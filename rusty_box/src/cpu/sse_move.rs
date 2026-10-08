@@ -727,12 +727,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         Ok(())
     }
 
-    /// MOVSLDUP memory
+    /// MOVSLDUP memory — Bochs loads it with `LOAD_Wdq`, so it is aligned.
     pub(super) fn movsldup_vps_wps_m(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
-        let seg = BxSegregs::from(instr.seg());
-        let eaddr = self.resolve_addr(instr);
-        let mut op = self.v_read_xmmword(seg, eaddr)?;
+        let mut op = self.sse_read_op2_xmm(instr)?;
         op.set_xmm32u(1, op.xmm32u(0));
         op.set_xmm32u(3, op.xmm32u(2));
         self.write_xmm_reg_lo128(instr.dst(), op);
@@ -752,12 +750,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         Ok(())
     }
 
-    /// MOVSHDUP memory
+    /// MOVSHDUP memory — Bochs loads it with `LOAD_Wdq`, so it is aligned.
     pub(super) fn movshdup_vps_wps_m(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
-        let seg = BxSegregs::from(instr.seg());
-        let eaddr = self.resolve_addr(instr);
-        let mut op = self.v_read_xmmword(seg, eaddr)?;
+        let mut op = self.sse_read_op2_xmm(instr)?;
         op.set_xmm32u(0, op.xmm32u(1));
         op.set_xmm32u(2, op.xmm32u(3));
         self.write_xmm_reg_lo128(instr.dst(), op);

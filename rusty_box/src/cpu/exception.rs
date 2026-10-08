@@ -6,17 +6,34 @@ use crate::cpu::{
 
 use super::Result;
 
-/// Interrupt type, based on BX_INTERRUPT_TYPE in Bochs
-#[derive(Debug, Clone, Copy)]
+/// The kind of event a delivery carries — Bochs cpu.h `BX_InterruptType`.
+///
+/// The discriminants are Bochs's values, and they are not this port's to
+/// choose: they ARE the architecture's interruption-type field, which three
+/// guest-visible words carry verbatim — VMX's interruption information, SVM's
+/// `EVENTINJ`/`EXITINTINFO`, and the event-information word a FRED delivery
+/// pushes (Bochs fred.cc `get_fred_event_info`, `type << 16`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum InterruptType {
-    SoftwareInterrupt = 0,
-    PrivilegedSoftwareInterrupt = 1,
-    SoftwareException = 2,
-    ExternalInterrupt = 3,
-    Nmi = 4,
-    HardwareException = 5,
+    ExternalInterrupt = 0,
+    Nmi = 2,
+    /// Every exception except `#BP` and `#OF`, which an instruction raises.
+    HardwareException = 3,
+    SoftwareInterrupt = 4,
+    PrivilegedSoftwareInterrupt = 5,
+    SoftwareException = 6,
     /// SYSCALL, SYSENTER with FRED, injected MTF
     EventOther = 7,
+}
+
+impl InterruptType {
+    /// Whether the delivery is checked against the gate's DPL, as an
+    /// instruction's own `INT n`, `INT3` or `INTO` is — Bochs exception.cc
+    /// `interrupt`, which derives its `soft_int` from the type and from
+    /// nothing else.
+    pub(super) const fn is_software(self) -> bool {
+        matches!(self, Self::SoftwareInterrupt | Self::SoftwareException)
+    }
 }
 
 /* Exception types.  These are used as indexes into the 'is_exception_OK'

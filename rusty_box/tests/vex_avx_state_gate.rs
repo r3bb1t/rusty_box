@@ -30,7 +30,38 @@ use rusty_box::emulator::{Emulator, EmulatorConfig};
 
 const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
 const CODE: u64 = 0x0020_0000;
-const UD_VECTOR: usize = 6;
+const IDT: u64 = 0x0028_0000;
+const STACK: u64 = 0x0030_0000;
+
+/// An IDT gate, and the one-instruction handler (`HLT`) it points at. Where
+/// the processor halts says which fault it took.
+struct Gate {
+    vector: u64,
+    handler: u64,
+}
+
+const UD_GATE: Gate = Gate {
+    vector: 6,
+    handler: 0x0029_0000,
+};
+const NM_GATE: Gate = Gate {
+    vector: 7,
+    handler: 0x0029_0010,
+};
+
+/// What one instruction did, as the guest sees it (doctrine R9). The
+/// machine's exception counters exist only in debug builds, so these tests
+/// read the processor's state instead, which holds under `--release` too.
+#[derive(Debug, PartialEq, Eq)]
+enum Outcome {
+    /// It retired, and the processor went on to the next instruction.
+    Retired,
+    /// It raised #UD: the processor entered the #UD handler with the
+    /// instruction's own address on its stack.
+    InvalidOpcode,
+    /// It raised #NM, the same way.
+    DeviceNotAvailable,
+}
 
 /// A CPU with SSE fully enabled and AVX state deliberately *not* enabled:
 /// CR4.OSFXSR and CR4.OSXSAVE are set, but no XSETBV runs, so XCR0 keeps its
@@ -47,15 +78,66 @@ fn avx_state_disabled_emulator() -> Box<Emulator> {
     emu
 }
 
-/// Run one encoding and return how many #UDs it raised.
-fn ud_raised_by(emu: &mut Emulator, code: &[u8]) -> u64 {
-    let before = emu.cpu().get_exception_diag()[UD_VECTOR];
+/// Point the #UD and #NM gates at their handlers.
+fn install_fault_handlers(emu: &mut Emulator) {
+    emu.reg_write(X86Reg::IdtrBase, IDT);
+    emu.reg_write(X86Reg::IdtrLimit, 256 * 16 - 1);
+    for gate in [&UD_GATE, &NM_GATE] {
+        let mut entry = [0u8; 16];
+        entry[0..2].copy_from_slice(&(gate.handler as u16).to_le_bytes());
+        entry[2..4].copy_from_slice(&0x0008u16.to_le_bytes());
+        entry[5] = 0x8E; // present, DPL 0, 64-bit interrupt gate
+        entry[6..8].copy_from_slice(&((gate.handler >> 16) as u16).to_le_bytes());
+        entry[8..12].copy_from_slice(&((gate.handler >> 32) as u32).to_le_bytes());
+        emu.mem_write(IDT + gate.vector * 16, &entry)
+            .expect("write the gate");
+        emu.mem_write(gate.handler, &[0xF4]).expect("write the handler");
+    }
+}
+
+/// Run one encoding and report what the guest saw. A fault leaves exactly one
+/// long-mode exception frame — SS, RSP, RFLAGS, CS and RIP, since neither #UD
+/// nor #NM pushes an error code — whose RIP is the instruction itself.
+fn run_one(emu: &mut Emulator, code: &[u8]) -> Outcome {
+    install_fault_handlers(emu);
     let mut image = code.to_vec();
     image.extend_from_slice(&[0xEB, 0xFE]); // jmp $
     emu.mem_write(CODE, &image).expect("write code");
-    emu.emu_start(CODE, Some(CODE + code.len() as u64), None, Some(4))
-        .expect("emu_start");
-    emu.cpu().get_exception_diag()[UD_VECTOR] - before
+    emu.reg_write(X86Reg::Rsp, STACK);
+    let stop = emu.emu_start(CODE, None, None, Some(8)).expect("emu_start");
+    let rip = emu.cpu().rip();
+    let outcome = if rip == CODE + code.len() as u64 {
+        Outcome::Retired
+    } else if rip == UD_GATE.handler + 1 {
+        Outcome::InvalidOpcode
+    } else if rip == NM_GATE.handler + 1 {
+        Outcome::DeviceNotAvailable
+    } else {
+        panic!("the instruction neither retired nor took #UD or #NM: rip={rip:#x}, stop={stop:?}");
+    };
+    match outcome {
+        Outcome::Retired => assert_eq!(
+            emu.reg_read(X86Reg::Rsp),
+            STACK,
+            "a retired instruction pushes nothing"
+        ),
+        Outcome::InvalidOpcode | Outcome::DeviceNotAvailable => {
+            assert_eq!(
+                emu.reg_read(X86Reg::Rsp),
+                STACK - 40,
+                "a fault pushes exactly one exception frame"
+            );
+            let mut pushed_rip = [0u8; 8];
+            emu.mem_read(STACK - 40, &mut pushed_rip)
+                .expect("read the frame");
+            assert_eq!(
+                u64::from_le_bytes(pushed_rip),
+                CODE,
+                "the frame's RIP must be the faulting instruction"
+            );
+        }
+    }
+    outcome
 }
 
 /// Every VEX encoding wired up in Phase A must #UD when XCR0 has not enabled
@@ -124,8 +206,8 @@ fn vex_encodings_ud_when_guest_has_not_enabled_avx_state() {
             for (name, code) in cases {
                 let mut emu = avx_state_disabled_emulator();
                 assert_eq!(
-                    ud_raised_by(&mut emu, code),
-                    1,
+                    run_one(&mut emu, code),
+                    Outcome::InvalidOpcode,
                     "{name}: a VEX encoding must raise #UD while XCR0 has not \
                      enabled AVX state — CR4.OSXSAVE and XCR0.SSE|YMM are what \
                      Bochs BxNoAVX tests, and CR4.OSFXSR is not a substitute"
@@ -149,7 +231,6 @@ fn cr0_ts_raises_nm_rather_than_ud() {
     std::thread::Builder::new()
         .stack_size(TEST_STACK_SIZE)
         .spawn(|| {
-            const NM_VECTOR: usize = 7;
             let mut emu = avx_state_disabled_emulator();
 
             // Enable AVX state properly, so the only thing left is CR0.TS.
@@ -163,27 +244,14 @@ fn cr0_ts_raises_nm_rather_than_ud() {
             // CR0.TS — the guest deferred saving the vector register file.
             emu.reg_write(X86Reg::Cr0, emu.reg_read(X86Reg::Cr0) | (1 << 3));
 
-            let ud_before = emu.cpu().get_exception_diag()[UD_VECTOR];
-            let nm_before = emu.cpu().get_exception_diag()[NM_VECTOR];
-
             // vpaddd xmm0, xmm1, xmm2
             let code = [0xC5, 0xF1, 0xFE, 0xC2];
-            let mut image = code.to_vec();
-            image.extend_from_slice(&[0xEB, 0xFE]);
-            emu.mem_write(CODE, &image).expect("write code");
-            emu.emu_start(CODE, Some(CODE + code.len() as u64), None, Some(4))
-                .expect("emu_start");
-
             assert_eq!(
-                emu.cpu().get_exception_diag()[NM_VECTOR] - nm_before,
-                1,
-                "CR0.TS must raise #NM so the guest's lazy-restore handler runs"
-            );
-            assert_eq!(
-                emu.cpu().get_exception_diag()[UD_VECTOR] - ud_before,
-                0,
-                "CR0.TS must not be reported as #UD — the instruction is legal, \
-                 the register file is merely not loaded yet"
+                run_one(&mut emu, &code),
+                Outcome::DeviceNotAvailable,
+                "CR0.TS must raise #NM so the guest's lazy-restore handler runs, \
+                 and not #UD — the instruction is legal, the register file is \
+                 merely not loaded yet"
             );
         })
         .expect("spawn")
@@ -213,8 +281,8 @@ fn clearing_cr4_osxsave_disables_avx_immediately() {
             // vpaddd xmm0, xmm1, xmm2 — runs while AVX state is enabled.
             let code = [0xC5u8, 0xF1, 0xFE, 0xC2];
             assert_eq!(
-                ud_raised_by(&mut emu, &code),
-                0,
+                run_one(&mut emu, &code),
+                Outcome::Retired,
                 "sanity: the instruction must execute while AVX state is on"
             );
 
@@ -223,8 +291,8 @@ fn clearing_cr4_osxsave_disables_avx_immediately() {
             emu.reg_write(X86Reg::Cr4, emu.reg_read(X86Reg::Cr4) & !(1 << 18));
 
             assert_eq!(
-                ud_raised_by(&mut emu, &code),
-                1,
+                run_one(&mut emu, &code),
+                Outcome::InvalidOpcode,
                 "clearing CR4.OSXSAVE must #UD the next AVX instruction — if it \
                  does not, fetch_mode_mask went stale and the icache state gate \
                  is running on out-of-date CPU state"
@@ -261,8 +329,8 @@ fn the_same_vex_encodings_execute_once_avx_state_is_enabled() {
                     .expect("enable AVX state");
 
                 assert_eq!(
-                    ud_raised_by(&mut emu, code),
-                    0,
+                    run_one(&mut emu, code),
+                    Outcome::Retired,
                     "{name}: must execute once XCR0 enables AVX state"
                 );
             }

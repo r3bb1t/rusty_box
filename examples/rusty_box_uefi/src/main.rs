@@ -195,6 +195,10 @@ fn run() -> Status {
         memory_block_size: 128 * 1024,
         ips: Ips::new(300_000_000),
         pci_enabled: true,
+        // This app mirrors Bochs's port-0xE9 console onto the UEFI console,
+        // so the console is on — what `port_e9_hack: enabled=1` in a bochsrc
+        // does.
+        port_e9_hack: rusty_box::iodev::PortE9Hack::On,
         ..Default::default()
     };
 
@@ -301,7 +305,11 @@ fn run() -> Status {
         // Print what the guest wrote to the debug port and to COM1 (no Vec
         // allocation). The console is this app's only output, so one that
         // refuses a write ends the run with the firmware's status.
-        let printed = drain_and_print(emu.debug_port().take_output()).and_then(|()| {
+        let debug_console = match emu.debug_port() {
+            Some(mut port) => drain_and_print(port.take_output()),
+            None => Ok(()),
+        };
+        let printed = debug_console.and_then(|()| {
             drain_and_print(emu.serial(0).expect("COM1 is always modelled").take_output())
         });
         if let Err(e) = printed {

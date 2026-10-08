@@ -21,6 +21,7 @@ use rusty_box::emulator::{
 use rusty_box::gui::NoGui;
 use rusty_box::{GpaPerms, GpaPlan, HostOffset, MemoryPlanError};
 use rusty_box::iodev::scancodes::BxKey;
+use rusty_box::iodev::PortE9Hack;
 
 /// A machine the tests can build without any file on disk: a small guest, and
 /// a BIOS image that is nothing but `HLT`, so whatever the reset vector
@@ -401,8 +402,22 @@ fn the_uart_and_the_debug_console_drain_as_bytes() {
     assert!(com1.is_empty(), "nothing has run to write to it yet");
     assert!(machine.serial(99).is_none(), "there is no UART 99");
 
-    let e9: Vec<u8> = machine.debug_port().take_output().collect();
-    assert!(e9.is_empty());
+    // The port-0xE9 console is Bochs's `port_e9_hack`, off unless the
+    // configuration turns it on.
+    assert!(machine.debug_port().is_none(), "the default machine has no console");
+    let mut with_console = MachineBuilder::new(EmulatorConfig {
+        port_e9_hack: PortE9Hack::On,
+        ..small_config()
+    })
+    .bios(&bios)
+    .build()
+    .expect("build");
+    let e9: Vec<u8> = with_console
+        .debug_port()
+        .expect("the console was turned on")
+        .take_output()
+        .collect();
+    assert!(e9.is_empty(), "nothing has run to write to it yet");
 }
 
 // ── Stopping from another thread ────────────────────────────────────────────

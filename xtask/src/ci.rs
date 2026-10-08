@@ -83,7 +83,10 @@ const UNSAFE_TOKEN_BASELINES: &[(&str, usize)] = &[
     // 0. `BspCpu`'s pointer newtype and its two `Deref` launderings are gone,
     // as is the no-alloc `[*mut BxCpuC; 253]` and the three dereferences that
     // read it. Every build's machine now derives `Send`.
-    ("rusty_box/src", 97),
+    // 97 -> 95: FXRSTOR and the XSAVE SSE restore write the XMM file through
+    // the safe register accessors, so their two `unsafe` wrappers, which
+    // guarded nothing, are gone.
+    ("rusty_box/src", 95),
     ("rusty_box_decoder/src", 0),
     // Zero, and structurally so: the crate carries `#![forbid(unsafe_code)]`,
     // which the workspace lint table backs with a `deny` any new crate inherits.

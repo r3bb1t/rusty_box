@@ -6,8 +6,8 @@ headless, read the screen, type at it — see
 [docs/automation.md](../../docs/automation.md). The launcher meant for users is
 `rusty_box_gui`.
 `cargo run --release -p rusty_box_gui` opens its VMware-style egui shell, which
-takes typed CLI flags, an optional `rusty_box.toml`, and a choice of engine:
-`--engine interpreter` (the default) or `--engine whp`. See
+takes typed CLI flags, an optional TOML file named with `--config`, and a choice
+of engine: `--engine interpreter` (the default) or `--engine whp`. See
 [rusty_box_gui/README.md](../../rusty_box_gui/README.md).
 
 Run every command below from the workspace root; the examples look for their
@@ -112,7 +112,7 @@ are present.
 
 | Variable | Read by | Effect |
 |----------|---------|--------|
-| `MAX_INSTRUCTIONS` | all six boot examples | Instruction budget. Defaults when unset: `dlxlinux` 450,000,000, the budget of the CI boot gate; `alpine` 1,000,000,000; `alpine_direct` 4,000,000,000; `dlxlinux_egui`, `rusty_box_egui` and `alpine_strace` unlimited, running until the window closes. `cargo run` always sets it: the repository's `.cargo/config.toml` supplies `20000000000` unless your environment already sets a value, so these defaults apply only to an example binary run outside cargo. |
+| `MAX_INSTRUCTIONS` | `dlxlinux`, `dlxlinux_egui`, `rusty_box_egui`, `alpine`, `alpine_direct`, `alpine_strace` | Instruction budget. Defaults when unset: `dlxlinux` 450,000,000, the budget of the CI boot gate; `alpine` 1,000,000,000; `alpine_direct` 4,000,000,000; `dlxlinux_egui`, `rusty_box_egui` and `alpine_strace` unlimited, running until the window closes. `cargo run` always sets it: the repository's `.cargo/config.toml` supplies `20000000000` unless your environment already sets a value, so these defaults apply only to an example binary run outside cargo. |
 | `RUSTY_BOX_HEADLESS` | `dlxlinux`, `alpine`, `alpine_direct` | Any value replaces the terminal display with no display. In `dlxlinux` it also turns on the scripted boot described above. In `alpine` it switches to a scripted loop of 100,000-instruction phases: it prints RIP after every phase and flags a RIP unchanged over four consecutive phases, presses Enter at the ISOLINUX prompt once 18M instructions have run, and from 100M on prints the VGA text every phase, adding `*** LOGIN DETECTED ***` when it shows `login:`. It types `root` the first time `login:` appears, and in each of the other phases from 100M on it presses Left Shift as a keep-alive. The egui examples ignore it. |
 | `RUSTY_BOX_BOOT` | `rusty_box_egui` | `dlx`, `alpine` or `alpine-direct` (case-insensitive; any other value boots DLX). When unset: `alpine` if an Alpine ISO is found, otherwise `dlx`. |
 | | `alpine_direct` | `direct` loads the kernel and initramfs from the ISO. Anything else, or unset, is BIOS boot. |
@@ -123,7 +123,7 @@ are present.
 | `ALPINE_RAM_MB` | `alpine`, `alpine_direct`, `alpine_strace`, `rusty_box_egui` (Alpine) | Guest RAM in MB (default 256). |
 | `CMDLINE` | `alpine_direct`, `alpine_strace`, `rusty_box_egui` (`alpine-direct`) | The kernel command line for direct kernel boot, replacing the built-in one. |
 | `RUSTY_BOX_NOSYNC` | `rusty_box_egui`, `alpine_strace` | `1` turns off the wall-clock slowdown (`sync_slowdown`), which is on by default. |
-| `BIOS_OUTPUT_FILE` | `dlxlinux`, `alpine` | Write the BIOS's port-0xE9 debug output to this file. |
+| `BIOS_OUTPUT_FILE` | `dlxlinux`, `alpine` | Write the port-0xE9 debug console's output to this file. The console is Bochs's `port_e9_hack`, off by default: `dlxlinux` turns it on only when this is set, so the CI boot gate runs the default machine; `alpine`, `alpine_direct` and the UEFI application always turn it on, because they print what the console says. |
 | `BIOS_QUIET_MODE` | `dlxlinux` | Only prints a heading above the BIOS output section; changes nothing else. |
 | `RUSTY_BOX_DEBUG` | `alpine` | Headless only, and non-release builds only (`cfg(debug_assertions)`): prints boot diagnostics in each phase between 2.8M and 3.1M instructions. |
 | `STRACE_LOG` | `alpine_strace` | The syscall log file (default `strace.log`, in the current directory). |
@@ -181,8 +181,8 @@ leaves it out.
 ## Linux GUI dependencies
 
 On Ubuntu/Debian, install the display server libraries before building with
-`gui-egui`:
+`gui-egui`. This is the list the GitHub CI installs:
 
 ```bash
-sudo apt install -y libxkbcommon-dev libwayland-dev libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libgl-dev
+sudo apt-get install -y --no-install-recommends pkg-config libgl1-mesa-dev libx11-dev libxi-dev libxcursor-dev libxrandr-dev libxinerama-dev libxkbcommon-dev libwayland-dev
 ```

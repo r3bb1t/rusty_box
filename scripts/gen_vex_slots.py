@@ -24,10 +24,11 @@ Table layout, with BX_SUPPORT_AMX = 0 (rusty_box does not implement AMX):
     entries  768..1023  VEX map 7  (MSR immediate forms)
 
 map 4 and map 6 are "for now empty" in upstream and emit no entries at all;
-map 5 sits inside ``#if BX_SUPPORT_AMX``. Only maps 1-3 are mirrored here —
-map 7 holds WRMSRNS/RDMSR/UWRMSR/URDMSR, gated on BX_ISA_MSR_IMM and
-BX_ISA_USER_MSR, which Corei7SkylakeX does not advertise, so rejecting the map
-at decode is observationally identical to Bochs's #UD on the ISA check.
+map 5 sits inside ``#if BX_SUPPORT_AMX``. Only maps 1-3 are generated here.
+Map 7 is not shared with any legacy table: its two populated slots, F6
+(WRMSRNS/RDMSR) and F8 (UWRMSR/URDMSR), decode through groups of their own,
+``VEX_MAP7_F6`` and ``VEX_MAP7_F8``, and ``vex_slot_populated`` names those two
+bytes beside them by hand.
 """
 
 from __future__ import annotations

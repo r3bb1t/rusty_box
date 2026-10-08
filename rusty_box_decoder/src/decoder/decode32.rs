@@ -776,8 +776,18 @@ pub const fn fetch_decode32_inplace(
 
     // === Phase 4: Parse immediate and moffs (direct memory offset) ===
     // Pass nnn to distinguish Group 3a/3b variants (TEST vs NOT/NEG/etc)
+    let ib_ib2 = !is_vex
+        && super::tables::has_ib_ib2(
+            opcode_map,
+            (b1 & 0xFF) as u8,
+            sse_prefix,
+            (metainfo1_bits & InstructionFlags::ModC0.bits()) != 0,
+            nnn,
+        );
     let imm_size = if is_vex {
         super::vex_shared::vex_immediate_size(opcode_map, (b1 & 0xFF) as u8)
+    } else if ib_ib2 {
+        2
     } else {
         get_immediate_size_32(b1, opcode_map, os_32, as_32, nnn)
     };
@@ -788,6 +798,12 @@ pub const fn fetch_decode32_inplace(
         }
 
         match imm_size {
+            // SSE4A EXTRQ/INSERTQ: Ib, then Ib2 where `ib2` reads it.
+            2 if ib_ib2 => {
+                instr.immediate = bytes[pos] as u32;
+                instr.displacement = bytes[pos + 1] as u32;
+                pos += 2;
+            }
             1 => {
                 let byte_val = bytes[pos];
                 // Sign-extend byte immediates that are used as 32-bit values via id():
@@ -933,6 +949,15 @@ pub const fn fetch_decode32_inplace(
         }
     } else {
         instr.opcode = lookup_opcode_32(b1, opcode_map, decmask, nnn);
+    }
+
+    // SSE4A's EXTRQ immediate form names its one register first (`Wdq, Ib,
+    // Ib2` in Bochs ia_opcodes.def), so `assign_srcs` makes ModRM.rm its
+    // destination; the byte rules above put ModRM.reg there, which is right
+    // for INSERTQ on the same byte.
+    if matches!(instr.opcode, Opcode::ExtrqUdqIbIb) {
+        instr.operands.dst = rm as u8;
+        instr.operands.src1 = nnn as u8;
     }
 
     // EVEX resolves against its own map, exactly as Bochs does: an EVEX-encoded

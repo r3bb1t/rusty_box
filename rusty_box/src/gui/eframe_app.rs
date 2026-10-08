@@ -231,9 +231,13 @@ impl RustyBoxApp {
     /// Touch drives the guest's mouse as a trackpad (see [`Touchpad`]), with
     /// the left and right buttons drawn at the bottom-right of `region`.
     ///
-    /// A touch belongs to the trackpad when it starts inside `image_rect`
-    /// with no window or area above it, so a menu drawn over the image keeps
-    /// its own touches.
+    /// A touch belongs to the trackpad when it starts inside `image_rect` on
+    /// the console's own layer: that layer is the topmost one there, the test
+    /// [`egui::Ui::rect_contains_pointer`] makes of the mouse. A window or area
+    /// drawn over the image, such as the phone's console menu, keeps its own
+    /// touches. The page underneath is a layer as well (egui registers its
+    /// background as one every pass), which is why the test names the
+    /// console's layer rather than asking for no layer at all.
     fn handle_touchpad(&mut self, ui: &egui::Ui, image_rect: egui::Rect, region: egui::Rect) {
         let ctx = ui.ctx().clone();
         let buttons = TouchButtons::in_region(region);
@@ -268,7 +272,7 @@ impl RustyBoxApp {
                 TouchZone::LeftButton
             } else if buttons.right.contains(pos) {
                 TouchZone::RightButton
-            } else if image_rect.contains(pos) && ctx.layer_id_at(pos).is_none() {
+            } else if image_rect.contains(pos) && ctx.layer_id_at(pos) == Some(ui.layer_id()) {
                 TouchZone::Pad
             } else {
                 TouchZone::Elsewhere
@@ -643,10 +647,13 @@ impl RustyBoxApp {
                     ui.add_space(offset_y);
                     ui.horizontal(|ui| {
                         ui.add_space(offset_x);
-                        let response = ui.image(egui::load::SizedTexture::new(
-                            tex.id(),
-                            egui::vec2(draw_w, draw_h),
-                        ));
+                        let response = ui.add(
+                            egui::Image::new(egui::load::SizedTexture::new(
+                                tex.id(),
+                                egui::vec2(draw_w, draw_h),
+                            ))
+                            .sense(super::host_input::GUEST_IMAGE_SENSE),
+                        );
                         image_rect = Some(response.rect);
                     });
                 } else {

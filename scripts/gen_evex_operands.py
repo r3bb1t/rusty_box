@@ -32,7 +32,7 @@ from collections import Counter
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
-DEC = os.path.join(ROOT, "cpp_orig", "bochs", "bench-src", "bochs", "cpu", "decoder")
+DEC = os.path.join(ROOT, "cpp_orig", "bochs", "bochs", "cpu", "decoder")
 HDR = os.path.join(DEC, "fetchdecode.h")
 DEF = os.path.join(DEC, "ia_opcodes_evex.def")
 ENUM = os.path.join(ROOT, "rusty_box_decoder", "src", "opcode.rs")

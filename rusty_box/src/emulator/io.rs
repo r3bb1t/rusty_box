@@ -23,7 +23,7 @@ use crate::{
         cpu::{BxCpuC, CpuActivityState},
         exec_ctx::ExecCtx,
         instrumentation::Instrumentation,
-        AcknowledgedInterrupt, TrapDischarge,
+        AcknowledgedInterrupt, HardwareEvent, TrapDischarge,
     },
     iodev::{devices::DeviceManager, BxDevicesC},
     memory::BxMemC,
@@ -331,6 +331,27 @@ impl<'a> PcIo<'a> {
         match ctx.discharge_the_trap_owed()? {
             TrapDischarge::Delivered | TrapDischarge::NothingOwed => Ok(()),
         }
+    }
+
+    /// Deliver `event` on this processor in place of the instruction at
+    /// `RIP`.
+    ///
+    /// For an engine whose hardware began delivering the event and stopped
+    /// partway — a fault the delivery raised that the engine traps, or an
+    /// access the engine must finish. Executing the instruction at `RIP`
+    /// would not recreate such an event: an acknowledged vector has left its
+    /// controller, and a trap's instruction has already retired. The
+    /// interpreter's own delivery runs instead, nested faults and all.
+    ///
+    /// # Errors
+    /// Whatever the delivery raised that the processor could not take.
+    pub(crate) fn deliver_hardware_event<T: Instrumentation>(
+        &mut self,
+        cpu: &mut BxCpuC<T>,
+        event: HardwareEvent,
+    ) -> crate::cpu::Result<()> {
+        let mut ctx = ExecCtx::new(cpu, self.reborrow());
+        ctx.deliver_hardware_event(event)
     }
 
     /// Signal a system-management interrupt on this processor.

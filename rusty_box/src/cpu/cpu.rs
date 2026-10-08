@@ -263,6 +263,38 @@ pub enum Exception {
     Sx = 30,
 }
 
+impl Exception {
+    /// The exception `vector` names, or `None` for a vector that names none:
+    /// 2 is the NMI, and 9, 15, 22–29, 31 and everything from 32 up are
+    /// reserved or external.
+    #[must_use]
+    pub const fn from_vector(vector: u8) -> Option<Self> {
+        Some(match vector {
+            0 => Self::De,
+            1 => Self::Db,
+            3 => Self::Bp,
+            4 => Self::Of,
+            5 => Self::Br,
+            6 => Self::Ud,
+            7 => Self::Nm,
+            8 => Self::Df,
+            10 => Self::Ts,
+            11 => Self::Np,
+            12 => Self::Ss,
+            13 => Self::Gp,
+            14 => Self::Pf,
+            16 => Self::Mf,
+            17 => Self::Ac,
+            18 => Self::Mc,
+            19 => Self::Xm,
+            20 => Self::Ve,
+            21 => Self::Cp,
+            30 => Self::Sx,
+            _ => return None,
+        })
+    }
+}
+
 #[allow(clippy::upper_case_acronyms)]
 pub(super) enum CpExceptionErrorCode {
     NearRet = 1,
@@ -1205,6 +1237,20 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         Self::is_canonical_to_width(addr, self.linaddr_width.into())
     }
 
+    /// Canonical to the widest linear address this processor supports — 57
+    /// bits on a model with LA57, else 48 — whatever paging mode it is in
+    /// now. Bochs cpu.h `IsCpuidCanonical`, which every WRMSR of an address
+    /// checks: the register keeps its value across a paging-mode change, so
+    /// it is judged against the processor and not the current mode.
+    pub(crate) fn is_cpuid_canonical(&self, addr: BxAddress) -> bool {
+        let width = if self.bx_cpuid_support_isa_extension(X86Feature::IsaLa57) {
+            57
+        } else {
+            48
+        };
+        Self::is_canonical_to_width(addr, width)
+    }
+
     #[inline]
     pub fn is_canonical_to_width(addr: u64, width: u32) -> bool {
         // Reinterpret addr as signed, shift right (arithmetic shift),
@@ -1422,6 +1468,11 @@ pub struct BxRegsMsr {
 
     pub(crate) ia32_umwait_ctrl: u32,
     pub(crate) ia32_spec_ctrl: u32, // SCA
+
+    /// IA32_USER_MSR_CTL: bit 0 enables URDMSR/UWRMSR, and the page it names
+    /// holds their permission bitmaps (reads first, writes 2048 bytes in).
+    /// Bochs cpu.h `msr.ia32_user_msr_ctrl`.
+    pub(crate) ia32_user_msr_ctrl: u64,
 }
 
 impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
@@ -2045,15 +2096,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
             self.diag_inject_ext_intr_vectors[vector as usize] += 1;
         }
 
-        // BOCHS BX_INSTR_HWINTERRUPT(cpu_id, vector, cs, eip)
-        if self.instrumentation.active.has_hw_interrupt() {
-            let cs = self.sregs[super::decoder::BxSegregs::Cs as usize]
-                .selector
-                .value;
-            let rip = self.rip();
-            let ev = super::instrumentation::HwInterruptEvent { vector, cs, rip };
-            self.instrumentation.fire_hwinterrupt(&ev);
-        }
+        self.instrument_hw_interrupt(vector);
 
         // Diagnostic ring for the pf_diag tripwire (see field docs).
         #[cfg(feature = "std")]
@@ -2081,14 +2124,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
         // - speculative_rsp setup/commit
         // - BadVector → exception() recovery
         // - mode dispatch (real vs protected)
-        // soft_int=false, no error code for external IRQs
-        let result = self.interrupt(
-            vector,
-            super::exception::InterruptType::ExternalInterrupt,
-            false,
-            false,
-            0,
-        );
+        let result =
+            self.interrupt(vector, super::exception::InterruptType::ExternalInterrupt, false, 0);
 
         // Commit prev_rip after successful delivery (Bochs event.cc)
         if result.is_ok() {
@@ -3437,10 +3474,16 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         self.cpu_mode == CpuMode::Long64
     }
 
-    /// Returns true when CPU is in long mode (either 64-bit or compatibility sub-mode).
-    /// Matches Bochs `long_mode()` which checks `EFER.LMA == 1`.
+    /// Long mode, 64-bit or compatibility: Bochs cpu.h `long_mode`, which is
+    /// `efer.get_LMA()` read directly rather than the `cpu_mode` that
+    /// `handle_cpu_mode_change` derives from it. The two agree between
+    /// instructions. Inside a state load — RSM, VMRUN and #VMEXIT, VM entry
+    /// and VM exit, a CR0 write — EFER is loaded first and `cpu_mode` is
+    /// recomputed only at the end, and every long-mode question asked in
+    /// between (the PDPTR checks, the EFLAGS.VM mask, the walk format of a
+    /// descriptor fetch) is about the EFER just loaded.
     pub(super) fn long_mode(&self) -> bool {
-        self.cpu_mode == CpuMode::Long64 || self.cpu_mode == CpuMode::LongCompat
+        self.efer.lma()
     }
 
     pub(crate) fn smm_mode(&self) -> bool {

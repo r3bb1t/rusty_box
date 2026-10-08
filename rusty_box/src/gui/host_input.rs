@@ -65,6 +65,24 @@ pub trait HostInputSink {
     fn push(&mut self, event: HostInputEvent) -> bool;
 }
 
+/// How the guest's image senses the pointer, in both consoles. Every click and
+/// drag over the image is the image's, so a host widget beside it — a panel's
+/// resize or grab handle, whose catch zone reaches a few points past its own
+/// edge — never takes a press meant for the guest. It is not
+/// [`egui::Sense::FOCUSABLE`], which [`egui::Sense::click_and_drag`] carries:
+/// the image stays out of the Tab chain and never holds the keyboard the
+/// guest's keys come from. The guest itself is fed from the raw pointer and
+/// touch state ([`translate_egui_mouse`], the trackpad), never from this
+/// widget's response.
+#[cfg(feature = "gui-egui")]
+pub const GUEST_IMAGE_SENSE: egui::Sense = egui::Sense::CLICK.union(egui::Sense::DRAG);
+
+#[cfg(feature = "gui-egui")]
+const _: () = assert!(
+    !GUEST_IMAGE_SENSE.contains(egui::Sense::FOCUSABLE),
+    "the guest's image must never take the keyboard from the guest"
+);
+
 /// Translate this frame's egui pointer state into at most one [`HostMouseEvent`]
 /// and push it into `sink`. Returns the current button bitmask so the caller can
 /// track it across frames (a button release with no motion still needs to be
@@ -501,13 +519,20 @@ pub(crate) enum HostKeyboardInput {
 ///
 /// Bounded, and the bound is a back-pressure point rather than a drop: when a
 /// queue is at capacity the machine stops taking from the front end, whose own
-/// queue then holds the rest in order. Capacity is reached only by a guest
-/// that has stopped draining its keyboard altogether — a POST that has not
-/// enabled the port yet, or a wedged one.
+/// queue then holds the rest in order, and [`Serial::send`] reports a short
+/// count. Capacity is reached only by a guest that has stopped draining its
+/// keyboard or UART altogether — a POST that has not enabled the port yet, or
+/// a wedged one.
+///
+/// Serial input is held per UART, numbered as [`Emulator::serial`] numbers
+/// them: each queue stands in for that port's Bochs backend.
+///
+/// [`Serial::send`]: crate::emulator_api::Serial::send
+/// [`Emulator::serial`]: crate::emulator::Emulator::serial
 #[derive(Debug, Default)]
 pub(crate) struct HostInputBacklog {
     keyboard: VecDeque<HostKeyboardInput>,
-    serial: VecDeque<u8>,
+    serial: [VecDeque<u8>; crate::iodev::serial::SERIAL_PORT_COUNT],
 }
 
 impl HostInputBacklog {
@@ -516,8 +541,8 @@ impl HostInputBacklog {
     /// minute of fast typing into a guest that is taking none of it.
     const KEYBOARD_CAPACITY: usize = 1024;
 
-    /// Host serial bytes held on the same terms — a few screens of pasted
-    /// text into a guest whose UART receiver never drains.
+    /// Host serial bytes held per port on the same terms — a few screens of
+    /// pasted text into a guest whose UART receiver never drains.
     const SERIAL_CAPACITY: usize = 4096;
 
     /// Whether the machine should take another batch of keyboard input from
@@ -527,9 +552,12 @@ impl HostInputBacklog {
         self.keyboard.len() < Self::KEYBOARD_CAPACITY
     }
 
-    /// The same for host serial input.
-    pub(crate) fn wants_serial_input(&self) -> bool {
-        self.serial.len() < Self::SERIAL_CAPACITY
+    /// The same for host serial input to UART `port`. A port no machine can
+    /// build wants nothing.
+    pub(crate) fn wants_serial_input(&self, port: usize) -> bool {
+        self.serial
+            .get(port)
+            .is_some_and(|held| held.len() < Self::SERIAL_CAPACITY)
     }
 
     pub(crate) fn push_keys(&mut self, keys: Vec<(crate::iodev::scancodes::BxKey, bool)>) {
@@ -554,8 +582,27 @@ impl HostInputBacklog {
         true
     }
 
-    pub(crate) fn push_serial(&mut self, bytes: Vec<u8>) {
-        self.serial.extend(bytes);
+    /// Hold a batch the front end gave up after [`Self::wants_serial_input`]
+    /// said yes. The batch is taken whole: refusing part of it would lose
+    /// that part, since the front end has already let go of it, so the
+    /// capacity is checked before taking and may be passed by one batch.
+    pub(crate) fn push_serial(&mut self, port: usize, bytes: Vec<u8>) {
+        if let Some(held) = self.serial.get_mut(port) {
+            held.extend(bytes);
+        }
+    }
+
+    /// Hold as much of `bytes` for UART `port` as fits under the capacity,
+    /// returning how many were taken — a prefix, so `bytes[taken..]` is what
+    /// the caller still has. Unlike [`Self::push_serial`] the caller keeps
+    /// what is refused, so nothing past the capacity is taken.
+    pub(crate) fn hold_serial(&mut self, port: usize, bytes: &[u8]) -> usize {
+        let Some(held) = self.serial.get_mut(port) else {
+            return 0;
+        };
+        let taken = bytes.len().min(Self::SERIAL_CAPACITY.saturating_sub(held.len()));
+        held.extend(&bytes[..taken]);
+        taken
     }
 
     /// The next keyboard event to offer the guest, left in place until the
@@ -570,14 +617,17 @@ impl HostInputBacklog {
         let _taken = self.keyboard.pop_front();
     }
 
-    /// The next host byte to offer a UART, left in place until it is taken.
-    pub(crate) fn next_serial(&self) -> Option<u8> {
-        self.serial.front().copied()
+    /// The next host byte to offer UART `port`, left in place until it is
+    /// taken.
+    pub(crate) fn next_serial(&self, port: usize) -> Option<u8> {
+        self.serial.get(port)?.front().copied()
     }
 
-    /// Retire the byte [`Self::next_serial`] returned.
-    pub(crate) fn accept_serial(&mut self) {
-        let _taken = self.serial.pop_front();
+    /// Retire the byte [`Self::next_serial`] returned for `port`.
+    pub(crate) fn accept_serial(&mut self, port: usize) {
+        if let Some(held) = self.serial.get_mut(port) {
+            let _taken = held.pop_front();
+        }
     }
 
     /// Drop the keyboard input held, as a hardware reset stops a paste in
@@ -589,10 +639,13 @@ impl HostInputBacklog {
     }
 
     /// Drop everything held: a restored snapshot replaces the guest this
-    /// input was typed for.
+    /// input was typed for. Snapshots are a `std` feature, and so is this.
+    #[cfg(feature = "std")]
     pub(crate) fn clear(&mut self) {
         self.keyboard.clear();
-        self.serial.clear();
+        for held in &mut self.serial {
+            held.clear();
+        }
     }
 }
 

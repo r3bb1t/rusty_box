@@ -1,6 +1,8 @@
 use crate::args::{Args, BootDevice, DiskGeometry, DisplayBackend, LogLevel};
 use crate::error::RunError;
+#[cfg(not(target_arch = "wasm32"))]
 use rusty_box::cpu::decoder::features::X86Feature;
+use rusty_box::iodev::PortE9Hack;
 use rusty_box::params::{BxParamError, BxParams};
 use rusty_box::CpuidFreq;
 use std::{
@@ -78,15 +80,19 @@ pub struct EmulatorToml {
     pub ips: Option<u32>,
     pub pci: Option<bool>,
     pub sync_slowdown: Option<bool>,
-    /// Advance PIT/ACPI timers on wall-clock time — Bochs `clock:
-    /// sync=realtime`. Default false (`sync=none`): timers follow emulated
-    /// time, PIT calibration measures exactly `ips`, boots deterministic.
+    /// Run the PIT, the ACPI timer and the VGA's vertical retrace on
+    /// wall-clock time — Bochs `clock: sync=realtime`. Default false
+    /// (`sync=none`): they follow emulated time, PIT calibration measures
+    /// exactly `ips`, boots deterministic.
     pub sync_realtime: Option<bool>,
     pub smp_quantum: Option<u32>,
     pub max_instructions: Option<u64>,
     /// How CPUID frequency leaves 0x15/0x16 are reported — Bochs
     /// `cpu: cpuid_freq=` ("hardware" | "none" | "ips"). Default: "none".
     pub cpuid_freq: Option<String>,
+    /// Whether port 0xE9 is a debug console — Bochs `port_e9_hack:`
+    /// ("off" | "on" | "all-rings"). Default: "off", as upstream.
+    pub port_e9_hack: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
@@ -262,6 +268,7 @@ pub struct ResolvedConfig {
     pub sync_realtime: bool,
     pub smp_quantum: u32,
     pub cpuid_freq: CpuidFreq,
+    pub port_e9_hack: PortE9Hack,
     pub max_instructions: u64,
     pub cpu_params: BxParams,
     pub display: DisplayBackend,
@@ -349,6 +356,7 @@ pub fn blank_config() -> ResolvedConfig {
         sync_realtime: DEFAULT_SYNC_REALTIME,
         smp_quantum: DEFAULT_SMP_QUANTUM,
         cpuid_freq: DEFAULT_CPUID_FREQ,
+        port_e9_hack: PortE9Hack::Off,
         max_instructions: DEFAULT_MAX_INSTRUCTIONS,
         cpu_params: BxParams::default(),
         display: default_display_backend(),
@@ -456,6 +464,20 @@ fn resolve_config_with_base(
             })
         }
     };
+    // Bochs `port_e9_hack: enabled=, all_rings=` (unmapped.cc, io.cc
+    // allow_io), off unless a configuration turns it on.
+    let port_e9_hack = match args
+        .port_e9_hack
+        .as_deref()
+        .or(file.emulator.port_e9_hack.as_deref())
+    {
+        None => PortE9Hack::Off,
+        Some(spelled) => port_e9_hack_from_toml(spelled).ok_or_else(|| {
+            RunError::InvalidPortE9Hack {
+                value: spelled.to_string(),
+            }
+        })?,
+    };
     let cpu_params = resolve_cpu_topology(&file, args)?;
 
     let display = args
@@ -518,6 +540,7 @@ fn resolve_config_with_base(
         sync_realtime,
         smp_quantum,
         cpuid_freq,
+        port_e9_hack,
         max_instructions,
         cpu_params,
         display,
@@ -610,6 +633,8 @@ impl ResolvedConfig {
             // Only persist a non-default mode so existing configs stay stable.
             cpuid_freq: (self.cpuid_freq != DEFAULT_CPUID_FREQ)
                 .then(|| cpuid_freq_toml(self.cpuid_freq).to_owned()),
+            port_e9_hack: (self.port_e9_hack != PortE9Hack::Off)
+                .then(|| port_e9_hack_toml(self.port_e9_hack).to_owned()),
         };
         let display = DisplayToml {
             backend: Some(self.display),
@@ -682,6 +707,24 @@ fn cpuid_freq_toml(mode: CpuidFreq) -> &'static str {
         CpuidFreq::Hardware => "hardware",
         CpuidFreq::Ips => "ips",
     }
+}
+
+/// The spelling `emulator.port_e9_hack` and `--port-e9-hack` give `hack`,
+/// the one [`port_e9_hack_from_toml`] reads back. One word for each of Bochs's
+/// reachable `port_e9_hack: enabled=, all_rings=` combinations.
+fn port_e9_hack_toml(hack: PortE9Hack) -> &'static str {
+    match hack {
+        PortE9Hack::Off => "off",
+        PortE9Hack::On => "on",
+        PortE9Hack::AllRings => "all-rings",
+    }
+}
+
+/// The console a spelling names, or `None` for one that names none.
+fn port_e9_hack_from_toml(spelled: &str) -> Option<PortE9Hack> {
+    [PortE9Hack::Off, PortE9Hack::On, PortE9Hack::AllRings]
+        .into_iter()
+        .find(|hack| port_e9_hack_toml(*hack) == spelled)
 }
 
 fn image_size_to_toml(size: rusty_box_bximage::ImageSize) -> String {
@@ -1070,11 +1113,12 @@ fn host_xsave_components() -> u64 {
     (u64::from(reported.edx) << 32) | u64::from(reported.eax)
 }
 
-#[cfg(not(target_arch = "x86_64"))]
+#[cfg(all(not(target_arch = "x86_64"), not(target_arch = "wasm32")))]
 fn host_xsave_components() -> u64 {
     0
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn detect_disk_geometry(path: &Path) -> Result<DiskGeometry, RunError> {
     auto_detect_chs(path)
 }
@@ -1217,6 +1261,73 @@ path = "boot.iso"
             resolved.to_file_config().emulator.cpuid_freq.as_deref(),
             Some("ips")
         );
+    }
+
+    /// The port-0xE9 console is off unless a VM asks for it, as Bochs's
+    /// `port_e9_hack` is; each of its three settings is spelled one way in
+    /// the file and on the command line, and the flag beats the file.
+    #[test]
+    fn port_e9_hack_defaults_to_off_and_parses_all_modes() {
+        let resolved = resolve_config(
+            config("[rom]\nbios = \"bios.bin\"\n\n[cdrom]\npath = \"boot.iso\"\n"),
+            &args(["rusty_box_gui"]),
+        )
+        .unwrap();
+        assert_eq!(resolved.port_e9_hack, PortE9Hack::Off);
+        assert_eq!(
+            resolved.to_file_config().emulator.port_e9_hack,
+            None,
+            "the default is not written, so existing VM files stay as they are"
+        );
+
+        let toml_on = r#"
+[emulator]
+port_e9_hack = "on"
+
+[rom]
+bios = "bios.bin"
+
+[cdrom]
+path = "boot.iso"
+"#;
+        let resolved = resolve_config(config(toml_on), &args(["rusty_box_gui"])).unwrap();
+        assert_eq!(resolved.port_e9_hack, PortE9Hack::On);
+
+        let resolved = resolve_config(
+            config(toml_on),
+            &args(["rusty_box_gui", "--port-e9-hack", "all-rings"]),
+        )
+        .unwrap();
+        assert_eq!(resolved.port_e9_hack, PortE9Hack::AllRings);
+        assert_eq!(
+            resolved.to_file_config().emulator.port_e9_hack.as_deref(),
+            Some("all-rings")
+        );
+
+        let resolved = resolve_config(
+            config(toml_on),
+            &args(["rusty_box_gui", "--port-e9-hack", "off"]),
+        )
+        .unwrap();
+        assert_eq!(resolved.port_e9_hack, PortE9Hack::Off, "the flag can turn it back off");
+    }
+
+    #[test]
+    fn port_e9_hack_rejects_a_mode_bochs_does_not_have() {
+        let toml = r#"
+[emulator]
+port_e9_hack = "enabled"
+
+[rom]
+bios = "bios.bin"
+
+[cdrom]
+path = "boot.iso"
+"#;
+        assert!(matches!(
+            resolve_config(config(toml), &args(["rusty_box_gui"])),
+            Err(RunError::InvalidPortE9Hack { value }) if value == "enabled"
+        ));
     }
 
     const WHP_FILE: &str = r#"
@@ -1987,6 +2098,7 @@ overwrite = false
             sync_realtime: !DEFAULT_SYNC_REALTIME,
             smp_quantum: 8,
             cpuid_freq: CpuidFreq::Hardware,
+            port_e9_hack: PortE9Hack::AllRings,
             max_instructions: 15_000_000_000,
             cpu_params: BxParams::default().with_topology(2, 2, 1).unwrap(),
             display: DisplayBackend::Headless,

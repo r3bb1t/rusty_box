@@ -16,7 +16,132 @@ warning-free.
 
 ## 1. Open work
 
-### 1.1 hwclock stalls during OpenRC boot
+Ordered by severity. §1.1 is a correctness defect a guest can trigger; the
+other two are measurement tasks. Do §1.1 first.
+
+### 1.1 62 advertised instructions abort the emulator instead of executing
+
+**The most serious item in this document.** A guest executing any of 43
+ordinary SSE-era instructions kills the emulator, and it is doing so because we
+told it — through CPUID, the one mechanism that exists for asking — that we
+support them.
+
+`execute_instruction` ends in a catch-all returning `CpuError::UnimplementedOpcode`
+— an *emulator* error that stops the host, where Bochs would point the opcode at
+`BxError` and let the guest take #UD. That distinction is the whole problem: a
+#UD is an exception the guest's own kernel catches and handles, and the machine
+keeps running. `UnimplementedOpcode` propagates out of the CPU loop and the VM
+dies. Only two behaviours are defensible — execute the instruction, or stop
+advertising the feature so the ISA gate turns it into a clean #UD. We do
+neither.
+
+The ISA gate normally prevents this by rewriting unsupported opcodes to
+`IaError` first, but it only helps when the model does **not** advertise the
+feature. These are advertised.
+
+Nothing structural has been keeping these away from us. They cluster in
+horizontal reductions, saturating clamps, 64-bit compares and packing
+conversions — common in video, image and crypto code, rare in a kernel boot or
+an installer. Alpine, Ubuntu and Windows 7 Setup happen not to reach them.
+The next guest may.
+
+#### The full list
+
+43 instructions, 62 opcode entries — VEX 128/256 forms and the two
+EXTRQ/INSERTQ encodings each need their own handler. These names are the
+`Opcode` variants, which is what to grep for; the ledger in `dispatcher.rs`
+`REACHABLE_GAPS` holds exactly this set.
+
+**MMX ↔ packed-FP conversions (6)** — Bochs `sse_pfp.cc` → `sse_pfp.rs`.
+Not one-liners: these need MMX register access, SoftFloat conversion and FPU
+tag-word maintenance.
+
+```
+Cvtpi2psVpsQq     Cvtps2piPqWps     Cvttps2piPqWps
+Cvtpi2pdVpdQq     Cvtpd2piPqWpd     Cvttpd2piPqWpd
+```
+
+**SSSE3 horizontal add/subtract (18)** — `simd_int.h` → `sse.rs` + `avx.rs`.
+Six legacy opcodes plus the twelve VEX forms `remap_sse_to_vex` derives from
+them.
+
+```
+PhaddwVdqWdq            PhadddVdqWdq            PhaddswVdqWdq
+PhsubwVdqWdq            PhsubdVdqWdq            PhsubswVdqWdq
+V128VphaddwVdqHdqWdq    V256VphaddwVdqHdqWdq
+V128VphadddVdqHdqWdq    V256VphadddVdqHdqWdq
+V128VphaddswVdqHdqWdq   V256VphaddswVdqHdqWdq
+V128VphsubwVdqHdqWdq    V256VphsubwVdqHdqWdq
+V128VphsubdVdqHdqWdq    V256VphsubdVdqHdqWdq
+V128VphsubswVdqHdqWdq   V256VphsubswVdqHdqWdq
+```
+
+**SSE4.1 integer min/max (6)** — `simd_int.h` → `sse.rs`. The simplest of the
+lot; `pminsw_vdq_wdq` in `sse.rs` is the shape to copy.
+
+```
+PminsbVdqWdq      PminsdVdqWdq      PminuwVdqWdq
+PmaxsbVdqWdq      PmaxsdVdqWdq      PmaxuwVdqWdq
+```
+
+**SSE4.1 / SSE4.2 compare, pack and extract (4)** — `simd_int.h` /
+`simd_compare.h` → `sse.rs`. `ExtractpsEdVpsIb` is a one-line dispatcher arm
+onto the existing PEXTRD handler; upstream defines it as literally that
+function.
+
+```
+PcmpeqqVdqWdq     PcmpgtqVdqWdq     PackusdwVdqWdq    ExtractpsEdVpsIb
+```
+
+**VEX forms whose legacy counterpart already works (22)** — → `avx.rs`. The
+operation exists but is inlined in the legacy handler; extract it to a `*_lane`
+helper, then call it per 128-bit lane, exactly as the blend helpers were done.
+
+```
+V128VpsignbVdqHdqWdq      V256VpsignbVdqHdqWdq
+V128VpsignwVdqHdqWdq      V256VpsignwVdqHdqWdq
+V128VpsigndVdqHdqWdq      V256VpsigndVdqHdqWdq
+V128VpavgbVdqWdq          V256VpavgbVdqWdq
+V128VpavgwVdqWdq          V256VpavgwVdqWdq
+V128VpmaddwdVdqHdqWdq     V256VpmaddwdVdqHdqWdq
+V128VpmaddubswVdqHdqWdq   V256VpmaddubswVdqHdqWdq
+V128VpacksswbVdqHdqWdq    V256VpacksswbVdqHdqWdq
+V128VpackuswbVdqHdqWdq    V256VpackuswbVdqHdqWdq
+V128VpackssdwVdqHdqWdq    V256VpackssdwVdqHdqWdq
+V128VpackusdwVdqHdqWdq    V256VpackusdwVdqHdqWdq
+```
+
+**SSE4A (6)** — Bochs `sse.cc` → `sse.rs`. Reachable only on `AmdRyzen`, which
+advertises `IsaSse4a`; checking Corei7SkylakeX alone shows none of them.
+
+```
+ExtrqVdqUq        ExtrqUdqIbIb      InsertqVdqUdq
+InsertqVdqUqIbIb  MovntssMssVss     MovntsdMsdVsd
+```
+
+#### Notes for whoever picks this up
+
+The destination files above are not a choice — the layout mirrors Bochs. In
+particular the `xmm_*` primitives from `simd_int.h` / `simd_compare.h` go in
+`sse.rs`, which **already** hosts that header's blend helpers as `*_lane`
+functions shared with `avx_pfp.rs`. Do not create a `simd_int.rs`; that was the
+first instinct and it is wrong.
+
+Pinned by `dispatcher.rs`
+`every_opcode_a_model_admits_has_a_dispatcher_arm`, a ratchet: the list may
+shrink, never grow, and a new gap on **any** shipped model fails the build.
+Delete each entry from `REACHABLE_GAPS` as you implement it — the test fails if
+the ledger and reality disagree in either direction, so it cannot silently rot.
+
+**Do not classify these by opcode name.** `remap_sse_to_vex` does `use
+Opcode::*` and writes its arms bare, so a scan for `Opcode::`-qualified names
+misses every VEX opcode the remap produces. That mistake is why this was first
+measured at 22 instead of 62. Use `opcode_state` / the generated tables.
+
+**Check every shipped CPU model, not one.** The six SSE4A entries exist only on
+`AmdRyzen`. A sweep against `Corei7SkylakeX` alone reports none of them.
+
+### 1.2 hwclock stalls during OpenRC boot
 
 The Alpine guest takes ~13 extra guest-seconds to reach login versus Bochs,
 from 2–4 deterministic ~3.0 s stalls in the OpenRC hwclock service. busybox
@@ -32,7 +157,7 @@ If it survives, the next step is execve-argv logging. The cr3-tagged tracer for
 that exists but is **not in the tree** — it is `alpine_direct.rs` in the git
 stash `pre-switch-to-feature-8`. Do not drop that stash.
 
-### 1.2 Bochs wall-ratio baseline with matched IPS
+### 1.3 Bochs wall-ratio baseline with matched IPS
 
 The last published ratio was measured before several correctness fixes and with
 unmatched `--ips`, so it is not a usable baseline. Re-establish it before any
@@ -43,48 +168,6 @@ rule the hard way: **interleaved A/B only**. Absolute wall-clock on this machine
 is untrustworthy — thermal state and background builds move it by more than the
 effects being measured, and within-binary variance has been observed up to 4×
 from ISO cache state alone.
-
-### 1.3 62 advertised instructions abort the emulator instead of executing
-
-`execute_instruction` ends in a catch-all returning `CpuError::UnimplementedOpcode`
-— an *emulator* error that stops the host, where Bochs would point the opcode at
-`BxError` and let the guest take #UD. The ISA gate normally prevents that by
-rewriting unsupported opcodes to `IaError` first, but it only helps when the
-model does not advertise the feature.
-
-62 opcodes are decodable, advertised by a shipped model, and have no dispatcher
-arm. Every one is a live host abort a guest can trigger:
-
-| Group | Count | Bochs home |
-|---|---|---|
-| SSSE3 horizontal add/sub — PHADDW/D/SW, PHSUBW/D/SW | 6 | `simd_int.h` |
-| SSE4.1 integer min/max — PMINSB/SD/UW, PMAXSB/SD/UW | 6 | `simd_int.h` |
-| PCMPEQQ, PCMPGTQ, PACKUSDW, EXTRACTPS | 4 | `simd_int.h` / `simd_compare.h` |
-| MMX <-> packed-FP conversions — CVTPI2PS/PD, CVT(T)PS2PI, CVT(T)PD2PI | 6 | `sse_pfp.cc` |
-| VEX forms whose V128/V256 opcode has no arm of its own | 34 | as above, per lane |
-| SSE4A — EXTRQ, INSERTQ, MOVNTSS, MOVNTSD | 6 | `sse.cc` |
-
-The SSE4A six appear only on `AmdRyzen`, which advertises `IsaSse4a`. Checking a
-single model would have missed them.
-
-Pinned by `dispatcher.rs`
-`every_opcode_a_model_admits_has_a_dispatcher_arm`, which is a ratchet: the list
-may shrink, never grow, and a new gap on **any** model fails the build.
-
-**Where the work goes** (the file layout mirrors Bochs, so this is not a
-choice): the `xmm_*` primitives from `simd_int.h` / `simd_compare.h` belong in
-`sse.rs`, which already hosts that header's blend helpers as `*_lane` functions
-shared with `avx_pfp.rs` — **not** in a new `simd_int.rs`. The six conversions
-go in `sse_pfp.rs`. The 34 VEX forms go in `avx.rs` and call the same lane
-helpers per 128-bit lane, which first requires extracting the shared operation
-out of the existing inline legacy handlers, exactly as the blend helpers were.
-EXTRACTPS is a one-line dispatcher arm onto the existing PEXTRD handler —
-upstream defines it as literally the same function.
-
-**Do not classify these by opcode name.** `remap_sse_to_vex` does `use
-Opcode::*` and writes its arms bare, so a scan for `Opcode::`-qualified names
-misses every VEX opcode the remap produces. That mistake is why this was first
-measured at 22 instead of 62.
 
 ## 2. Deliberate parity gaps
 
@@ -130,7 +213,7 @@ none can reach the dispatcher catch-all.
 
 That stops being true the moment a model advertises one of those features — an
 Icelake or Sapphire Rapids cpudb entry would bring GFNI, VAES, VBMI, VNNI, BF16
-and FP16 with it. The §1.3 ratchet is what will catch that, and the answer then
+and FP16 with it. The §1.1 ratchet is what will catch that, and the answer then
 is to implement the family, not to widen the ledger.
 
 The one gap worth closing regardless: `gen_opmap_evex.py` has no `--verify`
@@ -149,7 +232,7 @@ grep -oE "X86Feature::Isa\w+" rusty_box/src/cpu/cpudb/amd/amd_ryzen.rs | sort -u
 `AmdRyzen` advertises AVX, AVX2, F16C, FMA and SSE4A — **not** XOP, FMA4 or TBM.
 So adding the AMD model did not make §2.1 or this section observable, contrary
 to what the old AVX plan assumed. It did make SSE4A observable, which is where
-six of the §1.3 gaps come from.
+six of the §1.1 gaps come from.
 
 ### 2.4 VEX map 7
 

@@ -11,9 +11,15 @@ use std::sync::{
 };
 
 #[cfg(not(target_arch = "wasm32"))]
+use crate::library::CloseChoice;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::sessions::{
+    AliveEffect, Exclusive, HeldBy, Hold, Holdings, KeepAlive, RunHolds, Sessions, VmSession,
+};
+#[cfg(not(target_arch = "wasm32"))]
 use crate::shell::destination::{SidebarAction, VmBarAction};
 use crate::shell::destination::{Destination, ShellPage};
-use crate::shell::sidebar::VmLibraryEntry;
+use crate::shell::sidebar::{Drawer, VmLibraryEntry};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::shell::theme::{SPACE_PAGE, STROKE_HAIRLINE, TEXT_CAPTION, TEXT_DISPLAY};
 use crate::shell::theme::{
@@ -28,7 +34,7 @@ use crate::shell::widgets::disabled_tile;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::shell::widgets::{
     action_tile_enabled, hairline_above, home_fact, path_field_width, selection_row, status_text,
-    RowMark, ShellStateBadge, BROWSE, HOME_FACT_GAP, ROOT_INDENT,
+    RowMark, ShellStateBadge, BROWSE, HOME_FACT_GAP, ROOT_INDENT, ROW_HEIGHT,
 };
 use crate::shell::widgets::{
     action_tile, field_row, metadata_text, page_header, primary_button, status_dot,
@@ -41,10 +47,11 @@ use egui::RichText;
 // native build hands it to a runner thread instead.
 #[cfg(target_arch = "wasm32")]
 use rusty_box::emulator::RunBudget;
-use rusty_box::params::{
-    BxParams, BX_CPU_CORES_LIMIT, BX_CPU_HT_THREADS_LIMIT, BX_CPU_PROCESSORS_LIMIT,
-    BX_MAX_SMP_THREADS_SUPPORTED,
-};
+use rusty_box::params::{BxParams, BX_MAX_SMP_THREADS_SUPPORTED};
+#[cfg(not(target_arch = "wasm32"))]
+use rusty_box::gui::shared_display::SharedDisplay;
+#[cfg(not(target_arch = "wasm32"))]
+use rusty_box::params::{BX_CPU_CORES_LIMIT, BX_CPU_HT_THREADS_LIMIT, BX_CPU_PROCESSORS_LIMIT};
 use rusty_box_bximage::{calculate_hard_disk_geometry, FloppyFormat, SectorSize};
 #[cfg(target_arch = "wasm32")]
 use rusty_box_bximage::{CreatedImage as BxCreatedImage, ImageSize};
@@ -52,6 +59,7 @@ use rusty_box_bximage::{CreatedImage as BxCreatedImage, ImageSize};
 use rusty_box_bximage::{create_floppy, ExistingFilePolicy};
 
 /// Common pre-boot VBE resolutions offered by the Display panel picker.
+#[cfg(not(target_arch = "wasm32"))]
 const VGA_MODE_PRESETS: &[(u16, u16)] = &[
     (1024, 768),
     (1280, 720),
@@ -60,6 +68,7 @@ const VGA_MODE_PRESETS: &[(u16, u16)] = &[
     (1920, 1080),
 ];
 
+#[cfg(not(target_arch = "wasm32"))]
 fn vga_mode_label(mode: Option<crate::config::VgaMode>) -> String {
     match mode {
         None => "Default (VGA / VBE)".to_owned(),
@@ -77,7 +86,19 @@ const BROWSER_MAX_DOWNLOAD_BYTES: u64 = 64 * 1024 * 1024;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub enum NativeEmulatorCommand {
-    Start(crate::config::ResolvedConfig),
+    Start(StartRun),
+}
+
+/// One power-on, as the shell hands it to the launcher.
+#[cfg(not(target_arch = "wasm32"))]
+pub struct StartRun {
+    /// The VM's display: the run draws into it and reads its input from it.
+    pub(crate) display: Arc<Mutex<SharedDisplay>>,
+    /// What the run builds.
+    pub(crate) config: crate::config::ResolvedConfig,
+    /// What the power-on took that only one running VM may have: the run's
+    /// thread holds it until every machine the power-on builds is gone.
+    pub(crate) holds: RunHolds,
 }
 
 /// A path field the shell fills from a file chooser.
@@ -174,9 +195,100 @@ fn save_native_file(default_name: &str) -> Option<PathBuf> {
         .save_file()
 }
 
+/// A desktop's Hide: the window goes to the taskbar, and its VMs run on.
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
+fn minimize_window(ctx: &egui::Context) {
+    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+}
+
+/// What a close the user asked for leads to, for the platform to carry out
+/// (`close_step`, `NativeShellApp::perform_close_action`).
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CloseAction {
+    /// Hide the app: minimize the window; on Android, move the task to the back.
+    Hide,
+    /// Every VM has been asked to stop: a desktop's window closes, ending the
+    /// app; a phone's app goes to the background.
+    Quit,
+}
+
+/// Where a close is carried out: the two quit differently.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ClosePlatform {
+    /// Closing the window ends the app.
+    Desktop,
+    /// The app never ends its own loop; it goes to the background, as
+    /// Android's apps do. eframe ended there would leave its last frame on
+    /// the screen until the next touch, and could not start again in the
+    /// same process (winit makes one event loop per process).
+    Phone,
+}
+
+/// The platform this build carries out its closes on.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) const THIS_PLATFORM: ClosePlatform = if cfg!(target_os = "android") {
+    ClosePlatform::Phone
+} else {
+    ClosePlatform::Desktop
+};
+
+/// What carrying out a close does to the app's window.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WindowStep {
+    /// Off the screen, still running: a desktop's window goes to the
+    /// taskbar, a phone's app to the background.
+    LeaveTheScreen,
+    /// The window closes through eframe, and the app ends.
+    CloseTheWindow,
+}
+
+/// What `platform` does for a close's `action`: the one mapping. Hide
+/// leaves the screen with the VMs running. Quit comes once every VM was
+/// asked to stop: a desktop closes its window, and a phone's app leaves the
+/// screen too, so on a phone Hide and Quit differ only in the stopped VMs.
+#[cfg(not(target_arch = "wasm32"))]
+fn close_step(platform: ClosePlatform, action: CloseAction) -> WindowStep {
+    match action {
+        CloseAction::Hide => WindowStep::LeaveTheScreen,
+        CloseAction::Quit => match platform {
+            ClosePlatform::Desktop => WindowStep::CloseTheWindow,
+            ClosePlatform::Phone => WindowStep::LeaveTheScreen,
+        },
+    }
+}
+
+/// The question a close asks while VMs run, while it is open.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CloseQuestion {
+    /// Its "Remember my choice" checkbox.
+    remember: bool,
+}
+
+/// What the close question was answered with.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CloseAnswer {
+    Hide,
+    StopAndQuit,
+    Cancel,
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 pub struct NativeShellApp {
-    emulator: rusty_box::gui::RustyBoxApp,
+    /// Every VM's display and console, by VM; the shell draws and drives the
+    /// selected VM's.
+    sessions: Sessions,
+    /// What only one running VM may have — the hypervisor, each hard-disk
+    /// image — and which VM has it. A power-on takes; its run's thread gives
+    /// back.
+    holdings: Holdings,
+    /// Keeps the app running while any power-on lasts: each power-on takes
+    /// a hold, and its run's thread gives it back.
+    keep_alive: KeepAlive,
     chrome: ShellChrome,
     floppy_maker: FloppyMaker,
     /// The floppy maker's window is open.
@@ -188,7 +300,6 @@ pub struct NativeShellApp {
     settings: NativeVmSettings,
     vm_info: NativeVmInfo,
     command_tx: Sender<NativeEmulatorCommand>,
-    shared: Arc<Mutex<rusty_box::gui::shared_display::SharedDisplay>>,
     shell_notice: Option<ShellNotice>,
     /// The folder every library VM's edits are written to.
     library: crate::library::VmLibrary,
@@ -199,19 +310,29 @@ pub struct NativeShellApp {
     /// The overwrite creations settled this session, by path: each file the
     /// user agreed to let a startup-disk creation erase, and each one that
     /// did not exist when its VM was powered on, so there was nothing to
-    /// erase and nothing to ask. The runner erases an overwrite creation's
-    /// file at the first power-on of the session that uses the path and at
-    /// no later one, and provisions a plain creation at every power-on
-    /// without erasing anything, so one answer per file covers the session.
+    /// erase and nothing to ask. Each is recorded once the power-on that
+    /// settles it is sent, since only a sent power-on erases. The runner
+    /// erases an overwrite creation's file at the first power-on of the
+    /// session that uses the path and at no later one, and provisions a
+    /// plain creation at every power-on without erasing anything, so one
+    /// answer per file covers the session.
     overwrite_confirmed: std::collections::HashSet<PathBuf>,
     /// The gravest notice raised in this frame, which a lesser one may not
     /// replace; see `notify`.
     gravest_raised: Option<ShellNoticeKind>,
+    /// What closing the app does while VMs run, as the library folder
+    /// records it (`.on_close`) and the About window changes it.
+    close_choice: CloseChoice,
+    /// The question a close asks while VMs run, while it is open.
+    close_question: Option<CloseQuestion>,
+    /// What the last close decided, until the platform carries it out
+    /// (`take_close_action`).
+    close_action: Option<CloseAction>,
     /// A Browse press the Android host has yet to answer.
     #[cfg(target_os = "android")]
     browse_request: Option<BrowseTarget>,
     /// The full-screen console's menu is open.
-    #[cfg(target_os = "android")]
+    #[cfg(any(target_os = "android", test))]
     full_screen_menu_open: bool,
     /// The full-screen menu asked the Android host for its key pad.
     #[cfg(target_os = "android")]
@@ -223,12 +344,142 @@ pub struct NativeShellApp {
 #[cfg(target_os = "android")]
 const FULL_SCREEN_MENU: &str = "☰";
 /// The menu button's side, points: a comfortable thumb target.
-#[cfg(target_os = "android")]
+#[cfg(all(not(target_arch = "wasm32"), any(target_os = "android", test)))]
 const FULL_SCREEN_BUTTON_SIZE: f32 = 40.0;
 /// The menu button's fill over the guest: dark enough to find, light enough
 /// to leave the guest's corner readable under it.
 #[cfg(target_os = "android")]
 const FULL_SCREEN_BUTTON_ALPHA: u8 = 110;
+
+/// Where the full-screen console's menu list stands on a frame.
+#[cfg(all(not(target_arch = "wasm32"), any(target_os = "android", test)))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MenuScroll {
+    /// The menu opens on this frame: its list starts at its top.
+    Top,
+    /// The menu was open on the frame before: its list stays where it is.
+    Kept,
+}
+
+/// The full-screen console's menu window, under its corner button and held
+/// inside `area`. `contents` sit in a list that scrolls whenever they do not
+/// fit, so nothing in the menu is ever out of reach, and the list stands at
+/// `scroll`: on the frame the menu opens, at its top, whatever offset the
+/// last opening left behind.
+#[cfg(all(not(target_arch = "wasm32"), any(target_os = "android", test)))]
+fn show_full_screen_menu<F>(ctx: &egui::Context, area: egui::Rect, scroll: MenuScroll, contents: F)
+where
+    F: FnOnce(&mut egui::Ui),
+{
+    let below_button = SPACE_GROUP + FULL_SCREEN_BUTTON_SIZE + SPACE_ITEM;
+    // As wide as the window, and as tall as its items up to what fits.
+    let list = egui::ScrollArea::vertical().auto_shrink([false, true]);
+    let list = match scroll {
+        MenuScroll::Top => list.vertical_scroll_offset(0.0),
+        MenuScroll::Kept => list,
+    };
+    egui::Window::new("full_screen_menu")
+        .title_bar(false)
+        .resizable(false)
+        .collapsible(false)
+        .fixed_pos(area.left_top() + egui::vec2(SPACE_GROUP, below_button))
+        .constrain_to(area)
+        .show(ctx, |ui| {
+            list.show(ui, contents);
+        });
+}
+
+/// A window the phone's host draws over the shell.
+#[cfg(all(not(target_arch = "wasm32"), any(target_os = "android", test)))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HostWindow {
+    /// The file browser a Browse press opens.
+    FileBrowser,
+    /// The key pad the full-screen console's menu opens.
+    KeyPad,
+}
+
+/// Something of the shell's own open over its pages.
+#[cfg(all(not(target_arch = "wasm32"), any(target_os = "android", test)))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ShellOverlay {
+    /// The question a close asks while VMs run.
+    CloseQuestion,
+    /// A step waiting for confirmation.
+    Confirmation,
+    /// An open menu or drop-down list.
+    Popup,
+    /// The full-screen console's menu.
+    ConsoleMenu,
+    /// The floppy maker.
+    FloppyMaker,
+    /// The About window.
+    About,
+    /// The VM list.
+    VmList,
+}
+
+/// Something open on the phone's screen that Back puts away before it
+/// closes the app.
+#[cfg(all(not(target_arch = "wasm32"), any(target_os = "android", test)))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Overlay {
+    /// The shell's own, which the shell puts away.
+    Shell(ShellOverlay),
+    /// One of the host's windows, which the host puts away.
+    Host(HostWindow),
+}
+
+#[cfg(all(not(target_arch = "wasm32"), any(target_os = "android", test)))]
+impl Overlay {
+    /// Its place in Back's order, topmost first. The two modals and an open
+    /// popup sit over every window, so whichever of them is open is on top;
+    /// the host's windows come next, then the shell's own, and the VM list,
+    /// part of the page, last.
+    fn depth(self) -> u8 {
+        match self {
+            Self::Shell(ShellOverlay::CloseQuestion) => 0,
+            Self::Shell(ShellOverlay::Confirmation) => 1,
+            Self::Shell(ShellOverlay::Popup) => 2,
+            Self::Host(HostWindow::FileBrowser) => 3,
+            Self::Host(HostWindow::KeyPad) => 4,
+            Self::Shell(ShellOverlay::ConsoleMenu) => 5,
+            Self::Shell(ShellOverlay::FloppyMaker) => 6,
+            Self::Shell(ShellOverlay::About) => 7,
+            Self::Shell(ShellOverlay::VmList) => 8,
+        }
+    }
+}
+
+/// What a press of the phone's Back does.
+#[cfg(all(not(target_arch = "wasm32"), any(target_os = "android", test)))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BackPress {
+    /// Puts away the topmost of what is open.
+    PutAway(Overlay),
+    /// Nothing is open: Back is a close of the app.
+    Close,
+}
+
+/// What Back does with `open` on the phone's screen: puts away the topmost
+/// of it, or, with nothing open, closes the app. The one place that decides.
+#[cfg(all(not(target_arch = "wasm32"), any(target_os = "android", test)))]
+fn back_press(open: &[Overlay]) -> BackPress {
+    match open.iter().copied().min_by_key(|overlay| overlay.depth()) {
+        Some(topmost) => BackPress::PutAway(topmost),
+        None => BackPress::Close,
+    }
+}
+
+/// A running VM the phone's console menu can switch to.
+#[cfg(all(not(target_arch = "wasm32"), any(target_os = "android", test)))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SwitchTarget {
+    /// The VM's place in the library list, as `select_profile` takes it.
+    pub(crate) index: usize,
+    /// The VM's name, which its button in the menu carries.
+    pub(crate) name: String,
+}
 
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone)]
@@ -491,10 +742,11 @@ impl NativeVmSettings {
     }
 }
 
-/// Where a VM in the list came from, and so where its edits go.
+/// Where a VM in the list came from, and so where its edits go. It is also
+/// the VM's identity: the key of its session.
 #[cfg(not(target_arch = "wasm32"))]
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum VmOrigin {
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) enum VmOrigin {
     /// A library file; every applied edit is written back to it.
     Library(crate::library::VmStem),
     /// In memory only — the command line's machine, or the blank "New VM" —
@@ -873,7 +1125,9 @@ pub(crate) struct ShellChrome {
     vm_library: Vec<VmLibraryEntry>,
     library_filter: String,
     show_serial: bool,
-    show_library: bool,
+    /// The drawer `vm_library` is listed in, open beside the page or folded
+    /// away to its grab handle.
+    library: Drawer,
     show_about: bool,
 }
 
@@ -885,7 +1139,7 @@ impl Default for ShellChrome {
             vm_library: Vec::new(),
             library_filter: String::new(),
             show_serial: true,
-            show_library: true,
+            library: Drawer::Open,
             show_about: false,
         }
     }
@@ -920,10 +1174,6 @@ impl ShellChrome {
             .filter_map(|(index, entry)| entry.matches_filter(filter.as_str()).then_some(index))
             .collect()
     }
-}
-
-fn shell_should_draw_library(chrome: &ShellChrome) -> bool {
-    chrome.show_library
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -962,6 +1212,9 @@ struct FloppyMaker {
     /// shell can reach the platform's file chooser.
     #[cfg(not(target_arch = "wasm32"))]
     browse_requested: bool,
+    /// The maker's Create was pressed; the shell makes the image, since only
+    /// the shell knows which files its running VMs use as hard disks.
+    create_requested: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -980,6 +1233,7 @@ impl Default for FloppyMaker {
             status: None,
             #[cfg(not(target_arch = "wasm32"))]
             browse_requested: false,
+            create_requested: false,
         }
     }
 }
@@ -1306,6 +1560,34 @@ fn trimmed_optional_path(value: &str) -> Option<PathBuf> {
     }
 }
 
+/// A hard-disk image's identity, so two spellings of one file are one disk:
+/// its canonical path where it exists, and where it does not yet — a
+/// startup disk its first run makes — its name in its folder's canonical
+/// path, the canonical path the file has once it is made. A path whose
+/// folder does not exist either is made absolute.
+#[cfg(not(target_arch = "wasm32"))]
+fn disk_identity(path: &Path) -> PathBuf {
+    if let Ok(canonical) = std::fs::canonicalize(path) {
+        return canonical;
+    }
+    let absolute = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    let folder = absolute
+        .parent()
+        .and_then(|folder| std::fs::canonicalize(folder).ok());
+    match (folder, absolute.file_name()) {
+        (Some(folder), Some(name)) => folder.join(name),
+        (None, _) | (_, None) => absolute,
+    }
+}
+
+/// What the shell says when the hard-disk image at `path` is refused, to a
+/// power-on, a new disk's create or the floppy maker's, because `holder`
+/// runs on it.
+#[cfg(not(target_arch = "wasm32"))]
+fn disk_in_use(path: &Path, holder: &HeldBy) -> String {
+    format!("{} is in use by {}; stop it first.", path.display(), holder.name)
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn status_snapshot(
     shared: &Arc<Mutex<rusty_box::gui::shared_display::SharedDisplay>>,
@@ -1328,33 +1610,35 @@ pub(crate) fn status_snapshot(
 
 #[cfg(not(target_arch = "wasm32"))]
 impl NativeShellApp {
+    /// The shell of a desktop window, which keeps running whatever its screen
+    /// does.
     pub fn new(
         cc: &eframe::CreationContext<'_>,
-        shared: Arc<Mutex<rusty_box::gui::shared_display::SharedDisplay>>,
         command_tx: Sender<NativeEmulatorCommand>,
         start: crate::runner::ShellStart,
     ) -> Self {
-        configure_shell_style(&cc.egui_ctx);
-        let emulator = rusty_box::gui::RustyBoxApp::new(cc, Arc::clone(&shared));
-        #[cfg(target_os = "android")]
-        let emulator = {
-            let mut emulator = emulator;
-            emulator.set_display_scale(rusty_box::gui::DisplayScale::Fit);
-            // A finger is not a mouse: on a phone the guest's image is a
-            // trackpad with its own left and right buttons.
-            emulator.set_pointer_mode(rusty_box::gui::PointerMode::Touchpad);
-            emulator
-        };
-        Self::with_emulator(emulator, shared, command_tx, start)
+        Self::keeping_alive_by(cc, command_tx, start, AliveEffect::Nothing)
     }
 
-    /// The shell around `emulator`, opened on `start`'s VM list. `new` builds
-    /// the emulator view from the window; tests build it without one.
-    fn with_emulator(
-        emulator: rusty_box::gui::RustyBoxApp,
-        shared: Arc<Mutex<rusty_box::gui::shared_display::SharedDisplay>>,
+    /// The shell, keeping the app running by `alive` while any VM's
+    /// power-on lasts.
+    pub(crate) fn keeping_alive_by(
+        cc: &eframe::CreationContext<'_>,
         command_tx: Sender<NativeEmulatorCommand>,
         start: crate::runner::ShellStart,
+        alive: AliveEffect,
+    ) -> Self {
+        configure_shell_style(&cc.egui_ctx);
+        Self::with_commands(command_tx, start, alive)
+    }
+
+    /// The shell opened on `start`'s VM list, powering VMs on through
+    /// `command_tx`. `keeping_alive_by` styles the window first; tests build
+    /// the shell without one.
+    fn with_commands(
+        command_tx: Sender<NativeEmulatorCommand>,
+        start: crate::runner::ShellStart,
+        alive: AliveEffect,
     ) -> Self {
         let opening = OpeningList::from_start(&start);
         let shown = &opening.profiles[opening.selected];
@@ -1371,11 +1655,14 @@ impl NativeShellApp {
         chrome.destination = chrome.destination.select_vm(opening.selected);
         #[cfg(target_os = "android")]
         {
-            chrome.show_library = false;
+            chrome.library = Drawer::Closed;
             chrome.show_serial = false;
         }
+        let close_choice = start.library.close_choice();
         Self {
-            emulator,
+            sessions: Sessions::default(),
+            holdings: Holdings::default(),
+            keep_alive: KeepAlive::new(alive),
             chrome,
             floppy_maker: FloppyMaker::default(),
             floppy_maker_open: false,
@@ -1385,28 +1672,95 @@ impl NativeShellApp {
             settings,
             vm_info,
             command_tx,
-            shared,
             shell_notice: opening.notice,
             library: start.library,
             broken_files: opening.broken,
             pending_confirm: None,
             overwrite_confirmed: std::collections::HashSet::new(),
             gravest_raised: None,
+            close_choice,
+            close_question: None,
+            close_action: None,
             #[cfg(target_os = "android")]
             browse_request: None,
-            #[cfg(target_os = "android")]
+            #[cfg(any(target_os = "android", test))]
             full_screen_menu_open: false,
             #[cfg(target_os = "android")]
             keypad_requested: false,
         }
     }
 
+    /// The selected VM's identity: the key of its session.
+    fn shown_vm(&self) -> VmOrigin {
+        self.profiles[self.chrome.selected_vm().min(self.profiles.len() - 1)]
+            .origin
+            .clone()
+    }
+
+    /// The selected VM's state; a VM with no session is off.
     fn runtime_status(&self) -> ShellStatus {
-        status_snapshot(&self.shared)
+        self.sessions.get(&self.shown_vm()).map_or(
+            ShellStatus {
+                running: false,
+                ips: 0,
+                reset_requested: false,
+                start_pending: false,
+            },
+            VmSession::status,
+        )
+    }
+
+    /// The selected VM's display, its session opened on first use.
+    pub(crate) fn shown_display(&mut self) -> Arc<Mutex<SharedDisplay>> {
+        let vm = self.shown_vm();
+        Arc::clone(self.sessions.open(&vm).display())
+    }
+
+    /// Whether the phone keeps its screen on: while any VM starts or runs
+    /// (`MachineActivity::keeps_screen_on`), not only the one shown.
+    #[cfg(any(target_os = "android", test))]
+    pub(crate) fn any_vm_keeps_screen_on(&self) -> bool {
+        self.sessions
+            .statuses()
+            .iter()
+            .any(|status| crate::android_support::MachineActivity::of(status).keeps_screen_on())
+    }
+
+    /// Whether any VM runs or is about to: what makes a close ask.
+    #[cfg(any(target_os = "android", test))]
+    pub(crate) fn any_vm_live(&self) -> bool {
+        self.sessions.any_live()
+    }
+
+    /// The name a VM goes by in the shell's notices.
+    fn vm_name(&self, vm: &VmOrigin) -> &str {
+        self.profiles
+            .iter()
+            .find(|profile| &profile.origin == vm)
+            .map_or("A VM", |profile| profile.name.as_str())
+    }
+
+    /// Takes the hard-disk image at `path` for the VM named `by`, or says
+    /// which VM has it. The one way the shell takes a disk, by its identity
+    /// (`disk_identity`), whether to run a VM on it or to write it anew.
+    fn take_disk(&self, path: &Path, by: HeldBy) -> Result<Hold, HeldBy> {
+        self.holdings.take(Exclusive::Disk(disk_identity(path)), by)
+    }
+
+    /// The engine the shell names beside the selected VM's state: while the
+    /// VM runs or is about to, the one its run uses, which is the
+    /// interpreter when another VM held the hypervisor at its power-on;
+    /// otherwise the one it is set to.
+    fn shown_engine(&self) -> crate::config::Engine {
+        self.sessions
+            .get(&self.shown_vm())
+            .filter(|session| session.is_live())
+            .and_then(VmSession::run_engine)
+            .unwrap_or(self.settings.engine)
     }
 
     fn is_vm_running(&self) -> bool {
-        status_snapshot(&self.shared).running
+        self.runtime_status().running
     }
 
     fn draw_shell_notice(&mut self, ui: &mut egui::Ui) {
@@ -1453,14 +1807,10 @@ impl NativeShellApp {
         self.gravest_raised = None;
     }
 
+    /// Shows every run's error as an error notice, named by its VM.
     fn take_runtime_error_notice(&mut self) {
-        let runtime_error = self
-            .shared
-            .lock()
-            .ok()
-            .and_then(|mut display| display.runtime_error.take());
-
-        if let Some(message) = runtime_error {
+        for error in self.sessions.take_runtime_errors() {
+            let message = format!("{}: {}", self.vm_name(&error.vm), error.message);
             self.notify(ShellNotice::error(message));
         }
     }
@@ -1492,6 +1842,7 @@ impl NativeShellApp {
     /// rest of the shell cannot.
     fn draw_vm_bar(&mut self, ui: &mut egui::Ui) {
         let status = self.runtime_status();
+        let vm = self.shown_vm();
         let action = crate::shell::vm_bar::draw_vm_bar(
             ui,
             VmBarState {
@@ -1504,13 +1855,16 @@ impl NativeShellApp {
                 start_pending: status.start_pending,
                 on_console: self.chrome.page() == ShellPage::Console,
                 serial_shown: self.chrome.show_serial,
-                mouse_captured: self.emulator.mouse_captured(),
+                mouse_captured: self
+                    .sessions
+                    .get(&vm)
+                    .is_some_and(VmSession::mouse_captured),
             },
         );
         match action {
             None => {}
             Some(VmBarAction::ToggleSidebar) => {
-                self.chrome.show_library = !self.chrome.show_library;
+                self.chrome.library = self.chrome.library.toggled();
             }
             Some(VmBarAction::PowerOn) => self.start_vm(),
             Some(VmBarAction::PowerOff) => self.request_power_off(),
@@ -1518,8 +1872,12 @@ impl NativeShellApp {
             Some(VmBarAction::ToggleSerial) => {
                 self.chrome.show_serial = !self.chrome.show_serial;
             }
-            Some(VmBarAction::ToggleMouseCapture) => self.emulator.toggle_mouse_capture(),
-            Some(VmBarAction::SendCtrlAltDel) => self.emulator.send_ctrl_alt_del(),
+            Some(VmBarAction::ToggleMouseCapture) => {
+                self.sessions.open(&vm).console().toggle_mouse_capture();
+            }
+            Some(VmBarAction::SendCtrlAltDel) => {
+                self.sessions.open(&vm).console().send_ctrl_alt_del();
+            }
             Some(VmBarAction::CreateFloppy) => self.floppy_maker_open = true,
             Some(VmBarAction::ShowAbout) => self.chrome.show_about = true,
             Some(VmBarAction::Quit) => {
@@ -1530,37 +1888,62 @@ impl NativeShellApp {
         }
     }
 
-    /// Draws the tree and hands its click to `handle_sidebar_action`.
+    /// Draws the tree's drawer, open or closed, and hands its click to
+    /// `handle_sidebar_action`. A drag on the drawer's edge opens or closes
+    /// it in `chrome.library`, as the VM bar's toggle does.
     fn draw_sidebar(&mut self, ui: &mut egui::Ui) {
-        let badge = shell_state_badge(&self.runtime_status(), self.has_error_notice());
+        let dots = self.row_dots();
         let visible = self.chrome.visible_vm_indices();
-        let action = crate::shell::sidebar::draw_sidebar(
-            ui,
-            &self.chrome.vm_library,
-            &visible,
-            self.chrome.destination,
-            &mut self.chrome.library_filter,
-            badge,
-            &self.broken_files,
-        );
+        let action = crate::shell::sidebar::Sidebar {
+            entries: &self.chrome.vm_library,
+            visible: &visible,
+            destination: self.chrome.destination,
+            filter: &mut self.chrome.library_filter,
+            dots: &dots,
+            broken: &self.broken_files,
+            drawer: &mut self.chrome.library,
+        }
+        .show(ui);
         if let Some(action) = action {
             self.handle_sidebar_action(action);
         }
+    }
+
+    /// The dot each VM's row shows, by library index: the selected VM's state
+    /// badge, as the header shows it, and the state of every other VM that
+    /// runs or is about to; no dot for another VM that is off.
+    fn row_dots(&self) -> Vec<Option<egui::Color32>> {
+        let shown = self.chrome.selected_vm();
+        self.profiles
+            .iter()
+            .enumerate()
+            .map(|(index, profile)| {
+                if index == shown {
+                    return Some(
+                        shell_state_badge(&self.runtime_status(), self.has_error_notice()).color,
+                    );
+                }
+                self.sessions
+                    .get(&profile.origin)
+                    .filter(|session| session.is_live())
+                    .map(|session| shell_state_badge(&session.status(), false).color)
+            })
+            .collect()
     }
 
     /// Acts on a click in the tree. A page of the VM already shown is a move;
     /// a different VM is a profile switch, which goes through `select_profile`
     /// so that profile's config and settings are loaded too. Deleting a file
     /// that does not load waits for confirmation like every other delete. On
-    /// Android the tree is a drawer over the page, so a pick in it closes it
-    /// as well.
+    /// Android a pick in the tree also closes its drawer, so the page gets the
+    /// screen's width.
     fn handle_sidebar_action(&mut self, action: SidebarAction) {
         match action {
             SidebarAction::NewVm => {
                 self.add_vm_copying_selected();
                 #[cfg(target_os = "android")]
                 {
-                    self.chrome.show_library = false;
+                    self.chrome.library = Drawer::Closed;
                 }
             }
             SidebarAction::DeleteBroken(index) => {
@@ -1576,7 +1959,7 @@ impl NativeShellApp {
                 }
                 #[cfg(target_os = "android")]
                 {
-                    self.chrome.show_library = false;
+                    self.chrome.library = Drawer::Closed;
                 }
             }
         }
@@ -1600,7 +1983,7 @@ impl NativeShellApp {
             )
             .show(ui, |ui| {
                 ui.horizontal_centered(|ui| {
-                    if self.shared.is_poisoned() {
+                    if self.shown_display().is_poisoned() {
                         status_dot(ui, ACCENT_RED);
                         ui.label(status_text("State unavailable").color(ACCENT_RED));
                         return;
@@ -1611,9 +1994,7 @@ impl NativeShellApp {
                     status_dot(ui, badge.color);
                     ui.label(status_text(badge.label).color(badge.color));
                     ui.separator();
-                    ui.label(
-                        status_text(engine_label(self.settings.engine)).color(TEXT_PRIMARY),
-                    );
+                    ui.label(status_text(engine_label(self.shown_engine())).color(TEXT_PRIMARY));
                     ui.separator();
                     ui.label(
                         status_text(format!(
@@ -1710,7 +2091,7 @@ impl NativeShellApp {
                 status_dot(ui, badge.color);
                 ui.label(status_text(badge.label).color(badge.color));
                 ui.label(status_text("·").color(TEXT_MUTED));
-                ui.label(status_text(engine_label(self.settings.engine)).color(TEXT_MUTED));
+                ui.label(status_text(engine_label(self.shown_engine())).color(TEXT_MUTED));
             });
             let mut name_changed = false;
             if let Some(profile) = self.profiles.get_mut(self.chrome.selected_vm()) {
@@ -1800,8 +2181,13 @@ impl NativeShellApp {
         } else {
             Some(powered_off_placeholder())
         };
-        self.emulator
-            .ui_embedded_with_serial(ui, frame, self.chrome.show_serial, placeholder);
+        let vm = self.shown_vm();
+        self.sessions.open(&vm).console().ui_embedded_with_serial(
+            ui,
+            frame,
+            self.chrome.show_serial,
+            placeholder,
+        );
     }
 
     fn draw_hardware_page(&mut self, ui: &mut egui::Ui) {
@@ -1832,8 +2218,17 @@ impl NativeShellApp {
                                     } else {
                                         RowMark::Plain
                                     };
-                                    if selection_row(ui, device.label(), ROOT_INDENT, mark, None)
-                                        .clicked()
+                                    // The list fits its card, so its rows keep
+                                    // `ROW_HEIGHT` even under a phone's style.
+                                    if selection_row(
+                                        ui,
+                                        device.label(),
+                                        ROOT_INDENT,
+                                        mark,
+                                        None,
+                                        ROW_HEIGHT,
+                                    )
+                                    .clicked()
                                     {
                                         self.chrome.selected_hardware = device;
                                     }
@@ -2325,21 +2720,49 @@ impl NativeShellApp {
         }
     }
 
-    /// The floppy maker's window while it is open, and its Browse.
+    /// The floppy maker's window while it is open, its Browse, and its
+    /// Create, which the shell makes (`create_floppy`).
     fn draw_floppy_maker(&mut self, ctx: &egui::Context) {
         if !self.floppy_maker_open {
             return;
         }
         let mut open = true;
-        if let Some(created) = self.floppy_maker.ui_window(ctx, &mut open) {
-            self.handle_created_image(created);
-        }
+        self.floppy_maker.ui_window(ctx, &mut open);
         self.floppy_maker_open = open;
+        if std::mem::take(&mut self.floppy_maker.create_requested) {
+            self.create_floppy();
+            // The maker's window drew this frame before the image was made:
+            // the next frame shows what became of it.
+            ctx.request_repaint();
+        }
         if std::mem::take(&mut self.floppy_maker.browse_requested)
             && self.browse(BrowseTarget::NewFloppy)
         {
             if let Err(message) = self.apply_pending_settings() {
                 self.notify(ShellNotice::error(message));
+            }
+        }
+    }
+
+    /// Makes the floppy maker's image. Its file is taken for the write as a
+    /// power-on takes a hard disk (`take_disk`), so a file a running VM uses
+    /// as its hard disk is not written, and the maker says which VM uses it.
+    fn create_floppy(&mut self) {
+        let path = PathBuf::from(self.floppy_maker.path.trim());
+        let by = HeldBy {
+            name: self.vm_name(&self.shown_vm()).to_owned(),
+        };
+        match self.take_disk(&path, by) {
+            Ok(hold) => {
+                let created = self.floppy_maker.create_image();
+                drop(hold);
+                if let Some(created) = created {
+                    self.handle_created_image(created);
+                }
+            }
+            Err(holder) => {
+                self.floppy_maker.status =
+                    Some(CreatorStatus::Error(disk_in_use(&path, &holder)));
             }
         }
     }
@@ -2535,7 +2958,9 @@ impl NativeShellApp {
 
     /// Creates the sheet's disk and attaches it to the VM. A file of the same
     /// name stops a plain create: the sheet then asks whether to replace it
-    /// or save under the first free name.
+    /// or save under the first free name. The disk is taken for the create
+    /// as a power-on takes it (`take_disk`), so a file a running VM uses is
+    /// neither made nor replaced, and the sheet says which VM has it.
     fn create_new_disk(&mut self, existing: ExistingFilePolicy) {
         let Some(draft) = self.new_disk.as_mut() else {
             return;
@@ -2561,7 +2986,19 @@ impl NativeShellApp {
             return;
         }
         draft.conflict = None;
-        match crate::hard_disk::create_disk(&path, draft.size, existing) {
+        let size = draft.size;
+        let by = HeldBy {
+            name: self.vm_name(&self.shown_vm()).to_owned(),
+        };
+        let created = match self.take_disk(&path, by) {
+            Ok(hold) => {
+                let created = crate::hard_disk::create_disk(&path, size, existing);
+                drop(hold);
+                created
+            }
+            Err(holder) => Err(disk_in_use(&path, &holder)),
+        };
+        match created {
             Ok(_) => {
                 self.new_disk = None;
                 self.handle_created_image(CreatedImage {
@@ -2569,7 +3006,11 @@ impl NativeShellApp {
                     kind: CreatedImageKind::HardDisk,
                 });
             }
-            Err(message) => draft.error = Some(message),
+            Err(message) => {
+                if let Some(draft) = self.new_disk.as_mut() {
+                    draft.error = Some(message);
+                }
+            }
         }
     }
 
@@ -2735,17 +3176,12 @@ impl NativeShellApp {
         applied
     }
 
-    /// Shows the VM at `index`. The VM being left is applied and written
-    /// first, so nothing of it waits on a later frame.
+    /// Shows the VM at `index`, whether or not either VM runs: a VM left
+    /// running keeps running, and its console is there when it is shown
+    /// again. The VM being left is applied and written first, so nothing of
+    /// it waits on a later frame.
     fn select_profile(&mut self, index: usize) {
         if index >= self.profiles.len() {
-            return;
-        }
-        let status = self.runtime_status();
-        if status.running || status.start_pending {
-            self.notify(ShellNotice::warning(
-                "Stop the running VM before selecting another VM.",
-            ));
             return;
         }
         if let Err(message) = self.apply_pending_settings() {
@@ -2765,17 +3201,10 @@ impl NativeShellApp {
         }
     }
 
-    /// Adds a library VM copied from the selected one and selects it. Its file
-    /// is written at once, so it is there at the next launch. Refused while
-    /// the machine runs or is starting, when the new VM could not be selected.
+    /// Adds a library VM copied from the selected one and selects it, whether
+    /// or not a VM runs; the copy is off. Its file is written at once, so it
+    /// is there at the next launch.
     fn add_vm_copying_selected(&mut self) {
-        let status = self.runtime_status();
-        if status.running || status.start_pending {
-            self.notify(ShellNotice::warning(
-                "Stop the running VM before adding a VM.",
-            ));
-            return;
-        }
         if let Err(message) = self.apply_pending_settings() {
             self.notify(ShellNotice::error(message));
             return;
@@ -2818,6 +3247,10 @@ impl NativeShellApp {
                 profile.origin = VmOrigin::Library(stem.clone());
                 profile.file = Some(VmFileContents::of(&profile.name, &profile.config));
                 profile.save_state = SaveState::Saved;
+                // The VM keeps its screen, its console and any run it has:
+                // its session moves to the VM's new identity.
+                self.sessions
+                    .rekey(&VmOrigin::Launch, VmOrigin::Library(stem.clone()));
                 self.chrome.vm_library[index] = self.profiles[index].library_entry();
                 self.notify(ShellNotice::info(format!(
                     "Saved {} to the VM library.",
@@ -2829,17 +3262,18 @@ impl NativeShellApp {
         }
     }
 
-    /// Removes the selected VM and, for a library VM, its file. The VM goes as
+    /// Removes the selected VM and, for a library VM, its file. A VM that
+    /// runs or is about to is refused, with a notice naming it: once it was
+    /// gone, nothing would show its run or stop it. Otherwise the VM goes as
     /// it stands: nothing about it is validated or written first, so a VM
     /// whose settings no longer apply — a disk image that is gone, an empty
     /// BIOS path — is still deleted, and its unsaved edits go with it. A
     /// refresh error outranks a `remember` warning, so the refresh comes last.
     fn delete_selected_profile(&mut self) {
-        let status = self.runtime_status();
-        if status.running || status.start_pending {
-            self.notify(ShellNotice::warning(
-                "Stop the running VM before deleting it.",
-            ));
+        let vm = self.shown_vm();
+        if self.sessions.is_live(&vm) {
+            let message = format!("Stop {} before deleting it.", self.vm_name(&vm));
+            self.notify(ShellNotice::warning(message));
             return;
         }
         if self.profiles.len() == 1 {
@@ -2854,7 +3288,8 @@ impl NativeShellApp {
                 return;
             }
         }
-        self.profiles.remove(removed);
+        let gone = self.profiles.remove(removed);
+        self.sessions.close(&gone.origin);
         if removed < self.chrome.vm_library.len() {
             self.chrome.vm_library.remove(removed);
         }
@@ -2889,8 +3324,8 @@ impl NativeShellApp {
 
     /// Runs the step waiting for confirmation, if any. A delete or an
     /// overwrite whose VM is no longer the selected one does nothing and
-    /// says so. An agreed overwrite is kept for the session, and the
-    /// power-on it stopped runs.
+    /// says so. The power-on an agreed overwrite stopped runs, and the
+    /// answer is kept for the session once that power-on is sent.
     fn confirm_pending(&mut self) {
         match self.pending_confirm.take() {
             None => {}
@@ -2910,8 +3345,7 @@ impl NativeShellApp {
                 path,
             }) => {
                 if self.is_selected(index, &origin) {
-                    self.overwrite_confirmed.extend([path]);
-                    self.start_vm();
+                    self.start_vm_answered(Some(path));
                 } else {
                     self.notify(ShellNotice::warning(
                         "Another VM was selected while the power-on waited; nothing was started.",
@@ -3004,6 +3438,210 @@ impl NativeShellApp {
         }
     }
 
+    /// A close was asked for while VMs run (a desktop's window close, the VM
+    /// bar's Quit on a desktop or a phone, the phone's Back): carries out the
+    /// remembered choice, or opens the question.
+    pub(crate) fn close_requested(&mut self) {
+        self.carry_out(self.close_choice);
+    }
+
+    /// A close of the window that eframe was asked for this frame — a
+    /// desktop's close button or taskbar Close window, the VM bar's Quit —
+    /// taken over as `platform` takes it. While VMs run, it is cancelled and
+    /// goes to `close_requested`, and on a desktop a question it opens in a
+    /// window that is not shown brings the window back, so it can be
+    /// answered. With no VM live, the app quits as `platform` quits
+    /// (`close_step`): a desktop's close goes ahead, and a phone's is
+    /// cancelled, its app going to the background instead, since it never
+    /// ends its own loop.
+    fn take_over_close(&mut self, ctx: &egui::Context, platform: ClosePlatform) {
+        if !ctx.input(|input| input.viewport().close_requested()) {
+            return;
+        }
+        if self.sessions.any_live() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.close_requested();
+            match platform {
+                ClosePlatform::Desktop => {
+                    let shown = ctx.input(|input| input.viewport().visible().unwrap_or(true));
+                    if self.close_question.is_some() && !shown {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                    }
+                }
+                ClosePlatform::Phone => {}
+            }
+            return;
+        }
+        match close_step(platform, CloseAction::Quit) {
+            WindowStep::CloseTheWindow => {}
+            WindowStep::LeaveTheScreen => {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                self.carry_out(CloseChoice::StopAndQuit);
+            }
+        }
+    }
+
+    /// What the last close decided, once; `perform_close_action` carries it
+    /// out.
+    pub(crate) fn take_close_action(&mut self) -> Option<CloseAction> {
+        self.close_action.take()
+    }
+
+    /// The question a close asks while VMs run: hide the app, stop the VMs
+    /// and quit, or stay. Escape or a click outside is Cancel. Once no VM
+    /// runs or is about to, there is nothing to ask, and the question goes
+    /// as Cancel would: the app stays open, to be closed again.
+    fn draw_close_question(&mut self, ctx: &egui::Context) {
+        if self.close_question.is_none() {
+            return;
+        }
+        // The running VMs' names are read before the question is borrowed.
+        let mut names: Vec<String> = self
+            .sessions
+            .live_vms()
+            .iter()
+            .map(|vm| self.vm_name(vm).to_owned())
+            .collect();
+        if names.is_empty() {
+            self.cancel_close_question();
+            return;
+        }
+        names.sort();
+        let Some(question) = &mut self.close_question else {
+            return;
+        };
+        let mut answer = None;
+        let modal = egui::Modal::new(egui::Id::new("close_question")).show(ctx, |ui| {
+            ui.set_max_width(420.0);
+            ui.label(
+                RichText::new("VMs are still running")
+                    .size(TEXT_TITLE)
+                    .strong(),
+            );
+            ui.label(format!(
+                "{} will keep running if the app is hidden.",
+                names.join(", ")
+            ));
+            ui.checkbox(&mut question.remember, "Remember my choice");
+            ui.horizontal(|ui| {
+                if ui.button("Hide").clicked() {
+                    answer = Some(CloseAnswer::Hide);
+                }
+                if ui.button("Stop VMs and quit").clicked() {
+                    answer = Some(CloseAnswer::StopAndQuit);
+                }
+                if ui.button("Cancel").clicked() {
+                    answer = Some(CloseAnswer::Cancel);
+                }
+            });
+        });
+        let remember = question.remember;
+        if answer.is_none() && modal.should_close() {
+            answer = Some(CloseAnswer::Cancel);
+        }
+        let choice = match answer {
+            None => return,
+            Some(CloseAnswer::Cancel) => {
+                self.cancel_close_question();
+                return;
+            }
+            Some(CloseAnswer::Hide) => CloseChoice::Hide,
+            Some(CloseAnswer::StopAndQuit) => CloseChoice::StopAndQuit,
+        };
+        self.close_question = None;
+        if remember {
+            self.remember_close_choice(choice);
+        }
+        self.carry_out(choice);
+    }
+
+    /// The close question goes unanswered: nothing is decided, nothing
+    /// remembered, and the app stays as it is.
+    fn cancel_close_question(&mut self) {
+        self.close_question = None;
+    }
+
+    /// Carries out a close `choice` once it is made: Hide and Quit are
+    /// performed after it (`perform_close_action`). Asking opens the
+    /// question; one already open stays as it is, its checkbox included.
+    fn carry_out(&mut self, choice: CloseChoice) {
+        match choice {
+            CloseChoice::Ask => {
+                if self.close_question.is_none() {
+                    self.close_question = Some(CloseQuestion { remember: false });
+                }
+            }
+            CloseChoice::Hide => self.close_action = Some(CloseAction::Hide),
+            CloseChoice::StopAndQuit => {
+                self.sessions.stop_all();
+                self.close_action = Some(CloseAction::Quit);
+            }
+        }
+    }
+
+    /// Keeps `choice` for every later close, here and in the library folder.
+    /// A record that cannot be written leaves it kept here only, until the
+    /// app closes.
+    fn remember_close_choice(&mut self, choice: CloseChoice) {
+        self.close_choice = choice;
+        if let Err(error) = self.library.remember_close_choice(choice) {
+            self.notify(ShellNotice::warning(format!(
+                "Your choice was not saved for the next launch: {error}"
+            )));
+        }
+    }
+
+    /// Carries out what the last close decided, as `platform` carries it out
+    /// (`close_step`). Leaving the screen is the platform's own, and
+    /// `leave_the_screen` does it. Closing the window goes through eframe:
+    /// every VM was asked to stop when the choice was made, so the next
+    /// frame's `logic` finds none live and lets the close through.
+    pub(crate) fn perform_close_action<L>(
+        &mut self,
+        ctx: &egui::Context,
+        platform: ClosePlatform,
+        leave_the_screen: L,
+    ) where
+        L: FnOnce(),
+    {
+        match self
+            .take_close_action()
+            .map(|action| close_step(platform, action))
+        {
+            None => {}
+            Some(WindowStep::LeaveTheScreen) => leave_the_screen(),
+            Some(WindowStep::CloseTheWindow) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+        }
+    }
+
+    /// The About window, with what closing does while VMs run. A choice
+    /// picked there is kept at once (`remember_close_choice`).
+    fn draw_about_window(&mut self, ctx: &egui::Context) {
+        if !self.chrome.show_about {
+            return;
+        }
+        // The window's close button writes `open`, and its contents use
+        // `self`: the two borrows cannot overlap, so the window closes
+        // through a copy, written back once it is drawn.
+        let mut open = self.chrome.show_about;
+        about_window(&mut open).show(ctx, |ui| {
+            draw_about_text(ui);
+            ui.separator();
+            ui.label(RichText::new("When closing with VMs running").color(TEXT_MUTED));
+            let mut choice = self.close_choice;
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut choice, CloseChoice::Ask, "Ask");
+                ui.selectable_value(&mut choice, CloseChoice::Hide, "Hide");
+                ui.selectable_value(&mut choice, CloseChoice::StopAndQuit, "Stop VMs and quit");
+            });
+            if choice != self.close_choice {
+                self.remember_close_choice(choice);
+            }
+        });
+        self.chrome.show_about = open;
+    }
+
     fn delete_broken_file(&mut self, path: &Path) {
         match self.library.delete_file(path) {
             Ok(()) => self.broken_files.retain(|file| file.path != path),
@@ -3038,10 +3676,24 @@ impl NativeShellApp {
 
     /// Powers on the selected VM: its edits are applied and written first,
     /// then a VM that lacks a BIOS path or a medium to boot from is refused
-    /// with a notice naming what is missing, and a startup-disk creation that
-    /// would erase an existing file is put to the user before anything
-    /// starts, so a power-on that stops at either has still written the VM.
+    /// with a notice naming what is missing, a hard disk another running VM
+    /// uses is refused with a notice naming that VM, and a startup-disk
+    /// creation that would erase an existing file is put to the user, all
+    /// before anything starts, so a power-on that stops at any of them has
+    /// still written the VM. A disk in use is refused before the question,
+    /// so nothing is asked, or agreed, about erasing a file another VM
+    /// writes to. A VM set to the hypervisor while another VM holds it runs
+    /// on the interpreter, says so, and keeps its setting.
     fn start_vm(&mut self) {
+        self.start_vm_answered(None);
+    }
+
+    /// `start_vm` for a power-on an overwrite answer lets through: `agreed`
+    /// is the existing file the user has just agreed to have erased. It is
+    /// not asked about again, and it is kept as agreed for the session once
+    /// the power-on is sent and only then: a power-on refused or not sent
+    /// erases nothing, so the next one asks again.
+    fn start_vm_answered(&mut self, agreed: Option<PathBuf>) {
         let snapshot = self.runtime_status();
         if snapshot.running {
             self.chrome.go_to(ShellPage::Console);
@@ -3060,30 +3712,91 @@ impl NativeShellApp {
             self.notify(ShellNotice::warning(gap.notice()));
             return;
         }
-        if let Some(path) = self.unconfirmed_overwrite() {
+        let vm = self.shown_vm();
+        let name = HeldBy {
+            name: self.vm_name(&vm).to_owned(),
+        };
+        let mut config = self.config.clone();
+        // A hard disk has one running writer: a second would corrupt it. It
+        // is taken before the overwrite question, so a disk another VM uses
+        // is refused before anything is asked about erasing it.
+        let disk = match &config.disk {
+            None => None,
+            Some(disk) => match self.take_disk(&disk.path, name.clone()) {
+                Ok(hold) => Some(hold),
+                Err(holder) => {
+                    self.notify(ShellNotice::warning(disk_in_use(&disk.path, &holder)));
+                    return;
+                }
+            },
+        };
+        if let Some(path) = self
+            .unconfirmed_overwrite()
+            .filter(|path| agreed.as_ref() != Some(path))
+        {
             let index = self.chrome.selected_vm();
             self.pending_confirm = Some(PendingConfirm::OverwriteDisk {
                 index,
                 origin: self.profiles[index].origin.clone(),
                 path,
             });
+            // The disk goes back as this returns. The question is modal, so
+            // no other power-on can take the disk before the answer, and the
+            // power-on the answer lets through takes it again.
             return;
         }
-        self.overwrite_confirmed
-            .extend(self.overwrite_with_nothing_to_erase());
-        if let Ok(mut display) = self.shared.lock() {
-            display.start_pending = true;
+        // One VM at a time runs on the hypervisor; another runs on the
+        // interpreter for this power-on, and its setting stays as it is.
+        let hypervisor = match config.engine {
+            crate::config::Engine::Interpreter => None,
+            crate::config::Engine::Whp => {
+                match self.holdings.take(Exclusive::Hypervisor, name.clone()) {
+                    Ok(hold) => Some(hold),
+                    Err(holder) => {
+                        config.engine = crate::config::Engine::Interpreter;
+                        self.notify(ShellNotice::warning(format!(
+                            "{} runs on the interpreter: {} is using the hypervisor.",
+                            name.name, holder.name
+                        )));
+                        None
+                    }
+                }
+            }
+        };
+        // A file this power-on's overwrite creation makes, with nothing there
+        // to erase yet; read now, before the run makes it.
+        let nothing_to_erase = self.overwrite_with_nothing_to_erase();
+        // The engine the run uses, which the shell names while the VM is live.
+        self.sessions.open(&vm).set_run_engine(config.engine);
+        let display = self.shown_display();
+        if let Ok(mut shown) = display.lock() {
+            // The power-on lowers the stop its VM's last run left raised. The
+            // run never lowers it at its start, so a stop raised from here
+            // on, before the run begins, is honoured.
+            shown.stop_flag.store(false, Ordering::Relaxed);
+            shown.start_pending = true;
         }
-        match self
-            .command_tx
-            .send(NativeEmulatorCommand::Start(self.config.clone()))
-        {
+        match self.command_tx.send(NativeEmulatorCommand::Start(StartRun {
+            display: Arc::clone(&display),
+            config,
+            holds: RunHolds {
+                hypervisor,
+                disk,
+                alive: self.keep_alive.take(),
+            },
+        })) {
             Ok(()) => {
+                // The overwrite creations this power-on settles for the
+                // session: the file just agreed to, and the one made new.
+                self.overwrite_confirmed.extend(agreed);
+                self.overwrite_confirmed.extend(nothing_to_erase);
                 self.chrome.go_to(ShellPage::Console);
             }
+            // The Start comes back in the error, and what it holds is given
+            // back as the error is dropped.
             Err(_) => {
-                if let Ok(mut display) = self.shared.lock() {
-                    display.start_pending = false;
+                if let Ok(mut shown) = display.lock() {
+                    shown.start_pending = false;
                 }
                 self.notify(ShellNotice::error(
                     "Emulator worker is not available. Restart the application.",
@@ -3096,7 +3809,7 @@ impl NativeShellApp {
             return;
         }
 
-        if let Ok(mut display) = self.shared.lock() {
+        if let Ok(mut display) = self.shown_display().lock() {
             display.stop_flag.store(true, Ordering::Relaxed);
             display.reset_requested = false;
         }
@@ -3104,7 +3817,7 @@ impl NativeShellApp {
 
     /// How the phone draws this frame: see `android_support::console_view`.
     /// Only a notice the phone shows holds the shell's bars.
-    #[cfg(target_os = "android")]
+    #[cfg(any(target_os = "android", test))]
     fn console_view(&self) -> crate::android_support::ConsoleView {
         use crate::android_support::{console_view, MachineActivity, NoticeWaiting};
         let notice = match &self.shell_notice {
@@ -3127,11 +3840,15 @@ impl NativeShellApp {
         } else {
             rusty_box::gui::DisplayScale::Fit
         };
-        self.emulator.set_display_scale(scale);
+        let vm = self.shown_vm();
+        let console = self.sessions.open(&vm).console();
+        console.set_display_scale(scale);
         let area = ui.max_rect();
-        self.emulator.ui_embedded_with_serial(ui, frame, false, None);
+        console.ui_embedded_with_serial(ui, frame, false, None);
 
         let ctx = ui.ctx().clone();
+        // A tap that opens the menu shows it from its top.
+        let mut scroll = MenuScroll::Kept;
         egui::Area::new(egui::Id::new("full_screen_menu_button"))
             .fixed_pos(area.left_top() + egui::vec2(SPACE_GROUP, SPACE_GROUP))
             .order(egui::Order::Foreground)
@@ -3142,84 +3859,203 @@ impl NativeShellApp {
                     .min_size(egui::vec2(FULL_SCREEN_BUTTON_SIZE, FULL_SCREEN_BUTTON_SIZE));
                 if ui.add(button).clicked() {
                     self.full_screen_menu_open = !self.full_screen_menu_open;
+                    scroll = MenuScroll::Top;
                 }
             });
         if self.full_screen_menu_open {
-            self.draw_full_screen_menu(&ctx, area);
+            self.draw_full_screen_menu(&ctx, area, scroll);
         }
     }
 
     /// The full-screen console's menu: the machine's state and rate, the key
-    /// pad, the verbs that act on the guest, the fit or stretch choice, and
-    /// the way back to the shell with the machine left running.
+    /// pad, the verbs that act on the guest, the fit or stretch choice, the
+    /// pointer speed, the way back to the shell with the machine left
+    /// running, and last a switch to each other VM that runs or is about to,
+    /// so the menu's own items keep their places however many VMs run. Its
+    /// list scrolls whenever it does not fit inside `area`, so on a
+    /// landscape phone nothing in it is out of reach, and it opens at its
+    /// top (`show_full_screen_menu`).
     #[cfg(target_os = "android")]
-    fn draw_full_screen_menu(&mut self, ctx: &egui::Context, area: egui::Rect) {
+    fn draw_full_screen_menu(&mut self, ctx: &egui::Context, area: egui::Rect, scroll: MenuScroll) {
         let status = self.runtime_status();
         let badge = shell_state_badge(&status, self.has_error_notice());
-        let below_button = SPACE_GROUP + FULL_SCREEN_BUTTON_SIZE + SPACE_ITEM;
-        egui::Window::new("full_screen_menu")
-            .title_bar(false)
-            .resizable(false)
-            .collapsible(false)
-            .fixed_pos(area.left_top() + egui::vec2(SPACE_GROUP, below_button))
-            .constrain_to(area)
-            .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    status_dot(ui, badge.color);
-                    ui.label(status_text(badge.label).color(badge.color));
-                    ui.label(status_text("·").color(TEXT_MUTED));
-                    ui.label(status_text(engine_label(self.settings.engine)).color(TEXT_PRIMARY));
-                    ui.label(status_text("·").color(TEXT_MUTED));
-                    ui.label(status_text(format_ips_u32(status.ips)).color(ACCENT_BLUE));
-                });
-                ui.separator();
-                if ui.button("Keys").clicked() {
-                    self.keypad_requested = true;
-                    self.full_screen_menu_open = false;
-                }
-                if ui
-                    .add_enabled(status.running, egui::Button::new("Ctrl+Alt+Del"))
-                    .clicked()
-                {
-                    self.emulator.send_ctrl_alt_del();
-                }
-                let mut stretch = self.settings.console_stretch;
-                if ui.checkbox(&mut stretch, "Stretch to fill").changed() {
-                    self.settings.console_stretch = stretch;
-                    if let Err(message) = self.apply_pending_settings() {
-                        self.notify(ShellNotice::error(message));
-                    }
-                }
-                let mut speed = self.settings.pointer_speed.percent();
-                let slider = egui::Slider::new(&mut speed, crate::config::PointerSpeed::RANGE_PERCENT)
-                    .text("Pointer speed")
-                    .suffix(" %");
-                if ui.add(slider).changed() {
-                    self.settings.pointer_speed = crate::config::PointerSpeed::from_percent(speed);
-                    if let Err(message) = self.apply_pending_settings() {
-                        self.notify(ShellNotice::error(message));
-                    }
-                }
-                ui.separator();
-                if ui
-                    .add_enabled(status.running, egui::Button::new("■ Power off"))
-                    .clicked()
-                {
-                    self.request_power_off();
-                    self.full_screen_menu_open = false;
-                }
-                if ui
-                    .add_enabled(status.running, egui::Button::new("↻ Restart"))
-                    .clicked()
-                {
-                    self.request_reset();
-                    self.full_screen_menu_open = false;
-                }
-                if ui.button("Exit to shell").clicked() {
-                    self.chrome.go_to(ShellPage::Home);
-                    self.full_screen_menu_open = false;
-                }
+        let vm = self.shown_vm();
+        show_full_screen_menu(ctx, area, scroll, |ui| {
+            ui.horizontal(|ui| {
+                status_dot(ui, badge.color);
+                ui.label(status_text(badge.label).color(badge.color));
+                ui.label(status_text("·").color(TEXT_MUTED));
+                ui.label(status_text(engine_label(self.shown_engine())).color(TEXT_PRIMARY));
+                ui.label(status_text("·").color(TEXT_MUTED));
+                ui.label(status_text(format_ips_u32(status.ips)).color(ACCENT_BLUE));
             });
+            ui.separator();
+            if ui.button("Keys").clicked() {
+                self.keypad_requested = true;
+                self.full_screen_menu_open = false;
+            }
+            if ui
+                .add_enabled(status.running, egui::Button::new("Ctrl+Alt+Del"))
+                .clicked()
+            {
+                self.sessions.open(&vm).console().send_ctrl_alt_del();
+            }
+            let mut stretch = self.settings.console_stretch;
+            if ui.checkbox(&mut stretch, "Stretch to fill").changed() {
+                self.settings.console_stretch = stretch;
+                if let Err(message) = self.apply_pending_settings() {
+                    self.notify(ShellNotice::error(message));
+                }
+            }
+            let mut speed = self.settings.pointer_speed.percent();
+            let slider = egui::Slider::new(&mut speed, crate::config::PointerSpeed::RANGE_PERCENT)
+                .text("Pointer speed")
+                .suffix(" %");
+            if ui.add(slider).changed() {
+                self.settings.pointer_speed = crate::config::PointerSpeed::from_percent(speed);
+                if let Err(message) = self.apply_pending_settings() {
+                    self.notify(ShellNotice::error(message));
+                }
+            }
+            ui.separator();
+            if ui
+                .add_enabled(status.running, egui::Button::new("■ Power off"))
+                .clicked()
+            {
+                self.request_power_off();
+                self.full_screen_menu_open = false;
+            }
+            if ui
+                .add_enabled(status.running, egui::Button::new("↻ Restart"))
+                .clicked()
+            {
+                self.request_reset();
+                self.full_screen_menu_open = false;
+            }
+            if ui.button("Exit to shell").clicked() {
+                self.chrome.go_to(ShellPage::Home);
+                self.full_screen_menu_open = false;
+            }
+            let targets = self.switch_targets();
+            if !targets.is_empty() {
+                ui.separator();
+                ui.label(status_text("Running VMs").color(TEXT_MUTED));
+                for target in targets {
+                    if ui.button(&target.name).clicked() {
+                        self.switch_to(target);
+                    }
+                }
+            }
+        });
+    }
+
+    /// The VMs that run or are about to, other than the selected one, in
+    /// library order: what the full-screen console's menu offers.
+    #[cfg(any(target_os = "android", test))]
+    fn switch_targets(&self) -> Vec<SwitchTarget> {
+        let shown = self.chrome.selected_vm();
+        self.profiles
+            .iter()
+            .enumerate()
+            .filter(|(index, profile)| *index != shown && self.sessions.is_live(&profile.origin))
+            .map(|(index, profile)| SwitchTarget {
+                index,
+                name: profile.name.clone(),
+            })
+            .collect()
+    }
+
+    /// Shows `target`'s console, as a tap on it in the full-screen menu
+    /// asks: the menu closes, the VM is selected, and the shell goes on to
+    /// its Console page, since selecting a different VM lands on its Home
+    /// page (`Destination::select_vm`). The VM runs or is about to, so the
+    /// phone draws its console full screen unless a notice waits.
+    #[cfg(any(target_os = "android", test))]
+    fn switch_to(&mut self, target: SwitchTarget) {
+        self.full_screen_menu_open = false;
+        self.select_profile(target.index);
+        self.chrome.go_to(ShellPage::Console);
+    }
+
+    /// The phone's Back, pressed with `host` open over the shell: puts away
+    /// the topmost thing open (`back_press`), or, with nothing open, is a
+    /// close of the app, which goes to `close_requested` while a VM runs or
+    /// is about to and does nothing otherwise. Answers the host's window
+    /// when that is the topmost, for the host to put away.
+    #[cfg(any(target_os = "android", test))]
+    pub(crate) fn back_pressed(
+        &mut self,
+        ctx: &egui::Context,
+        host: &[HostWindow],
+    ) -> Option<HostWindow> {
+        let mut open = self.open_overlays(ctx);
+        open.extend(host.iter().copied().map(Overlay::Host));
+        match back_press(&open) {
+            BackPress::PutAway(Overlay::Host(window)) => Some(window),
+            BackPress::PutAway(Overlay::Shell(overlay)) => {
+                self.put_away(overlay, ctx);
+                None
+            }
+            BackPress::Close => {
+                if self.any_vm_live() {
+                    self.close_requested();
+                }
+                None
+            }
+        }
+    }
+
+    /// What of the shell's own the phone shows open this frame: the close
+    /// question, a confirmation and an open popup whatever the page; over
+    /// the full-screen console its menu; with the shell's bars, the floppy
+    /// maker, the About window and the VM list, which the full-screen
+    /// console does not draw.
+    #[cfg(any(target_os = "android", test))]
+    fn open_overlays(&self, ctx: &egui::Context) -> Vec<Overlay> {
+        let mut open = Vec::new();
+        if self.close_question.is_some() {
+            open.push(ShellOverlay::CloseQuestion);
+        }
+        if self.pending_confirm.is_some() {
+            open.push(ShellOverlay::Confirmation);
+        }
+        if egui::Popup::is_any_open(ctx) {
+            open.push(ShellOverlay::Popup);
+        }
+        match self.console_view() {
+            crate::android_support::ConsoleView::FullScreen => {
+                if self.full_screen_menu_open {
+                    open.push(ShellOverlay::ConsoleMenu);
+                }
+            }
+            crate::android_support::ConsoleView::Shell => {
+                if self.floppy_maker_open {
+                    open.push(ShellOverlay::FloppyMaker);
+                }
+                if self.chrome.show_about {
+                    open.push(ShellOverlay::About);
+                }
+                if self.chrome.library == Drawer::Open {
+                    open.push(ShellOverlay::VmList);
+                }
+            }
+        }
+        open.into_iter().map(Overlay::Shell).collect()
+    }
+
+    /// Puts `overlay` away, as its own Cancel or close button does: the
+    /// close question and a confirmation are cancelled.
+    #[cfg(any(target_os = "android", test))]
+    fn put_away(&mut self, overlay: ShellOverlay, ctx: &egui::Context) {
+        match overlay {
+            ShellOverlay::CloseQuestion => self.cancel_close_question(),
+            ShellOverlay::Confirmation => self.cancel_pending(),
+            ShellOverlay::Popup => egui::Popup::close_all(ctx),
+            ShellOverlay::ConsoleMenu => self.full_screen_menu_open = false,
+            ShellOverlay::FloppyMaker => self.floppy_maker_open = false,
+            ShellOverlay::About => self.chrome.show_about = false,
+            ShellOverlay::VmList => self.chrome.library = Drawer::Closed,
+        }
     }
 
     /// Whether the full-screen menu asked for the key pad since the last call.
@@ -3233,7 +4069,7 @@ impl NativeShellApp {
             return;
         }
 
-        if let Ok(mut display) = self.shared.lock() {
+        if let Ok(mut display) = self.shown_display().lock() {
             display.stop_flag.store(true, Ordering::Relaxed);
             display.reset_requested = true;
         }
@@ -3369,37 +4205,59 @@ impl NativeShellApp {
         self.take_runtime_error_notice();
         #[cfg(target_os = "android")]
         {
-            self.emulator
+            let vm = self.shown_vm();
+            self.sessions
+                .open(&vm)
+                .console()
                 .set_pointer_speed(self.settings.pointer_speed.factor());
             if self.console_view() == crate::android_support::ConsoleView::FullScreen {
                 self.draw_full_screen_console(ui, frame);
                 return;
             }
             self.full_screen_menu_open = false;
-            self.emulator
+            self.sessions
+                .open(&vm)
+                .console()
                 .set_display_scale(rusty_box::gui::DisplayScale::Fit);
         }
 
         self.draw_vm_bar(ui);
-        if shell_should_draw_library(&self.chrome) {
-            self.draw_sidebar(ui);
-        }
+        self.draw_sidebar(ui);
         self.draw_status_strip(ui);
         self.draw_central(ui, frame);
         self.draw_floppy_maker(ui.ctx());
-        draw_about_window(ui.ctx(), &mut self.chrome);
+        self.draw_about_window(ui.ctx());
     }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 impl eframe::App for NativeShellApp {
+    /// A close of the window, read before each frame and, while a desktop's
+    /// window is minimized, in place of one: eframe draws no frame for a
+    /// minimized window and runs this alone, so a hidden app closed from the
+    /// taskbar is seen here too. The close is taken over as this platform
+    /// takes it (`take_over_close`). On a desktop, what it decided is
+    /// carried out before this returns; a phone's host carries it out itself,
+    /// with its own way to leave the screen (`AndroidShellApp::logic`).
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.take_over_close(ctx, THIS_PLATFORM);
+        #[cfg(not(target_os = "android"))]
+        self.perform_close_action(ctx, THIS_PLATFORM, || minimize_window(ctx));
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
         self.begin_frame();
-        self.handle_native_dropped_files(ui.ctx());
-        self.draw_pending_confirm(ui.ctx());
+        self.handle_native_dropped_files(&ctx);
+        self.draw_pending_confirm(&ctx);
+        self.draw_close_question(&ctx);
         self.draw_shell(ui, frame);
-        self.flush_when_window_focus_is_lost(ui.ctx());
-        self.flush_unsaved_when_idle(ui.ctx());
+        self.flush_when_window_focus_is_lost(&ctx);
+        self.flush_unsaved_when_idle(&ctx);
+        // An answer the close question got in this frame is carried out in
+        // this frame, so the click and what it leads to land together.
+        #[cfg(not(target_os = "android"))]
+        self.perform_close_action(&ctx, THIS_PLATFORM, || minimize_window(&ctx));
     }
 
     /// eframe's save, made when the window is taken away from the app — on
@@ -3425,17 +4283,19 @@ impl eframe::App for NativeShellApp {
         false
     }
 
-    /// The window is closing: every edit still only in memory is written.
+    /// The window is closing: every VM's run is asked to stop, and every edit
+    /// still only in memory is written.
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.sessions.stop_all();
         self.flush_unsaved();
     }
 }
 
 impl FloppyMaker {
-    /// The floppy maker's window, while `open`. Returns the image it made.
+    /// The floppy maker's window, while `open`. Its Create is left for the
+    /// shell (`create_requested`), which makes the image.
     #[cfg(feature = "gui-egui")]
-    fn ui_window(&mut self, ctx: &egui::Context, open: &mut bool) -> Option<CreatedImage> {
-        let mut created_image = None;
+    fn ui_window(&mut self, ctx: &egui::Context, open: &mut bool) {
         egui::Window::new("Create floppy image")
             .open(open)
             .collapsible(false)
@@ -3486,7 +4346,7 @@ impl FloppyMaker {
                     "Create floppy image"
                 };
                 if ui.add(primary_button(action)).clicked() {
-                    created_image = self.create_image();
+                    self.create_requested = true;
                 }
                 if let Some(status) = &self.status {
                     match status {
@@ -3499,7 +4359,6 @@ impl FloppyMaker {
                     }
                 }
             });
-        created_image
     }
 
     fn create_image(&mut self) -> Option<CreatedImage> {
@@ -4252,7 +5111,12 @@ impl WebShellApp {
                     if ui.button("+ New Disk").clicked() {
                         self.open_new_disk_sheet();
                     }
-                    ui.checkbox(&mut self.chrome.show_library, "Library");
+                    if ui
+                        .selectable_label(self.chrome.library == Drawer::Open, "Library")
+                        .clicked()
+                    {
+                        self.chrome.library = self.chrome.library.toggled();
+                    }
                     ui.checkbox(&mut self.chrome.show_serial, "Serial");
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.label(RichText::new("Rusty Box Web").strong().color(TEXT_PRIMARY));
@@ -4261,7 +5125,13 @@ impl WebShellApp {
             });
     }
 
+    /// The library's drawer, open or closed: its heading, search field and
+    /// group caption stay put while the VM rows scroll under them. A drag on
+    /// the drawer's edge opens or closes it in `chrome.library`, as the
+    /// toolbar's Library toggle does; a closed drawer leaves its grab handle
+    /// at the left edge.
     fn draw_library(&mut self, ui: &mut egui::Ui) {
+        let mut open = self.chrome.library == Drawer::Open;
         egui::Panel::left("web_vm_library")
             .resizable(true)
             .default_size(250.0)
@@ -4271,7 +5141,7 @@ impl WebShellApp {
                     .fill(BG_PANEL)
                     .inner_margin(egui::Margin::same(14)),
             )
-            .show(ui, |ui| {
+            .show_collapsible(ui, &mut open, |ui| {
                 ui.label(
                     RichText::new("Library")
                         .size(16.0)
@@ -4285,28 +5155,34 @@ impl WebShellApp {
                 ui.add_space(8.0);
                 ui.label(RichText::new("⏷ My Computer").color(TEXT_MUTED));
                 let visible = self.chrome.visible_vm_indices();
-                for index in visible {
-                    let clicked = {
-                        let entry = &self.chrome.vm_library[index];
-                        let selected = ui.selectable_label(
-                            self.chrome.selected_vm() == index,
-                            format!("  ▣ {}", entry.name),
-                        );
-                        if self.chrome.selected_vm() == index {
-                            ui.indent(format!("web_library_metadata_{index}"), |ui| {
-                                ui.label(metadata_text("Boot", &entry.boot));
-                                ui.label(metadata_text("Memory", &entry.memory));
-                                ui.label(metadata_text("Disk", &entry.disk));
-                                ui.label(metadata_text("CD/DVD", &entry.cdrom));
-                            });
+                egui::ScrollArea::vertical()
+                    .id_salt("web_vm_list")
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        for index in visible {
+                            let clicked = {
+                                let entry = &self.chrome.vm_library[index];
+                                let selected = ui.selectable_label(
+                                    self.chrome.selected_vm() == index,
+                                    format!("  ▣ {}", entry.name),
+                                );
+                                if self.chrome.selected_vm() == index {
+                                    ui.indent(format!("web_library_metadata_{index}"), |ui| {
+                                        ui.label(metadata_text("Boot", &entry.boot));
+                                        ui.label(metadata_text("Memory", &entry.memory));
+                                        ui.label(metadata_text("Disk", &entry.disk));
+                                        ui.label(metadata_text("CD/DVD", &entry.cdrom));
+                                    });
+                                }
+                                selected.clicked()
+                            };
+                            if clicked {
+                                self.chrome.destination = Destination::new(index, ShellPage::Home);
+                            }
                         }
-                        selected.clicked()
-                    };
-                    if clicked {
-                        self.chrome.destination = Destination::new(index, ShellPage::Home);
-                    }
-                }
+                    });
             });
+        self.chrome.library = if open { Drawer::Open } else { Drawer::Closed };
     }
 
     fn draw_status_strip(&mut self, ui: &mut egui::Ui) {
@@ -4362,10 +5238,15 @@ impl WebShellApp {
             });
         if self.floppy_maker_open {
             let mut open = true;
-            // The browser saves the floppy as a download; the shell has
-            // nothing to attach it to.
-            drop(self.floppy_maker.ui_window(ui.ctx(), &mut open));
+            self.floppy_maker.ui_window(ui.ctx(), &mut open);
             self.floppy_maker_open = open;
+            if std::mem::take(&mut self.floppy_maker.create_requested) {
+                // The browser saves the floppy as a download; the shell has
+                // nothing to attach it to, and no VM's disk to keep it off.
+                drop(self.floppy_maker.create_image());
+                // The next frame shows what became of the download.
+                ui.ctx().request_repaint();
+            }
         }
     }
 
@@ -4498,7 +5379,10 @@ impl WebShellApp {
                 };
                 let mut image_rect = None;
                 ui.centered_and_justified(|ui| {
-                    let response = ui.image(egui::load::SizedTexture::new(texture, size));
+                    let response = ui.add(
+                        egui::Image::new(egui::load::SizedTexture::new(texture, size))
+                            .sense(rusty_box::gui::host_input::GUEST_IMAGE_SENSE),
+                    );
                     image_rect = Some(response.rect);
                 });
                 if let Some(rect) = image_rect {
@@ -4763,9 +5647,7 @@ impl eframe::App for WebShellApp {
 
         self.draw_menu_bar(ui);
         self.draw_toolbar(ui);
-        if shell_should_draw_library(&self.chrome) {
-            self.draw_library(ui);
-        }
+        self.draw_library(ui);
         self.draw_status_strip(ui);
         self.draw_central(ui);
         draw_about_window(ui.ctx(), &mut self.chrome);
@@ -4776,32 +5658,45 @@ impl eframe::App for WebShellApp {
     }
 }
 
+/// The browser shell's About window.
+#[cfg(target_arch = "wasm32")]
 fn draw_about_window(ctx: &egui::Context, chrome: &mut ShellChrome) {
     if !chrome.show_about {
         return;
     }
+    about_window(&mut chrome.show_about).show(ctx, draw_about_text);
+}
 
+/// The About window of every shell, shown while `open` holds; its close
+/// button clears `open`.
+fn about_window(open: &mut bool) -> egui::Window<'_> {
     egui::Window::new("About Rusty Box Workstation")
         .collapsible(false)
         .resizable(false)
-        .open(&mut chrome.show_about)
-        .show(ctx, |ui| {
-            ui.label(RichText::new("Rusty Box Workstation").size(TEXT_TITLE).strong());
-            ui.label("VMware-style shell for Rusty Box emulator sessions.");
-            ui.separator();
-            ui.label(metadata_text(
-                "Console",
-                "existing emulator display and keyboard path",
-            ));
-            ui.label(metadata_text(
-                "Images",
-                "bximage-backed hard disk and floppy creation",
-            ));
-            ui.label(metadata_text(
-                "Browser",
-                "upload ISO, download generated images",
-            ));
-        });
+        .open(open)
+}
+
+/// What the About window says in every shell.
+fn draw_about_text(ui: &mut egui::Ui) {
+    ui.label(
+        RichText::new("Rusty Box Workstation")
+            .size(TEXT_TITLE)
+            .strong(),
+    );
+    ui.label("VMware-style shell for Rusty Box emulator sessions.");
+    ui.separator();
+    ui.label(metadata_text(
+        "Console",
+        "existing emulator display and keyboard path",
+    ));
+    ui.label(metadata_text(
+        "Images",
+        "bximage-backed hard disk and floppy creation",
+    ));
+    ui.label(metadata_text(
+        "Browser",
+        "upload ISO, download generated images",
+    ));
 }
 
 #[cfg(target_os = "android")]
@@ -4841,7 +5736,7 @@ fn draw_u32_field(
     changed
 }
 
-#[cfg(not(target_os = "android"))]
+#[cfg(all(not(target_os = "android"), not(target_arch = "wasm32")))]
 fn draw_u32_field(
     ui: &mut egui::Ui,
     value: &mut u32,
@@ -4898,7 +5793,7 @@ fn draw_u64_field(
     changed
 }
 
-#[cfg(not(target_os = "android"))]
+#[cfg(all(not(target_os = "android"), not(target_arch = "wasm32")))]
 fn draw_u64_field(
     ui: &mut egui::Ui,
     value: &mut u64,
@@ -5093,6 +5988,7 @@ fn js_error(error: wasm_bindgen::JsValue) -> String {
 }
 
 /// What an engine is called in the window.
+#[cfg(not(target_arch = "wasm32"))]
 fn engine_label(engine: crate::config::Engine) -> &'static str {
     match engine {
         crate::config::Engine::Interpreter => "Interpreter",
@@ -5149,6 +6045,7 @@ mod tests {
             sync_realtime: false,
             smp_quantum: 16,
             cpuid_freq: rusty_box::CpuidFreq::None,
+            port_e9_hack: rusty_box::iodev::PortE9Hack::Off,
             max_instructions: u64::MAX,
             display: crate::args::DisplayBackend::Egui,
             bios: std::path::PathBuf::from("bios.bin"),
@@ -5236,11 +6133,7 @@ mod tests {
         NativeShellApp,
         std::sync::mpsc::Receiver<NativeEmulatorCommand>,
     ) {
-        let shared = Arc::new(Mutex::new(
-            rusty_box::gui::shared_display::SharedDisplay::new(),
-        ));
         let (command_tx, command_rx) = std::sync::mpsc::channel();
-        let emulator = rusty_box::gui::RustyBoxApp::new_embedded(Arc::clone(&shared));
         let start = crate::runner::ShellStart {
             library: scratch.library(),
             opening: launch.map_or(
@@ -5250,9 +6143,18 @@ mod tests {
             notice,
         };
         (
-            NativeShellApp::with_emulator(emulator, shared, command_tx, start),
+            NativeShellApp::with_commands(command_tx, start, AliveEffect::Nothing),
             command_rx,
         )
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    impl NativeShellApp {
+        /// The selected VM's console view, its session opened on first use.
+        fn shown_console(&mut self) -> &mut rusty_box::gui::RustyBoxApp {
+            let vm = self.shown_vm();
+            self.sessions.open(&vm).console()
+        }
     }
 
     /// A shell opened over a scratch library holding one VM, "Alpine", and
@@ -5267,6 +6169,132 @@ mod tests {
         scratch.library().create("Alpine", &test_resolved_config()).expect("seed");
         let (app, command_rx) = native_test_app_over(&scratch, None, None);
         (app, command_rx, scratch)
+    }
+
+    /// A shell opened over a scratch library, with the channel its power-ons
+    /// are sent on and the library folder that must outlive it.
+    #[cfg(not(target_arch = "wasm32"))]
+    struct TestShell {
+        app: NativeShellApp,
+        commands: std::sync::mpsc::Receiver<NativeEmulatorCommand>,
+        scratch: ScratchLibrary,
+    }
+
+    /// A shell over a scratch library holding "Alpine" and "Windows XP", in
+    /// that order, with Alpine selected.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn two_vm_app() -> TestShell {
+        let scratch = ScratchLibrary::new();
+        scratch.library().create("Alpine", &test_resolved_config()).expect("seed");
+        scratch.library().create("Windows XP", &test_resolved_config()).expect("seed");
+        let (app, commands) = native_test_app_over(&scratch, None, None);
+        TestShell {
+            app,
+            commands,
+            scratch,
+        }
+    }
+
+    /// A shell over a scratch library listing "Windows XP", "DLX" and
+    /// "Alpine", in that order, the reverse of their names' order, with
+    /// Windows XP selected. Each VM was made as "VM 1", "VM 2" or "VM 3" and
+    /// renamed since, and a renamed VM keeps the file it was made in, whose
+    /// name places it in the list.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn three_vm_app() -> TestShell {
+        let scratch = ScratchLibrary::new();
+        let library = scratch.library();
+        create_renamed(&library, "VM 1", "Windows XP");
+        create_renamed(&library, "VM 2", "DLX");
+        create_renamed(&library, "VM 3", "Alpine");
+        let (app, commands) = native_test_app_over(&scratch, None, None);
+        TestShell {
+            app,
+            commands,
+            scratch,
+        }
+    }
+
+    /// Adds a VM to `library` made as `made_as` and renamed `name` since, as
+    /// the shell writes a rename: its file keeps the stem `made_as` gave it.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn create_renamed(library: &crate::library::VmLibrary, made_as: &str, name: &str) {
+        let stem = library
+            .create(made_as, &test_resolved_config())
+            .expect("seed");
+        library
+            .save(&stem, name, &test_resolved_config())
+            .expect("rename");
+    }
+
+    /// `two_vm_app`, both VMs set to run on `engine`.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn two_vm_app_with_engine(engine: crate::config::Engine) -> TestShell {
+        let scratch = ScratchLibrary::new();
+        let mut config = test_resolved_config();
+        config.engine = engine;
+        scratch.library().create("Alpine", &config).expect("seed");
+        scratch.library().create("Windows XP", &config).expect("seed");
+        let (app, commands) = native_test_app_over(&scratch, None, None);
+        TestShell {
+            app,
+            commands,
+            scratch,
+        }
+    }
+
+    /// `two_vm_app`, both VMs on one hard disk: the same startup-disk path, a
+    /// file not made yet (a plain creation, which erases nothing).
+    #[cfg(not(target_arch = "wasm32"))]
+    fn two_vm_app_sharing_a_disk() -> TestShell {
+        let scratch = ScratchLibrary::new();
+        let disk = unique_temp_path("rusty-box-gui-shared-disk");
+        let mut config = test_resolved_config();
+        config.disk = Some(crate::config::ResolvedDisk {
+            path: disk.clone(),
+            geometry: crate::args::DiskGeometry {
+                cylinders: 20,
+                heads: 16,
+                sectors_per_track: 63,
+            },
+            channel: 0,
+            drive: 0,
+            creation: Some(crate::config::ResolvedDiskCreation {
+                path: disk,
+                size: rusty_box_bximage::ImageSize::mib(10),
+                overwrite: false,
+            }),
+        });
+        scratch.library().create("Alpine", &config).expect("seed");
+        scratch.library().create("Windows XP", &config).expect("seed");
+        let (app, commands) = native_test_app_over(&scratch, None, None);
+        TestShell {
+            app,
+            commands,
+            scratch,
+        }
+    }
+
+    /// Powers the selected VM on and plays the launcher's part: takes the
+    /// Start and marks its display running, no longer starting, in one lock
+    /// as `prepare_egui_run` does. Keep the returned run alive for as long as
+    /// the VM should hold what it took; dropping it gives the holds back, as
+    /// the run thread does once its machine is gone.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn power_on(
+        app: &mut NativeShellApp,
+        command_rx: &std::sync::mpsc::Receiver<NativeEmulatorCommand>,
+    ) -> StartRun {
+        app.start_vm();
+        let Ok(NativeEmulatorCommand::Start(start)) = command_rx.try_recv() else {
+            panic!("a power-on sends a Start");
+        };
+        {
+            let mut display = start.display.lock().unwrap();
+            display.start_pending = false;
+            display.emu_running = true;
+        }
+        start
     }
 
     /// What the start could not do is the first thing the shell shows.
@@ -5730,7 +6758,7 @@ mod tests {
         assert_eq!(memory_in_file(&scratch), 512);
         assert!(matches!(
             command_rx.try_recv(),
-            Ok(NativeEmulatorCommand::Start(config)) if config.memory_mib == 512
+            Ok(NativeEmulatorCommand::Start(start)) if start.config.memory_mib == 512
         ));
     }
 
@@ -6002,7 +7030,7 @@ mod tests {
         assert_eq!(memory_in_file(&scratch), 512);
         assert!(matches!(
             command_rx.try_recv(),
-            Ok(NativeEmulatorCommand::Start(config)) if config.memory_mib == 512
+            Ok(NativeEmulatorCommand::Start(start)) if start.config.memory_mib == 512
         ));
     }
 
@@ -6162,7 +7190,7 @@ mod tests {
             ))
         );
         assert!(command_rx.try_recv().is_err());
-        assert!(!app.shared.lock().unwrap().start_pending);
+        assert!(!app.shown_display().lock().unwrap().start_pending);
     }
 
     /// The blank "New VM" lacks both, and its refusal names both, pointing
@@ -6394,7 +7422,7 @@ mod tests {
         // it at no later one this session, so the next power-on asks nothing
         // either.
         write_test_disk(&disk);
-        app.shared.lock().unwrap().start_pending = false;
+        app.shown_display().lock().unwrap().start_pending = false;
         app.start_vm();
 
         assert_eq!(app.pending_confirm, None);
@@ -6427,7 +7455,7 @@ mod tests {
         assert!(!app.overwrite_confirmed.contains(&disk));
 
         write_test_disk(&disk);
-        app.shared.lock().unwrap().start_pending = false;
+        app.shown_display().lock().unwrap().start_pending = false;
         if let Some(creation) = app.settings.disk_creation.as_mut() {
             creation.overwrite = true;
         }
@@ -6477,12 +7505,48 @@ mod tests {
 
         // Powered off again. The runner recreated the disk at the first
         // power-on and does not again this session, so nothing is asked.
-        app.shared.lock().unwrap().start_pending = false;
+        app.shown_display().lock().unwrap().start_pending = false;
         app.start_vm();
 
         assert_eq!(app.pending_confirm, None);
         assert!(matches!(command_rx.try_recv(), Ok(NativeEmulatorCommand::Start(_))));
         remove_test_file(&disk);
+    }
+
+    /// An overwrite answer counts once the power-on it lets through is sent:
+    /// a power-on that cannot be sent erased nothing, so the next one asks
+    /// again.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn an_overwrite_answer_whose_power_on_is_not_sent_is_asked_again() {
+        let scratch = ScratchLibrary::new();
+        let disk = unique_temp_path("rusty-box-gui-overwrite-unsent");
+        write_test_disk(&disk);
+        let (mut app, command_rx) =
+            native_test_app_over(&scratch, Some(overwriting_launch(&disk)), None);
+        app.start_vm();
+        let asked = PendingConfirm::OverwriteDisk {
+            index: 0,
+            origin: VmOrigin::Launch,
+            path: disk.clone(),
+        };
+        assert_eq!(app.pending_confirm, Some(asked.clone()));
+
+        // The launcher is gone, so the agreed power-on is not sent.
+        drop(command_rx);
+        app.confirm_pending();
+        assert_eq!(
+            app.shell_notice,
+            Some(ShellNotice::error(
+                "Emulator worker is not available. Restart the application."
+            ))
+        );
+
+        app.start_vm();
+
+        let asked_again = app.pending_confirm == Some(asked);
+        remove_test_file(&disk);
+        assert!(asked_again, "the question is asked again");
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -6528,22 +7592,6 @@ mod tests {
         remove_test_file(&disk);
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
-    #[test]
-    fn adding_a_vm_is_refused_while_the_vm_runs() {
-        let (mut app, _command_rx, scratch) = library_app();
-        app.shared.lock().unwrap().emu_running = true;
-
-        app.add_vm_copying_selected();
-
-        assert_eq!(app.profiles.len(), 1);
-        assert_eq!(scratch.toml_files(), ["alpine.toml"]);
-        assert_eq!(
-            app.shell_notice,
-            Some(ShellNotice::warning("Stop the running VM before adding a VM."))
-        );
-    }
-
     #[test]
     fn shell_starts_on_home_page() {
         let chrome = ShellChrome::default();
@@ -6570,17 +7618,8 @@ mod tests {
     }
 
     #[test]
-    fn shell_library_sidebar_is_visible_by_default() {
-        let chrome = ShellChrome::default();
-        assert!(chrome.show_library);
-    }
-
-    #[test]
-    fn shell_library_sidebar_respects_visibility_toggle() {
-        let mut chrome = ShellChrome::default();
-        assert!(shell_should_draw_library(&chrome));
-        chrome.show_library = false;
-        assert!(!shell_should_draw_library(&chrome));
+    fn the_library_drawer_opens_by_default() {
+        assert_eq!(ShellChrome::default().library, Drawer::Open);
     }
 
     #[test]
@@ -7054,7 +8093,7 @@ mod tests {
         app.start_vm();
 
         let command = command_rx.try_recv().expect("start command should be sent");
-        let NativeEmulatorCommand::Start(config) = command;
+        let NativeEmulatorCommand::Start(StartRun { config, .. }) = command;
         assert_eq!(config.memory_mib, 640);
         assert_eq!(config.host_memory_mib, 256);
         assert_eq!(config.ips, 123_000_000);
@@ -7100,23 +8139,690 @@ mod tests {
             app.floppy_maker.status,
             Some(CreatorStatus::Success("existing status".to_owned()))
         );
-        assert!(!app.shared.lock().unwrap().start_pending);
+        assert!(!app.shown_display().lock().unwrap().start_pending);
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn native_runtime_error_becomes_shell_notice() {
         let (mut app, _command_rx, _library) = native_test_app();
-        app.shared.lock().unwrap().runtime_error =
+        app.shown_display().lock().unwrap().runtime_error =
             Some("Emulator startup failed: BIOS missing".to_owned());
 
         app.take_runtime_error_notice();
 
         assert_eq!(
             app.shell_notice,
-            Some(ShellNotice::error("Emulator startup failed: BIOS missing"))
+            Some(ShellNotice::error(
+                "Rusty Box: Emulator startup failed: BIOS missing"
+            ))
         );
-        assert!(app.shared.lock().unwrap().runtime_error.is_none());
+        assert!(app.shown_display().lock().unwrap().runtime_error.is_none());
+    }
+
+    /// A run's error reaches the shell named by its VM.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_runtime_error_is_shown_with_its_vms_name() {
+        let (mut app, _command_rx, _scratch) = library_app();
+        app.shown_display().lock().unwrap().runtime_error =
+            Some("the BIOS did not load".to_owned());
+        app.take_runtime_error_notice();
+        let notice = app.shell_notice.clone().expect("a notice");
+        assert!(notice.message.starts_with("Alpine: "), "{}", notice.message);
+    }
+
+    /// A power-on hands the launcher the selected VM's own display.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn powering_on_sends_the_selected_vms_display() {
+        let (mut app, command_rx, _scratch) = library_app();
+        app.start_vm();
+        let Ok(NativeEmulatorCommand::Start(start)) = command_rx.try_recv() else {
+            panic!("a power-on sends a Start");
+        };
+        assert!(Arc::ptr_eq(&start.display, &app.shown_display()));
+    }
+
+    /// A power-on lowers the stop the VM's last run left raised, so the run
+    /// it asks for runs.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_power_on_lowers_the_stop_its_last_run_left() {
+        let (mut app, command_rx, _scratch) = library_app();
+        app.shown_display()
+            .lock()
+            .unwrap()
+            .stop_flag
+            .store(true, Ordering::Relaxed);
+        app.start_vm();
+        let Ok(NativeEmulatorCommand::Start(start)) = command_rx.try_recv() else {
+            panic!("a power-on sends a Start");
+        };
+        assert!(!start.display.lock().unwrap().stop_flag.load(Ordering::Relaxed));
+    }
+
+    /// Every VM has a display of its own.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn each_vm_has_its_own_display() {
+        let TestShell {
+            mut app,
+            commands: _commands,
+            scratch: _scratch,
+        } = two_vm_app();
+        let first = app.shown_display();
+        app.select_profile(1);
+        let second = app.shown_display();
+        assert!(!Arc::ptr_eq(&first, &second));
+    }
+
+    /// The phone keeps its screen on while any VM starts or runs, the one
+    /// not shown included, and lets it sleep once every VM is off.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn the_phone_keeps_the_screen_on_while_any_vm_starts_or_runs() {
+        let TestShell {
+            mut app,
+            commands: _commands,
+            scratch: _scratch,
+        } = two_vm_app();
+        app.select_profile(1);
+        let other = app.shown_display();
+        app.select_profile(0);
+        assert_eq!(app.vm_info.name, "Alpine", "Windows XP is not shown");
+        assert!(!app.any_vm_keeps_screen_on(), "no VM is live");
+
+        other.lock().unwrap().start_pending = true;
+        assert!(app.any_vm_keeps_screen_on(), "the VM not shown starts");
+
+        {
+            let mut display = other.lock().unwrap();
+            display.start_pending = false;
+            display.emu_running = true;
+        }
+        assert!(app.any_vm_keeps_screen_on(), "the VM not shown runs");
+
+        other.lock().unwrap().emu_running = false;
+        assert!(!app.any_vm_keeps_screen_on(), "both VMs are off again");
+    }
+
+    /// Keeping the launch VM in the library while it runs keeps its screen
+    /// and its run: the kept VM shows the display its run draws into, still
+    /// running.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn keeping_a_running_vm_in_the_library_keeps_its_session() {
+        let (mut app, command_rx, _scratch) = native_test_app();
+        let start = power_on(&mut app, &command_rx);
+
+        app.keep_selected_in_library();
+
+        assert!(
+            matches!(app.profiles[0].origin, VmOrigin::Library(_)),
+            "the VM is kept in the library"
+        );
+        assert!(Arc::ptr_eq(&app.shown_display(), &start.display));
+        assert!(app.is_vm_running(), "the kept VM still runs");
+    }
+
+    /// Deleting a VM that is off forgets its session: nothing of the shell
+    /// holds its display any more.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn deleting_a_vm_closes_its_session() {
+        let TestShell {
+            mut app,
+            commands: _commands,
+            scratch: _scratch,
+        } = two_vm_app();
+        app.select_profile(1);
+        let deleted = app.shown_vm();
+        let display = app.shown_display();
+
+        app.request_delete_selected();
+        app.confirm_pending();
+
+        assert_eq!(app.profiles.len(), 1, "Windows XP is deleted");
+        assert!(app.sessions.get(&deleted).is_none(), "its session is closed");
+        assert_eq!(
+            Arc::strong_count(&display),
+            1,
+            "neither a session nor a console still holds its display"
+        );
+    }
+
+    /// Closing the window stops every VM's run: with two VMs running, each
+    /// one's stop flag is raised, and each shows as off.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn closing_the_window_stops_every_running_vm() {
+        let TestShell {
+            mut app,
+            commands: command_rx,
+            scratch: _scratch,
+        } = two_vm_app();
+        let alpine = power_on(&mut app, &command_rx);
+        app.select_profile(1);
+        let xp = power_on(&mut app, &command_rx);
+
+        eframe::App::on_exit(&mut app, None);
+
+        for (index, run) in [&alpine, &xp].into_iter().enumerate() {
+            let name = &app.profiles[index].name;
+            assert!(
+                run.display.lock().unwrap().stop_flag.load(Ordering::Relaxed),
+                "{name}'s run is asked to stop"
+            );
+            assert!(
+                !app.sessions.is_live(&app.profiles[index].origin),
+                "{name} shows as off"
+            );
+        }
+    }
+
+    /// Another VM is selected and powered on while one runs, and both run
+    /// at once, each on its own display.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn another_vm_can_be_selected_and_powered_on_while_one_runs() {
+        let TestShell {
+            mut app,
+            commands: command_rx,
+            scratch: _scratch,
+        } = two_vm_app();
+        let first = power_on(&mut app, &command_rx);
+        app.select_profile(1);
+        assert_eq!(app.chrome.selected_vm(), 1, "selecting is not refused");
+        let second = power_on(&mut app, &command_rx);
+        assert!(!Arc::ptr_eq(&first.display, &second.display));
+        let alpine = app.profiles[0].origin.clone();
+        let xp = app.profiles[1].origin.clone();
+        assert!(
+            app.sessions.is_live(&alpine) && app.sessions.is_live(&xp),
+            "both run at once"
+        );
+    }
+
+    /// A VM is added while another runs: the copy is written to the library
+    /// and shown.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_vm_can_be_added_while_one_runs() {
+        let TestShell {
+            mut app,
+            commands: command_rx,
+            scratch,
+        } = two_vm_app();
+        let run = power_on(&mut app, &command_rx);
+
+        app.add_vm_copying_selected();
+
+        assert_eq!(app.profiles.len(), 3, "the copy is added");
+        assert_eq!(app.vm_info.name, "Alpine copy", "the copy is shown");
+        assert_eq!(
+            scratch.toml_files(),
+            ["alpine-copy.toml", "alpine.toml", "windows-xp.toml"]
+        );
+        drop(run);
+    }
+
+    /// A VM that runs is not deleted, and the notice names it.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_running_vm_is_not_deleted() {
+        let TestShell {
+            mut app,
+            commands: command_rx,
+            scratch: _scratch,
+        } = two_vm_app();
+        // The run's holds go; its display stays live.
+        drop(power_on(&mut app, &command_rx));
+
+        app.delete_selected_profile();
+
+        assert_eq!(app.profiles.len(), 2);
+        assert_eq!(
+            app.shell_notice.as_ref().map(|notice| notice.message.as_str()),
+            Some("Stop Alpine before deleting it.")
+        );
+    }
+
+    /// A second VM set to the hypervisor, powered on while the first holds
+    /// it, runs on the interpreter, says which VM holds the hypervisor, and
+    /// keeps its setting.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_second_hypervisor_vm_runs_on_the_interpreter_and_says_who_holds_it() {
+        let TestShell {
+            mut app,
+            commands: command_rx,
+            scratch: _scratch,
+        } = two_vm_app_with_engine(crate::config::Engine::Whp);
+        let first = power_on(&mut app, &command_rx);
+        assert_eq!(first.config.engine, crate::config::Engine::Whp);
+        app.select_profile(1);
+        let second = power_on(&mut app, &command_rx);
+        assert_eq!(second.config.engine, crate::config::Engine::Interpreter);
+        assert_eq!(
+            app.shell_notice.as_ref().map(|notice| notice.message.as_str()),
+            Some("Windows XP runs on the interpreter: Alpine is using the hypervisor.")
+        );
+        assert_eq!(
+            app.settings.engine,
+            crate::config::Engine::Whp,
+            "its saved engine is unchanged"
+        );
+    }
+
+    /// The hypervisor is free for the next VM once the run that held it is
+    /// over.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn the_hypervisor_is_free_again_once_its_runs_are_over() {
+        let TestShell {
+            mut app,
+            commands: command_rx,
+            scratch: _scratch,
+        } = two_vm_app_with_engine(crate::config::Engine::Whp);
+        let first = power_on(&mut app, &command_rx);
+        // The thread gives its holds back after its machine is gone.
+        drop(first);
+        app.select_profile(1);
+        let second = power_on(&mut app, &command_rx);
+        assert_eq!(second.config.engine, crate::config::Engine::Whp);
+    }
+
+    /// A hard disk one running VM uses is refused to a second, with a notice
+    /// naming the VM that uses it.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_disk_in_use_is_refused_to_a_second_vm() {
+        let TestShell {
+            mut app,
+            commands: command_rx,
+            scratch: _scratch,
+        } = two_vm_app_sharing_a_disk();
+        let first = power_on(&mut app, &command_rx);
+        app.select_profile(1);
+        app.start_vm();
+        assert!(command_rx.try_recv().is_err(), "nothing is started");
+        let message = app
+            .shell_notice
+            .as_ref()
+            .map(|notice| notice.message.clone())
+            .unwrap_or_default();
+        assert!(
+            message.ends_with("is in use by Alpine; stop it first."),
+            "{message}"
+        );
+        drop(first);
+    }
+
+    /// A startup disk the first VM's run makes stays that VM's: once the
+    /// file exists, a second VM on its path is refused as it is while the
+    /// file does not.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_disk_made_by_the_first_run_is_refused_to_a_second_vm() {
+        let TestShell {
+            mut app,
+            commands: command_rx,
+            scratch: _scratch,
+        } = two_vm_app_sharing_a_disk();
+        let first = power_on(&mut app, &command_rx);
+        let disk = first
+            .config
+            .disk
+            .as_ref()
+            .map(|disk| disk.path.clone())
+            .expect("a disk");
+        // What the first run does as it starts: it makes the disk's file.
+        write_test_disk(&disk);
+
+        app.select_profile(1);
+        app.start_vm();
+
+        let started = command_rx.try_recv().is_ok();
+        remove_test_file(&disk);
+        assert!(!started, "nothing is started");
+        let message = app
+            .shell_notice
+            .as_ref()
+            .map(|notice| notice.message.clone())
+            .unwrap_or_default();
+        assert!(
+            message.ends_with("is in use by Alpine; stop it first."),
+            "{message}"
+        );
+        drop(first);
+    }
+
+    /// Two spellings of one existing hard-disk image are one disk: while a
+    /// VM runs on the file, a second VM given the same file by another path,
+    /// into a sibling folder and back out, is refused, and the notice names
+    /// the VM that runs on it.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_disk_in_use_is_refused_under_another_spelling_of_its_path() {
+        let TestShell {
+            mut app,
+            commands: command_rx,
+            scratch,
+        } = two_vm_app();
+        // The disk's folder lies in the scratch library's, and goes with it.
+        let folder = scratch.dir.join("disks");
+        fs::create_dir_all(folder.join("sub")).expect("create the disk's folder");
+        let disk = folder.join("d.img");
+        write_test_disk(&disk);
+        assert!(app.set_browsed_path(BrowseTarget::HardDisk, disk));
+        let alpine = power_on(&mut app, &command_rx);
+
+        app.select_profile(1);
+        let same_disk = folder.join("sub").join("..").join("d.img");
+        assert!(app.set_browsed_path(BrowseTarget::HardDisk, same_disk));
+        app.start_vm();
+
+        assert!(command_rx.try_recv().is_err(), "nothing is started");
+        let message = app
+            .shell_notice
+            .as_ref()
+            .map(|notice| notice.message.clone())
+            .unwrap_or_default();
+        assert!(
+            message.ends_with("is in use by Alpine; stop it first."),
+            "{message}"
+        );
+        drop(alpine);
+    }
+
+    /// A hard disk another running VM uses is refused before its overwrite
+    /// is asked about: nothing is agreed while it is in use, so once that VM
+    /// is off, the power-on asks before the file is erased.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_disk_in_use_is_refused_before_its_overwrite_is_asked() {
+        let TestShell {
+            mut app,
+            commands: command_rx,
+            scratch: _scratch,
+        } = two_vm_app_sharing_a_disk();
+        let disk = app.profiles[0]
+            .config
+            .disk
+            .as_ref()
+            .map(|disk| disk.path.clone())
+            .expect("a disk");
+        write_test_disk(&disk);
+        // Alpine creates its disk plainly, so the file it runs on is reused.
+        let alpine = power_on(&mut app, &command_rx);
+        app.select_profile(1);
+        // Windows XP recreates the same file, erasing it, at its power-on.
+        if let Some(creation) = app.settings.disk_creation.as_mut() {
+            creation.overwrite = true;
+        }
+
+        app.start_vm();
+
+        let refused_unasked = app.pending_confirm.is_none();
+        let message = app
+            .shell_notice
+            .as_ref()
+            .map(|notice| notice.message.clone())
+            .unwrap_or_default();
+        let nothing_started = command_rx.try_recv().is_err();
+        drop(alpine);
+        app.start_vm();
+        let asked = matches!(
+            &app.pending_confirm,
+            Some(PendingConfirm::OverwriteDisk { path, .. }) if path == &disk
+        );
+        let still_nothing_started = command_rx.try_recv().is_err();
+        remove_test_file(&disk);
+        assert!(refused_unasked, "nothing is asked about a disk in use");
+        assert!(
+            message.ends_with("is in use by Alpine; stop it first."),
+            "{message}"
+        );
+        assert!(nothing_started, "nothing is started");
+        assert!(asked, "once Alpine is off, the power-on asks before erasing");
+        assert!(still_nothing_started, "nothing starts before the answer");
+    }
+
+    /// The new-disk sheet does not replace a hard disk a running VM uses:
+    /// its Replace is refused, saying which VM has the disk, and the file is
+    /// as the running VM left it.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_new_disk_does_not_replace_a_disk_a_running_vm_uses() {
+        let TestShell {
+            mut app,
+            commands: command_rx,
+            scratch: _scratch,
+        } = two_vm_app_sharing_a_disk();
+        let disk = app.profiles[0]
+            .config
+            .disk
+            .as_ref()
+            .map(|disk| disk.path.clone())
+            .expect("a disk");
+        let written = vec![0xABu8; 512 * 16 * 63];
+        fs::write(&disk, &written).expect("write the running VM's disk");
+        let alpine = power_on(&mut app, &command_rx);
+        app.select_profile(1);
+        app.open_new_disk_sheet();
+        if let Some(draft) = app.new_disk.as_mut() {
+            draft.folder = DiskFolder::Chosen(disk.parent().expect("a folder").to_path_buf());
+            draft.name = disk
+                .file_name()
+                .expect("a file name")
+                .to_string_lossy()
+                .into_owned();
+            draft.size = crate::hard_disk::DiskSize::mib(10);
+        }
+
+        // The sheet finds the file and offers to replace it; Replace it.
+        app.create_new_disk(ExistingFilePolicy::CreateNew);
+        let offered = app
+            .new_disk
+            .as_ref()
+            .is_some_and(|draft| draft.conflict.is_some());
+        app.create_new_disk(ExistingFilePolicy::Truncate);
+
+        let after = fs::read(&disk);
+        remove_test_file(&disk);
+        assert!(offered, "the sheet offers to replace the file it found");
+        assert_eq!(
+            app.new_disk.as_ref().and_then(|draft| draft.error.clone()),
+            Some(format!(
+                "{} is in use by Alpine; stop it first.",
+                disk.display()
+            ))
+        );
+        assert!(
+            after.expect("the disk is still there") == written,
+            "the running VM's disk is as it left it"
+        );
+        drop(alpine);
+    }
+
+    /// Deleting a VM that is off while another runs leaves the running VM
+    /// its dot and its session on the row it moves up to.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn deleting_an_off_vm_keeps_the_running_vms_dot_and_session() {
+        let TestShell {
+            mut app,
+            commands: command_rx,
+            scratch: _scratch,
+        } = two_vm_app();
+        app.add_vm_copying_selected();
+        let copy = power_on(&mut app, &command_rx);
+        app.select_profile(0);
+
+        app.request_delete_selected();
+        app.confirm_pending();
+
+        let rows: Vec<&str> = app
+            .chrome
+            .vm_library
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect();
+        assert_eq!(rows, ["Windows XP", "Alpine copy"], "Alpine is deleted");
+        assert_eq!(app.chrome.selected_vm(), 0, "Windows XP is shown");
+        assert_eq!(
+            app.row_dots(),
+            vec![Some(TEXT_MUTED), Some(ACCENT_CYAN)],
+            "the running copy's row, one up, keeps its dot"
+        );
+        app.select_profile(1);
+        assert!(
+            Arc::ptr_eq(&app.shown_display(), &copy.display),
+            "the running copy keeps its session"
+        );
+        assert!(app.is_vm_running());
+    }
+
+    /// The drawer's dots: a running VM's row shows it running, the selected
+    /// VM's row shows its state, and a VM that is off and not selected has
+    /// no dot.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn every_running_vm_shows_a_dot_and_an_off_one_none() {
+        let TestShell {
+            mut app,
+            commands: command_rx,
+            scratch: _scratch,
+        } = two_vm_app();
+        let first = power_on(&mut app, &command_rx);
+        app.select_profile(1);
+        // Shown, Windows XP has a session, as the status strip opens it.
+        drop(app.shown_display());
+
+        let dots = app.row_dots();
+        assert_eq!(dots[0], Some(ACCENT_CYAN), "the running VM's row");
+        assert_eq!(dots[1], Some(TEXT_MUTED), "the selected VM's row, off");
+
+        app.select_profile(0);
+        let dots = app.row_dots();
+        assert_eq!(dots[0], Some(ACCENT_CYAN), "the selected VM's row, running");
+        assert_eq!(dots[1], None, "a VM that is off and not selected");
+        drop(first);
+    }
+
+    /// The full-screen console's menu offers every VM that runs except the
+    /// one shown, by name, in the order of the VM list, which follows the
+    /// VMs' files and not their names; a VM that is off is not offered.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn the_console_menu_offers_every_other_running_vm_in_library_order() {
+        let TestShell {
+            mut app,
+            commands: command_rx,
+            scratch: _scratch,
+        } = three_vm_app();
+        let xp = power_on(&mut app, &command_rx);
+        app.select_profile(2);
+        let alpine = power_on(&mut app, &command_rx);
+        app.select_profile(1);
+        assert_eq!(app.vm_info.name, "DLX", "DLX, off, is shown");
+        assert_eq!(
+            app.switch_targets(),
+            vec![
+                SwitchTarget {
+                    index: 0,
+                    name: "Windows XP".to_owned(),
+                },
+                SwitchTarget {
+                    index: 2,
+                    name: "Alpine".to_owned(),
+                },
+            ]
+        );
+
+        app.select_profile(0);
+        assert_eq!(
+            app.switch_targets(),
+            vec![SwitchTarget {
+                index: 2,
+                name: "Alpine".to_owned(),
+            }]
+        );
+        drop(xp);
+        drop(alpine);
+    }
+
+    /// A VM that is starting, its power-on sent and its run not up yet, is
+    /// offered too: the menu lists the VMs that run or are about to.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn the_console_menu_offers_a_vm_that_is_starting() {
+        let TestShell {
+            mut app,
+            commands: command_rx,
+            scratch: _scratch,
+        } = two_vm_app();
+        app.start_vm();
+        let Ok(NativeEmulatorCommand::Start(starting)) = command_rx.try_recv() else {
+            panic!("a power-on sends a Start");
+        };
+        {
+            let display = starting.display.lock().unwrap();
+            assert!(
+                display.start_pending && !display.emu_running,
+                "Alpine is starting, not running"
+            );
+        }
+        app.select_profile(1);
+
+        assert_eq!(
+            app.switch_targets(),
+            vec![SwitchTarget {
+                index: 0,
+                name: "Alpine".to_owned(),
+            }]
+        );
+        drop(starting);
+    }
+
+    /// A tap on a VM in the full-screen console's menu shows that VM's
+    /// console: the shell is on its Console page, and since the VM runs, the
+    /// phone draws that console full screen, as it drew the one the tap was
+    /// made over. The menu's open flag, which `switch_to` also clears, is in
+    /// the Android build only, so it is not asserted here.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_switch_from_the_console_menu_shows_that_vms_console_full_screen() {
+        let TestShell {
+            mut app,
+            commands: command_rx,
+            scratch: _scratch,
+        } = two_vm_app();
+        let alpine = power_on(&mut app, &command_rx);
+        app.select_profile(1);
+        let xp = power_on(&mut app, &command_rx);
+        assert_eq!(
+            app.console_view(),
+            crate::android_support::ConsoleView::FullScreen,
+            "Windows XP's console fills the screen, under the menu"
+        );
+        let Some(offered) = app.switch_targets().into_iter().next() else {
+            panic!("the menu offers Alpine");
+        };
+
+        app.switch_to(offered);
+
+        assert_eq!(app.vm_info.name, "Alpine", "the VM tapped is shown");
+        assert_eq!(app.chrome.page(), ShellPage::Console, "on its Console page");
+        assert!(app.sessions.is_live(&app.shown_vm()), "Alpine runs");
+        assert_eq!(
+            app.console_view(),
+            crate::android_support::ConsoleView::FullScreen,
+            "Alpine's console fills the screen"
+        );
+        drop(alpine);
+        drop(xp);
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -7127,8 +8833,8 @@ mod tests {
         app.request_power_off();
         app.request_reset();
 
-        let display = app
-            .shared
+        let shared = app.shown_display();
+        let display = shared
             .lock()
             .expect("shared display should not be poisoned");
         assert!(!display.stop_flag.load(Ordering::Relaxed));
@@ -7193,7 +8899,7 @@ mod tests {
         );
 
         app.add_vm_copying_selected();
-        app.shared.lock().unwrap().emu_running = true;
+        app.shown_display().lock().unwrap().emu_running = true;
         app.request_delete_selected();
         app.confirm_pending();
 
@@ -7201,26 +8907,7 @@ mod tests {
         assert_eq!(
             app.shell_notice,
             Some(ShellNotice::warning(
-                "Stop the running VM before deleting it."
-            ))
-        );
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    #[test]
-    fn native_profile_selection_refuses_while_running() {
-        let (mut app, _command_rx, _library) = native_test_app();
-        app.add_vm_copying_selected();
-        assert_eq!(app.chrome.selected_vm(), 1);
-        app.shared.lock().unwrap().emu_running = true;
-
-        app.select_profile(0);
-
-        assert_eq!(app.chrome.selected_vm(), 1);
-        assert_eq!(
-            app.shell_notice,
-            Some(ShellNotice::warning(
-                "Stop the running VM before selecting another VM."
+                "Stop Rusty Box copy before deleting it."
             ))
         );
     }
@@ -7303,7 +8990,7 @@ mod tests {
     fn created_image_hard_disk_warns_while_running() {
         let (mut app, _command_rx, _library) = native_test_app();
         let original_disk_path = app.settings.disk_path.clone();
-        app.shared.lock().unwrap().emu_running = true;
+        app.shown_display().lock().unwrap().emu_running = true;
 
         app.handle_created_image(CreatedImage {
             path: std::path::PathBuf::from("created.img"),
@@ -7374,5 +9061,1262 @@ mod tests {
             matches!(&panel.status, Some(CreatorStatus::Error(msg)) if msg.contains("already exists"))
         );
         remove_test_file(&path);
+    }
+
+    /// The native shell in a kittest window, run as eframe runs it — its
+    /// `App::logic`, then its `App::ui`, each frame — and driven as a user
+    /// drives it.
+    #[cfg(not(target_arch = "wasm32"))]
+    mod in_a_window {
+        use super::*;
+        use egui_kittest::{
+            kittest::{NodeT, Queryable},
+            Harness,
+        };
+
+        /// A frame every sixtieth of a second, as a desktop draws them, so a
+        /// double-click's two clicks land inside egui's double-click delay,
+        /// which kittest's default quarter-second frames overrun.
+        const FRAME: f32 = 1.0 / 60.0;
+
+        /// The launch VM's row, which only an open drawer draws.
+        const LAUNCH_VM_ROW: &str = "Rusty Box (unsaved)";
+
+        /// The shell, and the left edge of the area the harness draws it in,
+        /// which kittest insets from the window's edge: the drawer's fixed
+        /// edge, where a closed drawer's grab handle lies.
+        struct Window {
+            app: NativeShellApp,
+            left_edge: f32,
+            /// An area drawn over the shell, as the phone's console draws its
+            /// menu over the guest.
+            cover: Option<egui::Rect>,
+        }
+
+        fn window(app: NativeShellApp) -> Harness<'static, Window> {
+            let mut frame = eframe::Frame::_new_kittest();
+            Harness::builder()
+                .with_size(egui::vec2(800.0, 600.0))
+                .with_step_dt(FRAME)
+                .build_ui_state(
+                    move |ui, window: &mut Window| {
+                        window.left_edge = ui.available_rect_before_wrap().left();
+                        eframe::App::logic(&mut window.app, ui.ctx(), &mut frame);
+                        eframe::App::ui(&mut window.app, ui, &mut frame);
+                        if let Some(cover) = window.cover {
+                            egui::Area::new(egui::Id::new("cover"))
+                                .order(egui::Order::Foreground)
+                                .fixed_pos(cover.min)
+                                .show(ui.ctx(), |ui| ui.set_min_size(cover.size()));
+                        }
+                    },
+                    Window {
+                        app,
+                        left_edge: 0.0,
+                        cover: None,
+                    },
+                )
+        }
+
+        fn drawer_shows_its_rows(window: &Harness<'_, Window>) -> bool {
+            window.query_by_label(LAUNCH_VM_ROW).is_some()
+        }
+
+        fn press(pos: egui::Pos2) -> egui::Event {
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            }
+        }
+
+        fn release(pos: egui::Pos2) -> egui::Event {
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }
+        }
+
+        /// Two clicks at `pos`, one event a frame, as a double-click arrives.
+        fn double_click(window: &mut Harness<'_, Window>, pos: egui::Pos2) {
+            window.hover_at(pos);
+            for _ in 0..2 {
+                window.event(press(pos));
+                window.event(release(pos));
+            }
+            window.step();
+            window.step();
+        }
+
+        /// A drag from `from` to `to`, as a pointer makes one: pressed, moved
+        /// through the points between, and released where it stopped.
+        fn drag(window: &mut Harness<'_, Window>, from: egui::Pos2, to: egui::Pos2) {
+            window.drag_at(from);
+            window.step();
+            for n in 1..=4u8 {
+                window.hover_at(from + (to - from) * (f32::from(n) / 4.0));
+                window.step();
+            }
+            window.drop_at(to);
+            window.step();
+        }
+
+        #[test]
+        fn the_menu_button_closes_and_opens_the_drawer_and_its_edge_drags_it_open() {
+            let (app, _command_rx, _scratch) = native_test_app();
+            let mut window = window(app);
+            window.run();
+            assert!(
+                drawer_shows_its_rows(&window),
+                "a desktop's drawer starts open"
+            );
+
+            window.get_by_label("☰").click();
+            window.run();
+            assert_eq!(window.state().app.chrome.library, Drawer::Closed);
+            assert!(!drawer_shows_its_rows(&window));
+
+            window.get_by_label("☰").click();
+            window.run();
+            assert_eq!(window.state().app.chrome.library, Drawer::Open);
+            assert!(drawer_shows_its_rows(&window));
+
+            window.get_by_label("☰").click();
+            window.run();
+            assert_eq!(window.state().app.chrome.library, Drawer::Closed);
+            assert!(!drawer_shows_its_rows(&window));
+
+            // Closed, the drawer is still drawn as its grab handle, so a drag
+            // from the window's left edge opens it again.
+            let edge = window.state().left_edge;
+            drag(
+                &mut window,
+                egui::pos2(edge + 1.0, 300.0),
+                egui::pos2(edge + 260.0, 300.0),
+            );
+            window.run();
+            assert_eq!(window.state().app.chrome.library, Drawer::Open);
+            assert!(drawer_shows_its_rows(&window));
+        }
+
+        /// Puts `app` on its Console page with `library` as its drawer and a
+        /// running guest's frame stretched over the whole display region, so
+        /// the guest's image starts where the page does: at the window's left
+        /// edge while the drawer is closed, at the drawer's edge while it is
+        /// open. A running console asks for a frame every frame, so a test of
+        /// it steps the window rather than running it until it settles.
+        fn show_a_running_guest(app: &mut NativeShellApp, library: Drawer) {
+            app.chrome.go_to(ShellPage::Console);
+            app.chrome.library = library;
+            app.shown_console()
+                .set_display_scale(rusty_box::gui::DisplayScale::Stretch);
+            let shared = app.shown_display();
+            let mut display = shared.lock().expect("shared display");
+            display.fb_width = 64;
+            display.fb_height = 40;
+            display.framebuffer = vec![0x80; 64 * 40 * 4];
+            display.fb_dirty = true;
+            display.emu_running = true;
+        }
+
+        fn guest_image(window: &Harness<'_, Window>) -> egui::Rect {
+            window.get_by_role(egui::accesskit::Role::Image).rect()
+        }
+
+        /// The guest's image claims its own presses. With the drawer closed,
+        /// the image reaches the window's left edge, over the drawer's grab
+        /// handle; neither a double-click nor an outward drag there opens the
+        /// drawer, and the guest gets both.
+        #[test]
+        fn presses_on_the_guest_image_at_the_left_edge_leave_a_closed_drawer_closed() {
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            show_a_running_guest(&mut app, Drawer::Closed);
+            let shared = app.shown_display();
+            let mut window = window(app);
+            window.run_steps(2);
+            let edge = window.state().left_edge;
+            let image = guest_image(&window);
+            assert_eq!(
+                image.left(),
+                edge,
+                "the image lies over the drawer's handle"
+            );
+
+            let on_the_handle = egui::pos2(edge + 1.0, image.center().y);
+            double_click(&mut window, on_the_handle);
+            assert_eq!(window.state().app.chrome.library, Drawer::Closed);
+            assert!(
+                shared.lock().expect("shared display").mouse_captured,
+                "the click reached the guest: it captured the mouse"
+            );
+
+            drag(
+                &mut window,
+                on_the_handle,
+                egui::pos2(edge + 260.0, image.center().y),
+            );
+            window.run_steps(2);
+            assert_eq!(window.state().app.chrome.library, Drawer::Closed);
+            assert!(!drawer_shows_its_rows(&window));
+            assert!(
+                shared
+                    .lock()
+                    .expect("shared display")
+                    .pending_mouse
+                    .iter()
+                    .any(|event| event.buttons & 0x01 != 0 && event.dx > 0),
+                "the drag reached the guest: a held left button moved right"
+            );
+        }
+
+        /// With the drawer open, the image starts at the drawer's edge, inside
+        /// the reach of the drawer's resize handle; a double-click on the
+        /// image's first point there leaves the drawer open.
+        #[test]
+        fn a_double_click_on_the_guest_image_beside_an_open_drawer_leaves_it_open() {
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            show_a_running_guest(&mut app, Drawer::Open);
+            let mut window = window(app);
+            window.run_steps(2);
+            let image = guest_image(&window);
+
+            double_click(
+                &mut window,
+                egui::pos2(image.left() + 1.0, image.center().y),
+            );
+            window.run_steps(2);
+            assert_eq!(window.state().app.chrome.library, Drawer::Open);
+            assert!(drawer_shows_its_rows(&window));
+        }
+
+        fn finger(phase: egui::TouchPhase, pos: egui::Pos2) -> egui::Event {
+            egui::Event::Touch {
+                device_id: egui::TouchDeviceId(1),
+                id: egui::TouchId(1),
+                phase,
+                pos,
+                force: None,
+            }
+        }
+
+        /// A finger slid from `from` to `to` and lifted, as egui-winit
+        /// reports one: each touch with the pointer events it simulates for
+        /// the first finger, and `PointerGone` once the finger is up.
+        fn slide(window: &mut Harness<'_, Window>, from: egui::Pos2, to: egui::Pos2) {
+            window.event(finger(egui::TouchPhase::Start, from));
+            window.event(egui::Event::PointerMoved(from));
+            window.event(press(from));
+            window.step();
+            for n in 1..=10u8 {
+                let pos = from + (to - from) * (f32::from(n) / 10.0);
+                window.event(finger(egui::TouchPhase::Move, pos));
+                window.event(egui::Event::PointerMoved(pos));
+                window.step();
+            }
+            window.event(finger(egui::TouchPhase::End, to));
+            window.event(release(to));
+            window.event(egui::Event::PointerGone);
+            window.step();
+            window.run_steps(2);
+        }
+
+        /// How far right the guest's mouse was sent, summed over what is
+        /// queued for it.
+        fn sent_right(shared: &Arc<Mutex<rusty_box::gui::shared_display::SharedDisplay>>) -> i32 {
+            shared
+                .lock()
+                .expect("shared display")
+                .pending_mouse
+                .iter()
+                .map(|event| event.dx)
+                .sum()
+        }
+
+        /// Puts `app`'s console as a phone draws it: a running guest driven
+        /// by touch.
+        fn show_a_running_guest_on_a_trackpad(app: &mut NativeShellApp) {
+            show_a_running_guest(app, Drawer::Closed);
+            app.shown_console()
+                .set_pointer_mode(rusty_box::gui::PointerMode::Touchpad);
+        }
+
+        /// On a phone a finger is a trackpad: one slid right across the
+        /// guest's image moves the guest's mouse right, and a slide clicks
+        /// nothing.
+        #[test]
+        fn a_finger_slid_across_the_guest_moves_its_mouse() {
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            show_a_running_guest_on_a_trackpad(&mut app);
+            let shared = app.shown_display();
+            let mut window = window(app);
+            window.run_steps(2);
+            let from = guest_image(&window).center();
+
+            slide(&mut window, from, from + egui::vec2(120.0, 0.0));
+            assert!(sent_right(&shared) > 0, "the guest's mouse moved right");
+            assert!(
+                shared
+                    .lock()
+                    .expect("shared display")
+                    .pending_mouse
+                    .iter()
+                    .all(|event| event.buttons == 0),
+                "a slide holds no button"
+            );
+        }
+
+        /// An area drawn over the guest, as the phone's console menu is,
+        /// keeps the touches that start under it; the rest of the image is
+        /// still the trackpad.
+        #[test]
+        fn a_touch_under_an_area_over_the_guest_stays_with_the_area() {
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            show_a_running_guest_on_a_trackpad(&mut app);
+            let shared = app.shown_display();
+            let mut window = window(app);
+            window.run_steps(2);
+            let image = guest_image(&window);
+            let cover =
+                egui::Rect::from_min_max(image.min, egui::pos2(image.center().x, image.max.y));
+            window.state_mut().cover = Some(cover);
+            window.run_steps(2);
+
+            slide(
+                &mut window,
+                cover.center(),
+                cover.center() + egui::vec2(120.0, 0.0),
+            );
+            assert!(
+                shared
+                    .lock()
+                    .expect("shared display")
+                    .pending_mouse
+                    .is_empty(),
+                "a touch that starts under the area never reaches the guest"
+            );
+
+            let beside = egui::pos2(image.right() - image.width() / 4.0, image.center().y);
+            slide(&mut window, beside, beside + egui::vec2(120.0, 0.0));
+            assert!(
+                sent_right(&shared) > 0,
+                "beside the area the image is still the trackpad"
+            );
+        }
+
+        /// A VM set to the hypervisor that runs on the interpreter, because
+        /// another VM held the hypervisor at its power-on, names the
+        /// interpreter while it runs, in the status strip and on its Summary
+        /// page; once its run is over, both name the engine it is set to.
+        #[test]
+        fn a_vm_on_the_interpreter_in_place_of_the_hypervisor_says_so_while_it_runs() {
+            let TestShell {
+                mut app,
+                commands: command_rx,
+                scratch: _scratch,
+            } = two_vm_app_with_engine(crate::config::Engine::Whp);
+            let alpine = power_on(&mut app, &command_rx);
+            app.select_profile(1);
+            let xp = power_on(&mut app, &command_rx);
+            app.chrome.go_to(ShellPage::Home);
+            let mut window = window(app);
+            window.run_steps(2);
+            assert_eq!(
+                window.query_all_by_label("Interpreter").count(),
+                2,
+                "the status strip and the Summary page name the interpreter"
+            );
+            assert!(window.query_by_label("Windows Hypervisor").is_none());
+
+            // What the run's end does: the VM shows as off.
+            xp.display.lock().unwrap().emu_running = false;
+            window.run_steps(2);
+            assert_eq!(
+                window.query_all_by_label("Windows Hypervisor").count(),
+                2,
+                "both name the engine Windows XP is set to"
+            );
+            assert!(window.query_by_label("Interpreter").is_none());
+            drop(alpine);
+        }
+
+        /// What the Hardware page says while the VM shown runs or starts.
+        const HARDWARE_LOCKED: &str = "Power off before changing VM hardware.";
+
+        /// Whether each number field on the page shown can be edited.
+        fn number_fields_editable(window: &Harness<'_, Window>) -> Vec<bool> {
+            window
+                .query_all_by_role(egui::accesskit::Role::SpinButton)
+                .map(|field| !field.accesskit_node().is_disabled())
+                .collect()
+        }
+
+        /// Hardware is locked per VM: while Alpine runs, its Hardware page
+        /// is locked and says so, and the page of Windows XP, which is off,
+        /// can be edited.
+        #[test]
+        fn a_running_vms_hardware_is_locked_and_another_vms_is_not() {
+            let TestShell {
+                mut app,
+                commands: command_rx,
+                scratch: _scratch,
+            } = two_vm_app();
+            let alpine = power_on(&mut app, &command_rx);
+            app.chrome.go_to(ShellPage::Hardware);
+            let mut window = window(app);
+            window.run_steps(2);
+            let alpine_fields = number_fields_editable(&window);
+            assert!(
+                window.query_by_label(HARDWARE_LOCKED).is_some(),
+                "Alpine runs: its page says it is locked"
+            );
+            assert!(
+                !alpine_fields.is_empty() && alpine_fields.iter().all(|editable| !editable),
+                "Alpine runs: its fields are locked: {alpine_fields:?}"
+            );
+
+            window.state_mut().app.select_profile(1);
+            window.state_mut().app.chrome.go_to(ShellPage::Hardware);
+            window.run_steps(2);
+            let xp_fields = number_fields_editable(&window);
+            assert!(
+                window.query_by_label(HARDWARE_LOCKED).is_none(),
+                "Windows XP is off: its page is not locked"
+            );
+            assert!(
+                !xp_fields.is_empty() && xp_fields.iter().all(|editable| *editable),
+                "Windows XP is off: its fields can be edited: {xp_fields:?}"
+            );
+            drop(alpine);
+        }
+
+        /// The floppy maker does not replace a file a running VM uses as its
+        /// hard disk: its Create is refused, saying which VM uses the file,
+        /// and the file is as the running VM left it.
+        #[test]
+        fn the_floppy_maker_does_not_replace_a_disk_a_running_vm_uses() {
+            let TestShell {
+                mut app,
+                commands: command_rx,
+                scratch: _scratch,
+            } = two_vm_app_sharing_a_disk();
+            let disk = app.profiles[0]
+                .config
+                .disk
+                .as_ref()
+                .map(|disk| disk.path.clone())
+                .expect("a disk");
+            let written = vec![0xABu8; 512 * 16 * 63];
+            fs::write(&disk, &written).expect("write the running VM's disk");
+            let alpine = power_on(&mut app, &command_rx);
+            app.chrome.go_to(ShellPage::Home);
+            app.floppy_maker_open = true;
+            app.floppy_maker.path = disk.display().to_string();
+            app.floppy_maker.overwrite = true;
+            let mut window = window(app);
+            window.run_steps(2);
+
+            window
+                .get_by_role_and_label(egui::accesskit::Role::Button, "Create floppy image")
+                .click();
+            window.run_steps(2);
+
+            let refusal = format!("{} is in use by Alpine; stop it first.", disk.display());
+            let refused = window.query_by_label(&refusal).is_some();
+            let after = fs::read(&disk);
+            remove_test_file(&disk);
+            assert!(refused, "the maker says which VM uses the file");
+            assert!(
+                after.expect("the disk is still there") == written,
+                "the running VM's disk is as it left it"
+            );
+            drop(alpine);
+        }
+
+        /// The floppy maker's Create makes the image when no running VM uses
+        /// its file, and the shell says the floppy was made.
+        #[test]
+        fn the_floppy_makers_create_makes_the_image() {
+            let TestShell {
+                mut app,
+                commands: _commands,
+                scratch: _scratch,
+            } = two_vm_app();
+            let floppy = unique_temp_path("rusty-box-gui-made-floppy");
+            app.floppy_maker_open = true;
+            app.floppy_maker.path = floppy.display().to_string();
+            let mut window = window(app);
+            window.run_steps(2);
+
+            window
+                .get_by_role_and_label(egui::accesskit::Role::Button, "Create floppy image")
+                .click();
+            window.run_steps(2);
+
+            let made = fs::metadata(&floppy).map(|metadata| metadata.len());
+            remove_test_file(&floppy);
+            assert_eq!(made.expect("the image is made"), 1_474_560);
+            assert!(
+                window
+                    .query_by_label("Floppy image created. Floppy drive emulation is not wired yet.")
+                    .is_some(),
+                "the shell says the floppy was made"
+            );
+        }
+
+        /// The window's close button, pressed: one frame with the close request.
+        fn close_requested_by_the_window(window: &mut Harness<'_, Window>) {
+            window
+                .input_mut()
+                .viewports
+                .entry(egui::ViewportId::ROOT)
+                .or_default()
+                .events
+                .push(egui::ViewportEvent::Close);
+            window.step();
+        }
+
+        /// One more frame, for the close question to be where it shows: egui
+        /// lays a newly shown modal out unseen in its first frame, centred
+        /// from the next, so a click aimed at it waits that frame.
+        fn let_the_question_settle(window: &mut Harness<'_, Window>) {
+            window.step();
+        }
+
+        /// What the last frame asked of the window.
+        fn commands(window: &Harness<'_, Window>) -> Vec<egui::ViewportCommand> {
+            window
+                .output()
+                .viewport_output
+                .get(&egui::ViewportId::ROOT)
+                .map(|output| output.commands.clone())
+                .unwrap_or_default()
+        }
+
+        /// The window's close button, pressed while the window is minimized.
+        /// eframe draws no frame for a minimized window: it runs the app's
+        /// `App::logic` alone, as `run_logic` does here. Returns what the app
+        /// asked of the window.
+        fn close_requested_while_minimized(app: &mut NativeShellApp) -> Vec<egui::ViewportCommand> {
+            let mut input = egui::RawInput::default();
+            input.viewports.insert(
+                egui::ViewportId::ROOT,
+                egui::ViewportInfo {
+                    minimized: Some(true),
+                    events: vec![egui::ViewportEvent::Close],
+                    ..egui::ViewportInfo::default()
+                },
+            );
+            let mut frame = eframe::Frame::_new_kittest();
+            egui::Context::default()
+                .run_logic(&input, |ctx| eframe::App::logic(app, ctx, &mut frame))
+                .viewport_commands
+                .get(&egui::ViewportId::ROOT)
+                .cloned()
+                .unwrap_or_default()
+        }
+
+        #[test]
+        fn closing_with_a_vm_running_asks_and_hide_minimizes() {
+            let (mut app, command_rx, _scratch) = native_test_app();
+            let run = power_on(&mut app, &command_rx);
+            let mut window = window(app);
+            window.run_steps(2);
+            close_requested_by_the_window(&mut window);
+            assert!(commands(&window).contains(&egui::ViewportCommand::CancelClose));
+            let_the_question_settle(&mut window);
+            window.get_by_label("Hide").click();
+            window.step();
+            assert!(commands(&window).contains(&egui::ViewportCommand::Minimized(true)));
+            assert!(window.state().app.any_vm_live(), "hiding stops nothing");
+            drop(run);
+        }
+
+        #[test]
+        fn stop_vms_and_quit_stops_every_vm_and_closes() {
+            let (mut app, command_rx, _scratch) = native_test_app();
+            let run = power_on(&mut app, &command_rx);
+            let mut window = window(app);
+            window.run_steps(2);
+            close_requested_by_the_window(&mut window);
+            let_the_question_settle(&mut window);
+            window.get_by_label("Stop VMs and quit").click();
+            window.step();
+            assert!(!window.state().app.any_vm_live());
+            assert!(commands(&window).contains(&egui::ViewportCommand::Close));
+            drop(run);
+        }
+
+        #[test]
+        fn a_remembered_choice_is_carried_out_without_asking() {
+            let (mut app, command_rx, scratch) = native_test_app();
+            let run = power_on(&mut app, &command_rx);
+            let mut window = window(app);
+            window.run_steps(2);
+            close_requested_by_the_window(&mut window);
+            let_the_question_settle(&mut window);
+            window.get_by_label("Remember my choice").click();
+            window.step();
+            window.get_by_label("Hide").click();
+            window.step();
+            assert_eq!(scratch.library().close_choice(), CloseChoice::Hide);
+            close_requested_by_the_window(&mut window);
+            assert!(
+                window.query_by_label("Stop VMs and quit").is_none(),
+                "no question"
+            );
+            assert!(commands(&window).contains(&egui::ViewportCommand::Minimized(true)));
+            drop(run);
+        }
+
+        #[test]
+        fn closing_with_no_vm_running_closes() {
+            let (app, _command_rx, _scratch) = native_test_app();
+            let mut window = window(app);
+            window.run_steps(2);
+            close_requested_by_the_window(&mut window);
+            assert!(!commands(&window).contains(&egui::ViewportCommand::CancelClose));
+        }
+
+        /// Cancel leaves the window open and the VM running, and the next
+        /// close asks again.
+        #[test]
+        fn cancel_keeps_the_window_and_the_next_close_asks_again() {
+            let (mut app, command_rx, _scratch) = native_test_app();
+            let run = power_on(&mut app, &command_rx);
+            let mut window = window(app);
+            window.run_steps(2);
+            close_requested_by_the_window(&mut window);
+            let_the_question_settle(&mut window);
+            window.get_by_label("Cancel").click();
+            window.step();
+            assert!(!commands(&window).contains(&egui::ViewportCommand::Close));
+            assert!(!commands(&window).contains(&egui::ViewportCommand::Minimized(true)));
+            // The frame that took the click drew the question; the next does not.
+            window.step();
+            assert!(
+                window.query_by_label("Stop VMs and quit").is_none(),
+                "the question is gone"
+            );
+            assert!(window.state().app.any_vm_live());
+            close_requested_by_the_window(&mut window);
+            assert!(commands(&window).contains(&egui::ViewportCommand::CancelClose));
+            assert!(
+                window.query_by_label("Stop VMs and quit").is_some(),
+                "it asks again"
+            );
+            drop(run);
+        }
+
+        /// A hidden app closed from the taskbar: its window is minimized, so
+        /// the close reaches `App::logic` alone. It is cancelled there and
+        /// follows the remembered choice: a remembered Hide keeps the VM
+        /// running, a remembered Stop VMs and quit stops it and closes.
+        #[test]
+        fn closing_the_hidden_app_follows_the_remembered_choice() {
+            let (mut app, command_rx, _scratch) = native_test_app();
+            let run = power_on(&mut app, &command_rx);
+            app.remember_close_choice(CloseChoice::Hide);
+            let asked = close_requested_while_minimized(&mut app);
+            assert!(asked.contains(&egui::ViewportCommand::CancelClose));
+            assert!(app.any_vm_live(), "the hidden VM runs on");
+
+            app.remember_close_choice(CloseChoice::StopAndQuit);
+            let asked = close_requested_while_minimized(&mut app);
+            assert!(asked.contains(&egui::ViewportCommand::CancelClose));
+            assert!(asked.contains(&egui::ViewportCommand::Close));
+            assert!(!app.any_vm_live());
+            drop(run);
+        }
+
+        /// A hidden app closed from the taskbar with no choice remembered:
+        /// the window comes back, with the question in it.
+        #[test]
+        fn closing_the_hidden_app_brings_it_back_to_ask() {
+            let (mut app, command_rx, _scratch) = native_test_app();
+            let run = power_on(&mut app, &command_rx);
+            let asked = close_requested_while_minimized(&mut app);
+            assert!(asked.contains(&egui::ViewportCommand::CancelClose));
+            assert!(asked.contains(&egui::ViewportCommand::Minimized(false)));
+            assert!(asked.contains(&egui::ViewportCommand::Focus));
+            let mut window = window(app);
+            window.run_steps(2);
+            assert!(
+                window.query_by_label("Stop VMs and quit").is_some(),
+                "the question is in the window"
+            );
+            assert!(window.state().app.any_vm_live());
+            drop(run);
+        }
+
+        /// The About window changes the remembered choice: picked there, it
+        /// is kept in the library folder, and the next close follows it.
+        #[test]
+        fn the_about_window_changes_the_remembered_choice() {
+            let (mut app, command_rx, scratch) = native_test_app();
+            let run = power_on(&mut app, &command_rx);
+            app.chrome.show_about = true;
+            let mut window = window(app);
+            window.run_steps(2);
+            window.get_by_label("Stop VMs and quit").click();
+            window.step();
+            assert_eq!(scratch.library().close_choice(), CloseChoice::StopAndQuit);
+            close_requested_by_the_window(&mut window);
+            assert!(commands(&window).contains(&egui::ViewportCommand::Close));
+            assert!(!window.state().app.any_vm_live());
+            drop(run);
+        }
+
+        /// The About window shows the choice the library folder records,
+        /// as the app opens on it.
+        #[test]
+        fn the_about_window_shows_the_remembered_choice() {
+            let scratch = ScratchLibrary::new();
+            scratch
+                .library()
+                .remember_close_choice(CloseChoice::Hide)
+                .expect("remember");
+            let (mut app, _command_rx) = native_test_app_over(&scratch, None, None);
+            app.chrome.show_about = true;
+            let mut window = window(app);
+            window.run_steps(2);
+            let toggled = |label: &str| window.get_by_label(label).accesskit_node().toggled();
+            assert_eq!(toggled("Hide"), Some(egui::accesskit::Toggled::True));
+            assert_eq!(toggled("Ask"), Some(egui::accesskit::Toggled::False));
+            assert_eq!(
+                toggled("Stop VMs and quit"),
+                Some(egui::accesskit::Toggled::False)
+            );
+        }
+
+        /// With two VMs running, the question names both, and Stop VMs and
+        /// quit stops both.
+        #[test]
+        fn the_question_names_every_running_vm_and_stop_vms_and_quit_stops_them_all() {
+            let TestShell {
+                mut app,
+                commands: command_rx,
+                scratch: _scratch,
+            } = two_vm_app();
+            let alpine = power_on(&mut app, &command_rx);
+            app.select_profile(1);
+            let xp = power_on(&mut app, &command_rx);
+            let mut window = window(app);
+            window.run_steps(2);
+            close_requested_by_the_window(&mut window);
+            let_the_question_settle(&mut window);
+            assert!(window
+                .query_by_label("Alpine, Windows XP will keep running if the app is hidden.")
+                .is_some());
+            window.get_by_label("Stop VMs and quit").click();
+            window.step();
+            assert!(commands(&window).contains(&egui::ViewportCommand::Close));
+            assert!(!window.state().app.any_vm_live());
+            for run in [&alpine, &xp] {
+                assert!(
+                    !run.display.lock().unwrap().emu_running,
+                    "each VM shows as off"
+                );
+            }
+        }
+
+        /// Escape, or a click outside the question, is Cancel: nothing is
+        /// asked of the window, the VM runs on, and the question goes.
+        #[test]
+        fn escape_or_a_click_outside_cancels_the_question() {
+            let (mut app, command_rx, scratch) = native_test_app();
+            let run = power_on(&mut app, &command_rx);
+            let mut window = window(app);
+            window.run_steps(2);
+
+            close_requested_by_the_window(&mut window);
+            let_the_question_settle(&mut window);
+            window.input_mut().events.push(egui::Event::Key {
+                key: egui::Key::Escape,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            });
+            window.step();
+            assert!(!commands(&window).contains(&egui::ViewportCommand::Close));
+            assert!(!commands(&window).contains(&egui::ViewportCommand::Minimized(true)));
+            window.step();
+            assert!(
+                window.query_by_label("Stop VMs and quit").is_none(),
+                "Escape cancels"
+            );
+
+            close_requested_by_the_window(&mut window);
+            let_the_question_settle(&mut window);
+            // A corner of the window, away from the centred question.
+            let outside = egui::pos2(10.0, 590.0);
+            window.hover_at(outside);
+            window.event(press(outside));
+            window.event(release(outside));
+            window.step();
+            assert!(!commands(&window).contains(&egui::ViewportCommand::Close));
+            assert!(!commands(&window).contains(&egui::ViewportCommand::Minimized(true)));
+            window.step();
+            assert!(
+                window.query_by_label("Stop VMs and quit").is_none(),
+                "a click outside cancels"
+            );
+            assert!(window.state().app.any_vm_live());
+            assert_eq!(scratch.library().close_choice(), CloseChoice::Ask);
+            drop(run);
+        }
+
+        /// Once no VM runs, the question has nothing to ask: it goes, and
+        /// the app stays open, to be closed again.
+        #[test]
+        fn the_question_goes_once_no_vm_runs() {
+            let (mut app, command_rx, _scratch) = native_test_app();
+            let run = power_on(&mut app, &command_rx);
+            let mut window = window(app);
+            window.run_steps(2);
+            close_requested_by_the_window(&mut window);
+            let_the_question_settle(&mut window);
+            // What the run's end does: the VM shows as off.
+            run.display.lock().unwrap().emu_running = false;
+            window.step();
+            assert!(!commands(&window).contains(&egui::ViewportCommand::Close));
+            window.step();
+            assert!(window.query_by_label("Stop VMs and quit").is_none());
+            close_requested_by_the_window(&mut window);
+            assert!(
+                !commands(&window).contains(&egui::ViewportCommand::CancelClose),
+                "the next close closes"
+            );
+        }
+
+        /// The VM bar's Quit asks the window to close, and that close, the
+        /// next frame's close request, is taken over as the close button's:
+        /// with a VM running it asks. A phone's Quit reaches the same
+        /// `App::logic` through its host.
+        #[test]
+        fn the_vm_bars_quit_asks_while_a_vm_runs() {
+            let (mut app, command_rx, _scratch) = native_test_app();
+            let run = power_on(&mut app, &command_rx);
+            let mut window = window(app);
+            window.run_steps(2);
+            window.get_by_label("…").click();
+            window.run_steps(2);
+            window.get_by_label("Quit").click();
+            window.step();
+            assert!(commands(&window).contains(&egui::ViewportCommand::Close));
+            // egui-winit turns the Close command into the next frame's close
+            // request (`process_viewport_command`).
+            close_requested_by_the_window(&mut window);
+            assert!(commands(&window).contains(&egui::ViewportCommand::CancelClose));
+            assert!(
+                window.query_by_label("Stop VMs and quit").is_some(),
+                "it asks"
+            );
+            assert!(window.state().app.any_vm_live());
+            drop(run);
+        }
+    }
+
+    /// What a close leads to is taken once: the phone's Back and the
+    /// desktop's close read it through `take_close_action` and carry it out.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_close_action_is_taken_once() {
+        let (mut app, command_rx, _scratch) = native_test_app();
+        let run = power_on(&mut app, &command_rx);
+        app.remember_close_choice(CloseChoice::Hide);
+        app.close_requested();
+        assert_eq!(app.take_close_action(), Some(CloseAction::Hide));
+        assert_eq!(app.take_close_action(), None);
+        assert!(app.any_vm_live());
+
+        app.remember_close_choice(CloseChoice::StopAndQuit);
+        app.close_requested();
+        assert_eq!(app.take_close_action(), Some(CloseAction::Quit));
+        assert_eq!(app.take_close_action(), None);
+        assert!(!app.any_vm_live());
+        drop(run);
+    }
+
+    /// What carrying out a close did: how often the app left the screen, and
+    /// what was asked of the window.
+    #[cfg(not(target_arch = "wasm32"))]
+    struct CloseCarriedOut {
+        left_the_screen: u32,
+        commands: Vec<egui::ViewportCommand>,
+    }
+
+    /// Carries out the last close's decision as `platform` does, the app
+    /// leaving the screen through a counter.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn carry_out_on(app: &mut NativeShellApp, platform: ClosePlatform) -> CloseCarriedOut {
+        let mut left_the_screen = 0;
+        let output = egui::Context::default().run_logic(&egui::RawInput::default(), |ctx| {
+            app.perform_close_action(ctx, platform, || left_the_screen += 1);
+        });
+        CloseCarriedOut {
+            left_the_screen,
+            commands: output
+                .viewport_commands
+                .get(&egui::ViewportId::ROOT)
+                .cloned()
+                .unwrap_or_default(),
+        }
+    }
+
+    /// A close of the window, as `window` describes it, taken over as
+    /// `platform` takes it. Returns what was asked of the window.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn take_over_a_close_on(
+        app: &mut NativeShellApp,
+        platform: ClosePlatform,
+        window: egui::ViewportInfo,
+    ) -> Vec<egui::ViewportCommand> {
+        let mut input = egui::RawInput::default();
+        input.viewports.insert(
+            egui::ViewportId::ROOT,
+            egui::ViewportInfo {
+                events: vec![egui::ViewportEvent::Close],
+                ..window
+            },
+        );
+        egui::Context::default()
+            .run_logic(&input, |ctx| app.take_over_close(ctx, platform))
+            .viewport_commands
+            .get(&egui::ViewportId::ROOT)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// The one mapping, on both platforms (`close_step`): Hide leaves the
+    /// screen and stops nothing; Quit, once every VM stopped, closes a
+    /// desktop's window, and sends a phone's app off the screen as Hide does,
+    /// since a phone's app never ends its own loop.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn each_platform_carries_out_a_close_its_own_way() {
+        for platform in [ClosePlatform::Desktop, ClosePlatform::Phone] {
+            let (mut app, command_rx, _scratch) = native_test_app();
+            let run = power_on(&mut app, &command_rx);
+
+            app.remember_close_choice(CloseChoice::Hide);
+            app.close_requested();
+            let hidden = carry_out_on(&mut app, platform);
+            assert_eq!(hidden.left_the_screen, 1, "{platform:?}");
+            assert!(hidden.commands.is_empty(), "{platform:?}");
+            assert!(app.any_vm_live(), "hiding stops nothing");
+
+            app.remember_close_choice(CloseChoice::StopAndQuit);
+            app.close_requested();
+            let quit = carry_out_on(&mut app, platform);
+            assert!(!app.any_vm_live());
+            match platform {
+                ClosePlatform::Desktop => {
+                    assert_eq!(quit.left_the_screen, 0);
+                    assert_eq!(quit.commands, [egui::ViewportCommand::Close]);
+                }
+                ClosePlatform::Phone => {
+                    assert_eq!(quit.left_the_screen, 1);
+                    assert!(quit.commands.is_empty(), "the window stays open");
+                }
+            }
+            drop(run);
+        }
+    }
+
+    /// A close of the window with no VM running goes ahead on a desktop. A
+    /// phone cancels it and quits by sending the app off the screen. With a
+    /// VM running, a phone cancels it and asks, as a desktop does.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_phone_cancels_every_close_and_quits_off_the_screen() {
+        let (mut desktop, _desktop_commands, _desktop_scratch) = native_test_app();
+        assert!(take_over_a_close_on(
+            &mut desktop,
+            ClosePlatform::Desktop,
+            egui::ViewportInfo::default()
+        )
+        .is_empty());
+        assert_eq!(desktop.take_close_action(), None);
+
+        let (mut phone, phone_commands, _phone_scratch) = native_test_app();
+        assert_eq!(
+            take_over_a_close_on(
+                &mut phone,
+                ClosePlatform::Phone,
+                egui::ViewportInfo::default()
+            ),
+            [egui::ViewportCommand::CancelClose]
+        );
+        let quit = carry_out_on(&mut phone, ClosePlatform::Phone);
+        assert_eq!(quit.left_the_screen, 1);
+        assert!(quit.commands.is_empty(), "the window stays open");
+
+        let run = power_on(&mut phone, &phone_commands);
+        assert_eq!(
+            take_over_a_close_on(
+                &mut phone,
+                ClosePlatform::Phone,
+                egui::ViewportInfo::default()
+            ),
+            [egui::ViewportCommand::CancelClose]
+        );
+        assert!(phone.close_question.is_some(), "with a VM running it asks");
+        drop(run);
+    }
+
+    /// A close taken over while a VM runs brings a minimized window back for
+    /// its question on a desktop alone: a phone asks nothing of its window
+    /// but to stay open.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn only_a_desktop_brings_a_minimized_window_back_to_ask() {
+        let minimized = egui::ViewportInfo {
+            minimized: Some(true),
+            ..egui::ViewportInfo::default()
+        };
+        for platform in [ClosePlatform::Desktop, ClosePlatform::Phone] {
+            let (mut app, command_rx, _scratch) = native_test_app();
+            let run = power_on(&mut app, &command_rx);
+
+            let asked = take_over_a_close_on(&mut app, platform, minimized.clone());
+
+            assert!(app.close_question.is_some(), "{platform:?} asks");
+            match platform {
+                ClosePlatform::Desktop => assert_eq!(
+                    asked,
+                    [
+                        egui::ViewportCommand::CancelClose,
+                        egui::ViewportCommand::Minimized(false),
+                        egui::ViewportCommand::Focus
+                    ]
+                ),
+                ClosePlatform::Phone => {
+                    assert_eq!(asked, [egui::ViewportCommand::CancelClose]);
+                }
+            }
+            drop(run);
+        }
+    }
+
+    /// Back's order, topmost first: with one thing open and everything
+    /// below it, Back puts that one away; with nothing open, Back closes.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn back_puts_away_the_topmost_thing_open() {
+        let topmost_first = [
+            Overlay::Shell(ShellOverlay::CloseQuestion),
+            Overlay::Shell(ShellOverlay::Confirmation),
+            Overlay::Shell(ShellOverlay::Popup),
+            Overlay::Host(HostWindow::FileBrowser),
+            Overlay::Host(HostWindow::KeyPad),
+            Overlay::Shell(ShellOverlay::ConsoleMenu),
+            Overlay::Shell(ShellOverlay::FloppyMaker),
+            Overlay::Shell(ShellOverlay::About),
+            Overlay::Shell(ShellOverlay::VmList),
+        ];
+        for (place, topmost) in topmost_first.iter().enumerate() {
+            // Listed bottom first, so the order is Back's own.
+            let open: Vec<Overlay> = topmost_first[place..].iter().rev().copied().collect();
+            assert_eq!(back_press(&open), BackPress::PutAway(*topmost));
+        }
+        assert_eq!(back_press(&[]), BackPress::Close);
+    }
+
+    /// Back answers the close question with Cancel, before the host's file
+    /// browser under it: nothing is decided or remembered, and the VM runs.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn back_answers_the_close_question_with_cancel() {
+        let (mut app, command_rx, scratch) = native_test_app();
+        let run = power_on(&mut app, &command_rx);
+        app.chrome.library = Drawer::Closed;
+        let ctx = egui::Context::default();
+        app.close_requested();
+        assert!(app.close_question.is_some());
+        assert_eq!(app.back_pressed(&ctx, &[HostWindow::FileBrowser]), None);
+        assert!(app.close_question.is_none());
+        assert_eq!(app.take_close_action(), None);
+        assert!(app.any_vm_live());
+        assert_eq!(scratch.library().close_choice(), CloseChoice::Ask);
+        drop(run);
+    }
+
+    /// Back cancels a step waiting for confirmation, before the host's
+    /// windows: the file it would delete is kept.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn back_cancels_a_confirmation() {
+        let (mut app, _command_rx, scratch) = native_test_app();
+        app.chrome.library = Drawer::Closed;
+        let broken = scratch.dir.join("broken.toml");
+        fs::write(&broken, "not a VM").expect("write");
+        app.pending_confirm = Some(PendingConfirm::DeleteBroken(broken.clone()));
+        let ctx = egui::Context::default();
+        let host = [HostWindow::FileBrowser, HostWindow::KeyPad];
+        assert_eq!(app.back_pressed(&ctx, &host), None);
+        assert!(app.pending_confirm.is_none());
+        assert!(broken.exists(), "nothing was deleted");
+    }
+
+    /// Back closes an open menu or drop-down list before the host's windows.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn back_closes_an_open_popup() {
+        let (mut app, _command_rx, _scratch) = native_test_app();
+        app.chrome.library = Drawer::Closed;
+        let ctx = egui::Context::default();
+        egui::Popup::open_id(&ctx, egui::Id::new("a menu"));
+        assert_eq!(app.back_pressed(&ctx, &[HostWindow::KeyPad]), None);
+        assert!(!egui::Popup::is_any_open(&ctx));
+    }
+
+    /// Back hands the host its own windows, the file browser before the key
+    /// pad, both above the full-screen console's menu, which stays open.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn back_hands_the_host_its_windows() {
+        let (mut app, command_rx, _scratch) = native_test_app();
+        let run = power_on(&mut app, &command_rx);
+        app.chrome.library = Drawer::Closed;
+        app.full_screen_menu_open = true;
+        let ctx = egui::Context::default();
+        let host = [HostWindow::KeyPad, HostWindow::FileBrowser];
+        assert_eq!(app.back_pressed(&ctx, &host), Some(HostWindow::FileBrowser));
+        assert_eq!(
+            app.back_pressed(&ctx, &[HostWindow::KeyPad]),
+            Some(HostWindow::KeyPad)
+        );
+        assert!(app.full_screen_menu_open);
+        drop(run);
+    }
+
+    /// Over the full-screen console Back closes its menu, and then, with
+    /// nothing open on the screen, is a close, which asks while the VM runs.
+    /// The About window, which the full-screen console does not draw, does
+    /// not count.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn back_closes_the_console_menu_then_asks() {
+        let (mut app, command_rx, _scratch) = native_test_app();
+        let run = power_on(&mut app, &command_rx);
+        app.chrome.library = Drawer::Closed;
+        app.chrome.show_about = true;
+        app.full_screen_menu_open = true;
+        let ctx = egui::Context::default();
+        assert_eq!(
+            app.console_view(),
+            crate::android_support::ConsoleView::FullScreen
+        );
+        assert_eq!(app.back_pressed(&ctx, &[]), None);
+        assert!(!app.full_screen_menu_open);
+        assert!(app.close_question.is_none());
+        assert_eq!(app.back_pressed(&ctx, &[]), None);
+        assert!(app.close_question.is_some(), "with nothing open, Back asks");
+        drop(run);
+    }
+
+    /// With the shell's bars shown, Back closes the floppy maker, then the
+    /// About window, then the VM list, and only then is a close.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn back_closes_the_shells_windows_then_the_vm_list() {
+        let (mut app, command_rx, _scratch) = native_test_app();
+        let run = power_on(&mut app, &command_rx);
+        app.chrome.go_to(ShellPage::Home);
+        app.chrome.library = Drawer::Open;
+        app.chrome.show_about = true;
+        app.floppy_maker_open = true;
+        let ctx = egui::Context::default();
+        assert_eq!(app.back_pressed(&ctx, &[]), None);
+        assert!(!app.floppy_maker_open);
+        assert!(app.chrome.show_about);
+        assert_eq!(app.back_pressed(&ctx, &[]), None);
+        assert!(!app.chrome.show_about);
+        assert_eq!(app.chrome.library, Drawer::Open);
+        assert_eq!(app.back_pressed(&ctx, &[]), None);
+        assert_eq!(app.chrome.library, Drawer::Closed);
+        assert!(app.close_question.is_none());
+        assert_eq!(app.back_pressed(&ctx, &[]), None);
+        assert!(app.close_question.is_some());
+        drop(run);
+    }
+
+    /// With nothing open, Back does nothing while no VM runs, and follows
+    /// the remembered choice while one does.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn back_with_nothing_open_does_nothing_or_follows_the_choice() {
+        let (mut app, command_rx, _scratch) = native_test_app();
+        app.chrome.library = Drawer::Closed;
+        let ctx = egui::Context::default();
+        assert_eq!(app.back_pressed(&ctx, &[]), None);
+        assert!(app.close_question.is_none());
+        assert_eq!(app.take_close_action(), None);
+
+        let run = power_on(&mut app, &command_rx);
+        app.remember_close_choice(CloseChoice::StopAndQuit);
+        assert_eq!(app.back_pressed(&ctx, &[]), None);
+        assert_eq!(app.take_close_action(), Some(CloseAction::Quit));
+        assert!(!app.any_vm_live());
+        drop(run);
+    }
+
+    /// The phone's console menu opens at its top. Scrolled to its end when
+    /// it closed, it opens again with its first item where that item stood
+    /// the first time it opened.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn the_full_screen_menu_opens_at_its_top() {
+        use egui_kittest::{kittest::Queryable, Harness};
+
+        // A landscape phone's console, and a list taller than it.
+        let area = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(640.0, 360.0));
+        let mut menu = Harness::builder().with_size(area.size()).build_ui_state(
+            move |ui, shown: &mut Option<MenuScroll>| {
+                if let Some(scroll) = *shown {
+                    show_full_screen_menu(ui.ctx(), area, scroll, |ui| {
+                        for item in 0..40 {
+                            ui.label(format!("Item {item}"));
+                        }
+                    });
+                }
+            },
+            Some(MenuScroll::Top),
+        );
+        menu.step();
+        *menu.state_mut() = Some(MenuScroll::Kept);
+        menu.run_steps(2);
+        let first_opening = menu.get_by_label("Item 0").rect().top();
+
+        // The wheel, over the list, scrolls it to its end.
+        menu.hover_at(menu.get_by_label("Item 0").rect().center());
+        menu.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, -2000.0),
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers::NONE,
+        });
+        menu.run_steps(3);
+        assert!(
+            menu.get_by_label("Item 0").rect().top() < first_opening,
+            "the list was scrolled to its end"
+        );
+
+        // Closed for a frame, then opened again.
+        *menu.state_mut() = None;
+        menu.step();
+        *menu.state_mut() = Some(MenuScroll::Top);
+        menu.step();
+        *menu.state_mut() = Some(MenuScroll::Kept);
+        menu.run_steps(2);
+        assert_eq!(
+            menu.get_by_label("Item 0").rect().top(),
+            first_opening,
+            "the menu opens at its top"
+        );
     }
 }

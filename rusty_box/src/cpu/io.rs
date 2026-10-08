@@ -29,6 +29,15 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// Returns true if access is allowed, false if #GP(0) should be raised.
     /// Based on Bochs io.cc allow_io().
     fn allow_io(&mut self, port: u16, len: u32) -> super::Result<bool> {
+        // Bochs io.cc `allow_io`: with the debug console on for all rings,
+        // port 0xE9 is open to unprivileged code, before IOPL or the TSS
+        // bitmap is consulted.
+        if port == 0x00E9
+            && self.devices.port_e9_hack() == crate::iodev::PortE9Hack::AllRings
+        {
+            return Ok(true);
+        }
+
         // If not in protected mode, or CPL <= IOPL and not V8086, allow
         if !self.cr0.pe() {
             return Ok(true);
@@ -1660,5 +1669,43 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         // a cached trace cannot execute a stale tail.
         self.sync_io_events();
         self.smc_sync_after_phys_write();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::cpu::crregs::BxCr0;
+    use crate::cpu::decoder::BxSegregs;
+    use crate::cpu::exec_ctx::TestMachine;
+    use crate::iodev::PortE9Hack;
+
+    /// Bochs io.cc `allow_io`: only the all-rings console opens port 0xE9 to
+    /// code the I/O permission check would refuse. Here that is CPL 3 under
+    /// IOPL 0 with no 386 TSS to hold a bitmap, which refuses every port.
+    #[test]
+    fn only_the_all_rings_console_opens_port_0xe9_to_unprivileged_code() {
+        let mut machine = TestMachine::new();
+        let mut ctx = machine.ctx();
+        ctx.cr0.insert(BxCr0::PE);
+        ctx.sregs[BxSegregs::Cs as usize].selector.rpl = 3;
+        ctx.eflags.set_iopl(0);
+
+        for hack in [PortE9Hack::Off, PortE9Hack::On] {
+            ctx.devices.set_port_e9_hack(hack);
+            assert!(
+                !ctx.allow_io(0x00E9, 1).unwrap(),
+                "{hack:?}: unprivileged code is refused port 0xE9 like any port"
+            );
+        }
+
+        ctx.devices.set_port_e9_hack(PortE9Hack::AllRings);
+        assert!(
+            ctx.allow_io(0x00E9, 1).unwrap(),
+            "the all-rings console opens port 0xE9 at any privilege"
+        );
+        assert!(
+            !ctx.allow_io(0x00E8, 1).unwrap(),
+            "and opens no other port"
+        );
     }
 }

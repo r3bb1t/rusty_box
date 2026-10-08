@@ -17,6 +17,7 @@
 
 use super::{
     decoder::{BxSegregs, Instruction},
+    simd_int,
     xmm::BxPackedXmmRegister,
 };
 
@@ -50,13 +51,50 @@ pub(super) fn saturate_word_s_to_byte_u(val: i16) -> u8 {
 
 /// Saturate a signed 32-bit value to signed 16-bit range [-32768, 32767]
 #[inline]
-fn saturate_dword_s_to_word_s(val: i32) -> i16 {
+pub(super) fn saturate_dword_s_to_word_s(val: i32) -> i16 {
     if val > 32767 {
         32767
     } else if val < -32768 {
         -32768
     } else {
         val as i16
+    }
+}
+
+/// Bochs sse.cc `xmm_extrq`: the field `len` bits long at bit `shift` of
+/// `src`, moved to bit 0. Both are taken modulo 64, and a length of 0 keeps
+/// every bit from `shift` up.
+fn xmm_extrq(src: u64, shift: u8, len: u8) -> u64 {
+    let len = len & 0x3f;
+    let shift = shift & 0x3f;
+    let src = src >> shift;
+    if len != 0 {
+        src & ((1u64 << len) - 1)
+    } else {
+        src
+    }
+}
+
+/// Bochs sse.cc `xmm_insertq`: `dest` with the field `len` bits long at bit
+/// `shift` replaced by the low `len` bits of `src`. Both are taken modulo 64,
+/// and a length of 0 means all 64.
+fn xmm_insertq(dest: u64, src: u64, shift: u8, len: u8) -> u64 {
+    let len = len & 0x3f;
+    let shift = shift & 0x3f;
+    let mask = if len == 0 { u64::MAX } else { (1u64 << len) - 1 };
+    (dest & !(mask << shift)) | ((src & mask) << shift)
+}
+
+/// Saturate a signed 32-bit value to unsigned 16-bit range [0, 65535] —
+/// Bochs xmm.h `SaturateDwordSToWordU`.
+#[inline]
+pub(super) fn saturate_dword_s_to_word_u(val: i32) -> u16 {
+    if val < 0 {
+        0
+    } else if val > 65535 {
+        65535
+    } else {
+        val as u16
     }
 }
 
@@ -214,20 +252,57 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     // SSE helper: read op2 (register or memory)
     // ========================================================================
 
-    /// Read the second operand for SSE packed integer instructions.
-    /// If mod_c0, reads an XMM register; otherwise reads 128 bits from memory.
+    /// The 128-bit second operand of a legacy SSE instruction — Bochs load.cc
+    /// `LOAD_Wdq`, the memory-form loader of every legacy SSE opcode with a
+    /// 128-bit memory operand except the four string compares.
+    ///
+    /// The memory form must be 16-byte aligned, and raises #GP(0) otherwise,
+    /// unless MXCSR.MM allows misaligned SSE. A VEX encoding the decoder routes
+    /// to the same handler — the shared legacy tables keep some VEX forms, AES
+    /// among them, on their legacy opcode — is Bochs's `LOAD_Vector` instead,
+    /// which never checks alignment.
     #[inline]
     pub(super) fn sse_read_op2_xmm(
         &mut self,
         instr: &Instruction,
     ) -> super::Result<BxPackedXmmRegister> {
         if instr.mod_c0() {
-            Ok(self.read_xmm_reg(instr.src1()))
-        } else {
-            let eaddr = self.resolve_addr(instr);
-            let seg = BxSegregs::from(instr.seg());
-            self.v_read_xmmword(seg, eaddr)
+            return Ok(self.read_xmm_reg(instr.src1()));
         }
+        let eaddr = self.resolve_addr(instr);
+        let seg = BxSegregs::from(instr.seg());
+        if instr.is_vex() || self.mxcsr.misaligned_sse() {
+            self.v_read_xmmword(seg, eaddr)
+        } else {
+            self.v_read_xmmword_aligned(seg, eaddr)
+        }
+    }
+
+    /// Bochs cpu_templates.h `HANDLE_SSE_2OP`: a legacy SSE instruction whose
+    /// result is `func` applied to its destination and second operand.
+    fn sse_2op(&mut self, instr: &Instruction, func: simd_int::Xmm2Op) -> super::Result<()> {
+        self.prepare_sse()?;
+        let mut op1 = self.read_xmm_reg(instr.dst());
+        let op2 = self.sse_read_op2_xmm(instr)?;
+        func(&mut op1, &op2);
+        self.write_xmm_reg_lo128(instr.dst(), op1);
+        Ok(())
+    }
+
+    /// The same operand with no alignment rule — Bochs load.cc `LOADU_Wdq`,
+    /// the memory-form loader of PCMPESTRI, PCMPESTRM, PCMPISTRI and
+    /// PCMPISTRM in their legacy and VEX encodings alike.
+    #[inline]
+    pub(super) fn sse_read_op2_xmm_unaligned(
+        &mut self,
+        instr: &Instruction,
+    ) -> super::Result<BxPackedXmmRegister> {
+        if instr.mod_c0() {
+            return Ok(self.read_xmm_reg(instr.src1()));
+        }
+        let eaddr = self.resolve_addr(instr);
+        let seg = BxSegregs::from(instr.seg());
+        self.v_read_xmmword(seg, eaddr)
     }
 
     // ========================================================================
@@ -567,31 +642,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     }
 
     /// PMADDWD VdqWdq — multiply and add packed words to dwords
-    /// For each pair of adjacent words: result[i] = op1[2i]*op2[2i] + op1[2i+1]*op2[2i+1]
-    /// With the 0x80008000 overflow guard matching Bochs.
+    /// (Bochs `HANDLE_SSE_2OP<xmm_pmaddwd>`).
     pub(super) fn pmaddwd_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        let op1 = self.read_xmm_reg(instr.dst());
-        let op2 = self.sse_read_op2_xmm(instr)?;
-
-        let mut result = BxPackedXmmRegister::default();
-        for i in 0..4 {
-            if op1.xmm16u(i * 2) == 0x8000
-                && op1.xmm16u(i * 2 + 1) == 0x8000
-                && op2.xmm16u(i * 2) == 0x8000
-                && op2.xmm16u(i * 2 + 1) == 0x8000
-            {
-                result.set_xmm32u(i, 0x80000000);
-            } else {
-                result.set_xmm32s(
-                    i,
-                    (op1.xmm16s(i * 2) as i32) * (op2.xmm16s(i * 2) as i32)
-                        + (op1.xmm16s(i * 2 + 1) as i32) * (op2.xmm16s(i * 2 + 1) as i32),
-                );
-            }
-        }
-        self.write_xmm_reg_lo128(instr.dst(), result);
-        Ok(())
+        self.sse_2op(instr, simd_int::xmm_pmaddwd)
     }
 
     // ========================================================================
@@ -1268,74 +1321,71 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// PACKSSWB VdqWdq — pack signed words to signed bytes with saturation
     pub(super) fn packsswb_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        let op1 = self.read_xmm_reg(instr.dst());
-        let op2 = self.sse_read_op2_xmm(instr)?;
-
-        let mut result = BxPackedXmmRegister::default();
-        result.set_xmm_sbyte(0, saturate_word_s_to_byte_s(op1.xmm16s(0)));
-        result.set_xmm_sbyte(1, saturate_word_s_to_byte_s(op1.xmm16s(1)));
-        result.set_xmm_sbyte(2, saturate_word_s_to_byte_s(op1.xmm16s(2)));
-        result.set_xmm_sbyte(3, saturate_word_s_to_byte_s(op1.xmm16s(3)));
-        result.set_xmm_sbyte(4, saturate_word_s_to_byte_s(op1.xmm16s(4)));
-        result.set_xmm_sbyte(5, saturate_word_s_to_byte_s(op1.xmm16s(5)));
-        result.set_xmm_sbyte(6, saturate_word_s_to_byte_s(op1.xmm16s(6)));
-        result.set_xmm_sbyte(7, saturate_word_s_to_byte_s(op1.xmm16s(7)));
-        result.set_xmm_sbyte(8, saturate_word_s_to_byte_s(op2.xmm16s(0)));
-        result.set_xmm_sbyte(9, saturate_word_s_to_byte_s(op2.xmm16s(1)));
-        result.set_xmm_sbyte(10, saturate_word_s_to_byte_s(op2.xmm16s(2)));
-        result.set_xmm_sbyte(11, saturate_word_s_to_byte_s(op2.xmm16s(3)));
-        result.set_xmm_sbyte(12, saturate_word_s_to_byte_s(op2.xmm16s(4)));
-        result.set_xmm_sbyte(13, saturate_word_s_to_byte_s(op2.xmm16s(5)));
-        result.set_xmm_sbyte(14, saturate_word_s_to_byte_s(op2.xmm16s(6)));
-        result.set_xmm_sbyte(15, saturate_word_s_to_byte_s(op2.xmm16s(7)));
-        self.write_xmm_reg_lo128(instr.dst(), result);
-        Ok(())
+        self.sse_2op(instr, simd_int::xmm_packsswb)
     }
 
     /// PACKSSDW VdqWdq — pack signed dwords to signed words with saturation
     pub(super) fn packssdw_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        let op1 = self.read_xmm_reg(instr.dst());
-        let op2 = self.sse_read_op2_xmm(instr)?;
-
-        let mut result = BxPackedXmmRegister::default();
-        result.set_xmm16s(0, saturate_dword_s_to_word_s(op1.xmm32s(0)));
-        result.set_xmm16s(1, saturate_dword_s_to_word_s(op1.xmm32s(1)));
-        result.set_xmm16s(2, saturate_dword_s_to_word_s(op1.xmm32s(2)));
-        result.set_xmm16s(3, saturate_dword_s_to_word_s(op1.xmm32s(3)));
-        result.set_xmm16s(4, saturate_dword_s_to_word_s(op2.xmm32s(0)));
-        result.set_xmm16s(5, saturate_dword_s_to_word_s(op2.xmm32s(1)));
-        result.set_xmm16s(6, saturate_dword_s_to_word_s(op2.xmm32s(2)));
-        result.set_xmm16s(7, saturate_dword_s_to_word_s(op2.xmm32s(3)));
-        self.write_xmm_reg_lo128(instr.dst(), result);
-        Ok(())
+        self.sse_2op(instr, simd_int::xmm_packssdw)
     }
 
     /// PACKUSWB VdqWdq — pack signed words to unsigned bytes with saturation
     pub(super) fn packuswb_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        let op1 = self.read_xmm_reg(instr.dst());
-        let op2 = self.sse_read_op2_xmm(instr)?;
+        self.sse_2op(instr, simd_int::xmm_packuswb)
+    }
 
-        let mut result = BxPackedXmmRegister::default();
-        result.set_xmmubyte(0, saturate_word_s_to_byte_u(op1.xmm16s(0)));
-        result.set_xmmubyte(1, saturate_word_s_to_byte_u(op1.xmm16s(1)));
-        result.set_xmmubyte(2, saturate_word_s_to_byte_u(op1.xmm16s(2)));
-        result.set_xmmubyte(3, saturate_word_s_to_byte_u(op1.xmm16s(3)));
-        result.set_xmmubyte(4, saturate_word_s_to_byte_u(op1.xmm16s(4)));
-        result.set_xmmubyte(5, saturate_word_s_to_byte_u(op1.xmm16s(5)));
-        result.set_xmmubyte(6, saturate_word_s_to_byte_u(op1.xmm16s(6)));
-        result.set_xmmubyte(7, saturate_word_s_to_byte_u(op1.xmm16s(7)));
-        result.set_xmmubyte(8, saturate_word_s_to_byte_u(op2.xmm16s(0)));
-        result.set_xmmubyte(9, saturate_word_s_to_byte_u(op2.xmm16s(1)));
-        result.set_xmmubyte(10, saturate_word_s_to_byte_u(op2.xmm16s(2)));
-        result.set_xmmubyte(11, saturate_word_s_to_byte_u(op2.xmm16s(3)));
-        result.set_xmmubyte(12, saturate_word_s_to_byte_u(op2.xmm16s(4)));
-        result.set_xmmubyte(13, saturate_word_s_to_byte_u(op2.xmm16s(5)));
-        result.set_xmmubyte(14, saturate_word_s_to_byte_u(op2.xmm16s(6)));
-        result.set_xmmubyte(15, saturate_word_s_to_byte_u(op2.xmm16s(7)));
-        self.write_xmm_reg_lo128(instr.dst(), result);
+    /// PACKUSDW VdqWdq (66 0F 38 2B) — pack signed dwords to unsigned words
+    /// with saturation (SSE4.1; Bochs `HANDLE_SSE_2OP<xmm_packusdw>`)
+    pub(super) fn packusdw_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.sse_2op(instr, simd_int::xmm_packusdw)
+    }
+
+    // ========================================================================
+    // SSE4A (AMD) bit-field extract and insert — Bochs sse.cc. Each writes the
+    // low quadword of its destination and leaves the rest of the register
+    // alone (`BX_WRITE_XMM_REG_LO_QWORD`).
+    // ========================================================================
+
+    /// EXTRQ Udq, Ib, Ib2 (66 0F 78 /0 ib ib) — extract the field `Ib` bits
+    /// long at bit `Ib2` of the register's low quadword into its low bits.
+    pub(super) fn extrq_udq_ib_ib(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let source = self.read_xmm_reg(instr.dst()).xmm64u(0);
+        self.write_xmm_lo_qword(instr.dst(), xmm_extrq(source, instr.ib2(), instr.ib()));
+        Ok(())
+    }
+
+    /// EXTRQ Vdq, Uq (66 0F 79 /r) — as above, with the length in bits 5:0
+    /// and the position in bits 13:8 of the source register.
+    pub(super) fn extrq_vdq_uq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let control = self.read_xmm_reg(instr.src1()).xmm16u(0);
+        let source = self.read_xmm_reg(instr.dst()).xmm64u(0);
+        let extracted = xmm_extrq(source, (control >> 8) as u8, control as u8);
+        self.write_xmm_lo_qword(instr.dst(), extracted);
+        Ok(())
+    }
+
+    /// INSERTQ Vdq, Uq, Ib, Ib2 (F2 0F 78 /r ib ib) — insert the source's low
+    /// `Ib` bits into the destination's low quadword at bit `Ib2`.
+    pub(super) fn insertq_vdq_uq_ib_ib(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let destination = self.read_xmm_reg(instr.dst()).xmm64u(0);
+        let source = self.read_xmm_reg(instr.src1()).xmm64u(0);
+        let inserted = xmm_insertq(destination, source, instr.ib2(), instr.ib());
+        self.write_xmm_lo_qword(instr.dst(), inserted);
+        Ok(())
+    }
+
+    /// INSERTQ Vdq, Udq (F2 0F 79 /r) — as above, with the length in byte 8
+    /// and the position in byte 9 of the source register.
+    pub(super) fn insertq_vdq_udq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let source = self.read_xmm_reg(instr.src1());
+        let destination = self.read_xmm_reg(instr.dst()).xmm64u(0);
+        let inserted =
+            xmm_insertq(destination, source.xmm64u(0), source.xmmubyte(9), source.xmmubyte(8));
+        self.write_xmm_lo_qword(instr.dst(), inserted);
         Ok(())
     }
 
@@ -1618,36 +1668,53 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// PAVGB VdqWdq — packed average unsigned bytes: (a + b + 1) >> 1
     pub(super) fn pavgb_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        let op1 = self.read_xmm_reg(instr.dst());
-        let op2 = self.sse_read_op2_xmm(instr)?;
-
-        let mut result = BxPackedXmmRegister::default();
-        for i in 0..16 {
-            result.set_xmmubyte(
-                i,
-                ((op1.xmmubyte(i) as u16 + op2.xmmubyte(i) as u16 + 1) >> 1) as u8,
-            );
-        }
-        self.write_xmm_reg_lo128(instr.dst(), result);
-        Ok(())
+        self.sse_2op(instr, simd_int::xmm_pavgb)
     }
 
     /// PAVGW VdqWdq — packed average unsigned words: (a + b + 1) >> 1
     pub(super) fn pavgw_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        let op1 = self.read_xmm_reg(instr.dst());
-        let op2 = self.sse_read_op2_xmm(instr)?;
+        self.sse_2op(instr, simd_int::xmm_pavgw)
+    }
 
-        let mut result = BxPackedXmmRegister::default();
-        for i in 0..8 {
-            result.set_xmm16u(
-                i,
-                ((op1.xmm16u(i) as u32 + op2.xmm16u(i) as u32 + 1) >> 1) as u16,
-            );
-        }
-        self.write_xmm_reg_lo128(instr.dst(), result);
-        Ok(())
+    /// PMINSB VdqWdq (66 0F 38 38) — packed minimum signed bytes (SSE4.1)
+    pub(super) fn pminsb_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.sse_2op(instr, simd_int::xmm_pminsb)
+    }
+
+    /// PMINSD VdqWdq (66 0F 38 39) — packed minimum signed dwords (SSE4.1)
+    pub(super) fn pminsd_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.sse_2op(instr, simd_int::xmm_pminsd)
+    }
+
+    /// PMINUW VdqWdq (66 0F 38 3A) — packed minimum unsigned words (SSE4.1)
+    pub(super) fn pminuw_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.sse_2op(instr, simd_int::xmm_pminuw)
+    }
+
+    /// PMAXSB VdqWdq (66 0F 38 3C) — packed maximum signed bytes (SSE4.1)
+    pub(super) fn pmaxsb_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.sse_2op(instr, simd_int::xmm_pmaxsb)
+    }
+
+    /// PMAXSD VdqWdq (66 0F 38 3D) — packed maximum signed dwords (SSE4.1)
+    pub(super) fn pmaxsd_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.sse_2op(instr, simd_int::xmm_pmaxsd)
+    }
+
+    /// PMAXUW VdqWdq (66 0F 38 3E) — packed maximum unsigned words (SSE4.1)
+    pub(super) fn pmaxuw_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.sse_2op(instr, simd_int::xmm_pmaxuw)
+    }
+
+    /// PCMPEQQ VdqWdq (66 0F 38 29) — packed compare equal qwords (SSE4.1)
+    pub(super) fn pcmpeqq_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.sse_2op(instr, simd_int::xmm_pcmpeqq)
+    }
+
+    /// PCMPGTQ VdqWdq (66 0F 38 37) — packed compare signed greater-than
+    /// qwords (SSE4.2)
+    pub(super) fn pcmpgtq_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.sse_2op(instr, simd_int::xmm_pcmpgtq)
     }
 
     // ========================================================================
@@ -1773,66 +1840,58 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// PMADDUBSW VdqWdq (66 0F 38 04) - Multiply Unsigned/Signed Bytes, Add Pairs (128-bit)
     /// Bochs: HANDLE_SSE_2OP<xmm_pmaddubsw> / simd_int.h
     pub(super) fn pmaddubsw_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        let op1 = self.read_xmm_reg(instr.dst());
-        let op2 = self.sse_read_op2_xmm(instr)?;
-
-        let mut result = op1;
-        for n in 0..8usize {
-            let temp = (op1.xmmubyte(n * 2) as i32) * (op2.xmm_sbyte(n * 2) as i32)
-                + (op1.xmmubyte(n * 2 + 1) as i32) * (op2.xmm_sbyte(n * 2 + 1) as i32);
-            result.set_xmm16s(n, saturate_dword_s_to_word_s(temp));
-        }
-        self.write_xmm_reg_lo128(instr.dst(), result);
-        Ok(())
+        self.sse_2op(instr, simd_int::xmm_pmaddubsw)
     }
 
     /// PSIGNB VdqWdq (66 0F 38 08) - Negate/Zero/Keep Bytes Based on Sign (128-bit)
     /// Bochs: HANDLE_SSE_2OP<xmm_psignb> / simd_int.h
     pub(super) fn psignb_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        let op1 = self.read_xmm_reg(instr.dst());
-        let op2 = self.sse_read_op2_xmm(instr)?;
-
-        let mut result = op1;
-        for n in 0..16usize {
-            let sign = (op2.xmm_sbyte(n) > 0) as i32 - (op2.xmm_sbyte(n) < 0) as i32;
-            result.set_xmm_sbyte(n, ((op1.xmm_sbyte(n) as i32) * sign) as i8);
-        }
-        self.write_xmm_reg_lo128(instr.dst(), result);
-        Ok(())
+        self.sse_2op(instr, simd_int::xmm_psignb)
     }
 
     /// PSIGNW VdqWdq (66 0F 38 09) - Negate/Zero/Keep Words Based on Sign (128-bit)
     /// Bochs: HANDLE_SSE_2OP<xmm_psignw> / simd_int.h
     pub(super) fn psignw_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        let op1 = self.read_xmm_reg(instr.dst());
-        let op2 = self.sse_read_op2_xmm(instr)?;
-
-        let mut result = op1;
-        for n in 0..8usize {
-            let sign = (op2.xmm16s(n) > 0) as i32 - (op2.xmm16s(n) < 0) as i32;
-            result.set_xmm16s(n, ((op1.xmm16s(n) as i32) * sign) as i16);
-        }
-        self.write_xmm_reg_lo128(instr.dst(), result);
-        Ok(())
+        self.sse_2op(instr, simd_int::xmm_psignw)
     }
 
     /// PSIGND VdqWdq (66 0F 38 0A) - Negate/Zero/Keep Dwords Based on Sign (128-bit)
     /// Bochs: HANDLE_SSE_2OP<xmm_psignd> / simd_int.h
     pub(super) fn psignd_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        let op1 = self.read_xmm_reg(instr.dst());
-        let op2 = self.sse_read_op2_xmm(instr)?;
+        self.sse_2op(instr, simd_int::xmm_psignd)
+    }
 
-        let mut result = op1;
-        for n in 0..4usize {
-            let sign = (op2.xmm32s(n) > 0) as i64 - (op2.xmm32s(n) < 0) as i64;
-            result.set_xmm32s(n, ((op1.xmm32s(n) as i64) * sign) as i32);
-        }
-        self.write_xmm_reg_lo128(instr.dst(), result);
-        Ok(())
+    /// PHADDW VdqWdq (66 0F 38 01) - Horizontal Add Words (Bochs
+    /// HANDLE_SSE_2OP<xmm_phaddw>)
+    pub(super) fn phaddw_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.sse_2op(instr, simd_int::xmm_phaddw)
+    }
+
+    /// PHADDD VdqWdq (66 0F 38 02) - Horizontal Add Dwords
+    pub(super) fn phaddd_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.sse_2op(instr, simd_int::xmm_phaddd)
+    }
+
+    /// PHADDSW VdqWdq (66 0F 38 03) - Horizontal Add Words with Signed
+    /// Saturation
+    pub(super) fn phaddsw_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.sse_2op(instr, simd_int::xmm_phaddsw)
+    }
+
+    /// PHSUBW VdqWdq (66 0F 38 05) - Horizontal Subtract Words
+    pub(super) fn phsubw_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.sse_2op(instr, simd_int::xmm_phsubw)
+    }
+
+    /// PHSUBD VdqWdq (66 0F 38 06) - Horizontal Subtract Dwords
+    pub(super) fn phsubd_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.sse_2op(instr, simd_int::xmm_phsubd)
+    }
+
+    /// PHSUBSW VdqWdq (66 0F 38 07) - Horizontal Subtract Words with Signed
+    /// Saturation
+    pub(super) fn phsubsw_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.sse_2op(instr, simd_int::xmm_phsubsw)
     }
 
     /// PALIGNR VdqWdqIb (66 0F 3A 0F) - Packed Align Right (128-bit)
@@ -2125,5 +2184,153 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         blendvpd_lane(&mut op1, &op2, &mask);
         self.write_xmm_reg_lo128(instr.dst(), op1);
         Ok(())
+    }
+}
+
+/// SSE4A, run on the AMD model in flat long mode. The public API builds every
+/// machine on the default (Intel) model, so these drive the AMD processor
+/// through `TestMachine` rather than as an integration test. They rely on
+/// 64-bit mode, flat segment caches, an identity map of the low 2 MiB and
+/// CR4.OSFXSR — not on a GDT, a wider map or the RFLAGS a guest is handed.
+#[cfg(all(test, feature = "std"))]
+mod tests {
+    use super::*;
+    use crate::cpu::api_bridge::SegmentSize;
+    use crate::cpu::exec_ctx::{ExecCtx, TestMachine};
+    use crate::cpu::instrumentation::X86Reg;
+    use crate::memory::BxMemC;
+
+    /// Where the paging structures go: one PML4, one PDPT and one page
+    /// directory whose first entry maps the low 2 MiB onto itself.
+    const PML4: u64 = 0x1000;
+    const PDPT: u64 = 0x2000;
+    const PAGE_DIRECTORY: u64 = 0x3000;
+    /// Present and writable; and for a page-directory entry, 2 MiB.
+    const PRESENT_WRITABLE: u64 = 0x3;
+    const LARGE_PAGE: u64 = 0x80;
+    /// CR4.OSFXSR: legacy SSE executes.
+    const CR4_OSFXSR: u32 = 1 << 9;
+    const CODE_SELECTOR: u16 = 0x08;
+    const DATA_SELECTOR: u16 = 0x10;
+
+    /// The AMD model: the one that advertises SSE4A.
+    fn ryzen() -> TestMachine {
+        TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen())
+    }
+
+    /// Write `bytes` to RAM at `at`, all of them.
+    fn write_ram(memory: &mut BxMemC, at: u64, bytes: &[u8]) {
+        let copied = memory.write_ram(at, bytes).expect("RAM");
+        assert_eq!(copied, bytes.len(), "the write at {at:#x} reached RAM whole");
+    }
+
+    /// Read `out.len()` bytes of RAM at `at`, all of them.
+    fn read_ram(memory: &mut BxMemC, at: u64, out: &mut [u8]) {
+        let copied = memory.read_ram(at, out).expect("RAM");
+        assert_eq!(copied, out.len(), "the read at {at:#x} came from RAM whole");
+    }
+
+    /// The processor from reset in flat long mode with CR4.OSFXSR set: a
+    /// 64-bit code segment cache, flat data segment caches, CR0.PG, CR4.PAE
+    /// and EFER.LMA over an identity map of the low 2 MiB. No GDT backs the
+    /// selectors, so nothing here may reload a segment register.
+    fn long_mode_sse(machine: &mut TestMachine) -> ExecCtx<'_, ()> {
+        let memory = machine.memory_mut();
+        write_ram(memory, PML4, &(PDPT | PRESENT_WRITABLE).to_le_bytes());
+        write_ram(memory, PDPT, &(PAGE_DIRECTORY | PRESENT_WRITABLE).to_le_bytes());
+        write_ram(memory, PAGE_DIRECTORY, &(PRESENT_WRITABLE | LARGE_PAGE).to_le_bytes());
+
+        let mut cpu = machine.ctx();
+        cpu.reset(crate::cpu::ResetReason::Hardware);
+        cpu.set_seg_for_api(X86Reg::Cs, CODE_SELECTOR, 0, 0xFFFF_FFFF, SegmentSize::Long64);
+        for reg in [X86Reg::Ds, X86Reg::Es, X86Reg::Ss, X86Reg::Fs, X86Reg::Gs] {
+            cpu.set_seg_for_api(reg, DATA_SELECTOR, 0, 0xFFFF_FFFF, SegmentSize::Bits32);
+        }
+        cpu.enter_long_mode_for_api(PML4);
+        assert!(cpu.long64_mode(), "the processor is in 64-bit mode");
+        let cr4 = cpu.cr4.get32();
+        cpu.set_cr4_raw_for_api(cr4 | CR4_OSFXSR);
+        cpu
+    }
+
+    /// Decode `bytes` as one instruction and execute it; it must retire. A
+    /// fault would unwind as `CpuLoopRestart`, so that fails the test too.
+    fn execute(cpu: &mut ExecCtx<'_, ()>, bytes: &[u8]) {
+        let instr = rusty_box_decoder::fetch_decode64(bytes).expect("decodes");
+        if let Err(error) = cpu.execute_instruction(&instr) {
+            panic!("{:?} did not retire: {error:?}", instr.get_ia_opcode());
+        }
+    }
+
+    fn xmm_from_qwords(low: u64, high: u64) -> BxPackedXmmRegister {
+        let mut reg = BxPackedXmmRegister::default();
+        reg.set_xmm64u(0, low);
+        reg.set_xmm64u(1, high);
+        reg
+    }
+
+    const FIELD: u64 = 0x1234_5678_9ABC_DEF0;
+    const KEPT: u64 = 0xAAAA_BBBB_CCCC_DDDD;
+
+    /// EXTRQ moves the field it names to bit 0 and keeps the high quadword;
+    /// a length of 0 means all 64 bits (Bochs sse.cc `xmm_extrq`).
+    #[test]
+    fn extrq_extracts_the_field_it_names() {
+        let mut machine = ryzen();
+        let mut cpu = long_mode_sse(&mut machine);
+        cpu.write_xmm_reg(1, xmm_from_qwords(FIELD, KEPT));
+        // extrq xmm1, 8, 4: 8 bits at bit 4.
+        execute(&mut cpu, &[0x66, 0x0F, 0x78, 0xC1, 0x08, 0x04]);
+        assert_eq!(cpu.read_xmm_reg(1).xmm64u(0), 0xEF);
+        assert_eq!(cpu.read_xmm_reg(1).xmm64u(1), KEPT);
+
+        // extrq xmm1, xmm2 with length 16 in bits 5:0 and position 8 in 13:8.
+        cpu.write_xmm_reg(1, xmm_from_qwords(FIELD, KEPT));
+        cpu.write_xmm_reg(2, xmm_from_qwords(0x0810, 0));
+        execute(&mut cpu, &[0x66, 0x0F, 0x79, 0xCA]);
+        assert_eq!(cpu.read_xmm_reg(1).xmm64u(0), 0xBCDE);
+
+        // Length 0, position 12: everything from bit 12 up.
+        cpu.write_xmm_reg(1, xmm_from_qwords(FIELD, KEPT));
+        execute(&mut cpu, &[0x66, 0x0F, 0x78, 0xC1, 0x00, 0x0C]);
+        assert_eq!(cpu.read_xmm_reg(1).xmm64u(0), FIELD >> 12);
+    }
+
+    /// INSERTQ replaces the field it names with the source's low bits.
+    #[test]
+    fn insertq_replaces_the_field_it_names() {
+        let mut machine = ryzen();
+        let mut cpu = long_mode_sse(&mut machine);
+        cpu.write_xmm_reg(0, xmm_from_qwords(u64::MAX, KEPT));
+        cpu.write_xmm_reg(1, xmm_from_qwords(0x1234, 0));
+        // insertq xmm0, xmm1, 8, 16: 8 bits at bit 16.
+        execute(&mut cpu, &[0xF2, 0x0F, 0x78, 0xC1, 0x08, 0x10]);
+        assert_eq!(cpu.read_xmm_reg(0).xmm64u(0), 0xFFFF_FFFF_FF34_FFFF);
+        assert_eq!(cpu.read_xmm_reg(0).xmm64u(1), KEPT);
+
+        // insertq xmm0, xmm1 with length 4 in byte 8 and position 60 in byte 9.
+        cpu.write_xmm_reg(0, xmm_from_qwords(0, KEPT));
+        cpu.write_xmm_reg(1, xmm_from_qwords(0xF, 0x3C04));
+        execute(&mut cpu, &[0xF2, 0x0F, 0x79, 0xC1]);
+        assert_eq!(cpu.read_xmm_reg(0).xmm64u(0), 0xF000_0000_0000_0000);
+    }
+
+    /// MOVNTSS and MOVNTSD store the low dword and qword, through the page
+    /// walk like any guest store.
+    #[test]
+    fn the_scalar_non_temporal_stores_write_the_low_element() {
+        const AT: u64 = 0x8000;
+        let mut machine = ryzen();
+        let mut cpu = long_mode_sse(&mut machine);
+        cpu.write_xmm_reg(3, xmm_from_qwords(FIELD, KEPT));
+        write_ram(cpu.memory, AT, &[0u8; 16]);
+        // movntss [0x8000], xmm3: F3 0F 2B /r, ModRM 0x1C + SIB 0x25 disp32.
+        execute(&mut cpu, &[0xF3, 0x0F, 0x2B, 0x1C, 0x25, 0x00, 0x80, 0x00, 0x00]);
+        // movntsd [0x8008], xmm3
+        execute(&mut cpu, &[0xF2, 0x0F, 0x2B, 0x1C, 0x25, 0x08, 0x80, 0x00, 0x00]);
+        let mut stored = [0u8; 16];
+        read_ram(cpu.memory, AT, &mut stored);
+        assert_eq!(stored[..8], [0xF0, 0xDE, 0xBC, 0x9A, 0, 0, 0, 0], "the low dword alone");
+        assert_eq!(stored[8..], FIELD.to_le_bytes(), "the low qword");
     }
 }

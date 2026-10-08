@@ -644,6 +644,21 @@ pub(in crate::cpu) fn norm_round_pack_to_extf80(
 // Round-to-integer helpers (for extF80→i32/i64 conversions)
 // ============================================================
 
+/// The integer indefinite for a conversion `softfloat_roundToI32` cannot
+/// represent: the invalid flag, and the overflow value for the sign.
+fn round_to_i32_invalid(sign: bool, status: &mut SoftFloatStatus) -> i32 {
+    softfloat_raise_flags(status, FLAG_INVALID);
+    if sign {
+        I32_FROM_NEG_OVERFLOW
+    } else {
+        I32_FROM_POS_OVERFLOW
+    }
+}
+
+/// Bochs softfloat3e/s_roundToI32.cc `softfloat_roundToI32`: `sig` is a
+/// fixed-point value with the binary point between bits 11 and 12. A value
+/// too large for 32 bits — a NaN's or an infinity's significand among them —
+/// is invalid and becomes the integer indefinite.
 pub(in crate::cpu) fn softfloat_round_to_i32(
     sign: bool,
     sig: u64,
@@ -651,40 +666,51 @@ pub(in crate::cpu) fn softfloat_round_to_i32(
     exact: bool,
     status: &mut SoftFloatStatus,
 ) -> i32 {
-    let round_near_even = rounding_mode == ROUND_NEAR_EVEN;
+    let orig_sig = sig >> 12;
     let mut round_increment: u32 = 0x800;
-    if !round_near_even && rounding_mode != ROUND_NEAR_MAXMAG {
-        round_increment = if rounding_mode == (if sign { ROUND_MIN } else { ROUND_MAX }) {
-            0xFFF
-        } else {
-            0
-        };
+    if rounding_mode != ROUND_NEAR_MAXMAG && rounding_mode != ROUND_NEAR_EVEN {
+        round_increment = 0;
+        if rounding_mode == (if sign { ROUND_MIN } else { ROUND_MAX }) {
+            round_increment = 0xFFF;
+        }
     }
     let round_bits = (sig & 0xFFF) as u32;
-    let sig = (sig + round_increment as u64) >> 12;
-    let sig = if round_near_even && (round_bits == 0x800) {
-        sig & !1
-    } else {
-        sig
-    };
-    let mut z = sig as i32;
-    if sign {
-        z = -z;
+    let sig = sig.wrapping_add(u64::from(round_increment));
+    if sig & 0xFFFF_F000_0000_0000 != 0 {
+        return round_to_i32_invalid(sign, status);
     }
+    let mut sig32 = (sig >> 12) as u32;
+    if round_bits == 0x800 && rounding_mode == ROUND_NEAR_EVEN {
+        sig32 &= !1;
+    }
+    let z = (if sign { sig32.wrapping_neg() } else { sig32 }) as i32;
     if z != 0 && ((z < 0) ^ sign) {
-        softfloat_raise_flags(status, FLAG_INVALID);
-        return if sign {
-            I32_FROM_NEG_OVERFLOW
-        } else {
-            I32_FROM_POS_OVERFLOW
-        };
+        return round_to_i32_invalid(sign, status);
     }
-    if round_bits != 0 && exact {
-        softfloat_raise_flags(status, FLAG_INEXACT);
+    if round_bits != 0 {
+        if exact {
+            softfloat_raise_flags(status, FLAG_INEXACT);
+        }
+        if u64::from(sig32) > orig_sig {
+            softfloat_set_rounding_up(status);
+        }
     }
     z
 }
 
+/// The integer indefinite for a conversion `softfloat_roundToI64` cannot
+/// represent: the invalid flag, and the overflow value for the sign.
+fn round_to_i64_invalid(sign: bool, status: &mut SoftFloatStatus) -> i64 {
+    softfloat_raise_flags(status, FLAG_INVALID);
+    if sign {
+        I64_FROM_NEG_OVERFLOW
+    } else {
+        I64_FROM_POS_OVERFLOW
+    }
+}
+
+/// Bochs softfloat3e/s_roundToI64.cc `softfloat_roundToI64`: the 128-bit
+/// fixed-point value `sig:sig_extra`, binary point between the words.
 pub(in crate::cpu) fn softfloat_round_to_i64(
     sign: bool,
     sig: u64,
@@ -693,41 +719,33 @@ pub(in crate::cpu) fn softfloat_round_to_i64(
     exact: bool,
     status: &mut SoftFloatStatus,
 ) -> i64 {
-    let round_near_even = rounding_mode == ROUND_NEAR_EVEN;
-    let mut do_increment = 0x8000000000000000 <= sig_extra;
-    if !round_near_even && rounding_mode != ROUND_NEAR_MAXMAG {
-        do_increment =
-            (rounding_mode == (if sign { ROUND_MIN } else { ROUND_MAX })) && sig_extra != 0;
-    }
+    let orig_sig = sig;
+    let increment = if rounding_mode == ROUND_NEAR_MAXMAG || rounding_mode == ROUND_NEAR_EVEN {
+        0x8000_0000_0000_0000 <= sig_extra
+    } else {
+        sig_extra != 0 && rounding_mode == (if sign { ROUND_MIN } else { ROUND_MAX })
+    };
     let mut sig = sig;
-    if do_increment {
+    if increment {
         sig = sig.wrapping_add(1);
         if sig == 0 {
-            softfloat_raise_flags(status, FLAG_INVALID);
-            return if sign {
-                I64_FROM_NEG_OVERFLOW
-            } else {
-                I64_FROM_POS_OVERFLOW
-            };
+            return round_to_i64_invalid(sign, status);
         }
-        if round_near_even && (sig_extra == 0x8000000000000000) {
+        if sig_extra == 0x8000_0000_0000_0000 && rounding_mode == ROUND_NEAR_EVEN {
             sig &= !1;
         }
     }
-    let mut z = sig as i64;
-    if sign {
-        z = -z;
-    }
+    let z = (if sign { sig.wrapping_neg() } else { sig }) as i64;
     if z != 0 && ((z < 0) ^ sign) {
-        softfloat_raise_flags(status, FLAG_INVALID);
-        return if sign {
-            I64_FROM_NEG_OVERFLOW
-        } else {
-            I64_FROM_POS_OVERFLOW
-        };
+        return round_to_i64_invalid(sign, status);
     }
-    if sig_extra != 0 && exact {
-        softfloat_raise_flags(status, FLAG_INEXACT);
+    if sig_extra != 0 {
+        if exact {
+            softfloat_raise_flags(status, FLAG_INEXACT);
+        }
+        if sig > orig_sig {
+            softfloat_set_rounding_up(status);
+        }
     }
     z
 }

@@ -137,6 +137,11 @@ pub struct Keyboard<'m> {
 /// every scancode set, so one that starts always finishes.
 const PASTE_FILL_THRESHOLD: usize = 8;
 
+/// The UART a front end's serial console types into: COM1, the port a
+/// `console=ttyS0` kernel talks on and the only one a standard machine builds.
+#[cfg(feature = "alloc")]
+const FRONT_END_SERIAL_PORT: usize = 0;
+
 impl<'m> Keyboard<'m> {
     pub(crate) fn new(keyboard: &'m mut crate::iodev::keyboard::BxKeyboardC) -> Self {
         Self { keyboard }
@@ -615,8 +620,38 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
             .refresh(&mut sink, rusty_box_devices::display::card::Dirt::SelfTracked);
     }
 
+    /// Hold one piece of host keyboard input for the guest, to be offered by
+    /// the next [`Self::pump_gui_input`] as its ring drains. `false` when the
+    /// backlog is full.
+    #[cfg(feature = "alloc")]
+    pub(crate) fn hold_keyboard_input(
+        &mut self,
+        input: crate::gui::host_input::HostKeyboardInput,
+    ) -> bool {
+        self.host_input.push_keyboard(input)
+    }
+
+    /// Forget host input still waiting for room, because the guest it was
+    /// typed for is gone — replaced by a restored snapshot. A hardware reset
+    /// drops the keyboard part of it inside [`Emulator::reset`].
+    #[cfg(feature = "std")]
+    pub(crate) fn drop_held_host_input(&mut self) {
+        self.host_input.clear();
+    }
+
+    /// Without alloc there is no front end and no [`Serial::send`]
+    /// (`Emulator::gui` requires `Box<dyn BxGui>`), so there is no host input
+    /// to offer; `step` and the HLT/MWAIT waits stay callable from no-alloc
+    /// hosts like the UEFI example.
+    ///
+    /// [`Serial::send`]: crate::emulator_api::Serial
+    #[cfg(not(feature = "alloc"))]
+    #[inline]
+    pub fn pump_gui_input(&mut self) {}
+
     /// Offer pending host input (keyboard keys and scancodes, mouse, serial)
-    /// to the device layer, holding back whatever the guest has no room for.
+    /// — from the front end and from [`Serial::send`] — to the device layer,
+    /// holding back whatever the guest has no room for.
     ///
     /// Keyboard and serial input are PACED, not truncated. The i8042 ring and
     /// the 16550 receive FIFO hold 16 entries each, and one frame of typing or
@@ -646,32 +681,7 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
     /// stepped from its front end's thread, and this is how that thread's
     /// input reaches the devices between steps.
     ///
-    /// Without alloc there is no GUI (`Emulator::gui` requires `Box<dyn
-    /// BxGui>`), so host-input pumping is a no-op; `step` and the HLT/MWAIT
-    /// waits stay callable from no-alloc hosts like the UEFI example.
-    /// Hold one piece of host keyboard input for the guest, to be offered by
-    /// the next [`Self::pump_gui_input`] as its ring drains. `false` when the
-    /// backlog is full.
-    #[cfg(feature = "alloc")]
-    pub(crate) fn hold_keyboard_input(
-        &mut self,
-        input: crate::gui::host_input::HostKeyboardInput,
-    ) -> bool {
-        self.host_input.push_keyboard(input)
-    }
-
-    /// Forget host input still waiting for room, because the guest it was
-    /// typed for is gone — replaced by a restored snapshot. A hardware reset
-    /// drops the keyboard part of it inside [`Emulator::reset`].
-    #[cfg(feature = "std")]
-    pub(crate) fn drop_held_host_input(&mut self) {
-        self.host_input.clear();
-    }
-
-    #[cfg(not(feature = "alloc"))]
-    #[inline]
-    pub fn pump_gui_input(&mut self) {}
-
+    /// [`Serial::send`]: crate::emulator_api::Serial::send
     #[cfg(feature = "alloc")]
     pub fn pump_gui_input(&mut self) {
         use crate::gui::host_input::HostKeyboardInput;
@@ -685,7 +695,7 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         // its own queue holds the rest in order and the loss the cap would
         // otherwise be becomes back-pressure the host can see.
         let take_keyboard = self.host_input.wants_keyboard_input();
-        let take_serial = self.host_input.wants_serial_input();
+        let take_serial = self.host_input.wants_serial_input(FRONT_END_SERIAL_PORT);
         if let Some(gui) = &mut self.gui {
             gui.handle_events();
             if take_keyboard {
@@ -700,7 +710,7 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         // Keys before raw bytes, the order this pump has always used.
         self.host_input.push_keys(keys_to_send);
         self.host_input.push_scancodes(scancodes_to_send);
-        self.host_input.push_serial(serial_input);
+        self.host_input.push_serial(FRONT_END_SERIAL_PORT, serial_input);
 
         // Offer held keyboard input until the 8042 refuses one, and stop there
         // rather than skipping past it, so input reaches the guest in the
@@ -741,16 +751,23 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
             }
         }
         // The same gate Bochs's `rx_timer` applies before reading a host byte:
-        // one at a time, and only while the receiver has room for it.
-        let mut serial_changed = false;
-        while let Some(byte) = self.host_input.next_serial() {
-            if !self.device_manager.serial.receive_byte(0, byte) {
-                break;
+        // one at a time, and only while the receiver has room for it. Each
+        // built port reads its own backend, as each Bochs UART has its own.
+        let mut serial_changed = [false; crate::iodev::serial::SERIAL_PORT_COUNT];
+        for (port, changed) in serial_changed
+            .iter_mut()
+            .enumerate()
+            .take(self.device_manager.serial.configured_port_count())
+        {
+            while let Some(byte) = self.host_input.next_serial(port) {
+                if !self.device_manager.serial.receive_byte(port, byte) {
+                    break;
+                }
+                self.host_input.accept_serial(port);
+                *changed = true;
             }
-            self.host_input.accept_serial();
-            serial_changed = true;
         }
-        if !keyboard_changed && !serial_changed {
+        if !keyboard_changed && !serial_changed.contains(&true) {
             return;
         }
 
@@ -758,11 +775,14 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
         // Keyboard input needs no timer arming: the continuous 8042
         // serial-delay timer (Bochs keyboard.cc) picks queued bytes up on
         // its next fire.
-        if serial_changed {
-            // A host byte arriving at the UART leaves the same latched
-            // interrupt and FIFO-timeout work a guest-visible access would, so
-            // it is drained through the device API rather than by hand.
-            self.drain_serial_effects(0, current_ticks);
+        for (port, changed) in serial_changed.into_iter().enumerate() {
+            if changed {
+                // A host byte arriving at the UART leaves the same latched
+                // interrupt and FIFO-timeout work a guest-visible access
+                // would, so it is drained through the device API rather than
+                // by hand.
+                self.drain_serial_effects(port, current_ticks);
+            }
         }
         // A reset applied here needs no branch: host input reaches a machine
         // that resumes at the reset vector either way. A failure has nowhere to

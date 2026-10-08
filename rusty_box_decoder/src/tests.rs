@@ -1051,6 +1051,193 @@ fn test_vex_vmovntdqa_and_vpclmulqdq_decode() {
     );
 }
 
+/// A VEX map-7 instruction: `C4 E7 <W vvvv L pp> <opcode> <ModRM> imm32`,
+/// with R/X/B clear (no extension), so `pp` selects the form.
+fn vex_map7(vex2: u8, opcode: u8, modrm: u8, imm: u32) -> std::vec::Vec<u8> {
+    let mut bytes = std::vec![0xC4, 0xE7, vex2, opcode, modrm];
+    bytes.extend_from_slice(&imm.to_le_bytes());
+    bytes
+}
+
+/// VEX byte 2 with W0, vvvv unused (1111), L0, and the given `pp`.
+const VEX2_F3: u8 = 0x7A;
+const VEX2_F2: u8 = 0x7B;
+
+/// The register forms of URDMSR and UWRMSR, `F2/F3 0F 38 F8 /r` with a
+/// register operand (Bochs fetchdecode_opmap_0f38.cc `BxOpcodeTable0F38F8`).
+/// URDMSR writes ModRM.rm with the MSR named by ModRM.reg (`Eq, Gq`); UWRMSR
+/// reads the MSR index from ModRM.reg and the value from ModRM.rm (`Gq, Eq`).
+#[test]
+fn urdmsr_and_uwrmsr_register_forms_decode_in_64_bit_mode() {
+    // ModRM 0xC1: mod 11, reg = rax, rm = rcx.
+    let read = fetch_decode64(&[0xF2, 0x0F, 0x38, 0xF8, 0xC1]).unwrap();
+    assert_eq!(read.get_ia_opcode(), Opcode::UrdmsrEqGq);
+    assert_eq!((read.dst(), read.src1()), (1, 0), "rcx <- MSR[rax]");
+
+    let write = fetch_decode64(&[0xF3, 0x0F, 0x38, 0xF8, 0xC1]).unwrap();
+    assert_eq!(write.get_ia_opcode(), Opcode::UwrmsrGqEq);
+    assert_eq!((write.dst(), write.src1()), (0, 1), "MSR[rax] <- rcx");
+
+    // A memory operand is MOVDIR64B's encoding space only with 66; with F2
+    // or F3 it is no instruction.
+    assert!(fetch_decode64(&[0xF2, 0x0F, 0x38, 0xF8, 0x01]).is_err());
+    // 64-bit mode only.
+    assert!(fetch_decode32(&[0xF2, 0x0F, 0x38, 0xF8, 0xC1], true).is_err());
+}
+
+/// What a decoded SSE4A immediate form names.
+#[derive(Debug, PartialEq, Eq)]
+struct Sse4aImmediateForm {
+    opcode: Opcode,
+    dst: u8,
+    src1: u8,
+    length: u8,
+    position: u8,
+    instruction_length: u8,
+}
+
+fn sse4a_immediate_form(instr: &Instruction) -> Sse4aImmediateForm {
+    Sse4aImmediateForm {
+        opcode: instr.get_ia_opcode(),
+        dst: instr.dst(),
+        src1: instr.src1(),
+        length: instr.ib(),
+        position: instr.ib2(),
+        instruction_length: instr.ilen(),
+    }
+}
+
+/// SSE4A's immediate forms carry two immediates, the field length and then
+/// its position (Bochs ia_opcodes.def `EXTRQ_UdqIbIb` and
+/// `INSERTQ_VdqUqIbIb`, `OP_Ib, OP_Ib2`). Both are fetched, so each is six
+/// bytes long, and the second lands where `ib2` reads it. EXTRQ's one
+/// register is ModRM.rm; INSERTQ writes ModRM.reg from ModRM.rm.
+#[test]
+fn sse4a_immediate_forms_fetch_both_immediates() {
+    // ModRM 0xC1: mod 11, reg = xmm0, rm = xmm1; length 4, position 8.
+    let extrq = [0x66, 0x0F, 0x78, 0xC1, 0x04, 0x08];
+    let insertq = [0xF2, 0x0F, 0x78, 0xC1, 0x04, 0x08];
+    for decoded in [fetch_decode64(&extrq).unwrap(), fetch_decode32(&extrq, true).unwrap()] {
+        assert_eq!(
+            sse4a_immediate_form(&decoded),
+            Sse4aImmediateForm {
+                opcode: Opcode::ExtrqUdqIbIb,
+                dst: 1,
+                src1: decoded.src1(),
+                length: 4,
+                position: 8,
+                instruction_length: 6,
+            }
+        );
+    }
+    for decoded in [fetch_decode64(&insertq).unwrap(), fetch_decode32(&insertq, true).unwrap()] {
+        assert_eq!(
+            sse4a_immediate_form(&decoded),
+            Sse4aImmediateForm {
+                opcode: Opcode::InsertqVdqUqIbIb,
+                dst: 0,
+                src1: 1,
+                length: 4,
+                position: 8,
+                instruction_length: 6,
+            }
+        );
+    }
+    // A memory operand is no SSE4A form, and fetches no immediate for one.
+    assert!(fetch_decode64(&[0x66, 0x0F, 0x78, 0x01]).is_err());
+}
+
+/// VEX map 7 holds the immediate-index forms of RDMSR, WRMSRNS, URDMSR and
+/// UWRMSR (Bochs fetchdecode_opmap_avx.cc `BxOpcodeGroup_VEX_MAP7_F6` and
+/// `_F8`). Each takes a 32-bit immediate and one register operand in
+/// ModRM.rm — the destination of a read, the source of a write.
+#[test]
+fn vex_map_7_decodes_the_msr_immediate_forms() {
+    // ModRM 0xC2: mod 11, reg 0, rm = rdx.
+    for (vex2, opcode, expected, reads) in [
+        (VEX2_F2, 0xF6, Opcode::RdmsrEqId, true),
+        (VEX2_F3, 0xF6, Opcode::WrmsrnsIdEq, false),
+        (VEX2_F2, 0xF8, Opcode::UrdmsrEqId, true),
+        (VEX2_F3, 0xF8, Opcode::UwrmsrIdEq, false),
+    ] {
+        let bytes = vex_map7(vex2, opcode, 0xC2, 0x0000_001C);
+        let i = fetch_decode64(&bytes).unwrap();
+        assert_eq!(i.get_ia_opcode(), expected);
+        assert_eq!(i.ilen() as usize, bytes.len(), "{expected:?} consumes its imm32");
+        assert_eq!(i.id(), 0x1C, "{expected:?} index");
+        let register = if reads { i.dst() } else { i.src1() };
+        assert_eq!(register, 2, "{expected:?} names rdx");
+    }
+}
+
+/// What Bochs's map-7 groups do not accept is #UD: a memory operand, a
+/// nonzero ModRM.reg, VEX.L or VEX.W set, `vvvv` naming a register, an
+/// opcode byte with no group, and anything outside 64-bit mode.
+#[test]
+fn vex_map_7_rejects_what_bochs_rejects() {
+    let imm = 0x1C;
+    assert!(fetch_decode64(&vex_map7(VEX2_F2, 0xF8, 0x02, imm)).is_err(), "memory form");
+    assert!(fetch_decode64(&vex_map7(VEX2_F2, 0xF8, 0xCA, imm)).is_err(), "reg != 0");
+    assert!(fetch_decode64(&vex_map7(VEX2_F2 | 0x04, 0xF8, 0xC2, imm)).is_err(), "VEX.L");
+    assert!(fetch_decode64(&vex_map7(VEX2_F2 | 0x80, 0xF8, 0xC2, imm)).is_err(), "VEX.W");
+    assert!(fetch_decode64(&vex_map7(VEX2_F2 & !0x08, 0xF8, 0xC2, imm)).is_err(), "vvvv");
+    assert!(fetch_decode64(&vex_map7(VEX2_F2, 0xF7, 0xC2, imm)).is_err(), "no group");
+    assert!(fetch_decode32(&vex_map7(VEX2_F2, 0xF8, 0xC2, imm), true).is_err(), "32-bit");
+}
+
+/// `X86Feature` lists Bochs's ISA features, every one and in Bochs's order,
+/// so the generated ISA table's numbers mean what Bochs's do. The reference
+/// is the list `scripts/gen_opcode_isa.py` copied out of Bochs
+/// `cpu/decoder/features.h` (which itself refuses to generate on a
+/// mismatch); this catches `features.rs` edited afterwards. Names compare
+/// with the underscores dropped and case folded, as the script matches them.
+#[test]
+fn x86_feature_lists_the_bochs_features_in_order() {
+    fn normalized(name: &str) -> std::string::String {
+        name.replace('_', "").to_lowercase()
+    }
+    let bochs: Vec<_> = crate::opcode_isa::BOCHS_ISA_FEATURES
+        .iter()
+        .map(|name| normalized(name))
+        .collect();
+    let ours: Vec<_> = include_str!("features.rs")
+        .lines()
+        .map(str::trim)
+        .filter_map(|line| line.strip_prefix("Isa"))
+        .filter_map(|rest| rest.strip_suffix(','))
+        .map(normalized)
+        .collect();
+    assert_eq!(ours, bochs);
+}
+
+/// Every `X86Feature` has a bit in the `[u32; BX_ISA_EXTENSIONS_ARRAY_SIZE]`
+/// ISA-extension bitmask, which `enable_extension` and
+/// `bx_cpuid_support_isa_extension` index as `[feature / 32]`. Bochs
+/// `cpu/decoder/decoder.h` refuses to build when `BX_ISA_EXTENSION_LAST >=
+/// BX_ISA_EXTENSIONS_ARRAY_SIZE*32`; this is that check, over the feature list
+/// `scripts/gen_opcode_isa.py` copied out of `features.h`. The order test above
+/// reads `features.rs` as text, so the compiled enum is tied to the list here:
+/// its last discriminant is the list's last index.
+#[test]
+fn every_x86_feature_fits_the_isa_extensions_bitmask() {
+    use crate::features::X86Feature;
+    use crate::opcode_isa::BOCHS_ISA_FEATURES;
+    use crate::BX_ISA_EXTENSIONS_ARRAY_SIZE;
+
+    assert_eq!(
+        X86Feature::IsaUserMsr as usize + 1,
+        BOCHS_ISA_FEATURES.len(),
+        "X86Feature's last variant must number the last Bochs feature"
+    );
+    assert!(
+        BOCHS_ISA_FEATURES.len() < BX_ISA_EXTENSIONS_ARRAY_SIZE * 32,
+        "ISA extensions array limit exceeded! (Bochs cpu/decoder/decoder.h): \
+         {} features, {} bitmask words",
+        BOCHS_ISA_FEATURES.len(),
+        BX_ISA_EXTENSIONS_ARRAY_SIZE
+    );
+}
+
 #[test]
 fn opcode_isa_table_is_in_sync_with_the_opcode_enum() {
     use crate::features::X86Feature;
@@ -1099,8 +1286,9 @@ fn opcode_isa_table_is_in_sync_with_the_opcode_enum() {
     );
     assert_eq!(
         opcode_isa_feature(Opcode::V128VpclmulqdqVdqHdqWdqIb),
-        X86Feature::IsaAvx as u16,
-        "the 128-bit form is plain AVX; only the 256-bit form needs VPCLMULQDQ"
+        X86Feature::IsaAesPclmulqdq as u16,
+        "the 128-bit form needs AES+PCLMULQDQ (its AVX state is BX_PREPARE_AVX's); \
+         only the 256-bit form needs VPCLMULQDQ"
     );
 }
 
@@ -1855,11 +2043,28 @@ fn evex_master_table_has_every_slot_bochs_defines() {
     use crate::decoder::opmap_evex::EVEX_TABLE;
     let defined = EVEX_TABLE.iter().filter(|g| !g.is_empty()).count();
     assert_eq!(
-        defined, 389,
-        "BxOpcodeTableEVEX defines 389 non-ERR slots; regenerate with \
-         scripts/gen_opmap_evex.py if upstream changed"
+        defined, 385,
+        "BxOpcodeTableEVEX defines 385 non-ERR slots in the reference build \
+         (BX_SUPPORT_AMX 0); regenerate with scripts/gen_opmap_evex.py if \
+         upstream changed"
     );
     assert_eq!(EVEX_TABLE.len(), 256 * 5, "Bochs BxOpcodeTableEVEX[256*5]");
+}
+
+/// The reference Bochs build has BX_SUPPORT_AMX 0, so the EVEX tile-row
+/// encodings sit in `BxOpcodeGroup_ERR` slots and decode to #UD.
+#[test]
+fn evex_amx_encodings_are_undefined() {
+    // TCVTROWD2PS zmm0, tmm1, ecx: EVEX.512.F3.0F38.W0 4A /r, mod = 11.
+    let decoded =
+        crate::decoder::decode64::fetch_decode64(&[0x62, 0xF2, 0x7E, 0x48, 0x4A, 0xC1]);
+    assert!(
+        matches!(
+            decoded,
+            Err(DecodeError::Decoder(BxDecodeError::BxIllegalOpcode))
+        ),
+        "expected an illegal opcode, got {decoded:?}"
+    );
 }
 
 #[test]
@@ -2035,9 +2240,9 @@ fn every_evex_map_entry_decodes() {
         // when indexing). Synthesise the mm the encoding must actually carry.
         let map = [1usize, 2, 3, 5, 6][idx / 256];
         let opcode = (idx % 256) as u8;
-        // An entry whose own opcode is IaError is an encoding rusty does not
-        // implement (the FP16/BF16 forms Skylake-X never advertises); #UD is
-        // the correct outcome for it. If such an entry comes first it also
+        // An entry whose own opcode is IaError names an opcode the enum lacks
+        // (the generator reports each one); #UD is the correct outcome for
+        // it. If such an entry comes first it also
         // shadows the rest of the group for any encoding it matches, so those
         // cannot be reached by synthesis either.
         let group_shadowed = group

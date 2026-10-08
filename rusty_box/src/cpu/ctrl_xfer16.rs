@@ -5,7 +5,7 @@
 use super::{
     cpu::Exception,
     decoder::{BxSegregs, Instruction},
-    error::{CpuError, Result},
+    error::Result,
 };
 
 impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
@@ -16,8 +16,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// Branch to a near 16-bit address
     /// Matching C++ ctrl_xfer16.cc branch_near16
     pub(super) fn branch_near16(&mut self, new_ip: u16) -> super::Result<()> {
-        // Check CS limit (matching C++ line 32-36)
-        // Bochs: exception(BX_GP_EXCEPTION, 0) which longjmps
+        // Bochs ctrl_xfer16.cc branch_near16: the CS limit is checked in every
+        // mode, and exception(BX_GP_EXCEPTION, 0) longjmps.
         let limit = self.get_segment_limit(BxSegregs::Cs);
         if (new_ip as u32) > limit {
             tracing::error!(
@@ -28,10 +28,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             return self.exception(super::cpu::Exception::Gp, 0);
         }
 
-        // Matching C++ line 38: EIP = new_IP;
+        // Bochs ctrl_xfer16.cc branch_near16: EIP = new_IP.
         self.set_eip(new_ip as u32);
 
-        // Matching C++ lines 40-43: Set STOP_TRACE when handlers chaining is disabled
+        // Bochs ctrl_xfer16.cc branch_near16: without handler chaining
+        // (BX_SUPPORT_HANDLERS_CHAINING_SPEEDUPS == 0) the trace stops here.
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
@@ -108,12 +109,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     // CALL instructions
     // =========================================================================
 
-    /// CALL rel16 - Near call with 16-bit displacement
+    /// CALL rel16 - Near call with 16-bit displacement (Bochs ctrl_xfer16.cc
+    /// CALL_Jw: the push is speculative, so a #GP on the target puts the
+    /// stack back)
     pub fn call_jw(&mut self, instr: &Instruction) -> super::Result<()> {
         let disp = instr.iw() as i16;
         let ip = self.get_ip();
 
-        // Push return address
+        self.rsp_speculative();
         self.push_16(ip)?;
         // Bochs ctrl_xfer16.cc CALL_Jw \u2014 shadow stack push only when displacement is non-zero.
         let cpl = self.cs_rpl();
@@ -123,6 +126,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
         let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
         self.branch_near16(new_ip)?;
+        self.rsp_commit();
         let rip = self.rip();
         self.on_ucnear_branch(super::instrumentation::BranchType::Call, rip);
         Ok(())
@@ -135,12 +139,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let new_ip = self.get_gpr16(dst);
         let ip = self.get_ip();
 
+        self.rsp_speculative();
         self.push_16(ip)?;
         let cpl = self.cs_rpl();
         if self.shadow_stack_enabled(cpl) {
             self.shadow_stack_push_32(ip as u32)?;
         }
         self.branch_near16(new_ip)?;
+        self.rsp_commit();
         self.track_indirect_if_not_suppressed(instr.seg_override_cet(), cpl);
         let rip = self.rip();
         self.on_ucnear_branch(super::instrumentation::BranchType::CallIndirect, rip);
@@ -155,12 +161,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let new_ip = self.v_read_word(seg, eaddr)?;
         let ip = self.get_ip();
 
+        self.rsp_speculative();
         self.push_16(ip)?;
         let cpl = self.cs_rpl();
         if self.shadow_stack_enabled(cpl) {
             self.shadow_stack_push_32(ip as u32)?;
         }
         self.branch_near16(new_ip)?;
+        self.rsp_commit();
         self.track_indirect_if_not_suppressed(instr.seg_override_cet(), cpl);
         let rip = self.rip();
         self.on_ucnear_branch(super::instrumentation::BranchType::CallIndirect, rip);
@@ -180,31 +188,34 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     // RET instructions
     // =========================================================================
 
-    /// RET near - Return from procedure (16-bit)
-    pub fn ret_near16(&mut self, _instr: &Instruction) -> super::Result<()> {
-        let return_ip = self.pop_16()?;
-        self.branch_near16(return_ip)?;
-        let rip = self.rip();
-        self.on_ucnear_branch(super::instrumentation::BranchType::Ret, rip);
-        Ok(())
-    }
-
-    /// RET near imm16 - Return and pop imm16 bytes (16-bit)
+    /// RET near [imm16] (16-bit) — Bochs ctrl_xfer16.cc RETnear16_Iw, which
+    /// Bochs gives the immediate-less RET as well (its Iw is then zero). The
+    /// pop is speculative, so a #CP or #GP leaves the stack where it was.
     pub fn ret_near16_iw(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.rsp_speculative();
         let return_ip = self.pop_16()?;
-        let imm16 = instr.iw();
+        let cpl = self.cs_rpl();
+        if self.shadow_stack_enabled(cpl) {
+            let shadow_ip = self.shadow_stack_pop_32()?;
+            if shadow_ip != u32::from(return_ip) {
+                return self.exception(
+                    super::cpu::Exception::Cp,
+                    super::cpu::CpExceptionErrorCode::NearRet as u16,
+                );
+            }
+        }
 
         self.branch_near16(return_ip)?;
 
-        // Pop additional bytes from stack
-        let ss_d_b = self.get_segment_d_b(BxSegregs::Ss);
-        if ss_d_b {
+        let imm16 = instr.iw();
+        if self.get_segment_d_b(BxSegregs::Ss) {
             let esp = self.get_gpr32(4);
-            self.set_gpr32(4, esp.wrapping_add(imm16 as u32));
+            self.set_gpr32(4, esp.wrapping_add(u32::from(imm16)));
         } else {
             let sp = self.get_gpr16(4);
             self.set_gpr16(4, sp.wrapping_add(imm16));
         }
+        self.rsp_commit();
         let rip = self.rip();
         self.on_ucnear_branch(super::instrumentation::BranchType::Ret, rip);
         Ok(())
@@ -643,10 +654,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                     disp16,
                     limit
                 );
-                return Err(CpuError::BadVector {
-                    vector: Exception::Gp,
-                    error_code: 0,
-                });
+                return self.exception(Exception::Gp, 0);
             }
 
             self.load_seg_reg_real_mode(BxSegregs::Cs, cs_raw);
@@ -659,14 +667,17 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     }
 
     /// Far call 16-bit (matching C++ call_far16)
-    /// Called by CALL16_Ap and CALL16_Ep
+    /// Called by CALL16_Ap and CALL16_Ep. RSP_SPECULATIVE covers the whole
+    /// call, protected or not, as in Bochs: `call_protected` pushes before it
+    /// has finished checking the target.
     fn call_far16(&mut self, _instr: &Instruction, cs_raw: u16, disp16: u16) -> Result<()> {
         // Invalidate prefetch queue
         self.eip_fetch_window = None;
         self.eip_page_window_size = 0;
 
+        self.rsp_speculative();
         if self.protected_mode() {
-            return self.call_protected(cs_raw, disp16 as u32, false);
+            self.call_protected(cs_raw, disp16 as u32, false)?;
         } else {
             // Real mode or V8086 mode
             let limit = self.get_segment_limit(BxSegregs::Cs);
@@ -676,10 +687,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                     disp16,
                     limit
                 );
-                return Err(CpuError::BadVector {
-                    vector: Exception::Gp,
-                    error_code: 0,
-                });
+                return self.exception(Exception::Gp, 0);
             }
 
             // Push return address (CS:IP)
@@ -691,6 +699,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             self.load_seg_reg_real_mode(BxSegregs::Cs, cs_raw);
             self.set_eip(disp16 as u32);
         }
+        self.rsp_commit();
 
         // Set STOP_TRACE to break trace loop
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
@@ -755,51 +764,27 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     // Far RET instructions (16-bit)
     // =========================================================================
 
-    /// RETfar16 - Far return without immediate (16-bit)
-    /// Matching C++ ctrl_xfer16.cc (similar to RETfar16_Iw but without imm16)
-    pub fn retfar16(&mut self, _instr: &Instruction) -> Result<()> {
-        // Invalidate prefetch queue
-        self.eip_fetch_window = None;
-        self.eip_page_window_size = 0;
-
-        if self.protected_mode() {
-            return self.return_protected(0, false);
-        } else {
-            // Real mode or V8086 mode
-            let ip = self.pop_16()?;
-            let cs_raw = self.pop_16()?;
-
-            // Check CS limit
-            let limit = self.get_segment_limit(BxSegregs::Cs);
-            if (ip as u32) > limit {
-                tracing::error!(
-                    "retfar16: offset {:#06x} outside of CS limits {:#010x}",
-                    ip,
-                    limit
-                );
-                return self.exception(Exception::Gp, 0);
-            }
-
-            self.load_seg_reg_real_mode(BxSegregs::Cs, cs_raw);
-            self.set_eip(ip as u32);
-        }
-
-        // Set STOP_TRACE to break trace loop
-        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
-        Ok(())
-    }
-
-    /// RETfar16_Iw - Far return with immediate (16-bit)
-    /// Matching C++ ctrl_xfer16.cc
+    /// RETF / RETF imm16 with a 16-bit operand size; RETF without an
+    /// immediate decodes with Iw = 0 (Bochs ctrl_xfer16.cc RETfar16_Iw serves
+    /// both RETF_Op16 and RETF_Op16_Iw).
     pub fn retfar16_iw(&mut self, instr: &Instruction) -> Result<()> {
         // Invalidate prefetch queue
         self.eip_fetch_window = None;
         self.eip_page_window_size = 0;
 
+        // Bochs ctrl_xfer16.cc RETfar16_Iw reads the immediate as Bit16s, so
+        // a 32-bit stack releases a sign-extended count. Hardware zero-extends
+        // it; the sign extension is kept for parity until the owner rules on
+        // the "RETF imm16 in real mode sign-extends the immediate on a 32-bit
+        // stack" entry of docs/bochs-upstream-bugs.md — read it before
+        // changing this.
         let imm16 = instr.iw();
 
+        // Bochs ctrl_xfer16.cc RETfar16_Iw: RSP_SPECULATIVE, so a #GP after
+        // the pops restores SP.
+        self.rsp_speculative();
         if self.protected_mode() {
-            return self.return_protected(imm16, false);
+            self.return_protected(imm16, false)?;
         } else {
             // Real mode or V8086 mode
             let ip = self.pop_16()?;
@@ -813,10 +798,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                     ip,
                     limit
                 );
-                return Err(CpuError::BadVector {
-                    vector: Exception::Gp,
-                    error_code: 0,
-                });
+                return self.exception(Exception::Gp, 0);
             }
 
             self.load_seg_reg_real_mode(BxSegregs::Cs, cs_raw);
@@ -826,12 +808,13 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             let ss_d_b = self.get_segment_d_b(BxSegregs::Ss);
             if ss_d_b {
                 let esp = self.get_gpr32(4);
-                self.set_gpr32(4, esp.wrapping_add(imm16 as u32));
+                self.set_gpr32(4, esp.wrapping_add(imm16 as i16 as u32));
             } else {
                 let sp = self.get_gpr16(4);
                 self.set_gpr16(4, sp.wrapping_add(imm16));
             }
         }
+        self.rsp_commit();
 
         // Set STOP_TRACE to break trace loop
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;

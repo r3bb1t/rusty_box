@@ -21,7 +21,7 @@ an entry:
 function: `while (1) { …check wake conditions…; BX_TICKN(10); }`, returning to
 `cpu_loop` only under `if (BX_SMP_PROCESSORS > 1)`.
 
-**rusty_box:** `BxCpuC::handle_wait_for_event` always returns — Bochs's
+**rusty_box:** `ExecCtx::handle_wait_for_event` (`cpu/event.rs`) always returns — Bochs's
 `BX_SMP_PROCESSORS > 1` branch, taken unconditionally. `cpu_loop` returns to the
 scheduler, which advances virtual time via
 `Emulator::hlt_wait_step_ticks` (`emulator/scheduler.rs`) and re-enters. That
@@ -64,8 +64,9 @@ Not attempted — it is a rework of the time model for no guest-visible gain.
 
 ### Why the spin cannot simply be adopted
 
-`examples/rusty_box_web` drives the emulator cooperatively — one `step_batch()`
-per frame. A blocking wait never yields to the browser event loop, so the tab
+`examples/rusty_box_web` drives the emulator cooperatively — a few
+`Emulator::step` calls per frame, until the frame's budget is spent. A blocking
+wait never yields to the browser event loop, so the tab
 freezes and input can never arrive to end the wait. The egui GUI needs the same
 frame pumping.
 
@@ -143,19 +144,28 @@ upstream in `docs/bochs-upstream-bugs.md`.
 
 ## D3 — A fast REP string burst stops at the next timer deadline
 
-**Bochs:** `cpu/io.cc FastRepINSW` / `FastRepOUTSW` and
-`cpu/faststring.cc FastRepMOVSB` bound a burst by ECX and by the elements that
-fit in the destination page — nothing else. Virtual time does not move during
-the burst: `cpu/io.cc INSW32_YwDX` calls `BX_TICKN(wordCount-1)` only *after*
-`FastRepINSW` returns. The `if (BX_CPU_THIS_PTR async_event) break;` inside the
-inner loop therefore only catches an event that was already pending on entry —
-a deadline that falls inside the burst cannot be reached, because the clock that
-would reach it is frozen.
+**Bochs:** `cpu/io.cc FastRepINSW` / `FastRepOUTSW` bound a burst by ECX and
+by the words that fit in the page — nothing else. Virtual time does not move
+during the burst: `cpu/io.cc INSW32_YwDX` calls `BX_TICKN(wordCount-1)` only
+*after* `FastRepINSW` returns. The `if (BX_CPU_THIS_PTR async_event) break;`
+inside the inner loop therefore only catches an event that was already pending
+on entry — a deadline that falls inside the burst cannot be reached, because the
+clock that would reach it is frozen. `cpu/faststring.cc FastRepMOVSB` and
+`FastRepSTOSB` / `FastRepSTOSW` / `FastRepSTOSD` do not have this gap: each caps
+its count at `bx_pc_system.getNumCpuTicksLeftNextEvent()`.
 
-**rusty_box:** `cpu/io.rs`, the three fast-REP loops, seed
-`event_words_remaining` from `ticks_left_next_event()` and fold it into the
-per-chunk `min`. `tickn_fastrep` runs inside the loop, so time advances as the
-burst proceeds and the chunk ends exactly on the deadline.
+**rusty_box:** `cpu/io.rs`, the three fast `REP INSW` loops (`rep_insw16`,
+`rep_insw32`, `rep_insw64`), seed `event_words_remaining` from
+`ticks_left_next_event()` and fold it into the per-chunk `min` — the cap
+`faststring.cc` already applies to MOVS and STOS, which `cpu/string.rs
+fast_rep_elements` mirrors. A burst therefore ends exactly on the deadline. The
+clock still does not move inside it: each chunk's ticks beyond its first go to
+`tick_surplus`, which the scheduler counts when it advances the PC-system clock
+after the slice, and `tickn_fastrep` only asks whether the countdown would
+expire, raising `STOP_TRACE` when it would. The slice ends, the timer fires on
+its deadline, and the instruction resumes from its prefix with the count that is
+left. `REP OUTSW` has no fast path here: it runs one element per iteration, so
+an interrupt is taken between any two elements.
 
 ### What the guest observes
 
@@ -171,7 +181,9 @@ pending interrupt is taken at the next iteration boundary rather than deferred
 to the end of the instruction. Real hardware therefore behaves as this port
 does. Upstream's atomic burst is a speed shortcut whose cost is guest-visible
 timing, which makes matching it the fingerprint rather than avoiding it — the
-same reasoning as D2.
+same reasoning as D2. Upstream's own MOVS and STOS fast paths already stop at
+the next event, so the port's INSW loops follow the rule Bochs applies
+everywhere else.
 
 ### Known cost, not yet paid down
 
@@ -273,8 +285,8 @@ write (`api_bridge.rs`, `X86Reg::Rflags` and its narrower forms) and
 `import_arch_state`. The slice loop takes the bit after every slice
 (`take_scheduler_boundary_request`, `emulator/scheduler.rs`). But two setters
 of the same API raise it again between slices, both through
-`sync_lapic_events`: `set_cr8_for_api` and the `IA32_TSC_DEADLINE` arm of its
-MSR write. So a host that writes one of them and then writes RFLAGS with TF
+`sync_lapic_events`: `set_cr8_for_api` and the `BX_MSR_TSC_DEADLINE`
+(`IA32_TSC_DEADLINE`) arm of its MSR write. So a host that writes one of them and then writes RFLAGS with TF
 set would, under the literal store, clear the request. The next slice would
 then run instead of returning at its loop head for the boundary. That is a
 sequence of host calls, not guest behaviour.
@@ -358,15 +370,20 @@ are Bochs-faithful, carry the same hazard, and are outside this entry.
 
 ## D6 — The 8259's INTR reaches a processor through LVT0, and the bootstrap processor comes out of reset holding the virtual wire
 
-**Bochs:** `pc_system.cc bx_pc_system_c::raise_INTR` and `lower_INTR`, reached
-from `iodev/pic.cc bx_pic_c::service_master_pic` through the `BX_RAISE_INTR`
-macro in `bochs.h`. They call `BX_CPU(0)->signal_event(BX_EVENT_PENDING_INTR)`
-and the matching clear — straight at the processor's event word. Nothing on
-that path reads `cpu/apic.cc`'s `lvt[APIC_LVT0]`. The local APIC's LINT0 entry
-is written by the guest, saved, restored and returned on a read, and consulted
-by nothing: grepping `apic.cc` for `APIC_LVT0` finds the register table and the
-reset loop, and no reader. `cpu/event.cc handleAsyncEvent` then takes the vector
-with `DEV_pic_iac()` on the strength of the event bit alone.
+**Bochs:** `pc_system.cc bx_pc_system_c::raise_INTR` and `clear_INTR`, reached
+from `iodev/pic.cc bx_pic_c::pic_service` through the `BX_RAISE_INTR` and
+`BX_CLEAR_INTR` macros in `pc_system.h`. They call
+`BX_CPU(BX_BOOTSTRAP_PROCESSOR)->raise_INTR()` and `clear_INTR()`, which
+`cpu/event.cc` turns into `signal_event(BX_EVENT_PENDING_INTR)` and the
+matching `clear_event` — straight at the processor's event word. Nothing on
+that path reads `cpu/apic.cc`'s `lvt[APIC_LVT_LINT0]`. The local APIC's LINT0
+entry (offset `BX_LAPIC_LVT_LINT0`, `0x350`) is written by the guest, saved,
+restored and returned on a read, and consulted by nothing: in `apic.cc` it
+appears only in the xAPIC and x2APIC register read and write handlers, the
+masking loops of reset and software disable, and `register_state`.
+`cpu/event.cc handleAsyncEvent` then calls `HandleExtInterrupt`, whose
+`interrupt_acknowledge` takes the vector with `DEV_pic_iac()` on the strength
+of the event bit alone.
 
 Symmetrically, `bx_local_apic_c::reset` masks every LVT entry including LINT0,
 and the BIOS in `bios/` never writes offset `0x350` — `rombios.h` does not even
@@ -548,17 +565,16 @@ unenumerated leaf.
 
 ### Price of closing it
 
-Three behavioural edits, in two files.
+Two behavioural edits, in two files.
 
 - `#[default]` moves to `CpuidFreq::Hardware` in `rusty_box/src/cpu/cpuid.rs`.
   That changes `EmulatorConfig::default` and nothing else.
-- The `rusty_box_gui` launcher does not read that default.
-  `rusty_box_gui/src/config.rs` resolves an absent value through its own arm,
-  `None | Some("none") => CpuidFreq::None`, and that arm has to send an absent
-  value to `Hardware`.
-- The save arm in the same file leaves out whichever value it treats as the
-  default (`CpuidFreq::None => None`). It has to leave out `Hardware` and write
-  `none` out instead. Otherwise a saved `none` reloads as `hardware`.
+- The `rusty_box_gui` launcher does not read that default. It keeps its own,
+  `DEFAULT_CPUID_FREQ` in `rusty_box_gui/src/config.rs` (`CpuidFreq::None`),
+  and that constant moves to `CpuidFreq::Hardware`. Both of the file's arms
+  follow it: the resolve arm sends an absent value to it, and the save arm
+  leaves out only the value equal to it (`cpuid_freq_toml` spells the rest), so
+  a saved `none` still reloads as `none`.
 
 Plus the consequential edits, which change no behaviour. Three pieces of text
 state today's default and would become false: the `cpuid_freq` doc string in
@@ -585,9 +601,9 @@ bochs-emu/Bochs#791.
 
 ## D8 — KSHIFTLW and KSHIFTRW shift by 15
 
-**Bochs:** `cpu/avx/avx512_mask16.cc BX_CPU_C::KSHIFTLW_KGwKEwIbR` and
-`KSHIFTRW_KGwKEwIbR` shift only `if (count < 15)`, so a count of 15 writes
-zero. The other widths bound at their own width: `count < 8` in
+**Bochs, before upstream `2c1dca87d`:** `cpu/avx/avx512_mask16.cc
+BX_CPU_C::KSHIFTLW_KGwKEwIbR` and `KSHIFTRW_KGwKEwIbR` shift only
+`if (count < 15)`, so a count of 15 writes zero. The other widths bound at their own width: `count < 8` in
 `avx512_mask8.cc`, `< 32` in `avx512_mask32.cc`, `< 64` in `avx512_mask64.cc`.
 
 **rusty_box:** `cpu/avx512_mask.rs kshiftlw_kgw_kew_ib_r` and
@@ -613,15 +629,20 @@ matching it would reproduce an off-by-one rather than a modelling choice.
 One literal, and it buys a wrong answer at one count. No test pins the count-15
 case in either direction.
 
-**Status:** open and deliberate. Written up for upstream in
+**Status:** closed upstream. `2c1dca87d` changes both bounds to
+`count < 16`, which is what this port does, and the reference
+`docs/bochs-reference.md` pins includes it. The entry retires when the
+reference sync confirms the port matches that commit; until then it records
+the difference from the previous reference. Written up in
 `docs/bochs-upstream-bugs.md`.
 
 ---
 
 ## D9 — A quadword shift by exactly 64 in the XMM-register forms
 
-**Bochs:** `cpu/simd_int.h xmm_psrlq` clears the register only when
-`shift_64 > 64`, and `xmm_psravq` sign-fills an element only when `shift > 64`.
+**Bochs, before upstream `be01ec83e` and `8908f189d`:** `cpu/simd_int.h
+xmm_psrlq` clears the register only when `shift_64 > 64`, and `xmm_psravq`
+sign-fills an element only when `shift > 64`.
 A count of exactly 64 falls through to a shift by the operand's full width —
 `op->xmm64u(n) >>= shift` and `op1->xmm64s(n) >> shift` — which C++ leaves
 undefined, so the answer is whatever the compiler that built Bochs made of it.
@@ -655,7 +676,11 @@ still shifts at 63. The same file pins PSLLQ at both counts, which is plain
 parity with `xmm_psllq`. No test pins the VEX or EVEX forms, or VPSRAVQ, at a
 count of 64.
 
-**Status:** open and deliberate. Written up for upstream in
+**Status:** closed upstream. `be01ec83e` bounds `xmm_psrlq` and `8908f189d`
+bounds `xmm_psravq` at `> 63`, which is what this port does, and the reference
+`docs/bochs-reference.md` pins includes both. The entry retires when the
+reference sync confirms the port matches them; until then it records the
+difference from the previous reference. Written up in
 `docs/bochs-upstream-bugs.md`.
 
 ---
@@ -712,8 +737,9 @@ is set, and polls an empty backend again after 100 ms. Each fire hands
 **rusty_box:** `Emulator::pump_gui_input` (`emulator/run.rs`) is what stands in
 for that one-shot. It offers `BxSerialC::receive_byte` (`iodev/serial.rs`) one
 held byte at a time, gated by `rx_has_room`, and a refused byte stays in the
-machine's host-input backlog to be offered again at the next pump. Two things
-differ:
+machine's host-input backlog to be offered again at the next pump. The backlog
+holds one queue per built UART, filled by the front end's serial pane (COM1)
+and by `Serial::send`; each queue is that port's backend. Two things differ:
 
 - **The rate.** The pump runs per scheduler slice and per idle wait, not once
   per `databyte_usec`, so a receiver with room takes bytes back to back until
@@ -1090,45 +1116,65 @@ provenance for a facility Bochs lacks).
 The stream is part of the snapshot, so a restored machine keeps codes the guest
 wrote before it was saved.
 
----
+## D18 — VM entry refuses a 64-bit guest whose RIP is not canonical
 
-## D17 — Port 0xE9 answers as though Bochs's debug console were switched on
+**Bochs:** `cpu/vmx.cc BX_CPU_C::VMenterLoadCheckGuestState` checks guest RIP
+once: when the "IA-32e mode guest" entry control is clear or the guest's CS.L
+is 0, bits 63:32 must be zero. A guest entering 64-bit code (IA-32e and
+CS.L=1) gets no check, so any RIP enters. The guest's first fetch then takes
+#GP(0) inside the guest (`cpu/cpu.cc BX_CPU_C::prefetch`, "RIP crossed
+canonical boundary").
 
-**Bochs:** `iodev/unmapped.cc` gates port 0xE9 on `port_e9_hack`, whose default
-in `config.cc` is **off**. With it off a read of 0xE9 returns `0xFFFFFFFF` and a
-write is dropped. With it on, a read returns `0xE9` — the documented way for
-guest code to detect that the console is there — and a write goes to the host's
-stdout.
-
-**rusty_box:** `BxDevicesC::default_read_handler` always answers `0xE9`, and
-`default_write_handler` always captures the byte into the stream
-`Emulator::debug_port` drains. There is no parameter to turn it off.
+**rusty_box:** `vmenter_load_check_guest_state` (`cpu/vmx.rs`) makes Bochs's
+check and, for 64-bit code, also requires RIP to be canonical to the
+processor's linear-address width — 57 bits on a model with LA57, else 48
+(`BxCpuC::is_cpuid_canonical`, Bochs's `IsCpuidCanonical`) — failing the entry
+on guest state otherwise.
 
 ### What the guest observes
 
-The detection channel: guest code that reads port 0xE9 sees `0xE9` here and
-`0xFF` on a default-configured Bochs, so it concludes a debug console exists
-and writes to it. Nothing else changes — the writes are dropped either way as
-far as the guest can tell.
+A VMM that loads a non-canonical RIP for a 64-bit guest gets a failed-entry VM
+exit: reason 33 (VM-entry failure, invalid guest state) with bit 31 set, the
+VMM resuming at its HOST_RIP. Under Bochs the entry succeeds and the guest
+faults on its first instruction, which the VMM sees as a #GP exception exit or
+not at all, depending on its exception bitmap. Every canonical RIP, and every
+RIP outside 64-bit code, behaves the same on both.
 
-### What justifies it
+### Why the divergence is the correct side
 
-Not ruled on. The examples and the GUI read this stream, so turning it off by
-default would silence them; making it configurable is the obvious alternative
-and was never weighed. Found 2026-09-20 while wiring the POST-code tap (D16),
-which is the same family of host-side observation.
+The SDM's VM-entry checks on guest RIP list two rules: bits 63:32 are zero
+outside 64-bit code, and in 64-bit code (IA-32e mode guest with CS.L set) on a
+processor with N < 64 linear-address bits, bits 63:N are all equal — RIP is
+canonical. Bochs implements the first and omits the second, so a VMM sees a
+different exit from the one hardware gives. N is the processor's supported width (CPUID 80000008H), not the current
+paging mode's, which is why the check uses `is_cpuid_canonical` and not
+`is_canonical`.
 
-**Status:** open — awaiting the owner's ruling.
+### Price of closing it
+
+Deleting one branch. Tests pin both rules on a real VMLAUNCH:
+`a_64_bit_guest_needs_a_canonical_rip` and
+`a_compatibility_mode_guest_needs_a_rip_below_4_gib` (`cpu/vmx.rs`).
+
+**Status:** open and deliberate (owner ruling, 2026-10-04: implement the
+hardware behaviour, register it, and record the Bochs gap upstream). Written
+up in `docs/bochs-upstream-bugs.md`, to be confirmed by further checks before
+it is filed.
 
 ---
 
-# Hypervisor-engine divergences (`H<n>`)
+## Hypervisor-engine divergences (`H<n>`)
 
 A machine running its guest on `rusty_box_whp_engine` executes on the host's
 own processor, and there are things a hypervisor will not let a port control.
 These are numbered `H<n>` rather than `D<n>` because they hold **only** for a
 machine on that engine — the interpreter has none of them, and a machine on
 the interpreter is the reference both are measured against.
+
+With these entries in force, a machine on that engine boots Alpine Linux 3.24.1
+to a root shell: `login:` in 27.1 s against 65.0 s on the interpreter, median of
+three interleaved runs of `alpine_probe` on an i5-12450H (2026-09-12). DLX Linux
+does not reach `login:` on it today.
 
 The mixed-engine equality tests in `rusty_box_whp_engine` are how each entry
 here stays honest: anything a guest can observe differently between the two
@@ -1171,7 +1217,7 @@ because the guests this engine targets enable A20 and leave it enabled.
 
 ## H2 — The time-stamp counter is the host's
 
-**Bochs:** `cpu/proc_ctrl.cc get_tsc` derives the counter from the emulated
+**Bochs:** `cpu/proc_ctrl.cc BX_CPU_C::get_TSC` derives the counter from the emulated
 processor's own retired-instruction count, so guest time and the TSC advance
 together and both are this port's.
 
@@ -1199,8 +1245,9 @@ the worst of the three. So both stay with the hardware, together.
 ### Price of closing it
 
 A cross-engine TSC bridge: the engine would have to drive this port's counter
-from elapsed host time at the machine's own rate, the way it already converts a
-slice's duration into ticks, and then take `X64RdtscExit` plus the two TSC
+from elapsed host time at the machine's own rate, the way the device thread
+already turns elapsed host time into ticks (`service_once`,
+`rusty_box_whp_engine/src/device_thread.rs`), and then take `X64RdtscExit` plus the two TSC
 bits in the MSR exit bitmap. `X64RdtscExit` also puts an exit on the hottest
 instruction a calibrating guest executes, so it needs a measurement before it
 is worth having. Both bits are one named constant away in
@@ -1314,33 +1361,49 @@ thing:
 
 For the interpreter, stopping for the second kind is free and right: it services
 the bookkeeping in the next breath. For an engine servicing a trap it is
-ruinous and pointless — the machine cannot act on a queued boundary until the
-whole slice ends, so all the stop achieves is to end the instruction after ONE
-item, and the guest re-traps for the next one. A `REP INSW` reading one disk
-sector then costs 256 exits and 512 whole-architectural-state exchanges instead
-of one.
+ruinous and pointless — the engine acts on a queued boundary only once the
+trapped instruction is handed back, so all the stop achieves is to end the
+instruction after ONE item, and the guest re-traps for the next one. A
+`REP INSW` reading one disk sector then costs 256 exits and 512
+whole-architectural-state exchanges instead of one.
 
-**Decided provisionally** (2026-08-28): `PcIo::finish_the_instruction` parks the
-bookkeeping bits for the duration of a trapped instruction and puts them back
-after, so only a deliverable event stops it — plus one deliberate exception, a
+**Decided provisionally** (2026-08-28): `PcIo::finish_the_instruction`
+(`rusty_box/src/emulator/io.rs`) parks the bookkeeping bits for the duration of
+a trapped instruction and puts them back after. It holds the external interrupt
+for the same length (`park_deliverable_interrupt`, `cpu/arch_state.rs`: the
+8259's line, the local APIC's and a VMX virtual interrupt), because the
+interpreter's loop would otherwise deliver one at the head of the next item and
+enter a handler halfway through a disk sector. What stops a trapped instruction
+early is therefore an event that is not held — an NMI, an SMI, an INIT, a
+shutdown — or `ITEM_CEILING` (65,536 items), plus one deliberate exception, a
 device deadline coming due, which is asked directly of `pc_system` rather than
 through the shared `STOP_TRACE` bit. That exception exists so divergence **D3**
 keeps working on both engines: this port delivers a timer interrupt in the
 middle of a long string burst rather than at the end of it, and an engine that
 ran on would be the one diverging.
 
-**What to revisit.** Whether the two kinds should share a bit at all. Splitting
-them — a `TraceControl` word separate from `async_event` — would remove the
-parking, remove the need to ask `pc_system` a second question that the
-`STOP_TRACE` bit was already answering, and make both engines say what they
-mean. It touches every `async_event` site in `cpu/`, which is why it was not
-done under a boot bring-up.
+**What to revisit.**
+
+- Whether the two kinds should share a bit at all. Splitting them — a
+  `TraceControl` word separate from `async_event` — would remove the parking,
+  remove the need to ask `pc_system` a second question that the `STOP_TRACE`
+  bit was already answering, and make both engines say what they mean. It
+  touches every `async_event` site in `cpu/`, which is why it was not done under
+  a boot bring-up.
+- Whether holding the external interrupt is itself a divergence. Bochs
+  interrupts a repeated instruction between items; here a trapped one runs on
+  until it ends, reaches `ITEM_CEILING` or meets a device deadline, and only
+  then takes an interrupt that arrived meanwhile. It is not registered as one.
 
 ## H4 — A machine may be narrowed to the processor every engine can run
 
-**Off by default.** `--cpu-capabilities preset` is the default and answers
-`CPUID` byte for byte as Bochs does; the divergence exists only when a caller
-asks for `host-shared`.
+**Off by default on the interpreter.** `--cpu-capabilities preset` is the
+default and answers `CPUID` byte for byte as Bochs does; on the interpreter the
+divergence exists only when a caller asks for `host-shared`. On the hypervisor
+`rusty_box_gui` always asks for it, whatever the flag says
+(`cpu_params_for_engine`, `rusty_box_gui/src/runner.rs`): `XSETBV` is not
+trapped on the partition, so a guest told the full preset enables register state
+the host does not have.
 
 ### What the guest observes
 
@@ -1364,12 +1427,17 @@ under VMX, so none of them has the option not to. KVM masks to host support;
 VMware's EVC masks to a cluster baseline precisely so a guest survives the
 hardware under it changing, which here is a switch between engines.
 
-### Why it is a machine setting and not an engine one
+### Why it is meant to be a machine setting and not an engine one
 
 A guest keeps what it enabled across a switch from the hypervisor to the
 interpreter. If the two engines offered different processors, the switch would
 change the hardware under a running guest — and the switch is the point: drive
 the guest fast on hardware, then interpret it.
+
+That switch is not built: a machine runs on one engine from power-on to power-off.
+Until it is, `rusty_box_gui` picks the processor per engine — the VM's setting on
+the interpreter, `host-shared` on the hypervisor — so the same VM file gets a
+different processor on each. A switch mid-run has to make the two agree first.
 
 ### Price of closing it
 
@@ -1469,8 +1537,9 @@ registration.
 
 Arming at the sites that latch the work instead would be wrong, and structurally
 so. `activate_timer` has six callers in `iodev/keyboard.rs`, and two of them —
-`kbd_enq` and `mouse_enq` — are reached when the HOST queues a keystroke or a
-mouse packet, a path no guest port write passes through. An implementation that
+`kbd_enq` and `mouse_enq`, Bochs's `kbd_enQ` and `mouse_enQ` — are reached when
+the HOST queues a keystroke or a mouse packet, a path no guest port write passes
+through. An implementation that
 armed only where the guest touches port 0x60/0x64 would leave that byte latched
 with nothing armed to carry it, and IRQ1 would not fire until some unrelated port
 access happened to arm the one-shot; at an idle shell prompt that is a dead
@@ -1523,19 +1592,11 @@ arming is conditional in `Emulator::rearm_device_timers_after_hardware_reset`
 (`emulator/timers.rs`), the one-shot is armed from
 `Emulator::service_device_time` through `arm_the_serial_delay_if_owed`, and the
 question it asks is `BxKeyboardC::needs_serial_tick` (`iodev/keyboard.rs`).
-
-**The arming site is the whole of it, and it is not where a guest touches a
-port.** `activate_timer` has six callers in `keyboard.rs`, and two — `kbd_enQ`
-and `mouse_enQ` — are reached when the HOST queues a keystroke or a mouse
-packet, which no guest port write passes through. Arming from the port-dispatch
-tail would therefore drop host input entirely whenever the guest is idle: the
-byte sits latched, the one-shot is never armed, and IRQ1 never fires until some
-unrelated port access happens along. At an idle shell prompt that is a dead
-keyboard. Evaluating on every service covers all six latch paths and any added
-later, which a port-dispatch tail structurally cannot (R5). Pinned by
+That this one site also carries host input — the `kbd_enq` and `mouse_enq` paths
+above, which no guest port write passes through — is pinned by
 `a_keystroke_the_host_queues_arms_the_8042_although_the_guest_touched_no_port`
-(`rusty_box_whp_engine/src/fast_machine.rs`), whose guest is `jmp $` — it
-touches nothing, so no port write could have armed anything.
+(`rusty_box_whp_engine/src/fast_machine.rs`), whose guest is `jmp $`: it touches
+nothing, so no port write could have armed anything.
 
 ## H7 — The time-stamp counter's rate changes across an engine transfer
 
@@ -1702,10 +1763,12 @@ Bochs's behaviour exactly.
 Bochs raises a flag and reads the vector only once the processor is ready to take
 it: `pc_system.cc raise_INTR` carries no vector, and `cpu/event.cc` calls
 `DEV_pic_iac()` at the moment of delivery. This engine acknowledges earlier. The
-vCPU thread tests the guest's readiness from its last exit header — `IF` set, no
-interrupt shadow, no delivery already in flight — and, if the guest can take one,
-performs the acknowledge and places the resolved vector as a
-`WHvX64PendingEventExtInt` before re-entering the partition.
+vCPU thread's `stage_the_legacy_interrupt` first asks whether the local APIC's
+LVT0 admits the line at all (`lint0_admits_ext_int`, divergence D6), then tests
+the guest's readiness from its last exit header — `IF` set, no interrupt shadow,
+no delivery already in flight — and, if the guest can take one, performs the
+acknowledge and places the resolved vector as a `WHvX64PendingEventExtInt`
+before re-entering the partition.
 
 So the vector leaves the 8259 a few instructions earlier than Bochs would take
 it. A guest that masks that IRQ in the window between the acknowledge and the

@@ -1216,6 +1216,116 @@ fn flat_long64_pde_addr(addr: u64) -> u64 {
     0x3000 + (addr / 0x0020_0000) * 8
 }
 
+// Faults are read the way the guest sees them (doctrine R9): the processor
+// enters the vector's handler with one exception frame on its stack, whose RIP
+// is the faulting instruction. The machine's exception counters exist only in
+// debug builds, so a check that read them would prove nothing under
+// `--release`; the frame proves the same thing in every build.
+
+const IDT: u64 = 0x0028_0000;
+const FAULT_STACK: u64 = 0x0030_0000;
+
+/// Whether a vector pushes an error code below the rest of its frame.
+#[derive(Clone, Copy)]
+enum ErrorCodeSlot {
+    Pushed,
+    Absent,
+}
+
+/// An IDT gate, and the one-instruction handler (`HLT`) it points at.
+struct Gate {
+    vector: u64,
+    handler: u64,
+    error_code: ErrorCodeSlot,
+}
+
+const PF_GATE: Gate = Gate {
+    vector: 14,
+    handler: 0x0029_0000,
+    error_code: ErrorCodeSlot::Pushed,
+};
+const UD_GATE: Gate = Gate {
+    vector: 6,
+    handler: 0x0029_0010,
+    error_code: ErrorCodeSlot::Absent,
+};
+
+/// Point the #UD and #PF gates at their handlers, and give the processor a
+/// stack to push an exception frame on.
+fn install_fault_handlers(emu: &mut Emulator) {
+    emu.reg_write(X86Reg::IdtrBase, IDT);
+    emu.reg_write(X86Reg::IdtrLimit, 256 * 16 - 1);
+    emu.reg_write(X86Reg::Rsp, FAULT_STACK);
+    for gate in [&PF_GATE, &UD_GATE] {
+        let mut entry = [0u8; 16];
+        entry[0..2].copy_from_slice(&(gate.handler as u16).to_le_bytes());
+        entry[2..4].copy_from_slice(&0x0008u16.to_le_bytes());
+        entry[5] = 0x8E; // present, DPL 0, 64-bit interrupt gate
+        entry[6..8].copy_from_slice(&((gate.handler >> 16) as u16).to_le_bytes());
+        entry[8..12].copy_from_slice(&((gate.handler >> 32) as u32).to_le_bytes());
+        emu.mem_write(IDT + gate.vector * 16, &entry)
+            .expect("write the gate");
+        emu.mem_write(gate.handler, &[0xF4]).expect("write the handler");
+    }
+}
+
+/// The frame a delivered fault pushed, read back off the guest's stack.
+#[derive(Debug, PartialEq, Eq)]
+struct FaultFrame {
+    /// Where the handler returns to: the faulting instruction itself, which
+    /// is what lets the guest restart it.
+    rip: u64,
+    /// The error code, for a vector that pushes one.
+    error_code: Option<u64>,
+}
+
+/// Run `code` at `CASE_BASE` and return the frame of the fault it raises
+/// through `gate`. Fails unless the processor ends halted in that gate's
+/// handler with exactly one long-mode frame (SS, RSP, RFLAGS, CS, RIP and any
+/// error code) on the stack: an instruction that retires, or that raises
+/// another vector, fails here.
+fn take_fault(emu: &mut Emulator, code: &[u8], gate: &Gate) -> FaultFrame {
+    let mut prog = code.to_vec();
+    prog.extend_from_slice(&[0xEB, 0xFE]); // park, should it retire
+    emu.mem_write(CASE_BASE, &prog).expect("write code");
+    emu.reg_write(X86Reg::Rsp, FAULT_STACK);
+    let stop = emu
+        .emu_start(CASE_BASE, Some(gate.handler + 1), None, Some(20))
+        .expect("emu_start");
+    assert_eq!(
+        emu.cpu().rip(),
+        gate.handler + 1,
+        "the processor must enter the vector {} handler (stop={stop:?})",
+        gate.vector
+    );
+    let frame_len = match gate.error_code {
+        ErrorCodeSlot::Pushed => 48,
+        ErrorCodeSlot::Absent => 40,
+    };
+    let top = FAULT_STACK - frame_len;
+    assert_eq!(
+        emu.reg_read(X86Reg::Rsp),
+        top,
+        "a fault pushes exactly one exception frame"
+    );
+    match gate.error_code {
+        ErrorCodeSlot::Pushed => FaultFrame {
+            rip: read_qword(emu, top + 8),
+            error_code: Some(read_qword(emu, top)),
+        },
+        ErrorCodeSlot::Absent => FaultFrame {
+            rip: read_qword(emu, top),
+            error_code: None,
+        },
+    }
+}
+
+fn read_qword(emu: &mut Emulator, addr: u64) -> u64 {
+    let mut bytes = [0u8; 8];
+    emu.mem_read(addr, &mut bytes).expect("read the stack");
+    u64::from_le_bytes(bytes)
+}
+
 #[test]
 fn vex_maskmov_suppresses_masked_off_elements() {
     with_avx_emu(|emu| {
@@ -1224,24 +1334,8 @@ fn vex_maskmov_suppresses_masked_off_elements() {
         // stale TLB entry can hide the change.
         const HOLE: u64 = 0x00C0_0000;
         const STRADDLE: u64 = HOLE - 16; // dwords 0..3 mapped, 4..7 in the hole
-        const IDT: u64 = 0x0028_0000;
-        const PF_HANDLER: u64 = 0x0029_0000;
-        const STACK: u64 = 0x0030_0000;
 
-        // #PF gate (vector 14) whose handler is a single HLT.
-        let mut gate = [0u8; 16];
-        gate[0..2].copy_from_slice(&(PF_HANDLER as u16).to_le_bytes());
-        gate[2..4].copy_from_slice(&0x0008u16.to_le_bytes());
-        gate[5] = 0x8e;
-        gate[6..8].copy_from_slice(&((PF_HANDLER >> 16) as u16).to_le_bytes());
-        gate[8..12].copy_from_slice(&((PF_HANDLER >> 32) as u32).to_le_bytes());
-        emu.mem_write(IDT + 14 * 16, &gate).expect("write #PF gate");
-        emu.mem_write(PF_HANDLER, &[0xF4]).expect("write handler");
-        emu.mem_write(0x808, &0x00AF_9A00_0000_FFFFu64.to_le_bytes())
-            .expect("long code descriptor");
-        emu.reg_write(X86Reg::IdtrBase, IDT);
-        emu.reg_write(X86Reg::IdtrLimit, 256 * 16 - 1);
-        emu.reg_write(X86Reg::Rsp, STACK);
+        install_fault_handlers(emu);
         emu.mem_write(flat_long64_pde_addr(HOLE), &0u64.to_le_bytes())
             .expect("unmap the hole page");
 
@@ -1332,23 +1426,27 @@ fn vex_maskmov_suppresses_masked_off_elements() {
             "elements in the mapped page must load"
         );
         assert_eq!(
-            emu.cpu().get_exception_diag()[14],
-            0,
-            "masked-off elements in an unmapped page must not fault"
+            emu.reg_read(X86Reg::Rsp),
+            FAULT_STACK,
+            "masked-off elements in an unmapped page must not fault: nothing was pushed"
         );
 
-        // Same address, but now a masked-in element lands in the hole.
+        // Same address, but now a masked-in element lands in the hole: a
+        // supervisor read of a not-present page, at element 4's address.
         emu.reg_write(X86Reg::Rax, STRADDLE);
         emu.reg_write_ymm(X86Reg::Ymm2, high_only);
-        let mut prog = load.to_vec();
-        prog.extend_from_slice(&[0xEB, 0xFE]);
-        emu.mem_write(CASE_BASE, &prog).expect("write code");
-        emu.emu_start(CASE_BASE, Some(PF_HANDLER + 1), None, Some(20))
-            .expect("emu_start");
         assert_eq!(
-            emu.cpu().get_exception_diag()[14],
-            1,
+            take_fault(emu, load, &PF_GATE),
+            FaultFrame {
+                rip: CASE_BASE,
+                error_code: Some(0),
+            },
             "a masked-in element in an unmapped page must raise #PF"
+        );
+        assert_eq!(
+            emu.reg_read(X86Reg::Cr2),
+            HOLE,
+            "CR2 must name the masked-in element's address"
         );
     });
 }
@@ -1453,17 +1551,15 @@ fn vex_vgather_loads_elements_and_clears_the_mask() {
 
         // #UD when destination, mask and VSIB index are not all distinct.
         // VPGATHERDD ymm1, [rax+ymm1*4], ymm3 — index == destination.
+        install_fault_handlers(emu);
         emu.reg_write_ymm(X86Reg::Ymm3, ymm_from_u32([signed; 8]));
         let bad = &[0xC4u8, 0xE2, 0x65, 0x90, 0x0C, 0x88]; // sib 88: index=ymm1
-        let mut prog = bad.to_vec();
-        prog.extend_from_slice(&[0xEB, 0xFE]);
-        emu.mem_write(CASE_BASE, &prog).expect("write code");
-        let before = emu.cpu().get_exception_diag()[6];
-        emu.emu_start(CASE_BASE, Some(CASE_BASE + bad.len() as u64), None, Some(4))
-            .expect("emu_start");
         assert_eq!(
-            emu.cpu().get_exception_diag()[6],
-            before + 1,
+            take_fault(emu, bad, &UD_GATE),
+            FaultFrame {
+                rip: CASE_BASE,
+                error_code: None,
+            },
             "a gather whose index equals its destination must #UD"
         );
     });
@@ -1474,23 +1570,8 @@ fn vex_vgather_is_restartable_after_a_page_fault() {
     with_avx_emu(|emu| {
         const TABLE: u64 = 0x0060_0000;
         const HOLE: u64 = 0x00C0_0000;
-        const IDT: u64 = 0x0028_0000;
-        const PF_HANDLER: u64 = 0x0029_0000;
-        const STACK: u64 = 0x0030_0000;
 
-        let mut gate = [0u8; 16];
-        gate[0..2].copy_from_slice(&(PF_HANDLER as u16).to_le_bytes());
-        gate[2..4].copy_from_slice(&0x0008u16.to_le_bytes());
-        gate[5] = 0x8e;
-        gate[6..8].copy_from_slice(&((PF_HANDLER >> 16) as u16).to_le_bytes());
-        gate[8..12].copy_from_slice(&((PF_HANDLER >> 32) as u32).to_le_bytes());
-        emu.mem_write(IDT + 14 * 16, &gate).expect("write #PF gate");
-        emu.mem_write(PF_HANDLER, &[0xF4]).expect("write handler");
-        emu.mem_write(0x808, &0x00AF_9A00_0000_FFFFu64.to_le_bytes())
-            .expect("long code descriptor");
-        emu.reg_write(X86Reg::IdtrBase, IDT);
-        emu.reg_write(X86Reg::IdtrLimit, 256 * 16 - 1);
-        emu.reg_write(X86Reg::Rsp, STACK);
+        install_fault_handlers(emu);
         emu.mem_write(flat_long64_pde_addr(HOLE), &0u64.to_le_bytes())
             .expect("unmap the hole page");
 
@@ -1509,16 +1590,19 @@ fn vex_vgather_is_restartable_after_a_page_fault() {
         emu.reg_write_ymm(X86Reg::Ymm3, ymm_from_u32([0x8000_0000; 8]));
 
         let gather = &[0xC4u8, 0xE2, 0x65, 0x90, 0x0C, 0x90];
-        let mut prog = gather.to_vec();
-        prog.extend_from_slice(&[0xEB, 0xFE]);
-        emu.mem_write(CASE_BASE, &prog).expect("write code");
-        emu.emu_start(CASE_BASE, Some(PF_HANDLER + 1), None, Some(20))
-            .expect("emu_start");
-
         assert_eq!(
-            emu.cpu().get_exception_diag()[14],
-            1,
-            "the third element must raise #PF"
+            take_fault(emu, gather, &PF_GATE),
+            FaultFrame {
+                rip: CASE_BASE,
+                error_code: Some(0),
+            },
+            "the third element must raise #PF, a supervisor read of a not-present \
+             page, with the gather itself as the place to restart"
+        );
+        assert_eq!(
+            emu.reg_read(X86Reg::Cr2),
+            HOLE,
+            "CR2 must name the third element's address"
         );
 
         let dst = emu.reg_read_ymm(X86Reg::Ymm1);
@@ -1638,16 +1722,14 @@ fn vex_vpclmulqdq_sources_vvvv_per_lane() {
         // advertise — so the ISA gate must turn it into #UD, exactly as
         // Bochs's init_FetchDecodeTables does. The handler behind it is
         // exercised by vex_vpclmulqdq_vl256_runs_when_the_feature_is_present.
+        install_fault_handlers(emu);
         emu.reg_write_ymm(X86Reg::Ymm0, [0xAA; 32]);
-        let before = emu.cpu().get_exception_diag()[6];
-        let mut prog = vec![0xC4u8, 0xE3, 0x75, 0x44, 0xC2, 0x00];
-        prog.extend_from_slice(&[0xEB, 0xFE]);
-        emu.mem_write(CASE_BASE, &prog).expect("write code");
-        emu.emu_start(CASE_BASE, Some(CASE_BASE + 6), None, Some(4))
-            .expect("emu_start");
         assert_eq!(
-            emu.cpu().get_exception_diag()[6],
-            before + 1,
+            take_fault(emu, &[0xC4, 0xE3, 0x75, 0x44, 0xC2, 0x00], &UD_GATE),
+            FaultFrame {
+                rip: CASE_BASE,
+                error_code: None,
+            },
             "VEX.256 VPCLMULQDQ must #UD on a model without the VPCLMULQDQ feature"
         );
         assert_eq!(

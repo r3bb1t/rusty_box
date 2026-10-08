@@ -294,6 +294,10 @@ fn run_alpine() -> Result<()> {
         memory_block_size: 128 * 1024,
         ips: Ips::new(300_000_000),
         pci_enabled: true,
+        // ISOLINUX reports through Bochs's port-0xE9 console, and this
+        // harness prints what it says, so the console is on — what
+        // `port_e9_hack: enabled=1` in a bochsrc does.
+        port_e9_hack: rusty_box::iodev::PortE9Hack::On,
         ..Default::default()
     };
 
@@ -552,7 +556,10 @@ fn run_alpine() -> Result<()> {
 
             // Dump debug port output periodically to see ISOLINUX messages
             if phase_num % 10 == 0 {
-                let e9: Vec<u8> = emu.debug_port().take_output().collect();
+                let e9: Vec<u8> = emu
+                    .debug_port()
+                    .map(|mut port| port.take_output().collect())
+                    .unwrap_or_default();
                 if !e9.is_empty() {
                     let text = String::from_utf8_lossy(&e9);
                     for line in text.lines().take(5) {
@@ -635,7 +642,10 @@ fn run_alpine() -> Result<()> {
     }
 
     // Debug port output
-    let e9: Vec<u8> = emu.debug_port().take_output().collect();
+    let e9: Vec<u8> = emu
+        .debug_port()
+        .map(|mut port| port.take_output().collect())
+        .unwrap_or_default();
     if !e9.is_empty() {
         println!();
         println!("===== BOCHS DEBUG PORT OUTPUT (0xE9) =====");

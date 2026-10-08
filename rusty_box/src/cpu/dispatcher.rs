@@ -12,11 +12,28 @@ use super::{
     avx512_gather::VexGatherForm,
     avx512_misc::{PmovDst, PmovSat, PmovSrc},
     decoder::{Instruction, Opcode},
-    Result,
+    simd_int, Result,
 };
 
 impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
+    /// Execute one decoded instruction.
+    ///
+    /// A fault a handler reports as `CpuError::BadVector` rather than raising
+    /// is raised here, through `exception` — Bochs's handlers call
+    /// `exception()`, which never returns to them. One place for every
+    /// handler (R5), so no instruction can turn a guest's #GP, #SS, #NP or
+    /// #TS into an error that stops the emulator; and an RSP_SPECULATIVE the
+    /// handler left open is still open, so the fault restores RSP and SSP.
     pub(super) fn execute_instruction(&mut self, instr: &Instruction) -> Result<()> {
+        match self.dispatch_instruction(instr) {
+            Err(super::error::CpuError::BadVector { vector, error_code }) => {
+                self.exception(vector, error_code)
+            }
+            outcome => outcome,
+        }
+    }
+
+    fn dispatch_instruction(&mut self, instr: &Instruction) -> Result<()> {
         use crate::cpu::arith16;
         use crate::cpu::arith32;
         use crate::cpu::arith8;
@@ -575,22 +592,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             // =========================================================================
             // RET instructions
             // =========================================================================
-            Opcode::RetOp16 => {
-                self.ret_near16(instr)?;
-                Ok(())
-            }
-            Opcode::RetOp16Iw => {
-                self.ret_near16_iw(instr)?;
-                Ok(())
-            }
-            Opcode::RetOp32 => {
-                self.ret_near32(instr)?;
-                Ok(())
-            }
-            Opcode::RetOp32Iw => {
-                self.ret_near32_iw(instr)?;
-                Ok(())
-            }
+            // Bochs gives RET and RET imm16 one handler each width, the
+            // immediate-less form running it with Iw zero.
+            Opcode::RetOp16 | Opcode::RetOp16Iw => self.ret_near16_iw(instr),
+            Opcode::RetOp32 | Opcode::RetOp32Iw => self.ret_near32_iw(instr),
 
             // =========================================================================
             // LOOP instructions
@@ -630,8 +635,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             // =========================================================================
             // Far RET instructions (32-bit)
             // =========================================================================
-            Opcode::RetfOp32 => self.retfar32(instr),
-            Opcode::RetfOp32Iw => self.retfar32_iw(instr),
+            Opcode::RetfOp32 | Opcode::RetfOp32Iw => self.retfar32_iw(instr),
 
             // =========================================================================
             // Conditional jumps with 32-bit displacement (Jd variants)
@@ -729,8 +733,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             // =========================================================================
             // Far RET instructions (16-bit)
             // =========================================================================
-            Opcode::RetfOp16 => self.retfar16(instr),
-            Opcode::RetfOp16Iw => self.retfar16_iw(instr),
+            Opcode::RetfOp16 | Opcode::RetfOp16Iw => self.retfar16_iw(instr),
 
             // =========================================================================
             // Conditional jumps with 16-bit displacement (Jw variants)
@@ -1181,9 +1184,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             Opcode::IntIb => self.int_ib(instr),
             Opcode::INT3 => self.int3(instr),
             Opcode::INT1 => self.int1(instr),
-            // INTO: Bochs ia_opcodes.def BX_IA_INTO → BX_CPU_C::INTO.
-            // Decoder emits Opcode::Int0 for 0xCE (fetchdecode_opmap.h).
-            Opcode::Int0 => self.into_overflow(instr),
+            // Bochs ia_opcodes.def BX_IA_INTO → BX_CPU_C::INTO (opcode 0xCE).
+            Opcode::Into => self.into_overflow(instr),
             Opcode::IretOp16 => {
                 self.iret16(instr)?;
                 Ok(())
@@ -1392,10 +1394,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             Opcode::JmpJq | Opcode::JmpJbq => self.jmp_jq(instr),
             Opcode::JmpEq => self.jmp_eq(instr),
             Opcode::JmpfOp64Ep => self.jmp64_ep(instr),
-            Opcode::RetOp64 => self.retnear64_iw(instr), // Bochs: RetOp64 uses same handler (iw=0)
-            Opcode::RetOp64Iw => self.retnear64_iw(instr),
-            Opcode::RetfOp64 => self.retfar64(instr),
-            Opcode::RetfOp64Iw => self.retfar64_iw(instr),
+            // Bochs ia_opcodes.def: RET_Op64 and RETF_Op64 decode with Iw = 0
+            // and share the _Iw handlers.
+            Opcode::RetOp64 | Opcode::RetOp64Iw => self.retnear64_iw(instr),
+            Opcode::RetfOp64 | Opcode::RetfOp64Iw => self.retfar64_iw(instr),
             Opcode::IretOp64 => self.iret64(instr),
             Opcode::EnterOp64IwIb => self.enter64_iw_ib(instr),
             Opcode::LeaveOp64 => self.leave64(instr),
@@ -1472,8 +1474,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             Opcode::Cpuid => self.cpuid(instr),
             Opcode::Rdtsc => self.rdtsc(instr),
             Opcode::Rdpmc => self.rdpmc(instr),
-            Opcode::Rdmsr => self.rdmsr(instr),
-            Opcode::Wrmsr => self.wrmsr(instr),
+            // Bochs ia_opcodes.def sends every MSR form to one of four
+            // handlers, which tell the forms apart by opcode.
+            Opcode::Rdmsr | Opcode::RdmsrEqId => self.rdmsr(instr),
+            Opcode::Wrmsr | Opcode::Wrmsrns | Opcode::WrmsrnsIdEq => self.wrmsr(instr),
+            Opcode::UrdmsrEqId | Opcode::UrdmsrEqGq => self.urdmsr(instr),
+            Opcode::UwrmsrIdEq | Opcode::UwrmsrGqEq => self.uwrmsr(instr),
+            Opcode::Rdmsrlist => self.rdmsrlist(),
+            Opcode::Wrmsrlist => self.wrmsrlist(),
             Opcode::Sysenter => self.sysenter(instr),
             Opcode::Sysexit => self.sysexit(instr),
             Opcode::Syscall | Opcode::SyscallLegacy => self.syscall(instr),
@@ -2488,6 +2496,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             Opcode::MovntpsMpsVps => self.movntps_mps_vps(instr),
             Opcode::MovntpdMpdVpd => self.movntpd_mpd_vpd(instr),
             Opcode::MovntdqMdqVdq => self.movntdq_mdq_vdq(instr),
+            // SSE4A (AMD). The scalar non-temporal stores are Bochs's MOVSS
+            // and MOVSD stores; the decoder admits their memory forms alone.
+            Opcode::MovntssMssVss => self.movss_wss_vss_m(instr),
+            Opcode::MovntsdMsdVsd => self.movsd_wsd_vsd_m(instr),
+            Opcode::ExtrqUdqIbIb => self.extrq_udq_ib_ib(instr),
+            Opcode::ExtrqVdqUq => self.extrq_vdq_uq(instr),
+            Opcode::InsertqVdqUqIbIb => self.insertq_vdq_uq_ib_ib(instr),
+            Opcode::InsertqVdqUdq => self.insertq_vdq_udq(instr),
             Opcode::MovntiOp32MdGd => self.movnti_md_gd(instr),
             Opcode::MovntiOp64MdGd => self.movnti_op64_md_gd(instr),
             Opcode::MovntiMqGq => self.movnti_mq_gq(instr),
@@ -2639,7 +2655,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             Opcode::Cvtss2sdVsdWss => self.cvtss2sd_vsd_wss(instr),
             Opcode::Cvtsd2ssVssWsd => self.cvtsd2ss_vss_wsd(instr),
             Opcode::Cvtpi2psVpsQq => self.cvtpi2ps_vps_qq(instr),
+            Opcode::Cvtpi2pdVpdQq => self.cvtpi2pd_vpd_qq(instr),
+            Opcode::Cvttps2piPqWps => self.cvttps2pi_pq_wps(instr),
+            Opcode::Cvttpd2piPqWpd => self.cvttpd2pi_pq_wpd(instr),
             Opcode::Cvtps2piPqWps => self.cvtps2pi_pq_wps(instr),
+            Opcode::Cvtpd2piPqWpd => self.cvtpd2pi_pq_wpd(instr),
             Opcode::Cvtdq2psVpsWdq => self.cvtdq2ps_vps_wdq(instr),
             Opcode::Cvtps2dqVdqWps => self.cvtps2dq_vdq_wps(instr),
             Opcode::Cvttps2dqVdqWps => self.cvttps2dq_vdq_wps(instr),
@@ -2782,6 +2802,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             Opcode::PabsbVdqWdq => self.pabsb_vdq_wdq(instr),
             Opcode::PabswVdqWdq => self.pabsw_vdq_wdq(instr),
             Opcode::PabsdVdqWdq => self.pabsd_vdq_wdq(instr),
+            Opcode::PhaddwVdqWdq => self.phaddw_vdq_wdq(instr),
+            Opcode::PhadddVdqWdq => self.phaddd_vdq_wdq(instr),
+            Opcode::PhaddswVdqWdq => self.phaddsw_vdq_wdq(instr),
+            Opcode::PhsubwVdqWdq => self.phsubw_vdq_wdq(instr),
+            Opcode::PhsubdVdqWdq => self.phsubd_vdq_wdq(instr),
+            Opcode::PhsubswVdqWdq => self.phsubsw_vdq_wdq(instr),
 
             // SSE3 LDDQU — unaligned 128-bit load, same semantics as MOVDQU
             // (Bochs ia_opcodes.def BX_IA_LDDQU_VdqMdq → MOVUPS_VpsWpsM)
@@ -2800,6 +2826,16 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             Opcode::MpsadbwVdqWdqIb => self.mpsadbw_vdq_wdq_ib(instr),
             Opcode::PhminposuwVdqWdq => self.phminposuw_vdq_wdq(instr),
             Opcode::InsertpsVpsWssIb => self.insertps_vps_wss_ib(instr),
+            Opcode::PminsbVdqWdq => self.pminsb_vdq_wdq(instr),
+            Opcode::PminsdVdqWdq => self.pminsd_vdq_wdq(instr),
+            Opcode::PminuwVdqWdq => self.pminuw_vdq_wdq(instr),
+            Opcode::PmaxsbVdqWdq => self.pmaxsb_vdq_wdq(instr),
+            Opcode::PmaxsdVdqWdq => self.pmaxsd_vdq_wdq(instr),
+            Opcode::PmaxuwVdqWdq => self.pmaxuw_vdq_wdq(instr),
+            Opcode::PcmpeqqVdqWdq => self.pcmpeqq_vdq_wdq(instr),
+            Opcode::PackusdwVdqWdq => self.packusdw_vdq_wdq(instr),
+            // SSE4.2
+            Opcode::PcmpgtqVdqWdq => self.pcmpgtq_vdq_wdq(instr),
 
             // SSE4.1 FP blends (sse.rs)
             Opcode::BlendpsVpsWpsIb => self.blendps_vps_wps_ib(instr),
@@ -2811,6 +2847,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             Opcode::PextrbEdVdqIbR => self.pextrb_ed_vdq_ib_r(instr),
             Opcode::PextrbMbVdqIbM => self.pextrb_mb_vdq_ib_m(instr),
             Opcode::PextrdEdVdqIb => self.pextrd_ed_vdq_ib(instr),
+            // Bochs gives EXTRACTPS the PEXTRD handlers outright.
+            Opcode::ExtractpsEdVpsIb => self.pextrd_ed_vdq_ib(instr),
             Opcode::PextrqEqVdqIb => self.pextrq_eq_vdq_ib(instr),
             Opcode::PinsrbVdqEbIb => self.pinsrb_vdq_eb_ib(instr),
             Opcode::PinsrdVdqEdIb => self.pinsrd_vdq_ed_ib(instr),
@@ -4857,6 +4895,62 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             Opcode::V128VpmaxudVdqHdqWdq | Opcode::V256VpmaxudVdqHdqWdq => self.vpmaxud(instr),
 
             // =====================================================================
+            // VEX-encoded lane operations shared with their legacy forms
+            // (Bochs HANDLE_AVX_2OP over the simd_int.h body HANDLE_SSE_2OP uses)
+            // =====================================================================
+            Opcode::V128VphaddwVdqHdqWdq | Opcode::V256VphaddwVdqHdqWdq => {
+                self.avx_2op(instr, simd_int::xmm_phaddw)
+            }
+            Opcode::V128VphadddVdqHdqWdq | Opcode::V256VphadddVdqHdqWdq => {
+                self.avx_2op(instr, simd_int::xmm_phaddd)
+            }
+            Opcode::V128VphaddswVdqHdqWdq | Opcode::V256VphaddswVdqHdqWdq => {
+                self.avx_2op(instr, simd_int::xmm_phaddsw)
+            }
+            Opcode::V128VphsubwVdqHdqWdq | Opcode::V256VphsubwVdqHdqWdq => {
+                self.avx_2op(instr, simd_int::xmm_phsubw)
+            }
+            Opcode::V128VphsubdVdqHdqWdq | Opcode::V256VphsubdVdqHdqWdq => {
+                self.avx_2op(instr, simd_int::xmm_phsubd)
+            }
+            Opcode::V128VphsubswVdqHdqWdq | Opcode::V256VphsubswVdqHdqWdq => {
+                self.avx_2op(instr, simd_int::xmm_phsubsw)
+            }
+            Opcode::V128VpsignbVdqHdqWdq | Opcode::V256VpsignbVdqHdqWdq => {
+                self.avx_2op(instr, simd_int::xmm_psignb)
+            }
+            Opcode::V128VpsignwVdqHdqWdq | Opcode::V256VpsignwVdqHdqWdq => {
+                self.avx_2op(instr, simd_int::xmm_psignw)
+            }
+            Opcode::V128VpsigndVdqHdqWdq | Opcode::V256VpsigndVdqHdqWdq => {
+                self.avx_2op(instr, simd_int::xmm_psignd)
+            }
+            Opcode::V128VpavgbVdqWdq | Opcode::V256VpavgbVdqWdq => {
+                self.avx_2op(instr, simd_int::xmm_pavgb)
+            }
+            Opcode::V128VpavgwVdqWdq | Opcode::V256VpavgwVdqWdq => {
+                self.avx_2op(instr, simd_int::xmm_pavgw)
+            }
+            Opcode::V128VpmaddwdVdqHdqWdq | Opcode::V256VpmaddwdVdqHdqWdq => {
+                self.avx_2op(instr, simd_int::xmm_pmaddwd)
+            }
+            Opcode::V128VpmaddubswVdqHdqWdq | Opcode::V256VpmaddubswVdqHdqWdq => {
+                self.avx_2op(instr, simd_int::xmm_pmaddubsw)
+            }
+            Opcode::V128VpacksswbVdqHdqWdq | Opcode::V256VpacksswbVdqHdqWdq => {
+                self.avx_2op(instr, simd_int::xmm_packsswb)
+            }
+            Opcode::V128VpackuswbVdqHdqWdq | Opcode::V256VpackuswbVdqHdqWdq => {
+                self.avx_2op(instr, simd_int::xmm_packuswb)
+            }
+            Opcode::V128VpackssdwVdqHdqWdq | Opcode::V256VpackssdwVdqHdqWdq => {
+                self.avx_2op(instr, simd_int::xmm_packssdw)
+            }
+            Opcode::V128VpackusdwVdqHdqWdq | Opcode::V256VpackusdwVdqHdqWdq => {
+                self.avx_2op(instr, simd_int::xmm_packusdw)
+            }
+
+            // =====================================================================
             // VEX-encoded integer compare
             // =====================================================================
             Opcode::V128VpcmpeqbVdqHdqWdq | Opcode::V256VpcmpeqbVdqHdqWdq => self.vpcmpeqb(instr),
@@ -5369,83 +5463,9 @@ mod tests {
         }
 
         // Decodable, advertised and unhandled: a guest running one of these
-        // aborts the emulator instead of taking #UD. These are defects; the
-        // list must shrink, never grow.
-        const REACHABLE_GAPS: &[&str] = &[
-            // MMX <-> packed-FP conversions (SSE/SSE2), Bochs sse_pfp.cc.
-            "Cvttps2piPqWps",
-            "Cvtpi2pdVpdQq",
-            "Cvtpd2piPqWpd",
-            "Cvttpd2piPqWpd",
-            // SSSE3 horizontal add/subtract, and their VEX forms, which
-            // remap_sse_to_vex produces from the same legacy opcode.
-            "PhaddwVdqWdq",
-            "PhadddVdqWdq",
-            "PhaddswVdqWdq",
-            "PhsubwVdqWdq",
-            "PhsubdVdqWdq",
-            "PhsubswVdqWdq",
-            "V128VphaddwVdqHdqWdq",
-            "V256VphaddwVdqHdqWdq",
-            "V128VphadddVdqHdqWdq",
-            "V256VphadddVdqHdqWdq",
-            "V128VphaddswVdqHdqWdq",
-            "V256VphaddswVdqHdqWdq",
-            "V128VphsubwVdqHdqWdq",
-            "V256VphsubwVdqHdqWdq",
-            "V128VphsubdVdqHdqWdq",
-            "V256VphsubdVdqHdqWdq",
-            "V128VphsubswVdqHdqWdq",
-            "V256VphsubswVdqHdqWdq",
-            // SSE4.1 integer min/max.
-            "PminsbVdqWdq",
-            "PminsdVdqWdq",
-            "PminuwVdqWdq",
-            "PmaxsbVdqWdq",
-            "PmaxsdVdqWdq",
-            "PmaxuwVdqWdq",
-            // SSE4.1 / SSE4.2 compare, pack and extract.
-            "PcmpeqqVdqWdq",
-            "PcmpgtqVdqWdq",
-            "PackusdwVdqWdq",
-            "ExtractpsEdVpsIb",
-            // VEX forms whose legacy counterpart IS implemented, but whose
-            // V128/V256 opcode has no arm of its own.
-            "V128VpsignbVdqHdqWdq",
-            "V256VpsignbVdqHdqWdq",
-            "V128VpsignwVdqHdqWdq",
-            "V256VpsignwVdqHdqWdq",
-            "V128VpsigndVdqHdqWdq",
-            "V256VpsigndVdqHdqWdq",
-            "V128VpavgbVdqWdq",
-            "V256VpavgbVdqWdq",
-            "V128VpavgwVdqWdq",
-            "V256VpavgwVdqWdq",
-            "V128VpmaddwdVdqHdqWdq",
-            "V256VpmaddwdVdqHdqWdq",
-            "V128VpmaddubswVdqHdqWdq",
-            "V256VpmaddubswVdqHdqWdq",
-            "V128VpacksswbVdqHdqWdq",
-            "V256VpacksswbVdqHdqWdq",
-            "V128VpackuswbVdqHdqWdq",
-            "V256VpackuswbVdqHdqWdq",
-            "V128VpackssdwVdqHdqWdq",
-            "V256VpackssdwVdqHdqWdq",
-            "V128VpackusdwVdqHdqWdq",
-            "V256VpackusdwVdqHdqWdq",
-            // SSE4A. Only AmdRyzen advertises it (`IsaSse4a`), which is why
-            // these show up on that model and not on Corei7SkylakeX.
-            "ExtrqVdqUq",
-            "ExtrqUdqIbIb",
-            "InsertqVdqUdq",
-            "InsertqVdqUqIbIb",
-            "MovntssMssVss",
-            "MovntsdMsdVsd",
-        ];
-
-        // The ledger spans every model, because a gap on one model is a defect
-        // whether or not another model happens to hide it. AMD-only SSE4A is
-        // the case in point.
+        // aborts the emulator instead of taking #UD. Every model counts,
+        // because a gap on one model is a defect whether or not another
+        // happens to hide it.
         let mut reachable = std::collections::BTreeSet::new();
         for gaps in [
             missing(crate::cpu::cpudb::CpuModel::corei7_skylake_x(), &handled),
@@ -5454,26 +5474,12 @@ mod tests {
             reachable.extend(gaps.into_iter().filter(|g| decodable.contains(g)));
         }
 
-        let unexpected: Vec<_> = reachable
-            .iter()
-            .filter(|g| !REACHABLE_GAPS.contains(&g.as_str()))
-            .collect();
         assert!(
-            unexpected.is_empty(),
+            reachable.is_empty(),
             "{} decodable opcode(s) a shipped model admits have no dispatcher \
              arm, so a guest running one aborts the emulator instead of taking \
-             #UD. Implement them, or stop advertising the feature: {unexpected:?}",
-            unexpected.len()
-        );
-
-        let fixed: Vec<_> = REACHABLE_GAPS
-            .iter()
-            .filter(|k| !reachable.contains(**k))
-            .collect();
-        assert!(
-            fixed.is_empty(),
-            "these now have handlers -- delete them from REACHABLE_GAPS so the \
-             list keeps shrinking: {fixed:?}"
+             #UD. Implement them, or stop advertising the feature: {reachable:?}",
+            reachable.len()
         );
     }
 
@@ -5583,14 +5589,16 @@ mod tests {
             crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
         let mut cpu = machine.ctx();
         let mut instr = Instruction::default();
-        instr.set_ia_opcode(Opcode::PminsbVdqWdq);
+        // AMX: an opcode with no dispatcher arm, which no decoder table
+        // produces.
+        instr.set_ia_opcode(Opcode::Tdpbf16psTnnnTrmTreg);
 
         let error = cpu.execute_instruction(&instr).unwrap_err();
 
-        assert_eq!(error.to_string(), "Unimplemented opcode: PminsbVdqWdq");
+        assert_eq!(error.to_string(), "Unimplemented opcode: Tdpbf16psTnnnTrmTreg");
         match error {
             crate::cpu::CpuError::UnimplementedOpcode { opcode } => {
-                assert_eq!(format!("{opcode:?}"), "PminsbVdqWdq");
+                assert_eq!(format!("{opcode:?}"), "Tdpbf16psTnnnTrmTreg");
             }
             other => panic!("expected unimplemented opcode error, got {other:?}"),
         }
@@ -5797,17 +5805,75 @@ mod tests {
         }
     }
 
+    /// The two 4 KiB pages above 4 GiB the BTS tests address, and the physical
+    /// frames `long_mode_with_high_pages` maps them onto. Their 32-bit
+    /// truncations, 0x4000 and 0x5000, stay identity-mapped, so a truncated
+    /// access and a correct one reach different RAM.
+    const HIGH_DWORD_PAGE: u64 = 0x1_0000_4000;
+    const HIGH_DWORD_FRAME: u64 = 0x2_0000;
+    const HIGH_WORD_PAGE: u64 = 0x1_0000_5000;
+    const HIGH_WORD_FRAME: u64 = 0x2_1000;
+
+    /// A processor in 64-bit mode as a guest reaches it: a 64-bit code
+    /// segment, CR0.PG, CR4.PAE and EFER.LMA over a 4-level map. The low
+    /// 2 MiB is identity-mapped; `HIGH_DWORD_PAGE` and `HIGH_WORD_PAGE` map
+    /// onto frames of their own. No GDT backs the selectors, so nothing here
+    /// may reload a segment register.
+    fn long_mode_with_high_pages(
+        machine: &mut crate::cpu::exec_ctx::TestMachine,
+    ) -> crate::cpu::exec_ctx::ExecCtx<'_, ()> {
+        use crate::cpu::api_bridge::SegmentSize;
+        use crate::cpu::instrumentation::X86Reg;
+
+        const PML4: u64 = 0x1_0000;
+        const PDPT: u64 = 0x1_1000;
+        const LOW_DIRECTORY: u64 = 0x1_2000;
+        const HIGH_DIRECTORY: u64 = 0x1_3000;
+        const HIGH_TABLE: u64 = 0x1_4000;
+        const PRESENT_WRITABLE: u64 = 0x3;
+        const LARGE_PAGE: u64 = 0x80;
+        /// PDPT slot of the gigabyte at 4 GiB, and each high page's slot in
+        /// the table under it.
+        const HIGH_PDPT_SLOT: u64 = HIGH_DWORD_PAGE >> 30;
+        const HIGH_DWORD_SLOT: u64 = (HIGH_DWORD_PAGE >> 12) & 0x1FF;
+        const HIGH_WORD_SLOT: u64 = (HIGH_WORD_PAGE >> 12) & 0x1FF;
+
+        let memory = machine.memory_mut();
+        let mut map = |at: u64, entry: u64| {
+            let bytes = entry.to_le_bytes();
+            let copied = memory.write_ram(at, &bytes).expect("the page tables are RAM");
+            assert_eq!(copied, bytes.len(), "the entry at {at:#x} reached RAM whole");
+        };
+        map(PML4, PDPT | PRESENT_WRITABLE);
+        map(PDPT, LOW_DIRECTORY | PRESENT_WRITABLE);
+        map(LOW_DIRECTORY, PRESENT_WRITABLE | LARGE_PAGE);
+        map(PDPT + HIGH_PDPT_SLOT * 8, HIGH_DIRECTORY | PRESENT_WRITABLE);
+        map(HIGH_DIRECTORY, HIGH_TABLE | PRESENT_WRITABLE);
+        map(HIGH_TABLE + HIGH_DWORD_SLOT * 8, HIGH_DWORD_FRAME | PRESENT_WRITABLE);
+        map(HIGH_TABLE + HIGH_WORD_SLOT * 8, HIGH_WORD_FRAME | PRESENT_WRITABLE);
+
+        let mut cpu = machine.ctx();
+        cpu.reset(crate::cpu::ResetReason::Hardware);
+        cpu.set_seg_for_api(X86Reg::Cs, 0x08, 0, 0xFFFF_FFFF, SegmentSize::Long64);
+        for reg in [X86Reg::Ds, X86Reg::Es, X86Reg::Ss, X86Reg::Fs, X86Reg::Gs] {
+            cpu.set_seg_for_api(reg, 0x10, 0, 0xFFFF_FFFF, SegmentSize::Bits32);
+        }
+        cpu.enter_long_mode_for_api(PML4);
+        assert!(cpu.long64_mode(), "the processor is in 64-bit mode");
+        cpu
+    }
+
     #[test]
     fn bts_ed_gd_memory_keeps_64_bit_effective_address() {
         let mut machine =
             crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
-        let mut cpu = machine.ctx();
-        cpu.cpu_mode = CpuMode::Long64;
+        let mut cpu = long_mode_with_high_pages(&mut machine);
 
-        cpu.linaddr_width = 48;
         const LOW_ADDR: u64 = 0x4000;
-        const HIGH_ADDR: u64 = 0x1_0000_4000;
+        const HIGH_ADDR: u64 = HIGH_DWORD_PAGE;
         cpu.write_virtual_dword_64(BxSegregs::Ds, LOW_ADDR, 0x1234_0000)
+            .unwrap();
+        cpu.write_virtual_dword_64(BxSegregs::Ds, HIGH_ADDR, 0xABCD_0000)
             .unwrap();
         cpu.set_rbx(HIGH_ADDR);
         cpu.set_r14(1);
@@ -5827,6 +5893,11 @@ mod tests {
 
         cpu.execute_instruction(&instr).unwrap();
         assert_eq!(
+            cpu.read_virtual_dword_64(BxSegregs::Ds, HIGH_ADDR).unwrap(),
+            0xABCD_0002,
+            "BTS Ed,Gd sets the bit at its 64-bit effective address"
+        );
+        assert_eq!(
             cpu.read_virtual_dword_64(BxSegregs::Ds, LOW_ADDR).unwrap(),
             0x1234_0000,
             "BTS Ed,Gd in 64-bit address mode must not truncate the memory address"
@@ -5837,13 +5908,13 @@ mod tests {
     fn bts_ew_gw_memory_keeps_64_bit_effective_address() {
         let mut machine =
             crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
-        let mut cpu = machine.ctx();
-        cpu.cpu_mode = CpuMode::Long64;
-        cpu.linaddr_width = 48;
+        let mut cpu = long_mode_with_high_pages(&mut machine);
 
         const LOW_ADDR: u64 = 0x5000;
-        const HIGH_ADDR: u64 = 0x1_0000_5000;
+        const HIGH_ADDR: u64 = HIGH_WORD_PAGE;
         cpu.write_virtual_word_64(BxSegregs::Ds, LOW_ADDR, 0x1200)
+            .unwrap();
+        cpu.write_virtual_word_64(BxSegregs::Ds, HIGH_ADDR, 0xAB00)
             .unwrap();
         cpu.set_rbx(HIGH_ADDR);
         cpu.set_r14(1);
@@ -5862,6 +5933,11 @@ mod tests {
         instr.set_seg(BxSegregs::Ds);
 
         cpu.execute_instruction(&instr).unwrap();
+        assert_eq!(
+            cpu.read_virtual_word_64(BxSegregs::Ds, HIGH_ADDR).unwrap(),
+            0xAB02,
+            "BTS Ew,Gw sets the bit at its 64-bit effective address"
+        );
         assert_eq!(
             cpu.read_virtual_word_64(BxSegregs::Ds, LOW_ADDR).unwrap(),
             0x1200,

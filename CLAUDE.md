@@ -28,7 +28,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Rusty Box is a Rust port of the Bochs x86 emulator -- a complete CPU/system emulator targeting 32/64-bit x86 architecture. The original C++ Bochs source is in `cpp_orig/bochs/` for reference.
 
-**Status:** DLX Linux boots to an interactive bash shell; the `cargo xtask ci` boot gate reaches its login prompt on every run. Alpine Linux 3.24.1 boots to a working root shell on the interpreter and on the WHP engine, which reaches `login:` 2.40× sooner (27.1 s vs 65.0 s, i5-12450H, 2026-09-12); DLX does not reach `login:` on WHP today. Ubuntu Server 26.04 live-server boots to its installer; the Windows 10 22H2 installer starts and Windows 7 SP1 reaches Setup, both on the interpreter. `rusty_box_gui` is the front end: a VMware-style VM-library shell on desktop, Android and in the browser. The UEFI example completes BIOS POST and reaches the boot sector.
+**Status:** DLX Linux boots to an interactive bash shell; the `cargo xtask ci` boot gate reaches its login prompt on every run. Alpine Linux 3.24.1 boots to a working root shell on the interpreter and on the WHP engine, which reaches `login:` 2.40× sooner (27.1 s vs 65.0 s, i5-12450H, 2026-09-12); DLX does not reach `login:` on WHP today. Ubuntu Server 26.04 live-server boots to its installer. Windows XP installs and runs on the interpreter (a full install took about five hours on a phone); Windows 10 22H2's Setup runs but has not finished (on a phone it stayed at "Please wait" after 15 hours); Windows 7 SP1 reaches Setup. `rusty_box_gui` is the front end: a VMware-style VM-library shell on desktop, Android and in the browser, running several VMs at once; on a phone a foreground service keeps VMs running with the screen off. The UEFI example completes BIOS POST and reaches the boot sector.
 
 ## Build Commands
 
@@ -37,7 +37,8 @@ cargo xtask ci                                # THE gate suite (every step in xt
 cargo build --release --all-features          # Full build
 cargo test --release -p rusty_box --lib --features std   # lib tests (fast loop)
 cargo run --release --example dlxlinux --features std            # DLX headless
-cargo run --release --example rusty_box_egui --features "std,gui-egui"  # GUI
+cargo run --release -p rusty_box_gui           # the GUI front end (VM library shell)
+cargo run --release --example rusty_box_egui --features "std,gui-egui"  # egui developer harness
 cd examples/rusty_box_web && trunk serve      # WASM dev server
 cargo check --no-default-features -p rusty_box  # no_std + no_alloc build
 cargo build --release -p rusty_box_uefi --target x86_64-unknown-uefi  # UEFI app
@@ -111,15 +112,16 @@ through Deref — bind the inner value first.
 - **No global state** -- each `Emulator` is fully self-contained
 - **Bochs parity** -- all logic must match Bochs C++ source exactly; deviations are bugs
 - **no_std + no_alloc core** -- CPU, memory, decoder, I/O devices, emulator all compile without alloc. Fixed-size arrays and RingBuffer replace Vec/VecDeque. Alloc-dependent features (GUI, diagnostic String returns, StopHandle, hook closures) are behind `#[cfg(feature = "alloc")]`.
-- **Send by derivation** -- no `unsafe impl Send` in the tree. `BxMemoryStubC` and the alloc-build `Emulator` are pinned by `const` asserts in their own modules; the no-alloc `Emulator` is deliberately `!Send` (caller-supplied AP CPU pointers). The doctrine-ratchets ci step enforces both directions.
+- **Send by derivation** -- no `unsafe impl Send` in the tree. `BxMemoryStubC`, `Emulator` and both CPU stores are pinned `Send` by `const` asserts in their own modules, in every build: the no-alloc machine borrows its CPUs exclusively (`BorrowedCpus<'static, T>`), and an exclusive borrow of a `Send` type is `Send`. The doctrine-ratchets ci step holds `unsafe impl … Send/Sync` lines in `rusty_box/src` at zero.
 
 ### no_alloc Construction (UEFI path)
 
 ```rust
-// Placement construction -- no Box, no allocator
-BxCpuBuilder::<I>::init_cpu_at(cpu_ptr, tracer)     // CPU at raw pointer
-BxMemoryStubC::create_from_raw(ptr, len, ...)       // Memory from raw buffer
-Emulator::init_at(emu_ptr, cpu, mem_stub, config)   // Emulator at raw pointer
+// Placement construction -- no Box, no allocator (examples/rusty_box_uefi/src/main.rs)
+BxCpuBuilder::new().init_cpu_at(cpu_ptr, tracer)              // unsafe: CPU in zeroed caller-owned memory
+BxMemoryStubC::create_from_raw(ptr, len, guest, host, block)  // unsafe: memory over a caller-owned buffer
+MachineBuilder::new(config).bios(rom).build_at(storage, cpus, mem_stub)  // machine in &'a mut MaybeUninit<Emulator<T>>;
+                                                                         // cpus: &'static mut [&'static mut BxCpuC<T>]
 ```
 
 ## Workspace Structure
@@ -143,7 +145,7 @@ Emulator::init_at(emu_ptr, cpu, mem_stub, config)   // Emulator at raw pointer
 
 | Task | Files |
 |------|-------|
-| Add new instruction | `rusty_box_decoder/src/fetchdecode*.rs`, `rusty_box/src/cpu/<category>/` |
+| Add new instruction | `rusty_box_decoder/src/opcode.rs` and `src/decoder/` (`decode32.rs`, `decode64.rs`, `opmap*.rs`), the handler in `rusty_box/src/cpu/<category>.rs`, its arm in `rusty_box/src/cpu/dispatcher.rs` |
 | Add new I/O device | `rusty_box_devices/src/` for a model with no machine dependency, else `rusty_box/src/iodev/` (new file); `iodev/devices.rs` (registration either way) |
 | Modify memory mapping | `rusty_box/src/memory/misc_mem.rs`, `memory/mod.rs` |
 | Add/modify FPU instruction | `rusty_box/src/cpu/fpu/` (handlers), `cpu/softfloat3e/` (math) |

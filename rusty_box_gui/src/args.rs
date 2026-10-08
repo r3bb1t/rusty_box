@@ -92,8 +92,14 @@ pub struct Args {
     /// `cpu: cpuid_freq=` (hardware|none|ips). Default: none.
     #[arg(long = "cpuid-freq", value_name = "MODE")]
     pub cpuid_freq: Option<String>,
-    /// Advance PIT/ACPI timers on wall-clock time — Bochs `clock:
-    /// sync=realtime`. Default off (`sync=none`).
+    /// Make port 0xE9 a debug console whose output goes to stdout — Bochs
+    /// `port_e9_hack:` (off|on|all-rings; all-rings lets unprivileged code
+    /// write it too). Default: off.
+    #[arg(long = "port-e9-hack", value_name = "MODE")]
+    pub port_e9_hack: Option<String>,
+    /// Run the PIT, the ACPI timer and the VGA's vertical retrace on
+    /// wall-clock time — Bochs `clock: sync=realtime`. Default off
+    /// (`sync=none`).
     #[arg(long = "sync-realtime", action = ArgAction::SetTrue)]
     pub sync_realtime: bool,
     #[arg(long = "cpus", value_name = "N")]
@@ -157,6 +163,7 @@ impl Args {
             max_instructions,
             smp_quantum,
             cpuid_freq,
+            port_e9_hack,
             sync_realtime,
             cpus,
             cpu_sockets,
@@ -185,6 +192,7 @@ impl Args {
             || max_instructions.is_some()
             || smp_quantum.is_some()
             || cpuid_freq.is_some()
+            || port_e9_hack.is_some()
             || *sync_realtime
             || cpus.is_some()
             || cpu_sockets.is_some()
@@ -227,6 +235,7 @@ impl Args {
             max_instructions: _,
             smp_quantum: _,
             cpuid_freq: _,
+            port_e9_hack: _,
             sync_realtime: _,
             cpus: _,
             cpu_sockets: _,

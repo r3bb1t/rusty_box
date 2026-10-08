@@ -33,6 +33,7 @@ pub(crate) const ACCENT_RED: Color32 = Color32::from_rgb(0xFF, 0x5C, 0x6C);
 /// in this crate's shell code — the browser shell sets its own, and the Console
 /// page embeds `RustyBoxApp::ui_inner`, which paints its own sizes — and two
 /// weights carry every distinction: regular, and `.strong()`.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) const TEXT_DISPLAY: f32 = 22.0;
 pub(crate) const TEXT_TITLE: f32 = 16.0;
 pub(crate) const TEXT_BODY: f32 = 14.0;
@@ -44,6 +45,7 @@ pub(crate) const TEXT_CAPTION: f32 = 11.0;
 pub(crate) const SPACE_ITEM: f32 = 8.0;
 pub(crate) const SPACE_GROUP: f32 = 12.0;
 pub(crate) const SPACE_CARD: i8 = 16;
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) const SPACE_PAGE: i8 = 20;
 
 pub(crate) fn configure_shell_style(ctx: &egui::Context) {

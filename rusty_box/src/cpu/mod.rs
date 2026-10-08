@@ -20,7 +20,7 @@ pub use rusty_box_core::ResetReason;
 
 // Core CPU emulation modules (no alloc needed)
 pub mod error;
-pub use error::{CpuError, Result};
+pub use error::{CpuError, MsrRefusal, Result};
 
 pub(crate) mod api_bridge;
 pub mod arch_state;
@@ -83,6 +83,7 @@ pub(super) mod dispatcher;
 pub mod eflags;
 pub(super) mod event;
 pub(crate) use event::{AcknowledgedInterrupt, TrapDischarge};
+pub use event::HardwareEvent;
 pub(super) mod exception;
 pub(super) mod flag_ctrl;
 pub(super) mod flag_ctrl_pro;
@@ -127,6 +128,7 @@ pub mod snapshot;
 pub(super) mod soft_int;
 pub(super) mod simd_pfp;
 pub(super) mod softfloat3e;
+pub(super) mod simd_int;
 pub(super) mod sse;
 pub(super) mod sse_fp;
 pub(super) mod sse_move;

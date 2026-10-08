@@ -495,7 +495,14 @@ fn dump(machine: &mut FastMachine<()>) {
         Ok(None) => println!("the display is not in a text mode"),
         Err(refused) => println!("the guest's text screen: (unread: {refused})"),
     }
-    match machine.with_machine(|m| m.debug_port().take_output().collect::<Vec<u8>>()) {
+    // DLX's machine leaves the port-0xE9 console off, as `dlxlinux` does
+    // unless asked; a machine without one has nothing to report here.
+    let debug_console = |m: &mut rusty_box::emulator::Emulator<(), rusty_box_whp_engine::WhpEngine>| {
+        m.debug_port()
+            .map(|mut port| port.take_output().collect::<Vec<u8>>())
+            .unwrap_or_default()
+    };
+    match machine.with_machine(debug_console) {
         Ok(debugcon) if debugcon.is_empty() => {}
         Ok(debugcon) => println!("port 0xE9 said: {}", String::from_utf8_lossy(&debugcon)),
         Err(refused) => println!("port 0xE9: (unread: {refused})"),

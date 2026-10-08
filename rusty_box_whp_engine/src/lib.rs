@@ -67,17 +67,38 @@ pub(crate) mod fixtures {
     use rusty_box::emulator::{
         DeviceClock, Emulator, EmulatorConfig, MachineBuilder, MemorySize,
     };
+    use rusty_box::iodev::PortE9Hack;
     use rusty_box_core::time::{HostClock, HostInstant};
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
 
     /// Where the guest's code goes, and the port it writes to.
     pub(crate) const CODE: u64 = 0x1000;
-    /// Port 0xE9, the chipset debug console: a byte written here reaches the
+    /// Port 0xE9, Bochs's debug console: a byte written here reaches the
     /// machine's own debug port, which is host-readable — so the assertion is
-    /// about what the GUEST did, not about what the engine returned.
+    /// about what the GUEST did, not about what the engine returned. Every
+    /// machine these fixtures build turns the console on ([`CONSOLE`]); it is
+    /// off on a machine built with the defaults.
     pub(crate) const DEBUG_PORT: u8 = 0xE9;
     pub(crate) const MARK: u8 = 0x5A;
+
+    /// The port-0xE9 console every fixture machine has — Bochs's
+    /// `port_e9_hack: enabled=1`, the channel the guests below report through.
+    pub(crate) const CONSOLE: PortE9Hack = PortE9Hack::On;
+
+    /// What the guest has written to the port-0xE9 console since the last
+    /// look, on a machine built with [`CONSOLE`].
+    pub(crate) fn console_output<T, E>(machine: &mut Emulator<T, E>) -> std::vec::Vec<u8>
+    where
+        T: rusty_box::cpu::Instrumentation,
+        E: rusty_box::emulator::SliceEngine<T>,
+    {
+        machine
+            .debug_port()
+            .expect("a fixture machine has its console on")
+            .take_output()
+            .collect()
+    }
 
     /// A real-mode machine on this engine, with `code` loaded at [`CODE`] and
     /// its processor pointed at it, ADOPTED and ready to step.
@@ -105,6 +126,7 @@ pub(crate) mod fixtures {
         let config = EmulatorConfig {
             memory: MemorySize::bytes(8 * 1024 * 1024),
             device_clock: clock,
+            port_e9_hack: CONSOLE,
             ..EmulatorConfig::default()
         };
         let mut machine =
@@ -129,6 +151,7 @@ pub(crate) mod fixtures {
         let config = EmulatorConfig {
             memory: MemorySize::bytes(8 * 1024 * 1024),
             device_clock: clock,
+            port_e9_hack: CONSOLE,
             ..EmulatorConfig::default()
         };
         let mut machine = MachineBuilder::new(config)
@@ -165,6 +188,7 @@ pub(crate) mod fixtures {
             memory: MemorySize::bytes(8 * 1024 * 1024),
             device_clock: DeviceClock::HostTime,
             cpu_params,
+            port_e9_hack: CONSOLE,
             ..EmulatorConfig::default()
         };
         let machine = MachineBuilder::new(config)
@@ -600,7 +624,7 @@ pub(crate) mod fixtures {
         while !arrived && std::time::Instant::now() < deadline {
             let mut guard = machine.lock().expect("the machine's lock");
             guard.service_device_time(ips / 1_000).expect("the wheel turns");
-            written.extend(guard.debug_port().take_output());
+            written.extend(console_output(&mut **guard));
             arrived = enough(&**guard, &written);
             drop(guard);
             std::thread::yield_now();
@@ -609,7 +633,7 @@ pub(crate) mod fixtures {
             .request_park(crate::vcpu_thread::Parked::Paused)
             .expect("the park request reaches the platform");
         let parked = control.wait_parked_by(std::time::Duration::from_secs(5));
-        written.extend(machine.lock().expect("the machine's lock").debug_port().take_output());
+        written.extend(console_output(&mut **machine.lock().expect("the machine's lock")));
         assert_eq!(
             parked,
             Some(crate::vcpu_thread::Parked::Paused),
@@ -702,7 +726,7 @@ mod tests {
         hypervisor_here,
         ioapic_edge_guest, load_the_protected_mode_tables, machine_running,
         machine_with_devices_on, masked_lvt0_guest, shared, wait_until, RunningVcpu, ThreadedRun,
-        CODE, DEBUG_PORT, MARK,
+        console_output, CODE, CONSOLE, DEBUG_PORT, MARK,
     };
     use crate::vcpu_thread::Parked;
     use rusty_box::cpu::instrumentation::{CpuSetupMode, X86Reg};
@@ -741,7 +765,7 @@ mod tests {
 
         let written: std::vec::Vec<u8> =
             machine
-                .with_machine(|m| m.debug_port().take_output().collect())
+                .with_machine(console_output)
                 .expect("a stepped machine is paused");
         assert_eq!(
             written,
@@ -782,7 +806,7 @@ mod tests {
 
         let written: std::vec::Vec<u8> =
             machine
-                .with_machine(|m| m.debug_port().take_output().collect())
+                .with_machine(console_output)
                 .expect("a stepped machine is paused");
         assert_eq!(
             written,
@@ -836,6 +860,7 @@ mod tests {
 
         let config = EmulatorConfig {
             memory: MemorySize::bytes(8 * 1024 * 1024),
+            port_e9_hack: CONSOLE,
             ..EmulatorConfig::default()
         };
         let mut interpreted =
@@ -845,8 +870,7 @@ mod tests {
         interpreted
             .step(RunBudget::Ticks(1_000_000))
             .expect("the interpreter runs the guest");
-        let by_the_interpreter: std::vec::Vec<u8> =
-            interpreted.debug_port().take_output().collect();
+        let by_the_interpreter: std::vec::Vec<u8> = console_output(&mut interpreted);
 
         let _turn = a_turn_on_the_hardware();
         let mut on_hardware = fast_machine_running(asking);
@@ -855,7 +879,7 @@ mod tests {
             .expect("the hypervisor runs the guest");
         let by_the_hardware: std::vec::Vec<u8> =
             on_hardware
-                .with_machine(|m| m.debug_port().take_output().collect())
+                .with_machine(console_output)
                 .expect("a stepped machine is paused");
 
         assert_eq!(
@@ -900,6 +924,7 @@ mod tests {
 
         let config = EmulatorConfig {
             memory: MemorySize::bytes(8 * 1024 * 1024),
+            port_e9_hack: CONSOLE,
             ..EmulatorConfig::default()
         };
         let mut interpreted =
@@ -909,8 +934,7 @@ mod tests {
         interpreted
             .step(RunBudget::Ticks(1_000_000))
             .expect("the interpreter runs the guest");
-        let by_the_interpreter: std::vec::Vec<u8> =
-            interpreted.debug_port().take_output().collect();
+        let by_the_interpreter: std::vec::Vec<u8> = console_output(&mut interpreted);
 
         let _turn = a_turn_on_the_hardware();
         let mut on_hardware = fast_machine_running(asking);
@@ -919,7 +943,7 @@ mod tests {
             .expect("the hypervisor runs the guest");
         let by_the_hardware: std::vec::Vec<u8> =
             on_hardware
-                .with_machine(|m| m.debug_port().take_output().collect())
+                .with_machine(console_output)
                 .expect("a stepped machine is paused");
 
         assert_eq!(
@@ -1074,6 +1098,7 @@ mod tests {
         fn trace_on_interpreter(code: &[u8]) -> (u8, std::vec::Vec<u16>) {
             let config = EmulatorConfig {
                 memory: MemorySize::bytes(8 * 1024 * 1024),
+                port_e9_hack: CONSOLE,
                 ..EmulatorConfig::default()
             };
             let mut machine =
@@ -1094,7 +1119,7 @@ mod tests {
         fn read_trace<E: rusty_box::emulator::SliceEngine<()>>(
             machine: &mut Emulator<(), E>,
         ) -> (u8, std::vec::Vec<u16>) {
-            let count: std::vec::Vec<u8> = machine.debug_port().take_output().collect();
+            let count: std::vec::Vec<u8> = console_output(machine);
             let count = *count.last().expect("the guest reported its trap count");
             let raw = machine
                 .mem_read_vec(0x6000, usize::from(count) * 2)
@@ -1212,7 +1237,7 @@ mod tests {
         let mut seen: std::vec::Vec<u8> = std::vec::Vec::new();
         wait_until(
             || {
-                seen.extend(machine.lock().expect("the machine's lock").debug_port().take_output());
+                seen.extend(console_output(&mut **machine.lock().expect("the machine's lock")));
                 !seen.is_empty()
             },
             std::time::Duration::from_secs(2),
@@ -1270,7 +1295,7 @@ mod tests {
             || {
                 let mut m = machine.lock().expect("the machine's lock");
                 m.service_device_time(ips / 1_000).expect("the wheel turns");
-                seen.extend(m.debug_port().take_output());
+                seen.extend(console_output(&mut **m));
                 seen.len() >= 3
             },
             std::time::Duration::from_secs(5),
@@ -1299,7 +1324,7 @@ mod tests {
         );
         // Drained after the park, so the counts below describe a machine
         // nothing is still running against.
-        seen.extend(machine.lock().expect("the machine's lock").debug_port().take_output());
+        seen.extend(console_output(&mut **machine.lock().expect("the machine's lock")));
         assert!(seen.iter().all(|byte| *byte == MARK), "{seen:#04x?}");
         let census = control.census();
         assert_eq!(
@@ -1600,7 +1625,7 @@ mod tests {
         while std::time::Instant::now() < until {
             let mut m = machine.lock().expect("the machine's lock");
             m.service_device_time(ips / 1_000).expect("the wheel turns");
-            seen.extend(m.debug_port().take_output());
+            seen.extend(console_output(&mut **m));
             drop(m);
             std::thread::yield_now();
         }
@@ -1665,7 +1690,7 @@ mod tests {
         let mut seen: std::vec::Vec<u8> = std::vec::Vec::new();
         wait_until(
             || {
-                seen.extend(machine.lock().expect("the machine's lock").debug_port().take_output());
+                seen.extend(console_output(&mut **machine.lock().expect("the machine's lock")));
                 seen.contains(&MARK)
             },
             std::time::Duration::from_secs(2),
@@ -1793,7 +1818,7 @@ mod tests {
             let outcome = machine.step(RunBudget::Ticks(500_000)).expect("a step");
             written.extend(
                 machine
-                    .with_machine(|m| m.debug_port().take_output().collect::<std::vec::Vec<u8>>())
+                    .with_machine(console_output)
                     .expect("a stepped machine is paused"),
             );
             if written.contains(&MARK)

@@ -431,7 +431,11 @@ impl InjectState {
     /// entered, and a head is the one place both can be live.
     ///
     /// `in_flight` and `cr8` are not republished: nothing an errand does
-    /// begins a platform delivery, and the header's `CR8` still stands.
+    /// begins a platform delivery, and the header's `CR8` still stands. An
+    /// errand that takes an interrupted delivery back leaves `in_flight` as
+    /// the header set it too — the pending-event slot can still hold a vector
+    /// this engine placed, and only the next header can say it is gone; until
+    /// then a staging defers, which is the safe direction.
     ///
     /// Takes the flags rather than the processor so the freshness rule is
     /// unit-testable without a constructed `BxCpuC`; the call sites read them

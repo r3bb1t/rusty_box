@@ -539,20 +539,21 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         }
     }
 
-    /// The refusal a host gets for an MSR this processor's model does not
-    /// have. Shared by the read and the write so both say the same thing.
-    fn msr_absent_for_api<R>() -> super::Result<R> {
-        Err(super::CpuError::UnsupportedCpuOperation {
-            operation: "this processor's CPU model does not have that MSR",
-        })
+    /// A host MSR access refused, and why — the one shape every refusal of
+    /// [`Self::read_msr_for_api`] and [`Self::write_msr_for_api`] takes.
+    fn msr_refused<R>(msr: u32, reason: super::MsrRefusal) -> super::Result<R> {
+        Err(super::CpuError::MsrRefused { msr, reason })
     }
 
     /// Read an MSR by index, as `Emulator::msr_read` does for the boot
     /// processor: the TSC, APIC base, platform ID, APERF/MPERF, TSC deadline,
     /// the SYSENTER trio, STAR/LSTAR/CSTAR/FMASK, KERNEL_GS_BASE, TSC_AUX,
-    /// EFER and the FS/GS bases. `Err(UnimplementedInstruction)` for any
-    /// other, and `Err(UnsupportedCpuOperation)` for one this processor's
-    /// model does not have.
+    /// EFER and the FS/GS bases.
+    ///
+    /// Refused with [`MsrRefusal::Absent`](super::MsrRefusal::Absent) for an
+    /// MSR this processor's model does not have, and with
+    /// [`MsrRefusal::NotCarried`](super::MsrRefusal::NotCarried) for one it
+    /// has that this API does not read.
     ///
     /// Public, with [`Self::write_msr_for_api`], so an engine can read and
     /// put back the MSRs of any processor it runs — not only the one the
@@ -560,7 +561,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     pub fn read_msr_for_api(&self, msr: u32) -> super::Result<u64> {
         use super::msr::*;
         if !self.has_msr(msr) {
-            return Self::msr_absent_for_api();
+            return Self::msr_refused(msr, super::MsrRefusal::Absent);
         }
         let apicbase = self.msr.apicbase as u64;
         let v = match msr {
@@ -581,22 +582,44 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             BX_MSR_EFER => self.efer.get32() as u64,
             BX_MSR_FSBASE => self.msr_fsbase(),
             BX_MSR_GSBASE => self.msr_gsbase(),
-            _ => return Err(super::CpuError::UnimplementedInstruction),
+            _ => return Self::msr_refused(msr, super::MsrRefusal::NotCarried),
         };
         Ok(v)
     }
 
-    /// Write an MSR by index. Validates per-MSR rules like the in-CPU path;
-    /// returns `Err(UnimplementedInstruction)` for unknown MSRs.
+    /// Write an MSR by index, refusing what the processor's own WRMSR would:
+    /// an MSR this model does not have
+    /// ([`MsrRefusal::Absent`](super::MsrRefusal::Absent)), a read-only one
+    /// ([`ReadOnly`](super::MsrRefusal::ReadOnly)), and a value with a
+    /// reserved bit set or an address that is not canonical
+    /// ([`InvalidValue`](super::MsrRefusal::InvalidValue)). An MSR this API
+    /// does not write is [`NotCarried`](super::MsrRefusal::NotCarried).
     ///
-    /// A write the processor would take and then ignore is refused rather
-    /// than answered `Ok`, because a host cannot see "ignored" any other way:
+    /// A write the processor would take and then ignore is refused too
+    /// ([`WriteIgnored`](super::MsrRefusal::WriteIgnored)) rather than
+    /// answered `Ok`, because a host cannot see "ignored" any other way:
     /// `IA32_APERF` and `IA32_MPERF` always, and `IA32_TSC_DEADLINE` while the
     /// local APIC's timer is not in TSC-deadline mode.
     pub fn write_msr_for_api(&mut self, msr: u32, val: u64) -> super::Result<()> {
         use super::msr::*;
+        use super::MsrRefusal;
         if !self.has_msr(msr) {
-            return Self::msr_absent_for_api();
+            return Self::msr_refused(msr, MsrRefusal::Absent);
+        }
+        // Bochs msr.cc checks every address an MSR holds against the widest
+        // linear address the processor supports (`IsCpuidCanonical`).
+        let address_msr = matches!(
+            msr,
+            BX_MSR_SYSENTER_ESP
+                | BX_MSR_SYSENTER_EIP
+                | BX_MSR_LSTAR
+                | BX_MSR_CSTAR
+                | BX_MSR_KERNELGSBASE
+                | BX_MSR_FSBASE
+                | BX_MSR_GSBASE
+        );
+        if address_msr && !self.is_cpuid_canonical(val) {
+            return Self::msr_refused(msr, MsrRefusal::InvalidValue);
         }
         match msr {
             BX_MSR_TSC => {
@@ -606,21 +629,16 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             BX_MSR_APICBASE => {
                 self.msr.apicbase = val as _;
             }
-            BX_MSR_PLATFORM_ID => return Err(super::CpuError::UnimplementedInstruction), // read-only
+            BX_MSR_PLATFORM_ID => return Self::msr_refused(msr, MsrRefusal::ReadOnly),
             // Bochs msr.cc `WRMSR`: "ignore write into MSR IA32_APERF/MPERF".
             BX_MSR_IA32_APERF | BX_MSR_IA32_MPERF => {
-                return Err(super::CpuError::UnsupportedCpuOperation {
-                    operation: "WRMSR IA32_APERF/IA32_MPERF: the processor ignores writes to them",
-                });
+                return Self::msr_refused(msr, MsrRefusal::WriteIgnored);
             }
             // Bochs apic.cc `set_tsc_deadline`: ignored unless the timer's LVT
             // selects TSC-deadline mode.
             BX_MSR_TSC_DEADLINE => {
                 if !self.lapic.tsc_deadline_mode() {
-                    return Err(super::CpuError::UnsupportedCpuOperation {
-                        operation: "WRMSR IA32_TSC_DEADLINE: the local APIC timer is not in \
-                                    TSC-deadline mode, so the write would be ignored",
-                    });
+                    return Self::msr_refused(msr, MsrRefusal::WriteIgnored);
                 }
                 let current_ticks = self.cpu_local_ticks();
                 self.lapic.set_tsc_deadline(val, current_ticks);
@@ -643,9 +661,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             BX_MSR_EFER => {
                 let val32 = val as u32;
                 if (val32 & !self.efer_suppmask) != 0 {
-                    return Err(super::CpuError::UnsupportedCpuOperation {
-                        operation: "WRMSR EFER: reserved bits set for this processor",
-                    });
+                    return Self::msr_refused(msr, MsrRefusal::InvalidValue);
                 }
                 use super::crregs::BxEfer;
                 self.efer = BxEfer::from_bits_truncate(
@@ -656,7 +672,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
             }
             BX_MSR_FSBASE => self.set_msr_fsbase(val),
             BX_MSR_GSBASE => self.set_msr_gsbase(val),
-            _ => return Err(super::CpuError::UnimplementedInstruction),
+            _ => return Self::msr_refused(msr, MsrRefusal::NotCarried),
         }
         Ok(())
     }

@@ -11,10 +11,7 @@
 //! - AESKEYGENASSIST (AES Key Generation Assist)
 //! - PCLMULQDQ (Carry-Less Multiplication)
 
-use super::{
-    decoder::{BxSegregs, Instruction},
-    xmm::BxPackedXmmRegister,
-};
+use super::{decoder::Instruction, xmm::BxPackedXmmRegister};
 
 // ============================================================================
 // AES S-box tables (from Bochs aes.cc)
@@ -360,26 +357,12 @@ pub(super) fn xmm_pclmulqdq(a: u64, b: u64) -> BxPackedXmmRegister {
 // ============================================================================
 
 impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
-    /// Read source XMM operand from register or memory.
-    /// Matches Bochs LOAD_Wdq pattern: if mod==11b read register, else read 128-bit
-    /// from memory via paging-aware access.
-    #[inline]
-    fn read_xmm_src(&mut self, instr: &Instruction) -> super::Result<BxPackedXmmRegister> {
-        if instr.mod_c0() {
-            Ok(self.read_xmm_reg(instr.src()))
-        } else {
-            let eaddr = self.resolve_addr(instr);
-            let seg = BxSegregs::from(instr.seg());
-            self.v_read_xmmword(seg, eaddr)
-        }
-    }
-
     /// AESIMC VdqWdq — 66 0F 38 DB
     ///
     /// Perform Inverse MixColumns on the source XMM operand and store
     /// the result in the destination XMM register.
     pub(super) fn aesimc_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
-        let mut op = self.read_xmm_src(instr)?;
+        let mut op = self.sse_read_op2_xmm(instr)?;
 
         aes_inverse_mix_columns(&mut op);
 
@@ -415,7 +398,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// ShiftRows(state), SubBytes(state), MixColumns(state), XOR with round key.
     pub(super) fn aesenc_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut state = self.read_aes_state(instr);
-        let round_key = self.read_xmm_src(instr)?;
+        let round_key = self.sse_read_op2_xmm(instr)?;
 
         aes_shift_rows(&mut state);
         aes_substitute_bytes(&mut state);
@@ -432,7 +415,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// ShiftRows(state), SubBytes(state), XOR with round key.
     pub(super) fn aesenclast_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut state = self.read_aes_state(instr);
-        let round_key = self.read_xmm_src(instr)?;
+        let round_key = self.sse_read_op2_xmm(instr)?;
 
         aes_shift_rows(&mut state);
         aes_substitute_bytes(&mut state);
@@ -448,7 +431,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// InverseShiftRows, InverseSubBytes, InverseMixColumns, XOR with round key.
     pub(super) fn aesdec_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut state = self.read_aes_state(instr);
-        let round_key = self.read_xmm_src(instr)?;
+        let round_key = self.sse_read_op2_xmm(instr)?;
 
         aes_inverse_shift_rows(&mut state);
         aes_inverse_substitute_bytes(&mut state);
@@ -465,7 +448,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// InverseShiftRows, InverseSubBytes, XOR with round key.
     pub(super) fn aesdeclast_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut state = self.read_aes_state(instr);
-        let round_key = self.read_xmm_src(instr)?;
+        let round_key = self.sse_read_op2_xmm(instr)?;
 
         aes_inverse_shift_rows(&mut state);
         aes_inverse_substitute_bytes(&mut state);
@@ -479,7 +462,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     ///
     /// Assist in AES round key generation using the RCON immediate.
     pub(super) fn aeskeygenassist_vdq_wdq_ib(&mut self, instr: &Instruction) -> super::Result<()> {
-        let op = self.read_xmm_src(instr)?;
+        let op = self.sse_read_op2_xmm(instr)?;
         let rcon32 = instr.ib() as u32;
         let mut result = BxPackedXmmRegister::default();
 
@@ -504,7 +487,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         } else {
             self.read_xmm_reg(instr.dst())
         };
-        let op2 = self.read_xmm_src(instr)?;
+        let op2 = self.sse_read_op2_xmm(instr)?;
 
         let a = op1.xmm64u((imm8 & 1) as usize);
         let b = op2.xmm64u(((imm8 >> 4) & 1) as usize);

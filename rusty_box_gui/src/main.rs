@@ -10,8 +10,6 @@ use std::process::ExitCode;
 
 #[cfg(not(target_arch = "wasm32"))]
 fn main() -> ExitCode {
-    const EMULATOR_STACK_SIZE: usize = 1500 * 1024 * 1024;
-
     let args = rusty_box_gui::Args::parse();
 
     // A command line that names no machine opens the egui shell on its VM
@@ -46,7 +44,7 @@ fn main() -> ExitCode {
 
     let thread = match std::thread::Builder::new()
         .name("rusty_box_gui".to_owned())
-        .stack_size(EMULATOR_STACK_SIZE)
+        .stack_size(rusty_box_gui::runner::EMULATOR_STACK_BYTES)
         .spawn(move || rusty_box_gui::run_resolved(config))
     {
         Ok(thread) => thread,

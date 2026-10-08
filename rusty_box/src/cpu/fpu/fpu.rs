@@ -187,6 +187,31 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     // --- Environment save/load helpers ---
 
+    /// The FPU CS selector as an x87 state image stores it: zero on a model
+    /// that deprecates FCS and FDS, the tracked selector otherwise (Bochs
+    /// fpu.cc `x87_get_FCS`).
+    pub(in crate::cpu) fn x87_get_fcs(&self) -> u16 {
+        if self.bx_cpuid_support_isa_extension(
+            crate::cpu::decoder::features::X86Feature::IsaFcsFdsDeprecation,
+        ) {
+            0
+        } else {
+            self.the_i387.fcs
+        }
+    }
+
+    /// The FPU DS selector as an x87 state image stores it (Bochs fpu.cc
+    /// `x87_get_FDS`); see [`Self::x87_get_fcs`].
+    pub(in crate::cpu) fn x87_get_fds(&self) -> u16 {
+        if self.bx_cpuid_support_isa_extension(
+            crate::cpu::decoder::features::X86Feature::IsaFcsFdsDeprecation,
+        ) {
+            0
+        } else {
+            self.the_i387.fds
+        }
+    }
+
     /// Check if in protected mode (not real mode and not V8086)
     #[inline]
     fn is_protected_mode(&self) -> bool {
@@ -228,11 +253,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 self.v_write_dword(seg, eaddr.wrapping_add(0x08) & asize_mask, tmp)?;
                 let tmp = self.the_i387.fip as u32;
                 self.v_write_dword(seg, eaddr.wrapping_add(0x0c) & asize_mask, tmp)?;
-                let tmp = (self.the_i387.fcs as u32) | ((self.the_i387.foo as u32) << 16);
+                let tmp = (self.x87_get_fcs() as u32) | ((self.the_i387.foo as u32) << 16);
                 self.v_write_dword(seg, eaddr.wrapping_add(0x10) & asize_mask, tmp)?;
                 let tmp = self.the_i387.fdp as u32;
                 self.v_write_dword(seg, eaddr.wrapping_add(0x14) & asize_mask, tmp)?;
-                let tmp = 0xFFFF0000u32 | self.the_i387.fds as u32;
+                let tmp = 0xFFFF0000u32 | self.x87_get_fds() as u32;
                 self.v_write_dword(seg, eaddr.wrapping_add(0x18) & asize_mask, tmp)?;
                 offset = 0x1c;
             } else {
@@ -245,18 +270,18 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 self.v_write_word(seg, eaddr.wrapping_add(0x04) & asize_mask, tmp)?;
                 let tmp = (self.the_i387.fip & 0xFFFF) as u16;
                 self.v_write_word(seg, eaddr.wrapping_add(0x06) & asize_mask, tmp)?;
-                let tmp = self.the_i387.fcs;
+                let tmp = self.x87_get_fcs();
                 self.v_write_word(seg, eaddr.wrapping_add(0x08) & asize_mask, tmp)?;
                 let tmp = (self.the_i387.fdp & 0xFFFF) as u16;
                 self.v_write_word(seg, eaddr.wrapping_add(0x0a) & asize_mask, tmp)?;
-                let tmp = self.the_i387.fds;
+                let tmp = self.x87_get_fds();
                 self.v_write_word(seg, eaddr.wrapping_add(0x0c) & asize_mask, tmp)?;
                 offset = 0x0e;
             }
         } else {
             // Real or V86 mode
-            let fp_ip = ((self.the_i387.fcs as u32) << 4).wrapping_add(self.the_i387.fip as u32);
-            let fp_dp = ((self.the_i387.fds as u32) << 4).wrapping_add(self.the_i387.fdp as u32);
+            let fp_ip = ((self.x87_get_fcs() as u32) << 4).wrapping_add(self.the_i387.fip as u32);
+            let fp_dp = ((self.x87_get_fds() as u32) << 4).wrapping_add(self.the_i387.fdp as u32);
 
             if instr.os32_l() != 0 {
                 let tmp = 0xFFFF0000u32 | self.the_i387.get_control_word() as u32;
