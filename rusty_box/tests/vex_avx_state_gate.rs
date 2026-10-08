@@ -1,27 +1,24 @@
-//! Every VEX-encoded instruction must check *AVX* availability, not SSE.
+//! VEX-encoded AVX instructions check *AVX* state, not SSE state.
 //!
-//! Bochs tags the whole VEX surface `BX_PREPARE_AVX` in its fetch-decode
-//! tables; when `BX_FETCH_MODE_AVX_OK` is clear the handler is replaced with
-//! `BxNoAVX` (cpu/proc_ctrl.cc), which raises #UD unless the CPU is in
+//! Bochs marks its AVX instructions `BX_PREPARE_AVX` in `ia_opcodes.def`. Not
+//! every VEX encoding is one: the VEX-encoded BMI forms (ANDN, RORX, ...) carry
+//! no `BX_PREPARE_*`, and the opmask instructions are `BX_PREPARE_OPMASK`.
+//! While `BX_FETCH_MODE_AVX_OK` is clear, `assignHandler`
+//! (cpu/decoder/fetchdecode32.cc) gives a `BX_PREPARE_AVX` instruction the
+//! `BxNoAVX` handler (cpu/proc_ctrl.cc), which raises #UD unless the CPU is in
 //! protected mode with CR4.OSXSAVE set and XCR0.SSE|XCR0.YMM both enabled, and
 //! #NM when CR0.TS is set.
 //!
-//! rusty_box ports that gate in `cpu.rs` (`OpFlags::PREPARE_AVX` ->
-//! `bx_no_avx_wrapper`), but it only fires for opcodes present in
-//! `opcodes_table`. The AVX2/F16C opcodes wired up in Phase A are not in that
-//! table, so `get_opcode_entry` returns `None`, the gate is skipped, and the
-//! `prepare_*` call inside the handler is the only thing standing between the
-//! guest and the instruction.
+//! rusty_box applies the same gate at icache fill: `state_resolve_opcode`
+//! (cpu/decoder/mod.rs) reads the generated `opcode_isa::opcode_state` and
+//! turns a `CpuState::Avx` opcode into `NoAvxState` while AVX state is
+//! unavailable. A handler's own `prepare_sse()` tests CR0.EM, CR4.OSFXSR and
+//! CR0.TS, never CR4.OSXSAVE or XCR0, so it is the icache-fill gate that
+//! keeps an OS which has not enabled AVX state from running AVX instructions
+//! whose YMM results it would never save or restore.
 //!
-//! Several of those handlers called `prepare_sse()`, which tests CR0.EM and
-//! CR4.OSFXSR — and never looks at CR4.OSXSAVE or XCR0. An OS that had not
-//! enabled AVX state could therefore execute AVX2 instructions, whose YMM
-//! results it would then never save or restore across a context switch.
-//!
-//! The fixture below is the configuration the comment on
-//! `enable_guest_avx_state` in fp_vex_scalar_ops.rs already describes: CR4
-//! .OSXSAVE set but XCR0 left at its reset value, "a configuration in which
-//! every VEX encoding would #UD".
+//! The fixture below sets CR4.OSXSAVE but leaves XCR0 at its reset value, a
+//! configuration in which every `BX_PREPARE_AVX` instruction #UDs.
 
 #![cfg(feature = "std")]
 
@@ -140,15 +137,19 @@ fn run_one(emu: &mut Emulator, code: &[u8]) -> Outcome {
     outcome
 }
 
-/// Every VEX encoding wired up in Phase A must #UD when XCR0 has not enabled
-/// AVX state, exactly as Bochs's `BxNoAVX` does.
+/// Each of these instructions #UDs while XCR0 has not enabled AVX state: the
+/// `BX_PREPARE_AVX` ones through Bochs proc_ctrl.cc `BxNoAVX`, and the EVEX one
+/// (`BX_PREPARE_EVEX_NO_SAE`) through proc_ctrl.cc `BxNoEVEX`, which demands
+/// the same XCR0.SSE|XCR0.YMM bits and the AVX-512 ones besides.
 #[test]
 fn vex_encodings_ud_when_guest_has_not_enabled_avx_state() {
     std::thread::Builder::new()
         .stack_size(TEST_STACK_SIZE)
         .spawn(|| {
-            // (name, encoding). Every one of these is VEX-only, so Bochs
-            // reaches it exclusively through BX_PREPARE_AVX.
+            // (name, encoding). Every VEX case is a BX_PREPARE_AVX
+            // instruction and the EVEX case a BX_PREPARE_EVEX one, so in
+            // Bochs each reaches the instruction only through BxNoAVX or
+            // BxNoEVEX while their state is off.
             let cases: &[(&str, &[u8])] = &[
                 // VTESTPS ymm1, ymm2          VEX.256.66.0F38.W0 0E /r
                 ("vtestps", &[0xC4, 0xE2, 0x7D, 0x0E, 0xCA]),
@@ -170,8 +171,7 @@ fn vex_encodings_ud_when_guest_has_not_enabled_avx_state() {
                 ("vpsrlvd", &[0xC4, 0xE2, 0x71, 0x45, 0xC2]),
                 // VPSLLVQ xmm0, xmm1, xmm2    VEX.128.66.0F38.W1 47 /r
                 ("vpsllvq", &[0xC4, 0xE2, 0xF1, 0x47, 0xC2]),
-                // The shift-by-immediate groups, whose handlers are the ones
-                // the Windows 7 stall was traced to. 2-byte VEX, vvvv selects
+                // The shift-by-immediate groups. 2-byte VEX, vvvv selects
                 // the destination and ModRM.reg selects the group member.
                 // VPSRLD xmm0, xmm1, 4        C5 F9 72 /2
                 ("vpsrld_imm", &[0xC5, 0xF9, 0x72, 0xD1, 0x04]),

@@ -15,8 +15,8 @@ use crate::opcode::Opcode;
 /// Sentinel: this opcode is not gated on any CPUID feature.
 pub const ISA_ALWAYS: u16 = 0xFFFF;
 
-/// `X86Feature as u16` required by each opcode (2917 of 3682 are gated).
-pub static OPCODE_ISA: [u16; 3682] = [
+/// `X86Feature as u16` required by each opcode (2964 of 3732 are gated).
+pub static OPCODE_ISA: [u16; 3732] = [
     ISA_ALWAYS, // IaError
     ISA_ALWAYS, // InsertedOpcode
     ISA_ALWAYS, // Aaa
@@ -132,6 +132,9 @@ pub static OPCODE_ISA: [u16; 3682] = [
     ISA_ALWAYS, // SubGwEwZeroIdiom
     ISA_ALWAYS, // SubEdGdZeroIdiom
     ISA_ALWAYS, // SubGdEdZeroIdiom
+    ISA_ALWAYS, // TestEwGwIdiom
+    ISA_ALWAYS, // TestEdGdIdiom
+    ISA_ALWAYS, // TestEqGqIdiom
     ISA_ALWAYS, // AddGbEb
     ISA_ALWAYS, // OrGbEb
     ISA_ALWAYS, // AdcGbEb
@@ -548,6 +551,8 @@ pub static OPCODE_ISA: [u16; 3682] = [
     ISA_ALWAYS, // Xlat
     17, // Sysenter -> X86Feature::IsaSysenterSysexit
     17, // Sysexit -> X86Feature::IsaSysenterSysexit
+    18, // SysenterLongmode -> X86Feature::IsaSysenterSysexitLongmode
+    18, // SysexitLongmode -> X86Feature::IsaSysenterSysexitLongmode
     29, // Monitor -> X86Feature::IsaMonitorMwait
     29, // Mwait -> X86Feature::IsaMonitorMwait
     30, // UmonitorEq -> X86Feature::IsaWaitpkg
@@ -1047,6 +1052,9 @@ pub static OPCODE_ISA: [u16; 3682] = [
     23, // Lfence -> X86Feature::IsaSse2
     22, // Sfence -> X86Feature::IsaSse
     23, // Mfence -> X86Feature::IsaSse2
+    22, // XorpsVpsWpsZeroIdiom -> X86Feature::IsaSse
+    23, // XorpdVpdWpdZeroIdiom -> X86Feature::IsaSse2
+    23, // PxorVdqWdqZeroIdiom -> X86Feature::IsaSse2
     24, // MovddupVpdWq -> X86Feature::IsaSse3
     24, // MovsldupVpsWps -> X86Feature::IsaSse3
     24, // MovshdupVpsWps -> X86Feature::IsaSse3
@@ -2276,6 +2284,7 @@ pub static OPCODE_ISA: [u16; 3682] = [
     93, // TilestoredMdqTnnn -> X86Feature::IsaAmx
     93, // Tilerelease -> X86Feature::IsaAmx
     93, // TilezeroTnnn -> X86Feature::IsaAmx
+    104, // Bsrinit -> X86Feature::IsaAce
     94, // TdpbssdTnnnTrmTreg -> X86Feature::IsaAmxInt8
     94, // TdpbsudTnnnTrmTreg -> X86Feature::IsaAmxInt8
     94, // TdpbusdTnnnTrmTreg -> X86Feature::IsaAmxInt8
@@ -3689,6 +3698,25 @@ pub static OPCODE_ISA: [u16; 3682] = [
     100, // EvexTcvtrowps2bf16lVphTrmBd -> X86Feature::IsaAmxAvx512
     100, // EvexTcvtrowps2bf16hVphTrmIb -> X86Feature::IsaAmxAvx512
     100, // EvexTcvtrowps2bf16hVphTrmBd -> X86Feature::IsaAmxAvx512
+    104, // EvexTilemovrowTrmWdqIb -> X86Feature::IsaAce
+    104, // EvexTilemovrowTrmWdqBd -> X86Feature::IsaAce
+    104, // EvexTilemovcolTrmWdqIb -> X86Feature::IsaAce
+    104, // EvexTilemovcolTrmWdqBd -> X86Feature::IsaAce
+    104, // EvexBsrmovfBsrVdqWdq -> X86Feature::IsaAce
+    104, // EvexBsrmovlBsrWdq -> X86Feature::IsaAce
+    104, // EvexBsrmovlWdqBsr -> X86Feature::IsaAce
+    104, // EvexBsrmovhBsrWdq -> X86Feature::IsaAce
+    104, // EvexBsrmovhWdqBsr -> X86Feature::IsaAce
+    104, // EvexTop2bf16psTnnnWdqHdq -> X86Feature::IsaAce
+    104, // EvexTop4bssdTnnnWdqHdq -> X86Feature::IsaAce
+    104, // EvexTop4bsudTnnnWdqHdq -> X86Feature::IsaAce
+    104, // EvexTop4busdTnnnWdqHdq -> X86Feature::IsaAce
+    104, // EvexTop4buudTnnnWdqHdq -> X86Feature::IsaAce
+    104, // EvexTop4mxbsspsTnnnWdqHdqIb -> X86Feature::IsaAce
+    104, // EvexTop4mxbf8psTnnnWdqHdqIb -> X86Feature::IsaAce
+    104, // EvexTop4mxbhf8psTnnnWdqHdqIb -> X86Feature::IsaAce
+    104, // EvexTop4mxhbf8psTnnnWdqHdqIb -> X86Feature::IsaAce
+    104, // EvexTop4mxhf8psTnnnWdqHdqIb -> X86Feature::IsaAce
     103, // EvexVmovrsbVdqWdq -> X86Feature::IsaAvx10_2Movrs
     103, // EvexVmovrsbVdqWdqKmask -> X86Feature::IsaAvx10_2Movrs
     103, // EvexVmovrswVdqWdq -> X86Feature::IsaAvx10_2Movrs
@@ -3697,6 +3725,28 @@ pub static OPCODE_ISA: [u16; 3682] = [
     103, // EvexVmovrsdVdqWdqKmask -> X86Feature::IsaAvx10_2Movrs
     103, // EvexVmovrsqVdqWdq -> X86Feature::IsaAvx10_2Movrs
     103, // EvexVmovrsqVdqWdqKmask -> X86Feature::IsaAvx10_2Movrs
+    104, // EvexVcvtps2bf8Vf8WpsKmask -> X86Feature::IsaAce
+    104, // EvexVcvtps2bf8sVf8WpsKmask -> X86Feature::IsaAce
+    104, // EvexVcvtps2hf8Vf8WpsKmask -> X86Feature::IsaAce
+    104, // EvexVcvtps2hf8sVf8WpsKmask -> X86Feature::IsaAce
+    104, // EvexVcvtrops2hf8Vf8WpsKmask -> X86Feature::IsaAce
+    104, // EvexVcvtrops2hf8sVf8WpsKmask -> X86Feature::IsaAce
+    104, // EvexVcvtbiasps2bf8Vf8HdqWpsKmask -> X86Feature::IsaAce
+    104, // EvexVcvtbiasps2bf8sVf8HdqWpsKmask -> X86Feature::IsaAce
+    104, // EvexVcvtbiasps2hf8Vf8HdqWpsKmask -> X86Feature::IsaAce
+    104, // EvexVcvtbiasps2hf8sVf8HdqWpsKmask -> X86Feature::IsaAce
+    104, // EvexVcvtbf82psVpsWf8Kmask -> X86Feature::IsaAce
+    104, // EvexVcvthf82psVpsWf8Kmask -> X86Feature::IsaAce
+    104, // EvexVcvtbf42hf8Vf8Wf4Kmask -> X86Feature::IsaAce
+    104, // EvexVcvtbf62hf8Vf8Wf6Kmask -> X86Feature::IsaAce
+    104, // EvexVcvthf62hf8Vf8Wf6Kmask -> X86Feature::IsaAce
+    104, // EvexVcvtbf82bf6sVf6Wf8 -> X86Feature::IsaAce
+    104, // EvexVcvthf82hf6sVf6Wf8 -> X86Feature::IsaAce
+    104, // EvexVcvtbf82bf4sWf4Vdq -> X86Feature::IsaAce
+    104, // EvexVcvthf82bf4sWf4Vdq -> X86Feature::IsaAce
+    104, // EvexVunpackbVdqWdqIbKmask -> X86Feature::IsaAce
+    104, // EvexVpmovssdbWdqVdq -> X86Feature::IsaAce
+    104, // EvexVpmovssdbWdqVdqKmask -> X86Feature::IsaAce
     ISA_ALWAYS, // NoAvxState
     ISA_ALWAYS, // NoEvexState
 ];
@@ -3709,11 +3759,11 @@ pub fn opcode_isa_feature(opcode: Opcode) -> u16 {
 
 /// Number of opcodes carrying a real feature gate. Asserted by tests so
 /// that a silent regeneration drop is caught.
-pub const GATED_OPCODE_COUNT: usize = 2917;
+pub const GATED_OPCODE_COUNT: usize = 2964;
 
 /// Number of `Opcode` variants the table was generated against. A
 /// mismatch with the enum means the table needs regenerating.
-pub const OPCODE_VARIANT_COUNT: usize = 3682;
+pub const OPCODE_VARIANT_COUNT: usize = 3732;
 
 // EVEX encoding restrictions — Bochs cpu/decoder/fetchdecode.h.
 // `EVEX.b` means embedded broadcast on a memory operand and SAE /
@@ -3730,7 +3780,7 @@ pub const PREPARE_EVEX_NO_BROADCAST: u16 = 0x280;
 /// `bx_define_opcode`.
 // A `const` rather than a `static`: the EVEX decode path is a
 // `const fn`, and const evaluation may read consts but not statics.
-pub const OPCODE_EVEX_FLAGS: [u16; 3682] = [
+pub const OPCODE_EVEX_FLAGS: [u16; 3732] = [
     0x000, // IaError
     0x000, // InsertedOpcode
     0x000, // Aaa
@@ -3846,6 +3896,9 @@ pub const OPCODE_EVEX_FLAGS: [u16; 3682] = [
     0x000, // SubGwEwZeroIdiom
     0x000, // SubEdGdZeroIdiom
     0x000, // SubGdEdZeroIdiom
+    0x000, // TestEwGwIdiom
+    0x000, // TestEdGdIdiom
+    0x000, // TestEqGqIdiom
     0x000, // AddGbEb
     0x000, // OrGbEb
     0x000, // AdcGbEb
@@ -4262,6 +4315,8 @@ pub const OPCODE_EVEX_FLAGS: [u16; 3682] = [
     0x000, // Xlat
     0x000, // Sysenter
     0x000, // Sysexit
+    0x000, // SysenterLongmode
+    0x000, // SysexitLongmode
     0x000, // Monitor
     0x000, // Mwait
     0x000, // UmonitorEq
@@ -4761,6 +4816,9 @@ pub const OPCODE_EVEX_FLAGS: [u16; 3682] = [
     0x000, // Lfence
     0x000, // Sfence
     0x000, // Mfence
+    0x000, // XorpsVpsWpsZeroIdiom
+    0x000, // XorpdVpdWpdZeroIdiom
+    0x000, // PxorVdqWdqZeroIdiom
     0x000, // MovddupVpdWq
     0x000, // MovsldupVpsWps
     0x000, // MovshdupVpsWps
@@ -5990,6 +6048,7 @@ pub const OPCODE_EVEX_FLAGS: [u16; 3682] = [
     0x000, // TilestoredMdqTnnn
     0x000, // Tilerelease
     0x000, // TilezeroTnnn
+    0x000, // Bsrinit
     0x000, // TdpbssdTnnnTrmTreg
     0x000, // TdpbsudTnnnTrmTreg
     0x000, // TdpbusdTnnnTrmTreg
@@ -6002,69 +6061,69 @@ pub const OPCODE_EVEX_FLAGS: [u16; 3682] = [
     0x000, // Tdphf8psTnnnTrmTreg
     0x000, // Tdpbhf8psTnnnTrmTreg
     0x000, // Tdphbf8psTnnnTrmTreg
-    0x000, // KaddwKgwKhwKew
-    0x000, // KaddqKgqKhqKeq
-    0x000, // KaddbKgbKhbKeb
-    0x000, // KadddKgdKhdKed
-    0x000, // KandwKgwKhwKew
-    0x000, // KandqKgqKhqKeq
-    0x000, // KandbKgbKhbKeb
-    0x000, // KanddKgdKhdKed
-    0x000, // KandnwKgwKhwKew
-    0x000, // KandnqKgqKhqKeq
-    0x000, // KandnbKgbKhbKeb
-    0x000, // KandndKgdKhdKed
-    0x000, // KmovwKgwKew
-    0x000, // KmovqKgqKeq
-    0x000, // KmovbKgbKeb
-    0x000, // KmovdKgdKed
-    0x000, // KmovwKewKgw
-    0x000, // KmovqKeqKgq
-    0x000, // KmovbKebKgb
-    0x000, // KmovdKedKgd
-    0x000, // KmovbGdKeb
-    0x000, // KmovwGdKew
-    0x000, // KmovdGdKed
-    0x000, // KmovqGqKeq
-    0x000, // KmovbKgbEb
-    0x000, // KmovwKgwEw
-    0x000, // KmovdKgdEd
-    0x000, // KmovqKgqEq
-    0x000, // KunpckbwKgwKhbKeb
-    0x000, // KunpckwdKgdKhwKew
-    0x000, // KunpckdqKgqKhdKed
-    0x000, // KnotwKgwKew
-    0x000, // KnotqKgqKeq
-    0x000, // KnotbKgbKeb
-    0x000, // KnotdKgdKed
-    0x000, // KorwKgwKhwKew
-    0x000, // KorqKgqKhqKeq
-    0x000, // KorbKgbKhbKeb
-    0x000, // KordKgdKhdKed
-    0x000, // KortestwKgwKew
-    0x000, // KortestqKgqKeq
-    0x000, // KortestbKgbKeb
-    0x000, // KortestdKgdKed
-    0x000, // KshiftlbKgbKebIb
-    0x000, // KshiftlwKgwKewIb
-    0x000, // KshiftldKgdKedIb
-    0x000, // KshiftlqKgqKeqIb
-    0x000, // KshiftrbKgbKebIb
-    0x000, // KshiftrwKgwKewIb
-    0x000, // KshiftrdKgdKedIb
-    0x000, // KshiftrqKgqKeqIb
-    0x000, // KxnorwKgwKhwKew
-    0x000, // KxnorqKgqKhqKeq
-    0x000, // KxnorbKgbKhbKeb
-    0x000, // KxnordKgdKhdKed
-    0x000, // KxorwKgwKhwKew
-    0x000, // KxorqKgqKhqKeq
-    0x000, // KxorbKgbKhbKeb
-    0x000, // KxordKgdKhdKed
-    0x000, // KtestwKgwKew
-    0x000, // KtestqKgqKeq
-    0x000, // KtestbKgbKeb
-    0x000, // KtestdKgdKed
+    0x080, // KaddwKgwKhwKew
+    0x080, // KaddqKgqKhqKeq
+    0x080, // KaddbKgbKhbKeb
+    0x080, // KadddKgdKhdKed
+    0x080, // KandwKgwKhwKew
+    0x080, // KandqKgqKhqKeq
+    0x080, // KandbKgbKhbKeb
+    0x080, // KanddKgdKhdKed
+    0x080, // KandnwKgwKhwKew
+    0x080, // KandnqKgqKhqKeq
+    0x080, // KandnbKgbKhbKeb
+    0x080, // KandndKgdKhdKed
+    0x080, // KmovwKgwKew
+    0x080, // KmovqKgqKeq
+    0x080, // KmovbKgbKeb
+    0x080, // KmovdKgdKed
+    0x080, // KmovwKewKgw
+    0x080, // KmovqKeqKgq
+    0x080, // KmovbKebKgb
+    0x080, // KmovdKedKgd
+    0x080, // KmovbGdKeb
+    0x080, // KmovwGdKew
+    0x080, // KmovdGdKed
+    0x080, // KmovqGqKeq
+    0x080, // KmovbKgbEb
+    0x080, // KmovwKgwEw
+    0x080, // KmovdKgdEd
+    0x080, // KmovqKgqEq
+    0x080, // KunpckbwKgwKhbKeb
+    0x080, // KunpckwdKgdKhwKew
+    0x080, // KunpckdqKgqKhdKed
+    0x080, // KnotwKgwKew
+    0x080, // KnotqKgqKeq
+    0x080, // KnotbKgbKeb
+    0x080, // KnotdKgdKed
+    0x080, // KorwKgwKhwKew
+    0x080, // KorqKgqKhqKeq
+    0x080, // KorbKgbKhbKeb
+    0x080, // KordKgdKhdKed
+    0x080, // KortestwKgwKew
+    0x080, // KortestqKgqKeq
+    0x080, // KortestbKgbKeb
+    0x080, // KortestdKgdKed
+    0x080, // KshiftlbKgbKebIb
+    0x080, // KshiftlwKgwKewIb
+    0x080, // KshiftldKgdKedIb
+    0x080, // KshiftlqKgqKeqIb
+    0x080, // KshiftrbKgbKebIb
+    0x080, // KshiftrwKgwKewIb
+    0x080, // KshiftrdKgdKedIb
+    0x080, // KshiftrqKgqKeqIb
+    0x080, // KxnorwKgwKhwKew
+    0x080, // KxnorqKgqKhqKeq
+    0x080, // KxnorbKgbKhbKeb
+    0x080, // KxnordKgdKhdKed
+    0x080, // KxorwKgwKhwKew
+    0x080, // KxorqKgqKhqKeq
+    0x080, // KxorbKgbKhbKeb
+    0x080, // KxordKgdKhdKed
+    0x080, // KtestwKgwKew
+    0x080, // KtestqKgqKeq
+    0x080, // KtestbKgbKeb
+    0x080, // KtestdKgdKed
     0x000, // RdmsrEqId
     0x000, // WrmsrnsIdEq
     0x000, // UrdmsrEqId
@@ -7403,6 +7462,25 @@ pub const OPCODE_EVEX_FLAGS: [u16; 3682] = [
     0x380, // EvexTcvtrowps2bf16lVphTrmBd
     0x380, // EvexTcvtrowps2bf16hVphTrmIb
     0x380, // EvexTcvtrowps2bf16hVphTrmBd
+    0x380, // EvexTilemovrowTrmWdqIb
+    0x380, // EvexTilemovrowTrmWdqBd
+    0x380, // EvexTilemovcolTrmWdqIb
+    0x380, // EvexTilemovcolTrmWdqBd
+    0x380, // EvexBsrmovfBsrVdqWdq
+    0x380, // EvexBsrmovlBsrWdq
+    0x380, // EvexBsrmovlWdqBsr
+    0x380, // EvexBsrmovhBsrWdq
+    0x380, // EvexBsrmovhWdqBsr
+    0x380, // EvexTop2bf16psTnnnWdqHdq
+    0x380, // EvexTop4bssdTnnnWdqHdq
+    0x380, // EvexTop4bsudTnnnWdqHdq
+    0x380, // EvexTop4busdTnnnWdqHdq
+    0x380, // EvexTop4buudTnnnWdqHdq
+    0x380, // EvexTop4mxbsspsTnnnWdqHdqIb
+    0x380, // EvexTop4mxbf8psTnnnWdqHdqIb
+    0x380, // EvexTop4mxbhf8psTnnnWdqHdqIb
+    0x380, // EvexTop4mxhbf8psTnnnWdqHdqIb
+    0x380, // EvexTop4mxhf8psTnnnWdqHdqIb
     0x380, // EvexVmovrsbVdqWdq
     0x380, // EvexVmovrsbVdqWdqKmask
     0x380, // EvexVmovrswVdqWdq
@@ -7411,6 +7489,28 @@ pub const OPCODE_EVEX_FLAGS: [u16; 3682] = [
     0x380, // EvexVmovrsdVdqWdqKmask
     0x380, // EvexVmovrsqVdqWdq
     0x380, // EvexVmovrsqVdqWdqKmask
+    0x180, // EvexVcvtps2bf8Vf8WpsKmask
+    0x180, // EvexVcvtps2bf8sVf8WpsKmask
+    0x180, // EvexVcvtps2hf8Vf8WpsKmask
+    0x180, // EvexVcvtps2hf8sVf8WpsKmask
+    0x180, // EvexVcvtrops2hf8Vf8WpsKmask
+    0x180, // EvexVcvtrops2hf8sVf8WpsKmask
+    0x180, // EvexVcvtbiasps2bf8Vf8HdqWpsKmask
+    0x180, // EvexVcvtbiasps2bf8sVf8HdqWpsKmask
+    0x180, // EvexVcvtbiasps2hf8Vf8HdqWpsKmask
+    0x180, // EvexVcvtbiasps2hf8sVf8HdqWpsKmask
+    0x380, // EvexVcvtbf82psVpsWf8Kmask
+    0x380, // EvexVcvthf82psVpsWf8Kmask
+    0x380, // EvexVcvtbf42hf8Vf8Wf4Kmask
+    0x380, // EvexVcvtbf62hf8Vf8Wf6Kmask
+    0x380, // EvexVcvthf62hf8Vf8Wf6Kmask
+    0x380, // EvexVcvtbf82bf6sVf6Wf8
+    0x380, // EvexVcvthf82hf6sVf6Wf8
+    0x380, // EvexVcvtbf82bf4sWf4Vdq
+    0x380, // EvexVcvthf82bf4sWf4Vdq
+    0x380, // EvexVunpackbVdqWdqIbKmask
+    0x380, // EvexVpmovssdbWdqVdq
+    0x380, // EvexVpmovssdbWdqVdqKmask
     0x000, // NoAvxState
     0x000, // NoEvexState
 ];
@@ -7422,7 +7522,7 @@ pub const fn opcode_evex_flags(opcode: Opcode) -> u16 {
 }
 
 /// Number of opcodes carrying EVEX prepare attributes, pinned by tests.
-pub const EVEX_FLAGGED_OPCODE_COUNT: usize = 1333;
+pub const EVEX_FLAGGED_OPCODE_COUNT: usize = 1437;
 
 /// The CPU state an instruction needs enabled before it may execute —
 /// the `BX_PREPARE_*` attribute of Bochs `bx_define_opcode`.
@@ -7456,7 +7556,7 @@ pub enum CpuState {
 
 /// CPU state each opcode requires, from field 10 of `bx_define_opcode`.
 // A `const` for the same reason as OPCODE_EVEX_FLAGS.
-pub const OPCODE_STATE: [CpuState; 3682] = [
+pub const OPCODE_STATE: [CpuState; 3732] = [
     CpuState::Base, // IaError
     CpuState::Base, // InsertedOpcode
     CpuState::Base, // Aaa
@@ -7572,6 +7672,9 @@ pub const OPCODE_STATE: [CpuState; 3682] = [
     CpuState::Base, // SubGwEwZeroIdiom
     CpuState::Base, // SubEdGdZeroIdiom
     CpuState::Base, // SubGdEdZeroIdiom
+    CpuState::Base, // TestEwGwIdiom
+    CpuState::Base, // TestEdGdIdiom
+    CpuState::Base, // TestEqGqIdiom
     CpuState::Base, // AddGbEb
     CpuState::Base, // OrGbEb
     CpuState::Base, // AdcGbEb
@@ -7988,6 +8091,8 @@ pub const OPCODE_STATE: [CpuState; 3682] = [
     CpuState::Base, // Xlat
     CpuState::Base, // Sysenter
     CpuState::Base, // Sysexit
+    CpuState::Base, // SysenterLongmode
+    CpuState::Base, // SysexitLongmode
     CpuState::Base, // Monitor
     CpuState::Base, // Mwait
     CpuState::Base, // UmonitorEq
@@ -8487,6 +8592,9 @@ pub const OPCODE_STATE: [CpuState; 3682] = [
     CpuState::Base, // Lfence
     CpuState::Base, // Sfence
     CpuState::Base, // Mfence
+    CpuState::Sse, // XorpsVpsWpsZeroIdiom
+    CpuState::Sse, // XorpdVpdWpdZeroIdiom
+    CpuState::Sse, // PxorVdqWdqZeroIdiom
     CpuState::Sse, // MovddupVpdWq
     CpuState::Sse, // MovsldupVpsWps
     CpuState::Sse, // MovshdupVpsWps
@@ -9716,6 +9824,7 @@ pub const OPCODE_STATE: [CpuState; 3682] = [
     CpuState::Amx, // TilestoredMdqTnnn
     CpuState::Amx, // Tilerelease
     CpuState::Amx, // TilezeroTnnn
+    CpuState::Amx, // Bsrinit
     CpuState::Amx, // TdpbssdTnnnTrmTreg
     CpuState::Amx, // TdpbsudTnnnTrmTreg
     CpuState::Amx, // TdpbusdTnnnTrmTreg
@@ -11129,6 +11238,25 @@ pub const OPCODE_STATE: [CpuState; 3682] = [
     CpuState::Amx, // EvexTcvtrowps2bf16lVphTrmBd
     CpuState::Amx, // EvexTcvtrowps2bf16hVphTrmIb
     CpuState::Amx, // EvexTcvtrowps2bf16hVphTrmBd
+    CpuState::Amx, // EvexTilemovrowTrmWdqIb
+    CpuState::Amx, // EvexTilemovrowTrmWdqBd
+    CpuState::Amx, // EvexTilemovcolTrmWdqIb
+    CpuState::Amx, // EvexTilemovcolTrmWdqBd
+    CpuState::Amx, // EvexBsrmovfBsrVdqWdq
+    CpuState::Amx, // EvexBsrmovlBsrWdq
+    CpuState::Amx, // EvexBsrmovlWdqBsr
+    CpuState::Amx, // EvexBsrmovhBsrWdq
+    CpuState::Amx, // EvexBsrmovhWdqBsr
+    CpuState::Amx, // EvexTop2bf16psTnnnWdqHdq
+    CpuState::Amx, // EvexTop4bssdTnnnWdqHdq
+    CpuState::Amx, // EvexTop4bsudTnnnWdqHdq
+    CpuState::Amx, // EvexTop4busdTnnnWdqHdq
+    CpuState::Amx, // EvexTop4buudTnnnWdqHdq
+    CpuState::Amx, // EvexTop4mxbsspsTnnnWdqHdqIb
+    CpuState::Amx, // EvexTop4mxbf8psTnnnWdqHdqIb
+    CpuState::Amx, // EvexTop4mxbhf8psTnnnWdqHdqIb
+    CpuState::Amx, // EvexTop4mxhbf8psTnnnWdqHdqIb
+    CpuState::Amx, // EvexTop4mxhf8psTnnnWdqHdqIb
     CpuState::Evex, // EvexVmovrsbVdqWdq
     CpuState::Evex, // EvexVmovrsbVdqWdqKmask
     CpuState::Evex, // EvexVmovrswVdqWdq
@@ -11137,6 +11265,28 @@ pub const OPCODE_STATE: [CpuState; 3682] = [
     CpuState::Evex, // EvexVmovrsdVdqWdqKmask
     CpuState::Evex, // EvexVmovrsqVdqWdq
     CpuState::Evex, // EvexVmovrsqVdqWdqKmask
+    CpuState::Evex, // EvexVcvtps2bf8Vf8WpsKmask
+    CpuState::Evex, // EvexVcvtps2bf8sVf8WpsKmask
+    CpuState::Evex, // EvexVcvtps2hf8Vf8WpsKmask
+    CpuState::Evex, // EvexVcvtps2hf8sVf8WpsKmask
+    CpuState::Evex, // EvexVcvtrops2hf8Vf8WpsKmask
+    CpuState::Evex, // EvexVcvtrops2hf8sVf8WpsKmask
+    CpuState::Evex, // EvexVcvtbiasps2bf8Vf8HdqWpsKmask
+    CpuState::Evex, // EvexVcvtbiasps2bf8sVf8HdqWpsKmask
+    CpuState::Evex, // EvexVcvtbiasps2hf8Vf8HdqWpsKmask
+    CpuState::Evex, // EvexVcvtbiasps2hf8sVf8HdqWpsKmask
+    CpuState::Evex, // EvexVcvtbf82psVpsWf8Kmask
+    CpuState::Evex, // EvexVcvthf82psVpsWf8Kmask
+    CpuState::Evex, // EvexVcvtbf42hf8Vf8Wf4Kmask
+    CpuState::Evex, // EvexVcvtbf62hf8Vf8Wf6Kmask
+    CpuState::Evex, // EvexVcvthf62hf8Vf8Wf6Kmask
+    CpuState::Evex, // EvexVcvtbf82bf6sVf6Wf8
+    CpuState::Evex, // EvexVcvthf82hf6sVf6Wf8
+    CpuState::Evex, // EvexVcvtbf82bf4sWf4Vdq
+    CpuState::Evex, // EvexVcvthf82bf4sWf4Vdq
+    CpuState::Evex, // EvexVunpackbVdqWdqIbKmask
+    CpuState::Evex, // EvexVpmovssdbWdqVdq
+    CpuState::Evex, // EvexVpmovssdbWdqVdqKmask
     CpuState::Base, // NoAvxState
     CpuState::Base, // NoEvexState
 ];
@@ -11152,7 +11302,7 @@ pub const fn opcode_state(opcode: Opcode) -> CpuState {
 pub const STATE_AVX_OPCODE_COUNT: usize = 676;
 
 /// Opcodes requiring AVX-512 state.
-pub const STATE_EVEX_OPCODE_COUNT: usize = 1384;
+pub const STATE_EVEX_OPCODE_COUNT: usize = 1406;
 
 #[allow(dead_code)]
 fn _feature_type_is_used(f: X86Feature) -> u16 {

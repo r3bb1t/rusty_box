@@ -464,10 +464,10 @@ fn test_segment_prefix_before_rex() {
 }
 
 // =============================================================================
-// Regression tests for previously discovered decoder bugs
+// Operand directions and encodings pinned against Bochs
 // =============================================================================
 
-// -- SHRD/SHLD Ed,Gd direction (session 13 fix) --
+// -- SHRD/SHLD Ed,Gd direction --
 // These opcodes (0F A4/A5/AC/AD) must be in the Ed,Gd branch:
 // dst()=rm (destination register), src1()=nnn (shift source register).
 // Bug: they were in the ELSE branch, swapping dst/src1, causing ext2
@@ -520,7 +520,7 @@ fn test_shld_64bit_direction() {
     assert_eq!(i.src1(), 1, "64-bit SHLD src1 should be nnn=RCX(1)");
 }
 
-// -- MOVQ 66 0F D6 Ed,Gd direction (session 44-45 fix) --
+// -- MOVQ 66 0F D6 Ed,Gd direction --
 // 66 0F D6 is MOVQ xmm/m64, xmm — a STORE instruction.
 // Must be Ed,Gd: dst=rm (destination), src1=nnn (source XMM).
 
@@ -543,7 +543,7 @@ fn test_movq_66_0f_d6_store_direction_64bit() {
     assert_eq!(i.src1(), 2, "64-bit MOVQ store src1 should be nnn=XMM2(2)");
 }
 
-// -- F3 0F 7E MOVQ Vq,Wq exclusion from Ed,Gd (session 39 fix) --
+// -- F3 0F 7E MOVQ Vq,Wq exclusion from Ed,Gd --
 // F3 0F 7E is MOVQ xmm, xmm/m64 — a LOAD instruction.
 // Must NOT be Ed,Gd: dst=nnn (destination XMM), src1=rm (source).
 // Bug: 0x17E was in Ed,Gd branch for ALL SSE prefix variants.
@@ -1349,12 +1349,56 @@ fn opcode_prepare_table_is_in_sync_with_the_opcode_enum() {
     }
 }
 
+/// The opcode counts `scripts/gen_opcode_isa.py` writes into opcode_isa.rs
+/// (`GATED_OPCODE_COUNT`, `EVEX_FLAGGED_OPCODE_COUNT`, `STATE_AVX_OPCODE_COUNT`,
+/// `STATE_EVEX_OPCODE_COUNT`), pinned to what Bochs's ia_opcodes.def,
+/// ia_opcodes_evex.def and fetchdecode.h give against this enum. A
+/// regeneration that moves one must move it here too. `OPCODE_VARIANT_COUNT`
+/// is held to the enum by `opcode_isa_table_is_in_sync_with_the_opcode_enum`.
+#[test]
+fn opcode_isa_counts_are_pinned_to_the_reference_build() {
+    use crate::opcode_isa::{
+        EVEX_FLAGGED_OPCODE_COUNT, GATED_OPCODE_COUNT, OPCODE_EVEX_FLAGS,
+        STATE_AVX_OPCODE_COUNT, STATE_EVEX_OPCODE_COUNT,
+    };
+
+    assert_eq!(
+        OPCODE_EVEX_FLAGS.iter().filter(|f| **f != 0).count(),
+        EVEX_FLAGGED_OPCODE_COUNT,
+        "EVEX_FLAGGED_OPCODE_COUNT must count the table it describes"
+    );
+    assert_eq!(
+        GATED_OPCODE_COUNT, 2964,
+        "the reference build's ia_opcodes*.def gates 2964 of this enum's opcodes \
+         on a BX_ISA_* feature; regenerate with scripts/gen_opcode_isa.py if \
+         upstream changed"
+    );
+    assert_eq!(
+        EVEX_FLAGGED_OPCODE_COUNT, 1437,
+        "the reference build's ia_opcodes*.def gives 1437 of this enum's opcodes \
+         a BX_PREPARE_EVEX* bit (BX_PREPARE_OPMASK included); regenerate with \
+         scripts/gen_opcode_isa.py if upstream changed"
+    );
+    assert_eq!(
+        STATE_AVX_OPCODE_COUNT, 676,
+        "the reference build's ia_opcodes*.def marks 676 of this enum's opcodes \
+         BX_PREPARE_AVX; regenerate with scripts/gen_opcode_isa.py if upstream \
+         changed"
+    );
+    assert_eq!(
+        STATE_EVEX_OPCODE_COUNT, 1406,
+        "the reference build's ia_opcodes*.def marks 1406 of this enum's opcodes \
+         BX_PREPARE_EVEX* without BX_PREPARE_AMX; regenerate with \
+         scripts/gen_opcode_isa.py if upstream changed"
+    );
+}
+
 #[test]
 fn test_vex_legacy_shared_forms_enforce_bochs_encoding_limits() {
     // These VEX forms share a legacy SSE table entry, so nothing in the table
     // itself constrains them. Bochs constrains them in its separate VEX groups
-    // (fetchdecode_opmap_avx.cc), and the results are already correct — what
-    // was missing is the reserved-encoding #UD.
+    // (fetchdecode_opmap_avx.cc). The decoded results are the same; what this
+    // checks is the reserved-encoding #UD.
 
     // --- VL128-only (Bochs marks each group ATTR_VL128) ---
     // VMOVLPS [rax], xmm1 — C5 F8 13 08 decodes; the VEX.256 form must not.
@@ -1770,7 +1814,7 @@ fn test_lock_prefix_memory_allowed_register_rejected_64bit_exact_error() {
         "LOCK register form should be rejected, got {rejected:?}"
     );
 }
-// -- PUSH imm8 sign-extension (session 10 fix) --
+// -- PUSH imm8 sign-extension --
 // Opcode 0x6A (PUSH imm8): the byte immediate must be SIGN-extended.
 // Bug: was zero-extended, so PUSH 0xFF pushed 255 instead of -1,
 // breaking wait4(-1) in Linux init.
@@ -1829,7 +1873,7 @@ fn test_group3_test_dword_immediate_length() {
     assert_eq!(i.id(), 0x12345678);
 }
 
-// -- REX byte register mapping (session 25 fix) --
+// -- REX byte register mapping --
 // Bare REX (0x40, no R/X/B/W bits) must still enable SPL/BPL/SIL/DIL
 // register mapping by setting the Extend8bit flag.
 // Bug: decoder stored rex_prefix = b & 0x0F, which gave 0 for 0x40,
@@ -1864,7 +1908,7 @@ fn test_no_rex_no_extend8bit() {
 }
 
 // -- Ed,Gd convention: two-byte opcodes should NOT be affected by
-//    single-byte (b1 & 0x0F) == 0x01/0x09 matching (session 28 fix) --
+//    single-byte (b1 & 0x0F) == 0x01/0x09 matching --
 
 #[test]
 fn test_cmovno_not_swapped() {
@@ -2043,8 +2087,8 @@ fn evex_master_table_has_every_slot_bochs_defines() {
     use crate::decoder::opmap_evex::EVEX_TABLE;
     let defined = EVEX_TABLE.iter().filter(|g| !g.is_empty()).count();
     assert_eq!(
-        defined, 385,
-        "BxOpcodeTableEVEX defines 385 non-ERR slots in the reference build \
+        defined, 396,
+        "BxOpcodeTableEVEX defines 396 non-ERR slots in the reference build \
          (BX_SUPPORT_AMX 0); regenerate with scripts/gen_opmap_evex.py if \
          upstream changed"
     );
@@ -2567,9 +2611,8 @@ fn vex_unpopulated_opcode_slots_are_ud() {
 /// `LOCK MOV CR0` is AMD's ALT_MOV_CR8 alias and must decode as an access to
 /// CR8, not as #UD.
 ///
-/// A LOCK prefix on a register-form operand is otherwise always illegal, and
-/// this port used to reject it unconditionally — which is right for every
-/// opcode except these four. Bochs carves them out in the tail of
+/// A LOCK prefix on a register-form operand is illegal for every opcode
+/// except these four. Bochs carves them out in the tail of
 /// `fetchDecode64` / `fetchDecode32`, extending CR0 to CR8. Whether the CPU is
 /// actually allowed to do that is a feature question the decoder cannot answer,
 /// so it always extends and the MOV CR handlers veto it; see
@@ -2607,4 +2650,1471 @@ fn lock_mov_cr0_decodes_as_the_cr8_alias() {
     let i32 = fetch_decode32(&[0xF0, 0x0F, 0x22, 0xC0], true).unwrap();
     assert_eq!(i32.get_ia_opcode(), Opcode::MovCr0rd);
     assert_eq!(i32.dst(), 8, "32-bit LOCK MOV CR0 must reach CR8 too");
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// VEX.W1 / EVEX.W1 outside 64-bit mode, and the groups whose rows Bochs ends
+// with `last_opcode`.
+// ════════════════════════════════════════════════════════════════════════
+
+/// One encoding, and the opcodes each decoder mode may make of it: every name
+/// that one operand-width form goes by.
+struct ModeCase {
+    what: &'static str,
+    bytes: &'static [u8],
+    in_32_bit: &'static [Opcode],
+    in_64_bit: &'static [Opcode],
+}
+
+/// One encoding that decodes, and the opcode it must decode to.
+struct DecodeCase {
+    what: &'static str,
+    bytes: &'static [u8],
+    decodes_to: Opcode,
+}
+
+/// One encoding that no row of its group admits, so it must be #UD.
+struct UndefinedCase {
+    what: &'static str,
+    bytes: &'static [u8],
+}
+
+fn assert_decodes_64(case: &DecodeCase) {
+    match fetch_decode64(case.bytes) {
+        Ok(i) => assert_eq!(
+            i.get_ia_opcode(),
+            case.decodes_to,
+            "{}: {:02X?}",
+            case.what,
+            case.bytes
+        ),
+        Err(e) => panic!("{}: {:02X?} must decode, got {e:?}", case.what, case.bytes),
+    }
+}
+
+fn assert_undefined_64(case: &UndefinedCase) {
+    let decoded = fetch_decode64(case.bytes).map(|i| i.get_ia_opcode());
+    assert!(
+        decoded.is_err(),
+        "{}: {:02X?} must be #UD, decoded {decoded:?}",
+        case.what,
+        case.bytes
+    );
+}
+
+/// Bochs fetchdecode_opmap_avx.cc `BxOpcodeGroup_VEX_0F2A` (and 0F2C, 0F2D,
+/// 0F6E, 0F7E, 0F3A16, 0F3A22) and fetchdecode_opmap_evex.cc
+/// `BxOpcodeGroup_EVEX_0F2A` (and the same siblings plus MAP5 2A/2C/2D/78/79/
+/// 7B): the 64-bit form is `ATTR_VEX_W1 | ATTR_IS64` and comes first; the
+/// 32-bit form that follows carries no W attribute. Outside 64-bit mode W1
+/// is therefore ignored and selects the 32-bit form; in 64-bit mode W1
+/// selects the 64-bit form and W0 the 32-bit one.
+#[test]
+fn w1_selects_the_64_bit_form_only_in_64_bit_mode() {
+    // A width form counts under the port's legacy SSE name or Bochs's VEX name.
+    let cases = [
+        ModeCase {
+            what: "VEX.W1 F3 0F 2A VCVTSI2SS",
+            bytes: &[0xC4, 0xE1, 0xFA, 0x2A, 0xC0],
+            in_32_bit: &[Opcode::Vcvtsi2ssVssEd],
+            in_64_bit: &[Opcode::Vcvtsi2ssVssEq],
+        },
+        ModeCase {
+            what: "VEX.W0 F3 0F 2A VCVTSI2SS",
+            bytes: &[0xC4, 0xE1, 0x7A, 0x2A, 0xC0],
+            in_32_bit: &[Opcode::Vcvtsi2ssVssEd],
+            in_64_bit: &[Opcode::Vcvtsi2ssVssEd],
+        },
+        ModeCase {
+            what: "VEX.W1 F3 0F 2C VCVTTSS2SI",
+            bytes: &[0xC4, 0xE1, 0xFA, 0x2C, 0xC0],
+            in_32_bit: &[Opcode::Cvttss2siGdWss, Opcode::Vcvttss2siGdWss],
+            in_64_bit: &[Opcode::Cvttss2siGqWss, Opcode::Vcvttss2siGqWss],
+        },
+        ModeCase {
+            what: "VEX.W1 F2 0F 2D VCVTSD2SI",
+            bytes: &[0xC4, 0xE1, 0xFB, 0x2D, 0xC0],
+            in_32_bit: &[Opcode::Cvtsd2siGdWsd, Opcode::Vcvtsd2siGdWsd],
+            in_64_bit: &[Opcode::Cvtsd2siGqWsd, Opcode::Vcvtsd2siGqWsd],
+        },
+        ModeCase {
+            what: "VEX.W1 66 0F 6E VMOVD/VMOVQ",
+            bytes: &[0xC4, 0xE1, 0xF9, 0x6E, 0xC0],
+            in_32_bit: &[Opcode::MovdVdqEd, Opcode::V128VmovdVdqEd],
+            in_64_bit: &[Opcode::MovqVdqEq, Opcode::V128VmovqVdqEq],
+        },
+        ModeCase {
+            what: "VEX.W1 66 0F 7E VMOVD/VMOVQ",
+            bytes: &[0xC4, 0xE1, 0xF9, 0x7E, 0xC0],
+            in_32_bit: &[Opcode::MovdEdVd, Opcode::V128VmovdEdVd],
+            in_64_bit: &[Opcode::MovqEqVq, Opcode::V128VmovqEqVq],
+        },
+        ModeCase {
+            what: "VEX.W1 66 0F3A 16 VPEXTRD/VPEXTRQ",
+            bytes: &[0xC4, 0xE3, 0xF9, 0x16, 0xC0, 0x01],
+            in_32_bit: &[Opcode::V128VpextrdEdVdqIb],
+            in_64_bit: &[Opcode::V128VpextrqEqVdqIb],
+        },
+        ModeCase {
+            what: "VEX.W1 66 0F3A 22 VPINSRD/VPINSRQ",
+            bytes: &[0xC4, 0xE3, 0xF9, 0x22, 0xC0, 0x01],
+            in_32_bit: &[Opcode::V128VpinsrdVdqEdIb],
+            in_64_bit: &[Opcode::V128VpinsrqVdqEqIb],
+        },
+        ModeCase {
+            what: "EVEX.W1 F3 0F 2A VCVTSI2SS",
+            bytes: &[0x62, 0xF1, 0xFE, 0x08, 0x2A, 0xC0],
+            in_32_bit: &[Opcode::EvexVcvtsi2ssVssEd],
+            in_64_bit: &[Opcode::EvexVcvtsi2ssVssEq],
+        },
+        ModeCase {
+            what: "EVEX.W0 F3 0F 2A VCVTSI2SS",
+            bytes: &[0x62, 0xF1, 0x7E, 0x08, 0x2A, 0xC0],
+            in_32_bit: &[Opcode::EvexVcvtsi2ssVssEd],
+            in_64_bit: &[Opcode::EvexVcvtsi2ssVssEd],
+        },
+        ModeCase {
+            what: "EVEX.W1 F3 0F 2C VCVTTSS2SI",
+            bytes: &[0x62, 0xF1, 0xFE, 0x08, 0x2C, 0xC0],
+            in_32_bit: &[Opcode::EvexVcvttss2siGdWss],
+            in_64_bit: &[Opcode::EvexVcvttss2siGqWss],
+        },
+        ModeCase {
+            what: "EVEX.W1 F2 0F 2D VCVTSD2SI",
+            bytes: &[0x62, 0xF1, 0xFF, 0x08, 0x2D, 0xC0],
+            in_32_bit: &[Opcode::EvexVcvtsd2siGdWsd],
+            in_64_bit: &[Opcode::EvexVcvtsd2siGqWsd],
+        },
+        ModeCase {
+            what: "EVEX.W1 66 0F 6E VMOVD/VMOVQ",
+            bytes: &[0x62, 0xF1, 0xFD, 0x08, 0x6E, 0xC0],
+            in_32_bit: &[Opcode::EvexVmovdVdqEd],
+            in_64_bit: &[Opcode::EvexVmovqVdqEq],
+        },
+        ModeCase {
+            what: "EVEX.W1 66 0F 7E VMOVD/VMOVQ",
+            bytes: &[0x62, 0xF1, 0xFD, 0x08, 0x7E, 0xC0],
+            in_32_bit: &[Opcode::EvexVmovdEdVd],
+            in_64_bit: &[Opcode::EvexVmovqEqVq],
+        },
+        ModeCase {
+            what: "EVEX.W1 66 0F3A 16 VPEXTRD/VPEXTRQ",
+            bytes: &[0x62, 0xF3, 0xFD, 0x08, 0x16, 0xC0, 0x01],
+            in_32_bit: &[Opcode::EvexVpextrdEdVdqIb],
+            in_64_bit: &[Opcode::EvexVpextrqEqVdqIb],
+        },
+        ModeCase {
+            what: "EVEX.W1 66 0F3A 22 VPINSRD/VPINSRQ",
+            bytes: &[0x62, 0xF3, 0xFD, 0x08, 0x22, 0xC0, 0x01],
+            in_32_bit: &[Opcode::EvexVpinsrdVdqEdIb],
+            in_64_bit: &[Opcode::EvexVpinsrqVdqEqIb],
+        },
+    ];
+    for case in &cases {
+        match fetch_decode32(case.bytes, true) {
+            Ok(i) => assert!(
+                case.in_32_bit.contains(&i.get_ia_opcode()),
+                "{} in 32-bit mode: {:02X?} decoded {:?}, not the 32-bit form {:?}",
+                case.what,
+                case.bytes,
+                i.get_ia_opcode(),
+                case.in_32_bit
+            ),
+            Err(e) => panic!("{} must decode in 32-bit mode, got {e:?}", case.what),
+        }
+        match fetch_decode64(case.bytes) {
+            Ok(i) => assert!(
+                case.in_64_bit.contains(&i.get_ia_opcode()),
+                "{} in 64-bit mode: {:02X?} decoded {:?}, not the expected form {:?}",
+                case.what,
+                case.bytes,
+                i.get_ia_opcode(),
+                case.in_64_bit
+            ),
+            Err(e) => panic!("{} must decode in 64-bit mode, got {e:?}", case.what),
+        }
+    }
+}
+
+/// Bochs fetchdecode_opmap_evex.cc `BxOpcodeGroup_EVEX_0F3819`: every row
+/// carries `ATTR_VL256_512`, so VBROADCASTSD and VBROADCASTF32X2 have no
+/// 128-bit form.
+#[test]
+fn evex_128_bit_vbroadcastsd_and_vbroadcastf32x2_are_undefined() {
+    for case in [
+        UndefinedCase {
+            what: "EVEX.128.66.0F38.W1 19 VBROADCASTSD",
+            bytes: &[0x62, 0xF2, 0xFD, 0x08, 0x19, 0xC0],
+        },
+        UndefinedCase {
+            what: "EVEX.128.66.0F38.W1 19 VBROADCASTSD {k1}",
+            bytes: &[0x62, 0xF2, 0xFD, 0x09, 0x19, 0xC0],
+        },
+        UndefinedCase {
+            what: "EVEX.128.66.0F38.W0 19 VBROADCASTF32X2",
+            bytes: &[0x62, 0xF2, 0x7D, 0x08, 0x19, 0xC0],
+        },
+        UndefinedCase {
+            what: "EVEX.128.66.0F38.W0 19 VBROADCASTF32X2 {k1}",
+            bytes: &[0x62, 0xF2, 0x7D, 0x09, 0x19, 0xC0],
+        },
+    ] {
+        assert_undefined_64(&case);
+    }
+    for case in [
+        DecodeCase {
+            what: "EVEX.256.66.0F38.W1 19 VBROADCASTSD",
+            bytes: &[0x62, 0xF2, 0xFD, 0x28, 0x19, 0xC0],
+            decodes_to: Opcode::EvexVbroadcastsdVpdWsd,
+        },
+        DecodeCase {
+            what: "EVEX.512.66.0F38.W1 19 VBROADCASTSD {k1}",
+            bytes: &[0x62, 0xF2, 0xFD, 0x49, 0x19, 0xC0],
+            decodes_to: Opcode::EvexVbroadcastsdVpdWsdKmask,
+        },
+        DecodeCase {
+            what: "EVEX.256.66.0F38.W0 19 VBROADCASTF32X2",
+            bytes: &[0x62, 0xF2, 0x7D, 0x28, 0x19, 0xC0],
+            decodes_to: Opcode::EvexVbroadcastf32x2VpsWq,
+        },
+        DecodeCase {
+            what: "EVEX.512.66.0F38.W0 19 VBROADCASTF32X2 {k1}",
+            bytes: &[0x62, 0xF2, 0x7D, 0x49, 0x19, 0xC0],
+            decodes_to: Opcode::EvexVbroadcastf32x2VpsWqKmask,
+        },
+    ] {
+        assert_decodes_64(&case);
+    }
+}
+
+/// Bochs ends every opcode group with a `last_opcode` row; a group missing it
+/// lets a lookup that matches no row run on into the next group's rows. The
+/// port's groups are slices, so a lookup ends at the slice's end. These are
+/// the groups Bochs's fetchdecode_opmap_evex.cc `BxOpcodeGroup_EVEX_0F381A`
+/// and `BxOpcodeGroup_EVEX_0F381B` cover; each encoding below matches none of
+/// their rows (memory only, VL256_512 or VL512), and the next group,
+/// `BxOpcodeGroup_EVEX_0F381C`, holds VPABSB rows that would accept them.
+#[test]
+fn evex_broadcast_groups_end_at_their_last_row() {
+    for case in [
+        UndefinedCase {
+            what: "EVEX.128.66.0F38.W0 1A VBROADCASTF32X4 m128",
+            bytes: &[0x62, 0xF2, 0x7D, 0x08, 0x1A, 0x00],
+        },
+        UndefinedCase {
+            what: "EVEX.128.66.0F38.W1 1A VBROADCASTF64X2 m128",
+            bytes: &[0x62, 0xF2, 0xFD, 0x08, 0x1A, 0x00],
+        },
+        UndefinedCase {
+            what: "EVEX.256.66.0F38.W0 1A register form",
+            bytes: &[0x62, 0xF2, 0x7D, 0x28, 0x1A, 0xC0],
+        },
+        UndefinedCase {
+            what: "EVEX.256.66.0F38.W0 1B VBROADCASTF32X8 m256",
+            bytes: &[0x62, 0xF2, 0x7D, 0x28, 0x1B, 0x00],
+        },
+        UndefinedCase {
+            what: "EVEX.256.66.0F38.W1 1B VBROADCASTF64X4 m256",
+            bytes: &[0x62, 0xF2, 0xFD, 0x28, 0x1B, 0x00],
+        },
+        UndefinedCase {
+            what: "EVEX.512.66.0F38.W0 1B register form",
+            bytes: &[0x62, 0xF2, 0x7D, 0x48, 0x1B, 0xC0],
+        },
+    ] {
+        assert_undefined_64(&case);
+    }
+    for case in [
+        DecodeCase {
+            what: "EVEX.256.66.0F38.W0 1A VBROADCASTF32X4",
+            bytes: &[0x62, 0xF2, 0x7D, 0x28, 0x1A, 0x00],
+            decodes_to: Opcode::EvexVbroadcastf32x4VpsWps,
+        },
+        DecodeCase {
+            what: "EVEX.512.66.0F38.W1 1A VBROADCASTF64X2",
+            bytes: &[0x62, 0xF2, 0xFD, 0x48, 0x1A, 0x00],
+            decodes_to: Opcode::EvexVbroadcastf64x2VpdWpd,
+        },
+        DecodeCase {
+            what: "EVEX.512.66.0F38.W0 1B VBROADCASTF32X8",
+            bytes: &[0x62, 0xF2, 0x7D, 0x48, 0x1B, 0x00],
+            decodes_to: Opcode::EvexVbroadcastf32x8VpsWps,
+        },
+        DecodeCase {
+            what: "EVEX.512.66.0F38.W1 1B VBROADCASTF64X4",
+            bytes: &[0x62, 0xF2, 0xFD, 0x48, 0x1B, 0x00],
+            decodes_to: Opcode::EvexVbroadcastf64x4VpdWpd,
+        },
+    ] {
+        assert_decodes_64(&case);
+    }
+}
+
+/// Bochs fetchdecode_opmap_avx.cc `BxOpcodeGroup_VEX_0F2A`, `_0F2C`, `_0F2D`
+/// (F3 and F2 rows only), `_0F6E` (66, VL128), `_0F7E` (66 VL128, F3 VL128),
+/// `_0F3A16` and `_0F3A22` (66, VL128): an encoding outside those rows is #UD
+/// in both modes. The port reaches these bytes through the shared legacy
+/// table, whose no-prefix rows are the MMX forms.
+#[test]
+fn vex_groups_hold_only_their_bochs_rows() {
+    let cases = [
+        UndefinedCase { what: "VEX.NP 0F 2A (CVTPI2PS)", bytes: &[0xC4, 0xE1, 0x78, 0x2A, 0xC0] },
+        UndefinedCase { what: "VEX.66 0F 2A (CVTPI2PD)", bytes: &[0xC4, 0xE1, 0x79, 0x2A, 0xC0] },
+        UndefinedCase { what: "VEX.NP 0F 2C (CVTTPS2PI)", bytes: &[0xC4, 0xE1, 0x78, 0x2C, 0xC0] },
+        UndefinedCase { what: "VEX.66 0F 2C (CVTTPD2PI)", bytes: &[0xC4, 0xE1, 0x79, 0x2C, 0xC0] },
+        UndefinedCase { what: "VEX.NP 0F 2D (CVTPS2PI)", bytes: &[0xC4, 0xE1, 0x78, 0x2D, 0xC0] },
+        UndefinedCase { what: "VEX.66 0F 2D (CVTPD2PI)", bytes: &[0xC4, 0xE1, 0x79, 0x2D, 0xC0] },
+        UndefinedCase { what: "VEX.NP 0F 6E (MOVD mm)", bytes: &[0xC4, 0xE1, 0x78, 0x6E, 0xC0] },
+        UndefinedCase { what: "VEX.W1 NP 0F 6E (MOVQ mm)", bytes: &[0xC4, 0xE1, 0xF8, 0x6E, 0xC0] },
+        UndefinedCase { what: "VEX.F3 0F 6E", bytes: &[0xC4, 0xE1, 0x7A, 0x6E, 0xC0] },
+        UndefinedCase { what: "VEX.F2 0F 6E", bytes: &[0xC4, 0xE1, 0x7B, 0x6E, 0xC0] },
+        UndefinedCase { what: "VEX.256.66 0F 6E", bytes: &[0xC4, 0xE1, 0x7D, 0x6E, 0xC0] },
+        UndefinedCase { what: "VEX.NP 0F 7E (MOVD mm)", bytes: &[0xC4, 0xE1, 0x78, 0x7E, 0xC0] },
+        UndefinedCase { what: "VEX.W1 NP 0F 7E (MOVQ mm)", bytes: &[0xC4, 0xE1, 0xF8, 0x7E, 0xC0] },
+        UndefinedCase { what: "VEX.F2 0F 7E", bytes: &[0xC4, 0xE1, 0x7B, 0x7E, 0xC0] },
+        UndefinedCase { what: "VEX.256.66 0F 7E", bytes: &[0xC4, 0xE1, 0x7D, 0x7E, 0xC0] },
+        UndefinedCase { what: "VEX.256.F3 0F 7E", bytes: &[0xC4, 0xE1, 0x7E, 0x7E, 0xC0] },
+        UndefinedCase { what: "VEX.NP 0F3A 16", bytes: &[0xC4, 0xE3, 0x78, 0x16, 0xC0, 0x01] },
+        UndefinedCase { what: "VEX.F3 0F3A 16", bytes: &[0xC4, 0xE3, 0x7A, 0x16, 0xC0, 0x01] },
+        UndefinedCase { what: "VEX.256.66 0F3A 16", bytes: &[0xC4, 0xE3, 0x7D, 0x16, 0xC0, 0x01] },
+        UndefinedCase { what: "VEX.NP 0F3A 22", bytes: &[0xC4, 0xE3, 0x78, 0x22, 0xC0, 0x01] },
+        UndefinedCase { what: "VEX.F2 0F3A 22", bytes: &[0xC4, 0xE3, 0x7B, 0x22, 0xC0, 0x01] },
+        UndefinedCase { what: "VEX.256.66 0F3A 22", bytes: &[0xC4, 0xE3, 0x7D, 0x22, 0xC0, 0x01] },
+    ];
+    for case in &cases {
+        assert_undefined_64(case);
+        let decoded = fetch_decode32(case.bytes, true).map(|i| i.get_ia_opcode());
+        assert!(
+            decoded.is_err(),
+            "{} in 32-bit mode: {:02X?} must be #UD, decoded {decoded:?}",
+            case.what,
+            case.bytes
+        );
+    }
+    // The rows those groups do hold still decode.
+    for case in [
+        DecodeCase {
+            what: "VEX.F3 0F 7E VMOVQ",
+            bytes: &[0xC4, 0xE1, 0x7A, 0x7E, 0xC0],
+            decodes_to: Opcode::VmovqVqWq,
+        },
+        DecodeCase {
+            what: "VEX.F2 0F 2A VCVTSI2SD",
+            bytes: &[0xC4, 0xE1, 0x7B, 0x2A, 0xC0],
+            decodes_to: Opcode::Vcvtsi2sdVsdEd,
+        },
+    ] {
+        assert_decodes_64(&case);
+    }
+}
+
+/// Bochs fetchdecode_opmap_avx.cc `BxOpcodeGroup_VEX_0F11` admits every
+/// encoding of its byte: VMOVUPS (no prefix) and VMOVUPD (66) at VL128 and
+/// VL256, VMOVSS (F3) and VMOVSD (F2) as a register or a memory store at
+/// any VEX.L. No encoding matches none of its rows, so none can reach the
+/// group's end.
+#[test]
+fn vex_0f11_group_admits_every_encoding() {
+    for pp in 0u8..4 {
+        for vex_l in 0u8..2 {
+            for modrm in [0xC0u8, 0x00] {
+                let bytes = [0xC4, 0xE1, 0x78 | (vex_l << 2) | pp, 0x11, modrm];
+                let opcode = match fetch_decode64(&bytes) {
+                    Ok(i) => i.get_ia_opcode(),
+                    Err(e) => panic!("VEX 0F 11 {bytes:02X?} must decode, got {e:?}"),
+                };
+                let admitted = match pp {
+                    0 if vex_l == 0 => opcode == Opcode::V128VmovupsWpsVps,
+                    0 => opcode == Opcode::V256VmovupsWpsVps,
+                    1 if vex_l == 0 => opcode == Opcode::V128VmovupdWpdVpd,
+                    1 => opcode == Opcode::V256VmovupdWpdVpd,
+                    // The port folds Bochs's register and memory rows into one
+                    // opcode whose handler branches on mod; either is VMOVSS.
+                    2 => matches!(
+                        opcode,
+                        Opcode::V128VmovssWssHpsVss | Opcode::V128VmovssWssVss
+                    ),
+                    _ => matches!(
+                        opcode,
+                        Opcode::V128VmovsdWsdHpdVsd | Opcode::V128VmovsdWsdVsd
+                    ),
+                };
+                assert!(admitted, "VEX 0F 11 {bytes:02X?} decoded {opcode:?}");
+            }
+        }
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// The ACE EVEX slots outside `#if BX_SUPPORT_AMX`.
+// ════════════════════════════════════════════════════════════════════════
+
+/// Bochs fetchdecode_opmap_evex.cc `BxOpcodeGroup_EVEX_0F3841`,
+/// `BxOpcodeGroup_EVEX_0F3A3D` and `BxOpcodeGroup_EVEX_MAP5_36` .. `_3E`:
+/// each row is pinned by its SSE prefix and EVEX.W, so a row that moves to
+/// another prefix or W decodes something else or nothing.
+#[test]
+fn evex_ace_slots_select_by_prefix_and_w() {
+    let decodes = [
+        DecodeCase {
+            what: "EVEX.F3.0F38.W0 41",
+            bytes: &[0x62, 0xF2, 0x7E, 0x08, 0x41, 0xC0],
+            decodes_to: Opcode::EvexVpmovssdbWdqVdq,
+        },
+        DecodeCase {
+            what: "EVEX.F3.0F38.W0 41 {k1}",
+            bytes: &[0x62, 0xF2, 0x7E, 0x09, 0x41, 0xC0],
+            decodes_to: Opcode::EvexVpmovssdbWdqVdqKmask,
+        },
+        DecodeCase {
+            what: "EVEX.NP.0F3A.W0 3D",
+            bytes: &[0x62, 0xF3, 0x7C, 0x08, 0x3D, 0xC0, 0x00],
+            decodes_to: Opcode::EvexVunpackbVdqWdqIbKmask,
+        },
+        DecodeCase {
+            what: "EVEX.NP.MAP5.W1 36",
+            bytes: &[0x62, 0xF5, 0xFC, 0x08, 0x36, 0xC0],
+            decodes_to: Opcode::EvexVcvtbf82psVpsWf8Kmask,
+        },
+        DecodeCase {
+            what: "EVEX.NP.MAP5.W0 36",
+            bytes: &[0x62, 0xF5, 0x7C, 0x08, 0x36, 0xC0],
+            decodes_to: Opcode::EvexVcvthf82psVpsWf8Kmask,
+        },
+        DecodeCase {
+            what: "EVEX.NP.MAP5.W0 37",
+            bytes: &[0x62, 0xF5, 0x7C, 0x08, 0x37, 0xC0],
+            decodes_to: Opcode::EvexVcvtbf42hf8Vf8Wf4Kmask,
+        },
+        DecodeCase {
+            what: "EVEX.66.MAP5.W1 37 (register)",
+            bytes: &[0x62, 0xF5, 0xFD, 0x08, 0x37, 0xC0],
+            decodes_to: Opcode::EvexVcvtbf62hf8Vf8Wf6Kmask,
+        },
+        DecodeCase {
+            what: "EVEX.66.MAP5.W0 37 (register)",
+            bytes: &[0x62, 0xF5, 0x7D, 0x08, 0x37, 0xC0],
+            decodes_to: Opcode::EvexVcvthf62hf8Vf8Wf6Kmask,
+        },
+        DecodeCase {
+            what: "EVEX.F3.MAP5.W0 38",
+            bytes: &[0x62, 0xF5, 0x7E, 0x08, 0x38, 0xC0],
+            decodes_to: Opcode::EvexVcvtps2hf8Vf8WpsKmask,
+        },
+        DecodeCase {
+            what: "EVEX.66.MAP5.W0 38",
+            bytes: &[0x62, 0xF5, 0x7D, 0x08, 0x38, 0xC0],
+            decodes_to: Opcode::EvexVcvtrops2hf8Vf8WpsKmask,
+        },
+        DecodeCase {
+            what: "EVEX.NP.MAP5.W0 38",
+            bytes: &[0x62, 0xF5, 0x7C, 0x08, 0x38, 0xC0],
+            decodes_to: Opcode::EvexVcvtbiasps2hf8Vf8HdqWpsKmask,
+        },
+        DecodeCase {
+            what: "EVEX.F3.MAP5.W0 39",
+            bytes: &[0x62, 0xF5, 0x7E, 0x08, 0x39, 0xC0],
+            decodes_to: Opcode::EvexVcvtps2bf8Vf8WpsKmask,
+        },
+        DecodeCase {
+            what: "EVEX.NP.MAP5.W0 39",
+            bytes: &[0x62, 0xF5, 0x7C, 0x08, 0x39, 0xC0],
+            decodes_to: Opcode::EvexVcvtbiasps2bf8Vf8HdqWpsKmask,
+        },
+        DecodeCase {
+            what: "EVEX.F3.MAP5.W0 3A",
+            bytes: &[0x62, 0xF5, 0x7E, 0x08, 0x3A, 0xC0],
+            decodes_to: Opcode::EvexVcvtps2hf8sVf8WpsKmask,
+        },
+        DecodeCase {
+            what: "EVEX.66.MAP5.W0 3A",
+            bytes: &[0x62, 0xF5, 0x7D, 0x08, 0x3A, 0xC0],
+            decodes_to: Opcode::EvexVcvtrops2hf8sVf8WpsKmask,
+        },
+        DecodeCase {
+            what: "EVEX.NP.MAP5.W0 3A",
+            bytes: &[0x62, 0xF5, 0x7C, 0x08, 0x3A, 0xC0],
+            decodes_to: Opcode::EvexVcvtbiasps2hf8sVf8HdqWpsKmask,
+        },
+        DecodeCase {
+            what: "EVEX.F3.MAP5.W0 3B",
+            bytes: &[0x62, 0xF5, 0x7E, 0x08, 0x3B, 0xC0],
+            decodes_to: Opcode::EvexVcvtps2bf8sVf8WpsKmask,
+        },
+        DecodeCase {
+            what: "EVEX.NP.MAP5.W0 3B",
+            bytes: &[0x62, 0xF5, 0x7C, 0x08, 0x3B, 0xC0],
+            decodes_to: Opcode::EvexVcvtbiasps2bf8sVf8HdqWpsKmask,
+        },
+        DecodeCase {
+            what: "EVEX.F3.MAP5.W0 3C (register, k0)",
+            bytes: &[0x62, 0xF5, 0x7E, 0x08, 0x3C, 0xC0],
+            decodes_to: Opcode::EvexVcvthf82hf6sVf6Wf8,
+        },
+        DecodeCase {
+            what: "EVEX.F3.MAP5.W0 3D (k0)",
+            bytes: &[0x62, 0xF5, 0x7E, 0x08, 0x3D, 0xC0],
+            decodes_to: Opcode::EvexVcvthf82bf4sWf4Vdq,
+        },
+        DecodeCase {
+            what: "EVEX.F3.MAP5.W1 3D (k0)",
+            bytes: &[0x62, 0xF5, 0xFE, 0x08, 0x3D, 0xC0],
+            decodes_to: Opcode::EvexVcvtbf82bf4sWf4Vdq,
+        },
+        DecodeCase {
+            what: "EVEX.F3.MAP5.W1 3E (register, k0)",
+            bytes: &[0x62, 0xF5, 0xFE, 0x08, 0x3E, 0xC0],
+            decodes_to: Opcode::EvexVcvtbf82bf6sVf6Wf8,
+        },
+    ];
+    for case in &decodes {
+        assert_decodes_64(case);
+    }
+
+    let undefined = [
+        UndefinedCase { what: "EVEX.F3.0F38.W1 41", bytes: &[0x62, 0xF2, 0xFE, 0x08, 0x41, 0xC0] },
+        UndefinedCase { what: "EVEX.66.0F38.W0 41", bytes: &[0x62, 0xF2, 0x7D, 0x08, 0x41, 0xC0] },
+        UndefinedCase {
+            what: "EVEX.NP.0F3A.W1 3D",
+            bytes: &[0x62, 0xF3, 0xFC, 0x08, 0x3D, 0xC0, 0x00],
+        },
+        UndefinedCase {
+            what: "EVEX.66.0F3A.W0 3D",
+            bytes: &[0x62, 0xF3, 0x7D, 0x08, 0x3D, 0xC0, 0x00],
+        },
+        UndefinedCase { what: "EVEX.66.MAP5.W0 36", bytes: &[0x62, 0xF5, 0x7D, 0x08, 0x36, 0xC0] },
+        UndefinedCase { what: "EVEX.F3.MAP5.W0 36", bytes: &[0x62, 0xF5, 0x7E, 0x08, 0x36, 0xC0] },
+        UndefinedCase { what: "EVEX.NP.MAP5.W1 37", bytes: &[0x62, 0xF5, 0xFC, 0x08, 0x37, 0xC0] },
+        UndefinedCase {
+            what: "EVEX.66.MAP5.W0 37 (memory)",
+            bytes: &[0x62, 0xF5, 0x7D, 0x08, 0x37, 0x00],
+        },
+        UndefinedCase { what: "EVEX.F3.MAP5.W1 38", bytes: &[0x62, 0xF5, 0xFE, 0x08, 0x38, 0xC0] },
+        UndefinedCase { what: "EVEX.F2.MAP5.W0 38", bytes: &[0x62, 0xF5, 0x7F, 0x08, 0x38, 0xC0] },
+        UndefinedCase { what: "EVEX.66.MAP5.W0 39", bytes: &[0x62, 0xF5, 0x7D, 0x08, 0x39, 0xC0] },
+        UndefinedCase { what: "EVEX.F2.MAP5.W0 3A", bytes: &[0x62, 0xF5, 0x7F, 0x08, 0x3A, 0xC0] },
+        UndefinedCase { what: "EVEX.66.MAP5.W0 3B", bytes: &[0x62, 0xF5, 0x7D, 0x08, 0x3B, 0xC0] },
+        UndefinedCase {
+            what: "EVEX.F3.MAP5.W0 3C {k1}",
+            bytes: &[0x62, 0xF5, 0x7E, 0x09, 0x3C, 0xC0],
+        },
+        UndefinedCase {
+            what: "EVEX.F3.MAP5.W0 3C (memory)",
+            bytes: &[0x62, 0xF5, 0x7E, 0x08, 0x3C, 0x00],
+        },
+        UndefinedCase { what: "EVEX.F3.MAP5.W1 3C", bytes: &[0x62, 0xF5, 0xFE, 0x08, 0x3C, 0xC0] },
+        UndefinedCase {
+            what: "EVEX.F3.MAP5.W0 3D {k1}",
+            bytes: &[0x62, 0xF5, 0x7E, 0x09, 0x3D, 0xC0],
+        },
+        UndefinedCase { what: "EVEX.NP.MAP5.W0 3D", bytes: &[0x62, 0xF5, 0x7C, 0x08, 0x3D, 0xC0] },
+        UndefinedCase { what: "EVEX.F3.MAP5.W0 3E", bytes: &[0x62, 0xF5, 0x7E, 0x08, 0x3E, 0xC0] },
+        UndefinedCase {
+            what: "EVEX.F3.MAP5.W1 3E (memory)",
+            bytes: &[0x62, 0xF5, 0xFE, 0x08, 0x3E, 0x00],
+        },
+    ];
+    for case in &undefined {
+        assert_undefined_64(case);
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// Opcode::category and the TILEMOV operand fields.
+// ════════════════════════════════════════════════════════════════════════
+
+/// `category()` classifies by discriminant range, so a range bound left
+/// behind when variants are inserted would quietly reclassify them. Every
+/// `Evex*` variant is EVEX, and nothing else is.
+#[test]
+fn evex_category_is_exactly_the_evex_named_opcodes() {
+    use crate::opcode_isa::OPCODE_VARIANT_COUNT;
+    use crate::typed::OpcodeCategory;
+    for index in 0..OPCODE_VARIANT_COUNT {
+        let opcode = Opcode::from_u16_const(index as u16);
+        let name = std::format!("{opcode:?}");
+        assert_eq!(
+            name.starts_with("Evex"),
+            opcode.category() == OpcodeCategory::Evex,
+            "{name} is categorised {:?}",
+            opcode.category()
+        );
+    }
+}
+
+/// Bochs fetchdecode.h: `OP_Trm = BX_FORM_SRC(BX_TMM_REG, BX_SRC_RM)` and
+/// `OP_Wdq = BX_FORM_SRC(BX_VMM_FULL_VECTOR, BX_SRC_VECTOR_RM)`, so
+/// TILEMOVROW/TILEMOVCOL `Trm, Wdq` read their vector from rm, the field the
+/// tile is written to; `OP_Bd = BX_FORM_SRC(BX_GPR32, BX_SRC_VVV)` names the
+/// GPR in vvvv.
+#[test]
+fn tilemov_trm_wdq_reads_its_vector_from_rm() {
+    use crate::decoder::evex_operands::{evex_dst, EvexDst};
+    use crate::instruction::{GprIndex, InstructionFlags, Operands};
+    use crate::typed::TypedInstruction as T;
+
+    for opcode in [
+        Opcode::EvexTilemovrowTrmWdqIb,
+        Opcode::EvexTilemovrowTrmWdqBd,
+        Opcode::EvexTilemovcolTrmWdqIb,
+        Opcode::EvexTilemovcolTrmWdqBd,
+    ] {
+        assert_eq!(evex_dst(opcode), EvexDst::RmSourceRm, "{opcode:?}");
+    }
+
+    // The decoder's operands for `EvexDst::RmSourceRm` with rm = 5 and
+    // vvvv = 3: dst and src1 both rm, src2 vvvv.
+    let decoded = |opcode: Opcode| Instruction {
+        opcode,
+        length: 7,
+        flags: InstructionFlags::ModC0,
+        operands: Operands {
+            dst: 5,
+            src1: 5,
+            src2: 3,
+            src3: 0,
+            segment: 0,
+            base: 0,
+            index: 0,
+            scale: 0,
+        },
+        immediate: 0x2A,
+        displacement: 0,
+    };
+    match decoded(Opcode::EvexTilemovrowTrmWdqBd).typed() {
+        T::EvexTilemovrowTrmWdqBdR { dst, src, ctrl } => {
+            assert_eq!(dst, 5, "the tile is rm");
+            assert_eq!(src, 5, "the vector is rm too");
+            assert_eq!(ctrl, GprIndex::Rbx, "the row GPR is vvvv");
+        }
+        other => panic!("TILEMOVROW Trm, Wdq, Bd typed as {other:?}"),
+    }
+    match decoded(Opcode::EvexTilemovcolTrmWdqBd).typed() {
+        T::EvexTilemovcolTrmWdqBdR { dst, src, ctrl } => {
+            assert_eq!(dst, 5, "the tile is rm");
+            assert_eq!(src, 5, "the vector is rm too");
+            assert_eq!(ctrl, GprIndex::Rbx, "the column GPR is vvvv");
+        }
+        other => panic!("TILEMOVCOL Trm, Wdq, Bd typed as {other:?}"),
+    }
+    match decoded(Opcode::EvexTilemovrowTrmWdqIb).typed() {
+        T::EvexTilemovrowTrmWdqIbR { dst, src, imm } => {
+            assert_eq!(dst, 5, "the tile is rm");
+            assert_eq!(src, 5, "the vector is rm too");
+            assert_eq!(imm, 0x2A);
+        }
+        other => panic!("TILEMOVROW Trm, Wdq, Ib typed as {other:?}"),
+    }
+    match decoded(Opcode::EvexTilemovcolTrmWdqIb).typed() {
+        T::EvexTilemovcolTrmWdqIbR { dst, src, imm } => {
+            assert_eq!(dst, 5, "the tile is rm");
+            assert_eq!(src, 5, "the vector is rm too");
+            assert_eq!(imm, 0x2A);
+        }
+        other => panic!("TILEMOVCOL Trm, Wdq, Ib typed as {other:?}"),
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// Instruction::typed() for every EVEX opcode, held to its Bochs def entry.
+// ════════════════════════════════════════════════════════════════════════
+
+/// ModRM.reg, ModRM.rm and EVEX.vvvv in the instructions the typed-view test
+/// builds: three different registers, so a field's value shows which one it
+/// was read from.
+const TYPED_NNN: u8 = 5;
+const TYPED_RM: u8 = 6;
+const TYPED_VVVV: u8 = 7;
+
+/// The ModRM form an instruction is typed in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModrmForm {
+    Register,
+    Memory,
+}
+
+/// The two register fields the decoder fills from `evex_dst`.
+struct EvexRegisterFields {
+    dst: u8,
+    src1: u8,
+}
+
+/// An EVEX instruction with the fields the decoder assigns for
+/// `evex_dst(opcode)` (the `evex_dst` match in decode64.rs and decode32.rs),
+/// vvvv in `src2`, and `[rsi + 0x40]` as the memory form's address.
+fn evex_instruction(opcode: Opcode, form: ModrmForm) -> Instruction {
+    use crate::decoder::evex_operands::{evex_dst, EvexDst};
+    use crate::instruction::{InstructionFlags, Operands};
+
+    let fields = match evex_dst(opcode) {
+        EvexDst::Nnn => EvexRegisterFields {
+            dst: TYPED_NNN,
+            src1: TYPED_RM,
+        },
+        EvexDst::Rm => EvexRegisterFields {
+            dst: TYPED_RM,
+            src1: TYPED_NNN,
+        },
+        EvexDst::RmSourceRm => EvexRegisterFields {
+            dst: TYPED_RM,
+            src1: TYPED_RM,
+        },
+        EvexDst::Vvvv => EvexRegisterFields {
+            dst: TYPED_VVVV,
+            src1: TYPED_RM,
+        },
+    };
+    let flags = match form {
+        ModrmForm::Register => InstructionFlags::ModC0,
+        ModrmForm::Memory => InstructionFlags::empty(),
+    };
+    Instruction {
+        opcode,
+        length: 7,
+        flags,
+        operands: Operands {
+            dst: fields.dst,
+            src1: fields.src1,
+            src2: TYPED_VVVV,
+            src3: 0,
+            segment: crate::BxSegregs::Ds as u8,
+            base: TYPED_RM,
+            index: 4,
+            scale: 0,
+        },
+        immediate: 0,
+        displacement: 0x40,
+    }
+}
+
+/// One top-level field of a `TypedInstruction` variant: its name and the
+/// `Debug` text of its value.
+struct TypedField {
+    name: std::string::String,
+    value: std::string::String,
+}
+
+/// A `TypedInstruction` as its `Debug` text spells it.
+struct TypedShape {
+    text: std::string::String,
+    fields: Vec<TypedField>,
+}
+
+impl TypedShape {
+    /// Splits `Name { a: 1, b: MemoryOperand { .. } }` at its top-level
+    /// commas; a unit variant has no fields.
+    fn of(instr: &Instruction) -> Self {
+        let text = std::format!("{:?}", instr.typed());
+        let mut fields = Vec::new();
+        if let Some(open) = text.find(" { ") {
+            let inner = &text[open + 3..];
+            let body = inner.strip_suffix(" }").unwrap_or(inner);
+            let mut depth = 0i32;
+            let mut start = 0;
+            for (at, c) in body.char_indices() {
+                match c {
+                    '{' | '(' | '[' => depth += 1,
+                    '}' | ')' | ']' => depth -= 1,
+                    ',' if depth == 0 => {
+                        fields.push(TypedField::parse(&body[start..at]));
+                        start = at + 1;
+                    }
+                    _ => {}
+                }
+            }
+            fields.push(TypedField::parse(&body[start..]));
+        }
+        Self { text, fields }
+    }
+
+    fn field(&self, name: &str) -> Option<&TypedField> {
+        self.fields.iter().find(|field| field.name == name)
+    }
+
+    /// The names of the fields that hold a `MemoryOperand`.
+    fn memory_fields(&self) -> Vec<&str> {
+        self.fields
+            .iter()
+            .filter(|field| field.value.starts_with("MemoryOperand {"))
+            .map(|field| field.name.as_str())
+            .collect()
+    }
+
+    /// Whether field `name` holds the register index `register`.
+    fn holds(&self, name: &str, register: u8) -> bool {
+        self.field(name)
+            .is_some_and(|field| field.value == std::format!("{register}"))
+    }
+
+    /// How many fields are of `kind`.
+    fn count(&self, kind: TypedFieldKind) -> usize {
+        self.fields
+            .iter()
+            .filter(|field| field.kind() == kind)
+            .count()
+    }
+}
+
+/// What a `TypedInstruction` field of an EVEX variant names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TypedFieldKind {
+    /// A register or memory operand: `dst`, `src`, `src1`, `src2`, and `ctrl`
+    /// (a GPR named by EVEX.vvvv).
+    Operand,
+    /// An immediate: `imm`.
+    Immediate,
+}
+
+impl TypedField {
+    fn parse(piece: &str) -> Self {
+        let piece = piece.trim();
+        let colon = piece
+            .find(": ")
+            .unwrap_or_else(|| panic!("field {piece:?} has no `: `"));
+        Self {
+            name: piece[..colon].into(),
+            value: piece[colon + 2..].into(),
+        }
+    }
+
+    /// Every field name an EVEX variant uses; a new one stops the test until
+    /// it is classified here.
+    fn kind(&self) -> TypedFieldKind {
+        match self.name.as_str() {
+            "dst" | "src" | "src1" | "src2" | "ctrl" => TypedFieldKind::Operand,
+            "imm" => TypedFieldKind::Immediate,
+            other => panic!("EVEX variant field `{other}` is not classified in TypedField::kind"),
+        }
+    }
+}
+
+/// A rule of `evex_typed_view_matches_the_bochs_operand_lists` that a typed
+/// variant breaks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TypedRule {
+    /// (a) Operand fields that do not number the def entry's distinct
+    /// register and memory operands.
+    OperandFields,
+    /// (a) A `src1` field where the def entry lists fewer than three register
+    /// or memory operands.
+    PhantomSrc1,
+    /// (b) Immediate fields that do not number the def entry's immediates.
+    ImmediateFields,
+    /// (c) A store's memory variant whose only `MemoryOperand` is not `dst`.
+    StoreMemoryNotInDst,
+    /// (c) A load's memory variant that does not hold exactly one
+    /// `MemoryOperand`, in a source field.
+    LoadMemoryNotInSource,
+    /// (d) A store's register variant whose source is not ModRM.reg.
+    StoreSourceNotReg,
+    /// (e) A TILEMOV `Trm, Wdq` register variant that does not write and read
+    /// ModRM.rm.
+    TileOperandsNotRm,
+}
+
+/// One broken rule: the opcode, the form, the rule, what was counted where
+/// the rule counts, and the variant as typed.
+struct TypedDriftFinding {
+    opcode: Opcode,
+    form: ModrmForm,
+    rule: TypedRule,
+    detail: std::string::String,
+    typed: std::string::String,
+}
+
+/// An EVEX opcode excused from the named rules of the typed-view test, and
+/// why. It is held to every other rule.
+struct TypedViewException {
+    opcode: Opcode,
+    rules: &'static [TypedRule],
+    reason: &'static str,
+}
+
+const fn excepted(
+    opcode: Opcode,
+    rules: &'static [TypedRule],
+    reason: &'static str,
+) -> TypedViewException {
+    TypedViewException {
+        opcode,
+        rules,
+        reason,
+    }
+}
+
+const ALIASED_STORE: &str = "Bochs's first operand is OP_Mb/OP_Mw, an alias of OP_Eb/OP_Ew \
+     that gen_evex_operands.py's destination table does not follow, so `evex_dst` reads Nnn \
+     for this store (Task 4c)";
+
+/// Exceptions to `evex_typed_view_matches_the_bochs_operand_lists`. Each one
+/// excuses only the rules it names, and each named rule must still fire on
+/// its opcode, so an entry is removed with the defect it names.
+const TYPED_VIEW_EXCEPTIONS: &[TypedViewException] = &[
+    excepted(
+        Opcode::EvexVpextrbMbVdqIbM,
+        &[TypedRule::LoadMemoryNotInSource],
+        ALIASED_STORE,
+    ),
+    excepted(
+        Opcode::EvexVpextrwMwVdqIbM,
+        &[TypedRule::LoadMemoryNotInSource],
+        ALIASED_STORE,
+    ),
+];
+
+/// Every rule the typed view of `opcode` in `form` breaks.
+fn typed_view_drift(opcode: Opcode, form: ModrmForm) -> Vec<TypedDriftFinding> {
+    use crate::decoder::evex_operands::{
+        evex_dst, evex_immediate_count, evex_operand_count, EvexDst,
+    };
+
+    let shape = TypedShape::of(&evex_instruction(opcode, form));
+    let operands = evex_operand_count(opcode);
+    let immediates = evex_immediate_count(opcode);
+    let mut findings = Vec::new();
+    let mut broken = |rule: TypedRule, detail: std::string::String| {
+        findings.push(TypedDriftFinding {
+            opcode,
+            form,
+            rule,
+            detail,
+            typed: shape.text.clone(),
+        });
+    };
+
+    let typed_operands = shape.count(TypedFieldKind::Operand);
+    if typed_operands != usize::from(operands) {
+        broken(
+            TypedRule::OperandFields,
+            std::format!(" ({typed_operands} fields, {operands} in the def)"),
+        );
+    }
+    if shape.field("src1").is_some() && operands < 3 {
+        broken(TypedRule::PhantomSrc1, std::string::String::new());
+    }
+    let typed_immediates = shape.count(TypedFieldKind::Immediate);
+    if typed_immediates != usize::from(immediates) {
+        broken(
+            TypedRule::ImmediateFields,
+            std::format!(" ({typed_immediates} fields, {immediates} in the def)"),
+        );
+    }
+    match form {
+        ModrmForm::Memory => {
+            let memory = shape.memory_fields();
+            match evex_dst(opcode) {
+                EvexDst::Rm => {
+                    if memory != ["dst"] {
+                        broken(TypedRule::StoreMemoryNotInDst, std::string::String::new());
+                    }
+                }
+                EvexDst::Nnn | EvexDst::Vvvv | EvexDst::RmSourceRm => {
+                    let in_one_source = match memory.as_slice() {
+                        [field] => matches!(*field, "src" | "src1" | "src2"),
+                        _ => false,
+                    };
+                    if !in_one_source {
+                        broken(TypedRule::LoadMemoryNotInSource, std::string::String::new());
+                    }
+                }
+            }
+        }
+        ModrmForm::Register => match evex_dst(opcode) {
+            EvexDst::Rm => {
+                let source = if operands >= 3 { "src2" } else { "src" };
+                if !shape.holds(source, TYPED_NNN) {
+                    broken(TypedRule::StoreSourceNotReg, std::string::String::new());
+                }
+            }
+            EvexDst::RmSourceRm => {
+                if !(shape.holds("dst", TYPED_RM) && shape.holds("src", TYPED_RM)) {
+                    broken(TypedRule::TileOperandsNotRm, std::string::String::new());
+                }
+            }
+            EvexDst::Nnn | EvexDst::Vvvv => {}
+        },
+    }
+    findings
+}
+
+/// `Instruction::typed()` against Bochs's ia_opcodes_evex.def, for every
+/// EVEX opcode in each ModRM form its def entry executes in
+/// (`evex_forms`). A form whose handler is `NULL` or `BxError` is not judged:
+/// the decoder never produces it.
+///
+/// (a) a variant's operand fields (`TypedField::kind`: `dst`, `src`, `src1`,
+///     `src2`, and `ctrl`, a GPR named by vvvv) number exactly the entry's
+///     distinct register and memory operands (`evex_operand_count`), and a
+///     `src1` field appears only when there are three or more. Immediates do
+///     not count. Bochs fetchdecode32.cc `assign_srcs` rejects an encoding
+///     whose unused vvvv is not zero, so a two-operand entry has no second
+///     source to name.
+/// (b) a variant's `imm` fields number exactly the entry's immediates
+///     (`evex_immediate_count`).
+/// (c) a memory variant holds exactly one `MemoryOperand`: in `dst` when the
+///     entry is a store (`evex_dst` is `EvexDst::Rm`: its first operand is
+///     ModRM.rm and its source ModRM.reg), and otherwise in a source field
+///     (`src`, `src1` or `src2`), so a register-only shape on an entry with a
+///     memory form fails.
+/// (d) a store's register variant reads ModRM.reg: in `src`, or in `src2`
+///     when the entry lists three operands (`W, H, V`).
+/// (e) a TILEMOVROW/TILEMOVCOL `Trm, Wdq` register variant
+///     (`EvexDst::RmSourceRm`) writes and reads ModRM.rm.
+#[test]
+fn evex_typed_view_matches_the_bochs_operand_lists() {
+    use crate::decoder::evex_operands::{evex_forms, evex_operand_count, EvexForms};
+    use crate::opcode_isa::OPCODE_VARIANT_COUNT;
+    use crate::typed::OpcodeCategory;
+
+    let mut findings = Vec::new();
+    let mut judged = 0usize;
+    for index in 0..OPCODE_VARIANT_COUNT {
+        let opcode = Opcode::from_u16_const(index as u16);
+        if opcode.category() != OpcodeCategory::Evex {
+            continue;
+        }
+        assert_ne!(
+            evex_operand_count(opcode),
+            0,
+            "{opcode:?} has no EVEX def entry"
+        );
+        let forms: &[ModrmForm] = match evex_forms(opcode) {
+            EvexForms::RegisterAndMemory => &[ModrmForm::Register, ModrmForm::Memory],
+            EvexForms::Register => &[ModrmForm::Register],
+            EvexForms::Memory => &[ModrmForm::Memory],
+        };
+        for &form in forms {
+            findings.extend(typed_view_drift(opcode, form));
+        }
+        judged += 1;
+    }
+    assert!(judged > 1000, "only {judged} EVEX opcodes judged");
+
+    let excused = |finding: &TypedDriftFinding| {
+        TYPED_VIEW_EXCEPTIONS.iter().any(|exception| {
+            exception.opcode == finding.opcode && exception.rules.contains(&finding.rule)
+        })
+    };
+    let drifted: Vec<&TypedDriftFinding> = findings
+        .iter()
+        .filter(|finding| !excused(finding))
+        .collect();
+
+    let mut report = std::format!("{} typed-view findings:\n", drifted.len());
+    for finding in &drifted {
+        report.push_str(&std::format!(
+            "  {:?} {:?} {:?}{}: {}\n",
+            finding.opcode,
+            finding.form,
+            finding.rule,
+            finding.detail,
+            finding.typed
+        ));
+    }
+    let mut stale = 0usize;
+    for (index, exception) in TYPED_VIEW_EXCEPTIONS.iter().enumerate() {
+        if exception.rules.is_empty() {
+            stale += 1;
+            report.push_str(&std::format!(
+                "  exception {:?} names no rule, so it excuses nothing ({}); remove it\n",
+                exception.opcode, exception.reason
+            ));
+        }
+        for (rule_index, rule) in exception.rules.iter().enumerate() {
+            let named_again = exception.rules[..rule_index].contains(rule)
+                || TYPED_VIEW_EXCEPTIONS[..index].iter().any(|earlier| {
+                    earlier.opcode == exception.opcode && earlier.rules.contains(rule)
+                });
+            if named_again {
+                stale += 1;
+                report.push_str(&std::format!(
+                    "  exception {:?} names {:?} a second time ({}); remove the duplicate\n",
+                    exception.opcode, rule, exception.reason
+                ));
+            }
+        }
+        for rule in exception.rules {
+            let fires = findings
+                .iter()
+                .any(|finding| finding.opcode == exception.opcode && finding.rule == *rule);
+            if !fires {
+                stale += 1;
+                report.push_str(&std::format!(
+                    "  exception {:?} names {:?}, which it no longer breaks ({}); remove it\n",
+                    exception.opcode,
+                    rule,
+                    exception.reason
+                ));
+            }
+        }
+    }
+    assert!(drifted.is_empty() && stale == 0, "{report}");
+}
+
+/// The EVEX features Bochs's Skylake-X model enables (cpudb/intel/
+/// corei7_skylake-x.cc `enable_cpu_extension`): AVX512F, AVX512DQ, AVX512CD
+/// and AVX512BW. The decoder itself takes no feature mask; an opcode's gate
+/// is `opcode_isa_feature`.
+const SKYLAKE_X_EVEX_FEATURES: [crate::features::X86Feature; 4] = [
+    crate::features::X86Feature::IsaAvx512,
+    crate::features::X86Feature::IsaAvx512Dq,
+    crate::features::X86Feature::IsaAvx512Cd,
+    crate::features::X86Feature::IsaAvx512Bw,
+];
+
+/// ModRM.reg, ModRM.rm and EVEX.vvvv in the encodings of
+/// `evex_typed_view_reads_each_operand_from_its_field`. All three are below
+/// 8, so each encoding is valid in 32-bit protected mode too.
+const ENC_REG: u8 = 1;
+const ENC_RM: u8 = 2;
+const ENC_VVVV: u8 = 3;
+/// The immediate those encodings carry.
+const ENC_IMM: u8 = 0x2A;
+
+/// `bytes` decoded in 64-bit mode and in 32-bit protected mode, each required
+/// to be all of `expected`, an opcode Skylake-X executes, then typed.
+fn decode_evex(bytes: &[u8], expected: Opcode) -> [crate::typed::TypedInstruction; 2] {
+    use crate::opcode_isa::opcode_isa_feature;
+
+    assert!(
+        SKYLAKE_X_EVEX_FEATURES
+            .iter()
+            .any(|feature| *feature as u16 == opcode_isa_feature(expected)),
+        "{expected:?} is gated on a feature Skylake-X does not enable"
+    );
+    [fetch_decode64(bytes), fetch_decode32(bytes, true)].map(|decoded| {
+        let instr = decoded.unwrap_or_else(|error| panic!("{bytes:02X?}: {error:?}"));
+        assert_eq!(instr.get_ia_opcode(), expected, "{bytes:02X?}");
+        assert_eq!(usize::from(instr.length), bytes.len(), "{bytes:02X?}");
+        instr.typed()
+    })
+}
+
+/// `operand` is `[esi/rsi + displacement]`, the scaled disp8 of the encodings.
+fn assert_rsi_plus(operand: crate::typed::MemoryOperand, displacement: i32) {
+    use crate::instruction::GprIndex;
+    assert_eq!(operand.base, GprIndex::Rsi, "{operand:?}");
+    assert_eq!(operand.index, GprIndex::Rsp, "no index: {operand:?}");
+    assert_eq!(operand.displacement, displacement, "{operand:?}");
+}
+
+/// The typed view reads each operand from the field the decoder put it in,
+/// on real encodings decoded in 64-bit and 32-bit mode: one per macro shape,
+/// each with the operands Bochs ia_opcodes_evex.def lists. The encodings use
+/// reg = 1, rm = 2, vvvv = 3 and imm 0x2A; a memory form is `[rsi + 1*N]`,
+/// disp8 1 scaled by the opcode's tuple size N.
+///
+/// The GPR-from-vvvv shape (`ctrl`, Bochs `OP_Bd`) exists only on the AMX
+/// row ops, which Bochs's EVEX opcode map emits under `#if BX_SUPPORT_AMX`
+/// and this port's decode tables do not emit at all, so that one is typed
+/// from a hand-built instruction (`evex_instruction`).
+#[test]
+fn evex_typed_view_reads_each_operand_from_its_field() {
+    use crate::instruction::GprIndex;
+    use crate::typed::TypedInstruction as T;
+
+    // simd!: VMOVDQU32 zmm1{k1}, zmm2/m512 (EVEX.512.F3.0F.W0 6F).
+    for typed in decode_evex(
+        &[0x62, 0xF1, 0x7E, 0x49, 0x6F, 0xCA],
+        Opcode::EvexVmovdqu32VdqWdqKmask,
+    ) {
+        match typed {
+            T::EvexVmovdqu32VdqWdqKmaskR { dst, src } => {
+                assert_eq!(dst, ENC_REG, "the destination is reg");
+                assert_eq!(src, ENC_RM, "the source is rm");
+            }
+            other => panic!("VMOVDQU32 load typed as {other:?}"),
+        }
+    }
+    for typed in decode_evex(
+        &[0x62, 0xF1, 0x7E, 0x49, 0x6F, 0x4E, 0x01],
+        Opcode::EvexVmovdqu32VdqWdqKmask,
+    ) {
+        match typed {
+            T::EvexVmovdqu32VdqWdqKmaskM { dst, src } => {
+                assert_eq!(dst, ENC_REG, "the destination is reg");
+                assert_rsi_plus(src, 64);
+            }
+            other => panic!("VMOVDQU32 load from memory typed as {other:?}"),
+        }
+    }
+    // simd_st!: VMOVDQU32 zmm2/m512{k1}, zmm1 (EVEX.512.F3.0F.W0 7F).
+    for typed in decode_evex(
+        &[0x62, 0xF1, 0x7E, 0x49, 0x7F, 0xCA],
+        Opcode::EvexVmovdqu32WdqVdqKmask,
+    ) {
+        match typed {
+            T::EvexVmovdqu32WdqVdqKmaskR { dst, src } => {
+                assert_eq!(dst, ENC_RM, "the destination is rm");
+                assert_eq!(src, ENC_REG, "the source is reg");
+            }
+            other => panic!("VMOVDQU32 store typed as {other:?}"),
+        }
+    }
+    for typed in decode_evex(
+        &[0x62, 0xF1, 0x7E, 0x49, 0x7F, 0x4E, 0x01],
+        Opcode::EvexVmovdqu32WdqVdqKmask,
+    ) {
+        match typed {
+            T::EvexVmovdqu32WdqVdqKmaskM { dst, src } => {
+                assert_rsi_plus(dst, 64);
+                assert_eq!(src, ENC_REG, "the source is reg");
+            }
+            other => panic!("VMOVDQU32 store to memory typed as {other:?}"),
+        }
+    }
+    // simd_dst_gpr!: VPBROADCASTD zmm1{k1}, edx (EVEX.512.66.0F38.W0 7C).
+    for typed in decode_evex(
+        &[0x62, 0xF2, 0x7D, 0x49, 0x7C, 0xCA],
+        Opcode::EvexVpbroadcastdVdqEdKmask,
+    ) {
+        match typed {
+            T::EvexVpbroadcastdVdqEdKmaskR { dst, src } => {
+                assert_eq!(dst, ENC_REG, "the destination is reg");
+                assert_eq!(src, GprIndex::Rdx, "the GPR is rm");
+            }
+            other => panic!("VPBROADCASTD from a GPR typed as {other:?}"),
+        }
+    }
+    // simd_ib!: VPSHUFD zmm1{k1}, zmm2/m512, imm8 (EVEX.512.66.0F.W0 70).
+    for typed in decode_evex(
+        &[0x62, 0xF1, 0x7D, 0x49, 0x70, 0xCA, ENC_IMM],
+        Opcode::EvexVpshufdVdqWdqIbKmask,
+    ) {
+        match typed {
+            T::EvexVpshufdVdqWdqIbKmaskR { dst, src, imm } => {
+                assert_eq!(dst, ENC_REG, "the destination is reg");
+                assert_eq!(src, ENC_RM, "the source is rm");
+                assert_eq!(imm, ENC_IMM);
+            }
+            other => panic!("VPSHUFD typed as {other:?}"),
+        }
+    }
+    for typed in decode_evex(
+        &[0x62, 0xF1, 0x7D, 0x49, 0x70, 0x4E, 0x01, ENC_IMM],
+        Opcode::EvexVpshufdVdqWdqIbKmask,
+    ) {
+        match typed {
+            T::EvexVpshufdVdqWdqIbKmaskM { dst, src, imm } => {
+                assert_eq!(dst, ENC_REG, "the destination is reg");
+                assert_rsi_plus(src, 64);
+                assert_eq!(imm, ENC_IMM);
+            }
+            other => panic!("VPSHUFD from memory typed as {other:?}"),
+        }
+    }
+    // Shift by immediate: VPSRLD zmm3, zmm2/m512, imm8 (EVEX.512.66.0F.W0
+    // 72 /2), whose destination is vvvv (Bochs `OP_Hdq`).
+    for typed in decode_evex(
+        &[0x62, 0xF1, 0x65, 0x48, 0x72, 0xD2, ENC_IMM],
+        Opcode::EvexVpsrldUdqIb,
+    ) {
+        match typed {
+            T::EvexVpsrldUdqIbR { dst, src, imm } => {
+                assert_eq!(dst, ENC_VVVV, "the destination is vvvv");
+                assert_eq!(src, ENC_RM, "the source is rm");
+                assert_eq!(imm, ENC_IMM);
+            }
+            other => panic!("VPSRLD by immediate typed as {other:?}"),
+        }
+    }
+    for typed in decode_evex(
+        &[0x62, 0xF1, 0x65, 0x48, 0x72, 0x56, 0x01, ENC_IMM],
+        Opcode::EvexVpsrldUdqIb,
+    ) {
+        match typed {
+            T::EvexVpsrldUdqIbM { dst, src, imm } => {
+                assert_eq!(dst, ENC_VVVV, "the destination is vvvv");
+                assert_rsi_plus(src, 64);
+                assert_eq!(imm, ENC_IMM);
+            }
+            other => panic!("VPSRLD by immediate from memory typed as {other:?}"),
+        }
+    }
+    for typed in decode_evex(
+        &[0x62, 0xF1, 0x65, 0x49, 0x72, 0xD2, ENC_IMM],
+        Opcode::EvexVpsrldUdqIbKmask,
+    ) {
+        match typed {
+            T::EvexVpsrldUdqIbKmaskR { dst, src, imm } => {
+                assert_eq!(dst, ENC_VVVV, "the destination is vvvv");
+                assert_eq!(src, ENC_RM, "the source is rm");
+                assert_eq!(imm, ENC_IMM);
+            }
+            other => panic!("masked VPSRLD by immediate typed as {other:?}"),
+        }
+    }
+    // simd_st_ib!: VEXTRACTF32X4 xmm2/m128{k1}, zmm1, imm8
+    // (EVEX.512.66.0F3A.W0 19); N is 16.
+    for typed in decode_evex(
+        &[0x62, 0xF3, 0x7D, 0x49, 0x19, 0xCA, 0x01],
+        Opcode::EvexVextractf32x4WpsVpsIbKmask,
+    ) {
+        match typed {
+            T::EvexVextractf32x4WpsVpsIbKmaskR { dst, src, imm } => {
+                assert_eq!(dst, ENC_RM, "the destination is rm");
+                assert_eq!(src, ENC_REG, "the source is reg");
+                assert_eq!(imm, 1);
+            }
+            other => panic!("VEXTRACTF32X4 typed as {other:?}"),
+        }
+    }
+    for typed in decode_evex(
+        &[0x62, 0xF3, 0x7D, 0x49, 0x19, 0x4E, 0x01, 0x01],
+        Opcode::EvexVextractf32x4WpsVpsIbKmask,
+    ) {
+        match typed {
+            T::EvexVextractf32x4WpsVpsIbKmaskM { dst, src, imm } => {
+                assert_rsi_plus(dst, 16);
+                assert_eq!(src, ENC_REG, "the source is reg");
+                assert_eq!(imm, 1);
+            }
+            other => panic!("VEXTRACTF32X4 to memory typed as {other:?}"),
+        }
+    }
+    for typed in decode_evex(
+        &[0x62, 0xF3, 0x7D, 0x48, 0x19, 0x4E, 0x01, 0x01],
+        Opcode::EvexVextractf32x4WpsVpsIb,
+    ) {
+        match typed {
+            T::EvexVextractf32x4WpsVpsIbM { dst, src, imm } => {
+                assert_rsi_plus(dst, 16);
+                assert_eq!(src, ENC_REG, "the source is reg");
+                assert_eq!(imm, 1);
+            }
+            other => panic!("unmasked VEXTRACTF32X4 to memory typed as {other:?}"),
+        }
+    }
+    // simd3_ib!: VCMPPS k1, zmm3, zmm2/m512, imm8 (EVEX.512.0F.W0 C2).
+    for typed in decode_evex(
+        &[0x62, 0xF1, 0x64, 0x48, 0xC2, 0xCA, ENC_IMM],
+        Opcode::EvexVcmppsKgwHpsWpsIb,
+    ) {
+        match typed {
+            T::EvexVcmppsKgwHpsWpsIbR {
+                dst,
+                src1,
+                src2,
+                imm,
+            } => {
+                assert_eq!(dst, ENC_REG, "the k register is reg");
+                assert_eq!(src1, ENC_VVVV, "the first source is vvvv");
+                assert_eq!(src2, ENC_RM, "the second source is rm");
+                assert_eq!(imm, ENC_IMM);
+            }
+            other => panic!("VCMPPS typed as {other:?}"),
+        }
+    }
+    for typed in decode_evex(
+        &[0x62, 0xF1, 0x64, 0x48, 0xC2, 0x4E, 0x01, ENC_IMM],
+        Opcode::EvexVcmppsKgwHpsWpsIb,
+    ) {
+        match typed {
+            T::EvexVcmppsKgwHpsWpsIbM {
+                dst,
+                src1,
+                src2,
+                imm,
+            } => {
+                assert_eq!(dst, ENC_REG, "the k register is reg");
+                assert_eq!(src1, ENC_VVVV, "the first source is vvvv");
+                assert_rsi_plus(src2, 64);
+                assert_eq!(imm, ENC_IMM);
+            }
+            other => panic!("VCMPPS with memory typed as {other:?}"),
+        }
+    }
+    // simd3_ib! on a masked form: VPTERNLOGD zmm1{k1}, zmm3, zmm2/m512, imm8
+    // (EVEX.512.66.0F3A.W0 25).
+    for typed in decode_evex(
+        &[0x62, 0xF3, 0x65, 0x49, 0x25, 0xCA, ENC_IMM],
+        Opcode::EvexVpternlogdVdqHdqWdqIbKmask,
+    ) {
+        match typed {
+            T::EvexVpternlogdVdqHdqWdqIbKmaskR {
+                dst,
+                src1,
+                src2,
+                imm,
+            } => {
+                assert_eq!(dst, ENC_REG, "the destination is reg");
+                assert_eq!(src1, ENC_VVVV, "the first source is vvvv");
+                assert_eq!(src2, ENC_RM, "the second source is rm");
+                assert_eq!(imm, ENC_IMM);
+            }
+            other => panic!("VPTERNLOGD typed as {other:?}"),
+        }
+    }
+    // simd3!: VCVTSS2SD xmm1, xmm3, xmm2/m32 (EVEX.LIG.F3.0F.W0 5A); N is 4.
+    for typed in decode_evex(
+        &[0x62, 0xF1, 0x66, 0x08, 0x5A, 0x4E, 0x01],
+        Opcode::EvexVcvtss2sdVsdWss,
+    ) {
+        match typed {
+            T::EvexVcvtss2sdVsdWssM { dst, src1, src2 } => {
+                assert_eq!(dst, ENC_REG, "the destination is reg");
+                assert_eq!(src1, ENC_VVVV, "the merged vector is vvvv");
+                assert_rsi_plus(src2, 4);
+            }
+            other => panic!("VCVTSS2SD typed as {other:?}"),
+        }
+    }
+    // simd3_gpr!: VCVTSI2SS xmm1, xmm3, edx (EVEX.LIG.F3.0F.W0 2A).
+    for typed in decode_evex(
+        &[0x62, 0xF1, 0x66, 0x08, 0x2A, 0xCA],
+        Opcode::EvexVcvtsi2ssVssEd,
+    ) {
+        match typed {
+            T::EvexVcvtsi2ssVssEdR { dst, src1, src2 } => {
+                assert_eq!(dst, ENC_REG, "the destination is reg");
+                assert_eq!(src1, ENC_VVVV, "the merged vector is vvvv");
+                assert_eq!(src2, GprIndex::Rdx, "the GPR is rm");
+            }
+            other => panic!("VCVTSI2SS typed as {other:?}"),
+        }
+    }
+    // simd3_gpr_ib!: VPINSRD xmm1, xmm3, edx, imm8 (EVEX.128.66.0F3A.W0 22).
+    for typed in decode_evex(
+        &[0x62, 0xF3, 0x65, 0x08, 0x22, 0xCA, ENC_IMM],
+        Opcode::EvexVpinsrdVdqEdIb,
+    ) {
+        match typed {
+            T::EvexVpinsrdVdqEdIbR {
+                dst,
+                src1,
+                src2,
+                imm,
+            } => {
+                assert_eq!(dst, ENC_REG, "the destination is reg");
+                assert_eq!(src1, ENC_VVVV, "the merged vector is vvvv");
+                assert_eq!(src2, GprIndex::Rdx, "the GPR is rm");
+                assert_eq!(imm, ENC_IMM);
+            }
+            other => panic!("VPINSRD typed as {other:?}"),
+        }
+    }
+    // VPEXTRW ecx, xmm2, imm8 (EVEX.128.66.0F.WIG C5): the GPR is reg.
+    for typed in decode_evex(
+        &[0x62, 0xF1, 0x7D, 0x08, 0xC5, 0xCA, ENC_IMM],
+        Opcode::EvexVpextrwGdUdqIb,
+    ) {
+        match typed {
+            T::EvexVpextrwGdUdqIb { dst, src, imm } => {
+                assert_eq!(dst, GprIndex::Rcx, "the GPR is reg");
+                assert_eq!(src, ENC_RM, "the vector is rm");
+                assert_eq!(imm, ENC_IMM);
+            }
+            other => panic!("VPEXTRW to a GPR typed as {other:?}"),
+        }
+    }
+    // simd_ctrl_gpr!, hand-built (see above): TILEMOVROW Vdq, Trm, Bd with
+    // reg = 5, rm = 6, vvvv = 7; the row GPR is vvvv.
+    match evex_instruction(Opcode::EvexTilemovrowVdqTrmBd, ModrmForm::Register).typed() {
+        T::EvexTilemovrowVdqTrmBdR { dst, src, ctrl } => {
+            assert_eq!(dst, TYPED_NNN, "the vector is reg");
+            assert_eq!(src, TYPED_RM, "the tile is rm");
+            assert_eq!(ctrl, GprIndex::Rdi, "the row GPR is vvvv");
+        }
+        other => panic!("TILEMOVROW Vdq, Trm, Bd typed as {other:?}"),
+    }
 }

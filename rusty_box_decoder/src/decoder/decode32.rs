@@ -973,8 +973,8 @@ pub const fn fetch_decode32_inplace(
         // EVEX opcodes write the reg field, the store forms (VEXTRACT*, the
         // truncating VPMOV* stores, VCOMPRESS*, VPEXTR*, VSCATTER*) write rm,
         // and the shift/rotate groups write vvvv. Upstream takes it from the
-        // first operand in ia_opcodes_evex.def and the generated table carries
-        // the same information.
+        // first operand in ia_opcodes_evex.def, and the ModRM source from the
+        // first later ModRM operand; the generated table carries both.
         match super::evex_operands::evex_dst(instr.opcode) {
             super::evex_operands::EvexDst::Nnn => {
                 instr.operands.dst = nnn as u8;
@@ -983,6 +983,10 @@ pub const fn fetch_decode32_inplace(
             super::evex_operands::EvexDst::Rm => {
                 instr.operands.dst = rm as u8;
                 instr.operands.src1 = nnn as u8;
+            }
+            super::evex_operands::EvexDst::RmSourceRm => {
+                instr.operands.dst = rm as u8;
+                instr.operands.src1 = rm as u8;
             }
             super::evex_operands::EvexDst::Vvvv => {
                 instr.operands.dst = vex_vvv;
@@ -2124,9 +2128,7 @@ mod tests {
     }
 
     /// KMOVQ k -> m64 carries no ATTR_IS64 in Bochs `BxOpcodeGroup_VEX_0F91`,
-    /// so it is reachable from 32-bit code and must store a full qword. This is
-    /// the encoding that made the store-width fix untestable while decode32
-    /// rejected every VEX prefix.
+    /// so it is reachable from 32-bit code and must store a full qword.
     #[test]
     fn vex32_kmovq_stores_to_memory() {
         // KMOVQ [eax], k1 = C4 E1 F8 91 08

@@ -16,8 +16,12 @@ Run from the repo root:
     python scripts/gen_opcode_isa.py
 
 It rewrites the generated file in place and prints a summary. Re-run it after
-syncing `cpp_orig/bochs/` or after adding `Opcode` / `X86Feature` variants; the
-`opcode_isa_table_matches_bochs` test fails if the file drifts out of date.
+syncing `cpp_orig/bochs/` or after adding `Opcode` / `X86Feature` variants. In
+`rusty_box_decoder/src/tests.rs`, `opcode_isa_table_is_in_sync_with_the_opcode_enum`
+fails when the file no longer covers the enum (`OPCODE_VARIANT_COUNT`), and
+`opcode_isa_counts_are_pinned_to_the_reference_build` fails when a
+regeneration moves `GATED_OPCODE_COUNT`, `EVEX_FLAGGED_OPCODE_COUNT`,
+`STATE_AVX_OPCODE_COUNT` or `STATE_EVEX_OPCODE_COUNT`.
 """
 
 import re
@@ -69,6 +73,55 @@ BOCHS_SPELLING = {
 # than a silently ungated instruction.
 STATE_OVERRIDES = {}
 
+FETCHDECODE_H = "cpp_orig/bochs/bochs/cpu/decoder/fetchdecode.h"
+
+# BX_PREPARE_* bits a def may carry that this generator deliberately takes no
+# meaning from, each named by the fetchdecode.h token that introduces it. Its
+# value is read from fetchdecode.h like every other token's; only the bit it
+# adds on top of the tokens it is built from is exempt.
+#
+# BX_PREPARE_SCALEDATA is `(0x800 | BX_PREPARE_AMX)` in fetchdecode.h. Its AMX
+# bit classifies the opcode like any BX_PREPARE_AMX neighbour. The 0x800 bit
+# feeds only `assignHandler`'s BX_FETCH_MODE_SCALEDATA_OK test
+# (fetchdecode32.cc), which sits inside `#if BX_SUPPORT_AMX`; the reference
+# build compiles it out, and rusty_box models no scale-data state.
+PREPARE_BITS_IGNORED = {
+    "BX_PREPARE_SCALEDATA": "BX_PREPARE_AMX",
+}
+
+
+def prepare_values(header):
+    """Every `#define BX_PREPARE_<X> (<expr>)` in fetchdecode.h, evaluated.
+
+    Each expression ORs hex literals and other BX_PREPARE_* names, so the
+    names resolve recursively. An expression with any other term stops the
+    run: a value guessed here would classify opcodes wrongly without a trace.
+    """
+    raw = dict(re.findall(r"^#define\s+(BX_PREPARE_\w+)\s+\((.*?)\)\s*$", header, re.M))
+    if not raw:
+        sys.exit(f"no BX_PREPARE_* defines found in {FETCHDECODE_H}")
+    values = {}
+
+    def value(name, chain):
+        if name in values:
+            return values[name]
+        if name in chain:
+            sys.exit(f"{FETCHDECODE_H}: {name} is defined in terms of itself")
+        total = 0
+        for term in (t.strip() for t in raw[name].split("|")):
+            if re.fullmatch(r"0[xX][0-9A-Fa-f]+|[0-9]+", term):
+                total |= int(term, 0)
+            elif term in raw:
+                total |= value(term, chain + (name,))
+            else:
+                sys.exit(f"{FETCHDECODE_H}: cannot evaluate {name}: unknown term {term!r}")
+        values[name] = total
+        return total
+
+    for name in raw:
+        value(name, ())
+    return values
+
 
 def split_top(s):
     """Split on commas that are not nested inside parens or angle brackets."""
@@ -116,6 +169,33 @@ def main():
     evex_flags = {}
     # Bochs opcode name -> which CPU state must be enabled to execute it
     prepare_class = {}
+
+    # Field 10's BX_PREPARE_* tokens are decoded by value, as the C++ compiler
+    # decodes them, so a token defined in terms of another (OPMASK is EVEX,
+    # SCALEDATA carries AMX) lands in the class its bits say.
+    prepare = prepare_values(read(FETCHDECODE_H))
+    for token in ("BX_PREPARE_FPU", "BX_PREPARE_MMX", "BX_PREPARE_SSE", "BX_PREPARE_AVX",
+                  "BX_PREPARE_EVEX", "BX_PREPARE_EVEX_NO_SAE",
+                  "BX_PREPARE_EVEX_NO_BROADCAST", "BX_PREPARE_AMX"):
+        if token not in prepare:
+            sys.exit(f"{FETCHDECODE_H} no longer defines {token}")
+    bit_amx = prepare["BX_PREPARE_AMX"]
+    bit_evex = prepare["BX_PREPARE_EVEX"]
+    bit_avx = prepare["BX_PREPARE_AVX"]
+    bit_sse = prepare["BX_PREPARE_SSE"]
+    bit_mmx = prepare["BX_PREPARE_MMX"]
+    bit_fpu = prepare["BX_PREPARE_FPU"]
+    # The EVEX encoding-restriction bits, as the Rust table stores them
+    # (PREPARE_EVEX / PREPARE_EVEX_NO_SAE / PREPARE_EVEX_NO_BROADCAST).
+    evex_restrictions = (
+        prepare["BX_PREPARE_EVEX_NO_SAE"] | prepare["BX_PREPARE_EVEX_NO_BROADCAST"]
+    )
+    understood = bit_amx | bit_evex | bit_avx | bit_sse | bit_mmx | bit_fpu | evex_restrictions
+    for token, base in PREPARE_BITS_IGNORED.items():
+        if token not in prepare or base not in prepare:
+            sys.exit(f"PREPARE_BITS_IGNORED names {token} / {base}, which {FETCHDECODE_H} lacks")
+        understood |= prepare[token] & ~prepare[base]
+
     for name in ("ia_opcodes.def", "ia_opcodes_evex.def"):
         text = read("cpp_orig/bochs/bochs/cpu/decoder/" + name)
         # Drop trailing line comments first. The entry regex anchors on the
@@ -130,37 +210,44 @@ def main():
             if len(fields) < 6:
                 continue
             bochs[bochs_key(fields[0])] = fields[5].split("/*")[0].strip()
-            # Field 10 carries the BX_PREPARE_* attributes. Only the EVEX
-            # encoding-restriction bits matter here; the rest are decode hints
-            # rusty_box does not model.
+            # Field 10 carries the BX_PREPARE_* attributes, ORed with flags of
+            # other families (BX_LOCKABLE, BX_TRACE_END, ...) this table does
+            # not record. Every BX_PREPARE_* token must be one fetchdecode.h
+            # defines, and every bit it sets must be one this generator either
+            # uses or lists in PREPARE_BITS_IGNORED; anything else stops the
+            # run rather than quietly classifying the opcode as Base.
             attrs = fields[10] if len(fields) > 10 else ""
-            flags = 0
-            if "BX_PREPARE_EVEX_NO_BROADCAST" in attrs:
-                flags |= 0x280
-            if "BX_PREPARE_EVEX_NO_SAE" in attrs:
-                flags |= 0x180
-            if "BX_PREPARE_EVEX" in attrs:
-                flags |= 0x080
-            evex_flags[bochs_key(fields[0])] = flags
+            attr_value = 0
+            for token in re.findall(r"\bBX_PREPARE_\w+\b", attrs):
+                if token not in prepare:
+                    sys.exit(f"{fields[0]}: {token} is not defined in {FETCHDECODE_H}")
+                attr_value |= prepare[token]
+            if attr_value & ~understood:
+                sys.exit(
+                    f"{fields[0]}: BX_PREPARE_* bits {attr_value & ~understood:#x} carry a "
+                    f"meaning this generator does not know; classify them or add the "
+                    f"token to PREPARE_BITS_IGNORED"
+                )
+
+            # The EVEX encoding-restriction bits, kept as Bochs's values.
+            evex_flags[bochs_key(fields[0])] = attr_value & evex_restrictions
 
             # The same field also names the CPU state the instruction needs
             # enabled. Bochs turns this into a BxNo* handler substitution in
             # `assignHandler`; rusty_box applies it at icache fill. The classes
             # are mutually exclusive except AMX, which some opcodes carry
             # alongside EVEX — AMX is the stricter of the two, so it wins.
-            # BX_PREPARE_OPMASK is #defined to BX_PREPARE_EVEX, so the two are
-            # the same class and the EVEX test below catches both.
-            if "BX_PREPARE_AMX" in attrs:
+            if attr_value & bit_amx:
                 cls = STATE_AMX
-            elif "BX_PREPARE_EVEX" in attrs or "BX_PREPARE_OPMASK" in attrs:
+            elif attr_value & bit_evex:
                 cls = STATE_EVEX
-            elif "BX_PREPARE_AVX" in attrs:
+            elif attr_value & bit_avx:
                 cls = STATE_AVX
-            elif "BX_PREPARE_SSE" in attrs:
+            elif attr_value & bit_sse:
                 cls = STATE_SSE
-            elif "BX_PREPARE_MMX" in attrs:
+            elif attr_value & bit_mmx:
                 cls = STATE_MMX
-            elif "BX_PREPARE_FPU" in attrs:
+            elif attr_value & bit_fpu:
                 cls = STATE_FPU
             else:
                 cls = STATE_NONE

@@ -10,7 +10,8 @@
 //! `x86_64-unknown-none`, and for `wasm32-unknown-unknown` with alloc; the UEFI
 //! application build; the public-API, doc-example and doctrine compile-fail
 //! tests; checks of the GUI for wasm and for the host (its tests compiled, not
-//! run); an all-features check; and a debug-assertions check. `--full` then
+//! run), and with its `guest-trace` feature, whose tracer tests run; an
+//! all-features check; and a debug-assertions check. `--full` then
 //! adds the whole rusty_box test suite and the GUI release build, and the DLX
 //! Linux headless boot gate runs last unless `--skip-boot` is given.
 //!
@@ -902,6 +903,44 @@ const MATRIX: &[Step] = &[
         args: &["check", "--release", "-p", "rusty_box_gui", "--all-targets"],
         envs: &[],
         stdout_marker: None,
+    },
+    Step {
+        // `guest_trace.rs`, and the runner path that installs its tracer, are
+        // compiled only with the `guest-trace` feature, which no other step
+        // turns on. This compiles the feature's lib, binary and tests.
+        name: "GUI guest-trace check, tests included",
+        args: &[
+            "check",
+            "--release",
+            "-p",
+            "rusty_box_gui",
+            "--features",
+            "guest-trace",
+            "--all-targets",
+        ],
+        envs: &[],
+        stdout_marker: None,
+    },
+    Step {
+        // The tracer's own tests: the flight-recorder dump names the opcodes it
+        // recorded, and the default tracer records nothing. The marker is one
+        // of them passing, so a filter that stops matching fails the step
+        // rather than running nothing.
+        name: "GUI guest-trace tests",
+        args: &[
+            "test",
+            "--release",
+            "-p",
+            "rusty_box_gui",
+            "--features",
+            "guest-trace",
+            "--lib",
+            "guest_trace",
+        ],
+        envs: &[],
+        stdout_marker: Some(
+            "test guest_trace::tests::flight_dump_names_the_opcodes_it_recorded ... ok",
+        ),
     },
     Step {
         name: "all-features check",

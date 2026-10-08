@@ -1,11 +1,12 @@
 //! End-to-end execution of VEX- and EVEX-encoded instructions outside 64-bit
 //! mode.
 //!
-//! `decode32` used to reject every VEX prefix and treat `0x62` as BOUND, so a
-//! guest running 32-bit code — a plain 32-bit OS, or a 32-bit process in
+//! A guest running 32-bit code — a plain 32-bit OS, or a 32-bit process in
 //! compatibility mode under a 64-bit kernel, which `icache.rs` routes to
-//! `decode32` on `CS.L == 0` — took a #UD on the AVX and AVX-512 instructions
-//! CPUID had told it were available. These tests run the real instructions on a
+//! `decode32` on `CS.L == 0` — executes the AVX and AVX-512 instructions CPUID
+//! advertises: `decode32` recognises the VEX (`C4`/`C5`) and EVEX (`62`)
+//! prefixes when the following byte encodes a register operand, and decodes
+//! `LES`/`LDS`/`BOUND` otherwise. These tests run the real instructions on a
 //! protected-mode CPU.
 
 #![cfg(feature = "std")]
@@ -171,9 +172,8 @@ fn evex_avx512_executes_in_protected_mode() {
 /// `read_virtual_qword` / `write_virtual_qword` unconditionally: an opmask is 64
 /// bits wide regardless of the CPU's operand size, and VEX.W1 selects the opmask
 /// width here rather than the operand size. `BxOpcodeGroup_VEX_0F90` and `_0F91`
-/// carry no `ATTR_IS64`, so both forms are reachable from 32-bit code — which is
-/// what makes this the one place the store width is observable, and why it went
-/// untested while decode32 rejected every VEX prefix.
+/// carry no `ATTR_IS64`, so both forms are reachable from 32-bit code, which is
+/// what makes this the one place the store width is observable.
 #[test]
 fn kmovq_moves_a_full_qword_in_protected_mode() {
     std::thread::Builder::new()
@@ -204,6 +204,95 @@ fn kmovq_moves_a_full_qword_in_protected_mode() {
                 "KMOVQ must move all 64 bits outside 64-bit mode; a dword-wide \
                  access truncates k[63:32] and leaves the upper four bytes of \
                  the destination stale"
+            );
+        })
+        .expect("spawn")
+        .join()
+        .expect("join");
+}
+
+/// Bochs fetchdecode_opmap_avx.cc `BxOpcodeGroup_VEX_0F2A`: the 64-bit
+/// `VCVTSI2SS_VssEq` row is `ATTR_VEX_W1 | ATTR_IS64`, and the `VssEd` row
+/// after it carries no W attribute. Outside 64-bit mode VEX.W1 is therefore
+/// ignored, and the instruction converts the 32-bit EAX.
+#[test]
+fn vex_w1_vcvtsi2ss_converts_eax_in_protected_mode() {
+    std::thread::Builder::new()
+        .stack_size(TEST_STACK_SIZE)
+        .spawn(|| {
+            let mut emu = protected32_emulator();
+
+            // xmm1 supplies bits 127:32 of the result.
+            let mut merge = [0u8; 64];
+            for (i, byte) in merge.iter_mut().enumerate().take(16) {
+                *byte = 0x10 + i as u8;
+            }
+            emu.reg_write_zmm(X86Reg::Zmm1, merge);
+            emu.reg_write_zmm(X86Reg::Zmm0, [0xAA; 64]);
+            // EAX = -2. The upper half is what a 64-bit (Eq) source would add:
+            // read as RAX it is 0x1_FFFF_FFFE, as a zero-extended EAX
+            // 0xFFFF_FFFE; neither converts to -2.0.
+            emu.reg_write(X86Reg::Rax, 0x0000_0001_FFFF_FFFE);
+
+            // vcvtsi2ss xmm0, xmm1, eax with VEX.W1 = C4 E1 F2 2A C0
+            //   C4 E1: 3-byte VEX, map 0F
+            //   F2:    W(1) vvvv(1110 -> xmm1) L(0) pp(10 = F3)
+            run(&mut emu, &[0xC4, 0xE1, 0xF2, 0x2A, 0xC0], 4);
+
+            let got = emu.reg_read_zmm(X86Reg::Zmm0);
+            let low = f32::from_le_bytes(got[0..4].try_into().unwrap());
+            assert_eq!(
+                low, -2.0,
+                "VEX.W1 outside 64-bit mode converts the signed 32-bit EAX"
+            );
+            assert_eq!(&got[4..16], &merge[4..16], "bits 127:32 come from xmm1");
+            assert!(
+                got[16..].iter().all(|&x| x == 0),
+                "a VEX.128 result zeroes the rest of the register"
+            );
+        })
+        .expect("spawn")
+        .join()
+        .expect("join");
+}
+
+/// Bochs fetchdecode_opmap_evex.cc `BxOpcodeGroup_EVEX_0F2A`: the 64-bit
+/// `EVEX_VCVTSI2SS_VssEq` row is `ATTR_VEX_W1 | ATTR_IS64`, and the `VssEd`
+/// row after it carries no W attribute. Outside 64-bit mode EVEX.W1 is
+/// therefore ignored, and the instruction converts the 32-bit EAX.
+#[test]
+fn evex_w1_vcvtsi2ss_converts_eax_in_protected_mode() {
+    std::thread::Builder::new()
+        .stack_size(TEST_STACK_SIZE)
+        .spawn(|| {
+            let mut emu = protected32_emulator();
+
+            // xmm1 supplies bits 127:32 of the result.
+            let mut merge = [0u8; 64];
+            for (i, byte) in merge.iter_mut().enumerate().take(16) {
+                *byte = 0x20 + i as u8;
+            }
+            emu.reg_write_zmm(X86Reg::Zmm1, merge);
+            emu.reg_write_zmm(X86Reg::Zmm0, [0xAA; 64]);
+            // EAX = -2. The upper half is what a 64-bit (Eq) source would add.
+            emu.reg_write(X86Reg::Rax, 0x0000_0001_FFFF_FFFE);
+
+            // vcvtsi2ss xmm0, xmm1, eax with EVEX.W1 = 62 F1 F6 08 2A C0
+            //   F1: R X B R' = 1111, map 0F
+            //   F6: W(1) vvvv(1110 -> xmm1) 1 pp(10 = F3)
+            //   08: z(0) L'L(00) b(0) V'(1) aaa(000)
+            run(&mut emu, &[0x62, 0xF1, 0xF6, 0x08, 0x2A, 0xC0], 4);
+
+            let got = emu.reg_read_zmm(X86Reg::Zmm0);
+            let low = f32::from_le_bytes(got[0..4].try_into().unwrap());
+            assert_eq!(
+                low, -2.0,
+                "EVEX.W1 outside 64-bit mode converts the signed 32-bit EAX"
+            );
+            assert_eq!(&got[4..16], &merge[4..16], "bits 127:32 come from xmm1");
+            assert!(
+                got[16..].iter().all(|&x| x == 0),
+                "an EVEX.128 result zeroes the rest of the register"
             );
         })
         .expect("spawn")

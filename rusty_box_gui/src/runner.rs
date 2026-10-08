@@ -7,6 +7,7 @@ use crate::{
 // reaches the same narrowing through a method call and needs no name.
 #[cfg(all(not(feature = "guest-trace"), feature = "hv-whp", windows))]
 use crate::config::CpuCapabilities;
+use rusty_box::cpu::Instrumentation;
 use rusty_box::params::BxParams;
 #[cfg(feature = "gui-egui")]
 use rusty_box::gui::{shared_display::SharedDisplay, BridgeGui};
@@ -300,7 +301,7 @@ where
     // Diagnostic build: run the CPU with the guest-death tracer installed.
     // Single-CPU only — one tracer instance cannot be shared between processors.
     #[cfg(feature = "guest-trace")]
-    let mut emu = {
+    let emu = {
         let trace_log = crate::guest_trace::GuestTracer::default_log_path();
         let tracer = crate::guest_trace::GuestTracer::create(&trace_log).map_err(|source| {
             RunError::FileRead {
@@ -322,12 +323,13 @@ where
 /// One function for both drive paths (R5): the front end's stop control, its
 /// pre-boot video mode and its boot keystroke are wired here or nowhere, so
 /// none of them can work on one engine and quietly not on the other.
-fn arrange_for_boot<E>(
-    emu: &mut Emulator<(), E>,
+fn arrange_for_boot<T, E>(
+    emu: &mut Emulator<T, E>,
     config: &ResolvedConfig,
     stop_flag: Option<Arc<AtomicBool>>,
 ) where
-    E: SliceEngine<()>,
+    T: Instrumentation,
+    E: SliceEngine<T>,
 {
     if let Some(stop_flag) = stop_flag {
         emu.set_stop_flag(stop_flag);
@@ -355,14 +357,16 @@ fn arrange_for_boot<E>(
 ///
 /// Generic over the engine because `run_interactive` is: any engine that runs
 /// the machine in slices is driven this way. A machine on the hypervisor is
-/// not — see [`drive_on_the_hypervisor`].
-fn drive<E>(
-    mut emu: Box<Emulator<(), E>>,
+/// not — see [`drive_on_the_hypervisor`]. Generic over the tracer too, so the
+/// `guest-trace` build's traced machine runs the same way.
+fn drive<T, E>(
+    mut emu: Box<Emulator<T, E>>,
     config: &ResolvedConfig,
     stop_flag: Option<Arc<AtomicBool>>,
 ) -> Result<RunSummary, RunError>
 where
-    E: SliceEngine<()>,
+    T: Instrumentation,
+    E: SliceEngine<T>,
 {
     arrange_for_boot(emu.as_mut(), config, stop_flag);
     let instructions_executed = emu.run_interactive(config.max_instructions)?;

@@ -1098,9 +1098,10 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
         // most EVEX opcodes write the reg field, the store forms (VEXTRACT*,
         // the truncating VPMOV* stores, VCOMPRESS*, VPEXTR*, VSCATTER*) write
         // rm, and the shift/rotate groups write vvvv. Upstream takes it from
-        // the first operand in ia_opcodes_evex.def and the generated table
-        // carries the same information, so this replaces the byte rules
-        // wholesale for EVEX rather than patching them one opcode at a time.
+        // the first operand in ia_opcodes_evex.def, and the ModRM source from
+        // the first later ModRM operand; the generated table carries both, so
+        // this replaces the byte rules wholesale for EVEX rather than patching
+        // them one opcode at a time.
         //
         // For a memory form the rm field is an address rather than a register
         // and the handlers branch on mod, exactly as Bochs does; assigning it
@@ -1113,6 +1114,10 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
             super::evex_operands::EvexDst::Rm => {
                 instr.operands.dst = rm as u8;
                 instr.operands.src1 = nnn as u8;
+            }
+            super::evex_operands::EvexDst::RmSourceRm => {
+                instr.operands.dst = rm as u8;
+                instr.operands.src1 = rm as u8;
             }
             super::evex_operands::EvexDst::Vvvv => {
                 instr.operands.dst = vex_vvv;

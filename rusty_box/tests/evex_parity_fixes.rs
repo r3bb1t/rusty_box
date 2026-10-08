@@ -265,3 +265,90 @@ fn ktest_reads_the_reg_field_as_its_first_operand() {
         .join()
         .expect("join");
 }
+
+const IDT: u64 = 0x0028_0000;
+const UD_VECTOR: u64 = 6;
+const UD_HANDLER: u64 = 0x0029_0000;
+const STACK: u64 = 0x0030_0000;
+
+/// What one instruction did, as the guest sees it (doctrine R9).
+#[derive(Debug, PartialEq, Eq)]
+enum Outcome {
+    /// It retired, and the processor went on to the next instruction.
+    Retired,
+    /// It raised #UD: the processor entered the #UD handler with the
+    /// instruction's own address in the exception frame.
+    InvalidOpcode,
+}
+
+/// Run one encoding with a `HLT` #UD handler installed, and report what the
+/// guest saw. A #UD pushes one long-mode frame (SS, RSP, RFLAGS, CS, RIP; no
+/// error code) whose RIP is the instruction.
+fn run_one(emu: &mut Emulator, code: &[u8]) -> Outcome {
+    emu.reg_write(X86Reg::IdtrBase, IDT);
+    emu.reg_write(X86Reg::IdtrLimit, 256 * 16 - 1);
+    let mut gate = [0u8; 16];
+    gate[0..2].copy_from_slice(&(UD_HANDLER as u16).to_le_bytes());
+    gate[2..4].copy_from_slice(&0x0008u16.to_le_bytes());
+    gate[5] = 0x8E; // present, DPL 0, 64-bit interrupt gate
+    gate[6..8].copy_from_slice(&((UD_HANDLER >> 16) as u16).to_le_bytes());
+    gate[8..12].copy_from_slice(&((UD_HANDLER >> 32) as u32).to_le_bytes());
+    emu.mem_write(IDT + UD_VECTOR * 16, &gate).expect("write the #UD gate");
+    emu.mem_write(UD_HANDLER, &[0xF4]).expect("write the #UD handler");
+
+    let mut image = code.to_vec();
+    image.extend_from_slice(&[0xEB, 0xFE]); // jmp $
+    emu.mem_write(CODE, &image).expect("write code");
+    emu.reg_write(X86Reg::Rsp, STACK);
+    let stop = emu.emu_start(CODE, None, None, Some(8)).expect("emu_start");
+    let rip = emu.cpu().rip();
+    if rip == CODE + code.len() as u64 {
+        assert_eq!(emu.reg_read(X86Reg::Rsp), STACK, "a retired instruction pushes nothing");
+        return Outcome::Retired;
+    }
+    assert_eq!(
+        rip,
+        UD_HANDLER + 1,
+        "the instruction neither retired nor took #UD: stop={stop:?}"
+    );
+    assert_eq!(emu.reg_read(X86Reg::Rsp), STACK - 40, "#UD pushes one frame");
+    let mut pushed_rip = [0u8; 8];
+    emu.mem_read(STACK - 40, &mut pushed_rip).expect("read the frame");
+    assert_eq!(
+        u64::from_le_bytes(pushed_rip),
+        CODE,
+        "the frame's RIP must be the faulting instruction"
+    );
+    Outcome::InvalidOpcode
+}
+
+/// Bochs ia_opcodes_evex.def gates `BX_IA_EVEX_VPMOVSSDB_WdqVdq` on
+/// `BX_ISA_ACE`, which no shipped model advertises, so
+/// `init_FetchDecodeTables` points it at `BxError` and the guest takes #UD.
+/// The encoding decodes (fetchdecode_opmap_evex.cc
+/// `BxOpcodeGroup_EVEX_0F3841`); the #UD comes from the feature gate, which
+/// the AVX512F neighbour at 0F38 21 passes on the same CPU.
+#[test]
+fn evex_vpmovssdb_is_undefined_without_ace() {
+    std::thread::Builder::new()
+        .stack_size(TEST_STACK_SIZE)
+        .spawn(|| {
+            let mut emu = evex_emulator();
+
+            // vpmovsdb xmm0, xmm0   EVEX.128.F3.0F38.W0 21 /r  (AVX512F)
+            assert_eq!(
+                run_one(&mut emu, &[0x62, 0xF2, 0x7E, 0x08, 0x21, 0xC0]),
+                Outcome::Retired,
+                "the AVX512F store form retires on this CPU"
+            );
+            // vpmovssdb xmm0, xmm0  EVEX.128.F3.0F38.W0 41 /r  (ACE)
+            assert_eq!(
+                run_one(&mut emu, &[0x62, 0xF2, 0x7E, 0x08, 0x41, 0xC0]),
+                Outcome::InvalidOpcode,
+                "VPMOVSSDB needs ACE, which the model does not advertise"
+            );
+        })
+        .expect("spawn")
+        .join()
+        .expect("join");
+}

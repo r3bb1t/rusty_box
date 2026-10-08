@@ -617,9 +617,10 @@ fn run_split_load_cases() {
 
 
 /// Enable the guest's XCR0 FPU+SSE+YMM state, the way a real OS does before
-/// it runs any VEX instruction. Without it CR4.OSXSAVE is set but XCR0 is
-/// still zero — a configuration in which every VEX encoding would #UD, and in
-/// which `maxvl` leaves the upper half of the register file architecturally
+/// it runs any AVX instruction. Without it CR4.OSXSAVE is set but XCR0 holds
+/// its reset value (x87 only) — a configuration in which every
+/// `BX_PREPARE_AVX` instruction would #UD (Bochs proc_ctrl.cc `BxNoAVX`), and
+/// in which `maxvl` leaves the upper half of the register file architecturally
 /// invisible, so a VEX write does not clear it.
 fn enable_guest_avx_state(emu: &mut Emulator) {
     const XSETBV_SETUP_BASE: u64 = CASE_BASE + 0x800;
@@ -2457,8 +2458,8 @@ fn run_hadd_blend_dpp_cases() {
 }
 
 // ════════════════════════════════════════════════════════════════════════
-// VEX forms that must be VL-aware or 3-operand (previously fell through to
-// the 128-bit legacy handlers): VPTEST, VMOVMSKPS, VPMOVSX/ZX, VPABSB,
+// VEX forms that are VL-aware or 3-operand, unlike the 128-bit legacy
+// handlers of the same bytes: VPTEST, VMOVMSKPS, VPMOVSX/ZX, VPABSB,
 // VINSERTPS, VMPSADBW, VPHMINPOSUW, VPBLENDVB, VMOVQ, VLDDQU, VAESENC.
 // ════════════════════════════════════════════════════════════════════════
 
@@ -3136,9 +3137,8 @@ fn evex_is_reachable_by_a_guest_end_to_end() {
 // XSAVE/XRSTOR of the AVX-512 components.
 //
 // Advertising AVX-512 puts XCR0 bits 5/6/7 (OPMASK, ZMM_HI256, HI_ZMM) in
-// reach for the first time, so the kernel starts saving and restoring 2688
-// bytes of state on every context switch through code paths no guest could
-// previously execute. A round-trip that loses or misplaces bytes corrupts
+// reach, so a kernel that enables them saves and restores 2688 bytes of
+// those components on every context switch. A round-trip that loses or misplaces bytes corrupts
 // vector state across a switch, which shows up as userspace computing
 // garbage rather than as any fault.
 // ════════════════════════════════════════════════════════════════════════

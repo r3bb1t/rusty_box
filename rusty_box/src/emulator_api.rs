@@ -1505,8 +1505,8 @@ mod tests {
 
                 // CR4.OSFXSR | CR4.OSXSAVE, then XSETBV to put XCR0 at
                 // FPU|SSE|YMM. Both are needed: with CR4.OSXSAVE set but XCR0
-                // still at its reset value, every VEX encoding #UDs — that is
-                // what Bochs `BxNoAVX` tests, and rusty_box applies the same
+                // still at its reset value, every AVX instruction #UDs — that is
+                // what Bochs proc_ctrl.cc `BxNoAVX` tests, and rusty_box applies the same
                 // gate at icache fill.
                 emu.reg_write(
                     X86Reg::Cr4,

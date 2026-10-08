@@ -116,7 +116,7 @@ impl Opcode {
         match self {
             O::IaError => return OpcodeCategory::Error,
 
-            // VMX (discriminants 1409..=1423)
+            // VMX
             O::VmxonMq
             | O::Vmxoff
             | O::Vmcall
@@ -133,7 +133,7 @@ impl Opcode {
             | O::Invvpid
             | O::Vmfunc => return OpcodeCategory::Vmx,
 
-            // SVM (discriminants 1425..=1432)
+            // SVM
             O::Vmrun
             | O::Vmmcall
             | O::Vmload
@@ -155,24 +155,22 @@ impl Opcode {
         }
 
         // MMX + 3DNow!: PunpcklbwPqQd..=PrefetchwMb
-        // Includes Emms, Femms, Pf2id..Pswapdw, PrefetchwMb
         if d >= O::PunpcklbwPqQd as u16 && d <= O::PrefetchwMb as u16 {
             return OpcodeCategory::Mmx;
         }
 
-        // SSE/SSE2/SSE3/SSSE3/SSE4/AES/SHA/GFNI: Ldmxcsr..=Gf2p8mulbVdqWdq
-        // Includes all SSE* families, CRC32, MOVBE, POPCNT, XSAVE, AES, SHA, GFNI
+        // SSE: Ldmxcsr..=Gf2p8mulbVdqWdq
         if d >= O::Ldmxcsr as u16 && d <= O::Gf2p8mulbVdqWdq as u16 {
             return OpcodeCategory::Sse;
         }
 
-        // AVX/AVX2/FMA/FMA4/XOP (VEX-encoded): Vzeroupper..=VphsubdqVdqWdq
+        // AVX (VEX-encoded): Vzeroupper..=VphsubdqVdqWdq
         if d >= O::Vzeroupper as u16 && d <= O::VphsubdqVdqWdq as u16 {
             return OpcodeCategory::Avx;
         }
 
-        // EVEX: EvexVaddpsVpsHpsWps..=EvexVmovrsqVdqWdqKmask (last EVEX variant)
-        if d >= O::EvexVaddpsVpsHpsWps as u16 && d <= O::EvexVmovrsqVdqWdqKmask as u16 {
+        // EVEX: EvexVaddpsVpsHpsWps..=EvexVpmovssdbWdqVdqKmask
+        if d >= O::EvexVaddpsVpsHpsWps as u16 && d <= O::EvexVpmovssdbWdqVdqKmask as u16 {
             return OpcodeCategory::Evex;
         }
 
@@ -181,11 +179,8 @@ impl Opcode {
             return OpcodeCategory::Avx;
         }
 
-        // AMX tile ops (Ldtilecfg..=Tdphbf8psTnnnTrmTreg) are extensions, not
-        // AVX/EVEX in the traditional sense, and fall through to the default.
-
-        // Everything else is Extension (BMI, TBM, CET, RDRAND, LZCNT, TZCNT,
-        // ADX, SMAP, MOVDIRI, RAO-INT, CMPccXADD, AMX, SSE4A, MOVRS, etc.)
+        // Everything else, the AMX tile ops Ldtilecfg..=Tdphbf8psTnnnTrmTreg
+        // among them, is Extension.
         OpcodeCategory::Extension
     }
 }
@@ -265,6 +260,8 @@ pub enum TypedInstruction {
     Rsm,
     Sysenter,
     Sysexit,
+    SysenterLongmode,
+    SysexitLongmode,
     Syscall,
     SyscallLegacy,
     Sysret,
@@ -1351,7 +1348,8 @@ pub enum TypedInstruction {
     },
 
     // =====================================================================
-    // Zero-idiom (XOR/SUB reg, reg where src==dst)
+    // Zero-idiom (XOR/SUB reg, reg where src==dst) and the TEST reg, reg
+    // idiom (Bochs idiom.cc TEST_GwR_ZERO_IDIOM), which reads only `reg`
     // =====================================================================
     XorEwGwZeroIdiom {
         reg: GprIndex,
@@ -1387,6 +1385,15 @@ pub enum TypedInstruction {
         reg: GprIndex,
     },
     SubGqEqZeroIdiom {
+        reg: GprIndex,
+    },
+    TestEwGwIdiom {
+        reg: GprIndex,
+    },
+    TestEdGdIdiom {
+        reg: GprIndex,
+    },
+    TestEqGqIdiom {
         reg: GprIndex,
     },
 
@@ -9196,6 +9203,9 @@ pub enum TypedInstruction {
         dst: u8,
         src: MemoryOperand,
     },
+    PxorVdqWdqZeroIdiom {
+        dst: u8,
+    },
     RcppsVpsWpsR {
         dst: u8,
         src: u8,
@@ -9508,6 +9518,9 @@ pub enum TypedInstruction {
     TilezeroTnnn {
         reg: u8,
     },
+    Bsrinit {
+        dst: u8,
+    },
     UcomisdVsdWsdR {
         dst: u8,
         src: u8,
@@ -9564,6 +9577,9 @@ pub enum TypedInstruction {
         dst: u8,
         src: MemoryOperand,
     },
+    XorpdVpdWpdZeroIdiom {
+        dst: u8,
+    },
     XorpsVpsWpsR {
         dst: u8,
         src: u8,
@@ -9571,6 +9587,9 @@ pub enum TypedInstruction {
     XorpsVpsWpsM {
         dst: u8,
         src: MemoryOperand,
+    },
+    XorpsVpsWpsZeroIdiom {
+        dst: u8,
     },
 
     // =====================================================================
@@ -16152,9 +16171,57 @@ pub enum TypedInstruction {
     // =====================================================================
     // EVEX (AVX-512) instructions
     // =====================================================================
-    EvexTcvtrowd2psVpsTrmBd {
+    EvexBsrmovfBsrVdqWdqR {
+        dst: u8,
+        src1: u8,
+        src2: u8,
+    },
+    EvexBsrmovfBsrVdqWdqM {
+        dst: u8,
+        src1: u8,
+        src2: MemoryOperand,
+    },
+    EvexBsrmovhBsrWdqR {
         dst: u8,
         src: u8,
+    },
+    EvexBsrmovhBsrWdqM {
+        dst: u8,
+        src: MemoryOperand,
+    },
+    EvexBsrmovhWdqBsrR {
+        dst: u8,
+        src: u8,
+    },
+    EvexBsrmovhWdqBsrM {
+        dst: MemoryOperand,
+        src: u8,
+    },
+    EvexBsrmovlBsrWdqR {
+        dst: u8,
+        src: u8,
+    },
+    EvexBsrmovlBsrWdqM {
+        dst: u8,
+        src: MemoryOperand,
+    },
+    EvexBsrmovlWdqBsrR {
+        dst: u8,
+        src: u8,
+    },
+    EvexBsrmovlWdqBsrM {
+        dst: MemoryOperand,
+        src: u8,
+    },
+    EvexTcvtrowd2psVpsTrmBdR {
+        dst: u8,
+        src: u8,
+        ctrl: GprIndex,
+    },
+    EvexTcvtrowd2psVpsTrmBdM {
+        dst: u8,
+        src: MemoryOperand,
+        ctrl: GprIndex,
     },
     EvexTcvtrowd2psVpsTrmIbR {
         dst: u8,
@@ -16166,9 +16233,15 @@ pub enum TypedInstruction {
         src: MemoryOperand,
         imm: u8,
     },
-    EvexTcvtrowps2bf16hVphTrmBd {
+    EvexTcvtrowps2bf16hVphTrmBdR {
         dst: u8,
         src: u8,
+        ctrl: GprIndex,
+    },
+    EvexTcvtrowps2bf16hVphTrmBdM {
+        dst: u8,
+        src: MemoryOperand,
+        ctrl: GprIndex,
     },
     EvexTcvtrowps2bf16hVphTrmIbR {
         dst: u8,
@@ -16180,9 +16253,15 @@ pub enum TypedInstruction {
         src: MemoryOperand,
         imm: u8,
     },
-    EvexTcvtrowps2bf16lVphTrmBd {
+    EvexTcvtrowps2bf16lVphTrmBdR {
         dst: u8,
         src: u8,
+        ctrl: GprIndex,
+    },
+    EvexTcvtrowps2bf16lVphTrmBdM {
+        dst: u8,
+        src: MemoryOperand,
+        ctrl: GprIndex,
     },
     EvexTcvtrowps2bf16lVphTrmIbR {
         dst: u8,
@@ -16194,9 +16273,15 @@ pub enum TypedInstruction {
         src: MemoryOperand,
         imm: u8,
     },
-    EvexTcvtrowps2phhVphTrmBd {
+    EvexTcvtrowps2phhVphTrmBdR {
         dst: u8,
         src: u8,
+        ctrl: GprIndex,
+    },
+    EvexTcvtrowps2phhVphTrmBdM {
+        dst: u8,
+        src: MemoryOperand,
+        ctrl: GprIndex,
     },
     EvexTcvtrowps2phhVphTrmIbR {
         dst: u8,
@@ -16208,9 +16293,15 @@ pub enum TypedInstruction {
         src: MemoryOperand,
         imm: u8,
     },
-    EvexTcvtrowps2phlVphTrmBd {
+    EvexTcvtrowps2phlVphTrmBdR {
         dst: u8,
         src: u8,
+        ctrl: GprIndex,
+    },
+    EvexTcvtrowps2phlVphTrmBdM {
+        dst: u8,
+        src: MemoryOperand,
+        ctrl: GprIndex,
     },
     EvexTcvtrowps2phlVphTrmIbR {
         dst: u8,
@@ -16222,9 +16313,55 @@ pub enum TypedInstruction {
         src: MemoryOperand,
         imm: u8,
     },
-    EvexTilemovrowVdqTrmBd {
+    EvexTilemovcolTrmWdqBdR {
         dst: u8,
         src: u8,
+        ctrl: GprIndex,
+    },
+    EvexTilemovcolTrmWdqBdM {
+        dst: u8,
+        src: MemoryOperand,
+        ctrl: GprIndex,
+    },
+    EvexTilemovcolTrmWdqIbR {
+        dst: u8,
+        src: u8,
+        imm: u8,
+    },
+    EvexTilemovcolTrmWdqIbM {
+        dst: u8,
+        src: MemoryOperand,
+        imm: u8,
+    },
+    EvexTilemovrowTrmWdqBdR {
+        dst: u8,
+        src: u8,
+        ctrl: GprIndex,
+    },
+    EvexTilemovrowTrmWdqBdM {
+        dst: u8,
+        src: MemoryOperand,
+        ctrl: GprIndex,
+    },
+    EvexTilemovrowTrmWdqIbR {
+        dst: u8,
+        src: u8,
+        imm: u8,
+    },
+    EvexTilemovrowTrmWdqIbM {
+        dst: u8,
+        src: MemoryOperand,
+        imm: u8,
+    },
+    EvexTilemovrowVdqTrmBdR {
+        dst: u8,
+        src: u8,
+        ctrl: GprIndex,
+    },
+    EvexTilemovrowVdqTrmBdM {
+        dst: u8,
+        src: MemoryOperand,
+        ctrl: GprIndex,
     },
     EvexTilemovrowVdqTrmIbR {
         dst: u8,
@@ -16234,6 +16371,116 @@ pub enum TypedInstruction {
     EvexTilemovrowVdqTrmIbM {
         dst: u8,
         src: MemoryOperand,
+        imm: u8,
+    },
+    EvexTop2bf16psTnnnWdqHdqR {
+        dst: u8,
+        src1: u8,
+        src2: u8,
+    },
+    EvexTop2bf16psTnnnWdqHdqM {
+        dst: u8,
+        src1: u8,
+        src2: MemoryOperand,
+    },
+    EvexTop4bssdTnnnWdqHdqR {
+        dst: u8,
+        src1: u8,
+        src2: u8,
+    },
+    EvexTop4bssdTnnnWdqHdqM {
+        dst: u8,
+        src1: u8,
+        src2: MemoryOperand,
+    },
+    EvexTop4bsudTnnnWdqHdqR {
+        dst: u8,
+        src1: u8,
+        src2: u8,
+    },
+    EvexTop4bsudTnnnWdqHdqM {
+        dst: u8,
+        src1: u8,
+        src2: MemoryOperand,
+    },
+    EvexTop4busdTnnnWdqHdqR {
+        dst: u8,
+        src1: u8,
+        src2: u8,
+    },
+    EvexTop4busdTnnnWdqHdqM {
+        dst: u8,
+        src1: u8,
+        src2: MemoryOperand,
+    },
+    EvexTop4buudTnnnWdqHdqR {
+        dst: u8,
+        src1: u8,
+        src2: u8,
+    },
+    EvexTop4buudTnnnWdqHdqM {
+        dst: u8,
+        src1: u8,
+        src2: MemoryOperand,
+    },
+    EvexTop4mxbf8psTnnnWdqHdqIbR {
+        dst: u8,
+        src1: u8,
+        src2: u8,
+        imm: u8,
+    },
+    EvexTop4mxbf8psTnnnWdqHdqIbM {
+        dst: u8,
+        src1: u8,
+        src2: MemoryOperand,
+        imm: u8,
+    },
+    EvexTop4mxbhf8psTnnnWdqHdqIbR {
+        dst: u8,
+        src1: u8,
+        src2: u8,
+        imm: u8,
+    },
+    EvexTop4mxbhf8psTnnnWdqHdqIbM {
+        dst: u8,
+        src1: u8,
+        src2: MemoryOperand,
+        imm: u8,
+    },
+    EvexTop4mxbsspsTnnnWdqHdqIbR {
+        dst: u8,
+        src1: u8,
+        src2: u8,
+        imm: u8,
+    },
+    EvexTop4mxbsspsTnnnWdqHdqIbM {
+        dst: u8,
+        src1: u8,
+        src2: MemoryOperand,
+        imm: u8,
+    },
+    EvexTop4mxhbf8psTnnnWdqHdqIbR {
+        dst: u8,
+        src1: u8,
+        src2: u8,
+        imm: u8,
+    },
+    EvexTop4mxhbf8psTnnnWdqHdqIbM {
+        dst: u8,
+        src1: u8,
+        src2: MemoryOperand,
+        imm: u8,
+    },
+    EvexTop4mxhf8psTnnnWdqHdqIbR {
+        dst: u8,
+        src1: u8,
+        src2: u8,
+        imm: u8,
+    },
+    EvexTop4mxhf8psTnnnWdqHdqIbM {
+        dst: u8,
+        src1: u8,
+        src2: MemoryOperand,
         imm: u8,
     },
     EvexVaddbf16VphHphWphR {
@@ -16420,21 +16667,25 @@ pub enum TypedInstruction {
         dst: u8,
         src1: u8,
         src2: u8,
+        imm: u8,
     },
     EvexValigndVdqHdqWdqIbKmaskM {
         dst: u8,
         src1: u8,
         src2: MemoryOperand,
+        imm: u8,
     },
     EvexValignqVdqHdqWdqIbKmaskR {
         dst: u8,
         src1: u8,
         src2: u8,
+        imm: u8,
     },
     EvexValignqVdqHdqWdqIbKmaskM {
         dst: u8,
         src1: u8,
         src2: MemoryOperand,
+        imm: u8,
     },
     EvexVandnpdVpdHpdWpdR {
         dst: u8,
@@ -16546,13 +16797,11 @@ pub enum TypedInstruction {
     },
     EvexVbroadcastf32x2VpsWqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVbroadcastf32x2VpsWqKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVbroadcastf32x4VpsWpsR {
         dst: u8,
@@ -16564,13 +16813,11 @@ pub enum TypedInstruction {
     },
     EvexVbroadcastf32x4VpsWpsKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVbroadcastf32x4VpsWpsKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVbroadcastf32x8VpsWpsR {
         dst: u8,
@@ -16582,13 +16829,11 @@ pub enum TypedInstruction {
     },
     EvexVbroadcastf32x8VpsWpsKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVbroadcastf32x8VpsWpsKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVbroadcastf64x2VpdWpdR {
         dst: u8,
@@ -16600,13 +16845,11 @@ pub enum TypedInstruction {
     },
     EvexVbroadcastf64x2VpdWpdKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVbroadcastf64x2VpdWpdKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVbroadcastf64x4VpdWpdR {
         dst: u8,
@@ -16618,13 +16861,11 @@ pub enum TypedInstruction {
     },
     EvexVbroadcastf64x4VpdWpdKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVbroadcastf64x4VpdWpdKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVbroadcasti32x2VdqWqR {
         dst: u8,
@@ -16636,13 +16877,11 @@ pub enum TypedInstruction {
     },
     EvexVbroadcasti32x2VdqWqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVbroadcasti32x2VdqWqKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVbroadcasti32x4VdqWdqR {
         dst: u8,
@@ -16654,13 +16893,11 @@ pub enum TypedInstruction {
     },
     EvexVbroadcasti32x4VdqWdqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVbroadcasti32x4VdqWdqKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVbroadcasti32x8VdqWdqR {
         dst: u8,
@@ -16672,13 +16909,11 @@ pub enum TypedInstruction {
     },
     EvexVbroadcasti32x8VdqWdqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVbroadcasti32x8VdqWdqKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVbroadcasti64x2VdqWdqR {
         dst: u8,
@@ -16690,13 +16925,11 @@ pub enum TypedInstruction {
     },
     EvexVbroadcasti64x2VdqWdqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVbroadcasti64x2VdqWdqKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVbroadcasti64x4VdqWdqR {
         dst: u8,
@@ -16708,13 +16941,11 @@ pub enum TypedInstruction {
     },
     EvexVbroadcasti64x4VdqWdqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVbroadcasti64x4VdqWdqKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVbroadcastsdVpdWsdR {
         dst: u8,
@@ -16726,13 +16957,11 @@ pub enum TypedInstruction {
     },
     EvexVbroadcastsdVpdWsdKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVbroadcastsdVpdWsdKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVbroadcastssVpsWssR {
         dst: u8,
@@ -16744,82 +16973,94 @@ pub enum TypedInstruction {
     },
     EvexVbroadcastssVpsWssKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVbroadcastssVpsWssKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVcmppbf16KgdHphWphIbR {
         dst: u8,
-        src: u8,
+        src1: u8,
+        src2: u8,
         imm: u8,
     },
     EvexVcmppbf16KgdHphWphIbM {
         dst: u8,
-        src: MemoryOperand,
+        src1: u8,
+        src2: MemoryOperand,
         imm: u8,
     },
     EvexVcmppdKgbHpdWpdIbR {
         dst: u8,
-        src: u8,
+        src1: u8,
+        src2: u8,
         imm: u8,
     },
     EvexVcmppdKgbHpdWpdIbM {
         dst: u8,
-        src: MemoryOperand,
+        src1: u8,
+        src2: MemoryOperand,
         imm: u8,
     },
     EvexVcmpphKgdHphWphIbR {
         dst: u8,
-        src: u8,
+        src1: u8,
+        src2: u8,
         imm: u8,
     },
     EvexVcmpphKgdHphWphIbM {
         dst: u8,
-        src: MemoryOperand,
+        src1: u8,
+        src2: MemoryOperand,
         imm: u8,
     },
     EvexVcmppsKgwHpsWpsIbR {
         dst: u8,
-        src: u8,
+        src1: u8,
+        src2: u8,
         imm: u8,
     },
     EvexVcmppsKgwHpsWpsIbM {
         dst: u8,
-        src: MemoryOperand,
+        src1: u8,
+        src2: MemoryOperand,
         imm: u8,
     },
     EvexVcmpsdKgbHsdWsdIbR {
         dst: u8,
-        src: u8,
+        src1: u8,
+        src2: u8,
         imm: u8,
     },
     EvexVcmpsdKgbHsdWsdIbM {
         dst: u8,
-        src: MemoryOperand,
+        src1: u8,
+        src2: MemoryOperand,
         imm: u8,
     },
     EvexVcmpshKgbHshWshIbR {
         dst: u8,
-        src: u8,
+        src1: u8,
+        src2: u8,
         imm: u8,
     },
     EvexVcmpshKgbHshWshIbM {
         dst: u8,
-        src: MemoryOperand,
+        src1: u8,
+        src2: MemoryOperand,
         imm: u8,
     },
     EvexVcmpssKgbHssWssIbR {
         dst: u8,
-        src: u8,
+        src1: u8,
+        src2: u8,
         imm: u8,
     },
     EvexVcmpssKgbHssWssIbM {
         dst: u8,
-        src: MemoryOperand,
+        src1: u8,
+        src2: MemoryOperand,
         imm: u8,
     },
     EvexVcomisbf16VshWshR {
@@ -16864,13 +17105,11 @@ pub enum TypedInstruction {
     },
     EvexVcompresspdWpdVpdKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVcompresspdWpdVpdKmaskM {
-        dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        dst: MemoryOperand,
+        src: u8,
     },
     EvexVcompresspsWpsVpsR {
         dst: u8,
@@ -16882,13 +17121,11 @@ pub enum TypedInstruction {
     },
     EvexVcompresspsWpsVpsKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVcompresspsWpsVpsKmaskM {
-        dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        dst: MemoryOperand,
+        src: u8,
     },
     EvexVcomxsdVsdWsdR {
         dst: u8,
@@ -16984,13 +17221,11 @@ pub enum TypedInstruction {
     },
     EvexVcvtbf162ibsV8bWphKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVcvtbf162ibsV8bWphKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVcvtbf162iubsV8bWphR {
         dst: u8,
@@ -17002,13 +17237,51 @@ pub enum TypedInstruction {
     },
     EvexVcvtbf162iubsV8bWphKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVcvtbf162iubsV8bWphKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
+    },
+    EvexVcvtbf42hf8Vf8Wf4KmaskR {
+        dst: u8,
+        src: u8,
+    },
+    EvexVcvtbf42hf8Vf8Wf4KmaskM {
+        dst: u8,
+        src: MemoryOperand,
+    },
+    EvexVcvtbf62hf8Vf8Wf6KmaskR {
+        dst: u8,
+        src: u8,
+    },
+    EvexVcvtbf62hf8Vf8Wf6KmaskM {
+        dst: u8,
+        src: MemoryOperand,
+    },
+    EvexVcvtbf82bf4sWf4VdqR {
+        dst: u8,
+        src: u8,
+    },
+    EvexVcvtbf82bf4sWf4VdqM {
+        dst: MemoryOperand,
+        src: u8,
+    },
+    EvexVcvtbf82bf6sVf6Wf8R {
+        dst: u8,
+        src: u8,
+    },
+    EvexVcvtbf82bf6sVf6Wf8M {
+        dst: MemoryOperand,
+        src: u8,
+    },
+    EvexVcvtbf82psVpsWf8KmaskR {
+        dst: u8,
+        src: u8,
+    },
+    EvexVcvtbf82psVpsWf8KmaskM {
+        dst: u8,
+        src: MemoryOperand,
     },
     EvexVcvtbiasph2bf8Vf8hdqWphKmaskR {
         dst: u8,
@@ -17050,6 +17323,46 @@ pub enum TypedInstruction {
         src1: u8,
         src2: MemoryOperand,
     },
+    EvexVcvtbiasps2bf8Vf8HdqWpsKmaskR {
+        dst: u8,
+        src1: u8,
+        src2: u8,
+    },
+    EvexVcvtbiasps2bf8Vf8HdqWpsKmaskM {
+        dst: u8,
+        src1: u8,
+        src2: MemoryOperand,
+    },
+    EvexVcvtbiasps2bf8sVf8HdqWpsKmaskR {
+        dst: u8,
+        src1: u8,
+        src2: u8,
+    },
+    EvexVcvtbiasps2bf8sVf8HdqWpsKmaskM {
+        dst: u8,
+        src1: u8,
+        src2: MemoryOperand,
+    },
+    EvexVcvtbiasps2hf8Vf8HdqWpsKmaskR {
+        dst: u8,
+        src1: u8,
+        src2: u8,
+    },
+    EvexVcvtbiasps2hf8Vf8HdqWpsKmaskM {
+        dst: u8,
+        src1: u8,
+        src2: MemoryOperand,
+    },
+    EvexVcvtbiasps2hf8sVf8HdqWpsKmaskR {
+        dst: u8,
+        src1: u8,
+        src2: u8,
+    },
+    EvexVcvtbiasps2hf8sVf8HdqWpsKmaskM {
+        dst: u8,
+        src1: u8,
+        src2: MemoryOperand,
+    },
     EvexVcvtdq2pdVpdWdqR {
         dst: u8,
         src: u8,
@@ -17060,13 +17373,11 @@ pub enum TypedInstruction {
     },
     EvexVcvtdq2pdVpdWdqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVcvtdq2pdVpdWdqKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVcvtdq2phVphWdqR {
         dst: u8,
@@ -17078,13 +17389,11 @@ pub enum TypedInstruction {
     },
     EvexVcvtdq2phVphWdqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVcvtdq2phVphWdqKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVcvtdq2psVpsWdqR {
         dst: u8,
@@ -17096,23 +17405,51 @@ pub enum TypedInstruction {
     },
     EvexVcvtdq2psVpsWdqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVcvtdq2psVpsWdqKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
+    },
+    EvexVcvthf62hf8Vf8Wf6KmaskR {
+        dst: u8,
+        src: u8,
+    },
+    EvexVcvthf62hf8Vf8Wf6KmaskM {
+        dst: u8,
+        src: MemoryOperand,
+    },
+    EvexVcvthf82bf4sWf4VdqR {
+        dst: u8,
+        src: u8,
+    },
+    EvexVcvthf82bf4sWf4VdqM {
+        dst: MemoryOperand,
+        src: u8,
+    },
+    EvexVcvthf82hf6sVf6Wf8R {
+        dst: u8,
+        src: u8,
+    },
+    EvexVcvthf82hf6sVf6Wf8M {
+        dst: MemoryOperand,
+        src: u8,
     },
     EvexVcvthf82phVphWf8KmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVcvthf82phVphWf8KmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
+    },
+    EvexVcvthf82psVpsWf8KmaskR {
+        dst: u8,
+        src: u8,
+    },
+    EvexVcvthf82psVpsWf8KmaskM {
+        dst: u8,
+        src: MemoryOperand,
     },
     EvexVcvtne2ps2bf16VphHpsWpsKmaskR {
         dst: u8,
@@ -17126,13 +17463,11 @@ pub enum TypedInstruction {
     },
     EvexVcvtneps2bf16VphWpsKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVcvtneps2bf16VphWpsKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVcvtpd2dqVdqWpdR {
         dst: u8,
@@ -17144,13 +17479,11 @@ pub enum TypedInstruction {
     },
     EvexVcvtpd2dqVdqWpdKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVcvtpd2dqVdqWpdKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVcvtpd2phVphWdqR {
         dst: u8,
@@ -17162,13 +17495,11 @@ pub enum TypedInstruction {
     },
     EvexVcvtpd2phVphWdqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVcvtpd2phVphWdqKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVcvtpd2psVpsWpdR {
         dst: u8,
@@ -17180,13 +17511,11 @@ pub enum TypedInstruction {
     },
     EvexVcvtpd2psVpsWpdKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVcvtpd2psVpsWpdKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVcvtpd2qqVdqWpdR {
         dst: u8,
@@ -17198,13 +17527,11 @@ pub enum TypedInstruction {
     },
     EvexVcvtpd2qqVdqWpdKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVcvtpd2qqVdqWpdKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVcvtpd2udqVdqWpdR {
         dst: u8,
@@ -17216,13 +17543,11 @@ pub enum TypedInstruction {
     },
     EvexVcvtpd2udqVdqWpdKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVcvtpd2udqVdqWpdKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVcvtpd2uqqVdqWpdR {
         dst: u8,
@@ -17234,33 +17559,27 @@ pub enum TypedInstruction {
     },
     EvexVcvtpd2uqqVdqWpdKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVcvtpd2uqqVdqWpdKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVcvtph2bf8Vf8hdqWphKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVcvtph2bf8Vf8hdqWphKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVcvtph2bf8sVf8hdqWphKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVcvtph2bf8sVf8hdqWphKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVcvtph2dqVdqWphR {
         dst: u8,
@@ -17272,33 +17591,27 @@ pub enum TypedInstruction {
     },
     EvexVcvtph2dqVdqWphKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVcvtph2dqVdqWphKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVcvtph2hf8Vf8hdqWphKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVcvtph2hf8Vf8hdqWphKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVcvtph2hf8sVf8hdqWphKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVcvtph2hf8sVf8hdqWphKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVcvtph2ibsV8bWphR {
         dst: u8,
@@ -17310,13 +17623,11 @@ pub enum TypedInstruction {
     },
     EvexVcvtph2ibsV8bWphKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVcvtph2ibsV8bWphKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVcvtph2iubsV8bWphR {
         dst: u8,
@@ -17328,13 +17639,11 @@ pub enum TypedInstruction {
     },
     EvexVcvtph2iubsV8bWphKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVcvtph2iubsV8bWphKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVcvtph2pdVpdWphR {
         dst: u8,
@@ -17346,13 +17655,11 @@ pub enum TypedInstruction {
     },
     EvexVcvtph2pdVpdWphKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVcvtph2pdVpdWphKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVcvtph2psVpsWpsR {
         dst: u8,
@@ -17364,13 +17671,11 @@ pub enum TypedInstruction {
     },
     EvexVcvtph2psVpsWpsKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVcvtph2psVpsWpsKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVcvtph2psxVpsWphR {
         dst: u8,
@@ -17382,13 +17687,11 @@ pub enum TypedInstruction {
     },
     EvexVcvtph2psxVpsWphKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVcvtph2psxVpsWphKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVcvtph2qqVdqWphR {
         dst: u8,
@@ -17400,13 +17703,11 @@ pub enum TypedInstruction {
     },
     EvexVcvtph2qqVdqWphKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVcvtph2qqVdqWphKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVcvtph2udqVdqWphR {
         dst: u8,
@@ -17418,13 +17719,11 @@ pub enum TypedInstruction {
     },
     EvexVcvtph2udqVdqWphKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVcvtph2udqVdqWphKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVcvtph2uqqVdqWphR {
         dst: u8,
@@ -17436,13 +17735,11 @@ pub enum TypedInstruction {
     },
     EvexVcvtph2uqqVdqWphKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVcvtph2uqqVdqWphKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVcvtph2uwVdqWpsR {
         dst: u8,
@@ -17454,13 +17751,11 @@ pub enum TypedInstruction {
     },
     EvexVcvtph2uwVdqWpsKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVcvtph2uwVdqWpsKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVcvtph2wVdqWpsR {
         dst: u8,
@@ -17472,13 +17767,27 @@ pub enum TypedInstruction {
     },
     EvexVcvtph2wVdqWpsKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVcvtph2wVdqWpsKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
+    },
+    EvexVcvtps2bf8Vf8WpsKmaskR {
+        dst: u8,
+        src: u8,
+    },
+    EvexVcvtps2bf8Vf8WpsKmaskM {
+        dst: u8,
+        src: MemoryOperand,
+    },
+    EvexVcvtps2bf8sVf8WpsKmaskR {
+        dst: u8,
+        src: u8,
+    },
+    EvexVcvtps2bf8sVf8WpsKmaskM {
+        dst: u8,
+        src: MemoryOperand,
     },
     EvexVcvtps2dqVdqWpsR {
         dst: u8,
@@ -17490,13 +17799,27 @@ pub enum TypedInstruction {
     },
     EvexVcvtps2dqVdqWpsKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVcvtps2dqVdqWpsKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
+    },
+    EvexVcvtps2hf8Vf8WpsKmaskR {
+        dst: u8,
+        src: u8,
+    },
+    EvexVcvtps2hf8Vf8WpsKmaskM {
+        dst: u8,
+        src: MemoryOperand,
+    },
+    EvexVcvtps2hf8sVf8WpsKmaskR {
+        dst: u8,
+        src: u8,
+    },
+    EvexVcvtps2hf8sVf8WpsKmaskM {
+        dst: u8,
+        src: MemoryOperand,
     },
     EvexVcvtps2ibsV8bWpsR {
         dst: u8,
@@ -17508,13 +17831,11 @@ pub enum TypedInstruction {
     },
     EvexVcvtps2ibsV8bWpsKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVcvtps2ibsV8bWpsKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVcvtps2iubsV8bWpsR {
         dst: u8,
@@ -17526,13 +17847,11 @@ pub enum TypedInstruction {
     },
     EvexVcvtps2iubsV8bWpsKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVcvtps2iubsV8bWpsKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVcvtps2pdVpdWpsR {
         dst: u8,
@@ -17544,13 +17863,11 @@ pub enum TypedInstruction {
     },
     EvexVcvtps2pdVpdWpsKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVcvtps2pdVpdWpsKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVcvtps2phWpsVpsIbR {
         dst: u8,
@@ -17558,19 +17875,19 @@ pub enum TypedInstruction {
         imm: u8,
     },
     EvexVcvtps2phWpsVpsIbM {
-        dst: u8,
-        src: MemoryOperand,
+        dst: MemoryOperand,
+        src: u8,
         imm: u8,
     },
     EvexVcvtps2phWpsVpsIbKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
+        imm: u8,
     },
     EvexVcvtps2phWpsVpsIbKmaskM {
-        dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        dst: MemoryOperand,
+        src: u8,
+        imm: u8,
     },
     EvexVcvtps2phxVphWdqR {
         dst: u8,
@@ -17582,13 +17899,11 @@ pub enum TypedInstruction {
     },
     EvexVcvtps2phxVphWdqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVcvtps2phxVphWdqKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVcvtps2qqVdqWpsR {
         dst: u8,
@@ -17600,13 +17915,11 @@ pub enum TypedInstruction {
     },
     EvexVcvtps2qqVdqWpsKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVcvtps2qqVdqWpsKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVcvtps2udqVdqWpsR {
         dst: u8,
@@ -17618,13 +17931,11 @@ pub enum TypedInstruction {
     },
     EvexVcvtps2udqVdqWpsKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVcvtps2udqVdqWpsKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVcvtps2uqqVdqWpsR {
         dst: u8,
@@ -17636,13 +17947,11 @@ pub enum TypedInstruction {
     },
     EvexVcvtps2uqqVdqWpsKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVcvtps2uqqVdqWpsKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVcvtqq2pdVpdWdqR {
         dst: u8,
@@ -17654,13 +17963,11 @@ pub enum TypedInstruction {
     },
     EvexVcvtqq2pdVpdWdqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVcvtqq2pdVpdWdqKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVcvtqq2phVphWdqR {
         dst: u8,
@@ -17672,13 +17979,11 @@ pub enum TypedInstruction {
     },
     EvexVcvtqq2phVphWdqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVcvtqq2phVphWdqKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVcvtqq2psVpsWdqR {
         dst: u8,
@@ -17690,21 +17995,37 @@ pub enum TypedInstruction {
     },
     EvexVcvtqq2psVpsWdqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVcvtqq2psVpsWdqKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
-    EvexVcvtsd2shVssWshR {
+    EvexVcvtrops2hf8Vf8WpsKmaskR {
         dst: u8,
         src: u8,
     },
-    EvexVcvtsd2shVssWshM {
+    EvexVcvtrops2hf8Vf8WpsKmaskM {
         dst: u8,
         src: MemoryOperand,
+    },
+    EvexVcvtrops2hf8sVf8WpsKmaskR {
+        dst: u8,
+        src: u8,
+    },
+    EvexVcvtrops2hf8sVf8WpsKmaskM {
+        dst: u8,
+        src: MemoryOperand,
+    },
+    EvexVcvtsd2shVssWshR {
+        dst: u8,
+        src1: u8,
+        src2: u8,
+    },
+    EvexVcvtsd2shVssWshM {
+        dst: u8,
+        src1: u8,
+        src2: MemoryOperand,
     },
     EvexVcvtsd2shVssWshKmaskR {
         dst: u8,
@@ -17734,11 +18055,13 @@ pub enum TypedInstruction {
     },
     EvexVcvtsd2ssVssWsdR {
         dst: u8,
-        src: u8,
+        src1: u8,
+        src2: u8,
     },
     EvexVcvtsd2ssVssWsdM {
         dst: u8,
-        src: MemoryOperand,
+        src1: u8,
+        src2: MemoryOperand,
     },
     EvexVcvtsd2ssVssWsdKmaskR {
         dst: u8,
@@ -17768,11 +18091,13 @@ pub enum TypedInstruction {
     },
     EvexVcvtsh2sdVsdWshR {
         dst: u8,
-        src: u8,
+        src1: u8,
+        src2: u8,
     },
     EvexVcvtsh2sdVsdWshM {
         dst: u8,
-        src: MemoryOperand,
+        src1: u8,
+        src2: MemoryOperand,
     },
     EvexVcvtsh2sdVsdWshKmaskR {
         dst: u8,
@@ -17802,11 +18127,13 @@ pub enum TypedInstruction {
     },
     EvexVcvtsh2ssVssWshR {
         dst: u8,
-        src: u8,
+        src1: u8,
+        src2: u8,
     },
     EvexVcvtsh2ssVssWshM {
         dst: u8,
-        src: MemoryOperand,
+        src1: u8,
+        src2: MemoryOperand,
     },
     EvexVcvtsh2ssVssWshKmaskR {
         dst: u8,
@@ -17836,59 +18163,73 @@ pub enum TypedInstruction {
     },
     EvexVcvtsi2sdVsdEdR {
         dst: u8,
-        src: GprIndex,
+        src1: u8,
+        src2: GprIndex,
     },
     EvexVcvtsi2sdVsdEdM {
         dst: u8,
-        src: MemoryOperand,
+        src1: u8,
+        src2: MemoryOperand,
     },
     EvexVcvtsi2sdVsdEqR {
         dst: u8,
-        src: GprIndex,
+        src1: u8,
+        src2: GprIndex,
     },
     EvexVcvtsi2sdVsdEqM {
         dst: u8,
-        src: MemoryOperand,
+        src1: u8,
+        src2: MemoryOperand,
     },
     EvexVcvtsi2shVshEdR {
         dst: u8,
-        src: GprIndex,
+        src1: u8,
+        src2: GprIndex,
     },
     EvexVcvtsi2shVshEdM {
         dst: u8,
-        src: MemoryOperand,
+        src1: u8,
+        src2: MemoryOperand,
     },
     EvexVcvtsi2shVshEqR {
         dst: u8,
-        src: GprIndex,
+        src1: u8,
+        src2: GprIndex,
     },
     EvexVcvtsi2shVshEqM {
         dst: u8,
-        src: MemoryOperand,
+        src1: u8,
+        src2: MemoryOperand,
     },
     EvexVcvtsi2ssVssEdR {
         dst: u8,
-        src: GprIndex,
+        src1: u8,
+        src2: GprIndex,
     },
     EvexVcvtsi2ssVssEdM {
         dst: u8,
-        src: MemoryOperand,
+        src1: u8,
+        src2: MemoryOperand,
     },
     EvexVcvtsi2ssVssEqR {
         dst: u8,
-        src: GprIndex,
+        src1: u8,
+        src2: GprIndex,
     },
     EvexVcvtsi2ssVssEqM {
         dst: u8,
-        src: MemoryOperand,
+        src1: u8,
+        src2: MemoryOperand,
     },
     EvexVcvtss2sdVsdWssR {
         dst: u8,
-        src: u8,
+        src1: u8,
+        src2: u8,
     },
     EvexVcvtss2sdVsdWssM {
         dst: u8,
-        src: MemoryOperand,
+        src1: u8,
+        src2: MemoryOperand,
     },
     EvexVcvtss2sdVsdWssKmaskR {
         dst: u8,
@@ -17902,11 +18243,13 @@ pub enum TypedInstruction {
     },
     EvexVcvtss2shVssWshR {
         dst: u8,
-        src: u8,
+        src1: u8,
+        src2: u8,
     },
     EvexVcvtss2shVssWshM {
         dst: u8,
-        src: MemoryOperand,
+        src1: u8,
+        src2: MemoryOperand,
     },
     EvexVcvtss2shVssWshKmaskR {
         dst: u8,
@@ -17960,13 +18303,11 @@ pub enum TypedInstruction {
     },
     EvexVcvttbf162ibsV8bWphKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVcvttbf162ibsV8bWphKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVcvttbf162iubsV8bWphR {
         dst: u8,
@@ -17978,13 +18319,11 @@ pub enum TypedInstruction {
     },
     EvexVcvttbf162iubsV8bWphKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVcvttbf162iubsV8bWphKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVcvttpd2dqVdqWpdR {
         dst: u8,
@@ -17996,13 +18335,11 @@ pub enum TypedInstruction {
     },
     EvexVcvttpd2dqVdqWpdKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVcvttpd2dqVdqWpdKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVcvttpd2dqsVdqWpdR {
         dst: u8,
@@ -18014,13 +18351,11 @@ pub enum TypedInstruction {
     },
     EvexVcvttpd2dqsVdqWpdKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVcvttpd2dqsVdqWpdKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVcvttpd2qqVdqWpdR {
         dst: u8,
@@ -18032,13 +18367,11 @@ pub enum TypedInstruction {
     },
     EvexVcvttpd2qqVdqWpdKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVcvttpd2qqVdqWpdKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVcvttpd2qqsVdqWpdR {
         dst: u8,
@@ -18050,13 +18383,11 @@ pub enum TypedInstruction {
     },
     EvexVcvttpd2qqsVdqWpdKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVcvttpd2qqsVdqWpdKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVcvttpd2udqVdqWpdR {
         dst: u8,
@@ -18068,13 +18399,11 @@ pub enum TypedInstruction {
     },
     EvexVcvttpd2udqVdqWpdKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVcvttpd2udqVdqWpdKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVcvttpd2udqsVdqWpdR {
         dst: u8,
@@ -18086,13 +18415,11 @@ pub enum TypedInstruction {
     },
     EvexVcvttpd2udqsVdqWpdKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVcvttpd2udqsVdqWpdKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVcvttpd2uqqVdqWpdR {
         dst: u8,
@@ -18104,13 +18431,11 @@ pub enum TypedInstruction {
     },
     EvexVcvttpd2uqqVdqWpdKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVcvttpd2uqqVdqWpdKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVcvttpd2uqqsVdqWpdR {
         dst: u8,
@@ -18122,13 +18447,11 @@ pub enum TypedInstruction {
     },
     EvexVcvttpd2uqqsVdqWpdKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVcvttpd2uqqsVdqWpdKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVcvttph2dqVdqWphR {
         dst: u8,
@@ -18140,13 +18463,11 @@ pub enum TypedInstruction {
     },
     EvexVcvttph2dqVdqWphKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVcvttph2dqVdqWphKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVcvttph2ibsV8bWphR {
         dst: u8,
@@ -18158,13 +18479,11 @@ pub enum TypedInstruction {
     },
     EvexVcvttph2ibsV8bWphKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVcvttph2ibsV8bWphKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVcvttph2iubsV8bWphR {
         dst: u8,
@@ -18176,13 +18495,11 @@ pub enum TypedInstruction {
     },
     EvexVcvttph2iubsV8bWphKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVcvttph2iubsV8bWphKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVcvttph2qqVdqWphR {
         dst: u8,
@@ -18194,13 +18511,11 @@ pub enum TypedInstruction {
     },
     EvexVcvttph2qqVdqWphKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVcvttph2qqVdqWphKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVcvttph2udqVdqWphR {
         dst: u8,
@@ -18212,13 +18527,11 @@ pub enum TypedInstruction {
     },
     EvexVcvttph2udqVdqWphKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVcvttph2udqVdqWphKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVcvttph2uqqVdqWphR {
         dst: u8,
@@ -18230,13 +18543,11 @@ pub enum TypedInstruction {
     },
     EvexVcvttph2uqqVdqWphKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVcvttph2uqqVdqWphKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVcvttph2uwVdqWpsR {
         dst: u8,
@@ -18248,13 +18559,11 @@ pub enum TypedInstruction {
     },
     EvexVcvttph2uwVdqWpsKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVcvttph2uwVdqWpsKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVcvttph2wVdqWpsR {
         dst: u8,
@@ -18266,13 +18575,11 @@ pub enum TypedInstruction {
     },
     EvexVcvttph2wVdqWpsKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVcvttph2wVdqWpsKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVcvttps2dqVdqWpsR {
         dst: u8,
@@ -18284,13 +18591,11 @@ pub enum TypedInstruction {
     },
     EvexVcvttps2dqVdqWpsKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVcvttps2dqVdqWpsKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVcvttps2dqsVdqWpsR {
         dst: u8,
@@ -18302,13 +18607,11 @@ pub enum TypedInstruction {
     },
     EvexVcvttps2dqsVdqWpsKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVcvttps2dqsVdqWpsKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVcvttps2ibsV8bWpsR {
         dst: u8,
@@ -18320,13 +18623,11 @@ pub enum TypedInstruction {
     },
     EvexVcvttps2ibsV8bWpsKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVcvttps2ibsV8bWpsKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVcvttps2iubsV8bWpsR {
         dst: u8,
@@ -18338,13 +18639,11 @@ pub enum TypedInstruction {
     },
     EvexVcvttps2iubsV8bWpsKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVcvttps2iubsV8bWpsKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVcvttps2qqVdqWpsR {
         dst: u8,
@@ -18356,13 +18655,11 @@ pub enum TypedInstruction {
     },
     EvexVcvttps2qqVdqWpsKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVcvttps2qqVdqWpsKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVcvttps2qqsVdqWpsR {
         dst: u8,
@@ -18374,13 +18671,11 @@ pub enum TypedInstruction {
     },
     EvexVcvttps2qqsVdqWpsKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVcvttps2qqsVdqWpsKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVcvttps2udqVdqWpsR {
         dst: u8,
@@ -18392,13 +18687,11 @@ pub enum TypedInstruction {
     },
     EvexVcvttps2udqVdqWpsKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVcvttps2udqVdqWpsKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVcvttps2udqsVdqWpsR {
         dst: u8,
@@ -18410,13 +18703,11 @@ pub enum TypedInstruction {
     },
     EvexVcvttps2udqsVdqWpsKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVcvttps2udqsVdqWpsKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVcvttps2uqqVdqWpsR {
         dst: u8,
@@ -18428,13 +18719,11 @@ pub enum TypedInstruction {
     },
     EvexVcvttps2uqqVdqWpsKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVcvttps2uqqVdqWpsKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVcvttps2uqqsVdqWpsR {
         dst: u8,
@@ -18446,13 +18735,11 @@ pub enum TypedInstruction {
     },
     EvexVcvttps2uqqsVdqWpsKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVcvttps2uqqsVdqWpsKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVcvttsd2siGdWsdR {
         dst: GprIndex,
@@ -18624,13 +18911,11 @@ pub enum TypedInstruction {
     },
     EvexVcvtudq2pdVpdWdqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVcvtudq2pdVpdWdqKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVcvtudq2phVphWdqR {
         dst: u8,
@@ -18642,13 +18927,11 @@ pub enum TypedInstruction {
     },
     EvexVcvtudq2phVphWdqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVcvtudq2phVphWdqKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVcvtudq2psVpsWdqR {
         dst: u8,
@@ -18660,13 +18943,11 @@ pub enum TypedInstruction {
     },
     EvexVcvtudq2psVpsWdqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVcvtudq2psVpsWdqKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVcvtuqq2pdVpdWdqR {
         dst: u8,
@@ -18678,13 +18959,11 @@ pub enum TypedInstruction {
     },
     EvexVcvtuqq2pdVpdWdqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVcvtuqq2pdVpdWdqKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVcvtuqq2phVphWdqR {
         dst: u8,
@@ -18696,13 +18975,11 @@ pub enum TypedInstruction {
     },
     EvexVcvtuqq2phVphWdqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVcvtuqq2phVphWdqKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVcvtuqq2psVpsWdqR {
         dst: u8,
@@ -18714,61 +18991,71 @@ pub enum TypedInstruction {
     },
     EvexVcvtuqq2psVpsWdqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVcvtuqq2psVpsWdqKmaskM {
+        dst: u8,
+        src: MemoryOperand,
+    },
+    EvexVcvtusi2sdVsdEdR {
+        dst: u8,
+        src1: u8,
+        src2: GprIndex,
+    },
+    EvexVcvtusi2sdVsdEdM {
         dst: u8,
         src1: u8,
         src2: MemoryOperand,
     },
-    EvexVcvtusi2sdVsdEdR {
-        dst: u8,
-        src: GprIndex,
-    },
-    EvexVcvtusi2sdVsdEdM {
-        dst: u8,
-        src: MemoryOperand,
-    },
     EvexVcvtusi2sdVsdEqR {
         dst: u8,
-        src: GprIndex,
+        src1: u8,
+        src2: GprIndex,
     },
     EvexVcvtusi2sdVsdEqM {
         dst: u8,
-        src: MemoryOperand,
+        src1: u8,
+        src2: MemoryOperand,
     },
     EvexVcvtusi2shVshEdR {
         dst: u8,
-        src: GprIndex,
+        src1: u8,
+        src2: GprIndex,
     },
     EvexVcvtusi2shVshEdM {
         dst: u8,
-        src: MemoryOperand,
+        src1: u8,
+        src2: MemoryOperand,
     },
     EvexVcvtusi2shVshEqR {
         dst: u8,
-        src: GprIndex,
+        src1: u8,
+        src2: GprIndex,
     },
     EvexVcvtusi2shVshEqM {
         dst: u8,
-        src: MemoryOperand,
+        src1: u8,
+        src2: MemoryOperand,
     },
     EvexVcvtusi2ssVssEdR {
         dst: u8,
-        src: GprIndex,
+        src1: u8,
+        src2: GprIndex,
     },
     EvexVcvtusi2ssVssEdM {
         dst: u8,
-        src: MemoryOperand,
+        src1: u8,
+        src2: MemoryOperand,
     },
     EvexVcvtusi2ssVssEqR {
         dst: u8,
-        src: GprIndex,
+        src1: u8,
+        src2: GprIndex,
     },
     EvexVcvtusi2ssVssEqM {
         dst: u8,
-        src: MemoryOperand,
+        src1: u8,
+        src2: MemoryOperand,
     },
     EvexVcvtuw2phVphWdqR {
         dst: u8,
@@ -18780,13 +19067,11 @@ pub enum TypedInstruction {
     },
     EvexVcvtuw2phVphWdqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVcvtuw2phVphWdqKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVcvtw2phVphWdqR {
         dst: u8,
@@ -18798,23 +19083,23 @@ pub enum TypedInstruction {
     },
     EvexVcvtw2phVphWdqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVcvtw2phVphWdqKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVdbpsadbwVdqHdqWdqIbKmaskR {
         dst: u8,
         src1: u8,
         src2: u8,
+        imm: u8,
     },
     EvexVdbpsadbwVdqHdqWdqIbKmaskM {
         dst: u8,
         src1: u8,
         src2: MemoryOperand,
+        imm: u8,
     },
     EvexVdivbf16VphHphWphR {
         dst: u8,
@@ -18986,13 +19271,11 @@ pub enum TypedInstruction {
     },
     EvexVexpandpdVpdWpdKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVexpandpdVpdWpdKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVexpandpsVpsWpsR {
         dst: u8,
@@ -19004,13 +19287,11 @@ pub enum TypedInstruction {
     },
     EvexVexpandpsVpsWpsKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVexpandpsVpsWpsKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVextractf32x4WpsVpsIbR {
         dst: u8,
@@ -19018,19 +19299,19 @@ pub enum TypedInstruction {
         imm: u8,
     },
     EvexVextractf32x4WpsVpsIbM {
-        dst: u8,
-        src: MemoryOperand,
+        dst: MemoryOperand,
+        src: u8,
         imm: u8,
     },
     EvexVextractf32x4WpsVpsIbKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
+        imm: u8,
     },
     EvexVextractf32x4WpsVpsIbKmaskM {
-        dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        dst: MemoryOperand,
+        src: u8,
+        imm: u8,
     },
     EvexVextractf32x8WpsVpsIbR {
         dst: u8,
@@ -19038,19 +19319,19 @@ pub enum TypedInstruction {
         imm: u8,
     },
     EvexVextractf32x8WpsVpsIbM {
-        dst: u8,
-        src: MemoryOperand,
+        dst: MemoryOperand,
+        src: u8,
         imm: u8,
     },
     EvexVextractf32x8WpsVpsIbKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
+        imm: u8,
     },
     EvexVextractf32x8WpsVpsIbKmaskM {
-        dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        dst: MemoryOperand,
+        src: u8,
+        imm: u8,
     },
     EvexVextractf64x2WpdVpdIbR {
         dst: u8,
@@ -19058,19 +19339,19 @@ pub enum TypedInstruction {
         imm: u8,
     },
     EvexVextractf64x2WpdVpdIbM {
-        dst: u8,
-        src: MemoryOperand,
+        dst: MemoryOperand,
+        src: u8,
         imm: u8,
     },
     EvexVextractf64x2WpdVpdIbKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
+        imm: u8,
     },
     EvexVextractf64x2WpdVpdIbKmaskM {
-        dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        dst: MemoryOperand,
+        src: u8,
+        imm: u8,
     },
     EvexVextractf64x4WpdVpdIbR {
         dst: u8,
@@ -19078,19 +19359,19 @@ pub enum TypedInstruction {
         imm: u8,
     },
     EvexVextractf64x4WpdVpdIbM {
-        dst: u8,
-        src: MemoryOperand,
+        dst: MemoryOperand,
+        src: u8,
         imm: u8,
     },
     EvexVextractf64x4WpdVpdIbKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
+        imm: u8,
     },
     EvexVextractf64x4WpdVpdIbKmaskM {
-        dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        dst: MemoryOperand,
+        src: u8,
+        imm: u8,
     },
     EvexVextracti32x4WdqVdqIbR {
         dst: u8,
@@ -19098,19 +19379,19 @@ pub enum TypedInstruction {
         imm: u8,
     },
     EvexVextracti32x4WdqVdqIbM {
-        dst: u8,
-        src: MemoryOperand,
+        dst: MemoryOperand,
+        src: u8,
         imm: u8,
     },
     EvexVextracti32x4WdqVdqIbKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
+        imm: u8,
     },
     EvexVextracti32x4WdqVdqIbKmaskM {
-        dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        dst: MemoryOperand,
+        src: u8,
+        imm: u8,
     },
     EvexVextracti32x8WdqVdqIbR {
         dst: u8,
@@ -19118,19 +19399,19 @@ pub enum TypedInstruction {
         imm: u8,
     },
     EvexVextracti32x8WdqVdqIbM {
-        dst: u8,
-        src: MemoryOperand,
+        dst: MemoryOperand,
+        src: u8,
         imm: u8,
     },
     EvexVextracti32x8WdqVdqIbKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
+        imm: u8,
     },
     EvexVextracti32x8WdqVdqIbKmaskM {
-        dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        dst: MemoryOperand,
+        src: u8,
+        imm: u8,
     },
     EvexVextracti64x2WdqVdqIbR {
         dst: u8,
@@ -19138,19 +19419,19 @@ pub enum TypedInstruction {
         imm: u8,
     },
     EvexVextracti64x2WdqVdqIbM {
-        dst: u8,
-        src: MemoryOperand,
+        dst: MemoryOperand,
+        src: u8,
         imm: u8,
     },
     EvexVextracti64x2WdqVdqIbKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
+        imm: u8,
     },
     EvexVextracti64x2WdqVdqIbKmaskM {
-        dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        dst: MemoryOperand,
+        src: u8,
+        imm: u8,
     },
     EvexVextracti64x4WdqVdqIbR {
         dst: u8,
@@ -19158,19 +19439,19 @@ pub enum TypedInstruction {
         imm: u8,
     },
     EvexVextracti64x4WdqVdqIbM {
-        dst: u8,
-        src: MemoryOperand,
+        dst: MemoryOperand,
+        src: u8,
         imm: u8,
     },
     EvexVextracti64x4WdqVdqIbKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
+        imm: u8,
     },
     EvexVextracti64x4WdqVdqIbKmaskM {
-        dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        dst: MemoryOperand,
+        src: u8,
+        imm: u8,
     },
     EvexVextractpsEdVpsIbR {
         dst: GprIndex,
@@ -19238,11 +19519,13 @@ pub enum TypedInstruction {
         dst: u8,
         src1: u8,
         src2: u8,
+        imm: u8,
     },
     EvexVfixupimmpdVpdHpdWpdIbKmaskM {
         dst: u8,
         src1: u8,
         src2: MemoryOperand,
+        imm: u8,
     },
     EvexVfixupimmpsVpsHpsWpsIbR {
         dst: u8,
@@ -19260,31 +19543,37 @@ pub enum TypedInstruction {
         dst: u8,
         src1: u8,
         src2: u8,
+        imm: u8,
     },
     EvexVfixupimmpsVpsHpsWpsIbKmaskM {
         dst: u8,
         src1: u8,
         src2: MemoryOperand,
+        imm: u8,
     },
     EvexVfixupimmsdVsdHsdWsdIbKmaskR {
         dst: u8,
         src1: u8,
         src2: u8,
+        imm: u8,
     },
     EvexVfixupimmsdVsdHsdWsdIbKmaskM {
         dst: u8,
         src1: u8,
         src2: MemoryOperand,
+        imm: u8,
     },
     EvexVfixupimmssVssHssWssIbKmaskR {
         dst: u8,
         src1: u8,
         src2: u8,
+        imm: u8,
     },
     EvexVfixupimmssVssHssWssIbKmaskM {
         dst: u8,
         src1: u8,
         src2: MemoryOperand,
+        imm: u8,
     },
     EvexVfmadd132bf16VphHphWphR {
         dst: u8,
@@ -21368,73 +21657,73 @@ pub enum TypedInstruction {
     },
     EvexVfpclasspbf16KgdWphIbKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
+        imm: u8,
     },
     EvexVfpclasspbf16KgdWphIbKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
+        imm: u8,
     },
     EvexVfpclasspdKgbWpdIbKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
+        imm: u8,
     },
     EvexVfpclasspdKgbWpdIbKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
+        imm: u8,
     },
     EvexVfpclassphKgdWphIbKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
+        imm: u8,
     },
     EvexVfpclassphKgdWphIbKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
+        imm: u8,
     },
     EvexVfpclasspsKgwWpsIbKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
+        imm: u8,
     },
     EvexVfpclasspsKgwWpsIbKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
+        imm: u8,
     },
     EvexVfpclasssdKgbWsdIbKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
+        imm: u8,
     },
     EvexVfpclasssdKgbWsdIbKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
+        imm: u8,
     },
     EvexVfpclassshKgbWshIbKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
+        imm: u8,
     },
     EvexVfpclassshKgbWshIbKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
+        imm: u8,
     },
     EvexVfpclassssKgbWssIbKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
+        imm: u8,
     },
     EvexVfpclassssKgbWssIbKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
+        imm: u8,
     },
     EvexVgatherddVdqVsibR {
         dst: u8,
@@ -21510,13 +21799,11 @@ pub enum TypedInstruction {
     },
     EvexVgetexppbf16VphWphKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVgetexppbf16VphWphKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVgetexppdVpdWpdR {
         dst: u8,
@@ -21528,13 +21815,11 @@ pub enum TypedInstruction {
     },
     EvexVgetexppdVpdWpdKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVgetexppdVpdWpdKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVgetexpphVphWphR {
         dst: u8,
@@ -21546,13 +21831,11 @@ pub enum TypedInstruction {
     },
     EvexVgetexpphVphWphKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVgetexpphVphWphKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVgetexppsVpsWpsR {
         dst: u8,
@@ -21564,13 +21847,11 @@ pub enum TypedInstruction {
     },
     EvexVgetexppsVpsWpsKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVgetexppsVpsWpsKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVgetexpsdVsdHpdWsdR {
         dst: u8,
@@ -21634,93 +21915,103 @@ pub enum TypedInstruction {
     },
     EvexVgetmantpbf16VphWphIbKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
+        imm: u8,
     },
     EvexVgetmantpbf16VphWphIbKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
+        imm: u8,
     },
     EvexVgetmantpdVpdWpdIbKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
+        imm: u8,
     },
     EvexVgetmantpdVpdWpdIbKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
+        imm: u8,
     },
     EvexVgetmantphVphWphIbKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
+        imm: u8,
     },
     EvexVgetmantphVphWphIbKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
+        imm: u8,
     },
     EvexVgetmantpsVpsWpsIbKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
+        imm: u8,
     },
     EvexVgetmantpsVpsWpsIbKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
+        imm: u8,
     },
     EvexVgetmantsdVsdHpdWsdIbKmaskR {
         dst: u8,
         src1: u8,
         src2: u8,
+        imm: u8,
     },
     EvexVgetmantsdVsdHpdWsdIbKmaskM {
         dst: u8,
         src1: u8,
         src2: MemoryOperand,
+        imm: u8,
     },
     EvexVgetmantshVshHphWshIbKmaskR {
         dst: u8,
         src1: u8,
         src2: u8,
+        imm: u8,
     },
     EvexVgetmantshVshHphWshIbKmaskM {
         dst: u8,
         src1: u8,
         src2: MemoryOperand,
+        imm: u8,
     },
     EvexVgetmantssVssHpsWssIbKmaskR {
         dst: u8,
         src1: u8,
         src2: u8,
+        imm: u8,
     },
     EvexVgetmantssVssHpsWssIbKmaskM {
         dst: u8,
         src1: u8,
         src2: MemoryOperand,
+        imm: u8,
     },
     EvexVgf2p8affineinvqbVdqHdqWdqIbKmaskR {
         dst: u8,
         src1: u8,
         src2: u8,
+        imm: u8,
     },
     EvexVgf2p8affineinvqbVdqHdqWdqIbKmaskM {
         dst: u8,
         src1: u8,
         src2: MemoryOperand,
+        imm: u8,
     },
     EvexVgf2p8affineqbVdqHdqWdqIbKmaskR {
         dst: u8,
         src1: u8,
         src2: u8,
+        imm: u8,
     },
     EvexVgf2p8affineqbVdqHdqWdqIbKmaskM {
         dst: u8,
         src1: u8,
         src2: MemoryOperand,
+        imm: u8,
     },
     EvexVgf2p8mulbVdqHdqWdqKmaskR {
         dst: u8,
@@ -21748,11 +22039,13 @@ pub enum TypedInstruction {
         dst: u8,
         src1: u8,
         src2: u8,
+        imm: u8,
     },
     EvexVinsertf32x4VpsHpsWpsIbKmaskM {
         dst: u8,
         src1: u8,
         src2: MemoryOperand,
+        imm: u8,
     },
     EvexVinsertf32x8VpsHpsWpsIbR {
         dst: u8,
@@ -21770,11 +22063,13 @@ pub enum TypedInstruction {
         dst: u8,
         src1: u8,
         src2: u8,
+        imm: u8,
     },
     EvexVinsertf32x8VpsHpsWpsIbKmaskM {
         dst: u8,
         src1: u8,
         src2: MemoryOperand,
+        imm: u8,
     },
     EvexVinsertf64x2VpdHpdWpdIbR {
         dst: u8,
@@ -21792,11 +22087,13 @@ pub enum TypedInstruction {
         dst: u8,
         src1: u8,
         src2: u8,
+        imm: u8,
     },
     EvexVinsertf64x2VpdHpdWpdIbKmaskM {
         dst: u8,
         src1: u8,
         src2: MemoryOperand,
+        imm: u8,
     },
     EvexVinsertf64x4VpdHpdWpdIbR {
         dst: u8,
@@ -21814,11 +22111,13 @@ pub enum TypedInstruction {
         dst: u8,
         src1: u8,
         src2: u8,
+        imm: u8,
     },
     EvexVinsertf64x4VpdHpdWpdIbKmaskM {
         dst: u8,
         src1: u8,
         src2: MemoryOperand,
+        imm: u8,
     },
     EvexVinserti32x4VdqHdqWdqIbR {
         dst: u8,
@@ -21836,11 +22135,13 @@ pub enum TypedInstruction {
         dst: u8,
         src1: u8,
         src2: u8,
+        imm: u8,
     },
     EvexVinserti32x4VdqHdqWdqIbKmaskM {
         dst: u8,
         src1: u8,
         src2: MemoryOperand,
+        imm: u8,
     },
     EvexVinserti32x8VdqHdqWdqIbR {
         dst: u8,
@@ -21858,11 +22159,13 @@ pub enum TypedInstruction {
         dst: u8,
         src1: u8,
         src2: u8,
+        imm: u8,
     },
     EvexVinserti32x8VdqHdqWdqIbKmaskM {
         dst: u8,
         src1: u8,
         src2: MemoryOperand,
+        imm: u8,
     },
     EvexVinserti64x2VdqHdqWdqIbR {
         dst: u8,
@@ -21880,11 +22183,13 @@ pub enum TypedInstruction {
         dst: u8,
         src1: u8,
         src2: u8,
+        imm: u8,
     },
     EvexVinserti64x2VdqHdqWdqIbKmaskM {
         dst: u8,
         src1: u8,
         src2: MemoryOperand,
+        imm: u8,
     },
     EvexVinserti64x4VdqHdqWdqIbR {
         dst: u8,
@@ -21902,20 +22207,24 @@ pub enum TypedInstruction {
         dst: u8,
         src1: u8,
         src2: u8,
+        imm: u8,
     },
     EvexVinserti64x4VdqHdqWdqIbKmaskM {
         dst: u8,
         src1: u8,
         src2: MemoryOperand,
+        imm: u8,
     },
     EvexVinsertpsVpsWssIbR {
         dst: u8,
-        src: u8,
+        src1: u8,
+        src2: u8,
         imm: u8,
     },
     EvexVinsertpsVpsWssIbM {
         dst: u8,
-        src: MemoryOperand,
+        src1: u8,
+        src2: MemoryOperand,
         imm: u8,
     },
     EvexVmaxbf16VphHphWphR {
@@ -22278,13 +22587,11 @@ pub enum TypedInstruction {
     },
     EvexVmovapdVpdWpdKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVmovapdVpdWpdKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVmovapdWpdVpdR {
         dst: u8,
@@ -22296,13 +22603,11 @@ pub enum TypedInstruction {
     },
     EvexVmovapdWpdVpdKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVmovapdWpdVpdKmaskM {
-        dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        dst: MemoryOperand,
+        src: u8,
     },
     EvexVmovapsVpsWpsR {
         dst: u8,
@@ -22314,13 +22619,11 @@ pub enum TypedInstruction {
     },
     EvexVmovapsVpsWpsKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVmovapsVpsWpsKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVmovapsWpsVpsR {
         dst: u8,
@@ -22332,13 +22635,11 @@ pub enum TypedInstruction {
     },
     EvexVmovapsWpsVpsKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVmovapsWpsVpsKmaskM {
-        dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        dst: MemoryOperand,
+        src: u8,
     },
     EvexVmovdEdVdR {
         dst: GprIndex,
@@ -22382,13 +22683,11 @@ pub enum TypedInstruction {
     },
     EvexVmovddupVpdWpdKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVmovddupVpdWpdKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVmovdqa32VdqWdqR {
         dst: u8,
@@ -22400,13 +22699,11 @@ pub enum TypedInstruction {
     },
     EvexVmovdqa32VdqWdqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVmovdqa32VdqWdqKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVmovdqa32WdqVdqR {
         dst: u8,
@@ -22418,13 +22715,11 @@ pub enum TypedInstruction {
     },
     EvexVmovdqa32WdqVdqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVmovdqa32WdqVdqKmaskM {
-        dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        dst: MemoryOperand,
+        src: u8,
     },
     EvexVmovdqa64VdqWdqR {
         dst: u8,
@@ -22436,13 +22731,11 @@ pub enum TypedInstruction {
     },
     EvexVmovdqa64VdqWdqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVmovdqa64VdqWdqKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVmovdqa64WdqVdqR {
         dst: u8,
@@ -22454,13 +22747,11 @@ pub enum TypedInstruction {
     },
     EvexVmovdqa64WdqVdqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVmovdqa64WdqVdqKmaskM {
-        dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        dst: MemoryOperand,
+        src: u8,
     },
     EvexVmovdqu16VdqWdqR {
         dst: u8,
@@ -22472,13 +22763,11 @@ pub enum TypedInstruction {
     },
     EvexVmovdqu16VdqWdqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVmovdqu16VdqWdqKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVmovdqu16WdqVdqR {
         dst: u8,
@@ -22490,13 +22779,11 @@ pub enum TypedInstruction {
     },
     EvexVmovdqu16WdqVdqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVmovdqu16WdqVdqKmaskM {
-        dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        dst: MemoryOperand,
+        src: u8,
     },
     EvexVmovdqu32VdqWdqR {
         dst: u8,
@@ -22508,13 +22795,11 @@ pub enum TypedInstruction {
     },
     EvexVmovdqu32VdqWdqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVmovdqu32VdqWdqKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVmovdqu32WdqVdqR {
         dst: u8,
@@ -22526,13 +22811,11 @@ pub enum TypedInstruction {
     },
     EvexVmovdqu32WdqVdqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVmovdqu32WdqVdqKmaskM {
-        dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        dst: MemoryOperand,
+        src: u8,
     },
     EvexVmovdqu64VdqWdqR {
         dst: u8,
@@ -22544,13 +22827,11 @@ pub enum TypedInstruction {
     },
     EvexVmovdqu64VdqWdqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVmovdqu64VdqWdqKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVmovdqu64WdqVdqR {
         dst: u8,
@@ -22562,13 +22843,11 @@ pub enum TypedInstruction {
     },
     EvexVmovdqu64WdqVdqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVmovdqu64WdqVdqKmaskM {
-        dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        dst: MemoryOperand,
+        src: u8,
     },
     EvexVmovdqu8VdqWdqR {
         dst: u8,
@@ -22580,13 +22859,11 @@ pub enum TypedInstruction {
     },
     EvexVmovdqu8VdqWdqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVmovdqu8VdqWdqKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVmovdqu8WdqVdqR {
         dst: u8,
@@ -22598,13 +22875,11 @@ pub enum TypedInstruction {
     },
     EvexVmovdqu8WdqVdqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVmovdqu8WdqVdqKmaskM {
-        dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        dst: MemoryOperand,
+        src: u8,
     },
     EvexVmovhlpsVpsHpsWpsR {
         dst: u8,
@@ -22720,13 +22995,11 @@ pub enum TypedInstruction {
     },
     EvexVmovrsbVdqWdqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVmovrsbVdqWdqKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVmovrsdVdqWdqR {
         dst: u8,
@@ -22738,13 +23011,11 @@ pub enum TypedInstruction {
     },
     EvexVmovrsdVdqWdqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVmovrsdVdqWdqKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVmovrsqVdqWdqR {
         dst: u8,
@@ -22756,13 +23027,11 @@ pub enum TypedInstruction {
     },
     EvexVmovrsqVdqWdqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVmovrsqVdqWdqKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVmovrswVdqWdqR {
         dst: u8,
@@ -22774,13 +23043,11 @@ pub enum TypedInstruction {
     },
     EvexVmovrswVdqWdqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVmovrswVdqWdqKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVmovsdVsdHpdWsdR {
         dst: u8,
@@ -22812,13 +23079,11 @@ pub enum TypedInstruction {
     },
     EvexVmovsdVsdWsdKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVmovsdVsdWsdKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVmovsdWsdHpdVsdR {
         dst: u8,
@@ -22850,13 +23115,11 @@ pub enum TypedInstruction {
     },
     EvexVmovsdWsdVsdKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVmovsdWsdVsdKmaskM {
-        dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        dst: MemoryOperand,
+        src: u8,
     },
     EvexVmovshVshHphWshR {
         dst: u8,
@@ -22888,13 +23151,11 @@ pub enum TypedInstruction {
     },
     EvexVmovshVshWshKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVmovshVshWshKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVmovshWshHphVshR {
         dst: u8,
@@ -22926,13 +23187,11 @@ pub enum TypedInstruction {
     },
     EvexVmovshWshVshKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVmovshWshVshKmaskM {
-        dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        dst: MemoryOperand,
+        src: u8,
     },
     EvexVmovshdupVpsWpsR {
         dst: u8,
@@ -22944,13 +23203,11 @@ pub enum TypedInstruction {
     },
     EvexVmovshdupVpsWpsKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVmovshdupVpsWpsKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVmovsldupVpsWpsR {
         dst: u8,
@@ -22962,13 +23219,11 @@ pub enum TypedInstruction {
     },
     EvexVmovsldupVpsWpsKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVmovsldupVpsWpsKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVmovssVssHpsWssR {
         dst: u8,
@@ -23000,13 +23255,11 @@ pub enum TypedInstruction {
     },
     EvexVmovssVssWssKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVmovssVssWssKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVmovssWssHpsVssR {
         dst: u8,
@@ -23038,13 +23291,11 @@ pub enum TypedInstruction {
     },
     EvexVmovssWssVssKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVmovssWssVssKmaskM {
-        dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        dst: MemoryOperand,
+        src: u8,
     },
     EvexVmovupdVpdWpdR {
         dst: u8,
@@ -23056,13 +23307,11 @@ pub enum TypedInstruction {
     },
     EvexVmovupdVpdWpdKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVmovupdVpdWpdKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVmovupdWpdVpdR {
         dst: u8,
@@ -23074,13 +23323,11 @@ pub enum TypedInstruction {
     },
     EvexVmovupdWpdVpdKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVmovupdWpdVpdKmaskM {
-        dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        dst: MemoryOperand,
+        src: u8,
     },
     EvexVmovupsVpsWpsR {
         dst: u8,
@@ -23092,13 +23339,11 @@ pub enum TypedInstruction {
     },
     EvexVmovupsVpsWpsKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVmovupsVpsWpsKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVmovupsWpsVpsR {
         dst: u8,
@@ -23110,13 +23355,11 @@ pub enum TypedInstruction {
     },
     EvexVmovupsWpsVpsKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVmovupsWpsVpsKmaskM {
-        dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        dst: MemoryOperand,
+        src: u8,
     },
     EvexVmovwEdVshR {
         dst: GprIndex,
@@ -23166,11 +23409,13 @@ pub enum TypedInstruction {
         dst: u8,
         src1: u8,
         src2: u8,
+        imm: u8,
     },
     EvexVmpsadbwVdqHdqWdqIbKmaskM {
         dst: u8,
         src1: u8,
         src2: MemoryOperand,
+        imm: u8,
     },
     EvexVmulbf16VphHphWphR {
         dst: u8,
@@ -23382,13 +23627,11 @@ pub enum TypedInstruction {
     },
     EvexVpabsbVdqWdqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVpabsbVdqWdqKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVpabsdVdqWdqR {
         dst: u8,
@@ -23400,13 +23643,11 @@ pub enum TypedInstruction {
     },
     EvexVpabsdVdqWdqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVpabsdVdqWdqKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVpabsqVdqWdqR {
         dst: u8,
@@ -23418,13 +23659,11 @@ pub enum TypedInstruction {
     },
     EvexVpabsqVdqWdqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVpabsqVdqWdqKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVpabswVdqWdqR {
         dst: u8,
@@ -23436,13 +23675,11 @@ pub enum TypedInstruction {
     },
     EvexVpabswVdqWdqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVpabswVdqWdqKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVpackssdwVdqHdqWdqR {
         dst: u8,
@@ -23700,11 +23937,13 @@ pub enum TypedInstruction {
         dst: u8,
         src1: u8,
         src2: u8,
+        imm: u8,
     },
     EvexVpalignrVdqHdqWdqIbKmaskM {
         dst: u8,
         src1: u8,
         src2: MemoryOperand,
+        imm: u8,
     },
     EvexVpanddVdqHdqWdqR {
         dst: u8,
@@ -23876,13 +24115,11 @@ pub enum TypedInstruction {
     },
     EvexVpbroadcastbVdqEbKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: GprIndex,
     },
     EvexVpbroadcastbVdqEbKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVpbroadcastbVdqWbR {
         dst: u8,
@@ -23894,13 +24131,11 @@ pub enum TypedInstruction {
     },
     EvexVpbroadcastbVdqWbKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVpbroadcastbVdqWbKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVpbroadcastdVdqEdR {
         dst: u8,
@@ -23912,13 +24147,11 @@ pub enum TypedInstruction {
     },
     EvexVpbroadcastdVdqEdKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: GprIndex,
     },
     EvexVpbroadcastdVdqEdKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVpbroadcastdVdqWdR {
         dst: u8,
@@ -23930,13 +24163,11 @@ pub enum TypedInstruction {
     },
     EvexVpbroadcastdVdqWdKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVpbroadcastdVdqWdKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVpbroadcastmb2qVdqKebR {
         dst: u8,
@@ -23964,13 +24195,11 @@ pub enum TypedInstruction {
     },
     EvexVpbroadcastqVdqEqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: GprIndex,
     },
     EvexVpbroadcastqVdqEqKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVpbroadcastqVdqWqR {
         dst: u8,
@@ -23982,13 +24211,11 @@ pub enum TypedInstruction {
     },
     EvexVpbroadcastqVdqWqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVpbroadcastqVdqWqKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVpbroadcastwVdqEwR {
         dst: u8,
@@ -24000,13 +24227,11 @@ pub enum TypedInstruction {
     },
     EvexVpbroadcastwVdqEwKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: GprIndex,
     },
     EvexVpbroadcastwVdqEwKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVpbroadcastwVdqWwR {
         dst: u8,
@@ -24018,13 +24243,11 @@ pub enum TypedInstruction {
     },
     EvexVpbroadcastwVdqWwKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVpbroadcastwVdqWwKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVpclmulqdqVdqHdqWdqIbR {
         dst: u8,
@@ -24040,22 +24263,26 @@ pub enum TypedInstruction {
     },
     EvexVpcmpbKgqHdqWdqIbR {
         dst: u8,
-        src: u8,
+        src1: u8,
+        src2: u8,
         imm: u8,
     },
     EvexVpcmpbKgqHdqWdqIbM {
         dst: u8,
-        src: MemoryOperand,
+        src1: u8,
+        src2: MemoryOperand,
         imm: u8,
     },
     EvexVpcmpdKgwHdqWdqIbR {
         dst: u8,
-        src: u8,
+        src1: u8,
+        src2: u8,
         imm: u8,
     },
     EvexVpcmpdKgwHdqWdqIbM {
         dst: u8,
-        src: MemoryOperand,
+        src1: u8,
+        src2: MemoryOperand,
         imm: u8,
     },
     EvexVpcmpeqbKgqHdqWdqR {
@@ -24140,62 +24367,74 @@ pub enum TypedInstruction {
     },
     EvexVpcmpqKgbHdqWdqIbR {
         dst: u8,
-        src: u8,
+        src1: u8,
+        src2: u8,
         imm: u8,
     },
     EvexVpcmpqKgbHdqWdqIbM {
         dst: u8,
-        src: MemoryOperand,
+        src1: u8,
+        src2: MemoryOperand,
         imm: u8,
     },
     EvexVpcmpubKgqHdqWdqIbR {
         dst: u8,
-        src: u8,
+        src1: u8,
+        src2: u8,
         imm: u8,
     },
     EvexVpcmpubKgqHdqWdqIbM {
         dst: u8,
-        src: MemoryOperand,
+        src1: u8,
+        src2: MemoryOperand,
         imm: u8,
     },
     EvexVpcmpudKgwHdqWdqIbR {
         dst: u8,
-        src: u8,
+        src1: u8,
+        src2: u8,
         imm: u8,
     },
     EvexVpcmpudKgwHdqWdqIbM {
         dst: u8,
-        src: MemoryOperand,
+        src1: u8,
+        src2: MemoryOperand,
         imm: u8,
     },
     EvexVpcmpuqKgbHdqWdqIbR {
         dst: u8,
-        src: u8,
+        src1: u8,
+        src2: u8,
         imm: u8,
     },
     EvexVpcmpuqKgbHdqWdqIbM {
         dst: u8,
-        src: MemoryOperand,
+        src1: u8,
+        src2: MemoryOperand,
         imm: u8,
     },
     EvexVpcmpuwKgdHdqWdqIbR {
         dst: u8,
-        src: u8,
+        src1: u8,
+        src2: u8,
         imm: u8,
     },
     EvexVpcmpuwKgdHdqWdqIbM {
         dst: u8,
-        src: MemoryOperand,
+        src1: u8,
+        src2: MemoryOperand,
         imm: u8,
     },
     EvexVpcmpwKgdHdqWdqIbR {
         dst: u8,
-        src: u8,
+        src1: u8,
+        src2: u8,
         imm: u8,
     },
     EvexVpcmpwKgdHdqWdqIbM {
         dst: u8,
-        src: MemoryOperand,
+        src1: u8,
+        src2: MemoryOperand,
         imm: u8,
     },
     EvexVpcompressbWdqVdqR {
@@ -24208,13 +24447,11 @@ pub enum TypedInstruction {
     },
     EvexVpcompressbWdqVdqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVpcompressbWdqVdqKmaskM {
-        dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        dst: MemoryOperand,
+        src: u8,
     },
     EvexVpcompressdWdqVdqR {
         dst: u8,
@@ -24226,13 +24463,11 @@ pub enum TypedInstruction {
     },
     EvexVpcompressdWdqVdqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVpcompressdWdqVdqKmaskM {
-        dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        dst: MemoryOperand,
+        src: u8,
     },
     EvexVpcompressqWdqVdqR {
         dst: u8,
@@ -24244,13 +24479,11 @@ pub enum TypedInstruction {
     },
     EvexVpcompressqWdqVdqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVpcompressqWdqVdqKmaskM {
-        dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        dst: MemoryOperand,
+        src: u8,
     },
     EvexVpcompresswWdqVdqR {
         dst: u8,
@@ -24262,33 +24495,27 @@ pub enum TypedInstruction {
     },
     EvexVpcompresswWdqVdqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVpcompresswWdqVdqKmaskM {
-        dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        dst: MemoryOperand,
+        src: u8,
     },
     EvexVpconflictdVdqWdqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVpconflictdVdqWdqKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVpconflictqVdqWdqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVpconflictqVdqWdqKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVpdpbssdVdqHdqWdqR {
         dst: u8,
@@ -24722,13 +24949,13 @@ pub enum TypedInstruction {
     },
     EvexVpermilpdVpdWpdIbKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
+        imm: u8,
     },
     EvexVpermilpdVpdWpdIbKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
+        imm: u8,
     },
     EvexVpermilpsVpsHpsWpsR {
         dst: u8,
@@ -24762,13 +24989,13 @@ pub enum TypedInstruction {
     },
     EvexVpermilpsVpsWpsIbKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
+        imm: u8,
     },
     EvexVpermilpsVpsWpsIbKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
+        imm: u8,
     },
     EvexVpermpdVpdHpdWpdKmaskR {
         dst: u8,
@@ -24782,13 +25009,13 @@ pub enum TypedInstruction {
     },
     EvexVpermpdVpdWpdIbKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
+        imm: u8,
     },
     EvexVpermpdVpdWpdIbKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
+        imm: u8,
     },
     EvexVpermpsVpsHpsWpsKmaskR {
         dst: u8,
@@ -24812,13 +25039,13 @@ pub enum TypedInstruction {
     },
     EvexVpermqVdqWdqIbKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
+        imm: u8,
     },
     EvexVpermqVdqWdqIbKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
+        imm: u8,
     },
     EvexVpermt2bVdqHdqWdqKmaskR {
         dst: u8,
@@ -24900,13 +25127,11 @@ pub enum TypedInstruction {
     },
     EvexVpexpandbVdqWdqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVpexpandbVdqWdqKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVpexpanddVdqWdqR {
         dst: u8,
@@ -24918,13 +25143,11 @@ pub enum TypedInstruction {
     },
     EvexVpexpanddVdqWdqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVpexpanddVdqWdqKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVpexpandqVdqWdqR {
         dst: u8,
@@ -24936,13 +25159,11 @@ pub enum TypedInstruction {
     },
     EvexVpexpandqVdqWdqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVpexpandqVdqWdqKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVpexpandwVdqWdqR {
         dst: u8,
@@ -24954,13 +25175,11 @@ pub enum TypedInstruction {
     },
     EvexVpexpandwVdqWdqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVpexpandwVdqWdqKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVpextrbEdVdqIbR {
         dst: GprIndex,
@@ -24998,7 +25217,8 @@ pub enum TypedInstruction {
         imm: u8,
     },
     EvexVpextrwGdUdqIb {
-        dst: u8,
+        dst: GprIndex,
+        src: u8,
         imm: u8,
     },
     EvexVpextrwMwVdqIbM {
@@ -25008,63 +25228,67 @@ pub enum TypedInstruction {
     },
     EvexVpinsrbVdqEbIbR {
         dst: u8,
-        src: GprIndex,
+        src1: u8,
+        src2: GprIndex,
         imm: u8,
     },
     EvexVpinsrbVdqEbIbM {
         dst: u8,
-        src: MemoryOperand,
+        src1: u8,
+        src2: MemoryOperand,
         imm: u8,
     },
     EvexVpinsrdVdqEdIbR {
         dst: u8,
-        src: GprIndex,
+        src1: u8,
+        src2: GprIndex,
         imm: u8,
     },
     EvexVpinsrdVdqEdIbM {
         dst: u8,
-        src: MemoryOperand,
+        src1: u8,
+        src2: MemoryOperand,
         imm: u8,
     },
     EvexVpinsrqVdqEqIbR {
         dst: u8,
-        src: GprIndex,
+        src1: u8,
+        src2: GprIndex,
         imm: u8,
     },
     EvexVpinsrqVdqEqIbM {
         dst: u8,
-        src: MemoryOperand,
+        src1: u8,
+        src2: MemoryOperand,
         imm: u8,
     },
     EvexVpinsrwVdqEwIbR {
         dst: u8,
-        src: GprIndex,
+        src1: u8,
+        src2: GprIndex,
         imm: u8,
     },
     EvexVpinsrwVdqEwIbM {
         dst: u8,
-        src: MemoryOperand,
+        src1: u8,
+        src2: MemoryOperand,
         imm: u8,
     },
     EvexVplzcntdVdqWdqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVplzcntdVdqWdqKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVplzcntqVdqWdqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVplzcntqVdqWdqKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVpmadd52huqVdqHdqWdqR {
         dst: u8,
@@ -25492,13 +25716,11 @@ pub enum TypedInstruction {
     },
     EvexVpmovdbWdqVdqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVpmovdbWdqVdqKmaskM {
-        dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        dst: MemoryOperand,
+        src: u8,
     },
     EvexVpmovdwWdqVdqR {
         dst: u8,
@@ -25510,13 +25732,11 @@ pub enum TypedInstruction {
     },
     EvexVpmovdwWdqVdqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVpmovdwWdqVdqKmaskM {
-        dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        dst: MemoryOperand,
+        src: u8,
     },
     EvexVpmovm2bVdqKeqR {
         dst: u8,
@@ -25568,13 +25788,11 @@ pub enum TypedInstruction {
     },
     EvexVpmovqbWdqVdqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVpmovqbWdqVdqKmaskM {
-        dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        dst: MemoryOperand,
+        src: u8,
     },
     EvexVpmovqdWdqVdqR {
         dst: u8,
@@ -25586,13 +25804,11 @@ pub enum TypedInstruction {
     },
     EvexVpmovqdWdqVdqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVpmovqdWdqVdqKmaskM {
-        dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        dst: MemoryOperand,
+        src: u8,
     },
     EvexVpmovqwWdqVdqR {
         dst: u8,
@@ -25604,13 +25820,11 @@ pub enum TypedInstruction {
     },
     EvexVpmovqwWdqVdqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVpmovqwWdqVdqKmaskM {
-        dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        dst: MemoryOperand,
+        src: u8,
     },
     EvexVpmovsdbWdqVdqR {
         dst: u8,
@@ -25622,13 +25836,11 @@ pub enum TypedInstruction {
     },
     EvexVpmovsdbWdqVdqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVpmovsdbWdqVdqKmaskM {
-        dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        dst: MemoryOperand,
+        src: u8,
     },
     EvexVpmovsdwWdqVdqR {
         dst: u8,
@@ -25640,13 +25852,11 @@ pub enum TypedInstruction {
     },
     EvexVpmovsdwWdqVdqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVpmovsdwWdqVdqKmaskM {
-        dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        dst: MemoryOperand,
+        src: u8,
     },
     EvexVpmovsqbWdqVdqR {
         dst: u8,
@@ -25658,13 +25868,11 @@ pub enum TypedInstruction {
     },
     EvexVpmovsqbWdqVdqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVpmovsqbWdqVdqKmaskM {
-        dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        dst: MemoryOperand,
+        src: u8,
     },
     EvexVpmovsqdWdqVdqR {
         dst: u8,
@@ -25676,13 +25884,11 @@ pub enum TypedInstruction {
     },
     EvexVpmovsqdWdqVdqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVpmovsqdWdqVdqKmaskM {
-        dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        dst: MemoryOperand,
+        src: u8,
     },
     EvexVpmovsqwWdqVdqR {
         dst: u8,
@@ -25694,13 +25900,27 @@ pub enum TypedInstruction {
     },
     EvexVpmovsqwWdqVdqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVpmovsqwWdqVdqKmaskM {
+        dst: MemoryOperand,
+        src: u8,
+    },
+    EvexVpmovssdbWdqVdqR {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: u8,
+    },
+    EvexVpmovssdbWdqVdqM {
+        dst: MemoryOperand,
+        src: u8,
+    },
+    EvexVpmovssdbWdqVdqKmaskR {
+        dst: u8,
+        src: u8,
+    },
+    EvexVpmovssdbWdqVdqKmaskM {
+        dst: MemoryOperand,
+        src: u8,
     },
     EvexVpmovswbWdqVdqR {
         dst: u8,
@@ -25712,13 +25932,11 @@ pub enum TypedInstruction {
     },
     EvexVpmovswbWdqVdqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVpmovswbWdqVdqKmaskM {
-        dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        dst: MemoryOperand,
+        src: u8,
     },
     EvexVpmovsxbdVdqWdqR {
         dst: u8,
@@ -25730,13 +25948,11 @@ pub enum TypedInstruction {
     },
     EvexVpmovsxbdVdqWdqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVpmovsxbdVdqWdqKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVpmovsxbqVdqWdqR {
         dst: u8,
@@ -25748,13 +25964,11 @@ pub enum TypedInstruction {
     },
     EvexVpmovsxbqVdqWdqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVpmovsxbqVdqWdqKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVpmovsxbwVdqWdqR {
         dst: u8,
@@ -25766,13 +25980,11 @@ pub enum TypedInstruction {
     },
     EvexVpmovsxbwVdqWdqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVpmovsxbwVdqWdqKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVpmovsxdqVdqWdqR {
         dst: u8,
@@ -25784,13 +25996,11 @@ pub enum TypedInstruction {
     },
     EvexVpmovsxdqVdqWdqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVpmovsxdqVdqWdqKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVpmovsxwdVdqWdqR {
         dst: u8,
@@ -25802,13 +26012,11 @@ pub enum TypedInstruction {
     },
     EvexVpmovsxwdVdqWdqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVpmovsxwdVdqWdqKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVpmovsxwqVdqWdqR {
         dst: u8,
@@ -25820,13 +26028,11 @@ pub enum TypedInstruction {
     },
     EvexVpmovsxwqVdqWdqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVpmovsxwqVdqWdqKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVpmovusdbWdqVdqR {
         dst: u8,
@@ -25838,13 +26044,11 @@ pub enum TypedInstruction {
     },
     EvexVpmovusdbWdqVdqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVpmovusdbWdqVdqKmaskM {
-        dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        dst: MemoryOperand,
+        src: u8,
     },
     EvexVpmovusdwWdqVdqR {
         dst: u8,
@@ -25856,13 +26060,11 @@ pub enum TypedInstruction {
     },
     EvexVpmovusdwWdqVdqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVpmovusdwWdqVdqKmaskM {
-        dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        dst: MemoryOperand,
+        src: u8,
     },
     EvexVpmovusqbWdqVdqR {
         dst: u8,
@@ -25874,13 +26076,11 @@ pub enum TypedInstruction {
     },
     EvexVpmovusqbWdqVdqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVpmovusqbWdqVdqKmaskM {
-        dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        dst: MemoryOperand,
+        src: u8,
     },
     EvexVpmovusqdWdqVdqR {
         dst: u8,
@@ -25892,13 +26092,11 @@ pub enum TypedInstruction {
     },
     EvexVpmovusqdWdqVdqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVpmovusqdWdqVdqKmaskM {
-        dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        dst: MemoryOperand,
+        src: u8,
     },
     EvexVpmovusqwWdqVdqR {
         dst: u8,
@@ -25910,13 +26108,11 @@ pub enum TypedInstruction {
     },
     EvexVpmovusqwWdqVdqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVpmovusqwWdqVdqKmaskM {
-        dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        dst: MemoryOperand,
+        src: u8,
     },
     EvexVpmovuswbWdqVdqR {
         dst: u8,
@@ -25928,13 +26124,11 @@ pub enum TypedInstruction {
     },
     EvexVpmovuswbWdqVdqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVpmovuswbWdqVdqKmaskM {
-        dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        dst: MemoryOperand,
+        src: u8,
     },
     EvexVpmovw2mKgdWdqR {
         dst: u8,
@@ -25954,13 +26148,11 @@ pub enum TypedInstruction {
     },
     EvexVpmovwbWdqVdqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVpmovwbWdqVdqKmaskM {
-        dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        dst: MemoryOperand,
+        src: u8,
     },
     EvexVpmovzxbdVdqWdqR {
         dst: u8,
@@ -25972,13 +26164,11 @@ pub enum TypedInstruction {
     },
     EvexVpmovzxbdVdqWdqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVpmovzxbdVdqWdqKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVpmovzxbqVdqWdqR {
         dst: u8,
@@ -25990,13 +26180,11 @@ pub enum TypedInstruction {
     },
     EvexVpmovzxbqVdqWdqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVpmovzxbqVdqWdqKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVpmovzxbwVdqWdqR {
         dst: u8,
@@ -26008,13 +26196,11 @@ pub enum TypedInstruction {
     },
     EvexVpmovzxbwVdqWdqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVpmovzxbwVdqWdqKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVpmovzxdqVdqWdqR {
         dst: u8,
@@ -26026,13 +26212,11 @@ pub enum TypedInstruction {
     },
     EvexVpmovzxdqVdqWdqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVpmovzxdqVdqWdqKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVpmovzxwdVdqWdqR {
         dst: u8,
@@ -26044,13 +26228,11 @@ pub enum TypedInstruction {
     },
     EvexVpmovzxwdVdqWdqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVpmovzxwdVdqWdqKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVpmovzxwqVdqWdqR {
         dst: u8,
@@ -26062,13 +26244,11 @@ pub enum TypedInstruction {
     },
     EvexVpmovzxwqVdqWdqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVpmovzxwqVdqWdqKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVpmuldqVdqHdqWdqR {
         dst: u8,
@@ -26242,43 +26422,35 @@ pub enum TypedInstruction {
     },
     EvexVpopcntbVdqWdqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVpopcntbVdqWdqKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVpopcntdVdqWdqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVpopcntdVdqWdqKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVpopcntqVdqWdqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVpopcntqVdqWdqKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVpopcntwVdqWdqKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVpopcntwVdqWdqKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVpordVdqHdqWdqR {
         dst: u8,
@@ -26320,33 +26492,45 @@ pub enum TypedInstruction {
         src1: u8,
         src2: MemoryOperand,
     },
-    EvexVproldUdqIb {
+    EvexVproldUdqIbR {
         dst: u8,
+        src: u8,
+        imm: u8,
+    },
+    EvexVproldUdqIbM {
+        dst: u8,
+        src: MemoryOperand,
         imm: u8,
     },
     EvexVproldUdqIbKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
+        imm: u8,
     },
     EvexVproldUdqIbKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
+        imm: u8,
     },
-    EvexVprolqUdqIb {
+    EvexVprolqUdqIbR {
         dst: u8,
+        src: u8,
+        imm: u8,
+    },
+    EvexVprolqUdqIbM {
+        dst: u8,
+        src: MemoryOperand,
         imm: u8,
     },
     EvexVprolqUdqIbKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
+        imm: u8,
     },
     EvexVprolqUdqIbKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
+        imm: u8,
     },
     EvexVprolvdVdqHdqWdqR {
         dst: u8,
@@ -26388,33 +26572,45 @@ pub enum TypedInstruction {
         src1: u8,
         src2: MemoryOperand,
     },
-    EvexVprordUdqIb {
+    EvexVprordUdqIbR {
         dst: u8,
+        src: u8,
+        imm: u8,
+    },
+    EvexVprordUdqIbM {
+        dst: u8,
+        src: MemoryOperand,
         imm: u8,
     },
     EvexVprordUdqIbKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
+        imm: u8,
     },
     EvexVprordUdqIbKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
+        imm: u8,
     },
-    EvexVprorqUdqIb {
+    EvexVprorqUdqIbR {
         dst: u8,
+        src: u8,
+        imm: u8,
+    },
+    EvexVprorqUdqIbM {
+        dst: u8,
+        src: MemoryOperand,
         imm: u8,
     },
     EvexVprorqUdqIbKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
+        imm: u8,
     },
     EvexVprorqUdqIbKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
+        imm: u8,
     },
     EvexVprorvdVdqHdqWdqR {
         dst: u8,
@@ -26470,21 +26666,25 @@ pub enum TypedInstruction {
         dst: u8,
         src1: u8,
         src2: u8,
+        imm: u8,
     },
     EvexVpshlddVdqHdqWdqIbKmaskM {
         dst: u8,
         src1: u8,
         src2: MemoryOperand,
+        imm: u8,
     },
     EvexVpshldqVdqHdqWdqIbKmaskR {
         dst: u8,
         src1: u8,
         src2: u8,
+        imm: u8,
     },
     EvexVpshldqVdqHdqWdqIbKmaskM {
         dst: u8,
         src1: u8,
         src2: MemoryOperand,
+        imm: u8,
     },
     EvexVpshldvdVdqHdqWdqKmaskR {
         dst: u8,
@@ -26520,31 +26720,37 @@ pub enum TypedInstruction {
         dst: u8,
         src1: u8,
         src2: u8,
+        imm: u8,
     },
     EvexVpshldwVdqHdqWdqIbKmaskM {
         dst: u8,
         src1: u8,
         src2: MemoryOperand,
+        imm: u8,
     },
     EvexVpshrddVdqHdqWdqIbKmaskR {
         dst: u8,
         src1: u8,
         src2: u8,
+        imm: u8,
     },
     EvexVpshrddVdqHdqWdqIbKmaskM {
         dst: u8,
         src1: u8,
         src2: MemoryOperand,
+        imm: u8,
     },
     EvexVpshrdqVdqHdqWdqIbKmaskR {
         dst: u8,
         src1: u8,
         src2: u8,
+        imm: u8,
     },
     EvexVpshrdqVdqHdqWdqIbKmaskM {
         dst: u8,
         src1: u8,
         src2: MemoryOperand,
+        imm: u8,
     },
     EvexVpshrdvdVdqHdqWdqKmaskR {
         dst: u8,
@@ -26580,11 +26786,13 @@ pub enum TypedInstruction {
         dst: u8,
         src1: u8,
         src2: u8,
+        imm: u8,
     },
     EvexVpshrdwVdqHdqWdqIbKmaskM {
         dst: u8,
         src1: u8,
         src2: MemoryOperand,
+        imm: u8,
     },
     EvexVpshufbVdqHdqWdqR {
         dst: u8,
@@ -26628,13 +26836,13 @@ pub enum TypedInstruction {
     },
     EvexVpshufdVdqWdqIbKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
+        imm: u8,
     },
     EvexVpshufdVdqWdqIbKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
+        imm: u8,
     },
     EvexVpshufhwVdqWdqIbR {
         dst: u8,
@@ -26648,13 +26856,13 @@ pub enum TypedInstruction {
     },
     EvexVpshufhwVdqWdqIbKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
+        imm: u8,
     },
     EvexVpshufhwVdqWdqIbKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
+        imm: u8,
     },
     EvexVpshuflwVdqWdqIbR {
         dst: u8,
@@ -26668,27 +26876,33 @@ pub enum TypedInstruction {
     },
     EvexVpshuflwVdqWdqIbKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
+        imm: u8,
     },
     EvexVpshuflwVdqWdqIbKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
+        imm: u8,
     },
-    EvexVpslldUdqIb {
+    EvexVpslldUdqIbR {
         dst: u8,
+        src: u8,
+        imm: u8,
+    },
+    EvexVpslldUdqIbM {
+        dst: u8,
+        src: MemoryOperand,
         imm: u8,
     },
     EvexVpslldUdqIbKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
+        imm: u8,
     },
     EvexVpslldUdqIbKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
+        imm: u8,
     },
     EvexVpslldVdqHdqWdqR {
         dst: u8,
@@ -26710,23 +26924,35 @@ pub enum TypedInstruction {
         src1: u8,
         src2: MemoryOperand,
     },
-    EvexVpslldqUdqIb {
+    EvexVpslldqUdqIbR {
         dst: u8,
+        src: u8,
         imm: u8,
     },
-    EvexVpsllqUdqIb {
+    EvexVpslldqUdqIbM {
         dst: u8,
+        src: MemoryOperand,
+        imm: u8,
+    },
+    EvexVpsllqUdqIbR {
+        dst: u8,
+        src: u8,
+        imm: u8,
+    },
+    EvexVpsllqUdqIbM {
+        dst: u8,
+        src: MemoryOperand,
         imm: u8,
     },
     EvexVpsllqUdqIbKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
+        imm: u8,
     },
     EvexVpsllqUdqIbKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
+        imm: u8,
     },
     EvexVpsllqVdqHdqWdqR {
         dst: u8,
@@ -26808,19 +27034,25 @@ pub enum TypedInstruction {
         src1: u8,
         src2: MemoryOperand,
     },
-    EvexVpsllwUdqIb {
+    EvexVpsllwUdqIbR {
         dst: u8,
+        src: u8,
+        imm: u8,
+    },
+    EvexVpsllwUdqIbM {
+        dst: u8,
+        src: MemoryOperand,
         imm: u8,
     },
     EvexVpsllwUdqIbKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
+        imm: u8,
     },
     EvexVpsllwUdqIbKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
+        imm: u8,
     },
     EvexVpsllwVdqHdqWdqR {
         dst: u8,
@@ -26842,19 +27074,25 @@ pub enum TypedInstruction {
         src1: u8,
         src2: MemoryOperand,
     },
-    EvexVpsradUdqIb {
+    EvexVpsradUdqIbR {
         dst: u8,
+        src: u8,
+        imm: u8,
+    },
+    EvexVpsradUdqIbM {
+        dst: u8,
+        src: MemoryOperand,
         imm: u8,
     },
     EvexVpsradUdqIbKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
+        imm: u8,
     },
     EvexVpsradUdqIbKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
+        imm: u8,
     },
     EvexVpsradVdqHdqWdqR {
         dst: u8,
@@ -26876,19 +27114,25 @@ pub enum TypedInstruction {
         src1: u8,
         src2: MemoryOperand,
     },
-    EvexVpsraqUdqIb {
+    EvexVpsraqUdqIbR {
         dst: u8,
+        src: u8,
+        imm: u8,
+    },
+    EvexVpsraqUdqIbM {
+        dst: u8,
+        src: MemoryOperand,
         imm: u8,
     },
     EvexVpsraqUdqIbKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
+        imm: u8,
     },
     EvexVpsraqUdqIbKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
+        imm: u8,
     },
     EvexVpsraqVdqHdqWdqR {
         dst: u8,
@@ -26970,19 +27214,25 @@ pub enum TypedInstruction {
         src1: u8,
         src2: MemoryOperand,
     },
-    EvexVpsrawUdqIb {
+    EvexVpsrawUdqIbR {
         dst: u8,
+        src: u8,
+        imm: u8,
+    },
+    EvexVpsrawUdqIbM {
+        dst: u8,
+        src: MemoryOperand,
         imm: u8,
     },
     EvexVpsrawUdqIbKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
+        imm: u8,
     },
     EvexVpsrawUdqIbKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
+        imm: u8,
     },
     EvexVpsrawVdqHdqWdqR {
         dst: u8,
@@ -27004,19 +27254,25 @@ pub enum TypedInstruction {
         src1: u8,
         src2: MemoryOperand,
     },
-    EvexVpsrldUdqIb {
+    EvexVpsrldUdqIbR {
         dst: u8,
+        src: u8,
+        imm: u8,
+    },
+    EvexVpsrldUdqIbM {
+        dst: u8,
+        src: MemoryOperand,
         imm: u8,
     },
     EvexVpsrldUdqIbKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
+        imm: u8,
     },
     EvexVpsrldUdqIbKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
+        imm: u8,
     },
     EvexVpsrldVdqHdqWdqR {
         dst: u8,
@@ -27038,23 +27294,35 @@ pub enum TypedInstruction {
         src1: u8,
         src2: MemoryOperand,
     },
-    EvexVpsrldqUdqIb {
+    EvexVpsrldqUdqIbR {
         dst: u8,
+        src: u8,
         imm: u8,
     },
-    EvexVpsrlqUdqIb {
+    EvexVpsrldqUdqIbM {
         dst: u8,
+        src: MemoryOperand,
+        imm: u8,
+    },
+    EvexVpsrlqUdqIbR {
+        dst: u8,
+        src: u8,
+        imm: u8,
+    },
+    EvexVpsrlqUdqIbM {
+        dst: u8,
+        src: MemoryOperand,
         imm: u8,
     },
     EvexVpsrlqUdqIbKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
+        imm: u8,
     },
     EvexVpsrlqUdqIbKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
+        imm: u8,
     },
     EvexVpsrlqVdqHdqWdqR {
         dst: u8,
@@ -27136,19 +27404,25 @@ pub enum TypedInstruction {
         src1: u8,
         src2: MemoryOperand,
     },
-    EvexVpsrlwUdqIb {
+    EvexVpsrlwUdqIbR {
         dst: u8,
+        src: u8,
+        imm: u8,
+    },
+    EvexVpsrlwUdqIbM {
+        dst: u8,
+        src: MemoryOperand,
         imm: u8,
     },
     EvexVpsrlwUdqIbKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
+        imm: u8,
     },
     EvexVpsrlwUdqIbKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
+        imm: u8,
     },
     EvexVpsrlwVdqHdqWdqR {
         dst: u8,
@@ -27346,11 +27620,13 @@ pub enum TypedInstruction {
         dst: u8,
         src1: u8,
         src2: u8,
+        imm: u8,
     },
     EvexVpternlogdVdqHdqWdqIbKmaskM {
         dst: u8,
         src1: u8,
         src2: MemoryOperand,
+        imm: u8,
     },
     EvexVpternlogqVdqHdqWdqIbR {
         dst: u8,
@@ -27368,11 +27644,13 @@ pub enum TypedInstruction {
         dst: u8,
         src1: u8,
         src2: u8,
+        imm: u8,
     },
     EvexVpternlogqVdqHdqWdqIbKmaskM {
         dst: u8,
         src1: u8,
         src2: MemoryOperand,
+        imm: u8,
     },
     EvexVptestmbKgqHdqWdqR {
         dst: u8,
@@ -27658,61 +27936,65 @@ pub enum TypedInstruction {
         dst: u8,
         src1: u8,
         src2: u8,
+        imm: u8,
     },
     EvexVrangepdVpdHpdWpdIbKmaskM {
         dst: u8,
         src1: u8,
         src2: MemoryOperand,
+        imm: u8,
     },
     EvexVrangepsVpsHpsWpsIbKmaskR {
         dst: u8,
         src1: u8,
         src2: u8,
+        imm: u8,
     },
     EvexVrangepsVpsHpsWpsIbKmaskM {
         dst: u8,
         src1: u8,
         src2: MemoryOperand,
+        imm: u8,
     },
     EvexVrangesdVsdHpdWsdIbKmaskR {
         dst: u8,
         src1: u8,
         src2: u8,
+        imm: u8,
     },
     EvexVrangesdVsdHpdWsdIbKmaskM {
         dst: u8,
         src1: u8,
         src2: MemoryOperand,
+        imm: u8,
     },
     EvexVrangessVssHpsWssIbKmaskR {
         dst: u8,
         src1: u8,
         src2: u8,
+        imm: u8,
     },
     EvexVrangessVssHpsWssIbKmaskM {
         dst: u8,
         src1: u8,
         src2: MemoryOperand,
+        imm: u8,
     },
     EvexVrcp14pdVpdWpdKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVrcp14pdVpdWpdKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVrcp14psVpsWpsKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVrcp14psVpsWpsKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVrcp14sdVsdHpdWsdKmaskR {
         dst: u8,
@@ -27744,23 +28026,19 @@ pub enum TypedInstruction {
     },
     EvexVrcppbf16VphWphKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVrcppbf16VphWphKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVrcpphVphWphKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVrcpphVphWphKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVrcpshVshHphWshKmaskR {
         dst: u8,
@@ -27774,163 +28052,171 @@ pub enum TypedInstruction {
     },
     EvexVreducebf16VphWphIbKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
+        imm: u8,
     },
     EvexVreducebf16VphWphIbKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
+        imm: u8,
     },
     EvexVreducepdVpdWpdIbKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
+        imm: u8,
     },
     EvexVreducepdVpdWpdIbKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
+        imm: u8,
     },
     EvexVreducephVphWphIbKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
+        imm: u8,
     },
     EvexVreducephVphWphIbKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
+        imm: u8,
     },
     EvexVreducepsVpsWpsIbKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
+        imm: u8,
     },
     EvexVreducepsVpsWpsIbKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
+        imm: u8,
     },
     EvexVreducesdVsdHpdWsdIbKmaskR {
         dst: u8,
         src1: u8,
         src2: u8,
+        imm: u8,
     },
     EvexVreducesdVsdHpdWsdIbKmaskM {
         dst: u8,
         src1: u8,
         src2: MemoryOperand,
+        imm: u8,
     },
     EvexVreduceshVshHphWshIbKmaskR {
         dst: u8,
         src1: u8,
         src2: u8,
+        imm: u8,
     },
     EvexVreduceshVshHphWshIbKmaskM {
         dst: u8,
         src1: u8,
         src2: MemoryOperand,
+        imm: u8,
     },
     EvexVreducessVssHpsWssIbKmaskR {
         dst: u8,
         src1: u8,
         src2: u8,
+        imm: u8,
     },
     EvexVreducessVssHpsWssIbKmaskM {
         dst: u8,
         src1: u8,
         src2: MemoryOperand,
+        imm: u8,
     },
     EvexVrndscalebf16VphWphIbKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
+        imm: u8,
     },
     EvexVrndscalebf16VphWphIbKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
+        imm: u8,
     },
     EvexVrndscalepdVpdWpdIbKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
+        imm: u8,
     },
     EvexVrndscalepdVpdWpdIbKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
+        imm: u8,
     },
     EvexVrndscalephVphWphIbKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
+        imm: u8,
     },
     EvexVrndscalephVphWphIbKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
+        imm: u8,
     },
     EvexVrndscalepsVpsWpsIbKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
+        imm: u8,
     },
     EvexVrndscalepsVpsWpsIbKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
+        imm: u8,
     },
     EvexVrndscalesdVsdHpdWsdIbKmaskR {
         dst: u8,
         src1: u8,
         src2: u8,
+        imm: u8,
     },
     EvexVrndscalesdVsdHpdWsdIbKmaskM {
         dst: u8,
         src1: u8,
         src2: MemoryOperand,
+        imm: u8,
     },
     EvexVrndscaleshVshHphWshIbKmaskR {
         dst: u8,
         src1: u8,
         src2: u8,
+        imm: u8,
     },
     EvexVrndscaleshVshHphWshIbKmaskM {
         dst: u8,
         src1: u8,
         src2: MemoryOperand,
+        imm: u8,
     },
     EvexVrndscalessVssHpsWssIbKmaskR {
         dst: u8,
         src1: u8,
         src2: u8,
+        imm: u8,
     },
     EvexVrndscalessVssHpsWssIbKmaskM {
         dst: u8,
         src1: u8,
         src2: MemoryOperand,
+        imm: u8,
     },
     EvexVrsqrt14pdVpdWpdKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVrsqrt14pdVpdWpdKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVrsqrt14psVpsWpsKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVrsqrt14psVpsWpsKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVrsqrt14sdVsdHpdWsdKmaskR {
         dst: u8,
@@ -27962,23 +28248,19 @@ pub enum TypedInstruction {
     },
     EvexVrsqrtpbf16VphWphKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVrsqrtpbf16VphWphKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVrsqrtphVphWphKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVrsqrtphVphWphKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVrsqrtshVshHphWshKmaskR {
         dst: u8,
@@ -28198,41 +28480,49 @@ pub enum TypedInstruction {
         dst: u8,
         src1: u8,
         src2: u8,
+        imm: u8,
     },
     EvexVshuff32x4VpsHpsWpsIbKmaskM {
         dst: u8,
         src1: u8,
         src2: MemoryOperand,
+        imm: u8,
     },
     EvexVshuff64x2VpdHpdWpdIbKmaskR {
         dst: u8,
         src1: u8,
         src2: u8,
+        imm: u8,
     },
     EvexVshuff64x2VpdHpdWpdIbKmaskM {
         dst: u8,
         src1: u8,
         src2: MemoryOperand,
+        imm: u8,
     },
     EvexVshufi32x4VdqHdqWdqIbKmaskR {
         dst: u8,
         src1: u8,
         src2: u8,
+        imm: u8,
     },
     EvexVshufi32x4VdqHdqWdqIbKmaskM {
         dst: u8,
         src1: u8,
         src2: MemoryOperand,
+        imm: u8,
     },
     EvexVshufi64x2VdqHdqWdqIbKmaskR {
         dst: u8,
         src1: u8,
         src2: u8,
+        imm: u8,
     },
     EvexVshufi64x2VdqHdqWdqIbKmaskM {
         dst: u8,
         src1: u8,
         src2: MemoryOperand,
+        imm: u8,
     },
     EvexVshufpdVpdHpdWpdIbR {
         dst: u8,
@@ -28250,11 +28540,13 @@ pub enum TypedInstruction {
         dst: u8,
         src1: u8,
         src2: u8,
+        imm: u8,
     },
     EvexVshufpdVpdHpdWpdIbKmaskM {
         dst: u8,
         src1: u8,
         src2: MemoryOperand,
+        imm: u8,
     },
     EvexVshufpsVpsHpsWpsIbR {
         dst: u8,
@@ -28272,11 +28564,13 @@ pub enum TypedInstruction {
         dst: u8,
         src1: u8,
         src2: u8,
+        imm: u8,
     },
     EvexVshufpsVpsHpsWpsIbKmaskM {
         dst: u8,
         src1: u8,
         src2: MemoryOperand,
+        imm: u8,
     },
     EvexVsm4key4VdqHdqWdqR {
         dst: u8,
@@ -28308,13 +28602,11 @@ pub enum TypedInstruction {
     },
     EvexVsqrtbf16VphWphKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVsqrtbf16VphWphKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVsqrtpdVpdWpdR {
         dst: u8,
@@ -28326,13 +28618,11 @@ pub enum TypedInstruction {
     },
     EvexVsqrtpdVpdWpdKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVsqrtpdVpdWpdKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVsqrtphVphWphR {
         dst: u8,
@@ -28344,13 +28634,11 @@ pub enum TypedInstruction {
     },
     EvexVsqrtphVphWphKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVsqrtphVphWphKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVsqrtpsVpsWpsR {
         dst: u8,
@@ -28362,13 +28650,11 @@ pub enum TypedInstruction {
     },
     EvexVsqrtpsVpsWpsKmaskR {
         dst: u8,
-        src1: u8,
-        src2: u8,
+        src: u8,
     },
     EvexVsqrtpsVpsWpsKmaskM {
         dst: u8,
-        src1: u8,
-        src2: MemoryOperand,
+        src: MemoryOperand,
     },
     EvexVsqrtsdVsdHpdWsdR {
         dst: u8,
@@ -28617,6 +28903,16 @@ pub enum TypedInstruction {
     EvexVucomxssVssWssM {
         dst: u8,
         src: MemoryOperand,
+    },
+    EvexVunpackbVdqWdqIbKmaskR {
+        dst: u8,
+        src: u8,
+        imm: u8,
+    },
+    EvexVunpackbVdqWdqIbKmaskM {
+        dst: u8,
+        src: MemoryOperand,
+        imm: u8,
     },
     EvexVunpckhpdVpdHpdWpdR {
         dst: u8,
@@ -28996,6 +29292,25 @@ impl Instruction {
             };
         }
 
+        /// SIMD 2-operand store ExGx + imm8: dst=u8(rm) or mem, src=u8(nnn), imm=ib
+        macro_rules! simd_st_ib {
+            ($r:ident, $m:ident, $self:expr) => {
+                if $self.mod_c0() {
+                    T::$r {
+                        dst: $self.operands.dst,
+                        src: $self.operands.src1,
+                        imm: $self.ib(),
+                    }
+                } else {
+                    T::$m {
+                        dst: $self.memory_operand(),
+                        src: $self.operands.src1,
+                        imm: $self.ib(),
+                    }
+                }
+            };
+        }
+
         /// SIMD 3-operand VEX + imm8: dst=u8(nnn), src1=u8(vvvv=src2), src2=u8(rm) or mem, imm=ib
         macro_rules! simd3_ib {
             ($r:ident, $m:ident, $self:expr) => {
@@ -29075,6 +29390,48 @@ impl Instruction {
                         dst: $self.operands.dst,
                         src1: $self.operands.src2,
                         src2: $self.memory_operand(),
+                    }
+                }
+            };
+        }
+
+        /// SIMD 3-operand XMM,XMM,GPR + imm8: dst=u8(nnn), src1=u8(vvvv),
+        /// src2=GprIndex(rm) or mem, imm=ib
+        macro_rules! simd3_gpr_ib {
+            ($r:ident, $m:ident, $self:expr) => {
+                if $self.mod_c0() {
+                    T::$r {
+                        dst: $self.operands.dst,
+                        src1: $self.operands.src2,
+                        src2: $self.src1_reg(),
+                        imm: $self.ib(),
+                    }
+                } else {
+                    T::$m {
+                        dst: $self.operands.dst,
+                        src1: $self.operands.src2,
+                        src2: $self.memory_operand(),
+                        imm: $self.ib(),
+                    }
+                }
+            };
+        }
+
+        /// SIMD 2-operand + GPR in EVEX.vvvv: dst=u8(dst field),
+        /// src=u8(ModRM source) or mem, ctrl=GprIndex(vvvv)
+        macro_rules! simd_ctrl_gpr {
+            ($r:ident, $m:ident, $self:expr) => {
+                if $self.mod_c0() {
+                    T::$r {
+                        dst: $self.operands.dst,
+                        src: $self.operands.src1,
+                        ctrl: GprIndex::from_u8($self.src2()),
+                    }
+                } else {
+                    T::$m {
+                        dst: $self.operands.dst,
+                        src: $self.memory_operand(),
+                        ctrl: GprIndex::from_u8($self.src2()),
                     }
                 }
             };
@@ -29445,6 +29802,8 @@ impl Instruction {
             O::Rsm => T::Rsm,
             O::Sysenter => T::Sysenter,
             O::Sysexit => T::Sysexit,
+            O::SysenterLongmode => T::SysenterLongmode,
+            O::SysexitLongmode => T::SysexitLongmode,
             O::Syscall => T::Syscall,
             O::SyscallLegacy => T::SyscallLegacy,
             O::Sysret => T::Sysret,
@@ -30073,6 +30432,15 @@ impl Instruction {
                 reg: self.dst_reg(),
             },
             O::SubGqEqZeroIdiom => T::SubGqEqZeroIdiom {
+                reg: self.dst_reg(),
+            },
+            O::TestEwGwIdiom => T::TestEwGwIdiom {
+                reg: self.dst_reg(),
+            },
+            O::TestEdGdIdiom => T::TestEdGdIdiom {
+                reg: self.dst_reg(),
+            },
+            O::TestEqGqIdiom => T::TestEqGqIdiom {
                 reg: self.dst_reg(),
             },
 
@@ -32569,6 +32937,9 @@ impl Instruction {
             O::PunpcklwdVdqWdq => simd!(PunpcklwdVdqWdqR, PunpcklwdVdqWdqM, self),
             O::PxorPqQq => simd!(PxorPqQqR, PxorPqQqM, self),
             O::PxorVdqWdq => simd!(PxorVdqWdqR, PxorVdqWdqM, self),
+            O::PxorVdqWdqZeroIdiom => T::PxorVdqWdqZeroIdiom {
+                dst: self.operands.dst,
+            },
             O::RcppsVpsWps => simd!(RcppsVpsWpsR, RcppsVpsWpsM, self),
             O::RcpssVssWss => simd!(RcpssVssWssR, RcpssVssWssM, self),
             O::RoundpdVpdWpdIb => simd_ib!(RoundpdVpdWpdIbR, RoundpdVpdWpdIbM, self),
@@ -32664,6 +33035,9 @@ impl Instruction {
             O::TilezeroTnnn => T::TilezeroTnnn {
                 reg: self.operands.dst,
             },
+            O::Bsrinit => T::Bsrinit {
+                dst: self.operands.dst,
+            },
             O::UcomisdVsdWsd => simd!(UcomisdVsdWsdR, UcomisdVsdWsdM, self),
             O::UcomissVssWss => simd!(UcomissVssWssR, UcomissVssWssM, self),
             O::UnpckhpdVpdWdq => simd!(UnpckhpdVpdWdqR, UnpckhpdVpdWdqM, self),
@@ -32671,7 +33045,13 @@ impl Instruction {
             O::UnpcklpdVpdWdq => simd!(UnpcklpdVpdWdqR, UnpcklpdVpdWdqM, self),
             O::UnpcklpsVpsWdq => simd!(UnpcklpsVpsWdqR, UnpcklpsVpsWdqM, self),
             O::XorpdVpdWpd => simd!(XorpdVpdWpdR, XorpdVpdWpdM, self),
+            O::XorpdVpdWpdZeroIdiom => T::XorpdVpdWpdZeroIdiom {
+                dst: self.operands.dst,
+            },
             O::XorpsVpsWps => simd!(XorpsVpsWpsR, XorpsVpsWpsM, self),
+            O::XorpsVpsWpsZeroIdiom => T::XorpsVpsWpsZeroIdiom {
+                dst: self.operands.dst,
+            },
 
             // =================================================================
             // AVX / AVX2 / FMA / XOP / VEX-encoded
@@ -35307,51 +35687,96 @@ impl Instruction {
             // =================================================================
             // EVEX (AVX-512) instructions
             // =================================================================
-            O::EvexTcvtrowd2psVpsTrmBd => T::EvexTcvtrowd2psVpsTrmBd {
-                dst: self.operands.dst,
-                src: self.operands.src1,
-            },
+            O::EvexBsrmovfBsrVdqWdq => simd3!(EvexBsrmovfBsrVdqWdqR, EvexBsrmovfBsrVdqWdqM, self),
+            O::EvexBsrmovhBsrWdq => simd!(EvexBsrmovhBsrWdqR, EvexBsrmovhBsrWdqM, self),
+            O::EvexBsrmovhWdqBsr => simd_st!(EvexBsrmovhWdqBsrR, EvexBsrmovhWdqBsrM, self),
+            O::EvexBsrmovlBsrWdq => simd!(EvexBsrmovlBsrWdqR, EvexBsrmovlBsrWdqM, self),
+            O::EvexBsrmovlWdqBsr => simd_st!(EvexBsrmovlWdqBsrR, EvexBsrmovlWdqBsrM, self),
+            O::EvexTcvtrowd2psVpsTrmBd => {
+                simd_ctrl_gpr!(EvexTcvtrowd2psVpsTrmBdR, EvexTcvtrowd2psVpsTrmBdM, self)
+            }
             O::EvexTcvtrowd2psVpsTrmIb => {
                 simd_ib!(EvexTcvtrowd2psVpsTrmIbR, EvexTcvtrowd2psVpsTrmIbM, self)
             }
-            O::EvexTcvtrowps2bf16hVphTrmBd => T::EvexTcvtrowps2bf16hVphTrmBd {
-                dst: self.operands.dst,
-                src: self.operands.src1,
-            },
+            O::EvexTcvtrowps2bf16hVphTrmBd => simd_ctrl_gpr!(
+                EvexTcvtrowps2bf16hVphTrmBdR,
+                EvexTcvtrowps2bf16hVphTrmBdM,
+                self
+            ),
             O::EvexTcvtrowps2bf16hVphTrmIb => simd_ib!(
                 EvexTcvtrowps2bf16hVphTrmIbR,
                 EvexTcvtrowps2bf16hVphTrmIbM,
                 self
             ),
-            O::EvexTcvtrowps2bf16lVphTrmBd => T::EvexTcvtrowps2bf16lVphTrmBd {
-                dst: self.operands.dst,
-                src: self.operands.src1,
-            },
+            O::EvexTcvtrowps2bf16lVphTrmBd => simd_ctrl_gpr!(
+                EvexTcvtrowps2bf16lVphTrmBdR,
+                EvexTcvtrowps2bf16lVphTrmBdM,
+                self
+            ),
             O::EvexTcvtrowps2bf16lVphTrmIb => simd_ib!(
                 EvexTcvtrowps2bf16lVphTrmIbR,
                 EvexTcvtrowps2bf16lVphTrmIbM,
                 self
             ),
-            O::EvexTcvtrowps2phhVphTrmBd => T::EvexTcvtrowps2phhVphTrmBd {
-                dst: self.operands.dst,
-                src: self.operands.src1,
-            },
+            O::EvexTcvtrowps2phhVphTrmBd => {
+                simd_ctrl_gpr!(EvexTcvtrowps2phhVphTrmBdR, EvexTcvtrowps2phhVphTrmBdM, self)
+            }
             O::EvexTcvtrowps2phhVphTrmIb => {
                 simd_ib!(EvexTcvtrowps2phhVphTrmIbR, EvexTcvtrowps2phhVphTrmIbM, self)
             }
-            O::EvexTcvtrowps2phlVphTrmBd => T::EvexTcvtrowps2phlVphTrmBd {
-                dst: self.operands.dst,
-                src: self.operands.src1,
-            },
+            O::EvexTcvtrowps2phlVphTrmBd => {
+                simd_ctrl_gpr!(EvexTcvtrowps2phlVphTrmBdR, EvexTcvtrowps2phlVphTrmBdM, self)
+            }
             O::EvexTcvtrowps2phlVphTrmIb => {
                 simd_ib!(EvexTcvtrowps2phlVphTrmIbR, EvexTcvtrowps2phlVphTrmIbM, self)
             }
-            O::EvexTilemovrowVdqTrmBd => T::EvexTilemovrowVdqTrmBd {
-                dst: self.operands.dst,
-                src: self.operands.src1,
-            },
+            O::EvexTilemovcolTrmWdqBd => {
+                simd_ctrl_gpr!(EvexTilemovcolTrmWdqBdR, EvexTilemovcolTrmWdqBdM, self)
+            }
+            O::EvexTilemovcolTrmWdqIb => {
+                simd_ib!(EvexTilemovcolTrmWdqIbR, EvexTilemovcolTrmWdqIbM, self)
+            }
+            O::EvexTilemovrowTrmWdqBd => {
+                simd_ctrl_gpr!(EvexTilemovrowTrmWdqBdR, EvexTilemovrowTrmWdqBdM, self)
+            }
+            O::EvexTilemovrowTrmWdqIb => {
+                simd_ib!(EvexTilemovrowTrmWdqIbR, EvexTilemovrowTrmWdqIbM, self)
+            }
+            O::EvexTilemovrowVdqTrmBd => {
+                simd_ctrl_gpr!(EvexTilemovrowVdqTrmBdR, EvexTilemovrowVdqTrmBdM, self)
+            }
             O::EvexTilemovrowVdqTrmIb => {
                 simd_ib!(EvexTilemovrowVdqTrmIbR, EvexTilemovrowVdqTrmIbM, self)
+            }
+            O::EvexTop2bf16psTnnnWdqHdq => {
+                simd3!(EvexTop2bf16psTnnnWdqHdqR, EvexTop2bf16psTnnnWdqHdqM, self)
+            }
+            O::EvexTop4bssdTnnnWdqHdq => {
+                simd3!(EvexTop4bssdTnnnWdqHdqR, EvexTop4bssdTnnnWdqHdqM, self)
+            }
+            O::EvexTop4bsudTnnnWdqHdq => {
+                simd3!(EvexTop4bsudTnnnWdqHdqR, EvexTop4bsudTnnnWdqHdqM, self)
+            }
+            O::EvexTop4busdTnnnWdqHdq => {
+                simd3!(EvexTop4busdTnnnWdqHdqR, EvexTop4busdTnnnWdqHdqM, self)
+            }
+            O::EvexTop4buudTnnnWdqHdq => {
+                simd3!(EvexTop4buudTnnnWdqHdqR, EvexTop4buudTnnnWdqHdqM, self)
+            }
+            O::EvexTop4mxbf8psTnnnWdqHdqIb => {
+                simd3_ib!(EvexTop4mxbf8psTnnnWdqHdqIbR, EvexTop4mxbf8psTnnnWdqHdqIbM, self)
+            }
+            O::EvexTop4mxbhf8psTnnnWdqHdqIb => {
+                simd3_ib!(EvexTop4mxbhf8psTnnnWdqHdqIbR, EvexTop4mxbhf8psTnnnWdqHdqIbM, self)
+            }
+            O::EvexTop4mxbsspsTnnnWdqHdqIb => {
+                simd3_ib!(EvexTop4mxbsspsTnnnWdqHdqIbR, EvexTop4mxbsspsTnnnWdqHdqIbM, self)
+            }
+            O::EvexTop4mxhbf8psTnnnWdqHdqIb => {
+                simd3_ib!(EvexTop4mxhbf8psTnnnWdqHdqIbR, EvexTop4mxhbf8psTnnnWdqHdqIbM, self)
+            }
+            O::EvexTop4mxhf8psTnnnWdqHdqIb => {
+                simd3_ib!(EvexTop4mxhf8psTnnnWdqHdqIbR, EvexTop4mxhf8psTnnnWdqHdqIbM, self)
             }
             O::EvexVaddbf16VphHphWph => {
                 simd3!(EvexVaddbf16VphHphWphR, EvexVaddbf16VphHphWphM, self)
@@ -35393,12 +35818,12 @@ impl Instruction {
             O::EvexVaesenclastVdqHdqWdq => {
                 simd3!(EvexVaesenclastVdqHdqWdqR, EvexVaesenclastVdqHdqWdqM, self)
             }
-            O::EvexValigndVdqHdqWdqIbKmask => simd3!(
+            O::EvexValigndVdqHdqWdqIbKmask => simd3_ib!(
                 EvexValigndVdqHdqWdqIbKmaskR,
                 EvexValigndVdqHdqWdqIbKmaskM,
                 self
             ),
-            O::EvexValignqVdqHdqWdqIbKmask => simd3!(
+            O::EvexValignqVdqHdqWdqIbKmask => simd3_ib!(
                 EvexValignqVdqHdqWdqIbKmaskR,
                 EvexValignqVdqHdqWdqIbKmaskM,
                 self
@@ -35428,7 +35853,7 @@ impl Instruction {
             O::EvexVbroadcastf32x2VpsWq => {
                 simd!(EvexVbroadcastf32x2VpsWqR, EvexVbroadcastf32x2VpsWqM, self)
             }
-            O::EvexVbroadcastf32x2VpsWqKmask => simd3!(
+            O::EvexVbroadcastf32x2VpsWqKmask => simd!(
                 EvexVbroadcastf32x2VpsWqKmaskR,
                 EvexVbroadcastf32x2VpsWqKmaskM,
                 self
@@ -35436,7 +35861,7 @@ impl Instruction {
             O::EvexVbroadcastf32x4VpsWps => {
                 simd!(EvexVbroadcastf32x4VpsWpsR, EvexVbroadcastf32x4VpsWpsM, self)
             }
-            O::EvexVbroadcastf32x4VpsWpsKmask => simd3!(
+            O::EvexVbroadcastf32x4VpsWpsKmask => simd!(
                 EvexVbroadcastf32x4VpsWpsKmaskR,
                 EvexVbroadcastf32x4VpsWpsKmaskM,
                 self
@@ -35444,7 +35869,7 @@ impl Instruction {
             O::EvexVbroadcastf32x8VpsWps => {
                 simd!(EvexVbroadcastf32x8VpsWpsR, EvexVbroadcastf32x8VpsWpsM, self)
             }
-            O::EvexVbroadcastf32x8VpsWpsKmask => simd3!(
+            O::EvexVbroadcastf32x8VpsWpsKmask => simd!(
                 EvexVbroadcastf32x8VpsWpsKmaskR,
                 EvexVbroadcastf32x8VpsWpsKmaskM,
                 self
@@ -35452,7 +35877,7 @@ impl Instruction {
             O::EvexVbroadcastf64x2VpdWpd => {
                 simd!(EvexVbroadcastf64x2VpdWpdR, EvexVbroadcastf64x2VpdWpdM, self)
             }
-            O::EvexVbroadcastf64x2VpdWpdKmask => simd3!(
+            O::EvexVbroadcastf64x2VpdWpdKmask => simd!(
                 EvexVbroadcastf64x2VpdWpdKmaskR,
                 EvexVbroadcastf64x2VpdWpdKmaskM,
                 self
@@ -35460,7 +35885,7 @@ impl Instruction {
             O::EvexVbroadcastf64x4VpdWpd => {
                 simd!(EvexVbroadcastf64x4VpdWpdR, EvexVbroadcastf64x4VpdWpdM, self)
             }
-            O::EvexVbroadcastf64x4VpdWpdKmask => simd3!(
+            O::EvexVbroadcastf64x4VpdWpdKmask => simd!(
                 EvexVbroadcastf64x4VpdWpdKmaskR,
                 EvexVbroadcastf64x4VpdWpdKmaskM,
                 self
@@ -35468,7 +35893,7 @@ impl Instruction {
             O::EvexVbroadcasti32x2VdqWq => {
                 simd!(EvexVbroadcasti32x2VdqWqR, EvexVbroadcasti32x2VdqWqM, self)
             }
-            O::EvexVbroadcasti32x2VdqWqKmask => simd3!(
+            O::EvexVbroadcasti32x2VdqWqKmask => simd!(
                 EvexVbroadcasti32x2VdqWqKmaskR,
                 EvexVbroadcasti32x2VdqWqKmaskM,
                 self
@@ -35476,7 +35901,7 @@ impl Instruction {
             O::EvexVbroadcasti32x4VdqWdq => {
                 simd!(EvexVbroadcasti32x4VdqWdqR, EvexVbroadcasti32x4VdqWdqM, self)
             }
-            O::EvexVbroadcasti32x4VdqWdqKmask => simd3!(
+            O::EvexVbroadcasti32x4VdqWdqKmask => simd!(
                 EvexVbroadcasti32x4VdqWdqKmaskR,
                 EvexVbroadcasti32x4VdqWdqKmaskM,
                 self
@@ -35484,7 +35909,7 @@ impl Instruction {
             O::EvexVbroadcasti32x8VdqWdq => {
                 simd!(EvexVbroadcasti32x8VdqWdqR, EvexVbroadcasti32x8VdqWdqM, self)
             }
-            O::EvexVbroadcasti32x8VdqWdqKmask => simd3!(
+            O::EvexVbroadcasti32x8VdqWdqKmask => simd!(
                 EvexVbroadcasti32x8VdqWdqKmaskR,
                 EvexVbroadcasti32x8VdqWdqKmaskM,
                 self
@@ -35492,7 +35917,7 @@ impl Instruction {
             O::EvexVbroadcasti64x2VdqWdq => {
                 simd!(EvexVbroadcasti64x2VdqWdqR, EvexVbroadcasti64x2VdqWdqM, self)
             }
-            O::EvexVbroadcasti64x2VdqWdqKmask => simd3!(
+            O::EvexVbroadcasti64x2VdqWdqKmask => simd!(
                 EvexVbroadcasti64x2VdqWdqKmaskR,
                 EvexVbroadcasti64x2VdqWdqKmaskM,
                 self
@@ -35500,7 +35925,7 @@ impl Instruction {
             O::EvexVbroadcasti64x4VdqWdq => {
                 simd!(EvexVbroadcasti64x4VdqWdqR, EvexVbroadcasti64x4VdqWdqM, self)
             }
-            O::EvexVbroadcasti64x4VdqWdqKmask => simd3!(
+            O::EvexVbroadcasti64x4VdqWdqKmask => simd!(
                 EvexVbroadcasti64x4VdqWdqKmaskR,
                 EvexVbroadcasti64x4VdqWdqKmaskM,
                 self
@@ -35508,7 +35933,7 @@ impl Instruction {
             O::EvexVbroadcastsdVpdWsd => {
                 simd!(EvexVbroadcastsdVpdWsdR, EvexVbroadcastsdVpdWsdM, self)
             }
-            O::EvexVbroadcastsdVpdWsdKmask => simd3!(
+            O::EvexVbroadcastsdVpdWsdKmask => simd!(
                 EvexVbroadcastsdVpdWsdKmaskR,
                 EvexVbroadcastsdVpdWsdKmaskM,
                 self
@@ -35516,31 +35941,31 @@ impl Instruction {
             O::EvexVbroadcastssVpsWss => {
                 simd!(EvexVbroadcastssVpsWssR, EvexVbroadcastssVpsWssM, self)
             }
-            O::EvexVbroadcastssVpsWssKmask => simd3!(
+            O::EvexVbroadcastssVpsWssKmask => simd!(
                 EvexVbroadcastssVpsWssKmaskR,
                 EvexVbroadcastssVpsWssKmaskM,
                 self
             ),
             O::EvexVcmppbf16KgdHphWphIb => {
-                simd_ib!(EvexVcmppbf16KgdHphWphIbR, EvexVcmppbf16KgdHphWphIbM, self)
+                simd3_ib!(EvexVcmppbf16KgdHphWphIbR, EvexVcmppbf16KgdHphWphIbM, self)
             }
             O::EvexVcmppdKgbHpdWpdIb => {
-                simd_ib!(EvexVcmppdKgbHpdWpdIbR, EvexVcmppdKgbHpdWpdIbM, self)
+                simd3_ib!(EvexVcmppdKgbHpdWpdIbR, EvexVcmppdKgbHpdWpdIbM, self)
             }
             O::EvexVcmpphKgdHphWphIb => {
-                simd_ib!(EvexVcmpphKgdHphWphIbR, EvexVcmpphKgdHphWphIbM, self)
+                simd3_ib!(EvexVcmpphKgdHphWphIbR, EvexVcmpphKgdHphWphIbM, self)
             }
             O::EvexVcmppsKgwHpsWpsIb => {
-                simd_ib!(EvexVcmppsKgwHpsWpsIbR, EvexVcmppsKgwHpsWpsIbM, self)
+                simd3_ib!(EvexVcmppsKgwHpsWpsIbR, EvexVcmppsKgwHpsWpsIbM, self)
             }
             O::EvexVcmpsdKgbHsdWsdIb => {
-                simd_ib!(EvexVcmpsdKgbHsdWsdIbR, EvexVcmpsdKgbHsdWsdIbM, self)
+                simd3_ib!(EvexVcmpsdKgbHsdWsdIbR, EvexVcmpsdKgbHsdWsdIbM, self)
             }
             O::EvexVcmpshKgbHshWshIb => {
-                simd_ib!(EvexVcmpshKgbHshWshIbR, EvexVcmpshKgbHshWshIbM, self)
+                simd3_ib!(EvexVcmpshKgbHshWshIbR, EvexVcmpshKgbHshWshIbM, self)
             }
             O::EvexVcmpssKgbHssWssIb => {
-                simd_ib!(EvexVcmpssKgbHssWssIbR, EvexVcmpssKgbHssWssIbM, self)
+                simd3_ib!(EvexVcmpssKgbHssWssIbR, EvexVcmpssKgbHssWssIbM, self)
             }
             O::EvexVcomisbf16VshWsh => simd!(EvexVcomisbf16VshWshR, EvexVcomisbf16VshWshM, self),
             O::EvexVcomisdVsdWsd => simd!(EvexVcomisdVsdWsdR, EvexVcomisdVsdWsdM, self),
@@ -35549,7 +35974,7 @@ impl Instruction {
             O::EvexVcompresspdWpdVpd => {
                 simd_st!(EvexVcompresspdWpdVpdR, EvexVcompresspdWpdVpdM, self)
             }
-            O::EvexVcompresspdWpdVpdKmask => simd3!(
+            O::EvexVcompresspdWpdVpdKmask => simd_st!(
                 EvexVcompresspdWpdVpdKmaskR,
                 EvexVcompresspdWpdVpdKmaskM,
                 self
@@ -35557,7 +35982,7 @@ impl Instruction {
             O::EvexVcompresspsWpsVps => {
                 simd_st!(EvexVcompresspsWpsVpsR, EvexVcompresspsWpsVpsM, self)
             }
-            O::EvexVcompresspsWpsVpsKmask => simd3!(
+            O::EvexVcompresspsWpsVpsKmask => simd_st!(
                 EvexVcompresspsWpsVpsKmaskR,
                 EvexVcompresspsWpsVpsKmaskM,
                 self
@@ -35598,7 +36023,7 @@ impl Instruction {
             O::EvexVcvtbf162ibsV8bWph => {
                 simd!(EvexVcvtbf162ibsV8bWphR, EvexVcvtbf162ibsV8bWphM, self)
             }
-            O::EvexVcvtbf162ibsV8bWphKmask => simd3!(
+            O::EvexVcvtbf162ibsV8bWphKmask => simd!(
                 EvexVcvtbf162ibsV8bWphKmaskR,
                 EvexVcvtbf162ibsV8bWphKmaskM,
                 self
@@ -35606,11 +36031,26 @@ impl Instruction {
             O::EvexVcvtbf162iubsV8bWph => {
                 simd!(EvexVcvtbf162iubsV8bWphR, EvexVcvtbf162iubsV8bWphM, self)
             }
-            O::EvexVcvtbf162iubsV8bWphKmask => simd3!(
+            O::EvexVcvtbf162iubsV8bWphKmask => simd!(
                 EvexVcvtbf162iubsV8bWphKmaskR,
                 EvexVcvtbf162iubsV8bWphKmaskM,
                 self
             ),
+            O::EvexVcvtbf42hf8Vf8Wf4Kmask => {
+                simd!(EvexVcvtbf42hf8Vf8Wf4KmaskR, EvexVcvtbf42hf8Vf8Wf4KmaskM, self)
+            }
+            O::EvexVcvtbf62hf8Vf8Wf6Kmask => {
+                simd!(EvexVcvtbf62hf8Vf8Wf6KmaskR, EvexVcvtbf62hf8Vf8Wf6KmaskM, self)
+            }
+            O::EvexVcvtbf82bf4sWf4Vdq => {
+                simd_st!(EvexVcvtbf82bf4sWf4VdqR, EvexVcvtbf82bf4sWf4VdqM, self)
+            }
+            O::EvexVcvtbf82bf6sVf6Wf8 => {
+                simd_st!(EvexVcvtbf82bf6sVf6Wf8R, EvexVcvtbf82bf6sVf6Wf8M, self)
+            }
+            O::EvexVcvtbf82psVpsWf8Kmask => {
+                simd!(EvexVcvtbf82psVpsWf8KmaskR, EvexVcvtbf82psVpsWf8KmaskM, self)
+            }
             O::EvexVcvtbiasph2bf8Vf8hdqWphKmask => simd3!(
                 EvexVcvtbiasph2bf8Vf8hdqWphKmaskR,
                 EvexVcvtbiasph2bf8Vf8hdqWphKmaskM,
@@ -35631,182 +36071,224 @@ impl Instruction {
                 EvexVcvtbiasph2hf8sVf8hdqWphKmaskM,
                 self
             ),
+            O::EvexVcvtbiasps2bf8Vf8HdqWpsKmask => {
+                simd3!(EvexVcvtbiasps2bf8Vf8HdqWpsKmaskR, EvexVcvtbiasps2bf8Vf8HdqWpsKmaskM, self)
+            }
+            O::EvexVcvtbiasps2bf8sVf8HdqWpsKmask => {
+                simd3!(EvexVcvtbiasps2bf8sVf8HdqWpsKmaskR, EvexVcvtbiasps2bf8sVf8HdqWpsKmaskM, self)
+            }
+            O::EvexVcvtbiasps2hf8Vf8HdqWpsKmask => {
+                simd3!(EvexVcvtbiasps2hf8Vf8HdqWpsKmaskR, EvexVcvtbiasps2hf8Vf8HdqWpsKmaskM, self)
+            }
+            O::EvexVcvtbiasps2hf8sVf8HdqWpsKmask => {
+                simd3!(EvexVcvtbiasps2hf8sVf8HdqWpsKmaskR, EvexVcvtbiasps2hf8sVf8HdqWpsKmaskM, self)
+            }
             O::EvexVcvtdq2pdVpdWdq => simd!(EvexVcvtdq2pdVpdWdqR, EvexVcvtdq2pdVpdWdqM, self),
             O::EvexVcvtdq2pdVpdWdqKmask => {
-                simd3!(EvexVcvtdq2pdVpdWdqKmaskR, EvexVcvtdq2pdVpdWdqKmaskM, self)
+                simd!(EvexVcvtdq2pdVpdWdqKmaskR, EvexVcvtdq2pdVpdWdqKmaskM, self)
             }
             O::EvexVcvtdq2phVphWdq => simd!(EvexVcvtdq2phVphWdqR, EvexVcvtdq2phVphWdqM, self),
             O::EvexVcvtdq2phVphWdqKmask => {
-                simd3!(EvexVcvtdq2phVphWdqKmaskR, EvexVcvtdq2phVphWdqKmaskM, self)
+                simd!(EvexVcvtdq2phVphWdqKmaskR, EvexVcvtdq2phVphWdqKmaskM, self)
             }
             O::EvexVcvtdq2psVpsWdq => simd!(EvexVcvtdq2psVpsWdqR, EvexVcvtdq2psVpsWdqM, self),
             O::EvexVcvtdq2psVpsWdqKmask => {
-                simd3!(EvexVcvtdq2psVpsWdqKmaskR, EvexVcvtdq2psVpsWdqKmaskM, self)
+                simd!(EvexVcvtdq2psVpsWdqKmaskR, EvexVcvtdq2psVpsWdqKmaskM, self)
+            }
+            O::EvexVcvthf62hf8Vf8Wf6Kmask => {
+                simd!(EvexVcvthf62hf8Vf8Wf6KmaskR, EvexVcvthf62hf8Vf8Wf6KmaskM, self)
+            }
+            O::EvexVcvthf82bf4sWf4Vdq => {
+                simd_st!(EvexVcvthf82bf4sWf4VdqR, EvexVcvthf82bf4sWf4VdqM, self)
+            }
+            O::EvexVcvthf82hf6sVf6Wf8 => {
+                simd_st!(EvexVcvthf82hf6sVf6Wf8R, EvexVcvthf82hf6sVf6Wf8M, self)
             }
             O::EvexVcvthf82phVphWf8Kmask => {
-                simd3!(EvexVcvthf82phVphWf8KmaskR, EvexVcvthf82phVphWf8KmaskM, self)
+                simd!(EvexVcvthf82phVphWf8KmaskR, EvexVcvthf82phVphWf8KmaskM, self)
+            }
+            O::EvexVcvthf82psVpsWf8Kmask => {
+                simd!(EvexVcvthf82psVpsWf8KmaskR, EvexVcvthf82psVpsWf8KmaskM, self)
             }
             O::EvexVcvtne2ps2bf16VphHpsWpsKmask => simd3!(
                 EvexVcvtne2ps2bf16VphHpsWpsKmaskR,
                 EvexVcvtne2ps2bf16VphHpsWpsKmaskM,
                 self
             ),
-            O::EvexVcvtneps2bf16VphWpsKmask => simd3!(
+            O::EvexVcvtneps2bf16VphWpsKmask => simd!(
                 EvexVcvtneps2bf16VphWpsKmaskR,
                 EvexVcvtneps2bf16VphWpsKmaskM,
                 self
             ),
             O::EvexVcvtpd2dqVdqWpd => simd!(EvexVcvtpd2dqVdqWpdR, EvexVcvtpd2dqVdqWpdM, self),
             O::EvexVcvtpd2dqVdqWpdKmask => {
-                simd3!(EvexVcvtpd2dqVdqWpdKmaskR, EvexVcvtpd2dqVdqWpdKmaskM, self)
+                simd!(EvexVcvtpd2dqVdqWpdKmaskR, EvexVcvtpd2dqVdqWpdKmaskM, self)
             }
             O::EvexVcvtpd2phVphWdq => simd!(EvexVcvtpd2phVphWdqR, EvexVcvtpd2phVphWdqM, self),
             O::EvexVcvtpd2phVphWdqKmask => {
-                simd3!(EvexVcvtpd2phVphWdqKmaskR, EvexVcvtpd2phVphWdqKmaskM, self)
+                simd!(EvexVcvtpd2phVphWdqKmaskR, EvexVcvtpd2phVphWdqKmaskM, self)
             }
             O::EvexVcvtpd2psVpsWpd => simd!(EvexVcvtpd2psVpsWpdR, EvexVcvtpd2psVpsWpdM, self),
             O::EvexVcvtpd2psVpsWpdKmask => {
-                simd3!(EvexVcvtpd2psVpsWpdKmaskR, EvexVcvtpd2psVpsWpdKmaskM, self)
+                simd!(EvexVcvtpd2psVpsWpdKmaskR, EvexVcvtpd2psVpsWpdKmaskM, self)
             }
             O::EvexVcvtpd2qqVdqWpd => simd!(EvexVcvtpd2qqVdqWpdR, EvexVcvtpd2qqVdqWpdM, self),
             O::EvexVcvtpd2qqVdqWpdKmask => {
-                simd3!(EvexVcvtpd2qqVdqWpdKmaskR, EvexVcvtpd2qqVdqWpdKmaskM, self)
+                simd!(EvexVcvtpd2qqVdqWpdKmaskR, EvexVcvtpd2qqVdqWpdKmaskM, self)
             }
             O::EvexVcvtpd2udqVdqWpd => simd!(EvexVcvtpd2udqVdqWpdR, EvexVcvtpd2udqVdqWpdM, self),
             O::EvexVcvtpd2udqVdqWpdKmask => {
-                simd3!(EvexVcvtpd2udqVdqWpdKmaskR, EvexVcvtpd2udqVdqWpdKmaskM, self)
+                simd!(EvexVcvtpd2udqVdqWpdKmaskR, EvexVcvtpd2udqVdqWpdKmaskM, self)
             }
             O::EvexVcvtpd2uqqVdqWpd => simd!(EvexVcvtpd2uqqVdqWpdR, EvexVcvtpd2uqqVdqWpdM, self),
             O::EvexVcvtpd2uqqVdqWpdKmask => {
-                simd3!(EvexVcvtpd2uqqVdqWpdKmaskR, EvexVcvtpd2uqqVdqWpdKmaskM, self)
+                simd!(EvexVcvtpd2uqqVdqWpdKmaskR, EvexVcvtpd2uqqVdqWpdKmaskM, self)
             }
-            O::EvexVcvtph2bf8Vf8hdqWphKmask => simd3!(
+            O::EvexVcvtph2bf8Vf8hdqWphKmask => simd!(
                 EvexVcvtph2bf8Vf8hdqWphKmaskR,
                 EvexVcvtph2bf8Vf8hdqWphKmaskM,
                 self
             ),
-            O::EvexVcvtph2bf8sVf8hdqWphKmask => simd3!(
+            O::EvexVcvtph2bf8sVf8hdqWphKmask => simd!(
                 EvexVcvtph2bf8sVf8hdqWphKmaskR,
                 EvexVcvtph2bf8sVf8hdqWphKmaskM,
                 self
             ),
             O::EvexVcvtph2dqVdqWph => simd!(EvexVcvtph2dqVdqWphR, EvexVcvtph2dqVdqWphM, self),
             O::EvexVcvtph2dqVdqWphKmask => {
-                simd3!(EvexVcvtph2dqVdqWphKmaskR, EvexVcvtph2dqVdqWphKmaskM, self)
+                simd!(EvexVcvtph2dqVdqWphKmaskR, EvexVcvtph2dqVdqWphKmaskM, self)
             }
-            O::EvexVcvtph2hf8Vf8hdqWphKmask => simd3!(
+            O::EvexVcvtph2hf8Vf8hdqWphKmask => simd!(
                 EvexVcvtph2hf8Vf8hdqWphKmaskR,
                 EvexVcvtph2hf8Vf8hdqWphKmaskM,
                 self
             ),
-            O::EvexVcvtph2hf8sVf8hdqWphKmask => simd3!(
+            O::EvexVcvtph2hf8sVf8hdqWphKmask => simd!(
                 EvexVcvtph2hf8sVf8hdqWphKmaskR,
                 EvexVcvtph2hf8sVf8hdqWphKmaskM,
                 self
             ),
             O::EvexVcvtph2ibsV8bWph => simd!(EvexVcvtph2ibsV8bWphR, EvexVcvtph2ibsV8bWphM, self),
             O::EvexVcvtph2ibsV8bWphKmask => {
-                simd3!(EvexVcvtph2ibsV8bWphKmaskR, EvexVcvtph2ibsV8bWphKmaskM, self)
+                simd!(EvexVcvtph2ibsV8bWphKmaskR, EvexVcvtph2ibsV8bWphKmaskM, self)
             }
             O::EvexVcvtph2iubsV8bWph => simd!(EvexVcvtph2iubsV8bWphR, EvexVcvtph2iubsV8bWphM, self),
-            O::EvexVcvtph2iubsV8bWphKmask => simd3!(
+            O::EvexVcvtph2iubsV8bWphKmask => simd!(
                 EvexVcvtph2iubsV8bWphKmaskR,
                 EvexVcvtph2iubsV8bWphKmaskM,
                 self
             ),
             O::EvexVcvtph2pdVpdWph => simd!(EvexVcvtph2pdVpdWphR, EvexVcvtph2pdVpdWphM, self),
             O::EvexVcvtph2pdVpdWphKmask => {
-                simd3!(EvexVcvtph2pdVpdWphKmaskR, EvexVcvtph2pdVpdWphKmaskM, self)
+                simd!(EvexVcvtph2pdVpdWphKmaskR, EvexVcvtph2pdVpdWphKmaskM, self)
             }
             O::EvexVcvtph2psVpsWps => simd!(EvexVcvtph2psVpsWpsR, EvexVcvtph2psVpsWpsM, self),
             O::EvexVcvtph2psVpsWpsKmask => {
-                simd3!(EvexVcvtph2psVpsWpsKmaskR, EvexVcvtph2psVpsWpsKmaskM, self)
+                simd!(EvexVcvtph2psVpsWpsKmaskR, EvexVcvtph2psVpsWpsKmaskM, self)
             }
             O::EvexVcvtph2psxVpsWph => simd!(EvexVcvtph2psxVpsWphR, EvexVcvtph2psxVpsWphM, self),
             O::EvexVcvtph2psxVpsWphKmask => {
-                simd3!(EvexVcvtph2psxVpsWphKmaskR, EvexVcvtph2psxVpsWphKmaskM, self)
+                simd!(EvexVcvtph2psxVpsWphKmaskR, EvexVcvtph2psxVpsWphKmaskM, self)
             }
             O::EvexVcvtph2qqVdqWph => simd!(EvexVcvtph2qqVdqWphR, EvexVcvtph2qqVdqWphM, self),
             O::EvexVcvtph2qqVdqWphKmask => {
-                simd3!(EvexVcvtph2qqVdqWphKmaskR, EvexVcvtph2qqVdqWphKmaskM, self)
+                simd!(EvexVcvtph2qqVdqWphKmaskR, EvexVcvtph2qqVdqWphKmaskM, self)
             }
             O::EvexVcvtph2udqVdqWph => simd!(EvexVcvtph2udqVdqWphR, EvexVcvtph2udqVdqWphM, self),
             O::EvexVcvtph2udqVdqWphKmask => {
-                simd3!(EvexVcvtph2udqVdqWphKmaskR, EvexVcvtph2udqVdqWphKmaskM, self)
+                simd!(EvexVcvtph2udqVdqWphKmaskR, EvexVcvtph2udqVdqWphKmaskM, self)
             }
             O::EvexVcvtph2uqqVdqWph => simd!(EvexVcvtph2uqqVdqWphR, EvexVcvtph2uqqVdqWphM, self),
             O::EvexVcvtph2uqqVdqWphKmask => {
-                simd3!(EvexVcvtph2uqqVdqWphKmaskR, EvexVcvtph2uqqVdqWphKmaskM, self)
+                simd!(EvexVcvtph2uqqVdqWphKmaskR, EvexVcvtph2uqqVdqWphKmaskM, self)
             }
             O::EvexVcvtph2uwVdqWps => simd!(EvexVcvtph2uwVdqWpsR, EvexVcvtph2uwVdqWpsM, self),
             O::EvexVcvtph2uwVdqWpsKmask => {
-                simd3!(EvexVcvtph2uwVdqWpsKmaskR, EvexVcvtph2uwVdqWpsKmaskM, self)
+                simd!(EvexVcvtph2uwVdqWpsKmaskR, EvexVcvtph2uwVdqWpsKmaskM, self)
             }
             O::EvexVcvtph2wVdqWps => simd!(EvexVcvtph2wVdqWpsR, EvexVcvtph2wVdqWpsM, self),
             O::EvexVcvtph2wVdqWpsKmask => {
-                simd3!(EvexVcvtph2wVdqWpsKmaskR, EvexVcvtph2wVdqWpsKmaskM, self)
+                simd!(EvexVcvtph2wVdqWpsKmaskR, EvexVcvtph2wVdqWpsKmaskM, self)
+            }
+            O::EvexVcvtps2bf8Vf8WpsKmask => {
+                simd!(EvexVcvtps2bf8Vf8WpsKmaskR, EvexVcvtps2bf8Vf8WpsKmaskM, self)
+            }
+            O::EvexVcvtps2bf8sVf8WpsKmask => {
+                simd!(EvexVcvtps2bf8sVf8WpsKmaskR, EvexVcvtps2bf8sVf8WpsKmaskM, self)
             }
             O::EvexVcvtps2dqVdqWps => simd!(EvexVcvtps2dqVdqWpsR, EvexVcvtps2dqVdqWpsM, self),
             O::EvexVcvtps2dqVdqWpsKmask => {
-                simd3!(EvexVcvtps2dqVdqWpsKmaskR, EvexVcvtps2dqVdqWpsKmaskM, self)
+                simd!(EvexVcvtps2dqVdqWpsKmaskR, EvexVcvtps2dqVdqWpsKmaskM, self)
+            }
+            O::EvexVcvtps2hf8Vf8WpsKmask => {
+                simd!(EvexVcvtps2hf8Vf8WpsKmaskR, EvexVcvtps2hf8Vf8WpsKmaskM, self)
+            }
+            O::EvexVcvtps2hf8sVf8WpsKmask => {
+                simd!(EvexVcvtps2hf8sVf8WpsKmaskR, EvexVcvtps2hf8sVf8WpsKmaskM, self)
             }
             O::EvexVcvtps2ibsV8bWps => simd!(EvexVcvtps2ibsV8bWpsR, EvexVcvtps2ibsV8bWpsM, self),
             O::EvexVcvtps2ibsV8bWpsKmask => {
-                simd3!(EvexVcvtps2ibsV8bWpsKmaskR, EvexVcvtps2ibsV8bWpsKmaskM, self)
+                simd!(EvexVcvtps2ibsV8bWpsKmaskR, EvexVcvtps2ibsV8bWpsKmaskM, self)
             }
             O::EvexVcvtps2iubsV8bWps => simd!(EvexVcvtps2iubsV8bWpsR, EvexVcvtps2iubsV8bWpsM, self),
-            O::EvexVcvtps2iubsV8bWpsKmask => simd3!(
+            O::EvexVcvtps2iubsV8bWpsKmask => simd!(
                 EvexVcvtps2iubsV8bWpsKmaskR,
                 EvexVcvtps2iubsV8bWpsKmaskM,
                 self
             ),
             O::EvexVcvtps2pdVpdWps => simd!(EvexVcvtps2pdVpdWpsR, EvexVcvtps2pdVpdWpsM, self),
             O::EvexVcvtps2pdVpdWpsKmask => {
-                simd3!(EvexVcvtps2pdVpdWpsKmaskR, EvexVcvtps2pdVpdWpsKmaskM, self)
+                simd!(EvexVcvtps2pdVpdWpsKmaskR, EvexVcvtps2pdVpdWpsKmaskM, self)
             }
             O::EvexVcvtps2phWpsVpsIb => {
-                simd_ib!(EvexVcvtps2phWpsVpsIbR, EvexVcvtps2phWpsVpsIbM, self)
+                simd_st_ib!(EvexVcvtps2phWpsVpsIbR, EvexVcvtps2phWpsVpsIbM, self)
             }
-            O::EvexVcvtps2phWpsVpsIbKmask => simd3!(
+            O::EvexVcvtps2phWpsVpsIbKmask => simd_st_ib!(
                 EvexVcvtps2phWpsVpsIbKmaskR,
                 EvexVcvtps2phWpsVpsIbKmaskM,
                 self
             ),
             O::EvexVcvtps2phxVphWdq => simd!(EvexVcvtps2phxVphWdqR, EvexVcvtps2phxVphWdqM, self),
             O::EvexVcvtps2phxVphWdqKmask => {
-                simd3!(EvexVcvtps2phxVphWdqKmaskR, EvexVcvtps2phxVphWdqKmaskM, self)
+                simd!(EvexVcvtps2phxVphWdqKmaskR, EvexVcvtps2phxVphWdqKmaskM, self)
             }
             O::EvexVcvtps2qqVdqWps => simd!(EvexVcvtps2qqVdqWpsR, EvexVcvtps2qqVdqWpsM, self),
             O::EvexVcvtps2qqVdqWpsKmask => {
-                simd3!(EvexVcvtps2qqVdqWpsKmaskR, EvexVcvtps2qqVdqWpsKmaskM, self)
+                simd!(EvexVcvtps2qqVdqWpsKmaskR, EvexVcvtps2qqVdqWpsKmaskM, self)
             }
             O::EvexVcvtps2udqVdqWps => simd!(EvexVcvtps2udqVdqWpsR, EvexVcvtps2udqVdqWpsM, self),
             O::EvexVcvtps2udqVdqWpsKmask => {
-                simd3!(EvexVcvtps2udqVdqWpsKmaskR, EvexVcvtps2udqVdqWpsKmaskM, self)
+                simd!(EvexVcvtps2udqVdqWpsKmaskR, EvexVcvtps2udqVdqWpsKmaskM, self)
             }
             O::EvexVcvtps2uqqVdqWps => simd!(EvexVcvtps2uqqVdqWpsR, EvexVcvtps2uqqVdqWpsM, self),
             O::EvexVcvtps2uqqVdqWpsKmask => {
-                simd3!(EvexVcvtps2uqqVdqWpsKmaskR, EvexVcvtps2uqqVdqWpsKmaskM, self)
+                simd!(EvexVcvtps2uqqVdqWpsKmaskR, EvexVcvtps2uqqVdqWpsKmaskM, self)
             }
             O::EvexVcvtqq2pdVpdWdq => simd!(EvexVcvtqq2pdVpdWdqR, EvexVcvtqq2pdVpdWdqM, self),
             O::EvexVcvtqq2pdVpdWdqKmask => {
-                simd3!(EvexVcvtqq2pdVpdWdqKmaskR, EvexVcvtqq2pdVpdWdqKmaskM, self)
+                simd!(EvexVcvtqq2pdVpdWdqKmaskR, EvexVcvtqq2pdVpdWdqKmaskM, self)
             }
             O::EvexVcvtqq2phVphWdq => simd!(EvexVcvtqq2phVphWdqR, EvexVcvtqq2phVphWdqM, self),
             O::EvexVcvtqq2phVphWdqKmask => {
-                simd3!(EvexVcvtqq2phVphWdqKmaskR, EvexVcvtqq2phVphWdqKmaskM, self)
+                simd!(EvexVcvtqq2phVphWdqKmaskR, EvexVcvtqq2phVphWdqKmaskM, self)
             }
             O::EvexVcvtqq2psVpsWdq => simd!(EvexVcvtqq2psVpsWdqR, EvexVcvtqq2psVpsWdqM, self),
             O::EvexVcvtqq2psVpsWdqKmask => {
-                simd3!(EvexVcvtqq2psVpsWdqKmaskR, EvexVcvtqq2psVpsWdqKmaskM, self)
+                simd!(EvexVcvtqq2psVpsWdqKmaskR, EvexVcvtqq2psVpsWdqKmaskM, self)
             }
-            O::EvexVcvtsd2shVssWsh => simd!(EvexVcvtsd2shVssWshR, EvexVcvtsd2shVssWshM, self),
+            O::EvexVcvtrops2hf8Vf8WpsKmask => {
+                simd!(EvexVcvtrops2hf8Vf8WpsKmaskR, EvexVcvtrops2hf8Vf8WpsKmaskM, self)
+            }
+            O::EvexVcvtrops2hf8sVf8WpsKmask => {
+                simd!(EvexVcvtrops2hf8sVf8WpsKmaskR, EvexVcvtrops2hf8sVf8WpsKmaskM, self)
+            }
+            O::EvexVcvtsd2shVssWsh => simd3!(EvexVcvtsd2shVssWshR, EvexVcvtsd2shVssWshM, self),
             O::EvexVcvtsd2shVssWshKmask => {
                 simd3!(EvexVcvtsd2shVssWshKmaskR, EvexVcvtsd2shVssWshKmaskM, self)
             }
             O::EvexVcvtsd2siGdWsd => simd_gpr_src!(EvexVcvtsd2siGdWsdR, EvexVcvtsd2siGdWsdM, self),
             O::EvexVcvtsd2siGqWsd => simd_gpr_src!(EvexVcvtsd2siGqWsdR, EvexVcvtsd2siGqWsdM, self),
-            O::EvexVcvtsd2ssVssWsd => simd!(EvexVcvtsd2ssVssWsdR, EvexVcvtsd2ssVssWsdM, self),
+            O::EvexVcvtsd2ssVssWsd => simd3!(EvexVcvtsd2ssVssWsdR, EvexVcvtsd2ssVssWsdM, self),
             O::EvexVcvtsd2ssVssWsdKmask => {
                 simd3!(EvexVcvtsd2ssVssWsdKmaskR, EvexVcvtsd2ssVssWsdKmaskM, self)
             }
@@ -35816,13 +36298,13 @@ impl Instruction {
             O::EvexVcvtsd2usiGqWsd => {
                 simd_gpr_src!(EvexVcvtsd2usiGqWsdR, EvexVcvtsd2usiGqWsdM, self)
             }
-            O::EvexVcvtsh2sdVsdWsh => simd!(EvexVcvtsh2sdVsdWshR, EvexVcvtsh2sdVsdWshM, self),
+            O::EvexVcvtsh2sdVsdWsh => simd3!(EvexVcvtsh2sdVsdWshR, EvexVcvtsh2sdVsdWshM, self),
             O::EvexVcvtsh2sdVsdWshKmask => {
                 simd3!(EvexVcvtsh2sdVsdWshKmaskR, EvexVcvtsh2sdVsdWshKmaskM, self)
             }
             O::EvexVcvtsh2siGdWss => simd_gpr_src!(EvexVcvtsh2siGdWssR, EvexVcvtsh2siGdWssM, self),
             O::EvexVcvtsh2siGqWss => simd_gpr_src!(EvexVcvtsh2siGqWssR, EvexVcvtsh2siGqWssM, self),
-            O::EvexVcvtsh2ssVssWsh => simd!(EvexVcvtsh2ssVssWshR, EvexVcvtsh2ssVssWshM, self),
+            O::EvexVcvtsh2ssVssWsh => simd3!(EvexVcvtsh2ssVssWshR, EvexVcvtsh2ssVssWshM, self),
             O::EvexVcvtsh2ssVssWshKmask => {
                 simd3!(EvexVcvtsh2ssVssWshKmaskR, EvexVcvtsh2ssVssWshKmaskM, self)
             }
@@ -35832,17 +36314,17 @@ impl Instruction {
             O::EvexVcvtsh2usiGqWss => {
                 simd_gpr_src!(EvexVcvtsh2usiGqWssR, EvexVcvtsh2usiGqWssM, self)
             }
-            O::EvexVcvtsi2sdVsdEd => simd_dst_gpr!(EvexVcvtsi2sdVsdEdR, EvexVcvtsi2sdVsdEdM, self),
-            O::EvexVcvtsi2sdVsdEq => simd_dst_gpr!(EvexVcvtsi2sdVsdEqR, EvexVcvtsi2sdVsdEqM, self),
-            O::EvexVcvtsi2shVshEd => simd_dst_gpr!(EvexVcvtsi2shVshEdR, EvexVcvtsi2shVshEdM, self),
-            O::EvexVcvtsi2shVshEq => simd_dst_gpr!(EvexVcvtsi2shVshEqR, EvexVcvtsi2shVshEqM, self),
-            O::EvexVcvtsi2ssVssEd => simd_dst_gpr!(EvexVcvtsi2ssVssEdR, EvexVcvtsi2ssVssEdM, self),
-            O::EvexVcvtsi2ssVssEq => simd_dst_gpr!(EvexVcvtsi2ssVssEqR, EvexVcvtsi2ssVssEqM, self),
-            O::EvexVcvtss2sdVsdWss => simd!(EvexVcvtss2sdVsdWssR, EvexVcvtss2sdVsdWssM, self),
+            O::EvexVcvtsi2sdVsdEd => simd3_gpr!(EvexVcvtsi2sdVsdEdR, EvexVcvtsi2sdVsdEdM, self),
+            O::EvexVcvtsi2sdVsdEq => simd3_gpr!(EvexVcvtsi2sdVsdEqR, EvexVcvtsi2sdVsdEqM, self),
+            O::EvexVcvtsi2shVshEd => simd3_gpr!(EvexVcvtsi2shVshEdR, EvexVcvtsi2shVshEdM, self),
+            O::EvexVcvtsi2shVshEq => simd3_gpr!(EvexVcvtsi2shVshEqR, EvexVcvtsi2shVshEqM, self),
+            O::EvexVcvtsi2ssVssEd => simd3_gpr!(EvexVcvtsi2ssVssEdR, EvexVcvtsi2ssVssEdM, self),
+            O::EvexVcvtsi2ssVssEq => simd3_gpr!(EvexVcvtsi2ssVssEqR, EvexVcvtsi2ssVssEqM, self),
+            O::EvexVcvtss2sdVsdWss => simd3!(EvexVcvtss2sdVsdWssR, EvexVcvtss2sdVsdWssM, self),
             O::EvexVcvtss2sdVsdWssKmask => {
                 simd3!(EvexVcvtss2sdVsdWssKmaskR, EvexVcvtss2sdVsdWssKmaskM, self)
             }
-            O::EvexVcvtss2shVssWsh => simd!(EvexVcvtss2shVssWshR, EvexVcvtss2shVssWshM, self),
+            O::EvexVcvtss2shVssWsh => simd3!(EvexVcvtss2shVssWshR, EvexVcvtss2shVssWshM, self),
             O::EvexVcvtss2shVssWshKmask => {
                 simd3!(EvexVcvtss2shVssWshKmaskR, EvexVcvtss2shVssWshKmaskM, self)
             }
@@ -35857,7 +36339,7 @@ impl Instruction {
             O::EvexVcvttbf162ibsV8bWph => {
                 simd!(EvexVcvttbf162ibsV8bWphR, EvexVcvttbf162ibsV8bWphM, self)
             }
-            O::EvexVcvttbf162ibsV8bWphKmask => simd3!(
+            O::EvexVcvttbf162ibsV8bWphKmask => simd!(
                 EvexVcvttbf162ibsV8bWphKmaskR,
                 EvexVcvttbf162ibsV8bWphKmaskM,
                 self
@@ -35865,33 +36347,33 @@ impl Instruction {
             O::EvexVcvttbf162iubsV8bWph => {
                 simd!(EvexVcvttbf162iubsV8bWphR, EvexVcvttbf162iubsV8bWphM, self)
             }
-            O::EvexVcvttbf162iubsV8bWphKmask => simd3!(
+            O::EvexVcvttbf162iubsV8bWphKmask => simd!(
                 EvexVcvttbf162iubsV8bWphKmaskR,
                 EvexVcvttbf162iubsV8bWphKmaskM,
                 self
             ),
             O::EvexVcvttpd2dqVdqWpd => simd!(EvexVcvttpd2dqVdqWpdR, EvexVcvttpd2dqVdqWpdM, self),
             O::EvexVcvttpd2dqVdqWpdKmask => {
-                simd3!(EvexVcvttpd2dqVdqWpdKmaskR, EvexVcvttpd2dqVdqWpdKmaskM, self)
+                simd!(EvexVcvttpd2dqVdqWpdKmaskR, EvexVcvttpd2dqVdqWpdKmaskM, self)
             }
             O::EvexVcvttpd2dqsVdqWpd => simd!(EvexVcvttpd2dqsVdqWpdR, EvexVcvttpd2dqsVdqWpdM, self),
-            O::EvexVcvttpd2dqsVdqWpdKmask => simd3!(
+            O::EvexVcvttpd2dqsVdqWpdKmask => simd!(
                 EvexVcvttpd2dqsVdqWpdKmaskR,
                 EvexVcvttpd2dqsVdqWpdKmaskM,
                 self
             ),
             O::EvexVcvttpd2qqVdqWpd => simd!(EvexVcvttpd2qqVdqWpdR, EvexVcvttpd2qqVdqWpdM, self),
             O::EvexVcvttpd2qqVdqWpdKmask => {
-                simd3!(EvexVcvttpd2qqVdqWpdKmaskR, EvexVcvttpd2qqVdqWpdKmaskM, self)
+                simd!(EvexVcvttpd2qqVdqWpdKmaskR, EvexVcvttpd2qqVdqWpdKmaskM, self)
             }
             O::EvexVcvttpd2qqsVdqWpd => simd!(EvexVcvttpd2qqsVdqWpdR, EvexVcvttpd2qqsVdqWpdM, self),
-            O::EvexVcvttpd2qqsVdqWpdKmask => simd3!(
+            O::EvexVcvttpd2qqsVdqWpdKmask => simd!(
                 EvexVcvttpd2qqsVdqWpdKmaskR,
                 EvexVcvttpd2qqsVdqWpdKmaskM,
                 self
             ),
             O::EvexVcvttpd2udqVdqWpd => simd!(EvexVcvttpd2udqVdqWpdR, EvexVcvttpd2udqVdqWpdM, self),
-            O::EvexVcvttpd2udqVdqWpdKmask => simd3!(
+            O::EvexVcvttpd2udqVdqWpdKmask => simd!(
                 EvexVcvttpd2udqVdqWpdKmaskR,
                 EvexVcvttpd2udqVdqWpdKmaskM,
                 self
@@ -35899,13 +36381,13 @@ impl Instruction {
             O::EvexVcvttpd2udqsVdqWpd => {
                 simd!(EvexVcvttpd2udqsVdqWpdR, EvexVcvttpd2udqsVdqWpdM, self)
             }
-            O::EvexVcvttpd2udqsVdqWpdKmask => simd3!(
+            O::EvexVcvttpd2udqsVdqWpdKmask => simd!(
                 EvexVcvttpd2udqsVdqWpdKmaskR,
                 EvexVcvttpd2udqsVdqWpdKmaskM,
                 self
             ),
             O::EvexVcvttpd2uqqVdqWpd => simd!(EvexVcvttpd2uqqVdqWpdR, EvexVcvttpd2uqqVdqWpdM, self),
-            O::EvexVcvttpd2uqqVdqWpdKmask => simd3!(
+            O::EvexVcvttpd2uqqVdqWpdKmask => simd!(
                 EvexVcvttpd2uqqVdqWpdKmaskR,
                 EvexVcvttpd2uqqVdqWpdKmaskM,
                 self
@@ -35913,17 +36395,17 @@ impl Instruction {
             O::EvexVcvttpd2uqqsVdqWpd => {
                 simd!(EvexVcvttpd2uqqsVdqWpdR, EvexVcvttpd2uqqsVdqWpdM, self)
             }
-            O::EvexVcvttpd2uqqsVdqWpdKmask => simd3!(
+            O::EvexVcvttpd2uqqsVdqWpdKmask => simd!(
                 EvexVcvttpd2uqqsVdqWpdKmaskR,
                 EvexVcvttpd2uqqsVdqWpdKmaskM,
                 self
             ),
             O::EvexVcvttph2dqVdqWph => simd!(EvexVcvttph2dqVdqWphR, EvexVcvttph2dqVdqWphM, self),
             O::EvexVcvttph2dqVdqWphKmask => {
-                simd3!(EvexVcvttph2dqVdqWphKmaskR, EvexVcvttph2dqVdqWphKmaskM, self)
+                simd!(EvexVcvttph2dqVdqWphKmaskR, EvexVcvttph2dqVdqWphKmaskM, self)
             }
             O::EvexVcvttph2ibsV8bWph => simd!(EvexVcvttph2ibsV8bWphR, EvexVcvttph2ibsV8bWphM, self),
-            O::EvexVcvttph2ibsV8bWphKmask => simd3!(
+            O::EvexVcvttph2ibsV8bWphKmask => simd!(
                 EvexVcvttph2ibsV8bWphKmaskR,
                 EvexVcvttph2ibsV8bWphKmaskM,
                 self
@@ -35931,47 +36413,47 @@ impl Instruction {
             O::EvexVcvttph2iubsV8bWph => {
                 simd!(EvexVcvttph2iubsV8bWphR, EvexVcvttph2iubsV8bWphM, self)
             }
-            O::EvexVcvttph2iubsV8bWphKmask => simd3!(
+            O::EvexVcvttph2iubsV8bWphKmask => simd!(
                 EvexVcvttph2iubsV8bWphKmaskR,
                 EvexVcvttph2iubsV8bWphKmaskM,
                 self
             ),
             O::EvexVcvttph2qqVdqWph => simd!(EvexVcvttph2qqVdqWphR, EvexVcvttph2qqVdqWphM, self),
             O::EvexVcvttph2qqVdqWphKmask => {
-                simd3!(EvexVcvttph2qqVdqWphKmaskR, EvexVcvttph2qqVdqWphKmaskM, self)
+                simd!(EvexVcvttph2qqVdqWphKmaskR, EvexVcvttph2qqVdqWphKmaskM, self)
             }
             O::EvexVcvttph2udqVdqWph => simd!(EvexVcvttph2udqVdqWphR, EvexVcvttph2udqVdqWphM, self),
-            O::EvexVcvttph2udqVdqWphKmask => simd3!(
+            O::EvexVcvttph2udqVdqWphKmask => simd!(
                 EvexVcvttph2udqVdqWphKmaskR,
                 EvexVcvttph2udqVdqWphKmaskM,
                 self
             ),
             O::EvexVcvttph2uqqVdqWph => simd!(EvexVcvttph2uqqVdqWphR, EvexVcvttph2uqqVdqWphM, self),
-            O::EvexVcvttph2uqqVdqWphKmask => simd3!(
+            O::EvexVcvttph2uqqVdqWphKmask => simd!(
                 EvexVcvttph2uqqVdqWphKmaskR,
                 EvexVcvttph2uqqVdqWphKmaskM,
                 self
             ),
             O::EvexVcvttph2uwVdqWps => simd!(EvexVcvttph2uwVdqWpsR, EvexVcvttph2uwVdqWpsM, self),
             O::EvexVcvttph2uwVdqWpsKmask => {
-                simd3!(EvexVcvttph2uwVdqWpsKmaskR, EvexVcvttph2uwVdqWpsKmaskM, self)
+                simd!(EvexVcvttph2uwVdqWpsKmaskR, EvexVcvttph2uwVdqWpsKmaskM, self)
             }
             O::EvexVcvttph2wVdqWps => simd!(EvexVcvttph2wVdqWpsR, EvexVcvttph2wVdqWpsM, self),
             O::EvexVcvttph2wVdqWpsKmask => {
-                simd3!(EvexVcvttph2wVdqWpsKmaskR, EvexVcvttph2wVdqWpsKmaskM, self)
+                simd!(EvexVcvttph2wVdqWpsKmaskR, EvexVcvttph2wVdqWpsKmaskM, self)
             }
             O::EvexVcvttps2dqVdqWps => simd!(EvexVcvttps2dqVdqWpsR, EvexVcvttps2dqVdqWpsM, self),
             O::EvexVcvttps2dqVdqWpsKmask => {
-                simd3!(EvexVcvttps2dqVdqWpsKmaskR, EvexVcvttps2dqVdqWpsKmaskM, self)
+                simd!(EvexVcvttps2dqVdqWpsKmaskR, EvexVcvttps2dqVdqWpsKmaskM, self)
             }
             O::EvexVcvttps2dqsVdqWps => simd!(EvexVcvttps2dqsVdqWpsR, EvexVcvttps2dqsVdqWpsM, self),
-            O::EvexVcvttps2dqsVdqWpsKmask => simd3!(
+            O::EvexVcvttps2dqsVdqWpsKmask => simd!(
                 EvexVcvttps2dqsVdqWpsKmaskR,
                 EvexVcvttps2dqsVdqWpsKmaskM,
                 self
             ),
             O::EvexVcvttps2ibsV8bWps => simd!(EvexVcvttps2ibsV8bWpsR, EvexVcvttps2ibsV8bWpsM, self),
-            O::EvexVcvttps2ibsV8bWpsKmask => simd3!(
+            O::EvexVcvttps2ibsV8bWpsKmask => simd!(
                 EvexVcvttps2ibsV8bWpsKmaskR,
                 EvexVcvttps2ibsV8bWpsKmaskM,
                 self
@@ -35979,23 +36461,23 @@ impl Instruction {
             O::EvexVcvttps2iubsV8bWps => {
                 simd!(EvexVcvttps2iubsV8bWpsR, EvexVcvttps2iubsV8bWpsM, self)
             }
-            O::EvexVcvttps2iubsV8bWpsKmask => simd3!(
+            O::EvexVcvttps2iubsV8bWpsKmask => simd!(
                 EvexVcvttps2iubsV8bWpsKmaskR,
                 EvexVcvttps2iubsV8bWpsKmaskM,
                 self
             ),
             O::EvexVcvttps2qqVdqWps => simd!(EvexVcvttps2qqVdqWpsR, EvexVcvttps2qqVdqWpsM, self),
             O::EvexVcvttps2qqVdqWpsKmask => {
-                simd3!(EvexVcvttps2qqVdqWpsKmaskR, EvexVcvttps2qqVdqWpsKmaskM, self)
+                simd!(EvexVcvttps2qqVdqWpsKmaskR, EvexVcvttps2qqVdqWpsKmaskM, self)
             }
             O::EvexVcvttps2qqsVdqWps => simd!(EvexVcvttps2qqsVdqWpsR, EvexVcvttps2qqsVdqWpsM, self),
-            O::EvexVcvttps2qqsVdqWpsKmask => simd3!(
+            O::EvexVcvttps2qqsVdqWpsKmask => simd!(
                 EvexVcvttps2qqsVdqWpsKmaskR,
                 EvexVcvttps2qqsVdqWpsKmaskM,
                 self
             ),
             O::EvexVcvttps2udqVdqWps => simd!(EvexVcvttps2udqVdqWpsR, EvexVcvttps2udqVdqWpsM, self),
-            O::EvexVcvttps2udqVdqWpsKmask => simd3!(
+            O::EvexVcvttps2udqVdqWpsKmask => simd!(
                 EvexVcvttps2udqVdqWpsKmaskR,
                 EvexVcvttps2udqVdqWpsKmaskM,
                 self
@@ -36003,13 +36485,13 @@ impl Instruction {
             O::EvexVcvttps2udqsVdqWps => {
                 simd!(EvexVcvttps2udqsVdqWpsR, EvexVcvttps2udqsVdqWpsM, self)
             }
-            O::EvexVcvttps2udqsVdqWpsKmask => simd3!(
+            O::EvexVcvttps2udqsVdqWpsKmask => simd!(
                 EvexVcvttps2udqsVdqWpsKmaskR,
                 EvexVcvttps2udqsVdqWpsKmaskM,
                 self
             ),
             O::EvexVcvttps2uqqVdqWps => simd!(EvexVcvttps2uqqVdqWpsR, EvexVcvttps2uqqVdqWpsM, self),
-            O::EvexVcvttps2uqqVdqWpsKmask => simd3!(
+            O::EvexVcvttps2uqqVdqWpsKmask => simd!(
                 EvexVcvttps2uqqVdqWpsKmaskR,
                 EvexVcvttps2uqqVdqWpsKmaskM,
                 self
@@ -36017,7 +36499,7 @@ impl Instruction {
             O::EvexVcvttps2uqqsVdqWps => {
                 simd!(EvexVcvttps2uqqsVdqWpsR, EvexVcvttps2uqqsVdqWpsM, self)
             }
-            O::EvexVcvttps2uqqsVdqWpsKmask => simd3!(
+            O::EvexVcvttps2uqqsVdqWpsKmask => simd!(
                 EvexVcvttps2uqqsVdqWpsKmaskR,
                 EvexVcvttps2uqqsVdqWpsKmaskM,
                 self
@@ -36084,55 +36566,55 @@ impl Instruction {
             }
             O::EvexVcvtudq2pdVpdWdq => simd!(EvexVcvtudq2pdVpdWdqR, EvexVcvtudq2pdVpdWdqM, self),
             O::EvexVcvtudq2pdVpdWdqKmask => {
-                simd3!(EvexVcvtudq2pdVpdWdqKmaskR, EvexVcvtudq2pdVpdWdqKmaskM, self)
+                simd!(EvexVcvtudq2pdVpdWdqKmaskR, EvexVcvtudq2pdVpdWdqKmaskM, self)
             }
             O::EvexVcvtudq2phVphWdq => simd!(EvexVcvtudq2phVphWdqR, EvexVcvtudq2phVphWdqM, self),
             O::EvexVcvtudq2phVphWdqKmask => {
-                simd3!(EvexVcvtudq2phVphWdqKmaskR, EvexVcvtudq2phVphWdqKmaskM, self)
+                simd!(EvexVcvtudq2phVphWdqKmaskR, EvexVcvtudq2phVphWdqKmaskM, self)
             }
             O::EvexVcvtudq2psVpsWdq => simd!(EvexVcvtudq2psVpsWdqR, EvexVcvtudq2psVpsWdqM, self),
             O::EvexVcvtudq2psVpsWdqKmask => {
-                simd3!(EvexVcvtudq2psVpsWdqKmaskR, EvexVcvtudq2psVpsWdqKmaskM, self)
+                simd!(EvexVcvtudq2psVpsWdqKmaskR, EvexVcvtudq2psVpsWdqKmaskM, self)
             }
             O::EvexVcvtuqq2pdVpdWdq => simd!(EvexVcvtuqq2pdVpdWdqR, EvexVcvtuqq2pdVpdWdqM, self),
             O::EvexVcvtuqq2pdVpdWdqKmask => {
-                simd3!(EvexVcvtuqq2pdVpdWdqKmaskR, EvexVcvtuqq2pdVpdWdqKmaskM, self)
+                simd!(EvexVcvtuqq2pdVpdWdqKmaskR, EvexVcvtuqq2pdVpdWdqKmaskM, self)
             }
             O::EvexVcvtuqq2phVphWdq => simd!(EvexVcvtuqq2phVphWdqR, EvexVcvtuqq2phVphWdqM, self),
             O::EvexVcvtuqq2phVphWdqKmask => {
-                simd3!(EvexVcvtuqq2phVphWdqKmaskR, EvexVcvtuqq2phVphWdqKmaskM, self)
+                simd!(EvexVcvtuqq2phVphWdqKmaskR, EvexVcvtuqq2phVphWdqKmaskM, self)
             }
             O::EvexVcvtuqq2psVpsWdq => simd!(EvexVcvtuqq2psVpsWdqR, EvexVcvtuqq2psVpsWdqM, self),
             O::EvexVcvtuqq2psVpsWdqKmask => {
-                simd3!(EvexVcvtuqq2psVpsWdqKmaskR, EvexVcvtuqq2psVpsWdqKmaskM, self)
+                simd!(EvexVcvtuqq2psVpsWdqKmaskR, EvexVcvtuqq2psVpsWdqKmaskM, self)
             }
             O::EvexVcvtusi2sdVsdEd => {
-                simd_dst_gpr!(EvexVcvtusi2sdVsdEdR, EvexVcvtusi2sdVsdEdM, self)
+                simd3_gpr!(EvexVcvtusi2sdVsdEdR, EvexVcvtusi2sdVsdEdM, self)
             }
             O::EvexVcvtusi2sdVsdEq => {
-                simd_dst_gpr!(EvexVcvtusi2sdVsdEqR, EvexVcvtusi2sdVsdEqM, self)
+                simd3_gpr!(EvexVcvtusi2sdVsdEqR, EvexVcvtusi2sdVsdEqM, self)
             }
             O::EvexVcvtusi2shVshEd => {
-                simd_dst_gpr!(EvexVcvtusi2shVshEdR, EvexVcvtusi2shVshEdM, self)
+                simd3_gpr!(EvexVcvtusi2shVshEdR, EvexVcvtusi2shVshEdM, self)
             }
             O::EvexVcvtusi2shVshEq => {
-                simd_dst_gpr!(EvexVcvtusi2shVshEqR, EvexVcvtusi2shVshEqM, self)
+                simd3_gpr!(EvexVcvtusi2shVshEqR, EvexVcvtusi2shVshEqM, self)
             }
             O::EvexVcvtusi2ssVssEd => {
-                simd_dst_gpr!(EvexVcvtusi2ssVssEdR, EvexVcvtusi2ssVssEdM, self)
+                simd3_gpr!(EvexVcvtusi2ssVssEdR, EvexVcvtusi2ssVssEdM, self)
             }
             O::EvexVcvtusi2ssVssEq => {
-                simd_dst_gpr!(EvexVcvtusi2ssVssEqR, EvexVcvtusi2ssVssEqM, self)
+                simd3_gpr!(EvexVcvtusi2ssVssEqR, EvexVcvtusi2ssVssEqM, self)
             }
             O::EvexVcvtuw2phVphWdq => simd!(EvexVcvtuw2phVphWdqR, EvexVcvtuw2phVphWdqM, self),
             O::EvexVcvtuw2phVphWdqKmask => {
-                simd3!(EvexVcvtuw2phVphWdqKmaskR, EvexVcvtuw2phVphWdqKmaskM, self)
+                simd!(EvexVcvtuw2phVphWdqKmaskR, EvexVcvtuw2phVphWdqKmaskM, self)
             }
             O::EvexVcvtw2phVphWdq => simd!(EvexVcvtw2phVphWdqR, EvexVcvtw2phVphWdqM, self),
             O::EvexVcvtw2phVphWdqKmask => {
-                simd3!(EvexVcvtw2phVphWdqKmaskR, EvexVcvtw2phVphWdqKmaskM, self)
+                simd!(EvexVcvtw2phVphWdqKmaskR, EvexVcvtw2phVphWdqKmaskM, self)
             }
-            O::EvexVdbpsadbwVdqHdqWdqIbKmask => simd3!(
+            O::EvexVdbpsadbwVdqHdqWdqIbKmask => simd3_ib!(
                 EvexVdbpsadbwVdqHdqWdqIbKmaskR,
                 EvexVdbpsadbwVdqHdqWdqIbKmaskM,
                 self
@@ -36179,72 +36661,72 @@ impl Instruction {
             }
             O::EvexVexpandpdVpdWpd => simd!(EvexVexpandpdVpdWpdR, EvexVexpandpdVpdWpdM, self),
             O::EvexVexpandpdVpdWpdKmask => {
-                simd3!(EvexVexpandpdVpdWpdKmaskR, EvexVexpandpdVpdWpdKmaskM, self)
+                simd!(EvexVexpandpdVpdWpdKmaskR, EvexVexpandpdVpdWpdKmaskM, self)
             }
             O::EvexVexpandpsVpsWps => simd!(EvexVexpandpsVpsWpsR, EvexVexpandpsVpsWpsM, self),
             O::EvexVexpandpsVpsWpsKmask => {
-                simd3!(EvexVexpandpsVpsWpsKmaskR, EvexVexpandpsVpsWpsKmaskM, self)
+                simd!(EvexVexpandpsVpsWpsKmaskR, EvexVexpandpsVpsWpsKmaskM, self)
             }
             O::EvexVextractf32x4WpsVpsIb => {
-                simd_ib!(EvexVextractf32x4WpsVpsIbR, EvexVextractf32x4WpsVpsIbM, self)
+                simd_st_ib!(EvexVextractf32x4WpsVpsIbR, EvexVextractf32x4WpsVpsIbM, self)
             }
-            O::EvexVextractf32x4WpsVpsIbKmask => simd3!(
+            O::EvexVextractf32x4WpsVpsIbKmask => simd_st_ib!(
                 EvexVextractf32x4WpsVpsIbKmaskR,
                 EvexVextractf32x4WpsVpsIbKmaskM,
                 self
             ),
             O::EvexVextractf32x8WpsVpsIb => {
-                simd_ib!(EvexVextractf32x8WpsVpsIbR, EvexVextractf32x8WpsVpsIbM, self)
+                simd_st_ib!(EvexVextractf32x8WpsVpsIbR, EvexVextractf32x8WpsVpsIbM, self)
             }
-            O::EvexVextractf32x8WpsVpsIbKmask => simd3!(
+            O::EvexVextractf32x8WpsVpsIbKmask => simd_st_ib!(
                 EvexVextractf32x8WpsVpsIbKmaskR,
                 EvexVextractf32x8WpsVpsIbKmaskM,
                 self
             ),
             O::EvexVextractf64x2WpdVpdIb => {
-                simd_ib!(EvexVextractf64x2WpdVpdIbR, EvexVextractf64x2WpdVpdIbM, self)
+                simd_st_ib!(EvexVextractf64x2WpdVpdIbR, EvexVextractf64x2WpdVpdIbM, self)
             }
-            O::EvexVextractf64x2WpdVpdIbKmask => simd3!(
+            O::EvexVextractf64x2WpdVpdIbKmask => simd_st_ib!(
                 EvexVextractf64x2WpdVpdIbKmaskR,
                 EvexVextractf64x2WpdVpdIbKmaskM,
                 self
             ),
             O::EvexVextractf64x4WpdVpdIb => {
-                simd_ib!(EvexVextractf64x4WpdVpdIbR, EvexVextractf64x4WpdVpdIbM, self)
+                simd_st_ib!(EvexVextractf64x4WpdVpdIbR, EvexVextractf64x4WpdVpdIbM, self)
             }
-            O::EvexVextractf64x4WpdVpdIbKmask => simd3!(
+            O::EvexVextractf64x4WpdVpdIbKmask => simd_st_ib!(
                 EvexVextractf64x4WpdVpdIbKmaskR,
                 EvexVextractf64x4WpdVpdIbKmaskM,
                 self
             ),
             O::EvexVextracti32x4WdqVdqIb => {
-                simd_ib!(EvexVextracti32x4WdqVdqIbR, EvexVextracti32x4WdqVdqIbM, self)
+                simd_st_ib!(EvexVextracti32x4WdqVdqIbR, EvexVextracti32x4WdqVdqIbM, self)
             }
-            O::EvexVextracti32x4WdqVdqIbKmask => simd3!(
+            O::EvexVextracti32x4WdqVdqIbKmask => simd_st_ib!(
                 EvexVextracti32x4WdqVdqIbKmaskR,
                 EvexVextracti32x4WdqVdqIbKmaskM,
                 self
             ),
             O::EvexVextracti32x8WdqVdqIb => {
-                simd_ib!(EvexVextracti32x8WdqVdqIbR, EvexVextracti32x8WdqVdqIbM, self)
+                simd_st_ib!(EvexVextracti32x8WdqVdqIbR, EvexVextracti32x8WdqVdqIbM, self)
             }
-            O::EvexVextracti32x8WdqVdqIbKmask => simd3!(
+            O::EvexVextracti32x8WdqVdqIbKmask => simd_st_ib!(
                 EvexVextracti32x8WdqVdqIbKmaskR,
                 EvexVextracti32x8WdqVdqIbKmaskM,
                 self
             ),
             O::EvexVextracti64x2WdqVdqIb => {
-                simd_ib!(EvexVextracti64x2WdqVdqIbR, EvexVextracti64x2WdqVdqIbM, self)
+                simd_st_ib!(EvexVextracti64x2WdqVdqIbR, EvexVextracti64x2WdqVdqIbM, self)
             }
-            O::EvexVextracti64x2WdqVdqIbKmask => simd3!(
+            O::EvexVextracti64x2WdqVdqIbKmask => simd_st_ib!(
                 EvexVextracti64x2WdqVdqIbKmaskR,
                 EvexVextracti64x2WdqVdqIbKmaskM,
                 self
             ),
             O::EvexVextracti64x4WdqVdqIb => {
-                simd_ib!(EvexVextracti64x4WdqVdqIbR, EvexVextracti64x4WdqVdqIbM, self)
+                simd_st_ib!(EvexVextracti64x4WdqVdqIbR, EvexVextracti64x4WdqVdqIbM, self)
             }
-            O::EvexVextracti64x4WdqVdqIbKmask => simd3!(
+            O::EvexVextracti64x4WdqVdqIbKmask => simd_st_ib!(
                 EvexVextracti64x4WdqVdqIbKmaskR,
                 EvexVextracti64x4WdqVdqIbKmaskM,
                 self
@@ -36289,7 +36771,7 @@ impl Instruction {
                 EvexVfixupimmpdVpdHpdWpdIbM,
                 self
             ),
-            O::EvexVfixupimmpdVpdHpdWpdIbKmask => simd3!(
+            O::EvexVfixupimmpdVpdHpdWpdIbKmask => simd3_ib!(
                 EvexVfixupimmpdVpdHpdWpdIbKmaskR,
                 EvexVfixupimmpdVpdHpdWpdIbKmaskM,
                 self
@@ -36299,17 +36781,17 @@ impl Instruction {
                 EvexVfixupimmpsVpsHpsWpsIbM,
                 self
             ),
-            O::EvexVfixupimmpsVpsHpsWpsIbKmask => simd3!(
+            O::EvexVfixupimmpsVpsHpsWpsIbKmask => simd3_ib!(
                 EvexVfixupimmpsVpsHpsWpsIbKmaskR,
                 EvexVfixupimmpsVpsHpsWpsIbKmaskM,
                 self
             ),
-            O::EvexVfixupimmsdVsdHsdWsdIbKmask => simd3!(
+            O::EvexVfixupimmsdVsdHsdWsdIbKmask => simd3_ib!(
                 EvexVfixupimmsdVsdHsdWsdIbKmaskR,
                 EvexVfixupimmsdVsdHsdWsdIbKmaskM,
                 self
             ),
-            O::EvexVfixupimmssVssHssWssIbKmask => simd3!(
+            O::EvexVfixupimmssVssHssWssIbKmask => simd3_ib!(
                 EvexVfixupimmssVssHssWssIbKmaskR,
                 EvexVfixupimmssVssHssWssIbKmaskM,
                 self
@@ -37210,37 +37692,37 @@ impl Instruction {
                 EvexVfnmsub231ssVpsHssWssKmaskM,
                 self
             ),
-            O::EvexVfpclasspbf16KgdWphIbKmask => simd3!(
+            O::EvexVfpclasspbf16KgdWphIbKmask => simd_ib!(
                 EvexVfpclasspbf16KgdWphIbKmaskR,
                 EvexVfpclasspbf16KgdWphIbKmaskM,
                 self
             ),
-            O::EvexVfpclasspdKgbWpdIbKmask => simd3!(
+            O::EvexVfpclasspdKgbWpdIbKmask => simd_ib!(
                 EvexVfpclasspdKgbWpdIbKmaskR,
                 EvexVfpclasspdKgbWpdIbKmaskM,
                 self
             ),
-            O::EvexVfpclassphKgdWphIbKmask => simd3!(
+            O::EvexVfpclassphKgdWphIbKmask => simd_ib!(
                 EvexVfpclassphKgdWphIbKmaskR,
                 EvexVfpclassphKgdWphIbKmaskM,
                 self
             ),
-            O::EvexVfpclasspsKgwWpsIbKmask => simd3!(
+            O::EvexVfpclasspsKgwWpsIbKmask => simd_ib!(
                 EvexVfpclasspsKgwWpsIbKmaskR,
                 EvexVfpclasspsKgwWpsIbKmaskM,
                 self
             ),
-            O::EvexVfpclasssdKgbWsdIbKmask => simd3!(
+            O::EvexVfpclasssdKgbWsdIbKmask => simd_ib!(
                 EvexVfpclasssdKgbWsdIbKmaskR,
                 EvexVfpclasssdKgbWsdIbKmaskM,
                 self
             ),
-            O::EvexVfpclassshKgbWshIbKmask => simd3!(
+            O::EvexVfpclassshKgbWshIbKmask => simd_ib!(
                 EvexVfpclassshKgbWshIbKmaskR,
                 EvexVfpclassshKgbWshIbKmaskM,
                 self
             ),
-            O::EvexVfpclassssKgbWssIbKmask => simd3!(
+            O::EvexVfpclassssKgbWssIbKmask => simd_ib!(
                 EvexVfpclassssKgbWssIbKmaskR,
                 EvexVfpclassssKgbWssIbKmaskM,
                 self
@@ -37256,22 +37738,22 @@ impl Instruction {
             O::EvexVgetexppbf16VphWph => {
                 simd!(EvexVgetexppbf16VphWphR, EvexVgetexppbf16VphWphM, self)
             }
-            O::EvexVgetexppbf16VphWphKmask => simd3!(
+            O::EvexVgetexppbf16VphWphKmask => simd!(
                 EvexVgetexppbf16VphWphKmaskR,
                 EvexVgetexppbf16VphWphKmaskM,
                 self
             ),
             O::EvexVgetexppdVpdWpd => simd!(EvexVgetexppdVpdWpdR, EvexVgetexppdVpdWpdM, self),
             O::EvexVgetexppdVpdWpdKmask => {
-                simd3!(EvexVgetexppdVpdWpdKmaskR, EvexVgetexppdVpdWpdKmaskM, self)
+                simd!(EvexVgetexppdVpdWpdKmaskR, EvexVgetexppdVpdWpdKmaskM, self)
             }
             O::EvexVgetexpphVphWph => simd!(EvexVgetexpphVphWphR, EvexVgetexpphVphWphM, self),
             O::EvexVgetexpphVphWphKmask => {
-                simd3!(EvexVgetexpphVphWphKmaskR, EvexVgetexpphVphWphKmaskM, self)
+                simd!(EvexVgetexpphVphWphKmaskR, EvexVgetexpphVphWphKmaskM, self)
             }
             O::EvexVgetexppsVpsWps => simd!(EvexVgetexppsVpsWpsR, EvexVgetexppsVpsWpsM, self),
             O::EvexVgetexppsVpsWpsKmask => {
-                simd3!(EvexVgetexppsVpsWpsKmaskR, EvexVgetexppsVpsWpsKmaskM, self)
+                simd!(EvexVgetexppsVpsWpsKmaskR, EvexVgetexppsVpsWpsKmaskM, self)
             }
             O::EvexVgetexpsdVsdHpdWsd => {
                 simd3!(EvexVgetexpsdVsdHpdWsdR, EvexVgetexpsdVsdHpdWsdM, self)
@@ -37297,47 +37779,47 @@ impl Instruction {
                 EvexVgetexpssVssHpsWssKmaskM,
                 self
             ),
-            O::EvexVgetmantpbf16VphWphIbKmask => simd3!(
+            O::EvexVgetmantpbf16VphWphIbKmask => simd_ib!(
                 EvexVgetmantpbf16VphWphIbKmaskR,
                 EvexVgetmantpbf16VphWphIbKmaskM,
                 self
             ),
-            O::EvexVgetmantpdVpdWpdIbKmask => simd3!(
+            O::EvexVgetmantpdVpdWpdIbKmask => simd_ib!(
                 EvexVgetmantpdVpdWpdIbKmaskR,
                 EvexVgetmantpdVpdWpdIbKmaskM,
                 self
             ),
-            O::EvexVgetmantphVphWphIbKmask => simd3!(
+            O::EvexVgetmantphVphWphIbKmask => simd_ib!(
                 EvexVgetmantphVphWphIbKmaskR,
                 EvexVgetmantphVphWphIbKmaskM,
                 self
             ),
-            O::EvexVgetmantpsVpsWpsIbKmask => simd3!(
+            O::EvexVgetmantpsVpsWpsIbKmask => simd_ib!(
                 EvexVgetmantpsVpsWpsIbKmaskR,
                 EvexVgetmantpsVpsWpsIbKmaskM,
                 self
             ),
-            O::EvexVgetmantsdVsdHpdWsdIbKmask => simd3!(
+            O::EvexVgetmantsdVsdHpdWsdIbKmask => simd3_ib!(
                 EvexVgetmantsdVsdHpdWsdIbKmaskR,
                 EvexVgetmantsdVsdHpdWsdIbKmaskM,
                 self
             ),
-            O::EvexVgetmantshVshHphWshIbKmask => simd3!(
+            O::EvexVgetmantshVshHphWshIbKmask => simd3_ib!(
                 EvexVgetmantshVshHphWshIbKmaskR,
                 EvexVgetmantshVshHphWshIbKmaskM,
                 self
             ),
-            O::EvexVgetmantssVssHpsWssIbKmask => simd3!(
+            O::EvexVgetmantssVssHpsWssIbKmask => simd3_ib!(
                 EvexVgetmantssVssHpsWssIbKmaskR,
                 EvexVgetmantssVssHpsWssIbKmaskM,
                 self
             ),
-            O::EvexVgf2p8affineinvqbVdqHdqWdqIbKmask => simd3!(
+            O::EvexVgf2p8affineinvqbVdqHdqWdqIbKmask => simd3_ib!(
                 EvexVgf2p8affineinvqbVdqHdqWdqIbKmaskR,
                 EvexVgf2p8affineinvqbVdqHdqWdqIbKmaskM,
                 self
             ),
-            O::EvexVgf2p8affineqbVdqHdqWdqIbKmask => simd3!(
+            O::EvexVgf2p8affineqbVdqHdqWdqIbKmask => simd3_ib!(
                 EvexVgf2p8affineqbVdqHdqWdqIbKmaskR,
                 EvexVgf2p8affineqbVdqHdqWdqIbKmaskM,
                 self
@@ -37352,7 +37834,7 @@ impl Instruction {
                 EvexVinsertf32x4VpsHpsWpsIbM,
                 self
             ),
-            O::EvexVinsertf32x4VpsHpsWpsIbKmask => simd3!(
+            O::EvexVinsertf32x4VpsHpsWpsIbKmask => simd3_ib!(
                 EvexVinsertf32x4VpsHpsWpsIbKmaskR,
                 EvexVinsertf32x4VpsHpsWpsIbKmaskM,
                 self
@@ -37362,7 +37844,7 @@ impl Instruction {
                 EvexVinsertf32x8VpsHpsWpsIbM,
                 self
             ),
-            O::EvexVinsertf32x8VpsHpsWpsIbKmask => simd3!(
+            O::EvexVinsertf32x8VpsHpsWpsIbKmask => simd3_ib!(
                 EvexVinsertf32x8VpsHpsWpsIbKmaskR,
                 EvexVinsertf32x8VpsHpsWpsIbKmaskM,
                 self
@@ -37372,7 +37854,7 @@ impl Instruction {
                 EvexVinsertf64x2VpdHpdWpdIbM,
                 self
             ),
-            O::EvexVinsertf64x2VpdHpdWpdIbKmask => simd3!(
+            O::EvexVinsertf64x2VpdHpdWpdIbKmask => simd3_ib!(
                 EvexVinsertf64x2VpdHpdWpdIbKmaskR,
                 EvexVinsertf64x2VpdHpdWpdIbKmaskM,
                 self
@@ -37382,7 +37864,7 @@ impl Instruction {
                 EvexVinsertf64x4VpdHpdWpdIbM,
                 self
             ),
-            O::EvexVinsertf64x4VpdHpdWpdIbKmask => simd3!(
+            O::EvexVinsertf64x4VpdHpdWpdIbKmask => simd3_ib!(
                 EvexVinsertf64x4VpdHpdWpdIbKmaskR,
                 EvexVinsertf64x4VpdHpdWpdIbKmaskM,
                 self
@@ -37392,7 +37874,7 @@ impl Instruction {
                 EvexVinserti32x4VdqHdqWdqIbM,
                 self
             ),
-            O::EvexVinserti32x4VdqHdqWdqIbKmask => simd3!(
+            O::EvexVinserti32x4VdqHdqWdqIbKmask => simd3_ib!(
                 EvexVinserti32x4VdqHdqWdqIbKmaskR,
                 EvexVinserti32x4VdqHdqWdqIbKmaskM,
                 self
@@ -37402,7 +37884,7 @@ impl Instruction {
                 EvexVinserti32x8VdqHdqWdqIbM,
                 self
             ),
-            O::EvexVinserti32x8VdqHdqWdqIbKmask => simd3!(
+            O::EvexVinserti32x8VdqHdqWdqIbKmask => simd3_ib!(
                 EvexVinserti32x8VdqHdqWdqIbKmaskR,
                 EvexVinserti32x8VdqHdqWdqIbKmaskM,
                 self
@@ -37412,7 +37894,7 @@ impl Instruction {
                 EvexVinserti64x2VdqHdqWdqIbM,
                 self
             ),
-            O::EvexVinserti64x2VdqHdqWdqIbKmask => simd3!(
+            O::EvexVinserti64x2VdqHdqWdqIbKmask => simd3_ib!(
                 EvexVinserti64x2VdqHdqWdqIbKmaskR,
                 EvexVinserti64x2VdqHdqWdqIbKmaskM,
                 self
@@ -37422,13 +37904,13 @@ impl Instruction {
                 EvexVinserti64x4VdqHdqWdqIbM,
                 self
             ),
-            O::EvexVinserti64x4VdqHdqWdqIbKmask => simd3!(
+            O::EvexVinserti64x4VdqHdqWdqIbKmask => simd3_ib!(
                 EvexVinserti64x4VdqHdqWdqIbKmaskR,
                 EvexVinserti64x4VdqHdqWdqIbKmaskM,
                 self
             ),
             O::EvexVinsertpsVpsWssIb => {
-                simd_ib!(EvexVinsertpsVpsWssIbR, EvexVinsertpsVpsWssIbM, self)
+                simd3_ib!(EvexVinsertpsVpsWssIbR, EvexVinsertpsVpsWssIbM, self)
             }
             O::EvexVmaxbf16VphHphWph => {
                 simd3!(EvexVmaxbf16VphHphWphR, EvexVmaxbf16VphHphWphM, self)
@@ -37531,19 +38013,19 @@ impl Instruction {
             }
             O::EvexVmovapdVpdWpd => simd!(EvexVmovapdVpdWpdR, EvexVmovapdVpdWpdM, self),
             O::EvexVmovapdVpdWpdKmask => {
-                simd3!(EvexVmovapdVpdWpdKmaskR, EvexVmovapdVpdWpdKmaskM, self)
+                simd!(EvexVmovapdVpdWpdKmaskR, EvexVmovapdVpdWpdKmaskM, self)
             }
             O::EvexVmovapdWpdVpd => simd_st!(EvexVmovapdWpdVpdR, EvexVmovapdWpdVpdM, self),
             O::EvexVmovapdWpdVpdKmask => {
-                simd3!(EvexVmovapdWpdVpdKmaskR, EvexVmovapdWpdVpdKmaskM, self)
+                simd_st!(EvexVmovapdWpdVpdKmaskR, EvexVmovapdWpdVpdKmaskM, self)
             }
             O::EvexVmovapsVpsWps => simd!(EvexVmovapsVpsWpsR, EvexVmovapsVpsWpsM, self),
             O::EvexVmovapsVpsWpsKmask => {
-                simd3!(EvexVmovapsVpsWpsKmaskR, EvexVmovapsVpsWpsKmaskM, self)
+                simd!(EvexVmovapsVpsWpsKmaskR, EvexVmovapsVpsWpsKmaskM, self)
             }
             O::EvexVmovapsWpsVps => simd_st!(EvexVmovapsWpsVpsR, EvexVmovapsWpsVpsM, self),
             O::EvexVmovapsWpsVpsKmask => {
-                simd3!(EvexVmovapsWpsVpsKmaskR, EvexVmovapsWpsVpsKmaskM, self)
+                simd_st!(EvexVmovapsWpsVpsKmaskR, EvexVmovapsWpsVpsKmaskM, self)
             }
             O::EvexVmovdEdVd => {
                 if self.mod_c0() {
@@ -37563,55 +38045,55 @@ impl Instruction {
             O::EvexVmovdWdVd => simd_st!(EvexVmovdWdVdR, EvexVmovdWdVdM, self),
             O::EvexVmovddupVpdWpd => simd!(EvexVmovddupVpdWpdR, EvexVmovddupVpdWpdM, self),
             O::EvexVmovddupVpdWpdKmask => {
-                simd3!(EvexVmovddupVpdWpdKmaskR, EvexVmovddupVpdWpdKmaskM, self)
+                simd!(EvexVmovddupVpdWpdKmaskR, EvexVmovddupVpdWpdKmaskM, self)
             }
             O::EvexVmovdqa32VdqWdq => simd!(EvexVmovdqa32VdqWdqR, EvexVmovdqa32VdqWdqM, self),
             O::EvexVmovdqa32VdqWdqKmask => {
-                simd3!(EvexVmovdqa32VdqWdqKmaskR, EvexVmovdqa32VdqWdqKmaskM, self)
+                simd!(EvexVmovdqa32VdqWdqKmaskR, EvexVmovdqa32VdqWdqKmaskM, self)
             }
             O::EvexVmovdqa32WdqVdq => simd_st!(EvexVmovdqa32WdqVdqR, EvexVmovdqa32WdqVdqM, self),
             O::EvexVmovdqa32WdqVdqKmask => {
-                simd3!(EvexVmovdqa32WdqVdqKmaskR, EvexVmovdqa32WdqVdqKmaskM, self)
+                simd_st!(EvexVmovdqa32WdqVdqKmaskR, EvexVmovdqa32WdqVdqKmaskM, self)
             }
             O::EvexVmovdqa64VdqWdq => simd!(EvexVmovdqa64VdqWdqR, EvexVmovdqa64VdqWdqM, self),
             O::EvexVmovdqa64VdqWdqKmask => {
-                simd3!(EvexVmovdqa64VdqWdqKmaskR, EvexVmovdqa64VdqWdqKmaskM, self)
+                simd!(EvexVmovdqa64VdqWdqKmaskR, EvexVmovdqa64VdqWdqKmaskM, self)
             }
             O::EvexVmovdqa64WdqVdq => simd_st!(EvexVmovdqa64WdqVdqR, EvexVmovdqa64WdqVdqM, self),
             O::EvexVmovdqa64WdqVdqKmask => {
-                simd3!(EvexVmovdqa64WdqVdqKmaskR, EvexVmovdqa64WdqVdqKmaskM, self)
+                simd_st!(EvexVmovdqa64WdqVdqKmaskR, EvexVmovdqa64WdqVdqKmaskM, self)
             }
             O::EvexVmovdqu16VdqWdq => simd!(EvexVmovdqu16VdqWdqR, EvexVmovdqu16VdqWdqM, self),
             O::EvexVmovdqu16VdqWdqKmask => {
-                simd3!(EvexVmovdqu16VdqWdqKmaskR, EvexVmovdqu16VdqWdqKmaskM, self)
+                simd!(EvexVmovdqu16VdqWdqKmaskR, EvexVmovdqu16VdqWdqKmaskM, self)
             }
             O::EvexVmovdqu16WdqVdq => simd_st!(EvexVmovdqu16WdqVdqR, EvexVmovdqu16WdqVdqM, self),
             O::EvexVmovdqu16WdqVdqKmask => {
-                simd3!(EvexVmovdqu16WdqVdqKmaskR, EvexVmovdqu16WdqVdqKmaskM, self)
+                simd_st!(EvexVmovdqu16WdqVdqKmaskR, EvexVmovdqu16WdqVdqKmaskM, self)
             }
             O::EvexVmovdqu32VdqWdq => simd!(EvexVmovdqu32VdqWdqR, EvexVmovdqu32VdqWdqM, self),
             O::EvexVmovdqu32VdqWdqKmask => {
-                simd3!(EvexVmovdqu32VdqWdqKmaskR, EvexVmovdqu32VdqWdqKmaskM, self)
+                simd!(EvexVmovdqu32VdqWdqKmaskR, EvexVmovdqu32VdqWdqKmaskM, self)
             }
             O::EvexVmovdqu32WdqVdq => simd_st!(EvexVmovdqu32WdqVdqR, EvexVmovdqu32WdqVdqM, self),
             O::EvexVmovdqu32WdqVdqKmask => {
-                simd3!(EvexVmovdqu32WdqVdqKmaskR, EvexVmovdqu32WdqVdqKmaskM, self)
+                simd_st!(EvexVmovdqu32WdqVdqKmaskR, EvexVmovdqu32WdqVdqKmaskM, self)
             }
             O::EvexVmovdqu64VdqWdq => simd!(EvexVmovdqu64VdqWdqR, EvexVmovdqu64VdqWdqM, self),
             O::EvexVmovdqu64VdqWdqKmask => {
-                simd3!(EvexVmovdqu64VdqWdqKmaskR, EvexVmovdqu64VdqWdqKmaskM, self)
+                simd!(EvexVmovdqu64VdqWdqKmaskR, EvexVmovdqu64VdqWdqKmaskM, self)
             }
             O::EvexVmovdqu64WdqVdq => simd_st!(EvexVmovdqu64WdqVdqR, EvexVmovdqu64WdqVdqM, self),
             O::EvexVmovdqu64WdqVdqKmask => {
-                simd3!(EvexVmovdqu64WdqVdqKmaskR, EvexVmovdqu64WdqVdqKmaskM, self)
+                simd_st!(EvexVmovdqu64WdqVdqKmaskR, EvexVmovdqu64WdqVdqKmaskM, self)
             }
             O::EvexVmovdqu8VdqWdq => simd!(EvexVmovdqu8VdqWdqR, EvexVmovdqu8VdqWdqM, self),
             O::EvexVmovdqu8VdqWdqKmask => {
-                simd3!(EvexVmovdqu8VdqWdqKmaskR, EvexVmovdqu8VdqWdqKmaskM, self)
+                simd!(EvexVmovdqu8VdqWdqKmaskR, EvexVmovdqu8VdqWdqKmaskM, self)
             }
             O::EvexVmovdqu8WdqVdq => simd_st!(EvexVmovdqu8WdqVdqR, EvexVmovdqu8WdqVdqM, self),
             O::EvexVmovdqu8WdqVdqKmask => {
-                simd3!(EvexVmovdqu8WdqVdqKmaskR, EvexVmovdqu8WdqVdqKmaskM, self)
+                simd_st!(EvexVmovdqu8WdqVdqKmaskR, EvexVmovdqu8WdqVdqKmaskM, self)
             }
             O::EvexVmovhlpsVpsHpsWps => {
                 simd3!(EvexVmovhlpsVpsHpsWpsR, EvexVmovhlpsVpsHpsWpsM, self)
@@ -37689,19 +38171,19 @@ impl Instruction {
             O::EvexVmovqWqVq => simd_st!(EvexVmovqWqVqR, EvexVmovqWqVqM, self),
             O::EvexVmovrsbVdqWdq => simd!(EvexVmovrsbVdqWdqR, EvexVmovrsbVdqWdqM, self),
             O::EvexVmovrsbVdqWdqKmask => {
-                simd3!(EvexVmovrsbVdqWdqKmaskR, EvexVmovrsbVdqWdqKmaskM, self)
+                simd!(EvexVmovrsbVdqWdqKmaskR, EvexVmovrsbVdqWdqKmaskM, self)
             }
             O::EvexVmovrsdVdqWdq => simd!(EvexVmovrsdVdqWdqR, EvexVmovrsdVdqWdqM, self),
             O::EvexVmovrsdVdqWdqKmask => {
-                simd3!(EvexVmovrsdVdqWdqKmaskR, EvexVmovrsdVdqWdqKmaskM, self)
+                simd!(EvexVmovrsdVdqWdqKmaskR, EvexVmovrsdVdqWdqKmaskM, self)
             }
             O::EvexVmovrsqVdqWdq => simd!(EvexVmovrsqVdqWdqR, EvexVmovrsqVdqWdqM, self),
             O::EvexVmovrsqVdqWdqKmask => {
-                simd3!(EvexVmovrsqVdqWdqKmaskR, EvexVmovrsqVdqWdqKmaskM, self)
+                simd!(EvexVmovrsqVdqWdqKmaskR, EvexVmovrsqVdqWdqKmaskM, self)
             }
             O::EvexVmovrswVdqWdq => simd!(EvexVmovrswVdqWdqR, EvexVmovrswVdqWdqM, self),
             O::EvexVmovrswVdqWdqKmask => {
-                simd3!(EvexVmovrswVdqWdqKmaskR, EvexVmovrswVdqWdqKmaskM, self)
+                simd!(EvexVmovrswVdqWdqKmaskR, EvexVmovrswVdqWdqKmaskM, self)
             }
             O::EvexVmovsdVsdHpdWsd => simd3!(EvexVmovsdVsdHpdWsdR, EvexVmovsdVsdHpdWsdM, self),
             O::EvexVmovsdVsdHpdWsdKmask => {
@@ -37709,7 +38191,7 @@ impl Instruction {
             }
             O::EvexVmovsdVsdWsd => simd!(EvexVmovsdVsdWsdR, EvexVmovsdVsdWsdM, self),
             O::EvexVmovsdVsdWsdKmask => {
-                simd3!(EvexVmovsdVsdWsdKmaskR, EvexVmovsdVsdWsdKmaskM, self)
+                simd!(EvexVmovsdVsdWsdKmaskR, EvexVmovsdVsdWsdKmaskM, self)
             }
             O::EvexVmovsdWsdHpdVsd => {
                 if self.mod_c0() {
@@ -37731,7 +38213,7 @@ impl Instruction {
             }
             O::EvexVmovsdWsdVsd => simd_st!(EvexVmovsdWsdVsdR, EvexVmovsdWsdVsdM, self),
             O::EvexVmovsdWsdVsdKmask => {
-                simd3!(EvexVmovsdWsdVsdKmaskR, EvexVmovsdWsdVsdKmaskM, self)
+                simd_st!(EvexVmovsdWsdVsdKmaskR, EvexVmovsdWsdVsdKmaskM, self)
             }
             O::EvexVmovshVshHphWsh => simd3!(EvexVmovshVshHphWshR, EvexVmovshVshHphWshM, self),
             O::EvexVmovshVshHphWshKmask => {
@@ -37739,7 +38221,7 @@ impl Instruction {
             }
             O::EvexVmovshVshWsh => simd!(EvexVmovshVshWshR, EvexVmovshVshWshM, self),
             O::EvexVmovshVshWshKmask => {
-                simd3!(EvexVmovshVshWshKmaskR, EvexVmovshVshWshKmaskM, self)
+                simd!(EvexVmovshVshWshKmaskR, EvexVmovshVshWshKmaskM, self)
             }
             O::EvexVmovshWshHphVsh => {
                 if self.mod_c0() {
@@ -37761,15 +38243,15 @@ impl Instruction {
             }
             O::EvexVmovshWshVsh => simd_st!(EvexVmovshWshVshR, EvexVmovshWshVshM, self),
             O::EvexVmovshWshVshKmask => {
-                simd3!(EvexVmovshWshVshKmaskR, EvexVmovshWshVshKmaskM, self)
+                simd_st!(EvexVmovshWshVshKmaskR, EvexVmovshWshVshKmaskM, self)
             }
             O::EvexVmovshdupVpsWps => simd!(EvexVmovshdupVpsWpsR, EvexVmovshdupVpsWpsM, self),
             O::EvexVmovshdupVpsWpsKmask => {
-                simd3!(EvexVmovshdupVpsWpsKmaskR, EvexVmovshdupVpsWpsKmaskM, self)
+                simd!(EvexVmovshdupVpsWpsKmaskR, EvexVmovshdupVpsWpsKmaskM, self)
             }
             O::EvexVmovsldupVpsWps => simd!(EvexVmovsldupVpsWpsR, EvexVmovsldupVpsWpsM, self),
             O::EvexVmovsldupVpsWpsKmask => {
-                simd3!(EvexVmovsldupVpsWpsKmaskR, EvexVmovsldupVpsWpsKmaskM, self)
+                simd!(EvexVmovsldupVpsWpsKmaskR, EvexVmovsldupVpsWpsKmaskM, self)
             }
             O::EvexVmovssVssHpsWss => simd3!(EvexVmovssVssHpsWssR, EvexVmovssVssHpsWssM, self),
             O::EvexVmovssVssHpsWssKmask => {
@@ -37777,7 +38259,7 @@ impl Instruction {
             }
             O::EvexVmovssVssWss => simd!(EvexVmovssVssWssR, EvexVmovssVssWssM, self),
             O::EvexVmovssVssWssKmask => {
-                simd3!(EvexVmovssVssWssKmaskR, EvexVmovssVssWssKmaskM, self)
+                simd!(EvexVmovssVssWssKmaskR, EvexVmovssVssWssKmaskM, self)
             }
             O::EvexVmovssWssHpsVss => {
                 if self.mod_c0() {
@@ -37799,23 +38281,23 @@ impl Instruction {
             }
             O::EvexVmovssWssVss => simd_st!(EvexVmovssWssVssR, EvexVmovssWssVssM, self),
             O::EvexVmovssWssVssKmask => {
-                simd3!(EvexVmovssWssVssKmaskR, EvexVmovssWssVssKmaskM, self)
+                simd_st!(EvexVmovssWssVssKmaskR, EvexVmovssWssVssKmaskM, self)
             }
             O::EvexVmovupdVpdWpd => simd!(EvexVmovupdVpdWpdR, EvexVmovupdVpdWpdM, self),
             O::EvexVmovupdVpdWpdKmask => {
-                simd3!(EvexVmovupdVpdWpdKmaskR, EvexVmovupdVpdWpdKmaskM, self)
+                simd!(EvexVmovupdVpdWpdKmaskR, EvexVmovupdVpdWpdKmaskM, self)
             }
             O::EvexVmovupdWpdVpd => simd_st!(EvexVmovupdWpdVpdR, EvexVmovupdWpdVpdM, self),
             O::EvexVmovupdWpdVpdKmask => {
-                simd3!(EvexVmovupdWpdVpdKmaskR, EvexVmovupdWpdVpdKmaskM, self)
+                simd_st!(EvexVmovupdWpdVpdKmaskR, EvexVmovupdWpdVpdKmaskM, self)
             }
             O::EvexVmovupsVpsWps => simd!(EvexVmovupsVpsWpsR, EvexVmovupsVpsWpsM, self),
             O::EvexVmovupsVpsWpsKmask => {
-                simd3!(EvexVmovupsVpsWpsKmaskR, EvexVmovupsVpsWpsKmaskM, self)
+                simd!(EvexVmovupsVpsWpsKmaskR, EvexVmovupsVpsWpsKmaskM, self)
             }
             O::EvexVmovupsWpsVps => simd_st!(EvexVmovupsWpsVpsR, EvexVmovupsWpsVpsM, self),
             O::EvexVmovupsWpsVpsKmask => {
-                simd3!(EvexVmovupsWpsVpsKmaskR, EvexVmovupsWpsVpsKmaskM, self)
+                simd_st!(EvexVmovupsWpsVpsKmaskR, EvexVmovupsWpsVpsKmaskM, self)
             }
             O::EvexVmovwEdVsh => {
                 if self.mod_c0() {
@@ -37836,7 +38318,7 @@ impl Instruction {
             O::EvexVmpsadbwVdqHdqWdqIb => {
                 simd3_ib!(EvexVmpsadbwVdqHdqWdqIbR, EvexVmpsadbwVdqHdqWdqIbM, self)
             }
-            O::EvexVmpsadbwVdqHdqWdqIbKmask => simd3!(
+            O::EvexVmpsadbwVdqHdqWdqIbKmask => simd3_ib!(
                 EvexVmpsadbwVdqHdqWdqIbKmaskR,
                 EvexVmpsadbwVdqHdqWdqIbKmaskM,
                 self
@@ -37893,19 +38375,19 @@ impl Instruction {
             ),
             O::EvexVpabsbVdqWdq => simd!(EvexVpabsbVdqWdqR, EvexVpabsbVdqWdqM, self),
             O::EvexVpabsbVdqWdqKmask => {
-                simd3!(EvexVpabsbVdqWdqKmaskR, EvexVpabsbVdqWdqKmaskM, self)
+                simd!(EvexVpabsbVdqWdqKmaskR, EvexVpabsbVdqWdqKmaskM, self)
             }
             O::EvexVpabsdVdqWdq => simd!(EvexVpabsdVdqWdqR, EvexVpabsdVdqWdqM, self),
             O::EvexVpabsdVdqWdqKmask => {
-                simd3!(EvexVpabsdVdqWdqKmaskR, EvexVpabsdVdqWdqKmaskM, self)
+                simd!(EvexVpabsdVdqWdqKmaskR, EvexVpabsdVdqWdqKmaskM, self)
             }
             O::EvexVpabsqVdqWdq => simd!(EvexVpabsqVdqWdqR, EvexVpabsqVdqWdqM, self),
             O::EvexVpabsqVdqWdqKmask => {
-                simd3!(EvexVpabsqVdqWdqKmaskR, EvexVpabsqVdqWdqKmaskM, self)
+                simd!(EvexVpabsqVdqWdqKmaskR, EvexVpabsqVdqWdqKmaskM, self)
             }
             O::EvexVpabswVdqWdq => simd!(EvexVpabswVdqWdqR, EvexVpabswVdqWdqM, self),
             O::EvexVpabswVdqWdqKmask => {
-                simd3!(EvexVpabswVdqWdqKmaskR, EvexVpabswVdqWdqKmaskM, self)
+                simd!(EvexVpabswVdqWdqKmaskR, EvexVpabswVdqWdqKmaskM, self)
             }
             O::EvexVpackssdwVdqHdqWdq => {
                 simd3!(EvexVpackssdwVdqHdqWdqR, EvexVpackssdwVdqHdqWdqM, self)
@@ -37982,7 +38464,7 @@ impl Instruction {
             O::EvexVpalignrVdqHdqWdqIb => {
                 simd3_ib!(EvexVpalignrVdqHdqWdqIbR, EvexVpalignrVdqHdqWdqIbM, self)
             }
-            O::EvexVpalignrVdqHdqWdqIbKmask => simd3!(
+            O::EvexVpalignrVdqHdqWdqIbKmask => simd3_ib!(
                 EvexVpalignrVdqHdqWdqIbKmaskR,
                 EvexVpalignrVdqHdqWdqIbKmaskM,
                 self
@@ -38026,13 +38508,13 @@ impl Instruction {
             O::EvexVpbroadcastbVdqEb => {
                 simd_dst_gpr!(EvexVpbroadcastbVdqEbR, EvexVpbroadcastbVdqEbM, self)
             }
-            O::EvexVpbroadcastbVdqEbKmask => simd3!(
+            O::EvexVpbroadcastbVdqEbKmask => simd_dst_gpr!(
                 EvexVpbroadcastbVdqEbKmaskR,
                 EvexVpbroadcastbVdqEbKmaskM,
                 self
             ),
             O::EvexVpbroadcastbVdqWb => simd!(EvexVpbroadcastbVdqWbR, EvexVpbroadcastbVdqWbM, self),
-            O::EvexVpbroadcastbVdqWbKmask => simd3!(
+            O::EvexVpbroadcastbVdqWbKmask => simd!(
                 EvexVpbroadcastbVdqWbKmaskR,
                 EvexVpbroadcastbVdqWbKmaskM,
                 self
@@ -38040,13 +38522,13 @@ impl Instruction {
             O::EvexVpbroadcastdVdqEd => {
                 simd_dst_gpr!(EvexVpbroadcastdVdqEdR, EvexVpbroadcastdVdqEdM, self)
             }
-            O::EvexVpbroadcastdVdqEdKmask => simd3!(
+            O::EvexVpbroadcastdVdqEdKmask => simd_dst_gpr!(
                 EvexVpbroadcastdVdqEdKmaskR,
                 EvexVpbroadcastdVdqEdKmaskM,
                 self
             ),
             O::EvexVpbroadcastdVdqWd => simd!(EvexVpbroadcastdVdqWdR, EvexVpbroadcastdVdqWdM, self),
-            O::EvexVpbroadcastdVdqWdKmask => simd3!(
+            O::EvexVpbroadcastdVdqWdKmask => simd!(
                 EvexVpbroadcastdVdqWdKmaskR,
                 EvexVpbroadcastdVdqWdKmaskM,
                 self
@@ -38060,13 +38542,13 @@ impl Instruction {
             O::EvexVpbroadcastqVdqEq => {
                 simd_dst_gpr!(EvexVpbroadcastqVdqEqR, EvexVpbroadcastqVdqEqM, self)
             }
-            O::EvexVpbroadcastqVdqEqKmask => simd3!(
+            O::EvexVpbroadcastqVdqEqKmask => simd_dst_gpr!(
                 EvexVpbroadcastqVdqEqKmaskR,
                 EvexVpbroadcastqVdqEqKmaskM,
                 self
             ),
             O::EvexVpbroadcastqVdqWq => simd!(EvexVpbroadcastqVdqWqR, EvexVpbroadcastqVdqWqM, self),
-            O::EvexVpbroadcastqVdqWqKmask => simd3!(
+            O::EvexVpbroadcastqVdqWqKmask => simd!(
                 EvexVpbroadcastqVdqWqKmaskR,
                 EvexVpbroadcastqVdqWqKmaskM,
                 self
@@ -38074,13 +38556,13 @@ impl Instruction {
             O::EvexVpbroadcastwVdqEw => {
                 simd_dst_gpr!(EvexVpbroadcastwVdqEwR, EvexVpbroadcastwVdqEwM, self)
             }
-            O::EvexVpbroadcastwVdqEwKmask => simd3!(
+            O::EvexVpbroadcastwVdqEwKmask => simd_dst_gpr!(
                 EvexVpbroadcastwVdqEwKmaskR,
                 EvexVpbroadcastwVdqEwKmaskM,
                 self
             ),
             O::EvexVpbroadcastwVdqWw => simd!(EvexVpbroadcastwVdqWwR, EvexVpbroadcastwVdqWwM, self),
-            O::EvexVpbroadcastwVdqWwKmask => simd3!(
+            O::EvexVpbroadcastwVdqWwKmask => simd!(
                 EvexVpbroadcastwVdqWwKmaskR,
                 EvexVpbroadcastwVdqWwKmaskM,
                 self
@@ -38089,10 +38571,10 @@ impl Instruction {
                 simd3_ib!(EvexVpclmulqdqVdqHdqWdqIbR, EvexVpclmulqdqVdqHdqWdqIbM, self)
             }
             O::EvexVpcmpbKgqHdqWdqIb => {
-                simd_ib!(EvexVpcmpbKgqHdqWdqIbR, EvexVpcmpbKgqHdqWdqIbM, self)
+                simd3_ib!(EvexVpcmpbKgqHdqWdqIbR, EvexVpcmpbKgqHdqWdqIbM, self)
             }
             O::EvexVpcmpdKgwHdqWdqIb => {
-                simd_ib!(EvexVpcmpdKgwHdqWdqIbR, EvexVpcmpdKgwHdqWdqIbM, self)
+                simd3_ib!(EvexVpcmpdKgwHdqWdqIbR, EvexVpcmpdKgwHdqWdqIbM, self)
             }
             O::EvexVpcmpeqbKgqHdqWdq => {
                 simd3!(EvexVpcmpeqbKgqHdqWdqR, EvexVpcmpeqbKgqHdqWdqM, self)
@@ -38119,27 +38601,27 @@ impl Instruction {
                 simd3!(EvexVpcmpgtwKgdHdqWdqR, EvexVpcmpgtwKgdHdqWdqM, self)
             }
             O::EvexVpcmpqKgbHdqWdqIb => {
-                simd_ib!(EvexVpcmpqKgbHdqWdqIbR, EvexVpcmpqKgbHdqWdqIbM, self)
+                simd3_ib!(EvexVpcmpqKgbHdqWdqIbR, EvexVpcmpqKgbHdqWdqIbM, self)
             }
             O::EvexVpcmpubKgqHdqWdqIb => {
-                simd_ib!(EvexVpcmpubKgqHdqWdqIbR, EvexVpcmpubKgqHdqWdqIbM, self)
+                simd3_ib!(EvexVpcmpubKgqHdqWdqIbR, EvexVpcmpubKgqHdqWdqIbM, self)
             }
             O::EvexVpcmpudKgwHdqWdqIb => {
-                simd_ib!(EvexVpcmpudKgwHdqWdqIbR, EvexVpcmpudKgwHdqWdqIbM, self)
+                simd3_ib!(EvexVpcmpudKgwHdqWdqIbR, EvexVpcmpudKgwHdqWdqIbM, self)
             }
             O::EvexVpcmpuqKgbHdqWdqIb => {
-                simd_ib!(EvexVpcmpuqKgbHdqWdqIbR, EvexVpcmpuqKgbHdqWdqIbM, self)
+                simd3_ib!(EvexVpcmpuqKgbHdqWdqIbR, EvexVpcmpuqKgbHdqWdqIbM, self)
             }
             O::EvexVpcmpuwKgdHdqWdqIb => {
-                simd_ib!(EvexVpcmpuwKgdHdqWdqIbR, EvexVpcmpuwKgdHdqWdqIbM, self)
+                simd3_ib!(EvexVpcmpuwKgdHdqWdqIbR, EvexVpcmpuwKgdHdqWdqIbM, self)
             }
             O::EvexVpcmpwKgdHdqWdqIb => {
-                simd_ib!(EvexVpcmpwKgdHdqWdqIbR, EvexVpcmpwKgdHdqWdqIbM, self)
+                simd3_ib!(EvexVpcmpwKgdHdqWdqIbR, EvexVpcmpwKgdHdqWdqIbM, self)
             }
             O::EvexVpcompressbWdqVdq => {
                 simd_st!(EvexVpcompressbWdqVdqR, EvexVpcompressbWdqVdqM, self)
             }
-            O::EvexVpcompressbWdqVdqKmask => simd3!(
+            O::EvexVpcompressbWdqVdqKmask => simd_st!(
                 EvexVpcompressbWdqVdqKmaskR,
                 EvexVpcompressbWdqVdqKmaskM,
                 self
@@ -38147,7 +38629,7 @@ impl Instruction {
             O::EvexVpcompressdWdqVdq => {
                 simd_st!(EvexVpcompressdWdqVdqR, EvexVpcompressdWdqVdqM, self)
             }
-            O::EvexVpcompressdWdqVdqKmask => simd3!(
+            O::EvexVpcompressdWdqVdqKmask => simd_st!(
                 EvexVpcompressdWdqVdqKmaskR,
                 EvexVpcompressdWdqVdqKmaskM,
                 self
@@ -38155,7 +38637,7 @@ impl Instruction {
             O::EvexVpcompressqWdqVdq => {
                 simd_st!(EvexVpcompressqWdqVdqR, EvexVpcompressqWdqVdqM, self)
             }
-            O::EvexVpcompressqWdqVdqKmask => simd3!(
+            O::EvexVpcompressqWdqVdqKmask => simd_st!(
                 EvexVpcompressqWdqVdqKmaskR,
                 EvexVpcompressqWdqVdqKmaskM,
                 self
@@ -38163,17 +38645,17 @@ impl Instruction {
             O::EvexVpcompresswWdqVdq => {
                 simd_st!(EvexVpcompresswWdqVdqR, EvexVpcompresswWdqVdqM, self)
             }
-            O::EvexVpcompresswWdqVdqKmask => simd3!(
+            O::EvexVpcompresswWdqVdqKmask => simd_st!(
                 EvexVpcompresswWdqVdqKmaskR,
                 EvexVpcompresswWdqVdqKmaskM,
                 self
             ),
-            O::EvexVpconflictdVdqWdqKmask => simd3!(
+            O::EvexVpconflictdVdqWdqKmask => simd!(
                 EvexVpconflictdVdqWdqKmaskR,
                 EvexVpconflictdVdqWdqKmaskM,
                 self
             ),
-            O::EvexVpconflictqVdqWdqKmask => simd3!(
+            O::EvexVpconflictqVdqWdqKmask => simd!(
                 EvexVpconflictqVdqWdqKmaskR,
                 EvexVpconflictqVdqWdqKmaskM,
                 self
@@ -38353,7 +38835,7 @@ impl Instruction {
             O::EvexVpermilpdVpdWpdIb => {
                 simd_ib!(EvexVpermilpdVpdWpdIbR, EvexVpermilpdVpdWpdIbM, self)
             }
-            O::EvexVpermilpdVpdWpdIbKmask => simd3!(
+            O::EvexVpermilpdVpdWpdIbKmask => simd_ib!(
                 EvexVpermilpdVpdWpdIbKmaskR,
                 EvexVpermilpdVpdWpdIbKmaskM,
                 self
@@ -38369,7 +38851,7 @@ impl Instruction {
             O::EvexVpermilpsVpsWpsIb => {
                 simd_ib!(EvexVpermilpsVpsWpsIbR, EvexVpermilpsVpsWpsIbM, self)
             }
-            O::EvexVpermilpsVpsWpsIbKmask => simd3!(
+            O::EvexVpermilpsVpsWpsIbKmask => simd_ib!(
                 EvexVpermilpsVpsWpsIbKmaskR,
                 EvexVpermilpsVpsWpsIbKmaskM,
                 self
@@ -38378,7 +38860,7 @@ impl Instruction {
                 simd3!(EvexVpermpdVpdHpdWpdKmaskR, EvexVpermpdVpdHpdWpdKmaskM, self)
             }
             O::EvexVpermpdVpdWpdIbKmask => {
-                simd3!(EvexVpermpdVpdWpdIbKmaskR, EvexVpermpdVpdWpdIbKmaskM, self)
+                simd_ib!(EvexVpermpdVpdWpdIbKmaskR, EvexVpermpdVpdWpdIbKmaskM, self)
             }
             O::EvexVpermpsVpsHpsWpsKmask => {
                 simd3!(EvexVpermpsVpsHpsWpsKmaskR, EvexVpermpsVpsHpsWpsKmaskM, self)
@@ -38387,7 +38869,7 @@ impl Instruction {
                 simd3!(EvexVpermqVdqHdqWdqKmaskR, EvexVpermqVdqHdqWdqKmaskM, self)
             }
             O::EvexVpermqVdqWdqIbKmask => {
-                simd3!(EvexVpermqVdqWdqIbKmaskR, EvexVpermqVdqWdqIbKmaskM, self)
+                simd_ib!(EvexVpermqVdqWdqIbKmaskR, EvexVpermqVdqWdqIbKmaskM, self)
             }
             O::EvexVpermt2bVdqHdqWdqKmask => simd3!(
                 EvexVpermt2bVdqHdqWdqKmaskR,
@@ -38424,19 +38906,19 @@ impl Instruction {
             }
             O::EvexVpexpandbVdqWdq => simd!(EvexVpexpandbVdqWdqR, EvexVpexpandbVdqWdqM, self),
             O::EvexVpexpandbVdqWdqKmask => {
-                simd3!(EvexVpexpandbVdqWdqKmaskR, EvexVpexpandbVdqWdqKmaskM, self)
+                simd!(EvexVpexpandbVdqWdqKmaskR, EvexVpexpandbVdqWdqKmaskM, self)
             }
             O::EvexVpexpanddVdqWdq => simd!(EvexVpexpanddVdqWdqR, EvexVpexpanddVdqWdqM, self),
             O::EvexVpexpanddVdqWdqKmask => {
-                simd3!(EvexVpexpanddVdqWdqKmaskR, EvexVpexpanddVdqWdqKmaskM, self)
+                simd!(EvexVpexpanddVdqWdqKmaskR, EvexVpexpanddVdqWdqKmaskM, self)
             }
             O::EvexVpexpandqVdqWdq => simd!(EvexVpexpandqVdqWdqR, EvexVpexpandqVdqWdqM, self),
             O::EvexVpexpandqVdqWdqKmask => {
-                simd3!(EvexVpexpandqVdqWdqKmaskR, EvexVpexpandqVdqWdqKmaskM, self)
+                simd!(EvexVpexpandqVdqWdqKmaskR, EvexVpexpandqVdqWdqKmaskM, self)
             }
             O::EvexVpexpandwVdqWdq => simd!(EvexVpexpandwVdqWdqR, EvexVpexpandwVdqWdqM, self),
             O::EvexVpexpandwVdqWdqKmask => {
-                simd3!(EvexVpexpandwVdqWdqKmaskR, EvexVpexpandwVdqWdqKmaskM, self)
+                simd!(EvexVpexpandwVdqWdqKmaskR, EvexVpexpandwVdqWdqKmaskM, self)
             }
             O::EvexVpextrbEdVdqIbR => T::EvexVpextrbEdVdqIbR {
                 dst: self.dst_reg(),
@@ -38484,7 +38966,8 @@ impl Instruction {
                 imm: self.ib(),
             },
             O::EvexVpextrwGdUdqIb => T::EvexVpextrwGdUdqIb {
-                dst: self.operands.dst,
+                dst: self.dst_reg(),
+                src: self.operands.src1,
                 imm: self.ib(),
             },
             O::EvexVpextrwMwVdqIbM => T::EvexVpextrwMwVdqIbM {
@@ -38493,70 +38976,22 @@ impl Instruction {
                 imm: self.ib(),
             },
             O::EvexVpinsrbVdqEbIb => {
-                if self.mod_c0() {
-                    T::EvexVpinsrbVdqEbIbR {
-                        dst: self.operands.dst,
-                        src: self.src1_reg(),
-                        imm: self.ib(),
-                    }
-                } else {
-                    T::EvexVpinsrbVdqEbIbM {
-                        dst: self.operands.dst,
-                        src: self.memory_operand(),
-                        imm: self.ib(),
-                    }
-                }
+                simd3_gpr_ib!(EvexVpinsrbVdqEbIbR, EvexVpinsrbVdqEbIbM, self)
             }
             O::EvexVpinsrdVdqEdIb => {
-                if self.mod_c0() {
-                    T::EvexVpinsrdVdqEdIbR {
-                        dst: self.operands.dst,
-                        src: self.src1_reg(),
-                        imm: self.ib(),
-                    }
-                } else {
-                    T::EvexVpinsrdVdqEdIbM {
-                        dst: self.operands.dst,
-                        src: self.memory_operand(),
-                        imm: self.ib(),
-                    }
-                }
+                simd3_gpr_ib!(EvexVpinsrdVdqEdIbR, EvexVpinsrdVdqEdIbM, self)
             }
             O::EvexVpinsrqVdqEqIb => {
-                if self.mod_c0() {
-                    T::EvexVpinsrqVdqEqIbR {
-                        dst: self.operands.dst,
-                        src: self.src1_reg(),
-                        imm: self.ib(),
-                    }
-                } else {
-                    T::EvexVpinsrqVdqEqIbM {
-                        dst: self.operands.dst,
-                        src: self.memory_operand(),
-                        imm: self.ib(),
-                    }
-                }
+                simd3_gpr_ib!(EvexVpinsrqVdqEqIbR, EvexVpinsrqVdqEqIbM, self)
             }
             O::EvexVpinsrwVdqEwIb => {
-                if self.mod_c0() {
-                    T::EvexVpinsrwVdqEwIbR {
-                        dst: self.operands.dst,
-                        src: self.src1_reg(),
-                        imm: self.ib(),
-                    }
-                } else {
-                    T::EvexVpinsrwVdqEwIbM {
-                        dst: self.operands.dst,
-                        src: self.memory_operand(),
-                        imm: self.ib(),
-                    }
-                }
+                simd3_gpr_ib!(EvexVpinsrwVdqEwIbR, EvexVpinsrwVdqEwIbM, self)
             }
             O::EvexVplzcntdVdqWdqKmask => {
-                simd3!(EvexVplzcntdVdqWdqKmaskR, EvexVplzcntdVdqWdqKmaskM, self)
+                simd!(EvexVplzcntdVdqWdqKmaskR, EvexVplzcntdVdqWdqKmaskM, self)
             }
             O::EvexVplzcntqVdqWdqKmask => {
-                simd3!(EvexVplzcntqVdqWdqKmaskR, EvexVplzcntqVdqWdqKmaskM, self)
+                simd!(EvexVplzcntqVdqWdqKmaskR, EvexVplzcntqVdqWdqKmaskM, self)
             }
             O::EvexVpmadd52huqVdqHdqWdq => {
                 simd3!(EvexVpmadd52huqVdqHdqWdqR, EvexVpmadd52huqVdqHdqWdqM, self)
@@ -38658,11 +39093,11 @@ impl Instruction {
             O::EvexVpmovd2mKgwWdq => simd!(EvexVpmovd2mKgwWdqR, EvexVpmovd2mKgwWdqM, self),
             O::EvexVpmovdbWdqVdq => simd_st!(EvexVpmovdbWdqVdqR, EvexVpmovdbWdqVdqM, self),
             O::EvexVpmovdbWdqVdqKmask => {
-                simd3!(EvexVpmovdbWdqVdqKmaskR, EvexVpmovdbWdqVdqKmaskM, self)
+                simd_st!(EvexVpmovdbWdqVdqKmaskR, EvexVpmovdbWdqVdqKmaskM, self)
             }
             O::EvexVpmovdwWdqVdq => simd_st!(EvexVpmovdwWdqVdqR, EvexVpmovdwWdqVdqM, self),
             O::EvexVpmovdwWdqVdqKmask => {
-                simd3!(EvexVpmovdwWdqVdqKmaskR, EvexVpmovdwWdqVdqKmaskM, self)
+                simd_st!(EvexVpmovdwWdqVdqKmaskR, EvexVpmovdwWdqVdqKmaskM, self)
             }
             O::EvexVpmovm2bVdqKeq => simd!(EvexVpmovm2bVdqKeqR, EvexVpmovm2bVdqKeqM, self),
             O::EvexVpmovm2dVdqKew => simd!(EvexVpmovm2dVdqKewR, EvexVpmovm2dVdqKewM, self),
@@ -38671,116 +39106,120 @@ impl Instruction {
             O::EvexVpmovq2mKgbWdq => simd!(EvexVpmovq2mKgbWdqR, EvexVpmovq2mKgbWdqM, self),
             O::EvexVpmovqbWdqVdq => simd_st!(EvexVpmovqbWdqVdqR, EvexVpmovqbWdqVdqM, self),
             O::EvexVpmovqbWdqVdqKmask => {
-                simd3!(EvexVpmovqbWdqVdqKmaskR, EvexVpmovqbWdqVdqKmaskM, self)
+                simd_st!(EvexVpmovqbWdqVdqKmaskR, EvexVpmovqbWdqVdqKmaskM, self)
             }
             O::EvexVpmovqdWdqVdq => simd_st!(EvexVpmovqdWdqVdqR, EvexVpmovqdWdqVdqM, self),
             O::EvexVpmovqdWdqVdqKmask => {
-                simd3!(EvexVpmovqdWdqVdqKmaskR, EvexVpmovqdWdqVdqKmaskM, self)
+                simd_st!(EvexVpmovqdWdqVdqKmaskR, EvexVpmovqdWdqVdqKmaskM, self)
             }
             O::EvexVpmovqwWdqVdq => simd_st!(EvexVpmovqwWdqVdqR, EvexVpmovqwWdqVdqM, self),
             O::EvexVpmovqwWdqVdqKmask => {
-                simd3!(EvexVpmovqwWdqVdqKmaskR, EvexVpmovqwWdqVdqKmaskM, self)
+                simd_st!(EvexVpmovqwWdqVdqKmaskR, EvexVpmovqwWdqVdqKmaskM, self)
             }
             O::EvexVpmovsdbWdqVdq => simd_st!(EvexVpmovsdbWdqVdqR, EvexVpmovsdbWdqVdqM, self),
             O::EvexVpmovsdbWdqVdqKmask => {
-                simd3!(EvexVpmovsdbWdqVdqKmaskR, EvexVpmovsdbWdqVdqKmaskM, self)
+                simd_st!(EvexVpmovsdbWdqVdqKmaskR, EvexVpmovsdbWdqVdqKmaskM, self)
             }
             O::EvexVpmovsdwWdqVdq => simd_st!(EvexVpmovsdwWdqVdqR, EvexVpmovsdwWdqVdqM, self),
             O::EvexVpmovsdwWdqVdqKmask => {
-                simd3!(EvexVpmovsdwWdqVdqKmaskR, EvexVpmovsdwWdqVdqKmaskM, self)
+                simd_st!(EvexVpmovsdwWdqVdqKmaskR, EvexVpmovsdwWdqVdqKmaskM, self)
             }
             O::EvexVpmovsqbWdqVdq => simd_st!(EvexVpmovsqbWdqVdqR, EvexVpmovsqbWdqVdqM, self),
             O::EvexVpmovsqbWdqVdqKmask => {
-                simd3!(EvexVpmovsqbWdqVdqKmaskR, EvexVpmovsqbWdqVdqKmaskM, self)
+                simd_st!(EvexVpmovsqbWdqVdqKmaskR, EvexVpmovsqbWdqVdqKmaskM, self)
             }
             O::EvexVpmovsqdWdqVdq => simd_st!(EvexVpmovsqdWdqVdqR, EvexVpmovsqdWdqVdqM, self),
             O::EvexVpmovsqdWdqVdqKmask => {
-                simd3!(EvexVpmovsqdWdqVdqKmaskR, EvexVpmovsqdWdqVdqKmaskM, self)
+                simd_st!(EvexVpmovsqdWdqVdqKmaskR, EvexVpmovsqdWdqVdqKmaskM, self)
             }
             O::EvexVpmovsqwWdqVdq => simd_st!(EvexVpmovsqwWdqVdqR, EvexVpmovsqwWdqVdqM, self),
             O::EvexVpmovsqwWdqVdqKmask => {
-                simd3!(EvexVpmovsqwWdqVdqKmaskR, EvexVpmovsqwWdqVdqKmaskM, self)
+                simd_st!(EvexVpmovsqwWdqVdqKmaskR, EvexVpmovsqwWdqVdqKmaskM, self)
+            }
+            O::EvexVpmovssdbWdqVdq => simd_st!(EvexVpmovssdbWdqVdqR, EvexVpmovssdbWdqVdqM, self),
+            O::EvexVpmovssdbWdqVdqKmask => {
+                simd_st!(EvexVpmovssdbWdqVdqKmaskR, EvexVpmovssdbWdqVdqKmaskM, self)
             }
             O::EvexVpmovswbWdqVdq => simd_st!(EvexVpmovswbWdqVdqR, EvexVpmovswbWdqVdqM, self),
             O::EvexVpmovswbWdqVdqKmask => {
-                simd3!(EvexVpmovswbWdqVdqKmaskR, EvexVpmovswbWdqVdqKmaskM, self)
+                simd_st!(EvexVpmovswbWdqVdqKmaskR, EvexVpmovswbWdqVdqKmaskM, self)
             }
             O::EvexVpmovsxbdVdqWdq => simd!(EvexVpmovsxbdVdqWdqR, EvexVpmovsxbdVdqWdqM, self),
             O::EvexVpmovsxbdVdqWdqKmask => {
-                simd3!(EvexVpmovsxbdVdqWdqKmaskR, EvexVpmovsxbdVdqWdqKmaskM, self)
+                simd!(EvexVpmovsxbdVdqWdqKmaskR, EvexVpmovsxbdVdqWdqKmaskM, self)
             }
             O::EvexVpmovsxbqVdqWdq => simd!(EvexVpmovsxbqVdqWdqR, EvexVpmovsxbqVdqWdqM, self),
             O::EvexVpmovsxbqVdqWdqKmask => {
-                simd3!(EvexVpmovsxbqVdqWdqKmaskR, EvexVpmovsxbqVdqWdqKmaskM, self)
+                simd!(EvexVpmovsxbqVdqWdqKmaskR, EvexVpmovsxbqVdqWdqKmaskM, self)
             }
             O::EvexVpmovsxbwVdqWdq => simd!(EvexVpmovsxbwVdqWdqR, EvexVpmovsxbwVdqWdqM, self),
             O::EvexVpmovsxbwVdqWdqKmask => {
-                simd3!(EvexVpmovsxbwVdqWdqKmaskR, EvexVpmovsxbwVdqWdqKmaskM, self)
+                simd!(EvexVpmovsxbwVdqWdqKmaskR, EvexVpmovsxbwVdqWdqKmaskM, self)
             }
             O::EvexVpmovsxdqVdqWdq => simd!(EvexVpmovsxdqVdqWdqR, EvexVpmovsxdqVdqWdqM, self),
             O::EvexVpmovsxdqVdqWdqKmask => {
-                simd3!(EvexVpmovsxdqVdqWdqKmaskR, EvexVpmovsxdqVdqWdqKmaskM, self)
+                simd!(EvexVpmovsxdqVdqWdqKmaskR, EvexVpmovsxdqVdqWdqKmaskM, self)
             }
             O::EvexVpmovsxwdVdqWdq => simd!(EvexVpmovsxwdVdqWdqR, EvexVpmovsxwdVdqWdqM, self),
             O::EvexVpmovsxwdVdqWdqKmask => {
-                simd3!(EvexVpmovsxwdVdqWdqKmaskR, EvexVpmovsxwdVdqWdqKmaskM, self)
+                simd!(EvexVpmovsxwdVdqWdqKmaskR, EvexVpmovsxwdVdqWdqKmaskM, self)
             }
             O::EvexVpmovsxwqVdqWdq => simd!(EvexVpmovsxwqVdqWdqR, EvexVpmovsxwqVdqWdqM, self),
             O::EvexVpmovsxwqVdqWdqKmask => {
-                simd3!(EvexVpmovsxwqVdqWdqKmaskR, EvexVpmovsxwqVdqWdqKmaskM, self)
+                simd!(EvexVpmovsxwqVdqWdqKmaskR, EvexVpmovsxwqVdqWdqKmaskM, self)
             }
             O::EvexVpmovusdbWdqVdq => simd_st!(EvexVpmovusdbWdqVdqR, EvexVpmovusdbWdqVdqM, self),
             O::EvexVpmovusdbWdqVdqKmask => {
-                simd3!(EvexVpmovusdbWdqVdqKmaskR, EvexVpmovusdbWdqVdqKmaskM, self)
+                simd_st!(EvexVpmovusdbWdqVdqKmaskR, EvexVpmovusdbWdqVdqKmaskM, self)
             }
             O::EvexVpmovusdwWdqVdq => simd_st!(EvexVpmovusdwWdqVdqR, EvexVpmovusdwWdqVdqM, self),
             O::EvexVpmovusdwWdqVdqKmask => {
-                simd3!(EvexVpmovusdwWdqVdqKmaskR, EvexVpmovusdwWdqVdqKmaskM, self)
+                simd_st!(EvexVpmovusdwWdqVdqKmaskR, EvexVpmovusdwWdqVdqKmaskM, self)
             }
             O::EvexVpmovusqbWdqVdq => simd_st!(EvexVpmovusqbWdqVdqR, EvexVpmovusqbWdqVdqM, self),
             O::EvexVpmovusqbWdqVdqKmask => {
-                simd3!(EvexVpmovusqbWdqVdqKmaskR, EvexVpmovusqbWdqVdqKmaskM, self)
+                simd_st!(EvexVpmovusqbWdqVdqKmaskR, EvexVpmovusqbWdqVdqKmaskM, self)
             }
             O::EvexVpmovusqdWdqVdq => simd_st!(EvexVpmovusqdWdqVdqR, EvexVpmovusqdWdqVdqM, self),
             O::EvexVpmovusqdWdqVdqKmask => {
-                simd3!(EvexVpmovusqdWdqVdqKmaskR, EvexVpmovusqdWdqVdqKmaskM, self)
+                simd_st!(EvexVpmovusqdWdqVdqKmaskR, EvexVpmovusqdWdqVdqKmaskM, self)
             }
             O::EvexVpmovusqwWdqVdq => simd_st!(EvexVpmovusqwWdqVdqR, EvexVpmovusqwWdqVdqM, self),
             O::EvexVpmovusqwWdqVdqKmask => {
-                simd3!(EvexVpmovusqwWdqVdqKmaskR, EvexVpmovusqwWdqVdqKmaskM, self)
+                simd_st!(EvexVpmovusqwWdqVdqKmaskR, EvexVpmovusqwWdqVdqKmaskM, self)
             }
             O::EvexVpmovuswbWdqVdq => simd_st!(EvexVpmovuswbWdqVdqR, EvexVpmovuswbWdqVdqM, self),
             O::EvexVpmovuswbWdqVdqKmask => {
-                simd3!(EvexVpmovuswbWdqVdqKmaskR, EvexVpmovuswbWdqVdqKmaskM, self)
+                simd_st!(EvexVpmovuswbWdqVdqKmaskR, EvexVpmovuswbWdqVdqKmaskM, self)
             }
             O::EvexVpmovw2mKgdWdq => simd!(EvexVpmovw2mKgdWdqR, EvexVpmovw2mKgdWdqM, self),
             O::EvexVpmovwbWdqVdq => simd_st!(EvexVpmovwbWdqVdqR, EvexVpmovwbWdqVdqM, self),
             O::EvexVpmovwbWdqVdqKmask => {
-                simd3!(EvexVpmovwbWdqVdqKmaskR, EvexVpmovwbWdqVdqKmaskM, self)
+                simd_st!(EvexVpmovwbWdqVdqKmaskR, EvexVpmovwbWdqVdqKmaskM, self)
             }
             O::EvexVpmovzxbdVdqWdq => simd!(EvexVpmovzxbdVdqWdqR, EvexVpmovzxbdVdqWdqM, self),
             O::EvexVpmovzxbdVdqWdqKmask => {
-                simd3!(EvexVpmovzxbdVdqWdqKmaskR, EvexVpmovzxbdVdqWdqKmaskM, self)
+                simd!(EvexVpmovzxbdVdqWdqKmaskR, EvexVpmovzxbdVdqWdqKmaskM, self)
             }
             O::EvexVpmovzxbqVdqWdq => simd!(EvexVpmovzxbqVdqWdqR, EvexVpmovzxbqVdqWdqM, self),
             O::EvexVpmovzxbqVdqWdqKmask => {
-                simd3!(EvexVpmovzxbqVdqWdqKmaskR, EvexVpmovzxbqVdqWdqKmaskM, self)
+                simd!(EvexVpmovzxbqVdqWdqKmaskR, EvexVpmovzxbqVdqWdqKmaskM, self)
             }
             O::EvexVpmovzxbwVdqWdq => simd!(EvexVpmovzxbwVdqWdqR, EvexVpmovzxbwVdqWdqM, self),
             O::EvexVpmovzxbwVdqWdqKmask => {
-                simd3!(EvexVpmovzxbwVdqWdqKmaskR, EvexVpmovzxbwVdqWdqKmaskM, self)
+                simd!(EvexVpmovzxbwVdqWdqKmaskR, EvexVpmovzxbwVdqWdqKmaskM, self)
             }
             O::EvexVpmovzxdqVdqWdq => simd!(EvexVpmovzxdqVdqWdqR, EvexVpmovzxdqVdqWdqM, self),
             O::EvexVpmovzxdqVdqWdqKmask => {
-                simd3!(EvexVpmovzxdqVdqWdqKmaskR, EvexVpmovzxdqVdqWdqKmaskM, self)
+                simd!(EvexVpmovzxdqVdqWdqKmaskR, EvexVpmovzxdqVdqWdqKmaskM, self)
             }
             O::EvexVpmovzxwdVdqWdq => simd!(EvexVpmovzxwdVdqWdqR, EvexVpmovzxwdVdqWdqM, self),
             O::EvexVpmovzxwdVdqWdqKmask => {
-                simd3!(EvexVpmovzxwdVdqWdqKmaskR, EvexVpmovzxwdVdqWdqKmaskM, self)
+                simd!(EvexVpmovzxwdVdqWdqKmaskR, EvexVpmovzxwdVdqWdqKmaskM, self)
             }
             O::EvexVpmovzxwqVdqWdq => simd!(EvexVpmovzxwqVdqWdqR, EvexVpmovzxwqVdqWdqM, self),
             O::EvexVpmovzxwqVdqWdqKmask => {
-                simd3!(EvexVpmovzxwqVdqWdqKmaskR, EvexVpmovzxwqVdqWdqKmaskM, self)
+                simd!(EvexVpmovzxwqVdqWdqKmaskR, EvexVpmovzxwqVdqWdqKmaskM, self)
             }
             O::EvexVpmuldqVdqHdqWdq => simd3!(EvexVpmuldqVdqHdqWdqR, EvexVpmuldqVdqHdqWdqM, self),
             O::EvexVpmuldqVdqHdqWdqKmask => {
@@ -38832,16 +39271,16 @@ impl Instruction {
                 self
             ),
             O::EvexVpopcntbVdqWdqKmask => {
-                simd3!(EvexVpopcntbVdqWdqKmaskR, EvexVpopcntbVdqWdqKmaskM, self)
+                simd!(EvexVpopcntbVdqWdqKmaskR, EvexVpopcntbVdqWdqKmaskM, self)
             }
             O::EvexVpopcntdVdqWdqKmask => {
-                simd3!(EvexVpopcntdVdqWdqKmaskR, EvexVpopcntdVdqWdqKmaskM, self)
+                simd!(EvexVpopcntdVdqWdqKmaskR, EvexVpopcntdVdqWdqKmaskM, self)
             }
             O::EvexVpopcntqVdqWdqKmask => {
-                simd3!(EvexVpopcntqVdqWdqKmaskR, EvexVpopcntqVdqWdqKmaskM, self)
+                simd!(EvexVpopcntqVdqWdqKmaskR, EvexVpopcntqVdqWdqKmaskM, self)
             }
             O::EvexVpopcntwVdqWdqKmask => {
-                simd3!(EvexVpopcntwVdqWdqKmaskR, EvexVpopcntwVdqWdqKmaskM, self)
+                simd!(EvexVpopcntwVdqWdqKmaskR, EvexVpopcntwVdqWdqKmaskM, self)
             }
             O::EvexVpordVdqHdqWdq => simd3!(EvexVpordVdqHdqWdqR, EvexVpordVdqHdqWdqM, self),
             O::EvexVpordVdqHdqWdqKmask => {
@@ -38851,16 +39290,10 @@ impl Instruction {
             O::EvexVporqVdqHdqWdqKmask => {
                 simd3!(EvexVporqVdqHdqWdqKmaskR, EvexVporqVdqHdqWdqKmaskM, self)
             }
-            O::EvexVproldUdqIb => T::EvexVproldUdqIb {
-                dst: self.operands.dst,
-                imm: self.ib(),
-            },
-            O::EvexVproldUdqIbKmask => simd3!(EvexVproldUdqIbKmaskR, EvexVproldUdqIbKmaskM, self),
-            O::EvexVprolqUdqIb => T::EvexVprolqUdqIb {
-                dst: self.operands.dst,
-                imm: self.ib(),
-            },
-            O::EvexVprolqUdqIbKmask => simd3!(EvexVprolqUdqIbKmaskR, EvexVprolqUdqIbKmaskM, self),
+            O::EvexVproldUdqIb => simd_ib!(EvexVproldUdqIbR, EvexVproldUdqIbM, self),
+            O::EvexVproldUdqIbKmask => simd_ib!(EvexVproldUdqIbKmaskR, EvexVproldUdqIbKmaskM, self),
+            O::EvexVprolqUdqIb => simd_ib!(EvexVprolqUdqIbR, EvexVprolqUdqIbM, self),
+            O::EvexVprolqUdqIbKmask => simd_ib!(EvexVprolqUdqIbKmaskR, EvexVprolqUdqIbKmaskM, self),
             O::EvexVprolvdVdqHdqWdq => simd3!(EvexVprolvdVdqHdqWdqR, EvexVprolvdVdqHdqWdqM, self),
             O::EvexVprolvdVdqHdqWdqKmask => {
                 simd3!(EvexVprolvdVdqHdqWdqKmaskR, EvexVprolvdVdqHdqWdqKmaskM, self)
@@ -38869,16 +39302,10 @@ impl Instruction {
             O::EvexVprolvqVdqHdqWdqKmask => {
                 simd3!(EvexVprolvqVdqHdqWdqKmaskR, EvexVprolvqVdqHdqWdqKmaskM, self)
             }
-            O::EvexVprordUdqIb => T::EvexVprordUdqIb {
-                dst: self.operands.dst,
-                imm: self.ib(),
-            },
-            O::EvexVprordUdqIbKmask => simd3!(EvexVprordUdqIbKmaskR, EvexVprordUdqIbKmaskM, self),
-            O::EvexVprorqUdqIb => T::EvexVprorqUdqIb {
-                dst: self.operands.dst,
-                imm: self.ib(),
-            },
-            O::EvexVprorqUdqIbKmask => simd3!(EvexVprorqUdqIbKmaskR, EvexVprorqUdqIbKmaskM, self),
+            O::EvexVprordUdqIb => simd_ib!(EvexVprordUdqIbR, EvexVprordUdqIbM, self),
+            O::EvexVprordUdqIbKmask => simd_ib!(EvexVprordUdqIbKmaskR, EvexVprordUdqIbKmaskM, self),
+            O::EvexVprorqUdqIb => simd_ib!(EvexVprorqUdqIbR, EvexVprorqUdqIbM, self),
+            O::EvexVprorqUdqIbKmask => simd_ib!(EvexVprorqUdqIbKmaskR, EvexVprorqUdqIbKmaskM, self),
             O::EvexVprorvdVdqHdqWdq => simd3!(EvexVprorvdVdqHdqWdqR, EvexVprorvdVdqHdqWdqM, self),
             O::EvexVprorvdVdqHdqWdqKmask => {
                 simd3!(EvexVprorvdVdqHdqWdqKmaskR, EvexVprorvdVdqHdqWdqKmaskM, self)
@@ -38888,12 +39315,12 @@ impl Instruction {
                 simd3!(EvexVprorvqVdqHdqWdqKmaskR, EvexVprorvqVdqHdqWdqKmaskM, self)
             }
             O::EvexVpsadbwVdqHdqWdq => simd3!(EvexVpsadbwVdqHdqWdqR, EvexVpsadbwVdqHdqWdqM, self),
-            O::EvexVpshlddVdqHdqWdqIbKmask => simd3!(
+            O::EvexVpshlddVdqHdqWdqIbKmask => simd3_ib!(
                 EvexVpshlddVdqHdqWdqIbKmaskR,
                 EvexVpshlddVdqHdqWdqIbKmaskM,
                 self
             ),
-            O::EvexVpshldqVdqHdqWdqIbKmask => simd3!(
+            O::EvexVpshldqVdqHdqWdqIbKmask => simd3_ib!(
                 EvexVpshldqVdqHdqWdqIbKmaskR,
                 EvexVpshldqVdqHdqWdqIbKmaskM,
                 self
@@ -38913,17 +39340,17 @@ impl Instruction {
                 EvexVpshldvwVdqHdqWdqKmaskM,
                 self
             ),
-            O::EvexVpshldwVdqHdqWdqIbKmask => simd3!(
+            O::EvexVpshldwVdqHdqWdqIbKmask => simd3_ib!(
                 EvexVpshldwVdqHdqWdqIbKmaskR,
                 EvexVpshldwVdqHdqWdqIbKmaskM,
                 self
             ),
-            O::EvexVpshrddVdqHdqWdqIbKmask => simd3!(
+            O::EvexVpshrddVdqHdqWdqIbKmask => simd3_ib!(
                 EvexVpshrddVdqHdqWdqIbKmaskR,
                 EvexVpshrddVdqHdqWdqIbKmaskM,
                 self
             ),
-            O::EvexVpshrdqVdqHdqWdqIbKmask => simd3!(
+            O::EvexVpshrdqVdqHdqWdqIbKmask => simd3_ib!(
                 EvexVpshrdqVdqHdqWdqIbKmaskR,
                 EvexVpshrdqVdqHdqWdqIbKmaskM,
                 self
@@ -38943,7 +39370,7 @@ impl Instruction {
                 EvexVpshrdvwVdqHdqWdqKmaskM,
                 self
             ),
-            O::EvexVpshrdwVdqHdqWdqIbKmask => simd3!(
+            O::EvexVpshrdwVdqHdqWdqIbKmask => simd3_ib!(
                 EvexVpshrdwVdqHdqWdqIbKmaskR,
                 EvexVpshrdwVdqHdqWdqIbKmaskM,
                 self
@@ -38959,34 +39386,25 @@ impl Instruction {
             ),
             O::EvexVpshufdVdqWdqIb => simd_ib!(EvexVpshufdVdqWdqIbR, EvexVpshufdVdqWdqIbM, self),
             O::EvexVpshufdVdqWdqIbKmask => {
-                simd3!(EvexVpshufdVdqWdqIbKmaskR, EvexVpshufdVdqWdqIbKmaskM, self)
+                simd_ib!(EvexVpshufdVdqWdqIbKmaskR, EvexVpshufdVdqWdqIbKmaskM, self)
             }
             O::EvexVpshufhwVdqWdqIb => simd_ib!(EvexVpshufhwVdqWdqIbR, EvexVpshufhwVdqWdqIbM, self),
             O::EvexVpshufhwVdqWdqIbKmask => {
-                simd3!(EvexVpshufhwVdqWdqIbKmaskR, EvexVpshufhwVdqWdqIbKmaskM, self)
+                simd_ib!(EvexVpshufhwVdqWdqIbKmaskR, EvexVpshufhwVdqWdqIbKmaskM, self)
             }
             O::EvexVpshuflwVdqWdqIb => simd_ib!(EvexVpshuflwVdqWdqIbR, EvexVpshuflwVdqWdqIbM, self),
             O::EvexVpshuflwVdqWdqIbKmask => {
-                simd3!(EvexVpshuflwVdqWdqIbKmaskR, EvexVpshuflwVdqWdqIbKmaskM, self)
+                simd_ib!(EvexVpshuflwVdqWdqIbKmaskR, EvexVpshuflwVdqWdqIbKmaskM, self)
             }
-            O::EvexVpslldUdqIb => T::EvexVpslldUdqIb {
-                dst: self.operands.dst,
-                imm: self.ib(),
-            },
-            O::EvexVpslldUdqIbKmask => simd3!(EvexVpslldUdqIbKmaskR, EvexVpslldUdqIbKmaskM, self),
+            O::EvexVpslldUdqIb => simd_ib!(EvexVpslldUdqIbR, EvexVpslldUdqIbM, self),
+            O::EvexVpslldUdqIbKmask => simd_ib!(EvexVpslldUdqIbKmaskR, EvexVpslldUdqIbKmaskM, self),
             O::EvexVpslldVdqHdqWdq => simd3!(EvexVpslldVdqHdqWdqR, EvexVpslldVdqHdqWdqM, self),
             O::EvexVpslldVdqHdqWdqKmask => {
                 simd3!(EvexVpslldVdqHdqWdqKmaskR, EvexVpslldVdqHdqWdqKmaskM, self)
             }
-            O::EvexVpslldqUdqIb => T::EvexVpslldqUdqIb {
-                dst: self.operands.dst,
-                imm: self.ib(),
-            },
-            O::EvexVpsllqUdqIb => T::EvexVpsllqUdqIb {
-                dst: self.operands.dst,
-                imm: self.ib(),
-            },
-            O::EvexVpsllqUdqIbKmask => simd3!(EvexVpsllqUdqIbKmaskR, EvexVpsllqUdqIbKmaskM, self),
+            O::EvexVpslldqUdqIb => simd_ib!(EvexVpslldqUdqIbR, EvexVpslldqUdqIbM, self),
+            O::EvexVpsllqUdqIb => simd_ib!(EvexVpsllqUdqIbR, EvexVpsllqUdqIbM, self),
+            O::EvexVpsllqUdqIbKmask => simd_ib!(EvexVpsllqUdqIbKmaskR, EvexVpsllqUdqIbKmaskM, self),
             O::EvexVpsllqVdqHdqWdq => simd3!(EvexVpsllqVdqHdqWdqR, EvexVpsllqVdqHdqWdqM, self),
             O::EvexVpsllqVdqHdqWdqKmask => {
                 simd3!(EvexVpsllqVdqHdqWdqKmaskR, EvexVpsllqVdqHdqWdqKmaskM, self)
@@ -39003,29 +39421,20 @@ impl Instruction {
             O::EvexVpsllvwVdqHdqWdqKmask => {
                 simd3!(EvexVpsllvwVdqHdqWdqKmaskR, EvexVpsllvwVdqHdqWdqKmaskM, self)
             }
-            O::EvexVpsllwUdqIb => T::EvexVpsllwUdqIb {
-                dst: self.operands.dst,
-                imm: self.ib(),
-            },
-            O::EvexVpsllwUdqIbKmask => simd3!(EvexVpsllwUdqIbKmaskR, EvexVpsllwUdqIbKmaskM, self),
+            O::EvexVpsllwUdqIb => simd_ib!(EvexVpsllwUdqIbR, EvexVpsllwUdqIbM, self),
+            O::EvexVpsllwUdqIbKmask => simd_ib!(EvexVpsllwUdqIbKmaskR, EvexVpsllwUdqIbKmaskM, self),
             O::EvexVpsllwVdqHdqWdq => simd3!(EvexVpsllwVdqHdqWdqR, EvexVpsllwVdqHdqWdqM, self),
             O::EvexVpsllwVdqHdqWdqKmask => {
                 simd3!(EvexVpsllwVdqHdqWdqKmaskR, EvexVpsllwVdqHdqWdqKmaskM, self)
             }
-            O::EvexVpsradUdqIb => T::EvexVpsradUdqIb {
-                dst: self.operands.dst,
-                imm: self.ib(),
-            },
-            O::EvexVpsradUdqIbKmask => simd3!(EvexVpsradUdqIbKmaskR, EvexVpsradUdqIbKmaskM, self),
+            O::EvexVpsradUdqIb => simd_ib!(EvexVpsradUdqIbR, EvexVpsradUdqIbM, self),
+            O::EvexVpsradUdqIbKmask => simd_ib!(EvexVpsradUdqIbKmaskR, EvexVpsradUdqIbKmaskM, self),
             O::EvexVpsradVdqHdqWdq => simd3!(EvexVpsradVdqHdqWdqR, EvexVpsradVdqHdqWdqM, self),
             O::EvexVpsradVdqHdqWdqKmask => {
                 simd3!(EvexVpsradVdqHdqWdqKmaskR, EvexVpsradVdqHdqWdqKmaskM, self)
             }
-            O::EvexVpsraqUdqIb => T::EvexVpsraqUdqIb {
-                dst: self.operands.dst,
-                imm: self.ib(),
-            },
-            O::EvexVpsraqUdqIbKmask => simd3!(EvexVpsraqUdqIbKmaskR, EvexVpsraqUdqIbKmaskM, self),
+            O::EvexVpsraqUdqIb => simd_ib!(EvexVpsraqUdqIbR, EvexVpsraqUdqIbM, self),
+            O::EvexVpsraqUdqIbKmask => simd_ib!(EvexVpsraqUdqIbKmaskR, EvexVpsraqUdqIbKmaskM, self),
             O::EvexVpsraqVdqHdqWdq => simd3!(EvexVpsraqVdqHdqWdqR, EvexVpsraqVdqHdqWdqM, self),
             O::EvexVpsraqVdqHdqWdqKmask => {
                 simd3!(EvexVpsraqVdqHdqWdqKmaskR, EvexVpsraqVdqHdqWdqKmaskM, self)
@@ -39042,33 +39451,21 @@ impl Instruction {
             O::EvexVpsravwVdqHdqWdqKmask => {
                 simd3!(EvexVpsravwVdqHdqWdqKmaskR, EvexVpsravwVdqHdqWdqKmaskM, self)
             }
-            O::EvexVpsrawUdqIb => T::EvexVpsrawUdqIb {
-                dst: self.operands.dst,
-                imm: self.ib(),
-            },
-            O::EvexVpsrawUdqIbKmask => simd3!(EvexVpsrawUdqIbKmaskR, EvexVpsrawUdqIbKmaskM, self),
+            O::EvexVpsrawUdqIb => simd_ib!(EvexVpsrawUdqIbR, EvexVpsrawUdqIbM, self),
+            O::EvexVpsrawUdqIbKmask => simd_ib!(EvexVpsrawUdqIbKmaskR, EvexVpsrawUdqIbKmaskM, self),
             O::EvexVpsrawVdqHdqWdq => simd3!(EvexVpsrawVdqHdqWdqR, EvexVpsrawVdqHdqWdqM, self),
             O::EvexVpsrawVdqHdqWdqKmask => {
                 simd3!(EvexVpsrawVdqHdqWdqKmaskR, EvexVpsrawVdqHdqWdqKmaskM, self)
             }
-            O::EvexVpsrldUdqIb => T::EvexVpsrldUdqIb {
-                dst: self.operands.dst,
-                imm: self.ib(),
-            },
-            O::EvexVpsrldUdqIbKmask => simd3!(EvexVpsrldUdqIbKmaskR, EvexVpsrldUdqIbKmaskM, self),
+            O::EvexVpsrldUdqIb => simd_ib!(EvexVpsrldUdqIbR, EvexVpsrldUdqIbM, self),
+            O::EvexVpsrldUdqIbKmask => simd_ib!(EvexVpsrldUdqIbKmaskR, EvexVpsrldUdqIbKmaskM, self),
             O::EvexVpsrldVdqHdqWdq => simd3!(EvexVpsrldVdqHdqWdqR, EvexVpsrldVdqHdqWdqM, self),
             O::EvexVpsrldVdqHdqWdqKmask => {
                 simd3!(EvexVpsrldVdqHdqWdqKmaskR, EvexVpsrldVdqHdqWdqKmaskM, self)
             }
-            O::EvexVpsrldqUdqIb => T::EvexVpsrldqUdqIb {
-                dst: self.operands.dst,
-                imm: self.ib(),
-            },
-            O::EvexVpsrlqUdqIb => T::EvexVpsrlqUdqIb {
-                dst: self.operands.dst,
-                imm: self.ib(),
-            },
-            O::EvexVpsrlqUdqIbKmask => simd3!(EvexVpsrlqUdqIbKmaskR, EvexVpsrlqUdqIbKmaskM, self),
+            O::EvexVpsrldqUdqIb => simd_ib!(EvexVpsrldqUdqIbR, EvexVpsrldqUdqIbM, self),
+            O::EvexVpsrlqUdqIb => simd_ib!(EvexVpsrlqUdqIbR, EvexVpsrlqUdqIbM, self),
+            O::EvexVpsrlqUdqIbKmask => simd_ib!(EvexVpsrlqUdqIbKmaskR, EvexVpsrlqUdqIbKmaskM, self),
             O::EvexVpsrlqVdqHdqWdq => simd3!(EvexVpsrlqVdqHdqWdqR, EvexVpsrlqVdqHdqWdqM, self),
             O::EvexVpsrlqVdqHdqWdqKmask => {
                 simd3!(EvexVpsrlqVdqHdqWdqKmaskR, EvexVpsrlqVdqHdqWdqKmaskM, self)
@@ -39085,11 +39482,8 @@ impl Instruction {
             O::EvexVpsrlvwVdqHdqWdqKmask => {
                 simd3!(EvexVpsrlvwVdqHdqWdqKmaskR, EvexVpsrlvwVdqHdqWdqKmaskM, self)
             }
-            O::EvexVpsrlwUdqIb => T::EvexVpsrlwUdqIb {
-                dst: self.operands.dst,
-                imm: self.ib(),
-            },
-            O::EvexVpsrlwUdqIbKmask => simd3!(EvexVpsrlwUdqIbKmaskR, EvexVpsrlwUdqIbKmaskM, self),
+            O::EvexVpsrlwUdqIb => simd_ib!(EvexVpsrlwUdqIbR, EvexVpsrlwUdqIbM, self),
+            O::EvexVpsrlwUdqIbKmask => simd_ib!(EvexVpsrlwUdqIbKmaskR, EvexVpsrlwUdqIbKmaskM, self),
             O::EvexVpsrlwVdqHdqWdq => simd3!(EvexVpsrlwVdqHdqWdqR, EvexVpsrlwVdqHdqWdqM, self),
             O::EvexVpsrlwVdqHdqWdqKmask => {
                 simd3!(EvexVpsrlwVdqHdqWdqKmaskR, EvexVpsrlwVdqHdqWdqKmaskM, self)
@@ -39137,7 +39531,7 @@ impl Instruction {
             O::EvexVpternlogdVdqHdqWdqIb => {
                 simd3_ib!(EvexVpternlogdVdqHdqWdqIbR, EvexVpternlogdVdqHdqWdqIbM, self)
             }
-            O::EvexVpternlogdVdqHdqWdqIbKmask => simd3!(
+            O::EvexVpternlogdVdqHdqWdqIbKmask => simd3_ib!(
                 EvexVpternlogdVdqHdqWdqIbKmaskR,
                 EvexVpternlogdVdqHdqWdqIbKmaskM,
                 self
@@ -39145,7 +39539,7 @@ impl Instruction {
             O::EvexVpternlogqVdqHdqWdqIb => {
                 simd3_ib!(EvexVpternlogqVdqHdqWdqIbR, EvexVpternlogqVdqHdqWdqIbM, self)
             }
-            O::EvexVpternlogqVdqHdqWdqIbKmask => simd3!(
+            O::EvexVpternlogqVdqHdqWdqIbKmask => simd3_ib!(
                 EvexVpternlogqVdqHdqWdqIbKmaskR,
                 EvexVpternlogqVdqHdqWdqIbKmaskM,
                 self
@@ -39246,31 +39640,31 @@ impl Instruction {
             O::EvexVpxorqVdqHdqWdqKmask => {
                 simd3!(EvexVpxorqVdqHdqWdqKmaskR, EvexVpxorqVdqHdqWdqKmaskM, self)
             }
-            O::EvexVrangepdVpdHpdWpdIbKmask => simd3!(
+            O::EvexVrangepdVpdHpdWpdIbKmask => simd3_ib!(
                 EvexVrangepdVpdHpdWpdIbKmaskR,
                 EvexVrangepdVpdHpdWpdIbKmaskM,
                 self
             ),
-            O::EvexVrangepsVpsHpsWpsIbKmask => simd3!(
+            O::EvexVrangepsVpsHpsWpsIbKmask => simd3_ib!(
                 EvexVrangepsVpsHpsWpsIbKmaskR,
                 EvexVrangepsVpsHpsWpsIbKmaskM,
                 self
             ),
-            O::EvexVrangesdVsdHpdWsdIbKmask => simd3!(
+            O::EvexVrangesdVsdHpdWsdIbKmask => simd3_ib!(
                 EvexVrangesdVsdHpdWsdIbKmaskR,
                 EvexVrangesdVsdHpdWsdIbKmaskM,
                 self
             ),
-            O::EvexVrangessVssHpsWssIbKmask => simd3!(
+            O::EvexVrangessVssHpsWssIbKmask => simd3_ib!(
                 EvexVrangessVssHpsWssIbKmaskR,
                 EvexVrangessVssHpsWssIbKmaskM,
                 self
             ),
             O::EvexVrcp14pdVpdWpdKmask => {
-                simd3!(EvexVrcp14pdVpdWpdKmaskR, EvexVrcp14pdVpdWpdKmaskM, self)
+                simd!(EvexVrcp14pdVpdWpdKmaskR, EvexVrcp14pdVpdWpdKmaskM, self)
             }
             O::EvexVrcp14psVpsWpsKmask => {
-                simd3!(EvexVrcp14psVpsWpsKmaskR, EvexVrcp14psVpsWpsKmaskM, self)
+                simd!(EvexVrcp14psVpsWpsKmaskR, EvexVrcp14psVpsWpsKmaskM, self)
             }
             O::EvexVrcp14sdVsdHpdWsdKmask => simd3!(
                 EvexVrcp14sdVsdHpdWsdKmaskR,
@@ -39284,89 +39678,89 @@ impl Instruction {
             ),
             O::EvexVrcppbf16VphWph => simd!(EvexVrcppbf16VphWphR, EvexVrcppbf16VphWphM, self),
             O::EvexVrcppbf16VphWphKmask => {
-                simd3!(EvexVrcppbf16VphWphKmaskR, EvexVrcppbf16VphWphKmaskM, self)
+                simd!(EvexVrcppbf16VphWphKmaskR, EvexVrcppbf16VphWphKmaskM, self)
             }
             O::EvexVrcpphVphWphKmask => {
-                simd3!(EvexVrcpphVphWphKmaskR, EvexVrcpphVphWphKmaskM, self)
+                simd!(EvexVrcpphVphWphKmaskR, EvexVrcpphVphWphKmaskM, self)
             }
             O::EvexVrcpshVshHphWshKmask => {
                 simd3!(EvexVrcpshVshHphWshKmaskR, EvexVrcpshVshHphWshKmaskM, self)
             }
-            O::EvexVreducebf16VphWphIbKmask => simd3!(
+            O::EvexVreducebf16VphWphIbKmask => simd_ib!(
                 EvexVreducebf16VphWphIbKmaskR,
                 EvexVreducebf16VphWphIbKmaskM,
                 self
             ),
-            O::EvexVreducepdVpdWpdIbKmask => simd3!(
+            O::EvexVreducepdVpdWpdIbKmask => simd_ib!(
                 EvexVreducepdVpdWpdIbKmaskR,
                 EvexVreducepdVpdWpdIbKmaskM,
                 self
             ),
-            O::EvexVreducephVphWphIbKmask => simd3!(
+            O::EvexVreducephVphWphIbKmask => simd_ib!(
                 EvexVreducephVphWphIbKmaskR,
                 EvexVreducephVphWphIbKmaskM,
                 self
             ),
-            O::EvexVreducepsVpsWpsIbKmask => simd3!(
+            O::EvexVreducepsVpsWpsIbKmask => simd_ib!(
                 EvexVreducepsVpsWpsIbKmaskR,
                 EvexVreducepsVpsWpsIbKmaskM,
                 self
             ),
-            O::EvexVreducesdVsdHpdWsdIbKmask => simd3!(
+            O::EvexVreducesdVsdHpdWsdIbKmask => simd3_ib!(
                 EvexVreducesdVsdHpdWsdIbKmaskR,
                 EvexVreducesdVsdHpdWsdIbKmaskM,
                 self
             ),
-            O::EvexVreduceshVshHphWshIbKmask => simd3!(
+            O::EvexVreduceshVshHphWshIbKmask => simd3_ib!(
                 EvexVreduceshVshHphWshIbKmaskR,
                 EvexVreduceshVshHphWshIbKmaskM,
                 self
             ),
-            O::EvexVreducessVssHpsWssIbKmask => simd3!(
+            O::EvexVreducessVssHpsWssIbKmask => simd3_ib!(
                 EvexVreducessVssHpsWssIbKmaskR,
                 EvexVreducessVssHpsWssIbKmaskM,
                 self
             ),
-            O::EvexVrndscalebf16VphWphIbKmask => simd3!(
+            O::EvexVrndscalebf16VphWphIbKmask => simd_ib!(
                 EvexVrndscalebf16VphWphIbKmaskR,
                 EvexVrndscalebf16VphWphIbKmaskM,
                 self
             ),
-            O::EvexVrndscalepdVpdWpdIbKmask => simd3!(
+            O::EvexVrndscalepdVpdWpdIbKmask => simd_ib!(
                 EvexVrndscalepdVpdWpdIbKmaskR,
                 EvexVrndscalepdVpdWpdIbKmaskM,
                 self
             ),
-            O::EvexVrndscalephVphWphIbKmask => simd3!(
+            O::EvexVrndscalephVphWphIbKmask => simd_ib!(
                 EvexVrndscalephVphWphIbKmaskR,
                 EvexVrndscalephVphWphIbKmaskM,
                 self
             ),
-            O::EvexVrndscalepsVpsWpsIbKmask => simd3!(
+            O::EvexVrndscalepsVpsWpsIbKmask => simd_ib!(
                 EvexVrndscalepsVpsWpsIbKmaskR,
                 EvexVrndscalepsVpsWpsIbKmaskM,
                 self
             ),
-            O::EvexVrndscalesdVsdHpdWsdIbKmask => simd3!(
+            O::EvexVrndscalesdVsdHpdWsdIbKmask => simd3_ib!(
                 EvexVrndscalesdVsdHpdWsdIbKmaskR,
                 EvexVrndscalesdVsdHpdWsdIbKmaskM,
                 self
             ),
-            O::EvexVrndscaleshVshHphWshIbKmask => simd3!(
+            O::EvexVrndscaleshVshHphWshIbKmask => simd3_ib!(
                 EvexVrndscaleshVshHphWshIbKmaskR,
                 EvexVrndscaleshVshHphWshIbKmaskM,
                 self
             ),
-            O::EvexVrndscalessVssHpsWssIbKmask => simd3!(
+            O::EvexVrndscalessVssHpsWssIbKmask => simd3_ib!(
                 EvexVrndscalessVssHpsWssIbKmaskR,
                 EvexVrndscalessVssHpsWssIbKmaskM,
                 self
             ),
             O::EvexVrsqrt14pdVpdWpdKmask => {
-                simd3!(EvexVrsqrt14pdVpdWpdKmaskR, EvexVrsqrt14pdVpdWpdKmaskM, self)
+                simd!(EvexVrsqrt14pdVpdWpdKmaskR, EvexVrsqrt14pdVpdWpdKmaskM, self)
             }
             O::EvexVrsqrt14psVpsWpsKmask => {
-                simd3!(EvexVrsqrt14psVpsWpsKmaskR, EvexVrsqrt14psVpsWpsKmaskM, self)
+                simd!(EvexVrsqrt14psVpsWpsKmaskR, EvexVrsqrt14psVpsWpsKmaskM, self)
             }
             O::EvexVrsqrt14sdVsdHpdWsdKmask => simd3!(
                 EvexVrsqrt14sdVsdHpdWsdKmaskR,
@@ -39379,13 +39773,13 @@ impl Instruction {
                 self
             ),
             O::EvexVrsqrtpbf16VphWph => simd!(EvexVrsqrtpbf16VphWphR, EvexVrsqrtpbf16VphWphM, self),
-            O::EvexVrsqrtpbf16VphWphKmask => simd3!(
+            O::EvexVrsqrtpbf16VphWphKmask => simd!(
                 EvexVrsqrtpbf16VphWphKmaskR,
                 EvexVrsqrtpbf16VphWphKmaskM,
                 self
             ),
             O::EvexVrsqrtphVphWphKmask => {
-                simd3!(EvexVrsqrtphVphWphKmaskR, EvexVrsqrtphVphWphKmaskM, self)
+                simd!(EvexVrsqrtphVphWphKmaskR, EvexVrsqrtphVphWphKmaskM, self)
             }
             O::EvexVrsqrtshVshHphWshKmask => simd3!(
                 EvexVrsqrtshVshHphWshKmaskR,
@@ -39472,22 +39866,22 @@ impl Instruction {
             O::EvexVscatterqqVsibVdq => {
                 simd_st!(EvexVscatterqqVsibVdqR, EvexVscatterqqVsibVdqM, self)
             }
-            O::EvexVshuff32x4VpsHpsWpsIbKmask => simd3!(
+            O::EvexVshuff32x4VpsHpsWpsIbKmask => simd3_ib!(
                 EvexVshuff32x4VpsHpsWpsIbKmaskR,
                 EvexVshuff32x4VpsHpsWpsIbKmaskM,
                 self
             ),
-            O::EvexVshuff64x2VpdHpdWpdIbKmask => simd3!(
+            O::EvexVshuff64x2VpdHpdWpdIbKmask => simd3_ib!(
                 EvexVshuff64x2VpdHpdWpdIbKmaskR,
                 EvexVshuff64x2VpdHpdWpdIbKmaskM,
                 self
             ),
-            O::EvexVshufi32x4VdqHdqWdqIbKmask => simd3!(
+            O::EvexVshufi32x4VdqHdqWdqIbKmask => simd3_ib!(
                 EvexVshufi32x4VdqHdqWdqIbKmaskR,
                 EvexVshufi32x4VdqHdqWdqIbKmaskM,
                 self
             ),
-            O::EvexVshufi64x2VdqHdqWdqIbKmask => simd3!(
+            O::EvexVshufi64x2VdqHdqWdqIbKmask => simd3_ib!(
                 EvexVshufi64x2VdqHdqWdqIbKmaskR,
                 EvexVshufi64x2VdqHdqWdqIbKmaskM,
                 self
@@ -39495,7 +39889,7 @@ impl Instruction {
             O::EvexVshufpdVpdHpdWpdIb => {
                 simd3_ib!(EvexVshufpdVpdHpdWpdIbR, EvexVshufpdVpdHpdWpdIbM, self)
             }
-            O::EvexVshufpdVpdHpdWpdIbKmask => simd3!(
+            O::EvexVshufpdVpdHpdWpdIbKmask => simd3_ib!(
                 EvexVshufpdVpdHpdWpdIbKmaskR,
                 EvexVshufpdVpdHpdWpdIbKmaskM,
                 self
@@ -39503,7 +39897,7 @@ impl Instruction {
             O::EvexVshufpsVpsHpsWpsIb => {
                 simd3_ib!(EvexVshufpsVpsHpsWpsIbR, EvexVshufpsVpsHpsWpsIbM, self)
             }
-            O::EvexVshufpsVpsHpsWpsIbKmask => simd3!(
+            O::EvexVshufpsVpsHpsWpsIbKmask => simd3_ib!(
                 EvexVshufpsVpsHpsWpsIbKmaskR,
                 EvexVshufpsVpsHpsWpsIbKmaskM,
                 self
@@ -39516,19 +39910,19 @@ impl Instruction {
             }
             O::EvexVsqrtbf16VphWph => simd!(EvexVsqrtbf16VphWphR, EvexVsqrtbf16VphWphM, self),
             O::EvexVsqrtbf16VphWphKmask => {
-                simd3!(EvexVsqrtbf16VphWphKmaskR, EvexVsqrtbf16VphWphKmaskM, self)
+                simd!(EvexVsqrtbf16VphWphKmaskR, EvexVsqrtbf16VphWphKmaskM, self)
             }
             O::EvexVsqrtpdVpdWpd => simd!(EvexVsqrtpdVpdWpdR, EvexVsqrtpdVpdWpdM, self),
             O::EvexVsqrtpdVpdWpdKmask => {
-                simd3!(EvexVsqrtpdVpdWpdKmaskR, EvexVsqrtpdVpdWpdKmaskM, self)
+                simd!(EvexVsqrtpdVpdWpdKmaskR, EvexVsqrtpdVpdWpdKmaskM, self)
             }
             O::EvexVsqrtphVphWph => simd!(EvexVsqrtphVphWphR, EvexVsqrtphVphWphM, self),
             O::EvexVsqrtphVphWphKmask => {
-                simd3!(EvexVsqrtphVphWphKmaskR, EvexVsqrtphVphWphKmaskM, self)
+                simd!(EvexVsqrtphVphWphKmaskR, EvexVsqrtphVphWphKmaskM, self)
             }
             O::EvexVsqrtpsVpsWps => simd!(EvexVsqrtpsVpsWpsR, EvexVsqrtpsVpsWpsM, self),
             O::EvexVsqrtpsVpsWpsKmask => {
-                simd3!(EvexVsqrtpsVpsWpsKmaskR, EvexVsqrtpsVpsWpsKmaskM, self)
+                simd!(EvexVsqrtpsVpsWpsKmaskR, EvexVsqrtpsVpsWpsKmaskM, self)
             }
             O::EvexVsqrtsdVsdHpdWsd => simd3!(EvexVsqrtsdVsdHpdWsdR, EvexVsqrtsdVsdHpdWsdM, self),
             O::EvexVsqrtsdVsdHpdWsdKmask => {
@@ -39580,6 +39974,9 @@ impl Instruction {
             O::EvexVucomxsdVsdWsd => simd!(EvexVucomxsdVsdWsdR, EvexVucomxsdVsdWsdM, self),
             O::EvexVucomxshVshWsh => simd!(EvexVucomxshVshWshR, EvexVucomxshVshWshM, self),
             O::EvexVucomxssVssWss => simd!(EvexVucomxssVssWssR, EvexVucomxssVssWssM, self),
+            O::EvexVunpackbVdqWdqIbKmask => {
+                simd_ib!(EvexVunpackbVdqWdqIbKmaskR, EvexVunpackbVdqWdqIbKmaskM, self)
+            }
             O::EvexVunpckhpdVpdHpdWpd => {
                 simd3!(EvexVunpckhpdVpdHpdWpdR, EvexVunpckhpdVpdHpdWpdM, self)
             }
