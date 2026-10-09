@@ -95,7 +95,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     // ========================================================================
 
     pub(super) fn rcpps_vps_wps(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let mut op = self.sse_read_op2_xmm(instr)?;
         for i in 0..4 {
             op.set_xmm32u(i, approximate_rcp(op.xmm32u(i)));
@@ -110,7 +109,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     // ========================================================================
 
     pub(super) fn rcpss_vss_wss(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op = self.sse_pfp_read_op2_ss(instr)?;
         let mut result = self.read_xmm_reg(instr.dst());
         result.set_xmm32u(0, approximate_rcp(op));
@@ -124,7 +122,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     // ========================================================================
 
     pub(super) fn rsqrtps_vps_wps(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let mut op = self.sse_read_op2_xmm(instr)?;
         for i in 0..4 {
             op.set_xmm32u(i, approximate_rsqrt(op.xmm32u(i)));
@@ -139,7 +136,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     // ========================================================================
 
     pub(super) fn rsqrtss_vss_wss(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op = self.sse_pfp_read_op2_ss(instr)?;
         let mut result = self.read_xmm_reg(instr.dst());
         result.set_xmm32u(0, approximate_rsqrt(op));

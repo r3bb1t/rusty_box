@@ -3456,7 +3456,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     }
 
     fn vex_fp_logical(&mut self, instr: &Instruction, op: VexFpLogicalOp) -> super::Result<()> {
-        self.prepare_sse()?;
         let dst_idx = instr.dst();
         // Bochs HANDLE_AVX_2OP<xmm_{andps,andnps,orps,xorps}>.
         if instr.get_vl() >= 1 {
@@ -3542,7 +3541,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         signed: bool,
         take_max: bool,
     ) -> super::Result<()> {
-        self.prepare_sse()?;
         let dst_idx = instr.dst();
         if instr.get_vl() >= 1 {
             let src1 = self.read_ymm_reg(instr.src2());
@@ -3600,7 +3598,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         signed: bool,
         take_max: bool,
     ) -> super::Result<()> {
-        self.prepare_sse()?;
         let dst_idx = instr.dst();
         if instr.get_vl() >= 1 {
             let src1 = self.read_ymm_reg(instr.src2());
@@ -3658,7 +3655,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         signed: bool,
         take_max: bool,
     ) -> super::Result<()> {
-        self.prepare_sse()?;
         let dst_idx = instr.dst();
         if instr.get_vl() >= 1 {
             let src1 = self.read_ymm_reg(instr.src2());

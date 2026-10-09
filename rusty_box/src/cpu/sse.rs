@@ -281,7 +281,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// Bochs cpu_templates.h `HANDLE_SSE_2OP`: a legacy SSE instruction whose
     /// result is `func` applied to its destination and second operand.
     fn sse_2op(&mut self, instr: &Instruction, func: simd_int::Xmm2Op) -> super::Result<()> {
-        self.prepare_sse()?;
         let mut op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm(instr)?;
         func(&mut op1, &op2);
@@ -312,7 +311,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// PADDB VdqWdq — packed add bytes (16 x u8)
     pub(super) fn paddb_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm(instr)?;
 
@@ -326,7 +324,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// PADDW VdqWdq — packed add words (8 x u16)
     pub(super) fn paddw_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm(instr)?;
 
@@ -340,7 +337,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// PADDD VdqWdq — packed add dwords (4 x u32)
     pub(super) fn paddd_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm(instr)?;
 
@@ -354,7 +350,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// PADDQ VdqWdq — packed add qwords (2 x u64)
     pub(super) fn paddq_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm(instr)?;
 
@@ -371,7 +366,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// PSUBB VdqWdq — packed sub bytes (16 x u8)
     pub(super) fn psubb_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm(instr)?;
 
@@ -385,7 +379,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// PSUBW VdqWdq — packed sub words (8 x u16)
     pub(super) fn psubw_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm(instr)?;
 
@@ -399,7 +392,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// PSUBD VdqWdq — packed sub dwords (4 x u32)
     pub(super) fn psubd_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm(instr)?;
 
@@ -413,7 +405,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// PSUBQ VdqWdq — packed sub qwords (2 x u64)
     pub(super) fn psubq_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm(instr)?;
 
@@ -430,7 +421,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// PADDSB VdqWdq — packed add signed bytes with saturation
     pub(super) fn paddsb_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm(instr)?;
 
@@ -447,7 +437,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// PADDSW VdqWdq — packed add signed words with saturation
     pub(super) fn paddsw_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm(instr)?;
 
@@ -464,7 +453,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// PADDUSB VdqWdq — packed add unsigned bytes with saturation
     pub(super) fn paddusb_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm(instr)?;
 
@@ -478,7 +466,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// PADDUSW VdqWdq — packed add unsigned words with saturation
     pub(super) fn paddusw_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm(instr)?;
 
@@ -496,7 +483,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// PSUBSB VdqWdq — packed sub signed bytes with saturation
     pub(super) fn psubsb_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm(instr)?;
 
@@ -513,7 +499,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// PSUBSW VdqWdq — packed sub signed words with saturation
     pub(super) fn psubsw_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm(instr)?;
 
@@ -530,7 +515,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// PSUBUSB VdqWdq — packed sub unsigned bytes with saturation
     pub(super) fn psubusb_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm(instr)?;
 
@@ -544,7 +528,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// PSUBUSW VdqWdq — packed sub unsigned words with saturation
     pub(super) fn psubusw_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm(instr)?;
 
@@ -562,7 +545,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// PMULLW VdqWdq — packed multiply low words (8 x i16, keep low 16 bits)
     pub(super) fn pmullw_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm(instr)?;
 
@@ -579,7 +561,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// PMULHW VdqWdq — packed multiply high signed words (8 x i16, keep high 16 bits)
     pub(super) fn pmulhw_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm(instr)?;
 
@@ -596,7 +577,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// PMULHUW VdqWdq — packed multiply high unsigned words (8 x u16, keep high 16 bits)
     pub(super) fn pmulhuw_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm(instr)?;
 
@@ -614,7 +594,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// PMULHRSW VdqWdq — packed multiply high with rounding and scale (SSSE3)
     /// Bochs simd_int.h: ((a * b >> 14) + 1) >> 1
     pub(super) fn pmulhrsw_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm(instr)?;
 
@@ -630,7 +609,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// PMULUDQ VdqWdq — packed multiply unsigned dwords to qwords
     /// Multiplies dwords [0] and [2] of each operand, producing two 64-bit results.
     pub(super) fn pmuludq_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm(instr)?;
 
@@ -653,7 +631,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// PCMPEQB VdqWdq — packed compare equal bytes
     pub(super) fn pcmpeqb_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm(instr)?;
 
@@ -674,7 +651,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// PCMPEQW VdqWdq — packed compare equal words
     pub(super) fn pcmpeqw_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm(instr)?;
 
@@ -695,7 +671,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// PCMPEQD VdqWdq — packed compare equal dwords
     pub(super) fn pcmpeqd_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm(instr)?;
 
@@ -716,7 +691,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// PCMPGTB VdqWdq — packed compare greater than bytes (signed)
     pub(super) fn pcmpgtb_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm(instr)?;
 
@@ -737,7 +711,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// PCMPGTW VdqWdq — packed compare greater than words (signed)
     pub(super) fn pcmpgtw_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm(instr)?;
 
@@ -758,7 +731,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// PCMPGTD VdqWdq — packed compare greater than dwords (signed)
     pub(super) fn pcmpgtd_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm(instr)?;
 
@@ -783,7 +755,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// PAND VdqWdq — bitwise AND
     pub(super) fn pand_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm(instr)?;
 
@@ -796,7 +767,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// PANDN VdqWdq — bitwise AND NOT (~op1 & op2)
     pub(super) fn pandn_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm(instr)?;
 
@@ -809,7 +779,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// POR VdqWdq — bitwise OR
     pub(super) fn por_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm(instr)?;
 
@@ -822,7 +791,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// PXOR VdqWdq — bitwise XOR
     pub(super) fn pxor_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm(instr)?;
 
@@ -840,7 +808,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// PSRLW VdqWdq — shift right logical words by XMM count
     pub(super) fn psrlw_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let mut op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm(instr)?;
 
@@ -859,7 +826,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// PSRLD VdqWdq — shift right logical dwords by XMM count
     pub(super) fn psrld_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let mut op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm(instr)?;
 
@@ -878,7 +844,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// PSRLQ VdqWdq — shift right logical qwords by XMM count
     pub(super) fn psrlq_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let mut op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm(instr)?;
 
@@ -901,7 +866,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// PSRAW VdqWdq — shift right arithmetic words by XMM count
     pub(super) fn psraw_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let mut op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm(instr)?;
 
@@ -923,7 +887,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// PSRAD VdqWdq — shift right arithmetic dwords by XMM count
     pub(super) fn psrad_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let mut op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm(instr)?;
 
@@ -945,7 +908,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// PSLLW VdqWdq — shift left logical words by XMM count
     pub(super) fn psllw_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let mut op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm(instr)?;
 
@@ -963,7 +925,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// PSLLD VdqWdq — shift left logical dwords by XMM count
     pub(super) fn pslld_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let mut op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm(instr)?;
 
@@ -981,7 +942,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// PSLLQ VdqWdq — shift left logical qwords by XMM count
     pub(super) fn psllq_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let mut op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm(instr)?;
 
@@ -1005,7 +965,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// PSLLDQ UdqIb — shift left logical 128-bit by imm8 bytes (fills zeros from right)
     pub(super) fn pslldq_udq_ib(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op = self.read_xmm_reg(instr.dst());
         let count = (instr.ib() as usize).min(16);
 
@@ -1020,7 +979,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// PSRLDQ UdqIb — shift right logical 128-bit by imm8 bytes (fills zeros from left)
     pub(super) fn psrldq_udq_ib(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op = self.read_xmm_reg(instr.dst());
         let count = (instr.ib() as usize).min(16);
 
@@ -1039,7 +997,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// PSRLW UdqIb — shift right logical words by imm8
     pub(super) fn psrlw_udq_ib(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let mut op = self.read_xmm_reg(instr.dst());
         let shift = instr.ib();
 
@@ -1056,7 +1013,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// PSRLD UdqIb — shift right logical dwords by imm8
     pub(super) fn psrld_udq_ib(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let mut op = self.read_xmm_reg(instr.dst());
         let shift = instr.ib();
 
@@ -1073,7 +1029,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// PSRLQ UdqIb — shift right logical qwords by imm8
     pub(super) fn psrlq_udq_ib(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let mut op = self.read_xmm_reg(instr.dst());
         let shift = instr.ib();
 
@@ -1095,7 +1050,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// PSRAW UdqIb — shift right arithmetic words by imm8
     pub(super) fn psraw_udq_ib(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let mut op = self.read_xmm_reg(instr.dst());
         let shift = instr.ib();
 
@@ -1116,7 +1070,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// PSRAD UdqIb — shift right arithmetic dwords by imm8
     pub(super) fn psrad_udq_ib(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let mut op = self.read_xmm_reg(instr.dst());
         let shift = instr.ib();
 
@@ -1137,7 +1090,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// PSLLW UdqIb — shift left logical words by imm8
     pub(super) fn psllw_udq_ib(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let mut op = self.read_xmm_reg(instr.dst());
         let shift = instr.ib();
 
@@ -1154,7 +1106,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// PSLLD UdqIb — shift left logical dwords by imm8
     pub(super) fn pslld_udq_ib(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let mut op = self.read_xmm_reg(instr.dst());
         let shift = instr.ib();
 
@@ -1171,7 +1122,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// PSLLQ UdqIb — shift left logical qwords by imm8
     pub(super) fn psllq_udq_ib(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let mut op = self.read_xmm_reg(instr.dst());
         let shift = instr.ib();
 
@@ -1196,7 +1146,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// PUNPCKLBW VdqWdq — unpack and interleave low bytes
     /// dst[0]=dst_orig[0], dst[1]=src[0], dst[2]=dst_orig[1], dst[3]=src[1], ...
     pub(super) fn punpcklbw_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm(instr)?;
 
@@ -1211,7 +1160,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// PUNPCKLWD VdqWdq — unpack and interleave low words
     pub(super) fn punpcklwd_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm(instr)?;
 
@@ -1226,7 +1174,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// PUNPCKLDQ VdqWdq — unpack and interleave low dwords
     pub(super) fn punpckldq_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm(instr)?;
 
@@ -1241,7 +1188,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// PUNPCKLQDQ VdqWdq — unpack and interleave low qwords
     pub(super) fn punpcklqdq_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm(instr)?;
 
@@ -1259,7 +1205,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// PUNPCKHBW VdqWdq — unpack and interleave high bytes
     pub(super) fn punpckhbw_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm(instr)?;
 
@@ -1274,7 +1219,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// PUNPCKHWD VdqWdq — unpack and interleave high words
     pub(super) fn punpckhwd_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm(instr)?;
 
@@ -1289,7 +1233,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// PUNPCKHDQ VdqWdq — unpack and interleave high dwords
     pub(super) fn punpckhdq_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm(instr)?;
 
@@ -1304,7 +1247,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// PUNPCKHQDQ VdqWdq — unpack and interleave high qwords
     pub(super) fn punpckhqdq_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm(instr)?;
 
@@ -1349,7 +1291,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// EXTRQ Udq, Ib, Ib2 (66 0F 78 /0 ib ib) — extract the field `Ib` bits
     /// long at bit `Ib2` of the register's low quadword into its low bits.
     pub(super) fn extrq_udq_ib_ib(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let source = self.read_xmm_reg(instr.dst()).xmm64u(0);
         self.write_xmm_lo_qword(instr.dst(), xmm_extrq(source, instr.ib2(), instr.ib()));
         Ok(())
@@ -1358,7 +1299,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// EXTRQ Vdq, Uq (66 0F 79 /r) — as above, with the length in bits 5:0
     /// and the position in bits 13:8 of the source register.
     pub(super) fn extrq_vdq_uq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let control = self.read_xmm_reg(instr.src1()).xmm16u(0);
         let source = self.read_xmm_reg(instr.dst()).xmm64u(0);
         let extracted = xmm_extrq(source, (control >> 8) as u8, control as u8);
@@ -1369,7 +1309,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// INSERTQ Vdq, Uq, Ib, Ib2 (F2 0F 78 /r ib ib) — insert the source's low
     /// `Ib` bits into the destination's low quadword at bit `Ib2`.
     pub(super) fn insertq_vdq_uq_ib_ib(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let destination = self.read_xmm_reg(instr.dst()).xmm64u(0);
         let source = self.read_xmm_reg(instr.src1()).xmm64u(0);
         let inserted = xmm_insertq(destination, source, instr.ib2(), instr.ib());
@@ -1380,7 +1319,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// INSERTQ Vdq, Udq (F2 0F 79 /r) — as above, with the length in byte 8
     /// and the position in byte 9 of the source register.
     pub(super) fn insertq_vdq_udq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let source = self.read_xmm_reg(instr.src1());
         let destination = self.read_xmm_reg(instr.dst()).xmm64u(0);
         let inserted =
@@ -1396,7 +1334,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// PSHUFD VdqWdqIb — shuffle dwords by imm8
     /// Each 2-bit field in imm8 selects one of the 4 source dwords.
     pub(super) fn pshufd_vdq_wdq_ib(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op = self.sse_read_op2_xmm(instr)?;
         let order = instr.ib();
 
@@ -1412,7 +1349,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// PSHUFHW VdqWdqIb — shuffle high words by imm8
     /// Low qword is copied unchanged; high 4 words are shuffled by imm8.
     pub(super) fn pshufhw_vdq_wdq_ib(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op = self.sse_read_op2_xmm(instr)?;
         let order = instr.ib();
 
@@ -1431,7 +1367,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// PSHUFLW VdqWdqIb — shuffle low words by imm8
     /// High qword is copied unchanged; low 4 words are shuffled by imm8.
     pub(super) fn pshuflw_vdq_wdq_ib(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op = self.sse_read_op2_xmm(instr)?;
         let order = instr.ib();
 
@@ -1453,7 +1388,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// PINSRW VdqEwIb — insert word at position specified by imm8 & 7
     pub(super) fn pinsrw_vdq_ew_ib(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let mut op1 = self.read_xmm_reg(instr.dst());
         let op2 = if instr.mod_c0() {
             self.get_gpr16(instr.src1().into())
@@ -1470,7 +1404,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// PEXTRW GdUdqIb — extract word at position specified by imm8 & 7 to GPR32
     pub(super) fn pextrw_gd_udq_ib(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op = self.read_xmm_reg(instr.src1());
         let result = op.xmm16u((instr.ib() & 7) as usize) as u32;
         self.set_gpr32(instr.dst().into(), result);
@@ -1491,7 +1424,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// PEXTRB EdVdqIbR — extract byte from XMM at imm8 & 0xF position to GPR32
     /// (register form). Bochs sse.cc `PEXTRB_EdVdqIbR`.
     pub(super) fn pextrb_ed_vdq_ib_r(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op = self.read_xmm_reg(instr.src1());
         let result = op.xmmubyte((instr.ib() & 0xF) as usize) as u32;
         self.set_gpr32(instr.dst().into(), result);
@@ -1501,7 +1433,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// PEXTRB MbVdqIbM — extract byte from XMM at imm8 & 0xF position to memory
     /// (memory form). Bochs sse.cc `PEXTRB_MbVdqIbM`.
     pub(super) fn pextrb_mb_vdq_ib_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op = self.read_xmm_reg(instr.src1());
         let result = op.xmmubyte((instr.ib() & 0xF) as usize);
         let seg = BxSegregs::from(instr.seg());
@@ -1514,7 +1445,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// (66 0F 3A 15 /r ib, register destination). Bochs `PEXTRW_EdVdqIbR`
     /// zero-extends the word into the full 32-bit register.
     pub(super) fn pextrw_ed_vdq_ib_r(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op = self.read_xmm_reg(instr.src1());
         let result = u32::from(op.xmm16u((instr.ib() & 0x7) as usize));
         self.set_gpr32(instr.dst().into(), result);
@@ -1524,7 +1454,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// PEXTRW MwVdqIbM — extract word from XMM at imm8 & 7 to memory
     /// (66 0F 3A 15 /r ib, memory destination). Bochs `PEXTRW_MwVdqIbM`.
     pub(super) fn pextrw_mw_vdq_ib_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op = self.read_xmm_reg(instr.src1());
         let result = op.xmm16u((instr.ib() & 0x7) as usize);
         let seg = BxSegregs::from(instr.seg());
@@ -1537,7 +1466,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// R/M form). Bochs sse.cc `PEXTRD_EdVdqIbR` / `PEXTRD_EdVdqIbM`, which
     /// EXTRACTPS shares.
     pub(super) fn pextrd_ed_vdq_ib(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op = self.read_xmm_reg(instr.src1());
         let result = op.xmm32u((instr.ib() & 3) as usize);
         if instr.mod_c0() {
@@ -1553,7 +1481,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// PEXTRQ EqVdqIb — extract qword from XMM at imm8 & 1 position (combined
     /// R/M form). Bochs sse.cc `PEXTRQ_EqVdqIbR` / `PEXTRQ_EqVdqIbM`.
     pub(super) fn pextrq_eq_vdq_ib(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op = self.read_xmm_reg(instr.src1());
         let result = op.xmm64u((instr.ib() & 1) as usize);
         if instr.mod_c0() {
@@ -1568,7 +1495,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// PINSRB VdqEbIb — insert byte from GPR/memory into XMM at imm8 & 0xF position (combined R/M)
     pub(super) fn pinsrb_vdq_eb_ib(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let mut op1 = self.read_xmm_reg(instr.dst());
         let op2 = if instr.mod_c0() {
             // BX_READ_8BIT_REGL — always low byte, never AH/CH/DH/BH
@@ -1585,7 +1511,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// PINSRD VdqEdIb — insert dword from GPR/memory into XMM at imm8 & 3 position (combined R/M)
     pub(super) fn pinsrd_vdq_ed_ib(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let mut op1 = self.read_xmm_reg(instr.dst());
         let op2 = if instr.mod_c0() {
             self.get_gpr32(instr.src1().into())
@@ -1601,7 +1526,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// PINSRQ VdqEqIb — insert qword from GPR/memory into XMM at imm8 & 1 position (combined R/M)
     pub(super) fn pinsrq_vdq_eq_ib(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let mut op1 = self.read_xmm_reg(instr.dst());
         let op2 = if instr.mod_c0() {
             self.get_gpr64(instr.src1().into())
@@ -1621,7 +1545,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// PMINUB VdqWdq — packed minimum unsigned bytes
     pub(super) fn pminub_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm(instr)?;
 
@@ -1635,7 +1558,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// PMAXUB VdqWdq — packed maximum unsigned bytes
     pub(super) fn pmaxub_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm(instr)?;
 
@@ -1649,7 +1571,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// PMINSW VdqWdq — packed minimum signed words
     pub(super) fn pminsw_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm(instr)?;
 
@@ -1663,7 +1584,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// PMAXSW VdqWdq — packed maximum signed words
     pub(super) fn pmaxsw_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm(instr)?;
 
@@ -1732,7 +1652,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// PMOVMSKB GdUdq — move byte mask: collect sign bits of 16 bytes into GPR32
     pub(super) fn pmovmskb_gd_udq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op = self.read_xmm_reg(instr.src1());
         let mut mask = 0u32;
         for i in 0..16 {
@@ -1747,7 +1666,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// PSADBW VdqWdq — sum of absolute differences
     /// Computes SAD for low 8 bytes -> result qword 0, high 8 bytes -> result qword 1.
     pub(super) fn psadbw_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm(instr)?;
 
@@ -1772,8 +1690,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// from the source XMM register to memory at [DS:(E/R)DI].
     /// Bochs: sse_move.cc MASKMOVDQU_VdqUdq
     pub(super) fn maskmovdqu_vdq_udq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-
         let op = self.read_xmm_reg(instr.dst()); // nnn = Vdq (data source)
         let mask = self.read_xmm_reg(instr.src1()); // rm = Udq (mask)
 
@@ -1829,7 +1745,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// PSHUFB VdqWdq (66 0F 38 00) - Packed Shuffle Bytes (128-bit)
     /// Bochs: PSHUFB_VdqWdqR / xmm_pshufb (simd_int.h)
     pub(super) fn pshufb_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm(instr)?;
 
@@ -1906,7 +1821,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// PALIGNR VdqWdqIb (66 0F 3A 0F) - Packed Align Right (128-bit)
     /// Bochs: PALIGNR_VdqWdqIbR / xmm_palignr (simd_int.h)
     pub(super) fn palignr_vdq_wdq_ib(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm(instr)?;
         let shift = instr.ib();
@@ -1969,7 +1883,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// Bochs: PBLENDVB_VdqWdqR / xmm_pblendvb (simd_int.h)
     /// Implicit mask register: XMM0
     pub(super) fn pblendvb_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let mut op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm(instr)?;
         let mask = self.read_xmm_reg(0); // XMM0 is implicit mask
@@ -1982,7 +1895,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// PABSB VdqWdq (66 0F 38 1C) — Packed Absolute Value Bytes
     /// Bochs: HANDLE_SSE_1OP<xmm_pabsb> (simd_int.h)
     pub(super) fn pabsb_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let mut op = self.sse_read_op2_xmm(instr)?;
         pabsb_lane(&mut op);
         self.write_xmm_reg_lo128(instr.dst(), op);
@@ -1992,7 +1904,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// PABSW VdqWdq (66 0F 38 1D) — Packed Absolute Value Words
     /// Bochs: HANDLE_SSE_1OP<xmm_pabsw> (simd_int.h)
     pub(super) fn pabsw_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let mut op = self.sse_read_op2_xmm(instr)?;
         pabsw_lane(&mut op);
         self.write_xmm_reg_lo128(instr.dst(), op);
@@ -2002,7 +1913,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// PABSD VdqWdq (66 0F 38 1E) — Packed Absolute Value Dwords
     /// Bochs: HANDLE_SSE_1OP<xmm_pabsd> (simd_int.h)
     pub(super) fn pabsd_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let mut op = self.sse_read_op2_xmm(instr)?;
         pabsd_lane(&mut op);
         self.write_xmm_reg_lo128(instr.dst(), op);
@@ -2012,7 +1922,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// MPSADBW VdqWdqIb (66 0F 3A 42) — Multiple Sums of Absolute Differences
     /// Bochs: MPSADBW_VdqWdqIbR via simd_int.h xmm_mpsadbw
     pub(super) fn mpsadbw_vdq_wdq_ib(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm(instr)?;
         let result = mpsadbw_lane(&op1, &op2, instr.ib());
@@ -2023,7 +1932,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// PHMINPOSUW VdqWdq (66 0F 38 41) — Horizontal Minimum of Unsigned Words
     /// Bochs: PHMINPOSUW_VdqWdqR (sse.cc)
     pub(super) fn phminposuw_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op = self.sse_read_op2_xmm(instr)?;
         let result = phminposuw_core(&op);
         self.write_xmm_reg_lo128(instr.dst(), result);
@@ -2033,7 +1941,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// INSERTPS VpsWssIb (66 0F 3A 21) — Insert Packed Single Precision
     /// Bochs: INSERTPS_VpsWssIbR / INSERTPS_VpsWssIbM (sse.cc)
     pub(super) fn insertps_vps_wss_ib(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let control = instr.ib();
         let op2 = if instr.mod_c0() {
             // Register form: imm[7:6] selects the source dword
@@ -2054,7 +1961,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// Bochs: PTEST_VdqWdqR (sse.cc)
     /// Sets ZF if (op2 AND op1) == 0, CF if (op2 AND NOT op1) == 0
     pub(super) fn ptest_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm(instr)?;
 
@@ -2072,7 +1978,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// PMULDQ VdqWdq (66 0F 38 28) - Multiply Packed Signed Dword to Qword
     /// Bochs: HANDLE_SSE_2OP<xmm_pmuldq> / simd_int.h
     pub(super) fn pmuldq_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm(instr)?;
 
@@ -2086,7 +1991,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// PMINUD VdqWdq (66 0F 38 3B) - Minimum of Packed Unsigned Dwords
     /// Bochs: HANDLE_SSE_2OP<xmm_pminud> / simd_int.h
     pub(super) fn pminud_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let mut op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm(instr)?;
 
@@ -2102,7 +2006,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// PMAXUD VdqWdq (66 0F 38 3F) - Maximum of Packed Unsigned Dwords
     /// Bochs: HANDLE_SSE_2OP<xmm_pmaxud> / simd_int.h
     pub(super) fn pmaxud_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let mut op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm(instr)?;
 
@@ -2118,7 +2021,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// PMULLD VdqWdq (66 0F 38 40) - Multiply Packed Signed Dword, Low Result
     /// Bochs: HANDLE_SSE_2OP<xmm_pmulld> / simd_int.h
     pub(super) fn pmulld_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let mut op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm(instr)?;
 
@@ -2132,7 +2034,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// PBLENDW VdqWdqIb (66 0F 3A 0E) - Blend Packed Words
     /// Bochs: PBLENDW_VdqWdqIbR / xmm_pblendw (simd_int.h)
     pub(super) fn pblendw_vdq_wdq_ib(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let mut op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm(instr)?;
         let mut mask = instr.ib() as u32;
@@ -2150,7 +2051,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// BLENDPS VpsWpsIb (66 0F 3A 0C) - Blend Packed Single-FP by immediate
     /// Bochs: BLENDPS_VpsWpsIbR / xmm_blendps (simd_int.h)
     pub(super) fn blendps_vps_wps_ib(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let mut op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm(instr)?;
         blendps_lane(&mut op1, &op2, instr.ib());
@@ -2161,7 +2061,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// BLENDPD VpdWpdIb (66 0F 3A 0D) - Blend Packed Double-FP by immediate
     /// Bochs: BLENDPD_VpdWpdIbR / xmm_blendpd (simd_int.h)
     pub(super) fn blendpd_vpd_wpd_ib(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let mut op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm(instr)?;
         blendpd_lane(&mut op1, &op2, instr.ib());
@@ -2173,7 +2072,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// Bochs: BLENDVPS_VpsWpsR / xmm_blendvps (simd_int.h)
     /// Implicit mask register: XMM0 (sign bit of each dword lane)
     pub(super) fn blendvps_vps_wps(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let mut op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm(instr)?;
         let mask = self.read_xmm_reg(0); // XMM0 is implicit mask
@@ -2186,7 +2084,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// Bochs: BLENDVPD_VpdWpdR / xmm_blendvpd (simd_int.h)
     /// Implicit mask register: XMM0 (sign bit of each qword lane)
     pub(super) fn blendvpd_vpd_wpd(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let mut op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm(instr)?;
         let mask = self.read_xmm_reg(0); // XMM0 is implicit mask

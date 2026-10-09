@@ -2055,7 +2055,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             Opcode::Fnclex => self.fnclex(instr),
             Opcode::Fnop => self.fnop(instr),
             Opcode::Fplegacy => self.fplegacy(instr),
-            Opcode::Fpuesc | Opcode::Fwait => Ok(()),
+            Opcode::Fwait => self.fwait(instr),
+            // Bochs fpu_emu.cc `FPU_ESC`: an x87 escape with no FPU behind it
+            // does nothing once the state gate has let it through.
+            Opcode::Fpuesc => Ok(()),
             Opcode::Fldcw => self.fldcw(instr),
             Opcode::Fnstcw => self.fnstcw(instr),
             Opcode::Fnstsw => self.fnstsw(instr),
@@ -3050,9 +3053,13 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             }
 
             // The instruction decoded fine but needs CPU state the guest has
-            // not enabled. `state_resolve_opcode` substituted these at icache
-            // fill, exactly as Bochs assignHandler substitutes BxNoAVX /
-            // BxNoEVEX; the handlers pick #UD or #NM from the actual reason.
+            // not enabled. `assign_handler` substituted these at icache fill,
+            // exactly as Bochs assignHandler substitutes BxNoFPU /
+            // BxNoMMX / BxNoSSE / BxNoAVX / BxNoEVEX; the handlers pick #UD or
+            // #NM from the actual reason.
+            Opcode::NoFpuState => self.bx_no_fpu(instr),
+            Opcode::NoMmxState => self.bx_no_mmx(instr),
+            Opcode::NoSseState => self.bx_no_sse(instr),
             Opcode::NoAvxState => self.bx_no_avx(instr),
             Opcode::NoEvexState => self.bx_no_evex(instr),
 

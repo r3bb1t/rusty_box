@@ -12,10 +12,10 @@
 //! rusty_box applies the same gate at icache fill: `state_resolve_opcode`
 //! (cpu/decoder/mod.rs) reads the generated `opcode_isa::opcode_state` and
 //! turns a `CpuState::Avx` opcode into `NoAvxState` while AVX state is
-//! unavailable. A handler's own `prepare_sse()` tests CR0.EM, CR4.OSFXSR and
-//! CR0.TS, never CR4.OSXSAVE or XCR0, so it is the icache-fill gate that
-//! keeps an OS which has not enabled AVX state from running AVX instructions
-//! whose YMM results it would never save or restore.
+//! unavailable. The legacy SSE state CR4.OSFXSR names is a different state:
+//! it says nothing about CR4.OSXSAVE or XCR0, so it is the AVX gate that keeps
+//! an OS which has not enabled AVX state from running AVX instructions whose
+//! YMM results it would never save or restore.
 //!
 //! The fixture below sets CR4.OSXSAVE but leaves XCR0 at its reset value, a
 //! configuration in which every `BX_PREPARE_AVX` instruction #UDs.
@@ -26,52 +26,18 @@
 
 #![cfg(feature = "std")]
 
-use rusty_box::cpu::{CpuSetupMode, X86Reg};
+mod state_gate;
+
+use rusty_box::cpu::X86Reg;
 use rusty_box::emulator::{Emulator, EmulatorConfig};
-
-const TEST_STACK_SIZE: usize = 64 * 1024 * 1024;
-const CODE: u64 = 0x0020_0000;
-const IDT: u64 = 0x0028_0000;
-const STACK: u64 = 0x0030_0000;
-
-/// An IDT gate, and the one-instruction handler (`HLT`) it points at. Where
-/// the processor halts says which fault it took.
-struct Gate {
-    vector: u64,
-    handler: u64,
-}
-
-const UD_GATE: Gate = Gate {
-    vector: 6,
-    handler: 0x0029_0000,
-};
-const NM_GATE: Gate = Gate {
-    vector: 7,
-    handler: 0x0029_0010,
-};
-
-/// What one instruction did, as the guest sees it (doctrine R9). The
-/// machine's exception counters exist only in debug builds, so these tests
-/// read the processor's state instead, which holds under `--release` too.
-#[derive(Debug, PartialEq, Eq)]
-enum Outcome {
-    /// It retired, and the processor went on to the next instruction.
-    Retired,
-    /// It raised #UD: the processor entered the #UD handler with the
-    /// instruction's own address on its stack.
-    InvalidOpcode,
-    /// It raised #NM, the same way.
-    DeviceNotAvailable,
-}
+use state_gate::{long64_emulator, run_one, Outcome, CODE, TEST_STACK_SIZE};
 
 /// A CPU with SSE fully enabled and AVX state deliberately *not* enabled:
 /// CR4.OSFXSR and CR4.OSXSAVE are set, but no XSETBV runs, so XCR0 keeps its
-/// reset value of 1 (x87 only). `prepare_sse` is satisfied here; `prepare_avx`
-/// — and Bochs's `BxNoAVX` — are not.
+/// reset value of 1 (x87 only). The SSE state gate is satisfied here; the AVX
+/// one — Bochs's `BxNoAVX` — is not.
 fn avx_state_disabled_emulator() -> Box<Emulator> {
-    let cfg = EmulatorConfig::default();
-    let mut emu =
-        Emulator::new_with_mode(cfg, CpuSetupMode::FlatLong64).expect("emulator");
+    let mut emu = long64_emulator(EmulatorConfig::default());
     emu.reg_write(
         X86Reg::Cr4,
         emu.reg_read(X86Reg::Cr4) | (1 << 9) | (1 << 18),
@@ -90,68 +56,6 @@ fn avx_state_enabled_emulator() -> Box<Emulator> {
     emu.emu_start(CODE, Some(CODE + 3), None, Some(1))
         .expect("enable AVX state");
     emu
-}
-
-/// Point the #UD and #NM gates at their handlers.
-fn install_fault_handlers(emu: &mut Emulator) {
-    emu.reg_write(X86Reg::IdtrBase, IDT);
-    emu.reg_write(X86Reg::IdtrLimit, 256 * 16 - 1);
-    for gate in [&UD_GATE, &NM_GATE] {
-        let mut entry = [0u8; 16];
-        entry[0..2].copy_from_slice(&(gate.handler as u16).to_le_bytes());
-        entry[2..4].copy_from_slice(&0x0008u16.to_le_bytes());
-        entry[5] = 0x8E; // present, DPL 0, 64-bit interrupt gate
-        entry[6..8].copy_from_slice(&((gate.handler >> 16) as u16).to_le_bytes());
-        entry[8..12].copy_from_slice(&((gate.handler >> 32) as u32).to_le_bytes());
-        emu.mem_write(IDT + gate.vector * 16, &entry)
-            .expect("write the gate");
-        emu.mem_write(gate.handler, &[0xF4]).expect("write the handler");
-    }
-}
-
-/// Run one encoding and report what the guest saw. A fault leaves exactly one
-/// long-mode exception frame — SS, RSP, RFLAGS, CS and RIP, since neither #UD
-/// nor #NM pushes an error code — whose RIP is the instruction itself.
-fn run_one(emu: &mut Emulator, code: &[u8]) -> Outcome {
-    install_fault_handlers(emu);
-    let mut image = code.to_vec();
-    image.extend_from_slice(&[0xEB, 0xFE]); // jmp $
-    emu.mem_write(CODE, &image).expect("write code");
-    emu.reg_write(X86Reg::Rsp, STACK);
-    let stop = emu.emu_start(CODE, None, None, Some(8)).expect("emu_start");
-    let rip = emu.cpu().rip();
-    let outcome = if rip == CODE + code.len() as u64 {
-        Outcome::Retired
-    } else if rip == UD_GATE.handler + 1 {
-        Outcome::InvalidOpcode
-    } else if rip == NM_GATE.handler + 1 {
-        Outcome::DeviceNotAvailable
-    } else {
-        panic!("the instruction neither retired nor took #UD or #NM: rip={rip:#x}, stop={stop:?}");
-    };
-    match outcome {
-        Outcome::Retired => assert_eq!(
-            emu.reg_read(X86Reg::Rsp),
-            STACK,
-            "a retired instruction pushes nothing"
-        ),
-        Outcome::InvalidOpcode | Outcome::DeviceNotAvailable => {
-            assert_eq!(
-                emu.reg_read(X86Reg::Rsp),
-                STACK - 40,
-                "a fault pushes exactly one exception frame"
-            );
-            let mut pushed_rip = [0u8; 8];
-            emu.mem_read(STACK - 40, &mut pushed_rip)
-                .expect("read the frame");
-            assert_eq!(
-                u64::from_le_bytes(pushed_rip),
-                CODE,
-                "the frame's RIP must be the faulting instruction"
-            );
-        }
-    }
-    outcome
 }
 
 /// Each of these instructions #UDs while XCR0 has not enabled AVX state: the
@@ -200,9 +104,9 @@ fn vex_encodings_ud_when_guest_has_not_enabled_avx_state() {
                 ("vpslldq_imm", &[0xC5, 0xF9, 0x73, 0xF9, 0x04]),
                 // VPSRAW xmm0, xmm1, 4        C5 F9 71 /4
                 ("vpsraw_imm", &[0xC5, 0xF9, 0x71, 0xE1, 0x04]),
-                // Handlers that still gate on SSE internally. They are covered
-                // by the icache-fill state gate rather than by their own
-                // prepare_* call, so they exercise the central path.
+                // No handler checks CPU state itself, so only the icache-fill
+                // state gate stands between these and a guest without AVX
+                // state.
                 // VPADDB xmm0, xmm1, xmm2     VEX.128.66.0F.W0 FC /r
                 ("vpaddb", &[0xC5, 0xF1, 0xFC, 0xC2]),
                 // VMPSADBW ymm0, ymm1, ymm2, 0  VEX.256.66.0F3A.W0 42 /r ib

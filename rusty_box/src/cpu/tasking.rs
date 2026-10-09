@@ -427,6 +427,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
         self.sregs[BxSegregs::Fs as usize].cache.valid = 0;
         self.sregs[BxSegregs::Gs as usize].cache.valid = 0;
 
+        // Step 9 set CR0.TS, which gates x87, MMX, SSE and AVX state through
+        // `fetch_mode_mask` (Bochs tasking.cc task_switch: "CR0.TS changes").
+        self.handle_fpu_mmx_mode_change();
+        self.handle_sse_mode_change();
+        self.handle_avx_mode_change();
+
         // ─── Segment descriptor validation (Bochs tasking.cc) ───
 
         // Temporarily set CPL to 3 so that privilege level change and stack switch

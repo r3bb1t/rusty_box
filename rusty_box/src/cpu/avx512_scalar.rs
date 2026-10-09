@@ -921,10 +921,6 @@ mod tests {
             crate::cpu::exec_ctx::TestMachine::with_model(crate::cpu::CpuModel::amd_ryzen());
         let mut c = machine.ctx();
         c.mxcsr.mxcsr = MXCSR_RESET;
-        // The signed float -> GPR forms route to the legacy handlers, which
-        // begin with prepare_sse(); a builder-made CPU has CR4.OSFXSR clear,
-        // so without this they raise #UD before converting anything.
-        c.cr4.insert(crate::cpu::crregs::BxCr4::OSFXSR);
 
         // 3e9 exceeds i32::MAX but fits a u32, so the signed form saturates to
         // the integer indefinite value while the unsigned one converts.

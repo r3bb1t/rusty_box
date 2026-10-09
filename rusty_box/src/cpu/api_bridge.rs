@@ -1382,7 +1382,7 @@ mod tests {
     use crate::cpu::crregs::{BxCr0, BxCr4, BxEfer};
     use crate::cpu::exec_ctx::{ExecCtx, TestMachine};
     use crate::cpu::msr::{BX_MSR_EFER, BX_MSR_IA32_APERF, BX_MSR_IA32_MPERF, BX_MSR_TSC_DEADLINE};
-    use crate::cpu::opcodes_table::FetchModeMask;
+    use crate::cpu::fetch_mode::FetchModeMask;
     use crate::cpu::ResetReason;
 
     /// CR0.TS and CR0.EM are what make x87, MMX and SSE unavailable. A host

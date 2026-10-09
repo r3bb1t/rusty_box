@@ -59,18 +59,36 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     // FPU_check_pending_exceptions  (from fpu.cc)
     // -----------------------------------------------------------------------
 
-    /// Check if unmasked FPU exceptions are pending and, if CR0.NE=1,
-    /// raise #MF (exception 16).
+    /// Bochs ferr.cc `FPU_check_pending_exceptions`: an unmasked x87
+    /// exception the unit is holding (status word ES) raises #MF when CR0.NE
+    /// selects native error reporting.
     ///
-    /// In MSDOS-compatibility mode (NE=0) we just log a warning.
+    /// With CR0.NE = 0 (MS-DOS compatible reporting) Bochs instead asserts
+    /// FERR# — IRQ 13 through `DEV_extfpuirq_set_fpu_error` — unless IGNNE#
+    /// is asserted, and parks the processor in `BX_ACTIVITY_WAIT_FOR_X87`.
+    /// This port models neither yet, so it says what Bochs would do — once per
+    /// processor as a warning, every time after at debug level, since the
+    /// condition repeats on each x87 instruction until the guest clears ES —
+    /// and lets the instruction continue.
     pub fn fpu_check_pending_exceptions(&mut self) -> super::super::Result<()> {
+        const FERR_REPORTED: u8 = 1 << 2;
         if (self.the_i387.get_partial_status() & FPU_SW_SUMMARY) != 0 {
-            // CR0.NE is bit 5
             if self.cr0.ne() {
-                // Native FPU error reporting — raise #MF
                 return self.exception(Exception::Mf, 0u16);
+            }
+            if (self.boot_debug_flags & FERR_REPORTED) == 0 {
+                self.boot_debug_flags |= FERR_REPORTED;
+                tracing::warn!(
+                    "x87 exception pending at RIP={:#x} with CR0.NE=0: Bochs asserts FERR# \
+                     (IRQ 13) and waits for the x87 here (ferr.cc \
+                     FPU_check_pending_exceptions); not modelled, so the instruction continues",
+                    self.prev_rip
+                );
             } else {
-                tracing::debug!("math_abort: MSDOS compatibility FPU exception");
+                tracing::debug!(
+                    "x87 exception pending at RIP={:#x} with CR0.NE=0: FERR# not modelled",
+                    self.prev_rip
+                );
             }
         }
         Ok(())

@@ -28,7 +28,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     /// and consults each CPU's own `ia_extensions_bitmask` instead. Same
     /// observable behaviour, no shared mutable state.
     ///
-    /// Called from the icache fill path, so the dispatch loop pays nothing.
+    /// Called from `assign_handler` (cpu/icache.rs) at trace fill, so the
+    /// dispatch loop pays nothing.
     pub(in crate::cpu) fn isa_resolve_opcode(&self, opcode: Opcode) -> Opcode {
         let feature = rusty_box_decoder::opcode_isa::opcode_isa_feature(opcode);
         if feature == rusty_box_decoder::opcode_isa::ISA_ALWAYS {
@@ -92,36 +93,41 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     ///
     /// Bochs tags each instruction with the state it needs — the `BX_PREPARE_*`
     /// field of `bx_define_opcode` — and `assignHandler`
-    /// (`cpu/decoder/fetchdecode32.cc`) swaps the handler for `BxNoAVX` or
-    /// `BxNoEVEX` when the matching `BX_FETCH_MODE_*_OK` bit is clear. Those
-    /// handlers raise #UD when the state is unavailable and #NM when CR0.TS is
-    /// set, which is why this returns a sentinel opcode rather than
-    /// [`Opcode::IaError`]: only the handler can tell the two faults apart.
+    /// (`cpu/decoder/fetchdecode32.cc`) swaps the handler for `BxNoFPU`,
+    /// `BxNoMMX`, `BxNoSSE`, `BxNoAVX` or `BxNoEVEX` when the matching
+    /// `BX_FETCH_MODE_*_OK` bit is clear. Those handlers raise #UD when the
+    /// state is unavailable and #NM when CR0.TS is set, which is why this
+    /// returns a sentinel opcode rather than [`Opcode::IaError`]: only the
+    /// handler can tell the two faults apart.
     ///
-    /// Applied at icache fill next to [`Self::isa_resolve_opcode`], so the
+    /// Its one caller is `assign_handler` (cpu/icache.rs), which both trace-fill
+    /// paths go through, so that is the one place the state is checked (R5).
+    /// No instruction handler repeats it — Bochs's do not either — so a handler
+    /// shared between a legacy SSE encoding and its VEX or EVEX form is gated by
+    /// whichever class the decoded opcode carries, and never by the other's.
+    ///
+    /// Applied at icache fill, after [`Self::isa_resolve_opcode`], so the
     /// dispatch loop pays nothing. That is sound because the icache is keyed on
-    /// `fetch_mode_mask` (see `BxICache::hash`), so a trace decoded while AVX
-    /// was disabled cannot be reused after the guest enables it.
-    ///
-    /// Only [`CpuState::Avx`] and [`CpuState::Evex`] are resolved here; the
-    /// match below says what happens to the rest and why.
-    ///
-    /// [`CpuState::Avx`]: rusty_box_decoder::opcode_isa::CpuState::Avx
-    /// [`CpuState::Evex`]: rusty_box_decoder::opcode_isa::CpuState::Evex
+    /// `fetch_mode_mask` (see `BxICache::hash`), so a trace decoded while a
+    /// state was disabled cannot be reused after the guest enables it — which
+    /// in turn holds only because every write of CR0.EM/TS, CR4.OSFXSR,
+    /// CR4.OSXSAVE and XCR0 recomputes the mask.
     pub(in crate::cpu) fn state_resolve_opcode(&self, opcode: Opcode) -> Opcode {
-        use super::opcodes_table::FetchModeMask;
+        use super::fetch_mode::FetchModeMask;
         use rusty_box_decoder::opcode_isa::{opcode_state, CpuState};
 
         // Deliberately exhaustive, with no catch-all arm: a new `CpuState`
         // must be considered here rather than silently inheriting "ungated".
+        // The order of Bochs's checks does not matter: each opcode carries
+        // exactly one class.
         let (required, fault) = match opcode_state(opcode) {
+            CpuState::Fpu => (FetchModeMask::FPU_MMX_OK, Opcode::NoFpuState),
+            CpuState::Mmx => (FetchModeMask::FPU_MMX_OK, Opcode::NoMmxState),
+            CpuState::Sse => (FetchModeMask::SSE_OK, Opcode::NoSseState),
             CpuState::Avx => (FetchModeMask::AVX_OK, Opcode::NoAvxState),
             CpuState::Evex => (FetchModeMask::EVEX_OK, Opcode::NoEvexState),
 
-            // Enforced inside the handlers by `prepare_fpu` / `prepare_sse`,
-            // which is correct for them because those handlers are also reached
-            // from legacy encodings that need exactly that check.
-            CpuState::Base | CpuState::Fpu | CpuState::Mmx | CpuState::Sse => return opcode,
+            CpuState::Base => return opcode,
 
             // AMX is not implemented; its opcodes never survive the ISA gate,
             // so there is no state to check.

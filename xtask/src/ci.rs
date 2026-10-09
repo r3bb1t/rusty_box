@@ -275,7 +275,10 @@ const BLANKET_DEAD_CODE_BASELINES: &[(&str, usize)] = &[
     // 68 -> 67: `cpu/msr.rs` no longer hides its own dead code. The MSR
     // descriptor table names every constant the dispatch answers, and the
     // three with no remaining caller are gone.
-    ("rusty_box/src", 67),
+    // 67 -> 66: `cpu/opcodes_table.rs` is gone. Its handler table and wrappers
+    // were reached only from an `assign_handler` nothing called; the fetch-mode
+    // bits it also held live in `cpu/fetch_mode.rs`, which hides nothing.
+    ("rusty_box/src", 66),
     // `decoder/tables.rs` names `dead_code`; the three opcode maps (`opmap.rs`,
     // `opmap_0f38.rs`, `opmap_0f3a.rs`) switch it off through `unused`.
     ("rusty_box_decoder/src", 4),

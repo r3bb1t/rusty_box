@@ -20,8 +20,8 @@ syncing `cpp_orig/bochs/` or after adding `Opcode` / `X86Feature` variants. In
 `rusty_box_decoder/src/tests.rs`, `opcode_isa_table_is_in_sync_with_the_opcode_enum`
 fails when the file no longer covers the enum (`OPCODE_VARIANT_COUNT`), and
 `opcode_isa_counts_are_pinned_to_the_reference_build` fails when a
-regeneration moves `GATED_OPCODE_COUNT`, `EVEX_FLAGGED_OPCODE_COUNT`,
-`STATE_AVX_OPCODE_COUNT` or `STATE_EVEX_OPCODE_COUNT`.
+regeneration moves `GATED_OPCODE_COUNT`, `EVEX_FLAGGED_OPCODE_COUNT` or one of
+the `STATE_*_OPCODE_COUNT`s.
 """
 
 import re
@@ -54,9 +54,13 @@ PREPARE_NAMES = {
 KNOWN_UNMATCHED = {
     # Substituted by the icache fill path when the guest has not enabled the
     # CPU state the decoded instruction needs. Bochs expresses the same thing
-    # as a handler swap to BxNoAVX / BxNoEVEX, so there is no BX_IA_* to match.
+    # as a handler swap to BxNoFPU / BxNoMMX / BxNoSSE / BxNoAVX / BxNoEVEX,
+    # so there is no BX_IA_* to match.
     "NoAvxState",
     "NoEvexState",
+    "NoFpuState",
+    "NoMmxState",
+    "NoSseState",
 }
 
 # Opcodes whose rusty name does not normalise to their Bochs name. Bochs's
@@ -465,8 +469,17 @@ def main():
         "    OPCODE_STATE[opcode as usize]",
         "}",
         "",
-        "/// Opcodes requiring AVX state, pinned by tests so a regeneration that",
-        "/// silently drops the gate is caught.",
+        "/// Opcodes requiring x87 state, pinned by tests so a regeneration that",
+        "/// silently drops the gate is caught. The same holds for each count below.",
+        f"pub const STATE_FPU_OPCODE_COUNT: usize = {prepare_counts.get(STATE_FPU, 0)};",
+        "",
+        "/// Opcodes requiring MMX state.",
+        f"pub const STATE_MMX_OPCODE_COUNT: usize = {prepare_counts.get(STATE_MMX, 0)};",
+        "",
+        "/// Opcodes requiring SSE state.",
+        f"pub const STATE_SSE_OPCODE_COUNT: usize = {prepare_counts.get(STATE_SSE, 0)};",
+        "",
+        "/// Opcodes requiring AVX state.",
         f"pub const STATE_AVX_OPCODE_COUNT: usize = {prepare_counts.get(STATE_AVX, 0)};",
         "",
         "/// Opcodes requiring AVX-512 state.",

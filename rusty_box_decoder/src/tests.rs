@@ -1296,10 +1296,23 @@ fn opcode_isa_table_is_in_sync_with_the_opcode_enum() {
 fn opcode_prepare_table_is_in_sync_with_the_opcode_enum() {
     use crate::opcode_isa::{
         opcode_state, CpuState, OPCODE_STATE, OPCODE_VARIANT_COUNT, STATE_AVX_OPCODE_COUNT,
-        STATE_EVEX_OPCODE_COUNT,
+        STATE_EVEX_OPCODE_COUNT, STATE_FPU_OPCODE_COUNT, STATE_MMX_OPCODE_COUNT,
+        STATE_SSE_OPCODE_COUNT,
     };
 
     assert_eq!(OPCODE_STATE.len(), OPCODE_VARIANT_COUNT);
+    assert_eq!(
+        OPCODE_STATE.iter().filter(|c| **c == CpuState::Fpu).count(),
+        STATE_FPU_OPCODE_COUNT
+    );
+    assert_eq!(
+        OPCODE_STATE.iter().filter(|c| **c == CpuState::Mmx).count(),
+        STATE_MMX_OPCODE_COUNT
+    );
+    assert_eq!(
+        OPCODE_STATE.iter().filter(|c| **c == CpuState::Sse).count(),
+        STATE_SSE_OPCODE_COUNT
+    );
     assert_eq!(
         OPCODE_STATE.iter().filter(|c| **c == CpuState::Avx).count(),
         STATE_AVX_OPCODE_COUNT
@@ -1313,6 +1326,11 @@ fn opcode_prepare_table_is_in_sync_with_the_opcode_enum() {
     assert_eq!(opcode_state(Opcode::VtestpsVpsWps), CpuState::Avx);
     assert_eq!(opcode_state(Opcode::V256VpaddbVdqHdqWdq), CpuState::Avx);
     assert_eq!(opcode_state(Opcode::PaddbVdqWdq), CpuState::Sse);
+    assert_eq!(opcode_state(Opcode::AesencVdqWdq), CpuState::Sse);
+    assert_eq!(opcode_state(Opcode::PaddbPqQq), CpuState::Mmx);
+    assert_eq!(opcode_state(Opcode::FLD1), CpuState::Fpu);
+    // FWAIT has no BX_PREPARE_*: it checks CR0.TS with CR0.MP itself.
+    assert_eq!(opcode_state(Opcode::Fwait), CpuState::Base);
 
     // VEX encoding does NOT imply AVX state: the BMI instructions are
     // VEX-encoded but operate on GPRs, and Bochs gives them
@@ -1323,6 +1341,9 @@ fn opcode_prepare_table_is_in_sync_with_the_opcode_enum() {
 
     // The fault sentinels must never be gated, or resolving one would
     // substitute another and loop.
+    assert_eq!(opcode_state(Opcode::NoFpuState), CpuState::Base);
+    assert_eq!(opcode_state(Opcode::NoMmxState), CpuState::Base);
+    assert_eq!(opcode_state(Opcode::NoSseState), CpuState::Base);
     assert_eq!(opcode_state(Opcode::NoAvxState), CpuState::Base);
     assert_eq!(opcode_state(Opcode::NoEvexState), CpuState::Base);
     assert_eq!(opcode_state(Opcode::IaError), CpuState::Base);
@@ -1350,8 +1371,8 @@ fn opcode_prepare_table_is_in_sync_with_the_opcode_enum() {
 }
 
 /// The opcode counts `scripts/gen_opcode_isa.py` writes into opcode_isa.rs
-/// (`GATED_OPCODE_COUNT`, `EVEX_FLAGGED_OPCODE_COUNT`, `STATE_AVX_OPCODE_COUNT`,
-/// `STATE_EVEX_OPCODE_COUNT`), pinned to what Bochs's ia_opcodes.def,
+/// (`GATED_OPCODE_COUNT`, `EVEX_FLAGGED_OPCODE_COUNT` and the
+/// `STATE_*_OPCODE_COUNT`s), pinned to what Bochs's ia_opcodes.def,
 /// ia_opcodes_evex.def and fetchdecode.h give against this enum. A
 /// regeneration that moves one must move it here too. `OPCODE_VARIANT_COUNT`
 /// is held to the enum by `opcode_isa_table_is_in_sync_with_the_opcode_enum`.
@@ -1359,7 +1380,8 @@ fn opcode_prepare_table_is_in_sync_with_the_opcode_enum() {
 fn opcode_isa_counts_are_pinned_to_the_reference_build() {
     use crate::opcode_isa::{
         EVEX_FLAGGED_OPCODE_COUNT, GATED_OPCODE_COUNT, OPCODE_EVEX_FLAGS,
-        STATE_AVX_OPCODE_COUNT, STATE_EVEX_OPCODE_COUNT,
+        STATE_AVX_OPCODE_COUNT, STATE_EVEX_OPCODE_COUNT, STATE_FPU_OPCODE_COUNT,
+        STATE_MMX_OPCODE_COUNT, STATE_SSE_OPCODE_COUNT,
     };
 
     assert_eq!(
@@ -1378,6 +1400,24 @@ fn opcode_isa_counts_are_pinned_to_the_reference_build() {
         "the reference build's ia_opcodes*.def gives 1437 of this enum's opcodes \
          a BX_PREPARE_EVEX* bit (BX_PREPARE_OPMASK included); regenerate with \
          scripts/gen_opcode_isa.py if upstream changed"
+    );
+    assert_eq!(
+        STATE_FPU_OPCODE_COUNT, 136,
+        "the reference build's ia_opcodes*.def marks 136 of this enum's opcodes \
+         BX_PREPARE_FPU; regenerate with scripts/gen_opcode_isa.py if upstream \
+         changed"
+    );
+    assert_eq!(
+        STATE_MMX_OPCODE_COUNT, 116,
+        "the reference build's ia_opcodes*.def marks 116 of this enum's opcodes \
+         BX_PREPARE_MMX; regenerate with scripts/gen_opcode_isa.py if upstream \
+         changed"
+    );
+    assert_eq!(
+        STATE_SSE_OPCODE_COUNT, 305,
+        "the reference build's ia_opcodes*.def marks 305 of this enum's opcodes \
+         BX_PREPARE_SSE; regenerate with scripts/gen_opcode_isa.py if upstream \
+         changed"
     );
     assert_eq!(
         STATE_AVX_OPCODE_COUNT, 676,

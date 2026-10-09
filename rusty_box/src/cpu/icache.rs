@@ -115,6 +115,14 @@ pub struct BxICache {
     pub(crate) entry: [BxICacheEntry; BX_ICACHE_ENTRIES],
     /// Large array (~15 MB) — struct should be heap-allocated (e.g. via Box).
     pub(crate) mpool: [Instruction; BX_ICACHE_MEM_POOL],
+    /// The opcode the decoder produced for each `mpool` slot, kept apart from
+    /// the one `assign_handler` leaves in the slot for dispatch. Bochs swaps
+    /// only an instruction's handler (`execute1`), so `getIaOpcode()` — and
+    /// every instrumentation callback — still names the instruction the guest
+    /// wrote when it is about to raise #UD or #NM instead of running. Written
+    /// once per decoded instruction at trace fill; the dispatch loop never
+    /// reads it.
+    pub(crate) decoded_opcodes: [Opcode; BX_ICACHE_MEM_POOL],
     pub(crate) mpindex: usize,
     next_page_split_index: usize,
     page_split_index: [PageSplitEntry; BX_ICACHE_PAGE_SPLIT_ENTRIES],
@@ -219,6 +227,7 @@ impl BxICache {
         Self {
             entry: [BxICacheEntry::INVALID; BX_ICACHE_ENTRIES],
             mpool: [Instruction::EMPTY; BX_ICACHE_MEM_POOL],
+            decoded_opcodes: [Opcode::IaError; BX_ICACHE_MEM_POOL],
             mpindex: 0,
             next_page_split_index: 0,
             page_split_index: [PageSplitEntry::EMPTY; BX_ICACHE_PAGE_SPLIT_ENTRIES],
@@ -305,6 +314,17 @@ impl BxICache {
             return None;
         }
         Some(e)
+    }
+
+    /// The instruction in `mpool[index]` as the guest wrote it: the slot's
+    /// operands with the opcode the decoder produced, where dispatch may see a
+    /// state sentinel or `IaError` in its place. What instrumentation is
+    /// shown — Bochs `BX_INSTR_*` callbacks get a `bxInstruction_c` whose
+    /// `getIaOpcode()` `assignHandler` never changed.
+    pub(crate) fn decoded_instruction(&self, index: usize) -> Instruction {
+        let mut instr = self.mpool[index];
+        instr.set_ia_opcode(self.decoded_opcodes[index]);
+        instr
     }
 
     pub fn flush_page(&mut self, ppf: BxPhyAddress) {
@@ -649,13 +669,49 @@ fn is_trace_end_opcode(opcode: Opcode) -> bool {
         // User interrupts
         Opcode::Stui | Opcode::Uiret | Opcode::SenduipiEq |
         // Undefined / error placeholders
-        Opcode::Ud0 | Opcode::Ud1 | Opcode::Ud2 | Opcode::IaError
+        Opcode::Ud0 | Opcode::Ud1 | Opcode::Ud2 | Opcode::IaError |
+        // CPU state the guest has not enabled: Bochs fetchdecode32.cc
+        // assignHandler returns "end of trace" when it substitutes BxNoFPU,
+        // BxNoMMX, BxNoSSE, BxNoAVX or BxNoEVEX.
+        Opcode::NoFpuState | Opcode::NoMmxState | Opcode::NoSseState |
+        Opcode::NoAvxState | Opcode::NoEvexState
     )
 }
 
 impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     fn bx_end_trace(&mut self) {
         self.async_event |= BX_ASYNC_EVENT_STOP_TRACE;
+    }
+
+    /// Bochs fetchdecode32.cc `assignHandler`, for the instruction a trace
+    /// fill has just decoded into `mpool[index]`. Both fill paths call it —
+    /// the in-page decode in `serve_icache_miss` and the page-straddling one
+    /// after `boundary_fetch`, as Bochs icache.cc `serveICacheMiss` and
+    /// `boundaryFetch` both call `assignHandler` — so it is the one place an
+    /// instruction is gated (R5).
+    ///
+    /// Two gates, in Bochs's order:
+    /// - the ISA gate: an opcode whose CPUID feature this model lacks runs as
+    ///   `IaError`, the opcode Bochs `init_FetchDecodeTables` points at
+    ///   `BxError` ([`Self::isa_resolve_opcode`]);
+    /// - the state gate: an opcode whose CPU state the guest has not enabled
+    ///   runs as the matching `No*State` sentinel, Bochs's `BxNoFPU` /
+    ///   `BxNoMMX` / `BxNoSSE` / `BxNoAVX` / `BxNoEVEX`
+    ///   ([`Self::state_resolve_opcode`]).
+    ///
+    /// The decoded opcode is kept in `decoded_opcodes`, since Bochs replaces
+    /// only the handler and its instrumentation still sees the instruction.
+    /// Once per trace fill, so the dispatch loop pays nothing; sound to cache
+    /// because the icache is keyed on `fetch_mode_mask`, so enabling a state
+    /// yields different entries. The decoded length is untouched: Bochs's
+    /// decode succeeds too, and only the handler changes.
+    pub(super) fn assign_handler(&mut self, index: usize) {
+        let decoded = self.i_cache.mpool[index].get_ia_opcode();
+        self.i_cache.decoded_opcodes[index] = decoded;
+        let resolved = self.state_resolve_opcode(self.isa_resolve_opcode(decoded));
+        if resolved != decoded {
+            self.i_cache.mpool[index].set_ia_opcode(resolved);
+        }
     }
 }
 
@@ -781,26 +837,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> ExecCtx<'_, T> {
             let decode_result =
                 normalize_decode_result(&mut self.i_cache.mpool[current_mpindex], decode_result);
 
-            // Bochs init_FetchDecodeTables (fetchdecode32.cc) makes an opcode
-            // whose CPUID feature this model lacks execute as BxError. Applied
-            // here, once per trace fill, so the dispatch loop is untouched. The
-            // decoded length is preserved: Bochs's decode also succeeds, only
-            // the handler changes.
-            // Bochs assignHandler additionally swaps the handler for BxNoAVX /
-            // BxNoEVEX when the instruction needs CPU state the guest has not
-            // enabled. Applied after the ISA gate and in the same place, for
-            // the same reason; safe to cache because the icache is keyed on
-            // fetch_mode_mask, so enabling AVX yields different entries.
-            if decode_result.is_ok() {
-                let decoded = self.i_cache.mpool[current_mpindex].get_ia_opcode();
-                let resolved = self.state_resolve_opcode(self.isa_resolve_opcode(decoded));
-                if resolved != decoded {
-                    self.i_cache.mpool[current_mpindex].set_ia_opcode(resolved);
-                }
-            }
-
             match decode_result {
                 Ok(()) => {
+                    // Bochs serveICacheMiss: assignHandler, right after decode.
+                    self.assign_handler(current_mpindex);
+
                     // Instruction is already in mpool[current_mpindex] — get its length
                     let i_len = { self.i_cache.mpool[current_mpindex].ilen() as u32 };
 
@@ -826,19 +867,17 @@ impl<T: crate::cpu::instrumentation::Instrumentation> ExecCtx<'_, T> {
                         } else {
                             super::instrumentation::CodeSize::Bits16
                         };
-                        // Disjoint fields of the CPU: the event borrows the
-                        // decoded instruction out of `i_cache` while the tracer
-                        // is called through `instrumentation`. Naming the CPU
-                        // is what makes that disjointness visible — reaching
-                        // both through `Deref` would borrow the whole context.
-                        let cpu: &mut BxCpuC<T> = self;
+                        // The instruction as decoded, not as `assign_handler`
+                        // left it for dispatch: Bochs's BX_INSTR_OPCODE sees an
+                        // instruction whose opcode was never replaced.
+                        let decoded = self.i_cache.decoded_instruction(current_mpindex);
                         let ev = super::instrumentation::OpcodeEvent {
                             rip,
-                            instr: &cpu.i_cache.mpool[current_mpindex],
+                            instr: &decoded,
                             bytes,
                             size,
                         };
-                        cpu.instrumentation.fire_opcode(&ev);
+                        self.instrumentation.fire_opcode(&ev);
                     }
 
                     // Update trace mask
@@ -988,6 +1027,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> ExecCtx<'_, T> {
                         break;
                     }
                     self.i_cache.mpool[current_mpindex] = boundary_instr;
+                    // Bochs boundaryFetch: assignHandler, for the page-
+                    // straddling instruction exactly as for any other.
+                    self.assign_handler(current_mpindex);
                     current_mpindex += 1;
 
                     // Add the instruction to trace cache (matching C++ line 152-154)
@@ -1128,8 +1170,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> ExecCtx<'_, T> {
             crate::cpu::CpuError::Decoder(error)
         })?;
 
-        // assignHandler is a no-op in Rust (matching C++ line 303)
-        // In C++, assignHandler can return non-zero, but we don't check it here
+        // Bochs calls assignHandler here; the caller does, once the
+        // instruction is in its mpool slot (`assign_handler`).
 
         // Restore EIP since we fudged it to start at the 2nd page boundary.
         // (matching C++ line 306: RIP = BX_CPU_THIS_PTR prev_rip)
@@ -1193,6 +1235,8 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         debug_assert!(source_start_idx + max_length <= BX_ICACHE_MEM_POOL);
         for k in 0..max_length {
             self.i_cache.mpool[current_mpindex + k] = self.i_cache.mpool[source_start_idx + k];
+            self.i_cache.decoded_opcodes[current_mpindex + k] =
+                self.i_cache.decoded_opcodes[source_start_idx + k];
         }
 
         // Bochs mergeTraces: entry->tlen += max_length; entry->traceMask |= e->traceMask. Our

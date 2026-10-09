@@ -6227,6 +6227,12 @@ pub enum TypedInstruction {
     NoAvxStateTyped,
     /// NoEvexState — internal sentinel: the guest has not enabled AVX-512 state.
     NoEvexStateTyped,
+    /// NoFpuState — internal sentinel: the guest has not enabled x87 state.
+    NoFpuStateTyped,
+    /// NoMmxState — internal sentinel: the guest has not enabled MMX state.
+    NoMmxStateTyped,
+    /// NoSseState — internal sentinel: the guest has not enabled SSE state.
+    NoSseStateTyped,
 
     // =====================================================================
     // Extension — SSE crossover instructions
@@ -32112,6 +32118,9 @@ impl Instruction {
             O::InsertedOpcode => T::InsertedOpcodeTyped,
             O::NoAvxState => T::NoAvxStateTyped,
             O::NoEvexState => T::NoEvexStateTyped,
+            O::NoFpuState => T::NoFpuStateTyped,
+            O::NoMmxState => T::NoMmxStateTyped,
+            O::NoSseState => T::NoSseStateTyped,
 
             // =================================================================
             // Extension — SSE crossover

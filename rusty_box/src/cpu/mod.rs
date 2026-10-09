@@ -85,6 +85,7 @@ pub(super) mod event;
 pub(crate) use event::{AcknowledgedInterrupt, TrapDischarge};
 pub use event::HardwareEvent;
 pub(super) mod exception;
+pub(super) mod fetch_mode;
 pub(super) mod flag_ctrl;
 pub(super) mod flag_ctrl_pro;
 pub(super) mod fpu;
@@ -106,7 +107,6 @@ pub(super) mod mult32;
 pub(super) mod mult64;
 pub(super) mod mult8;
 pub(super) mod mwait;
-pub(super) mod opcodes_table;
 pub(super) mod paging;
 /// Null-page write-fault tripwire (see the module docs). Diagnostic-only.
 #[cfg(feature = "std")]

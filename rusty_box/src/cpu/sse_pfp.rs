@@ -162,7 +162,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         instr: &Instruction,
         func: fn(&mut BxPackedXmmRegister, &BxPackedXmmRegister, &mut SoftFloatStatus),
     ) -> super::Result<()> {
-        self.prepare_sse()?;
         let mut op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm(instr)?;
         let mut status = self.sse_status();
@@ -180,7 +179,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         instr: &Instruction,
         func: fn(&mut BxPackedXmmRegister, &mut SoftFloatStatus),
     ) -> super::Result<()> {
-        self.prepare_sse()?;
         let mut op = self.sse_read_op2_xmm(instr)?;
         let mut status = self.sse_status();
         func(&mut op, &mut status);
@@ -197,7 +195,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         instr: &Instruction,
         func: fn(Float32, Float32, &mut SoftFloatStatus) -> Float32,
     ) -> super::Result<()> {
-        self.prepare_sse()?;
         let op2 = self.sse_pfp_read_op2_ss(instr)?;
         let mut result = self.read_xmm_reg(instr.dst());
         let mut status = self.sse_status();
@@ -216,7 +213,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         instr: &Instruction,
         func: fn(Float64, Float64, &mut SoftFloatStatus) -> Float64,
     ) -> super::Result<()> {
-        self.prepare_sse()?;
         let op2 = self.sse_pfp_read_op2_sd(instr)?;
         let mut result = self.read_xmm_reg(instr.dst());
         let mut status = self.sse_status();
@@ -235,7 +231,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         instr: &Instruction,
         func: fn(u64, u64) -> u64,
     ) -> super::Result<()> {
-        self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm(instr)?;
         let mut result = BxPackedXmmRegister::default();
@@ -362,7 +357,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// SQRTSS — Square Root of Scalar Single-Precision (lowest f32 only)
     pub(super) fn sqrtss_vss_wss(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op = self.sse_pfp_read_op2_ss(instr)?;
         let mut status = self.sse_status();
         let value = f32_sqrt(op, &mut status);
@@ -375,7 +369,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// SQRTSD — Square Root of Scalar Double-Precision (lowest f64 only)
     pub(super) fn sqrtsd_vsd_wsd(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op = self.sse_pfp_read_op2_sd(instr)?;
         let mut status = self.sse_status();
         let value = f64_sqrt(op, &mut status);
@@ -395,7 +388,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     // ========================================================================
 
     pub(super) fn roundps_vps_wps_ib(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let mut op = self.sse_read_op2_xmm(instr)?;
         let mut status = self.sse_status();
         mxcsr_to_softfloat_status_word_imm_override(&mut status, instr.ib());
@@ -408,7 +400,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     }
 
     pub(super) fn roundpd_vpd_wpd_ib(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let mut op = self.sse_read_op2_xmm(instr)?;
         let mut status = self.sse_status();
         mxcsr_to_softfloat_status_word_imm_override(&mut status, instr.ib());
@@ -421,7 +412,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     }
 
     pub(super) fn roundss_vss_wss_ib(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op = self.sse_pfp_read_op2_ss(instr)?;
         let mut status = self.sse_status();
         mxcsr_to_softfloat_status_word_imm_override(&mut status, instr.ib());
@@ -434,7 +424,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     }
 
     pub(super) fn roundsd_vsd_wsd_ib(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op = self.sse_pfp_read_op2_sd(instr)?;
         let mut status = self.sse_status();
         mxcsr_to_softfloat_status_word_imm_override(&mut status, instr.ib());
@@ -547,7 +536,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// CMPPS — Compare Packed Single-Precision (4 x f32) with imm8 predicate
     pub(super) fn cmpps_vps_wps_ib(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let mut op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm(instr)?;
         let mut status = self.sse_status();
@@ -559,7 +547,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// CMPPD — Compare Packed Double-Precision (2 x f64) with imm8 predicate
     pub(super) fn cmppd_vpd_wpd_ib(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let mut op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm(instr)?;
         let mut status = self.sse_status();
@@ -571,7 +558,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// CMPSS — Compare Scalar Single-Precision (lowest f32) with imm8 predicate
     pub(super) fn cmpss_vss_wss_ib(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op2 = self.sse_pfp_read_op2_ss(instr)?;
         let mut result = self.read_xmm_reg(instr.dst());
         let mut status = self.sse_status();
@@ -589,7 +575,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// CMPSD — Compare Scalar Double-Precision (lowest f64) with imm8 predicate
     pub(super) fn cmpsd_vsd_wsd_ib(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op2 = self.sse_pfp_read_op2_sd(instr)?;
         let mut result = self.read_xmm_reg(instr.dst());
         let mut status = self.sse_status();
@@ -638,7 +623,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         instr: &Instruction,
         compare: fn(Float32, Float32, &mut SoftFloatStatus) -> i32,
     ) -> super::Result<()> {
-        self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst()).xmm32u(0);
         let op2 = self.sse_pfp_read_op2_ss(instr)?;
         let mut status = self.sse_status();
@@ -655,7 +639,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         instr: &Instruction,
         compare: fn(Float64, Float64, &mut SoftFloatStatus) -> i32,
     ) -> super::Result<()> {
-        self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst()).xmm64u(0);
         let op2 = self.sse_pfp_read_op2_sd(instr)?;
         let mut status = self.sse_status();
@@ -697,7 +680,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// CVTSI2SS — Convert Int32 to Scalar Single-Precision
     pub(super) fn cvtsi2ss_vss_ed(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op = self.cvtsi_read_src32(instr)?;
         let mut status = self.sse_status();
         let value = i32_to_f32(op, &mut status);
@@ -711,7 +693,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// CVTSI2SD — Convert Int32 to Scalar Double-Precision.
     /// Exact for every i32, so Bochs performs no exception check here.
     pub(super) fn cvtsi2sd_vsd_ed(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op = self.cvtsi_read_src32(instr)?;
         let mut result = self.read_xmm_reg(instr.dst());
         result.set_xmm64u(0, i32_to_f64(op));
@@ -721,7 +702,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// CVTSI2SS — Convert Int64 to Scalar Single-Precision (64-bit mode)
     pub(super) fn cvtsi2ss_vss_eq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op = self.cvtsi_read_src64(instr)?;
         let mut status = self.sse_status();
         let value = i64_to_f32(op, &mut status);
@@ -734,7 +714,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// CVTSI2SD — Convert Int64 to Scalar Double-Precision (64-bit mode)
     pub(super) fn cvtsi2sd_vsd_eq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op = self.cvtsi_read_src64(instr)?;
         let mut status = self.sse_status();
         let value = i64_to_f64(op, &mut status);
@@ -755,7 +734,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// CVTSS2SI — Convert Scalar Single-Precision to Int32 (MXCSR rounding)
     pub(super) fn cvtss2si_gd_wss(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op = self.sse_pfp_read_op2_ss(instr)?;
         let mut status = self.sse_status();
         crate::cpu::avx::softfloat_rc_override(&mut status, instr);
@@ -768,7 +746,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// CVTSD2SI — Convert Scalar Double-Precision to Int32 (MXCSR rounding)
     pub(super) fn cvtsd2si_gd_wsd(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op = self.sse_pfp_read_op2_sd(instr)?;
         let mut status = self.sse_status();
         crate::cpu::avx::softfloat_rc_override(&mut status, instr);
@@ -781,7 +758,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// CVTTSS2SI — Convert Scalar Single-Precision to Int32 (truncate)
     pub(super) fn cvttss2si_gd_wss(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op = self.sse_pfp_read_op2_ss(instr)?;
         let mut status = self.sse_status();
         crate::cpu::avx::softfloat_rc_override(&mut status, instr);
@@ -793,7 +769,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// CVTTSD2SI — Convert Scalar Double-Precision to Int32 (truncate)
     pub(super) fn cvttsd2si_gd_wsd(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op = self.sse_pfp_read_op2_sd(instr)?;
         let mut status = self.sse_status();
         crate::cpu::avx::softfloat_rc_override(&mut status, instr);
@@ -805,7 +780,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// CVTTSS2SI — Convert Scalar Single-Precision to Int64 (truncate, 64-bit mode)
     pub(super) fn cvttss2si_gq_wss(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op = self.sse_pfp_read_op2_ss(instr)?;
         let mut status = self.sse_status();
         crate::cpu::avx::softfloat_rc_override(&mut status, instr);
@@ -817,7 +791,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// CVTTSD2SI — Convert Scalar Double-Precision to Int64 (truncate, 64-bit mode)
     pub(super) fn cvttsd2si_gq_wsd(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op = self.sse_pfp_read_op2_sd(instr)?;
         let mut status = self.sse_status();
         crate::cpu::avx::softfloat_rc_override(&mut status, instr);
@@ -829,7 +802,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// CVTSS2SI — Convert Scalar Single-Precision to Int64 (MXCSR rounding, 64-bit mode)
     pub(super) fn cvtss2si_gq_wss(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op = self.sse_pfp_read_op2_ss(instr)?;
         let mut status = self.sse_status();
         crate::cpu::avx::softfloat_rc_override(&mut status, instr);
@@ -842,7 +814,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// CVTSD2SI — Convert Scalar Double-Precision to Int64 (MXCSR rounding, 64-bit mode)
     pub(super) fn cvtsd2si_gq_wsd(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op = self.sse_pfp_read_op2_sd(instr)?;
         let mut status = self.sse_status();
         crate::cpu::avx::softfloat_rc_override(&mut status, instr);
@@ -879,7 +850,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// CVTPS2PD — Convert 2 Packed Singles to 2 Packed Doubles
     pub(super) fn cvtps2pd_vpd_wps(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op = self.sse_pfp_read_op2_lo_qword(instr)?;
         let mut status = self.sse_status();
         let mut result = BxPackedXmmRegister::default();
@@ -892,7 +862,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// CVTPD2PS — Convert 2 Packed Doubles to 2 Packed Singles
     pub(super) fn cvtpd2ps_vps_wpd(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let mut op = self.sse_read_op2_xmm(instr)?;
         let mut status = self.sse_status();
         let lo = f64_to_f32(op.xmm64u(0), &mut status);
@@ -907,7 +876,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// CVTSS2SD — Convert Scalar Single to Scalar Double
     pub(super) fn cvtss2sd_vsd_wss(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op = self.sse_pfp_read_op2_ss(instr)?;
         let mut status = self.sse_status();
         let value = f32_to_f64(op, &mut status);
@@ -920,7 +888,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// CVTSD2SS — Convert Scalar Double to Scalar Single
     pub(super) fn cvtsd2ss_vss_wsd(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op = self.sse_pfp_read_op2_sd(instr)?;
         let mut status = self.sse_status();
         let value = f64_to_f32(op, &mut status);
@@ -956,7 +923,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// CVTPI2PS — two MMX int32 to two singles in the low quadword, the rest
     /// of the register kept (Bochs `CVTPI2PS_VpsQqR` / `CVTPI2PS_VpsQqM`).
     pub(super) fn cvtpi2ps_vps_qq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         if instr.mod_c0() {
             self.fpu_check_pending_exceptions()?;
         }
@@ -978,7 +944,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// there is no exception check (Bochs `CVTPI2PD_VpdQqR` /
     /// `CVTPI2PD_VpdQqM`); the register form transitions before it reads.
     pub(super) fn cvtpi2pd_vpd_qq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         if instr.mod_c0() {
             self.fpu_check_pending_exceptions()?;
             self.prepare_fpu2mmx();
@@ -994,7 +959,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// CVTTPS2PI — two singles to two MMX int32, truncating (Bochs
     /// `CVTTPS2PI_PqWps`).
     pub(super) fn cvttps2pi_pq_wps(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         self.fpu_check_pending_exceptions()?;
         let op = self.sse_pfp_read_op2_lo_qword(instr)?;
         let mut status = self.sse_status();
@@ -1010,7 +974,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// CVTTPD2PI — two doubles to two MMX int32, truncating (Bochs
     /// `CVTTPD2PI_PqWpd`).
     pub(super) fn cvttpd2pi_pq_wpd(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         self.fpu_check_pending_exceptions()?;
         let op = self.sse_read_op2_xmm(instr)?;
         let mut status = self.sse_status();
@@ -1026,7 +989,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// CVTPS2PI — two singles to two MMX int32 under the MXCSR rounding mode
     /// (Bochs `CVTPS2PI_PqWps`).
     pub(super) fn cvtps2pi_pq_wps(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         self.fpu_check_pending_exceptions()?;
         let op = self.sse_pfp_read_op2_lo_qword(instr)?;
         let mut status = self.sse_status();
@@ -1043,7 +1005,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// CVTPD2PI — two doubles to two MMX int32 under the MXCSR rounding mode
     /// (Bochs `CVTPD2PI_PqWpd`).
     pub(super) fn cvtpd2pi_pq_wpd(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         self.fpu_check_pending_exceptions()?;
         let op = self.sse_read_op2_xmm(instr)?;
         let mut status = self.sse_status();
@@ -1064,7 +1025,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// CVTDQ2PS — Convert 4 Packed Int32 to 4 Packed Singles
     pub(super) fn cvtdq2ps_vps_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let mut op = self.sse_read_op2_xmm(instr)?;
         let mut status = self.sse_status();
         for i in 0..4 {
@@ -1077,7 +1037,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// CVTPS2DQ — Convert 4 Packed Singles to 4 Packed Int32 (MXCSR rounding)
     pub(super) fn cvtps2dq_vdq_wps(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let mut op = self.sse_read_op2_xmm(instr)?;
         let mut status = self.sse_status();
         let rc = softfloat_get_rounding_mode(&status);
@@ -1091,7 +1050,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// CVTTPS2DQ — Convert 4 Packed Singles to 4 Packed Int32 (truncate)
     pub(super) fn cvttps2dq_vdq_wps(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let mut op = self.sse_read_op2_xmm(instr)?;
         let mut status = self.sse_status();
         for i in 0..4 {
@@ -1105,7 +1063,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// CVTDQ2PD — Convert 2 Packed Int32 to 2 Packed Doubles.
     /// Exact for every i32, so Bochs performs no exception check here.
     pub(super) fn cvtdq2pd_vpd_wq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op = self.sse_pfp_read_op2_lo_qword(instr)?;
         let mut result = BxPackedXmmRegister::default();
         result.set_xmm64u(0, i32_to_f64(op.xmm32s(0)));
@@ -1117,7 +1074,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// CVTPD2DQ — Convert 2 Packed Doubles to 2 Packed Int32 (MXCSR rounding).
     /// Result occupies the low 64 bits; the high 64 bits are zeroed.
     pub(super) fn cvtpd2dq_vq_wpd(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let mut op = self.sse_read_op2_xmm(instr)?;
         let mut status = self.sse_status();
         let rc = softfloat_get_rounding_mode(&status);
@@ -1134,7 +1090,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// CVTTPD2DQ — Convert 2 Packed Doubles to 2 Packed Int32 (truncate).
     /// Result occupies the low 64 bits; the high 64 bits are zeroed.
     pub(super) fn cvttpd2dq_vq_wpd(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let mut op = self.sse_read_op2_xmm(instr)?;
         let mut status = self.sse_status();
         let lo = f64_to_i32_r_min_mag(op.xmm64u(0), true, false, &mut status);
@@ -1154,7 +1109,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// SHUFPS — Shuffle Packed Single-Precision (imm8 selects lanes)
     pub(super) fn shufps_vps_wps_ib(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm(instr)?;
         let mut result = BxPackedXmmRegister::default();
@@ -1165,7 +1119,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// SHUFPD — Shuffle Packed Double-Precision (imm8 selects lanes)
     pub(super) fn shufpd_vpd_wpd_ib(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm(instr)?;
         let mut result = BxPackedXmmRegister::default();
@@ -1181,7 +1134,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// UNPCKLPS — Interleave Low Single-Precision: { op1[0], op2[0], op1[1], op2[1] }
     pub(super) fn unpcklps_vps_wps(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm(instr)?;
         let mut result = BxPackedXmmRegister::default();
@@ -1195,7 +1147,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// UNPCKHPS — Interleave High Single-Precision: { op1[2], op2[2], op1[3], op2[3] }
     pub(super) fn unpckhps_vps_wps(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm(instr)?;
         let mut result = BxPackedXmmRegister::default();
@@ -1209,7 +1160,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// UNPCKLPD — Interleave Low Double-Precision: { op1[0], op2[0] }
     pub(super) fn unpcklpd_vpd_wpd(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm(instr)?;
         let mut result = BxPackedXmmRegister::default();
@@ -1221,7 +1171,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// UNPCKHPD — Interleave High Double-Precision: { op1[1], op2[1] }
     pub(super) fn unpckhpd_vpd_wpd(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm(instr)?;
         let mut result = BxPackedXmmRegister::default();
@@ -1276,7 +1225,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// DPPS — Dot Product of Packed Single-FP (66 0F 3A 40)
     pub(super) fn dpps_vps_wps_ib(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let mut op1 = self.read_xmm_reg(instr.dst());
         let mut op2 = self.sse_read_op2_xmm(instr)?;
         let mask = instr.ib();
@@ -1308,7 +1256,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// DPPD — Dot Product of Packed Double-FP (66 0F 3A 41)
     pub(super) fn dppd_vpd_wpd_ib(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let mut op1 = self.read_xmm_reg(instr.dst());
         let mut op2 = self.sse_read_op2_xmm(instr)?;
         let mask = instr.ib();

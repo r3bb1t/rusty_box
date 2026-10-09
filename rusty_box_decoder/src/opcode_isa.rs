@@ -15,8 +15,8 @@ use crate::opcode::Opcode;
 /// Sentinel: this opcode is not gated on any CPUID feature.
 pub const ISA_ALWAYS: u16 = 0xFFFF;
 
-/// `X86Feature as u16` required by each opcode (2964 of 3732 are gated).
-pub static OPCODE_ISA: [u16; 3732] = [
+/// `X86Feature as u16` required by each opcode (2964 of 3735 are gated).
+pub static OPCODE_ISA: [u16; 3735] = [
     ISA_ALWAYS, // IaError
     ISA_ALWAYS, // InsertedOpcode
     ISA_ALWAYS, // Aaa
@@ -3749,6 +3749,9 @@ pub static OPCODE_ISA: [u16; 3732] = [
     104, // EvexVpmovssdbWdqVdqKmask -> X86Feature::IsaAce
     ISA_ALWAYS, // NoAvxState
     ISA_ALWAYS, // NoEvexState
+    ISA_ALWAYS, // NoFpuState
+    ISA_ALWAYS, // NoMmxState
+    ISA_ALWAYS, // NoSseState
 ];
 
 /// Feature required to execute `opcode`, or `ISA_ALWAYS` if ungated.
@@ -3763,7 +3766,7 @@ pub const GATED_OPCODE_COUNT: usize = 2964;
 
 /// Number of `Opcode` variants the table was generated against. A
 /// mismatch with the enum means the table needs regenerating.
-pub const OPCODE_VARIANT_COUNT: usize = 3732;
+pub const OPCODE_VARIANT_COUNT: usize = 3735;
 
 // EVEX encoding restrictions — Bochs cpu/decoder/fetchdecode.h.
 // `EVEX.b` means embedded broadcast on a memory operand and SAE /
@@ -3780,7 +3783,7 @@ pub const PREPARE_EVEX_NO_BROADCAST: u16 = 0x280;
 /// `bx_define_opcode`.
 // A `const` rather than a `static`: the EVEX decode path is a
 // `const fn`, and const evaluation may read consts but not statics.
-pub const OPCODE_EVEX_FLAGS: [u16; 3732] = [
+pub const OPCODE_EVEX_FLAGS: [u16; 3735] = [
     0x000, // IaError
     0x000, // InsertedOpcode
     0x000, // Aaa
@@ -7513,6 +7516,9 @@ pub const OPCODE_EVEX_FLAGS: [u16; 3732] = [
     0x380, // EvexVpmovssdbWdqVdqKmask
     0x000, // NoAvxState
     0x000, // NoEvexState
+    0x000, // NoFpuState
+    0x000, // NoMmxState
+    0x000, // NoSseState
 ];
 
 /// EVEX prepare attributes for `opcode` (0 when it has none).
@@ -7556,7 +7562,7 @@ pub enum CpuState {
 
 /// CPU state each opcode requires, from field 10 of `bx_define_opcode`.
 // A `const` for the same reason as OPCODE_EVEX_FLAGS.
-pub const OPCODE_STATE: [CpuState; 3732] = [
+pub const OPCODE_STATE: [CpuState; 3735] = [
     CpuState::Base, // IaError
     CpuState::Base, // InsertedOpcode
     CpuState::Base, // Aaa
@@ -11289,6 +11295,9 @@ pub const OPCODE_STATE: [CpuState; 3732] = [
     CpuState::Evex, // EvexVpmovssdbWdqVdqKmask
     CpuState::Base, // NoAvxState
     CpuState::Base, // NoEvexState
+    CpuState::Base, // NoFpuState
+    CpuState::Base, // NoMmxState
+    CpuState::Base, // NoSseState
 ];
 
 /// CPU state `opcode` requires before it may execute.
@@ -11297,8 +11306,17 @@ pub const fn opcode_state(opcode: Opcode) -> CpuState {
     OPCODE_STATE[opcode as usize]
 }
 
-/// Opcodes requiring AVX state, pinned by tests so a regeneration that
-/// silently drops the gate is caught.
+/// Opcodes requiring x87 state, pinned by tests so a regeneration that
+/// silently drops the gate is caught. The same holds for each count below.
+pub const STATE_FPU_OPCODE_COUNT: usize = 136;
+
+/// Opcodes requiring MMX state.
+pub const STATE_MMX_OPCODE_COUNT: usize = 116;
+
+/// Opcodes requiring SSE state.
+pub const STATE_SSE_OPCODE_COUNT: usize = 305;
+
+/// Opcodes requiring AVX state.
 pub const STATE_AVX_OPCODE_COUNT: usize = 676;
 
 /// Opcodes requiring AVX-512 state.

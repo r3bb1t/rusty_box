@@ -727,9 +727,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
 
         // Update fetch mode mask for 32-bit mode
         self.fetch_mode_mask
-            .set(super::opcodes_table::FetchModeMask::D_B, true);
+            .set(super::fetch_mode::FetchModeMask::D_B, true);
         self.fetch_mode_mask
-            .remove(super::opcodes_table::FetchModeMask::LONG64);
+            .remove(super::fetch_mode::FetchModeMask::LONG64);
 
         // Mask external interrupts (IF=0)
         self.mask_event(Self::BX_EVENT_PENDING_INTR | Self::BX_EVENT_PENDING_LAPIC_INTR);

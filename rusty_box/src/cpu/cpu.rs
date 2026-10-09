@@ -824,11 +824,11 @@ pub struct BxCpuC<T: super::instrumentation::Instrumentation = ()> {
     // `i_cache_handlers` fn-ptr pool are gone — the cpu loop dispatches through
     // the canonical `execute_instruction` match, so no handler pointers are
     // cached per decoded instruction.
-    pub(super) fetch_mode_mask: super::opcodes_table::FetchModeMask,
+    pub(super) fetch_mode_mask: super::fetch_mode::FetchModeMask,
 
     /// Maximum architecturally-visible vector length, recomputed from XCR0
     /// by `handle_avx_mode_change`. Bochs cpu.h `maxvl`.
-    pub(super) maxvl: super::opcodes_table::BxAvxVectorLength,
+    pub(super) maxvl: super::fetch_mode::BxAvxVectorLength,
 
     pub(super) address_xlation: AddressXlation,
 
@@ -876,6 +876,7 @@ pub struct BxCpuC<T: super::instrumentation::Instrumentation = ()> {
     ///
     /// Bit 0: reported unsupported opcode
     /// Bit 1: reported real-mode IVT vector to 0000:0000
+    /// Bit 2: reported an x87 error that Bochs would signal through FERR#
     pub(super) boot_debug_flags: u8,
 }
 impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
@@ -1694,10 +1695,6 @@ impl Uintr {
     }
 }
 
-/// Type alias for instruction handler function pointer
-pub(super) type InstructionHandler<T> =
-    fn(&mut super::exec_ctx::ExecCtx<'_, T>, &Instruction) -> Result<()>;
-
 impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     /// Bochs `signal_event()`: set event bit and force async check.
     /// Called by PIC (via raw pointer) when master int_pin asserts.
@@ -2486,11 +2483,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                     self.diag_current_opcode = opcode as u16;
                 }
 
-                // Bochs BX_INSTR_BEFORE_EXECUTION(cpu_id, i)
+                // Bochs BX_INSTR_BEFORE_EXECUTION(cpu_id, i), with `i` as
+                // decoded: a sentinel `assign_handler` put in its slot is a
+                // dispatch detail the callback never sees.
                 if self.instrumentation.active.has_exec() {
                     let rip_before = self.prev_rip;
+                    let decoded = self.i_cache.decoded_instruction(instr_idx);
                     self.instrumentation
-                        .fire_before_execution(rip_before, instr_ref());
+                        .fire_before_execution(rip_before, &decoded);
                 }
 
                 // A2 single dispatch (unmeasured): the canonical
@@ -2541,8 +2541,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                 // we just executed (matches BOCHS semantics).
                 if self.instrumentation.active.has_exec() {
                     let executed_rip = self.prev_rip;
+                    let decoded = self.i_cache.decoded_instruction(instr_idx);
                     self.instrumentation
-                        .fire_after_execution(executed_rip, instr_ref());
+                        .fire_after_execution(executed_rip, &decoded);
                 }
 
                 // Bochs cpu.cc — prev_rip = RIP AFTER execution ("commit new RIP")
@@ -3532,429 +3533,110 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
         Ok(())
     }
 
-    /// BxNoFPU - FPU not available handler
-    /// Matches BX_CPU_C::BxNoFPU from proc_ctrl.cc
-    /// Raises #NM (Device Not Available) if CR0.EM or CR0.TS is set
+    /// The handler `Opcode::NoFpuState` dispatches to: an x87 instruction
+    /// decoded while `FetchModeMask::FPU_MMX_OK` was clear. Bochs proc_ctrl.cc
+    /// `BxNoFPU`: #NM when CR0.EM or CR0.TS is set.
     pub(super) fn bx_no_fpu(&mut self, _instr: &Instruction) -> Result<()> {
-        let cr0 = self.cr0.get32();
-        let cr0_em = (cr0 & (1 << 2)) != 0; // CR0.EM bit 2
-        let cr0_ts = (cr0 & (1 << 3)) != 0; // CR0.TS bit 3
-
-        if cr0_em || cr0_ts {
-            self.exception(Exception::Nm, 0)?;
+        if self.cr0.em() || self.cr0.ts() {
+            return self.exception(Exception::Nm, 0);
         }
-
-        // BX_ASSERT(0) in original - this should not be reached in normal operation
-        tracing::warn!("BxNoFPU: FPU instruction executed but FPU not available");
-        Ok(())
+        self.stale_state_gate("BxNoFPU")
     }
 
-    /// BxNoMMX - MMX not available handler
-    /// Matches BX_CPU_C::BxNoMMX from proc_ctrl.cc
-    /// Raises #UD if CR0.EM is set, #NM if CR0.TS is set
+    /// The handler `Opcode::NoMmxState` dispatches to: an MMX instruction
+    /// decoded while `FetchModeMask::FPU_MMX_OK` was clear. Bochs proc_ctrl.cc
+    /// `BxNoMMX`: #UD when CR0.EM is set, else #NM when CR0.TS is set.
     pub(super) fn bx_no_mmx(&mut self, _instr: &Instruction) -> Result<()> {
-        let cr0 = self.cr0.get32();
-        let cr0_em = (cr0 & (1 << 2)) != 0; // CR0.EM bit 2
-        let cr0_ts = (cr0 & (1 << 3)) != 0; // CR0.TS bit 3
-
-        if cr0_em {
-            self.exception(Exception::Ud, 0)?;
+        if self.cr0.em() {
+            return self.exception(Exception::Ud, 0);
         }
-
-        if cr0_ts {
-            self.exception(Exception::Nm, 0)?;
+        if self.cr0.ts() {
+            return self.exception(Exception::Nm, 0);
         }
-
-        // BX_ASSERT(0) in original - this should not be reached in normal operation
-        tracing::warn!("BxNoMMX: MMX instruction executed but MMX not available");
-        Ok(())
+        self.stale_state_gate("BxNoMMX")
     }
 
-    /// BxNoSSE - SSE not available handler
-    /// Matches BX_CPU_C::BxNoSSE from proc_ctrl.cc
-    /// Only available if CPU_LEVEL >= 6
-    /// Raises #UD if CR0.EM is set or CR4.OSFXSR is clear, #NM if CR0.TS is set
-    pub(super) fn bx_no_sse(&mut self, instr: &Instruction) -> Result<()> {
-        let cr0 = self.cr0.get32();
-        let cr4 = self.cr4.get32();
-        let cr0_em = (cr0 & (1 << 2)) != 0; // CR0.EM bit 2
-        let cr0_ts = (cr0 & (1 << 3)) != 0; // CR0.TS bit 3
-        let cr4_osfxsr = (cr4 & (1 << 9)) != 0; // CR4.OSFXSR bit 9
-
-        if cr0_em || !cr4_osfxsr {
-            self.exception(Exception::Ud, 0)?;
+    /// The handler `Opcode::NoSseState` dispatches to: an SSE instruction
+    /// decoded while `FetchModeMask::SSE_OK` was clear. Bochs proc_ctrl.cc
+    /// `BxNoSSE`: #UD when CR0.EM is set or CR4.OSFXSR is clear, else #NM when
+    /// CR0.TS is set.
+    pub(super) fn bx_no_sse(&mut self, _instr: &Instruction) -> Result<()> {
+        if self.cr0.em() || !self.cr4.osfxsr() {
+            return self.exception(Exception::Ud, 0);
         }
-
-        if cr0_ts {
-            self.exception(Exception::Nm, 0)?;
+        if self.cr0.ts() {
+            return self.exception(Exception::Nm, 0);
         }
-
-        // BX_ASSERT(0) in original - this should not be reached in normal operation
-        tracing::warn!("BxNoSSE: SSE instruction executed but SSE not available");
-        Ok(())
+        self.stale_state_gate("BxNoSSE")
     }
 
-    /// BxNoAVX - AVX not available handler
-    /// Matches BX_CPU_C::BxNoAVX from proc_ctrl.cc
-    /// Only available if BX_SUPPORT_AVX
-    /// Raises #UD if not in protected mode, CR4.OSXSAVE is clear, or XCR0 doesn't have required bits
-    /// Raises #NM if CR0.TS is set
+    /// The handler `Opcode::NoAvxState` dispatches to: an AVX instruction
+    /// decoded while `FetchModeMask::AVX_OK` was clear. Bochs proc_ctrl.cc
+    /// `BxNoAVX`: #UD outside protected mode (virtual-8086 mode included) or
+    /// with CR4.OSXSAVE clear, #UD unless XCR0 enables SSE and YMM state, else
+    /// #NM when CR0.TS is set.
     pub(super) fn bx_no_avx(&mut self, _instr: &Instruction) -> Result<()> {
-        self.prepare_avx()
+        if !self.protected_mode() || !self.cr4.osxsave() {
+            return self.exception(Exception::Ud, 0);
+        }
+        if !self.xcr0_enables(XCR0_AVX_STATE) {
+            return self.exception(Exception::Ud, 0);
+        }
+        if self.cr0.ts() {
+            return self.exception(Exception::Nm, 0);
+        }
+        self.stale_state_gate("BxNoAVX")
     }
 
-    /// BxNoOpMask - Opmask not available handler
-    /// Matches BX_CPU_C::BxNoOpMask from proc_ctrl.cc
-    /// Only available if BX_SUPPORT_EVEX
-    /// Raises #UD if not in protected mode, CR4.OSXSAVE is clear, or XCR0 doesn't have required bits
-    /// Raises #NM if CR0.TS is set
-    pub(super) fn bx_no_opmask(&mut self, instr: &Instruction) -> Result<()> {
-        // Check if in protected mode (CR0.PE = 1)
-        let cr0 = self.cr0.get32();
-        let cr0_pe = (cr0 & (1 << 0)) != 0; // CR0.PE bit 0
-        if !cr0_pe {
-            self.exception(Exception::Ud, 0)?;
-            return Ok(());
+    /// The handler `Opcode::NoEvexState` dispatches to: an EVEX instruction
+    /// decoded while `FetchModeMask::EVEX_OK` was clear. Bochs proc_ctrl.cc
+    /// `BxNoEVEX`: `BxNoAVX`'s checks, with XCR0 also required to enable the
+    /// OPMASK, ZMM_HI256 and HI_ZMM state.
+    pub(super) fn bx_no_evex(&mut self, _instr: &Instruction) -> Result<()> {
+        if !self.protected_mode() || !self.cr4.osxsave() {
+            return self.exception(Exception::Ud, 0);
         }
-
-        let cr4 = self.cr4.get32();
-        let cr4_osxsave = (cr4 & (1 << 18)) != 0; // CR4.OSXSAVE bit 18
-
-        if !cr4_osxsave {
-            self.exception(Exception::Ud, 0)?;
-            return Ok(());
+        if !self.xcr0_enables(XCR0_EVEX_STATE) {
+            return self.exception(Exception::Ud, 0);
         }
-
-        // Check XCR0 for SSE, YMM, and OPMASK masks
-        let xcr0 = self.xcr0.get32();
-        const XCR0_SSE_MASK: u32 = 1 << 0;
-        const XCR0_YMM_MASK: u32 = 1 << 2;
-        const XCR0_OPMASK_MASK: u32 = 1 << 5;
-        if (xcr0 & (XCR0_SSE_MASK | XCR0_YMM_MASK | XCR0_OPMASK_MASK))
-            != (XCR0_SSE_MASK | XCR0_YMM_MASK | XCR0_OPMASK_MASK)
-        {
-            self.exception(Exception::Ud, 0)?;
-            return Ok(());
+        if self.cr0.ts() {
+            return self.exception(Exception::Nm, 0);
         }
-
-        let cr0_ts = (cr0 & (1 << 3)) != 0; // CR0.TS bit 3
-        if cr0_ts {
-            self.exception(Exception::Nm, 0)?;
-        }
-
-        // BX_ASSERT(0) in original - this should not be reached in normal operation
-        tracing::warn!("BxNoOpMask: Opmask instruction executed but Opmask not available");
-        Ok(())
+        self.stale_state_gate("BxNoEVEX")
     }
 
-    /// BxNoEVEX - EVEX not available handler
-    /// Matches BX_CPU_C::BxNoEVEX from proc_ctrl.cc
-    /// Only available if BX_SUPPORT_EVEX
-    /// Raises #UD if not in protected mode, CR4.OSXSAVE is clear, or XCR0 doesn't have required bits
-    /// Raises #NM if CR0.TS is set
-    pub(super) fn bx_no_evex(&mut self, instr: &Instruction) -> Result<()> {
-        // Check if in protected mode (CR0.PE = 1)
-        let cr0 = self.cr0.get32();
-        let cr0_pe = (cr0 & (1 << 0)) != 0; // CR0.PE bit 0
-        if !cr0_pe {
-            self.exception(Exception::Ud, 0)?;
-            return Ok(());
-        }
-
-        let cr4 = self.cr4.get32();
-        let cr4_osxsave = (cr4 & (1 << 18)) != 0; // CR4.OSXSAVE bit 18
-
-        if !cr4_osxsave {
-            self.exception(Exception::Ud, 0)?;
-            return Ok(());
-        }
-
-        // Check XCR0 for SSE, YMM, OPMASK, ZMM_HI256, and HI_ZMM masks
-        let xcr0 = self.xcr0.get32();
-        const XCR0_SSE_MASK: u32 = 1 << 0;
-        const XCR0_YMM_MASK: u32 = 1 << 2;
-        const XCR0_OPMASK_MASK: u32 = 1 << 5;
-        const XCR0_ZMM_HI256_MASK: u32 = 1 << 6;
-        const XCR0_HI_ZMM_MASK: u32 = 1 << 7;
-        if (xcr0
-            & (XCR0_SSE_MASK
-                | XCR0_YMM_MASK
-                | XCR0_OPMASK_MASK
-                | XCR0_ZMM_HI256_MASK
-                | XCR0_HI_ZMM_MASK))
-            != (XCR0_SSE_MASK
-                | XCR0_YMM_MASK
-                | XCR0_OPMASK_MASK
-                | XCR0_ZMM_HI256_MASK
-                | XCR0_HI_ZMM_MASK)
-        {
-            self.exception(Exception::Ud, 0)?;
-            return Ok(());
-        }
-
-        let cr0_ts = (cr0 & (1 << 3)) != 0; // CR0.TS bit 3
-        if cr0_ts {
-            self.exception(Exception::Nm, 0)?;
-        }
-
-        // BX_ASSERT(0) in original - this should not be reached in normal operation
-        tracing::warn!("BxNoEVEX: EVEX instruction executed but EVEX not available");
-        Ok(())
+    /// Whether XCR0 enables every state component in `components`.
+    fn xcr0_enables(&self, components: u32) -> bool {
+        (self.xcr0.get32() & components) == components
     }
 
-    /// BxNoAMX - AMX not available handler
-    /// Matches BX_CPU_C::BxNoAMX from proc_ctrl.cc
-    /// Only available if BX_SUPPORT_AMX
-    /// Raises #UD if not in long64 mode, CR4.OSXSAVE is clear, or XCR0 doesn't have required bits
-    pub(super) fn bx_no_amx(&mut self, instr: &Instruction) -> Result<()> {
-        if !self.long64_mode() {
-            self.exception(Exception::Ud, 0)?;
-            return Ok(());
-        }
-
-        let cr4 = self.cr4.get32();
-        let cr4_osxsave = (cr4 & (1 << 18)) != 0; // CR4.OSXSAVE bit 18
-
-        if !cr4_osxsave {
-            self.exception(Exception::Ud, 0)?;
-            return Ok(());
-        }
-
-        // Check XCR0 for XTILECFG and XTILEDATA masks
-        let xcr0 = self.xcr0.get32();
-        const XCR0_XTILECFG_MASK: u32 = 1 << 17;
-        const XCR0_XTILEDATA_MASK: u32 = 1 << 18;
-        if (xcr0 & (XCR0_XTILECFG_MASK | XCR0_XTILEDATA_MASK))
-            != (XCR0_XTILECFG_MASK | XCR0_XTILEDATA_MASK)
-        {
-            self.exception(Exception::Ud, 0)?;
-            return Ok(());
-        }
-
-        // BX_ASSERT(0) in original - this should not be reached in normal operation
-        tracing::warn!("BxNoAMX: AMX instruction executed but AMX not available");
+    /// Where every `bx_no_*` handler lands when the state it guards turns
+    /// out to be enabled: `fetch_mode_mask` said the state was off while CR0,
+    /// CR4 and XCR0 say it is on, so the mask is stale. Bochs's handlers end
+    /// in `BX_ASSERT(0)` — compiled out in the reference build — and
+    /// `BX_NEXT_TRACE`, which retires the instruction without running it;
+    /// this does the same, and says so.
+    fn stale_state_gate(&self, handler: &'static str) -> Result<()> {
+        tracing::warn!(
+            "{handler} reached at RIP={:#x} with its CPU state enabled: fetch_mode_mask is \
+             stale, and the instruction retires without executing",
+            self.prev_rip
+        );
         Ok(())
     }
 }
 
-// =========================================================================
-// Handler assignment (assign_handler) matching original C++ assignHandler
-// =========================================================================
+/// Bochs crregs.h `BX_XCR0_SSE_MASK | BX_XCR0_YMM_MASK`: what `BxNoAVX` asks
+/// XCR0 for.
+const XCR0_AVX_STATE: u32 =
+    (1 << super::crregs::Xcr0Component::Sse as u32) | (1 << super::crregs::Xcr0Component::Ymm as u32);
 
-impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
-    /// Assign handler function for instruction execution
-    ///
-    /// This function selects the appropriate handler function for an instruction based on:
-    /// - The instruction opcode
-    /// - Whether it's a memory form (modC0 == false) or register form (modC0 == true)
-    /// - Special cases (e.g., MOV with SS segment override)
-    /// - Feature availability (FPU, MMX, SSE, AVX, EVEX, OPMASK, AMX)
-    /// - EVEX-specific rules (broadcast, SAE)
-    ///
-    /// Matching C++ `BX_CPU_C::assignHandler` in fetchdecode32.cc
-    ///
-    /// # Parameters
-    /// - `instr`: The instruction to assign a handler for
-    /// - `fetch_mode_mask`: Bitmask indicating which features are currently available
-    ///
-    /// # Returns
-    /// - `Ok((should_stop_trace, handler_opt))`:
-    ///   - `should_stop_trace`: `true` if trace should end (TRACE_END flag set or error handler assigned)
-    ///   - `handler_opt`: The selected handler function, or `None` if opcode not in table
-    ///
-    /// # Special Cases
-    /// - MOV with SS segment override uses MOV32S handlers (stack_read_dword/stack_write_dword)
-    /// - Instructions requiring unavailable features get error handlers (BxNoFPU, BxNoMMX, etc.)
-    /// - EVEX instructions with invalid broadcast/SAE get BxError handler
-    pub(crate) fn assign_handler(
-        &mut self,
-        instr: &mut Instruction,
-        fetch_mode_mask: super::opcodes_table::FetchModeMask,
-    ) -> Result<(bool, Option<InstructionHandler<T>>)> {
-        use super::opcodes_table::{get_opcode_entry, FetchModeMask, OpFlags};
-        use crate::cpu::decoder::Opcode;
-
-        let ia_opcode = instr.get_ia_opcode();
-        let opcode_entry = get_opcode_entry(ia_opcode);
-
-        // Get opflags from table entry, or use empty if not in table yet
-        let op_flags = opcode_entry
-            .as_ref()
-            .map(|e| e.opflags)
-            .unwrap_or(OpFlags::empty());
-
-        // Check modC0 (register form vs memory form)
-        let is_reg_form = instr.mod_c0();
-
-        // Handler assignment logic (matching original lines 2045-2061)
-        let mut selected_handler: Option<InstructionHandler<T>> = None;
-        let mut is_bx_error = false; // Track if BxError handler was assigned
-
-        if let Some(entry) = &opcode_entry {
-            // Handler assignment from table
-            if !is_reg_form {
-                // Memory form: use execute1 from table (matching line 2046)
-                selected_handler = Some(entry.execute1);
-
-                // Special case: MOV with SS segment override (matching lines 2049-2056)
-                if ia_opcode == Opcode::MovOp32GdEd && instr.seg() == BxSegregs::Ss as u8 {
-                    // Use MOV32S_GdEdM handler (matching C++ line 2051)
-                    use super::opcodes_table::mov32s_gd_ed_m_wrapper;
-                    selected_handler = Some(mov32s_gd_ed_m_wrapper);
-                }
-                if ia_opcode == Opcode::MovOp32EdGd && instr.seg() == BxSegregs::Ss as u8 {
-                    // Use MOV32S_EdGdM handler (matching C++ line 2055)
-                    use super::opcodes_table::mov32s_ed_gd_m_wrapper;
-                    selected_handler = Some(mov32s_ed_gd_m_wrapper);
-                }
-            } else {
-                // Register form: use execute2 from table as execute1 (matching line 2059)
-                if let Some(execute2) = entry.execute2 {
-                    selected_handler = Some(execute2);
-                } else {
-                    // No register form handler - fall back to execute_instruction
-                    return Ok((false, None));
-                }
-            }
-        } else {
-            // Opcode not in table yet - will use execute_instruction match statement
-            return Ok((false, None));
-        }
-
-        // EVEX-specific checks (matching lines 2067-2084)
-        // These checks assign BxError IMMEDIATELY if EVEX rules are violated
-        {
-            if op_flags.contains(OpFlags::PREPARE_EVEX) {
-                if instr.get_evex_b() != 0 {
-                    if !is_reg_form {
-                        // Memory form: check NO_BROADCAST
-                        if op_flags.contains(OpFlags::PREPARE_EVEX_NO_BROADCAST) {
-                            tracing::trace!(
-                                "{:?}: broadcast is not supported for this instruction",
-                                ia_opcode
-                            );
-                            // Matching C++ line 2073: assign BxError immediately
-                            selected_handler = Some(super::opcodes_table::bx_error_wrapper);
-                            is_bx_error = true;
-                        }
-                    } else {
-                        // Register form: check NO_SAE
-                        if op_flags.contains(OpFlags::PREPARE_EVEX_NO_SAE) {
-                            tracing::trace!(
-                                "{:?}: EVEX.b in reg form is not allowed for instructions which cannot cause floating point exception",
-                                ia_opcode
-                            );
-                            // Matching C++ line 2079: assign BxError immediately
-                            selected_handler = Some(super::opcodes_table::bx_error_wrapper);
-                            is_bx_error = true;
-                        }
-                    }
-                }
-            }
-        }
-
-        // Feature availability checks (matching lines 2086-2133)
-        // These checks only assign error handlers if execute1 != BxError (matching C++ lines 2088, 2092, etc.)
-        // Check FPU/MMX availability
-        if !fetch_mode_mask.contains(FetchModeMask::FPU_MMX_OK) {
-            if op_flags.contains(OpFlags::PREPARE_FPU) {
-                // Matching C++ line 2088: only assign if execute1 != BxError
-                if !is_bx_error {
-                    use super::opcodes_table::bx_no_fpu_wrapper;
-                    selected_handler = Some(bx_no_fpu_wrapper);
-                }
-                return Ok((true, selected_handler)); // Stop trace
-            }
-            if op_flags.contains(OpFlags::PREPARE_MMX) {
-                // Matching C++ line 2092: only assign if execute1 != BxError
-                if !is_bx_error {
-                    use super::opcodes_table::bx_no_mmx_wrapper;
-                    selected_handler = Some(bx_no_mmx_wrapper);
-                }
-                return Ok((true, selected_handler)); // Stop trace
-            }
-        }
-
-        // Check SSE availability (CPU_LEVEL >= 6)
-        {
-            if !fetch_mode_mask.contains(FetchModeMask::SSE_OK) {
-                if op_flags.contains(OpFlags::PREPARE_SSE) {
-                    // Matching C++ line 2099: only assign if execute1 != BxError
-                    if !is_bx_error {
-                        use super::opcodes_table::bx_no_sse_wrapper;
-                        selected_handler = Some(bx_no_sse_wrapper);
-                    }
-                    return Ok((true, selected_handler)); // Stop trace
-                }
-            }
-        }
-
-        // Check AVX availability
-        {
-            if !fetch_mode_mask.contains(FetchModeMask::AVX_OK) {
-                if op_flags.contains(OpFlags::PREPARE_AVX) {
-                    // Matching C++ line 2106: only assign if execute1 != BxError
-                    if !is_bx_error {
-                        use super::opcodes_table::bx_no_avx_wrapper;
-                        selected_handler = Some(bx_no_avx_wrapper);
-                    }
-                    return Ok((true, selected_handler)); // Stop trace
-                }
-            }
-        }
-
-        // Check OPMASK availability
-        {
-            if !fetch_mode_mask.contains(FetchModeMask::OPMASK_OK) {
-                if op_flags.contains(OpFlags::PREPARE_OPMASK) {
-                    // Matching C++ line 2113: only assign if execute1 != BxError
-                    if !is_bx_error {
-                        use super::opcodes_table::bx_no_opmask_wrapper;
-                        selected_handler = Some(bx_no_opmask_wrapper);
-                    }
-                    return Ok((true, selected_handler)); // Stop trace
-                }
-            }
-        }
-
-        // Check EVEX availability
-        {
-            if !fetch_mode_mask.contains(FetchModeMask::EVEX_OK) {
-                if op_flags.contains(OpFlags::PREPARE_EVEX) {
-                    // Matching C++ line 2119: only assign if execute1 != BxError
-                    if !is_bx_error {
-                        use super::opcodes_table::bx_no_evex_wrapper;
-                        selected_handler = Some(bx_no_evex_wrapper);
-                    }
-                    return Ok((true, selected_handler)); // Stop trace
-                }
-            }
-        }
-
-        // Check AMX availability
-        {
-            if !fetch_mode_mask.contains(FetchModeMask::AMX_OK)
-                && op_flags.contains(OpFlags::PREPARE_AMX)
-            {
-                // Matching C++ line 2126: only assign if execute1 != BxError
-                if !is_bx_error {
-                    use super::opcodes_table::bx_no_amx_wrapper;
-                    selected_handler = Some(bx_no_amx_wrapper);
-                }
-                return Ok((true, selected_handler)); // Stop trace
-            }
-        }
-
-        // Check if trace should end (matching line 2135)
-        // Original: if ((op_flags & BX_TRACE_END) != 0 || i->execute1 == &BX_CPU_C::BxError)
-        if op_flags.contains(OpFlags::TRACE_END) || is_bx_error {
-            return Ok((true, selected_handler)); // Stop trace
-        }
-
-        // Return handler for execution
-        Ok((false, selected_handler))
-    }
-}
+/// `XCR0_AVX_STATE` plus `BX_XCR0_OPMASK_MASK | BX_XCR0_ZMM_HI256_MASK |
+/// BX_XCR0_HI_ZMM_MASK`: what `BxNoEVEX` asks XCR0 for.
+const XCR0_EVEX_STATE: u32 = XCR0_AVX_STATE
+    | (1 << super::crregs::Xcr0Component::Opmask as u32)
+    | (1 << super::crregs::Xcr0Component::ZmmHi256 as u32)
+    | (1 << super::crregs::Xcr0Component::HiZmm as u32);
 
 #[cfg(test)]
 mod tests {

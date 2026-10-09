@@ -1086,6 +1086,12 @@ impl<T: Instrumentation> BxCpuC<T> {
     /// paging bits and `EFER.NXE`/`LMA`. A segment does not translate — it
     /// forms the linear address the TLB is keyed on — and neither does `RIP`,
     /// a general register or the vector file.
+    ///
+    /// The same two groups carry what the icache state gate reads through
+    /// `fetch_mode_mask`: CR0.EM/TS and CR4.OSFXSR/OSXSAVE with the control
+    /// registers, XCR0 with the model-specific ones. The gate is rebuilt here,
+    /// after every group is written, because the mode change the control
+    /// registers trigger runs before XCR0 is.
     fn rederive_after_import(&mut self, groups: ArchGroups) {
         if groups.is_empty() {
             return;
@@ -1095,6 +1101,9 @@ impl<T: Instrumentation> BxCpuC<T> {
         self.invalidate_prefetch_q();
         self.invalidate_stack_cache();
         if groups.intersects(ArchGroups::CONTROL_REGS | ArchGroups::MSRS) {
+            self.handle_fpu_mmx_mode_change();
+            self.handle_sse_mode_change();
+            self.handle_avx_mode_change();
             self.tlb_flush();
         }
     }
