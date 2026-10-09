@@ -4,7 +4,8 @@
 //!
 //! The destination and disp8 tables come from the operand lists in Bochs's
 //! `cpu/decoder/ia_opcodes_evex.def`, where each `OP_*` is
-//! `BX_FORM_SRC(type, src)`. The first operand's `src` gives the
+//! `BX_FORM_SRC(type, src)` or an alias of one (`OP_Mb = OP_Eb`), which
+//! is followed. The first operand's `src` gives the
 //! destination field and the first later ModRM operand's `src` the
 //! source field; the memory operand's `type` gives the disp8 scale
 //! that `evex_displ8_compression` computes upstream. The test-only
@@ -121,9 +122,11 @@ pub(crate) const fn evex_dst(op: Opcode) -> EvexDst {
         Opcode::EvexVpcompresswWdqVdq => EvexDst::Rm,
         Opcode::EvexVpcompresswWdqVdqKmask => EvexDst::Rm,
         Opcode::EvexVpextrbEdVdqIbR => EvexDst::Rm,
+        Opcode::EvexVpextrbMbVdqIbM => EvexDst::Rm,
         Opcode::EvexVpextrdEdVdqIb => EvexDst::Rm,
         Opcode::EvexVpextrqEqVdqIb => EvexDst::Rm,
         Opcode::EvexVpextrwEdVdqIbR => EvexDst::Rm,
+        Opcode::EvexVpextrwMwVdqIbM => EvexDst::Rm,
         Opcode::EvexVpmovdbWdqVdq => EvexDst::Rm,
         Opcode::EvexVpmovdbWdqVdqKmask => EvexDst::Rm,
         Opcode::EvexVpmovdwWdqVdq => EvexDst::Rm,
@@ -2971,10 +2974,12 @@ pub(crate) const fn evex_tuple(op: Opcode) -> EvexTuple {
         Opcode::EvexVpexpandwVdqWdq => EvexTuple::ScalarWord,
         Opcode::EvexVpexpandwVdqWdqKmask => EvexTuple::ScalarWord,
         Opcode::EvexVpextrbEdVdqIbR => EvexTuple::Gpr32,
+        Opcode::EvexVpextrbMbVdqIbM => EvexTuple::None,
         Opcode::EvexVpextrdEdVdqIb => EvexTuple::Gpr32,
         Opcode::EvexVpextrqEqVdqIb => EvexTuple::Gpr64,
         Opcode::EvexVpextrwEdVdqIbR => EvexTuple::Gpr32,
         Opcode::EvexVpextrwGdUdqIb => EvexTuple::FullVector,
+        Opcode::EvexVpextrwMwVdqIbM => EvexTuple::Gpr16,
         Opcode::EvexVpinsrbVdqEbIb => EvexTuple::Gpr16,
         Opcode::EvexVpinsrdVdqEdIb => EvexTuple::Gpr32,
         Opcode::EvexVpinsrqVdqEqIb => EvexTuple::Gpr64,

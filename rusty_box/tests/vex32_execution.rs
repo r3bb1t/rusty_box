@@ -300,6 +300,54 @@ fn evex_w1_vcvtsi2ss_converts_eax_in_protected_mode() {
         .expect("join");
 }
 
+/// Bochs fetchdecode32.cc `evex_displ8_compression` scales the disp8 of an
+/// EVEX VPEXTRB/VPEXTRW store by the GPR size its ia_opcodes_evex.def entry
+/// names first: `OP_Mb`/`OP_Mw`, fetchdecode.h aliases of `OP_Eb`/`OP_Ew`
+/// (`BX_GPR8`/`BX_GPR16` on `BX_SRC_RM`), give N = 1 and N = 2, and
+/// `assign_srcs` applies N to `displ32u` with 32-bit addressing. sse.cc
+/// `PEXTRB_MbVdqIbM`/`PEXTRW_MwVdqIbM` store the element of `i->src()`, the
+/// ModRM.reg register (`OP_Vdq`).
+#[test]
+fn evex_vpextrb_vpextrw_stores_scale_disp8_in_protected_mode() {
+    std::thread::Builder::new()
+        .stack_size(TEST_STACK_SIZE)
+        .spawn(|| {
+            let mut emu = protected32_emulator();
+            let mut source = [0u8; 64];
+            for (n, byte) in source.iter_mut().enumerate().take(16) {
+                *byte = 0x40 + n as u8;
+            }
+            emu.reg_write_zmm(X86Reg::Zmm1, source);
+            // xmm0 is the register ModRM.rm's base names.
+            emu.reg_write_zmm(X86Reg::Zmm0, [0xE0; 64]);
+            emu.reg_write(X86Reg::Rax, DEST);
+
+            // vpextrw [eax+0x04*2], xmm1, 3 = 62 F3 7D 08 15 48 04 03
+            //   F3: R X B R' = 1111, map 0F3A
+            //   7D: W(0) vvvv(1111) 1 pp(01 = 66)
+            //   08: z(0) L'L(00) b(0) V'(1) aaa(000)
+            //   48: mod 01 (disp8), reg 001 (xmm1), rm 000 (eax)
+            emu.mem_write(DEST, &[0x5A; 16]).expect("poison");
+            run(&mut emu, &[0x62, 0xF3, 0x7D, 0x08, 0x15, 0x48, 0x04, 0x03], 4);
+            let mut got = [0u8; 16];
+            emu.mem_read(DEST, &mut got).expect("read back");
+            let mut want = [0x5Au8; 16];
+            want[8..10].copy_from_slice(&source[6..8]);
+            assert_eq!(got, want, "VPEXTRW m16 stores word 3 of xmm1 at eax + 4 * 2");
+
+            // vpextrb [eax+0x04], xmm1, 7 = 62 F3 7D 08 14 48 04 07
+            emu.mem_write(DEST, &[0x5A; 16]).expect("poison");
+            run(&mut emu, &[0x62, 0xF3, 0x7D, 0x08, 0x14, 0x48, 0x04, 0x07], 4);
+            emu.mem_read(DEST, &mut got).expect("read back");
+            let mut want = [0x5Au8; 16];
+            want[4] = source[7];
+            assert_eq!(got, want, "VPEXTRB m8 stores byte 7 of xmm1 at eax + 4");
+        })
+        .expect("spawn")
+        .join()
+        .expect("join");
+}
+
 /// LES, LDS and BOUND still decode: the VEX and EVEX prefixes are only
 /// recognised when the following byte encodes a register operand, which those
 /// three instructions never do.

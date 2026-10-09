@@ -852,3 +852,72 @@ decided.
 
 **Filing status**: NOT FILED. The PR body, filing steps and verification notes
 are in `docs/bochs-upstream-pr-retf16-imm16.md`.
+
+---
+
+## VEX shift-by-immediate instructions execute with a memory operand
+
+**Severity**: guest-visible, but narrow. A VEX-encoded VPSRLW, VPSRAW, VPSLLW,
+VPSRLD, VPSRAD, VPSLLD, VPSRLQ, VPSRLDQ, VPSLLQ or VPSLLDQ with a memory
+operand reads and shifts 16 or 32 bytes, where the processor raises #UD. No
+compiler emits these encodings. What sees the difference is software that
+probes for #UD (fuzzers, CPU-identification code, anti-emulation checks) and
+hand-written or corrupted code.
+
+**Location**: `cpu/decoder/fetchdecode_opmap_avx.cc` — `BxOpcodeGroup_VEX_0F71`,
+`BxOpcodeGroup_VEX_0F72`, `BxOpcodeGroup_VEX_0F73`.
+
+**Root cause**:
+
+```cpp
+// cpu/decoder/fetchdecode_opmap_avx.cc
+static const Bit64u BxOpcodeGroup_VEX_0F71[] = {
+  form_opcode(ATTR_SSE_PREFIX_66 | ATTR_NNN2 | ATTR_VL128, BX_IA_V128_VPSRLW_UdqIb),
+  ...                                     // no ATTR_MODC0 on any row
+```
+
+None of the twenty rows in the three groups requires a register operand. The
+`ia_opcodes.def` entries (`BX_IA_V128_VPSRLW_UdqIb` and its siblings) declare
+`OP_Wdq` and give a memory handler (`LOADU_Wdq` for VL128, `LOAD_Vector` for
+VL256), so the memory form decodes and runs. The legacy SSE groups
+`BxOpcodeTable0F71/72/73` (`fetchdecode_opmap.h`) mark the same instructions
+`ATTR_MODC0`. The opcodes' own names say `Udq`, which means a register selected
+by ModRM.r/m. Upstream master `f87c5e226` (2026-10-03) still has the bug.
+
+**Architecture**: the SDM lists every VEX form with a register operand only:
+`VEX.128.66.0F.WIG 71 /2 ib VPSRLW xmm1, xmm2, imm8`, and `ymm2` for VEX.256.
+Only the EVEX forms take `xmm2/m128`, and Bochs decodes those through its EVEX
+groups, which are correct.
+
+**Measured** (2026-10-09) with a boot-sector probe that enters 32-bit protected
+mode, enables SSE and AVX state, and runs each encoding under #UD, #NM, #GP and
+#PF handlers. `+` means the instruction retired, `#U` means #UD:
+
+| Test | Hardware | Bochs `f87c5e226` | Bochs + fix |
+|---|---|---|---|
+| VEX.128 VPSRLW xmm, xmm, 4 (control) | + | + | + |
+| legacy PSRLW xmm, [mem], 4 (control) | #U | #U | #U |
+| VEX.128 VPSRLW / VPSRLD / VPSRLQ / VPSRLDQ, [mem] | #U ×4 | + ×4 | #U ×4 |
+| VEX.256 VPSRLW ymm, ymm, 4 (control) | + | + | + |
+| VEX.256 VPSRLW ymm, [mem], 4 | #U | + | #U |
+
+The hardware is an Intel Core i5-12450H (family 6, model 154, stepping 3),
+reached through the Windows Hypervisor Platform. The guest's code executes on
+the processor, and `rusty_box_whp_engine` intercepts only #GP, so each #UD came
+from the CPU. The probe image was loaded by a temporary test, since deleted.
+
+**Fix**: add `| ATTR_MODC0` to all twenty rows. This is prepared as
+`docs/bochs-vex-shift-imm-memory-fix.patch` (`git am`-ready, with a HISTORY
+line). The patch was built and verified against master `f87c5e226`.
+
+**Reproduction**: `docs/bochs-vex-shift-imm-memory-probe.S`, a 512-byte boot
+sector built with GNU binutils alone. It prints one result per test to port
+0xE9, then writes `Shutdown` to port 0x8900.
+
+**Rusty Box behavior**: implements the hardware behaviour, and registers it as
+divergence D19 in `docs/bochs-parity-divergences.md`. The VEX path decodes
+through the legacy table's register-only row (`opmap.rs` `BxOpcodeTable0F71`
+and its siblings), so the memory form raises #UD.
+
+**Filing status**: NOT FILED. The PR body, filing steps and verification notes
+are in `docs/bochs-upstream-pr-vex-shift-imm-memory.md`.

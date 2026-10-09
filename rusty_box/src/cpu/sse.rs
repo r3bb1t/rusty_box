@@ -1481,20 +1481,28 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     // SSE4.1 Insert/Extract (PEXTRB/D/Q, PINSRB/D/Q)
     // ========================================================================
 
-    /// PEXTRB EdVdqIbR — extract byte from XMM at imm8 & 0xF position to GPR32 (register form)
-    /// Decoder: 0F 3A map → dst=nnn (XMM source), src1=rm (GPR destination)
+    // The extracts below are the handlers of the legacy, VEX and EVEX forms
+    // alike, as in Bochs, whose def entries all lead with the GPR or memory
+    // destination (OP_Ed/OP_Eq/OP_Mb/OP_Mw, ModRM.rm) and then the XMM source
+    // (OP_Vdq/OP_Vps, ModRM.reg): `src1()` is the XMM source and, in a
+    // register form, `dst()` the GPR destination — Bochs's `i->src()` and
+    // `i->dst()`.
+
+    /// PEXTRB EdVdqIbR — extract byte from XMM at imm8 & 0xF position to GPR32
+    /// (register form). Bochs sse.cc `PEXTRB_EdVdqIbR`.
     pub(super) fn pextrb_ed_vdq_ib_r(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
-        let op = self.read_xmm_reg(instr.dst()); // nnn = XMM source
+        let op = self.read_xmm_reg(instr.src1());
         let result = op.xmmubyte((instr.ib() & 0xF) as usize) as u32;
-        self.set_gpr32(instr.src1().into(), result); // rm = GPR destination
+        self.set_gpr32(instr.dst().into(), result);
         Ok(())
     }
 
-    /// PEXTRB MbVdqIbM — extract byte from XMM at imm8 & 0xF position to memory (memory form)
+    /// PEXTRB MbVdqIbM — extract byte from XMM at imm8 & 0xF position to memory
+    /// (memory form). Bochs sse.cc `PEXTRB_MbVdqIbM`.
     pub(super) fn pextrb_mb_vdq_ib_m(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
-        let op = self.read_xmm_reg(instr.dst()); // nnn = XMM source
+        let op = self.read_xmm_reg(instr.src1());
         let result = op.xmmubyte((instr.ib() & 0xF) as usize);
         let seg = BxSegregs::from(instr.seg());
         let eaddr = self.resolve_addr(instr);
@@ -1507,9 +1515,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// zero-extends the word into the full 32-bit register.
     pub(super) fn pextrw_ed_vdq_ib_r(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
-        let op = self.read_xmm_reg(instr.dst()); // nnn = XMM source
+        let op = self.read_xmm_reg(instr.src1());
         let result = u32::from(op.xmm16u((instr.ib() & 0x7) as usize));
-        self.set_gpr32(instr.src1().into(), result); // rm = GPR destination
+        self.set_gpr32(instr.dst().into(), result);
         Ok(())
     }
 
@@ -1517,7 +1525,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// (66 0F 3A 15 /r ib, memory destination). Bochs `PEXTRW_MwVdqIbM`.
     pub(super) fn pextrw_mw_vdq_ib_m(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
-        let op = self.read_xmm_reg(instr.dst()); // nnn = XMM source
+        let op = self.read_xmm_reg(instr.src1());
         let result = op.xmm16u((instr.ib() & 0x7) as usize);
         let seg = BxSegregs::from(instr.seg());
         let eaddr = self.resolve_addr(instr);
@@ -1525,14 +1533,15 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         Ok(())
     }
 
-    /// PEXTRD EdVdqIb — extract dword from XMM at imm8 & 3 position (combined R/M form)
-    /// Decoder: 0F 3A map → dst=nnn (XMM source), src1=rm (GPR/mem destination)
+    /// PEXTRD EdVdqIb — extract dword from XMM at imm8 & 3 position (combined
+    /// R/M form). Bochs sse.cc `PEXTRD_EdVdqIbR` / `PEXTRD_EdVdqIbM`, which
+    /// EXTRACTPS shares.
     pub(super) fn pextrd_ed_vdq_ib(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
-        let op = self.read_xmm_reg(instr.dst()); // nnn = XMM source
+        let op = self.read_xmm_reg(instr.src1());
         let result = op.xmm32u((instr.ib() & 3) as usize);
         if instr.mod_c0() {
-            self.set_gpr32(instr.src1().into(), result); // rm = GPR destination
+            self.set_gpr32(instr.dst().into(), result);
         } else {
             let seg = BxSegregs::from(instr.seg());
             let eaddr = self.resolve_addr(instr);
@@ -1541,14 +1550,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         Ok(())
     }
 
-    /// PEXTRQ EqVdqIb — extract qword from XMM at imm8 & 1 position (combined R/M form)
-    /// Decoder: 0F 3A map → dst=nnn (XMM source), src1=rm (GPR/mem destination)
+    /// PEXTRQ EqVdqIb — extract qword from XMM at imm8 & 1 position (combined
+    /// R/M form). Bochs sse.cc `PEXTRQ_EqVdqIbR` / `PEXTRQ_EqVdqIbM`.
     pub(super) fn pextrq_eq_vdq_ib(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
-        let op = self.read_xmm_reg(instr.dst()); // nnn = XMM source
+        let op = self.read_xmm_reg(instr.src1());
         let result = op.xmm64u((instr.ib() & 1) as usize);
         if instr.mod_c0() {
-            self.set_gpr64(instr.src1().into(), result); // rm = GPR destination
+            self.set_gpr64(instr.dst().into(), result);
         } else {
             let seg = BxSegregs::from(instr.seg());
             let eaddr = self.resolve_addr(instr);

@@ -1770,6 +1770,100 @@ fn pextrw_to_rm16_extracts_the_selected_word() {
     });
 }
 
+/// One legacy or VEX extract at 0F 3A 14..17: `code` takes the element the
+/// immediate selects from xmm2 (ModRM.reg) into rcx, or to `[rax]`
+/// (ModRM.rm).
+struct Extract {
+    name: &'static str,
+    code: &'static [u8],
+    /// The bytes of xmm2 the immediate selects.
+    element: core::ops::Range<usize>,
+}
+
+/// Bochs ia_opcodes.def leads PEXTRB/PEXTRW/PEXTRD/PEXTRQ/EXTRACTPS and their
+/// VEX forms with the GPR or memory destination (`OP_Ed`/`OP_Eq`/`OP_Mb`/
+/// `OP_Mw`, ModRM.rm) and then the XMM source (`OP_Vdq`/`OP_Vps`, ModRM.reg),
+/// and sse.cc `PEXTRB_EdVdqIbR` … `PEXTRQ_EqVdqIbM` read `i->src()` and write
+/// `i->dst()`. The 32-bit register forms zero bits 63:32
+/// (`BX_WRITE_32BIT_REGZ`).
+///
+/// ModRM D1 names xmm2 in reg and ecx in rm, and ModRM 10 names xmm2 and
+/// `[rax]`. Read the other way round, the register forms would take xmm1 and
+/// write rdx, and the memory forms would store from xmm0; all three are
+/// poisoned.
+#[test]
+fn legacy_and_vex_extracts_read_modrm_reg_and_write_modrm_rm() {
+    with_avx_emu(|emu| {
+        const SCRATCH: u64 = 0x0060_0000;
+        const RDX: u64 = 0x5555_6666_7777_8888;
+        let source: [u8; 16] = core::array::from_fn(|n| 0x30 + n as u8);
+
+        let to_gpr = [
+            Extract { name: "pextrb ecx, xmm2, 9", code: &[0x66, 0x0F, 0x3A, 0x14, 0xD1, 0x09], element: 9..10 },
+            Extract { name: "pextrw ecx, xmm2, 5", code: &[0x66, 0x0F, 0x3A, 0x15, 0xD1, 0x05], element: 10..12 },
+            Extract { name: "pextrd ecx, xmm2, 2", code: &[0x66, 0x0F, 0x3A, 0x16, 0xD1, 0x02], element: 8..12 },
+            Extract { name: "pextrq rcx, xmm2, 1", code: &[0x66, 0x48, 0x0F, 0x3A, 0x16, 0xD1, 0x01], element: 8..16 },
+            Extract { name: "extractps ecx, xmm2, 3", code: &[0x66, 0x0F, 0x3A, 0x17, 0xD1, 0x03], element: 12..16 },
+            Extract { name: "vpextrb ecx, xmm2, 9", code: &[0xC4, 0xE3, 0x79, 0x14, 0xD1, 0x09], element: 9..10 },
+            Extract { name: "vpextrw ecx, xmm2, 5", code: &[0xC4, 0xE3, 0x79, 0x15, 0xD1, 0x05], element: 10..12 },
+            Extract { name: "vpextrd ecx, xmm2, 2", code: &[0xC4, 0xE3, 0x79, 0x16, 0xD1, 0x02], element: 8..12 },
+            Extract { name: "vpextrq rcx, xmm2, 1", code: &[0xC4, 0xE3, 0xF9, 0x16, 0xD1, 0x01], element: 8..16 },
+            Extract { name: "vextractps ecx, xmm2, 3", code: &[0xC4, 0xE3, 0x79, 0x17, 0xD1, 0x03], element: 12..16 },
+        ];
+        let to_memory = [
+            Extract { name: "pextrb [rax], xmm2, 9", code: &[0x66, 0x0F, 0x3A, 0x14, 0x10, 0x09], element: 9..10 },
+            Extract { name: "pextrw [rax], xmm2, 5", code: &[0x66, 0x0F, 0x3A, 0x15, 0x10, 0x05], element: 10..12 },
+            Extract { name: "pextrd [rax], xmm2, 2", code: &[0x66, 0x0F, 0x3A, 0x16, 0x10, 0x02], element: 8..12 },
+            Extract { name: "pextrq [rax], xmm2, 1", code: &[0x66, 0x48, 0x0F, 0x3A, 0x16, 0x10, 0x01], element: 8..16 },
+            Extract { name: "extractps [rax], xmm2, 3", code: &[0x66, 0x0F, 0x3A, 0x17, 0x10, 0x03], element: 12..16 },
+            Extract { name: "vpextrb [rax], xmm2, 9", code: &[0xC4, 0xE3, 0x79, 0x14, 0x10, 0x09], element: 9..10 },
+            Extract { name: "vpextrw [rax], xmm2, 5", code: &[0xC4, 0xE3, 0x79, 0x15, 0x10, 0x05], element: 10..12 },
+            Extract { name: "vpextrd [rax], xmm2, 2", code: &[0xC4, 0xE3, 0x79, 0x16, 0x10, 0x02], element: 8..12 },
+            Extract { name: "vpextrq [rax], xmm2, 1", code: &[0xC4, 0xE3, 0xF9, 0x16, 0x10, 0x01], element: 8..16 },
+            Extract { name: "vextractps [rax], xmm2, 3", code: &[0xC4, 0xE3, 0x79, 0x17, 0x10, 0x03], element: 12..16 },
+        ];
+
+        let mut wrong = Vec::new();
+        for case in &to_gpr {
+            emu.reg_write_xmm(X86Reg::Xmm1, [0xC7; 16]);
+            emu.reg_write_xmm(X86Reg::Xmm2, source);
+            emu.reg_write(X86Reg::Rcx, 0xDEAD_BEEF_DEAD_BEEF);
+            emu.reg_write(X86Reg::Rdx, RDX);
+            run_one(emu, case.name, case.code);
+            let mut bytes = [0u8; 8];
+            bytes[..case.element.len()].copy_from_slice(&source[case.element.clone()]);
+            let want = u64::from_le_bytes(bytes);
+            let rcx = emu.reg_read(X86Reg::Rcx);
+            let rdx = emu.reg_read(X86Reg::Rdx);
+            if rcx != want || rdx != RDX {
+                wrong.push(format!(
+                    "{}: rcx {rcx:#018X} (want {want:#018X}), rdx {rdx:#018X} (want {RDX:#018X})",
+                    case.name
+                ));
+            }
+        }
+        for case in &to_memory {
+            emu.mem_write(SCRATCH, &[0x5A; 16]).expect("poison");
+            emu.reg_write_xmm(X86Reg::Xmm0, [0xE0; 16]);
+            emu.reg_write_xmm(X86Reg::Xmm2, source);
+            emu.reg_write(X86Reg::Rax, SCRATCH);
+            run_one(emu, case.name, case.code);
+            let mut want = [0x5Au8; 16];
+            want[..case.element.len()].copy_from_slice(&source[case.element.clone()]);
+            let mut got = [0u8; 16];
+            emu.mem_read(SCRATCH, &mut got).expect("read back");
+            if got != want {
+                wrong.push(format!("{}: [rax] {got:02X?} (want {want:02X?})", case.name));
+            }
+        }
+        assert!(
+            wrong.is_empty(),
+            "an extract takes ModRM.reg's element to ModRM.rm:\n{}",
+            wrong.join("\n")
+        );
+    });
+}
+
 #[test]
 fn indexbyte_avx2_ingredients() {
     std::thread::Builder::new()

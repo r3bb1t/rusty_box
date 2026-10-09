@@ -1,0 +1,108 @@
+From 5212537f13ba39bf268f7d2bdd050ad88210f638 Mon Sep 17 00:00:00 2001
+From: r3bb1t <49586603+r3bb1t@users.noreply.github.com>
+Date: Fri, 9 Oct 2026 10:49:17 +0300
+Subject: [PATCH] VEX shift by immediate instructions must #UD with a memory
+ operand
+
+The VEX groups for 66 0F 71, 72 and 73 (BxOpcodeGroup_VEX_0F71/72/73 in
+fetchdecode_opmap_avx.cc) carry no ATTR_MODC0, so Bochs decodes and
+executes VPSRLW/VPSRAW/VPSLLW, VPSRLD/VPSRAD/VPSLLD and
+VPSRLQ/VPSRLDQ/VPSLLQ/VPSLLDQ with a memory operand, reading 16 or 32
+bytes and shifting them.
+
+These forms take a register operand only:
+ - the SDM lists every VEX form as "xmm2, imm8" / "ymm2, imm8", ModRM:r/m
+   register; only the EVEX forms (separate EVEX groups, unchanged here)
+   take xmm2/m128
+ - the legacy SSE groups BxOpcodeTable0F71/72/73 in fetchdecode_opmap.h
+   already mark the same instructions ATTR_MODC0, and the opcodes are
+   named *_UdqIb (U = register only)
+ - measured on an Intel Core i5-12450H with a boot-sector probe in 32-bit
+   protected mode with AVX state enabled: the register forms retire, and
+   VPSRLW, VPSRLD, VPSRLQ, VPSRLDQ (VEX.128) and VPSRLW (VEX.256) with a
+   memory operand all raise #UD. Bochs today executes all five; with this
+   patch it raises #UD for each, matching the processor.
+---
+ bochs/cpu/HISTORY                          |  1 +
+ bochs/cpu/decoder/fetchdecode_opmap_avx.cc | 40 +++++++++++-----------
+ 2 files changed, 21 insertions(+), 20 deletions(-)
+
+diff --git a/bochs/cpu/HISTORY b/bochs/cpu/HISTORY
+index 3493adced..0570081fe 100644
+--- a/bochs/cpu/HISTORY
++++ b/bochs/cpu/HISTORY
+@@ -10,6 +10,7 @@ Legend:
+ Changes after Bochs 3.1:
+ 
+ ! Implemented AI Compute Extensions (ACE) emulation according AI Compute Extensions (ACE) Specification rev1.16.2 from x86 Ecosystem Advisory Group
++- AVX/AVX2: VEX encoded shift by immediate instructions (VPSRLW/VPSRAW/VPSLLW/VPSRLD/VPSRAD/VPSLLD/VPSRLQ/VPSRLDQ/VPSLLQ/VPSLLDQ) must #UD when encoded with a memory operand
+ - AMX: TILELOADD/TILESTORED must #UD if memory operand is encoded without SIB byte, use zero stride when SIB has no index register (was using RSP)
+ - AVX/AVX-512: VGATHER/VSCATTER instructions must #UD if memory operand is encoded without VSIB byte
+ + AMX-FP8: rewrite TDPBF8PS/TDPHF8PS/TDPBHF8PS/TDPHBF8PS to match SDM: they must accumulate FP8 products exactly in fixed point over the whole K dimension with single rounding to FP32
+diff --git a/bochs/cpu/decoder/fetchdecode_opmap_avx.cc b/bochs/cpu/decoder/fetchdecode_opmap_avx.cc
+index 0f600caca..a10f10d91 100644
+--- a/bochs/cpu/decoder/fetchdecode_opmap_avx.cc
++++ b/bochs/cpu/decoder/fetchdecode_opmap_avx.cc
+@@ -388,39 +388,39 @@ static const Bit64u BxOpcodeGroup_VEX_0F70[] = {
+ };
+ 
+ static const Bit64u BxOpcodeGroup_VEX_0F71[] = {
+-  form_opcode(ATTR_SSE_PREFIX_66 | ATTR_NNN2 | ATTR_VL128, BX_IA_V128_VPSRLW_UdqIb),
+-  form_opcode(ATTR_SSE_PREFIX_66 | ATTR_NNN2 | ATTR_VL256, BX_IA_V256_VPSRLW_UdqIb),
++  form_opcode(ATTR_SSE_PREFIX_66 | ATTR_NNN2 | ATTR_VL128 | ATTR_MODC0, BX_IA_V128_VPSRLW_UdqIb),
++  form_opcode(ATTR_SSE_PREFIX_66 | ATTR_NNN2 | ATTR_VL256 | ATTR_MODC0, BX_IA_V256_VPSRLW_UdqIb),
+ 
+-  form_opcode(ATTR_SSE_PREFIX_66 | ATTR_NNN4 | ATTR_VL128, BX_IA_V128_VPSRAW_UdqIb),
+-  form_opcode(ATTR_SSE_PREFIX_66 | ATTR_NNN4 | ATTR_VL256, BX_IA_V256_VPSRAW_UdqIb),
++  form_opcode(ATTR_SSE_PREFIX_66 | ATTR_NNN4 | ATTR_VL128 | ATTR_MODC0, BX_IA_V128_VPSRAW_UdqIb),
++  form_opcode(ATTR_SSE_PREFIX_66 | ATTR_NNN4 | ATTR_VL256 | ATTR_MODC0, BX_IA_V256_VPSRAW_UdqIb),
+ 
+-  form_opcode(ATTR_SSE_PREFIX_66 | ATTR_NNN6 | ATTR_VL128, BX_IA_V128_VPSLLW_UdqIb),
+-  last_opcode(ATTR_SSE_PREFIX_66 | ATTR_NNN6 | ATTR_VL256, BX_IA_V256_VPSLLW_UdqIb)
++  form_opcode(ATTR_SSE_PREFIX_66 | ATTR_NNN6 | ATTR_VL128 | ATTR_MODC0, BX_IA_V128_VPSLLW_UdqIb),
++  last_opcode(ATTR_SSE_PREFIX_66 | ATTR_NNN6 | ATTR_VL256 | ATTR_MODC0, BX_IA_V256_VPSLLW_UdqIb)
+ };
+ 
+ static const Bit64u BxOpcodeGroup_VEX_0F72[] = {
+-  form_opcode(ATTR_SSE_PREFIX_66 | ATTR_NNN2 | ATTR_VL128, BX_IA_V128_VPSRLD_UdqIb),
+-  form_opcode(ATTR_SSE_PREFIX_66 | ATTR_NNN2 | ATTR_VL256, BX_IA_V256_VPSRLD_UdqIb),
++  form_opcode(ATTR_SSE_PREFIX_66 | ATTR_NNN2 | ATTR_VL128 | ATTR_MODC0, BX_IA_V128_VPSRLD_UdqIb),
++  form_opcode(ATTR_SSE_PREFIX_66 | ATTR_NNN2 | ATTR_VL256 | ATTR_MODC0, BX_IA_V256_VPSRLD_UdqIb),
+ 
+-  form_opcode(ATTR_SSE_PREFIX_66 | ATTR_NNN4 | ATTR_VL128, BX_IA_V128_VPSRAD_UdqIb),
+-  form_opcode(ATTR_SSE_PREFIX_66 | ATTR_NNN4 | ATTR_VL256, BX_IA_V256_VPSRAD_UdqIb),
++  form_opcode(ATTR_SSE_PREFIX_66 | ATTR_NNN4 | ATTR_VL128 | ATTR_MODC0, BX_IA_V128_VPSRAD_UdqIb),
++  form_opcode(ATTR_SSE_PREFIX_66 | ATTR_NNN4 | ATTR_VL256 | ATTR_MODC0, BX_IA_V256_VPSRAD_UdqIb),
+ 
+-  form_opcode(ATTR_SSE_PREFIX_66 | ATTR_NNN6 | ATTR_VL128, BX_IA_V128_VPSLLD_UdqIb),
+-  last_opcode(ATTR_SSE_PREFIX_66 | ATTR_NNN6 | ATTR_VL256, BX_IA_V256_VPSLLD_UdqIb)
++  form_opcode(ATTR_SSE_PREFIX_66 | ATTR_NNN6 | ATTR_VL128 | ATTR_MODC0, BX_IA_V128_VPSLLD_UdqIb),
++  last_opcode(ATTR_SSE_PREFIX_66 | ATTR_NNN6 | ATTR_VL256 | ATTR_MODC0, BX_IA_V256_VPSLLD_UdqIb)
+ };
+ 
+ static const Bit64u BxOpcodeGroup_VEX_0F73[] = {
+-  form_opcode(ATTR_SSE_PREFIX_66 | ATTR_NNN2 | ATTR_VL128, BX_IA_V128_VPSRLQ_UdqIb),
+-  form_opcode(ATTR_SSE_PREFIX_66 | ATTR_NNN2 | ATTR_VL256, BX_IA_V256_VPSRLQ_UdqIb),
++  form_opcode(ATTR_SSE_PREFIX_66 | ATTR_NNN2 | ATTR_VL128 | ATTR_MODC0, BX_IA_V128_VPSRLQ_UdqIb),
++  form_opcode(ATTR_SSE_PREFIX_66 | ATTR_NNN2 | ATTR_VL256 | ATTR_MODC0, BX_IA_V256_VPSRLQ_UdqIb),
+ 
+-  form_opcode(ATTR_SSE_PREFIX_66 | ATTR_NNN3 | ATTR_VL128, BX_IA_V128_VPSRLDQ_UdqIb),
+-  form_opcode(ATTR_SSE_PREFIX_66 | ATTR_NNN3 | ATTR_VL256, BX_IA_V256_VPSRLDQ_UdqIb),
++  form_opcode(ATTR_SSE_PREFIX_66 | ATTR_NNN3 | ATTR_VL128 | ATTR_MODC0, BX_IA_V128_VPSRLDQ_UdqIb),
++  form_opcode(ATTR_SSE_PREFIX_66 | ATTR_NNN3 | ATTR_VL256 | ATTR_MODC0, BX_IA_V256_VPSRLDQ_UdqIb),
+ 
+-  form_opcode(ATTR_SSE_PREFIX_66 | ATTR_NNN6 | ATTR_VL128, BX_IA_V128_VPSLLQ_UdqIb),
+-  form_opcode(ATTR_SSE_PREFIX_66 | ATTR_NNN6 | ATTR_VL256, BX_IA_V256_VPSLLQ_UdqIb),
++  form_opcode(ATTR_SSE_PREFIX_66 | ATTR_NNN6 | ATTR_VL128 | ATTR_MODC0, BX_IA_V128_VPSLLQ_UdqIb),
++  form_opcode(ATTR_SSE_PREFIX_66 | ATTR_NNN6 | ATTR_VL256 | ATTR_MODC0, BX_IA_V256_VPSLLQ_UdqIb),
+ 
+-  form_opcode(ATTR_SSE_PREFIX_66 | ATTR_NNN7 | ATTR_VL128, BX_IA_V128_VPSLLDQ_UdqIb),
+-  last_opcode(ATTR_SSE_PREFIX_66 | ATTR_NNN7 | ATTR_VL256, BX_IA_V256_VPSLLDQ_UdqIb)
++  form_opcode(ATTR_SSE_PREFIX_66 | ATTR_NNN7 | ATTR_VL128 | ATTR_MODC0, BX_IA_V128_VPSLLDQ_UdqIb),
++  last_opcode(ATTR_SSE_PREFIX_66 | ATTR_NNN7 | ATTR_VL256 | ATTR_MODC0, BX_IA_V256_VPSLLDQ_UdqIb)
+ };
+ 
+ static const Bit64u BxOpcodeGroup_VEX_0F74[] = {
+-- 
+2.52.0.windows.1
+

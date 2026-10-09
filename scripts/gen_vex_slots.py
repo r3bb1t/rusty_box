@@ -15,6 +15,22 @@ rather than hand-transcribed.
 Usage:
     python scripts/gen_vex_slots.py --verify    # exit 1 if vex_shared.rs drifted
     python scripts/gen_vex_slots.py             # print the Rust table
+    python scripts/gen_vex_slots.py --emit-groups PATH
+        # write Bochs's VEX groups and master table as a Rust module at PATH
+
+``--emit-groups`` transcribes every ``BxOpcodeGroup_VEX_*`` row the master
+table reaches — attributes and ``BX_IA_*`` opcode, in Bochs order — in the
+entry encoding ``opmap_evex.rs`` uses (``form_opcode(attrs, opcode)``, built by
+``gen_opmap_evex.rust_attrs``), so ``decoder::find_opcode_in_table`` resolves
+them exactly as ``findOpcode`` does. The master table ``VEX_TABLE`` holds maps
+1, 2, 3 and 7 in that order, as ``BxOpcodeTableVEX`` does with
+``BX_SUPPORT_AMX`` 0. Beside it, ``bochs_vex_sources`` states, for each opcode
+the table holds, what its ia_opcodes.def entry tells the decoder (aliases
+followed as ``gen_evex_operands`` follows them): the fields its destination and
+its ModRM source come from; whether fetchdecode32.cc ``assign_srcs`` finds a
+``BX_SRC_VVV`` source, a ``BX_SRC_VSIB`` source, or an opmask named by
+ModRM.reg or by VEX.vvvv; and whether ``assignHandler`` finds a handler for the
+memory form and for the register form (``BxError`` or ``NULL`` is a guest #UD).
 
 Table layout, with BX_SUPPORT_AMX = 0 (rusty_box does not implement AMX):
 
@@ -38,12 +54,42 @@ import re
 import sys
 from pathlib import Path
 
+import gen_evex_operands
+import gen_opmap_evex
+
 REPO = Path(__file__).resolve().parent.parent
-BOCHS_TABLE = REPO / "cpp_orig/bochs/bochs/cpu/decoder/fetchdecode_opmap_avx.cc"
+BOCHS_DECODER = REPO / "cpp_orig/bochs/bochs/cpu/decoder"
+BOCHS_TABLE = BOCHS_DECODER / "fetchdecode_opmap_avx.cc"
+BOCHS_DEFS = [BOCHS_DECODER / "ia_opcodes.def", BOCHS_DECODER / "ia_opcodes_evex.def"]
 RUST_SOURCE = REPO / "rusty_box_decoder/src/decoder/vex_shared.rs"
 
 MAPS = 3
 SLOTS_PER_MAP = 256
+
+# BxOpcodeTableVEX with BX_SUPPORT_AMX 0: maps 1, 2, 3 and 7, in that order.
+TABLE_MAPS = (1, 2, 3, 7)
+
+# How the reference build resolves the conditionals of fetchdecode_opmap_avx.cc
+# (gen_opmap_evex.REFERENCE_BUILD, plus the file's own BX_SUPPORT_AVX guard).
+VEX_REFERENCE_BUILD = {
+    "#if BX_SUPPORT_AVX": True,
+    "#ifndef BX_STANDALONE_DECODER": True,
+    "#if BX_SUPPORT_AMX": False,
+}
+
+DEF_LINE_RE = re.compile(r"^\s*bx_define_opcode\(\s*BX_IA_(\w+)\s*,(.*)\)\s*$")
+
+# The instruction field an operand's `BX_SRC_*` origin names.
+FIELD = {
+    "BX_SRC_NONE": "None",
+    "BX_SRC_EAX": "Eax",
+    "BX_SRC_NNN": "Nnn",
+    "BX_SRC_RM": "Rm",
+    "BX_SRC_VECTOR_RM": "Rm",
+    "BX_SRC_VSIB": "Rm",
+    "BX_SRC_VVV": "Vvv",
+    "BX_SRC_VIB": "Vib",
+}
 
 ENTRY_RE = re.compile(r"\bBxOpcodeGroup_(\w+)")
 TABLE_START_RE = re.compile(r"const\s+Bit64u\s*\*\s*BxOpcodeTableVEX\s*\[")
@@ -146,6 +192,216 @@ def render(bitmap: list[list[int]], entries: list[str]) -> str:
     return "\n".join(out)
 
 
+def bochs_sources() -> dict[str, dict[str, object]]:
+    """For every Bochs opcode, its destination and ModRM-source fields, what
+    ``assign_srcs`` checks of its sources, and the forms it executes in.
+
+    Read from the four source operands of each ``bx_define_opcode`` entry,
+    every ``OP_*`` resolved through fetchdecode.h with aliases followed. A name
+    that is neither a ``BX_FORM_SRC`` constant nor an alias of one stops the
+    run.
+    """
+    header = (BOCHS_DECODER / "fetchdecode.h").read_text(encoding="utf-8", errors="replace")
+    ops = gen_evex_operands.parse_op_constants(header)
+    aliases = gen_evex_operands.parse_op_aliases(header)
+
+    facts: dict[str, dict[str, object]] = {}
+    for path in BOCHS_DEFS:
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            m = DEF_LINE_RE.match(line.split("//")[0])
+            if not m:
+                continue
+            fields = [f.strip() for f in m.group(2).split(",")]
+            if len(fields) != 10:
+                raise SystemExit(f"{m.group(1)}: expected 10 fields after the name, got {len(fields)}")
+            sources = []
+            for name in fields[5:9]:
+                if name == "OP_NONE":
+                    continue
+                resolved = gen_evex_operands.resolve_operand(name, ops, aliases)
+                if resolved is None:
+                    raise SystemExit(
+                        f"{m.group(1)}: operand {name} is neither a BX_FORM_SRC constant "
+                        f"nor an alias of one in fetchdecode.h"
+                    )
+                sources.append(resolved)
+            # The destination is the first operand (`OP_NONE` there: none), and
+            # the ModRM source the first later operand that names a register
+            # through ModRM and is not the destination read back — the rule
+            # gen_evex_operands applies to the EVEX entries.
+            first = None
+            if fields[5] != "OP_NONE":
+                first = gen_evex_operands.resolve_operand(fields[5], ops, aliases)
+            modrm_source = "None"
+            for operand in sources[1 if first is not None else 0 :]:
+                if operand != first and operand[1] in gen_evex_operands.MODRM_SRC:
+                    modrm_source = FIELD[operand[1]]
+                    break
+            kmask = ("BX_KMASK_REG", "BX_KMASK_REG_PAIR")
+            facts[m.group(1)] = {
+                "dst": "None" if first is None else FIELD[first[1]],
+                "modrm_source": modrm_source,
+                # execute1 runs the memory form and execute2 the register
+                # form; `assignHandler` installs whichever the ModRM form
+                # selects, and a `BxError` (or `NULL`) there is a guest #UD.
+                "memory_form": fields[2] not in gen_evex_operands.NO_HANDLER,
+                "register_form": fields[3] not in gen_evex_operands.NO_HANDLER,
+                "vvv": any(src == "BX_SRC_VVV" for _, src in sources),
+                "vsib": any(src == "BX_SRC_VSIB" for _, src in sources),
+                # assign_srcs: an opmask in ModRM.reg (BX_KMASK_REG or
+                # BX_KMASK_REG_PAIR) or in VEX.vvvv (BX_KMASK_REG) must be one
+                # of k0..k7.
+                "kmask_nnn": any(src == "BX_SRC_NNN" and typ in kmask for typ, src in sources),
+                "kmask_vvv": any(
+                    src == "BX_SRC_VVV" and typ == "BX_KMASK_REG" for typ, src in sources
+                ),
+            }
+    return facts
+
+
+def render_groups(entries: list[str]) -> str:
+    """The VEX groups and master table as a Rust module (see ``--emit-groups``)."""
+    text = gen_opmap_evex.resolve_conditionals(
+        gen_opmap_evex.strip_comments(BOCHS_TABLE.read_text(encoding="utf-8", errors="replace")),
+        VEX_REFERENCE_BUILD,
+        "VEX",
+    )
+    groups = gen_opmap_evex.parse_groups(text, "VEX")
+    rust_names = gen_opmap_evex.rust_opcode_names("[A-Z]")
+    sources = bochs_sources()
+
+    needed = len(TABLE_MAPS) * SLOTS_PER_MAP
+    if len(entries) != needed:
+        raise SystemExit(f"expected {needed} VEX table entries, parsed {len(entries)}")
+    used = sorted({e for e in entries if e != "ERR"})
+    unknown = [g for g in used if "BxOpcodeGroup_" + g not in groups]
+    if unknown:
+        raise SystemExit(f"master table references groups that were not parsed: {unknown[:5]}")
+
+    out = [
+        "//! Bochs `BxOpcodeTableVEX` — generated, do not edit by hand.",
+        "//!",
+        "//! Regenerate with `python scripts/gen_vex_slots.py --emit-groups <path>`.",
+        "//!",
+        "//! Transcribed from Bochs `cpu/decoder/fetchdecode_opmap_avx.cc` with",
+        "//! `BX_SUPPORT_AMX` 0: one group per (map, opcode byte), each entry a",
+        "//! `form_opcode(attrs, opcode)` in Bochs order. The master table holds",
+        "//! maps 1, 2, 3 and 7, indexed `block * 256 + opcode`.",
+        "",
+        "use super::form_opcode;",
+        "use super::tables::OpcodeAttrs as A;",
+        "use crate::opcode::Opcode;",
+        "",
+        "/// Empty slot — every encoding for this byte is undefined.",
+        "pub(crate) static VEX_GROUP_ERR: &[u64] = &[];",
+        "",
+    ]
+    missing: set[str] = set()
+    opcodes: list[str] = []
+    rows = 0
+    for g in used:
+        out.append(f"static {g.upper()}: &[u64] = &[")
+        for attrs, bx in groups["BxOpcodeGroup_" + g]:
+            rows += 1
+            key = bx.replace("_", "").lower()
+            if key in rust_names:
+                op = rust_names[key]
+                if op not in opcodes:
+                    opcodes.append(op)
+                if bx not in sources:
+                    raise SystemExit(f"BX_IA_{bx} has no bx_define_opcode entry")
+            else:
+                missing.add(bx)
+                op = "IaError"
+            out.append(f"    form_opcode({gen_opmap_evex.rust_attrs(attrs)}, Opcode::{op}),")
+        out.append("];")
+        out.append("")
+
+    out.append("/// Master VEX table: blocks 0..3 hold maps 1, 2, 3 and 7.")
+    out.append(f"pub(crate) static VEX_TABLE: [&[u64]; {needed}] = [")
+    for i, g in enumerate(entries):
+        if i % SLOTS_PER_MAP == 0:
+            out.append(f"    // ---- map {TABLE_MAPS[i // SLOTS_PER_MAP]} ----")
+        ident = "VEX_GROUP_ERR" if g == "ERR" else g.upper()
+        out.append(f"    /* {i % SLOTS_PER_MAP:02X} */ {ident},")
+    out.append("];")
+    out.append("")
+
+    by_rust = {}
+    for bx, fact in sources.items():
+        key = bx.replace("_", "").lower()
+        if key in rust_names:
+            by_rust[rust_names[key]] = fact
+    # The fields the emitted opcodes name, in FIELD's order; `None` is the
+    # default arm's.
+    named = {"None"} | {by_rust[op][k] for op in opcodes for k in ("dst", "modrm_source")}
+    out += [
+        "/// The instruction field a Bochs operand's `BX_SRC_*` origin names.",
+        "#[derive(Debug, Clone, Copy, PartialEq, Eq)]",
+        "pub(crate) enum BochsVexField {",
+    ]
+    out += [f"    {field}," for field in dict.fromkeys(FIELD.values()) if field in named]
+    out += [
+        "}",
+        "",
+        "/// What Bochs checks of a decoded VEX opcode, from its ia_opcodes.def",
+        "/// entry: fetchdecode32.cc `assign_srcs` checks its sources, and",
+        "/// `assignHandler` installs the handler of its ModRM form.",
+        "#[derive(Debug, Clone, Copy, PartialEq, Eq)]",
+        "pub(crate) struct BochsVexSources {",
+        "    /// The field the first operand names (`None` when it is `OP_NONE`).",
+        "    pub(crate) dst: BochsVexField,",
+        "    /// The field of the first later operand that names a register",
+        "    /// through ModRM and is not the destination read back.",
+        "    pub(crate) modrm_source: BochsVexField,",
+        "    /// A source is `BX_SRC_VVV`; without one, VEX.vvvv must be 1111b.",
+        "    pub(crate) vvv: bool,",
+        "    /// A source is `BX_SRC_VSIB`: ModRM.rm must be 100b.",
+        "    pub(crate) vsib: bool,",
+        "    /// ModRM.reg names an opmask, which must be k0..k7.",
+        "    pub(crate) kmask_nnn: bool,",
+        "    /// VEX.vvvv names an opmask, which must be k0..k7.",
+        "    pub(crate) kmask_vvv: bool,",
+        "    /// The memory form has a handler (`execute1` is neither `NULL` nor",
+        "    /// `BxError`).",
+        "    pub(crate) memory_form: bool,",
+        "    /// The register form has a handler (`execute2`).",
+        "    pub(crate) register_form: bool,",
+        "}",
+        "",
+        "/// [`BochsVexSources`] of every opcode [`VEX_TABLE`] holds; none for the rest.",
+        "pub(crate) const fn bochs_vex_sources(op: Opcode) -> BochsVexSources {",
+        "    match op {",
+    ]
+    flags = ("vvv", "vsib", "kmask_nnn", "kmask_vvv", "memory_form", "register_form")
+    for op in sorted(opcodes):
+        f = by_rust[op]
+        values = ", ".join(
+            [f"dst: BochsVexField::{f['dst']}", f"modrm_source: BochsVexField::{f['modrm_source']}"]
+            + [f"{name}: {str(f[name]).lower()}" for name in flags]
+        )
+        out.append(f"        Opcode::{op} => BochsVexSources {{ {values} }},")
+    none = ", ".join(
+        ["dst: BochsVexField::None", "modrm_source: BochsVexField::None"]
+        + [f"{name}: false" for name in flags]
+    )
+    out += [
+        f"        _ => BochsVexSources {{ {none} }},",
+        "    }",
+        "}",
+        "",
+    ]
+
+    print(f"groups emitted        : {len(used)}", file=sys.stderr)
+    print(f"table rows            : {rows}", file=sys.stderr)
+    print(f"distinct opcodes      : {len(opcodes)}", file=sys.stderr)
+    print(f"master slots defined  : {len(used)} / {needed}", file=sys.stderr)
+    print(f"opcodes -> IaError    : {len(missing)} distinct (not in rusty's enum)", file=sys.stderr)
+    for n in sorted(missing):
+        print(f"    {n}", file=sys.stderr)
+    return "\n".join(out)
+
+
 def parse_rust_bitmap() -> list[list[int]]:
     text = RUST_SOURCE.read_text(encoding="utf-8")
     match = re.search(
@@ -171,9 +427,20 @@ def main() -> int:
         action="store_true",
         help="compare vex_shared.rs against Bochs and exit non-zero on drift",
     )
+    parser.add_argument(
+        "--emit-groups",
+        metavar="PATH",
+        help="write Bochs's VEX groups and master table as a Rust module at PATH",
+    )
     args = parser.parse_args()
 
     entries = collect_entries(BOCHS_TABLE.read_text(encoding="utf-8", errors="replace"))
+
+    if args.emit_groups:
+        Path(args.emit_groups).write_text(render_groups(entries), encoding="utf-8", newline="\n")
+        print(f"wrote {args.emit_groups}", file=sys.stderr)
+        return 0
+
     expected = build_bitmap(entries)
 
     if not args.verify:

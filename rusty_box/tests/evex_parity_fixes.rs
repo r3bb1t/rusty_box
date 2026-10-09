@@ -352,3 +352,176 @@ fn evex_vpmovssdb_is_undefined_without_ace() {
         .join()
         .expect("join");
 }
+
+/// Where the VPEXTR* tests store, inside the FlatLong64 identity map.
+const DATA: u64 = 0x0044_0000;
+
+/// One EVEX VPEXTR* memory form, `vpextr* [rax + disp8], xmm1, ib`: it stores
+/// the element the immediate selects from xmm1 (ModRM.reg) at `rax` plus the
+/// encoded disp8 times Bochs's N.
+struct ExtractStore {
+    name: &'static str,
+    code: &'static [u8],
+    /// The encoded disp8 times `evex_displ8_compression`'s N.
+    offset: usize,
+    /// The bytes of xmm1 the immediate selects.
+    element: core::ops::Range<usize>,
+}
+
+/// Bochs fetchdecode32.cc `evex_displ8_compression` scales a VPEXTR* store's
+/// disp8 by the size of the GPR type its ia_opcodes_evex.def entry names
+/// first. `OP_Mb` and `OP_Mw` are fetchdecode.h aliases of `OP_Eb` and
+/// `OP_Ew` (`BX_GPR8`/`BX_GPR16` on `BX_SRC_RM`), so VPEXTRB m8 scales by 1
+/// and VPEXTRW m16 by 2; `OP_Ed`/`OP_Eq` give VPEXTRD 4 and VPEXTRQ 8. The
+/// stored element comes from ModRM.reg: sse.cc `PEXTRB_MbVdqIbM` through
+/// `PEXTRQ_EqVdqIbM` read `i->src()`, which `assign_srcs` takes from
+/// `OP_Vdq` (`BX_SRC_NNN`).
+///
+/// xmm0, the register ModRM.rm's base names, holds different bytes, so a
+/// store that read the base register's number as its source shows up as
+/// well as one at the wrong address.
+#[test]
+fn evex_vpextr_stores_scale_disp8_by_the_element_size() {
+    std::thread::Builder::new()
+        .stack_size(TEST_STACK_SIZE)
+        .spawn(|| {
+            let mut emu = evex_emulator();
+            let source: [u8; 16] = core::array::from_fn(|n| 0x10 + n as u8);
+            let base_register: [u8; 16] = core::array::from_fn(|n| 0xE0 + n as u8);
+
+            // EVEX.128.66.0F3A: P0 F3 (map 0F3A, no register extension),
+            // P1 7D (W0) / FD (W1) with vvvv = 1111, P2 08 (VL128, k0).
+            // ModRM 48: mod 01 (disp8), reg 001 (xmm1), rm 000 (rax).
+            let cases = [
+                ExtractStore {
+                    name: "vpextrb [rax+0x08], xmm1, 9",
+                    code: &[0x62, 0xF3, 0x7D, 0x08, 0x14, 0x48, 0x08, 0x09],
+                    offset: 0x08,
+                    element: 9..10,
+                },
+                ExtractStore {
+                    name: "vpextrw [rax+0x08*2], xmm1, 5",
+                    code: &[0x62, 0xF3, 0x7D, 0x08, 0x15, 0x48, 0x08, 0x05],
+                    offset: 0x10,
+                    element: 10..12,
+                },
+                ExtractStore {
+                    name: "vpextrd [rax+0x03*4], xmm1, 2",
+                    code: &[0x62, 0xF3, 0x7D, 0x08, 0x16, 0x48, 0x03, 0x02],
+                    offset: 0x0C,
+                    element: 8..12,
+                },
+                ExtractStore {
+                    name: "vpextrq [rax+0x02*8], xmm1, 1",
+                    code: &[0x62, 0xF3, 0xFD, 0x08, 0x16, 0x48, 0x02, 0x01],
+                    offset: 0x10,
+                    element: 8..16,
+                },
+            ];
+            let mut wrong = Vec::new();
+            for case in &cases {
+                emu.mem_write(DATA, &[0x5A; 32]).expect("poison the store area");
+                emu.reg_write_xmm(X86Reg::Xmm0, base_register);
+                emu.reg_write_xmm(X86Reg::Xmm1, source);
+                emu.reg_write(X86Reg::Rax, DATA);
+                assert_eq!(run_one(&mut emu, case.code), Outcome::Retired, "{}", case.name);
+
+                let mut want = [0x5Au8; 32];
+                want[case.offset..case.offset + case.element.len()]
+                    .copy_from_slice(&source[case.element.clone()]);
+                let mut got = [0u8; 32];
+                emu.mem_read(DATA, &mut got).expect("read the store area");
+                if got != want {
+                    wrong.push(format!("{}:\n    got  {got:02X?}\n    want {want:02X?}", case.name));
+                }
+            }
+            assert!(
+                wrong.is_empty(),
+                "the element of xmm1 must land at rax + disp8 * N and nowhere else:\n{}",
+                wrong.join("\n")
+            );
+        })
+        .expect("spawn")
+        .join()
+        .expect("join");
+}
+
+/// One EVEX VPEXTR* register form, `vpextr* ecx/rcx, xmm2, ib`.
+struct ExtractToGpr {
+    name: &'static str,
+    code: &'static [u8],
+    /// rcx afterwards.
+    want: u64,
+}
+
+/// Bochs sse.cc `PEXTRB_EdVdqIbR`, `PEXTRW_EdVdqIbR`, `PEXTRD_EdVdqIbR` and
+/// `PEXTRQ_EqVdqIbR` read the XMM register `i->src()` and write the GPR
+/// `i->dst()`; the EVEX def entries (`OP_Ed`/`OP_Eq`, `OP_Vdq`) make those
+/// ModRM.reg and ModRM.rm. The 32-bit forms zero bits 63:32
+/// (`BX_WRITE_32BIT_REGZ`).
+///
+/// ModRM D1 names xmm2 in reg and ecx in rm. Read the other way round, the
+/// instruction would take xmm1 and write rdx, both poisoned here.
+#[test]
+fn evex_vpextr_register_forms_read_modrm_reg_and_write_modrm_rm() {
+    std::thread::Builder::new()
+        .stack_size(TEST_STACK_SIZE)
+        .spawn(|| {
+            let mut emu = evex_emulator();
+            let source: [u8; 16] = core::array::from_fn(|n| 0x30 + n as u8);
+            const RDX: u64 = 0x5555_6666_7777_8888;
+
+            let cases = [
+                ExtractToGpr {
+                    name: "vpextrb ecx, xmm2, 9",
+                    code: &[0x62, 0xF3, 0x7D, 0x08, 0x14, 0xD1, 0x09],
+                    want: u64::from(source[9]),
+                },
+                ExtractToGpr {
+                    name: "vpextrw ecx, xmm2, 5",
+                    code: &[0x62, 0xF3, 0x7D, 0x08, 0x15, 0xD1, 0x05],
+                    want: u64::from(u16::from_le_bytes([source[10], source[11]])),
+                },
+                ExtractToGpr {
+                    name: "vpextrd ecx, xmm2, 2",
+                    code: &[0x62, 0xF3, 0x7D, 0x08, 0x16, 0xD1, 0x02],
+                    want: u64::from(u32::from_le_bytes([
+                        source[8], source[9], source[10], source[11],
+                    ])),
+                },
+                ExtractToGpr {
+                    name: "vpextrq rcx, xmm2, 1",
+                    code: &[0x62, 0xF3, 0xFD, 0x08, 0x16, 0xD1, 0x01],
+                    want: u64::from_le_bytes([
+                        source[8], source[9], source[10], source[11], source[12],
+                        source[13], source[14], source[15],
+                    ]),
+                },
+            ];
+            let mut wrong = Vec::new();
+            for case in &cases {
+                emu.reg_write_xmm(X86Reg::Xmm1, [0xC7; 16]);
+                emu.reg_write_xmm(X86Reg::Xmm2, source);
+                emu.reg_write(X86Reg::Rcx, 0xDEAD_BEEF_DEAD_BEEF);
+                emu.reg_write(X86Reg::Rdx, RDX);
+                assert_eq!(run_one(&mut emu, case.code), Outcome::Retired, "{}", case.name);
+
+                let rcx = emu.reg_read(X86Reg::Rcx);
+                let rdx = emu.reg_read(X86Reg::Rdx);
+                if rcx != case.want || rdx != RDX {
+                    wrong.push(format!(
+                        "{}: rcx {rcx:#018X} (want {:#018X}), rdx {rdx:#018X} (want {RDX:#018X})",
+                        case.name, case.want
+                    ));
+                }
+            }
+            assert!(
+                wrong.is_empty(),
+                "rcx (ModRM.rm) takes the element of xmm2 (ModRM.reg), and rdx is no operand:\n{}",
+                wrong.join("\n")
+            );
+        })
+        .expect("spawn")
+        .join()
+        .expect("join");
+}

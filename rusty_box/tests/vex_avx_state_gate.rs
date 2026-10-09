@@ -19,6 +19,10 @@
 //!
 //! The fixture below sets CR4.OSXSAVE but leaves XCR0 at its reset value, a
 //! configuration in which every `BX_PREPARE_AVX` instruction #UDs.
+//!
+//! With AVX state enabled, the file also holds divergence D19
+//! (`docs/bochs-parity-divergences.md`): a VEX shift by immediate with a
+//! memory operand is #UD, as on hardware, where Bochs executes it.
 
 #![cfg(feature = "std")]
 
@@ -72,6 +76,19 @@ fn avx_state_disabled_emulator() -> Box<Emulator> {
         X86Reg::Cr4,
         emu.reg_read(X86Reg::Cr4) | (1 << 9) | (1 << 18),
     );
+    emu
+}
+
+/// The same CPU after the guest's own XSETBV (ECX = 0, EDX:EAX = 7) has set
+/// XCR0 to x87|SSE|AVX, the state an OS enables before it runs AVX code.
+fn avx_state_enabled_emulator() -> Box<Emulator> {
+    let mut emu = avx_state_disabled_emulator();
+    emu.reg_write(X86Reg::Rax, 0x7);
+    emu.reg_write(X86Reg::Rcx, 0);
+    emu.reg_write(X86Reg::Rdx, 0);
+    emu.mem_write(CODE, &[0x0F, 0x01, 0xD1]).expect("xsetbv");
+    emu.emu_start(CODE, Some(CODE + 3), None, Some(1))
+        .expect("enable AVX state");
     emu
 }
 
@@ -304,8 +321,8 @@ fn clearing_cr4_osxsave_disables_avx_immediately() {
 }
 
 /// With AVX state properly enabled the very same encodings execute. This is
-/// the other half of the gate: the fix must not turn a working instruction
-/// into a fault.
+/// the other half of the gate: it must not turn a working instruction into a
+/// fault.
 #[test]
 fn the_same_vex_encodings_execute_once_avx_state_is_enabled() {
     std::thread::Builder::new()
@@ -319,20 +336,89 @@ fn the_same_vex_encodings_execute_once_avx_state_is_enabled() {
             ];
 
             for (name, code) in cases {
-                let mut emu = avx_state_disabled_emulator();
-                // XSETBV ECX=0, EDX:EAX=7 -> XCR0 = FPU|SSE|YMM.
-                emu.reg_write(X86Reg::Rax, 0x7);
-                emu.reg_write(X86Reg::Rcx, 0);
-                emu.reg_write(X86Reg::Rdx, 0);
-                emu.mem_write(CODE, &[0x0F, 0x01, 0xD1]).expect("xsetbv");
-                emu.emu_start(CODE, Some(CODE + 3), None, Some(1))
-                    .expect("enable AVX state");
-
+                let mut emu = avx_state_enabled_emulator();
                 assert_eq!(
                     run_one(&mut emu, code),
                     Outcome::Retired,
                     "{name}: must execute once XCR0 enables AVX state"
                 );
+            }
+        })
+        .expect("spawn")
+        .join()
+        .expect("join");
+}
+
+/// One VEX shift-by-immediate group, `VEX.66.0F <opcode> /<member> ib`: the
+/// opcode byte, and the ModRM.reg values that name an instruction in it.
+struct ShiftByImmediateGroup {
+    opcode: u8,
+    members: &'static [u8],
+}
+
+/// Bochs fetchdecode_opmap_avx.cc `BxOpcodeGroup_VEX_0F71`, `_0F72`, `_0F73`.
+const SHIFT_BY_IMMEDIATE_GROUPS: [ShiftByImmediateGroup; 3] = [
+    // VPSRLW, VPSRAW, VPSLLW
+    ShiftByImmediateGroup {
+        opcode: 0x71,
+        members: &[2, 4, 6],
+    },
+    // VPSRLD, VPSRAD, VPSLLD
+    ShiftByImmediateGroup {
+        opcode: 0x72,
+        members: &[2, 4, 6],
+    },
+    // VPSRLQ, VPSRLDQ, VPSLLQ, VPSLLDQ
+    ShiftByImmediateGroup {
+        opcode: 0x73,
+        members: &[2, 3, 6, 7],
+    },
+];
+
+/// Divergence D19: every VEX shift by immediate, VEX.128 and VEX.256, retires
+/// in its register form and raises #UD in its memory form. The SDM lists the
+/// VEX forms register-only, and an i5-12450H raised #UD for the five forms
+/// docs/bochs-vex-shift-imm-memory-probe.S asks it about (one per group and
+/// vector length). Bochs executes the memory form because its VEX groups lack
+/// ATTR_MODC0.
+#[test]
+fn vex_shift_by_immediate_refuses_a_memory_operand() {
+    std::thread::Builder::new()
+        .stack_size(TEST_STACK_SIZE)
+        .spawn(|| {
+            for group in &SHIFT_BY_IMMEDIATE_GROUPS {
+                for &member in group.members {
+                    // 2-byte VEX, byte 1 = R̄ v̄vvv L pp: vvvv = xmm1 (the
+                    // destination), pp = 66, L = 0 (0xF1) or 1 (0xF5).
+                    for vex in [0xF1u8, 0xF5] {
+                        let register = [0xC5, vex, group.opcode, 0xC0 | (member << 3) | 2, 0x04];
+                        // ModRM mod = 00, rm = 101: [rip + 0x100].
+                        let memory = [
+                            0xC5,
+                            vex,
+                            group.opcode,
+                            (member << 3) | 5,
+                            0x00,
+                            0x01,
+                            0x00,
+                            0x00,
+                            0x04,
+                        ];
+
+                        let mut emu = avx_state_enabled_emulator();
+                        assert_eq!(
+                            run_one(&mut emu, &register),
+                            Outcome::Retired,
+                            "{register:02X?}: the register form executes"
+                        );
+                        let mut emu = avx_state_enabled_emulator();
+                        assert_eq!(
+                            run_one(&mut emu, &memory),
+                            Outcome::InvalidOpcode,
+                            "{memory:02X?}: the memory form is #UD"
+                        );
+                    }
+                }
             }
         })
         .expect("spawn")

@@ -15,10 +15,11 @@ alone, only from the opcode's operand list:
     divided by N.
 
 Upstream keeps both in ia_opcodes_evex.def, where every operand is an `OP_*`
-constant defined in fetchdecode.h as `BX_FORM_SRC(type, src)`. The `src` of
-the first operand gives the destination field, the `src` of the first later
-ModRM operand gives the source field, and the `type` of the memory operand
-feeds `evex_displ8_compression` (cpu/decoder/fetchdecode32.cc).
+constant defined in fetchdecode.h as `BX_FORM_SRC(type, src)`, or an alias of
+one (`OP_Mb = OP_Eb`), which every table here follows. The `src` of the first
+operand gives the destination field, the `src` of the first later ModRM
+operand gives the source field, and the `type` of the memory operand feeds
+`evex_displ8_compression` (cpu/decoder/fetchdecode32.cc).
 
 Both tables are read from upstream so neither can drift from the definitions
 it describes.
@@ -228,19 +229,20 @@ def main():
         counts.setdefault(rust, len(registers))
         immediates.setdefault(rust, sum(1 for r in resolved if r[1] == "BX_SRC_NONE"))
 
-        operands = [o for o in OP_RE.findall(m.group(2)) if o in ops]
-        if not operands:
+        if not resolved:
             continue
 
-        # Destination: the first operand. Its ModRM register source: the first
-        # later operand that names a register through ModRM and is not the
-        # destination read back (the FMA forms list `Vps` twice).
-        _typ, src = ops[operands[0]]
+        # Destination: the first operand, with aliases followed, so the
+        # `OP_Mb`/`OP_Mw` stores of VPEXTRB/VPEXTRW take `OP_Eb`/`OP_Ew`'s
+        # `BX_SRC_RM`. Its ModRM register source: the first later operand that
+        # names a register through ModRM and is not the destination read back
+        # (the FMA forms list `Vps` twice).
+        _typ, src = resolved[0]
         if src in DST_SRC:
             modrm_src = None
-            for opname in operands[1:]:
-                if ops[opname] != ops[operands[0]] and ops[opname][1] in MODRM_SRC:
-                    modrm_src = MODRM_SRC[ops[opname][1]]
+            for operand in resolved[1:]:
+                if operand != resolved[0] and operand[1] in MODRM_SRC:
+                    modrm_src = MODRM_SRC[operand[1]]
                     break
             pair = (DST_SRC[src], modrm_src)
             if pair not in LAYOUT:
@@ -250,9 +252,9 @@ def main():
                 )
             dsts.setdefault(rust, LAYOUT[pair])
 
-        # disp8 scale: the first operand that can name memory.
-        for opname in operands:
-            typ, src = ops[opname]
+        # disp8 scale: the first operand that can name memory, aliases
+        # followed (`OP_Mw` is `OP_Ew`, a `BX_GPR16` memory operand: N = 2).
+        for typ, src in resolved:
             if src not in MEM_SRC:
                 continue
             if src == "BX_SRC_RM" and typ in GPR_KIND:
@@ -272,7 +274,8 @@ def main():
     a("//!")
     a("//! The destination and disp8 tables come from the operand lists in Bochs's")
     a("//! `cpu/decoder/ia_opcodes_evex.def`, where each `OP_*` is")
-    a("//! `BX_FORM_SRC(type, src)`. The first operand's `src` gives the")
+    a("//! `BX_FORM_SRC(type, src)` or an alias of one (`OP_Mb = OP_Eb`), which")
+    a("//! is followed. The first operand's `src` gives the")
     a("//! destination field and the first later ModRM operand's `src` the")
     a("//! source field; the memory operand's `type` gives the disp8 scale")
     a("//! that `evex_displ8_compression` computes upstream. The test-only")

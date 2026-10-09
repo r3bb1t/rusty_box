@@ -951,8 +951,8 @@ fn test_vex_vl128_only_legacy_shared_forms_decode() {
     // VPEXTRB eax, xmm1, 3 — C4 E3 79 14 C8 03.
     let b = fetch_decode64(&[0xC4, 0xE3, 0x79, 0x14, 0xC8, 0x03]).unwrap();
     assert_eq!(b.get_ia_opcode(), Opcode::V128VpextrbEdVdqIbR);
-    assert_eq!(b.dst(), 1); // nnn = xmm source
-    assert_eq!(b.src1(), 0); // rm = GPR destination
+    assert_eq!(b.dst(), 0); // rm = GPR destination (OP_Ed)
+    assert_eq!(b.src1(), 1); // nnn = xmm source (OP_Vdq)
 
     // VPEXTRW [rax], xmm1, 2 — C4 E3 79 15 08 02 (memory destination).
     let w = fetch_decode64(&[0xC4, 0xE3, 0x79, 0x15, 0x08, 0x02]).unwrap();
@@ -3530,37 +3530,10 @@ struct TypedViewException {
     reason: &'static str,
 }
 
-const fn excepted(
-    opcode: Opcode,
-    rules: &'static [TypedRule],
-    reason: &'static str,
-) -> TypedViewException {
-    TypedViewException {
-        opcode,
-        rules,
-        reason,
-    }
-}
-
-const ALIASED_STORE: &str = "Bochs's first operand is OP_Mb/OP_Mw, an alias of OP_Eb/OP_Ew \
-     that gen_evex_operands.py's destination table does not follow, so `evex_dst` reads Nnn \
-     for this store (Task 4c)";
-
 /// Exceptions to `evex_typed_view_matches_the_bochs_operand_lists`. Each one
 /// excuses only the rules it names, and each named rule must still fire on
 /// its opcode, so an entry is removed with the defect it names.
-const TYPED_VIEW_EXCEPTIONS: &[TypedViewException] = &[
-    excepted(
-        Opcode::EvexVpextrbMbVdqIbM,
-        &[TypedRule::LoadMemoryNotInSource],
-        ALIASED_STORE,
-    ),
-    excepted(
-        Opcode::EvexVpextrwMwVdqIbM,
-        &[TypedRule::LoadMemoryNotInSource],
-        ALIASED_STORE,
-    ),
-];
+const TYPED_VIEW_EXCEPTIONS: &[TypedViewException] = &[];
 
 /// Every rule the typed view of `opcode` in `form` breaks.
 fn typed_view_drift(opcode: Opcode, form: ModrmForm) -> Vec<TypedDriftFinding> {

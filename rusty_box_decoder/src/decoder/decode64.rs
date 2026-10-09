@@ -805,6 +805,11 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
             || matches!(b1, 0x1A4 | 0x1A5 | 0x1AC | 0x1AD)
             // SETcc Eb (0F 90..9F): single-operand, rm=destination, nnn=opcode extension
             || (b1 >= 0x190 && b1 <= 0x19F)
+            // PEXTRB/PEXTRW/PEXTRD/PEXTRQ/EXTRACTPS (0F 3A 14..17) and their VEX
+            // forms: rm=GPR or memory destination, nnn=XMM source. Bochs
+            // ia_opcodes.def leads each with OP_Ed/OP_Eq/OP_Mb/OP_Mw, then OP_Vdq
+            // or OP_Vps.
+            || matches!(b1, 0x314 | 0x315 | 0x316 | 0x317)
         {
             // Ed,Gd format: rm (Ed) is destination, nnn (Gd) is source
             // Examples: ADD Ed,Gd | SUB Ed,Gd | MOV Ed,Gd | BTS EdGd | XADD EbGb
