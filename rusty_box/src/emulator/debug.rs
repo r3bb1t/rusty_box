@@ -10,6 +10,13 @@ use crate::Result;
 
 use super::{Emulator, SliceEngine, SoftwareEngine};
 
+/// A byte's place in guest RAM's storage order, which is not a physical
+/// address (R4): below the PCI hole the two agree, and the RAM above the
+/// hole is stored straight after the RAM below it
+/// (memory_rusty_box.rs `bx_translate_gpa_to_linear`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RamOffset(pub u64);
+
 /// One processor of a machine, chosen by index, for a debugger to read.
 pub struct DebugCpu<'m, T: Instrumentation, E = SoftwareEngine> {
     machine: &'m mut Emulator<T, E>,
@@ -59,6 +66,12 @@ impl<T: Instrumentation, E: SliceEngine<T>> DebugCpu<'_, T, E> {
                     device_manager,
                     ..
                 } = &mut *self.machine;
+                // A window with no device behind it has no handler to call
+                // (Bochs finds no memory handler there): it reads as nothing.
+                if !devices.mmio_claimed(hit, device_manager) {
+                    buf.fill(0xff);
+                    return Ok(Fetched::OutsideMemory);
+                }
                 let mut fetched = Fetched::Valid;
                 for (offset, byte) in (0u64..).zip(buf.iter_mut()) {
                     // Bochs hands the handler one byte at a time, at the

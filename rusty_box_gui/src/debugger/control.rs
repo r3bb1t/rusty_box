@@ -75,6 +75,17 @@ pub(crate) enum DebugNote {
     StepNeedsInterpreter,
 }
 
+/// How a run begins.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RunStart {
+    /// The shell asked for it and lowered the stop flag then; a stop raised
+    /// since is honoured.
+    PowerOn,
+    /// The run before it ended on a restart; the stop that ended it is spent,
+    /// and lowered, unless a stop was asked for since that run ended.
+    Restart,
+}
+
 /// Why a dump still queued when its VM stopped was not written.
 pub(crate) const NOT_SAVED_VM_STOPPED: &str = "the VM stopped before its RAM was saved";
 
@@ -89,6 +100,8 @@ struct ControlState {
     /// the run serves when it comes back, even if that work was withdrawn
     /// in the meantime (a pause answered by Resume before the run saw it).
     serve_requested: bool,
+    /// A dump the run thread has taken off the queue and is writing.
+    dump_in_flight: bool,
     tasks: VecDeque<Task>,
     view: ViewRequest,
     snapshot: Option<Arc<DebugSnapshot>>,
@@ -113,6 +126,7 @@ impl RunControl {
                 phase: RunPhase::Running,
                 ending: false,
                 serve_requested: false,
+                dump_in_flight: false,
                 tasks: VecDeque::new(),
                 view: ViewRequest::default(),
                 snapshot: None,
@@ -241,11 +255,14 @@ impl RunControl {
     }
 
     #[cfg(feature = "gui-egui")]
+    /// A dump is queued or being written.
     pub(crate) fn dump_pending(&self) -> bool {
-        self.lock()
-            .tasks
-            .iter()
-            .any(|task| matches!(task, Task::DumpRam(_)))
+        let state = self.lock();
+        state.dump_in_flight
+            || state
+                .tasks
+                .iter()
+                .any(|task| matches!(task, Task::DumpRam(_)))
     }
 
     #[cfg(feature = "gui-egui")]
@@ -255,18 +272,29 @@ impl RunControl {
 
     // ── the run thread's side ──
 
-    /// A run begins: it runs, nothing is asked of it yet.
-    pub(crate) fn begin_run(&self) {
+    /// A run begins `how`: it runs, nothing is asked of it yet. A stop asked
+    /// for since the last run ended (or since the power-on) stands, so the
+    /// run ends as soon as it starts; a restart otherwise lowers the stop
+    /// that ended the run before it, under this lock, so a stop that lands
+    /// between the two runs can never be lowered by mistake.
+    pub(crate) fn begin_run(&self, how: RunStart) {
         let mut state = self.lock();
         state.live = true;
         state.wanted = Wanted::Run;
         state.phase = RunPhase::Running;
-        state.ending = false;
         state.serve_requested = false;
         state.note = None;
         state.tasks.clear();
         // A new run: what the last one showed is no longer this guest.
         state.snapshot = None;
+        match how {
+            RunStart::PowerOn => {}
+            RunStart::Restart => {
+                if !state.ending {
+                    self.stop_flag.store(false, Ordering::Relaxed);
+                }
+            }
+        }
     }
 
     /// What the run thread does once the machine handed control back. A
@@ -302,6 +330,9 @@ impl RunControl {
                 return BetweenRuns::End;
             }
             if let Some(task) = state.tasks.pop_front() {
+                if matches!(task, Task::DumpRam(_)) {
+                    state.dump_in_flight = true;
+                }
                 return BetweenRuns::Perform(task);
             }
             match state.wanted {
@@ -338,13 +369,24 @@ impl RunControl {
     }
 
     pub(crate) fn record_dump(&self, outcome: DumpOutcome) {
-        self.lock().dump_outcomes.push(outcome);
+        let mut state = self.lock();
+        state.dump_in_flight = false;
+        state.dump_outcomes.push(outcome);
     }
 
-    /// The run is over: a dump nobody served is reported unsaved.
+    /// Whether the shell has asked the run to end, so a long task (a dump of
+    /// several GiB) gives up rather than holding a power-off or a quit.
+    pub(crate) fn ending(&self) -> bool {
+        self.lock().ending
+    }
+
+    /// The run is over: the stop that ended it is spent, and a dump nobody
+    /// served is reported unsaved.
     pub(crate) fn finish_run(&self) {
         let mut state = self.lock();
         state.live = false;
+        state.ending = false;
+        state.dump_in_flight = false;
         state.wanted = Wanted::Run;
         state.phase = RunPhase::Running;
         let unserved: Vec<Task> = state.tasks.drain(..).collect();
@@ -375,7 +417,7 @@ mod tests {
     #[test]
     fn a_shell_stop_ends_the_run_whatever_else_was_asked() {
         let control = control();
-        control.begin_run();
+        control.begin_run(RunStart::PowerOn);
         control.pause();
         control.end_run();
         assert_eq!(control.after_run(PowerState::Running), AfterRun::End);
@@ -385,7 +427,7 @@ mod tests {
     #[test]
     fn a_guest_that_switched_itself_off_ends_the_run_even_when_a_pause_was_asked() {
         let control = control();
-        control.begin_run();
+        control.begin_run(RunStart::PowerOn);
         control.pause();
         assert_eq!(control.after_run(PowerState::PoweredOff), AfterRun::End);
         assert_eq!(control.after_run(PowerState::CpuShutdown), AfterRun::End);
@@ -394,7 +436,7 @@ mod tests {
     #[test]
     fn a_pause_raises_the_stop_flag_and_the_first_look_publishes() {
         let control = control();
-        control.begin_run();
+        control.begin_run(RunStart::PowerOn);
         control.pause();
         assert!(raised(&control));
         assert_eq!(control.after_run(PowerState::Running), AfterRun::Serve);
@@ -405,7 +447,7 @@ mod tests {
     #[test]
     fn a_resume_lowers_the_stop_flag_unless_a_stop_was_asked() {
         let control = control();
-        control.begin_run();
+        control.begin_run(RunStart::PowerOn);
         control.pause();
         assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::Refresh));
         control.resume();
@@ -424,7 +466,7 @@ mod tests {
     #[test]
     fn a_dump_asked_while_running_is_served_then_the_run_resumes() {
         let control = control();
-        control.begin_run();
+        control.begin_run(RunStart::PowerOn);
         let path = PathBuf::from("memory.bin");
         assert_eq!(control.request_dump(path.clone()), DumpRequest::Queued);
         assert!(raised(&control));
@@ -446,7 +488,7 @@ mod tests {
     #[test]
     fn a_dump_still_queued_when_the_run_ends_is_reported_unsaved() {
         let control = control();
-        control.begin_run();
+        control.begin_run(RunStart::PowerOn);
         let path = PathBuf::from("memory.bin");
         assert_eq!(control.request_dump(path.clone()), DumpRequest::Queued);
         control.end_run();
@@ -467,7 +509,7 @@ mod tests {
     #[test]
     fn a_pause_withdrawn_before_the_run_saw_it_resumes_the_run() {
         let control = control();
-        control.begin_run();
+        control.begin_run(RunStart::PowerOn);
         control.pause();
         control.resume();
         assert_eq!(control.after_run(PowerState::Running), AfterRun::Serve);
@@ -479,7 +521,7 @@ mod tests {
     #[test]
     fn a_new_run_shows_nothing_of_the_last() {
         let control = control();
-        control.begin_run();
+        control.begin_run(RunStart::PowerOn);
         control.publish(crate::debugger::inspect::DebugSnapshot {
             cpus: Vec::new(),
             cpu: 0,
@@ -494,21 +536,56 @@ mod tests {
             stack: Vec::new(),
         });
         control.finish_run();
-        control.begin_run();
+        control.begin_run(RunStart::PowerOn);
         assert!(control.snapshot().is_none());
+    }
+
+    /// A restart lowers the stop that ended the run before it; a stop asked
+    /// for after that run ended still stands when the restart begins, so the
+    /// restarted run ends at once.
+    #[test]
+    fn a_restart_lowers_only_the_stop_that_ended_its_run() {
+        let control = control();
+        control.begin_run(RunStart::PowerOn);
+        control.end_run(); // the restart's own stop
+        control.finish_run();
+        control.begin_run(RunStart::Restart);
+        assert!(!raised(&control), "the stop that ended the run is spent");
+
+        control.end_run(); // a restart again
+        control.finish_run();
+        control.end_run(); // a power-off between the two runs
+        control.begin_run(RunStart::Restart);
+        assert!(raised(&control), "a stop after the run ended still stands");
+        assert_eq!(control.after_run(PowerState::Running), AfterRun::End);
+    }
+
+    /// A dump being written still counts as pending, so the page keeps
+    /// saying so and offers no second dump until it is done.
+    #[test]
+    fn a_dump_being_written_is_still_pending() {
+        let control = control();
+        control.begin_run(RunStart::PowerOn);
+        let path = PathBuf::from("memory.bin");
+        assert_eq!(control.request_dump(path.clone()), DumpRequest::Queued);
+        assert_eq!(control.after_run(PowerState::Running), AfterRun::Serve);
+        assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::DumpRam(path.clone())));
+        assert!(control.dump_pending(), "taken off the queue, but not written yet");
+        control.record_dump(DumpOutcome::Saved { path, bytes: 1 });
+        assert!(!control.dump_pending());
     }
 
     #[test]
     fn a_run_that_spent_its_budget_with_nothing_asked_ends() {
         let control = control();
-        control.begin_run();
+        control.begin_run(RunStart::PowerOn);
         assert_eq!(control.after_run(PowerState::Running), AfterRun::End);
     }
 
     #[test]
     fn a_step_is_queued_only_while_paused() {
         let control = control();
-        control.begin_run();
+        control.begin_run(RunStart::PowerOn);
         control.step();
         assert_eq!(control.after_run(PowerState::Running), AfterRun::End, "no step queued");
         control.pause();
@@ -520,7 +597,7 @@ mod tests {
     #[test]
     fn an_unchanged_view_queues_no_refresh() {
         let control = control();
-        control.begin_run();
+        control.begin_run(RunStart::PowerOn);
         control.pause();
         assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::Refresh));
         control.set_view(ViewRequest::default());
@@ -536,7 +613,7 @@ mod tests {
     #[test]
     fn a_paused_thread_wakes_for_a_stop() {
         let control = Arc::new(control());
-        control.begin_run();
+        control.begin_run(RunStart::PowerOn);
         control.pause();
         assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::Refresh));
         let waiter = {

@@ -8,7 +8,7 @@ use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 use rusty_box::cpu::Instrumentation;
-use rusty_box::emulator::{Emulator, SliceEngine};
+use rusty_box::emulator::{Emulator, RamOffset, SliceEngine};
 
 use super::control::DumpOutcome;
 
@@ -21,17 +21,23 @@ enum DumpError {
     Io(#[from] io::Error),
     #[error("guest RAM could not be read: {0}")]
     Read(#[from] rusty_box::Error),
+    /// The run was told to end while the dump was being written.
+    #[error("{}", super::control::NOT_SAVED_VM_STOPPED)]
+    Abandoned,
 }
 
-/// Writes all of `emu`'s RAM to `path`. The bytes go to a `.partial` file
+/// Writes all of `emu`'s RAM to `path`, giving up between chunks once
+/// `abandoned` answers true (the VM is being powered off or the app closed,
+/// which must not wait for several GiB). The bytes go to a `.partial` file
 /// beside it first, which takes `path`'s name only once it is whole, so a
 /// failed dump never leaves a short file under the name asked for.
-pub(crate) fn dump_ram<T: Instrumentation, E: SliceEngine<T>>(
+pub(crate) fn dump_ram<T: Instrumentation, E: SliceEngine<T>, F: Fn() -> bool>(
     emu: &mut Emulator<T, E>,
     path: &Path,
+    abandoned: F,
 ) -> DumpOutcome {
     let partial = partial_path(path);
-    let written = write_ram(emu, &partial).and_then(|bytes| {
+    let written = write_ram(emu, &partial, abandoned).and_then(|bytes| {
         fs::rename(&partial, path)
             .map(|()| bytes)
             .map_err(DumpError::Io)
@@ -58,19 +64,23 @@ pub(crate) fn dump_ram<T: Instrumentation, E: SliceEngine<T>>(
     }
 }
 
-fn write_ram<T: Instrumentation, E: SliceEngine<T>>(
+fn write_ram<T: Instrumentation, E: SliceEngine<T>, F: Fn() -> bool>(
     emu: &mut Emulator<T, E>,
     partial: &Path,
+    abandoned: F,
 ) -> Result<u64, DumpError> {
     let total = emu.mem_size() as u64;
     let mut out = BufWriter::new(File::create(partial)?);
     let mut chunk = vec![0u8; DUMP_CHUNK_BYTES];
     let mut offset = 0u64;
     while offset < total {
+        if abandoned() {
+            return Err(DumpError::Abandoned);
+        }
         let len = usize::try_from(total - offset)
             .map_or(DUMP_CHUNK_BYTES, |left| left.min(DUMP_CHUNK_BYTES));
         let buf = &mut chunk[..len];
-        emu.read_ram_image(offset, buf)?;
+        emu.read_ram_image(RamOffset(offset), buf)?;
         out.write_all(buf)?;
         offset += len as u64;
     }
@@ -112,7 +122,7 @@ mod tests {
         machine.mem_write(0x3F_FFF0, &[1, 2, 3]).expect("write");
         let path = scratch("whole.bin");
 
-        let outcome = dump_ram(&mut machine, &path);
+        let outcome = dump_ram(&mut machine, &path, || false);
 
         assert_eq!(
             outcome,
@@ -129,6 +139,24 @@ mod tests {
         fs::remove_file(&path).expect("clean up");
     }
 
+    /// A power-off during a dump does not wait for it: the dump stops at the
+    /// next chunk, says why, and leaves no partial file.
+    #[test]
+    fn a_dump_the_vm_stops_during_gives_up_and_leaves_no_partial_file() {
+        let mut machine = MachineBuilder::new(EmulatorConfig::default())
+            .build()
+            .expect("machine");
+        let path = scratch("abandoned.bin");
+        match dump_ram(&mut machine, &path, || true) {
+            DumpOutcome::Failed { reason, .. } => {
+                assert_eq!(reason, super::super::control::NOT_SAVED_VM_STOPPED);
+            }
+            DumpOutcome::Saved { .. } => panic!("an abandoned dump was saved"),
+        }
+        assert!(!path.exists());
+        assert!(!partial_path(&path).exists());
+    }
+
     #[test]
     fn a_dump_that_cannot_be_written_reports_why_and_leaves_no_partial_file() {
         let mut machine = MachineBuilder::new(EmulatorConfig::default())
@@ -136,7 +164,7 @@ mod tests {
             .expect("machine");
         let path = scratch("no-such-folder").join("memory.bin");
 
-        match dump_ram(&mut machine, &path) {
+        match dump_ram(&mut machine, &path, || false) {
             DumpOutcome::Failed {
                 path: named,
                 reason,

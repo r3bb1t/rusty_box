@@ -40,7 +40,7 @@ use core::sync::atomic::AtomicBool;
 mod builder;
 pub use builder::{AtaSlot, BootDevice, BootOrder, BuildError, DiskGeometry, MachineBuilder};
 mod debug;
-pub use debug::DebugCpu;
+pub use debug::{DebugCpu, RamOffset};
 mod display;
 pub use display::{
     Display, DisplaySource, Resolution, RowChars, StdVga, TextGrid, TextPos, TextView, VgaCard,

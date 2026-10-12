@@ -1,17 +1,38 @@
 use crate::{
     args::{Args, BootDevice, DisplayBackend, LogLevel},
     config::{Engine, ResolvedConfig},
-    debugger::{
-        control::{AfterRun, RunControl},
-        serve::{serve, Next, Stepping},
-    },
     error::RunError,
 };
-#[cfg(all(not(feature = "guest-trace"), feature = "hv-whp", windows))]
+#[cfg(feature = "gui-egui")]
+use crate::debugger::{
+    control::{AfterRun, RunControl, RunStart},
+    serve::{serve, Next, Stepping},
+};
+#[cfg(all(not(feature = "guest-trace"), feature = "hv-whp", windows, feature = "gui-egui"))]
 use crate::debugger::{
     control::BetweenRuns,
     serve::{perform, MachineAfter},
 };
+
+/// What pauses, steps and ends a run from outside it: the shell's run
+/// control. A build without the shell has none, and there this type has no
+/// values, so every run is one nobody can pause.
+#[cfg(feature = "gui-egui")]
+type RunLink = Arc<RunControl>;
+#[cfg(not(feature = "gui-egui"))]
+type RunLink = core::convert::Infallible;
+
+/// The stop flag `link` raises.
+fn stop_flag_of(link: &RunLink) -> Arc<AtomicBool> {
+    #[cfg(feature = "gui-egui")]
+    {
+        Arc::clone(link.stop_flag())
+    }
+    #[cfg(not(feature = "gui-egui"))]
+    {
+        match *link {}
+    }
+}
 // Named only where the hypervisor engine forces it; the interpreter path
 // reaches the same narrowing through a method call and needs no name.
 #[cfg(all(not(feature = "guest-trace"), feature = "hv-whp", windows))]
@@ -32,8 +53,6 @@ use rusty_box::gui::{BxGui, NoGui, TermGui};
 use rusty_box_whp_engine::{FastMachine, FastMachineFault, StepStop, WhpEngine};
 #[cfg(feature = "gui-egui")]
 use std::collections::HashSet;
-#[cfg(feature = "gui-egui")]
-use std::sync::atomic::Ordering;
 #[cfg(feature = "gui-egui")]
 use std::sync::{mpsc, Mutex};
 use std::{
@@ -162,7 +181,7 @@ fn prepare_configured_media_files(
 fn run_with_gui<G>(
     config: ResolvedConfig,
     gui: G,
-    control: Option<Arc<RunControl>>,
+    control: Option<RunLink>,
     create_startup_disks: bool,
 ) -> Result<RunSummary, RunError>
 where
@@ -230,7 +249,7 @@ fn prepare_run(
 fn run_prepared<G>(
     prepared: PreparedRun,
     gui: G,
-    control: Option<Arc<RunControl>>,
+    control: Option<RunLink>,
 ) -> Result<RunSummary, RunError>
 where
     G: BxGui + 'static,
@@ -371,17 +390,13 @@ fn arrange_for_boot<T, E>(
 fn drive<T, E>(
     mut emu: Box<Emulator<T, E>>,
     config: &ResolvedConfig,
-    control: Option<Arc<RunControl>>,
+    control: Option<RunLink>,
 ) -> Result<RunSummary, RunError>
 where
     T: Instrumentation,
     E: SliceEngine<T>,
 {
-    arrange_for_boot(
-        emu.as_mut(),
-        config,
-        control.as_ref().map(|control| Arc::clone(control.stop_flag())),
-    );
+    arrange_for_boot(emu.as_mut(), config, control.as_ref().map(stop_flag_of));
     // A run nobody can pause runs to its end in one call.
     let Some(control) = control else {
         let instructions_executed = emu.run_interactive(config.max_instructions)?;
@@ -389,9 +404,23 @@ where
             instructions_executed: Some(instructions_executed),
         });
     };
-    // `run_interactive` returns whenever the stop flag rises; the machine is
-    // still whole then, and runs on from where it stood when called again
-    // (emulator/tests.rs: a paused machine is not a switched-off one).
+    drive_served(emu, config, control)
+}
+
+/// `drive` for a run the shell can pause: `run_interactive` returns whenever
+/// the stop flag rises; the machine is still whole then, and runs on from
+/// where it stood when called again (emulator/tests.rs: a paused machine is
+/// not a switched-off one).
+#[cfg(feature = "gui-egui")]
+fn drive_served<T, E>(
+    mut emu: Box<Emulator<T, E>>,
+    config: &ResolvedConfig,
+    control: RunLink,
+) -> Result<RunSummary, RunError>
+where
+    T: Instrumentation,
+    E: SliceEngine<T>,
+{
     let mut retired = 0u64;
     while retired < config.max_instructions {
         let left = config.max_instructions - retired;
@@ -411,6 +440,20 @@ where
     Ok(RunSummary {
         instructions_executed: Some(retired),
     })
+}
+
+/// Without the shell there is no run control, so no run gets here.
+#[cfg(not(feature = "gui-egui"))]
+fn drive_served<T, E>(
+    _emu: Box<Emulator<T, E>>,
+    _config: &ResolvedConfig,
+    control: RunLink,
+) -> Result<RunSummary, RunError>
+where
+    T: Instrumentation,
+    E: SliceEngine<T>,
+{
+    match control {}
 }
 
 /// How much guest time one hypervisor step covers, in milliseconds at the
@@ -452,7 +495,7 @@ const FRAME_INTERVAL: std::time::Duration = std::time::Duration::from_millis(40)
 fn drive_on_the_hypervisor(
     mut emu: Box<Emulator<(), WhpEngine>>,
     config: &ResolvedConfig,
-    control: Option<Arc<RunControl>>,
+    control: Option<RunLink>,
 ) -> Result<RunSummary, RunError> {
     // Refused, not approximated: nothing on the hypervisor counts the guest's
     // instructions, so a limit in them would end the run at a guess, and a
@@ -464,10 +507,9 @@ fn drive_on_the_hypervisor(
     }
     // This loop is what reads the flag, so a run given none gets one nobody
     // will raise rather than a branch on every step.
-    let stop_flag = control.as_ref().map_or_else(
-        || Arc::new(AtomicBool::new(false)),
-        |control| Arc::clone(control.stop_flag()),
-    );
+    let stop_flag = control
+        .as_ref()
+        .map_or_else(|| Arc::new(AtomicBool::new(false)), stop_flag_of);
     arrange_for_boot(emu.as_mut(), config, Some(Arc::clone(&stop_flag)));
     let step = RunBudget::Ticks(
         (emu.config().ips.per_second_u64() * HYPERVISOR_STEP_MILLIS / 1_000).max(1),
@@ -494,18 +536,12 @@ fn drive_on_the_hypervisor(
     loop {
         if stop_flag.load(std::sync::atomic::Ordering::Relaxed) {
             // A run nobody can pause ends on its stop.
-            let Some(control) = control.as_deref() else {
+            let Some(control) = control.as_ref() else {
                 break;
             };
-            let power = machine
-                .with_machine(|m| m.power().state())
-                .map_err(|source| RunError::Hypervisor { source })?;
-            match control.after_run(power) {
-                AfterRun::End => break,
-                AfterRun::Serve => match serve_on_the_hypervisor(&mut machine, control)? {
-                    Next::Resume => continue,
-                    Next::End => break,
-                },
+            match after_stop_on_the_hypervisor(&mut machine, control)? {
+                AfterStop::RunOn => continue,
+                AfterStop::End => break,
             }
         }
         let outcome = machine
@@ -547,11 +583,47 @@ fn drive_on_the_hypervisor(
     })
 }
 
+/// What a hypervisor run does once it finds its stop flag raised.
+#[cfg(all(not(feature = "guest-trace"), feature = "hv-whp", windows))]
+enum AfterStop {
+    End,
+    RunOn,
+}
+
+/// A raised stop flag on a run the shell can pause: a guest that switched
+/// itself off or a stop the shell asked for ends the run; a pause or a dump
+/// is served, and the run goes on once the shell lets it.
+#[cfg(all(not(feature = "guest-trace"), feature = "hv-whp", windows, feature = "gui-egui"))]
+fn after_stop_on_the_hypervisor(
+    machine: &mut FastMachine,
+    control: &RunLink,
+) -> Result<AfterStop, RunError> {
+    let power = machine
+        .with_machine(|m| m.power().state())
+        .map_err(|source| RunError::Hypervisor { source })?;
+    match control.after_run(power) {
+        AfterRun::End => Ok(AfterStop::End),
+        AfterRun::Serve => match serve_on_the_hypervisor(machine, control)? {
+            Next::Resume => Ok(AfterStop::RunOn),
+            Next::End => Ok(AfterStop::End),
+        },
+    }
+}
+
+/// Without the shell there is no run control, so no run gets here.
+#[cfg(all(not(feature = "guest-trace"), feature = "hv-whp", windows, not(feature = "gui-egui")))]
+fn after_stop_on_the_hypervisor(
+    _machine: &mut FastMachine,
+    control: &RunLink,
+) -> Result<AfterStop, RunError> {
+    match *control {}
+}
+
 /// `serve` for a machine on the hypervisor: between steps every processor is
 /// parked and the machine is whole (`FastMachine::with_machine`), so each
 /// task runs there. Nothing counts the instructions it retires, so it cannot
 /// step one.
-#[cfg(all(not(feature = "guest-trace"), feature = "hv-whp", windows))]
+#[cfg(all(not(feature = "guest-trace"), feature = "hv-whp", windows, feature = "gui-egui"))]
 fn serve_on_the_hypervisor(
     machine: &mut FastMachine,
     control: &RunControl,
@@ -1079,10 +1151,11 @@ fn run_one_vm(start: crate::app::StartRun, provisioned: &Mutex<HashSet<PathBuf>>
     let mut retired = Some(0u64);
     let mut how = RunStart::PowerOn;
     loop {
-        // Before the display is marked running, so a stop asked for from
-        // here on ends this run (`RunControl::begin_run` clears the last).
-        control.begin_run();
-        prepare_egui_run(&display, how);
+        // A restart lowers the stop that ended the run before it, unless a
+        // stop was asked for since; a power-on finds the flag the shell
+        // lowered. Either way a stop asked for from here on ends this run.
+        control.begin_run(how);
+        prepare_egui_run(&display);
         let creation = startup_disk_creation(&config);
         // A record that cannot be read, its lock poisoned, reads as not yet
         // provisioned: the creation runs, as at the path's first power-on.
@@ -1154,37 +1227,11 @@ fn run_one_vm(start: crate::app::StartRun, provisioned: &Mutex<HashSet<PathBuf>>
     retired
 }
 
-/// How a run begins.
+/// Marks `shared`'s VM running for the run about to begin. The stop flag is
+/// the run control's to lower (`RunControl::begin_run`), never the display's.
 #[cfg(feature = "gui-egui")]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum RunStart {
-    /// The shell asked for it and lowered the stop flag then; a stop raised
-    /// since is honoured.
-    PowerOn,
-    /// The run before it ended on a restart; the stop that ended it is spent.
-    Restart,
-}
-
-/// Marks `shared`'s VM running for a run that begins `how`.
-///
-/// A run never lowers the flag at a power-on: the shell lowered it when it
-/// asked for the power-on, so a stop raised since, as closing the shell
-/// raises one before the run's thread gets here, ends the run at once. A
-/// restart lowers the stop that ended the run before it, in the same lock
-/// as it reads that the restart still stands: a stop raised after the
-/// restart was asked for withdraws it (`signal_egui_stop`, a power-off) and
-/// is honoured the same way.
-#[cfg(feature = "gui-egui")]
-fn prepare_egui_run(shared: &Arc<Mutex<SharedDisplay>>, how: RunStart) {
+fn prepare_egui_run(shared: &Arc<Mutex<SharedDisplay>>) {
     if let Ok(mut display) = shared.lock() {
-        match how {
-            RunStart::PowerOn => {}
-            RunStart::Restart => {
-                if display.reset_requested {
-                    display.stop_flag.store(false, Ordering::Relaxed);
-                }
-            }
-        }
         display.emu_running = true;
         display.start_pending = false;
         display.reset_requested = false;
@@ -1429,6 +1476,8 @@ mod tests {
     };
     use rusty_box::params::BxParams;
     use rusty_box_bximage::ImageSize;
+    #[cfg(feature = "gui-egui")]
+    use std::sync::atomic::Ordering;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -1949,7 +1998,7 @@ mod tests {
         let shared = Arc::new(Mutex::new(SharedDisplay::new()));
         shared.lock().unwrap().queue_serial_input_line("stale");
 
-        prepare_egui_run(&shared, RunStart::PowerOn);
+        prepare_egui_run(&shared);
 
         assert_eq!(
             shared.lock().unwrap().drain_serial_input(),
@@ -1971,7 +2020,7 @@ mod tests {
             .push(HostInputEvent::Key(BxKey::Enter, true)));
         assert_eq!(shared.lock().unwrap().pending_keys.len(), 1);
 
-        prepare_egui_run(&shared, RunStart::PowerOn);
+        prepare_egui_run(&shared);
 
         assert!(shared.lock().unwrap().pending_keys.is_empty());
     }
@@ -2000,27 +2049,6 @@ mod tests {
         signal_egui_stop(display, &control_for(display));
     }
 
-    /// A restart lowers the stop that ended the run before it, and only that
-    /// one: a stop raised after the restart was asked for withdraws it, and
-    /// still stands when the run it would have begun starts.
-    #[cfg(feature = "gui-egui")]
-    #[test]
-    fn a_restart_lowers_only_the_stop_that_ended_its_run() {
-        let shared = Arc::new(Mutex::new(SharedDisplay::new()));
-        let raised = || shared.lock().unwrap().stop_flag.load(Ordering::Relaxed);
-
-        ask_for_a_restart(&shared);
-        prepare_egui_run(&shared, RunStart::Restart);
-        assert!(!raised(), "the stop that ended the run is spent");
-
-        ask_for_a_restart(&shared);
-        stop(&shared);
-        prepare_egui_run(&shared, RunStart::Restart);
-        assert!(
-            raised(),
-            "a stop raised after the restart was asked for still stands"
-        );
-    }
 
     /// A power-on refused for a missing CD-ROM leaves an `overwrite` disk as
     /// it was: the CD-ROM is checked before the disk is recreated.
@@ -2691,16 +2719,19 @@ mod tests {
     fn quitting_while_a_restart_is_queued_ends_the_vm() {
         let bios = spinning_bios();
         let display = Arc::new(Mutex::new(SharedDisplay::new()));
+        let control = control_for(&display);
         let run = spawn_run(crate::app::StartRun {
             display: Arc::clone(&display),
             config: spinning_config(&bios),
             holds: holds_of_a_plain_power_on(),
-            control: control_for(&display),
+            control: Arc::clone(&control),
         });
         wait_until(|| display.lock().unwrap().emu_running);
 
+        // Quitting stops through the VM's own control, as `Sessions::stop_all`
+        // does, so a stop that lands after the restart was taken still ends it.
         ask_for_a_restart(&display);
-        stop(&display);
+        signal_egui_stop(&display, &control);
 
         wait_for_end(&run, "a VM stopped with its restart queued");
         let retired = run.join().expect("the run's thread");

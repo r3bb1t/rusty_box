@@ -846,6 +846,8 @@ fn a_ram_image_below_the_pci_hole_is_ram_at_its_physical_address() {
     let mut machine = MachineBuilder::new(small_config()).build().expect("machine");
     machine.mem_write(0x1234, b"rusty").expect("write");
     let mut image = [0u8; 5];
-    machine.read_ram_image(0x1234, &mut image).expect("read");
+    machine
+        .read_ram_image(rusty_box::emulator::RamOffset(0x1234), &mut image)
+        .expect("read");
     assert_eq!(&image, b"rusty");
 }

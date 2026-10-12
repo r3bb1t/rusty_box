@@ -1829,22 +1829,36 @@ impl NativeShellApp {
         }
     }
 
-    /// Reports every finished RAM dump, named by its VM.
+    /// Reports every finished RAM dump, named by its VM, in one notice: the
+    /// shell shows one notice at a time, so dumps that finish together are
+    /// said together, at the gravest of their kinds.
     fn take_dump_notices(&mut self) {
+        let mut kind = None;
+        let mut messages = Vec::new();
         for done in self.sessions.take_dump_outcomes() {
             let name = self.vm_name(&done.vm).to_owned();
-            let notice = match done.outcome {
-                DumpOutcome::Saved { path, bytes } => ShellNotice::info(format!(
-                    "Saved {} MiB of {name}'s RAM to {}.",
-                    bytes / (1024 * 1024),
-                    path.display()
-                )),
-                DumpOutcome::Failed { path, reason } => ShellNotice::error(format!(
-                    "{name}'s RAM was not saved to {}: {reason}.",
-                    path.display()
-                )),
+            let (this_kind, message) = match done.outcome {
+                DumpOutcome::Saved { path, bytes } => (
+                    ShellNoticeKind::Info,
+                    format!(
+                        "Saved {} MiB of {name}'s RAM to {}.",
+                        bytes / (1024 * 1024),
+                        path.display()
+                    ),
+                ),
+                DumpOutcome::Failed { path, reason } => (
+                    ShellNoticeKind::Error,
+                    format!("{name}'s RAM was not saved to {}: {reason}.", path.display()),
+                ),
             };
-            self.notify(notice);
+            kind = Some(kind.map_or(this_kind, |gravest: ShellNoticeKind| gravest.max(this_kind)));
+            messages.push(message);
+        }
+        if let Some(kind) = kind {
+            self.notify(ShellNotice {
+                kind,
+                message: messages.join(" "),
+            });
         }
     }
 
@@ -8343,7 +8357,7 @@ mod tests {
         let (mut app, _command_rx, _scratch) = native_test_app();
         let vm = app.shown_vm();
         let control = Arc::clone(app.sessions.open(&vm).control());
-        control.begin_run();
+        control.begin_run(crate::debugger::control::RunStart::PowerOn);
         let path = PathBuf::from("memory.bin");
         assert_eq!(control.request_dump(path.clone()), DumpRequest::Queued);
         control.record_dump(DumpOutcome::Saved {
@@ -8361,6 +8375,28 @@ mod tests {
             notice.message
         );
         assert!(notice.message.contains("memory.bin"));
+    }
+
+    /// Two dumps that finish in one frame are both said, at the graver kind.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn dumps_that_finish_together_are_all_reported() {
+        let (mut app, _command_rx, _scratch) = native_test_app();
+        let vm = app.shown_vm();
+        let control = Arc::clone(app.sessions.open(&vm).control());
+        control.record_dump(DumpOutcome::Saved {
+            path: PathBuf::from("first.bin"),
+            bytes: 32 * 1024 * 1024,
+        });
+        control.record_dump(DumpOutcome::Failed {
+            path: PathBuf::from("second.bin"),
+            reason: "the disk is full".to_owned(),
+        });
+        app.take_dump_notices();
+        let notice = app.shell_notice.clone().expect("a notice");
+        assert_eq!(notice.kind, ShellNoticeKind::Error);
+        assert!(notice.message.contains("first.bin"), "{}", notice.message);
+        assert!(notice.message.contains("second.bin"), "{}", notice.message);
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -9334,7 +9370,7 @@ mod tests {
         fn live_vm(app: &mut NativeShellApp) -> Arc<crate::debugger::control::RunControl> {
             let vm = app.shown_vm();
             let control = Arc::clone(app.sessions.open(&vm).control());
-            control.begin_run();
+            control.begin_run(crate::debugger::control::RunStart::PowerOn);
             app.shown_display().lock().unwrap().emu_running = true;
             control
         }

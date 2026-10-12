@@ -3,11 +3,12 @@
 //!
 //! The bar draws from borrowed state and reports the click; the app decides
 //! what the click means. The power verbs (Power on, Pause or Resume, Power
-//! off, Restart) are always present and enabled by the machine's state alone; the three controls that act on the guest's
-//! console (Ctrl+Alt+Del, mouse capture, the serial pane) appear only while
-//! the console page is shown — in the bar while it has room for them, inside
-//! the `…` overflow when it does not. The `…` at the far right always holds
-//! the two verbs that belong to the application rather than to the VM.
+//! off, Restart) are always present and enabled by the machine's state
+//! alone; the three controls that act on the guest's console (Ctrl+Alt+Del,
+//! mouse capture, the serial pane) appear only while the console page is
+//! shown — in the bar while it has room for them, inside the `…` overflow
+//! when it does not. The `…` at the far right always holds Dump RAM and the
+//! verbs that belong to the application rather than to the VM.
 
 #[cfg(target_os = "android")]
 use crate::shell::destination::ShellPage;

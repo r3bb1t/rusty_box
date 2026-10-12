@@ -591,8 +591,13 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emu
     /// sits from 4 GiB up, past the PCI hole (`bx_translate_gpa_to_linear`).
     /// Offsets `0..mem_size()` cover all of RAM exactly once, which is what a
     /// RAM image is.
-    pub fn read_ram_image(&mut self, offset: u64, buf: &mut [u8]) -> Result<()> {
+    pub fn read_ram_image(
+        &mut self,
+        offset: crate::emulator::RamOffset,
+        buf: &mut [u8],
+    ) -> Result<()> {
         use crate::memory::memory_rusty_box::{bx_ram_stretch, bx_translate_linear_to_gpa};
+        let crate::emulator::RamOffset(offset) = offset;
         let mut done = 0usize;
         while done < buf.len() {
             let at = offset

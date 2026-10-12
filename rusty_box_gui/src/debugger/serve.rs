@@ -95,7 +95,7 @@ pub(crate) fn perform<T: Instrumentation, E: SliceEngine<T>>(
             }
         },
         Task::DumpRam(path) => {
-            control.record_dump(dump_ram(emu, &path));
+            control.record_dump(dump_ram(emu, &path, || control.ending()));
             Ok(live(0))
         }
     }
@@ -158,7 +158,7 @@ mod tests {
         machine.reg_write(X86Reg::Rip, code);
         let control = RunControl::new(Arc::new(AtomicBool::new(false)));
         machine.set_stop_flag(Arc::clone(control.stop_flag()));
-        control.begin_run();
+        control.begin_run(crate::debugger::control::RunStart::PowerOn);
         control.pause();
         let BetweenRuns::Perform(task) = control.next_between_runs() else {
             panic!("a pause publishes first")

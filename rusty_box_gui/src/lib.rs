@@ -24,7 +24,7 @@ pub mod args;
 #[cfg(feature = "gui-egui")]
 pub(crate) mod shell;
 pub mod config;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "gui-egui"))]
 pub(crate) mod debugger;
 mod disk_images;
 mod hard_disk;
