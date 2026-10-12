@@ -1,7 +1,8 @@
 //! The Debugger page: a paused VM's processors, code, memory and stack. It is
-//! laid out as x64dbg lays out its CPU tab (code above memory on the left,
-//! registers above the stack on the right) and stacked in one column where
-//! the page is too narrow for two. Like the VM bar, it draws from borrowed
+//! laid out as x64dbg lays out its CPU tab (code on the left, registers above
+//! the stack on the right, the memory dump across the bottom) and stacked in
+//! one column where the page is too narrow for two; the page scrolls either
+//! way, and no row wraps. Like the VM bar, it draws from borrowed
 //! state and reports what was asked for; the app acts on it.
 
 use egui::RichText;
@@ -13,7 +14,7 @@ use crate::debugger::inspect::{
 };
 use crate::shell::theme::{
     shell_card_frame, ACCENT_AMBER, ACCENT_CYAN, ACCENT_RED, SPACE_ITEM, SPACE_PAGE, TEXT_MUTED,
-    TEXT_PRIMARY,
+    TEXT_PRIMARY, TEXT_SECONDARY,
 };
 
 pub(crate) const NOT_RUNNING: &str =
@@ -154,21 +155,23 @@ pub(crate) fn draw_debugger_page(
             }
             follow_window(pane, snapshot);
             ui.add_space(SPACE_ITEM);
-            if ui.available_width() >= TWO_COLUMN_WIDTH {
-                ui.columns(2, |columns| {
-                    code_pane(&mut columns[0], snapshot);
-                    memory_pane(&mut columns[0], snapshot, pane, &mut action);
-                    registers_pane(&mut columns[1], snapshot);
-                    stack_pane(&mut columns[1], snapshot);
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    if ui.available_width() >= TWO_COLUMN_WIDTH {
+                        ui.columns(2, |columns| {
+                            code_pane(&mut columns[0], snapshot);
+                            registers_pane(&mut columns[1], snapshot);
+                            stack_pane(&mut columns[1], snapshot);
+                        });
+                        memory_pane(ui, snapshot, pane, &mut action);
+                    } else {
+                        registers_pane(ui, snapshot);
+                        code_pane(ui, snapshot);
+                        stack_pane(ui, snapshot);
+                        memory_pane(ui, snapshot, pane, &mut action);
+                    }
                 });
-            } else {
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    registers_pane(ui, snapshot);
-                    code_pane(ui, snapshot);
-                    stack_pane(ui, snapshot);
-                    memory_pane(ui, snapshot, pane, &mut action);
-                });
-            }
         });
     action
 }
@@ -275,8 +278,18 @@ fn pane_title(ui: &mut egui::Ui, title: &str) {
 }
 
 fn mono(text: impl Into<String>) -> RichText {
-    RichText::new(text).monospace()
+    RichText::new(text).monospace().size(TEXT_SECONDARY)
 }
+
+/// One listing row: cut at the pane's edge rather than wrapped, so columns
+/// of hex stay aligned.
+fn row(ui: &mut egui::Ui, text: RichText) {
+    ui.add(egui::Label::new(text).wrap_mode(egui::TextWrapMode::Truncate));
+}
+
+/// The bytes column of the code listing: at most this many bytes, the rest
+/// marked with an ellipsis, so the opcode name stays in view.
+const CODE_BYTES_SHOWN: usize = 8;
 
 fn hex_digits(size: CodeSize) -> usize {
     match size {
@@ -290,20 +303,28 @@ fn code_pane(ui: &mut egui::Ui, snapshot: &DebugSnapshot) {
         pane_title(ui, "Code");
         let digits = shown_view(snapshot).map_or(16, |view| hex_digits(view.code_size));
         for (index, line) in snapshot.code.iter().enumerate() {
-            let bytes: Vec<String> = line.bytes.iter().map(|byte| format!("{byte:02X}")).collect();
+            let mut bytes: Vec<String> = line
+                .bytes
+                .iter()
+                .take(CODE_BYTES_SHOWN)
+                .map(|byte| format!("{byte:02X}"))
+                .collect();
+            if line.bytes.len() > CODE_BYTES_SHOWN {
+                bytes.push("…".to_owned());
+            }
             let text = match &line.text {
                 CodeText::Opcode(name) => name.as_str(),
                 CodeText::Undecodable => "(undecodable)",
                 CodeText::Unreadable => "(unreadable)",
             };
-            let row = format!(
-                "{:0digits$X}  {:<30}  {text}",
+            let listing = format!(
+                "{:0digits$X}  {:<26} {text}",
                 line.address,
                 bytes.join(" ")
             );
             // The first line is the instruction at RIP.
             let color = if index == 0 { ACCENT_CYAN } else { TEXT_PRIMARY };
-            ui.label(mono(row).color(color));
+            row(ui, mono(listing).color(color));
         }
     });
 }
@@ -481,8 +502,8 @@ fn memory_pane(
         if let Some(error) = pane.address_error {
             ui.label(RichText::new(error.message()).color(ACCENT_RED));
         }
-        for row in &snapshot.memory.rows {
-            let text = match row.bytes {
+        for line in &snapshot.memory.rows {
+            let text = match line.bytes {
                 Some(bytes) => {
                     let hex: Vec<String> = bytes.iter().map(|byte| format!("{byte:02X}")).collect();
                     let ascii: String = bytes
@@ -495,25 +516,32 @@ fn memory_pane(
                             }
                         })
                         .collect();
-                    format!("{:016X}  {}  {ascii}", row.address, hex.join(" "))
+                    format!("{:016X}  {}  {ascii}", line.address, hex.join(" "))
                 }
-                None => format!("{:016X}  {}", row.address, ["??"; 16].join(" ")),
+                None => format!("{:016X}  {}", line.address, ["??"; 16].join(" ")),
             };
-            ui.label(mono(text).color(TEXT_PRIMARY));
+            row(ui, mono(text).color(TEXT_PRIMARY));
         }
     });
 }
 
 fn stack_pane(ui: &mut egui::Ui, snapshot: &DebugSnapshot) {
-    let digits = shown_view(snapshot).map_or(16, |view| hex_digits(view.code_size));
+    let size = shown_view(snapshot).map(|view| view.code_size);
+    let digits = size.map_or(16, hex_digits);
+    // A slot is as wide as a pointer at the code size: 2, 4 or 8 bytes.
+    let value_digits = size.map_or(16, |size| 2 * crate::debugger::inspect::slot_bytes(size));
     shell_card_frame().show(ui, |ui| {
         pane_title(ui, "Stack");
         for (index, slot) in snapshot.stack.iter().enumerate() {
             let value = slot
                 .value
-                .map_or_else(|| "?".repeat(digits), |value| format!("{value:0digits$X}"));
+                .map_or_else(
+                    || "?".repeat(value_digits),
+                    |value| format!("{value:0value_digits$X}"),
+                );
             let marker = if index == 0 { "  top" } else { "" };
-            ui.label(
+            row(
+                ui,
                 mono(format!("{:0digits$X}  {value}{marker}", slot.address)).color(TEXT_PRIMARY),
             );
         }
