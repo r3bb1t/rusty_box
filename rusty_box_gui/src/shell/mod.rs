@@ -12,8 +12,11 @@
 //! selected one open to its pages, and the entry each row is drawn from.
 //! `vm_bar` is the one bar above a page: the selected VM's name, its state
 //! badge, and the verbs that change that state, with the console's own
-//! controls shown only while the console page is.
+//! controls shown only while the console page is. `debugger_page` is the
+//! Debugger page: a paused VM's registers, code, memory and stack.
 
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) mod debugger_page;
 pub(crate) mod destination;
 pub(crate) mod sidebar;
 pub(crate) mod theme;
@@ -30,8 +33,12 @@ mod tests {
 
     /// The sources whose string literals reach the screen, each with the path
     /// a failure names.
-    const SOURCES: [(&str, &str); 7] = [
+    const SOURCES: [(&str, &str); 8] = [
         ("rusty_box_gui/src/app.rs", include_str!("../app.rs")),
+        (
+            "rusty_box_gui/src/shell/debugger_page.rs",
+            include_str!("debugger_page.rs"),
+        ),
         (
             "rusty_box_gui/src/shell/destination.rs",
             include_str!("destination.rs"),

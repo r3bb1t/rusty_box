@@ -2,8 +2,8 @@
 //! verbs that change that state.
 //!
 //! The bar draws from borrowed state and reports the click; the app decides
-//! what the click means. The power verbs are always present and enabled by
-//! the machine's state alone; the three controls that act on the guest's
+//! what the click means. The power verbs (Power on, Pause or Resume, Power
+//! off, Restart) are always present and enabled by the machine's state alone; the three controls that act on the guest's
 //! console (Ctrl+Alt+Del, mouse capture, the serial pane) appear only while
 //! the console page is shown — in the bar while it has room for them, inside
 //! the `…` overflow when it does not. The `…` at the far right always holds
@@ -40,6 +40,8 @@ pub(crate) struct VmBarState<'a> {
     pub(crate) page: ShellPage,
     pub(crate) running: bool,
     pub(crate) start_pending: bool,
+    /// The shell asked this VM to pause: the verb reads Resume.
+    pub(crate) pause_wanted: bool,
     pub(crate) on_console: bool,
     pub(crate) serial_shown: bool,
     pub(crate) mouse_captured: bool,
@@ -56,6 +58,12 @@ const RESTART: &str = "↻ Restart";
 const POWER_OFF: &str = "■ Power off";
 #[cfg(not(target_arch = "wasm32"))]
 const POWER_ON: &str = "▶ Power on";
+#[cfg(not(target_arch = "wasm32"))]
+const PAUSE: &str = "Pause";
+#[cfg(not(target_arch = "wasm32"))]
+const RESUME: &str = "▶ Resume";
+#[cfg(not(target_arch = "wasm32"))]
+const DUMP_RAM: &str = "Dump RAM…";
 #[cfg(not(target_arch = "wasm32"))]
 const CTRL_ALT_DEL: &str = "Ctrl+Alt+Del";
 #[cfg(not(target_arch = "wasm32"))]
@@ -79,15 +87,17 @@ const BAR_HEIGHT: f32 = 36.0;
 const BAR_MARGIN_Y: f32 = 4.0;
 
 /// The width the verbs that are always in the bar take together: the `…`
-/// overflow and the three power verbs, with the gaps between them.
+/// overflow and the four power verbs, with the gaps between them. Pause is
+/// measured at its wider caption, so the bar does not shift as it flips.
 #[cfg(not(target_arch = "wasm32"))]
 fn power_verbs_width(ui: &egui::Ui) -> f32 {
     let gap = ui.spacing().item_spacing.x;
     button_width(ui, OVERFLOW)
         + button_width(ui, RESTART)
         + button_width(ui, POWER_OFF)
+        + button_width(ui, PAUSE).max(button_width(ui, RESUME))
         + button_width(ui, RichText::new(POWER_ON).strong())
-        + 3.0 * gap
+        + 4.0 * gap
 }
 
 /// The width the console's three controls and their separator take when they
@@ -248,6 +258,13 @@ pub(crate) fn draw_vm_bar(ui: &mut egui::Ui, state: VmBarState<'_>) -> Option<Vm
                             }
                             ui.separator();
                         }
+                        if ui
+                            .add_enabled(state.running, egui::Button::new(DUMP_RAM))
+                            .clicked()
+                        {
+                            action = Some(VmBarAction::DumpRam);
+                            ui.close();
+                        }
                         if ui.button("Create floppy image…").clicked() {
                             action = Some(VmBarAction::CreateFloppy);
                             ui.close();
@@ -280,6 +297,13 @@ pub(crate) fn draw_vm_bar(ui: &mut egui::Ui, state: VmBarState<'_>) -> Option<Vm
                         .clicked()
                     {
                         action = Some(VmBarAction::PowerOff);
+                    }
+                    let pause = if state.pause_wanted { RESUME } else { PAUSE };
+                    if ui
+                        .add_enabled(state.running, egui::Button::new(pause))
+                        .clicked()
+                    {
+                        action = Some(VmBarAction::TogglePause);
                     }
                     // The filled treatment marks the one verb that can be taken
                     // now; a Power on that cannot be pressed rests as a ghost

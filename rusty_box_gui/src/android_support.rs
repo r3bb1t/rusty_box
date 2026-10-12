@@ -68,7 +68,7 @@ pub(crate) fn console_view(
     notice: NoticeWaiting,
 ) -> ConsoleView {
     match page {
-        ShellPage::Home | ShellPage::Hardware => ConsoleView::Shell,
+        ShellPage::Home | ShellPage::Hardware | ShellPage::Debugger => ConsoleView::Shell,
         ShellPage::Console => match (activity, notice) {
             (MachineActivity::Stopped, NoticeWaiting::None | NoticeWaiting::Shown)
             | (MachineActivity::Starting | MachineActivity::Running, NoticeWaiting::Shown) => {
@@ -598,6 +598,7 @@ mod tests {
             ips: 0,
             reset_requested: false,
             start_pending,
+            paused: false,
         }
     }
 

@@ -5,7 +5,6 @@ use std::path::PathBuf;
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::{
-    atomic::Ordering,
     mpsc::Sender,
     {Arc, Mutex},
 };
@@ -18,6 +17,8 @@ use crate::sessions::{
 };
 #[cfg(not(target_arch = "wasm32"))]
 use crate::shell::destination::{SidebarAction, VmBarAction};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::debugger::control::{DumpOutcome, DumpRequest, Wanted};
 use crate::shell::destination::{Destination, ShellPage};
 use crate::shell::sidebar::{Drawer, VmLibraryEntry};
 #[cfg(not(target_arch = "wasm32"))]
@@ -99,6 +100,8 @@ pub struct StartRun {
     /// What the power-on took that only one running VM may have: the run's
     /// thread holds it until every machine the power-on builds is gone.
     pub(crate) holds: RunHolds,
+    /// The run's control: the only writer of its stop flag.
+    pub(crate) control: Arc<crate::debugger::control::RunControl>,
 }
 
 /// A path field the shell fills from a file chooser.
@@ -117,6 +120,8 @@ pub(crate) enum BrowseTarget {
     NewDisk,
     /// Where the floppy maker writes its next image.
     NewFloppy,
+    /// Where the shown VM's RAM is saved.
+    RamDump,
 }
 
 /// A Browse press the Android host answers with a file browser of its own.
@@ -1183,6 +1188,8 @@ pub(crate) struct ShellStatus {
     pub ips: u32,
     pub reset_requested: bool,
     pub start_pending: bool,
+    /// The run is paused: it has stopped retiring instructions for the shell.
+    pub paused: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1240,6 +1247,10 @@ impl Default for FloppyMaker {
 
 /// The file name a new floppy image is offered under.
 const FLOPPY_FILE_NAME: &str = "floppy.img";
+
+/// The name Dump RAM… offers for the file it saves.
+#[cfg(not(target_arch = "wasm32"))]
+const RAM_DUMP_FILE_NAME: &str = "memory.bin";
 
 /// A hard disk not yet created: what the Hard disk page's new-disk sheet
 /// holds while it is open.
@@ -1598,12 +1609,14 @@ pub(crate) fn status_snapshot(
             ips: display.ips,
             reset_requested: display.reset_requested,
             start_pending: display.start_pending,
+            paused: false,
         },
         Err(_) => ShellStatus {
             running: false,
             ips: 0,
             reset_requested: false,
             start_pending: false,
+            paused: false,
         },
     }
 }
@@ -1705,6 +1718,7 @@ impl NativeShellApp {
                 ips: 0,
                 reset_requested: false,
                 start_pending: false,
+                paused: false,
             },
             VmSession::status,
         )
@@ -1815,6 +1829,48 @@ impl NativeShellApp {
         }
     }
 
+    /// Reports every finished RAM dump, named by its VM.
+    fn take_dump_notices(&mut self) {
+        for done in self.sessions.take_dump_outcomes() {
+            let name = self.vm_name(&done.vm).to_owned();
+            let notice = match done.outcome {
+                DumpOutcome::Saved { path, bytes } => ShellNotice::info(format!(
+                    "Saved {} MiB of {name}'s RAM to {}.",
+                    bytes / (1024 * 1024),
+                    path.display()
+                )),
+                DumpOutcome::Failed { path, reason } => ShellNotice::error(format!(
+                    "{name}'s RAM was not saved to {}: {reason}.",
+                    path.display()
+                )),
+            };
+            self.notify(notice);
+        }
+    }
+
+    /// Pauses the shown VM, or lets it run on when it was asked to pause.
+    fn toggle_pause(&mut self) {
+        let vm = self.shown_vm();
+        let session = self.sessions.open(&vm);
+        if !session.is_live() {
+            return;
+        }
+        match session.control().wanted() {
+            Wanted::Run => session.control().pause(),
+            Wanted::Pause => session.control().resume(),
+        }
+    }
+
+    /// Asks where to save the shown VM's RAM; the answer goes to
+    /// `set_browsed_path`, which hands the run the dump.
+    fn ask_for_ram_dump(&mut self) {
+        if self.browse(BrowseTarget::RamDump) {
+            if let Err(message) = self.apply_pending_settings() {
+                self.notify(ShellNotice::error(message));
+            }
+        }
+    }
+
     /// A file dropped on the window while Hardware › Hard disk is shown
     /// becomes the VM's hard disk, as its Use a disk file would make it.
     #[cfg(not(target_arch = "wasm32"))]
@@ -1853,6 +1909,10 @@ impl NativeShellApp {
                 page: self.chrome.page(),
                 running: status.running,
                 start_pending: status.start_pending,
+                pause_wanted: self
+                    .sessions
+                    .get(&vm)
+                    .is_some_and(|session| session.control().wanted() == Wanted::Pause),
                 on_console: self.chrome.page() == ShellPage::Console,
                 serial_shown: self.chrome.show_serial,
                 mouse_captured: self
@@ -1869,6 +1929,8 @@ impl NativeShellApp {
             Some(VmBarAction::PowerOn) => self.start_vm(),
             Some(VmBarAction::PowerOff) => self.request_power_off(),
             Some(VmBarAction::Restart) => self.request_reset(),
+            Some(VmBarAction::TogglePause) => self.toggle_pause(),
+            Some(VmBarAction::DumpRam) => self.ask_for_ram_dump(),
             Some(VmBarAction::ToggleSerial) => {
                 self.chrome.show_serial = !self.chrome.show_serial;
             }
@@ -2030,8 +2092,50 @@ impl NativeShellApp {
                     ShellPage::Home => self.draw_home_page(ui),
                     ShellPage::Console => self.draw_console_page(ui, frame),
                     ShellPage::Hardware => self.draw_hardware_page(ui),
+                    ShellPage::Debugger => self.draw_debugger_page(ui),
                 }
             });
+    }
+
+    fn draw_debugger_page(&mut self, ui: &mut egui::Ui) {
+        use crate::debugger::inspect::ViewRequest;
+        use crate::shell::debugger_page::{draw_debugger_page, DebuggerAction, DebuggerPageState};
+        let status = self.runtime_status();
+        let vm = self.shown_vm();
+        let session = self.sessions.open(&vm);
+        let control = Arc::clone(session.control());
+        let snapshot = control.snapshot();
+        let step_available = session.run_engine() != Some(crate::config::Engine::Whp);
+        let action = draw_debugger_page(
+            ui,
+            DebuggerPageState {
+                live: status.running,
+                paused: status.paused,
+                step_available,
+                dump_pending: control.dump_pending(),
+                note: control.note(),
+                snapshot: snapshot.as_deref(),
+                pane: session.debugger_mut(),
+            },
+        );
+        // A paused run answers on its own thread; keep looking while it may.
+        if status.running {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(100));
+        }
+        match action {
+            None => {}
+            Some(DebuggerAction::Step) => control.step(),
+            Some(DebuggerAction::DumpRam) => self.ask_for_ram_dump(),
+            Some(DebuggerAction::ShowMemory(memory)) => {
+                let cpu = control.view().cpu;
+                control.set_view(ViewRequest { cpu, memory });
+            }
+            Some(DebuggerAction::SelectCpu(cpu)) => {
+                let memory = control.view().memory;
+                control.set_view(ViewRequest { cpu, memory });
+            }
+        }
     }
 
     fn draw_home_page(&mut self, ui: &mut egui::Ui) {
@@ -3769,11 +3873,12 @@ impl NativeShellApp {
         // The engine the run uses, which the shell names while the VM is live.
         self.sessions.open(&vm).set_run_engine(config.engine);
         let display = self.shown_display();
+        let control = Arc::clone(self.sessions.open(&vm).control());
+        // The power-on lowers the stop its VM's last run left raised. The run
+        // never lowers it at its start, so a stop raised from here on, before
+        // the run begins, is honoured.
+        control.arm_for_power_on();
         if let Ok(mut shown) = display.lock() {
-            // The power-on lowers the stop its VM's last run left raised. The
-            // run never lowers it at its start, so a stop raised from here
-            // on, before the run begins, is honoured.
-            shown.stop_flag.store(false, Ordering::Relaxed);
             shown.start_pending = true;
         }
         match self.command_tx.send(NativeEmulatorCommand::Start(StartRun {
@@ -3784,6 +3889,7 @@ impl NativeShellApp {
                 disk,
                 alive: self.keep_alive.take(),
             },
+            control,
         })) {
             Ok(()) => {
                 // The overwrite creations this power-on settles for the
@@ -3808,11 +3914,8 @@ impl NativeShellApp {
         if !self.is_vm_running() {
             return;
         }
-
-        if let Ok(mut display) = self.shown_display().lock() {
-            display.stop_flag.store(true, Ordering::Relaxed);
-            display.reset_requested = false;
-        }
+        let vm = self.shown_vm();
+        self.sessions.open(&vm).power_off();
     }
 
     /// How the phone draws this frame: see `android_support::console_view`.
@@ -3918,6 +4021,22 @@ impl NativeShellApp {
                 }
             }
             ui.separator();
+            let pause = if self
+                .sessions
+                .get(&vm)
+                .is_some_and(|session| session.control().wanted() == Wanted::Pause)
+            {
+                "▶ Resume"
+            } else {
+                "Pause"
+            };
+            if ui
+                .add_enabled(status.running, egui::Button::new(pause))
+                .clicked()
+            {
+                self.toggle_pause();
+                self.full_screen_menu_open = false;
+            }
             if ui
                 .add_enabled(status.running, egui::Button::new("■ Power off"))
                 .clicked()
@@ -4068,11 +4187,8 @@ impl NativeShellApp {
         if !self.is_vm_running() {
             return;
         }
-
-        if let Ok(mut display) = self.shown_display().lock() {
-            display.stop_flag.store(true, Ordering::Relaxed);
-            display.reset_requested = true;
-        }
+        let vm = self.shown_vm();
+        self.sessions.open(&vm).restart();
     }
 
     /// Offers a file for the field `target` names and puts the choice there.
@@ -4089,6 +4205,7 @@ impl NativeShellApp {
                 save_native_file(&name)
             }
             BrowseTarget::NewFloppy => save_native_file(FLOPPY_FILE_NAME),
+            BrowseTarget::RamDump => save_native_file(RAM_DUMP_FILE_NAME),
             BrowseTarget::HardDisk
             | BrowseTarget::Cdrom
             | BrowseTarget::Bios
@@ -4147,6 +4264,19 @@ impl NativeShellApp {
                 self.floppy_maker.path = text;
                 false
             }
+            BrowseTarget::RamDump => {
+                let vm = self.shown_vm();
+                let name = self.vm_name(&vm).to_owned();
+                match self.sessions.open(&vm).request_dump(path) {
+                    DumpRequest::Queued => {
+                        self.notify(ShellNotice::info(format!("Saving {name}'s RAM…")));
+                    }
+                    DumpRequest::NotRunning => self.notify(ShellNotice::warning(format!(
+                        "{name} is not running, so its RAM was not saved."
+                    ))),
+                }
+                false
+            }
         }
     }
 
@@ -4175,6 +4305,8 @@ impl NativeShellApp {
                 PathBuf::from(self.floppy_maker.path.trim()),
                 Some(FLOPPY_FILE_NAME),
             ),
+            // The browser opens in the shared Download folder.
+            BrowseTarget::RamDump => (PathBuf::new(), Some(RAM_DUMP_FILE_NAME)),
         };
         Some(BrowseRequest {
             target,
@@ -4203,6 +4335,7 @@ impl NativeShellApp {
     /// frame that raises it already shows it.
     fn draw_shell(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         self.take_runtime_error_notice();
+        self.take_dump_notices();
         #[cfg(target_os = "android")]
         {
             let vm = self.shown_vm();
@@ -5834,7 +5967,12 @@ fn cpu_count_label(cpus: u32) -> String {
 /// idle is muted.
 #[cfg(not(target_arch = "wasm32"))]
 fn shell_state_badge(status: &ShellStatus, faulted: bool) -> ShellStateBadge {
-    if status.running {
+    if status.running && status.paused {
+        ShellStateBadge {
+            label: "Paused",
+            color: ACCENT_AMBER,
+        }
+    } else if status.running {
         ShellStateBadge {
             label: "Running",
             color: ACCENT_CYAN,
@@ -6001,6 +6139,8 @@ fn engine_label(engine: crate::config::Engine) -> &'static str {
 mod tests {
     use super::*;
     use std::fs;
+    #[cfg(not(target_arch = "wasm32"))]
+    use std::sync::atomic::Ordering;
 
     /// A path no other test of this process has: the clock alone is not
     /// enough, since two tests can start within one of its ticks.
@@ -8184,6 +8324,64 @@ mod tests {
         assert!(Arc::ptr_eq(&start.display, &app.shown_display()));
     }
 
+    /// A dump asked of a VM that is not running is said to be refused; it is
+    /// never queued for a run that will not come.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_ram_dump_of_a_vm_that_is_off_is_refused_with_a_notice() {
+        let (mut app, _command_rx, _scratch) = native_test_app();
+        let changed = app.set_browsed_path(BrowseTarget::RamDump, PathBuf::from("memory.bin"));
+        assert!(!changed, "a dump changes no setting");
+        let notice = app.shell_notice.clone().expect("a notice");
+        assert_eq!(notice.kind, ShellNoticeKind::Warning);
+        assert!(notice.message.contains("is not running"), "{}", notice.message);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_saved_dump_is_reported_with_its_vm_size_and_file() {
+        let (mut app, _command_rx, _scratch) = native_test_app();
+        let vm = app.shown_vm();
+        let control = Arc::clone(app.sessions.open(&vm).control());
+        control.begin_run();
+        let path = PathBuf::from("memory.bin");
+        assert_eq!(control.request_dump(path.clone()), DumpRequest::Queued);
+        control.record_dump(DumpOutcome::Saved {
+            path,
+            bytes: 32 * 1024 * 1024,
+        });
+
+        app.take_dump_notices();
+
+        let notice = app.shell_notice.clone().expect("a notice");
+        assert_eq!(notice.kind, ShellNoticeKind::Info);
+        assert!(
+            notice.message.contains("Saved 32 MiB of Rusty Box's RAM"),
+            "{}",
+            notice.message
+        );
+        assert!(notice.message.contains("memory.bin"));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_dump_that_failed_is_reported_as_an_error() {
+        let (mut app, _command_rx, _scratch) = native_test_app();
+        let vm = app.shown_vm();
+        app.sessions
+            .open(&vm)
+            .control()
+            .record_dump(DumpOutcome::Failed {
+                path: PathBuf::from("memory.bin"),
+                reason: "the disk is full".to_owned(),
+            });
+        app.take_dump_notices();
+        let notice = app.shell_notice.clone().expect("a notice");
+        assert_eq!(notice.kind, ShellNoticeKind::Error);
+        assert!(notice.message.contains("was not saved"));
+        assert!(notice.message.contains("the disk is full"));
+    }
+
     /// A power-on lowers the stop the VM's last run left raised, so the run
     /// it asks for runs.
     #[cfg(not(target_arch = "wasm32"))]
@@ -9094,9 +9292,19 @@ mod tests {
         }
 
         fn window(app: NativeShellApp) -> Harness<'static, Window> {
+            window_of_size(app, egui::vec2(800.0, 600.0))
+        }
+
+        /// A window wide and tall enough that the Debugger page lays its panes
+        /// out in two columns, every pane in view.
+        fn tall_window(app: NativeShellApp) -> Harness<'static, Window> {
+            window_of_size(app, egui::vec2(1400.0, 2000.0))
+        }
+
+        fn window_of_size(app: NativeShellApp, size: egui::Vec2) -> Harness<'static, Window> {
             let mut frame = eframe::Frame::_new_kittest();
             Harness::builder()
-                .with_size(egui::vec2(800.0, 600.0))
+                .with_size(size)
                 .with_step_dt(FRAME)
                 .build_ui_state(
                     move |ui, window: &mut Window| {
@@ -9120,6 +9328,172 @@ mod tests {
 
         fn drawer_shows_its_rows(window: &Harness<'_, Window>) -> bool {
             window.query_by_label(LAUNCH_VM_ROW).is_some()
+        }
+
+        /// The shown VM, live as a run makes it, and its control.
+        fn live_vm(app: &mut NativeShellApp) -> Arc<crate::debugger::control::RunControl> {
+            let vm = app.shown_vm();
+            let control = Arc::clone(app.sessions.open(&vm).control());
+            control.begin_run();
+            app.shown_display().lock().unwrap().emu_running = true;
+            control
+        }
+
+        /// A long-mode machine paused at `mov rax, 42`, read as the page reads it.
+        fn paused_snapshot() -> crate::debugger::inspect::DebugSnapshot {
+            use rusty_box::cpu::{CpuSetupMode, X86Reg};
+            let mut machine = rusty_box::emulator::Emulator::new_with_mode(
+                rusty_box::emulator::EmulatorConfig::default(),
+                CpuSetupMode::FlatLong64,
+            )
+            .expect("machine");
+            let code = CpuSetupMode::FlatLong64.first_free_physical_address();
+            machine
+                .mem_write(code, &[0x48, 0xC7, 0xC0, 0x2A, 0, 0, 0, 0xF4])
+                .expect("write");
+            machine.reg_write(X86Reg::Rip, code);
+            machine.reg_write(X86Reg::Rax, 0x2A);
+            crate::debugger::inspect::read_snapshot(
+                &mut machine,
+                &crate::debugger::inspect::ViewRequest::default(),
+            )
+        }
+
+        /// The shown VM live and paused, its pause's snapshot published.
+        fn paused_vm(app: &mut NativeShellApp) -> Arc<crate::debugger::control::RunControl> {
+            use crate::debugger::control::{BetweenRuns, Task};
+            let control = live_vm(app);
+            control.pause();
+            assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::Refresh));
+            control.publish(paused_snapshot());
+            control
+        }
+
+        fn open_debugger(window: &mut Harness<'_, Window>) {
+            window.get_by_label("Debugger").click();
+            window.run();
+        }
+
+        #[test]
+        fn pause_in_the_bar_pauses_the_shown_vm_and_resume_lets_it_run() {
+            use crate::debugger::control::Wanted;
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = live_vm(&mut app);
+            let mut window = window(app);
+            window.run();
+
+            window.get_by_label("Pause").click();
+            window.run();
+            assert_eq!(control.wanted(), Wanted::Pause);
+            assert!(control.stop_flag().load(Ordering::Relaxed));
+
+            window.get_by_label("▶ Resume").click();
+            window.run();
+            assert_eq!(control.wanted(), Wanted::Run);
+        }
+
+        #[test]
+        fn a_paused_vm_reads_paused_in_its_badge() {
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            paused_vm(&mut app);
+            let mut window = window(app);
+            window.run();
+            // The bar's badge and the status strip both say so.
+            assert!(window.query_all_by_label("Paused").next().is_some());
+        }
+
+        #[test]
+        fn the_debugger_page_shows_the_paused_processor() {
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            paused_vm(&mut app);
+            let mut window = window(app);
+            window.run();
+            open_debugger(&mut window);
+            assert!(window.query_by_label("RAX").is_some());
+            assert!(window.query_by_label("000000000000002A").is_some());
+            assert!(window
+                .query_all_by(|node| node
+                    .label()
+                    .or(node.value())
+                    .is_some_and(|text| text.contains("64-bit mode")))
+                .next()
+                .is_some());
+        }
+
+        #[test]
+        fn the_debugger_page_of_a_vm_that_is_off_says_how_to_start() {
+            let (app, _command_rx, _scratch) = native_test_app();
+            let mut window = window(app);
+            window.run();
+            open_debugger(&mut window);
+            assert!(window
+                .query_by_label(crate::shell::debugger_page::NOT_RUNNING)
+                .is_some());
+        }
+
+        #[test]
+        fn step_asks_the_paused_run_for_one_instruction() {
+            use crate::debugger::control::{BetweenRuns, Task};
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_vm(&mut app);
+            let mut window = window(app);
+            window.run();
+            open_debugger(&mut window);
+            window.get_by_label("Step").click();
+            window.run();
+            assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::Step));
+        }
+
+        #[test]
+        fn step_is_disabled_for_a_vm_on_the_hypervisor() {
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            paused_vm(&mut app);
+            let vm = app.shown_vm();
+            app.sessions
+                .open(&vm)
+                .set_run_engine(crate::config::Engine::Whp);
+            let mut window = window(app);
+            window.run();
+            open_debugger(&mut window);
+            assert!(window.get_by_label("Step").accesskit_node().is_disabled());
+        }
+
+        #[test]
+        fn a_bad_address_is_refused_inline_and_the_view_stays() {
+            use crate::shell::debugger_page::{AddressError, MEMORY_ADDRESS};
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_vm(&mut app);
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            let before = control.view();
+            window
+                .get_by_role_and_label(egui::accesskit::Role::TextInput, MEMORY_ADDRESS)
+                .click();
+            window.run();
+            window
+                .get_by_role_and_label(egui::accesskit::Role::TextInput, MEMORY_ADDRESS)
+                .type_text("xyz");
+            window.run();
+            window.get_by_label("Go").click();
+            window.run();
+            assert!(window.query_by_label(AddressError::NotHex.message()).is_some());
+            assert_eq!(control.view(), before);
+        }
+
+        #[test]
+        fn rsp_points_the_memory_pane_at_the_stack() {
+            use crate::debugger::inspect::MemoryTarget;
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_vm(&mut app);
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            window
+                .get_by_role_and_label(egui::accesskit::Role::Button, "RSP")
+                .click();
+            window.run();
+            assert_eq!(control.view().memory, MemoryTarget::Rsp);
         }
 
         fn press(pos: egui::Pos2) -> egui::Event {
