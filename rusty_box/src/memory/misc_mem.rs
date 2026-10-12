@@ -802,7 +802,8 @@ impl BxMemC {
                 fetched = Fetched::OutsideMemory;
                 0xff
             };
-            a20_addr += 1;
+            // Wraps at the top of the address space, as Bochs's `a20addr++`.
+            a20_addr = a20_addr.wrapping_add(1);
         }
         Ok(DbgFetch::Read(fetched))
     }

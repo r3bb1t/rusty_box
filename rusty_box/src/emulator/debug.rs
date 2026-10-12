@@ -33,12 +33,12 @@ impl<T: Instrumentation, E: SliceEngine<T>> DebugCpu<'_, T, E> {
     }
 
     /// Bochs paging.cc `dbg_xlate_linear2phy`: where `laddr` maps through
-    /// this processor's paging structures, or `None` where it does not.
+    /// this processor's paging structures (and EPT or the SVM nested tables
+    /// when it runs as a guest under them), or `None` where it does not.
     pub fn dbg_xlate_linear2phy(&mut self, laddr: u64) -> Option<u64> {
         self.machine
             .exec_ctx(self.index)
-            .translate_linear_system_read(laddr)
-            .ok()
+            .dbg_xlate_linear2phy(laddr, crate::cpu::paging::DbgWalk::Guest)
     }
 
     /// Bochs misc_mem.cc `dbg_fetch_mem`: `buf.len()` guest-physical bytes

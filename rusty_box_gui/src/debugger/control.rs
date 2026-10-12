@@ -85,6 +85,10 @@ struct ControlState {
     phase: RunPhase,
     /// The shell asked the run to end: power off, restart, quit.
     ending: bool,
+    /// The flag stands raised for the shell's work (a pause or a dump), so
+    /// the run serves when it comes back, even if that work was withdrawn
+    /// in the meantime (a pause answered by Resume before the run saw it).
+    serve_requested: bool,
     tasks: VecDeque<Task>,
     view: ViewRequest,
     snapshot: Option<Arc<DebugSnapshot>>,
@@ -108,6 +112,7 @@ impl RunControl {
                 wanted: Wanted::Run,
                 phase: RunPhase::Running,
                 ending: false,
+                serve_requested: false,
                 tasks: VecDeque::new(),
                 view: ViewRequest::default(),
                 snapshot: None,
@@ -138,6 +143,7 @@ impl RunControl {
     pub(crate) fn arm_for_power_on(&self) {
         let mut state = self.lock();
         state.ending = false;
+        state.serve_requested = false;
         state.wanted = Wanted::Run;
         self.stop_flag.store(false, Ordering::Relaxed);
     }
@@ -149,6 +155,7 @@ impl RunControl {
             return;
         }
         state.wanted = Wanted::Pause;
+        state.serve_requested = true;
         self.stop_flag.store(true, Ordering::Relaxed);
         self.changed.notify_all();
     }
@@ -195,6 +202,7 @@ impl RunControl {
         }
         state.tasks.push_back(Task::DumpRam(path));
         if state.phase == RunPhase::Running {
+            state.serve_requested = true;
             self.stop_flag.store(true, Ordering::Relaxed);
         }
         self.changed.notify_all();
@@ -254,14 +262,17 @@ impl RunControl {
         state.wanted = Wanted::Run;
         state.phase = RunPhase::Running;
         state.ending = false;
+        state.serve_requested = false;
         state.note = None;
         state.tasks.clear();
+        // A new run: what the last one showed is no longer this guest.
+        state.snapshot = None;
     }
 
     /// What the run thread does once the machine handed control back. A
     /// guest that switched itself off, or a stop the shell asked for, ends
-    /// the run; a pause or queued work is served; a budget spent with
-    /// nothing asked ends it too.
+    /// the run; a flag raised for a pause or a dump is served, even when the
+    /// pause was withdrawn since; a budget spent with nothing asked ends it.
     pub(crate) fn after_run(&self, power: PowerState) -> AfterRun {
         match power {
             PowerState::Running => {}
@@ -270,7 +281,10 @@ impl RunControl {
         let state = self.lock();
         if state.ending {
             AfterRun::End
-        } else if state.wanted == Wanted::Pause || !state.tasks.is_empty() {
+        } else if state.serve_requested
+            || state.wanted == Wanted::Pause
+            || !state.tasks.is_empty()
+        {
             AfterRun::Serve
         } else {
             AfterRun::End
@@ -293,6 +307,7 @@ impl RunControl {
             match state.wanted {
                 Wanted::Run => {
                     self.stop_flag.store(false, Ordering::Relaxed);
+                    state.serve_requested = false;
                     state.phase = RunPhase::Running;
                     return BetweenRuns::Resume;
                 }
@@ -445,6 +460,42 @@ mod tests {
                 reason: NOT_SAVED_VM_STOPPED.to_owned(),
             }]
         );
+    }
+
+    /// Pause then Resume before the run thread saw the pause: the raised
+    /// flag still brings the run back, and it runs on rather than ending.
+    #[test]
+    fn a_pause_withdrawn_before_the_run_saw_it_resumes_the_run() {
+        let control = control();
+        control.begin_run();
+        control.pause();
+        control.resume();
+        assert_eq!(control.after_run(PowerState::Running), AfterRun::Serve);
+        assert_eq!(control.next_between_runs(), BetweenRuns::Resume);
+        assert!(!raised(&control));
+        assert_eq!(control.after_run(PowerState::Running), AfterRun::End);
+    }
+
+    #[test]
+    fn a_new_run_shows_nothing_of_the_last() {
+        let control = control();
+        control.begin_run();
+        control.publish(crate::debugger::inspect::DebugSnapshot {
+            cpus: Vec::new(),
+            cpu: 0,
+            code: Vec::new(),
+            memory: crate::debugger::inspect::MemoryWindow {
+                start: crate::debugger::inspect::GuestAddress {
+                    space: crate::debugger::inspect::AddressSpace::Linear,
+                    value: 0,
+                },
+                rows: Vec::new(),
+            },
+            stack: Vec::new(),
+        });
+        control.finish_run();
+        control.begin_run();
+        assert!(control.snapshot().is_none());
     }
 
     #[test]

@@ -794,6 +794,39 @@ fn a_debugger_walks_a_long_mode_processors_page_tables() {
     assert_eq!(cpu.dbg_xlate_linear2phy(0xFFFF_FF80_0000_0000), None);
 }
 
+/// A 4 MiB page reaches above 4 GiB through PSE-36: the PDE's bits 13..20
+/// are physical address bits 32..39 (Bochs paging.cc `dbg_xlate_linear2phy`).
+#[test]
+fn a_debugger_walk_follows_a_pse36_page_above_4_gib() {
+    let mut machine =
+        Emulator::new_with_mode(EmulatorConfig::default(), CpuSetupMode::FlatProtected32)
+            .expect("machine");
+    let page_directory = 0x0010_0000u64;
+    // PDE 1: present, writable, 4 MiB, physical bit 32 set through PSE-36.
+    machine
+        .mem_write_u32_le(page_directory + 4, 0x0040_0083 | (1 << 13))
+        .expect("PDE");
+    machine.reg_write(X86Reg::Cr3, page_directory);
+    machine.reg_write(X86Reg::Cr4, machine.reg_read(X86Reg::Cr4) | (1 << 4));
+    machine.reg_write(X86Reg::Cr0, machine.reg_read(X86Reg::Cr0) | (1 << 31));
+    let mut cpu = machine.debug_cpu(0).expect("the boot processor");
+    assert_eq!(cpu.dbg_xlate_linear2phy(0x0040_0123), Some(0x1_0040_0123));
+    assert_eq!(cpu.dbg_xlate_linear2phy(0x0080_0000), None, "PDE 2 is not present");
+}
+
+/// A read that ends at the top of the physical address space wraps, as
+/// Bochs's does, rather than overflowing.
+#[test]
+fn a_debugger_read_at_the_top_of_the_address_space_is_outside_memory() {
+    let mut machine = MachineBuilder::new(small_config()).build().expect("machine");
+    let mut cpu = machine.debug_cpu(0).expect("the boot processor");
+    let mut bytes = [0u8; 16];
+    assert_eq!(
+        cpu.dbg_fetch_mem(0xFFFF_FFFF_FFFF_FFF0, &mut bytes).expect("fetch"),
+        Fetched::OutsideMemory
+    );
+}
+
 #[test]
 fn a_code_size_decodes_at_its_own_width() {
     // JMP $ — two bytes at any width.

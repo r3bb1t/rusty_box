@@ -2499,6 +2499,17 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     }
 }
 
+/// Which tables a debugger walk reads: Bochs `dbg_xlate_linear2phy`'s
+/// `nested_walk`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DbgWalk {
+    /// The processor's own paging structures, from CR3.
+    Guest,
+    /// An SVM host's nested tables, from the VMCB's nCR3, under the host's
+    /// CR4 and EFER.LMA.
+    Nested,
+}
+
 /// Read-only page walks: they answer where a linear address maps without
 /// touching the TLB or the accessed/dirty bits.
 ///
@@ -2662,6 +2673,184 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
         let paddr = ppf | (laddr & offset_mask);
         Ok(paddr & self.a20_mask)
+    }
+
+    /// Bochs paging.cc `BX_CPU_C::dbg_xlate_linear2phy`: where `laddr` maps,
+    /// for a debugger. Paging structures are read without touching the TLB
+    /// or an accessed or dirty bit, and every structure address and the
+    /// result pass through EPT or the SVM nested tables inside a guest that
+    /// has them. `None` is Bochs's `page_fault` exit.
+    pub(crate) fn dbg_xlate_linear2phy(
+        &mut self,
+        laddr: BxAddress,
+        walk: DbgWalk,
+    ) -> Option<BxPhyAddress> {
+        use super::decoder::features::X86Feature;
+        const BX_LEVEL_PTE: u32 = 0;
+        const BX_LEVEL_PDE: u32 = 1;
+        const BX_LEVEL_PDPTE: u32 = 2;
+        const BX_LEVEL_PML4: u32 = 3;
+        const BX_LEVEL_PML5: u32 = 4;
+        let mut laddr = laddr;
+        let mut offset_mask: u64 = 0xfff;
+        let paddress = if !self.cr0.pg() {
+            laddr
+        } else {
+            let mut pt_address = self.cr3 & BX_CR3_PAGING_MASK_PAE;
+            let mut the_cr4 = self.cr4;
+            let mut in_long_mode = self.long_mode();
+            if walk == DbgWalk::Nested {
+                pt_address = self.vmcb.ctrls.ncr3 & !0xfff;
+                the_cr4 = self.vmcb.host_state.cr4;
+                in_long_mode = self.vmcb.host_state.efer.lma();
+            }
+            if the_cr4.pae() {
+                let mut level = BX_LEVEL_PDE;
+                if !in_long_mode {
+                    laddr &= 0xffff_ffff;
+                    offset_mask = 0x3fff_ffff;
+                    if self.in_svm_guest && self.vmcb.ctrls.nested_paging {
+                        level = BX_LEVEL_PDPTE;
+                    } else {
+                        let entry = self.pdptrcache.entry[((laddr >> 30) & 3) as usize];
+                        if entry & 0x1 == 0 {
+                            return None;
+                        }
+                        pt_address = entry & 0x000f_ffff_ffff_f000;
+                    }
+                } else {
+                    level = if the_cr4.la57() {
+                        BX_LEVEL_PML5
+                    } else {
+                        BX_LEVEL_PML4
+                    };
+                    offset_mask = (1u64 << self.linaddr_width) - 1;
+                }
+                loop {
+                    pt_address += (laddr >> (9 + 9 * level)) & 0xff8;
+                    offset_mask >>= 9;
+                    pt_address = self.dbg_nested_translation(pt_address, walk)?;
+                    let pte = self.page_walk_read_qword_ro(pt_address);
+                    if pte & 1 == 0 {
+                        return None;
+                    }
+                    if pte & PAGING_PAE_PHY_RESERVED_BITS != 0 {
+                        return None;
+                    }
+                    pt_address = pte & 0x000f_ffff_ffff_f000;
+                    if level == BX_LEVEL_PTE {
+                        break;
+                    }
+                    if pte & 0x80 != 0 {
+                        // large page
+                        pt_address &= 0x000f_ffff_ffff_e000;
+                        if pt_address & offset_mask != 0 {
+                            return None;
+                        }
+                        if self.bx_cpuid_support_isa_extension(X86Feature::Isa1gPages)
+                            && level == BX_LEVEL_PDPTE
+                        {
+                            break;
+                        }
+                        if level == BX_LEVEL_PDE {
+                            break;
+                        }
+                        return None;
+                    }
+                    level -= 1;
+                }
+                pt_address + (laddr & offset_mask)
+            } else {
+                laddr &= 0xffff_ffff;
+                offset_mask = 0xfff;
+                let mut level = BX_LEVEL_PDE;
+                loop {
+                    pt_address += (laddr >> (10 + 10 * level)) & 0xffc;
+                    pt_address = self.dbg_nested_translation(pt_address, walk)?;
+                    let pte = u64::from(self.page_walk_read_dword_ro(pt_address));
+                    if pte & 1 == 0 {
+                        return None;
+                    }
+                    pt_address = pte & 0xffff_f000;
+                    if level == BX_LEVEL_PDE && pte & 0x80 != 0 && the_cr4.pse() {
+                        offset_mask = 0x3f_ffff;
+                        pt_address = (pte & 0xffc0_0000) + ((pte & 0x003f_e000) << 19);
+                        break;
+                    }
+                    if level == BX_LEVEL_PTE {
+                        break;
+                    }
+                    level -= 1;
+                }
+                pt_address + (laddr & offset_mask)
+            }
+        };
+        let paddress = self.dbg_nested_translation(paddress, walk)?;
+        Some(paddress & self.a20_mask)
+    }
+
+    /// The nested step Bochs `dbg_xlate_linear2phy` applies to each
+    /// paging-structure address and to its result: EPT inside a VMX guest
+    /// that enables it (`dbg_translate_guest_physical_ept`), and the SVM
+    /// nested tables inside an SVM guest that does
+    /// (`dbg_translate_guest_physical_npt`) except during that nested walk.
+    fn dbg_nested_translation(
+        &mut self,
+        guest_paddr: BxPhyAddress,
+        walk: DbgWalk,
+    ) -> Option<BxPhyAddress> {
+        let mut paddr = guest_paddr;
+        if self.ept_active() {
+            paddr = self.dbg_translate_guest_physical_ept(paddr)?;
+        }
+        if walk == DbgWalk::Guest && self.in_svm_guest && self.vmcb.ctrls.nested_paging {
+            paddr = self.dbg_xlate_linear2phy(paddr, DbgWalk::Nested)?;
+        }
+        Some(paddr)
+    }
+
+    /// Bochs paging.cc `dbg_translate_guest_physical_ept`.
+    fn dbg_translate_guest_physical_ept(&mut self, guest_paddr: BxPhyAddress) -> Option<BxPhyAddress> {
+        use super::decoder::features::X86Feature;
+        // BX_EPT_ENTRY_NOT_PRESENT, _WRITE_ONLY, _WRITE_EXECUTE
+        const EPT_ENTRY_NOT_PRESENT: u64 = 0;
+        const EPT_ENTRY_WRITE_ONLY: u64 = 2;
+        const EPT_ENTRY_WRITE_EXECUTE: u64 = 6;
+        let mut pt_address = self.vmcs.eptptr & !0xfff;
+        let mut offset_mask: u64 = 0x0000_ffff_ffff_ffff;
+        let mut level: u32 = 3; // BX_LEVEL_PML4
+        loop {
+            pt_address += (guest_paddr >> (9 + 9 * level)) & 0xff8;
+            offset_mask >>= 9;
+            let pte = self.page_walk_read_qword_ro(pt_address);
+            match pte & 7 {
+                EPT_ENTRY_NOT_PRESENT | EPT_ENTRY_WRITE_ONLY | EPT_ENTRY_WRITE_EXECUTE => {
+                    return None
+                }
+                _ => {}
+            }
+            if pte & PAGING_PAE_PHY_RESERVED_BITS != 0 {
+                return None;
+            }
+            pt_address = pte & 0x000f_ffff_ffff_f000;
+            if level == 0 {
+                break;
+            }
+            if pte & 0x80 != 0 {
+                let deepest_large =
+                    1 + u32::from(self.bx_cpuid_support_isa_extension(X86Feature::Isa1gPages));
+                if level > deepest_large {
+                    return None;
+                }
+                pt_address &= 0x000f_ffff_ffff_e000;
+                if pt_address & offset_mask != 0 {
+                    return None;
+                }
+                break;
+            }
+            level -= 1;
+        }
+        Some(pt_address + (guest_paddr & offset_mask))
     }
 
     /// Translate a linear address using a caller-supplied CR3 instead of
