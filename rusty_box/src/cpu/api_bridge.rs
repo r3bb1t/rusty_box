@@ -474,6 +474,66 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
 
     // ── EFER ───────────────────────────────────────────────────────────
 
+    /// Every register `CpuSnapshot` carries, read off this processor.
+    pub(crate) fn snapshot_for_api(&self) -> super::instrumentation::CpuSnapshot {
+        super::instrumentation::CpuSnapshot {
+            rax: self.rax(),
+            rbx: self.rbx(),
+            rcx: self.rcx(),
+            rdx: self.rdx(),
+            rsi: self.rsi(),
+            rdi: self.rdi(),
+            rbp: self.rbp(),
+            rsp: self.rsp(),
+            r8: self.r8(),
+            r9: self.r9(),
+            r10: self.r10(),
+            r11: self.r11(),
+            r12: self.r12(),
+            r13: self.r13(),
+            r14: self.r14(),
+            r15: self.r15(),
+            rip: self.rip(),
+            eflags: self.rflags_for_api() as u32,
+            cs: self.get_cs_selector(),
+            ss: self.get_ss_selector(),
+            ds: self.get_ds_selector(),
+            es: self.seg_selector_for_api(0),
+            fs: self.seg_selector_for_api(4),
+            gs: self.seg_selector_for_api(5),
+            cr0: self.get_cr0_val() as u64,
+            cr2: self.cr2_for_api(),
+            cr3: self.get_cr3_val(),
+            cr4: self.cr4_for_api(),
+            cpl: self.cpl_for_api(),
+            icount: self.icount_for_api(),
+            fpu_regs: core::array::from_fn(|i| self.fpu_read_st(i)),
+            fpu_sw: self.fpu_sw_for_api(),
+            fpu_cw: self.fpu_cw_for_api(),
+            mxcsr: self.mxcsr_for_api(),
+            xmm: core::array::from_fn(|i| self.xmm_read_for_api(i)),
+        }
+    }
+
+    /// This processor as a debugger shows it.
+    pub(crate) fn debug_view_for_api(&self) -> super::instrumentation::CpuDebugView {
+        super::instrumentation::CpuDebugView {
+            registers: self.snapshot_for_api(),
+            mode: self.execution_mode(),
+            code_size: self.code_size(),
+            activity: self.processor_activity(),
+            efer: self.efer_for_api(),
+            segment_bases: super::instrumentation::SegmentBases {
+                es: self.get_segment_base(BxSegregs::Es),
+                cs: self.get_segment_base(BxSegregs::Cs),
+                ss: self.get_segment_base(BxSegregs::Ss),
+                ds: self.get_segment_base(BxSegregs::Ds),
+                fs: self.get_segment_base(BxSegregs::Fs),
+                gs: self.get_segment_base(BxSegregs::Gs),
+            },
+        }
+    }
+
     #[inline]
     pub(crate) fn efer_for_api(&self) -> u64 {
         self.efer.get32() as u64

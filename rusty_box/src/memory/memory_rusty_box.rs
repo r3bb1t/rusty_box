@@ -32,6 +32,29 @@ pub(crate) fn bx_translate_gpa_to_linear(gpa: u64) -> u64 {
     }
 }
 
+/// The guest-physical address of RAM-store offset `offset`: the inverse of
+/// [`bx_translate_gpa_to_linear`] over RAM. RAM below the PCI hole sits at
+/// its own address; the rest sits from 4 GiB up.
+#[inline]
+pub(crate) fn bx_translate_linear_to_gpa(offset: u64) -> u64 {
+    if offset >= BX_PCI_HOLE_START {
+        offset + BX_PCI_HOLE_SIZE
+    } else {
+        offset
+    }
+}
+
+/// How many bytes from RAM-store `offset` lie on one side of the hole, at
+/// most `len`: a read of RAM in storage order never spans the hole.
+#[inline]
+pub(crate) fn bx_ram_stretch(offset: u64, len: usize) -> usize {
+    if offset < BX_PCI_HOLE_START {
+        usize::try_from(BX_PCI_HOLE_START - offset).map_or(len, |left| left.min(len))
+    } else {
+        len
+    }
+}
+
 /// Return the complete linear-RAM span for a guest physical access.
 ///
 /// The PCI aperture is never RAM. Addresses above it are stored densely after
@@ -67,4 +90,23 @@ pub(super) enum MemoryAreaT {
     E8000,
     EC000,
     F0000,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_ram_offset_maps_back_to_the_address_it_came_from() {
+        for gpa in [0, 0x1000, BX_PCI_HOLE_START - 1, BX_PCI_HOLE_END, BX_PCI_HOLE_END + 0x1234] {
+            assert_eq!(bx_translate_linear_to_gpa(bx_translate_gpa_to_linear(gpa)), gpa);
+        }
+    }
+
+    #[test]
+    fn a_stretch_stops_at_the_hole_and_runs_free_above_it() {
+        assert_eq!(bx_ram_stretch(BX_PCI_HOLE_START - 16, 64), 16);
+        assert_eq!(bx_ram_stretch(0, 64), 64);
+        assert_eq!(bx_ram_stretch(BX_PCI_HOLE_START, 64), 64);
+    }
 }

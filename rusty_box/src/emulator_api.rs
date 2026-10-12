@@ -285,44 +285,7 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emu
     /// [`CpuSnapshot`] docs for the design rationale (callbacks use
     /// primitives, not snapshots).
     pub fn cpu_snapshot(&self) -> CpuSnapshot {
-        let cpu = self.cpu();
-        CpuSnapshot {
-            rax: cpu.rax(),
-            rbx: cpu.rbx(),
-            rcx: cpu.rcx(),
-            rdx: cpu.rdx(),
-            rsi: cpu.rsi(),
-            rdi: cpu.rdi(),
-            rbp: cpu.rbp(),
-            rsp: cpu.rsp(),
-            r8: cpu.r8(),
-            r9: cpu.r9(),
-            r10: cpu.r10(),
-            r11: cpu.r11(),
-            r12: cpu.r12(),
-            r13: cpu.r13(),
-            r14: cpu.r14(),
-            r15: cpu.r15(),
-            rip: cpu.rip(),
-            eflags: cpu.rflags_for_api() as u32,
-            cs: cpu.get_cs_selector(),
-            ss: cpu.get_ss_selector(),
-            ds: cpu.get_ds_selector(),
-            es: cpu.seg_selector_for_api(0),
-            fs: cpu.seg_selector_for_api(4),
-            gs: cpu.seg_selector_for_api(5),
-            cr0: cpu.get_cr0_val() as u64,
-            cr2: cpu.cr2_for_api(),
-            cr3: cpu.get_cr3_val(),
-            cr4: cpu.cr4_for_api(),
-            cpl: cpu.cpl_for_api(),
-            icount: cpu.icount_for_api(),
-            fpu_regs: core::array::from_fn(|i| cpu.fpu_read_st(i)),
-            fpu_sw: cpu.fpu_sw_for_api(),
-            fpu_cw: cpu.fpu_cw_for_api(),
-            mxcsr: cpu.mxcsr_for_api(),
-            xmm: core::array::from_fn(|i| cpu.xmm_read_for_api(i)),
-        }
+        self.cpu().snapshot_for_api()
     }
 
     /// Restore CPU state from a previously captured snapshot.
@@ -619,6 +582,28 @@ impl<'a, T: crate::cpu::instrumentation::Instrumentation, E: SliceEngine<T>> Emu
                 addr,
                 len: buf.len(),
             }));
+        }
+        Ok(())
+    }
+
+    /// Read guest RAM by its offset in the RAM store instead of by physical
+    /// address. Below 3 GiB an offset is its physical address; the RAM above
+    /// sits from 4 GiB up, past the PCI hole (`bx_translate_gpa_to_linear`).
+    /// Offsets `0..mem_size()` cover all of RAM exactly once, which is what a
+    /// RAM image is.
+    pub fn read_ram_image(&mut self, offset: u64, buf: &mut [u8]) -> Result<()> {
+        use crate::memory::memory_rusty_box::{bx_ram_stretch, bx_translate_linear_to_gpa};
+        let mut done = 0usize;
+        while done < buf.len() {
+            let at = offset
+                .checked_add(u64::try_from(done)?)
+                .ok_or(Error::Memory(crate::memory::MemoryError::ReadPhysicalPage {
+                    addr: offset,
+                    len: buf.len(),
+                }))?;
+            let stretch = bx_ram_stretch(at, buf.len() - done);
+            self.mem_read(bx_translate_linear_to_gpa(at), &mut buf[done..done + stretch])?;
+            done += stretch;
         }
         Ok(())
     }

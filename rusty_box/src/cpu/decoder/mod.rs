@@ -10,6 +10,19 @@ pub use rusty_box_decoder::opcode::Opcode;
 
 use crate::cpu::{BxCpuC};
 
+impl crate::cpu::instrumentation::CodeSize {
+    /// Decode one instruction from `bytes` at this size: `fetchDecode64` for
+    /// 64-bit code, `fetchDecode32` with CS.D_B for the other two (Bochs
+    /// decoder/fetchdecode32.cc / fetchdecode64.cc).
+    pub fn decode(self, bytes: &[u8]) -> DecodeResult<Instruction> {
+        match self {
+            Self::Bits64 => decode64::fetch_decode64(bytes),
+            Self::Bits32 => decode32::fetch_decode32(bytes, true),
+            Self::Bits16 => decode32::fetch_decode32(bytes, false),
+        }
+    }
+}
+
 /// The ISA gate itself is needed by the icache fill path, which compiles
 /// without `alloc`, so it lives outside the alloc-gated block below.
 impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {

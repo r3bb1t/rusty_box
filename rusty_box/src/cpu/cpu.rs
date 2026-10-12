@@ -3475,6 +3475,53 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
         self.cpu_mode == CpuMode::Long64
     }
 
+    /// The size the next instruction decodes at: 64-bit in long 64-bit mode,
+    /// otherwise CS.D_B. This is the choice every Bochs `fetchDecode32` /
+    /// `fetchDecode64` call site makes, made here once.
+    #[inline]
+    pub(crate) fn code_size(&self) -> super::instrumentation::CodeSize {
+        use super::instrumentation::CodeSize;
+        if self.long64_mode() {
+            CodeSize::Bits64
+        } else if self.sregs[super::decoder::BxSegregs::Cs as usize]
+            .cache
+            .u
+            .segment_d_b()
+        {
+            CodeSize::Bits32
+        } else {
+            CodeSize::Bits16
+        }
+    }
+
+    /// `cpu_mode`, as the public API names it.
+    pub(crate) fn execution_mode(&self) -> super::instrumentation::ExecutionMode {
+        use super::instrumentation::ExecutionMode;
+        match self.cpu_mode {
+            CpuMode::Ia32Real => ExecutionMode::Real,
+            CpuMode::Ia32V8086 => ExecutionMode::Virtual8086,
+            CpuMode::Ia32Protected => ExecutionMode::Protected,
+            CpuMode::LongCompat => ExecutionMode::LongCompat,
+            CpuMode::Long64 => ExecutionMode::Long64,
+        }
+    }
+
+    /// `activity_state`, as the public API names it. Bochs cpu.h defines
+    /// `BX_VMX_LAST_ACTIVITY_STATE` as `BX_ACTIVITY_STATE_WAIT_FOR_SIPI`, and
+    /// `MWAIT_IF` is MWAIT that also wakes on a masked interrupt.
+    pub(crate) fn processor_activity(&self) -> super::instrumentation::ProcessorActivity {
+        use super::instrumentation::ProcessorActivity;
+        match self.activity_state {
+            CpuActivityState::Active => ProcessorActivity::Active,
+            CpuActivityState::Hlt => ProcessorActivity::Halted,
+            CpuActivityState::Shutdown => ProcessorActivity::Shutdown,
+            CpuActivityState::WaitForSipi | CpuActivityState::VmxLastActivityState => {
+                ProcessorActivity::WaitForSipi
+            }
+            CpuActivityState::Mwait | CpuActivityState::MwaitIf => ProcessorActivity::Mwait,
+        }
+    }
+
     /// Long mode, 64-bit or compatibility: Bochs cpu.h `long_mode`, which is
     /// `efer.get_LMA()` read directly rather than the `cpu_mode` that
     /// `handle_cpu_mode_change` derives from it. The two agree between

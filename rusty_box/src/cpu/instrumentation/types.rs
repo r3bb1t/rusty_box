@@ -552,6 +552,74 @@ pub struct CpuSnapshot {
     pub xmm: [[u8; 16]; 16],
 }
 
+// ─────────────────────────── Debugger view ───────────────────────────
+
+/// The mode a processor executes in: Bochs cpu.h `BX_MODE_IA32_REAL` through
+/// `BX_MODE_LONG_64`, the value of `cpu_mode`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ExecutionMode {
+    /// CR0.PE = 0.
+    Real,
+    /// CR0.PE = 1 and EFLAGS.VM = 1, outside long mode.
+    Virtual8086,
+    /// CR0.PE = 1 and EFLAGS.VM = 0, outside long mode.
+    Protected,
+    /// EFER.LMA = 1 and CS.L = 0.
+    LongCompat,
+    /// EFER.LMA = 1 and CS.L = 1.
+    Long64,
+}
+
+/// What a processor is doing between instructions: Bochs cpu.h
+/// `BX_ACTIVITY_STATE_*`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ProcessorActivity {
+    Active,
+    /// HLT: waiting for an interrupt.
+    Halted,
+    /// The architectural shutdown state a triple fault leaves.
+    Shutdown,
+    /// An application processor waiting for its startup IPI.
+    WaitForSipi,
+    /// MWAIT: waiting for a monitored write or an interrupt.
+    Mwait,
+}
+
+/// The base of each segment register's descriptor cache.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SegmentBases {
+    pub es: u64,
+    pub cs: u64,
+    pub ss: u64,
+    pub ds: u64,
+    pub fs: u64,
+    pub gs: u64,
+}
+
+/// One processor as a debugger shows it: its registers, and what they mean
+/// for reading its code and its stack.
+#[derive(Debug, Clone, Copy)]
+pub struct CpuDebugView {
+    pub registers: CpuSnapshot,
+    pub mode: ExecutionMode,
+    /// The size the processor decodes its next instruction at.
+    pub code_size: CodeSize,
+    pub activity: ProcessorActivity,
+    pub efer: u64,
+    pub segment_bases: SegmentBases,
+}
+
+/// What a debugger read of guest-physical memory found: Bochs misc_mem.cc
+/// `dbg_fetch_mem`'s answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Fetched {
+    /// Every byte came from RAM, ROM or a device.
+    Valid,
+    /// At least one byte lay where nothing answers (the PCI hole with no
+    /// device in it, or past the end of memory) and reads as 0xFF.
+    OutsideMemory,
+}
+
 // ─────────────────────────── X86Reg ───────────────────────────
 
 /// All x86 registers addressable through `Emulator::reg_read` / `reg_write`.

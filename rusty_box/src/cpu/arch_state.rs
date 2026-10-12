@@ -1138,16 +1138,10 @@ impl<T: Instrumentation> BxCpuC<T> {
     /// the delivery touches no vector state.
     #[must_use]
     pub fn next_instruction_touches_vector_state(&self, bytes: &[u8]) -> bool {
-        use super::decoder::{decode32, decode64, Opcode};
+        use super::decoder::Opcode;
         use rusty_box_decoder::opcode_isa::{opcode_state, CpuState};
 
-        let decoded = if self.long64_mode() {
-            decode64::fetch_decode64(bytes)
-        } else {
-            let is_32_bit_mode =
-                self.sregs[BxSegregs::Cs as usize].cache.u.segment_d_b();
-            decode32::fetch_decode32(bytes, is_32_bit_mode)
-        };
+        let decoded = self.code_size().decode(bytes);
         let Ok(instruction) = decoded else {
             return true;
         };

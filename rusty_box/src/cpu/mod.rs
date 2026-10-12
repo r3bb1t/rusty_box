@@ -3,7 +3,8 @@ pub mod decoder;
 pub mod instrumentation;
 
 pub use instrumentation::{
-    BranchEvent, BranchType, CacheCntrl, CodeSize, CpuSetupMode, CpuSnapshot, EmuStopReason,
+    BranchEvent, BranchType, CacheCntrl, CodeSize, CpuDebugView, CpuSetupMode, CpuSnapshot,
+    EmuStopReason, ExecutionMode, Fetched, ProcessorActivity, SegmentBases,
     ExitSet, HookCtx, HookMask, HwInterruptEvent, InstrAction, Instrumentation, InvEptType,
     InvPcidType, IoHookEvent, LinAccess, MemAccessRW, MemHookEvent, MemPermViolation, MemPerms,
     MemType, MemUnmapped, MwaitEvent, MwaitFlags, OpcodeEvent, PhyAccess, PrefetchEvent,

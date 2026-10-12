@@ -860,13 +860,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> ExecCtx<'_, T> {
                         let rip =
                             self.prev_rip + (current_page_offset as u64 - (page_offset as u64));
                         let bytes = &current_fetch_ptr[..i_len as usize];
-                        let size = if long64 {
-                            super::instrumentation::CodeSize::Bits64
-                        } else if is_32_bit_mode {
-                            super::instrumentation::CodeSize::Bits32
-                        } else {
-                            super::instrumentation::CodeSize::Bits16
-                        };
+                        let size = self.code_size();
                         // The instruction as decoded, not as `assign_handler`
                         // left it for dispatch: Bochs's BX_INSTR_OPCODE sees an
                         // instruction whose opcode was never replaced.
@@ -1182,13 +1176,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> ExecCtx<'_, T> {
         if self.instrumentation.active.has_exec() {
             let rip = self.prev_rip;
             let bytes = &fetch_buffer[..instr.ilen() as usize];
-            let size = if self.long64_mode() {
-                super::instrumentation::CodeSize::Bits64
-            } else if is_32_bit_mode {
-                super::instrumentation::CodeSize::Bits32
-            } else {
-                super::instrumentation::CodeSize::Bits16
-            };
+            let size = self.code_size();
             let ev = super::instrumentation::OpcodeEvent {
                 rip,
                 instr: &instr,

@@ -15,6 +15,14 @@ use crate::{
 
 use super::{MemoryError, Result};
 
+/// One debugger fetch: the bytes, or the device that owns the address. Bochs
+/// `dbg_fetch_mem` calls that device's read handler itself; here the machine
+/// does it, as it does for every access the map reports.
+pub(crate) enum DbgFetch {
+    Read(crate::cpu::instrumentation::Fetched),
+    Device(super::mmio_map::MmioHit),
+}
+
 pub(super) const FLASH_READ_ARRAY: u8 = 0xff;
 pub(super) const FLASH_INT_ID: u8 = 0x90;
 pub(super) const FLASH_READ_STATUS: u8 = 0x70;
@@ -722,6 +730,107 @@ impl BxMemC {
 
             Ok(PhysAccess::Done)
         }
+    }
+
+    /// Bochs misc_mem.cc `BX_MEM_C::dbg_fetch_mem`: guest-physical bytes as
+    /// the processor sees them (RAM, BIOS and expansion ROM, PCI shadow RAM,
+    /// SMRAM, a device window) without the per-access bookkeeping of
+    /// `read_physical_page`. As in Bochs, the device window is looked up once,
+    /// at the first byte, and owns the whole read.
+    pub(crate) fn dbg_fetch_mem(
+        &mut self,
+        policy: super::CpuMemoryPolicy,
+        addr: BxPhyAddress,
+        buf: &mut [u8],
+    ) -> Result<DbgFetch> {
+        use crate::cpu::instrumentation::Fetched;
+        use crate::memory::memory_rusty_box::{
+            bios_map_last128k, bx_is_pci_hole_addr, bx_translate_gpa_to_linear, MemoryAreaT,
+            BIOSROMSZ, BIOS_MASK, EXROM_MASK,
+        };
+
+        let mut a20_addr = self.a20_addr(addr);
+        let is_bios = a20_addr >= u64::from(self.bios_rom_addr) && a20_addr <= 0xffff_ffff;
+        let use_smram = (0x000a_0000..0x000c_0000).contains(&a20_addr)
+            && self.smram_available
+            && (self.smram_enable || (policy.smm_mode() && !self.smram_restricted));
+        if !use_smram {
+            if let Some(hit) = self.mmio.lookup(a20_addr) {
+                return Ok(DbgFetch::Device(hit));
+            }
+        }
+
+        let guest_len = self.inherited_memory_stub.guest_len() as u64;
+        let mut fetched = Fetched::Valid;
+        for byte in buf.iter_mut() {
+            let linear = bx_translate_gpa_to_linear(a20_addr);
+            *byte = if self.pci_enabled && (0x000c_0000..0x0010_0000).contains(&a20_addr) {
+                let area = (((a20_addr >> 14) & 0x0f) as usize).min(MemoryAreaT::F0000 as usize);
+                if !self.memory_type[area][0] {
+                    // Read from ROM
+                    if (a20_addr & 0xfffe_0000) == 0x000e_0000 {
+                        // last 128K of BIOS ROM mapped to 0xE0000-0xFFFFF
+                        self.dbg_bios_byte(bios_map_last128k(a20_addr as usize))
+                    } else {
+                        self.dbg_rom_byte(((a20_addr as usize) & EXROM_MASK) + BIOSROMSZ)
+                    }
+                } else {
+                    // Read from ShadowRAM
+                    self.dbg_ram_byte(a20_addr)?
+                }
+            } else if linear < guest_len && !is_bios {
+                if bx_is_pci_hole_addr(a20_addr) {
+                    // MMIO hole without handler
+                    fetched = Fetched::OutsideMemory;
+                    0xff
+                } else if a20_addr < 0x000c_0000 || a20_addr >= 0x0010_0000 {
+                    self.dbg_ram_byte(a20_addr)?
+                } else if (a20_addr & 0xfffe_0000) == 0x000e_0000 {
+                    // last 128K of BIOS ROM mapped to 0xE0000-0xFFFFF
+                    self.dbg_rom_byte(bios_map_last128k(a20_addr as usize))
+                } else {
+                    self.dbg_rom_byte(((a20_addr as usize) & EXROM_MASK) + BIOSROMSZ)
+                }
+            } else if a20_addr > 0xffff_ffff {
+                // beyond limits of memory
+                fetched = Fetched::OutsideMemory;
+                0xff
+            } else if is_bios {
+                self.dbg_bios_byte((a20_addr as usize) & BIOS_MASK)
+            } else {
+                // beyond limits of memory
+                fetched = Fetched::OutsideMemory;
+                0xff
+            };
+            a20_addr += 1;
+        }
+        Ok(DbgFetch::Read(fetched))
+    }
+
+    /// A BIOS byte at ROM offset `offset`: the flash array when the chipset
+    /// models one (Bochs `flash_type > 0`), the ROM image otherwise.
+    fn dbg_bios_byte(&mut self, offset: usize) -> u8 {
+        if self.flash_type > 0 {
+            self.flash_read(offset as u32)
+        } else {
+            self.dbg_rom_byte(offset)
+        }
+    }
+
+    fn dbg_rom_byte(&mut self, offset: usize) -> u8 {
+        self.inherited_memory_stub
+            .rom()
+            .get(offset)
+            .copied()
+            .unwrap_or(0xff)
+    }
+
+    fn dbg_ram_byte(&mut self, a20_addr: BxPhyAddress) -> Result<u8> {
+        use crate::memory::memory_rusty_box::bx_guest_ram_span;
+        let span = bx_guest_ram_span(a20_addr, 1, self.inherited_memory_stub.guest_len())
+            .ok_or(MemoryError::Internal("physical address is not guest RAM"))?;
+        let vector = self.inherited_memory_stub.get_vector_offset(span.start)?;
+        Ok(vector.first().copied().unwrap_or(0xff))
     }
 
     /// Map an address range to the device that owns it.

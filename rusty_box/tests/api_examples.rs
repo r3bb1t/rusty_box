@@ -13,7 +13,7 @@
 
 #![cfg(feature = "std")]
 
-use rusty_box::cpu::{CpuSetupMode, ResetReason, X86Reg};
+use rusty_box::cpu::{CodeSize, CpuSetupMode, ExecutionMode, Fetched, ResetReason, X86Reg};
 use rusty_box::emulator::{
     AtaSlot, BootDevice, BootOrder, DiskGeometry, Emulator, EmulatorConfig, Ips, MachineBuilder,
     MemorySize, PowerState, RunBudget, StopReason, Typed,
@@ -708,4 +708,111 @@ fn machines_are_send_so_a_fleet_is_one_per_worker() {
     for worker in workers {
         assert_eq!(worker.join().expect("join"), StopReason::Halted);
     }
+}
+
+// ── Reading a processor the way a debugger does ─────────────────────────────
+
+/// A debugger reads the boot processor at its reset vector: real mode, 16-bit
+/// code, CS based at 0xFFFF0000 — and the bytes there are the BIOS ROM the
+/// processor fetches, through the same read Bochs's debugger makes.
+#[test]
+fn a_debugger_reads_the_boot_processor_at_its_reset_vector() {
+    let bios = vec![0xF4u8; HALT_BIOS_BYTES];
+    let mut machine = MachineBuilder::new(small_config())
+        .bios(&bios)
+        .build()
+        .expect("machine");
+    let mut cpu = machine.debug_cpu(0).expect("the boot processor");
+    let view = cpu.view();
+    assert_eq!(view.mode, ExecutionMode::Real);
+    assert_eq!(view.code_size, CodeSize::Bits16);
+    assert_eq!(view.registers.rip, 0xFFF0);
+    assert_eq!(view.segment_bases.cs, 0xFFFF_0000);
+
+    let reset_vector = view.segment_bases.cs + view.registers.rip;
+    let physical = cpu
+        .dbg_xlate_linear2phy(reset_vector)
+        .expect("paging is off, so every linear address maps");
+    assert_eq!(physical, reset_vector);
+    let mut bytes = [0u8; 4];
+    assert_eq!(cpu.dbg_fetch_mem(physical, &mut bytes).expect("fetch"), Fetched::Valid);
+    assert_eq!(bytes, [0xF4; 4]);
+}
+
+/// Below 1 MiB the BIOS is mapped over RAM. A debugger sees the ROM there, as
+/// the processor does; a RAM read sees the RAM underneath.
+#[test]
+fn a_debugger_sees_the_bios_where_a_ram_read_sees_ram() {
+    let bios = vec![0xF4u8; HALT_BIOS_BYTES];
+    let mut machine = MachineBuilder::new(small_config())
+        .bios(&bios)
+        .build()
+        .expect("machine");
+    let mut ram = [0xAAu8; 4];
+    machine.mem_read(0xF_FFF0, &mut ram).expect("RAM read");
+    assert_ne!(ram, [0xF4; 4], "RAM under the BIOS is not the BIOS");
+    let mut cpu = machine.debug_cpu(0).expect("the boot processor");
+    let mut seen = [0u8; 4];
+    assert_eq!(cpu.dbg_fetch_mem(0xF_FFF0, &mut seen).expect("fetch"), Fetched::Valid);
+    assert_eq!(seen, [0xF4; 4]);
+}
+
+/// Memory with nothing behind it reads as 0xFF and says so.
+#[test]
+fn a_debugger_read_of_the_pci_hole_says_it_found_nothing() {
+    let mut machine = MachineBuilder::new(small_config()).build().expect("machine");
+    let mut cpu = machine.debug_cpu(0).expect("the boot processor");
+    let mut bytes = [0u8; 4];
+    assert_eq!(
+        cpu.dbg_fetch_mem(0xD000_0000, &mut bytes).expect("fetch"),
+        Fetched::OutsideMemory
+    );
+    assert_eq!(bytes, [0xFF; 4]);
+}
+
+#[test]
+fn a_uniprocessor_has_no_second_processor_to_read() {
+    let mut machine = MachineBuilder::new(small_config()).build().expect("machine");
+    assert!(machine.debug_cpu(1).is_none());
+}
+
+/// Long mode reads as long mode, and a debugger walks the identity map the
+/// mode setup built without faulting on a hole in it.
+#[test]
+fn a_debugger_walks_a_long_mode_processors_page_tables() {
+    let mut machine =
+        Emulator::new_with_mode(EmulatorConfig::default(), CpuSetupMode::FlatLong64)
+            .expect("machine");
+    let mapped = CpuSetupMode::FlatLong64.first_free_physical_address();
+    let mut cpu = machine.debug_cpu(0).expect("the boot processor");
+    let view = cpu.view();
+    assert_eq!(view.mode, ExecutionMode::Long64);
+    assert_eq!(view.code_size, CodeSize::Bits64);
+    assert_ne!(view.efer & 0x400, 0, "EFER.LMA");
+    assert_eq!(cpu.dbg_xlate_linear2phy(mapped), Some(mapped));
+    // PML4 slot 511: the mode setup maps only the low slots.
+    assert_eq!(cpu.dbg_xlate_linear2phy(0xFFFF_FF80_0000_0000), None);
+}
+
+#[test]
+fn a_code_size_decodes_at_its_own_width() {
+    // JMP $ — two bytes at any width.
+    let jump = CodeSize::Bits16.decode(&[0xEB, 0xFE]).expect("decodes");
+    assert_eq!(jump.ilen(), 2);
+    // MOV RAX, imm32 is seven bytes only in 64-bit code.
+    let mov = CodeSize::Bits64
+        .decode(&[0x48, 0xC7, 0xC0, 0x2A, 0x00, 0x00, 0x00])
+        .expect("decodes");
+    assert_eq!(mov.ilen(), 7);
+}
+
+/// A RAM image is RAM in storage order; below the PCI hole an offset is its
+/// physical address.
+#[test]
+fn a_ram_image_below_the_pci_hole_is_ram_at_its_physical_address() {
+    let mut machine = MachineBuilder::new(small_config()).build().expect("machine");
+    machine.mem_write(0x1234, b"rusty").expect("write");
+    let mut image = [0u8; 5];
+    machine.read_ram_image(0x1234, &mut image).expect("read");
+    assert_eq!(&image, b"rusty");
 }
