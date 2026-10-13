@@ -76,6 +76,7 @@ mod tests {
                 observed: true,
             }),
             owner: RegionOwner::Private,
+            vad: None,
         }
     }
 

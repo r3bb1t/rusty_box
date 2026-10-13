@@ -32,11 +32,17 @@ use rusty_box::emulator::{DebugCpu, SliceEngine};
 
 use super::memory_map::{self, MemoryMap, ModuleLayout};
 use super::pe::{self, HEADER_BYTES};
+use super::vad::{self, VadNode, VadRegion, VadShape, MAX_VAD_NODES};
 
 /// The top of a user address space: canonical low half in long mode, and
 /// above every 32-bit user address, so one bound covers native 64-bit, a
 /// WOW64 process and a 32-bit kernel's user space alike.
 const USER_SPACE_END: u64 = 0x0000_8000_0000_0000;
+
+/// The largest span a single VAD may describe: 64 GiB, far above any real
+/// reservation yet far below the whole address space. A descriptor larger than
+/// this is a wrong field read as a node, not a VAD.
+const MAX_VAD_SPAN: u64 = 0x10_0000_0000;
 
 /// What the page asks to list beside the processor panes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -252,7 +258,7 @@ pub(crate) fn read_system<T: Instrumentation, E: SliceEngine<T>>(
                 let read = process_modules(cpu, &processes, &processes[index]);
                 let map = match (detail, &read) {
                     (ProcessDetail::MemoryMap, ModuleRead::Listed(modules)) => {
-                        Some(read_memory_map(cpu, cr3, modules))
+                        Some(read_memory_map(cpu, eprocess, cr3, modules))
                     }
                     _ => None,
                 };
@@ -719,6 +725,7 @@ fn process_modules<T: Instrumentation, E: SliceEngine<T>>(
 /// sections come from each module's PE headers, read through its own tables.
 pub(crate) fn read_memory_map<T: Instrumentation, E: SliceEngine<T>>(
     cpu: &mut DebugCpu<'_, T, E>,
+    eprocess: u64,
     cr3: u64,
     modules: &[WinModule],
 ) -> MemoryMap {
@@ -754,7 +761,180 @@ pub(crate) fn read_memory_map<T: Instrumentation, E: SliceEngine<T>>(
             WalkStep::Continue
         },
     );
-    memory_map::build(&mappings, &layouts)
+    // Overlay Windows' own records when the VAD tree is found, so reserved
+    // regions and Windows' protection show; else the page-table map stands.
+    let module_bases: Vec<u64> = modules.iter().map(|module| module.base).collect();
+    match read_vads(cpu, eprocess, &module_bases) {
+        Some(vads) => memory_map::build_with_vads(&mappings, &layouts, &vads),
+        None => memory_map::build(&mappings, &layouts),
+    }
+}
+
+/// Windows' own records of the process's address space: the VAD tree, read
+/// from the `EPROCESS` at `eprocess`. The tree's root and node shape are
+/// discovered by trying each 64-bit shape at every `EPROCESS` field and
+/// accepting the tree that contains the process's loaded modules. `None`
+/// when no shape's tree validates (an unknown build, or the tree is paged
+/// out), so the map falls back to the page-table form.
+fn read_vads<T: Instrumentation, E: SliceEngine<T>>(
+    cpu: &mut DebugCpu<'_, T, E>,
+    eprocess: u64,
+    module_bases: &[u64],
+) -> Option<Vec<VadRegion>> {
+    // A 64-bit kernel uses one of these two shapes; the x86 shape is added
+    // with 32-bit-kernel support.
+    for shape in [VadShape::AvlX64, VadShape::BalancedNode] {
+        if let Some(vads) = try_vad_shape(cpu, eprocess, shape, module_bases) {
+            return Some(vads);
+        }
+    }
+    None
+}
+
+/// Tries `shape` at every `EPROCESS` field: the field that reads as a tree
+/// root whose regions cover most of the process's modules is the `VadRoot`.
+fn try_vad_shape<T: Instrumentation, E: SliceEngine<T>>(
+    cpu: &mut DebugCpu<'_, T, E>,
+    eprocess: u64,
+    shape: VadShape,
+    module_bases: &[u64],
+) -> Option<Vec<VadRegion>> {
+    for offset in (0..EPROCESS_SPAN as u64).step_by(8) {
+        let Some(root) = vad_root_at(cpu, eprocess + offset, shape) else {
+            continue;
+        };
+        // Probe: the root must read as a plausible node before a full walk.
+        if read_vad_node(cpu, root, shape).is_none() {
+            continue;
+        }
+        let vads = vad::walk(root, |pointer| read_vad_node(cpu, pointer, shape), MAX_VAD_NODES);
+        if vads_cover_modules(&vads, module_bases) {
+            return Some(vads);
+        }
+    }
+    None
+}
+
+/// The VAD tree root held by the candidate field at `field`, or `None` when
+/// the field is not a VAD root of `shape`.
+///
+/// AvlX64: the field is an `MM_AVL_TABLE` whose `BalancedRoot` sentinel anchors
+/// the tree — its `Parent` points to the sentinel itself and its `LeftChild`
+/// is null, a signature a wrong `EPROCESS` field does not share. The real root
+/// is the sentinel's `RightChild` (+0x10). BalancedNode: the field is an
+/// `RTL_AVL_TREE` whose `Root` (+0x0) is the root directly.
+fn vad_root_at<T: Instrumentation, E: SliceEngine<T>>(
+    cpu: &mut DebugCpu<'_, T, E>,
+    field: u64,
+    shape: VadShape,
+) -> Option<u64> {
+    match shape {
+        VadShape::AvlX64 => {
+            let parent = read_u64(cpu, Root::Live, field)?;
+            let left_child = read_u64(cpu, Root::Live, field + 0x08)?;
+            let right_child = read_u64(cpu, Root::Live, field + 0x10)?;
+            avl_table_root(parent, left_child, right_child, field)
+        }
+        VadShape::BalancedNode => read_u64(cpu, Root::Live, field).and_then(kernel_pointer),
+        VadShape::XpX86 => None,
+    }
+}
+
+/// The root an `MM_AVL_TABLE` at `table` holds, given its `BalancedRoot`
+/// sentinel's `Parent`, `LeftChild` and `RightChild`. The sentinel's `Parent`
+/// points to the sentinel itself (its low two bits carry the AVL balance), and
+/// its `LeftChild` is null; the root is its `RightChild`. `None` when the words
+/// do not form that sentinel, so a wrong field is not mistaken for a VAD root.
+fn avl_table_root(parent: u64, left_child: u64, right_child: u64, table: u64) -> Option<u64> {
+    if parent & !0x3 != table || left_child != 0 {
+        return None;
+    }
+    kernel_pointer(right_child)
+}
+
+/// Whether the VAD regions contain nearly every module base — the test that
+/// the discovered tree really is this process's address space. The threshold
+/// is near-total, not a majority, so a coincidental or partial tree at the
+/// wrong `EPROCESS` field is rejected; a few modules may miss (one loading,
+/// or a base mid-region), so a small slack is allowed.
+fn vads_cover_modules(vads: &[VadRegion], module_bases: &[u64]) -> bool {
+    if vads.is_empty() {
+        return false;
+    }
+    if module_bases.is_empty() {
+        return true;
+    }
+    let covered = module_bases
+        .iter()
+        .filter(|&&base| vads.iter().any(|vad| vad.start <= base && base < vad.end))
+        .count();
+    // At least 90% of modules must lie in the tree.
+    covered * 10 >= module_bases.len() * 9
+}
+
+/// Reads one VAD node of `shape` at `pointer`, or `None` when it does not
+/// read as a plausible descriptor (a sentinel, a leaf's null child, or
+/// garbage from a wrong shape).
+fn read_vad_node<T: Instrumentation, E: SliceEngine<T>>(
+    cpu: &mut DebugCpu<'_, T, E>,
+    pointer: u64,
+    shape: VadShape,
+) -> Option<VadNode> {
+    let layout = vad::node_layout(shape);
+    let left = read_u64(cpu, Root::Live, pointer + layout.left)?;
+    let right = read_u64(cpu, Root::Live, pointer + layout.right)?;
+    let (start_vpn, end_vpn) = if layout.vpn_is_u64 {
+        (
+            read_u64(cpu, Root::Live, pointer + layout.start_vpn)?,
+            read_u64(cpu, Root::Live, pointer + layout.end_vpn)?,
+        )
+    } else {
+        let mut start = u64::from(read_u32(cpu, Root::Live, pointer + layout.start_vpn)?);
+        let mut end = u64::from(read_u32(cpu, Root::Live, pointer + layout.end_vpn)?);
+        if let Some(high) = layout.start_vpn_high {
+            start |= u64::from(read_u8(cpu, Root::Live, pointer + high)?) << 32;
+        }
+        if let Some(high) = layout.end_vpn_high {
+            end |= u64::from(read_u8(cpu, Root::Live, pointer + high)?) << 32;
+        }
+        (start, end)
+    };
+    if end_vpn < start_vpn {
+        return None;
+    }
+    let flags = if layout.flags_is_u64 {
+        read_u64(cpu, Root::Live, pointer + layout.flags)?
+    } else {
+        u64::from(read_u32(cpu, Root::Live, pointer + layout.flags)?)
+    };
+    let start = start_vpn << 12;
+    let end = end_vpn.checked_add(1)?.checked_shl(12)?;
+    if start >= end || end > USER_SPACE_END {
+        return None;
+    }
+    // Defence in depth: no real VAD spans more than a fraction of the address
+    // space. A single node claiming the whole of it is a wrong field read as a
+    // tree, not a descriptor — reject it so discovery keeps looking.
+    if end - start > MAX_VAD_SPAN {
+        return None;
+    }
+    Some(VadNode {
+        left: kernel_pointer(left).unwrap_or(0),
+        right: kernel_pointer(right).unwrap_or(0),
+        region: VadRegion {
+            start,
+            end,
+            info: vad::decode_flags(flags, shape),
+        },
+    })
+}
+
+fn read_u8<T: Instrumentation, E: SliceEngine<T>>(
+    cpu: &mut DebugCpu<'_, T, E>,
+    root: Root,
+    address: u64,
+) -> Option<u8> {
+    read_exact(cpu, root, address, 1).map(|bytes| bytes[0])
 }
 
 /// The `EPROCESS.Peb` offset: the first field that, in `PEB_WITNESSES`
@@ -1009,5 +1189,22 @@ mod tests {
     fn an_address_space_is_its_table_address_whatever_its_flags() {
         assert!(same_address_space(0x1234_5000, 0x1234_5018));
         assert!(!same_address_space(0x1234_5000, 0x1234_6000));
+    }
+
+    #[test]
+    fn an_mm_avl_table_root_is_its_self_referential_sentinel_right_child() {
+        let table = 0xFFFF_FADF_F3F2_4398;
+        let root = 0xFFFF_FADF_F39E_5880;
+        // The real sentinel: Parent points to the table itself (the low two
+        // bits carry the balance), LeftChild is null, the root is RightChild.
+        assert_eq!(avl_table_root(table, 0, root, table), kernel_pointer(root));
+        assert_eq!(avl_table_root(table | 0x2, 0, root, table), kernel_pointer(root));
+        // A wrong EPROCESS field: its first word is not a self-pointer, so it
+        // is not mistaken for a VAD root even if a later word reads as a node.
+        assert_eq!(avl_table_root(0xFFFF_FADF_F3E1_E410, 0, root, table), None);
+        // A non-empty balanced tree's left child is set: not a VAD sentinel.
+        assert_eq!(avl_table_root(table, root, root, table), None);
+        // The right child must be a kernel pointer.
+        assert_eq!(avl_table_root(table, 0, 0, table), None);
     }
 }

@@ -15,6 +15,7 @@
 use rusty_box::cpu::PageMapping;
 
 use super::pe::PeSection;
+use super::vad::{VadInfo, VadRegion};
 
 const PAGE: u64 = 0x1000;
 
@@ -24,6 +25,9 @@ pub(crate) enum MapOrigin {
     /// Only the process's page tables: reserved-but-unmapped memory is not
     /// seen, so a region's total is its mapped pages.
     PageTables,
+    /// Windows' own records (the VAD tree), so reserved-but-unmapped regions
+    /// appear and regions carry Windows' type and protection.
+    WindowsRecords,
 }
 
 /// One region of the address space.
@@ -38,6 +42,9 @@ pub(crate) struct MapRegion {
     /// What its pages grant, when any are mapped or a section's flags say.
     pub(crate) access: Option<RegionAccess>,
     pub(crate) owner: RegionOwner,
+    /// Windows' own record of this region (type and protection), when the
+    /// VAD tree was read and a VAD covers it.
+    pub(crate) vad: Option<VadInfo>,
 }
 
 /// What a region's pages grant.
@@ -245,6 +252,7 @@ pub(crate) fn build(mappings: &[PageMapping], modules: &[ModuleLayout]) -> Memor
             total_pages,
             access,
             owner: label.owner.clone(),
+            vad: None,
         });
     }
 
@@ -258,6 +266,44 @@ pub(crate) fn build(mappings: &[PageMapping], modules: &[ModuleLayout]) -> Memor
         origin: MapOrigin::PageTables,
         regions,
     }
+}
+
+/// The page-table map with Windows' VAD records overlaid: every region is
+/// annotated with the VAD that covers its start, and each VAD that no mapped
+/// region overlaps is added as a reserved row (resident 0), so reserved
+/// memory and Windows' type and protection both show.
+pub(crate) fn build_with_vads(
+    mappings: &[PageMapping],
+    modules: &[ModuleLayout],
+    vads: &[VadRegion],
+) -> MemoryMap {
+    let mut map = build(mappings, modules);
+    map.origin = MapOrigin::WindowsRecords;
+    for region in &mut map.regions {
+        region.vad = vads
+            .iter()
+            .find(|vad| vad.start <= region.start && region.start < vad.end)
+            .map(|vad| vad.info);
+    }
+    for vad in vads {
+        let overlaps = map
+            .regions
+            .iter()
+            .any(|region| region.start < vad.end && region.start + region.size > vad.start);
+        if !overlaps {
+            map.regions.push(MapRegion {
+                start: vad.start,
+                size: vad.end - vad.start,
+                resident_pages: 0,
+                total_pages: (vad.end - vad.start) / PAGE,
+                access: None,
+                owner: RegionOwner::Private,
+                vad: Some(vad.info),
+            });
+        }
+    }
+    map.regions.sort_by_key(|region| region.start);
+    map
 }
 
 /// The parts of the mapped pages that no label covers, as private regions:
@@ -305,6 +351,7 @@ fn private_runs(mappings: &[PageMapping], labels: &[Label]) -> Vec<MapRegion> {
                         total_pages: 1,
                         access: Some(access),
                         owner: RegionOwner::Private,
+                        vad: None,
                     });
                 }
             }

@@ -1286,6 +1286,13 @@ fn right_card_header(
         ProcessDetail::Modules => header_row(ui, 0.0, &module_columns()),
         ProcessDetail::MemoryMap => {
             if let Some(map) = map.filter(|map| !map.regions.is_empty()) {
+                let origin = match map.origin {
+                    crate::debugger::memory_map::MapOrigin::WindowsRecords => {
+                        "from Windows' records"
+                    }
+                    crate::debugger::memory_map::MapOrigin::PageTables => "from page tables",
+                };
+                ui.label(RichText::new(origin).size(TEXT_SECONDARY).color(TEXT_MUTED));
                 draw_minimap(ui, map, minimap_click);
             }
             header_row(ui, 0.0, &memory_columns());
@@ -1368,17 +1375,49 @@ const MEMORY_ACCESS_CHARS: usize = 5;
 const MEMORY_MODULE_CHARS: usize = 18;
 
 const MEMORY_GAUGE_CHARS: usize = 7;
+const MEMORY_TYPE_CHARS: usize = 7;
 
-fn memory_columns() -> [Cell; 7] {
+fn memory_columns() -> [Cell; 8] {
     [
         Cell::left("Address", TEXT_MUTED, 16),
         Cell::right("Size", TEXT_MUTED, MEMORY_SIZE_CHARS),
         Cell::right("Resident", TEXT_MUTED, MEMORY_RESIDENT_CHARS),
         Cell::left("", TEXT_MUTED, MEMORY_GAUGE_CHARS),
         Cell::left("Access", TEXT_MUTED, MEMORY_ACCESS_CHARS),
+        Cell::left("Type", TEXT_MUTED, MEMORY_TYPE_CHARS),
         Cell::left("Module", TEXT_MUTED, MEMORY_MODULE_CHARS),
         Cell::fill("Section", TEXT_MUTED),
     ]
+}
+
+/// A region's Windows type, when its VAD was read.
+fn vad_type_label(region: &crate::debugger::memory_map::MapRegion) -> &'static str {
+    use crate::debugger::vad::VadKind;
+    match region.vad.map(|info| info.kind) {
+        Some(VadKind::Image) => "image",
+        Some(VadKind::Mapped) => "mapped",
+        Some(VadKind::Private) => "private",
+        None => "",
+    }
+}
+
+/// How a region's access reads: the hardware access of its resident pages,
+/// or — for a region with no resident page — Windows' protection from its VAD.
+fn region_access_text(region: &crate::debugger::memory_map::MapRegion) -> String {
+    match region.access {
+        Some(access) => {
+            let mut text = String::from("R");
+            text.push(if access.writable { 'W' } else { ' ' });
+            if access.executable {
+                text.push('X');
+            }
+            text
+        }
+        None => region
+            .vad
+            .and_then(|info| info.protection)
+            .map_or_else(|| "—".to_owned(), |protection| protection.label().to_owned()),
+    }
 }
 
 /// The memory map, grouped by module: each module is one row that expands
@@ -1434,6 +1473,7 @@ fn memory_map_rows(
                     ),
                     gauge,
                     Cell::left("", TEXT_MUTED, MEMORY_ACCESS_CHARS),
+                    Cell::left("image", TEXT_MUTED, MEMORY_TYPE_CHARS),
                     Cell::left(name.as_str(), name_color, MEMORY_MODULE_CHARS),
                     Cell::fill(
                         format!("{} sections", regions.len().saturating_sub(1)),
@@ -1483,17 +1523,7 @@ fn region_row(
     let region = &map.regions[index];
     let executable = region.access.is_some_and(|a| a.executable);
     let observed = region.access.is_some_and(|a| a.observed);
-    let access_text = match region.access {
-        Some(access) => {
-            let mut text = String::from("R");
-            text.push(if access.writable { 'W' } else { ' ' });
-            if access.executable {
-                text.push('X');
-            }
-            text
-        }
-        None => "—".to_owned(),
-    };
+    let access_text = region_access_text(region);
     let (module, section) = match &region.owner {
         RegionOwner::Header { module, .. } => (module.as_str(), "headers"),
         RegionOwner::Section { module, section, .. } => (module.as_str(), section.as_str()),
@@ -1523,6 +1553,7 @@ fn region_row(
         ),
         gauge,
         Cell::left(access_text, access_color, MEMORY_ACCESS_CHARS),
+        Cell::left(vad_type_label(region), TEXT_MUTED, MEMORY_TYPE_CHARS),
         Cell::left(module, module_color, MEMORY_MODULE_CHARS),
         Cell::fill(section, TEXT_MUTED),
     ];
