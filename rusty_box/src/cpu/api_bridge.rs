@@ -532,6 +532,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
                 gs: self.get_segment_base(BxSegregs::Gs),
             },
             kernel_gs_base: self.msr.kernelgsbase,
+            gdtr: super::instrumentation::DescriptorTable {
+                base: self.gdtr.base,
+                limit: self.gdtr.limit,
+            },
+            idtr: super::instrumentation::DescriptorTable {
+                base: self.idtr.base,
+                limit: self.idtr.limit,
+            },
         }
     }
 

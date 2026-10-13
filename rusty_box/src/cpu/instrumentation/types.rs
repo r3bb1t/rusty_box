@@ -610,6 +610,67 @@ pub struct CpuDebugView {
     /// `IA32_KERNEL_GS_BASE`: the GS base `SWAPGS` exchanges with GS's, so in
     /// a 64-bit kernel entered from user mode it holds the user GS base.
     pub kernel_gs_base: u64,
+    /// GDTR: where the global descriptor table lies.
+    pub gdtr: DescriptorTable,
+    /// IDTR: where the interrupt descriptor table lies.
+    pub idtr: DescriptorTable,
+}
+
+/// A descriptor-table register (GDTR, IDTR): the table's linear base and
+/// its limit, the offset of its last byte.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DescriptorTable {
+    pub base: u64,
+    pub limit: u16,
+}
+
+/// What a page grants once every paging level is combined: a level that
+/// withholds a right withholds it for the whole page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PageAccess {
+    /// U/S set at every level: user mode may reach it.
+    pub user: bool,
+    /// R/W set at every level.
+    pub writable: bool,
+    /// No level sets XD (always true while EFER.NXE is clear).
+    pub executable: bool,
+}
+
+/// One page or large page mapped by a paging structure's leaf entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PageMapping {
+    /// The first linear address it maps, canonical in long mode.
+    pub linear: u64,
+    /// Where that address lands in guest-physical memory.
+    pub physical: u64,
+    /// 4 KiB, 2 MiB or 4 MiB (legacy PSE), 1 GiB.
+    pub size: u64,
+    pub access: PageAccess,
+}
+
+/// A span of linear addresses, `start` included and `end` excluded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LinearRange {
+    pub start: u64,
+    pub end: u64,
+}
+
+/// What a mapping walk's visitor wants next.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WalkStep {
+    Continue,
+    Stop,
+}
+
+/// How a mapping walk ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MappingWalk {
+    /// Every mapping in the range was visited.
+    Complete,
+    /// The visitor asked to stop.
+    Stopped,
+    /// CR0.PG is clear: there are no paging structures to walk.
+    PagingOff,
 }
 
 /// What a debugger read of guest-physical memory found: Bochs misc_mem.cc

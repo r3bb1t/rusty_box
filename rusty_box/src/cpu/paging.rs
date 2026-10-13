@@ -2809,6 +2809,255 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         Some(paddress & self.a20_mask)
     }
 
+    /// Every page the paging structures rooted at `cr3` map within `range`,
+    /// in address order, read as [`Self::dbg_xlate_linear2phy`] reads them:
+    /// without the TLB or an accessed or dirty bit, each structure address
+    /// through EPT or the SVM nested tables when the processor runs under
+    /// them, under this processor's CR4 and EFER. An entry with a reserved
+    /// bit set maps nothing, as that walk treats it.
+    pub(crate) fn dbg_page_mappings<F>(
+        &mut self,
+        cr3: u64,
+        range: crate::cpu::instrumentation::LinearRange,
+        visit: &mut F,
+    ) -> crate::cpu::instrumentation::MappingWalk
+    where
+        F: FnMut(crate::cpu::instrumentation::PageMapping) -> crate::cpu::instrumentation::WalkStep,
+    {
+        use crate::cpu::instrumentation::{MappingWalk, PageAccess, WalkStep};
+        if !self.cr0.pg() {
+            return MappingWalk::PagingOff;
+        }
+        let full = PageAccess {
+            user: true,
+            writable: true,
+            executable: true,
+        };
+        let walk = DbgWalk::Root(cr3);
+        let step = if self.long_mode() {
+            let levels = if self.cr4.la57() { 5 } else { 4 };
+            let table = cr3 & BX_CR3_PAGING_MASK_PAE;
+            self.dbg_map_wide(table, levels - 1, 0, levels, full, range, walk, visit)
+        } else if self.cr4.pae() {
+            // A PAE root is 32 bytes at CR3[31:5]: four PDPTEs, which carry
+            // no access bits of their own.
+            let mut step = WalkStep::Continue;
+            for index in 0..4u64 {
+                let base = index << 30;
+                if !Self::dbg_span_overlaps(base, 1 << 30, range) {
+                    continue;
+                }
+                let Some(at) = self.dbg_nested_translation((cr3 & 0xffff_ffe0) + index * 8, walk)
+                else {
+                    continue;
+                };
+                let pdpte = self.page_walk_read_qword_ro(at);
+                if pdpte & 1 == 0 || pdpte & PAGING_PAE_PHY_RESERVED_BITS != 0 {
+                    continue;
+                }
+                step = self.dbg_map_wide(
+                    pdpte & 0x000f_ffff_ffff_f000,
+                    1,
+                    base,
+                    0,
+                    full,
+                    range,
+                    walk,
+                    visit,
+                );
+                if step == WalkStep::Stop {
+                    break;
+                }
+            }
+            step
+        } else {
+            self.dbg_map_legacy(cr3 & 0xffff_f000, range, walk, visit)
+        };
+        match step {
+            WalkStep::Continue => MappingWalk::Complete,
+            WalkStep::Stop => MappingWalk::Stopped,
+        }
+    }
+
+    /// Whether `[base, base + span)` meets `range`.
+    fn dbg_span_overlaps(
+        base: u64,
+        span: u64,
+        range: crate::cpu::instrumentation::LinearRange,
+    ) -> bool {
+        base < range.end && base.wrapping_add(span) > range.start
+    }
+
+    /// One 512-entry table of 8-byte entries (long mode, or PAE's directory
+    /// and table levels) at guest-physical `table`, whose entries each span
+    /// `1 << (12 + 9 * level)` bytes from linear `base`. A long-mode top
+    /// level (`top_levels` > 0) sign-extends the address it builds.
+    #[allow(clippy::too_many_arguments)]
+    fn dbg_map_wide<F>(
+        &mut self,
+        table: u64,
+        level: u32,
+        base: u64,
+        top_levels: u32,
+        inherited: crate::cpu::instrumentation::PageAccess,
+        range: crate::cpu::instrumentation::LinearRange,
+        walk: DbgWalk,
+        visit: &mut F,
+    ) -> crate::cpu::instrumentation::WalkStep
+    where
+        F: FnMut(crate::cpu::instrumentation::PageMapping) -> crate::cpu::instrumentation::WalkStep,
+    {
+        use super::decoder::features::X86Feature;
+        use crate::cpu::instrumentation::{PageAccess, PageMapping, WalkStep};
+        let shift = 12 + 9 * level;
+        let span = 1u64 << shift;
+        let nxe = self.efer.nxe();
+        for index in 0..512u64 {
+            let mut linear = base | (index << shift);
+            if top_levels > 0 {
+                // Canonical form: the top level's highest bit extends.
+                let width = 12 + 9 * top_levels;
+                let sign = 1u64 << (width - 1);
+                if linear & sign != 0 {
+                    linear |= !((1u64 << width) - 1);
+                }
+            }
+            if !Self::dbg_span_overlaps(linear, span, range) {
+                continue;
+            }
+            let Some(at) = self.dbg_nested_translation(table + index * 8, walk) else {
+                continue;
+            };
+            let pte = self.page_walk_read_qword_ro(at);
+            if pte & 1 == 0 || pte & PAGING_PAE_PHY_RESERVED_BITS != 0 {
+                continue;
+            }
+            let access = PageAccess {
+                user: inherited.user && pte & 0x4 != 0,
+                writable: inherited.writable && pte & 0x2 != 0,
+                executable: inherited.executable && !(nxe && pte & (1 << 63) != 0),
+            };
+            let large = level > 0 && pte & 0x80 != 0;
+            if large {
+                let allowed = level == 1
+                    || (level == 2 && self.bx_cpuid_support_isa_extension(X86Feature::Isa1gPages));
+                if !allowed {
+                    continue;
+                }
+            }
+            let step = if level == 0 || large {
+                let frame = pte & 0x000f_ffff_ffff_f000 & !(span - 1);
+                let Some(physical) = self.dbg_nested_translation(frame, walk) else {
+                    continue;
+                };
+                visit(PageMapping {
+                    linear,
+                    physical: physical & self.a20_mask,
+                    size: span,
+                    access,
+                })
+            } else {
+                self.dbg_map_wide(
+                    pte & 0x000f_ffff_ffff_f000,
+                    level - 1,
+                    linear,
+                    0,
+                    access,
+                    range,
+                    walk,
+                    visit,
+                )
+            };
+            if step == WalkStep::Stop {
+                return WalkStep::Stop;
+            }
+        }
+        WalkStep::Continue
+    }
+
+    /// Legacy 32-bit paging: a 1024-entry directory of 4-byte entries at
+    /// `directory`, each a 4 MiB page under CR4.PSE (PSE-36 bits included,
+    /// as Bochs `dbg_xlate_linear2phy` reads them) or a table of 4 KiB pages.
+    fn dbg_map_legacy<F>(
+        &mut self,
+        directory: u64,
+        range: crate::cpu::instrumentation::LinearRange,
+        walk: DbgWalk,
+        visit: &mut F,
+    ) -> crate::cpu::instrumentation::WalkStep
+    where
+        F: FnMut(crate::cpu::instrumentation::PageMapping) -> crate::cpu::instrumentation::WalkStep,
+    {
+        use crate::cpu::instrumentation::{PageAccess, PageMapping, WalkStep};
+        let access_of = |entry: u64, inherited: PageAccess| PageAccess {
+            user: inherited.user && entry & 0x4 != 0,
+            writable: inherited.writable && entry & 0x2 != 0,
+            executable: true,
+        };
+        let full = PageAccess {
+            user: true,
+            writable: true,
+            executable: true,
+        };
+        for pde_index in 0..1024u64 {
+            let base = pde_index << 22;
+            if !Self::dbg_span_overlaps(base, 1 << 22, range) {
+                continue;
+            }
+            let Some(at) = self.dbg_nested_translation(directory + pde_index * 4, walk) else {
+                continue;
+            };
+            let pde = u64::from(self.page_walk_read_dword_ro(at));
+            if pde & 1 == 0 {
+                continue;
+            }
+            let dir_access = access_of(pde, full);
+            if pde & 0x80 != 0 && self.cr4.pse() {
+                let frame = (pde & 0xffc0_0000) + ((pde & 0x003f_e000) << 19);
+                let Some(physical) = self.dbg_nested_translation(frame, walk) else {
+                    continue;
+                };
+                let step = visit(PageMapping {
+                    linear: base,
+                    physical: physical & self.a20_mask,
+                    size: 1 << 22,
+                    access: dir_access,
+                });
+                if step == WalkStep::Stop {
+                    return WalkStep::Stop;
+                }
+                continue;
+            }
+            let table = pde & 0xffff_f000;
+            for pte_index in 0..1024u64 {
+                let linear = base | (pte_index << 12);
+                if !Self::dbg_span_overlaps(linear, 1 << 12, range) {
+                    continue;
+                }
+                let Some(at) = self.dbg_nested_translation(table + pte_index * 4, walk) else {
+                    continue;
+                };
+                let pte = u64::from(self.page_walk_read_dword_ro(at));
+                if pte & 1 == 0 {
+                    continue;
+                }
+                let Some(physical) = self.dbg_nested_translation(pte & 0xffff_f000, walk) else {
+                    continue;
+                };
+                let step = visit(PageMapping {
+                    linear,
+                    physical: physical & self.a20_mask,
+                    size: 1 << 12,
+                    access: access_of(pte, dir_access),
+                });
+                if step == WalkStep::Stop {
+                    return WalkStep::Stop;
+                }
+            }
+        }
+        WalkStep::Continue
+    }
+
     /// The nested step Bochs `dbg_xlate_linear2phy` applies to each
     /// paging-structure address and to its result: EPT inside a VMX guest
     /// that enables it (`dbg_translate_guest_physical_ept`), and the SVM

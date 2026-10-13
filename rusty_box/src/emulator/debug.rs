@@ -4,7 +4,9 @@
 //! neither the TLB nor an accessed or dirty bit; a read of a device window is
 //! that device's read, as it is in Bochs.
 
-use crate::cpu::instrumentation::{CpuDebugView, Fetched, Instrumentation};
+use crate::cpu::instrumentation::{
+    CpuDebugView, Fetched, Instrumentation, LinearRange, MappingWalk, PageMapping, WalkStep,
+};
 use crate::memory::{misc_mem::DbgFetch, mmio_map::MmioHit, CpuMemoryPolicy};
 use crate::Result;
 
@@ -83,6 +85,20 @@ impl<T: Instrumentation, E: SliceEngine<T>> DebugCpu<'_, T, E> {
         self.machine
             .exec_ctx(self.index)
             .dbg_xlate_linear2phy(laddr, crate::cpu::paging::DbgWalk::Root(cr3))
+    }
+
+    /// Every page the paging structures rooted at the CR3 value `cr3` map
+    /// within `range`, in address order, handed to `visit` until it asks to
+    /// stop: a page's linear and physical address, its size, and the rights
+    /// all of its levels together grant. The tables are read as
+    /// [`Self::dbg_xlate_linear2phy_in`] reads them, so the two agree.
+    pub fn dbg_page_mappings_in<F>(&mut self, cr3: u64, range: LinearRange, mut visit: F) -> MappingWalk
+    where
+        F: FnMut(PageMapping) -> WalkStep,
+    {
+        self.machine
+            .exec_ctx(self.index)
+            .dbg_page_mappings(cr3, range, &mut visit)
     }
 
     /// Bochs misc_mem.cc `dbg_fetch_mem`: `buf.len()` guest-physical bytes
