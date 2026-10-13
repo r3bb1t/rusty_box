@@ -6,6 +6,8 @@
 //! hex, text or UTF-16. Like the VM bar, it draws from borrowed state and
 //! reports what was asked for; the app acts on it.
 
+use std::collections::BTreeSet;
+
 use egui::text::{LayoutJob, TextFormat};
 use egui::RichText;
 use rusty_box::cpu::{CodeSize, CpuDebugView, ExecutionMode, ProcessorActivity};
@@ -24,12 +26,12 @@ use crate::debugger::windows::{
     WinModule, WinProcess,
 };
 use crate::shell::listing::{
-    card_title, chip, empty_state, header_row, lead_arrow, lead_dot, list_row,
+    card_title, chip, empty_state, header_row, lead_arrow, lead_chevron, lead_dot, list_row,
     mono_font, segmented, tree_guides, Cell, RowSense, Tone, TREE_INDENT,
 };
 use crate::shell::theme::{
-    shell_card_frame, ACCENT_AMBER, ACCENT_BLUE, ACCENT_CYAN, ACCENT_RED, SPACE_ITEM, SPACE_PAGE,
-    TEXT_MUTED, TEXT_PRIMARY, TEXT_SECONDARY,
+    shell_card_frame, ACCENT_AMBER, ACCENT_BLUE, ACCENT_CYAN, ACCENT_RED, CONTROL_FILL_REST,
+    SPACE_ITEM, SPACE_PAGE, TEXT_MUTED, TEXT_PRIMARY, TEXT_SECONDARY,
 };
 
 pub(crate) const NOT_RUNNING: &str =
@@ -108,6 +110,11 @@ pub(crate) struct DebuggerPane {
     pub(crate) list_filter: String,
     /// Whether the Processes view shows modules or the memory map.
     pub(crate) process_detail: ProcessDetail,
+    /// Module bases whose sections are expanded in the memory map.
+    pub(crate) expanded_modules: std::collections::BTreeSet<u64>,
+    /// An address the memory list should scroll to next frame: set by a
+    /// minimap click, consumed once.
+    pub(crate) scroll_to: Option<u64>,
 }
 
 impl Default for DebuggerPane {
@@ -126,6 +133,8 @@ impl Default for DebuggerPane {
             process_layout: ProcessLayout::Tree,
             list_filter: String::new(),
             process_detail: ProcessDetail::Modules,
+            expanded_modules: BTreeSet::new(),
+            scroll_to: None,
         }
     }
 }
@@ -1172,9 +1181,10 @@ fn processes_page(
     let process_title = Title::counted("Processes", listing.processes.len());
     let navigable = chosen.is_some_and(|process| process.current);
     let rows = process_rows_shown(&listing.processes, pane.process_layout, &pane.list_filter);
-    // The Modules/Memory-map switch reports through this, so neither right-card
-    // closure has to borrow `action` (the body already does).
+    // The Modules/Memory-map switch and the minimap report through these
+    // locals, so the right card's two closures borrow disjoint fields.
     let mut switch_to: Option<ProcessDetail> = None;
+    let mut minimap_click: Option<u64> = None;
     if wide {
         let gap = SPACE_ITEM;
         let page = ui.available_size();
@@ -1192,8 +1202,8 @@ fn processes_page(
                 ui,
                 egui::vec2(page.x - gap - left, page.y),
                 right_title,
-                |ui| right_card_header(ui, pane.process_detail, &mut switch_to),
-                |ui| right_card_body(ui, detail, listing, navigable, action),
+                |ui| right_card_header(ui, pane.process_detail, map_of(listing), &mut switch_to, &mut minimap_click),
+                |ui| right_card_body(ui, detail, listing, navigable, &mut pane.expanded_modules, &mut pane.scroll_to, action),
             );
         });
     } else {
@@ -1210,10 +1220,15 @@ fn processes_page(
                 card(
                     ui,
                     right_title,
-                    |ui| right_card_header(ui, pane.process_detail, &mut switch_to),
-                    |ui| right_card_body(ui, detail, listing, navigable, action),
+                    |ui| right_card_header(ui, pane.process_detail, map_of(listing), &mut switch_to, &mut minimap_click),
+                    |ui| right_card_body(ui, detail, listing, navigable, &mut pane.expanded_modules, &mut pane.scroll_to, action),
                 );
             });
+    }
+    // A minimap click this frame becomes next frame's scroll target, after
+    // both right-card closures have ended (they borrow disjoint fields).
+    if minimap_click.is_some() {
+        pane.scroll_to = minimap_click;
     }
     if let Some(chosen_detail) = switch_to {
         pane.process_detail = chosen_detail;
@@ -1224,9 +1239,21 @@ fn processes_page(
     }
 }
 
-/// The right card's header: the Modules/Memory-map switch and the column
-/// titles. A changed switch is reported through `switch_to`.
-fn right_card_header(ui: &mut egui::Ui, detail: ProcessDetail, switch_to: &mut Option<ProcessDetail>) {
+/// The memory map of the listing's chosen process, if it has been read.
+fn map_of(listing: &ProcessListing) -> Option<&MemoryMap> {
+    listing.modules.as_ref().and_then(|modules| modules.map.as_ref())
+}
+
+/// The right card's header: the Modules/Memory-map switch, the memory-map
+/// minimap, and the column titles. A changed switch is reported through
+/// `switch_to`; a minimap click through `minimap_click`.
+fn right_card_header(
+    ui: &mut egui::Ui,
+    detail: ProcessDetail,
+    map: Option<&MemoryMap>,
+    switch_to: &mut Option<ProcessDetail>,
+    minimap_click: &mut Option<u64>,
+) {
     let mut chosen = detail;
     if segmented(
         ui,
@@ -1240,8 +1267,42 @@ fn right_card_header(ui: &mut egui::Ui, detail: ProcessDetail, switch_to: &mut O
     }
     match detail {
         ProcessDetail::Modules => header_row(ui, 0.0, &module_columns()),
-        ProcessDetail::MemoryMap => header_row(ui, 0.0, &memory_columns()),
+        ProcessDetail::MemoryMap => {
+            if let Some(map) = map.filter(|map| !map.regions.is_empty()) {
+                draw_minimap(ui, map, minimap_click);
+            }
+            header_row(ui, 0.0, &memory_columns());
+        }
     }
+}
+
+/// The horizontal address-space overview: every region as a segment on a log
+/// scale, executable memory cyan. A click jumps the list to that region.
+fn draw_minimap(ui: &mut egui::Ui, map: &MemoryMap, minimap_click: &mut Option<u64>) {
+    use crate::debugger::minimap;
+    let width = ui.available_width();
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(width, 14.0), egui::Sense::click());
+    let painter = ui.painter();
+    painter.rect_filled(rect, 3.0, crate::shell::theme::BG_WELL);
+    for lane in minimap::lanes(map, width) {
+        let segment = egui::Rect::from_min_size(
+            egui::pos2(rect.left() + lane.top, rect.top() + 2.0),
+            egui::vec2(lane.height.max(1.0), rect.height() - 4.0),
+        );
+        let color = if lane.executable {
+            ACCENT_CYAN
+        } else {
+            CONTROL_FILL_REST
+        };
+        painter.rect_filled(segment, 0.0, color);
+    }
+    if response.clicked() {
+        if let Some(pos) = response.interact_pointer_pos() {
+            *minimap_click = minimap::address_at(map, width, pos.x - rect.left());
+        }
+    }
+    ui.add_space(2.0);
 }
 
 /// The right card's body: the modules, or the memory map.
@@ -1250,12 +1311,14 @@ fn right_card_body(
     detail: ProcessDetail,
     listing: &ProcessListing,
     navigable: bool,
+    expanded: &mut BTreeSet<u64>,
+    scroll_to: &mut Option<u64>,
     action: &mut Option<DebuggerAction>,
 ) {
     match detail {
         ProcessDetail::Modules => listed_modules(ui, listing, navigable, action),
         ProcessDetail::MemoryMap => match listing.modules.as_ref().and_then(|m| m.map.as_ref()) {
-            Some(map) => memory_map_rows(ui, map, navigable, action),
+            Some(map) => memory_map_rows(ui, map, navigable, expanded, scroll_to, action),
             None => {
                 ui.add_space(SPACE_ITEM);
                 ui.label(RichText::new("Reading the address space…").color(TEXT_MUTED));
@@ -1286,24 +1349,29 @@ const MEMORY_RESIDENT_CHARS: usize = 9;
 const MEMORY_ACCESS_CHARS: usize = 5;
 const MEMORY_MODULE_CHARS: usize = 18;
 
-fn memory_columns() -> [Cell; 6] {
+const MEMORY_GAUGE_CHARS: usize = 7;
+
+fn memory_columns() -> [Cell; 7] {
     [
         Cell::left("Address", TEXT_MUTED, 16),
         Cell::right("Size", TEXT_MUTED, MEMORY_SIZE_CHARS),
         Cell::right("Resident", TEXT_MUTED, MEMORY_RESIDENT_CHARS),
+        Cell::left("", TEXT_MUTED, MEMORY_GAUGE_CHARS),
         Cell::left("Access", TEXT_MUTED, MEMORY_ACCESS_CHARS),
         Cell::left("Module", TEXT_MUTED, MEMORY_MODULE_CHARS),
         Cell::fill("Section", TEXT_MUTED),
     ]
 }
 
-/// One row per region, in address order: its address, size, how much is
-/// resident, the access of its pages, and what occupies it. Executable
-/// memory is cyan — the one thing to hunt for.
+/// The memory map, grouped by module: each module is one row that expands
+/// into its header and section rows; private memory stays a plain row.
+/// Executable memory is cyan — the one thing to hunt for.
 fn memory_map_rows(
     ui: &mut egui::Ui,
     map: &MemoryMap,
     navigable: bool,
+    expanded: &mut BTreeSet<u64>,
+    scroll_to: &mut Option<u64>,
     action: &mut Option<DebuggerAction>,
 ) {
     if map.regions.is_empty() {
@@ -1311,64 +1379,147 @@ fn memory_map_rows(
         ui.label(RichText::new("No mapped memory.").color(TEXT_MUTED));
         return;
     }
-    for (index, region) in map.regions.iter().enumerate() {
-        let executable = region.access.is_some_and(|a| a.executable);
-        let observed = region.access.is_some_and(|a| a.observed);
-        let access_text = match region.access {
-            Some(access) => {
-                let mut text = String::from("R");
-                if access.writable {
-                    text.push('W');
+    for group in crate::debugger::memory_map::group(map) {
+        match group {
+            crate::debugger::memory_map::MapGroup::Region(index) => {
+                region_row(ui, map, index, 0.0, navigable, scroll_to, action);
+            }
+            crate::debugger::memory_map::MapGroup::Module {
+                base,
+                name,
+                regions,
+                resident_pages,
+                total_pages,
+            } => {
+                let open = expanded.contains(&base);
+                let any_exec = regions
+                    .iter()
+                    .any(|&i| map.regions[i].access.is_some_and(|a| a.executable));
+                let first = &map.regions[regions[0]];
+                let last = &map.regions[*regions.last().unwrap_or(&regions[0])];
+                let span = (last.start + last.size).saturating_sub(first.start);
+                let fraction = resident_pages as f32 / total_pages.max(1) as f32;
+                let gauge = if any_exec {
+                    Cell::gauge_colored(fraction, MEMORY_GAUGE_CHARS, ACCENT_CYAN)
                 } else {
-                    text.push(' ');
+                    Cell::gauge(fraction, MEMORY_GAUGE_CHARS)
+                };
+                let name_color = if any_exec { ACCENT_CYAN } else { TEXT_PRIMARY };
+                let cells = [
+                    Cell::left(format!("{:016X}", first.start), TEXT_MUTED, 16),
+                    Cell::right(human_size(span), TEXT_MUTED, MEMORY_SIZE_CHARS),
+                    Cell::right(
+                        format!("{resident_pages}/{total_pages}"),
+                        TEXT_MUTED,
+                        MEMORY_RESIDENT_CHARS,
+                    ),
+                    gauge,
+                    Cell::left("", TEXT_MUTED, MEMORY_ACCESS_CHARS),
+                    Cell::left(name.as_str(), name_color, MEMORY_MODULE_CHARS),
+                    Cell::fill(
+                        format!("{} sections", regions.len().saturating_sub(1)),
+                        TEXT_MUTED,
+                    ),
+                ];
+                let response =
+                    list_row(ui, TREE_INDENT, &cells, Tone::Plain, RowSense::Pick { selected: open });
+                lead_chevron(ui, response.rect, open, name_color);
+                if *scroll_to == Some(first.start) {
+                    response.scroll_to_me(Some(egui::Align::TOP));
+                    *scroll_to = None;
                 }
-                if access.executable {
-                    text.push('X');
+                if response
+                    .on_hover_text("Click to show this module's sections.")
+                    .clicked()
+                {
+                    if open {
+                        expanded.remove(&base);
+                    } else {
+                        expanded.insert(base);
+                    }
                 }
-                text
+                if open {
+                    for index in regions {
+                        region_row(ui, map, index, TREE_INDENT, navigable, scroll_to, action);
+                    }
+                }
             }
-            None => "—".to_owned(),
-        };
-        let (module, section) = match &region.owner {
-            RegionOwner::Header { module } => (module.as_str(), "headers"),
-            RegionOwner::Section { module, section, .. } => (module.as_str(), section.as_str()),
-            RegionOwner::Private => ("", "private"),
-        };
-        let access_color = if executable {
-            ACCENT_CYAN
-        } else if observed {
-            TEXT_PRIMARY
-        } else {
-            TEXT_MUTED
-        };
-        let module_color = if executable { ACCENT_CYAN } else { TEXT_PRIMARY };
-        let resident = format!("{}/{}", region.resident_pages, region.total_pages);
-        let cells = [
-            Cell::left(format!("{:016X}", region.start), TEXT_MUTED, 16),
-            Cell::right(human_size(region.size), TEXT_MUTED, MEMORY_SIZE_CHARS),
-            Cell::right(resident, TEXT_MUTED, MEMORY_RESIDENT_CHARS),
-            Cell::left(access_text, access_color, MEMORY_ACCESS_CHARS),
-            Cell::left(module, module_color, MEMORY_MODULE_CHARS),
-            Cell::fill(section, TEXT_MUTED),
-        ];
-        let response = list_row(
-            ui,
-            0.0,
-            &cells,
-            Tone::striped(index),
-            RowSense::Pick { selected: false },
-        );
-        // A region in the running process opens the memory pane at its start.
-        if navigable {
-            if response
-                .on_hover_text("Click to show it in memory.")
-                .clicked()
-            {
-                *action = Some(DebuggerAction::OpenModule(region.start));
-            }
-        } else {
-            response.on_hover_text(ANOTHER_ADDRESS_SPACE);
         }
+    }
+}
+
+/// One region row: its address, size, residency gauge, access, and owner. At
+/// `lead` points of indent (a section under its module). A row of the running
+/// process opens the memory pane at its start.
+fn region_row(
+    ui: &mut egui::Ui,
+    map: &MemoryMap,
+    index: usize,
+    lead: f32,
+    navigable: bool,
+    scroll_to: &mut Option<u64>,
+    action: &mut Option<DebuggerAction>,
+) {
+    let region = &map.regions[index];
+    let executable = region.access.is_some_and(|a| a.executable);
+    let observed = region.access.is_some_and(|a| a.observed);
+    let access_text = match region.access {
+        Some(access) => {
+            let mut text = String::from("R");
+            text.push(if access.writable { 'W' } else { ' ' });
+            if access.executable {
+                text.push('X');
+            }
+            text
+        }
+        None => "—".to_owned(),
+    };
+    let (module, section) = match &region.owner {
+        RegionOwner::Header { module, .. } => (module.as_str(), "headers"),
+        RegionOwner::Section { module, section, .. } => (module.as_str(), section.as_str()),
+        RegionOwner::Private => ("", "private"),
+    };
+    let access_color = if executable {
+        ACCENT_CYAN
+    } else if observed {
+        TEXT_PRIMARY
+    } else {
+        TEXT_MUTED
+    };
+    let module_color = if executable { ACCENT_CYAN } else { TEXT_PRIMARY };
+    let fraction = region.resident_pages as f32 / region.total_pages.max(1) as f32;
+    let gauge = if executable {
+        Cell::gauge_colored(fraction, MEMORY_GAUGE_CHARS, ACCENT_CYAN)
+    } else {
+        Cell::gauge(fraction, MEMORY_GAUGE_CHARS)
+    };
+    let cells = [
+        Cell::left(format!("{:016X}", region.start), TEXT_MUTED, 16),
+        Cell::right(human_size(region.size), TEXT_MUTED, MEMORY_SIZE_CHARS),
+        Cell::right(
+            format!("{}/{}", region.resident_pages, region.total_pages),
+            TEXT_MUTED,
+            MEMORY_RESIDENT_CHARS,
+        ),
+        gauge,
+        Cell::left(access_text, access_color, MEMORY_ACCESS_CHARS),
+        Cell::left(module, module_color, MEMORY_MODULE_CHARS),
+        Cell::fill(section, TEXT_MUTED),
+    ];
+    let response = list_row(ui, lead, &cells, Tone::striped(index), RowSense::Pick { selected: false });
+    if *scroll_to == Some(region.start) {
+        response.scroll_to_me(Some(egui::Align::TOP));
+        *scroll_to = None;
+    }
+    if navigable {
+        if response
+            .on_hover_text("Click to show it in memory.")
+            .clicked()
+        {
+            *action = Some(DebuggerAction::OpenModule(region.start));
+        }
+    } else {
+        response.on_hover_text(ANOTHER_ADDRESS_SPACE);
     }
 }
 

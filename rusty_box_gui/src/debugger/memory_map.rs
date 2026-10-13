@@ -55,7 +55,7 @@ pub(crate) struct RegionAccess {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum RegionOwner {
     /// A module's PE header page.
-    Header { module: String },
+    Header { base: u64, module: String },
     /// A module's section.
     Section {
         base: u64,
@@ -80,6 +80,61 @@ pub(crate) struct ModuleLayout {
 pub(crate) struct MemoryMap {
     pub(crate) origin: MapOrigin,
     pub(crate) regions: Vec<MapRegion>,
+}
+
+/// One row of the memory map when its regions are grouped by module: a
+/// module with its header and sections folded together, or a lone region.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum MapGroup {
+    Module {
+        base: u64,
+        name: String,
+        /// Indices into `MemoryMap::regions`: the header, then the sections.
+        regions: Vec<usize>,
+        resident_pages: u64,
+        total_pages: u64,
+    },
+    /// A private region, by its index in `MemoryMap::regions`.
+    Region(usize),
+}
+
+/// The map's regions grouped by module, in address order: a run of a
+/// module's header and section regions becomes one `Module`; a private
+/// region becomes a `Region`.
+pub(crate) fn group(map: &MemoryMap) -> Vec<MapGroup> {
+    let mut groups: Vec<MapGroup> = Vec::new();
+    for (index, region) in map.regions.iter().enumerate() {
+        let (base, name) = match &region.owner {
+            RegionOwner::Header { base, module } | RegionOwner::Section { base, module, .. } => {
+                (*base, module.as_str())
+            }
+            RegionOwner::Private => {
+                groups.push(MapGroup::Region(index));
+                continue;
+            }
+        };
+        match groups.last_mut() {
+            Some(MapGroup::Module {
+                base: group_base,
+                regions,
+                resident_pages,
+                total_pages,
+                ..
+            }) if *group_base == base => {
+                regions.push(index);
+                *resident_pages += region.resident_pages;
+                *total_pages += region.total_pages;
+            }
+            _ => groups.push(MapGroup::Module {
+                base,
+                name: name.to_owned(),
+                regions: vec![index],
+                resident_pages: region.resident_pages,
+                total_pages: region.total_pages,
+            }),
+        }
+    }
+    groups
 }
 
 /// A labelled span the modules impose on the address space.
@@ -108,6 +163,7 @@ fn module_labels(modules: &[ModuleLayout]) -> Vec<Label> {
             start: module.base,
             end: module.base + PAGE,
             owner: RegionOwner::Header {
+                base: module.base,
                 module: module.name.clone(),
             },
             section_access: None,
@@ -321,7 +377,13 @@ mod tests {
         let regions = build(&mappings, std::slice::from_ref(&module)).regions;
         assert_eq!(regions.len(), 3);
 
-        assert_eq!(regions[0].owner, RegionOwner::Header { module: "app.exe".to_owned() });
+        assert_eq!(
+            regions[0].owner,
+            RegionOwner::Header {
+                base,
+                module: "app.exe".to_owned()
+            }
+        );
         assert_eq!((regions[0].resident_pages, regions[0].total_pages), (1, 1));
 
         assert!(matches!(&regions[1].owner, RegionOwner::Section { section, .. } if section == ".text"));
@@ -333,6 +395,48 @@ mod tests {
         assert_eq!(regions[2].resident_pages, 0);
         let data = regions[2].access.expect("from PE flags");
         assert!(!data.observed && data.writable && !data.executable);
+    }
+
+    /// A module's header and sections fold into one group, private regions
+    /// stay as lone rows between them, and the group sums residency.
+    #[test]
+    fn regions_group_by_module_keeping_private_rows_between() {
+        let base = 0x0040_0000u64;
+        let module = ModuleLayout {
+            base,
+            name: "app.exe".to_owned(),
+            sections: vec![
+                section(".text", 0x1000, 0x1000, false, true),
+                section(".data", 0x2000, 0x1000, true, false),
+            ],
+        };
+        let mappings = [
+            map(0x1_0000, PAGE, true, false),
+            map(base, PAGE, false, false),
+            map(base + 0x1000, PAGE, false, true),
+            map(base + 0x2000, PAGE, true, false),
+            map(0x7000_0000, PAGE, true, false),
+        ];
+        let built = build(&mappings, std::slice::from_ref(&module));
+        let groups = group(&built);
+        assert_eq!(groups.len(), 3);
+        assert!(matches!(groups[0], MapGroup::Region(_)));
+        match &groups[1] {
+            MapGroup::Module {
+                base: group_base,
+                name,
+                regions,
+                resident_pages,
+                total_pages,
+            } => {
+                assert_eq!(*group_base, base);
+                assert_eq!(name, "app.exe");
+                assert_eq!(regions.len(), 3);
+                assert_eq!((*resident_pages, *total_pages), (3, 3));
+            }
+            MapGroup::Region(_) => panic!("expected a module group"),
+        }
+        assert!(matches!(groups[2], MapGroup::Region(_)));
     }
 
     /// Mapped pages in no module are private; a run breaks where the access

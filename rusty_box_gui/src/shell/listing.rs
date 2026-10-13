@@ -11,8 +11,8 @@ use egui::text::LayoutJob;
 use egui::{Color32, FontId, Rect, RichText, Stroke, WidgetInfo, WidgetType};
 
 use crate::shell::theme::{
-    ACCENT_CYAN, BG_WELL, STROKE_HAIRLINE, TEXT_CAPTION, TEXT_MUTED, TEXT_PRIMARY, TEXT_SECONDARY,
-    TEXT_TITLE,
+    ACCENT_CYAN, BG_WELL, CONTROL_FILL_REST, STROKE_HAIRLINE, TEXT_CAPTION, TEXT_MUTED,
+    TEXT_PRIMARY, TEXT_SECONDARY, TEXT_TITLE,
 };
 
 /// Every listing row's height, points.
@@ -81,6 +81,9 @@ pub(crate) enum CellText {
     Plain(String, Color32),
     /// Text coloured piece by piece (a memory row's changed bytes).
     Job(LayoutJob),
+    /// A horizontal bar filled by a fraction in `0..=1`, in that colour: how
+    /// much of a region is resident.
+    Gauge(f32, Color32),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -136,10 +139,25 @@ impl Cell {
         }
     }
 
+    /// A residency bar `chars` wide, in the rest-control fill.
+    pub(crate) fn gauge(fraction: f32, chars: usize) -> Self {
+        Self::gauge_colored(fraction, chars, CONTROL_FILL_REST)
+    }
+
+    /// A residency bar `chars` wide, in `color`.
+    pub(crate) fn gauge_colored(fraction: f32, chars: usize, color: Color32) -> Self {
+        Self {
+            text: CellText::Gauge(fraction.clamp(0.0, 1.0), color),
+            width: Width::Chars(chars as f32),
+            align: Align::Left,
+        }
+    }
+
     fn plain_text(&self) -> &str {
         match &self.text {
             CellText::Plain(text, _) => text,
             CellText::Job(job) => &job.text,
+            CellText::Gauge(..) => "",
         }
     }
 }
@@ -253,11 +271,20 @@ pub(crate) fn list_row(
         );
     }
     for (cell, column) in cells.iter().zip(column_rects(rect, lead, cells, char_width)) {
+        if let CellText::Gauge(fraction, color) = cell.text {
+            let track = Rect::from_center_size(column.center(), egui::vec2(column.width(), 5.0));
+            painter.rect_filled(track, 2.0, BG_WELL);
+            let mut filled = track;
+            filled.set_width(track.width() * fraction);
+            painter.rect_filled(filled, 2.0, color);
+            continue;
+        }
         let galley = match &cell.text {
             CellText::Plain(text, color) => {
                 painter.layout_no_wrap(text.clone(), mono_font(), *color)
             }
             CellText::Job(job) => ui.fonts_mut(|fonts| fonts.layout_job(job.clone())),
+            CellText::Gauge(..) => unreachable!("gauge painted above"),
         };
         let x = match cell.align {
             Align::Left => column.left(),
@@ -346,6 +373,28 @@ pub(crate) fn lead_arrow(ui: &egui::Ui, row: Rect, color: Color32) {
     ));
 }
 
+/// A disclosure chevron in a row's lead: pointing right when closed, down
+/// when open. Painted, not a glyph, so it needs no font coverage.
+pub(crate) fn lead_chevron(ui: &egui::Ui, row: Rect, open: bool, color: Color32) {
+    let left = row.left() + ROW_PAD;
+    let middle = row.center().y;
+    let points = if open {
+        vec![
+            egui::pos2(left, middle - 2.5),
+            egui::pos2(left + 9.0, middle - 2.5),
+            egui::pos2(left + 4.5, middle + 3.5),
+        ]
+    } else {
+        vec![
+            egui::pos2(left + 1.0, middle - 4.5),
+            egui::pos2(left + 7.0, middle),
+            egui::pos2(left + 1.0, middle + 4.5),
+        ]
+    };
+    ui.painter()
+        .add(egui::Shape::convex_polygon(points, color, Stroke::NONE));
+}
+
 /// A status chip: `text` in `color` on a tint of it.
 pub(crate) fn chip(ui: &mut egui::Ui, text: &str, color: Color32) -> egui::Response {
     egui::Frame::new()
@@ -413,4 +462,24 @@ pub(crate) fn empty_state(ui: &mut egui::Ui, title: &str, body: &str) {
         ui.add_space(4.0);
         ui.label(RichText::new(body).color(TEXT_MUTED));
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fraction(cell: &Cell) -> Option<f32> {
+        match cell.text {
+            CellText::Gauge(fraction, _) => Some(fraction),
+            CellText::Plain(..) | CellText::Job(_) => None,
+        }
+    }
+
+    #[test]
+    fn a_gauge_cell_clamps_its_fraction() {
+        assert_eq!(fraction(&Cell::gauge(1.5, 6)), Some(1.0));
+        assert_eq!(fraction(&Cell::gauge(-0.2, 6)), Some(0.0));
+        assert_eq!(fraction(&Cell::gauge(0.5, 6)), Some(0.5));
+        assert_eq!(fraction(&Cell::left("x", TEXT_PRIMARY, 1)), None);
+    }
 }
