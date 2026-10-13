@@ -2169,6 +2169,20 @@ impl NativeShellApp {
                     ..control.view()
                 });
             }
+            Some(DebuggerAction::ViewInProcess { cr3, address }) => {
+                use crate::debugger::inspect::{AddressSpace, GuestAddress, MemoryTarget};
+                use crate::debugger::windows::SystemView;
+                use crate::shell::debugger_page::DebuggerTab;
+                self.sessions.open(&vm).debugger_mut().tab = DebuggerTab::Cpu;
+                control.set_view(ViewRequest {
+                    memory: MemoryTarget::At(GuestAddress {
+                        space: AddressSpace::Process { cr3 },
+                        value: address,
+                    }),
+                    system: SystemView::Off,
+                    ..control.view()
+                });
+            }
         }
     }
 

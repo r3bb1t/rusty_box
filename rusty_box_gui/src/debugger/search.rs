@@ -112,7 +112,24 @@ pub(crate) fn find<T: Instrumentation, E: SliceEngine<T>, F: Fn() -> bool>(
 ) -> FindOutcome {
     match request.from.space {
         AddressSpace::Physical => find_physical(emu, request, abandoned),
-        AddressSpace::Linear => find_linear(emu, cpu, request, abandoned),
+        AddressSpace::Linear | AddressSpace::Process { .. } => {
+            find_linear(emu, cpu, request.from.space, request, abandoned)
+        }
+    }
+}
+
+/// Where `address` maps in `space`: the processor's own tables for `Linear`,
+/// a given CR3's for `Process`.
+fn translate_in<T: Instrumentation, E: SliceEngine<T>>(
+    emu: &mut Emulator<T, E>,
+    cpu: usize,
+    space: AddressSpace,
+    address: u64,
+) -> Option<u64> {
+    let mut debug = emu.debug_cpu(cpu)?;
+    match space {
+        AddressSpace::Linear | AddressSpace::Physical => debug.dbg_xlate_linear2phy(address),
+        AddressSpace::Process { cr3 } => debug.dbg_xlate_linear2phy_in(cr3, address),
     }
 }
 
@@ -189,6 +206,7 @@ fn find_physical<T: Instrumentation, E: SliceEngine<T>, F: Fn() -> bool>(
 fn find_linear<T: Instrumentation, E: SliceEngine<T>, F: Fn() -> bool>(
     emu: &mut Emulator<T, E>,
     cpu: usize,
+    space: AddressSpace,
     request: &FindRequest,
     abandoned: F,
 ) -> FindOutcome {
@@ -208,9 +226,7 @@ fn find_linear<T: Instrumentation, E: SliceEngine<T>, F: Fn() -> bool>(
         let len = (page_end - address) as usize;
         // RAM only: an unmapped page, or one that maps a device window or
         // lies past RAM, breaks the run of bytes a hit could span.
-        let ram = emu
-            .debug_cpu(cpu)
-            .and_then(|mut debug| debug.dbg_xlate_linear2phy(address))
+        let ram = translate_in(emu, cpu, space, address)
             .and_then(RamOffset::of_physical)
             .filter(|RamOffset(offset)| offset.saturating_add(len as u64) <= total);
         let read = match ram {
@@ -231,7 +247,7 @@ fn find_linear<T: Instrumentation, E: SliceEngine<T>, F: Fn() -> bool>(
             if let Some(hit) = position(&window.bytes, &request.pattern) {
                 return FindOutcome::Found(FoundAt {
                     at: GuestAddress {
-                        space: AddressSpace::Linear,
+                        space,
                         value: window.start.wrapping_add(hit as u64),
                     },
                     len: request.pattern.len() as u64,
@@ -248,7 +264,7 @@ fn find_linear<T: Instrumentation, E: SliceEngine<T>, F: Fn() -> bool>(
     }
     FindOutcome::NotFound {
         searched_to: GuestAddress {
-            space: AddressSpace::Linear,
+            space,
             value: address,
         },
     }

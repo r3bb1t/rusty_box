@@ -200,6 +200,10 @@ pub(crate) enum DebuggerAction {
     /// Show the CPU tab with the memory pane at this linear address: a
     /// module picked from a list.
     OpenModule(u64),
+    /// Show the CPU tab with the memory pane at `address` in the address
+    /// space of the process at `cr3`: a region of a process other than the
+    /// running one.
+    ViewInProcess { cr3: u64, address: u64 },
 }
 
 /// What the panes compare against and mark: the snapshot before, and the
@@ -815,14 +819,24 @@ fn memory_bar(
 ) {
     {
         ui.horizontal_wrapped(|ui| {
-            segmented(
-                ui,
-                &mut pane.space,
-                &[
-                    (AddressSpace::Linear, "Linear"),
-                    (AddressSpace::Physical, "Physical"),
-                ],
-            );
+            let mut spaces = vec![
+                (AddressSpace::Linear, "Linear"),
+                (AddressSpace::Physical, "Physical"),
+            ];
+            // A Process space appears once a process other than the running
+            // one is being browsed, so it can be selected and left.
+            let process_space = match pane.space {
+                AddressSpace::Process { cr3 } => Some(cr3),
+                AddressSpace::Linear | AddressSpace::Physical => snapshot.memory_space,
+            };
+            if let Some(cr3) = process_space {
+                spaces.push((AddressSpace::Process { cr3 }, "Process"));
+            }
+            segmented(ui, &mut pane.space, &spaces);
+            if let Some(cr3) = process_space {
+                chip(ui, &format!("CR3 {cr3:X}"), ACCENT_AMBER)
+                    .on_hover_text("Browsing another process's address space.");
+            }
             let field = ui.add(
                 egui::TextEdit::singleline(&mut pane.address_text)
                     .font(egui::TextStyle::Monospace)
@@ -1180,6 +1194,9 @@ fn processes_page(
     };
     let process_title = Title::counted("Processes", listing.processes.len());
     let navigable = chosen.is_some_and(|process| process.current);
+    // The chosen process's address space, for browsing it when it is not the
+    // running one.
+    let process_cr3 = chosen.map(|process| process.cr3);
     let rows = process_rows_shown(&listing.processes, pane.process_layout, &pane.list_filter);
     // The Modules/Memory-map switch and the minimap report through these
     // locals, so the right card's two closures borrow disjoint fields.
@@ -1203,7 +1220,7 @@ fn processes_page(
                 egui::vec2(page.x - gap - left, page.y),
                 right_title,
                 |ui| right_card_header(ui, pane.process_detail, map_of(listing), &mut switch_to, &mut minimap_click),
-                |ui| right_card_body(ui, detail, listing, navigable, &mut pane.expanded_modules, &mut pane.scroll_to, action),
+                |ui| right_card_body(ui, detail, listing, navigable, process_cr3, &mut pane.expanded_modules, &mut pane.scroll_to, action),
             );
         });
     } else {
@@ -1221,7 +1238,7 @@ fn processes_page(
                     ui,
                     right_title,
                     |ui| right_card_header(ui, pane.process_detail, map_of(listing), &mut switch_to, &mut minimap_click),
-                    |ui| right_card_body(ui, detail, listing, navigable, &mut pane.expanded_modules, &mut pane.scroll_to, action),
+                    |ui| right_card_body(ui, detail, listing, navigable, process_cr3, &mut pane.expanded_modules, &mut pane.scroll_to, action),
                 );
             });
     }
@@ -1311,6 +1328,7 @@ fn right_card_body(
     detail: ProcessDetail,
     listing: &ProcessListing,
     navigable: bool,
+    process_cr3: Option<u64>,
     expanded: &mut BTreeSet<u64>,
     scroll_to: &mut Option<u64>,
     action: &mut Option<DebuggerAction>,
@@ -1318,7 +1336,7 @@ fn right_card_body(
     match detail {
         ProcessDetail::Modules => listed_modules(ui, listing, navigable, action),
         ProcessDetail::MemoryMap => match listing.modules.as_ref().and_then(|m| m.map.as_ref()) {
-            Some(map) => memory_map_rows(ui, map, navigable, expanded, scroll_to, action),
+            Some(map) => memory_map_rows(ui, map, navigable, process_cr3, expanded, scroll_to, action),
             None => {
                 ui.add_space(SPACE_ITEM);
                 ui.label(RichText::new("Reading the address space…").color(TEXT_MUTED));
@@ -1370,6 +1388,7 @@ fn memory_map_rows(
     ui: &mut egui::Ui,
     map: &MemoryMap,
     navigable: bool,
+    process_cr3: Option<u64>,
     expanded: &mut BTreeSet<u64>,
     scroll_to: &mut Option<u64>,
     action: &mut Option<DebuggerAction>,
@@ -1382,7 +1401,7 @@ fn memory_map_rows(
     for group in crate::debugger::memory_map::group(map) {
         match group {
             crate::debugger::memory_map::MapGroup::Region(index) => {
-                region_row(ui, map, index, 0.0, navigable, scroll_to, action);
+                region_row(ui, map, index, 0.0, navigable, process_cr3, scroll_to, action);
             }
             crate::debugger::memory_map::MapGroup::Module {
                 base,
@@ -1440,7 +1459,7 @@ fn memory_map_rows(
                 }
                 if open {
                     for index in regions {
-                        region_row(ui, map, index, TREE_INDENT, navigable, scroll_to, action);
+                        region_row(ui, map, index, TREE_INDENT, navigable, process_cr3, scroll_to, action);
                     }
                 }
             }
@@ -1457,6 +1476,7 @@ fn region_row(
     index: usize,
     lead: f32,
     navigable: bool,
+    process_cr3: Option<u64>,
     scroll_to: &mut Option<u64>,
     action: &mut Option<DebuggerAction>,
 ) {
@@ -1517,6 +1537,16 @@ fn region_row(
             .clicked()
         {
             *action = Some(DebuggerAction::OpenModule(region.start));
+        }
+    } else if let Some(cr3) = process_cr3 {
+        if response
+            .on_hover_text("Click to show it in this process's memory.")
+            .clicked()
+        {
+            *action = Some(DebuggerAction::ViewInProcess {
+                cr3,
+                address: region.start,
+            });
         }
     } else {
         response.on_hover_text(ANOTHER_ADDRESS_SPACE);

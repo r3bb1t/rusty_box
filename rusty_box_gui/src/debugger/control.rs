@@ -593,6 +593,7 @@ mod tests {
             stack: Vec::new(),
             process: None,
             system: crate::debugger::windows::SystemListing::NotAsked,
+            memory_space: None,
         });
         control.finish_run();
         control.begin_run(RunStart::PowerOn);
@@ -648,6 +649,7 @@ mod tests {
             stack: Vec::new(),
             process: None,
             system: crate::debugger::windows::SystemListing::NotAsked,
+            memory_space: None,
         }
     }
 

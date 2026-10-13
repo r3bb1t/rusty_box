@@ -18,7 +18,11 @@ const PAGE_BYTES: u64 = 0x1000;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AddressSpace {
     Physical,
+    /// The shown processor's own linear space.
     Linear,
+    /// Another process's linear space, read through its CR3 — so a process
+    /// other than the running one can be browsed.
+    Process { cr3: u64 },
 }
 
 /// An address in one of the two spaces the page reads (R4).
@@ -70,6 +74,9 @@ pub(crate) struct DebugSnapshot {
     pub(crate) process: Option<String>,
     /// What `ViewRequest::system` asked to be listed.
     pub(crate) system: SystemListing,
+    /// Whose address space the memory window shows, when it is not the shown
+    /// processor's own (a process browsed through its CR3).
+    pub(crate) memory_space: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -160,6 +167,7 @@ pub(crate) fn read_snapshot<T: Instrumentation, E: SliceEngine<T>>(
             stack: Vec::new(),
             process: None,
             system: SystemListing::NotAsked,
+            memory_space: None,
         };
     };
     let shown = cpu.view();
@@ -182,6 +190,10 @@ pub(crate) fn read_snapshot<T: Instrumentation, E: SliceEngine<T>>(
     let stack = read_stack(&mut cpu, rsp, slot_bytes(size));
     let process = windows_image_path(&mut cpu, &shown);
     let system = read_system(&mut cpu, &shown, view.system);
+    let memory_space = match start.space {
+        AddressSpace::Process { cr3 } => Some(cr3),
+        AddressSpace::Linear | AddressSpace::Physical => None,
+    };
     DebugSnapshot {
         cpus,
         cpu: index,
@@ -190,6 +202,7 @@ pub(crate) fn read_snapshot<T: Instrumentation, E: SliceEngine<T>>(
         stack,
         process,
         system,
+        memory_space,
     }
 }
 
@@ -311,12 +324,13 @@ fn read_within_page<T: Instrumentation, E: SliceEngine<T>>(
     at: GuestAddress,
     buf: &mut [u8],
 ) -> Readable {
-    let physical = match at.space {
-        AddressSpace::Physical => at.value,
-        AddressSpace::Linear => match cpu.dbg_xlate_linear2phy(at.value) {
-            Some(physical) => physical,
-            None => return Readable::Unreadable,
-        },
+    let translated = match at.space {
+        AddressSpace::Physical => Some(at.value),
+        AddressSpace::Linear => cpu.dbg_xlate_linear2phy(at.value),
+        AddressSpace::Process { cr3 } => cpu.dbg_xlate_linear2phy_in(cr3, at.value),
+    };
+    let Some(physical) = translated else {
+        return Readable::Unreadable;
     };
     match cpu.dbg_fetch_mem(physical, buf) {
         Ok(Fetched::Valid) => Readable::Read,
