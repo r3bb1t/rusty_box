@@ -30,6 +30,7 @@
 use rusty_box::cpu::{CpuDebugView, Fetched, Instrumentation, LinearRange, WalkStep};
 use rusty_box::emulator::{DebugCpu, SliceEngine};
 
+use super::inspect::{ModuleSpace, SymModule, SymbolIndex};
 use super::memory_map::{self, MemoryMap, ModuleLayout};
 use super::pe::{self, HEADER_BYTES};
 use super::vad::{self, VadNode, VadRegion, VadShape, MAX_VAD_NODES};
@@ -270,6 +271,51 @@ pub(crate) fn read_system<T: Instrumentation, E: SliceEngine<T>>(
             });
             SystemListing::Processes(ProcessListing { processes, modules })
         }
+    }
+}
+
+/// The modules the code, stack and memory panes name an address against: the
+/// kernel's loaded modules, and the shown processor's process's own modules
+/// when it runs one. Read every pause, independent of which system panel is
+/// shown. A read that comes up short leaves the index short; it never fails
+/// the snapshot, so a non-Windows guest simply names nothing.
+pub(crate) fn read_symbols<T: Instrumentation, E: SliceEngine<T>>(
+    cpu: &mut DebugCpu<'_, T, E>,
+    view: &CpuDebugView,
+) -> SymbolIndex {
+    let Ok(kernel) = find_kernel(cpu, view) else {
+        return SymbolIndex::default();
+    };
+    let mut modules = Vec::new();
+    if let Some(head) = kernel.loaded_modules {
+        gather_modules(
+            &mut modules,
+            list_modules(cpu, Root::Live, head).unwrap_or_default(),
+            ModuleSpace::Kernel,
+        );
+    }
+    let processes = list_processes(cpu, &kernel, view.registers.cr3);
+    if let Some(current) = processes.iter().find(|process| process.current) {
+        if let ModuleRead::Listed(user) = process_modules(cpu, &processes, current) {
+            gather_modules(&mut modules, user, ModuleSpace::User);
+        }
+    }
+    SymbolIndex { modules }
+}
+
+/// Appends `source` modules to `into` as `space` symbols, naming an unnamed
+/// module by its base so an address in it still resolves.
+fn gather_modules(into: &mut Vec<SymModule>, source: Vec<WinModule>, space: ModuleSpace) {
+    for module in source {
+        let name = module
+            .name
+            .unwrap_or_else(|| format!("{:X}", module.base));
+        into.push(SymModule {
+            base: module.base,
+            size: u64::from(module.size),
+            name,
+            space,
+        });
     }
 }
 

@@ -593,6 +593,7 @@ mod tests {
             stack: Vec::new(),
             process: None,
             system: crate::debugger::windows::SystemListing::NotAsked,
+            symbols: crate::debugger::inspect::SymbolIndex::default(),
             memory_space: None,
         });
         control.finish_run();
@@ -637,7 +638,9 @@ mod tests {
     }
 
     fn empty_snapshot(rip: u64) -> crate::debugger::inspect::DebugSnapshot {
-        use crate::debugger::inspect::{AddressSpace, DebugSnapshot, GuestAddress, MemoryWindow};
+        use crate::debugger::inspect::{
+            AddressSpace, DebugSnapshot, GuestAddress, MemoryWindow, SymbolIndex,
+        };
         DebugSnapshot {
             cpus: Vec::new(),
             cpu: 0,
@@ -649,6 +652,7 @@ mod tests {
             stack: Vec::new(),
             process: None,
             system: crate::debugger::windows::SystemListing::NotAsked,
+            symbols: SymbolIndex::default(),
             memory_space: None,
         }
     }

@@ -14,8 +14,8 @@ use rusty_box::cpu::{CodeSize, CpuDebugView, ExecutionMode, ProcessorActivity};
 
 use crate::debugger::control::DebugNote;
 use crate::debugger::inspect::{
-    AddressSpace, CodeText, DebugSnapshot, GuestAddress, MemoryTarget, MEMORY_WINDOW_BYTES,
-    ROW_BYTES,
+    AddressSpace, CodeText, DebugSnapshot, GuestAddress, MemoryTarget, ModuleSpace,
+    MEMORY_WINDOW_BYTES, ROW_BYTES,
 };
 use crate::debugger::search::{
     pattern_of, FindOutcome, FindRequest, FoundAt, PatternError, SearchEncoding,
@@ -301,12 +301,31 @@ fn status_chips(ui: &mut egui::Ui, snapshot: &DebugSnapshot, paused: bool) {
             let name = path.rsplit(['\\', '/']).next().unwrap_or(path);
             chip(ui, &format!("Process {name}"), TEXT_PRIMARY).on_hover_text(path.as_str());
         }
+        if let Some(symbol) = snapshot
+            .code
+            .first()
+            .and_then(|line| snapshot.symbols.resolve(line.address))
+        {
+            chip(ui, &format!("at {}", symbol.label()), ACCENT_CYAN)
+                .on_hover_text("The module RIP points into.");
+        }
         chip(ui, &format!("CR3 {:X}", view.registers.cr3), TEXT_MUTED)
             .on_hover_text("The address space: each process has its own page tables.");
         if !paused {
             chip(ui, SHOWING_LAST_PAUSE, ACCENT_AMBER);
         }
     });
+}
+
+/// The base of the module the shown processor's RIP is in, when it lies in
+/// `space`: the module to mark as current in that space's list.
+fn current_module_base(snapshot: &DebugSnapshot, space: ModuleSpace) -> Option<u64> {
+    snapshot
+        .code
+        .first()
+        .and_then(|line| snapshot.symbols.resolve(line.address))
+        .filter(|symbol| symbol.space == space)
+        .map(|symbol| symbol.base)
 }
 
 /// A new window start (a new pause, a Page down, RIP or RSP) is written into
@@ -882,6 +901,14 @@ fn memory_bar(
                     value: start.value.wrapping_add(MEMORY_WINDOW_BYTES),
                 })));
             }
+            // The module the window sits in — only for the shown processor's
+            // own linear space, where the symbol index applies.
+            if start.space == AddressSpace::Linear {
+                if let Some(symbol) = snapshot.symbols.resolve(start.value) {
+                    chip(ui, &symbol.label(), TEXT_MUTED)
+                        .on_hover_text("The module this address is in.");
+                }
+            }
         });
         if let Some(error) = pane.address_error {
             ui.label(RichText::new(error.message()).color(ACCENT_RED));
@@ -1070,9 +1097,16 @@ fn stack_rows(ui: &mut egui::Ui, snapshot: &DebugSnapshot, marks: Marks<'_>) {
         };
         let address_color = if top { ACCENT_CYAN } else { TEXT_MUTED };
         let tone = if top { Tone::Current } else { Tone::Plain };
+        // A slot that points into a module is a code pointer — most often a
+        // return address, so the column reads as the call chain.
+        let symbol = slot
+            .value
+            .and_then(|value| snapshot.symbols.resolve(value))
+            .map_or_else(String::new, |symbol| symbol.label());
         let cells = [
             Cell::left(format!("{:0digits$X}", slot.address), address_color, digits),
             Cell::left(value, value_color, value_digits),
+            Cell::fill(symbol, TEXT_MUTED),
         ];
         let response = list_row(ui, MARKER_LEAD, &cells, tone, RowSense::Look);
         if top {
@@ -1107,7 +1141,8 @@ fn system_page(
             empty_state(ui, "No Windows kernel", &no_windows_kernel(*miss));
         }
         (SystemListing::Processes(listing), DebuggerTab::Processes) => {
-            processes_page(ui, wide, listing, pane, action);
+            let current_user_module = current_module_base(snapshot, ModuleSpace::User);
+            processes_page(ui, wide, listing, current_user_module, pane, action);
         }
         (SystemListing::KernelModules(modules), DebuggerTab::KernelModules) => {
             let filter = pane.list_filter.to_lowercase();
@@ -1124,7 +1159,10 @@ fn system_page(
                     filter_field(ui, &mut pane.list_filter);
                     header_row(ui, 0.0, &module_columns());
                 },
-                |ui| module_rows(ui, &shown, true, action),
+                |ui| {
+                    let current = current_module_base(snapshot, ModuleSpace::Kernel);
+                    module_rows(ui, &shown, true, current, action);
+                },
             );
         }
         // A list for another tab, or none yet: the run thread is reading.
@@ -1164,6 +1202,7 @@ fn processes_page(
     ui: &mut egui::Ui,
     wide: bool,
     listing: &ProcessListing,
+    current_user_module: Option<u64>,
     pane: &mut DebuggerPane,
     action: &mut Option<DebuggerAction>,
 ) {
@@ -1194,6 +1233,10 @@ fn processes_page(
     };
     let process_title = Title::counted("Processes", listing.processes.len());
     let navigable = chosen.is_some_and(|process| process.current);
+    // The current module is only the running process's; another process's
+    // list shares bases (ntdll loads at one address everywhere) but is not
+    // where the processor runs, so it gets no mark.
+    let highlight = if navigable { current_user_module } else { None };
     // The chosen process's address space, for browsing it when it is not the
     // running one.
     let process_cr3 = chosen.map(|process| process.cr3);
@@ -1220,7 +1263,7 @@ fn processes_page(
                 egui::vec2(page.x - gap - left, page.y),
                 right_title,
                 |ui| right_card_header(ui, pane.process_detail, map_of(listing), &mut switch_to, &mut minimap_click),
-                |ui| right_card_body(ui, detail, listing, navigable, process_cr3, &mut pane.expanded_modules, &mut pane.scroll_to, action),
+                |ui| right_card_body(ui, detail, listing, navigable, highlight, process_cr3, &mut pane.expanded_modules, &mut pane.scroll_to, action),
             );
         });
     } else {
@@ -1238,7 +1281,7 @@ fn processes_page(
                     ui,
                     right_title,
                     |ui| right_card_header(ui, pane.process_detail, map_of(listing), &mut switch_to, &mut minimap_click),
-                    |ui| right_card_body(ui, detail, listing, navigable, process_cr3, &mut pane.expanded_modules, &mut pane.scroll_to, action),
+                    |ui| right_card_body(ui, detail, listing, navigable, highlight, process_cr3, &mut pane.expanded_modules, &mut pane.scroll_to, action),
                 );
             });
     }
@@ -1335,13 +1378,14 @@ fn right_card_body(
     detail: ProcessDetail,
     listing: &ProcessListing,
     navigable: bool,
+    highlight: Option<u64>,
     process_cr3: Option<u64>,
     expanded: &mut BTreeSet<u64>,
     scroll_to: &mut Option<u64>,
     action: &mut Option<DebuggerAction>,
 ) {
     match detail {
-        ProcessDetail::Modules => listed_modules(ui, listing, navigable, action),
+        ProcessDetail::Modules => listed_modules(ui, listing, navigable, highlight, action),
         ProcessDetail::MemoryMap => match listing.modules.as_ref().and_then(|m| m.map.as_ref()) {
             Some(map) => memory_map_rows(ui, map, navigable, process_cr3, expanded, scroll_to, action),
             None => {
@@ -1669,6 +1713,7 @@ fn listed_modules(
     ui: &mut egui::Ui,
     listing: &ProcessListing,
     navigable: bool,
+    highlight: Option<u64>,
     action: &mut Option<DebuggerAction>,
 ) {
     let muted = |ui: &mut egui::Ui, text: &str| {
@@ -1677,7 +1722,7 @@ fn listed_modules(
     match listing.modules.as_ref().map(|modules| &modules.read) {
         Some(ModuleRead::Listed(modules)) => {
             let shown: Vec<&WinModule> = modules.iter().collect();
-            module_rows(ui, &shown, navigable, action);
+            module_rows(ui, &shown, navigable, highlight, action);
         }
         Some(ModuleRead::NoUserSpace) => {
             muted(ui, "A kernel process: it loads no user-mode modules.");
@@ -1794,6 +1839,7 @@ fn module_rows(
     ui: &mut egui::Ui,
     modules: &[&WinModule],
     navigable: bool,
+    highlight: Option<u64>,
     action: &mut Option<DebuggerAction>,
 ) {
     if modules.is_empty() {
@@ -1804,19 +1850,17 @@ fn module_rows(
     for (n, module) in modules.iter().enumerate() {
         let name = module.name.as_deref().unwrap_or("(paged out)");
         let path = module.path.as_deref().unwrap_or("(paged out)");
+        // The module the shown processor is executing in.
+        let current = highlight == Some(module.base);
+        let name_color = if current { ACCENT_CYAN } else { TEXT_PRIMARY };
         let cells = [
             Cell::left(format!("{:016X}", module.base), TEXT_MUTED, 16),
             Cell::right(format!("{:X}", module.size), TEXT_MUTED, MODULE_SIZE_CHARS),
-            Cell::left(name, TEXT_PRIMARY, MODULE_NAME_CHARS),
+            Cell::left(name, name_color, MODULE_NAME_CHARS),
             Cell::fill(path, TEXT_MUTED.gamma_multiply(0.8)),
         ];
-        let response = list_row(
-            ui,
-            0.0,
-            &cells,
-            Tone::striped(n),
-            RowSense::Pick { selected: false },
-        );
+        let tone = if current { Tone::Current } else { Tone::striped(n) };
+        let response = list_row(ui, 0.0, &cells, tone, RowSense::Pick { selected: current });
         if navigable {
             if response
                 .on_hover_text(format!("{path}\nClick to show it in memory."))

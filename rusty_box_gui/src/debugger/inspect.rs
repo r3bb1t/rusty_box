@@ -4,7 +4,7 @@
 use rusty_box::cpu::{CodeSize, CpuDebugView, Fetched, Instrumentation};
 use rusty_box::emulator::{DebugCpu, Emulator, SliceEngine};
 
-use super::windows::{read_system, SystemListing, SystemView};
+use super::windows::{read_symbols, read_system, SystemListing, SystemView};
 
 pub(crate) const ROW_BYTES: usize = 16;
 pub(crate) const MEMORY_ROWS: usize = 32;
@@ -60,6 +60,67 @@ impl Default for ViewRequest {
     }
 }
 
+/// Where a module lives: a process's own user space, or the shared kernel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ModuleSpace {
+    User,
+    Kernel,
+}
+
+/// One loaded module, for naming an address against it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SymModule {
+    pub(crate) base: u64,
+    pub(crate) size: u64,
+    pub(crate) name: String,
+    pub(crate) space: ModuleSpace,
+}
+
+/// The modules an address can be named against: the shown processor's process
+/// (user space) and the kernel. Read every pause, so the code, stack and
+/// memory panes can show any address as `module+offset`.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct SymbolIndex {
+    pub(crate) modules: Vec<SymModule>,
+}
+
+/// An address named against the module that contains it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Symbol {
+    pub(crate) module: String,
+    /// The module's load base, so the list showing it can highlight the row.
+    pub(crate) base: u64,
+    pub(crate) offset: u64,
+    pub(crate) space: ModuleSpace,
+}
+
+impl Symbol {
+    /// `ntdll.dll+0x1a2c`, or the bare module name at its base.
+    pub(crate) fn label(&self) -> String {
+        if self.offset == 0 {
+            self.module.clone()
+        } else {
+            format!("{}+{:#x}", self.module, self.offset)
+        }
+    }
+}
+
+impl SymbolIndex {
+    /// The module that contains `address`, if any. The subtraction before the
+    /// width test keeps a kernel module near the top of memory from wrapping.
+    pub(crate) fn resolve(&self, address: u64) -> Option<Symbol> {
+        self.modules
+            .iter()
+            .find(|module| address >= module.base && address - module.base < module.size)
+            .map(|module| Symbol {
+                module: module.name.clone(),
+                base: module.base,
+                offset: address - module.base,
+                space: module.space,
+            })
+    }
+}
+
 /// Everything the page shows of one pause.
 #[derive(Debug)]
 pub(crate) struct DebugSnapshot {
@@ -74,6 +135,9 @@ pub(crate) struct DebugSnapshot {
     pub(crate) process: Option<String>,
     /// What `ViewRequest::system` asked to be listed.
     pub(crate) system: SystemListing,
+    /// The modules the code, stack and memory panes name addresses against:
+    /// the shown processor's process and the kernel.
+    pub(crate) symbols: SymbolIndex,
     /// Whose address space the memory window shows, when it is not the shown
     /// processor's own (a process browsed through its CR3).
     pub(crate) memory_space: Option<u64>,
@@ -167,6 +231,7 @@ pub(crate) fn read_snapshot<T: Instrumentation, E: SliceEngine<T>>(
             stack: Vec::new(),
             process: None,
             system: SystemListing::NotAsked,
+            symbols: SymbolIndex::default(),
             memory_space: None,
         };
     };
@@ -189,6 +254,7 @@ pub(crate) fn read_snapshot<T: Instrumentation, E: SliceEngine<T>>(
     let memory = read_memory(&mut cpu, start);
     let stack = read_stack(&mut cpu, rsp, slot_bytes(size));
     let process = windows_image_path(&mut cpu, &shown);
+    let symbols = read_symbols(&mut cpu, &shown);
     let system = read_system(&mut cpu, &shown, view.system);
     let memory_space = match start.space {
         AddressSpace::Process { cr3 } => Some(cr3),
@@ -202,6 +268,7 @@ pub(crate) fn read_snapshot<T: Instrumentation, E: SliceEngine<T>>(
         stack,
         process,
         system,
+        symbols,
         memory_space,
     }
 }
@@ -603,5 +670,41 @@ mod tests {
             },
         );
         assert_eq!(snapshot.cpu, 0);
+    }
+
+    #[test]
+    fn an_address_is_named_against_the_module_that_contains_it() {
+        let index = SymbolIndex {
+            modules: vec![
+                SymModule {
+                    base: 0x7FEF_0000_0000,
+                    size: 0x13_0000,
+                    name: "ntdll.dll".to_owned(),
+                    space: ModuleSpace::User,
+                },
+                SymModule {
+                    base: 0xFFFF_F800_0100_0000,
+                    size: 0x40_0000,
+                    name: "ntoskrnl.exe".to_owned(),
+                    space: ModuleSpace::Kernel,
+                },
+            ],
+        };
+        assert_eq!(
+            index.resolve(0x7FEF_0000_1A2C).map(|symbol| symbol.label()),
+            Some("ntdll.dll+0x1a2c".to_owned())
+        );
+        // At a module's base, the bare name, no `+0`.
+        assert_eq!(
+            index.resolve(0x7FEF_0000_0000).map(|symbol| symbol.label()),
+            Some("ntdll.dll".to_owned())
+        );
+        assert_eq!(
+            index.resolve(0xFFFF_F800_0100_0100).map(|symbol| symbol.space),
+            Some(ModuleSpace::Kernel)
+        );
+        // Outside every module, and just past one's end, name nothing.
+        assert_eq!(index.resolve(0x1000), None);
+        assert_eq!(index.resolve(0x7FEF_0013_0000), None);
     }
 }
