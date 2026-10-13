@@ -13,16 +13,22 @@ use rusty_box::cpu::{CodeSize, CpuDebugView, ExecutionMode, ProcessorActivity};
 use crate::debugger::control::DebugNote;
 use crate::debugger::inspect::{
     AddressSpace, CodeText, DebugSnapshot, GuestAddress, MemoryTarget, MEMORY_WINDOW_BYTES,
+    ROW_BYTES,
 };
 use crate::debugger::search::{
     pattern_of, FindOutcome, FindRequest, FoundAt, PatternError, SearchEncoding,
 };
 use crate::debugger::windows::{
-    KernelMiss, ModuleRead, ProcessListing, SystemListing, SystemView, WinModule, WinProcess,
+    process_tree, KernelMiss, ModuleRead, ProcessListing, SystemListing, SystemView, WinModule,
+    WinProcess,
+};
+use crate::shell::listing::{
+    card_title, chip, empty_state, header_row, lead_arrow, lead_dot, list_row,
+    mono_font, segmented, tree_guides, Cell, RowSense, Tone, TREE_INDENT,
 };
 use crate::shell::theme::{
-    shell_card_frame, ACCENT_AMBER, ACCENT_CYAN, ACCENT_RED, SPACE_ITEM, SPACE_PAGE, TEXT_MUTED,
-    TEXT_PRIMARY, TEXT_SECONDARY,
+    shell_card_frame, ACCENT_AMBER, ACCENT_BLUE, ACCENT_CYAN, ACCENT_RED, SPACE_ITEM, SPACE_PAGE,
+    TEXT_MUTED, TEXT_PRIMARY, TEXT_SECONDARY,
 };
 
 pub(crate) const NOT_RUNNING: &str =
@@ -96,6 +102,9 @@ pub(crate) struct DebuggerPane {
     /// The process whose modules the Processes view lists (its `EPROCESS`
     /// address); `None` lists the running process's.
     pub(crate) selected_process: Option<u64>,
+    pub(crate) process_layout: ProcessLayout,
+    /// What a listed process's or module's name must contain.
+    pub(crate) list_filter: String,
 }
 
 impl Default for DebuggerPane {
@@ -111,6 +120,8 @@ impl Default for DebuggerPane {
             search_error: None,
             tab: DebuggerTab::Cpu,
             selected_process: None,
+            process_layout: ProcessLayout::Tree,
+            list_filter: String::new(),
         }
     }
 }
@@ -219,7 +230,7 @@ pub(crate) fn draw_debugger_page(
         .inner_margin(egui::Margin::same(SPACE_PAGE))
         .show(ui, |ui| {
             if !live {
-                ui.label(RichText::new(NOT_RUNNING).color(TEXT_MUTED));
+                empty_state(ui, "Not running", NOT_RUNNING);
                 return;
             }
             let bar = Toolbar {
@@ -232,13 +243,10 @@ pub(crate) fn draw_debugger_page(
                 ui.label(RichText::new(STEP_NEEDS_INTERPRETER).color(ACCENT_AMBER));
             }
             let Some(snapshot) = snapshot else {
-                ui.label(RichText::new(PAUSE_TO_INSPECT).color(TEXT_MUTED));
+                empty_state(ui, "Running", PAUSE_TO_INSPECT);
                 return;
             };
-            if !paused {
-                ui.label(RichText::new(SHOWING_LAST_PAUSE).color(ACCENT_AMBER));
-            }
-            privilege_line(ui, snapshot);
+            status_chips(ui, snapshot, paused);
             follow_window(pane, snapshot);
             ui.add_space(SPACE_ITEM);
             let wide = ui.available_width() >= TWO_COLUMN_WIDTH;
@@ -253,41 +261,33 @@ pub(crate) fn draw_debugger_page(
     action
 }
 
-/// Which privilege the shown processor runs at, as a badge — user mode
-/// (CPL 3) or kernel mode (CPL 0) — and, for a Windows guest, the process
-/// it runs for.
-fn privilege_line(ui: &mut egui::Ui, snapshot: &DebugSnapshot) {
+/// The shown processor's state as a row of chips: its privilege — user mode
+/// (CPL 3) or kernel mode (CPL 0) — its mode and activity, the Windows
+/// process it runs for when the guest's structures name one, its address
+/// space, and whether the page shows a pause that has since run on.
+fn status_chips(ui: &mut egui::Ui, snapshot: &DebugSnapshot, paused: bool) {
     let Some(view) = shown_view(snapshot) else {
         return;
     };
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
         let (text, color) = match view.registers.cpl {
             0 => ("Kernel mode", ACCENT_AMBER),
             3 => ("User mode", ACCENT_CYAN),
             _ => ("Privileged", ACCENT_AMBER),
         };
-        egui::Frame::new()
-            .stroke(egui::Stroke::new(1.0_f32, color))
-            .corner_radius(4)
-            .inner_margin(egui::Margin::symmetric(6, 1))
-            .show(ui, |ui| {
-                ui.label(RichText::new(format!("{text} · CPL {}", view.registers.cpl)).color(color));
-            });
-        match &snapshot.process {
-            Some(path) => {
-                let name = path.rsplit(['\\', '/']).next().unwrap_or(path);
-                ui.label(RichText::new(format!("Process: {name}")).color(TEXT_PRIMARY))
-                    .on_hover_text(path);
-            }
-            None => {
-                ui.label(
-                    RichText::new("Process: unknown (not a Windows user thread)")
-                        .color(TEXT_MUTED),
-                );
-            }
+        chip(ui, &format!("{text} · CPL {}", view.registers.cpl), color);
+        chip(ui, mode_label(view), ACCENT_BLUE);
+        chip(ui, activity_label(view.activity), TEXT_MUTED);
+        if let Some(path) = &snapshot.process {
+            let name = path.rsplit(['\\', '/']).next().unwrap_or(path);
+            chip(ui, &format!("Process {name}"), TEXT_PRIMARY).on_hover_text(path.as_str());
         }
-        ui.label(RichText::new(format!("CR3 {:X}", view.registers.cr3)).color(TEXT_MUTED))
+        chip(ui, &format!("CR3 {:X}", view.registers.cr3), TEXT_MUTED)
             .on_hover_text("The address space: each process has its own page tables.");
+        if !paused {
+            chip(ui, SHOWING_LAST_PAUSE, ACCENT_AMBER);
+        }
     });
 }
 
@@ -335,16 +335,13 @@ fn toolbar(
         {
             *action = Some(DebuggerAction::DumpRam);
         }
-        ui.separator();
-        for tab in DebuggerTab::ALL {
-            if ui.selectable_label(pane.tab == tab, tab.label()).clicked() && pane.tab != tab {
-                pane.tab = tab;
-                *action = Some(DebuggerAction::ShowSystem(
-                    tab.system_view(pane.selected_process),
-                ));
-            }
+        ui.add_space(SPACE_ITEM);
+        let tabs = DebuggerTab::ALL.map(|tab| (tab, tab.label()));
+        if segmented(ui, &mut pane.tab, &tabs) {
+            *action = Some(DebuggerAction::ShowSystem(
+                pane.tab.system_view(pane.selected_process),
+            ));
         }
-        ui.separator();
         let Some(snapshot) = snapshot else {
             return;
         };
@@ -362,9 +359,6 @@ fn toolbar(
                 *action = Some(DebuggerAction::SelectCpu(chosen));
             }
         }
-        if let Some(view) = shown_view(snapshot) {
-            ui.label(RichText::new(mode_label(view)).color(TEXT_MUTED));
-        }
     });
 }
 
@@ -376,9 +370,9 @@ fn cpu_label(index: usize) -> String {
     }
 }
 
-/// e.g. "64-bit mode · CPL 0 · running".
-fn mode_label(view: &CpuDebugView) -> String {
-    let mode = match view.mode {
+/// e.g. "64-bit mode".
+fn mode_label(view: &CpuDebugView) -> &'static str {
+    match view.mode {
         ExecutionMode::Real => "Real mode",
         ExecutionMode::Virtual8086 => "Virtual-8086 mode",
         ExecutionMode::Protected => match view.code_size {
@@ -387,29 +381,21 @@ fn mode_label(view: &CpuDebugView) -> String {
         },
         ExecutionMode::LongCompat => "Compatibility mode",
         ExecutionMode::Long64 => "64-bit mode",
-    };
-    let activity = match view.activity {
-        ProcessorActivity::Active => "running",
-        ProcessorActivity::Halted => "halted",
-        ProcessorActivity::Shutdown => "shut down",
-        ProcessorActivity::WaitForSipi => "waiting for startup",
-        ProcessorActivity::Mwait => "waiting (MWAIT)",
-    };
-    format!("{mode} · {activity}")
+    }
 }
 
-fn pane_title(ui: &mut egui::Ui, title: &str) {
-    ui.label(RichText::new(title).strong().color(TEXT_PRIMARY));
+fn activity_label(activity: ProcessorActivity) -> &'static str {
+    match activity {
+        ProcessorActivity::Active => "Running",
+        ProcessorActivity::Halted => "Halted",
+        ProcessorActivity::Shutdown => "Shut down",
+        ProcessorActivity::WaitForSipi => "Waiting for startup",
+        ProcessorActivity::Mwait => "Waiting (MWAIT)",
+    }
 }
 
 fn mono(text: impl Into<String>) -> RichText {
     RichText::new(text).monospace().size(TEXT_SECONDARY)
-}
-
-/// One listing row: cut at the pane's edge rather than wrapped, so columns
-/// of hex stay aligned.
-fn row(ui: &mut egui::Ui, text: RichText) {
-    ui.add(egui::Label::new(text).wrap_mode(egui::TextWrapMode::Truncate));
 }
 
 /// The bytes column of the code listing: at most this many bytes, the rest
@@ -447,11 +433,17 @@ fn grid_layout(
     let bottom = page.y - gap - top;
     ui.spacing_mut().item_spacing = egui::vec2(gap, gap);
     ui.horizontal_top(|ui| {
-        fixed_card(ui, egui::vec2(left, top), "Code", |_| {}, |ui| code_rows(ui, snapshot));
+        fixed_card(
+            ui,
+            egui::vec2(left, top),
+            Title::plain("Code"),
+            |_| {},
+            |ui| code_rows(ui, snapshot),
+        );
         fixed_card(
             ui,
             egui::vec2(right, top),
-            "Registers",
+            Title::plain("Registers"),
             |_| {},
             |ui| register_rows(ui, snapshot, marks),
         );
@@ -460,14 +452,14 @@ fn grid_layout(
         fixed_card(
             ui,
             egui::vec2(left, bottom),
-            "Memory",
+            Title::plain("Memory"),
             |ui| memory_bar(ui, snapshot, marks, pane, action),
             |ui| memory_rows(ui, snapshot, marks),
         );
         fixed_card(
             ui,
             egui::vec2(right, bottom),
-            "Stack",
+            Title::plain("Stack"),
             |_| {},
             |ui| stack_rows(ui, snapshot, marks),
         );
@@ -486,20 +478,50 @@ fn stacked_layout(
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            card(ui, "Registers", |ui| register_rows(ui, snapshot, marks));
-            card(ui, "Code", |ui| code_rows(ui, snapshot));
-            card(ui, "Stack", |ui| stack_rows(ui, snapshot, marks));
-            card(ui, "Memory", |ui| {
-                memory_bar(ui, snapshot, marks, pane, action);
-                memory_rows(ui, snapshot, marks);
+            let gap = SPACE_ITEM;
+            card(ui, Title::plain("Registers"), |_| {}, |ui| {
+                register_rows(ui, snapshot, marks);
             });
+            ui.add_space(gap);
+            card(ui, Title::plain("Code"), |_| {}, |ui| code_rows(ui, snapshot));
+            ui.add_space(gap);
+            card(ui, Title::plain("Stack"), |_| {}, |ui| {
+                stack_rows(ui, snapshot, marks);
+            });
+            ui.add_space(gap);
+            card(
+                ui,
+                Title::plain("Memory"),
+                |ui| memory_bar(ui, snapshot, marks, pane, action),
+                |ui| memory_rows(ui, snapshot, marks),
+            );
         });
 }
 
+/// A pane's title: its name, and how many entries it lists when it lists.
+#[derive(Clone, Copy)]
+struct Title<'a> {
+    text: &'a str,
+    count: Option<usize>,
+}
+
+impl<'a> Title<'a> {
+    const fn plain(text: &'a str) -> Self {
+        Self { text, count: None }
+    }
+
+    const fn counted(text: &'a str, count: usize) -> Self {
+        Self {
+            text,
+            count: Some(count),
+        }
+    }
+}
+
 /// A pane of exactly `size`: its title, a fixed `header` (the memory pane's
-/// address bar), and a `body` that scrolls inside the pane when it is
-/// taller or wider than the room left.
-fn fixed_card<H, B>(ui: &mut egui::Ui, size: egui::Vec2, title: &str, header: H, body: B)
+/// address bar, a table's column titles), and a `body` that scrolls inside
+/// the pane when it is taller or wider than the room left.
+fn fixed_card<H, B>(ui: &mut egui::Ui, size: egui::Vec2, title: Title<'_>, header: H, body: B)
 where
     H: FnOnce(&mut egui::Ui),
     B: FnOnce(&mut egui::Ui),
@@ -512,10 +534,13 @@ where
         frame.show(ui, |ui| {
             ui.set_min_size(inner);
             ui.set_max_size(inner);
-            pane_title(ui, title);
+            ui.spacing_mut().item_spacing.y = 4.0;
+            card_title(ui, title.text, title.count);
             header(ui);
+            // Listing rows sit flush, one under the next.
+            ui.spacing_mut().item_spacing.y = 0.0;
             egui::ScrollArea::both()
-                .id_salt(title)
+                .id_salt(title.text)
                 .auto_shrink([false, false])
                 .show(ui, body);
         });
@@ -523,14 +548,29 @@ where
 }
 
 /// A pane as tall as its content, the page's full width.
-fn card<B: FnOnce(&mut egui::Ui)>(ui: &mut egui::Ui, title: &str, body: B) {
+fn card<H, B>(ui: &mut egui::Ui, title: Title<'_>, header: H, body: B)
+where
+    H: FnOnce(&mut egui::Ui),
+    B: FnOnce(&mut egui::Ui),
+{
     shell_card_frame().show(ui, |ui| {
         ui.set_min_width(ui.available_width());
-        pane_title(ui, title);
+        ui.spacing_mut().item_spacing.y = 4.0;
+        card_title(ui, title.text, title.count);
+        header(ui);
+        ui.spacing_mut().item_spacing.y = 0.0;
         body(ui);
     });
 }
 
+/// The room the code listing gives an instruction's bytes, in characters:
+/// `CODE_BYTES_SHOWN` bytes and an ellipsis.
+const CODE_BYTES_CHARS: usize = 3 * CODE_BYTES_SHOWN + 1;
+/// The lead before a listing's first column, where the RIP marker sits.
+const MARKER_LEAD: f32 = 12.0;
+
+/// The code at RIP, one instruction a row: address, bytes, opcode. The row at
+/// RIP is shaded and marked.
 fn code_rows(ui: &mut egui::Ui, snapshot: &DebugSnapshot) {
     let digits = shown_view(snapshot).map_or(16, |view| hex_digits(view.code_size));
     for (index, line) in snapshot.code.iter().enumerate() {
@@ -543,19 +583,27 @@ fn code_rows(ui: &mut egui::Ui, snapshot: &DebugSnapshot) {
         if line.bytes.len() > CODE_BYTES_SHOWN {
             bytes.push("…".to_owned());
         }
-        let text = match &line.text {
-            CodeText::Opcode(name) => name.as_str(),
-            CodeText::Undecodable => "(undecodable)",
-            CodeText::Unreadable => "(unreadable)",
+        let (text, text_color) = match &line.text {
+            CodeText::Opcode(name) => (name.as_str(), TEXT_PRIMARY),
+            CodeText::Undecodable => ("(undecodable)", TEXT_MUTED),
+            CodeText::Unreadable => ("(unreadable)", TEXT_MUTED),
         };
-        let listing = format!(
-            "{:0digits$X}  {:<24}  {text}",
-            line.address,
-            bytes.join(" ")
-        );
         // The first line is the instruction at RIP.
-        let color = if index == 0 { ACCENT_CYAN } else { TEXT_PRIMARY };
-        row(ui, mono(listing).color(color));
+        let at_rip = index == 0;
+        let (address_color, tone) = if at_rip {
+            (ACCENT_CYAN, Tone::Current)
+        } else {
+            (TEXT_MUTED, Tone::Plain)
+        };
+        let cells = [
+            Cell::left(format!("{:0digits$X}", line.address), address_color, digits),
+            Cell::left(bytes.join(" "), TEXT_MUTED, CODE_BYTES_CHARS),
+            Cell::fill(text, if at_rip { ACCENT_CYAN } else { text_color }),
+        ];
+        let response = list_row(ui, MARKER_LEAD, &cells, tone, RowSense::Look);
+        if at_rip {
+            lead_arrow(ui, response.rect, ACCENT_CYAN);
+        }
     }
 }
 
@@ -570,9 +618,12 @@ fn register_rows(ui: &mut egui::Ui, snapshot: &DebugSnapshot, marks: Marks<'_>) 
     let r = &view.registers;
     let old = before.map(|before| &before.registers);
     let wide = view.code_size == CodeSize::Bits64;
+    ui.spacing_mut().item_spacing.y = 2.0;
     {
+        section_caption(ui, "General");
         egui::Grid::new("debugger_registers")
             .num_columns(2)
+            .spacing(REGISTER_GRID_SPACING)
             .show(ui, |ui| {
                 let gprs = [
                     ("RAX", "EAX", r.rax, old.map(|o| o.rax)),
@@ -610,14 +661,11 @@ fn register_rows(ui: &mut egui::Ui, snapshot: &DebugSnapshot, marks: Marks<'_>) 
                 register_row(ui, "EFLAGS", format!("{:08X}", r.eflags), flags_changed);
             });
         // On a line of its own, so the flags do not widen the value column.
-        let flags_color = if old.is_some_and(|o| o.eflags != r.eflags) {
-            CHANGED
-        } else {
-            TEXT_MUTED
-        };
-        row(ui, mono(flags_text(r.eflags)).color(flags_color));
+        ui.label(flags_job(r.eflags, old.map(|o| o.eflags)));
+        section_caption(ui, "System");
         egui::Grid::new("debugger_system_registers")
             .num_columns(2)
+            .spacing(REGISTER_GRID_SPACING)
             .show(ui, |ui| {
                 let bases = &view.segment_bases;
                 let old_bases = before.map(|before| &before.segment_bases);
@@ -651,8 +699,9 @@ fn register_rows(ui: &mut egui::Ui, snapshot: &DebugSnapshot, marks: Marks<'_>) 
                     register_row(ui, name, format!("{value:016X}"), changed);
                 }
             });
+        ui.add_space(SPACE_ITEM / 2.0);
         ui.collapsing("x87", |ui| {
-            egui::Grid::new("debugger_x87").num_columns(2).show(ui, |ui| {
+            egui::Grid::new("debugger_x87").num_columns(2).spacing(REGISTER_GRID_SPACING).show(ui, |ui| {
                 for (index, register) in r.fpu_regs.iter().enumerate() {
                     let changed = old.is_some_and(|o| o.fpu_regs[index] != *register);
                     register_row(ui, &format!("ST{index}"), le_hex(register), changed);
@@ -664,7 +713,7 @@ fn register_rows(ui: &mut egui::Ui, snapshot: &DebugSnapshot, marks: Marks<'_>) 
             });
         });
         ui.collapsing("SSE", |ui| {
-            egui::Grid::new("debugger_sse").num_columns(2).show(ui, |ui| {
+            egui::Grid::new("debugger_sse").num_columns(2).spacing(REGISTER_GRID_SPACING).show(ui, |ui| {
                 let shown = if wide { 16 } else { 8 };
                 for (index, register) in r.xmm.iter().enumerate().take(shown) {
                     let changed = old.is_some_and(|o| o.xmm[index] != *register);
@@ -687,9 +736,23 @@ fn register_row(ui: &mut egui::Ui, name: &str, value: String, changed: bool) -> 
     response
 }
 
-/// The nine status and control flags, as x64dbg lists them.
-fn flags_text(eflags: u32) -> String {
-    [
+/// The gap between a register's name and its value, and between rows.
+const REGISTER_GRID_SPACING: egui::Vec2 = egui::vec2(16.0, 2.0);
+
+/// A small heading over a group of registers.
+fn section_caption(ui: &mut egui::Ui, text: &str) {
+    ui.add_space(SPACE_ITEM / 2.0);
+    ui.label(
+        RichText::new(text)
+            .size(crate::shell::theme::TEXT_CAPTION)
+            .color(TEXT_MUTED),
+    );
+}
+
+/// The nine status and control flags, as x64dbg lists them: a set flag
+/// bright, a clear one dim, one the last step flipped red.
+fn flags_job(eflags: u32, before: Option<u32>) -> LayoutJob {
+    const FLAGS: [(&str, u32); 9] = [
         ("CF", 0),
         ("PF", 2),
         ("AF", 4),
@@ -699,11 +762,27 @@ fn flags_text(eflags: u32) -> String {
         ("IF", 9),
         ("DF", 10),
         ("OF", 11),
-    ]
-    .iter()
-    .map(|(name, bit)| format!("{name} {}", (eflags >> bit) & 1))
-    .collect::<Vec<_>>()
-    .join("  ")
+    ];
+    let font = mono_font();
+    let mut job = LayoutJob::default();
+    for (index, (name, bit)) in FLAGS.iter().enumerate() {
+        let set = (eflags >> bit) & 1 == 1;
+        let flipped = before.is_some_and(|before| (before >> bit) & 1 != (eflags >> bit) & 1);
+        let color = if flipped {
+            CHANGED
+        } else if set {
+            ACCENT_CYAN
+        } else {
+            TEXT_MUTED.gamma_multiply(0.6)
+        };
+        let separator = if index == 0 { "" } else { " " };
+        job.append(
+            &format!("{separator}{name}"),
+            0.0,
+            TextFormat::simple(font.clone(), color),
+        );
+    }
+    job
 }
 
 /// A little-endian register, most significant byte first.
@@ -722,16 +801,24 @@ fn memory_bar(
 ) {
     {
         ui.horizontal_wrapped(|ui| {
-            ui.selectable_value(&mut pane.space, AddressSpace::Linear, "Linear");
-            ui.selectable_value(&mut pane.space, AddressSpace::Physical, "Physical");
-            let label = ui.label(RichText::new(MEMORY_ADDRESS).color(TEXT_MUTED));
-            let field = ui
-                .add(
-                    egui::TextEdit::singleline(&mut pane.address_text)
-                        .font(egui::TextStyle::Monospace)
-                        .desired_width(160.0),
-                )
-                .labelled_by(label.id);
+            segmented(
+                ui,
+                &mut pane.space,
+                &[
+                    (AddressSpace::Linear, "Linear"),
+                    (AddressSpace::Physical, "Physical"),
+                ],
+            );
+            let field = ui.add(
+                egui::TextEdit::singleline(&mut pane.address_text)
+                    .font(egui::TextStyle::Monospace)
+                    .hint_text("Address")
+                    .desired_width(150.0),
+            );
+            let enabled = ui.is_enabled();
+            field.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::WidgetType::TextEdit, enabled, MEMORY_ADDRESS)
+            });
             let entered =
                 field.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
             if ui.button("Go").clicked() || entered {
@@ -786,9 +873,15 @@ fn search_bar(
     action: &mut Option<DebuggerAction>,
 ) {
     ui.horizontal_wrapped(|ui| {
-        ui.selectable_value(&mut pane.search_encoding, SearchEncoding::Hex, "Hex");
-        ui.selectable_value(&mut pane.search_encoding, SearchEncoding::Text, "Text");
-        ui.selectable_value(&mut pane.search_encoding, SearchEncoding::Utf16, "UTF-16");
+        segmented(
+            ui,
+            &mut pane.search_encoding,
+            &[
+                (SearchEncoding::Hex, "Hex"),
+                (SearchEncoding::Text, "Text"),
+                (SearchEncoding::Utf16, "UTF-16"),
+            ],
+        );
         let label = ui.label(RichText::new(FIND).color(TEXT_MUTED));
         let field = ui
             .add(
@@ -865,27 +958,38 @@ fn memory_rows(ui: &mut egui::Ui, snapshot: &DebugSnapshot, marks: Marks<'_>) {
         Some(FindOutcome::Found(_) | FindOutcome::NotFound { .. } | FindOutcome::Abandoned)
         | None => None,
     };
-    let font = egui::FontId::monospace(TEXT_SECONDARY);
+    let font = mono_font();
+    // Sixteen bytes, each two digits and a space but the last.
+    const HEX_CHARS: usize = 3 * ROW_BYTES - 1;
     for (index, line) in snapshot.memory.rows.iter().enumerate() {
+        let address = Cell::left(format!("{:016X}", line.address), TEXT_MUTED, 16);
+        let tone = Tone::striped(index);
         let Some(bytes) = line.bytes else {
-            let text = format!("{:016X}  {}", line.address, ["??"; 16].join(" "));
-            row(ui, mono(text).color(TEXT_MUTED));
+            let unreadable = ["??"; ROW_BYTES].join(" ");
+            let cells = [address, Cell::left(unreadable, TEXT_MUTED.gamma_multiply(0.6), HEX_CHARS)];
+            list_row(ui, 0.0, &cells, tone, RowSense::Look);
             continue;
         };
         let old = before.and_then(|rows| rows.get(index)).and_then(|old| old.bytes);
-        let mut job = LayoutJob::default();
-        let plain = TextFormat::simple(font.clone(), TEXT_PRIMARY);
-        job.append(&format!("{:016X}  ", line.address), 0.0, plain.clone());
+        let mut hex = LayoutJob::default();
         for (column, byte) in bytes.iter().enumerate() {
-            let address = line.address.wrapping_add(column as u64);
+            let at = line.address.wrapping_add(column as u64);
             let color = if old.is_some_and(|old| old[column] != *byte) {
                 CHANGED
-            } else if hit.is_some_and(|hit| in_hit(hit, address)) {
+            } else if hit.is_some_and(|hit| in_hit(hit, at)) {
                 ACCENT_AMBER
+            } else if *byte == 0 {
+                // Zero bytes recede, so the data in a page stands out.
+                TEXT_MUTED.gamma_multiply(0.7)
             } else {
                 TEXT_PRIMARY
             };
-            job.append(&format!("{byte:02X} "), 0.0, TextFormat::simple(font.clone(), color));
+            let separator = if column == 0 { "" } else { " " };
+            hex.append(
+                &format!("{separator}{byte:02X}"),
+                0.0,
+                TextFormat::simple(font.clone(), color),
+            );
         }
         let ascii: String = bytes
             .iter()
@@ -897,10 +1001,12 @@ fn memory_rows(ui: &mut egui::Ui, snapshot: &DebugSnapshot, marks: Marks<'_>) {
                 }
             })
             .collect();
-        job.append(&format!(" {ascii}"), 0.0, TextFormat::simple(font.clone(), TEXT_MUTED));
-        job.wrap.max_rows = 1;
-        job.wrap.break_anywhere = true;
-        ui.add(egui::Label::new(job).wrap_mode(egui::TextWrapMode::Truncate));
+        let cells = [
+            address,
+            Cell::job(hex, HEX_CHARS),
+            Cell::left(ascii, ACCENT_BLUE, ROW_BYTES),
+        ];
+        list_row(ui, 0.0, &cells, tone, RowSense::Look);
     }
 }
 
@@ -926,17 +1032,24 @@ fn stack_rows(ui: &mut egui::Ui, snapshot: &DebugSnapshot, marks: Marks<'_>) {
         let changed = before
             .and_then(|stack| stack.iter().find(|old| old.address == slot.address))
             .is_some_and(|old| old.value != slot.value);
-        let color = if changed {
+        let top = index == 0;
+        let value_color = if changed {
             CHANGED
-        } else if index == 0 {
+        } else if top {
             ACCENT_CYAN
         } else {
             TEXT_PRIMARY
         };
-        row(
-            ui,
-            mono(format!("{:0digits$X}  {value}", slot.address)).color(color),
-        );
+        let address_color = if top { ACCENT_CYAN } else { TEXT_MUTED };
+        let tone = if top { Tone::Current } else { Tone::Plain };
+        let cells = [
+            Cell::left(format!("{:0digits$X}", slot.address), address_color, digits),
+            Cell::left(value, value_color, value_digits),
+        ];
+        let response = list_row(ui, MARKER_LEAD, &cells, tone, RowSense::Look);
+        if top {
+            lead_arrow(ui, response.rect, ACCENT_CYAN);
+        }
     }
 }
 
@@ -963,25 +1076,60 @@ fn system_page(
 ) {
     match (&snapshot.system, pane.tab) {
         (SystemListing::NoWindowsKernel(miss), _) => {
-            ui.label(RichText::new(no_windows_kernel(*miss)).color(TEXT_MUTED));
+            empty_state(ui, "No Windows kernel", &no_windows_kernel(*miss));
         }
         (SystemListing::Processes(listing), DebuggerTab::Processes) => {
             processes_page(ui, wide, listing, pane, action);
         }
         (SystemListing::KernelModules(modules), DebuggerTab::KernelModules) => {
+            let filter = pane.list_filter.to_lowercase();
+            let shown: Vec<&WinModule> = modules
+                .iter()
+                .filter(|module| module_matches(module, &filter))
+                .collect();
             let page = ui.available_size();
-            fixed_card(ui, page, "Kernel modules", module_header, |ui| {
-                module_rows(ui, modules, true, action);
-            });
+            fixed_card(
+                ui,
+                page,
+                Title::counted("Kernel modules", modules.len()),
+                |ui| {
+                    filter_field(ui, &mut pane.list_filter);
+                    header_row(ui, 0.0, &module_columns());
+                },
+                |ui| module_rows(ui, &shown, true, action),
+            );
         }
         // A list for another tab, or none yet: the run thread is reading.
         (
             SystemListing::NotAsked | SystemListing::Processes(_) | SystemListing::KernelModules(_),
             _,
         ) => {
-            ui.label(RichText::new(READING_LIST).color(TEXT_MUTED));
+            empty_state(ui, "Reading", READING_LIST);
         }
     }
+}
+
+/// The accessible name of a list's filter field.
+pub(crate) const FILTER: &str = "Filter by name";
+
+/// The filter over a list: what a name (or path) must contain.
+fn filter_field(ui: &mut egui::Ui, filter: &mut String) {
+    let response = ui.add(
+        egui::TextEdit::singleline(filter)
+            .hint_text(FILTER)
+            .desired_width(220.0),
+    );
+    let enabled = ui.is_enabled();
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::TextEdit, enabled, FILTER));
+}
+
+/// A module passes a lowercase `filter` when its name or path holds it.
+fn module_matches(module: &WinModule, filter: &str) -> bool {
+    filter.is_empty()
+        || [module.name.as_deref(), module.path.as_deref()]
+            .into_iter()
+            .flatten()
+            .any(|text| text.to_lowercase().contains(filter))
 }
 
 fn processes_page(
@@ -999,21 +1147,35 @@ fn processes_page(
         Some(process) => format!("Modules of {} (PID {})", process.name, process.pid),
         None => "Modules".to_owned(),
     };
+    let module_count = match listing.modules.as_ref().map(|modules| &modules.read) {
+        Some(ModuleRead::Listed(modules)) => Some(modules.len()),
+        Some(ModuleRead::NoUserSpace | ModuleRead::Unreadable) | None => None,
+    };
+    let module_title = Title {
+        text: &title,
+        count: module_count,
+    };
+    let process_title = Title::counted("Processes", listing.processes.len());
     let navigable = chosen.is_some_and(|process| process.current);
+    let rows = process_rows_shown(&listing.processes, pane.process_layout, &pane.list_filter);
     if wide {
         let gap = SPACE_ITEM;
         let page = ui.available_size();
         let left = ((page.x - gap) * PROCESS_LIST_SHARE).floor();
         ui.spacing_mut().item_spacing = egui::vec2(gap, gap);
         ui.horizontal_top(|ui| {
-            fixed_card(ui, egui::vec2(left, page.y), "Processes", process_header, |ui| {
-                process_rows(ui, &listing.processes, chosen, pane, action);
-            });
+            fixed_card(
+                ui,
+                egui::vec2(left, page.y),
+                process_title,
+                |ui| process_header(ui, &mut pane.process_layout, &mut pane.list_filter),
+                |ui| process_rows(ui, &listing.processes, &rows, chosen, &mut pane.selected_process, action),
+            );
             fixed_card(
                 ui,
                 egui::vec2(page.x - gap - left, page.y),
-                &title,
-                module_header,
+                module_title,
+                |ui| header_row(ui, 0.0, &module_columns()),
                 |ui| listed_modules(ui, listing, navigable, action),
             );
         });
@@ -1021,15 +1183,97 @@ fn processes_page(
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                card(ui, "Processes", |ui| {
-                    process_header(ui);
-                    process_rows(ui, &listing.processes, chosen, pane, action);
-                });
-                card(ui, &title, |ui| {
-                    module_header(ui);
-                    listed_modules(ui, listing, navigable, action);
-                });
+                card(
+                    ui,
+                    process_title,
+                    |ui| process_header(ui, &mut pane.process_layout, &mut pane.list_filter),
+                    |ui| process_rows(ui, &listing.processes, &rows, chosen, &mut pane.selected_process, action),
+                );
+                ui.add_space(SPACE_ITEM);
+                card(
+                    ui,
+                    module_title,
+                    |ui| header_row(ui, 0.0, &module_columns()),
+                    |ui| listed_modules(ui, listing, navigable, action),
+                );
             });
+    }
+}
+
+/// How the Processes card orders its rows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ProcessLayout {
+    /// The kernel's order: creation order.
+    List,
+    /// Each process under the one that created it.
+    Tree,
+}
+
+/// One row the Processes card draws: which process, and where in the tree.
+struct ShownProcess {
+    index: usize,
+    depth: usize,
+    guides: Vec<bool>,
+    last: bool,
+}
+
+/// The rows the Processes card draws under `layout`, keeping those whose
+/// name holds `filter` — and, in the tree, their ancestors, so a match keeps
+/// the branch that leads to it.
+fn process_rows_shown(
+    processes: &[WinProcess],
+    layout: ProcessLayout,
+    filter: &str,
+) -> Vec<ShownProcess> {
+    let filter = filter.to_lowercase();
+    let matches = |process: &WinProcess| {
+        filter.is_empty() || process.name.to_lowercase().contains(&filter)
+    };
+    match layout {
+        ProcessLayout::List => processes
+            .iter()
+            .enumerate()
+            .filter(|(_, process)| matches(process))
+            .map(|(index, _)| ShownProcess {
+                index,
+                depth: 0,
+                guides: Vec::new(),
+                last: false,
+            })
+            .collect(),
+        ProcessLayout::Tree => {
+            let tree = process_tree(processes);
+            let mut keep = vec![filter.is_empty(); processes.len()];
+            if !filter.is_empty() {
+                for (index, process) in processes.iter().enumerate() {
+                    if !matches(process) {
+                        continue;
+                    }
+                    // The match and every listed ancestor of it.
+                    let mut at = Some(index);
+                    let mut steps = 0;
+                    while let Some(here) = at {
+                        if keep[here] || steps > processes.len() {
+                            break;
+                        }
+                        keep[here] = true;
+                        steps += 1;
+                        at = processes[here]
+                            .parent
+                            .and_then(|parent| processes.iter().position(|p| p.pid == parent));
+                    }
+                }
+            }
+            tree.into_iter()
+                .filter(|row| keep[row.index])
+                .map(|row| ShownProcess {
+                    index: row.index,
+                    depth: row.depth,
+                    guides: row.guides,
+                    last: row.last,
+                })
+                .collect()
+        }
     }
 }
 
@@ -1047,7 +1291,10 @@ fn listed_modules(
         ui.label(RichText::new(text).color(TEXT_MUTED));
     };
     match listing.modules.as_ref().map(|modules| &modules.read) {
-        Some(ModuleRead::Listed(modules)) => module_rows(ui, modules, navigable, action),
+        Some(ModuleRead::Listed(modules)) => {
+            let shown: Vec<&WinModule> = modules.iter().collect();
+            module_rows(ui, &shown, navigable, action);
+        }
         Some(ModuleRead::NoUserSpace) => {
             muted(ui, "A kernel process: it loads no user-mode modules.");
         }
@@ -1058,72 +1305,137 @@ fn listed_modules(
     }
 }
 
-fn process_header(ui: &mut egui::Ui) {
-    row(
-        ui,
-        mono(format!("  {:>6}  {:<15}  {:<16}  EPROCESS", "PID", "Name", "CR3")).color(TEXT_MUTED),
-    );
+/// The Processes card's controls and column titles.
+fn process_header(ui: &mut egui::Ui, layout: &mut ProcessLayout, filter: &mut String) {
+    ui.horizontal(|ui| {
+        segmented(
+            ui,
+            layout,
+            &[(ProcessLayout::List, "List"), (ProcessLayout::Tree, "Tree")],
+        );
+        filter_field(ui, filter);
+    });
+    header_row(ui, PROCESS_LEAD, &process_columns("Name", "PID", "CR3"));
 }
 
-/// One row per process; the running one is marked, the listed one selected.
+/// The room before a process's name: the running-process dot.
+const PROCESS_LEAD: f32 = 14.0;
+/// The widest PID column, in characters.
+const PID_CHARS: usize = 6;
+/// A CR3 column, in characters: the table address without leading zeros.
+const CR3_CHARS: usize = 10;
+
+fn process_columns(name: &str, pid: &str, cr3: &str) -> [Cell; 3] {
+    [
+        Cell::fill(name, TEXT_MUTED),
+        Cell::right(pid, TEXT_MUTED, PID_CHARS),
+        Cell::right(cr3, TEXT_MUTED, CR3_CHARS),
+    ]
+}
+
+/// One row per shown process: the running one marked with a dot, the listed
+/// one selected, the tree's guides in its lead.
 fn process_rows(
     ui: &mut egui::Ui,
     processes: &[WinProcess],
+    rows: &[ShownProcess],
     chosen: Option<&WinProcess>,
-    pane: &mut DebuggerPane,
+    selected_process: &mut Option<u64>,
     action: &mut Option<DebuggerAction>,
 ) {
-    for process in processes {
-        let marker = if process.current { "▶" } else { " " };
-        let text = format!(
-            "{marker} {:>6}  {:<15}  {:016X}  {:016X}",
-            process.pid, process.name, process.cr3, process.eprocess
-        );
-        let color = if process.current { ACCENT_CYAN } else { TEXT_PRIMARY };
+    if rows.is_empty() {
+        ui.add_space(SPACE_ITEM);
+        ui.label(RichText::new("No process matches the filter.").color(TEXT_MUTED));
+        return;
+    }
+    for (n, shown) in rows.iter().enumerate() {
+        let process = &processes[shown.index];
         let selected = chosen.is_some_and(|c| c.eprocess == process.eprocess);
-        let response = ui.add(
-            egui::Button::selectable(selected, mono(text).color(color))
-                .wrap_mode(egui::TextWrapMode::Truncate),
-        );
-        let response = if process.current {
-            response.on_hover_text("The shown processor runs in this process's address space.")
+        let name_color = if process.current { ACCENT_CYAN } else { TEXT_PRIMARY };
+        let lead = shown.depth as f32 * TREE_INDENT + PROCESS_LEAD;
+        let cells = [
+            Cell::fill(process.name.as_str(), name_color),
+            Cell::right(process.pid.to_string(), TEXT_MUTED, PID_CHARS),
+            Cell::right(format!("{:X}", process.cr3), TEXT_MUTED, CR3_CHARS),
+        ];
+        let tone = if selected {
+            Tone::Selected
         } else {
-            response
+            Tone::striped(n)
         };
+        let response = list_row(ui, lead, &cells, tone, RowSense::Pick { selected });
+        tree_guides(ui, response.rect, shown.depth, &shown.guides, shown.last);
+        if process.current {
+            lead_dot(ui, response.rect, lead, ACCENT_CYAN);
+        }
+        let parent = process
+            .parent
+            .map_or_else(|| "unknown".to_owned(), |parent| parent.to_string());
+        let running = if process.current {
+            "\nThe shown processor runs in this process's address space."
+        } else {
+            ""
+        };
+        let response = response.on_hover_text(format!(
+            "{} — PID {}, parent {parent}\nEPROCESS {:016X}\nCR3 {:016X}{running}",
+            process.name, process.pid, process.eprocess, process.cr3
+        ));
         if response.clicked() && !selected {
-            pane.selected_process = Some(process.eprocess);
+            *selected_process = Some(process.eprocess);
             *action = Some(DebuggerAction::ShowSystem(SystemView::Processes {
-                selected: pane.selected_process,
+                selected: *selected_process,
             }));
         }
     }
 }
 
-fn module_header(ui: &mut egui::Ui) {
-    row(
-        ui,
-        mono(format!("{:<16}  {:>8}  Name", "Base", "Size")).color(TEXT_MUTED),
-    );
+/// A module table's columns: base, size, name, and the path in the room left.
+fn module_columns() -> [Cell; 4] {
+    [
+        Cell::left("Base", TEXT_MUTED, 16),
+        Cell::right("Size", TEXT_MUTED, MODULE_SIZE_CHARS),
+        Cell::left("Name", TEXT_MUTED, MODULE_NAME_CHARS),
+        Cell::fill("Path", TEXT_MUTED),
+    ]
 }
+
+const MODULE_SIZE_CHARS: usize = 8;
+const MODULE_NAME_CHARS: usize = 18;
 
 /// One row per module. A module in the running address space opens the CPU
 /// tab's memory pane at its base; one elsewhere says why it cannot.
 fn module_rows(
     ui: &mut egui::Ui,
-    modules: &[WinModule],
+    modules: &[&WinModule],
     navigable: bool,
     action: &mut Option<DebuggerAction>,
 ) {
-    for module in modules {
-        let name = module.name.as_deref().unwrap_or("(name paged out)");
-        let text = format!("{:016X}  {:>8X}  {name}", module.base, module.size);
-        let path = module.path.as_deref().unwrap_or("(path paged out)");
-        let response = ui.add(
-            egui::Button::selectable(false, mono(text).color(TEXT_PRIMARY))
-                .wrap_mode(egui::TextWrapMode::Truncate),
+    if modules.is_empty() {
+        ui.add_space(SPACE_ITEM);
+        ui.label(RichText::new("No module matches the filter.").color(TEXT_MUTED));
+        return;
+    }
+    for (n, module) in modules.iter().enumerate() {
+        let name = module.name.as_deref().unwrap_or("(paged out)");
+        let path = module.path.as_deref().unwrap_or("(paged out)");
+        let cells = [
+            Cell::left(format!("{:016X}", module.base), TEXT_MUTED, 16),
+            Cell::right(format!("{:X}", module.size), TEXT_MUTED, MODULE_SIZE_CHARS),
+            Cell::left(name, TEXT_PRIMARY, MODULE_NAME_CHARS),
+            Cell::fill(path, TEXT_MUTED.gamma_multiply(0.8)),
+        ];
+        let response = list_row(
+            ui,
+            0.0,
+            &cells,
+            Tone::striped(n),
+            RowSense::Pick { selected: false },
         );
         if navigable {
-            if response.on_hover_text(format!("{path}\nClick to show it in memory.")).clicked() {
+            if response
+                .on_hover_text(format!("{path}\nClick to show it in memory."))
+                .clicked()
+            {
                 *action = Some(DebuggerAction::OpenModule(module.base));
             }
         } else {
@@ -1135,6 +1447,46 @@ fn module_rows(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn process(pid: u64, parent: Option<u64>, name: &str) -> WinProcess {
+        WinProcess {
+            eprocess: pid,
+            pid,
+            parent,
+            name: name.to_owned(),
+            cr3: 0,
+            current: false,
+        }
+    }
+
+    /// A filtered tree keeps each match and the branch above it; a filtered
+    /// list keeps the matches alone.
+    #[test]
+    fn a_filter_keeps_the_branch_that_leads_to_a_match() {
+        let processes = [
+            process(4, None, "System"),
+            process(228, Some(4), "smss.exe"),
+            process(276, Some(228), "csrss.exe"),
+            process(300, Some(228), "winlogon.exe"),
+            process(348, Some(300), "services.exe"),
+            process(1400, Some(348), "wmiprvse.exe"),
+        ];
+        let names = |rows: Vec<ShownProcess>| -> Vec<&str> {
+            rows.iter().map(|row| processes[row.index].name.as_str()).collect()
+        };
+        assert_eq!(
+            names(process_rows_shown(&processes, ProcessLayout::Tree, "WMI")),
+            ["System", "smss.exe", "winlogon.exe", "services.exe", "wmiprvse.exe"]
+        );
+        assert_eq!(
+            names(process_rows_shown(&processes, ProcessLayout::List, "wmi")),
+            ["wmiprvse.exe"]
+        );
+        assert_eq!(
+            process_rows_shown(&processes, ProcessLayout::Tree, "").len(),
+            processes.len()
+        );
+    }
 
     #[test]
     fn typed_addresses_are_read_as_x64dbg_writes_them() {

@@ -13,11 +13,15 @@
 //! `vm_bar` is the one bar above a page: the selected VM's name, its state
 //! badge, and the verbs that change that state, with the console's own
 //! controls shown only while the console page is. `debugger_page` is the
-//! Debugger page: a paused VM's registers, code, memory and stack.
+//! Debugger page: a paused VM's registers, code, memory and stack, and a
+//! Windows guest's processes and kernel modules; `listing` is the row, chip
+//! and switch vocabulary it is drawn in.
 
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod debugger_page;
 pub(crate) mod destination;
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) mod listing;
 pub(crate) mod sidebar;
 pub(crate) mod theme;
 pub(crate) mod vm_bar;
@@ -33,11 +37,15 @@ mod tests {
 
     /// The sources whose string literals reach the screen, each with the path
     /// a failure names.
-    const SOURCES: [(&str, &str); 8] = [
+    const SOURCES: [(&str, &str); 9] = [
         ("rusty_box_gui/src/app.rs", include_str!("../app.rs")),
         (
             "rusty_box_gui/src/shell/debugger_page.rs",
             include_str!("debugger_page.rs"),
+        ),
+        (
+            "rusty_box_gui/src/shell/listing.rs",
+            include_str!("listing.rs"),
         ),
         (
             "rusty_box_gui/src/shell/destination.rs",

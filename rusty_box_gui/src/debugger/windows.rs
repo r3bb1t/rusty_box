@@ -99,6 +99,9 @@ pub(crate) struct WinProcess {
     /// The kernel address of its `EPROCESS`.
     pub(crate) eprocess: u64,
     pub(crate) pid: u64,
+    /// The PID of the process that created it, when that field was found; a
+    /// parent that has since exited is no longer listed.
+    pub(crate) parent: Option<u64>,
     /// `EPROCESS.ImageFileName`: the image's base name, cut at 15 bytes.
     pub(crate) name: String,
     /// Its address space: `KPROCESS.DirectoryTableBase`.
@@ -487,6 +490,7 @@ fn list_processes<T: Instrumentation, E: SliceEngine<T>>(
             processes.push(WinProcess {
                 eprocess,
                 pid,
+                parent: None,
                 name,
                 cr3,
                 current: same_address_space(cr3, live_cr3),
@@ -500,7 +504,144 @@ fn list_processes<T: Instrumentation, E: SliceEngine<T>>(
         }
         entry = next;
     }
+    assign_parents(cpu, layout, &mut processes);
     processes
+}
+
+/// Fills each process's `parent` from `EPROCESS.InheritedFromUniqueProcessId`,
+/// found as the first field past `UniqueProcessId` that reads as a parent ID
+/// in every process at once: zero in System, the System process's PID in at
+/// least one other (the session manager, smss.exe), never the process's own
+/// PID, always a PID-shaped value (a multiple of 4 below 2^24), and the PID of
+/// a listed process for at least half the rest (a parent that has exited,
+/// such as explorer.exe's userinit.exe, is no longer listed). Left `None`
+/// when no field qualifies.
+fn assign_parents<T: Instrumentation, E: SliceEngine<T>>(
+    cpu: &mut DebugCpu<'_, T, E>,
+    layout: &ProcessLayout,
+    processes: &mut [WinProcess],
+) {
+    const MAX_PID: u64 = 1 << 24;
+    let mut blocks = Vec::with_capacity(processes.len());
+    for process in processes.iter() {
+        match read_exact(cpu, Root::Live, process.eprocess, EPROCESS_SPAN) {
+            Some(block) => blocks.push(block),
+            None => return,
+        }
+    }
+    let pids: Vec<u64> = processes.iter().map(|p| p.pid).collect();
+    let qword = |block: &[u8], offset: usize| {
+        block
+            .get(offset..offset + 8)
+            .and_then(|bytes| bytes.try_into().ok())
+            .map(u64::from_le_bytes)
+    };
+    let first = usize::try_from(layout.pid).unwrap_or(EPROCESS_SPAN) + 8;
+    let found = (first..EPROCESS_SPAN - 8).step_by(8).find(|&offset| {
+        let mut from_system = false;
+        let mut listed = 0usize;
+        let mut others = 0usize;
+        for (process, block) in processes.iter().zip(&blocks) {
+            let Some(value) = qword(block, offset) else {
+                return false;
+            };
+            if process.pid == SYSTEM_PID {
+                if value != 0 {
+                    return false;
+                }
+                continue;
+            }
+            if process.pid == 0 {
+                continue;
+            }
+            if value == process.pid || value % 4 != 0 || value >= MAX_PID {
+                return false;
+            }
+            others += 1;
+            from_system |= value == SYSTEM_PID;
+            listed += usize::from(pids.contains(&value));
+        }
+        from_system && others > 0 && 2 * listed >= others
+    });
+    let Some(offset) = found else {
+        return;
+    };
+    for (process, block) in processes.iter_mut().zip(&blocks) {
+        process.parent = qword(block, offset).filter(|&parent| parent != 0);
+    }
+}
+
+/// One process's row in the process tree.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct TreeRow {
+    /// Its place in the listing the tree was built from.
+    pub(crate) index: usize,
+    pub(crate) depth: usize,
+    /// For each ancestor level below this row's own: whether a later sibling
+    /// follows at that level, so a guide line runs on past this row.
+    pub(crate) guides: Vec<bool>,
+    /// It is the last child of its parent.
+    pub(crate) last: bool,
+}
+
+/// `processes` as a tree, depth first, children in listing order. A process
+/// whose parent is not listed (exited, or never found) is a root.
+pub(crate) fn process_tree(processes: &[WinProcess]) -> Vec<TreeRow> {
+    let listed = |pid: u64| processes.iter().any(|p| p.pid == pid);
+    let parent_of = |process: &WinProcess| {
+        process
+            .parent
+            .filter(|&parent| parent != process.pid && listed(parent))
+    };
+    let mut rows = Vec::with_capacity(processes.len());
+    let mut placed = vec![false; processes.len()];
+    let roots: Vec<usize> = (0..processes.len())
+        .filter(|&i| parent_of(&processes[i]).is_none())
+        .collect();
+    let count = roots.len();
+    for (n, root) in roots.into_iter().enumerate() {
+        place(processes, root, 0, Vec::new(), n + 1 == count, &mut placed, &mut rows);
+    }
+    // A cycle of parents has no root: list what it left unplaced at the top.
+    for index in 0..processes.len() {
+        if !placed[index] {
+            place(processes, index, 0, Vec::new(), true, &mut placed, &mut rows);
+        }
+    }
+    rows
+}
+
+fn place(
+    processes: &[WinProcess],
+    index: usize,
+    depth: usize,
+    guides: Vec<bool>,
+    last: bool,
+    placed: &mut [bool],
+    rows: &mut Vec<TreeRow>,
+) {
+    if placed[index] {
+        return;
+    }
+    placed[index] = true;
+    let pid = processes[index].pid;
+    let children: Vec<usize> = (0..processes.len())
+        .filter(|&i| i != index && !placed[i] && processes[i].parent == Some(pid))
+        .collect();
+    rows.push(TreeRow {
+        index,
+        depth,
+        guides: guides.clone(),
+        last,
+    });
+    let mut below = guides;
+    if depth > 0 {
+        below.push(!last);
+    }
+    let count = children.len();
+    for (n, child) in children.into_iter().enumerate() {
+        place(processes, child, depth + 1, below.clone(), n + 1 == count, placed, rows);
+    }
 }
 
 /// Two CR3 values name one address space when their table addresses match
@@ -726,6 +867,58 @@ mod tests {
                 SystemListing::NoWindowsKernel(KernelMiss::NoKpcr)
             );
         }
+    }
+
+    fn process(pid: u64, parent: Option<u64>) -> WinProcess {
+        WinProcess {
+            eprocess: pid,
+            pid,
+            parent,
+            name: format!("p{pid}"),
+            cr3: 0,
+            current: false,
+        }
+    }
+
+    /// System → smss → {csrss, winlogon → services}, and explorer, whose
+    /// parent has exited, at the top beside System.
+    #[test]
+    fn a_process_tree_nests_children_under_their_parent() {
+        let processes = [
+            process(4, None),
+            process(220, Some(4)),
+            process(276, Some(220)),
+            process(300, Some(220)),
+            process(348, Some(300)),
+            process(1500, Some(1400)),
+        ];
+        let rows = process_tree(&processes);
+        let shape: Vec<(u64, usize, bool)> = rows
+            .iter()
+            .map(|row| (processes[row.index].pid, row.depth, row.last))
+            .collect();
+        assert_eq!(
+            shape,
+            [
+                (4, 0, false),
+                (220, 1, true),
+                (276, 2, false),
+                (300, 2, true),
+                (348, 3, true),
+                (1500, 0, true),
+            ]
+        );
+        // services sits under winlogon, the last child of smss, the last
+        // child of System: no guide runs on past it at either level.
+        assert_eq!(rows[4].guides, [false, false]);
+        // csrss has a later sibling (winlogon): its children would see a guide.
+        assert_eq!(rows[2].guides, [false]);
+    }
+
+    #[test]
+    fn a_cycle_of_parents_still_lists_every_process() {
+        let processes = [process(8, Some(12)), process(12, Some(8))];
+        assert_eq!(process_tree(&processes).len(), 2);
     }
 
     #[test]
