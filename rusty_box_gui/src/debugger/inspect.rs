@@ -60,6 +60,9 @@ pub(crate) struct DebugSnapshot {
     pub(crate) code: Vec<CodeLine>,
     pub(crate) memory: MemoryWindow,
     pub(crate) stack: Vec<StackSlot>,
+    /// The Windows process the shown processor is running for, by its image
+    /// path, when the guest's structures name one.
+    pub(crate) process: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -148,6 +151,7 @@ pub(crate) fn read_snapshot<T: Instrumentation, E: SliceEngine<T>>(
                 rows: Vec::new(),
             },
             stack: Vec::new(),
+            process: None,
         };
     };
     let shown = cpu.view();
@@ -168,13 +172,127 @@ pub(crate) fn read_snapshot<T: Instrumentation, E: SliceEngine<T>>(
     };
     let memory = read_memory(&mut cpu, start);
     let stack = read_stack(&mut cpu, rsp, slot_bytes(size));
+    let process = windows_image_path(&mut cpu, &shown);
     DebugSnapshot {
         cpus,
         cpu: index,
         code,
         memory,
         stack,
+        process,
     }
+}
+
+/// The longest image path read, in UTF-16 code units (Windows' `MAX_PATH`
+/// is 260; the NT path form a little longer).
+const MAX_IMAGE_PATH_UNITS: u16 = 1024;
+
+/// The image path of the Windows process `view` runs for, walked from the
+/// thread's TEB: TEB → PEB → `RTL_USER_PROCESS_PARAMETERS.ImagePathName`.
+/// These offsets hold for every x64 Windows and every x86 NT (winternl.h's
+/// layouts). The TEB is the user GS base in 64-bit code (FS in 32-bit code);
+/// a 64-bit kernel entered from user mode keeps the user GS base in
+/// `IA32_KERNEL_GS_BASE` after `SWAPGS`. `None` for a guest that is not
+/// Windows, a kernel thread with no user side, a 32-bit kernel, or anything
+/// that does not read as these structures.
+fn windows_image_path<T: Instrumentation, E: SliceEngine<T>>(
+    cpu: &mut DebugCpu<'_, T, E>,
+    view: &CpuDebugView,
+) -> Option<String> {
+    use rusty_box::cpu::ExecutionMode;
+    let user = view.registers.cpl == 3;
+    match view.mode {
+        ExecutionMode::Long64 => {
+            let teb = if user {
+                view.segment_bases.gs
+            } else {
+                view.kernel_gs_base
+            };
+            image_path_64(cpu, teb)
+        }
+        // A 32-bit process under a 64-bit kernel (WOW64): FS is its 32-bit TEB.
+        ExecutionMode::LongCompat | ExecutionMode::Protected if user => {
+            image_path_32(cpu, view.segment_bases.fs)
+        }
+        ExecutionMode::LongCompat
+        | ExecutionMode::Protected
+        | ExecutionMode::Real
+        | ExecutionMode::Virtual8086 => None,
+    }
+}
+
+/// A user-mode address of a 64-bit Windows process: canonical, low half.
+fn user_pointer_64(value: u64) -> Option<u64> {
+    (value != 0 && value < 0x0000_8000_0000_0000).then_some(value)
+}
+
+fn read_u64<T: Instrumentation, E: SliceEngine<T>>(
+    cpu: &mut DebugCpu<'_, T, E>,
+    address: u64,
+) -> Option<u64> {
+    let at = GuestAddress { space: AddressSpace::Linear, value: address };
+    let bytes: [u8; 8] = read_prefix(cpu, at, 8).try_into().ok()?;
+    Some(u64::from_le_bytes(bytes))
+}
+
+fn read_u32<T: Instrumentation, E: SliceEngine<T>>(
+    cpu: &mut DebugCpu<'_, T, E>,
+    address: u64,
+) -> Option<u32> {
+    let at = GuestAddress { space: AddressSpace::Linear, value: address };
+    let bytes: [u8; 4] = read_prefix(cpu, at, 4).try_into().ok()?;
+    Some(u32::from_le_bytes(bytes))
+}
+
+/// A `UNICODE_STRING`'s text, given its length in bytes and its buffer.
+fn read_unicode<T: Instrumentation, E: SliceEngine<T>>(
+    cpu: &mut DebugCpu<'_, T, E>,
+    length_bytes: u16,
+    buffer: u64,
+) -> Option<String> {
+    if length_bytes == 0 || length_bytes % 2 != 0 || length_bytes / 2 > MAX_IMAGE_PATH_UNITS {
+        return None;
+    }
+    let at = GuestAddress { space: AddressSpace::Linear, value: buffer };
+    let bytes = read_prefix(cpu, at, usize::from(length_bytes));
+    if bytes.len() != usize::from(length_bytes) {
+        return None;
+    }
+    let units: Vec<u16> = bytes
+        .chunks_exact(2)
+        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+        .collect();
+    let text = String::from_utf16(&units).ok()?;
+    text.chars().all(|c| !c.is_control()).then_some(text)
+}
+
+/// x64 TEB → PEB at +0x60, PEB → ProcessParameters at +0x20, and
+/// ImagePathName (Length at +0x60, Buffer at +0x68) in the parameters.
+fn image_path_64<T: Instrumentation, E: SliceEngine<T>>(
+    cpu: &mut DebugCpu<'_, T, E>,
+    teb: u64,
+) -> Option<String> {
+    let teb = user_pointer_64(teb)?;
+    let peb = user_pointer_64(read_u64(cpu, teb + 0x60)?)?;
+    let parameters = user_pointer_64(read_u64(cpu, peb + 0x20)?)?;
+    let length = read_u32(cpu, parameters + 0x60)? as u16;
+    let buffer = user_pointer_64(read_u64(cpu, parameters + 0x68)?)?;
+    read_unicode(cpu, length, buffer)
+}
+
+/// x86 TEB → PEB at +0x30, PEB → ProcessParameters at +0x10, and
+/// ImagePathName (Length at +0x38, Buffer at +0x3C) in the parameters.
+fn image_path_32<T: Instrumentation, E: SliceEngine<T>>(
+    cpu: &mut DebugCpu<'_, T, E>,
+    teb: u64,
+) -> Option<String> {
+    let pointer = |value: u32| (value != 0).then_some(u64::from(value));
+    let teb = pointer(u32::try_from(teb).ok()?)?;
+    let peb = pointer(read_u32(cpu, teb + 0x30)?)?;
+    let parameters = pointer(read_u32(cpu, peb + 0x10)?)?;
+    let length = read_u32(cpu, parameters + 0x38)? as u16;
+    let buffer = pointer(read_u32(cpu, parameters + 0x3C)?)?;
+    read_unicode(cpu, length, buffer)
 }
 
 /// Reads `buf.len()` bytes at `at`, which lie within one page.

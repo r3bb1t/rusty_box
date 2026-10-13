@@ -7,6 +7,7 @@ use rusty_box::emulator::{Emulator, RunBudget, SliceEngine, StopReason};
 use super::control::{BetweenRuns, DebugNote, RunControl, Task};
 use super::dump::dump_ram;
 use super::inspect::read_snapshot;
+use super::search::find;
 
 /// Whether the engine can stop after one instruction.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -96,6 +97,12 @@ pub(crate) fn perform<T: Instrumentation, E: SliceEngine<T>>(
         },
         Task::DumpRam(path) => {
             control.record_dump(dump_ram(emu, &path, || control.ending()));
+            Ok(live(0))
+        }
+        Task::Find(request) => {
+            let outcome = find(emu, control.view().cpu, &request, || control.ending());
+            control.record_find(outcome);
+            control.publish(read_snapshot(emu, &control.view()));
             Ok(live(0))
         }
     }

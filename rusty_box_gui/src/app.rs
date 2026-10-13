@@ -2119,6 +2119,7 @@ impl NativeShellApp {
         let session = self.sessions.open(&vm);
         let control = Arc::clone(session.control());
         let snapshot = control.snapshot();
+        let previous = control.previous_snapshot();
         let step_available = session.run_engine() != Some(crate::config::Engine::Whp);
         let action = draw_debugger_page(
             ui,
@@ -2129,6 +2130,9 @@ impl NativeShellApp {
                 dump_pending: control.dump_pending(),
                 note: control.note(),
                 snapshot: snapshot.as_deref(),
+                previous: previous.as_deref(),
+                find: control.find_outcome(),
+                searching: control.searching(),
                 pane: session.debugger_mut(),
             },
         );
@@ -2149,6 +2153,7 @@ impl NativeShellApp {
                 let memory = control.view().memory;
                 control.set_view(ViewRequest { cpu, memory });
             }
+            Some(DebuggerAction::Find(request)) => control.find(request),
         }
     }
 
@@ -9515,6 +9520,50 @@ mod tests {
             window.run();
             assert!(window.query_by_label(AddressError::NotHex.message()).is_some());
             assert_eq!(control.view(), before);
+        }
+
+        /// Find next with hex typed queues the search for the paused run.
+        #[test]
+        fn find_next_asks_the_paused_run_to_search() {
+            use crate::debugger::control::{BetweenRuns, Task};
+            use crate::shell::debugger_page::FIND;
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_vm(&mut app);
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            window
+                .get_by_role_and_label(egui::accesskit::Role::TextInput, FIND)
+                .click();
+            window.run();
+            window
+                .get_by_role_and_label(egui::accesskit::Role::TextInput, FIND)
+                .type_text("48 C7");
+            window.run();
+            window.get_by_label("Find next").click();
+            window.run();
+            match control.next_between_runs() {
+                BetweenRuns::Perform(Task::Find(request)) => {
+                    assert_eq!(request.pattern, [0x48, 0xC7]);
+                }
+                other => panic!("no search queued: {other:?}"),
+            }
+        }
+
+        /// A register the last step changed is drawn red.
+        #[test]
+        fn a_register_a_step_changed_is_drawn_red() {
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_vm(&mut app);
+            // The same pause again, with RAX changed: the step before it.
+            let mut stepped = paused_snapshot();
+            stepped.cpus[0].registers.rax = 0x99;
+            control.publish(stepped);
+            let mut window = window(app);
+            window.run();
+            open_debugger(&mut window);
+            assert!(window.query_by_label("0000000000000099").is_some());
+            assert!(window.query_by_label("000000000000002A").is_none());
         }
 
         #[test]

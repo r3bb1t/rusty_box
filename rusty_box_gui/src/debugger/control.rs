@@ -10,7 +10,8 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 
 use rusty_box::emulator::PowerState;
 
-use super::inspect::{DebugSnapshot, ViewRequest};
+use super::inspect::{DebugSnapshot, MemoryTarget, ViewRequest};
+use super::search::{FindOutcome, FindRequest};
 
 /// What the shell asked of the run.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -35,6 +36,8 @@ pub(crate) enum Task {
     Step,
     /// Write the machine's RAM to this file.
     DumpRam(PathBuf),
+    /// Search memory, and show the hit.
+    Find(FindRequest),
 }
 
 /// What a run thread does once its machine handed control back.
@@ -105,6 +108,12 @@ struct ControlState {
     tasks: VecDeque<Task>,
     view: ViewRequest,
     snapshot: Option<Arc<DebugSnapshot>>,
+    /// The snapshot before `snapshot`, which the page compares against to
+    /// mark what a step changed.
+    previous: Option<Arc<DebugSnapshot>>,
+    /// The last search's outcome, and whether one is queued or running.
+    find: Option<FindOutcome>,
+    searching: bool,
     note: Option<DebugNote>,
     dump_outcomes: Vec<DumpOutcome>,
 }
@@ -130,6 +139,9 @@ impl RunControl {
                 tasks: VecDeque::new(),
                 view: ViewRequest::default(),
                 snapshot: None,
+                previous: None,
+                find: None,
+                searching: false,
                 note: None,
                 dump_outcomes: Vec::new(),
             }),
@@ -249,9 +261,36 @@ impl RunControl {
         self.lock().snapshot.clone()
     }
 
+    /// The snapshot before the current one: what a step is compared against.
+    #[cfg(feature = "gui-egui")]
+    pub(crate) fn previous_snapshot(&self) -> Option<Arc<DebugSnapshot>> {
+        self.lock().previous.clone()
+    }
+
     #[cfg(feature = "gui-egui")]
     pub(crate) fn note(&self) -> Option<DebugNote> {
         self.lock().note
+    }
+
+    /// Asks a paused run to search memory; the hit, if any, is shown.
+    #[cfg(feature = "gui-egui")]
+    pub(crate) fn find(&self, request: FindRequest) {
+        let mut state = self.lock();
+        if state.phase == RunPhase::Paused && state.wanted == Wanted::Pause && !state.ending {
+            state.tasks.push_back(Task::Find(request));
+            state.searching = true;
+            self.changed.notify_all();
+        }
+    }
+
+    #[cfg(feature = "gui-egui")]
+    pub(crate) fn find_outcome(&self) -> Option<FindOutcome> {
+        self.lock().find
+    }
+
+    #[cfg(feature = "gui-egui")]
+    pub(crate) fn searching(&self) -> bool {
+        self.lock().searching
     }
 
     #[cfg(feature = "gui-egui")]
@@ -287,6 +326,9 @@ impl RunControl {
         state.tasks.clear();
         // A new run: what the last one showed is no longer this guest.
         state.snapshot = None;
+        state.previous = None;
+        state.find = None;
+        state.searching = false;
         match how {
             RunStart::PowerOn => {}
             RunStart::Restart => {
@@ -360,8 +402,22 @@ impl RunControl {
         self.lock().view
     }
 
+    /// Shows `snapshot`; the one it replaces is kept as the comparison that
+    /// marks what changed.
     pub(crate) fn publish(&self, snapshot: DebugSnapshot) {
-        self.lock().snapshot = Some(Arc::new(snapshot));
+        let mut state = self.lock();
+        state.previous = state.snapshot.take();
+        state.snapshot = Some(Arc::new(snapshot));
+    }
+
+    /// Records a search's outcome; a hit becomes the memory pane's window.
+    pub(crate) fn record_find(&self, outcome: FindOutcome) {
+        let mut state = self.lock();
+        state.searching = false;
+        if let FindOutcome::Found(found) = outcome {
+            state.view.memory = MemoryTarget::At(found.at);
+        }
+        state.find = Some(outcome);
     }
 
     pub(crate) fn note_refusal(&self, note: DebugNote) {
@@ -396,9 +452,10 @@ impl RunControl {
                     path,
                     reason: NOT_SAVED_VM_STOPPED.to_owned(),
                 }),
-                Task::Refresh | Task::Step => {}
+                Task::Refresh | Task::Step | Task::Find(_) => {}
             }
         }
+        state.searching = false;
     }
 }
 
@@ -534,10 +591,12 @@ mod tests {
                 rows: Vec::new(),
             },
             stack: Vec::new(),
+            process: None,
         });
         control.finish_run();
         control.begin_run(RunStart::PowerOn);
         assert!(control.snapshot().is_none());
+        assert!(control.previous_snapshot().is_none());
     }
 
     /// A restart lowers the stop that ended the run before it; a stop asked
@@ -573,6 +632,58 @@ mod tests {
         assert!(control.dump_pending(), "taken off the queue, but not written yet");
         control.record_dump(DumpOutcome::Saved { path, bytes: 1 });
         assert!(!control.dump_pending());
+    }
+
+    fn empty_snapshot(rip: u64) -> crate::debugger::inspect::DebugSnapshot {
+        use crate::debugger::inspect::{AddressSpace, DebugSnapshot, GuestAddress, MemoryWindow};
+        DebugSnapshot {
+            cpus: Vec::new(),
+            cpu: 0,
+            code: Vec::new(),
+            memory: MemoryWindow {
+                start: GuestAddress { space: AddressSpace::Linear, value: rip },
+                rows: Vec::new(),
+            },
+            stack: Vec::new(),
+            process: None,
+        }
+    }
+
+    /// Each snapshot published keeps the one before it, which the page
+    /// compares against to draw what a step changed in red.
+    #[test]
+    fn a_published_snapshot_keeps_the_one_before_it() {
+        let control = control();
+        control.begin_run(RunStart::PowerOn);
+        control.publish(empty_snapshot(1));
+        control.publish(empty_snapshot(2));
+        let previous = control.previous_snapshot().expect("kept");
+        assert_eq!(previous.memory.start.value, 1);
+        assert_eq!(control.snapshot().expect("shown").memory.start.value, 2);
+    }
+
+    /// A search is taken only while paused, and a hit becomes the window.
+    #[test]
+    fn a_search_hit_becomes_the_memory_window() {
+        use crate::debugger::inspect::{AddressSpace, GuestAddress};
+        use crate::debugger::search::{FindOutcome, FindRequest, FoundAt};
+        let control = control();
+        control.begin_run(RunStart::PowerOn);
+        let request = FindRequest {
+            from: GuestAddress { space: AddressSpace::Physical, value: 0 },
+            pattern: b"XP".to_vec(),
+        };
+        control.find(request.clone());
+        assert!(!control.searching(), "a running VM takes no search");
+        control.pause();
+        assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::Refresh));
+        control.find(request.clone());
+        assert!(control.searching());
+        assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::Find(request)));
+        let at = GuestAddress { space: AddressSpace::Physical, value: 0x1234 };
+        control.record_find(FindOutcome::Found(FoundAt { at, len: 2 }));
+        assert!(!control.searching());
+        assert_eq!(control.view().memory, crate::debugger::inspect::MemoryTarget::At(at));
     }
 
     #[test]

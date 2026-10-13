@@ -531,6 +531,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
                 fs: self.get_segment_base(BxSegregs::Fs),
                 gs: self.get_segment_base(BxSegregs::Gs),
             },
+            kernel_gs_base: self.msr.kernelgsbase,
         }
     }
 

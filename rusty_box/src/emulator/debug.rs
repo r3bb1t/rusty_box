@@ -17,6 +17,33 @@ use super::{Emulator, SliceEngine, SoftwareEngine};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RamOffset(pub u64);
 
+impl RamOffset {
+    /// The guest-physical address this RAM byte sits at.
+    pub fn physical(self) -> u64 {
+        crate::memory::memory_rusty_box::bx_translate_linear_to_gpa(self.0)
+    }
+
+    /// The RAM byte at guest-physical `physical`, or, for an address in the
+    /// PCI hole, the first RAM byte above it — so a walk through RAM by
+    /// physical address can start anywhere and never reads a device window.
+    pub fn at_or_after_physical(physical: u64) -> Self {
+        use crate::memory::memory_rusty_box::{
+            bx_is_pci_hole_addr, bx_translate_gpa_to_linear, BX_PCI_HOLE_END,
+        };
+        if bx_is_pci_hole_addr(physical) {
+            Self(bx_translate_gpa_to_linear(BX_PCI_HOLE_END))
+        } else {
+            Self(bx_translate_gpa_to_linear(physical))
+        }
+    }
+
+    /// The RAM byte at guest-physical `physical`, or `None` in the PCI hole.
+    pub fn of_physical(physical: u64) -> Option<Self> {
+        use crate::memory::memory_rusty_box::{bx_is_pci_hole_addr, bx_translate_gpa_to_linear};
+        (!bx_is_pci_hole_addr(physical)).then(|| Self(bx_translate_gpa_to_linear(physical)))
+    }
+}
+
 /// One processor of a machine, chosen by index, for a debugger to read.
 pub struct DebugCpu<'m, T: Instrumentation, E = SoftwareEngine> {
     machine: &'m mut Emulator<T, E>,

@@ -607,6 +607,9 @@ pub struct CpuDebugView {
     pub activity: ProcessorActivity,
     pub efer: u64,
     pub segment_bases: SegmentBases,
+    /// `IA32_KERNEL_GS_BASE`: the GS base `SWAPGS` exchanges with GS's, so in
+    /// a 64-bit kernel entered from user mode it holds the user GS base.
+    pub kernel_gs_base: u64,
 }
 
 /// What a debugger read of guest-physical memory found: Bochs misc_mem.cc

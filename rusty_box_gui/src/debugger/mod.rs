@@ -8,4 +8,5 @@
 pub(crate) mod control;
 pub(crate) mod dump;
 pub(crate) mod inspect;
+pub(crate) mod search;
 pub(crate) mod serve;
