@@ -33,6 +33,7 @@ use rusty_box::emulator::{DebugCpu, SliceEngine};
 use super::inspect::{ModuleSpace, SymModule, SymbolIndex};
 use super::memory_map::{self, MemoryMap, ModuleLayout};
 use super::pe::{self, HEADER_BYTES};
+use super::threads::{walk_thread_list, WinThread, MAX_THREADS};
 use super::vad::{self, VadNode, VadRegion, VadShape, MAX_VAD_NODES};
 
 /// The top of a user address space: canonical low half in long mode, and
@@ -70,6 +71,8 @@ pub(crate) enum ProcessDetail {
     Modules,
     /// Its address space, region by region.
     MemoryMap,
+    /// Its threads, with their start addresses and stacks.
+    Threads,
 }
 
 /// What was listed for a [`SystemView`].
@@ -145,6 +148,8 @@ pub(crate) struct ProcessModules {
     pub(crate) read: ModuleRead,
     /// The memory map, when the view asked for it and the modules read.
     pub(crate) map: Option<MemoryMap>,
+    /// The process's threads, from its `ETHREAD` list.
+    pub(crate) threads: Vec<WinThread>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -256,10 +261,14 @@ pub(crate) fn read_system<T: Instrumentation, E: SliceEngine<T>>(
             let modules = chosen_index.map(|index| {
                 let eprocess = processes[index].eprocess;
                 let cr3 = processes[index].cr3;
+                let pid = processes[index].pid;
                 let read = process_modules(cpu, &processes, &processes[index]);
+                let threads = read_threads(cpu, eprocess, pid, cr3);
                 let map = match (detail, &read) {
                     (ProcessDetail::MemoryMap, ModuleRead::Listed(modules)) => {
-                        Some(read_memory_map(cpu, eprocess, cr3, modules))
+                        let mut map = read_memory_map(cpu, eprocess, cr3, modules);
+                        memory_map::label_stacks(&mut map, &threads);
+                        Some(map)
                     }
                     _ => None,
                 };
@@ -267,6 +276,7 @@ pub(crate) fn read_system<T: Instrumentation, E: SliceEngine<T>>(
                     eprocess,
                     read,
                     map,
+                    threads,
                 }
             });
             SystemListing::Processes(ProcessListing { processes, modules })
@@ -594,6 +604,205 @@ fn list_processes<T: Instrumentation, E: SliceEngine<T>>(
     }
     assign_parents(cpu, layout, &mut processes);
     processes
+}
+
+/// Where a process's thread fields sit, found by validation (never fixed
+/// offsets): `head` is the `EPROCESS`-relative `ThreadListHead`, and the rest
+/// are offsets from a `ThreadListEntry` node to the `ETHREAD`'s fields.
+struct ThreadLayout {
+    head: u64,
+    cid: i64,
+    teb: Option<i64>,
+}
+
+/// The widest span from a `ThreadListEntry` to one of its `ETHREAD` fields:
+/// `Teb` sits in the `KTHREAD` before the entry (a negative delta), `Cid` and
+/// `StartAddress` after it.
+const THREAD_DELTA_MIN: i64 = -0x600;
+const THREAD_DELTA_MAX: i64 = 0x400;
+
+fn read_at<T: Instrumentation, E: SliceEngine<T>>(
+    cpu: &mut DebugCpu<'_, T, E>,
+    node: u64,
+    delta: i64,
+) -> Option<u64> {
+    read_u64(cpu, Root::Live, node.wrapping_add(delta as u64))
+}
+
+/// A thread ID shape: a non-zero multiple of four below 2^24, as Windows hands
+/// out client IDs.
+fn is_client_id(value: u64) -> bool {
+    value != 0 && value % 4 == 0 && value < 0x0100_0000
+}
+
+/// The threads of the process at `eprocess` (PID `pid`), from its
+/// `EPROCESS.ThreadListHead`. The head, the `ETHREAD.Cid` and the `KTHREAD.Teb`
+/// are located by validation — the head is the field reading as a `LIST_ENTRY`
+/// whose nodes all sit in an `ETHREAD` whose `Cid.UniqueProcess` is this PID,
+/// and the `Teb` is the node-relative field whose `NtTib.Self` points back at
+/// it — so no build-specific offsets are assumed. `None`-shaped reads leave a
+/// thread sparse; a corrupt list stops at `MAX_THREADS`.
+fn read_threads<T: Instrumentation, E: SliceEngine<T>>(
+    cpu: &mut DebugCpu<'_, T, E>,
+    eprocess: u64,
+    pid: u64,
+    cr3: u64,
+) -> Vec<WinThread> {
+    let Some(layout) = discover_thread_layout(cpu, eprocess, pid, cr3) else {
+        return Vec::new();
+    };
+    let head = eprocess + layout.head;
+    let nodes = walk_thread_list(
+        head,
+        |node| read_u64(cpu, Root::Live, node).and_then(kernel_pointer),
+        MAX_THREADS,
+    );
+    nodes
+        .iter()
+        .map(|&node| read_thread(cpu, node, &layout, cr3))
+        .collect()
+}
+
+/// Finds the thread-list field and the `ETHREAD` field offsets by validation.
+fn discover_thread_layout<T: Instrumentation, E: SliceEngine<T>>(
+    cpu: &mut DebugCpu<'_, T, E>,
+    eprocess: u64,
+    pid: u64,
+    cr3: u64,
+) -> Option<ThreadLayout> {
+    for offset in (0..EPROCESS_SPAN as u64).step_by(8) {
+        let head = eprocess + offset;
+        let Some(first) = read_u64(cpu, Root::Live, head).and_then(kernel_pointer) else {
+            continue;
+        };
+        // A LIST_ENTRY head: the first node's Blink points back at the head.
+        if first == head || read_u64(cpu, Root::Live, first + 8) != Some(head) {
+            continue;
+        }
+        let Some(cid) = find_cid_delta(cpu, first, pid) else {
+            continue;
+        };
+        let nodes = walk_thread_list(
+            head,
+            |node| read_u64(cpu, Root::Live, node).and_then(kernel_pointer),
+            MAX_THREADS,
+        );
+        if nodes.is_empty() {
+            continue;
+        }
+        let covered = nodes
+            .iter()
+            .filter(|&&node| read_at(cpu, node, cid) == Some(pid))
+            .count();
+        // Nearly every node must carry this PID: the thread list, not another
+        // EPROCESS list that happens to read as a ring.
+        if covered * 10 < nodes.len() * 9 {
+            continue;
+        }
+        let teb = find_teb_delta(cpu, &nodes, cr3);
+        return Some(ThreadLayout {
+            head: offset,
+            cid,
+            teb,
+        });
+    }
+    None
+}
+
+/// The node-relative offset of `Cid`: `UniqueProcess` equals the PID and
+/// `UniqueThread` is a client-ID-shaped value right after it.
+fn find_cid_delta<T: Instrumentation, E: SliceEngine<T>>(
+    cpu: &mut DebugCpu<'_, T, E>,
+    node: u64,
+    pid: u64,
+) -> Option<i64> {
+    (THREAD_DELTA_MIN..THREAD_DELTA_MAX).step_by(8).find(|&delta| {
+        read_at(cpu, node, delta) == Some(pid)
+            && read_at(cpu, node, delta + 8).is_some_and(is_client_id)
+    })
+}
+
+/// The node-relative offset of `KTHREAD.Teb`: the field whose value reads as a
+/// user pointer whose `NtTib.Self` (TEB +0x30) points back at it. The pointer
+/// lives in the `ETHREAD` (kernel), but the `TEB` is user memory, so it is read
+/// through the process's own address space. The delta that self-references for
+/// the most threads is the field — a stray lower offset might match one thread
+/// by chance, but only the real `Teb` matches every user thread at once.
+fn find_teb_delta<T: Instrumentation, E: SliceEngine<T>>(
+    cpu: &mut DebugCpu<'_, T, E>,
+    nodes: &[u64],
+    cr3: u64,
+) -> Option<i64> {
+    (THREAD_DELTA_MIN..THREAD_DELTA_MAX)
+        .step_by(8)
+        .map(|delta| {
+            let matches = nodes
+                .iter()
+                .filter(|&&node| {
+                    read_at(cpu, node, delta)
+                        .and_then(user_pointer)
+                        .is_some_and(|teb| {
+                            read_u64(cpu, Root::Process(cr3), teb + 0x30) == Some(teb)
+                        })
+                })
+                .count();
+            (delta, matches)
+        })
+        .filter(|&(_, matches)| matches > 0)
+        .max_by_key(|&(_, matches)| matches)
+        .map(|(delta, _)| delta)
+}
+
+/// Reads one thread from its `ThreadListEntry` node. The `ETHREAD` fields are
+/// kernel memory; the `TEB` and the stack are the process's user memory, read
+/// through its address space `cr3`.
+fn read_thread<T: Instrumentation, E: SliceEngine<T>>(
+    cpu: &mut DebugCpu<'_, T, E>,
+    node: u64,
+    layout: &ThreadLayout,
+    cr3: u64,
+) -> WinThread {
+    let user = Root::Process(cr3);
+    let tid = read_at(cpu, node, layout.cid + 8).unwrap_or(0);
+    let teb = layout
+        .teb
+        .and_then(|delta| read_at(cpu, node, delta))
+        .and_then(user_pointer)
+        .filter(|&teb| read_u64(cpu, user, teb + 0x30) == Some(teb));
+    // NtTib.StackBase at TEB +0x08, StackLimit at +0x10 (x64): the stack grows
+    // down from base to limit.
+    let stack = teb.and_then(|teb| {
+        let base = read_u64(cpu, user, teb + 0x08)?;
+        let limit = read_u64(cpu, user, teb + 0x10)?;
+        (limit < base && user_pointer(base).is_some())
+            .then_some(LinearRange { start: limit, end: base })
+    });
+    // `Win32StartAddress` (Cid +0x70 on this build) is the thread's own entry,
+    // set for user threads; a kernel thread has none, so fall back to the
+    // kernel `StartAddress` (Cid +0x68). Both read from the ETHREAD.
+    let win32 = read_at(cpu, node, layout.cid + 0x70).filter(|&v| user_pointer(v).is_some());
+    let start = win32
+        .or_else(|| {
+            read_at(cpu, node, layout.cid + 0x68)
+                .filter(|&v| kernel_pointer(v).is_some() || user_pointer(v).is_some())
+        })
+        .unwrap_or(0);
+    // NtTib.FiberData (TEB +0x20) is a union with the TEB version: a thread
+    // running fibres holds a heap pointer here, an ordinary thread a small
+    // version number. A value above the version range is fibre data.
+    let uses_fibers = teb.is_some_and(|teb| {
+        read_u64(cpu, user, teb + 0x20)
+            .and_then(user_pointer)
+            .is_some_and(|data| data >= 0x1_0000)
+    });
+    WinThread {
+        tid,
+        start,
+        teb,
+        stack,
+        name: None,
+        uses_fibers,
+    }
 }
 
 /// Fills each process's `parent` from `EPROCESS.InheritedFromUniqueProcessId`,

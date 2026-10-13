@@ -15,6 +15,7 @@
 use rusty_box::cpu::PageMapping;
 
 use super::pe::PeSection;
+use super::threads::{stack_owner, WinThread};
 use super::vad::{VadInfo, VadRegion};
 
 const PAGE: u64 = 0x1000;
@@ -69,8 +70,9 @@ pub(crate) enum RegionOwner {
         module: String,
         section: String,
     },
-    /// Mapped memory in no module: heaps, stacks, the PEB, mapped files.
-    /// Named by thread and PEB walks in a later pass.
+    /// A thread's user stack, named from its `TEB` by [`label_stacks`].
+    Stack { tid: u64 },
+    /// Mapped memory in no module: heaps, the PEB, mapped files.
     Private,
 }
 
@@ -115,7 +117,7 @@ pub(crate) fn group(map: &MemoryMap) -> Vec<MapGroup> {
             RegionOwner::Header { base, module } | RegionOwner::Section { base, module, .. } => {
                 (*base, module.as_str())
             }
-            RegionOwner::Private => {
+            RegionOwner::Stack { .. } | RegionOwner::Private => {
                 groups.push(MapGroup::Region(index));
                 continue;
             }
@@ -304,6 +306,20 @@ pub(crate) fn build_with_vads(
     }
     map.regions.sort_by_key(|region| region.start);
     map
+}
+
+/// Renames each private region that lies wholly inside a thread's user stack to
+/// `Stack { tid }`. A module header or section keeps its name; only unowned
+/// private memory can be a stack.
+pub(crate) fn label_stacks(map: &mut MemoryMap, threads: &[WinThread]) {
+    for region in &mut map.regions {
+        if !matches!(region.owner, RegionOwner::Private) {
+            continue;
+        }
+        if let Some(tid) = stack_owner(region.start, region.start + region.size, threads) {
+            region.owner = RegionOwner::Stack { tid };
+        }
+    }
 }
 
 /// The parts of the mapped pages that no label covers, as private regions:
@@ -518,5 +534,42 @@ mod tests {
         assert_eq!((private[2].start, private[2].size), (base + 0x2000, PAGE));
         // The whole map is in address order.
         assert!(regions.windows(2).all(|w| w[0].start <= w[1].start));
+    }
+
+    #[test]
+    fn label_stacks_names_only_private_memory_inside_a_stack() {
+        use rusty_box::cpu::LinearRange;
+        let region = |start: u64, owner: RegionOwner| MapRegion {
+            start,
+            size: 0x1000,
+            resident_pages: 1,
+            total_pages: 1,
+            access: None,
+            owner,
+            vad: None,
+        };
+        let mut map = MemoryMap {
+            origin: MapOrigin::WindowsRecords,
+            regions: vec![
+                region(0x5C_0000, RegionOwner::Private),
+                region(0x5D_0000, RegionOwner::Header { base: 0x5D_0000, module: "x.dll".to_owned() }),
+                region(0x9_0000, RegionOwner::Private),
+            ],
+        };
+        let threads = [WinThread {
+            tid: 0x1A4,
+            start: 0,
+            teb: Some(0x7FF0_0000),
+            stack: Some(LinearRange { start: 0x5B_0000, end: 0x60_0000 }),
+            name: None,
+            uses_fibers: false,
+        }];
+        label_stacks(&mut map, &threads);
+        // Private memory inside the stack is named for the thread.
+        assert!(matches!(map.regions[0].owner, RegionOwner::Stack { tid: 0x1A4 }));
+        // A module region inside the stack range keeps its own name.
+        assert!(matches!(map.regions[1].owner, RegionOwner::Header { .. }));
+        // Private memory outside every stack stays private.
+        assert!(matches!(map.regions[2].owner, RegionOwner::Private));
     }
 }

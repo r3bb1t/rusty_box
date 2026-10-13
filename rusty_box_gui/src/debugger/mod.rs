@@ -15,5 +15,6 @@ pub(crate) mod minimap;
 pub(crate) mod pe;
 pub(crate) mod search;
 pub(crate) mod serve;
+pub(crate) mod threads;
 pub(crate) mod vad;
 pub(crate) mod windows;

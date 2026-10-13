@@ -21,6 +21,7 @@ use crate::debugger::search::{
     pattern_of, FindOutcome, FindRequest, FoundAt, PatternError, SearchEncoding,
 };
 use crate::debugger::memory_map::{MemoryMap, RegionOwner};
+use crate::debugger::threads::WinThread;
 use crate::debugger::windows::{
     process_tree, KernelMiss, ModuleRead, ProcessDetail, ProcessListing, SystemListing, SystemView,
     WinModule, WinProcess,
@@ -1221,6 +1222,10 @@ fn processes_page(
     let detail = pane.process_detail;
     let right_count = match detail {
         ProcessDetail::Modules => module_count,
+        ProcessDetail::Threads => listing
+            .modules
+            .as_ref()
+            .map(|modules| modules.threads.len()),
         ProcessDetail::MemoryMap => listing
             .modules
             .as_ref()
@@ -1321,12 +1326,14 @@ fn right_card_header(
         &[
             (ProcessDetail::Modules, "Modules"),
             (ProcessDetail::MemoryMap, "Memory map"),
+            (ProcessDetail::Threads, "Threads"),
         ],
     ) {
         *switch_to = Some(chosen);
     }
     match detail {
         ProcessDetail::Modules => header_row(ui, 0.0, &module_columns()),
+        ProcessDetail::Threads => header_row(ui, 0.0, &thread_columns()),
         ProcessDetail::MemoryMap => {
             if let Some(map) = map.filter(|map| !map.regions.is_empty()) {
                 let origin = match map.origin {
@@ -1386,6 +1393,13 @@ fn right_card_body(
 ) {
     match detail {
         ProcessDetail::Modules => listed_modules(ui, listing, navigable, highlight, action),
+        ProcessDetail::Threads => match listing.modules.as_ref() {
+            Some(modules) => thread_rows(ui, &modules.threads, navigable, action),
+            None => {
+                ui.add_space(SPACE_ITEM);
+                ui.label(RichText::new("Pick a process.").color(TEXT_MUTED));
+            }
+        },
         ProcessDetail::MemoryMap => match listing.modules.as_ref().and_then(|m| m.map.as_ref()) {
             Some(map) => memory_map_rows(ui, map, navigable, process_cr3, expanded, scroll_to, action),
             None => {
@@ -1569,9 +1583,10 @@ fn region_row(
     let observed = region.access.is_some_and(|a| a.observed);
     let access_text = region_access_text(region);
     let (module, section) = match &region.owner {
-        RegionOwner::Header { module, .. } => (module.as_str(), "headers"),
-        RegionOwner::Section { module, section, .. } => (module.as_str(), section.as_str()),
-        RegionOwner::Private => ("", "private"),
+        RegionOwner::Header { module, .. } => (module.as_str(), "headers".to_owned()),
+        RegionOwner::Section { module, section, .. } => (module.as_str(), section.clone()),
+        RegionOwner::Stack { tid } => ("", format!("stack · thread {tid}")),
+        RegionOwner::Private => ("", "private".to_owned()),
     };
     let access_color = if executable {
         ACCENT_CYAN
@@ -1870,6 +1885,67 @@ fn module_rows(
             }
         } else {
             response.on_hover_text(format!("{path}\n{ANOTHER_ADDRESS_SPACE}"));
+        }
+    }
+}
+
+const THREAD_TID_CHARS: usize = 7;
+const THREAD_START_CHARS: usize = 16;
+const THREAD_STACK_CHARS: usize = 29;
+
+fn thread_columns() -> [Cell; 4] {
+    [
+        Cell::right("TID", TEXT_MUTED, THREAD_TID_CHARS),
+        Cell::left("Start", TEXT_MUTED, THREAD_START_CHARS),
+        Cell::left("Stack", TEXT_MUTED, THREAD_STACK_CHARS),
+        Cell::fill("Name / fibres", TEXT_MUTED),
+    ]
+}
+
+/// One row per thread: its ID, start address, user stack, and a mark for a
+/// thread that runs fibres (and a name, on the Windows builds that keep one).
+/// A thread of the running process opens its stack in the memory pane.
+fn thread_rows(
+    ui: &mut egui::Ui,
+    threads: &[WinThread],
+    navigable: bool,
+    action: &mut Option<DebuggerAction>,
+) {
+    if threads.is_empty() {
+        ui.add_space(SPACE_ITEM);
+        ui.label(RichText::new("No threads listed.").color(TEXT_MUTED));
+        return;
+    }
+    for (n, thread) in threads.iter().enumerate() {
+        let start = if thread.start == 0 {
+            String::new()
+        } else {
+            format!("{:016X}", thread.start)
+        };
+        let stack = thread
+            .stack
+            .map_or_else(String::new, |stack| format!("{:X}–{:X}", stack.start, stack.end));
+        let tail = match (&thread.name, thread.uses_fibers) {
+            (Some(name), true) => format!("{name}  fibres"),
+            (Some(name), false) => name.clone(),
+            (None, true) => "fibres".to_owned(),
+            (None, false) => String::new(),
+        };
+        let tail_color = if thread.uses_fibers { ACCENT_AMBER } else { TEXT_MUTED };
+        let cells = [
+            Cell::right(thread.tid.to_string(), TEXT_PRIMARY, THREAD_TID_CHARS),
+            Cell::left(start, TEXT_MUTED, THREAD_START_CHARS),
+            Cell::left(stack, TEXT_MUTED, THREAD_STACK_CHARS),
+            Cell::fill(tail, tail_color),
+        ];
+        let response = list_row(ui, 0.0, &cells, Tone::striped(n), RowSense::Pick { selected: false });
+        if let (true, Some(stack)) = (navigable, thread.stack) {
+            if response
+                .on_hover_text("Click to show its stack in memory.")
+                .clicked()
+            {
+                *action = Some(DebuggerAction::OpenModule(stack.start));
+            }
         }
     }
 }
