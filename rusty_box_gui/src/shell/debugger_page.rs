@@ -18,9 +18,10 @@ use crate::debugger::inspect::{
 use crate::debugger::search::{
     pattern_of, FindOutcome, FindRequest, FoundAt, PatternError, SearchEncoding,
 };
+use crate::debugger::memory_map::{MemoryMap, RegionOwner};
 use crate::debugger::windows::{
-    process_tree, KernelMiss, ModuleRead, ProcessListing, SystemListing, SystemView, WinModule,
-    WinProcess,
+    process_tree, KernelMiss, ModuleRead, ProcessDetail, ProcessListing, SystemListing, SystemView,
+    WinModule, WinProcess,
 };
 use crate::shell::listing::{
     card_title, chip, empty_state, header_row, lead_arrow, lead_dot, list_row,
@@ -105,6 +106,8 @@ pub(crate) struct DebuggerPane {
     pub(crate) process_layout: ProcessLayout,
     /// What a listed process's or module's name must contain.
     pub(crate) list_filter: String,
+    /// Whether the Processes view shows modules or the memory map.
+    pub(crate) process_detail: ProcessDetail,
 }
 
 impl Default for DebuggerPane {
@@ -122,6 +125,7 @@ impl Default for DebuggerPane {
             selected_process: None,
             process_layout: ProcessLayout::Tree,
             list_filter: String::new(),
+            process_detail: ProcessDetail::Modules,
         }
     }
 }
@@ -149,11 +153,12 @@ impl DebuggerTab {
     }
 
     /// What this tab asks the run thread to list.
-    fn system_view(self, selected_process: Option<u64>) -> SystemView {
+    fn system_view(self, selected_process: Option<u64>, detail: ProcessDetail) -> SystemView {
         match self {
             Self::Cpu => SystemView::Off,
             Self::Processes => SystemView::Processes {
                 selected: selected_process,
+                detail,
             },
             Self::KernelModules => SystemView::KernelModules,
         }
@@ -339,7 +344,7 @@ fn toolbar(
         let tabs = DebuggerTab::ALL.map(|tab| (tab, tab.label()));
         if segmented(ui, &mut pane.tab, &tabs) {
             *action = Some(DebuggerAction::ShowSystem(
-                pane.tab.system_view(pane.selected_process),
+                pane.tab.system_view(pane.selected_process, pane.process_detail),
             ));
         }
         let Some(snapshot) = snapshot else {
@@ -1151,13 +1156,25 @@ fn processes_page(
         Some(ModuleRead::Listed(modules)) => Some(modules.len()),
         Some(ModuleRead::NoUserSpace | ModuleRead::Unreadable) | None => None,
     };
-    let module_title = Title {
+    let detail = pane.process_detail;
+    let right_count = match detail {
+        ProcessDetail::Modules => module_count,
+        ProcessDetail::MemoryMap => listing
+            .modules
+            .as_ref()
+            .and_then(|modules| modules.map.as_ref())
+            .map(|map| map.regions.len()),
+    };
+    let right_title = Title {
         text: &title,
-        count: module_count,
+        count: right_count,
     };
     let process_title = Title::counted("Processes", listing.processes.len());
     let navigable = chosen.is_some_and(|process| process.current);
     let rows = process_rows_shown(&listing.processes, pane.process_layout, &pane.list_filter);
+    // The Modules/Memory-map switch reports through this, so neither right-card
+    // closure has to borrow `action` (the body already does).
+    let mut switch_to: Option<ProcessDetail> = None;
     if wide {
         let gap = SPACE_ITEM;
         let page = ui.available_size();
@@ -1169,14 +1186,14 @@ fn processes_page(
                 egui::vec2(left, page.y),
                 process_title,
                 |ui| process_header(ui, &mut pane.process_layout, &mut pane.list_filter),
-                |ui| process_rows(ui, &listing.processes, &rows, chosen, &mut pane.selected_process, action),
+                |ui| process_rows(ui, &listing.processes, &rows, chosen, &mut pane.selected_process, detail, action),
             );
             fixed_card(
                 ui,
                 egui::vec2(page.x - gap - left, page.y),
-                module_title,
-                |ui| header_row(ui, 0.0, &module_columns()),
-                |ui| listed_modules(ui, listing, navigable, action),
+                right_title,
+                |ui| right_card_header(ui, pane.process_detail, &mut switch_to),
+                |ui| right_card_body(ui, detail, listing, navigable, action),
             );
         });
     } else {
@@ -1187,16 +1204,171 @@ fn processes_page(
                     ui,
                     process_title,
                     |ui| process_header(ui, &mut pane.process_layout, &mut pane.list_filter),
-                    |ui| process_rows(ui, &listing.processes, &rows, chosen, &mut pane.selected_process, action),
+                    |ui| process_rows(ui, &listing.processes, &rows, chosen, &mut pane.selected_process, detail, action),
                 );
                 ui.add_space(SPACE_ITEM);
                 card(
                     ui,
-                    module_title,
-                    |ui| header_row(ui, 0.0, &module_columns()),
-                    |ui| listed_modules(ui, listing, navigable, action),
+                    right_title,
+                    |ui| right_card_header(ui, pane.process_detail, &mut switch_to),
+                    |ui| right_card_body(ui, detail, listing, navigable, action),
                 );
             });
+    }
+    if let Some(chosen_detail) = switch_to {
+        pane.process_detail = chosen_detail;
+        *action = Some(DebuggerAction::ShowSystem(SystemView::Processes {
+            selected: pane.selected_process,
+            detail: chosen_detail,
+        }));
+    }
+}
+
+/// The right card's header: the Modules/Memory-map switch and the column
+/// titles. A changed switch is reported through `switch_to`.
+fn right_card_header(ui: &mut egui::Ui, detail: ProcessDetail, switch_to: &mut Option<ProcessDetail>) {
+    let mut chosen = detail;
+    if segmented(
+        ui,
+        &mut chosen,
+        &[
+            (ProcessDetail::Modules, "Modules"),
+            (ProcessDetail::MemoryMap, "Memory map"),
+        ],
+    ) {
+        *switch_to = Some(chosen);
+    }
+    match detail {
+        ProcessDetail::Modules => header_row(ui, 0.0, &module_columns()),
+        ProcessDetail::MemoryMap => header_row(ui, 0.0, &memory_columns()),
+    }
+}
+
+/// The right card's body: the modules, or the memory map.
+fn right_card_body(
+    ui: &mut egui::Ui,
+    detail: ProcessDetail,
+    listing: &ProcessListing,
+    navigable: bool,
+    action: &mut Option<DebuggerAction>,
+) {
+    match detail {
+        ProcessDetail::Modules => listed_modules(ui, listing, navigable, action),
+        ProcessDetail::MemoryMap => match listing.modules.as_ref().and_then(|m| m.map.as_ref()) {
+            Some(map) => memory_map_rows(ui, map, navigable, action),
+            None => {
+                ui.add_space(SPACE_ITEM);
+                ui.label(RichText::new("Reading the address space…").color(TEXT_MUTED));
+            }
+        },
+    }
+}
+
+/// A size in bytes, as a debugger shows it: whole KiB, or MiB/GiB to one
+/// place. Guest regions are page-aligned, so KiB is exact.
+fn human_size(bytes: u64) -> String {
+    const KIB: u64 = 1024;
+    const MIB: u64 = KIB * 1024;
+    const GIB: u64 = MIB * 1024;
+    if bytes >= GIB {
+        format!("{:.1} GB", bytes as f64 / GIB as f64)
+    } else if bytes >= MIB {
+        format!("{:.1} MB", bytes as f64 / MIB as f64)
+    } else if bytes >= KIB {
+        format!("{} KB", bytes / KIB)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
+const MEMORY_SIZE_CHARS: usize = 8;
+const MEMORY_RESIDENT_CHARS: usize = 9;
+const MEMORY_ACCESS_CHARS: usize = 5;
+const MEMORY_MODULE_CHARS: usize = 18;
+
+fn memory_columns() -> [Cell; 6] {
+    [
+        Cell::left("Address", TEXT_MUTED, 16),
+        Cell::right("Size", TEXT_MUTED, MEMORY_SIZE_CHARS),
+        Cell::right("Resident", TEXT_MUTED, MEMORY_RESIDENT_CHARS),
+        Cell::left("Access", TEXT_MUTED, MEMORY_ACCESS_CHARS),
+        Cell::left("Module", TEXT_MUTED, MEMORY_MODULE_CHARS),
+        Cell::fill("Section", TEXT_MUTED),
+    ]
+}
+
+/// One row per region, in address order: its address, size, how much is
+/// resident, the access of its pages, and what occupies it. Executable
+/// memory is cyan — the one thing to hunt for.
+fn memory_map_rows(
+    ui: &mut egui::Ui,
+    map: &MemoryMap,
+    navigable: bool,
+    action: &mut Option<DebuggerAction>,
+) {
+    if map.regions.is_empty() {
+        ui.add_space(SPACE_ITEM);
+        ui.label(RichText::new("No mapped memory.").color(TEXT_MUTED));
+        return;
+    }
+    for (index, region) in map.regions.iter().enumerate() {
+        let executable = region.access.is_some_and(|a| a.executable);
+        let observed = region.access.is_some_and(|a| a.observed);
+        let access_text = match region.access {
+            Some(access) => {
+                let mut text = String::from("R");
+                if access.writable {
+                    text.push('W');
+                } else {
+                    text.push(' ');
+                }
+                if access.executable {
+                    text.push('X');
+                }
+                text
+            }
+            None => "—".to_owned(),
+        };
+        let (module, section) = match &region.owner {
+            RegionOwner::Header { module } => (module.as_str(), "headers"),
+            RegionOwner::Section { module, section, .. } => (module.as_str(), section.as_str()),
+            RegionOwner::Private => ("", "private"),
+        };
+        let access_color = if executable {
+            ACCENT_CYAN
+        } else if observed {
+            TEXT_PRIMARY
+        } else {
+            TEXT_MUTED
+        };
+        let module_color = if executable { ACCENT_CYAN } else { TEXT_PRIMARY };
+        let resident = format!("{}/{}", region.resident_pages, region.total_pages);
+        let cells = [
+            Cell::left(format!("{:016X}", region.start), TEXT_MUTED, 16),
+            Cell::right(human_size(region.size), TEXT_MUTED, MEMORY_SIZE_CHARS),
+            Cell::right(resident, TEXT_MUTED, MEMORY_RESIDENT_CHARS),
+            Cell::left(access_text, access_color, MEMORY_ACCESS_CHARS),
+            Cell::left(module, module_color, MEMORY_MODULE_CHARS),
+            Cell::fill(section, TEXT_MUTED),
+        ];
+        let response = list_row(
+            ui,
+            0.0,
+            &cells,
+            Tone::striped(index),
+            RowSense::Pick { selected: false },
+        );
+        // A region in the running process opens the memory pane at its start.
+        if navigable {
+            if response
+                .on_hover_text("Click to show it in memory.")
+                .clicked()
+            {
+                *action = Some(DebuggerAction::OpenModule(region.start));
+            }
+        } else {
+            response.on_hover_text(ANOTHER_ADDRESS_SPACE);
+        }
     }
 }
 
@@ -1341,6 +1513,7 @@ fn process_rows(
     rows: &[ShownProcess],
     chosen: Option<&WinProcess>,
     selected_process: &mut Option<u64>,
+    detail: ProcessDetail,
     action: &mut Option<DebuggerAction>,
 ) {
     if rows.is_empty() {
@@ -1384,6 +1557,7 @@ fn process_rows(
             *selected_process = Some(process.eprocess);
             *action = Some(DebuggerAction::ShowSystem(SystemView::Processes {
                 selected: *selected_process,
+                detail,
             }));
         }
     }

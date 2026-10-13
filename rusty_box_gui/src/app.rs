@@ -9610,7 +9610,10 @@ mod tests {
             window.run();
             assert_eq!(
                 control.view().system,
-                SystemView::Processes { selected: None }
+                SystemView::Processes {
+                    selected: None,
+                    detail: crate::debugger::windows::ProcessDetail::Modules,
+                }
             );
             window.get_by_label("Kernel modules").click();
             window.run();

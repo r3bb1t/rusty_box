@@ -10,6 +10,8 @@
 pub(crate) mod control;
 pub(crate) mod dump;
 pub(crate) mod inspect;
+pub(crate) mod memory_map;
+pub(crate) mod pe;
 pub(crate) mod search;
 pub(crate) mod serve;
 pub(crate) mod windows;

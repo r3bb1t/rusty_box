@@ -27,8 +27,16 @@
 //! (`DebugCpu::dbg_xlate_linear2phy_in`), so every process's modules list,
 //! not only the running one's.
 
-use rusty_box::cpu::{CpuDebugView, Fetched, Instrumentation};
+use rusty_box::cpu::{CpuDebugView, Fetched, Instrumentation, LinearRange, WalkStep};
 use rusty_box::emulator::{DebugCpu, SliceEngine};
+
+use super::memory_map::{self, MemoryMap, ModuleLayout};
+use super::pe::{self, HEADER_BYTES};
+
+/// The top of a user address space: canonical low half in long mode, and
+/// above every 32-bit user address, so one bound covers native 64-bit, a
+/// WOW64 process and a 32-bit kernel's user space alike.
+const USER_SPACE_END: u64 = 0x0000_8000_0000_0000;
 
 /// What the page asks to list beside the processor panes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -36,11 +44,25 @@ pub(crate) enum SystemView {
     /// Nothing: the processor panes only.
     #[default]
     Off,
-    /// Every process, and the modules of `selected` (an `EPROCESS` address),
-    /// or of the running process when none is selected.
-    Processes { selected: Option<u64> },
+    /// Every process, and — for `selected` (an `EPROCESS` address), or the
+    /// running process when none is selected — either its modules or its
+    /// memory map.
+    Processes {
+        selected: Option<u64>,
+        detail: ProcessDetail,
+    },
     /// The drivers and the kernel itself, in load order.
     KernelModules,
+}
+
+/// What the Processes view shows for the chosen process.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum ProcessDetail {
+    /// Its loaded modules, in load order.
+    #[default]
+    Modules,
+    /// Its address space, region by region.
+    MemoryMap,
 }
 
 /// What was listed for a [`SystemView`].
@@ -114,6 +136,8 @@ pub(crate) struct WinProcess {
 pub(crate) struct ProcessModules {
     pub(crate) eprocess: u64,
     pub(crate) read: ModuleRead,
+    /// The memory map, when the view asked for it and the modules read.
+    pub(crate) map: Option<MemoryMap>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -217,14 +241,26 @@ pub(crate) fn read_system<T: Instrumentation, E: SliceEngine<T>>(
             ),
             None => SystemListing::NoWindowsKernel(KernelMiss::NoModuleList),
         },
-        SystemView::Processes { selected } => {
+        SystemView::Processes { selected, detail } => {
             let processes = list_processes(cpu, &kernel, view.registers.cr3);
-            let chosen = selected
-                .and_then(|eprocess| processes.iter().find(|p| p.eprocess == eprocess))
-                .or_else(|| processes.iter().find(|p| p.current));
-            let modules = chosen.map(|process| ProcessModules {
-                eprocess: process.eprocess,
-                read: process_modules(cpu, &processes, process),
+            let chosen_index = selected
+                .and_then(|eprocess| processes.iter().position(|p| p.eprocess == eprocess))
+                .or_else(|| processes.iter().position(|p| p.current));
+            let modules = chosen_index.map(|index| {
+                let eprocess = processes[index].eprocess;
+                let cr3 = processes[index].cr3;
+                let read = process_modules(cpu, &processes, &processes[index]);
+                let map = match (detail, &read) {
+                    (ProcessDetail::MemoryMap, ModuleRead::Listed(modules)) => {
+                        Some(read_memory_map(cpu, cr3, modules))
+                    }
+                    _ => None,
+                };
+                ProcessModules {
+                    eprocess,
+                    read,
+                    map,
+                }
             });
             SystemListing::Processes(ProcessListing { processes, modules })
         }
@@ -677,6 +713,50 @@ fn process_modules<T: Instrumentation, E: SliceEngine<T>>(
     }
 }
 
+/// The page-table memory map of the process whose address space is `cr3`:
+/// its mapped user pages, with each module's span split into its header and
+/// its sections. The module list is already read by [`process_modules`]; the
+/// sections come from each module's PE headers, read through its own tables.
+pub(crate) fn read_memory_map<T: Instrumentation, E: SliceEngine<T>>(
+    cpu: &mut DebugCpu<'_, T, E>,
+    cr3: u64,
+    modules: &[WinModule],
+) -> MemoryMap {
+    let root = Root::Process(cr3);
+    let layouts: Vec<ModuleLayout> = modules
+        .iter()
+        .map(|module| {
+            let sections = read_exact(cpu, root, module.base, HEADER_BYTES)
+                .and_then(|header| pe::parse_sections(&header))
+                .unwrap_or_default();
+            let name = module
+                .name
+                .clone()
+                .unwrap_or_else(|| format!("{:X}", module.base));
+            ModuleLayout {
+                base: module.base,
+                name,
+                sections,
+            }
+        })
+        .collect();
+    let mut mappings = Vec::new();
+    cpu.dbg_page_mappings_in(
+        cr3,
+        LinearRange {
+            start: 0,
+            end: USER_SPACE_END,
+        },
+        |mapping| {
+            if mapping.access.user {
+                mappings.push(mapping);
+            }
+            WalkStep::Continue
+        },
+    );
+    memory_map::build(&mappings, &layouts)
+}
+
 /// The `EPROCESS.Peb` offset: the first field that, in `PEB_WITNESSES`
 /// processes (or every process there is, if fewer), holds a page-aligned
 /// user address whose `ImageBaseAddress` (+0x10) points at an `MZ` image.
@@ -860,7 +940,11 @@ mod tests {
             read_system(&mut cpu, &view, SystemView::Off),
             SystemListing::NotAsked
         );
-        for asked in [SystemView::KernelModules, SystemView::Processes { selected: None }] {
+        let processes = SystemView::Processes {
+            selected: None,
+            detail: ProcessDetail::Modules,
+        };
+        for asked in [SystemView::KernelModules, processes] {
             // The flat test mode keeps GS at 0: there is no KPCR to find.
             assert_eq!(
                 read_system(&mut cpu, &view, asked),
