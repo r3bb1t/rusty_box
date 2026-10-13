@@ -17,6 +17,9 @@ use crate::debugger::inspect::{
 use crate::debugger::search::{
     pattern_of, FindOutcome, FindRequest, FoundAt, PatternError, SearchEncoding,
 };
+use crate::debugger::windows::{
+    KernelMiss, ModuleRead, ProcessListing, SystemListing, SystemView, WinModule, WinProcess,
+};
 use crate::shell::theme::{
     shell_card_frame, ACCENT_AMBER, ACCENT_CYAN, ACCENT_RED, SPACE_ITEM, SPACE_PAGE, TEXT_MUTED,
     TEXT_PRIMARY, TEXT_SECONDARY,
@@ -89,6 +92,10 @@ pub(crate) struct DebuggerPane {
     pub(crate) search_text: String,
     pub(crate) search_encoding: SearchEncoding,
     pub(crate) search_error: Option<PatternError>,
+    pub(crate) tab: DebuggerTab,
+    /// The process whose modules the Processes view lists (its `EPROCESS`
+    /// address); `None` lists the running process's.
+    pub(crate) selected_process: Option<u64>,
 }
 
 impl Default for DebuggerPane {
@@ -102,6 +109,42 @@ impl Default for DebuggerPane {
             search_text: String::new(),
             search_encoding: SearchEncoding::Hex,
             search_error: None,
+            tab: DebuggerTab::Cpu,
+            selected_process: None,
+        }
+    }
+}
+
+/// What the page shows under its toolbar.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DebuggerTab {
+    /// Code, registers, memory and stack.
+    Cpu,
+    /// The guest's processes and the modules of one.
+    Processes,
+    /// The guest kernel's drivers.
+    KernelModules,
+}
+
+impl DebuggerTab {
+    const ALL: [Self; 3] = [Self::Cpu, Self::Processes, Self::KernelModules];
+
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Cpu => "CPU",
+            Self::Processes => "Processes",
+            Self::KernelModules => "Kernel modules",
+        }
+    }
+
+    /// What this tab asks the run thread to list.
+    fn system_view(self, selected_process: Option<u64>) -> SystemView {
+        match self {
+            Self::Cpu => SystemView::Off,
+            Self::Processes => SystemView::Processes {
+                selected: selected_process,
+            },
+            Self::KernelModules => SystemView::KernelModules,
         }
     }
 }
@@ -127,6 +170,11 @@ pub(crate) enum DebuggerAction {
     ShowMemory(MemoryTarget),
     SelectCpu(usize),
     Find(FindRequest),
+    /// List these beside the processor panes (or nothing).
+    ShowSystem(SystemView),
+    /// Show the CPU tab with the memory pane at this linear address: a
+    /// module picked from a list.
+    OpenModule(u64),
 }
 
 /// What the panes compare against and mark: the snapshot before, and the
@@ -193,10 +241,13 @@ pub(crate) fn draw_debugger_page(
             privilege_line(ui, snapshot);
             follow_window(pane, snapshot);
             ui.add_space(SPACE_ITEM);
-            if ui.available_width() >= TWO_COLUMN_WIDTH {
-                grid_layout(ui, snapshot, marks, pane, &mut action);
-            } else {
-                stacked_layout(ui, snapshot, marks, pane, &mut action);
+            let wide = ui.available_width() >= TWO_COLUMN_WIDTH;
+            match pane.tab {
+                DebuggerTab::Cpu if wide => grid_layout(ui, snapshot, marks, pane, &mut action),
+                DebuggerTab::Cpu => stacked_layout(ui, snapshot, marks, pane, &mut action),
+                DebuggerTab::Processes | DebuggerTab::KernelModules => {
+                    system_page(ui, wide, snapshot, pane, &mut action);
+                }
             }
         });
     action
@@ -284,6 +335,16 @@ fn toolbar(
         {
             *action = Some(DebuggerAction::DumpRam);
         }
+        ui.separator();
+        for tab in DebuggerTab::ALL {
+            if ui.selectable_label(pane.tab == tab, tab.label()).clicked() && pane.tab != tab {
+                pane.tab = tab;
+                *action = Some(DebuggerAction::ShowSystem(
+                    tab.system_view(pane.selected_process),
+                ));
+            }
+        }
+        ui.separator();
         let Some(snapshot) = snapshot else {
             return;
         };
@@ -445,7 +506,9 @@ where
 {
     let frame = shell_card_frame();
     let inner = (size - frame.total_margin().sum()).max(egui::Vec2::ZERO);
-    ui.allocate_ui(size, |ui| {
+    // The pane stacks its title, header and body whatever the row around it
+    // lays out.
+    ui.allocate_ui_with_layout(size, egui::Layout::top_down(egui::Align::Min), |ui| {
         frame.show(ui, |ui| {
             ui.set_min_size(inner);
             ui.set_max_size(inner);
@@ -874,6 +937,198 @@ fn stack_rows(ui: &mut egui::Ui, snapshot: &DebugSnapshot, marks: Marks<'_>) {
             ui,
             mono(format!("{:0digits$X}  {value}", slot.address)).color(color),
         );
+    }
+}
+
+/// Said while the run thread has not yet listed what a tab asks for.
+const READING_LIST: &str = "Reading the guest's lists…";
+/// Why the lists are empty: no Windows x64 kernel, and the step that said so.
+pub(crate) fn no_windows_kernel(miss: KernelMiss) -> String {
+    format!(
+        "No 64-bit Windows kernel was found in this guest ({}): the lists read \
+         Windows x64's own process and driver lists.",
+        miss.message()
+    )
+}
+const ANOTHER_ADDRESS_SPACE: &str = "This module lies in another process's address space; \
+     pause while that process runs to see its memory.";
+
+/// The Processes and Kernel modules tabs: the guest kernel's own lists.
+fn system_page(
+    ui: &mut egui::Ui,
+    wide: bool,
+    snapshot: &DebugSnapshot,
+    pane: &mut DebuggerPane,
+    action: &mut Option<DebuggerAction>,
+) {
+    match (&snapshot.system, pane.tab) {
+        (SystemListing::NoWindowsKernel(miss), _) => {
+            ui.label(RichText::new(no_windows_kernel(*miss)).color(TEXT_MUTED));
+        }
+        (SystemListing::Processes(listing), DebuggerTab::Processes) => {
+            processes_page(ui, wide, listing, pane, action);
+        }
+        (SystemListing::KernelModules(modules), DebuggerTab::KernelModules) => {
+            let page = ui.available_size();
+            fixed_card(ui, page, "Kernel modules", module_header, |ui| {
+                module_rows(ui, modules, true, action);
+            });
+        }
+        // A list for another tab, or none yet: the run thread is reading.
+        (
+            SystemListing::NotAsked | SystemListing::Processes(_) | SystemListing::KernelModules(_),
+            _,
+        ) => {
+            ui.label(RichText::new(READING_LIST).color(TEXT_MUTED));
+        }
+    }
+}
+
+fn processes_page(
+    ui: &mut egui::Ui,
+    wide: bool,
+    listing: &ProcessListing,
+    pane: &mut DebuggerPane,
+    action: &mut Option<DebuggerAction>,
+) {
+    let chosen = listing
+        .modules
+        .as_ref()
+        .and_then(|modules| listing.processes.iter().find(|p| p.eprocess == modules.eprocess));
+    let title = match chosen {
+        Some(process) => format!("Modules of {} (PID {})", process.name, process.pid),
+        None => "Modules".to_owned(),
+    };
+    let navigable = chosen.is_some_and(|process| process.current);
+    if wide {
+        let gap = SPACE_ITEM;
+        let page = ui.available_size();
+        let left = ((page.x - gap) * PROCESS_LIST_SHARE).floor();
+        ui.spacing_mut().item_spacing = egui::vec2(gap, gap);
+        ui.horizontal_top(|ui| {
+            fixed_card(ui, egui::vec2(left, page.y), "Processes", process_header, |ui| {
+                process_rows(ui, &listing.processes, chosen, pane, action);
+            });
+            fixed_card(
+                ui,
+                egui::vec2(page.x - gap - left, page.y),
+                &title,
+                module_header,
+                |ui| listed_modules(ui, listing, navigable, action),
+            );
+        });
+    } else {
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                card(ui, "Processes", |ui| {
+                    process_header(ui);
+                    process_rows(ui, &listing.processes, chosen, pane, action);
+                });
+                card(ui, &title, |ui| {
+                    module_header(ui);
+                    listed_modules(ui, listing, navigable, action);
+                });
+            });
+    }
+}
+
+/// The share of the page's width the process list takes beside its modules.
+const PROCESS_LIST_SHARE: f32 = 0.45;
+
+/// The chosen process's modules, or why there are none to list.
+fn listed_modules(
+    ui: &mut egui::Ui,
+    listing: &ProcessListing,
+    navigable: bool,
+    action: &mut Option<DebuggerAction>,
+) {
+    let muted = |ui: &mut egui::Ui, text: &str| {
+        ui.label(RichText::new(text).color(TEXT_MUTED));
+    };
+    match listing.modules.as_ref().map(|modules| &modules.read) {
+        Some(ModuleRead::Listed(modules)) => module_rows(ui, modules, navigable, action),
+        Some(ModuleRead::NoUserSpace) => {
+            muted(ui, "A kernel process: it loads no user-mode modules.");
+        }
+        Some(ModuleRead::Unreadable) => {
+            muted(ui, "Its loader data is paged out or could not be found.");
+        }
+        None => muted(ui, "Pick a process."),
+    }
+}
+
+fn process_header(ui: &mut egui::Ui) {
+    row(
+        ui,
+        mono(format!("  {:>6}  {:<15}  {:<16}  EPROCESS", "PID", "Name", "CR3")).color(TEXT_MUTED),
+    );
+}
+
+/// One row per process; the running one is marked, the listed one selected.
+fn process_rows(
+    ui: &mut egui::Ui,
+    processes: &[WinProcess],
+    chosen: Option<&WinProcess>,
+    pane: &mut DebuggerPane,
+    action: &mut Option<DebuggerAction>,
+) {
+    for process in processes {
+        let marker = if process.current { "▶" } else { " " };
+        let text = format!(
+            "{marker} {:>6}  {:<15}  {:016X}  {:016X}",
+            process.pid, process.name, process.cr3, process.eprocess
+        );
+        let color = if process.current { ACCENT_CYAN } else { TEXT_PRIMARY };
+        let selected = chosen.is_some_and(|c| c.eprocess == process.eprocess);
+        let response = ui.add(
+            egui::Button::selectable(selected, mono(text).color(color))
+                .wrap_mode(egui::TextWrapMode::Truncate),
+        );
+        let response = if process.current {
+            response.on_hover_text("The shown processor runs in this process's address space.")
+        } else {
+            response
+        };
+        if response.clicked() && !selected {
+            pane.selected_process = Some(process.eprocess);
+            *action = Some(DebuggerAction::ShowSystem(SystemView::Processes {
+                selected: pane.selected_process,
+            }));
+        }
+    }
+}
+
+fn module_header(ui: &mut egui::Ui) {
+    row(
+        ui,
+        mono(format!("{:<16}  {:>8}  Name", "Base", "Size")).color(TEXT_MUTED),
+    );
+}
+
+/// One row per module. A module in the running address space opens the CPU
+/// tab's memory pane at its base; one elsewhere says why it cannot.
+fn module_rows(
+    ui: &mut egui::Ui,
+    modules: &[WinModule],
+    navigable: bool,
+    action: &mut Option<DebuggerAction>,
+) {
+    for module in modules {
+        let name = module.name.as_deref().unwrap_or("(name paged out)");
+        let text = format!("{:016X}  {:>8X}  {name}", module.base, module.size);
+        let path = module.path.as_deref().unwrap_or("(path paged out)");
+        let response = ui.add(
+            egui::Button::selectable(false, mono(text).color(TEXT_PRIMARY))
+                .wrap_mode(egui::TextWrapMode::Truncate),
+        );
+        if navigable {
+            if response.on_hover_text(format!("{path}\nClick to show it in memory.")).clicked() {
+                *action = Some(DebuggerAction::OpenModule(module.base));
+            }
+        } else {
+            response.on_hover_text(format!("{path}\n{ANOTHER_ADDRESS_SPACE}"));
+        }
     }
 }
 

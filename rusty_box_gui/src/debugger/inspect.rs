@@ -4,6 +4,8 @@
 use rusty_box::cpu::{CodeSize, CpuDebugView, Fetched, Instrumentation};
 use rusty_box::emulator::{DebugCpu, Emulator, SliceEngine};
 
+use super::windows::{read_system, SystemListing, SystemView};
+
 pub(crate) const ROW_BYTES: usize = 16;
 pub(crate) const MEMORY_ROWS: usize = 32;
 pub(crate) const MEMORY_WINDOW_BYTES: u64 = (ROW_BYTES * MEMORY_ROWS) as u64;
@@ -40,6 +42,8 @@ pub(crate) enum MemoryTarget {
 pub(crate) struct ViewRequest {
     pub(crate) cpu: usize,
     pub(crate) memory: MemoryTarget,
+    /// The guest OS's processes or kernel modules, when the page lists them.
+    pub(crate) system: SystemView,
 }
 
 impl Default for ViewRequest {
@@ -47,6 +51,7 @@ impl Default for ViewRequest {
         Self {
             cpu: 0,
             memory: MemoryTarget::Rip,
+            system: SystemView::Off,
         }
     }
 }
@@ -63,6 +68,8 @@ pub(crate) struct DebugSnapshot {
     /// The Windows process the shown processor is running for, by its image
     /// path, when the guest's structures name one.
     pub(crate) process: Option<String>,
+    /// What `ViewRequest::system` asked to be listed.
+    pub(crate) system: SystemListing,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -152,6 +159,7 @@ pub(crate) fn read_snapshot<T: Instrumentation, E: SliceEngine<T>>(
             },
             stack: Vec::new(),
             process: None,
+            system: SystemListing::NotAsked,
         };
     };
     let shown = cpu.view();
@@ -173,6 +181,7 @@ pub(crate) fn read_snapshot<T: Instrumentation, E: SliceEngine<T>>(
     let memory = read_memory(&mut cpu, start);
     let stack = read_stack(&mut cpu, rsp, slot_bytes(size));
     let process = windows_image_path(&mut cpu, &shown);
+    let system = read_system(&mut cpu, &shown, view.system);
     DebugSnapshot {
         cpus,
         cpu: index,
@@ -180,6 +189,7 @@ pub(crate) fn read_snapshot<T: Instrumentation, E: SliceEngine<T>>(
         memory,
         stack,
         process,
+        system,
     }
 }
 
@@ -556,8 +566,8 @@ mod tests {
             let snapshot = read_snapshot(
                 &mut machine,
                 &ViewRequest {
-                    cpu: 0,
                     memory: MemoryTarget::At(target),
+                    ..ViewRequest::default()
                 },
             );
             assert_eq!(snapshot.memory.rows.len(), MEMORY_ROWS, "{target:?}");
@@ -575,7 +585,7 @@ mod tests {
             &mut machine,
             &ViewRequest {
                 cpu: 5,
-                memory: MemoryTarget::Rip,
+                ..ViewRequest::default()
             },
         );
         assert_eq!(snapshot.cpu, 0);

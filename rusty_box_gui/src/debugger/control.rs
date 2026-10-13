@@ -592,6 +592,7 @@ mod tests {
             },
             stack: Vec::new(),
             process: None,
+            system: crate::debugger::windows::SystemListing::NotAsked,
         });
         control.finish_run();
         control.begin_run(RunStart::PowerOn);
@@ -646,6 +647,7 @@ mod tests {
             },
             stack: Vec::new(),
             process: None,
+            system: crate::debugger::windows::SystemListing::NotAsked,
         }
     }
 
@@ -714,8 +716,8 @@ mod tests {
         control.set_view(ViewRequest::default());
         assert!(control.lock().tasks.is_empty());
         control.set_view(ViewRequest {
-            cpu: 0,
             memory: crate::debugger::inspect::MemoryTarget::Rsp,
+            ..ViewRequest::default()
         });
         assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::Refresh));
     }

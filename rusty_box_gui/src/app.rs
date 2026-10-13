@@ -2146,14 +2146,29 @@ impl NativeShellApp {
             Some(DebuggerAction::Step) => control.step(),
             Some(DebuggerAction::DumpRam) => self.ask_for_ram_dump(),
             Some(DebuggerAction::ShowMemory(memory)) => {
-                let cpu = control.view().cpu;
-                control.set_view(ViewRequest { cpu, memory });
+                control.set_view(ViewRequest { memory, ..control.view() });
             }
             Some(DebuggerAction::SelectCpu(cpu)) => {
-                let memory = control.view().memory;
-                control.set_view(ViewRequest { cpu, memory });
+                control.set_view(ViewRequest { cpu, ..control.view() });
             }
             Some(DebuggerAction::Find(request)) => control.find(request),
+            Some(DebuggerAction::ShowSystem(system)) => {
+                control.set_view(ViewRequest { system, ..control.view() });
+            }
+            Some(DebuggerAction::OpenModule(base)) => {
+                use crate::debugger::inspect::{AddressSpace, GuestAddress, MemoryTarget};
+                use crate::debugger::windows::SystemView;
+                use crate::shell::debugger_page::DebuggerTab;
+                self.sessions.open(&vm).debugger_mut().tab = DebuggerTab::Cpu;
+                control.set_view(ViewRequest {
+                    memory: MemoryTarget::At(GuestAddress {
+                        space: AddressSpace::Linear,
+                        value: base,
+                    }),
+                    system: SystemView::Off,
+                    ..control.view()
+                });
+            }
         }
     }
 
@@ -9579,6 +9594,50 @@ mod tests {
                 .click();
             window.run();
             assert_eq!(control.view().memory, MemoryTarget::Rsp);
+        }
+
+        /// The Processes and Kernel modules tabs ask the paused run for the
+        /// guest's lists; CPU asks for none.
+        #[test]
+        fn the_list_tabs_ask_the_run_for_the_guests_lists() {
+            use crate::debugger::windows::SystemView;
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_vm(&mut app);
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            window.get_by_label("Processes").click();
+            window.run();
+            assert_eq!(
+                control.view().system,
+                SystemView::Processes { selected: None }
+            );
+            window.get_by_label("Kernel modules").click();
+            window.run();
+            assert_eq!(control.view().system, SystemView::KernelModules);
+            window.get_by_label("CPU").click();
+            window.run();
+            assert_eq!(control.view().system, SystemView::Off);
+        }
+
+        /// A guest that is not 64-bit Windows says so under the list tabs.
+        #[test]
+        fn a_guest_with_no_windows_kernel_says_so_under_the_list_tabs() {
+            use crate::debugger::windows::{KernelMiss, SystemListing};
+            use crate::shell::debugger_page::no_windows_kernel;
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_vm(&mut app);
+            let mut snapshot = paused_snapshot();
+            snapshot.system = SystemListing::NoWindowsKernel(KernelMiss::NoKpcr);
+            control.publish(snapshot);
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            window.get_by_label("Kernel modules").click();
+            window.run();
+            assert!(window
+                .query_by_label(&no_windows_kernel(KernelMiss::NoKpcr))
+                .is_some());
         }
 
         fn press(pos: egui::Pos2) -> egui::Event {

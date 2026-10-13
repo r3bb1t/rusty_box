@@ -2505,6 +2505,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 pub(crate) enum DbgWalk {
     /// The processor's own paging structures, from CR3.
     Guest,
+    /// Another address space's paging structures, from this CR3 value, under
+    /// the processor's own CR4 and EFER.LMA: a guest OS's other processes.
+    /// Bochs's debugger walks only the live CR3; this walk is that walk with
+    /// the root swapped, so a legacy PAE root's PDPTEs come from memory at
+    /// CR3 rather than from the processor's PDPTR cache.
+    Root(u64),
     /// An SVM host's nested tables, from the VMCB's nCR3, under the host's
     /// CR4 and EFER.LMA.
     Nested,
@@ -2699,10 +2705,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             let mut pt_address = self.cr3 & BX_CR3_PAGING_MASK_PAE;
             let mut the_cr4 = self.cr4;
             let mut in_long_mode = self.long_mode();
-            if walk == DbgWalk::Nested {
-                pt_address = self.vmcb.ctrls.ncr3 & !0xfff;
-                the_cr4 = self.vmcb.host_state.cr4;
-                in_long_mode = self.vmcb.host_state.efer.lma();
+            match walk {
+                DbgWalk::Guest => {}
+                DbgWalk::Root(cr3) => pt_address = cr3 & BX_CR3_PAGING_MASK_PAE,
+                DbgWalk::Nested => {
+                    pt_address = self.vmcb.ctrls.ncr3 & !0xfff;
+                    the_cr4 = self.vmcb.host_state.cr4;
+                    in_long_mode = self.vmcb.host_state.efer.lma();
+                }
             }
             if the_cr4.pae() {
                 let mut level = BX_LEVEL_PDE;
@@ -2712,7 +2722,17 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                     if self.in_svm_guest && self.vmcb.ctrls.nested_paging {
                         level = BX_LEVEL_PDPTE;
                     } else {
-                        let entry = self.pdptrcache.entry[((laddr >> 30) & 3) as usize];
+                        let entry = match walk {
+                            DbgWalk::Root(cr3) => {
+                                // A PAE root is 32 bytes at CR3[31:5]: four PDPTEs.
+                                let at = (cr3 & 0xffff_ffe0) + ((laddr >> 30) & 3) * 8;
+                                let at = self.dbg_nested_translation(at, walk)?;
+                                self.page_walk_read_qword_ro(at)
+                            }
+                            DbgWalk::Guest | DbgWalk::Nested => {
+                                self.pdptrcache.entry[((laddr >> 30) & 3) as usize]
+                            }
+                        };
                         if entry & 0x1 == 0 {
                             return None;
                         }
@@ -2803,7 +2823,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         if self.ept_active() {
             paddr = self.dbg_translate_guest_physical_ept(paddr)?;
         }
-        if walk == DbgWalk::Guest && self.in_svm_guest && self.vmcb.ctrls.nested_paging {
+        if walk != DbgWalk::Nested && self.in_svm_guest && self.vmcb.ctrls.nested_paging {
             paddr = self.dbg_xlate_linear2phy(paddr, DbgWalk::Nested)?;
         }
         Some(paddr)

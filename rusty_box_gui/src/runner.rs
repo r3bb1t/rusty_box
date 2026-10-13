@@ -2905,8 +2905,8 @@ mod tests {
 
         // Read again, elsewhere: the guest has not moved meanwhile.
         vm.control.set_view(ViewRequest {
-            cpu: 0,
             memory: MemoryTarget::Rsp,
+            ..ViewRequest::default()
         });
         wait_until(|| {
             vm.control

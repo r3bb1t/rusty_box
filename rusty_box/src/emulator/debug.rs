@@ -75,6 +75,16 @@ impl<T: Instrumentation, E: SliceEngine<T>> DebugCpu<'_, T, E> {
             .dbg_xlate_linear2phy(laddr, crate::cpu::paging::DbgWalk::Guest)
     }
 
+    /// [`Self::dbg_xlate_linear2phy`] through another address space: the
+    /// paging structures rooted at the CR3 value `cr3`, read under this
+    /// processor's CR4 and EFER. That is how a debugger follows a guest OS
+    /// into a process other than the one this processor is running.
+    pub fn dbg_xlate_linear2phy_in(&mut self, cr3: u64, laddr: u64) -> Option<u64> {
+        self.machine
+            .exec_ctx(self.index)
+            .dbg_xlate_linear2phy(laddr, crate::cpu::paging::DbgWalk::Root(cr3))
+    }
+
     /// Bochs misc_mem.cc `dbg_fetch_mem`: `buf.len()` guest-physical bytes
     /// from `addr`, as this processor sees them (its SMM state decides
     /// whether SMRAM is visible).
