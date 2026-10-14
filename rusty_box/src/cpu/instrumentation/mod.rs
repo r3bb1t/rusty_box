@@ -67,7 +67,9 @@ pub use bochs::Instrumentation;
 pub use ctx::{CpuAccess, HookCtx};
 pub use registry::InstrumentationRegistry;
 pub use types::{
-    BranchEvent, BranchType, CacheCntrl, CodeSize, CpuSetupMode, CpuSnapshot, EmuStopReason,
+    BranchEvent, BranchType, CacheCntrl, CodeSize, CpuDebugView, CpuSetupMode, CpuSnapshot,
+    EmuStopReason, ExecutionMode, Fetched, ProcessorActivity, SegmentBases,
+    DescriptorTable, LinearRange, MappingWalk, PageAccess, PageMapping, WalkStep,
     ExitSet, HookMask, HwInterruptEvent, InstrAction, InvEptType, InvPcidType, IoHookEvent,
     LinAccess, MemAccessRW, MemHookEvent, MemPermViolation, MemPerms, MemType, MemUnmapped,
     MwaitEvent, MwaitFlags, OpcodeEvent, PhyAccess, PrefetchEvent, PrefetchHint, ResetType,

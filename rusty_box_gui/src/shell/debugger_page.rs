@@ -1,0 +1,3869 @@
+//! The Debugger page: a paused VM's processors, code, memory and stack, laid
+//! out as x64dbg lays out its CPU tab — a fixed grid of code and registers
+//! above memory and stack, each pane scrolling on its own — where the page
+//! is wide and tall enough for four useful panes, and otherwise as panes at
+//! the height of their content in two columns or one, the page scrolling as
+//! a whole (`Fit`). The choice is made from the room the page measures, never
+//! from the platform. What the last step (or pause) changed is drawn red; the
+//! memory pane searches for hex, text or UTF-16. Like the VM bar, it draws
+//! from borrowed state and reports what was asked for; the app acts on it.
+
+use std::collections::{BTreeSet, HashMap};
+
+use egui::text::{LayoutJob, TextFormat};
+use egui::RichText;
+use rusty_box::cpu::{CodeSize, CpuDebugView, ExecutionMode, ProcessorActivity};
+
+use crate::debugger::control::DebugNote;
+use crate::debugger::inspect::{
+    AddressSpace, CodeText, DebugSnapshot, GuestAddress, MemoryTarget, ModuleSpace, ViewContext,
+    Viewing, MEMORY_WINDOW_BYTES, ROW_BYTES, WOW64_CODE_SELECTOR,
+};
+use crate::debugger::threads::SavedRegisters;
+use crate::debugger::search::{
+    pattern_of, FindOutcome, FindRequest, FoundAt, PatternError, SearchEncoding,
+};
+use crate::debugger::memory_map::{MemoryMap, RegionOwner};
+use crate::debugger::threads::WinThread;
+use crate::debugger::pe::{ExportRead, ExportTarget, PeExport};
+use crate::debugger::windows::{
+    KernelDetail, KernelListing, KernelMiss, ModuleBits, ModuleRead, PickedDetail, PickedModule,
+    ProcessDetail, ProcessListing, SectionsRead, SystemListing, SystemView, TreeRow, WinModule,
+    WinProcess,
+};
+use crate::shell::listing::{
+    card_title, char_width, chip, empty_state, header_row, lead_arrow, lead_chevron, lead_dot,
+    list_row, mono_font, row_visible, segmented, skip_row, title_label, tree_guides, Cell, RowSense,
+    Tone, ROW_PAD, TREE_INDENT,
+};
+use crate::shell::theme::{
+    shell_card_frame, shell_card_frame_with_margin, ACCENT_AMBER, ACCENT_BLUE, ACCENT_CYAN,
+    ACCENT_RED, CONTROL_FILL_REST, SPACE_CARD, SPACE_CARD_COMPACT, SPACE_ITEM, SPACE_PAGE,
+    SPACE_PAGE_COMPACT, TEXT_MUTED, TEXT_PRIMARY, TEXT_SECONDARY,
+};
+
+pub(crate) const NOT_RUNNING: &str =
+    "Power the VM on and pause it to see its processors, code and memory.";
+const PAUSE_TO_INSPECT: &str = "Pause the VM to see its processors, code and memory.";
+const SHOWING_LAST_PAUSE: &str = "Running: showing the state at the last pause.";
+const STEP_NEEDS_INTERPRETER: &str =
+    "Step needs the interpreter: a VM on the hypervisor retires instructions nothing counts.";
+/// The accessible name of the memory pane's address field.
+pub(crate) const MEMORY_ADDRESS: &str = "Memory address";
+/// The accessible name of the memory pane's search field.
+pub(crate) const FIND: &str = "Find";
+/// What a step changed is drawn in this colour, as x64dbg does.
+const CHANGED: egui::Color32 = ACCENT_RED;
+/// The narrowest page, points, that fills a grid of four panes: the left
+/// column holds a code row and a memory row without scrolling sideways.
+const GRID_MIN_WIDTH: f32 = 940.0;
+/// The least height, points, a grid pane keeps a useful run of rows in.
+const GRID_PANE_MIN_HEIGHT: f32 = 200.0;
+/// What a grid page spends above its panes, points: its margins, the header
+/// row (two where the chips wrap) and the gaps.
+const GRID_CHROME_HEIGHT: f32 = 150.0;
+/// The shortest page, points, that fills a grid of two rows of panes.
+const GRID_MIN_HEIGHT: f32 = 2.0 * GRID_PANE_MIN_HEIGHT + SPACE_ITEM + GRID_CHROME_HEIGHT;
+/// The narrowest page, points, whose panes sit in two columns while the page
+/// scrolls: each column then holds the registers and the stack without
+/// scrolling sideways.
+const TWO_COLUMN_MIN_WIDTH: f32 = 720.0;
+
+/// How many columns a scrolling page lays its panes in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Columns {
+    One,
+    Two,
+}
+
+/// How the page lays its panes out. It is decided from the room the page
+/// measures for itself — never from the platform — so a short desktop window
+/// is laid out as a landscape phone is, and a tall phone as a narrow window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Fit {
+    /// Four panes fill the page, each scrolling on its own, as x64dbg's CPU
+    /// tab does: the page is wide and tall enough for every pane to keep a
+    /// useful number of rows.
+    Grid,
+    /// Every pane at the height of its content, in `Columns`; the page
+    /// scrolls as a whole, so no pane is ever out of reach.
+    Scrolling(Columns),
+}
+
+impl Fit {
+    /// The layout for a page of `room` points.
+    fn of(room: egui::Vec2) -> Self {
+        if room.x >= GRID_MIN_WIDTH && room.y >= GRID_MIN_HEIGHT {
+            Self::Grid
+        } else if room.x >= TWO_COLUMN_MIN_WIDTH {
+            Self::Scrolling(Columns::Two)
+        } else {
+            Self::Scrolling(Columns::One)
+        }
+    }
+
+    /// A page with room to spare is roomy; one that scrolls packs tighter.
+    fn density(self) -> Density {
+        match self {
+            Self::Grid => Density::Roomy,
+            Self::Scrolling(Columns::One | Columns::Two) => Density::Compact,
+        }
+    }
+}
+
+/// How much air the page keeps around and between its panes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Density {
+    Roomy,
+    Compact,
+}
+
+impl Density {
+    /// The page's margin on every side.
+    fn page_margin(self) -> i8 {
+        match self {
+            Self::Roomy => SPACE_PAGE,
+            Self::Compact => SPACE_PAGE_COMPACT,
+        }
+    }
+
+    /// A card that is as tall as its content.
+    fn card_frame(self) -> egui::Frame {
+        shell_card_frame_with_margin(match self {
+            Self::Roomy => SPACE_CARD,
+            Self::Compact => SPACE_CARD_COMPACT,
+        })
+    }
+
+    /// The gap between panes, and between a row's items.
+    fn gap(self) -> f32 {
+        match self {
+            Self::Roomy => SPACE_ITEM,
+            Self::Compact => SPACE_ITEM * 0.75,
+        }
+    }
+
+    /// The gap between a card's title, its controls and its first row.
+    fn title_gap(self) -> f32 {
+        match self {
+            Self::Roomy => 4.0,
+            Self::Compact => 2.0,
+        }
+    }
+
+    /// The padding inside a header button.
+    fn button_padding(self) -> egui::Vec2 {
+        match self {
+            Self::Roomy => egui::vec2(12.0, 6.0),
+            Self::Compact => egui::vec2(8.0, 3.0),
+        }
+    }
+}
+
+/// What a typed address could not be read as.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AddressError {
+    Empty,
+    NotHex,
+    TooLong,
+}
+
+impl AddressError {
+    pub(crate) const fn message(self) -> &'static str {
+        match self {
+            Self::Empty => "Type an address.",
+            Self::NotHex => "An address is hexadecimal digits, with or without 0x.",
+            Self::TooLong => "An address has at most 16 hexadecimal digits.",
+        }
+    }
+}
+
+/// Reads a typed address: hexadecimal, with an optional `0x`, and `_` or a
+/// backtick between digit groups as x64dbg writes them.
+pub(crate) fn parse_address(text: &str) -> Result<u64, AddressError> {
+    let trimmed = text.trim();
+    let digits = trimmed
+        .strip_prefix("0x")
+        .or_else(|| trimmed.strip_prefix("0X"))
+        .unwrap_or(trimmed);
+    let digits: String = digits.chars().filter(|c| *c != '_' && *c != '`').collect();
+    if digits.is_empty() {
+        return Err(AddressError::Empty);
+    }
+    if !digits.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(AddressError::NotHex);
+    }
+    if digits.len() > 16 {
+        return Err(AddressError::TooLong);
+    }
+    u64::from_str_radix(&digits, 16).map_err(|_| AddressError::NotHex)
+}
+
+/// What the page keeps between frames for one VM.
+#[derive(Debug)]
+pub(crate) struct DebuggerPane {
+    pub(crate) address_text: String,
+    pub(crate) space: AddressSpace,
+    pub(crate) address_error: Option<AddressError>,
+    pub(crate) cpu: usize,
+    /// The window start last written into `address_text`, so a new snapshot
+    /// updates the field without overwriting what is being typed.
+    pub(crate) shown_start: Option<GuestAddress>,
+    pub(crate) search_text: String,
+    pub(crate) search_encoding: SearchEncoding,
+    pub(crate) search_error: Option<PatternError>,
+    pub(crate) tab: DebuggerTab,
+    /// The process whose modules the Processes view lists (its `EPROCESS`
+    /// address); `None` lists the running process's.
+    pub(crate) selected_process: Option<u64>,
+    pub(crate) process_layout: ProcessLayout,
+    /// What a listed process's or module's name must contain.
+    pub(crate) list_filter: String,
+    /// Whether the Processes view shows modules or the memory map.
+    pub(crate) process_detail: ProcessDetail,
+    /// Module bases whose sections are expanded in the memory map.
+    pub(crate) expanded_modules: std::collections::BTreeSet<u64>,
+    /// An address the memory list should scroll to next frame: set by a
+    /// minimap click, consumed once.
+    pub(crate) scroll_to: Option<u64>,
+    /// How the grid's panes divide the page.
+    pub(crate) split: PaneSplit,
+    /// The kernel module the Kernel modules view details (its base).
+    pub(crate) selected_kernel_module: Option<u64>,
+    /// Whether that view shows the module's sections or its exports.
+    pub(crate) kernel_detail: KernelDetail,
+    /// What a listed export's name must contain.
+    pub(crate) export_filter: String,
+    /// Which card of the Processes or Kernel modules tab the keys move in.
+    pub(crate) list_focus: ListFocus,
+    /// The row of that tab's detail card the keys stand on.
+    pub(crate) detail_cursor: Option<usize>,
+}
+
+impl Default for DebuggerPane {
+    fn default() -> Self {
+        Self {
+            address_text: String::new(),
+            space: AddressSpace::Linear,
+            address_error: None,
+            cpu: 0,
+            shown_start: None,
+            search_text: String::new(),
+            search_encoding: SearchEncoding::Hex,
+            search_error: None,
+            tab: DebuggerTab::Cpu,
+            selected_process: None,
+            process_layout: ProcessLayout::Tree,
+            list_filter: String::new(),
+            process_detail: ProcessDetail::Modules,
+            expanded_modules: BTreeSet::new(),
+            scroll_to: None,
+            split: PaneSplit::default(),
+            selected_kernel_module: None,
+            kernel_detail: KernelDetail::Sections,
+            export_filter: String::new(),
+            list_focus: ListFocus::List,
+            detail_cursor: None,
+        }
+    }
+}
+
+/// What the page shows under its toolbar.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DebuggerTab {
+    /// Code, registers, memory and stack.
+    Cpu,
+    /// The guest's processes and the modules of one.
+    Processes,
+    /// The guest kernel's drivers.
+    KernelModules,
+}
+
+impl DebuggerTab {
+    const ALL: [Self; 3] = [Self::Cpu, Self::Processes, Self::KernelModules];
+
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Cpu => "CPU",
+            Self::Processes => "Processes",
+            Self::KernelModules => "Kernel modules",
+        }
+    }
+
+    /// What this tab asks the run thread to list, for what `pane` has picked.
+    fn system_view(self, pane: &DebuggerPane) -> SystemView {
+        match self {
+            Self::Cpu => SystemView::Off,
+            Self::Processes => SystemView::Processes {
+                selected: pane.selected_process,
+                detail: pane.process_detail,
+            },
+            Self::KernelModules => SystemView::KernelModules {
+                selected: pane.selected_kernel_module,
+                detail: pane.kernel_detail,
+            },
+        }
+    }
+}
+
+pub(crate) struct DebuggerPageState<'a> {
+    pub(crate) live: bool,
+    pub(crate) paused: bool,
+    pub(crate) step_available: bool,
+    pub(crate) dump_pending: bool,
+    pub(crate) note: Option<DebugNote>,
+    pub(crate) snapshot: Option<&'a DebugSnapshot>,
+    /// The snapshot before `snapshot`: what is drawn red changed since it.
+    pub(crate) previous: Option<&'a DebugSnapshot>,
+    pub(crate) find: Option<FindOutcome>,
+    pub(crate) searching: bool,
+    pub(crate) pane: &'a mut DebuggerPane,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum DebuggerAction {
+    Step,
+    DumpRam,
+    ShowMemory(MemoryTarget),
+    SelectCpu(usize),
+    Find(FindRequest),
+    /// List these beside the processor panes (or nothing).
+    ShowSystem(SystemView),
+    /// Show the CPU tab with the memory pane at this linear address: a
+    /// module picked from a list.
+    OpenModule(u64),
+    /// Show the CPU tab with the memory pane at `address` in the address
+    /// space of the process at `cr3`: a region of a process other than the
+    /// running one.
+    ViewInProcess { cr3: u64, address: u64 },
+    /// Show the CPU tab looking from here: a process or thread seen from
+    /// inside, or the live processor again.
+    View(ViewContext),
+}
+
+/// The banner's way back from a thread's view.
+pub(crate) const BACK_TO_LIVE: &str = "Back to live CPU";
+const STEP_WHILE_VIEWING: &str =
+    "Step runs the live processor; go back to the live CPU to step.";
+
+/// What the panes compare against and mark: the snapshot before, and the
+/// last search hit.
+#[derive(Clone, Copy)]
+struct Marks<'a> {
+    previous: Option<&'a DebugSnapshot>,
+    find: Option<FindOutcome>,
+    searching: bool,
+}
+
+/// What the toolbar draws from.
+struct Toolbar {
+    paused: bool,
+    step_available: bool,
+    dump_pending: bool,
+    /// The panes show a thread's saved state, not the live processor that a
+    /// step would run.
+    viewing: bool,
+}
+
+/// Under the header while the panes look from somewhere other than the live
+/// processor: whom they show (or why that cannot be shown) and the way back.
+fn viewing_banner(ui: &mut egui::Ui, snapshot: &DebugSnapshot, action: &mut Option<DebuggerAction>) {
+    let text = match &snapshot.viewing {
+        Viewing::Live => return,
+        Viewing::Running { process } => {
+            format!("{process} is running on this processor: showing the live CPU.")
+        }
+        Viewing::Thread(thread) => format!(
+            "Viewing {} · PID {} · thread {} · saved state",
+            thread.process, thread.pid, thread.tid
+        ),
+        Viewing::Miss(miss) => miss.describe(),
+    };
+    egui::Frame::new()
+        .fill(ACCENT_AMBER.gamma_multiply(0.12))
+        .stroke(egui::Stroke::new(1.0_f32, ACCENT_AMBER.gamma_multiply(0.5)))
+        .corner_radius(8)
+        .inner_margin(egui::Margin::symmetric(10, 5))
+        .show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new(text).color(ACCENT_AMBER));
+                if ui.button(BACK_TO_LIVE).clicked() {
+                    *action = Some(DebuggerAction::View(ViewContext::Live));
+                }
+            });
+        });
+}
+
+pub(crate) fn draw_debugger_page(
+    ui: &mut egui::Ui,
+    state: DebuggerPageState<'_>,
+) -> Option<DebuggerAction> {
+    let mut action = None;
+    let DebuggerPageState {
+        live,
+        paused,
+        step_available,
+        dump_pending,
+        note,
+        snapshot,
+        previous,
+        find,
+        searching,
+        pane,
+    } = state;
+    // What was read from somewhere else is no baseline for what changed: a
+    // live snapshot and a thread's view are compared with neither.
+    let previous = previous.filter(|before| snapshot.is_some_and(|now| now.context == before.context));
+    let marks = Marks {
+        previous,
+        find,
+        searching,
+    };
+    // The room the page was given, measured here and nowhere else: every
+    // layout choice below follows from it.
+    let fit = Fit::of(ui.available_size());
+    let density = fit.density();
+    egui::Frame::new()
+        .inner_margin(egui::Margin::same(density.page_margin()))
+        .show(ui, |ui| {
+            if !live {
+                empty_state(ui, "Not running", NOT_RUNNING);
+                return;
+            }
+            let bar = Toolbar {
+                paused,
+                step_available,
+                dump_pending,
+                viewing: snapshot.is_some_and(|snapshot| matches!(snapshot.viewing, Viewing::Thread(_))),
+            };
+            header(ui, &bar, density, snapshot, pane, &mut action);
+            if let Some(DebugNote::StepNeedsInterpreter) = note {
+                ui.label(RichText::new(STEP_NEEDS_INTERPRETER).color(ACCENT_AMBER));
+            }
+            let Some(snapshot) = snapshot else {
+                empty_state(ui, "Running", PAUSE_TO_INSPECT);
+                return;
+            };
+            viewing_banner(ui, snapshot, &mut action);
+            follow_window(pane, snapshot);
+            ui.add_space(density.gap());
+            match (pane.tab, fit) {
+                (DebuggerTab::Cpu, Fit::Grid) => {
+                    grid_layout(ui, snapshot, marks, pane, &mut action);
+                }
+                (DebuggerTab::Cpu, Fit::Scrolling(columns)) => {
+                    scrolling_layout(ui, columns, density, snapshot, marks, pane, &mut action);
+                }
+                (DebuggerTab::Processes | DebuggerTab::KernelModules, _) => {
+                    system_page(ui, fit, snapshot, pane, &mut action);
+                }
+            }
+        });
+    action
+}
+
+/// The shown processor's state as chips: its privilege — user mode (CPL 3)
+/// or kernel mode (CPL 0) — its mode and activity, the Windows process it
+/// runs for when the guest's structures name one, its address space, and
+/// whether the page shows a pause that has since run on. They go into the
+/// header's row, after its buttons, and wrap where the row is full.
+fn status_chips(ui: &mut egui::Ui, snapshot: &DebugSnapshot, paused: bool) {
+    // Whose state the chips describe: a viewed thread's saved state, or the
+    // shown processor's.
+    let cr3 = match &snapshot.viewing {
+        Viewing::Thread(thread) => {
+            let cpl = thread.saved.cs & 3;
+            let (text, color) = if cpl == 3 {
+                ("User mode", ACCENT_CYAN)
+            } else {
+                ("Kernel mode", ACCENT_AMBER)
+            };
+            chip(ui, &format!("{text} · CPL {cpl}"), color);
+            let mode = if thread.saved.cs == WOW64_CODE_SELECTOR {
+                "Compatibility mode"
+            } else {
+                "64-bit mode"
+            };
+            chip(ui, mode, ACCENT_BLUE);
+            chip(ui, "Saved state", TEXT_MUTED)
+                .on_hover_text("What the kernel saved when this thread last entered it.");
+            thread.cr3
+        }
+        Viewing::Live | Viewing::Running { .. } | Viewing::Miss(_) => {
+            let Some(view) = shown_view(snapshot) else {
+                return;
+            };
+            let (text, color) = match view.registers.cpl {
+                0 => ("Kernel mode", ACCENT_AMBER),
+                3 => ("User mode", ACCENT_CYAN),
+                _ => ("Privileged", ACCENT_AMBER),
+            };
+            chip(ui, &format!("{text} · CPL {}", view.registers.cpl), color);
+            chip(ui, mode_label(view), ACCENT_BLUE);
+            chip(ui, activity_label(view.activity), TEXT_MUTED);
+            view.registers.cr3
+        }
+    };
+    if let Some(path) = &snapshot.process {
+        let name = path.rsplit(['\\', '/']).next().unwrap_or(path);
+        chip(ui, &format!("Process {name}"), TEXT_PRIMARY).on_hover_text(path.as_str());
+    }
+    if let Some(symbol) = snapshot
+        .code
+        .first()
+        .and_then(|line| snapshot.symbols.resolve(line.address))
+    {
+        chip(ui, &format!("at {}", symbol.label()), ACCENT_CYAN)
+            .on_hover_text("The module RIP points into.");
+    }
+    chip(ui, &format!("CR3 {cr3:X}"), TEXT_MUTED)
+        .on_hover_text("The address space: each process has its own page tables.");
+    if !paused {
+        chip(ui, SHOWING_LAST_PAUSE, ACCENT_AMBER);
+    }
+}
+
+/// The base of the module the shown processor's RIP is in, when it lies in
+/// `space`: the module to mark as current in that space's list.
+fn current_module_base(snapshot: &DebugSnapshot, space: ModuleSpace) -> Option<u64> {
+    snapshot
+        .code
+        .first()
+        .and_then(|line| snapshot.symbols.resolve(line.address))
+        .filter(|symbol| symbol.space == space)
+        .map(|symbol| symbol.base)
+}
+
+/// A new window start (a new pause, a Page down, RIP or RSP) is written into
+/// the address field.
+fn follow_window(pane: &mut DebuggerPane, snapshot: &DebugSnapshot) {
+    let start = snapshot.memory.start;
+    if pane.shown_start != Some(start) {
+        pane.address_text = format!("{:X}", start.value);
+        pane.space = start.space;
+        pane.address_error = None;
+        pane.shown_start = Some(start);
+    }
+}
+
+fn shown_view(snapshot: &DebugSnapshot) -> Option<&CpuDebugView> {
+    snapshot.cpus.get(snapshot.cpu)
+}
+
+/// The width the code and stack panes were read at: a viewed thread's own
+/// mode (32-bit for a WOW64 thread in its 32-bit code), else the shown
+/// processor's.
+fn pane_code_size(snapshot: &DebugSnapshot) -> CodeSize {
+    match &snapshot.viewing {
+        Viewing::Thread(thread) if thread.saved.cs == WOW64_CODE_SELECTOR => CodeSize::Bits32,
+        Viewing::Thread(_) => CodeSize::Bits64,
+        Viewing::Live | Viewing::Running { .. } | Viewing::Miss(_) => {
+            shown_view(snapshot).map_or(CodeSize::Bits64, |view| view.code_size)
+        }
+    }
+}
+
+/// The address space the code and stack were read in, and the one the symbol
+/// index's user modules belong to: a viewed thread's process, else the shown
+/// processor's linear space.
+fn vantage_space(snapshot: &DebugSnapshot) -> AddressSpace {
+    match &snapshot.viewing {
+        Viewing::Thread(thread) => AddressSpace::Process { cr3: thread.cr3 },
+        Viewing::Live | Viewing::Running { .. } | Viewing::Miss(_) => AddressSpace::Linear,
+    }
+}
+
+/// The page's one header row: the buttons and the tab switch, then — once a
+/// pause has been read — the shown processor's chips, on the same row after
+/// them. The row wraps only where it has no more room.
+fn header(
+    ui: &mut egui::Ui,
+    bar: &Toolbar,
+    density: Density,
+    snapshot: Option<&DebugSnapshot>,
+    pane: &mut DebuggerPane,
+    action: &mut Option<DebuggerAction>,
+) {
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = egui::vec2(density.gap(), density.gap());
+        ui.spacing_mut().button_padding = density.button_padding();
+        let step = ui.add_enabled(
+            bar.paused && bar.step_available && !bar.viewing,
+            egui::Button::new("Step"),
+        );
+        let step = if !bar.step_available {
+            step.on_disabled_hover_text(STEP_NEEDS_INTERPRETER)
+        } else if bar.viewing {
+            step.on_disabled_hover_text(STEP_WHILE_VIEWING)
+        } else {
+            step
+        };
+        if step.clicked() {
+            *action = Some(DebuggerAction::Step);
+        }
+        let dump = if bar.dump_pending {
+            "Saving RAM…"
+        } else {
+            "Dump RAM…"
+        };
+        if ui
+            .add_enabled(!bar.dump_pending, egui::Button::new(dump))
+            .clicked()
+        {
+            *action = Some(DebuggerAction::DumpRam);
+        }
+        let tabs = DebuggerTab::ALL.map(|tab| (tab, tab.label()));
+        if segmented(ui, &mut pane.tab, &tabs) {
+            // A tab's keys start on its list, standing on no detail row.
+            pane.list_focus = ListFocus::List;
+            pane.detail_cursor = None;
+            *action = Some(DebuggerAction::ShowSystem(
+                pane.tab.system_view(pane),
+            ));
+        }
+        let Some(snapshot) = snapshot else {
+            return;
+        };
+        if snapshot.cpus.len() > 1 {
+            let mut chosen = pane.cpu;
+            egui::ComboBox::from_id_salt("debugger_cpu")
+                .selected_text(cpu_label(chosen))
+                .show_ui(ui, |ui| {
+                    for index in 0..snapshot.cpus.len() {
+                        ui.selectable_value(&mut chosen, index, cpu_label(index));
+                    }
+                });
+            if chosen != pane.cpu {
+                pane.cpu = chosen;
+                *action = Some(DebuggerAction::SelectCpu(chosen));
+            }
+        }
+        status_chips(ui, snapshot, bar.paused);
+    });
+}
+
+fn cpu_label(index: usize) -> String {
+    if index == 0 {
+        "CPU 0 (boot)".to_owned()
+    } else {
+        format!("CPU {index}")
+    }
+}
+
+/// e.g. "64-bit mode".
+fn mode_label(view: &CpuDebugView) -> &'static str {
+    match view.mode {
+        ExecutionMode::Real => "Real mode",
+        ExecutionMode::Virtual8086 => "Virtual-8086 mode",
+        ExecutionMode::Protected => match view.code_size {
+            CodeSize::Bits16 => "16-bit protected mode",
+            CodeSize::Bits32 | CodeSize::Bits64 => "32-bit protected mode",
+        },
+        ExecutionMode::LongCompat => "Compatibility mode",
+        ExecutionMode::Long64 => "64-bit mode",
+    }
+}
+
+fn activity_label(activity: ProcessorActivity) -> &'static str {
+    match activity {
+        ProcessorActivity::Active => "Running",
+        ProcessorActivity::Halted => "Halted",
+        ProcessorActivity::Shutdown => "Shut down",
+        ProcessorActivity::WaitForSipi => "Waiting for startup",
+        ProcessorActivity::Mwait => "Waiting (MWAIT)",
+    }
+}
+
+fn mono(text: impl Into<String>) -> RichText {
+    RichText::new(text).monospace().size(TEXT_SECONDARY)
+}
+
+/// The bytes column of the code listing: at most this many bytes, the rest
+/// marked with an ellipsis, so the opcode name stays in view.
+const CODE_BYTES_SHOWN: usize = 8;
+
+fn hex_digits(size: CodeSize) -> usize {
+    match size {
+        CodeSize::Bits64 => 16,
+        CodeSize::Bits16 | CodeSize::Bits32 => 8,
+    }
+}
+
+/// The share of the page's width the left column (code above memory) takes
+/// in the grid layout: x64dbg gives its disassembly and dump the wide side.
+const LEFT_SHARE: f32 = 0.62;
+/// The share of the page's height the top row (code beside registers) takes.
+const TOP_SHARE: f32 = 0.58;
+
+/// The page where it is wide enough: four panes in a fixed grid that fills
+/// the page (code and registers above, memory and stack below), each pane
+/// scrolling on its own, as x64dbg's CPU tab does.
+fn grid_layout(
+    ui: &mut egui::Ui,
+    snapshot: &DebugSnapshot,
+    marks: Marks<'_>,
+    pane: &mut DebuggerPane,
+    action: &mut Option<DebuggerAction>,
+) {
+    let gap = SPACE_ITEM;
+    let page = ui.available_size();
+    // The split is read before the panes borrow the pane state, and written
+    // back once they are drawn.
+    let mut split = pane.split;
+    // The stored share is the preference; the layout keeps both columns their
+    // minimum at today's width, so a narrower window never squeezes one out.
+    let columns = resized(split.columns, 0.0, page.x, gap, SPLIT_MIN);
+    let left = ((page.x - gap) * columns).floor();
+    let right = page.x - gap - left;
+    ui.horizontal_top(|ui| {
+        ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
+        split_column(
+            ui,
+            egui::vec2(left, page.y),
+            gap,
+            Split { share: &mut split.left_rows, default: TOP_SHARE, label: RESIZE_CODE_MEMORY },
+            |ui, size| {
+                fixed_card(ui, size, Title::plain("Code"), |_| {}, |ui| code_rows(ui, snapshot));
+            },
+            |ui, size| {
+                fixed_card(
+                    ui,
+                    size,
+                    Title::plain("Memory"),
+                    |ui| memory_bar(ui, snapshot, marks, pane, action),
+                    |ui| memory_rows(ui, snapshot, marks),
+                );
+            },
+        );
+        match splitter(ui, egui::vec2(gap, page.y), SplitAxis::Columns, RESIZE_COLUMNS) {
+            SplitterMove::Still => {}
+            SplitterMove::Dragged(delta) => {
+                split.columns = resized(columns, delta, page.x, gap, SPLIT_MIN);
+            }
+            SplitterMove::Reset => split.columns = LEFT_SHARE,
+        }
+        split_column(
+            ui,
+            egui::vec2(right, page.y),
+            gap,
+            Split {
+                share: &mut split.right_rows,
+                default: TOP_SHARE,
+                label: RESIZE_REGISTERS_STACK,
+            },
+            |ui, size| {
+                fixed_card(ui, size, Title::plain("Registers"), |_| {}, |ui| {
+                    register_rows(ui, snapshot, marks);
+                });
+            },
+            |ui, size| {
+                fixed_card(ui, size, Title::plain("Stack"), |_| {}, |ui| {
+                    stack_rows(ui, snapshot, marks);
+                });
+            },
+        );
+    });
+    pane.split = split;
+}
+
+/// How the grid's panes divide the page, as shares of the room between
+/// each pair: dragged by the gaps between them, kept per VM while the app
+/// runs.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct PaneSplit {
+    /// The CPU tab's left column (code above memory), of the width.
+    pub(crate) columns: f32,
+    /// Code, of the left column's height.
+    pub(crate) left_rows: f32,
+    /// Registers, of the right column's height.
+    pub(crate) right_rows: f32,
+    /// The process list, of the Processes tab's width.
+    pub(crate) processes: f32,
+    /// The module list, of the Kernel modules tab's width.
+    pub(crate) kernel: f32,
+}
+
+impl Default for PaneSplit {
+    fn default() -> Self {
+        Self {
+            columns: LEFT_SHARE,
+            left_rows: TOP_SHARE,
+            right_rows: TOP_SHARE,
+            processes: PROCESS_LIST_SHARE,
+            kernel: PROCESS_LIST_SHARE,
+        }
+    }
+}
+
+/// The least a dragged split leaves either pane, points: a title and a few
+/// rows.
+const SPLIT_MIN: f32 = 96.0;
+
+/// The accessible names of the gaps that resize the panes.
+pub(crate) const RESIZE_COLUMNS: &str = "Resize columns";
+pub(crate) const RESIZE_CODE_MEMORY: &str = "Resize code and memory";
+pub(crate) const RESIZE_REGISTERS_STACK: &str = "Resize registers and stack";
+pub(crate) const RESIZE_PROCESS_LIST: &str = "Resize process list";
+pub(crate) const RESIZE_MODULE_LIST: &str = "Resize module list";
+
+/// Which way a gap divides its panes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SplitAxis {
+    /// Side by side: the gap is dragged left and right.
+    Columns,
+    /// One above the other: the gap is dragged up and down.
+    Rows,
+}
+
+/// What a gap was asked this frame.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum SplitterMove {
+    Still,
+    /// Dragged this many points along its axis.
+    Dragged(f32),
+    /// Double-clicked: back to the default split.
+    Reset,
+}
+
+/// `share` moved by a `delta`-point drag across `extent` points, of which
+/// `gap` is the gap itself, kept so neither pane falls below `min`. Where the
+/// room cannot hold two minimums the split sits in the middle.
+fn resized(share: f32, delta: f32, extent: f32, gap: f32, min: f32) -> f32 {
+    let room = extent - gap;
+    if room <= 0.0 {
+        return 0.5;
+    }
+    let low = (min / room).min(0.5);
+    (share + delta / room).clamp(low, 1.0 - low)
+}
+
+/// The gap between two panes, `size` points, as a handle: drag it to move
+/// the split, double-click it to reset. It shows a line while pointed at or
+/// dragged, and the resize cursor.
+fn splitter(ui: &mut egui::Ui, size: egui::Vec2, axis: SplitAxis, label: &str) -> SplitterMove {
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
+    let enabled = ui.is_enabled();
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Other, enabled, label));
+    let cursor = match axis {
+        SplitAxis::Columns => egui::CursorIcon::ResizeColumn,
+        SplitAxis::Rows => egui::CursorIcon::ResizeRow,
+    };
+    let active = response.hovered() || response.dragged();
+    if active {
+        ui.ctx().set_cursor_icon(cursor);
+        let line = match axis {
+            SplitAxis::Columns => egui::Rect::from_center_size(
+                rect.center(),
+                egui::vec2(2.0, rect.height() * 0.4),
+            ),
+            SplitAxis::Rows => egui::Rect::from_center_size(
+                rect.center(),
+                egui::vec2(rect.width() * 0.4, 2.0),
+            ),
+        };
+        ui.painter().rect_filled(line, 1.0, ACCENT_CYAN);
+    }
+    // egui counts a third quick click as a triple, not a double; it still
+    // holds the double-click that resets.
+    if response.double_clicked() || response.triple_clicked() {
+        return SplitterMove::Reset;
+    }
+    if response.dragged() {
+        let delta = response.drag_delta();
+        let along = match axis {
+            SplitAxis::Columns => delta.x,
+            SplitAxis::Rows => delta.y,
+        };
+        if along != 0.0 {
+            return SplitterMove::Dragged(along);
+        }
+    }
+    SplitterMove::Still
+}
+
+/// One of a column's splits: the share it moves, the share a double-click
+/// restores, and the gap's accessible name.
+struct Split<'a> {
+    share: &'a mut f32,
+    default: f32,
+    label: &'a str,
+}
+
+/// A column of `size` points: `top` above a row gap above `bottom`, the gap
+/// moving `split`.
+fn split_column<A, B>(ui: &mut egui::Ui, size: egui::Vec2, gap: f32, split: Split<'_>, top: A, bottom: B)
+where
+    A: FnOnce(&mut egui::Ui, egui::Vec2),
+    B: FnOnce(&mut egui::Ui, egui::Vec2),
+{
+    // Laid out at the share clamped to today's height (see `grid_layout`).
+    let share = resized(*split.share, 0.0, size.y, gap, SPLIT_MIN);
+    let top_height = ((size.y - gap) * share).floor();
+    let bottom_height = size.y - gap - top_height;
+    ui.allocate_ui_with_layout(size, egui::Layout::top_down(egui::Align::Min), |ui| {
+        ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
+        top(ui, egui::vec2(size.x, top_height));
+        match splitter(ui, egui::vec2(size.x, gap), SplitAxis::Rows, split.label) {
+            SplitterMove::Still => {}
+            SplitterMove::Dragged(delta) => {
+                *split.share = resized(share, delta, size.y, gap, SPLIT_MIN);
+            }
+            SplitterMove::Reset => *split.share = split.default,
+        }
+        bottom(ui, egui::vec2(size.x, bottom_height));
+    });
+}
+
+/// The page where the grid has no room (a short or narrow window): every pane
+/// at the height of its content, the page scrolling as a whole. In two
+/// columns the left one — code above memory — takes the wide side, as the
+/// grid's does; in one the panes follow each other.
+fn scrolling_layout(
+    ui: &mut egui::Ui,
+    columns: Columns,
+    density: Density,
+    snapshot: &DebugSnapshot,
+    marks: Marks<'_>,
+    pane: &mut DebuggerPane,
+    action: &mut Option<DebuggerAction>,
+) {
+    let gap = density.gap();
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .show(ui, |ui| match columns {
+            Columns::Two => side_by_side(
+                ui,
+                gap,
+                LEFT_SHARE,
+                &mut (),
+                |ui, _| {
+                    card(ui, density, Title::plain("Code"), |_| {}, |ui| {
+                        code_rows(ui, snapshot);
+                    });
+                    ui.add_space(gap);
+                    card(
+                        ui,
+                        density,
+                        Title::plain("Memory"),
+                        |ui| memory_bar(ui, snapshot, marks, pane, action),
+                        |ui| memory_rows(ui, snapshot, marks),
+                    );
+                },
+                |ui, _| {
+                    card(ui, density, Title::plain("Registers"), |_| {}, |ui| {
+                        register_rows(ui, snapshot, marks);
+                    });
+                    ui.add_space(gap);
+                    card(ui, density, Title::plain("Stack"), |_| {}, |ui| {
+                        stack_rows(ui, snapshot, marks);
+                    });
+                },
+            ),
+            Columns::One => {
+                card(ui, density, Title::plain("Registers"), |_| {}, |ui| {
+                    register_rows(ui, snapshot, marks);
+                });
+                ui.add_space(gap);
+                card(ui, density, Title::plain("Code"), |_| {}, |ui| {
+                    code_rows(ui, snapshot);
+                });
+                ui.add_space(gap);
+                card(ui, density, Title::plain("Stack"), |_| {}, |ui| {
+                    stack_rows(ui, snapshot, marks);
+                });
+                ui.add_space(gap);
+                card(
+                    ui,
+                    density,
+                    Title::plain("Memory"),
+                    |ui| memory_bar(ui, snapshot, marks, pane, action),
+                    |ui| memory_rows(ui, snapshot, marks),
+                );
+            }
+        });
+}
+
+/// Two columns, the left `left_share` of the width and a `gap` between them,
+/// each drawn top-down at its own height. `context` is lent to the left
+/// column and then to the right, so both may write the same state.
+fn side_by_side<C, L, R>(
+    ui: &mut egui::Ui,
+    gap: f32,
+    left_share: f32,
+    context: &mut C,
+    left: L,
+    right: R,
+) where
+    L: FnOnce(&mut egui::Ui, &mut C),
+    R: FnOnce(&mut egui::Ui, &mut C),
+{
+    let width = ui.available_width();
+    let left_width = ((width - gap) * left_share).floor();
+    let right_width = width - gap - left_width;
+    ui.horizontal_top(|ui| {
+        ui.spacing_mut().item_spacing.x = gap;
+        ui.vertical(|ui| {
+            ui.set_width(left_width);
+            left(ui, context);
+        });
+        ui.vertical(|ui| {
+            ui.set_width(right_width);
+            right(ui, context);
+        });
+    });
+}
+
+/// A pane's title: its name, and how many entries it lists when it lists.
+#[derive(Clone, Copy)]
+struct Title<'a> {
+    text: &'a str,
+    count: Option<usize>,
+    /// The header draws the title beside its controls, so the card leaves it
+    /// its own row (it still names the scroll area). A list pane does this to
+    /// keep a row of height for its rows.
+    inline: bool,
+}
+
+impl<'a> Title<'a> {
+    const fn plain(text: &'a str) -> Self {
+        Self { text, count: None, inline: false }
+    }
+
+    const fn counted(text: &'a str, count: usize) -> Self {
+        Self {
+            text,
+            count: Some(count),
+            inline: false,
+        }
+    }
+
+    /// The same title, drawn by the header in its controls row.
+    const fn inlined(mut self) -> Self {
+        self.inline = true;
+        self
+    }
+}
+
+/// A pane of exactly `size`: its title, a fixed `header` (the memory pane's
+/// address bar, a table's column titles), and a `body` that scrolls inside
+/// the pane when it is taller or wider than the room left.
+fn fixed_card<H, B>(ui: &mut egui::Ui, size: egui::Vec2, title: Title<'_>, header: H, body: B)
+where
+    H: FnOnce(&mut egui::Ui),
+    B: FnOnce(&mut egui::Ui),
+{
+    let frame = shell_card_frame();
+    let inner = (size - frame.total_margin().sum()).max(egui::Vec2::ZERO);
+    // The pane stacks its title, header and body whatever the row around it
+    // lays out.
+    ui.allocate_ui_with_layout(size, egui::Layout::top_down(egui::Align::Min), |ui| {
+        frame.show(ui, |ui| {
+            ui.set_min_size(inner);
+            ui.set_max_size(inner);
+            ui.spacing_mut().item_spacing.y = 4.0;
+            if !title.inline {
+                card_title(ui, title.text, title.count);
+            }
+            header(ui);
+            // Listing rows sit flush, one under the next.
+            ui.spacing_mut().item_spacing.y = 0.0;
+            egui::ScrollArea::both()
+                .id_salt(title.text)
+                .auto_shrink([false, false])
+                .show(ui, body);
+        });
+    });
+}
+
+/// A pane as tall as its content, the width of the column it is in. Its
+/// listing scrolls sideways by itself where a row is wider than the column,
+/// so the card never grows past the page.
+fn card<H, B>(ui: &mut egui::Ui, density: Density, title: Title<'_>, header: H, body: B)
+where
+    H: FnOnce(&mut egui::Ui),
+    B: FnOnce(&mut egui::Ui),
+{
+    density.card_frame().show(ui, |ui| {
+        ui.set_min_width(ui.available_width());
+        ui.spacing_mut().item_spacing.y = density.title_gap();
+        if !title.inline {
+            card_title(ui, title.text, title.count);
+        }
+        header(ui);
+        // Listing rows sit flush, one under the next.
+        ui.spacing_mut().item_spacing.y = 0.0;
+        egui::ScrollArea::horizontal()
+            .id_salt(title.text)
+            .auto_shrink([false, true])
+            .show(ui, body);
+    });
+}
+
+/// The room a pane is given: the size it must fill, or whatever its content
+/// takes at a density.
+#[derive(Clone, Copy)]
+enum Room {
+    Fixed(egui::Vec2),
+    Content(Density),
+}
+
+/// A pane in `room`: a `fixed_card` where the page gives it a size, a `card`
+/// where the page scrolls.
+fn pane_card<H, B>(ui: &mut egui::Ui, room: Room, title: Title<'_>, header: H, body: B)
+where
+    H: FnOnce(&mut egui::Ui),
+    B: FnOnce(&mut egui::Ui),
+{
+    match room {
+        Room::Fixed(size) => fixed_card(ui, size, title, header, body),
+        Room::Content(density) => card(ui, density, title, header, body),
+    }
+}
+
+/// The fewest bytes the code listing shows of an instruction, however narrow
+/// the pane: the opcode name is what is read, and keeps its room first.
+const CODE_BYTES_MIN: usize = 2;
+/// The room the longest opcode names the listing prints keep, in characters.
+const CODE_OPCODE_CHARS: f32 = 16.0;
+/// The two gaps between the code listing's three columns, in characters.
+const CODE_GAP_CHARS: f32 = 4.0;
+/// The lead before a listing's first column, where the RIP marker sits.
+const MARKER_LEAD: f32 = 12.0;
+
+/// How many of an instruction's bytes the code listing shows in a pane
+/// `room_chars` characters wide whose addresses are `digits` characters: the
+/// address, the gaps and the opcode keep their room, and the bytes — three
+/// characters each and an ellipsis — take the rest, between `CODE_BYTES_MIN`
+/// and `CODE_BYTES_SHOWN`.
+fn code_bytes_shown(room_chars: f32, digits: usize) -> usize {
+    let left = room_chars - digits as f32 - CODE_GAP_CHARS - CODE_OPCODE_CHARS - 1.0;
+    let fits = (left / 3.0).floor().max(CODE_BYTES_MIN as f32);
+    (fits as usize).min(CODE_BYTES_SHOWN)
+}
+
+/// The code at RIP, one instruction a row: address, bytes, opcode. The row at
+/// RIP is shaded and marked.
+fn code_rows(ui: &mut egui::Ui, snapshot: &DebugSnapshot) {
+    let digits = hex_digits(pane_code_size(snapshot));
+    let room = (ui.available_width() - MARKER_LEAD - 2.0 * ROW_PAD) / char_width(ui);
+    let shown = code_bytes_shown(room, digits);
+    for (index, line) in snapshot.code.iter().enumerate() {
+        let mut bytes: Vec<String> = line
+            .bytes
+            .iter()
+            .take(shown)
+            .map(|byte| format!("{byte:02X}"))
+            .collect();
+        if line.bytes.len() > shown {
+            bytes.push("…".to_owned());
+        }
+        let (text, text_color) = match &line.text {
+            CodeText::Opcode(name) => (name.as_str(), TEXT_PRIMARY),
+            CodeText::Undecodable => ("(undecodable)", TEXT_MUTED),
+            CodeText::Unreadable => ("(unreadable)", TEXT_MUTED),
+        };
+        // The first line is the instruction at RIP.
+        let at_rip = index == 0;
+        let (address_color, tone) = if at_rip {
+            (ACCENT_CYAN, Tone::Current)
+        } else {
+            (TEXT_MUTED, Tone::Plain)
+        };
+        let cells = [
+            Cell::left(format!("{:0digits$X}", line.address), address_color, digits),
+            Cell::left(bytes.join(" "), TEXT_MUTED, 3 * shown + 1),
+            Cell::fill(text, if at_rip { ACCENT_CYAN } else { text_color }),
+        ];
+        let response = list_row(ui, MARKER_LEAD, &cells, tone, RowSense::Look);
+        if at_rip {
+            lead_arrow(ui, response.rect, ACCENT_CYAN);
+        }
+    }
+}
+
+fn register_rows(ui: &mut egui::Ui, snapshot: &DebugSnapshot, marks: Marks<'_>) {
+    if let Viewing::Thread(thread) = &snapshot.viewing {
+        saved_register_rows(ui, &thread.saved);
+        return;
+    }
+    let Some(view) = shown_view(snapshot) else {
+        return;
+    };
+    // The same processor as it stood before the last step or pause.
+    let before = marks
+        .previous
+        .and_then(|previous| previous.cpus.get(snapshot.cpu));
+    let r = &view.registers;
+    let old = before.map(|before| &before.registers);
+    let wide = view.code_size == CodeSize::Bits64;
+    ui.spacing_mut().item_spacing.y = 2.0;
+    {
+        section_caption(ui, "General");
+        egui::Grid::new("debugger_registers")
+            .num_columns(2)
+            .spacing(REGISTER_GRID_SPACING)
+            .show(ui, |ui| {
+                let gprs = [
+                    ("RAX", "EAX", r.rax, old.map(|o| o.rax)),
+                    ("RBX", "EBX", r.rbx, old.map(|o| o.rbx)),
+                    ("RCX", "ECX", r.rcx, old.map(|o| o.rcx)),
+                    ("RDX", "EDX", r.rdx, old.map(|o| o.rdx)),
+                    ("RSI", "ESI", r.rsi, old.map(|o| o.rsi)),
+                    ("RDI", "EDI", r.rdi, old.map(|o| o.rdi)),
+                    ("RBP", "EBP", r.rbp, old.map(|o| o.rbp)),
+                    ("RSP", "ESP", r.rsp, old.map(|o| o.rsp)),
+                    ("R8", "", r.r8, old.map(|o| o.r8)),
+                    ("R9", "", r.r9, old.map(|o| o.r9)),
+                    ("R10", "", r.r10, old.map(|o| o.r10)),
+                    ("R11", "", r.r11, old.map(|o| o.r11)),
+                    ("R12", "", r.r12, old.map(|o| o.r12)),
+                    ("R13", "", r.r13, old.map(|o| o.r13)),
+                    ("R14", "", r.r14, old.map(|o| o.r14)),
+                    ("R15", "", r.r15, old.map(|o| o.r15)),
+                ];
+                for (long, short, value, before) in gprs.iter().take(if wide { 16 } else { 8 }) {
+                    let changed = before.is_some_and(|before| before != *value);
+                    if wide {
+                        register_row(ui, long, format!("{value:016X}"), changed);
+                    } else {
+                        register_row(ui, short, format!("{:08X}", value & 0xFFFF_FFFF), changed);
+                    }
+                }
+                let rip_changed = old.is_some_and(|o| o.rip != r.rip);
+                if wide {
+                    register_row(ui, "RIP", format!("{:016X}", r.rip), rip_changed);
+                } else {
+                    register_row(ui, "EIP", format!("{:08X}", r.rip & 0xFFFF_FFFF), rip_changed);
+                }
+                let flags_changed = old.is_some_and(|o| o.eflags != r.eflags);
+                register_row(ui, "EFLAGS", format!("{:08X}", r.eflags), flags_changed);
+            });
+        // On a line of its own, so the flags do not widen the value column.
+        ui.label(flags_job(r.eflags, old.map(|o| o.eflags)));
+        section_caption(ui, "System");
+        egui::Grid::new("debugger_system_registers")
+            .num_columns(2)
+            .spacing(REGISTER_GRID_SPACING)
+            .show(ui, |ui| {
+                let bases = &view.segment_bases;
+                let old_bases = before.map(|before| &before.segment_bases);
+                for (name, selector, base, before) in [
+                    ("CS", r.cs, bases.cs, old.zip(old_bases).map(|(o, b)| (o.cs, b.cs))),
+                    ("SS", r.ss, bases.ss, old.zip(old_bases).map(|(o, b)| (o.ss, b.ss))),
+                    ("DS", r.ds, bases.ds, old.zip(old_bases).map(|(o, b)| (o.ds, b.ds))),
+                    ("ES", r.es, bases.es, old.zip(old_bases).map(|(o, b)| (o.es, b.es))),
+                    ("FS", r.fs, bases.fs, old.zip(old_bases).map(|(o, b)| (o.fs, b.fs))),
+                    ("GS", r.gs, bases.gs, old.zip(old_bases).map(|(o, b)| (o.gs, b.gs))),
+                ] {
+                    let changed = before.is_some_and(|before| before != (selector, base));
+                    register_row(ui, name, format!("{selector:04X}  base {base:016X}"), changed);
+                }
+                let kgs_changed = before.is_some_and(|b| b.kernel_gs_base != view.kernel_gs_base);
+                register_row(
+                    ui,
+                    "KGSBASE",
+                    format!("{:016X}", view.kernel_gs_base),
+                    kgs_changed,
+                )
+                .on_hover_text("IA32_KERNEL_GS_BASE: the GS base SWAPGS exchanges with GS's.");
+                for (name, value, before) in [
+                    ("CR0", r.cr0, old.map(|o| o.cr0)),
+                    ("CR2", r.cr2, old.map(|o| o.cr2)),
+                    ("CR3", r.cr3, old.map(|o| o.cr3)),
+                    ("CR4", r.cr4, old.map(|o| o.cr4)),
+                    ("EFER", view.efer, before.map(|b| b.efer)),
+                ] {
+                    let changed = before.is_some_and(|before| before != value);
+                    register_row(ui, name, format!("{value:016X}"), changed);
+                }
+            });
+        ui.add_space(SPACE_ITEM / 2.0);
+        ui.collapsing("x87", |ui| {
+            egui::Grid::new("debugger_x87").num_columns(2).spacing(REGISTER_GRID_SPACING).show(ui, |ui| {
+                for (index, register) in r.fpu_regs.iter().enumerate() {
+                    let changed = old.is_some_and(|o| o.fpu_regs[index] != *register);
+                    register_row(ui, &format!("ST{index}"), le_hex(register), changed);
+                }
+                let sw_changed = old.is_some_and(|o| o.fpu_sw != r.fpu_sw);
+                register_row(ui, "FSW", format!("{:04X}", r.fpu_sw), sw_changed);
+                let cw_changed = old.is_some_and(|o| o.fpu_cw != r.fpu_cw);
+                register_row(ui, "FCW", format!("{:04X}", r.fpu_cw), cw_changed);
+            });
+        });
+        ui.collapsing("SSE", |ui| {
+            egui::Grid::new("debugger_sse").num_columns(2).spacing(REGISTER_GRID_SPACING).show(ui, |ui| {
+                let shown = if wide { 16 } else { 8 };
+                for (index, register) in r.xmm.iter().enumerate().take(shown) {
+                    let changed = old.is_some_and(|o| o.xmm[index] != *register);
+                    register_row(ui, &format!("XMM{index}"), le_hex(register), changed);
+                }
+                let mxcsr_changed = old.is_some_and(|o| o.mxcsr != r.mxcsr);
+                register_row(ui, "MXCSR", format!("{:08X}", r.mxcsr), mxcsr_changed);
+            });
+        });
+    }
+}
+
+/// Why the dimmed registers of a viewed thread may not be its own.
+const ENTRY_DEPENDENT: &str = "Saved only as the way it entered the kernel requires (system \
+     call, interrupt or exception); it may not be this thread's value.";
+/// Why R12–R15 have no value in a viewed thread.
+const NOT_IN_TRAP_FRAME: &str = "A trap frame does not hold this register.";
+
+/// A viewed thread's registers as its `KTRAP_FRAME` holds them: RIP, RSP,
+/// RBP, RFLAGS and the segments, which every kernel entry saves, plainly; the
+/// ones that depend on how it entered dimmed; R12–R15, which no trap frame
+/// holds, as dashes. The live processor's system, x87 and SSE state belongs
+/// to whatever runs, so it is not shown here.
+fn saved_register_rows(ui: &mut egui::Ui, saved: &SavedRegisters) {
+    ui.spacing_mut().item_spacing.y = 2.0;
+    section_caption(ui, "Saved when it entered the kernel");
+    egui::Grid::new("debugger_saved_registers")
+        .num_columns(2)
+        .spacing(REGISTER_GRID_SPACING)
+        .show(ui, |ui| {
+            for (name, value) in [("RIP", saved.rip), ("RSP", saved.rsp), ("RBP", saved.rbp)] {
+                register_row(ui, name, format!("{value:016X}"), false);
+            }
+            register_row(ui, "RFLAGS", format!("{:08X}", saved.rflags), false);
+            for (name, value) in [
+                ("RAX", saved.rax),
+                ("RBX", saved.rbx),
+                ("RCX", saved.rcx),
+                ("RDX", saved.rdx),
+                ("RSI", saved.rsi),
+                ("RDI", saved.rdi),
+                ("R8", saved.r8),
+                ("R9", saved.r9),
+                ("R10", saved.r10),
+                ("R11", saved.r11),
+            ] {
+                faint_register_row(ui, name, format!("{value:016X}")).on_hover_text(ENTRY_DEPENDENT);
+            }
+            for name in ["R12", "R13", "R14", "R15"] {
+                faint_register_row(ui, name, "—".repeat(16)).on_hover_text(NOT_IN_TRAP_FRAME);
+            }
+            register_row(ui, "CS", format!("{:04X}", saved.cs), false);
+            register_row(ui, "SS", format!("{:04X}", saved.ss), false);
+        });
+    // EFlags is a 32-bit field of the frame.
+    ui.label(flags_job(saved.rflags as u32, None));
+}
+
+/// A register shown dimmed: present, but not to be trusted as much.
+fn faint_register_row(ui: &mut egui::Ui, name: &str, value: String) -> egui::Response {
+    ui.label(mono(name).color(TEXT_MUTED));
+    let response = ui.label(mono(value).color(TEXT_MUTED.gamma_multiply(0.75)));
+    ui.end_row();
+    response
+}
+
+/// One register: its name, and its value — red when the last step or pause
+/// changed it.
+fn register_row(ui: &mut egui::Ui, name: &str, value: String, changed: bool) -> egui::Response {
+    ui.label(mono(name).color(TEXT_MUTED));
+    let color = if changed { CHANGED } else { TEXT_PRIMARY };
+    let response = ui.label(mono(value).color(color));
+    ui.end_row();
+    response
+}
+
+/// The gap between a register's name and its value, and between rows.
+const REGISTER_GRID_SPACING: egui::Vec2 = egui::vec2(16.0, 2.0);
+
+/// A small heading over a group of registers.
+fn section_caption(ui: &mut egui::Ui, text: &str) {
+    ui.add_space(SPACE_ITEM / 2.0);
+    ui.label(
+        RichText::new(text)
+            .size(crate::shell::theme::TEXT_CAPTION)
+            .color(TEXT_MUTED),
+    );
+}
+
+/// The nine status and control flags, as x64dbg lists them: a set flag
+/// bright, a clear one dim, one the last step flipped red.
+fn flags_job(eflags: u32, before: Option<u32>) -> LayoutJob {
+    const FLAGS: [(&str, u32); 9] = [
+        ("CF", 0),
+        ("PF", 2),
+        ("AF", 4),
+        ("ZF", 6),
+        ("SF", 7),
+        ("TF", 8),
+        ("IF", 9),
+        ("DF", 10),
+        ("OF", 11),
+    ];
+    let font = mono_font();
+    let mut job = LayoutJob::default();
+    for (index, (name, bit)) in FLAGS.iter().enumerate() {
+        let set = (eflags >> bit) & 1 == 1;
+        let flipped = before.is_some_and(|before| (before >> bit) & 1 != (eflags >> bit) & 1);
+        let color = if flipped {
+            CHANGED
+        } else if set {
+            ACCENT_CYAN
+        } else {
+            TEXT_MUTED.gamma_multiply(0.6)
+        };
+        let separator = if index == 0 { "" } else { " " };
+        job.append(
+            &format!("{separator}{name}"),
+            0.0,
+            TextFormat::simple(font.clone(), color),
+        );
+    }
+    job
+}
+
+/// A little-endian register, most significant byte first.
+fn le_hex(bytes: &[u8]) -> String {
+    bytes.iter().rev().map(|byte| format!("{byte:02X}")).collect()
+}
+
+/// The memory pane's controls: the address space, the address to show, the
+/// RIP and RSP shortcuts and paging, then the search row.
+fn memory_bar(
+    ui: &mut egui::Ui,
+    snapshot: &DebugSnapshot,
+    marks: Marks<'_>,
+    pane: &mut DebuggerPane,
+    action: &mut Option<DebuggerAction>,
+) {
+    {
+        ui.horizontal_wrapped(|ui| {
+            let mut spaces = vec![
+                (AddressSpace::Linear, "Linear"),
+                (AddressSpace::Physical, "Physical"),
+            ];
+            // A Process space appears once a process other than the running
+            // one is being browsed, so it can be selected and left.
+            let process_space = match pane.space {
+                AddressSpace::Process { cr3 } => Some(cr3),
+                AddressSpace::Linear | AddressSpace::Physical => snapshot.memory_space,
+            };
+            if let Some(cr3) = process_space {
+                spaces.push((AddressSpace::Process { cr3 }, "Process"));
+            }
+            segmented(ui, &mut pane.space, &spaces);
+            if let Some(cr3) = process_space {
+                chip(ui, &format!("CR3 {cr3:X}"), ACCENT_AMBER)
+                    .on_hover_text("Browsing another process's address space.");
+            }
+            let field = ui.add(
+                egui::TextEdit::singleline(&mut pane.address_text)
+                    .font(egui::TextStyle::Monospace)
+                    .hint_text("Address")
+                    .desired_width(150.0),
+            );
+            let enabled = ui.is_enabled();
+            field.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::WidgetType::TextEdit, enabled, MEMORY_ADDRESS)
+            });
+            let entered =
+                field.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+            if ui.button("Go").clicked() || entered {
+                match parse_address(&pane.address_text) {
+                    Ok(value) => {
+                        pane.address_error = None;
+                        *action = Some(DebuggerAction::ShowMemory(MemoryTarget::At(
+                            GuestAddress {
+                                space: pane.space,
+                                value,
+                            },
+                        )));
+                    }
+                    Err(error) => pane.address_error = Some(error),
+                }
+            }
+            if ui.button("RIP").clicked() {
+                *action = Some(DebuggerAction::ShowMemory(MemoryTarget::Rip));
+            }
+            if ui.button("RSP").clicked() {
+                *action = Some(DebuggerAction::ShowMemory(MemoryTarget::Rsp));
+            }
+            let start = snapshot.memory.start;
+            if ui.button("Page up").clicked() {
+                *action = Some(DebuggerAction::ShowMemory(MemoryTarget::At(GuestAddress {
+                    space: start.space,
+                    value: start.value.wrapping_sub(MEMORY_WINDOW_BYTES),
+                })));
+            }
+            if ui.button("Page down").clicked() {
+                *action = Some(DebuggerAction::ShowMemory(MemoryTarget::At(GuestAddress {
+                    space: start.space,
+                    value: start.value.wrapping_add(MEMORY_WINDOW_BYTES),
+                })));
+            }
+            // The module the window sits in — only in the space the symbol
+            // index's user modules belong to (a viewed thread's process, else
+            // the shown processor's linear space).
+            if start.space == vantage_space(snapshot) {
+                if let Some(symbol) = snapshot.symbols.resolve(start.value) {
+                    chip(ui, &symbol.label(), TEXT_MUTED)
+                        .on_hover_text("The module this address is in.");
+                }
+            }
+        });
+        if let Some(error) = pane.address_error {
+            ui.label(RichText::new(error.message()).color(ACCENT_RED));
+        }
+        search_bar(ui, snapshot, marks, pane, action);
+    }
+}
+
+/// The search row: what to find, how to read it, and what the last search
+/// came to. A search starts just past the last hit while that hit is in
+/// the window, and at the window's start otherwise.
+fn search_bar(
+    ui: &mut egui::Ui,
+    snapshot: &DebugSnapshot,
+    marks: Marks<'_>,
+    pane: &mut DebuggerPane,
+    action: &mut Option<DebuggerAction>,
+) {
+    ui.horizontal_wrapped(|ui| {
+        segmented(
+            ui,
+            &mut pane.search_encoding,
+            &[
+                (SearchEncoding::Hex, "Hex"),
+                (SearchEncoding::Text, "Text"),
+                (SearchEncoding::Utf16, "UTF-16"),
+            ],
+        );
+        let label = ui.label(RichText::new(FIND).color(TEXT_MUTED));
+        let field = ui
+            .add(
+                egui::TextEdit::singleline(&mut pane.search_text)
+                    .font(egui::TextStyle::Monospace)
+                    .desired_width(220.0),
+            )
+            .labelled_by(label.id);
+        let entered = field.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+        let next = ui.add_enabled(!marks.searching, egui::Button::new("Find next"));
+        if next.clicked() || (entered && !marks.searching) {
+            match pattern_of(pane.search_encoding, &pane.search_text) {
+                Ok(pattern) => {
+                    pane.search_error = None;
+                    *action = Some(DebuggerAction::Find(FindRequest {
+                        from: search_start(snapshot, marks.find),
+                        pattern,
+                    }));
+                }
+                Err(error) => pane.search_error = Some(error),
+            }
+        }
+    });
+    if let Some(error) = pane.search_error {
+        ui.label(RichText::new(error.message()).color(ACCENT_RED));
+    } else if marks.searching {
+        ui.label(RichText::new("Searching…").color(TEXT_MUTED));
+    } else if let Some(outcome) = marks.find {
+        let (text, color) = match outcome {
+            FindOutcome::Found(found) => (format!("Found at {:X}", found.at.value), ACCENT_AMBER),
+            FindOutcome::NotFound { searched_to } => (
+                format!("Not found before {:X}", searched_to.value),
+                TEXT_MUTED,
+            ),
+            FindOutcome::Abandoned => ("Search stopped: the VM is stopping".to_owned(), TEXT_MUTED),
+        };
+        ui.label(RichText::new(text).color(color));
+    }
+}
+
+/// Where the next search starts: just past the last hit while it is in the
+/// window shown, so Find next walks from hit to hit; the window's start once
+/// the window has moved elsewhere.
+fn search_start(snapshot: &DebugSnapshot, find: Option<FindOutcome>) -> GuestAddress {
+    let window = snapshot.memory.start;
+    let end = window.value.wrapping_add(MEMORY_WINDOW_BYTES);
+    match find {
+        Some(FindOutcome::Found(found))
+            if found.at.space == window.space && (window.value..end).contains(&found.at.value) =>
+        {
+            GuestAddress {
+                space: window.space,
+                value: found.at.value.wrapping_add(1),
+            }
+        }
+        Some(FindOutcome::Found(_) | FindOutcome::NotFound { .. } | FindOutcome::Abandoned)
+        | None => window,
+    }
+}
+
+/// How many bytes a memory row shows per line in a pane `room_chars` wide: all
+/// `ROW_BYTES` where it has the room, otherwise half, so a phone's dump fits
+/// without a sideways swipe. A row is an exact number of lines either way.
+/// A line is the 16-char address, two gaps, `3n-1` hex characters and `n`
+/// ASCII — `19 + 4n` characters.
+fn memory_bytes_per_line(room_chars: f32) -> usize {
+    if room_chars >= 19.0 + 4.0 * ROW_BYTES as f32 {
+        ROW_BYTES
+    } else {
+        ROW_BYTES / 2
+    }
+}
+
+/// The memory window: address, up to sixteen bytes and their ASCII per line,
+/// folded to eight where the pane is too narrow for sixteen. A byte the last
+/// step changed is red; the bytes of the last search hit amber.
+fn memory_rows(ui: &mut egui::Ui, snapshot: &DebugSnapshot, marks: Marks<'_>) {
+    // The window as it stood before, compared only when it shows the same
+    // place: a window that moved has nothing to compare against.
+    let before = marks
+        .previous
+        .filter(|previous| previous.memory.start == snapshot.memory.start)
+        .map(|previous| &previous.memory.rows);
+    let hit = match marks.find {
+        Some(FindOutcome::Found(found)) if found.at.space == snapshot.memory.start.space => {
+            Some(found)
+        }
+        Some(FindOutcome::Found(_) | FindOutcome::NotFound { .. } | FindOutcome::Abandoned)
+        | None => None,
+    };
+    let font = mono_font();
+    let room = (ui.available_width() - 2.0 * ROW_PAD) / char_width(ui);
+    let per_line = memory_bytes_per_line(room);
+    let hex_chars = 3 * per_line - 1;
+    for (index, line) in snapshot.memory.rows.iter().enumerate() {
+        let tone = Tone::striped(index);
+        // A 16-byte row is drawn as one line, or two when it is folded.
+        for chunk in (0..ROW_BYTES).step_by(per_line) {
+            let base = line.address.wrapping_add(chunk as u64);
+            let address = Cell::left(format!("{base:016X}"), TEXT_MUTED, 16);
+            let Some(bytes) = line.bytes else {
+                let unreadable = vec!["??"; per_line].join(" ");
+                let cells =
+                    [address, Cell::left(unreadable, TEXT_MUTED.gamma_multiply(0.6), hex_chars)];
+                list_row(ui, 0.0, &cells, tone, RowSense::Look);
+                continue;
+            };
+            let old = before.and_then(|rows| rows.get(index)).and_then(|old| old.bytes);
+            let mut hex = LayoutJob::default();
+            for offset in 0..per_line {
+                let column = chunk + offset;
+                let byte = bytes[column];
+                let at = line.address.wrapping_add(column as u64);
+                let color = if old.is_some_and(|old| old[column] != byte) {
+                    CHANGED
+                } else if hit.is_some_and(|hit| in_hit(hit, at)) {
+                    ACCENT_AMBER
+                } else if byte == 0 {
+                    // Zero bytes recede, so the data in a page stands out.
+                    TEXT_MUTED.gamma_multiply(0.7)
+                } else {
+                    TEXT_PRIMARY
+                };
+                let separator = if offset == 0 { "" } else { " " };
+                hex.append(
+                    &format!("{separator}{byte:02X}"),
+                    0.0,
+                    TextFormat::simple(font.clone(), color),
+                );
+            }
+            let ascii: String = bytes[chunk..chunk + per_line]
+                .iter()
+                .map(|&byte| {
+                    if (0x20..0x7F).contains(&byte) {
+                        byte as char
+                    } else {
+                        '.'
+                    }
+                })
+                .collect();
+            let cells = [
+                address,
+                Cell::job(hex, hex_chars),
+                Cell::left(ascii, ACCENT_BLUE, per_line),
+            ];
+            list_row(ui, 0.0, &cells, tone, RowSense::Look);
+        }
+    }
+}
+
+fn in_hit(hit: FoundAt, address: u64) -> bool {
+    hit.at.value <= address && address < hit.at.value.wrapping_add(hit.len)
+}
+
+/// The stack from RSP up: the slot RSP points at in cyan, a slot the last
+/// step changed in red.
+fn stack_rows(ui: &mut egui::Ui, snapshot: &DebugSnapshot, marks: Marks<'_>) {
+    let size = pane_code_size(snapshot);
+    let digits = hex_digits(size);
+    // A slot is as wide as a pointer at the code size: 2, 4 or 8 bytes.
+    let value_digits = 2 * crate::debugger::inspect::slot_bytes(size);
+    let before = marks.previous.map(|previous| &previous.stack);
+    for (index, slot) in snapshot.stack.iter().enumerate() {
+        let value = slot.value.map_or_else(
+            || "?".repeat(value_digits),
+            |value| format!("{value:0value_digits$X}"),
+        );
+        // Compared slot by address, so a stack that moved compares only the
+        // slots both views hold.
+        let changed = before
+            .and_then(|stack| stack.iter().find(|old| old.address == slot.address))
+            .is_some_and(|old| old.value != slot.value);
+        let top = index == 0;
+        let value_color = if changed {
+            CHANGED
+        } else if top {
+            ACCENT_CYAN
+        } else {
+            TEXT_PRIMARY
+        };
+        let address_color = if top { ACCENT_CYAN } else { TEXT_MUTED };
+        let tone = if top { Tone::Current } else { Tone::Plain };
+        // A slot that points into a module is a code pointer — most often a
+        // return address, so the column reads as the call chain.
+        let symbol = slot
+            .value
+            .and_then(|value| snapshot.symbols.resolve(value))
+            .map_or_else(String::new, |symbol| symbol.label());
+        let cells = [
+            Cell::left(format!("{:0digits$X}", slot.address), address_color, digits),
+            Cell::left(value, value_color, value_digits),
+            Cell::fill(symbol, TEXT_MUTED),
+        ];
+        let response = list_row(ui, MARKER_LEAD, &cells, tone, RowSense::Look);
+        if top {
+            lead_arrow(ui, response.rect, ACCENT_CYAN);
+        }
+    }
+}
+
+/// Said while the run thread has not yet listed what a tab asks for.
+const READING_LIST: &str = "Reading the guest's lists…";
+/// Why the lists are empty: no Windows x64 kernel, and the step that said so.
+pub(crate) fn no_windows_kernel(miss: KernelMiss) -> String {
+    format!(
+        "No 64-bit Windows kernel was found in this guest ({}): the lists read \
+         Windows x64's own process and driver lists.",
+        miss.message()
+    )
+}
+const ANOTHER_ADDRESS_SPACE: &str = "This module lies in another process's address space; \
+     pause while that process runs to see its memory.";
+
+/// The Processes and Kernel modules tabs: the guest kernel's own lists.
+fn system_page(
+    ui: &mut egui::Ui,
+    fit: Fit,
+    snapshot: &DebugSnapshot,
+    pane: &mut DebuggerPane,
+    action: &mut Option<DebuggerAction>,
+) {
+    match (&snapshot.system, pane.tab) {
+        (SystemListing::NoWindowsKernel(miss), _) => {
+            empty_state(ui, "No Windows kernel", &no_windows_kernel(*miss));
+        }
+        (SystemListing::Processes(listing), DebuggerTab::Processes) => {
+            let current_user_module = current_module_base(snapshot, ModuleSpace::User);
+            processes_page(ui, fit, listing, current_user_module, pane, action);
+        }
+        (SystemListing::KernelModules(listing), DebuggerTab::KernelModules) => {
+            let current = current_module_base(snapshot, ModuleSpace::Kernel);
+            kernel_page(ui, fit, listing, current, pane, action);
+        }
+        // A list for another tab, or none yet: the run thread is reading.
+        (
+            SystemListing::NotAsked | SystemListing::Processes(_) | SystemListing::KernelModules(_),
+            _,
+        ) => {
+            empty_state(ui, "Reading", READING_LIST);
+        }
+    }
+}
+
+/// The accessible name of a list's filter field.
+pub(crate) const FILTER: &str = "Filter by name";
+
+/// The accessible name of the exports' filter field.
+pub(crate) const EXPORT_FILTER: &str = "Filter exports";
+
+/// The filter over a list: what a name (or path) must contain.
+fn filter_field(ui: &mut egui::Ui, filter: &mut String) {
+    labelled_filter(ui, filter, FILTER);
+}
+
+/// A filter field named `label`, which is also its hint.
+fn labelled_filter(ui: &mut egui::Ui, filter: &mut String, label: &str) {
+    let response = ui.add(
+        egui::TextEdit::singleline(filter)
+            .hint_text(label)
+            .desired_width(220.0),
+    );
+    let enabled = ui.is_enabled();
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::TextEdit, enabled, label));
+}
+
+/// Which card of a list tab the keys move in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ListFocus {
+    /// The processes, or the kernel's modules.
+    List,
+    /// What is listed beside them for the picked one.
+    Detail,
+}
+
+impl ListFocus {
+    const fn other(self) -> Self {
+        match self {
+            Self::List => Self::Detail,
+            Self::Detail => Self::List,
+        }
+    }
+}
+
+/// The keys a list tab took this frame.
+#[derive(Clone, Copy)]
+struct ListKeys {
+    /// Rows to move: down positive, up negative.
+    step: isize,
+    /// Enter: what a double-click on the row stood on does.
+    open: bool,
+    /// Tab presses: each hands the keys to the other card.
+    switches: usize,
+    /// Shift+Tab presses: each shows the detail card's next view.
+    next_views: usize,
+}
+
+/// The list tabs' keyboard: a widget of no size that holds the focus, with a
+/// filter that keeps egui from moving the focus on Tab and the arrows.
+const LIST_KEYS: &str = "debugger_list_keys";
+
+/// Takes the keyboard for a list tab and reads what was pressed. The keys
+/// are left alone while a text field (a filter) has them or a window above
+/// the page does; `None` then, and on the frame the focus is taken, before
+/// its filter holds.
+fn list_keys(ui: &mut egui::Ui) -> Option<ListKeys> {
+    let id = egui::Id::new(LIST_KEYS);
+    // Placed every frame: egui drops the focus of a widget a frame did not
+    // place.
+    ui.interact(
+        egui::Rect::from_min_size(ui.cursor().min, egui::Vec2::ZERO),
+        id,
+        egui::Sense::focusable_noninteractive(),
+    );
+    let ctx = ui.ctx().clone();
+    if !ctx.memory(|memory| memory.has_focus(id)) {
+        let free = !ctx.text_edit_focused()
+            && ctx.memory(|memory| memory.allows_interaction(ui.layer_id()));
+        if free {
+            ctx.memory_mut(|memory| memory.request_focus(id));
+        }
+        return None;
+    }
+    ctx.memory_mut(|memory| {
+        memory.set_focus_lock_filter(
+            id,
+            egui::EventFilter {
+                tab: true,
+                horizontal_arrows: true,
+                vertical_arrows: true,
+                escape: false,
+            },
+        );
+    });
+    Some(ctx.input_mut(|input| {
+        // Shift+Tab first: a plain Tab's match ignores Shift.
+        let next_views = input.count_and_consume_key(egui::Modifiers::SHIFT, egui::Key::Tab);
+        let switches = input.count_and_consume_key(egui::Modifiers::NONE, egui::Key::Tab);
+        let down = input.count_and_consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown);
+        let up = input.count_and_consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp);
+        let open = input.count_and_consume_key(egui::Modifiers::NONE, egui::Key::Enter) > 0;
+        ListKeys {
+            step: down as isize - up as isize,
+            open,
+            switches,
+            next_views,
+        }
+    }))
+}
+
+/// The row the keys stand on in a listing, and whether a key moved them
+/// there this frame: a row moved to is drawn even out of sight, and scrolled
+/// into view.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum KeyRow {
+    Resting(usize),
+    Moved(usize),
+}
+
+impl KeyRow {
+    fn row(self) -> usize {
+        match self {
+            Self::Resting(at) | Self::Moved(at) => at,
+        }
+    }
+
+    fn at(self, row: usize) -> bool {
+        self.row() == row
+    }
+
+    fn brings_in(self, row: usize) -> bool {
+        self == Self::Moved(row)
+    }
+}
+
+/// Whether row `row` of a listing is left as room only: out of sight, and
+/// not the row a key just moved to.
+fn culled(ui: &egui::Ui, key: Option<KeyRow>, row: usize) -> bool {
+    !key.is_some_and(|key| key.brings_in(row)) && !row_visible(ui)
+}
+
+/// A detail row's shade: selected where the keys stand, striped otherwise.
+fn keyed_tone(key: Option<KeyRow>, row: usize) -> Tone {
+    if key.is_some_and(|key| key.at(row)) {
+        Tone::Selected
+    } else {
+        Tone::striped(row)
+    }
+}
+
+/// Scrolls the drawn row `row` into view when a key just moved to it.
+fn follow_key(response: &egui::Response, key: Option<KeyRow>, row: usize) {
+    if key.is_some_and(|key| key.brings_in(row)) {
+        response.scroll_to_me(None);
+    }
+}
+
+/// Where the keys left a listing of `rows` rows that stood on `from`: the
+/// row they stand on now, and the row Enter opened.
+struct Walk {
+    key: Option<KeyRow>,
+    open: Option<usize>,
+}
+
+/// Moves from `from` by the keys' step, staying in the listing. Standing on
+/// no row is standing just above the first.
+fn walk(keys: ListKeys, from: Option<usize>, rows: usize) -> Walk {
+    let at = from.filter(|&at| at < rows);
+    let key = match (rows.checked_sub(1), keys.step) {
+        (None, _) => None,
+        (Some(_), 0) => at.map(KeyRow::Resting),
+        (Some(last), step) => {
+            let to = match at {
+                Some(at) => at.saturating_add_signed(step),
+                None => step.saturating_sub(1).max(0).unsigned_abs(),
+            };
+            Some(KeyRow::Moved(to.min(last)))
+        }
+    };
+    let open = if keys.open { key.map(KeyRow::row) } else { None };
+    Walk { key, open }
+}
+
+/// The rows the keys stand on in a list tab's two cards.
+#[derive(Clone, Copy, Default)]
+struct KeyedRows {
+    list: Option<KeyRow>,
+    detail: Option<KeyRow>,
+}
+
+/// What Enter does on a row of a detail card: what a click on it does.
+enum RowOpen {
+    Act(DebuggerAction),
+    /// A module's row in the memory map: shows or hides its sections.
+    Fold(u64),
+    /// Nothing opens: a module of another address space, a forwarded export.
+    Nothing,
+}
+
+/// Moves the detail card's cursor by the keys over the rows `opens` lists,
+/// and does what Enter opened. A frame with no move and no Enter lists none.
+fn walk_detail<F>(
+    keys: ListKeys,
+    opens: F,
+    cursor: &mut Option<usize>,
+    expanded: &mut BTreeSet<u64>,
+    action: &mut Option<DebuggerAction>,
+) -> Option<KeyRow>
+where
+    F: FnOnce(&BTreeSet<u64>) -> Vec<RowOpen>,
+{
+    if keys.step == 0 && !keys.open {
+        // A cursor past the rows of a listing that shrank stands on none.
+        return cursor.map(KeyRow::Resting);
+    }
+    let opens = opens(expanded);
+    let walked = walk(keys, *cursor, opens.len());
+    if let Some(KeyRow::Moved(to)) = walked.key {
+        *cursor = Some(to);
+    }
+    if let Some(opened) = walked.open {
+        match opens.into_iter().nth(opened) {
+            Some(RowOpen::Act(open)) => *action = Some(open),
+            Some(RowOpen::Fold(base)) => {
+                if !expanded.remove(&base) {
+                    expanded.insert(base);
+                }
+            }
+            Some(RowOpen::Nothing) | None => {}
+        }
+    }
+    walked.key
+}
+
+/// `pane_card`, outlined in cyan while it is `keyed`: the card the keys move
+/// in.
+fn keyed_pane_card<H, B>(ui: &mut egui::Ui, room: Room, title: Title<'_>, keyed: bool, header: H, body: B)
+where
+    H: FnOnce(&mut egui::Ui),
+    B: FnOnce(&mut egui::Ui),
+{
+    let card = ui.scope(|ui| pane_card(ui, room, title, header, body)).response.rect;
+    if keyed {
+        ui.painter().rect_stroke(
+            card,
+            12.0,
+            egui::Stroke::new(1.5_f32, ACCENT_CYAN),
+            egui::StrokeKind::Inside,
+        );
+    }
+}
+
+/// The Kernel modules tab: the kernel's modules, and beside them the picked
+/// one's sections or exports — laid out as the Processes tab is, the two
+/// cards side by side with a handle between them where the page has room,
+/// one above the other where it scrolls.
+fn kernel_page(
+    ui: &mut egui::Ui,
+    fit: Fit,
+    listing: &KernelListing,
+    current: Option<u64>,
+    pane: &mut DebuggerPane,
+    action: &mut Option<DebuggerAction>,
+) {
+    let filter = pane.list_filter.to_lowercase();
+    let shown: Vec<&WinModule> = listing
+        .modules
+        .iter()
+        .filter(|module| module_matches(module, &filter))
+        .collect();
+    let picked_before = pane.selected_kernel_module;
+    let detail_before = pane.kernel_detail;
+    let keys = list_keys(ui);
+    let keyed_rows = keys.map_or_else(KeyedRows::default, |keys| {
+        kernel_keys(keys, listing, &shown, pane, action)
+    });
+    let keyed = keys.map(|_| pane.list_focus);
+    // A pick or view the keys did not make (a click) leaves the cursor on no
+    // detail row.
+    let keyed_pick = (pane.selected_kernel_module, pane.kernel_detail);
+    let answer = kernel_answer(listing, pane);
+    let picked_name = pane
+        .selected_kernel_module
+        .and_then(|base| listing.modules.iter().find(|module| module.base == base))
+        .map(|module| module.name.clone().unwrap_or_else(|| format!("{:X}", module.base)));
+    let detail_count = answer.and_then(|picked| match &picked.shown {
+        PickedDetail::Sections(SectionsRead::Mapped(map)) => Some(map.regions.len()),
+        PickedDetail::Exports(ExportRead::Listed(exports)) => Some(exports.len()),
+        PickedDetail::Sections(SectionsRead::HeaderUnreadable)
+        | PickedDetail::Exports(ExportRead::NoTable | ExportRead::NotPe | ExportRead::Unreadable) => {
+            None
+        }
+    });
+    let list_title = Title::counted("Kernel modules", listing.modules.len()).inlined();
+    let detail_title = Title {
+        text: picked_name.as_deref().unwrap_or("Module"),
+        count: detail_count,
+        inline: true,
+    };
+    let has_pick = pane.selected_kernel_module.is_some();
+    // Read before the header's field takes the filter for this frame.
+    let export_filter = pane.export_filter.to_lowercase();
+
+    let mut list_card = |ui: &mut egui::Ui, room: Room, action: &mut Option<DebuggerAction>| {
+        keyed_pane_card(
+            ui,
+            room,
+            list_title,
+            keyed == Some(ListFocus::List),
+            |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    title_label(ui, list_title.text, list_title.count);
+                    filter_field(ui, &mut pane.list_filter);
+                });
+                header_row(ui, 0.0, &module_columns());
+            },
+            |ui| {
+                module_rows(
+                    ui,
+                    &shown,
+                    ModuleClick::Pick {
+                        picked: &mut pane.selected_kernel_module,
+                    },
+                    current,
+                    keyed_rows.list,
+                    action,
+                );
+            },
+        );
+    };
+    let mut detail_card = |ui: &mut egui::Ui, room: Room, action: &mut Option<DebuggerAction>| {
+        keyed_pane_card(
+            ui,
+            room,
+            detail_title,
+            keyed == Some(ListFocus::Detail),
+            |ui| {
+                kernel_detail_header(
+                    ui,
+                    detail_title,
+                    &mut pane.kernel_detail,
+                    &mut pane.export_filter,
+                );
+            },
+            |ui| kernel_detail_body(ui, answer, has_pick, &export_filter, keyed_rows.detail, action),
+        );
+    };
+    match fit {
+        Fit::Grid => {
+            let gap = SPACE_ITEM;
+            let page = ui.available_size();
+            let share = resized(pane.split.kernel, 0.0, page.x, gap, SPLIT_MIN);
+            let left = ((page.x - gap) * share).floor();
+            let mut moved: Option<f32> = None;
+            ui.horizontal_top(|ui| {
+                ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
+                list_card(ui, Room::Fixed(egui::vec2(left, page.y)), &mut *action);
+                match splitter(ui, egui::vec2(gap, page.y), SplitAxis::Columns, RESIZE_MODULE_LIST) {
+                    SplitterMove::Still => {}
+                    SplitterMove::Dragged(delta) => {
+                        moved = Some(resized(share, delta, page.x, gap, SPLIT_MIN));
+                    }
+                    SplitterMove::Reset => moved = Some(PROCESS_LIST_SHARE),
+                }
+                detail_card(
+                    ui,
+                    Room::Fixed(egui::vec2(page.x - gap - left, page.y)),
+                    &mut *action,
+                );
+            });
+            if let Some(share) = moved {
+                pane.split.kernel = share;
+            }
+        }
+        Fit::Scrolling(columns) => {
+            let density = fit.density();
+            let room = Room::Content(density);
+            let gap = density.gap();
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| match columns {
+                    Columns::Two => side_by_side(
+                        ui,
+                        gap,
+                        PROCESS_LIST_SHARE,
+                        action,
+                        |ui, action| list_card(ui, room, action),
+                        |ui, action| detail_card(ui, room, action),
+                    ),
+                    Columns::One => {
+                        list_card(ui, room, &mut *action);
+                        ui.add_space(gap);
+                        detail_card(ui, room, &mut *action);
+                    }
+                });
+        }
+    }
+    // A new pick or a switch between sections and exports asks the run for
+    // it; a double-click that opened a module in memory stands.
+    let changed =
+        pane.selected_kernel_module != picked_before || pane.kernel_detail != detail_before;
+    if changed && !matches!(action, Some(DebuggerAction::OpenModule(_))) {
+        *action = Some(DebuggerAction::ShowSystem(SystemView::KernelModules {
+            selected: pane.selected_kernel_module,
+            detail: pane.kernel_detail,
+        }));
+    }
+    if (pane.selected_kernel_module, pane.kernel_detail) != keyed_pick {
+        pane.detail_cursor = None;
+    }
+}
+
+/// The run's answer for the picked kernel module, once it is for what is
+/// picked and asked.
+fn kernel_answer<'a>(listing: &'a KernelListing, pane: &DebuggerPane) -> Option<&'a PickedModule> {
+    listing.picked.as_ref().filter(|picked| {
+        Some(picked.base) == pane.selected_kernel_module
+            && matches!(
+                (&picked.shown, pane.kernel_detail),
+                (PickedDetail::Sections(_), KernelDetail::Sections)
+                    | (PickedDetail::Exports(_), KernelDetail::Exports)
+            )
+    })
+}
+
+/// The Kernel modules tab's keys: Tab hands them between the cards, Shift+Tab
+/// switches the detail between sections and exports, and Up, Down and Enter
+/// pick and open a module of `shown` in the list, or walk and open the
+/// detail's rows.
+fn kernel_keys(
+    keys: ListKeys,
+    listing: &KernelListing,
+    shown: &[&WinModule],
+    pane: &mut DebuggerPane,
+    action: &mut Option<DebuggerAction>,
+) -> KeyedRows {
+    if keys.switches % 2 == 1 {
+        pane.list_focus = pane.list_focus.other();
+    }
+    if keys.next_views % 2 == 1 {
+        pane.kernel_detail = match pane.kernel_detail {
+            KernelDetail::Sections => KernelDetail::Exports,
+            KernelDetail::Exports => KernelDetail::Sections,
+        };
+        pane.detail_cursor = None;
+    }
+    match pane.list_focus {
+        ListFocus::List => {
+            let at = pane
+                .selected_kernel_module
+                .and_then(|base| shown.iter().position(|module| module.base == base));
+            let walked = walk(keys, at, shown.len());
+            if let Some(KeyRow::Moved(to)) = walked.key {
+                pane.selected_kernel_module = Some(shown[to].base);
+            }
+            if let Some(opened) = walked.open {
+                *action = Some(DebuggerAction::OpenModule(shown[opened].base));
+            }
+            KeyedRows {
+                list: walked.key,
+                detail: None,
+            }
+        }
+        ListFocus::Detail => {
+            // A view switched this frame has no answer yet, so lists no rows.
+            let answer = kernel_answer(listing, pane);
+            let filter = pane.export_filter.to_lowercase();
+            let detail = walk_detail(
+                keys,
+                |_| answer.map_or_else(Vec::new, |picked| kernel_detail_opens(picked, &filter)),
+                &mut pane.detail_cursor,
+                &mut pane.expanded_modules,
+                action,
+            );
+            KeyedRows { list: None, detail }
+        }
+    }
+}
+
+/// What Enter does on each row the picked module's detail lists, in order:
+/// a section or an export with an address opens in memory.
+fn kernel_detail_opens(picked: &PickedModule, export_filter: &str) -> Vec<RowOpen> {
+    match &picked.shown {
+        PickedDetail::Sections(SectionsRead::Mapped(map)) => map
+            .regions
+            .iter()
+            .map(|region| RowOpen::Act(DebuggerAction::OpenModule(region.start)))
+            .collect(),
+        PickedDetail::Exports(ExportRead::Listed(exports)) => exports
+            .iter()
+            .filter(|export| export_matches(export, export_filter))
+            .map(|export| match export_address(picked.base, export) {
+                Some(address) => RowOpen::Act(DebuggerAction::OpenModule(address)),
+                None => RowOpen::Nothing,
+            })
+            .collect(),
+        PickedDetail::Sections(SectionsRead::HeaderUnreadable)
+        | PickedDetail::Exports(ExportRead::NoTable | ExportRead::NotPe | ExportRead::Unreadable) => {
+            Vec::new()
+        }
+    }
+}
+
+/// Whether an export's name, or a forwarder's target, holds the lowercase
+/// `filter`.
+fn export_matches(export: &PeExport, filter: &str) -> bool {
+    filter.is_empty()
+        || export.name.as_deref().is_some_and(|name| name.to_lowercase().contains(filter))
+        || match &export.target {
+            ExportTarget::Forwarded(to) => to.to_lowercase().contains(filter),
+            ExportTarget::Rva(_) => false,
+        }
+}
+
+/// Where an export of the module at `base` lies; a forwarder has no address.
+fn export_address(base: u64, export: &PeExport) -> Option<u64> {
+    match &export.target {
+        ExportTarget::Rva(rva) => Some(base.wrapping_add(u64::from(*rva))),
+        ExportTarget::Forwarded(_) => None,
+    }
+}
+
+/// The detail card's title, its Sections/Exports switch (and the exports'
+/// filter), and the column titles of what it lists.
+fn kernel_detail_header(
+    ui: &mut egui::Ui,
+    title: Title<'_>,
+    detail: &mut KernelDetail,
+    export_filter: &mut String,
+) {
+    ui.horizontal_wrapped(|ui| {
+        title_label(ui, title.text, title.count);
+        segmented(
+            ui,
+            detail,
+            &[(KernelDetail::Sections, "Sections"), (KernelDetail::Exports, "Exports")],
+        );
+        match detail {
+            KernelDetail::Exports => labelled_filter(ui, export_filter, EXPORT_FILTER),
+            KernelDetail::Sections => {}
+        }
+    });
+    match detail {
+        KernelDetail::Sections => header_row(ui, 0.0, &section_columns()),
+        KernelDetail::Exports => header_row(ui, 0.0, &export_columns()),
+    }
+}
+
+/// The picked module's sections or exports, or why they are not listed; the
+/// keys stand on row `key` of them.
+fn kernel_detail_body(
+    ui: &mut egui::Ui,
+    answer: Option<&PickedModule>,
+    has_pick: bool,
+    export_filter: &str,
+    key: Option<KeyRow>,
+    action: &mut Option<DebuggerAction>,
+) {
+    let mut muted = |text: &str| {
+        ui.add_space(SPACE_ITEM);
+        ui.label(RichText::new(text).color(TEXT_MUTED));
+    };
+    let Some(picked) = answer else {
+        muted(if has_pick {
+            "Reading the module…"
+        } else {
+            "Pick a module to see its sections and exports."
+        });
+        return;
+    };
+    match &picked.shown {
+        PickedDetail::Sections(SectionsRead::Mapped(map)) => section_rows(ui, map, key, action),
+        PickedDetail::Sections(SectionsRead::HeaderUnreadable) => {
+            muted("Its headers are paged out, so its sections cannot be read.");
+        }
+        PickedDetail::Exports(ExportRead::Listed(exports)) => {
+            export_rows(ui, picked.base, exports, export_filter, key, action);
+        }
+        PickedDetail::Exports(ExportRead::NoTable) => muted("It exports nothing."),
+        PickedDetail::Exports(ExportRead::NotPe) => {
+            muted("Its headers do not read as a PE image.");
+        }
+        PickedDetail::Exports(ExportRead::Unreadable) => muted("Its export table is paged out."),
+    }
+}
+
+const SECTION_NAME_CHARS: usize = 9;
+
+fn section_columns() -> [Cell; 6] {
+    [
+        Cell::left("Section", TEXT_MUTED, SECTION_NAME_CHARS),
+        Cell::left("Address", TEXT_MUTED, 16),
+        Cell::right("Size", TEXT_MUTED, MEMORY_SIZE_CHARS),
+        Cell::right("Resident", TEXT_MUTED, MEMORY_RESIDENT_CHARS),
+        Cell::left("", TEXT_MUTED, MEMORY_GAUGE_CHARS),
+        Cell::fill("Access", TEXT_MUTED),
+    ]
+}
+
+/// A module's header page and sections, one a row: name, address, size, how
+/// much is resident, and access — executable code cyan. A click opens the
+/// region in the memory pane; the keys stand on row `key`.
+fn section_rows(
+    ui: &mut egui::Ui,
+    map: &MemoryMap,
+    key: Option<KeyRow>,
+    action: &mut Option<DebuggerAction>,
+) {
+    for (n, region) in map.regions.iter().enumerate() {
+        let name = match &region.owner {
+            RegionOwner::Header { .. } => "headers",
+            RegionOwner::Section { section, .. } => section.as_str(),
+            RegionOwner::Stack { .. } | RegionOwner::Private => "(other)",
+        };
+        let executable = region.access.is_some_and(|access| access.executable);
+        let color = if executable { ACCENT_CYAN } else { TEXT_PRIMARY };
+        let fraction = region.resident_pages as f32 / region.total_pages.max(1) as f32;
+        let gauge = if executable {
+            Cell::gauge_colored(fraction, MEMORY_GAUGE_CHARS, ACCENT_CYAN)
+        } else {
+            Cell::gauge(fraction, MEMORY_GAUGE_CHARS)
+        };
+        let cells = [
+            Cell::left(name, color, SECTION_NAME_CHARS),
+            Cell::left(format!("{:016X}", region.start), TEXT_MUTED, 16),
+            Cell::right(human_size(region.size), TEXT_MUTED, MEMORY_SIZE_CHARS),
+            Cell::right(
+                format!("{}/{}", region.resident_pages, region.total_pages),
+                TEXT_MUTED,
+                MEMORY_RESIDENT_CHARS,
+            ),
+            gauge,
+            Cell::fill(region_access_text(region), color),
+        ];
+        let response = list_row(ui, 0.0, &cells, keyed_tone(key, n), RowSense::Pick { selected: false });
+        follow_key(&response, key, n);
+        if response.on_hover_text("Click to show it in memory.").clicked() {
+            *action = Some(DebuggerAction::OpenModule(region.start));
+        }
+    }
+}
+
+const EXPORT_ORDINAL_CHARS: usize = 6;
+
+fn export_columns() -> [Cell; 3] {
+    [
+        Cell::left("Address", TEXT_MUTED, 16),
+        Cell::right("Ord", TEXT_MUTED, EXPORT_ORDINAL_CHARS),
+        Cell::fill("Name", TEXT_MUTED),
+    ]
+}
+
+/// A module's exports at `base`, one a row, keeping those whose name (or a
+/// forwarder's target) holds the lowercase `filter`: address, ordinal, name.
+/// A forwarder shows where it leads instead of an address. A click on an
+/// export with an address opens it in the memory pane; the keys stand on
+/// row `key` of those listed.
+fn export_rows(
+    ui: &mut egui::Ui,
+    base: u64,
+    exports: &[PeExport],
+    filter: &str,
+    key: Option<KeyRow>,
+    action: &mut Option<DebuggerAction>,
+) {
+    let mut any = false;
+    for (n, export) in exports.iter().filter(|export| export_matches(export, filter)).enumerate() {
+        any = true;
+        if culled(ui, key, n) {
+            skip_row(ui);
+            continue;
+        }
+        let name = export.name.as_deref().unwrap_or("(by ordinal)");
+        // Where a click goes: an export with an address; a forwarder has none.
+        let target = export_address(base, export);
+        let address = target.map_or_else(|| "forwarded".to_owned(), |at| format!("{at:016X}"));
+        let label = match &export.target {
+            ExportTarget::Rva(_) => name.to_owned(),
+            ExportTarget::Forwarded(to) => format!("{name}  forwarded to {to}"),
+        };
+        let cells = [
+            Cell::left(address, TEXT_MUTED, 16),
+            Cell::right(export.ordinal.to_string(), TEXT_MUTED, EXPORT_ORDINAL_CHARS),
+            Cell::fill(label, TEXT_PRIMARY),
+        ];
+        let response = list_row(ui, 0.0, &cells, keyed_tone(key, n), RowSense::Pick { selected: false });
+        follow_key(&response, key, n);
+        match target {
+            Some(address) => {
+                if response.on_hover_text("Click to show it in memory.").clicked() {
+                    *action = Some(DebuggerAction::OpenModule(address));
+                }
+            }
+            None => {
+                response.on_hover_text("Forwarded: the function lives in the module named.");
+            }
+        }
+    }
+    if !any {
+        ui.add_space(SPACE_ITEM);
+        ui.label(RichText::new("No export matches the filter.").color(TEXT_MUTED));
+    }
+}
+
+/// A module passes a lowercase `filter` when its name or path holds it.
+fn module_matches(module: &WinModule, filter: &str) -> bool {
+    filter.is_empty()
+        || [module.name.as_deref(), module.path.as_deref()]
+            .into_iter()
+            .flatten()
+            .any(|text| text.to_lowercase().contains(filter))
+}
+
+fn processes_page(
+    ui: &mut egui::Ui,
+    fit: Fit,
+    listing: &ProcessListing,
+    current_user_module: Option<u64>,
+    pane: &mut DebuggerPane,
+    action: &mut Option<DebuggerAction>,
+) {
+    let chosen = listing
+        .modules
+        .as_ref()
+        .and_then(|modules| listing.processes.iter().find(|p| p.eprocess == modules.eprocess));
+    let navigable = chosen.is_some_and(|process| process.current);
+    // The chosen process's address space, for browsing it when it is not the
+    // running one.
+    let process_cr3 = chosen.map(|process| process.cr3);
+    let rows = process_rows_shown(
+        &listing.processes,
+        &listing.tree,
+        pane.process_layout,
+        &pane.list_filter,
+    );
+    let keys = list_keys(ui);
+    let keyed_rows = keys.map_or_else(KeyedRows::default, |keys| {
+        process_keys(keys, listing, &rows, chosen, navigable, process_cr3, pane, action)
+    });
+    let keyed = keys.map(|_| pane.list_focus);
+    // A pick or view the keys did not make (a click) leaves the cursor on no
+    // detail row.
+    let keyed_pick = (pane.selected_process, pane.process_detail);
+    let title = match chosen {
+        Some(process) => format!("Modules of {} (PID {})", process.name, process.pid),
+        None => "Modules".to_owned(),
+    };
+    let module_count = match listing.modules.as_ref().map(|modules| &modules.read) {
+        Some(ModuleRead::Listed(modules)) => Some(modules.len()),
+        Some(ModuleRead::NoUserSpace | ModuleRead::Unreadable) | None => None,
+    };
+    let detail = pane.process_detail;
+    let right_count = match detail {
+        ProcessDetail::Modules => module_count,
+        ProcessDetail::Threads => listing
+            .modules
+            .as_ref()
+            .map(|modules| modules.threads.len()),
+        ProcessDetail::MemoryMap => listing
+            .modules
+            .as_ref()
+            .and_then(|modules| modules.map.as_ref())
+            .map(|map| map.regions.len()),
+    };
+    let right_title = Title {
+        text: &title,
+        count: right_count,
+        inline: true,
+    };
+    let process_title = Title::counted("Processes", listing.processes.len()).inlined();
+    // The current module is only the running process's; another process's
+    // list shares bases (ntdll loads at one address everywhere) but is not
+    // where the processor runs, so it gets no mark.
+    let highlight = if navigable { current_user_module } else { None };
+    let scroll_was_pending = pane.scroll_to.is_some();
+    // The Modules/Memory-map switch and the minimap report through these
+    // locals, so the right card's two closures borrow disjoint fields.
+    let mut switch_to: Option<ProcessDetail> = None;
+    let mut minimap_click: Option<u64> = None;
+    // The two cards, each drawn in the room the layout below gives it. They
+    // take `action` as an argument so neither holds it between calls.
+    let mut process_card = |ui: &mut egui::Ui, room: Room, action: &mut Option<DebuggerAction>| {
+        keyed_pane_card(
+            ui,
+            room,
+            process_title,
+            keyed == Some(ListFocus::List),
+            |ui| process_header(ui, process_title, &mut pane.process_layout, &mut pane.list_filter),
+            |ui| {
+                process_rows(
+                    ui,
+                    &listing.processes,
+                    &rows,
+                    chosen,
+                    &mut pane.selected_process,
+                    detail,
+                    keyed_rows.list,
+                    action,
+                );
+            },
+        );
+    };
+    let mut detail_card = |ui: &mut egui::Ui, room: Room, action: &mut Option<DebuggerAction>| {
+        keyed_pane_card(
+            ui,
+            room,
+            right_title,
+            keyed == Some(ListFocus::Detail),
+            |ui| {
+                right_card_header(
+                    ui,
+                    right_title,
+                    pane.process_detail,
+                    map_of(listing),
+                    &mut switch_to,
+                    &mut minimap_click,
+                );
+            },
+            |ui| {
+                right_card_body(
+                    ui,
+                    detail,
+                    listing,
+                    navigable,
+                    highlight,
+                    process_cr3,
+                    &mut pane.expanded_modules,
+                    &mut pane.scroll_to,
+                    keyed_rows.detail,
+                    action,
+                );
+            },
+        );
+    };
+    match fit {
+        Fit::Grid => {
+            let gap = SPACE_ITEM;
+            let page = ui.available_size();
+            // Laid out at the share clamped to today's width (see
+            // `grid_layout`); a drag moves on from there.
+            let share = resized(pane.split.processes, 0.0, page.x, gap, SPLIT_MIN);
+            let left = ((page.x - gap) * share).floor();
+            // Only a drag or a reset changes the stored preference.
+            let mut moved: Option<f32> = None;
+            ui.horizontal_top(|ui| {
+                ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
+                process_card(ui, Room::Fixed(egui::vec2(left, page.y)), &mut *action);
+                match splitter(ui, egui::vec2(gap, page.y), SplitAxis::Columns, RESIZE_PROCESS_LIST) {
+                    SplitterMove::Still => {}
+                    SplitterMove::Dragged(delta) => {
+                        moved = Some(resized(share, delta, page.x, gap, SPLIT_MIN));
+                    }
+                    SplitterMove::Reset => moved = Some(PROCESS_LIST_SHARE),
+                }
+                detail_card(
+                    ui,
+                    Room::Fixed(egui::vec2(page.x - gap - left, page.y)),
+                    &mut *action,
+                );
+            });
+            if let Some(share) = moved {
+                pane.split.processes = share;
+            }
+        }
+        Fit::Scrolling(columns) => {
+            let density = fit.density();
+            let room = Room::Content(density);
+            let gap = density.gap();
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| match columns {
+                    Columns::Two => side_by_side(
+                        ui,
+                        gap,
+                        PROCESS_LIST_SHARE,
+                        action,
+                        |ui, action| process_card(ui, room, action),
+                        |ui, action| detail_card(ui, room, action),
+                    ),
+                    Columns::One => {
+                        process_card(ui, room, &mut *action);
+                        ui.add_space(gap);
+                        detail_card(ui, room, &mut *action);
+                    }
+                });
+        }
+    }
+    // A target that was pending when the frame began and is still pending
+    // drew no row to consume it: it is dropped, not left to fire later when a
+    // row happens to appear.
+    if scroll_was_pending && pane.scroll_to.is_some() {
+        pane.scroll_to = None;
+    }
+    // A minimap click this frame becomes next frame's scroll target, after
+    // both right-card closures have ended (they borrow disjoint fields). A
+    // section of a collapsed module has no row until its module is open, so
+    // the module is opened for it.
+    if let Some(address) = minimap_click {
+        pane.scroll_to = Some(address);
+        let section_owner = map_of(listing).and_then(|map| {
+            map.regions
+                .iter()
+                .find(|region| region.start == address)
+                .and_then(|region| match &region.owner {
+                    RegionOwner::Section { base, .. } => Some(*base),
+                    RegionOwner::Header { .. } | RegionOwner::Stack { .. } | RegionOwner::Private => {
+                        None
+                    }
+                })
+        });
+        if let Some(base) = section_owner {
+            pane.expanded_modules.insert(base);
+        }
+    }
+    if let Some(chosen_detail) = switch_to {
+        pane.process_detail = chosen_detail;
+        *action = Some(DebuggerAction::ShowSystem(SystemView::Processes {
+            selected: pane.selected_process,
+            detail: chosen_detail,
+        }));
+    }
+    if (pane.selected_process, pane.process_detail) != keyed_pick {
+        pane.detail_cursor = None;
+    }
+}
+
+/// The detail views in the order the switch shows them, each followed by the
+/// one Shift+Tab shows next.
+fn next_process_detail(detail: ProcessDetail) -> ProcessDetail {
+    match detail {
+        ProcessDetail::Modules => ProcessDetail::MemoryMap,
+        ProcessDetail::MemoryMap => ProcessDetail::Threads,
+        ProcessDetail::Threads => ProcessDetail::Modules,
+    }
+}
+
+/// The Processes tab's keys: Tab hands them between the cards, Shift+Tab
+/// shows the next detail view, and Up, Down and Enter pick and view a process
+/// of `rows` in the list, or walk and open the detail's rows.
+fn process_keys(
+    keys: ListKeys,
+    listing: &ProcessListing,
+    rows: &[ShownProcess],
+    chosen: Option<&WinProcess>,
+    navigable: bool,
+    process_cr3: Option<u64>,
+    pane: &mut DebuggerPane,
+    action: &mut Option<DebuggerAction>,
+) -> KeyedRows {
+    if keys.switches % 2 == 1 {
+        pane.list_focus = pane.list_focus.other();
+    }
+    if keys.next_views > 0 {
+        for _ in 0..keys.next_views % 3 {
+            pane.process_detail = next_process_detail(pane.process_detail);
+        }
+        pane.detail_cursor = None;
+        *action = Some(DebuggerAction::ShowSystem(SystemView::Processes {
+            selected: pane.selected_process,
+            detail: pane.process_detail,
+        }));
+    }
+    match pane.list_focus {
+        ListFocus::List => {
+            // The process picked, or the one shown before any pick.
+            let shown = pane.selected_process.or(chosen.map(|process| process.eprocess));
+            let at = shown.and_then(|eprocess| {
+                rows.iter()
+                    .position(|row| listing.processes[row.index].eprocess == eprocess)
+            });
+            let walked = walk(keys, at, rows.len());
+            if let Some(KeyRow::Moved(to)) = walked.key {
+                let eprocess = listing.processes[rows[to].index].eprocess;
+                if shown != Some(eprocess) {
+                    pane.selected_process = Some(eprocess);
+                    *action = Some(DebuggerAction::ShowSystem(SystemView::Processes {
+                        selected: pane.selected_process,
+                        detail: pane.process_detail,
+                    }));
+                }
+            }
+            if let Some(opened) = walked.open {
+                // What a double-click does (see `process_rows`).
+                let process = &listing.processes[rows[opened].index];
+                let context = if process.current {
+                    ViewContext::Live
+                } else {
+                    ViewContext::Process {
+                        eprocess: process.eprocess,
+                    }
+                };
+                *action = Some(DebuggerAction::View(context));
+            }
+            KeyedRows {
+                list: walked.key,
+                detail: None,
+            }
+        }
+        ListFocus::Detail => {
+            // A view switched this frame has not been read yet: what the
+            // listing holds for it may be an older read.
+            let view = pane.process_detail;
+            let switched = keys.next_views > 0;
+            let detail = walk_detail(
+                keys,
+                |expanded| {
+                    if switched {
+                        Vec::new()
+                    } else {
+                        process_detail_opens(listing, view, navigable, process_cr3, expanded)
+                    }
+                },
+                &mut pane.detail_cursor,
+                &mut pane.expanded_modules,
+                action,
+            );
+            KeyedRows { list: None, detail }
+        }
+    }
+}
+
+/// What Enter does on each row the chosen process's detail card lists, in
+/// the order it draws them (the memory map's open modules with their
+/// sections under them).
+fn process_detail_opens(
+    listing: &ProcessListing,
+    detail: ProcessDetail,
+    navigable: bool,
+    process_cr3: Option<u64>,
+    expanded: &BTreeSet<u64>,
+) -> Vec<RowOpen> {
+    let Some(modules) = listing.modules.as_ref() else {
+        return Vec::new();
+    };
+    match detail {
+        ProcessDetail::Modules => match &modules.read {
+            ModuleRead::Listed(listed) => listed
+                .iter()
+                .map(|module| {
+                    if navigable {
+                        RowOpen::Act(DebuggerAction::OpenModule(module.base))
+                    } else {
+                        RowOpen::Nothing
+                    }
+                })
+                .collect(),
+            ModuleRead::NoUserSpace | ModuleRead::Unreadable => Vec::new(),
+        },
+        ProcessDetail::Threads => modules
+            .threads
+            .iter()
+            .map(|thread| {
+                RowOpen::Act(DebuggerAction::View(ViewContext::Thread {
+                    eprocess: modules.eprocess,
+                    tid: thread.tid,
+                }))
+            })
+            .collect(),
+        ProcessDetail::MemoryMap => {
+            let Some(map) = modules.map.as_ref() else {
+                return Vec::new();
+            };
+            let mut opens = Vec::new();
+            for group in crate::debugger::memory_map::group(map) {
+                match group {
+                    crate::debugger::memory_map::MapGroup::Region(index) => {
+                        opens.push(region_open(map.regions[index].start, navigable, process_cr3));
+                    }
+                    crate::debugger::memory_map::MapGroup::Module { base, regions, .. } => {
+                        opens.push(RowOpen::Fold(base));
+                        if expanded.contains(&base) {
+                            for index in regions {
+                                opens.push(region_open(map.regions[index].start, navigable, process_cr3));
+                            }
+                        }
+                    }
+                }
+            }
+            opens
+        }
+    }
+}
+
+/// What a click on a memory-map region at `start` does: opens it in memory
+/// for the running process, or in the address space at `process_cr3` for
+/// another.
+fn region_open(start: u64, navigable: bool, process_cr3: Option<u64>) -> RowOpen {
+    match (navigable, process_cr3) {
+        (true, _) => RowOpen::Act(DebuggerAction::OpenModule(start)),
+        (false, Some(cr3)) => RowOpen::Act(DebuggerAction::ViewInProcess { cr3, address: start }),
+        (false, None) => RowOpen::Nothing,
+    }
+}
+
+/// The memory map of the listing's chosen process, if it has been read.
+fn map_of(listing: &ProcessListing) -> Option<&MemoryMap> {
+    listing.modules.as_ref().and_then(|modules| modules.map.as_ref())
+}
+
+/// The right card's header: the Modules/Memory-map switch, the memory-map
+/// minimap, and the column titles. A changed switch is reported through
+/// `switch_to`; a minimap click through `minimap_click`.
+fn right_card_header(
+    ui: &mut egui::Ui,
+    title: Title<'_>,
+    detail: ProcessDetail,
+    map: Option<&MemoryMap>,
+    switch_to: &mut Option<ProcessDetail>,
+    minimap_click: &mut Option<u64>,
+) {
+    let mut chosen = detail;
+    // The title shares the switch's row (the card leaves it out).
+    ui.horizontal_wrapped(|ui| {
+        title_label(ui, title.text, title.count);
+        if segmented(
+            ui,
+            &mut chosen,
+            &[
+                (ProcessDetail::Modules, "Modules"),
+                (ProcessDetail::MemoryMap, "Memory map"),
+                (ProcessDetail::Threads, "Threads"),
+            ],
+        ) {
+            *switch_to = Some(chosen);
+        }
+    });
+    match detail {
+        ProcessDetail::Modules => header_row(ui, 0.0, &module_columns()),
+        ProcessDetail::Threads => header_row(ui, 0.0, &thread_columns()),
+        ProcessDetail::MemoryMap => {
+            if let Some(map) = map.filter(|map| !map.regions.is_empty()) {
+                let origin = match map.origin {
+                    crate::debugger::memory_map::MapOrigin::WindowsRecords => {
+                        "from Windows' records"
+                    }
+                    crate::debugger::memory_map::MapOrigin::PageTables => "from page tables",
+                };
+                ui.label(RichText::new(origin).size(TEXT_SECONDARY).color(TEXT_MUTED));
+                draw_minimap(ui, map, minimap_click);
+            }
+            header_row(ui, 0.0, &memory_columns());
+        }
+    }
+}
+
+/// The horizontal address-space overview: every region as a segment on a log
+/// scale, executable memory cyan. A click jumps the list to that region.
+fn draw_minimap(ui: &mut egui::Ui, map: &MemoryMap, minimap_click: &mut Option<u64>) {
+    use crate::debugger::minimap;
+    let width = ui.available_width();
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(width, 14.0), egui::Sense::click());
+    let painter = ui.painter();
+    painter.rect_filled(rect, 3.0, crate::shell::theme::BG_WELL);
+    // The lanes drawn are the lanes a click is matched against.
+    for lane in minimap::lanes(map, width) {
+        let segment = egui::Rect::from_min_size(
+            egui::pos2(rect.left() + lane.offset, rect.top() + 2.0),
+            egui::vec2(lane.extent, rect.height() - 4.0),
+        );
+        let color = if lane.executable {
+            ACCENT_CYAN
+        } else {
+            CONTROL_FILL_REST
+        };
+        painter.rect_filled(segment, 0.0, color);
+    }
+    if response.clicked() {
+        if let Some(pos) = response.interact_pointer_pos() {
+            *minimap_click = minimap::address_at(map, width, pos.x - rect.left());
+        }
+    }
+    ui.add_space(2.0);
+}
+
+/// The right card's body: the modules, the memory map or the threads, the
+/// keys standing on row `key`.
+fn right_card_body(
+    ui: &mut egui::Ui,
+    detail: ProcessDetail,
+    listing: &ProcessListing,
+    navigable: bool,
+    highlight: Option<u64>,
+    process_cr3: Option<u64>,
+    expanded: &mut BTreeSet<u64>,
+    scroll_to: &mut Option<u64>,
+    key: Option<KeyRow>,
+    action: &mut Option<DebuggerAction>,
+) {
+    match detail {
+        ProcessDetail::Modules => listed_modules(ui, listing, navigable, highlight, key, action),
+        ProcessDetail::Threads => match listing.modules.as_ref() {
+            Some(modules) => thread_rows(ui, &modules.threads, modules.eprocess, key, action),
+            None => {
+                ui.add_space(SPACE_ITEM);
+                ui.label(RichText::new("Pick a process.").color(TEXT_MUTED));
+            }
+        },
+        ProcessDetail::MemoryMap => match listing.modules.as_ref().and_then(|m| m.map.as_ref()) {
+            Some(map) => {
+                memory_map_rows(ui, map, navigable, process_cr3, expanded, scroll_to, key, action);
+            }
+            None => {
+                ui.add_space(SPACE_ITEM);
+                ui.label(RichText::new("Reading the address space…").color(TEXT_MUTED));
+            }
+        },
+    }
+}
+
+/// A size in bytes, as a debugger shows it: whole KiB, or MiB/GiB to one
+/// place. Guest regions are page-aligned, so KiB is exact.
+fn human_size(bytes: u64) -> String {
+    const KIB: u64 = 1024;
+    const MIB: u64 = KIB * 1024;
+    const GIB: u64 = MIB * 1024;
+    if bytes >= GIB {
+        format!("{:.1} GB", bytes as f64 / GIB as f64)
+    } else if bytes >= MIB {
+        format!("{:.1} MB", bytes as f64 / MIB as f64)
+    } else if bytes >= KIB {
+        format!("{} KB", bytes / KIB)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
+const MEMORY_SIZE_CHARS: usize = 8;
+const MEMORY_RESIDENT_CHARS: usize = 9;
+const MEMORY_ACCESS_CHARS: usize = 5;
+const MEMORY_MODULE_CHARS: usize = 18;
+
+const MEMORY_GAUGE_CHARS: usize = 7;
+const MEMORY_TYPE_CHARS: usize = 7;
+
+fn memory_columns() -> [Cell; 8] {
+    [
+        Cell::left("Address", TEXT_MUTED, 16),
+        Cell::right("Size", TEXT_MUTED, MEMORY_SIZE_CHARS),
+        Cell::right("Resident", TEXT_MUTED, MEMORY_RESIDENT_CHARS),
+        Cell::left("", TEXT_MUTED, MEMORY_GAUGE_CHARS),
+        Cell::left("Access", TEXT_MUTED, MEMORY_ACCESS_CHARS),
+        Cell::left("Type", TEXT_MUTED, MEMORY_TYPE_CHARS),
+        Cell::left("Module", TEXT_MUTED, MEMORY_MODULE_CHARS),
+        Cell::fill("Section", TEXT_MUTED),
+    ]
+}
+
+/// A region's Windows type, when its VAD was read.
+fn vad_type_label(region: &crate::debugger::memory_map::MapRegion) -> &'static str {
+    use crate::debugger::vad::VadKind;
+    match region.vad.map(|info| info.kind) {
+        Some(VadKind::Image) => "image",
+        Some(VadKind::Mapped) => "mapped",
+        Some(VadKind::Private) => "private",
+        None => "",
+    }
+}
+
+/// How a region's access reads: the hardware access of its resident pages,
+/// or — for a region with no resident page — Windows' protection from its VAD.
+fn region_access_text(region: &crate::debugger::memory_map::MapRegion) -> String {
+    match region.access {
+        Some(access) => {
+            let mut text = String::from("R");
+            text.push(if access.writable { 'W' } else { ' ' });
+            if access.executable {
+                text.push('X');
+            }
+            text
+        }
+        None => region
+            .vad
+            .and_then(|info| info.protection)
+            .map_or_else(|| "—".to_owned(), |protection| protection.label().to_owned()),
+    }
+}
+
+/// The memory map, grouped by module: each module is one row that expands
+/// into its header and section rows; private memory stays a plain row.
+/// Executable memory is cyan — the one thing to hunt for.
+fn memory_map_rows(
+    ui: &mut egui::Ui,
+    map: &MemoryMap,
+    navigable: bool,
+    process_cr3: Option<u64>,
+    expanded: &mut BTreeSet<u64>,
+    scroll_to: &mut Option<u64>,
+    key: Option<KeyRow>,
+    action: &mut Option<DebuggerAction>,
+) {
+    if map.regions.is_empty() {
+        ui.add_space(SPACE_ITEM);
+        ui.label(RichText::new("No mapped memory.").color(TEXT_MUTED));
+        return;
+    }
+    // The rows drawn so far: the keys count modules and their open sections
+    // alike, in the order `process_detail_opens` lists them.
+    let mut row = 0usize;
+    let sections = |ui: &mut egui::Ui,
+                        regions: &[usize],
+                        row: &mut usize,
+                        scroll_to: &mut Option<u64>,
+                        action: &mut Option<DebuggerAction>| {
+        for &index in regions {
+            let place = RowPlace { lead: TREE_INDENT, row: *row, key };
+            region_row(ui, map, index, place, navigable, process_cr3, scroll_to, action);
+            *row += 1;
+        }
+    };
+    for group in crate::debugger::memory_map::group(map) {
+        match group {
+            crate::debugger::memory_map::MapGroup::Region(index) => {
+                let place = RowPlace { lead: 0.0, row, key };
+                region_row(ui, map, index, place, navigable, process_cr3, scroll_to, action);
+                row += 1;
+            }
+            crate::debugger::memory_map::MapGroup::Module {
+                base,
+                name,
+                regions,
+                resident_pages,
+                total_pages,
+            } => {
+                let open = expanded.contains(&base);
+                let first = &map.regions[regions[0]];
+                let module_row = row;
+                row += 1;
+                // A module row that is out of sight costs nothing but its
+                // place in the list; its sections follow when it is open.
+                if *scroll_to != Some(first.start) && culled(ui, key, module_row) {
+                    skip_row(ui);
+                    if open {
+                        sections(ui, &regions, &mut row, scroll_to, action);
+                    }
+                    continue;
+                }
+                let any_exec = regions
+                    .iter()
+                    .any(|&i| map.regions[i].access.is_some_and(|a| a.executable));
+                let last = &map.regions[*regions.last().unwrap_or(&regions[0])];
+                let span = (last.start + last.size).saturating_sub(first.start);
+                let fraction = resident_pages as f32 / total_pages.max(1) as f32;
+                let gauge = if any_exec {
+                    Cell::gauge_colored(fraction, MEMORY_GAUGE_CHARS, ACCENT_CYAN)
+                } else {
+                    Cell::gauge(fraction, MEMORY_GAUGE_CHARS)
+                };
+                let name_color = if any_exec { ACCENT_CYAN } else { TEXT_PRIMARY };
+                let cells = [
+                    Cell::left(format!("{:016X}", first.start), TEXT_MUTED, 16),
+                    Cell::right(human_size(span), TEXT_MUTED, MEMORY_SIZE_CHARS),
+                    Cell::right(
+                        format!("{resident_pages}/{total_pages}"),
+                        TEXT_MUTED,
+                        MEMORY_RESIDENT_CHARS,
+                    ),
+                    gauge,
+                    Cell::left("", TEXT_MUTED, MEMORY_ACCESS_CHARS),
+                    Cell::left("image", TEXT_MUTED, MEMORY_TYPE_CHARS),
+                    Cell::left(name.as_str(), name_color, MEMORY_MODULE_CHARS),
+                    Cell::fill(
+                        format!("{} sections", regions.len().saturating_sub(1)),
+                        TEXT_MUTED,
+                    ),
+                ];
+                let tone = if key.is_some_and(|key| key.at(module_row)) {
+                    Tone::Selected
+                } else {
+                    Tone::Plain
+                };
+                let response =
+                    list_row(ui, TREE_INDENT, &cells, tone, RowSense::Pick { selected: open });
+                lead_chevron(ui, response.rect, open, name_color);
+                follow_key(&response, key, module_row);
+                if *scroll_to == Some(first.start) {
+                    response.scroll_to_me(Some(egui::Align::TOP));
+                    *scroll_to = None;
+                }
+                if response
+                    .on_hover_text("Click to show this module's sections.")
+                    .clicked()
+                {
+                    if open {
+                        expanded.remove(&base);
+                    } else {
+                        expanded.insert(base);
+                    }
+                }
+                // Its open state is read before the click above may change it,
+                // as `process_detail_opens` read it.
+                if open {
+                    sections(ui, &regions, &mut row, scroll_to, action);
+                }
+            }
+        }
+    }
+}
+
+/// Where a memory-map row sits: `lead` points of indent (a section under its
+/// module), row `row` of the map, and the row the keys stand on.
+#[derive(Clone, Copy)]
+struct RowPlace {
+    lead: f32,
+    row: usize,
+    key: Option<KeyRow>,
+}
+
+/// One region row: its address, size, residency gauge, access, and owner,
+/// placed at `place`. A row of the running process opens the memory pane at
+/// its start; one of another process opens that process's memory.
+fn region_row(
+    ui: &mut egui::Ui,
+    map: &MemoryMap,
+    index: usize,
+    place: RowPlace,
+    navigable: bool,
+    process_cr3: Option<u64>,
+    scroll_to: &mut Option<u64>,
+    action: &mut Option<DebuggerAction>,
+) {
+    let region = &map.regions[index];
+    let RowPlace { lead, row, key } = place;
+    // A row out of sight is left as room only, unless it is the scroll target
+    // or the row a key just moved to.
+    if *scroll_to != Some(region.start) && culled(ui, key, row) {
+        skip_row(ui);
+        return;
+    }
+    let executable = region.access.is_some_and(|a| a.executable);
+    let observed = region.access.is_some_and(|a| a.observed);
+    let access_text = region_access_text(region);
+    let (module, section) = match &region.owner {
+        RegionOwner::Header { module, .. } => (module.as_str(), "headers".to_owned()),
+        RegionOwner::Section { module, section, .. } => (module.as_str(), section.clone()),
+        RegionOwner::Stack { tid } => ("", format!("stack · thread {tid}")),
+        RegionOwner::Private => ("", "private".to_owned()),
+    };
+    let access_color = if executable {
+        ACCENT_CYAN
+    } else if observed {
+        TEXT_PRIMARY
+    } else {
+        TEXT_MUTED
+    };
+    let module_color = if executable { ACCENT_CYAN } else { TEXT_PRIMARY };
+    let fraction = region.resident_pages as f32 / region.total_pages.max(1) as f32;
+    let gauge = if executable {
+        Cell::gauge_colored(fraction, MEMORY_GAUGE_CHARS, ACCENT_CYAN)
+    } else {
+        Cell::gauge(fraction, MEMORY_GAUGE_CHARS)
+    };
+    let cells = [
+        Cell::left(format!("{:016X}", region.start), TEXT_MUTED, 16),
+        Cell::right(human_size(region.size), TEXT_MUTED, MEMORY_SIZE_CHARS),
+        Cell::right(
+            format!("{}/{}", region.resident_pages, region.total_pages),
+            TEXT_MUTED,
+            MEMORY_RESIDENT_CHARS,
+        ),
+        gauge,
+        Cell::left(access_text, access_color, MEMORY_ACCESS_CHARS),
+        Cell::left(vad_type_label(region), TEXT_MUTED, MEMORY_TYPE_CHARS),
+        Cell::left(module, module_color, MEMORY_MODULE_CHARS),
+        Cell::fill(section, TEXT_MUTED),
+    ];
+    let tone = if key.is_some_and(|key| key.at(row)) {
+        Tone::Selected
+    } else {
+        Tone::striped(index)
+    };
+    let response = list_row(ui, lead, &cells, tone, RowSense::Pick { selected: false });
+    follow_key(&response, key, row);
+    if *scroll_to == Some(region.start) {
+        response.scroll_to_me(Some(egui::Align::TOP));
+        *scroll_to = None;
+    }
+    match region_open(region.start, navigable, process_cr3) {
+        RowOpen::Act(open) => {
+            let hint = if navigable {
+                "Click to show it in memory."
+            } else {
+                "Click to show it in this process's memory."
+            };
+            if response.on_hover_text(hint).clicked() {
+                *action = Some(open);
+            }
+        }
+        RowOpen::Fold(_) | RowOpen::Nothing => {
+            response.on_hover_text(ANOTHER_ADDRESS_SPACE);
+        }
+    }
+}
+
+/// How the Processes card orders its rows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ProcessLayout {
+    /// The kernel's order: creation order.
+    List,
+    /// Each process under the one that created it.
+    Tree,
+}
+
+/// One row the Processes card draws: which process, and where in the tree.
+struct ShownProcess {
+    index: usize,
+    depth: usize,
+    guides: Vec<bool>,
+    last: bool,
+}
+
+/// The rows the Processes card draws under `layout`, keeping those whose
+/// name holds `filter` — and, in the tree (`tree`, read once with the
+/// listing), their ancestors, so a match keeps the branch that leads to it.
+fn process_rows_shown(
+    processes: &[WinProcess],
+    tree: &[TreeRow],
+    layout: ProcessLayout,
+    filter: &str,
+) -> Vec<ShownProcess> {
+    let filter = filter.to_lowercase();
+    let matches = |process: &WinProcess| {
+        filter.is_empty() || process.name.to_lowercase().contains(&filter)
+    };
+    match layout {
+        ProcessLayout::List => processes
+            .iter()
+            .enumerate()
+            .filter(|(_, process)| matches(process))
+            .map(|(index, _)| ShownProcess {
+                index,
+                depth: 0,
+                guides: Vec::new(),
+                last: false,
+            })
+            .collect(),
+        ProcessLayout::Tree => {
+            let mut keep = vec![filter.is_empty(); processes.len()];
+            if !filter.is_empty() {
+                let by_pid: HashMap<u64, usize> = processes
+                    .iter()
+                    .enumerate()
+                    .map(|(index, process)| (process.pid, index))
+                    .collect();
+                for (index, process) in processes.iter().enumerate() {
+                    if !matches(process) {
+                        continue;
+                    }
+                    // The match and every listed ancestor of it.
+                    let mut at = Some(index);
+                    let mut steps = 0;
+                    while let Some(here) = at {
+                        if keep[here] || steps > processes.len() {
+                            break;
+                        }
+                        keep[here] = true;
+                        steps += 1;
+                        at = processes[here]
+                            .parent
+                            .and_then(|parent| by_pid.get(&parent).copied());
+                    }
+                }
+            }
+            tree.iter()
+                .filter(|row| keep[row.index])
+                .map(|row| ShownProcess {
+                    index: row.index,
+                    depth: row.depth,
+                    guides: row.guides.clone(),
+                    last: row.last,
+                })
+                .collect()
+        }
+    }
+}
+
+/// The share of the page's width the process list takes beside its modules.
+const PROCESS_LIST_SHARE: f32 = 0.45;
+
+/// The chosen process's modules, or why there are none to list.
+fn listed_modules(
+    ui: &mut egui::Ui,
+    listing: &ProcessListing,
+    navigable: bool,
+    highlight: Option<u64>,
+    key: Option<KeyRow>,
+    action: &mut Option<DebuggerAction>,
+) {
+    let muted = |ui: &mut egui::Ui, text: &str| {
+        ui.label(RichText::new(text).color(TEXT_MUTED));
+    };
+    match listing.modules.as_ref().map(|modules| &modules.read) {
+        Some(ModuleRead::Listed(modules)) => {
+            let shown: Vec<&WinModule> = modules.iter().collect();
+            let click = if navigable {
+                ModuleClick::Open
+            } else {
+                ModuleClick::Foreign
+            };
+            module_rows(ui, &shown, click, highlight, key, action);
+        }
+        Some(ModuleRead::NoUserSpace) => {
+            muted(ui, "A kernel process: it loads no user-mode modules.");
+        }
+        Some(ModuleRead::Unreadable) => {
+            muted(ui, "Its loader data is paged out or could not be found.");
+        }
+        None => muted(ui, "Pick a process."),
+    }
+}
+
+/// The Processes card's title, controls and column titles. The title shares
+/// the controls row (the card leaves it out), so the list keeps a row.
+fn process_header(ui: &mut egui::Ui, title: Title<'_>, layout: &mut ProcessLayout, filter: &mut String) {
+    ui.horizontal_wrapped(|ui| {
+        title_label(ui, title.text, title.count);
+        segmented(
+            ui,
+            layout,
+            &[(ProcessLayout::List, "List"), (ProcessLayout::Tree, "Tree")],
+        );
+        filter_field(ui, filter);
+    });
+    header_row(ui, PROCESS_LEAD, &process_columns("Name", "PID", "CR3"));
+}
+
+/// The room before a process's name: the running-process dot.
+const PROCESS_LEAD: f32 = 14.0;
+/// The widest PID column, in characters.
+const PID_CHARS: usize = 6;
+/// A CR3 column, in characters: the table address without leading zeros.
+const CR3_CHARS: usize = 10;
+
+fn process_columns(name: &str, pid: &str, cr3: &str) -> [Cell; 3] {
+    [
+        Cell::fill(name, TEXT_MUTED),
+        Cell::right(pid, TEXT_MUTED, PID_CHARS),
+        Cell::right(cr3, TEXT_MUTED, CR3_CHARS),
+    ]
+}
+
+/// One row per shown process: the running one marked with a dot, the listed
+/// one selected, the tree's guides in its lead. A row the keys just picked
+/// (`key`) is scrolled into view.
+fn process_rows(
+    ui: &mut egui::Ui,
+    processes: &[WinProcess],
+    rows: &[ShownProcess],
+    chosen: Option<&WinProcess>,
+    selected_process: &mut Option<u64>,
+    detail: ProcessDetail,
+    key: Option<KeyRow>,
+    action: &mut Option<DebuggerAction>,
+) {
+    if rows.is_empty() {
+        ui.add_space(SPACE_ITEM);
+        ui.label(RichText::new("No process matches the filter.").color(TEXT_MUTED));
+        return;
+    }
+    for (n, shown) in rows.iter().enumerate() {
+        if culled(ui, key, n) {
+            skip_row(ui);
+            continue;
+        }
+        let process = &processes[shown.index];
+        let selected = chosen.is_some_and(|c| c.eprocess == process.eprocess);
+        let name_color = if process.current { ACCENT_CYAN } else { TEXT_PRIMARY };
+        let lead = shown.depth as f32 * TREE_INDENT + PROCESS_LEAD;
+        let cells = [
+            Cell::fill(process.name.as_str(), name_color),
+            Cell::right(process.pid.to_string(), TEXT_MUTED, PID_CHARS),
+            Cell::right(format!("{:X}", process.cr3), TEXT_MUTED, CR3_CHARS),
+        ];
+        let tone = if selected {
+            Tone::Selected
+        } else {
+            Tone::striped(n)
+        };
+        let response = list_row(ui, lead, &cells, tone, RowSense::Pick { selected });
+        follow_key(&response, key, n);
+        tree_guides(ui, response.rect, shown.depth, &shown.guides, shown.last);
+        if process.current {
+            lead_dot(ui, response.rect, lead, ACCENT_CYAN);
+        }
+        let parent = process
+            .parent
+            .map_or_else(|| "unknown".to_owned(), |parent| parent.to_string());
+        let running = if process.current {
+            "\nThe shown processor runs in this process's address space."
+        } else {
+            ""
+        };
+        let response = response.on_hover_text(format!(
+            "{} — PID {}, parent {parent}\nEPROCESS {:016X}\nCR3 {:016X}{running}\n\
+             Double-click to see the CPU tab from inside it.",
+            process.name, process.pid, process.eprocess, process.cr3
+        ));
+        // A double-click's first click has already picked the row. egui calls
+        // a double-click a triple when the click before last (anywhere) came
+        // within 0.6 s, so a triple opens the row too. The running process has
+        // no state but its live one: it opens the live view.
+        if response.double_clicked() || response.triple_clicked() {
+            let context = if process.current {
+                ViewContext::Live
+            } else {
+                ViewContext::Process {
+                    eprocess: process.eprocess,
+                }
+            };
+            *action = Some(DebuggerAction::View(context));
+        } else if response.clicked() && !selected {
+            *selected_process = Some(process.eprocess);
+            *action = Some(DebuggerAction::ShowSystem(SystemView::Processes {
+                selected: *selected_process,
+                detail,
+            }));
+        }
+    }
+}
+
+/// A module table's columns: base, size, name, and the path in the room left.
+fn module_columns() -> [Cell; 4] {
+    [
+        Cell::left("Base", TEXT_MUTED, 16),
+        Cell::right("Size", TEXT_MUTED, MODULE_SIZE_CHARS),
+        Cell::left("Name", TEXT_MUTED, MODULE_NAME_CHARS),
+        Cell::fill("Path", TEXT_MUTED),
+    ]
+}
+
+const MODULE_SIZE_CHARS: usize = 8;
+const MODULE_NAME_CHARS: usize = 18;
+
+/// One row per module. A module in the running address space opens the CPU
+/// tab's memory pane at its base; one elsewhere says why it cannot.
+/// What a click on a module row does.
+enum ModuleClick<'a> {
+    /// Opens it in the memory pane: a module of the running process.
+    Open,
+    /// Nothing to open: it lies in another process's address space.
+    Foreign,
+    /// Picks it into `picked`, for its detail; a double-click (or a triple,
+    /// which holds one) opens it in the memory pane.
+    Pick { picked: &'a mut Option<u64> },
+}
+
+fn module_rows(
+    ui: &mut egui::Ui,
+    modules: &[&WinModule],
+    mut click: ModuleClick<'_>,
+    highlight: Option<u64>,
+    key: Option<KeyRow>,
+    action: &mut Option<DebuggerAction>,
+) {
+    if modules.is_empty() {
+        ui.add_space(SPACE_ITEM);
+        ui.label(RichText::new("No module matches the filter.").color(TEXT_MUTED));
+        return;
+    }
+    for (n, module) in modules.iter().enumerate() {
+        if culled(ui, key, n) {
+            skip_row(ui);
+            continue;
+        }
+        let base_name = module.name.as_deref().unwrap_or("(paged out)");
+        // A 32-bit module (a WOW64 process's) is tagged beside its name.
+        let name = match module.bits {
+            ModuleBits::Bits32 => format!("{base_name}  · 32"),
+            ModuleBits::Bits64 => base_name.to_owned(),
+        };
+        let path = module.path.as_deref().unwrap_or("(paged out)");
+        // The module the shown processor is executing in.
+        let current = highlight == Some(module.base);
+        let name_color = if current { ACCENT_CYAN } else { TEXT_PRIMARY };
+        let cells = [
+            Cell::left(format!("{:016X}", module.base), TEXT_MUTED, 16),
+            Cell::right(format!("{:X}", module.size), TEXT_MUTED, MODULE_SIZE_CHARS),
+            Cell::left(name, name_color, MODULE_NAME_CHARS),
+            Cell::fill(path, TEXT_MUTED.gamma_multiply(0.8)),
+        ];
+        // A picked kernel module, or the row the keys stand on.
+        let picked_now = match &click {
+            ModuleClick::Pick { picked } => **picked == Some(module.base),
+            ModuleClick::Open | ModuleClick::Foreign => false,
+        } || key.is_some_and(|key| key.at(n));
+        let tone = if picked_now {
+            Tone::Selected
+        } else if current {
+            Tone::Current
+        } else {
+            Tone::striped(n)
+        };
+        let response = list_row(
+            ui,
+            0.0,
+            &cells,
+            tone,
+            RowSense::Pick {
+                selected: picked_now || current,
+            },
+        );
+        follow_key(&response, key, n);
+        match &mut click {
+            ModuleClick::Open => {
+                if response
+                    .on_hover_text(format!("{path}\nClick to show it in memory."))
+                    .clicked()
+                {
+                    *action = Some(DebuggerAction::OpenModule(module.base));
+                }
+            }
+            ModuleClick::Foreign => {
+                response.on_hover_text(format!("{path}\n{ANOTHER_ADDRESS_SPACE}"));
+            }
+            ModuleClick::Pick { picked } => {
+                let response = response.on_hover_text(format!(
+                    "{path}\nClick to see its sections and exports; double-click to show it \
+                     in memory."
+                ));
+                if response.double_clicked() || response.triple_clicked() {
+                    *action = Some(DebuggerAction::OpenModule(module.base));
+                } else if response.clicked() {
+                    **picked = Some(module.base);
+                }
+            }
+        }
+    }
+}
+
+const THREAD_TID_CHARS: usize = 7;
+const THREAD_START_CHARS: usize = 16;
+const THREAD_STACK_CHARS: usize = 29;
+
+fn thread_columns() -> [Cell; 4] {
+    [
+        Cell::right("TID", TEXT_MUTED, THREAD_TID_CHARS),
+        Cell::left("Start", TEXT_MUTED, THREAD_START_CHARS),
+        Cell::left("Stack", TEXT_MUTED, THREAD_STACK_CHARS),
+        Cell::fill("Fibres", TEXT_MUTED),
+    ]
+}
+
+/// One row per thread of the process at `eprocess`: its ID, start address,
+/// user stack, and a mark for a thread that runs fibres. Double-clicking one
+/// shows the CPU tab from inside it; the keys stand on row `key`.
+fn thread_rows(
+    ui: &mut egui::Ui,
+    threads: &[WinThread],
+    eprocess: u64,
+    key: Option<KeyRow>,
+    action: &mut Option<DebuggerAction>,
+) {
+    if threads.is_empty() {
+        ui.add_space(SPACE_ITEM);
+        ui.label(RichText::new("No threads listed.").color(TEXT_MUTED));
+        return;
+    }
+    for (n, thread) in threads.iter().enumerate() {
+        if culled(ui, key, n) {
+            skip_row(ui);
+            continue;
+        }
+        let start = if thread.start == 0 {
+            String::new()
+        } else {
+            format!("{:016X}", thread.start)
+        };
+        let stack = thread
+            .stack
+            .map_or_else(String::new, |stack| format!("{:X}–{:X}", stack.start, stack.end));
+        let tail = if thread.uses_fibers { "fibres" } else { "" };
+        let tail_color = if thread.uses_fibers { ACCENT_AMBER } else { TEXT_MUTED };
+        let cells = [
+            Cell::right(thread.tid.to_string(), TEXT_PRIMARY, THREAD_TID_CHARS),
+            Cell::left(start, TEXT_MUTED, THREAD_START_CHARS),
+            Cell::left(stack, TEXT_MUTED, THREAD_STACK_CHARS),
+            Cell::fill(tail, tail_color),
+        ];
+        let response = list_row(ui, 0.0, &cells, keyed_tone(key, n), RowSense::Pick { selected: false });
+        follow_key(&response, key, n);
+        let response = response.on_hover_text("Double-click to see the CPU tab from inside this thread.");
+        // A triple holds the double-click (see `process_rows`).
+        if response.double_clicked() || response.triple_clicked() {
+            *action = Some(DebuggerAction::View(ViewContext::Thread {
+                eprocess,
+                tid: thread.tid,
+            }));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn process(pid: u64, parent: Option<u64>, name: &str) -> WinProcess {
+        WinProcess {
+            eprocess: pid,
+            pid,
+            parent,
+            name: name.to_owned(),
+            cr3: 0,
+            current: false,
+        }
+    }
+
+    /// A filtered tree keeps each match and the branch above it; a filtered
+    /// list keeps the matches alone.
+    #[test]
+    fn a_filter_keeps_the_branch_that_leads_to_a_match() {
+        let processes = [
+            process(4, None, "System"),
+            process(228, Some(4), "smss.exe"),
+            process(276, Some(228), "csrss.exe"),
+            process(300, Some(228), "winlogon.exe"),
+            process(348, Some(300), "services.exe"),
+            process(1400, Some(348), "wmiprvse.exe"),
+        ];
+        let tree = crate::debugger::windows::process_tree(&processes);
+        let names = |rows: Vec<ShownProcess>| -> Vec<&str> {
+            rows.iter().map(|row| processes[row.index].name.as_str()).collect()
+        };
+        assert_eq!(
+            names(process_rows_shown(&processes, &tree, ProcessLayout::Tree, "WMI")),
+            ["System", "smss.exe", "winlogon.exe", "services.exe", "wmiprvse.exe"]
+        );
+        assert_eq!(
+            names(process_rows_shown(&processes, &tree, ProcessLayout::List, "wmi")),
+            ["wmiprvse.exe"]
+        );
+        assert_eq!(
+            process_rows_shown(&processes, &tree, ProcessLayout::Tree, "").len(),
+            processes.len()
+        );
+    }
+
+    /// The layout follows the room measured, whatever hosts the window: the
+    /// same size gives the same layout on a phone and on a desktop.
+    #[test]
+    fn the_layout_is_decided_by_the_room_the_page_has() {
+        // A desktop window: wide and tall enough for four useful panes.
+        assert_eq!(Fit::of(egui::vec2(1400.0, 900.0)), Fit::Grid);
+        assert_eq!(Fit::of(egui::vec2(GRID_MIN_WIDTH, GRID_MIN_HEIGHT)), Fit::Grid);
+        // A landscape phone: wide, but short — the grid would squeeze every
+        // pane to a few rows, so the page scrolls in two columns.
+        assert_eq!(Fit::of(egui::vec2(1000.0, 330.0)), Fit::Scrolling(Columns::Two));
+        // The same short height on a wide desktop window gets the same.
+        assert_eq!(Fit::of(egui::vec2(1800.0, 330.0)), Fit::Scrolling(Columns::Two));
+        // A portrait phone, and a tall but narrow window.
+        assert_eq!(Fit::of(egui::vec2(400.0, 800.0)), Fit::Scrolling(Columns::One));
+        assert_eq!(Fit::of(egui::vec2(700.0, 1400.0)), Fit::Scrolling(Columns::One));
+        // One point short of either threshold leaves the grid.
+        assert_ne!(Fit::of(egui::vec2(GRID_MIN_WIDTH - 1.0, GRID_MIN_HEIGHT)), Fit::Grid);
+        assert_ne!(Fit::of(egui::vec2(GRID_MIN_WIDTH, GRID_MIN_HEIGHT - 1.0)), Fit::Grid);
+    }
+
+    /// A narrow pane gives the bytes up before it gives up the opcode: the
+    /// listing shows fewer bytes, never fewer than two, and all eight where
+    /// the pane has the room.
+    #[test]
+    fn a_narrow_code_pane_shows_fewer_bytes_to_keep_the_opcode() {
+        assert_eq!(code_bytes_shown(120.0, 16), CODE_BYTES_SHOWN);
+        // 16 digits, 4 of gaps, 16 for the opcode, 1 for the ellipsis: the
+        // 45th character is the first byte's third.
+        assert_eq!(code_bytes_shown(45.0, 16), 2);
+        assert_eq!(code_bytes_shown(51.0, 16), 4);
+        assert_eq!(code_bytes_shown(10.0, 16), CODE_BYTES_MIN);
+        // A 32-bit address is eight characters shorter: three more bytes
+        // fit in a pane of the same width.
+        assert_eq!(code_bytes_shown(51.0, 8), 7);
+    }
+
+    /// A live snapshot of a long-mode machine, and one looking from a thread
+    /// whose saved code segment is `cs`, in the address space at 0x3000.
+    fn snapshots(cs: u16) -> (DebugSnapshot, DebugSnapshot) {
+        use crate::debugger::inspect::{read_snapshot, ViewRequest};
+        use crate::debugger::threads::{decode_trap_frame, TRAP_FRAME_BYTES};
+        use crate::debugger::windows::{ThreadView, WindowsDiscovery};
+        use rusty_box::cpu::CpuSetupMode;
+        use rusty_box::emulator::{Emulator, EmulatorConfig};
+        let mut machine =
+            Emulator::new_with_mode(EmulatorConfig::default(), CpuSetupMode::FlatLong64)
+                .expect("machine");
+        let read = |machine: &mut Emulator| {
+            read_snapshot(machine, &ViewRequest::default(), &mut WindowsDiscovery::default(), None)
+        };
+        let live = read(&mut machine);
+        let mut viewed = read(&mut machine);
+        let mut saved = decode_trap_frame(&[0u8; TRAP_FRAME_BYTES]);
+        saved.cs = cs;
+        viewed.viewing = Viewing::Thread(ThreadView {
+            process: "winlogon.exe".to_owned(),
+            pid: 0x1E0,
+            tid: 0x1F4,
+            cr3: 0x3000,
+            saved,
+            symbols: crate::debugger::inspect::SymbolIndex::default(),
+        });
+        (live, viewed)
+    }
+
+    /// The code and stack panes are as wide as the code they show: a viewed
+    /// thread's own mode, not the live processor's.
+    #[test]
+    fn a_viewed_threads_panes_take_its_own_code_width() {
+        let (live, mut viewed) = snapshots(0x33);
+        assert_eq!(pane_code_size(&live), CodeSize::Bits64);
+        viewed.cpus[0].code_size = CodeSize::Bits32;
+        assert_eq!(pane_code_size(&viewed), CodeSize::Bits64, "a 64-bit thread");
+        let (_, wow64) = snapshots(WOW64_CODE_SELECTOR);
+        assert_eq!(pane_code_size(&wow64), CodeSize::Bits32, "a WOW64 thread in 32-bit code");
+    }
+
+    /// Addresses are named against the viewed process's modules only in its
+    /// own address space, and against the live process's only in the live one.
+    #[test]
+    fn addresses_are_named_only_in_the_space_their_modules_belong_to() {
+        let (live, viewed) = snapshots(0x33);
+        assert_eq!(vantage_space(&live), AddressSpace::Linear);
+        assert_eq!(vantage_space(&viewed), AddressSpace::Process { cr3: 0x3000 });
+    }
+
+    /// A drag moves a split by its share of the room the two panes have, and
+    /// never past the point where either pane would be smaller than `min`.
+    #[test]
+    fn a_dragged_split_moves_by_the_drag_and_keeps_both_panes_their_minimum() {
+        // 1008 points, an 8-point gap: 1000 points for the panes.
+        let moved = resized(0.5, 100.0, 1008.0, 8.0, 96.0);
+        assert!((moved - 0.6).abs() < 1e-4, "{moved}");
+        assert!((resized(0.9, 500.0, 1008.0, 8.0, 96.0) - 0.904).abs() < 1e-4);
+        assert!((resized(0.1, -500.0, 1008.0, 8.0, 96.0) - 0.096).abs() < 1e-4);
+        // Too little room for two minimums: the split sits in the middle.
+        let squeezed = resized(0.8, 50.0, 100.0, 8.0, 96.0);
+        assert!((squeezed - 0.5).abs() < 1e-4, "{squeezed}");
+    }
+
+    /// A wide memory pane shows all sixteen bytes a line; a narrow one folds
+    /// to eight so the dump fits without a sideways swipe.
+    #[test]
+    fn a_narrow_memory_pane_folds_its_rows_to_eight_bytes() {
+        assert_eq!(memory_bytes_per_line(120.0), ROW_BYTES);
+        assert_eq!(memory_bytes_per_line(19.0 + 4.0 * ROW_BYTES as f32), ROW_BYTES);
+        assert_eq!(memory_bytes_per_line(60.0), ROW_BYTES / 2);
+        assert_eq!(memory_bytes_per_line(10.0), ROW_BYTES / 2);
+    }
+
+    #[test]
+    fn a_page_that_scrolls_packs_tighter_than_one_that_fills() {
+        let roomy = Fit::Grid.density();
+        let compact = Fit::Scrolling(Columns::Two).density();
+        assert_eq!(compact, Fit::Scrolling(Columns::One).density());
+        assert!(compact.page_margin() < roomy.page_margin());
+        assert!(compact.gap() < roomy.gap());
+        assert!(compact.title_gap() < roomy.title_gap());
+        assert!(compact.button_padding().y < roomy.button_padding().y);
+    }
+
+    #[test]
+    fn the_keys_walk_a_listing_and_stay_inside_it() {
+        let keys = |step: isize, open: bool| ListKeys { step, open, switches: 0, next_views: 0 };
+        // Standing on no row is standing just above the first.
+        assert_eq!(walk(keys(1, false), None, 5).key, Some(KeyRow::Moved(0)));
+        assert_eq!(walk(keys(3, false), None, 5).key, Some(KeyRow::Moved(2)));
+        assert_eq!(walk(keys(-1, false), None, 5).key, Some(KeyRow::Moved(0)));
+        // Both ends hold.
+        assert_eq!(walk(keys(-4, false), Some(2), 5).key, Some(KeyRow::Moved(0)));
+        assert_eq!(walk(keys(9, false), Some(2), 5).key, Some(KeyRow::Moved(4)));
+        // A row past a listing that shrank is no row; no step leaves it so.
+        assert_eq!(walk(keys(0, false), Some(7), 5).key, None);
+        assert_eq!(walk(keys(0, false), Some(3), 5).key, Some(KeyRow::Resting(3)));
+        // Enter opens the row stood on after the move, and nothing in an
+        // empty listing.
+        assert_eq!(walk(keys(1, true), Some(3), 5).open, Some(4));
+        assert_eq!(walk(keys(0, true), None, 5).open, None);
+        assert_eq!(walk(keys(1, true), None, 0).key, None);
+        assert_eq!(walk(keys(1, true), None, 0).open, None);
+    }
+
+    #[test]
+    fn typed_addresses_are_read_as_x64dbg_writes_them() {
+        assert_eq!(parse_address("7c00"), Ok(0x7C00));
+        assert_eq!(
+            parse_address("  0xFFFFF800`00001000 "),
+            Ok(0xFFFF_F800_0000_1000)
+        );
+        assert_eq!(parse_address("0X1_0000"), Ok(0x1_0000));
+        assert_eq!(parse_address(""), Err(AddressError::Empty));
+        assert_eq!(parse_address("0x"), Err(AddressError::Empty));
+        assert_eq!(parse_address("rip"), Err(AddressError::NotHex));
+        assert_eq!(
+            parse_address("1_0000_0000_0000_0000"),
+            Err(AddressError::TooLong)
+        );
+    }
+}

@@ -24,12 +24,18 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// handler (R5), so no instruction can turn a guest's #GP, #SS, #NP or
     /// #TS into an error that stops the emulator; and an RSP_SPECULATIVE the
     /// handler left open is still open, so the fault restores RSP and SSP.
+    ///
+    /// The success path returns a fresh `Ok(())` rather than passing the
+    /// handler's value on: a handler writes only the tag of its `Result`, and
+    /// moving the whole 32-byte value would reload bytes it never wrote — a
+    /// store-forwarding stall on every retired instruction.
     pub(super) fn execute_instruction(&mut self, instr: &Instruction) -> Result<()> {
         match self.dispatch_instruction(instr) {
+            Ok(()) => Ok(()),
             Err(super::error::CpuError::BadVector { vector, error_code }) => {
                 self.exception(vector, error_code)
             }
-            outcome => outcome,
+            Err(other) => Err(other),
         }
     }
 
@@ -2055,7 +2061,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             Opcode::Fnclex => self.fnclex(instr),
             Opcode::Fnop => self.fnop(instr),
             Opcode::Fplegacy => self.fplegacy(instr),
-            Opcode::Fpuesc | Opcode::Fwait => Ok(()),
+            Opcode::Fwait => self.fwait(instr),
+            // Bochs fpu_emu.cc `FPU_ESC`: an x87 escape with no FPU behind it
+            // does nothing once the state gate has let it through.
+            Opcode::Fpuesc => Ok(()),
             Opcode::Fldcw => self.fldcw(instr),
             Opcode::Fnstcw => self.fnstcw(instr),
             Opcode::Fnstsw => self.fnstsw(instr),
@@ -3050,9 +3059,13 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             }
 
             // The instruction decoded fine but needs CPU state the guest has
-            // not enabled. `state_resolve_opcode` substituted these at icache
-            // fill, exactly as Bochs assignHandler substitutes BxNoAVX /
-            // BxNoEVEX; the handlers pick #UD or #NM from the actual reason.
+            // not enabled. `assign_handler` substituted these at icache fill,
+            // exactly as Bochs assignHandler substitutes BxNoFPU /
+            // BxNoMMX / BxNoSSE / BxNoAVX / BxNoEVEX; the handlers pick #UD or
+            // #NM from the actual reason.
+            Opcode::NoFpuState => self.bx_no_fpu(instr),
+            Opcode::NoMmxState => self.bx_no_mmx(instr),
+            Opcode::NoSseState => self.bx_no_sse(instr),
             Opcode::NoAvxState => self.bx_no_avx(instr),
             Opcode::NoEvexState => self.bx_no_evex(instr),
 
@@ -5383,8 +5396,8 @@ mod tests {
     /// dispatcher *handles* — and nothing enforced that. Advertising one more
     /// feature than the handlers cover turns a guest #UD into a host abort.
     ///
-    /// As of writing, 410 EVEX opcodes decode but have no handler (AVX512-FP16,
-    /// AVX10.2, VBMI2, AMX, VNNI, VAES, GFNI, BF16, …). Every one is gated on a
+    /// Many EVEX opcodes decode but have no handler (AVX512-FP16, AVX10.2,
+    /// VBMI2, AMX, ACE, VNNI, VAES, GFNI, BF16, …). Every one is gated on a
     /// feature neither shipped model advertises, so none is reachable. This
     /// test is what keeps that true.
     ///
@@ -5433,9 +5446,9 @@ mod tests {
         }
 
         // Only a decodable opcode matters: an `Opcode` variant no table can
-        // emit is unreachable however the gate resolves it, and there are 77 of
-        // those. The decoder's own tables are the authority, so they are read
-        // the same way this file was.
+        // emit is unreachable however the gate resolves it. The decoder's own
+        // tables are the authority, so they are read the same way this file
+        // was.
         const DECODER_SRC: &[&str] = &[
             include_str!("../../../rusty_box_decoder/src/decoder/opmap.rs"),
             include_str!("../../../rusty_box_decoder/src/decoder/opmap_0f38.rs"),
@@ -5548,27 +5561,27 @@ mod tests {
         // `BxCpuBuilder::build()` only runs `initialize()`, not a hardware
         // reset, so MXCSR is left at the zeroed-allocation value — a state
         // no real CPU can be in, and one in which every exception is
-        // *unmasked*. Now that the FP handlers actually consult MXCSR, an
-        // inexact result there would raise #XM (or #UD, since these tests
+        // *unmasked*. The FP handlers consult MXCSR, so an inexact result
+        // there would raise #XM (or #UD, since these tests
         // leave CR4.OSXMMEXCPT clear). Apply the architectural reset value.
         cpu.mxcsr.mxcsr = crate::cpu::xmm::MXCSR_RESET;
 
         // A VEX-encoded write clears only as much of the register file as
         // XCR0 has made architecturally visible (Bochs `maxvl`). A builder-made
         // CPU has CR4.OSXSAVE and XCR0 clear, which on real hardware is a state
-        // where every VEX instruction would #UD before reaching a handler — so
+        // where every AVX instruction would #UD before reaching a handler — so
         // give these tests the register file an AVX-512-capable guest actually
         // runs with, rather than asserting against an unreachable one.
         cpu.cr4.insert(BxCr4::OSXSAVE);
         cpu.xcr0.set32(0xE7);
         cpu.handle_avx_mode_change();
 
-        // `BxNoAVX` (Bochs proc_ctrl.cc) rejects every VEX encoding outside
+        // `BxNoAVX` (Bochs proc_ctrl.cc) rejects every AVX instruction outside
         // protected mode, so a builder-made CPU — which comes up in real mode —
         // is the same unreachable configuration the comment above is about: a
         // guest cannot have XCR0.YMM enabled and still be in real mode. Put the
         // CPU in protected mode so handlers that gate on AVX availability, as
-        // the VEX-only ones must, see a state a guest can actually reach.
+        // the BX_PREPARE_AVX ones must, see a state a guest can actually reach.
         cpu.cpu_mode = CpuMode::Ia32Protected;
     }
 

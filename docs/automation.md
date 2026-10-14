@@ -395,6 +395,30 @@ machine.msr_write(0xC000_0080, efer)?;
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
+A debugger's view of any processor, read the way Bochs's debugger reads:
+page walks that set no accessed bit, and memory as the processor sees it —
+ROM, shadow RAM and device windows included, which `mem_read` (RAM only)
+does not show.
+
+```rust,no_run
+# use rusty_box::cpu::Fetched;
+# use rusty_box::emulator::{EmulatorConfig, MachineBuilder};
+# let mut machine = MachineBuilder::new(EmulatorConfig::default()).build()?;
+let mut cpu = machine.debug_cpu(0).expect("processor 0 always exists");
+let view = cpu.view();
+let code = view.segment_bases.cs + view.registers.rip;
+if let Some(physical) = cpu.dbg_xlate_linear2phy(code) {
+    let mut bytes = [0u8; 15];
+    if cpu.dbg_fetch_mem(physical, &mut bytes)? == Fetched::Valid {
+        println!("{:?}", view.code_size.decode(&bytes).map(|i| i.get_ia_opcode()));
+    }
+}
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+A read of a device window is that device's read, with whatever it changes in
+the device, exactly as in Bochs.
+
 **Limits.** An MSR access the processor would not take is refused with
 `CpuError::MsrRefused`, whose `MsrRefusal` says why, so a host can tell the
 cases apart:

@@ -54,15 +54,23 @@ const VECTOR_NAMES: [&str; 22] = [
 /// (lazy FPU switch), #PF (demand paging).
 const SKIP_VECTORS: u32 = (1 << 1) | (1 << 2) | (1 << 3) | (1 << 7) | (1 << 14);
 
-/// Flight-recorder capacity (power of two). At ~10 bytes/entry this holds
-/// the last 256k user-mode instructions — several scheduler quanta, enough
-/// to cover a Go panic's full parse path.
+/// Flight-recorder capacity (power of two): the last 256 Ki user-mode
+/// instructions — several scheduler quanta, enough to cover a Go panic's
+/// full parse path.
 const FLIGHT_CAP: usize = 1 << 18;
 /// User/kernel split: record only canonical user-half RIPs.
 const USER_RIP_LIMIT: u64 = 1 << 47;
 
+/// One flight-recorder slot: a user-mode instruction's RIP and opcode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FlightEntry {
+    rip: u64,
+    opcode: Opcode,
+}
+
 pub struct GuestTracer {
-    out: BufWriter<File>,
+    /// The log; `None` in the [`Default`] tracer, which writes nothing.
+    out: Option<BufWriter<File>>,
     /// Retired instruction count — the timestamp for every log line.
     icount: u64,
     /// RIP of the most recently executed instruction (exception context).
@@ -76,12 +84,34 @@ pub struct GuestTracer {
     lines_since_flush: u32,
     /// Set after the first write error so the console warning fires once.
     write_error_reported: bool,
-    /// Flight recorder: ring of (rip, opcode) for user-mode instructions,
-    /// dumped when a guest process writes "panic: " to stderr.
-    flight: Vec<(u64, u16)>,
+    /// Flight recorder: a ring of the last [`FLIGHT_CAP`] user-mode
+    /// instructions, dumped when a guest process writes "panic: " to stderr.
+    /// Empty in the [`Default`] tracer.
+    flight: Vec<FlightEntry>,
     flight_pos: usize,
     /// Dumps are large; cap how many panics get one per boot.
     flight_dumps_left: u8,
+}
+
+/// `Instrumentation` requires a default: it holds the processor's tracer slot
+/// while a hook runs on the real tracer (see the trait). It has no log and no
+/// flight recorder, so it records nothing.
+impl Default for GuestTracer {
+    fn default() -> Self {
+        Self {
+            out: None,
+            icount: 0,
+            last_rip: 0,
+            last_opcode: None,
+            exc_counts: [0; 32],
+            tkill_counts: [0; 65],
+            lines_since_flush: 0,
+            write_error_reported: false,
+            flight: Vec::new(),
+            flight_pos: 0,
+            flight_dumps_left: 0,
+        }
+    }
 }
 
 impl GuestTracer {
@@ -101,7 +131,7 @@ impl GuestTracer {
         )?;
         out.flush()?;
         Ok(Self {
-            out,
+            out: Some(out),
             icount: 0,
             last_rip: 0,
             last_opcode: None,
@@ -109,15 +139,23 @@ impl GuestTracer {
             tkill_counts: [0; 65],
             lines_since_flush: 0,
             write_error_reported: false,
-            flight: vec![(0, 0); FLIGHT_CAP],
+            flight: vec![
+                FlightEntry {
+                    rip: 0,
+                    opcode: Opcode::IaError,
+                };
+                FLIGHT_CAP
+            ],
             flight_pos: 0,
             flight_dumps_left: 2,
         })
     }
 
     /// Dump the flight-recorder ring (oldest → newest) after a guest panic.
-    /// Format: 8 `rip:opcode` hex pairs per line, then a decoded tail of the
-    /// last 64 entries with opcode names for quick reading.
+    /// A header line says what the numbers mean; `F` lines then carry 8
+    /// `rip:opcode` hex pairs each, the opcode as a discriminant of this
+    /// build's `Opcode` enum (which renumbers whenever an opcode is added),
+    /// and `FTAIL` lines name the opcode of each of the last 64 entries.
     fn dump_flight(&mut self) {
         if self.flight_dumps_left == 0 {
             return;
@@ -131,13 +169,17 @@ impl GuestTracer {
         };
         self.emit(
             true,
-            format_args!("FLIGHT dump: {filled} user-mode instructions, oldest first"),
+            format_args!(
+                "FLIGHT dump: {filled} user-mode instructions, oldest first; F lines are \
+                 rip:opcode hex pairs, the opcode a discriminant of this build's Opcode enum; \
+                 FTAIL lines name the opcode"
+            ),
         );
         let mut line = String::with_capacity(200);
         for i in 0..filled {
-            let (rip, opc) = self.flight[(start + i) & (FLIGHT_CAP - 1)];
+            let entry = self.flight[(start + i) & (FLIGHT_CAP - 1)];
             use core::fmt::Write as _;
-            let res = write!(line, "{rip:x}:{opc:x} ");
+            let res = write!(line, "{:x}:{:x} ", entry.rip, entry.opcode as u16);
             if let Err(e) = res {
                 // String formatting cannot fail; keep the contract explicit.
                 self.emit(true, format_args!("FLIGHT format error: {e}"));
@@ -150,21 +192,28 @@ impl GuestTracer {
         }
         let tail = filled.min(64);
         for i in (filled - tail)..filled {
-            let (rip, opc) = self.flight[(start + i) & (FLIGHT_CAP - 1)];
-            self.emit(false, format_args!("FTAIL {rip:#x} opc={opc:#x}"));
+            let entry = self.flight[(start + i) & (FLIGHT_CAP - 1)];
+            self.emit(
+                false,
+                format_args!("FTAIL {:#x} op={:?}", entry.rip, entry.opcode),
+            );
         }
         self.emit(true, format_args!("FLIGHT dump end"));
     }
 
     /// Append one line; flush immediately for rare/critical lines and
-    /// periodically otherwise so a host crash loses little.
+    /// periodically otherwise so a host crash loses little. The [`Default`]
+    /// tracer has no log and writes nothing.
     fn emit(&mut self, flush_now: bool, line: core::fmt::Arguments) {
-        let res = writeln!(self.out, "[{:>13}] {}", self.icount, line);
+        let Some(out) = self.out.as_mut() else {
+            return;
+        };
+        let res = writeln!(out, "[{:>13}] {}", self.icount, line);
         self.lines_since_flush += 1;
         let res = res.and_then(|()| {
             if flush_now || self.lines_since_flush >= 64 {
                 self.lines_since_flush = 0;
-                self.out.flush()
+                out.flush()
             } else {
                 Ok(())
             }
@@ -179,7 +228,7 @@ impl GuestTracer {
 
     /// Read up to `cap` bytes of guest memory. Retries with shrinking sizes
     /// because a read fails wholesale when its tail crosses an unmapped page.
-    fn read_guest(ctx: &HookCtx, addr: u64, cap: usize) -> Option<Vec<u8>> {
+    fn read_guest(ctx: &mut HookCtx, addr: u64, cap: usize) -> Option<Vec<u8>> {
         if addr == 0 || addr >= 0x8000_0000_0000_0000 {
             return None;
         }
@@ -196,14 +245,14 @@ impl GuestTracer {
     }
 
     /// Read a NUL-terminated guest string, escaped for logging.
-    fn read_cstr(ctx: &HookCtx, addr: u64) -> Option<String> {
+    fn read_cstr(ctx: &mut HookCtx, addr: u64) -> Option<String> {
         let buf = Self::read_guest(ctx, addr, STR_CAP)?;
         let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
         Some(escape_bytes(&buf[..end]))
     }
 
     /// Read a guest u64 (e.g. an argv slot or iovec field).
-    fn read_u64(ctx: &HookCtx, addr: u64) -> Option<u64> {
+    fn read_u64(ctx: &mut HookCtx, addr: u64) -> Option<u64> {
         let buf = Self::read_guest(ctx, addr, 8)?;
         if buf.len() < 8 {
             return None;
@@ -213,7 +262,7 @@ impl GuestTracer {
         ]))
     }
 
-    fn log_execve(&mut self, ctx: &HookCtx, path_ptr: u64, argv_ptr: u64) {
+    fn log_execve(&mut self, ctx: &mut HookCtx, path_ptr: u64, argv_ptr: u64) {
         let path = Self::read_cstr(ctx, path_ptr).unwrap_or_else(|| "<unreadable>".to_owned());
         let mut argv = String::new();
         for i in 0..4u64 {
@@ -236,7 +285,7 @@ impl GuestTracer {
     /// write(fd, buf, count) with fd 0..=2 — capture the payload. Under
     /// systemd a service's fd 1/2 is the journal socket, so daemon stderr
     /// (Go panics included) still flows through here.
-    fn log_write(&mut self, ctx: &HookCtx, fd: u64, buf_ptr: u64, count: u64) {
+    fn log_write(&mut self, ctx: &mut HookCtx, fd: u64, buf_ptr: u64, count: u64) {
         let raw = Self::read_guest(ctx, buf_ptr, count as usize);
         let is_panic = fd == 2
             && raw
@@ -258,7 +307,7 @@ impl GuestTracer {
     }
 
     /// writev(fd, iov, iovcnt) with fd 0..=2 — gather the first iovecs.
-    fn log_writev(&mut self, ctx: &HookCtx, fd: u64, iov_ptr: u64, iovcnt: u64) {
+    fn log_writev(&mut self, ctx: &mut HookCtx, fd: u64, iov_ptr: u64, iovcnt: u64) {
         let mut gathered: Vec<u8> = Vec::new();
         let mut total = 0u64;
         for i in 0..iovcnt.min(4) {
@@ -312,7 +361,7 @@ impl GuestTracer {
         );
     }
 
-    fn log_mount(&mut self, ctx: &HookCtx, src: u64, target: u64, fstype: u64) {
+    fn log_mount(&mut self, ctx: &mut HookCtx, src: u64, target: u64, fstype: u64) {
         let src = Self::read_cstr(ctx, src).unwrap_or_else(|| "<none>".to_owned());
         let target = Self::read_cstr(ctx, target).unwrap_or_else(|| "<none>".to_owned());
         let fstype = Self::read_cstr(ctx, fstype).unwrap_or_else(|| "<none>".to_owned());
@@ -336,9 +385,12 @@ impl Instrumentation for GuestTracer {
         self.last_opcode = Some(opcode);
         // Flight recorder: user-mode instructions only (kernel noise would
         // drown the trail; the panicking process's last quanta dominate).
+        // The `Default` tracer's ring is empty, so it records nothing.
         if rip < USER_RIP_LIMIT {
-            self.flight[self.flight_pos & (FLIGHT_CAP - 1)] = (rip, opcode as u16);
-            self.flight_pos = self.flight_pos.wrapping_add(1);
+            if let Some(slot) = self.flight.get_mut(self.flight_pos & (FLIGHT_CAP - 1)) {
+                *slot = FlightEntry { rip, opcode };
+                self.flight_pos = self.flight_pos.wrapping_add(1);
+            }
         }
     }
 
@@ -392,7 +444,10 @@ impl Instrumentation for GuestTracer {
 
 impl Drop for GuestTracer {
     fn drop(&mut self) {
-        if let Err(e) = self.out.flush() {
+        let Some(out) = self.out.as_mut() else {
+            return;
+        };
+        if let Err(e) = out.flush() {
             if !self.write_error_reported {
                 tracing::error!("guest-trace: final log flush failed: {e}");
             }
@@ -448,5 +503,55 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
         assert!(contents.starts_with("# rusty_box guest trace"));
         assert!(contents.contains("TEST line"));
+    }
+
+    #[test]
+    fn flight_dump_names_the_opcodes_it_recorded() {
+        // A log of its own: the tests share one process, so a path shared
+        // with another test would race.
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!(
+            "rusty-box-guest-trace-flight-{}.log",
+            std::process::id()
+        ));
+        let path_str = path.to_str().unwrap();
+        {
+            let mut tracer = GuestTracer::create(path_str).unwrap();
+            let mut instr = Instruction::default();
+            instr.set_ia_opcode(Opcode::Cpuid);
+            tracer.before_execution(0x40_1000, &instr);
+            instr.set_ia_opcode(Opcode::EvexVpmovssdbWdqVdqKmask);
+            tracer.before_execution(0x40_1002, &instr);
+            tracer.dump_flight();
+        }
+        let contents = std::fs::read_to_string(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert!(contents.contains("FTAIL 0x401000 op=Cpuid\n"), "{contents}");
+        assert!(
+            contents.contains("FTAIL 0x401002 op=EvexVpmovssdbWdqVdqKmask\n"),
+            "{contents}"
+        );
+        let pairs = format!(
+            "F 401000:{:x} 401002:{:x} \n",
+            Opcode::Cpuid as u16,
+            Opcode::EvexVpmovssdbWdqVdqKmask as u16
+        );
+        assert!(contents.contains(&pairs), "{contents}");
+        assert!(
+            contents.contains("the opcode a discriminant of this build's Opcode enum"),
+            "{contents}"
+        );
+    }
+
+    #[test]
+    fn default_tracer_records_nothing() {
+        let mut tracer = GuestTracer::default();
+        let mut instr = Instruction::default();
+        instr.set_ia_opcode(Opcode::Cpuid);
+        tracer.before_execution(0x40_1000, &instr);
+        tracer.emit(true, format_args!("TEST line"));
+        assert!(tracer.out.is_none());
+        assert!(tracer.flight.is_empty());
+        assert_eq!(tracer.flight_pos, 0);
     }
 }

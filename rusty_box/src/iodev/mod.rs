@@ -871,6 +871,18 @@ impl BxDevicesC {
         self.default_write_handler(port, value, io_len);
     }
 
+    /// Whether a device answers for `hit`: the question [`Self::mmio_read`]
+    /// answers by dispatching, asked without dispatching and without its
+    /// warning, for a debugger that reads a window nothing is mapped into.
+    pub(crate) fn mmio_claimed(
+        &self,
+        hit: crate::memory::mmio_map::MmioHit,
+        dm: &mut devices::DeviceManager,
+    ) -> bool {
+        let slot = DevSlot::from_mmio_token(hit.token);
+        slot == DevSlot::IOAPIC || dm.bind_mmio(slot).is_some()
+    }
+
     /// Service a memory-mapped read that the memory map attributed to `token`.
     ///
     /// The counterpart of [`Self::inp`] for physical addresses. Memory decides

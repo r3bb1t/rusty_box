@@ -1086,6 +1086,12 @@ impl<T: Instrumentation> BxCpuC<T> {
     /// paging bits and `EFER.NXE`/`LMA`. A segment does not translate — it
     /// forms the linear address the TLB is keyed on — and neither does `RIP`,
     /// a general register or the vector file.
+    ///
+    /// The same two groups carry what the icache state gate reads through
+    /// `fetch_mode_mask`: CR0.EM/TS and CR4.OSFXSR/OSXSAVE with the control
+    /// registers, XCR0 with the model-specific ones. The gate is rebuilt here,
+    /// after every group is written, because the mode change the control
+    /// registers trigger runs before XCR0 is.
     fn rederive_after_import(&mut self, groups: ArchGroups) {
         if groups.is_empty() {
             return;
@@ -1095,6 +1101,9 @@ impl<T: Instrumentation> BxCpuC<T> {
         self.invalidate_prefetch_q();
         self.invalidate_stack_cache();
         if groups.intersects(ArchGroups::CONTROL_REGS | ArchGroups::MSRS) {
+            self.handle_fpu_mmx_mode_change();
+            self.handle_sse_mode_change();
+            self.handle_avx_mode_change();
             self.tlb_flush();
         }
     }
@@ -1129,16 +1138,10 @@ impl<T: Instrumentation> BxCpuC<T> {
     /// the delivery touches no vector state.
     #[must_use]
     pub fn next_instruction_touches_vector_state(&self, bytes: &[u8]) -> bool {
-        use super::decoder::{decode32, decode64, Opcode};
+        use super::decoder::Opcode;
         use rusty_box_decoder::opcode_isa::{opcode_state, CpuState};
 
-        let decoded = if self.long64_mode() {
-            decode64::fetch_decode64(bytes)
-        } else {
-            let is_32_bit_mode =
-                self.sregs[BxSegregs::Cs as usize].cache.u.segment_d_b();
-            decode32::fetch_decode32(bytes, is_32_bit_mode)
-        };
+        let decoded = self.code_size().decode(bytes);
         let Ok(instruction) = decoded else {
             return true;
         };

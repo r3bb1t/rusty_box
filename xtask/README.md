@@ -19,10 +19,10 @@ This is the local gate suite, defined in `xtask/src/ci.rs`. It runs its steps in
 
 | Invocation | Steps |
 | --- | --- |
-| `cargo xtask ci` | 27 |
-| `cargo xtask ci --skip-boot` | 26 |
-| `cargo xtask ci --full` | 29 |
-| `cargo xtask ci --full --skip-boot` | 28 |
+| `cargo xtask ci` | 29 |
+| `cargo xtask ci --skip-boot` | 28 |
+| `cargo xtask ci --full` | 31 |
+| `cargo xtask ci --full --skip-boot` | 30 |
 
 ### Prerequisites
 
@@ -45,7 +45,7 @@ This step is an in-process text scan, not a cargo command. It enforces the Safet
 
 It is a line scan, not a parser. The baseline constants and the reason each one moved are in `xtask/src/ci.rs`.
 
-### Steps 2 to 26: the build and test matrix
+### Steps 2 to 28: the build and test matrix
 
 Every step is `--release` except the debug-assertions check, which exists to compile the `#[cfg(debug_assertions)]` code that release builds leave out.
 
@@ -74,14 +74,17 @@ Every step is `--release` except the debug-assertions check, which exists to com
 | 22 | doctrine compile-fail fixtures | `cargo test --release -p rusty_box --features std --test compile_fail` |
 | 23 | GUI wasm target check | `cargo check --release -p rusty_box_gui --target wasm32-unknown-unknown` |
 | 24 | GUI host check, tests included | `cargo check --release -p rusty_box_gui --all-targets` |
-| 25 | all-features check | `cargo check --release -p rusty_box --all-features` |
-| 26 | debug-assertions check (all targets, all features) | `cargo check -p rusty_box --all-targets --all-features` |
+| 25 | GUI guest-trace check, tests included | `cargo check --release -p rusty_box_gui --features guest-trace --all-targets` |
+| 26 | GUI guest-trace tests | `cargo test --release -p rusty_box_gui --features guest-trace --lib guest_trace` |
+| 27 | all-features check | `cargo check --release -p rusty_box --all-features` |
+| 28 | debug-assertions check (all targets, all features) | `cargo check -p rusty_box --all-targets --all-features` |
 
 Notes on specific steps:
 
 - **WHP steps (9 to 12)** need no hypervisor. The sys and wrapper tests cover layouts and arithmetic. Engine tests that need hardware skip themselves on a host without it. `--all-targets` on step 12 also compiles the engine's example harnesses.
 - **Doc examples (step 21)** compile the crate's doc comments and the Rust blocks of [`docs/automation.md`](../docs/automation.md), which `rusty_box/src/lib.rs` includes behind `#[cfg(doctest)]`. An example in that guide that names a signature the crate does not have fails here.
 - **Compile-fail fixtures (step 22)** are the doctrine's trybuild tests. Their goldens are rustc's rendered diagnostics, so they change when the quoted code or the toolchain changes. Once you have confirmed the rule still holds, regenerate them with `TRYBUILD=overwrite cargo test --release -p rusty_box --features std --test compile_fail`.
+- **Guest-trace steps (25 and 26)** cover `rusty_box_gui/src/guest_trace.rs`, which only the `guest-trace` feature compiles. Step 26 passes only if its stdout shows `test guest_trace::tests::flight_dump_names_the_opcodes_it_recorded ... ok`, so a test filter that matches nothing fails it.
 
 ### `--full`: two more steps
 
@@ -105,7 +108,7 @@ It passes only if the run exits successfully and its stdout contains `*** LOGIN 
 
 ### What `ci` does not cover
 
-- It compiles the `rusty_box_gui` tests but does not run them. Run them with `cargo test --release -p rusty_box_gui`.
+- It compiles the `rusty_box_gui` tests but runs only the guest-trace tracer's. Run the rest with `cargo test --release -p rusty_box_gui`.
 - No step runs the tests of `rusty_box_bximage` or of `xtask`. Both are compiled: `rusty_box_bximage` as a dependency of the GUI steps, and `xtask` by the `cargo xtask` alias that runs the gate. Run the xtask's own, among them the APK packing's, with `cargo test --release -p xtask`.
 - No step builds `examples/rusty_box_web`, `examples/no_alloc_smoke` or the Android APK. The GUI steps compile the APK's library, the `rusty_box_gui_android` example, only for the host, where it is empty.
 

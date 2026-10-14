@@ -445,7 +445,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// they do not exist.
     #[inline]
     pub(super) fn write_xmm_reg(&mut self, index: u8, val: BxPackedXmmRegister) {
-        use super::opcodes_table::BxAvxVectorLength;
+        use super::fetch_mode::BxAvxVectorLength;
         let i = index as usize;
         self.vmm[i].set_zmm128(0, val);
         if self.maxvl > BxAvxVectorLength::Vl128 {
@@ -529,43 +529,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// `BX_CLEAR_AVX_HIGH256`.
     #[inline]
     pub(super) fn write_ymm_reg(&mut self, index: u8, val: BxPackedYmmRegister) {
-        use super::opcodes_table::BxAvxVectorLength;
+        use super::fetch_mode::BxAvxVectorLength;
         let i = index as usize;
         self.vmm[i].set_zmm256(0, val);
         if self.maxvl > BxAvxVectorLength::Vl256 {
             self.vmm[i].set_zmm256(1, BxPackedYmmRegister::default());
         }
-    }
-
-    /// Prepare for SSE instruction — check CR0.EM, CR4.OSFXSR, CR0.TS
-    /// Returns Ok(()) if SSE is available, or raises #UD/#NM exception.
-    /// Bochs: BX_CPU_C::prepareSSE() / bx_no_sse checks
-    #[inline]
-    pub(super) fn prepare_sse(&mut self) -> super::Result<()> {
-        if self.cr0.em() {
-            return self.exception(super::cpu::Exception::Ud, 0);
-        }
-        if !self.cr4.osfxsr() {
-            return self.exception(super::cpu::Exception::Ud, 0);
-        }
-        if self.cr0.ts() {
-            return self.exception(super::cpu::Exception::Nm, 0);
-        }
-        Ok(())
-    }
-    /// Prepare for AVX instruction — check protected mode, CR4.OSXSAVE,
-    /// XCR0.SSE+YMM, then CR0.TS.
-    /// Returns Ok(()) if AVX is available, or raises #UD/#NM exception.
-    /// Bochs: BX_CPU_C::BxNoAVX().
-    #[inline]
-    pub(super) fn prepare_avx(&mut self) -> super::Result<()> {
-        if !self.protected_mode() || !self.cr4.osxsave() || (self.xcr0.get32() & 0x6) != 0x6 {
-            return self.exception(super::cpu::Exception::Ud, 0);
-        }
-        if self.cr0.ts() {
-            return self.exception(super::cpu::Exception::Nm, 0);
-        }
-        Ok(())
     }
 }
 

@@ -9,12 +9,15 @@ pub(crate) enum ShellPage {
     Home,
     Console,
     Hardware,
+    /// A paused VM's processors, code, memory and stack.
+    #[cfg(not(target_arch = "wasm32"))]
+    Debugger,
 }
 
 impl ShellPage {
     /// The pages a VM node lists, in the order the tree draws them.
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) const ALL: [Self; 3] = [Self::Home, Self::Console, Self::Hardware];
+    pub(crate) const ALL: [Self; 4] = [Self::Home, Self::Console, Self::Hardware, Self::Debugger];
 
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) const fn label(self) -> &'static str {
@@ -22,6 +25,7 @@ impl ShellPage {
             Self::Home => "Summary",
             Self::Console => "Console",
             Self::Hardware => "Hardware",
+            Self::Debugger => "Debugger",
         }
     }
 }
@@ -103,6 +107,10 @@ pub(crate) enum VmBarAction {
     PowerOn,
     PowerOff,
     Restart,
+    /// Pause a running VM, or let a paused one run on.
+    TogglePause,
+    /// Save the VM's RAM to a file.
+    DumpRam,
     ToggleSerial,
     ToggleMouseCapture,
     SendCtrlAltDel,
@@ -171,7 +179,7 @@ mod tests {
     fn every_page_the_tree_lists_carries_a_label() {
         assert_eq!(
             ShellPage::ALL.map(ShellPage::label),
-            ["Summary", "Console", "Hardware"]
+            ["Summary", "Console", "Hardware", "Debugger"]
         );
     }
 }

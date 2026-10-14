@@ -3,7 +3,9 @@ pub mod decoder;
 pub mod instrumentation;
 
 pub use instrumentation::{
-    BranchEvent, BranchType, CacheCntrl, CodeSize, CpuSetupMode, CpuSnapshot, EmuStopReason,
+    BranchEvent, BranchType, CacheCntrl, CodeSize, CpuDebugView, CpuSetupMode, CpuSnapshot,
+    EmuStopReason, ExecutionMode, Fetched, ProcessorActivity, SegmentBases,
+    DescriptorTable, LinearRange, MappingWalk, PageAccess, PageMapping, WalkStep,
     ExitSet, HookCtx, HookMask, HwInterruptEvent, InstrAction, Instrumentation, InvEptType,
     InvPcidType, IoHookEvent, LinAccess, MemAccessRW, MemHookEvent, MemPermViolation, MemPerms,
     MemType, MemUnmapped, MwaitEvent, MwaitFlags, OpcodeEvent, PhyAccess, PrefetchEvent,
@@ -85,6 +87,7 @@ pub(super) mod event;
 pub(crate) use event::{AcknowledgedInterrupt, TrapDischarge};
 pub use event::HardwareEvent;
 pub(super) mod exception;
+pub(super) mod fetch_mode;
 pub(super) mod flag_ctrl;
 pub(super) mod flag_ctrl_pro;
 pub(super) mod fpu;
@@ -106,7 +109,6 @@ pub(super) mod mult32;
 pub(super) mod mult64;
 pub(super) mod mult8;
 pub(super) mod mwait;
-pub(super) mod opcodes_table;
 pub(super) mod paging;
 /// Null-page write-fault tripwire (see the module docs). Diagnostic-only.
 #[cfg(feature = "std")]

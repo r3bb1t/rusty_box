@@ -59,7 +59,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         instr: &Instruction,
         func: impl Fn(&mut BxPackedXmmRegister, &BxPackedXmmRegister, &mut SoftFloatStatus),
     ) -> super::Result<()> {
-        self.prepare_sse()?;
         if instr.get_vl() >= 1 {
             let mut op1 = self.read_ymm_reg(instr.src2());
             let op2 = self.vex_read_src2_ymm(instr)?;
@@ -90,7 +89,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         instr: &Instruction,
         func: fn(&mut BxPackedXmmRegister, &mut SoftFloatStatus),
     ) -> super::Result<()> {
-        self.prepare_sse()?;
         if instr.get_vl() >= 1 {
             let mut op = self.vex_read_src2_ymm(instr)?;
             let mut status = self.sse_status();
@@ -120,7 +118,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         instr: &Instruction,
         func: fn(Float32, Float32, &mut SoftFloatStatus) -> Float32,
     ) -> super::Result<()> {
-        self.prepare_sse()?;
         let w = self.sse_pfp_read_op2_ss(instr)?;
         let mut result = self.read_xmm_reg(instr.src2());
         let mut status = self.sse_status();
@@ -138,7 +135,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         instr: &Instruction,
         func: fn(Float64, Float64, &mut SoftFloatStatus) -> Float64,
     ) -> super::Result<()> {
-        self.prepare_sse()?;
         let w = self.sse_pfp_read_op2_sd(instr)?;
         let mut result = self.read_xmm_reg(instr.src2());
         let mut status = self.sse_status();
@@ -182,7 +178,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// takes its mode from MXCSR.RC; the truncating form always rounds
     /// toward zero.
     fn vex_cvt_ps2dq(&mut self, instr: &Instruction, truncate: bool) -> super::Result<()> {
-        self.prepare_sse()?;
         if instr.get_vl() >= 1 {
             let mut op = self.vex_read_src2_ymm(instr)?;
             let mut status = self.sse_status();
@@ -306,7 +301,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// VCVTPD2DQ / VCVTTPD2DQ — 2 (VL=128) or 4 (VL=256) f64 → i32 into an
     /// xmm result; unused upper lanes zeroed.
     fn vex_cvt_pd2dq(&mut self, instr: &Instruction, truncate: bool) -> super::Result<()> {
-        self.prepare_sse()?;
         let mut result = BxPackedXmmRegister::default();
         if instr.get_vl() >= 1 {
             let op2 = self.vex_read_src2_ymm(instr)?;
@@ -1207,7 +1201,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         instr: &Instruction,
         func: fn(Float32) -> Float32,
     ) -> super::Result<()> {
-        self.prepare_sse()?;
         if instr.get_vl() >= 1 {
             let mut op = self.vex_read_src2_ymm(instr)?;
             for i in 0..8 {
@@ -1230,7 +1223,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         instr: &Instruction,
         func: fn(Float32) -> Float32,
     ) -> super::Result<()> {
-        self.prepare_sse()?;
         let w = self.sse_pfp_read_op2_ss(instr)?;
         let mut result = self.read_xmm_reg(instr.src2());
         result.set_xmm32u(0, func(w));

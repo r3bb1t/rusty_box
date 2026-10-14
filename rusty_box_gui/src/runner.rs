@@ -3,10 +3,41 @@ use crate::{
     config::{Engine, ResolvedConfig},
     error::RunError,
 };
+#[cfg(feature = "gui-egui")]
+use crate::debugger::{
+    control::{AfterRun, RunControl, RunStart},
+    serve::{serve, Next, Stepping},
+};
+#[cfg(all(not(feature = "guest-trace"), feature = "hv-whp", windows, feature = "gui-egui"))]
+use crate::debugger::{
+    control::BetweenRuns,
+    serve::{perform, MachineAfter},
+};
+
+/// What pauses, steps and ends a run from outside it: the shell's run
+/// control. A build without the shell has none, and there this type has no
+/// values, so every run is one nobody can pause.
+#[cfg(feature = "gui-egui")]
+type RunLink = Arc<RunControl>;
+#[cfg(not(feature = "gui-egui"))]
+type RunLink = core::convert::Infallible;
+
+/// The stop flag `link` raises.
+fn stop_flag_of(link: &RunLink) -> Arc<AtomicBool> {
+    #[cfg(feature = "gui-egui")]
+    {
+        Arc::clone(link.stop_flag())
+    }
+    #[cfg(not(feature = "gui-egui"))]
+    {
+        match *link {}
+    }
+}
 // Named only where the hypervisor engine forces it; the interpreter path
 // reaches the same narrowing through a method call and needs no name.
 #[cfg(all(not(feature = "guest-trace"), feature = "hv-whp", windows))]
 use crate::config::CpuCapabilities;
+use rusty_box::cpu::Instrumentation;
 use rusty_box::params::BxParams;
 #[cfg(feature = "gui-egui")]
 use rusty_box::gui::{shared_display::SharedDisplay, BridgeGui};
@@ -22,8 +53,6 @@ use rusty_box::gui::{BxGui, NoGui, TermGui};
 use rusty_box_whp_engine::{FastMachine, FastMachineFault, StepStop, WhpEngine};
 #[cfg(feature = "gui-egui")]
 use std::collections::HashSet;
-#[cfg(feature = "gui-egui")]
-use std::sync::atomic::Ordering;
 #[cfg(feature = "gui-egui")]
 use std::sync::{mpsc, Mutex};
 use std::{
@@ -152,14 +181,14 @@ fn prepare_configured_media_files(
 fn run_with_gui<G>(
     config: ResolvedConfig,
     gui: G,
-    stop_flag: Option<Arc<AtomicBool>>,
+    control: Option<RunLink>,
     create_startup_disks: bool,
 ) -> Result<RunSummary, RunError>
 where
     G: BxGui + 'static,
 {
     let prepared = prepare_run(config, create_startup_disks)?;
-    run_prepared(prepared, gui, stop_flag)
+    run_prepared(prepared, gui, control)
 }
 
 /// A run's inputs, read and checked, with its startup disk provisioned.
@@ -216,11 +245,11 @@ fn prepare_run(
 }
 
 /// Builds the machine `prepared` describes and runs it on `gui` until it
-/// stops or `stop_flag` is raised.
+/// stops, or until `control` ends the run; `control` also pauses it.
 fn run_prepared<G>(
     prepared: PreparedRun,
     gui: G,
-    stop_flag: Option<Arc<AtomicBool>>,
+    control: Option<RunLink>,
 ) -> Result<RunSummary, RunError>
 where
     G: BxGui + 'static,
@@ -292,7 +321,7 @@ where
             return Err(RunError::NoHypervisor);
         }
         let emu = builder.build_on::<WhpEngine>()?;
-        return drive_on_the_hypervisor(emu, &config, stop_flag);
+        return drive_on_the_hypervisor(emu, &config, control);
     }
 
     #[cfg(not(feature = "guest-trace"))]
@@ -300,7 +329,7 @@ where
     // Diagnostic build: run the CPU with the guest-death tracer installed.
     // Single-CPU only — one tracer instance cannot be shared between processors.
     #[cfg(feature = "guest-trace")]
-    let mut emu = {
+    let emu = {
         let trace_log = crate::guest_trace::GuestTracer::default_log_path();
         let tracer = crate::guest_trace::GuestTracer::create(&trace_log).map_err(|source| {
             RunError::FileRead {
@@ -313,7 +342,7 @@ where
         builder.tracer(tracer).build()?
     };
 
-    drive(emu, &config, stop_flag)
+    drive(emu, &config, control)
 }
 
 /// Everything a built machine needs arranged before it runs, whichever engine
@@ -322,12 +351,13 @@ where
 /// One function for both drive paths (R5): the front end's stop control, its
 /// pre-boot video mode and its boot keystroke are wired here or nowhere, so
 /// none of them can work on one engine and quietly not on the other.
-fn arrange_for_boot<E>(
-    emu: &mut Emulator<(), E>,
+fn arrange_for_boot<T, E>(
+    emu: &mut Emulator<T, E>,
     config: &ResolvedConfig,
     stop_flag: Option<Arc<AtomicBool>>,
 ) where
-    E: SliceEngine<()>,
+    T: Instrumentation,
+    E: SliceEngine<T>,
 {
     if let Some(stop_flag) = stop_flag {
         emu.set_stop_flag(stop_flag);
@@ -355,21 +385,75 @@ fn arrange_for_boot<E>(
 ///
 /// Generic over the engine because `run_interactive` is: any engine that runs
 /// the machine in slices is driven this way. A machine on the hypervisor is
-/// not — see [`drive_on_the_hypervisor`].
-fn drive<E>(
-    mut emu: Box<Emulator<(), E>>,
+/// not — see [`drive_on_the_hypervisor`]. Generic over the tracer too, so the
+/// `guest-trace` build's traced machine runs the same way.
+fn drive<T, E>(
+    mut emu: Box<Emulator<T, E>>,
     config: &ResolvedConfig,
-    stop_flag: Option<Arc<AtomicBool>>,
+    control: Option<RunLink>,
 ) -> Result<RunSummary, RunError>
 where
-    E: SliceEngine<()>,
+    T: Instrumentation,
+    E: SliceEngine<T>,
 {
-    arrange_for_boot(emu.as_mut(), config, stop_flag);
-    let instructions_executed = emu.run_interactive(config.max_instructions)?;
+    arrange_for_boot(emu.as_mut(), config, control.as_ref().map(stop_flag_of));
+    // A run nobody can pause runs to its end in one call.
+    let Some(control) = control else {
+        let instructions_executed = emu.run_interactive(config.max_instructions)?;
+        return Ok(RunSummary {
+            instructions_executed: Some(instructions_executed),
+        });
+    };
+    drive_served(emu, config, control)
+}
 
+/// `drive` for a run the shell can pause: `run_interactive` returns whenever
+/// the stop flag rises; the machine is still whole then, and runs on from
+/// where it stood when called again (emulator/tests.rs: a paused machine is
+/// not a switched-off one).
+#[cfg(feature = "gui-egui")]
+fn drive_served<T, E>(
+    mut emu: Box<Emulator<T, E>>,
+    config: &ResolvedConfig,
+    control: RunLink,
+) -> Result<RunSummary, RunError>
+where
+    T: Instrumentation,
+    E: SliceEngine<T>,
+{
+    let mut retired = 0u64;
+    while retired < config.max_instructions {
+        let left = config.max_instructions - retired;
+        retired = retired.saturating_add(emu.run_interactive(left)?);
+        match control.after_run(emu.power().state()) {
+            AfterRun::End => break,
+            AfterRun::Serve => {
+                let served = serve(emu.as_mut(), &control, Stepping::Instructions)?;
+                retired = retired.saturating_add(served.retired);
+                match served.next {
+                    Next::Resume => {}
+                    Next::End => break,
+                }
+            }
+        }
+    }
     Ok(RunSummary {
-        instructions_executed: Some(instructions_executed),
+        instructions_executed: Some(retired),
     })
+}
+
+/// Without the shell there is no run control, so no run gets here.
+#[cfg(not(feature = "gui-egui"))]
+fn drive_served<T, E>(
+    _emu: Box<Emulator<T, E>>,
+    _config: &ResolvedConfig,
+    control: RunLink,
+) -> Result<RunSummary, RunError>
+where
+    T: Instrumentation,
+    E: SliceEngine<T>,
+{
+    match control {}
 }
 
 /// How much guest time one hypervisor step covers, in milliseconds at the
@@ -411,7 +495,7 @@ const FRAME_INTERVAL: std::time::Duration = std::time::Duration::from_millis(40)
 fn drive_on_the_hypervisor(
     mut emu: Box<Emulator<(), WhpEngine>>,
     config: &ResolvedConfig,
-    stop_flag: Option<Arc<AtomicBool>>,
+    control: Option<RunLink>,
 ) -> Result<RunSummary, RunError> {
     // Refused, not approximated: nothing on the hypervisor counts the guest's
     // instructions, so a limit in them would end the run at a guess, and a
@@ -423,7 +507,9 @@ fn drive_on_the_hypervisor(
     }
     // This loop is what reads the flag, so a run given none gets one nobody
     // will raise rather than a branch on every step.
-    let stop_flag = stop_flag.unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
+    let stop_flag = control
+        .as_ref()
+        .map_or_else(|| Arc::new(AtomicBool::new(false)), stop_flag_of);
     arrange_for_boot(emu.as_mut(), config, Some(Arc::clone(&stop_flag)));
     let step = RunBudget::Ticks(
         (emu.config().ips.per_second_u64() * HYPERVISOR_STEP_MILLIS / 1_000).max(1),
@@ -449,7 +535,14 @@ fn drive_on_the_hypervisor(
     let mut last_frame = std::time::Instant::now();
     loop {
         if stop_flag.load(std::sync::atomic::Ordering::Relaxed) {
-            break;
+            // A run nobody can pause ends on its stop.
+            let Some(control) = control.as_ref() else {
+                break;
+            };
+            match after_stop_on_the_hypervisor(&mut machine, control)? {
+                AfterStop::RunOn => continue,
+                AfterStop::End => break,
+            }
         }
         let outcome = machine
             .step(step)
@@ -488,6 +581,68 @@ fn drive_on_the_hypervisor(
         // Nothing here counted, so nothing is claimed — see `RunSummary`.
         instructions_executed: None,
     })
+}
+
+/// What a hypervisor run does once it finds its stop flag raised.
+#[cfg(all(not(feature = "guest-trace"), feature = "hv-whp", windows))]
+enum AfterStop {
+    End,
+    RunOn,
+}
+
+/// A raised stop flag on a run the shell can pause: a guest that switched
+/// itself off or a stop the shell asked for ends the run; a pause or a dump
+/// is served, and the run goes on once the shell lets it.
+#[cfg(all(not(feature = "guest-trace"), feature = "hv-whp", windows, feature = "gui-egui"))]
+fn after_stop_on_the_hypervisor(
+    machine: &mut FastMachine,
+    control: &RunLink,
+) -> Result<AfterStop, RunError> {
+    let power = machine
+        .with_machine(|m| m.power().state())
+        .map_err(|source| RunError::Hypervisor { source })?;
+    match control.after_run(power) {
+        AfterRun::End => Ok(AfterStop::End),
+        AfterRun::Serve => match serve_on_the_hypervisor(machine, control)? {
+            Next::Resume => Ok(AfterStop::RunOn),
+            Next::End => Ok(AfterStop::End),
+        },
+    }
+}
+
+/// Without the shell there is no run control, so no run gets here.
+#[cfg(all(not(feature = "guest-trace"), feature = "hv-whp", windows, not(feature = "gui-egui")))]
+fn after_stop_on_the_hypervisor(
+    _machine: &mut FastMachine,
+    control: &RunLink,
+) -> Result<AfterStop, RunError> {
+    match *control {}
+}
+
+/// `serve` for a machine on the hypervisor: between steps every processor is
+/// parked and the machine is whole (`FastMachine::with_machine`), so each
+/// task runs there. Nothing counts the instructions it retires, so it cannot
+/// step one.
+#[cfg(all(not(feature = "guest-trace"), feature = "hv-whp", windows, feature = "gui-egui"))]
+fn serve_on_the_hypervisor(
+    machine: &mut FastMachine,
+    control: &RunControl,
+) -> Result<Next, RunError> {
+    loop {
+        match control.next_between_runs() {
+            BetweenRuns::Perform(task) => {
+                let performed = machine
+                    .with_machine(|m| perform(m, control, task, Stepping::Unavailable))
+                    .map_err(|source| RunError::Hypervisor { source })??;
+                match performed.after {
+                    MachineAfter::Live => {}
+                    MachineAfter::Over => return Ok(Next::End),
+                }
+            }
+            BetweenRuns::Resume => return Ok(Next::Resume),
+            BetweenRuns::End => return Ok(Next::End),
+        }
+    }
 }
 
 /// Which clock the machine's devices run on, decided by the engine (R2).
@@ -874,6 +1029,7 @@ fn startup_disk_creation(config: &ResolvedConfig) -> Option<&crate::config::Reso
 #[cfg(feature = "gui-egui")]
 struct VmRunThread {
     display: Arc<Mutex<SharedDisplay>>,
+    control: Arc<RunControl>,
     thread: std::thread::JoinHandle<Option<u64>>,
 }
 
@@ -955,19 +1111,24 @@ fn run_egui_launcher(
             tally.join(finished);
         }
         let display = Arc::clone(&start.display);
+        let control = Arc::clone(&start.control);
         let provisioned = Arc::clone(&provisioned);
         let spawned = std::thread::Builder::new()
             .name("rusty_box_gui_emulator".to_owned())
             .stack_size(EMULATOR_STACK_BYTES)
             .spawn(move || run_one_vm(start, &provisioned));
         match spawned {
-            Ok(thread) => runs.push(VmRunThread { display, thread }),
+            Ok(thread) => runs.push(VmRunThread {
+                display,
+                control,
+                thread,
+            }),
             Err(source) => record_egui_error(&display, &RunError::ThreadStart { source }),
         }
     }
 
     for run in &runs {
-        signal_egui_stop(&run.display);
+        signal_egui_stop(&run.display, &run.control);
     }
     for run in runs {
         tally.join(run);
@@ -985,11 +1146,16 @@ fn run_one_vm(start: crate::app::StartRun, provisioned: &Mutex<HashSet<PathBuf>>
         display,
         config,
         holds,
+        control,
     } = start;
     let mut retired = Some(0u64);
     let mut how = RunStart::PowerOn;
     loop {
-        let stop_flag = prepare_egui_run(&display, how);
+        // A restart lowers the stop that ended the run before it, unless a
+        // stop was asked for since; a power-on finds the flag the shell
+        // lowered. Either way a stop asked for from here on ends this run.
+        control.begin_run(how);
+        prepare_egui_run(&display);
         let creation = startup_disk_creation(&config);
         // A record that cannot be read, its lock poisoned, reads as not yet
         // provisioned: the creation runs, as at the path's first power-on.
@@ -1023,8 +1189,9 @@ fn run_one_vm(start: crate::app::StartRun, provisioned: &Mutex<HashSet<PathBuf>>
                         .filter(|creation| creation.overwrite)
                         .map(|creation| creation.path.clone()),
                 );
-            run_prepared(prepared, bridge, Some(stop_flag))
+            run_prepared(prepared, bridge, Some(Arc::clone(&control)))
         });
+        control.finish_run();
         let summary = match run {
             Ok(summary) => summary,
             Err(error) => {
@@ -1060,38 +1227,11 @@ fn run_one_vm(start: crate::app::StartRun, provisioned: &Mutex<HashSet<PathBuf>>
     retired
 }
 
-/// How a run begins.
+/// Marks `shared`'s VM running for the run about to begin. The stop flag is
+/// the run control's to lower (`RunControl::begin_run`), never the display's.
 #[cfg(feature = "gui-egui")]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum RunStart {
-    /// The shell asked for it and lowered the stop flag then; a stop raised
-    /// since is honoured.
-    PowerOn,
-    /// The run before it ended on a restart; the stop that ended it is spent.
-    Restart,
-}
-
-/// Marks `shared`'s VM running for a run that begins `how`, and returns the
-/// stop flag the run polls.
-///
-/// A run never lowers the flag at a power-on: the shell lowered it when it
-/// asked for the power-on, so a stop raised since, as closing the shell
-/// raises one before the run's thread gets here, ends the run at once. A
-/// restart lowers the stop that ended the run before it, in the same lock
-/// as it reads that the restart still stands: a stop raised after the
-/// restart was asked for withdraws it (`signal_egui_stop`, a power-off) and
-/// is honoured the same way.
-#[cfg(feature = "gui-egui")]
-fn prepare_egui_run(shared: &Arc<Mutex<SharedDisplay>>, how: RunStart) -> Arc<AtomicBool> {
+fn prepare_egui_run(shared: &Arc<Mutex<SharedDisplay>>) {
     if let Ok(mut display) = shared.lock() {
-        match how {
-            RunStart::PowerOn => {}
-            RunStart::Restart => {
-                if display.reset_requested {
-                    display.stop_flag.store(false, Ordering::Relaxed);
-                }
-            }
-        }
         display.emu_running = true;
         display.start_pending = false;
         display.reset_requested = false;
@@ -1102,9 +1242,6 @@ fn prepare_egui_run(shared: &Arc<Mutex<SharedDisplay>>, how: RunStart) -> Arc<At
         // into the next boot.
         drop(display.drain_serial_input());
         display.pending_keys.clear();
-        Arc::clone(&display.stop_flag)
-    } else {
-        Arc::new(AtomicBool::new(false))
     }
 }
 
@@ -1132,17 +1269,17 @@ fn record_egui_error(shared: &Arc<Mutex<SharedDisplay>>, error: &RunError) {
     }
 }
 
-/// Stops `shared`'s VM for good: its run's stop flag is raised, it shows as
-/// neither running nor starting, and a restart asked for and not yet begun
-/// is withdrawn, so the run ends rather than beginning again.
+/// Stops `shared`'s VM for good: it shows as neither running nor starting, a
+/// restart asked for and not yet begun is withdrawn, and the run ends,
+/// paused or not (`RunControl::end_run`).
 #[cfg(feature = "gui-egui")]
-pub(crate) fn signal_egui_stop(shared: &Arc<Mutex<SharedDisplay>>) {
+pub(crate) fn signal_egui_stop(shared: &Arc<Mutex<SharedDisplay>>, control: &RunControl) {
     if let Ok(mut display) = shared.lock() {
         display.emu_running = false;
-        display.stop_flag.store(true, Ordering::Relaxed);
         display.start_pending = false;
         display.reset_requested = false;
     }
+    control.end_run();
 }
 
 /// Install the log subscriber.
@@ -1339,6 +1476,8 @@ mod tests {
     };
     use rusty_box::params::BxParams;
     use rusty_box_bximage::ImageSize;
+    #[cfg(feature = "gui-egui")]
+    use std::sync::atomic::Ordering;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -1859,7 +1998,7 @@ mod tests {
         let shared = Arc::new(Mutex::new(SharedDisplay::new()));
         shared.lock().unwrap().queue_serial_input_line("stale");
 
-        drop(prepare_egui_run(&shared, RunStart::PowerOn));
+        prepare_egui_run(&shared);
 
         assert_eq!(
             shared.lock().unwrap().drain_serial_input(),
@@ -1881,7 +2020,7 @@ mod tests {
             .push(HostInputEvent::Key(BxKey::Enter, true)));
         assert_eq!(shared.lock().unwrap().pending_keys.len(), 1);
 
-        drop(prepare_egui_run(&shared, RunStart::PowerOn));
+        prepare_egui_run(&shared);
 
         assert!(shared.lock().unwrap().pending_keys.is_empty());
     }
@@ -1895,26 +2034,21 @@ mod tests {
         display.reset_requested = true;
     }
 
-    /// A restart lowers the stop that ended the run before it, and only that
-    /// one: a stop raised after the restart was asked for withdraws it, and
-    /// still stands when the run it would have begun starts.
+    /// A control over `display`'s stop flag. A stop raised through any
+    /// control that shares the flag ends a run that is not paused; a paused
+    /// run sleeps on its own control, so the tests that pause hold that one
+    /// (`TestVm`).
     #[cfg(feature = "gui-egui")]
-    #[test]
-    fn a_restart_lowers_only_the_stop_that_ended_its_run() {
-        let shared = Arc::new(Mutex::new(SharedDisplay::new()));
-
-        ask_for_a_restart(&shared);
-        let stop = prepare_egui_run(&shared, RunStart::Restart);
-        assert!(!stop.load(Ordering::Relaxed), "the stop that ended the run is spent");
-
-        ask_for_a_restart(&shared);
-        signal_egui_stop(&shared);
-        let stop = prepare_egui_run(&shared, RunStart::Restart);
-        assert!(
-            stop.load(Ordering::Relaxed),
-            "a stop raised after the restart was asked for still stands"
-        );
+    fn control_for(display: &Mutex<SharedDisplay>) -> Arc<RunControl> {
+        Arc::new(RunControl::new(Arc::clone(&display.lock().unwrap().stop_flag)))
     }
+
+    /// The shell's power-off of a VM that is not paused.
+    #[cfg(feature = "gui-egui")]
+    fn stop(display: &Arc<Mutex<SharedDisplay>>) {
+        signal_egui_stop(display, &control_for(display));
+    }
+
 
     /// A power-on refused for a missing CD-ROM leaves an `overwrite` disk as
     /// it was: the CD-ROM is checked before the disk is recreated.
@@ -2018,16 +2152,26 @@ mod tests {
         config: ResolvedConfig,
         holds: RunHolds,
     ) {
-        {
-            let mut shown = display.lock().unwrap();
-            shown.stop_flag.store(false, Ordering::Relaxed);
-            shown.start_pending = true;
-        }
+        power_on_with(commands, display, &control_for(display), config, holds);
+    }
+
+    /// `power_on_holding` through `control`, the one the test pauses with.
+    #[cfg(feature = "gui-egui")]
+    fn power_on_with(
+        commands: &mpsc::Sender<crate::app::NativeEmulatorCommand>,
+        display: &Arc<Mutex<SharedDisplay>>,
+        control: &Arc<RunControl>,
+        config: ResolvedConfig,
+        holds: RunHolds,
+    ) {
+        control.arm_for_power_on();
+        display.lock().unwrap().start_pending = true;
         commands
             .send(crate::app::NativeEmulatorCommand::Start(crate::app::StartRun {
                 display: Arc::clone(display),
                 config,
                 holds,
+                control: Arc::clone(control),
             }))
             .unwrap();
     }
@@ -2451,8 +2595,8 @@ mod tests {
             })
         });
 
-        signal_egui_stop(&first);
-        signal_egui_stop(&second);
+        stop(&first);
+        stop(&second);
         drop(commands);
         let result = join_launcher(launcher);
         remove_test_file(&bios);
@@ -2526,6 +2670,7 @@ mod tests {
             display: Arc::clone(&display),
             config: spinning_config(&bios),
             holds: holds_of_a_plain_power_on(),
+            control: control_for(&display),
         });
 
         wait_for_end(&run, "a run stopped before it started");
@@ -2558,7 +2703,7 @@ mod tests {
             "the restart lowered the stop that ended the run before it"
         );
 
-        signal_egui_stop(&display);
+        stop(&display);
         drop(commands);
         let result = join_launcher(launcher);
         remove_test_file(&bios);
@@ -2574,15 +2719,19 @@ mod tests {
     fn quitting_while_a_restart_is_queued_ends_the_vm() {
         let bios = spinning_bios();
         let display = Arc::new(Mutex::new(SharedDisplay::new()));
+        let control = control_for(&display);
         let run = spawn_run(crate::app::StartRun {
             display: Arc::clone(&display),
             config: spinning_config(&bios),
             holds: holds_of_a_plain_power_on(),
+            control: Arc::clone(&control),
         });
         wait_until(|| display.lock().unwrap().emu_running);
 
+        // Quitting stops through the VM's own control, as `Sessions::stop_all`
+        // does, so a stop that lands after the restart was taken still ends it.
         ask_for_a_restart(&display);
-        signal_egui_stop(&display);
+        signal_egui_stop(&display, &control);
 
         wait_for_end(&run, "a VM stopped with its restart queued");
         let retired = run.join().expect("the run's thread");
@@ -2652,7 +2801,7 @@ mod tests {
             "kept alive through the restart"
         );
 
-        signal_egui_stop(&display);
+        stop(&display);
         drop(commands);
         let result = join_launcher(launcher);
         remove_test_file(&bios);
@@ -2666,6 +2815,244 @@ mod tests {
             [AliveChange::Started, AliveChange::Stopped],
             "let go once the run is over"
         );
+    }
+
+    /// A VM as the shell holds it: its display, and the run control a test
+    /// pauses it with.
+    #[cfg(feature = "gui-egui")]
+    struct TestVm {
+        display: Arc<Mutex<SharedDisplay>>,
+        control: Arc<RunControl>,
+    }
+
+    #[cfg(feature = "gui-egui")]
+    impl TestVm {
+        fn new() -> Self {
+            let display = Arc::new(Mutex::new(SharedDisplay::new()));
+            let control = control_for(&display);
+            Self { display, control }
+        }
+
+        fn power_on(
+            &self,
+            commands: &mpsc::Sender<crate::app::NativeEmulatorCommand>,
+            config: ResolvedConfig,
+        ) {
+            power_on_with(
+                commands,
+                &self.display,
+                &self.control,
+                config,
+                holds_of_a_plain_power_on(),
+            );
+        }
+
+        /// The shell's Restart (`VmSession::restart`).
+        fn restart(&self) {
+            self.display.lock().unwrap().reset_requested = true;
+            self.control.end_run();
+        }
+
+        fn stop(&self) {
+            signal_egui_stop(&self.display, &self.control);
+        }
+
+        fn ips(&self) -> u32 {
+            self.display.lock().unwrap().ips
+        }
+
+        fn paused_snapshot(&self) -> Arc<crate::debugger::inspect::DebugSnapshot> {
+            use crate::debugger::control::RunPhase;
+            wait_until(|| {
+                self.control.phase() == RunPhase::Paused && self.control.snapshot().is_some()
+            });
+            self.control.snapshot().expect("a paused run publishes")
+        }
+
+        /// Powered on the spinning BIOS and retiring instructions.
+        fn spinning(
+            commands: &mpsc::Sender<crate::app::NativeEmulatorCommand>,
+            bios: &Path,
+        ) -> Self {
+            let vm = Self::new();
+            vm.power_on(commands, spinning_config(bios));
+            wait_until(|| vm.ips() > 0);
+            vm
+        }
+    }
+
+    /// A paused VM shows where its guest spins (the BIOS's `JMP $` at the
+    /// reset vector, read from ROM), stops retiring instructions, and runs on
+    /// when resumed.
+    #[cfg(feature = "gui-egui")]
+    #[test]
+    fn a_paused_vm_shows_where_its_guest_stopped_and_runs_on_when_resumed() {
+        use crate::debugger::control::RunPhase;
+        use crate::debugger::inspect::{MemoryTarget, ViewRequest};
+        let bios = spinning_bios();
+        let (commands, command_rx) = mpsc::channel();
+        let launcher = spawn_launcher(command_rx);
+        let vm = TestVm::spinning(&commands, &bios);
+
+        vm.control.pause();
+        let snapshot = vm.paused_snapshot();
+        let boot = snapshot.cpus[0];
+        assert_eq!(boot.mode, rusty_box::cpu::ExecutionMode::Real);
+        assert_eq!(boot.registers.rip, 0xFFF0);
+        assert_eq!(boot.segment_bases.cs, 0xFFFF_0000);
+        assert_eq!(snapshot.code[0].bytes, [0xEB, 0xFE]);
+        assert_eq!(vm.ips(), 0, "a paused VM shows no rate");
+
+        // Read again, elsewhere: the guest has not moved meanwhile.
+        vm.control.set_view(ViewRequest {
+            memory: MemoryTarget::Rsp,
+            ..ViewRequest::default()
+        });
+        wait_until(|| {
+            vm.control
+                .snapshot()
+                .is_some_and(|again| !Arc::ptr_eq(&again, &snapshot))
+        });
+        let again = vm.control.snapshot().expect("published");
+        assert_eq!(again.cpus[0].registers.icount, boot.registers.icount);
+
+        vm.control.resume();
+        wait_until(|| vm.control.phase() == RunPhase::Running && vm.ips() > 0);
+
+        vm.stop();
+        drop(commands);
+        let result = join_launcher(launcher);
+        remove_test_file(&bios);
+        assert!(result.is_ok());
+        assert_eq!(vm.display.lock().unwrap().runtime_error, None);
+    }
+
+    #[cfg(feature = "gui-egui")]
+    #[test]
+    fn powering_off_a_paused_vm_ends_its_run() {
+        let bios = spinning_bios();
+        let (commands, command_rx) = mpsc::channel();
+        let launcher = spawn_launcher(command_rx);
+        let vm = TestVm::spinning(&commands, &bios);
+        vm.control.pause();
+        drop(vm.paused_snapshot());
+
+        vm.stop();
+        wait_until_the_run_is_over(&vm.display);
+
+        drop(commands);
+        let result = join_launcher(launcher);
+        remove_test_file(&bios);
+        assert!(result.is_ok());
+    }
+
+    #[cfg(feature = "gui-egui")]
+    #[test]
+    fn restarting_a_paused_vm_runs_it_again_unpaused() {
+        use crate::debugger::control::{RunPhase, Wanted};
+        let bios = spinning_bios();
+        let (commands, command_rx) = mpsc::channel();
+        let launcher = spawn_launcher(command_rx);
+        let vm = TestVm::spinning(&commands, &bios);
+        vm.control.pause();
+        drop(vm.paused_snapshot());
+
+        vm.restart();
+        wait_until(|| {
+            let shown = vm.display.lock().unwrap();
+            !shown.reset_requested && shown.emu_running && shown.ips > 0
+        });
+        assert_eq!(vm.control.phase(), RunPhase::Running);
+        assert_eq!(vm.control.wanted(), Wanted::Run);
+
+        vm.stop();
+        drop(commands);
+        let result = join_launcher(launcher);
+        remove_test_file(&bios);
+        assert!(result.is_ok());
+    }
+
+    #[cfg(feature = "gui-egui")]
+    #[test]
+    fn closing_the_shell_while_a_vm_is_paused_ends_it() {
+        let bios = spinning_bios();
+        let (commands, command_rx) = mpsc::channel();
+        let launcher = spawn_launcher(command_rx);
+        let vm = TestVm::spinning(&commands, &bios);
+        vm.control.pause();
+        drop(vm.paused_snapshot());
+
+        // The shell's sender goes with its window; the launcher stops every run.
+        drop(commands);
+        let result = join_launcher(launcher);
+        remove_test_file(&bios);
+        assert!(result.is_ok());
+        assert!(!vm.display.lock().unwrap().emu_running);
+    }
+
+    #[cfg(feature = "gui-egui")]
+    #[test]
+    fn a_step_retires_one_instruction_of_the_paused_guest() {
+        let bios = spinning_bios();
+        let (commands, command_rx) = mpsc::channel();
+        let launcher = spawn_launcher(command_rx);
+        let vm = TestVm::spinning(&commands, &bios);
+        vm.control.pause();
+        let before = vm.paused_snapshot();
+
+        vm.control.step();
+        wait_until(|| {
+            vm.control
+                .snapshot()
+                .is_some_and(|after| !Arc::ptr_eq(&after, &before))
+        });
+        let after = vm.control.snapshot().expect("published");
+        assert_eq!(
+            after.cpus[0].registers.icount,
+            before.cpus[0].registers.icount + 1
+        );
+        assert_eq!(after.cpus[0].registers.rip, 0xFFF0, "JMP $ jumps to itself");
+
+        vm.stop();
+        drop(commands);
+        let result = join_launcher(launcher);
+        remove_test_file(&bios);
+        assert!(result.is_ok());
+    }
+
+    /// RAM saved while the VM runs holds all of its RAM, and the VM runs on.
+    #[cfg(feature = "gui-egui")]
+    #[test]
+    fn ram_saved_while_the_vm_runs_holds_its_ram_and_the_vm_runs_on() {
+        use crate::debugger::control::{DumpOutcome, DumpRequest, RunPhase};
+        let bios = spinning_bios();
+        let (commands, command_rx) = mpsc::channel();
+        let launcher = spawn_launcher(command_rx);
+        let vm = TestVm::spinning(&commands, &bios);
+        let path = unique_temp_path("rusty-box-gui-ram-dump");
+
+        assert_eq!(vm.control.request_dump(path.clone()), DumpRequest::Queued);
+        let mut outcomes = Vec::new();
+        wait_until(|| {
+            outcomes.extend(vm.control.take_dump_outcomes());
+            !outcomes.is_empty()
+        });
+        assert_eq!(
+            outcomes,
+            [DumpOutcome::Saved {
+                path: path.clone(),
+                bytes: 32 * 1024 * 1024
+            }]
+        );
+        assert_eq!(fs::metadata(&path).expect("the dump").len(), 32 * 1024 * 1024);
+        wait_until(|| vm.control.phase() == RunPhase::Running && vm.ips() > 0);
+
+        vm.stop();
+        drop(commands);
+        let result = join_launcher(launcher);
+        remove_test_file(&bios);
+        remove_test_file(&path);
+        assert!(result.is_ok());
     }
 
     #[test]

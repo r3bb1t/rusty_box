@@ -805,6 +805,11 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
             || matches!(b1, 0x1A4 | 0x1A5 | 0x1AC | 0x1AD)
             // SETcc Eb (0F 90..9F): single-operand, rm=destination, nnn=opcode extension
             || (b1 >= 0x190 && b1 <= 0x19F)
+            // PEXTRB/PEXTRW/PEXTRD/PEXTRQ/EXTRACTPS (0F 3A 14..17) and their VEX
+            // forms: rm=GPR or memory destination, nnn=XMM source. Bochs
+            // ia_opcodes.def leads each with OP_Ed/OP_Eq/OP_Mb/OP_Mw, then OP_Vdq
+            // or OP_Vps.
+            || matches!(b1, 0x314 | 0x315 | 0x316 | 0x317)
         {
             // Ed,Gd format: rm (Ed) is destination, nnn (Gd) is source
             // Examples: ADD Ed,Gd | SUB Ed,Gd | MOV Ed,Gd | BTS EdGd | XADD EbGb
@@ -1098,9 +1103,10 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
         // most EVEX opcodes write the reg field, the store forms (VEXTRACT*,
         // the truncating VPMOV* stores, VCOMPRESS*, VPEXTR*, VSCATTER*) write
         // rm, and the shift/rotate groups write vvvv. Upstream takes it from
-        // the first operand in ia_opcodes_evex.def and the generated table
-        // carries the same information, so this replaces the byte rules
-        // wholesale for EVEX rather than patching them one opcode at a time.
+        // the first operand in ia_opcodes_evex.def, and the ModRM source from
+        // the first later ModRM operand; the generated table carries both, so
+        // this replaces the byte rules wholesale for EVEX rather than patching
+        // them one opcode at a time.
         //
         // For a memory form the rm field is an address rather than a register
         // and the handlers branch on mod, exactly as Bochs does; assigning it
@@ -1113,6 +1119,10 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
             super::evex_operands::EvexDst::Rm => {
                 instr.operands.dst = rm as u8;
                 instr.operands.src1 = nnn as u8;
+            }
+            super::evex_operands::EvexDst::RmSourceRm => {
+                instr.operands.dst = rm as u8;
+                instr.operands.src1 = rm as u8;
             }
             super::evex_operands::EvexDst::Vvvv => {
                 instr.operands.dst = vex_vvv;

@@ -13,7 +13,8 @@
 //! - Non-temporal stores: MOVNTPS, MOVNTPD, MOVNTDQ, MOVNTI
 //! - MXCSR: LDMXCSR, STMXCSR
 //!
-//! All handlers call `prepare_sse()` first (checks CR0.EM, CR4.OSFXSR, CR0.TS).
+//! No handler checks CR0.EM, CR4.OSFXSR or CR0.TS: the icache state gate
+//! (`state_resolve_opcode`) does, once, as Bochs `assignHandler` does.
 //! Legacy SSE (non-VEX) preserves upper bits: uses `write_xmm_reg_lo128`.
 
 use super::{
@@ -23,62 +24,6 @@ use super::{
 
 impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::ExecCtx<'_, T> {
     // ========================================================================
-    // MOVUPS / MOVUPD — Unaligned packed single/double (0F 10, 0F 11)
-    // MOVDQU          — Unaligned packed integer (F3 0F 6F, F3 0F 7F)
-    //
-    // In Bochs, all four share the same M handlers (MOVUPS_VpsWpsM /
-    // MOVUPS_WpsVpsM) and the same R handler (MOVAPS_VpsWpsR).
-    // ========================================================================
-
-    /// MOVUPS/MOVUPD/MOVDQU load — XMM <- M128 (unaligned)
-    /// Bochs: MOVUPS_VpsWpsM
-    pub(super) fn movups_vps_wps_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        let seg = BxSegregs::from(instr.seg());
-        let eaddr = self.resolve_addr(instr);
-        let val = self.v_read_xmmword(seg, eaddr)?;
-        self.write_xmm_reg_lo128(instr.dst(), val);
-        Ok(())
-    }
-
-    /// MOVUPS/MOVUPD/MOVDQU store — M128 <- XMM (unaligned)
-    /// Bochs: MOVUPS_WpsVpsM
-    pub(super) fn movups_wps_vps_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        let seg = BxSegregs::from(instr.seg());
-        let eaddr = self.resolve_addr(instr);
-        let val = self.read_xmm_reg(instr.src1());
-        self.v_write_xmmword(seg, eaddr, &val)?;
-        Ok(())
-    }
-
-    // Aliases for MOVUPD / MOVDQU (identical behavior, different opcodes)
-
-    /// MOVUPD load — XMM <- M128 (unaligned)
-    #[inline]
-    pub(super) fn movupd_vpd_wpd_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.movups_vps_wps_m(instr)
-    }
-
-    /// MOVUPD store — M128 <- XMM (unaligned)
-    #[inline]
-    pub(super) fn movupd_wpd_vpd_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.movups_wps_vps_m(instr)
-    }
-
-    /// MOVDQU load — XMM <- M128 (unaligned, integer)
-    #[inline]
-    pub(super) fn movdqu_vdq_wdq_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.movups_vps_wps_m(instr)
-    }
-
-    /// MOVDQU store — M128 <- XMM (unaligned, integer)
-    #[inline]
-    pub(super) fn movdqu_wdq_vdq_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.movups_wps_vps_m(instr)
-    }
-
-    // ========================================================================
     // MOVAPS / MOVAPD — Aligned packed single/double (0F 28, 0F 29)
     // MOVDQA          — Aligned packed integer (66 0F 6F, 66 0F 7F)
     //
@@ -86,33 +31,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     // Memory form: aligned 16-byte access, #GP if misaligned
     // ========================================================================
 
-    /// MOVAPS/MOVAPD/MOVDQA/MOVUPS/MOVUPD/MOVDQU register form — XMM <- XMM
-    /// Bochs: MOVAPS_VpsWpsR
-    /// Used for ALL packed 128-bit XMM-to-XMM moves regardless of
-    /// aligned/unaligned or float/integer mnemonic.
-    pub(super) fn movaps_vps_wps_r(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        let val = self.read_xmm_reg(instr.src1());
-        self.write_xmm_reg_lo128(instr.dst(), val);
-        Ok(())
-    }
-
-    /// MOVAPS/MOVAPD/MOVDQA load — XMM <- M128 (aligned, #GP if misaligned)
-    /// Bochs: MOVAPS_VpsWpsM
-    pub(super) fn movaps_vps_wps_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        let seg = BxSegregs::from(instr.seg());
-        let eaddr = self.resolve_addr(instr);
-        let val = self.v_read_xmmword_aligned(seg, eaddr)?;
-        self.write_xmm_reg_lo128(instr.dst(), val);
-        Ok(())
-    }
-
     /// MOVAPS/MOVAPD/MOVDQA/MOVNTPS/MOVNTPD/MOVNTDQ store — M128 <- XMM (aligned)
     /// Bochs: MOVAPS_WpsVpsM
     /// Non-temporal hint is ignored in emulation.
     pub(super) fn movaps_wps_vps_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let seg = BxSegregs::from(instr.seg());
         let eaddr = self.resolve_addr(instr);
         let val = self.read_xmm_reg(instr.src1());
@@ -122,22 +44,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     // Aliases for MOVAPD / MOVDQA / non-temporal stores (all share handlers)
 
-    /// MOVAPD load — XMM <- M128 (aligned)
-    #[inline]
-    pub(super) fn movapd_vpd_wpd_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.movaps_vps_wps_m(instr)
-    }
-
     /// MOVAPD store — M128 <- XMM (aligned)
     #[inline]
     pub(super) fn movapd_wpd_vpd_m(&mut self, instr: &Instruction) -> super::Result<()> {
         self.movaps_wps_vps_m(instr)
-    }
-
-    /// MOVDQA load — XMM <- M128 (aligned, integer)
-    #[inline]
-    pub(super) fn movdqa_vdq_wdq_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.movaps_vps_wps_m(instr)
     }
 
     /// MOVDQA store — M128 <- XMM (aligned, integer)
@@ -148,7 +58,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// MOVDQA load — legacy SSE (preserves upper YMM, matching Bochs BX_WRITE_XMM_REG)
     pub(super) fn movdqa_load_sse(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         if instr.mod_c0() {
             let val = self.read_xmm_reg(instr.src1());
             self.write_xmm_reg_lo128(instr.dst(), val);
@@ -163,7 +72,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// MOVDQA store — legacy SSE
     pub(super) fn movdqa_store_sse(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         if instr.mod_c0() {
             let val = self.read_xmm_reg(instr.src1());
             self.write_xmm_reg_lo128(instr.dst(), val);
@@ -175,7 +83,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// MOVDQU load — legacy SSE (preserves upper YMM)
     pub(super) fn movdqu_load_sse(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         if instr.mod_c0() {
             let val = self.read_xmm_reg(instr.src1());
             self.write_xmm_reg_lo128(instr.dst(), val);
@@ -217,7 +124,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// MOVSS register form — dst.lo_dword = src.lo_dword, high 96 bits preserved
     /// Bochs: MOVSS_VssWssR
     pub(super) fn movss_vss_wss_r(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let src_lo = self.xmm_lo_dword(instr.src1());
         self.write_xmm_lo_dword(instr.dst(), src_lo);
         Ok(())
@@ -226,7 +132,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// MOVSS memory load — dst = zero-extend(mem32)
     /// Bochs: MOVSS_VssWssM
     pub(super) fn movss_vss_wss_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let seg = BxSegregs::from(instr.seg());
         let eaddr = self.resolve_addr(instr);
         let val32 = self.v_read_dword(seg, eaddr)?;
@@ -245,7 +150,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// This is the same as movss_vss_wss_r but with src/dst roles swapped in
     /// the opcode encoding. For register form, Bochs reuses MOVSS_VssWssR.
     pub(super) fn movss_wss_vss_r(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         // For register store (0F 11 /r with mod=11), it's dst.lo = src.lo
         let src_lo = self.xmm_lo_dword(instr.src1());
         self.write_xmm_lo_dword(instr.dst(), src_lo);
@@ -255,7 +159,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// MOVSS memory store — mem32 = src.lo_dword
     /// Bochs: MOVSS_WssVssM
     pub(super) fn movss_wss_vss_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let seg = BxSegregs::from(instr.seg());
         let eaddr = self.resolve_addr(instr);
         let val = self.xmm_lo_dword(instr.src1());
@@ -274,7 +177,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// MOVSD register form — dst.lo_qword = src.lo_qword, high 64 bits preserved
     /// Bochs: MOVSD_VsdWsdR
     pub(super) fn movsd_vsd_wsd_r(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let src_lo = self.xmm_lo_qword(instr.src1());
         self.write_xmm_lo_qword(instr.dst(), src_lo);
         Ok(())
@@ -283,7 +185,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// MOVSD memory load — dst = zero-extend(mem64)
     /// Bochs: MOVSD_VsdWsdM
     pub(super) fn movsd_vsd_wsd_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let seg = BxSegregs::from(instr.seg());
         let eaddr = self.resolve_addr(instr);
         let val64 = self.v_read_qword(seg, eaddr)?;
@@ -298,7 +199,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// MOVSD register store form — dst.lo_qword = src.lo_qword, high 64 preserved
     pub(super) fn movsd_wsd_vsd_r(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let src_lo = self.xmm_lo_qword(instr.src1());
         self.write_xmm_lo_qword(instr.dst(), src_lo);
         Ok(())
@@ -307,7 +207,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// MOVSD memory store — mem64 = src.lo_qword
     /// Bochs: MOVSD_WsdVsdM  (also used for MOVLPS/MOVLPD stores)
     pub(super) fn movsd_wsd_vsd_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let seg = BxSegregs::from(instr.seg());
         let eaddr = self.resolve_addr(instr);
         let val = self.xmm_lo_qword(instr.src1());
@@ -325,7 +224,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// MOVLPS/MOVLPD load — dst.lo_qword = mem64, high qword preserved
     /// Bochs: MOVLPS_VpsMq
     pub(super) fn movlps_vps_mq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let seg = BxSegregs::from(instr.seg());
         let eaddr = self.resolve_addr(instr);
         let val64 = self.v_read_qword(seg, eaddr)?;
@@ -342,7 +240,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// MOVLPS/MOVLPD store — mem64 = src.lo_qword
     /// Bochs: MOVSD_WsdVsdM (same handler — stores low qword)
     pub(super) fn movlps_mq_vps(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let seg = BxSegregs::from(instr.seg());
         let eaddr = self.resolve_addr(instr);
         let val = self.xmm_lo_qword(instr.src1());
@@ -360,7 +257,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// MOVHPS/MOVHPD load — dst.hi_qword = mem64, low qword preserved
     /// Bochs: MOVHPS_VpsMq
     pub(super) fn movhps_vps_mq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let seg = BxSegregs::from(instr.seg());
         let eaddr = self.resolve_addr(instr);
         let val64 = self.v_read_qword(seg, eaddr)?;
@@ -377,7 +273,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// MOVHPS/MOVHPD store — mem64 = src.hi_qword
     /// Bochs: MOVHPS_MqVps
     pub(super) fn movhps_mq_vps(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let seg = BxSegregs::from(instr.seg());
         let eaddr = self.resolve_addr(instr);
         let val = self.xmm_hi_qword(instr.src1());
@@ -395,7 +290,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// MOVLHPS — dst[127:64] = src[63:0], dst[63:0] preserved
     /// Bochs: MOVLHPS_VpsWpsR
     pub(super) fn movlhps_vps_wps(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let src_lo = self.xmm_lo_qword(instr.src1());
         self.write_xmm_hi_qword(instr.dst(), src_lo);
         Ok(())
@@ -404,7 +298,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// MOVHLPS — dst[63:0] = src[127:64], dst[127:64] preserved
     /// Bochs: MOVHLPS_VpsWpsR
     pub(super) fn movhlps_vps_wps(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let src_hi = self.xmm_hi_qword(instr.src1());
         self.write_xmm_lo_qword(instr.dst(), src_hi);
         Ok(())
@@ -419,7 +312,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// MOVMSKPS — extract 4 sign bits from packed single → GPR
     /// Bochs: MOVMSKPS_GdUps (uses xmm_pmovmskd helper)
     pub(super) fn movmskps_gd_ups(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let src = self.read_xmm_reg(instr.src1());
         let mut mask: u32 = 0;
         if src.xmm32u(0) & 0x8000_0000 != 0 {
@@ -442,7 +334,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// MOVMSKPD — extract 2 sign bits from packed double → GPR
     /// Bochs: MOVMSKPD_GdUpd (uses xmm_pmovmskq helper)
     pub(super) fn movmskpd_gd_upd(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let src = self.read_xmm_reg(instr.src1());
         let mut mask: u32 = 0;
         if src.xmm64u(0) & 0x8000_0000_0000_0000 != 0 {
@@ -462,7 +353,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// MOVD register form — XMM[31:0] = Ed (GPR), XMM[127:32] = 0
     /// Bochs: MOVD_VdqEdR
     pub(super) fn movd_vdq_ed_r(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let val32 = self.get_gpr32(instr.src1().into());
         let mut op = BxPackedXmmRegister::default();
         op.set_xmm64u(0, val32 as u64);
@@ -475,7 +365,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// MOVD memory form — XMM[31:0] = mem32, XMM[127:32] = 0
     pub(super) fn movd_vdq_ed_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let seg = BxSegregs::from(instr.seg());
         let eaddr = self.resolve_addr(instr);
         let val32 = self.v_read_dword(seg, eaddr)?;
@@ -491,7 +380,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// MOVD register form — Ed (GPR) = XMM[31:0]
     /// Bochs: MOVD_EdVdR
     pub(super) fn movd_ed_vdq_r(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let val = self.xmm_lo_dword(instr.src1());
         self.set_gpr32(instr.dst().into(), val);
         Ok(())
@@ -499,7 +387,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// MOVD memory form — mem32 = XMM[31:0]
     pub(super) fn movd_ed_vdq_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let seg = BxSegregs::from(instr.seg());
         let eaddr = self.resolve_addr(instr);
         let val = self.xmm_lo_dword(instr.src1());
@@ -517,7 +404,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// MOVQ register form (F3 0F 7E) — dst[63:0] = src[63:0], dst[127:64] = 0
     /// Bochs: MOVQ_VqWqR
     pub(super) fn movq_vq_wq_r(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let mut op = BxPackedXmmRegister::default();
         op.set_xmm64u(0, self.xmm_lo_qword(instr.src1()));
         op.set_xmm64u(1, 0);
@@ -527,7 +413,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// MOVQ memory load (F3 0F 7E) — dst[63:0] = mem64, dst[127:64] = 0
     pub(super) fn movq_vq_wq_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let seg = BxSegregs::from(instr.seg());
         let eaddr = self.resolve_addr(instr);
         let val64 = self.v_read_qword(seg, eaddr)?;
@@ -541,7 +426,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// MOVQ register store (66 0F D6) — dst[63:0] = src[63:0], dst[127:64] preserved
     /// Note: In Bochs for register form this zeros upper. We follow Bochs behavior.
     pub(super) fn movq_wq_vq_r(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let src_lo = self.xmm_lo_qword(instr.src1());
         // Bochs: for 66 0F D6 register form, writes lo qword and zeros high
         let mut op = BxPackedXmmRegister::default();
@@ -553,7 +437,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// MOVQ memory store (66 0F D6) — mem64 = src[63:0]
     pub(super) fn movq_wq_vq_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let seg = BxSegregs::from(instr.seg());
         let eaddr = self.resolve_addr(instr);
         let val = self.xmm_lo_qword(instr.src1());
@@ -609,7 +492,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// MOVQ xmm, r/m64 — Load 64-bit integer into XMM low qword, zero upper
     /// Bochs: MOVQ_VdqEq (66 REX.W 0F 6E)
     pub(super) fn movq_vdq_eq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let val = if instr.mod_c0() {
             self.get_gpr64(instr.src1() as usize)
         } else {
@@ -629,7 +511,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// MOVQ r/m64, xmm — Store XMM low qword to GPR or memory
     /// Bochs: MOVQ_EqVq (66 REX.W 0F 7E)
     pub(super) fn movq_eq_vq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let val = self.xmm_lo_qword(instr.src1());
         if instr.mod_c0() {
             self.set_gpr64(instr.dst() as usize, val);
@@ -655,7 +536,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// MOVDQ2Q — MMX = XMM.lo_qword
     /// Bochs: MOVDQ2Q_PqUdq
     pub(super) fn movdq2q_pq_udq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         self.fpu_check_pending_exceptions()?;
         self.prepare_fpu2mmx();
 
@@ -669,7 +549,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// MOVQ2DQ — XMM = zero-extend(MMX)
     /// Bochs: MOVQ2DQ_VdqQq
     pub(super) fn movq2dq_vdq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         self.fpu_check_pending_exceptions()?;
         self.prepare_fpu2mmx();
 
@@ -692,7 +571,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// MOVDDUP register — dst = { src.lo_qword, src.lo_qword }
     /// Bochs: MOVDDUP_VpdWqR
     pub(super) fn movddup_vpd_wq_r(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let src_lo = self.xmm_lo_qword(instr.src1());
         let mut op = BxPackedXmmRegister::default();
         op.set_xmm64u(0, src_lo);
@@ -703,7 +581,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// MOVDDUP memory — dst = { mem64, mem64 }
     pub(super) fn movddup_vpd_wq_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let seg = BxSegregs::from(instr.seg());
         let eaddr = self.resolve_addr(instr);
         let val64 = self.v_read_qword(seg, eaddr)?;
@@ -718,7 +595,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// Duplicates even-indexed dwords: dst[0]=src[0], dst[1]=src[0], dst[2]=src[2], dst[3]=src[2]
     /// Bochs: MOVSLDUP_VpsWpsR
     pub(super) fn movsldup_vps_wps_r(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let src = self.read_xmm_reg(instr.src1());
         let mut op = src;
         op.set_xmm32u(1, op.xmm32u(0));
@@ -729,7 +605,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// MOVSLDUP memory — Bochs loads it with `LOAD_Wdq`, so it is aligned.
     pub(super) fn movsldup_vps_wps_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let mut op = self.sse_read_op2_xmm(instr)?;
         op.set_xmm32u(1, op.xmm32u(0));
         op.set_xmm32u(3, op.xmm32u(2));
@@ -741,7 +616,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// Duplicates odd-indexed dwords: dst[0]=src[1], dst[1]=src[1], dst[2]=src[3], dst[3]=src[3]
     /// Bochs: MOVSHDUP_VpsWpsR
     pub(super) fn movshdup_vps_wps_r(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let src = self.read_xmm_reg(instr.src1());
         let mut op = src;
         op.set_xmm32u(0, op.xmm32u(1));
@@ -752,315 +626,10 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// MOVSHDUP memory — Bochs loads it with `LOAD_Wdq`, so it is aligned.
     pub(super) fn movshdup_vps_wps_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let mut op = self.sse_read_op2_xmm(instr)?;
         op.set_xmm32u(0, op.xmm32u(1));
         op.set_xmm32u(2, op.xmm32u(3));
         self.write_xmm_reg_lo128(instr.dst(), op);
-        Ok(())
-    }
-
-    // ========================================================================
-    // SSE2 Pack/Unpack — 128-bit integer forms
-    // PUNPCKLBW/WD/DQ, PUNPCKHBW/WD/DQ (66 0F 60-6D)
-    //
-    // These interleave elements from low or high halves of two XMM registers.
-    // ========================================================================
-
-    /// PUNPCKLBW — Unpack and interleave low bytes
-    /// Bochs: PUNPCKLBW_VdqWdqR (sse_int.cc)
-    pub(super) fn punpcklbw_vdq_wdq_r(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        let op1 = self.read_xmm_reg(instr.dst());
-        let op2 = self.read_xmm_reg(instr.src1());
-        let mut result = BxPackedXmmRegister::default();
-        result.set_xmmubyte(0, op1.xmmubyte(0));
-        result.set_xmmubyte(1, op2.xmmubyte(0));
-        result.set_xmmubyte(2, op1.xmmubyte(1));
-        result.set_xmmubyte(3, op2.xmmubyte(1));
-        result.set_xmmubyte(4, op1.xmmubyte(2));
-        result.set_xmmubyte(5, op2.xmmubyte(2));
-        result.set_xmmubyte(6, op1.xmmubyte(3));
-        result.set_xmmubyte(7, op2.xmmubyte(3));
-        result.set_xmmubyte(8, op1.xmmubyte(4));
-        result.set_xmmubyte(9, op2.xmmubyte(4));
-        result.set_xmmubyte(10, op1.xmmubyte(5));
-        result.set_xmmubyte(11, op2.xmmubyte(5));
-        result.set_xmmubyte(12, op1.xmmubyte(6));
-        result.set_xmmubyte(13, op2.xmmubyte(6));
-        result.set_xmmubyte(14, op1.xmmubyte(7));
-        result.set_xmmubyte(15, op2.xmmubyte(7));
-        self.write_xmm_reg_lo128(instr.dst(), result);
-        Ok(())
-    }
-
-    /// PUNPCKLBW — memory form
-    pub(super) fn punpcklbw_vdq_wdq_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        let op1 = self.read_xmm_reg(instr.dst());
-        let seg = BxSegregs::from(instr.seg());
-        let eaddr = self.resolve_addr(instr);
-        let op2 = self.v_read_xmmword(seg, eaddr)?;
-        let mut result = BxPackedXmmRegister::default();
-        result.set_xmmubyte(0, op1.xmmubyte(0));
-        result.set_xmmubyte(1, op2.xmmubyte(0));
-        result.set_xmmubyte(2, op1.xmmubyte(1));
-        result.set_xmmubyte(3, op2.xmmubyte(1));
-        result.set_xmmubyte(4, op1.xmmubyte(2));
-        result.set_xmmubyte(5, op2.xmmubyte(2));
-        result.set_xmmubyte(6, op1.xmmubyte(3));
-        result.set_xmmubyte(7, op2.xmmubyte(3));
-        result.set_xmmubyte(8, op1.xmmubyte(4));
-        result.set_xmmubyte(9, op2.xmmubyte(4));
-        result.set_xmmubyte(10, op1.xmmubyte(5));
-        result.set_xmmubyte(11, op2.xmmubyte(5));
-        result.set_xmmubyte(12, op1.xmmubyte(6));
-        result.set_xmmubyte(13, op2.xmmubyte(6));
-        result.set_xmmubyte(14, op1.xmmubyte(7));
-        result.set_xmmubyte(15, op2.xmmubyte(7));
-        self.write_xmm_reg_lo128(instr.dst(), result);
-        Ok(())
-    }
-
-    /// PUNPCKLWD — Unpack and interleave low words
-    pub(super) fn punpcklwd_vdq_wdq_r(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        let op1 = self.read_xmm_reg(instr.dst());
-        let op2 = self.read_xmm_reg(instr.src1());
-        let mut result = BxPackedXmmRegister::default();
-        result.set_xmm16u(0, op1.xmm16u(0));
-        result.set_xmm16u(1, op2.xmm16u(0));
-        result.set_xmm16u(2, op1.xmm16u(1));
-        result.set_xmm16u(3, op2.xmm16u(1));
-        result.set_xmm16u(4, op1.xmm16u(2));
-        result.set_xmm16u(5, op2.xmm16u(2));
-        result.set_xmm16u(6, op1.xmm16u(3));
-        result.set_xmm16u(7, op2.xmm16u(3));
-        self.write_xmm_reg_lo128(instr.dst(), result);
-        Ok(())
-    }
-
-    /// PUNPCKLWD — memory form
-    pub(super) fn punpcklwd_vdq_wdq_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        let op1 = self.read_xmm_reg(instr.dst());
-        let seg = BxSegregs::from(instr.seg());
-        let eaddr = self.resolve_addr(instr);
-        let op2 = self.v_read_xmmword(seg, eaddr)?;
-        let mut result = BxPackedXmmRegister::default();
-        result.set_xmm16u(0, op1.xmm16u(0));
-        result.set_xmm16u(1, op2.xmm16u(0));
-        result.set_xmm16u(2, op1.xmm16u(1));
-        result.set_xmm16u(3, op2.xmm16u(1));
-        result.set_xmm16u(4, op1.xmm16u(2));
-        result.set_xmm16u(5, op2.xmm16u(2));
-        result.set_xmm16u(6, op1.xmm16u(3));
-        result.set_xmm16u(7, op2.xmm16u(3));
-        self.write_xmm_reg_lo128(instr.dst(), result);
-        Ok(())
-    }
-
-    /// PUNPCKLDQ — Unpack and interleave low dwords
-    pub(super) fn punpckldq_vdq_wdq_r(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        let op1 = self.read_xmm_reg(instr.dst());
-        let op2 = self.read_xmm_reg(instr.src1());
-        let mut result = BxPackedXmmRegister::default();
-        result.set_xmm32u(0, op1.xmm32u(0));
-        result.set_xmm32u(1, op2.xmm32u(0));
-        result.set_xmm32u(2, op1.xmm32u(1));
-        result.set_xmm32u(3, op2.xmm32u(1));
-        self.write_xmm_reg_lo128(instr.dst(), result);
-        Ok(())
-    }
-
-    /// PUNPCKLDQ — memory form
-    pub(super) fn punpckldq_vdq_wdq_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        let op1 = self.read_xmm_reg(instr.dst());
-        let seg = BxSegregs::from(instr.seg());
-        let eaddr = self.resolve_addr(instr);
-        let op2 = self.v_read_xmmword(seg, eaddr)?;
-        let mut result = BxPackedXmmRegister::default();
-        result.set_xmm32u(0, op1.xmm32u(0));
-        result.set_xmm32u(1, op2.xmm32u(0));
-        result.set_xmm32u(2, op1.xmm32u(1));
-        result.set_xmm32u(3, op2.xmm32u(1));
-        self.write_xmm_reg_lo128(instr.dst(), result);
-        Ok(())
-    }
-
-    /// PUNPCKLQDQ — Unpack and interleave low qwords
-    pub(super) fn punpcklqdq_vdq_wdq_r(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        let op1 = self.read_xmm_reg(instr.dst());
-        let op2 = self.read_xmm_reg(instr.src1());
-        let mut result = BxPackedXmmRegister::default();
-        result.set_xmm64u(0, op1.xmm64u(0));
-        result.set_xmm64u(1, op2.xmm64u(0));
-        self.write_xmm_reg_lo128(instr.dst(), result);
-        Ok(())
-    }
-
-    /// PUNPCKLQDQ — memory form
-    pub(super) fn punpcklqdq_vdq_wdq_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        let op1 = self.read_xmm_reg(instr.dst());
-        let seg = BxSegregs::from(instr.seg());
-        let eaddr = self.resolve_addr(instr);
-        let op2 = self.v_read_xmmword(seg, eaddr)?;
-        let mut result = BxPackedXmmRegister::default();
-        result.set_xmm64u(0, op1.xmm64u(0));
-        result.set_xmm64u(1, op2.xmm64u(0));
-        self.write_xmm_reg_lo128(instr.dst(), result);
-        Ok(())
-    }
-
-    /// PUNPCKHBW — Unpack and interleave high bytes
-    pub(super) fn punpckhbw_vdq_wdq_r(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        let op1 = self.read_xmm_reg(instr.dst());
-        let op2 = self.read_xmm_reg(instr.src1());
-        let mut result = BxPackedXmmRegister::default();
-        result.set_xmmubyte(0, op1.xmmubyte(8));
-        result.set_xmmubyte(1, op2.xmmubyte(8));
-        result.set_xmmubyte(2, op1.xmmubyte(9));
-        result.set_xmmubyte(3, op2.xmmubyte(9));
-        result.set_xmmubyte(4, op1.xmmubyte(10));
-        result.set_xmmubyte(5, op2.xmmubyte(10));
-        result.set_xmmubyte(6, op1.xmmubyte(11));
-        result.set_xmmubyte(7, op2.xmmubyte(11));
-        result.set_xmmubyte(8, op1.xmmubyte(12));
-        result.set_xmmubyte(9, op2.xmmubyte(12));
-        result.set_xmmubyte(10, op1.xmmubyte(13));
-        result.set_xmmubyte(11, op2.xmmubyte(13));
-        result.set_xmmubyte(12, op1.xmmubyte(14));
-        result.set_xmmubyte(13, op2.xmmubyte(14));
-        result.set_xmmubyte(14, op1.xmmubyte(15));
-        result.set_xmmubyte(15, op2.xmmubyte(15));
-        self.write_xmm_reg_lo128(instr.dst(), result);
-        Ok(())
-    }
-
-    /// PUNPCKHBW — memory form
-    pub(super) fn punpckhbw_vdq_wdq_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        let op1 = self.read_xmm_reg(instr.dst());
-        let seg = BxSegregs::from(instr.seg());
-        let eaddr = self.resolve_addr(instr);
-        let op2 = self.v_read_xmmword(seg, eaddr)?;
-        let mut result = BxPackedXmmRegister::default();
-        result.set_xmmubyte(0, op1.xmmubyte(8));
-        result.set_xmmubyte(1, op2.xmmubyte(8));
-        result.set_xmmubyte(2, op1.xmmubyte(9));
-        result.set_xmmubyte(3, op2.xmmubyte(9));
-        result.set_xmmubyte(4, op1.xmmubyte(10));
-        result.set_xmmubyte(5, op2.xmmubyte(10));
-        result.set_xmmubyte(6, op1.xmmubyte(11));
-        result.set_xmmubyte(7, op2.xmmubyte(11));
-        result.set_xmmubyte(8, op1.xmmubyte(12));
-        result.set_xmmubyte(9, op2.xmmubyte(12));
-        result.set_xmmubyte(10, op1.xmmubyte(13));
-        result.set_xmmubyte(11, op2.xmmubyte(13));
-        result.set_xmmubyte(12, op1.xmmubyte(14));
-        result.set_xmmubyte(13, op2.xmmubyte(14));
-        result.set_xmmubyte(14, op1.xmmubyte(15));
-        result.set_xmmubyte(15, op2.xmmubyte(15));
-        self.write_xmm_reg_lo128(instr.dst(), result);
-        Ok(())
-    }
-
-    /// PUNPCKHWD — Unpack and interleave high words
-    pub(super) fn punpckhwd_vdq_wdq_r(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        let op1 = self.read_xmm_reg(instr.dst());
-        let op2 = self.read_xmm_reg(instr.src1());
-        let mut result = BxPackedXmmRegister::default();
-        result.set_xmm16u(0, op1.xmm16u(4));
-        result.set_xmm16u(1, op2.xmm16u(4));
-        result.set_xmm16u(2, op1.xmm16u(5));
-        result.set_xmm16u(3, op2.xmm16u(5));
-        result.set_xmm16u(4, op1.xmm16u(6));
-        result.set_xmm16u(5, op2.xmm16u(6));
-        result.set_xmm16u(6, op1.xmm16u(7));
-        result.set_xmm16u(7, op2.xmm16u(7));
-        self.write_xmm_reg_lo128(instr.dst(), result);
-        Ok(())
-    }
-
-    /// PUNPCKHWD — memory form
-    pub(super) fn punpckhwd_vdq_wdq_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        let op1 = self.read_xmm_reg(instr.dst());
-        let seg = BxSegregs::from(instr.seg());
-        let eaddr = self.resolve_addr(instr);
-        let op2 = self.v_read_xmmword(seg, eaddr)?;
-        let mut result = BxPackedXmmRegister::default();
-        result.set_xmm16u(0, op1.xmm16u(4));
-        result.set_xmm16u(1, op2.xmm16u(4));
-        result.set_xmm16u(2, op1.xmm16u(5));
-        result.set_xmm16u(3, op2.xmm16u(5));
-        result.set_xmm16u(4, op1.xmm16u(6));
-        result.set_xmm16u(5, op2.xmm16u(6));
-        result.set_xmm16u(6, op1.xmm16u(7));
-        result.set_xmm16u(7, op2.xmm16u(7));
-        self.write_xmm_reg_lo128(instr.dst(), result);
-        Ok(())
-    }
-
-    /// PUNPCKHDQ — Unpack and interleave high dwords
-    pub(super) fn punpckhdq_vdq_wdq_r(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        let op1 = self.read_xmm_reg(instr.dst());
-        let op2 = self.read_xmm_reg(instr.src1());
-        let mut result = BxPackedXmmRegister::default();
-        result.set_xmm32u(0, op1.xmm32u(2));
-        result.set_xmm32u(1, op2.xmm32u(2));
-        result.set_xmm32u(2, op1.xmm32u(3));
-        result.set_xmm32u(3, op2.xmm32u(3));
-        self.write_xmm_reg_lo128(instr.dst(), result);
-        Ok(())
-    }
-
-    /// PUNPCKHDQ — memory form
-    pub(super) fn punpckhdq_vdq_wdq_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        let op1 = self.read_xmm_reg(instr.dst());
-        let seg = BxSegregs::from(instr.seg());
-        let eaddr = self.resolve_addr(instr);
-        let op2 = self.v_read_xmmword(seg, eaddr)?;
-        let mut result = BxPackedXmmRegister::default();
-        result.set_xmm32u(0, op1.xmm32u(2));
-        result.set_xmm32u(1, op2.xmm32u(2));
-        result.set_xmm32u(2, op1.xmm32u(3));
-        result.set_xmm32u(3, op2.xmm32u(3));
-        self.write_xmm_reg_lo128(instr.dst(), result);
-        Ok(())
-    }
-
-    /// PUNPCKHQDQ — Unpack and interleave high qwords
-    pub(super) fn punpckhqdq_vdq_wdq_r(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        let op1 = self.read_xmm_reg(instr.dst());
-        let op2 = self.read_xmm_reg(instr.src1());
-        let mut result = BxPackedXmmRegister::default();
-        result.set_xmm64u(0, op1.xmm64u(1));
-        result.set_xmm64u(1, op2.xmm64u(1));
-        self.write_xmm_reg_lo128(instr.dst(), result);
-        Ok(())
-    }
-
-    /// PUNPCKHQDQ — memory form
-    pub(super) fn punpckhqdq_vdq_wdq_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-        let op1 = self.read_xmm_reg(instr.dst());
-        let seg = BxSegregs::from(instr.seg());
-        let eaddr = self.resolve_addr(instr);
-        let op2 = self.v_read_xmmword(seg, eaddr)?;
-        let mut result = BxPackedXmmRegister::default();
-        result.set_xmm64u(0, op1.xmm64u(1));
-        result.set_xmm64u(1, op2.xmm64u(1));
-        self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
 
@@ -1074,7 +643,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// PMOVSXBW — Sign-extend 8 packed bytes to 8 packed words
     /// Bochs: PMOVSXBW_VdqWqR
     pub(super) fn pmovsxbw_vdq_wq_r(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let src_lo = self.xmm_lo_qword(instr.src1());
         let src_bytes = src_lo.to_le_bytes();
         let mut result = BxPackedXmmRegister::default();
@@ -1092,7 +660,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// PMOVSXBW — memory form
     pub(super) fn pmovsxbw_vdq_wq_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let seg = BxSegregs::from(instr.seg());
         let eaddr = self.resolve_addr(instr);
         let val64 = self.v_read_qword(seg, eaddr)?;
@@ -1113,7 +680,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// PMOVSXWD — Sign-extend 4 packed words to 4 packed dwords
     /// Bochs: PMOVSXWD_VdqWqR
     pub(super) fn pmovsxwd_vdq_wq_r(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let src = self.read_xmm_reg(instr.src1());
         let mut result = BxPackedXmmRegister::default();
         result.set_xmm32u(0, src.xmm16u(0) as i16 as i32 as u32);
@@ -1126,7 +692,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// PMOVSXWD — memory form
     pub(super) fn pmovsxwd_vdq_wq_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let seg = BxSegregs::from(instr.seg());
         let eaddr = self.resolve_addr(instr);
         let val64 = self.v_read_qword(seg, eaddr)?;
@@ -1148,7 +713,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// PMOVSXDQ — Sign-extend 2 packed dwords to 2 packed qwords
     /// Bochs: PMOVSXDQ_VdqWqR
     pub(super) fn pmovsxdq_vdq_wq_r(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let src_lo = self.xmm_lo_qword(instr.src1());
         let mut result = BxPackedXmmRegister::default();
         result.set_xmm64u(0, (src_lo as u32 as i32 as i64) as u64);
@@ -1159,7 +723,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// PMOVSXDQ — memory form
     pub(super) fn pmovsxdq_vdq_wq_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let seg = BxSegregs::from(instr.seg());
         let eaddr = self.resolve_addr(instr);
         let val64 = self.v_read_qword(seg, eaddr)?;
@@ -1173,7 +736,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// PMOVZXBW — Zero-extend 8 packed bytes to 8 packed words
     /// Bochs: PMOVZXBW_VdqWqR
     pub(super) fn pmovzxbw_vdq_wq_r(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let src_lo = self.xmm_lo_qword(instr.src1());
         let src_bytes = src_lo.to_le_bytes();
         let mut result = BxPackedXmmRegister::default();
@@ -1191,7 +753,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// PMOVZXBW — memory form
     pub(super) fn pmovzxbw_vdq_wq_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let seg = BxSegregs::from(instr.seg());
         let eaddr = self.resolve_addr(instr);
         let val64 = self.v_read_qword(seg, eaddr)?;
@@ -1212,7 +773,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// PMOVZXWD — Zero-extend 4 packed words to 4 packed dwords
     /// Bochs: PMOVZXWD_VdqWqR
     pub(super) fn pmovzxwd_vdq_wq_r(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let src = self.read_xmm_reg(instr.src1());
         let mut result = BxPackedXmmRegister::default();
         result.set_xmm32u(0, src.xmm16u(0) as u32);
@@ -1225,7 +785,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// PMOVZXWD — memory form
     pub(super) fn pmovzxwd_vdq_wq_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let seg = BxSegregs::from(instr.seg());
         let eaddr = self.resolve_addr(instr);
         let val64 = self.v_read_qword(seg, eaddr)?;
@@ -1241,7 +800,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// PMOVZXDQ — Zero-extend 2 packed dwords to 2 packed qwords
     /// Bochs: PMOVZXDQ_VdqWqR
     pub(super) fn pmovzxdq_vdq_wq_r(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let src_lo = self.xmm_lo_qword(instr.src1());
         let mut result = BxPackedXmmRegister::default();
         result.set_xmm64u(0, src_lo as u32 as u64);
@@ -1252,7 +810,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// PMOVZXDQ — memory form
     pub(super) fn pmovzxdq_vdq_wq_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let seg = BxSegregs::from(instr.seg());
         let eaddr = self.resolve_addr(instr);
         let val64 = self.v_read_qword(seg, eaddr)?;
@@ -1272,7 +829,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// PMOVSXBD — Sign-extend 4 packed bytes to 4 packed dwords
     /// Bochs: PMOVSXBD_VdqWdR
     pub(super) fn pmovsxbd_vdq_wd_r(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let val32 = self.xmm_lo_dword(instr.src1());
         let mut result = BxPackedXmmRegister::default();
         result.set_xmm32u(0, (val32 as u8 as i8 as i32) as u32);
@@ -1285,7 +841,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// PMOVSXBD — memory form
     pub(super) fn pmovsxbd_vdq_wd_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let seg = BxSegregs::from(instr.seg());
         let eaddr = self.resolve_addr(instr);
         let val32 = self.v_read_dword(seg, eaddr)?;
@@ -1301,7 +856,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// PMOVSXBQ — Sign-extend 2 packed bytes to 2 packed qwords
     /// Bochs: PMOVSXBQ_VdqWwR
     pub(super) fn pmovsxbq_vdq_ww_r(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let val32 = self.xmm_lo_dword(instr.src1());
         let val16 = val32 as u16;
         let mut result = BxPackedXmmRegister::default();
@@ -1313,7 +867,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// PMOVSXBQ — memory form
     pub(super) fn pmovsxbq_vdq_ww_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let seg = BxSegregs::from(instr.seg());
         let eaddr = self.resolve_addr(instr);
         let val16 = self.v_read_word(seg, eaddr)?;
@@ -1327,7 +880,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// PMOVSXWQ — Sign-extend 2 packed words to 2 packed qwords
     /// Bochs: PMOVSXWQ_VdqWdR
     pub(super) fn pmovsxwq_vdq_wd_r(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let val32 = self.xmm_lo_dword(instr.src1());
         let mut result = BxPackedXmmRegister::default();
         result.set_xmm64u(0, (val32 as u16 as i16 as i64) as u64);
@@ -1338,7 +890,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// PMOVSXWQ — memory form
     pub(super) fn pmovsxwq_vdq_wd_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let seg = BxSegregs::from(instr.seg());
         let eaddr = self.resolve_addr(instr);
         let val32 = self.v_read_dword(seg, eaddr)?;
@@ -1352,7 +903,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// PMOVZXBD — Zero-extend 4 packed bytes to 4 packed dwords
     /// Bochs: PMOVZXBD_VdqWdR
     pub(super) fn pmovzxbd_vdq_wd_r(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let val32 = self.xmm_lo_dword(instr.src1());
         let mut result = BxPackedXmmRegister::default();
         result.set_xmm32u(0, val32 as u8 as u32);
@@ -1365,7 +915,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// PMOVZXBD — memory form
     pub(super) fn pmovzxbd_vdq_wd_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let seg = BxSegregs::from(instr.seg());
         let eaddr = self.resolve_addr(instr);
         let val32 = self.v_read_dword(seg, eaddr)?;
@@ -1381,7 +930,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// PMOVZXBQ — Zero-extend 2 packed bytes to 2 packed qwords
     /// Bochs: PMOVZXBQ_VdqWwR
     pub(super) fn pmovzxbq_vdq_ww_r(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let val32 = self.xmm_lo_dword(instr.src1());
         let val16 = val32 as u16;
         let mut result = BxPackedXmmRegister::default();
@@ -1393,7 +941,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// PMOVZXBQ — memory form
     pub(super) fn pmovzxbq_vdq_ww_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let seg = BxSegregs::from(instr.seg());
         let eaddr = self.resolve_addr(instr);
         let val16 = self.v_read_word(seg, eaddr)?;
@@ -1407,7 +954,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// PMOVZXWQ — Zero-extend 2 packed words to 2 packed qwords
     /// Bochs: PMOVZXWQ_VdqWdR
     pub(super) fn pmovzxwq_vdq_wd_r(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let val32 = self.xmm_lo_dword(instr.src1());
         let mut result = BxPackedXmmRegister::default();
         result.set_xmm64u(0, val32 as u16 as u64);
@@ -1418,7 +964,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
 
     /// PMOVZXWQ — memory form
     pub(super) fn pmovzxwq_vdq_wd_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let seg = BxSegregs::from(instr.seg());
         let eaddr = self.resolve_addr(instr);
         let val32 = self.v_read_dword(seg, eaddr)?;

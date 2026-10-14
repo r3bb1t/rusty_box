@@ -69,35 +69,36 @@ REFERENCE_BUILD = {
 }
 
 
-def resolve_conditionals(text):
+def resolve_conditionals(text, reference_build=REFERENCE_BUILD, table="EVEX"):
     """Flatten `#if / #else / #endif` the way the reference build does.
 
     Its BX_SUPPORT_AMX is 0, and rusty_box implements no AMX state, so an AMX
     group is not emitted and its master-table slot is the #else arm's
     `BxOpcodeGroup_ERR` — a guest #UD, as upstream. scripts/gen_vex_slots.py
-    resolves the VEX table the same way. A condition missing from
-    REFERENCE_BUILD stops the run rather than guess a branch, and so does an
-    `#elif`, whose arm a single REFERENCE_BUILD lookup cannot choose.
+    resolves the VEX groups through this function with its own
+    `reference_build`. A condition missing from `reference_build` stops the
+    run rather than guess a branch, and so does an `#elif`, whose arm a single
+    lookup cannot choose.
     """
     out, skipping = [], []
     for line in text.splitlines():
         s = line.strip()
         if s.startswith("#elif"):
-            sys.exit(f"unexpected conditional in the EVEX table: {s}")
+            sys.exit(f"unexpected conditional in the {table} table: {s}")
         if s.startswith("#if"):
             condition = s.split("//")[0].strip()
-            if condition not in REFERENCE_BUILD:
-                sys.exit(f"unexpected conditional in the EVEX table: {s}")
-            skipping.append(not REFERENCE_BUILD[condition])
+            if condition not in reference_build:
+                sys.exit(f"unexpected conditional in the {table} table: {s}")
+            skipping.append(not reference_build[condition])
             continue
         if s.startswith("#else"):
             if not skipping:
-                sys.exit("#else outside any #if in the EVEX table")
+                sys.exit(f"#else outside any #if in the {table} table")
             skipping[-1] = not skipping[-1]
             continue
         if s.startswith("#endif"):
             if not skipping:
-                sys.exit("#endif outside any #if in the EVEX table")
+                sys.exit(f"#endif outside any #if in the {table} table")
             skipping.pop()
             continue
         if not any(skipping):
@@ -105,8 +106,10 @@ def resolve_conditionals(text):
     return "\n".join(out)
 
 
-def rust_opcode_names():
-    names = re.findall(r"^\s+(Evex[A-Za-z0-9]*)\s*,\s*$", read(ENUM), re.M)
+def rust_opcode_names(first="Evex"):
+    """-> {lowercased variant: variant} for the `Opcode` variants whose name
+    starts with the regex `first` (`[A-Z]` takes every variant)."""
+    names = re.findall(rf"^\s+({first}[A-Za-z0-9]*)\s*,\s*$", read(ENUM), re.M)
     by_ci = {}
     for n in names:
         by_ci.setdefault(n.lower(), []).append(n)
@@ -116,11 +119,12 @@ def rust_opcode_names():
     return {k: v[0] for k, v in by_ci.items()}
 
 
-def parse_groups(text):
-    """-> {group_name: [(attr_expr, bx_opcode_name), ...]} in source order."""
+def parse_groups(text, family="EVEX"):
+    """-> {group_name: [(attr_expr, bx_opcode_name), ...]} in source order,
+    for the `BxOpcodeGroup_<family>_*` groups."""
     groups = {}
     pattern = re.compile(
-        r"static\s+const\s+Bit64u\s+(BxOpcodeGroup_EVEX_\w+)\s*\[\s*\]\s*=\s*\{(.*?)\};",
+        rf"static\s+const\s+Bit64u\s+(BxOpcodeGroup_{family}_\w+)\s*\[\s*\]\s*=\s*\{{(.*?)\}};",
         re.S,
     )
     entry = re.compile(

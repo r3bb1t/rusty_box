@@ -13,7 +13,10 @@
 
 #![cfg(feature = "std")]
 
-use rusty_box::cpu::{CpuSetupMode, ResetReason, X86Reg};
+use rusty_box::cpu::{
+    CodeSize, CpuSetupMode, ExecutionMode, Fetched, LinearRange, MappingWalk, PageAccess,
+    PageMapping, ResetReason, WalkStep, X86Reg,
+};
 use rusty_box::emulator::{
     AtaSlot, BootDevice, BootOrder, DiskGeometry, Emulator, EmulatorConfig, Ips, MachineBuilder,
     MemorySize, PowerState, RunBudget, StopReason, Typed,
@@ -708,4 +711,273 @@ fn machines_are_send_so_a_fleet_is_one_per_worker() {
     for worker in workers {
         assert_eq!(worker.join().expect("join"), StopReason::Halted);
     }
+}
+
+// ── Reading a processor the way a debugger does ─────────────────────────────
+
+/// A debugger reads the boot processor at its reset vector: real mode, 16-bit
+/// code, CS based at 0xFFFF0000 — and the bytes there are the BIOS ROM the
+/// processor fetches, through the same read Bochs's debugger makes.
+#[test]
+fn a_debugger_reads_the_boot_processor_at_its_reset_vector() {
+    let bios = vec![0xF4u8; HALT_BIOS_BYTES];
+    let mut machine = MachineBuilder::new(small_config())
+        .bios(&bios)
+        .build()
+        .expect("machine");
+    let mut cpu = machine.debug_cpu(0).expect("the boot processor");
+    let view = cpu.view();
+    assert_eq!(view.mode, ExecutionMode::Real);
+    assert_eq!(view.code_size, CodeSize::Bits16);
+    assert_eq!(view.registers.rip, 0xFFF0);
+    assert_eq!(view.segment_bases.cs, 0xFFFF_0000);
+
+    let reset_vector = view.segment_bases.cs + view.registers.rip;
+    let physical = cpu
+        .dbg_xlate_linear2phy(reset_vector)
+        .expect("paging is off, so every linear address maps");
+    assert_eq!(physical, reset_vector);
+    let mut bytes = [0u8; 4];
+    assert_eq!(cpu.dbg_fetch_mem(physical, &mut bytes).expect("fetch"), Fetched::Valid);
+    assert_eq!(bytes, [0xF4; 4]);
+}
+
+/// Below 1 MiB the BIOS is mapped over RAM. A debugger sees the ROM there, as
+/// the processor does; a RAM read sees the RAM underneath.
+#[test]
+fn a_debugger_sees_the_bios_where_a_ram_read_sees_ram() {
+    let bios = vec![0xF4u8; HALT_BIOS_BYTES];
+    let mut machine = MachineBuilder::new(small_config())
+        .bios(&bios)
+        .build()
+        .expect("machine");
+    let mut ram = [0xAAu8; 4];
+    machine.mem_read(0xF_FFF0, &mut ram).expect("RAM read");
+    assert_ne!(ram, [0xF4; 4], "RAM under the BIOS is not the BIOS");
+    let mut cpu = machine.debug_cpu(0).expect("the boot processor");
+    let mut seen = [0u8; 4];
+    assert_eq!(cpu.dbg_fetch_mem(0xF_FFF0, &mut seen).expect("fetch"), Fetched::Valid);
+    assert_eq!(seen, [0xF4; 4]);
+}
+
+/// Memory with nothing behind it reads as 0xFF and says so.
+#[test]
+fn a_debugger_read_of_the_pci_hole_says_it_found_nothing() {
+    let mut machine = MachineBuilder::new(small_config()).build().expect("machine");
+    let mut cpu = machine.debug_cpu(0).expect("the boot processor");
+    let mut bytes = [0u8; 4];
+    assert_eq!(
+        cpu.dbg_fetch_mem(0xD000_0000, &mut bytes).expect("fetch"),
+        Fetched::OutsideMemory
+    );
+    assert_eq!(bytes, [0xFF; 4]);
+}
+
+#[test]
+fn a_uniprocessor_has_no_second_processor_to_read() {
+    let mut machine = MachineBuilder::new(small_config()).build().expect("machine");
+    assert!(machine.debug_cpu(1).is_none());
+}
+
+/// Long mode reads as long mode, and a debugger walks the identity map the
+/// mode setup built without faulting on a hole in it.
+#[test]
+fn a_debugger_walks_a_long_mode_processors_page_tables() {
+    let mut machine =
+        Emulator::new_with_mode(EmulatorConfig::default(), CpuSetupMode::FlatLong64)
+            .expect("machine");
+    let mapped = CpuSetupMode::FlatLong64.first_free_physical_address();
+    let mut cpu = machine.debug_cpu(0).expect("the boot processor");
+    let view = cpu.view();
+    assert_eq!(view.mode, ExecutionMode::Long64);
+    assert_eq!(view.code_size, CodeSize::Bits64);
+    assert_ne!(view.efer & 0x400, 0, "EFER.LMA");
+    assert_eq!(cpu.dbg_xlate_linear2phy(mapped), Some(mapped));
+    // PML4 slot 511: the mode setup maps only the low slots.
+    assert_eq!(cpu.dbg_xlate_linear2phy(0xFFFF_FF80_0000_0000), None);
+}
+
+/// A 4 MiB page reaches above 4 GiB through PSE-36: the PDE's bits 13..20
+/// are physical address bits 32..39 (Bochs paging.cc `dbg_xlate_linear2phy`).
+#[test]
+fn a_debugger_walk_follows_a_pse36_page_above_4_gib() {
+    let mut machine =
+        Emulator::new_with_mode(EmulatorConfig::default(), CpuSetupMode::FlatProtected32)
+            .expect("machine");
+    let page_directory = 0x0010_0000u64;
+    // PDE 1: present, writable, 4 MiB, physical bit 32 set through PSE-36.
+    machine
+        .mem_write_u32_le(page_directory + 4, 0x0040_0083 | (1 << 13))
+        .expect("PDE");
+    machine.reg_write(X86Reg::Cr3, page_directory);
+    machine.reg_write(X86Reg::Cr4, machine.reg_read(X86Reg::Cr4) | (1 << 4));
+    machine.reg_write(X86Reg::Cr0, machine.reg_read(X86Reg::Cr0) | (1 << 31));
+    let mut cpu = machine.debug_cpu(0).expect("the boot processor");
+    assert_eq!(cpu.dbg_xlate_linear2phy(0x0040_0123), Some(0x1_0040_0123));
+    assert_eq!(cpu.dbg_xlate_linear2phy(0x0080_0000), None, "PDE 2 is not present");
+}
+
+/// What a mapping walk reported: how it ended, and what it found.
+struct Walked {
+    walk: MappingWalk,
+    found: Vec<PageMapping>,
+}
+
+/// Every mapping a walk of `cr3` reports below `end`, in order.
+fn mappings_below(machine: &mut Emulator, cr3: u64, end: u64) -> Walked {
+    let mut cpu = machine.debug_cpu(0).expect("the boot processor");
+    let mut found = Vec::new();
+    let walk = cpu.dbg_page_mappings_in(cr3, LinearRange { start: 0, end }, |mapping| {
+        found.push(mapping);
+        WalkStep::Continue
+    });
+    Walked { walk, found }
+}
+
+const RW_USER: PageAccess = PageAccess { user: true, writable: true, executable: true };
+
+/// Legacy 32-bit paging: a table of 4 KiB pages and a 4 MiB PSE page, each
+/// granting what every level it passes through grants — and the walk reads
+/// the tables of the CR3 it is given, not the processor's own.
+#[test]
+fn a_mapping_walk_lists_legacy_pages_with_their_combined_rights() {
+    let mut machine =
+        Emulator::new_with_mode(EmulatorConfig::default(), CpuSetupMode::FlatProtected32)
+            .expect("machine");
+    let directory = 0x0010_0000u64;
+    let table = 0x0010_1000u64;
+    // PDE 0: a page table, present, writable, user.
+    machine.mem_write_u32_le(directory, (table as u32) | 0x7).expect("PDE 0");
+    // PTE 5: user, read-only. PTE 6: supervisor, writable.
+    machine.mem_write_u32_le(table + 5 * 4, 0x0000_5005).expect("PTE 5");
+    machine.mem_write_u32_le(table + 6 * 4, 0x0000_6003).expect("PTE 6");
+    // PDE 1: a 4 MiB page, present, writable, user.
+    machine.mem_write_u32_le(directory + 4, 0x0040_0087).expect("PDE 1");
+    machine.reg_write(X86Reg::Cr4, machine.reg_read(X86Reg::Cr4) | (1 << 4));
+    machine.reg_write(X86Reg::Cr0, machine.reg_read(X86Reg::Cr0) | (1 << 31));
+    // The processor's own CR3 points elsewhere: the walk follows `directory`.
+    machine.reg_write(X86Reg::Cr3, 0x0020_0000);
+
+    let Walked { walk, found } = mappings_below(&mut machine, directory, 0x0080_0000);
+
+    assert_eq!(walk, MappingWalk::Complete);
+    assert_eq!(
+        found,
+        [
+            PageMapping {
+                linear: 0x5000,
+                physical: 0x5000,
+                size: 0x1000,
+                access: PageAccess { user: true, writable: false, executable: true },
+            },
+            PageMapping {
+                linear: 0x6000,
+                physical: 0x6000,
+                size: 0x1000,
+                access: PageAccess { user: false, writable: true, executable: true },
+            },
+            PageMapping { linear: 0x40_0000, physical: 0x40_0000, size: 0x40_0000, access: RW_USER },
+        ]
+    );
+}
+
+/// PAE paging: a 2 MiB page, and a 4 KiB page XD withholds execution from
+/// while EFER.NXE is set.
+#[test]
+fn a_mapping_walk_lists_pae_pages_and_honours_execute_disable() {
+    let mut machine =
+        Emulator::new_with_mode(EmulatorConfig::default(), CpuSetupMode::FlatProtected32)
+            .expect("machine");
+    let pdpt = 0x0010_0000u64;
+    let directory = 0x0010_1000u64;
+    let table = 0x0010_2000u64;
+    machine.mem_write_u64_le(pdpt, directory | 0x1).expect("PDPTE 0");
+    // PDE 0: a table. PDE 1: a 2 MiB page.
+    machine.mem_write_u64_le(directory, table | 0x7).expect("PDE 0");
+    machine.mem_write_u64_le(directory + 8, 0x0020_0000 | 0x87).expect("PDE 1");
+    // PTE 7: user, writable, execute-disable.
+    machine.mem_write_u64_le(table + 7 * 8, 0x7000 | 0x7 | (1 << 63)).expect("PTE 7");
+    machine.reg_write(X86Reg::Efer, machine.reg_read(X86Reg::Efer) | (1 << 11));
+    machine.reg_write(X86Reg::Cr4, machine.reg_read(X86Reg::Cr4) | (1 << 5));
+    machine.reg_write(X86Reg::Cr3, pdpt);
+    machine.reg_write(X86Reg::Cr0, machine.reg_read(X86Reg::Cr0) | (1 << 31));
+
+    let Walked { walk, found } = mappings_below(&mut machine, pdpt, 0x0040_0000);
+
+    assert_eq!(walk, MappingWalk::Complete);
+    assert_eq!(
+        found,
+        [
+            PageMapping {
+                linear: 0x7000,
+                physical: 0x7000,
+                size: 0x1000,
+                access: PageAccess { user: true, writable: true, executable: false },
+            },
+            PageMapping { linear: 0x20_0000, physical: 0x20_0000, size: 0x20_0000, access: RW_USER },
+        ]
+    );
+}
+
+/// Long mode: the mode setup's identity map lists from address zero, the
+/// visitor can stop the walk, and with paging off there is nothing to walk.
+#[test]
+fn a_mapping_walk_lists_a_long_mode_identity_map_and_stops_when_asked() {
+    let mut machine =
+        Emulator::new_with_mode(EmulatorConfig::default(), CpuSetupMode::FlatLong64)
+            .expect("machine");
+    let cr3 = machine.reg_read(X86Reg::Cr3);
+    let mut cpu = machine.debug_cpu(0).expect("the boot processor");
+    let mut first = None;
+    let walk = cpu.dbg_page_mappings_in(cr3, LinearRange { start: 0, end: u64::MAX }, |mapping| {
+        first = Some(mapping);
+        WalkStep::Stop
+    });
+    assert_eq!(walk, MappingWalk::Stopped);
+    let first = first.expect("the identity map maps address zero");
+    assert_eq!((first.linear, first.physical), (0, 0));
+    assert!(first.access.writable);
+
+    let mut real = Emulator::new_with_mode(small_config(), CpuSetupMode::RealMode).expect("machine");
+    let Walked { walk, found } = mappings_below(&mut real, 0, u64::MAX);
+    assert_eq!(walk, MappingWalk::PagingOff);
+    assert!(found.is_empty());
+}
+
+/// A read that ends at the top of the physical address space wraps, as
+/// Bochs's does, rather than overflowing.
+#[test]
+fn a_debugger_read_at_the_top_of_the_address_space_is_outside_memory() {
+    let mut machine = MachineBuilder::new(small_config()).build().expect("machine");
+    let mut cpu = machine.debug_cpu(0).expect("the boot processor");
+    let mut bytes = [0u8; 16];
+    assert_eq!(
+        cpu.dbg_fetch_mem(0xFFFF_FFFF_FFFF_FFF0, &mut bytes).expect("fetch"),
+        Fetched::OutsideMemory
+    );
+}
+
+#[test]
+fn a_code_size_decodes_at_its_own_width() {
+    // JMP $ — two bytes at any width.
+    let jump = CodeSize::Bits16.decode(&[0xEB, 0xFE]).expect("decodes");
+    assert_eq!(jump.ilen(), 2);
+    // MOV RAX, imm32 is seven bytes only in 64-bit code.
+    let mov = CodeSize::Bits64
+        .decode(&[0x48, 0xC7, 0xC0, 0x2A, 0x00, 0x00, 0x00])
+        .expect("decodes");
+    assert_eq!(mov.ilen(), 7);
+}
+
+/// A RAM image is RAM in storage order; below the PCI hole an offset is its
+/// physical address.
+#[test]
+fn a_ram_image_below_the_pci_hole_is_ram_at_its_physical_address() {
+    let mut machine = MachineBuilder::new(small_config()).build().expect("machine");
+    machine.mem_write(0x1234, b"rusty").expect("write");
+    let mut image = [0u8; 5];
+    machine
+        .read_ram_image(rusty_box::emulator::RamOffset(0x1234), &mut image)
+        .expect("read");
+    assert_eq!(&image, b"rusty");
 }

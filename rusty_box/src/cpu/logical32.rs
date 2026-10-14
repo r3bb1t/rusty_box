@@ -37,16 +37,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     // CMP instructions
     // =========================================================================
 
-    /// CMP r32, r32
-    pub fn cmp_gd_ed_r(&mut self, instr: &Instruction) {
-        let dst = instr.dst() as usize;
-        let src = instr.src() as usize;
-        let op1 = self.get_gpr32(dst);
-        let op2 = self.get_gpr32(src);
-        let result = op1.wrapping_sub(op2);
-        self.set_flags_oszapc_sub_32(op1, op2, result);
-    }
-
     /// CMP EAX, imm32
     pub fn cmp_eax_id(&mut self, instr: &Instruction) {
         let op1 = self.get_gpr32(0); // EAX
@@ -65,15 +55,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 self.icount
             );
         }
-    }
-
-    /// CMP r/m32, imm32
-    pub fn cmp_ed_id_r(&mut self, instr: &Instruction) {
-        let dst = instr.dst() as usize;
-        let op1 = self.get_gpr32(dst);
-        let op2 = instr.id();
-        let result = op1.wrapping_sub(op2);
-        self.set_flags_oszapc_sub_32(op1, op2, result);
     }
 
     // =========================================================================
@@ -504,31 +485,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         let result = op1_32 & op2_32;
 
         self.set_flags_oszapc_logic_32(result);
-        Ok(())
-    }
-
-    /// CMP_GdEdM: CMP r32, r/m32 (memory form)
-    /// Matches BX_CPU_C::CMP_GdEdM
-    pub fn cmp_gd_ed_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let eaddr = self.resolve_addr(instr);
-        let seg = BxSegregs::from(instr.seg());
-        let op2_32 = self.v_read_dword(seg, eaddr)?;
-        let dst_reg = instr.dst() as usize;
-        let op1_32 = self.get_gpr32(dst_reg);
-        let result = op1_32.wrapping_sub(op2_32);
-        self.set_flags_oszapc_sub_32(op1_32, op2_32, result);
-        Ok(())
-    }
-
-    /// CMP_EdIdM: CMP r/m32, imm32 (memory form)
-    /// Matches BX_CPU_C::CMP_EdIdM
-    pub fn cmp_ed_id_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let eaddr = self.resolve_addr(instr);
-        let seg = BxSegregs::from(instr.seg());
-        let op1_32 = self.v_read_dword(seg, eaddr)?;
-        let op2_32 = instr.id();
-        let result = op1_32.wrapping_sub(op2_32);
-        self.set_flags_oszapc_sub_32(op1_32, op2_32, result);
         Ok(())
     }
 

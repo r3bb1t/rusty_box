@@ -724,37 +724,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     // 32-bit MOV memory forms (matching C++ data_xfer32.cc)
     // =========================================================================
 
-    /// MOV r32, r/m32 (memory form with SS segment override)
-    /// Matching C++ data_xfer32.cc MOV32S_GdEdM
-    /// Uses stack_read_dword instead of read_virtual_dword
-    pub fn mov32s_gd_ed_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let eaddr = self.resolve_addr(instr);
-        let val32 = self.stack_read_dword(eaddr as u32)?;
-        let dst_reg = instr.dst() as usize;
-
-        self.set_gpr32(dst_reg, val32);
-        Ok(())
-    }
-
-    /// MOV r/m32, r32 (memory form with SS segment override)
-    ///
-    /// This handler is used when MOV instruction has an SS segment override prefix.
-    /// It uses stack_write_dword instead of write_virtual_dword to write memory through
-    /// the SS segment, which is important for stack operations.
-    ///
-    /// Matching C++ data_xfer32.cc BX_CPU_C::MOV32S_EdGdM
-    ///
-    /// # Operation
-    /// Writes a 32-bit value from the source register to SS:offset.
-    pub fn mov32s_ed_gd_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let eaddr = self.resolve_addr(instr);
-        let src_reg = instr.src() as usize;
-        let val32 = self.get_gpr32(src_reg);
-
-        self.stack_write_dword(eaddr as u32, val32)?;
-        Ok(())
-    }
-
     /// XCHG r/m32, r32 (memory form)
     /// Matching C++ data_xfer32.cc XCHG_EdGdM
     /// Note: always locked (read_RMW_virtual_dword)
