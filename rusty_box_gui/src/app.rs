@@ -300,6 +300,9 @@ pub struct NativeShellApp {
     floppy_maker_open: bool,
     /// The Hard disk page's new-disk sheet, while it is open.
     new_disk: Option<NewDiskDraft>,
+    /// The Summary page's file-name editor, while it is open.
+    #[cfg(not(target_arch = "wasm32"))]
+    file_rename: Option<FileRenameDraft>,
     profiles: Vec<NativeVmProfile>,
     config: crate::config::ResolvedConfig,
     settings: NativeVmSettings,
@@ -1252,6 +1255,21 @@ const FLOPPY_FILE_NAME: &str = "floppy.img";
 #[cfg(not(target_arch = "wasm32"))]
 const RAM_DUMP_FILE_NAME: &str = "memory.bin";
 
+/// A library VM's file name being edited: what the Summary page's rename
+/// editor holds while it is open.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FileRenameDraft {
+    /// The VM whose file is renamed. The editor shows only while this VM is
+    /// the selected one, and a rename of another file, or of this one, ends
+    /// it.
+    vm: VmOrigin,
+    /// The file name as typed, without `.toml`.
+    text: String,
+    /// Why the last save was refused.
+    refusal: Option<String>,
+}
+
 /// A hard disk not yet created: what the Hard disk page's new-disk sheet
 /// holds while it is open.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1680,6 +1698,8 @@ impl NativeShellApp {
             floppy_maker: FloppyMaker::default(),
             floppy_maker_open: false,
             new_disk: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            file_rename: None,
             profiles: opening.profiles,
             config,
             settings,
@@ -2296,8 +2316,122 @@ impl NativeShellApp {
                 }
             });
             let caption = self.summary_caption();
-            ui.label(RichText::new(caption).size(TEXT_CAPTION).color(TEXT_MUTED));
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new(caption).size(TEXT_CAPTION).color(TEXT_MUTED));
+                if matches!(origin, VmOrigin::Library(_))
+                    && ui
+                        .small_button("Rename file…")
+                        .on_hover_text("Change the name of this VM's file in the library")
+                        .clicked()
+                {
+                    self.open_file_rename();
+                }
+            });
+            self.draw_file_rename(ui);
         });
+    }
+
+    /// Opens the file-name editor on the selected library VM, holding the
+    /// name its file has now.
+    fn open_file_rename(&mut self) {
+        let vm = self.shown_vm();
+        let VmOrigin::Library(stem) = &vm else {
+            return;
+        };
+        self.file_rename = Some(FileRenameDraft {
+            text: stem.as_str().to_owned(),
+            vm,
+            refusal: None,
+        });
+    }
+
+    /// The file-name editor under the Summary caption, while it is open on
+    /// the selected VM: the name being typed, what it is cut down to, why a
+    /// save was refused, and Save and Cancel.
+    fn draw_file_rename(&mut self, ui: &mut egui::Ui) {
+        let shown = self.shown_vm();
+        let Some(draft) = self
+            .file_rename
+            .as_mut()
+            .filter(|draft| draft.vm == shown)
+        else {
+            return;
+        };
+        let (mut save, mut cancel) = (false, false);
+        ui.horizontal_wrapped(|ui| {
+            let label = ui.label("File name");
+            let field = ui
+                .add(egui::TextEdit::singleline(&mut draft.text).desired_width(220.0))
+                .labelled_by(label.id);
+            ui.label(".toml");
+            let entered =
+                field.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+            if ui.add(primary_button("Save file name")).clicked() || entered {
+                save = true;
+            }
+            if ui.button("Cancel").clicked() {
+                cancel = true;
+            }
+        });
+        let cut_down = crate::library::safe_stem(&draft.text);
+        if cut_down != draft.text {
+            ui.label(
+                RichText::new(format!("It is saved as {cut_down}.toml."))
+                    .size(TEXT_CAPTION)
+                    .color(TEXT_MUTED),
+            );
+        }
+        if let Some(refusal) = &draft.refusal {
+            ui.label(RichText::new(refusal).size(TEXT_CAPTION).color(ACCENT_RED));
+        }
+        if cancel {
+            self.file_rename = None;
+        } else if save {
+            self.save_file_rename();
+        }
+    }
+
+    /// Renames the file of the VM the editor is open on to the name typed.
+    /// The VM is written first, so the file that moves holds it as it is. A
+    /// name another file has is refused in the editor, which stays open.
+    fn save_file_rename(&mut self) {
+        self.flush_unsaved();
+        // The flush may have moved the file to follow the VM's name, which
+        // changes the identity the editor holds.
+        let Some(draft) = self.file_rename.clone() else {
+            return;
+        };
+        let VmOrigin::Library(stem) = draft.vm.clone() else {
+            self.file_rename = None;
+            return;
+        };
+        match self.library.rename(&stem, &draft.text) {
+            Ok(renamed) => {
+                self.file_rename = None;
+                if renamed == stem {
+                    return;
+                }
+                if let Some(index) = self
+                    .profiles
+                    .iter()
+                    .position(|profile| profile.origin == draft.vm)
+                {
+                    self.adopt_stem(index, renamed.clone());
+                }
+                self.notify(ShellNotice::info(format!(
+                    "Renamed the file to {}.",
+                    self.library.path_of(&renamed).display()
+                )));
+            }
+            Err(crate::library::LibraryError::StemTaken { stem }) => {
+                if let Some(draft) = &mut self.file_rename {
+                    draft.refusal = Some(format!(
+                        "Another VM already uses {stem}.toml. Choose another name."
+                    ));
+                }
+            }
+            Err(error) => self.notify(ShellNotice::error(error.to_string())),
+        }
     }
 
     /// The Summary page's caption on where the selected VM is kept: its
@@ -3244,11 +3378,15 @@ impl NativeShellApp {
             if !due {
                 continue;
             }
+            let previous_name = profile.file.as_ref().map(|file| file.name.clone());
             match self.library.save(stem, &profile.name, &profile.config) {
                 Ok(()) => {
                     let profile = &mut self.profiles[index];
                     profile.file = Some(VmFileContents::of(&profile.name, &profile.config));
                     profile.save_state = SaveState::Saved;
+                    if let Some(previous) = previous_name {
+                        self.file_follows_name(index, &previous);
+                    }
                 }
                 Err(error) => {
                     tracing::error!(vm = stem.as_str(), %error, "the VM's file was not written");
@@ -3258,6 +3396,62 @@ impl NativeShellApp {
             }
             self.refresh_library_entry(index);
         }
+    }
+
+    /// Renames the file of the library VM at `index` to follow its name, when
+    /// the VM was written under `previous_name` and the name has changed
+    /// since, and the file's name was derived from `previous_name` — a file
+    /// name chosen by hand stays. A rename that fails is told in a notice and
+    /// leaves the VM saved under its old file name.
+    fn file_follows_name(&mut self, index: usize, previous_name: &str) {
+        let VmOrigin::Library(stem) = self.profiles[index].origin.clone() else {
+            return;
+        };
+        let name = self.profiles[index].name.trim().to_owned();
+        if name.is_empty() || name == previous_name.trim() {
+            return;
+        }
+        let derived = crate::library::stem_follows_name(&stem, previous_name);
+        if !derived || crate::library::stem_follows_name(&stem, &name) {
+            return;
+        }
+        match self.library.rename_to_follow(&stem, &name) {
+            Ok(renamed) => self.adopt_stem(index, renamed),
+            Err(error) => {
+                tracing::warn!(vm = stem.as_str(), %error, "the VM's file was not renamed");
+                self.notify(ShellNotice::warning(format!(
+                    "{name} is saved, but its file keeps the name {}.toml: {error}",
+                    stem.as_str()
+                )));
+            }
+        }
+    }
+
+    /// Makes the library VM at `index` the one in the file of `renamed`,
+    /// which its file was just moved to: its session, the remembered
+    /// selection and any question about it follow.
+    fn adopt_stem(&mut self, index: usize, renamed: crate::library::VmStem) {
+        let old = self.profiles[index].origin.clone();
+        let new = VmOrigin::Library(renamed.clone());
+        self.profiles[index].origin = new.clone();
+        self.sessions.rekey(&old, new.clone());
+        if self.chrome.selected_vm() == index {
+            self.remember(&renamed);
+        }
+        if let Some(
+            PendingConfirm::DeleteVm { origin, .. } | PendingConfirm::OverwriteDisk { origin, .. },
+        ) = &mut self.pending_confirm
+        {
+            if *origin == old {
+                *origin = new.clone();
+            }
+        }
+        if let Some(draft) = &mut self.file_rename {
+            if draft.vm == old {
+                draft.vm = new;
+            }
+        }
+        self.refresh_library_entry(index);
     }
 
     /// Makes the sidebar's row for the VM at `index` say what the VM is now.
@@ -5880,6 +6074,60 @@ fn draw_about_text(ui: &mut egui::Ui) {
     ));
 }
 
+/// A number typed on the phone: a field holding the digits, the soft
+/// keyboard's to fill. Digits are all it takes. The number is committed when
+/// the field is left or Enter is pressed, cut to `min..=max`; text that is
+/// no number is dropped and the field shows the value again. While the field
+/// is being typed in, its text is kept in egui's memory, so a value changed
+/// by the `−` and `+` buttons still shows when the field is not.
+#[cfg(any(target_os = "android", test))]
+fn typed_number_field(
+    ui: &mut egui::Ui,
+    value: &mut u64,
+    min: u64,
+    max: u64,
+    suffix: &str,
+    editable: bool,
+) -> bool {
+    let id = ui.auto_id_with("typed number");
+    let typing = ui.memory(|memory| memory.has_focus(id) || memory.had_focus_last_frame(id));
+    let mut text = if typing {
+        ui.data_mut(|data| data.get_temp::<String>(id))
+            .unwrap_or_else(|| value.to_string())
+    } else {
+        value.to_string()
+    };
+    let response = ui.add_enabled(
+        editable,
+        egui::TextEdit::singleline(&mut text)
+            .id(id)
+            .desired_width(TYPED_NUMBER_WIDTH),
+    );
+    if response.changed() {
+        text.retain(|ch| ch.is_ascii_digit());
+    }
+    let mut changed = false;
+    if response.lost_focus() {
+        if let Some(typed) = crate::android_support::typed_number(&text, min, max) {
+            if typed != *value {
+                *value = typed;
+                changed = true;
+            }
+        }
+        text = value.to_string();
+    }
+    ui.data_mut(|data| data.insert_temp(id, text));
+    if !suffix.is_empty() {
+        ui.label(RichText::new(suffix).color(TEXT_MUTED));
+    }
+    changed
+}
+
+/// The room a typed number's field takes, points: ten digits, the widest
+/// value any numeric setting holds.
+#[cfg(any(target_os = "android", test))]
+const TYPED_NUMBER_WIDTH: f32 = 112.0;
+
 #[cfg(target_os = "android")]
 fn draw_u32_field(
     ui: &mut egui::Ui,
@@ -5903,7 +6151,11 @@ fn draw_u32_field(
         *value = decrement;
         changed = true;
     }
-    ui.label(RichText::new(format!("{value}{suffix}")).color(TEXT_MUTED));
+    let mut typed = u64::from(*value);
+    if typed_number_field(ui, &mut typed, u64::from(min), u64::from(max), suffix, editable) {
+        *value = u32::try_from(typed).unwrap_or(max);
+        changed = true;
+    }
     let increment = value.saturating_add(step).min(max);
     if ui
         .add_enabled(editable, egui::Button::new("+"))
@@ -5960,7 +6212,9 @@ fn draw_u64_field(
         *value = decrement;
         changed = true;
     }
-    ui.label(RichText::new(format!("{value}{suffix}")).color(TEXT_MUTED));
+    if typed_number_field(ui, value, min, max, suffix, editable) {
+        changed = true;
+    }
     let increment = value.saturating_add(step).min(max);
     if ui
         .add_enabled(editable, egui::Button::new("+"))
@@ -6386,8 +6640,8 @@ mod tests {
     /// A shell over a scratch library listing "Windows XP", "DLX" and
     /// "Alpine", in that order, the reverse of their names' order, with
     /// Windows XP selected. Each VM was made as "VM 1", "VM 2" or "VM 3" and
-    /// renamed since, and a renamed VM keeps the file it was made in, whose
-    /// name places it in the list.
+    /// named by its file since, so its file name, which the library does not
+    /// derive from that name, places it in the list.
     #[cfg(not(target_arch = "wasm32"))]
     fn three_vm_app() -> TestShell {
         let scratch = ScratchLibrary::new();
@@ -6649,17 +6903,120 @@ mod tests {
         assert_eq!(scratch.library().load().expect("reload").vms[0].config.memory_mib, 512);
     }
 
+    fn stem_of(text: &str) -> crate::library::VmStem {
+        crate::library::VmStem::parse(text).expect("a stem")
+    }
+
+    /// A VM renamed in the shell has the file it was made in renamed to
+    /// match: the VM, its session and the remembered selection follow, and
+    /// the file the shell reads at the next launch is the one it wrote.
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
-    fn a_renamed_vm_keeps_its_file() {
+    fn a_renamed_vm_has_its_file_renamed_to_match() {
         let (mut app, _command_rx, scratch) = library_app();
+        let before = app.profiles[0].origin.clone();
+        app.sessions.open(&before);
 
         app.profiles[0].name = "Alpine edge".to_owned();
         app.apply_pending_settings().unwrap();
         app.flush_unsaved();
 
-        assert_eq!(scratch.toml_files(), ["alpine.toml"]);
-        assert_eq!(scratch.library().load().expect("reload").vms[0].name, "Alpine edge");
+        assert_eq!(scratch.toml_files(), ["alpine-edge.toml"]);
+        let reloaded = scratch.library().load().expect("reload").vms;
+        assert_eq!(reloaded[0].name, "Alpine edge");
+        assert_eq!(reloaded[0].stem, stem_of("alpine-edge"));
+        let after = VmOrigin::Library(stem_of("alpine-edge"));
+        assert_eq!(app.profiles[0].origin, after);
+        assert!(app.sessions.get(&after).is_some(), "the session moved with it");
+        assert!(app.sessions.get(&before).is_none());
+        assert_eq!(
+            scratch.library().last_selected(),
+            Some(stem_of("alpine-edge")),
+            "the next launch opens the VM under its new file"
+        );
+        assert_eq!(app.profiles[0].save_state, SaveState::Saved);
+    }
+
+    /// The case that was reported: a copy of "Windows XP" is named
+    /// "Windows XP copy" and its file "windows-xp-copy"; renamed Ubuntu, it
+    /// is "ubuntu" and the file says so.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_copy_renamed_does_not_keep_copy_in_its_file_name() {
+        let mut shell = two_vm_app();
+        shell.app.select_profile(1);
+        shell.app.add_vm_copying_selected();
+        assert_eq!(
+            shell.scratch.toml_files(),
+            ["alpine.toml", "windows-xp-copy.toml", "windows-xp.toml"]
+        );
+        let copy = shell.app.chrome.selected_vm();
+
+        shell.app.profiles[copy].name = "Ubuntu".to_owned();
+        shell.app.apply_pending_settings().unwrap();
+        shell.app.flush_unsaved();
+
+        assert_eq!(
+            shell.scratch.toml_files(),
+            ["alpine.toml", "ubuntu.toml", "windows-xp.toml"]
+        );
+    }
+
+    /// A file name the user chose is not derived from the VM's name, so a
+    /// rename of the VM leaves it.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_file_name_chosen_by_hand_is_left_when_the_vm_is_renamed() {
+        let (mut app, _command_rx, scratch) = library_app();
+        app.open_file_rename();
+        app.file_rename.as_mut().expect("the editor is open").text = "lab".to_owned();
+        app.save_file_rename();
+        assert_eq!(scratch.toml_files(), ["lab.toml"]);
+
+        app.profiles[0].name = "Debian".to_owned();
+        app.apply_pending_settings().unwrap();
+        app.flush_unsaved();
+
+        assert_eq!(scratch.toml_files(), ["lab.toml"]);
+        assert_eq!(scratch.library().load().expect("reload").vms[0].name, "Debian");
+    }
+
+    /// A file name another VM has is refused where it is typed: the editor
+    /// stays open with the reason, and nothing moves.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_file_name_another_vm_has_is_refused_in_the_editor() {
+        let mut shell = two_vm_app();
+        shell.app.open_file_rename();
+        shell.app.file_rename.as_mut().expect("the editor is open").text = "windows-xp".to_owned();
+
+        shell.app.save_file_rename();
+
+        assert_eq!(shell.scratch.toml_files(), ["alpine.toml", "windows-xp.toml"]);
+        let draft = shell.app.file_rename.as_ref().expect("still open");
+        assert!(draft
+            .refusal
+            .as_deref()
+            .is_some_and(|reason| reason.contains("windows-xp.toml")));
+    }
+
+    /// A file renamed by hand carries the VM with it: the editor closes, the
+    /// caption names the new file, and the session is where the VM is.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_file_renamed_by_hand_is_where_the_vm_is() {
+        let (mut app, _command_rx, scratch) = library_app();
+        let before = app.profiles[0].origin.clone();
+        app.sessions.open(&before);
+        app.open_file_rename();
+        app.file_rename.as_mut().expect("the editor is open").text = "Lab: Alpine 3".to_owned();
+
+        app.save_file_rename();
+
+        assert_eq!(scratch.toml_files(), ["lab-alpine-3.toml"]);
+        assert!(app.file_rename.is_none());
+        assert!(app.summary_caption().ends_with("lab-alpine-3.toml"));
+        assert!(app.sessions.get(&VmOrigin::Library(stem_of("lab-alpine-3"))).is_some());
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -7335,7 +7692,8 @@ mod tests {
     }
 
     /// A library VM with no medium to boot from is renamed like any other:
-    /// the rename marks it `Unsaved`, and the flush writes it.
+    /// the rename marks it `Unsaved`, and the flush writes it, in a file
+    /// that takes the new name.
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn a_vm_with_no_media_is_renamed_and_its_file_written() {
@@ -7353,7 +7711,7 @@ mod tests {
         app.flush_unsaved();
 
         assert_eq!(app.profiles[0].save_state, SaveState::Saved);
-        assert_eq!(scratch.toml_files(), ["rusty-box.toml"]);
+        assert_eq!(scratch.toml_files(), ["phone.toml"]);
         assert_eq!(scratch.library().load().expect("reload").vms[0].name, "Phone");
     }
 
@@ -9426,6 +9784,8 @@ mod tests {
             crate::debugger::inspect::read_snapshot(
                 &mut machine,
                 &crate::debugger::inspect::ViewRequest::default(),
+                &mut crate::debugger::windows::WindowsDiscovery::default(),
+                None,
             )
         }
 
@@ -9551,6 +9911,39 @@ mod tests {
             assert_eq!(control.view(), before);
         }
 
+        /// The Summary page's "Rename file…" opens an editor on the file's
+        /// name; saving it renames the file and the caption names the new one.
+        #[test]
+        fn the_rename_file_button_renames_the_vms_file() {
+            let (app, _command_rx, scratch) = library_app();
+            let mut window = window(app);
+            window.run();
+            window.get_by_label("Rename file…").click();
+            window.run();
+            window
+                .get_by_role_and_label(egui::accesskit::Role::TextInput, "File name")
+                .click();
+            window.run();
+            window
+                .get_by_role_and_label(egui::accesskit::Role::TextInput, "File name")
+                .type_text("-lab");
+            window.run();
+            window.get_by_label("Save file name").click();
+            window.run();
+
+            assert_eq!(scratch.toml_files(), ["alpine-lab.toml"]);
+            assert!(window.query_by_label("Save file name").is_none(), "the editor closed");
+        }
+
+        /// A temporary VM has no file, so there is nothing to rename.
+        #[test]
+        fn a_temporary_vm_has_no_file_to_rename() {
+            let (app, _command_rx, _scratch) = native_test_app();
+            let mut window = window(app);
+            window.run();
+            assert!(window.query_by_label("Rename file…").is_none());
+        }
+
         /// Find next with hex typed queues the search for the paused run.
         #[test]
         fn find_next_asks_the_paused_run_to_search() {
@@ -9655,6 +10048,166 @@ mod tests {
             assert!(window
                 .query_by_label(&no_windows_kernel(KernelMiss::NoKpcr))
                 .is_some());
+        }
+
+        /// A landscape phone's window: wide, and short.
+        const LANDSCAPE_PHONE: egui::Vec2 = egui::vec2(1000.0, 430.0);
+        /// A window whose page, beside the open drawer, is a portrait
+        /// phone's width.
+        const NARROW_PAGE: egui::Vec2 = egui::vec2(560.0, 800.0);
+
+        /// The chips are on the header's row, after its buttons: not on a row
+        /// of their own beneath them.
+        #[test]
+        fn the_debugger_chips_sit_beside_the_buttons() {
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            paused_vm(&mut app);
+            let mut window = window_of_size(app, egui::vec2(1400.0, 700.0));
+            window.run();
+            open_debugger(&mut window);
+            let step = window
+                .get_by_role_and_label(egui::accesskit::Role::Button, "Step")
+                .rect();
+            let chip = window.get_by_label("64-bit mode").rect();
+            assert!(
+                (step.center().y - chip.center().y).abs() < 12.0,
+                "the chip at {chip:?} is not on the row of the Step button at {step:?}"
+            );
+            assert!(chip.left() > step.right(), "the chip is not after the button");
+        }
+
+        /// A window as short as a landscape phone's does not squeeze the
+        /// panes: each keeps its content's height, and the page scrolls to
+        /// every one of them.
+        #[test]
+        fn a_short_wide_window_keeps_every_debugger_pane_in_reach() {
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            paused_vm(&mut app);
+            let mut window = window_of_size(app, LANDSCAPE_PHONE);
+            window.run();
+            open_debugger(&mut window);
+
+            // Code is not squeezed to a few rows to fit beside Memory: the
+            // column holds all of its listing.
+            let code = window.get_by_label("Code").rect();
+            let memory = window.get_by_label("Memory").rect();
+            assert!(
+                memory.top() - code.top() > 300.0,
+                "Code at {code:?} is squeezed above Memory at {memory:?}"
+            );
+
+            for title in ["Code", "Registers", "Stack", "Memory"] {
+                window.get_by_label(title).scroll_to_me();
+                window.run();
+                let rect = window.get_by_label(title).rect();
+                assert!(
+                    rect.top() >= 0.0 && rect.bottom() <= LANDSCAPE_PHONE.y,
+                    "{title} at {rect:?} is out of view in a window {LANDSCAPE_PHONE:?}"
+                );
+            }
+        }
+
+        /// In a window too narrow for the header's buttons and chips on one
+        /// row, the row wraps; nothing runs past the window's edge.
+        #[test]
+        fn a_narrow_debugger_header_wraps_inside_the_window() {
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            paused_vm(&mut app);
+            let mut window = window_of_size(app, NARROW_PAGE);
+            window.run();
+            open_debugger(&mut window);
+            let step = window
+                .get_by_role_and_label(egui::accesskit::Role::Button, "Step")
+                .rect();
+            let tabs = window
+                .get_by_role_and_label(egui::accesskit::Role::Button, "Kernel modules")
+                .rect();
+            let chip = window.get_by_label("64-bit mode").rect();
+            for (name, rect) in [("Step", step), ("Kernel modules", tabs), ("64-bit mode", chip)] {
+                assert!(
+                    rect.right() <= NARROW_PAGE.x,
+                    "{name} at {rect:?} runs past the window's edge"
+                );
+            }
+            // The tab switch wrapped under the buttons, and the chips under it.
+            assert!(tabs.top() > step.bottom() - 1.0, "tabs {tabs:?} step {step:?}");
+            assert!(chip.top() > tabs.bottom() - 1.0, "chip {chip:?} tabs {tabs:?}");
+        }
+
+        /// A guest's process list and the modules of one process.
+        fn process_listing_snapshot() -> crate::debugger::inspect::DebugSnapshot {
+            use crate::debugger::windows::{
+                ModuleBits, ModuleRead, ProcessListing, ProcessModules, SystemListing, WinModule,
+                WinProcess,
+            };
+            let processes = vec![
+                WinProcess {
+                    eprocess: 0xFFFF_FA80_0000_1000,
+                    pid: 4,
+                    parent: None,
+                    name: "System".to_owned(),
+                    cr3: 0x1000,
+                    current: false,
+                },
+                WinProcess {
+                    eprocess: 0xFFFF_FA80_0000_2000,
+                    pid: 520,
+                    parent: Some(4),
+                    name: "smss.exe".to_owned(),
+                    cr3: 0x2000,
+                    current: true,
+                },
+            ];
+            let tree = crate::debugger::windows::process_tree(&processes);
+            let mut snapshot = paused_snapshot();
+            snapshot.system = SystemListing::Processes(ProcessListing {
+                processes,
+                tree,
+                modules: Some(ProcessModules {
+                    eprocess: 0xFFFF_FA80_0000_2000,
+                    read: ModuleRead::Listed(vec![WinModule {
+                        base: 0x7FF0_0000_0000,
+                        size: 0x1000,
+                        name: Some("ntdll.dll".to_owned()),
+                        path: Some("C:\\Windows\\System32\\ntdll.dll".to_owned()),
+                        bits: ModuleBits::Bits64,
+                    }]),
+                    map: None,
+                    threads: Vec::new(),
+                }),
+            });
+            snapshot
+        }
+
+        /// The Processes tab draws its lists whatever the window's size: the
+        /// grid where there is room, two columns or one where the page
+        /// scrolls.
+        #[test]
+        fn the_processes_tab_lists_in_every_layout() {
+            for size in [
+                egui::vec2(1400.0, 900.0),
+                LANDSCAPE_PHONE,
+                NARROW_PAGE,
+            ] {
+                let (mut app, _command_rx, _scratch) = native_test_app();
+                let control = paused_vm(&mut app);
+                control.publish(process_listing_snapshot());
+                let mut window = window_of_size(app, size);
+                window.run();
+                open_debugger(&mut window);
+                window.get_by_label("Processes").click();
+                window.run();
+                let shows = |window: &Harness<'_, Window>, text: &str| {
+                    window
+                        .query_all_by(|node| {
+                            node.label().is_some_and(|label| label.contains(text))
+                        })
+                        .next()
+                        .is_some()
+                };
+                assert!(shows(&window, "smss.exe"), "no process row in a window {size:?}");
+                assert!(shows(&window, "ntdll.dll"), "no module row in a window {size:?}");
+            }
         }
 
         fn press(pos: egui::Pos2) -> egui::Event {
@@ -10798,6 +11351,66 @@ mod tests {
         assert_eq!(app.take_close_action(), Some(CloseAction::Quit));
         assert!(!app.any_vm_live());
         drop(run);
+    }
+
+    /// The phone's numeric fields take typed digits. What is typed is taken
+    /// when Enter is pressed, and anything that is not a digit never reaches
+    /// the field.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_number_typed_into_the_phones_field_is_taken_on_enter() {
+        use egui_kittest::{kittest::Queryable, Harness};
+        let mut field = Harness::builder()
+            .with_size(egui::vec2(320.0, 80.0))
+            .build_ui_state(
+                |ui, value: &mut u64| {
+                    typed_number_field(ui, value, 1, 2_000_000_000, "", true);
+                },
+                3_u64,
+            );
+        field.run();
+        field.get_by_role(egui::accesskit::Role::TextInput).click();
+        field.run();
+        field.get_by_role(egui::accesskit::Role::TextInput).type_text("x0y0");
+        field.run();
+        field.key_press(egui::Key::Enter);
+        field.run();
+
+        assert_eq!(*field.state(), 300);
+    }
+
+    /// A number past the field's range is cut to it; a field left with no
+    /// digits in it keeps the value it had.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_typed_number_past_the_range_is_cut_to_it() {
+        use egui_kittest::{kittest::Queryable, Harness};
+        let mut field = Harness::builder()
+            .with_size(egui::vec2(320.0, 80.0))
+            .build_ui_state(
+                |ui, value: &mut u64| {
+                    typed_number_field(ui, value, 1, 2_000_000_000, "", true);
+                },
+                3_u64,
+            );
+        field.run();
+        field.get_by_role(egui::accesskit::Role::TextInput).click();
+        field.run();
+        field
+            .get_by_role(egui::accesskit::Role::TextInput)
+            .type_text("9999999999");
+        field.run();
+        field.key_press(egui::Key::Enter);
+        field.run();
+        assert_eq!(*field.state(), 2_000_000_000);
+
+        field.get_by_role(egui::accesskit::Role::TextInput).click();
+        field.run();
+        field.get_by_role(egui::accesskit::Role::TextInput).type_text("x");
+        field.run();
+        field.key_press(egui::Key::Enter);
+        field.run();
+        assert_eq!(*field.state(), 2_000_000_000, "no digit typed, nothing changed");
     }
 
     /// The phone's console menu opens at its top. Scrolled to its end when

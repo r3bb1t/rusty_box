@@ -22,7 +22,7 @@ const GAP_CHARS: f32 = 2.0;
 /// The room a `Fill` column keeps however narrow the pane, in characters.
 const FILL_MIN_CHARS: f32 = 12.0;
 /// The horizontal padding inside a row, points.
-const ROW_PAD: f32 = 6.0;
+pub(crate) const ROW_PAD: f32 = 6.0;
 /// One level of tree indent, points.
 pub(crate) const TREE_INDENT: f32 = 16.0;
 
@@ -235,17 +235,20 @@ pub(crate) fn list_row(
         RowSense::Pick { .. } => egui::Sense::click(),
     };
     let (rect, response) = ui.allocate_exact_size(egui::vec2(width, ROW_HEIGHT), egui_sense);
-    let label = cells
-        .iter()
-        .map(Cell::plain_text)
-        .filter(|text| !text.is_empty())
-        .collect::<Vec<_>>()
-        .join("  ");
     let enabled = ui.is_enabled();
-    response.widget_info(|| match sense {
-        RowSense::Look => WidgetInfo::labeled(WidgetType::Label, enabled, &label),
-        RowSense::Pick { selected } => {
-            WidgetInfo::selected(WidgetType::SelectableLabel, enabled, selected, &label)
+    // The accessible label is built only where something asks for it.
+    response.widget_info(|| {
+        let label = cells
+            .iter()
+            .map(Cell::plain_text)
+            .filter(|text| !text.is_empty())
+            .collect::<Vec<_>>()
+            .join("  ");
+        match sense {
+            RowSense::Look => WidgetInfo::labeled(WidgetType::Label, enabled, &label),
+            RowSense::Pick { selected } => {
+                WidgetInfo::selected(WidgetType::SelectableLabel, enabled, selected, &label)
+            }
         }
     });
     if !ui.is_rect_visible(rect) {
@@ -271,20 +274,20 @@ pub(crate) fn list_row(
         );
     }
     for (cell, column) in cells.iter().zip(column_rects(rect, lead, cells, char_width)) {
-        if let CellText::Gauge(fraction, color) = cell.text {
-            let track = Rect::from_center_size(column.center(), egui::vec2(column.width(), 5.0));
-            painter.rect_filled(track, 2.0, BG_WELL);
-            let mut filled = track;
-            filled.set_width(track.width() * fraction);
-            painter.rect_filled(filled, 2.0, color);
-            continue;
-        }
         let galley = match &cell.text {
+            CellText::Gauge(fraction, color) => {
+                let track =
+                    Rect::from_center_size(column.center(), egui::vec2(column.width(), 5.0));
+                painter.rect_filled(track, 2.0, BG_WELL);
+                let mut filled = track;
+                filled.set_width(track.width() * fraction);
+                painter.rect_filled(filled, 2.0, *color);
+                continue;
+            }
             CellText::Plain(text, color) => {
                 painter.layout_no_wrap(text.clone(), mono_font(), *color)
             }
             CellText::Job(job) => ui.fonts_mut(|fonts| fonts.layout_job(job.clone())),
-            CellText::Gauge(..) => unreachable!("gauge painted above"),
         };
         let x = match cell.align {
             Align::Left => column.left(),
@@ -296,6 +299,22 @@ pub(crate) fn list_row(
             .galley(egui::pos2(x, y), galley, Color32::PLACEHOLDER);
     }
     response
+}
+
+/// Whether a listing row placed now would meet the visible area. A list of
+/// thousands asks this before it builds a row's strings, and calls
+/// [`skip_row`] for a row that would not be seen.
+pub(crate) fn row_visible(ui: &egui::Ui) -> bool {
+    let top = ui.next_widget_position().y;
+    let clip = ui.clip_rect();
+    top + ROW_HEIGHT >= clip.top() && top <= clip.bottom()
+}
+
+/// Leaves the room one listing row takes, drawing nothing: the rows after it
+/// stay where they were.
+pub(crate) fn skip_row(ui: &mut egui::Ui) {
+    let width = ui.available_width().floor();
+    ui.allocate_exact_size(egui::vec2(width, ROW_HEIGHT), egui::Sense::hover());
 }
 
 /// The column titles over a table whose rows are `cells` wide.
@@ -395,18 +414,54 @@ pub(crate) fn lead_chevron(ui: &egui::Ui, row: Rect, open: bool, color: Color32)
         .add(egui::Shape::convex_polygon(points, color, Stroke::NONE));
 }
 
+/// In a wrapping row, starts the next row when `width` does not fit in what
+/// is left of this one. A widget wraps by itself; a frame (a chip, a switch)
+/// takes whatever room the row has left and overflows it, so it asks first.
+/// A row's first item is never moved: nothing would be gained.
+pub(crate) fn wrap_before(ui: &mut egui::Ui, width: f32) {
+    let layout = *ui.layout();
+    if !layout.main_wrap || !layout.is_horizontal() {
+        return;
+    }
+    // In a wrapping layout `available_width` is the width after the wrap;
+    // what is left of this row is the width before it.
+    let at_row_start = ui.cursor().min.x <= ui.max_rect().min.x + 0.5;
+    if !at_row_start && ui.available_size_before_wrap().x < width {
+        ui.end_row();
+    }
+}
+
+/// The horizontal margin of a chip, points.
+const CHIP_MARGIN_X: i8 = 8;
+/// The width of a chip's border on both sides, points.
+const CHIP_BORDER: f32 = 2.0;
+
 /// A status chip: `text` in `color` on a tint of it.
 pub(crate) fn chip(ui: &mut egui::Ui, text: &str, color: Color32) -> egui::Response {
+    let text_width = ui
+        .painter()
+        .layout_no_wrap(text.to_owned(), FontId::proportional(TEXT_CAPTION), color)
+        .size()
+        .x;
+    wrap_before(ui, text_width + 2.0 * f32::from(CHIP_MARGIN_X) + CHIP_BORDER);
     egui::Frame::new()
         .fill(color.gamma_multiply(0.14))
         .stroke(Stroke::new(1.0_f32, color.gamma_multiply(0.55)))
         .corner_radius(10)
-        .inner_margin(egui::Margin::symmetric(8, 2))
+        .inner_margin(egui::Margin::symmetric(CHIP_MARGIN_X, 2))
         .show(ui, |ui| {
             ui.label(RichText::new(text).size(TEXT_CAPTION).color(color));
         })
         .response
 }
+
+/// The horizontal padding of a segmented switch's buttons, points.
+const SEGMENT_PADDING_X: f32 = 10.0;
+/// What a segmented switch's frame adds around its buttons: two points of
+/// margin and one of border on each side.
+const SEGMENT_FRAME_X: f32 = 6.0;
+/// The gap between a segmented switch's buttons, points.
+const SEGMENT_GAP: f32 = 2.0;
 
 /// A segmented switch over `options`: the picked one filled. Returns whether
 /// the pick changed.
@@ -416,14 +471,27 @@ pub(crate) fn segmented<T: Copy + PartialEq>(
     options: &[(T, &str)],
 ) -> bool {
     let mut changed = false;
+    let font = egui::TextStyle::Button.resolve(ui.style());
+    let buttons: f32 = options
+        .iter()
+        .map(|&(_, label)| {
+            ui.painter()
+                .layout_no_wrap(label.to_owned(), font.clone(), Color32::PLACEHOLDER)
+                .size()
+                .x
+                + 2.0 * SEGMENT_PADDING_X
+        })
+        .sum();
+    let gaps = SEGMENT_GAP * options.len().saturating_sub(1) as f32;
+    wrap_before(ui, buttons + gaps + SEGMENT_FRAME_X);
     egui::Frame::new()
         .fill(BG_WELL)
         .stroke(Stroke::new(1.0_f32, STROKE_HAIRLINE))
         .corner_radius(8)
         .inner_margin(egui::Margin::same(2))
         .show(ui, |ui| {
-            ui.spacing_mut().item_spacing.x = 2.0;
-            ui.spacing_mut().button_padding = egui::vec2(10.0, 3.0);
+            ui.spacing_mut().item_spacing.x = SEGMENT_GAP;
+            ui.spacing_mut().button_padding = egui::vec2(SEGMENT_PADDING_X, 3.0);
             ui.horizontal(|ui| {
                 for &(value, label) in options {
                     let selected = *current == value;

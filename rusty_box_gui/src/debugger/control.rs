@@ -12,6 +12,7 @@ use rusty_box::emulator::PowerState;
 
 use super::inspect::{DebugSnapshot, MemoryTarget, ViewRequest};
 use super::search::{FindOutcome, FindRequest};
+use super::windows::WindowsDiscovery;
 
 /// What the shell asked of the run.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -111,6 +112,10 @@ struct ControlState {
     /// The snapshot before `snapshot`, which the page compares against to
     /// mark what a step changed.
     previous: Option<Arc<DebugSnapshot>>,
+    /// The guest has executed since `snapshot` was read: a pause that
+    /// followed a run, or a step. A refresh that only changes the view finds
+    /// it clear, and then the guest stands exactly as `snapshot` shows it.
+    guest_ran: bool,
     /// The last search's outcome, and whether one is queued or running.
     find: Option<FindOutcome>,
     searching: bool,
@@ -123,6 +128,9 @@ pub(crate) struct RunControl {
     stop_flag: Arc<AtomicBool>,
     state: Mutex<ControlState>,
     changed: Condvar,
+    /// What the run's pauses have learned about the guest's structures. Only
+    /// the run thread reads it, so the lock is never contended.
+    discovery: Mutex<WindowsDiscovery>,
 }
 
 impl RunControl {
@@ -140,12 +148,14 @@ impl RunControl {
                 view: ViewRequest::default(),
                 snapshot: None,
                 previous: None,
+                guest_ran: false,
                 find: None,
                 searching: false,
                 note: None,
                 dump_outcomes: Vec::new(),
             }),
             changed: Condvar::new(),
+            discovery: Mutex::new(WindowsDiscovery::default()),
         }
     }
 
@@ -327,8 +337,13 @@ impl RunControl {
         // A new run: what the last one showed is no longer this guest.
         state.snapshot = None;
         state.previous = None;
+        state.guest_ran = false;
         state.find = None;
         state.searching = false;
+        *self
+            .discovery
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = WindowsDiscovery::default();
         match how {
             RunStart::PowerOn => {}
             RunStart::Restart => {
@@ -372,8 +387,12 @@ impl RunControl {
                 return BetweenRuns::End;
             }
             if let Some(task) = state.tasks.pop_front() {
-                if matches!(task, Task::DumpRam(_)) {
-                    state.dump_in_flight = true;
+                match task {
+                    Task::DumpRam(_) => state.dump_in_flight = true,
+                    // The step executes an instruction: the snapshot it
+                    // publishes follows the guest's move.
+                    Task::Step => state.guest_ran = true,
+                    Task::Refresh | Task::Find(_) => {}
                 }
                 return BetweenRuns::Perform(task);
             }
@@ -387,6 +406,8 @@ impl RunControl {
                 Wanted::Pause => {
                     if state.phase == RunPhase::Running {
                         state.phase = RunPhase::Paused;
+                        // The guest ran up to this pause.
+                        state.guest_ran = true;
                         return BetweenRuns::Perform(Task::Refresh);
                     }
                     state = self
@@ -402,12 +423,45 @@ impl RunControl {
         self.lock().view
     }
 
-    /// Shows `snapshot`; the one it replaces is kept as the comparison that
-    /// marks what changed.
+    /// Shows `snapshot`, which follows the guest's move; the one it replaces
+    /// is kept as the comparison that marks what changed.
     pub(crate) fn publish(&self, snapshot: DebugSnapshot) {
         let mut state = self.lock();
         state.previous = state.snapshot.take();
         state.snapshot = Some(Arc::new(snapshot));
+        state.guest_ran = false;
+    }
+
+    /// Shows `snapshot`, a reading of the guest as it stands at this pause.
+    /// When the guest ran since the last snapshot (a pause that followed a
+    /// run) that snapshot becomes the comparison; when only the view changed
+    /// (a page, a tab, a search) the comparison stays what the last step or
+    /// pause made it, so what changed is still marked.
+    pub(crate) fn publish_view(&self, snapshot: DebugSnapshot) {
+        let mut state = self.lock();
+        if state.guest_ran {
+            state.previous = state.snapshot.take();
+        }
+        state.snapshot = Some(Arc::new(snapshot));
+        state.guest_ran = false;
+    }
+
+    /// The snapshot shown, when the guest has not executed since it was
+    /// read: what a refresh that only changes the view may carry over.
+    pub(crate) fn unmoved_snapshot(&self) -> Option<Arc<DebugSnapshot>> {
+        let state = self.lock();
+        if state.guest_ran {
+            None
+        } else {
+            state.snapshot.clone()
+        }
+    }
+
+    /// What this run has learned about the guest's structure layouts.
+    pub(crate) fn discovery(&self) -> MutexGuard<'_, WindowsDiscovery> {
+        self.discovery
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Records a search's outcome; a hit becomes the memory pane's window.
@@ -592,6 +646,7 @@ mod tests {
             },
             stack: Vec::new(),
             process: None,
+            asked: crate::debugger::windows::SystemView::Off,
             system: crate::debugger::windows::SystemListing::NotAsked,
             symbols: crate::debugger::inspect::SymbolIndex::default(),
             memory_space: None,
@@ -651,14 +706,15 @@ mod tests {
             },
             stack: Vec::new(),
             process: None,
+            asked: crate::debugger::windows::SystemView::Off,
             system: crate::debugger::windows::SystemListing::NotAsked,
             symbols: SymbolIndex::default(),
             memory_space: None,
         }
     }
 
-    /// Each snapshot published keeps the one before it, which the page
-    /// compares against to draw what a step changed in red.
+    /// Each snapshot published after the guest moved keeps the one before
+    /// it, which the page compares against to draw what a step changed in red.
     #[test]
     fn a_published_snapshot_keeps_the_one_before_it() {
         let control = control();
@@ -669,6 +725,52 @@ mod tests {
         assert_eq!(previous.memory.start.value, 1);
         assert_eq!(control.snapshot().expect("shown").memory.start.value, 2);
     }
+
+    /// A step, then a refresh that only changes the view: what the step
+    /// changed is still compared against the state before the step.
+    #[test]
+    fn a_view_change_keeps_the_comparison_a_step_made() {
+        let control = control();
+        control.begin_run(RunStart::PowerOn);
+        control.pause();
+        assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::Refresh));
+        control.publish_view(empty_snapshot(1));
+        control.step();
+        assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::Step));
+        control.publish(empty_snapshot(2));
+        assert_eq!(control.previous_snapshot().expect("kept").memory.start.value, 1);
+
+        // Paging memory re-reads the same guest: the comparison stays.
+        control.set_view(ViewRequest {
+            memory: crate::debugger::inspect::MemoryTarget::Rsp,
+            ..ViewRequest::default()
+        });
+        assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::Refresh));
+        assert!(control.unmoved_snapshot().is_some(), "nothing executed since");
+        control.publish_view(empty_snapshot(3));
+        assert_eq!(control.previous_snapshot().expect("kept").memory.start.value, 1);
+        assert_eq!(control.snapshot().expect("shown").memory.start.value, 3);
+    }
+
+    /// A pause that follows a run is a new baseline, and its snapshot cannot
+    /// carry the last pause's structure reads over.
+    #[test]
+    fn a_pause_after_a_run_is_a_new_comparison_and_carries_nothing() {
+        let control = control();
+        control.begin_run(RunStart::PowerOn);
+        control.pause();
+        assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::Refresh));
+        control.publish_view(empty_snapshot(1));
+        assert!(control.unmoved_snapshot().is_some());
+        control.resume();
+        assert_eq!(control.next_between_runs(), BetweenRuns::Resume);
+        control.pause();
+        assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::Refresh));
+        assert!(control.unmoved_snapshot().is_none(), "the guest ran between the pauses");
+        control.publish_view(empty_snapshot(2));
+        assert_eq!(control.previous_snapshot().expect("kept").memory.start.value, 1);
+    }
+
 
     /// A search is taken only while paused, and a hit becomes the window.
     #[test]

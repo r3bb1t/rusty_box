@@ -47,6 +47,12 @@ pub(crate) const SPACE_GROUP: f32 = 12.0;
 pub(crate) const SPACE_CARD: i8 = 16;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) const SPACE_PAGE: i8 = 20;
+/// The page and card margins of a page that has little room (a short or
+/// narrow window): half of the roomy ones, so listings keep their rows.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) const SPACE_PAGE_COMPACT: i8 = 8;
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) const SPACE_CARD_COMPACT: i8 = 8;
 
 pub(crate) fn configure_shell_style(ctx: &egui::Context) {
     use egui::{style::Selection, Theme, ThemePreference, Vec2};
@@ -86,11 +92,16 @@ pub(crate) fn configure_shell_style(ctx: &egui::Context) {
 }
 
 pub(crate) fn shell_card_frame() -> egui::Frame {
+    shell_card_frame_with_margin(SPACE_CARD)
+}
+
+/// A card's frame with `margin` points inside its border.
+pub(crate) fn shell_card_frame_with_margin(margin: i8) -> egui::Frame {
     egui::Frame::new()
         .fill(BG_CARD)
         .stroke(Stroke::new(1.0_f32, STROKE_HAIRLINE))
         .corner_radius(12)
-        .inner_margin(egui::Margin::same(SPACE_CARD))
+        .inner_margin(egui::Margin::same(margin))
 }
 
 #[cfg(test)]

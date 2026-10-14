@@ -5,10 +5,6 @@
 //! address ranges. Their node layout and their flag bit positions move
 //! between Windows families, so both are selected by shape:
 //!
-//! - `XpX86` — Windows XP / Server 2003, x86. The node holds the page numbers
-//!   first, then the tree pointers; the flags are a 32-bit word with
-//!   `Protection` at bits 24..29 and no explicit `VadType` (image memory is
-//!   marked by `ImageMap`).
 //! - `AvlX64` — XP x64 / Server 2003 x64, Vista, Windows 7 (the `MM_AVL_TABLE`
 //!   form). The node holds the tree pointers first, then 64-bit page numbers;
 //!   the flags are a 64-bit word with `VadType` at bits 52..55 and
@@ -24,10 +20,6 @@
 /// Which Windows family's descriptor layout a guest uses.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum VadShape {
-    /// Windows XP / Server 2003, x86. Reached only by the 32-bit-kernel
-    /// reader; the decode and layout for it are tested here.
-    #[allow(dead_code)]
-    XpX86,
     AvlX64,
     BalancedNode,
 }
@@ -117,19 +109,6 @@ pub(crate) struct VadNodeLayout {
 /// The node layout for a shape.
 pub(crate) fn node_layout(shape: VadShape) -> VadNodeLayout {
     match shape {
-        // MMVAD (x86): StartingVpn@0, EndingVpn@4, Parent@8, LeftChild@0xC,
-        // RightChild@0x10, u (flags)@0x14.
-        VadShape::XpX86 => VadNodeLayout {
-            left: 0x0C,
-            right: 0x10,
-            start_vpn: 0x00,
-            end_vpn: 0x04,
-            start_vpn_high: None,
-            end_vpn_high: None,
-            flags: 0x14,
-            vpn_is_u64: false,
-            flags_is_u64: false,
-        },
         // MMVAD (x64 AVL): Balance/Parent@0, LeftChild@8, RightChild@0x10,
         // StartingVpn@0x18, EndingVpn@0x20, u (flags)@0x28.
         VadShape::AvlX64 => VadNodeLayout {
@@ -162,37 +141,17 @@ pub(crate) fn node_layout(shape: VadShape) -> VadNodeLayout {
 
 /// Decodes a descriptor's flags word for the given shape.
 pub(crate) fn decode_flags(flags: u64, shape: VadShape) -> VadInfo {
-    let (vad_type, protection_bits, private, image_map) = match shape {
-        // 32-bit flags: CommitCharge:19, PhysicalMapping, ImageMap(20),
-        // UserPhysicalPages, NoChange, WriteWatch, Protection(24..28),
-        // LargePages, MemCommit, PrivateMemory(31). No VadType field.
-        VadShape::XpX86 => (
-            None,
-            (flags >> 24) & 0x1F,
-            (flags >> 31) & 1 != 0,
-            (flags >> 20) & 1 != 0,
-        ),
+    let (vad_type, protection_bits, private) = match shape {
         // 64-bit flags: CommitCharge:51, NoChange, VadType(52..54), MemCommit,
         // Protection(56..60), Spare, PrivateMemory(63).
-        VadShape::AvlX64 => (
-            Some((flags >> 52) & 0x7),
-            (flags >> 56) & 0x1F,
-            (flags >> 63) & 1 != 0,
-            false,
-        ),
+        VadShape::AvlX64 => ((flags >> 52) & 0x7, (flags >> 56) & 0x1F, (flags >> 63) & 1 != 0),
         // 32-bit flags: Lock, LockContended, DeleteInProgress, NoChange,
         // VadType(4..6), Protection(7..11), PreferredNode, PageSize,
         // PrivateMemory(20).
-        VadShape::BalancedNode => (
-            Some((flags >> 4) & 0x7),
-            (flags >> 7) & 0x1F,
-            (flags >> 20) & 1 != 0,
-            false,
-        ),
+        VadShape::BalancedNode => ((flags >> 4) & 0x7, (flags >> 7) & 0x1F, (flags >> 20) & 1 != 0),
     };
-    // VadType 2 is VadImageMap; on XP x86 the ImageMap bit says the same.
-    let image = vad_type == Some(2) || image_map;
-    let kind = if image {
+    // VadType 2 is VadImageMap.
+    let kind = if vad_type == 2 {
         VadKind::Image
     } else if private {
         VadKind::Private
@@ -316,16 +275,6 @@ mod tests {
 
     #[test]
     fn flags_decode_per_shape() {
-        // XP x86: Protection = EXECUTE_READWRITE (6) at bit 24, PrivateMemory.
-        let xp = decode_flags((6 << 24) | (1 << 31), VadShape::XpX86);
-        assert_eq!(xp.kind, VadKind::Private);
-        assert_eq!(xp.protection, Some(WinProtection::ExecuteReadWrite));
-
-        // XP x86: ImageMap (bit 20) → image, Protection = ReadOnly.
-        let xp_image = decode_flags((1 << 20) | (1 << 24), VadShape::XpX86);
-        assert_eq!(xp_image.kind, VadKind::Image);
-        assert_eq!(xp_image.protection, Some(WinProtection::ReadOnly));
-
         // AVL x64: VadType 2 (image), Protection = ReadOnly (1) at bit 56.
         let img = decode_flags((2u64 << 52) | (1u64 << 56), VadShape::AvlX64);
         assert_eq!(img.kind, VadKind::Image);

@@ -6,7 +6,7 @@ use rusty_box::emulator::{Emulator, RunBudget, SliceEngine, StopReason};
 
 use super::control::{BetweenRuns, DebugNote, RunControl, Task};
 use super::dump::dump_ram;
-use super::inspect::read_snapshot;
+use super::inspect::{read_snapshot, DebugSnapshot};
 use super::search::find;
 
 /// Whether the engine can stop after one instruction.
@@ -70,7 +70,8 @@ pub(crate) fn perform<T: Instrumentation, E: SliceEngine<T>>(
             if let Some(gui) = emu.gui_mut() {
                 gui.show_ips(0);
             }
-            control.publish(read_snapshot(emu, &control.view()));
+            let snapshot = read_for(emu, control);
+            control.publish_view(snapshot);
             Ok(live(0))
         }
         Task::Step => match stepping {
@@ -79,7 +80,8 @@ pub(crate) fn perform<T: Instrumentation, E: SliceEngine<T>>(
                 let outcome = emu.step(RunBudget::Instructions(1))?;
                 emu.present_console_output();
                 emu.update_gui();
-                control.publish(read_snapshot(emu, &control.view()));
+                let snapshot = read_for(emu, control);
+                control.publish(snapshot);
                 let retired = emu.cpu_snapshot().icount.saturating_sub(before);
                 let after = match outcome.stop {
                     StopReason::GuestPowerOff | StopReason::CpuShutdown => MachineAfter::Over,
@@ -102,10 +104,25 @@ pub(crate) fn perform<T: Instrumentation, E: SliceEngine<T>>(
         Task::Find(request) => {
             let outcome = find(emu, control.view().cpu, &request, || control.ending());
             control.record_find(outcome);
-            control.publish(read_snapshot(emu, &control.view()));
+            let snapshot = read_for(emu, control);
+            control.publish_view(snapshot);
             Ok(live(0))
         }
     }
+}
+
+/// Reads the snapshot the shell's view asks for. What the guest's own
+/// structures gave the last snapshot is carried over when the guest has not
+/// moved and the view still asks for the same processor and listing; a view
+/// that only changed where memory is shown does not walk them again.
+fn read_for<T: Instrumentation, E: SliceEngine<T>>(
+    emu: &mut Emulator<T, E>,
+    control: &RunControl,
+) -> DebugSnapshot {
+    let view = control.view();
+    let unmoved = control.unmoved_snapshot();
+    let mut discovery = control.discovery();
+    read_snapshot(emu, &view, &mut discovery, unmoved.as_deref())
 }
 
 /// Serves the shell until it lets the machine run on or ends the run.

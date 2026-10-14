@@ -10,20 +10,20 @@ use rusty_box::cpu::LinearRange;
 /// never spins the run thread.
 pub(crate) const MAX_THREADS: usize = 1 << 16;
 
-/// One thread of a process. A kernel thread has no user `TEB`, so no stack and
-/// no name; a name is kept only where Windows stores one (Windows 10 1607+).
+/// One thread of a process. A kernel thread has no user `TEB`, so no stack.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct WinThread {
     /// `ETHREAD.Cid.UniqueThread`.
     pub(crate) tid: u64,
-    /// `ETHREAD.StartAddress`: where the thread began.
+    /// Where the thread began: `Win32StartAddress` when it is a user address,
+    /// else the kernel `StartAddress`; 0 when neither field was found.
     pub(crate) start: u64,
     /// `KTHREAD.Teb`: the user thread environment block, when it has one.
     pub(crate) teb: Option<u64>,
     /// The user stack from the `TEB`'s `NtTib`: `StackLimit..StackBase`.
     pub(crate) stack: Option<LinearRange>,
-    pub(crate) name: Option<String>,
-    /// `TEB.SameTebFlags.HasFiberData`: the thread runs fibres.
+    /// `TEB.NtTib.FiberData` holds a fibre's address, not the TEB version
+    /// number it shares its slot with: the thread has become a fibre.
     pub(crate) uses_fibers: bool,
 }
 
@@ -76,7 +76,6 @@ mod tests {
             start: 0,
             teb: stack.map(|_| 0x7FF0_0000),
             stack,
-            name: None,
             uses_fibers: false,
         }
     }
@@ -123,17 +122,16 @@ mod tests {
 
     #[test]
     fn a_thread_without_a_teb_lists_without_a_stack() {
-        // A kernel thread: an ID and a start address, no TEB, stack or name.
+        // A kernel thread: an ID and a start address, no TEB or stack.
         let kernel_thread = WinThread {
             tid: 0x44,
             start: 0xFFFF_F800_0100_0000,
             teb: None,
             stack: None,
-            name: None,
             uses_fibers: false,
         };
         // It is never a stack owner, whatever region is asked.
         assert_eq!(stack_owner(0, u64::MAX, std::slice::from_ref(&kernel_thread)), None);
-        assert!(kernel_thread.stack.is_none() && kernel_thread.name.is_none());
+        assert!(kernel_thread.stack.is_none());
     }
 }

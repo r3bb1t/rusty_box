@@ -4,7 +4,7 @@
 use rusty_box::cpu::{CodeSize, CpuDebugView, Fetched, Instrumentation};
 use rusty_box::emulator::{DebugCpu, Emulator, SliceEngine};
 
-use super::windows::{read_symbols, read_system, SystemListing, SystemView};
+use super::windows::{read_windows, SystemListing, SystemView, WindowsDiscovery};
 
 pub(crate) const ROW_BYTES: usize = 16;
 pub(crate) const MEMORY_ROWS: usize = 32;
@@ -25,7 +25,7 @@ pub(crate) enum AddressSpace {
     Process { cr3: u64 },
 }
 
-/// An address in one of the two spaces the page reads (R4).
+/// An address in one of the spaces the page reads (R4).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct GuestAddress {
     pub(crate) space: AddressSpace,
@@ -133,7 +133,8 @@ pub(crate) struct DebugSnapshot {
     /// The Windows process the shown processor is running for, by its image
     /// path, when the guest's structures name one.
     pub(crate) process: Option<String>,
-    /// What `ViewRequest::system` asked to be listed.
+    /// What `ViewRequest::system` asked to be listed, and what it gave.
+    pub(crate) asked: SystemView,
     pub(crate) system: SystemListing,
     /// The modules the code, stack and memory panes name addresses against:
     /// the shown processor's process and the kernel.
@@ -204,10 +205,17 @@ pub(crate) fn linear_of(base: u64, offset: u64, size: CodeSize) -> u64 {
 }
 
 /// Reads one pause through processor `view.cpu`, or through the boot
-/// processor when that index no longer exists.
+/// processor when that index no longer exists. `unmoved` is the snapshot
+/// shown, when the guest has not executed since it was read: the guest's own
+/// structures (its process, symbols and listing) are carried over from it when
+/// it was read through the same processor for the same request, and read
+/// afresh otherwise. `discovery` keeps what those reads learn of the guest's
+/// layouts.
 pub(crate) fn read_snapshot<T: Instrumentation, E: SliceEngine<T>>(
     emu: &mut Emulator<T, E>,
     view: &ViewRequest,
+    discovery: &mut WindowsDiscovery,
+    unmoved: Option<&DebugSnapshot>,
 ) -> DebugSnapshot {
     let mut cpus = Vec::new();
     for index in 0..emu.cpu_count() {
@@ -230,6 +238,7 @@ pub(crate) fn read_snapshot<T: Instrumentation, E: SliceEngine<T>>(
             },
             stack: Vec::new(),
             process: None,
+            asked: SystemView::Off,
             system: SystemListing::NotAsked,
             symbols: SymbolIndex::default(),
             memory_space: None,
@@ -253,9 +262,15 @@ pub(crate) fn read_snapshot<T: Instrumentation, E: SliceEngine<T>>(
     };
     let memory = read_memory(&mut cpu, start);
     let stack = read_stack(&mut cpu, rsp, slot_bytes(size));
-    let process = windows_image_path(&mut cpu, &shown);
-    let symbols = read_symbols(&mut cpu, &shown);
-    let system = read_system(&mut cpu, &shown, view.system);
+    let carried = unmoved.filter(|last| last.cpu == index && last.asked == view.system);
+    let (process, symbols, system) = match carried {
+        Some(last) => (last.process.clone(), last.symbols.clone(), last.system.clone()),
+        None => {
+            let process = windows_image_path(&mut cpu, &shown);
+            let windows = read_windows(&mut cpu, &shown, view.system, discovery);
+            (process, windows.symbols, windows.system)
+        }
+    };
     let memory_space = match start.space {
         AddressSpace::Process { cr3 } => Some(cr3),
         AddressSpace::Linear | AddressSpace::Physical => None,
@@ -267,6 +282,7 @@ pub(crate) fn read_snapshot<T: Instrumentation, E: SliceEngine<T>>(
         memory,
         stack,
         process,
+        asked: view.system,
         system,
         symbols,
         memory_space,
@@ -608,7 +624,12 @@ mod tests {
         machine.reg_write(X86Reg::Rip, code);
         machine.reg_write(X86Reg::Rax, 0x2A);
 
-        let snapshot = read_snapshot(&mut machine, &ViewRequest::default());
+        let snapshot = read_snapshot(
+            &mut machine,
+            &ViewRequest::default(),
+            &mut WindowsDiscovery::default(),
+            None,
+        );
 
         assert_eq!(snapshot.cpus.len(), 1);
         assert_eq!(snapshot.cpus[0].registers.rax, 0x2A);
@@ -650,6 +671,8 @@ mod tests {
                     memory: MemoryTarget::At(target),
                     ..ViewRequest::default()
                 },
+                &mut WindowsDiscovery::default(),
+                None,
             );
             assert_eq!(snapshot.memory.rows.len(), MEMORY_ROWS, "{target:?}");
             assert!(
@@ -668,8 +691,35 @@ mod tests {
                 cpu: 5,
                 ..ViewRequest::default()
             },
+            &mut WindowsDiscovery::default(),
+            None,
         );
         assert_eq!(snapshot.cpu, 0);
+    }
+
+    /// A refresh that only moves the memory window, with the guest unmoved,
+    /// carries the guest-structure reads over instead of walking them again.
+    #[test]
+    fn an_unmoved_guest_carries_its_structure_reads_into_the_next_snapshot() {
+        let mut machine = long_mode_machine();
+        let mut discovery = WindowsDiscovery::default();
+        let mut first = read_snapshot(&mut machine, &ViewRequest::default(), &mut discovery, None);
+        // A marker no real read could produce, so a re-read would drop it.
+        first.process = Some("carried.exe".to_owned());
+        let paged = ViewRequest {
+            memory: MemoryTarget::Rsp,
+            ..ViewRequest::default()
+        };
+        let carried = read_snapshot(&mut machine, &paged, &mut discovery, Some(&first));
+        assert_eq!(carried.process.as_deref(), Some("carried.exe"));
+        // A different listing asked for is read afresh.
+        let listed = ViewRequest {
+            system: SystemView::KernelModules,
+            ..ViewRequest::default()
+        };
+        let read = read_snapshot(&mut machine, &listed, &mut discovery, Some(&first));
+        assert_eq!(read.process, None);
+        assert_eq!(read.asked, SystemView::KernelModules);
     }
 
     #[test]

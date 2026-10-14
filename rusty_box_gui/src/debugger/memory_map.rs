@@ -4,19 +4,21 @@
 //! The page-table map built here is the foundation: it walks the process's
 //! own paging structures (`DebugCpu::dbg_page_mappings_in`) for the pages
 //! actually mapped, and labels them with the modules the loader list names
-//! and the sections their PE headers declare. A later pass can overlay
-//! Windows' own region records (the VAD tree) to add reserved-but-unmapped
-//! regions and Windows' protection and type; this map stands on its own
-//! without it.
+//! and the sections their PE headers declare. Windows' own region records
+//! (the VAD tree) can be overlaid to add reserved-but-unmapped regions and
+//! Windows' protection and type; the map stands on its own without them.
 //!
-//! The builder [`build`] takes plain data — the mappings and the module
+//! The builders [`build`] and [`build_with_vads`] take plain data — the
+//! mappings (in address order, as the walk reports them) and the module
 //! layouts — so the region logic is tested without a machine.
+
+use std::collections::BTreeMap;
 
 use rusty_box::cpu::PageMapping;
 
 use super::pe::PeSection;
 use super::threads::{stack_owner, WinThread};
-use super::vad::{VadInfo, VadRegion};
+use super::vad::{VadInfo, VadKind, VadRegion};
 
 const PAGE: u64 = 0x1000;
 
@@ -44,7 +46,8 @@ pub(crate) struct MapRegion {
     pub(crate) access: Option<RegionAccess>,
     pub(crate) owner: RegionOwner,
     /// Windows' own record of this region (type and protection), when the
-    /// VAD tree was read and a VAD covers it.
+    /// VAD tree was read and a VAD covers its start. A region never spans two
+    /// VADs.
     pub(crate) vad: Option<VadInfo>,
 }
 
@@ -72,7 +75,7 @@ pub(crate) enum RegionOwner {
     },
     /// A thread's user stack, named from its `TEB` by [`label_stacks`].
     Stack { tid: u64 },
-    /// Mapped memory in no module: heaps, the PEB, mapped files.
+    /// Mapped or reserved memory in no module: heaps, the PEB, mapped files.
     Private,
 }
 
@@ -107,11 +110,13 @@ pub(crate) enum MapGroup {
     Region(usize),
 }
 
-/// The map's regions grouped by module, in address order: a run of a
-/// module's header and section regions becomes one `Module`; a private
-/// region becomes a `Region`.
+/// The map's regions grouped by module, in address order: all of a module's
+/// header and section regions become one `Module` at the module's first
+/// region, however much private memory lies between them; every other region
+/// becomes a `Region`.
 pub(crate) fn group(map: &MemoryMap) -> Vec<MapGroup> {
     let mut groups: Vec<MapGroup> = Vec::new();
+    let mut by_base: BTreeMap<u64, usize> = BTreeMap::new();
     for (index, region) in map.regions.iter().enumerate() {
         let (base, name) = match &region.owner {
             RegionOwner::Header { base, module } | RegionOwner::Section { base, module, .. } => {
@@ -122,25 +127,27 @@ pub(crate) fn group(map: &MemoryMap) -> Vec<MapGroup> {
                 continue;
             }
         };
-        match groups.last_mut() {
+        match by_base.get(&base).and_then(|&at| groups.get_mut(at)) {
             Some(MapGroup::Module {
-                base: group_base,
                 regions,
                 resident_pages,
                 total_pages,
                 ..
-            }) if *group_base == base => {
+            }) => {
                 regions.push(index);
                 *resident_pages += region.resident_pages;
                 *total_pages += region.total_pages;
             }
-            _ => groups.push(MapGroup::Module {
-                base,
-                name: name.to_owned(),
-                regions: vec![index],
-                resident_pages: region.resident_pages,
-                total_pages: region.total_pages,
-            }),
+            Some(MapGroup::Region(_)) | None => {
+                by_base.insert(base, groups.len());
+                groups.push(MapGroup::Module {
+                    base,
+                    name: name.to_owned(),
+                    regions: vec![index],
+                    resident_pages: region.resident_pages,
+                    total_pages: region.total_pages,
+                });
+            }
         }
     }
     groups
@@ -155,6 +162,13 @@ struct Label {
     section_access: Option<RegionAccess>,
 }
 
+/// A half-open span of addresses, `start..end`.
+#[derive(Clone, Copy)]
+struct Span {
+    start: u64,
+    end: u64,
+}
+
 fn page_down(address: u64) -> u64 {
     address & !(PAGE - 1)
 }
@@ -163,14 +177,18 @@ fn page_up(address: u64) -> u64 {
     address.wrapping_add(PAGE - 1) & !(PAGE - 1)
 }
 
-/// The spans the modules label, in address order and without overlap: a
-/// header page, then one span per section.
+/// The spans the modules label, in address order: a header page, then one
+/// span per section. A module or section whose extent would run past the top
+/// of the address space is not labelled rather than wrapped.
 fn module_labels(modules: &[ModuleLayout]) -> Vec<Label> {
     let mut labels = Vec::new();
     for module in modules {
+        let Some(header_end) = module.base.checked_add(PAGE) else {
+            continue;
+        };
         labels.push(Label {
             start: module.base,
-            end: module.base + PAGE,
+            end: header_end,
             owner: RegionOwner::Header {
                 base: module.base,
                 module: module.name.clone(),
@@ -178,9 +196,19 @@ fn module_labels(modules: &[ModuleLayout]) -> Vec<Label> {
             section_access: None,
         });
         for section in &module.sections {
-            let start = (module.base + u64::from(section.rva)).max(module.base + PAGE);
-            let start = page_down(start);
-            let end = page_up(module.base + u64::from(section.rva) + u64::from(section.virtual_size));
+            // The loader sizes a section by VirtualSize, and by SizeOfRawData
+            // when VirtualSize is zero.
+            let size = if section.virtual_size == 0 {
+                section.raw_size
+            } else {
+                section.virtual_size
+            };
+            let first = module.base.saturating_add(u64::from(section.rva));
+            let Some(last) = first.checked_add(u64::from(size)) else {
+                continue;
+            };
+            let start = page_down(first.max(header_end));
+            let end = page_up(last);
             if end <= start {
                 continue;
             }
@@ -205,14 +233,52 @@ fn module_labels(modules: &[ModuleLayout]) -> Vec<Label> {
     labels
 }
 
+/// The labels' spans merged into disjoint spans in address order, for
+/// finding the label a page lies in.
+fn label_spans(labels: &[Label]) -> Vec<Span> {
+    let mut spans: Vec<Span> = Vec::new();
+    for label in labels {
+        match spans.last_mut() {
+            Some(last) if label.start <= last.end => last.end = last.end.max(label.end),
+            _ => spans.push(Span {
+                start: label.start,
+                end: label.end,
+            }),
+        }
+    }
+    spans
+}
+
+/// The span of `spans` (disjoint, in address order) holding `address`.
+fn span_at(spans: &[Span], address: u64) -> Option<Span> {
+    let after = spans.partition_point(|span| span.start <= address);
+    after
+        .checked_sub(1)
+        .map(|at| spans[at])
+        .filter(|span| address < span.end)
+}
+
+/// The index of the VAD of `vads` (disjoint, in address order) holding
+/// `address`.
+fn vad_covering(vads: &[VadRegion], address: u64) -> Option<usize> {
+    let after = vads.partition_point(|vad| vad.start <= address);
+    after
+        .checked_sub(1)
+        .filter(|&at| address < vads[at].end)
+}
+
 /// The combined access of every mapped page in `[lo, hi)`, and how many
-/// there are.
+/// there are. `mappings` are in address order and do not overlap.
 fn resident(mappings: &[PageMapping], lo: u64, hi: u64) -> (u64, Option<RegionAccess>) {
+    let first = mappings.partition_point(|mapping| mapping.linear.saturating_add(mapping.size) <= lo);
     let mut pages = 0u64;
     let mut access: Option<RegionAccess> = None;
-    for mapping in mappings {
+    for mapping in &mappings[first..] {
+        if mapping.linear >= hi {
+            break;
+        }
         let start = mapping.linear.max(lo);
-        let end = (mapping.linear + mapping.size).min(hi);
+        let end = mapping.linear.saturating_add(mapping.size).min(hi);
         if start >= end {
             continue;
         }
@@ -239,73 +305,118 @@ fn resident(mappings: &[PageMapping], lo: u64, hi: u64) -> (u64, Option<RegionAc
 /// Builds a process's page-table memory map from the mapped pages and the
 /// module layouts. `mappings` are in address order, as the walk reports them.
 pub(crate) fn build(mappings: &[PageMapping], modules: &[ModuleLayout]) -> MemoryMap {
-    let labels = module_labels(modules);
-    let mut regions = Vec::new();
-
-    // Each module label becomes a region, residency read from the mappings.
-    for label in &labels {
-        let total_pages = (label.end - label.start) / PAGE;
-        let (resident_pages, observed) = resident(mappings, label.start, label.end);
-        let access = observed.or(label.section_access);
-        regions.push(MapRegion {
-            start: label.start,
-            size: label.end - label.start,
-            resident_pages,
-            total_pages,
-            access,
-            owner: label.owner.clone(),
-            vad: None,
-        });
-    }
-
-    // Mapped pages in no label are private memory: contiguous runs of one
-    // access become one region.
-    let mut private = private_runs(mappings, &labels);
-    regions.append(&mut private);
-
-    regions.sort_by_key(|region| region.start);
-    MemoryMap {
-        origin: MapOrigin::PageTables,
-        regions,
-    }
+    assemble(mappings, modules, None)
 }
 
-/// The page-table map with Windows' VAD records overlaid: every region is
-/// annotated with the VAD that covers its start, and each VAD that no mapped
-/// region overlaps is added as a reserved row (resident 0), so reserved
-/// memory and Windows' type and protection both show.
+/// The page-table map with Windows' VAD records overlaid. Mapped memory is
+/// split where one VAD ends and the next begins, so every region carries the
+/// type and protection of the one VAD it lies in; each stretch of a VAD that
+/// no mapped region covers is added as a reserved row (resident 0). An image
+/// view whose pages a listed module's sections cover adds none: the module
+/// owns its padding.
 pub(crate) fn build_with_vads(
     mappings: &[PageMapping],
     modules: &[ModuleLayout],
     vads: &[VadRegion],
 ) -> MemoryMap {
-    let mut map = build(mappings, modules);
-    map.origin = MapOrigin::WindowsRecords;
-    for region in &mut map.regions {
-        region.vad = vads
-            .iter()
-            .find(|vad| vad.start <= region.start && region.start < vad.end)
-            .map(|vad| vad.info);
+    let mut ordered = vads.to_vec();
+    ordered.sort_by_key(|vad| vad.start);
+    assemble(mappings, modules, Some(&ordered))
+}
+
+fn assemble(
+    mappings: &[PageMapping],
+    modules: &[ModuleLayout],
+    vads: Option<&[VadRegion]>,
+) -> MemoryMap {
+    let records = vads.unwrap_or(&[]);
+    let labels = module_labels(modules);
+    let spans = label_spans(&labels);
+    let mut regions = Vec::with_capacity(labels.len());
+
+    // Each module label becomes a region, residency read from the mappings.
+    for label in &labels {
+        let total_pages = (label.end - label.start) / PAGE;
+        let (resident_pages, observed) = resident(mappings, label.start, label.end);
+        regions.push(MapRegion {
+            start: label.start,
+            size: label.end - label.start,
+            resident_pages,
+            total_pages,
+            access: observed.or(label.section_access),
+            owner: label.owner.clone(),
+            vad: vad_covering(records, label.start).map(|at| records[at].info),
+        });
     }
+
+    // Mapped pages in no label are private memory: contiguous runs of one
+    // access inside one VAD become one region.
+    regions.append(&mut private_runs(mappings, &spans, records));
+    regions.sort_by_key(|region| region.start);
+
+    let origin = match vads {
+        Some(_) => {
+            let mut reserved = reserved_regions(&regions, records);
+            regions.append(&mut reserved);
+            regions.sort_by_key(|region| region.start);
+            MapOrigin::WindowsRecords
+        }
+        None => MapOrigin::PageTables,
+    };
+    MemoryMap { origin, regions }
+}
+
+/// The stretches of each VAD that no region of `regions` (in address order)
+/// covers, as reserved rows carrying the VAD's record.
+fn reserved_regions(regions: &[MapRegion], vads: &[VadRegion]) -> Vec<MapRegion> {
+    let mut reserved = Vec::new();
     for vad in vads {
-        let overlaps = map
-            .regions
-            .iter()
-            .any(|region| region.start < vad.end && region.start + region.size > vad.start);
-        if !overlaps {
-            map.regions.push(MapRegion {
-                start: vad.start,
-                size: vad.end - vad.start,
+        let first = regions
+            .partition_point(|region| region.start.saturating_add(region.size) <= vad.start);
+        let mut cursor = vad.start;
+        let mut module_owned = false;
+        let mut gaps: Vec<Span> = Vec::new();
+        for region in &regions[first..] {
+            if region.start >= vad.end {
+                break;
+            }
+            if matches!(
+                region.owner,
+                RegionOwner::Header { .. } | RegionOwner::Section { .. }
+            ) {
+                module_owned = true;
+            }
+            if region.start > cursor {
+                gaps.push(Span {
+                    start: cursor,
+                    end: region.start,
+                });
+            }
+            cursor = cursor.max(region.start.saturating_add(region.size));
+        }
+        if cursor < vad.end {
+            gaps.push(Span {
+                start: cursor,
+                end: vad.end,
+            });
+        }
+        if vad.info.kind == VadKind::Image && module_owned {
+            continue;
+        }
+        for gap in gaps {
+            let size = gap.end - gap.start;
+            reserved.push(MapRegion {
+                start: gap.start,
+                size,
                 resident_pages: 0,
-                total_pages: (vad.end - vad.start) / PAGE,
+                total_pages: size / PAGE,
                 access: None,
                 owner: RegionOwner::Private,
                 vad: Some(vad.info),
             });
         }
     }
-    map.regions.sort_by_key(|region| region.start);
-    map
+    reserved
 }
 
 /// Renames each private region that lies wholly inside a thread's user stack to
@@ -322,17 +433,24 @@ pub(crate) fn label_stacks(map: &mut MemoryMap, threads: &[WinThread]) {
     }
 }
 
+/// A run of mapped private pages being built.
+struct OpenRun {
+    region: MapRegion,
+    /// The VAD, by index, every page of the run lies in.
+    vad: Option<usize>,
+}
+
 /// The parts of the mapped pages that no label covers, as private regions:
-/// a run breaks at a gap in the mapping, at a label's edge, or where the
-/// access changes.
-fn private_runs(mappings: &[PageMapping], labels: &[Label]) -> Vec<MapRegion> {
+/// a run breaks at a gap in the mapping, at a label's edge, at a VAD's edge,
+/// or where the access changes.
+fn private_runs(mappings: &[PageMapping], spans: &[Span], vads: &[VadRegion]) -> Vec<MapRegion> {
     let mut regions = Vec::new();
-    let mut run: Option<MapRegion> = None;
+    let mut run: Option<OpenRun> = None;
     for mapping in mappings {
-        // Each 4 KiB page of the mapping, so a label edge inside a large
-        // page splits it cleanly.
+        // Each 4 KiB page of the mapping, so a label or VAD edge inside a
+        // large page splits it cleanly.
         let mut page = mapping.linear;
-        let end = mapping.linear + mapping.size;
+        let end = mapping.linear.saturating_add(mapping.size);
         let access = RegionAccess {
             user: mapping.access.user,
             writable: mapping.access.writable,
@@ -340,56 +458,55 @@ fn private_runs(mappings: &[PageMapping], labels: &[Label]) -> Vec<MapRegion> {
             observed: true,
         };
         while page < end {
-            if labelled(labels, page) {
-                if let Some(region) = run.take() {
-                    regions.push(region);
+            if let Some(span) = span_at(spans, page) {
+                if let Some(open) = run.take() {
+                    regions.push(open.region);
                 }
-                page += PAGE;
+                page = span.end;
                 continue;
             }
+            let vad = vad_covering(vads, page);
             match &mut run {
-                Some(region)
-                    if region.start + region.size == page
-                        && region.access == Some(access) =>
+                Some(open)
+                    if open.region.start + open.region.size == page
+                        && open.region.access == Some(access)
+                        && open.vad == vad =>
                 {
-                    region.size += PAGE;
-                    region.resident_pages += 1;
-                    region.total_pages += 1;
+                    open.region.size += PAGE;
+                    open.region.resident_pages += 1;
+                    open.region.total_pages += 1;
                 }
                 _ => {
-                    if let Some(region) = run.take() {
-                        regions.push(region);
+                    if let Some(open) = run.take() {
+                        regions.push(open.region);
                     }
-                    run = Some(MapRegion {
-                        start: page,
-                        size: PAGE,
-                        resident_pages: 1,
-                        total_pages: 1,
-                        access: Some(access),
-                        owner: RegionOwner::Private,
-                        vad: None,
+                    run = Some(OpenRun {
+                        region: MapRegion {
+                            start: page,
+                            size: PAGE,
+                            resident_pages: 1,
+                            total_pages: 1,
+                            access: Some(access),
+                            owner: RegionOwner::Private,
+                            vad: vad.map(|at| vads[at].info),
+                        },
+                        vad,
                     });
                 }
             }
             page += PAGE;
         }
     }
-    if let Some(region) = run.take() {
-        regions.push(region);
+    if let Some(open) = run.take() {
+        regions.push(open.region);
     }
     regions
-}
-
-/// Whether the page at `address` lies in any label.
-fn labelled(labels: &[Label], address: u64) -> bool {
-    labels
-        .iter()
-        .any(|label| label.start <= address && address < label.end)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::debugger::vad::WinProtection;
     use rusty_box::cpu::PageAccess;
 
     fn map(linear: u64, size: u64, writable: bool, executable: bool) -> PageMapping {
@@ -415,6 +532,17 @@ mod tests {
             writable,
             executable,
             code: executable,
+        }
+    }
+
+    fn vad(start: u64, end: u64, kind: VadKind) -> VadRegion {
+        VadRegion {
+            start,
+            end,
+            info: VadInfo {
+                kind,
+                protection: Some(WinProtection::ReadWrite),
+            },
         }
     }
 
@@ -536,6 +664,133 @@ mod tests {
         assert!(regions.windows(2).all(|w| w[0].start <= w[1].start));
     }
 
+    /// A reservation with a few committed pages: the committed pages are one
+    /// region and the reserved remainder above and below are reserved rows,
+    /// all carrying the VAD's record.
+    #[test]
+    fn a_vad_with_committed_pages_shows_its_reserved_remainder() {
+        let mappings = [map(0x20_0000, 3 * PAGE, true, false)];
+        let vads = [vad(0x10_0000, 0x30_0000, VadKind::Private)];
+        let built = build_with_vads(&mappings, &[], &vads);
+        assert_eq!(built.origin, MapOrigin::WindowsRecords);
+        let shape: Vec<(u64, u64, u64)> = built
+            .regions
+            .iter()
+            .map(|r| (r.start, r.size, r.resident_pages))
+            .collect();
+        assert_eq!(
+            shape,
+            [
+                (0x10_0000, 0x10_0000, 0),
+                (0x20_0000, 3 * PAGE, 3),
+                (0x20_3000, 0x10_0000 - 3 * PAGE, 0),
+            ]
+        );
+        assert!(built.regions.iter().all(|r| r.vad.map(|v| v.kind) == Some(VadKind::Private)));
+    }
+
+    /// Two adjacent VADs whose pages carry the same rights are two regions,
+    /// each with its own VAD's type — not one run labelled by the first.
+    #[test]
+    fn adjacent_vads_with_the_same_page_rights_stay_separate() {
+        let mappings = [map(0x40_0000, 4 * PAGE, true, false)];
+        let vads = [
+            vad(0x40_0000, 0x40_2000, VadKind::Private),
+            vad(0x40_2000, 0x40_4000, VadKind::Mapped),
+        ];
+        let built = build_with_vads(&mappings, &[], &vads);
+        assert_eq!(built.regions.len(), 2);
+        assert_eq!(built.regions[0].vad.map(|v| v.kind), Some(VadKind::Private));
+        assert_eq!(built.regions[0].size, 2 * PAGE);
+        assert_eq!(built.regions[1].vad.map(|v| v.kind), Some(VadKind::Mapped));
+        assert_eq!(built.regions[1].start, 0x40_2000);
+    }
+
+    /// An image view that a listed module's sections cover adds no reserved
+    /// rows for its non-resident pages: the module row already accounts for
+    /// them. An image view no module claims does, so an unlisted image shows.
+    #[test]
+    fn an_image_vad_adds_reserved_rows_only_when_no_listed_module_owns_it() {
+        let base = 0x0040_0000u64;
+        let module = ModuleLayout {
+            base,
+            name: "app.exe".to_owned(),
+            sections: vec![section(".text", 0x1000, 0x2000, false, true)],
+        };
+        let mappings = [map(base, PAGE, false, false)];
+        let vads = [
+            vad(base, base + 0x4000, VadKind::Image),
+            vad(0x5000_0000, 0x5000_8000, VadKind::Image),
+        ];
+        let built = build_with_vads(&mappings, std::slice::from_ref(&module), &vads);
+        // Header + .text for the module; one reserved row for the unlisted image.
+        let reserved: Vec<&MapRegion> = built
+            .regions
+            .iter()
+            .filter(|r| r.owner == RegionOwner::Private)
+            .collect();
+        assert_eq!(reserved.len(), 1);
+        assert_eq!((reserved[0].start, reserved[0].size), (0x5000_0000, 0x8000));
+        assert_eq!(reserved[0].vad.map(|v| v.kind), Some(VadKind::Image));
+        assert_eq!(built.regions.len(), 3);
+    }
+
+    /// A section with VirtualSize 0 is sized by SizeOfRawData, as the loader
+    /// does, so its pages stay in the module instead of becoming private runs.
+    #[test]
+    fn a_section_with_no_virtual_size_is_sized_by_its_raw_size() {
+        let base = 0x0040_0000u64;
+        let mut text = section(".text", 0x1000, 0, false, true);
+        text.raw_size = 0x2000;
+        let module = ModuleLayout {
+            base,
+            name: "packed.exe".to_owned(),
+            sections: vec![text],
+        };
+        let mappings = [map(base + 0x1000, 2 * PAGE, false, true)];
+        let regions = build(&mappings, std::slice::from_ref(&module)).regions;
+        assert_eq!(regions.len(), 2);
+        assert_eq!((regions[1].start, regions[1].size), (base + 0x1000, 2 * PAGE));
+        assert!(regions.iter().all(|r| r.owner != RegionOwner::Private));
+    }
+
+    /// Private memory lying between two sections of one module does not split
+    /// the module into two rows.
+    #[test]
+    fn a_private_row_inside_a_module_does_not_split_its_group() {
+        let base = 0x0040_0000u64;
+        let module = ModuleLayout {
+            base,
+            name: "gap.dll".to_owned(),
+            sections: vec![
+                section(".text", 0x1000, 0x1000, false, true),
+                section(".data", 0x4000, 0x1000, true, false),
+            ],
+        };
+        // A mapped page in the unlabelled gap between .text and .data.
+        let mappings = [map(base + 0x2000, PAGE, true, false)];
+        let built = build(&mappings, std::slice::from_ref(&module));
+        let groups = group(&built);
+        let modules = groups
+            .iter()
+            .filter(|group| matches!(group, MapGroup::Module { .. }))
+            .count();
+        assert_eq!(modules, 1);
+        assert!(groups.iter().any(|group| matches!(group, MapGroup::Region(_))));
+    }
+
+    /// A base so high that its header page would wrap is left out, not
+    /// wrapped into a region with an underflowed size.
+    #[test]
+    fn a_module_at_the_top_of_the_address_space_is_skipped() {
+        let module = ModuleLayout {
+            base: 0xFFFF_FFFF_FFFF_F800,
+            name: "wild.dll".to_owned(),
+            sections: vec![section(".text", 0x1000, 0x1000, false, true)],
+        };
+        assert!(build(&[], std::slice::from_ref(&module)).regions.is_empty());
+    }
+
     #[test]
     fn label_stacks_names_only_private_memory_inside_a_stack() {
         use rusty_box::cpu::LinearRange;
@@ -561,7 +816,6 @@ mod tests {
             start: 0,
             teb: Some(0x7FF0_0000),
             stack: Some(LinearRange { start: 0x5B_0000, end: 0x60_0000 }),
-            name: None,
             uses_fibers: false,
         }];
         label_stacks(&mut map, &threads);

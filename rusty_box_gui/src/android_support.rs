@@ -14,6 +14,18 @@ use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
+/// The number the text typed into a numeric field commits to: plain digits,
+/// cut to `min..=max`. `None` for text that is not a plain number — empty,
+/// signed, spaced, or longer than any number the field holds — which leaves
+/// the field as it was.
+pub(crate) fn typed_number(text: &str, min: u64, max: u64) -> Option<u64> {
+    let plain = !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit());
+    if !plain {
+        return None;
+    }
+    text.parse::<u64>().ok().map(|number| number.clamp(min, max))
+}
+
 /// What the machine is doing, as far as the phone's window cares.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum MachineActivity {
@@ -589,6 +601,18 @@ fn memory_words(resident: Kib) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_typed_number_is_plain_digits_cut_to_the_range() {
+        assert_eq!(typed_number("120000000", 1, 2_000_000_000), Some(120_000_000));
+        assert_eq!(typed_number("0", 1, 2_000_000_000), Some(1));
+        assert_eq!(typed_number("9999999999", 1, 2_000_000_000), Some(2_000_000_000));
+        for refused in ["", " ", "12 3", "-5", "+5", "1e6", "12M", "١٢"] {
+            assert_eq!(typed_number(refused, 1, 100), None, "{refused:?}");
+        }
+        // Longer than a u64 holds: not a number the field can take.
+        assert_eq!(typed_number("99999999999999999999999", 1, 100), None);
+    }
 
     /// The shell's view of a machine that is `running`, and has a power-on
     /// recorded when `start_pending`.

@@ -1,12 +1,14 @@
 //! The Debugger page: a paused VM's processors, code, memory and stack, laid
 //! out as x64dbg lays out its CPU tab — a fixed grid of code and registers
-//! above memory and stack, each pane scrolling on its own — and stacked in
-//! one scrolling column where the page is too narrow for the grid. What the
-//! last step (or pause) changed is drawn red; the memory pane searches for
-//! hex, text or UTF-16. Like the VM bar, it draws from borrowed state and
-//! reports what was asked for; the app acts on it.
+//! above memory and stack, each pane scrolling on its own — where the page
+//! is wide and tall enough for four useful panes, and otherwise as panes at
+//! the height of their content in two columns or one, the page scrolling as
+//! a whole (`Fit`). The choice is made from the room the page measures, never
+//! from the platform. What the last step (or pause) changed is drawn red; the
+//! memory pane searches for hex, text or UTF-16. Like the VM bar, it draws
+//! from borrowed state and reports what was asked for; the app acts on it.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
 use egui::text::{LayoutJob, TextFormat};
 use egui::RichText;
@@ -23,16 +25,18 @@ use crate::debugger::search::{
 use crate::debugger::memory_map::{MemoryMap, RegionOwner};
 use crate::debugger::threads::WinThread;
 use crate::debugger::windows::{
-    process_tree, KernelMiss, ModuleRead, ProcessDetail, ProcessListing, SystemListing, SystemView,
-    WinModule, WinProcess,
+    KernelMiss, ModuleBits, ModuleRead, ProcessDetail, ProcessListing, SystemListing, SystemView,
+    TreeRow, WinModule, WinProcess,
 };
 use crate::shell::listing::{
-    card_title, chip, empty_state, header_row, lead_arrow, lead_chevron, lead_dot, list_row,
-    mono_font, segmented, tree_guides, Cell, RowSense, Tone, TREE_INDENT,
+    card_title, char_width, chip, empty_state, header_row, lead_arrow, lead_chevron, lead_dot,
+    list_row, mono_font, row_visible, segmented, skip_row, tree_guides, Cell, RowSense, Tone,
+    ROW_PAD, TREE_INDENT,
 };
 use crate::shell::theme::{
-    shell_card_frame, ACCENT_AMBER, ACCENT_BLUE, ACCENT_CYAN, ACCENT_RED, CONTROL_FILL_REST,
-    SPACE_ITEM, SPACE_PAGE, TEXT_MUTED, TEXT_PRIMARY, TEXT_SECONDARY,
+    shell_card_frame, shell_card_frame_with_margin, ACCENT_AMBER, ACCENT_BLUE, ACCENT_CYAN,
+    ACCENT_RED, CONTROL_FILL_REST, SPACE_CARD, SPACE_CARD_COMPACT, SPACE_ITEM, SPACE_PAGE,
+    SPACE_PAGE_COMPACT, TEXT_MUTED, TEXT_PRIMARY, TEXT_SECONDARY,
 };
 
 pub(crate) const NOT_RUNNING: &str =
@@ -47,8 +51,111 @@ pub(crate) const MEMORY_ADDRESS: &str = "Memory address";
 pub(crate) const FIND: &str = "Find";
 /// What a step changed is drawn in this colour, as x64dbg does.
 const CHANGED: egui::Color32 = ACCENT_RED;
-/// The page width from which the panes sit in two columns, points.
-const TWO_COLUMN_WIDTH: f32 = 900.0;
+/// The narrowest page, points, that fills a grid of four panes: the left
+/// column holds a code row and a memory row without scrolling sideways.
+const GRID_MIN_WIDTH: f32 = 940.0;
+/// The least height, points, a grid pane keeps a useful run of rows in.
+const GRID_PANE_MIN_HEIGHT: f32 = 200.0;
+/// What a grid page spends above its panes, points: its margins, the header
+/// row (two where the chips wrap) and the gaps.
+const GRID_CHROME_HEIGHT: f32 = 150.0;
+/// The shortest page, points, that fills a grid of two rows of panes.
+const GRID_MIN_HEIGHT: f32 = 2.0 * GRID_PANE_MIN_HEIGHT + SPACE_ITEM + GRID_CHROME_HEIGHT;
+/// The narrowest page, points, whose panes sit in two columns while the page
+/// scrolls: each column then holds the registers and the stack without
+/// scrolling sideways.
+const TWO_COLUMN_MIN_WIDTH: f32 = 720.0;
+
+/// How many columns a scrolling page lays its panes in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Columns {
+    One,
+    Two,
+}
+
+/// How the page lays its panes out. It is decided from the room the page
+/// measures for itself — never from the platform — so a short desktop window
+/// is laid out as a landscape phone is, and a tall phone as a narrow window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Fit {
+    /// Four panes fill the page, each scrolling on its own, as x64dbg's CPU
+    /// tab does: the page is wide and tall enough for every pane to keep a
+    /// useful number of rows.
+    Grid,
+    /// Every pane at the height of its content, in `Columns`; the page
+    /// scrolls as a whole, so no pane is ever out of reach.
+    Scrolling(Columns),
+}
+
+impl Fit {
+    /// The layout for a page of `room` points.
+    fn of(room: egui::Vec2) -> Self {
+        if room.x >= GRID_MIN_WIDTH && room.y >= GRID_MIN_HEIGHT {
+            Self::Grid
+        } else if room.x >= TWO_COLUMN_MIN_WIDTH {
+            Self::Scrolling(Columns::Two)
+        } else {
+            Self::Scrolling(Columns::One)
+        }
+    }
+
+    /// A page with room to spare is roomy; one that scrolls packs tighter.
+    fn density(self) -> Density {
+        match self {
+            Self::Grid => Density::Roomy,
+            Self::Scrolling(Columns::One | Columns::Two) => Density::Compact,
+        }
+    }
+}
+
+/// How much air the page keeps around and between its panes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Density {
+    Roomy,
+    Compact,
+}
+
+impl Density {
+    /// The page's margin on every side.
+    fn page_margin(self) -> i8 {
+        match self {
+            Self::Roomy => SPACE_PAGE,
+            Self::Compact => SPACE_PAGE_COMPACT,
+        }
+    }
+
+    /// A card that is as tall as its content.
+    fn card_frame(self) -> egui::Frame {
+        shell_card_frame_with_margin(match self {
+            Self::Roomy => SPACE_CARD,
+            Self::Compact => SPACE_CARD_COMPACT,
+        })
+    }
+
+    /// The gap between panes, and between a row's items.
+    fn gap(self) -> f32 {
+        match self {
+            Self::Roomy => SPACE_ITEM,
+            Self::Compact => SPACE_ITEM * 0.75,
+        }
+    }
+
+    /// The gap between a card's title, its controls and its first row.
+    fn title_gap(self) -> f32 {
+        match self {
+            Self::Roomy => 4.0,
+            Self::Compact => 2.0,
+        }
+    }
+
+    /// The padding inside a header button.
+    fn button_padding(self) -> egui::Vec2 {
+        match self {
+            Self::Roomy => egui::vec2(12.0, 6.0),
+            Self::Compact => egui::vec2(8.0, 3.0),
+        }
+    }
+}
 
 /// What a typed address could not be read as.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -245,8 +352,12 @@ pub(crate) fn draw_debugger_page(
         find,
         searching,
     };
+    // The room the page was given, measured here and nowhere else: every
+    // layout choice below follows from it.
+    let fit = Fit::of(ui.available_size());
+    let density = fit.density();
     egui::Frame::new()
-        .inner_margin(egui::Margin::same(SPACE_PAGE))
+        .inner_margin(egui::Margin::same(density.page_margin()))
         .show(ui, |ui| {
             if !live {
                 empty_state(ui, "Not running", NOT_RUNNING);
@@ -257,7 +368,7 @@ pub(crate) fn draw_debugger_page(
                 step_available,
                 dump_pending,
             };
-            toolbar(ui, &bar, snapshot, pane, &mut action);
+            header(ui, &bar, density, snapshot, pane, &mut action);
             if let Some(DebugNote::StepNeedsInterpreter) = note {
                 ui.label(RichText::new(STEP_NEEDS_INTERPRETER).color(ACCENT_AMBER));
             }
@@ -265,57 +376,57 @@ pub(crate) fn draw_debugger_page(
                 empty_state(ui, "Running", PAUSE_TO_INSPECT);
                 return;
             };
-            status_chips(ui, snapshot, paused);
             follow_window(pane, snapshot);
-            ui.add_space(SPACE_ITEM);
-            let wide = ui.available_width() >= TWO_COLUMN_WIDTH;
-            match pane.tab {
-                DebuggerTab::Cpu if wide => grid_layout(ui, snapshot, marks, pane, &mut action),
-                DebuggerTab::Cpu => stacked_layout(ui, snapshot, marks, pane, &mut action),
-                DebuggerTab::Processes | DebuggerTab::KernelModules => {
-                    system_page(ui, wide, snapshot, pane, &mut action);
+            ui.add_space(density.gap());
+            match (pane.tab, fit) {
+                (DebuggerTab::Cpu, Fit::Grid) => {
+                    grid_layout(ui, snapshot, marks, pane, &mut action);
+                }
+                (DebuggerTab::Cpu, Fit::Scrolling(columns)) => {
+                    scrolling_layout(ui, columns, density, snapshot, marks, pane, &mut action);
+                }
+                (DebuggerTab::Processes | DebuggerTab::KernelModules, _) => {
+                    system_page(ui, fit, snapshot, pane, &mut action);
                 }
             }
         });
     action
 }
 
-/// The shown processor's state as a row of chips: its privilege — user mode
-/// (CPL 3) or kernel mode (CPL 0) — its mode and activity, the Windows
-/// process it runs for when the guest's structures name one, its address
-/// space, and whether the page shows a pause that has since run on.
+/// The shown processor's state as chips: its privilege — user mode (CPL 3)
+/// or kernel mode (CPL 0) — its mode and activity, the Windows process it
+/// runs for when the guest's structures name one, its address space, and
+/// whether the page shows a pause that has since run on. They go into the
+/// header's row, after its buttons, and wrap where the row is full.
 fn status_chips(ui: &mut egui::Ui, snapshot: &DebugSnapshot, paused: bool) {
     let Some(view) = shown_view(snapshot) else {
         return;
     };
-    ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing.x = 6.0;
-        let (text, color) = match view.registers.cpl {
-            0 => ("Kernel mode", ACCENT_AMBER),
-            3 => ("User mode", ACCENT_CYAN),
-            _ => ("Privileged", ACCENT_AMBER),
-        };
-        chip(ui, &format!("{text} · CPL {}", view.registers.cpl), color);
-        chip(ui, mode_label(view), ACCENT_BLUE);
-        chip(ui, activity_label(view.activity), TEXT_MUTED);
-        if let Some(path) = &snapshot.process {
-            let name = path.rsplit(['\\', '/']).next().unwrap_or(path);
-            chip(ui, &format!("Process {name}"), TEXT_PRIMARY).on_hover_text(path.as_str());
-        }
-        if let Some(symbol) = snapshot
-            .code
-            .first()
-            .and_then(|line| snapshot.symbols.resolve(line.address))
-        {
-            chip(ui, &format!("at {}", symbol.label()), ACCENT_CYAN)
-                .on_hover_text("The module RIP points into.");
-        }
-        chip(ui, &format!("CR3 {:X}", view.registers.cr3), TEXT_MUTED)
-            .on_hover_text("The address space: each process has its own page tables.");
-        if !paused {
-            chip(ui, SHOWING_LAST_PAUSE, ACCENT_AMBER);
-        }
-    });
+    let (text, color) = match view.registers.cpl {
+        0 => ("Kernel mode", ACCENT_AMBER),
+        3 => ("User mode", ACCENT_CYAN),
+        _ => ("Privileged", ACCENT_AMBER),
+    };
+    chip(ui, &format!("{text} · CPL {}", view.registers.cpl), color);
+    chip(ui, mode_label(view), ACCENT_BLUE);
+    chip(ui, activity_label(view.activity), TEXT_MUTED);
+    if let Some(path) = &snapshot.process {
+        let name = path.rsplit(['\\', '/']).next().unwrap_or(path);
+        chip(ui, &format!("Process {name}"), TEXT_PRIMARY).on_hover_text(path.as_str());
+    }
+    if let Some(symbol) = snapshot
+        .code
+        .first()
+        .and_then(|line| snapshot.symbols.resolve(line.address))
+    {
+        chip(ui, &format!("at {}", symbol.label()), ACCENT_CYAN)
+            .on_hover_text("The module RIP points into.");
+    }
+    chip(ui, &format!("CR3 {:X}", view.registers.cr3), TEXT_MUTED)
+        .on_hover_text("The address space: each process has its own page tables.");
+    if !paused {
+        chip(ui, SHOWING_LAST_PAUSE, ACCENT_AMBER);
+    }
 }
 
 /// The base of the module the shown processor's RIP is in, when it lies in
@@ -345,14 +456,20 @@ fn shown_view(snapshot: &DebugSnapshot) -> Option<&CpuDebugView> {
     snapshot.cpus.get(snapshot.cpu)
 }
 
-fn toolbar(
+/// The page's one header row: the buttons and the tab switch, then — once a
+/// pause has been read — the shown processor's chips, on the same row after
+/// them. The row wraps only where it has no more room.
+fn header(
     ui: &mut egui::Ui,
     bar: &Toolbar,
+    density: Density,
     snapshot: Option<&DebugSnapshot>,
     pane: &mut DebuggerPane,
     action: &mut Option<DebuggerAction>,
 ) {
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = egui::vec2(density.gap(), density.gap());
+        ui.spacing_mut().button_padding = density.button_padding();
         let step = ui.add_enabled(bar.paused && bar.step_available, egui::Button::new("Step"));
         let step = if bar.step_available {
             step
@@ -373,7 +490,6 @@ fn toolbar(
         {
             *action = Some(DebuggerAction::DumpRam);
         }
-        ui.add_space(SPACE_ITEM);
         let tabs = DebuggerTab::ALL.map(|tab| (tab, tab.label()));
         if segmented(ui, &mut pane.tab, &tabs) {
             *action = Some(DebuggerAction::ShowSystem(
@@ -397,6 +513,7 @@ fn toolbar(
                 *action = Some(DebuggerAction::SelectCpu(chosen));
             }
         }
+        status_chips(ui, snapshot, bar.paused);
     });
 }
 
@@ -504,36 +621,103 @@ fn grid_layout(
     });
 }
 
-/// The page where it is too narrow for the grid (a phone): the panes one
-/// under the other, the page scrolling as a whole.
-fn stacked_layout(
+/// The page where the grid has no room (a short or narrow window): every pane
+/// at the height of its content, the page scrolling as a whole. In two
+/// columns the left one — code above memory — takes the wide side, as the
+/// grid's does; in one the panes follow each other.
+fn scrolling_layout(
     ui: &mut egui::Ui,
+    columns: Columns,
+    density: Density,
     snapshot: &DebugSnapshot,
     marks: Marks<'_>,
     pane: &mut DebuggerPane,
     action: &mut Option<DebuggerAction>,
 ) {
+    let gap = density.gap();
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
-        .show(ui, |ui| {
-            let gap = SPACE_ITEM;
-            card(ui, Title::plain("Registers"), |_| {}, |ui| {
-                register_rows(ui, snapshot, marks);
-            });
-            ui.add_space(gap);
-            card(ui, Title::plain("Code"), |_| {}, |ui| code_rows(ui, snapshot));
-            ui.add_space(gap);
-            card(ui, Title::plain("Stack"), |_| {}, |ui| {
-                stack_rows(ui, snapshot, marks);
-            });
-            ui.add_space(gap);
-            card(
+        .show(ui, |ui| match columns {
+            Columns::Two => side_by_side(
                 ui,
-                Title::plain("Memory"),
-                |ui| memory_bar(ui, snapshot, marks, pane, action),
-                |ui| memory_rows(ui, snapshot, marks),
-            );
+                gap,
+                LEFT_SHARE,
+                &mut (),
+                |ui, _| {
+                    card(ui, density, Title::plain("Code"), |_| {}, |ui| {
+                        code_rows(ui, snapshot);
+                    });
+                    ui.add_space(gap);
+                    card(
+                        ui,
+                        density,
+                        Title::plain("Memory"),
+                        |ui| memory_bar(ui, snapshot, marks, pane, action),
+                        |ui| memory_rows(ui, snapshot, marks),
+                    );
+                },
+                |ui, _| {
+                    card(ui, density, Title::plain("Registers"), |_| {}, |ui| {
+                        register_rows(ui, snapshot, marks);
+                    });
+                    ui.add_space(gap);
+                    card(ui, density, Title::plain("Stack"), |_| {}, |ui| {
+                        stack_rows(ui, snapshot, marks);
+                    });
+                },
+            ),
+            Columns::One => {
+                card(ui, density, Title::plain("Registers"), |_| {}, |ui| {
+                    register_rows(ui, snapshot, marks);
+                });
+                ui.add_space(gap);
+                card(ui, density, Title::plain("Code"), |_| {}, |ui| {
+                    code_rows(ui, snapshot);
+                });
+                ui.add_space(gap);
+                card(ui, density, Title::plain("Stack"), |_| {}, |ui| {
+                    stack_rows(ui, snapshot, marks);
+                });
+                ui.add_space(gap);
+                card(
+                    ui,
+                    density,
+                    Title::plain("Memory"),
+                    |ui| memory_bar(ui, snapshot, marks, pane, action),
+                    |ui| memory_rows(ui, snapshot, marks),
+                );
+            }
         });
+}
+
+/// Two columns, the left `left_share` of the width and a `gap` between them,
+/// each drawn top-down at its own height. `context` is lent to the left
+/// column and then to the right, so both may write the same state.
+fn side_by_side<C, L, R>(
+    ui: &mut egui::Ui,
+    gap: f32,
+    left_share: f32,
+    context: &mut C,
+    left: L,
+    right: R,
+) where
+    L: FnOnce(&mut egui::Ui, &mut C),
+    R: FnOnce(&mut egui::Ui, &mut C),
+{
+    let width = ui.available_width();
+    let left_width = ((width - gap) * left_share).floor();
+    let right_width = width - gap - left_width;
+    ui.horizontal_top(|ui| {
+        ui.spacing_mut().item_spacing.x = gap;
+        ui.vertical(|ui| {
+            ui.set_width(left_width);
+            left(ui, context);
+        });
+        ui.vertical(|ui| {
+            ui.set_width(right_width);
+            right(ui, context);
+        });
+    });
 }
 
 /// A pane's title: its name, and how many entries it lists when it lists.
@@ -585,40 +769,84 @@ where
     });
 }
 
-/// A pane as tall as its content, the page's full width.
-fn card<H, B>(ui: &mut egui::Ui, title: Title<'_>, header: H, body: B)
+/// A pane as tall as its content, the width of the column it is in. Its
+/// listing scrolls sideways by itself where a row is wider than the column,
+/// so the card never grows past the page.
+fn card<H, B>(ui: &mut egui::Ui, density: Density, title: Title<'_>, header: H, body: B)
 where
     H: FnOnce(&mut egui::Ui),
     B: FnOnce(&mut egui::Ui),
 {
-    shell_card_frame().show(ui, |ui| {
+    density.card_frame().show(ui, |ui| {
         ui.set_min_width(ui.available_width());
-        ui.spacing_mut().item_spacing.y = 4.0;
+        ui.spacing_mut().item_spacing.y = density.title_gap();
         card_title(ui, title.text, title.count);
         header(ui);
+        // Listing rows sit flush, one under the next.
         ui.spacing_mut().item_spacing.y = 0.0;
-        body(ui);
+        egui::ScrollArea::horizontal()
+            .id_salt(title.text)
+            .auto_shrink([false, true])
+            .show(ui, body);
     });
 }
 
-/// The room the code listing gives an instruction's bytes, in characters:
-/// `CODE_BYTES_SHOWN` bytes and an ellipsis.
-const CODE_BYTES_CHARS: usize = 3 * CODE_BYTES_SHOWN + 1;
+/// The room a pane is given: the size it must fill, or whatever its content
+/// takes at a density.
+#[derive(Clone, Copy)]
+enum Room {
+    Fixed(egui::Vec2),
+    Content(Density),
+}
+
+/// A pane in `room`: a `fixed_card` where the page gives it a size, a `card`
+/// where the page scrolls.
+fn pane_card<H, B>(ui: &mut egui::Ui, room: Room, title: Title<'_>, header: H, body: B)
+where
+    H: FnOnce(&mut egui::Ui),
+    B: FnOnce(&mut egui::Ui),
+{
+    match room {
+        Room::Fixed(size) => fixed_card(ui, size, title, header, body),
+        Room::Content(density) => card(ui, density, title, header, body),
+    }
+}
+
+/// The fewest bytes the code listing shows of an instruction, however narrow
+/// the pane: the opcode name is what is read, and keeps its room first.
+const CODE_BYTES_MIN: usize = 2;
+/// The room the longest opcode names the listing prints keep, in characters.
+const CODE_OPCODE_CHARS: f32 = 16.0;
+/// The two gaps between the code listing's three columns, in characters.
+const CODE_GAP_CHARS: f32 = 4.0;
 /// The lead before a listing's first column, where the RIP marker sits.
 const MARKER_LEAD: f32 = 12.0;
+
+/// How many of an instruction's bytes the code listing shows in a pane
+/// `room_chars` characters wide whose addresses are `digits` characters: the
+/// address, the gaps and the opcode keep their room, and the bytes — three
+/// characters each and an ellipsis — take the rest, between `CODE_BYTES_MIN`
+/// and `CODE_BYTES_SHOWN`.
+fn code_bytes_shown(room_chars: f32, digits: usize) -> usize {
+    let left = room_chars - digits as f32 - CODE_GAP_CHARS - CODE_OPCODE_CHARS - 1.0;
+    let fits = (left / 3.0).floor().max(CODE_BYTES_MIN as f32);
+    (fits as usize).min(CODE_BYTES_SHOWN)
+}
 
 /// The code at RIP, one instruction a row: address, bytes, opcode. The row at
 /// RIP is shaded and marked.
 fn code_rows(ui: &mut egui::Ui, snapshot: &DebugSnapshot) {
     let digits = shown_view(snapshot).map_or(16, |view| hex_digits(view.code_size));
+    let room = (ui.available_width() - MARKER_LEAD - 2.0 * ROW_PAD) / char_width(ui);
+    let shown = code_bytes_shown(room, digits);
     for (index, line) in snapshot.code.iter().enumerate() {
         let mut bytes: Vec<String> = line
             .bytes
             .iter()
-            .take(CODE_BYTES_SHOWN)
+            .take(shown)
             .map(|byte| format!("{byte:02X}"))
             .collect();
-        if line.bytes.len() > CODE_BYTES_SHOWN {
+        if line.bytes.len() > shown {
             bytes.push("…".to_owned());
         }
         let (text, text_color) = match &line.text {
@@ -635,7 +863,7 @@ fn code_rows(ui: &mut egui::Ui, snapshot: &DebugSnapshot) {
         };
         let cells = [
             Cell::left(format!("{:0digits$X}", line.address), address_color, digits),
-            Cell::left(bytes.join(" "), TEXT_MUTED, CODE_BYTES_CHARS),
+            Cell::left(bytes.join(" "), TEXT_MUTED, 3 * shown + 1),
             Cell::fill(text, if at_rip { ACCENT_CYAN } else { text_color }),
         ];
         let response = list_row(ui, MARKER_LEAD, &cells, tone, RowSense::Look);
@@ -1132,7 +1360,7 @@ const ANOTHER_ADDRESS_SPACE: &str = "This module lies in another process's addre
 /// The Processes and Kernel modules tabs: the guest kernel's own lists.
 fn system_page(
     ui: &mut egui::Ui,
-    wide: bool,
+    fit: Fit,
     snapshot: &DebugSnapshot,
     pane: &mut DebuggerPane,
     action: &mut Option<DebuggerAction>,
@@ -1143,7 +1371,7 @@ fn system_page(
         }
         (SystemListing::Processes(listing), DebuggerTab::Processes) => {
             let current_user_module = current_module_base(snapshot, ModuleSpace::User);
-            processes_page(ui, wide, listing, current_user_module, pane, action);
+            processes_page(ui, fit, listing, current_user_module, pane, action);
         }
         (SystemListing::KernelModules(modules), DebuggerTab::KernelModules) => {
             let filter = pane.list_filter.to_lowercase();
@@ -1151,20 +1379,27 @@ fn system_page(
                 .iter()
                 .filter(|module| module_matches(module, &filter))
                 .collect();
-            let page = ui.available_size();
-            fixed_card(
-                ui,
-                page,
-                Title::counted("Kernel modules", modules.len()),
-                |ui| {
-                    filter_field(ui, &mut pane.list_filter);
-                    header_row(ui, 0.0, &module_columns());
-                },
-                |ui| {
-                    let current = current_module_base(snapshot, ModuleSpace::Kernel);
-                    module_rows(ui, &shown, true, current, action);
-                },
-            );
+            let title = Title::counted("Kernel modules", modules.len());
+            let header = |ui: &mut egui::Ui| {
+                filter_field(ui, &mut pane.list_filter);
+                header_row(ui, 0.0, &module_columns());
+            };
+            let body = |ui: &mut egui::Ui| {
+                let current = current_module_base(snapshot, ModuleSpace::Kernel);
+                module_rows(ui, &shown, true, current, action);
+            };
+            match fit {
+                Fit::Grid => {
+                    let page = ui.available_size();
+                    pane_card(ui, Room::Fixed(page), title, header, body);
+                }
+                Fit::Scrolling(_) => {
+                    let room = Room::Content(fit.density());
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| pane_card(ui, room, title, header, body));
+                }
+            }
         }
         // A list for another tab, or none yet: the run thread is reading.
         (
@@ -1201,7 +1436,7 @@ fn module_matches(module: &WinModule, filter: &str) -> bool {
 
 fn processes_page(
     ui: &mut egui::Ui,
-    wide: bool,
+    fit: Fit,
     listing: &ProcessListing,
     current_user_module: Option<u64>,
     pane: &mut DebuggerPane,
@@ -1245,55 +1480,131 @@ fn processes_page(
     // The chosen process's address space, for browsing it when it is not the
     // running one.
     let process_cr3 = chosen.map(|process| process.cr3);
-    let rows = process_rows_shown(&listing.processes, pane.process_layout, &pane.list_filter);
+    let rows = process_rows_shown(
+        &listing.processes,
+        &listing.tree,
+        pane.process_layout,
+        &pane.list_filter,
+    );
+    let scroll_was_pending = pane.scroll_to.is_some();
     // The Modules/Memory-map switch and the minimap report through these
     // locals, so the right card's two closures borrow disjoint fields.
     let mut switch_to: Option<ProcessDetail> = None;
     let mut minimap_click: Option<u64> = None;
-    if wide {
-        let gap = SPACE_ITEM;
-        let page = ui.available_size();
-        let left = ((page.x - gap) * PROCESS_LIST_SHARE).floor();
-        ui.spacing_mut().item_spacing = egui::vec2(gap, gap);
-        ui.horizontal_top(|ui| {
-            fixed_card(
-                ui,
-                egui::vec2(left, page.y),
-                process_title,
-                |ui| process_header(ui, &mut pane.process_layout, &mut pane.list_filter),
-                |ui| process_rows(ui, &listing.processes, &rows, chosen, &mut pane.selected_process, detail, action),
-            );
-            fixed_card(
-                ui,
-                egui::vec2(page.x - gap - left, page.y),
-                right_title,
-                |ui| right_card_header(ui, pane.process_detail, map_of(listing), &mut switch_to, &mut minimap_click),
-                |ui| right_card_body(ui, detail, listing, navigable, highlight, process_cr3, &mut pane.expanded_modules, &mut pane.scroll_to, action),
-            );
-        });
-    } else {
-        egui::ScrollArea::vertical()
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                card(
+    // The two cards, each drawn in the room the layout below gives it. They
+    // take `action` as an argument so neither holds it between calls.
+    let mut process_card = |ui: &mut egui::Ui, room: Room, action: &mut Option<DebuggerAction>| {
+        pane_card(
+            ui,
+            room,
+            process_title,
+            |ui| process_header(ui, &mut pane.process_layout, &mut pane.list_filter),
+            |ui| {
+                process_rows(
                     ui,
-                    process_title,
-                    |ui| process_header(ui, &mut pane.process_layout, &mut pane.list_filter),
-                    |ui| process_rows(ui, &listing.processes, &rows, chosen, &mut pane.selected_process, detail, action),
+                    &listing.processes,
+                    &rows,
+                    chosen,
+                    &mut pane.selected_process,
+                    detail,
+                    action,
                 );
-                ui.add_space(SPACE_ITEM);
-                card(
+            },
+        );
+    };
+    let mut detail_card = |ui: &mut egui::Ui, room: Room, action: &mut Option<DebuggerAction>| {
+        pane_card(
+            ui,
+            room,
+            right_title,
+            |ui| {
+                right_card_header(
                     ui,
-                    right_title,
-                    |ui| right_card_header(ui, pane.process_detail, map_of(listing), &mut switch_to, &mut minimap_click),
-                    |ui| right_card_body(ui, detail, listing, navigable, highlight, process_cr3, &mut pane.expanded_modules, &mut pane.scroll_to, action),
+                    pane.process_detail,
+                    map_of(listing),
+                    &mut switch_to,
+                    &mut minimap_click,
+                );
+            },
+            |ui| {
+                right_card_body(
+                    ui,
+                    detail,
+                    listing,
+                    navigable,
+                    highlight,
+                    process_cr3,
+                    &mut pane.expanded_modules,
+                    &mut pane.scroll_to,
+                    action,
+                );
+            },
+        );
+    };
+    match fit {
+        Fit::Grid => {
+            let gap = SPACE_ITEM;
+            let page = ui.available_size();
+            let left = ((page.x - gap) * PROCESS_LIST_SHARE).floor();
+            ui.spacing_mut().item_spacing = egui::vec2(gap, gap);
+            ui.horizontal_top(|ui| {
+                process_card(ui, Room::Fixed(egui::vec2(left, page.y)), &mut *action);
+                detail_card(
+                    ui,
+                    Room::Fixed(egui::vec2(page.x - gap - left, page.y)),
+                    &mut *action,
                 );
             });
+        }
+        Fit::Scrolling(columns) => {
+            let density = fit.density();
+            let room = Room::Content(density);
+            let gap = density.gap();
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| match columns {
+                    Columns::Two => side_by_side(
+                        ui,
+                        gap,
+                        PROCESS_LIST_SHARE,
+                        action,
+                        |ui, action| process_card(ui, room, action),
+                        |ui, action| detail_card(ui, room, action),
+                    ),
+                    Columns::One => {
+                        process_card(ui, room, &mut *action);
+                        ui.add_space(gap);
+                        detail_card(ui, room, &mut *action);
+                    }
+                });
+        }
+    }
+    // A target that was pending when the frame began and is still pending
+    // drew no row to consume it: it is dropped, not left to fire later when a
+    // row happens to appear.
+    if scroll_was_pending && pane.scroll_to.is_some() {
+        pane.scroll_to = None;
     }
     // A minimap click this frame becomes next frame's scroll target, after
-    // both right-card closures have ended (they borrow disjoint fields).
-    if minimap_click.is_some() {
-        pane.scroll_to = minimap_click;
+    // both right-card closures have ended (they borrow disjoint fields). A
+    // section of a collapsed module has no row until its module is open, so
+    // the module is opened for it.
+    if let Some(address) = minimap_click {
+        pane.scroll_to = Some(address);
+        let section_owner = map_of(listing).and_then(|map| {
+            map.regions
+                .iter()
+                .find(|region| region.start == address)
+                .and_then(|region| match &region.owner {
+                    RegionOwner::Section { base, .. } => Some(*base),
+                    RegionOwner::Header { .. } | RegionOwner::Stack { .. } | RegionOwner::Private => {
+                        None
+                    }
+                })
+        });
+        if let Some(base) = section_owner {
+            pane.expanded_modules.insert(base);
+        }
     }
     if let Some(chosen_detail) = switch_to {
         pane.process_detail = chosen_detail;
@@ -1359,10 +1670,11 @@ fn draw_minimap(ui: &mut egui::Ui, map: &MemoryMap, minimap_click: &mut Option<u
         ui.allocate_exact_size(egui::vec2(width, 14.0), egui::Sense::click());
     let painter = ui.painter();
     painter.rect_filled(rect, 3.0, crate::shell::theme::BG_WELL);
+    // The lanes drawn are the lanes a click is matched against.
     for lane in minimap::lanes(map, width) {
         let segment = egui::Rect::from_min_size(
-            egui::pos2(rect.left() + lane.top, rect.top() + 2.0),
-            egui::vec2(lane.height.max(1.0), rect.height() - 4.0),
+            egui::pos2(rect.left() + lane.offset, rect.top() + 2.0),
+            egui::vec2(lane.extent, rect.height() - 4.0),
         );
         let color = if lane.executable {
             ACCENT_CYAN
@@ -1508,10 +1820,30 @@ fn memory_map_rows(
                 total_pages,
             } => {
                 let open = expanded.contains(&base);
+                let first = &map.regions[regions[0]];
+                // A module row that is out of sight costs nothing but its
+                // place in the list; its sections follow when it is open.
+                if *scroll_to != Some(first.start) && !row_visible(ui) {
+                    skip_row(ui);
+                    if open {
+                        for index in regions {
+                            region_row(
+                                ui,
+                                map,
+                                index,
+                                TREE_INDENT,
+                                navigable,
+                                process_cr3,
+                                scroll_to,
+                                action,
+                            );
+                        }
+                    }
+                    continue;
+                }
                 let any_exec = regions
                     .iter()
                     .any(|&i| map.regions[i].access.is_some_and(|a| a.executable));
-                let first = &map.regions[regions[0]];
                 let last = &map.regions[*regions.last().unwrap_or(&regions[0])];
                 let span = (last.start + last.size).saturating_sub(first.start);
                 let fraction = resident_pages as f32 / total_pages.max(1) as f32;
@@ -1579,6 +1911,11 @@ fn region_row(
     action: &mut Option<DebuggerAction>,
 ) {
     let region = &map.regions[index];
+    // A row out of sight is left as room only, unless it is the scroll target.
+    if *scroll_to != Some(region.start) && !row_visible(ui) {
+        skip_row(ui);
+        return;
+    }
     let executable = region.access.is_some_and(|a| a.executable);
     let observed = region.access.is_some_and(|a| a.observed);
     let access_text = region_access_text(region);
@@ -1661,10 +1998,11 @@ struct ShownProcess {
 }
 
 /// The rows the Processes card draws under `layout`, keeping those whose
-/// name holds `filter` — and, in the tree, their ancestors, so a match keeps
-/// the branch that leads to it.
+/// name holds `filter` — and, in the tree (`tree`, read once with the
+/// listing), their ancestors, so a match keeps the branch that leads to it.
 fn process_rows_shown(
     processes: &[WinProcess],
+    tree: &[TreeRow],
     layout: ProcessLayout,
     filter: &str,
 ) -> Vec<ShownProcess> {
@@ -1685,9 +2023,13 @@ fn process_rows_shown(
             })
             .collect(),
         ProcessLayout::Tree => {
-            let tree = process_tree(processes);
             let mut keep = vec![filter.is_empty(); processes.len()];
             if !filter.is_empty() {
+                let by_pid: HashMap<u64, usize> = processes
+                    .iter()
+                    .enumerate()
+                    .map(|(index, process)| (process.pid, index))
+                    .collect();
                 for (index, process) in processes.iter().enumerate() {
                     if !matches(process) {
                         continue;
@@ -1703,16 +2045,16 @@ fn process_rows_shown(
                         steps += 1;
                         at = processes[here]
                             .parent
-                            .and_then(|parent| processes.iter().position(|p| p.pid == parent));
+                            .and_then(|parent| by_pid.get(&parent).copied());
                     }
                 }
             }
-            tree.into_iter()
+            tree.iter()
                 .filter(|row| keep[row.index])
                 .map(|row| ShownProcess {
                     index: row.index,
                     depth: row.depth,
-                    guides: row.guides,
+                    guides: row.guides.clone(),
                     last: row.last,
                 })
                 .collect()
@@ -1751,7 +2093,7 @@ fn listed_modules(
 
 /// The Processes card's controls and column titles.
 fn process_header(ui: &mut egui::Ui, layout: &mut ProcessLayout, filter: &mut String) {
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         segmented(
             ui,
             layout,
@@ -1794,6 +2136,10 @@ fn process_rows(
         return;
     }
     for (n, shown) in rows.iter().enumerate() {
+        if !row_visible(ui) {
+            skip_row(ui);
+            continue;
+        }
         let process = &processes[shown.index];
         let selected = chosen.is_some_and(|c| c.eprocess == process.eprocess);
         let name_color = if process.current { ACCENT_CYAN } else { TEXT_PRIMARY };
@@ -1863,7 +2209,16 @@ fn module_rows(
         return;
     }
     for (n, module) in modules.iter().enumerate() {
-        let name = module.name.as_deref().unwrap_or("(paged out)");
+        if !row_visible(ui) {
+            skip_row(ui);
+            continue;
+        }
+        let base_name = module.name.as_deref().unwrap_or("(paged out)");
+        // A 32-bit module (a WOW64 process's) is tagged beside its name.
+        let name = match module.bits {
+            ModuleBits::Bits32 => format!("{base_name}  · 32"),
+            ModuleBits::Bits64 => base_name.to_owned(),
+        };
         let path = module.path.as_deref().unwrap_or("(paged out)");
         // The module the shown processor is executing in.
         let current = highlight == Some(module.base);
@@ -1898,13 +2253,13 @@ fn thread_columns() -> [Cell; 4] {
         Cell::right("TID", TEXT_MUTED, THREAD_TID_CHARS),
         Cell::left("Start", TEXT_MUTED, THREAD_START_CHARS),
         Cell::left("Stack", TEXT_MUTED, THREAD_STACK_CHARS),
-        Cell::fill("Name / fibres", TEXT_MUTED),
+        Cell::fill("Fibres", TEXT_MUTED),
     ]
 }
 
 /// One row per thread: its ID, start address, user stack, and a mark for a
-/// thread that runs fibres (and a name, on the Windows builds that keep one).
-/// A thread of the running process opens its stack in the memory pane.
+/// thread that runs fibres. A thread of the running process opens its stack
+/// in the memory pane.
 fn thread_rows(
     ui: &mut egui::Ui,
     threads: &[WinThread],
@@ -1917,6 +2272,10 @@ fn thread_rows(
         return;
     }
     for (n, thread) in threads.iter().enumerate() {
+        if !row_visible(ui) {
+            skip_row(ui);
+            continue;
+        }
         let start = if thread.start == 0 {
             String::new()
         } else {
@@ -1925,12 +2284,7 @@ fn thread_rows(
         let stack = thread
             .stack
             .map_or_else(String::new, |stack| format!("{:X}–{:X}", stack.start, stack.end));
-        let tail = match (&thread.name, thread.uses_fibers) {
-            (Some(name), true) => format!("{name}  fibres"),
-            (Some(name), false) => name.clone(),
-            (None, true) => "fibres".to_owned(),
-            (None, false) => String::new(),
-        };
+        let tail = if thread.uses_fibers { "fibres" } else { "" };
         let tail_color = if thread.uses_fibers { ACCENT_AMBER } else { TEXT_MUTED };
         let cells = [
             Cell::right(thread.tid.to_string(), TEXT_PRIMARY, THREAD_TID_CHARS),
@@ -1977,21 +2331,69 @@ mod tests {
             process(348, Some(300), "services.exe"),
             process(1400, Some(348), "wmiprvse.exe"),
         ];
+        let tree = crate::debugger::windows::process_tree(&processes);
         let names = |rows: Vec<ShownProcess>| -> Vec<&str> {
             rows.iter().map(|row| processes[row.index].name.as_str()).collect()
         };
         assert_eq!(
-            names(process_rows_shown(&processes, ProcessLayout::Tree, "WMI")),
+            names(process_rows_shown(&processes, &tree, ProcessLayout::Tree, "WMI")),
             ["System", "smss.exe", "winlogon.exe", "services.exe", "wmiprvse.exe"]
         );
         assert_eq!(
-            names(process_rows_shown(&processes, ProcessLayout::List, "wmi")),
+            names(process_rows_shown(&processes, &tree, ProcessLayout::List, "wmi")),
             ["wmiprvse.exe"]
         );
         assert_eq!(
-            process_rows_shown(&processes, ProcessLayout::Tree, "").len(),
+            process_rows_shown(&processes, &tree, ProcessLayout::Tree, "").len(),
             processes.len()
         );
+    }
+
+    /// The layout follows the room measured, whatever hosts the window: the
+    /// same size gives the same layout on a phone and on a desktop.
+    #[test]
+    fn the_layout_is_decided_by_the_room_the_page_has() {
+        // A desktop window: wide and tall enough for four useful panes.
+        assert_eq!(Fit::of(egui::vec2(1400.0, 900.0)), Fit::Grid);
+        assert_eq!(Fit::of(egui::vec2(GRID_MIN_WIDTH, GRID_MIN_HEIGHT)), Fit::Grid);
+        // A landscape phone: wide, but short — the grid would squeeze every
+        // pane to a few rows, so the page scrolls in two columns.
+        assert_eq!(Fit::of(egui::vec2(1000.0, 330.0)), Fit::Scrolling(Columns::Two));
+        // The same short height on a wide desktop window gets the same.
+        assert_eq!(Fit::of(egui::vec2(1800.0, 330.0)), Fit::Scrolling(Columns::Two));
+        // A portrait phone, and a tall but narrow window.
+        assert_eq!(Fit::of(egui::vec2(400.0, 800.0)), Fit::Scrolling(Columns::One));
+        assert_eq!(Fit::of(egui::vec2(700.0, 1400.0)), Fit::Scrolling(Columns::One));
+        // One point short of either threshold leaves the grid.
+        assert_ne!(Fit::of(egui::vec2(GRID_MIN_WIDTH - 1.0, GRID_MIN_HEIGHT)), Fit::Grid);
+        assert_ne!(Fit::of(egui::vec2(GRID_MIN_WIDTH, GRID_MIN_HEIGHT - 1.0)), Fit::Grid);
+    }
+
+    /// A narrow pane gives the bytes up before it gives up the opcode: the
+    /// listing shows fewer bytes, never fewer than two, and all eight where
+    /// the pane has the room.
+    #[test]
+    fn a_narrow_code_pane_shows_fewer_bytes_to_keep_the_opcode() {
+        assert_eq!(code_bytes_shown(120.0, 16), CODE_BYTES_SHOWN);
+        // 16 digits, 4 of gaps, 16 for the opcode, 1 for the ellipsis: the
+        // 45th character is the first byte's third.
+        assert_eq!(code_bytes_shown(45.0, 16), 2);
+        assert_eq!(code_bytes_shown(51.0, 16), 4);
+        assert_eq!(code_bytes_shown(10.0, 16), CODE_BYTES_MIN);
+        // A 32-bit address is eight characters shorter: three more bytes
+        // fit in a pane of the same width.
+        assert_eq!(code_bytes_shown(51.0, 8), 7);
+    }
+
+    #[test]
+    fn a_page_that_scrolls_packs_tighter_than_one_that_fills() {
+        let roomy = Fit::Grid.density();
+        let compact = Fit::Scrolling(Columns::Two).density();
+        assert_eq!(compact, Fit::Scrolling(Columns::One).density());
+        assert!(compact.page_margin() < roomy.page_margin());
+        assert!(compact.gap() < roomy.gap());
+        assert!(compact.title_gap() < roomy.title_gap());
+        assert!(compact.button_padding().y < roomy.button_padding().y);
     }
 
     #[test]

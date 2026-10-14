@@ -413,6 +413,15 @@ The Summary page shows:
   A temporary VM's caption reads
   `Temporary VM. Not saved until it is kept in the library.`
 
+A library VM's file is named after the VM (`Windows XP` is
+`windows-xp.toml`), and **the file is renamed when the VM is**: a copy made as
+`Windows XP copy` and then named `Ubuntu` is `ubuntu.toml`. A name another VM's
+file already has gets `-2`. A file name you chose yourself is never changed by
+a rename of the VM. **Rename file…**, beside the caption, opens an editor for
+the file's name: it takes letters, digits and dashes (anything else is cut
+down, and the editor shows what the name becomes), and refuses a name another
+VM's file has. The VM keeps running while its file is renamed.
+
 A library VM has a **Delete VM** button; a temporary VM has **Keep in
 library** and **Discard**. `Delete VM` and `Discard` ask first
 (`Delete <name>?` / `Discard <name>?`) and work only while the VM is stopped
@@ -460,6 +469,12 @@ Settings can be edited only while the VM is powered off, and they take effect
 at the next power-on. While the VM runs, the page reads
 `Power off before changing VM hardware.`
 
+- **Numbers on a phone.** `Guest memory`, `Host memory`, `Memory block`,
+  `Sockets`, `Cores / socket`, `Threads / core`, `IPS target` and `Max
+  instructions` have `−` and `+` buttons and, between them, a field you can
+  type digits into. The number is taken when you leave the field or press
+  Enter, cut to the field's range; text with no digits leaves the value as it
+  was.
 - **Browse.** Choosing a hard disk with `Use a disk file` or `Change`, or a
   file for `ISO path`, also turns that device on.
 - **Boot order.** An attached device the order leaves out is added to it,
@@ -605,7 +620,8 @@ corresponds to.
 
 `name` is what the shell shows for the VM. A library file without one is
 shown under its file name. The shell writes the key whenever it saves the
-VM, and leaves it out when the name is blank.
+VM, and leaves it out when the name is blank. Renaming a VM in the shell
+renames its file to match (see the Summary page).
 
 ### `[emulator]`
 
