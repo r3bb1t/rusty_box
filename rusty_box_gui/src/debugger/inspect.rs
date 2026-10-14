@@ -834,13 +834,17 @@ mod tests {
         let carried = read_snapshot(&mut machine, &paged, &mut discovery, Some(&first));
         assert_eq!(carried.process.as_deref(), Some("carried.exe"));
         // A different listing asked for is read afresh.
+        let kernel = SystemView::KernelModules {
+            selected: None,
+            detail: super::super::windows::KernelDetail::Sections,
+        };
         let listed = ViewRequest {
-            system: SystemView::KernelModules,
+            system: kernel,
             ..ViewRequest::default()
         };
         let read = read_snapshot(&mut machine, &listed, &mut discovery, Some(&first));
         assert_eq!(read.process, None);
-        assert_eq!(read.asked, SystemView::KernelModules);
+        assert_eq!(read.asked, kernel);
     }
 
     /// Asking to look from a process of a guest that is not Windows says why,

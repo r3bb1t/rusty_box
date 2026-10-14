@@ -10038,7 +10038,13 @@ mod tests {
             );
             window.get_by_label("Kernel modules").click();
             window.run();
-            assert_eq!(control.view().system, SystemView::KernelModules);
+            assert_eq!(
+                control.view().system,
+                SystemView::KernelModules {
+                    selected: None,
+                    detail: crate::debugger::windows::KernelDetail::Sections,
+                }
+            );
             window.get_by_label("CPU").click();
             window.run();
             assert_eq!(control.view().system, SystemView::Off);
@@ -10191,6 +10197,216 @@ mod tests {
                 }),
             });
             snapshot
+        }
+
+        /// tcpip.sys's base in the kernel listings below.
+        const TCPIP_BASE: u64 = 0xFFFF_FADF_F000_0000;
+
+        /// The kernel and two drivers listed, with `picked`'s detail.
+        fn kernel_listing_snapshot(
+            picked: Option<crate::debugger::windows::PickedModule>,
+        ) -> crate::debugger::inspect::DebugSnapshot {
+            use crate::debugger::windows::{KernelListing, ModuleBits, SystemListing, WinModule};
+            let module = |base: u64, name: &str| WinModule {
+                base,
+                size: 0x11_0000,
+                name: Some(name.to_owned()),
+                path: Some(format!("\\SystemRoot\\system32\\drivers\\{name}")),
+                bits: ModuleBits::Bits64,
+            };
+            let mut snapshot = paused_snapshot();
+            snapshot.system = SystemListing::KernelModules(KernelListing {
+                modules: vec![
+                    module(0xFFFF_F800_0100_0000, "ntoskrnl.exe"),
+                    module(TCPIP_BASE, "tcpip.sys"),
+                ],
+                picked,
+            });
+            snapshot
+        }
+
+        /// One click at `pos`, as a pointer makes it.
+        fn single_click(window: &mut Harness<'_, Window>, pos: egui::Pos2) {
+            window.hover_at(pos);
+            window.event(press(pos));
+            window.event(release(pos));
+            window.step();
+        }
+
+        /// Opens the Kernel modules tab and lets the tab's click settle.
+        fn open_kernel_modules(window: &mut Harness<'_, Window>) {
+            open_debugger(window);
+            window.get_by_label("Kernel modules").click();
+            window.run();
+            let_clicks_settle(window);
+        }
+
+        /// A click on a driver picks it: the run is asked for its sections,
+        /// and the page stays on the list.
+        #[test]
+        fn clicking_a_kernel_module_picks_it() {
+            use crate::debugger::windows::{KernelDetail, SystemView};
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_vm(&mut app);
+            control.publish(kernel_listing_snapshot(None));
+            let mut window = tall_window(app);
+            window.run();
+            open_kernel_modules(&mut window);
+            let tcpip = row_center(&window, "tcpip.sys");
+            single_click(&mut window, tcpip);
+            window.run();
+            assert_eq!(
+                control.view().system,
+                SystemView::KernelModules {
+                    selected: Some(TCPIP_BASE),
+                    detail: KernelDetail::Sections,
+                }
+            );
+            assert!(window.query_by_label("Registers").is_none(), "still on the list");
+        }
+
+        /// A double-click on a driver opens it in the memory pane.
+        #[test]
+        fn double_clicking_a_kernel_module_opens_it_in_memory() {
+            use crate::debugger::inspect::{AddressSpace, GuestAddress, MemoryTarget};
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_vm(&mut app);
+            control.publish(kernel_listing_snapshot(None));
+            let mut window = tall_window(app);
+            window.run();
+            open_kernel_modules(&mut window);
+            let tcpip = row_center(&window, "tcpip.sys");
+            double_click(&mut window, tcpip);
+            window.run();
+            assert_eq!(
+                control.view().memory,
+                MemoryTarget::At(GuestAddress {
+                    space: AddressSpace::Linear,
+                    value: TCPIP_BASE,
+                })
+            );
+            assert!(window.query_by_label("Registers").is_some(), "the CPU tab is shown");
+        }
+
+        /// The picked driver's sections list with their access; the switch
+        /// asks for its exports instead.
+        #[test]
+        fn a_picked_kernel_module_lists_its_sections_and_switches_to_exports() {
+            use crate::debugger::memory_map::{
+                MapOrigin, MapRegion, MemoryMap, RegionAccess, RegionOwner,
+            };
+            use crate::debugger::windows::{
+                KernelDetail, PickedDetail, PickedModule, SectionsRead, SystemView,
+            };
+            let text = MapRegion {
+                start: TCPIP_BASE + 0x1000,
+                size: 0xB0000,
+                resident_pages: 0x9C,
+                total_pages: 0xB0,
+                access: Some(RegionAccess {
+                    user: false,
+                    writable: false,
+                    executable: true,
+                    observed: true,
+                }),
+                owner: RegionOwner::Section {
+                    base: TCPIP_BASE,
+                    module: "tcpip.sys".to_owned(),
+                    section: ".text".to_owned(),
+                },
+                vad: None,
+            };
+            let picked = PickedModule {
+                base: TCPIP_BASE,
+                shown: PickedDetail::Sections(SectionsRead::Mapped(MemoryMap {
+                    origin: MapOrigin::PageTables,
+                    regions: vec![text],
+                })),
+            };
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_vm(&mut app);
+            control.publish(kernel_listing_snapshot(Some(picked)));
+            let mut window = tall_window(app);
+            window.run();
+            open_kernel_modules(&mut window);
+            let tcpip = row_center(&window, "tcpip.sys");
+            single_click(&mut window, tcpip);
+            window.run();
+            assert!(
+                window
+                    .query_all_by(|node| node.label().is_some_and(|label| label.contains(".text")))
+                    .next()
+                    .is_some(),
+                "the .text section is listed"
+            );
+            window.get_by_label("Exports").click();
+            window.run();
+            assert_eq!(
+                control.view().system,
+                SystemView::KernelModules {
+                    selected: Some(TCPIP_BASE),
+                    detail: KernelDetail::Exports,
+                }
+            );
+        }
+
+        /// The picked driver's exports list by name, forwarders with where
+        /// they lead, and the filter narrows them.
+        #[test]
+        fn a_picked_kernel_module_lists_its_exports_and_filters_them() {
+            use crate::debugger::pe::{ExportRead, ExportTarget, PeExport};
+            use crate::debugger::windows::{PickedDetail, PickedModule};
+            use crate::shell::debugger_page::EXPORT_FILTER;
+            let exports = vec![
+                PeExport {
+                    name: Some("IoCreateDevice".to_owned()),
+                    ordinal: 1,
+                    target: ExportTarget::Rva(0x1100),
+                },
+                PeExport {
+                    name: Some("KeWaitForSingleObject".to_owned()),
+                    ordinal: 2,
+                    target: ExportTarget::Rva(0x1200),
+                },
+                PeExport {
+                    name: Some("KeFwd".to_owned()),
+                    ordinal: 3,
+                    target: ExportTarget::Forwarded("HAL.HalFoo".to_owned()),
+                },
+            ];
+            let picked = PickedModule {
+                base: TCPIP_BASE,
+                shown: PickedDetail::Exports(ExportRead::Listed(exports)),
+            };
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_vm(&mut app);
+            control.publish(kernel_listing_snapshot(Some(picked)));
+            let mut window = tall_window(app);
+            window.run();
+            open_kernel_modules(&mut window);
+            let tcpip = row_center(&window, "tcpip.sys");
+            single_click(&mut window, tcpip);
+            window.run();
+            window.get_by_label("Exports").click();
+            window.run();
+            let shows = |window: &Harness<'_, Window>, text: &str| {
+                window
+                    .query_all_by(|node| node.label().is_some_and(|label| label.contains(text)))
+                    .next()
+                    .is_some()
+            };
+            assert!(shows(&window, "IoCreateDevice"));
+            assert!(shows(&window, "HAL.HalFoo"), "a forwarder shows where it leads");
+            window
+                .get_by_role_and_label(egui::accesskit::Role::TextInput, EXPORT_FILTER)
+                .click();
+            window.run();
+            window
+                .get_by_role_and_label(egui::accesskit::Role::TextInput, EXPORT_FILTER)
+                .type_text("wait");
+            window.run();
+            assert!(shows(&window, "KeWaitForSingleObject"));
+            assert!(!shows(&window, "IoCreateDevice"), "filtered out");
         }
 
         /// The Processes tab draws its lists whatever the window's size: the

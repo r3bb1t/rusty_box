@@ -320,13 +320,15 @@ pub(crate) fn skip_row(ui: &mut egui::Ui) {
 /// The column titles over a table whose rows are `cells` wide.
 pub(crate) fn header_row(ui: &mut egui::Ui, lead: f32, cells: &[Cell]) {
     let char_width = char_width(ui);
-    let width = ui
-        .available_width()
-        .floor()
-        .max(min_width(lead, cells, char_width).ceil());
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, ROW_HEIGHT), egui::Sense::hover());
-    let painter = ui.painter();
-    for (cell, column) in cells.iter().zip(column_rects(rect, lead, cells, char_width)) {
+    // The titles sit where the rows' columns sit, even past the room given;
+    // the row takes only that room and clips the rest, so it never widens the
+    // card it heads (the rows themselves scroll inside the card).
+    let given = ui.available_width().floor();
+    let columns_width = given.max(min_width(lead, cells, char_width).ceil());
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(given, ROW_HEIGHT), egui::Sense::hover());
+    let columns = Rect::from_min_size(rect.min, egui::vec2(columns_width, ROW_HEIGHT));
+    let painter = ui.painter().with_clip_rect(rect.intersect(ui.clip_rect()));
+    for (cell, column) in cells.iter().zip(column_rects(columns, lead, cells, char_width)) {
         let galley = painter.layout_no_wrap(
             cell.plain_text().to_owned(),
             FontId::proportional(TEXT_CAPTION),
@@ -546,6 +548,30 @@ mod tests {
             CellText::Gauge(fraction, _) => Some(fraction),
             CellText::Plain(..) | CellText::Job(_) => None,
         }
+    }
+
+    /// Column titles wider than their card clip instead of widening it: the
+    /// card holds its size, and its rows scroll inside it.
+    #[test]
+    fn a_header_row_never_takes_more_width_than_it_is_given() {
+        let cells = [
+            Cell::left("Base", TEXT_MUTED, 16),
+            Cell::right("Size", TEXT_MUTED, 8),
+            Cell::left("Name", TEXT_MUTED, 18),
+            Cell::fill("Path", TEXT_MUTED),
+        ];
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(400.0, 80.0))
+            .build_ui_state(
+                move |ui, used: &mut f32| {
+                    ui.set_max_width(200.0);
+                    header_row(ui, 0.0, &cells);
+                    *used = ui.min_rect().width();
+                },
+                0.0_f32,
+            );
+        harness.run();
+        assert!(*harness.state() <= 200.5, "the row took {} points", harness.state());
     }
 
     #[test]

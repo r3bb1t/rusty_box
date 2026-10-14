@@ -40,7 +40,7 @@ use rusty_box::emulator::{DebugCpu, SliceEngine};
 
 use super::inspect::{ModuleSpace, SymModule, SymbolIndex};
 use super::memory_map::{self, MemoryMap, ModuleLayout};
-use super::pe::{self, HEADER_BYTES};
+use super::pe::{self, ExportRead, HEADER_BYTES};
 use super::threads::{
     decode_trap_frame, frame_is_users, walk_thread_list, SavedRegisters, WinThread, MAX_THREADS,
     TRAP_FRAME_BYTES,
@@ -70,8 +70,51 @@ pub(crate) enum SystemView {
         selected: Option<u64>,
         detail: ProcessDetail,
     },
-    /// The drivers and the kernel itself, in load order.
-    KernelModules,
+    /// The drivers and the kernel itself, in load order, and — for
+    /// `selected` (a module's base) — its sections or its exports.
+    KernelModules {
+        selected: Option<u64>,
+        detail: KernelDetail,
+    },
+}
+
+/// What the Kernel modules view shows for the picked module.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum KernelDetail {
+    /// Its PE sections, with how much of each is resident and its access.
+    #[default]
+    Sections,
+    /// The functions it exports.
+    Exports,
+}
+
+/// The kernel's modules, and the picked one's detail.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct KernelListing {
+    pub(crate) modules: Vec<WinModule>,
+    pub(crate) picked: Option<PickedModule>,
+}
+
+/// The picked kernel module's detail, as the view asked for it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PickedModule {
+    pub(crate) base: u64,
+    pub(crate) shown: PickedDetail,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum PickedDetail {
+    Sections(SectionsRead),
+    Exports(ExportRead),
+}
+
+/// A module's sections as its headers and the page tables give them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum SectionsRead {
+    /// Its header page and each section, with residency and access.
+    Mapped(MemoryMap),
+    /// Its header page is paged out, so its sections are unknown.
+    HeaderUnreadable,
 }
 
 /// What the Processes view shows for the chosen process.
@@ -95,7 +138,7 @@ pub(crate) enum SystemListing {
     /// address space), and the step that showed it.
     NoWindowsKernel(KernelMiss),
     Processes(ProcessListing),
-    KernelModules(Vec<WinModule>),
+    KernelModules(KernelListing),
 }
 
 /// The step at which the walk to a Windows x64 kernel gave out.
@@ -318,7 +361,7 @@ pub(crate) fn read_windows<T: Instrumentation, E: SliceEngine<T>>(
         Err(miss) => {
             let system = match request {
                 SystemView::Off => SystemListing::NotAsked,
-                SystemView::Processes { .. } | SystemView::KernelModules => {
+                SystemView::Processes { .. } | SystemView::KernelModules { .. } => {
                     SystemListing::NoWindowsKernel(miss)
                 }
             };
@@ -355,8 +398,31 @@ pub(crate) fn read_windows<T: Instrumentation, E: SliceEngine<T>>(
 
     let system = match request {
         SystemView::Off => SystemListing::NotAsked,
-        SystemView::KernelModules => match kernel.loaded_modules {
-            Some(_) => SystemListing::KernelModules(kernel_modules),
+        SystemView::KernelModules { selected, detail } => match kernel.loaded_modules {
+            Some(_) => {
+                // The picked module's detail is read only as asked: its
+                // sections, or its exports.
+                let picked = selected
+                    .and_then(|base| kernel_modules.iter().find(|module| module.base == base))
+                    .cloned()
+                    .map(|module| PickedModule {
+                        base: module.base,
+                        shown: match detail {
+                            KernelDetail::Sections => PickedDetail::Sections(read_kernel_sections(
+                                cpu,
+                                view.registers.cr3,
+                                &module,
+                            )),
+                            KernelDetail::Exports => {
+                                PickedDetail::Exports(read_kernel_exports(cpu, &module))
+                            }
+                        },
+                    });
+                SystemListing::KernelModules(KernelListing {
+                    modules: kernel_modules,
+                    picked,
+                })
+            }
             None => SystemListing::NoWindowsKernel(KernelMiss::NoModuleList),
         },
         SystemView::Processes { selected, detail } => {
@@ -1612,6 +1678,62 @@ fn read_memory_map<T: Instrumentation, E: SliceEngine<T>>(
     }
 }
 
+/// A kernel module's header page and sections, from its PE headers, with each
+/// one's residency and access from the page tables under `cr3` (the kernel
+/// half is the same in every address space). A section with no page mapped —
+/// one the loader discarded after boot, or paged out — is listed with none
+/// resident and the access its PE flags give.
+fn read_kernel_sections<T: Instrumentation, E: SliceEngine<T>>(
+    cpu: &mut DebugCpu<'_, T, E>,
+    cr3: u64,
+    module: &WinModule,
+) -> SectionsRead {
+    let Some(sections) = read_exact(cpu, Root::Live, module.base, HEADER_BYTES)
+        .and_then(|header| pe::parse_sections(&header))
+    else {
+        return SectionsRead::HeaderUnreadable;
+    };
+    let layout = ModuleLayout {
+        base: module.base,
+        name: module
+            .name
+            .clone()
+            .unwrap_or_else(|| format!("{:X}", module.base)),
+        sections,
+    };
+    let image = LinearRange {
+        start: module.base,
+        end: module.base.saturating_add(u64::from(module.size)),
+    };
+    let mut mappings = Vec::new();
+    let walk = cpu.dbg_page_mappings_in(cr3, image, |mapping| {
+        mappings.push(mapping);
+        WalkStep::Continue
+    });
+    match walk {
+        // Without paging nothing is mapped: every section reads as none
+        // resident, which is what the empty mappings give.
+        MappingWalk::Complete | MappingWalk::Stopped | MappingWalk::PagingOff => {}
+    }
+    // A kernel image mapped by large pages is reported a page at a time, and
+    // the last page runs past the image: only the image's own pages count.
+    let mappings = memory_map::clip_mappings(&mappings, image);
+    SectionsRead::Mapped(memory_map::build(&mappings, &[layout]))
+}
+
+/// A kernel module's exports, read from its export table in kernel memory.
+fn read_kernel_exports<T: Instrumentation, E: SliceEngine<T>>(
+    cpu: &mut DebugCpu<'_, T, E>,
+    module: &WinModule,
+) -> ExportRead {
+    let Some(header) = read_exact(cpu, Root::Live, module.base, HEADER_BYTES) else {
+        return ExportRead::Unreadable;
+    };
+    pe::parse_exports(&header, |rva, len| {
+        read_exact(cpu, Root::Live, module.base.wrapping_add(u64::from(rva)), len)
+    })
+}
+
 /// Windows' own records of the process's address space: the VAD tree, read
 /// from the `EPROCESS` at `eprocess`. The tree's root and node shape are
 /// discovered by trying each 64-bit shape at every `EPROCESS` field and
@@ -2111,7 +2233,11 @@ mod tests {
             selected: None,
             detail: ProcessDetail::Modules,
         };
-        for asked in [SystemView::KernelModules, processes] {
+        let kernel = SystemView::KernelModules {
+            selected: None,
+            detail: KernelDetail::Sections,
+        };
+        for asked in [kernel, processes] {
             // The flat test mode keeps GS at 0: there is no KPCR to find.
             assert_eq!(
                 read_windows(&mut cpu, &view, asked, &mut discovery).system,
@@ -2186,7 +2312,10 @@ mod tests {
         let read = read_windows(
             &mut cpu,
             &view,
-            SystemView::KernelModules,
+            SystemView::KernelModules {
+                selected: Some(0xFFFF_F800_0100_0000),
+                detail: KernelDetail::Exports,
+            },
             &mut WindowsDiscovery::default(),
         );
         assert_eq!(

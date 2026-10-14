@@ -14,7 +14,7 @@
 
 use std::collections::BTreeMap;
 
-use rusty_box::cpu::PageMapping;
+use rusty_box::cpu::{LinearRange, PageMapping};
 
 use super::pe::PeSection;
 use super::threads::{stack_owner, WinThread};
@@ -302,6 +302,26 @@ fn resident(mappings: &[PageMapping], lo: u64, hi: u64) -> (u64, Option<RegionAc
     (pages, access)
 }
 
+/// The parts of `mappings` that lie inside `range`, each cut at the range's
+/// ends with its physical address moved along with its start. A walk reports
+/// a large page whole, so one that begins inside a module can run on past its
+/// end; cut, it counts only the module's own pages.
+pub(crate) fn clip_mappings(mappings: &[PageMapping], range: LinearRange) -> Vec<PageMapping> {
+    mappings
+        .iter()
+        .filter_map(|mapping| {
+            let start = mapping.linear.max(range.start);
+            let end = mapping.linear.saturating_add(mapping.size).min(range.end);
+            (start < end).then(|| PageMapping {
+                linear: start,
+                physical: mapping.physical.wrapping_add(start - mapping.linear),
+                size: end - start,
+                access: mapping.access,
+            })
+        })
+        .collect()
+}
+
 /// Builds a process's page-table memory map from the mapped pages and the
 /// module layouts. `mappings` are in address order, as the walk reports them.
 pub(crate) fn build(mappings: &[PageMapping], modules: &[ModuleLayout]) -> MemoryMap {
@@ -508,6 +528,20 @@ mod tests {
     use super::*;
     use crate::debugger::vad::WinProtection;
     use rusty_box::cpu::PageAccess;
+
+    /// A large page that runs past a module's end is cut at the end, its
+    /// physical address moved with its start; a mapping wholly outside goes.
+    #[test]
+    fn mappings_are_cut_to_the_range_asked_for() {
+        let range = LinearRange { start: 0x40_0000, end: 0x48_0000 };
+        let large = map(0x40_0000, 0x20_0000, true, true);
+        let before = map(0x3F_F000, 0x2000, false, false);
+        let outside = map(0x60_0000, 0x1000, false, false);
+        let cut = clip_mappings(&[before, large, outside], range);
+        assert_eq!(cut.len(), 2);
+        assert_eq!((cut[0].linear, cut[0].size, cut[0].physical), (0x40_0000, 0x1000, 0x40_0000));
+        assert_eq!((cut[1].linear, cut[1].size), (0x40_0000, 0x8_0000));
+    }
 
     fn map(linear: u64, size: u64, writable: bool, executable: bool) -> PageMapping {
         PageMapping {

@@ -25,9 +25,11 @@ use crate::debugger::search::{
 };
 use crate::debugger::memory_map::{MemoryMap, RegionOwner};
 use crate::debugger::threads::WinThread;
+use crate::debugger::pe::{ExportRead, ExportTarget, PeExport};
 use crate::debugger::windows::{
-    KernelMiss, ModuleBits, ModuleRead, ProcessDetail, ProcessListing, SystemListing, SystemView,
-    TreeRow, WinModule, WinProcess,
+    KernelDetail, KernelListing, KernelMiss, ModuleBits, ModuleRead, PickedDetail, PickedModule,
+    ProcessDetail, ProcessListing, SectionsRead, SystemListing, SystemView, TreeRow, WinModule,
+    WinProcess,
 };
 use crate::shell::listing::{
     card_title, char_width, chip, empty_state, header_row, lead_arrow, lead_chevron, lead_dot,
@@ -226,6 +228,12 @@ pub(crate) struct DebuggerPane {
     pub(crate) scroll_to: Option<u64>,
     /// How the grid's panes divide the page.
     pub(crate) split: PaneSplit,
+    /// The kernel module the Kernel modules view details (its base).
+    pub(crate) selected_kernel_module: Option<u64>,
+    /// Whether that view shows the module's sections or its exports.
+    pub(crate) kernel_detail: KernelDetail,
+    /// What a listed export's name must contain.
+    pub(crate) export_filter: String,
 }
 
 impl Default for DebuggerPane {
@@ -247,6 +255,9 @@ impl Default for DebuggerPane {
             expanded_modules: BTreeSet::new(),
             scroll_to: None,
             split: PaneSplit::default(),
+            selected_kernel_module: None,
+            kernel_detail: KernelDetail::Sections,
+            export_filter: String::new(),
         }
     }
 }
@@ -273,15 +284,18 @@ impl DebuggerTab {
         }
     }
 
-    /// What this tab asks the run thread to list.
-    fn system_view(self, selected_process: Option<u64>, detail: ProcessDetail) -> SystemView {
+    /// What this tab asks the run thread to list, for what `pane` has picked.
+    fn system_view(self, pane: &DebuggerPane) -> SystemView {
         match self {
             Self::Cpu => SystemView::Off,
             Self::Processes => SystemView::Processes {
-                selected: selected_process,
-                detail,
+                selected: pane.selected_process,
+                detail: pane.process_detail,
             },
-            Self::KernelModules => SystemView::KernelModules,
+            Self::KernelModules => SystemView::KernelModules {
+                selected: pane.selected_kernel_module,
+                detail: pane.kernel_detail,
+            },
         }
     }
 }
@@ -595,7 +609,7 @@ fn header(
         let tabs = DebuggerTab::ALL.map(|tab| (tab, tab.label()));
         if segmented(ui, &mut pane.tab, &tabs) {
             *action = Some(DebuggerAction::ShowSystem(
-                pane.tab.system_view(pane.selected_process, pane.process_detail),
+                pane.tab.system_view(pane),
             ));
         }
         let Some(snapshot) = snapshot else {
@@ -756,6 +770,8 @@ pub(crate) struct PaneSplit {
     pub(crate) right_rows: f32,
     /// The process list, of the Processes tab's width.
     pub(crate) processes: f32,
+    /// The module list, of the Kernel modules tab's width.
+    pub(crate) kernel: f32,
 }
 
 impl Default for PaneSplit {
@@ -765,6 +781,7 @@ impl Default for PaneSplit {
             left_rows: TOP_SHARE,
             right_rows: TOP_SHARE,
             processes: PROCESS_LIST_SHARE,
+            kernel: PROCESS_LIST_SHARE,
         }
     }
 }
@@ -778,6 +795,7 @@ pub(crate) const RESIZE_COLUMNS: &str = "Resize columns";
 pub(crate) const RESIZE_CODE_MEMORY: &str = "Resize code and memory";
 pub(crate) const RESIZE_REGISTERS_STACK: &str = "Resize registers and stack";
 pub(crate) const RESIZE_PROCESS_LIST: &str = "Resize process list";
+pub(crate) const RESIZE_MODULE_LIST: &str = "Resize module list";
 
 /// Which way a gap divides its panes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1735,36 +1753,9 @@ fn system_page(
             let current_user_module = current_module_base(snapshot, ModuleSpace::User);
             processes_page(ui, fit, listing, current_user_module, pane, action);
         }
-        (SystemListing::KernelModules(modules), DebuggerTab::KernelModules) => {
-            let filter = pane.list_filter.to_lowercase();
-            let shown: Vec<&WinModule> = modules
-                .iter()
-                .filter(|module| module_matches(module, &filter))
-                .collect();
-            let title = Title::counted("Kernel modules", modules.len()).inlined();
-            let header = |ui: &mut egui::Ui| {
-                ui.horizontal_wrapped(|ui| {
-                    title_label(ui, title.text, title.count);
-                    filter_field(ui, &mut pane.list_filter);
-                });
-                header_row(ui, 0.0, &module_columns());
-            };
-            let body = |ui: &mut egui::Ui| {
-                let current = current_module_base(snapshot, ModuleSpace::Kernel);
-                module_rows(ui, &shown, true, current, action);
-            };
-            match fit {
-                Fit::Grid => {
-                    let page = ui.available_size();
-                    pane_card(ui, Room::Fixed(page), title, header, body);
-                }
-                Fit::Scrolling(_) => {
-                    let room = Room::Content(fit.density());
-                    egui::ScrollArea::vertical()
-                        .auto_shrink([false, false])
-                        .show(ui, |ui| pane_card(ui, room, title, header, body));
-                }
-            }
+        (SystemListing::KernelModules(listing), DebuggerTab::KernelModules) => {
+            let current = current_module_base(snapshot, ModuleSpace::Kernel);
+            kernel_page(ui, fit, listing, current, pane, action);
         }
         // A list for another tab, or none yet: the run thread is reading.
         (
@@ -1779,15 +1770,359 @@ fn system_page(
 /// The accessible name of a list's filter field.
 pub(crate) const FILTER: &str = "Filter by name";
 
+/// The accessible name of the exports' filter field.
+pub(crate) const EXPORT_FILTER: &str = "Filter exports";
+
 /// The filter over a list: what a name (or path) must contain.
 fn filter_field(ui: &mut egui::Ui, filter: &mut String) {
+    labelled_filter(ui, filter, FILTER);
+}
+
+/// A filter field named `label`, which is also its hint.
+fn labelled_filter(ui: &mut egui::Ui, filter: &mut String, label: &str) {
     let response = ui.add(
         egui::TextEdit::singleline(filter)
-            .hint_text(FILTER)
+            .hint_text(label)
             .desired_width(220.0),
     );
     let enabled = ui.is_enabled();
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::TextEdit, enabled, FILTER));
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::TextEdit, enabled, label));
+}
+
+/// The Kernel modules tab: the kernel's modules, and beside them the picked
+/// one's sections or exports — laid out as the Processes tab is, the two
+/// cards side by side with a handle between them where the page has room,
+/// one above the other where it scrolls.
+fn kernel_page(
+    ui: &mut egui::Ui,
+    fit: Fit,
+    listing: &KernelListing,
+    current: Option<u64>,
+    pane: &mut DebuggerPane,
+    action: &mut Option<DebuggerAction>,
+) {
+    let filter = pane.list_filter.to_lowercase();
+    let shown: Vec<&WinModule> = listing
+        .modules
+        .iter()
+        .filter(|module| module_matches(module, &filter))
+        .collect();
+    let picked_before = pane.selected_kernel_module;
+    let detail_before = pane.kernel_detail;
+    // The run's answer, once it is for what is picked and asked.
+    let answer = listing.picked.as_ref().filter(|picked| {
+        Some(picked.base) == pane.selected_kernel_module
+            && matches!(
+                (&picked.shown, pane.kernel_detail),
+                (PickedDetail::Sections(_), KernelDetail::Sections)
+                    | (PickedDetail::Exports(_), KernelDetail::Exports)
+            )
+    });
+    let picked_name = pane
+        .selected_kernel_module
+        .and_then(|base| listing.modules.iter().find(|module| module.base == base))
+        .map(|module| module.name.clone().unwrap_or_else(|| format!("{:X}", module.base)));
+    let detail_count = answer.and_then(|picked| match &picked.shown {
+        PickedDetail::Sections(SectionsRead::Mapped(map)) => Some(map.regions.len()),
+        PickedDetail::Exports(ExportRead::Listed(exports)) => Some(exports.len()),
+        PickedDetail::Sections(SectionsRead::HeaderUnreadable)
+        | PickedDetail::Exports(ExportRead::NoTable | ExportRead::NotPe | ExportRead::Unreadable) => {
+            None
+        }
+    });
+    let list_title = Title::counted("Kernel modules", listing.modules.len()).inlined();
+    let detail_title = Title {
+        text: picked_name.as_deref().unwrap_or("Module"),
+        count: detail_count,
+        inline: true,
+    };
+    let has_pick = pane.selected_kernel_module.is_some();
+    // Read before the header's field takes the filter for this frame.
+    let export_filter = pane.export_filter.to_lowercase();
+
+    let mut list_card = |ui: &mut egui::Ui, room: Room, action: &mut Option<DebuggerAction>| {
+        pane_card(
+            ui,
+            room,
+            list_title,
+            |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    title_label(ui, list_title.text, list_title.count);
+                    filter_field(ui, &mut pane.list_filter);
+                });
+                header_row(ui, 0.0, &module_columns());
+            },
+            |ui| {
+                module_rows(
+                    ui,
+                    &shown,
+                    ModuleClick::Pick {
+                        picked: &mut pane.selected_kernel_module,
+                    },
+                    current,
+                    action,
+                );
+            },
+        );
+    };
+    let mut detail_card = |ui: &mut egui::Ui, room: Room, action: &mut Option<DebuggerAction>| {
+        pane_card(
+            ui,
+            room,
+            detail_title,
+            |ui| {
+                kernel_detail_header(
+                    ui,
+                    detail_title,
+                    &mut pane.kernel_detail,
+                    &mut pane.export_filter,
+                );
+            },
+            |ui| kernel_detail_body(ui, answer, has_pick, &export_filter, action),
+        );
+    };
+    match fit {
+        Fit::Grid => {
+            let gap = SPACE_ITEM;
+            let page = ui.available_size();
+            let share = resized(pane.split.kernel, 0.0, page.x, gap, SPLIT_MIN);
+            let left = ((page.x - gap) * share).floor();
+            let mut moved: Option<f32> = None;
+            ui.horizontal_top(|ui| {
+                ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
+                list_card(ui, Room::Fixed(egui::vec2(left, page.y)), &mut *action);
+                match splitter(ui, egui::vec2(gap, page.y), SplitAxis::Columns, RESIZE_MODULE_LIST) {
+                    SplitterMove::Still => {}
+                    SplitterMove::Dragged(delta) => {
+                        moved = Some(resized(share, delta, page.x, gap, SPLIT_MIN));
+                    }
+                    SplitterMove::Reset => moved = Some(PROCESS_LIST_SHARE),
+                }
+                detail_card(
+                    ui,
+                    Room::Fixed(egui::vec2(page.x - gap - left, page.y)),
+                    &mut *action,
+                );
+            });
+            if let Some(share) = moved {
+                pane.split.kernel = share;
+            }
+        }
+        Fit::Scrolling(columns) => {
+            let density = fit.density();
+            let room = Room::Content(density);
+            let gap = density.gap();
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| match columns {
+                    Columns::Two => side_by_side(
+                        ui,
+                        gap,
+                        PROCESS_LIST_SHARE,
+                        action,
+                        |ui, action| list_card(ui, room, action),
+                        |ui, action| detail_card(ui, room, action),
+                    ),
+                    Columns::One => {
+                        list_card(ui, room, &mut *action);
+                        ui.add_space(gap);
+                        detail_card(ui, room, &mut *action);
+                    }
+                });
+        }
+    }
+    // A new pick or a switch between sections and exports asks the run for
+    // it; a double-click that opened a module in memory stands.
+    let changed =
+        pane.selected_kernel_module != picked_before || pane.kernel_detail != detail_before;
+    if changed && !matches!(action, Some(DebuggerAction::OpenModule(_))) {
+        *action = Some(DebuggerAction::ShowSystem(SystemView::KernelModules {
+            selected: pane.selected_kernel_module,
+            detail: pane.kernel_detail,
+        }));
+    }
+}
+
+/// The detail card's title, its Sections/Exports switch (and the exports'
+/// filter), and the column titles of what it lists.
+fn kernel_detail_header(
+    ui: &mut egui::Ui,
+    title: Title<'_>,
+    detail: &mut KernelDetail,
+    export_filter: &mut String,
+) {
+    ui.horizontal_wrapped(|ui| {
+        title_label(ui, title.text, title.count);
+        segmented(
+            ui,
+            detail,
+            &[(KernelDetail::Sections, "Sections"), (KernelDetail::Exports, "Exports")],
+        );
+        match detail {
+            KernelDetail::Exports => labelled_filter(ui, export_filter, EXPORT_FILTER),
+            KernelDetail::Sections => {}
+        }
+    });
+    match detail {
+        KernelDetail::Sections => header_row(ui, 0.0, &section_columns()),
+        KernelDetail::Exports => header_row(ui, 0.0, &export_columns()),
+    }
+}
+
+/// The picked module's sections or exports, or why they are not listed.
+fn kernel_detail_body(
+    ui: &mut egui::Ui,
+    answer: Option<&PickedModule>,
+    has_pick: bool,
+    export_filter: &str,
+    action: &mut Option<DebuggerAction>,
+) {
+    let mut muted = |text: &str| {
+        ui.add_space(SPACE_ITEM);
+        ui.label(RichText::new(text).color(TEXT_MUTED));
+    };
+    let Some(picked) = answer else {
+        muted(if has_pick {
+            "Reading the module…"
+        } else {
+            "Pick a module to see its sections and exports."
+        });
+        return;
+    };
+    match &picked.shown {
+        PickedDetail::Sections(SectionsRead::Mapped(map)) => section_rows(ui, map, action),
+        PickedDetail::Sections(SectionsRead::HeaderUnreadable) => {
+            muted("Its headers are paged out, so its sections cannot be read.");
+        }
+        PickedDetail::Exports(ExportRead::Listed(exports)) => {
+            export_rows(ui, picked.base, exports, export_filter, action);
+        }
+        PickedDetail::Exports(ExportRead::NoTable) => muted("It exports nothing."),
+        PickedDetail::Exports(ExportRead::NotPe) => {
+            muted("Its headers do not read as a PE image.");
+        }
+        PickedDetail::Exports(ExportRead::Unreadable) => muted("Its export table is paged out."),
+    }
+}
+
+const SECTION_NAME_CHARS: usize = 9;
+
+fn section_columns() -> [Cell; 6] {
+    [
+        Cell::left("Section", TEXT_MUTED, SECTION_NAME_CHARS),
+        Cell::left("Address", TEXT_MUTED, 16),
+        Cell::right("Size", TEXT_MUTED, MEMORY_SIZE_CHARS),
+        Cell::right("Resident", TEXT_MUTED, MEMORY_RESIDENT_CHARS),
+        Cell::left("", TEXT_MUTED, MEMORY_GAUGE_CHARS),
+        Cell::fill("Access", TEXT_MUTED),
+    ]
+}
+
+/// A module's header page and sections, one a row: name, address, size, how
+/// much is resident, and access — executable code cyan. A click opens the
+/// region in the memory pane.
+fn section_rows(ui: &mut egui::Ui, map: &MemoryMap, action: &mut Option<DebuggerAction>) {
+    for (n, region) in map.regions.iter().enumerate() {
+        let name = match &region.owner {
+            RegionOwner::Header { .. } => "headers",
+            RegionOwner::Section { section, .. } => section.as_str(),
+            RegionOwner::Stack { .. } | RegionOwner::Private => "(other)",
+        };
+        let executable = region.access.is_some_and(|access| access.executable);
+        let color = if executable { ACCENT_CYAN } else { TEXT_PRIMARY };
+        let fraction = region.resident_pages as f32 / region.total_pages.max(1) as f32;
+        let gauge = if executable {
+            Cell::gauge_colored(fraction, MEMORY_GAUGE_CHARS, ACCENT_CYAN)
+        } else {
+            Cell::gauge(fraction, MEMORY_GAUGE_CHARS)
+        };
+        let cells = [
+            Cell::left(name, color, SECTION_NAME_CHARS),
+            Cell::left(format!("{:016X}", region.start), TEXT_MUTED, 16),
+            Cell::right(human_size(region.size), TEXT_MUTED, MEMORY_SIZE_CHARS),
+            Cell::right(
+                format!("{}/{}", region.resident_pages, region.total_pages),
+                TEXT_MUTED,
+                MEMORY_RESIDENT_CHARS,
+            ),
+            gauge,
+            Cell::fill(region_access_text(region), color),
+        ];
+        let response = list_row(ui, 0.0, &cells, Tone::striped(n), RowSense::Pick { selected: false });
+        if response.on_hover_text("Click to show it in memory.").clicked() {
+            *action = Some(DebuggerAction::OpenModule(region.start));
+        }
+    }
+}
+
+const EXPORT_ORDINAL_CHARS: usize = 6;
+
+fn export_columns() -> [Cell; 3] {
+    [
+        Cell::left("Address", TEXT_MUTED, 16),
+        Cell::right("Ord", TEXT_MUTED, EXPORT_ORDINAL_CHARS),
+        Cell::fill("Name", TEXT_MUTED),
+    ]
+}
+
+/// A module's exports at `base`, one a row, keeping those whose name (or a
+/// forwarder's target) holds the lowercase `filter`: address, ordinal, name.
+/// A forwarder shows where it leads instead of an address. A click on an
+/// export with an address opens it in the memory pane.
+fn export_rows(
+    ui: &mut egui::Ui,
+    base: u64,
+    exports: &[PeExport],
+    filter: &str,
+    action: &mut Option<DebuggerAction>,
+) {
+    let matches = |export: &PeExport| {
+        filter.is_empty()
+            || export.name.as_deref().is_some_and(|name| name.to_lowercase().contains(filter))
+            || match &export.target {
+                ExportTarget::Forwarded(to) => to.to_lowercase().contains(filter),
+                ExportTarget::Rva(_) => false,
+            }
+    };
+    let mut any = false;
+    for (n, export) in exports.iter().filter(|export| matches(export)).enumerate() {
+        any = true;
+        if !row_visible(ui) {
+            skip_row(ui);
+            continue;
+        }
+        let name = export.name.as_deref().unwrap_or("(by ordinal)");
+        // Where a click goes: an export with an address; a forwarder has none.
+        let target = match &export.target {
+            ExportTarget::Rva(rva) => Some(base.wrapping_add(u64::from(*rva))),
+            ExportTarget::Forwarded(_) => None,
+        };
+        let address = target.map_or_else(|| "forwarded".to_owned(), |at| format!("{at:016X}"));
+        let label = match &export.target {
+            ExportTarget::Rva(_) => name.to_owned(),
+            ExportTarget::Forwarded(to) => format!("{name}  forwarded to {to}"),
+        };
+        let cells = [
+            Cell::left(address, TEXT_MUTED, 16),
+            Cell::right(export.ordinal.to_string(), TEXT_MUTED, EXPORT_ORDINAL_CHARS),
+            Cell::fill(label, TEXT_PRIMARY),
+        ];
+        let response = list_row(ui, 0.0, &cells, Tone::striped(n), RowSense::Pick { selected: false });
+        match target {
+            Some(address) => {
+                if response.on_hover_text("Click to show it in memory.").clicked() {
+                    *action = Some(DebuggerAction::OpenModule(address));
+                }
+            }
+            None => {
+                response.on_hover_text("Forwarded: the function lives in the module named.");
+            }
+        }
+    }
+    if !any {
+        ui.add_space(SPACE_ITEM);
+        ui.label(RichText::new("No export matches the filter.").color(TEXT_MUTED));
+    }
 }
 
 /// A module passes a lowercase `filter` when its name or path holds it.
@@ -2466,7 +2801,12 @@ fn listed_modules(
     match listing.modules.as_ref().map(|modules| &modules.read) {
         Some(ModuleRead::Listed(modules)) => {
             let shown: Vec<&WinModule> = modules.iter().collect();
-            module_rows(ui, &shown, navigable, highlight, action);
+            let click = if navigable {
+                ModuleClick::Open
+            } else {
+                ModuleClick::Foreign
+            };
+            module_rows(ui, &shown, click, highlight, action);
         }
         Some(ModuleRead::NoUserSpace) => {
             muted(ui, "A kernel process: it loads no user-mode modules.");
@@ -2599,10 +2939,21 @@ const MODULE_NAME_CHARS: usize = 18;
 
 /// One row per module. A module in the running address space opens the CPU
 /// tab's memory pane at its base; one elsewhere says why it cannot.
+/// What a click on a module row does.
+enum ModuleClick<'a> {
+    /// Opens it in the memory pane: a module of the running process.
+    Open,
+    /// Nothing to open: it lies in another process's address space.
+    Foreign,
+    /// Picks it into `picked`, for its detail; a double-click (or a triple,
+    /// which holds one) opens it in the memory pane.
+    Pick { picked: &'a mut Option<u64> },
+}
+
 fn module_rows(
     ui: &mut egui::Ui,
     modules: &[&WinModule],
-    navigable: bool,
+    mut click: ModuleClick<'_>,
     highlight: Option<u64>,
     action: &mut Option<DebuggerAction>,
 ) {
@@ -2632,17 +2983,49 @@ fn module_rows(
             Cell::left(name, name_color, MODULE_NAME_CHARS),
             Cell::fill(path, TEXT_MUTED.gamma_multiply(0.8)),
         ];
-        let tone = if current { Tone::Current } else { Tone::striped(n) };
-        let response = list_row(ui, 0.0, &cells, tone, RowSense::Pick { selected: current });
-        if navigable {
-            if response
-                .on_hover_text(format!("{path}\nClick to show it in memory."))
-                .clicked()
-            {
-                *action = Some(DebuggerAction::OpenModule(module.base));
-            }
+        let picked_now = match &click {
+            ModuleClick::Pick { picked } => **picked == Some(module.base),
+            ModuleClick::Open | ModuleClick::Foreign => false,
+        };
+        let tone = if picked_now {
+            Tone::Selected
+        } else if current {
+            Tone::Current
         } else {
-            response.on_hover_text(format!("{path}\n{ANOTHER_ADDRESS_SPACE}"));
+            Tone::striped(n)
+        };
+        let response = list_row(
+            ui,
+            0.0,
+            &cells,
+            tone,
+            RowSense::Pick {
+                selected: picked_now || current,
+            },
+        );
+        match &mut click {
+            ModuleClick::Open => {
+                if response
+                    .on_hover_text(format!("{path}\nClick to show it in memory."))
+                    .clicked()
+                {
+                    *action = Some(DebuggerAction::OpenModule(module.base));
+                }
+            }
+            ModuleClick::Foreign => {
+                response.on_hover_text(format!("{path}\n{ANOTHER_ADDRESS_SPACE}"));
+            }
+            ModuleClick::Pick { picked } => {
+                let response = response.on_hover_text(format!(
+                    "{path}\nClick to see its sections and exports; double-click to show it \
+                     in memory."
+                ));
+                if response.double_clicked() || response.triple_clicked() {
+                    *action = Some(DebuggerAction::OpenModule(module.base));
+                } else if response.clicked() {
+                    **picked = Some(module.base);
+                }
+            }
         }
     }
 }
