@@ -10267,6 +10267,106 @@ mod tests {
             assert!(window.query_by_label("Registers").is_some(), "the CPU tab is shown");
         }
 
+        /// A double-click on a row straight after a click elsewhere (here the
+        /// tab that showed the list) opens it: egui counts the row's second
+        /// click as a triple when the click before last came within 0.6 s,
+        /// and a triple holds the double-click.
+        #[test]
+        fn a_double_click_right_after_another_click_still_opens_the_row() {
+            use crate::debugger::inspect::ViewContext;
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_vm(&mut app);
+            control.publish(process_listing_snapshot());
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            let_clicks_settle(&mut window);
+            window.get_by_label("Processes").click();
+            window.step();
+            window.step();
+            let system = row_center(&window, "System");
+            double_click(&mut window, system);
+            window.run();
+            assert_eq!(
+                control.view().context,
+                ViewContext::Process { eprocess: 0xFFFF_FA80_0000_1000 }
+            );
+        }
+
+        /// Double-clicking the process the processor runs opens the plain live
+        /// view: there is no other state of it to look from.
+        #[test]
+        fn double_clicking_the_running_process_opens_the_live_view() {
+            use crate::debugger::inspect::ViewContext;
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_vm(&mut app);
+            control.publish(process_listing_snapshot());
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            window.get_by_label("Processes").click();
+            window.run();
+            let_clicks_settle(&mut window);
+            // smss.exe is the running process in this listing.
+            let smss = row_center(&window, "smss.exe");
+            double_click(&mut window, smss);
+            window.run();
+            assert_eq!(control.view().context, ViewContext::Live);
+            assert!(window.query_by_label("Registers").is_some(), "the CPU tab is shown");
+        }
+
+        /// Asked to look from a process that turns out to be the running one,
+        /// the page shows the live processor and says so, with the way back.
+        #[test]
+        fn a_viewed_process_that_is_running_shows_the_live_cpu_and_says_so() {
+            use crate::debugger::inspect::{ViewContext, Viewing};
+            use crate::shell::debugger_page::BACK_TO_LIVE;
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_vm(&mut app);
+            let mut snapshot = paused_snapshot();
+            snapshot.context = ViewContext::Process { eprocess: 0xFFFF_FA80_0000_3000 };
+            snapshot.viewing = Viewing::Running { process: "winlogon.exe".to_owned() };
+            control.publish(snapshot);
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            assert!(
+                window
+                    .query_all_by(|node| node.label().or(node.value()).is_some_and(|text| {
+                        text.contains("winlogon.exe") && text.contains("live CPU")
+                    }))
+                    .next()
+                    .is_some(),
+                "the banner says the live CPU is shown"
+            );
+            assert!(!window.get_by_label("Step").accesskit_node().is_disabled());
+            assert!(window.query_by_label(BACK_TO_LIVE).is_some());
+        }
+
+        /// A split dragged in a wide window still leaves every pane its
+        /// minimum once the window is made narrower.
+        #[test]
+        fn a_narrowed_window_keeps_every_pane_its_minimum() {
+            use crate::shell::debugger_page::RESIZE_COLUMNS;
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            paused_vm(&mut app);
+            let mut window = window_of_size(app, egui::vec2(2600.0, 1200.0));
+            window.run();
+            open_debugger(&mut window);
+            let handle = window.get_by_label(RESIZE_COLUMNS).rect().center();
+            drag(&mut window, handle, handle + egui::vec2(1500.0, 0.0));
+            window.run();
+            window.set_size(egui::vec2(1200.0, 1200.0));
+            window.run();
+            // The right column (Registers) keeps at least its minimum width:
+            // its title sits no closer to the page's right edge than that.
+            let registers = window.get_by_label("Registers").rect();
+            assert!(
+                registers.left() <= 1200.0 - 96.0,
+                "Registers at {registers:?} is squeezed past its minimum"
+            );
+        }
+
         /// Double-clicking a thread asks to look from inside that thread.
         #[test]
         fn double_clicking_a_thread_views_that_thread() {

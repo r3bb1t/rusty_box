@@ -448,6 +448,23 @@ pub(crate) enum ViewMiss {
     /// that reads as its own: a kernel process, a thread only ever in the
     /// kernel, or a frame paged out.
     NoSavedState,
+    /// The thread runs in user mode on another processor: its trap frame is
+    /// an old kernel entry, and its live state is that processor's.
+    RunningElsewhere { cpu: usize },
+}
+
+/// A processor running a thread in user mode, by the TEB its GS base holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct LiveTeb {
+    pub(crate) cpu: usize,
+    pub(crate) teb: u64,
+}
+
+/// The processor running the thread whose TEB is `teb` in user mode, if one
+/// does.
+pub(crate) fn cpu_running(teb: Option<u64>, live: &[LiveTeb]) -> Option<usize> {
+    let teb = teb?;
+    live.iter().find(|running| running.teb == teb).map(|running| running.cpu)
 }
 
 impl ViewMiss {
@@ -464,6 +481,9 @@ impl ViewMiss {
                  frame is paged out."
                     .to_owned()
             }
+            Self::RunningElsewhere { cpu } => {
+                format!("It is running on CPU {cpu}: pick CPU {cpu} to see it live.")
+            }
         }
     }
 }
@@ -471,21 +491,25 @@ impl ViewMiss {
 /// What looking from a process or thread came to.
 #[derive(Clone, Debug)]
 pub(crate) enum ThreadViewRead {
-    /// The process asked for is the one the processor runs: its live state is
-    /// the view.
-    Live,
+    /// The process (or thread) asked for is the one the shown processor
+    /// runs: its live state is the view.
+    Running { process: String },
     Thread(ThreadView),
     Miss(ViewMiss),
 }
 
 /// Finds `target` in the guest's process list and reads the thread to look
 /// from: the one asked for, or for a process its first thread with saved user
-/// state. A process the shown processor runs reads as `Live`. The walks are
-/// the ones `read_windows` makes, through the same `discovery`.
+/// state that no processor runs. A process the shown processor runs, or a
+/// thread it runs in user mode, reads as `Running`: an old trap frame is never
+/// shown for a thread whose state is live. `live` names the threads the
+/// processors run in user mode. The walks are the ones `read_windows` makes,
+/// through the same `discovery`.
 pub(crate) fn read_thread_view<T: Instrumentation, E: SliceEngine<T>>(
     cpu: &mut DebugCpu<'_, T, E>,
     view: &CpuDebugView,
     target: ViewTarget,
+    live: &[LiveTeb],
     discovery: &mut WindowsDiscovery,
 ) -> ThreadViewRead {
     let state = match find_kernel(cpu, view, &mut discovery.state) {
@@ -512,8 +536,13 @@ pub(crate) fn read_thread_view<T: Instrumentation, E: SliceEngine<T>>(
         return ThreadViewRead::Miss(ViewMiss::NoSuchProcess);
     };
     if process.current && matches!(target, ViewTarget::Process { .. }) {
-        return ThreadViewRead::Live;
+        return ThreadViewRead::Running {
+            process: process.name.clone(),
+        };
     }
+    // The thread the shown processor runs in user mode: its GS base is its
+    // TEB.
+    let shown_teb = (view.registers.cpl == 3).then_some(view.segment_bases.gs);
     let read = process_modules(cpu, &processes, process, peb_offset, wow64_offset);
     let (user_space, listed) = match &read {
         ModuleRead::Listed(modules) => (true, modules.as_slice()),
@@ -531,9 +560,20 @@ pub(crate) fn read_thread_view<T: Instrumentation, E: SliceEngine<T>>(
         &ranges,
     );
     let chosen = match target {
-        ViewTarget::Process { .. } => threads.iter().find(|thread| thread.saved.is_some()),
+        // A thread a processor runs shows no live state through its frame.
+        ViewTarget::Process { .. } => threads
+            .iter()
+            .find(|thread| thread.saved.is_some() && cpu_running(thread.teb, live).is_none()),
         ViewTarget::Thread { tid, .. } => match threads.iter().find(|thread| thread.tid == tid) {
-            Some(thread) => Some(thread),
+            Some(thread) => match cpu_running(thread.teb, live) {
+                None => Some(thread),
+                Some(_) if thread.teb.is_some() && thread.teb == shown_teb => {
+                    return ThreadViewRead::Running {
+                        process: process.name.clone(),
+                    };
+                }
+                Some(cpu) => return ThreadViewRead::Miss(ViewMiss::RunningElsewhere { cpu }),
+            },
             None => return ThreadViewRead::Miss(ViewMiss::NoSuchThread),
         },
     };
@@ -2094,7 +2134,7 @@ mod tests {
             ViewTarget::Process { eprocess: 0xFFFF_FA80_0000_1000 },
             ViewTarget::Thread { eprocess: 0xFFFF_FA80_0000_1000, tid: 0x1A4 },
         ] {
-            let read = read_thread_view(&mut cpu, &view, target, &mut discovery);
+            let read = read_thread_view(&mut cpu, &view, target, &[], &mut discovery);
             assert!(
                 matches!(read, ThreadViewRead::Miss(ViewMiss::NoWindowsKernel(KernelMiss::NoKpcr))),
                 "{target:?} read as {read:?}"
@@ -2111,10 +2151,26 @@ mod tests {
             ViewMiss::NoSuchProcess,
             ViewMiss::NoSuchThread,
             ViewMiss::NoSavedState,
+            ViewMiss::RunningElsewhere { cpu: 1 },
         ] {
             assert!(!miss.describe().is_empty(), "{miss:?}");
         }
         assert!(ViewMiss::NoSavedState.describe().contains("saved"));
+        assert!(ViewMiss::RunningElsewhere { cpu: 1 }.describe().contains("CPU 1"));
+    }
+
+    /// A thread that a processor runs in user mode is the one whose TEB that
+    /// processor's GS base holds: its trap frame is an old entry, not where
+    /// it is now.
+    #[test]
+    fn a_thread_running_on_a_processor_is_found_by_its_teb() {
+        let live = [
+            LiveTeb { cpu: 0, teb: 0x7FF_FFFD_E000 },
+            LiveTeb { cpu: 1, teb: 0x7FF_FFFD_A000 },
+        ];
+        assert_eq!(cpu_running(Some(0x7FF_FFFD_A000), &live), Some(1));
+        assert_eq!(cpu_running(Some(0x7FF_FFFD_C000), &live), None);
+        assert_eq!(cpu_running(None, &live), None, "a kernel thread has no TEB");
     }
 
     /// A KPCR-shaped address that does not read says the kernel is not

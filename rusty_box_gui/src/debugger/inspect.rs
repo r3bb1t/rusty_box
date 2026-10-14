@@ -5,8 +5,8 @@ use rusty_box::cpu::{CodeSize, CpuDebugView, Fetched, Instrumentation};
 use rusty_box::emulator::{DebugCpu, Emulator, SliceEngine};
 
 use super::windows::{
-    read_thread_view, read_windows, SystemListing, SystemView, ThreadView, ThreadViewRead,
-    ViewMiss, ViewTarget, WindowsDiscovery,
+    read_thread_view, read_windows, LiveTeb, SystemListing, SystemView, ThreadView,
+    ThreadViewRead, ViewMiss, ViewTarget, WindowsDiscovery,
 };
 
 pub(crate) const ROW_BYTES: usize = 16;
@@ -82,6 +82,9 @@ impl Default for ViewRequest {
 pub(crate) enum Viewing {
     /// The shown processor.
     Live,
+    /// A process or thread was asked for, and the shown processor runs it:
+    /// the panes are the live processor's, which is its state.
+    Running { process: String },
     /// A thread seen from inside.
     Thread(ThreadView),
     /// A process or thread was asked for and cannot be shown; the panes read
@@ -297,18 +300,26 @@ pub(crate) fn read_snapshot<T: Instrumentation, E: SliceEngine<T>>(
     });
     let viewing = match carried {
         Some(last) => last.viewing.clone(),
-        None => match view.context {
-            ViewContext::Live => Viewing::Live,
-            ViewContext::Process { eprocess } => {
-                viewing_of(read_thread_view(&mut cpu, &shown, ViewTarget::Process { eprocess }, discovery))
+        None => {
+            let live = live_tebs(&cpus);
+            match view.context {
+                ViewContext::Live => Viewing::Live,
+                ViewContext::Process { eprocess } => viewing_of(read_thread_view(
+                    &mut cpu,
+                    &shown,
+                    ViewTarget::Process { eprocess },
+                    &live,
+                    discovery,
+                )),
+                ViewContext::Thread { eprocess, tid } => viewing_of(read_thread_view(
+                    &mut cpu,
+                    &shown,
+                    ViewTarget::Thread { eprocess, tid },
+                    &live,
+                    discovery,
+                )),
             }
-            ViewContext::Thread { eprocess, tid } => viewing_of(read_thread_view(
-                &mut cpu,
-                &shown,
-                ViewTarget::Thread { eprocess, tid },
-                discovery,
-            )),
-        },
+        }
     };
     let vantage = match &viewing {
         Viewing::Thread(thread) => Vantage {
@@ -321,7 +332,7 @@ pub(crate) fn read_snapshot<T: Instrumentation, E: SliceEngine<T>>(
                 CodeSize::Bits64
             },
         },
-        Viewing::Live | Viewing::Miss(_) => Vantage {
+        Viewing::Live | Viewing::Running { .. } | Viewing::Miss(_) => Vantage {
             space: AddressSpace::Linear,
             rip: linear_of(shown.segment_bases.cs, shown.registers.rip, shown.code_size),
             rsp: linear_of(shown.segment_bases.ss, shown.registers.rsp, shown.code_size),
@@ -351,7 +362,7 @@ pub(crate) fn read_snapshot<T: Instrumentation, E: SliceEngine<T>>(
                 Viewing::Thread(thread) => {
                     (Some(thread.process.clone()), thread.symbols.clone(), windows.system)
                 }
-                Viewing::Live | Viewing::Miss(_) => {
+                Viewing::Live | Viewing::Running { .. } | Viewing::Miss(_) => {
                     let process = windows_image_path(&mut cpu, &shown);
                     (process, windows.symbols, windows.system)
                 }
@@ -378,14 +389,27 @@ pub(crate) fn read_snapshot<T: Instrumentation, E: SliceEngine<T>>(
     }
 }
 
-/// A thread-view read as the snapshot carries it: a process that runs is the
-/// live view.
+/// A thread-view read as the snapshot carries it.
 fn viewing_of(read: ThreadViewRead) -> Viewing {
     match read {
-        ThreadViewRead::Live => Viewing::Live,
+        ThreadViewRead::Running { process } => Viewing::Running { process },
         ThreadViewRead::Thread(thread) => Viewing::Thread(thread),
         ThreadViewRead::Miss(miss) => Viewing::Miss(miss),
     }
+}
+
+/// The threads the processors run in user mode (CPL 3), each by the TEB its
+/// GS base holds. A processor in the kernel names none: there, a thread's
+/// trap frame is its user state.
+pub(crate) fn live_tebs(cpus: &[CpuDebugView]) -> Vec<LiveTeb> {
+    cpus.iter()
+        .enumerate()
+        .filter(|(_, view)| view.registers.cpl == 3)
+        .map(|(cpu, view)| LiveTeb {
+            cpu,
+            teb: view.segment_bases.gs,
+        })
+        .collect()
 }
 
 /// The longest image path read, in UTF-16 code units (Windows' `MAX_PATH`
@@ -841,6 +865,21 @@ mod tests {
         );
         assert_eq!(snapshot.context, request.context);
         assert_eq!(snapshot.code[0].address, code, "the live RIP");
+    }
+
+    /// Only a processor in user mode names the thread it runs, by the TEB its
+    /// GS base holds; in the kernel its trap frame is that thread's own.
+    #[test]
+    fn only_a_processor_in_user_mode_names_the_thread_it_runs() {
+        use super::super::windows::LiveTeb;
+        let machine = long_mode_machine();
+        let mut machine = machine;
+        let mut view = machine.debug_cpu(0).expect("the boot processor").view();
+        view.registers.cpl = 3;
+        view.segment_bases.gs = 0x7FF_FFFD_E000;
+        assert_eq!(live_tebs(&[view]), [LiveTeb { cpu: 0, teb: 0x7FF_FFFD_E000 }]);
+        view.registers.cpl = 0;
+        assert!(live_tebs(&[view]).is_empty());
     }
 
     /// A refresh that looks from somewhere else reads the guest afresh: what

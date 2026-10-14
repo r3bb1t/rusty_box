@@ -350,6 +350,9 @@ struct Toolbar {
 fn viewing_banner(ui: &mut egui::Ui, snapshot: &DebugSnapshot, action: &mut Option<DebuggerAction>) {
     let text = match &snapshot.viewing {
         Viewing::Live => return,
+        Viewing::Running { process } => {
+            format!("{process} is running on this processor: showing the live CPU.")
+        }
         Viewing::Thread(thread) => format!(
             "Viewing {} · PID {} · thread {} · saved state",
             thread.process, thread.pid, thread.tid
@@ -466,7 +469,7 @@ fn status_chips(ui: &mut egui::Ui, snapshot: &DebugSnapshot, paused: bool) {
                 .on_hover_text("What the kernel saved when this thread last entered it.");
             thread.cr3
         }
-        Viewing::Live | Viewing::Miss(_) => {
+        Viewing::Live | Viewing::Running { .. } | Viewing::Miss(_) => {
             let Some(view) = shown_view(snapshot) else {
                 return;
             };
@@ -525,6 +528,29 @@ fn follow_window(pane: &mut DebuggerPane, snapshot: &DebugSnapshot) {
 
 fn shown_view(snapshot: &DebugSnapshot) -> Option<&CpuDebugView> {
     snapshot.cpus.get(snapshot.cpu)
+}
+
+/// The width the code and stack panes were read at: a viewed thread's own
+/// mode (32-bit for a WOW64 thread in its 32-bit code), else the shown
+/// processor's.
+fn pane_code_size(snapshot: &DebugSnapshot) -> CodeSize {
+    match &snapshot.viewing {
+        Viewing::Thread(thread) if thread.saved.cs == WOW64_CODE_SELECTOR => CodeSize::Bits32,
+        Viewing::Thread(_) => CodeSize::Bits64,
+        Viewing::Live | Viewing::Running { .. } | Viewing::Miss(_) => {
+            shown_view(snapshot).map_or(CodeSize::Bits64, |view| view.code_size)
+        }
+    }
+}
+
+/// The address space the code and stack were read in, and the one the symbol
+/// index's user modules belong to: a viewed thread's process, else the shown
+/// processor's linear space.
+fn vantage_space(snapshot: &DebugSnapshot) -> AddressSpace {
+    match &snapshot.viewing {
+        Viewing::Thread(thread) => AddressSpace::Process { cr3: thread.cr3 },
+        Viewing::Live | Viewing::Running { .. } | Viewing::Miss(_) => AddressSpace::Linear,
+    }
 }
 
 /// The page's one header row: the buttons and the tab switch, then — once a
@@ -661,7 +687,10 @@ fn grid_layout(
     // The split is read before the panes borrow the pane state, and written
     // back once they are drawn.
     let mut split = pane.split;
-    let left = ((page.x - gap) * split.columns).floor();
+    // The stored share is the preference; the layout keeps both columns their
+    // minimum at today's width, so a narrower window never squeezes one out.
+    let columns = resized(split.columns, 0.0, page.x, gap, SPLIT_MIN);
+    let left = ((page.x - gap) * columns).floor();
     let right = page.x - gap - left;
     ui.horizontal_top(|ui| {
         ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
@@ -686,7 +715,7 @@ fn grid_layout(
         match splitter(ui, egui::vec2(gap, page.y), SplitAxis::Columns, RESIZE_COLUMNS) {
             SplitterMove::Still => {}
             SplitterMove::Dragged(delta) => {
-                split.columns = resized(split.columns, delta, page.x, gap, SPLIT_MIN);
+                split.columns = resized(columns, delta, page.x, gap, SPLIT_MIN);
             }
             SplitterMove::Reset => split.columns = LEFT_SHARE,
         }
@@ -840,7 +869,9 @@ where
     A: FnOnce(&mut egui::Ui, egui::Vec2),
     B: FnOnce(&mut egui::Ui, egui::Vec2),
 {
-    let top_height = ((size.y - gap) * *split.share).floor();
+    // Laid out at the share clamped to today's height (see `grid_layout`).
+    let share = resized(*split.share, 0.0, size.y, gap, SPLIT_MIN);
+    let top_height = ((size.y - gap) * share).floor();
     let bottom_height = size.y - gap - top_height;
     ui.allocate_ui_with_layout(size, egui::Layout::top_down(egui::Align::Min), |ui| {
         ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
@@ -848,7 +879,7 @@ where
         match splitter(ui, egui::vec2(size.x, gap), SplitAxis::Rows, split.label) {
             SplitterMove::Still => {}
             SplitterMove::Dragged(delta) => {
-                *split.share = resized(*split.share, delta, size.y, gap, SPLIT_MIN);
+                *split.share = resized(share, delta, size.y, gap, SPLIT_MIN);
             }
             SplitterMove::Reset => *split.share = split.default,
         }
@@ -1086,7 +1117,7 @@ fn code_bytes_shown(room_chars: f32, digits: usize) -> usize {
 /// The code at RIP, one instruction a row: address, bytes, opcode. The row at
 /// RIP is shaded and marked.
 fn code_rows(ui: &mut egui::Ui, snapshot: &DebugSnapshot) {
-    let digits = shown_view(snapshot).map_or(16, |view| hex_digits(view.code_size));
+    let digits = hex_digits(pane_code_size(snapshot));
     let room = (ui.available_width() - MARKER_LEAD - 2.0 * ROW_PAD) / char_width(ui);
     let shown = code_bytes_shown(room, digits);
     for (index, line) in snapshot.code.iter().enumerate() {
@@ -1438,9 +1469,10 @@ fn memory_bar(
                     value: start.value.wrapping_add(MEMORY_WINDOW_BYTES),
                 })));
             }
-            // The module the window sits in — only for the shown processor's
-            // own linear space, where the symbol index applies.
-            if start.space == AddressSpace::Linear {
+            // The module the window sits in — only in the space the symbol
+            // index's user modules belong to (a viewed thread's process, else
+            // the shown processor's linear space).
+            if start.space == vantage_space(snapshot) {
                 if let Some(symbol) = snapshot.symbols.resolve(start.value) {
                     chip(ui, &symbol.label(), TEXT_MUTED)
                         .on_hover_text("The module this address is in.");
@@ -1631,10 +1663,10 @@ fn in_hit(hit: FoundAt, address: u64) -> bool {
 /// The stack from RSP up: the slot RSP points at in cyan, a slot the last
 /// step changed in red.
 fn stack_rows(ui: &mut egui::Ui, snapshot: &DebugSnapshot, marks: Marks<'_>) {
-    let size = shown_view(snapshot).map(|view| view.code_size);
-    let digits = size.map_or(16, hex_digits);
+    let size = pane_code_size(snapshot);
+    let digits = hex_digits(size);
     // A slot is as wide as a pointer at the code size: 2, 4 or 8 bytes.
-    let value_digits = size.map_or(16, |size| 2 * crate::debugger::inspect::slot_bytes(size));
+    let value_digits = 2 * crate::debugger::inspect::slot_bytes(size);
     let before = marks.previous.map(|previous| &previous.stack);
     for (index, slot) in snapshot.stack.iter().enumerate() {
         let value = slot.value.map_or_else(
@@ -1880,17 +1912,21 @@ fn processes_page(
         Fit::Grid => {
             let gap = SPACE_ITEM;
             let page = ui.available_size();
-            let mut share = pane.split.processes;
+            // Laid out at the share clamped to today's width (see
+            // `grid_layout`); a drag moves on from there.
+            let share = resized(pane.split.processes, 0.0, page.x, gap, SPLIT_MIN);
             let left = ((page.x - gap) * share).floor();
+            // Only a drag or a reset changes the stored preference.
+            let mut moved: Option<f32> = None;
             ui.horizontal_top(|ui| {
                 ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
                 process_card(ui, Room::Fixed(egui::vec2(left, page.y)), &mut *action);
                 match splitter(ui, egui::vec2(gap, page.y), SplitAxis::Columns, RESIZE_PROCESS_LIST) {
                     SplitterMove::Still => {}
                     SplitterMove::Dragged(delta) => {
-                        share = resized(share, delta, page.x, gap, SPLIT_MIN);
+                        moved = Some(resized(share, delta, page.x, gap, SPLIT_MIN));
                     }
-                    SplitterMove::Reset => share = PROCESS_LIST_SHARE,
+                    SplitterMove::Reset => moved = Some(PROCESS_LIST_SHARE),
                 }
                 detail_card(
                     ui,
@@ -1898,7 +1934,9 @@ fn processes_page(
                     &mut *action,
                 );
             });
-            pane.split.processes = share;
+            if let Some(share) = moved {
+                pane.split.processes = share;
+            }
         }
         Fit::Scrolling(columns) => {
             let density = fit.density();
@@ -2523,11 +2561,19 @@ fn process_rows(
              Double-click to see the CPU tab from inside it.",
             process.name, process.pid, process.eprocess, process.cr3
         ));
-        // A double-click's first click has already picked the row.
-        if response.double_clicked() {
-            *action = Some(DebuggerAction::View(ViewContext::Process {
-                eprocess: process.eprocess,
-            }));
+        // A double-click's first click has already picked the row. egui calls
+        // a double-click a triple when the click before last (anywhere) came
+        // within 0.6 s, so a triple opens the row too. The running process has
+        // no state but its live one: it opens the live view.
+        if response.double_clicked() || response.triple_clicked() {
+            let context = if process.current {
+                ViewContext::Live
+            } else {
+                ViewContext::Process {
+                    eprocess: process.eprocess,
+                }
+            };
+            *action = Some(DebuggerAction::View(context));
         } else if response.clicked() && !selected {
             *selected_process = Some(process.eprocess);
             *action = Some(DebuggerAction::ShowSystem(SystemView::Processes {
@@ -2614,11 +2660,9 @@ fn thread_columns() -> [Cell; 4] {
     ]
 }
 
-/// One row per thread: its ID, start address, user stack, and a mark for a
-/// thread that runs fibres. A thread of the running process opens its stack
-/// in the memory pane.
-/// One row per thread of the process at `eprocess`; double-clicking one shows
-/// the CPU tab from inside it.
+/// One row per thread of the process at `eprocess`: its ID, start address,
+/// user stack, and a mark for a thread that runs fibres. Double-clicking one
+/// shows the CPU tab from inside it.
 fn thread_rows(
     ui: &mut egui::Ui,
     threads: &[WinThread],
@@ -2651,11 +2695,10 @@ fn thread_rows(
             Cell::left(stack, TEXT_MUTED, THREAD_STACK_CHARS),
             Cell::fill(tail, tail_color),
         ];
-        let response = list_row(ui, 0.0, &cells, Tone::striped(n), RowSense::Pick { selected: false });
-        if response
-            .on_hover_text("Double-click to see the CPU tab from inside this thread.")
-            .double_clicked()
-        {
+        let response = list_row(ui, 0.0, &cells, Tone::striped(n), RowSense::Pick { selected: false })
+            .on_hover_text("Double-click to see the CPU tab from inside this thread.");
+        // A triple holds the double-click (see `process_rows`).
+        if response.double_clicked() || response.triple_clicked() {
             *action = Some(DebuggerAction::View(ViewContext::Thread {
                 eprocess,
                 tid: thread.tid,
@@ -2743,6 +2786,56 @@ mod tests {
         // A 32-bit address is eight characters shorter: three more bytes
         // fit in a pane of the same width.
         assert_eq!(code_bytes_shown(51.0, 8), 7);
+    }
+
+    /// A live snapshot of a long-mode machine, and one looking from a thread
+    /// whose saved code segment is `cs`, in the address space at 0x3000.
+    fn snapshots(cs: u16) -> (DebugSnapshot, DebugSnapshot) {
+        use crate::debugger::inspect::{read_snapshot, ViewRequest};
+        use crate::debugger::threads::{decode_trap_frame, TRAP_FRAME_BYTES};
+        use crate::debugger::windows::{ThreadView, WindowsDiscovery};
+        use rusty_box::cpu::CpuSetupMode;
+        use rusty_box::emulator::{Emulator, EmulatorConfig};
+        let mut machine =
+            Emulator::new_with_mode(EmulatorConfig::default(), CpuSetupMode::FlatLong64)
+                .expect("machine");
+        let read = |machine: &mut Emulator| {
+            read_snapshot(machine, &ViewRequest::default(), &mut WindowsDiscovery::default(), None)
+        };
+        let live = read(&mut machine);
+        let mut viewed = read(&mut machine);
+        let mut saved = decode_trap_frame(&[0u8; TRAP_FRAME_BYTES]);
+        saved.cs = cs;
+        viewed.viewing = Viewing::Thread(ThreadView {
+            process: "winlogon.exe".to_owned(),
+            pid: 0x1E0,
+            tid: 0x1F4,
+            cr3: 0x3000,
+            saved,
+            symbols: crate::debugger::inspect::SymbolIndex::default(),
+        });
+        (live, viewed)
+    }
+
+    /// The code and stack panes are as wide as the code they show: a viewed
+    /// thread's own mode, not the live processor's.
+    #[test]
+    fn a_viewed_threads_panes_take_its_own_code_width() {
+        let (live, mut viewed) = snapshots(0x33);
+        assert_eq!(pane_code_size(&live), CodeSize::Bits64);
+        viewed.cpus[0].code_size = CodeSize::Bits32;
+        assert_eq!(pane_code_size(&viewed), CodeSize::Bits64, "a 64-bit thread");
+        let (_, wow64) = snapshots(WOW64_CODE_SELECTOR);
+        assert_eq!(pane_code_size(&wow64), CodeSize::Bits32, "a WOW64 thread in 32-bit code");
+    }
+
+    /// Addresses are named against the viewed process's modules only in its
+    /// own address space, and against the live process's only in the live one.
+    #[test]
+    fn addresses_are_named_only_in_the_space_their_modules_belong_to() {
+        let (live, viewed) = snapshots(0x33);
+        assert_eq!(vantage_space(&live), AddressSpace::Linear);
+        assert_eq!(vantage_space(&viewed), AddressSpace::Process { cr3: 0x3000 });
     }
 
     /// A drag moves a split by its share of the room the two panes have, and
