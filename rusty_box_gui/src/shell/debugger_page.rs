@@ -25,9 +25,11 @@ use crate::debugger::search::{
 };
 use crate::debugger::memory_map::{MemoryMap, RegionOwner};
 use crate::debugger::threads::WinThread;
-use crate::debugger::pe::{ExportRead, ExportTarget, PeExport};
+use crate::debugger::pe::{
+    ExportRead, ExportTarget, ImportName, ImportRead, ImportedModule, PeExport, PeImport, ThunksEnd,
+};
 use crate::debugger::windows::{
-    KernelDetail, KernelListing, KernelMiss, ModuleBits, ModuleRead, PickedDetail, PickedModule,
+    ModuleDetail, KernelListing, KernelMiss, ModuleBits, ModuleRead, PickedDetail, PickedModule,
     ProcessDetail, ProcessListing, SectionsRead, SystemListing, SystemView, TreeRow, WinModule,
     WinProcess,
 };
@@ -231,13 +233,24 @@ pub(crate) struct DebuggerPane {
     /// The kernel module the Kernel modules view details (its base).
     pub(crate) selected_kernel_module: Option<u64>,
     /// Whether that view shows the module's sections or its exports.
-    pub(crate) kernel_detail: KernelDetail,
+    pub(crate) kernel_detail: ModuleDetail,
     /// What a listed export's name must contain.
     pub(crate) export_filter: String,
     /// Which card of the Processes or Kernel modules tab the keys move in.
     pub(crate) list_focus: ListFocus,
     /// The row of that tab's detail card the keys stand on.
     pub(crate) detail_cursor: Option<usize>,
+    /// The module of the listed process the Processes view details (its
+    /// base), and what is shown of it.
+    pub(crate) selected_process_module: Option<u64>,
+    pub(crate) process_module_detail: ModuleDetail,
+    /// What a listed export or import of that module must contain.
+    pub(crate) process_module_filter: String,
+    /// The row of that module's card the keys stand on.
+    pub(crate) module_cursor: Option<usize>,
+    /// The picked module's import groups (by index) shown folded shut, on
+    /// either tab.
+    pub(crate) folded_imports: BTreeSet<usize>,
 }
 
 impl Default for DebuggerPane {
@@ -260,10 +273,25 @@ impl Default for DebuggerPane {
             scroll_to: None,
             split: PaneSplit::default(),
             selected_kernel_module: None,
-            kernel_detail: KernelDetail::Sections,
+            kernel_detail: ModuleDetail::Sections,
             export_filter: String::new(),
             list_focus: ListFocus::List,
             detail_cursor: None,
+            selected_process_module: None,
+            process_module_detail: ModuleDetail::Sections,
+            process_module_filter: String::new(),
+            module_cursor: None,
+            folded_imports: BTreeSet::new(),
+        }
+    }
+}
+
+impl DebuggerPane {
+    /// What the list tabs' trees show open.
+    fn folds(&mut self) -> Folds<'_> {
+        Folds {
+            map_open: &mut self.expanded_modules,
+            imports_shut: &mut self.folded_imports,
         }
     }
 }
@@ -297,6 +325,8 @@ impl DebuggerTab {
             Self::Processes => SystemView::Processes {
                 selected: pane.selected_process,
                 detail: pane.process_detail,
+                module: pane.selected_process_module,
+                module_detail: pane.process_module_detail,
             },
             Self::KernelModules => SystemView::KernelModules {
                 selected: pane.selected_kernel_module,
@@ -617,6 +647,8 @@ fn header(
             // A tab's keys start on its list, standing on no detail row.
             pane.list_focus = ListFocus::List;
             pane.detail_cursor = None;
+            pane.module_cursor = None;
+            pane.folded_imports.clear();
             *action = Some(DebuggerAction::ShowSystem(
                 pane.tab.system_view(pane),
             ));
@@ -722,10 +754,11 @@ fn grid_layout(
             egui::vec2(left, page.y),
             gap,
             Split { share: &mut split.left_rows, default: TOP_SHARE, label: RESIZE_CODE_MEMORY },
-            |ui, size| {
+            &mut (),
+            |ui, size, _| {
                 fixed_card(ui, size, Title::plain("Code"), |_| {}, |ui| code_rows(ui, snapshot));
             },
-            |ui, size| {
+            |ui, size, _| {
                 fixed_card(
                     ui,
                     size,
@@ -751,12 +784,13 @@ fn grid_layout(
                 default: TOP_SHARE,
                 label: RESIZE_REGISTERS_STACK,
             },
-            |ui, size| {
+            &mut (),
+            |ui, size, _| {
                 fixed_card(ui, size, Title::plain("Registers"), |_| {}, |ui| {
                     register_rows(ui, snapshot, marks);
                 });
             },
-            |ui, size| {
+            |ui, size, _| {
                 fixed_card(ui, size, Title::plain("Stack"), |_| {}, |ui| {
                     stack_rows(ui, snapshot, marks);
                 });
@@ -781,6 +815,9 @@ pub(crate) struct PaneSplit {
     pub(crate) processes: f32,
     /// The module list, of the Kernel modules tab's width.
     pub(crate) kernel: f32,
+    /// A process's modules, of the height they share with the picked one's
+    /// detail.
+    pub(crate) modules: f32,
 }
 
 impl Default for PaneSplit {
@@ -791,6 +828,7 @@ impl Default for PaneSplit {
             right_rows: TOP_SHARE,
             processes: PROCESS_LIST_SHARE,
             kernel: PROCESS_LIST_SHARE,
+            modules: PROCESS_LIST_SHARE,
         }
     }
 }
@@ -805,6 +843,7 @@ pub(crate) const RESIZE_CODE_MEMORY: &str = "Resize code and memory";
 pub(crate) const RESIZE_REGISTERS_STACK: &str = "Resize registers and stack";
 pub(crate) const RESIZE_PROCESS_LIST: &str = "Resize process list";
 pub(crate) const RESIZE_MODULE_LIST: &str = "Resize module list";
+pub(crate) const RESIZE_MODULE_DETAIL: &str = "Resize modules and module detail";
 
 /// Which way a gap divides its panes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -890,11 +929,19 @@ struct Split<'a> {
 }
 
 /// A column of `size` points: `top` above a row gap above `bottom`, the gap
-/// moving `split`.
-fn split_column<A, B>(ui: &mut egui::Ui, size: egui::Vec2, gap: f32, split: Split<'_>, top: A, bottom: B)
-where
-    A: FnOnce(&mut egui::Ui, egui::Vec2),
-    B: FnOnce(&mut egui::Ui, egui::Vec2),
+/// moving `split`. Each pane is handed `context` in turn, so both can write
+/// to it.
+fn split_column<C, A, B>(
+    ui: &mut egui::Ui,
+    size: egui::Vec2,
+    gap: f32,
+    split: Split<'_>,
+    context: &mut C,
+    top: A,
+    bottom: B,
+) where
+    A: FnOnce(&mut egui::Ui, egui::Vec2, &mut C),
+    B: FnOnce(&mut egui::Ui, egui::Vec2, &mut C),
 {
     // Laid out at the share clamped to today's height (see `grid_layout`).
     let share = resized(*split.share, 0.0, size.y, gap, SPLIT_MIN);
@@ -902,7 +949,7 @@ where
     let bottom_height = size.y - gap - top_height;
     ui.allocate_ui_with_layout(size, egui::Layout::top_down(egui::Align::Min), |ui| {
         ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
-        top(ui, egui::vec2(size.x, top_height));
+        top(ui, egui::vec2(size.x, top_height), context);
         match splitter(ui, egui::vec2(size.x, gap), SplitAxis::Rows, split.label) {
             SplitterMove::Still => {}
             SplitterMove::Dragged(delta) => {
@@ -910,7 +957,7 @@ where
             }
             SplitterMove::Reset => *split.share = split.default,
         }
-        bottom(ui, egui::vec2(size.x, bottom_height));
+        bottom(ui, egui::vec2(size.x, bottom_height), context);
     });
 }
 
@@ -1798,6 +1845,9 @@ fn labelled_filter(ui: &mut egui::Ui, filter: &mut String, label: &str) {
     response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::TextEdit, enabled, label));
 }
 
+/// The accessible name of the imports' filter field.
+pub(crate) const IMPORT_FILTER: &str = "Filter imports";
+
 /// Which card of a list tab the keys move in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ListFocus {
@@ -1805,13 +1855,77 @@ pub(crate) enum ListFocus {
     List,
     /// What is listed beside them for the picked one.
     Detail,
+    /// The picked process module's sections, exports or imports, under that
+    /// process's modules.
+    Module,
+}
+
+/// How many cards a list tab shows the keys can move in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Cards {
+    /// A list and its detail.
+    Two,
+    /// A process list, its modules, and the picked module's detail.
+    Three,
 }
 
 impl ListFocus {
-    const fn other(self) -> Self {
+    /// The card Tab hands the keys to.
+    const fn next(self, cards: Cards) -> Self {
+        match (self, cards) {
+            (Self::List, _) => Self::Detail,
+            (Self::Detail, Cards::Three) => Self::Module,
+            (Self::Detail, Cards::Two) | (Self::Module, _) => Self::List,
+        }
+    }
+}
+
+/// The view a module's card shows after `detail`, as its switch orders them.
+const fn next_module_detail(detail: ModuleDetail) -> ModuleDetail {
+    match detail {
+        ModuleDetail::Sections => ModuleDetail::Exports,
+        ModuleDetail::Exports => ModuleDetail::Imports,
+        ModuleDetail::Imports => ModuleDetail::Sections,
+    }
+}
+
+/// Where a click or Enter on an address in a module's detail shows it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Opener {
+    /// The memory pane, in the shown processor's address space: the kernel's
+    /// modules, and the running process's.
+    Live,
+    /// The memory pane, in the address space at `cr3`: another process's.
+    Process { cr3: u64 },
+    /// Nowhere: another process whose address space is not known.
+    Nowhere,
+}
+
+impl Opener {
+    /// A process's: live when it runs, else through its address space.
+    const fn of_process(navigable: bool, process_cr3: Option<u64>) -> Self {
+        match (navigable, process_cr3) {
+            (true, _) => Self::Live,
+            (false, Some(cr3)) => Self::Process { cr3 },
+            (false, None) => Self::Nowhere,
+        }
+    }
+
+    /// What opening `address` does.
+    fn open(self, address: u64) -> RowOpen {
         match self {
-            Self::List => Self::Detail,
-            Self::Detail => Self::List,
+            Self::Live => RowOpen::Act(DebuggerAction::OpenModule(address)),
+            Self::Process { cr3 } => RowOpen::Act(DebuggerAction::ViewInProcess { cr3, address }),
+            Self::Nowhere => RowOpen::Nothing,
+        }
+    }
+
+    /// The hover that says what a click does.
+    const fn hint(self) -> &'static str {
+        match self {
+            Self::Live => "Click to show it in memory.",
+            Self::Process { .. } => "Click to show it in this process's memory.",
+            Self::Nowhere => ANOTHER_ADDRESS_SPACE,
         }
     }
 }
@@ -1823,10 +1937,23 @@ struct ListKeys {
     step: isize,
     /// Enter: what a double-click on the row stood on does.
     open: bool,
-    /// Tab presses: each hands the keys to the other card.
+    /// Right presses less Left presses: a row with rows under it (a module in
+    /// the memory map, a module imported from) shows them for each Right and
+    /// hides them for each Left.
+    sideways: isize,
+    /// Tab presses: each hands the keys to the next card.
     switches: usize,
-    /// Shift+Tab presses: each shows the detail card's next view.
+    /// Shift+Tab presses: each shows the next view of the card the keys are
+    /// in (the detail's, from the list).
     next_views: usize,
+}
+
+impl ListKeys {
+    /// Whether a key moves, opens or folds a row: all that walking a card's
+    /// rows answers. Most frames press none.
+    const fn walks(self) -> bool {
+        self.step != 0 || self.open || self.sideways != 0
+    }
 }
 
 /// The list tabs' keyboard: a widget of no size that holds the focus, with a
@@ -1873,9 +2000,12 @@ fn list_keys(ui: &mut egui::Ui) -> Option<ListKeys> {
         let down = input.count_and_consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown);
         let up = input.count_and_consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp);
         let open = input.count_and_consume_key(egui::Modifiers::NONE, egui::Key::Enter) > 0;
+        let right = input.count_and_consume_key(egui::Modifiers::NONE, egui::Key::ArrowRight);
+        let left = input.count_and_consume_key(egui::Modifiers::NONE, egui::Key::ArrowLeft);
         ListKeys {
             step: down as isize - up as isize,
             open,
+            sideways: right as isize - left as isize,
             switches,
             next_views,
         }
@@ -1955,50 +2085,136 @@ fn walk(keys: ListKeys, from: Option<usize>, rows: usize) -> Walk {
     Walk { key, open }
 }
 
-/// The rows the keys stand on in a list tab's two cards.
+/// The rows the keys stand on in a list tab's cards.
 #[derive(Clone, Copy, Default)]
 struct KeyedRows {
     list: Option<KeyRow>,
     detail: Option<KeyRow>,
+    module: Option<KeyRow>,
+}
+
+/// A row that has rows under it, shown or hidden.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Fold {
+    /// A module in the memory map, by its base: its sections.
+    MapModule(u64),
+    /// A module imported from, by its index in the import table: the
+    /// functions imported from it.
+    ImportGroup(usize),
+}
+
+/// What is shown open: the memory map's modules open (closed by default) and
+/// the import groups folded shut (open by default).
+struct Folds<'a> {
+    map_open: &'a mut BTreeSet<u64>,
+    imports_shut: &'a mut BTreeSet<usize>,
+}
+
+impl Folds<'_> {
+    fn is_open(&self, fold: Fold) -> bool {
+        match fold {
+            Fold::MapModule(base) => self.map_open.contains(&base),
+            Fold::ImportGroup(index) => !self.imports_shut.contains(&index),
+        }
+    }
+
+    fn set_open(&mut self, fold: Fold, open: bool) {
+        match (fold, open) {
+            (Fold::MapModule(base), true) => {
+                self.map_open.insert(base);
+            }
+            (Fold::MapModule(base), false) => {
+                self.map_open.remove(&base);
+            }
+            (Fold::ImportGroup(index), true) => {
+                self.imports_shut.remove(&index);
+            }
+            (Fold::ImportGroup(index), false) => {
+                self.imports_shut.insert(index);
+            }
+        }
+    }
 }
 
 /// What Enter does on a row of a detail card: what a click on it does.
 enum RowOpen {
     Act(DebuggerAction),
-    /// A module's row in the memory map: shows or hides its sections.
-    Fold(u64),
+    /// A row with rows under it: shows or hides them.
+    Fold(Fold),
     /// Nothing opens: a module of another address space, a forwarded export.
     Nothing,
 }
 
-/// Moves the detail card's cursor by the keys over the rows `opens` lists,
-/// and does what Enter opened. A frame with no move and no Enter lists none.
+/// Where a detail row sits in a tree (the memory map's, the imports'), for
+/// Left and Right.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Branch {
+    /// A row with nothing under it and nothing over it.
+    Leaf,
+    /// A row with rows under it.
+    Parent(Fold),
+    /// A row shown under the parent row at this index.
+    Under(usize),
+}
+
+/// A detail row as the keys see it: what Enter does on it, and where it sits.
+struct DetailRow {
+    open: RowOpen,
+    branch: Branch,
+}
+
+impl DetailRow {
+    const fn leaf(open: RowOpen) -> Self {
+        Self {
+            open,
+            branch: Branch::Leaf,
+        }
+    }
+}
+
+/// Moves a card's cursor by the keys over the rows `rows` lists, then shows
+/// or hides a parent row's children for Right and Left, then does what Enter
+/// opened. A frame with none of these keys lists no rows.
 fn walk_detail<F>(
     keys: ListKeys,
-    opens: F,
+    rows: F,
     cursor: &mut Option<usize>,
-    expanded: &mut BTreeSet<u64>,
+    mut folds: Folds<'_>,
     action: &mut Option<DebuggerAction>,
 ) -> Option<KeyRow>
 where
-    F: FnOnce(&BTreeSet<u64>) -> Vec<RowOpen>,
+    F: FnOnce(&Folds<'_>) -> Vec<DetailRow>,
 {
-    if keys.step == 0 && !keys.open {
+    if !keys.walks() {
         // A cursor past the rows of a listing that shrank stands on none.
         return cursor.map(KeyRow::Resting);
     }
-    let opens = opens(expanded);
-    let walked = walk(keys, *cursor, opens.len());
+    let rows = rows(&folds);
+    let mut walked = walk(keys, *cursor, rows.len());
     if let Some(KeyRow::Moved(to)) = walked.key {
         *cursor = Some(to);
     }
+    // Each press acts on the row the one before it left the keys on.
+    for _ in 0..keys.sideways.unsigned_abs() {
+        let Some(at) = walked.key.map(KeyRow::row) else {
+            break;
+        };
+        match (rows.get(at).map(|row| row.branch), keys.sideways > 0) {
+            (Some(Branch::Parent(fold)), open) => folds.set_open(fold, open),
+            // Left on a child steps out to its parent's row.
+            (Some(Branch::Under(parent)), false) => {
+                *cursor = Some(parent);
+                walked.key = Some(KeyRow::Moved(parent));
+            }
+            (Some(Branch::Under(_) | Branch::Leaf), true) | (Some(Branch::Leaf), false) | (None, _) => {}
+        }
+    }
     if let Some(opened) = walked.open {
-        match opens.into_iter().nth(opened) {
+        match rows.into_iter().nth(opened).map(|row| row.open) {
             Some(RowOpen::Act(open)) => *action = Some(open),
-            Some(RowOpen::Fold(base)) => {
-                if !expanded.remove(&base) {
-                    expanded.insert(base);
-                }
+            Some(RowOpen::Fold(fold)) => {
+                let open = folds.is_open(fold);
+                folds.set_open(fold, !open);
             }
             Some(RowOpen::Nothing) | None => {}
         }
@@ -2025,7 +2241,7 @@ where
 }
 
 /// The Kernel modules tab: the kernel's modules, and beside them the picked
-/// one's sections or exports — laid out as the Processes tab is, the two
+/// one's sections, exports or imports — laid out as the Processes tab is, the two
 /// cards side by side with a handle between them where the page has room,
 /// one above the other where it scrolls.
 fn kernel_page(
@@ -2042,38 +2258,32 @@ fn kernel_page(
         .iter()
         .filter(|module| module_matches(module, &filter))
         .collect();
-    let picked_before = pane.selected_kernel_module;
-    let detail_before = pane.kernel_detail;
+    let picked_before = (pane.selected_kernel_module, pane.kernel_detail);
     let keys = list_keys(ui);
     let keyed_rows = keys.map_or_else(KeyedRows::default, |keys| {
         kernel_keys(keys, listing, &shown, pane, action)
     });
     let keyed = keys.map(|_| pane.list_focus);
-    // A pick or view the keys did not make (a click) leaves the cursor on no
-    // detail row.
-    let keyed_pick = (pane.selected_kernel_module, pane.kernel_detail);
-    let answer = kernel_answer(listing, pane);
     let picked_name = pane
         .selected_kernel_module
         .and_then(|base| listing.modules.iter().find(|module| module.base == base))
         .map(|module| module.name.clone().unwrap_or_else(|| format!("{:X}", module.base)));
-    let detail_count = answer.and_then(|picked| match &picked.shown {
-        PickedDetail::Sections(SectionsRead::Mapped(map)) => Some(map.regions.len()),
-        PickedDetail::Exports(ExportRead::Listed(exports)) => Some(exports.len()),
-        PickedDetail::Sections(SectionsRead::HeaderUnreadable)
-        | PickedDetail::Exports(ExportRead::NoTable | ExportRead::NotPe | ExportRead::Unreadable) => {
-            None
-        }
-    });
+    // Read before the header's field takes the filter for this frame.
+    let detail_filter = pane.export_filter.to_lowercase();
+    let module_card = ModuleCard {
+        answer: module_answer(listing.picked.as_ref(), pane.selected_kernel_module, pane.kernel_detail),
+        has_pick: pane.selected_kernel_module.is_some(),
+        filter: &detail_filter,
+        // The kernel half is mapped alike in every address space.
+        opener: Opener::Live,
+        named: &listing.modules,
+    };
     let list_title = Title::counted("Kernel modules", listing.modules.len()).inlined();
     let detail_title = Title {
         text: picked_name.as_deref().unwrap_or("Module"),
-        count: detail_count,
+        count: module_card.count(),
         inline: true,
     };
-    let has_pick = pane.selected_kernel_module.is_some();
-    // Read before the header's field takes the filter for this frame.
-    let export_filter = pane.export_filter.to_lowercase();
 
     let mut list_card = |ui: &mut egui::Ui, room: Room, action: &mut Option<DebuggerAction>| {
         keyed_pane_card(
@@ -2092,8 +2302,9 @@ fn kernel_page(
                 module_rows(
                     ui,
                     &shown,
-                    ModuleClick::Pick {
+                    ModuleClick {
                         picked: &mut pane.selected_kernel_module,
+                        opener: Opener::Live,
                     },
                     current,
                     keyed_rows.list,
@@ -2107,16 +2318,18 @@ fn kernel_page(
             ui,
             room,
             detail_title,
-            keyed == Some(ListFocus::Detail),
+            keyed.is_some_and(|focus| focus != ListFocus::List),
             |ui| {
-                kernel_detail_header(
+                module_detail_header(
                     ui,
                     detail_title,
                     &mut pane.kernel_detail,
                     &mut pane.export_filter,
                 );
             },
-            |ui| kernel_detail_body(ui, answer, has_pick, &export_filter, keyed_rows.detail, action),
+            |ui| {
+                module_detail_body(ui, module_card, keyed_rows.detail, &mut pane.folded_imports, action);
+            },
         );
     };
     match fit {
@@ -2169,38 +2382,62 @@ fn kernel_page(
                 });
         }
     }
-    // A new pick or a switch between sections and exports asks the run for
-    // it; a double-click that opened a module in memory stands.
-    let changed =
-        pane.selected_kernel_module != picked_before || pane.kernel_detail != detail_before;
-    if changed && !matches!(action, Some(DebuggerAction::OpenModule(_))) {
-        *action = Some(DebuggerAction::ShowSystem(SystemView::KernelModules {
-            selected: pane.selected_kernel_module,
-            detail: pane.kernel_detail,
-        }));
-    }
-    if (pane.selected_kernel_module, pane.kernel_detail) != keyed_pick {
+    // A new pick or another view asks the run for it, and leaves the cursor
+    // on no detail row and every import group open; a double-click that
+    // opened a module in memory stands.
+    if (pane.selected_kernel_module, pane.kernel_detail) != picked_before {
         pane.detail_cursor = None;
+        pane.folded_imports.clear();
+        if !matches!(action, Some(DebuggerAction::OpenModule(_))) {
+            *action = Some(DebuggerAction::ShowSystem(DebuggerTab::KernelModules.system_view(pane)));
+        }
     }
 }
 
-/// The run's answer for the picked kernel module, once it is for what is
-/// picked and asked.
-fn kernel_answer<'a>(listing: &'a KernelListing, pane: &DebuggerPane) -> Option<&'a PickedModule> {
-    listing.picked.as_ref().filter(|picked| {
-        Some(picked.base) == pane.selected_kernel_module
-            && matches!(
-                (&picked.shown, pane.kernel_detail),
-                (PickedDetail::Sections(_), KernelDetail::Sections)
-                    | (PickedDetail::Exports(_), KernelDetail::Exports)
-            )
-    })
+/// What a module's card draws from: the run's answer for the picked module,
+/// and how the addresses it lists open and are named.
+#[derive(Clone, Copy)]
+struct ModuleCard<'a> {
+    answer: Option<&'a PickedModule>,
+    has_pick: bool,
+    /// What a listed export or import must contain, lowercase.
+    filter: &'a str,
+    opener: Opener,
+    /// The modules a bound import's address is named against.
+    named: &'a [WinModule],
+}
+
+impl ModuleCard<'_> {
+    /// How many entries the answer lists.
+    fn count(&self) -> Option<usize> {
+        match &self.answer?.shown {
+            PickedDetail::Sections(SectionsRead::Mapped(map)) => Some(map.regions.len()),
+            PickedDetail::Exports(ExportRead::Listed(exports)) => Some(exports.len()),
+            PickedDetail::Imports(ImportRead::Listed(modules)) => {
+                Some(modules.iter().map(|module| module.functions.len()).sum())
+            }
+            PickedDetail::Sections(SectionsRead::HeaderUnreadable)
+            | PickedDetail::Exports(ExportRead::NoTable | ExportRead::NotPe | ExportRead::Unreadable)
+            | PickedDetail::Imports(ImportRead::NoTable | ImportRead::NotPe | ImportRead::Unreadable) => {
+                None
+            }
+        }
+    }
+}
+
+/// The run's answer for the module picked at `selected`, once it is for that
+/// module and the `detail` asked.
+fn module_answer(
+    picked: Option<&PickedModule>,
+    selected: Option<u64>,
+    detail: ModuleDetail,
+) -> Option<&PickedModule> {
+    picked.filter(|picked| Some(picked.base) == selected && picked.shown.answers(detail))
 }
 
 /// The Kernel modules tab's keys: Tab hands them between the cards, Shift+Tab
-/// switches the detail between sections and exports, and Up, Down and Enter
-/// pick and open a module of `shown` in the list, or walk and open the
-/// detail's rows.
+/// shows the detail's next view, and Up, Down and Enter pick and open a
+/// module of `shown` in the list, or walk and open the detail's rows.
 fn kernel_keys(
     keys: ListKeys,
     listing: &KernelListing,
@@ -2209,13 +2446,12 @@ fn kernel_keys(
     action: &mut Option<DebuggerAction>,
 ) -> KeyedRows {
     if keys.switches % 2 == 1 {
-        pane.list_focus = pane.list_focus.other();
+        pane.list_focus = pane.list_focus.next(Cards::Two);
     }
-    if keys.next_views % 2 == 1 {
-        pane.kernel_detail = match pane.kernel_detail {
-            KernelDetail::Sections => KernelDetail::Exports,
-            KernelDetail::Exports => KernelDetail::Sections,
-        };
+    if keys.next_views % 3 != 0 {
+        for _ in 0..keys.next_views % 3 {
+            pane.kernel_detail = next_module_detail(pane.kernel_detail);
+        }
         pane.detail_cursor = None;
     }
     match pane.list_focus {
@@ -2232,56 +2468,112 @@ fn kernel_keys(
             }
             KeyedRows {
                 list: walked.key,
-                detail: None,
+                ..KeyedRows::default()
             }
         }
-        ListFocus::Detail => {
+        // This tab has no third card: the keys there are the detail's.
+        ListFocus::Detail | ListFocus::Module => {
+            if !keys.walks() {
+                return KeyedRows {
+                    detail: pane.detail_cursor.map(KeyRow::Resting),
+                    ..KeyedRows::default()
+                };
+            }
             // A view switched this frame has no answer yet, so lists no rows.
-            let answer = kernel_answer(listing, pane);
             let filter = pane.export_filter.to_lowercase();
+            let card = ModuleCard {
+                answer: module_answer(
+                    listing.picked.as_ref(),
+                    pane.selected_kernel_module,
+                    pane.kernel_detail,
+                ),
+                has_pick: pane.selected_kernel_module.is_some(),
+                filter: &filter,
+                opener: Opener::Live,
+                named: &listing.modules,
+            };
             let detail = walk_detail(
                 keys,
-                |_| answer.map_or_else(Vec::new, |picked| kernel_detail_opens(picked, &filter)),
+                |folds| module_detail_rows(card, folds),
                 &mut pane.detail_cursor,
-                &mut pane.expanded_modules,
+                Folds {
+                    map_open: &mut pane.expanded_modules,
+                    imports_shut: &mut pane.folded_imports,
+                },
                 action,
             );
-            KeyedRows { list: None, detail }
+            KeyedRows {
+                detail,
+                ..KeyedRows::default()
+            }
         }
     }
 }
 
-/// What Enter does on each row the picked module's detail lists, in order:
-/// a section or an export with an address opens in memory.
-fn kernel_detail_opens(picked: &PickedModule, export_filter: &str) -> Vec<RowOpen> {
+/// The rows a module's card lists, in the order it draws them: a section, or
+/// an export or import with an address, opens in memory; an imported-from
+/// module's row folds its functions.
+fn module_detail_rows(card: ModuleCard<'_>, folds: &Folds<'_>) -> Vec<DetailRow> {
+    let Some(picked) = card.answer else {
+        return Vec::new();
+    };
+    let opens = |address: Option<u64>| address.map_or(RowOpen::Nothing, |at| card.opener.open(at));
     match &picked.shown {
         PickedDetail::Sections(SectionsRead::Mapped(map)) => map
             .regions
             .iter()
-            .map(|region| RowOpen::Act(DebuggerAction::OpenModule(region.start)))
+            .map(|region| DetailRow::leaf(opens(Some(region.start))))
             .collect(),
         PickedDetail::Exports(ExportRead::Listed(exports)) => exports
             .iter()
-            .filter(|export| export_matches(export, export_filter))
-            .map(|export| match export_address(picked.base, export) {
-                Some(address) => RowOpen::Act(DebuggerAction::OpenModule(address)),
-                None => RowOpen::Nothing,
-            })
+            .filter(|export| export_matches(export, card.filter))
+            .map(|export| DetailRow::leaf(opens(export_address(picked.base, export))))
             .collect(),
+        PickedDetail::Imports(ImportRead::Listed(modules)) => {
+            import_lines(modules, card.filter, &*folds.imports_shut)
+                .into_iter()
+                .map(|line| match line {
+                    ImportLine::Group { index, .. } => DetailRow {
+                        open: RowOpen::Fold(Fold::ImportGroup(index)),
+                        branch: Branch::Parent(Fold::ImportGroup(index)),
+                    },
+                    ImportLine::Function { group, function, parent } => DetailRow {
+                        open: opens(modules[group].functions[function].bound),
+                        branch: Branch::Under(parent),
+                    },
+                    ImportLine::PagedOut { parent, .. } => DetailRow {
+                        open: RowOpen::Nothing,
+                        branch: Branch::Under(parent),
+                    },
+                })
+                .collect()
+        }
         PickedDetail::Sections(SectionsRead::HeaderUnreadable)
-        | PickedDetail::Exports(ExportRead::NoTable | ExportRead::NotPe | ExportRead::Unreadable) => {
+        | PickedDetail::Exports(ExportRead::NoTable | ExportRead::NotPe | ExportRead::Unreadable)
+        | PickedDetail::Imports(ImportRead::NoTable | ImportRead::NotPe | ImportRead::Unreadable) => {
             Vec::new()
         }
     }
+}
+
+/// Whether `text` holds the lowercase `filter`, ASCII letters matched in
+/// either case, without allocating: PE export and import names are ASCII,
+/// and every row is matched every frame.
+fn holds_ignoring_case(text: &str, filter: &str) -> bool {
+    filter.is_empty()
+        || text
+            .as_bytes()
+            .windows(filter.len())
+            .any(|window| window.eq_ignore_ascii_case(filter.as_bytes()))
 }
 
 /// Whether an export's name, or a forwarder's target, holds the lowercase
 /// `filter`.
 fn export_matches(export: &PeExport, filter: &str) -> bool {
     filter.is_empty()
-        || export.name.as_deref().is_some_and(|name| name.to_lowercase().contains(filter))
+        || export.name.as_deref().is_some_and(|name| holds_ignoring_case(name, filter))
         || match &export.target {
-            ExportTarget::Forwarded(to) => to.to_lowercase().contains(filter),
+            ExportTarget::Forwarded(to) => holds_ignoring_case(to, filter),
             ExportTarget::Rva(_) => false,
         }
 }
@@ -2294,67 +2586,105 @@ fn export_address(base: u64, export: &PeExport) -> Option<u64> {
     }
 }
 
-/// The detail card's title, its Sections/Exports switch (and the exports'
-/// filter), and the column titles of what it lists.
-fn kernel_detail_header(
+/// A module card's title, its Sections/Exports/Imports switch (and the
+/// filter over exports or imports), and the column titles of what it lists.
+fn module_detail_header(
     ui: &mut egui::Ui,
     title: Title<'_>,
-    detail: &mut KernelDetail,
-    export_filter: &mut String,
+    detail: &mut ModuleDetail,
+    filter: &mut String,
 ) {
     ui.horizontal_wrapped(|ui| {
         title_label(ui, title.text, title.count);
         segmented(
             ui,
             detail,
-            &[(KernelDetail::Sections, "Sections"), (KernelDetail::Exports, "Exports")],
+            &[
+                (ModuleDetail::Sections, "Sections"),
+                (ModuleDetail::Exports, "Exports"),
+                (ModuleDetail::Imports, "Imports"),
+            ],
         );
         match detail {
-            KernelDetail::Exports => labelled_filter(ui, export_filter, EXPORT_FILTER),
-            KernelDetail::Sections => {}
+            ModuleDetail::Exports => labelled_filter(ui, filter, EXPORT_FILTER),
+            ModuleDetail::Imports => labelled_filter(ui, filter, IMPORT_FILTER),
+            ModuleDetail::Sections => {}
         }
     });
     match detail {
-        KernelDetail::Sections => header_row(ui, 0.0, &section_columns()),
-        KernelDetail::Exports => header_row(ui, 0.0, &export_columns()),
+        ModuleDetail::Sections => header_row(ui, 0.0, &section_columns()),
+        ModuleDetail::Exports => header_row(ui, 0.0, &export_columns()),
+        ModuleDetail::Imports => header_row(ui, TREE_INDENT, &import_columns()),
     }
 }
 
-/// The picked module's sections or exports, or why they are not listed; the
-/// keys stand on row `key` of them.
-fn kernel_detail_body(
+/// The picked module's sections, exports or imports, or why they are not
+/// listed; the keys stand on row `key` of them, and the import groups in
+/// `imports_shut` are folded.
+fn module_detail_body(
     ui: &mut egui::Ui,
-    answer: Option<&PickedModule>,
-    has_pick: bool,
-    export_filter: &str,
+    card: ModuleCard<'_>,
     key: Option<KeyRow>,
+    imports_shut: &mut BTreeSet<usize>,
     action: &mut Option<DebuggerAction>,
 ) {
-    let mut muted = |text: &str| {
+    let muted = |ui: &mut egui::Ui, text: &str| {
         ui.add_space(SPACE_ITEM);
         ui.label(RichText::new(text).color(TEXT_MUTED));
     };
-    let Some(picked) = answer else {
-        muted(if has_pick {
+    let Some(picked) = card.answer else {
+        let text = if card.has_pick {
             "Reading the module…"
         } else {
-            "Pick a module to see its sections and exports."
-        });
+            "Pick a module to see its sections, exports and imports."
+        };
+        muted(ui, text);
         return;
     };
     match &picked.shown {
-        PickedDetail::Sections(SectionsRead::Mapped(map)) => section_rows(ui, map, key, action),
+        PickedDetail::Sections(SectionsRead::Mapped(map)) => {
+            section_rows(ui, map, card.opener, key, action);
+        }
         PickedDetail::Sections(SectionsRead::HeaderUnreadable) => {
-            muted("Its headers are paged out, so its sections cannot be read.");
+            muted(ui, "Its headers are paged out, so its sections cannot be read.");
         }
         PickedDetail::Exports(ExportRead::Listed(exports)) => {
-            export_rows(ui, picked.base, exports, export_filter, key, action);
+            export_rows(ui, picked.base, exports, card, key, action);
         }
-        PickedDetail::Exports(ExportRead::NoTable) => muted("It exports nothing."),
-        PickedDetail::Exports(ExportRead::NotPe) => {
-            muted("Its headers do not read as a PE image.");
+        PickedDetail::Exports(ExportRead::NoTable) => muted(ui, "It exports nothing."),
+        PickedDetail::Exports(ExportRead::NotPe) | PickedDetail::Imports(ImportRead::NotPe) => {
+            muted(ui, "Its headers do not read as a PE image.");
         }
-        PickedDetail::Exports(ExportRead::Unreadable) => muted("Its export table is paged out."),
+        PickedDetail::Exports(ExportRead::Unreadable) => muted(ui, "Its export table is paged out."),
+        PickedDetail::Imports(ImportRead::Listed(modules)) => {
+            import_rows(ui, picked.base, modules, card, key, imports_shut, action);
+        }
+        PickedDetail::Imports(ImportRead::NoTable) => muted(ui, "It imports nothing."),
+        PickedDetail::Imports(ImportRead::Unreadable) => muted(ui, "Its import table is paged out."),
+    }
+}
+
+/// Hovers `response` with what a click on its address shows, and asks for it
+/// on a click. `None` for `address` says `no_address`.
+fn click_opens(
+    response: egui::Response,
+    opener: Opener,
+    address: Option<u64>,
+    no_address: &str,
+    action: &mut Option<DebuggerAction>,
+) {
+    match address.map(|at| opener.open(at)) {
+        Some(RowOpen::Act(open)) => {
+            if response.on_hover_text(opener.hint()).clicked() {
+                *action = Some(open);
+            }
+        }
+        Some(RowOpen::Fold(_) | RowOpen::Nothing) => {
+            response.on_hover_text(opener.hint());
+        }
+        None => {
+            response.on_hover_text(no_address);
+        }
     }
 }
 
@@ -2372,11 +2702,12 @@ fn section_columns() -> [Cell; 6] {
 }
 
 /// A module's header page and sections, one a row: name, address, size, how
-/// much is resident, and access — executable code cyan. A click opens the
-/// region in the memory pane; the keys stand on row `key`.
+/// much is resident, and access — executable code cyan. A click shows the
+/// region where `opener` shows it; the keys stand on row `key`.
 fn section_rows(
     ui: &mut egui::Ui,
     map: &MemoryMap,
+    opener: Opener,
     key: Option<KeyRow>,
     action: &mut Option<DebuggerAction>,
 ) {
@@ -2408,9 +2739,7 @@ fn section_rows(
         ];
         let response = list_row(ui, 0.0, &cells, keyed_tone(key, n), RowSense::Pick { selected: false });
         follow_key(&response, key, n);
-        if response.on_hover_text("Click to show it in memory.").clicked() {
-            *action = Some(DebuggerAction::OpenModule(region.start));
-        }
+        click_opens(response, opener, Some(region.start), "", action);
     }
 }
 
@@ -2425,20 +2754,20 @@ fn export_columns() -> [Cell; 3] {
 }
 
 /// A module's exports at `base`, one a row, keeping those whose name (or a
-/// forwarder's target) holds the lowercase `filter`: address, ordinal, name.
-/// A forwarder shows where it leads instead of an address. A click on an
-/// export with an address opens it in the memory pane; the keys stand on
-/// row `key` of those listed.
+/// forwarder's target) holds the card's filter: address, ordinal, name. A
+/// forwarder shows where it leads instead of an address. A click on an
+/// export with an address shows it where the card's opener shows it; the
+/// keys stand on row `key` of those listed.
 fn export_rows(
     ui: &mut egui::Ui,
     base: u64,
     exports: &[PeExport],
-    filter: &str,
+    card: ModuleCard<'_>,
     key: Option<KeyRow>,
     action: &mut Option<DebuggerAction>,
 ) {
     let mut any = false;
-    for (n, export) in exports.iter().filter(|export| export_matches(export, filter)).enumerate() {
+    for (n, export) in exports.iter().filter(|export| export_matches(export, card.filter)).enumerate() {
         any = true;
         if culled(ui, key, n) {
             skip_row(ui);
@@ -2459,20 +2788,193 @@ fn export_rows(
         ];
         let response = list_row(ui, 0.0, &cells, keyed_tone(key, n), RowSense::Pick { selected: false });
         follow_key(&response, key, n);
-        match target {
-            Some(address) => {
-                if response.on_hover_text("Click to show it in memory.").clicked() {
-                    *action = Some(DebuggerAction::OpenModule(address));
-                }
-            }
-            None => {
-                response.on_hover_text("Forwarded: the function lives in the module named.");
-            }
-        }
+        click_opens(
+            response,
+            card.opener,
+            target,
+            "Forwarded: the function lives in the module named.",
+            action,
+        );
     }
     if !any {
         ui.add_space(SPACE_ITEM);
         ui.label(RichText::new("No export matches the filter.").color(TEXT_MUTED));
+    }
+}
+
+/// The widest import name the Name column holds before it clips.
+const IMPORT_NAME_CHARS: usize = 28;
+
+fn import_columns() -> [Cell; 3] {
+    [
+        Cell::left("Slot", TEXT_MUTED, 16),
+        Cell::left("Name", TEXT_MUTED, IMPORT_NAME_CHARS),
+        Cell::fill("Bound to", TEXT_MUTED),
+    ]
+}
+
+/// One row of a module's imports as the card lists them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ImportLine {
+    /// The module imported from, by its index in the import table: how many
+    /// of its functions are listed, and whether they show.
+    Group { index: usize, listed: usize, open: bool },
+    /// Function `function` of the group at `group`, under the group's row
+    /// `parent`.
+    Function { group: usize, function: usize, parent: usize },
+    /// The group's functions past a paged-out entry, under its row `parent`.
+    PagedOut { group: usize, parent: usize },
+}
+
+/// Whether an import's name holds the lowercase `filter`; one by ordinal
+/// matches as `#ordinal`.
+fn import_matches(import: &PeImport, filter: &str) -> bool {
+    match &import.name {
+        ImportName::Named { name, .. } => holds_ignoring_case(name, filter),
+        ImportName::Ordinal(ordinal) => format!("#{ordinal}").contains(filter),
+        ImportName::Overwritten | ImportName::PagedOut => false,
+    }
+}
+
+/// The rows of `modules`' imports the card lists: each module imported from
+/// whose name, or one of whose functions, holds the lowercase `filter`, its
+/// listed functions under it unless it is folded in `shut`.
+fn import_lines(modules: &[ImportedModule], filter: &str, shut: &BTreeSet<usize>) -> Vec<ImportLine> {
+    let mut lines = Vec::new();
+    for (index, module) in modules.iter().enumerate() {
+        let whole = filter.is_empty()
+            || module.name.as_deref().is_some_and(|name| holds_ignoring_case(name, filter));
+        let open = !shut.contains(&index);
+        let parent = lines.len();
+        // The group's row goes first; its count is known once its functions
+        // are matched.
+        lines.push(ImportLine::Group { index, listed: 0, open });
+        let mut listed = 0;
+        for (function, import) in module.functions.iter().enumerate() {
+            if whole || import_matches(import, filter) {
+                listed += 1;
+                if open {
+                    lines.push(ImportLine::Function { group: index, function, parent });
+                }
+            }
+        }
+        if listed == 0 && !whole {
+            lines.truncate(parent);
+            continue;
+        }
+        lines[parent] = ImportLine::Group { index, listed, open };
+        if open {
+            match module.end {
+                ThunksEnd::PagedOut => lines.push(ImportLine::PagedOut { group: index, parent }),
+                ThunksEnd::Terminated => {}
+            }
+        }
+    }
+    lines
+}
+
+/// The module in `named` that holds `address`, by name.
+fn module_named_at(named: &[WinModule], address: u64) -> Option<&str> {
+    named
+        .iter()
+        .find(|module| (module.base..module.base.saturating_add(u64::from(module.size))).contains(&address))
+        .and_then(|module| module.name.as_deref())
+}
+
+/// A module's imports, the image based at `base`: a row per module imported
+/// from, folding its functions, and under it a row per function — its IAT
+/// slot, its name, and where the loaded slot points, with the module there.
+/// A click on a function shows where it was bound; the keys stand on row
+/// `key`, and the groups in `shut` are folded.
+fn import_rows(
+    ui: &mut egui::Ui,
+    base: u64,
+    modules: &[ImportedModule],
+    card: ModuleCard<'_>,
+    key: Option<KeyRow>,
+    shut: &mut BTreeSet<usize>,
+    action: &mut Option<DebuggerAction>,
+) {
+    let lines = import_lines(modules, card.filter, shut);
+    if lines.is_empty() {
+        ui.add_space(SPACE_ITEM);
+        ui.label(RichText::new("No import matches the filter.").color(TEXT_MUTED));
+        return;
+    }
+    let mut toggled = None;
+    for (n, line) in lines.iter().enumerate() {
+        if culled(ui, key, n) {
+            skip_row(ui);
+            continue;
+        }
+        match *line {
+            ImportLine::Group { index, listed, open } => {
+                let name = modules[index].name.as_deref().unwrap_or("(name paged out)");
+                let tone = if key.is_some_and(|key| key.at(n)) {
+                    Tone::Selected
+                } else {
+                    Tone::Plain
+                };
+                let cells = [Cell::fill(format!("{name}  {listed} functions"), TEXT_PRIMARY)];
+                let response =
+                    list_row(ui, TREE_INDENT, &cells, tone, RowSense::Pick { selected: open });
+                lead_chevron(ui, response.rect, open, TEXT_PRIMARY);
+                follow_key(&response, key, n);
+                if response
+                    .on_hover_text("Click to show or hide what it imports from this module.")
+                    .clicked()
+                {
+                    toggled = Some(index);
+                }
+            }
+            ImportLine::Function { group, function, .. } => {
+                let import = &modules[group].functions[function];
+                let name = match &import.name {
+                    ImportName::Named { name, .. } => name.clone(),
+                    ImportName::Ordinal(ordinal) => format!("#{ordinal}"),
+                    ImportName::Overwritten => "(name overwritten by the loader)".to_owned(),
+                    ImportName::PagedOut => "(name paged out)".to_owned(),
+                };
+                let bound = match import.bound {
+                    Some(at) => match module_named_at(card.named, at) {
+                        Some(module) => format!("{at:016X}  {module}"),
+                        None => format!("{at:016X}"),
+                    },
+                    None => "(slot paged out)".to_owned(),
+                };
+                let cells = [
+                    Cell::left(
+                        format!("{:016X}", base.wrapping_add(u64::from(import.slot))),
+                        TEXT_MUTED,
+                        16,
+                    ),
+                    Cell::left(name, TEXT_PRIMARY, IMPORT_NAME_CHARS),
+                    Cell::fill(bound, TEXT_MUTED),
+                ];
+                let response =
+                    list_row(ui, TREE_INDENT, &cells, keyed_tone(key, n), RowSense::Pick { selected: false });
+                follow_key(&response, key, n);
+                click_opens(
+                    response,
+                    card.opener,
+                    import.bound,
+                    "Its IAT slot is paged out, so where it was bound is unknown.",
+                    action,
+                );
+            }
+            ImportLine::PagedOut { .. } => {
+                let cells = [Cell::fill(
+                    "The rest of this module's imports is paged out.",
+                    TEXT_MUTED,
+                )];
+                list_row(ui, TREE_INDENT, &cells, keyed_tone(key, n), RowSense::Look);
+            }
+        }
+    }
+    if let Some(index) = toggled {
+        if !shut.remove(&index) {
+            shut.insert(index);
+        }
     }
 }
 
@@ -2501,20 +3003,34 @@ fn processes_page(
     // The chosen process's address space, for browsing it when it is not the
     // running one.
     let process_cr3 = chosen.map(|process| process.cr3);
+    let opener = Opener::of_process(navigable, process_cr3);
     let rows = process_rows_shown(
         &listing.processes,
         &listing.tree,
         pane.process_layout,
         &pane.list_filter,
     );
+    let listed: &[WinModule] = match listing.modules.as_ref().map(|modules| &modules.read) {
+        Some(ModuleRead::Listed(modules)) => modules,
+        Some(ModuleRead::NoUserSpace | ModuleRead::Unreadable) | None => &[],
+    };
+    // What the frame starts from: whatever changes of it by the frame's end
+    // is asked of the run again.
+    let asked_before = DebuggerTab::Processes.system_view(pane);
+    let picked_before = (pane.selected_process, pane.process_detail);
+    let module_before = (pane.selected_process_module, pane.process_module_detail);
     let keys = list_keys(ui);
     let keyed_rows = keys.map_or_else(KeyedRows::default, |keys| {
-        process_keys(keys, listing, &rows, chosen, navigable, process_cr3, pane, action)
+        let tab = ProcessTab {
+            listing,
+            rows: &rows,
+            chosen,
+            opener,
+            listed,
+        };
+        process_keys(keys, tab, pane, action)
     });
     let keyed = keys.map(|_| pane.list_focus);
-    // A pick or view the keys did not make (a click) leaves the cursor on no
-    // detail row.
-    let keyed_pick = (pane.selected_process, pane.process_detail);
     let title = match chosen {
         Some(process) => format!("Modules of {} (PID {})", process.name, process.pid),
         None => "Modules".to_owned(),
@@ -2547,12 +3063,34 @@ fn processes_page(
     // where the processor runs, so it gets no mark.
     let highlight = if navigable { current_user_module } else { None };
     let scroll_was_pending = pane.scroll_to.is_some();
+    // Read before the module card's field takes the filter for this frame.
+    let module_filter = pane.process_module_filter.to_lowercase();
+    let module_card = ModuleCard {
+        answer: module_answer(
+            listing.modules.as_ref().and_then(|modules| modules.picked.as_ref()),
+            pane.selected_process_module,
+            pane.process_module_detail,
+        ),
+        has_pick: pane.selected_process_module.is_some(),
+        filter: &module_filter,
+        opener,
+        named: listed,
+    };
+    let module_name = pane
+        .selected_process_module
+        .and_then(|base| listed.iter().find(|module| module.base == base))
+        .map(|module| module.name.clone().unwrap_or_else(|| format!("{:X}", module.base)));
+    let module_title = Title {
+        text: module_name.as_deref().unwrap_or("Module"),
+        count: module_card.count(),
+        inline: true,
+    };
     // The Modules/Memory-map switch and the minimap report through these
     // locals, so the right card's two closures borrow disjoint fields.
     let mut switch_to: Option<ProcessDetail> = None;
     let mut minimap_click: Option<u64> = None;
-    // The two cards, each drawn in the room the layout below gives it. They
-    // take `action` as an argument so neither holds it between calls.
+    // The cards, each drawn in the room the layout below gives it. They take
+    // `action` as an argument so none holds it between calls.
     let mut process_card = |ui: &mut egui::Ui, room: Room, action: &mut Option<DebuggerAction>| {
         keyed_pane_card(
             ui,
@@ -2567,10 +3105,29 @@ fn processes_page(
                     &rows,
                     chosen,
                     &mut pane.selected_process,
-                    detail,
                     keyed_rows.list,
                     action,
                 );
+            },
+        );
+    };
+    // The picked module's card: under the modules, in the Modules view.
+    let mut module_card_drawn = |ui: &mut egui::Ui, room: Room, action: &mut Option<DebuggerAction>| {
+        keyed_pane_card(
+            ui,
+            room,
+            module_title,
+            keyed == Some(ListFocus::Module),
+            |ui| {
+                module_detail_header(
+                    ui,
+                    module_title,
+                    &mut pane.process_module_detail,
+                    &mut pane.process_module_filter,
+                );
+            },
+            |ui| {
+                module_detail_body(ui, module_card, keyed_rows.module, &mut pane.folded_imports, action);
             },
         );
     };
@@ -2593,11 +3150,13 @@ fn processes_page(
             |ui| {
                 right_card_body(
                     ui,
-                    detail,
-                    listing,
-                    navigable,
-                    highlight,
-                    process_cr3,
+                    RightCard {
+                        detail,
+                        listing,
+                        opener,
+                        highlight,
+                    },
+                    &mut pane.selected_process_module,
                     &mut pane.expanded_modules,
                     &mut pane.scroll_to,
                     keyed_rows.detail,
@@ -2606,6 +3165,7 @@ fn processes_page(
             },
         );
     };
+    let with_module = detail == ProcessDetail::Modules;
     match fit {
         Fit::Grid => {
             let gap = SPACE_ITEM;
@@ -2616,6 +3176,7 @@ fn processes_page(
             let left = ((page.x - gap) * share).floor();
             // Only a drag or a reset changes the stored preference.
             let mut moved: Option<f32> = None;
+            let mut modules_share = pane.split.modules;
             ui.horizontal_top(|ui| {
                 ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
                 process_card(ui, Room::Fixed(egui::vec2(left, page.y)), &mut *action);
@@ -2626,20 +3187,41 @@ fn processes_page(
                     }
                     SplitterMove::Reset => moved = Some(PROCESS_LIST_SHARE),
                 }
-                detail_card(
-                    ui,
-                    Room::Fixed(egui::vec2(page.x - gap - left, page.y)),
-                    &mut *action,
-                );
+                let right = egui::vec2(page.x - gap - left, page.y);
+                if with_module {
+                    split_column(
+                        ui,
+                        right,
+                        gap,
+                        Split {
+                            share: &mut modules_share,
+                            default: PROCESS_LIST_SHARE,
+                            label: RESIZE_MODULE_DETAIL,
+                        },
+                        &mut *action,
+                        |ui, size, action| detail_card(ui, Room::Fixed(size), action),
+                        |ui, size, action| module_card_drawn(ui, Room::Fixed(size), action),
+                    );
+                } else {
+                    detail_card(ui, Room::Fixed(right), &mut *action);
+                }
             });
             if let Some(share) = moved {
                 pane.split.processes = share;
             }
+            pane.split.modules = modules_share;
         }
         Fit::Scrolling(columns) => {
             let density = fit.density();
             let room = Room::Content(density);
             let gap = density.gap();
+            let mut right_column = |ui: &mut egui::Ui, action: &mut Option<DebuggerAction>| {
+                detail_card(ui, room, action);
+                if with_module {
+                    ui.add_space(gap);
+                    module_card_drawn(ui, room, action);
+                }
+            };
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .show(ui, |ui| match columns {
@@ -2649,12 +3231,12 @@ fn processes_page(
                         PROCESS_LIST_SHARE,
                         action,
                         |ui, action| process_card(ui, room, action),
-                        |ui, action| detail_card(ui, room, action),
+                        |ui, action| right_column(ui, action),
                     ),
                     Columns::One => {
                         process_card(ui, room, &mut *action);
                         ui.add_space(gap);
-                        detail_card(ui, room, &mut *action);
+                        right_column(ui, &mut *action);
                     }
                 });
         }
@@ -2688,14 +3270,46 @@ fn processes_page(
     }
     if let Some(chosen_detail) = switch_to {
         pane.process_detail = chosen_detail;
-        *action = Some(DebuggerAction::ShowSystem(SystemView::Processes {
-            selected: pane.selected_process,
-            detail: chosen_detail,
-        }));
     }
-    if (pane.selected_process, pane.process_detail) != keyed_pick {
+    // A process picked anew lists its own modules, none of them picked; a
+    // new pick or view leaves its card's cursor on no row and every import
+    // group open.
+    if pane.selected_process != picked_before.0 {
+        pane.selected_process_module = None;
+    }
+    if (pane.selected_process, pane.process_detail) != picked_before {
         pane.detail_cursor = None;
     }
+    if (pane.selected_process_module, pane.process_module_detail) != module_before {
+        pane.module_cursor = None;
+        pane.folded_imports.clear();
+    }
+    // Whatever changed is asked of the run, unless the frame asked to show
+    // something else instead (a double-click, an Enter).
+    let asked = DebuggerTab::Processes.system_view(pane);
+    let shows_elsewhere = matches!(
+        action,
+        Some(
+            DebuggerAction::View(_)
+                | DebuggerAction::OpenModule(_)
+                | DebuggerAction::ViewInProcess { .. }
+        )
+    );
+    if asked != asked_before && !shows_elsewhere {
+        *action = Some(DebuggerAction::ShowSystem(asked));
+    }
+}
+
+/// What the Processes tab's keys walk: the listing, the rows its process
+/// list shows, the process whose detail is shown, where its addresses open,
+/// and its listed modules.
+#[derive(Clone, Copy)]
+struct ProcessTab<'a> {
+    listing: &'a ProcessListing,
+    rows: &'a [ShownProcess],
+    chosen: Option<&'a WinProcess>,
+    opener: Opener,
+    listed: &'a [WinModule],
 }
 
 /// The detail views in the order the switch shows them, each followed by the
@@ -2708,32 +3322,51 @@ fn next_process_detail(detail: ProcessDetail) -> ProcessDetail {
     }
 }
 
-/// The Processes tab's keys: Tab hands them between the cards, Shift+Tab
-/// shows the next detail view, and Up, Down and Enter pick and view a process
-/// of `rows` in the list, or walk and open the detail's rows.
+/// The Processes tab's keys: Tab hands them to the next card (the process
+/// list, its modules or other detail, the picked module's card); Shift+Tab
+/// shows the next view of the module's card when the keys are in it, else
+/// of the process's detail; Up, Down and Enter pick and view a process in
+/// the list, pick and open a module in the modules, or walk and open the
+/// rows of the other cards.
 fn process_keys(
     keys: ListKeys,
-    listing: &ProcessListing,
-    rows: &[ShownProcess],
-    chosen: Option<&WinProcess>,
-    navigable: bool,
-    process_cr3: Option<u64>,
+    tab: ProcessTab<'_>,
     pane: &mut DebuggerPane,
     action: &mut Option<DebuggerAction>,
 ) -> KeyedRows {
-    if keys.switches % 2 == 1 {
-        pane.list_focus = pane.list_focus.other();
+    let cards = |pane: &DebuggerPane| match pane.process_detail {
+        ProcessDetail::Modules => Cards::Three,
+        ProcessDetail::MemoryMap | ProcessDetail::Threads => Cards::Two,
+    };
+    // A view without the module's card left the keys there: they are the
+    // detail's.
+    if pane.list_focus == ListFocus::Module && cards(pane) == Cards::Two {
+        pane.list_focus = ListFocus::Detail;
     }
-    if keys.next_views > 0 {
-        for _ in 0..keys.next_views % 3 {
-            pane.process_detail = next_process_detail(pane.process_detail);
+    // Two and three cards both cycle within six presses.
+    for _ in 0..keys.switches % 6 {
+        pane.list_focus = pane.list_focus.next(cards(pane));
+    }
+    // A view switched this frame has not been read yet: what the listing
+    // holds for it may be an older read, so its rows are not walked.
+    let switched = keys.next_views % 3 != 0;
+    for _ in 0..keys.next_views % 3 {
+        match pane.list_focus {
+            ListFocus::Module => {
+                pane.process_module_detail = next_module_detail(pane.process_module_detail);
+            }
+            ListFocus::List | ListFocus::Detail => {
+                pane.process_detail = next_process_detail(pane.process_detail);
+            }
         }
-        pane.detail_cursor = None;
-        *action = Some(DebuggerAction::ShowSystem(SystemView::Processes {
-            selected: pane.selected_process,
-            detail: pane.process_detail,
-        }));
     }
+    let ProcessTab {
+        listing,
+        rows,
+        chosen,
+        opener,
+        listed,
+    } = tab;
     match pane.list_focus {
         ListFocus::List => {
             // The process picked, or the one shown before any pick.
@@ -2747,10 +3380,6 @@ fn process_keys(
                 let eprocess = listing.processes[rows[to].index].eprocess;
                 if shown != Some(eprocess) {
                     pane.selected_process = Some(eprocess);
-                    *action = Some(DebuggerAction::ShowSystem(SystemView::Processes {
-                        selected: pane.selected_process,
-                        detail: pane.process_detail,
-                    }));
                 }
             }
             if let Some(opened) = walked.open {
@@ -2767,102 +3396,148 @@ fn process_keys(
             }
             KeyedRows {
                 list: walked.key,
-                detail: None,
+                ..KeyedRows::default()
+            }
+        }
+        // The modules: the keys pick one, as a click does, and Enter opens it.
+        ListFocus::Detail if pane.process_detail == ProcessDetail::Modules => {
+            let at = pane
+                .selected_process_module
+                .and_then(|base| listed.iter().position(|module| module.base == base));
+            let walked = walk(keys, at, listed.len());
+            if let Some(KeyRow::Moved(to)) = walked.key {
+                pane.selected_process_module = Some(listed[to].base);
+            }
+            if let Some(opened) = walked.open {
+                match opener.open(listed[opened].base) {
+                    RowOpen::Act(open) => *action = Some(open),
+                    RowOpen::Fold(_) | RowOpen::Nothing => {}
+                }
+            }
+            KeyedRows {
+                detail: walked.key,
+                ..KeyedRows::default()
             }
         }
         ListFocus::Detail => {
-            // A view switched this frame has not been read yet: what the
-            // listing holds for it may be an older read.
             let view = pane.process_detail;
-            let switched = keys.next_views > 0;
+            let mut cursor = pane.detail_cursor;
             let detail = walk_detail(
                 keys,
-                |expanded| {
+                |folds| {
                     if switched {
                         Vec::new()
                     } else {
-                        process_detail_opens(listing, view, navigable, process_cr3, expanded)
+                        process_detail_rows(listing, view, opener, folds)
                     }
                 },
-                &mut pane.detail_cursor,
-                &mut pane.expanded_modules,
+                &mut cursor,
+                pane.folds(),
                 action,
             );
-            KeyedRows { list: None, detail }
+            pane.detail_cursor = cursor;
+            KeyedRows {
+                detail,
+                ..KeyedRows::default()
+            }
+        }
+        ListFocus::Module => {
+            if !keys.walks() {
+                return KeyedRows {
+                    module: pane.module_cursor.map(KeyRow::Resting),
+                    ..KeyedRows::default()
+                };
+            }
+            let filter = pane.process_module_filter.to_lowercase();
+            let card = ModuleCard {
+                answer: module_answer(
+                    listing.modules.as_ref().and_then(|modules| modules.picked.as_ref()),
+                    pane.selected_process_module,
+                    pane.process_module_detail,
+                ),
+                has_pick: pane.selected_process_module.is_some(),
+                filter: &filter,
+                opener,
+                named: listed,
+            };
+            let mut cursor = pane.module_cursor;
+            let module = walk_detail(
+                keys,
+                |folds| {
+                    if switched {
+                        Vec::new()
+                    } else {
+                        module_detail_rows(card, folds)
+                    }
+                },
+                &mut cursor,
+                pane.folds(),
+                action,
+            );
+            pane.module_cursor = cursor;
+            KeyedRows {
+                module,
+                ..KeyedRows::default()
+            }
         }
     }
 }
 
-/// What Enter does on each row the chosen process's detail card lists, in
-/// the order it draws them (the memory map's open modules with their
-/// sections under them).
-fn process_detail_opens(
+/// The rows the chosen process's memory map or threads list, in the order
+/// the card draws them: the memory map's open modules with their sections
+/// under them.
+fn process_detail_rows(
     listing: &ProcessListing,
     detail: ProcessDetail,
-    navigable: bool,
-    process_cr3: Option<u64>,
-    expanded: &BTreeSet<u64>,
-) -> Vec<RowOpen> {
+    opener: Opener,
+    folds: &Folds<'_>,
+) -> Vec<DetailRow> {
     let Some(modules) = listing.modules.as_ref() else {
         return Vec::new();
     };
     match detail {
-        ProcessDetail::Modules => match &modules.read {
-            ModuleRead::Listed(listed) => listed
-                .iter()
-                .map(|module| {
-                    if navigable {
-                        RowOpen::Act(DebuggerAction::OpenModule(module.base))
-                    } else {
-                        RowOpen::Nothing
-                    }
-                })
-                .collect(),
-            ModuleRead::NoUserSpace | ModuleRead::Unreadable => Vec::new(),
-        },
+        // The keys pick among the modules instead (`process_keys`).
+        ProcessDetail::Modules => Vec::new(),
         ProcessDetail::Threads => modules
             .threads
             .iter()
             .map(|thread| {
-                RowOpen::Act(DebuggerAction::View(ViewContext::Thread {
+                DetailRow::leaf(RowOpen::Act(DebuggerAction::View(ViewContext::Thread {
                     eprocess: modules.eprocess,
                     tid: thread.tid,
-                }))
+                })))
             })
             .collect(),
         ProcessDetail::MemoryMap => {
             let Some(map) = modules.map.as_ref() else {
                 return Vec::new();
             };
-            let mut opens = Vec::new();
+            let mut rows = Vec::new();
             for group in crate::debugger::memory_map::group(map) {
                 match group {
                     crate::debugger::memory_map::MapGroup::Region(index) => {
-                        opens.push(region_open(map.regions[index].start, navigable, process_cr3));
+                        rows.push(DetailRow::leaf(opener.open(map.regions[index].start)));
                     }
                     crate::debugger::memory_map::MapGroup::Module { base, regions, .. } => {
-                        opens.push(RowOpen::Fold(base));
-                        if expanded.contains(&base) {
+                        let module_row = rows.len();
+                        let fold = Fold::MapModule(base);
+                        rows.push(DetailRow {
+                            open: RowOpen::Fold(fold),
+                            branch: Branch::Parent(fold),
+                        });
+                        if folds.is_open(fold) {
                             for index in regions {
-                                opens.push(region_open(map.regions[index].start, navigable, process_cr3));
+                                rows.push(DetailRow {
+                                    open: opener.open(map.regions[index].start),
+                                    branch: Branch::Under(module_row),
+                                });
                             }
                         }
                     }
                 }
             }
-            opens
+            rows
         }
-    }
-}
-
-/// What a click on a memory-map region at `start` does: opens it in memory
-/// for the running process, or in the address space at `process_cr3` for
-/// another.
-fn region_open(start: u64, navigable: bool, process_cr3: Option<u64>) -> RowOpen {
-    match (navigable, process_cr3) {
-        (true, _) => RowOpen::Act(DebuggerAction::OpenModule(start)),
-        (false, Some(cr3)) => RowOpen::Act(DebuggerAction::ViewInProcess { cr3, address: start }),
-        (false, None) => RowOpen::Nothing,
     }
 }
 
@@ -2947,22 +3622,41 @@ fn draw_minimap(ui: &mut egui::Ui, map: &MemoryMap, minimap_click: &mut Option<u
     ui.add_space(2.0);
 }
 
-/// The right card's body: the modules, the memory map or the threads, the
-/// keys standing on row `key`.
+/// What the right card draws: which view of the chosen process, where its
+/// addresses open, and the module the processor runs in (marked).
+#[derive(Clone, Copy)]
+struct RightCard<'a> {
+    detail: ProcessDetail,
+    listing: &'a ProcessListing,
+    opener: Opener,
+    highlight: Option<u64>,
+}
+
+/// The right card's body: the modules (one picked into `picked_module`), the
+/// memory map or the threads, the keys standing on row `key`.
 fn right_card_body(
     ui: &mut egui::Ui,
-    detail: ProcessDetail,
-    listing: &ProcessListing,
-    navigable: bool,
-    highlight: Option<u64>,
-    process_cr3: Option<u64>,
+    card: RightCard<'_>,
+    picked_module: &mut Option<u64>,
     expanded: &mut BTreeSet<u64>,
     scroll_to: &mut Option<u64>,
     key: Option<KeyRow>,
     action: &mut Option<DebuggerAction>,
 ) {
+    let RightCard {
+        detail,
+        listing,
+        opener,
+        highlight,
+    } = card;
     match detail {
-        ProcessDetail::Modules => listed_modules(ui, listing, navigable, highlight, key, action),
+        ProcessDetail::Modules => {
+            let click = ModuleClick {
+                picked: picked_module,
+                opener,
+            };
+            listed_modules(ui, listing, click, highlight, key, action);
+        }
         ProcessDetail::Threads => match listing.modules.as_ref() {
             Some(modules) => thread_rows(ui, &modules.threads, modules.eprocess, key, action),
             None => {
@@ -2972,7 +3666,7 @@ fn right_card_body(
         },
         ProcessDetail::MemoryMap => match listing.modules.as_ref().and_then(|m| m.map.as_ref()) {
             Some(map) => {
-                memory_map_rows(ui, map, navigable, process_cr3, expanded, scroll_to, key, action);
+                memory_map_rows(ui, map, opener, expanded, scroll_to, key, action);
             }
             None => {
                 ui.add_space(SPACE_ITEM);
@@ -3056,8 +3750,7 @@ fn region_access_text(region: &crate::debugger::memory_map::MapRegion) -> String
 fn memory_map_rows(
     ui: &mut egui::Ui,
     map: &MemoryMap,
-    navigable: bool,
-    process_cr3: Option<u64>,
+    opener: Opener,
     expanded: &mut BTreeSet<u64>,
     scroll_to: &mut Option<u64>,
     key: Option<KeyRow>,
@@ -3069,7 +3762,7 @@ fn memory_map_rows(
         return;
     }
     // The rows drawn so far: the keys count modules and their open sections
-    // alike, in the order `process_detail_opens` lists them.
+    // alike, in the order `process_detail_rows` lists them.
     let mut row = 0usize;
     let sections = |ui: &mut egui::Ui,
                         regions: &[usize],
@@ -3078,7 +3771,7 @@ fn memory_map_rows(
                         action: &mut Option<DebuggerAction>| {
         for &index in regions {
             let place = RowPlace { lead: TREE_INDENT, row: *row, key };
-            region_row(ui, map, index, place, navigable, process_cr3, scroll_to, action);
+            region_row(ui, map, index, place, opener, scroll_to, action);
             *row += 1;
         }
     };
@@ -3086,7 +3779,7 @@ fn memory_map_rows(
         match group {
             crate::debugger::memory_map::MapGroup::Region(index) => {
                 let place = RowPlace { lead: 0.0, row, key };
-                region_row(ui, map, index, place, navigable, process_cr3, scroll_to, action);
+                region_row(ui, map, index, place, opener, scroll_to, action);
                 row += 1;
             }
             crate::debugger::memory_map::MapGroup::Module {
@@ -3162,7 +3855,7 @@ fn memory_map_rows(
                     }
                 }
                 // Its open state is read before the click above may change it,
-                // as `process_detail_opens` read it.
+                // as `process_detail_rows` read it.
                 if open {
                     sections(ui, &regions, &mut row, scroll_to, action);
                 }
@@ -3181,15 +3874,13 @@ struct RowPlace {
 }
 
 /// One region row: its address, size, residency gauge, access, and owner,
-/// placed at `place`. A row of the running process opens the memory pane at
-/// its start; one of another process opens that process's memory.
+/// placed at `place`. A click shows the region where `opener` shows it.
 fn region_row(
     ui: &mut egui::Ui,
     map: &MemoryMap,
     index: usize,
     place: RowPlace,
-    navigable: bool,
-    process_cr3: Option<u64>,
+    opener: Opener,
     scroll_to: &mut Option<u64>,
     action: &mut Option<DebuggerAction>,
 ) {
@@ -3249,21 +3940,7 @@ fn region_row(
         response.scroll_to_me(Some(egui::Align::TOP));
         *scroll_to = None;
     }
-    match region_open(region.start, navigable, process_cr3) {
-        RowOpen::Act(open) => {
-            let hint = if navigable {
-                "Click to show it in memory."
-            } else {
-                "Click to show it in this process's memory."
-            };
-            if response.on_hover_text(hint).clicked() {
-                *action = Some(open);
-            }
-        }
-        RowOpen::Fold(_) | RowOpen::Nothing => {
-            response.on_hover_text(ANOTHER_ADDRESS_SPACE);
-        }
-    }
+    click_opens(response, opener, Some(region.start), "", action);
 }
 
 /// How the Processes card orders its rows.
@@ -3355,7 +4032,7 @@ const PROCESS_LIST_SHARE: f32 = 0.45;
 fn listed_modules(
     ui: &mut egui::Ui,
     listing: &ProcessListing,
-    navigable: bool,
+    click: ModuleClick<'_>,
     highlight: Option<u64>,
     key: Option<KeyRow>,
     action: &mut Option<DebuggerAction>,
@@ -3366,11 +4043,6 @@ fn listed_modules(
     match listing.modules.as_ref().map(|modules| &modules.read) {
         Some(ModuleRead::Listed(modules)) => {
             let shown: Vec<&WinModule> = modules.iter().collect();
-            let click = if navigable {
-                ModuleClick::Open
-            } else {
-                ModuleClick::Foreign
-            };
             module_rows(ui, &shown, click, highlight, key, action);
         }
         Some(ModuleRead::NoUserSpace) => {
@@ -3422,7 +4094,6 @@ fn process_rows(
     rows: &[ShownProcess],
     chosen: Option<&WinProcess>,
     selected_process: &mut Option<u64>,
-    detail: ProcessDetail,
     key: Option<KeyRow>,
     action: &mut Option<DebuggerAction>,
 ) {
@@ -3483,11 +4154,8 @@ fn process_rows(
             };
             *action = Some(DebuggerAction::View(context));
         } else if response.clicked() && !selected {
+            // Asked of the run once the frame is drawn (`processes_page`).
             *selected_process = Some(process.eprocess);
-            *action = Some(DebuggerAction::ShowSystem(SystemView::Processes {
-                selected: *selected_process,
-                detail,
-            }));
         }
     }
 }
@@ -3505,23 +4173,20 @@ fn module_columns() -> [Cell; 4] {
 const MODULE_SIZE_CHARS: usize = 8;
 const MODULE_NAME_CHARS: usize = 18;
 
-/// One row per module. A module in the running address space opens the CPU
-/// tab's memory pane at its base; one elsewhere says why it cannot.
-/// What a click on a module row does.
-enum ModuleClick<'a> {
-    /// Opens it in the memory pane: a module of the running process.
-    Open,
-    /// Nothing to open: it lies in another process's address space.
-    Foreign,
-    /// Picks it into `picked`, for its detail; a double-click (or a triple,
-    /// which holds one) opens it in the memory pane.
-    Pick { picked: &'a mut Option<u64> },
+/// What a click on a module row does: it picks the module into `picked`, for
+/// its detail; a double-click (or a triple, which holds one) shows it where
+/// `opener` shows it.
+struct ModuleClick<'a> {
+    picked: &'a mut Option<u64>,
+    opener: Opener,
 }
 
+/// One row per module, the picked one and the row the keys stand on
+/// selected, the one the processor runs in marked.
 fn module_rows(
     ui: &mut egui::Ui,
     modules: &[&WinModule],
-    mut click: ModuleClick<'_>,
+    click: ModuleClick<'_>,
     highlight: Option<u64>,
     key: Option<KeyRow>,
     action: &mut Option<DebuggerAction>,
@@ -3552,11 +4217,7 @@ fn module_rows(
             Cell::left(name, name_color, MODULE_NAME_CHARS),
             Cell::fill(path, TEXT_MUTED.gamma_multiply(0.8)),
         ];
-        // A picked kernel module, or the row the keys stand on.
-        let picked_now = match &click {
-            ModuleClick::Pick { picked } => **picked == Some(module.base),
-            ModuleClick::Open | ModuleClick::Foreign => false,
-        } || key.is_some_and(|key| key.at(n));
+        let picked_now = *click.picked == Some(module.base) || key.is_some_and(|key| key.at(n));
         let tone = if picked_now {
             Tone::Selected
         } else if current {
@@ -3574,29 +4235,21 @@ fn module_rows(
             },
         );
         follow_key(&response, key, n);
-        match &mut click {
-            ModuleClick::Open => {
-                if response
-                    .on_hover_text(format!("{path}\nClick to show it in memory."))
-                    .clicked()
-                {
-                    *action = Some(DebuggerAction::OpenModule(module.base));
-                }
+        let opens = click.opener.open(module.base);
+        let then = match opens {
+            RowOpen::Act(_) => "double-click to show it in memory.",
+            RowOpen::Fold(_) | RowOpen::Nothing => ANOTHER_ADDRESS_SPACE,
+        };
+        let response = response.on_hover_text(format!(
+            "{path}\nClick to see its sections, exports and imports; {then}"
+        ));
+        if response.double_clicked() || response.triple_clicked() {
+            match opens {
+                RowOpen::Act(open) => *action = Some(open),
+                RowOpen::Fold(_) | RowOpen::Nothing => {}
             }
-            ModuleClick::Foreign => {
-                response.on_hover_text(format!("{path}\n{ANOTHER_ADDRESS_SPACE}"));
-            }
-            ModuleClick::Pick { picked } => {
-                let response = response.on_hover_text(format!(
-                    "{path}\nClick to see its sections and exports; double-click to show it \
-                     in memory."
-                ));
-                if response.double_clicked() || response.triple_clicked() {
-                    *action = Some(DebuggerAction::OpenModule(module.base));
-                } else if response.clicked() {
-                    **picked = Some(module.base);
-                }
-            }
+        } else if response.clicked() {
+            *click.picked = Some(module.base);
         }
     }
 }
@@ -3830,8 +4483,23 @@ mod tests {
     }
 
     #[test]
+    fn a_filter_matches_a_name_in_either_case() {
+        assert!(holds_ignoring_case("KeWaitForSingleObject", "wait"));
+        assert!(holds_ignoring_case("KERNELBASE.dll", "kernelbase"));
+        assert!(!holds_ignoring_case("NtClose", "wait"));
+        assert!(!holds_ignoring_case("Nt", "ntclose"), "a filter longer than the name");
+        assert!(holds_ignoring_case("NtClose", ""), "no filter keeps everything");
+    }
+
+    #[test]
     fn the_keys_walk_a_listing_and_stay_inside_it() {
-        let keys = |step: isize, open: bool| ListKeys { step, open, switches: 0, next_views: 0 };
+        let keys = |step: isize, open: bool| ListKeys {
+            step,
+            open,
+            sideways: 0,
+            switches: 0,
+            next_views: 0,
+        };
         // Standing on no row is standing just above the first.
         assert_eq!(walk(keys(1, false), None, 5).key, Some(KeyRow::Moved(0)));
         assert_eq!(walk(keys(3, false), None, 5).key, Some(KeyRow::Moved(2)));

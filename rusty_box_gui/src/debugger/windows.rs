@@ -40,7 +40,7 @@ use rusty_box::emulator::{DebugCpu, SliceEngine};
 
 use super::inspect::{ModuleSpace, SymModule, SymbolIndex};
 use super::memory_map::{self, MemoryMap, ModuleLayout};
-use super::pe::{self, ExportRead, HEADER_BYTES};
+use super::pe::{self, ExportRead, ImportRead, HEADER_BYTES};
 use super::threads::{
     decode_trap_frame, frame_is_users, walk_thread_list, SavedRegisters, WinThread, MAX_THREADS,
     TRAP_FRAME_BYTES,
@@ -64,28 +64,34 @@ pub(crate) enum SystemView {
     #[default]
     Off,
     /// Every process, and — for `selected` (an `EPROCESS` address), or the
-    /// running process when none is selected — either its modules or its
-    /// memory map.
+    /// running process when none is selected — its modules, its memory map
+    /// or its threads; with its modules, `module_detail` of the module based
+    /// at `module`.
     Processes {
         selected: Option<u64>,
         detail: ProcessDetail,
+        module: Option<u64>,
+        module_detail: ModuleDetail,
     },
     /// The drivers and the kernel itself, in load order, and — for
-    /// `selected` (a module's base) — its sections or its exports.
+    /// `selected` (a module's base) — its sections, exports or imports.
     KernelModules {
         selected: Option<u64>,
-        detail: KernelDetail,
+        detail: ModuleDetail,
     },
 }
 
-/// What the Kernel modules view shows for the picked module.
+/// What is shown of a picked module: a driver in the Kernel modules view, or
+/// a module of a process in the Processes view.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) enum KernelDetail {
+pub(crate) enum ModuleDetail {
     /// Its PE sections, with how much of each is resident and its access.
     #[default]
     Sections,
     /// The functions it exports.
     Exports,
+    /// The functions it imports, by the module they come from.
+    Imports,
 }
 
 /// The kernel's modules, and the picked one's detail.
@@ -95,7 +101,7 @@ pub(crate) struct KernelListing {
     pub(crate) picked: Option<PickedModule>,
 }
 
-/// The picked kernel module's detail, as the view asked for it.
+/// The picked module's detail, as the view asked for it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PickedModule {
     pub(crate) base: u64,
@@ -106,6 +112,19 @@ pub(crate) struct PickedModule {
 pub(crate) enum PickedDetail {
     Sections(SectionsRead),
     Exports(ExportRead),
+    Imports(ImportRead),
+}
+
+impl PickedDetail {
+    /// Whether this is the detail `asked` names.
+    pub(crate) const fn answers(&self, asked: ModuleDetail) -> bool {
+        matches!(
+            (self, asked),
+            (Self::Sections(_), ModuleDetail::Sections)
+                | (Self::Exports(_), ModuleDetail::Exports)
+                | (Self::Imports(_), ModuleDetail::Imports)
+        )
+    }
 }
 
 /// A module's sections as its headers and the page tables give them.
@@ -214,6 +233,9 @@ pub(crate) struct ProcessModules {
     pub(crate) map: Option<MemoryMap>,
     /// The process's threads, from its `ETHREAD` list.
     pub(crate) threads: Vec<WinThread>,
+    /// The picked module's detail, when the view lists modules and one of
+    /// them is picked.
+    pub(crate) picked: Option<PickedModule>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -400,23 +422,22 @@ pub(crate) fn read_windows<T: Instrumentation, E: SliceEngine<T>>(
         SystemView::Off => SystemListing::NotAsked,
         SystemView::KernelModules { selected, detail } => match kernel.loaded_modules {
             Some(_) => {
-                // The picked module's detail is read only as asked: its
-                // sections, or its exports.
+                // The picked module's detail is read only as asked. The
+                // kernel half is the same in every address space.
                 let picked = selected
                     .and_then(|base| kernel_modules.iter().find(|module| module.base == base))
                     .cloned()
                     .map(|module| PickedModule {
                         base: module.base,
-                        shown: match detail {
-                            KernelDetail::Sections => PickedDetail::Sections(read_kernel_sections(
-                                cpu,
-                                view.registers.cr3,
-                                &module,
-                            )),
-                            KernelDetail::Exports => {
-                                PickedDetail::Exports(read_kernel_exports(cpu, &module))
-                            }
-                        },
+                        shown: read_module_detail(
+                            cpu,
+                            ImageSpace {
+                                root: Root::Live,
+                                cr3: view.registers.cr3,
+                            },
+                            &module,
+                            detail,
+                        ),
                     });
                 SystemListing::KernelModules(KernelListing {
                     modules: kernel_modules,
@@ -425,7 +446,12 @@ pub(crate) fn read_windows<T: Instrumentation, E: SliceEngine<T>>(
             }
             None => SystemListing::NoWindowsKernel(KernelMiss::NoModuleList),
         },
-        SystemView::Processes { selected, detail } => {
+        SystemView::Processes {
+            selected,
+            detail,
+            module,
+            module_detail,
+        } => {
             let chosen_index = selected
                 .and_then(|eprocess| processes.iter().position(|p| p.eprocess == eprocess))
                 .or(current_index);
@@ -461,11 +487,32 @@ pub(crate) fn read_windows<T: Instrumentation, E: SliceEngine<T>>(
                     }
                     _ => None,
                 };
+                // The picked module's detail, read in the process's own
+                // address space: the running one through the processor's
+                // page tables, any other through its DirectoryTableBase.
+                let space = ImageSpace {
+                    root: if process.current {
+                        Root::Live
+                    } else {
+                        Root::Process(process.cr3)
+                    },
+                    cr3: process.cr3,
+                };
+                let picked = match (detail, &read) {
+                    (ProcessDetail::Modules, ModuleRead::Listed(modules)) => module
+                        .and_then(|base| modules.iter().find(|listed| listed.base == base))
+                        .map(|listed| PickedModule {
+                            base: listed.base,
+                            shown: read_module_detail(cpu, space, listed, module_detail),
+                        }),
+                    _ => None,
+                };
                 ProcessModules {
                     eprocess: process.eprocess,
                     read,
                     map,
                     threads,
+                    picked,
                 }
             });
             let tree = process_tree(&processes);
@@ -1678,17 +1725,38 @@ fn read_memory_map<T: Instrumentation, E: SliceEngine<T>>(
     }
 }
 
-/// A kernel module's header page and sections, from its PE headers, with each
-/// one's residency and access from the page tables under `cr3` (the kernel
-/// half is the same in every address space). A section with no page mapped —
-/// one the loader discarded after boot, or paged out — is listed with none
-/// resident and the access its PE flags give.
-fn read_kernel_sections<T: Instrumentation, E: SliceEngine<T>>(
-    cpu: &mut DebugCpu<'_, T, E>,
+/// The address space a module's image is read in: the root its bytes are
+/// read through, and the page tables its residency is walked in.
+#[derive(Clone, Copy, Debug)]
+struct ImageSpace {
+    root: Root,
     cr3: u64,
+}
+
+/// The `detail` of `module`, read in `space`.
+fn read_module_detail<T: Instrumentation, E: SliceEngine<T>>(
+    cpu: &mut DebugCpu<'_, T, E>,
+    space: ImageSpace,
+    module: &WinModule,
+    detail: ModuleDetail,
+) -> PickedDetail {
+    match detail {
+        ModuleDetail::Sections => PickedDetail::Sections(read_module_sections(cpu, space, module)),
+        ModuleDetail::Exports => PickedDetail::Exports(read_module_exports(cpu, space.root, module)),
+        ModuleDetail::Imports => PickedDetail::Imports(read_module_imports(cpu, space.root, module)),
+    }
+}
+
+/// A module's header page and sections, from its PE headers, with each one's
+/// residency and access from the page tables of `space`. A section with no
+/// page mapped — one the loader discarded after boot, or paged out — is
+/// listed with none resident and the access its PE flags give.
+fn read_module_sections<T: Instrumentation, E: SliceEngine<T>>(
+    cpu: &mut DebugCpu<'_, T, E>,
+    space: ImageSpace,
     module: &WinModule,
 ) -> SectionsRead {
-    let Some(sections) = read_exact(cpu, Root::Live, module.base, HEADER_BYTES)
+    let Some(sections) = read_exact(cpu, space.root, module.base, HEADER_BYTES)
         .and_then(|header| pe::parse_sections(&header))
     else {
         return SectionsRead::HeaderUnreadable;
@@ -1706,7 +1774,7 @@ fn read_kernel_sections<T: Instrumentation, E: SliceEngine<T>>(
         end: module.base.saturating_add(u64::from(module.size)),
     };
     let mut mappings = Vec::new();
-    let walk = cpu.dbg_page_mappings_in(cr3, image, |mapping| {
+    let walk = cpu.dbg_page_mappings_in(space.cr3, image, |mapping| {
         mappings.push(mapping);
         WalkStep::Continue
     });
@@ -1721,16 +1789,31 @@ fn read_kernel_sections<T: Instrumentation, E: SliceEngine<T>>(
     SectionsRead::Mapped(memory_map::build(&mappings, &[layout]))
 }
 
-/// A kernel module's exports, read from its export table in kernel memory.
-fn read_kernel_exports<T: Instrumentation, E: SliceEngine<T>>(
+/// A module's exports, read from its export table through `root`.
+fn read_module_exports<T: Instrumentation, E: SliceEngine<T>>(
     cpu: &mut DebugCpu<'_, T, E>,
+    root: Root,
     module: &WinModule,
 ) -> ExportRead {
-    let Some(header) = read_exact(cpu, Root::Live, module.base, HEADER_BYTES) else {
+    let Some(header) = read_exact(cpu, root, module.base, HEADER_BYTES) else {
         return ExportRead::Unreadable;
     };
     pe::parse_exports(&header, |rva, len| {
-        read_exact(cpu, Root::Live, module.base.wrapping_add(u64::from(rva)), len)
+        read_exact(cpu, root, module.base.wrapping_add(u64::from(rva)), len)
+    })
+}
+
+/// A module's imports, read from its import table and IAT through `root`.
+fn read_module_imports<T: Instrumentation, E: SliceEngine<T>>(
+    cpu: &mut DebugCpu<'_, T, E>,
+    root: Root,
+    module: &WinModule,
+) -> ImportRead {
+    let Some(header) = read_exact(cpu, root, module.base, HEADER_BYTES) else {
+        return ImportRead::Unreadable;
+    };
+    pe::parse_imports(&header, |rva, len| {
+        read_exact(cpu, root, module.base.wrapping_add(u64::from(rva)), len)
     })
 }
 
@@ -2232,10 +2315,12 @@ mod tests {
         let processes = SystemView::Processes {
             selected: None,
             detail: ProcessDetail::Modules,
+            module: None,
+            module_detail: ModuleDetail::Sections,
         };
         let kernel = SystemView::KernelModules {
             selected: None,
-            detail: KernelDetail::Sections,
+            detail: ModuleDetail::Sections,
         };
         for asked in [kernel, processes] {
             // The flat test mode keeps GS at 0: there is no KPCR to find.
@@ -2299,6 +2384,41 @@ mod tests {
         assert_eq!(cpu_running(None, &live), None, "a kernel thread has no TEB");
     }
 
+    /// A module's imports are read from its image in guest memory at its
+    /// base, through the processor's page tables or a process's alike.
+    #[test]
+    fn a_modules_imports_are_read_from_its_image_in_memory() {
+        let mut machine =
+            Emulator::new_with_mode(EmulatorConfig::default(), CpuSetupMode::FlatLong64)
+                .expect("machine");
+        let base = CpuSetupMode::FlatLong64.first_free_physical_address();
+        machine
+            .mem_write(base, &pe::tests::importing_image(true))
+            .expect("write the image");
+        let mut cpu = machine.debug_cpu(0).expect("the boot processor");
+        let cr3 = cpu.view().registers.cr3;
+        let module = WinModule {
+            base,
+            size: 0x3000,
+            name: Some("app.exe".to_owned()),
+            path: None,
+            bits: ModuleBits::Bits64,
+        };
+        for root in [Root::Live, Root::Process(cr3)] {
+            let read = read_module_detail(
+                &mut cpu,
+                ImageSpace { root, cr3 },
+                &module,
+                ModuleDetail::Imports,
+            );
+            let PickedDetail::Imports(ImportRead::Listed(modules)) = read else {
+                panic!("{root:?}: the imports read as {read:?}");
+            };
+            assert_eq!(modules[0].name.as_deref(), Some("ntdll.dll"), "{root:?}");
+            assert_eq!(modules[0].functions[0].bound, Some(0x7FF8_1380), "{root:?}");
+        }
+    }
+
     /// A KPCR-shaped address that does not read says the kernel is not
     /// mapped under these page tables, rather than that none was found.
     #[test]
@@ -2314,7 +2434,7 @@ mod tests {
             &view,
             SystemView::KernelModules {
                 selected: Some(0xFFFF_F800_0100_0000),
-                detail: KernelDetail::Exports,
+                detail: ModuleDetail::Exports,
             },
             &mut WindowsDiscovery::default(),
         );

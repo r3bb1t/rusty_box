@@ -836,7 +836,7 @@ mod tests {
         // A different listing asked for is read afresh.
         let kernel = SystemView::KernelModules {
             selected: None,
-            detail: super::super::windows::KernelDetail::Sections,
+            detail: super::super::windows::ModuleDetail::Sections,
         };
         let listed = ViewRequest {
             system: kernel,

@@ -10031,10 +10031,7 @@ mod tests {
             window.run();
             assert_eq!(
                 control.view().system,
-                SystemView::Processes {
-                    selected: None,
-                    detail: crate::debugger::windows::ProcessDetail::Modules,
-                }
+                processes_view(None, crate::debugger::windows::ProcessDetail::Modules)
             );
             window.get_by_label("Kernel modules").click();
             window.run();
@@ -10042,7 +10039,7 @@ mod tests {
                 control.view().system,
                 SystemView::KernelModules {
                     selected: None,
-                    detail: crate::debugger::windows::KernelDetail::Sections,
+                    detail: crate::debugger::windows::ModuleDetail::Sections,
                 }
             );
             window.get_by_label("CPU").click();
@@ -10194,9 +10191,177 @@ mod tests {
                     }]),
                     map: None,
                     threads: Vec::new(),
+                    picked: None,
                 }),
             });
             snapshot
+        }
+
+        /// ntdll.dll's base in `process_listing_snapshot`.
+        const LISTED_NTDLL: u64 = 0x7FF0_0000_0000;
+
+        /// `process_listing_snapshot` with ntdll.dll picked, showing what it
+        /// imports: `CreateFileW` from KERNELBASE.dll, bound to an address
+        /// inside ntdll.dll itself.
+        fn importing_process_snapshot() -> crate::debugger::inspect::DebugSnapshot {
+            use crate::debugger::pe::{ImportName, ImportRead, ImportedModule, PeImport, ThunksEnd};
+            use crate::debugger::windows::{PickedDetail, PickedModule, SystemListing};
+            let mut snapshot = process_listing_snapshot();
+            if let SystemListing::Processes(listing) = &mut snapshot.system {
+                if let Some(modules) = listing.modules.as_mut() {
+                    modules.picked = Some(PickedModule {
+                        base: LISTED_NTDLL,
+                        shown: PickedDetail::Imports(ImportRead::Listed(vec![ImportedModule {
+                            name: Some("KERNELBASE.dll".to_owned()),
+                            functions: vec![PeImport {
+                                name: ImportName::Named {
+                                    hint: 7,
+                                    name: "CreateFileW".to_owned(),
+                                },
+                                slot: 0x900,
+                                bound: Some(LISTED_NTDLL + 0x800),
+                            }],
+                            end: ThunksEnd::Terminated,
+                        }])),
+                    });
+                }
+            }
+            snapshot
+        }
+
+        /// Whether a row whose label holds `text` is drawn.
+        fn shows(window: &Harness<'_, Window>, text: &str) -> bool {
+            window
+                .query_all_by(|node| node.label().is_some_and(|label| label.contains(text)))
+                .next()
+                .is_some()
+        }
+
+        /// A click on a process's module picks it: the run is asked for its
+        /// sections, and the page stays on the lists.
+        #[test]
+        fn clicking_a_processes_module_picks_it() {
+            use crate::debugger::windows::{ModuleDetail, ProcessDetail, SystemView};
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_vm(&mut app);
+            control.publish(process_listing_snapshot());
+            let mut window = tall_window(app);
+            window.run();
+            open_processes(&mut window);
+            let_clicks_settle(&mut window);
+            let ntdll = row_center(&window, "ntdll.dll");
+            single_click(&mut window, ntdll);
+            window.run();
+            assert_eq!(
+                control.view().system,
+                SystemView::Processes {
+                    selected: None,
+                    detail: ProcessDetail::Modules,
+                    module: Some(LISTED_NTDLL),
+                    module_detail: ModuleDetail::Sections,
+                }
+            );
+            assert!(window.query_by_label("Registers").is_none(), "still on the lists");
+        }
+
+        /// The picked module's imports list under the module they come from;
+        /// Left folds that module's row and Right opens it again, and Enter
+        /// on an import opens where it was bound.
+        #[test]
+        fn a_picked_modules_imports_list_by_module_and_fold_with_the_keys() {
+            use crate::debugger::inspect::{AddressSpace, GuestAddress, MemoryTarget};
+            use crate::debugger::windows::{ModuleDetail, ProcessDetail, SystemView};
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_vm(&mut app);
+            control.publish(importing_process_snapshot());
+            let mut window = tall_window(app);
+            window.run();
+            open_processes(&mut window);
+            let_clicks_settle(&mut window);
+            let ntdll = row_center(&window, "ntdll.dll");
+            single_click(&mut window, ntdll);
+            window.run();
+            window.get_by_label("Imports").click();
+            window.run();
+            assert_eq!(
+                control.view().system,
+                SystemView::Processes {
+                    selected: None,
+                    detail: ProcessDetail::Modules,
+                    module: Some(LISTED_NTDLL),
+                    module_detail: ModuleDetail::Imports,
+                }
+            );
+            assert!(shows(&window, "KERNELBASE.dll"));
+            assert!(shows(&window, "CreateFileW"), "the import is listed under its module");
+            // The keys go to the modules, then to the picked module's card.
+            press_key(&mut window, egui::Key::Tab);
+            press_key(&mut window, egui::Key::Tab);
+            press_key(&mut window, egui::Key::ArrowDown);
+            press_key(&mut window, egui::Key::ArrowLeft);
+            assert!(!shows(&window, "CreateFileW"), "Left folded KERNELBASE.dll");
+            press_key(&mut window, egui::Key::ArrowRight);
+            assert!(shows(&window, "CreateFileW"), "Right opened it again");
+            press_key(&mut window, egui::Key::ArrowDown);
+            press_key(&mut window, egui::Key::Enter);
+            assert_eq!(
+                control.view().memory,
+                MemoryTarget::At(GuestAddress {
+                    space: AddressSpace::Linear,
+                    value: LISTED_NTDLL + 0x800,
+                })
+            );
+        }
+
+        /// Shift+Tab in the picked module's card shows its next view.
+        #[test]
+        fn shift_tab_in_a_modules_card_shows_its_next_view() {
+            use crate::debugger::windows::{ModuleDetail, ProcessDetail, SystemView};
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_vm(&mut app);
+            control.publish(process_listing_snapshot());
+            let mut window = tall_window(app);
+            window.run();
+            open_processes(&mut window);
+            press_key(&mut window, egui::Key::Tab);
+            press_key(&mut window, egui::Key::ArrowDown);
+            press_key(&mut window, egui::Key::Tab);
+            for module_detail in [ModuleDetail::Exports, ModuleDetail::Imports, ModuleDetail::Sections] {
+                press_shift_tab(&mut window);
+                assert_eq!(
+                    control.view().system,
+                    SystemView::Processes {
+                        selected: None,
+                        detail: ProcessDetail::Modules,
+                        module: Some(LISTED_NTDLL),
+                        module_detail,
+                    }
+                );
+            }
+        }
+
+        /// A driver's imports are asked for by the switch, as its exports are.
+        #[test]
+        fn a_kernel_modules_imports_are_asked_for_by_the_switch() {
+            use crate::debugger::windows::{ModuleDetail, SystemView};
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_vm(&mut app);
+            control.publish(kernel_listing_snapshot(None));
+            let mut window = tall_window(app);
+            window.run();
+            open_kernel_modules(&mut window);
+            let tcpip = row_center(&window, "tcpip.sys");
+            single_click(&mut window, tcpip);
+            window.run();
+            window.get_by_label("Imports").click();
+            window.run();
+            assert_eq!(
+                control.view().system,
+                SystemView::KernelModules {
+                    selected: Some(TCPIP_BASE),
+                    detail: ModuleDetail::Imports,
+                }
+            );
         }
 
         /// tcpip.sys's base in the kernel listings below.
@@ -10245,7 +10410,7 @@ mod tests {
         /// and the page stays on the list.
         #[test]
         fn clicking_a_kernel_module_picks_it() {
-            use crate::debugger::windows::{KernelDetail, SystemView};
+            use crate::debugger::windows::{ModuleDetail, SystemView};
             let (mut app, _command_rx, _scratch) = native_test_app();
             let control = paused_vm(&mut app);
             control.publish(kernel_listing_snapshot(None));
@@ -10259,7 +10424,7 @@ mod tests {
                 control.view().system,
                 SystemView::KernelModules {
                     selected: Some(TCPIP_BASE),
-                    detail: KernelDetail::Sections,
+                    detail: ModuleDetail::Sections,
                 }
             );
             assert!(window.query_by_label("Registers").is_none(), "still on the list");
@@ -10296,7 +10461,7 @@ mod tests {
                 MapOrigin, MapRegion, MemoryMap, RegionAccess, RegionOwner,
             };
             use crate::debugger::windows::{
-                KernelDetail, PickedDetail, PickedModule, SectionsRead, SystemView,
+                ModuleDetail, PickedDetail, PickedModule, SectionsRead, SystemView,
             };
             let text = MapRegion {
                 start: TCPIP_BASE + 0x1000,
@@ -10345,7 +10510,7 @@ mod tests {
                 control.view().system,
                 SystemView::KernelModules {
                     selected: Some(TCPIP_BASE),
-                    detail: KernelDetail::Exports,
+                    detail: ModuleDetail::Exports,
                 }
             );
         }
@@ -10642,6 +10807,19 @@ mod tests {
             window.run();
         }
 
+        /// The Processes view of `selected`'s `detail`, with no module picked.
+        fn processes_view(
+            selected: Option<u64>,
+            detail: crate::debugger::windows::ProcessDetail,
+        ) -> crate::debugger::windows::SystemView {
+            crate::debugger::windows::SystemView::Processes {
+                selected,
+                detail,
+                module: None,
+                module_detail: crate::debugger::windows::ModuleDetail::Sections,
+            }
+        }
+
         /// System's and smss.exe's EPROCESS in `process_listing_snapshot`.
         const SYSTEM_EPROCESS: u64 = 0xFFFF_FA80_0000_1000;
         const SMSS_EPROCESS: u64 = 0xFFFF_FA80_0000_2000;
@@ -10649,7 +10827,7 @@ mod tests {
         /// Up and Down pick the process above or below the one shown.
         #[test]
         fn the_arrow_keys_pick_the_process_above_or_below() {
-            use crate::debugger::windows::{ProcessDetail, SystemView};
+            use crate::debugger::windows::ProcessDetail;
             let (mut app, _command_rx, _scratch) = native_test_app();
             let control = paused_vm(&mut app);
             control.publish(process_listing_snapshot());
@@ -10660,18 +10838,12 @@ mod tests {
             press_key(&mut window, egui::Key::ArrowUp);
             assert_eq!(
                 control.view().system,
-                SystemView::Processes {
-                    selected: Some(SYSTEM_EPROCESS),
-                    detail: ProcessDetail::Modules,
-                }
+                processes_view(Some(SYSTEM_EPROCESS), ProcessDetail::Modules)
             );
             press_key(&mut window, egui::Key::ArrowDown);
             assert_eq!(
                 control.view().system,
-                SystemView::Processes {
-                    selected: Some(SMSS_EPROCESS),
-                    detail: ProcessDetail::Modules,
-                }
+                processes_view(Some(SMSS_EPROCESS), ProcessDetail::Modules)
             );
         }
 
@@ -10718,25 +10890,25 @@ mod tests {
             assert!(window.query_by_label("Registers").is_some(), "the CPU tab is shown");
         }
 
-        /// Tab again gives the keys back to the process list.
+        /// Tab past the last card gives the keys back to the process list: in
+        /// the Modules view the cards are the processes, their modules and the
+        /// picked module's detail.
         #[test]
-        fn a_second_tab_gives_the_keys_back_to_the_list() {
-            use crate::debugger::windows::{ProcessDetail, SystemView};
+        fn a_tab_past_the_last_card_gives_the_keys_back_to_the_list() {
+            use crate::debugger::windows::ProcessDetail;
             let (mut app, _command_rx, _scratch) = native_test_app();
             let control = paused_vm(&mut app);
             control.publish(process_listing_snapshot());
             let mut window = tall_window(app);
             window.run();
             open_processes(&mut window);
-            press_key(&mut window, egui::Key::Tab);
-            press_key(&mut window, egui::Key::Tab);
+            for _ in 0..3 {
+                press_key(&mut window, egui::Key::Tab);
+            }
             press_key(&mut window, egui::Key::ArrowUp);
             assert_eq!(
                 control.view().system,
-                SystemView::Processes {
-                    selected: Some(SYSTEM_EPROCESS),
-                    detail: ProcessDetail::Modules,
-                }
+                processes_view(Some(SYSTEM_EPROCESS), ProcessDetail::Modules)
             );
         }
 
@@ -10744,7 +10916,7 @@ mod tests {
         /// them: modules, memory map, threads, and round again.
         #[test]
         fn shift_tab_shows_the_next_detail_view() {
-            use crate::debugger::windows::{ProcessDetail, SystemView};
+            use crate::debugger::windows::ProcessDetail;
             let (mut app, _command_rx, _scratch) = native_test_app();
             let control = paused_vm(&mut app);
             control.publish(process_listing_snapshot());
@@ -10755,7 +10927,7 @@ mod tests {
                 press_shift_tab(&mut window);
                 assert_eq!(
                     control.view().system,
-                    SystemView::Processes { selected: None, detail },
+                    processes_view(None, detail),
                     "after Shift+Tab"
                 );
             }
@@ -10765,7 +10937,7 @@ mod tests {
         /// process while the field has them.
         #[test]
         fn the_keys_of_a_filter_being_typed_in_stay_in_it() {
-            use crate::debugger::windows::{ProcessDetail, SystemView};
+            use crate::debugger::windows::ProcessDetail;
             use crate::shell::debugger_page::FILTER;
             let (mut app, _command_rx, _scratch) = native_test_app();
             let control = paused_vm(&mut app);
@@ -10781,7 +10953,7 @@ mod tests {
             press_key(&mut window, egui::Key::Tab);
             assert_eq!(
                 control.view().system,
-                SystemView::Processes { selected: None, detail: ProcessDetail::Modules }
+                processes_view(None, ProcessDetail::Modules)
             );
         }
 
@@ -10791,9 +10963,78 @@ mod tests {
         #[test]
         fn the_keys_open_a_module_in_the_memory_map_and_walk_into_its_sections() {
             use crate::debugger::inspect::{AddressSpace, GuestAddress, MemoryTarget};
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_vm(&mut app);
+            control.publish(memory_map_snapshot());
+            let mut window = tall_window(app);
+            window.run();
+            open_processes(&mut window);
+            press_shift_tab(&mut window);
+            press_key(&mut window, egui::Key::Tab);
+            // The private region, then ntdll's module row.
+            press_key(&mut window, egui::Key::ArrowDown);
+            press_key(&mut window, egui::Key::ArrowDown);
+            press_key(&mut window, egui::Key::Enter);
+            assert!(shows_text(&window), "the module opened to show its sections");
+            // Its header, then its .text.
+            press_key(&mut window, egui::Key::ArrowDown);
+            press_key(&mut window, egui::Key::ArrowDown);
+            press_key(&mut window, egui::Key::Enter);
+            assert_eq!(
+                control.view().memory,
+                MemoryTarget::At(GuestAddress {
+                    space: AddressSpace::Linear,
+                    value: MAP_NTDLL + 0x1000,
+                })
+            );
+        }
+
+        /// Right shows a module's sections and Left hides them; Left on a
+        /// section steps out to its module first, as in a tree.
+        #[test]
+        fn left_and_right_hide_and_show_a_modules_sections() {
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_vm(&mut app);
+            control.publish(memory_map_snapshot());
+            let mut window = tall_window(app);
+            window.run();
+            open_processes(&mut window);
+            press_shift_tab(&mut window);
+            press_key(&mut window, egui::Key::Tab);
+            press_key(&mut window, egui::Key::ArrowDown);
+            press_key(&mut window, egui::Key::ArrowDown);
+            press_key(&mut window, egui::Key::ArrowRight);
+            assert!(shows_text(&window), "Right showed the module's sections");
+            press_key(&mut window, egui::Key::ArrowLeft);
+            assert!(!shows_text(&window), "Left hid them");
+            press_key(&mut window, egui::Key::ArrowRight);
+            // Down to the header, then to .text; Left steps out to the
+            // module, and a second Left hides its sections.
+            press_key(&mut window, egui::Key::ArrowDown);
+            press_key(&mut window, egui::Key::ArrowDown);
+            press_key(&mut window, egui::Key::ArrowLeft);
+            assert!(shows_text(&window), "the first Left only stepped out");
+            press_key(&mut window, egui::Key::ArrowLeft);
+            assert!(!shows_text(&window), "the second Left hid the sections");
+        }
+
+        /// ntdll's base in `memory_map_snapshot`.
+        const MAP_NTDLL: u64 = 0x7FF0_0000_0000;
+
+        /// Whether a row showing ntdll's .text section is drawn.
+        fn shows_text(window: &Harness<'_, Window>) -> bool {
+            window
+                .query_all_by(|node| node.label().is_some_and(|label| label.contains(".text")))
+                .next()
+                .is_some()
+        }
+
+        /// The process listing with smss.exe's memory map: a private region,
+        /// then ntdll's header and .text grouped under its module row.
+        fn memory_map_snapshot() -> crate::debugger::inspect::DebugSnapshot {
             use crate::debugger::memory_map::{MapOrigin, MapRegion, MemoryMap, RegionOwner};
             use crate::debugger::windows::SystemListing;
-            const NTDLL: u64 = 0x7FF0_0000_0000;
+            const NTDLL: u64 = MAP_NTDLL;
             let region = |start: u64, owner: RegionOwner| MapRegion {
                 start,
                 size: 0x1000,
@@ -10826,36 +11067,7 @@ mod tests {
                     });
                 }
             }
-            let (mut app, _command_rx, _scratch) = native_test_app();
-            let control = paused_vm(&mut app);
-            control.publish(snapshot);
-            let mut window = tall_window(app);
-            window.run();
-            open_processes(&mut window);
-            press_shift_tab(&mut window);
-            press_key(&mut window, egui::Key::Tab);
-            // The private region, then ntdll's module row.
-            press_key(&mut window, egui::Key::ArrowDown);
-            press_key(&mut window, egui::Key::ArrowDown);
-            press_key(&mut window, egui::Key::Enter);
-            assert!(
-                window
-                    .query_all_by(|node| node.label().is_some_and(|label| label.contains(".text")))
-                    .next()
-                    .is_some(),
-                "the module opened to show its sections"
-            );
-            // Its header, then its .text.
-            press_key(&mut window, egui::Key::ArrowDown);
-            press_key(&mut window, egui::Key::ArrowDown);
-            press_key(&mut window, egui::Key::Enter);
-            assert_eq!(
-                control.view().memory,
-                MemoryTarget::At(GuestAddress {
-                    space: AddressSpace::Linear,
-                    value: NTDLL + 0x1000,
-                })
-            );
+            snapshot
         }
 
         /// Down picks the drivers in turn from the top, Shift+Tab switches
@@ -10863,7 +11075,7 @@ mod tests {
         #[test]
         fn the_keys_pick_a_kernel_module_show_its_exports_and_open_it() {
             use crate::debugger::inspect::{AddressSpace, GuestAddress, MemoryTarget};
-            use crate::debugger::windows::{KernelDetail, SystemView};
+            use crate::debugger::windows::{ModuleDetail, SystemView};
             let (mut app, _command_rx, _scratch) = native_test_app();
             let control = paused_vm(&mut app);
             control.publish(kernel_listing_snapshot(None));
@@ -10875,7 +11087,7 @@ mod tests {
                 control.view().system,
                 SystemView::KernelModules {
                     selected: Some(0xFFFF_F800_0100_0000),
-                    detail: KernelDetail::Sections,
+                    detail: ModuleDetail::Sections,
                 }
             );
             press_key(&mut window, egui::Key::ArrowDown);
@@ -10884,7 +11096,7 @@ mod tests {
                 control.view().system,
                 SystemView::KernelModules {
                     selected: Some(TCPIP_BASE),
-                    detail: KernelDetail::Exports,
+                    detail: ModuleDetail::Exports,
                 }
             );
             press_key(&mut window, egui::Key::Enter);
