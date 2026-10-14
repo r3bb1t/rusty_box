@@ -506,20 +506,25 @@ pub(crate) fn segmented<T: Copy + PartialEq>(
     changed
 }
 
-/// A card's title, with a count of what it lists when it lists something.
+/// A card's title, with a count of what it lists when it lists something, on
+/// a row of its own.
 pub(crate) fn card_title(ui: &mut egui::Ui, title: &str, count: Option<usize>) {
-    ui.horizontal(|ui| {
-        ui.label(RichText::new(title).strong().color(TEXT_PRIMARY));
-        if let Some(count) = count {
-            egui::Frame::new()
-                .fill(BG_WELL)
-                .corner_radius(8)
-                .inner_margin(egui::Margin::symmetric(6, 0))
-                .show(ui, |ui| {
-                    ui.label(RichText::new(count.to_string()).size(TEXT_CAPTION).color(TEXT_MUTED));
-                });
-        }
-    });
+    ui.horizontal(|ui| title_label(ui, title, count));
+}
+
+/// The card title's name and count badge drawn as two items in the current
+/// row, so a header can place them beside its controls instead of above them.
+pub(crate) fn title_label(ui: &mut egui::Ui, title: &str, count: Option<usize>) {
+    ui.label(RichText::new(title).strong().color(TEXT_PRIMARY));
+    if let Some(count) = count {
+        egui::Frame::new()
+            .fill(BG_WELL)
+            .corner_radius(8)
+            .inner_margin(egui::Margin::symmetric(6, 0))
+            .show(ui, |ui| {
+                ui.label(RichText::new(count.to_string()).size(TEXT_CAPTION).color(TEXT_MUTED));
+            });
+    }
 }
 
 /// A message where a pane has nothing to show: a title and why, centred.

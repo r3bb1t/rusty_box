@@ -30,8 +30,8 @@ use crate::debugger::windows::{
 };
 use crate::shell::listing::{
     card_title, char_width, chip, empty_state, header_row, lead_arrow, lead_chevron, lead_dot,
-    list_row, mono_font, row_visible, segmented, skip_row, tree_guides, Cell, RowSense, Tone,
-    ROW_PAD, TREE_INDENT,
+    list_row, mono_font, row_visible, segmented, skip_row, title_label, tree_guides, Cell, RowSense,
+    Tone, ROW_PAD, TREE_INDENT,
 };
 use crate::shell::theme::{
     shell_card_frame, shell_card_frame_with_margin, ACCENT_AMBER, ACCENT_BLUE, ACCENT_CYAN,
@@ -725,18 +725,29 @@ fn side_by_side<C, L, R>(
 struct Title<'a> {
     text: &'a str,
     count: Option<usize>,
+    /// The header draws the title beside its controls, so the card leaves it
+    /// its own row (it still names the scroll area). A list pane does this to
+    /// keep a row of height for its rows.
+    inline: bool,
 }
 
 impl<'a> Title<'a> {
     const fn plain(text: &'a str) -> Self {
-        Self { text, count: None }
+        Self { text, count: None, inline: false }
     }
 
     const fn counted(text: &'a str, count: usize) -> Self {
         Self {
             text,
             count: Some(count),
+            inline: false,
         }
+    }
+
+    /// The same title, drawn by the header in its controls row.
+    const fn inlined(mut self) -> Self {
+        self.inline = true;
+        self
     }
 }
 
@@ -757,7 +768,9 @@ where
             ui.set_min_size(inner);
             ui.set_max_size(inner);
             ui.spacing_mut().item_spacing.y = 4.0;
-            card_title(ui, title.text, title.count);
+            if !title.inline {
+                card_title(ui, title.text, title.count);
+            }
             header(ui);
             // Listing rows sit flush, one under the next.
             ui.spacing_mut().item_spacing.y = 0.0;
@@ -780,7 +793,9 @@ where
     density.card_frame().show(ui, |ui| {
         ui.set_min_width(ui.available_width());
         ui.spacing_mut().item_spacing.y = density.title_gap();
-        card_title(ui, title.text, title.count);
+        if !title.inline {
+            card_title(ui, title.text, title.count);
+        }
         header(ui);
         // Listing rows sit flush, one under the next.
         ui.spacing_mut().item_spacing.y = 0.0;
@@ -1401,9 +1416,12 @@ fn system_page(
                 .iter()
                 .filter(|module| module_matches(module, &filter))
                 .collect();
-            let title = Title::counted("Kernel modules", modules.len());
+            let title = Title::counted("Kernel modules", modules.len()).inlined();
             let header = |ui: &mut egui::Ui| {
-                filter_field(ui, &mut pane.list_filter);
+                ui.horizontal_wrapped(|ui| {
+                    title_label(ui, title.text, title.count);
+                    filter_field(ui, &mut pane.list_filter);
+                });
                 header_row(ui, 0.0, &module_columns());
             };
             let body = |ui: &mut egui::Ui| {
@@ -1492,8 +1510,9 @@ fn processes_page(
     let right_title = Title {
         text: &title,
         count: right_count,
+        inline: true,
     };
-    let process_title = Title::counted("Processes", listing.processes.len());
+    let process_title = Title::counted("Processes", listing.processes.len()).inlined();
     let navigable = chosen.is_some_and(|process| process.current);
     // The current module is only the running process's; another process's
     // list shares bases (ntdll loads at one address everywhere) but is not
@@ -1520,7 +1539,7 @@ fn processes_page(
             ui,
             room,
             process_title,
-            |ui| process_header(ui, &mut pane.process_layout, &mut pane.list_filter),
+            |ui| process_header(ui, process_title, &mut pane.process_layout, &mut pane.list_filter),
             |ui| {
                 process_rows(
                     ui,
@@ -1542,6 +1561,7 @@ fn processes_page(
             |ui| {
                 right_card_header(
                     ui,
+                    right_title,
                     pane.process_detail,
                     map_of(listing),
                     &mut switch_to,
@@ -1647,23 +1667,28 @@ fn map_of(listing: &ProcessListing) -> Option<&MemoryMap> {
 /// `switch_to`; a minimap click through `minimap_click`.
 fn right_card_header(
     ui: &mut egui::Ui,
+    title: Title<'_>,
     detail: ProcessDetail,
     map: Option<&MemoryMap>,
     switch_to: &mut Option<ProcessDetail>,
     minimap_click: &mut Option<u64>,
 ) {
     let mut chosen = detail;
-    if segmented(
-        ui,
-        &mut chosen,
-        &[
-            (ProcessDetail::Modules, "Modules"),
-            (ProcessDetail::MemoryMap, "Memory map"),
-            (ProcessDetail::Threads, "Threads"),
-        ],
-    ) {
-        *switch_to = Some(chosen);
-    }
+    // The title shares the switch's row (the card leaves it out).
+    ui.horizontal_wrapped(|ui| {
+        title_label(ui, title.text, title.count);
+        if segmented(
+            ui,
+            &mut chosen,
+            &[
+                (ProcessDetail::Modules, "Modules"),
+                (ProcessDetail::MemoryMap, "Memory map"),
+                (ProcessDetail::Threads, "Threads"),
+            ],
+        ) {
+            *switch_to = Some(chosen);
+        }
+    });
     match detail {
         ProcessDetail::Modules => header_row(ui, 0.0, &module_columns()),
         ProcessDetail::Threads => header_row(ui, 0.0, &thread_columns()),
@@ -2113,9 +2138,11 @@ fn listed_modules(
     }
 }
 
-/// The Processes card's controls and column titles.
-fn process_header(ui: &mut egui::Ui, layout: &mut ProcessLayout, filter: &mut String) {
+/// The Processes card's title, controls and column titles. The title shares
+/// the controls row (the card leaves it out), so the list keeps a row.
+fn process_header(ui: &mut egui::Ui, title: Title<'_>, layout: &mut ProcessLayout, filter: &mut String) {
     ui.horizontal_wrapped(|ui| {
+        title_label(ui, title.text, title.count);
         segmented(
             ui,
             layout,

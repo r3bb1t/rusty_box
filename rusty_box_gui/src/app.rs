@@ -10210,6 +10210,44 @@ mod tests {
             }
         }
 
+        /// The Processes list's title sits on the same row as its List/Tree
+        /// switch, not above it, so the list keeps that row of height.
+        #[test]
+        fn the_process_list_title_shares_the_controls_row() {
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_vm(&mut app);
+            control.publish(process_listing_snapshot());
+            let mut window = window_of_size(app, egui::vec2(1400.0, 900.0));
+            window.run();
+            open_debugger(&mut window);
+            window.get_by_label("Processes").click();
+            window.run();
+            // The List switch and the "Processes" title are on one row; the
+            // first process row is below them. The title is a Label; the tab
+            // of the same name is a Button.
+            let title = window
+                .get_by_role_and_label(egui::accesskit::Role::Label, "Processes")
+                .rect();
+            let list = window
+                .get_by_role_and_label(egui::accesskit::Role::Button, "List")
+                .rect();
+            let first_row = window
+                .query_all_by(|node| {
+                    node.label().or(node.value()).is_some_and(|t| t.contains("smss.exe"))
+                })
+                .next()
+                .expect("a process row")
+                .rect();
+            assert!(
+                (title.center().y - list.center().y).abs() < 12.0,
+                "title {title:?} is not on the switch's row {list:?}"
+            );
+            assert!(
+                first_row.top() > list.bottom() - 1.0,
+                "the first row {first_row:?} is not below the controls {list:?}"
+            );
+        }
+
         fn press(pos: egui::Pos2) -> egui::Event {
             egui::Event::PointerButton {
                 pos,
