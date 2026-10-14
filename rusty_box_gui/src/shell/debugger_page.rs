@@ -223,6 +223,8 @@ pub(crate) struct DebuggerPane {
     /// An address the memory list should scroll to next frame: set by a
     /// minimap click, consumed once.
     pub(crate) scroll_to: Option<u64>,
+    /// How the grid's panes divide the page.
+    pub(crate) split: PaneSplit,
 }
 
 impl Default for DebuggerPane {
@@ -243,6 +245,7 @@ impl Default for DebuggerPane {
             process_detail: ProcessDetail::Modules,
             expanded_modules: BTreeSet::new(),
             scroll_to: None,
+            split: PaneSplit::default(),
         }
     }
 }
@@ -582,42 +585,201 @@ fn grid_layout(
 ) {
     let gap = SPACE_ITEM;
     let page = ui.available_size();
-    let left = ((page.x - gap) * LEFT_SHARE).floor();
+    // The split is read before the panes borrow the pane state, and written
+    // back once they are drawn.
+    let mut split = pane.split;
+    let left = ((page.x - gap) * split.columns).floor();
     let right = page.x - gap - left;
-    let top = ((page.y - gap) * TOP_SHARE).floor();
-    let bottom = page.y - gap - top;
-    ui.spacing_mut().item_spacing = egui::vec2(gap, gap);
     ui.horizontal_top(|ui| {
-        fixed_card(
+        ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
+        split_column(
             ui,
-            egui::vec2(left, top),
-            Title::plain("Code"),
-            |_| {},
-            |ui| code_rows(ui, snapshot),
+            egui::vec2(left, page.y),
+            gap,
+            Split { share: &mut split.left_rows, default: TOP_SHARE, label: RESIZE_CODE_MEMORY },
+            |ui, size| {
+                fixed_card(ui, size, Title::plain("Code"), |_| {}, |ui| code_rows(ui, snapshot));
+            },
+            |ui, size| {
+                fixed_card(
+                    ui,
+                    size,
+                    Title::plain("Memory"),
+                    |ui| memory_bar(ui, snapshot, marks, pane, action),
+                    |ui| memory_rows(ui, snapshot, marks),
+                );
+            },
         );
-        fixed_card(
+        match splitter(ui, egui::vec2(gap, page.y), SplitAxis::Columns, RESIZE_COLUMNS) {
+            SplitterMove::Still => {}
+            SplitterMove::Dragged(delta) => {
+                split.columns = resized(split.columns, delta, page.x, gap, SPLIT_MIN);
+            }
+            SplitterMove::Reset => split.columns = LEFT_SHARE,
+        }
+        split_column(
             ui,
-            egui::vec2(right, top),
-            Title::plain("Registers"),
-            |_| {},
-            |ui| register_rows(ui, snapshot, marks),
+            egui::vec2(right, page.y),
+            gap,
+            Split {
+                share: &mut split.right_rows,
+                default: TOP_SHARE,
+                label: RESIZE_REGISTERS_STACK,
+            },
+            |ui, size| {
+                fixed_card(ui, size, Title::plain("Registers"), |_| {}, |ui| {
+                    register_rows(ui, snapshot, marks);
+                });
+            },
+            |ui, size| {
+                fixed_card(ui, size, Title::plain("Stack"), |_| {}, |ui| {
+                    stack_rows(ui, snapshot, marks);
+                });
+            },
         );
     });
-    ui.horizontal_top(|ui| {
-        fixed_card(
-            ui,
-            egui::vec2(left, bottom),
-            Title::plain("Memory"),
-            |ui| memory_bar(ui, snapshot, marks, pane, action),
-            |ui| memory_rows(ui, snapshot, marks),
-        );
-        fixed_card(
-            ui,
-            egui::vec2(right, bottom),
-            Title::plain("Stack"),
-            |_| {},
-            |ui| stack_rows(ui, snapshot, marks),
-        );
+    pane.split = split;
+}
+
+/// How the grid's panes divide the page, as shares of the room between
+/// each pair: dragged by the gaps between them, kept per VM while the app
+/// runs.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct PaneSplit {
+    /// The CPU tab's left column (code above memory), of the width.
+    pub(crate) columns: f32,
+    /// Code, of the left column's height.
+    pub(crate) left_rows: f32,
+    /// Registers, of the right column's height.
+    pub(crate) right_rows: f32,
+    /// The process list, of the Processes tab's width.
+    pub(crate) processes: f32,
+}
+
+impl Default for PaneSplit {
+    fn default() -> Self {
+        Self {
+            columns: LEFT_SHARE,
+            left_rows: TOP_SHARE,
+            right_rows: TOP_SHARE,
+            processes: PROCESS_LIST_SHARE,
+        }
+    }
+}
+
+/// The least a dragged split leaves either pane, points: a title and a few
+/// rows.
+const SPLIT_MIN: f32 = 96.0;
+
+/// The accessible names of the gaps that resize the panes.
+pub(crate) const RESIZE_COLUMNS: &str = "Resize columns";
+pub(crate) const RESIZE_CODE_MEMORY: &str = "Resize code and memory";
+pub(crate) const RESIZE_REGISTERS_STACK: &str = "Resize registers and stack";
+pub(crate) const RESIZE_PROCESS_LIST: &str = "Resize process list";
+
+/// Which way a gap divides its panes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SplitAxis {
+    /// Side by side: the gap is dragged left and right.
+    Columns,
+    /// One above the other: the gap is dragged up and down.
+    Rows,
+}
+
+/// What a gap was asked this frame.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum SplitterMove {
+    Still,
+    /// Dragged this many points along its axis.
+    Dragged(f32),
+    /// Double-clicked: back to the default split.
+    Reset,
+}
+
+/// `share` moved by a `delta`-point drag across `extent` points, of which
+/// `gap` is the gap itself, kept so neither pane falls below `min`. Where the
+/// room cannot hold two minimums the split sits in the middle.
+fn resized(share: f32, delta: f32, extent: f32, gap: f32, min: f32) -> f32 {
+    let room = extent - gap;
+    if room <= 0.0 {
+        return 0.5;
+    }
+    let low = (min / room).min(0.5);
+    (share + delta / room).clamp(low, 1.0 - low)
+}
+
+/// The gap between two panes, `size` points, as a handle: drag it to move
+/// the split, double-click it to reset. It shows a line while pointed at or
+/// dragged, and the resize cursor.
+fn splitter(ui: &mut egui::Ui, size: egui::Vec2, axis: SplitAxis, label: &str) -> SplitterMove {
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
+    let enabled = ui.is_enabled();
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Other, enabled, label));
+    let cursor = match axis {
+        SplitAxis::Columns => egui::CursorIcon::ResizeColumn,
+        SplitAxis::Rows => egui::CursorIcon::ResizeRow,
+    };
+    let active = response.hovered() || response.dragged();
+    if active {
+        ui.ctx().set_cursor_icon(cursor);
+        let line = match axis {
+            SplitAxis::Columns => egui::Rect::from_center_size(
+                rect.center(),
+                egui::vec2(2.0, rect.height() * 0.4),
+            ),
+            SplitAxis::Rows => egui::Rect::from_center_size(
+                rect.center(),
+                egui::vec2(rect.width() * 0.4, 2.0),
+            ),
+        };
+        ui.painter().rect_filled(line, 1.0, ACCENT_CYAN);
+    }
+    // egui counts a third quick click as a triple, not a double; it still
+    // holds the double-click that resets.
+    if response.double_clicked() || response.triple_clicked() {
+        return SplitterMove::Reset;
+    }
+    if response.dragged() {
+        let delta = response.drag_delta();
+        let along = match axis {
+            SplitAxis::Columns => delta.x,
+            SplitAxis::Rows => delta.y,
+        };
+        if along != 0.0 {
+            return SplitterMove::Dragged(along);
+        }
+    }
+    SplitterMove::Still
+}
+
+/// One of a column's splits: the share it moves, the share a double-click
+/// restores, and the gap's accessible name.
+struct Split<'a> {
+    share: &'a mut f32,
+    default: f32,
+    label: &'a str,
+}
+
+/// A column of `size` points: `top` above a row gap above `bottom`, the gap
+/// moving `split`.
+fn split_column<A, B>(ui: &mut egui::Ui, size: egui::Vec2, gap: f32, split: Split<'_>, top: A, bottom: B)
+where
+    A: FnOnce(&mut egui::Ui, egui::Vec2),
+    B: FnOnce(&mut egui::Ui, egui::Vec2),
+{
+    let top_height = ((size.y - gap) * *split.share).floor();
+    let bottom_height = size.y - gap - top_height;
+    ui.allocate_ui_with_layout(size, egui::Layout::top_down(egui::Align::Min), |ui| {
+        ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
+        top(ui, egui::vec2(size.x, top_height));
+        match splitter(ui, egui::vec2(size.x, gap), SplitAxis::Rows, split.label) {
+            SplitterMove::Still => {}
+            SplitterMove::Dragged(delta) => {
+                *split.share = resized(*split.share, delta, size.y, gap, SPLIT_MIN);
+            }
+            SplitterMove::Reset => *split.share = split.default,
+        }
+        bottom(ui, egui::vec2(size.x, bottom_height));
     });
 }
 
@@ -1587,16 +1749,25 @@ fn processes_page(
         Fit::Grid => {
             let gap = SPACE_ITEM;
             let page = ui.available_size();
-            let left = ((page.x - gap) * PROCESS_LIST_SHARE).floor();
-            ui.spacing_mut().item_spacing = egui::vec2(gap, gap);
+            let mut share = pane.split.processes;
+            let left = ((page.x - gap) * share).floor();
             ui.horizontal_top(|ui| {
+                ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
                 process_card(ui, Room::Fixed(egui::vec2(left, page.y)), &mut *action);
+                match splitter(ui, egui::vec2(gap, page.y), SplitAxis::Columns, RESIZE_PROCESS_LIST) {
+                    SplitterMove::Still => {}
+                    SplitterMove::Dragged(delta) => {
+                        share = resized(share, delta, page.x, gap, SPLIT_MIN);
+                    }
+                    SplitterMove::Reset => share = PROCESS_LIST_SHARE,
+                }
                 detail_card(
                     ui,
                     Room::Fixed(egui::vec2(page.x - gap - left, page.y)),
                     &mut *action,
                 );
             });
+            pane.split.processes = share;
         }
         Fit::Scrolling(columns) => {
             let density = fit.density();
@@ -2432,6 +2603,20 @@ mod tests {
         // A 32-bit address is eight characters shorter: three more bytes
         // fit in a pane of the same width.
         assert_eq!(code_bytes_shown(51.0, 8), 7);
+    }
+
+    /// A drag moves a split by its share of the room the two panes have, and
+    /// never past the point where either pane would be smaller than `min`.
+    #[test]
+    fn a_dragged_split_moves_by_the_drag_and_keeps_both_panes_their_minimum() {
+        // 1008 points, an 8-point gap: 1000 points for the panes.
+        let moved = resized(0.5, 100.0, 1008.0, 8.0, 96.0);
+        assert!((moved - 0.6).abs() < 1e-4, "{moved}");
+        assert!((resized(0.9, 500.0, 1008.0, 8.0, 96.0) - 0.904).abs() < 1e-4);
+        assert!((resized(0.1, -500.0, 1008.0, 8.0, 96.0) - 0.096).abs() < 1e-4);
+        // Too little room for two minimums: the split sits in the middle.
+        let squeezed = resized(0.8, 50.0, 100.0, 8.0, 96.0);
+        assert!((squeezed - 0.5).abs() < 1e-4, "{squeezed}");
     }
 
     /// A wide memory pane shows all sixteen bytes a line; a narrow one folds

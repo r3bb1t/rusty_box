@@ -10210,6 +10210,42 @@ mod tests {
             }
         }
 
+        /// Dragging the gap between the CPU tab's columns widens the left one
+        /// (the Registers pane moves right with it); double-clicking the gap
+        /// puts it back.
+        #[test]
+        fn dragging_the_column_gap_resizes_the_cpu_panes_and_a_double_click_resets() {
+            use crate::shell::debugger_page::RESIZE_COLUMNS;
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            paused_vm(&mut app);
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            let before = window.get_by_label("Registers").rect();
+            let handle = window.get_by_label(RESIZE_COLUMNS).rect().center();
+            drag(&mut window, handle, handle + egui::vec2(120.0, 0.0));
+            window.run();
+            let dragged = window.get_by_label("Registers").rect();
+            assert!(
+                dragged.left() - before.left() >= 100.0,
+                "Registers moved from {before:?} to {dragged:?}"
+            );
+
+            // Past egui's triple-click window (0.6 s) since the last click, so
+            // this is a plain double-click.
+            for _ in 0..45 {
+                window.step();
+            }
+            let handle = window.get_by_label(RESIZE_COLUMNS).rect().center();
+            double_click(&mut window, handle);
+            window.run();
+            let reset = window.get_by_label("Registers").rect();
+            assert!(
+                (reset.left() - before.left()).abs() <= 2.0,
+                "Registers at {reset:?} after the reset, {before:?} before the drag"
+            );
+        }
+
         /// The Processes list's title sits on the same row as its List/Tree
         /// switch, not above it, so the list keeps that row of height.
         #[test]
