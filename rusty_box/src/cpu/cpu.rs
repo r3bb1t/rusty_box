@@ -2584,14 +2584,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                     // next pc_system deadline, so a linked chain cannot run
                     // past a timer any more than the existing trace-end
                     // chaining can. Cooperative stop keeps trace latency.
-                    // BENCHMARK-ONLY (temporary): link-rate diagnostics —
-                    // 498 = STOP_TRACE breaks, 499 = other async breaks,
-                    // 500 = guard passed, 501 = link followed.
-                    if self.async_event == BX_ASYNC_EVENT_STOP_TRACE {
-                        crate::vec_diag::count(498);
-                    } else {
-                        crate::vec_diag::count(499);
-                    }
                     if !STOP_AFTER_ONE_TRACE
                         && self.async_event == BX_ASYNC_EVENT_STOP_TRACE
                         && iteration < max_instructions
@@ -2599,9 +2591,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                         && !self.instrumentation.stop_request
                         && super::icache::is_linkable_opcode(opcode)
                     {
-                        crate::vec_diag::count(500);
                         if let Some((start, tlen)) = self.try_link_trace(instr_idx) {
-                            crate::vec_diag::count(501);
                             self.async_event &= !BX_ASYNC_EVENT_STOP_TRACE;
                             instr_idx = start;
                             trace_end = start + tlen;

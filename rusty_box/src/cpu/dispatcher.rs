@@ -24,12 +24,18 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// handler (R5), so no instruction can turn a guest's #GP, #SS, #NP or
     /// #TS into an error that stops the emulator; and an RSP_SPECULATIVE the
     /// handler left open is still open, so the fault restores RSP and SSP.
+    ///
+    /// The success path returns a fresh `Ok(())` rather than passing the
+    /// handler's value on: a handler writes only the tag of its `Result`, and
+    /// moving the whole 32-byte value would reload bytes it never wrote — a
+    /// store-forwarding stall on every retired instruction.
     pub(super) fn execute_instruction(&mut self, instr: &Instruction) -> Result<()> {
         match self.dispatch_instruction(instr) {
+            Ok(()) => Ok(()),
             Err(super::error::CpuError::BadVector { vector, error_code }) => {
                 self.exception(vector, error_code)
             }
-            outcome => outcome,
+            Err(other) => Err(other),
         }
     }
 
