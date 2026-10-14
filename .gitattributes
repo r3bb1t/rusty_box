@@ -1,0 +1,3 @@
+# Upstream patches are applied with `git apply` / `git am` against the Bochs
+# tree, which uses LF; they must reach the working tree byte for byte.
+docs/*.patch -text

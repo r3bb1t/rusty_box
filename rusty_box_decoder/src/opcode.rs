@@ -178,6 +178,10 @@ back_to_enum! {
         SubEdGdZeroIdiom,
         SubGdEdZeroIdiom,
 
+        TestEwGwIdiom,
+        TestEdGdIdiom,
+        TestEqGqIdiom,
+
         AddGbEb,
         OrGbEb,
         AdcGbEb,
@@ -656,6 +660,8 @@ back_to_enum! {
 
         Sysenter,
         Sysexit,
+        SysenterLongmode,
+        SysexitLongmode,
 
         Monitor,
         Mwait,
@@ -1194,6 +1200,11 @@ back_to_enum! {
         Lfence,
         Sfence,
         Mfence,
+
+        XorpsVpsWpsZeroIdiom,
+        XorpdVpdWpdZeroIdiom,
+        PxorVdqWdqZeroIdiom,
+
         // SSE and SSE2,
 
         // SSE3,
@@ -2658,6 +2669,7 @@ back_to_enum! {
         TilestoredMdqTnnn,
         Tilerelease,
         TilezeroTnnn,
+        Bsrinit,
         TdpbssdTnnnTrmTreg,
         TdpbsudTnnnTrmTreg,
         TdpbusdTnnnTrmTreg,
@@ -4386,6 +4398,25 @@ back_to_enum! {
         EvexTcvtrowps2bf16lVphTrmBd,
         EvexTcvtrowps2bf16hVphTrmIb,
         EvexTcvtrowps2bf16hVphTrmBd,
+        EvexTilemovrowTrmWdqIb,
+        EvexTilemovrowTrmWdqBd,
+        EvexTilemovcolTrmWdqIb,
+        EvexTilemovcolTrmWdqBd,
+        EvexBsrmovfBsrVdqWdq,
+        EvexBsrmovlBsrWdq,
+        EvexBsrmovlWdqBsr,
+        EvexBsrmovhBsrWdq,
+        EvexBsrmovhWdqBsr,
+        EvexTop2bf16psTnnnWdqHdq,
+        EvexTop4bssdTnnnWdqHdq,
+        EvexTop4bsudTnnnWdqHdq,
+        EvexTop4busdTnnnWdqHdq,
+        EvexTop4buudTnnnWdqHdq,
+        EvexTop4mxbsspsTnnnWdqHdqIb,
+        EvexTop4mxbf8psTnnnWdqHdqIb,
+        EvexTop4mxbhf8psTnnnWdqHdqIb,
+        EvexTop4mxhbf8psTnnnWdqHdqIb,
+        EvexTop4mxhf8psTnnnWdqHdqIb,
 
         // AVX10.2 MOVRS,
         EvexVmovrsbVdqWdq,
@@ -4396,18 +4427,47 @@ back_to_enum! {
         EvexVmovrsdVdqWdqKmask,
         EvexVmovrsqVdqWdq,
         EvexVmovrsqVdqWdqKmask,
+        EvexVcvtps2bf8Vf8WpsKmask,
+        EvexVcvtps2bf8sVf8WpsKmask,
+        EvexVcvtps2hf8Vf8WpsKmask,
+        EvexVcvtps2hf8sVf8WpsKmask,
+        EvexVcvtrops2hf8Vf8WpsKmask,
+        EvexVcvtrops2hf8sVf8WpsKmask,
+        EvexVcvtbiasps2bf8Vf8HdqWpsKmask,
+        EvexVcvtbiasps2bf8sVf8HdqWpsKmask,
+        EvexVcvtbiasps2hf8Vf8HdqWpsKmask,
+        EvexVcvtbiasps2hf8sVf8HdqWpsKmask,
+        EvexVcvtbf82psVpsWf8Kmask,
+        EvexVcvthf82psVpsWf8Kmask,
+        EvexVcvtbf42hf8Vf8Wf4Kmask,
+        EvexVcvtbf62hf8Vf8Wf6Kmask,
+        EvexVcvthf62hf8Vf8Wf6Kmask,
+        EvexVcvtbf82bf6sVf6Wf8,
+        EvexVcvthf82hf6sVf6Wf8,
+        EvexVcvtbf82bf4sWf4Vdq,
+        EvexVcvthf82bf4sWf4Vdq,
+        EvexVunpackbVdqWdqIbKmask,
+        EvexVpmovssdbWdqVdq,
+        EvexVpmovssdbWdqVdqKmask,
 
         // Internal sentinels, appended last so the discriminants of real
         // opcodes never move. The icache fill path substitutes one of these
         // when the decoded instruction needs CPU state the guest has not
         // enabled, mirroring how Bochs `assignHandler` swaps the handler for
-        // `BxNoAVX` / `BxNoEVEX`. They exist as opcodes rather than as a flag
-        // because the fault is not always #UD — with CR0.TS set the guest is
-        // owed #NM, and only the handler can tell the two apart.
+        // `BxNoFPU` / `BxNoMMX` / `BxNoSSE` / `BxNoAVX` / `BxNoEVEX`. They
+        // exist as opcodes rather than as a flag because the fault is not
+        // always #UD — with CR0.TS set the guest is owed #NM, and only the
+        // handler can tell the two apart.
         /// Decoded instruction requires AVX state the guest has not enabled.
         NoAvxState,
         /// Decoded instruction requires AVX-512 state the guest has not enabled.
         NoEvexState,
+        /// Decoded instruction requires x87 state the guest has not enabled.
+        NoFpuState,
+        /// Decoded instruction requires MMX state the guest has not enabled.
+        NoMmxState,
+        /// Decoded instruction requires SSE state the guest has not enabled.
+        NoSseState,
     }
 }
 

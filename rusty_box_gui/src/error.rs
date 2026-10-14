@@ -231,6 +231,16 @@ pub enum LibraryError {
     #[error("failed to delete {}: {source}", path.display())]
     Delete { path: PathBuf, source: io::Error },
 
+    #[error("failed to rename {} to {}: {source}", from.display(), to.display())]
+    Rename {
+        from: PathBuf,
+        to: PathBuf,
+        source: io::Error,
+    },
+
+    #[error("another VM already uses the file name {stem}.toml")]
+    StemTaken { stem: String },
+
     #[error("{} is not a file of the VM library in {}", path.display(), dir.display())]
     OutsideLibrary { path: PathBuf, dir: PathBuf },
 

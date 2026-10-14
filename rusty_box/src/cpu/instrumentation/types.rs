@@ -552,6 +552,138 @@ pub struct CpuSnapshot {
     pub xmm: [[u8; 16]; 16],
 }
 
+// ─────────────────────────── Debugger view ───────────────────────────
+
+/// The mode a processor executes in: Bochs cpu.h `BX_MODE_IA32_REAL` through
+/// `BX_MODE_LONG_64`, the value of `cpu_mode`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ExecutionMode {
+    /// CR0.PE = 0.
+    Real,
+    /// CR0.PE = 1 and EFLAGS.VM = 1, outside long mode.
+    Virtual8086,
+    /// CR0.PE = 1 and EFLAGS.VM = 0, outside long mode.
+    Protected,
+    /// EFER.LMA = 1 and CS.L = 0.
+    LongCompat,
+    /// EFER.LMA = 1 and CS.L = 1.
+    Long64,
+}
+
+/// What a processor is doing between instructions: Bochs cpu.h
+/// `BX_ACTIVITY_STATE_*`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ProcessorActivity {
+    Active,
+    /// HLT: waiting for an interrupt.
+    Halted,
+    /// The architectural shutdown state a triple fault leaves.
+    Shutdown,
+    /// An application processor waiting for its startup IPI.
+    WaitForSipi,
+    /// MWAIT: waiting for a monitored write or an interrupt.
+    Mwait,
+}
+
+/// The base of each segment register's descriptor cache.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SegmentBases {
+    pub es: u64,
+    pub cs: u64,
+    pub ss: u64,
+    pub ds: u64,
+    pub fs: u64,
+    pub gs: u64,
+}
+
+/// One processor as a debugger shows it: its registers, and what they mean
+/// for reading its code and its stack.
+#[derive(Debug, Clone, Copy)]
+pub struct CpuDebugView {
+    pub registers: CpuSnapshot,
+    pub mode: ExecutionMode,
+    /// The size the processor decodes its next instruction at.
+    pub code_size: CodeSize,
+    pub activity: ProcessorActivity,
+    pub efer: u64,
+    pub segment_bases: SegmentBases,
+    /// `IA32_KERNEL_GS_BASE`: the GS base `SWAPGS` exchanges with GS's, so in
+    /// a 64-bit kernel entered from user mode it holds the user GS base.
+    pub kernel_gs_base: u64,
+    /// GDTR: where the global descriptor table lies.
+    pub gdtr: DescriptorTable,
+    /// IDTR: where the interrupt descriptor table lies.
+    pub idtr: DescriptorTable,
+}
+
+/// A descriptor-table register (GDTR, IDTR): the table's linear base and
+/// its limit, the offset of its last byte.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DescriptorTable {
+    pub base: u64,
+    pub limit: u16,
+}
+
+/// What a page grants once every paging level is combined: a level that
+/// withholds a right withholds it for the whole page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PageAccess {
+    /// U/S set at every level: user mode may reach it.
+    pub user: bool,
+    /// R/W set at every level.
+    pub writable: bool,
+    /// No level sets XD (always true while EFER.NXE is clear).
+    pub executable: bool,
+}
+
+/// One page or large page mapped by a paging structure's leaf entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PageMapping {
+    /// The first linear address it maps, canonical in long mode.
+    pub linear: u64,
+    /// Where that address lands in guest-physical memory.
+    pub physical: u64,
+    /// 4 KiB, 2 MiB or 4 MiB (legacy PSE), 1 GiB.
+    pub size: u64,
+    pub access: PageAccess,
+}
+
+/// A span of linear addresses, `start` included and `end` excluded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LinearRange {
+    pub start: u64,
+    pub end: u64,
+}
+
+/// What a mapping walk's visitor wants next.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WalkStep {
+    Continue,
+    Stop,
+}
+
+/// How a mapping walk ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MappingWalk {
+    /// Every mapping in the range was visited.
+    Complete,
+    /// The visitor asked to stop.
+    Stopped,
+    /// CR0.PG is clear: there are no paging structures to walk.
+    PagingOff,
+}
+
+/// What a debugger read of guest-physical memory found: Bochs misc_mem.cc
+/// `dbg_fetch_mem`'s answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Fetched {
+    /// Every byte came from RAM, ROM or a device.
+    Valid,
+    /// At least one byte lay where nothing answers (the PCI hole with no
+    /// device in it, or past the end of memory) and reads as 0xFF.
+    OutsideMemory,
+}
+
 // ─────────────────────────── X86Reg ───────────────────────────
 
 /// All x86 registers addressable through `Emulator::reg_read` / `reg_write`.

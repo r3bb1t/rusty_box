@@ -5,7 +5,6 @@ use std::path::PathBuf;
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::{
-    atomic::Ordering,
     mpsc::Sender,
     {Arc, Mutex},
 };
@@ -18,6 +17,8 @@ use crate::sessions::{
 };
 #[cfg(not(target_arch = "wasm32"))]
 use crate::shell::destination::{SidebarAction, VmBarAction};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::debugger::control::{DumpOutcome, DumpRequest, Wanted};
 use crate::shell::destination::{Destination, ShellPage};
 use crate::shell::sidebar::{Drawer, VmLibraryEntry};
 #[cfg(not(target_arch = "wasm32"))]
@@ -99,6 +100,8 @@ pub struct StartRun {
     /// What the power-on took that only one running VM may have: the run's
     /// thread holds it until every machine the power-on builds is gone.
     pub(crate) holds: RunHolds,
+    /// The run's control: the only writer of its stop flag.
+    pub(crate) control: Arc<crate::debugger::control::RunControl>,
 }
 
 /// A path field the shell fills from a file chooser.
@@ -117,6 +120,8 @@ pub(crate) enum BrowseTarget {
     NewDisk,
     /// Where the floppy maker writes its next image.
     NewFloppy,
+    /// Where the shown VM's RAM is saved.
+    RamDump,
 }
 
 /// A Browse press the Android host answers with a file browser of its own.
@@ -295,6 +300,9 @@ pub struct NativeShellApp {
     floppy_maker_open: bool,
     /// The Hard disk page's new-disk sheet, while it is open.
     new_disk: Option<NewDiskDraft>,
+    /// The Summary page's file-name editor, while it is open.
+    #[cfg(not(target_arch = "wasm32"))]
+    file_rename: Option<FileRenameDraft>,
     profiles: Vec<NativeVmProfile>,
     config: crate::config::ResolvedConfig,
     settings: NativeVmSettings,
@@ -1183,6 +1191,8 @@ pub(crate) struct ShellStatus {
     pub ips: u32,
     pub reset_requested: bool,
     pub start_pending: bool,
+    /// The run is paused: it has stopped retiring instructions for the shell.
+    pub paused: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1240,6 +1250,25 @@ impl Default for FloppyMaker {
 
 /// The file name a new floppy image is offered under.
 const FLOPPY_FILE_NAME: &str = "floppy.img";
+
+/// The name Dump RAM… offers for the file it saves.
+#[cfg(not(target_arch = "wasm32"))]
+const RAM_DUMP_FILE_NAME: &str = "memory.bin";
+
+/// A library VM's file name being edited: what the Summary page's rename
+/// editor holds while it is open.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FileRenameDraft {
+    /// The VM whose file is renamed. The editor shows only while this VM is
+    /// the selected one, and a rename of another file, or of this one, ends
+    /// it.
+    vm: VmOrigin,
+    /// The file name as typed, without `.toml`.
+    text: String,
+    /// Why the last save was refused.
+    refusal: Option<String>,
+}
 
 /// A hard disk not yet created: what the Hard disk page's new-disk sheet
 /// holds while it is open.
@@ -1598,12 +1627,14 @@ pub(crate) fn status_snapshot(
             ips: display.ips,
             reset_requested: display.reset_requested,
             start_pending: display.start_pending,
+            paused: false,
         },
         Err(_) => ShellStatus {
             running: false,
             ips: 0,
             reset_requested: false,
             start_pending: false,
+            paused: false,
         },
     }
 }
@@ -1667,6 +1698,8 @@ impl NativeShellApp {
             floppy_maker: FloppyMaker::default(),
             floppy_maker_open: false,
             new_disk: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            file_rename: None,
             profiles: opening.profiles,
             config,
             settings,
@@ -1705,6 +1738,7 @@ impl NativeShellApp {
                 ips: 0,
                 reset_requested: false,
                 start_pending: false,
+                paused: false,
             },
             VmSession::status,
         )
@@ -1815,6 +1849,62 @@ impl NativeShellApp {
         }
     }
 
+    /// Reports every finished RAM dump, named by its VM, in one notice: the
+    /// shell shows one notice at a time, so dumps that finish together are
+    /// said together, at the gravest of their kinds.
+    fn take_dump_notices(&mut self) {
+        let mut kind = None;
+        let mut messages = Vec::new();
+        for done in self.sessions.take_dump_outcomes() {
+            let name = self.vm_name(&done.vm).to_owned();
+            let (this_kind, message) = match done.outcome {
+                DumpOutcome::Saved { path, bytes } => (
+                    ShellNoticeKind::Info,
+                    format!(
+                        "Saved {} MiB of {name}'s RAM to {}.",
+                        bytes / (1024 * 1024),
+                        path.display()
+                    ),
+                ),
+                DumpOutcome::Failed { path, reason } => (
+                    ShellNoticeKind::Error,
+                    format!("{name}'s RAM was not saved to {}: {reason}.", path.display()),
+                ),
+            };
+            kind = Some(kind.map_or(this_kind, |gravest: ShellNoticeKind| gravest.max(this_kind)));
+            messages.push(message);
+        }
+        if let Some(kind) = kind {
+            self.notify(ShellNotice {
+                kind,
+                message: messages.join(" "),
+            });
+        }
+    }
+
+    /// Pauses the shown VM, or lets it run on when it was asked to pause.
+    fn toggle_pause(&mut self) {
+        let vm = self.shown_vm();
+        let session = self.sessions.open(&vm);
+        if !session.is_live() {
+            return;
+        }
+        match session.control().wanted() {
+            Wanted::Run => session.control().pause(),
+            Wanted::Pause => session.control().resume(),
+        }
+    }
+
+    /// Asks where to save the shown VM's RAM; the answer goes to
+    /// `set_browsed_path`, which hands the run the dump.
+    fn ask_for_ram_dump(&mut self) {
+        if self.browse(BrowseTarget::RamDump) {
+            if let Err(message) = self.apply_pending_settings() {
+                self.notify(ShellNotice::error(message));
+            }
+        }
+    }
+
     /// A file dropped on the window while Hardware › Hard disk is shown
     /// becomes the VM's hard disk, as its Use a disk file would make it.
     #[cfg(not(target_arch = "wasm32"))]
@@ -1853,6 +1943,10 @@ impl NativeShellApp {
                 page: self.chrome.page(),
                 running: status.running,
                 start_pending: status.start_pending,
+                pause_wanted: self
+                    .sessions
+                    .get(&vm)
+                    .is_some_and(|session| session.control().wanted() == Wanted::Pause),
                 on_console: self.chrome.page() == ShellPage::Console,
                 serial_shown: self.chrome.show_serial,
                 mouse_captured: self
@@ -1869,6 +1963,8 @@ impl NativeShellApp {
             Some(VmBarAction::PowerOn) => self.start_vm(),
             Some(VmBarAction::PowerOff) => self.request_power_off(),
             Some(VmBarAction::Restart) => self.request_reset(),
+            Some(VmBarAction::TogglePause) => self.toggle_pause(),
+            Some(VmBarAction::DumpRam) => self.ask_for_ram_dump(),
             Some(VmBarAction::ToggleSerial) => {
                 self.chrome.show_serial = !self.chrome.show_serial;
             }
@@ -2030,8 +2126,98 @@ impl NativeShellApp {
                     ShellPage::Home => self.draw_home_page(ui),
                     ShellPage::Console => self.draw_console_page(ui, frame),
                     ShellPage::Hardware => self.draw_hardware_page(ui),
+                    ShellPage::Debugger => self.draw_debugger_page(ui),
                 }
             });
+    }
+
+    fn draw_debugger_page(&mut self, ui: &mut egui::Ui) {
+        use crate::debugger::inspect::ViewRequest;
+        use crate::shell::debugger_page::{draw_debugger_page, DebuggerAction, DebuggerPageState};
+        let status = self.runtime_status();
+        let vm = self.shown_vm();
+        let session = self.sessions.open(&vm);
+        let control = Arc::clone(session.control());
+        let snapshot = control.snapshot();
+        let previous = control.previous_snapshot();
+        let step_available = session.run_engine() != Some(crate::config::Engine::Whp);
+        let action = draw_debugger_page(
+            ui,
+            DebuggerPageState {
+                live: status.running,
+                paused: status.paused,
+                step_available,
+                dump_pending: control.dump_pending(),
+                note: control.note(),
+                snapshot: snapshot.as_deref(),
+                previous: previous.as_deref(),
+                find: control.find_outcome(),
+                searching: control.searching(),
+                pane: session.debugger_mut(),
+            },
+        );
+        // A paused run answers on its own thread; keep looking while it may.
+        if status.running {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(100));
+        }
+        match action {
+            None => {}
+            Some(DebuggerAction::Step) => control.step(),
+            Some(DebuggerAction::DumpRam) => self.ask_for_ram_dump(),
+            Some(DebuggerAction::ShowMemory(memory)) => {
+                control.set_view(ViewRequest { memory, ..control.view() });
+            }
+            Some(DebuggerAction::SelectCpu(cpu)) => {
+                control.set_view(ViewRequest { cpu, ..control.view() });
+            }
+            Some(DebuggerAction::Find(request)) => control.find(request),
+            Some(DebuggerAction::ShowSystem(system)) => {
+                control.set_view(ViewRequest { system, ..control.view() });
+            }
+            Some(DebuggerAction::OpenModule(base)) => {
+                use crate::debugger::inspect::{AddressSpace, GuestAddress, MemoryTarget};
+                use crate::debugger::windows::SystemView;
+                use crate::shell::debugger_page::DebuggerTab;
+                self.sessions.open(&vm).debugger_mut().tab = DebuggerTab::Cpu;
+                control.set_view(ViewRequest {
+                    memory: MemoryTarget::At(GuestAddress {
+                        space: AddressSpace::Linear,
+                        value: base,
+                    }),
+                    system: SystemView::Off,
+                    ..control.view()
+                });
+            }
+            Some(DebuggerAction::ViewInProcess { cr3, address }) => {
+                use crate::debugger::inspect::{AddressSpace, GuestAddress, MemoryTarget};
+                use crate::debugger::windows::SystemView;
+                use crate::shell::debugger_page::DebuggerTab;
+                self.sessions.open(&vm).debugger_mut().tab = DebuggerTab::Cpu;
+                control.set_view(ViewRequest {
+                    memory: MemoryTarget::At(GuestAddress {
+                        space: AddressSpace::Process { cr3 },
+                        value: address,
+                    }),
+                    system: SystemView::Off,
+                    ..control.view()
+                });
+            }
+            Some(DebuggerAction::View(context)) => {
+                use crate::debugger::inspect::MemoryTarget;
+                use crate::debugger::windows::SystemView;
+                use crate::shell::debugger_page::DebuggerTab;
+                // The CPU tab, its memory pane following the RIP of whoever
+                // it now looks from.
+                self.sessions.open(&vm).debugger_mut().tab = DebuggerTab::Cpu;
+                control.set_view(ViewRequest {
+                    context,
+                    memory: MemoryTarget::Rip,
+                    system: SystemView::Off,
+                    ..control.view()
+                });
+            }
+        }
     }
 
     fn draw_home_page(&mut self, ui: &mut egui::Ui) {
@@ -2144,8 +2330,122 @@ impl NativeShellApp {
                 }
             });
             let caption = self.summary_caption();
-            ui.label(RichText::new(caption).size(TEXT_CAPTION).color(TEXT_MUTED));
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new(caption).size(TEXT_CAPTION).color(TEXT_MUTED));
+                if matches!(origin, VmOrigin::Library(_))
+                    && ui
+                        .small_button("Rename file…")
+                        .on_hover_text("Change the name of this VM's file in the library")
+                        .clicked()
+                {
+                    self.open_file_rename();
+                }
+            });
+            self.draw_file_rename(ui);
         });
+    }
+
+    /// Opens the file-name editor on the selected library VM, holding the
+    /// name its file has now.
+    fn open_file_rename(&mut self) {
+        let vm = self.shown_vm();
+        let VmOrigin::Library(stem) = &vm else {
+            return;
+        };
+        self.file_rename = Some(FileRenameDraft {
+            text: stem.as_str().to_owned(),
+            vm,
+            refusal: None,
+        });
+    }
+
+    /// The file-name editor under the Summary caption, while it is open on
+    /// the selected VM: the name being typed, what it is cut down to, why a
+    /// save was refused, and Save and Cancel.
+    fn draw_file_rename(&mut self, ui: &mut egui::Ui) {
+        let shown = self.shown_vm();
+        let Some(draft) = self
+            .file_rename
+            .as_mut()
+            .filter(|draft| draft.vm == shown)
+        else {
+            return;
+        };
+        let (mut save, mut cancel) = (false, false);
+        ui.horizontal_wrapped(|ui| {
+            let label = ui.label("File name");
+            let field = ui
+                .add(egui::TextEdit::singleline(&mut draft.text).desired_width(220.0))
+                .labelled_by(label.id);
+            ui.label(".toml");
+            let entered =
+                field.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+            if ui.add(primary_button("Save file name")).clicked() || entered {
+                save = true;
+            }
+            if ui.button("Cancel").clicked() {
+                cancel = true;
+            }
+        });
+        let cut_down = crate::library::safe_stem(&draft.text);
+        if cut_down != draft.text {
+            ui.label(
+                RichText::new(format!("It is saved as {cut_down}.toml."))
+                    .size(TEXT_CAPTION)
+                    .color(TEXT_MUTED),
+            );
+        }
+        if let Some(refusal) = &draft.refusal {
+            ui.label(RichText::new(refusal).size(TEXT_CAPTION).color(ACCENT_RED));
+        }
+        if cancel {
+            self.file_rename = None;
+        } else if save {
+            self.save_file_rename();
+        }
+    }
+
+    /// Renames the file of the VM the editor is open on to the name typed.
+    /// The VM is written first, so the file that moves holds it as it is. A
+    /// name another file has is refused in the editor, which stays open.
+    fn save_file_rename(&mut self) {
+        self.flush_unsaved();
+        // The flush may have moved the file to follow the VM's name, which
+        // changes the identity the editor holds.
+        let Some(draft) = self.file_rename.clone() else {
+            return;
+        };
+        let VmOrigin::Library(stem) = draft.vm.clone() else {
+            self.file_rename = None;
+            return;
+        };
+        match self.library.rename(&stem, &draft.text) {
+            Ok(renamed) => {
+                self.file_rename = None;
+                if renamed == stem {
+                    return;
+                }
+                if let Some(index) = self
+                    .profiles
+                    .iter()
+                    .position(|profile| profile.origin == draft.vm)
+                {
+                    self.adopt_stem(index, renamed.clone());
+                }
+                self.notify(ShellNotice::info(format!(
+                    "Renamed the file to {}.",
+                    self.library.path_of(&renamed).display()
+                )));
+            }
+            Err(crate::library::LibraryError::StemTaken { stem }) => {
+                if let Some(draft) = &mut self.file_rename {
+                    draft.refusal = Some(format!(
+                        "Another VM already uses {stem}.toml. Choose another name."
+                    ));
+                }
+            }
+            Err(error) => self.notify(ShellNotice::error(error.to_string())),
+        }
     }
 
     /// The Summary page's caption on where the selected VM is kept: its
@@ -3092,11 +3392,15 @@ impl NativeShellApp {
             if !due {
                 continue;
             }
+            let previous_name = profile.file.as_ref().map(|file| file.name.clone());
             match self.library.save(stem, &profile.name, &profile.config) {
                 Ok(()) => {
                     let profile = &mut self.profiles[index];
                     profile.file = Some(VmFileContents::of(&profile.name, &profile.config));
                     profile.save_state = SaveState::Saved;
+                    if let Some(previous) = previous_name {
+                        self.file_follows_name(index, &previous);
+                    }
                 }
                 Err(error) => {
                     tracing::error!(vm = stem.as_str(), %error, "the VM's file was not written");
@@ -3106,6 +3410,62 @@ impl NativeShellApp {
             }
             self.refresh_library_entry(index);
         }
+    }
+
+    /// Renames the file of the library VM at `index` to follow its name, when
+    /// the VM was written under `previous_name` and the name has changed
+    /// since, and the file's name was derived from `previous_name` — a file
+    /// name chosen by hand stays. A rename that fails is told in a notice and
+    /// leaves the VM saved under its old file name.
+    fn file_follows_name(&mut self, index: usize, previous_name: &str) {
+        let VmOrigin::Library(stem) = self.profiles[index].origin.clone() else {
+            return;
+        };
+        let name = self.profiles[index].name.trim().to_owned();
+        if name.is_empty() || name == previous_name.trim() {
+            return;
+        }
+        let derived = crate::library::stem_follows_name(&stem, previous_name);
+        if !derived || crate::library::stem_follows_name(&stem, &name) {
+            return;
+        }
+        match self.library.rename_to_follow(&stem, &name) {
+            Ok(renamed) => self.adopt_stem(index, renamed),
+            Err(error) => {
+                tracing::warn!(vm = stem.as_str(), %error, "the VM's file was not renamed");
+                self.notify(ShellNotice::warning(format!(
+                    "{name} is saved, but its file keeps the name {}.toml: {error}",
+                    stem.as_str()
+                )));
+            }
+        }
+    }
+
+    /// Makes the library VM at `index` the one in the file of `renamed`,
+    /// which its file was just moved to: its session, the remembered
+    /// selection and any question about it follow.
+    fn adopt_stem(&mut self, index: usize, renamed: crate::library::VmStem) {
+        let old = self.profiles[index].origin.clone();
+        let new = VmOrigin::Library(renamed.clone());
+        self.profiles[index].origin = new.clone();
+        self.sessions.rekey(&old, new.clone());
+        if self.chrome.selected_vm() == index {
+            self.remember(&renamed);
+        }
+        if let Some(
+            PendingConfirm::DeleteVm { origin, .. } | PendingConfirm::OverwriteDisk { origin, .. },
+        ) = &mut self.pending_confirm
+        {
+            if *origin == old {
+                *origin = new.clone();
+            }
+        }
+        if let Some(draft) = &mut self.file_rename {
+            if draft.vm == old {
+                draft.vm = new;
+            }
+        }
+        self.refresh_library_entry(index);
     }
 
     /// Makes the sidebar's row for the VM at `index` say what the VM is now.
@@ -3769,11 +4129,12 @@ impl NativeShellApp {
         // The engine the run uses, which the shell names while the VM is live.
         self.sessions.open(&vm).set_run_engine(config.engine);
         let display = self.shown_display();
+        let control = Arc::clone(self.sessions.open(&vm).control());
+        // The power-on lowers the stop its VM's last run left raised. The run
+        // never lowers it at its start, so a stop raised from here on, before
+        // the run begins, is honoured.
+        control.arm_for_power_on();
         if let Ok(mut shown) = display.lock() {
-            // The power-on lowers the stop its VM's last run left raised. The
-            // run never lowers it at its start, so a stop raised from here
-            // on, before the run begins, is honoured.
-            shown.stop_flag.store(false, Ordering::Relaxed);
             shown.start_pending = true;
         }
         match self.command_tx.send(NativeEmulatorCommand::Start(StartRun {
@@ -3784,6 +4145,7 @@ impl NativeShellApp {
                 disk,
                 alive: self.keep_alive.take(),
             },
+            control,
         })) {
             Ok(()) => {
                 // The overwrite creations this power-on settles for the
@@ -3808,11 +4170,8 @@ impl NativeShellApp {
         if !self.is_vm_running() {
             return;
         }
-
-        if let Ok(mut display) = self.shown_display().lock() {
-            display.stop_flag.store(true, Ordering::Relaxed);
-            display.reset_requested = false;
-        }
+        let vm = self.shown_vm();
+        self.sessions.open(&vm).power_off();
     }
 
     /// How the phone draws this frame: see `android_support::console_view`.
@@ -3918,6 +4277,22 @@ impl NativeShellApp {
                 }
             }
             ui.separator();
+            let pause = if self
+                .sessions
+                .get(&vm)
+                .is_some_and(|session| session.control().wanted() == Wanted::Pause)
+            {
+                "▶ Resume"
+            } else {
+                "Pause"
+            };
+            if ui
+                .add_enabled(status.running, egui::Button::new(pause))
+                .clicked()
+            {
+                self.toggle_pause();
+                self.full_screen_menu_open = false;
+            }
             if ui
                 .add_enabled(status.running, egui::Button::new("■ Power off"))
                 .clicked()
@@ -4068,11 +4443,8 @@ impl NativeShellApp {
         if !self.is_vm_running() {
             return;
         }
-
-        if let Ok(mut display) = self.shown_display().lock() {
-            display.stop_flag.store(true, Ordering::Relaxed);
-            display.reset_requested = true;
-        }
+        let vm = self.shown_vm();
+        self.sessions.open(&vm).restart();
     }
 
     /// Offers a file for the field `target` names and puts the choice there.
@@ -4089,6 +4461,7 @@ impl NativeShellApp {
                 save_native_file(&name)
             }
             BrowseTarget::NewFloppy => save_native_file(FLOPPY_FILE_NAME),
+            BrowseTarget::RamDump => save_native_file(RAM_DUMP_FILE_NAME),
             BrowseTarget::HardDisk
             | BrowseTarget::Cdrom
             | BrowseTarget::Bios
@@ -4147,6 +4520,19 @@ impl NativeShellApp {
                 self.floppy_maker.path = text;
                 false
             }
+            BrowseTarget::RamDump => {
+                let vm = self.shown_vm();
+                let name = self.vm_name(&vm).to_owned();
+                match self.sessions.open(&vm).request_dump(path) {
+                    DumpRequest::Queued => {
+                        self.notify(ShellNotice::info(format!("Saving {name}'s RAM…")));
+                    }
+                    DumpRequest::NotRunning => self.notify(ShellNotice::warning(format!(
+                        "{name} is not running, so its RAM was not saved."
+                    ))),
+                }
+                false
+            }
         }
     }
 
@@ -4175,6 +4561,8 @@ impl NativeShellApp {
                 PathBuf::from(self.floppy_maker.path.trim()),
                 Some(FLOPPY_FILE_NAME),
             ),
+            // The browser opens in the shared Download folder.
+            BrowseTarget::RamDump => (PathBuf::new(), Some(RAM_DUMP_FILE_NAME)),
         };
         Some(BrowseRequest {
             target,
@@ -4203,6 +4591,7 @@ impl NativeShellApp {
     /// frame that raises it already shows it.
     fn draw_shell(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         self.take_runtime_error_notice();
+        self.take_dump_notices();
         #[cfg(target_os = "android")]
         {
             let vm = self.shown_vm();
@@ -5699,6 +6088,60 @@ fn draw_about_text(ui: &mut egui::Ui) {
     ));
 }
 
+/// A number typed on the phone: a field holding the digits, the soft
+/// keyboard's to fill. Digits are all it takes. The number is committed when
+/// the field is left or Enter is pressed, cut to `min..=max`; text that is
+/// no number is dropped and the field shows the value again. While the field
+/// is being typed in, its text is kept in egui's memory, so a value changed
+/// by the `−` and `+` buttons still shows when the field is not.
+#[cfg(any(target_os = "android", test))]
+fn typed_number_field(
+    ui: &mut egui::Ui,
+    value: &mut u64,
+    min: u64,
+    max: u64,
+    suffix: &str,
+    editable: bool,
+) -> bool {
+    let id = ui.auto_id_with("typed number");
+    let typing = ui.memory(|memory| memory.has_focus(id) || memory.had_focus_last_frame(id));
+    let mut text = if typing {
+        ui.data_mut(|data| data.get_temp::<String>(id))
+            .unwrap_or_else(|| value.to_string())
+    } else {
+        value.to_string()
+    };
+    let response = ui.add_enabled(
+        editable,
+        egui::TextEdit::singleline(&mut text)
+            .id(id)
+            .desired_width(TYPED_NUMBER_WIDTH),
+    );
+    if response.changed() {
+        text.retain(|ch| ch.is_ascii_digit());
+    }
+    let mut changed = false;
+    if response.lost_focus() {
+        if let Some(typed) = crate::android_support::typed_number(&text, min, max) {
+            if typed != *value {
+                *value = typed;
+                changed = true;
+            }
+        }
+        text = value.to_string();
+    }
+    ui.data_mut(|data| data.insert_temp(id, text));
+    if !suffix.is_empty() {
+        ui.label(RichText::new(suffix).color(TEXT_MUTED));
+    }
+    changed
+}
+
+/// The room a typed number's field takes, points: ten digits, the widest
+/// value any numeric setting holds.
+#[cfg(any(target_os = "android", test))]
+const TYPED_NUMBER_WIDTH: f32 = 112.0;
+
 #[cfg(target_os = "android")]
 fn draw_u32_field(
     ui: &mut egui::Ui,
@@ -5722,7 +6165,11 @@ fn draw_u32_field(
         *value = decrement;
         changed = true;
     }
-    ui.label(RichText::new(format!("{value}{suffix}")).color(TEXT_MUTED));
+    let mut typed = u64::from(*value);
+    if typed_number_field(ui, &mut typed, u64::from(min), u64::from(max), suffix, editable) {
+        *value = u32::try_from(typed).unwrap_or(max);
+        changed = true;
+    }
     let increment = value.saturating_add(step).min(max);
     if ui
         .add_enabled(editable, egui::Button::new("+"))
@@ -5779,7 +6226,9 @@ fn draw_u64_field(
         *value = decrement;
         changed = true;
     }
-    ui.label(RichText::new(format!("{value}{suffix}")).color(TEXT_MUTED));
+    if typed_number_field(ui, value, min, max, suffix, editable) {
+        changed = true;
+    }
     let increment = value.saturating_add(step).min(max);
     if ui
         .add_enabled(editable, egui::Button::new("+"))
@@ -5834,7 +6283,12 @@ fn cpu_count_label(cpus: u32) -> String {
 /// idle is muted.
 #[cfg(not(target_arch = "wasm32"))]
 fn shell_state_badge(status: &ShellStatus, faulted: bool) -> ShellStateBadge {
-    if status.running {
+    if status.running && status.paused {
+        ShellStateBadge {
+            label: "Paused",
+            color: ACCENT_AMBER,
+        }
+    } else if status.running {
         ShellStateBadge {
             label: "Running",
             color: ACCENT_CYAN,
@@ -6001,6 +6455,8 @@ fn engine_label(engine: crate::config::Engine) -> &'static str {
 mod tests {
     use super::*;
     use std::fs;
+    #[cfg(not(target_arch = "wasm32"))]
+    use std::sync::atomic::Ordering;
 
     /// A path no other test of this process has: the clock alone is not
     /// enough, since two tests can start within one of its ticks.
@@ -6198,8 +6654,8 @@ mod tests {
     /// A shell over a scratch library listing "Windows XP", "DLX" and
     /// "Alpine", in that order, the reverse of their names' order, with
     /// Windows XP selected. Each VM was made as "VM 1", "VM 2" or "VM 3" and
-    /// renamed since, and a renamed VM keeps the file it was made in, whose
-    /// name places it in the list.
+    /// named by its file since, so its file name, which the library does not
+    /// derive from that name, places it in the list.
     #[cfg(not(target_arch = "wasm32"))]
     fn three_vm_app() -> TestShell {
         let scratch = ScratchLibrary::new();
@@ -6461,17 +6917,120 @@ mod tests {
         assert_eq!(scratch.library().load().expect("reload").vms[0].config.memory_mib, 512);
     }
 
+    fn stem_of(text: &str) -> crate::library::VmStem {
+        crate::library::VmStem::parse(text).expect("a stem")
+    }
+
+    /// A VM renamed in the shell has the file it was made in renamed to
+    /// match: the VM, its session and the remembered selection follow, and
+    /// the file the shell reads at the next launch is the one it wrote.
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
-    fn a_renamed_vm_keeps_its_file() {
+    fn a_renamed_vm_has_its_file_renamed_to_match() {
         let (mut app, _command_rx, scratch) = library_app();
+        let before = app.profiles[0].origin.clone();
+        app.sessions.open(&before);
 
         app.profiles[0].name = "Alpine edge".to_owned();
         app.apply_pending_settings().unwrap();
         app.flush_unsaved();
 
-        assert_eq!(scratch.toml_files(), ["alpine.toml"]);
-        assert_eq!(scratch.library().load().expect("reload").vms[0].name, "Alpine edge");
+        assert_eq!(scratch.toml_files(), ["alpine-edge.toml"]);
+        let reloaded = scratch.library().load().expect("reload").vms;
+        assert_eq!(reloaded[0].name, "Alpine edge");
+        assert_eq!(reloaded[0].stem, stem_of("alpine-edge"));
+        let after = VmOrigin::Library(stem_of("alpine-edge"));
+        assert_eq!(app.profiles[0].origin, after);
+        assert!(app.sessions.get(&after).is_some(), "the session moved with it");
+        assert!(app.sessions.get(&before).is_none());
+        assert_eq!(
+            scratch.library().last_selected(),
+            Some(stem_of("alpine-edge")),
+            "the next launch opens the VM under its new file"
+        );
+        assert_eq!(app.profiles[0].save_state, SaveState::Saved);
+    }
+
+    /// The case that was reported: a copy of "Windows XP" is named
+    /// "Windows XP copy" and its file "windows-xp-copy"; renamed Ubuntu, it
+    /// is "ubuntu" and the file says so.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_copy_renamed_does_not_keep_copy_in_its_file_name() {
+        let mut shell = two_vm_app();
+        shell.app.select_profile(1);
+        shell.app.add_vm_copying_selected();
+        assert_eq!(
+            shell.scratch.toml_files(),
+            ["alpine.toml", "windows-xp-copy.toml", "windows-xp.toml"]
+        );
+        let copy = shell.app.chrome.selected_vm();
+
+        shell.app.profiles[copy].name = "Ubuntu".to_owned();
+        shell.app.apply_pending_settings().unwrap();
+        shell.app.flush_unsaved();
+
+        assert_eq!(
+            shell.scratch.toml_files(),
+            ["alpine.toml", "ubuntu.toml", "windows-xp.toml"]
+        );
+    }
+
+    /// A file name the user chose is not derived from the VM's name, so a
+    /// rename of the VM leaves it.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_file_name_chosen_by_hand_is_left_when_the_vm_is_renamed() {
+        let (mut app, _command_rx, scratch) = library_app();
+        app.open_file_rename();
+        app.file_rename.as_mut().expect("the editor is open").text = "lab".to_owned();
+        app.save_file_rename();
+        assert_eq!(scratch.toml_files(), ["lab.toml"]);
+
+        app.profiles[0].name = "Debian".to_owned();
+        app.apply_pending_settings().unwrap();
+        app.flush_unsaved();
+
+        assert_eq!(scratch.toml_files(), ["lab.toml"]);
+        assert_eq!(scratch.library().load().expect("reload").vms[0].name, "Debian");
+    }
+
+    /// A file name another VM has is refused where it is typed: the editor
+    /// stays open with the reason, and nothing moves.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_file_name_another_vm_has_is_refused_in_the_editor() {
+        let mut shell = two_vm_app();
+        shell.app.open_file_rename();
+        shell.app.file_rename.as_mut().expect("the editor is open").text = "windows-xp".to_owned();
+
+        shell.app.save_file_rename();
+
+        assert_eq!(shell.scratch.toml_files(), ["alpine.toml", "windows-xp.toml"]);
+        let draft = shell.app.file_rename.as_ref().expect("still open");
+        assert!(draft
+            .refusal
+            .as_deref()
+            .is_some_and(|reason| reason.contains("windows-xp.toml")));
+    }
+
+    /// A file renamed by hand carries the VM with it: the editor closes, the
+    /// caption names the new file, and the session is where the VM is.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_file_renamed_by_hand_is_where_the_vm_is() {
+        let (mut app, _command_rx, scratch) = library_app();
+        let before = app.profiles[0].origin.clone();
+        app.sessions.open(&before);
+        app.open_file_rename();
+        app.file_rename.as_mut().expect("the editor is open").text = "Lab: Alpine 3".to_owned();
+
+        app.save_file_rename();
+
+        assert_eq!(scratch.toml_files(), ["lab-alpine-3.toml"]);
+        assert!(app.file_rename.is_none());
+        assert!(app.summary_caption().ends_with("lab-alpine-3.toml"));
+        assert!(app.sessions.get(&VmOrigin::Library(stem_of("lab-alpine-3"))).is_some());
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -7147,7 +7706,8 @@ mod tests {
     }
 
     /// A library VM with no medium to boot from is renamed like any other:
-    /// the rename marks it `Unsaved`, and the flush writes it.
+    /// the rename marks it `Unsaved`, and the flush writes it, in a file
+    /// that takes the new name.
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn a_vm_with_no_media_is_renamed_and_its_file_written() {
@@ -7165,7 +7725,7 @@ mod tests {
         app.flush_unsaved();
 
         assert_eq!(app.profiles[0].save_state, SaveState::Saved);
-        assert_eq!(scratch.toml_files(), ["rusty-box.toml"]);
+        assert_eq!(scratch.toml_files(), ["phone.toml"]);
         assert_eq!(scratch.library().load().expect("reload").vms[0].name, "Phone");
     }
 
@@ -8184,6 +8744,86 @@ mod tests {
         assert!(Arc::ptr_eq(&start.display, &app.shown_display()));
     }
 
+    /// A dump asked of a VM that is not running is said to be refused; it is
+    /// never queued for a run that will not come.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_ram_dump_of_a_vm_that_is_off_is_refused_with_a_notice() {
+        let (mut app, _command_rx, _scratch) = native_test_app();
+        let changed = app.set_browsed_path(BrowseTarget::RamDump, PathBuf::from("memory.bin"));
+        assert!(!changed, "a dump changes no setting");
+        let notice = app.shell_notice.clone().expect("a notice");
+        assert_eq!(notice.kind, ShellNoticeKind::Warning);
+        assert!(notice.message.contains("is not running"), "{}", notice.message);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_saved_dump_is_reported_with_its_vm_size_and_file() {
+        let (mut app, _command_rx, _scratch) = native_test_app();
+        let vm = app.shown_vm();
+        let control = Arc::clone(app.sessions.open(&vm).control());
+        control.begin_run(crate::debugger::control::RunStart::PowerOn);
+        let path = PathBuf::from("memory.bin");
+        assert_eq!(control.request_dump(path.clone()), DumpRequest::Queued);
+        control.record_dump(DumpOutcome::Saved {
+            path,
+            bytes: 32 * 1024 * 1024,
+        });
+
+        app.take_dump_notices();
+
+        let notice = app.shell_notice.clone().expect("a notice");
+        assert_eq!(notice.kind, ShellNoticeKind::Info);
+        assert!(
+            notice.message.contains("Saved 32 MiB of Rusty Box's RAM"),
+            "{}",
+            notice.message
+        );
+        assert!(notice.message.contains("memory.bin"));
+    }
+
+    /// Two dumps that finish in one frame are both said, at the graver kind.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn dumps_that_finish_together_are_all_reported() {
+        let (mut app, _command_rx, _scratch) = native_test_app();
+        let vm = app.shown_vm();
+        let control = Arc::clone(app.sessions.open(&vm).control());
+        control.record_dump(DumpOutcome::Saved {
+            path: PathBuf::from("first.bin"),
+            bytes: 32 * 1024 * 1024,
+        });
+        control.record_dump(DumpOutcome::Failed {
+            path: PathBuf::from("second.bin"),
+            reason: "the disk is full".to_owned(),
+        });
+        app.take_dump_notices();
+        let notice = app.shell_notice.clone().expect("a notice");
+        assert_eq!(notice.kind, ShellNoticeKind::Error);
+        assert!(notice.message.contains("first.bin"), "{}", notice.message);
+        assert!(notice.message.contains("second.bin"), "{}", notice.message);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_dump_that_failed_is_reported_as_an_error() {
+        let (mut app, _command_rx, _scratch) = native_test_app();
+        let vm = app.shown_vm();
+        app.sessions
+            .open(&vm)
+            .control()
+            .record_dump(DumpOutcome::Failed {
+                path: PathBuf::from("memory.bin"),
+                reason: "the disk is full".to_owned(),
+            });
+        app.take_dump_notices();
+        let notice = app.shell_notice.clone().expect("a notice");
+        assert_eq!(notice.kind, ShellNoticeKind::Error);
+        assert!(notice.message.contains("was not saved"));
+        assert!(notice.message.contains("the disk is full"));
+    }
+
     /// A power-on lowers the stop the VM's last run left raised, so the run
     /// it asks for runs.
     #[cfg(not(target_arch = "wasm32"))]
@@ -9094,9 +9734,19 @@ mod tests {
         }
 
         fn window(app: NativeShellApp) -> Harness<'static, Window> {
+            window_of_size(app, egui::vec2(800.0, 600.0))
+        }
+
+        /// A window wide and tall enough that the Debugger page lays its panes
+        /// out in two columns, every pane in view.
+        fn tall_window(app: NativeShellApp) -> Harness<'static, Window> {
+            window_of_size(app, egui::vec2(1400.0, 2000.0))
+        }
+
+        fn window_of_size(app: NativeShellApp, size: egui::Vec2) -> Harness<'static, Window> {
             let mut frame = eframe::Frame::_new_kittest();
             Harness::builder()
-                .with_size(egui::vec2(800.0, 600.0))
+                .with_size(size)
                 .with_step_dt(FRAME)
                 .build_ui_state(
                     move |ui, window: &mut Window| {
@@ -9120,6 +9770,1316 @@ mod tests {
 
         fn drawer_shows_its_rows(window: &Harness<'_, Window>) -> bool {
             window.query_by_label(LAUNCH_VM_ROW).is_some()
+        }
+
+        /// The shown VM, live as a run makes it, and its control.
+        fn live_vm(app: &mut NativeShellApp) -> Arc<crate::debugger::control::RunControl> {
+            let vm = app.shown_vm();
+            let control = Arc::clone(app.sessions.open(&vm).control());
+            control.begin_run(crate::debugger::control::RunStart::PowerOn);
+            app.shown_display().lock().unwrap().emu_running = true;
+            control
+        }
+
+        /// A long-mode machine paused at `mov rax, 42`, read as the page reads it.
+        fn paused_snapshot() -> crate::debugger::inspect::DebugSnapshot {
+            use rusty_box::cpu::{CpuSetupMode, X86Reg};
+            let mut machine = rusty_box::emulator::Emulator::new_with_mode(
+                rusty_box::emulator::EmulatorConfig::default(),
+                CpuSetupMode::FlatLong64,
+            )
+            .expect("machine");
+            let code = CpuSetupMode::FlatLong64.first_free_physical_address();
+            machine
+                .mem_write(code, &[0x48, 0xC7, 0xC0, 0x2A, 0, 0, 0, 0xF4])
+                .expect("write");
+            machine.reg_write(X86Reg::Rip, code);
+            machine.reg_write(X86Reg::Rax, 0x2A);
+            crate::debugger::inspect::read_snapshot(
+                &mut machine,
+                &crate::debugger::inspect::ViewRequest::default(),
+                &mut crate::debugger::windows::WindowsDiscovery::default(),
+                None,
+            )
+        }
+
+        /// The shown VM live and paused, its pause's snapshot published.
+        fn paused_vm(app: &mut NativeShellApp) -> Arc<crate::debugger::control::RunControl> {
+            use crate::debugger::control::{BetweenRuns, Task};
+            let control = live_vm(app);
+            control.pause();
+            assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::Refresh));
+            control.publish(paused_snapshot());
+            control
+        }
+
+        fn open_debugger(window: &mut Harness<'_, Window>) {
+            window.get_by_label("Debugger").click();
+            window.run();
+        }
+
+        #[test]
+        fn pause_in_the_bar_pauses_the_shown_vm_and_resume_lets_it_run() {
+            use crate::debugger::control::Wanted;
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = live_vm(&mut app);
+            let mut window = window(app);
+            window.run();
+
+            window.get_by_label("Pause").click();
+            window.run();
+            assert_eq!(control.wanted(), Wanted::Pause);
+            assert!(control.stop_flag().load(Ordering::Relaxed));
+
+            window.get_by_label("▶ Resume").click();
+            window.run();
+            assert_eq!(control.wanted(), Wanted::Run);
+        }
+
+        #[test]
+        fn a_paused_vm_reads_paused_in_its_badge() {
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            paused_vm(&mut app);
+            let mut window = window(app);
+            window.run();
+            // The bar's badge and the status strip both say so.
+            assert!(window.query_all_by_label("Paused").next().is_some());
+        }
+
+        #[test]
+        fn the_debugger_page_shows_the_paused_processor() {
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            paused_vm(&mut app);
+            let mut window = window(app);
+            window.run();
+            open_debugger(&mut window);
+            assert!(window.query_by_label("RAX").is_some());
+            assert!(window.query_by_label("000000000000002A").is_some());
+            assert!(window
+                .query_all_by(|node| node
+                    .label()
+                    .or(node.value())
+                    .is_some_and(|text| text.contains("64-bit mode")))
+                .next()
+                .is_some());
+        }
+
+        #[test]
+        fn the_debugger_page_of_a_vm_that_is_off_says_how_to_start() {
+            let (app, _command_rx, _scratch) = native_test_app();
+            let mut window = window(app);
+            window.run();
+            open_debugger(&mut window);
+            assert!(window
+                .query_by_label(crate::shell::debugger_page::NOT_RUNNING)
+                .is_some());
+        }
+
+        #[test]
+        fn step_asks_the_paused_run_for_one_instruction() {
+            use crate::debugger::control::{BetweenRuns, Task};
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_vm(&mut app);
+            let mut window = window(app);
+            window.run();
+            open_debugger(&mut window);
+            window.get_by_label("Step").click();
+            window.run();
+            assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::Step));
+        }
+
+        #[test]
+        fn step_is_disabled_for_a_vm_on_the_hypervisor() {
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            paused_vm(&mut app);
+            let vm = app.shown_vm();
+            app.sessions
+                .open(&vm)
+                .set_run_engine(crate::config::Engine::Whp);
+            let mut window = window(app);
+            window.run();
+            open_debugger(&mut window);
+            assert!(window.get_by_label("Step").accesskit_node().is_disabled());
+        }
+
+        #[test]
+        fn a_bad_address_is_refused_inline_and_the_view_stays() {
+            use crate::shell::debugger_page::{AddressError, MEMORY_ADDRESS};
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_vm(&mut app);
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            let before = control.view();
+            window
+                .get_by_role_and_label(egui::accesskit::Role::TextInput, MEMORY_ADDRESS)
+                .click();
+            window.run();
+            window
+                .get_by_role_and_label(egui::accesskit::Role::TextInput, MEMORY_ADDRESS)
+                .type_text("xyz");
+            window.run();
+            window.get_by_label("Go").click();
+            window.run();
+            assert!(window.query_by_label(AddressError::NotHex.message()).is_some());
+            assert_eq!(control.view(), before);
+        }
+
+        /// The Summary page's "Rename file…" opens an editor on the file's
+        /// name; saving it renames the file and the caption names the new one.
+        #[test]
+        fn the_rename_file_button_renames_the_vms_file() {
+            let (app, _command_rx, scratch) = library_app();
+            let mut window = window(app);
+            window.run();
+            window.get_by_label("Rename file…").click();
+            window.run();
+            window
+                .get_by_role_and_label(egui::accesskit::Role::TextInput, "File name")
+                .click();
+            window.run();
+            window
+                .get_by_role_and_label(egui::accesskit::Role::TextInput, "File name")
+                .type_text("-lab");
+            window.run();
+            window.get_by_label("Save file name").click();
+            window.run();
+
+            assert_eq!(scratch.toml_files(), ["alpine-lab.toml"]);
+            assert!(window.query_by_label("Save file name").is_none(), "the editor closed");
+        }
+
+        /// A temporary VM has no file, so there is nothing to rename.
+        #[test]
+        fn a_temporary_vm_has_no_file_to_rename() {
+            let (app, _command_rx, _scratch) = native_test_app();
+            let mut window = window(app);
+            window.run();
+            assert!(window.query_by_label("Rename file…").is_none());
+        }
+
+        /// Find next with hex typed queues the search for the paused run.
+        #[test]
+        fn find_next_asks_the_paused_run_to_search() {
+            use crate::debugger::control::{BetweenRuns, Task};
+            use crate::shell::debugger_page::FIND;
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_vm(&mut app);
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            window
+                .get_by_role_and_label(egui::accesskit::Role::TextInput, FIND)
+                .click();
+            window.run();
+            window
+                .get_by_role_and_label(egui::accesskit::Role::TextInput, FIND)
+                .type_text("48 C7");
+            window.run();
+            window.get_by_label("Find next").click();
+            window.run();
+            match control.next_between_runs() {
+                BetweenRuns::Perform(Task::Find(request)) => {
+                    assert_eq!(request.pattern, [0x48, 0xC7]);
+                }
+                other => panic!("no search queued: {other:?}"),
+            }
+        }
+
+        /// A register the last step changed is drawn red.
+        #[test]
+        fn a_register_a_step_changed_is_drawn_red() {
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_vm(&mut app);
+            // The same pause again, with RAX changed: the step before it.
+            let mut stepped = paused_snapshot();
+            stepped.cpus[0].registers.rax = 0x99;
+            control.publish(stepped);
+            let mut window = window(app);
+            window.run();
+            open_debugger(&mut window);
+            assert!(window.query_by_label("0000000000000099").is_some());
+            assert!(window.query_by_label("000000000000002A").is_none());
+        }
+
+        #[test]
+        fn rsp_points_the_memory_pane_at_the_stack() {
+            use crate::debugger::inspect::MemoryTarget;
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_vm(&mut app);
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            window
+                .get_by_role_and_label(egui::accesskit::Role::Button, "RSP")
+                .click();
+            window.run();
+            assert_eq!(control.view().memory, MemoryTarget::Rsp);
+        }
+
+        /// The Processes and Kernel modules tabs ask the paused run for the
+        /// guest's lists; CPU asks for none.
+        #[test]
+        fn the_list_tabs_ask_the_run_for_the_guests_lists() {
+            use crate::debugger::windows::SystemView;
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_vm(&mut app);
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            window.get_by_label("Processes").click();
+            window.run();
+            assert_eq!(
+                control.view().system,
+                SystemView::Processes {
+                    selected: None,
+                    detail: crate::debugger::windows::ProcessDetail::Modules,
+                }
+            );
+            window.get_by_label("Kernel modules").click();
+            window.run();
+            assert_eq!(
+                control.view().system,
+                SystemView::KernelModules {
+                    selected: None,
+                    detail: crate::debugger::windows::KernelDetail::Sections,
+                }
+            );
+            window.get_by_label("CPU").click();
+            window.run();
+            assert_eq!(control.view().system, SystemView::Off);
+        }
+
+        /// A guest that is not 64-bit Windows says so under the list tabs.
+        #[test]
+        fn a_guest_with_no_windows_kernel_says_so_under_the_list_tabs() {
+            use crate::debugger::windows::{KernelMiss, SystemListing};
+            use crate::shell::debugger_page::no_windows_kernel;
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_vm(&mut app);
+            let mut snapshot = paused_snapshot();
+            snapshot.system = SystemListing::NoWindowsKernel(KernelMiss::NoKpcr);
+            control.publish(snapshot);
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            window.get_by_label("Kernel modules").click();
+            window.run();
+            assert!(window
+                .query_by_label(&no_windows_kernel(KernelMiss::NoKpcr))
+                .is_some());
+        }
+
+        /// A landscape phone's window: wide, and short.
+        const LANDSCAPE_PHONE: egui::Vec2 = egui::vec2(1000.0, 430.0);
+        /// A window whose page, beside the open drawer, is a portrait
+        /// phone's width.
+        const NARROW_PAGE: egui::Vec2 = egui::vec2(560.0, 800.0);
+
+        /// The chips are on the header's row, after its buttons: not on a row
+        /// of their own beneath them.
+        #[test]
+        fn the_debugger_chips_sit_beside_the_buttons() {
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            paused_vm(&mut app);
+            let mut window = window_of_size(app, egui::vec2(1400.0, 700.0));
+            window.run();
+            open_debugger(&mut window);
+            let step = window
+                .get_by_role_and_label(egui::accesskit::Role::Button, "Step")
+                .rect();
+            let chip = window.get_by_label("64-bit mode").rect();
+            assert!(
+                (step.center().y - chip.center().y).abs() < 12.0,
+                "the chip at {chip:?} is not on the row of the Step button at {step:?}"
+            );
+            assert!(chip.left() > step.right(), "the chip is not after the button");
+        }
+
+        /// A window as short as a landscape phone's does not squeeze the
+        /// panes: each keeps its content's height, and the page scrolls to
+        /// every one of them.
+        #[test]
+        fn a_short_wide_window_keeps_every_debugger_pane_in_reach() {
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            paused_vm(&mut app);
+            let mut window = window_of_size(app, LANDSCAPE_PHONE);
+            window.run();
+            open_debugger(&mut window);
+
+            // Code is not squeezed to a few rows to fit beside Memory: the
+            // column holds all of its listing.
+            let code = window.get_by_label("Code").rect();
+            let memory = window.get_by_label("Memory").rect();
+            assert!(
+                memory.top() - code.top() > 300.0,
+                "Code at {code:?} is squeezed above Memory at {memory:?}"
+            );
+
+            for title in ["Code", "Registers", "Stack", "Memory"] {
+                window.get_by_label(title).scroll_to_me();
+                window.run();
+                let rect = window.get_by_label(title).rect();
+                assert!(
+                    rect.top() >= 0.0 && rect.bottom() <= LANDSCAPE_PHONE.y,
+                    "{title} at {rect:?} is out of view in a window {LANDSCAPE_PHONE:?}"
+                );
+            }
+        }
+
+        /// In a window too narrow for the header's buttons and chips on one
+        /// row, the row wraps; nothing runs past the window's edge.
+        #[test]
+        fn a_narrow_debugger_header_wraps_inside_the_window() {
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            paused_vm(&mut app);
+            let mut window = window_of_size(app, NARROW_PAGE);
+            window.run();
+            open_debugger(&mut window);
+            let step = window
+                .get_by_role_and_label(egui::accesskit::Role::Button, "Step")
+                .rect();
+            let tabs = window
+                .get_by_role_and_label(egui::accesskit::Role::Button, "Kernel modules")
+                .rect();
+            let chip = window.get_by_label("64-bit mode").rect();
+            for (name, rect) in [("Step", step), ("Kernel modules", tabs), ("64-bit mode", chip)] {
+                assert!(
+                    rect.right() <= NARROW_PAGE.x,
+                    "{name} at {rect:?} runs past the window's edge"
+                );
+            }
+            // The tab switch wrapped under the buttons, and the chips under it.
+            assert!(tabs.top() > step.bottom() - 1.0, "tabs {tabs:?} step {step:?}");
+            assert!(chip.top() > tabs.bottom() - 1.0, "chip {chip:?} tabs {tabs:?}");
+        }
+
+        /// A guest's process list and the modules of one process.
+        fn process_listing_snapshot() -> crate::debugger::inspect::DebugSnapshot {
+            use crate::debugger::windows::{
+                ModuleBits, ModuleRead, ProcessListing, ProcessModules, SystemListing, WinModule,
+                WinProcess,
+            };
+            let processes = vec![
+                WinProcess {
+                    eprocess: 0xFFFF_FA80_0000_1000,
+                    pid: 4,
+                    parent: None,
+                    name: "System".to_owned(),
+                    cr3: 0x1000,
+                    current: false,
+                },
+                WinProcess {
+                    eprocess: 0xFFFF_FA80_0000_2000,
+                    pid: 520,
+                    parent: Some(4),
+                    name: "smss.exe".to_owned(),
+                    cr3: 0x2000,
+                    current: true,
+                },
+            ];
+            let tree = crate::debugger::windows::process_tree(&processes);
+            let mut snapshot = paused_snapshot();
+            snapshot.system = SystemListing::Processes(ProcessListing {
+                processes,
+                tree,
+                modules: Some(ProcessModules {
+                    eprocess: 0xFFFF_FA80_0000_2000,
+                    read: ModuleRead::Listed(vec![WinModule {
+                        base: 0x7FF0_0000_0000,
+                        size: 0x1000,
+                        name: Some("ntdll.dll".to_owned()),
+                        path: Some("C:\\Windows\\System32\\ntdll.dll".to_owned()),
+                        bits: ModuleBits::Bits64,
+                    }]),
+                    map: None,
+                    threads: Vec::new(),
+                }),
+            });
+            snapshot
+        }
+
+        /// tcpip.sys's base in the kernel listings below.
+        const TCPIP_BASE: u64 = 0xFFFF_FADF_F000_0000;
+
+        /// The kernel and two drivers listed, with `picked`'s detail.
+        fn kernel_listing_snapshot(
+            picked: Option<crate::debugger::windows::PickedModule>,
+        ) -> crate::debugger::inspect::DebugSnapshot {
+            use crate::debugger::windows::{KernelListing, ModuleBits, SystemListing, WinModule};
+            let module = |base: u64, name: &str| WinModule {
+                base,
+                size: 0x11_0000,
+                name: Some(name.to_owned()),
+                path: Some(format!("\\SystemRoot\\system32\\drivers\\{name}")),
+                bits: ModuleBits::Bits64,
+            };
+            let mut snapshot = paused_snapshot();
+            snapshot.system = SystemListing::KernelModules(KernelListing {
+                modules: vec![
+                    module(0xFFFF_F800_0100_0000, "ntoskrnl.exe"),
+                    module(TCPIP_BASE, "tcpip.sys"),
+                ],
+                picked,
+            });
+            snapshot
+        }
+
+        /// One click at `pos`, as a pointer makes it.
+        fn single_click(window: &mut Harness<'_, Window>, pos: egui::Pos2) {
+            window.hover_at(pos);
+            window.event(press(pos));
+            window.event(release(pos));
+            window.step();
+        }
+
+        /// Opens the Kernel modules tab and lets the tab's click settle.
+        fn open_kernel_modules(window: &mut Harness<'_, Window>) {
+            open_debugger(window);
+            window.get_by_label("Kernel modules").click();
+            window.run();
+            let_clicks_settle(window);
+        }
+
+        /// A click on a driver picks it: the run is asked for its sections,
+        /// and the page stays on the list.
+        #[test]
+        fn clicking_a_kernel_module_picks_it() {
+            use crate::debugger::windows::{KernelDetail, SystemView};
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_vm(&mut app);
+            control.publish(kernel_listing_snapshot(None));
+            let mut window = tall_window(app);
+            window.run();
+            open_kernel_modules(&mut window);
+            let tcpip = row_center(&window, "tcpip.sys");
+            single_click(&mut window, tcpip);
+            window.run();
+            assert_eq!(
+                control.view().system,
+                SystemView::KernelModules {
+                    selected: Some(TCPIP_BASE),
+                    detail: KernelDetail::Sections,
+                }
+            );
+            assert!(window.query_by_label("Registers").is_none(), "still on the list");
+        }
+
+        /// A double-click on a driver opens it in the memory pane.
+        #[test]
+        fn double_clicking_a_kernel_module_opens_it_in_memory() {
+            use crate::debugger::inspect::{AddressSpace, GuestAddress, MemoryTarget};
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_vm(&mut app);
+            control.publish(kernel_listing_snapshot(None));
+            let mut window = tall_window(app);
+            window.run();
+            open_kernel_modules(&mut window);
+            let tcpip = row_center(&window, "tcpip.sys");
+            double_click(&mut window, tcpip);
+            window.run();
+            assert_eq!(
+                control.view().memory,
+                MemoryTarget::At(GuestAddress {
+                    space: AddressSpace::Linear,
+                    value: TCPIP_BASE,
+                })
+            );
+            assert!(window.query_by_label("Registers").is_some(), "the CPU tab is shown");
+        }
+
+        /// The picked driver's sections list with their access; the switch
+        /// asks for its exports instead.
+        #[test]
+        fn a_picked_kernel_module_lists_its_sections_and_switches_to_exports() {
+            use crate::debugger::memory_map::{
+                MapOrigin, MapRegion, MemoryMap, RegionAccess, RegionOwner,
+            };
+            use crate::debugger::windows::{
+                KernelDetail, PickedDetail, PickedModule, SectionsRead, SystemView,
+            };
+            let text = MapRegion {
+                start: TCPIP_BASE + 0x1000,
+                size: 0xB0000,
+                resident_pages: 0x9C,
+                total_pages: 0xB0,
+                access: Some(RegionAccess {
+                    user: false,
+                    writable: false,
+                    executable: true,
+                    observed: true,
+                }),
+                owner: RegionOwner::Section {
+                    base: TCPIP_BASE,
+                    module: "tcpip.sys".to_owned(),
+                    section: ".text".to_owned(),
+                },
+                vad: None,
+            };
+            let picked = PickedModule {
+                base: TCPIP_BASE,
+                shown: PickedDetail::Sections(SectionsRead::Mapped(MemoryMap {
+                    origin: MapOrigin::PageTables,
+                    regions: vec![text],
+                })),
+            };
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_vm(&mut app);
+            control.publish(kernel_listing_snapshot(Some(picked)));
+            let mut window = tall_window(app);
+            window.run();
+            open_kernel_modules(&mut window);
+            let tcpip = row_center(&window, "tcpip.sys");
+            single_click(&mut window, tcpip);
+            window.run();
+            assert!(
+                window
+                    .query_all_by(|node| node.label().is_some_and(|label| label.contains(".text")))
+                    .next()
+                    .is_some(),
+                "the .text section is listed"
+            );
+            window.get_by_label("Exports").click();
+            window.run();
+            assert_eq!(
+                control.view().system,
+                SystemView::KernelModules {
+                    selected: Some(TCPIP_BASE),
+                    detail: KernelDetail::Exports,
+                }
+            );
+        }
+
+        /// The picked driver's exports list by name, forwarders with where
+        /// they lead, and the filter narrows them.
+        #[test]
+        fn a_picked_kernel_module_lists_its_exports_and_filters_them() {
+            use crate::debugger::pe::{ExportRead, ExportTarget, PeExport};
+            use crate::debugger::windows::{PickedDetail, PickedModule};
+            use crate::shell::debugger_page::EXPORT_FILTER;
+            let exports = vec![
+                PeExport {
+                    name: Some("IoCreateDevice".to_owned()),
+                    ordinal: 1,
+                    target: ExportTarget::Rva(0x1100),
+                },
+                PeExport {
+                    name: Some("KeWaitForSingleObject".to_owned()),
+                    ordinal: 2,
+                    target: ExportTarget::Rva(0x1200),
+                },
+                PeExport {
+                    name: Some("KeFwd".to_owned()),
+                    ordinal: 3,
+                    target: ExportTarget::Forwarded("HAL.HalFoo".to_owned()),
+                },
+            ];
+            let picked = PickedModule {
+                base: TCPIP_BASE,
+                shown: PickedDetail::Exports(ExportRead::Listed(exports)),
+            };
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_vm(&mut app);
+            control.publish(kernel_listing_snapshot(Some(picked)));
+            let mut window = tall_window(app);
+            window.run();
+            open_kernel_modules(&mut window);
+            let tcpip = row_center(&window, "tcpip.sys");
+            single_click(&mut window, tcpip);
+            window.run();
+            window.get_by_label("Exports").click();
+            window.run();
+            let shows = |window: &Harness<'_, Window>, text: &str| {
+                window
+                    .query_all_by(|node| node.label().is_some_and(|label| label.contains(text)))
+                    .next()
+                    .is_some()
+            };
+            assert!(shows(&window, "IoCreateDevice"));
+            assert!(shows(&window, "HAL.HalFoo"), "a forwarder shows where it leads");
+            window
+                .get_by_role_and_label(egui::accesskit::Role::TextInput, EXPORT_FILTER)
+                .click();
+            window.run();
+            window
+                .get_by_role_and_label(egui::accesskit::Role::TextInput, EXPORT_FILTER)
+                .type_text("wait");
+            window.run();
+            assert!(shows(&window, "KeWaitForSingleObject"));
+            assert!(!shows(&window, "IoCreateDevice"), "filtered out");
+        }
+
+        /// The Processes tab draws its lists whatever the window's size: the
+        /// grid where there is room, two columns or one where the page
+        /// scrolls.
+        #[test]
+        fn the_processes_tab_lists_in_every_layout() {
+            for size in [
+                egui::vec2(1400.0, 900.0),
+                LANDSCAPE_PHONE,
+                NARROW_PAGE,
+            ] {
+                let (mut app, _command_rx, _scratch) = native_test_app();
+                let control = paused_vm(&mut app);
+                control.publish(process_listing_snapshot());
+                let mut window = window_of_size(app, size);
+                window.run();
+                open_debugger(&mut window);
+                window.get_by_label("Processes").click();
+                window.run();
+                let shows = |window: &Harness<'_, Window>, text: &str| {
+                    window
+                        .query_all_by(|node| {
+                            node.label().is_some_and(|label| label.contains(text))
+                        })
+                        .next()
+                        .is_some()
+                };
+                assert!(shows(&window, "smss.exe"), "no process row in a window {size:?}");
+                assert!(shows(&window, "ntdll.dll"), "no module row in a window {size:?}");
+            }
+        }
+
+        /// The row (by a substring of its accessible label) and the centre to
+        /// click it at.
+        fn row_center(window: &Harness<'_, Window>, text: &str) -> egui::Pos2 {
+            window
+                .query_all_by(|node| node.label().is_some_and(|label| label.contains(text)))
+                .next()
+                .unwrap_or_else(|| panic!("no row showing {text}"))
+                .rect()
+                .center()
+        }
+
+        /// Steps past egui's triple-click window since the last click, so the
+        /// next two clicks are a plain double-click.
+        fn let_clicks_settle(window: &mut Harness<'_, Window>) {
+            for _ in 0..45 {
+                window.step();
+            }
+        }
+
+        /// Double-clicking a process that is not running opens the CPU tab
+        /// asking to look from inside it.
+        #[test]
+        fn double_clicking_a_process_opens_the_cpu_tab_viewing_it() {
+            use crate::debugger::inspect::ViewContext;
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_vm(&mut app);
+            control.publish(process_listing_snapshot());
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            window.get_by_label("Processes").click();
+            window.run();
+            let_clicks_settle(&mut window);
+            let system = row_center(&window, "System");
+            double_click(&mut window, system);
+            window.run();
+            assert_eq!(
+                control.view().context,
+                ViewContext::Process { eprocess: 0xFFFF_FA80_0000_1000 }
+            );
+            assert!(window.query_by_label("Registers").is_some(), "the CPU tab is shown");
+        }
+
+        /// A double-click on a row straight after a click elsewhere (here the
+        /// tab that showed the list) opens it: egui counts the row's second
+        /// click as a triple when the click before last came within 0.6 s,
+        /// and a triple holds the double-click.
+        #[test]
+        fn a_double_click_right_after_another_click_still_opens_the_row() {
+            use crate::debugger::inspect::ViewContext;
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_vm(&mut app);
+            control.publish(process_listing_snapshot());
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            let_clicks_settle(&mut window);
+            window.get_by_label("Processes").click();
+            window.step();
+            window.step();
+            let system = row_center(&window, "System");
+            double_click(&mut window, system);
+            window.run();
+            assert_eq!(
+                control.view().context,
+                ViewContext::Process { eprocess: 0xFFFF_FA80_0000_1000 }
+            );
+        }
+
+        /// Double-clicking the process the processor runs opens the plain live
+        /// view: there is no other state of it to look from.
+        #[test]
+        fn double_clicking_the_running_process_opens_the_live_view() {
+            use crate::debugger::inspect::ViewContext;
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_vm(&mut app);
+            control.publish(process_listing_snapshot());
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            window.get_by_label("Processes").click();
+            window.run();
+            let_clicks_settle(&mut window);
+            // smss.exe is the running process in this listing.
+            let smss = row_center(&window, "smss.exe");
+            double_click(&mut window, smss);
+            window.run();
+            assert_eq!(control.view().context, ViewContext::Live);
+            assert!(window.query_by_label("Registers").is_some(), "the CPU tab is shown");
+        }
+
+        /// Asked to look from a process that turns out to be the running one,
+        /// the page shows the live processor and says so, with the way back.
+        #[test]
+        fn a_viewed_process_that_is_running_shows_the_live_cpu_and_says_so() {
+            use crate::debugger::inspect::{ViewContext, Viewing};
+            use crate::shell::debugger_page::BACK_TO_LIVE;
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_vm(&mut app);
+            let mut snapshot = paused_snapshot();
+            snapshot.context = ViewContext::Process { eprocess: 0xFFFF_FA80_0000_3000 };
+            snapshot.viewing = Viewing::Running { process: "winlogon.exe".to_owned() };
+            control.publish(snapshot);
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            assert!(
+                window
+                    .query_all_by(|node| node.label().or(node.value()).is_some_and(|text| {
+                        text.contains("winlogon.exe") && text.contains("live CPU")
+                    }))
+                    .next()
+                    .is_some(),
+                "the banner says the live CPU is shown"
+            );
+            assert!(!window.get_by_label("Step").accesskit_node().is_disabled());
+            assert!(window.query_by_label(BACK_TO_LIVE).is_some());
+        }
+
+        /// A split dragged in a wide window still leaves every pane its
+        /// minimum once the window is made narrower.
+        #[test]
+        fn a_narrowed_window_keeps_every_pane_its_minimum() {
+            use crate::shell::debugger_page::RESIZE_COLUMNS;
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            paused_vm(&mut app);
+            let mut window = window_of_size(app, egui::vec2(2600.0, 1200.0));
+            window.run();
+            open_debugger(&mut window);
+            let handle = window.get_by_label(RESIZE_COLUMNS).rect().center();
+            drag(&mut window, handle, handle + egui::vec2(1500.0, 0.0));
+            window.run();
+            window.set_size(egui::vec2(1200.0, 1200.0));
+            window.run();
+            // The right column (Registers) keeps at least its minimum width:
+            // its title sits no closer to the page's right edge than that.
+            let registers = window.get_by_label("Registers").rect();
+            assert!(
+                registers.left() <= 1200.0 - 96.0,
+                "Registers at {registers:?} is squeezed past its minimum"
+            );
+        }
+
+        /// Double-clicking a thread asks to look from inside that thread.
+        #[test]
+        fn double_clicking_a_thread_views_that_thread() {
+            use crate::debugger::inspect::ViewContext;
+            use crate::debugger::threads::WinThread;
+            use crate::debugger::windows::SystemListing;
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_vm(&mut app);
+            let mut snapshot = process_listing_snapshot();
+            if let SystemListing::Processes(listing) = &mut snapshot.system {
+                if let Some(modules) = listing.modules.as_mut() {
+                    modules.threads.push(WinThread {
+                        tid: 0x424,
+                        start: 0x7FF7_0000_1000,
+                        teb: Some(0x7FF_FFFD_E000),
+                        stack: Some(rusty_box::cpu::LinearRange { start: 0x10_0000, end: 0x20_0000 }),
+                        uses_fibers: false,
+                        saved: None,
+                    });
+                }
+            }
+            control.publish(snapshot);
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            window.get_by_label("Processes").click();
+            window.run();
+            window.get_by_label("Threads").click();
+            window.run();
+            let_clicks_settle(&mut window);
+            // 0x424 is thread 1060.
+            let row = row_center(&window, "1060");
+            double_click(&mut window, row);
+            window.run();
+            assert_eq!(
+                control.view().context,
+                ViewContext::Thread { eprocess: 0xFFFF_FA80_0000_2000, tid: 0x424 }
+            );
+        }
+
+        /// Opens the Processes tab; its lists take the keys from the next
+        /// frame on.
+        fn open_processes(window: &mut Harness<'_, Window>) {
+            open_debugger(window);
+            window.get_by_label("Processes").click();
+            window.run();
+        }
+
+        /// One press of `key`, then the frames it causes.
+        fn press_key(window: &mut Harness<'_, Window>, key: egui::Key) {
+            window.key_press(key);
+            window.run();
+        }
+
+        fn press_shift_tab(window: &mut Harness<'_, Window>) {
+            window.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::Tab);
+            window.run();
+        }
+
+        /// System's and smss.exe's EPROCESS in `process_listing_snapshot`.
+        const SYSTEM_EPROCESS: u64 = 0xFFFF_FA80_0000_1000;
+        const SMSS_EPROCESS: u64 = 0xFFFF_FA80_0000_2000;
+
+        /// Up and Down pick the process above or below the one shown.
+        #[test]
+        fn the_arrow_keys_pick_the_process_above_or_below() {
+            use crate::debugger::windows::{ProcessDetail, SystemView};
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_vm(&mut app);
+            control.publish(process_listing_snapshot());
+            let mut window = tall_window(app);
+            window.run();
+            open_processes(&mut window);
+            // smss.exe, under System in the tree, is the process shown.
+            press_key(&mut window, egui::Key::ArrowUp);
+            assert_eq!(
+                control.view().system,
+                SystemView::Processes {
+                    selected: Some(SYSTEM_EPROCESS),
+                    detail: ProcessDetail::Modules,
+                }
+            );
+            press_key(&mut window, egui::Key::ArrowDown);
+            assert_eq!(
+                control.view().system,
+                SystemView::Processes {
+                    selected: Some(SMSS_EPROCESS),
+                    detail: ProcessDetail::Modules,
+                }
+            );
+        }
+
+        /// Enter on the picked process does what a double-click does.
+        #[test]
+        fn enter_views_the_picked_process_from_inside() {
+            use crate::debugger::inspect::ViewContext;
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_vm(&mut app);
+            control.publish(process_listing_snapshot());
+            let mut window = tall_window(app);
+            window.run();
+            open_processes(&mut window);
+            press_key(&mut window, egui::Key::ArrowUp);
+            press_key(&mut window, egui::Key::Enter);
+            assert_eq!(
+                control.view().context,
+                ViewContext::Process { eprocess: SYSTEM_EPROCESS }
+            );
+            assert!(window.query_by_label("Registers").is_some(), "the CPU tab is shown");
+        }
+
+        /// Tab moves the keys to the card beside the list: Down stands on its
+        /// first row and Enter opens that module in memory.
+        #[test]
+        fn tab_moves_the_keys_to_the_modules_and_enter_opens_one() {
+            use crate::debugger::inspect::{AddressSpace, GuestAddress, MemoryTarget};
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_vm(&mut app);
+            control.publish(process_listing_snapshot());
+            let mut window = tall_window(app);
+            window.run();
+            open_processes(&mut window);
+            press_key(&mut window, egui::Key::Tab);
+            press_key(&mut window, egui::Key::ArrowDown);
+            press_key(&mut window, egui::Key::Enter);
+            assert_eq!(
+                control.view().memory,
+                MemoryTarget::At(GuestAddress {
+                    space: AddressSpace::Linear,
+                    value: 0x7FF0_0000_0000,
+                })
+            );
+            assert!(window.query_by_label("Registers").is_some(), "the CPU tab is shown");
+        }
+
+        /// Tab again gives the keys back to the process list.
+        #[test]
+        fn a_second_tab_gives_the_keys_back_to_the_list() {
+            use crate::debugger::windows::{ProcessDetail, SystemView};
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_vm(&mut app);
+            control.publish(process_listing_snapshot());
+            let mut window = tall_window(app);
+            window.run();
+            open_processes(&mut window);
+            press_key(&mut window, egui::Key::Tab);
+            press_key(&mut window, egui::Key::Tab);
+            press_key(&mut window, egui::Key::ArrowUp);
+            assert_eq!(
+                control.view().system,
+                SystemView::Processes {
+                    selected: Some(SYSTEM_EPROCESS),
+                    detail: ProcessDetail::Modules,
+                }
+            );
+        }
+
+        /// Shift+Tab shows the detail views in turn, as the switch orders
+        /// them: modules, memory map, threads, and round again.
+        #[test]
+        fn shift_tab_shows_the_next_detail_view() {
+            use crate::debugger::windows::{ProcessDetail, SystemView};
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_vm(&mut app);
+            control.publish(process_listing_snapshot());
+            let mut window = tall_window(app);
+            window.run();
+            open_processes(&mut window);
+            for detail in [ProcessDetail::MemoryMap, ProcessDetail::Threads, ProcessDetail::Modules] {
+                press_shift_tab(&mut window);
+                assert_eq!(
+                    control.view().system,
+                    SystemView::Processes { selected: None, detail },
+                    "after Shift+Tab"
+                );
+            }
+        }
+
+        /// Keys typed into a filter are the filter's: Up does not pick a
+        /// process while the field has them.
+        #[test]
+        fn the_keys_of_a_filter_being_typed_in_stay_in_it() {
+            use crate::debugger::windows::{ProcessDetail, SystemView};
+            use crate::shell::debugger_page::FILTER;
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_vm(&mut app);
+            control.publish(process_listing_snapshot());
+            let mut window = tall_window(app);
+            window.run();
+            open_processes(&mut window);
+            window
+                .get_by_role_and_label(egui::accesskit::Role::TextInput, FILTER)
+                .click();
+            window.run();
+            press_key(&mut window, egui::Key::ArrowUp);
+            press_key(&mut window, egui::Key::Tab);
+            assert_eq!(
+                control.view().system,
+                SystemView::Processes { selected: None, detail: ProcessDetail::Modules }
+            );
+        }
+
+        /// In the memory map Enter opens a module's row to show its sections
+        /// under it, the keys walk on into them, and Enter on one opens it in
+        /// memory.
+        #[test]
+        fn the_keys_open_a_module_in_the_memory_map_and_walk_into_its_sections() {
+            use crate::debugger::inspect::{AddressSpace, GuestAddress, MemoryTarget};
+            use crate::debugger::memory_map::{MapOrigin, MapRegion, MemoryMap, RegionOwner};
+            use crate::debugger::windows::SystemListing;
+            const NTDLL: u64 = 0x7FF0_0000_0000;
+            let region = |start: u64, owner: RegionOwner| MapRegion {
+                start,
+                size: 0x1000,
+                resident_pages: 1,
+                total_pages: 1,
+                access: None,
+                owner,
+                vad: None,
+            };
+            let mut snapshot = process_listing_snapshot();
+            if let SystemListing::Processes(listing) = &mut snapshot.system {
+                if let Some(modules) = listing.modules.as_mut() {
+                    modules.map = Some(MemoryMap {
+                        origin: MapOrigin::PageTables,
+                        regions: vec![
+                            region(0x1_0000, RegionOwner::Private),
+                            region(
+                                NTDLL,
+                                RegionOwner::Header { base: NTDLL, module: "ntdll.dll".to_owned() },
+                            ),
+                            region(
+                                NTDLL + 0x1000,
+                                RegionOwner::Section {
+                                    base: NTDLL,
+                                    module: "ntdll.dll".to_owned(),
+                                    section: ".text".to_owned(),
+                                },
+                            ),
+                        ],
+                    });
+                }
+            }
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_vm(&mut app);
+            control.publish(snapshot);
+            let mut window = tall_window(app);
+            window.run();
+            open_processes(&mut window);
+            press_shift_tab(&mut window);
+            press_key(&mut window, egui::Key::Tab);
+            // The private region, then ntdll's module row.
+            press_key(&mut window, egui::Key::ArrowDown);
+            press_key(&mut window, egui::Key::ArrowDown);
+            press_key(&mut window, egui::Key::Enter);
+            assert!(
+                window
+                    .query_all_by(|node| node.label().is_some_and(|label| label.contains(".text")))
+                    .next()
+                    .is_some(),
+                "the module opened to show its sections"
+            );
+            // Its header, then its .text.
+            press_key(&mut window, egui::Key::ArrowDown);
+            press_key(&mut window, egui::Key::ArrowDown);
+            press_key(&mut window, egui::Key::Enter);
+            assert_eq!(
+                control.view().memory,
+                MemoryTarget::At(GuestAddress {
+                    space: AddressSpace::Linear,
+                    value: NTDLL + 0x1000,
+                })
+            );
+        }
+
+        /// Down picks the drivers in turn from the top, Shift+Tab switches
+        /// the picked one to its exports, and Enter opens it in memory.
+        #[test]
+        fn the_keys_pick_a_kernel_module_show_its_exports_and_open_it() {
+            use crate::debugger::inspect::{AddressSpace, GuestAddress, MemoryTarget};
+            use crate::debugger::windows::{KernelDetail, SystemView};
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_vm(&mut app);
+            control.publish(kernel_listing_snapshot(None));
+            let mut window = tall_window(app);
+            window.run();
+            open_kernel_modules(&mut window);
+            press_key(&mut window, egui::Key::ArrowDown);
+            assert_eq!(
+                control.view().system,
+                SystemView::KernelModules {
+                    selected: Some(0xFFFF_F800_0100_0000),
+                    detail: KernelDetail::Sections,
+                }
+            );
+            press_key(&mut window, egui::Key::ArrowDown);
+            press_shift_tab(&mut window);
+            assert_eq!(
+                control.view().system,
+                SystemView::KernelModules {
+                    selected: Some(TCPIP_BASE),
+                    detail: KernelDetail::Exports,
+                }
+            );
+            press_key(&mut window, egui::Key::Enter);
+            assert_eq!(
+                control.view().memory,
+                MemoryTarget::At(GuestAddress {
+                    space: AddressSpace::Linear,
+                    value: TCPIP_BASE,
+                })
+            );
+        }
+
+        /// A pick moved by the keys past the bottom of the list is scrolled
+        /// into view.
+        #[test]
+        fn a_pick_moved_by_the_keys_is_scrolled_into_view() {
+            use crate::debugger::windows::{KernelListing, ModuleBits, SystemListing, WinModule};
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_vm(&mut app);
+            let mut snapshot = paused_snapshot();
+            snapshot.system = SystemListing::KernelModules(KernelListing {
+                modules: (0..300u64)
+                    .map(|n| WinModule {
+                        base: 0xFFFF_F880_0000_0000 + n * 0x10_0000,
+                        size: 0x1_0000,
+                        name: Some(format!("drv{n:03}.sys")),
+                        path: None,
+                        bits: ModuleBits::Bits64,
+                    })
+                    .collect(),
+                picked: None,
+            });
+            control.publish(snapshot);
+            let size = egui::vec2(1400.0, 700.0);
+            let mut window = window_of_size(app, size);
+            window.run();
+            open_kernel_modules(&mut window);
+            for _ in 0..250 {
+                window.key_press(egui::Key::ArrowDown);
+            }
+            window.run();
+            let row = window
+                .query_all_by(|node| node.label().is_some_and(|label| label.contains("drv249.sys")))
+                .next()
+                .expect("the picked row is drawn")
+                .rect();
+            assert!(
+                row.top() >= 0.0 && row.bottom() <= size.y,
+                "the picked row at {row:?} is out of a window {size:?}"
+            );
+        }
+
+        /// A snapshot looking from a thread inside winlogon.exe.
+        fn viewed_snapshot() -> crate::debugger::inspect::DebugSnapshot {
+            use crate::debugger::inspect::{SymbolIndex, ViewContext, Viewing};
+            use crate::debugger::threads::{decode_trap_frame, TRAP_FRAME_BYTES};
+            use crate::debugger::windows::ThreadView;
+            let mut saved = decode_trap_frame(&[0u8; TRAP_FRAME_BYTES]);
+            saved.rip = 0x7FF7_0001_2345;
+            saved.rsp = 0x1F_F000;
+            saved.cs = 0x33;
+            saved.ss = 0x2B;
+            let mut snapshot = paused_snapshot();
+            snapshot.context = ViewContext::Thread { eprocess: 0xFFFF_FA80_0000_3000, tid: 0x1F4 };
+            snapshot.viewing = Viewing::Thread(ThreadView {
+                process: "winlogon.exe".to_owned(),
+                pid: 0x1E0,
+                tid: 0x1F4,
+                cr3: 0x3000,
+                saved,
+                symbols: SymbolIndex::default(),
+            });
+            snapshot
+        }
+
+        /// Looking from a thread says so, shows its saved RIP, turns Step off,
+        /// and "Back to live CPU" asks for the live processor again.
+        #[test]
+        fn a_viewed_thread_shows_its_banner_saved_registers_and_no_step() {
+            use crate::debugger::inspect::ViewContext;
+            use crate::shell::debugger_page::BACK_TO_LIVE;
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_vm(&mut app);
+            control.publish(viewed_snapshot());
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            let shows = |window: &Harness<'_, Window>, text: &str| {
+                window
+                    .query_all_by(|node| {
+                        node.label().or(node.value()).is_some_and(|label| label.contains(text))
+                    })
+                    .next()
+                    .is_some()
+            };
+            assert!(shows(&window, "Viewing winlogon.exe"), "the banner names the process");
+            assert!(shows(&window, "thread 500"), "and the thread (0x1F4)");
+            assert!(shows(&window, "00007FF700012345"), "the saved RIP is shown");
+            assert!(window.get_by_label("Step").accesskit_node().is_disabled());
+            window.get_by_label(BACK_TO_LIVE).click();
+            window.run();
+            assert_eq!(control.view().context, ViewContext::Live);
+        }
+
+        /// A process that cannot be looked from says why, with the way back.
+        #[test]
+        fn a_process_that_cannot_be_viewed_says_why() {
+            use crate::debugger::inspect::{ViewContext, Viewing};
+            use crate::debugger::windows::ViewMiss;
+            use crate::shell::debugger_page::BACK_TO_LIVE;
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_vm(&mut app);
+            let mut snapshot = paused_snapshot();
+            snapshot.context = ViewContext::Process { eprocess: 0xFFFF_FA80_0000_1000 };
+            snapshot.viewing = Viewing::Miss(ViewMiss::NoSavedState);
+            control.publish(snapshot);
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            assert!(window.query_by_label(&ViewMiss::NoSavedState.describe()).is_some());
+            assert!(window.query_by_label(BACK_TO_LIVE).is_some());
+        }
+
+        /// Dragging the gap between the CPU tab's columns widens the left one
+        /// (the Registers pane moves right with it); double-clicking the gap
+        /// puts it back.
+        #[test]
+        fn dragging_the_column_gap_resizes_the_cpu_panes_and_a_double_click_resets() {
+            use crate::shell::debugger_page::RESIZE_COLUMNS;
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            paused_vm(&mut app);
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            let before = window.get_by_label("Registers").rect();
+            let handle = window.get_by_label(RESIZE_COLUMNS).rect().center();
+            drag(&mut window, handle, handle + egui::vec2(120.0, 0.0));
+            window.run();
+            let dragged = window.get_by_label("Registers").rect();
+            assert!(
+                dragged.left() - before.left() >= 100.0,
+                "Registers moved from {before:?} to {dragged:?}"
+            );
+
+            // Past egui's triple-click window (0.6 s) since the last click, so
+            // this is a plain double-click.
+            for _ in 0..45 {
+                window.step();
+            }
+            let handle = window.get_by_label(RESIZE_COLUMNS).rect().center();
+            double_click(&mut window, handle);
+            window.run();
+            let reset = window.get_by_label("Registers").rect();
+            assert!(
+                (reset.left() - before.left()).abs() <= 2.0,
+                "Registers at {reset:?} after the reset, {before:?} before the drag"
+            );
+        }
+
+        /// The Processes list's title sits on the same row as its List/Tree
+        /// switch, not above it, so the list keeps that row of height.
+        #[test]
+        fn the_process_list_title_shares_the_controls_row() {
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_vm(&mut app);
+            control.publish(process_listing_snapshot());
+            let mut window = window_of_size(app, egui::vec2(1400.0, 900.0));
+            window.run();
+            open_debugger(&mut window);
+            window.get_by_label("Processes").click();
+            window.run();
+            // The List switch and the "Processes" title are on one row; the
+            // first process row is below them. The title is a Label; the tab
+            // of the same name is a Button.
+            let title = window
+                .get_by_role_and_label(egui::accesskit::Role::Label, "Processes")
+                .rect();
+            let list = window
+                .get_by_role_and_label(egui::accesskit::Role::Button, "List")
+                .rect();
+            let first_row = window
+                .query_all_by(|node| {
+                    node.label().or(node.value()).is_some_and(|t| t.contains("smss.exe"))
+                })
+                .next()
+                .expect("a process row")
+                .rect();
+            assert!(
+                (title.center().y - list.center().y).abs() < 12.0,
+                "title {title:?} is not on the switch's row {list:?}"
+            );
+            assert!(
+                first_row.top() > list.bottom() - 1.0,
+                "the first row {first_row:?} is not below the controls {list:?}"
+            );
         }
 
         fn press(pos: egui::Pos2) -> egui::Event {
@@ -10263,6 +12223,66 @@ mod tests {
         assert_eq!(app.take_close_action(), Some(CloseAction::Quit));
         assert!(!app.any_vm_live());
         drop(run);
+    }
+
+    /// The phone's numeric fields take typed digits. What is typed is taken
+    /// when Enter is pressed, and anything that is not a digit never reaches
+    /// the field.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_number_typed_into_the_phones_field_is_taken_on_enter() {
+        use egui_kittest::{kittest::Queryable, Harness};
+        let mut field = Harness::builder()
+            .with_size(egui::vec2(320.0, 80.0))
+            .build_ui_state(
+                |ui, value: &mut u64| {
+                    typed_number_field(ui, value, 1, 2_000_000_000, "", true);
+                },
+                3_u64,
+            );
+        field.run();
+        field.get_by_role(egui::accesskit::Role::TextInput).click();
+        field.run();
+        field.get_by_role(egui::accesskit::Role::TextInput).type_text("x0y0");
+        field.run();
+        field.key_press(egui::Key::Enter);
+        field.run();
+
+        assert_eq!(*field.state(), 300);
+    }
+
+    /// A number past the field's range is cut to it; a field left with no
+    /// digits in it keeps the value it had.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_typed_number_past_the_range_is_cut_to_it() {
+        use egui_kittest::{kittest::Queryable, Harness};
+        let mut field = Harness::builder()
+            .with_size(egui::vec2(320.0, 80.0))
+            .build_ui_state(
+                |ui, value: &mut u64| {
+                    typed_number_field(ui, value, 1, 2_000_000_000, "", true);
+                },
+                3_u64,
+            );
+        field.run();
+        field.get_by_role(egui::accesskit::Role::TextInput).click();
+        field.run();
+        field
+            .get_by_role(egui::accesskit::Role::TextInput)
+            .type_text("9999999999");
+        field.run();
+        field.key_press(egui::Key::Enter);
+        field.run();
+        assert_eq!(*field.state(), 2_000_000_000);
+
+        field.get_by_role(egui::accesskit::Role::TextInput).click();
+        field.run();
+        field.get_by_role(egui::accesskit::Role::TextInput).type_text("x");
+        field.run();
+        field.key_press(egui::Key::Enter);
+        field.run();
+        assert_eq!(*field.state(), 2_000_000_000, "no digit typed, nothing changed");
     }
 
     /// The phone's console menu opens at its top. Scrolled to its end when

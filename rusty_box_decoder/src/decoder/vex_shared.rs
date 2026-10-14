@@ -142,14 +142,12 @@ const VEX_POPULATED_SLOTS: [[u64; 4]; 3] = [
 /// Upstream resolves a VEX encoding against `BxOpcodeTableVEX` and nothing
 /// else, so a byte with no group there is `BxOpcodeGroup_ERR` — a guest #UD.
 /// This port shares the legacy SSE tables with the VEX path instead, and those
-/// hold entries for bytes that have no VEX form at all. Without this test
-/// `VEX.0F 80` matched the `JO rel32` entry and the guest took a *branch*
-/// instead of the #UD it had earned; `0F A4`/`0F AC` matched SHLD/SHRD and
-/// `0F BA` the BT group, each of them also consuming an immediate that was not
-/// there.
+/// hold entries for bytes that have no VEX form at all: `0F 80` is `JO rel32`,
+/// `0F A4`/`0F AC` are SHLD/SHRD and `0F BA` is the BT group, each of which
+/// would also consume an immediate the VEX encoding does not carry.
 ///
-/// Testing the slot before consulting the shared table restores upstream's
-/// shape for the whole class at once, rather than one opcode at a time.
+/// Testing the slot before consulting the shared table gives upstream's #UD
+/// for that whole class at once, rather than one opcode at a time.
 pub(super) const fn vex_slot_populated(opcode_map: u8, opcode_byte: u8) -> bool {
     if opcode_map == VEX_MAP7 {
         return matches!(opcode_byte, 0xF6 | 0xF8);
@@ -383,9 +381,9 @@ pub(super) const fn validate_evex_b(opcode: Opcode, mod_c0: bool) -> DecodeResul
 ///
 /// Those entries carry no VEX-specific attributes, so nothing in the table
 /// constrains vector length or ModRM form; Bochs states the limits in its
-/// separate VEX groups (`fetchdecode_opmap_avx.cc`). The decoded *results* are
-/// already correct — this supplies the reserved-encoding `#UD` that was
-/// missing. Only called on the VEX path, so legacy encodings are unaffected.
+/// separate VEX groups (`fetchdecode_opmap_avx.cc`). The decoded *results*
+/// match Bochs; this supplies the reserved-encoding `#UD`. Only called on the
+/// VEX path, so legacy encodings are unaffected.
 pub(super) const fn validate_vex_legacy_form(
     opcode: Opcode,
     vex_l: u8,
@@ -455,6 +453,29 @@ pub(super) const fn validate_vex_legacy_form(
             | RdgsbaseEq
             | WrgsbaseEd
             | WrgsbaseEq
+    ) {
+        return Err(DecodeError::Decoder(BxDecodeError::BxIllegalOpcode));
+    }
+
+    // No row of Bochs's fetchdecode_opmap_avx.cc `BxOpcodeTableVEX` decodes to
+    // a BX_PREPARE_MMX opcode or to an opcode with an MMX-register operand.
+    // The shared legacy table holds such forms at bytes that also carry VEX
+    // rows, so a VEX encoding that reaches one is refused here: the MMX-state
+    // opcodes by class, and the SSE-state conversions and moves whose other
+    // operand is an MMX register by name.
+    if matches!(
+        crate::opcode_isa::opcode_state(opcode),
+        crate::opcode_isa::CpuState::Mmx
+    ) || matches!(
+        opcode,
+        Cvtpi2psVpsQq
+            | Cvtpi2pdVpdQq
+            | Cvttps2piPqWps
+            | Cvttpd2piPqWpd
+            | Cvtps2piPqWps
+            | Cvtpd2piPqWpd
+            | Movq2dqVdqQq
+            | Movdq2qPqUdq
     ) {
         return Err(DecodeError::Decoder(BxDecodeError::BxIllegalOpcode));
     }
@@ -1984,5 +2005,42 @@ mod tests {
             "a VEX encoding decoded to a legacy opcode that remap_sse_to_vex \
              would have rewritten, meaning the remap never ran for it: {leaked:02X?}"
         );
+    }
+
+    /// No row of Bochs's fetchdecode_opmap_avx.cc `BxOpcodeTableVEX` decodes to
+    /// a BX_PREPARE_MMX opcode or to an opcode with an MMX-register operand,
+    /// so no VEX encoding may decode to one here, in either mode. Every
+    /// ModRM.reg value is swept, which reaches the reg-selected MMX groups
+    /// (the shift-by-immediate forms at `0F 71/72/73`).
+    #[test]
+    fn vex_never_decodes_to_an_mmx_register_form() {
+        use crate::decoder::decode32::fetch_decode32;
+        use crate::opcode_isa::{opcode_state, CpuState};
+        const MMX_OPERAND_SSE_FORMS: [Opcode; 8] = [
+            Opcode::Cvtpi2psVpsQq,
+            Opcode::Cvtpi2pdVpdQq,
+            Opcode::Cvttps2piPqWps,
+            Opcode::Cvttpd2piPqWpd,
+            Opcode::Cvtps2piPqWps,
+            Opcode::Cvtpd2piPqWpd,
+            Opcode::Movq2dqVdqQq,
+            Opcode::Movdq2qPqUdq,
+        ];
+        for map in 1..=3u8 {
+            for opcode in 0..=255u8 {
+                for_each_encoding(map, opcode, |bytes| {
+                    for decoded in [fetch_decode64(bytes), fetch_decode32(bytes, true)] {
+                        if let Ok(instr) = decoded {
+                            let op = instr.get_ia_opcode();
+                            assert!(
+                                !matches!(opcode_state(op), CpuState::Mmx)
+                                    && !MMX_OPERAND_SSE_FORMS.contains(&op),
+                                "VEX {bytes:02X?} decoded the MMX form {op:?}"
+                            );
+                        }
+                    }
+                });
+            }
+        }
     }
 }

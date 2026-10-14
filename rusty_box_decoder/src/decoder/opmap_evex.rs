@@ -108,10 +108,10 @@ static EVEX_0F29: &[u64] = &[
 ];
 
 static EVEX_0F2A: &[u64] = &[
-    form_opcode(A::VEX_W0.union(A::MASK_K0).union(A::SSE_PREFIX_F3), Opcode::EvexVcvtsi2ssVssEd),
     form_opcode(A::VEX_W1.union(A::MASK_K0).union(A::SSE_PREFIX_F3).union(A::IS64), Opcode::EvexVcvtsi2ssVssEq),
-    form_opcode(A::VEX_W0.union(A::MASK_K0).union(A::SSE_PREFIX_F2), Opcode::EvexVcvtsi2sdVsdEd),
+    form_opcode(A::MASK_K0.union(A::SSE_PREFIX_F3), Opcode::EvexVcvtsi2ssVssEd),
     form_opcode(A::VEX_W1.union(A::MASK_K0).union(A::SSE_PREFIX_F2).union(A::IS64), Opcode::EvexVcvtsi2sdVsdEq),
+    form_opcode(A::MASK_K0.union(A::SSE_PREFIX_F2), Opcode::EvexVcvtsi2sdVsdEd),
 ];
 
 static EVEX_0F2B: &[u64] = &[
@@ -120,17 +120,17 @@ static EVEX_0F2B: &[u64] = &[
 ];
 
 static EVEX_0F2C: &[u64] = &[
-    form_opcode(A::VEX_W0.union(A::MASK_K0).union(A::SSE_PREFIX_F3), Opcode::EvexVcvttss2siGdWss),
     form_opcode(A::VEX_W1.union(A::MASK_K0).union(A::SSE_PREFIX_F3).union(A::IS64), Opcode::EvexVcvttss2siGqWss),
-    form_opcode(A::VEX_W0.union(A::MASK_K0).union(A::SSE_PREFIX_F2), Opcode::EvexVcvttsd2siGdWsd),
+    form_opcode(A::MASK_K0.union(A::SSE_PREFIX_F3), Opcode::EvexVcvttss2siGdWss),
     form_opcode(A::VEX_W1.union(A::MASK_K0).union(A::SSE_PREFIX_F2).union(A::IS64), Opcode::EvexVcvttsd2siGqWsd),
+    form_opcode(A::MASK_K0.union(A::SSE_PREFIX_F2), Opcode::EvexVcvttsd2siGdWsd),
 ];
 
 static EVEX_0F2D: &[u64] = &[
-    form_opcode(A::VEX_W0.union(A::MASK_K0).union(A::SSE_PREFIX_F3), Opcode::EvexVcvtss2siGdWss),
     form_opcode(A::VEX_W1.union(A::MASK_K0).union(A::SSE_PREFIX_F3).union(A::IS64), Opcode::EvexVcvtss2siGqWss),
-    form_opcode(A::VEX_W0.union(A::MASK_K0).union(A::SSE_PREFIX_F2), Opcode::EvexVcvtsd2siGdWsd),
+    form_opcode(A::MASK_K0.union(A::SSE_PREFIX_F3), Opcode::EvexVcvtss2siGdWss),
     form_opcode(A::VEX_W1.union(A::MASK_K0).union(A::SSE_PREFIX_F2).union(A::IS64), Opcode::EvexVcvtsd2siGqWsd),
+    form_opcode(A::MASK_K0.union(A::SSE_PREFIX_F2), Opcode::EvexVcvtsd2siGdWsd),
 ];
 
 static EVEX_0F2E: &[u64] = &[
@@ -229,10 +229,10 @@ static EVEX_0F3818: &[u64] = &[
 ];
 
 static EVEX_0F3819: &[u64] = &[
-    form_opcode(A::SSE_PREFIX_66.union(A::VEX_W0).union(A::MASK_K0), Opcode::EvexVbroadcastf32x2VpsWq),
-    form_opcode(A::SSE_PREFIX_66.union(A::VEX_W0), Opcode::EvexVbroadcastf32x2VpsWqKmask),
-    form_opcode(A::SSE_PREFIX_66.union(A::VEX_W1).union(A::MASK_K0), Opcode::EvexVbroadcastsdVpdWsd),
-    form_opcode(A::SSE_PREFIX_66.union(A::VEX_W1), Opcode::EvexVbroadcastsdVpdWsdKmask),
+    form_opcode(A::SSE_PREFIX_66.union(A::VEX_W0).union(A::VL256_512).union(A::MASK_K0), Opcode::EvexVbroadcastf32x2VpsWq),
+    form_opcode(A::SSE_PREFIX_66.union(A::VEX_W0).union(A::VL256_512), Opcode::EvexVbroadcastf32x2VpsWqKmask),
+    form_opcode(A::SSE_PREFIX_66.union(A::VEX_W1).union(A::VL256_512).union(A::MASK_K0), Opcode::EvexVbroadcastsdVpdWsd),
+    form_opcode(A::SSE_PREFIX_66.union(A::VEX_W1).union(A::VL256_512), Opcode::EvexVbroadcastsdVpdWsdKmask),
 ];
 
 static EVEX_0F381A: &[u64] = &[
@@ -471,6 +471,11 @@ static EVEX_0F3840: &[u64] = &[
     form_opcode(A::SSE_PREFIX_66.union(A::VEX_W0), Opcode::EvexVpmulldVdqHdqWdqKmask),
     form_opcode(A::SSE_PREFIX_66.union(A::VEX_W1).union(A::MASK_K0), Opcode::EvexVpmullqVdqHdqWdq),
     form_opcode(A::SSE_PREFIX_66.union(A::VEX_W1), Opcode::EvexVpmullqVdqHdqWdqKmask),
+];
+
+static EVEX_0F3841: &[u64] = &[
+    form_opcode(A::SSE_PREFIX_F3.union(A::VEX_W0).union(A::MASK_K0), Opcode::EvexVpmovssdbWdqVdq),
+    form_opcode(A::SSE_PREFIX_F3.union(A::VEX_W0), Opcode::EvexVpmovssdbWdqVdqKmask),
 ];
 
 static EVEX_0F3842: &[u64] = &[
@@ -1109,8 +1114,8 @@ static EVEX_0F3A15: &[u64] = &[
 ];
 
 static EVEX_0F3A16: &[u64] = &[
-    form_opcode(A::SSE_PREFIX_66.union(A::VL128).union(A::VEX_W0).union(A::MASK_K0), Opcode::EvexVpextrdEdVdqIb),
     form_opcode(A::SSE_PREFIX_66.union(A::VL128).union(A::VEX_W1).union(A::MASK_K0).union(A::IS64), Opcode::EvexVpextrqEqVdqIb),
+    form_opcode(A::SSE_PREFIX_66.union(A::VL128).union(A::MASK_K0), Opcode::EvexVpextrdEdVdqIb),
 ];
 
 static EVEX_0F3A17: &[u64] = &[
@@ -1169,8 +1174,8 @@ static EVEX_0F3A21: &[u64] = &[
 ];
 
 static EVEX_0F3A22: &[u64] = &[
-    form_opcode(A::SSE_PREFIX_66.union(A::VL128).union(A::VEX_W0).union(A::MASK_K0), Opcode::EvexVpinsrdVdqEdIb),
     form_opcode(A::SSE_PREFIX_66.union(A::VL128).union(A::VEX_W1).union(A::MASK_K0).union(A::IS64), Opcode::EvexVpinsrqVdqEqIb),
+    form_opcode(A::SSE_PREFIX_66.union(A::VL128).union(A::MASK_K0), Opcode::EvexVpinsrdVdqEdIb),
 ];
 
 static EVEX_0F3A23: &[u64] = &[
@@ -1224,6 +1229,10 @@ static EVEX_0F3A3B: &[u64] = &[
     form_opcode(A::SSE_PREFIX_66.union(A::VL512).union(A::VEX_W0), Opcode::EvexVextracti32x8WdqVdqIbKmask),
     form_opcode(A::SSE_PREFIX_66.union(A::VL512).union(A::VEX_W1).union(A::MASK_K0), Opcode::EvexVextracti64x4WdqVdqIb),
     form_opcode(A::SSE_PREFIX_66.union(A::VL512).union(A::VEX_W1), Opcode::EvexVextracti64x4WdqVdqIbKmask),
+];
+
+static EVEX_0F3A3D: &[u64] = &[
+    form_opcode(A::SSE_NO_PREFIX.union(A::VEX_W0), Opcode::EvexVunpackbVdqWdqIbKmask),
 ];
 
 static EVEX_0F3A3E: &[u64] = &[
@@ -1539,8 +1548,8 @@ static EVEX_0F6D: &[u64] = &[
 ];
 
 static EVEX_0F6E: &[u64] = &[
-    form_opcode(A::VEX_W0.union(A::MASK_K0).union(A::SSE_PREFIX_66).union(A::VL128), Opcode::EvexVmovdVdqEd),
     form_opcode(A::VEX_W1.union(A::MASK_K0).union(A::SSE_PREFIX_66).union(A::VL128).union(A::IS64), Opcode::EvexVmovqVdqEq),
+    form_opcode(A::MASK_K0.union(A::SSE_PREFIX_66).union(A::VL128), Opcode::EvexVmovdVdqEd),
 ];
 
 static EVEX_0F6F: &[u64] = &[
@@ -1625,10 +1634,10 @@ static EVEX_0F78: &[u64] = &[
     form_opcode(A::VEX_W0.union(A::SSE_PREFIX_66), Opcode::EvexVcvttps2uqqVdqWpsKmask),
     form_opcode(A::VEX_W1.union(A::MASK_K0).union(A::SSE_PREFIX_66), Opcode::EvexVcvttpd2uqqVdqWpd),
     form_opcode(A::VEX_W1.union(A::SSE_PREFIX_66), Opcode::EvexVcvttpd2uqqVdqWpdKmask),
-    form_opcode(A::VEX_W0.union(A::MASK_K0).union(A::SSE_PREFIX_F3), Opcode::EvexVcvttss2usiGdWss),
     form_opcode(A::VEX_W1.union(A::MASK_K0).union(A::SSE_PREFIX_F3).union(A::IS64), Opcode::EvexVcvttss2usiGqWss),
-    form_opcode(A::VEX_W0.union(A::MASK_K0).union(A::SSE_PREFIX_F2), Opcode::EvexVcvttsd2usiGdWsd),
+    form_opcode(A::MASK_K0.union(A::SSE_PREFIX_F3), Opcode::EvexVcvttss2usiGdWss),
     form_opcode(A::VEX_W1.union(A::MASK_K0).union(A::SSE_PREFIX_F2).union(A::IS64), Opcode::EvexVcvttsd2usiGqWsd),
+    form_opcode(A::MASK_K0.union(A::SSE_PREFIX_F2), Opcode::EvexVcvttsd2usiGdWsd),
 ];
 
 static EVEX_0F79: &[u64] = &[
@@ -1640,10 +1649,10 @@ static EVEX_0F79: &[u64] = &[
     form_opcode(A::VEX_W0.union(A::SSE_PREFIX_66), Opcode::EvexVcvtps2uqqVdqWpsKmask),
     form_opcode(A::VEX_W1.union(A::MASK_K0).union(A::SSE_PREFIX_66), Opcode::EvexVcvtpd2uqqVdqWpd),
     form_opcode(A::VEX_W1.union(A::SSE_PREFIX_66), Opcode::EvexVcvtpd2uqqVdqWpdKmask),
-    form_opcode(A::VEX_W0.union(A::MASK_K0).union(A::SSE_PREFIX_F3), Opcode::EvexVcvtss2usiGdWss),
     form_opcode(A::VEX_W1.union(A::MASK_K0).union(A::SSE_PREFIX_F3).union(A::IS64), Opcode::EvexVcvtss2usiGqWss),
-    form_opcode(A::VEX_W0.union(A::MASK_K0).union(A::SSE_PREFIX_F2), Opcode::EvexVcvtsd2usiGdWsd),
+    form_opcode(A::MASK_K0.union(A::SSE_PREFIX_F3), Opcode::EvexVcvtss2usiGdWss),
     form_opcode(A::VEX_W1.union(A::MASK_K0).union(A::SSE_PREFIX_F2).union(A::IS64), Opcode::EvexVcvtsd2usiGqWsd),
+    form_opcode(A::MASK_K0.union(A::SSE_PREFIX_F2), Opcode::EvexVcvtsd2usiGdWsd),
 ];
 
 static EVEX_0F7A: &[u64] = &[
@@ -1666,15 +1675,15 @@ static EVEX_0F7B: &[u64] = &[
     form_opcode(A::VEX_W0.union(A::SSE_PREFIX_66), Opcode::EvexVcvtps2qqVdqWpsKmask),
     form_opcode(A::VEX_W1.union(A::MASK_K0).union(A::SSE_PREFIX_66), Opcode::EvexVcvtpd2qqVdqWpd),
     form_opcode(A::VEX_W1.union(A::SSE_PREFIX_66), Opcode::EvexVcvtpd2qqVdqWpdKmask),
-    form_opcode(A::VEX_W0.union(A::MASK_K0).union(A::SSE_PREFIX_F3), Opcode::EvexVcvtusi2ssVssEd),
     form_opcode(A::VEX_W1.union(A::MASK_K0).union(A::SSE_PREFIX_F3).union(A::IS64), Opcode::EvexVcvtusi2ssVssEq),
-    form_opcode(A::VEX_W0.union(A::MASK_K0).union(A::SSE_PREFIX_F2), Opcode::EvexVcvtusi2sdVsdEd),
+    form_opcode(A::MASK_K0.union(A::SSE_PREFIX_F3), Opcode::EvexVcvtusi2ssVssEd),
     form_opcode(A::VEX_W1.union(A::MASK_K0).union(A::SSE_PREFIX_F2).union(A::IS64), Opcode::EvexVcvtusi2sdVsdEq),
+    form_opcode(A::MASK_K0.union(A::SSE_PREFIX_F2), Opcode::EvexVcvtusi2sdVsdEd),
 ];
 
 static EVEX_0F7E: &[u64] = &[
-    form_opcode(A::VEX_W0.union(A::MASK_K0).union(A::SSE_PREFIX_66).union(A::VL128), Opcode::EvexVmovdEdVd),
     form_opcode(A::VEX_W1.union(A::MASK_K0).union(A::SSE_PREFIX_66).union(A::VL128).union(A::IS64), Opcode::EvexVmovqEqVq),
+    form_opcode(A::MASK_K0.union(A::SSE_PREFIX_66).union(A::VL128), Opcode::EvexVmovdEdVd),
     form_opcode(A::VEX_W0.union(A::MASK_K0).union(A::SSE_PREFIX_F3).union(A::VL128), Opcode::EvexVmovdVdWd),
     form_opcode(A::VEX_W1.union(A::MASK_K0).union(A::SSE_PREFIX_F3).union(A::VL128), Opcode::EvexVmovqVqWq),
 ];
@@ -1983,18 +1992,18 @@ static EVEX_MAP5_1E: &[u64] = &[
 ];
 
 static EVEX_MAP5_2A: &[u64] = &[
-    form_opcode(A::VEX_W0.union(A::MASK_K0).union(A::SSE_PREFIX_F3), Opcode::EvexVcvtsi2shVshEd),
     form_opcode(A::VEX_W1.union(A::MASK_K0).union(A::SSE_PREFIX_F3).union(A::IS64), Opcode::EvexVcvtsi2shVshEq),
+    form_opcode(A::MASK_K0.union(A::SSE_PREFIX_F3), Opcode::EvexVcvtsi2shVshEd),
 ];
 
 static EVEX_MAP5_2C: &[u64] = &[
-    form_opcode(A::VEX_W0.union(A::MASK_K0).union(A::SSE_PREFIX_F3), Opcode::EvexVcvttsh2siGdWss),
     form_opcode(A::VEX_W1.union(A::MASK_K0).union(A::SSE_PREFIX_F3).union(A::IS64), Opcode::EvexVcvttsh2siGqWss),
+    form_opcode(A::MASK_K0.union(A::SSE_PREFIX_F3), Opcode::EvexVcvttsh2siGdWss),
 ];
 
 static EVEX_MAP5_2D: &[u64] = &[
-    form_opcode(A::VEX_W0.union(A::MASK_K0).union(A::SSE_PREFIX_F3), Opcode::EvexVcvtsh2siGdWss),
     form_opcode(A::VEX_W1.union(A::MASK_K0).union(A::SSE_PREFIX_F3).union(A::IS64), Opcode::EvexVcvtsh2siGqWss),
+    form_opcode(A::MASK_K0.union(A::SSE_PREFIX_F3), Opcode::EvexVcvtsh2siGdWss),
 ];
 
 static EVEX_MAP5_2E: &[u64] = &[
@@ -2006,6 +2015,52 @@ static EVEX_MAP5_2F: &[u64] = &[
     form_opcode(A::VEX_W0.union(A::MASK_K0).union(A::SSE_NO_PREFIX), Opcode::EvexVcomishVshWsh),
     form_opcode(A::VEX_W0.union(A::MASK_K0).union(A::SSE_PREFIX_66), Opcode::EvexVcomisbf16VshWsh),
     form_opcode(A::VEX_W0.union(A::MASK_K0).union(A::SSE_PREFIX_F3), Opcode::EvexVcomxshVshWsh),
+];
+
+static EVEX_MAP5_36: &[u64] = &[
+    form_opcode(A::SSE_NO_PREFIX.union(A::VEX_W1), Opcode::EvexVcvtbf82psVpsWf8Kmask),
+    form_opcode(A::SSE_NO_PREFIX.union(A::VEX_W0), Opcode::EvexVcvthf82psVpsWf8Kmask),
+];
+
+static EVEX_MAP5_37: &[u64] = &[
+    form_opcode(A::SSE_NO_PREFIX.union(A::VEX_W0), Opcode::EvexVcvtbf42hf8Vf8Wf4Kmask),
+    form_opcode(A::SSE_PREFIX_66.union(A::VEX_W1).union(A::MOD_REG), Opcode::EvexVcvtbf62hf8Vf8Wf6Kmask),
+    form_opcode(A::SSE_PREFIX_66.union(A::VEX_W0).union(A::MOD_REG), Opcode::EvexVcvthf62hf8Vf8Wf6Kmask),
+];
+
+static EVEX_MAP5_38: &[u64] = &[
+    form_opcode(A::SSE_PREFIX_F3.union(A::VEX_W0), Opcode::EvexVcvtps2hf8Vf8WpsKmask),
+    form_opcode(A::SSE_PREFIX_66.union(A::VEX_W0), Opcode::EvexVcvtrops2hf8Vf8WpsKmask),
+    form_opcode(A::SSE_NO_PREFIX.union(A::VEX_W0), Opcode::EvexVcvtbiasps2hf8Vf8HdqWpsKmask),
+];
+
+static EVEX_MAP5_39: &[u64] = &[
+    form_opcode(A::SSE_PREFIX_F3.union(A::VEX_W0), Opcode::EvexVcvtps2bf8Vf8WpsKmask),
+    form_opcode(A::SSE_NO_PREFIX.union(A::VEX_W0), Opcode::EvexVcvtbiasps2bf8Vf8HdqWpsKmask),
+];
+
+static EVEX_MAP5_3A: &[u64] = &[
+    form_opcode(A::SSE_PREFIX_F3.union(A::VEX_W0), Opcode::EvexVcvtps2hf8sVf8WpsKmask),
+    form_opcode(A::SSE_PREFIX_66.union(A::VEX_W0), Opcode::EvexVcvtrops2hf8sVf8WpsKmask),
+    form_opcode(A::SSE_NO_PREFIX.union(A::VEX_W0), Opcode::EvexVcvtbiasps2hf8sVf8HdqWpsKmask),
+];
+
+static EVEX_MAP5_3B: &[u64] = &[
+    form_opcode(A::SSE_PREFIX_F3.union(A::VEX_W0), Opcode::EvexVcvtps2bf8sVf8WpsKmask),
+    form_opcode(A::SSE_NO_PREFIX.union(A::VEX_W0), Opcode::EvexVcvtbiasps2bf8sVf8HdqWpsKmask),
+];
+
+static EVEX_MAP5_3C: &[u64] = &[
+    form_opcode(A::SSE_PREFIX_F3.union(A::VEX_W0).union(A::MASK_K0).union(A::MOD_REG), Opcode::EvexVcvthf82hf6sVf6Wf8),
+];
+
+static EVEX_MAP5_3D: &[u64] = &[
+    form_opcode(A::SSE_PREFIX_F3.union(A::VEX_W0).union(A::MASK_K0), Opcode::EvexVcvthf82bf4sWf4Vdq),
+    form_opcode(A::SSE_PREFIX_F3.union(A::VEX_W1).union(A::MASK_K0), Opcode::EvexVcvtbf82bf4sWf4Vdq),
+];
+
+static EVEX_MAP5_3E: &[u64] = &[
+    form_opcode(A::SSE_PREFIX_F3.union(A::VEX_W1).union(A::MASK_K0).union(A::MOD_REG), Opcode::EvexVcvtbf82bf6sVf6Wf8),
 ];
 
 static EVEX_MAP5_51: &[u64] = &[
@@ -2138,10 +2193,10 @@ static EVEX_MAP5_6C: &[u64] = &[
     form_opcode(A::VEX_W0.union(A::SSE_PREFIX_66), Opcode::EvexVcvttps2uqqsVdqWpsKmask),
     form_opcode(A::VEX_W1.union(A::MASK_K0).union(A::SSE_PREFIX_66), Opcode::EvexVcvttpd2uqqsVdqWpd),
     form_opcode(A::VEX_W1.union(A::SSE_PREFIX_66), Opcode::EvexVcvttpd2uqqsVdqWpdKmask),
-    form_opcode(A::VEX_W0.union(A::MASK_K0).union(A::SSE_PREFIX_F3), Opcode::EvexVcvttss2usisGdWss),
     form_opcode(A::VEX_W1.union(A::MASK_K0).union(A::SSE_PREFIX_F3).union(A::IS64), Opcode::EvexVcvttss2usisGqWss),
-    form_opcode(A::VEX_W0.union(A::MASK_K0).union(A::SSE_PREFIX_F2), Opcode::EvexVcvttsd2usisGdWsd),
+    form_opcode(A::MASK_K0.union(A::SSE_PREFIX_F3), Opcode::EvexVcvttss2usisGdWss),
     form_opcode(A::VEX_W1.union(A::MASK_K0).union(A::SSE_PREFIX_F2).union(A::IS64), Opcode::EvexVcvttsd2usisGqWsd),
+    form_opcode(A::MASK_K0.union(A::SSE_PREFIX_F2), Opcode::EvexVcvttsd2usisGdWsd),
 ];
 
 static EVEX_MAP5_6D: &[u64] = &[
@@ -2153,10 +2208,10 @@ static EVEX_MAP5_6D: &[u64] = &[
     form_opcode(A::VEX_W0.union(A::SSE_PREFIX_66), Opcode::EvexVcvttps2qqsVdqWpsKmask),
     form_opcode(A::VEX_W1.union(A::MASK_K0).union(A::SSE_PREFIX_66), Opcode::EvexVcvttpd2qqsVdqWpd),
     form_opcode(A::VEX_W1.union(A::SSE_PREFIX_66), Opcode::EvexVcvttpd2qqsVdqWpdKmask),
-    form_opcode(A::VEX_W0.union(A::MASK_K0).union(A::SSE_PREFIX_F3), Opcode::EvexVcvttss2sisGdWss),
     form_opcode(A::VEX_W1.union(A::MASK_K0).union(A::SSE_PREFIX_F3).union(A::IS64), Opcode::EvexVcvttss2sisGqWss),
-    form_opcode(A::VEX_W0.union(A::MASK_K0).union(A::SSE_PREFIX_F2), Opcode::EvexVcvttsd2sisGdWsd),
+    form_opcode(A::MASK_K0.union(A::SSE_PREFIX_F3), Opcode::EvexVcvttss2sisGdWss),
     form_opcode(A::VEX_W1.union(A::MASK_K0).union(A::SSE_PREFIX_F2).union(A::IS64), Opcode::EvexVcvttsd2sisGqWsd),
+    form_opcode(A::MASK_K0.union(A::SSE_PREFIX_F2), Opcode::EvexVcvttsd2sisGdWsd),
 ];
 
 static EVEX_MAP5_6E: &[u64] = &[
@@ -2186,8 +2241,8 @@ static EVEX_MAP5_78: &[u64] = &[
     form_opcode(A::VEX_W0.union(A::SSE_NO_PREFIX), Opcode::EvexVcvttph2udqVdqWphKmask),
     form_opcode(A::VEX_W0.union(A::MASK_K0).union(A::SSE_PREFIX_66), Opcode::EvexVcvttph2uqqVdqWph),
     form_opcode(A::VEX_W0.union(A::SSE_PREFIX_66), Opcode::EvexVcvttph2uqqVdqWphKmask),
-    form_opcode(A::VEX_W0.union(A::MASK_K0).union(A::SSE_PREFIX_F3), Opcode::EvexVcvttsh2usiGdWss),
     form_opcode(A::VEX_W1.union(A::MASK_K0).union(A::SSE_PREFIX_F3).union(A::IS64), Opcode::EvexVcvttsh2usiGqWss),
+    form_opcode(A::MASK_K0.union(A::SSE_PREFIX_F3), Opcode::EvexVcvttsh2usiGdWss),
 ];
 
 static EVEX_MAP5_79: &[u64] = &[
@@ -2195,8 +2250,8 @@ static EVEX_MAP5_79: &[u64] = &[
     form_opcode(A::VEX_W0.union(A::SSE_NO_PREFIX), Opcode::EvexVcvtph2udqVdqWphKmask),
     form_opcode(A::VEX_W0.union(A::MASK_K0).union(A::SSE_PREFIX_66), Opcode::EvexVcvtph2uqqVdqWph),
     form_opcode(A::VEX_W0.union(A::SSE_PREFIX_66), Opcode::EvexVcvtph2uqqVdqWphKmask),
-    form_opcode(A::VEX_W0.union(A::MASK_K0).union(A::SSE_PREFIX_F3), Opcode::EvexVcvtsh2usiGdWss),
     form_opcode(A::VEX_W1.union(A::MASK_K0).union(A::SSE_PREFIX_F3).union(A::IS64), Opcode::EvexVcvtsh2usiGqWss),
+    form_opcode(A::MASK_K0.union(A::SSE_PREFIX_F3), Opcode::EvexVcvtsh2usiGdWss),
 ];
 
 static EVEX_MAP5_7A: &[u64] = &[
@@ -2211,8 +2266,8 @@ static EVEX_MAP5_7A: &[u64] = &[
 static EVEX_MAP5_7B: &[u64] = &[
     form_opcode(A::VEX_W0.union(A::MASK_K0).union(A::SSE_PREFIX_66), Opcode::EvexVcvtph2qqVdqWph),
     form_opcode(A::VEX_W0.union(A::SSE_PREFIX_66), Opcode::EvexVcvtph2qqVdqWphKmask),
-    form_opcode(A::VEX_W0.union(A::MASK_K0).union(A::SSE_PREFIX_F3), Opcode::EvexVcvtusi2shVshEd),
     form_opcode(A::VEX_W1.union(A::MASK_K0).union(A::SSE_PREFIX_F3).union(A::IS64), Opcode::EvexVcvtusi2shVshEq),
+    form_opcode(A::MASK_K0.union(A::SSE_PREFIX_F3), Opcode::EvexVcvtusi2shVshEd),
 ];
 
 static EVEX_MAP5_7C: &[u64] = &[
@@ -2812,7 +2867,7 @@ pub(crate) static EVEX_TABLE: [&[u64]; 1280] = [
     /* 3E */ EVEX_0F383E,
     /* 3F */ EVEX_0F383F,
     /* 40 */ EVEX_0F3840,
-    /* 41 */ EVEX_GROUP_ERR,
+    /* 41 */ EVEX_0F3841,
     /* 42 */ EVEX_0F3842,
     /* 43 */ EVEX_0F3843,
     /* 44 */ EVEX_0F3844,
@@ -3065,7 +3120,7 @@ pub(crate) static EVEX_TABLE: [&[u64]; 1280] = [
     /* 3A */ EVEX_0F3A3A,
     /* 3B */ EVEX_0F3A3B,
     /* 3C */ EVEX_GROUP_ERR,
-    /* 3D */ EVEX_GROUP_ERR,
+    /* 3D */ EVEX_0F3A3D,
     /* 3E */ EVEX_0F3A3E,
     /* 3F */ EVEX_0F3A3F,
     /* 40 */ EVEX_GROUP_ERR,
@@ -3315,15 +3370,15 @@ pub(crate) static EVEX_TABLE: [&[u64]; 1280] = [
     /* 33 */ EVEX_GROUP_ERR,
     /* 34 */ EVEX_GROUP_ERR,
     /* 35 */ EVEX_GROUP_ERR,
-    /* 36 */ EVEX_GROUP_ERR,
-    /* 37 */ EVEX_GROUP_ERR,
-    /* 38 */ EVEX_GROUP_ERR,
-    /* 39 */ EVEX_GROUP_ERR,
-    /* 3A */ EVEX_GROUP_ERR,
-    /* 3B */ EVEX_GROUP_ERR,
-    /* 3C */ EVEX_GROUP_ERR,
-    /* 3D */ EVEX_GROUP_ERR,
-    /* 3E */ EVEX_GROUP_ERR,
+    /* 36 */ EVEX_MAP5_36,
+    /* 37 */ EVEX_MAP5_37,
+    /* 38 */ EVEX_MAP5_38,
+    /* 39 */ EVEX_MAP5_39,
+    /* 3A */ EVEX_MAP5_3A,
+    /* 3B */ EVEX_MAP5_3B,
+    /* 3C */ EVEX_MAP5_3C,
+    /* 3D */ EVEX_MAP5_3D,
+    /* 3E */ EVEX_MAP5_3E,
     /* 3F */ EVEX_GROUP_ERR,
     /* 40 */ EVEX_GROUP_ERR,
     /* 41 */ EVEX_GROUP_ERR,

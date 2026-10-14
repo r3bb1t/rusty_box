@@ -11,6 +11,7 @@ use rusty_box::gui::RustyBoxApp;
 
 use crate::app::{status_snapshot, ShellStatus, VmOrigin};
 use crate::config::Engine;
+use crate::debugger::control::{DumpOutcome, DumpRequest, RunControl, RunPhase};
 
 /// What only one running VM may have at a time.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -192,11 +193,17 @@ pub(crate) struct VmSession {
     /// the interpreter when another VM held the hypervisor then. `None`
     /// until the VM is first powered on.
     run_engine: Option<Engine>,
+    /// The only writer of the run's stop flag (`RunControl`).
+    control: Arc<RunControl>,
+    /// What the Debugger page keeps for this VM between frames.
+    debugger: crate::shell::debugger_page::DebuggerPane,
 }
 
 impl VmSession {
     pub(crate) fn new() -> Self {
-        let display = Arc::new(Mutex::new(SharedDisplay::new()));
+        let shown = SharedDisplay::new();
+        let control = Arc::new(RunControl::new(Arc::clone(&shown.stop_flag)));
+        let display = Arc::new(Mutex::new(shown));
         let console = RustyBoxApp::new_embedded(Arc::clone(&display));
         #[cfg(target_os = "android")]
         let console = {
@@ -211,11 +218,42 @@ impl VmSession {
             display,
             console,
             run_engine: None,
+            control,
+            debugger: crate::shell::debugger_page::DebuggerPane::default(),
         }
+    }
+
+    pub(crate) fn debugger_mut(&mut self) -> &mut crate::shell::debugger_page::DebuggerPane {
+        &mut self.debugger
     }
 
     pub(crate) fn display(&self) -> &Arc<Mutex<SharedDisplay>> {
         &self.display
+    }
+
+    pub(crate) fn control(&self) -> &Arc<RunControl> {
+        &self.control
+    }
+
+    /// Power off: the run ends, paused or not, and does not begin again.
+    pub(crate) fn power_off(&self) {
+        if let Ok(mut display) = self.display.lock() {
+            display.reset_requested = false;
+        }
+        self.control.end_run();
+    }
+
+    /// Restart: the run ends, paused or not, and begins again. The restart is
+    /// recorded before the run is told to end, so the run reads it as it ends.
+    pub(crate) fn restart(&self) {
+        if let Ok(mut display) = self.display.lock() {
+            display.reset_requested = true;
+        }
+        self.control.end_run();
+    }
+
+    pub(crate) fn request_dump(&self, path: PathBuf) -> DumpRequest {
+        self.control.request_dump(path)
     }
 
     pub(crate) fn console(&mut self) -> &mut RustyBoxApp {
@@ -227,7 +265,10 @@ impl VmSession {
     }
 
     pub(crate) fn status(&self) -> ShellStatus {
-        status_snapshot(&self.display)
+        ShellStatus {
+            paused: self.control.phase() == RunPhase::Paused,
+            ..status_snapshot(&self.display)
+        }
     }
 
     /// The engine the VM's live run uses: what its last power-on recorded,
@@ -246,6 +287,12 @@ impl VmSession {
         let status = self.status();
         status.running || status.start_pending
     }
+}
+
+/// A finished RAM dump, with the VM it belongs to.
+pub(crate) struct VmDumpOutcome {
+    pub(crate) vm: VmOrigin,
+    pub(crate) outcome: DumpOutcome,
 }
 
 /// A run's error, with the VM it belongs to.
@@ -310,8 +357,22 @@ impl Sessions {
     /// Asks every VM's run to stop; each thread ends on its own.
     pub(crate) fn stop_all(&self) {
         for session in self.by_vm.values() {
-            crate::runner::signal_egui_stop(&session.display);
+            crate::runner::signal_egui_stop(&session.display, &session.control);
         }
+    }
+
+    /// Takes every finished dump the runs recorded.
+    pub(crate) fn take_dump_outcomes(&self) -> Vec<VmDumpOutcome> {
+        let mut done = Vec::new();
+        for (vm, session) in &self.by_vm {
+            for outcome in session.control.take_dump_outcomes() {
+                done.push(VmDumpOutcome {
+                    vm: vm.clone(),
+                    outcome,
+                });
+            }
+        }
+        done
     }
 
     /// Takes every run error the displays hold.

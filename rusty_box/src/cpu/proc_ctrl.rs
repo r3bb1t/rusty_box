@@ -262,7 +262,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
 
     // Bochs proc_ctrl.cc — update FPU/MMX permission based on CR0.EM, CR0.TS
     pub(super) fn handle_fpu_mmx_mode_change(&mut self) {
-        use super::opcodes_table::FetchModeMask;
+        use super::fetch_mode::FetchModeMask;
         if self.cr0.em() || self.cr0.ts() {
             self.fetch_mode_mask.remove(FetchModeMask::FPU_MMX_OK);
         } else {
@@ -272,7 +272,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
 
     // Bochs proc_ctrl.cc — update SSE permission based on CR0.TS, CR0.EM, CR4.OSFXSR
     pub(super) fn handle_sse_mode_change(&mut self) {
-        use super::opcodes_table::FetchModeMask;
+        use super::fetch_mode::FetchModeMask;
         if self.cr0.ts() || self.cr0.em() || !self.cr4.osfxsr() {
             self.fetch_mode_mask.remove(FetchModeMask::SSE_OK);
         } else {
@@ -290,7 +290,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     /// the two move together here even though this decoder tracks them
     /// separately.
     pub(super) fn handle_avx_mode_change(&mut self) {
-        use super::opcodes_table::{BxAvxVectorLength, FetchModeMask};
+        use super::fetch_mode::{BxAvxVectorLength, FetchModeMask};
         const XCR0_SSE: u32 = 1 << 1;
         const XCR0_YMM: u32 = 1 << 2;
         const XCR0_OPMASK: u32 = 1 << 5;
@@ -349,7 +349,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> BxCpuC<T> {
     #[inline]
     pub(super) fn update_fetch_mode_mask(&mut self) {
         use super::cpu::CpuMode;
-        use super::opcodes_table::FetchModeMask;
+        use super::fetch_mode::FetchModeMask;
 
         // Bochs: fetchModeMask = cpu_state_use_ok | (long64<<1) | d_b
         // SAFETY: segment cache populated during segment load; union read matches descriptor type
@@ -585,8 +585,14 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         if self.in_svm_guest && self.svm_cr_write_intercepted(0) {
             return self.svm_vmexit(super::svm::SvmVmexit::Cr0Write as i32, 0, 0);
         }
-        let cr0_val = self.cr0.get32();
-        self.cr0.set32(cr0_val & !(1u32 << 3));
+        self.cr0.remove(super::crregs::BxCr0::TS);
+
+        // Bochs crregs.cc CLTS: CR0.TS gates x87, MMX, SSE and AVX state, so
+        // all three handlers run — the icache state gate reads the
+        // `fetch_mode_mask` bits they derive, not CR0 itself.
+        self.handle_fpu_mmx_mode_change();
+        self.handle_sse_mode_change();
+        self.handle_avx_mode_change();
         Ok(())
     }
 
@@ -2369,8 +2375,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     // ========================================================================
 
     pub(super) fn ldmxcsr(&mut self, instr: &super::decoder::Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-
         let eaddr = self.resolve_addr(instr);
         let seg = super::decoder::BxSegregs::from(instr.seg());
         let new_mxcsr = self.v_read_dword(seg, eaddr)?;
@@ -2390,8 +2394,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     // ========================================================================
 
     pub(super) fn stmxcsr(&mut self, instr: &super::decoder::Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
-
         let eaddr = self.resolve_addr(instr);
         let seg = super::decoder::BxSegregs::from(instr.seg());
         self.v_write_dword(seg, eaddr, self.mxcsr.mxcsr & self.mxcsr_mask)?;
@@ -5427,7 +5429,7 @@ mod avx_mode_tests {
     //! decode no matter what the guest had enabled in XCR0.
 
     use crate::cpu::crregs::{BxCr0, BxCr4};
-    use crate::cpu::opcodes_table::{BxAvxVectorLength, FetchModeMask};
+    use crate::cpu::fetch_mode::{BxAvxVectorLength, FetchModeMask};
 
     const XCR0_X87: u32 = 1 << 0;
     const XCR0_SSE: u32 = 1 << 1;

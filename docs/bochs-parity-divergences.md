@@ -1163,6 +1163,65 @@ it is filed.
 
 ---
 
+## D19 — VEX shift-by-immediate instructions refuse a memory operand
+
+**Bochs:** `cpu/decoder/fetchdecode_opmap_avx.cc` `BxOpcodeGroup_VEX_0F71`,
+`BxOpcodeGroup_VEX_0F72` and `BxOpcodeGroup_VEX_0F73` carry no `ATTR_MODC0`.
+A VEX-encoded VPSRLW, VPSRAW, VPSLLW, VPSRLD, VPSRAD, VPSLLD, VPSRLQ, VPSRLDQ,
+VPSLLQ or VPSLLDQ with a memory operand therefore decodes. Its handler then
+loads 16 or 32 bytes (`LOADU_Wdq` / `LOAD_Vector`) and shifts them.
+
+**rusty_box:** the VEX path decodes these bytes through the legacy table rows
+(`rusty_box_decoder/src/decoder/opmap.rs` `BxOpcodeTable0F71`, `0F72` and
+`0F73`), which are register-only (`MOD_REG`), as Bochs's own legacy
+`BxOpcodeTable0F71/72/73` are (`ATTR_MODC0`). A memory form finds no row and
+raises #UD.
+
+### What the guest observes
+
+Each of the ten instructions, VEX.128 or VEX.256, with a memory operand raises
+#UD instead of executing. The register forms, and every EVEX form (memory
+included), behave as in Bochs.
+
+### Why the divergence is the correct side
+
+The processor raises #UD. This was measured on 2026-10-09 with
+`docs/bochs-vex-shift-imm-memory-probe.S`. The probe was run four ways: on an
+Intel Core i5-12450H through the Windows Hypervisor Platform, on stock Bochs
+`f87c5e226`, on Bochs with the patch, and on the port's interpreter. The last
+was a temporary test that booted the same image and is now deleted.
+
+```
+hardware          R:+ S:#U 71:#U 72:#U 73/2:#U 73/3:#U YR:+ Y71:#U
+Bochs f87c5e226   R:+ S:#U 71:+  72:+  73/2:+  73/3:+  YR:+ Y71:+
+rusty_box         R:+ S:#U 71:#U 72:#U 73/2:#U 73/3:#U YR:+ Y71:#U
+```
+
+The processor was asked about five of the twenty forms. Those are VEX.128
+VPSRLW, VPSRLD, VPSRLQ and VPSRLDQ, and VEX.256 VPSRLW, which cover every group
+and both vector lengths. The other fifteen rest on two things: the SDM, which
+lists every VEX form as register-only, and the fact that the same attribute
+omission covers all twenty rows. The opcodes' own names (`*_UdqIb`) also say
+register-only. Bochs with `docs/bochs-vex-shift-imm-memory-fix.patch` prints the
+hardware row. The upstream report is in `docs/bochs-upstream-bugs.md`.
+
+### Price of closing it
+
+There is nothing to pay: upstream is the side that should move. But a VEX
+decode table generated from Bochs's `BxOpcodeTableVEX` would bring the bug in
+with it, and the Bochs reference sync builds exactly that table: Task 4c Part 2,
+design (ii), ruled 2026-10-09. That generator must state this override
+explicitly, and keep it until upstream takes the patch. The test
+`vex_shift_by_immediate_refuses_a_memory_operand`
+(`rusty_box/tests/vex_avx_state_gate.rs`) runs all twenty forms in a guest and
+fails if the restriction is lost.
+
+**Status:** deliberate (owner ruling, 2026-10-09: record it and prepare the
+upstream PR). The PR is prepared and NOT FILED; see
+`docs/bochs-upstream-pr-vex-shift-imm-memory.md`.
+
+---
+
 ## Hypervisor-engine divergences (`H<n>`)
 
 A machine running its guest on `rusty_box_whp_engine` executes on the host's

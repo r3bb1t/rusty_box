@@ -1,7 +1,7 @@
 #![allow(dead_code)]
-//! FPU core instructions: FNINIT, FNCLEX, FNOP, FPLEGACY, FLDCW, FNSTCW, FNSTSW, FNSTSW_AX,
-//! FLDENV, FNSTENV, FRSTOR, FNSAVE
-//! Ported from Bochs cpu/fpu/fpu.cc
+//! FPU core instructions: FNINIT, FNCLEX, FNOP, FPLEGACY, FWAIT, FLDCW, FNSTCW, FNSTSW,
+//! FNSTSW_AX, FLDENV, FNSTENV, FRSTOR, FNSAVE
+//! Ported from Bochs cpu/fpu/fpu.cc (FWAIT from cpu/fpu_emu.cc)
 
 use super::super::cpu::CpuMode;
 use super::super::decoder::{BxSegregs, Instruction};
@@ -39,6 +39,17 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// FPLEGACY — Legacy FPU prefix (no operation)
     pub fn fplegacy(&mut self, _instr: &Instruction) -> super::super::Result<()> {
         Ok(())
+    }
+
+    /// FWAIT — Bochs fpu_emu.cc `FWAIT`. FWAIT carries no `BX_PREPARE_*`, so
+    /// the icache state gate passes it through and it checks CR0 itself: #NM
+    /// when CR0.TS and CR0.MP are both set, then whatever unmasked exception
+    /// the x87 unit is holding (`FPU_check_pending_exceptions`).
+    pub fn fwait(&mut self, _instr: &Instruction) -> super::super::Result<()> {
+        if self.cr0.ts() && self.cr0.mp() {
+            return self.exception(super::super::cpu::Exception::Nm, 0);
+        }
+        self.fpu_check_pending_exceptions()
     }
 
     /// FLDCW — Load control word from memory

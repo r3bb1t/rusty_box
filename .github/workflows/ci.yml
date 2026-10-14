@@ -1,15 +1,16 @@
 name: CI
 
+# The full matrix gates master only: what reaches master is what ships.
+# Development branches are gated locally by `cargo xtask ci`; this matrix
+# can still be run on any branch by hand.
 on:
   push:
     branches:
       - master
-      - dev
-      - 'feature/**'
   pull_request:
     branches:
       - master
-      - dev
+  workflow_dispatch:
 
 permissions:
   contents: read

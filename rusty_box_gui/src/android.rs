@@ -709,6 +709,7 @@ impl FileBrowser {
                 FileFilter::Extension("img")
             }
             BrowseTarget::Bios | BrowseTarget::VgaBios => FileFilter::Any,
+            BrowseTarget::RamDump => FileFilter::Extension("bin"),
         };
         let dir = request
             .current

@@ -415,7 +415,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// Result written to XMM0.
     /// Sets CF, ZF, SF, OF; clears AF, PF.
     pub(super) fn pcmpestrm_vdq_wdq_ib(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm_unaligned(instr)?;
         let imm8 = instr.ib();
@@ -496,7 +495,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// Index of first/last set bit written to ECX/RCX.
     /// Sets CF, ZF, SF, OF; clears AF, PF.
     pub(super) fn pcmpestri_vdq_wdq_ib(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm_unaligned(instr)?;
         let imm8 = instr.ib();
@@ -573,7 +571,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// Result written to XMM0.
     /// Sets CF, ZF, SF, OF; clears AF, PF.
     pub(super) fn pcmpistrm_vdq_wdq_ib(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm_unaligned(instr)?;
         let imm8 = instr.ib();
@@ -643,7 +640,6 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     /// Index of first/last set bit written to ECX/RCX.
     /// Sets CF, ZF, SF, OF; clears AF, PF.
     pub(super) fn pcmpistri_vdq_wdq_ib(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm_unaligned(instr)?;
         let imm8 = instr.ib();

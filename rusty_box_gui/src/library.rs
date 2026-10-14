@@ -331,16 +331,7 @@ impl VmLibrary {
     /// makes the stem unique, and the base is cut so the whole stays within
     /// `MAX_STEM_LEN`.
     fn unused_stem(&self, name: &str) -> Result<VmStem, LibraryError> {
-        let taken: HashSet<String> = self
-            .entries()?
-            .iter()
-            .filter(|path| {
-                path.extension()
-                    .is_some_and(|extension| extension.eq_ignore_ascii_case(VM_EXTENSION))
-            })
-            .filter_map(|path| path.file_stem().and_then(OsStr::to_str))
-            .map(str::to_ascii_lowercase)
-            .collect();
+        let taken = self.taken_stems()?;
         let base = safe_stem(name);
         let mut candidate = base.clone();
         let mut suffix: u64 = 2;
@@ -350,6 +341,78 @@ impl VmLibrary {
         }
         VmStem::parse(&candidate)
     }
+
+    /// The stems of every entry named `<stem>.toml` — a folder or anything
+    /// else included — in lower case, under any spelling of the extension.
+    fn taken_stems(&self) -> Result<HashSet<String>, LibraryError> {
+        Ok(self
+            .entries()?
+            .iter()
+            .filter(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case(VM_EXTENSION))
+            })
+            .filter_map(|path| path.file_stem().and_then(OsStr::to_str))
+            .map(str::to_ascii_lowercase)
+            .collect())
+    }
+
+    /// Moves the file of `from` to the stem a VM called `name` would be
+    /// given, and returns that stem: the file name follows a rename of the
+    /// VM. A stem already taken gets the suffix `-2`, `-3`, … as at creation;
+    /// a file that already carries the name's stem stays where it is.
+    pub fn rename_to_follow(&self, from: &VmStem, name: &str) -> Result<VmStem, LibraryError> {
+        if stem_follows_name(from, name) {
+            return Ok(from.clone());
+        }
+        let to = self.unused_stem(name)?;
+        self.move_file(from, &to)?;
+        Ok(to)
+    }
+
+    /// Moves the file of `from` to the stem `requested` is cut down to (see
+    /// [`safe_stem`]) and returns that stem. A stem another entry already
+    /// has is refused, not suffixed: the stem is the one asked for. Naming
+    /// the file's own stem again, or the same one in another case, is
+    /// allowed.
+    pub fn rename(&self, from: &VmStem, requested: &str) -> Result<VmStem, LibraryError> {
+        let to = VmStem::parse(&safe_stem(requested))?;
+        if to == *from {
+            return Ok(to);
+        }
+        let own = from.0.to_ascii_lowercase();
+        if to.0 != own && self.taken_stems()?.contains(&to.0) {
+            return Err(LibraryError::StemTaken { stem: to.0 });
+        }
+        self.move_file(from, &to)?;
+        Ok(to)
+    }
+
+    /// The file of `from` at the path of `to`. The caller has seen that no
+    /// other entry has `to`: a rename over an existing file replaces it.
+    fn move_file(&self, from: &VmStem, to: &VmStem) -> Result<(), LibraryError> {
+        let source = self.path_of(from);
+        let target = self.path_of(to);
+        fs::rename(&source, &target).map_err(|error| LibraryError::Rename {
+            from: source,
+            to: target,
+            source: error,
+        })
+    }
+}
+
+/// Whether `stem` is the file name the library gives a VM called `name`, or
+/// that name with a uniqueness suffix: the file name was derived from the
+/// name, so it follows when the name changes. A file name chosen by hand is
+/// not, and is left as it is.
+pub fn stem_follows_name(stem: &VmStem, name: &str) -> bool {
+    let base = safe_stem(name);
+    let stem = stem.0.to_ascii_lowercase();
+    stem == base
+        || stem
+            .strip_prefix(&base)
+            .and_then(|rest| rest.strip_prefix('-'))
+            .is_some_and(|digits| !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// What one file describes.
@@ -690,6 +753,83 @@ mod tests {
         assert_eq!(contents.vms[0].config.engine, Engine::Whp);
         assert_eq!(contents.vms[0].config, config);
         assert!(contents.broken.is_empty());
+        remove_dir(&dir);
+    }
+
+    /// A copy made as "Windows copy" and then named Ubuntu has a file called
+    /// ubuntu, and the file it had is gone.
+    #[test]
+    fn a_vms_file_name_follows_its_new_name() {
+        let dir = scratch_dir("follow");
+        let library = VmLibrary::open(dir.clone()).expect("open");
+        let config = sample_config(&dir);
+        let copy = library.create("Windows copy", &config).expect("create");
+        assert_eq!(copy.as_str(), "windows-copy");
+
+        let moved = library.rename_to_follow(&copy, "Ubuntu").expect("rename");
+
+        assert_eq!(moved.as_str(), "ubuntu");
+        assert_eq!(toml_names(&dir), ["ubuntu.toml"]);
+        remove_dir(&dir);
+    }
+
+    /// A stem another VM has is not taken over: the follower gets `-2`.
+    #[test]
+    fn a_file_that_follows_a_name_another_vm_has_gets_a_suffix() {
+        let dir = scratch_dir("follow-taken");
+        let library = VmLibrary::open(dir.clone()).expect("open");
+        let config = sample_config(&dir);
+        library.create("Ubuntu", &config).expect("create");
+        let copy = library.create("Ubuntu copy", &config).expect("create");
+
+        let moved = library.rename_to_follow(&copy, "Ubuntu").expect("rename");
+
+        assert_eq!(moved.as_str(), "ubuntu-2");
+        assert_eq!(toml_names(&dir), ["ubuntu-2.toml", "ubuntu.toml"]);
+        remove_dir(&dir);
+    }
+
+    /// A file already named for the VM stays where it is, whatever the case
+    /// or the uniqueness suffix.
+    #[test]
+    fn a_file_named_for_its_vm_follows_nothing() {
+        assert!(stem_follows_name(&stem("alpine"), "Alpine"));
+        assert!(stem_follows_name(&stem("alpine-2"), "Alpine"));
+        assert!(stem_follows_name(&stem("ALPINE"), "alpine"));
+        assert!(!stem_follows_name(&stem("alpine-copy"), "Alpine"));
+        assert!(!stem_follows_name(&stem("alpine2"), "Alpine"));
+        assert!(!stem_follows_name(&stem("my-lab"), "Alpine"));
+
+        let dir = scratch_dir("follow-noop");
+        let library = VmLibrary::open(dir.clone()).expect("open");
+        let alpine = library.create("Alpine", &sample_config(&dir)).expect("create");
+        let kept = library.rename_to_follow(&alpine, "alpine").expect("rename");
+        assert_eq!(kept, alpine);
+        assert_eq!(toml_names(&dir), ["alpine.toml"]);
+        remove_dir(&dir);
+    }
+
+    /// A file renamed by hand takes the name it is given, cut down to the
+    /// library's alphabet; a name another file has is refused and nothing
+    /// moves.
+    #[test]
+    fn a_file_is_renamed_to_a_name_that_is_free() {
+        let dir = scratch_dir("rename");
+        let library = VmLibrary::open(dir.clone()).expect("open");
+        let config = sample_config(&dir);
+        let first = library.create("Alpine", &config).expect("create");
+        library.create("Debian", &config).expect("create");
+
+        let taken = library.rename(&first, "DEBIAN");
+        assert!(matches!(taken, Err(LibraryError::StemTaken { ref stem }) if stem == "debian"));
+        assert_eq!(toml_names(&dir), ["alpine.toml", "debian.toml"]);
+
+        let moved = library.rename(&first, "Lab: Alpine 3").expect("rename");
+        assert_eq!(moved.as_str(), "lab-alpine-3");
+        assert_eq!(toml_names(&dir), ["debian.toml", "lab-alpine-3.toml"]);
+
+        // The same stem again is no move, and no refusal.
+        assert_eq!(library.rename(&moved, "lab alpine 3").expect("same"), moved);
         remove_dir(&dir);
     }
 
