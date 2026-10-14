@@ -817,6 +817,7 @@ mod tests {
             teb: Some(0x7FF0_0000),
             stack: Some(LinearRange { start: 0x5B_0000, end: 0x60_0000 }),
             uses_fibers: false,
+            saved: None,
         }];
         label_stacks(&mut map, &threads);
         // Private memory inside the stack is named for the thread.

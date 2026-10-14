@@ -650,6 +650,8 @@ mod tests {
             system: crate::debugger::windows::SystemListing::NotAsked,
             symbols: crate::debugger::inspect::SymbolIndex::default(),
             memory_space: None,
+            context: crate::debugger::inspect::ViewContext::Live,
+            viewing: crate::debugger::inspect::Viewing::Live,
         });
         control.finish_run();
         control.begin_run(RunStart::PowerOn);
@@ -710,6 +712,8 @@ mod tests {
             system: crate::debugger::windows::SystemListing::NotAsked,
             symbols: SymbolIndex::default(),
             memory_space: None,
+            context: crate::debugger::inspect::ViewContext::Live,
+            viewing: crate::debugger::inspect::Viewing::Live,
         }
     }
 

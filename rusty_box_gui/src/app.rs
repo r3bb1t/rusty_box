@@ -2203,6 +2203,20 @@ impl NativeShellApp {
                     ..control.view()
                 });
             }
+            Some(DebuggerAction::View(context)) => {
+                use crate::debugger::inspect::MemoryTarget;
+                use crate::debugger::windows::SystemView;
+                use crate::shell::debugger_page::DebuggerTab;
+                // The CPU tab, its memory pane following the RIP of whoever
+                // it now looks from.
+                self.sessions.open(&vm).debugger_mut().tab = DebuggerTab::Cpu;
+                control.set_view(ViewRequest {
+                    context,
+                    memory: MemoryTarget::Rip,
+                    system: SystemView::Off,
+                    ..control.view()
+                });
+            }
         }
     }
 
@@ -10208,6 +10222,160 @@ mod tests {
                 assert!(shows(&window, "smss.exe"), "no process row in a window {size:?}");
                 assert!(shows(&window, "ntdll.dll"), "no module row in a window {size:?}");
             }
+        }
+
+        /// The row (by a substring of its accessible label) and the centre to
+        /// click it at.
+        fn row_center(window: &Harness<'_, Window>, text: &str) -> egui::Pos2 {
+            window
+                .query_all_by(|node| node.label().is_some_and(|label| label.contains(text)))
+                .next()
+                .unwrap_or_else(|| panic!("no row showing {text}"))
+                .rect()
+                .center()
+        }
+
+        /// Steps past egui's triple-click window since the last click, so the
+        /// next two clicks are a plain double-click.
+        fn let_clicks_settle(window: &mut Harness<'_, Window>) {
+            for _ in 0..45 {
+                window.step();
+            }
+        }
+
+        /// Double-clicking a process that is not running opens the CPU tab
+        /// asking to look from inside it.
+        #[test]
+        fn double_clicking_a_process_opens_the_cpu_tab_viewing_it() {
+            use crate::debugger::inspect::ViewContext;
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_vm(&mut app);
+            control.publish(process_listing_snapshot());
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            window.get_by_label("Processes").click();
+            window.run();
+            let_clicks_settle(&mut window);
+            let system = row_center(&window, "System");
+            double_click(&mut window, system);
+            window.run();
+            assert_eq!(
+                control.view().context,
+                ViewContext::Process { eprocess: 0xFFFF_FA80_0000_1000 }
+            );
+            assert!(window.query_by_label("Registers").is_some(), "the CPU tab is shown");
+        }
+
+        /// Double-clicking a thread asks to look from inside that thread.
+        #[test]
+        fn double_clicking_a_thread_views_that_thread() {
+            use crate::debugger::inspect::ViewContext;
+            use crate::debugger::threads::WinThread;
+            use crate::debugger::windows::SystemListing;
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_vm(&mut app);
+            let mut snapshot = process_listing_snapshot();
+            if let SystemListing::Processes(listing) = &mut snapshot.system {
+                if let Some(modules) = listing.modules.as_mut() {
+                    modules.threads.push(WinThread {
+                        tid: 0x424,
+                        start: 0x7FF7_0000_1000,
+                        teb: Some(0x7FF_FFFD_E000),
+                        stack: Some(rusty_box::cpu::LinearRange { start: 0x10_0000, end: 0x20_0000 }),
+                        uses_fibers: false,
+                        saved: None,
+                    });
+                }
+            }
+            control.publish(snapshot);
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            window.get_by_label("Processes").click();
+            window.run();
+            window.get_by_label("Threads").click();
+            window.run();
+            let_clicks_settle(&mut window);
+            // 0x424 is thread 1060.
+            let row = row_center(&window, "1060");
+            double_click(&mut window, row);
+            window.run();
+            assert_eq!(
+                control.view().context,
+                ViewContext::Thread { eprocess: 0xFFFF_FA80_0000_2000, tid: 0x424 }
+            );
+        }
+
+        /// A snapshot looking from a thread inside winlogon.exe.
+        fn viewed_snapshot() -> crate::debugger::inspect::DebugSnapshot {
+            use crate::debugger::inspect::{SymbolIndex, ViewContext, Viewing};
+            use crate::debugger::threads::{decode_trap_frame, TRAP_FRAME_BYTES};
+            use crate::debugger::windows::ThreadView;
+            let mut saved = decode_trap_frame(&[0u8; TRAP_FRAME_BYTES]);
+            saved.rip = 0x7FF7_0001_2345;
+            saved.rsp = 0x1F_F000;
+            saved.cs = 0x33;
+            saved.ss = 0x2B;
+            let mut snapshot = paused_snapshot();
+            snapshot.context = ViewContext::Thread { eprocess: 0xFFFF_FA80_0000_3000, tid: 0x1F4 };
+            snapshot.viewing = Viewing::Thread(ThreadView {
+                process: "winlogon.exe".to_owned(),
+                pid: 0x1E0,
+                tid: 0x1F4,
+                cr3: 0x3000,
+                saved,
+                symbols: SymbolIndex::default(),
+            });
+            snapshot
+        }
+
+        /// Looking from a thread says so, shows its saved RIP, turns Step off,
+        /// and "Back to live CPU" asks for the live processor again.
+        #[test]
+        fn a_viewed_thread_shows_its_banner_saved_registers_and_no_step() {
+            use crate::debugger::inspect::ViewContext;
+            use crate::shell::debugger_page::BACK_TO_LIVE;
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_vm(&mut app);
+            control.publish(viewed_snapshot());
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            let shows = |window: &Harness<'_, Window>, text: &str| {
+                window
+                    .query_all_by(|node| {
+                        node.label().or(node.value()).is_some_and(|label| label.contains(text))
+                    })
+                    .next()
+                    .is_some()
+            };
+            assert!(shows(&window, "Viewing winlogon.exe"), "the banner names the process");
+            assert!(shows(&window, "thread 500"), "and the thread (0x1F4)");
+            assert!(shows(&window, "00007FF700012345"), "the saved RIP is shown");
+            assert!(window.get_by_label("Step").accesskit_node().is_disabled());
+            window.get_by_label(BACK_TO_LIVE).click();
+            window.run();
+            assert_eq!(control.view().context, ViewContext::Live);
+        }
+
+        /// A process that cannot be looked from says why, with the way back.
+        #[test]
+        fn a_process_that_cannot_be_viewed_says_why() {
+            use crate::debugger::inspect::{ViewContext, Viewing};
+            use crate::debugger::windows::ViewMiss;
+            use crate::shell::debugger_page::BACK_TO_LIVE;
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_vm(&mut app);
+            let mut snapshot = paused_snapshot();
+            snapshot.context = ViewContext::Process { eprocess: 0xFFFF_FA80_0000_1000 };
+            snapshot.viewing = Viewing::Miss(ViewMiss::NoSavedState);
+            control.publish(snapshot);
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            assert!(window.query_by_label(&ViewMiss::NoSavedState.describe()).is_some());
+            assert!(window.query_by_label(BACK_TO_LIVE).is_some());
         }
 
         /// Dragging the gap between the CPU tab's columns widens the left one

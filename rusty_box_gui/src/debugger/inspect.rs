@@ -4,7 +4,10 @@
 use rusty_box::cpu::{CodeSize, CpuDebugView, Fetched, Instrumentation};
 use rusty_box::emulator::{DebugCpu, Emulator, SliceEngine};
 
-use super::windows::{read_windows, SystemListing, SystemView, WindowsDiscovery};
+use super::windows::{
+    read_thread_view, read_windows, SystemListing, SystemView, ThreadView, ThreadViewRead,
+    ViewMiss, ViewTarget, WindowsDiscovery,
+};
 
 pub(crate) const ROW_BYTES: usize = 16;
 pub(crate) const MEMORY_ROWS: usize = 32;
@@ -41,6 +44,18 @@ pub(crate) enum MemoryTarget {
     Rsp,
 }
 
+/// Whom the code, stack and registers are read from: the shown processor, or
+/// a Windows process or thread seen from inside (its saved user state, in its
+/// address space).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ViewContext {
+    Live,
+    /// A process: its first thread with saved user state, or the live
+    /// processor when it is the process that runs.
+    Process { eprocess: u64 },
+    Thread { eprocess: u64, tid: u64 },
+}
+
 /// What the page asks to be read.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ViewRequest {
@@ -48,6 +63,7 @@ pub(crate) struct ViewRequest {
     pub(crate) memory: MemoryTarget,
     /// The guest OS's processes or kernel modules, when the page lists them.
     pub(crate) system: SystemView,
+    pub(crate) context: ViewContext,
 }
 
 impl Default for ViewRequest {
@@ -56,9 +72,33 @@ impl Default for ViewRequest {
             cpu: 0,
             memory: MemoryTarget::Rip,
             system: SystemView::Off,
+            context: ViewContext::Live,
         }
     }
 }
+
+/// Whom a snapshot's code, stack and registers were read from.
+#[derive(Clone, Debug)]
+pub(crate) enum Viewing {
+    /// The shown processor.
+    Live,
+    /// A thread seen from inside.
+    Thread(ThreadView),
+    /// A process or thread was asked for and cannot be shown; the panes read
+    /// the live processor.
+    Miss(ViewMiss),
+}
+
+/// Where the code and stack panes read from, and at what width.
+struct Vantage {
+    space: AddressSpace,
+    rip: u64,
+    rsp: u64,
+    size: CodeSize,
+}
+
+/// The selector of a WOW64 thread's 32-bit code segment.
+pub(crate) const WOW64_CODE_SELECTOR: u16 = 0x23;
 
 /// Where a module lives: a process's own user space, or the shared kernel.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -142,6 +182,9 @@ pub(crate) struct DebugSnapshot {
     /// Whose address space the memory window shows, when it is not the shown
     /// processor's own (a process browsed through its CR3).
     pub(crate) memory_space: Option<u64>,
+    /// Whom the page asked to look from, and what it came to.
+    pub(crate) context: ViewContext,
+    pub(crate) viewing: Viewing,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -242,33 +285,77 @@ pub(crate) fn read_snapshot<T: Instrumentation, E: SliceEngine<T>>(
             system: SystemListing::NotAsked,
             symbols: SymbolIndex::default(),
             memory_space: None,
+            context: view.context,
+            viewing: Viewing::Live,
         };
     };
     let shown = cpu.view();
-    let size = shown.code_size;
-    let rip = linear_of(shown.segment_bases.cs, shown.registers.rip, size);
-    let rsp = linear_of(shown.segment_bases.ss, shown.registers.rsp, size);
-    let code = read_code(&mut cpu, rip, size);
+    // What was read of the guest's structures is carried over only for the
+    // same processor, the same listing and the same point of view.
+    let carried = unmoved.filter(|last| {
+        last.cpu == index && last.asked == view.system && last.context == view.context
+    });
+    let viewing = match carried {
+        Some(last) => last.viewing.clone(),
+        None => match view.context {
+            ViewContext::Live => Viewing::Live,
+            ViewContext::Process { eprocess } => {
+                viewing_of(read_thread_view(&mut cpu, &shown, ViewTarget::Process { eprocess }, discovery))
+            }
+            ViewContext::Thread { eprocess, tid } => viewing_of(read_thread_view(
+                &mut cpu,
+                &shown,
+                ViewTarget::Thread { eprocess, tid },
+                discovery,
+            )),
+        },
+    };
+    let vantage = match &viewing {
+        Viewing::Thread(thread) => Vantage {
+            space: AddressSpace::Process { cr3: thread.cr3 },
+            rip: thread.saved.rip,
+            rsp: thread.saved.rsp,
+            size: if thread.saved.cs == WOW64_CODE_SELECTOR {
+                CodeSize::Bits32
+            } else {
+                CodeSize::Bits64
+            },
+        },
+        Viewing::Live | Viewing::Miss(_) => Vantage {
+            space: AddressSpace::Linear,
+            rip: linear_of(shown.segment_bases.cs, shown.registers.rip, shown.code_size),
+            rsp: linear_of(shown.segment_bases.ss, shown.registers.rsp, shown.code_size),
+            size: shown.code_size,
+        },
+    };
+    let code = read_code(&mut cpu, vantage.space, vantage.rip, vantage.size);
     let start = match view.memory {
         MemoryTarget::At(address) => address,
         MemoryTarget::Rip => GuestAddress {
-            space: AddressSpace::Linear,
-            value: rip,
+            space: vantage.space,
+            value: vantage.rip,
         },
         MemoryTarget::Rsp => GuestAddress {
-            space: AddressSpace::Linear,
-            value: rsp,
+            space: vantage.space,
+            value: vantage.rsp,
         },
     };
     let memory = read_memory(&mut cpu, start);
-    let stack = read_stack(&mut cpu, rsp, slot_bytes(size));
-    let carried = unmoved.filter(|last| last.cpu == index && last.asked == view.system);
+    let stack = read_stack(&mut cpu, vantage.space, vantage.rsp, slot_bytes(vantage.size));
     let (process, symbols, system) = match carried {
         Some(last) => (last.process.clone(), last.symbols.clone(), last.system.clone()),
         None => {
-            let process = windows_image_path(&mut cpu, &shown);
             let windows = read_windows(&mut cpu, &shown, view.system, discovery);
-            (process, windows.symbols, windows.system)
+            match &viewing {
+                // The view's own process names its addresses.
+                Viewing::Thread(thread) => {
+                    (Some(thread.process.clone()), thread.symbols.clone(), windows.system)
+                }
+                Viewing::Live | Viewing::Miss(_) => {
+                    let process = windows_image_path(&mut cpu, &shown);
+                    (process, windows.symbols, windows.system)
+                }
+            }
         }
     };
     let memory_space = match start.space {
@@ -286,6 +373,18 @@ pub(crate) fn read_snapshot<T: Instrumentation, E: SliceEngine<T>>(
         system,
         symbols,
         memory_space,
+        context: view.context,
+        viewing,
+    }
+}
+
+/// A thread-view read as the snapshot carries it: a process that runs is the
+/// live view.
+fn viewing_of(read: ThreadViewRead) -> Viewing {
+    match read {
+        ThreadViewRead::Live => Viewing::Live,
+        ThreadViewRead::Thread(thread) => Viewing::Thread(thread),
+        ThreadViewRead::Miss(miss) => Viewing::Miss(miss),
     }
 }
 
@@ -450,15 +549,14 @@ fn read_prefix<T: Instrumentation, E: SliceEngine<T>>(
     bytes
 }
 
+/// The code at `rip`, read through `space`.
 fn read_code<T: Instrumentation, E: SliceEngine<T>>(
     cpu: &mut DebugCpu<'_, T, E>,
+    space: AddressSpace,
     rip: u64,
     size: CodeSize,
 ) -> Vec<CodeLine> {
-    let at = GuestAddress {
-        space: AddressSpace::Linear,
-        value: rip,
-    };
+    let at = GuestAddress { space, value: rip };
     let bytes = read_prefix(cpu, at, CODE_LINES * MAX_INSTRUCTION_BYTES);
     if bytes.is_empty() {
         return vec![CodeLine {
@@ -532,18 +630,17 @@ fn read_memory<T: Instrumentation, E: SliceEngine<T>>(
     }
 }
 
+/// The stack from `rsp` up, read through `space`.
 fn read_stack<T: Instrumentation, E: SliceEngine<T>>(
     cpu: &mut DebugCpu<'_, T, E>,
+    space: AddressSpace,
     rsp: u64,
     width: usize,
 ) -> Vec<StackSlot> {
     let mut slots = Vec::with_capacity(STACK_SLOTS);
     for slot in 0..STACK_SLOTS {
         let address = rsp.wrapping_add((slot * width) as u64);
-        let at = GuestAddress {
-            space: AddressSpace::Linear,
-            value: address,
-        };
+        let at = GuestAddress { space, value: address };
         let bytes = read_prefix(cpu, at, width);
         let value = (bytes.len() == width).then(|| {
             let mut raw = [0u8; 8];
@@ -720,6 +817,46 @@ mod tests {
         let read = read_snapshot(&mut machine, &listed, &mut discovery, Some(&first));
         assert_eq!(read.process, None);
         assert_eq!(read.asked, SystemView::KernelModules);
+    }
+
+    /// Asking to look from a process of a guest that is not Windows says why,
+    /// and the panes read the live processor, not an invented thread.
+    #[test]
+    fn asking_to_view_a_process_of_a_guest_that_is_not_windows_says_why_and_reads_live() {
+        use super::super::windows::{KernelMiss, ViewMiss};
+        let mut machine = long_mode_machine();
+        let code = CpuSetupMode::FlatLong64.first_free_physical_address();
+        machine.mem_write(code, &[0x90, 0xF4]).expect("write");
+        machine.reg_write(X86Reg::Rip, code);
+        let request = ViewRequest {
+            context: ViewContext::Process { eprocess: 0xFFFF_FA80_0000_1000 },
+            ..ViewRequest::default()
+        };
+        let snapshot =
+            read_snapshot(&mut machine, &request, &mut WindowsDiscovery::default(), None);
+        assert!(
+            matches!(snapshot.viewing, Viewing::Miss(ViewMiss::NoWindowsKernel(KernelMiss::NoKpcr))),
+            "{:?}",
+            snapshot.viewing
+        );
+        assert_eq!(snapshot.context, request.context);
+        assert_eq!(snapshot.code[0].address, code, "the live RIP");
+    }
+
+    /// A refresh that looks from somewhere else reads the guest afresh: what
+    /// was read for the live view is not carried into a thread's.
+    #[test]
+    fn a_different_view_context_is_read_afresh() {
+        let mut machine = long_mode_machine();
+        let mut discovery = WindowsDiscovery::default();
+        let mut first = read_snapshot(&mut machine, &ViewRequest::default(), &mut discovery, None);
+        first.process = Some("carried.exe".to_owned());
+        let viewing = ViewRequest {
+            context: ViewContext::Thread { eprocess: 0xFFFF_FA80_0000_1000, tid: 0x1A4 },
+            ..ViewRequest::default()
+        };
+        let read = read_snapshot(&mut machine, &viewing, &mut discovery, Some(&first));
+        assert_eq!(read.process, None);
     }
 
     #[test]

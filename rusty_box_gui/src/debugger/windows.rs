@@ -41,7 +41,10 @@ use rusty_box::emulator::{DebugCpu, SliceEngine};
 use super::inspect::{ModuleSpace, SymModule, SymbolIndex};
 use super::memory_map::{self, MemoryMap, ModuleLayout};
 use super::pe::{self, HEADER_BYTES};
-use super::threads::{walk_thread_list, WinThread, MAX_THREADS};
+use super::threads::{
+    decode_trap_frame, frame_is_users, walk_thread_list, SavedRegisters, WinThread, MAX_THREADS,
+    TRAP_FRAME_BYTES,
+};
 use super::vad::{self, VadNode, VadRegion, VadShape, MAX_VAD_NODES};
 
 /// The top of a user address space: canonical low half in long mode, and
@@ -408,6 +411,147 @@ pub(crate) fn read_windows<T: Instrumentation, E: SliceEngine<T>>(
         }
     };
     WindowsRead { symbols, system }
+}
+
+/// Whom the CPU tab is asked to look from: a process (one of its threads with
+/// saved user state), or one thread of it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ViewTarget {
+    Process { eprocess: u64 },
+    Thread { eprocess: u64, tid: u64 },
+}
+
+/// A thread the CPU tab looks from: its process, and its user registers as
+/// the kernel saved them.
+#[derive(Clone, Debug)]
+pub(crate) struct ThreadView {
+    /// `EPROCESS.ImageFileName`.
+    pub(crate) process: String,
+    pub(crate) pid: u64,
+    pub(crate) tid: u64,
+    /// Its process's address space.
+    pub(crate) cr3: u64,
+    pub(crate) saved: SavedRegisters,
+    /// The kernel's modules and its process's, for naming addresses.
+    pub(crate) symbols: SymbolIndex,
+}
+
+/// Why a process or thread cannot be shown from inside.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ViewMiss {
+    NoWindowsKernel(KernelMiss),
+    /// The process has exited since it was listed.
+    NoSuchProcess,
+    /// The thread has exited since it was listed.
+    NoSuchThread,
+    /// No thread of it (or not this thread) has user state saved in a frame
+    /// that reads as its own: a kernel process, a thread only ever in the
+    /// kernel, or a frame paged out.
+    NoSavedState,
+}
+
+impl ViewMiss {
+    /// What the banner says.
+    pub(crate) fn describe(&self) -> String {
+        match self {
+            Self::NoWindowsKernel(miss) => {
+                format!("No 64-bit Windows kernel was found ({}).", miss.message())
+            }
+            Self::NoSuchProcess => "That process has exited.".to_owned(),
+            Self::NoSuchThread => "That thread has exited.".to_owned(),
+            Self::NoSavedState => {
+                "No user state is saved for it: a kernel process or thread, or its trap \
+                 frame is paged out."
+                    .to_owned()
+            }
+        }
+    }
+}
+
+/// What looking from a process or thread came to.
+#[derive(Clone, Debug)]
+pub(crate) enum ThreadViewRead {
+    /// The process asked for is the one the processor runs: its live state is
+    /// the view.
+    Live,
+    Thread(ThreadView),
+    Miss(ViewMiss),
+}
+
+/// Finds `target` in the guest's process list and reads the thread to look
+/// from: the one asked for, or for a process its first thread with saved user
+/// state. A process the shown processor runs reads as `Live`. The walks are
+/// the ones `read_windows` makes, through the same `discovery`.
+pub(crate) fn read_thread_view<T: Instrumentation, E: SliceEngine<T>>(
+    cpu: &mut DebugCpu<'_, T, E>,
+    view: &CpuDebugView,
+    target: ViewTarget,
+    discovery: &mut WindowsDiscovery,
+) -> ThreadViewRead {
+    let state = match find_kernel(cpu, view, &mut discovery.state) {
+        Ok(state) => state,
+        Err(miss) => return ThreadViewRead::Miss(ViewMiss::NoWindowsKernel(miss)),
+    };
+    let KernelState {
+        kernel,
+        peb_offset,
+        parent_offset,
+        wow64_offset,
+        threads: thread_layout,
+        vad: _,
+    } = state;
+    let kernel_modules = match kernel.loaded_modules {
+        Some(head) => list_modules(cpu, Root::Live, head).unwrap_or_default(),
+        None => Vec::new(),
+    };
+    let processes = list_processes(cpu, kernel, view.registers.cr3, parent_offset);
+    let eprocess = match target {
+        ViewTarget::Process { eprocess } | ViewTarget::Thread { eprocess, .. } => eprocess,
+    };
+    let Some(process) = processes.iter().find(|process| process.eprocess == eprocess) else {
+        return ThreadViewRead::Miss(ViewMiss::NoSuchProcess);
+    };
+    if process.current && matches!(target, ViewTarget::Process { .. }) {
+        return ThreadViewRead::Live;
+    }
+    let read = process_modules(cpu, &processes, process, peb_offset, wow64_offset);
+    let (user_space, listed) = match &read {
+        ModuleRead::Listed(modules) => (true, modules.as_slice()),
+        ModuleRead::Unreadable => (true, &[][..]),
+        ModuleRead::NoUserSpace => (false, &[][..]),
+    };
+    let ranges = code_ranges(&kernel_modules, listed);
+    let threads = read_threads(
+        cpu,
+        process.eprocess,
+        process.pid,
+        process.cr3,
+        user_space,
+        thread_layout,
+        &ranges,
+    );
+    let chosen = match target {
+        ViewTarget::Process { .. } => threads.iter().find(|thread| thread.saved.is_some()),
+        ViewTarget::Thread { tid, .. } => match threads.iter().find(|thread| thread.tid == tid) {
+            Some(thread) => Some(thread),
+            None => return ThreadViewRead::Miss(ViewMiss::NoSuchThread),
+        },
+    };
+    let Some((thread, saved)) = chosen.and_then(|thread| thread.saved.map(|saved| (thread, saved)))
+    else {
+        return ThreadViewRead::Miss(ViewMiss::NoSavedState);
+    };
+    let mut named = Vec::new();
+    gather_modules(&mut named, &kernel_modules, ModuleSpace::Kernel);
+    gather_modules(&mut named, listed, ModuleSpace::User);
+    ThreadViewRead::Thread(ThreadView {
+        process: process.name.clone(),
+        pid: process.pid,
+        tid: thread.tid,
+        cr3: process.cr3,
+        saved,
+        symbols: SymbolIndex { modules: named },
+    })
 }
 
 /// Appends `source` modules to `into` as `space` symbols, naming an unnamed
@@ -777,6 +921,9 @@ struct ThreadLayout {
     /// The two start addresses; found once the threads' entry points can be
     /// checked against loaded modules.
     start: Option<StartLayout>,
+    /// `KTHREAD.TrapFrame`; found once a process whose threads have user
+    /// stacks is read.
+    trap_frame: Option<i64>,
 }
 
 /// Where a thread's two start addresses sit, as node-relative offsets.
@@ -882,11 +1029,71 @@ fn read_threads<T: Instrumentation, E: SliceEngine<T>>(
             layout.start = Some(found);
         }
     }
-    *cache = Some(layout);
-    nodes
+    let mut threads: Vec<WinThread> = nodes
         .iter()
         .map(|&node| read_thread(cpu, node, &layout, cr3))
-        .collect()
+        .collect();
+    // The trap-frame field is found against the threads' own stacks, so it
+    // is looked for once they are read, and the threads take their saved
+    // registers from it.
+    if layout.trap_frame.is_none() && user_space {
+        if let Some(delta) = find_trap_frame_delta(cpu, &nodes, &threads) {
+            layout.trap_frame = Some(delta);
+            for (thread, &node) in threads.iter_mut().zip(&nodes) {
+                thread.saved = thread.stack.and_then(|stack| saved_registers(cpu, node, delta, stack));
+            }
+        }
+    }
+    *cache = Some(layout);
+    threads
+}
+
+/// The thread at `node`'s user registers from the `KTRAP_FRAME` its
+/// `KTHREAD.TrapFrame` (node-relative `delta`) points at, when that frame is
+/// its own user state (`frame_is_users` against its user `stack`). The frame
+/// is kernel memory.
+fn saved_registers<T: Instrumentation, E: SliceEngine<T>>(
+    cpu: &mut DebugCpu<'_, T, E>,
+    node: u64,
+    delta: i64,
+    stack: LinearRange,
+) -> Option<SavedRegisters> {
+    let frame_at = read_at(cpu, node, delta).and_then(kernel_pointer)?;
+    let mut frame = [0u8; TRAP_FRAME_BYTES];
+    if !read_into(cpu, Root::Live, frame_at, &mut frame) {
+        return None;
+    }
+    let saved = decode_trap_frame(&frame);
+    frame_is_users(&saved, stack).then_some(saved)
+}
+
+/// The node-relative offset of `KTHREAD.TrapFrame`: the field that, for the
+/// most threads, points at a frame holding that thread's own user state — a
+/// user CS, a user RIP and an RSP in its own stack. A stray pointer may lead
+/// to one plausible frame; only `TrapFrame` does for every waiting thread at
+/// once. Ties go to the lower offset.
+fn find_trap_frame_delta<T: Instrumentation, E: SliceEngine<T>>(
+    cpu: &mut DebugCpu<'_, T, E>,
+    nodes: &[u64],
+    threads: &[WinThread],
+) -> Option<i64> {
+    (THREAD_DELTA_MIN..THREAD_DELTA_MAX)
+        .step_by(8)
+        .map(|delta| {
+            let matches = nodes
+                .iter()
+                .zip(threads)
+                .filter(|&(&node, thread)| {
+                    thread
+                        .stack
+                        .is_some_and(|stack| saved_registers(cpu, node, delta, stack).is_some())
+                })
+                .count();
+            (delta, matches)
+        })
+        .filter(|&(_, matches)| matches > 0)
+        .max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(&a.0)))
+        .map(|(delta, _)| delta)
 }
 
 /// Whether a thread layout learned earlier reads true for this process: its
@@ -948,6 +1155,7 @@ fn discover_thread_layout<T: Instrumentation, E: SliceEngine<T>>(
             cid,
             teb: None,
             start: None,
+            trap_frame: None,
         });
     }
     None
@@ -1090,12 +1298,17 @@ fn read_thread<T: Instrumentation, E: SliceEngine<T>>(
             .and_then(user_pointer)
             .is_some_and(|data| data >= 0x1_0000)
     });
+    let saved = layout
+        .trap_frame
+        .zip(stack)
+        .and_then(|(delta, stack)| saved_registers(cpu, node, delta, stack));
     WinThread {
         tid,
         start,
         teb,
         stack,
         uses_fibers,
+        saved,
     }
 }
 
@@ -1865,6 +2078,43 @@ mod tests {
                 SystemListing::NoWindowsKernel(KernelMiss::NoKpcr)
             );
         }
+    }
+
+    /// Viewing a process or thread of a guest that is not Windows says why,
+    /// and never falls back to the live processor as if it were that thread.
+    #[test]
+    fn viewing_a_thread_of_a_guest_that_is_not_windows_says_why() {
+        let mut machine =
+            Emulator::new_with_mode(EmulatorConfig::default(), CpuSetupMode::FlatLong64)
+                .expect("machine");
+        let mut cpu = machine.debug_cpu(0).expect("the boot processor");
+        let view = cpu.view();
+        let mut discovery = WindowsDiscovery::default();
+        for target in [
+            ViewTarget::Process { eprocess: 0xFFFF_FA80_0000_1000 },
+            ViewTarget::Thread { eprocess: 0xFFFF_FA80_0000_1000, tid: 0x1A4 },
+        ] {
+            let read = read_thread_view(&mut cpu, &view, target, &mut discovery);
+            assert!(
+                matches!(read, ThreadViewRead::Miss(ViewMiss::NoWindowsKernel(KernelMiss::NoKpcr))),
+                "{target:?} read as {read:?}"
+            );
+        }
+    }
+
+    /// Every reason a thread cannot be shown says what it is, so the banner
+    /// never reads blank.
+    #[test]
+    fn every_reason_a_thread_cannot_be_shown_is_said() {
+        for miss in [
+            ViewMiss::NoWindowsKernel(KernelMiss::NoKpcr),
+            ViewMiss::NoSuchProcess,
+            ViewMiss::NoSuchThread,
+            ViewMiss::NoSavedState,
+        ] {
+            assert!(!miss.describe().is_empty(), "{miss:?}");
+        }
+        assert!(ViewMiss::NoSavedState.describe().contains("saved"));
     }
 
     /// A KPCR-shaped address that does not read says the kernel is not

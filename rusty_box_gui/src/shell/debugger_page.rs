@@ -16,9 +16,10 @@ use rusty_box::cpu::{CodeSize, CpuDebugView, ExecutionMode, ProcessorActivity};
 
 use crate::debugger::control::DebugNote;
 use crate::debugger::inspect::{
-    AddressSpace, CodeText, DebugSnapshot, GuestAddress, MemoryTarget, ModuleSpace,
-    MEMORY_WINDOW_BYTES, ROW_BYTES,
+    AddressSpace, CodeText, DebugSnapshot, GuestAddress, MemoryTarget, ModuleSpace, ViewContext,
+    Viewing, MEMORY_WINDOW_BYTES, ROW_BYTES, WOW64_CODE_SELECTOR,
 };
+use crate::debugger::threads::SavedRegisters;
 use crate::debugger::search::{
     pattern_of, FindOutcome, FindRequest, FoundAt, PatternError, SearchEncoding,
 };
@@ -315,7 +316,15 @@ pub(crate) enum DebuggerAction {
     /// space of the process at `cr3`: a region of a process other than the
     /// running one.
     ViewInProcess { cr3: u64, address: u64 },
+    /// Show the CPU tab looking from here: a process or thread seen from
+    /// inside, or the live processor again.
+    View(ViewContext),
 }
+
+/// The banner's way back from a thread's view.
+pub(crate) const BACK_TO_LIVE: &str = "Back to live CPU";
+const STEP_WHILE_VIEWING: &str =
+    "Step runs the live processor; go back to the live CPU to step.";
 
 /// What the panes compare against and mark: the snapshot before, and the
 /// last search hit.
@@ -331,6 +340,35 @@ struct Toolbar {
     paused: bool,
     step_available: bool,
     dump_pending: bool,
+    /// The panes show a thread's saved state, not the live processor that a
+    /// step would run.
+    viewing: bool,
+}
+
+/// Under the header while the panes look from somewhere other than the live
+/// processor: whom they show (or why that cannot be shown) and the way back.
+fn viewing_banner(ui: &mut egui::Ui, snapshot: &DebugSnapshot, action: &mut Option<DebuggerAction>) {
+    let text = match &snapshot.viewing {
+        Viewing::Live => return,
+        Viewing::Thread(thread) => format!(
+            "Viewing {} · PID {} · thread {} · saved state",
+            thread.process, thread.pid, thread.tid
+        ),
+        Viewing::Miss(miss) => miss.describe(),
+    };
+    egui::Frame::new()
+        .fill(ACCENT_AMBER.gamma_multiply(0.12))
+        .stroke(egui::Stroke::new(1.0_f32, ACCENT_AMBER.gamma_multiply(0.5)))
+        .corner_radius(8)
+        .inner_margin(egui::Margin::symmetric(10, 5))
+        .show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new(text).color(ACCENT_AMBER));
+                if ui.button(BACK_TO_LIVE).clicked() {
+                    *action = Some(DebuggerAction::View(ViewContext::Live));
+                }
+            });
+        });
 }
 
 pub(crate) fn draw_debugger_page(
@@ -350,6 +388,9 @@ pub(crate) fn draw_debugger_page(
         searching,
         pane,
     } = state;
+    // What was read from somewhere else is no baseline for what changed: a
+    // live snapshot and a thread's view are compared with neither.
+    let previous = previous.filter(|before| snapshot.is_some_and(|now| now.context == before.context));
     let marks = Marks {
         previous,
         find,
@@ -370,6 +411,7 @@ pub(crate) fn draw_debugger_page(
                 paused,
                 step_available,
                 dump_pending,
+                viewing: snapshot.is_some_and(|snapshot| matches!(snapshot.viewing, Viewing::Thread(_))),
             };
             header(ui, &bar, density, snapshot, pane, &mut action);
             if let Some(DebugNote::StepNeedsInterpreter) = note {
@@ -379,6 +421,7 @@ pub(crate) fn draw_debugger_page(
                 empty_state(ui, "Running", PAUSE_TO_INSPECT);
                 return;
             };
+            viewing_banner(ui, snapshot, &mut action);
             follow_window(pane, snapshot);
             ui.add_space(density.gap());
             match (pane.tab, fit) {
@@ -402,17 +445,42 @@ pub(crate) fn draw_debugger_page(
 /// whether the page shows a pause that has since run on. They go into the
 /// header's row, after its buttons, and wrap where the row is full.
 fn status_chips(ui: &mut egui::Ui, snapshot: &DebugSnapshot, paused: bool) {
-    let Some(view) = shown_view(snapshot) else {
-        return;
+    // Whose state the chips describe: a viewed thread's saved state, or the
+    // shown processor's.
+    let cr3 = match &snapshot.viewing {
+        Viewing::Thread(thread) => {
+            let cpl = thread.saved.cs & 3;
+            let (text, color) = if cpl == 3 {
+                ("User mode", ACCENT_CYAN)
+            } else {
+                ("Kernel mode", ACCENT_AMBER)
+            };
+            chip(ui, &format!("{text} · CPL {cpl}"), color);
+            let mode = if thread.saved.cs == WOW64_CODE_SELECTOR {
+                "Compatibility mode"
+            } else {
+                "64-bit mode"
+            };
+            chip(ui, mode, ACCENT_BLUE);
+            chip(ui, "Saved state", TEXT_MUTED)
+                .on_hover_text("What the kernel saved when this thread last entered it.");
+            thread.cr3
+        }
+        Viewing::Live | Viewing::Miss(_) => {
+            let Some(view) = shown_view(snapshot) else {
+                return;
+            };
+            let (text, color) = match view.registers.cpl {
+                0 => ("Kernel mode", ACCENT_AMBER),
+                3 => ("User mode", ACCENT_CYAN),
+                _ => ("Privileged", ACCENT_AMBER),
+            };
+            chip(ui, &format!("{text} · CPL {}", view.registers.cpl), color);
+            chip(ui, mode_label(view), ACCENT_BLUE);
+            chip(ui, activity_label(view.activity), TEXT_MUTED);
+            view.registers.cr3
+        }
     };
-    let (text, color) = match view.registers.cpl {
-        0 => ("Kernel mode", ACCENT_AMBER),
-        3 => ("User mode", ACCENT_CYAN),
-        _ => ("Privileged", ACCENT_AMBER),
-    };
-    chip(ui, &format!("{text} · CPL {}", view.registers.cpl), color);
-    chip(ui, mode_label(view), ACCENT_BLUE);
-    chip(ui, activity_label(view.activity), TEXT_MUTED);
     if let Some(path) = &snapshot.process {
         let name = path.rsplit(['\\', '/']).next().unwrap_or(path);
         chip(ui, &format!("Process {name}"), TEXT_PRIMARY).on_hover_text(path.as_str());
@@ -425,7 +493,7 @@ fn status_chips(ui: &mut egui::Ui, snapshot: &DebugSnapshot, paused: bool) {
         chip(ui, &format!("at {}", symbol.label()), ACCENT_CYAN)
             .on_hover_text("The module RIP points into.");
     }
-    chip(ui, &format!("CR3 {:X}", view.registers.cr3), TEXT_MUTED)
+    chip(ui, &format!("CR3 {cr3:X}"), TEXT_MUTED)
         .on_hover_text("The address space: each process has its own page tables.");
     if !paused {
         chip(ui, SHOWING_LAST_PAUSE, ACCENT_AMBER);
@@ -473,11 +541,16 @@ fn header(
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = egui::vec2(density.gap(), density.gap());
         ui.spacing_mut().button_padding = density.button_padding();
-        let step = ui.add_enabled(bar.paused && bar.step_available, egui::Button::new("Step"));
-        let step = if bar.step_available {
-            step
-        } else {
+        let step = ui.add_enabled(
+            bar.paused && bar.step_available && !bar.viewing,
+            egui::Button::new("Step"),
+        );
+        let step = if !bar.step_available {
             step.on_disabled_hover_text(STEP_NEEDS_INTERPRETER)
+        } else if bar.viewing {
+            step.on_disabled_hover_text(STEP_WHILE_VIEWING)
+        } else {
+            step
         };
         if step.clicked() {
             *action = Some(DebuggerAction::Step);
@@ -1051,6 +1124,10 @@ fn code_rows(ui: &mut egui::Ui, snapshot: &DebugSnapshot) {
 }
 
 fn register_rows(ui: &mut egui::Ui, snapshot: &DebugSnapshot, marks: Marks<'_>) {
+    if let Viewing::Thread(thread) = &snapshot.viewing {
+        saved_register_rows(ui, &thread.saved);
+        return;
+    }
     let Some(view) = shown_view(snapshot) else {
         return;
     };
@@ -1167,6 +1244,60 @@ fn register_rows(ui: &mut egui::Ui, snapshot: &DebugSnapshot, marks: Marks<'_>) 
             });
         });
     }
+}
+
+/// Why the dimmed registers of a viewed thread may not be its own.
+const ENTRY_DEPENDENT: &str = "Saved only as the way it entered the kernel requires (system \
+     call, interrupt or exception); it may not be this thread's value.";
+/// Why R12–R15 have no value in a viewed thread.
+const NOT_IN_TRAP_FRAME: &str = "A trap frame does not hold this register.";
+
+/// A viewed thread's registers as its `KTRAP_FRAME` holds them: RIP, RSP,
+/// RBP, RFLAGS and the segments, which every kernel entry saves, plainly; the
+/// ones that depend on how it entered dimmed; R12–R15, which no trap frame
+/// holds, as dashes. The live processor's system, x87 and SSE state belongs
+/// to whatever runs, so it is not shown here.
+fn saved_register_rows(ui: &mut egui::Ui, saved: &SavedRegisters) {
+    ui.spacing_mut().item_spacing.y = 2.0;
+    section_caption(ui, "Saved when it entered the kernel");
+    egui::Grid::new("debugger_saved_registers")
+        .num_columns(2)
+        .spacing(REGISTER_GRID_SPACING)
+        .show(ui, |ui| {
+            for (name, value) in [("RIP", saved.rip), ("RSP", saved.rsp), ("RBP", saved.rbp)] {
+                register_row(ui, name, format!("{value:016X}"), false);
+            }
+            register_row(ui, "RFLAGS", format!("{:08X}", saved.rflags), false);
+            for (name, value) in [
+                ("RAX", saved.rax),
+                ("RBX", saved.rbx),
+                ("RCX", saved.rcx),
+                ("RDX", saved.rdx),
+                ("RSI", saved.rsi),
+                ("RDI", saved.rdi),
+                ("R8", saved.r8),
+                ("R9", saved.r9),
+                ("R10", saved.r10),
+                ("R11", saved.r11),
+            ] {
+                faint_register_row(ui, name, format!("{value:016X}")).on_hover_text(ENTRY_DEPENDENT);
+            }
+            for name in ["R12", "R13", "R14", "R15"] {
+                faint_register_row(ui, name, "—".repeat(16)).on_hover_text(NOT_IN_TRAP_FRAME);
+            }
+            register_row(ui, "CS", format!("{:04X}", saved.cs), false);
+            register_row(ui, "SS", format!("{:04X}", saved.ss), false);
+        });
+    // EFlags is a 32-bit field of the frame.
+    ui.label(flags_job(saved.rflags as u32, None));
+}
+
+/// A register shown dimmed: present, but not to be trusted as much.
+fn faint_register_row(ui: &mut egui::Ui, name: &str, value: String) -> egui::Response {
+    ui.label(mono(name).color(TEXT_MUTED));
+    let response = ui.label(mono(value).color(TEXT_MUTED.gamma_multiply(0.75)));
+    ui.end_row();
+    response
 }
 
 /// One register: its name, and its value — red when the last step or pause
@@ -1924,7 +2055,7 @@ fn right_card_body(
     match detail {
         ProcessDetail::Modules => listed_modules(ui, listing, navigable, highlight, action),
         ProcessDetail::Threads => match listing.modules.as_ref() {
-            Some(modules) => thread_rows(ui, &modules.threads, navigable, action),
+            Some(modules) => thread_rows(ui, &modules.threads, modules.eprocess, action),
             None => {
                 ui.add_space(SPACE_ITEM);
                 ui.label(RichText::new("Pick a process.").color(TEXT_MUTED));
@@ -2388,10 +2519,16 @@ fn process_rows(
             ""
         };
         let response = response.on_hover_text(format!(
-            "{} — PID {}, parent {parent}\nEPROCESS {:016X}\nCR3 {:016X}{running}",
+            "{} — PID {}, parent {parent}\nEPROCESS {:016X}\nCR3 {:016X}{running}\n\
+             Double-click to see the CPU tab from inside it.",
             process.name, process.pid, process.eprocess, process.cr3
         ));
-        if response.clicked() && !selected {
+        // A double-click's first click has already picked the row.
+        if response.double_clicked() {
+            *action = Some(DebuggerAction::View(ViewContext::Process {
+                eprocess: process.eprocess,
+            }));
+        } else if response.clicked() && !selected {
             *selected_process = Some(process.eprocess);
             *action = Some(DebuggerAction::ShowSystem(SystemView::Processes {
                 selected: *selected_process,
@@ -2480,10 +2617,12 @@ fn thread_columns() -> [Cell; 4] {
 /// One row per thread: its ID, start address, user stack, and a mark for a
 /// thread that runs fibres. A thread of the running process opens its stack
 /// in the memory pane.
+/// One row per thread of the process at `eprocess`; double-clicking one shows
+/// the CPU tab from inside it.
 fn thread_rows(
     ui: &mut egui::Ui,
     threads: &[WinThread],
-    navigable: bool,
+    eprocess: u64,
     action: &mut Option<DebuggerAction>,
 ) {
     if threads.is_empty() {
@@ -2513,13 +2652,14 @@ fn thread_rows(
             Cell::fill(tail, tail_color),
         ];
         let response = list_row(ui, 0.0, &cells, Tone::striped(n), RowSense::Pick { selected: false });
-        if let (true, Some(stack)) = (navigable, thread.stack) {
-            if response
-                .on_hover_text("Click to show its stack in memory.")
-                .clicked()
-            {
-                *action = Some(DebuggerAction::OpenModule(stack.start));
-            }
+        if response
+            .on_hover_text("Double-click to see the CPU tab from inside this thread.")
+            .double_clicked()
+        {
+            *action = Some(DebuggerAction::View(ViewContext::Thread {
+                eprocess,
+                tid: thread.tid,
+            }));
         }
     }
 }
