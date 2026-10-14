@@ -1226,8 +1226,22 @@ fn search_start(snapshot: &DebugSnapshot, find: Option<FindOutcome>) -> GuestAdd
     }
 }
 
-/// The memory window: address, sixteen bytes and their ASCII per row. A byte
-/// the last step changed is red; the bytes of the last search hit amber.
+/// How many bytes a memory row shows per line in a pane `room_chars` wide: all
+/// `ROW_BYTES` where it has the room, otherwise half, so a phone's dump fits
+/// without a sideways swipe. A row is an exact number of lines either way.
+/// A line is the 16-char address, two gaps, `3n-1` hex characters and `n`
+/// ASCII — `19 + 4n` characters.
+fn memory_bytes_per_line(room_chars: f32) -> usize {
+    if room_chars >= 19.0 + 4.0 * ROW_BYTES as f32 {
+        ROW_BYTES
+    } else {
+        ROW_BYTES / 2
+    }
+}
+
+/// The memory window: address, up to sixteen bytes and their ASCII per line,
+/// folded to eight where the pane is too narrow for sixteen. A byte the last
+/// step changed is red; the bytes of the last search hit amber.
 fn memory_rows(ui: &mut egui::Ui, snapshot: &DebugSnapshot, marks: Marks<'_>) {
     // The window as it stood before, compared only when it shows the same
     // place: a window that moved has nothing to compare against.
@@ -1243,54 +1257,62 @@ fn memory_rows(ui: &mut egui::Ui, snapshot: &DebugSnapshot, marks: Marks<'_>) {
         | None => None,
     };
     let font = mono_font();
-    // Sixteen bytes, each two digits and a space but the last.
-    const HEX_CHARS: usize = 3 * ROW_BYTES - 1;
+    let room = (ui.available_width() - 2.0 * ROW_PAD) / char_width(ui);
+    let per_line = memory_bytes_per_line(room);
+    let hex_chars = 3 * per_line - 1;
     for (index, line) in snapshot.memory.rows.iter().enumerate() {
-        let address = Cell::left(format!("{:016X}", line.address), TEXT_MUTED, 16);
         let tone = Tone::striped(index);
-        let Some(bytes) = line.bytes else {
-            let unreadable = ["??"; ROW_BYTES].join(" ");
-            let cells = [address, Cell::left(unreadable, TEXT_MUTED.gamma_multiply(0.6), HEX_CHARS)];
-            list_row(ui, 0.0, &cells, tone, RowSense::Look);
-            continue;
-        };
-        let old = before.and_then(|rows| rows.get(index)).and_then(|old| old.bytes);
-        let mut hex = LayoutJob::default();
-        for (column, byte) in bytes.iter().enumerate() {
-            let at = line.address.wrapping_add(column as u64);
-            let color = if old.is_some_and(|old| old[column] != *byte) {
-                CHANGED
-            } else if hit.is_some_and(|hit| in_hit(hit, at)) {
-                ACCENT_AMBER
-            } else if *byte == 0 {
-                // Zero bytes recede, so the data in a page stands out.
-                TEXT_MUTED.gamma_multiply(0.7)
-            } else {
-                TEXT_PRIMARY
+        // A 16-byte row is drawn as one line, or two when it is folded.
+        for chunk in (0..ROW_BYTES).step_by(per_line) {
+            let base = line.address.wrapping_add(chunk as u64);
+            let address = Cell::left(format!("{base:016X}"), TEXT_MUTED, 16);
+            let Some(bytes) = line.bytes else {
+                let unreadable = vec!["??"; per_line].join(" ");
+                let cells =
+                    [address, Cell::left(unreadable, TEXT_MUTED.gamma_multiply(0.6), hex_chars)];
+                list_row(ui, 0.0, &cells, tone, RowSense::Look);
+                continue;
             };
-            let separator = if column == 0 { "" } else { " " };
-            hex.append(
-                &format!("{separator}{byte:02X}"),
-                0.0,
-                TextFormat::simple(font.clone(), color),
-            );
-        }
-        let ascii: String = bytes
-            .iter()
-            .map(|&byte| {
-                if (0x20..0x7F).contains(&byte) {
-                    byte as char
+            let old = before.and_then(|rows| rows.get(index)).and_then(|old| old.bytes);
+            let mut hex = LayoutJob::default();
+            for offset in 0..per_line {
+                let column = chunk + offset;
+                let byte = bytes[column];
+                let at = line.address.wrapping_add(column as u64);
+                let color = if old.is_some_and(|old| old[column] != byte) {
+                    CHANGED
+                } else if hit.is_some_and(|hit| in_hit(hit, at)) {
+                    ACCENT_AMBER
+                } else if byte == 0 {
+                    // Zero bytes recede, so the data in a page stands out.
+                    TEXT_MUTED.gamma_multiply(0.7)
                 } else {
-                    '.'
-                }
-            })
-            .collect();
-        let cells = [
-            address,
-            Cell::job(hex, HEX_CHARS),
-            Cell::left(ascii, ACCENT_BLUE, ROW_BYTES),
-        ];
-        list_row(ui, 0.0, &cells, tone, RowSense::Look);
+                    TEXT_PRIMARY
+                };
+                let separator = if offset == 0 { "" } else { " " };
+                hex.append(
+                    &format!("{separator}{byte:02X}"),
+                    0.0,
+                    TextFormat::simple(font.clone(), color),
+                );
+            }
+            let ascii: String = bytes[chunk..chunk + per_line]
+                .iter()
+                .map(|&byte| {
+                    if (0x20..0x7F).contains(&byte) {
+                        byte as char
+                    } else {
+                        '.'
+                    }
+                })
+                .collect();
+            let cells = [
+                address,
+                Cell::job(hex, hex_chars),
+                Cell::left(ascii, ACCENT_BLUE, per_line),
+            ];
+            list_row(ui, 0.0, &cells, tone, RowSense::Look);
+        }
     }
 }
 
@@ -2383,6 +2405,16 @@ mod tests {
         // A 32-bit address is eight characters shorter: three more bytes
         // fit in a pane of the same width.
         assert_eq!(code_bytes_shown(51.0, 8), 7);
+    }
+
+    /// A wide memory pane shows all sixteen bytes a line; a narrow one folds
+    /// to eight so the dump fits without a sideways swipe.
+    #[test]
+    fn a_narrow_memory_pane_folds_its_rows_to_eight_bytes() {
+        assert_eq!(memory_bytes_per_line(120.0), ROW_BYTES);
+        assert_eq!(memory_bytes_per_line(19.0 + 4.0 * ROW_BYTES as f32), ROW_BYTES);
+        assert_eq!(memory_bytes_per_line(60.0), ROW_BYTES / 2);
+        assert_eq!(memory_bytes_per_line(10.0), ROW_BYTES / 2);
     }
 
     #[test]
