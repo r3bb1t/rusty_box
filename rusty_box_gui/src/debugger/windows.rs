@@ -40,6 +40,7 @@ use rusty_box::emulator::{DebugCpu, SliceEngine};
 
 use super::drivers;
 use super::inspect::{ModuleSpace, SymModule, SymbolIndex};
+use super::ssdt;
 use super::memory_map::{self, MemoryMap, ModuleLayout};
 use super::pe::{self, ExportRead, ImportRead, HEADER_BYTES};
 use super::threads::{
@@ -86,6 +87,8 @@ pub(crate) enum SystemView {
         selected: Option<u64>,
         detail: DriverDetail,
     },
+    /// The kernel's system-service dispatch table.
+    Ssdt,
 }
 
 /// What the Drivers view shows for the chosen driver.
@@ -177,6 +180,25 @@ pub(crate) enum SystemListing {
     Processes(ProcessListing),
     KernelModules(KernelListing),
     Drivers(DriverListing),
+    Ssdt(SsdtListing),
+}
+
+/// The kernel's system-service dispatch table, one row per service.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SsdtListing {
+    pub(crate) services: Vec<SsdtService>,
+    /// Whether any service points outside the kernel image — a hook.
+    pub(crate) any_hooked: bool,
+}
+
+/// One system service.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SsdtService {
+    pub(crate) index: u32,
+    pub(crate) routine: u64,
+    pub(crate) site: PointerSite,
+    /// The name of the module the routine lies in, when it lies in one.
+    pub(crate) module_name: Option<String>,
 }
 
 /// Every driver object, and the picked one's detail.
@@ -292,6 +314,8 @@ pub(crate) enum KernelMiss {
     NoModuleList,
     /// The object namespace root was not reached from `IoDriverObjectType`.
     NoObjectNamespace,
+    /// `KeServiceDescriptorTable` was not found or did not read.
+    NoSsdt,
 }
 
 impl KernelMiss {
@@ -308,6 +332,7 @@ impl KernelMiss {
             Self::UnknownProcessLayout => "the System process's EPROCESS was not recognised",
             Self::NoModuleList => "the kernel's loaded-module list was not found",
             Self::NoObjectNamespace => "the object namespace was not reached",
+            Self::NoSsdt => "the system-service table (KeServiceDescriptorTable) was not found",
         }
     }
 }
@@ -501,7 +526,8 @@ pub(crate) fn read_windows<T: Instrumentation, E: SliceEngine<T>>(
                 SystemView::Off => SystemListing::NotAsked,
                 SystemView::Processes { .. }
                 | SystemView::KernelModules { .. }
-                | SystemView::Drivers { .. } => SystemListing::NoWindowsKernel(miss),
+                | SystemView::Drivers { .. }
+                | SystemView::Ssdt => SystemListing::NoWindowsKernel(miss),
             };
             return WindowsRead {
                 symbols: SymbolIndex::default(),
@@ -663,6 +689,10 @@ pub(crate) fn read_windows<T: Instrumentation, E: SliceEngine<T>>(
                 None => SystemListing::NoWindowsKernel(KernelMiss::NoObjectNamespace),
             }
         }
+        SystemView::Ssdt => match read_ssdt(cpu, kernel, &kernel_modules) {
+            Some(listing) => SystemListing::Ssdt(listing),
+            None => SystemListing::NoWindowsKernel(KernelMiss::NoSsdt),
+        },
     };
     WindowsRead { symbols, system }
 }
@@ -1162,6 +1192,69 @@ fn symbolic_links<T: Instrumentation, E: SliceEngine<T>>(
             Some((format!("\\??\\{name}"), target))
         })
         .collect()
+}
+
+// ───────────────────────────── SSDT ──────────────────────────────
+
+/// The kernel's system-service table, each service classified against the
+/// loaded modules. `None` when `KeServiceDescriptorTable` is not found.
+fn read_ssdt<T: Instrumentation, E: SliceEngine<T>>(
+    cpu: &mut DebugCpu<'_, T, E>,
+    kernel: &Kernel,
+    modules: &[WinModule],
+) -> Option<SsdtListing> {
+    let descriptor = export(cpu, &kernel.image, "KeServiceDescriptorTable")?;
+    let base = read_u64(cpu, Root::Live, descriptor + ssdt::DESCRIPTOR_SERVICE_TABLE)
+        .and_then(kernel_pointer)?;
+    let limit = read_u32(cpu, Root::Live, descriptor + ssdt::DESCRIPTOR_SERVICE_LIMIT)?
+        .min(ssdt::MAX_SERVICES);
+    if limit == 0 {
+        return None;
+    }
+    let bytes = read_exact(cpu, Root::Live, base, limit as usize * 4)?;
+    let entries: Vec<i32> = bytes
+        .chunks_exact(4)
+        .map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect();
+    // The encoding is the one whose routines land in a loaded module most
+    // often: the wrong one scatters them outside every image.
+    let in_modules = |encoding| {
+        entries
+            .iter()
+            .filter(|&&entry| module_of(ssdt::routine_of(base, entry, encoding), modules).is_some())
+            .count()
+    };
+    let encoding = if in_modules(ssdt::Encoding::Shift) >= in_modules(ssdt::Encoding::Mask) {
+        ssdt::Encoding::Shift
+    } else {
+        ssdt::Encoding::Mask
+    };
+    // A service that lies in the kernel image is unhooked; the kernel is its
+    // own owner, so an in-kernel routine reads as `OwnImage`.
+    let own = module_of(kernel.image.base, modules);
+    let mut any_hooked = false;
+    let services = entries
+        .iter()
+        .enumerate()
+        .map(|(index, &entry)| {
+            let routine = ssdt::routine_of(base, entry, encoding);
+            let site = classify_pointer(routine, own, modules, None);
+            if site != PointerSite::OwnImage {
+                any_hooked = true;
+            }
+            let module_name = module_of(routine, modules).and_then(|m| m.name.clone());
+            SsdtService {
+                index: index as u32,
+                routine,
+                site,
+                module_name,
+            }
+        })
+        .collect();
+    Some(SsdtListing {
+        services,
+        any_hooked,
+    })
 }
 
 /// Whom the CPU tab is asked to look from: a process (one of its threads with

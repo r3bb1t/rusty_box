@@ -31,8 +31,8 @@ use crate::debugger::pe::{
 use crate::debugger::windows::{
     DeviceRow, DispatchEntry, DriverDetail, DriverListing, DriverShown, KernelListing, KernelMiss,
     ModuleBits, ModuleDetail, ModuleRead, PickedDetail, PickedDriver, PickedModule, PointerSite,
-    ProcessDetail, ProcessListing, SectionsRead, SystemListing, SystemView, TreeRow, WinDriver,
-    WinModule, WinProcess,
+    ProcessDetail, ProcessListing, SectionsRead, SsdtListing, SsdtService, SystemListing,
+    SystemView, TreeRow, WinDriver, WinModule, WinProcess,
 };
 use crate::shell::listing::{
     card_title, char_width, chip, empty_state, header_row, lead_arrow, lead_chevron, lead_dot,
@@ -317,10 +317,13 @@ pub(crate) enum DebuggerTab {
     KernelModules,
     /// The guest kernel's driver objects and their devices.
     Drivers,
+    /// The kernel's system-service dispatch table.
+    Ssdt,
 }
 
 impl DebuggerTab {
-    const ALL: [Self; 4] = [Self::Cpu, Self::Processes, Self::KernelModules, Self::Drivers];
+    const ALL: [Self; 5] =
+        [Self::Cpu, Self::Processes, Self::KernelModules, Self::Drivers, Self::Ssdt];
 
     pub(crate) const fn label(self) -> &'static str {
         match self {
@@ -328,6 +331,7 @@ impl DebuggerTab {
             Self::Processes => "Processes",
             Self::KernelModules => "Kernel modules",
             Self::Drivers => "Drivers",
+            Self::Ssdt => "SSDT",
         }
     }
 
@@ -349,6 +353,7 @@ impl DebuggerTab {
                 selected: pane.selected_driver,
                 detail: pane.driver_detail,
             },
+            Self::Ssdt => SystemView::Ssdt,
         }
     }
 }
@@ -501,7 +506,13 @@ pub(crate) fn draw_debugger_page(
                 (DebuggerTab::Cpu, Fit::Scrolling(columns)) => {
                     scrolling_layout(ui, columns, density, snapshot, marks, pane, &mut action);
                 }
-                (DebuggerTab::Processes | DebuggerTab::KernelModules | DebuggerTab::Drivers, _) => {
+                (
+                    DebuggerTab::Processes
+                    | DebuggerTab::KernelModules
+                    | DebuggerTab::Drivers
+                    | DebuggerTab::Ssdt,
+                    _,
+                ) => {
                     system_page(ui, fit, snapshot, pane, &mut action);
                 }
             }
@@ -1836,12 +1847,16 @@ fn system_page(
         (SystemListing::Drivers(listing), DebuggerTab::Drivers) => {
             drivers_page(ui, fit, listing, pane, action);
         }
+        (SystemListing::Ssdt(listing), DebuggerTab::Ssdt) => {
+            ssdt_page(ui, fit, listing, pane, action);
+        }
         // A list for another tab, or none yet: the run thread is reading.
         (
             SystemListing::NotAsked
             | SystemListing::Processes(_)
             | SystemListing::KernelModules(_)
-            | SystemListing::Drivers(_),
+            | SystemListing::Drivers(_)
+            | SystemListing::Ssdt(_),
             _,
         ) => {
             empty_state(ui, "Reading", READING_LIST);
@@ -3123,6 +3138,148 @@ fn drivers_page(
         pane.detail_cursor = None;
         if !matches!(action, Some(DebuggerAction::OpenModule(_))) {
             *action = Some(DebuggerAction::ShowSystem(DebuggerTab::Drivers.system_view(pane)));
+        }
+    }
+}
+
+// ───────────────────────────── SSDT tab ──────────────────────────────
+
+const SSDT_INDEX_CHARS: usize = 6;
+
+fn ssdt_columns() -> [Cell; 3] {
+    [
+        Cell::right("#", TEXT_MUTED, SSDT_INDEX_CHARS),
+        Cell::left("Routine", TEXT_MUTED, 16),
+        Cell::fill("Target", TEXT_MUTED),
+    ]
+}
+
+/// Whether a service's module name holds `filter`, or its index reads `filter`.
+fn ssdt_matches(service: &SsdtService, filter: &str) -> bool {
+    filter.is_empty()
+        || service
+            .module_name
+            .as_deref()
+            .is_some_and(|name| holds_ignoring_case(name, filter))
+        || service.index.to_string().contains(filter)
+}
+
+/// The target text and colour a service shows: a routine inside the kernel is
+/// normal; one in another module or in none is a hook, shown red.
+fn ssdt_target(service: &SsdtService) -> (String, egui::Color32) {
+    match service.site {
+        PointerSite::OwnImage => (
+            service.module_name.clone().unwrap_or_else(|| "kernel".to_owned()),
+            TEXT_PRIMARY,
+        ),
+        PointerSite::InModule { off, .. } => {
+            let name = service.module_name.as_deref().unwrap_or("module");
+            (format!("{name}+0x{off:X}  · hooked"), ACCENT_RED)
+        }
+        PointerSite::KernelDefault => ("kernel".to_owned(), TEXT_PRIMARY),
+        PointerSite::NoModule => ("no module  · hooked".to_owned(), ACCENT_RED),
+    }
+}
+
+/// Where a click or Enter on a service shows its routine: in memory when it
+/// lies in a known module.
+fn ssdt_open(service: &SsdtService) -> Option<u64> {
+    match service.site {
+        PointerSite::OwnImage | PointerSite::InModule { .. } => Some(service.routine),
+        PointerSite::KernelDefault | PointerSite::NoModule => None,
+    }
+}
+
+/// One row per service: its index, routine address, and where it leads — a
+/// hooked service (outside the kernel image) in red. The keys stand on `key`.
+fn ssdt_rows(
+    ui: &mut egui::Ui,
+    services: &[&SsdtService],
+    key: Option<KeyRow>,
+    action: &mut Option<DebuggerAction>,
+) {
+    if services.is_empty() {
+        ui.add_space(SPACE_ITEM);
+        ui.label(RichText::new("No service matches the filter.").color(TEXT_MUTED));
+        return;
+    }
+    for (n, service) in services.iter().enumerate() {
+        if culled(ui, key, n) {
+            skip_row(ui);
+            continue;
+        }
+        let (target, color) = ssdt_target(service);
+        let cells = [
+            Cell::right(service.index.to_string(), TEXT_MUTED, SSDT_INDEX_CHARS),
+            Cell::left(format!("{:016X}", service.routine), TEXT_MUTED, 16),
+            Cell::fill(target, color),
+        ];
+        let response = list_row(ui, 0.0, &cells, keyed_tone(key, n), RowSense::Pick { selected: false });
+        follow_key(&response, key, n);
+        click_opens(response, Opener::Live, ssdt_open(service), "", action);
+    }
+}
+
+/// The SSDT tab: one flat, filterable list of the kernel's system services,
+/// each classified against the loaded modules so a hooked entry stands out.
+fn ssdt_page(
+    ui: &mut egui::Ui,
+    fit: Fit,
+    listing: &SsdtListing,
+    pane: &mut DebuggerPane,
+    action: &mut Option<DebuggerAction>,
+) {
+    let filter = pane.list_filter.to_lowercase();
+    let shown: Vec<&SsdtService> = listing
+        .services
+        .iter()
+        .filter(|service| ssdt_matches(service, &filter))
+        .collect();
+    // One list: the keys always move in it, opening a service's routine.
+    let keyed_row = list_keys(ui).and_then(|keys| {
+        let walked = walk(keys, pane.detail_cursor, shown.len());
+        if let Some(KeyRow::Moved(to)) = walked.key {
+            pane.detail_cursor = Some(to);
+        }
+        if let Some(opened) = walked.open {
+            if let Some(routine) = shown.get(opened).and_then(|service| ssdt_open(service)) {
+                *action = Some(DebuggerAction::OpenModule(routine));
+            }
+        }
+        walked.key
+    });
+    let hooked = if listing.any_hooked { "  · hooks present" } else { "" };
+    let title = Title::counted("System services", listing.services.len()).inlined();
+    let mut card = |ui: &mut egui::Ui, room: Room, action: &mut Option<DebuggerAction>| {
+        keyed_pane_card(
+            ui,
+            room,
+            title,
+            keyed_row.is_some(),
+            |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    title_label(ui, title.text, title.count);
+                    if !hooked.is_empty() {
+                        ui.label(RichText::new(hooked.trim()).color(ACCENT_RED));
+                    }
+                    filter_field(ui, &mut pane.list_filter);
+                });
+                header_row(ui, 0.0, &ssdt_columns());
+            },
+            |ui| {
+                ssdt_rows(ui, &shown, keyed_row, action);
+            },
+        );
+    };
+    match fit {
+        Fit::Grid => {
+            card(ui, Room::Fixed(ui.available_size()), action);
+        }
+        Fit::Scrolling(_) => {
+            let room = Room::Content(fit.density());
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| card(ui, room, action));
         }
     }
 }
