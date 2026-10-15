@@ -8,6 +8,7 @@
 //! is between runs.
 
 pub(crate) mod control;
+pub(crate) mod drivers;
 pub(crate) mod dump;
 pub(crate) mod inspect;
 pub(crate) mod memory_map;

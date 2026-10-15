@@ -29,9 +29,10 @@ use crate::debugger::pe::{
     ExportRead, ExportTarget, ImportName, ImportRead, ImportedModule, PeExport, PeImport, ThunksEnd,
 };
 use crate::debugger::windows::{
-    ModuleDetail, KernelListing, KernelMiss, ModuleBits, ModuleRead, PickedDetail, PickedModule,
-    ProcessDetail, ProcessListing, SectionsRead, SystemListing, SystemView, TreeRow, WinModule,
-    WinProcess,
+    DeviceRow, DispatchEntry, DriverDetail, DriverListing, DriverShown, KernelListing, KernelMiss,
+    ModuleBits, ModuleDetail, ModuleRead, PickedDetail, PickedDriver, PickedModule, PointerSite,
+    ProcessDetail, ProcessListing, SectionsRead, SystemListing, SystemView, TreeRow, WinDriver,
+    WinModule, WinProcess,
 };
 use crate::shell::listing::{
     card_title, char_width, chip, empty_state, header_row, lead_arrow, lead_chevron, lead_dot,
@@ -251,6 +252,12 @@ pub(crate) struct DebuggerPane {
     /// The picked module's import groups (by index) shown folded shut, on
     /// either tab.
     pub(crate) folded_imports: BTreeSet<usize>,
+    /// The driver the Drivers view details (its `DRIVER_OBJECT` address).
+    pub(crate) selected_driver: Option<u64>,
+    /// Whether that view shows the driver's dispatch table or its devices.
+    pub(crate) driver_detail: DriverDetail,
+    /// What a listed driver's name must contain.
+    pub(crate) driver_filter: String,
 }
 
 impl Default for DebuggerPane {
@@ -282,6 +289,9 @@ impl Default for DebuggerPane {
             process_module_filter: String::new(),
             module_cursor: None,
             folded_imports: BTreeSet::new(),
+            selected_driver: None,
+            driver_detail: DriverDetail::Dispatch,
+            driver_filter: String::new(),
         }
     }
 }
@@ -303,18 +313,21 @@ pub(crate) enum DebuggerTab {
     Cpu,
     /// The guest's processes and the modules of one.
     Processes,
-    /// The guest kernel's drivers.
+    /// The guest kernel's modules, in load order.
     KernelModules,
+    /// The guest kernel's driver objects and their devices.
+    Drivers,
 }
 
 impl DebuggerTab {
-    const ALL: [Self; 3] = [Self::Cpu, Self::Processes, Self::KernelModules];
+    const ALL: [Self; 4] = [Self::Cpu, Self::Processes, Self::KernelModules, Self::Drivers];
 
     pub(crate) const fn label(self) -> &'static str {
         match self {
             Self::Cpu => "CPU",
             Self::Processes => "Processes",
             Self::KernelModules => "Kernel modules",
+            Self::Drivers => "Drivers",
         }
     }
 
@@ -331,6 +344,10 @@ impl DebuggerTab {
             Self::KernelModules => SystemView::KernelModules {
                 selected: pane.selected_kernel_module,
                 detail: pane.kernel_detail,
+            },
+            Self::Drivers => SystemView::Drivers {
+                selected: pane.selected_driver,
+                detail: pane.driver_detail,
             },
         }
     }
@@ -484,7 +501,7 @@ pub(crate) fn draw_debugger_page(
                 (DebuggerTab::Cpu, Fit::Scrolling(columns)) => {
                     scrolling_layout(ui, columns, density, snapshot, marks, pane, &mut action);
                 }
-                (DebuggerTab::Processes | DebuggerTab::KernelModules, _) => {
+                (DebuggerTab::Processes | DebuggerTab::KernelModules | DebuggerTab::Drivers, _) => {
                     system_page(ui, fit, snapshot, pane, &mut action);
                 }
             }
@@ -818,6 +835,8 @@ pub(crate) struct PaneSplit {
     /// A process's modules, of the height they share with the picked one's
     /// detail.
     pub(crate) modules: f32,
+    /// The driver list, of the Drivers tab's width.
+    pub(crate) drivers: f32,
 }
 
 impl Default for PaneSplit {
@@ -829,6 +848,7 @@ impl Default for PaneSplit {
             processes: PROCESS_LIST_SHARE,
             kernel: PROCESS_LIST_SHARE,
             modules: PROCESS_LIST_SHARE,
+            drivers: PROCESS_LIST_SHARE,
         }
     }
 }
@@ -1813,9 +1833,15 @@ fn system_page(
             let current = current_module_base(snapshot, ModuleSpace::Kernel);
             kernel_page(ui, fit, listing, current, pane, action);
         }
+        (SystemListing::Drivers(listing), DebuggerTab::Drivers) => {
+            drivers_page(ui, fit, listing, pane, action);
+        }
         // A list for another tab, or none yet: the run thread is reading.
         (
-            SystemListing::NotAsked | SystemListing::Processes(_) | SystemListing::KernelModules(_),
+            SystemListing::NotAsked
+            | SystemListing::Processes(_)
+            | SystemListing::KernelModules(_)
+            | SystemListing::Drivers(_),
             _,
         ) => {
             empty_state(ui, "Reading", READING_LIST);
@@ -2661,6 +2687,443 @@ fn module_detail_body(
         }
         PickedDetail::Imports(ImportRead::NoTable) => muted(ui, "It imports nothing."),
         PickedDetail::Imports(ImportRead::Unreadable) => muted(ui, "Its import table is paged out."),
+    }
+}
+
+// ───────────────────────────── Drivers tab ──────────────────────────────
+
+const DRIVER_NAME_CHARS: usize = 28;
+const DRIVER_MODULE_CHARS: usize = 18;
+const DISPATCH_LABEL_CHARS: usize = 26;
+
+/// Whether a driver's namespace name or its module name holds `filter`.
+fn driver_matches(driver: &WinDriver, filter: &str) -> bool {
+    filter.is_empty()
+        || holds_ignoring_case(&driver.name, filter)
+        || driver
+            .module_name
+            .as_deref()
+            .is_some_and(|name| holds_ignoring_case(name, filter))
+}
+
+fn driver_columns() -> [Cell; 3] {
+    [
+        Cell::left("Driver", TEXT_MUTED, DRIVER_NAME_CHARS),
+        Cell::left("Module", TEXT_MUTED, DRIVER_MODULE_CHARS),
+        Cell::right("Devices", TEXT_MUTED, 7),
+    ]
+}
+
+/// The run's answer for the driver picked at `selected`, once it is for that
+/// driver and the `detail` asked.
+fn driver_answer(
+    picked: Option<&PickedDriver>,
+    selected: Option<u64>,
+    detail: DriverDetail,
+) -> Option<&PickedDriver> {
+    picked.filter(|picked| Some(picked.driver_object) == selected && picked.shown.answers(detail))
+}
+
+/// One row per driver: its name, matched module (or a flag when it has none),
+/// and device count. A flagged driver's name is amber; the picked one and the
+/// keyed row are selected. A click picks it; a double-click opens its module.
+fn driver_rows(
+    ui: &mut egui::Ui,
+    drivers: &[&WinDriver],
+    picked: &mut Option<u64>,
+    key: Option<KeyRow>,
+    action: &mut Option<DebuggerAction>,
+) {
+    if drivers.is_empty() {
+        ui.add_space(SPACE_ITEM);
+        ui.label(RichText::new("No driver matches the filter.").color(TEXT_MUTED));
+        return;
+    }
+    for (n, driver) in drivers.iter().enumerate() {
+        if culled(ui, key, n) {
+            skip_row(ui);
+            continue;
+        }
+        let name_color = if driver.flagged { ACCENT_AMBER } else { TEXT_PRIMARY };
+        let module = match (&driver.module_name, driver.module) {
+            (Some(name), _) => name.clone(),
+            (None, Some(_)) => "(unnamed)".to_owned(),
+            (None, None) => "no module".to_owned(),
+        };
+        let module_color = if driver.module.is_none() { ACCENT_RED } else { TEXT_MUTED };
+        let name = if driver.in_namespace {
+            driver.name.clone()
+        } else {
+            format!("{}  · not in namespace", driver.name)
+        };
+        let cells = [
+            Cell::left(name, name_color, DRIVER_NAME_CHARS),
+            Cell::left(module, module_color, DRIVER_MODULE_CHARS),
+            Cell::right(driver.device_count.to_string(), TEXT_MUTED, 7),
+        ];
+        let picked_now = *picked == Some(driver.driver_object) || key.is_some_and(|key| key.at(n));
+        let tone = if picked_now { Tone::Selected } else { Tone::striped(n) };
+        let response = list_row(ui, 0.0, &cells, tone, RowSense::Pick { selected: picked_now });
+        follow_key(&response, key, n);
+        let response = response.on_hover_text(
+            "Click to see its dispatch table and devices; double-click to show its module.",
+        );
+        if (response.double_clicked() || response.triple_clicked()) && driver.module.is_some() {
+            if let Some(base) = driver.module {
+                *action = Some(DebuggerAction::OpenModule(base));
+            }
+        } else if response.clicked() {
+            *picked = Some(driver.driver_object);
+        }
+    }
+}
+
+/// The Drivers tab's keys: Tab hands them between the two cards, Shift+Tab
+/// shows the detail's other view, and Up, Down and Enter pick and open a
+/// driver in the list, or walk and open the detail's rows.
+fn driver_keys(
+    keys: ListKeys,
+    listing: &DriverListing,
+    shown: &[&WinDriver],
+    pane: &mut DebuggerPane,
+    action: &mut Option<DebuggerAction>,
+) -> KeyedRows {
+    if keys.switches % 2 == 1 {
+        pane.list_focus = pane.list_focus.next(Cards::Two);
+    }
+    if keys.next_views % 2 == 1 {
+        pane.driver_detail = next_driver_detail(pane.driver_detail);
+        pane.detail_cursor = None;
+    }
+    match pane.list_focus {
+        ListFocus::List => {
+            let at = pane
+                .selected_driver
+                .and_then(|addr| shown.iter().position(|driver| driver.driver_object == addr));
+            let walked = walk(keys, at, shown.len());
+            if let Some(KeyRow::Moved(to)) = walked.key {
+                pane.selected_driver = Some(shown[to].driver_object);
+            }
+            if let Some(opened) = walked.open {
+                if let Some(base) = shown[opened].module {
+                    *action = Some(DebuggerAction::OpenModule(base));
+                }
+            }
+            KeyedRows {
+                list: walked.key,
+                ..KeyedRows::default()
+            }
+        }
+        ListFocus::Detail | ListFocus::Module => {
+            let answer = driver_answer(
+                listing.picked.as_ref(),
+                pane.selected_driver,
+                pane.driver_detail,
+            );
+            let detail = walk_detail(
+                keys,
+                |_| driver_detail_rows(answer),
+                &mut pane.detail_cursor,
+                Folds {
+                    map_open: &mut pane.expanded_modules,
+                    imports_shut: &mut pane.folded_imports,
+                },
+                action,
+            );
+            KeyedRows {
+                detail,
+                ..KeyedRows::default()
+            }
+        }
+    }
+}
+
+/// The view a driver's card shows after `detail`.
+const fn next_driver_detail(detail: DriverDetail) -> DriverDetail {
+    match detail {
+        DriverDetail::Dispatch => DriverDetail::Devices,
+        DriverDetail::Devices => DriverDetail::Dispatch,
+    }
+}
+
+/// The rows a driver's detail lists, for the keys: a dispatch handler with a
+/// module opens it in memory; a device opens nothing.
+fn driver_detail_rows(answer: Option<&PickedDriver>) -> Vec<DetailRow> {
+    let Some(picked) = answer else {
+        return Vec::new();
+    };
+    match &picked.shown {
+        DriverShown::Dispatch(entries) => entries
+            .iter()
+            .map(|entry| DetailRow::leaf(dispatch_open(entry)))
+            .collect(),
+        DriverShown::Devices(rows) => {
+            rows.iter().map(|_| DetailRow::leaf(RowOpen::Nothing)).collect()
+        }
+    }
+}
+
+/// What Enter or a click on a dispatch row does: show the handler in memory
+/// when it lies in a module, else nothing.
+fn dispatch_open(entry: &DispatchEntry) -> RowOpen {
+    match entry.site {
+        PointerSite::OwnImage | PointerSite::InModule { .. } => {
+            RowOpen::Act(DebuggerAction::OpenModule(entry.addr))
+        }
+        PointerSite::KernelDefault | PointerSite::NoModule => RowOpen::Nothing,
+    }
+}
+
+/// A driver's card title and its Dispatch / Devices switch.
+fn driver_detail_header(ui: &mut egui::Ui, title: Title<'_>, detail: &mut DriverDetail) {
+    ui.horizontal_wrapped(|ui| {
+        title_label(ui, title.text, title.count);
+        segmented(
+            ui,
+            detail,
+            &[
+                (DriverDetail::Dispatch, "Dispatch"),
+                (DriverDetail::Devices, "Devices"),
+            ],
+        );
+    });
+}
+
+/// The body of a driver's detail card: its dispatch table or its devices.
+fn driver_detail_body(
+    ui: &mut egui::Ui,
+    answer: Option<&PickedDriver>,
+    has_pick: bool,
+    key: Option<KeyRow>,
+    action: &mut Option<DebuggerAction>,
+) {
+    let muted = |ui: &mut egui::Ui, text: &str| {
+        ui.add_space(SPACE_ITEM);
+        ui.label(RichText::new(text).color(TEXT_MUTED));
+    };
+    let Some(picked) = answer else {
+        let text = if has_pick {
+            "Reading the driver…"
+        } else {
+            "Pick a driver to see its dispatch table and devices."
+        };
+        muted(ui, text);
+        return;
+    };
+    match &picked.shown {
+        DriverShown::Dispatch(entries) => dispatch_rows(ui, entries, key, action),
+        DriverShown::Devices(rows) => device_rows(ui, rows, key),
+    }
+}
+
+/// The text and colour a handler's classification shows.
+fn site_text(site: PointerSite, module_name: impl Fn(u64) -> String) -> (String, egui::Color32) {
+    match site {
+        PointerSite::OwnImage => ("own image".to_owned(), TEXT_PRIMARY),
+        PointerSite::KernelDefault => ("kernel default".to_owned(), TEXT_MUTED),
+        PointerSite::InModule { base, off } => (format!("{}+0x{off:X}", module_name(base)), ACCENT_CYAN),
+        PointerSite::NoModule => ("no module".to_owned(), ACCENT_RED),
+    }
+}
+
+/// One row per dispatch entry: its name, handler address, and where it leads.
+/// A row into another module is clickable; a row into none is red.
+fn dispatch_rows(
+    ui: &mut egui::Ui,
+    entries: &[DispatchEntry],
+    key: Option<KeyRow>,
+    action: &mut Option<DebuggerAction>,
+) {
+    for (n, entry) in entries.iter().enumerate() {
+        if culled(ui, key, n) {
+            skip_row(ui);
+            continue;
+        }
+        // The module an in-module handler names is already in its text.
+        let (site, color) = site_text(entry.site, |_| String::new());
+        let site = match entry.site {
+            PointerSite::InModule { off, .. } => format!("+0x{off:X}"),
+            _ => site,
+        };
+        let label_color = match entry.site {
+            PointerSite::NoModule => ACCENT_RED,
+            _ => TEXT_PRIMARY,
+        };
+        let address = if entry.addr == 0 {
+            "—".to_owned()
+        } else {
+            format!("{:016X}", entry.addr)
+        };
+        let cells = [
+            Cell::left(entry.label.clone(), label_color, DISPATCH_LABEL_CHARS),
+            Cell::left(address, TEXT_MUTED, 16),
+            Cell::fill(site, color),
+        ];
+        let response = list_row(ui, 0.0, &cells, keyed_tone(key, n), RowSense::Pick { selected: false });
+        follow_key(&response, key, n);
+        let opener = Opener::Live;
+        let address = match dispatch_open(entry) {
+            RowOpen::Act(DebuggerAction::OpenModule(at)) => Some(at),
+            _ => None,
+        };
+        click_opens(response, opener, address, "", action);
+    }
+}
+
+/// One row per device: its name, type, characteristics, with its filter stack
+/// and `\??\` links beneath.
+fn device_rows(ui: &mut egui::Ui, rows: &[DeviceRow], key: Option<KeyRow>) {
+    if rows.is_empty() {
+        ui.add_space(SPACE_ITEM);
+        ui.label(RichText::new("This driver owns no device objects.").color(TEXT_MUTED));
+        return;
+    }
+    for (n, device) in rows.iter().enumerate() {
+        if culled(ui, key, n) {
+            skip_row(ui);
+            continue;
+        }
+        let name = device.name.clone().unwrap_or_else(|| "(unnamed)".to_owned());
+        let cells = [
+            Cell::left(name, TEXT_PRIMARY, 32),
+            Cell::left(device.device_type.clone(), ACCENT_CYAN, 18),
+            Cell::fill(format!("char 0x{:X}", device.characteristics), TEXT_MUTED),
+        ];
+        let response = list_row(ui, 0.0, &cells, keyed_tone(key, n), RowSense::Pick { selected: false });
+        follow_key(&response, key, n);
+        for driver in &device.attached_above {
+            ui.label(mono(format!("    attached above: {driver}")).color(TEXT_MUTED));
+        }
+        for link in &device.links {
+            ui.label(mono(format!("    {link}")).color(TEXT_MUTED));
+        }
+    }
+}
+
+/// The Drivers tab: the driver list, and the picked driver's dispatch table
+/// or devices.
+fn drivers_page(
+    ui: &mut egui::Ui,
+    fit: Fit,
+    listing: &DriverListing,
+    pane: &mut DebuggerPane,
+    action: &mut Option<DebuggerAction>,
+) {
+    let filter = pane.driver_filter.to_lowercase();
+    let shown: Vec<&WinDriver> = listing
+        .drivers
+        .iter()
+        .filter(|driver| driver_matches(driver, &filter))
+        .collect();
+    let picked_before = (pane.selected_driver, pane.driver_detail);
+    let keys = list_keys(ui);
+    let keyed_rows = keys.map_or_else(KeyedRows::default, |keys| {
+        driver_keys(keys, listing, &shown, pane, action)
+    });
+    let keyed = keys.map(|_| pane.list_focus);
+    let picked_name = pane
+        .selected_driver
+        .and_then(|addr| listing.drivers.iter().find(|driver| driver.driver_object == addr))
+        .map(|driver| driver.name.clone());
+    let answer = driver_answer(listing.picked.as_ref(), pane.selected_driver, pane.driver_detail);
+    let has_pick = pane.selected_driver.is_some();
+    let count = match answer.map(|picked| &picked.shown) {
+        Some(DriverShown::Dispatch(entries)) => Some(entries.len()),
+        Some(DriverShown::Devices(rows)) => Some(rows.len()),
+        None => None,
+    };
+    let list_title = Title::counted("Drivers", listing.drivers.len()).inlined();
+    let detail_title = Title {
+        text: picked_name.as_deref().unwrap_or("Driver"),
+        count,
+        inline: true,
+    };
+
+    let mut list_card = |ui: &mut egui::Ui, room: Room, action: &mut Option<DebuggerAction>| {
+        keyed_pane_card(
+            ui,
+            room,
+            list_title,
+            keyed == Some(ListFocus::List),
+            |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    title_label(ui, list_title.text, list_title.count);
+                    filter_field(ui, &mut pane.driver_filter);
+                });
+                header_row(ui, 0.0, &driver_columns());
+            },
+            |ui| {
+                driver_rows(ui, &shown, &mut pane.selected_driver, keyed_rows.list, action);
+            },
+        );
+    };
+    let mut detail_card = |ui: &mut egui::Ui, room: Room, action: &mut Option<DebuggerAction>| {
+        keyed_pane_card(
+            ui,
+            room,
+            detail_title,
+            keyed.is_some_and(|focus| focus != ListFocus::List),
+            |ui| {
+                driver_detail_header(ui, detail_title, &mut pane.driver_detail);
+            },
+            |ui| {
+                driver_detail_body(ui, answer, has_pick, keyed_rows.detail, action);
+            },
+        );
+    };
+    match fit {
+        Fit::Grid => {
+            let gap = SPACE_ITEM;
+            let page = ui.available_size();
+            let share = resized(pane.split.drivers, 0.0, page.x, gap, SPLIT_MIN);
+            let left = ((page.x - gap) * share).floor();
+            let mut moved: Option<f32> = None;
+            ui.horizontal_top(|ui| {
+                ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
+                list_card(ui, Room::Fixed(egui::vec2(left, page.y)), &mut *action);
+                match splitter(ui, egui::vec2(gap, page.y), SplitAxis::Columns, RESIZE_MODULE_LIST) {
+                    SplitterMove::Still => {}
+                    SplitterMove::Dragged(delta) => {
+                        moved = Some(resized(share, delta, page.x, gap, SPLIT_MIN));
+                    }
+                    SplitterMove::Reset => moved = Some(PROCESS_LIST_SHARE),
+                }
+                detail_card(ui, Room::Fixed(egui::vec2(page.x - gap - left, page.y)), &mut *action);
+            });
+            if let Some(share) = moved {
+                pane.split.drivers = share;
+            }
+        }
+        Fit::Scrolling(columns) => {
+            let density = fit.density();
+            let room = Room::Content(density);
+            let gap = density.gap();
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| match columns {
+                    Columns::Two => side_by_side(
+                        ui,
+                        gap,
+                        PROCESS_LIST_SHARE,
+                        action,
+                        |ui, action| list_card(ui, room, action),
+                        |ui, action| detail_card(ui, room, action),
+                    ),
+                    Columns::One => {
+                        list_card(ui, room, &mut *action);
+                        ui.add_space(gap);
+                        detail_card(ui, room, &mut *action);
+                    }
+                });
+        }
+    }
+    // A new pick or the other view asks the run for it, and leaves the cursor
+    // on no detail row; a double-click that opened a module stands.
+    if (pane.selected_driver, pane.driver_detail) != picked_before {
+        pane.detail_cursor = None;
+        if !matches!(action, Some(DebuggerAction::OpenModule(_))) {
+            *action = Some(DebuggerAction::ShowSystem(DebuggerTab::Drivers.system_view(pane)));
+        }
     }
 }
 

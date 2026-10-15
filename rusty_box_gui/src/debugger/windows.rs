@@ -38,6 +38,7 @@ use rusty_box::cpu::{
 };
 use rusty_box::emulator::{DebugCpu, SliceEngine};
 
+use super::drivers;
 use super::inspect::{ModuleSpace, SymModule, SymbolIndex};
 use super::memory_map::{self, MemoryMap, ModuleLayout};
 use super::pe::{self, ExportRead, ImportRead, HEADER_BYTES};
@@ -79,6 +80,23 @@ pub(crate) enum SystemView {
         selected: Option<u64>,
         detail: ModuleDetail,
     },
+    /// Every driver object, and — for `selected` (a `DRIVER_OBJECT` address) —
+    /// its IRP dispatch table or its devices.
+    Drivers {
+        selected: Option<u64>,
+        detail: DriverDetail,
+    },
+}
+
+/// What the Drivers view shows for the chosen driver.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum DriverDetail {
+    /// The 28 IRP handlers, `StartIo`, `Unload`, `Init` and `FastIoDispatch`,
+    /// each classified against the loaded modules.
+    #[default]
+    Dispatch,
+    /// Its device objects, with their types, filter stacks and `\??\` links.
+    Devices,
 }
 
 /// What is shown of a picked module: a driver in the Kernel modules view, or
@@ -158,6 +176,97 @@ pub(crate) enum SystemListing {
     NoWindowsKernel(KernelMiss),
     Processes(ProcessListing),
     KernelModules(KernelListing),
+    Drivers(DriverListing),
+}
+
+/// Every driver object, and the picked one's detail.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DriverListing {
+    pub(crate) drivers: Vec<WinDriver>,
+    pub(crate) picked: Option<PickedDriver>,
+}
+
+/// One driver object in the list.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct WinDriver {
+    /// The kernel address of its `DRIVER_OBJECT`.
+    pub(crate) driver_object: u64,
+    /// Its namespace name, e.g. `\Driver\Disk`.
+    pub(crate) name: String,
+    /// The base of the loaded module its `DriverStart`/`DriverSize` matches,
+    /// when one matches.
+    pub(crate) module: Option<u64>,
+    /// The module's name, when the match is named.
+    pub(crate) module_name: Option<String>,
+    /// Whether the driver was found in `\Driver` or `\FileSystem`; a driver
+    /// reached only through a device reads false ("not in namespace").
+    pub(crate) in_namespace: bool,
+    pub(crate) device_count: usize,
+    /// It has no matching module, or at least one handler points into none.
+    pub(crate) flagged: bool,
+}
+
+/// The picked driver's detail, as the view asked for it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PickedDriver {
+    pub(crate) driver_object: u64,
+    pub(crate) shown: DriverShown,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum DriverShown {
+    /// The 28 IRP handlers, then `StartIo`, `Unload`, `Init`, then the
+    /// `FastIoDispatch` entries.
+    Dispatch(Vec<DispatchEntry>),
+    Devices(Vec<DeviceRow>),
+}
+
+impl DriverShown {
+    /// Whether this is the detail `asked` names.
+    pub(crate) const fn answers(&self, asked: DriverDetail) -> bool {
+        matches!(
+            (self, asked),
+            (Self::Dispatch(_), DriverDetail::Dispatch) | (Self::Devices(_), DriverDetail::Devices)
+        )
+    }
+}
+
+/// One entry in a driver's dispatch table.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DispatchEntry {
+    /// e.g. `READ`, `DEVICE_CONTROL`, `Unload`, `FastIoRead`.
+    pub(crate) label: String,
+    pub(crate) addr: u64,
+    pub(crate) site: PointerSite,
+}
+
+/// One of a driver's device objects.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DeviceRow {
+    /// Its object name, e.g. `\Device\Harddisk0`, when it has one.
+    pub(crate) name: Option<String>,
+    pub(crate) device_type: String,
+    pub(crate) characteristics: u32,
+    /// The named devices attached above this one, in stack order (filters).
+    pub(crate) attached_above: Vec<String>,
+    /// The `\??\` symbolic links resolving to this device.
+    pub(crate) links: Vec<String>,
+}
+
+/// Where a kernel code pointer in a dispatch or callback table leads. Reused
+/// by the SSDT and callbacks views.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PointerSite {
+    /// Inside the owning driver's own image: a normal, unhooked handler.
+    OwnImage,
+    /// The kernel's shared default handler (`IopInvalidDeviceRequest`): the
+    /// value most drivers share that lands inside the kernel image.
+    KernelDefault,
+    /// Inside another loaded module, at `base`+`off`. Normal for drivers that
+    /// route through a framework (Wdf01000, CLASSPNP); shown neutrally.
+    InModule { base: u64, off: u64 },
+    /// Inside no loaded module — the case worth flagging.
+    NoModule,
 }
 
 /// The step at which the walk to a Windows x64 kernel gave out.
@@ -181,6 +290,8 @@ pub(crate) enum KernelMiss {
     /// Neither an export nor the debugger data block gives the
     /// loaded-module list.
     NoModuleList,
+    /// The object namespace root was not reached from `IoDriverObjectType`.
+    NoObjectNamespace,
 }
 
 impl KernelMiss {
@@ -196,6 +307,7 @@ impl KernelMiss {
             Self::NoSystemProcess => "PsInitialSystemProcess is not set",
             Self::UnknownProcessLayout => "the System process's EPROCESS was not recognised",
             Self::NoModuleList => "the kernel's loaded-module list was not found",
+            Self::NoObjectNamespace => "the object namespace was not reached",
         }
     }
 }
@@ -348,6 +460,10 @@ struct KernelState {
     wow64_offset: Option<u64>,
     threads: Option<ThreadLayout>,
     vad: Option<VadSite>,
+    /// The object-header name-lookup era, once the object namespace was read.
+    object_era: Option<drivers::ObjectHeaderEra>,
+    /// The object namespace root directory (`\`), once reached.
+    object_root: Option<u64>,
 }
 
 /// What the walks have learned about one guest's structure layouts. A run
@@ -383,9 +499,9 @@ pub(crate) fn read_windows<T: Instrumentation, E: SliceEngine<T>>(
         Err(miss) => {
             let system = match request {
                 SystemView::Off => SystemListing::NotAsked,
-                SystemView::Processes { .. } | SystemView::KernelModules { .. } => {
-                    SystemListing::NoWindowsKernel(miss)
-                }
+                SystemView::Processes { .. }
+                | SystemView::KernelModules { .. }
+                | SystemView::Drivers { .. } => SystemListing::NoWindowsKernel(miss),
             };
             return WindowsRead {
                 symbols: SymbolIndex::default(),
@@ -400,6 +516,8 @@ pub(crate) fn read_windows<T: Instrumentation, E: SliceEngine<T>>(
         wow64_offset,
         threads: thread_layout,
         vad,
+        object_era,
+        object_root,
     } = state;
     let kernel_modules = match kernel.loaded_modules {
         Some(head) => list_modules(cpu, Root::Live, head).unwrap_or_default(),
@@ -522,8 +640,528 @@ pub(crate) fn read_windows<T: Instrumentation, E: SliceEngine<T>>(
                 modules,
             })
         }
+        SystemView::Drivers { selected, detail } => {
+            match read_drivers(cpu, kernel, &kernel_modules, object_era, object_root) {
+                Some((mut drivers, default)) => {
+                    let picked = match (*object_era, *object_root) {
+                        (Some(era), Some(root)) => selected.and_then(|driver_object| {
+                            read_driver_detail(
+                                cpu,
+                                &kernel_modules,
+                                driver_object,
+                                detail,
+                                era,
+                                root,
+                                default,
+                            )
+                        }),
+                        _ => None,
+                    };
+                    drivers.sort_by(|a, b| a.name.cmp(&b.name));
+                    SystemListing::Drivers(DriverListing { drivers, picked })
+                }
+                None => SystemListing::NoWindowsKernel(KernelMiss::NoObjectNamespace),
+            }
+        }
     };
     WindowsRead { symbols, system }
+}
+
+// ───────────────────────────── drivers ──────────────────────────────
+
+/// The `DRIVER_OBJECT` directories, plus `\Device` for drivers reached only
+/// through a device.
+const DRIVER_DIRECTORIES: [&str; 2] = ["Driver", "FileSystem"];
+
+/// The `OBJECT_HEADER` of the object whose body is at `body`.
+fn object_header(body: u64) -> u64 {
+    body.wrapping_sub(drivers::OBJECT_BODY_OFFSET)
+}
+
+/// The `OBJECT_HEADER_NAME_INFO` of the object at `body`, when it has a name.
+fn name_info_of<T: Instrumentation, E: SliceEngine<T>>(
+    cpu: &mut DebugCpu<'_, T, E>,
+    era: drivers::ObjectHeaderEra,
+    body: u64,
+) -> Option<u64> {
+    let header = object_header(body);
+    let byte_at = match era {
+        drivers::ObjectHeaderEra::Legacy => header + drivers::LEGACY_NAME_INFO_OFFSET,
+        drivers::ObjectHeaderEra::Modern => header + drivers::MODERN_INFO_MASK_OFFSET,
+    };
+    let delta = drivers::name_info_delta(era, read_u8(cpu, Root::Live, byte_at)?)?;
+    Some(header.checked_sub(delta)?)
+}
+
+/// The name of the object at `body` (its `NAME_INFO.Name`), when it has one.
+fn object_name<T: Instrumentation, E: SliceEngine<T>>(
+    cpu: &mut DebugCpu<'_, T, E>,
+    era: drivers::ObjectHeaderEra,
+    body: u64,
+) -> Option<String> {
+    let name_info = name_info_of(cpu, era, body)?;
+    read_unicode_string(cpu, Root::Live, name_info + drivers::NAME_INFO_NAME)
+}
+
+/// The directory an object belongs to: its `NAME_INFO.Directory`.
+fn object_directory<T: Instrumentation, E: SliceEngine<T>>(
+    cpu: &mut DebugCpu<'_, T, E>,
+    era: drivers::ObjectHeaderEra,
+    body: u64,
+) -> Option<u64> {
+    let name_info = name_info_of(cpu, era, body)?;
+    read_u64(cpu, Root::Live, name_info).and_then(kernel_pointer)
+}
+
+/// Every object body in an `OBJECT_DIRECTORY` at `directory`, with its name.
+fn enumerate_directory<T: Instrumentation, E: SliceEngine<T>>(
+    cpu: &mut DebugCpu<'_, T, E>,
+    era: drivers::ObjectHeaderEra,
+    directory: u64,
+) -> Vec<(Option<String>, u64)> {
+    let mut out = Vec::new();
+    let mut visited = HashSet::new();
+    for bucket in 0..drivers::OBJECT_DIRECTORY_BUCKETS as u64 {
+        let Some(mut entry) = read_u64(cpu, Root::Live, directory + bucket * 8) else {
+            continue;
+        };
+        for _ in 0..MAX_OBJECTS_PER_BUCKET {
+            let Some(entry_addr) = kernel_pointer(entry) else {
+                break;
+            };
+            if !visited.insert(entry_addr) {
+                break;
+            }
+            let object = read_u64(cpu, Root::Live, entry_addr + drivers::DIRECTORY_ENTRY_OBJECT)
+                .and_then(kernel_pointer);
+            if let Some(object) = object {
+                out.push((object_name(cpu, era, object), object));
+            }
+            match read_u64(cpu, Root::Live, entry_addr + drivers::DIRECTORY_ENTRY_CHAIN) {
+                Some(0) | None => break,
+                Some(next) => entry = next,
+            }
+        }
+    }
+    out
+}
+
+/// A named child directory of `directory`.
+fn child_directory<T: Instrumentation, E: SliceEngine<T>>(
+    cpu: &mut DebugCpu<'_, T, E>,
+    era: drivers::ObjectHeaderEra,
+    directory: u64,
+    name: &str,
+) -> Option<u64> {
+    enumerate_directory(cpu, era, directory)
+        .into_iter()
+        .find(|(child_name, _)| child_name.as_deref() == Some(name))
+        .map(|(_, body)| body)
+}
+
+/// A corrupt bucket chain stops here.
+const MAX_OBJECTS_PER_BUCKET: usize = 1 << 16;
+
+/// Finds the object namespace root `\` and the `OBJECT_HEADER` era, from the
+/// kernel export `IoDriverObjectType` (a pointer to the Driver type object,
+/// whose name is "Driver"). Caches both in `object_era`/`object_root`.
+fn object_namespace<T: Instrumentation, E: SliceEngine<T>>(
+    cpu: &mut DebugCpu<'_, T, E>,
+    kernel: &Kernel,
+    object_era: &mut Option<drivers::ObjectHeaderEra>,
+    object_root: &mut Option<u64>,
+) -> Option<(drivers::ObjectHeaderEra, u64)> {
+    if let (Some(era), Some(root)) = (*object_era, *object_root) {
+        // Still a directory holding a child named "Driver"?
+        if child_directory(cpu, era, root, "Driver").is_some() {
+            return Some((era, root));
+        }
+    }
+    let type_export = export(cpu, &kernel.image, "IoDriverObjectType")?;
+    let type_object = read_u64(cpu, Root::Live, type_export).and_then(kernel_pointer)?;
+    for era in [drivers::ObjectHeaderEra::Legacy, drivers::ObjectHeaderEra::Modern] {
+        if object_name(cpu, era, type_object).as_deref() != Some("Driver") {
+            continue;
+        }
+        // The type object lives in \ObjectTypes; its directory's directory is
+        // the root \.
+        let Some(object_types) = object_directory(cpu, era, type_object) else {
+            continue;
+        };
+        let root = object_directory(cpu, era, object_types)?;
+        *object_era = Some(era);
+        *object_root = Some(root);
+        return Some((era, root));
+    }
+    None
+}
+
+/// The loaded module whose image covers `addr`.
+fn module_of(addr: u64, modules: &[WinModule]) -> Option<&WinModule> {
+    modules
+        .iter()
+        .find(|m| (m.base..m.base.wrapping_add(u64::from(m.size))).contains(&addr))
+}
+
+/// Where a kernel code pointer leads. `own` is the owning driver's module;
+/// `default` is the kernel's shared handler value (so it is not called a hook).
+fn classify_pointer(
+    addr: u64,
+    own: Option<&WinModule>,
+    modules: &[WinModule],
+    default: Option<u64>,
+) -> PointerSite {
+    if addr == 0 {
+        return PointerSite::NoModule;
+    }
+    if Some(addr) == default {
+        return PointerSite::KernelDefault;
+    }
+    if let Some(module) = own {
+        if (module.base..module.base.wrapping_add(u64::from(module.size))).contains(&addr) {
+            return PointerSite::OwnImage;
+        }
+    }
+    match module_of(addr, modules) {
+        Some(module) => PointerSite::InModule {
+            base: module.base,
+            off: addr - module.base,
+        },
+        None => PointerSite::NoModule,
+    }
+}
+
+/// The value most drivers' IRP handlers share that lies inside the kernel
+/// image: `IopInvalidDeviceRequest`, found without its symbol.
+fn kernel_default_handler(objects: &[drivers::DriverObject], kernel: &Kernel) -> Option<u64> {
+    use std::collections::HashMap;
+    let range = kernel.image.base..kernel.image.base.wrapping_add(u64::from(kernel.image.size));
+    let mut counts: HashMap<u64, usize> = HashMap::new();
+    for object in objects {
+        for &handler in &object.major {
+            if range.contains(&handler) {
+                *counts.entry(handler).or_default() += 1;
+            }
+        }
+    }
+    counts
+        .into_iter()
+        .max_by_key(|&(_, count)| count)
+        .map(|(handler, _)| handler)
+}
+
+/// Every driver object in the guest, and the kernel's shared default handler.
+/// `None` only when the object namespace cannot be reached.
+fn read_drivers<T: Instrumentation, E: SliceEngine<T>>(
+    cpu: &mut DebugCpu<'_, T, E>,
+    kernel: &Kernel,
+    modules: &[WinModule],
+    object_era: &mut Option<drivers::ObjectHeaderEra>,
+    object_root: &mut Option<u64>,
+) -> Option<(Vec<WinDriver>, Option<u64>)> {
+    let (era, root) = object_namespace(cpu, kernel, object_era, object_root)?;
+
+    // Each driver object, with the directory name it was found under and its
+    // decoded body. A driver object is kept once, by its address.
+    let mut found: Vec<(u64, bool, drivers::DriverObject)> = Vec::new();
+    let mut seen = HashSet::new();
+    for directory_name in DRIVER_DIRECTORIES {
+        let Some(directory) = child_directory(cpu, era, root, directory_name) else {
+            continue;
+        };
+        for (_, body) in enumerate_directory(cpu, era, directory) {
+            if found.len() >= drivers::MAX_DRIVERS {
+                break;
+            }
+            if !seen.insert(body) {
+                continue;
+            }
+            if let Some(object) = read_exact(cpu, Root::Live, body, drivers::DRIVER_OBJECT_SIZE)
+                .and_then(|b| drivers::parse_driver(&b))
+            {
+                found.push((body, true, object));
+            }
+        }
+    }
+    // Drivers reached only through a named device in \Device.
+    if let Some(device_dir) = child_directory(cpu, era, root, "Device") {
+        for (_, device_body) in enumerate_directory(cpu, era, device_dir) {
+            if found.len() >= drivers::MAX_DRIVERS {
+                break;
+            }
+            let Some(device) = read_exact(cpu, Root::Live, device_body, drivers::DEVICE_OBJECT_SPAN)
+                .and_then(|b| drivers::parse_device(&b))
+            else {
+                continue;
+            };
+            let Some(driver_object) = kernel_pointer(device.driver) else {
+                continue;
+            };
+            if !seen.insert(driver_object) {
+                continue;
+            }
+            if let Some(object) = read_exact(cpu, Root::Live, driver_object, drivers::DRIVER_OBJECT_SIZE)
+                .and_then(|b| drivers::parse_driver(&b))
+            {
+                found.push((driver_object, false, object));
+            }
+        }
+    }
+
+    let objects: Vec<drivers::DriverObject> = found.iter().map(|(_, _, o)| o.clone()).collect();
+    let default = kernel_default_handler(&objects, kernel);
+
+    let drivers_list = found
+        .iter()
+        .map(|(driver_object, in_namespace, object)| {
+            let name = object_name(cpu, era, *driver_object)
+                .map(|leaf| format!("\\{}\\{leaf}", namespace_prefix(*in_namespace)))
+                .unwrap_or_else(|| format!("{driver_object:#X}"));
+            let module = module_of(object.start, modules);
+            let device_count = device_chain(cpu, object.device_object).len();
+            let own = module;
+            let flagged = module.is_none()
+                || object
+                    .major
+                    .iter()
+                    .chain([&object.start_io, &object.unload])
+                    .any(|&addr| {
+                        addr != 0 && classify_pointer(addr, own, modules, default) == PointerSite::NoModule
+                    });
+            WinDriver {
+                driver_object: *driver_object,
+                name,
+                module: module.map(|m| m.base),
+                module_name: module.and_then(|m| m.name.clone()),
+                in_namespace: *in_namespace,
+                device_count,
+                flagged,
+            }
+        })
+        .collect();
+    Some((drivers_list, default))
+}
+
+/// A driver's directory for its namespace name: not-in-namespace drivers reach
+/// us through \Device, so they are shown as living there.
+fn namespace_prefix(in_namespace: bool) -> &'static str {
+    if in_namespace {
+        "Driver"
+    } else {
+        "Device"
+    }
+}
+
+/// The device objects of the driver at `device_object`, following `NextDevice`.
+fn device_chain<T: Instrumentation, E: SliceEngine<T>>(
+    cpu: &mut DebugCpu<'_, T, E>,
+    device_object: u64,
+) -> Vec<(u64, drivers::DeviceObject)> {
+    let mut out = Vec::new();
+    let mut visited = HashSet::new();
+    let mut at = device_object;
+    for _ in 0..drivers::MAX_DEVICES_PER_DRIVER {
+        let Some(addr) = kernel_pointer(at) else {
+            break;
+        };
+        if !visited.insert(addr) {
+            break;
+        }
+        let Some(device) = read_exact(cpu, Root::Live, addr, drivers::DEVICE_OBJECT_SPAN)
+            .and_then(|b| drivers::parse_device(&b))
+        else {
+            break;
+        };
+        let next = device.next;
+        out.push((addr, device));
+        at = next;
+    }
+    out
+}
+
+/// The picked driver's dispatch table or its devices.
+#[allow(clippy::too_many_arguments)]
+fn read_driver_detail<T: Instrumentation, E: SliceEngine<T>>(
+    cpu: &mut DebugCpu<'_, T, E>,
+    modules: &[WinModule],
+    driver_object: u64,
+    detail: DriverDetail,
+    era: drivers::ObjectHeaderEra,
+    root: u64,
+    default: Option<u64>,
+) -> Option<PickedDriver> {
+    let object =
+        read_exact(cpu, Root::Live, driver_object, drivers::DRIVER_OBJECT_SIZE).and_then(|b| drivers::parse_driver(&b))?;
+    let own = module_of(object.start, modules);
+    let shown = match detail {
+        DriverDetail::Dispatch => {
+            let mut entries = Vec::new();
+            for (index, &addr) in object.major.iter().enumerate() {
+                entries.push(DispatchEntry {
+                    label: drivers::major_function_name(index).to_owned(),
+                    addr,
+                    site: classify_pointer(addr, own, modules, default),
+                });
+            }
+            for (label, addr) in [
+                ("StartIo", object.start_io),
+                ("Unload", object.unload),
+                ("Init", object.init),
+            ] {
+                entries.push(DispatchEntry {
+                    label: label.to_owned(),
+                    addr,
+                    site: classify_pointer(addr, own, modules, default),
+                });
+            }
+            for entry in fast_io_entries(cpu, object.fast_io, own, modules, default) {
+                entries.push(entry);
+            }
+            DriverShown::Dispatch(entries)
+        }
+        DriverDetail::Devices => {
+            let links = symbolic_links(cpu, era, root);
+            let rows = device_chain(cpu, object.device_object)
+                .into_iter()
+                .map(|(addr, device)| {
+                    let name = object_name(cpu, era, addr);
+                    let attached_above = attached_stack(cpu, era, device.attached);
+                    let device_links = name
+                        .as_ref()
+                        .map(|device_name| {
+                            links
+                                .iter()
+                                .filter(|(_, target)| target == device_name)
+                                .map(|(link, _)| link.clone())
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    DeviceRow {
+                        name,
+                        device_type: drivers::device_type_name(device.device_type),
+                        characteristics: device.characteristics,
+                        attached_above,
+                        links: device_links,
+                    }
+                })
+                .collect();
+            DriverShown::Devices(rows)
+        }
+    };
+    Some(PickedDriver {
+        driver_object,
+        shown,
+    })
+}
+
+/// The `FastIoDispatch` entries, when the table reads: `SizeOfFastIoDispatch`
+/// gives the count, then one pointer each.
+fn fast_io_entries<T: Instrumentation, E: SliceEngine<T>>(
+    cpu: &mut DebugCpu<'_, T, E>,
+    fast_io: u64,
+    own: Option<&WinModule>,
+    modules: &[WinModule],
+    default: Option<u64>,
+) -> Vec<DispatchEntry> {
+    const NAMES: [&str; 27] = [
+        "FastIoCheckIfPossible",
+        "FastIoRead",
+        "FastIoWrite",
+        "FastIoQueryBasicInfo",
+        "FastIoQueryStandardInfo",
+        "FastIoLock",
+        "FastIoUnlockSingle",
+        "FastIoUnlockAll",
+        "FastIoUnlockAllByKey",
+        "FastIoDeviceControl",
+        "AcquireFileForNtCreateSection",
+        "ReleaseFileForNtCreateSection",
+        "FastIoDetachDevice",
+        "FastIoQueryNetworkOpenInfo",
+        "AcquireForModWrite",
+        "MdlRead",
+        "MdlReadComplete",
+        "PrepareMdlWrite",
+        "MdlWriteComplete",
+        "FastIoReadCompressed",
+        "FastIoWriteCompressed",
+        "MdlReadCompleteCompressed",
+        "MdlWriteCompleteCompressed",
+        "FastIoQueryOpen",
+        "ReleaseForModWrite",
+        "AcquireForCcFlush",
+        "ReleaseForCcFlush",
+    ];
+    let Some(fast_io) = kernel_pointer(fast_io) else {
+        return Vec::new();
+    };
+    let Some(size) = read_u32(cpu, Root::Live, fast_io) else {
+        return Vec::new();
+    };
+    // SizeOfFastIoDispatch counts the whole structure, header included.
+    let count = (size as usize).saturating_sub(8) / 8;
+    (0..count.min(NAMES.len()))
+        .filter_map(|i| {
+            let addr = read_u64(cpu, Root::Live, fast_io + 8 + (i as u64) * 8)?;
+            (addr != 0).then(|| DispatchEntry {
+                label: format!("FastIo.{}", NAMES[i]),
+                addr,
+                site: classify_pointer(addr, own, modules, default),
+            })
+        })
+        .collect()
+}
+
+/// The named drivers of the devices attached above a device, bottom-up.
+fn attached_stack<T: Instrumentation, E: SliceEngine<T>>(
+    cpu: &mut DebugCpu<'_, T, E>,
+    era: drivers::ObjectHeaderEra,
+    attached: u64,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut visited = HashSet::new();
+    let mut at = attached;
+    for _ in 0..drivers::MAX_ATTACH_DEPTH {
+        let Some(addr) = kernel_pointer(at) else {
+            break;
+        };
+        if !visited.insert(addr) {
+            break;
+        }
+        let Some(device) = read_exact(cpu, Root::Live, addr, drivers::DEVICE_OBJECT_SPAN)
+            .and_then(|b| drivers::parse_device(&b))
+        else {
+            break;
+        };
+        let label = kernel_pointer(device.driver)
+            .and_then(|driver| object_name(cpu, era, driver))
+            .map(|leaf| format!("\\Driver\\{leaf}"))
+            .unwrap_or_else(|| format!("{addr:#X}"));
+        out.push(label);
+        at = device.attached;
+    }
+    out
+}
+
+/// The symbolic links under `\GLOBAL??` (or `\??`): (link name, target).
+fn symbolic_links<T: Instrumentation, E: SliceEngine<T>>(
+    cpu: &mut DebugCpu<'_, T, E>,
+    era: drivers::ObjectHeaderEra,
+    root: u64,
+) -> Vec<(String, String)> {
+    let directory = child_directory(cpu, era, root, "GLOBAL??")
+        .or_else(|| child_directory(cpu, era, root, "??"));
+    let Some(directory) = directory else {
+        return Vec::new();
+    };
+    enumerate_directory(cpu, era, directory)
+        .into_iter()
+        .filter_map(|(name, body)| {
+            let name = name?;
+            let target = read_unicode_string(cpu, Root::Live, body + drivers::SYMBOLIC_LINK_TARGET)?;
+            Some((format!("\\??\\{name}"), target))
+        })
+        .collect()
 }
 
 /// Whom the CPU tab is asked to look from: a process (one of its threads with
@@ -636,6 +1274,8 @@ pub(crate) fn read_thread_view<T: Instrumentation, E: SliceEngine<T>>(
         wow64_offset,
         threads: thread_layout,
         vad: _,
+        object_era: _,
+        object_root: _,
     } = state;
     let kernel_modules = match kernel.loaded_modules {
         Some(head) => list_modules(cpu, Root::Live, head).unwrap_or_default(),
@@ -750,6 +1390,8 @@ fn find_kernel<'a, T: Instrumentation, E: SliceEngine<T>>(
             wow64_offset: None,
             threads: None,
             vad: None,
+            object_era: None,
+            object_root: None,
         });
     }
     cache.as_mut().ok_or(KernelMiss::NoKernelImage)
