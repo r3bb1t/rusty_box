@@ -201,6 +201,12 @@ fn source_text(source: &SymbolSource) -> String {
     }
 }
 
+/// What the tab says when the pause named no module: symbols are looked up
+/// for a 64-bit Windows guest's kernel and processes, which the walks found
+/// none of.
+const NO_MODULES: &str = "No modules in this pause. Symbols are looked up for the kernel and processes of a 64-bit \
+                          Windows guest; the Processes tab says why none was found.";
+
 /// How many project files that did not index are named one by one.
 const PROBLEMS_SHOWN: usize = 3;
 
@@ -360,6 +366,9 @@ pub(crate) fn symbols_page(
                 header_row(ui, 0.0, &symbol_columns());
             },
             |ui| {
+                if snapshot.symbols.modules.is_empty() {
+                    ui.label(RichText::new(NO_MODULES).color(TEXT_MUTED));
+                }
                 for (n, module) in shown.iter().enumerate() {
                     if culled(ui, keyed_row, n) {
                         skip_row(ui);

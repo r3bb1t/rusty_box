@@ -10284,6 +10284,27 @@ mod tests {
             assert_eq!(hub.view().state(&kernel_identity()), Some(&ModuleSymbols::Pending));
         }
 
+        /// A pause that names no module (a guest with no 64-bit Windows
+        /// kernel) shows why on the Symbols tab, not an empty table.
+        #[test]
+        fn the_symbols_tab_says_why_it_lists_no_modules() {
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_vm(&mut app);
+            control.publish(paused_snapshot());
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            window.get_by_label("Symbols").click();
+            window.run();
+            assert!(
+                window
+                    .query_all_by(|node| node.label().or(node.value()).is_some_and(|text| text.contains("No modules in this pause")))
+                    .next()
+                    .is_some(),
+                "the tab says why it is empty"
+            );
+        }
+
         /// A project file the index could not read says so on the Symbols
         /// tab, with its path: the owner's build that is never found has a
         /// visible reason.

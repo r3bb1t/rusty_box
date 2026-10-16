@@ -400,7 +400,9 @@ impl SettingsState {
         SettingsState {
             path,
             file: loaded.file,
-            problem: loaded.problem.map(|problem| problem.to_string()),
+            // The TOML parser's message ends with a line break; the page
+            // continues the sentence after it.
+            problem: loaded.problem.map(|problem| problem.to_string().trim_end().to_owned()),
             set_aside: None,
             environment,
             resolved,
@@ -726,6 +728,20 @@ mod tests {
         state.save(file("[symbols]\ndownload = \"automatic\"\n")).expect("save again");
         assert_eq!(std::fs::read_to_string(&aside).expect("still kept"), "[symbols]\nstore = 3\n");
         assert!(!dir.join(format!("{SETTINGS_FILE}.broken-2")).exists());
+        std::fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    /// The page writes "<problem>. The engine runs on …": a problem ending
+    /// in a line break would start that sentence on a line of its own.
+    #[test]
+    fn a_broken_files_problem_ends_where_its_text_does() {
+        let dir = std::env::temp_dir().join(format!("rusty-box-gui-settings-problem-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("folder");
+        let path = dir.join(SETTINGS_FILE);
+        std::fs::write(&path, "[symbols]\nstore = 3\n").expect("write");
+        let state = SettingsState::load(path, Environment::default());
+        let problem = state.problem.expect("the file does not parse");
+        assert_eq!(problem.trim_end(), problem, "{problem:?}");
         std::fs::remove_dir_all(&dir).expect("clean up");
     }
 
