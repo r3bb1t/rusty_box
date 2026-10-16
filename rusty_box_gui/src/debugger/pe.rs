@@ -43,13 +43,28 @@ pub(crate) struct PeSection {
 }
 
 fn read_u16(bytes: &[u8], at: usize) -> Option<u16> {
-    bytes.get(at..at + 2).map(|b| u16::from_le_bytes([b[0], b[1]]))
+    bytes
+        .get(at..)
+        .and_then(<[u8]>::first_chunk)
+        .copied()
+        .map(u16::from_le_bytes)
 }
 
 fn read_u32(bytes: &[u8], at: usize) -> Option<u32> {
     bytes
-        .get(at..at + 4)
-        .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+        .get(at..)
+        .and_then(<[u8]>::first_chunk)
+        .copied()
+        .map(u32::from_le_bytes)
+}
+
+/// The bytes of `bytes` before its first NUL, or all of them when it has none.
+fn before_nul(bytes: &[u8]) -> &[u8] {
+    bytes
+        .iter()
+        .position(|&byte| byte == 0)
+        .and_then(|end| bytes.get(..end))
+        .unwrap_or(bytes)
 }
 
 /// The sections of the image whose headers begin at `header`, or `None` when
@@ -66,18 +81,19 @@ pub(crate) fn parse_sections(header: &[u8]) -> Option<Vec<PeSection>> {
     }
     // IMAGE_FILE_HEADER: NumberOfSections at +2, SizeOfOptionalHeader at +16,
     // relative to the signature's end.
-    let file_header = nt + 4;
-    let number_of_sections = read_u16(header, file_header + 2)?;
-    let optional_header_size = read_u16(header, file_header + 16)? as usize;
+    let file_header = nt.checked_add(4)?;
+    let number_of_sections = read_u16(header, file_header.checked_add(2)?)?;
+    let optional_header_size = usize::from(read_u16(header, file_header.checked_add(16)?)?);
     if number_of_sections == 0 || number_of_sections > MAX_SECTIONS {
         return None;
     }
-    let mut at = file_header + 20 + optional_header_size;
-    let mut sections = Vec::with_capacity(number_of_sections as usize);
+    let mut at = file_header
+        .checked_add(20)?
+        .checked_add(optional_header_size)?;
+    let mut sections = Vec::with_capacity(usize::from(number_of_sections));
     for _ in 0..number_of_sections {
-        let entry = header.get(at..at + SECTION_HEADER_LEN)?;
-        let end = entry[..8].iter().position(|&b| b == 0).unwrap_or(8);
-        let name = String::from_utf8_lossy(&entry[..end]).into_owned();
+        let entry: &[u8; SECTION_HEADER_LEN] = header.get(at..).and_then(<[u8]>::first_chunk)?;
+        let name = String::from_utf8_lossy(before_nul(entry.get(..8)?)).into_owned();
         let characteristics = read_u32(entry, 36)?;
         sections.push(PeSection {
             name,
@@ -89,7 +105,7 @@ pub(crate) fn parse_sections(header: &[u8]) -> Option<Vec<PeSection>> {
             executable: characteristics & SCN_MEM_EXECUTE != 0,
             code: characteristics & SCN_CNT_CODE != 0,
         });
-        at += SECTION_HEADER_LEN;
+        at = at.checked_add(SECTION_HEADER_LEN)?;
     }
     Some(sections)
 }
@@ -154,7 +170,17 @@ fn optional_header(header: &[u8]) -> Option<usize> {
     }
     // The optional header follows the 4-byte signature and the 20-byte file
     // header.
-    Some(nt + 4 + 20)
+    nt.checked_add(24)
+}
+
+/// The little-endian `u32`s of `bytes`, four bytes each; a trailing part
+/// shorter than four is not one.
+fn u32s(bytes: &[u8]) -> Vec<u32> {
+    bytes
+        .chunks_exact(4)
+        .filter_map(|chunk| <[u8; 4]>::try_from(chunk).ok())
+        .map(u32::from_le_bytes)
+        .collect()
 }
 
 /// The exports of the image whose headers begin at `header`. `read(rva, len)`
@@ -170,14 +196,20 @@ where
     let Some(optional) = optional_header(header) else {
         return ExportRead::NotPe;
     };
-    let directory_at = match read_u16(header, optional) {
-        Some(PE32_PLUS_MAGIC) => optional + PE32_PLUS_EXPORT_DIRECTORY,
-        Some(PE32_MAGIC) => optional + PE32_EXPORT_DIRECTORY,
+    let directory = match read_u16(header, optional) {
+        Some(PE32_PLUS_MAGIC) => PE32_PLUS_EXPORT_DIRECTORY,
+        Some(PE32_MAGIC) => PE32_EXPORT_DIRECTORY,
         Some(_) | None => return ExportRead::NotPe,
     };
-    let (Some(table_rva), Some(table_size)) =
-        (read_u32(header, directory_at), read_u32(header, directory_at + 4))
-    else {
+    let Some(directory_at) = optional.checked_add(directory) else {
+        return ExportRead::NotPe;
+    };
+    let (Some(table_rva), Some(table_size)) = (
+        read_u32(header, directory_at),
+        directory_at
+            .checked_add(4)
+            .and_then(|at| read_u32(header, at)),
+    ) else {
         return ExportRead::NotPe;
     };
     if table_rva == 0 || table_size == 0 {
@@ -192,28 +224,27 @@ where
     if functions > MAX_EXPORTS || names > MAX_EXPORTS {
         return ExportRead::Unreadable;
     }
-    let u32s = |bytes: Vec<u8>| -> Vec<u32> {
-        bytes
-            .chunks_exact(4)
-            .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-            .collect()
-    };
-    let Some(function_rvas) = read(field(28), functions as usize * 4).map(u32s) else {
+    // Both counts are at most MAX_EXPORTS, so the byte lengths cannot wrap.
+    let (functions, names) = (functions as usize, names as usize);
+    let Some(function_rvas) = read(field(28), functions.wrapping_mul(4)).map(|bytes| u32s(&bytes))
+    else {
         return ExportRead::Unreadable;
     };
-    let Some(name_rvas) = read(field(32), names as usize * 4).map(u32s) else {
+    let Some(name_rvas) = read(field(32), names.wrapping_mul(4)).map(|bytes| u32s(&bytes)) else {
         return ExportRead::Unreadable;
     };
-    let Some(name_ordinals) = read(field(36), names as usize * 2) else {
+    let Some(name_ordinals) = read(field(36), names.wrapping_mul(2)) else {
         return ExportRead::Unreadable;
     };
     // Each name names the function its ordinal index points at; the first
     // name for a function is kept.
     let mut name_of: Vec<Option<String>> = vec![None; function_rvas.len()];
-    for (name_rva, index) in name_rvas
-        .iter()
-        .zip(name_ordinals.chunks_exact(2).map(|b| u16::from_le_bytes([b[0], b[1]])))
-    {
+    for (name_rva, index) in name_rvas.iter().zip(
+        name_ordinals
+            .chunks_exact(2)
+            .filter_map(|chunk| <[u8; 2]>::try_from(chunk).ok())
+            .map(u16::from_le_bytes),
+    ) {
         if let Some(slot) = name_of.get_mut(usize::from(index)) {
             if slot.is_none() {
                 *slot = read_c_string(&mut read, *name_rva);
@@ -329,27 +360,38 @@ where
     let Some(optional) = optional_header(header) else {
         return ImportRead::NotPe;
     };
-    let (directory_at, thunk) = match read_u16(header, optional) {
-        Some(PE32_PLUS_MAGIC) => (optional + PE32_PLUS_IMPORT_DIRECTORY, 8u32),
-        Some(PE32_MAGIC) => (optional + PE32_IMPORT_DIRECTORY, 4u32),
+    let (directory, format) = match read_u16(header, optional) {
+        Some(PE32_PLUS_MAGIC) => (PE32_PLUS_IMPORT_DIRECTORY, THUNK64),
+        Some(PE32_MAGIC) => (PE32_IMPORT_DIRECTORY, THUNK32),
         Some(_) | None => return ImportRead::NotPe,
+    };
+    let thunk = format.width;
+    let ordinal_flag = format.ordinal_flag;
+    let Some(directory_at) = optional.checked_add(directory) else {
+        return ImportRead::NotPe;
     };
     let Some(table_rva) = read_u32(header, directory_at) else {
         return ImportRead::NotPe;
     };
-    if table_rva == 0 || read_u32(header, directory_at + 4).unwrap_or(0) == 0 {
+    let table_size = directory_at
+        .checked_add(4)
+        .and_then(|at| read_u32(header, at))
+        .unwrap_or(0);
+    if table_rva == 0 || table_size == 0 {
         return ImportRead::NoTable;
     }
-    let ordinal_flag = 1u64 << (thunk * 8 - 1);
     // A thunk array is read no further than the image: what lies past it is
     // not the image's. A header that gives no size bounds nothing.
-    let image_end = read_u32(header, optional + SIZE_OF_IMAGE)
+    let image_end = optional
+        .checked_add(SIZE_OF_IMAGE)
+        .and_then(|at| read_u32(header, at))
         .filter(|&size| size != 0)
         .unwrap_or(u32::MAX);
     let mut modules = Vec::new();
     let mut functions_read = 0usize;
     for index in 0..MAX_IMPORT_MODULES {
-        let at = table_rva.wrapping_add(index * IMPORT_DESCRIPTOR_LEN);
+        // `index` stays below MAX_IMPORT_MODULES, so the product cannot wrap.
+        let at = table_rva.wrapping_add(index.wrapping_mul(IMPORT_DESCRIPTOR_LEN));
         let Some(descriptor) = read(at, IMPORT_DESCRIPTOR_LEN as usize) else {
             return ImportRead::Unreadable;
         };
@@ -392,7 +434,7 @@ where
                 iat.entry(&mut read, slot)
             };
             functions.push(PeImport { name, slot, bound });
-            functions_read += 1;
+            functions_read = functions_read.saturating_add(1);
         }
         modules.push(ImportedModule {
             name: read_c_string(&mut read, name_rva),
@@ -405,6 +447,25 @@ where
 
 /// `IMAGE_OPTIONAL_HEADER.SizeOfImage`, at one offset in PE32 and PE32+.
 const SIZE_OF_IMAGE: usize = 0x38;
+
+/// A name-table entry's shape: its width in bytes, and the bit that marks an
+/// import by ordinal.
+#[derive(Clone, Copy)]
+struct ThunkFormat {
+    width: u32,
+    ordinal_flag: u64,
+}
+
+/// `IMAGE_THUNK_DATA32` with `IMAGE_ORDINAL_FLAG32`.
+const THUNK32: ThunkFormat = ThunkFormat {
+    width: 4,
+    ordinal_flag: 1 << 31,
+};
+/// `IMAGE_THUNK_DATA64` with `IMAGE_ORDINAL_FLAG64`.
+const THUNK64: ThunkFormat = ThunkFormat {
+    width: 8,
+    ordinal_flag: 1 << 63,
+};
 
 /// A thunk array's entries, `width` bytes each, read a page at a time and
 /// never past `image_end`.
@@ -434,17 +495,24 @@ impl ThunkPages {
     {
         let end = rva.checked_add(self.width).filter(|&end| end <= self.image_end)?;
         let held = rva >= self.at
-            && u64::from(end) <= u64::from(self.at) + self.bytes.len() as u64;
+            && u64::from(end) <= u64::from(self.at).saturating_add(self.bytes.len() as u64);
         if !held {
-            let page_end = (u64::from(rva) / u64::from(PAGE_BYTES) + 1) * u64::from(PAGE_BYTES);
-            // An entry that crosses a page boundary is read whole.
+            // `rva` fits in 32 bits, so the next page boundary fits in 64.
+            let page_end = (u64::from(rva) | u64::from(PAGE_BYTES - 1)).wrapping_add(1);
+            // An entry that crosses a page boundary is read whole. Both
+            // `page_end` and `end` lie past `rva`, and `end <= image_end`, so
+            // the fill length cannot wrap.
             let fill_end = page_end.max(u64::from(end)).min(u64::from(self.image_end));
-            self.bytes = read(rva, (fill_end - u64::from(rva)) as usize)?;
+            self.bytes = read(rva, fill_end.wrapping_sub(u64::from(rva)) as usize)?;
             self.at = rva;
         }
-        let from = (rva - self.at) as usize;
+        // Held bytes start at or before `rva`, so the offset cannot wrap.
+        let from = rva.wrapping_sub(self.at) as usize;
+        let entry = self.bytes.get(from..)?.get(..self.width as usize)?;
         let mut raw = [0u8; 8];
-        raw[..self.width as usize].copy_from_slice(self.bytes.get(from..from + self.width as usize)?);
+        for (to, &byte) in raw.iter_mut().zip(entry) {
+            *to = byte;
+        }
         Some(u64::from_le_bytes(raw))
     }
 }
@@ -456,16 +524,18 @@ fn read_by_name<R>(read: &mut R, rva: u32) -> ImportName
 where
     R: FnMut(u32, usize) -> Option<Vec<u8>>,
 {
-    let in_page = (PAGE_BYTES - rva % PAGE_BYTES) as usize;
+    let in_page = bytes_left_in_page(rva);
     // A hint split across a page boundary is read whole.
     let take = in_page.clamp(2, 2 + MAX_EXPORT_NAME);
     let Some(chunk) = read(rva, take) else {
         return ImportName::PagedOut;
     };
-    let hint = u16::from_le_bytes([chunk[0], chunk[1]]);
-    let text = &chunk[2..];
-    let name = match text.iter().position(|&byte| byte == 0) {
-        Some(end) => String::from_utf8_lossy(&text[..end]).into_owned(),
+    let Some((hint, text)) = chunk.split_first_chunk::<2>() else {
+        return ImportName::PagedOut;
+    };
+    let hint = u16::from_le_bytes(*hint);
+    let name = match text.iter().position(|&byte| byte == 0).and_then(|end| text.get(..end)) {
+        Some(name) => String::from_utf8_lossy(name).into_owned(),
         None => {
             let Some(rest) = rva
                 .checked_add(take as u32)
@@ -489,12 +559,11 @@ where
     let mut bytes = Vec::new();
     let mut at = rva;
     while bytes.len() < MAX_EXPORT_NAME {
-        let in_page = (PAGE_BYTES - at % PAGE_BYTES) as usize;
-        let take = in_page.min(MAX_EXPORT_NAME - bytes.len());
+        let take = bytes_left_in_page(at).min(MAX_EXPORT_NAME.saturating_sub(bytes.len()));
         let chunk = read(at, take)?;
-        match chunk.iter().position(|&b| b == 0) {
-            Some(end) => {
-                bytes.extend_from_slice(&chunk[..end]);
+        match chunk.iter().position(|&b| b == 0).and_then(|end| chunk.get(..end)) {
+            Some(text) => {
+                bytes.extend_from_slice(text);
                 return Some(String::from_utf8_lossy(&bytes).into_owned());
             }
             None => bytes.extend_from_slice(&chunk),
@@ -502,6 +571,11 @@ where
         at = at.checked_add(take as u32)?;
     }
     Some(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// How many bytes from `rva` to the end of its page: 1 through `PAGE_BYTES`.
+fn bytes_left_in_page(rva: u32) -> usize {
+    PAGE_BYTES.wrapping_sub(rva & (PAGE_BYTES - 1)) as usize
 }
 
 #[cfg(test)]
@@ -824,5 +898,39 @@ pub(crate) mod tests {
         put_u16(&mut truncated, 0, 0x5A4D);
         put_u32(&mut truncated, 0x3C, 0x1000);
         assert_eq!(parse_sections(&truncated), None);
+    }
+
+    /// Every corruption of the test images — each truncation, each field set
+    /// to 0, its maximum or one past itself, seeded bit flips — parses to an
+    /// answer or a refusal; none reads out of range.
+    #[test]
+    fn the_header_parsers_survive_every_corruption_of_their_images() {
+        use rusty_box_symbols_fixtures::mutate::{variants, Budget};
+        struct Parsed {
+            sections: usize,
+            exports: usize,
+            imports: usize,
+        }
+        let mut parsed = Parsed { sections: 0, exports: 0, imports: 0 };
+        for original in [image(), importing_image(false), importing_image(true)] {
+            for mutation in variants(original.len(), Budget::STANDARD) {
+                let bytes = mutation.apply(&original);
+                let read = |rva: u32, len: usize| {
+                    let start = usize::try_from(rva).ok()?;
+                    bytes.get(start..start.checked_add(len)?).map(<[u8]>::to_vec)
+                };
+                if parse_sections(&bytes).is_some() {
+                    parsed.sections += 1;
+                }
+                if !matches!(parse_exports(&bytes, read), ExportRead::NotPe) {
+                    parsed.exports += 1;
+                }
+                if !matches!(parse_imports(&bytes, read), ImportRead::NotPe) {
+                    parsed.imports += 1;
+                }
+            }
+        }
+        // Most variants leave the headers whole: each parser still answers.
+        assert!(parsed.sections > 0 && parsed.exports > 0 && parsed.imports > 0);
     }
 }

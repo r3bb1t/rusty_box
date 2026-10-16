@@ -38,17 +38,18 @@ pub(crate) struct DriverObject {
 }
 
 fn qword(b: &[u8], at: usize) -> Option<u64> {
-    let s: [u8; 8] = b.get(at..at + 8)?.try_into().ok()?;
+    let s: [u8; 8] = b.get(at..at.checked_add(8)?)?.try_into().ok()?;
     Some(u64::from_le_bytes(s))
 }
 
 fn dword(b: &[u8], at: usize) -> Option<u32> {
-    let s: [u8; 4] = b.get(at..at + 4)?.try_into().ok()?;
+    let s: [u8; 4] = b.get(at..at.checked_add(4)?)?.try_into().ok()?;
     Some(u32::from_le_bytes(s))
 }
 
 fn word(b: &[u8], at: usize) -> Option<u16> {
-    b.get(at..at + 2).map(|s| u16::from_le_bytes([s[0], s[1]]))
+    let s: [u8; 2] = b.get(at..at.checked_add(2)?)?.try_into().ok()?;
+    Some(u16::from_le_bytes(s))
 }
 
 /// Decodes a `_DRIVER_OBJECT` from a 0x150-byte body, or `None` when the bytes
@@ -60,7 +61,7 @@ pub(crate) fn parse_driver(body: &[u8]) -> Option<DriverObject> {
     }
     let mut major = [0u64; MAJOR_FUNCTION_COUNT];
     for (i, slot) in major.iter_mut().enumerate() {
-        *slot = qword(b, D_MAJOR + i * 8)?;
+        *slot = qword(b, D_MAJOR.checked_add(i.checked_mul(8)?)?)?;
     }
     Some(DriverObject {
         start: qword(b, D_DRIVER_START)?,
@@ -128,6 +129,8 @@ pub(crate) const MODERN_INFO_MASK_OFFSET: u64 = 0x1A;
 pub(crate) const OBJECT_BODY_OFFSET: u64 = 0x30;
 /// Each optional header (`CreatorInfo`, `NameInfo`, …) is 0x20 bytes.
 const OPTIONAL_HEADER_SIZE: u64 = 0x20;
+/// `NameInfo` with `CreatorInfo` before it: two optional headers.
+const NAME_AND_CREATOR_SIZE: u64 = 2 * OPTIONAL_HEADER_SIZE;
 /// `InfoMask` bits: `CreatorInfo` present (bit 0), `NameInfo` present (bit 1).
 const INFO_MASK_CREATOR: u8 = 0x01;
 const INFO_MASK_NAME: u8 = 0x02;
@@ -142,12 +145,11 @@ pub(crate) fn name_info_delta(era: ObjectHeaderEra, name_byte: u8) -> Option<u64
         ObjectHeaderEra::Modern => (name_byte & INFO_MASK_NAME != 0).then(|| {
             // NameInfo is the header just before the object header; CreatorInfo,
             // when present, precedes NameInfo, so it adds its own size.
-            OPTIONAL_HEADER_SIZE
-                + if name_byte & INFO_MASK_CREATOR != 0 {
-                    OPTIONAL_HEADER_SIZE
-                } else {
-                    0
-                }
+            if name_byte & INFO_MASK_CREATOR != 0 {
+                NAME_AND_CREATOR_SIZE
+            } else {
+                OPTIONAL_HEADER_SIZE
+            }
         }),
     }
 }

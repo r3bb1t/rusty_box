@@ -122,6 +122,8 @@ pub(crate) enum BrowseTarget {
     NewFloppy,
     /// Where the shown VM's RAM is saved.
     RamDump,
+    /// A file of debug information for the module the Symbols tab picked.
+    SymbolFile,
 }
 
 /// A Browse press the Android host answers with a file browser of its own.
@@ -191,6 +193,37 @@ fn phone_shows_notice(kind: ShellNoticeKind) -> bool {
 #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
 fn pick_native_file() -> Option<PathBuf> {
     rfd::FileDialog::new().pick_file()
+}
+
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
+fn pick_native_folder() -> Option<PathBuf> {
+    rfd::FileDialog::new().pick_folder()
+}
+
+/// Opens `folder`, made first if it is not there yet, in the system's file
+/// manager. The manager is left running; a thread reaps it when it exits.
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
+pub(crate) fn open_folder(folder: &std::path::Path) -> std::io::Result<()> {
+    let manager = if cfg!(windows) {
+        "explorer"
+    } else if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    std::fs::create_dir_all(folder)?;
+    let mut child = std::process::Command::new(manager).arg(folder).spawn()?;
+    // explorer exits 1 even when it opened the folder, so the status says
+    // nothing; only a failure to wait is worth a line.
+    let reaper = std::thread::Builder::new().name("open-folder".to_owned()).spawn(move || {
+        if let Err(error) = child.wait() {
+            tracing::warn!("the file manager's exit was not read: {error}");
+        }
+    })?;
+    // The reaper runs detached; the folder is open whether or not it is
+    // joined.
+    drop(reaper);
+    Ok(())
 }
 
 #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
@@ -294,6 +327,21 @@ pub struct NativeShellApp {
     /// Keeps the app running while any power-on lasts: each power-on takes
     /// a hold, and its run's thread gives it back.
     keep_alive: KeepAlive,
+    /// The symbol settings file and what it resolved to.
+    symbol_settings: crate::symbol_settings::SettingsState,
+    /// What the symbol engine has found, for every VM: symbol files are
+    /// keyed by the build they describe, so one hub serves every guest.
+    symbols: crate::symbols::hub::SymbolHub,
+    /// The symbol workers, once a window started them; dropping them closes
+    /// the hub.
+    symbol_workers: Option<crate::symbols::worker::SymbolWorkers>,
+    /// The module a file chooser is open for, to load the chosen file as its
+    /// debug information.
+    symbol_file_for: Option<rusty_box_symbols::identity::ModuleIdentity>,
+    /// The Settings page's edits, kept while the page is left and back.
+    settings_draft: Option<crate::symbol_settings::SettingsDraft>,
+    /// Why the Settings page's last Save did not write.
+    settings_save_problem: Option<String>,
     chrome: ShellChrome,
     floppy_maker: FloppyMaker,
     /// The floppy maker's window is open.
@@ -1137,6 +1185,9 @@ pub(crate) struct ShellChrome {
     /// away to its grab handle.
     library: Drawer,
     show_about: bool,
+    /// A VM's page, or the app's Settings.
+    #[cfg(not(target_arch = "wasm32"))]
+    surface: crate::shell::destination::Surface,
 }
 
 impl Default for ShellChrome {
@@ -1149,6 +1200,8 @@ impl Default for ShellChrome {
             show_serial: true,
             library: Drawer::Open,
             show_about: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            surface: crate::shell::destination::Surface::Vm,
         }
     }
 }
@@ -1660,7 +1713,23 @@ impl NativeShellApp {
         alive: AliveEffect,
     ) -> Self {
         configure_shell_style(&cc.egui_ctx);
-        Self::with_commands(command_tx, start, alive)
+        let mut app = Self::with_commands(command_tx, start, alive);
+        app.start_symbol_workers(&cc.egui_ctx);
+        app
+    }
+
+    /// Starts the symbol workers, the window drawing each thing they
+    /// publish. Tests build the shell through `with_commands`, which starts
+    /// none. When they do not start, symbols stay unavailable and the shell
+    /// says why.
+    fn start_symbol_workers(&mut self, context: &egui::Context) {
+        self.symbols.set_repaint(context.clone());
+        match crate::symbols::worker::start(&self.symbols) {
+            Ok(workers) => self.symbol_workers = Some(workers),
+            Err(error) => self.notify(ShellNotice::error(format!(
+                "The symbol workers did not start, so no module will be named: {error}"
+            ))),
+        }
     }
 
     /// The shell opened on `start`'s VM list, powering VMs on through
@@ -1690,10 +1759,23 @@ impl NativeShellApp {
             chrome.show_serial = false;
         }
         let close_choice = start.library.close_choice();
+        let symbol_settings = crate::symbol_settings::SettingsState::load(
+            start.settings_file.clone(),
+            crate::symbol_settings::Environment::from_process(),
+        );
+        let symbols = crate::symbols::hub::SymbolHub::new(crate::symbols::hub::HubConfig::from_settings(
+            &symbol_settings.resolved,
+        ));
         Self {
             sessions: Sessions::default(),
             holdings: Holdings::default(),
             keep_alive: KeepAlive::new(alive),
+            symbol_settings,
+            symbols,
+            symbol_workers: None,
+            symbol_file_for: None,
+            settings_draft: None,
+            settings_save_problem: None,
             chrome,
             floppy_maker: FloppyMaker::default(),
             floppy_maker_open: false,
@@ -1975,12 +2057,16 @@ impl NativeShellApp {
                 self.sessions.open(&vm).console().send_ctrl_alt_del();
             }
             Some(VmBarAction::CreateFloppy) => self.floppy_maker_open = true,
+            Some(VmBarAction::OpenSettings) => self.open_settings(),
             Some(VmBarAction::ShowAbout) => self.chrome.show_about = true,
             Some(VmBarAction::Quit) => {
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
             }
             #[cfg(target_os = "android")]
-            Some(VmBarAction::GoTo(page)) => self.chrome.go_to(page),
+            Some(VmBarAction::GoTo(page)) => {
+                self.chrome.surface = crate::shell::destination::Surface::Vm;
+                self.chrome.go_to(page);
+            }
         }
     }
 
@@ -1998,6 +2084,7 @@ impl NativeShellApp {
             dots: &dots,
             broken: &self.broken_files,
             drawer: &mut self.chrome.library,
+            surface: self.chrome.surface,
         }
         .show(ui);
         if let Some(action) = action {
@@ -2048,6 +2135,7 @@ impl NativeShellApp {
                 }
             }
             SidebarAction::Select(destination) => {
+                self.chrome.surface = crate::shell::destination::Surface::Vm;
                 if destination.vm() == self.chrome.destination.vm() {
                     self.chrome.go_to(destination.page());
                 } else {
@@ -2058,6 +2146,7 @@ impl NativeShellApp {
                     self.chrome.library = Drawer::Closed;
                 }
             }
+            SidebarAction::OpenSettings => self.open_settings(),
         }
     }
 
@@ -2119,16 +2208,115 @@ impl NativeShellApp {
     }
 
     fn draw_central(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
-        egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(BG_BASE))
-            .show(ui, |ui| {
-                match self.chrome.page() {
-                    ShellPage::Home => self.draw_home_page(ui),
-                    ShellPage::Console => self.draw_console_page(ui, frame),
-                    ShellPage::Hardware => self.draw_hardware_page(ui),
-                    ShellPage::Debugger => self.draw_debugger_page(ui),
+        use crate::shell::destination::Surface;
+        egui::CentralPanel::default().frame(egui::Frame::new().fill(BG_BASE)).show(ui, |ui| match self.chrome.surface {
+            Surface::Settings => self.draw_settings_page(ui),
+            Surface::Vm => match self.chrome.page() {
+                ShellPage::Home => self.draw_home_page(ui),
+                ShellPage::Console => self.draw_console_page(ui, frame),
+                ShellPage::Hardware => self.draw_hardware_page(ui),
+                ShellPage::Debugger => self.draw_debugger_page(ui),
+            },
+        });
+    }
+
+    /// Shows the app's Settings, its fields filled from the settings file
+    /// unless an edit is under way, and has the store measured.
+    fn open_settings(&mut self) {
+        self.chrome.surface = crate::shell::destination::Surface::Settings;
+        if self.settings_draft.is_none() {
+            self.settings_draft = Some(crate::symbol_settings::SettingsDraft::of(&self.symbol_settings.file));
+        }
+        self.symbols.measure_store();
+        #[cfg(target_os = "android")]
+        {
+            self.chrome.library = Drawer::Closed;
+        }
+    }
+
+    fn draw_settings_page(&mut self, ui: &mut egui::Ui) {
+        use crate::shell::symbols_page::{draw_symbols_page, SymbolsPageAction, SymbolsPageState};
+        let draft =
+            self.settings_draft.get_or_insert_with(|| crate::symbol_settings::SettingsDraft::of(&self.symbol_settings.file));
+        let view = self.symbols.view();
+        let action = draw_symbols_page(
+            ui,
+            SymbolsPageState {
+                draft,
+                settings: &self.symbol_settings,
+                usage: view.store_usage.as_ref(),
+                save_problem: self.settings_save_problem.as_deref(),
+            },
+        );
+        match action {
+            None => {}
+            Some(SymbolsPageAction::Save) => self.save_settings(),
+            Some(SymbolsPageAction::Revert) => {
+                self.settings_draft = Some(crate::symbol_settings::SettingsDraft::of(&self.symbol_settings.file));
+                self.settings_save_problem = None;
+            }
+            #[cfg(not(target_os = "android"))]
+            Some(SymbolsPageAction::Browse(field)) => {
+                if let Some(folder) = pick_native_folder() {
+                    self.put_folder(field, &folder);
                 }
-            });
+            }
+            #[cfg(not(target_os = "android"))]
+            Some(SymbolsPageAction::OpenStore) => {
+                let store = self.symbol_settings.resolved.store.value.clone();
+                if let Err(error) = open_folder(&store) {
+                    self.notify(ShellNotice::error(format!("The symbol store {} did not open: {error}", store.display())));
+                }
+            }
+        }
+    }
+
+    /// Writes the page's draft to the settings file and has the engine run
+    /// on it; a draft that is no settings file says why on the page.
+    fn save_settings(&mut self) {
+        let Some(draft) = &self.settings_draft else {
+            return;
+        };
+        let file = match draft.to_file() {
+            Ok(file) => file,
+            Err(problem) => {
+                self.settings_save_problem = Some(problem.to_string());
+                return;
+            }
+        };
+        match self.symbol_settings.save(file) {
+            Ok(()) => {
+                self.settings_save_problem = None;
+                self.symbols.reconfigure(crate::symbols::hub::HubConfig::from_settings(&self.symbol_settings.resolved));
+                self.notify(ShellNotice::info("The symbol settings were saved."));
+            }
+            Err(error) => self.notify(ShellNotice::error(format!("The symbol settings were not saved: {error}"))),
+        }
+    }
+
+    /// Puts a picked `folder` into the page's `field`: the store's field
+    /// takes it whole, a list takes it as one more line.
+    #[cfg(not(target_os = "android"))]
+    fn put_folder(&mut self, field: crate::shell::symbols_page::FolderField, folder: &std::path::Path) {
+        use crate::shell::symbols_page::FolderField;
+        let Some(draft) = self.settings_draft.as_mut() else {
+            return;
+        };
+        let text = folder.display().to_string();
+        let list = match field {
+            FolderField::Store => {
+                draft.store = text;
+                return;
+            }
+            FolderField::ProjectSymbols(index) => draft.projects.get_mut(index).map(|p| &mut p.symbols),
+            FolderField::ProjectSources(index) => draft.projects.get_mut(index).map(|p| &mut p.sources),
+        };
+        if let Some(list) = list {
+            if !list.trim().is_empty() {
+                list.push('\n');
+            }
+            list.push_str(&text);
+        }
     }
 
     fn draw_debugger_page(&mut self, ui: &mut egui::Ui) {
@@ -2140,7 +2328,26 @@ impl NativeShellApp {
         let control = Arc::clone(session.control());
         let snapshot = control.snapshot();
         let previous = control.previous_snapshot();
+        // Each new pause's modules are asked of the symbol engine once.
+        if let Some(shown) = &snapshot {
+            let pane = session.debugger_mut();
+            let fresh = Arc::downgrade(shown);
+            let asked = pane.symbols_asked.as_ref().is_some_and(|last| last.ptr_eq(&fresh));
+            if !asked {
+                pane.symbols_asked = Some(fresh);
+                let addresses = crate::symbols::wanted::shown_addresses(shown);
+                self.symbols.want(&crate::symbols::wanted::wanted_modules(
+                    &shown.symbols,
+                    &addresses,
+                ));
+            }
+            // The kernel's layouts go to the run as soon as its tables load,
+            // whether or not a new pause brought them.
+            let layout = crate::symbols::kernel::kernel_layout(&shown.symbols, &self.symbols.view(), &mut pane.kernel_layout);
+            control.set_kernel_layout(layout);
+        }
         let step_available = session.run_engine() != Some(crate::config::Engine::Whp);
+        let symbols = self.symbols.view();
         let action = draw_debugger_page(
             ui,
             DebuggerPageState {
@@ -2154,6 +2361,7 @@ impl NativeShellApp {
                 find: control.find_outcome(),
                 searching: control.searching(),
                 pane: session.debugger_mut(),
+                symbols: &symbols,
             },
         );
         // A paused run answers on its own thread; keep looking while it may.
@@ -2216,6 +2424,38 @@ impl NativeShellApp {
                     system: SystemView::Off,
                     ..control.view()
                 });
+            }
+            Some(DebuggerAction::Symbols(asked)) => self.act_on_symbols(asked),
+        }
+    }
+
+    /// Does what the Symbols tab asked of the symbol engine.
+    fn act_on_symbols(&mut self, asked: crate::shell::debugger_page::SymbolsAction) {
+        use crate::shell::debugger_page::SymbolsAction;
+        use rusty_box_symbols::service::Consent;
+        match asked {
+            SymbolsAction::LoadFromFile(identity) => {
+                self.symbol_file_for = Some(identity);
+                if self.browse(BrowseTarget::SymbolFile) {
+                    if let Err(message) = self.apply_pending_settings() {
+                        self.notify(ShellNotice::error(message));
+                    }
+                }
+            }
+            SymbolsAction::LoadAnyway { identity, path } => {
+                self.symbols.attach(&identity, path, Consent::LoadAnyway);
+            }
+            SymbolsAction::Retry(identity) => self.symbols.retry(&identity),
+            SymbolsAction::Cancel(identity) => self.symbols.cancel(&identity),
+            SymbolsAction::Unload(identity) => self.symbols.unload(&identity),
+            SymbolsAction::Rescan => self.symbols.rescan(),
+            SymbolsAction::OpenSettings => self.open_settings(),
+            #[cfg(not(target_os = "android"))]
+            SymbolsAction::OpenStore => {
+                let store = self.symbol_settings.resolved.store.value.clone();
+                if let Err(error) = open_folder(&store) {
+                    self.notify(ShellNotice::error(format!("The symbol store {} did not open: {error}", store.display())));
+                }
             }
         }
     }
@@ -4465,7 +4705,8 @@ impl NativeShellApp {
             BrowseTarget::HardDisk
             | BrowseTarget::Cdrom
             | BrowseTarget::Bios
-            | BrowseTarget::VgaBios => pick_native_file(),
+            | BrowseTarget::VgaBios
+            | BrowseTarget::SymbolFile => pick_native_file(),
         };
         chosen.is_some_and(|path| self.set_browsed_path(target, path))
     }
@@ -4533,6 +4774,12 @@ impl NativeShellApp {
                 }
                 false
             }
+            BrowseTarget::SymbolFile => {
+                if let Some(identity) = self.symbol_file_for.take() {
+                    self.symbols.attach(&identity, path, rusty_box_symbols::service::Consent::MatchOnly);
+                }
+                false
+            }
         }
     }
 
@@ -4563,6 +4810,7 @@ impl NativeShellApp {
             ),
             // The browser opens in the shared Download folder.
             BrowseTarget::RamDump => (PathBuf::new(), Some(RAM_DUMP_FILE_NAME)),
+            BrowseTarget::SymbolFile => (PathBuf::new(), None),
         };
         Some(BrowseRequest {
             target,
@@ -6540,6 +6788,12 @@ mod tests {
             crate::library::VmLibrary::open(self.dir.clone()).expect("open scratch library")
         }
 
+        /// A symbol settings file of this test's own, beside the library
+        /// folder (whose parent is the shared temporary folder).
+        fn settings_file(&self) -> std::path::PathBuf {
+            self.dir.with_extension("settings.toml")
+        }
+
         fn toml_files(&self) -> Vec<String> {
             let mut names: Vec<String> = fs::read_dir(&self.dir)
                 .expect("list scratch library")
@@ -6557,7 +6811,27 @@ mod tests {
             if let Err(error) = fs::remove_dir_all(&self.dir) {
                 eprintln!("could not remove {}: {error}", self.dir.display());
             }
+            match fs::remove_file(self.settings_file()) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => eprintln!("could not remove {}: {error}", self.settings_file().display()),
+            }
         }
+    }
+
+    /// The shell resolves its symbol settings from its own file at start: a
+    /// key the file sets wins. A test shell starts no symbol workers.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn the_shell_reads_its_symbol_settings_at_start() {
+        let scratch = ScratchLibrary::new();
+        fs::write(scratch.settings_file(), "[symbols]\ndownload = \"off\"\n").expect("write the settings");
+        let (app, _command_rx) = native_test_app_over(&scratch, None, None);
+        let downloads = &app.symbol_settings.resolved.downloads;
+        assert_eq!(downloads.value, rusty_box_symbols::service::Downloads::Off);
+        assert_eq!(downloads.origin, crate::symbol_settings::Origin::File);
+        assert!(app.symbol_settings.problem.is_none());
+        assert!(app.symbol_workers.is_none());
     }
 
     /// A shell opened the way the command line opens it: `test_resolved_config()`
@@ -6597,6 +6871,7 @@ mod tests {
                 crate::runner::ShellOpening::Launch,
             ),
             notice,
+            settings_file: scratch.settings_file(),
         };
         (
             NativeShellApp::with_commands(command_tx, start, AliveEffect::Nothing),
@@ -6811,6 +7086,7 @@ mod tests {
             library,
             opening: crate::runner::ShellOpening::LibraryVm(beta.clone()),
             notice: None,
+            settings_file: scratch.settings_file(),
         };
 
         let opening = OpeningList::from_start(&start);
@@ -6869,6 +7145,7 @@ mod tests {
             library,
             opening: crate::runner::ShellOpening::LastShown,
             notice: Some("a bundled VM was not imported".to_owned()),
+            settings_file: scratch.settings_file(),
         };
 
         let opening = OpeningList::from_start(&start);
@@ -9800,6 +10077,7 @@ mod tests {
                 &crate::debugger::inspect::ViewRequest::default(),
                 &mut crate::debugger::windows::WindowsDiscovery::default(),
                 None,
+                None,
             )
         }
 
@@ -9862,6 +10140,230 @@ mod tests {
                     .is_some_and(|text| text.contains("64-bit mode")))
                 .next()
                 .is_some());
+        }
+
+        /// A pause's modules are asked of the symbol engine when the page
+        /// shows it, and only once however often it is drawn.
+        #[test]
+        fn a_pauses_modules_are_asked_for_once() {
+            use crate::debugger::inspect::{ModuleSpace, SymModule, SymbolIndex};
+            use crate::debugger::module_identity::GuestIdentity;
+            use crate::symbols::hub::ModuleSymbols;
+            use rusty_box_symbols::identity::{ModuleIdentity, PeImageId};
+            let kernel = ModuleIdentity::Pe {
+                file_name: "ntoskrnl.exe".to_owned(),
+                image: PeImageId {
+                    time_date_stamp: 0x5E1D_2A4B,
+                    size_of_image: 0x10_0000,
+                },
+                pdb: None,
+            };
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = live_vm(&mut app);
+            control.pause();
+            assert_eq!(
+                control.next_between_runs(),
+                crate::debugger::control::BetweenRuns::Perform(crate::debugger::control::Task::Refresh)
+            );
+            let mut snapshot = paused_snapshot();
+            snapshot.symbols = SymbolIndex {
+                modules: vec![SymModule {
+                    base: 0xFFFF_F800_0100_0000,
+                    size: 0x10_0000,
+                    name: "ntoskrnl.exe".to_owned(),
+                    space: ModuleSpace::Kernel,
+                    identity: GuestIdentity::Known(kernel.clone()),
+                }],
+                kernel: Some(0xFFFF_F800_0100_0000),
+            };
+            control.publish(snapshot);
+            let mut window = window(app);
+            window.run();
+            open_debugger(&mut window);
+            let view = window.state().app.symbols.view();
+            assert_eq!(view.state(&kernel), Some(&ModuleSymbols::Pending));
+            let generation = view.generation;
+            window.run();
+            assert_eq!(window.state().app.symbols.view().generation, generation);
+        }
+
+        /// Once the kernel's tables load, its layouts go to the paused run,
+        /// which reads the guest again under them.
+        #[test]
+        fn a_loaded_kernel_pdb_is_handed_to_the_paused_run() {
+            use crate::debugger::control::{BetweenRuns, Task};
+            use crate::symbols::kernel::tests::{hub_with_kernel_tables, kernel_symbols};
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            app.symbols = hub_with_kernel_tables();
+            let control = live_vm(&mut app);
+            control.pause();
+            assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::Refresh));
+            let mut snapshot = paused_snapshot();
+            snapshot.symbols = kernel_symbols();
+            control.publish(snapshot);
+            let mut window = window(app);
+            window.run();
+            open_debugger(&mut window);
+            let layout = control.kernel_layout().expect("handed over");
+            assert_eq!(layout.process.unique_process_id.map(|offset| offset.0), Some(0x440));
+            assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::Refresh));
+        }
+
+        /// With the kernel's tables loaded, the code pane heads a function
+        /// with its name, names a call's target and gives the source line.
+        #[test]
+        fn the_code_pane_names_functions_and_branch_targets() {
+            use crate::debugger::inspect::{CodeLine, CodeText};
+            use crate::symbols::kernel::tests::{kernel_symbols, KERNEL_BASE};
+            use crate::symbols::names::tests::{hub_with_kernel_code, loaded};
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            app.symbols = hub_with_kernel_code(loaded());
+            let control = live_vm(&mut app);
+            control.pause();
+            assert_eq!(
+                control.next_between_runs(),
+                crate::debugger::control::BetweenRuns::Perform(crate::debugger::control::Task::Refresh)
+            );
+            let mut snapshot = paused_snapshot();
+            snapshot.symbols = kernel_symbols();
+            snapshot.code = vec![CodeLine {
+                address: KERNEL_BASE + 0x1040,
+                bytes: vec![0xE8, 0xBB, 0x00, 0x00, 0x00],
+                text: CodeText::Opcode("CallJq".to_owned()),
+                target: Some(KERNEL_BASE + 0x1100),
+            }];
+            control.publish(snapshot);
+            let mut window = window(app);
+            window.run();
+            open_debugger(&mut window);
+            let shows = |text: &str| {
+                window
+                    .query_all_by(|node| node.label().or(node.value()).is_some_and(|label| label.contains(text)))
+                    .next()
+                    .is_some()
+            };
+            assert!(shows("ntoskrnl!KiSystemCall64:"), "the function's heading");
+            assert!(shows("CallJq -> ntoskrnl!KeBugCheckEx"), "the call's target");
+            assert!(shows("trap.asm:100"), "the source line");
+            assert!(shows("at ntoskrnl!KiSystemCall64"), "the at chip");
+        }
+
+        /// The header chip counts the pause's modules and opens the Symbols
+        /// tab, which lists a module the servers lack; picking it offers
+        /// Retry, which asks the engine again.
+        #[test]
+        fn the_symbols_tab_lists_a_missing_module_and_retries_it() {
+            use crate::symbols::hub::{ModuleEntry, ModuleSymbols};
+            use crate::symbols::kernel::tests::{kernel_identity, kernel_symbols, look_up_as_a_worker, quiet_hub};
+            let hub = quiet_hub();
+            look_up_as_a_worker(&hub, &kernel_identity(), ModuleEntry { state: ModuleSymbols::NotOnServer, tables: None });
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            app.symbols = hub.clone();
+            let control = paused_vm(&mut app);
+            let mut snapshot = paused_snapshot();
+            snapshot.symbols = kernel_symbols();
+            control.publish(snapshot);
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            window.get_by_label("1 missing").click();
+            window.run();
+            assert!(
+                window
+                    .query_all_by(|node| node.label().or(node.value()).is_some_and(|text| text.contains("not on the symbol servers")))
+                    .next()
+                    .is_some(),
+                "the Symbols tab lists the module's state"
+            );
+            let_clicks_settle(&mut window);
+            let row = row_center(&window, "ntoskrnl.exe");
+            single_click(&mut window, row);
+            window.run();
+            window.get_by_label("Retry").click();
+            window.run();
+            assert_eq!(hub.view().state(&kernel_identity()), Some(&ModuleSymbols::Pending));
+        }
+
+        /// A project file the index could not read says so on the Symbols
+        /// tab, with its path: the owner's build that is never found has a
+        /// visible reason.
+        #[test]
+        fn the_symbols_tab_lists_project_files_that_did_not_index() {
+            use crate::symbols::hub::{ModuleEntry, ModuleSymbols};
+            use crate::symbols::kernel::tests::{kernel_identity, kernel_symbols, look_up_as_a_worker, quiet_hub};
+            use rusty_box_symbols::projects::{IndexProblem, ProjectIndex};
+            let hub = quiet_hub();
+            look_up_as_a_worker(&hub, &kernel_identity(), ModuleEntry { state: ModuleSymbols::NotOnServer, tables: None });
+            let mut index = ProjectIndex::default();
+            index.problems.push(IndexProblem {
+                path: std::path::PathBuf::from("work").join("build").join("mydriver.pdb"),
+                reason: "the PDB is cut short".to_owned(),
+            });
+            hub.set_projects(index);
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            app.symbols = hub;
+            let control = paused_vm(&mut app);
+            let mut snapshot = paused_snapshot();
+            snapshot.symbols = kernel_symbols();
+            control.publish(snapshot);
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            window.get_by_label("1 missing").click();
+            window.run();
+            let shown = |needle: &str| {
+                window
+                    .query_all_by(|node| node.label().or(node.value()).is_some_and(|text| text.contains(needle)))
+                    .next()
+                    .is_some()
+            };
+            assert!(shown("mydriver.pdb"), "the file is named");
+            assert!(shown("the PDB is cut short"), "with why it did not index");
+        }
+
+        /// The drawer's Settings opens the app's Settings, whose Save writes
+        /// the settings file and has the engine run on it.
+        #[test]
+        fn the_settings_page_saves_the_symbol_settings() {
+            use crate::symbol_settings::Origin;
+            use rusty_box_symbols::service::Downloads;
+            let (app, _command_rx, scratch) = native_test_app();
+            let mut window = tall_window(app);
+            window.run();
+            window.get_by_label(crate::shell::vm_bar::SETTINGS).click();
+            window.run();
+            assert!(window.query_by_label(crate::shell::symbols_page::SYMBOLS_HEADING).is_some());
+            window.get_by_label("Off").click();
+            window.run();
+            window.get_by_label("Save").click();
+            window.run();
+            let saved = &window.state().app.symbol_settings.resolved.downloads;
+            assert_eq!(saved.value, Downloads::Off);
+            assert_eq!(saved.origin, Origin::File);
+            let text = fs::read_to_string(scratch.settings_file()).expect("the settings file");
+            assert!(text.contains("download = \"off\""), "{text}");
+        }
+
+        /// The Symbols tab's own way to the app's Settings opens them.
+        #[test]
+        fn the_symbols_tab_opens_the_symbol_settings() {
+            use crate::shell::debugger_page::DebuggerTab;
+            use crate::shell::destination::Surface;
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_vm(&mut app);
+            let mut snapshot = paused_snapshot();
+            snapshot.symbols = crate::symbols::kernel::tests::kernel_symbols();
+            control.publish(snapshot);
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            let vm = window.state().app.shown_vm();
+            window.state_mut().app.sessions.open(&vm).debugger_mut().tab = DebuggerTab::Symbols;
+            window.run();
+            window.get_by_label(crate::shell::debugger_page::SYMBOL_SETTINGS).click();
+            window.run();
+            assert_eq!(window.state().app.chrome.surface, Surface::Settings);
+            assert!(window.query_by_label(crate::shell::symbols_page::SYMBOLS_HEADING).is_some());
         }
 
         #[test]
@@ -10237,6 +10739,23 @@ mod tests {
                 .is_some()
         }
 
+        /// A kernel listing says whose layouts read it.
+        #[test]
+        fn a_kernel_listing_says_whose_layouts_read_it() {
+            use crate::debugger::windows::KernelLayouts;
+            for layouts in [KernelLayouts::Pdb, KernelLayouts::PdbDisagrees] {
+                let (mut app, _command_rx, _scratch) = native_test_app();
+                let control = paused_vm(&mut app);
+                let mut snapshot = process_listing_snapshot();
+                snapshot.layouts = Some(layouts);
+                control.publish(snapshot);
+                let mut window = tall_window(app);
+                window.run();
+                open_processes(&mut window);
+                assert!(window.query_by_label(layouts.label()).is_some(), "{layouts:?} is said");
+            }
+        }
+
         /// A click on a process's module picks it: the run is asked for its
         /// sections, and the page stays on the lists.
         #[test]
@@ -10326,7 +10845,7 @@ mod tests {
             press_key(&mut window, egui::Key::Tab);
             press_key(&mut window, egui::Key::ArrowDown);
             press_key(&mut window, egui::Key::Tab);
-            for module_detail in [ModuleDetail::Exports, ModuleDetail::Imports, ModuleDetail::Sections] {
+            for module_detail in [ModuleDetail::Exports, ModuleDetail::Imports, ModuleDetail::Symbols, ModuleDetail::Sections] {
                 press_shift_tab(&mut window);
                 assert_eq!(
                     control.view().system,
@@ -10338,6 +10857,46 @@ mod tests {
                     }
                 );
             }
+        }
+
+        /// The Kernel modules list says what the engine has for each module,
+        /// and a picked module's Symbols view offers the action its state
+        /// takes.
+        #[test]
+        fn a_modules_symbols_show_in_the_list_and_its_symbols_view() {
+            use crate::debugger::module_identity::GuestIdentity;
+            use crate::debugger::windows::{ModuleDetail, PickedDetail, PickedModule};
+            use crate::symbols::kernel::tests::{kernel_identity, kernel_symbols, KERNEL_BASE};
+            use crate::symbols::names::tests::{hub_with_kernel_code, loaded};
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            app.symbols = hub_with_kernel_code(loaded());
+            let control = paused_vm(&mut app);
+            let mut snapshot = kernel_listing_snapshot(Some(PickedModule {
+                base: KERNEL_BASE,
+                shown: PickedDetail::Symbols(GuestIdentity::Known(kernel_identity())),
+            }));
+            snapshot.symbols = kernel_symbols();
+            control.publish(snapshot);
+            let mut window = tall_window(app);
+            window.run();
+            open_kernel_modules(&mut window);
+            let row_says = |window: &Harness<'_, Window>, module: &str, state: &str| {
+                window
+                    .query_all_by(|node| node.label().is_some_and(|label| label.contains(module) && label.contains(state)))
+                    .next()
+                    .is_some()
+            };
+            assert!(row_says(&window, "ntoskrnl.exe", "loaded"));
+            assert!(row_says(&window, "tcpip.sys", "-"), "a module this pause did not name");
+            let vm = window.state().app.shown_vm();
+            {
+                let pane = window.state_mut().app.sessions.open(&vm).debugger_mut();
+                pane.selected_kernel_module = Some(KERNEL_BASE);
+                pane.kernel_detail = ModuleDetail::Symbols;
+            }
+            window.run();
+            assert!(window.query_by_label("Unload").is_some());
+            assert!(window.query_by_label(crate::shell::debugger_page::LOAD_FROM_FILE).is_some());
         }
 
         /// A driver's imports are asked for by the switch, as its exports are.

@@ -64,16 +64,28 @@ pub(crate) struct SavedRegisters {
 /// Rip 0x168, SegCs 0x170 (u16), EFlags 0x178 (u32), Rsp 0x180, SegSs 0x188
 /// (u16).
 pub(crate) fn decode_trap_frame(frame: &[u8; TRAP_FRAME_BYTES]) -> SavedRegisters {
+    // Every offset below lies inside the frame, so each read finds its
+    // bytes; a miss would read as 0.
     let u64_at = |offset: usize| {
-        let mut raw = [0u8; 8];
-        raw.copy_from_slice(&frame[offset..offset + 8]);
-        u64::from_le_bytes(raw)
+        offset
+            .checked_add(8)
+            .and_then(|end| frame.get(offset..end))
+            .and_then(|bytes| <[u8; 8]>::try_from(bytes).ok())
+            .map_or(0, u64::from_le_bytes)
     };
-    let u16_at = |offset: usize| u16::from_le_bytes([frame[offset], frame[offset + 1]]);
+    let u16_at = |offset: usize| {
+        offset
+            .checked_add(2)
+            .and_then(|end| frame.get(offset..end))
+            .and_then(|bytes| <[u8; 2]>::try_from(bytes).ok())
+            .map_or(0, u16::from_le_bytes)
+    };
     let u32_at = |offset: usize| {
-        let mut raw = [0u8; 4];
-        raw.copy_from_slice(&frame[offset..offset + 4]);
-        u32::from_le_bytes(raw)
+        offset
+            .checked_add(4)
+            .and_then(|end| frame.get(offset..end))
+            .and_then(|bytes| <[u8; 4]>::try_from(bytes).ok())
+            .map_or(0, u32::from_le_bytes)
     };
     SavedRegisters {
         rip: u64_at(0x168),
@@ -113,9 +125,9 @@ pub(crate) fn frame_is_users(saved: &SavedRegisters, stack: LinearRange) -> bool
 /// each node's address, up to `cap`. A `Flink` chain that loops without
 /// passing back through `head` is stopped by the visited set, so a corrupt
 /// list ends the walk instead of spinning.
-pub(crate) fn walk_thread_list(
+pub(crate) fn walk_thread_list<F: FnMut(u64) -> Option<u64>>(
     head: u64,
-    mut read_flink: impl FnMut(u64) -> Option<u64>,
+    mut read_flink: F,
     cap: usize,
 ) -> Vec<u64> {
     let mut entries = Vec::new();

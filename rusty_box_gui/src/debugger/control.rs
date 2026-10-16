@@ -11,6 +11,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use rusty_box::emulator::PowerState;
 
 use super::inspect::{DebugSnapshot, MemoryTarget, ViewRequest};
+use super::kernel_layout::{same_layouts, KernelLayout};
 use super::search::{FindOutcome, FindRequest};
 use super::windows::WindowsDiscovery;
 
@@ -121,6 +122,9 @@ struct ControlState {
     searching: bool,
     note: Option<DebugNote>,
     dump_outcomes: Vec<DumpOutcome>,
+    /// The kernel PDB's layouts, which the shell hands over once its tables
+    /// load; the walks read the guest's structures under them.
+    kernel_layout: Option<Arc<KernelLayout>>,
 }
 
 /// One VM's run control, shared by the shell and the VM's run thread.
@@ -153,6 +157,7 @@ impl RunControl {
                 searching: false,
                 note: None,
                 dump_outcomes: Vec::new(),
+                kernel_layout: None,
             }),
             changed: Condvar::new(),
             discovery: Mutex::new(WindowsDiscovery::default()),
@@ -222,6 +227,23 @@ impl RunControl {
             return;
         }
         state.view = view;
+        if state.phase == RunPhase::Paused && !state.tasks.contains(&Task::Refresh) {
+            state.tasks.push_back(Task::Refresh);
+            self.changed.notify_all();
+        }
+    }
+
+    /// The kernel PDB's layouts for the walks, or `None` to walk by discovery
+    /// alone. A paused run reads the guest's structures again at once under
+    /// new layouts; the snapshot it shows was read under the old ones, so
+    /// nothing of it is carried over.
+    #[cfg(feature = "gui-egui")]
+    pub(crate) fn set_kernel_layout(&self, layout: Option<Arc<KernelLayout>>) {
+        let mut state = self.lock();
+        if same_layouts(state.kernel_layout.as_ref(), layout.as_ref()) {
+            return;
+        }
+        state.kernel_layout = layout;
         if state.phase == RunPhase::Paused && !state.tasks.contains(&Task::Refresh) {
             state.tasks.push_back(Task::Refresh);
             self.changed.notify_all();
@@ -421,6 +443,11 @@ impl RunControl {
 
     pub(crate) fn view(&self) -> ViewRequest {
         self.lock().view
+    }
+
+    /// The layouts the walks read under now.
+    pub(crate) fn kernel_layout(&self) -> Option<Arc<KernelLayout>> {
+        self.lock().kernel_layout.clone()
     }
 
     /// Shows `snapshot`, which follows the guest's move; the one it replaces
@@ -652,6 +679,8 @@ mod tests {
             memory_space: None,
             context: crate::debugger::inspect::ViewContext::Live,
             viewing: crate::debugger::inspect::Viewing::Live,
+            layout: None,
+            layouts: None,
         });
         control.finish_run();
         control.begin_run(RunStart::PowerOn);
@@ -714,7 +743,36 @@ mod tests {
             memory_space: None,
             context: crate::debugger::inspect::ViewContext::Live,
             viewing: crate::debugger::inspect::Viewing::Live,
+            layout: None,
+            layouts: None,
         }
+    }
+
+    /// New layouts make a paused run read the guest again, once; the same
+    /// layouts handed over again ask for nothing.
+    #[test]
+    fn new_kernel_layouts_make_a_paused_run_read_again() {
+        use crate::debugger::kernel_layout::KernelLayout;
+        let control = control();
+        control.begin_run(RunStart::PowerOn);
+        control.pause();
+        assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::Refresh));
+        let layout = Arc::new(KernelLayout {
+            kernel: crate::symbols::kernel::tests::kernel_identity(),
+            globals: Default::default(),
+            process: Default::default(),
+            thread: Default::default(),
+            vad: None,
+            object_era: None,
+            failures: Vec::new(),
+        });
+        control.set_kernel_layout(Some(Arc::clone(&layout)));
+        assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::Refresh));
+        control.set_kernel_layout(Some(Arc::clone(&layout)));
+        assert!(control.lock().tasks.is_empty());
+        assert!(control.kernel_layout().is_some_and(|held| Arc::ptr_eq(&held, &layout)));
+        control.set_kernel_layout(None);
+        assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::Refresh));
     }
 
     /// Each snapshot published after the guest moved keeps the one before

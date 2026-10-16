@@ -465,20 +465,27 @@ const SEGMENT_FRAME_X: f32 = 6.0;
 /// The gap between a segmented switch's buttons, points.
 const SEGMENT_GAP: f32 = 2.0;
 
+/// One button of a segmented switch: the value it picks and its label.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Segment<T> {
+    pub(crate) value: T,
+    pub(crate) label: &'static str,
+}
+
 /// A segmented switch over `options`: the picked one filled. Returns whether
 /// the pick changed.
 pub(crate) fn segmented<T: Copy + PartialEq>(
     ui: &mut egui::Ui,
     current: &mut T,
-    options: &[(T, &str)],
+    options: &[Segment<T>],
 ) -> bool {
     let mut changed = false;
     let font = egui::TextStyle::Button.resolve(ui.style());
     let buttons: f32 = options
         .iter()
-        .map(|&(_, label)| {
+        .map(|segment| {
             ui.painter()
-                .layout_no_wrap(label.to_owned(), font.clone(), Color32::PLACEHOLDER)
+                .layout_no_wrap(segment.label.to_owned(), font.clone(), Color32::PLACEHOLDER)
                 .size()
                 .x
                 + 2.0 * SEGMENT_PADDING_X
@@ -495,11 +502,11 @@ pub(crate) fn segmented<T: Copy + PartialEq>(
             ui.spacing_mut().item_spacing.x = SEGMENT_GAP;
             ui.spacing_mut().button_padding = egui::vec2(SEGMENT_PADDING_X, 3.0);
             ui.horizontal(|ui| {
-                for &(value, label) in options {
-                    let selected = *current == value;
-                    let button = egui::Button::selectable(selected, label).corner_radius(6);
+                for segment in options {
+                    let selected = *current == segment.value;
+                    let button = egui::Button::selectable(selected, segment.label).corner_radius(6);
                     if ui.add(button).clicked() && !selected {
-                        *current = value;
+                        *current = segment.value;
                         changed = true;
                     }
                 }

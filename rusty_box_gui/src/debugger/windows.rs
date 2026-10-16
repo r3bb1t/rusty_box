@@ -24,21 +24,24 @@
 //!   points at a page whose `ImageBaseAddress` (+0x10) holds an `MZ` image.
 //!
 //! A process's own memory is read through its page tables
-//! (`DebugCpu::dbg_xlate_linear2phy_in`), so every process's modules list,
-//! not only the running one's.
+//! ([`Root::Process`]), so every process's modules list, not only the
+//! running one's. Every read goes through [`GuestMemory`], so the walks run
+//! as well over a page map as over a paused machine.
 //!
 //! What the walks discover about a guest's layouts is held in a
 //! [`WindowsDiscovery`] for the run and checked where it is used, so a pause
 //! pays for the lists it reads and not for finding the structures again.
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
-use rusty_box::cpu::{
-    CpuDebugView, Fetched, Instrumentation, LinearRange, MappingWalk, WalkStep,
-};
-use rusty_box::emulator::{DebugCpu, SliceEngine};
+use rusty_box::cpu::{CpuDebugView, LinearRange, MappingWalk, WalkStep};
+use rusty_box_symbols::units::FieldOffset;
 
 use super::drivers;
+use super::guest::{GuestMemory, GuestRead, Root};
+use super::kernel_layout::{same_layouts, KernelLayout};
+use super::module_identity::{read_module_identity, GuestIdentity};
 use super::inspect::{ModuleSpace, SymModule, SymbolIndex};
 use super::ssdt;
 use super::memory_map::{self, MemoryMap, ModuleLayout};
@@ -47,7 +50,9 @@ use super::threads::{
     decode_trap_frame, frame_is_users, walk_thread_list, SavedRegisters, WinThread, MAX_THREADS,
     TRAP_FRAME_BYTES,
 };
-use super::vad::{self, VadNode, VadRegion, VadShape, MAX_VAD_NODES};
+use super::vad::{
+    self, FieldWidth, VadLayout, VadNode, VadRegion, VadRootKind, VadShape, MAX_VAD_NODES,
+};
 
 /// The top of a user address space: canonical low half in long mode, and
 /// above every 32-bit user address, so one bound covers native 64-bit, a
@@ -113,6 +118,8 @@ pub(crate) enum ModuleDetail {
     Exports,
     /// The functions it imports, by the module they come from.
     Imports,
+    /// Its identity, and what the symbol engine has for it.
+    Symbols,
 }
 
 /// The kernel's modules, and the picked one's detail.
@@ -134,6 +141,8 @@ pub(crate) enum PickedDetail {
     Sections(SectionsRead),
     Exports(ExportRead),
     Imports(ImportRead),
+    /// The identity its image gives, which the engine's state is looked up by.
+    Symbols(GuestIdentity),
 }
 
 impl PickedDetail {
@@ -144,6 +153,7 @@ impl PickedDetail {
             (Self::Sections(_), ModuleDetail::Sections)
                 | (Self::Exports(_), ModuleDetail::Exports)
                 | (Self::Imports(_), ModuleDetail::Imports)
+                | (Self::Symbols(_), ModuleDetail::Symbols)
         )
     }
 }
@@ -440,16 +450,8 @@ const MZ: u16 = 0x5A4D;
 const PE_SIGNATURE: u32 = 0x4550;
 const PE32_PLUS_MAGIC: u16 = 0x20B;
 
-/// Whose page tables a read walks.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Root {
-    /// The shown processor's own CR3.
-    Live,
-    /// A process's `DirectoryTableBase`.
-    Process(u64),
-}
-
 /// The kernel image found in the guest.
+#[derive(Clone, Copy)]
 struct PeImage {
     base: u64,
     /// The `IMAGE_NT_HEADERS64`.
@@ -468,6 +470,31 @@ struct ProcessLayout {
     pid: u64,
     links: u64,
     name: u64,
+    /// `KPROCESS.DirectoryTableBase`.
+    directory_table_base: u64,
+}
+
+/// Whose layouts the walks read a kernel's structures by.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum KernelLayouts {
+    /// The kernel PDB's, which agree with memory.
+    Pdb,
+    /// Found in memory: no kernel PDB is loaded.
+    Discovered,
+    /// Found in memory: the System process does not read as System where the
+    /// kernel PDB puts its fields.
+    PdbDisagrees,
+}
+
+impl KernelLayouts {
+    /// What each listing says of its layouts.
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Pdb => "layouts: PDB",
+            Self::Discovered => "layouts: discovered",
+            Self::PdbDisagrees => "layouts: discovered (the kernel PDB disagrees with memory)",
+        }
+    }
 }
 
 struct Kernel {
@@ -476,13 +503,22 @@ struct Kernel {
     loaded_modules: Option<u64>,
     system: u64,
     layout: ProcessLayout,
+    /// The kernel's build, when its `NtBuildNumber` export reads.
+    build: Option<u32>,
 }
 
-/// Where a process's VAD tree root sits in its `EPROCESS`, and the node shape
+/// The kernel's build, from its `NtBuildNumber` export: the low 16 bits, the
+/// high nibble marking a free or checked build.
+fn nt_build_number<G: GuestMemory>(cpu: &mut G, image: &PeImage) -> Option<u32> {
+    let variable = export(cpu, image, "NtBuildNumber")?;
+    read_u32(cpu, Root::Live, variable).map(|value| value & 0xFFFF)
+}
+
+/// Where a process's VAD tree root sits in its `EPROCESS`, and the layout
 /// that tree uses.
 #[derive(Clone, Copy)]
 struct VadSite {
-    shape: VadShape,
+    layout: VadLayout,
     offset: u64,
 }
 
@@ -505,6 +541,75 @@ struct KernelState {
     object_root: Option<u64>,
     /// `KeServiceDescriptorTable`, once found.
     service_descriptor: Option<u64>,
+    /// Whose layouts the offsets above were seeded from.
+    layouts: KernelLayouts,
+}
+
+impl KernelState {
+    /// A kernel found by discovery, nothing learned beneath it yet.
+    fn discovered(kernel: Kernel, layouts: KernelLayouts) -> KernelState {
+        KernelState {
+            kernel,
+            peb_offset: None,
+            parent_offset: None,
+            wow64_offset: None,
+            threads: None,
+            vad: None,
+            object_era: None,
+            object_root: None,
+            service_descriptor: None,
+            layouts,
+        }
+    }
+
+    /// A kernel whose PDB agrees with memory: every member the PDB has is
+    /// taken from it, and one it lacks is left for discovery. Each is still
+    /// checked where it is used, as a discovered one is.
+    fn seeded<G: GuestMemory>(cpu: &mut G, kernel: Kernel, layout: &KernelLayout) -> KernelState {
+        let base = kernel.image.base;
+        let process = &layout.process;
+        let globals = &layout.globals;
+        let object_root = globals
+            .root_directory_object
+            .and_then(|rva| read_u64(cpu, Root::Live, base.wrapping_add(rva.0)))
+            .and_then(kernel_pointer);
+        KernelState {
+            peb_offset: process.peb.map(|offset| offset.0),
+            parent_offset: process.inherited_from_unique_process_id.map(|offset| offset.0),
+            wow64_offset: process.wow64_process.map(|offset| offset.0),
+            threads: seeded_threads(layout),
+            vad: layout
+                .vad
+                .and_then(|tree| process.vad_root.map(|root| VadSite { layout: tree, offset: root.0 })),
+            object_era: layout.object_era,
+            object_root,
+            service_descriptor: globals.service_descriptor_table.map(|rva| base.wrapping_add(rva.0)),
+            layouts: KernelLayouts::Pdb,
+            kernel,
+        }
+    }
+}
+
+/// The thread layout the PDB gives, its `ETHREAD` members made relative to
+/// `ThreadListEntry` as the walk reads them; `None` without the list's head,
+/// its entry or `Cid`.
+fn seeded_threads(layout: &KernelLayout) -> Option<ThreadLayout> {
+    let head = layout.process.thread_list_head?.0;
+    let fields = &layout.thread;
+    let entry = i64::try_from(fields.thread_list_entry?.0).ok()?;
+    let delta = |member: Option<FieldOffset>| {
+        member
+            .and_then(|offset| i64::try_from(offset.0).ok())
+            .and_then(|offset| offset.checked_sub(entry))
+    };
+    Some(ThreadLayout {
+        head,
+        cid: delta(fields.cid)?,
+        teb: delta(fields.teb),
+        start: delta(fields.win32_start_address)
+            .and_then(|win32| delta(fields.start_address).map(|kernel| StartLayout { win32, kernel })),
+        trap_frame: delta(fields.trap_frame),
+    })
 }
 
 /// What the walks have learned about one guest's structure layouts. A run
@@ -513,6 +618,19 @@ struct KernelState {
 #[derive(Default)]
 pub(crate) struct WindowsDiscovery {
     state: Option<KernelState>,
+    /// The kernel PDB's layouts `state` was learned under.
+    layout: Option<Arc<KernelLayout>>,
+}
+
+impl WindowsDiscovery {
+    /// Keeps what was learned only while the layouts stay `layout`: a state
+    /// learned under other layouts may hold offsets they do not.
+    fn under(&mut self, layout: Option<&Arc<KernelLayout>>) {
+        if !same_layouts(self.layout.as_ref(), layout) {
+            self.state = None;
+            self.layout = layout.cloned();
+        }
+    }
 }
 
 /// What a guest's Windows structures gave one pause.
@@ -521,6 +639,8 @@ pub(crate) struct WindowsRead {
     pub(crate) symbols: SymbolIndex,
     /// What the view asked to be listed.
     pub(crate) system: SystemListing,
+    /// Whose layouts the kernel's structures were read by, once it was found.
+    pub(crate) layouts: Option<KernelLayouts>,
 }
 
 /// The modules the code, stack and memory panes name an address against (the
@@ -528,14 +648,17 @@ pub(crate) struct WindowsRead {
 /// when it runs one) and the listing `request` asks for, through the
 /// processor `view` describes. The symbols are read whatever is requested.
 /// A read that comes up short leaves the index short; it never fails the
-/// snapshot, so a non-Windows guest simply names nothing.
-pub(crate) fn read_windows<T: Instrumentation, E: SliceEngine<T>>(
-    cpu: &mut DebugCpu<'_, T, E>,
+/// snapshot, so a non-Windows guest simply names nothing. `layout` is the
+/// kernel PDB's, when the shell handed one over.
+pub(crate) fn read_windows<G: GuestMemory>(
+    cpu: &mut G,
     view: &CpuDebugView,
     request: SystemView,
     discovery: &mut WindowsDiscovery,
+    layout: Option<&Arc<KernelLayout>>,
 ) -> WindowsRead {
-    let state = match find_kernel(cpu, view, &mut discovery.state) {
+    discovery.under(layout);
+    let state = match find_kernel(cpu, view, &mut discovery.state, layout) {
         Ok(state) => state,
         Err(miss) => {
             let system = match request {
@@ -548,6 +671,7 @@ pub(crate) fn read_windows<T: Instrumentation, E: SliceEngine<T>>(
             return WindowsRead {
                 symbols: SymbolIndex::default(),
                 system,
+                layouts: None,
             };
         }
     };
@@ -561,23 +685,28 @@ pub(crate) fn read_windows<T: Instrumentation, E: SliceEngine<T>>(
         object_era,
         object_root,
         service_descriptor,
+        layouts,
     } = state;
+    let layouts = *layouts;
     let kernel_modules = match kernel.loaded_modules {
         Some(head) => list_modules(cpu, Root::Live, head).unwrap_or_default(),
         None => Vec::new(),
     };
     let processes = list_processes(cpu, kernel, view.registers.cr3, parent_offset);
     let current_index = processes.iter().position(|process| process.current);
-    let current_read = current_index.map(|index| {
-        process_modules(cpu, &processes, &processes[index], peb_offset, wow64_offset)
-    });
+    let current_read = current_index
+        .and_then(|index| processes.get(index))
+        .map(|current| process_modules(cpu, &processes, current, peb_offset, wow64_offset));
 
     let mut named = Vec::new();
-    gather_modules(&mut named, &kernel_modules, ModuleSpace::Kernel);
+    gather_modules(cpu, Root::Live, &mut named, &kernel_modules, ModuleSpace::Kernel);
     if let Some(ModuleRead::Listed(user)) = &current_read {
-        gather_modules(&mut named, user, ModuleSpace::User);
+        gather_modules(cpu, Root::Live, &mut named, user, ModuleSpace::User);
     }
-    let symbols = SymbolIndex { modules: named };
+    let symbols = SymbolIndex {
+        modules: named,
+        kernel: Some(kernel.image.base),
+    };
 
     let system = match request {
         SystemView::Off => SystemListing::NotAsked,
@@ -616,8 +745,8 @@ pub(crate) fn read_windows<T: Instrumentation, E: SliceEngine<T>>(
             let chosen_index = selected
                 .and_then(|eprocess| processes.iter().position(|p| p.eprocess == eprocess))
                 .or(current_index);
-            let modules = chosen_index.map(|index| {
-                let process = &processes[index];
+            let modules = chosen_index.and_then(|index| {
+                let process = processes.get(index)?;
                 let read = match &current_read {
                     Some(read) if Some(index) == current_index => read.clone(),
                     Some(_) | None => {
@@ -642,11 +771,12 @@ pub(crate) fn read_windows<T: Instrumentation, E: SliceEngine<T>>(
                 let map = match (detail, &read) {
                     (ProcessDetail::MemoryMap, ModuleRead::Listed(modules)) => {
                         let mut map =
-                            read_memory_map(cpu, process.eprocess, process.cr3, modules, vad);
+                            read_memory_map(cpu, process.eprocess, process.cr3, modules, kernel.build, vad);
                         memory_map::label_stacks(&mut map, &threads);
                         Some(map)
                     }
-                    _ => None,
+                    (ProcessDetail::MemoryMap, ModuleRead::NoUserSpace | ModuleRead::Unreadable)
+                    | (ProcessDetail::Modules | ProcessDetail::Threads, _) => None,
                 };
                 // The picked module's detail, read in the process's own
                 // address space: the running one through the processor's
@@ -666,15 +796,16 @@ pub(crate) fn read_windows<T: Instrumentation, E: SliceEngine<T>>(
                             base: listed.base,
                             shown: read_module_detail(cpu, space, listed, module_detail),
                         }),
-                    _ => None,
+                    (ProcessDetail::Modules, ModuleRead::NoUserSpace | ModuleRead::Unreadable)
+                    | (ProcessDetail::MemoryMap | ProcessDetail::Threads, _) => None,
                 };
-                ProcessModules {
+                Some(ProcessModules {
                     eprocess: process.eprocess,
                     read,
                     map,
                     threads,
                     picked,
-                }
+                })
             });
             let tree = process_tree(&processes);
             SystemListing::Processes(ProcessListing {
@@ -698,7 +829,7 @@ pub(crate) fn read_windows<T: Instrumentation, E: SliceEngine<T>>(
                                 default,
                             )
                         }),
-                        _ => None,
+                        (Some(_), None) | (None, _) => None,
                     };
                     drivers.sort_by(|a, b| a.name.cmp(&b.name));
                     SystemListing::Drivers(DriverListing { drivers, picked })
@@ -711,7 +842,7 @@ pub(crate) fn read_windows<T: Instrumentation, E: SliceEngine<T>>(
             None => SystemListing::NoWindowsKernel(KernelMiss::NoSsdt),
         },
     };
-    WindowsRead { symbols, system }
+    WindowsRead { symbols, system, layouts: Some(layouts) }
 }
 
 // ───────────────────────────── drivers ──────────────────────────────
@@ -726,33 +857,33 @@ fn object_header(body: u64) -> u64 {
 }
 
 /// The `OBJECT_HEADER_NAME_INFO` of the object at `body`, when it has a name.
-fn name_info_of<T: Instrumentation, E: SliceEngine<T>>(
-    cpu: &mut DebugCpu<'_, T, E>,
+fn name_info_of<G: GuestMemory>(
+    cpu: &mut G,
     era: drivers::ObjectHeaderEra,
     body: u64,
 ) -> Option<u64> {
     let header = object_header(body);
     let byte_at = match era {
-        drivers::ObjectHeaderEra::Legacy => header + drivers::LEGACY_NAME_INFO_OFFSET,
-        drivers::ObjectHeaderEra::Modern => header + drivers::MODERN_INFO_MASK_OFFSET,
+        drivers::ObjectHeaderEra::Legacy => header.wrapping_add(drivers::LEGACY_NAME_INFO_OFFSET),
+        drivers::ObjectHeaderEra::Modern => header.wrapping_add(drivers::MODERN_INFO_MASK_OFFSET),
     };
     let delta = drivers::name_info_delta(era, read_u8(cpu, Root::Live, byte_at)?)?;
     Some(header.checked_sub(delta)?)
 }
 
 /// The name of the object at `body` (its `NAME_INFO.Name`), when it has one.
-fn object_name<T: Instrumentation, E: SliceEngine<T>>(
-    cpu: &mut DebugCpu<'_, T, E>,
+fn object_name<G: GuestMemory>(
+    cpu: &mut G,
     era: drivers::ObjectHeaderEra,
     body: u64,
 ) -> Option<String> {
     let name_info = name_info_of(cpu, era, body)?;
-    read_unicode_string(cpu, Root::Live, name_info + drivers::NAME_INFO_NAME)
+    read_unicode_string(cpu, Root::Live, name_info.wrapping_add(drivers::NAME_INFO_NAME))
 }
 
 /// The directory an object belongs to: its `NAME_INFO.Directory`.
-fn object_directory<T: Instrumentation, E: SliceEngine<T>>(
-    cpu: &mut DebugCpu<'_, T, E>,
+fn object_directory<G: GuestMemory>(
+    cpu: &mut G,
     era: drivers::ObjectHeaderEra,
     body: u64,
 ) -> Option<u64> {
@@ -761,15 +892,17 @@ fn object_directory<T: Instrumentation, E: SliceEngine<T>>(
 }
 
 /// Every object body in an `OBJECT_DIRECTORY` at `directory`, with its name.
-fn enumerate_directory<T: Instrumentation, E: SliceEngine<T>>(
-    cpu: &mut DebugCpu<'_, T, E>,
+fn enumerate_directory<G: GuestMemory>(
+    cpu: &mut G,
     era: drivers::ObjectHeaderEra,
     directory: u64,
 ) -> Vec<(Option<String>, u64)> {
     let mut out = Vec::new();
     let mut visited = HashSet::new();
     for bucket in 0..drivers::OBJECT_DIRECTORY_BUCKETS as u64 {
-        let Some(mut entry) = read_u64(cpu, Root::Live, directory + bucket * 8) else {
+        // `bucket` stays below OBJECT_DIRECTORY_BUCKETS: the product cannot wrap.
+        let bucket_at = directory.wrapping_add(bucket.wrapping_mul(8));
+        let Some(mut entry) = read_u64(cpu, Root::Live, bucket_at) else {
             continue;
         };
         for _ in 0..MAX_OBJECTS_PER_BUCKET {
@@ -779,12 +912,17 @@ fn enumerate_directory<T: Instrumentation, E: SliceEngine<T>>(
             if !visited.insert(entry_addr) {
                 break;
             }
-            let object = read_u64(cpu, Root::Live, entry_addr + drivers::DIRECTORY_ENTRY_OBJECT)
-                .and_then(kernel_pointer);
+            let object = read_u64(
+                cpu,
+                Root::Live,
+                entry_addr.wrapping_add(drivers::DIRECTORY_ENTRY_OBJECT),
+            )
+            .and_then(kernel_pointer);
             if let Some(object) = object {
                 out.push((object_name(cpu, era, object), object));
             }
-            match read_u64(cpu, Root::Live, entry_addr + drivers::DIRECTORY_ENTRY_CHAIN) {
+            let chain = entry_addr.wrapping_add(drivers::DIRECTORY_ENTRY_CHAIN);
+            match read_u64(cpu, Root::Live, chain) {
                 Some(0) | None => break,
                 Some(next) => entry = next,
             }
@@ -794,8 +932,8 @@ fn enumerate_directory<T: Instrumentation, E: SliceEngine<T>>(
 }
 
 /// A named child directory of `directory`.
-fn child_directory<T: Instrumentation, E: SliceEngine<T>>(
-    cpu: &mut DebugCpu<'_, T, E>,
+fn child_directory<G: GuestMemory>(
+    cpu: &mut G,
     era: drivers::ObjectHeaderEra,
     directory: u64,
     name: &str,
@@ -812,8 +950,8 @@ const MAX_OBJECTS_PER_BUCKET: usize = 1 << 16;
 /// Finds the object namespace root `\` and the `OBJECT_HEADER` era, from the
 /// kernel export `IoDriverObjectType` (a pointer to the Driver type object,
 /// whose name is "Driver"). Caches both in `object_era`/`object_root`.
-fn object_namespace<T: Instrumentation, E: SliceEngine<T>>(
-    cpu: &mut DebugCpu<'_, T, E>,
+fn object_namespace<G: GuestMemory>(
+    cpu: &mut G,
     kernel: &Kernel,
     object_era: &mut Option<drivers::ObjectHeaderEra>,
     object_root: &mut Option<u64>,
@@ -870,9 +1008,10 @@ fn classify_pointer(
         }
     }
     match module_of(addr, modules) {
+        // `module_of` found `addr` inside the module: at or past its base.
         Some(module) => PointerSite::InModule {
             base: module.base,
-            off: addr - module.base,
+            off: addr.wrapping_sub(module.base),
         },
         None => PointerSite::NoModule,
     }
@@ -887,7 +1026,8 @@ fn kernel_default_handler(objects: &[drivers::DriverObject], kernel: &Kernel) ->
     for object in objects {
         for &handler in &object.major {
             if range.contains(&handler) {
-                *counts.entry(handler).or_default() += 1;
+                let count = counts.entry(handler).or_default();
+                *count = count.saturating_add(1);
             }
         }
     }
@@ -899,8 +1039,8 @@ fn kernel_default_handler(objects: &[drivers::DriverObject], kernel: &Kernel) ->
 
 /// Every driver object in the guest, and the kernel's shared default handler.
 /// `None` only when the object namespace cannot be reached.
-fn read_drivers<T: Instrumentation, E: SliceEngine<T>>(
-    cpu: &mut DebugCpu<'_, T, E>,
+fn read_drivers<G: GuestMemory>(
+    cpu: &mut G,
     kernel: &Kernel,
     modules: &[WinModule],
     object_era: &mut Option<drivers::ObjectHeaderEra>,
@@ -1000,8 +1140,8 @@ fn namespace_prefix(in_namespace: bool) -> &'static str {
 }
 
 /// The device objects of the driver at `device_object`, following `NextDevice`.
-fn device_chain<T: Instrumentation, E: SliceEngine<T>>(
-    cpu: &mut DebugCpu<'_, T, E>,
+fn device_chain<G: GuestMemory>(
+    cpu: &mut G,
     device_object: u64,
 ) -> Vec<(u64, drivers::DeviceObject)> {
     let mut out = Vec::new();
@@ -1028,8 +1168,8 @@ fn device_chain<T: Instrumentation, E: SliceEngine<T>>(
 
 /// The picked driver's dispatch table or its devices.
 #[allow(clippy::too_many_arguments)]
-fn read_driver_detail<T: Instrumentation, E: SliceEngine<T>>(
-    cpu: &mut DebugCpu<'_, T, E>,
+fn read_driver_detail<G: GuestMemory>(
+    cpu: &mut G,
     modules: &[WinModule],
     driver_object: u64,
     detail: DriverDetail,
@@ -1103,8 +1243,8 @@ fn read_driver_detail<T: Instrumentation, E: SliceEngine<T>>(
 
 /// The `FastIoDispatch` entries, when the table reads: `SizeOfFastIoDispatch`
 /// gives the count, then one pointer each.
-fn fast_io_entries<T: Instrumentation, E: SliceEngine<T>>(
-    cpu: &mut DebugCpu<'_, T, E>,
+fn fast_io_entries<G: GuestMemory>(
+    cpu: &mut G,
     fast_io: u64,
     own: Option<&WinModule>,
     modules: &[WinModule],
@@ -1147,11 +1287,16 @@ fn fast_io_entries<T: Instrumentation, E: SliceEngine<T>>(
     };
     // SizeOfFastIoDispatch counts the whole structure, header included.
     let count = (size as usize).saturating_sub(8) / 8;
-    (0..count.min(NAMES.len()))
-        .filter_map(|i| {
-            let addr = read_u64(cpu, Root::Live, fast_io + 8 + (i as u64) * 8)?;
+    NAMES
+        .iter()
+        .take(count)
+        .enumerate()
+        .filter_map(|(i, name)| {
+            // `i` is below NAMES.len(): the offset cannot wrap.
+            let slot = fast_io.wrapping_add(8).wrapping_add((i as u64).wrapping_mul(8));
+            let addr = read_u64(cpu, Root::Live, slot)?;
             (addr != 0).then(|| DispatchEntry {
-                label: format!("FastIo.{}", NAMES[i]),
+                label: format!("FastIo.{name}"),
                 addr,
                 site: classify_pointer(addr, own, modules, default),
             })
@@ -1160,8 +1305,8 @@ fn fast_io_entries<T: Instrumentation, E: SliceEngine<T>>(
 }
 
 /// The named drivers of the devices attached above a device, bottom-up.
-fn attached_stack<T: Instrumentation, E: SliceEngine<T>>(
-    cpu: &mut DebugCpu<'_, T, E>,
+fn attached_stack<G: GuestMemory>(
+    cpu: &mut G,
     era: drivers::ObjectHeaderEra,
     attached: u64,
 ) -> Vec<String> {
@@ -1191,8 +1336,8 @@ fn attached_stack<T: Instrumentation, E: SliceEngine<T>>(
 }
 
 /// The symbolic links under `\GLOBAL??` (or `\??`): (link name, target).
-fn symbolic_links<T: Instrumentation, E: SliceEngine<T>>(
-    cpu: &mut DebugCpu<'_, T, E>,
+fn symbolic_links<G: GuestMemory>(
+    cpu: &mut G,
     era: drivers::ObjectHeaderEra,
     root: u64,
 ) -> Vec<(String, String)> {
@@ -1205,7 +1350,11 @@ fn symbolic_links<T: Instrumentation, E: SliceEngine<T>>(
         .into_iter()
         .filter_map(|(name, body)| {
             let name = name?;
-            let target = read_unicode_string(cpu, Root::Live, body + drivers::SYMBOLIC_LINK_TARGET)?;
+            let target = read_unicode_string(
+                cpu,
+                Root::Live,
+                body.wrapping_add(drivers::SYMBOLIC_LINK_TARGET),
+            )?;
             Some((format!("\\??\\{name}"), target))
         })
         .collect()
@@ -1216,8 +1365,8 @@ fn symbolic_links<T: Instrumentation, E: SliceEngine<T>>(
 /// The kernel's system-service table, each service classified against the
 /// loaded modules. `None` when no `KeServiceDescriptorTable` is found; the
 /// one found is kept in `cached`.
-fn read_ssdt<T: Instrumentation, E: SliceEngine<T>>(
-    cpu: &mut DebugCpu<'_, T, E>,
+fn read_ssdt<G: GuestMemory>(
+    cpu: &mut G,
     kernel: &Kernel,
     cached: &mut Option<u64>,
     modules: &[WinModule],
@@ -1272,18 +1421,20 @@ fn image_holds(image: &PeImage, addr: u64) -> bool {
 }
 
 /// The service table the descriptor at `descriptor` points to.
-fn read_service_table<T: Instrumentation, E: SliceEngine<T>>(
-    cpu: &mut DebugCpu<'_, T, E>,
+fn read_service_table<G: GuestMemory>(
+    cpu: &mut G,
     image: &PeImage,
     descriptor: u64,
 ) -> Option<ServiceTable> {
     let bytes = read_exact(cpu, Root::Live, descriptor, ssdt::DESCRIPTOR_BYTES)?;
     let parsed = ssdt::parse_descriptor(&bytes)?;
     let base = kernel_pointer(parsed.service_table)?;
-    let raw = read_exact(cpu, Root::Live, base, parsed.limit as usize * 4)?;
+    // `parse_descriptor` caps the limit at MAX_SERVICES: the length cannot wrap.
+    let raw = read_exact(cpu, Root::Live, base, (parsed.limit as usize).wrapping_mul(4))?;
     let entries: Vec<i32> = raw
         .chunks_exact(4)
-        .map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .filter_map(|chunk| <[u8; 4]>::try_from(chunk).ok())
+        .map(i32::from_le_bytes)
         .collect();
     // The wrong encoding scatters the routines outside the kernel image.
     let decoding = ssdt::decode(base, &entries, |routine| image_holds(image, routine));
@@ -1301,8 +1452,8 @@ fn read_service_table<T: Instrumentation, E: SliceEngine<T>>(
 /// that reads as the kernel's own service table. The descriptor found is kept
 /// in `cached`. A known descriptor is taken whatever its routines point at, so
 /// a table hooked wholesale is still listed (and flagged).
-fn service_table<T: Instrumentation, E: SliceEngine<T>>(
-    cpu: &mut DebugCpu<'_, T, E>,
+fn service_table<G: GuestMemory>(
+    cpu: &mut G,
     image: &PeImage,
     cached: &mut Option<u64>,
 ) -> Option<ServiceTable> {
@@ -1328,8 +1479,8 @@ fn service_table<T: Instrumentation, E: SliceEngine<T>>(
 /// so) whose `KiServiceTable` lies in the kernel image and whose routines
 /// land in the kernel image most often — at least for half its services,
 /// which no other datum a `lea r10` loads does.
-fn service_table_from_code<T: Instrumentation, E: SliceEngine<T>>(
-    cpu: &mut DebugCpu<'_, T, E>,
+fn service_table_from_code<G: GuestMemory>(
+    cpu: &mut G,
     image: &PeImage,
 ) -> Option<ServiceTable> {
     let header = read_exact(cpu, Root::Live, image.base, HEADER_BYTES)?;
@@ -1341,16 +1492,26 @@ fn service_table_from_code<T: Instrumentation, E: SliceEngine<T>>(
             0 => section.raw_size,
             size => size,
         };
-        let start = image.base + u64::from(section.rva);
-        let end = start + u64::from(size);
+        let start = image.base.wrapping_add(u64::from(section.rva));
+        // A section that would run past the top of memory is not scanned.
+        let Some(end) = start.checked_add(u64::from(size)) else {
+            continue;
+        };
         let mut at = start;
         while at < end {
-            let take = (PAGE_BYTES - at % PAGE_BYTES).min(end - at) as usize;
+            // At most the rest of `at`'s page, and no further than `end`.
+            let take = PAGE_BYTES
+                .wrapping_sub(at & (PAGE_BYTES - 1))
+                .min(end.wrapping_sub(at));
+            let Some(chunk) = page.get_mut(..take as usize) else {
+                break;
+            };
             // A paged-out or discarded page is passed by.
-            if read_into(cpu, Root::Live, at, &mut page[..take]) {
-                scan.feed(&page[..take], at);
+            if read_into(cpu, Root::Live, at, chunk) {
+                scan.feed(chunk, at);
             }
-            at += take as u64;
+            // `take <= end - at`: the sum cannot wrap.
+            at = at.wrapping_add(take);
         }
     }
     scan.targets()
@@ -1358,7 +1519,8 @@ fn service_table_from_code<T: Instrumentation, E: SliceEngine<T>>(
         .filter(|&target| image_holds(image, target))
         .filter_map(|target| read_service_table(cpu, image, target))
         .filter(|table| {
-            image_holds(image, table.base) && table.decoding.inside * 2 > table.entries.len()
+            image_holds(image, table.base)
+                && table.decoding.inside.saturating_mul(2) > table.entries.len()
         })
         .max_by_key(|table| table.decoding.inside)
 }
@@ -1454,15 +1616,17 @@ pub(crate) enum ThreadViewRead {
 /// thread it runs in user mode, reads as `Running`: an old trap frame is never
 /// shown for a thread whose state is live. `live` names the threads the
 /// processors run in user mode. The walks are the ones `read_windows` makes,
-/// through the same `discovery`.
-pub(crate) fn read_thread_view<T: Instrumentation, E: SliceEngine<T>>(
-    cpu: &mut DebugCpu<'_, T, E>,
+/// through the same `discovery` and `layout`.
+pub(crate) fn read_thread_view<G: GuestMemory>(
+    cpu: &mut G,
     view: &CpuDebugView,
     target: ViewTarget,
     live: &[LiveTeb],
     discovery: &mut WindowsDiscovery,
+    layout: Option<&Arc<KernelLayout>>,
 ) -> ThreadViewRead {
-    let state = match find_kernel(cpu, view, &mut discovery.state) {
+    discovery.under(layout);
+    let state = match find_kernel(cpu, view, &mut discovery.state, layout) {
         Ok(state) => state,
         Err(miss) => return ThreadViewRead::Miss(ViewMiss::NoWindowsKernel(miss)),
     };
@@ -1476,6 +1640,7 @@ pub(crate) fn read_thread_view<T: Instrumentation, E: SliceEngine<T>>(
         object_era: _,
         object_root: _,
         service_descriptor: _,
+        layouts: _,
     } = state;
     let kernel_modules = match kernel.loaded_modules {
         Some(head) => list_modules(cpu, Root::Live, head).unwrap_or_default(),
@@ -1535,22 +1700,33 @@ pub(crate) fn read_thread_view<T: Instrumentation, E: SliceEngine<T>>(
         return ThreadViewRead::Miss(ViewMiss::NoSavedState);
     };
     let mut named = Vec::new();
-    gather_modules(&mut named, &kernel_modules, ModuleSpace::Kernel);
-    gather_modules(&mut named, listed, ModuleSpace::User);
+    gather_modules(cpu, Root::Live, &mut named, &kernel_modules, ModuleSpace::Kernel);
+    gather_modules(cpu, Root::Process(process.cr3), &mut named, listed, ModuleSpace::User);
     ThreadViewRead::Thread(ThreadView {
         process: process.name.clone(),
         pid: process.pid,
         tid: thread.tid,
         cr3: process.cr3,
         saved,
-        symbols: SymbolIndex { modules: named },
+        symbols: SymbolIndex {
+            modules: named,
+            kernel: Some(kernel.image.base),
+        },
     })
 }
 
-/// Appends `source` modules to `into` as `space` symbols, naming an unnamed
-/// module by its base so an address in it still resolves.
-fn gather_modules(into: &mut Vec<SymModule>, source: &[WinModule], space: ModuleSpace) {
+/// Appends `source` modules, read under `root`, to `into` as `space`
+/// symbols with their identities, naming an unnamed module by its base so an
+/// address in it still resolves.
+fn gather_modules<G: GuestMemory>(
+    cpu: &mut G,
+    root: Root,
+    into: &mut Vec<SymModule>,
+    source: &[WinModule],
+    space: ModuleSpace,
+) {
     for module in source {
+        let identity = read_module_identity(cpu, root, module.base, module.name.as_deref());
         let name = module
             .name
             .clone()
@@ -1560,6 +1736,7 @@ fn gather_modules(into: &mut Vec<SymModule>, source: &[WinModule], space: Module
             size: u64::from(module.size),
             name,
             space,
+            identity,
         });
     }
 }
@@ -1568,11 +1745,13 @@ fn gather_modules(into: &mut Vec<SymModule>, source: &[WinModule], space: Module
 const EFER_LMA: u64 = 1 << 10;
 
 /// The kernel held in `cache` while it still stands in the guest, else the
-/// one found there now.
-fn find_kernel<'a, T: Instrumentation, E: SliceEngine<T>>(
-    cpu: &mut DebugCpu<'_, T, E>,
+/// one found there now, read by the kernel PDB's `layout` when it agrees
+/// with memory.
+fn find_kernel<'a, G: GuestMemory>(
+    cpu: &mut G,
     view: &CpuDebugView,
     cache: &'a mut Option<KernelState>,
+    layout: Option<&Arc<KernelLayout>>,
 ) -> Result<&'a mut KernelState, KernelMiss> {
     if view.efer & EFER_LMA == 0 {
         return Err(KernelMiss::NotLongMode);
@@ -1582,38 +1761,33 @@ fn find_kernel<'a, T: Instrumentation, E: SliceEngine<T>>(
         .is_some_and(|state| kernel_stands(cpu, &state.kernel));
     if !standing {
         *cache = None;
-        let kernel = discover_kernel(cpu, view)?;
-        *cache = Some(KernelState {
-            kernel,
-            peb_offset: None,
-            parent_offset: None,
-            wow64_offset: None,
-            threads: None,
-            vad: None,
-            object_era: None,
-            object_root: None,
-            service_descriptor: None,
-        });
+        *cache = Some(discover_kernel(cpu, view, layout.map(Arc::as_ref))?);
     }
     cache.as_mut().ok_or(KernelMiss::NoKernelImage)
 }
 
 /// Whether `kernel`, found earlier, is still the guest's: its image header
 /// reads and its System process still holds PID 4 at the learned offset.
-fn kernel_stands<T: Instrumentation, E: SliceEngine<T>>(
-    cpu: &mut DebugCpu<'_, T, E>,
+fn kernel_stands<G: GuestMemory>(
+    cpu: &mut G,
     kernel: &Kernel,
 ) -> bool {
     read_u16(cpu, Root::Live, kernel.image.base) == Some(MZ)
-        && read_u64(cpu, Root::Live, kernel.system + kernel.layout.pid) == Some(SYSTEM_PID)
+        && read_u64(cpu, Root::Live, kernel.system.wrapping_add(kernel.layout.pid))
+            == Some(SYSTEM_PID)
 }
 
 /// Finds the kernel through the shown processor: its KPCR, the image below
-/// interrupt vector 0's handler, and the System process.
-fn discover_kernel<T: Instrumentation, E: SliceEngine<T>>(
-    cpu: &mut DebugCpu<'_, T, E>,
+/// interrupt vector 0's handler, and the System process. With the kernel
+/// PDB's `layout` the System process is reached through the PDB's
+/// `PsInitialSystemProcess`, and the PDB's layouts are used only when that
+/// process holds PID 4 and reads "System" where the PDB puts those fields;
+/// otherwise every layout is discovered.
+fn discover_kernel<G: GuestMemory>(
+    cpu: &mut G,
     view: &CpuDebugView,
-) -> Result<Kernel, KernelMiss> {
+    layout: Option<&KernelLayout>,
+) -> Result<KernelState, KernelMiss> {
     let kpcr = match find_kpcr(cpu, view) {
         Some(kpcr) => kpcr,
         None if kpcr_unreadable(cpu, view) => return Err(KernelMiss::KernelUnmapped),
@@ -1623,55 +1797,102 @@ fn discover_kernel<T: Instrumentation, E: SliceEngine<T>>(
         image,
         system_variable,
     } = kernel_image(cpu, kpcr).ok_or(KernelMiss::NoKernelImage)?;
+    let layouts = match layout {
+        Some(layout) => match pdb_kernel(cpu, &image, layout) {
+            Some(kernel) => return Ok(KernelState::seeded(cpu, kernel, layout)),
+            None => KernelLayouts::PdbDisagrees,
+        },
+        None => KernelLayouts::Discovered,
+    };
     let system = read_u64(cpu, Root::Live, system_variable)
         .and_then(kernel_pointer)
         .ok_or(KernelMiss::NoSystemProcess)?;
-    let layout = process_layout(cpu, system).ok_or(KernelMiss::UnknownProcessLayout)?;
+    let process = process_layout(cpu, system).ok_or(KernelMiss::UnknownProcessLayout)?;
     let loaded_modules = loaded_module_list(cpu, &image);
-    Ok(Kernel {
+    let build = nt_build_number(cpu, &image);
+    let kernel = Kernel {
         image,
         loaded_modules,
         system,
-        layout,
+        layout: process,
+        build,
+    };
+    Ok(KernelState::discovered(kernel, layouts))
+}
+
+/// The kernel as its PDB lays it out, when the System process the PDB's
+/// `PsInitialSystemProcess` names holds PID 4 at the PDB's `UniqueProcessId`
+/// and "System" at its `ImageFileName`.
+fn pdb_kernel<G: GuestMemory>(cpu: &mut G, image: &PeImage, layout: &KernelLayout) -> Option<Kernel> {
+    let process = &layout.process;
+    let system_variable = image.base.wrapping_add(layout.globals.initial_system_process?.0);
+    let system = read_u64(cpu, Root::Live, system_variable).and_then(kernel_pointer)?;
+    let pid = process.unique_process_id?.0;
+    let name = process.image_file_name?.0;
+    if read_u64(cpu, Root::Live, system.wrapping_add(pid)) != Some(SYSTEM_PID)
+        || read_array::<7, G>(cpu, Root::Live, system.wrapping_add(name)) != Some(*b"System\0")
+    {
+        return None;
+    }
+    let loaded_modules = layout
+        .globals
+        .loaded_module_list
+        .map(|rva| image.base.wrapping_add(rva.0))
+        .filter(|&head| heads_a_list(cpu, head))
+        .or_else(|| loaded_module_list(cpu, image));
+    let build = nt_build_number(cpu, image);
+    Some(Kernel {
+        image: *image,
+        loaded_modules,
+        system,
+        build,
+        layout: ProcessLayout {
+            pid,
+            links: process.active_process_links?.0,
+            name,
+            directory_table_base: process.directory_table_base.map_or(DIRECTORY_TABLE_BASE, |offset| offset.0),
+        },
     })
 }
 
 /// The KPCR: GS in the kernel, `IA32_KERNEL_GS_BASE` in user mode (and in
 /// the kernel between its entry and `SWAPGS`) — whichever points at itself.
-fn find_kpcr<T: Instrumentation, E: SliceEngine<T>>(
-    cpu: &mut DebugCpu<'_, T, E>,
+fn find_kpcr<G: GuestMemory>(
+    cpu: &mut G,
     view: &CpuDebugView,
 ) -> Option<u64> {
     [view.segment_bases.gs, view.kernel_gs_base]
         .into_iter()
         .filter_map(kernel_pointer)
-        .find(|&kpcr| read_u64(cpu, Root::Live, kpcr + 0x18) == Some(kpcr))
+        .find(|&kpcr| read_u64(cpu, Root::Live, kpcr.wrapping_add(0x18)) == Some(kpcr))
 }
 
 /// Whether a KPCR-shaped address is held but does not read, as when the
 /// processor runs on page tables that leave the kernel out.
-fn kpcr_unreadable<T: Instrumentation, E: SliceEngine<T>>(
-    cpu: &mut DebugCpu<'_, T, E>,
+fn kpcr_unreadable<G: GuestMemory>(
+    cpu: &mut G,
     view: &CpuDebugView,
 ) -> bool {
     [view.segment_bases.gs, view.kernel_gs_base]
         .into_iter()
         .filter_map(kernel_pointer)
-        .any(|kpcr| read_u64(cpu, Root::Live, kpcr + 0x18).is_none())
+        .any(|kpcr| read_u64(cpu, Root::Live, kpcr.wrapping_add(0x18)).is_none())
 }
 
 /// The kernel image and its `PsInitialSystemProcess`: the first image at or
 /// below interrupt vector 0's handler that exports that variable. Images that
 /// do not (the HAL, which the kernel's handlers may lie above) are passed by.
-fn kernel_image<T: Instrumentation, E: SliceEngine<T>>(
-    cpu: &mut DebugCpu<'_, T, E>,
+fn kernel_image<G: GuestMemory>(
+    cpu: &mut G,
     kpcr: u64,
 ) -> Option<KernelImage> {
-    let idt = kernel_pointer(read_u64(cpu, Root::Live, kpcr + 0x38)?)?;
-    let gate = read_exact(cpu, Root::Live, idt, 16)?;
-    let handler = u64::from(u16::from_le_bytes([gate[0], gate[1]]))
-        | u64::from(u16::from_le_bytes([gate[6], gate[7]])) << 16
-        | u64::from(u32::from_le_bytes([gate[8], gate[9], gate[10], gate[11]])) << 32;
+    let idt = kernel_pointer(read_u64(cpu, Root::Live, kpcr.wrapping_add(0x38))?)?;
+    let gate: [u8; 16] = read_array(cpu, Root::Live, idt)?;
+    // Intel SDM Vol. 3A, "64-bit IDT gate descriptor": offset bits 0–15 at
+    // bytes 0–1, 16–31 at bytes 6–7, 32–63 at bytes 8–11.
+    let handler = u64::from_le_bytes([
+        gate[0], gate[1], gate[6], gate[7], gate[8], gate[9], gate[10], gate[11],
+    ]);
     let mut page = kernel_pointer(handler)? & !(PAGE_BYTES - 1);
     for _ in 0..KERNEL_SCAN_PAGES {
         if let Some(image) = pe_image(cpu, Root::Live, page) {
@@ -1690,16 +1911,10 @@ fn kernel_image<T: Instrumentation, E: SliceEngine<T>>(
 /// The head of the kernel's loaded-module list: its `PsLoadedModuleList`
 /// export, or the debugger data block's copy where it exports none. Either
 /// is taken only when it heads a list whose first entry points back at it.
-fn loaded_module_list<T: Instrumentation, E: SliceEngine<T>>(
-    cpu: &mut DebugCpu<'_, T, E>,
+fn loaded_module_list<G: GuestMemory>(
+    cpu: &mut G,
     image: &PeImage,
 ) -> Option<u64> {
-    let heads_a_list = |cpu: &mut DebugCpu<'_, T, E>, head: u64| {
-        read_u64(cpu, Root::Live, head)
-            .and_then(kernel_pointer)
-            .and_then(|first| read_u64(cpu, Root::Live, first + 8))
-            == Some(head)
-    };
     if let Some(head) = export(cpu, image, "PsLoadedModuleList") {
         if heads_a_list(cpu, head) {
             return Some(head);
@@ -1709,12 +1924,20 @@ fn loaded_module_list<T: Instrumentation, E: SliceEngine<T>>(
     heads_a_list(cpu, head).then_some(head)
 }
 
+/// Whether `head` heads a list: its first entry's `Blink` points back at it.
+fn heads_a_list<G: GuestMemory>(cpu: &mut G, head: u64) -> bool {
+    read_u64(cpu, Root::Live, head)
+        .and_then(kernel_pointer)
+        .and_then(|first| read_u64(cpu, Root::Live, first.wrapping_add(8)))
+        == Some(head)
+}
+
 /// `KDDEBUGGER_DATA64.PsLoadedModuleList`, from the block in `image` whose
 /// header tag is `KDBG` (at +0x10, the block 8-aligned) and whose `KernBase`
 /// (+0x18) is the image's base. Windows 8 and later keep the block encoded
 /// unless a kernel debugger is attached; their kernels export the list.
-fn debugger_data_module_list<T: Instrumentation, E: SliceEngine<T>>(
-    cpu: &mut DebugCpu<'_, T, E>,
+fn debugger_data_module_list<G: GuestMemory>(
+    cpu: &mut G,
     image: &PeImage,
 ) -> Option<u64> {
     const TAG: &[u8; 4] = b"KDBG";
@@ -1722,87 +1945,116 @@ fn debugger_data_module_list<T: Instrumentation, E: SliceEngine<T>>(
     const KERN_BASE: u64 = 0x18;
     const PS_LOADED_MODULE_LIST: u64 = 0x48;
     let mut page = image.base;
-    let end = image.base + u64::from(image.size);
+    let end = image.base.checked_add(u64::from(image.size))?;
     while page < end {
         // Paged-out and discarded pages are passed by.
         if let Some(bytes) = read_exact(cpu, Root::Live, page, PAGE_BYTES as usize) {
-            for at in (0..bytes.len() - TAG.len()).step_by(8) {
-                // The tag sits 0x10 into an 8-aligned block: 8-aligned too.
-                if &bytes[at..at + TAG.len()] != TAG {
+            // The tag sits 0x10 into an 8-aligned block: 8-aligned too.
+            for (index, chunk) in bytes.chunks_exact(8).enumerate() {
+                if chunk.get(..TAG.len()) != Some(TAG.as_slice()) {
                     continue;
                 }
-                let block = page + at as u64 - TAG_OFFSET;
-                if read_u64(cpu, Root::Live, block + KERN_BASE) == Some(image.base) {
-                    return read_u64(cpu, Root::Live, block + PS_LOADED_MODULE_LIST)
+                // At most a page's worth of 8-byte steps: no wrap.
+                let block = page
+                    .wrapping_add((index as u64).wrapping_mul(8))
+                    .wrapping_sub(TAG_OFFSET);
+                if read_u64(cpu, Root::Live, block.wrapping_add(KERN_BASE)) == Some(image.base) {
+                    return read_u64(cpu, Root::Live, block.wrapping_add(PS_LOADED_MODULE_LIST))
                         .and_then(kernel_pointer);
                 }
             }
         }
-        page += PAGE_BYTES;
+        page = page.checked_add(PAGE_BYTES)?;
     }
     None
 }
 
 /// A PE32+ image whose headers start at `base`.
-fn pe_image<T: Instrumentation, E: SliceEngine<T>>(
-    cpu: &mut DebugCpu<'_, T, E>,
+fn pe_image<G: GuestMemory>(
+    cpu: &mut G,
     root: Root,
     base: u64,
 ) -> Option<PeImage> {
     if read_u16(cpu, root, base)? != MZ {
         return None;
     }
-    let lfanew = u64::from(read_u32(cpu, root, base + 0x3C)?);
+    let lfanew = u64::from(read_u32(cpu, root, base.wrapping_add(0x3C))?);
     if !(0x40..PAGE_BYTES).contains(&lfanew) {
         return None;
     }
-    let nt = base + lfanew;
-    if read_u32(cpu, root, nt)? != PE_SIGNATURE || read_u16(cpu, root, nt + 0x18)? != PE32_PLUS_MAGIC
+    let nt = base.wrapping_add(lfanew);
+    if read_u32(cpu, root, nt)? != PE_SIGNATURE
+        || read_u16(cpu, root, nt.wrapping_add(0x18))? != PE32_PLUS_MAGIC
     {
         return None;
     }
-    let size = read_u32(cpu, root, nt + 0x18 + 0x38)?;
+    // OptionalHeader at +0x18; SizeOfImage at +0x38 of it.
+    let size = read_u32(cpu, root, nt.wrapping_add(0x18 + 0x38))?;
     Some(PeImage { base, nt, size })
 }
 
 /// The address `image` exports under `name`, found by a binary search of its
 /// export name table (sorted, as the PE format requires).
-fn export<T: Instrumentation, E: SliceEngine<T>>(
-    cpu: &mut DebugCpu<'_, T, E>,
+fn export<G: GuestMemory>(
+    cpu: &mut G,
     image: &PeImage,
     name: &str,
 ) -> Option<u64> {
     let base = image.base;
     // OptionalHeader at +0x18; DataDirectory[EXPORT] at +0x70 of it.
-    let directory = u64::from(read_u32(cpu, Root::Live, image.nt + 0x18 + 0x70)?);
+    let directory = u64::from(read_u32(cpu, Root::Live, image.nt.wrapping_add(0x18 + 0x70))?);
     if directory == 0 {
         return None;
     }
-    let directory = base + directory;
-    let count = read_u32(cpu, Root::Live, directory + 0x18)?;
-    let functions = base + u64::from(read_u32(cpu, Root::Live, directory + 0x1C)?);
-    let names = base + u64::from(read_u32(cpu, Root::Live, directory + 0x20)?);
-    let ordinals = base + u64::from(read_u32(cpu, Root::Live, directory + 0x24)?);
+    let directory = base.wrapping_add(directory);
+    let count = read_u32(cpu, Root::Live, directory.wrapping_add(0x18))?;
+    let functions = base.wrapping_add(u64::from(read_u32(
+        cpu,
+        Root::Live,
+        directory.wrapping_add(0x1C),
+    )?));
+    let names = base.wrapping_add(u64::from(read_u32(
+        cpu,
+        Root::Live,
+        directory.wrapping_add(0x20),
+    )?));
+    let ordinals = base.wrapping_add(u64::from(read_u32(
+        cpu,
+        Root::Live,
+        directory.wrapping_add(0x24),
+    )?));
     // The name and its terminator: enough to order any export against it.
     let mut wanted = name.as_bytes().to_vec();
     wanted.push(0);
-    let (mut low, mut high) = (0u32, count);
+    let mut low = 0u32;
+    let mut high = count;
+    // At most 32 halvings of a `u32` range; `middle` stays below `high`, so
+    // its sums cannot wrap.
     while low < high {
-        let middle = low + (high - low) / 2;
-        let at = base + u64::from(read_u32(cpu, Root::Live, names + 4 * u64::from(middle))?);
+        let middle = low.wrapping_add(high.wrapping_sub(low) / 2);
+        let entry = names.wrapping_add(u64::from(middle).wrapping_mul(4));
+        let at = base.wrapping_add(u64::from(read_u32(cpu, Root::Live, entry)?));
         let candidate = read_exact(cpu, Root::Live, at, wanted.len())?;
         // Bytes after a shorter name's terminator do not order it.
         let candidate = match candidate.iter().position(|&byte| byte == 0) {
-            Some(end) => &candidate[..=end],
-            None => &candidate[..],
+            Some(end) => candidate.get(..=end)?,
+            None => candidate.as_slice(),
         };
-        match candidate.cmp(&wanted[..]) {
-            core::cmp::Ordering::Less => low = middle + 1,
+        match candidate.cmp(wanted.as_slice()) {
+            core::cmp::Ordering::Less => low = middle.wrapping_add(1),
             core::cmp::Ordering::Greater => high = middle,
             core::cmp::Ordering::Equal => {
-                let ordinal = read_u16(cpu, Root::Live, ordinals + 2 * u64::from(middle))?;
-                let rva = read_u32(cpu, Root::Live, functions + 4 * u64::from(ordinal))?;
-                return Some(base + u64::from(rva));
+                let ordinal = read_u16(
+                    cpu,
+                    Root::Live,
+                    ordinals.wrapping_add(u64::from(middle).wrapping_mul(2)),
+                )?;
+                let rva = read_u32(
+                    cpu,
+                    Root::Live,
+                    functions.wrapping_add(u64::from(ordinal).wrapping_mul(4)),
+                )?;
+                return Some(base.wrapping_add(u64::from(rva)));
             }
         }
     }
@@ -1810,14 +2062,14 @@ fn export<T: Instrumentation, E: SliceEngine<T>>(
 }
 
 /// Finds the moving `EPROCESS` fields in the System process.
-fn process_layout<T: Instrumentation, E: SliceEngine<T>>(
-    cpu: &mut DebugCpu<'_, T, E>,
+fn process_layout<G: GuestMemory>(
+    cpu: &mut G,
     system: u64,
 ) -> Option<ProcessLayout> {
     let block = read_exact(cpu, Root::Live, system, EPROCESS_SPAN)?;
     let qword = |offset: usize| {
         block
-            .get(offset..offset + 8)
+            .get(offset..offset.checked_add(8)?)
             .and_then(|bytes| bytes.try_into().ok())
             .map(u64::from_le_bytes)
     };
@@ -1826,14 +2078,15 @@ fn process_layout<T: Instrumentation, E: SliceEngine<T>>(
         if qword(offset) != Some(SYSTEM_PID) {
             continue;
         }
-        let links = system + offset as u64 + 8;
+        // `offset` is below `EPROCESS_SPAN`: these sums do not wrap.
+        let links = system.wrapping_add(offset as u64).wrapping_add(8);
         let (Some(flink), Some(blink)) = (
-            qword(offset + 8).and_then(kernel_pointer),
-            qword(offset + 16).and_then(kernel_pointer),
+            qword(offset.wrapping_add(8)).and_then(kernel_pointer),
+            qword(offset.wrapping_add(16)).and_then(kernel_pointer),
         ) else {
             continue;
         };
-        if read_u64(cpu, Root::Live, flink + 8) == Some(links)
+        if read_u64(cpu, Root::Live, flink.wrapping_add(8)) == Some(links)
             && read_u64(cpu, Root::Live, blink) == Some(links)
         {
             pid = Some(offset as u64);
@@ -1846,22 +2099,25 @@ fn process_layout<T: Instrumentation, E: SliceEngine<T>>(
         .position(|window| window == b"System\0")? as u64;
     Some(ProcessLayout {
         pid,
-        links: pid + 8,
+        links: pid.wrapping_add(8),
         name,
+        directory_table_base: DIRECTORY_TABLE_BASE,
     })
 }
 
 /// Every process on `ActiveProcessLinks`, starting at System. The list head
 /// (`PsActiveProcessHead`) lies inside the kernel image and is no process.
-fn list_processes<T: Instrumentation, E: SliceEngine<T>>(
-    cpu: &mut DebugCpu<'_, T, E>,
+fn list_processes<G: GuestMemory>(
+    cpu: &mut G,
     kernel: &Kernel,
     live_cr3: u64,
     parent_offset: &mut Option<u64>,
 ) -> Vec<WinProcess> {
     let layout = &kernel.layout;
-    let image = kernel.image.base..kernel.image.base + u64::from(kernel.image.size);
-    let first = kernel.system + layout.links;
+    // Only bounds a `contains`: an image that would run past the top of
+    // memory reaches to it.
+    let image = kernel.image.base..kernel.image.base.saturating_add(u64::from(kernel.image.size));
+    let first = kernel.system.wrapping_add(layout.links);
     let mut processes = Vec::new();
     let mut visited = HashSet::new();
     let mut entry = first;
@@ -1871,19 +2127,24 @@ fn list_processes<T: Instrumentation, E: SliceEngine<T>>(
             break;
         }
         if !image.contains(&entry) {
-            let eprocess = entry - layout.links;
+            let eprocess = entry.wrapping_sub(layout.links);
             let (Some(pid), Some(cr3)) = (
-                read_u64(cpu, Root::Live, eprocess + layout.pid),
-                read_u64(cpu, Root::Live, eprocess + DIRECTORY_TABLE_BASE),
+                read_u64(cpu, Root::Live, eprocess.wrapping_add(layout.pid)),
+                read_u64(cpu, Root::Live, eprocess.wrapping_add(layout.directory_table_base)),
             ) else {
                 break;
             };
-            let name = read_exact(cpu, Root::Live, eprocess + layout.name, IMAGE_FILE_NAME_BYTES)
-                .map(|bytes| {
-                    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-                    String::from_utf8_lossy(&bytes[..end]).into_owned()
-                })
-                .unwrap_or_default();
+            let name = read_exact(
+                cpu,
+                Root::Live,
+                eprocess.wrapping_add(layout.name),
+                IMAGE_FILE_NAME_BYTES,
+            )
+            .map(|bytes| {
+                let name = bytes.split(|&byte| byte == 0).next().unwrap_or_default();
+                String::from_utf8_lossy(name).into_owned()
+            })
+            .unwrap_or_default();
             processes.push(WinProcess {
                 eprocess,
                 pid,
@@ -1957,7 +2218,8 @@ fn in_code_range(ranges: &[CodeRange], address: u64) -> bool {
     let after = ranges.partition_point(|range| range.start <= address);
     after
         .checked_sub(1)
-        .is_some_and(|at| address < ranges[at].end)
+        .and_then(|at| ranges.get(at))
+        .is_some_and(|range| address < range.end)
 }
 
 /// The widest span from a `ThreadListEntry` to one of its `ETHREAD` fields:
@@ -1968,8 +2230,8 @@ const THREAD_DELTA_MAX: i64 = 0x400;
 /// How far past `Cid` the start addresses are looked for.
 const START_DELTA_AFTER: i64 = 0x200;
 
-fn read_at<T: Instrumentation, E: SliceEngine<T>>(
-    cpu: &mut DebugCpu<'_, T, E>,
+fn read_at<G: GuestMemory>(
+    cpu: &mut G,
     node: u64,
     delta: i64,
 ) -> Option<u64> {
@@ -1979,7 +2241,7 @@ fn read_at<T: Instrumentation, E: SliceEngine<T>>(
 /// A thread ID shape: a non-zero multiple of four below 2^24, as Windows hands
 /// out client IDs.
 fn is_client_id(value: u64) -> bool {
-    value != 0 && value % 4 == 0 && value < 0x0100_0000
+    value != 0 && value & 3 == 0 && value < 0x0100_0000
 }
 
 /// The threads of the process at `eprocess` (PID `pid`), from its
@@ -1992,8 +2254,8 @@ fn is_client_id(value: u64) -> bool {
 /// and then kept in `cache`, to be checked against the next process. A field
 /// that was not found leaves that part of a thread blank; a corrupt list
 /// stops at `MAX_THREADS`.
-fn read_threads<T: Instrumentation, E: SliceEngine<T>>(
-    cpu: &mut DebugCpu<'_, T, E>,
+fn read_threads<G: GuestMemory>(
+    cpu: &mut G,
     eprocess: u64,
     pid: u64,
     cr3: u64,
@@ -2009,7 +2271,7 @@ fn read_threads<T: Instrumentation, E: SliceEngine<T>>(
             None => return Vec::new(),
         },
     };
-    let head = eprocess + layout.head;
+    let head = eprocess.wrapping_add(layout.head);
     let nodes = walk_thread_list(
         head,
         |node| read_u64(cpu, Root::Live, node).and_then(kernel_pointer),
@@ -2048,8 +2310,8 @@ fn read_threads<T: Instrumentation, E: SliceEngine<T>>(
 /// `KTHREAD.TrapFrame` (node-relative `delta`) points at, when that frame is
 /// its own user state (`frame_is_users` against its user `stack`). The frame
 /// is kernel memory.
-fn saved_registers<T: Instrumentation, E: SliceEngine<T>>(
-    cpu: &mut DebugCpu<'_, T, E>,
+fn saved_registers<G: GuestMemory>(
+    cpu: &mut G,
     node: u64,
     delta: i64,
     stack: LinearRange,
@@ -2068,8 +2330,8 @@ fn saved_registers<T: Instrumentation, E: SliceEngine<T>>(
 /// user CS, a user RIP and an RSP in its own stack. A stray pointer may lead
 /// to one plausible frame; only `TrapFrame` does for every waiting thread at
 /// once. Ties go to the lower offset.
-fn find_trap_frame_delta<T: Instrumentation, E: SliceEngine<T>>(
-    cpu: &mut DebugCpu<'_, T, E>,
+fn find_trap_frame_delta<G: GuestMemory>(
+    cpu: &mut G,
     nodes: &[u64],
     threads: &[WinThread],
 ) -> Option<i64> {
@@ -2088,42 +2350,44 @@ fn find_trap_frame_delta<T: Instrumentation, E: SliceEngine<T>>(
             (delta, matches)
         })
         .filter(|&(_, matches)| matches > 0)
-        .max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(&a.0)))
+        .max_by(|(a_delta, a_matches), (b_delta, b_matches)| {
+            a_matches.cmp(b_matches).then(b_delta.cmp(a_delta))
+        })
         .map(|(delta, _)| delta)
 }
 
 /// Whether a thread layout learned earlier reads true for this process: its
 /// list head is a ring, empty or whose first thread carries this PID.
-fn thread_layout_holds<T: Instrumentation, E: SliceEngine<T>>(
-    cpu: &mut DebugCpu<'_, T, E>,
+fn thread_layout_holds<G: GuestMemory>(
+    cpu: &mut G,
     eprocess: u64,
     pid: u64,
     layout: &ThreadLayout,
 ) -> bool {
-    let head = eprocess + layout.head;
+    let head = eprocess.wrapping_add(layout.head);
     let Some(first) = read_u64(cpu, Root::Live, head).and_then(kernel_pointer) else {
         return false;
     };
     if first == head {
         return true;
     }
-    read_u64(cpu, Root::Live, first + 8) == Some(head)
+    read_u64(cpu, Root::Live, first.wrapping_add(8)) == Some(head)
         && read_at(cpu, first, layout.cid) == Some(pid)
 }
 
 /// Finds the thread-list field and the `Cid` offset by validation.
-fn discover_thread_layout<T: Instrumentation, E: SliceEngine<T>>(
-    cpu: &mut DebugCpu<'_, T, E>,
+fn discover_thread_layout<G: GuestMemory>(
+    cpu: &mut G,
     eprocess: u64,
     pid: u64,
 ) -> Option<ThreadLayout> {
     for offset in (0..EPROCESS_SPAN as u64).step_by(8) {
-        let head = eprocess + offset;
+        let head = eprocess.wrapping_add(offset);
         let Some(first) = read_u64(cpu, Root::Live, head).and_then(kernel_pointer) else {
             continue;
         };
         // A LIST_ENTRY head: the first node's Blink points back at the head.
-        if first == head || read_u64(cpu, Root::Live, first + 8) != Some(head) {
+        if first == head || read_u64(cpu, Root::Live, first.wrapping_add(8)) != Some(head) {
             continue;
         }
         let Some(cid) = find_cid_delta(cpu, first, pid) else {
@@ -2143,7 +2407,8 @@ fn discover_thread_layout<T: Instrumentation, E: SliceEngine<T>>(
             .count();
         // Nearly every node must carry this PID: the thread list, not another
         // EPROCESS list that happens to read as a ring.
-        if covered * 10 < nodes.len() * 9 {
+        // Both counts are at most MAX_THREADS: the products cannot wrap.
+        if covered.wrapping_mul(10) < nodes.len().wrapping_mul(9) {
             continue;
         }
         return Some(ThreadLayout {
@@ -2165,8 +2430,8 @@ fn discover_thread_layout<T: Instrumentation, E: SliceEngine<T>>(
 /// against a field, and `Win32StartAddress` follows `StartAddress`, so the
 /// last two holders are the pair; one holder serves as both fields. No holder
 /// finds nothing, so a start address is blank, never a guess.
-fn find_start_layout<T: Instrumentation, E: SliceEngine<T>>(
-    cpu: &mut DebugCpu<'_, T, E>,
+fn find_start_layout<G: GuestMemory>(
+    cpu: &mut G,
     nodes: &[u64],
     cid: i64,
     ranges: &[CodeRange],
@@ -2176,19 +2441,22 @@ fn find_start_layout<T: Instrumentation, E: SliceEngine<T>>(
     }
     let mut holders = Vec::new();
     // `Cid` itself holds a PID and a TID, not an address.
-    for delta in ((cid + 0x10)..(cid + START_DELTA_AFTER)).step_by(8) {
+    // `cid` is a learned delta inside THREAD_DELTA_MIN..THREAD_DELTA_MAX:
+    // these sums cannot wrap.
+    for delta in (cid.wrapping_add(0x10)..cid.wrapping_add(START_DELTA_AFTER)).step_by(8) {
         let mut set = 0usize;
         let mut hits = 0usize;
         for &node in nodes {
             match read_at(cpu, node, delta) {
                 Some(0) | None => {}
                 Some(value) => {
-                    set += 1;
-                    hits += usize::from(in_code_range(ranges, value));
+                    set = set.saturating_add(1);
+                    hits = hits.saturating_add(usize::from(in_code_range(ranges, value)));
                 }
             }
         }
-        if set > 0 && hits * 10 >= set * 9 {
+        // Both counts are at most MAX_THREADS: the products cannot wrap.
+        if set > 0 && hits.wrapping_mul(10) >= set.wrapping_mul(9) {
             holders.push(delta);
         }
     }
@@ -2207,14 +2475,14 @@ fn find_start_layout<T: Instrumentation, E: SliceEngine<T>>(
 
 /// The node-relative offset of `Cid`: `UniqueProcess` equals the PID and
 /// `UniqueThread` is a client-ID-shaped value right after it.
-fn find_cid_delta<T: Instrumentation, E: SliceEngine<T>>(
-    cpu: &mut DebugCpu<'_, T, E>,
+fn find_cid_delta<G: GuestMemory>(
+    cpu: &mut G,
     node: u64,
     pid: u64,
 ) -> Option<i64> {
     (THREAD_DELTA_MIN..THREAD_DELTA_MAX).step_by(8).find(|&delta| {
         read_at(cpu, node, delta) == Some(pid)
-            && read_at(cpu, node, delta + 8).is_some_and(is_client_id)
+            && read_at(cpu, node, delta.wrapping_add(8)).is_some_and(is_client_id)
     })
 }
 
@@ -2224,8 +2492,8 @@ fn find_cid_delta<T: Instrumentation, E: SliceEngine<T>>(
 /// through the process's own address space. The delta that self-references for
 /// the most threads is the field — a stray lower offset might match one thread
 /// by chance, but only the real `Teb` matches every user thread at once.
-fn find_teb_delta<T: Instrumentation, E: SliceEngine<T>>(
-    cpu: &mut DebugCpu<'_, T, E>,
+fn find_teb_delta<G: GuestMemory>(
+    cpu: &mut G,
     nodes: &[u64],
     cr3: u64,
 ) -> Option<i64> {
@@ -2238,7 +2506,7 @@ fn find_teb_delta<T: Instrumentation, E: SliceEngine<T>>(
                     read_at(cpu, node, delta)
                         .and_then(user_pointer)
                         .is_some_and(|teb| {
-                            read_u64(cpu, Root::Process(cr3), teb + 0x30) == Some(teb)
+                            read_u64(cpu, Root::Process(cr3), teb.wrapping_add(0x30)) == Some(teb)
                         })
                 })
                 .count();
@@ -2252,24 +2520,24 @@ fn find_teb_delta<T: Instrumentation, E: SliceEngine<T>>(
 /// Reads one thread from its `ThreadListEntry` node. The `ETHREAD` fields are
 /// kernel memory; the `TEB` and the stack are the process's user memory, read
 /// through its address space `cr3`.
-fn read_thread<T: Instrumentation, E: SliceEngine<T>>(
-    cpu: &mut DebugCpu<'_, T, E>,
+fn read_thread<G: GuestMemory>(
+    cpu: &mut G,
     node: u64,
     layout: &ThreadLayout,
     cr3: u64,
 ) -> WinThread {
     let user = Root::Process(cr3);
-    let tid = read_at(cpu, node, layout.cid + 8).unwrap_or(0);
+    let tid = read_at(cpu, node, layout.cid.wrapping_add(8)).unwrap_or(0);
     let teb = layout
         .teb
         .and_then(|delta| read_at(cpu, node, delta))
         .and_then(user_pointer)
-        .filter(|&teb| read_u64(cpu, user, teb + 0x30) == Some(teb));
+        .filter(|&teb| read_u64(cpu, user, teb.wrapping_add(0x30)) == Some(teb));
     // NtTib.StackBase at TEB +0x08, StackLimit at +0x10 (x64): the stack grows
     // down from base to limit.
     let stack = teb.and_then(|teb| {
-        let base = read_u64(cpu, user, teb + 0x08)?;
-        let limit = read_u64(cpu, user, teb + 0x10)?;
+        let base = read_u64(cpu, user, teb.wrapping_add(0x08))?;
+        let limit = read_u64(cpu, user, teb.wrapping_add(0x10))?;
         (limit < base && user_pointer(base).is_some())
             .then_some(LinearRange { start: limit, end: base })
     });
@@ -2290,7 +2558,7 @@ fn read_thread<T: Instrumentation, E: SliceEngine<T>>(
     // running fibres holds a heap pointer here, an ordinary thread a small
     // version number. A value above the version range is fibre data.
     let uses_fibers = teb.is_some_and(|teb| {
-        read_u64(cpu, user, teb + 0x20)
+        read_u64(cpu, user, teb.wrapping_add(0x20))
             .and_then(user_pointer)
             .is_some_and(|data| data >= 0x1_0000)
     });
@@ -2317,8 +2585,8 @@ fn read_thread<T: Instrumentation, E: SliceEngine<T>>(
 /// such as explorer.exe's userinit.exe, is no longer listed). Left `None`
 /// when no field qualifies. The offset found is kept in `cached`, and later
 /// reads take the field there without searching.
-fn assign_parents<T: Instrumentation, E: SliceEngine<T>>(
-    cpu: &mut DebugCpu<'_, T, E>,
+fn assign_parents<G: GuestMemory>(
+    cpu: &mut G,
     layout: &ProcessLayout,
     processes: &mut [WinProcess],
     cached: &mut Option<u64>,
@@ -2326,7 +2594,7 @@ fn assign_parents<T: Instrumentation, E: SliceEngine<T>>(
     const MAX_PID: u64 = 1 << 24;
     if let Some(offset) = *cached {
         for process in processes.iter_mut() {
-            process.parent = read_u64(cpu, Root::Live, process.eprocess + offset)
+            process.parent = read_u64(cpu, Root::Live, process.eprocess.wrapping_add(offset))
                 .filter(|&parent| parent != 0);
         }
         return;
@@ -2341,11 +2609,13 @@ fn assign_parents<T: Instrumentation, E: SliceEngine<T>>(
     let pids: Vec<u64> = processes.iter().map(|p| p.pid).collect();
     let qword = |block: &[u8], offset: usize| {
         block
-            .get(offset..offset + 8)
+            .get(offset..offset.checked_add(8)?)
             .and_then(|bytes| bytes.try_into().ok())
             .map(u64::from_le_bytes)
     };
-    let first = usize::try_from(layout.pid).unwrap_or(EPROCESS_SPAN) + 8;
+    let first = usize::try_from(layout.pid)
+        .unwrap_or(EPROCESS_SPAN)
+        .saturating_add(8);
     let found = (first..EPROCESS_SPAN - 8).step_by(8).find(|&offset| {
         let mut from_system = false;
         let mut listed = 0usize;
@@ -2363,14 +2633,14 @@ fn assign_parents<T: Instrumentation, E: SliceEngine<T>>(
             if process.pid == 0 {
                 continue;
             }
-            if value == process.pid || value % 4 != 0 || value >= MAX_PID {
+            if value == process.pid || value & 3 != 0 || value >= MAX_PID {
                 return false;
             }
-            others += 1;
+            others = others.saturating_add(1);
             from_system |= value == SYSTEM_PID;
-            listed += usize::from(pids.contains(&value));
+            listed = listed.saturating_add(usize::from(pids.contains(&value)));
         }
-        from_system && others > 0 && 2 * listed >= others
+        from_system && others > 0 && listed.saturating_mul(2) >= others
     });
     let Some(offset) = found else {
         return;
@@ -2405,16 +2675,20 @@ pub(crate) fn process_tree(processes: &[WinProcess]) -> Vec<TreeRow> {
     };
     let mut rows = Vec::with_capacity(processes.len());
     let mut placed = vec![false; processes.len()];
-    let roots: Vec<usize> = (0..processes.len())
-        .filter(|&i| parent_of(&processes[i]).is_none())
+    let roots: Vec<usize> = processes
+        .iter()
+        .enumerate()
+        .filter(|&(_, process)| parent_of(process).is_none())
+        .map(|(index, _)| index)
         .collect();
     let count = roots.len();
     for (n, root) in roots.into_iter().enumerate() {
-        place(processes, root, 0, Vec::new(), n + 1 == count, &mut placed, &mut rows);
+        let last = n.saturating_add(1) == count;
+        place(processes, root, 0, Vec::new(), last, &mut placed, &mut rows);
     }
     // A cycle of parents has no root: list what it left unplaced at the top.
     for index in 0..processes.len() {
-        if !placed[index] {
+        if placed.get(index) == Some(&false) {
             place(processes, index, 0, Vec::new(), true, &mut placed, &mut rows);
         }
     }
@@ -2430,13 +2704,21 @@ fn place(
     placed: &mut [bool],
     rows: &mut Vec<TreeRow>,
 ) {
-    if placed[index] {
+    let (Some(done), Some(process)) = (placed.get_mut(index), processes.get(index)) else {
+        return;
+    };
+    if *done {
         return;
     }
-    placed[index] = true;
-    let pid = processes[index].pid;
-    let children: Vec<usize> = (0..processes.len())
-        .filter(|&i| i != index && !placed[i] && processes[i].parent == Some(pid))
+    *done = true;
+    let pid = process.pid;
+    let children: Vec<usize> = processes
+        .iter()
+        .enumerate()
+        .filter(|&(i, child)| {
+            i != index && placed.get(i) == Some(&false) && child.parent == Some(pid)
+        })
+        .map(|(i, _)| i)
         .collect();
     rows.push(TreeRow {
         index,
@@ -2450,7 +2732,8 @@ fn place(
     }
     let count = children.len();
     for (n, child) in children.into_iter().enumerate() {
-        place(processes, child, depth + 1, below.clone(), n + 1 == count, placed, rows);
+        let last = n.saturating_add(1) == count;
+        place(processes, child, depth.saturating_add(1), below.clone(), last, placed, rows);
     }
 }
 
@@ -2462,8 +2745,8 @@ fn same_address_space(a: u64, b: u64) -> bool {
 
 /// The modules `process` has loaded: its PEB's loader list, read through its
 /// own page tables.
-fn process_modules<T: Instrumentation, E: SliceEngine<T>>(
-    cpu: &mut DebugCpu<'_, T, E>,
+fn process_modules<G: GuestMemory>(
+    cpu: &mut G,
     processes: &[WinProcess],
     process: &WinProcess,
     peb_offset: &mut Option<u64>,
@@ -2479,7 +2762,7 @@ fn process_modules<T: Instrumentation, E: SliceEngine<T>>(
             None => return ModuleRead::Unreadable,
         },
     };
-    let Some(peb) = read_u64(cpu, Root::Live, process.eprocess + peb_offset) else {
+    let Some(peb) = read_u64(cpu, Root::Live, process.eprocess.wrapping_add(peb_offset)) else {
         return ModuleRead::Unreadable;
     };
     if peb == 0 {
@@ -2487,10 +2770,10 @@ fn process_modules<T: Instrumentation, E: SliceEngine<T>>(
     }
     let root = Root::Process(process.cr3);
     // PEB.Ldr at +0x18; PEB_LDR_DATA.InLoadOrderModuleList at +0x10.
-    let Some(loader) = read_u64(cpu, root, peb + 0x18).and_then(user_pointer) else {
+    let Some(loader) = read_u64(cpu, root, peb.wrapping_add(0x18)).and_then(user_pointer) else {
         return ModuleRead::Unreadable;
     };
-    match list_modules(cpu, root, loader + 0x10) {
+    match list_modules(cpu, root, loader.wrapping_add(0x10)) {
         Some(mut modules) => {
             // A WOW64 process also has a 32-bit loader; its modules sit beside
             // the 64-bit ones, each tagged by bitness.
@@ -2509,12 +2792,14 @@ fn process_modules<T: Instrumentation, E: SliceEngine<T>>(
 /// The page-table memory map of the process whose address space is `cr3`:
 /// its mapped user pages, with each module's span split into its header and
 /// its sections. The module list is already read by [`process_modules`]; the
-/// sections come from each module's PE headers, read through its own tables.
-fn read_memory_map<T: Instrumentation, E: SliceEngine<T>>(
-    cpu: &mut DebugCpu<'_, T, E>,
+/// sections come from each module's PE headers, read through its own tables;
+/// `build` picks the VAD flag bits when no PDB named them.
+fn read_memory_map<G: GuestMemory>(
+    cpu: &mut G,
     eprocess: u64,
     cr3: u64,
     modules: &[WinModule],
+    build: Option<u32>,
     vad_site: &mut Option<VadSite>,
 ) -> MemoryMap {
     let root = Root::Process(cr3);
@@ -2536,7 +2821,7 @@ fn read_memory_map<T: Instrumentation, E: SliceEngine<T>>(
         })
         .collect();
     let mut mappings = Vec::new();
-    let walk = cpu.dbg_page_mappings_in(
+    let walk = cpu.page_mappings(
         cr3,
         LinearRange {
             start: 0,
@@ -2562,7 +2847,7 @@ fn read_memory_map<T: Instrumentation, E: SliceEngine<T>>(
     // Overlay Windows' own records when the VAD tree is found, so reserved
     // regions and Windows' protection show; else the page-table map stands.
     let module_bases: Vec<u64> = modules.iter().map(|module| module.base).collect();
-    match read_vads(cpu, eprocess, &module_bases, vad_site) {
+    match read_vads(cpu, eprocess, &module_bases, build, vad_site) {
         Some(vads) => memory_map::build_with_vads(&mappings, &layouts, &vads),
         None => memory_map::build(&mappings, &layouts),
     }
@@ -2577,8 +2862,8 @@ struct ImageSpace {
 }
 
 /// The `detail` of `module`, read in `space`.
-fn read_module_detail<T: Instrumentation, E: SliceEngine<T>>(
-    cpu: &mut DebugCpu<'_, T, E>,
+fn read_module_detail<G: GuestMemory>(
+    cpu: &mut G,
     space: ImageSpace,
     module: &WinModule,
     detail: ModuleDetail,
@@ -2587,6 +2872,9 @@ fn read_module_detail<T: Instrumentation, E: SliceEngine<T>>(
         ModuleDetail::Sections => PickedDetail::Sections(read_module_sections(cpu, space, module)),
         ModuleDetail::Exports => PickedDetail::Exports(read_module_exports(cpu, space.root, module)),
         ModuleDetail::Imports => PickedDetail::Imports(read_module_imports(cpu, space.root, module)),
+        ModuleDetail::Symbols => {
+            PickedDetail::Symbols(read_module_identity(cpu, space.root, module.base, module.name.as_deref()))
+        }
     }
 }
 
@@ -2594,8 +2882,8 @@ fn read_module_detail<T: Instrumentation, E: SliceEngine<T>>(
 /// residency and access from the page tables of `space`. A section with no
 /// page mapped — one the loader discarded after boot, or paged out — is
 /// listed with none resident and the access its PE flags give.
-fn read_module_sections<T: Instrumentation, E: SliceEngine<T>>(
-    cpu: &mut DebugCpu<'_, T, E>,
+fn read_module_sections<G: GuestMemory>(
+    cpu: &mut G,
     space: ImageSpace,
     module: &WinModule,
 ) -> SectionsRead {
@@ -2617,7 +2905,7 @@ fn read_module_sections<T: Instrumentation, E: SliceEngine<T>>(
         end: module.base.saturating_add(u64::from(module.size)),
     };
     let mut mappings = Vec::new();
-    let walk = cpu.dbg_page_mappings_in(space.cr3, image, |mapping| {
+    let walk = cpu.page_mappings(space.cr3, image, |mapping| {
         mappings.push(mapping);
         WalkStep::Continue
     });
@@ -2633,8 +2921,8 @@ fn read_module_sections<T: Instrumentation, E: SliceEngine<T>>(
 }
 
 /// A module's exports, read from its export table through `root`.
-fn read_module_exports<T: Instrumentation, E: SliceEngine<T>>(
-    cpu: &mut DebugCpu<'_, T, E>,
+fn read_module_exports<G: GuestMemory>(
+    cpu: &mut G,
     root: Root,
     module: &WinModule,
 ) -> ExportRead {
@@ -2647,8 +2935,8 @@ fn read_module_exports<T: Instrumentation, E: SliceEngine<T>>(
 }
 
 /// A module's imports, read from its import table and IAT through `root`.
-fn read_module_imports<T: Instrumentation, E: SliceEngine<T>>(
-    cpu: &mut DebugCpu<'_, T, E>,
+fn read_module_imports<G: GuestMemory>(
+    cpu: &mut G,
     root: Root,
     module: &WinModule,
 ) -> ImportRead {
@@ -2664,13 +2952,15 @@ fn read_module_imports<T: Instrumentation, E: SliceEngine<T>>(
 /// from the `EPROCESS` at `eprocess`. The tree's root and node shape are
 /// discovered by trying each 64-bit shape at every `EPROCESS` field and
 /// accepting the tree that contains the process's loaded modules; the site
-/// found is kept in `site` and tried first next time. `None` when no shape's
-/// tree validates (an unknown build, or the tree is paged out), so the map
-/// falls back to the page-table form.
-fn read_vads<T: Instrumentation, E: SliceEngine<T>>(
-    cpu: &mut DebugCpu<'_, T, E>,
+/// found is kept in `site` and tried first next time. A shape's flag bits are
+/// `build`'s era's ([`vad::build_flags`]). `None` when no shape's tree
+/// validates (an unknown build, or the tree is paged out), so the map falls
+/// back to the page-table form.
+fn read_vads<G: GuestMemory>(
+    cpu: &mut G,
     eprocess: u64,
     module_bases: &[u64],
+    build: Option<u32>,
     site: &mut Option<VadSite>,
 ) -> Option<Vec<VadRegion>> {
     if let Some(known) = *site {
@@ -2680,7 +2970,10 @@ fn read_vads<T: Instrumentation, E: SliceEngine<T>>(
     }
     for shape in [VadShape::AvlX64, VadShape::BalancedNode] {
         for offset in (0..EPROCESS_SPAN as u64).step_by(8) {
-            let candidate = VadSite { shape, offset };
+            let candidate = VadSite {
+                layout: vad::shape_layout(shape, build),
+                offset,
+            };
             if let Some(vads) = vads_at(cpu, eprocess, candidate, module_bases) {
                 *site = Some(candidate);
                 return Some(vads);
@@ -2692,41 +2985,41 @@ fn read_vads<T: Instrumentation, E: SliceEngine<T>>(
 
 /// The VAD tree whose root the `EPROCESS` field at `site` holds, when it
 /// reads as a root whose regions cover most of the process's modules.
-fn vads_at<T: Instrumentation, E: SliceEngine<T>>(
-    cpu: &mut DebugCpu<'_, T, E>,
+fn vads_at<G: GuestMemory>(
+    cpu: &mut G,
     eprocess: u64,
     site: VadSite,
     module_bases: &[u64],
 ) -> Option<Vec<VadRegion>> {
-    let VadSite { shape, offset } = site;
-    let root = vad_root_at(cpu, eprocess + offset, shape)?;
+    let VadSite { layout, offset } = site;
+    let root = vad_root_at(cpu, eprocess.wrapping_add(offset), layout.root)?;
     // Probe: the root must read as a plausible node before a full walk.
-    read_vad_node(cpu, root, shape)?;
-    let vads = vad::walk(root, |pointer| read_vad_node(cpu, pointer, shape), MAX_VAD_NODES);
+    read_vad_node(cpu, root, &layout)?;
+    let vads = vad::walk(root, |pointer| read_vad_node(cpu, pointer, &layout), MAX_VAD_NODES);
     vads_cover_modules(&vads, module_bases).then_some(vads)
 }
 
 /// The VAD tree root held by the candidate field at `field`, or `None` when
-/// the field is not a VAD root of `shape`.
+/// the field is not a VAD root of `kind`.
 ///
-/// AvlX64: the field is an `MM_AVL_TABLE` whose `BalancedRoot` sentinel anchors
-/// the tree — its `Parent` points to the sentinel itself and its `LeftChild`
-/// is null, a signature a wrong `EPROCESS` field does not share. The real root
-/// is the sentinel's `RightChild` (+0x10). BalancedNode: the field is an
-/// `RTL_AVL_TREE` whose `Root` (+0x0) is the root directly.
-fn vad_root_at<T: Instrumentation, E: SliceEngine<T>>(
-    cpu: &mut DebugCpu<'_, T, E>,
+/// `AvlTable`: the field is an `MM_AVL_TABLE` whose `BalancedRoot` sentinel
+/// anchors the tree — its `Parent` points to the sentinel itself and its
+/// `LeftChild` is null, a signature a wrong `EPROCESS` field does not share.
+/// The real root is the sentinel's `RightChild` (+0x10). `AvlTree`: the field
+/// is an `RTL_AVL_TREE` whose `Root` (+0x0) is the root directly.
+fn vad_root_at<G: GuestMemory>(
+    cpu: &mut G,
     field: u64,
-    shape: VadShape,
+    kind: VadRootKind,
 ) -> Option<u64> {
-    match shape {
-        VadShape::AvlX64 => {
+    match kind {
+        VadRootKind::AvlTable => {
             let parent = read_u64(cpu, Root::Live, field)?;
-            let left_child = read_u64(cpu, Root::Live, field + 0x08)?;
-            let right_child = read_u64(cpu, Root::Live, field + 0x10)?;
+            let left_child = read_u64(cpu, Root::Live, field.wrapping_add(0x08))?;
+            let right_child = read_u64(cpu, Root::Live, field.wrapping_add(0x10))?;
             avl_table_root(parent, left_child, right_child, field)
         }
-        VadShape::BalancedNode => read_u64(cpu, Root::Live, field).and_then(kernel_pointer),
+        VadRootKind::AvlTree => read_u64(cpu, Root::Live, field).and_then(kernel_pointer),
     }
 }
 
@@ -2759,43 +3052,54 @@ fn vads_cover_modules(vads: &[VadRegion], module_bases: &[u64]) -> bool {
         .filter(|&&base| vads.iter().any(|vad| vad.start <= base && base < vad.end))
         .count();
     // At least 90% of modules must lie in the tree.
-    covered * 10 >= module_bases.len() * 9
+    covered.saturating_mul(10) >= module_bases.len().saturating_mul(9)
 }
 
-/// Reads one VAD node of `shape` at `pointer`, or `None` when it does not
-/// read as a plausible descriptor (a sentinel, a leaf's null child, or
-/// garbage from a wrong shape).
-fn read_vad_node<T: Instrumentation, E: SliceEngine<T>>(
-    cpu: &mut DebugCpu<'_, T, E>,
+/// A descriptor's first and last page numbers, as its node stores them.
+struct VpnSpan {
+    first: u64,
+    last: u64,
+}
+
+/// Reads one VAD node laid out as `layout` at `pointer`, or `None` when it
+/// does not read as a plausible descriptor (a sentinel, a leaf's null child,
+/// or garbage from a wrong layout).
+fn read_vad_node<G: GuestMemory>(
+    cpu: &mut G,
     pointer: u64,
-    shape: VadShape,
+    layout: &VadLayout,
 ) -> Option<VadNode> {
-    let layout = vad::node_layout(shape);
-    let left = read_u64(cpu, Root::Live, pointer + layout.left)?;
-    let right = read_u64(cpu, Root::Live, pointer + layout.right)?;
-    let (start_vpn, end_vpn) = if layout.vpn_is_u64 {
-        (
-            read_u64(cpu, Root::Live, pointer + layout.start_vpn)?,
-            read_u64(cpu, Root::Live, pointer + layout.end_vpn)?,
-        )
-    } else {
-        let mut start = u64::from(read_u32(cpu, Root::Live, pointer + layout.start_vpn)?);
-        let mut end = u64::from(read_u32(cpu, Root::Live, pointer + layout.end_vpn)?);
-        if let Some(high) = layout.start_vpn_high {
-            start |= u64::from(read_u8(cpu, Root::Live, pointer + high)?) << 32;
+    let node = layout.node;
+    let left = read_u64(cpu, Root::Live, pointer.wrapping_add(node.left))?;
+    let right = read_u64(cpu, Root::Live, pointer.wrapping_add(node.right))?;
+    let vpns = match node.vpn_width {
+        FieldWidth::Qword => VpnSpan {
+            first: read_u64(cpu, Root::Live, pointer.wrapping_add(node.start_vpn))?,
+            last: read_u64(cpu, Root::Live, pointer.wrapping_add(node.end_vpn))?,
+        },
+        FieldWidth::Dword => {
+            let mut first = u64::from(read_u32(cpu, Root::Live, pointer.wrapping_add(node.start_vpn))?);
+            let mut last = u64::from(read_u32(cpu, Root::Live, pointer.wrapping_add(node.end_vpn))?);
+            // A high byte is bits 32 to 39 of its page number.
+            if let Some(high) = node.start_vpn_high {
+                first |= u64::from(read_u8(cpu, Root::Live, pointer.wrapping_add(high))?).wrapping_shl(32);
+            }
+            if let Some(high) = node.end_vpn_high {
+                last |= u64::from(read_u8(cpu, Root::Live, pointer.wrapping_add(high))?).wrapping_shl(32);
+            }
+            VpnSpan { first, last }
         }
-        if let Some(high) = layout.end_vpn_high {
-            end |= u64::from(read_u8(cpu, Root::Live, pointer + high)?) << 32;
-        }
-        (start, end)
     };
+    let VpnSpan {
+        first: start_vpn,
+        last: end_vpn,
+    } = vpns;
     if end_vpn < start_vpn {
         return None;
     }
-    let flags = if layout.flags_is_u64 {
-        read_u64(cpu, Root::Live, pointer + layout.flags)?
-    } else {
-        u64::from(read_u32(cpu, Root::Live, pointer + layout.flags)?)
+    let flags = match node.flags_width {
+        FieldWidth::Qword => read_u64(cpu, Root::Live, pointer.wrapping_add(node.flags))?,
+        FieldWidth::Dword => u64::from(read_u32(cpu, Root::Live, pointer.wrapping_add(node.flags))?),
     };
     // No page number reaches past the user half's: rejected before the shift,
     // so a garbage value cannot wrap into a plausible address.
@@ -2803,14 +3107,15 @@ fn read_vad_node<T: Instrumentation, E: SliceEngine<T>>(
         return None;
     }
     let start = start_vpn << 12;
-    let end = (end_vpn + 1) << 12;
+    // `end_vpn` is below the user half's last page number: no wrap.
+    let end = end_vpn.wrapping_add(1) << 12;
     if start >= end {
         return None;
     }
     // Defence in depth: no real VAD spans more than a fraction of the address
     // space. A single node claiming the whole of it is a wrong field read as a
     // tree, not a descriptor — reject it so discovery keeps looking.
-    if end - start > MAX_VAD_SPAN {
+    if end.wrapping_sub(start) > MAX_VAD_SPAN {
         return None;
     }
     Some(VadNode {
@@ -2819,13 +3124,13 @@ fn read_vad_node<T: Instrumentation, E: SliceEngine<T>>(
         region: VadRegion {
             start,
             end,
-            info: vad::decode_flags(flags, shape),
+            info: layout.flags.decode(flags),
         },
     })
 }
 
-fn read_u8<T: Instrumentation, E: SliceEngine<T>>(
-    cpu: &mut DebugCpu<'_, T, E>,
+fn read_u8<G: GuestMemory>(
+    cpu: &mut G,
     root: Root,
     address: u64,
 ) -> Option<u8> {
@@ -2836,8 +3141,8 @@ fn read_u8<T: Instrumentation, E: SliceEngine<T>>(
 /// The `EPROCESS.Peb` offset: the first field that, in `PEB_WITNESSES`
 /// processes (or every process there is, if fewer), holds a page-aligned
 /// user address whose `ImageBaseAddress` (+0x10) points at an `MZ` image.
-fn find_peb_offset<T: Instrumentation, E: SliceEngine<T>>(
-    cpu: &mut DebugCpu<'_, T, E>,
+fn find_peb_offset<G: GuestMemory>(
+    cpu: &mut G,
     processes: &[WinProcess],
 ) -> Option<u64> {
     let mut witnesses = Vec::new();
@@ -2845,7 +3150,7 @@ fn find_peb_offset<T: Instrumentation, E: SliceEngine<T>>(
         if let Some(block) = read_exact(cpu, Root::Live, process.eprocess, EPROCESS_SPAN) {
             witnesses.push((process.cr3, block));
         }
-        if witnesses.len() == 2 * PEB_WITNESSES {
+        if witnesses.len() == PEB_WITNESSES.saturating_mul(2) {
             break;
         }
     }
@@ -2854,10 +3159,11 @@ fn find_peb_offset<T: Instrumentation, E: SliceEngine<T>>(
         return None;
     }
     for offset in (0..EPROCESS_SPAN).step_by(8) {
-        let mut agreeing = 0;
+        let mut agreeing = 0usize;
         for (cr3, block) in &witnesses {
-            let Some(value) = block
-                .get(offset..offset + 8)
+            let Some(value) = offset
+                .checked_add(8)
+                .and_then(|end| block.get(offset..end))
                 .and_then(|bytes| bytes.try_into().ok())
                 .map(u64::from_le_bytes)
             else {
@@ -2867,9 +3173,9 @@ fn find_peb_offset<T: Instrumentation, E: SliceEngine<T>>(
                 continue;
             }
             let root = Root::Process(*cr3);
-            let image = read_u64(cpu, root, value + 0x10).and_then(user_pointer);
+            let image = read_u64(cpu, root, value.wrapping_add(0x10)).and_then(user_pointer);
             if image.and_then(|image| read_u16(cpu, root, image)) == Some(MZ) {
-                agreeing += 1;
+                agreeing = agreeing.saturating_add(1);
             }
         }
         if agreeing >= needed {
@@ -2880,8 +3186,8 @@ fn find_peb_offset<T: Instrumentation, E: SliceEngine<T>>(
 }
 
 /// The modules on the loader list headed at `head`, in load order.
-fn list_modules<T: Instrumentation, E: SliceEngine<T>>(
-    cpu: &mut DebugCpu<'_, T, E>,
+fn list_modules<G: GuestMemory>(
+    cpu: &mut G,
     root: Root,
     head: u64,
 ) -> Option<Vec<WinModule>> {
@@ -2894,16 +3200,16 @@ fn list_modules<T: Instrumentation, E: SliceEngine<T>>(
             break;
         }
         let (Some(base), Some(size)) = (
-            read_u64(cpu, root, entry + 0x30),
-            read_u32(cpu, root, entry + 0x40),
+            read_u64(cpu, root, entry.wrapping_add(0x30)),
+            read_u32(cpu, root, entry.wrapping_add(0x40)),
         ) else {
             break;
         };
         modules.push(WinModule {
             base,
             size,
-            name: read_unicode_string(cpu, root, entry + 0x58),
-            path: read_unicode_string(cpu, root, entry + 0x48),
+            name: read_unicode_string(cpu, root, entry.wrapping_add(0x58)),
+            path: read_unicode_string(cpu, root, entry.wrapping_add(0x48)),
             bits: ModuleBits::Bits64,
         });
         let Some(next) = read_u64(cpu, root, entry) else {
@@ -2920,8 +3226,8 @@ fn list_modules<T: Instrumentation, E: SliceEngine<T>>(
 /// fields. The field is found by validation, and kept in `cache` once a
 /// WOW64 process has shown where it is; until then a process with no 32-bit
 /// half is searched for it. Empty for a plain 64-bit process.
-fn read_wow64_modules<T: Instrumentation, E: SliceEngine<T>>(
-    cpu: &mut DebugCpu<'_, T, E>,
+fn read_wow64_modules<G: GuestMemory>(
+    cpu: &mut G,
     eprocess: u64,
     cr3: u64,
     cache: &mut Option<u64>,
@@ -2941,32 +3247,32 @@ fn read_wow64_modules<T: Instrumentation, E: SliceEngine<T>>(
 
 /// The 32-bit modules of the `PEB32` that the `EPROCESS` field at `offset`
 /// leads to, when it leads to one.
-fn wow64_modules_at<T: Instrumentation, E: SliceEngine<T>>(
-    cpu: &mut DebugCpu<'_, T, E>,
+fn wow64_modules_at<G: GuestMemory>(
+    cpu: &mut G,
     root: Root,
     eprocess: u64,
     offset: u64,
 ) -> Option<Vec<WinModule>> {
-    let value = read_u64(cpu, Root::Live, eprocess + offset)?;
+    let value = read_u64(cpu, Root::Live, eprocess.wrapping_add(offset))?;
     let peb32 = peb32_of(cpu, value)?;
     // PEB32.ImageBaseAddress at +0x08; a real PEB32 begins a PE image.
-    let image_base = u64::from(read_u32(cpu, root, peb32 + 0x08)?);
+    let image_base = u64::from(read_u32(cpu, root, peb32.wrapping_add(0x08))?);
     if image_base == 0 || read_u16(cpu, root, image_base)? != MZ {
         return None;
     }
     // PEB32.Ldr at +0x0C; PEB_LDR_DATA32.InLoadOrderModuleList at +0x0C.
-    let loader = u64::from(read_u32(cpu, root, peb32 + 0x0C)?);
+    let loader = u64::from(read_u32(cpu, root, peb32.wrapping_add(0x0C))?);
     if loader == 0 {
         return None;
     }
-    Some(list_modules32(cpu, root, loader + 0x0C))
+    Some(list_modules32(cpu, root, loader.wrapping_add(0x0C)))
 }
 
 /// The `PEB32` address an `EPROCESS.Wow64Process` value stands for: a user
 /// address below 4 GiB held directly (Windows XP through 8.1), or a kernel
 /// pointer to an `EWOW64PROCESS` whose first field is it (Windows 10 on).
-fn peb32_of<T: Instrumentation, E: SliceEngine<T>>(
-    cpu: &mut DebugCpu<'_, T, E>,
+fn peb32_of<G: GuestMemory>(
+    cpu: &mut G,
     value: u64,
 ) -> Option<u64> {
     // A 32-bit PEB lives in the 32-bit half of the address space.
@@ -2980,8 +3286,8 @@ fn peb32_of<T: Instrumentation, E: SliceEngine<T>>(
 /// Walks a 32-bit `InLoadOrderModuleList` at `head`: `DllBase` +0x18,
 /// `SizeOfImage` +0x20, `FullDllName` +0x24, `BaseDllName` +0x2C, all 4-byte
 /// `LDR_DATA_TABLE_ENTRY` fields.
-fn list_modules32<T: Instrumentation, E: SliceEngine<T>>(
-    cpu: &mut DebugCpu<'_, T, E>,
+fn list_modules32<G: GuestMemory>(
+    cpu: &mut G,
     root: Root,
     head: u64,
 ) -> Vec<WinModule> {
@@ -2996,16 +3302,16 @@ fn list_modules32<T: Instrumentation, E: SliceEngine<T>>(
             break;
         }
         let (Some(base), Some(size)) = (
-            read_u32(cpu, root, entry + 0x18).map(u64::from),
-            read_u32(cpu, root, entry + 0x20),
+            read_u32(cpu, root, entry.wrapping_add(0x18)).map(u64::from),
+            read_u32(cpu, root, entry.wrapping_add(0x20)),
         ) else {
             break;
         };
         modules.push(WinModule {
             base,
             size,
-            name: read_unicode_string32(cpu, root, entry + 0x2C),
-            path: read_unicode_string32(cpu, root, entry + 0x24),
+            name: read_unicode_string32(cpu, root, entry.wrapping_add(0x2C)),
+            path: read_unicode_string32(cpu, root, entry.wrapping_add(0x24)),
             bits: ModuleBits::Bits32,
         });
         let Some(next) = read_u32(cpu, root, entry).map(u64::from) else {
@@ -3018,8 +3324,8 @@ fn list_modules32<T: Instrumentation, E: SliceEngine<T>>(
 
 /// A 32-bit `UNICODE_STRING` at `at`: `Length` (bytes) at +0, `Buffer` (a
 /// 4-byte pointer) at +4.
-fn read_unicode_string32<T: Instrumentation, E: SliceEngine<T>>(
-    cpu: &mut DebugCpu<'_, T, E>,
+fn read_unicode_string32<G: GuestMemory>(
+    cpu: &mut G,
     root: Root,
     at: u64,
 ) -> Option<String> {
@@ -3027,18 +3333,24 @@ fn read_unicode_string32<T: Instrumentation, E: SliceEngine<T>>(
     if length == 0 || length % 2 != 0 || length > MAX_NAME_BYTES {
         return None;
     }
-    let buffer = u64::from(read_u32(cpu, root, at + 4)?);
+    let buffer = u64::from(read_u32(cpu, root, at.wrapping_add(4))?);
     let bytes = read_exact(cpu, root, buffer, usize::from(length))?;
+    Some(utf16_lossy(&bytes))
+}
+
+/// UTF-16LE `bytes` as text; a trailing odd byte is no unit.
+fn utf16_lossy(bytes: &[u8]) -> String {
     let units: Vec<u16> = bytes
         .chunks_exact(2)
-        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+        .filter_map(|pair| <[u8; 2]>::try_from(pair).ok())
+        .map(u16::from_le_bytes)
         .collect();
-    Some(String::from_utf16_lossy(&units))
+    String::from_utf16_lossy(&units)
 }
 
 /// A 64-bit `UNICODE_STRING` at `at`: `Length` (bytes) at +0, `Buffer` at +8.
-fn read_unicode_string<T: Instrumentation, E: SliceEngine<T>>(
-    cpu: &mut DebugCpu<'_, T, E>,
+fn read_unicode_string<G: GuestMemory>(
+    cpu: &mut G,
     root: Root,
     at: u64,
 ) -> Option<String> {
@@ -3046,13 +3358,9 @@ fn read_unicode_string<T: Instrumentation, E: SliceEngine<T>>(
     if length == 0 || length % 2 != 0 || length > MAX_NAME_BYTES {
         return None;
     }
-    let buffer = read_u64(cpu, root, at + 8)?;
+    let buffer = read_u64(cpu, root, at.wrapping_add(8))?;
     let bytes = read_exact(cpu, root, buffer, usize::from(length))?;
-    let units: Vec<u16> = bytes
-        .chunks_exact(2)
-        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
-        .collect();
-    Some(String::from_utf16_lossy(&units))
+    Some(utf16_lossy(&bytes))
 }
 
 /// An address in the kernel half of a 64-bit address space.
@@ -3065,44 +3373,24 @@ fn user_pointer(value: u64) -> Option<u64> {
     (value != 0 && value < 0x0000_8000_0000_0000).then_some(value)
 }
 
-/// Fills `buf` from linear `address` under `root`, one page at a time;
-/// `false` when any page of it does not map or does not read.
-fn read_into<T: Instrumentation, E: SliceEngine<T>>(
-    cpu: &mut DebugCpu<'_, T, E>,
+/// Fills `buf` from linear `address` under `root`; `false` when any page of
+/// it does not map or does not read.
+fn read_into<G: GuestMemory>(
+    cpu: &mut G,
     root: Root,
     address: u64,
     buf: &mut [u8],
 ) -> bool {
-    let mut done = 0usize;
-    let mut at = address;
-    while done < buf.len() {
-        let in_page = usize::try_from(PAGE_BYTES - (at % PAGE_BYTES)).unwrap_or(buf.len());
-        let take = in_page.min(buf.len() - done);
-        let physical = match root {
-            Root::Live => cpu.dbg_xlate_linear2phy(at),
-            Root::Process(cr3) => cpu.dbg_xlate_linear2phy_in(cr3, at),
-        };
-        let Some(physical) = physical else {
-            return false;
-        };
-        match cpu.dbg_fetch_mem(physical, &mut buf[done..done + take]) {
-            Ok(Fetched::Valid) => {}
-            Ok(Fetched::OutsideMemory) => return false,
-            Err(error) => {
-                tracing::warn!("debugger read at {physical:#x} failed: {error}");
-                return false;
-            }
-        }
-        done += take;
-        at = at.wrapping_add(take as u64);
+    match cpu.read_linear(root, address, buf) {
+        GuestRead::Read => true,
+        GuestRead::Unreadable => false,
     }
-    true
 }
 
 /// `len` bytes from linear `address` under `root`, or `None` when any page of
 /// them does not map or does not read.
-fn read_exact<T: Instrumentation, E: SliceEngine<T>>(
-    cpu: &mut DebugCpu<'_, T, E>,
+fn read_exact<G: GuestMemory>(
+    cpu: &mut G,
     root: Root,
     address: u64,
     len: usize,
@@ -3111,8 +3399,19 @@ fn read_exact<T: Instrumentation, E: SliceEngine<T>>(
     read_into(cpu, root, address, &mut bytes).then_some(bytes)
 }
 
-fn read_u64<T: Instrumentation, E: SliceEngine<T>>(
-    cpu: &mut DebugCpu<'_, T, E>,
+/// `N` bytes at linear `address` under `root`, as an array: a fixed-size
+/// read whose fields the caller takes by constant index.
+fn read_array<const N: usize, G: GuestMemory>(
+    cpu: &mut G,
+    root: Root,
+    address: u64,
+) -> Option<[u8; N]> {
+    let mut bytes = [0u8; N];
+    read_into(cpu, root, address, &mut bytes).then_some(bytes)
+}
+
+fn read_u64<G: GuestMemory>(
+    cpu: &mut G,
     root: Root,
     address: u64,
 ) -> Option<u64> {
@@ -3120,8 +3419,8 @@ fn read_u64<T: Instrumentation, E: SliceEngine<T>>(
     read_into(cpu, root, address, &mut raw).then(|| u64::from_le_bytes(raw))
 }
 
-fn read_u32<T: Instrumentation, E: SliceEngine<T>>(
-    cpu: &mut DebugCpu<'_, T, E>,
+fn read_u32<G: GuestMemory>(
+    cpu: &mut G,
     root: Root,
     address: u64,
 ) -> Option<u32> {
@@ -3129,8 +3428,8 @@ fn read_u32<T: Instrumentation, E: SliceEngine<T>>(
     read_into(cpu, root, address, &mut raw).then(|| u32::from_le_bytes(raw))
 }
 
-fn read_u16<T: Instrumentation, E: SliceEngine<T>>(
-    cpu: &mut DebugCpu<'_, T, E>,
+fn read_u16<G: GuestMemory>(
+    cpu: &mut G,
     root: Root,
     address: u64,
 ) -> Option<u16> {
@@ -3152,7 +3451,7 @@ mod tests {
         let mut cpu = machine.debug_cpu(0).expect("the boot processor");
         let view = cpu.view();
         let mut discovery = WindowsDiscovery::default();
-        let off = read_windows(&mut cpu, &view, SystemView::Off, &mut discovery);
+        let off = read_windows(&mut cpu, &view, SystemView::Off, &mut discovery, None);
         assert_eq!(off.system, SystemListing::NotAsked);
         assert!(off.symbols.modules.is_empty());
         let processes = SystemView::Processes {
@@ -3168,7 +3467,7 @@ mod tests {
         for asked in [kernel, processes] {
             // The flat test mode keeps GS at 0: there is no KPCR to find.
             assert_eq!(
-                read_windows(&mut cpu, &view, asked, &mut discovery).system,
+                read_windows(&mut cpu, &view, asked, &mut discovery, None).system,
                 SystemListing::NoWindowsKernel(KernelMiss::NoKpcr)
             );
         }
@@ -3188,7 +3487,7 @@ mod tests {
             ViewTarget::Process { eprocess: 0xFFFF_FA80_0000_1000 },
             ViewTarget::Thread { eprocess: 0xFFFF_FA80_0000_1000, tid: 0x1A4 },
         ] {
-            let read = read_thread_view(&mut cpu, &view, target, &[], &mut discovery);
+            let read = read_thread_view(&mut cpu, &view, target, &[], &mut discovery, None);
             assert!(
                 matches!(read, ThreadViewRead::Miss(ViewMiss::NoWindowsKernel(KernelMiss::NoKpcr))),
                 "{target:?} read as {read:?}"
@@ -3280,11 +3579,222 @@ mod tests {
                 detail: ModuleDetail::Exports,
             },
             &mut WindowsDiscovery::default(),
+            None,
         );
         assert_eq!(
             read.system,
             SystemListing::NoWindowsKernel(KernelMiss::KernelUnmapped)
         );
+    }
+
+    /// The walks find a kernel through the KPCR, its processes through
+    /// `ActiveProcessLinks` and its modules through `PsLoadedModuleList`,
+    /// whatever answers the reads.
+    #[test]
+    fn the_walks_find_a_kernel_laid_out_in_a_page_map() {
+        use crate::debugger::fake_windows::{FakeWindows, FakeWindowsSpec};
+
+        let mut fake = FakeWindows::build(FakeWindowsSpec::typical());
+        let view = fake.view;
+        let read = read_windows(
+            &mut fake.guest,
+            &view,
+            SystemView::Processes {
+                selected: None,
+                detail: ProcessDetail::Modules,
+                module: None,
+                module_detail: ModuleDetail::Sections,
+            },
+            &mut WindowsDiscovery::default(),
+            None,
+        );
+        let SystemListing::Processes(listing) = read.system else {
+            panic!("the processes read as {:?}", read.system);
+        };
+        let processes: Vec<&str> = listing.processes.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(processes, ["System", "smss.exe", "csrss.exe"]);
+        let pids: Vec<u64> = listing.processes.iter().map(|p| p.pid).collect();
+        assert_eq!(pids, [4, 0x1F0, 0x26C]);
+        assert_eq!(listing.processes[1].eprocess, fake.eprocess(1));
+        assert!(listing.processes[0].current, "System runs in the live address space");
+        let modules: Vec<&str> = read.symbols.modules.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(modules, ["ntoskrnl.exe", "disk.sys"]);
+    }
+
+    /// The kernel PDB's layouts, as the shell would hand them over for the
+    /// PDB `fixture` describes.
+    fn pdb_layout(fixture: &rusty_box_symbols_fixtures::pdb::PdbFixture) -> Arc<KernelLayout> {
+        let bytes = rusty_box_symbols_fixtures::pdb::build_pdb(fixture);
+        let tables = rusty_box_symbols::tables::SymbolTables::parse(&bytes).expect("the fixture parses");
+        Arc::new(KernelLayout::from_tables(crate::symbols::kernel::tests::kernel_identity(), &tables))
+    }
+
+    fn windows10_kernel() -> rusty_box_symbols_fixtures::pdb::PdbFixture {
+        crate::debugger::kernel_layout::fixture::windows10_kernel([0x42; 16], 1)
+    }
+
+    fn listed_processes(read: &WindowsRead) -> Vec<String> {
+        match &read.system {
+            SystemListing::Processes(listing) => listing.processes.iter().map(|p| format!("{} {}", p.pid, p.name)).collect(),
+            other => panic!("the processes read as {other:?}"),
+        }
+    }
+
+    /// One guest lists the same processes whether its kernel is read by the
+    /// PDB's layouts or by discovery, and each listing says which.
+    #[test]
+    fn the_same_guest_lists_the_same_processes_under_pdb_and_discovered_layouts() {
+        use crate::debugger::fake_windows::{FakeWindows, FakeWindowsSpec};
+        let mut fake = FakeWindows::build(FakeWindowsSpec::typical());
+        let view = fake.view;
+        let mut discovery = WindowsDiscovery::default();
+        let discovered = read_windows(&mut fake.guest, &view, PROCESSES, &mut discovery, None);
+        assert_eq!(discovered.layouts, Some(KernelLayouts::Discovered));
+        let layout = pdb_layout(&windows10_kernel());
+        let by_pdb = read_windows(&mut fake.guest, &view, PROCESSES, &mut discovery, Some(&layout));
+        assert_eq!(by_pdb.layouts, Some(KernelLayouts::Pdb));
+        assert_eq!(listed_processes(&by_pdb), listed_processes(&discovered));
+        assert_eq!(listed_processes(&by_pdb), ["4 System", "496 smss.exe", "620 csrss.exe"]);
+    }
+
+    /// Review focus 2: a PDB of another build (here, an older layout of
+    /// `_EPROCESS`) is caught by the System cross-check, and the walks fall
+    /// back to discovery and still list every process.
+    #[test]
+    fn a_kernel_pdb_that_disagrees_with_memory_falls_back_to_discovery() {
+        use crate::debugger::fake_windows::{FakeWindows, FakeWindowsSpec};
+        let mut fake = FakeWindows::build(FakeWindowsSpec::typical());
+        let view = fake.view;
+        let mut wrong = windows10_kernel();
+        if let Some(eprocess) = wrong.types.iter_mut().find(|udt| udt.name == "_EPROCESS") {
+            for field in &mut eprocess.fields {
+                match field.name.as_str() {
+                    "UniqueProcessId" => field.offset = 0x2E0,
+                    "ActiveProcessLinks" => field.offset = 0x2E8,
+                    _ => {}
+                }
+            }
+        }
+        let layout = pdb_layout(&wrong);
+        let read = read_windows(&mut fake.guest, &view, PROCESSES, &mut WindowsDiscovery::default(), Some(&layout));
+        assert_eq!(read.layouts, Some(KernelLayouts::PdbDisagrees));
+        assert_eq!(listed_processes(&read), ["4 System", "496 smss.exe", "620 csrss.exe"]);
+    }
+
+    /// A PDB that agrees with memory seeds every offset the walks would
+    /// otherwise search for, its `ETHREAD` members relative to the thread
+    /// list's entry.
+    #[test]
+    fn a_kernel_pdb_seeds_what_the_walks_would_discover() {
+        use crate::debugger::fake_windows::{FakeWindows, FakeWindowsSpec, KERNEL_BASE};
+        let mut fake = FakeWindows::build(FakeWindowsSpec::typical());
+        let view = fake.view;
+        let layout = pdb_layout(&windows10_kernel());
+        let state = discover_kernel(&mut fake.guest, &view, Some(&layout)).expect("the kernel");
+        assert_eq!(state.layouts, KernelLayouts::Pdb);
+        assert_eq!(state.peb_offset, Some(0x550));
+        assert_eq!(state.parent_offset, Some(0x540));
+        assert_eq!(state.wow64_offset, Some(0x580));
+        let threads = state.threads.expect("the thread layout");
+        assert_eq!(threads.head, 0x5E0);
+        assert_eq!(threads.cid, 0x478 - 0x4E8);
+        assert_eq!(threads.teb, Some(0xF0 - 0x4E8));
+        assert_eq!(threads.trap_frame, Some(0x90 - 0x4E8));
+        let start = threads.start.expect("both start addresses");
+        assert_eq!(start.win32, 0x4D0 - 0x4E8);
+        assert_eq!(start.kernel, 0x450 - 0x4E8);
+        let vad = state.vad.expect("the VAD site");
+        assert_eq!(vad.offset, 0x7D8);
+        // The PDB fixture is Windows 10 22H2's, build 19045.
+        assert_eq!(vad.layout, vad::shape_layout(VadShape::BalancedNode, Some(19045)));
+        assert_eq!(state.object_era, Some(drivers::ObjectHeaderEra::Modern));
+        assert_eq!(state.service_descriptor, Some(KERNEL_BASE + 0x3040));
+        assert_eq!(state.kernel.layout.directory_table_base, 0x28);
+    }
+
+    /// The kernel's build is read from its `NtBuildNumber` export, its free-
+    /// build nibble dropped; a kernel without the export has no build, so
+    /// its regions' kinds read unknown rather than by a guessed era.
+    #[test]
+    fn the_kernels_build_comes_from_its_nt_build_number_export() {
+        use crate::debugger::fake_windows::{FakeWindows, FakeWindowsSpec};
+        let mut fake = FakeWindows::build(FakeWindowsSpec::typical());
+        let view = fake.view;
+        let state = discover_kernel(&mut fake.guest, &view, None).expect("the kernel");
+        assert_eq!(state.kernel.build, Some(19045));
+        let by_pdb = discover_kernel(&mut fake.guest, &view, Some(&pdb_layout(&windows10_kernel()))).expect("the kernel");
+        assert_eq!(by_pdb.kernel.build, Some(19045));
+        let mut unexported = FakeWindows::build(FakeWindowsSpec { build_number: None, ..FakeWindowsSpec::typical() });
+        let view = unexported.view;
+        let state = discover_kernel(&mut unexported.guest, &view, None).expect("the kernel");
+        assert_eq!(state.kernel.build, None);
+    }
+
+    /// The processes view every listing test asks for.
+    pub(crate) const PROCESSES: SystemView = SystemView::Processes {
+        selected: None,
+        detail: ProcessDetail::Modules,
+        module: None,
+        module_detail: ModuleDetail::Sections,
+    };
+
+    fn process_names(read: &WindowsRead) -> Vec<String> {
+        match &read.system {
+            SystemListing::Processes(listing) => listing.processes.iter().map(|p| p.name.clone()).collect(),
+            other => panic!("the processes read as {other:?}"),
+        }
+    }
+
+    /// Review focus 1: a process whose `Flink` leaves for the top of the
+    /// address space ends the list there; what was read stays listed.
+    #[test]
+    fn a_process_ring_that_leaves_for_the_top_of_memory_ends_the_list() {
+        use crate::debugger::fake_windows::{FakeWindows, FakeWindowsSpec, LIVE_CR3};
+        let spec = FakeWindowsSpec::typical();
+        let links = spec.eprocess.unique_process_id + 8;
+        let mut fake = FakeWindows::build(spec);
+        let smss = fake.eprocess(1);
+        fake.guest.write_u64(LIVE_CR3, smss + links, 0xFFFF_FFFF_FFFF_FFF8);
+        let view = fake.view;
+        let read = read_windows(&mut fake.guest, &view, PROCESSES, &mut WindowsDiscovery::default(), None);
+        assert_eq!(process_names(&read), ["System", "smss.exe"]);
+    }
+
+    /// Review focus 1: an export table that claims four billion names, at an
+    /// RVA that wraps past the top of memory, names nothing, so no kernel is
+    /// found and nothing is listed.
+    #[test]
+    fn an_export_table_that_claims_every_name_finds_no_kernel() {
+        use crate::debugger::fake_windows::{FakeWindows, FakeWindowsSpec, EXPORTS_RVA, KERNEL_BASE, LIVE_CR3};
+        let mut fake = FakeWindows::build(FakeWindowsSpec::typical());
+        let directory = KERNEL_BASE + EXPORTS_RVA;
+        fake.guest.write_u32(LIVE_CR3, directory + 0x18, u32::MAX);
+        fake.guest.write_u32(LIVE_CR3, directory + 0x20, 0xFFFF_FFF0);
+        let view = fake.view;
+        let read = read_windows(&mut fake.guest, &view, PROCESSES, &mut WindowsDiscovery::default(), None);
+        assert!(read.symbols.modules.is_empty(), "{:?}", read.symbols.modules);
+    }
+
+    /// Review focus 1: a driver whose image would run past the top of the
+    /// address space is still listed, and reading its sections ends cleanly.
+    #[test]
+    fn a_module_whose_size_runs_past_the_top_of_memory_is_still_listed() {
+        use crate::debugger::fake_windows::{FakeImage, FakePdb, FakeWindows, FakeWindowsSpec};
+        let edge = 0xFFFF_FFFF_FFF0_0000;
+        let mut spec = FakeWindowsSpec::typical();
+        spec.drivers.push(FakeImage {
+            name: "edge.sys",
+            base: edge,
+            size: 0x20_0000,
+            time_date_stamp: 1,
+            pdb: FakePdb { guid: [0x22; 16], age: 1, path: "edge.pdb" },
+        });
+        let mut fake = FakeWindows::build(spec);
+        let view = fake.view;
+        let request = SystemView::KernelModules { selected: Some(edge), detail: ModuleDetail::Sections };
+        let read = read_windows(&mut fake.guest, &view, request, &mut WindowsDiscovery::default(), None);
+        let modules: Vec<&str> = read.symbols.modules.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(modules, ["ntoskrnl.exe", "disk.sys", "edge.sys"]);
     }
 
     #[test]

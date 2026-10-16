@@ -115,8 +115,9 @@ same commit.
 
 The end state is a target: `#![forbid(unsafe_code)]` on every library crate except the
 host-FFI leaf, with no_alloc placement delegated to the vetted `static_cell` crate, so that the
-one unavoidable `unsafe` lives outside this tree. Today three crates carry the `forbid`:
-`rusty_box_core`, `rusty_box_decoder` and `rusty_box_devices`. `static_cell` is not a
+one unavoidable `unsafe` lives outside this tree. Today four crates carry the `forbid`:
+`rusty_box_core`, `rusty_box_decoder`, `rusty_box_devices` and `rusty_box_symbols`.
+`static_cell` is not a
 dependency. The leaf, `rusty_box_whp_sys`, is a permanent exception and is registered below.
 Four other scanned trees hold `unsafe` tokens:
 
@@ -133,9 +134,10 @@ leaf does, is the owner's call and is not decided here. This document declares n
 permanent; until that call is made, their tokens are held by their ratchet baselines, not by a
 registry entry.
 
-*Enforcement (mechanical):* the `doctrine ratchets` step of `cargo xtask ci` scans eight trees,
+*Enforcement (mechanical):* the `doctrine ratchets` step of `cargo xtask ci` scans nine trees,
 the `src` of `rusty_box`, `rusty_box_decoder`, `rusty_box_core`, `rusty_box_devices`,
-`rusty_box_whp_sys`, `rusty_box_whp`, `rusty_box_whp_engine` and `rusty_box_gui`. It fails when,
+`rusty_box_whp_sys`, `rusty_box_whp`, `rusty_box_whp_engine`, `rusty_box_gui` and
+`rusty_box_symbols`. It fails when,
 in any of them:
 
 - the `unsafe` tokens exceed that tree's entry in `UNSAFE_TOKEN_BASELINES`. The scan counts
@@ -682,7 +684,7 @@ recalled: a whole-word search for `dyn` over the `src` tree of every workspace c
 - `rusty_box_devices/src`: 4. Two are code (`DeviceCtx`, below); two are comments, in
   `api.rs` and `display/card.rs`.
 - `rusty_box_decoder/src` and `rusty_box_whp_engine/src`: 1 each, code, below.
-- `rusty_box_core`, `rusty_box_whp_sys`, `rusty_box_whp`, `rusty_box_bximage`, `xtask`, and
+- `rusty_box_core`, `rusty_box_whp_sys`, `rusty_box_whp`, `rusty_box_bximage`, `rusty_box_symbols`, `xtask`, and
   the three crates under `examples/`: none.
 
 Integration tests, benches and example programs (the `tests/`, `benches/` and `examples/`

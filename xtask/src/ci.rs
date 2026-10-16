@@ -1,11 +1,13 @@
 //! Local CI gate suite.
 //!
 //! `cargo xtask ci` runs the doctrine ratchets, then a fixed matrix of `cargo`
-//! steps, every one but the last a release build: tests for rusty_box_core and
+//! steps, every one but the last a release build: the xtask crate's own
+//! tests; tests for rusty_box_core and
 //! rusty_box_devices (their no_std + no_alloc builds included) and bare-metal
 //! (`x86_64-unknown-none`) checks of both, devices with alloc; tests for the
 //! three WHP crates, the engine's with every target, and a check of
-//! rusty_box_whp's examples; tests for the decoder and the rusty_box library;
+//! rusty_box_whp's examples; tests and clippy for the symbol engine; the
+//! debugger's panic lints; tests for the decoder and the rusty_box library;
 //! checks of rusty_box as no_std with and without alloc, for
 //! `x86_64-unknown-none`, and for `wasm32-unknown-unknown` with alloc; the UEFI
 //! application build; the public-API, doc-example and doctrine compile-fail
@@ -247,11 +249,36 @@ const UNSAFE_TOKEN_BASELINES: &[(&str, usize)] = &[
     // `android.rs`. The crate is host FFI outside a named leaf; see the R1
     // registry in docs/safety-doctrine.md.
     ("rusty_box_gui/src", 2),
+    // The symbol engine reads untrusted files (PDBs, ELF, cabinets) and the
+    // network, so it is `#![forbid(unsafe_code)]` from its first line.
+    ("rusty_box_symbols/src", 0),
 ];
 /// `unsafe impl … Send/Sync` lines in rusty_box/src. Zero, permanently: thread
 /// safety is derived from ownership, and `Emulator`'s `const` assertion in
 /// emulator/mod.rs fails the build if a field ever takes that away (R6).
 const UNSAFE_IMPL_SEND_BASELINE: usize = 0;
+
+/// Source roots the shape check parses (`xtask::shape`): tuples, `dyn` and
+/// `impl Trait` are refused there. Each crate that follows the rules joins
+/// in the task that creates it.
+const SHAPE_CHECKED: &[&str] = &[
+    "rusty_box_symbols/src",
+    "rusty_box_gui/src/debugger/guest.rs",
+    "rusty_box_gui/src/debugger/fake_windows.rs",
+    "rusty_box_gui/src/debugger/module_identity.rs",
+    "rusty_box_gui/src/debugger/kernel_layout.rs",
+    "rusty_box_gui/src/symbols",
+    "rusty_box_gui/src/symbol_settings.rs",
+    "rusty_box_gui/src/shell/debugger_page/symbols_tab.rs",
+    "rusty_box_gui/src/shell/symbols_page.rs",
+];
+
+/// The `#[no_panic]` canary must fail to link naming this function.
+const CANARY_FUNCTION: &str = "index_past_the_end";
+
+/// The crate whose `#[no_panic]` functions must each be reached from its
+/// tests (`xtask::tier_p`).
+const TIER_P_CRATE: &str = "rusty_box_symbols";
 
 /// Files, per crate, carrying a crate-inner `allow` or `expect` that switches
 /// `dead_code` off for the whole file — and, in a `mod.rs`, for every module
@@ -286,14 +313,15 @@ const BLANKET_DEAD_CODE_BASELINES: &[(&str, usize)] = &[
 
 /// `.unwrap()` / `.expect(…)` outside test code, in each crate
 /// `UNSAFE_TOKEN_BASELINES` names: rusty_box, the decoder, core, devices, the
-/// three WHP crates and the GUI.
+/// three WHP crates, the GUI and the symbol engine.
 /// Zero, and it is to stay zero: a library that panics on a condition it could
 /// have returned is a library its caller cannot contain.
 ///
 /// The rule is about WHERE, not about the call. Inside `#[cfg(test)]`, a
 /// fixture that cannot be built should fail loudly and immediately — so the
-/// scan stops at a file's first `#[cfg(test)]` line, skips whole test files,
-/// and skips doc comments, whose examples are tests too.
+/// scan skips `#[cfg(test)]` items, whole test files (by name, or by a
+/// `#[cfg(test)]` on their `mod` declaration), and doc comments, whose
+/// examples are tests too.
 ///
 /// 52 -> 0. Every one of the 52 was a claim about a value, and none of them
 /// paid for itself: the largest group, 37 in `cpu/string.rs`, asserted at run
@@ -433,6 +461,106 @@ fn production_panics(text: &str) -> usize {
     n
 }
 
+/// A module a file declares as a file of its own (`mod name;`).
+#[derive(Debug, PartialEq, Eq)]
+struct DeclaredModule {
+    name: String,
+    /// Its `#[path = "…"]`, when it carries one.
+    path: Option<String>,
+}
+
+/// The modules `text` declares as files (`mod name;`, any visibility) under a
+/// `#[cfg(test)]` gate: whole files of test code, which is what the gate on
+/// their declaration makes them. Other attributes may stand between the gate
+/// and the declaration; any other line drops the gate.
+fn test_gated_module_files(text: &str) -> Vec<DeclaredModule> {
+    let mut modules = Vec::new();
+    let mut gated = false;
+    let mut path = None;
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.is_empty() || trimmed.starts_with("//") {
+            continue;
+        }
+        if is_cfg_test_attr(trimmed) {
+            gated = true;
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("#[path") {
+            path = rest
+                .split('"')
+                .nth(1)
+                .map(str::to_owned);
+            continue;
+        }
+        if trimmed.starts_with("#[") {
+            continue;
+        }
+        if gated {
+            let declaration = trimmed
+                .strip_prefix("pub(crate) ")
+                .or_else(|| trimmed.strip_prefix("pub(super) "))
+                .or_else(|| trimmed.strip_prefix("pub "))
+                .unwrap_or(trimmed);
+            if let Some(name) = declaration
+                .strip_prefix("mod ")
+                .and_then(|rest| rest.trim_end().strip_suffix(';'))
+            {
+                modules.push(DeclaredModule {
+                    name: name.trim().to_owned(),
+                    path: path.take(),
+                });
+            }
+        }
+        gated = false;
+        path = None;
+    }
+    modules
+}
+
+/// The files a `mod name;` in `parent` can live in: beside it for a `mod.rs`,
+/// `lib.rs` or `main.rs`, else in the folder named after it.
+fn declared_module_files(parent: &std::path::Path, name: &str) -> [PathBuf; 2] {
+    let dir = parent.parent().unwrap_or(parent);
+    let stem = parent.file_stem().and_then(|stem| stem.to_str()).unwrap_or("");
+    let home = if matches!(stem, "mod" | "lib" | "main") {
+        dir.to_path_buf()
+    } else {
+        dir.join(stem)
+    };
+    [home.join(format!("{name}.rs")), home.join(name).join("mod.rs")]
+}
+
+/// Every file under `dir` that a `#[cfg(test)]`-gated `mod name;` declares.
+fn collect_test_gated_files(
+    dir: &std::path::Path,
+    found: &mut std::collections::HashSet<PathBuf>,
+) -> Result<(), String> {
+    let entries = std::fs::read_dir(dir)
+        .map_err(|err| format!("doctrine ratchets: read_dir {}: {err}", dir.display()))?;
+    for entry in entries {
+        let path = entry
+            .map_err(|err| format!("doctrine ratchets: dir entry: {err}"))?
+            .path();
+        if path.is_dir() {
+            collect_test_gated_files(&path, found)?;
+        } else if path.extension().is_some_and(|e| e == "rs") {
+            let text = std::fs::read_to_string(&path)
+                .map_err(|err| format!("doctrine ratchets: read {}: {err}", path.display()))?;
+            for module in test_gated_module_files(&text) {
+                match module.path {
+                    // A `#[path]` is relative to the declaring file's folder.
+                    Some(file) => {
+                        found.insert(path.parent().unwrap_or(&path).join(file));
+                    }
+                    None => found.extend(declared_module_files(&path, &module.name)),
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Count occurrences of a bare `unsafe` token per crate, comment lines
 /// stripped, against the ratchet baselines.
 fn doctrine_ratchets(root: &PathBuf) -> Result<(), String> {
@@ -507,13 +635,17 @@ fn doctrine_ratchets(root: &PathBuf) -> Result<(), String> {
             .is_some_and(|stem| stem == "tests" || stem.ends_with("_tests"))
     }
 
-    fn scan_dir(
-        dir: &std::path::Path,
-        unsafe_tokens: &mut usize,
-        unsafe_impl_send: &mut usize,
-        blanket_dead_code: &mut usize,
-        panics: &mut usize,
-    ) -> Result<(), String> {
+    /// What one crate's scan adds to: its counts, and the files its
+    /// `#[cfg(test)]`-gated declarations make test code.
+    struct CrateScan {
+        unsafe_tokens: usize,
+        unsafe_impl_send: usize,
+        blanket_dead_code: usize,
+        panics: usize,
+        test_files: std::collections::HashSet<PathBuf>,
+    }
+
+    fn scan_dir(dir: &std::path::Path, scan: &mut CrateScan) -> Result<(), String> {
         let entries = std::fs::read_dir(dir)
             .map_err(|err| format!("doctrine ratchets: read_dir {}: {err}", dir.display()))?;
         for entry in entries {
@@ -521,31 +653,31 @@ fn doctrine_ratchets(root: &PathBuf) -> Result<(), String> {
                 entry.map_err(|err| format!("doctrine ratchets: dir entry: {err}"))?;
             let path = entry.path();
             if path.is_dir() {
-                scan_dir(&path, unsafe_tokens, unsafe_impl_send, blanket_dead_code, panics)?;
+                scan_dir(&path, scan)?;
             } else if path.extension().is_some_and(|e| e == "rs") {
                 let text = std::fs::read_to_string(&path).map_err(|err| {
                     format!("doctrine ratchets: read {}: {err}", path.display())
                 })?;
-                if !is_test_file(&path) {
-                    *panics += production_panics(&text);
+                if !is_test_file(&path) && !scan.test_files.contains(&path) {
+                    scan.panics += production_panics(&text);
                 }
                 // One per FILE, not per line: a file may carry several inner
                 // attributes, and what is being counted is files whose dead
                 // code is invisible.
                 if hides_dead_code(&text) {
-                    *blanket_dead_code += 1;
+                    scan.blanket_dead_code += 1;
                 }
                 for line in text.lines() {
                     let trimmed = line.trim_start();
                     if trimmed.starts_with("//") {
                         continue;
                     }
-                    *unsafe_tokens += word_count(line, "unsafe");
+                    scan.unsafe_tokens += word_count(line, "unsafe");
                     let code = line.split("//").next().unwrap_or("");
                     if code.contains("unsafe impl")
                         && (code.contains("Send") || code.contains("Sync"))
                     {
-                        *unsafe_impl_send += 1;
+                        scan.unsafe_impl_send += 1;
                     }
                 }
             }
@@ -556,17 +688,23 @@ fn doctrine_ratchets(root: &PathBuf) -> Result<(), String> {
     let mut total_impl_send = 0usize;
     let mut total_panics = 0usize;
     for (rel, baseline) in UNSAFE_TOKEN_BASELINES {
-        let mut tokens = 0usize;
-        let mut impl_send = 0usize;
-        let mut blanket_dead_code = 0usize;
-        let mut panics = 0usize;
-        scan_dir(
-            &root.join(rel),
-            &mut tokens,
-            &mut impl_send,
-            &mut blanket_dead_code,
-            &mut panics,
-        )?;
+        let mut test_files = std::collections::HashSet::new();
+        collect_test_gated_files(&root.join(rel), &mut test_files)?;
+        let mut scan = CrateScan {
+            unsafe_tokens: 0,
+            unsafe_impl_send: 0,
+            blanket_dead_code: 0,
+            panics: 0,
+            test_files,
+        };
+        scan_dir(&root.join(rel), &mut scan)?;
+        let CrateScan {
+            unsafe_tokens: tokens,
+            unsafe_impl_send: impl_send,
+            blanket_dead_code,
+            panics,
+            ..
+        } = scan;
         if panics > PRODUCTION_PANIC_BASELINE {
             return Err(format!(
                 "doctrine ratchets: {rel} has {panics} `.unwrap()`/`.expect(…)` outside test \
@@ -618,11 +756,145 @@ fn doctrine_ratchets(root: &PathBuf) -> Result<(), String> {
              {UNSAFE_IMPL_SEND_BASELINE} (R6: Send derives, never promised)"
         ));
     }
+    for rel in SHAPE_CHECKED {
+        let mut findings = Vec::new();
+        shape_scan(&root.join(rel), &mut findings)?;
+        if let Some(first) = findings.first() {
+            return Err(format!(
+                "doctrine ratchets: {} tuple/`dyn`/`impl Trait` constructs under {rel}, the \
+                 first: {first}. Name the shape with a struct (R0), a generic (R8), or match \
+                 on the values directly.",
+                findings.len()
+            ));
+        }
+    }
+    no_panic_canary(root)?;
+    tier_p_sweep(root)?;
     println!("    production `.unwrap()`/`.expect(…)`: {total_panics}");
     println!(
         "<== doctrine ratchets ok ({:.1}s)",
         started.elapsed().as_secs_f32()
     );
+    Ok(())
+}
+
+/// Every refused construct in the file `dir`, or under the folder `dir`, as `path:line:column what`.
+fn shape_scan(dir: &std::path::Path, findings: &mut Vec<String>) -> Result<(), String> {
+    if dir.is_file() {
+        let text =
+            std::fs::read_to_string(dir).map_err(|error| format!("{}: {error}", dir.display()))?;
+        for finding in crate::shape::check_source(&text)
+            .map_err(|error| format!("{}: {error}", dir.display()))?
+        {
+            findings.push(format!(
+                "{}:{}:{} {}",
+                dir.display(),
+                finding.line,
+                finding.column,
+                finding.what
+            ));
+        }
+        return Ok(());
+    }
+    let entries = std::fs::read_dir(dir).map_err(|error| format!("{}: {error}", dir.display()))?;
+    for entry in entries {
+        let path = entry.map_err(|error| format!("{}: {error}", dir.display()))?.path();
+        if path.is_dir() {
+            shape_scan(&path, findings)?;
+        } else if path.extension().is_some_and(|ext| ext == "rs") {
+            let text = std::fs::read_to_string(&path)
+                .map_err(|error| format!("{}: {error}", path.display()))?;
+            for finding in crate::shape::check_source(&text)
+                .map_err(|error| format!("{}: {error}", path.display()))?
+            {
+                findings.push(format!(
+                    "{}:{}:{} {}",
+                    path.display(),
+                    finding.line,
+                    finding.column,
+                    finding.what
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Builds the canary and requires its link to fail naming
+/// `CANARY_FUNCTION`: proof that `#[no_panic]` still proves something here.
+fn no_panic_canary(root: &PathBuf) -> Result<(), String> {
+    let output = Command::new("cargo")
+        .args([
+            "build",
+            "--release",
+            "--manifest-path",
+            "xtask/no_panic_canary/Cargo.toml",
+        ])
+        .env("CARGO_TARGET_DIR", root.join("target").join("no_panic_canary"))
+        .current_dir(root)
+        .output()
+        .map_err(|error| format!("no-panic canary: failed to spawn cargo: {error}"))?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if output.status.success() {
+        return Err(
+            "doctrine ratchets: the no-panic canary LINKED. `#[no_panic]` proves nothing on \
+             this toolchain or with these settings, so no proof in rusty_box_symbols can be \
+             trusted until it fails again."
+                .to_owned(),
+        );
+    }
+    if !stderr.contains(CANARY_FUNCTION) {
+        let tail: Vec<&str> = stderr.lines().rev().take(20).collect();
+        let tail: Vec<&str> = tail.into_iter().rev().collect();
+        return Err(format!(
+            "doctrine ratchets: the no-panic canary failed for another reason than its proof \
+             (no mention of `{CANARY_FUNCTION}`):\n{}",
+            tail.join("\n")
+        ));
+    }
+    println!("    no-panic canary: refused to link, as it must");
+    Ok(())
+}
+
+/// Every `#[no_panic]` function of `TIER_P_CRATE` must be reached from the
+/// crate's own tests: its release test link proves only what they reach.
+fn tier_p_sweep(root: &PathBuf) -> Result<(), String> {
+    use crate::tier_p::{untested_tier_p, SourceRole};
+    let crate_root = root.join(TIER_P_CRATE);
+    let mut sources = Vec::new();
+    collect_sources(&crate_root.join("src"), SourceRole::Library, &mut sources)?;
+    collect_sources(&crate_root.join("tests"), SourceRole::Test, &mut sources)?;
+    let untested = untested_tier_p(&sources)?;
+    if let Some(first) = untested.first() {
+        return Err(format!(
+            "doctrine ratchets: {} `#[no_panic]` functions of {TIER_P_CRATE} are reached by no test, \
+             the first: `{}` in {}. Its release test link proves only what its own tests reach: \
+             call it from its module's tests.",
+            untested.len(),
+            first.function,
+            first.path
+        ));
+    }
+    println!("    tier-P sweep: every `#[no_panic]` function of {TIER_P_CRATE} is reached from its tests");
+    Ok(())
+}
+
+/// Every `.rs` file under `dir`, read, with the role given.
+fn collect_sources(
+    dir: &std::path::Path,
+    role: crate::tier_p::SourceRole,
+    into: &mut Vec<crate::tier_p::Source>,
+) -> Result<(), String> {
+    let entries = std::fs::read_dir(dir).map_err(|error| format!("{}: {error}", dir.display()))?;
+    for entry in entries {
+        let path = entry.map_err(|error| format!("{}: {error}", dir.display()))?.path();
+        if path.is_dir() {
+            collect_sources(&path, role, into)?;
+        } else if path.extension().is_some_and(|ext| ext == "rs") {
+            let text = std::fs::read_to_string(&path).map_err(|error| format!("{}: {error}", path.display()))?;
+            into.push(crate::tier_p::Source { path: path.display().to_string(), text, role });
+        }
+    }
     Ok(())
 }
 
@@ -644,6 +916,16 @@ struct Step {
 }
 
 const MATRIX: &[Step] = &[
+    // The gate's own scanners first: the ratchets above ran on their rules,
+    // and these tests are what hold those rules to their cases. The
+    // `cargo xtask` alias runs a debug build, so this release build of the
+    // crate never replaces the binary running it.
+    Step {
+        name: "xtask tests",
+        args: &["test", "--release", "-p", "xtask"],
+        envs: &[],
+        stdout_marker: None,
+    },
     // The core crate is proven on its own, in every configuration it ships,
     // BEFORE anything that depends on it: a foundation that only compiles as
     // part of its consumer is not a foundation. Its default build is the
@@ -757,6 +1039,56 @@ const MATRIX: &[Step] = &[
     Step {
         name: "decoder tests",
         args: &["test", "--release", "-p", "rusty_box_decoder"],
+        envs: &[],
+        stdout_marker: None,
+    },
+    // The symbol engine reads hostile files with readers of its own and may
+    // not panic. Its tests run in release, whose test binaries link with
+    // unwinding: that is what makes its `#[no_panic]` proofs bite (a panic
+    // path reachable from a marked function fails the link).
+    Step {
+        name: "symbols tests",
+        args: &["test", "--release", "-p", "rusty_box_symbols"],
+        envs: &[],
+        stdout_marker: None,
+    },
+    // The crate's zero-panic lints are clippy lints, and no other step runs
+    // clippy: without this one, an index or an `unwrap` would compile clean.
+    // `--features fakes` lints the test doubles other crates link against.
+    Step {
+        name: "symbols clippy",
+        args: &[
+            "clippy",
+            "--release",
+            "-p",
+            "rusty_box_symbols",
+            "--all-targets",
+            "--features",
+            "fakes",
+            "--no-deps",
+            "--",
+            "-D",
+            "warnings",
+        ],
+        envs: &[],
+        stdout_marker: None,
+    },
+    // The debugger walks memory a guest controls; its modules deny the
+    // panic lints, and this step is what runs them. `-A clippy::all` keeps
+    // the rest of the crate to rustc's own warnings: only the walls fail it.
+    Step {
+        name: "gui clippy",
+        args: &[
+            "clippy",
+            "--release",
+            "-p",
+            "rusty_box_gui",
+            "--lib",
+            "--no-deps",
+            "--",
+            "-A",
+            "clippy::all",
+        ],
         envs: &[],
         stdout_marker: None,
     },
@@ -1177,9 +1509,72 @@ mod tests {
         );
     }
 
+    /// The gate's own scanners (the ratchet's test-module rule, the literal
+    /// stripper) are only as good as their tests, and those run nowhere
+    /// unless a step runs them.
+    #[test]
+    fn the_matrix_runs_the_xtask_tests() {
+        let wanted: &[&str] = &["test", "--release", "-p", "xtask"];
+        assert!(MATRIX.iter().any(|step| step.args == wanted), "no MATRIX step runs `cargo test --release -p xtask`");
+    }
+
     #[test]
     fn parse_ci_rejects_unknown() {
         assert!(parse_ci_args(&["--bogus".into()]).is_err());
+    }
+
+    #[test]
+    fn a_module_file_declared_under_cfg_test_is_test_code() {
+        let source = r#"
+pub(crate) mod guest;
+#[cfg(test)]
+pub(crate) mod fake_windows;
+#[cfg(all(test, not(debug_assertions)))]
+#[path = "elsewhere.rs"]
+mod proofs;
+#[cfg(test)]
+mod tests {
+    mod inline_only;
+}
+#[cfg(any(test, feature = "fakes"))]
+pub mod fakes;
+#[cfg(test)]
+use std::fmt;
+mod production;
+"#;
+        assert_eq!(
+            test_gated_module_files(source),
+            [
+                DeclaredModule {
+                    name: "fake_windows".to_owned(),
+                    path: None,
+                },
+                DeclaredModule {
+                    name: "proofs".to_owned(),
+                    path: Some("elsewhere.rs".to_owned()),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_declared_module_lives_beside_a_mod_rs_and_below_any_other_file() {
+        let beside = declared_module_files(std::path::Path::new("src/debugger/mod.rs"), "fake");
+        assert_eq!(
+            beside,
+            [
+                PathBuf::from("src/debugger/fake.rs"),
+                PathBuf::from("src/debugger/fake/mod.rs")
+            ]
+        );
+        let below = declared_module_files(std::path::Path::new("src/debugger.rs"), "fake");
+        assert_eq!(
+            below,
+            [
+                PathBuf::from("src/debugger/fake.rs"),
+                PathBuf::from("src/debugger/fake/mod.rs")
+            ]
+        );
     }
 
     #[test]

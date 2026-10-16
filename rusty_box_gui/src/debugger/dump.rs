@@ -77,12 +77,15 @@ fn write_ram<T: Instrumentation, E: SliceEngine<T>, F: Fn() -> bool>(
         if abandoned() {
             return Err(DumpError::Abandoned);
         }
-        let len = usize::try_from(total - offset)
-            .map_or(DUMP_CHUNK_BYTES, |left| left.min(DUMP_CHUNK_BYTES));
-        let buf = &mut chunk[..len];
+        // `offset` is below `total` here, so what is left is at least 1.
+        let len = usize::try_from(total.saturating_sub(offset))
+            .map_or(chunk.len(), |left| left.min(chunk.len()));
+        let buf = chunk
+            .get_mut(..len)
+            .ok_or_else(|| io::Error::other("a dump chunk outgrew its buffer"))?;
         emu.read_ram_image(RamOffset(offset), buf)?;
         out.write_all(buf)?;
-        offset += len as u64;
+        offset = offset.saturating_add(len as u64);
     }
     let file = out
         .into_inner()

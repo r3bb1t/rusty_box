@@ -14,3 +14,8 @@ readme = "README.md"
 adb_client = { version = "3.2.2", default-features = false }
 ureq = "2"
 zip = { version = "0.6", default-features = false, features = ["deflate"] }
+# The hook's input is a JSON event (Claude Code PreToolUse).
+serde_json = "1"
+# The shape check parses Rust source; span locations give it line numbers.
+syn = { version = "2", features = ["full", "visit"] }
+proc-macro2 = { version = "1", features = ["span-locations"] }

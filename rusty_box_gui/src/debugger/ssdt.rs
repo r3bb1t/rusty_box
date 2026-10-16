@@ -44,13 +44,17 @@ pub(crate) struct Descriptor {
 /// The descriptor `bytes` (at least [`DESCRIPTOR_BYTES`] of them) hold, or
 /// `None` when its limit is zero or past [`MAX_SERVICES`].
 pub(crate) fn parse_descriptor(bytes: &[u8]) -> Option<Descriptor> {
-    let table = bytes.get(DESCRIPTOR_SERVICE_TABLE..DESCRIPTOR_SERVICE_TABLE + 8)?;
-    let limit = bytes.get(DESCRIPTOR_SERVICE_LIMIT..DESCRIPTOR_SERVICE_LIMIT + 4)?;
-    let limit = u32::from_le_bytes([limit[0], limit[1], limit[2], limit[3]]);
+    let table: [u8; 8] = bytes
+        .get(DESCRIPTOR_SERVICE_TABLE..DESCRIPTOR_SERVICE_TABLE + 8)?
+        .try_into()
+        .ok()?;
+    let limit: [u8; 4] = bytes
+        .get(DESCRIPTOR_SERVICE_LIMIT..DESCRIPTOR_SERVICE_LIMIT + 4)?
+        .try_into()
+        .ok()?;
+    let limit = u32::from_le_bytes(limit);
     (1..=MAX_SERVICES).contains(&limit).then(|| Descriptor {
-        service_table: u64::from_le_bytes([
-            table[0], table[1], table[2], table[3], table[4], table[5], table[6], table[7],
-        ]),
+        service_table: u64::from_le_bytes(table),
         limit,
     })
 }
@@ -60,14 +64,21 @@ pub(crate) fn parse_descriptor(bytes: &[u8]) -> Option<Descriptor> {
 /// end is passed by.
 fn push_lea_r10_targets(code: &[u8], address: u64, out: &mut Vec<u64>) {
     for (at, bytes) in code.windows(LEA_R10_LEN).enumerate() {
-        if bytes[..3] != LEA_R10_RIP {
+        if bytes.get(..3) != Some(LEA_R10_RIP.as_slice()) {
             continue;
         }
-        let displacement = i32::from_le_bytes([bytes[3], bytes[4], bytes[5], bytes[6]]);
-        // RIP-relative: from the end of the instruction.
+        let Some(displacement) = bytes
+            .get(3..LEA_R10_LEN)
+            .and_then(|raw| <[u8; 4]>::try_from(raw).ok())
+            .map(i32::from_le_bytes)
+        else {
+            continue;
+        };
+        // RIP-relative: from the end of the instruction. `at` indexes a
+        // window of `code`, so the sum stays far below `usize::MAX`.
         out.push(
             address
-                .wrapping_add((at + LEA_R10_LEN) as u64)
+                .wrapping_add(at.wrapping_add(LEA_R10_LEN) as u64)
                 .wrapping_add_signed(i64::from(displacement)),
         );
     }
@@ -98,7 +109,7 @@ impl LeaR10Scan {
         push_lea_r10_targets(&self.window, start, &mut self.targets);
         // Fewer bytes than one instruction: none found twice.
         let keep = self.window.len().min(LEA_R10_LEN - 1);
-        self.window.drain(..self.window.len() - keep);
+        self.window.drain(..self.window.len().saturating_sub(keep));
         self.next = Some(address.wrapping_add(piece.len() as u64));
     }
 
@@ -270,5 +281,20 @@ mod tests {
                 inside: 3,
             }
         );
+    }
+
+    /// A descriptor cut short reads as none, at every length; a table at
+    /// the top of memory names its routines by wrapping, as the processor
+    /// adds.
+    #[test]
+    fn a_descriptor_cut_short_or_a_table_at_the_top_of_memory_reads_safely() {
+        let mut bytes = vec![0u8; DESCRIPTOR_SERVICE_LIMIT + 4];
+        bytes[DESCRIPTOR_SERVICE_LIMIT..].copy_from_slice(&10u32.to_le_bytes());
+        assert!(parse_descriptor(&bytes).is_some());
+        for len in 0..bytes.len() {
+            assert!(parse_descriptor(&bytes[..len]).is_none(), "{len} bytes");
+        }
+        assert_eq!(routine_of(u64::MAX, 0x10, Encoding::Shift), 0);
+        assert_eq!(routine_of(0, -0x10, Encoding::Mask), u64::MAX - 0xF);
     }
 }

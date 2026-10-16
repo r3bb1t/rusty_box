@@ -20,6 +20,14 @@ use crate::debugger::inspect::{
     Viewing, MEMORY_WINDOW_BYTES, ROW_BYTES, WOW64_CODE_SELECTOR,
 };
 use crate::debugger::threads::SavedRegisters;
+use crate::symbols::hub::SymbolsView;
+use crate::symbols::names::{NameMiss, NameTrust, NamedAddress, Namer};
+
+mod symbols_tab;
+pub(crate) use symbols_tab::{SymbolFilter, SymbolsAction};
+#[cfg(test)]
+pub(crate) use symbols_tab::{LOAD_FROM_FILE, SYMBOL_SETTINGS};
+use symbols_tab::{module_symbols_body, symbol_counts, symbols_page, ModuleStates, SYMBOL_STATE_CHARS};
 use crate::debugger::search::{
     pattern_of, FindOutcome, FindRequest, FoundAt, PatternError, SearchEncoding,
 };
@@ -29,15 +37,15 @@ use crate::debugger::pe::{
     ExportRead, ExportTarget, ImportName, ImportRead, ImportedModule, PeExport, PeImport, ThunksEnd,
 };
 use crate::debugger::windows::{
-    DeviceRow, DispatchEntry, DriverDetail, DriverListing, DriverShown, KernelListing, KernelMiss,
-    ModuleBits, ModuleDetail, ModuleRead, PickedDetail, PickedDriver, PickedModule, PointerSite,
+    DeviceRow, DispatchEntry, DriverDetail, DriverListing, DriverShown, KernelLayouts,
+    KernelListing, KernelMiss, ModuleBits, ModuleDetail, ModuleRead, PickedDetail, PickedDriver, PickedModule, PointerSite,
     ProcessDetail, ProcessListing, SectionsRead, SsdtListing, SsdtService, SystemListing,
     SystemView, TreeRow, WinDriver, WinModule, WinProcess,
 };
 use crate::shell::listing::{
     card_title, char_width, chip, empty_state, header_row, lead_arrow, lead_chevron, lead_dot,
     list_row, mono_font, row_visible, segmented, skip_row, title_label, tree_guides, Cell, RowSense,
-    Tone, ROW_PAD, TREE_INDENT,
+    Segment, Tone, ROW_PAD, TREE_INDENT,
 };
 use crate::shell::theme::{
     shell_card_frame, shell_card_frame_with_margin, ACCENT_AMBER, ACCENT_BLUE, ACCENT_CYAN,
@@ -169,15 +177,27 @@ pub(crate) enum AddressError {
     Empty,
     NotHex,
     TooLong,
+    /// A `module!name` that names no address.
+    Name(NameMiss),
 }
 
 impl AddressError {
     pub(crate) const fn message(self) -> &'static str {
         match self {
-            Self::Empty => "Type an address.",
-            Self::NotHex => "An address is hexadecimal digits, with or without 0x.",
+            Self::Empty => "Type an address or module!name.",
+            Self::NotHex => "An address is hexadecimal digits, with or without 0x, or module!name.",
             Self::TooLong => "An address has at most 16 hexadecimal digits.",
+            Self::Name(miss) => miss.message(),
         }
+    }
+}
+
+/// What Go was given: `module!name`, named against the pause's modules and
+/// the engine's tables, or an address.
+fn go_target(text: &str, names: Namer<'_>) -> Result<u64, AddressError> {
+    match text.trim().split_once('!') {
+        Some((module, name)) => names.address_of(module.trim(), name.trim()).map_err(AddressError::Name),
+        None => parse_address(text),
     }
 }
 
@@ -258,6 +278,16 @@ pub(crate) struct DebuggerPane {
     pub(crate) driver_detail: DriverDetail,
     /// What a listed driver's name must contain.
     pub(crate) driver_filter: String,
+    /// The snapshot whose modules were last asked of the symbol engine.
+    pub(crate) symbols_asked: Option<std::sync::Weak<DebugSnapshot>>,
+    /// The kernel layouts last made from the kernel's tables.
+    pub(crate) kernel_layout: Option<crate::symbols::kernel::LayoutCache>,
+    /// Which modules the Symbols tab lists.
+    pub(crate) symbol_filter: SymbolFilter,
+    /// The Symbols tab's row the keys stand on.
+    pub(crate) symbol_cursor: Option<usize>,
+    /// The module the Symbols tab acts on (its base).
+    pub(crate) picked_symbol: Option<u64>,
 }
 
 impl Default for DebuggerPane {
@@ -292,6 +322,11 @@ impl Default for DebuggerPane {
             selected_driver: None,
             driver_detail: DriverDetail::Dispatch,
             driver_filter: String::new(),
+            symbols_asked: None,
+            kernel_layout: None,
+            symbol_filter: SymbolFilter::All,
+            symbol_cursor: None,
+            picked_symbol: None,
         }
     }
 }
@@ -319,11 +354,12 @@ pub(crate) enum DebuggerTab {
     Drivers,
     /// The kernel's system-service dispatch table.
     Ssdt,
+    /// What the symbol engine has for each module.
+    Symbols,
 }
 
 impl DebuggerTab {
-    const ALL: [Self; 5] =
-        [Self::Cpu, Self::Processes, Self::KernelModules, Self::Drivers, Self::Ssdt];
+    const ALL: [Self; 6] = [Self::Cpu, Self::Processes, Self::KernelModules, Self::Drivers, Self::Ssdt, Self::Symbols];
 
     pub(crate) const fn label(self) -> &'static str {
         match self {
@@ -332,13 +368,15 @@ impl DebuggerTab {
             Self::KernelModules => "Kernel modules",
             Self::Drivers => "Drivers",
             Self::Ssdt => "SSDT",
+            Self::Symbols => "Symbols",
         }
     }
 
     /// What this tab asks the run thread to list, for what `pane` has picked.
+    /// The Symbols tab lists the modules every pause reads.
     fn system_view(self, pane: &DebuggerPane) -> SystemView {
         match self {
-            Self::Cpu => SystemView::Off,
+            Self::Cpu | Self::Symbols => SystemView::Off,
             Self::Processes => SystemView::Processes {
                 selected: pane.selected_process,
                 detail: pane.process_detail,
@@ -370,6 +408,8 @@ pub(crate) struct DebuggerPageState<'a> {
     pub(crate) find: Option<FindOutcome>,
     pub(crate) searching: bool,
     pub(crate) pane: &'a mut DebuggerPane,
+    /// What the symbol engine has found, which names addresses as drawn.
+    pub(crate) symbols: &'a SymbolsView,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -391,6 +431,8 @@ pub(crate) enum DebuggerAction {
     /// Show the CPU tab looking from here: a process or thread seen from
     /// inside, or the live processor again.
     View(ViewContext),
+    /// Something asked of the symbol engine.
+    Symbols(SymbolsAction),
 }
 
 /// The banner's way back from a thread's view.
@@ -399,12 +441,22 @@ const STEP_WHILE_VIEWING: &str =
     "Step runs the live processor; go back to the live CPU to step.";
 
 /// What the panes compare against and mark: the snapshot before, and the
-/// last search hit.
+/// last search hit; and what they name addresses by.
 #[derive(Clone, Copy)]
 struct Marks<'a> {
     previous: Option<&'a DebugSnapshot>,
     find: Option<FindOutcome>,
     searching: bool,
+    symbols: &'a SymbolsView,
+}
+
+/// The colour a name is drawn in: amber when it comes from a file of
+/// another build loaded anyway, else `plain`.
+pub(crate) fn name_color(named: &NamedAddress, plain: egui::Color32) -> egui::Color32 {
+    match named.trust {
+        NameTrust::Matched => plain,
+        NameTrust::Forced => ACCENT_AMBER,
+    }
 }
 
 /// What the toolbar draws from.
@@ -462,6 +514,7 @@ pub(crate) fn draw_debugger_page(
         find,
         searching,
         pane,
+        symbols,
     } = state;
     // What was read from somewhere else is no baseline for what changed: a
     // live snapshot and a thread's view are compared with neither.
@@ -470,6 +523,7 @@ pub(crate) fn draw_debugger_page(
         previous,
         find,
         searching,
+        symbols,
     };
     // The room the page was given, measured here and nowhere else: every
     // layout choice below follows from it.
@@ -488,7 +542,7 @@ pub(crate) fn draw_debugger_page(
                 dump_pending,
                 viewing: snapshot.is_some_and(|snapshot| matches!(snapshot.viewing, Viewing::Thread(_))),
             };
-            header(ui, &bar, density, snapshot, pane, &mut action);
+            header(ui, &bar, density, snapshot, symbols, pane, &mut action);
             if let Some(DebugNote::StepNeedsInterpreter) = note {
                 ui.label(RichText::new(STEP_NEEDS_INTERPRETER).color(ACCENT_AMBER));
             }
@@ -513,7 +567,11 @@ pub(crate) fn draw_debugger_page(
                     | DebuggerTab::Ssdt,
                     _,
                 ) => {
-                    system_page(ui, fit, snapshot, pane, &mut action);
+                    let states = ModuleStates { index: &snapshot.symbols, view: symbols };
+                    system_page(ui, fit, snapshot, states, pane, &mut action);
+                }
+                (DebuggerTab::Symbols, _) => {
+                    symbols_page(ui, fit, snapshot, symbols, pane, &mut action);
                 }
             }
         });
@@ -525,7 +583,7 @@ pub(crate) fn draw_debugger_page(
 /// runs for when the guest's structures name one, its address space, and
 /// whether the page shows a pause that has since run on. They go into the
 /// header's row, after its buttons, and wrap where the row is full.
-fn status_chips(ui: &mut egui::Ui, snapshot: &DebugSnapshot, paused: bool) {
+fn status_chips(ui: &mut egui::Ui, snapshot: &DebugSnapshot, names: Namer<'_>, paused: bool) {
     // Whose state the chips describe: a viewed thread's saved state, or the
     // shown processor's.
     let cr3 = match &snapshot.viewing {
@@ -566,13 +624,9 @@ fn status_chips(ui: &mut egui::Ui, snapshot: &DebugSnapshot, paused: bool) {
         let name = path.rsplit(['\\', '/']).next().unwrap_or(path);
         chip(ui, &format!("Process {name}"), TEXT_PRIMARY).on_hover_text(path.as_str());
     }
-    if let Some(symbol) = snapshot
-        .code
-        .first()
-        .and_then(|line| snapshot.symbols.resolve(line.address))
-    {
-        chip(ui, &format!("at {}", symbol.label()), ACCENT_CYAN)
-            .on_hover_text("The module RIP points into.");
+    if let Some(named) = snapshot.code.first().and_then(|line| names.name(line.address)) {
+        chip(ui, &format!("at {}", named.label()), name_color(&named, ACCENT_CYAN))
+            .on_hover_text("Where RIP points.");
     }
     chip(ui, &format!("CR3 {cr3:X}"), TEXT_MUTED)
         .on_hover_text("The address space: each process has its own page tables.");
@@ -639,6 +693,7 @@ fn header(
     bar: &Toolbar,
     density: Density,
     snapshot: Option<&DebugSnapshot>,
+    symbols: &SymbolsView,
     pane: &mut DebuggerPane,
     action: &mut Option<DebuggerAction>,
 ) {
@@ -670,7 +725,7 @@ fn header(
         {
             *action = Some(DebuggerAction::DumpRam);
         }
-        let tabs = DebuggerTab::ALL.map(|tab| (tab, tab.label()));
+        let tabs = DebuggerTab::ALL.map(|tab| Segment { value: tab, label: tab.label() });
         if segmented(ui, &mut pane.tab, &tabs) {
             // A tab's keys start on its list, standing on no detail row.
             pane.list_focus = ListFocus::List;
@@ -698,7 +753,19 @@ fn header(
                 *action = Some(DebuggerAction::SelectCpu(chosen));
             }
         }
-        status_chips(ui, snapshot, bar.paused);
+        status_chips(ui, snapshot, Namer::new(&snapshot.symbols, symbols), bar.paused);
+        if !snapshot.symbols.modules.is_empty() {
+            let counts = symbol_counts(&snapshot.symbols, symbols);
+            let color = if counts.missing > 0 { ACCENT_AMBER } else { TEXT_MUTED };
+            let opened = chip(ui, &counts.label(), color)
+                .interact(egui::Sense::click())
+                .on_hover_text("Open the Symbols tab.")
+                .clicked();
+            if opened && pane.tab != DebuggerTab::Symbols {
+                pane.tab = DebuggerTab::Symbols;
+                *action = Some(DebuggerAction::ShowSystem(DebuggerTab::Symbols.system_view(pane)));
+            }
+        }
     });
 }
 
@@ -784,7 +851,7 @@ fn grid_layout(
             Split { share: &mut split.left_rows, default: TOP_SHARE, label: RESIZE_CODE_MEMORY },
             &mut (),
             |ui, size, _| {
-                fixed_card(ui, size, Title::plain("Code"), |_| {}, |ui| code_rows(ui, snapshot));
+                fixed_card(ui, size, Title::plain("Code"), |_| {}, |ui| code_rows(ui, snapshot, marks));
             },
             |ui, size, _| {
                 fixed_card(
@@ -1016,7 +1083,7 @@ fn scrolling_layout(
                 &mut (),
                 |ui, _| {
                     card(ui, density, Title::plain("Code"), |_| {}, |ui| {
-                        code_rows(ui, snapshot);
+                        code_rows(ui, snapshot, marks);
                     });
                     ui.add_space(gap);
                     card(
@@ -1043,7 +1110,7 @@ fn scrolling_layout(
                 });
                 ui.add_space(gap);
                 card(ui, density, Title::plain("Code"), |_| {}, |ui| {
-                    code_rows(ui, snapshot);
+                    code_rows(ui, snapshot, marks);
                 });
                 ui.add_space(gap);
                 card(ui, density, Title::plain("Stack"), |_| {}, |ui| {
@@ -1219,13 +1286,21 @@ fn code_bytes_shown(room_chars: f32, digits: usize) -> usize {
     (fits as usize).min(CODE_BYTES_SHOWN)
 }
 
-/// The code at RIP, one instruction a row: address, bytes, opcode. The row at
-/// RIP is shaded and marked.
-fn code_rows(ui: &mut egui::Ui, snapshot: &DebugSnapshot) {
+/// The code at RIP, one instruction a row: address, bytes, opcode, then the
+/// named target of a branch or `lea` and the source line, when the tables
+/// have them. A function's first instruction is headed by the function's
+/// name. The row at RIP is shaded and marked.
+fn code_rows(ui: &mut egui::Ui, snapshot: &DebugSnapshot, marks: Marks<'_>) {
+    let names = Namer::new(&snapshot.symbols, marks.symbols);
     let digits = hex_digits(pane_code_size(snapshot));
     let room = (ui.available_width() - MARKER_LEAD - 2.0 * ROW_PAD) / char_width(ui);
     let shown = code_bytes_shown(room, digits);
     for (index, line) in snapshot.code.iter().enumerate() {
+        let named = names.name(line.address);
+        if let Some(start) = named.as_ref().filter(|named| named.starts_function()) {
+            let heading = [Cell::fill(format!("{}:", start.label()), name_color(start, ACCENT_BLUE))];
+            list_row(ui, MARKER_LEAD, &heading, Tone::Plain, RowSense::Look);
+        }
         let mut bytes: Vec<String> = line
             .bytes
             .iter()
@@ -1235,13 +1310,30 @@ fn code_rows(ui: &mut egui::Ui, snapshot: &DebugSnapshot) {
         if line.bytes.len() > shown {
             bytes.push("…".to_owned());
         }
-        let (text, text_color) = match &line.text {
-            CodeText::Opcode(name) => (name.as_str(), TEXT_PRIMARY),
-            CodeText::Undecodable => ("(undecodable)", TEXT_MUTED),
-            CodeText::Unreadable => ("(unreadable)", TEXT_MUTED),
-        };
         // The first line is the instruction at RIP.
         let at_rip = index == 0;
+        let mut text_color = match &line.text {
+            CodeText::Opcode(_) if at_rip => ACCENT_CYAN,
+            CodeText::Opcode(_) => TEXT_PRIMARY,
+            CodeText::Undecodable | CodeText::Unreadable => TEXT_MUTED,
+        };
+        let mut text = match &line.text {
+            CodeText::Opcode(name) => name.clone(),
+            CodeText::Undecodable => "(undecodable)".to_owned(),
+            CodeText::Unreadable => "(unreadable)".to_owned(),
+        };
+        if let Some(target) = line.target {
+            match names.name(target) {
+                Some(named) => {
+                    text.push_str(&format!(" -> {}", named.label()));
+                    text_color = name_color(&named, text_color);
+                }
+                None => text.push_str(&format!(" -> {target:X}")),
+            }
+        }
+        if let Some(source) = named.as_ref().and_then(NamedAddress::source) {
+            text.push_str(&format!("  · {source}"));
+        }
         let (address_color, tone) = if at_rip {
             (ACCENT_CYAN, Tone::Current)
         } else {
@@ -1250,7 +1342,7 @@ fn code_rows(ui: &mut egui::Ui, snapshot: &DebugSnapshot) {
         let cells = [
             Cell::left(format!("{:0digits$X}", line.address), address_color, digits),
             Cell::left(bytes.join(" "), TEXT_MUTED, 3 * shown + 1),
-            Cell::fill(text, if at_rip { ACCENT_CYAN } else { text_color }),
+            Cell::fill(text, text_color),
         ];
         let response = list_row(ui, MARKER_LEAD, &cells, tone, RowSense::Look);
         if at_rip {
@@ -1512,8 +1604,8 @@ fn memory_bar(
     {
         ui.horizontal_wrapped(|ui| {
             let mut spaces = vec![
-                (AddressSpace::Linear, "Linear"),
-                (AddressSpace::Physical, "Physical"),
+                Segment { value: AddressSpace::Linear, label: "Linear" },
+                Segment { value: AddressSpace::Physical, label: "Physical" },
             ];
             // A Process space appears once a process other than the running
             // one is being browsed, so it can be selected and left.
@@ -1522,7 +1614,7 @@ fn memory_bar(
                 AddressSpace::Linear | AddressSpace::Physical => snapshot.memory_space,
             };
             if let Some(cr3) = process_space {
-                spaces.push((AddressSpace::Process { cr3 }, "Process"));
+                spaces.push(Segment { value: AddressSpace::Process { cr3 }, label: "Process" });
             }
             segmented(ui, &mut pane.space, &spaces);
             if let Some(cr3) = process_space {
@@ -1542,14 +1634,14 @@ fn memory_bar(
             let entered =
                 field.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
             if ui.button("Go").clicked() || entered {
-                match parse_address(&pane.address_text) {
+                let names = Namer::new(&snapshot.symbols, marks.symbols);
+                match go_target(&pane.address_text, names) {
                     Ok(value) => {
                         pane.address_error = None;
+                        // A name is a linear address in the panes' own space.
+                        let space = if pane.address_text.contains('!') { vantage_space(snapshot) } else { pane.space };
                         *action = Some(DebuggerAction::ShowMemory(MemoryTarget::At(
-                            GuestAddress {
-                                space: pane.space,
-                                value,
-                            },
+                            GuestAddress { space, value },
                         )));
                     }
                     Err(error) => pane.address_error = Some(error),
@@ -1578,9 +1670,10 @@ fn memory_bar(
             // index's user modules belong to (a viewed thread's process, else
             // the shown processor's linear space).
             if start.space == vantage_space(snapshot) {
-                if let Some(symbol) = snapshot.symbols.resolve(start.value) {
-                    chip(ui, &symbol.label(), TEXT_MUTED)
-                        .on_hover_text("The module this address is in.");
+                let names = Namer::new(&snapshot.symbols, marks.symbols);
+                if let Some(named) = names.name(start.value) {
+                    chip(ui, &named.label(), name_color(&named, TEXT_MUTED))
+                        .on_hover_text("Where this address is.");
                 }
             }
         });
@@ -1606,9 +1699,9 @@ fn search_bar(
             ui,
             &mut pane.search_encoding,
             &[
-                (SearchEncoding::Hex, "Hex"),
-                (SearchEncoding::Text, "Text"),
-                (SearchEncoding::Utf16, "UTF-16"),
+                Segment { value: SearchEncoding::Hex, label: "Hex" },
+                Segment { value: SearchEncoding::Text, label: "Text" },
+                Segment { value: SearchEncoding::Utf16, label: "UTF-16" },
             ],
         );
         let label = ui.label(RichText::new(FIND).color(TEXT_MUTED));
@@ -1768,6 +1861,7 @@ fn in_hit(hit: FoundAt, address: u64) -> bool {
 /// The stack from RSP up: the slot RSP points at in cyan, a slot the last
 /// step changed in red.
 fn stack_rows(ui: &mut egui::Ui, snapshot: &DebugSnapshot, marks: Marks<'_>) {
+    let names = Namer::new(&snapshot.symbols, marks.symbols);
     let size = pane_code_size(snapshot);
     let digits = hex_digits(size);
     // A slot is as wide as a pointer at the code size: 2, 4 or 8 bytes.
@@ -1795,14 +1889,15 @@ fn stack_rows(ui: &mut egui::Ui, snapshot: &DebugSnapshot, marks: Marks<'_>) {
         let tone = if top { Tone::Current } else { Tone::Plain };
         // A slot that points into a module is a code pointer — most often a
         // return address, so the column reads as the call chain.
-        let symbol = slot
-            .value
-            .and_then(|value| snapshot.symbols.resolve(value))
-            .map_or_else(String::new, |symbol| symbol.label());
+        let named = slot.value.and_then(|value| names.name(value));
+        let name_cell = match &named {
+            Some(named) => Cell::fill(named.label(), name_color(named, TEXT_MUTED)),
+            None => Cell::fill(String::new(), TEXT_MUTED),
+        };
         let cells = [
             Cell::left(format!("{:0digits$X}", slot.address), address_color, digits),
             Cell::left(value, value_color, value_digits),
-            Cell::fill(symbol, TEXT_MUTED),
+            name_cell,
         ];
         let response = list_row(ui, MARKER_LEAD, &cells, tone, RowSense::Look);
         if top {
@@ -1846,6 +1941,7 @@ fn system_page(
     ui: &mut egui::Ui,
     fit: Fit,
     snapshot: &DebugSnapshot,
+    states: ModuleStates<'_>,
     pane: &mut DebuggerPane,
     action: &mut Option<DebuggerAction>,
 ) {
@@ -1854,17 +1950,21 @@ fn system_page(
             empty_state(ui, no_windows_kernel_title(*miss), &no_windows_kernel(*miss));
         }
         (SystemListing::Processes(listing), DebuggerTab::Processes) => {
+            layouts_line(ui, snapshot.layouts);
             let current_user_module = current_module_base(snapshot, ModuleSpace::User);
-            processes_page(ui, fit, listing, current_user_module, pane, action);
+            processes_page(ui, fit, listing, current_user_module, states, pane, action);
         }
         (SystemListing::KernelModules(listing), DebuggerTab::KernelModules) => {
+            layouts_line(ui, snapshot.layouts);
             let current = current_module_base(snapshot, ModuleSpace::Kernel);
-            kernel_page(ui, fit, listing, current, pane, action);
+            kernel_page(ui, fit, listing, current, states, pane, action);
         }
         (SystemListing::Drivers(listing), DebuggerTab::Drivers) => {
+            layouts_line(ui, snapshot.layouts);
             drivers_page(ui, fit, listing, pane, action);
         }
         (SystemListing::Ssdt(listing), DebuggerTab::Ssdt) => {
+            layouts_line(ui, snapshot.layouts);
             ssdt_page(ui, fit, listing, pane, action);
         }
         // A list for another tab, or none yet: the run thread is reading.
@@ -1879,6 +1979,59 @@ fn system_page(
             empty_state(ui, "Reading", READING_LIST);
         }
     }
+}
+
+#[cfg(test)]
+mod name_tests {
+    use super::*;
+    use crate::symbols::kernel::tests::{kernel_symbols, KERNEL_BASE};
+    use crate::symbols::names::tests::hub_with_kernel_code;
+    use rusty_box_symbols::identity::{Guid, TablesIdentity};
+
+    /// Review focus 3: a name from a file of another build, loaded anyway,
+    /// is drawn amber wherever a pane draws it.
+    #[test]
+    fn a_forced_module_is_named_in_amber() {
+        let view = hub_with_kernel_code(crate::symbols::hub::ModuleSymbols::Forced {
+            found: TablesIdentity::Pdb { guid: Guid::from_le_bytes([0x77; 16]), age: 3 },
+            path: std::path::PathBuf::from("D:\\other\\ntkrnlmp.pdb"),
+        })
+        .view();
+        let symbols = kernel_symbols();
+        let named = Namer::new(&symbols, &view).name(KERNEL_BASE + 0x1040).expect("in the kernel");
+        assert_eq!(named.label(), "ntoskrnl!KiSystemCall64");
+        assert_eq!(name_color(&named, ACCENT_CYAN), ACCENT_AMBER);
+        let matched = Namer::new(&symbols, &hub_with_kernel_code(crate::symbols::names::tests::loaded()).view())
+            .name(KERNEL_BASE + 0x1040)
+            .expect("in the kernel");
+        assert_eq!(name_color(&matched, ACCENT_CYAN), ACCENT_CYAN);
+    }
+
+    /// Go takes `module!name` as well as an address, and says why a name
+    /// does not resolve.
+    #[test]
+    fn go_takes_a_name_or_an_address() {
+        let view = hub_with_kernel_code(crate::symbols::names::tests::loaded()).view();
+        let symbols = kernel_symbols();
+        let names = Namer::new(&symbols, &view);
+        assert_eq!(go_target(" nt!KeBugCheckEx ", names), Ok(KERNEL_BASE + 0x1100));
+        assert_eq!(go_target("0x1234", names), Ok(0x1234));
+        assert_eq!(go_target("nt!Nope", names), Err(AddressError::Name(NameMiss::UnknownName)));
+        assert_eq!(go_target("zz", names), Err(AddressError::NotHex));
+    }
+}
+
+/// The line over a kernel listing that says whose layouts read it; a kernel
+/// PDB that disagrees with memory reads amber.
+fn layouts_line(ui: &mut egui::Ui, layouts: Option<KernelLayouts>) {
+    let Some(layouts) = layouts else {
+        return;
+    };
+    let color = match layouts {
+        KernelLayouts::Pdb | KernelLayouts::Discovered => TEXT_MUTED,
+        KernelLayouts::PdbDisagrees => ACCENT_AMBER,
+    };
+    ui.label(RichText::new(layouts.label()).small().color(color));
 }
 
 /// The accessible name of a list's filter field.
@@ -1943,7 +2096,8 @@ const fn next_module_detail(detail: ModuleDetail) -> ModuleDetail {
     match detail {
         ModuleDetail::Sections => ModuleDetail::Exports,
         ModuleDetail::Exports => ModuleDetail::Imports,
-        ModuleDetail::Imports => ModuleDetail::Sections,
+        ModuleDetail::Imports => ModuleDetail::Symbols,
+        ModuleDetail::Symbols => ModuleDetail::Sections,
     }
 }
 
@@ -2307,6 +2461,7 @@ fn kernel_page(
     fit: Fit,
     listing: &KernelListing,
     current: Option<u64>,
+    states: ModuleStates<'_>,
     pane: &mut DebuggerPane,
     action: &mut Option<DebuggerAction>,
 ) {
@@ -2365,6 +2520,7 @@ fn kernel_page(
                         opener: Opener::Live,
                     },
                     current,
+                    states,
                     keyed_rows.list,
                     action,
                 );
@@ -2386,7 +2542,7 @@ fn kernel_page(
                 );
             },
             |ui| {
-                module_detail_body(ui, module_card, keyed_rows.detail, &mut pane.folded_imports, action);
+                module_detail_body(ui, module_card, states, keyed_rows.detail, &mut pane.folded_imports, action);
             },
         );
     };
@@ -2476,9 +2632,8 @@ impl ModuleCard<'_> {
             }
             PickedDetail::Sections(SectionsRead::HeaderUnreadable)
             | PickedDetail::Exports(ExportRead::NoTable | ExportRead::NotPe | ExportRead::Unreadable)
-            | PickedDetail::Imports(ImportRead::NoTable | ImportRead::NotPe | ImportRead::Unreadable) => {
-                None
-            }
+            | PickedDetail::Imports(ImportRead::NoTable | ImportRead::NotPe | ImportRead::Unreadable)
+            | PickedDetail::Symbols(_) => None,
         }
     }
 }
@@ -2506,8 +2661,9 @@ fn kernel_keys(
     if keys.switches % 2 == 1 {
         pane.list_focus = pane.list_focus.next(Cards::Two);
     }
-    if keys.next_views % 3 != 0 {
-        for _ in 0..keys.next_views % 3 {
+    // A module's four views cycle within four presses.
+    if keys.next_views % 4 != 0 {
+        for _ in 0..keys.next_views % 4 {
             pane.kernel_detail = next_module_detail(pane.kernel_detail);
         }
         pane.detail_cursor = None;
@@ -2606,11 +2762,11 @@ fn module_detail_rows(card: ModuleCard<'_>, folds: &Folds<'_>) -> Vec<DetailRow>
                 })
                 .collect()
         }
+        // The Symbols view's actions are buttons, not rows.
         PickedDetail::Sections(SectionsRead::HeaderUnreadable)
         | PickedDetail::Exports(ExportRead::NoTable | ExportRead::NotPe | ExportRead::Unreadable)
-        | PickedDetail::Imports(ImportRead::NoTable | ImportRead::NotPe | ImportRead::Unreadable) => {
-            Vec::new()
-        }
+        | PickedDetail::Imports(ImportRead::NoTable | ImportRead::NotPe | ImportRead::Unreadable)
+        | PickedDetail::Symbols(_) => Vec::new(),
     }
 }
 
@@ -2644,8 +2800,9 @@ fn export_address(base: u64, export: &PeExport) -> Option<u64> {
     }
 }
 
-/// A module card's title, its Sections/Exports/Imports switch (and the
-/// filter over exports or imports), and the column titles of what it lists.
+/// A module card's title, its Sections/Exports/Imports/Symbols switch (and
+/// the filter over exports or imports), and the column titles of what it
+/// lists.
 fn module_detail_header(
     ui: &mut egui::Ui,
     title: Title<'_>,
@@ -2658,21 +2815,23 @@ fn module_detail_header(
             ui,
             detail,
             &[
-                (ModuleDetail::Sections, "Sections"),
-                (ModuleDetail::Exports, "Exports"),
-                (ModuleDetail::Imports, "Imports"),
+                Segment { value: ModuleDetail::Sections, label: "Sections" },
+                Segment { value: ModuleDetail::Exports, label: "Exports" },
+                Segment { value: ModuleDetail::Imports, label: "Imports" },
+                Segment { value: ModuleDetail::Symbols, label: "Symbols" },
             ],
         );
         match detail {
             ModuleDetail::Exports => labelled_filter(ui, filter, EXPORT_FILTER),
             ModuleDetail::Imports => labelled_filter(ui, filter, IMPORT_FILTER),
-            ModuleDetail::Sections => {}
+            ModuleDetail::Sections | ModuleDetail::Symbols => {}
         }
     });
     match detail {
         ModuleDetail::Sections => header_row(ui, 0.0, &section_columns()),
         ModuleDetail::Exports => header_row(ui, 0.0, &export_columns()),
         ModuleDetail::Imports => header_row(ui, TREE_INDENT, &import_columns()),
+        ModuleDetail::Symbols => {}
     }
 }
 
@@ -2682,6 +2841,7 @@ fn module_detail_header(
 fn module_detail_body(
     ui: &mut egui::Ui,
     card: ModuleCard<'_>,
+    states: ModuleStates<'_>,
     key: Option<KeyRow>,
     imports_shut: &mut BTreeSet<usize>,
     action: &mut Option<DebuggerAction>,
@@ -2694,7 +2854,7 @@ fn module_detail_body(
         let text = if card.has_pick {
             "Reading the module…"
         } else {
-            "Pick a module to see its sections, exports and imports."
+            "Pick a module to see its sections, exports, imports and symbols."
         };
         muted(ui, text);
         return;
@@ -2719,6 +2879,7 @@ fn module_detail_body(
         }
         PickedDetail::Imports(ImportRead::NoTable) => muted(ui, "It imports nothing."),
         PickedDetail::Imports(ImportRead::Unreadable) => muted(ui, "Its import table is paged out."),
+        PickedDetail::Symbols(identity) => module_symbols_body(ui, identity, states.view, action),
     }
 }
 
@@ -2914,8 +3075,8 @@ fn driver_detail_header(ui: &mut egui::Ui, title: Title<'_>, detail: &mut Driver
             ui,
             detail,
             &[
-                (DriverDetail::Dispatch, "Dispatch"),
-                (DriverDetail::Devices, "Devices"),
+                Segment { value: DriverDetail::Dispatch, label: "Dispatch" },
+                Segment { value: DriverDetail::Devices, label: "Devices" },
             ],
         );
     });
@@ -3629,6 +3790,7 @@ fn processes_page(
     fit: Fit,
     listing: &ProcessListing,
     current_user_module: Option<u64>,
+    states: ModuleStates<'_>,
     pane: &mut DebuggerPane,
     action: &mut Option<DebuggerAction>,
 ) {
@@ -3764,7 +3926,7 @@ fn processes_page(
                 );
             },
             |ui| {
-                module_detail_body(ui, module_card, keyed_rows.module, &mut pane.folded_imports, action);
+                module_detail_body(ui, module_card, states, keyed_rows.module, &mut pane.folded_imports, action);
             },
         );
     };
@@ -3792,6 +3954,7 @@ fn processes_page(
                         listing,
                         opener,
                         highlight,
+                        states,
                     },
                     &mut pane.selected_process_module,
                     &mut pane.expanded_modules,
@@ -3986,8 +4149,10 @@ fn process_keys(
     }
     // A view switched this frame has not been read yet: what the listing
     // holds for it may be an older read, so its rows are not walked.
-    let switched = keys.next_views % 3 != 0;
-    for _ in 0..keys.next_views % 3 {
+    // Three process views and four module views both cycle within twelve
+    // presses.
+    let switched = keys.next_views % 12 != 0;
+    for _ in 0..keys.next_views % 12 {
         match pane.list_focus {
             ListFocus::Module => {
                 pane.process_module_detail = next_module_detail(pane.process_module_detail);
@@ -4202,9 +4367,9 @@ fn right_card_header(
             ui,
             &mut chosen,
             &[
-                (ProcessDetail::Modules, "Modules"),
-                (ProcessDetail::MemoryMap, "Memory map"),
-                (ProcessDetail::Threads, "Threads"),
+                Segment { value: ProcessDetail::Modules, label: "Modules" },
+                Segment { value: ProcessDetail::MemoryMap, label: "Memory map" },
+                Segment { value: ProcessDetail::Threads, label: "Threads" },
             ],
         ) {
             *switch_to = Some(chosen);
@@ -4267,6 +4432,7 @@ struct RightCard<'a> {
     listing: &'a ProcessListing,
     opener: Opener,
     highlight: Option<u64>,
+    states: ModuleStates<'a>,
 }
 
 /// The right card's body: the modules (one picked into `picked_module`), the
@@ -4285,6 +4451,7 @@ fn right_card_body(
         listing,
         opener,
         highlight,
+        states,
     } = card;
     match detail {
         ProcessDetail::Modules => {
@@ -4292,7 +4459,7 @@ fn right_card_body(
                 picked: picked_module,
                 opener,
             };
-            listed_modules(ui, listing, click, highlight, key, action);
+            listed_modules(ui, listing, click, highlight, states, key, action);
         }
         ProcessDetail::Threads => match listing.modules.as_ref() {
             Some(modules) => thread_rows(ui, &modules.threads, modules.eprocess, key, action),
@@ -4315,7 +4482,7 @@ fn right_card_body(
 
 /// A size in bytes, as a debugger shows it: whole KiB, or MiB/GiB to one
 /// place. Guest regions are page-aligned, so KiB is exact.
-fn human_size(bytes: u64) -> String {
+pub(crate) fn human_size(bytes: u64) -> String {
     const KIB: u64 = 1024;
     const MIB: u64 = KIB * 1024;
     const GIB: u64 = MIB * 1024;
@@ -4358,6 +4525,7 @@ fn vad_type_label(region: &crate::debugger::memory_map::MapRegion) -> &'static s
         Some(VadKind::Image) => "image",
         Some(VadKind::Mapped) => "mapped",
         Some(VadKind::Private) => "private",
+        Some(VadKind::Unknown) => "unknown",
         None => "",
     }
 }
@@ -4671,6 +4839,7 @@ fn listed_modules(
     listing: &ProcessListing,
     click: ModuleClick<'_>,
     highlight: Option<u64>,
+    states: ModuleStates<'_>,
     key: Option<KeyRow>,
     action: &mut Option<DebuggerAction>,
 ) {
@@ -4680,7 +4849,7 @@ fn listed_modules(
     match listing.modules.as_ref().map(|modules| &modules.read) {
         Some(ModuleRead::Listed(modules)) => {
             let shown: Vec<&WinModule> = modules.iter().collect();
-            module_rows(ui, &shown, click, highlight, key, action);
+            module_rows(ui, &shown, click, highlight, states, key, action);
         }
         Some(ModuleRead::NoUserSpace) => {
             muted(ui, "A kernel process: it loads no user-mode modules.");
@@ -4700,7 +4869,7 @@ fn process_header(ui: &mut egui::Ui, title: Title<'_>, layout: &mut ProcessLayou
         segmented(
             ui,
             layout,
-            &[(ProcessLayout::List, "List"), (ProcessLayout::Tree, "Tree")],
+            &[Segment { value: ProcessLayout::List, label: "List" }, Segment { value: ProcessLayout::Tree, label: "Tree" }],
         );
         filter_field(ui, filter);
     });
@@ -4797,12 +4966,14 @@ fn process_rows(
     }
 }
 
-/// A module table's columns: base, size, name, and the path in the room left.
-fn module_columns() -> [Cell; 4] {
+/// A module table's columns: base, size, name, what the symbol engine has,
+/// and the path in the room left.
+fn module_columns() -> [Cell; 5] {
     [
         Cell::left("Base", TEXT_MUTED, 16),
         Cell::right("Size", TEXT_MUTED, MODULE_SIZE_CHARS),
         Cell::left("Name", TEXT_MUTED, MODULE_NAME_CHARS),
+        Cell::left("Symbols", TEXT_MUTED, SYMBOL_STATE_CHARS),
         Cell::fill("Path", TEXT_MUTED),
     ]
 }
@@ -4818,13 +4989,15 @@ struct ModuleClick<'a> {
     opener: Opener,
 }
 
-/// One row per module, the picked one and the row the keys stand on
-/// selected, the one the processor runs in marked.
+/// One row per module, with what the symbol engine has for it; the picked
+/// one and the row the keys stand on selected, the one the processor runs in
+/// marked.
 fn module_rows(
     ui: &mut egui::Ui,
     modules: &[&WinModule],
     click: ModuleClick<'_>,
     highlight: Option<u64>,
+    states: ModuleStates<'_>,
     key: Option<KeyRow>,
     action: &mut Option<DebuggerAction>,
 ) {
@@ -4852,6 +5025,7 @@ fn module_rows(
             Cell::left(format!("{:016X}", module.base), TEXT_MUTED, 16),
             Cell::right(format!("{:X}", module.size), TEXT_MUTED, MODULE_SIZE_CHARS),
             Cell::left(name, name_color, MODULE_NAME_CHARS),
+            states.cell(module.base),
             Cell::fill(path, TEXT_MUTED.gamma_multiply(0.8)),
         ];
         let picked_now = *click.picked == Some(module.base) || key.is_some_and(|key| key.at(n));
@@ -5046,7 +5220,7 @@ mod tests {
             Emulator::new_with_mode(EmulatorConfig::default(), CpuSetupMode::FlatLong64)
                 .expect("machine");
         let read = |machine: &mut Emulator| {
-            read_snapshot(machine, &ViewRequest::default(), &mut WindowsDiscovery::default(), None)
+            read_snapshot(machine, &ViewRequest::default(), &mut WindowsDiscovery::default(), None, None)
         };
         let live = read(&mut machine);
         let mut viewed = read(&mut machine);

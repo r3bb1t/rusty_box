@@ -556,7 +556,7 @@ fn partial_path(path: &Path) -> PathBuf {
 /// `path` is either what it was or the whole of `bytes`, never part of them.
 /// A partial file whose write or rename failed is removed again, and the
 /// failure that stopped the write is what the caller gets.
-fn write_atomically(path: &Path, bytes: &[u8]) -> Result<(), LibraryError> {
+pub(crate) fn write_atomically(path: &Path, bytes: &[u8]) -> Result<(), LibraryError> {
     let partial = partial_path(path);
     let written = write_synced(&partial, bytes)
         .map_err(|source| LibraryError::Write {

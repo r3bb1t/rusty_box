@@ -87,6 +87,16 @@ impl Default for Destination {
     }
 }
 
+/// What fills the shell's central area: a page of the shown VM, or the
+/// app's own Settings, which belong to no VM.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum Surface {
+    #[default]
+    Vm,
+    Settings,
+}
+
 /// What a click in the sidebar asked for. The sidebar reports it; the app
 /// decides what it means.
 #[cfg(not(target_arch = "wasm32"))]
@@ -97,6 +107,8 @@ pub(crate) enum SidebarAction {
     NewVm,
     /// Delete the library file at this index of the "Could not load" group.
     DeleteBroken(usize),
+    /// Show the app's Settings.
+    OpenSettings,
 }
 
 /// What a click in the VM bar asked for.
@@ -116,6 +128,8 @@ pub(crate) enum VmBarAction {
     SendCtrlAltDel,
     /// Open the floppy maker.
     CreateFloppy,
+    /// Show the app's Settings.
+    OpenSettings,
     ShowAbout,
     Quit,
     /// A phone's page tab: the bar carries the pages a desktop's tree lists.

@@ -1,0 +1,20 @@
+# A crate that must FAIL to link: its one function is marked #[no_panic] and
+# indexes past the end of a slice. The doctrine ratchets build it and pass
+# only when the link fails naming that function, so a toolchain or setting
+# under which `#[no_panic]` stops proving anything fails ci instead of
+# silently passing every proof in rusty_box_symbols.
+[package]
+name = "no_panic_canary"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Not a member of the repository's workspace.
+[workspace]
+
+[dependencies]
+no-panic = "0.1"
+
+[profile.release]
+# The proof sees only panics that unwind.
+panic = "unwind"

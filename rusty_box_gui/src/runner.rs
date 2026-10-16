@@ -705,6 +705,8 @@ pub struct ShellStart {
     /// start could not do — a bundled VM it could not import, say. `None`
     /// when the start did everything it set out to.
     pub notice: Option<String>,
+    /// The symbol settings file, beside the VM library.
+    pub settings_file: std::path::PathBuf,
 }
 
 /// The VM the shell shows first.
@@ -795,10 +797,12 @@ fn shell_start(library: crate::library::VmLibrary, launch: Option<LaunchVm>) -> 
         ShellOpening::LibraryVm(stem) => remember_named_vm(&library, stem),
         ShellOpening::LastShown | ShellOpening::Launch(_) => first_run_notice(&library),
     };
+    let settings_file = crate::symbol_settings::settings_file_beside(library.dir());
     ShellStart {
         library,
         opening,
         notice,
+        settings_file,
     }
 }
 

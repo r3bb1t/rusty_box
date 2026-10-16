@@ -193,6 +193,7 @@ fn run(app: AndroidApp) -> Result<RunSummary, RunError> {
         library,
         opening: crate::runner::ShellOpening::LastShown,
         notice: joined_notice(ended, notice),
+        settings_file: storage.join(crate::symbol_settings::SETTINGS_FILE),
     };
     crate::runner::run_android_shell(start, app, &storage)
 }
@@ -708,7 +709,7 @@ impl FileBrowser {
             BrowseTarget::HardDisk | BrowseTarget::NewDisk | BrowseTarget::NewFloppy => {
                 FileFilter::Extension("img")
             }
-            BrowseTarget::Bios | BrowseTarget::VgaBios => FileFilter::Any,
+            BrowseTarget::Bios | BrowseTarget::VgaBios | BrowseTarget::SymbolFile => FileFilter::Any,
             BrowseTarget::RamDump => FileFilter::Extension("bin"),
         };
         let dir = request

@@ -1,0 +1,31 @@
+[package]
+name = "rusty_box_symbols"
+description = "Finds, fetches and reads the debug information (PDB, DWARF) of a module identified by its exact build"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[features]
+# Test doubles for other crates' tests: an in-memory file store and a
+# scripted HTTP client.
+fakes = []
+
+[dependencies]
+# Error enums, as everywhere in the workspace.
+thiserror.workspace = true
+# `#[no_panic]`: a link-time proof that a function cannot reach a panic.
+no-panic = "0.1"
+# HTTP with rustls (already in Cargo.lock through xtask): follows the
+# symbol server's 302 to blob storage, and its proxy from the environment.
+# Behind the HttpClient port; spec §11 names it the one third-party parser
+# of untrusted bytes the engine keeps.
+ureq = "2.12.1"
+
+[dev-dependencies]
+rusty_box_symbols_fixtures = { path = "../rusty_box_symbols_fixtures" }
+
+[lints]
+workspace = true

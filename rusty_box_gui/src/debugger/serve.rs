@@ -111,18 +111,20 @@ pub(crate) fn perform<T: Instrumentation, E: SliceEngine<T>>(
     }
 }
 
-/// Reads the snapshot the shell's view asks for. What the guest's own
-/// structures gave the last snapshot is carried over when the guest has not
-/// moved and the view still asks for the same processor and listing; a view
-/// that only changed where memory is shown does not walk them again.
+/// Reads the snapshot the shell's view asks for, under the kernel layouts the
+/// shell handed over. What the guest's own structures gave the last snapshot
+/// is carried over when the guest has not moved and the view still asks for
+/// the same processor and listing under the same layouts; a view that only
+/// changed where memory is shown does not walk them again.
 fn read_for<T: Instrumentation, E: SliceEngine<T>>(
     emu: &mut Emulator<T, E>,
     control: &RunControl,
 ) -> DebugSnapshot {
     let view = control.view();
     let unmoved = control.unmoved_snapshot();
+    let layout = control.kernel_layout();
     let mut discovery = control.discovery();
-    read_snapshot(emu, &view, &mut discovery, unmoved.as_deref())
+    read_snapshot(emu, &view, &mut discovery, unmoved.as_deref(), layout.as_ref())
 }
 
 /// Serves the shell until it lets the machine run on or ends the run.

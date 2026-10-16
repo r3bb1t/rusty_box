@@ -22,6 +22,8 @@ pub(crate) mod debugger_page;
 pub(crate) mod destination;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod listing;
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) mod symbols_page;
 pub(crate) mod sidebar;
 pub(crate) mod theme;
 pub(crate) mod vm_bar;
@@ -37,11 +39,16 @@ mod tests {
 
     /// The sources whose string literals reach the screen, each with the path
     /// a failure names.
-    const SOURCES: [(&str, &str); 9] = [
+    const SOURCES: [(&str, &str); 11] = [
+        ("rusty_box_gui/src/shell/symbols_page.rs", include_str!("symbols_page.rs")),
         ("rusty_box_gui/src/app.rs", include_str!("../app.rs")),
         (
             "rusty_box_gui/src/shell/debugger_page.rs",
             include_str!("debugger_page.rs"),
+        ),
+        (
+            "rusty_box_gui/src/shell/debugger_page/symbols_tab.rs",
+            include_str!("debugger_page/symbols_tab.rs"),
         ),
         (
             "rusty_box_gui/src/shell/listing.rs",

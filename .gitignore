@@ -74,6 +74,7 @@
 
 # Generated browser/native artifacts
 /rusty_box_gui/dist/
+/xtask/no_panic_canary/Cargo.lock
 
 # Staged Android assets. Nothing in the tree writes here; a checkout may
 # still hold a 66 MB ISO from an earlier `cargo xtask android build`.
