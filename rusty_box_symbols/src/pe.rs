@@ -606,18 +606,19 @@ fn read_file(file: &[u8], at: u64, buf: &mut [u8]) -> ImageRead {
     }
 }
 
-/// A PE file's bytes, read by RVA through its section table.
-pub struct FileImage {
-    bytes: Vec<u8>,
+/// A PE file's bytes, owned or borrowed, read by RVA through its section
+/// table.
+pub struct FileImage<B: AsRef<[u8]>> {
+    bytes: B,
     headers: PeHeaders,
 }
 
-impl FileImage {
+impl<B: AsRef<[u8]>> FileImage<B> {
     /// Parses the headers, which sit at the same offsets in a file and in
     /// the image the loader makes of it.
-    pub fn new(bytes: Vec<u8>) -> Result<FileImage, HeaderError> {
+    pub fn new(bytes: B) -> Result<FileImage<B>, HeaderError> {
         let headers = {
-            let mut read = |rva: Rva, buf: &mut [u8]| read_file(&bytes, rva.0, buf);
+            let mut read = |rva: Rva, buf: &mut [u8]| read_file(bytes.as_ref(), rva.0, buf);
             read_headers(&mut read)?
         };
         Ok(FileImage { bytes, headers })
@@ -676,10 +677,10 @@ impl FileImage {
         let zeros = usize::try_from(zeros).ok()?;
         let total = from_file.checked_add(zeros)?;
         let placed = out.get_mut(..total)?;
-        let (file_part, zero_part) = placed.split_at_mut(from_file);
+        let (file_part, zero_part) = placed.split_at_mut_checked(from_file)?;
         // Bytes wholly past a section's raw data come from no file offset.
         if !file_part.is_empty() {
-            match read_file(&self.bytes, file_at, file_part) {
+            match read_file(self.bytes.as_ref(), file_at, file_part) {
                 ImageRead::Read => {}
                 ImageRead::Unreadable => return None,
             }
@@ -700,9 +701,10 @@ pub enum BinaryPdbError {
     NoPdb(PdbUnavailable),
 }
 
-/// The PDB identity of the binary in `bytes`, which was fetched by `wanted`
-/// because the guest's copy of its debug directory did not read.
-pub fn pdb_from_binary(bytes: Vec<u8>, wanted: PeImageId) -> Result<PdbId, BinaryPdbError> {
+/// The PDB identity of the binary in `bytes`, owned or borrowed, which was
+/// fetched by `wanted` because the guest's copy of its debug directory did
+/// not read.
+pub fn pdb_from_binary<B: AsRef<[u8]>>(bytes: B, wanted: PeImageId) -> Result<PdbId, BinaryPdbError> {
     let file = FileImage::new(bytes).map_err(BinaryPdbError::Headers)?;
     let found = file.headers().image_id();
     if found != wanted {

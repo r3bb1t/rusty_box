@@ -2029,7 +2029,7 @@ fn layouts_line(ui: &mut egui::Ui, layouts: Option<KernelLayouts>) {
     };
     let color = match layouts {
         KernelLayouts::Pdb | KernelLayouts::Discovered => TEXT_MUTED,
-        KernelLayouts::PdbDisagrees => ACCENT_AMBER,
+        KernelLayouts::PdbDisagrees | KernelLayouts::ForcedPdb => ACCENT_AMBER,
     };
     ui.label(RichText::new(layouts.label()).small().color(color));
 }

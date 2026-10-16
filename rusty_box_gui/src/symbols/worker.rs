@@ -8,7 +8,7 @@ use rusty_box_symbols::fs_store::FsStore;
 use rusty_box_symbols::http::HttpClient;
 use rusty_box_symbols::identity::ModuleIdentity;
 use rusty_box_symbols::projects::{Freshness, ProjectIndex};
-use rusty_box_symbols::service::{LocateOutcome, SymbolService};
+use rusty_box_symbols::service::{attach_file, LocateOutcome, SymbolService};
 use rusty_box_symbols::store::{FileStore, StoreError, SymbolStore};
 use rusty_box_symbols::ureq_http::UreqHttp;
 
@@ -46,7 +46,9 @@ pub(crate) fn start(hub: &SymbolHub) -> std::io::Result<SymbolWorkers> {
         let worker_http = http.clone();
         let spawned = std::thread::Builder::new()
             .name(format!("rusty_box_symbols_{writer}"))
-            .spawn(move || serve(&worker_hub, |config| production_service(config, writer, &worker_http)));
+            .spawn(move || {
+                serve(&worker_hub, |config| production_service(config, writer, &worker_http), || FsStore::new(writer))
+            });
         match spawned {
             // The handle is let go: see `SymbolWorkers`.
             Ok(handle) => drop(handle),
@@ -65,25 +67,34 @@ pub(crate) struct Current<F: FileStore, H: HttpClient> {
     service: SymbolService<F, H>,
 }
 
-/// Takes jobs until the hub closes.
-pub(crate) fn serve<F, H, M>(hub: &SymbolHub, mut make: M)
+/// Takes jobs until the hub closes. `make` builds the service over the
+/// store; `bare` gives a file reader alone, for what needs no store.
+pub(crate) fn serve<F, H, M, B>(hub: &SymbolHub, mut make: M, mut bare: B)
 where
     F: FileStore,
     H: HttpClient,
     M: FnMut(&HubConfig) -> Result<SymbolService<F, H>, StoreError>,
+    B: FnMut() -> F,
 {
     let mut current: Option<Current<F, H>> = None;
     while let Some(ticket) = hub.next_job() {
-        perform(hub, &mut current, &mut make, ticket);
+        perform(hub, &mut current, &mut make, &mut bare, ticket);
     }
 }
 
-/// One job: the service is made again when the settings changed.
-pub(crate) fn perform<F, H, M>(hub: &SymbolHub, current: &mut Option<Current<F, H>>, make: &mut M, ticket: Ticket)
-where
+/// One job: the service is made again when the settings changed. When the
+/// store does not open, an attach still reads its file through `bare`.
+pub(crate) fn perform<F, H, M, B>(
+    hub: &SymbolHub,
+    current: &mut Option<Current<F, H>>,
+    make: &mut M,
+    bare: &mut B,
+    ticket: Ticket,
+) where
     F: FileStore,
     H: HttpClient,
     M: FnMut(&HubConfig) -> Result<SymbolService<F, H>, StoreError>,
+    B: FnMut() -> F,
 {
     let stale = current
         .as_ref()
@@ -97,7 +108,11 @@ where
             Err(error) => {
                 let reason = format!("the symbol store does not open: {error}");
                 match &ticket.job {
-                    Job::Locate { identity } | Job::Attach { identity, .. } => hub.finish(
+                    // A picked file is read without the store.
+                    Job::Attach { identity, path, consent } => {
+                        hub.finish(identity, entry_of(attach_file(&mut bare(), path, identity, *consent)));
+                    }
+                    Job::Locate { identity } => hub.finish(
                         identity,
                         ModuleEntry {
                             state: ModuleSymbols::Failed {
@@ -125,8 +140,12 @@ where
         Job::Locate { identity } => {
             let mut outcome = locate(hub, current, &identity);
             // A module none of the projects' indexed files matched may be in
-            // a build made since: index again when the folders changed.
-            if !matches!(outcome, LocateOutcome::Loaded { .. }) && !current.config.projects.is_empty() {
+            // a build made since: index again when the folders changed. One
+            // check stands for a burst of misses (`PROJECT_CHECK_INTERVAL`).
+            if !matches!(outcome, LocateOutcome::Loaded { .. })
+                && !current.config.projects.is_empty()
+                && hub.project_check_due(std::time::Instant::now())
+            {
                 let projects = hub.view().projects.clone();
                 match projects.freshness(current.service.store().files(), &current.config.projects) {
                     Ok(Freshness::Current) => {}
@@ -272,7 +291,7 @@ mod tests {
 
         fn perform(&mut self, hub: &SymbolHub, ticket: Ticket) {
             let ready = &mut self.ready;
-            perform(hub, &mut self.current, &mut |_: &HubConfig| Ok(ready.take().expect("made once")), ticket);
+            perform(hub, &mut self.current, &mut |_: &HubConfig| Ok(ready.take().expect("made once")), &mut MemoryStore::default, ticket);
         }
 
         /// Performs every job queued now.
@@ -393,6 +412,50 @@ mod tests {
         assert!(hub.view().tables(&kernel).is_some());
     }
 
+    /// A pause asks for many modules at once; their misses walk the project
+    /// folders once between them, not once each.
+    #[test]
+    fn a_burst_of_misses_lists_the_project_folders_once() {
+        let folder = PathBuf::from("work").join("build");
+        let projects = vec![ProjectFolders { name: "mydriver".into(), symbols: vec![folder] }];
+        let config = config(projects);
+        let hub = SymbolHub::new(config.clone());
+        let mut worker = Worker::new(&config, MemoryStore::default(), ScriptedHttp::default());
+        for missing in [module("one", 10), module("two", 11), module("three", 12)] {
+            want(&hub, &missing, Priority::Rest);
+        }
+        worker.drain(&hub);
+        assert_eq!(worker.files().listings(), 1);
+    }
+
+    /// The store does not open (its network drive is gone) and the owner
+    /// attaches a file from disk: it loads, since reading it needs no store.
+    #[test]
+    fn a_file_attaches_while_the_store_does_not_open() {
+        let kernel = module("ntkrnlmp", 1);
+        let picked = PathBuf::from("Downloads").join("ntkrnlmp.pdb");
+        let config = config(Vec::new());
+        let hub = SymbolHub::new(config);
+        hub.attach(&kernel, picked.clone(), Consent::MatchOnly);
+        let ticket = hub.try_next_job().expect("the attach");
+        let mut current: Option<Current<MemoryStore, ScriptedHttp>> = None;
+        let mut unopened = |config: &HubConfig| -> Result<SymbolService<MemoryStore, ScriptedHttp>, StoreError> {
+            Err(StoreError::Inspect { path: config.store.clone(), source: std::io::Error::other("the drive is gone") })
+        };
+        let mut bare = || {
+            let mut files = MemoryStore::default();
+            files.insert(picked.clone(), pdb(1));
+            files
+        };
+        perform(&hub, &mut current, &mut unopened, &mut bare, ticket);
+        assert!(
+            matches!(hub.view().state(&kernel), Some(ModuleSymbols::Loaded { from: SymbolSource::Attached { .. } })),
+            "{:?}",
+            hub.view().state(&kernel)
+        );
+        assert!(hub.view().tables(&kernel).is_some());
+    }
+
     /// The owner rebuilt the driver after the folders were indexed: the
     /// lookup misses, sees the folder changed, indexes again and finds it.
     #[test]
@@ -433,6 +496,34 @@ mod tests {
         assert!(matches!(hub.view().state(&kernel), Some(ModuleSymbols::Loaded { .. })));
     }
 
+    /// The shell is asked to draw only once the hub has let go of its lock:
+    /// whatever egui runs on a repaint request may read the hub.
+    #[test]
+    fn the_shell_is_asked_to_draw_after_the_hub_lets_go() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let hub = SymbolHub::new(config(Vec::new()));
+        let requests = Arc::new(AtomicUsize::new(0));
+        let while_locked = Arc::new(AtomicUsize::new(0));
+        let context = egui::Context::default();
+        let probe = hub.clone();
+        let counted = Arc::clone(&requests);
+        let locked = Arc::clone(&while_locked);
+        context.set_request_repaint_callback(move |_| {
+            counted.fetch_add(1, Ordering::SeqCst);
+            if !probe.lock_is_free() {
+                locked.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+        hub.set_repaint(context);
+        let kernel = module("ntkrnlmp", 1);
+        want(&hub, &kernel, Priority::Kernel);
+        hub.cancel(&kernel);
+        // egui reports a request when it moves the next frame earlier, so
+        // two in one frame report once.
+        assert!(requests.load(Ordering::SeqCst) >= 1, "a publication asks for a frame");
+        assert_eq!(while_locked.load(Ordering::SeqCst), 0, "no request is made under the hub's lock");
+    }
+
     #[test]
     fn a_reader_keeps_its_view_while_the_hub_moves_on() {
         let hub = SymbolHub::new(config(Vec::new()));
@@ -449,10 +540,14 @@ mod tests {
         let hub = SymbolHub::new(config(Vec::new()));
         let worker_hub = hub.clone();
         let worker = std::thread::spawn(move || {
-            serve(&worker_hub, |config: &HubConfig| {
-                SymbolStore::open(MemoryStore::default(), config.store.clone())
-                    .map(|store| SymbolService::new(store, ScriptedHttp::default(), config.service.clone()))
-            })
+            serve(
+                &worker_hub,
+                |config: &HubConfig| {
+                    SymbolStore::open(MemoryStore::default(), config.store.clone())
+                        .map(|store| SymbolService::new(store, ScriptedHttp::default(), config.service.clone()))
+                },
+                MemoryStore::default,
+            )
         });
         hub.close();
         worker.join().expect("the worker ends");

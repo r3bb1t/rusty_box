@@ -52,11 +52,21 @@ pub(crate) struct ThreadFields {
     pub(crate) trap_frame: Option<FieldOffset>,
 }
 
+/// Whose build the PDB the layouts come from describes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LayoutSource {
+    /// The kernel's own.
+    Matched,
+    /// Another build's, loaded on the owner's word ("Load anyway").
+    Forced,
+}
+
 /// What one kernel build's PDB says about the structures the walker reads.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct KernelLayout {
     /// The kernel build the PDB describes.
     pub(crate) kernel: ModuleIdentity,
+    pub(crate) source: LayoutSource,
     pub(crate) globals: KernelGlobals,
     pub(crate) process: ProcessFields,
     pub(crate) thread: ThreadFields,
@@ -108,8 +118,9 @@ impl Lookups<'_> {
 }
 
 impl KernelLayout {
-    /// The layouts `tables`, the PDB of `kernel`, give.
-    pub(crate) fn from_tables(kernel: ModuleIdentity, tables: &SymbolTables) -> KernelLayout {
+    /// The layouts `tables`, the PDB of `kernel` or (`Forced`) of another
+    /// build, give.
+    pub(crate) fn from_tables(kernel: ModuleIdentity, tables: &SymbolTables, source: LayoutSource) -> KernelLayout {
         let mut lookups = Lookups {
             tables,
             failures: Vec::new(),
@@ -155,6 +166,7 @@ impl KernelLayout {
         };
         KernelLayout {
             kernel,
+            source,
             globals,
             process,
             thread,
@@ -372,7 +384,7 @@ mod tests {
 
     fn layout_of(pdb: &PdbFixture) -> KernelLayout {
         let tables = SymbolTables::parse(&build_pdb(pdb)).expect("the fixture parses");
-        KernelLayout::from_tables(kernel(), &tables)
+        KernelLayout::from_tables(kernel(), &tables, LayoutSource::Matched)
     }
 
     #[test]

@@ -175,6 +175,24 @@ impl StoreCopy {
     }
 }
 
+/// Why `parse` gave no tables.
+enum Unparsed {
+    /// The bytes do not parse.
+    Parse(ParseError),
+    /// The owner cancelled the download of a supplement the file names.
+    Cancelled(HttpError),
+}
+
+impl Unparsed {
+    /// The lookup's reason, for the file `origin` names.
+    fn at(self, origin: String) -> LocateError {
+        match self {
+            Unparsed::Parse(source) => LocateError::Parse { origin, source },
+            Unparsed::Cancelled(error) => LocateError::Http(error),
+        }
+    }
+}
+
 /// A file a server had.
 struct Fetched {
     url: String,
@@ -206,6 +224,37 @@ fn debuginfod_urls(servers: &[String], build_id: &BuildId) -> Vec<Vec<String>> {
         .iter()
         .map(|server| vec![format!("{}/buildid/{}/debuginfo", server.trim_end_matches('/'), build_id.to_hex())])
         .collect()
+}
+
+/// What an attached file comes to: taken when it is `wanted`'s build, else
+/// refused, or loaded as forced on `LoadAnyway`.
+fn judge_attached(tables: SymbolTables, path: &Path, wanted: &ModuleIdentity, consent: Consent) -> LocateOutcome {
+    let found = tables.identity();
+    match (wanted.matches(&found), consent) {
+        (IdentityMatch::Same, Consent::MatchOnly | Consent::LoadAnyway) => {
+            LocateOutcome::Loaded { tables: Arc::new(tables), from: SymbolSource::Attached { path: path.to_owned() } }
+        }
+        (IdentityMatch::Different | IdentityMatch::Unknown, Consent::MatchOnly) => {
+            LocateOutcome::Refused { found, wanted: wanted.clone(), path: path.to_owned() }
+        }
+        (IdentityMatch::Different | IdentityMatch::Unknown, Consent::LoadAnyway) => {
+            LocateOutcome::Forced { tables: Arc::new(tables), found, path: path.to_owned() }
+        }
+    }
+}
+
+/// Loads a file the owner picked for `wanted`, read through `files` alone:
+/// how an attach works while the store does not open. A dwz supplement the
+/// file names is not looked for; the file loads without it.
+pub fn attach_file<F: FileStore>(files: &mut F, path: &Path, wanted: &ModuleIdentity, consent: Consent) -> LocateOutcome {
+    let bytes = match files.read(path) {
+        Ok(bytes) => bytes,
+        Err(error) => return LocateOutcome::Unavailable { reason: error.into() },
+    };
+    match SymbolTables::parse_with_supplement(&bytes, None) {
+        Ok(tables) => judge_attached(tables, path, wanted, consent),
+        Err(source) => LocateOutcome::Unavailable { reason: LocateError::Parse { origin: path.display().to_string(), source } },
+    }
 }
 
 pub struct SymbolService<F: FileStore, H: HttpClient> {
@@ -253,14 +302,17 @@ impl<F: FileStore, H: HttpClient> SymbolService<F, H> {
             ModuleIdentity::Pe { pdb: Some(_), .. } | ModuleIdentity::Elf { .. } => wanted.clone(),
         };
         if let Some(found) = projects.find(&wanted) {
-            // A file changed since it was indexed is passed by.
-            if let Ok(tables) = self.parse_local(&found.path, projects, &mut progress) {
-                if wanted.matches(&tables.identity()) == IdentityMatch::Same {
+            match self.parse_local(&found.path, projects, &mut progress) {
+                Ok(tables) if wanted.matches(&tables.identity()) == IdentityMatch::Same => {
                     return LocateOutcome::Loaded {
                         tables: Arc::new(tables),
                         from: SymbolSource::Project { name: found.project.clone(), path: found.path.clone() },
                     };
                 }
+                // The owner cancelled the file's supplement download.
+                Err(reason @ LocateError::Http(HttpError::Cancelled { .. })) => return LocateOutcome::Unavailable { reason },
+                // A file changed since it was indexed is passed by.
+                Ok(_) | Err(_) => {}
             }
         }
         let keyed = match self.keyed(&wanted) {
@@ -277,7 +329,9 @@ impl<F: FileStore, H: HttpClient> SymbolService<F, H> {
                         return LocateOutcome::Loaded { tables: Arc::new(tables), from: SymbolSource::Store { path: keyed.store_path } };
                     }
                     Ok(tables) => StoreCopy::Unusable { reason: LocateError::WrongBuild { origin, found: tables.identity() } },
-                    Err(source) => StoreCopy::Unusable { reason: LocateError::Parse { origin, source } },
+                    // A cancel says nothing about the store file: it stays.
+                    Err(Unparsed::Cancelled(error)) => return LocateOutcome::Unavailable { reason: error.into() },
+                    Err(Unparsed::Parse(source)) => StoreCopy::Unusable { reason: LocateError::Parse { origin, source } },
                 }
             }
             Ok(None) => StoreCopy::Absent,
@@ -320,18 +374,7 @@ impl<F: FileStore, H: HttpClient> SymbolService<F, H> {
             Ok(tables) => tables,
             Err(reason) => return LocateOutcome::Unavailable { reason },
         };
-        let found = tables.identity();
-        match (wanted.matches(&found), consent) {
-            (IdentityMatch::Same, Consent::MatchOnly | Consent::LoadAnyway) => {
-                LocateOutcome::Loaded { tables: Arc::new(tables), from: SymbolSource::Attached { path: path.to_owned() } }
-            }
-            (IdentityMatch::Different | IdentityMatch::Unknown, Consent::MatchOnly) => {
-                LocateOutcome::Refused { found, wanted: wanted.clone(), path: path.to_owned() }
-            }
-            (IdentityMatch::Different | IdentityMatch::Unknown, Consent::LoadAnyway) => {
-                LocateOutcome::Forced { tables: Arc::new(tables), found, path: path.to_owned() }
-            }
-        }
+        judge_attached(tables, path, wanted, consent)
     }
 
     fn parse_local<P>(&mut self, path: &Path, projects: &ProjectIndex, progress: &mut P) -> Result<SymbolTables, LocateError>
@@ -340,26 +383,27 @@ impl<F: FileStore, H: HttpClient> SymbolService<F, H> {
     {
         let bytes = self.store.files().read(path)?;
         self.parse(&bytes, projects, progress)
-            .map_err(|source| LocateError::Parse { origin: path.display().to_string(), source })
+            .map_err(|unparsed| unparsed.at(path.display().to_string()))
     }
 
     /// The tables of `bytes`, with their dwz supplement when they name one
     /// and it can be had.
-    fn parse<P>(&mut self, bytes: &[u8], projects: &ProjectIndex, progress: &mut P) -> Result<SymbolTables, ParseError>
+    fn parse<P>(&mut self, bytes: &[u8], projects: &ProjectIndex, progress: &mut P) -> Result<SymbolTables, Unparsed>
     where
         P: FnMut(Progress) -> Flow,
     {
-        let supplement = match supplement_of(bytes)? {
-            Some(link) => self.supplement(&link, projects, progress),
+        let supplement = match supplement_of(bytes).map_err(Unparsed::Parse)? {
+            Some(link) => self.supplement(&link, projects, progress).map_err(Unparsed::Cancelled)?,
             None => None,
         };
-        SymbolTables::parse_with_supplement(bytes, supplement.as_deref())
+        SymbolTables::parse_with_supplement(bytes, supplement.as_deref()).map_err(Unparsed::Parse)
     }
 
     /// A dwz supplement by build-id: a project's, the store's, else
     /// debuginfod's (verified, then kept). Anything that does not give it
-    /// gives `None`; the file it serves loads without it.
-    fn supplement<P>(&mut self, link: &AltLink, projects: &ProjectIndex, progress: &mut P) -> Option<Vec<u8>>
+    /// gives `None`, and the file it serves loads without it; the owner's
+    /// cancel of its download is the one error.
+    fn supplement<P>(&mut self, link: &AltLink, projects: &ProjectIndex, progress: &mut P) -> Result<Option<Vec<u8>>, HttpError>
     where
         P: FnMut(Progress) -> Flow,
     {
@@ -368,18 +412,18 @@ impl<F: FileStore, H: HttpClient> SymbolService<F, H> {
         if let Some(found) = projects.find_build_id(&link.build_id) {
             if let Ok(bytes) = self.store.files().read(&found.path) {
                 if is_it(&bytes) {
-                    return Some(bytes);
+                    return Ok(Some(bytes));
                 }
             }
         }
         let store_path = self.store.debug_file_path(&link.build_id);
         if let Ok(Some(bytes)) = self.store.lookup(&store_path) {
             if is_it(&bytes) {
-                return Some(bytes);
+                return Ok(Some(bytes));
             }
         }
         match self.config.downloads {
-            Downloads::Off => return None,
+            Downloads::Off => return Ok(None),
             Downloads::Automatic => {}
         }
         let keyed = Keyed {
@@ -387,13 +431,17 @@ impl<F: FileStore, H: HttpClient> SymbolService<F, H> {
             kind: ServerKind::Debuginfod,
             servers: debuginfod_urls(&self.config.debuginfod, &link.build_id),
         };
-        let fetched = self.fetch(&keyed, progress).ok()??;
+        let fetched = match self.fetch(&keyed, progress) {
+            Ok(Some(fetched)) => fetched,
+            Err(LocateError::Http(error @ HttpError::Cancelled { .. })) => return Err(error),
+            Ok(None) | Err(_) => return Ok(None),
+        };
         if !is_it(&fetched.bytes) {
-            return None;
+            return Ok(None);
         }
         match self.store.place(&keyed.store_path, &fetched.bytes) {
             // Kept or not, the supplement serves this lookup.
-            Ok(Placed::Written | Placed::AlreadyPresent) | Err(_) => Some(fetched.bytes),
+            Ok(Placed::Written | Placed::AlreadyPresent) | Err(_) => Ok(Some(fetched.bytes)),
         }
     }
 
@@ -486,7 +534,7 @@ impl<F: FileStore, H: HttpClient> SymbolService<F, H> {
         };
         let tables = match self.parse(&fetched.bytes, projects, progress) {
             Ok(tables) => tables,
-            Err(source) => return LocateOutcome::Unavailable { reason: LocateError::Parse { origin: fetched.url, source } },
+            Err(unparsed) => return LocateOutcome::Unavailable { reason: unparsed.at(fetched.url) },
         };
         let found = tables.identity();
         if wanted.matches(&found) != IdentityMatch::Same {
@@ -521,7 +569,7 @@ impl<F: FileStore, H: HttpClient> SymbolService<F, H> {
         let Some(fetched) = self.fetch(&keyed, progress)? else {
             return Ok(BinaryLookup::NotOnServer);
         };
-        let pdb = pdb_from_binary(fetched.bytes.clone(), image).map_err(LocateError::Binary)?;
+        let pdb = pdb_from_binary(fetched.bytes.as_slice(), image).map_err(LocateError::Binary)?;
         match self.keep(keyed.store_path, &fetched.bytes, store_copy) {
             // The binary only names the PDB: kept or not, it served this
             // lookup, as a supplement does.
@@ -810,6 +858,23 @@ mod tests {
         assert_eq!(loaded_from(&service.attach(&right, &kernel(), Consent::MatchOnly)), Some(&SymbolSource::Attached { path: right }));
     }
 
+    /// A picked file read through a file reader alone is judged as an
+    /// attach through the service is.
+    #[test]
+    fn a_file_attaches_through_a_file_reader_alone() {
+        let mut files = MemoryStore::default();
+        let right = PathBuf::from("Downloads").join("ntkrnlmp.pdb");
+        let other = PathBuf::from("Downloads").join("old.pdb");
+        files.insert(right.clone(), pdb(GUID_BYTES, 1));
+        files.insert(other.clone(), pdb(GUID_BYTES, 2));
+        assert_eq!(
+            loaded_from(&attach_file(&mut files, &right, &kernel(), Consent::MatchOnly)),
+            Some(&SymbolSource::Attached { path: right })
+        );
+        assert!(matches!(attach_file(&mut files, &other, &kernel(), Consent::MatchOnly), LocateOutcome::Refused { .. }));
+        assert!(matches!(attach_file(&mut files, &other, &kernel(), Consent::LoadAnyway), LocateOutcome::Forced { .. }));
+    }
+
     /// A user-mode module's pageable debug directory.
     #[test]
     fn a_module_without_its_pdb_identity_is_found_through_its_binary() {
@@ -864,6 +929,58 @@ mod tests {
         assert!(service.http().requests().contains(&supplement_url));
         let kept = service.store().debug_file_path(&supplement_id);
         assert!(service.store().lookup(&kept).unwrap().is_some(), "the supplement is kept");
+    }
+
+    fn cancelled(outcome: &LocateOutcome) -> bool {
+        matches!(unavailable(outcome), Some(LocateError::Http(HttpError::Cancelled { .. })))
+    }
+
+    /// The owner's cancel during the supplement's download ends the lookup
+    /// as cancelled; the main file is not kept as though it loaded.
+    #[test]
+    fn a_cancel_during_the_supplement_download_cancels_the_lookup() {
+        let pair = dwz_pair(DwzForms::Gnu, TEXT_RVA);
+        let main = build_elf(ElfSpec { symtab: Symtab::Without, ..ElfSpec::pie() }, &pair.main);
+        let build_id = BuildId(BUILD_ID.to_vec());
+        let supplement_id = BuildId(SUPPLEMENT_BUILD_ID.to_vec());
+        let module = ModuleIdentity::Elf { file_name: "widget".into(), build_id: build_id.clone() };
+        let mut http = ScriptedHttp::default();
+        http.respond(&format!("{DEBUGINFOD}/buildid/{}/debuginfo", build_id.to_hex()), 200, main);
+        http.respond(&format!("{DEBUGINFOD}/buildid/{}/debuginfo", supplement_id.to_hex()), 200, pair.supplement);
+        let mut service = service(MemoryStore::default(), http, Downloads::Automatic);
+        // The second download is the supplement's: cancel it.
+        let mut downloads = 0u32;
+        let outcome = service.locate(&module, &ProjectIndex::default(), |_| {
+            downloads += 1;
+            if downloads >= 2 {
+                Flow::Cancel
+            } else {
+                Flow::Continue
+            }
+        });
+        assert!(cancelled(&outcome), "a cancel is a cancel");
+        let main_path = service.store().debug_file_path(&build_id);
+        assert_eq!(service.store().lookup(&main_path).unwrap(), None, "nothing kept from a cancelled lookup");
+    }
+
+    /// A store file whose supplement download the owner cancels is not
+    /// taken for a broken one: it stays, and the lookup is cancelled.
+    #[test]
+    fn a_cancel_during_a_store_files_supplement_leaves_the_store_file() {
+        let pair = dwz_pair(DwzForms::Gnu, TEXT_RVA);
+        let main = build_elf(ElfSpec { symtab: Symtab::Without, ..ElfSpec::pie() }, &pair.main);
+        let build_id = BuildId(BUILD_ID.to_vec());
+        let supplement_id = BuildId(SUPPLEMENT_BUILD_ID.to_vec());
+        let module = ModuleIdentity::Elf { file_name: "widget".into(), build_id: build_id.clone() };
+        let mut http = ScriptedHttp::default();
+        http.respond(&format!("{DEBUGINFOD}/buildid/{}/debuginfo", supplement_id.to_hex()), 200, pair.supplement);
+        let mut service = service(MemoryStore::default(), http, Downloads::Automatic);
+        let main_path = service.store().debug_file_path(&build_id);
+        service.store().files().insert(main_path.clone(), main.clone());
+        // The only download is the supplement's: cancel the first.
+        let outcome = service.locate(&module, &ProjectIndex::default(), |_| Flow::Cancel);
+        assert!(cancelled(&outcome), "a cancel is a cancel");
+        assert_eq!(service.store().lookup(&main_path).unwrap(), Some(main), "the store file stays");
     }
 
     /// Review focus 5: the supplement is not on the server.

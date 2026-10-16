@@ -101,7 +101,9 @@ impl Fix {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Standing {
     Loaded,
-    Underway,
+    /// Asked for; no worker has taken it yet.
+    Waiting,
+    Downloading,
     Missing,
 }
 
@@ -137,7 +139,7 @@ fn state_text(identity: &GuestIdentity, state: Option<&ModuleSymbols>) -> StateT
             state: "waiting".to_owned(),
             color: TEXT_MUTED,
             source: String::new(),
-            standing: Standing::Underway,
+            standing: Standing::Waiting,
             fix: Some(Fix::Cancel),
         },
         Some(ModuleSymbols::Downloading { done, total }) => StateText {
@@ -147,7 +149,7 @@ fn state_text(identity: &GuestIdentity, state: Option<&ModuleSymbols>) -> StateT
             },
             color: ACCENT_BLUE,
             source: String::new(),
-            standing: Standing::Underway,
+            standing: Standing::Downloading,
             fix: Some(Fix::Cancel),
         },
         Some(ModuleSymbols::Loaded { from }) => StateText {
@@ -224,7 +226,8 @@ fn index_problems_text(problems: &[IndexProblem]) -> Option<String> {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct SymbolCounts {
     pub(crate) loaded: usize,
-    pub(crate) underway: usize,
+    pub(crate) waiting: usize,
+    pub(crate) downloading: usize,
     pub(crate) missing: usize,
 }
 
@@ -235,11 +238,13 @@ struct Counted {
 }
 
 impl SymbolCounts {
-    /// "14 loaded · 2 downloading · 1 missing", leaving out what is none.
+    /// "14 loaded · 1 waiting · 2 downloading · 1 missing", leaving out what
+    /// is none.
     pub(crate) fn label(self) -> String {
         let parts: Vec<String> = [
             Counted { count: self.loaded, what: "loaded" },
-            Counted { count: self.underway, what: "downloading" },
+            Counted { count: self.waiting, what: "waiting" },
+            Counted { count: self.downloading, what: "downloading" },
             Counted { count: self.missing, what: "missing" },
         ]
         .into_iter()
@@ -264,7 +269,8 @@ pub(crate) fn symbol_counts(symbols: &SymbolIndex, view: &SymbolsView) -> Symbol
     for module in &symbols.modules {
         match state_text(&module.identity, state_of(&module.identity, view)).standing {
             Standing::Loaded => counts.loaded = counts.loaded.saturating_add(1),
-            Standing::Underway => counts.underway = counts.underway.saturating_add(1),
+            Standing::Waiting => counts.waiting = counts.waiting.saturating_add(1),
+            Standing::Downloading => counts.downloading = counts.downloading.saturating_add(1),
             Standing::Missing => counts.missing = counts.missing.saturating_add(1),
         }
     }
@@ -450,7 +456,8 @@ impl ModuleStates<'_> {
         match state_text(&module.identity, state).standing {
             Standing::Loaded if forced => cell("forced", ACCENT_AMBER),
             Standing::Loaded => cell("loaded", ACCENT_CYAN),
-            Standing::Underway => cell("loading", ACCENT_BLUE),
+            Standing::Waiting => cell("waiting", TEXT_MUTED),
+            Standing::Downloading => cell("loading", ACCENT_BLUE),
             Standing::Missing => cell("missing", ACCENT_AMBER),
         }
     }
@@ -493,8 +500,8 @@ mod tests {
         let case = |state, fix, standing| Case { state, fix, standing };
         let cases = [
             case(None, Some(Fix::Retry), Standing::Missing),
-            case(Some(ModuleSymbols::Pending), Some(Fix::Cancel), Standing::Underway),
-            case(Some(ModuleSymbols::Downloading { done: 1024, total: Some(4096) }), Some(Fix::Cancel), Standing::Underway),
+            case(Some(ModuleSymbols::Pending), Some(Fix::Cancel), Standing::Waiting),
+            case(Some(ModuleSymbols::Downloading { done: 1024, total: Some(4096) }), Some(Fix::Cancel), Standing::Downloading),
             case(
                 Some(ModuleSymbols::Loaded { from: SymbolSource::Store { path: path.clone() } }),
                 Some(Fix::Unload),
@@ -558,11 +565,30 @@ mod tests {
         assert_eq!(state_text(&GuestIdentity::Unnamed, None).standing, Standing::Missing);
     }
 
+    /// A module asked for but not yet taken by a worker counts as waiting,
+    /// not as downloading.
+    #[test]
+    fn the_chip_counts_waiting_apart_from_downloading() {
+        let view = |state: ModuleSymbols| {
+            let mut view = SymbolsView::default();
+            if let GuestIdentity::Known(identity) = known() {
+                view.modules.insert(identity, crate::symbols::hub::ModuleEntry { state, tables: None });
+            }
+            view
+        };
+        let index = SymbolIndex { modules: vec![module(known())], kernel: None };
+        let waiting = symbol_counts(&index, &view(ModuleSymbols::Pending));
+        assert_eq!(waiting, SymbolCounts { loaded: 0, waiting: 1, downloading: 0, missing: 0 });
+        assert_eq!(waiting.label(), "1 waiting");
+        let downloading = symbol_counts(&index, &view(ModuleSymbols::Downloading { done: 1, total: None }));
+        assert_eq!(downloading.label(), "1 downloading");
+    }
+
     #[test]
     fn the_chip_counts_only_what_there_is() {
-        let counts = SymbolCounts { loaded: 14, underway: 2, missing: 1 };
+        let counts = SymbolCounts { loaded: 14, waiting: 0, downloading: 2, missing: 1 };
         assert_eq!(counts.label(), "14 loaded · 2 downloading · 1 missing");
-        assert_eq!(SymbolCounts { loaded: 3, underway: 0, missing: 0 }.label(), "3 loaded");
+        assert_eq!(SymbolCounts { loaded: 3, waiting: 0, downloading: 0, missing: 0 }.label(), "3 loaded");
         assert_eq!(SymbolCounts::default().label(), "no modules");
     }
 }

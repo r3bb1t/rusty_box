@@ -18,6 +18,8 @@ pub struct MemoryStore {
     files: BTreeMap<PathBuf, StoredFile>,
     writes: u64,
     unreadable: BTreeSet<PathBuf>,
+    /// How many recursive listings were asked for.
+    listings: u64,
 }
 
 impl MemoryStore {
@@ -43,6 +45,13 @@ impl MemoryStore {
     /// Makes reads of `path` fail as a disk error would.
     pub fn fail_reads_of(&mut self, path: PathBuf) {
         self.unreadable.insert(path);
+    }
+
+    /// How many recursive listings were asked for: a walk of a whole folder
+    /// tree, which on a disk is the costly read.
+    #[must_use]
+    pub fn listings(&self) -> u64 {
+        self.listings
     }
 }
 
@@ -90,6 +99,7 @@ impl FileStore for MemoryStore {
     }
 
     fn list_recursive(&mut self, root: &Path) -> Result<Vec<ListedFile>, StoreError> {
+        self.listings = self.listings.saturating_add(1);
         Ok(self
             .files
             .iter()

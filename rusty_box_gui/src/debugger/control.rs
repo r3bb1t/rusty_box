@@ -759,6 +759,7 @@ mod tests {
         assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::Refresh));
         let layout = Arc::new(KernelLayout {
             kernel: crate::symbols::kernel::tests::kernel_identity(),
+            source: crate::debugger::kernel_layout::LayoutSource::Matched,
             globals: Default::default(),
             process: Default::default(),
             thread: Default::default(),

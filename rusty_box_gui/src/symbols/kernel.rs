@@ -8,9 +8,9 @@ use std::sync::Arc;
 use rusty_box_symbols::tables::SymbolTables;
 
 use crate::debugger::inspect::SymbolIndex;
-use crate::debugger::kernel_layout::KernelLayout;
+use crate::debugger::kernel_layout::{KernelLayout, LayoutSource};
 
-use super::hub::SymbolsView;
+use super::hub::{ModuleSymbols, SymbolsView};
 
 /// Layouts made from one loaded file of tables.
 pub(crate) struct LayoutCache {
@@ -38,7 +38,20 @@ pub(crate) fn kernel_layout(
     if let Some(made) = cache.as_ref().filter(|made| Arc::ptr_eq(&made.tables, tables)) {
         return Some(Arc::clone(&made.layout));
     }
-    let layout = Arc::new(KernelLayout::from_tables(identity.clone(), tables));
+    let source = match view.state(identity) {
+        Some(ModuleSymbols::Forced { .. }) => LayoutSource::Forced,
+        Some(
+            ModuleSymbols::Loaded { .. }
+            | ModuleSymbols::Pending
+            | ModuleSymbols::Downloading { .. }
+            | ModuleSymbols::Refused { .. }
+            | ModuleSymbols::NotOnServer
+            | ModuleSymbols::Failed { .. }
+            | ModuleSymbols::Unloaded,
+        )
+        | None => LayoutSource::Matched,
+    };
+    let layout = Arc::new(KernelLayout::from_tables(identity.clone(), tables, source));
     *cache = Some(LayoutCache { tables: Arc::clone(tables), layout: Arc::clone(&layout) });
     Some(layout)
 }
@@ -117,6 +130,25 @@ pub(crate) mod tests {
             },
         );
         hub
+    }
+
+    /// Tables of another build, loaded on the owner's word, make layouts
+    /// that say so.
+    #[test]
+    fn layouts_from_forced_tables_are_marked_forced() {
+        use rusty_box_symbols::identity::TablesIdentity;
+        let hub = quiet_hub();
+        let pdb = build_pdb(&fixture::windows10_kernel([0x24; 16], 1));
+        let tables = SymbolTables::parse(&pdb).expect("the fixture parses");
+        let forced = ModuleSymbols::Forced {
+            found: TablesIdentity::Pdb { guid: Guid::from_le_bytes([0x24; 16]), age: 1 },
+            path: PathBuf::from("Downloads").join("ntkrnlmp.pdb"),
+        };
+        look_up_as_a_worker(&hub, &kernel_identity(), ModuleEntry { state: forced, tables: Some(Arc::new(tables)) });
+        let made = kernel_layout(&kernel_symbols(), &hub.view(), &mut None).expect("the tables loaded");
+        assert_eq!(made.source, LayoutSource::Forced);
+        let matched = kernel_layout(&kernel_symbols(), &hub_with_kernel_tables().view(), &mut None).expect("loaded");
+        assert_eq!(matched.source, LayoutSource::Matched);
     }
 
     #[test]

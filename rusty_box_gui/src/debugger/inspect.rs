@@ -1043,6 +1043,7 @@ mod tests {
         first.process = Some("carried.exe".to_owned());
         let layout = Arc::new(KernelLayout {
             kernel: kernel_identity(),
+            source: crate::debugger::kernel_layout::LayoutSource::Matched,
             globals: Default::default(),
             process: Default::default(),
             thread: Default::default(),

@@ -8,6 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, Instant};
 
 use rusty_box_symbols::http::{Flow, Progress, Retry};
 use rusty_box_symbols::identity::{ModuleIdentity, TablesIdentity};
@@ -164,18 +165,23 @@ struct HubState {
     config: Arc<HubConfig>,
     closing: bool,
     repaint: Option<egui::Context>,
+    /// When a missed lookup last checked the project folders for a newer
+    /// build.
+    projects_checked: Option<Instant>,
 }
 
+/// How long one check of the project folders stands for the misses after
+/// it, so a pause's burst of lookups walks the folders once: a build made
+/// within it is found on the next pause, or by Retry.
+pub(crate) const PROJECT_CHECK_INTERVAL: Duration = Duration::from_secs(5);
+
 impl HubState {
-    /// Applies `change` to the view, counts the publication and asks the
-    /// shell to draw it.
+    /// Applies `change` to the view and counts the publication; the shell is
+    /// asked to draw it when the lock is let go ([`SymbolHub::update`]).
     fn publish<F: FnOnce(&mut SymbolsView)>(&mut self, change: F) {
         let view = Arc::make_mut(&mut self.view);
         change(view);
         view.generation = view.generation.wrapping_add(1);
-        if let Some(context) = &self.repaint {
-            context.request_repaint();
-        }
     }
 
     /// Applies `change` to the published modules (readers keep their view).
@@ -240,6 +246,7 @@ impl SymbolHub {
                     config: Arc::new(config),
                     closing: false,
                     repaint: None,
+                    projects_checked: None,
                 }),
                 wake: Condvar::new(),
             }),
@@ -248,6 +255,21 @@ impl SymbolHub {
 
     fn lock(&self) -> MutexGuard<'_, HubState> {
         self.shared.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Runs `change` under the lock. When it published, the shell is asked
+    /// to draw once the lock is let go, so whatever egui runs on that
+    /// request may read the hub.
+    fn update<R, F: FnOnce(&mut HubState) -> R>(&self, change: F) -> R {
+        let mut state = self.lock();
+        let before = state.view.generation;
+        let result = change(&mut state);
+        let repaint = if state.view.generation == before { None } else { state.repaint.clone() };
+        drop(state);
+        if let Some(context) = repaint {
+            context.request_repaint();
+        }
+        result
     }
 
     // ── the shell's side ──
@@ -265,7 +287,11 @@ impl SymbolHub {
     /// Asks for `modules`: one never asked for is looked up; one still
     /// waiting is moved up when it is now more urgent.
     pub(crate) fn want(&self, modules: &[WantedModule]) {
-        let mut state = self.lock();
+        self.update(|state| self.want_locked(state, modules));
+    }
+
+    /// [`Self::want`]'s work, under the lock.
+    fn want_locked(&self, state: &mut HubState, modules: &[WantedModule]) {
         let mut fresh = Vec::new();
         for wanted in modules {
             if !state.view.modules.contains_key(&wanted.identity) {
@@ -301,55 +327,58 @@ impl SymbolHub {
     /// Looks a module up again: after a failure, a 404, a refusal, an
     /// unload, or a cancel.
     pub(crate) fn retry(&self, identity: &ModuleIdentity) {
-        let mut state = self.lock();
-        if state.busy.contains(identity) {
-            return;
-        }
-        state.queue.retain(|queued| queued.job.module() != Some(identity));
-        state.enqueue(
-            Job::Locate {
-                identity: identity.clone(),
-            },
-            Priority::Shown,
-        );
-        state.publish_modules(|modules| {
-            modules.insert(identity.clone(), ModuleEntry::pending());
+        self.update(|state| {
+            if state.busy.contains(identity) {
+                return;
+            }
+            state.queue.retain(|queued| queued.job.module() != Some(identity));
+            state.enqueue(
+                Job::Locate {
+                    identity: identity.clone(),
+                },
+                Priority::Shown,
+            );
+            state.publish_modules(|modules| {
+                modules.insert(identity.clone(), ModuleEntry::pending());
+            });
+            self.shared.wake.notify_all();
         });
-        self.shared.wake.notify_all();
     }
 
     /// Stops a lookup: a waiting one leaves the queue, a running one stops
     /// at its next read. Either fails, retryably.
     pub(crate) fn cancel(&self, identity: &ModuleIdentity) {
-        let mut state = self.lock();
-        let before = state.queue.len();
-        state.queue.retain(|queued| queued.job.module() != Some(identity));
-        if state.busy.contains(identity) {
-            state.cancelled.insert(identity.clone());
-            return;
-        }
-        if state.queue.len() != before {
-            state.publish_modules(|modules| {
-                modules.insert(identity.clone(), cancelled());
-            });
-        }
+        self.update(|state| {
+            let before = state.queue.len();
+            state.queue.retain(|queued| queued.job.module() != Some(identity));
+            if state.busy.contains(identity) {
+                state.cancelled.insert(identity.clone());
+                return;
+            }
+            if state.queue.len() != before {
+                state.publish_modules(|modules| {
+                    modules.insert(identity.clone(), cancelled());
+                });
+            }
+        });
     }
 
     /// Drops a module's tables; it is not looked up again until Retry.
     pub(crate) fn unload(&self, identity: &ModuleIdentity) {
-        let mut state = self.lock();
-        state.queue.retain(|queued| queued.job.module() != Some(identity));
-        if state.busy.contains(identity) {
-            state.cancelled.insert(identity.clone());
-        }
-        state.publish_modules(|modules| {
-            modules.insert(
-                identity.clone(),
-                ModuleEntry {
-                    state: ModuleSymbols::Unloaded,
-                    tables: None,
-                },
-            );
+        self.update(|state| {
+            state.queue.retain(|queued| queued.job.module() != Some(identity));
+            if state.busy.contains(identity) {
+                state.cancelled.insert(identity.clone());
+            }
+            state.publish_modules(|modules| {
+                modules.insert(
+                    identity.clone(),
+                    ModuleEntry {
+                        state: ModuleSymbols::Unloaded,
+                        tables: None,
+                    },
+                );
+            });
         });
     }
 
@@ -357,23 +386,24 @@ impl SymbolHub {
     /// lookup already running for it is cancelled, and the file is loaded
     /// once that lookup ends.
     pub(crate) fn attach(&self, identity: &ModuleIdentity, path: PathBuf, consent: Consent) {
-        let mut state = self.lock();
-        if state.busy.contains(identity) {
-            state.cancelled.insert(identity.clone());
-        }
-        state.queue.retain(|queued| queued.job.module() != Some(identity));
-        state.enqueue(
-            Job::Attach {
-                identity: identity.clone(),
-                path,
-                consent,
-            },
-            Priority::Kernel,
-        );
-        state.publish_modules(|modules| {
-            modules.insert(identity.clone(), ModuleEntry::pending());
+        self.update(|state| {
+            if state.busy.contains(identity) {
+                state.cancelled.insert(identity.clone());
+            }
+            state.queue.retain(|queued| queued.job.module() != Some(identity));
+            state.enqueue(
+                Job::Attach {
+                    identity: identity.clone(),
+                    path,
+                    consent,
+                },
+                Priority::Kernel,
+            );
+            state.publish_modules(|modules| {
+                modules.insert(identity.clone(), ModuleEntry::pending());
+            });
+            self.shared.wake.notify_all();
         });
-        self.shared.wake.notify_all();
     }
 
     /// Indexes the project folders again, ahead of every lookup.
@@ -396,35 +426,36 @@ impl SymbolHub {
     /// are indexed again, the store is measured again, and every module that
     /// was not found is looked up again under them.
     pub(crate) fn reconfigure(&self, config: HubConfig) {
-        let mut state = self.lock();
-        state.config = Arc::new(config);
-        state.queue.retain(|queued| queued.job != Job::Rescan && queued.job != Job::MeasureStore);
-        state.enqueue(Job::Rescan, Priority::Kernel);
-        state.enqueue(Job::MeasureStore, Priority::Rest);
-        let missing: Vec<ModuleIdentity> = state
-            .view
-            .modules
-            .iter()
-            .filter(|(identity, entry)| {
-                matches!(entry.state, ModuleSymbols::NotOnServer | ModuleSymbols::Failed { .. })
-                    && !state.busy.contains(*identity)
-            })
-            .map(|(identity, _)| identity.clone())
-            .collect();
-        for identity in &missing {
-            state.enqueue(
-                Job::Locate {
-                    identity: identity.clone(),
-                },
-                Priority::Rest,
-            );
-        }
-        state.publish_modules(|modules| {
-            for identity in missing {
-                modules.insert(identity, ModuleEntry::pending());
+        self.update(|state| {
+            state.config = Arc::new(config);
+            state.queue.retain(|queued| queued.job != Job::Rescan && queued.job != Job::MeasureStore);
+            state.enqueue(Job::Rescan, Priority::Kernel);
+            state.enqueue(Job::MeasureStore, Priority::Rest);
+            let missing: Vec<ModuleIdentity> = state
+                .view
+                .modules
+                .iter()
+                .filter(|(identity, entry)| {
+                    matches!(entry.state, ModuleSymbols::NotOnServer | ModuleSymbols::Failed { .. })
+                        && !state.busy.contains(*identity)
+                })
+                .map(|(identity, _)| identity.clone())
+                .collect();
+            for identity in &missing {
+                state.enqueue(
+                    Job::Locate {
+                        identity: identity.clone(),
+                    },
+                    Priority::Rest,
+                );
             }
+            state.publish_modules(|modules| {
+                for identity in missing {
+                    modules.insert(identity, ModuleEntry::pending());
+                }
+            });
+            self.shared.wake.notify_all();
         });
-        self.shared.wake.notify_all();
     }
 
     /// Tells the workers to stop: a waiting one wakes and returns, a busy
@@ -453,6 +484,13 @@ impl SymbolHub {
         }
     }
 
+    /// Whether no one holds the hub's lock now: how a test sees that the
+    /// shell is asked to draw outside it.
+    #[cfg(test)]
+    pub(crate) fn lock_is_free(&self) -> bool {
+        self.shared.state.try_lock().is_ok()
+    }
+
     /// The next job, when one is queued now: how tests drive a worker one
     /// job at a time.
     #[cfg(test)]
@@ -464,26 +502,41 @@ impl SymbolHub {
         state.take()
     }
 
+    /// Whether a lookup that missed may check the project folders for a
+    /// newer build at `now`: once per [`PROJECT_CHECK_INTERVAL`], whichever
+    /// worker asks.
+    pub(crate) fn project_check_due(&self, now: Instant) -> bool {
+        let mut state = self.lock();
+        let due = state
+            .projects_checked
+            .is_none_or(|last| now.saturating_duration_since(last) >= PROJECT_CHECK_INTERVAL);
+        if due {
+            state.projects_checked = Some(now);
+        }
+        due
+    }
+
     /// A download's progress; `Flow::Cancel` when the owner cancelled it or
     /// the hub is closing.
     pub(crate) fn progress(&self, identity: &ModuleIdentity, progress: Progress) -> Flow {
-        let mut state = self.lock();
-        if state.cancelled.contains(identity) {
-            return Flow::Cancel;
-        }
-        state.publish_modules(|modules| {
-            modules.insert(
-                identity.clone(),
-                ModuleEntry {
-                    state: ModuleSymbols::Downloading {
-                        done: progress.done,
-                        total: progress.total,
+        self.update(|state| {
+            if state.cancelled.contains(identity) {
+                return Flow::Cancel;
+            }
+            state.publish_modules(|modules| {
+                modules.insert(
+                    identity.clone(),
+                    ModuleEntry {
+                        state: ModuleSymbols::Downloading {
+                            done: progress.done,
+                            total: progress.total,
+                        },
+                        tables: None,
                     },
-                    tables: None,
-                },
-            );
-        });
-        Flow::Continue
+                );
+            });
+            Flow::Continue
+        })
     }
 
     /// A job's outcome for `identity`. A module unloaded while it was being
@@ -491,42 +544,45 @@ impl SymbolHub {
     /// shows that job's outcome when it ends; one cancelled shows the
     /// cancel. A job held back for this module may start now.
     pub(crate) fn finish(&self, identity: &ModuleIdentity, entry: ModuleEntry) {
-        let mut state = self.lock();
-        state.busy.remove(identity);
-        let was_cancelled = state.cancelled.remove(identity);
-        self.shared.wake.notify_all();
-        let unloaded = matches!(state.view.state(identity), Some(ModuleSymbols::Unloaded));
-        let superseded = state.queue.iter().any(|queued| queued.job.module() == Some(identity));
-        if unloaded || superseded {
-            return;
-        }
-        state.publish_modules(|modules| {
-            // A cancelled download ends as a failure, shown as the cancel.
-            let entry = if was_cancelled && matches!(entry.state, ModuleSymbols::Failed { .. }) {
-                cancelled()
-            } else {
-                entry
-            };
-            modules.insert(identity.clone(), entry);
+        self.update(|state| {
+            state.busy.remove(identity);
+            let was_cancelled = state.cancelled.remove(identity);
+            self.shared.wake.notify_all();
+            let unloaded = matches!(state.view.state(identity), Some(ModuleSymbols::Unloaded));
+            let superseded = state.queue.iter().any(|queued| queued.job.module() == Some(identity));
+            if unloaded || superseded {
+                return;
+            }
+            state.publish_modules(|modules| {
+                // A cancelled download ends as a failure, shown as the cancel.
+                let entry = if was_cancelled && matches!(entry.state, ModuleSymbols::Failed { .. }) {
+                    cancelled()
+                } else {
+                    entry
+                };
+                modules.insert(identity.clone(), entry);
+            });
         });
     }
 
     /// A freshly built project index.
     pub(crate) fn set_projects(&self, projects: ProjectIndex) {
-        self.lock().publish(|view| {
-            view.projects = Arc::new(projects);
-            view.projects_problem = None;
+        self.update(|state| {
+            state.publish(|view| {
+                view.projects = Arc::new(projects);
+                view.projects_problem = None;
+            });
         });
     }
 
     /// Why the project folders could not be indexed; the last index stands.
     pub(crate) fn fail_projects(&self, reason: String) {
-        self.lock().publish(|view| view.projects_problem = Some(reason));
+        self.update(|state| state.publish(|view| view.projects_problem = Some(reason)));
     }
 
     /// What measuring the store came to.
     pub(crate) fn set_store_usage(&self, measure: StoreMeasure) {
-        self.lock().publish(|view| view.store_usage = Some(measure));
+        self.update(|state| state.publish(|view| view.store_usage = Some(measure)));
     }
 }
 

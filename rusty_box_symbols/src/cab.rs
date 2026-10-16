@@ -330,12 +330,12 @@ pub fn extract_single(bytes: &[u8], cap: u64) -> Result<Extracted, CabError> {
     }
     let start = file_offset as usize;
     let end = usize::try_from(file_end).map_err(|_| CabError::FileOutsideFolder)?;
-    let bytes = if start == 0 && end == out.len() {
-        out
-    } else {
-        out.get(start..end).ok_or(CabError::FileOutsideFolder)?.to_vec()
-    };
-    Ok(Extracted { name, compression, bytes })
+    // The file's bytes move to the front of the folder's buffer, which then
+    // ends with them: no second buffer is allocated.
+    let len = out.get(start..end).map(<[u8]>::len).ok_or(CabError::FileOutsideFolder)?;
+    out.copy_within(start..end, 0);
+    out.truncate(len);
+    Ok(Extracted { name, compression, bytes: out })
 }
 
 #[cfg(test)]

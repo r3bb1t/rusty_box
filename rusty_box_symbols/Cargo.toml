@@ -16,8 +16,6 @@ fakes = []
 [dependencies]
 # Error enums, as everywhere in the workspace.
 thiserror.workspace = true
-# `#[no_panic]`: a link-time proof that a function cannot reach a panic.
-no-panic = "0.1"
 # HTTP with rustls (already in Cargo.lock through xtask): follows the
 # symbol server's 302 to blob storage, and its proxy from the environment.
 # Behind the HttpClient port; spec §11 names it the one third-party parser
@@ -25,6 +23,9 @@ no-panic = "0.1"
 ureq = "2.12.1"
 
 [dev-dependencies]
+# `#[no_panic]`: a link-time proof that a function cannot reach a panic,
+# made by the crate's own release test link only (`cfg(all(test, not(debug_assertions)))`).
+no-panic = "0.1"
 rusty_box_symbols_fixtures = { path = "../rusty_box_symbols_fixtures" }
 
 [lints]

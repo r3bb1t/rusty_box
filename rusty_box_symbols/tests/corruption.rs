@@ -441,7 +441,7 @@ fn dwz_pairs_survive_corruption() {
 fn pe_files_and_images_survive_corruption() {
     let codeview = rsds([0x11; 16], 3, r"d:\os\obj\amd64\ntkrnlmp.pdb");
     let wanted = PeImageId { time_date_stamp: 0x0BAD_F00D, size_of_image: 0x3000 };
-    assert_survives(&[Fixture::new("pe file", pe32_file(&codeview))], |bytes| match pdb_from_binary(bytes.to_vec(), wanted) {
+    assert_survives(&[Fixture::new("pe file", pe32_file(&codeview))], |bytes| match pdb_from_binary(bytes, wanted) {
         Ok(_) => Parsed::Read { answers: 1 },
         Err(_) => Parsed::Refused,
     });

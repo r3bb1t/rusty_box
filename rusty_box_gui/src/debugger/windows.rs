@@ -40,7 +40,7 @@ use rusty_box_symbols::units::FieldOffset;
 
 use super::drivers;
 use super::guest::{GuestMemory, GuestRead, Root};
-use super::kernel_layout::{same_layouts, KernelLayout};
+use super::kernel_layout::{same_layouts, KernelLayout, LayoutSource};
 use super::module_identity::{read_module_identity, GuestIdentity};
 use super::inspect::{ModuleSpace, SymModule, SymbolIndex};
 use super::ssdt;
@@ -484,6 +484,9 @@ pub(crate) enum KernelLayouts {
     /// Found in memory: the System process does not read as System where the
     /// kernel PDB puts its fields.
     PdbDisagrees,
+    /// A PDB of another build the owner loaded by hand, which agrees with
+    /// memory: its layouts may still differ where memory is not checked.
+    ForcedPdb,
 }
 
 impl KernelLayouts {
@@ -491,6 +494,7 @@ impl KernelLayouts {
     pub(crate) const fn label(self) -> &'static str {
         match self {
             Self::Pdb => "layouts: PDB",
+            Self::ForcedPdb => "layouts: PDB of another build, loaded by hand",
             Self::Discovered => "layouts: discovered",
             Self::PdbDisagrees => "layouts: discovered (the kernel PDB disagrees with memory)",
         }
@@ -584,7 +588,10 @@ impl KernelState {
             object_era: layout.object_era,
             object_root,
             service_descriptor: globals.service_descriptor_table.map(|rva| base.wrapping_add(rva.0)),
-            layouts: KernelLayouts::Pdb,
+            layouts: match layout.source {
+                LayoutSource::Matched => KernelLayouts::Pdb,
+                LayoutSource::Forced => KernelLayouts::ForcedPdb,
+            },
             kernel,
         }
     }
@@ -1798,7 +1805,7 @@ fn discover_kernel<G: GuestMemory>(
         system_variable,
     } = kernel_image(cpu, kpcr).ok_or(KernelMiss::NoKernelImage)?;
     let layouts = match layout {
-        Some(layout) => match pdb_kernel(cpu, &image, layout) {
+        Some(layout) => match pdb_kernel(cpu, &image, system_variable, layout) {
             Some(kernel) => return Ok(KernelState::seeded(cpu, kernel, layout)),
             None => KernelLayouts::PdbDisagrees,
         },
@@ -1822,13 +1829,29 @@ fn discover_kernel<G: GuestMemory>(
 
 /// The kernel as its PDB lays it out, when the System process the PDB's
 /// `PsInitialSystemProcess` names holds PID 4 at the PDB's `UniqueProcessId`
-/// and "System" at its `ImageFileName`.
-fn pdb_kernel<G: GuestMemory>(cpu: &mut G, image: &PeImage, layout: &KernelLayout) -> Option<Kernel> {
+/// and "System" at its `ImageFileName`. A symbol or member the PDB lacks
+/// falls back alone to what discovery finds (spec §8.1): the export
+/// `exported_system` for `PsInitialSystemProcess`, the System process's own
+/// fields for the members; a lack is no disagreement.
+fn pdb_kernel<G: GuestMemory>(
+    cpu: &mut G,
+    image: &PeImage,
+    exported_system: u64,
+    layout: &KernelLayout,
+) -> Option<Kernel> {
     let process = &layout.process;
-    let system_variable = image.base.wrapping_add(layout.globals.initial_system_process?.0);
+    let system_variable = layout
+        .globals
+        .initial_system_process
+        .map_or(exported_system, |rva| image.base.wrapping_add(rva.0));
     let system = read_u64(cpu, Root::Live, system_variable).and_then(kernel_pointer)?;
-    let pid = process.unique_process_id?.0;
-    let name = process.image_file_name?.0;
+    let lacks_a_member = process.unique_process_id.is_none()
+        || process.image_file_name.is_none()
+        || process.active_process_links.is_none();
+    let discovered = if lacks_a_member { process_layout(cpu, system) } else { None };
+    let pid = process.unique_process_id.map(|offset| offset.0).or(discovered.as_ref().map(|found| found.pid))?;
+    let name = process.image_file_name.map(|offset| offset.0).or(discovered.as_ref().map(|found| found.name))?;
+    let links = process.active_process_links.map(|offset| offset.0).or(discovered.as_ref().map(|found| found.links))?;
     if read_u64(cpu, Root::Live, system.wrapping_add(pid)) != Some(SYSTEM_PID)
         || read_array::<7, G>(cpu, Root::Live, system.wrapping_add(name)) != Some(*b"System\0")
     {
@@ -1848,7 +1871,7 @@ fn pdb_kernel<G: GuestMemory>(cpu: &mut G, image: &PeImage, layout: &KernelLayou
         build,
         layout: ProcessLayout {
             pid,
-            links: process.active_process_links?.0,
+            links,
             name,
             directory_table_base: process.directory_table_base.map_or(DIRECTORY_TABLE_BASE, |offset| offset.0),
         },
@@ -3624,9 +3647,29 @@ mod tests {
     /// The kernel PDB's layouts, as the shell would hand them over for the
     /// PDB `fixture` describes.
     fn pdb_layout(fixture: &rusty_box_symbols_fixtures::pdb::PdbFixture) -> Arc<KernelLayout> {
+        layout_from(fixture, crate::debugger::kernel_layout::LayoutSource::Matched)
+    }
+
+    fn layout_from(
+        fixture: &rusty_box_symbols_fixtures::pdb::PdbFixture,
+        source: crate::debugger::kernel_layout::LayoutSource,
+    ) -> Arc<KernelLayout> {
         let bytes = rusty_box_symbols_fixtures::pdb::build_pdb(fixture);
         let tables = rusty_box_symbols::tables::SymbolTables::parse(&bytes).expect("the fixture parses");
-        Arc::new(KernelLayout::from_tables(crate::symbols::kernel::tests::kernel_identity(), &tables))
+        Arc::new(KernelLayout::from_tables(crate::symbols::kernel::tests::kernel_identity(), &tables, source))
+    }
+
+    /// A PDB of another build the owner loaded by hand, which agrees with
+    /// memory, seeds the walks, and the listings say whose layouts they are.
+    #[test]
+    fn layouts_from_a_forced_pdb_say_so() {
+        use crate::debugger::fake_windows::{FakeWindows, FakeWindowsSpec};
+        let mut fake = FakeWindows::build(FakeWindowsSpec::typical());
+        let view = fake.view;
+        let layout = layout_from(&windows10_kernel(), crate::debugger::kernel_layout::LayoutSource::Forced);
+        let read = read_windows(&mut fake.guest, &view, PROCESSES, &mut WindowsDiscovery::default(), Some(&layout));
+        assert_eq!(read.layouts, Some(KernelLayouts::ForcedPdb));
+        assert!(KernelLayouts::ForcedPdb.label().contains("another build"));
     }
 
     fn windows10_kernel() -> rusty_box_symbols_fixtures::pdb::PdbFixture {
@@ -3679,6 +3722,34 @@ mod tests {
         let read = read_windows(&mut fake.guest, &view, PROCESSES, &mut WindowsDiscovery::default(), Some(&layout));
         assert_eq!(read.layouts, Some(KernelLayouts::PdbDisagrees));
         assert_eq!(listed_processes(&read), ["4 System", "496 smss.exe", "620 csrss.exe"]);
+    }
+
+    /// A PDB lacking one `_EPROCESS` member, or the `PsInitialSystemProcess`
+    /// symbol, still seeds the rest: just that one falls back to discovery
+    /// (spec §8.1). A lack is no disagreement.
+    #[test]
+    fn a_kernel_pdb_missing_one_field_falls_back_for_that_field_alone() {
+        use crate::debugger::fake_windows::{FakeWindows, FakeWindowsSpec};
+        let without_links = {
+            let mut pdb = windows10_kernel();
+            if let Some(eprocess) = pdb.types.iter_mut().find(|udt| udt.name == "_EPROCESS") {
+                eprocess.fields.retain(|field| field.name != "ActiveProcessLinks");
+            }
+            pdb
+        };
+        let without_system = {
+            let mut pdb = windows10_kernel();
+            pdb.publics.retain(|public| public.name != "PsInitialSystemProcess");
+            pdb
+        };
+        for pdb in [without_links, without_system] {
+            let mut fake = FakeWindows::build(FakeWindowsSpec::typical());
+            let view = fake.view;
+            let layout = pdb_layout(&pdb);
+            let read = read_windows(&mut fake.guest, &view, PROCESSES, &mut WindowsDiscovery::default(), Some(&layout));
+            assert_eq!(read.layouts, Some(KernelLayouts::Pdb));
+            assert_eq!(listed_processes(&read), ["4 System", "496 smss.exe", "620 csrss.exe"]);
+        }
     }
 
     /// A PDB that agrees with memory seeds every offset the walks would

@@ -1,8 +1,9 @@
 //! Whether a shell command writes files. In this repository files are
 //! written with the Edit and Write tools, whose exact-match check is the
 //! safety net (CLAUDE.md, "Edit with the Edit/Write tools"); scripted edits
-//! have damaged the tree before. A PreToolUse hook runs
-//! `cargo xtask check-shell-command` on every Bash and PowerShell call and
+//! have damaged the tree before. A PreToolUse hook runs the
+//! `check-shell-command` subcommand (`cargo run --release --quiet --package
+//! xtask -- check-shell-command`) on every Bash and PowerShell call and
 //! refuses what this module flags. A false refusal costs a retry with the
 //! right tool; a false pass is the bug, so the rules lean towards refusing.
 
@@ -38,8 +39,13 @@ impl Refusal {
 /// Targets a redirect may name without writing a file.
 const NULL_DEVICES: &[&str] = &["/dev/null", "$null", "nul", "/dev/stderr", "/dev/stdout"];
 
-/// Commands that write files, as their first word.
-const WRITING_COMMANDS: &[&str] = &["tee", "cp", "mv", "install", "touch", "truncate", "ln", "dd"];
+/// Commands that write files, as their first word: POSIX tools, PowerShell's
+/// aliases of the writing cmdlets (`sc`, `ac`, `cpi`, `mi`, `rni`, `ren`),
+/// and cmd's own `copy` and `move`.
+const WRITING_COMMANDS: &[&str] = &[
+    "tee", "cp", "mv", "install", "touch", "truncate", "ln", "dd", "sc", "ac", "cpi", "mi", "rni", "ren", "copy",
+    "move",
+];
 
 /// PowerShell cmdlets and aliases that write files, matched case-insensitively
 /// anywhere in the command (a nested `pwsh -Command "…"` included).
@@ -52,6 +58,7 @@ const WRITING_CMDLETS: &[&str] = &[
     "Rename-Item",
     "Export-Csv",
     "Export-Clixml",
+    "Tee-Object",
 ];
 
 /// Script interpreters, and the calls in their scripts that write files.
@@ -147,11 +154,12 @@ fn redirects_into_a_file(text: &str) -> bool {
         if c != '>' {
             continue;
         }
-        // `>>` appends; `>&N`, `>|` and `2>&1` name a stream.
-        if chars.get(at) == Some(&'>') {
+        // `>>` appends and `>|` overrides noclobber, both into a file; `>&N`
+        // and `2>&1` name a stream.
+        if chars.get(at) == Some(&'>') || chars.get(at) == Some(&'|') {
             at += 1;
         }
-        if chars.get(at) == Some(&'&') || chars.get(at) == Some(&'|') {
+        if chars.get(at) == Some(&'&') {
             continue;
         }
         while chars.get(at).is_some_and(|c| *c == ' ' || *c == '\t') {
@@ -187,7 +195,17 @@ fn writing_command(words: &[String]) -> Option<&'static str> {
     let mut rest = words.iter().skip_while(|word| {
         word.contains('=') && !word.starts_with('-') && !word.starts_with('$')
     });
-    let name = rest.next()?;
+    let mut name = rest.next()?;
+    // `cmd /c …` and `cmd /k …` run the command that follows.
+    if name.eq_ignore_ascii_case("cmd") {
+        let mut after = rest.clone();
+        if after.next().is_some_and(|flag| flag.eq_ignore_ascii_case("/c") || flag.eq_ignore_ascii_case("/k")) {
+            if let Some(inner) = after.next() {
+                name = inner;
+                rest = after;
+            }
+        }
+    }
     let args: Vec<&String> = rest.collect();
     let lower = name.to_ascii_lowercase();
     if let Some(&found) = WRITING_COMMANDS.iter().find(|candidate| **candidate == lower) {
@@ -386,6 +404,18 @@ mod tests {
                 command: "python3 - <<'EOF'\nfrom pathlib import Path\nPath('a').write_text('b')\nEOF",
                 refusal: Refusal::InterpreterWrites("python3"),
             },
+            // `>|` writes the file even with noclobber set.
+            Case { command: "echo x >| notes.md", refusal: Refusal::Redirect },
+            Case { command: "Get-Date | Tee-Object out.txt", refusal: Refusal::WritingCommand("Tee-Object") },
+            // PowerShell's aliases, and cmd's own copy and move.
+            Case { command: "sc a.txt hi", refusal: Refusal::WritingCommand("sc") },
+            Case { command: "'x' | ac a.txt", refusal: Refusal::WritingCommand("ac") },
+            Case { command: "cpi a.rs b.rs", refusal: Refusal::WritingCommand("cpi") },
+            Case { command: "mi a.rs b.rs", refusal: Refusal::WritingCommand("mi") },
+            Case { command: "rni a.rs b.rs", refusal: Refusal::WritingCommand("rni") },
+            Case { command: "ren a.rs b.rs", refusal: Refusal::WritingCommand("ren") },
+            Case { command: "copy a.rs b.rs", refusal: Refusal::WritingCommand("copy") },
+            Case { command: "cmd /c move a.rs b.rs", refusal: Refusal::WritingCommand("move") },
         ];
         for case in cases {
             assert_eq!(refusal(case.command), Some(case.refusal), "{}", case.command);

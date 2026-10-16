@@ -183,7 +183,9 @@ impl PdbTables {
         for procedure in &tables.procedures {
             push(&mut tables.by_name, Named { name: procedure.name.clone(), rva: procedure.rva }, "name index")?;
         }
-        tables.by_name.sort_by(|a, b| a.name.cmp(&b.name));
+        // Unstable sorts take no scratch buffer; the address breaks a tie
+        // between namesakes as the procedures' own order would.
+        tables.by_name.sort_unstable_by(|a, b| a.name.cmp(&b.name).then(a.rva.cmp(&b.rva)));
         Ok(tables)
     }
 
