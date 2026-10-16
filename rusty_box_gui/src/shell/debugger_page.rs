@@ -1813,13 +1813,30 @@ fn stack_rows(ui: &mut egui::Ui, snapshot: &DebugSnapshot, marks: Marks<'_>) {
 
 /// Said while the run thread has not yet listed what a tab asks for.
 const READING_LIST: &str = "Reading the guest's lists…";
-/// Why the lists are empty: no Windows x64 kernel, and the step that said so.
+/// Why the lists are empty: no Windows x64 kernel, or a kernel without the
+/// structure a tab lists, and the step that said so.
 pub(crate) fn no_windows_kernel(miss: KernelMiss) -> String {
-    format!(
-        "No 64-bit Windows kernel was found in this guest ({}): the lists read \
-         Windows x64's own process and driver lists.",
-        miss.message()
-    )
+    if miss.kernel_found() {
+        format!(
+            "The 64-bit Windows kernel was found, but {}.",
+            miss.message()
+        )
+    } else {
+        format!(
+            "No 64-bit Windows kernel was found in this guest ({}): the lists read \
+             Windows x64's own process and driver lists.",
+            miss.message()
+        )
+    }
+}
+
+/// The heading over [`no_windows_kernel`]'s text.
+fn no_windows_kernel_title(miss: KernelMiss) -> &'static str {
+    if miss.kernel_found() {
+        "Not found in the kernel"
+    } else {
+        "No Windows kernel"
+    }
 }
 const ANOTHER_ADDRESS_SPACE: &str = "This module lies in another process's address space; \
      pause while that process runs to see its memory.";
@@ -1834,7 +1851,7 @@ fn system_page(
 ) {
     match (&snapshot.system, pane.tab) {
         (SystemListing::NoWindowsKernel(miss), _) => {
-            empty_state(ui, "No Windows kernel", &no_windows_kernel(*miss));
+            empty_state(ui, no_windows_kernel_title(*miss), &no_windows_kernel(*miss));
         }
         (SystemListing::Processes(listing), DebuggerTab::Processes) => {
             let current_user_module = current_module_base(snapshot, ModuleSpace::User);

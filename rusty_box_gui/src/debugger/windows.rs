@@ -319,6 +319,20 @@ pub(crate) enum KernelMiss {
 }
 
 impl KernelMiss {
+    /// Whether the kernel itself was found, and only a structure beneath it
+    /// was not.
+    pub(crate) const fn kernel_found(self) -> bool {
+        match self {
+            Self::NotLongMode
+            | Self::NoKpcr
+            | Self::KernelUnmapped
+            | Self::NoKernelImage
+            | Self::NoSystemProcess
+            | Self::UnknownProcessLayout => false,
+            Self::NoModuleList | Self::NoObjectNamespace | Self::NoSsdt => true,
+        }
+    }
+
     pub(crate) const fn message(self) -> &'static str {
         match self {
             Self::NotLongMode => "the processor is not in long mode",
@@ -489,6 +503,8 @@ struct KernelState {
     object_era: Option<drivers::ObjectHeaderEra>,
     /// The object namespace root directory (`\`), once reached.
     object_root: Option<u64>,
+    /// `KeServiceDescriptorTable`, once found.
+    service_descriptor: Option<u64>,
 }
 
 /// What the walks have learned about one guest's structure layouts. A run
@@ -544,6 +560,7 @@ pub(crate) fn read_windows<T: Instrumentation, E: SliceEngine<T>>(
         vad,
         object_era,
         object_root,
+        service_descriptor,
     } = state;
     let kernel_modules = match kernel.loaded_modules {
         Some(head) => list_modules(cpu, Root::Live, head).unwrap_or_default(),
@@ -689,7 +706,7 @@ pub(crate) fn read_windows<T: Instrumentation, E: SliceEngine<T>>(
                 None => SystemListing::NoWindowsKernel(KernelMiss::NoObjectNamespace),
             }
         }
-        SystemView::Ssdt => match read_ssdt(cpu, kernel, &kernel_modules) {
+        SystemView::Ssdt => match read_ssdt(cpu, kernel, service_descriptor, &kernel_modules) {
             Some(listing) => SystemListing::Ssdt(listing),
             None => SystemListing::NoWindowsKernel(KernelMiss::NoSsdt),
         },
@@ -1197,43 +1214,23 @@ fn symbolic_links<T: Instrumentation, E: SliceEngine<T>>(
 // ───────────────────────────── SSDT ──────────────────────────────
 
 /// The kernel's system-service table, each service classified against the
-/// loaded modules. `None` when `KeServiceDescriptorTable` is not found.
+/// loaded modules. `None` when no `KeServiceDescriptorTable` is found; the
+/// one found is kept in `cached`.
 fn read_ssdt<T: Instrumentation, E: SliceEngine<T>>(
     cpu: &mut DebugCpu<'_, T, E>,
     kernel: &Kernel,
+    cached: &mut Option<u64>,
     modules: &[WinModule],
 ) -> Option<SsdtListing> {
-    let descriptor = export(cpu, &kernel.image, "KeServiceDescriptorTable")?;
-    let base = read_u64(cpu, Root::Live, descriptor + ssdt::DESCRIPTOR_SERVICE_TABLE)
-        .and_then(kernel_pointer)?;
-    let limit = read_u32(cpu, Root::Live, descriptor + ssdt::DESCRIPTOR_SERVICE_LIMIT)?
-        .min(ssdt::MAX_SERVICES);
-    if limit == 0 {
-        return None;
-    }
-    let bytes = read_exact(cpu, Root::Live, base, limit as usize * 4)?;
-    let entries: Vec<i32> = bytes
-        .chunks_exact(4)
-        .map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-        .collect();
-    // The encoding is the one whose routines land in a loaded module most
-    // often: the wrong one scatters them outside every image.
-    let in_modules = |encoding| {
-        entries
-            .iter()
-            .filter(|&&entry| module_of(ssdt::routine_of(base, entry, encoding), modules).is_some())
-            .count()
-    };
-    let encoding = if in_modules(ssdt::Encoding::Shift) >= in_modules(ssdt::Encoding::Mask) {
-        ssdt::Encoding::Shift
-    } else {
-        ssdt::Encoding::Mask
-    };
+    let table = service_table(cpu, &kernel.image, cached)?;
+    let base = table.base;
+    let encoding = table.decoding.encoding;
     // A service that lies in the kernel image is unhooked; the kernel is its
     // own owner, so an in-kernel routine reads as `OwnImage`.
     let own = module_of(kernel.image.base, modules);
     let mut any_hooked = false;
-    let services = entries
+    let services = table
+        .entries
         .iter()
         .enumerate()
         .map(|(index, &entry)| {
@@ -1255,6 +1252,115 @@ fn read_ssdt<T: Instrumentation, E: SliceEngine<T>>(
         services,
         any_hooked,
     })
+}
+
+/// A `KiServiceTable`, read through the descriptor that points at it.
+struct ServiceTable {
+    /// The `KSERVICE_TABLE_DESCRIPTOR` it was read through.
+    descriptor: u64,
+    /// `KiServiceTable` itself.
+    base: u64,
+    entries: Vec<i32>,
+    /// The encoding its entries decode with, and how many of their routines
+    /// land inside the kernel image under it.
+    decoding: ssdt::Decoding,
+}
+
+/// Whether `addr` lies inside `image`.
+fn image_holds(image: &PeImage, addr: u64) -> bool {
+    (image.base..image.base.wrapping_add(u64::from(image.size))).contains(&addr)
+}
+
+/// The service table the descriptor at `descriptor` points to.
+fn read_service_table<T: Instrumentation, E: SliceEngine<T>>(
+    cpu: &mut DebugCpu<'_, T, E>,
+    image: &PeImage,
+    descriptor: u64,
+) -> Option<ServiceTable> {
+    let bytes = read_exact(cpu, Root::Live, descriptor, ssdt::DESCRIPTOR_BYTES)?;
+    let parsed = ssdt::parse_descriptor(&bytes)?;
+    let base = kernel_pointer(parsed.service_table)?;
+    let raw = read_exact(cpu, Root::Live, base, parsed.limit as usize * 4)?;
+    let entries: Vec<i32> = raw
+        .chunks_exact(4)
+        .map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect();
+    // The wrong encoding scatters the routines outside the kernel image.
+    let decoding = ssdt::decode(base, &entries, |routine| image_holds(image, routine));
+    Some(ServiceTable {
+        descriptor,
+        base,
+        entries,
+        decoding,
+    })
+}
+
+/// `KeServiceDescriptorTable`'s service table: through `cached` while that
+/// descriptor still reads, else through the kernel's export (5.2 SP1 is the
+/// only x64 kernel with one), else the `lea r10` target in the kernel's code
+/// that reads as the kernel's own service table. The descriptor found is kept
+/// in `cached`. A known descriptor is taken whatever its routines point at, so
+/// a table hooked wholesale is still listed (and flagged).
+fn service_table<T: Instrumentation, E: SliceEngine<T>>(
+    cpu: &mut DebugCpu<'_, T, E>,
+    image: &PeImage,
+    cached: &mut Option<u64>,
+) -> Option<ServiceTable> {
+    let known = match *cached {
+        Some(descriptor) => read_service_table(cpu, image, descriptor),
+        None => None,
+    };
+    let table = match known {
+        Some(table) => table,
+        None => match export(cpu, image, "KeServiceDescriptorTable")
+            .and_then(|descriptor| read_service_table(cpu, image, descriptor))
+        {
+            Some(table) => table,
+            None => service_table_from_code(cpu, image)?,
+        },
+    };
+    *cached = Some(table.descriptor);
+    Some(table)
+}
+
+/// The descriptor a `lea r10, [rip + disp32]` in the kernel's executable
+/// sections loads (`KiSystemServiceRepeat` loads `KeServiceDescriptorTable`
+/// so) whose `KiServiceTable` lies in the kernel image and whose routines
+/// land in the kernel image most often — at least for half its services,
+/// which no other datum a `lea r10` loads does.
+fn service_table_from_code<T: Instrumentation, E: SliceEngine<T>>(
+    cpu: &mut DebugCpu<'_, T, E>,
+    image: &PeImage,
+) -> Option<ServiceTable> {
+    let header = read_exact(cpu, Root::Live, image.base, HEADER_BYTES)?;
+    let sections = pe::parse_sections(&header)?;
+    let mut scan = ssdt::LeaR10Scan::default();
+    let mut page = vec![0u8; PAGE_BYTES as usize];
+    for section in sections.iter().filter(|section| section.executable) {
+        let size = match section.virtual_size {
+            0 => section.raw_size,
+            size => size,
+        };
+        let start = image.base + u64::from(section.rva);
+        let end = start + u64::from(size);
+        let mut at = start;
+        while at < end {
+            let take = (PAGE_BYTES - at % PAGE_BYTES).min(end - at) as usize;
+            // A paged-out or discarded page is passed by.
+            if read_into(cpu, Root::Live, at, &mut page[..take]) {
+                scan.feed(&page[..take], at);
+            }
+            at += take as u64;
+        }
+    }
+    scan.targets()
+        .into_iter()
+        .filter(|&target| image_holds(image, target))
+        .filter_map(|target| read_service_table(cpu, image, target))
+        .filter(|table| {
+            image_holds(image, table.base) && table.decoding.inside * 2 > table.entries.len()
+        })
+        .max_by_key(|table| table.decoding.inside)
 }
 
 /// Whom the CPU tab is asked to look from: a process (one of its threads with
@@ -1369,6 +1475,7 @@ pub(crate) fn read_thread_view<T: Instrumentation, E: SliceEngine<T>>(
         vad: _,
         object_era: _,
         object_root: _,
+        service_descriptor: _,
     } = state;
     let kernel_modules = match kernel.loaded_modules {
         Some(head) => list_modules(cpu, Root::Live, head).unwrap_or_default(),
@@ -1485,6 +1592,7 @@ fn find_kernel<'a, T: Instrumentation, E: SliceEngine<T>>(
             vad: None,
             object_era: None,
             object_root: None,
+            service_descriptor: None,
         });
     }
     cache.as_mut().ok_or(KernelMiss::NoKernelImage)
