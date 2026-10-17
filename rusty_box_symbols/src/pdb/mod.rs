@@ -130,10 +130,12 @@ impl<'a> PdbFile<'a> {
 }
 
 pub mod dbi;
+pub mod hash_table;
 pub mod info;
 pub mod lines;
 pub mod msf;
 pub mod msfz;
+pub mod source_block;
 pub mod symbols;
 pub mod tables;
 pub mod tpi;

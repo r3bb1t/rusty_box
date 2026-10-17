@@ -50,6 +50,7 @@ pub mod elf;
 pub mod fs_store;
 pub mod http;
 pub mod identity;
+mod line_index;
 #[cfg(any(test, feature = "fakes"))]
 pub mod memory_store;
 pub mod pdb;
@@ -59,6 +60,7 @@ pub mod read;
 #[cfg(any(test, feature = "fakes"))]
 pub mod scripted_http;
 pub mod service;
+pub mod source_path;
 pub mod store;
 pub mod symbol_path;
 pub mod tables;

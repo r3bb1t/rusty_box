@@ -445,6 +445,33 @@ where
     ImportRead::Unreadable
 }
 
+/// `DataDirectory[IMAGE_DIRECTORY_ENTRY_EXCEPTION]` inside each optional
+/// header.
+const PE32_EXCEPTION_DIRECTORY: usize = 0x78;
+const PE32_PLUS_EXCEPTION_DIRECTORY: usize = 0x88;
+
+/// One `IMAGE_DATA_DIRECTORY`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct DataDirectory {
+    pub(crate) rva: u32,
+    pub(crate) size: u32,
+}
+
+/// The exception directory (x64: the `RUNTIME_FUNCTION` table) of the image
+/// whose headers begin at `header`; `None` when it has none or the headers
+/// do not read as PE.
+pub(crate) fn exception_directory(header: &[u8]) -> Option<DataDirectory> {
+    let optional = optional_header(header)?;
+    let entry = match read_u16(header, optional)? {
+        PE32_PLUS_MAGIC => PE32_PLUS_EXCEPTION_DIRECTORY,
+        PE32_MAGIC => PE32_EXCEPTION_DIRECTORY,
+        _ => return None,
+    };
+    let at = optional.checked_add(entry)?;
+    let directory = DataDirectory { rva: read_u32(header, at)?, size: read_u32(header, at.checked_add(4)?)? };
+    (directory.rva != 0 && directory.size != 0).then_some(directory)
+}
+
 /// `IMAGE_OPTIONAL_HEADER.SizeOfImage`, at one offset in PE32 and PE32+.
 const SIZE_OF_IMAGE: usize = 0x38;
 
@@ -615,6 +642,32 @@ pub(crate) mod tests {
         put_u32(&mut bytes, at + 16, 0x2000);
         put_u32(&mut bytes, at + 36, SCN_MEM_READ | SCN_MEM_WRITE);
         bytes
+    }
+
+    /// Headers of a PE32 (`wide` false) or PE32+ image whose exception
+    /// directory is `directory`.
+    fn with_exception_directory(wide: bool, directory: DataDirectory) -> Vec<u8> {
+        let mut bytes = vec![0u8; 0x200];
+        put_u16(&mut bytes, 0, 0x5A4D);
+        put_u32(&mut bytes, 0x3C, 0x80);
+        put_u32(&mut bytes, 0x80, 0x0000_4550);
+        let optional = 0x98;
+        put_u16(&mut bytes, optional, if wide { PE32_PLUS_MAGIC } else { PE32_MAGIC });
+        let entry = optional + if wide { 0x88 } else { 0x78 };
+        put_u32(&mut bytes, entry, directory.rva);
+        put_u32(&mut bytes, entry + 4, directory.size);
+        bytes
+    }
+
+    #[test]
+    fn the_exception_directory_is_read_from_either_header() {
+        let directory = DataDirectory { rva: 0x5000, size: 0x30 };
+        for wide in [false, true] {
+            assert_eq!(exception_directory(&with_exception_directory(wide, directory)), Some(directory), "wide {wide}");
+        }
+        let empty = DataDirectory { rva: 0, size: 0 };
+        assert_eq!(exception_directory(&with_exception_directory(true, empty)), None);
+        assert_eq!(exception_directory(b"MZ"), None);
     }
 
     #[test]

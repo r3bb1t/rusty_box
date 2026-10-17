@@ -103,6 +103,7 @@ pub(crate) mod tests {
                 max_download: DEFAULT_MAX_DOWNLOAD,
             },
             projects: Vec::new(),
+            sources: Vec::new(),
         })
     }
 

@@ -107,7 +107,17 @@ pub struct FixtureProcedure {
     pub offset: u32,
     pub len: u32,
     pub file: String,
+    /// The checksum the file's C13 checksum entry records, if any.
+    pub checksum: Option<FixtureChecksum>,
     pub lines: Vec<FixtureLine>,
+}
+
+/// A C13 file checksum: `kind` 1 MD5, 2 SHA-1, 3 SHA-256 (another value is
+/// written as given), and its bytes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FixtureChecksum {
+    pub kind: u8,
+    pub bytes: Vec<u8>,
 }
 
 /// OMAP, as a binary rewritten after linking carries it: the sections as
@@ -188,7 +198,26 @@ pub struct PdbFixture {
     pub broken_udt_records: u32,
     pub omap: Option<FixtureOmap>,
     pub container: FixtureContainer,
+    /// Source files embedded in the PDB: the `/src/headerblock` stream and
+    /// one `/src/files/<lower-cased path>` stream each.
+    pub embedded: Vec<FixtureEmbedded>,
+    /// Cuts the `/src/headerblock` stream to this many bytes.
+    pub header_block_len: Option<usize>,
 }
+
+/// A source file embedded in the PDB, as `/src/headerblock` names it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FixtureEmbedded {
+    pub path: String,
+    pub contents: Vec<u8>,
+    /// The entry's compression byte; 0 is none.
+    pub compression: u8,
+}
+
+/// `/src/headerblock`'s version, in its header and in each entry.
+pub const SOURCE_BLOCK_VERSION: u32 = 19_980_827;
+const HEADER_BLOCK: u32 = 13;
+const FIRST_EMBEDDED_FILE: u32 = 14;
 
 impl PdbFixture {
     /// A PDB of `guid` and `age` with a `.text` at RVA 0x1000 and a `.data`
@@ -209,8 +238,62 @@ impl PdbFixture {
             broken_udt_records: 0,
             omap: None,
             container: FixtureContainer::Msf,
+            embedded: Vec::new(),
+            header_block_len: None,
         }
     }
+}
+
+/// An embedded file's names in `/names`.
+struct EmbeddedNames {
+    file: u32,
+    virtual_file: u32,
+}
+
+/// `/src/headerblock` (LLVM `SrcHeaderBlockHeader`, then the
+/// `HashTable<SrcHeaderBlockEntry>`): a 64-byte header; size, capacity, the
+/// present and deleted bit vectors; a `FileNI` key and a 40-byte entry per
+/// file.
+fn header_block(fixture: &PdbFixture, names: &[EmbeddedNames]) -> Vec<u8> {
+    let count = fixture.embedded.len() as u32;
+    let capacity = count.max(1);
+    let mut out = Vec::new();
+    out.extend_from_slice(&SOURCE_BLOCK_VERSION.to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes()); // the stream's size, patched below
+    out.extend_from_slice(&0u64.to_le_bytes()); // file time
+    out.extend_from_slice(&1u32.to_le_bytes()); // age
+    out.extend_from_slice(&[0; 44]);
+    out.extend_from_slice(&count.to_le_bytes());
+    out.extend_from_slice(&capacity.to_le_bytes());
+    let words = capacity.div_ceil(32);
+    out.extend_from_slice(&words.to_le_bytes());
+    for word in 0..words {
+        let mut bits = 0u32;
+        for slot in word * 32..(word * 32 + 32).min(count) {
+            bits |= 1 << (slot % 32);
+        }
+        out.extend_from_slice(&bits.to_le_bytes());
+    }
+    out.extend_from_slice(&0u32.to_le_bytes()); // no deleted buckets
+    for (embedded, names) in fixture.embedded.iter().zip(names) {
+        out.extend_from_slice(&names.file.to_le_bytes()); // the key
+        out.extend_from_slice(&40u32.to_le_bytes());
+        out.extend_from_slice(&SOURCE_BLOCK_VERSION.to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes()); // CRC
+        out.extend_from_slice(&(embedded.contents.len() as u32).to_le_bytes());
+        out.extend_from_slice(&names.file.to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes()); // object name: the empty string
+        out.extend_from_slice(&names.virtual_file.to_le_bytes());
+        out.push(embedded.compression);
+        out.push(0); // not virtual
+        out.extend_from_slice(&[0; 2 + 8]);
+    }
+    let size = out.len() as u32;
+    out[4..8].copy_from_slice(&size.to_le_bytes());
+    if let Some(len) = fixture.header_block_len {
+        out.truncate(len);
+    }
+    out
 }
 
 /// One stream of a fixture PDB.
@@ -380,18 +463,30 @@ fn module_stream(fixture: &PdbFixture, file_names: &[u32]) -> ModuleStream {
     }
     let symbols = builder.finish();
 
+    // One checksum entry per procedure's file: name, size, kind, the bytes,
+    // padded to 4. A LINES block names its file by its entry's offset.
     let mut checksums = Vec::new();
-    for name in file_names {
+    let mut entry_offsets = Vec::with_capacity(file_names.len());
+    for (name, procedure) in file_names.iter().zip(&fixture.procedures) {
+        entry_offsets.push(checksums.len() as u32);
         checksums.extend_from_slice(&name.to_le_bytes());
-        checksums.push(0);
-        checksums.push(0);
+        match &procedure.checksum {
+            Some(checksum) => {
+                checksums.push(checksum.bytes.len() as u8);
+                checksums.push(checksum.kind);
+                checksums.extend_from_slice(&checksum.bytes);
+            }
+            None => {
+                checksums.push(0);
+                checksums.push(0);
+            }
+        }
         pad_zero(&mut checksums);
     }
     let mut c13 = Vec::new();
     subsection(&mut c13, SubsectionKind::FILE_CHECKSUMS, &checksums);
     for (index, procedure) in fixture.procedures.iter().enumerate() {
-        // Each checksum entry is 8 bytes (name, size, kind, padding).
-        let file_index = (index * 8) as u32;
+        let file_index = entry_offsets[index];
         let mut payload = Vec::new();
         payload.extend_from_slice(&procedure.offset.to_le_bytes());
         payload.extend_from_slice(&procedure.section.to_le_bytes());
@@ -804,14 +899,43 @@ fn type_records(fixture: &PdbFixture) -> TypeRecords {
 /// The fixture's streams, by stream index.
 pub fn fixture_streams(fixture: &PdbFixture) -> Vec<FixtureStream> {
     let files: Vec<String> = fixture.procedures.iter().map(|procedure| procedure.file.clone()).collect();
-    let file_refs: Vec<&str> = files.iter().map(String::as_str).collect();
-    let names = names_stream(&file_refs);
+    // Procedures' files first (a module's checksum entries name them by
+    // these offsets), then embedded files' paths and virtual names not
+    // among them.
+    let virtual_names: Vec<String> = fixture.embedded.iter().map(|embedded| embedded.path.to_lowercase()).collect();
+    let mut strings: Vec<&str> = files.iter().map(String::as_str).collect();
+    for text in fixture.embedded.iter().map(|embedded| embedded.path.as_str()).chain(virtual_names.iter().map(String::as_str)) {
+        if !strings.contains(&text) {
+            strings.push(text);
+        }
+    }
+    let names = names_stream(&strings);
+    let offset_of = |text: &str| {
+        let place = strings.iter().position(|known| *known == text).expect("a string of /names");
+        names.offsets[place]
+    };
+    let embedded_names: Vec<EmbeddedNames> = fixture
+        .embedded
+        .iter()
+        .zip(&virtual_names)
+        .map(|(embedded, virtual_name)| EmbeddedNames { file: offset_of(&embedded.path), virtual_file: offset_of(virtual_name) })
+        .collect();
     let gss = global_symbols(fixture);
     let indexes = build_global_symbols_index(&gss, get_v1_default_bucket(false)).expect("symbol indexes");
     let module = module_stream(fixture, &names.offsets);
 
     let mut named = NamedStreams::default();
     assert!(named.insert("/names", NAMES), "the /names stream is named once");
+    let mut embedded_streams = Vec::new();
+    if !fixture.embedded.is_empty() {
+        assert!(named.insert("/src/headerblock", HEADER_BLOCK), "the header block is named once");
+        embedded_streams.push(FixtureStream { index: HEADER_BLOCK, bytes: header_block(fixture, &embedded_names) });
+        for (place, (embedded, virtual_name)) in fixture.embedded.iter().zip(&virtual_names).enumerate() {
+            let index = FIRST_EMBEDDED_FILE + place as u32;
+            assert!(named.insert(&format!("/src/files/{virtual_name}"), index), "each embedded file is named once");
+            embedded_streams.push(FixtureStream { index, bytes: embedded.contents.clone() });
+        }
+    }
     let pdbi = PdbiStream {
         signature: 0x6700_0000,
         version: PDBI_VERSION_VC70,
@@ -842,6 +966,7 @@ pub fn fixture_streams(fixture: &PdbFixture) -> Vec<FixtureStream> {
         }
         streams.push(FixtureStream { index: OMAP_FROM_SOURCE, bytes: map });
     }
+    streams.extend(embedded_streams);
     streams
 }
 

@@ -1,7 +1,7 @@
 //! C13 debug subsections in a module stream (LLVM, "The Module Information
 //! Stream", "C13 Line Information"): `DEBUG_S_LINES` maps code offsets to
 //! line numbers per source file; `DEBUG_S_FILECHKSMS` names each file by an
-//! offset into the `/names` stream.
+//! offset into the `/names` stream, with the checksum of its bytes.
 
 #[cfg(all(test, not(debug_assertions)))]
 use no_panic::no_panic;
@@ -101,6 +101,28 @@ pub fn checksum_name(checksums: Bytes<'_>, file: u32) -> Result<u32, ReadError> 
     checksums.u32_le(file as usize)
 }
 
+/// A file checksum entry: the file's `/names` offset, the checksum's kind
+/// (0 none, 1 MD5, 2 SHA-1, 3 SHA-256) and its bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ChecksumEntry<'a> {
+    pub name: u32,
+    pub kind: u8,
+    pub bytes: &'a [u8],
+}
+
+/// The checksum entry at byte offset `file`, which is how a line block
+/// names its file: u32 name offset, u8 size, u8 kind, `size` bytes.
+#[cfg_attr(all(test, not(debug_assertions)), no_panic)]
+pub fn decode_checksum_entry(checksums: Bytes<'_>, file: u32) -> Result<ChecksumEntry<'_>, ReadError> {
+    let at = file as usize;
+    let field = |offset: usize| at.checked_add(offset).ok_or(ReadError::Truncated { at, len: offset });
+    let name = checksums.u32_le(at)?;
+    let size = checksums.u8(field(4)?)?;
+    let kind = checksums.u8(field(5)?)?;
+    let bytes = checksums.slice(field(6)?, usize::from(size))?;
+    Ok(ChecksumEntry { name, kind, bytes })
+}
+
 /// A string of the `/names` stream: a header (signature 0xEFFEEFFE,
 /// version, buffer size), then the buffer the offsets point into.
 #[must_use]
@@ -111,4 +133,29 @@ pub fn names_string(names: Bytes<'_>, offset: u32) -> Option<&[u8]> {
     }
     let size = names.u32_le(8).ok()? as usize;
     names.sub(12, size).ok()?.cstr(offset as usize, 4096).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_checksum_entry_reads_its_name_kind_and_bytes() {
+        // Name offset 4, 16 bytes, kind 1 (MD5), the bytes.
+        let mut entry = vec![4, 0, 0, 0, 16, 1];
+        entry.extend_from_slice(&[0xAA; 16]);
+        assert_eq!(
+            decode_checksum_entry(Bytes::new(&entry), 0),
+            Ok(ChecksumEntry { name: 4, kind: 1, bytes: &[0xAA; 16] })
+        );
+    }
+
+    #[test]
+    fn a_checksum_entry_cut_short_does_not_read() {
+        let mut entry = vec![4, 0, 0, 0, 16, 1];
+        entry.extend_from_slice(&[0xAA; 8]);
+        assert!(decode_checksum_entry(Bytes::new(&entry), 0).is_err(), "bytes cut short");
+        assert!(decode_checksum_entry(Bytes::new(&entry[..5]), 0).is_err(), "kind cut off");
+        assert!(decode_checksum_entry(Bytes::new(&entry), u32::MAX).is_err(), "past the end");
+    }
 }

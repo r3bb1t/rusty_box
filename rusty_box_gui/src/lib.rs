@@ -40,6 +40,8 @@ pub(crate) mod sessions;
 #[cfg(all(not(target_arch = "wasm32"), feature = "gui-egui"))]
 pub(crate) mod symbol_settings;
 #[cfg(all(not(target_arch = "wasm32"), feature = "gui-egui"))]
+pub(crate) mod source;
+#[cfg(all(not(target_arch = "wasm32"), feature = "gui-egui"))]
 pub(crate) mod symbols;
 
 pub use args::{Args, BootDevice, DiskGeometry, DisplayBackend};

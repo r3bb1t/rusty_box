@@ -124,6 +124,8 @@ pub(crate) enum BrowseTarget {
     RamDump,
     /// A file of debug information for the module the Symbols tab picked.
     SymbolFile,
+    /// The source file the source view could not find.
+    SourceFile,
 }
 
 /// A Browse press the Android host answers with a file browser of its own.
@@ -338,6 +340,9 @@ pub struct NativeShellApp {
     /// The module a file chooser is open for, to load the chosen file as its
     /// debug information.
     symbol_file_for: Option<rusty_box_symbols::identity::ModuleIdentity>,
+    /// The build path of the source file a file chooser is open for: the
+    /// chosen file maps it for the rest of the run.
+    source_file_for: Option<String>,
     /// The Settings page's edits, kept while the page is left and back.
     settings_draft: Option<crate::symbol_settings::SettingsDraft>,
     /// Why the Settings page's last Save did not write.
@@ -1774,6 +1779,7 @@ impl NativeShellApp {
             symbols,
             symbol_workers: None,
             symbol_file_for: None,
+            source_file_for: None,
             settings_draft: None,
             settings_save_problem: None,
             chrome,
@@ -2348,6 +2354,24 @@ impl NativeShellApp {
         }
         let step_available = session.run_engine() != Some(crate::config::Engine::Whp);
         let symbols = self.symbols.view();
+        // A step reads line rows from the engine's latest view; the machine's
+        // breakpoints follow the owner's as the pause's modules and their
+        // symbols resolve source lines.
+        control.set_symbols(Arc::clone(&symbols));
+        // The pause's source file is read as soon as its module's tables say
+        // which it is.
+        let pause_source = snapshot.as_deref().and_then(|shown| {
+            crate::shell::debugger_page::source_view::source_at(shown.code.first()?.address, &shown.symbols, &symbols)
+        });
+        if let Some(source) = &pause_source {
+            self.symbols.want_source(&source.key);
+        }
+        let targets = control.targets();
+        control.set_breakpoints(crate::debugger::source_breakpoints::applied_set(
+            &targets,
+            snapshot.as_deref().map(|shown| &shown.symbols),
+            &symbols,
+        ));
         let breakpoints = control.breakpoints();
         let stopped_at = control.stopped_at();
         // The processor switch shows the processor the run reads, which a
@@ -2359,6 +2383,7 @@ impl NativeShellApp {
                 live: status.running,
                 paused: status.paused,
                 step_available,
+                stepping: control.stepping(),
                 dump_pending: control.dump_pending(),
                 note: control.note(),
                 snapshot: snapshot.as_deref(),
@@ -2367,6 +2392,7 @@ impl NativeShellApp {
                 searching: control.searching(),
                 pane: session.debugger_mut(),
                 symbols: &symbols,
+                targets: &targets,
                 breakpoints: &breakpoints,
                 stopped_at,
             },
@@ -2378,7 +2404,19 @@ impl NativeShellApp {
         }
         match action {
             None => {}
-            Some(DebuggerAction::Step) => control.step(),
+            Some(DebuggerAction::Step { kind, unit }) => {
+                control.step(crate::debugger::stepping::StepRequest { kind, unit, cpu: control.view().cpu });
+            }
+            Some(DebuggerAction::CancelStep) => control.cancel_step(),
+            Some(DebuggerAction::LocateSource { build_path }) => {
+                self.source_file_for = Some(build_path);
+                if self.browse(BrowseTarget::SourceFile) {
+                    if let Err(message) = self.apply_pending_settings() {
+                        self.notify(ShellNotice::error(message));
+                    }
+                }
+            }
+            Some(DebuggerAction::SaveRunMap { project, map }) => self.save_run_map(&project, map),
             Some(DebuggerAction::DumpRam) => self.ask_for_ram_dump(),
             Some(DebuggerAction::ShowMemory(memory)) => {
                 control.set_view(ViewRequest { memory, ..control.view() });
@@ -2433,7 +2471,37 @@ impl NativeShellApp {
                 });
             }
             Some(DebuggerAction::Symbols(asked)) => self.act_on_symbols(asked),
-            Some(DebuggerAction::SetBreakpoints(set)) => control.set_breakpoints(set),
+            Some(DebuggerAction::SetTargets(targets)) => {
+                let applied = crate::debugger::source_breakpoints::applied_set(
+                    &targets,
+                    snapshot.as_deref().map(|shown| &shown.symbols),
+                    &symbols,
+                );
+                control.set_targets(targets);
+                control.set_breakpoints(applied);
+            }
+        }
+    }
+
+    /// Writes a map the owner made by locating a source file into the
+    /// settings of `project`, the project the file's module came from, and
+    /// looks symbols and sources up again under them.
+    fn save_run_map(&mut self, project: &str, map: crate::source::find::PathMap) {
+        let mut file = self.symbol_settings.file.clone();
+        let Some(entry) = file.projects.iter_mut().find(|entry| entry.name == project) else {
+            self.notify(ShellNotice::error(format!("The settings have no project named {project}.")));
+            return;
+        };
+        let kept = crate::symbol_settings::PathMapToml { from: PathBuf::from(&map.from), to: map.to };
+        if !entry.map.contains(&kept) {
+            entry.map.push(kept);
+        }
+        match self.symbol_settings.save(file) {
+            Ok(()) => {
+                self.symbols.reconfigure(crate::symbols::hub::HubConfig::from_settings(&self.symbol_settings.resolved));
+                self.notify(ShellNotice::info(format!("The path map is saved in {project}'s settings.")));
+            }
+            Err(error) => self.notify(ShellNotice::error(format!("The path map was not saved: {error}"))),
         }
     }
 
@@ -4718,7 +4786,8 @@ impl NativeShellApp {
             | BrowseTarget::Cdrom
             | BrowseTarget::Bios
             | BrowseTarget::VgaBios
-            | BrowseTarget::SymbolFile => pick_native_file(),
+            | BrowseTarget::SymbolFile
+            | BrowseTarget::SourceFile => pick_native_file(),
         };
         chosen.is_some_and(|path| self.set_browsed_path(target, path))
     }
@@ -4792,6 +4861,12 @@ impl NativeShellApp {
                 }
                 false
             }
+            BrowseTarget::SourceFile => {
+                if let Some(build_path) = self.source_file_for.take() {
+                    self.symbols.add_run_map(crate::shell::debugger_page::source_view::located_map(&build_path, &path));
+                }
+                false
+            }
         }
     }
 
@@ -4822,7 +4897,7 @@ impl NativeShellApp {
             ),
             // The browser opens in the shared Download folder.
             BrowseTarget::RamDump => (PathBuf::new(), Some(RAM_DUMP_FILE_NAME)),
-            BrowseTarget::SymbolFile => (PathBuf::new(), None),
+            BrowseTarget::SymbolFile | BrowseTarget::SourceFile => (PathBuf::new(), None),
         };
         Some(BrowseRequest {
             target,
@@ -10259,6 +10334,10 @@ mod tests {
                 target: Some(KERNEL_BASE + 0x1100),
             }];
             control.publish(snapshot);
+            // The pause has a source line; the disassembly is asked for.
+            let vm = app.shown_vm();
+            app.sessions.open(&vm).debugger_mut().code_view =
+                Some(crate::shell::debugger_page::source_view::CodeView::Disassembly);
             let mut window = window(app);
             window.run();
             open_debugger(&mut window);
@@ -10497,9 +10576,12 @@ mod tests {
             let mut window = window(app);
             window.run();
             open_debugger(&mut window);
-            window.get_by_label("Step").click();
+            window.get_by_label("Step into").click();
             window.run();
-            assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::Step));
+            assert_eq!(
+                control.next_between_runs(),
+                BetweenRuns::Perform(Task::Step(crate::debugger::stepping::StepRequest::instruction_into(0)))
+            );
         }
 
         #[test]
@@ -10513,7 +10595,7 @@ mod tests {
             let mut window = window(app);
             window.run();
             open_debugger(&mut window);
-            assert!(window.get_by_label("Step").accesskit_node().is_disabled());
+            assert!(window.get_by_label("Step into").accesskit_node().is_disabled());
         }
 
         #[test]
@@ -10547,6 +10629,260 @@ mod tests {
             window.key_press(egui::Key::F2);
             window.run();
             assert!(control.breakpoints().is_empty(), "F2 removed the picked row");
+        }
+
+        /// The kernel fixture's `trap.asm` as the build recorded it.
+        const TRAP_ASM: &str = r"d:\os\src\ntos\ke\amd64\trap.asm";
+
+        /// The shown VM paused at `KiSystemCall64`, line 100 of the kernel's
+        /// `trap.asm`, its tables loaded and its source read as `found`
+        /// (lines `source line 1` to `source line 120`).
+        fn paused_in_trap_asm(
+            app: &mut NativeShellApp,
+            found: crate::source::find::SourceFound,
+        ) -> Arc<crate::debugger::control::RunControl> {
+            use crate::debugger::control::{BetweenRuns, Task};
+            use crate::debugger::inspect::{CodeLine, CodeText};
+            use crate::source::find::{LoadedSource, SourceText};
+            use crate::symbols::hub::{Job, SourceKey};
+            use crate::symbols::kernel::tests::{kernel_identity, kernel_symbols, KERNEL_BASE};
+            use crate::symbols::names::tests::{hub_with_kernel_code, loaded};
+            app.symbols = hub_with_kernel_code(loaded());
+            let control = live_vm(app);
+            control.pause();
+            assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::Refresh));
+            let mut snapshot = paused_snapshot();
+            snapshot.symbols = kernel_symbols();
+            snapshot.code = vec![CodeLine {
+                address: KERNEL_BASE + 0x1040,
+                bytes: vec![0x90],
+                text: CodeText::Opcode("Nop".to_owned()),
+                target: None,
+            }];
+            control.publish(snapshot);
+            let key = SourceKey { identity: kernel_identity(), file: 0 };
+            app.symbols.want_source(&key);
+            let ticket = app.symbols.try_next_job().expect("the read");
+            assert_eq!(ticket.job, Job::ReadSource { key: key.clone() });
+            let text = SourceText { lines: (1..=120).map(|line| format!("source line {line}")).collect() };
+            app.symbols.finish_source(&key, LoadedSource { found, text: Some(text) });
+            control
+        }
+
+        fn found_in_folders(check: crate::source::find::SourceCheck) -> crate::source::find::SourceFound {
+            crate::source::find::SourceFound::Disk {
+                path: PathBuf::from(r"D:\work\trap.asm"),
+                by: crate::source::find::FoundBy::SourceFolder,
+                check,
+            }
+        }
+
+        /// Whether a node whose label or value holds `text` is drawn.
+        fn shown_anywhere(window: &Harness<'_, Window>, text: &str) -> bool {
+            window
+                .query_all_by(|node| node.label().or(node.value()).is_some_and(|label| label.contains(text)))
+                .next()
+                .is_some()
+        }
+
+        #[test]
+        fn the_source_view_shows_the_file_at_the_pause_line() {
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            paused_in_trap_asm(&mut app, found_in_folders(crate::source::find::SourceCheck::Matches));
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            assert!(shown_anywhere(&window, "source line 100"), "the pause's line");
+            assert!(shown_anywhere(&window, "trap.asm"), "the file's name");
+            assert!(shown_anywhere(&window, "in the project's source folders"), "how it was found");
+            assert!(shown_anywhere(&window, "matches the build"), "its check");
+            assert!(!shown_anywhere(&window, "Nop"), "the source, not the disassembly");
+        }
+
+        /// F2 in the source view sets a breakpoint on the pause's line, by
+        /// its build path; the machine gets the line's address.
+        #[test]
+        fn f2_in_the_source_view_sets_a_breakpoint_on_the_line() {
+            use crate::debugger::source_breakpoints::{BreakpointTarget, SourceTarget};
+            use crate::symbols::kernel::tests::KERNEL_BASE;
+            use rusty_box::cpu::CodeBreakpoint;
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_in_trap_asm(&mut app, found_in_folders(crate::source::find::SourceCheck::Matches));
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            window.key_press(egui::Key::F2);
+            window.run();
+            window.run();
+            assert_eq!(control.targets(), [BreakpointTarget::Source(SourceTarget { file: TRAP_ASM.into(), line: 100 })]);
+            assert_eq!(control.breakpoints(), [CodeBreakpoint::Linear(KERNEL_BASE + 0x1040)]);
+        }
+
+        #[test]
+        fn a_file_that_differs_from_the_build_says_so() {
+            use crate::shell::debugger_page::source_view::SOURCE_DIFFERS;
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            paused_in_trap_asm(&mut app, found_in_folders(crate::source::find::SourceCheck::Differs));
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            assert!(shown_anywhere(&window, SOURCE_DIFFERS));
+            assert!(shown_anywhere(&window, "source line 100"), "the lines are still shown");
+        }
+
+        #[test]
+        fn a_source_file_not_found_offers_to_locate_it() {
+            use crate::shell::debugger_page::source_view::LOCATE;
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            paused_in_trap_asm(&mut app, crate::source::find::SourceFound::Missing { build_path: TRAP_ASM.into() });
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            assert!(shown_anywhere(&window, &format!("Source not found: {TRAP_ASM}")));
+            assert!(window.query_by_label(LOCATE).is_some());
+        }
+
+        /// The owner's pick of Disassembly stays when a step brings a new
+        /// pause.
+        #[test]
+        fn the_disassembly_picked_stays_across_a_step() {
+            use crate::shell::debugger_page::source_view::DISASSEMBLY_SWITCH;
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_in_trap_asm(&mut app, found_in_folders(crate::source::find::SourceCheck::Matches));
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            window.get_by_label(DISASSEMBLY_SWITCH).click();
+            window.run();
+            assert!(shown_anywhere(&window, "Nop"), "the disassembly");
+            let again = control.snapshot().expect("published");
+            let mut next = paused_snapshot();
+            next.symbols = again.symbols.clone();
+            next.code = again.code.clone();
+            control.publish(next);
+            window.run();
+            assert!(shown_anywhere(&window, "Nop"), "still the disassembly");
+            assert!(!shown_anywhere(&window, "source line 100"));
+        }
+
+        /// F11, F10, Shift+F11 step into, over and out by line in the source
+        /// view; F10 steps over by instruction in the disassembly.
+        /// The steps queued for the run, in order.
+        fn queued_steps(control: &crate::debugger::control::RunControl) -> Vec<crate::debugger::stepping::StepRequest> {
+            control
+                .queued()
+                .into_iter()
+                .filter_map(|task| match task {
+                    crate::debugger::control::Task::Step(request) => Some(request),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        #[test]
+        fn the_step_keys_ask_for_their_steps_in_the_shown_unit() {
+            use crate::debugger::stepping::{StepKind, StepRequest, StepUnit};
+            use crate::shell::debugger_page::source_view::DISASSEMBLY_SWITCH;
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_in_trap_asm(&mut app, found_in_folders(crate::source::find::SourceCheck::Matches));
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            let asked = |kind: StepKind, unit: StepUnit| StepRequest { kind, unit, cpu: 0 };
+            window.key_press(egui::Key::F11);
+            window.run();
+            window.key_press(egui::Key::F10);
+            window.run();
+            window.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::F11);
+            window.run();
+            window.get_by_label(DISASSEMBLY_SWITCH).click();
+            window.run();
+            window.key_press(egui::Key::F10);
+            window.run();
+            assert_eq!(
+                queued_steps(&control),
+                [
+                    asked(StepKind::Into, StepUnit::Line),
+                    asked(StepKind::Over, StepUnit::Line),
+                    asked(StepKind::Out, StepUnit::Line),
+                    asked(StepKind::Over, StepUnit::Instruction),
+                ]
+            );
+        }
+
+        /// Ctrl+F10 runs to the picked source line's code.
+        #[test]
+        fn run_to_cursor_runs_to_the_picked_line() {
+            use crate::debugger::stepping::{StepKind, StepRequest, StepUnit};
+            use crate::symbols::kernel::tests::KERNEL_BASE;
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_in_trap_asm(&mut app, found_in_folders(crate::source::find::SourceCheck::Matches));
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            assert!(window.get_by_label("Run to cursor").accesskit_node().is_disabled(), "nothing picked yet");
+            window
+                .query_all_by(|node| node.label().or(node.value()).is_some_and(|label| label.contains("source line 104")))
+                .next()
+                .expect("line 104")
+                .click();
+            window.run();
+            window.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::F10);
+            window.run();
+            assert_eq!(
+                queued_steps(&control),
+                [StepRequest { kind: StepKind::RunTo { address: KERNEL_BASE + 0x1050 }, unit: StepUnit::Line, cpu: 0 }]
+            );
+        }
+
+        /// A step that did not finish says why.
+        #[test]
+        fn a_step_that_did_not_finish_says_why() {
+            use crate::debugger::control::{DebugNote, StepCut};
+            use crate::debugger::stepping::StepCeiling;
+            use crate::shell::debugger_page::STEP_TIME_CEILING;
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_vm(&mut app);
+            control.note_refusal(DebugNote::StepCut(StepCut::Ceiling(StepCeiling::Time)));
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            assert!(shown_anywhere(&window, STEP_TIME_CEILING));
+            control.note_refusal(DebugNote::StepCut(StepCut::Ceiling(StepCeiling::Instructions(10_000_000))));
+            window.run();
+            assert!(shown_anywhere(&window, "The step did not finish: stopped after 10000000 instructions."));
+        }
+
+        /// A source line no module of the pause has stays on the list as
+        /// pending, saying why, and gives the machine nothing.
+        #[test]
+        fn a_file_and_line_typed_in_the_field_is_listed_as_pending() {
+            use crate::debugger::source_breakpoints::{BreakpointTarget, SourceTarget};
+            use crate::shell::debugger_page::{DebuggerTab, BREAKPOINT_ADDRESS, PENDING_NO_LINE};
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_vm(&mut app);
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            let vm = window.state().app.shown_vm();
+            window.state_mut().app.sessions.open(&vm).debugger_mut().tab = DebuggerTab::Breakpoints;
+            window.run();
+            let field = || egui::accesskit::Role::TextInput;
+            window.get_by_role_and_label(field(), BREAKPOINT_ADDRESS).click();
+            window.run();
+            window.get_by_role_and_label(field(), BREAKPOINT_ADDRESS).type_text(r"io\read.c:120");
+            window.run();
+            window.get_by_label("Add").click();
+            window.run();
+            window.run();
+            assert_eq!(
+                control.targets(),
+                [BreakpointTarget::Source(SourceTarget { file: r"io\read.c".into(), line: 120 })]
+            );
+            assert!(control.breakpoints().is_empty(), "no module has the line");
+            let shown = |text: &str| window.query_all_by(|node| node.label().or(node.value()).is_some_and(|shown| shown.contains(text))).next().is_some();
+            assert!(shown(r"io\read.c:120"), "the row names the line");
+            assert!(shown(PENDING_NO_LINE), "and why it is pending");
         }
 
         /// A click picks a code line, and F2 sets a breakpoint there and then
@@ -10813,7 +11149,7 @@ mod tests {
             window.run();
             open_debugger(&mut window);
             let step = window
-                .get_by_role_and_label(egui::accesskit::Role::Button, "Step")
+                .get_by_role_and_label(egui::accesskit::Role::Button, "Step into")
                 .rect();
             let chip = window.get_by_label("64-bit mode").rect();
             assert!(
@@ -10864,13 +11200,13 @@ mod tests {
             window.run();
             open_debugger(&mut window);
             let step = window
-                .get_by_role_and_label(egui::accesskit::Role::Button, "Step")
+                .get_by_role_and_label(egui::accesskit::Role::Button, "Step into")
                 .rect();
             let tabs = window
                 .get_by_role_and_label(egui::accesskit::Role::Button, "Kernel modules")
                 .rect();
             let chip = window.get_by_label("64-bit mode").rect();
-            for (name, rect) in [("Step", step), ("Kernel modules", tabs), ("64-bit mode", chip)] {
+            for (name, rect) in [("Step into", step), ("Kernel modules", tabs), ("64-bit mode", chip)] {
                 assert!(
                     rect.right() <= NARROW_PAGE.x,
                     "{name} at {rect:?} runs past the window's edge"
@@ -11570,7 +11906,7 @@ mod tests {
                     .is_some(),
                 "the banner says the live CPU is shown"
             );
-            assert!(!window.get_by_label("Step").accesskit_node().is_disabled());
+            assert!(!window.get_by_label("Step into").accesskit_node().is_disabled());
             assert!(window.query_by_label(BACK_TO_LIVE).is_some());
         }
 
@@ -12045,7 +12381,7 @@ mod tests {
             assert!(shows(&window, "Viewing winlogon.exe"), "the banner names the process");
             assert!(shows(&window, "thread 500"), "and the thread (0x1F4)");
             assert!(shows(&window, "00007FF700012345"), "the saved RIP is shown");
-            assert!(window.get_by_label("Step").accesskit_node().is_disabled());
+            assert!(window.get_by_label("Step into").accesskit_node().is_disabled());
             window.get_by_label(BACK_TO_LIVE).click();
             window.run();
             assert_eq!(control.view().context, ViewContext::Live);

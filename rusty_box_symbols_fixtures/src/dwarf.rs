@@ -2,12 +2,15 @@
 //! assembler for what gimli cannot write (the `strx`/`addrx`/`rnglistx`
 //! forms, type units, the GNU alternate-file forms).
 
-use gimli::write::{Address, AttributeValue, DwarfUnit, EndianVec, Expression, LineProgram, LineString, Sections};
+use gimli::write::{Address, AttributeValue, DwarfUnit, EndianVec, Expression, FileInfo, LineProgram, LineString, Sections};
 use gimli::{Encoding, Format, LineEncoding};
 
 use crate::elf::{build_elf, ElfSpec, Encoding as StoredAs, ExtraSection, Symtab, FUNC_LEN};
 
 pub const COMP_DIR: &str = "/build/widget";
+
+/// The MD5 a DWARF 5 line program records for `src/main.c`.
+pub const MAIN_C_MD5: [u8; 16] = [0x5d, 0x41, 0x40, 0x2a, 0xbc, 0x4b, 0x2a, 0x76, 0xb9, 0x71, 0x9d, 0x91, 0x10, 0x17, 0xc5, 0x92];
 
 /// 32- or 64-bit DWARF.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -56,9 +59,13 @@ pub fn build_dwarf(spec: DwarfSpec) -> Vec<ExtraSection> {
     let comp_dir = LineString::new(COMP_DIR, encoding, &mut dwarf.line_strings);
     let src_dir = LineString::new("src", encoding, &mut dwarf.line_strings);
     let main_c = LineString::new("main.c", encoding, &mut dwarf.line_strings);
-    let mut program = LineProgram::new(encoding, LineEncoding::default(), comp_dir, Some(src_dir.clone()), main_c.clone(), None);
+    let main_c_info = FileInfo { md5: MAIN_C_MD5, ..FileInfo::default() };
+    let mut program =
+        LineProgram::new(encoding, LineEncoding::default(), comp_dir, Some(src_dir.clone()), main_c.clone(), Some(main_c_info.clone()));
+    // DWARF 5 file entries carry `DW_LNCT_MD5`; earlier versions have no field for it.
+    program.file_has_md5 = true;
     let directory = program.add_directory(src_dir);
-    let file = program.add_file(main_c, directory, None);
+    let file = program.add_file(main_c, directory, Some(main_c_info));
     program.begin_sequence(Some(Address::Constant(text_va)));
     program.row().file = file;
     program.row().address_offset = 0;

@@ -7,6 +7,7 @@
 use super::forms::{decode_value, Encoding, Value};
 use super::{push, short, DwarfError, Format};
 use crate::read::{Bytes, Cursor};
+use crate::tables::{ChecksumKind, FileChecksum, SourceFile};
 
 const DW_LNS_COPY: u8 = 1;
 const DW_LNS_ADVANCE_PC: u8 = 2;
@@ -18,6 +19,7 @@ const DW_LNE_END_SEQUENCE: u8 = 1;
 const DW_LNE_SET_ADDRESS: u8 = 2;
 const DW_LNCT_PATH: u64 = 1;
 const DW_LNCT_DIRECTORY_INDEX: u64 = 2;
+const DW_LNCT_MD5: u64 = 5;
 /// Directories or files in one header past this are not a real program's.
 const MAX_ENTRIES: u64 = 1 << 16;
 /// Entry formats of one header (DWARF 5 defines five content types).
@@ -41,11 +43,17 @@ pub struct Row {
     pub sequence: Sequence,
 }
 
-/// A program's files (full paths, by index) and rows.
+/// A program's files (full paths, with a version 5 header's MD5, by index)
+/// and rows.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LineProgram {
-    pub files: Vec<String>,
+    pub files: Vec<SourceFile>,
     pub rows: Vec<Row>,
+}
+
+/// A file named by a header of version 2 to 4, which records no checksum.
+fn unchecked(path: String) -> SourceFile {
+    SourceFile { path, checksum: None }
 }
 
 /// What a unit tells its line program.
@@ -76,11 +84,12 @@ struct EntryFormat {
     form: u64,
 }
 
-/// A version 5 header entry: its path and directory index.
+/// A version 5 header entry: its path, directory index and MD5.
 #[derive(Clone, Default)]
 struct HeaderEntry {
     path: String,
     directory: u64,
+    md5: Option<FileChecksum>,
 }
 
 /// Reads a version 5 header entry list (§6.2.4.1, items 14 to 20).
@@ -117,6 +126,11 @@ where
                 DW_LNCT_DIRECTORY_INDEX => {
                     if let Value::Unsigned(index) = decoded.value {
                         entry.directory = index;
+                    }
+                }
+                DW_LNCT_MD5 => {
+                    if let Value::Data16(bytes) = decoded.value {
+                        entry.md5 = FileChecksum::of(ChecksumKind::Md5, bytes);
                     }
                 }
                 _ => {}
@@ -192,7 +206,8 @@ where
                 .ok()
                 .and_then(|index| directories.get(index))
                 .map_or("", |directory| directory.path.as_str());
-            push(&mut program.files, joined(comp_dir, &joined(directory, &file.path)), "file names")?;
+            let path = joined(comp_dir, &joined(directory, &file.path));
+            push(&mut program.files, SourceFile { path, checksum: file.md5 }, "file names")?;
         }
     } else {
         let mut directories = Vec::new();
@@ -207,7 +222,7 @@ where
             }
             push(&mut directories, String::from_utf8_lossy(directory).into_owned(), "include directories")?;
         }
-        push(&mut program.files, joined(&unit.comp_dir, &unit.unit_name), "file names")?;
+        push(&mut program.files, unchecked(joined(&unit.comp_dir, &unit.unit_name)), "file names")?;
         loop {
             let name = cursor.cstr(MAX_NAME_BYTES).map_err(|source| short(what, source))?;
             if name.is_empty() {
@@ -224,7 +239,7 @@ where
                 .and_then(|index| directories.get(index))
                 .map_or("", String::as_str);
             let name = String::from_utf8_lossy(name);
-            push(&mut program.files, joined(&unit.comp_dir, &joined(directory, &name)), "file names")?;
+            push(&mut program.files, unchecked(joined(&unit.comp_dir, &joined(directory, &name))), "file names")?;
         }
     }
 

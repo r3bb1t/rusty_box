@@ -379,6 +379,12 @@ pub(crate) fn lead_dot(ui: &egui::Ui, row: Rect, lead: f32, color: Color32) {
     ui.painter().circle_filled(center, 3.5, color);
 }
 
+/// [`lead_dot`]'s outline: a breakpoint that resolves nowhere yet.
+pub(crate) fn lead_ring(ui: &egui::Ui, row: Rect, lead: f32, color: Color32) {
+    let center = egui::pos2(row.left() + ROW_PAD + lead - 7.0, row.center().y);
+    ui.painter().circle_stroke(center, 3.0, egui::Stroke::new(1.2, color));
+}
+
 /// A small right-pointing marker in a row's lead: where the processor is.
 pub(crate) fn lead_arrow(ui: &egui::Ui, row: Rect, color: Color32) {
     let left = row.left() + ROW_PAD;

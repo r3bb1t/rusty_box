@@ -17,6 +17,8 @@ use rusty_box_symbols::service::{Consent, ServiceConfig, SymbolSource};
 use rusty_box_symbols::store::StoreUsage;
 use rusty_box_symbols::tables::SymbolTables;
 
+use crate::source::find::{LoadedSource, PathMap, SourceFolders};
+
 /// What the engine has for one module.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ModuleSymbols {
@@ -61,6 +63,22 @@ pub(crate) enum StoreMeasure {
     Failed(String),
 }
 
+/// A source file a module's tables name: the module, and the file's place
+/// in its tables' [`SymbolTables::files`].
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct SourceKey {
+    pub(crate) identity: ModuleIdentity,
+    pub(crate) file: usize,
+}
+
+/// A source file asked for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum SourceSlot {
+    /// A worker is finding it.
+    Reading,
+    Read(Arc<LoadedSource>),
+}
+
 /// One published state of the hub.
 #[derive(Clone, Default)]
 pub(crate) struct SymbolsView {
@@ -70,6 +88,14 @@ pub(crate) struct SymbolsView {
     pub(crate) projects_problem: Option<String>,
     /// How much the store holds, once a worker measured it.
     pub(crate) store_usage: Option<StoreMeasure>,
+    /// The source files asked for since the last rescan.
+    pub(crate) sources: BTreeMap<SourceKey, SourceSlot>,
+    /// Each project's source folders, by project name, indexed the first
+    /// time one of its files is read after a rescan.
+    pub(crate) source_folders: BTreeMap<String, Arc<SourceFolders>>,
+    /// Maps the owner made this run by locating a file: tried first, for
+    /// every module.
+    pub(crate) run_maps: Vec<PathMap>,
     /// Changes with each publication, so a reader can tell a new view from
     /// the last; it is compared for equality only, so it wraps.
     pub(crate) generation: u64,
@@ -101,12 +127,22 @@ pub(crate) struct WantedModule {
     pub(crate) priority: Priority,
 }
 
+/// Where a project's sources are: its source folders, and its path maps
+/// from the build machine's paths.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ProjectSources {
+    pub(crate) name: String,
+    pub(crate) folders: Vec<PathBuf>,
+    pub(crate) maps: Vec<PathMap>,
+}
+
 /// What the workers look up with.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct HubConfig {
     pub(crate) store: PathBuf,
     pub(crate) service: ServiceConfig,
     pub(crate) projects: Vec<ProjectFolders>,
+    pub(crate) sources: Vec<ProjectSources>,
 }
 
 impl HubConfig {
@@ -115,6 +151,7 @@ impl HubConfig {
             store: settings.store.value.clone(),
             service: settings.service_config(),
             projects: settings.project_folders(),
+            sources: settings.project_sources(),
         }
     }
 }
@@ -132,13 +169,17 @@ pub(crate) enum Job {
     Rescan,
     /// Count the store's files and bytes.
     MeasureStore,
+    /// Find and read a source file.
+    ReadSource { key: SourceKey },
 }
 
 impl Job {
+    /// The module a lookup is for; a source read is not one, and runs
+    /// beside its module's lookups.
     fn module(&self) -> Option<&ModuleIdentity> {
         match self {
             Job::Locate { identity } | Job::Attach { identity, .. } => Some(identity),
-            Job::Rescan | Job::MeasureStore => None,
+            Job::Rescan | Job::MeasureStore | Job::ReadSource { .. } => None,
         }
     }
 }
@@ -406,12 +447,31 @@ impl SymbolHub {
         });
     }
 
-    /// Indexes the project folders again, ahead of every lookup.
+    /// Indexes the project folders again, ahead of every lookup; the
+    /// sources read are found again when next asked for, their folders
+    /// indexed again.
     pub(crate) fn rescan(&self) {
-        let mut state = self.lock();
-        state.queue.retain(|queued| queued.job != Job::Rescan);
-        state.enqueue(Job::Rescan, Priority::Kernel);
-        self.shared.wake.notify_all();
+        self.update(|state| {
+            state.queue.retain(|queued| queued.job != Job::Rescan);
+            state.enqueue(Job::Rescan, Priority::Kernel);
+            forget_sources(state);
+            self.shared.wake.notify_all();
+        });
+    }
+
+    /// Asks for a source file: one not asked for since the last rescan is
+    /// found and read by a worker.
+    pub(crate) fn want_source(&self, key: &SourceKey) {
+        self.update(|state| {
+            if state.view.sources.contains_key(key) {
+                return;
+            }
+            state.enqueue(Job::ReadSource { key: key.clone() }, Priority::Shown);
+            state.publish(|view| {
+                view.sources.insert(key.clone(), SourceSlot::Reading);
+            });
+            self.shared.wake.notify_all();
+        });
     }
 
     /// Measures the store again, behind every lookup.
@@ -431,6 +491,7 @@ impl SymbolHub {
             state.queue.retain(|queued| queued.job != Job::Rescan && queued.job != Job::MeasureStore);
             state.enqueue(Job::Rescan, Priority::Kernel);
             state.enqueue(Job::MeasureStore, Priority::Rest);
+            forget_sources(state);
             let missing: Vec<ModuleIdentity> = state
                 .view
                 .modules
@@ -584,6 +645,67 @@ impl SymbolHub {
     pub(crate) fn set_store_usage(&self, measure: StoreMeasure) {
         self.update(|state| state.publish(|view| view.store_usage = Some(measure)));
     }
+
+    /// Project `name`'s source folders, indexed.
+    pub(crate) fn set_source_folders(&self, name: &str, folders: SourceFolders) {
+        self.update(|state| {
+            state.publish(|view| {
+                view.source_folders.insert(name.to_owned(), Arc::new(folders));
+            });
+        });
+    }
+
+    /// What finding `key`'s file came to. A key forgotten meanwhile (a
+    /// rescan) stays forgotten.
+    pub(crate) fn finish_source(&self, key: &SourceKey, loaded: LoadedSource) {
+        self.update(|state| {
+            if !state.view.sources.contains_key(key) {
+                return;
+            }
+            state.publish(|view| {
+                view.sources.insert(key.clone(), SourceSlot::Read(Arc::new(loaded)));
+            });
+        });
+    }
+
+    /// A map the owner made by locating a file: every source is found again
+    /// with it.
+    pub(crate) fn add_run_map(&self, map: PathMap) {
+        self.update(|state| {
+            state.queue.retain(|queued| !matches!(queued.job, Job::ReadSource { .. }));
+            state.publish(|view| {
+                if !view.run_maps.contains(&map) {
+                    view.run_maps.push(map);
+                }
+                view.sources.clear();
+            });
+        });
+    }
+
+    /// Drops `key`: its module has no tables to name the file by, so it is
+    /// asked for again once it has.
+    pub(crate) fn forget_source(&self, key: &SourceKey) {
+        self.update(|state| {
+            if state.view.sources.contains_key(key) {
+                state.publish(|view| {
+                    view.sources.remove(key);
+                });
+            }
+        });
+    }
+}
+
+/// Drops every source read and every source folder index, and the reads
+/// still queued.
+fn forget_sources(state: &mut HubState) {
+    state.queue.retain(|queued| !matches!(queued.job, Job::ReadSource { .. }));
+    if state.view.sources.is_empty() && state.view.source_folders.is_empty() {
+        return;
+    }
+    state.publish(|view| {
+        view.sources.clear();
+        view.source_folders.clear();
+    });
 }
 
 /// A cancelled lookup: failed, and Retry may succeed.

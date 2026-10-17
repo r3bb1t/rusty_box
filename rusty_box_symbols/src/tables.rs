@@ -16,6 +16,87 @@ pub struct SourceLine {
     pub line: u32,
 }
 
+/// The hash a compiler recorded of a source file's bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChecksumKind {
+    Md5,
+    Sha1,
+    Sha256,
+}
+
+impl ChecksumKind {
+    /// The digest's length in bytes.
+    #[must_use]
+    pub const fn digest_len(self) -> usize {
+        match self {
+            ChecksumKind::Md5 => 16,
+            ChecksumKind::Sha1 => 20,
+            ChecksumKind::Sha256 => 32,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FileChecksum {
+    pub kind: ChecksumKind,
+    /// `kind.digest_len()` bytes.
+    pub bytes: Vec<u8>,
+}
+
+impl FileChecksum {
+    /// A digest of kind `kind`, when `bytes` is that kind's length.
+    #[must_use]
+    pub fn of(kind: ChecksumKind, bytes: &[u8]) -> Option<FileChecksum> {
+        (bytes.len() == kind.digest_len()).then(|| FileChecksum { kind, bytes: bytes.to_vec() })
+    }
+}
+
+/// A source file the tables name, as the build recorded its path, and the
+/// checksum recorded with it, when there is one of a kind this reader knows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SourceFile {
+    pub path: String,
+    pub checksum: Option<FileChecksum>,
+}
+
+/// A source file a PDB carries inside it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EmbeddedSource {
+    /// The file's bytes, as they are on the build machine.
+    Plain(Vec<u8>),
+    /// Stored compressed, by a scheme this reader does not undo: the
+    /// entry's compression byte.
+    Compressed { kind: u8 },
+}
+
+/// The code one source line compiled to, in one place: `start..end`, and
+/// the line it is, in file `file` (an index into [`SymbolTables::files`]).
+/// A line may have several rows (a loop header, inlined or reordered code).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LineRow {
+    pub start: Rva,
+    pub end: Rva,
+    pub file: usize,
+    pub line: u32,
+}
+
+/// A source line resolved to code in one file: the line that has the code
+/// (the asked line, or the next line of its function when the asked one has
+/// none), and every row of it, by start.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedLine {
+    pub line: u32,
+    pub ranges: Vec<LineRow>,
+}
+
+/// A function's code, `start..end`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProcedureSpan {
+    pub name: String,
+    pub start: Rva,
+    pub end: Rva,
+}
+
 /// An address named: the function or symbol it lies in, how far into it,
 /// and the source line, when the tables have line information.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -188,6 +269,68 @@ impl SymbolTables {
         }
     }
 
+    /// Every source file the line tables name, each path once; a line
+    /// answer's file index is an index into this list.
+    #[must_use]
+    pub fn files(&self) -> &[SourceFile] {
+        match self {
+            SymbolTables::Pdb(tables) => tables.files(),
+            SymbolTables::Dwarf(tables) => tables.files(),
+        }
+    }
+
+    /// The source of file `file` (an index into [`SymbolTables::files`]),
+    /// when the PDB embeds it; DWARF tables embed none.
+    #[must_use]
+    pub fn embedded_source(&self, file: usize) -> Option<&EmbeddedSource> {
+        match self {
+            SymbolTables::Pdb(tables) => tables.embedded_source(file),
+            SymbolTables::Dwarf(_) => None,
+        }
+    }
+
+    /// The line row whose code holds `rva`.
+    #[must_use]
+    pub fn line_at(&self, rva: Rva) -> Option<LineRow> {
+        match self {
+            SymbolTables::Pdb(tables) => tables.line_at(rva),
+            SymbolTables::Dwarf(tables) => tables.line_at(rva),
+        }
+    }
+
+    /// Line `line` of every file whose path ends with `file`'s components
+    /// (see [`crate::source_path`]), one answer per such file that has code
+    /// for it: the line's rows, or, for a line with no code, the rows of the
+    /// next line of the function the line lies in. A line in no function's
+    /// lines resolves to nothing.
+    #[must_use]
+    pub fn lines_of(&self, file: &str, line: u32) -> Vec<ResolvedLine> {
+        match self {
+            SymbolTables::Pdb(tables) => tables.lines_of(file, line),
+            SymbolTables::Dwarf(tables) => tables.lines_of(file, line),
+        }
+    }
+
+    /// The lines of file `file` (a place in [`SymbolTables::files`]) that
+    /// have code, ascending.
+    #[must_use]
+    pub fn code_lines(&self, file: usize) -> Vec<u32> {
+        match self {
+            SymbolTables::Pdb(tables) => tables.code_lines(file),
+            SymbolTables::Dwarf(tables) => tables.code_lines(file),
+        }
+    }
+
+    /// The function whose code holds `rva`: a PDB procedure or a DWARF
+    /// subprogram, never a public or `.symtab` symbol (they have no end).
+    #[must_use]
+    pub fn procedure_at(&self, rva: Rva) -> Option<ProcedureSpan> {
+        match self {
+            SymbolTables::Pdb(tables) => tables.procedure_at(rva),
+            SymbolTables::Dwarf(tables) => tables.procedure_at(rva),
+        }
+    }
+
     pub fn layout(&self, type_name: &str) -> Result<Option<TypeLayout>, LayoutError> {
         match self {
             SymbolTables::Pdb(tables) => tables.layout(type_name),
@@ -234,6 +377,13 @@ mod tests {
         }
         let tables = SymbolTables::parse(&elf()).unwrap();
         assert!(matches!(tables, SymbolTables::Dwarf(_)));
+        assert_eq!(
+            tables.files().iter().map(|file| file.path.as_str()).collect::<Vec<&str>>(),
+            ["/build/widget/src/main.c"]
+        );
+        assert_eq!(tables.line_at(Rva(TEXT_RVA)).map(|row| row.line), Some(10));
+        assert_eq!(tables.lines_of("main.c", 11).first().map(|resolved| resolved.line), Some(11));
+        assert_eq!(tables.procedure_at(Rva(TEXT_RVA)).map(|span| span.name), Some("widget_init".to_owned()));
         assert_eq!(tables.symbolize(Rva(TEXT_RVA)).map(|hit| hit.name), Some("widget_init".to_owned()));
         assert_eq!(tables.layout("Widget").unwrap().map(|layout| layout.size), Some(16));
     }

@@ -98,8 +98,8 @@ pub enum Value<'a> {
     RangeListIndex(u64),
     LocationListIndex(u64),
     Flag(u8),
-    /// 16 bytes no answer this reader gives uses.
-    Data16,
+    /// 16 bytes (a line header's `DW_LNCT_MD5`).
+    Data16(&'a [u8]),
 }
 
 /// A value and where the next one starts.
@@ -169,8 +169,8 @@ fn decode_direct<'a>(section: Bytes<'a>, at: usize, form: u64, implicit: i64, un
         DW_FORM_DATA4 => sized(section, at, 4, Value::Unsigned),
         DW_FORM_DATA8 => sized(section, at, 8, Value::Unsigned),
         DW_FORM_DATA16 => {
-            section.slice(at, 16).map_err(|source| short("attribute", source))?;
-            Ok(Decoded { value: Value::Data16, next: past(at, 16)? })
+            let bytes = section.slice(at, 16).map_err(|source| short("attribute", source))?;
+            Ok(Decoded { value: Value::Data16(bytes), next: past(at, 16)? })
         }
         DW_FORM_SDATA => {
             let leb = section.sleb128(at).map_err(|source| short("attribute", source))?;

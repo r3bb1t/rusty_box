@@ -20,7 +20,11 @@ use super::{push, DwarfError, Format};
 use crate::elf::{ElfFile, ElfSymbol};
 use crate::identity::{BuildId, TablesIdentity};
 use crate::read::Bytes;
-use crate::tables::{FieldLayout, LayoutError, MemberLocation, ParseError, SourceLine, SymbolHit, TypeLayout};
+use crate::line_index::{CodeSpan, LineIndex};
+use crate::tables::{
+    FieldLayout, LayoutError, LineRow, MemberLocation, ParseError, ProcedureSpan, ResolvedLine, SourceFile, SourceLine,
+    SymbolHit, TypeLayout,
+};
 use crate::units::{BitRange, FieldOffset, Rva};
 
 const DW_TAG_ARRAY_TYPE: u64 = 0x01;
@@ -191,7 +195,7 @@ struct UnitFindings {
     functions: Vec<Span>,
     types: Vec<NamedEntry>,
     lines: Vec<LineRange>,
-    files: Vec<String>,
+    files: Vec<SourceFile>,
 }
 
 /// A member, by entry and name.
@@ -227,8 +231,9 @@ pub struct DwarfTables {
     symbols: Vec<Span>,
     /// Functions, then symbols, sorted by name.
     names: Vec<NamedAddress>,
-    lines: Vec<LineRange>,
-    files: Vec<String>,
+    lines: LineIndex,
+    /// Every unit's files, each path once.
+    files: Vec<SourceFile>,
     main: Sections,
     supplement: Option<Sections>,
     units: Vec<UnitInfo>,
@@ -279,8 +284,41 @@ fn unsigned(value: Option<Value<'_>>) -> Option<u64> {
         | Value::RangeListIndex(_)
         | Value::LocationListIndex(_)
         | Value::Flag(_)
-        | Value::Data16 => None,
+        | Value::Data16(_) => None,
     }
+}
+
+/// Joins a unit's files to `files` by path, so a file several units name
+/// (a header, or a unit's own file named again in its file table) is listed
+/// once, with the first checksum any unit recorded for it. `index` maps each
+/// listed path to its place. Answers where each of the unit's files landed.
+fn join_files(
+    files: &mut Vec<SourceFile>,
+    index: &mut BTreeMap<String, usize>,
+    unit: Vec<SourceFile>,
+) -> Result<Vec<usize>, ParseError> {
+    let mut landed = Vec::new();
+    landed.try_reserve_exact(unit.len()).map_err(|_| ParseError::Allocation { what: "source files" })?;
+    for file in unit {
+        let place = match index.get(&file.path) {
+            Some(&place) => {
+                if let Some(known) = files.get_mut(place) {
+                    if known.checksum.is_none() {
+                        known.checksum = file.checksum;
+                    }
+                }
+                place
+            }
+            None => {
+                let place = files.len();
+                index.insert(file.path.clone(), place);
+                push(files, file, "source files")?;
+                place
+            }
+        };
+        landed.push(place);
+    }
+    Ok(landed)
 }
 
 /// A `DW_AT_data_member_location` expression this reader evaluates:
@@ -332,7 +370,7 @@ impl DwarfTables {
             functions: Vec::new(),
             symbols: Vec::new(),
             names: Vec::new(),
-            lines: Vec::new(),
+            lines: LineIndex::default(),
             files: Vec::new(),
             main: Sections::read(&file)?,
             supplement,
@@ -350,14 +388,24 @@ impl DwarfTables {
         if tables.supplement.is_some() {
             tables.index_units(Origin::Supplement, UnitSection::Info)?;
         }
+        let mut file_index = BTreeMap::new();
+        let mut rows = Vec::new();
         for unit in 0..tables.units.len() {
             match tables.scan_unit(unit) {
-                Ok(findings) => tables.merge(findings)?,
+                Ok(findings) => tables.merge(findings, &mut file_index, &mut rows)?,
                 Err(_) => tables.broken_units = tables.broken_units.saturating_add(1),
             }
         }
         tables.functions.sort_unstable_by_key(|function| function.start);
-        tables.lines.sort_unstable_by_key(|range| range.start);
+        let mut spans = Vec::new();
+        spans
+            .try_reserve_exact(tables.functions.len())
+            .map_err(|_| ParseError::Allocation { what: "function spans" })?;
+        let link_base = tables.link_base;
+        spans.extend(tables.functions.iter().filter_map(|function| {
+            Some(CodeSpan { start: function.start.checked_sub(link_base)?, end: function.end.checked_sub(link_base)? })
+        }));
+        tables.lines = LineIndex::build(rows, &spans)?;
         for function in &tables.functions {
             push(&mut tables.names, NamedAddress { name: function.name.clone(), address: function.start }, "name index")
                 .map_err(ParseError::from)?;
@@ -451,13 +499,26 @@ impl DwarfTables {
         }
     }
 
-    fn merge(&mut self, findings: UnitFindings) -> Result<(), ParseError> {
-        let first_file = self.files.len();
-        for file in findings.files {
-            push(&mut self.files, file, "source files")?;
-        }
+    /// A unit's line ranges become rows, by RVA, with their files
+    /// renumbered into the tables' file list; a range whose file index the
+    /// unit's table does not hold names no file, and one below the link base
+    /// lies outside the image and is left out.
+    fn merge(
+        &mut self,
+        findings: UnitFindings,
+        file_index: &mut BTreeMap<String, usize>,
+        rows: &mut Vec<LineRow>,
+    ) -> Result<(), ParseError> {
+        let renumbered = join_files(&mut self.files, file_index, findings.files)?;
         for range in findings.lines {
-            push(&mut self.lines, LineRange { file: range.file.saturating_add(first_file), ..range }, "line ranges")?;
+            let file = renumbered.get(range.file).copied().unwrap_or(usize::MAX);
+            let Some(start) = range.start.checked_sub(self.link_base) else {
+                continue;
+            };
+            let Some(end) = range.end.checked_sub(self.link_base) else {
+                continue;
+            };
+            push(rows, LineRow { start: Rva(start), end: Rva(end), file, line: range.line }, "line ranges")?;
         }
         for function in findings.functions {
             push(&mut self.functions, function, "functions")?;
@@ -505,7 +566,7 @@ impl DwarfTables {
             | Value::RangeListIndex(_)
             | Value::LocationListIndex(_)
             | Value::Flag(_)
-            | Value::Data16 => None,
+            | Value::Data16(_) => None,
         }
     }
 
@@ -530,7 +591,7 @@ impl DwarfTables {
             | Value::RangeListIndex(_)
             | Value::LocationListIndex(_)
             | Value::Flag(_)
-            | Value::Data16 => None,
+            | Value::Data16(_) => None,
         }
     }
 
@@ -592,7 +653,7 @@ impl DwarfTables {
             | Value::RangeListIndex(_)
             | Value::LocationListIndex(_)
             | Value::Flag(_)
-            | Value::Data16 => None,
+            | Value::Data16(_) => None,
         }
     }
 
@@ -753,16 +814,46 @@ impl DwarfTables {
         };
         let line = self
             .lines
-            .partition_point(|range| range.start <= address)
-            .checked_sub(1)
-            .and_then(|index| self.lines.get(index))
-            .filter(|range| address < range.end)
-            .and_then(|range| Some(SourceLine { file: self.files.get(range.file)?.clone(), line: range.line }));
+            .line_at(rva)
+            .and_then(|row| Some(SourceLine { file: self.files.get(row.file)?.path.clone(), line: row.line }));
         if let Some(function) = containing(&self.functions) {
             return Some(SymbolHit { name: function.name, offset: address.saturating_sub(function.start), line });
         }
         let symbol = containing(&self.symbols)?;
         Some(SymbolHit { name: symbol.name, offset: address.saturating_sub(symbol.start), line })
+    }
+
+    #[must_use]
+    pub fn files(&self) -> &[SourceFile] {
+        &self.files
+    }
+
+    #[must_use]
+    pub fn line_at(&self, rva: Rva) -> Option<LineRow> {
+        self.lines.line_at(rva)
+    }
+
+    #[must_use]
+    pub fn lines_of(&self, file: &str, line: u32) -> Vec<ResolvedLine> {
+        self.lines.lines_of(&self.files, file, line)
+    }
+
+    #[must_use]
+    pub fn code_lines(&self, file: usize) -> Vec<u32> {
+        self.lines.code_lines(file)
+    }
+
+    /// The DWARF subprogram holding `rva`.
+    #[must_use]
+    pub fn procedure_at(&self, rva: Rva) -> Option<ProcedureSpan> {
+        let address = self.link_base.checked_add(rva.0)?;
+        let index = self.functions.partition_point(|span| span.start <= address).checked_sub(1)?;
+        let function = self.functions.get(index).filter(|span| address < span.end)?;
+        Some(ProcedureSpan {
+            name: function.name.clone(),
+            start: Rva(function.start.checked_sub(self.link_base)?),
+            end: Rva(function.end.checked_sub(self.link_base)?),
+        })
     }
 
     /// A DWARF function's address, else a symbol's.
@@ -1066,7 +1157,10 @@ fn root_bases(context: &UnitContext<'_>) -> Result<Bases, DwarfError> {
 mod tests {
     use super::*;
     use crate::units::{BitRange, FieldOffset};
-    use rusty_box_symbols_fixtures::dwarf::{build_dwarf, looping_typedefs, split_forms_dwarf, DwarfFormat, DwarfSpec};
+    use crate::tables::{ChecksumKind, FileChecksum, LineRow, ProcedureSpan, ResolvedLine, SourceFile};
+    use rusty_box_symbols_fixtures::dwarf::{
+        build_dwarf, looping_typedefs, split_forms_dwarf, DwarfFormat, DwarfSpec, MAIN_C_MD5,
+    };
     use rusty_box_symbols_fixtures::elf::{
         build_elf, ElfSpec, Encoding, ExtraSection, Symtab, Text, BUILD_ID, FUNC_LEN, TEXT_LEN, TEXT_RVA,
     };
@@ -1130,6 +1224,75 @@ mod tests {
             assert_eq!(tables.address_of("widget_init"), Some(Rva(TEXT_RVA)), "{named}");
             assert_eq!(tables.address_of("nope"), None);
         }
+    }
+
+    /// DWARF 5 file entries carry the MD5 of the file; earlier versions
+    /// have no field for one. The unit's own file and its file entry name
+    /// the same path, listed once.
+    #[test]
+    fn a_dwarf_5_unit_lists_md5_checksums() {
+        for shape in every_shape() {
+            let tables = DwarfTables::parse(&shape.bytes).unwrap();
+            let named = format!("{:?} DWARF {} {:?}", shape.spec, shape.version, shape.format);
+            let checksum = (shape.version >= 5).then(|| FileChecksum { kind: ChecksumKind::Md5, bytes: MAIN_C_MD5.to_vec() });
+            assert_eq!(tables.files(), [SourceFile { path: MAIN_C.to_owned(), checksum }], "{named}");
+        }
+    }
+
+    /// `widget_init`: line 10 at `.text`, 11 from +8 to the function's end.
+    #[test]
+    fn dwarf_line_at_gives_the_whole_row() {
+        for shape in every_shape() {
+            let tables = DwarfTables::parse(&shape.bytes).unwrap();
+            let named = format!("{:?} DWARF {} {:?}", shape.spec, shape.version, shape.format);
+            let row = |start: u64, end: u64, line: u32| LineRow { start: Rva(start), end: Rva(end), file: 0, line };
+            assert_eq!(tables.line_at(Rva(TEXT_RVA + 9)), Some(row(TEXT_RVA + 8, TEXT_RVA + FUNC_LEN, 11)), "{named}");
+            assert_eq!(tables.line_at(Rva(TEXT_RVA)), Some(row(TEXT_RVA, TEXT_RVA + 8, 10)), "{named}");
+            assert_eq!(tables.line_at(Rva(TEXT_RVA + FUNC_LEN)), None, "{named}");
+        }
+    }
+
+    #[test]
+    fn dwarf_lines_of_finds_the_line() {
+        for shape in every_shape() {
+            let tables = DwarfTables::parse(&shape.bytes).unwrap();
+            let named = format!("{:?} DWARF {} {:?}", shape.spec, shape.version, shape.format);
+            let ten = LineRow { start: Rva(TEXT_RVA), end: Rva(TEXT_RVA + 8), file: 0, line: 10 };
+            assert_eq!(tables.lines_of("src/main.c", 10), [ResolvedLine { line: 10, ranges: vec![ten] }], "{named}");
+            assert_eq!(tables.lines_of(r"widget\SRC\main.c", 10), [ResolvedLine { line: 10, ranges: vec![ten] }]);
+            assert_eq!(tables.lines_of("ain.c", 10), [], "{named}");
+            assert_eq!(tables.lines_of("main.c", 12), [], "past the function");
+        }
+    }
+
+    #[test]
+    fn dwarf_procedure_at_gives_the_span() {
+        for shape in every_shape() {
+            let tables = DwarfTables::parse(&shape.bytes).unwrap();
+            let span = ProcedureSpan { name: "widget_init".into(), start: Rva(TEXT_RVA), end: Rva(TEXT_RVA + FUNC_LEN) };
+            assert_eq!(tables.procedure_at(Rva(TEXT_RVA + 4)), Some(span));
+            // `.symtab`'s helper is a symbol, not a DWARF function.
+            assert_eq!(tables.procedure_at(Rva(TEXT_RVA + FUNC_LEN + 4)), None);
+        }
+    }
+
+    /// A header two units include: listed once, at its first place, and a
+    /// checksum the second unit records fills the one the first lacked.
+    #[test]
+    fn units_naming_one_file_share_its_entry() {
+        let md5 = || Some(FileChecksum { kind: ChecksumKind::Md5, bytes: vec![9; 16] });
+        let file = |path: &str, checksum: Option<FileChecksum>| SourceFile { path: path.to_owned(), checksum };
+        let mut files = Vec::new();
+        let mut index = BTreeMap::new();
+        let first = join_files(&mut files, &mut index, vec![file("/a.c", None), file("/h.h", None)]).unwrap();
+        let second = join_files(&mut files, &mut index, vec![file("/b.c", md5()), file("/h.h", md5())]).unwrap();
+        assert_eq!(first, [0, 1]);
+        assert_eq!(second, [2, 1]);
+        assert_eq!(files, [file("/a.c", None), file("/h.h", md5()), file("/b.c", md5())]);
+        // A third unit's other checksum does not replace the one recorded.
+        let other = Some(FileChecksum { kind: ChecksumKind::Md5, bytes: vec![1; 16] });
+        join_files(&mut files, &mut index, vec![file("/h.h", other)]).unwrap();
+        assert_eq!(files.get(1), Some(&file("/h.h", md5())));
     }
 
     #[test]

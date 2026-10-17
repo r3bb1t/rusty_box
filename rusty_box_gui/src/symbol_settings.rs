@@ -31,6 +31,8 @@ use rusty_box_symbols::service::{Downloads, ServiceConfig, DEFAULT_MAX_DOWNLOAD}
 use rusty_box_symbols::symbol_path::{parse_debuginfod_urls, parse_nt_symbol_path};
 
 use crate::error::LibraryError;
+use crate::source::find::PathMap;
+use crate::symbols::hub::ProjectSources;
 
 /// The settings file's name, in the folder that holds the VM library.
 pub(crate) const SETTINGS_FILE: &str = "settings.toml";
@@ -262,6 +264,22 @@ impl SymbolSettings {
             .map(|project| ProjectFolders {
                 name: project.name.clone(),
                 symbols: project.symbols.clone(),
+            })
+            .collect()
+    }
+
+    /// Each project's source folders and path maps.
+    pub(crate) fn project_sources(&self) -> Vec<ProjectSources> {
+        self.projects
+            .iter()
+            .map(|project| ProjectSources {
+                name: project.name.clone(),
+                folders: project.sources.clone(),
+                maps: project
+                    .map
+                    .iter()
+                    .map(|map| PathMap { from: map.from.to_string_lossy().into_owned(), to: map.to.clone() })
+                    .collect(),
             })
             .collect()
     }
@@ -628,6 +646,17 @@ mod tests {
             resolved.project_folders(),
             [ProjectFolders { name: "mydriver".to_owned(), symbols: vec![PathBuf::from("build")] }]
         );
+        let sources = resolved.project_sources();
+        let [ProjectSources { name, folders, maps }] = sources.as_slice() else {
+            panic!("one project: {sources:?}");
+        };
+        assert_eq!(name, "mydriver");
+        assert_eq!(*folders, [PathBuf::from("src")]);
+        let [PathMap { from, to }] = maps.as_slice() else {
+            panic!("one map: {maps:?}");
+        };
+        assert_eq!(rusty_box_symbols::source_path::components(from).collect::<Vec<&str>>(), ["C:", "agent"]);
+        assert_eq!(*to, PathBuf::from(r"D:\work"));
     }
 
     /// Review focus 5: a file that does not parse says why and is left as

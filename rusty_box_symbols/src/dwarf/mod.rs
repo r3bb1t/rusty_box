@@ -110,7 +110,7 @@ mod tests {
             case(DW_FORM_DATA2, &[1, 2], Value::Unsigned(0x0201), 2),
             case(DW_FORM_DATA4, &[1, 2, 3, 4], Value::Unsigned(0x0403_0201), 4),
             case(DW_FORM_DATA8, &[1, 0, 0, 0, 0, 0, 0, 0], Value::Unsigned(1), 8),
-            case(DW_FORM_DATA16, &[0; 16], Value::Data16, 16),
+            case(DW_FORM_DATA16, &[7; 16], Value::Data16(&[7; 16]), 16),
             case(DW_FORM_SDATA, &[0x7E], Value::Signed(-2), 1),
             case(DW_FORM_UDATA, &[0x80, 0x01], Value::Unsigned(128), 2),
             case(DW_FORM_FLAG, &[1], Value::Flag(1), 1),

@@ -1,13 +1,25 @@
 //! What a run thread does with a machine that is between runs: the shell's
 //! queued work, one task at a time, until the shell lets it run on or ends it.
 
-use rusty_box::cpu::{BreakpointRefusal, CodeBreakpoint, Instrumentation};
-use rusty_box::emulator::{Emulator, RunBudget, SliceEngine, StopReason};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
-use super::control::{BetweenRuns, DebugNote, RunControl, Task};
+use rusty_box::cpu::decoder::Opcode;
+use rusty_box::cpu::{BreakpointRefusal, CodeBreakpoint, CodeSize, CpuDebugView, Instrumentation};
+use rusty_box::emulator::{Emulator, RunBudget, SliceEngine, StopReason};
+use rusty_box_symbols::units::Rva;
+
+use super::control::{BetweenRuns, DebugNote, RunControl, StepCut, Task};
 use super::dump::dump_ram;
-use super::inspect::{read_snapshot, DebugSnapshot};
+use super::guest::{GuestMemory, GuestRead, Root};
+use super::inspect::{read_snapshot, DebugSnapshot, SymModule};
 use super::search::find;
+use super::stepping::{
+    step, CallerFrame, CodeWidth, Decoded, Flow, RowSpan, RunStop, SourcePlace, StepEnd, StepRegisters, StepRequest,
+    Stepped, Stepper, STEP_LIMITS,
+};
+use super::unwind::{caller_of, Frame, FrameFound, FrameRegisters, UnwindModule, Unwinding};
+use crate::symbols::hub::SymbolsView;
 
 /// Whether the engine can stop after one instruction.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -74,33 +86,10 @@ pub(crate) fn perform<T: Instrumentation, E: SliceEngine<T>>(
             control.publish_view(snapshot);
             Ok(live(0))
         }
-        Task::Step => match stepping {
-            Stepping::Instructions => {
-                let before = emu.cpu_snapshot().icount;
-                let outcome = emu.step(RunBudget::Instructions(1))?;
-                emu.present_console_output();
-                emu.update_gui();
-                let snapshot = read_for(emu, control);
-                control.publish(snapshot);
-                let retired = emu.cpu_snapshot().icount.saturating_sub(before);
-                if let StopReason::Breakpoint(hit) = outcome.stop {
-                    control.stepped_onto_breakpoint(hit);
-                }
-                let after = match outcome.stop {
-                    StopReason::GuestPowerOff | StopReason::CpuShutdown => MachineAfter::Over,
-                    StopReason::BudgetExhausted
-                    | StopReason::Halted
-                    | StopReason::StopRequested
-                    | StopReason::EngineFault
-                    | StopReason::Breakpoint(_) => MachineAfter::Live,
-                };
-                Ok(Performed { retired, after })
-            }
-            Stepping::Unavailable => {
-                control.note_refusal(DebugNote::StepNeedsInterpreter);
-                Ok(live(0))
-            }
-        },
+        Task::Step(request) => {
+            let _finished = StepUnderWay { control };
+            perform_step(emu, control, request, stepping)
+        }
         Task::DumpRam(path) => {
             control.record_dump(dump_ram(emu, &path, || control.ending()));
             Ok(live(0))
@@ -119,6 +108,71 @@ pub(crate) fn perform<T: Instrumentation, E: SliceEngine<T>>(
     }
 }
 
+/// A step under way: the control hears it ended however the step leaves.
+struct StepUnderWay<'a> {
+    control: &'a RunControl,
+}
+
+impl Drop for StepUnderWay<'_> {
+    fn drop(&mut self) {
+        self.control.step_finished();
+    }
+}
+
+/// Steps the processor `request` names, and publishes where it stopped.
+fn perform_step<T: Instrumentation, E: SliceEngine<T>>(
+    emu: &mut Emulator<T, E>,
+    control: &RunControl,
+    request: StepRequest,
+    stepping: Stepping,
+) -> Result<Performed, rusty_box::Error> {
+    let live = |retired| Performed {
+        retired,
+        after: MachineAfter::Live,
+    };
+    match stepping {
+        Stepping::Instructions => {}
+        Stepping::Unavailable => {
+            control.note_refusal(DebugNote::StepNeedsInterpreter);
+            return Ok(live(0));
+        }
+    }
+    let before = emu.cpu_snapshot().icount;
+    // A processor past the last (a view of another machine) steps the boot
+    // processor.
+    let cpu = if request.cpu < emu.cpu_count() { request.cpu } else { 0 };
+    // A machine has its boot processor at least.
+    let Some(mut stepper) = MachineStepper::new(emu, control, cpu) else {
+        return Ok(live(0));
+    };
+    let end = step(&mut stepper, &StepRequest { cpu, ..request }, &STEP_LIMITS);
+    if let Some(failure) = stepper.failure.take() {
+        return Err(failure);
+    }
+    emu.present_console_output();
+    emu.update_gui();
+    let snapshot = read_for(emu, control);
+    control.publish(snapshot);
+    let retired = emu.cpu_snapshot().icount.saturating_sub(before);
+    let cut = |cut: StepCut| {
+        control.note_refusal(DebugNote::StepCut(cut));
+        MachineAfter::Live
+    };
+    let after = match end {
+        StepEnd::Done => MachineAfter::Live,
+        StepEnd::UserBreakpoint(hit) => {
+            control.stepped_onto_breakpoint(hit);
+            MachineAfter::Live
+        }
+        StepEnd::MachineOver => MachineAfter::Over,
+        StepEnd::Ceiling(ceiling) => cut(StepCut::Ceiling(ceiling)),
+        StepEnd::Cancelled => cut(StepCut::Cancelled),
+        StepEnd::NoCaller => cut(StepCut::NoCaller),
+        StepEnd::BreakpointsRefused(refusal) => cut(StepCut::BreakpointsRefused(refusal)),
+    };
+    Ok(Performed { retired, after })
+}
+
 /// Gives `emu` the code breakpoints `set`; a set the machine refuses leaves
 /// a note for the page, and the machine keeps the set it had.
 pub(crate) fn apply_breakpoints<T: Instrumentation, E: SliceEngine<T>>(
@@ -127,11 +181,252 @@ pub(crate) fn apply_breakpoints<T: Instrumentation, E: SliceEngine<T>>(
     set: &[CodeBreakpoint],
 ) {
     match emu.set_code_breakpoints(set) {
-        Ok(()) => {}
+        Ok(()) => control.record_applied_breakpoints(set),
         Err(BreakpointRefusal::EngineCannotStop) => control.note_refusal(DebugNote::BreakpointsNeedInterpreter),
         Err(BreakpointRefusal::TooManyLinear | BreakpointRefusal::TooManyPhysical) => {
             control.note_refusal(DebugNote::TooManyBreakpoints);
         }
+    }
+}
+
+/// How many instructions a step's run takes at a time between looks at the
+/// clock and at the owner's cancel.
+const RUN_CHUNK: u64 = 65_536;
+
+/// A paused machine as the step machine drives it: processor `cpu` is the
+/// one stepped; its line rows come from the symbol engine's view and the
+/// last pause's modules; its caller from the unwinder.
+struct MachineStepper<'a, T: Instrumentation, E: SliceEngine<T>> {
+    emu: &'a mut Emulator<T, E>,
+    control: &'a RunControl,
+    cpu: usize,
+    /// The owner's breakpoints the machine holds, which a run's targets
+    /// join.
+    user: Vec<CodeBreakpoint>,
+    symbols: Option<Arc<SymbolsView>>,
+    modules: Vec<SymModule>,
+    started: Instant,
+    /// The stepped processor as last read.
+    last_view: CpuDebugView,
+    /// The machine failed: the step ends, and the run with it.
+    failure: Option<rusty_box::Error>,
+}
+
+impl<'a, T: Instrumentation, E: SliceEngine<T>> MachineStepper<'a, T, E> {
+    /// `None` when the machine has no processor `cpu`.
+    fn new(emu: &'a mut Emulator<T, E>, control: &'a RunControl, cpu: usize) -> Option<Self> {
+        let last_view = emu.debug_cpu(cpu)?.view();
+        let modules = control.snapshot().map(|snapshot| snapshot.symbols.modules.clone()).unwrap_or_default();
+        Some(MachineStepper {
+            emu,
+            control,
+            cpu,
+            user: control.applied_breakpoints(),
+            symbols: control.symbols(),
+            modules,
+            started: Instant::now(),
+            last_view,
+            failure: None,
+        })
+    }
+
+    /// The stepped processor's view.
+    fn view(&mut self) -> CpuDebugView {
+        if let Some(debug) = self.emu.debug_cpu(self.cpu) {
+            self.last_view = debug.view();
+        }
+        self.last_view
+    }
+
+    /// Runs one batch of `budget`; a machine failure ends the step.
+    fn run(&mut self, budget: RunBudget) -> Option<StopReason> {
+        match self.emu.step(budget) {
+            Ok(outcome) => Some(outcome.stop),
+            Err(failure) => {
+                self.failure = Some(failure);
+                None
+            }
+        }
+    }
+
+    /// Runs on, the targets armed, until one of them on the stepped
+    /// processor, a breakpoint of the owner's, the clock or a cancel.
+    fn run_to_targets(&mut self, targets: &[u64], until: Duration) -> RunStop {
+        if targets.contains(&self.registers().rip) {
+            match self.single_step() {
+                Stepped::Retired if targets.contains(&self.registers().rip) => return RunStop::AtTarget,
+                Stepped::Retired => {}
+                Stepped::UserBreakpoint(hit) => return RunStop::UserBreakpoint(hit),
+                Stepped::MachineOver => return RunStop::MachineOver,
+            }
+        }
+        loop {
+            if self.elapsed() >= until {
+                return RunStop::Ceiling;
+            }
+            if self.cancelled() {
+                return RunStop::Cancelled;
+            }
+            match self.run(RunBudget::Instructions(RUN_CHUNK)) {
+                Some(StopReason::Breakpoint(hit)) => {
+                    if hit.cpu == self.cpu && targets.contains(&hit.linear) {
+                        return RunStop::AtTarget;
+                    }
+                    if self.user.contains(&hit.breakpoint) {
+                        return RunStop::UserBreakpoint(hit);
+                    }
+                    // A target another processor reached: it runs on.
+                }
+                Some(StopReason::GuestPowerOff | StopReason::CpuShutdown) | None => return RunStop::MachineOver,
+                Some(StopReason::BudgetExhausted | StopReason::Halted | StopReason::StopRequested | StopReason::EngineFault) => {}
+            }
+        }
+    }
+}
+
+/// What an instruction does to the flow of control, by its opcode.
+fn flow_of(opcode: Opcode) -> Flow {
+    match opcode {
+        Opcode::CallEd
+        | Opcode::CallEw
+        | Opcode::CallJd
+        | Opcode::CallJw
+        | Opcode::CallJq
+        | Opcode::CallEq
+        | Opcode::CallfOp16Ap
+        | Opcode::CallfOp32Ap
+        | Opcode::CallfOp16Ep
+        | Opcode::CallfOp32Ep
+        | Opcode::CallfOp64Ep => Flow::Call,
+        Opcode::Syscall
+        | Opcode::SyscallLegacy
+        | Opcode::Sysenter
+        | Opcode::SysenterLongmode
+        | Opcode::IntIb
+        | Opcode::INT3
+        | Opcode::Into => Flow::Trap,
+        Opcode::RetOp16
+        | Opcode::RetOp16Iw
+        | Opcode::RetOp32
+        | Opcode::RetOp32Iw
+        | Opcode::RetOp64
+        | Opcode::RetOp64Iw
+        | Opcode::RetfOp16
+        | Opcode::RetfOp16Iw
+        | Opcode::RetfOp32
+        | Opcode::RetfOp32Iw
+        | Opcode::RetfOp64
+        | Opcode::RetfOp64Iw
+        | Opcode::IretOp16
+        | Opcode::IretOp32
+        | Opcode::IretOp64 => Flow::Return,
+        _ => Flow::Other,
+    }
+}
+
+/// The longest x86 instruction.
+const MAX_INSTRUCTION_BYTES: usize = 15;
+
+impl<T: Instrumentation, E: SliceEngine<T>> Stepper for MachineStepper<'_, T, E> {
+    fn registers(&mut self) -> StepRegisters {
+        let view = self.view();
+        match view.code_size {
+            CodeSize::Bits64 => StepRegisters { rip: view.registers.rip, rsp: view.registers.rsp, width: CodeWidth::Long64 },
+            // Breakpoints and line rows are by linear address: CS's base plus
+            // EIP.
+            CodeSize::Bits32 | CodeSize::Bits16 => StepRegisters {
+                rip: view.segment_bases.cs.wrapping_add(view.registers.rip) & 0xFFFF_FFFF,
+                rsp: view.segment_bases.ss.wrapping_add(view.registers.rsp) & 0xFFFF_FFFF,
+                width: CodeWidth::Protected32,
+            },
+        }
+    }
+
+    fn single_step(&mut self) -> Stepped {
+        match self.run(RunBudget::Instructions(1)) {
+            Some(StopReason::Breakpoint(hit)) => Stepped::UserBreakpoint(hit),
+            Some(StopReason::GuestPowerOff | StopReason::CpuShutdown) | None => Stepped::MachineOver,
+            Some(StopReason::BudgetExhausted | StopReason::Halted | StopReason::StopRequested | StopReason::EngineFault) => {
+                Stepped::Retired
+            }
+        }
+    }
+
+    fn run_until(&mut self, targets: &[u64], until: Duration) -> RunStop {
+        let mut armed = self.user.clone();
+        armed.extend(targets.iter().map(|target| CodeBreakpoint::Linear(*target)));
+        if let Err(refusal) = self.emu.set_code_breakpoints(&armed) {
+            return RunStop::BreakpointsRefused(refusal);
+        }
+        let stop = self.run_to_targets(targets, until);
+        match self.emu.set_code_breakpoints(&self.user) {
+            Ok(()) => stop,
+            Err(refusal) => RunStop::BreakpointsRefused(refusal),
+        }
+    }
+
+    fn instruction_at(&mut self, rip: u64) -> Option<Decoded> {
+        let size = self.view().code_size;
+        let mut bytes = [0u8; MAX_INSTRUCTION_BYTES];
+        let mut debug = self.emu.debug_cpu(self.cpu)?;
+        // An instruction may end before the page that does not map.
+        let readable = (1..=MAX_INSTRUCTION_BYTES).rev().find(|length| {
+            bytes.get_mut(..*length).is_some_and(|prefix| debug.read_linear(Root::Live, rip, prefix) == GuestRead::Read)
+        })?;
+        let instruction = size.decode(bytes.get(..readable)?).ok()?;
+        Some(Decoded { length: u64::from(instruction.ilen()), flow: flow_of(instruction.get_ia_opcode()) })
+    }
+
+    fn line_row(&mut self, rip: u64) -> Option<RowSpan> {
+        let module = self.modules.iter().find(|module| rip.checked_sub(module.base).is_some_and(|offset| offset < module.size))?;
+        let tables = self.symbols.as_ref()?.tables(module.identity.known()?)?;
+        let row = tables.line_at(Rva(rip.checked_sub(module.base)?))?;
+        Some(RowSpan {
+            start: module.base.wrapping_add(row.start.0),
+            end: module.base.wrapping_add(row.end.0),
+            place: SourcePlace { module: module.base, file: row.file, line: row.line },
+        })
+    }
+
+    fn caller(&mut self) -> Option<CallerFrame> {
+        let at = self.registers();
+        let snapshot = self.view().registers;
+        let mut registers = [None; 16];
+        for (slot, value) in registers.iter_mut().zip([
+            snapshot.rax,
+            snapshot.rcx,
+            snapshot.rdx,
+            snapshot.rbx,
+            snapshot.rsp,
+            snapshot.rbp,
+            snapshot.rsi,
+            snapshot.rdi,
+            snapshot.r8,
+            snapshot.r9,
+            snapshot.r10,
+            snapshot.r11,
+            snapshot.r12,
+            snapshot.r13,
+            snapshot.r14,
+            snapshot.r15,
+        ]) {
+            *slot = Some(value);
+        }
+        let modules: Vec<UnwindModule> =
+            self.modules.iter().map(|module| UnwindModule { base: module.base, size: module.size }).collect();
+        let unwinding = Unwinding { root: Root::Live, modules: &modules, width: at.width };
+        let frame = Frame { registers: FrameRegisters { rip: at.rip, rsp: at.rsp, registers }, how: FrameFound::Registers };
+        let mut debug = self.emu.debug_cpu(self.cpu)?;
+        let caller = caller_of(&mut debug, &unwinding, &frame).ok()?;
+        Some(CallerFrame { rip: caller.registers.rip, rsp: caller.registers.rsp })
+    }
+
+    fn cancelled(&mut self) -> bool {
+        self.control.step_cancelled()
+    }
+
+    fn elapsed(&mut self) -> Duration {
+        self.started.elapsed()
     }
 }
 
@@ -192,10 +487,20 @@ pub(crate) fn serve<T: Instrumentation, E: SliceEngine<T>>(
 #[cfg(all(test, feature = "gui-egui"))]
 mod tests {
     use super::*;
-    use crate::debugger::control::DumpOutcome;
-    use rusty_box::cpu::{CpuSetupMode, X86Reg};
+    use crate::debugger::control::{DumpOutcome, StepCut};
+    use crate::debugger::inspect::{ModuleSpace, SymModule, SymbolIndex};
+    use crate::debugger::module_identity::GuestIdentity;
+    use crate::debugger::stepping::{StepKind, StepRequest, StepUnit};
+    use crate::symbols::hub::{ModuleEntry, ModuleSymbols, SymbolsView};
+    use rusty_box::cpu::{CodeBreakpointHit, CpuSetupMode, X86Reg};
     use rusty_box::emulator::EmulatorConfig;
+    use rusty_box_symbols::identity::{Guid, ModuleIdentity, PdbId, PeImageId};
+    use rusty_box_symbols::service::SymbolSource;
+    use rusty_box_symbols::tables::SymbolTables;
+    use rusty_box_symbols_fixtures::pdb::{build_pdb, FixtureLine, FixtureProcedure, PdbFixture};
     use std::sync::{atomic::AtomicBool, Arc};
+
+    const ONE: StepRequest = StepRequest::instruction_into(0);
 
     /// A long-mode machine at `nop ; nop ; hlt`, paused under a control that
     /// shares its stop flag, with the pause's first snapshot published.
@@ -224,10 +529,10 @@ mod tests {
             control.snapshot().expect("published").cpus[0].registers.rip,
             code
         );
-        control.step();
-        assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::Step));
+        control.step(ONE);
+        assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::Step(ONE)));
         let performed =
-            perform(&mut machine, &control, Task::Step, Stepping::Instructions).expect("step");
+            perform(&mut machine, &control, Task::Step(ONE), Stepping::Instructions).expect("step");
         assert_eq!(performed.retired, 1);
         assert_eq!(performed.after, MachineAfter::Live);
         assert_eq!(
@@ -245,17 +550,17 @@ mod tests {
         let at = CodeBreakpoint::Linear(code + 1);
         perform(&mut machine, &control, Task::ApplyBreakpoints(vec![at]), Stepping::Instructions).expect("apply");
         assert_eq!(control.note(), None, "the interpreter takes breakpoints");
-        control.step();
-        assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::Step));
-        let performed = perform(&mut machine, &control, Task::Step, Stepping::Instructions).expect("step");
+        control.step(ONE);
+        assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::Step(ONE)));
+        let performed = perform(&mut machine, &control, Task::Step(ONE), Stepping::Instructions).expect("step");
         assert_eq!(performed.retired, 1);
         assert_eq!(
             control.stopped_at(),
             Some(CodeBreakpointHit { cpu: 0, breakpoint: at, linear: code + 1 })
         );
-        control.step();
-        assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::Step));
-        let performed = perform(&mut machine, &control, Task::Step, Stepping::Instructions).expect("step");
+        control.step(ONE);
+        assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::Step(ONE)));
+        let performed = perform(&mut machine, &control, Task::Step(ONE), Stepping::Instructions).expect("step");
         assert_eq!(performed.retired, 1, "the breakpoint's own instruction executes");
         assert_eq!(machine.cpu_snapshot().rip, code + 2);
         assert_eq!(control.stopped_at(), None);
@@ -292,10 +597,159 @@ mod tests {
     fn a_step_on_the_hypervisor_is_refused_with_a_note() {
         let (mut machine, control, code) = paused();
         let performed =
-            perform(&mut machine, &control, Task::Step, Stepping::Unavailable).expect("refusal");
+            perform(&mut machine, &control, Task::Step(ONE), Stepping::Unavailable).expect("refusal");
         assert_eq!(performed.retired, 0);
         assert_eq!(control.note(), Some(DebugNote::StepNeedsInterpreter));
         assert_eq!(machine.cpu_snapshot().rip, code, "the guest did not move");
+    }
+
+    /// A long-mode machine paused at `code`: `call f ; nop ; hlt`, with `f:
+    /// nop ; ret` at `code + 0x10` and the stack at `code + 0x1000`.
+    struct Calling {
+        machine: Box<Emulator>,
+        control: RunControl,
+        code: u64,
+    }
+
+    const CALL_LENGTH: u64 = 5;
+    const F: u64 = 0x10;
+    const STACK: u64 = 0x1000;
+
+    fn calling() -> Calling {
+        let (mut machine, control, code) = paused();
+        let program = [0xE8, 0x0B, 0, 0, 0, 0x90, 0xF4, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0xC3];
+        machine.mem_write(code, &program).expect("write");
+        machine.reg_write(X86Reg::Rsp, code + STACK);
+        Calling { machine, control, code }
+    }
+
+    fn request(kind: StepKind, unit: StepUnit) -> StepRequest {
+        StepRequest { kind, unit, cpu: 0 }
+    }
+
+    /// Where the boot processor stands.
+    #[derive(Debug, PartialEq, Eq)]
+    struct Landing {
+        rip: u64,
+        rsp: u64,
+    }
+
+    fn landing(machine: &Emulator) -> Landing {
+        let snapshot = machine.cpu_snapshot();
+        Landing { rip: snapshot.rip, rsp: snapshot.rsp }
+    }
+
+    /// The pause's modules: one, unnamed, holding the code, so the unwinder
+    /// finds no unwind data in it and takes its functions for leaves.
+    fn publish_module_over(calling: &mut Calling, identity: GuestIdentity, base: u64) {
+        let mut snapshot = read_for(&mut calling.machine, &calling.control);
+        snapshot.symbols = SymbolIndex {
+            modules: vec![SymModule { base, size: 0x10_0000, name: "flat.exe".into(), space: ModuleSpace::User, identity }],
+            kernel: None,
+        };
+        calling.control.publish(snapshot);
+    }
+
+    #[test]
+    fn stepping_over_a_call_stops_after_it() {
+        let mut calling = calling();
+        let over = request(StepKind::Over, StepUnit::Instruction);
+        perform(&mut calling.machine, &calling.control, Task::Step(over), Stepping::Instructions).expect("step");
+        assert_eq!(landing(&calling.machine), Landing { rip: calling.code + CALL_LENGTH, rsp: calling.code + STACK });
+        assert_eq!(calling.control.note(), None);
+    }
+
+    #[test]
+    fn stepping_out_returns_to_the_caller() {
+        let mut calling = calling();
+        perform(&mut calling.machine, &calling.control, Task::Step(ONE), Stepping::Instructions).expect("into");
+        assert_eq!(landing(&calling.machine), Landing { rip: calling.code + F, rsp: calling.code + STACK - 8 });
+        let base = calling.code & !0xFFFF;
+        publish_module_over(&mut calling, GuestIdentity::Unnamed, base);
+        let out = request(StepKind::Out, StepUnit::Instruction);
+        perform(&mut calling.machine, &calling.control, Task::Step(out), Stepping::Instructions).expect("out");
+        assert_eq!(landing(&calling.machine), Landing { rip: calling.code + CALL_LENGTH, rsp: calling.code + STACK });
+    }
+
+    #[test]
+    fn running_to_an_address_stops_there() {
+        let mut calling = calling();
+        let to = request(StepKind::RunTo { address: calling.code + 6 }, StepUnit::Line);
+        perform(&mut calling.machine, &calling.control, Task::Step(to), Stepping::Instructions).expect("run to");
+        assert_eq!(landing(&calling.machine), Landing { rip: calling.code + 6, rsp: calling.code + STACK });
+    }
+
+    #[test]
+    fn a_breakpoint_inside_a_call_stepped_over_stops_the_step_there() {
+        let mut calling = calling();
+        let at = CodeBreakpoint::Linear(calling.code + F);
+        perform(&mut calling.machine, &calling.control, Task::ApplyBreakpoints(vec![at]), Stepping::Instructions)
+            .expect("apply");
+        let over = request(StepKind::Over, StepUnit::Instruction);
+        perform(&mut calling.machine, &calling.control, Task::Step(over), Stepping::Instructions).expect("step");
+        assert_eq!(calling.machine.cpu_snapshot().rip, calling.code + F);
+        assert_eq!(
+            calling.control.stopped_at(),
+            Some(CodeBreakpointHit { cpu: 0, breakpoint: at, linear: calling.code + F })
+        );
+    }
+
+    /// The owner stops a step that would never end.
+    #[test]
+    fn a_step_is_stopped_on_the_owners_word() {
+        let mut calling = calling();
+        calling.machine.mem_write(calling.code, &[0xEB, 0xFE]).expect("jmp $");
+        let Calling { mut machine, control, code } = calling;
+        let control = Arc::new(control);
+        let stepping = Arc::clone(&control);
+        let to = request(StepKind::RunTo { address: code + 0x100 }, StepUnit::Instruction);
+        let runner = std::thread::spawn(move || {
+            perform(&mut machine, &stepping, Task::Step(to), Stepping::Instructions).expect("step");
+            machine
+        });
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        control.cancel_step();
+        let machine = runner.join().expect("the step ends");
+        assert_eq!(control.note(), Some(DebugNote::StepCut(StepCut::Cancelled)));
+        assert_eq!(machine.cpu_snapshot().rip, code);
+    }
+
+    /// Line 1 is `call f ; nop`, line 2 the `hlt`: stepping over line 1
+    /// runs the call and the `nop` after it.
+    #[test]
+    fn stepping_over_by_line_runs_to_the_next_line() {
+        let mut calling = calling();
+        let identity = ModuleIdentity::Pe {
+            file_name: "flat.exe".into(),
+            image: PeImageId { time_date_stamp: 1, size_of_image: 0x10_0000 },
+            pdb: Some(PdbId { name: "flat.pdb".into(), guid: Guid::from_le_bytes([5; 16]), age: 1 }),
+        };
+        let mut fixture = PdbFixture::new([5; 16], 1);
+        fixture.procedures.push(FixtureProcedure {
+            name: "main".into(),
+            section: 1,
+            offset: 0x100,
+            len: 0x10,
+            file: r"C:\src\main.c".into(),
+            checksum: None,
+            lines: vec![FixtureLine { offset: 0, line: 1 }, FixtureLine { offset: 6, line: 2 }],
+        });
+        let tables = SymbolTables::parse(&build_pdb(&fixture)).expect("the fixture parses");
+        let mut view = SymbolsView::default();
+        view.modules.insert(
+            identity.clone(),
+            ModuleEntry {
+                state: ModuleSymbols::Loaded { from: SymbolSource::Store { path: "flat.pdb".into() } },
+                tables: Some(Arc::new(tables)),
+            },
+        );
+        calling.control.set_symbols(Arc::new(view));
+        // `.text` is at RVA 0x1000 and `main` 0x100 into it.
+        let base = calling.code - 0x1100;
+        publish_module_over(&mut calling, GuestIdentity::Known(identity), base);
+        let over = request(StepKind::Over, StepUnit::Line);
+        perform(&mut calling.machine, &calling.control, Task::Step(over), Stepping::Instructions).expect("step");
+        assert_eq!(landing(&calling.machine), Landing { rip: calling.code + 6, rsp: calling.code + STACK });
     }
 
     #[test]

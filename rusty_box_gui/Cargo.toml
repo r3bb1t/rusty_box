@@ -60,6 +60,11 @@ rusty_box = { path = "../rusty_box", default-features = false, features = ["std"
 # The debugger's symbols: PDB/DWARF tables, the store, the servers. Native
 # only, as the debugger page is: the HTTP adapter's TLS stack is native-only.
 rusty_box_symbols = { path = "../rusty_box_symbols" }
+# The checksums a build records of each source file (MD5, SHA-1, SHA-256),
+# checked against the file the source view shows.
+md-5 = { version = "0.10.6", default-features = false }
+sha1 = { version = "0.10.6", default-features = false }
+sha2 = { version = "0.10.8", default-features = false }
 
 [target.'cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))'.dependencies]
 rfd = "0.17.2"

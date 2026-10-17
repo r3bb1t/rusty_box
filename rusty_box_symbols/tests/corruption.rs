@@ -294,6 +294,7 @@ fn rich_pdb(container: FixtureContainer, form: RecordForm) -> PdbFixture {
         offset: 0x100,
         len: 0x40,
         file: r"d:\os\ke\bugcheck.c".into(),
+        checksum: None,
         lines: vec![FixtureLine { offset: 0, line: 10 }, FixtureLine { offset: 0x10, line: 12 }],
     });
     fixture.types.push(FixtureUdt {

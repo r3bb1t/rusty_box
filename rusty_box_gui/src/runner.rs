@@ -3048,7 +3048,7 @@ mod tests {
         vm.control.pause();
         let before = vm.paused_snapshot();
 
-        vm.control.step();
+        vm.control.step(crate::debugger::stepping::StepRequest::instruction_into(0));
         wait_until(|| {
             vm.control
                 .snapshot()

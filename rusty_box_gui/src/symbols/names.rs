@@ -164,6 +164,7 @@ pub(crate) mod tests {
             offset: 0x40,
             len: 0x40,
             file: "d:\\os\\src\\ntos\\ke\\amd64\\trap.asm".to_owned(),
+            checksum: None,
             lines: vec![FixtureLine { offset: 0, line: 100 }, FixtureLine { offset: 0x10, line: 104 }],
         });
         pdb.publics.push(FixturePublic { name: "KiSystemCall64".to_owned(), section: 1, offset: 0x40, kind: PublicKind::Function });
