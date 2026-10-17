@@ -10387,6 +10387,71 @@ mod tests {
             assert!(window.query_by_label(crate::shell::symbols_page::SYMBOLS_HEADING).is_some());
         }
 
+        /// The SSDT tab lists the kernel's services by name with a hook in
+        /// red and how the table was found, and switches to the GUI's table,
+        /// still saying the kernel's has hooks.
+        #[test]
+        fn the_ssdt_tab_lists_both_tables_by_name() {
+            use crate::debugger::windows::{
+                GuiServices, InlineJump, PointerSite, ServiceTableRead, SsdtListing, SsdtService, SystemListing,
+                TablePlace, TableSource,
+            };
+            use crate::shell::debugger_page::DebuggerTab;
+            let service = |index: u32, name: &str, routine: u64, module: &str| SsdtService {
+                index,
+                routine,
+                site: PointerSite::OwnImage,
+                module_name: Some(module.to_owned()),
+                stub_name: Some(name.to_owned()),
+                inline: None,
+            };
+            let mut hooked = service(1, "NtCreateFile", 0xFFFF_F800_0100_5120, "ntoskrnl.exe");
+            hooked.inline = Some(InlineJump { target: 0xFFFF_F800_0300_0200, module_name: Some("disk.sys".to_owned()) });
+            let listing = SsdtListing {
+                kernel: ServiceTableRead {
+                    source: TableSource::Code,
+                    base: 0xFFFF_F800_0100_6000,
+                    place: TablePlace::InOwner,
+                    services: vec![service(0, "NtClose", 0xFFFF_F800_0100_5100, "ntoskrnl.exe"), hooked],
+                    any_hooked: true,
+                },
+                gui: GuiServices::Listed(ServiceTableRead {
+                    source: TableSource::Pdb,
+                    base: 0xFFFF_F960_0000_2000,
+                    place: TablePlace::InOwner,
+                    services: vec![service(0, "NtUserGetMessage", 0xFFFF_F960_0000_1000, "win32k.sys")],
+                    any_hooked: false,
+                }),
+            };
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_vm(&mut app);
+            let mut snapshot = paused_snapshot();
+            snapshot.system = SystemListing::Ssdt(listing);
+            control.publish(snapshot);
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            let vm = window.state().app.shown_vm();
+            window.state_mut().app.sessions.open(&vm).debugger_mut().tab = DebuggerTab::Ssdt;
+            window.run();
+            let shown = |window: &Harness<'_, Window>, needle: &str| {
+                window
+                    .query_all_by(|node| node.label().or(node.value()).is_some_and(|text| text.contains(needle)))
+                    .next()
+                    .is_some()
+            };
+            assert!(shown(&window, "NtClose"), "the kernel's services are named");
+            assert!(shown(&window, "inline hook, jumps to disk.sys"), "an inline hook is said");
+            assert!(shown(&window, "found by: code"));
+            assert!(shown(&window, "hooks present"));
+            window.get_by_label("GUI").click();
+            window.run();
+            assert!(shown(&window, "NtUserGetMessage"), "the GUI's services are named");
+            assert!(shown(&window, "found by: PDB"));
+            assert!(shown(&window, "the kernel table has hooks"));
+            assert!(!shown(&window, "NtClose"), "the kernel's list is not shown with the GUI's");
+        }
+
         #[test]
         fn the_debugger_page_of_a_vm_that_is_off_says_how_to_start() {
             let (app, _command_rx, _scratch) = native_test_app();
@@ -10774,6 +10839,27 @@ mod tests {
                 window.run();
                 open_processes(&mut window);
                 assert!(window.query_by_label(layouts.label()).is_some(), "{layouts:?} is said");
+            }
+        }
+
+        /// A kernel listing read through the kernel's page tables (a
+        /// KVA-shadow user-mode pause) says so; one read through the
+        /// processor's own says nothing of tables.
+        #[test]
+        fn a_kernel_listing_says_when_it_was_read_through_the_kernels_tables() {
+            use crate::debugger::windows::ReadThrough;
+            let kernel = ReadThrough::KernelTables { cr3: 0x3_0002 };
+            let said = kernel.label().expect("the kernel's tables are said");
+            for (through, shown) in [ReadThrough::ProcessorTables, kernel].into_iter().zip([false, true]) {
+                let (mut app, _command_rx, _scratch) = native_test_app();
+                let control = paused_vm(&mut app);
+                let mut snapshot = process_listing_snapshot();
+                snapshot.through = through;
+                control.publish(snapshot);
+                let mut window = tall_window(app);
+                window.run();
+                open_processes(&mut window);
+                assert_eq!(window.query_by_label(said).is_some(), shown, "{through:?}");
             }
         }
 

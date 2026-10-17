@@ -681,6 +681,7 @@ mod tests {
             viewing: crate::debugger::inspect::Viewing::Live,
             layout: None,
             layouts: None,
+            through: crate::debugger::windows::ReadThrough::ProcessorTables,
         });
         control.finish_run();
         control.begin_run(RunStart::PowerOn);
@@ -745,6 +746,7 @@ mod tests {
             viewing: crate::debugger::inspect::Viewing::Live,
             layout: None,
             layouts: None,
+            through: crate::debugger::windows::ReadThrough::ProcessorTables,
         }
     }
 

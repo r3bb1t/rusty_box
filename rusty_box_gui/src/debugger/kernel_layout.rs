@@ -21,6 +21,7 @@ pub(crate) struct KernelGlobals {
     pub(crate) loaded_module_list: Option<Rva>,
     pub(crate) root_directory_object: Option<Rva>,
     pub(crate) service_descriptor_table: Option<Rva>,
+    pub(crate) service_descriptor_table_shadow: Option<Rva>,
 }
 
 /// `_EPROCESS` members, from the start of the `_EPROCESS`.
@@ -131,6 +132,7 @@ impl KernelLayout {
             loaded_module_list: tables.address_of("PsLoadedModuleList"),
             root_directory_object: tables.address_of("ObpRootDirectoryObject"),
             service_descriptor_table: tables.address_of("KeServiceDescriptorTable"),
+            service_descriptor_table_shadow: tables.address_of("KeServiceDescriptorTableShadow"),
         };
         const EPROCESS: &str = "_EPROCESS";
         let process = ProcessFields {
@@ -290,6 +292,7 @@ pub(crate) mod fixture {
             data("PsLoadedModuleList", 0x20),
             data("ObpRootDirectoryObject", 0x30),
             data("KeServiceDescriptorTable", 0x40),
+            data("KeServiceDescriptorTableShadow", 0x80),
         ];
         pdb.types = vec![
             udt("_LIST_ENTRY", Struct, 0x10, vec![
@@ -392,6 +395,7 @@ mod tests {
         let layout = layout_of(&fixture::windows10_kernel(GUID, 1));
         assert_eq!(layout.globals.initial_system_process, Some(Rva(0x3010)));
         assert_eq!(layout.globals.service_descriptor_table, Some(Rva(0x3040)));
+        assert_eq!(layout.globals.service_descriptor_table_shadow, Some(Rva(0x3080)));
         let offset = |value| Some(FieldOffset(value));
         assert_eq!(
             layout.process,

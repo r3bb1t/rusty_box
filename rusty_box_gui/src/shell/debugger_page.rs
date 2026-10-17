@@ -39,8 +39,8 @@ use crate::debugger::pe::{
 use crate::debugger::windows::{
     DeviceRow, DispatchEntry, DriverDetail, DriverListing, DriverShown, KernelLayouts,
     KernelListing, KernelMiss, ModuleBits, ModuleDetail, ModuleRead, PickedDetail, PickedDriver, PickedModule, PointerSite,
-    ProcessDetail, ProcessListing, SectionsRead, SsdtListing, SsdtService, SystemListing,
-    SystemView, TreeRow, WinDriver, WinModule, WinProcess,
+    GuiMiss, GuiServices, ProcessDetail, ProcessListing, SectionsRead, ServiceTableRead, SsdtListing, SsdtService,
+    SystemListing, SystemView, TablePlace, TreeRow, WinDriver, WinModule, WinProcess,
 };
 use crate::shell::listing::{
     card_title, char_width, chip, empty_state, header_row, lead_arrow, lead_chevron, lead_dot,
@@ -278,6 +278,8 @@ pub(crate) struct DebuggerPane {
     pub(crate) driver_detail: DriverDetail,
     /// What a listed driver's name must contain.
     pub(crate) driver_filter: String,
+    /// Which system-service table the SSDT view lists.
+    pub(crate) ssdt_table: SsdtTable,
     /// The snapshot whose modules were last asked of the symbol engine.
     pub(crate) symbols_asked: Option<std::sync::Weak<DebugSnapshot>>,
     /// The kernel layouts last made from the kernel's tables.
@@ -322,6 +324,7 @@ impl Default for DebuggerPane {
             selected_driver: None,
             driver_detail: DriverDetail::Dispatch,
             driver_filter: String::new(),
+            ssdt_table: SsdtTable::Kernel,
             symbols_asked: None,
             kernel_layout: None,
             symbol_filter: SymbolFilter::All,
@@ -1950,22 +1953,22 @@ fn system_page(
             empty_state(ui, no_windows_kernel_title(*miss), &no_windows_kernel(*miss));
         }
         (SystemListing::Processes(listing), DebuggerTab::Processes) => {
-            layouts_line(ui, snapshot.layouts);
+            layouts_line(ui, snapshot);
             let current_user_module = current_module_base(snapshot, ModuleSpace::User);
             processes_page(ui, fit, listing, current_user_module, states, pane, action);
         }
         (SystemListing::KernelModules(listing), DebuggerTab::KernelModules) => {
-            layouts_line(ui, snapshot.layouts);
+            layouts_line(ui, snapshot);
             let current = current_module_base(snapshot, ModuleSpace::Kernel);
             kernel_page(ui, fit, listing, current, states, pane, action);
         }
         (SystemListing::Drivers(listing), DebuggerTab::Drivers) => {
-            layouts_line(ui, snapshot.layouts);
+            layouts_line(ui, snapshot);
             drivers_page(ui, fit, listing, pane, action);
         }
         (SystemListing::Ssdt(listing), DebuggerTab::Ssdt) => {
-            layouts_line(ui, snapshot.layouts);
-            ssdt_page(ui, fit, listing, pane, action);
+            layouts_line(ui, snapshot);
+            ssdt_page(ui, fit, listing, Namer::new(states.index, states.view), pane, action);
         }
         // A list for another tab, or none yet: the run thread is reading.
         (
@@ -2007,6 +2010,41 @@ mod name_tests {
         assert_eq!(name_color(&matched, ACCENT_CYAN), ACCENT_CYAN);
     }
 
+    /// A service is named by its stub, else by its routine's own symbol; a
+    /// routine whose symbol is not the stub's service reads rerouted, in
+    /// amber; a first jump out of the owner reads an inline hook, in red.
+    #[test]
+    fn a_service_is_named_by_its_stub_and_flagged_when_its_symbol_differs() {
+        use crate::debugger::windows::InlineJump;
+        let view = hub_with_kernel_code(crate::symbols::names::tests::loaded()).view();
+        let symbols = kernel_symbols();
+        let names = Namer::new(&symbols, &view);
+        let service = |stub: Option<&str>| SsdtService {
+            index: 7,
+            routine: KERNEL_BASE + 0x1040,
+            site: PointerSite::OwnImage,
+            module_name: Some("ntoskrnl.exe".to_owned()),
+            stub_name: stub.map(str::to_owned),
+            inline: None,
+        };
+        let plain = service_view(&service(Some("KiSystemCall64")), names);
+        assert_eq!(plain.name, "KiSystemCall64");
+        assert_eq!(plain.target, "ntoskrnl.exe");
+        assert_eq!(plain.color, TEXT_PRIMARY);
+        let unnamed = service_view(&service(None), names);
+        assert_eq!(unnamed.name, "KiSystemCall64");
+        assert_eq!(unnamed.color, TEXT_PRIMARY);
+        let rerouted = service_view(&service(Some("NtClose")), names);
+        assert_eq!(rerouted.name, "NtClose");
+        assert_eq!(rerouted.target, "ntoskrnl.exe  · rerouted to KiSystemCall64");
+        assert_eq!(rerouted.color, ACCENT_AMBER);
+        let mut hooked = service(Some("NtClose"));
+        hooked.inline = Some(InlineJump { target: 0xFFFF_F800_0300_0200, module_name: Some("disk.sys".to_owned()) });
+        let inline = service_view(&hooked, names);
+        assert_eq!(inline.color, ACCENT_RED);
+        assert!(inline.target.contains("inline hook, jumps to disk.sys"), "{}", inline.target);
+    }
+
     /// Go takes `module!name` as well as an address, and says why a name
     /// does not resolve.
     #[test]
@@ -2021,17 +2059,20 @@ mod name_tests {
     }
 }
 
-/// The line over a kernel listing that says whose layouts read it; a kernel
-/// PDB that disagrees with memory reads amber.
-fn layouts_line(ui: &mut egui::Ui, layouts: Option<KernelLayouts>) {
-    let Some(layouts) = layouts else {
-        return;
-    };
-    let color = match layouts {
-        KernelLayouts::Pdb | KernelLayouts::Discovered => TEXT_MUTED,
-        KernelLayouts::PdbDisagrees | KernelLayouts::ForcedPdb => ACCENT_AMBER,
-    };
-    ui.label(RichText::new(layouts.label()).small().color(color));
+/// The lines over a kernel listing that say whose layouts read it — a kernel
+/// PDB that disagrees with memory reads amber — and whose page tables, when
+/// not the processor's own.
+fn layouts_line(ui: &mut egui::Ui, snapshot: &DebugSnapshot) {
+    if let Some(layouts) = snapshot.layouts {
+        let color = match layouts {
+            KernelLayouts::Pdb | KernelLayouts::Discovered => TEXT_MUTED,
+            KernelLayouts::PdbDisagrees | KernelLayouts::ForcedPdb => ACCENT_AMBER,
+        };
+        ui.label(RichText::new(layouts.label()).small().color(color));
+    }
+    if let Some(through) = snapshot.through.label() {
+        ui.label(RichText::new(through).small().color(TEXT_MUTED));
+    }
 }
 
 /// The accessible name of a list's filter field.
@@ -3322,41 +3363,111 @@ fn drivers_page(
 
 // ───────────────────────────── SSDT tab ──────────────────────────────
 
-const SSDT_INDEX_CHARS: usize = 6;
+/// Which system-service table the SSDT tab lists.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SsdtTable {
+    /// `KiServiceTable`, the kernel's own.
+    Kernel,
+    /// `W32pServiceTable`, in `win32k`.
+    Gui,
+}
 
-fn ssdt_columns() -> [Cell; 3] {
+impl SsdtTable {
+    /// The title over the table's list.
+    const fn title(self) -> &'static str {
+        match self {
+            Self::Kernel => "Kernel services",
+            Self::Gui => "GUI services",
+        }
+    }
+}
+
+const SSDT_INDEX_CHARS: usize = 6;
+/// The Service column's width: most `NtUser*`/`NtGdi*` names fit.
+const SSDT_NAME_CHARS: usize = 30;
+
+fn ssdt_columns() -> [Cell; 4] {
     [
         Cell::right("#", TEXT_MUTED, SSDT_INDEX_CHARS),
+        Cell::left("Service", TEXT_MUTED, SSDT_NAME_CHARS),
         Cell::left("Routine", TEXT_MUTED, 16),
         Cell::fill("Target", TEXT_MUTED),
     ]
 }
 
-/// Whether a service's module name holds `filter`, or its index reads `filter`.
-fn ssdt_matches(service: &SsdtService, filter: &str) -> bool {
+/// How the SSDT tab shows one service.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ServiceView {
+    /// The stub's name, else the routine's own symbol when the routine begins
+    /// a function in its owner; empty when neither is known.
+    name: String,
+    /// Where the service leads, and what is wrong with that.
+    target: String,
+    color: egui::Color32,
+}
+
+/// One listed service and how it shows.
+struct ShownService<'a> {
+    service: &'a SsdtService,
+    view: ServiceView,
+}
+
+/// How `service` shows, its routine named by `names`. In red: an entry that
+/// leads out of the table's owner, or a routine whose first instruction
+/// jumps out of it. In amber: an entry whose routine's own symbol is not
+/// the service its stub names — rerouted inside the owner, or a routine the
+/// linker folded with another of the same code.
+fn service_view(service: &SsdtService, names: Namer<'_>) -> ServiceView {
+    let symbol = match service.site {
+        PointerSite::OwnImage => names
+            .name(service.routine)
+            .filter(NamedAddress::starts_function)
+            .and_then(|named| named.function)
+            .map(|function| function.name),
+        PointerSite::InModule { .. } | PointerSite::KernelDefault | PointerSite::NoModule => None,
+    };
+    let name = service.stub_name.clone().or_else(|| symbol.clone()).unwrap_or_default();
+    let module = service.module_name.as_deref().unwrap_or("kernel");
+    let rerouted = symbol
+        .as_deref()
+        .filter(|symbol| service.stub_name.as_deref().is_some_and(|stub| stub != *symbol));
+    let shown = |target: String, color: egui::Color32| ServiceView {
+        name: name.clone(),
+        target,
+        color,
+    };
+    if let Some(jump) = &service.inline {
+        let landing = match &jump.module_name {
+            Some(landing) => format!("{landing} {:016X}", jump.target),
+            None => format!("{:016X}, in no module", jump.target),
+        };
+        return shown(format!("{module}  · inline hook, jumps to {landing}"), ACCENT_RED);
+    }
+    match service.site {
+        PointerSite::OwnImage => match rerouted {
+            Some(symbol) => shown(format!("{module}  · rerouted to {symbol}"), ACCENT_AMBER),
+            None => shown(module.to_owned(), TEXT_PRIMARY),
+        },
+        PointerSite::InModule { off, .. } => {
+            let landing = service.module_name.as_deref().unwrap_or("module");
+            shown(format!("{landing}+0x{off:X}  · hooked"), ACCENT_RED)
+        }
+        PointerSite::KernelDefault => shown(module.to_owned(), TEXT_PRIMARY),
+        PointerSite::NoModule => shown("no module  · hooked".to_owned(), ACCENT_RED),
+    }
+}
+
+/// Whether a service's name or module name holds `filter`, or its index
+/// reads `filter`.
+fn ssdt_matches(shown: &ShownService<'_>, filter: &str) -> bool {
     filter.is_empty()
-        || service
+        || holds_ignoring_case(&shown.view.name, filter)
+        || shown
+            .service
             .module_name
             .as_deref()
             .is_some_and(|name| holds_ignoring_case(name, filter))
-        || service.index.to_string().contains(filter)
-}
-
-/// The target text and colour a service shows: a routine inside the kernel is
-/// normal; one in another module or in none is a hook, shown red.
-fn ssdt_target(service: &SsdtService) -> (String, egui::Color32) {
-    match service.site {
-        PointerSite::OwnImage => (
-            service.module_name.clone().unwrap_or_else(|| "kernel".to_owned()),
-            TEXT_PRIMARY,
-        ),
-        PointerSite::InModule { off, .. } => {
-            let name = service.module_name.as_deref().unwrap_or("module");
-            (format!("{name}+0x{off:X}  · hooked"), ACCENT_RED)
-        }
-        PointerSite::KernelDefault => ("kernel".to_owned(), TEXT_PRIMARY),
-        PointerSite::NoModule => ("no module  · hooked".to_owned(), ACCENT_RED),
-    }
+        || shown.service.index.to_string().contains(filter)
 }
 
 /// Where a click or Enter on a service shows its routine: in memory when it
@@ -3368,11 +3479,11 @@ fn ssdt_open(service: &SsdtService) -> Option<u64> {
     }
 }
 
-/// One row per service: its index, routine address, and where it leads — a
-/// hooked service (outside the kernel image) in red. The keys stand on `key`.
+/// One row per service: its index, name, routine address, and where it
+/// leads, coloured as [`service_view`] says. The keys stand on `key`.
 fn ssdt_rows(
     ui: &mut egui::Ui,
-    services: &[&SsdtService],
+    services: &[ShownService<'_>],
     key: Option<KeyRow>,
     action: &mut Option<DebuggerAction>,
 ) {
@@ -3381,16 +3492,17 @@ fn ssdt_rows(
         ui.label(RichText::new("No service matches the filter.").color(TEXT_MUTED));
         return;
     }
-    for (n, service) in services.iter().enumerate() {
+    for (n, shown) in services.iter().enumerate() {
         if culled(ui, key, n) {
             skip_row(ui);
             continue;
         }
-        let (target, color) = ssdt_target(service);
+        let service = shown.service;
         let cells = [
             Cell::right(service.index.to_string(), TEXT_MUTED, SSDT_INDEX_CHARS),
+            Cell::left(shown.view.name.clone(), TEXT_PRIMARY, SSDT_NAME_CHARS),
             Cell::left(format!("{:016X}", service.routine), TEXT_MUTED, 16),
-            Cell::fill(target, color),
+            Cell::fill(shown.view.target.clone(), shown.view.color),
         ];
         let response = list_row(ui, 0.0, &cells, keyed_tone(key, n), RowSense::Pick { selected: false });
         follow_key(&response, key, n);
@@ -3398,21 +3510,55 @@ fn ssdt_rows(
     }
 }
 
-/// The SSDT tab: one flat, filterable list of the kernel's system services,
-/// each classified against the loaded modules so a hooked entry stands out.
+/// Under the SSDT title: how the shown table's descriptor was found, and a
+/// table that lies outside its owner (swapped whole), in red.
+fn ssdt_table_lines(ui: &mut egui::Ui, table: &ServiceTableRead) {
+    ui.label(RichText::new(table.source.label()).small().color(TEXT_MUTED));
+    match table.place {
+        TablePlace::InOwner => {}
+        TablePlace::Outside => {
+            ui.label(
+                RichText::new(format!(
+                    "The table itself lies outside its owner, at {:016X}: it was swapped whole.",
+                    table.base
+                ))
+                .color(ACCENT_RED),
+            );
+        }
+    }
+}
+
+/// The SSDT tab: the kernel's system services or the GUI's, one filterable
+/// list, each service named by its stub and classified against the loaded
+/// modules so a hooked entry stands out.
 fn ssdt_page(
     ui: &mut egui::Ui,
     fit: Fit,
     listing: &SsdtListing,
+    names: Namer<'_>,
     pane: &mut DebuggerPane,
     action: &mut Option<DebuggerAction>,
 ) {
+    let picked: Result<&ServiceTableRead, GuiMiss> = match pane.ssdt_table {
+        SsdtTable::Kernel => Ok(&listing.kernel),
+        SsdtTable::Gui => match &listing.gui {
+            GuiServices::Listed(table) => Ok(table),
+            GuiServices::Missing(miss) => Err(*miss),
+        },
+    };
     let filter = pane.list_filter.to_lowercase();
-    let shown: Vec<&SsdtService> = listing
-        .services
-        .iter()
-        .filter(|service| ssdt_matches(service, &filter))
-        .collect();
+    let shown: Vec<ShownService<'_>> = match picked {
+        Ok(table) => table
+            .services
+            .iter()
+            .map(|service| ShownService {
+                service,
+                view: service_view(service, names),
+            })
+            .filter(|shown| ssdt_matches(shown, &filter))
+            .collect(),
+        Err(_) => Vec::new(),
+    };
     // One list: the keys always move in it, opening a service's routine.
     let keyed_row = list_keys(ui).and_then(|keys| {
         let walked = walk(keys, pane.detail_cursor, shown.len());
@@ -3420,14 +3566,29 @@ fn ssdt_page(
             pane.detail_cursor = Some(to);
         }
         if let Some(opened) = walked.open {
-            if let Some(routine) = shown.get(opened).and_then(|service| ssdt_open(service)) {
+            if let Some(routine) = shown.get(opened).and_then(|shown| ssdt_open(shown.service)) {
                 *action = Some(DebuggerAction::OpenModule(routine));
             }
         }
         walked.key
     });
-    let hooked = if listing.any_hooked { "  · hooks present" } else { "" };
-    let title = Title::counted("System services", listing.services.len()).inlined();
+    let gui_hooked = match &listing.gui {
+        GuiServices::Listed(table) => table.any_hooked,
+        GuiServices::Missing(_) => false,
+    };
+    // Hooks in the table not shown are said too, so none hides behind the switch.
+    let hooks = match pane.ssdt_table {
+        SsdtTable::Kernel if listing.kernel.any_hooked => Some("hooks present"),
+        SsdtTable::Gui if gui_hooked => Some("hooks present"),
+        SsdtTable::Kernel if gui_hooked => Some("the GUI table has hooks"),
+        SsdtTable::Gui if listing.kernel.any_hooked => Some("the kernel table has hooks"),
+        SsdtTable::Kernel | SsdtTable::Gui => None,
+    };
+    let count = match picked {
+        Ok(table) => table.services.len(),
+        Err(_) => 0,
+    };
+    let title = Title::counted(pane.ssdt_table.title(), count).inlined();
     let mut card = |ui: &mut egui::Ui, room: Room, action: &mut Option<DebuggerAction>| {
         keyed_pane_card(
             ui,
@@ -3437,15 +3598,29 @@ fn ssdt_page(
             |ui| {
                 ui.horizontal_wrapped(|ui| {
                     title_label(ui, title.text, title.count);
-                    if !hooked.is_empty() {
-                        ui.label(RichText::new(hooked.trim()).color(ACCENT_RED));
+                    let tables = [
+                        Segment { value: SsdtTable::Kernel, label: "Kernel" },
+                        Segment { value: SsdtTable::Gui, label: "GUI" },
+                    ];
+                    if segmented(ui, &mut pane.ssdt_table, &tables) {
+                        pane.detail_cursor = None;
+                    }
+                    if let Some(hooks) = hooks {
+                        ui.label(RichText::new(hooks).color(ACCENT_RED));
                     }
                     filter_field(ui, &mut pane.list_filter);
                 });
-                header_row(ui, 0.0, &ssdt_columns());
+                if let Ok(table) = picked {
+                    ssdt_table_lines(ui, table);
+                    header_row(ui, 0.0, &ssdt_columns());
+                }
             },
-            |ui| {
-                ssdt_rows(ui, &shown, keyed_row, action);
+            |ui| match picked {
+                Ok(_) => ssdt_rows(ui, &shown, keyed_row, action),
+                Err(miss) => {
+                    ui.add_space(SPACE_ITEM);
+                    ui.label(RichText::new(miss.label()).color(TEXT_MUTED));
+                }
             },
         );
     };

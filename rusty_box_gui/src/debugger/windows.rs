@@ -32,10 +32,10 @@
 //! [`WindowsDiscovery`] for the run and checked where it is used, so a pause
 //! pays for the lists it reads and not for finding the structures again.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
-use rusty_box::cpu::{CpuDebugView, LinearRange, MappingWalk, WalkStep};
+use rusty_box::cpu::{CpuDebugView, LinearRange, MappingWalk, PageMapping, WalkStep};
 use rusty_box_symbols::units::FieldOffset;
 
 use super::drivers;
@@ -45,7 +45,7 @@ use super::module_identity::{read_module_identity, GuestIdentity};
 use super::inspect::{ModuleSpace, SymModule, SymbolIndex};
 use super::ssdt;
 use super::memory_map::{self, MemoryMap, ModuleLayout};
-use super::pe::{self, ExportRead, ImportRead, HEADER_BYTES};
+use super::pe::{self, ExportRead, ExportTarget, ImportRead, HEADER_BYTES};
 use super::threads::{
     decode_trap_frame, frame_is_users, walk_thread_list, SavedRegisters, WinThread, MAX_THREADS,
     TRAP_FRAME_BYTES,
@@ -193,11 +193,85 @@ pub(crate) enum SystemListing {
     Ssdt(SsdtListing),
 }
 
-/// The kernel's system-service dispatch table, one row per service.
+/// The kernel's two system-service tables: its own (`KiServiceTable`) and
+/// the GUI's (`W32pServiceTable`, in `win32k`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct SsdtListing {
+    pub(crate) kernel: ServiceTableRead,
+    pub(crate) gui: GuiServices,
+}
+
+/// The GUI services, or why they were not read.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum GuiServices {
+    Listed(ServiceTableRead),
+    Missing(GuiMiss),
+}
+
+/// Why the GUI table was not read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GuiMiss {
+    /// No `KeServiceDescriptorTableShadow` was found.
+    NoShadowDescriptor,
+    /// No `win32k*.sys` is loaded.
+    NoWin32k,
+    /// No process but System maps the table: its session space is in none
+    /// read.
+    NoSessionProcess,
+}
+
+impl GuiMiss {
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::NoShadowDescriptor => "The GUI services were not read: KeServiceDescriptorTableShadow was not found.",
+            Self::NoWin32k => "The GUI services were not read: no win32k module is loaded.",
+            Self::NoSessionProcess => {
+                "The GUI services were not read: no process maps them (they live in a session's address space)."
+            }
+        }
+    }
+}
+
+/// How a table's descriptor was found.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TableSource {
+    /// The kernel PDB's symbol.
+    Pdb,
+    /// The kernel's export (the first x64 kernel only).
+    Export,
+    /// The `lea` that loads it in `KiSystemServiceRepeat`.
+    Code,
+}
+
+impl TableSource {
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Pdb => "found by: PDB",
+            Self::Export => "found by: export",
+            Self::Code => "found by: code",
+        }
+    }
+}
+
+/// Where a service table itself lies.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TablePlace {
+    /// In the image that owns it.
+    InOwner,
+    /// Outside it: the whole table was swapped.
+    Outside,
+}
+
+/// One system-service table, one row per service.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ServiceTableRead {
+    pub(crate) source: TableSource,
+    /// The table's address.
+    pub(crate) base: u64,
+    pub(crate) place: TablePlace,
     pub(crate) services: Vec<SsdtService>,
-    /// Whether any service points outside the kernel image — a hook.
+    /// Whether any entry leads outside the table's owner, or any routine's
+    /// first instruction jumps outside it — a hook.
     pub(crate) any_hooked: bool,
 }
 
@@ -208,6 +282,20 @@ pub(crate) struct SsdtService {
     pub(crate) routine: u64,
     pub(crate) site: PointerSite,
     /// The name of the module the routine lies in, when it lies in one.
+    pub(crate) module_name: Option<String>,
+    /// The name of the system-call stub that calls this service (`ntdll`'s
+    /// or `win32u`'s), when one does.
+    pub(crate) stub_name: Option<String>,
+    /// Where the routine's first instruction jumps, when it jumps outside the
+    /// table's owner: an inline hook.
+    pub(crate) inline: Option<InlineJump>,
+}
+
+/// An inline hook: the routine's first instruction leaves its owner.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct InlineJump {
+    pub(crate) target: u64,
+    /// The module the jump lands in, when it lands in one.
     pub(crate) module_name: Option<String>,
 }
 
@@ -348,8 +436,9 @@ impl KernelMiss {
             Self::NotLongMode => "the processor is not in long mode",
             Self::NoKpcr => "neither GS nor KERNEL_GS_BASE points at a KPCR",
             Self::KernelUnmapped => {
-                "the kernel is not mapped in the page tables this pause runs on; pause \
-                 while the guest runs kernel code"
+                "the kernel is not mapped in the page tables this pause runs on, and the \
+                 KPCR's mapped pages hold none of this process's kernel tables; pause while \
+                 the guest runs kernel code"
             }
             Self::NoKernelImage => "no kernel image exporting PsInitialSystemProcess was found",
             Self::NoSystemProcess => "PsInitialSystemProcess is not set",
@@ -543,8 +632,8 @@ struct KernelState {
     object_era: Option<drivers::ObjectHeaderEra>,
     /// The object namespace root directory (`\`), once reached.
     object_root: Option<u64>,
-    /// `KeServiceDescriptorTable`, once found.
-    service_descriptor: Option<u64>,
+    /// The service descriptors and stub names, once found.
+    ssdt: SsdtCache,
     /// Whose layouts the offsets above were seeded from.
     layouts: KernelLayouts,
 }
@@ -561,7 +650,7 @@ impl KernelState {
             vad: None,
             object_era: None,
             object_root: None,
-            service_descriptor: None,
+            ssdt: SsdtCache::default(),
             layouts,
         }
     }
@@ -587,7 +676,15 @@ impl KernelState {
                 .and_then(|tree| process.vad_root.map(|root| VadSite { layout: tree, offset: root.0 })),
             object_era: layout.object_era,
             object_root,
-            service_descriptor: globals.service_descriptor_table.map(|rva| base.wrapping_add(rva.0)),
+            ssdt: SsdtCache {
+                kernel: globals
+                    .service_descriptor_table
+                    .map(|rva| FoundDescriptor { address: base.wrapping_add(rva.0), source: TableSource::Pdb }),
+                shadow: globals
+                    .service_descriptor_table_shadow
+                    .map(|rva| FoundDescriptor { address: base.wrapping_add(rva.0), source: TableSource::Pdb }),
+                stubs: StubNames::default(),
+            },
             layouts: match layout.source {
                 LayoutSource::Matched => KernelLayouts::Pdb,
                 LayoutSource::Forced => KernelLayouts::ForcedPdb,
@@ -627,6 +724,9 @@ pub(crate) struct WindowsDiscovery {
     state: Option<KernelState>,
     /// The kernel PDB's layouts `state` was learned under.
     layout: Option<Arc<KernelLayout>>,
+    /// Where, from the KPCR, the KPRCB's `KernelDirectoryTableBase` lies,
+    /// once a KVA-shadow pause found it.
+    kva_shadow: Option<u64>,
 }
 
 impl WindowsDiscovery {
@@ -648,6 +748,158 @@ pub(crate) struct WindowsRead {
     pub(crate) system: SystemListing,
     /// Whose layouts the kernel's structures were read by, once it was found.
     pub(crate) layouts: Option<KernelLayouts>,
+    /// Whose page tables the kernel was read through.
+    pub(crate) through: ReadThrough,
+}
+
+/// Whose page tables a pause's kernel reads go through.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ReadThrough {
+    /// The processor's own: they map the kernel.
+    ProcessorTables,
+    /// The kernel's, from the KPRCB: the processor runs user mode on KVA-shadow
+    /// tables that leave the kernel out.
+    KernelTables { cr3: u64 },
+}
+
+impl ReadThrough {
+    /// The CR3 the walk's live space is rooted at: the running process's.
+    fn live_cr3(self, view: &CpuDebugView) -> u64 {
+        match self {
+            Self::ProcessorTables => view.registers.cr3,
+            Self::KernelTables { cr3 } => cr3,
+        }
+    }
+
+    /// What a listing says of the tables it was read through, when not the
+    /// processor's own.
+    pub(crate) const fn label(self) -> Option<&'static str> {
+        match self {
+            Self::ProcessorTables => None,
+            Self::KernelTables { .. } => {
+                Some("read through the kernel's page tables: this pause runs user mode on KVA-shadow tables")
+            }
+        }
+    }
+}
+
+/// A guest read through the kernel's page tables where the processor's
+/// leave the kernel out: `Root::Live` walks from `cr3`, and every other read
+/// is the guest's own.
+struct KernelTablesView<'a, G> {
+    cpu: &'a mut G,
+    cr3: u64,
+}
+
+impl<G: GuestMemory> GuestMemory for KernelTablesView<'_, G> {
+    fn translate(&mut self, root: Root, linear: u64) -> Option<u64> {
+        let root = match root {
+            Root::Live => Root::Process(self.cr3),
+            Root::Process(cr3) => Root::Process(cr3),
+        };
+        self.cpu.translate(root, linear)
+    }
+
+    fn read_physical(&mut self, physical: u64, buf: &mut [u8]) -> GuestRead {
+        self.cpu.read_physical(physical, buf)
+    }
+
+    fn page_mappings<F>(&mut self, cr3: u64, range: LinearRange, visit: F) -> MappingWalk
+    where
+        F: FnMut(PageMapping) -> WalkStep,
+    {
+        self.cpu.page_mappings(cr3, range, visit)
+    }
+}
+
+/// How far past the KPCR the KPRCB's `KernelDirectoryTableBase` is looked
+/// for: past the end of the largest KPRCB.
+const KPCR_SHADOW_SPAN: u64 = 0x2_0000;
+/// The CR3 bits that address the top-level table; the low 12 are flags or
+/// a PCID.
+const CR3_TABLE: u64 = 0x000F_FFFF_FFFF_F000;
+/// The CR3 bits no table address uses: 52–62 (bit 63 is the no-flush hint).
+const CR3_RESERVED: u64 = 0x7FF0_0000_0000_0000;
+
+/// Whose page tables this pause's kernel reads go through: the processor's
+/// while the kernel reads through them, else the kernel's own tables, found
+/// in the KPRCB page a KVA-shadow user space keeps mapped (see
+/// [`shadow_kernel_cr3`]).
+fn kernel_tables<G: GuestMemory>(
+    cpu: &mut G,
+    view: &CpuDebugView,
+    discovery: &mut WindowsDiscovery,
+) -> ReadThrough {
+    let mapped = match &discovery.state {
+        Some(state) => kernel_stands(cpu, &state.kernel),
+        None => find_kpcr(cpu, view).and_then(|kpcr| kernel_image(cpu, kpcr)).is_some(),
+    };
+    if mapped {
+        return ReadThrough::ProcessorTables;
+    }
+    match shadow_kernel_cr3(cpu, view, &mut discovery.kva_shadow) {
+        Some(cr3) => ReadThrough::KernelTables { cr3 },
+        None => ReadThrough::ProcessorTables,
+    }
+}
+
+/// The kernel's CR3 for the running process, under KVA shadow: the entry
+/// stubs load it from the KPRCB's `KernelDirectoryTableBase`, on a page the
+/// user tables keep mapped, at an offset that differs by build. Each 8-byte
+/// value in the KPCR's readable pages is tried (the offset `known` first),
+/// and taken when through it the KPCR's `Self` reads back the KPCR, its
+/// tables are not the processor's, and the paused RIP maps where it maps
+/// under the processor's — the same process. The offset found is kept in
+/// `known`.
+fn shadow_kernel_cr3<G: GuestMemory>(
+    cpu: &mut G,
+    view: &CpuDebugView,
+    known: &mut Option<u64>,
+) -> Option<u64> {
+    let kpcrs: Vec<u64> = [view.segment_bases.gs, view.kernel_gs_base]
+        .into_iter()
+        .filter_map(kernel_pointer)
+        .collect();
+    let live_table = view.registers.cr3 & CR3_TABLE;
+    let rip = view.registers.rip;
+    let live_rip = cpu.translate(Root::Live, rip);
+    let fits = |cpu: &mut G, kpcr: u64, value: u64| -> bool {
+        value & CR3_TABLE != 0
+            && value & CR3_RESERVED == 0
+            && value & CR3_TABLE != live_table
+            && read_u64(cpu, Root::Process(value), kpcr.wrapping_add(0x18)) == Some(kpcr)
+            && cpu.translate(Root::Process(value), rip) == live_rip
+    };
+    for &kpcr in &kpcrs {
+        if let Some(offset) = *known {
+            if let Some(value) = read_u64(cpu, Root::Live, kpcr.wrapping_add(offset)) {
+                if fits(cpu, kpcr, value) {
+                    return Some(value);
+                }
+            }
+        }
+    }
+    for &kpcr in &kpcrs {
+        let mut page = vec![0u8; PAGE_BYTES as usize];
+        let start = kpcr & !(PAGE_BYTES - 1);
+        for offset in (0..KPCR_SHADOW_SPAN).step_by(PAGE_BYTES as usize) {
+            let at = start.wrapping_add(offset);
+            if !read_into(cpu, Root::Live, at, &mut page) {
+                continue;
+            }
+            for (slot, bytes) in (0u64..).zip(page.chunks_exact(8)) {
+                let Ok(raw) = <[u8; 8]>::try_from(bytes) else {
+                    continue;
+                };
+                let value = u64::from_le_bytes(raw);
+                if fits(cpu, kpcr, value) {
+                    *known = Some(at.wrapping_add(slot.wrapping_mul(8)).wrapping_sub(kpcr));
+                    return Some(value);
+                }
+            }
+        }
+    }
+    None
 }
 
 /// The modules the code, stack and memory panes name an address against (the
@@ -665,6 +917,28 @@ pub(crate) fn read_windows<G: GuestMemory>(
     layout: Option<&Arc<KernelLayout>>,
 ) -> WindowsRead {
     discovery.under(layout);
+    match kernel_tables(cpu, view, discovery) {
+        ReadThrough::ProcessorTables => {
+            read_windows_through(cpu, view, request, discovery, layout, ReadThrough::ProcessorTables)
+        }
+        ReadThrough::KernelTables { cr3 } => {
+            let mut kernel = KernelTablesView { cpu, cr3 };
+            read_windows_through(&mut kernel, view, request, discovery, layout, ReadThrough::KernelTables { cr3 })
+        }
+    }
+}
+
+/// [`read_windows`] through the page tables `through` names, which
+/// `Root::Live` already walks.
+fn read_windows_through<G: GuestMemory>(
+    cpu: &mut G,
+    view: &CpuDebugView,
+    request: SystemView,
+    discovery: &mut WindowsDiscovery,
+    layout: Option<&Arc<KernelLayout>>,
+    through: ReadThrough,
+) -> WindowsRead {
+    let live_cr3 = through.live_cr3(view);
     let state = match find_kernel(cpu, view, &mut discovery.state, layout) {
         Ok(state) => state,
         Err(miss) => {
@@ -679,6 +953,7 @@ pub(crate) fn read_windows<G: GuestMemory>(
                 symbols: SymbolIndex::default(),
                 system,
                 layouts: None,
+                through,
             };
         }
     };
@@ -691,7 +966,7 @@ pub(crate) fn read_windows<G: GuestMemory>(
         vad,
         object_era,
         object_root,
-        service_descriptor,
+        ssdt,
         layouts,
     } = state;
     let layouts = *layouts;
@@ -699,7 +974,7 @@ pub(crate) fn read_windows<G: GuestMemory>(
         Some(head) => list_modules(cpu, Root::Live, head).unwrap_or_default(),
         None => Vec::new(),
     };
-    let processes = list_processes(cpu, kernel, view.registers.cr3, parent_offset);
+    let processes = list_processes(cpu, kernel, live_cr3, parent_offset);
     let current_index = processes.iter().position(|process| process.current);
     let current_read = current_index
         .and_then(|index| processes.get(index))
@@ -730,7 +1005,7 @@ pub(crate) fn read_windows<G: GuestMemory>(
                             cpu,
                             ImageSpace {
                                 root: Root::Live,
-                                cr3: view.registers.cr3,
+                                cr3: live_cr3,
                             },
                             &module,
                             detail,
@@ -844,12 +1119,19 @@ pub(crate) fn read_windows<G: GuestMemory>(
                 None => SystemListing::NoWindowsKernel(KernelMiss::NoObjectNamespace),
             }
         }
-        SystemView::Ssdt => match read_ssdt(cpu, kernel, service_descriptor, &kernel_modules) {
-            Some(listing) => SystemListing::Ssdt(listing),
-            None => SystemListing::NoWindowsKernel(KernelMiss::NoSsdt),
-        },
+        SystemView::Ssdt => {
+            let scene = SsdtScene {
+                kernel,
+                modules: &kernel_modules,
+                processes: &processes,
+            };
+            match read_ssdt(cpu, &scene, ssdt, peb_offset, wow64_offset) {
+                Some(listing) => SystemListing::Ssdt(listing),
+                None => SystemListing::NoWindowsKernel(KernelMiss::NoSsdt),
+            }
+        }
     };
-    WindowsRead { symbols, system, layouts: Some(layouts) }
+    WindowsRead { symbols, system, layouts: Some(layouts), through }
 }
 
 // ───────────────────────────── drivers ──────────────────────────────
@@ -1369,56 +1651,374 @@ fn symbolic_links<G: GuestMemory>(
 
 // ───────────────────────────── SSDT ──────────────────────────────
 
-/// The kernel's system-service table, each service classified against the
-/// loaded modules. `None` when no `KeServiceDescriptorTable` is found; the
-/// one found is kept in `cached`.
+/// The service descriptors found in one kernel and the services' stub names,
+/// kept for as long as the kernel is.
+#[derive(Default)]
+struct SsdtCache {
+    /// `KeServiceDescriptorTable`.
+    kernel: Option<FoundDescriptor>,
+    /// `KeServiceDescriptorTableShadow`.
+    shadow: Option<FoundDescriptor>,
+    stubs: StubNames,
+}
+
+/// A descriptor's address, and how it was found.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FoundDescriptor {
+    address: u64,
+    source: TableSource,
+}
+
+/// The services' names by index, from the system-call stubs that call them.
+#[derive(Default)]
+struct StubNames {
+    /// `ntdll.dll`'s.
+    kernel: BTreeMap<u32, String>,
+    /// `win32u.dll`'s.
+    gui: BTreeMap<u32, String>,
+}
+
+/// The first build with `win32u.dll` (Windows 10 1607); before it the GUI
+/// stubs lie unexported in `user32.dll` and `gdi32.dll`.
+const WIN32U_FIRST_BUILD: u32 = 14393;
+
+/// The processes a session's GUI table is read through first, after the
+/// running one.
+const SESSION_PROCESSES: [&str; 3] = ["csrss.exe", "winlogon.exe", "explorer.exe"];
+
+/// What an SSDT read looks across: the kernel, its loaded modules and the
+/// processes.
+struct SsdtScene<'a> {
+    kernel: &'a Kernel,
+    modules: &'a [WinModule],
+    processes: &'a [WinProcess],
+}
+
+/// A descriptor found, and what it holds.
+#[derive(Clone, Copy)]
+struct LocatedDescriptor {
+    found: FoundDescriptor,
+    descriptor: ssdt::Descriptor,
+}
+
+/// A descriptor found, and the table it describes.
+struct LocatedTable {
+    located: LocatedDescriptor,
+    table: ServiceTable,
+}
+
+/// The kernel's system-service table and the GUI's, each service classified
+/// against the loaded modules, named by its stub and checked for an inline
+/// hook. `None` when no `KeServiceDescriptorTable` is found. The descriptors
+/// found and the stub names read are kept in `cache`.
 fn read_ssdt<G: GuestMemory>(
     cpu: &mut G,
-    kernel: &Kernel,
-    cached: &mut Option<u64>,
-    modules: &[WinModule],
+    scene: &SsdtScene<'_>,
+    cache: &mut SsdtCache,
+    peb_offset: &mut Option<u64>,
+    wow64_offset: &mut Option<u64>,
 ) -> Option<SsdtListing> {
-    let table = service_table(cpu, &kernel.image, cached)?;
-    let base = table.base;
-    let encoding = table.decoding.encoding;
-    // A service that lies in the kernel image is unhooked; the kernel is its
-    // own owner, so an in-kernel routine reads as `OwnImage`.
-    let own = module_of(kernel.image.base, modules);
+    let image = &scene.kernel.image;
+    // The kernel's code is scanned at most once a read, for both tables.
+    let mut code = None;
+    let owners = [kernel_module(image, scene.modules)];
+    let kernel_table = kernel_service_table(cpu, image, &owners, &mut cache.kernel, &mut code)?;
+    read_stub_names(cpu, scene, &mut cache.stubs, peb_offset, wow64_offset);
+    let kernel = list_services(
+        cpu,
+        Root::Live,
+        &kernel_table,
+        &owners,
+        scene.modules,
+        &cache.stubs.kernel,
+    );
+    let gui = gui_services(
+        cpu,
+        scene,
+        kernel_table.located.descriptor,
+        &mut cache.shadow,
+        &mut code,
+        &cache.stubs.gui,
+    );
+    Some(SsdtListing { kernel, gui })
+}
+
+/// The kernel's own entry in `modules`, or one made from its image when the
+/// list does not hold it.
+fn kernel_module(image: &PeImage, modules: &[WinModule]) -> WinModule {
+    module_of(image.base, modules).cloned().unwrap_or(WinModule {
+        base: image.base,
+        size: image.size,
+        name: None,
+        path: None,
+        bits: ModuleBits::Bits64,
+    })
+}
+
+/// Whether `module` is one of the GUI's kernel images: `win32k.sys`, or
+/// `win32kbase.sys` and `win32kfull.sys` since Windows 10.
+fn is_win32k(module: &WinModule) -> bool {
+    module
+        .name
+        .as_deref()
+        .and_then(|name| name.get(..6))
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("win32k"))
+}
+
+/// The processes the GUI table is read through, in the order tried: the
+/// running one, then `csrss.exe`, `winlogon.exe` and `explorer.exe`, then
+/// the rest. Never System, whose space maps no session.
+fn session_candidates(processes: &[WinProcess]) -> Vec<&WinProcess> {
+    let user: Vec<&WinProcess> = processes.iter().filter(|p| p.pid != SYSTEM_PID).collect();
+    let named = |process: &WinProcess, name: &str| process.name.eq_ignore_ascii_case(name);
+    let mut order: Vec<&WinProcess> = user.iter().copied().filter(|p| p.current).collect();
+    for name in SESSION_PROCESSES {
+        order.extend(user.iter().copied().filter(|p| !p.current && named(p, name)));
+    }
+    order.extend(
+        user.iter()
+            .copied()
+            .filter(|p| !p.current && !SESSION_PROCESSES.iter().any(|name| named(p, name))),
+    );
+    order
+}
+
+/// The page tables a process's own space is read through: the processor's
+/// for the running process, its `DirectoryTableBase` for any other.
+fn process_root(process: &WinProcess) -> Root {
+    if process.current {
+        Root::Live
+    } else {
+        Root::Process(process.cr3)
+    }
+}
+
+/// Fills whichever of `names`' tables is empty from the stubs of the first
+/// processes, in session order, that load `ntdll.dll` (the kernel's) and
+/// `win32u.dll` (the GUI's, on a build that has it). A table no process
+/// gave yet (early in boot) is looked for again on the next read.
+fn read_stub_names<G: GuestMemory>(
+    cpu: &mut G,
+    scene: &SsdtScene<'_>,
+    names: &mut StubNames,
+    peb_offset: &mut Option<u64>,
+    wow64_offset: &mut Option<u64>,
+) {
+    let gui_stubs_exported = scene.kernel.build.is_none_or(|build| build >= WIN32U_FIRST_BUILD);
+    for process in session_candidates(scene.processes) {
+        let gui_wanted = gui_stubs_exported && names.gui.is_empty();
+        if !names.kernel.is_empty() && !gui_wanted {
+            return;
+        }
+        let ModuleRead::Listed(modules) =
+            process_modules(cpu, scene.processes, process, peb_offset, wow64_offset)
+        else {
+            continue;
+        };
+        let root = Root::Process(process.cr3);
+        let native = |name: &str| {
+            modules
+                .iter()
+                .find(|m| m.bits == ModuleBits::Bits64 && m.name.as_deref().is_some_and(|n| n.eq_ignore_ascii_case(name)))
+        };
+        if names.kernel.is_empty() {
+            if let Some(ntdll) = native("ntdll.dll") {
+                names.kernel = stubs_of(cpu, root, ntdll).kernel;
+            }
+        }
+        if gui_wanted {
+            if let Some(win32u) = native("win32u.dll") {
+                names.gui = stubs_of(cpu, root, win32u).gui;
+            }
+        }
+    }
+}
+
+/// The services `module`'s `Nt*` exports call, by the system-call stub each
+/// leads to; an export that is no stub is passed by.
+fn stubs_of<G: GuestMemory>(cpu: &mut G, root: Root, module: &WinModule) -> StubNames {
+    let mut names = StubNames::default();
+    let ExportRead::Listed(exports) = read_module_exports(cpu, root, module) else {
+        return names;
+    };
+    for export in exports {
+        let Some(name) = export.name else {
+            continue;
+        };
+        let ExportTarget::Rva(rva) = export.target else {
+            continue;
+        };
+        if !name.starts_with("Nt") {
+            continue;
+        }
+        let at = module.base.wrapping_add(u64::from(rva));
+        let Some(code) = read_exact(cpu, root, at, ssdt::STUB_BYTES) else {
+            continue;
+        };
+        let table = match ssdt::stub_service(&code) {
+            Some(ssdt::StubService::Kernel(index)) => names.kernel.entry(index),
+            Some(ssdt::StubService::Gui(index)) => names.gui.entry(index),
+            None => continue,
+        };
+        table.or_insert(name);
+    }
+    names
+}
+
+/// One table's services, read through `root`: each routine classified
+/// against `owners` (the images the table belongs to) and `modules`, named
+/// from `names`, and checked for a first instruction that leaves `owners`.
+fn list_services<G: GuestMemory>(
+    cpu: &mut G,
+    root: Root,
+    located: &LocatedTable,
+    owners: &[WinModule],
+    modules: &[WinModule],
+    names: &BTreeMap<u32, String>,
+) -> ServiceTableRead {
+    let table = &located.table;
     let mut any_hooked = false;
     let services = table
         .entries
         .iter()
         .enumerate()
         .map(|(index, &entry)| {
-            let routine = ssdt::routine_of(base, entry, encoding);
-            let site = classify_pointer(routine, own, modules, None);
-            if site != PointerSite::OwnImage {
+            // `parse_descriptor` caps the entries at MAX_SERVICES: `index`
+            // fits a u32.
+            let index = index as u32;
+            let routine = ssdt::routine_of(table.base, entry, table.decoding.encoding);
+            let site = classify_pointer(routine, module_of(routine, owners), modules, None);
+            let inline = match site {
+                PointerSite::OwnImage => inline_jump(cpu, root, routine, owners, modules),
+                PointerSite::InModule { .. } | PointerSite::KernelDefault | PointerSite::NoModule => None,
+            };
+            if site != PointerSite::OwnImage || inline.is_some() {
                 any_hooked = true;
             }
-            let module_name = module_of(routine, modules).and_then(|m| m.name.clone());
             SsdtService {
-                index: index as u32,
+                index,
                 routine,
                 site,
-                module_name,
+                module_name: module_of(routine, modules).and_then(|m| m.name.clone()),
+                stub_name: names.get(&index).cloned(),
+                inline,
             }
         })
         .collect();
-    Some(SsdtListing {
+    let place = match module_of(table.base, owners) {
+        Some(_) => TablePlace::InOwner,
+        None => TablePlace::Outside,
+    };
+    ServiceTableRead {
+        source: located.located.found.source,
+        base: table.base,
+        place,
         services,
         any_hooked,
+    }
+}
+
+/// Where the routine at `routine` first jumps, read through `root`, when a
+/// jump there leaves `owners`: an inline hook.
+fn inline_jump<G: GuestMemory>(
+    cpu: &mut G,
+    root: Root,
+    routine: u64,
+    owners: &[WinModule],
+    modules: &[WinModule],
+) -> Option<InlineJump> {
+    let code = read_exact(cpu, root, routine, ssdt::JUMP_BYTES)?;
+    let target = match ssdt::first_jump(&code, routine)? {
+        ssdt::FirstJump::To(target) => target,
+        ssdt::FirstJump::Through(slot) => read_u64(cpu, root, slot)?,
+    };
+    if module_of(target, owners).is_some() {
+        return None;
+    }
+    Some(InlineJump {
+        target,
+        module_name: module_of(target, modules).and_then(|m| m.name.clone()),
     })
 }
 
-/// A `KiServiceTable`, read through the descriptor that points at it.
+/// The GUI's table, read through the first process in session order whose
+/// read of it decodes with more than half its routines inside a `win32k`
+/// image; or why it was not read.
+fn gui_services<G: GuestMemory>(
+    cpu: &mut G,
+    scene: &SsdtScene<'_>,
+    kernel: ssdt::Descriptor,
+    kept: &mut Option<FoundDescriptor>,
+    code: &mut Option<ssdt::LeaTargets>,
+    names: &BTreeMap<u32, String>,
+) -> GuiServices {
+    let owners: Vec<WinModule> = scene.modules.iter().filter(|m| is_win32k(m)).cloned().collect();
+    if owners.is_empty() {
+        return GuiServices::Missing(GuiMiss::NoWin32k);
+    }
+    let Some(located) = shadow_descriptor(cpu, &scene.kernel.image, kernel, kept, code) else {
+        return GuiServices::Missing(GuiMiss::NoShadowDescriptor);
+    };
+    for process in session_candidates(scene.processes) {
+        let root = process_root(process);
+        let Some(table) = read_table(cpu, root, located.descriptor, &owners) else {
+            continue;
+        };
+        if table.decoding.inside.saturating_mul(2) > table.entries.len() {
+            let located = LocatedTable { located, table };
+            return GuiServices::Listed(list_services(cpu, root, &located, &owners, scene.modules, names));
+        }
+    }
+    GuiServices::Missing(GuiMiss::NoSessionProcess)
+}
+
+/// The GUI table's descriptor in `KeServiceDescriptorTableShadow`: through
+/// the shadow kept while its second descriptor still reads (a kernel PDB
+/// seeds it), else through the `lea r11` target in the kernel's code whose
+/// first descriptor is the kernel table's `kernel` and whose second reads.
+/// The shadow found is kept in `kept`.
+fn shadow_descriptor<G: GuestMemory>(
+    cpu: &mut G,
+    image: &PeImage,
+    kernel: ssdt::Descriptor,
+    kept: &mut Option<FoundDescriptor>,
+    code: &mut Option<ssdt::LeaTargets>,
+) -> Option<LocatedDescriptor> {
+    let known = (*kept).and_then(|found| {
+        let bytes = read_exact(cpu, Root::Live, found.address, ssdt::SHADOW_BYTES)?;
+        let descriptor = ssdt::known_shadow_gui_descriptor(&bytes)?;
+        Some(LocatedDescriptor { found, descriptor })
+    });
+    let located = match known {
+        Some(located) => located,
+        None => lea_targets(cpu, image, code)
+            .r11
+            .iter()
+            .copied()
+            .filter(|&address| image_holds(image, address))
+            .find_map(|address| {
+                let bytes = read_exact(cpu, Root::Live, address, ssdt::SHADOW_BYTES)?;
+                let descriptor = ssdt::shadow_gui_descriptor(&bytes, kernel)?;
+                Some(LocatedDescriptor {
+                    found: FoundDescriptor {
+                        address,
+                        source: TableSource::Code,
+                    },
+                    descriptor,
+                })
+            })?,
+    };
+    *kept = Some(located.found);
+    Some(located)
+}
+
+/// A service table, read.
 struct ServiceTable {
-    /// The `KSERVICE_TABLE_DESCRIPTOR` it was read through.
-    descriptor: u64,
-    /// `KiServiceTable` itself.
+    /// `KiServiceTable` or `W32pServiceTable` itself.
     base: u64,
     entries: Vec<i32>,
     /// The encoding its entries decode with, and how many of their routines
-    /// land inside the kernel image under it.
+    /// land inside the table's owners under it.
     decoding: ssdt::Decoding,
 }
 
@@ -1427,58 +2027,79 @@ fn image_holds(image: &PeImage, addr: u64) -> bool {
     (image.base..image.base.wrapping_add(u64::from(image.size))).contains(&addr)
 }
 
-/// The service table the descriptor at `descriptor` points to.
-fn read_service_table<G: GuestMemory>(
+/// The table `descriptor` describes, read through `root`, its entries decoded
+/// by the encoding that puts the most routines inside `owners`: the wrong
+/// one scatters them.
+fn read_table<G: GuestMemory>(
     cpu: &mut G,
-    image: &PeImage,
-    descriptor: u64,
+    root: Root,
+    descriptor: ssdt::Descriptor,
+    owners: &[WinModule],
 ) -> Option<ServiceTable> {
-    let bytes = read_exact(cpu, Root::Live, descriptor, ssdt::DESCRIPTOR_BYTES)?;
-    let parsed = ssdt::parse_descriptor(&bytes)?;
-    let base = kernel_pointer(parsed.service_table)?;
+    let base = kernel_pointer(descriptor.service_table)?;
     // `parse_descriptor` caps the limit at MAX_SERVICES: the length cannot wrap.
-    let raw = read_exact(cpu, Root::Live, base, (parsed.limit as usize).wrapping_mul(4))?;
+    let raw = read_exact(cpu, root, base, (descriptor.limit as usize).wrapping_mul(4))?;
     let entries: Vec<i32> = raw
         .chunks_exact(4)
         .filter_map(|chunk| <[u8; 4]>::try_from(chunk).ok())
         .map(i32::from_le_bytes)
         .collect();
-    // The wrong encoding scatters the routines outside the kernel image.
-    let decoding = ssdt::decode(base, &entries, |routine| image_holds(image, routine));
+    let decoding = ssdt::decode(base, &entries, |routine| module_of(routine, owners).is_some());
     Some(ServiceTable {
-        descriptor,
         base,
         entries,
         decoding,
     })
 }
 
-/// `KeServiceDescriptorTable`'s service table: through `cached` while that
-/// descriptor still reads, else through the kernel's export (5.2 SP1 is the
-/// only x64 kernel with one), else the `lea r10` target in the kernel's code
-/// that reads as the kernel's own service table. The descriptor found is kept
-/// in `cached`. A known descriptor is taken whatever its routines point at, so
-/// a table hooked wholesale is still listed (and flagged).
-fn service_table<G: GuestMemory>(
+/// The kernel descriptor `found` names, and its table.
+fn kernel_table_at<G: GuestMemory>(
+    cpu: &mut G,
+    found: FoundDescriptor,
+    owners: &[WinModule],
+) -> Option<LocatedTable> {
+    let bytes = read_exact(cpu, Root::Live, found.address, ssdt::DESCRIPTOR_BYTES)?;
+    let descriptor = ssdt::parse_descriptor(&bytes)?;
+    let table = read_table(cpu, Root::Live, descriptor, owners)?;
+    Some(LocatedTable {
+        located: LocatedDescriptor { found, descriptor },
+        table,
+    })
+}
+
+/// `KeServiceDescriptorTable` and its table: the descriptor kept while it
+/// still reads (a kernel PDB seeds it), else the kernel's export (5.2 SP1 is
+/// the only x64 kernel with one), else the `lea r10` target in the kernel's
+/// code that reads as the kernel's own service table. The descriptor found is
+/// kept in `kept`. A descriptor kept or exported is taken whatever its
+/// routines point at, so a table hooked wholesale is still listed (and
+/// flagged).
+fn kernel_service_table<G: GuestMemory>(
     cpu: &mut G,
     image: &PeImage,
-    cached: &mut Option<u64>,
-) -> Option<ServiceTable> {
-    let known = match *cached {
-        Some(descriptor) => read_service_table(cpu, image, descriptor),
-        None => None,
+    owners: &[WinModule],
+    kept: &mut Option<FoundDescriptor>,
+    code: &mut Option<ssdt::LeaTargets>,
+) -> Option<LocatedTable> {
+    let known = (*kept).and_then(|found| kernel_table_at(cpu, found, owners));
+    let located = match known {
+        Some(located) => located,
+        None => {
+            let exported = export(cpu, image, "KeServiceDescriptorTable").and_then(|address| {
+                let found = FoundDescriptor {
+                    address,
+                    source: TableSource::Export,
+                };
+                kernel_table_at(cpu, found, owners)
+            });
+            match exported {
+                Some(located) => located,
+                None => kernel_table_from_code(cpu, image, owners, code)?,
+            }
+        }
     };
-    let table = match known {
-        Some(table) => table,
-        None => match export(cpu, image, "KeServiceDescriptorTable")
-            .and_then(|descriptor| read_service_table(cpu, image, descriptor))
-        {
-            Some(table) => table,
-            None => service_table_from_code(cpu, image)?,
-        },
-    };
-    *cached = Some(table.descriptor);
-    Some(table)
+    *kept = Some(located.located.found);
+    Some(located)
 }
 
 /// The descriptor a `lea r10, [rip + disp32]` in the kernel's executable
@@ -1486,13 +2107,50 @@ fn service_table<G: GuestMemory>(
 /// so) whose `KiServiceTable` lies in the kernel image and whose routines
 /// land in the kernel image most often — at least for half its services,
 /// which no other datum a `lea r10` loads does.
-fn service_table_from_code<G: GuestMemory>(
+fn kernel_table_from_code<G: GuestMemory>(
     cpu: &mut G,
     image: &PeImage,
-) -> Option<ServiceTable> {
-    let header = read_exact(cpu, Root::Live, image.base, HEADER_BYTES)?;
-    let sections = pe::parse_sections(&header)?;
-    let mut scan = ssdt::LeaR10Scan::default();
+    owners: &[WinModule],
+    code: &mut Option<ssdt::LeaTargets>,
+) -> Option<LocatedTable> {
+    lea_targets(cpu, image, code)
+        .r10
+        .iter()
+        .copied()
+        .filter(|&address| image_holds(image, address))
+        .filter_map(|address| {
+            let found = FoundDescriptor {
+                address,
+                source: TableSource::Code,
+            };
+            kernel_table_at(cpu, found, owners)
+        })
+        .filter(|located| {
+            let table = &located.table;
+            image_holds(image, table.base) && table.decoding.inside.saturating_mul(2) > table.entries.len()
+        })
+        .max_by_key(|located| located.table.decoding.inside)
+}
+
+/// The `lea r10` and `lea r11` targets in the kernel's code, scanned into
+/// `code` the first time they are asked for.
+fn lea_targets<'a, G: GuestMemory>(
+    cpu: &mut G,
+    image: &PeImage,
+    code: &'a mut Option<ssdt::LeaTargets>,
+) -> &'a ssdt::LeaTargets {
+    code.get_or_insert_with(|| scan_kernel_code(cpu, image))
+}
+
+/// Every `lea r10/r11, [rip + disp32]` target in the kernel's executable
+/// sections; none when its headers do not read.
+fn scan_kernel_code<G: GuestMemory>(cpu: &mut G, image: &PeImage) -> ssdt::LeaTargets {
+    let Some(sections) =
+        read_exact(cpu, Root::Live, image.base, HEADER_BYTES).and_then(|header| pe::parse_sections(&header))
+    else {
+        return ssdt::LeaTargets::default();
+    };
+    let mut scan = ssdt::LeaRipScan::default();
     let mut page = vec![0u8; PAGE_BYTES as usize];
     for section in sections.iter().filter(|section| section.executable) {
         let size = match section.virtual_size {
@@ -1522,14 +2180,6 @@ fn service_table_from_code<G: GuestMemory>(
         }
     }
     scan.targets()
-        .into_iter()
-        .filter(|&target| image_holds(image, target))
-        .filter_map(|target| read_service_table(cpu, image, target))
-        .filter(|table| {
-            image_holds(image, table.base)
-                && table.decoding.inside.saturating_mul(2) > table.entries.len()
-        })
-        .max_by_key(|table| table.decoding.inside)
 }
 
 /// Whom the CPU tab is asked to look from: a process (one of its threads with
@@ -1633,6 +2283,28 @@ pub(crate) fn read_thread_view<G: GuestMemory>(
     layout: Option<&Arc<KernelLayout>>,
 ) -> ThreadViewRead {
     discovery.under(layout);
+    match kernel_tables(cpu, view, discovery) {
+        ReadThrough::ProcessorTables => {
+            read_thread_view_through(cpu, view, target, live, discovery, layout, ReadThrough::ProcessorTables)
+        }
+        ReadThrough::KernelTables { cr3 } => {
+            let mut kernel = KernelTablesView { cpu, cr3 };
+            read_thread_view_through(&mut kernel, view, target, live, discovery, layout, ReadThrough::KernelTables { cr3 })
+        }
+    }
+}
+
+/// [`read_thread_view`] through the page tables `through` names, which
+/// `Root::Live` already walks.
+fn read_thread_view_through<G: GuestMemory>(
+    cpu: &mut G,
+    view: &CpuDebugView,
+    target: ViewTarget,
+    live: &[LiveTeb],
+    discovery: &mut WindowsDiscovery,
+    layout: Option<&Arc<KernelLayout>>,
+    through: ReadThrough,
+) -> ThreadViewRead {
     let state = match find_kernel(cpu, view, &mut discovery.state, layout) {
         Ok(state) => state,
         Err(miss) => return ThreadViewRead::Miss(ViewMiss::NoWindowsKernel(miss)),
@@ -1646,14 +2318,14 @@ pub(crate) fn read_thread_view<G: GuestMemory>(
         vad: _,
         object_era: _,
         object_root: _,
-        service_descriptor: _,
+        ssdt: _,
         layouts: _,
     } = state;
     let kernel_modules = match kernel.loaded_modules {
         Some(head) => list_modules(cpu, Root::Live, head).unwrap_or_default(),
         None => Vec::new(),
     };
-    let processes = list_processes(cpu, kernel, view.registers.cr3, parent_offset);
+    let processes = list_processes(cpu, kernel, through.live_cr3(view), parent_offset);
     let eprocess = match target {
         ViewTarget::Process { eprocess } | ViewTarget::Thread { eprocess, .. } => eprocess,
     };
@@ -3779,7 +4451,9 @@ mod tests {
         // The PDB fixture is Windows 10 22H2's, build 19045.
         assert_eq!(vad.layout, vad::shape_layout(VadShape::BalancedNode, Some(19045)));
         assert_eq!(state.object_era, Some(drivers::ObjectHeaderEra::Modern));
-        assert_eq!(state.service_descriptor, Some(KERNEL_BASE + 0x3040));
+        let pdb = |address| Some(FoundDescriptor { address, source: TableSource::Pdb });
+        assert_eq!(state.ssdt.kernel, pdb(KERNEL_BASE + 0x3040));
+        assert_eq!(state.ssdt.shadow, pdb(KERNEL_BASE + 0x3080));
         assert_eq!(state.kernel.layout.directory_table_base, 0x28);
     }
 
@@ -3799,6 +4473,195 @@ mod tests {
         let view = unexported.view;
         let state = discover_kernel(&mut unexported.guest, &view, None).expect("the kernel");
         assert_eq!(state.kernel.build, None);
+    }
+
+    fn ssdt_of(read: WindowsRead) -> SsdtListing {
+        match read.system {
+            SystemListing::Ssdt(listing) => listing,
+            other => panic!("the SSDT read as {other:?}"),
+        }
+    }
+
+    fn stub_names(table: &ServiceTableRead) -> Vec<String> {
+        table.services.iter().map(|service| service.stub_name.clone().unwrap_or_default()).collect()
+    }
+
+    fn read_services(fake: &mut crate::debugger::fake_windows::FakeWindows, layout: Option<&Arc<KernelLayout>>) -> SsdtListing {
+        let view = fake.view;
+        ssdt_of(read_windows(&mut fake.guest, &view, SystemView::Ssdt, &mut WindowsDiscovery::default(), layout))
+    }
+
+    /// With no PDB and no export, both tables are found through
+    /// `KiSystemServiceRepeat`'s `lea r10` and `lea r11`, and named by
+    /// `ntdll`'s and `win32u`'s stubs; the GUI table is read through
+    /// `csrss.exe`, whose session alone maps it.
+    #[test]
+    fn both_service_tables_are_found_in_code_and_named_by_their_stubs() {
+        use crate::debugger::fake_windows::{FakeWindows, FakeWindowsSpec};
+        let mut fake = FakeWindows::build(FakeWindowsSpec::with_services());
+        let listing = read_services(&mut fake, None);
+        let kernel = &listing.kernel;
+        assert_eq!(kernel.source, TableSource::Code);
+        assert_eq!(kernel.place, TablePlace::InOwner);
+        assert_eq!(stub_names(kernel), ["NtClose", "NtCreateFile", "NtOpenProcess"]);
+        assert_eq!(kernel.services[1].routine, FakeWindows::kernel_routine(1));
+        assert_eq!(kernel.services[1].site, PointerSite::OwnImage);
+        assert!(!kernel.any_hooked);
+        let GuiServices::Listed(gui) = &listing.gui else {
+            panic!("the GUI table read as {:?}", listing.gui);
+        };
+        assert_eq!(gui.source, TableSource::Code);
+        assert_eq!(stub_names(gui), ["NtUserGetMessage", "NtGdiBitBlt"]);
+        assert_eq!(gui.services[0].routine, FakeWindows::gui_routine(0));
+        assert_eq!(gui.services[0].site, PointerSite::OwnImage);
+    }
+
+    /// The kernel PDB names where both descriptors are.
+    #[test]
+    fn a_kernel_pdb_places_both_descriptors() {
+        use crate::debugger::fake_windows::{FakeWindows, FakeWindowsSpec};
+        let mut fake = FakeWindows::build(FakeWindowsSpec::with_services());
+        let layout = pdb_layout(&windows10_kernel());
+        let listing = read_services(&mut fake, Some(&layout));
+        assert_eq!(listing.kernel.source, TableSource::Pdb);
+        assert!(matches!(&listing.gui, GuiServices::Listed(gui) if gui.source == TableSource::Pdb), "{:?}", listing.gui);
+    }
+
+    /// An entry that leads into another driver is hooked; a routine whose
+    /// first instruction jumps into another driver is an inline hook.
+    #[test]
+    fn an_entry_or_a_first_jump_out_of_the_kernel_is_a_hook() {
+        use crate::debugger::fake_windows::{FakeWindows, FakeWindowsSpec, DISK_BASE};
+        let mut fake = FakeWindows::build(FakeWindowsSpec::with_services());
+        fake.set_kernel_entry(1, DISK_BASE + 0x100);
+        let patched = FakeWindows::kernel_routine(2);
+        let target = DISK_BASE + 0x200;
+        let mut jump = vec![0xE9];
+        jump.extend_from_slice(&(target.wrapping_sub(patched + 5) as u32).to_le_bytes());
+        fake.patch_kernel_routine(2, &jump);
+        let listing = read_services(&mut fake, None);
+        let services = &listing.kernel.services;
+        assert_eq!(services[1].site, PointerSite::InModule { base: DISK_BASE, off: 0x100 });
+        assert_eq!(services[1].module_name.as_deref(), Some("disk.sys"));
+        assert!(listing.kernel.any_hooked);
+        assert_eq!(services[2].site, PointerSite::OwnImage);
+        assert_eq!(services[2].inline, Some(InlineJump { target, module_name: Some("disk.sys".to_owned()) }));
+        assert_eq!(services[0].inline, None);
+    }
+
+    /// A first instruction that jumps through a slot (`jmp [rip+0]`) is an
+    /// inline hook to where the slot points.
+    #[test]
+    fn a_jump_through_a_slot_out_of_the_kernel_is_an_inline_hook() {
+        use crate::debugger::fake_windows::{FakeWindows, FakeWindowsSpec, DISK_BASE};
+        let mut fake = FakeWindows::build(FakeWindowsSpec::with_services());
+        let target = DISK_BASE + 0x300;
+        let mut jump = vec![0xFF, 0x25, 0, 0, 0, 0];
+        jump.extend_from_slice(&target.to_le_bytes());
+        fake.patch_kernel_routine(0, &jump);
+        let listing = read_services(&mut fake, None);
+        let service = &listing.kernel.services[0];
+        assert_eq!(service.site, PointerSite::OwnImage);
+        assert_eq!(service.inline, Some(InlineJump { target, module_name: Some("disk.sys".to_owned()) }));
+        assert!(listing.kernel.any_hooked);
+    }
+
+    /// A kernel table swapped whole — `KeServiceDescriptorTable` pointed at a
+    /// copy in another driver — is found through the PDB, listed and called
+    /// moved; the shadow, left alone, still gives the GUI table.
+    #[test]
+    fn a_table_swapped_whole_is_listed_as_moved() {
+        use crate::debugger::fake_windows::{
+            FakeWindows, FakeWindowsSpec, DISK_BASE, KERNEL_BASE, LIVE_CR3, SERVICE_DESCRIPTOR_RVA,
+        };
+        let mut fake = FakeWindows::build(FakeWindowsSpec::with_services());
+        let copy = DISK_BASE + 0x1000;
+        for index in 0..3u32 {
+            let offset = FakeWindows::kernel_routine(index).wrapping_sub(copy) as i64;
+            fake.guest.write_u32(LIVE_CR3, copy + 4 * u64::from(index), ((offset << 4) | 2) as u32);
+        }
+        fake.guest.write_u64(LIVE_CR3, KERNEL_BASE + SERVICE_DESCRIPTOR_RVA, copy);
+        let layout = pdb_layout(&windows10_kernel());
+        let listing = read_services(&mut fake, Some(&layout));
+        assert_eq!(listing.kernel.place, TablePlace::Outside);
+        assert_eq!(listing.kernel.base, copy);
+        assert_eq!(listing.kernel.services[2].routine, FakeWindows::kernel_routine(2));
+        assert_eq!(stub_names(&listing.kernel), ["NtClose", "NtCreateFile", "NtOpenProcess"]);
+        assert!(matches!(&listing.gui, GuiServices::Listed(gui) if gui.services.len() == 2), "{:?}", listing.gui);
+    }
+
+    /// A guest whose GUI table cannot be read says why: no `win32k`, or no
+    /// process but System maps the table.
+    #[test]
+    fn a_gui_table_that_cannot_be_read_says_why() {
+        use crate::debugger::fake_windows::{FakeWindows, FakeWindowsSpec};
+        let mut spec = FakeWindowsSpec::with_services();
+        spec.drivers.retain(|driver| driver.name != "win32k.sys");
+        let listing = read_services(&mut FakeWindows::build(spec), None);
+        assert_eq!(listing.gui, GuiServices::Missing(GuiMiss::NoWin32k));
+        assert_eq!(listing.kernel.services.len(), 3);
+        let mut spec = FakeWindowsSpec::with_services();
+        if let Some(services) = spec.services.as_mut() {
+            services.session_process = 0;
+        }
+        let listing = read_services(&mut FakeWindows::build(spec), None);
+        assert_eq!(listing.gui, GuiServices::Missing(GuiMiss::NoSessionProcess));
+    }
+
+    /// Under KVA shadow a user-mode pause runs on tables that leave the
+    /// kernel out; the KPRCB page the entry stubs read gives the kernel's
+    /// tables, and the walk reads through them: the processes list, and the
+    /// running one is the process those tables belong to.
+    #[test]
+    fn a_user_mode_pause_under_kva_shadow_reads_through_the_kernels_tables() {
+        use crate::debugger::fake_windows::{FakeWindows, FakeWindowsSpec, KPRCB_SHADOW_OFFSET};
+        let mut fake = FakeWindows::build(FakeWindowsSpec::with_services());
+        let csrss = 0x3_0000;
+        // The kernel's CR3 with PCID 2 in its low bits.
+        fake.pause_in_user_mode_under_kva_shadow(csrss, csrss | 2);
+        let view = fake.view;
+        let mut discovery = WindowsDiscovery::default();
+        let read = read_windows(&mut fake.guest, &view, PROCESSES, &mut discovery, None);
+        assert_eq!(read.through, ReadThrough::KernelTables { cr3: csrss | 2 });
+        let SystemListing::Processes(listing) = &read.system else {
+            panic!("the processes read as {:?}", read.system);
+        };
+        assert_eq!(listing.processes.len(), 3);
+        let current: Vec<&str> = listing.processes.iter().filter(|p| p.current).map(|p| p.name.as_str()).collect();
+        assert_eq!(current, ["csrss.exe"]);
+        assert!(matches!(&listing.modules, Some(modules) if matches!(&modules.read, ModuleRead::Listed(listed) if listed.len() == 3)));
+        assert_eq!(discovery.kva_shadow, Some(KPRCB_SHADOW_OFFSET));
+        let ssdt = ssdt_of(read_windows(&mut fake.guest, &view, SystemView::Ssdt, &mut discovery, None));
+        assert_eq!(ssdt.kernel.services.len(), 3);
+    }
+
+    /// A value in the KPRCB's shadow page that maps the kernel but belongs
+    /// to another process (the paused code does not map there) is not
+    /// taken; with no kernel tables found the kernel reads unmapped.
+    #[test]
+    fn a_shadow_page_without_this_processs_kernel_tables_reads_unmapped() {
+        use crate::debugger::fake_windows::{FakeWindows, FakeWindowsSpec};
+        for value in [0x2_0000, 0] {
+            let mut fake = FakeWindows::build(FakeWindowsSpec::with_services());
+            fake.pause_in_user_mode_under_kva_shadow(0x3_0000, value);
+            let view = fake.view;
+            let read = read_windows(&mut fake.guest, &view, PROCESSES, &mut WindowsDiscovery::default(), None);
+            assert!(
+                matches!(read.system, SystemListing::NoWindowsKernel(KernelMiss::KernelUnmapped)),
+                "{value:#x}: {:?}",
+                read.system
+            );
+        }
+    }
+
+    /// A kernel-mode pause reads through the processor's own tables.
+    #[test]
+    fn a_kernel_mode_pause_reads_through_the_processors_tables() {
+        use crate::debugger::fake_windows::{FakeWindows, FakeWindowsSpec};
+        let mut fake = FakeWindows::build(FakeWindowsSpec::with_services());
+        let view = fake.view;
+        let read = read_windows(&mut fake.guest, &view, PROCESSES, &mut WindowsDiscovery::default(), None);
+        assert_eq!(read.through, ReadThrough::ProcessorTables);
     }
 
     /// The processes view every listing test asks for.
@@ -3859,6 +4722,7 @@ mod tests {
             size: 0x20_0000,
             time_date_stamp: 1,
             pdb: FakePdb { guid: [0x22; 16], age: 1, path: "edge.pdb" },
+            sections: Vec::new(),
         });
         let mut fake = FakeWindows::build(spec);
         let view = fake.view;

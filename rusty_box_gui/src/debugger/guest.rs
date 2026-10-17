@@ -94,11 +94,16 @@ impl<T: Instrumentation, E: SliceEngine<T>> GuestMemory for DebugCpu<'_, T, E> {
 }
 
 /// A guest made of a page map, for tests: physical pages, a kernel half every
-/// address space shares, and per address space a user half. Every page is
-/// writable and executable; user-half pages are user pages.
+/// address space shares, per address space a user half, and per address space
+/// session pages — kernel-half pages only that space maps, as Windows maps
+/// `win32k` and its session data. An isolated address space (a KVA-shadow
+/// user space) sees its session pages and none of the shared kernel half.
+/// Every page is writable and executable; user-half pages are user pages. A
+/// CR3 value names its space by its table address alone, as the processor's
+/// walk reads it (the PCID bits and bit 63 are not part of it).
 #[cfg(test)]
 pub(crate) mod fake {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
 
     use super::*;
     use rusty_box::cpu::PageAccess;
@@ -106,6 +111,8 @@ pub(crate) mod fake {
     pub(crate) const PAGE: u64 = 0x1000;
     /// The first address of the kernel half.
     pub(crate) const KERNEL_HALF: u64 = 0xFFFF_8000_0000_0000;
+    /// The bits of a CR3 value that address its top-level table.
+    const CR3_TABLE: u64 = 0x000F_FFFF_FFFF_F000;
 
     pub(crate) struct FakeGuest {
         /// The live processor's address space.
@@ -115,7 +122,21 @@ pub(crate) mod fake {
         kernel: BTreeMap<u64, u64>,
         /// Linear page to physical page, per address space, for the user half.
         users: BTreeMap<u64, BTreeMap<u64, u64>>,
+        /// Linear page to physical page, per address space, for kernel-half
+        /// pages only that space maps.
+        sessions: BTreeMap<u64, BTreeMap<u64, u64>>,
+        /// Address spaces that do not map the shared kernel half.
+        isolated: BTreeSet<u64>,
         next_free: u64,
+    }
+
+    /// Which map a write lands in.
+    #[derive(Clone, Copy)]
+    enum Space {
+        /// The user half of `cr3`, or the shared kernel half.
+        Ordinary,
+        /// `cr3`'s own kernel-half pages.
+        Session,
     }
 
     impl FakeGuest {
@@ -125,21 +146,44 @@ pub(crate) mod fake {
                 physical: BTreeMap::new(),
                 kernel: BTreeMap::new(),
                 users: BTreeMap::new(),
+                sessions: BTreeMap::new(),
+                isolated: BTreeSet::new(),
                 next_free: 0x10_0000,
             }
         }
 
-        fn pages_of(&mut self, cr3: u64, page: u64) -> &mut BTreeMap<u64, u64> {
-            if page >= KERNEL_HALF {
-                &mut self.kernel
-            } else {
-                self.users.entry(cr3).or_default()
+        /// Makes the space at `cr3` the one the live processor runs on.
+        pub(crate) fn set_live_cr3(&mut self, cr3: u64) {
+            self.live_cr3 = cr3;
+        }
+
+        /// Maps the user half of the space at `from` into the space at `to`
+        /// too, onto the same physical pages, as a process's KVA-shadow
+        /// tables map its user half.
+        pub(crate) fn alias_user_half(&mut self, from: u64, to: u64) {
+            let pages = self.users.get(&(from & CR3_TABLE)).cloned().unwrap_or_default();
+            self.users.insert(to & CR3_TABLE, pages);
+        }
+
+        /// Leaves the shared kernel half out of the space at `cr3`: only its
+        /// session pages map there, as a KVA-shadow user space maps only the
+        /// kernel's entry pages.
+        pub(crate) fn isolate(&mut self, cr3: u64) {
+            self.isolated.insert(cr3 & CR3_TABLE);
+        }
+
+        fn pages_of(&mut self, cr3: u64, page: u64, space: Space) -> &mut BTreeMap<u64, u64> {
+            let cr3 = cr3 & CR3_TABLE;
+            match space {
+                Space::Session => self.sessions.entry(cr3).or_default(),
+                Space::Ordinary if page >= KERNEL_HALF => &mut self.kernel,
+                Space::Ordinary => self.users.entry(cr3).or_default(),
             }
         }
 
-        fn physical_page(&mut self, cr3: u64, page: u64) -> u64 {
+        fn physical_page(&mut self, cr3: u64, page: u64, space: Space) -> u64 {
             let fresh = self.next_free;
-            let physical = *self.pages_of(cr3, page).entry(page).or_insert(fresh);
+            let physical = *self.pages_of(cr3, page, space).entry(page).or_insert(fresh);
             if physical == fresh {
                 self.next_free += PAGE;
                 self.physical.insert(physical, Box::new([0; PAGE as usize]));
@@ -147,18 +191,28 @@ pub(crate) mod fake {
             physical
         }
 
+        fn write_in(&mut self, cr3: u64, linear: u64, bytes: &[u8], space: Space) {
+            for (offset, byte) in bytes.iter().enumerate() {
+                let at = linear.wrapping_add(offset as u64);
+                let physical = self.physical_page(cr3, at & !(PAGE - 1), space);
+                if let Some(page) = self.physical.get_mut(&physical) {
+                    page[(at & (PAGE - 1)) as usize] = *byte;
+                }
+            }
+        }
+
         /// Writes `bytes` at `linear` in the space at `cr3` (any space, for a
         /// kernel-half address), mapping zeroed pages as needed. A write that
         /// runs past the top of the address space wraps, as the processor's
         /// addresses do.
         pub(crate) fn write(&mut self, cr3: u64, linear: u64, bytes: &[u8]) {
-            for (offset, byte) in bytes.iter().enumerate() {
-                let at = linear.wrapping_add(offset as u64);
-                let physical = self.physical_page(cr3, at & !(PAGE - 1));
-                if let Some(page) = self.physical.get_mut(&physical) {
-                    page[(at & (PAGE - 1)) as usize] = *byte;
-                }
-            }
+            self.write_in(cr3, linear, bytes, Space::Ordinary);
+        }
+
+        /// Writes `bytes` at kernel-half `linear` in session pages only the
+        /// space at `cr3` maps.
+        pub(crate) fn write_session(&mut self, cr3: u64, linear: u64, bytes: &[u8]) {
+            self.write_in(cr3, linear, bytes, Space::Session);
         }
 
         pub(crate) fn write_u64(&mut self, cr3: u64, linear: u64, value: u64) {
@@ -176,12 +230,14 @@ pub(crate) mod fake {
         /// Unmaps the page holding `linear`: a page the guest paged out.
         pub(crate) fn page_out(&mut self, cr3: u64, linear: u64) {
             let page = linear & !(PAGE - 1);
-            self.pages_of(cr3, page).remove(&page);
+            self.pages_of(cr3, page, Space::Ordinary).remove(&page);
         }
 
         fn lookup(&self, cr3: u64, page: u64) -> Option<u64> {
             if page >= KERNEL_HALF {
-                self.kernel.get(&page).copied()
+                let session = self.sessions.get(&cr3).and_then(|pages| pages.get(&page));
+                let shared = || if self.isolated.contains(&cr3) { None } else { self.kernel.get(&page) };
+                session.or_else(shared).copied()
             } else {
                 self.users.get(&cr3)?.get(&page).copied()
             }
@@ -193,7 +249,7 @@ pub(crate) mod fake {
             let cr3 = match root {
                 Root::Live => self.live_cr3,
                 Root::Process(cr3) => cr3,
-            };
+            } & CR3_TABLE;
             let page = self.lookup(cr3, linear & !(PAGE - 1))?;
             Some(page + (linear & (PAGE - 1)))
         }
@@ -216,11 +272,15 @@ pub(crate) mod fake {
             if range.start >= range.end {
                 return MappingWalk::Complete;
             }
+            let cr3 = cr3 & CR3_TABLE;
             let empty = BTreeMap::new();
             let user = self.users.get(&cr3).unwrap_or(&empty);
+            let session = self.sessions.get(&cr3).unwrap_or(&empty);
+            let shared = if self.isolated.contains(&cr3) { &empty } else { &self.kernel };
             let pages = user
                 .range(range.start..range.end)
-                .chain(self.kernel.range(range.start..range.end));
+                .chain(session.range(range.start..range.end))
+                .chain(shared.range(range.start..range.end));
             for (&linear, &physical) in pages {
                 let mapping = PageMapping {
                     linear,

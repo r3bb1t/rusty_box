@@ -12,7 +12,7 @@ use super::guest::{GuestMemory, GuestRead, Root};
 use super::kernel_layout::{same_layouts, KernelLayout};
 use super::module_identity::GuestIdentity;
 use super::windows::{
-    read_thread_view, read_windows, KernelLayouts, LiveTeb, SystemListing, SystemView,
+    read_thread_view, read_windows, KernelLayouts, LiveTeb, ReadThrough, SystemListing, SystemView,
     ThreadView, ThreadViewRead, ViewMiss, ViewTarget, WindowsDiscovery,
 };
 
@@ -200,6 +200,8 @@ pub(crate) struct DebugSnapshot {
     pub(crate) layout: Option<Arc<KernelLayout>>,
     /// Whose layouts the walks read the kernel by, once it was found.
     pub(crate) layouts: Option<KernelLayouts>,
+    /// Whose page tables the walks read the kernel through.
+    pub(crate) through: ReadThrough,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -308,6 +310,7 @@ pub(crate) fn read_snapshot<T: Instrumentation, E: SliceEngine<T>>(
             viewing: Viewing::Live,
             layout: layout.cloned(),
             layouts: None,
+            through: ReadThrough::ProcessorTables,
         };
     };
     let shown = cpu.view();
@@ -383,6 +386,7 @@ pub(crate) fn read_snapshot<T: Instrumentation, E: SliceEngine<T>>(
             symbols: last.symbols.clone(),
             system: last.system.clone(),
             layouts: last.layouts,
+            through: last.through,
         },
         None => {
             let windows = read_windows(&mut cpu, &shown, view.system, discovery, layout);
@@ -393,17 +397,19 @@ pub(crate) fn read_snapshot<T: Instrumentation, E: SliceEngine<T>>(
                     symbols: thread.symbols.clone(),
                     system: windows.system,
                     layouts: windows.layouts,
+                    through: windows.through,
                 },
                 Viewing::Live | Viewing::Running { .. } | Viewing::Miss(_) => GuestStructures {
                     process: windows_image_path(&mut cpu, &shown),
                     symbols: windows.symbols,
                     system: windows.system,
                     layouts: windows.layouts,
+                    through: windows.through,
                 },
             }
         }
     };
-    let GuestStructures { process, symbols, system, layouts } = structures;
+    let GuestStructures { process, symbols, system, layouts, through } = structures;
     let memory_space = match start.space {
         AddressSpace::Process { cr3 } => Some(cr3),
         AddressSpace::Linear | AddressSpace::Physical => None,
@@ -423,6 +429,7 @@ pub(crate) fn read_snapshot<T: Instrumentation, E: SliceEngine<T>>(
         viewing,
         layout: layout.cloned(),
         layouts,
+        through,
     }
 }
 
@@ -432,6 +439,7 @@ struct GuestStructures {
     symbols: SymbolIndex,
     system: SystemListing,
     layouts: Option<KernelLayouts>,
+    through: ReadThrough,
 }
 
 /// A thread-view read as the snapshot carries it.
