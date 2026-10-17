@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 
+use rusty_box::cpu::{CodeBreakpoint, CodeBreakpointHit};
 use rusty_box::emulator::PowerState;
 
 use super::inspect::{DebugSnapshot, MemoryTarget, ViewRequest};
@@ -40,6 +41,8 @@ pub(crate) enum Task {
     DumpRam(PathBuf),
     /// Search memory, and show the hit.
     Find(FindRequest),
+    /// Give the machine this set of code breakpoints.
+    ApplyBreakpoints(Vec<CodeBreakpoint>),
 }
 
 /// What a run thread does once its machine handed control back.
@@ -78,6 +81,12 @@ pub(crate) enum DebugNote {
     /// A machine on the hypervisor retires instructions nothing counts, so it
     /// cannot stop after one.
     StepNeedsInterpreter,
+    /// A machine on the hypervisor meets no instruction boundary this port
+    /// sees, so it cannot stop before one.
+    BreakpointsNeedInterpreter,
+    /// The machine holds at most `MAX_LINEAR_BREAKPOINTS` code breakpoints of
+    /// a kind.
+    TooManyBreakpoints,
 }
 
 /// How a run begins.
@@ -125,6 +134,11 @@ struct ControlState {
     /// The kernel PDB's layouts, which the shell hands over once its tables
     /// load; the walks read the guest's structures under them.
     kernel_layout: Option<Arc<KernelLayout>>,
+    /// The shell's code breakpoints: given to the machine at every run's
+    /// start, and again whenever the shell changes them.
+    breakpoints: Vec<CodeBreakpoint>,
+    /// The code breakpoint the run is paused at, until it runs on or steps.
+    stopped_at: Option<CodeBreakpointHit>,
 }
 
 /// One VM's run control, shared by the shell and the VM's run thread.
@@ -158,6 +172,8 @@ impl RunControl {
                 note: None,
                 dump_outcomes: Vec::new(),
                 kernel_layout: None,
+                breakpoints: Vec::new(),
+                stopped_at: None,
             }),
             changed: Condvar::new(),
             discovery: Mutex::new(WindowsDiscovery::default()),
@@ -206,7 +222,37 @@ impl RunControl {
         let mut state = self.lock();
         state.wanted = Wanted::Run;
         state.note = None;
+        state.stopped_at = None;
         self.changed.notify_all();
+    }
+
+    /// The shell's code breakpoints become `set`. A live run is given them
+    /// at once: a paused one between its tasks, a running one stopped for
+    /// them and run on after, as a dump is.
+    #[cfg(feature = "gui-egui")]
+    pub(crate) fn set_breakpoints(&self, set: Vec<CodeBreakpoint>) {
+        let mut state = self.lock();
+        if state.breakpoints == set {
+            return;
+        }
+        state.breakpoints = set.clone();
+        if !state.live || state.ending {
+            return;
+        }
+        // Only the newest set is worth giving the machine.
+        state.tasks.retain(|task| !matches!(task, Task::ApplyBreakpoints(_)));
+        state.tasks.push_back(Task::ApplyBreakpoints(set));
+        if state.phase == RunPhase::Running {
+            state.serve_requested = true;
+            self.stop_flag.store(true, Ordering::Relaxed);
+        }
+        self.changed.notify_all();
+    }
+
+    /// The code breakpoint the run is paused at.
+    #[cfg(feature = "gui-egui")]
+    pub(crate) fn stopped_at(&self) -> Option<CodeBreakpointHit> {
+        self.lock().stopped_at
     }
 
     /// Asks for one instruction; only a paused run takes it.
@@ -362,6 +408,7 @@ impl RunControl {
         state.guest_ran = false;
         state.find = None;
         state.searching = false;
+        state.stopped_at = None;
         *self
             .discovery
             .lock()
@@ -412,9 +459,13 @@ impl RunControl {
                 match task {
                     Task::DumpRam(_) => state.dump_in_flight = true,
                     // The step executes an instruction: the snapshot it
-                    // publishes follows the guest's move.
-                    Task::Step => state.guest_ran = true,
-                    Task::Refresh | Task::Find(_) => {}
+                    // publishes follows the guest's move, off the breakpoint
+                    // it may have been paused at.
+                    Task::Step => {
+                        state.guest_ran = true;
+                        state.stopped_at = None;
+                    }
+                    Task::Refresh | Task::Find(_) | Task::ApplyBreakpoints(_) => {}
                 }
                 return BetweenRuns::Perform(task);
             }
@@ -443,6 +494,36 @@ impl RunControl {
 
     pub(crate) fn view(&self) -> ViewRequest {
         self.lock().view
+    }
+
+    /// The shell's code breakpoints, which a run gives its machine at its
+    /// start.
+    pub(crate) fn breakpoints(&self) -> Vec<CodeBreakpoint> {
+        self.lock().breakpoints.clone()
+    }
+
+    /// The machine stopped at `hit` while running: the run pauses, showing
+    /// the processor that stopped.
+    pub(crate) fn stopped_at_breakpoint(&self, hit: CodeBreakpointHit) {
+        let mut state = self.lock();
+        if state.ending {
+            return;
+        }
+        state.wanted = Wanted::Pause;
+        state.serve_requested = true;
+        self.record_stop(&mut state, hit);
+        self.changed.notify_all();
+    }
+
+    /// A step stopped at `hit`: the paused run shows it.
+    pub(crate) fn stepped_onto_breakpoint(&self, hit: CodeBreakpointHit) {
+        let mut state = self.lock();
+        self.record_stop(&mut state, hit);
+    }
+
+    fn record_stop(&self, state: &mut ControlState, hit: CodeBreakpointHit) {
+        state.stopped_at = Some(hit);
+        state.view.cpu = hit.cpu;
     }
 
     /// The layouts the walks read under now.
@@ -533,7 +614,7 @@ impl RunControl {
                     path,
                     reason: NOT_SAVED_VM_STOPPED.to_owned(),
                 }),
-                Task::Refresh | Task::Step | Task::Find(_) => {}
+                Task::Refresh | Task::Step | Task::Find(_) | Task::ApplyBreakpoints(_) => {}
             }
         }
         state.searching = false;
@@ -682,6 +763,7 @@ mod tests {
             layout: None,
             layouts: None,
             through: crate::debugger::windows::ReadThrough::ProcessorTables,
+            vmcs: None,
         });
         control.finish_run();
         control.begin_run(RunStart::PowerOn);
@@ -747,6 +829,7 @@ mod tests {
             layout: None,
             layouts: None,
             through: crate::debugger::windows::ReadThrough::ProcessorTables,
+            vmcs: None,
         }
     }
 
@@ -913,5 +996,51 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         assert_eq!(waiter.join().expect("the waiter"), BetweenRuns::End);
+    }
+
+    /// Breakpoints changed while the run runs stop it for the change, which
+    /// is served alone (only the newest set), and the run goes on after.
+    #[test]
+    fn breakpoints_changed_while_running_are_given_to_the_machine_and_it_runs_on() {
+        let control = control();
+        control.begin_run(RunStart::PowerOn);
+        let first = vec![CodeBreakpoint::Linear(0x1000)];
+        let newest = vec![CodeBreakpoint::Linear(0x2000)];
+        control.set_breakpoints(first);
+        control.set_breakpoints(newest.clone());
+        assert!(raised(&control), "the run stops for the change");
+        assert_eq!(control.after_run(PowerState::Running), AfterRun::Serve);
+        assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::ApplyBreakpoints(newest.clone())));
+        assert_eq!(control.next_between_runs(), BetweenRuns::Resume);
+        assert!(!raised(&control), "and runs on");
+        assert_eq!(control.breakpoints(), newest, "kept for the next run");
+        control.set_breakpoints(newest);
+        assert!(!raised(&control), "an unchanged set asks nothing");
+    }
+
+    /// A breakpoint stop pauses the run on the processor that stopped; a
+    /// resume runs on, and the hit is no longer shown.
+    #[test]
+    fn a_breakpoint_stop_pauses_the_run_on_its_processor() {
+        let control = control();
+        control.begin_run(RunStart::PowerOn);
+        let hit = CodeBreakpointHit {
+            cpu: 1,
+            breakpoint: CodeBreakpoint::Linear(0x1000),
+            linear: 0x1000,
+        };
+        control.stopped_at_breakpoint(hit);
+        assert_eq!(control.after_run(PowerState::Running), AfterRun::Serve);
+        assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::Refresh));
+        assert_eq!(control.phase(), RunPhase::Paused);
+        assert_eq!(control.view().cpu, 1, "the stopped processor is shown");
+        assert_eq!(control.stopped_at(), Some(hit));
+        control.step();
+        assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::Step));
+        assert_eq!(control.stopped_at(), None, "a step moves off the breakpoint");
+        control.stepped_onto_breakpoint(hit);
+        control.resume();
+        assert_eq!(control.stopped_at(), None);
+        assert_eq!(control.next_between_runs(), BetweenRuns::Resume);
     }
 }

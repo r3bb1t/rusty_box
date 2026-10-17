@@ -2534,3 +2534,5 @@ fn assert_machine_send_for_every_send_tracer<T: Instrumentation + Send>() {
 
 #[cfg(all(test, feature = "alloc"))]
 mod tests;
+#[cfg(all(test, feature = "std"))]
+mod breakpoint_tests;

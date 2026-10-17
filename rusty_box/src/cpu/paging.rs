@@ -2514,6 +2514,45 @@ pub(crate) enum DbgWalk {
     /// An SVM host's nested tables, from the VMCB's nCR3, under the host's
     /// CR4 and EFER.LMA.
     Nested,
+    /// The paging structures of the guest a VMCS holds, read by a processor
+    /// in VMX root operation: from this CR3 value, under the guest's CR0, CR4
+    /// and EFER, every structure address and the result through the guest's
+    /// EPT. Bochs's debugger has no such walk: its `dbg_xlate_linear2phy`
+    /// reads only the processor's own registers, so it follows a guest only
+    /// while the processor runs it.
+    VmxGuest(VmxGuestWalk),
+}
+
+/// The paging registers a debugger walk reads under.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct DbgPaging {
+    pub(crate) cr0: super::crregs::BxCr0,
+    pub(crate) cr4: super::crregs::BxCr4,
+    pub(crate) efer: super::crregs::BxEfer,
+}
+
+/// A walk of a VMX guest's address space: its CR3 value, its paging
+/// registers, and how its physical addresses reach memory.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct VmxGuestWalk {
+    pub(crate) cr3: u64,
+    pub(crate) paging: DbgPaging,
+    pub(crate) memory: crate::cpu::instrumentation::GuestPhysicalMemory,
+}
+
+impl VmxGuestWalk {
+    /// The address space at `cr3` inside the guest `guest` describes.
+    pub(crate) fn of(guest: &crate::cpu::instrumentation::VmxGuest, cr3: u64) -> Self {
+        Self {
+            cr3,
+            paging: DbgPaging {
+                cr0: super::crregs::BxCr0::from_bits_retain(guest.cr0 as u32),
+                cr4: super::crregs::BxCr4::from_bits_retain(guest.cr4),
+                efer: super::crregs::BxEfer::from_bits_retain(guest.efer as u32),
+            },
+            memory: guest.memory,
+        }
+    }
 }
 
 /// Read-only page walks: they answer where a linear address maps without
@@ -2699,21 +2738,18 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         const BX_LEVEL_PML5: u32 = 4;
         let mut laddr = laddr;
         let mut offset_mask: u64 = 0xfff;
-        let paddress = if !self.cr0.pg() {
+        let paging = self.dbg_paging(walk);
+        let paddress = if !paging.cr0.pg() {
             laddr
         } else {
-            let mut pt_address = self.cr3 & BX_CR3_PAGING_MASK_PAE;
-            let mut the_cr4 = self.cr4;
-            let mut in_long_mode = self.long_mode();
-            match walk {
-                DbgWalk::Guest => {}
-                DbgWalk::Root(cr3) => pt_address = cr3 & BX_CR3_PAGING_MASK_PAE,
-                DbgWalk::Nested => {
-                    pt_address = self.vmcb.ctrls.ncr3 & !0xfff;
-                    the_cr4 = self.vmcb.host_state.cr4;
-                    in_long_mode = self.vmcb.host_state.efer.lma();
-                }
-            }
+            let the_cr4 = paging.cr4;
+            let in_long_mode = paging.efer.lma();
+            let mut pt_address = match walk {
+                DbgWalk::Guest => self.cr3 & BX_CR3_PAGING_MASK_PAE,
+                DbgWalk::Root(cr3) => cr3 & BX_CR3_PAGING_MASK_PAE,
+                DbgWalk::Nested => self.vmcb.ctrls.ncr3 & !0xfff,
+                DbgWalk::VmxGuest(guest) => guest.cr3 & BX_CR3_PAGING_MASK_PAE,
+            };
             if the_cr4.pae() {
                 let mut level = BX_LEVEL_PDE;
                 if !in_long_mode {
@@ -2723,7 +2759,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                         level = BX_LEVEL_PDPTE;
                     } else {
                         let entry = match walk {
-                            DbgWalk::Root(cr3) => {
+                            DbgWalk::Root(cr3) | DbgWalk::VmxGuest(VmxGuestWalk { cr3, .. }) => {
                                 // A PAE root is 32 bytes at CR3[31:5]: four PDPTEs.
                                 let at = (cr3 & 0xffff_ffe0) + ((laddr >> 30) & 3) * 8;
                                 let at = self.dbg_nested_translation(at, walk)?;
@@ -2824,8 +2860,40 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
     where
         F: FnMut(crate::cpu::instrumentation::PageMapping) -> crate::cpu::instrumentation::WalkStep,
     {
+        self.dbg_page_mappings_of(DbgWalk::Root(cr3), cr3, range, visit)
+    }
+
+    /// [`Self::dbg_page_mappings`] in the address space at `cr3` inside the
+    /// VMX guest `walk` describes: under the guest's paging registers, every
+    /// structure address and every page through the guest's EPT, so a
+    /// mapping's physical address is the machine's.
+    pub(crate) fn dbg_vmx_guest_page_mappings<F>(
+        &mut self,
+        walk: VmxGuestWalk,
+        range: crate::cpu::instrumentation::LinearRange,
+        visit: &mut F,
+    ) -> crate::cpu::instrumentation::MappingWalk
+    where
+        F: FnMut(crate::cpu::instrumentation::PageMapping) -> crate::cpu::instrumentation::WalkStep,
+    {
+        self.dbg_page_mappings_of(DbgWalk::VmxGuest(walk), walk.cr3, range, visit)
+    }
+
+    /// The mapping walk of the tables at `cr3`, read under `walk`'s paging
+    /// registers and nested step.
+    fn dbg_page_mappings_of<F>(
+        &mut self,
+        walk: DbgWalk,
+        cr3: u64,
+        range: crate::cpu::instrumentation::LinearRange,
+        visit: &mut F,
+    ) -> crate::cpu::instrumentation::MappingWalk
+    where
+        F: FnMut(crate::cpu::instrumentation::PageMapping) -> crate::cpu::instrumentation::WalkStep,
+    {
         use crate::cpu::instrumentation::{MappingWalk, PageAccess, WalkStep};
-        if !self.cr0.pg() {
+        let paging = self.dbg_paging(walk);
+        if !paging.cr0.pg() {
             return MappingWalk::PagingOff;
         }
         let full = PageAccess {
@@ -2833,12 +2901,11 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
             writable: true,
             executable: true,
         };
-        let walk = DbgWalk::Root(cr3);
-        let step = if self.long_mode() {
-            let levels = if self.cr4.la57() { 5 } else { 4 };
+        let step = if paging.efer.lma() {
+            let levels = if paging.cr4.la57() { 5 } else { 4 };
             let table = cr3 & BX_CR3_PAGING_MASK_PAE;
             self.dbg_map_wide(table, levels - 1, 0, levels, full, range, walk, visit)
-        } else if self.cr4.pae() {
+        } else if paging.cr4.pae() {
             // A PAE root is 32 bytes at CR3[31:5]: four PDPTEs, which carry
             // no access bits of their own.
             let mut step = WalkStep::Continue;
@@ -2911,7 +2978,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         use crate::cpu::instrumentation::{PageAccess, PageMapping, WalkStep};
         let shift = 12 + 9 * level;
         let span = 1u64 << shift;
-        let nxe = self.efer.nxe();
+        let nxe = self.dbg_paging(walk).efer.nxe();
         for index in 0..512u64 {
             let mut linear = base | (index << shift);
             if top_levels > 0 {
@@ -3012,7 +3079,7 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
                 continue;
             }
             let dir_access = access_of(pde, full);
-            if pde & 0x80 != 0 && self.cr4.pse() {
+            if pde & 0x80 != 0 && self.dbg_paging(walk).cr4.pse() {
                 let frame = (pde & 0xffc0_0000) + ((pde & 0x003f_e000) << 19);
                 let Some(physical) = self.dbg_nested_translation(frame, walk) else {
                     continue;
@@ -3068,9 +3135,19 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         guest_paddr: BxPhyAddress,
         walk: DbgWalk,
     ) -> Option<BxPhyAddress> {
+        use crate::cpu::instrumentation::GuestPhysicalMemory;
+        if let DbgWalk::VmxGuest(guest) = walk {
+            return match guest.memory {
+                GuestPhysicalMemory::Direct => Some(guest_paddr),
+                GuestPhysicalMemory::Ept { eptp } => {
+                    self.dbg_translate_guest_physical_ept(guest_paddr, eptp)
+                }
+            };
+        }
         let mut paddr = guest_paddr;
         if self.ept_active() {
-            paddr = self.dbg_translate_guest_physical_ept(paddr)?;
+            let eptp = self.vmcs.eptptr;
+            paddr = self.dbg_translate_guest_physical_ept(paddr, eptp)?;
         }
         if walk != DbgWalk::Nested && self.in_svm_guest && self.vmcb.ctrls.nested_paging {
             paddr = self.dbg_xlate_linear2phy(paddr, DbgWalk::Nested)?;
@@ -3078,14 +3155,37 @@ impl<T: crate::cpu::instrumentation::Instrumentation> crate::cpu::exec_ctx::Exec
         Some(paddr)
     }
 
-    /// Bochs paging.cc `dbg_translate_guest_physical_ept`.
-    fn dbg_translate_guest_physical_ept(&mut self, guest_paddr: BxPhyAddress) -> Option<BxPhyAddress> {
+    /// The paging registers `walk` reads under: a VMX guest's own, an SVM
+    /// host's CR4 and EFER for its nested tables, else the processor's.
+    fn dbg_paging(&self, walk: DbgWalk) -> DbgPaging {
+        match walk {
+            DbgWalk::Guest | DbgWalk::Root(_) => DbgPaging {
+                cr0: self.cr0,
+                cr4: self.cr4,
+                efer: self.efer,
+            },
+            DbgWalk::Nested => DbgPaging {
+                cr0: self.cr0,
+                cr4: self.vmcb.host_state.cr4,
+                efer: self.vmcb.host_state.efer,
+            },
+            DbgWalk::VmxGuest(guest) => guest.paging,
+        }
+    }
+
+    /// Bochs paging.cc `dbg_translate_guest_physical_ept`, through the EPT
+    /// paging structures the EPT pointer `eptp` names.
+    fn dbg_translate_guest_physical_ept(
+        &mut self,
+        guest_paddr: BxPhyAddress,
+        eptp: u64,
+    ) -> Option<BxPhyAddress> {
         use super::decoder::features::X86Feature;
         // BX_EPT_ENTRY_NOT_PRESENT, _WRITE_ONLY, _WRITE_EXECUTE
         const EPT_ENTRY_NOT_PRESENT: u64 = 0;
         const EPT_ENTRY_WRITE_ONLY: u64 = 2;
         const EPT_ENTRY_WRITE_EXECUTE: u64 = 6;
-        let mut pt_address = self.vmcs.eptptr & !0xfff;
+        let mut pt_address = eptp & !0xfff;
         let mut offset_mask: u64 = 0x0000_ffff_ffff_ffff;
         let mut level: u32 = 3; // BX_LEVEL_PML4
         loop {

@@ -964,7 +964,6 @@ fn save_v3_vmcs_cache<W: SnapWrite>(
     vm: &super::vmx::VmcsCache,
 ) -> SnapResult<()> {
     write_v3_fields!(writer;
-        write_bool(vm.launched),
         write_u64(vm.host_cr0), write_u64(vm.host_cr3), write_u64(vm.host_cr4),
         write_u64(vm.host_rsp), write_u64(vm.host_rip),
         write_u16(vm.host_cs_selector), write_u16(vm.host_ss_selector),
@@ -1080,7 +1079,6 @@ fn restore_v3_vmcs_cache<R: SnapRead>(
     vm: &mut super::vmx::VmcsCache,
 ) -> SnapResult<()> {
     read_v3_fields!(reader, vm;
-        read_bool => launched,
         read_u64 => host_cr0, read_u64 => host_cr3, read_u64 => host_cr4,
         read_u64 => host_rsp, read_u64 => host_rip,
         read_u16 => host_cs_selector, read_u16 => host_ss_selector,
@@ -1342,8 +1340,7 @@ mod tests {
         cpu.vmcsptr = 0x0012_3000;
         cpu.vmxonptr = 0x0056_7000;
 
-        cpu.vmcs.launched = true;
-        cpu.vmcs.host_cr0 = 0x8000_0031; // first serialized u64 field
+        cpu.vmcs.host_cr0 = 0x8000_0031; // first serialized field
         cpu.vmcs.guest_cs_selector = 0x1234;
         cpu.vmcs.exit_reason = 0x77;
         cpu.vmcs.exit_qualification = 0xABCD_EF01;
@@ -1366,7 +1363,6 @@ mod tests {
         assert_eq!(restored.vmcsptr, 0x0012_3000);
         assert_eq!(restored.vmxonptr, 0x0056_7000);
 
-        assert!(restored.vmcs.launched);
         assert_eq!(restored.vmcs.host_cr0, 0x8000_0031);
         assert_eq!(restored.vmcs.guest_cs_selector, 0x1234);
         assert_eq!(restored.vmcs.exit_reason, 0x77);

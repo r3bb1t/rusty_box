@@ -616,6 +616,50 @@ pub struct CpuDebugView {
     pub idtr: DescriptorTable,
 }
 
+/// The guest a VMM runs, as its current VMCS holds it while the processor is
+/// in VMX root operation: every VM exit writes the guest's state into the
+/// VMCS's guest-state area (Bochs vmx.cc `VMexitSaveGuestState`), and the
+/// next VM entry loads it from there. The general-purpose registers other
+/// than RSP, the FPU and vector state and `IA32_KERNEL_GS_BASE` are not in
+/// the VMCS: a VMM keeps them in its own memory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VmxGuest {
+    /// Guest-physical address of the VMCS region it was read from.
+    pub vmcs: u64,
+    pub rip: u64,
+    pub rsp: u64,
+    pub rflags: u64,
+    pub cr0: u64,
+    pub cr3: u64,
+    pub cr4: u64,
+    /// IA32_EFER as the guest runs under it: the VMCS's guest field when VM
+    /// entry loads it, else the processor's own with LMA and LME as VM entry
+    /// leaves them for the "IA-32e mode guest" control (Bochs vmx.cc
+    /// `VMenterLoadCheckGuestState`).
+    pub efer: u64,
+    pub mode: ExecutionMode,
+    /// The size the guest decodes its next instruction at.
+    pub code_size: CodeSize,
+    /// The guest's privilege level: its SS's DPL, as VM entry sets it.
+    pub cpl: u8,
+    pub activity: ProcessorActivity,
+    pub segment_bases: SegmentBases,
+    pub gdtr: DescriptorTable,
+    pub idtr: DescriptorTable,
+    /// How the guest's physical addresses reach the machine's memory.
+    pub memory: GuestPhysicalMemory,
+}
+
+/// How a VMX guest's physical addresses reach the machine's memory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GuestPhysicalMemory {
+    /// They are the machine's physical addresses: the VMM enables no EPT.
+    Direct,
+    /// Through the EPT paging structures `eptp` (the VMCS's EPT pointer)
+    /// names.
+    Ept { eptp: u64 },
+}
+
 /// A descriptor-table register (GDTR, IDTR): the table's linear base and
 /// its limit, the offset of its last byte.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -917,6 +961,9 @@ pub enum EmuStopReason {
     Shutdown,
     /// RIP reached one of the configured exit addresses.
     ReachedExit(u64),
+    /// A processor stopped before the instruction at a debugger code
+    /// breakpoint (`Emulator::set_code_breakpoints`).
+    ReachedBreakpoint(crate::cpu::CodeBreakpointHit),
 }
 
 // ─────────────────────────── CpuSetupMode ───────────────────────────

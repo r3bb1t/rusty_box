@@ -4654,6 +4654,49 @@ mod tests {
         }
     }
 
+    /// A pause in a hypervisor (VMX root operation) shows the VMM, whose
+    /// registers lead to no Windows; read as the guest its VMCS holds, the
+    /// processes list, and the GUI services read in the session process's
+    /// space inside that guest.
+    #[test]
+    fn a_pause_in_a_hypervisor_reads_windows_as_the_guest_its_vmcs_holds() {
+        use crate::debugger::fake_windows::{FakeWindows, FakeWindowsSpec};
+        use crate::debugger::guest::{vmx_guest_view, LiveAt, PausedCpu};
+        let fake = FakeWindows::build(FakeWindowsSpec::with_services());
+        let user_process = fake.eprocess(1);
+        let mut pause = fake.pause_in_a_hypervisor();
+        let mut own = PausedCpu { cpu: &mut pause.host, vmx_guest: None };
+        let read = read_windows(&mut own, &pause.view, PROCESSES, &mut WindowsDiscovery::default(), None);
+        assert!(matches!(read.system, SystemListing::NoWindowsKernel(_)), "{:?}", read.system);
+
+        let view = vmx_guest_view(&pause.guest, &pause.view);
+        let mut paused = PausedCpu { cpu: &mut pause.host, vmx_guest: Some(pause.guest) };
+        let mut guest = LiveAt { memory: &mut paused, live_cr3: Some(pause.guest.cr3) };
+        let mut discovery = WindowsDiscovery::default();
+        let read = read_windows(&mut guest, &view, PROCESSES, &mut discovery, None);
+        let SystemListing::Processes(listing) = &read.system else {
+            panic!("the processes read as {:?}", read.system);
+        };
+        assert_eq!(listing.processes.len(), 3);
+        let ssdt = ssdt_of(read_windows(&mut guest, &view, SystemView::Ssdt, &mut discovery, None));
+        assert_eq!(ssdt.kernel.services.len(), 3);
+        assert!(matches!(ssdt.gui, GuiServices::Listed(_)), "{:?}", ssdt.gui);
+
+        let memory_map = SystemView::Processes {
+            selected: Some(user_process),
+            detail: ProcessDetail::MemoryMap,
+            module: None,
+            module_detail: ModuleDetail::Sections,
+        };
+        let read = read_windows(&mut guest, &view, memory_map, &mut discovery, None);
+        let SystemListing::Processes(listing) = &read.system else {
+            panic!("the processes read as {:?}", read.system);
+        };
+        let map = listing.modules.as_ref().and_then(|modules| modules.map.as_ref());
+        let resident: u64 = map.map_or(0, |map| map.regions.iter().map(|region| region.resident_pages).sum());
+        assert!(resident > 0, "the process's pages are walked in the guest: {:?}", listing.modules);
+    }
+
     /// A kernel-mode pause reads through the processor's own tables.
     #[test]
     fn a_kernel_mode_pause_reads_through_the_processors_tables() {

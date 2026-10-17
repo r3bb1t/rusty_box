@@ -5,12 +5,17 @@
 //! that device's read, as it is in Bochs.
 
 use crate::cpu::instrumentation::{
-    CpuDebugView, Fetched, Instrumentation, LinearRange, MappingWalk, PageMapping, WalkStep,
+    CpuDebugView, Fetched, Instrumentation, LinearRange, MappingWalk, PageMapping, VmxGuest,
+    WalkStep,
 };
+use crate::cpu::paging::{DbgWalk, VmxGuestWalk};
+#[cfg(doc)]
+use crate::cpu::{MAX_LINEAR_BREAKPOINTS, MAX_PHYSICAL_BREAKPOINTS};
+use crate::cpu::{BreakpointRefusal, BreakpointSupport, CodeBreakpoint, CodeBreakpointHit};
 use crate::memory::{misc_mem::DbgFetch, mmio_map::MmioHit, CpuMemoryPolicy};
 use crate::Result;
 
-use super::{Emulator, SliceEngine, SoftwareEngine};
+use super::{Emulator, SliceEngine, SoftwareEngine, StopCause};
 
 /// A byte's place in guest RAM's storage order, which is not a physical
 /// address (R4): below the PCI hole the two agree, and the RAM above the
@@ -60,6 +65,49 @@ impl<T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
             index,
         })
     }
+
+    /// Replaces the debugger's code breakpoints on every processor: Bochs's
+    /// `lbreak` and `pbreak`, up to [`MAX_LINEAR_BREAKPOINTS`] and
+    /// [`MAX_PHYSICAL_BREAKPOINTS`]. A processor that reaches one stops before
+    /// its instruction executes; the run reports
+    /// [`StopReason::Breakpoint`](super::StopReason::Breakpoint) and raises the
+    /// stop flag, and the run after the flag is lowered executes that
+    /// instruction. Nothing is written to guest memory and no debug register
+    /// changes, so the guest cannot tell. An empty slice clears them.
+    ///
+    /// # Errors
+    /// [`BreakpointRefusal`] when a kind has more breakpoints than slots, or
+    /// when breakpoints are asked of an engine that does not run the guest
+    /// through the interpreter ([`SliceEngine::CODE_BREAKPOINTS`]). A refused
+    /// set leaves the one before it in place.
+    pub fn set_code_breakpoints(
+        &mut self,
+        breakpoints: &[CodeBreakpoint],
+    ) -> core::result::Result<(), BreakpointRefusal> {
+        match E::CODE_BREAKPOINTS {
+            BreakpointSupport::Honoured => {}
+            BreakpointSupport::Refused if breakpoints.is_empty() => {}
+            BreakpointSupport::Refused => return Err(BreakpointRefusal::EngineCannotStop),
+        }
+        for index in 0..self.cpu_count() {
+            self.cpu_mut_at(index).set_code_breakpoints(breakpoints)?;
+        }
+        Ok(())
+    }
+
+    /// The code breakpoint the machine stopped at, while the stop flag it
+    /// raised still stands, for a driver that reads no stop reason
+    /// (`run_interactive` returns a count). A hit is told once — here or as a
+    /// run's [`StopReason::Breakpoint`](super::StopReason::Breakpoint),
+    /// whichever asks first — and the flag then stands as a plain stop.
+    pub fn stopped_at_breakpoint(&mut self) -> Option<CodeBreakpointHit> {
+        let cause = self.stop_in_force()?;
+        self.breakpoint_reported(cause);
+        match cause {
+            StopCause::Breakpoint(hit) => Some(hit),
+            StopCause::HostRequested | StopCause::GuestPowerOff | StopCause::EngineFault => None,
+        }
+    }
 }
 
 impl<T: Instrumentation, E: SliceEngine<T>> DebugCpu<'_, T, E> {
@@ -74,7 +122,7 @@ impl<T: Instrumentation, E: SliceEngine<T>> DebugCpu<'_, T, E> {
     pub fn dbg_xlate_linear2phy(&mut self, laddr: u64) -> Option<u64> {
         self.machine
             .exec_ctx(self.index)
-            .dbg_xlate_linear2phy(laddr, crate::cpu::paging::DbgWalk::Guest)
+            .dbg_xlate_linear2phy(laddr, DbgWalk::Guest)
     }
 
     /// [`Self::dbg_xlate_linear2phy`] through another address space: the
@@ -84,7 +132,7 @@ impl<T: Instrumentation, E: SliceEngine<T>> DebugCpu<'_, T, E> {
     pub fn dbg_xlate_linear2phy_in(&mut self, cr3: u64, laddr: u64) -> Option<u64> {
         self.machine
             .exec_ctx(self.index)
-            .dbg_xlate_linear2phy(laddr, crate::cpu::paging::DbgWalk::Root(cr3))
+            .dbg_xlate_linear2phy(laddr, DbgWalk::Root(cr3))
     }
 
     /// Every page the paging structures rooted at the CR3 value `cr3` map
@@ -99,6 +147,45 @@ impl<T: Instrumentation, E: SliceEngine<T>> DebugCpu<'_, T, E> {
         self.machine
             .exec_ctx(self.index)
             .dbg_page_mappings(cr3, range, &mut visit)
+    }
+
+    /// The guest the current VMCS holds, while this processor is in VMX root
+    /// operation — a VMM paused between two runs of its guest — and that VMCS
+    /// has been launched: the guest's state as the last VM exit from it wrote
+    /// it into the VMCS. `None` when the processor is not in VMX root
+    /// operation or has no launched VMCS; inside a guest, [`Self::view`] is
+    /// already the guest's. Bochs's debugger has no such view: it reads the
+    /// processor's own registers only.
+    pub fn vmx_guest(&mut self) -> Option<VmxGuest> {
+        self.machine.exec_ctx(self.index).vmx_guest()
+    }
+
+    /// [`Self::dbg_xlate_linear2phy_in`] inside the VMX guest `guest`: the
+    /// paging structures rooted at the CR3 value `cr3`, read under the
+    /// guest's CR0, CR4 and EFER, every structure address and the result
+    /// through the guest's EPT ([`VmxGuest::memory`]), so the address
+    /// returned is the machine's — what [`Self::dbg_fetch_mem`] reads.
+    pub fn dbg_xlate_vmx_guest_linear2phy(&mut self, guest: &VmxGuest, cr3: u64, laddr: u64) -> Option<u64> {
+        let walk = DbgWalk::VmxGuest(VmxGuestWalk::of(guest, cr3));
+        self.machine.exec_ctx(self.index).dbg_xlate_linear2phy(laddr, walk)
+    }
+
+    /// [`Self::dbg_page_mappings_in`] inside the VMX guest `guest`, read as
+    /// [`Self::dbg_xlate_vmx_guest_linear2phy`] reads it: each mapping's
+    /// physical address is the machine's.
+    pub fn dbg_vmx_guest_page_mappings<F>(
+        &mut self,
+        guest: &VmxGuest,
+        cr3: u64,
+        range: LinearRange,
+        mut visit: F,
+    ) -> MappingWalk
+    where
+        F: FnMut(PageMapping) -> WalkStep,
+    {
+        self.machine
+            .exec_ctx(self.index)
+            .dbg_vmx_guest_page_mappings(VmxGuestWalk::of(guest, cr3), range, &mut visit)
     }
 
     /// Bochs misc_mem.cc `dbg_fetch_mem`: `buf.len()` guest-physical bytes

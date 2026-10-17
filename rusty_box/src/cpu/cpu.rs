@@ -793,6 +793,9 @@ pub struct BxCpuC<T: super::instrumentation::Instrumentation = ()> {
     /// the hook mask and the two stop flags, and nothing else.
     pub(crate) instrumentation: super::instrumentation::InstrumentationRegistry<T>,
 
+    /// The debugger's code breakpoints, and the hit this processor reports.
+    pub(crate) code_breakpoints: super::breakpoints::CodeBreakpointState,
+
     pub(crate) page_permissions: Option<crate::memory::permissions::PagePermissions>,
 
     pub(crate) mmio: crate::memory::mmio::MmioRegistry,
@@ -2398,6 +2401,12 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                     Err(e) => break 'cpu_loop Err(e),
                 }
             };
+            // Debugger code breakpoints (Bochs cpu.cc `dbg_code_bp_after_fetch`
+            // and the check after event delivery): an armed breakpoint always
+            // begins a trace, so a trace start is where one is met.
+            if self.code_breakpoints.armed() && self.stops_at_code_breakpoint() {
+                break 'cpu_loop Ok(iteration);
+            }
             if STRICT_INSTRUCTION_BUDGET {
                 let trace_budget = usize::try_from(max_instructions.saturating_sub(iteration))
                     .unwrap_or(usize::MAX);
@@ -2589,6 +2598,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                         && iteration < max_instructions
                         && matches!(self.activity_state, CpuActivityState::Active)
                         && !self.instrumentation.stop_request
+                        // A linked trace starts without the trace-start
+                        // check a breakpoint needs.
+                        && !self.code_breakpoints.armed()
                         && super::icache::is_linkable_opcode(opcode)
                     {
                         if let Some((start, tlen)) = self.try_link_trace(instr_idx) {
@@ -2645,6 +2657,9 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                     };
                     instr_idx = start;
                     trace_end = start + tlen;
+                    if self.code_breakpoints.armed() && self.stops_at_code_breakpoint() {
+                        break 'cpu_loop Ok(iteration);
+                    }
                     if STRICT_INSTRUCTION_BUDGET {
                         let trace_budget =
                             usize::try_from(max_instructions.saturating_sub(iteration))
@@ -2674,6 +2689,19 @@ impl<T: crate::cpu::instrumentation::Instrumentation> super::exec_ctx::ExecCtx<'
                 break 'cpu_loop Ok(iteration);
             }
         };
+
+        // The boundary the loop leaves the processor on is checked as well, as
+        // Bochs `dbg_instruction_epilog` checks the one after the last
+        // instruction a `cpu_loop_debugger` call executes: a run that ends
+        // there — a single step onto a breakpoint — reports it, and the run
+        // that resumes there executes it.
+        if result.is_ok()
+            && self.code_breakpoints.armed()
+            && !self.code_breakpoints.hit_pending()
+            && self.stops_at_code_breakpoint()
+        {
+            tracing::debug!("code breakpoint at the boundary a run ended on");
+        }
 
         // Bochs icount units: report retired instructions, which includes
         // slow-repeat iterations charged inside handlers that `iteration`

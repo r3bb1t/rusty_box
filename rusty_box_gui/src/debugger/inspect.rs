@@ -8,7 +8,7 @@ use rusty_box::cpu::decoder::{GprIndex, Instruction, Opcode};
 use rusty_box::cpu::{CodeSize, CpuDebugView, Instrumentation};
 use rusty_box::emulator::{Emulator, SliceEngine};
 
-use super::guest::{GuestMemory, GuestRead, Root};
+use super::guest::{vmx_guest_view, GuestMemory, GuestRead, PausedCpu, Root};
 use super::kernel_layout::{same_layouts, KernelLayout};
 use super::module_identity::GuestIdentity;
 use super::windows::{
@@ -202,6 +202,10 @@ pub(crate) struct DebugSnapshot {
     pub(crate) layouts: Option<KernelLayouts>,
     /// Whose page tables the walks read the kernel through.
     pub(crate) through: ReadThrough,
+    /// The VMCS whose guest the guest's own structures were read as, when the
+    /// processor was paused in VMX root operation: its guest-physical
+    /// address.
+    pub(crate) vmcs: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -311,9 +315,18 @@ pub(crate) fn read_snapshot<T: Instrumentation, E: SliceEngine<T>>(
             layout: layout.cloned(),
             layouts: None,
             through: ReadThrough::ProcessorTables,
+            vmcs: None,
         };
     };
     let shown = cpu.view();
+    // Paused in VMX root operation, the processor shows the VMM, and the
+    // guest's own structures are walked as the guest its VMCS holds.
+    let vmx_guest = cpu.vmx_guest();
+    let walked_view = match &vmx_guest {
+        Some(guest) => vmx_guest_view(guest, &shown),
+        None => shown,
+    };
+    let mut cpu = PausedCpu { cpu: &mut cpu, vmx_guest };
     // What was read of the guest's structures is carried over only for the
     // same processor, the same listing, the same point of view and the same
     // kernel layouts.
@@ -330,16 +343,16 @@ pub(crate) fn read_snapshot<T: Instrumentation, E: SliceEngine<T>>(
             match view.context {
                 ViewContext::Live => Viewing::Live,
                 ViewContext::Process { eprocess } => viewing_of(read_thread_view(
-                    &mut cpu,
-                    &shown,
+                    &mut cpu.walked(),
+                    &walked_view,
                     ViewTarget::Process { eprocess },
                     &live,
                     discovery,
                     layout,
                 )),
                 ViewContext::Thread { eprocess, tid } => viewing_of(read_thread_view(
-                    &mut cpu,
-                    &shown,
+                    &mut cpu.walked(),
+                    &walked_view,
                     ViewTarget::Thread { eprocess, tid },
                     &live,
                     discovery,
@@ -389,7 +402,7 @@ pub(crate) fn read_snapshot<T: Instrumentation, E: SliceEngine<T>>(
             through: last.through,
         },
         None => {
-            let windows = read_windows(&mut cpu, &shown, view.system, discovery, layout);
+            let windows = read_windows(&mut cpu.walked(), &walked_view, view.system, discovery, layout);
             match &viewing {
                 // The view's own process names its addresses.
                 Viewing::Thread(thread) => GuestStructures {
@@ -400,7 +413,7 @@ pub(crate) fn read_snapshot<T: Instrumentation, E: SliceEngine<T>>(
                     through: windows.through,
                 },
                 Viewing::Live | Viewing::Running { .. } | Viewing::Miss(_) => GuestStructures {
-                    process: windows_image_path(&mut cpu, &shown),
+                    process: windows_image_path(&mut cpu.walked(), &walked_view),
                     symbols: windows.symbols,
                     system: windows.system,
                     layouts: windows.layouts,
@@ -430,6 +443,7 @@ pub(crate) fn read_snapshot<T: Instrumentation, E: SliceEngine<T>>(
         layout: layout.cloned(),
         layouts,
         through,
+        vmcs: cpu.vmx_guest.map(|guest| guest.vmcs),
     }
 }
 

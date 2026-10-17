@@ -2348,6 +2348,11 @@ impl NativeShellApp {
         }
         let step_available = session.run_engine() != Some(crate::config::Engine::Whp);
         let symbols = self.symbols.view();
+        let breakpoints = control.breakpoints();
+        let stopped_at = control.stopped_at();
+        // The processor switch shows the processor the run reads, which a
+        // breakpoint stop sets to the one that stopped.
+        session.debugger_mut().cpu = control.view().cpu;
         let action = draw_debugger_page(
             ui,
             DebuggerPageState {
@@ -2362,6 +2367,8 @@ impl NativeShellApp {
                 searching: control.searching(),
                 pane: session.debugger_mut(),
                 symbols: &symbols,
+                breakpoints: &breakpoints,
+                stopped_at,
             },
         );
         // A paused run answers on its own thread; keep looking while it may.
@@ -2426,6 +2433,7 @@ impl NativeShellApp {
                 });
             }
             Some(DebuggerAction::Symbols(asked)) => self.act_on_symbols(asked),
+            Some(DebuggerAction::SetBreakpoints(set)) => control.set_breakpoints(set),
         }
     }
 
@@ -4393,6 +4401,10 @@ impl NativeShellApp {
                 self.overwrite_confirmed.extend(agreed);
                 self.overwrite_confirmed.extend(nothing_to_erase);
                 self.chrome.go_to(ShellPage::Console);
+                // A booting machine gets the whole page: the serial pane and
+                // the library come back from their buttons.
+                self.chrome.show_serial = false;
+                self.chrome.library = Drawer::Closed;
             }
             // The Start comes back in the error, and what it holds is given
             // back as the error is dropped.
@@ -9119,6 +9131,20 @@ mod tests {
         assert!(!start.display.lock().unwrap().stop_flag.load(Ordering::Relaxed));
     }
 
+    /// A power-on shows the console alone: the serial pane hidden and the
+    /// library drawer folded to its handle.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_power_on_hides_the_serial_pane_and_folds_the_library() {
+        let (mut app, command_rx, _scratch) = library_app();
+        assert!(app.chrome.show_serial, "shown before the power-on");
+        assert_eq!(app.chrome.library, Drawer::Open);
+        app.start_vm();
+        assert!(matches!(command_rx.try_recv(), Ok(NativeEmulatorCommand::Start(_))));
+        assert!(!app.chrome.show_serial, "the serial pane is hidden");
+        assert_eq!(app.chrome.library, Drawer::Closed, "the library is folded");
+    }
+
     /// Every VM has a display of its own.
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
@@ -10491,6 +10517,122 @@ mod tests {
         }
 
         #[test]
+        fn the_breakpoints_tab_adds_from_its_field_and_removes_the_picked_one() {
+            use crate::shell::debugger_page::{DebuggerTab, BREAKPOINT_ADDRESS, NO_BREAKPOINTS};
+            use rusty_box::cpu::CodeBreakpoint;
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_vm(&mut app);
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            let vm = window.state().app.shown_vm();
+            window.state_mut().app.sessions.open(&vm).debugger_mut().tab = DebuggerTab::Breakpoints;
+            window.run();
+            assert!(window.query_by_label(NO_BREAKPOINTS).is_some(), "an empty list says how to add one");
+            let field = || egui::accesskit::Role::TextInput;
+            window.get_by_role_and_label(field(), BREAKPOINT_ADDRESS).click();
+            window.run();
+            window.get_by_role_and_label(field(), BREAKPOINT_ADDRESS).type_text("0x1000");
+            window.run();
+            window.get_by_label("Add").click();
+            window.run();
+            assert_eq!(control.breakpoints(), [CodeBreakpoint::Linear(0x1000)]);
+            window.run();
+            window
+                .query_all_by(|node| node.label().or(node.value()).is_some_and(|text| text.contains("0000000000001000")))
+                .next()
+                .expect("the breakpoint's row")
+                .click();
+            window.run();
+            window.key_press(egui::Key::F2);
+            window.run();
+            assert!(control.breakpoints().is_empty(), "F2 removed the picked row");
+        }
+
+        /// A click picks a code line, and F2 sets a breakpoint there and then
+        /// removes it; with no line picked F2 acts on the line at RIP.
+        #[test]
+        fn f2_sets_and_removes_a_breakpoint_on_the_picked_code_line() {
+            use rusty_box::cpu::CodeBreakpoint;
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_vm(&mut app);
+            let snapshot = control.snapshot().expect("published");
+            let rip = snapshot.code[0].address;
+            let next = snapshot.code[1].address;
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            window.key_press(egui::Key::F2);
+            window.run();
+            assert_eq!(control.breakpoints(), [CodeBreakpoint::Linear(rip)], "nothing picked: RIP's line");
+            let row = format!("{next:016X}");
+            window
+                .query_all_by(|node| node.label().or(node.value()).is_some_and(|text| text.starts_with(&row)))
+                .next()
+                .expect("the second code line")
+                .click();
+            window.run();
+            window.key_press(egui::Key::F2);
+            window.run();
+            assert_eq!(
+                control.breakpoints(),
+                [CodeBreakpoint::Linear(rip), CodeBreakpoint::Linear(next)],
+                "the picked line"
+            );
+            window.key_press(egui::Key::F2);
+            window.run();
+            assert_eq!(control.breakpoints(), [CodeBreakpoint::Linear(rip)], "F2 again removes it");
+        }
+
+        /// A code line's menu sets a breakpoint there, and then removes it;
+        /// the line is marked while one is set.
+        #[test]
+        fn a_code_lines_menu_sets_and_removes_a_breakpoint_there() {
+            use crate::shell::debugger_page::{REMOVE_BREAKPOINT_HERE, SET_BREAKPOINT_HERE};
+            use rusty_box::cpu::CodeBreakpoint;
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_vm(&mut app);
+            let rip = control.snapshot().expect("published").cpus[0].registers.rip;
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            let row = format!("{rip:016X}");
+            let open_menu = |window: &mut Harness<'_, Window>| {
+                window
+                    .query_all_by(|node| node.label().or(node.value()).is_some_and(|text| text.starts_with(&row)))
+                    .next()
+                    .expect("the code line at RIP")
+                    .click_secondary();
+                window.run();
+            };
+            open_menu(&mut window);
+            window.get_by_label(SET_BREAKPOINT_HERE).click();
+            window.run();
+            assert_eq!(control.breakpoints(), [CodeBreakpoint::Linear(rip)]);
+            open_menu(&mut window);
+            window.get_by_label(REMOVE_BREAKPOINT_HERE).click();
+            window.run();
+            assert!(control.breakpoints().is_empty());
+        }
+
+        /// A run paused at a breakpoint says which, on which processor.
+        #[test]
+        fn a_breakpoint_stop_is_said_under_the_header() {
+            use rusty_box::cpu::{CodeBreakpoint, CodeBreakpointHit};
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_vm(&mut app);
+            control.stepped_onto_breakpoint(CodeBreakpointHit {
+                cpu: 0,
+                breakpoint: CodeBreakpoint::Linear(0x1000),
+                linear: 0x1000,
+            });
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            assert!(window.query_by_label("Stopped at breakpoint 1000 · CPU 0 (boot)").is_some());
+        }
+
+        #[test]
         fn a_bad_address_is_refused_inline_and_the_view_stays() {
             use crate::shell::debugger_page::{AddressError, MEMORY_ADDRESS};
             let (mut app, _command_rx, _scratch) = native_test_app();
@@ -10861,6 +11003,48 @@ mod tests {
                 open_processes(&mut window);
                 assert_eq!(window.query_by_label(said).is_some(), shown, "{through:?}");
             }
+        }
+
+        /// A kernel listing read as the guest a VMCS holds (a pause in the
+        /// hypervisor) says so, and names the VMCS; one read through the
+        /// processor itself says nothing of it.
+        #[test]
+        fn a_kernel_listing_says_when_it_was_read_as_a_vmcs_guest() {
+            use crate::shell::debugger_page::vmx_guest_label;
+            let said = vmx_guest_label(0xB_0000);
+            for (vmcs, shown) in [None, Some(0xB_0000)].into_iter().zip([false, true]) {
+                let (mut app, _command_rx, _scratch) = native_test_app();
+                let control = paused_vm(&mut app);
+                let mut snapshot = process_listing_snapshot();
+                snapshot.vmcs = vmcs;
+                control.publish(snapshot);
+                let mut window = tall_window(app);
+                window.run();
+                open_processes(&mut window);
+                assert_eq!(window.query_by_label(&said).is_some(), shown, "{vmcs:?}");
+            }
+        }
+
+        /// A pause in the hypervisor whose VMCS guest runs no Windows kernel
+        /// says what that guest may be: under VBS, the secure kernel.
+        #[test]
+        fn no_windows_in_a_vmcs_guest_says_it_may_be_the_secure_kernel() {
+            use crate::debugger::windows::{KernelMiss, SystemListing};
+            use crate::shell::debugger_page::no_windows_kernel_in;
+            let said = no_windows_kernel_in(KernelMiss::NoKpcr, Some(0xB_0000));
+            assert!(said.contains("secure kernel"), "{said}");
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_vm(&mut app);
+            let mut snapshot = paused_snapshot();
+            snapshot.system = SystemListing::NoWindowsKernel(KernelMiss::NoKpcr);
+            snapshot.vmcs = Some(0xB_0000);
+            control.publish(snapshot);
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            window.get_by_label("Kernel modules").click();
+            window.run();
+            assert!(window.query_by_label(&said).is_some());
         }
 
         /// A click on a process's module picks it: the run is asked for its

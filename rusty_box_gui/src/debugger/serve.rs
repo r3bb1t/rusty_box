@@ -1,7 +1,7 @@
 //! What a run thread does with a machine that is between runs: the shell's
 //! queued work, one task at a time, until the shell lets it run on or ends it.
 
-use rusty_box::cpu::Instrumentation;
+use rusty_box::cpu::{BreakpointRefusal, CodeBreakpoint, Instrumentation};
 use rusty_box::emulator::{Emulator, RunBudget, SliceEngine, StopReason};
 
 use super::control::{BetweenRuns, DebugNote, RunControl, Task};
@@ -83,12 +83,16 @@ pub(crate) fn perform<T: Instrumentation, E: SliceEngine<T>>(
                 let snapshot = read_for(emu, control);
                 control.publish(snapshot);
                 let retired = emu.cpu_snapshot().icount.saturating_sub(before);
+                if let StopReason::Breakpoint(hit) = outcome.stop {
+                    control.stepped_onto_breakpoint(hit);
+                }
                 let after = match outcome.stop {
                     StopReason::GuestPowerOff | StopReason::CpuShutdown => MachineAfter::Over,
                     StopReason::BudgetExhausted
                     | StopReason::Halted
                     | StopReason::StopRequested
-                    | StopReason::EngineFault => MachineAfter::Live,
+                    | StopReason::EngineFault
+                    | StopReason::Breakpoint(_) => MachineAfter::Live,
                 };
                 Ok(Performed { retired, after })
             }
@@ -107,6 +111,26 @@ pub(crate) fn perform<T: Instrumentation, E: SliceEngine<T>>(
             let snapshot = read_for(emu, control);
             control.publish_view(snapshot);
             Ok(live(0))
+        }
+        Task::ApplyBreakpoints(set) => {
+            apply_breakpoints(emu, control, &set);
+            Ok(live(0))
+        }
+    }
+}
+
+/// Gives `emu` the code breakpoints `set`; a set the machine refuses leaves
+/// a note for the page, and the machine keeps the set it had.
+pub(crate) fn apply_breakpoints<T: Instrumentation, E: SliceEngine<T>>(
+    emu: &mut Emulator<T, E>,
+    control: &RunControl,
+    set: &[CodeBreakpoint],
+) {
+    match emu.set_code_breakpoints(set) {
+        Ok(()) => {}
+        Err(BreakpointRefusal::EngineCannotStop) => control.note_refusal(DebugNote::BreakpointsNeedInterpreter),
+        Err(BreakpointRefusal::TooManyLinear | BreakpointRefusal::TooManyPhysical) => {
+            control.note_refusal(DebugNote::TooManyBreakpoints);
         }
     }
 }
@@ -210,6 +234,58 @@ mod tests {
             control.snapshot().expect("published").cpus[0].registers.rip,
             code + 1
         );
+    }
+
+    /// A set given between runs reaches the machine: a step that lands on a
+    /// breakpoint says so, and the next step executes its instruction.
+    #[test]
+    fn a_step_onto_a_breakpoint_shows_it_and_the_next_step_executes_it() {
+        use rusty_box::cpu::CodeBreakpointHit;
+        let (mut machine, control, code) = paused();
+        let at = CodeBreakpoint::Linear(code + 1);
+        perform(&mut machine, &control, Task::ApplyBreakpoints(vec![at]), Stepping::Instructions).expect("apply");
+        assert_eq!(control.note(), None, "the interpreter takes breakpoints");
+        control.step();
+        assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::Step));
+        let performed = perform(&mut machine, &control, Task::Step, Stepping::Instructions).expect("step");
+        assert_eq!(performed.retired, 1);
+        assert_eq!(
+            control.stopped_at(),
+            Some(CodeBreakpointHit { cpu: 0, breakpoint: at, linear: code + 1 })
+        );
+        control.step();
+        assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::Step));
+        let performed = perform(&mut machine, &control, Task::Step, Stepping::Instructions).expect("step");
+        assert_eq!(performed.retired, 1, "the breakpoint's own instruction executes");
+        assert_eq!(machine.cpu_snapshot().rip, code + 2);
+        assert_eq!(control.stopped_at(), None);
+    }
+
+    /// An engine that runs the interpreter but says nothing of breakpoints.
+    #[derive(Default)]
+    struct SilentEngine;
+
+    impl<T: Instrumentation> SliceEngine<T> for SilentEngine {
+        const PROGRESS_UNIT: rusty_box::emulator::ProgressUnit = rusty_box::emulator::ProgressUnit::Instructions;
+
+        fn run_slice(
+            &mut self,
+            cpu: &mut rusty_box::cpu::BxCpuC<T>,
+            io: rusty_box::emulator::PcIo<'_>,
+            request: rusty_box::emulator::SliceRequest,
+        ) -> rusty_box::cpu::Result<rusty_box::emulator::Progress> {
+            rusty_box::emulator::SoftwareEngine.run_slice(cpu, io, request)
+        }
+    }
+
+    /// A machine whose engine refuses breakpoints leaves the page a note.
+    #[test]
+    fn breakpoints_an_engine_refuses_leave_a_note() {
+        let mut machine = Emulator::<(), SilentEngine>::with_engine(EmulatorConfig::default(), CpuSetupMode::FlatLong64)
+            .expect("machine");
+        let control = RunControl::new(Arc::new(AtomicBool::new(false)));
+        apply_breakpoints(&mut machine, &control, &[CodeBreakpoint::Linear(0x1000)]);
+        assert_eq!(control.note(), Some(DebugNote::BreakpointsNeedInterpreter));
     }
 
     #[test]

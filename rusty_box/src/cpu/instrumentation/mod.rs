@@ -70,6 +70,7 @@ pub use types::{
     BranchEvent, BranchType, CacheCntrl, CodeSize, CpuDebugView, CpuSetupMode, CpuSnapshot,
     EmuStopReason, ExecutionMode, Fetched, ProcessorActivity, SegmentBases,
     DescriptorTable, LinearRange, MappingWalk, PageAccess, PageMapping, WalkStep,
+    GuestPhysicalMemory, VmxGuest,
     ExitSet, HookMask, HwInterruptEvent, InstrAction, InvEptType, InvPcidType, IoHookEvent,
     LinAccess, MemAccessRW, MemHookEvent, MemPermViolation, MemPerms, MemType, MemUnmapped,
     MwaitEvent, MwaitFlags, OpcodeEvent, PhyAccess, PrefetchEvent, PrefetchHint, ResetType,

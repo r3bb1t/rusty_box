@@ -2,9 +2,10 @@
 //! Windows stores it (UTF-16LE). The search reads RAM only, never a device
 //! window, since a device read changes the device.
 
-use rusty_box::cpu::Instrumentation;
+use rusty_box::cpu::{Instrumentation, VmxGuest};
 use rusty_box::emulator::{Emulator, RamOffset, SliceEngine};
 
+use super::guest::{GuestMemory, PausedCpu, Root};
 use super::inspect::{AddressSpace, GuestAddress};
 
 /// How a search's text becomes the bytes it looks for.
@@ -124,18 +125,22 @@ pub(crate) fn find<T: Instrumentation, E: SliceEngine<T>, F: Fn() -> bool>(
 }
 
 /// Where `address` maps in `space`: the processor's own tables for `Linear`,
-/// a given CR3's for `Process`.
+/// a given CR3's for `Process` — inside `vmx_guest`, the guest the
+/// processor's VMCS holds, when it is paused in VMX root operation.
 fn translate_in<T: Instrumentation, E: SliceEngine<T>>(
     emu: &mut Emulator<T, E>,
     cpu: usize,
     space: AddressSpace,
+    vmx_guest: Option<VmxGuest>,
     address: u64,
 ) -> Option<u64> {
     let mut debug = emu.debug_cpu(cpu)?;
-    match space {
-        AddressSpace::Linear | AddressSpace::Physical => debug.dbg_xlate_linear2phy(address),
-        AddressSpace::Process { cr3 } => debug.dbg_xlate_linear2phy_in(cr3, address),
-    }
+    let mut paused = PausedCpu { cpu: &mut debug, vmx_guest };
+    let root = match space {
+        AddressSpace::Linear | AddressSpace::Physical => Root::Live,
+        AddressSpace::Process { cr3 } => Root::Process(cr3),
+    };
+    paused.translate(root, address)
 }
 
 fn position(haystack: &[u8], pattern: &[u8]) -> Option<usize> {
@@ -219,6 +224,7 @@ fn find_linear<T: Instrumentation, E: SliceEngine<T>, F: Fn() -> bool>(
     abandoned: F,
 ) -> FindOutcome {
     let total = emu.mem_size() as u64;
+    let vmx_guest = emu.debug_cpu(cpu).and_then(|mut debug| debug.vmx_guest());
     let end = request.from.value.saturating_add(LINEAR_SEARCH_SPAN);
     let mut address = request.from.value;
     let mut window = Window {
@@ -238,7 +244,7 @@ fn find_linear<T: Instrumentation, E: SliceEngine<T>, F: Fn() -> bool>(
         };
         // RAM only: an unmapped page, or one that maps a device window or
         // lies past RAM, breaks the run of bytes a hit could span.
-        let ram = translate_in(emu, cpu, space, address)
+        let ram = translate_in(emu, cpu, space, vmx_guest, address)
             .and_then(RamOffset::of_physical)
             .filter(|RamOffset(offset)| offset.saturating_add(len as u64) <= total);
         let read = match ram {

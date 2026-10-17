@@ -567,6 +567,41 @@ fn test_movq_f3_0f_7e_load_direction_64bit() {
     assert_eq!(i.src1(), 1, "64-bit F3 0F 7E src1 should be rm=1");
 }
 
+// -- 0F 78 direction --
+// Bochs ia_opcodes.def: VMREAD is OP_Ed/OP_Eq, OP_Gd/OP_Gq and EXTRQ with
+// immediates is OP_Wdq, OP_Ib — both put the destination in rm. INSERTQ
+// (F2 prefix) is OP_Vdq, OP_Wq: its destination is nnn.
+
+#[test]
+fn test_vmread_0f_78_store_direction() {
+    // 0F 78 D1 = VMREAD ECX, EDX: reg=2 (the field encoding), rm=1 (where it goes)
+    let i = fetch_decode32(&[0x0F, 0x78, 0xD1], true).unwrap();
+    assert_eq!(i.dst(), 1, "VMREAD dst should be rm=ECX(1)");
+    assert_eq!(i.src1(), 2, "VMREAD src1 should be nnn=EDX(2)");
+}
+
+#[test]
+fn test_vmread_0f_78_store_direction_64bit() {
+    let i = fetch_decode64(&[0x0F, 0x78, 0xD1]).unwrap();
+    assert_eq!(i.dst(), 1, "64-bit VMREAD dst should be rm=RCX(1)");
+    assert_eq!(i.src1(), 2, "64-bit VMREAD src1 should be nnn=RDX(2)");
+}
+
+#[test]
+fn test_extrq_66_0f_78_immediate_form_direction() {
+    // 66 0F 78 C1 08 04 = EXTRQ XMM1, 8, 4: nnn=0 (fixed), rm=1
+    let i = fetch_decode64(&[0x66, 0x0F, 0x78, 0xC1, 0x08, 0x04]).unwrap();
+    assert_eq!(i.dst(), 1, "EXTRQ dst should be rm=XMM1(1)");
+}
+
+#[test]
+fn test_insertq_f2_0f_78_direction() {
+    // F2 0F 78 D1 08 04 = INSERTQ XMM2, XMM1, 8, 4
+    let i = fetch_decode64(&[0xF2, 0x0F, 0x78, 0xD1, 0x08, 0x04]).unwrap();
+    assert_eq!(i.dst(), 2, "INSERTQ dst should be nnn=XMM2(2)");
+    assert_eq!(i.src1(), 1, "INSERTQ src1 should be rm=XMM1(1)");
+}
+
 #[test]
 fn test_final_entry_one_byte_os16_32bit_add() {
     let i = fetch_decode32(&[0x66, 0x01, 0xD8], true).unwrap();

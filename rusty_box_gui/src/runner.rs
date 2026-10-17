@@ -6,7 +6,7 @@ use crate::{
 #[cfg(feature = "gui-egui")]
 use crate::debugger::{
     control::{AfterRun, RunControl, RunStart},
-    serve::{serve, Next, Stepping},
+    serve::{apply_breakpoints, serve, Next, Stepping},
 };
 #[cfg(all(not(feature = "guest-trace"), feature = "hv-whp", windows, feature = "gui-egui"))]
 use crate::debugger::{
@@ -422,9 +422,15 @@ where
     E: SliceEngine<T>,
 {
     let mut retired = 0u64;
+    // The shell's breakpoints outlive a run; each run's machine is given them.
+    apply_breakpoints(emu.as_mut(), &control, &control.breakpoints());
     while retired < config.max_instructions {
         let left = config.max_instructions - retired;
         retired = retired.saturating_add(emu.run_interactive(left)?);
+        // A processor that stopped at a breakpoint pauses the run on it.
+        if let Some(hit) = emu.stopped_at_breakpoint() {
+            control.stopped_at_breakpoint(hit);
+        }
         match control.after_run(emu.power().state()) {
             AfterRun::End => break,
             AfterRun::Serve => {
@@ -2922,6 +2928,44 @@ mod tests {
 
         vm.control.resume();
         wait_until(|| vm.control.phase() == RunPhase::Running && vm.ips() > 0);
+
+        vm.stop();
+        drop(commands);
+        let result = join_launcher(launcher);
+        remove_test_file(&bios);
+        assert!(result.is_ok());
+        assert_eq!(vm.display.lock().unwrap().runtime_error, None);
+    }
+
+    /// A breakpoint set on a running VM pauses it before the instruction
+    /// there, showing the processor that reached it; running on pauses it
+    /// there again on the guest's next pass.
+    #[cfg(feature = "gui-egui")]
+    #[test]
+    fn a_breakpoint_set_on_a_running_vm_pauses_it_there() {
+        use rusty_box::cpu::{CodeBreakpoint, CodeBreakpointHit};
+        let bios = spinning_bios();
+        let (commands, command_rx) = mpsc::channel();
+        let launcher = spawn_launcher(command_rx);
+        let vm = TestVm::spinning(&commands, &bios);
+
+        // The BIOS's `JMP $` at the reset vector: CS base FFFF0000 plus FFF0.
+        let at = CodeBreakpoint::Linear(0xFFFF_FFF0);
+        let hit = CodeBreakpointHit { cpu: 0, breakpoint: at, linear: 0xFFFF_FFF0 };
+        vm.control.set_breakpoints(vec![at]);
+        let snapshot = vm.paused_snapshot();
+        assert_eq!(vm.control.stopped_at(), Some(hit));
+        assert_eq!(snapshot.cpus[0].registers.rip, 0xFFF0);
+        let icount = snapshot.cpus[0].registers.icount;
+
+        vm.control.resume();
+        wait_until(|| {
+            vm.control.stopped_at() == Some(hit)
+                && vm
+                    .control
+                    .snapshot()
+                    .is_some_and(|again| again.cpus[0].registers.icount == icount + 1)
+        });
 
         vm.stop();
         drop(commands);

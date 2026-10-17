@@ -1222,6 +1222,155 @@ upstream PR). The PR is prepared and NOT FILED; see
 
 ---
 
+## D20 — Debugger code breakpoints keep whole traces, and each boundary is checked once
+
+**Bochs:** `cpu/cpu.cc`. While its internal debugger is active Bochs runs
+`cpu_loop_debugger`, which raises `BX_ASYNC_EVENT_STOP_TRACE` before every
+instruction, so it executes one instruction per trace and checks code
+breakpoints after each (`dbg_instruction_epilog` → `dbg_check_code_bpoints`),
+after a new fetch window (`prefetch` → `dbg_code_bp_after_fetch`) and after
+event delivery. A boundary is not reported until one instruction has
+executed since `cpu_loop_debugger` was entered (`dbg_loop_icount`).
+
+**rusty_box:** `cpu/breakpoints.rs`. While a set is armed the normal loop
+runs, with three changes: a trace is cut before every instruction at a
+breakpoint's page offset (`serve_icache_miss`), no trace is merged or linked,
+and the boundary is checked at each trace start and where the loop leaves the
+processor. Setting breakpoints flushes the trace cache. A boundary once
+reported is passed over by the next run exactly once, keyed by the
+processor's instruction count and the boundary's linear address.
+
+### What the guest observes
+
+Nothing. Nothing is written to guest memory and no debug register changes;
+which traces are built is not guest-visible (as for A2 single dispatch in
+`cpu.rs`). Where the processor stops is Bochs's: before the first instruction
+whose linear (CS base plus RIP) or physical address is a breakpoint's.
+
+### Why the divergence is the correct side
+
+- **Speed while armed.** One instruction per trace would make a guest run
+  several times slower for as long as any breakpoint is set, which is how
+  long a person debugging a boot leaves one. The cut by page offset costs a
+  trace only where a breakpoint could be; it is by offset, not by address,
+  because a trace is keyed by its physical page and runs under any linear
+  mapping of it (`a_linear_breakpoint_is_met_through_another_mapping_of_its_page`).
+- **No boundary skipped.** Bochs passes over the first boundary of every
+  `cpu_loop_debugger` entry. A multiprocessor run enters it once per quantum,
+  so a breakpoint that falls where a quantum ends is never reported, and an
+  interrupt delivered at entry hides one at its handler. Here only the
+  boundary already reported is passed over, once.
+- **Unarmed cost.** One flag test per trace start, and none per instruction.
+
+Bochs's virtual (CS:EIP) breakpoints are not built; its linear and physical
+ones are, 16 of each as its shipped `config.h`.
+
+### Price of closing it
+
+Running one instruction per trace while armed is a smaller loop than this,
+at the speed cost above. The tests in `emulator/breakpoint_tests.rs` hold the
+stopping behaviour either way.
+
+**Status:** deliberate (built 2026-10-17 on the owner's "Commit and keep
+going", which chose sub-project 3; awaiting the owner's review).
+
+---
+
+## D21 — A VM exit writes back every field the VMCS cache holds
+
+**Bochs:** `cpu/vmx.cc`. A VMCS is a region of guest-physical memory, laid
+out by `vmcs.cc` `init_generic_mapping` with access rights rotated
+(`VMCS_AR_ROTATE`). VMREAD and VMWRITE reach the current one through
+`vmcsptr`; VM entry reads it field by field (`VMenterLoadCheckVmControls`,
+`VMenterLoadCheckHostState`, `VMenterLoadCheckGuestState`); VM exit writes
+the exit information and the guest state field by field (`VMexit`,
+`VMexitSaveGuestState`), several under a gate — guest EFER only with the
+STORE_EFER exit control, the instruction-information field only for the
+exits that have one. VMFUNC's EPTP switch (`vmfunc.cc`) writes the EPTP
+when it happens.
+
+**rusty_box:** `cpu/vmx.rs`. The VMCS is the same region with the same
+layout, and VMREAD, VMWRITE, VMfail, VMCLEAR and the launch state go to it
+as Bochs's do. VM entry reads every field the processor's VMCS cache holds
+(`vmcs_load_cache`); VM exit, after saving the guest state and before the
+MSR-store list, writes every one of them back (`vmcs_store_cache`).
+
+### What the guest observes
+
+What Bochs's guest observes. A field Bochs leaves alone at an exit holds the
+value the entry read from that same VMCS, so writing it back puts the same
+bytes in memory. Three things differ, none of them defined behaviour a VMM
+can rely on:
+
+- Software that writes a VMCS region directly while that VMCS is active
+  finds an exit overwriting the fields it changed. The SDM leaves such
+  writes undefined: a processor may keep an active VMCS on the chip.
+- An instrumentation observer sees a physical write for every held field at
+  each exit, where Bochs reports one per `VMwrite`.
+- A field Bochs writes while the guest runs lands in memory at the next exit
+  instead. Of those, only VMFUNC's EPTP switch and the PML index exist, and
+  this processor offers neither VMFUNC nor PML
+  (`VMX_PROCBASED_CTLS2_ALLOWED_1`).
+
+### Why the divergence is the correct side
+
+The exit path updates the cache in many places, some of them per exit
+reason. Writing back the whole cache cannot miss one of them, where a
+hand-kept list of Bochs's gated writes would leave a stale field in memory
+the first time an update was added without its write.
+`every_field_the_cache_holds_survives_an_entry_and_an_exit` holds the load
+and the store to the same set of fields.
+
+### Price of closing it
+
+A list of the fields Bochs's `VMexit` and `VMexitSaveGuestState` write, with
+their gates, replacing the whole-cache write — and every exit-specific write
+(`VMexit_Instruction`'s instruction information, an EPT violation's guest
+addresses) moved onto it.
+
+**Status:** deliberate (2026-10-17, while making the VMCS memory-resident
+for sub-project 2b Part B).
+
+---
+
+## D22 — The debugger reads a paused VMM's guest through its VMCS
+
+**Bochs:** `bx_debug/dbg_main.cc` and `cpu/paging.cc`
+`dbg_xlate_linear2phy`. The debugger shows and walks the processor's own
+registers. A processor paused in VMX root operation shows the VMM; its guest
+is reachable only by resuming until the guest runs.
+
+**rusty_box:** `emulator/debug.rs` `DebugCpu::vmx_guest`,
+`dbg_xlate_vmx_guest_linear2phy`, `dbg_vmx_guest_page_mappings`. In VMX root
+operation with a launched current VMCS, the guest's registers are read out of
+that VMCS's guest-state area in memory, and its address spaces are walked
+under its own CR0, CR4 and EFER, every paging-structure address and every
+result through the VMCS's EPT (Bochs `dbg_translate_guest_physical_ept`). The
+guest's EFER is derived as Bochs's `VMenterLoadCheckGuestState` loads it, and
+its CPL is its SS's DPL, as that entry sets it.
+
+### What the guest observes
+
+Nothing: every read is a debugger read, through the TLB-free walk and
+`dbg_fetch_mem`, and none changes the VMCS.
+
+### Why the divergence is the correct side
+
+It is a debugger capability Bochs does not have (R7, declared provenance):
+with Hyper-V or VBS running, Windows is a VMX guest, and a pause that lands
+in the hypervisor would otherwise show no Windows at all. The state read is
+the architectural VMCS guest-state area, the same bytes the next VM entry
+loads, so the view is the guest the processor would resume.
+
+### Price of closing it
+
+Removing the three calls; nothing else depends on them in the library.
+
+**Status:** deliberate (2026-10-17, sub-project 2b Part B, approved by the
+owner).
+
+---
+
 ## Hypervisor-engine divergences (`H<n>`)
 
 A machine running its guest on `rusty_box_whp_engine` executes on the host's

@@ -5,7 +5,10 @@
 //! Bochs's debugger primitives (`dbg_xlate_linear2phy`, `dbg_fetch_mem`);
 //! tests answer it from a page map.
 
-use rusty_box::cpu::{Fetched, Instrumentation, LinearRange, MappingWalk, PageMapping, WalkStep};
+use rusty_box::cpu::{
+    CpuDebugView, CpuSnapshot, Fetched, Instrumentation, LinearRange, MappingWalk, PageMapping, VmxGuest,
+    WalkStep,
+};
 use rusty_box::emulator::{DebugCpu, SliceEngine};
 
 /// Whose page tables a read walks.
@@ -63,6 +66,163 @@ pub(crate) trait GuestMemory {
             at = at.wrapping_add(in_page);
         }
         GuestRead::Read
+    }
+}
+
+/// The address spaces of the guest a VMCS holds, which a processor paused in
+/// VMX root operation can be read through as well as its own.
+pub(crate) trait VmxGuestSpaces: GuestMemory {
+    /// The physical address `linear` maps to in the address space at `cr3`
+    /// inside `guest`: through the guest's paging and its EPT.
+    fn vmx_guest_translate(&mut self, guest: &VmxGuest, cr3: u64, linear: u64) -> Option<u64>;
+    /// Visits each mapping of `range` in the address space at `cr3` inside
+    /// `guest`.
+    fn vmx_guest_page_mappings<F>(&mut self, guest: &VmxGuest, cr3: u64, range: LinearRange, visit: F) -> MappingWalk
+    where
+        F: FnMut(PageMapping) -> WalkStep;
+}
+
+impl<T: Instrumentation, E: SliceEngine<T>> VmxGuestSpaces for DebugCpu<'_, T, E> {
+    fn vmx_guest_translate(&mut self, guest: &VmxGuest, cr3: u64, linear: u64) -> Option<u64> {
+        self.dbg_xlate_vmx_guest_linear2phy(guest, cr3, linear)
+    }
+
+    fn vmx_guest_page_mappings<F>(&mut self, guest: &VmxGuest, cr3: u64, range: LinearRange, visit: F) -> MappingWalk
+    where
+        F: FnMut(PageMapping) -> WalkStep,
+    {
+        self.dbg_vmx_guest_page_mappings(guest, cr3, range, visit)
+    }
+}
+
+/// A paused processor as the debugger reads it: its own address space
+/// (`Root::Live`) and physical memory, and every other address space
+/// (`Root::Process`) inside the guest its current VMCS holds when it is
+/// paused in VMX root operation — the CR3 values a guest listing names are
+/// that guest's — else under its own paging.
+pub(crate) struct PausedCpu<'a, G> {
+    pub(crate) cpu: &'a mut G,
+    /// The guest the processor's current VMCS holds, when it is paused in
+    /// VMX root operation.
+    pub(crate) vmx_guest: Option<VmxGuest>,
+}
+
+impl<G> PausedCpu<'_, G> {
+    /// The guest the walker reads: the one the VMCS holds, live in its own
+    /// current address space, when the processor is paused in VMX root
+    /// operation; else the processor's own.
+    pub(crate) fn walked(&mut self) -> LiveAt<'_, Self> {
+        let live_cr3 = self.vmx_guest.map(|guest| guest.cr3);
+        LiveAt { memory: self, live_cr3 }
+    }
+}
+
+impl<G: VmxGuestSpaces> GuestMemory for PausedCpu<'_, G> {
+    fn translate(&mut self, root: Root, linear: u64) -> Option<u64> {
+        match (root, &self.vmx_guest) {
+            (Root::Process(cr3), Some(guest)) => self.cpu.vmx_guest_translate(guest, cr3, linear),
+            (Root::Process(_) | Root::Live, _) => self.cpu.translate(root, linear),
+        }
+    }
+
+    fn read_physical(&mut self, physical: u64, buf: &mut [u8]) -> GuestRead {
+        self.cpu.read_physical(physical, buf)
+    }
+
+    fn page_mappings<F>(&mut self, cr3: u64, range: LinearRange, visit: F) -> MappingWalk
+    where
+        F: FnMut(PageMapping) -> WalkStep,
+    {
+        match &self.vmx_guest {
+            Some(guest) => self.cpu.vmx_guest_page_mappings(guest, cr3, range, visit),
+            None => self.cpu.page_mappings(cr3, range, visit),
+        }
+    }
+}
+
+/// A guest read with its live address space (`Root::Live`) rooted at
+/// `live_cr3` when there is one, every other read passed through: the guest
+/// the walker reads when the processor is paused in VMX root operation,
+/// whose live space is the guest's current one, not the VMM's.
+pub(crate) struct LiveAt<'a, G> {
+    pub(crate) memory: &'a mut G,
+    pub(crate) live_cr3: Option<u64>,
+}
+
+impl<G: GuestMemory> GuestMemory for LiveAt<'_, G> {
+    fn translate(&mut self, root: Root, linear: u64) -> Option<u64> {
+        let root = match (root, self.live_cr3) {
+            (Root::Live, Some(cr3)) => Root::Process(cr3),
+            (Root::Live, None) => Root::Live,
+            (Root::Process(cr3), _) => Root::Process(cr3),
+        };
+        self.memory.translate(root, linear)
+    }
+
+    fn read_physical(&mut self, physical: u64, buf: &mut [u8]) -> GuestRead {
+        self.memory.read_physical(physical, buf)
+    }
+
+    fn page_mappings<F>(&mut self, cr3: u64, range: LinearRange, visit: F) -> MappingWalk
+    where
+        F: FnMut(PageMapping) -> WalkStep,
+    {
+        self.memory.page_mappings(cr3, range, visit)
+    }
+}
+
+/// The guest `guest` describes, as the processor view the walker reads a
+/// guest by: its registers, paging registers, mode and descriptor tables
+/// from the VMCS. What a VMCS does not hold reads 0 — the general-purpose
+/// registers but RSP, the FPU and vector state, `IA32_KERNEL_GS_BASE`, CR2
+/// and the selectors — and the instruction count is `processor`'s.
+pub(crate) fn vmx_guest_view(guest: &VmxGuest, processor: &CpuDebugView) -> CpuDebugView {
+    CpuDebugView {
+        registers: CpuSnapshot {
+            rax: 0,
+            rbx: 0,
+            rcx: 0,
+            rdx: 0,
+            rsi: 0,
+            rdi: 0,
+            rbp: 0,
+            rsp: guest.rsp,
+            r8: 0,
+            r9: 0,
+            r10: 0,
+            r11: 0,
+            r12: 0,
+            r13: 0,
+            r14: 0,
+            r15: 0,
+            rip: guest.rip,
+            eflags: guest.rflags as u32,
+            cs: 0,
+            ss: 0,
+            ds: 0,
+            es: 0,
+            fs: 0,
+            gs: 0,
+            cr0: guest.cr0,
+            cr2: 0,
+            cr3: guest.cr3,
+            cr4: guest.cr4,
+            cpl: guest.cpl,
+            icount: processor.registers.icount,
+            fpu_regs: [[0; 10]; 8],
+            fpu_sw: 0,
+            fpu_cw: 0,
+            mxcsr: 0,
+            xmm: [[0; 16]; 16],
+        },
+        mode: guest.mode,
+        code_size: guest.code_size,
+        activity: guest.activity,
+        efer: guest.efer,
+        segment_bases: guest.segment_bases,
+        kernel_gs_base: 0,
+        gdtr: guest.gdtr,
+        idtr: guest.idtr,
     }
 }
 
@@ -233,6 +393,14 @@ pub(crate) mod fake {
             self.pages_of(cr3, page, Space::Ordinary).remove(&page);
         }
 
+        /// Every address space written so far, by its table address: the
+        /// live one, each user half and each set of session pages.
+        pub(crate) fn spaces(&self) -> BTreeSet<u64> {
+            let mut spaces: BTreeSet<u64> = self.users.keys().chain(self.sessions.keys()).copied().collect();
+            spaces.insert(self.live_cr3 & CR3_TABLE);
+            spaces
+        }
+
         fn lookup(&self, cr3: u64, page: u64) -> Option<u64> {
             if page >= KERNEL_HALF {
                 let session = self.sessions.get(&cr3).and_then(|pages| pages.get(&page));
@@ -298,6 +466,67 @@ pub(crate) mod fake {
                 }
             }
             MappingWalk::Complete
+        }
+    }
+
+    /// A machine paused in a VMM, for tests: `memory` holds the VMM's address
+    /// space and its guest's over one physical memory. The processor's own
+    /// walk reaches only the VMM's space; the guest's are reached through
+    /// [`VmxGuestSpaces`] alone, as a guest's CR3 names guest-physical tables
+    /// the VMM's paging does not read.
+    pub(crate) struct FakeVmxHost {
+        pub(crate) memory: FakeGuest,
+        guest_spaces: BTreeSet<u64>,
+    }
+
+    impl FakeVmxHost {
+        /// Makes every space `memory` holds the guest's, and runs the
+        /// processor on a VMM space at `vmm_cr3` that maps none of them.
+        pub(crate) fn new(mut memory: FakeGuest, vmm_cr3: u64) -> Self {
+            let guest_spaces = memory.spaces();
+            memory.isolate(vmm_cr3);
+            memory.set_live_cr3(vmm_cr3);
+            FakeVmxHost { memory, guest_spaces }
+        }
+
+        fn is_guests(&self, cr3: u64) -> bool {
+            self.guest_spaces.contains(&(cr3 & CR3_TABLE))
+        }
+    }
+
+    impl GuestMemory for FakeVmxHost {
+        fn translate(&mut self, root: Root, linear: u64) -> Option<u64> {
+            match root {
+                Root::Process(cr3) if self.is_guests(cr3) => None,
+                Root::Process(_) | Root::Live => self.memory.translate(root, linear),
+            }
+        }
+
+        fn read_physical(&mut self, physical: u64, buf: &mut [u8]) -> GuestRead {
+            self.memory.read_physical(physical, buf)
+        }
+
+        fn page_mappings<F>(&mut self, cr3: u64, range: LinearRange, visit: F) -> MappingWalk
+        where
+            F: FnMut(PageMapping) -> WalkStep,
+        {
+            if self.is_guests(cr3) {
+                return MappingWalk::Complete;
+            }
+            self.memory.page_mappings(cr3, range, visit)
+        }
+    }
+
+    impl VmxGuestSpaces for FakeVmxHost {
+        fn vmx_guest_translate(&mut self, _guest: &VmxGuest, cr3: u64, linear: u64) -> Option<u64> {
+            self.memory.translate(Root::Process(cr3), linear)
+        }
+
+        fn vmx_guest_page_mappings<F>(&mut self, _guest: &VmxGuest, cr3: u64, range: LinearRange, visit: F) -> MappingWalk
+        where
+            F: FnMut(PageMapping) -> WalkStep,
+        {
+            self.memory.page_mappings(cr3, range, visit)
         }
     }
 }

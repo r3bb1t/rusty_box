@@ -6,10 +6,10 @@
 //! CodeView record names its PDB, on a page of its own so a test can page it
 //! out.
 
-use rusty_box::cpu::{CpuDebugView, CpuSetupMode};
+use rusty_box::cpu::{CpuDebugView, CpuSetupMode, GuestPhysicalMemory, VmxGuest};
 use rusty_box::emulator::{Emulator, EmulatorConfig};
 
-use super::guest::fake::FakeGuest;
+use super::guest::fake::{FakeGuest, FakeVmxHost};
 
 /// The live processor's address space; the System process runs in it.
 pub(crate) const LIVE_CR3: u64 = 0x1000;
@@ -294,6 +294,59 @@ impl FakeWindows {
         self.view.registers.rip = PROCESS_IMAGE_BASE;
         self.view.segment_bases.gs = USER_TEB;
         self.view.kernel_gs_base = KPCR;
+    }
+}
+
+/// The VMM's own address space, when the fake Windows runs as a VMX guest.
+const VMM_CR3: u64 = 0xA_0000;
+/// Where the paused VMM runs, and the VMCS holding its guest.
+const VMM_CODE: u64 = 0xFFFF_8000_0010_0000;
+const VMCS: u64 = 0xB_0000;
+
+/// A fake Windows running as a VMX guest, paused in its VMM: the processor
+/// in VMX root operation on the VMM's own address space, and the guest as
+/// its VMCS holds it.
+pub(crate) struct HypervisorPause {
+    pub(crate) host: FakeVmxHost,
+    /// The guest, where the Windows view was paused.
+    pub(crate) guest: VmxGuest,
+    /// The processor: the VMM's registers, no KPCR in GS.
+    pub(crate) view: CpuDebugView,
+}
+
+impl FakeWindows {
+    /// This Windows as a VMX guest paused where [`FakeWindows::view`] is,
+    /// with the processor paused in the VMM.
+    pub(crate) fn pause_in_a_hypervisor(self) -> HypervisorPause {
+        let shown = self.view;
+        let guest = VmxGuest {
+            vmcs: VMCS,
+            rip: shown.registers.rip,
+            rsp: shown.registers.rsp,
+            rflags: u64::from(shown.registers.eflags),
+            cr0: shown.registers.cr0,
+            cr3: shown.registers.cr3,
+            cr4: shown.registers.cr4,
+            efer: shown.efer,
+            mode: shown.mode,
+            code_size: shown.code_size,
+            cpl: shown.registers.cpl,
+            activity: shown.activity,
+            segment_bases: shown.segment_bases,
+            gdtr: shown.gdtr,
+            idtr: shown.idtr,
+            memory: GuestPhysicalMemory::Direct,
+        };
+        let mut view = shown;
+        view.registers.cr3 = VMM_CR3;
+        view.registers.rip = VMM_CODE;
+        view.segment_bases.gs = 0;
+        view.kernel_gs_base = 0;
+        HypervisorPause {
+            host: FakeVmxHost::new(self.guest, VMM_CR3),
+            guest,
+            view,
+        }
     }
 }
 

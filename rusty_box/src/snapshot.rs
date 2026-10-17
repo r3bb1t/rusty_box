@@ -44,8 +44,12 @@ const SNAPSHOT_MAGIC: &[u8; 8] = b"RBXSNAP1";
 /// Bochs `cpu/decoder/features.h` list that includes `BX_ISA_AMD`,
 /// `BX_ISA_SYSENTER_SYSEXIT_LONGMODE`, `BX_ISA_LONG_MODE_AMD` and `BX_ISA_ACE`
 /// (`X86Feature` declaration order).
+///
+/// Version 12: the CPU section's VMCS cache has no launch state; a VMCS's
+/// launch state is in its region in guest memory, which the memory section
+/// carries (Bochs vmx.cc `VMCS_LAUNCH_STATE_FIELD_ENCODING`).
 #[cfg(feature = "std")]
-pub(crate) const SNAPSHOT_V3_VERSION: u32 = 11;
+pub(crate) const SNAPSHOT_V3_VERSION: u32 = 12;
 #[cfg(feature = "std")]
 pub(crate) const SNAPSHOT_SECTION_VERSION: u32 = 1;
 

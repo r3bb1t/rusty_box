@@ -12,7 +12,10 @@ use std::collections::{BTreeSet, HashMap};
 
 use egui::text::{LayoutJob, TextFormat};
 use egui::RichText;
-use rusty_box::cpu::{CodeSize, CpuDebugView, ExecutionMode, ProcessorActivity};
+use rusty_box::cpu::{
+    CodeBreakpoint, CodeBreakpointHit, CodeSize, CpuDebugView, ExecutionMode, ProcessorActivity,
+    MAX_LINEAR_BREAKPOINTS,
+};
 
 use crate::debugger::control::DebugNote;
 use crate::debugger::inspect::{
@@ -61,6 +64,16 @@ const STEP_NEEDS_INTERPRETER: &str =
     "Step needs the interpreter: a VM on the hypervisor retires instructions nothing counts.";
 /// The accessible name of the memory pane's address field.
 pub(crate) const MEMORY_ADDRESS: &str = "Memory address";
+/// The accessible name of the breakpoint field.
+pub(crate) const BREAKPOINT_ADDRESS: &str = "Breakpoint address";
+const BREAKPOINTS_NEED_INTERPRETER: &str =
+    "Breakpoints need the interpreter: a VM on the hypervisor runs its instructions where this debugger cannot stop them.";
+const BREAKPOINTS_IDLE: &str = "These breakpoints stay idle while the VM runs on the hypervisor.";
+/// What the Breakpoints tab's Remove does.
+const REMOVE_BREAKPOINT: &str = "Remove the picked breakpoint.";
+/// A code line's menu items.
+pub(crate) const SET_BREAKPOINT_HERE: &str = "Set breakpoint";
+pub(crate) const REMOVE_BREAKPOINT_HERE: &str = "Remove breakpoint";
 /// The accessible name of the memory pane's search field.
 pub(crate) const FIND: &str = "Find";
 /// What a step changed is drawn in this colour, as x64dbg does.
@@ -278,6 +291,14 @@ pub(crate) struct DebuggerPane {
     pub(crate) driver_detail: DriverDetail,
     /// What a listed driver's name must contain.
     pub(crate) driver_filter: String,
+    /// The breakpoint field's text, and why it was not taken.
+    pub(crate) breakpoint_text: String,
+    pub(crate) breakpoint_error: Option<AddressError>,
+    /// The Breakpoints tab's picked row.
+    pub(crate) breakpoint_cursor: Option<usize>,
+    /// The code pane's picked instruction (its address), which F2 sets or
+    /// removes a breakpoint on.
+    pub(crate) code_cursor: Option<u64>,
     /// Which system-service table the SSDT view lists.
     pub(crate) ssdt_table: SsdtTable,
     /// The snapshot whose modules were last asked of the symbol engine.
@@ -324,6 +345,10 @@ impl Default for DebuggerPane {
             selected_driver: None,
             driver_detail: DriverDetail::Dispatch,
             driver_filter: String::new(),
+            breakpoint_text: String::new(),
+            breakpoint_error: None,
+            breakpoint_cursor: None,
+            code_cursor: None,
             ssdt_table: SsdtTable::Kernel,
             symbols_asked: None,
             kernel_layout: None,
@@ -359,14 +384,25 @@ pub(crate) enum DebuggerTab {
     Ssdt,
     /// What the symbol engine has for each module.
     Symbols,
+    /// The debugger's code breakpoints.
+    Breakpoints,
 }
 
 impl DebuggerTab {
-    const ALL: [Self; 6] = [Self::Cpu, Self::Processes, Self::KernelModules, Self::Drivers, Self::Ssdt, Self::Symbols];
+    const ALL: [Self; 7] = [
+        Self::Cpu,
+        Self::Breakpoints,
+        Self::Processes,
+        Self::KernelModules,
+        Self::Drivers,
+        Self::Ssdt,
+        Self::Symbols,
+    ];
 
     pub(crate) const fn label(self) -> &'static str {
         match self {
             Self::Cpu => "CPU",
+            Self::Breakpoints => "Breakpoints",
             Self::Processes => "Processes",
             Self::KernelModules => "Kernel modules",
             Self::Drivers => "Drivers",
@@ -376,10 +412,11 @@ impl DebuggerTab {
     }
 
     /// What this tab asks the run thread to list, for what `pane` has picked.
-    /// The Symbols tab lists the modules every pause reads.
+    /// The Symbols tab lists the modules every pause reads; the Breakpoints
+    /// tab lists the shell's own set.
     fn system_view(self, pane: &DebuggerPane) -> SystemView {
         match self {
-            Self::Cpu | Self::Symbols => SystemView::Off,
+            Self::Cpu | Self::Symbols | Self::Breakpoints => SystemView::Off,
             Self::Processes => SystemView::Processes {
                 selected: pane.selected_process,
                 detail: pane.process_detail,
@@ -413,6 +450,10 @@ pub(crate) struct DebuggerPageState<'a> {
     pub(crate) pane: &'a mut DebuggerPane,
     /// What the symbol engine has found, which names addresses as drawn.
     pub(crate) symbols: &'a SymbolsView,
+    /// The shell's code breakpoints.
+    pub(crate) breakpoints: &'a [CodeBreakpoint],
+    /// The code breakpoint the run is paused at.
+    pub(crate) stopped_at: Option<CodeBreakpointHit>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -436,6 +477,8 @@ pub(crate) enum DebuggerAction {
     View(ViewContext),
     /// Something asked of the symbol engine.
     Symbols(SymbolsAction),
+    /// The shell's code breakpoints become this set.
+    SetBreakpoints(Vec<CodeBreakpoint>),
 }
 
 /// The banner's way back from a thread's view.
@@ -451,6 +494,8 @@ struct Marks<'a> {
     find: Option<FindOutcome>,
     searching: bool,
     symbols: &'a SymbolsView,
+    /// The code breakpoints, which the code pane marks.
+    breakpoints: &'a [CodeBreakpoint],
 }
 
 /// The colour a name is drawn in: amber when it comes from a file of
@@ -518,6 +563,8 @@ pub(crate) fn draw_debugger_page(
         searching,
         pane,
         symbols,
+        breakpoints,
+        stopped_at,
     } = state;
     // What was read from somewhere else is no baseline for what changed: a
     // live snapshot and a thread's view are compared with neither.
@@ -527,6 +574,7 @@ pub(crate) fn draw_debugger_page(
         find,
         searching,
         symbols,
+        breakpoints,
     };
     // The room the page was given, measured here and nowhere else: every
     // layout choice below follows from it.
@@ -546,8 +594,26 @@ pub(crate) fn draw_debugger_page(
                 viewing: snapshot.is_some_and(|snapshot| matches!(snapshot.viewing, Viewing::Thread(_))),
             };
             header(ui, &bar, density, snapshot, symbols, pane, &mut action);
-            if let Some(DebugNote::StepNeedsInterpreter) = note {
-                ui.label(RichText::new(STEP_NEEDS_INTERPRETER).color(ACCENT_AMBER));
+            if let Some(note) = note {
+                ui.label(RichText::new(note_text(note)).color(ACCENT_AMBER));
+            }
+            // Names come from the pause shown, when there is one.
+            let no_modules = crate::debugger::inspect::SymbolIndex::default();
+            let names = Namer::new(snapshot.map_or(&no_modules, |snapshot| &snapshot.symbols), symbols);
+            if let Some(hit) = stopped_at {
+                breakpoint_banner(ui, hit, names);
+            }
+            // The Breakpoints tab needs no pause: a breakpoint can be set on a
+            // running VM.
+            if pane.tab == DebuggerTab::Breakpoints {
+                let list = BreakpointList {
+                    breakpoints,
+                    names,
+                    available: step_available,
+                };
+                ui.add_space(density.gap());
+                breakpoints_page(ui, density, &list, pane, &mut action);
+                return;
             }
             let Some(snapshot) = snapshot else {
                 empty_state(ui, "Running", PAUSE_TO_INSPECT);
@@ -556,6 +622,9 @@ pub(crate) fn draw_debugger_page(
             viewing_banner(ui, snapshot, &mut action);
             follow_window(pane, snapshot);
             ui.add_space(density.gap());
+            if pane.tab == DebuggerTab::Cpu {
+                code_key(ui, snapshot, breakpoints, pane, &mut action);
+            }
             match (pane.tab, fit) {
                 (DebuggerTab::Cpu, Fit::Grid) => {
                     grid_layout(ui, snapshot, marks, pane, &mut action);
@@ -563,6 +632,8 @@ pub(crate) fn draw_debugger_page(
                 (DebuggerTab::Cpu, Fit::Scrolling(columns)) => {
                     scrolling_layout(ui, columns, density, snapshot, marks, pane, &mut action);
                 }
+                // Drawn above, before a pause is needed.
+                (DebuggerTab::Breakpoints, _) => {}
                 (
                     DebuggerTab::Processes
                     | DebuggerTab::KernelModules
@@ -579,6 +650,250 @@ pub(crate) fn draw_debugger_page(
             }
         });
     action
+}
+
+/// What the page says of something the run refused.
+fn note_text(note: DebugNote) -> String {
+    match note {
+        DebugNote::StepNeedsInterpreter => STEP_NEEDS_INTERPRETER.to_owned(),
+        DebugNote::BreakpointsNeedInterpreter => BREAKPOINTS_NEED_INTERPRETER.to_owned(),
+        DebugNote::TooManyBreakpoints => {
+            format!("The machine holds at most {MAX_LINEAR_BREAKPOINTS} breakpoints; the last change was not taken.")
+        }
+    }
+}
+
+/// How a breakpoint reads: its address's name when the pause names it, else
+/// the address.
+fn breakpoint_label(breakpoint: CodeBreakpoint, names: Namer<'_>) -> String {
+    match breakpoint {
+        CodeBreakpoint::Linear(address) => names
+            .name(address)
+            .map_or_else(|| format!("{address:X}"), |named| named.label()),
+        CodeBreakpoint::Physical(address) => format!("physical {address:X}"),
+    }
+}
+
+/// Under the header while the run is paused at a code breakpoint: which one,
+/// and on which processor.
+fn breakpoint_banner(ui: &mut egui::Ui, hit: CodeBreakpointHit, names: Namer<'_>) {
+    let text = format!(
+        "Stopped at breakpoint {} · {}",
+        breakpoint_label(hit.breakpoint, names),
+        cpu_label(hit.cpu)
+    );
+    egui::Frame::new()
+        .fill(ACCENT_RED.gamma_multiply(0.12))
+        .stroke(egui::Stroke::new(1.0_f32, ACCENT_RED.gamma_multiply(0.5)))
+        .corner_radius(8)
+        .inner_margin(egui::Margin::symmetric(10, 5))
+        .show(ui, |ui| {
+            ui.label(RichText::new(text).color(ACCENT_RED));
+        });
+}
+
+/// What the Breakpoints tab draws from.
+struct BreakpointList<'a> {
+    breakpoints: &'a [CodeBreakpoint],
+    names: Namer<'a>,
+    /// The VM runs on the interpreter, which can stop at one.
+    available: bool,
+}
+
+/// Said when no breakpoint is set.
+pub(crate) const NO_BREAKPOINTS: &str =
+    "No breakpoints. Add one above, or pick an instruction on the CPU tab and press F2.";
+/// How the picked breakpoint is removed.
+const BREAKPOINT_KEYS: &str = "F2 or Delete removes the picked breakpoint.";
+
+fn breakpoint_columns() -> [Cell; 3] {
+    [
+        Cell::right("#", TEXT_MUTED, 3),
+        Cell::left("Address", TEXT_MUTED, 16),
+        Cell::fill("Where", TEXT_MUTED),
+    ]
+}
+
+/// The Breakpoints tab: a field taking an address or `module!name` (as Go
+/// does) with Add, then every breakpoint a row; a picked row is removed by
+/// F2, Delete, Remove or its menu.
+fn breakpoints_page(
+    ui: &mut egui::Ui,
+    density: Density,
+    list: &BreakpointList<'_>,
+    pane: &mut DebuggerPane,
+    action: &mut Option<DebuggerAction>,
+) {
+    if pane.breakpoint_cursor.is_some_and(|row| row >= list.breakpoints.len()) {
+        pane.breakpoint_cursor = None;
+    }
+    let remove = |row: usize| -> DebuggerAction {
+        let mut set = list.breakpoints.to_vec();
+        if row < set.len() {
+            set.remove(row);
+        }
+        DebuggerAction::SetBreakpoints(set)
+    };
+    let typing = ui.ctx().egui_wants_keyboard_input();
+    let removing = !typing && ui.input(|input| input.key_pressed(egui::Key::F2) || input.key_pressed(egui::Key::Delete));
+    if let Some(row) = pane.breakpoint_cursor.filter(|_| removing) {
+        *action = Some(remove(row));
+        pane.breakpoint_cursor = None;
+    }
+    add_breakpoint_row(ui, list, pane, action);
+    ui.add_space(density.gap());
+    let title = Title::counted("Breakpoints", list.breakpoints.len());
+    card(
+        ui,
+        density,
+        title,
+        |ui| {
+            if !list.breakpoints.is_empty() {
+                ui.label(RichText::new(BREAKPOINT_KEYS).small().color(TEXT_MUTED));
+                header_row(ui, 0.0, &breakpoint_columns());
+            }
+        },
+        |ui| {
+            if list.breakpoints.is_empty() {
+                ui.add_space(SPACE_ITEM);
+                ui.label(RichText::new(NO_BREAKPOINTS).color(TEXT_MUTED));
+                return;
+            }
+            for (row, &breakpoint) in list.breakpoints.iter().enumerate() {
+                let selected = pane.breakpoint_cursor == Some(row);
+                let address = match breakpoint {
+                    CodeBreakpoint::Linear(address) | CodeBreakpoint::Physical(address) => address,
+                };
+                let place = match breakpoint {
+                    CodeBreakpoint::Linear(address) => {
+                        list.names.name(address).map(|named| named.label()).unwrap_or_default()
+                    }
+                    CodeBreakpoint::Physical(_) => "physical address".to_owned(),
+                };
+                let cells = [
+                    Cell::right((row + 1).to_string(), TEXT_MUTED, 3),
+                    Cell::left(format!("{address:016X}"), ACCENT_RED, 16),
+                    Cell::fill(place, TEXT_PRIMARY),
+                ];
+                let tone = if selected { Tone::Selected } else { Tone::Plain };
+                let response = list_row(ui, 0.0, &cells, tone, RowSense::Pick { selected });
+                if response.clicked() {
+                    pane.breakpoint_cursor = Some(row);
+                }
+                response.context_menu(|ui| {
+                    if ui.button(REMOVE_BREAKPOINT_HERE).clicked() {
+                        *action = Some(remove(row));
+                        ui.close();
+                    }
+                });
+            }
+            ui.add_space(SPACE_ITEM);
+            let picked = pane.breakpoint_cursor;
+            let remove_picked = ui
+                .add_enabled(picked.is_some(), egui::Button::new("Remove"))
+                .on_hover_text(REMOVE_BREAKPOINT);
+            if remove_picked.clicked() {
+                if let Some(row) = picked {
+                    *action = Some(remove(row));
+                    pane.breakpoint_cursor = None;
+                }
+            }
+        },
+    );
+    if !list.available && !list.breakpoints.is_empty() {
+        ui.label(RichText::new(BREAKPOINTS_IDLE).color(ACCENT_AMBER));
+    }
+}
+
+/// F2 on the CPU tab sets a breakpoint on the picked instruction, or removes
+/// the one there; with no instruction picked (or the picked one no longer
+/// shown) it acts on the instruction at RIP. Not while a field takes the
+/// keys.
+fn code_key(
+    ui: &egui::Ui,
+    snapshot: &DebugSnapshot,
+    breakpoints: &[CodeBreakpoint],
+    pane: &DebuggerPane,
+    action: &mut Option<DebuggerAction>,
+) {
+    if ui.ctx().egui_wants_keyboard_input() || !ui.input(|input| input.key_pressed(egui::Key::F2)) {
+        return;
+    }
+    let shown = |address: &u64| snapshot.code.iter().any(|line| line.address == *address);
+    let address = pane
+        .code_cursor
+        .filter(shown)
+        .or_else(|| snapshot.code.first().map(|line| line.address));
+    if let Some(address) = address {
+        *action = Some(DebuggerAction::SetBreakpoints(toggled(breakpoints, address)));
+    }
+}
+
+/// A field taking an address or `module!name` and Add, which adds a linear
+/// breakpoint there.
+fn add_breakpoint_row(
+    ui: &mut egui::Ui,
+    strip: &BreakpointList<'_>,
+    pane: &mut DebuggerPane,
+    action: &mut Option<DebuggerAction>,
+) {
+    let linear = strip
+        .breakpoints
+        .iter()
+        .filter(|breakpoint| matches!(breakpoint, CodeBreakpoint::Linear(_)))
+        .count();
+    let full = linear >= MAX_LINEAR_BREAKPOINTS;
+    let enabled = strip.available && !full;
+    ui.horizontal_wrapped(|ui| {
+        let field = ui.add_enabled(
+            enabled,
+            egui::TextEdit::singleline(&mut pane.breakpoint_text)
+                .font(egui::TextStyle::Monospace)
+                .hint_text("address or module!name")
+                .desired_width(200.0),
+        );
+        field.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::TextEdit, enabled, BREAKPOINT_ADDRESS));
+        let entered = field.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+        let add = ui.add_enabled(enabled, egui::Button::new("Add"));
+        let add = if !strip.available {
+            add.on_disabled_hover_text(BREAKPOINTS_NEED_INTERPRETER)
+        } else if full {
+            add.on_disabled_hover_text(format!("At most {MAX_LINEAR_BREAKPOINTS} breakpoints."))
+        } else {
+            add
+        };
+        if enabled && (add.clicked() || entered) {
+            match go_target(&pane.breakpoint_text, strip.names) {
+                Ok(address) => {
+                    let breakpoint = CodeBreakpoint::Linear(address);
+                    if !strip.breakpoints.contains(&breakpoint) {
+                        let mut set = strip.breakpoints.to_vec();
+                        set.push(breakpoint);
+                        *action = Some(DebuggerAction::SetBreakpoints(set));
+                    }
+                    pane.breakpoint_text.clear();
+                    pane.breakpoint_error = None;
+                }
+                Err(error) => pane.breakpoint_error = Some(error),
+            }
+        }
+    });
+    if let Some(error) = pane.breakpoint_error {
+        ui.label(RichText::new(error.message()).color(ACCENT_RED));
+    }
+}
+
+/// The breakpoint set with the one at `address` added, or removed when it is
+/// already there: what a code line's menu does.
+fn toggled(breakpoints: &[CodeBreakpoint], address: u64) -> Vec<CodeBreakpoint> {
+    let at = CodeBreakpoint::Linear(address);
+    if breakpoints.contains(&at) {
+        breakpoints.iter().copied().filter(|kept| *kept != at).collect()
+    } else {
+        let mut set = breakpoints.to_vec();
+        set.push(at);
+        set
+    }
 }
 
 /// The shown processor's state as chips: its privilege — user mode (CPL 3)
@@ -845,6 +1160,12 @@ fn grid_layout(
     let columns = resized(split.columns, 0.0, page.x, gap, SPLIT_MIN);
     let left = ((page.x - gap) * columns).floor();
     let right = page.x - gap - left;
+    // The code pane's pick is read before the panes borrow the pane state,
+    // and written back once they are drawn, as the split is.
+    let mut left_panes = LeftPanes {
+        action: &mut *action,
+        code_cursor: pane.code_cursor,
+    };
     ui.horizontal_top(|ui| {
         ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
         split_column(
@@ -852,16 +1173,18 @@ fn grid_layout(
             egui::vec2(left, page.y),
             gap,
             Split { share: &mut split.left_rows, default: TOP_SHARE, label: RESIZE_CODE_MEMORY },
-            &mut (),
-            |ui, size, _| {
-                fixed_card(ui, size, Title::plain("Code"), |_| {}, |ui| code_rows(ui, snapshot, marks));
+            &mut left_panes,
+            |ui, size, panes| {
+                fixed_card(ui, size, Title::plain("Code"), |_| {}, |ui| {
+                    code_rows(ui, snapshot, marks, &mut panes.code_cursor, panes.action);
+                });
             },
-            |ui, size, _| {
+            |ui, size, panes| {
                 fixed_card(
                     ui,
                     size,
                     Title::plain("Memory"),
-                    |ui| memory_bar(ui, snapshot, marks, pane, action),
+                    |ui| memory_bar(ui, snapshot, marks, pane, panes.action),
                     |ui| memory_rows(ui, snapshot, marks),
                 );
             },
@@ -895,7 +1218,15 @@ fn grid_layout(
             },
         );
     });
+    pane.code_cursor = left_panes.code_cursor;
     pane.split = split;
+}
+
+/// What the grid's left column lends its code and memory panes: the action,
+/// and the code pane's picked instruction.
+struct LeftPanes<'a> {
+    action: &'a mut Option<DebuggerAction>,
+    code_cursor: Option<u64>,
 }
 
 /// How the grid's panes divide the page, as shares of the room between
@@ -1076,6 +1407,8 @@ fn scrolling_layout(
     action: &mut Option<DebuggerAction>,
 ) {
     let gap = density.gap();
+    // The code pane's pick, written back once the panes are drawn.
+    let mut code_cursor = pane.code_cursor;
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| match columns {
@@ -1086,7 +1419,7 @@ fn scrolling_layout(
                 &mut (),
                 |ui, _| {
                     card(ui, density, Title::plain("Code"), |_| {}, |ui| {
-                        code_rows(ui, snapshot, marks);
+                        code_rows(ui, snapshot, marks, &mut code_cursor, &mut *action);
                     });
                     ui.add_space(gap);
                     card(
@@ -1113,7 +1446,7 @@ fn scrolling_layout(
                 });
                 ui.add_space(gap);
                 card(ui, density, Title::plain("Code"), |_| {}, |ui| {
-                    code_rows(ui, snapshot, marks);
+                    code_rows(ui, snapshot, marks, &mut code_cursor, &mut *action);
                 });
                 ui.add_space(gap);
                 card(ui, density, Title::plain("Stack"), |_| {}, |ui| {
@@ -1129,6 +1462,7 @@ fn scrolling_layout(
                 );
             }
         });
+    pane.code_cursor = code_cursor;
 }
 
 /// Two columns, the left `left_share` of the width and a `gap` between them,
@@ -1292,8 +1626,16 @@ fn code_bytes_shown(room_chars: f32, digits: usize) -> usize {
 /// The code at RIP, one instruction a row: address, bytes, opcode, then the
 /// named target of a branch or `lea` and the source line, when the tables
 /// have them. A function's first instruction is headed by the function's
-/// name. The row at RIP is shaded and marked.
-fn code_rows(ui: &mut egui::Ui, snapshot: &DebugSnapshot, marks: Marks<'_>) {
+/// name. The row at RIP is shaded and marked; a row at a breakpoint is marked
+/// red. A click picks a row (`cursor`), which F2 sets or removes a breakpoint
+/// on, and a row's context menu does the same.
+fn code_rows(
+    ui: &mut egui::Ui,
+    snapshot: &DebugSnapshot,
+    marks: Marks<'_>,
+    cursor: &mut Option<u64>,
+    action: &mut Option<DebuggerAction>,
+) {
     let names = Namer::new(&snapshot.symbols, marks.symbols);
     let digits = hex_digits(pane_code_size(snapshot));
     let room = (ui.available_width() - MARKER_LEAD - 2.0 * ROW_PAD) / char_width(ui);
@@ -1337,20 +1679,38 @@ fn code_rows(ui: &mut egui::Ui, snapshot: &DebugSnapshot, marks: Marks<'_>) {
         if let Some(source) = named.as_ref().and_then(NamedAddress::source) {
             text.push_str(&format!("  · {source}"));
         }
-        let (address_color, tone) = if at_rip {
-            (ACCENT_CYAN, Tone::Current)
+        let picked = *cursor == Some(line.address);
+        let address_color = if at_rip { ACCENT_CYAN } else { TEXT_MUTED };
+        let tone = if picked {
+            Tone::Selected
+        } else if at_rip {
+            Tone::Current
         } else {
-            (TEXT_MUTED, Tone::Plain)
+            Tone::Plain
         };
         let cells = [
             Cell::left(format!("{:0digits$X}", line.address), address_color, digits),
             Cell::left(bytes.join(" "), TEXT_MUTED, 3 * shown + 1),
             Cell::fill(text, text_color),
         ];
-        let response = list_row(ui, MARKER_LEAD, &cells, tone, RowSense::Look);
-        if at_rip {
-            lead_arrow(ui, response.rect, ACCENT_CYAN);
+        let response = list_row(ui, MARKER_LEAD, &cells, tone, RowSense::Pick { selected: picked });
+        if response.clicked() {
+            *cursor = Some(line.address);
         }
+        let at_breakpoint = marks.breakpoints.contains(&CodeBreakpoint::Linear(line.address));
+        match (at_rip, at_breakpoint) {
+            (true, true) => lead_arrow(ui, response.rect, ACCENT_RED),
+            (true, false) => lead_arrow(ui, response.rect, ACCENT_CYAN),
+            (false, true) => lead_dot(ui, response.rect, MARKER_LEAD, ACCENT_RED),
+            (false, false) => {}
+        }
+        response.context_menu(|ui| {
+            let label = if at_breakpoint { REMOVE_BREAKPOINT_HERE } else { SET_BREAKPOINT_HERE };
+            if ui.button(label).clicked() {
+                *action = Some(DebuggerAction::SetBreakpoints(toggled(marks.breakpoints, line.address)));
+                ui.close();
+            }
+        });
     }
 }
 
@@ -1928,6 +2288,25 @@ pub(crate) fn no_windows_kernel(miss: KernelMiss) -> String {
     }
 }
 
+/// [`no_windows_kernel`]'s text for a pause that read the guest of the VMCS
+/// at `vmcs` (the processor was paused in the hypervisor): no kernel found
+/// there says what else that guest may be.
+pub(crate) fn no_windows_kernel_in(miss: KernelMiss, vmcs: Option<u64>) -> String {
+    match vmcs {
+        Some(vmcs) if !miss.kernel_found() => format!(
+            "{} This pause is in the hypervisor, and the guest of its VMCS at {vmcs:#x} was read: \
+             under VBS that guest may be the secure kernel (VTL 1) rather than Windows.",
+            no_windows_kernel(miss)
+        ),
+        Some(_) | None => no_windows_kernel(miss),
+    }
+}
+
+/// What a listing says when it was read as the guest of the VMCS at `vmcs`.
+pub(crate) fn vmx_guest_label(vmcs: u64) -> String {
+    format!("read as the guest of the VMCS at {vmcs:#x}: this pause is in the hypervisor (VMX root)")
+}
+
 /// The heading over [`no_windows_kernel`]'s text.
 fn no_windows_kernel_title(miss: KernelMiss) -> &'static str {
     if miss.kernel_found() {
@@ -1950,7 +2329,7 @@ fn system_page(
 ) {
     match (&snapshot.system, pane.tab) {
         (SystemListing::NoWindowsKernel(miss), _) => {
-            empty_state(ui, no_windows_kernel_title(*miss), &no_windows_kernel(*miss));
+            empty_state(ui, no_windows_kernel_title(*miss), &no_windows_kernel_in(*miss, snapshot.vmcs));
         }
         (SystemListing::Processes(listing), DebuggerTab::Processes) => {
             layouts_line(ui, snapshot);
@@ -2072,6 +2451,9 @@ fn layouts_line(ui: &mut egui::Ui, snapshot: &DebugSnapshot) {
     }
     if let Some(through) = snapshot.through.label() {
         ui.label(RichText::new(through).small().color(TEXT_MUTED));
+    }
+    if let Some(vmcs) = snapshot.vmcs {
+        ui.label(RichText::new(vmx_guest_label(vmcs)).small().color(TEXT_MUTED));
     }
 }
 
