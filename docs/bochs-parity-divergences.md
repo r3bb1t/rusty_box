@@ -1462,14 +1462,40 @@ of an image whose size is not a whole number of cylinders stays reachable by
 CHS; VM files saved by the shell carry that geometry. Refusing it, as Bochs
 does, would refuse VMs that boot today.
 
+### If a guest trips on it
+
+What it looks like: a disk error on a sector near the very end of the disk,
+in the last, partial cylinder, and nowhere else. The likeliest guests are ones
+that address the disk by cylinder, head and sector instead of by sector number
+(DOS, old boot loaders, BIOS-based partitioning tools), and installers that
+size a partition from the reported geometry, so the partition ends past the
+image and the install fails late with write errors.
+
+How to confirm it: the attach logs
+`ATA: geometry C/H/S describes N bytes, more than '<image>' holds (M bytes)`,
+and the failing access logs
+`ATA: logical address out of bounds (x/y) - aborting command` with x at or past
+y, the image's sector count.
+
+What to do for that VM: under Hardware › Hard disk › Advanced, turn on
+`Override CHS geometry` and set cylinders to the image's bytes divided by
+heads × sectors per track × 512, rounded down. Do it before the guest
+partitions the disk; a partition already made up to the old end still reaches
+past the image.
+
+What to do for good: the price below.
+
 ### Price of closing it
 
 Detect the geometry by rounding down, as Bochs's own auto-geometry does
-(`hd_size / (heads * spt * sect_size)`), and refuse a larger one here. A VM
-whose saved geometry was rounded up would then need its geometry changed,
-which moves every CHS address past the change for an installed guest.
+(`hd_size / (heads * spt * sect_size)`) in `rusty_box_gui` `config.rs`
+`auto_detect_chs`, and refuse a larger one here. A VM whose saved geometry was
+rounded up then needs its cylinder count lowered. Every CHS address inside the
+remaining cylinders stays where it is, but the last, partial cylinder drops
+out, and the BIOS's translated geometry for a large disk (the one INT 13h
+reports, which a partition table records) can change with it.
 
-**Status:** proposed (2026-10-18), awaiting the owner's agreement.
+**Status:** deliberate (2026-10-18, approved by the owner).
 
 ---
 
