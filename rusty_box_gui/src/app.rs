@@ -19,6 +19,12 @@ use crate::sessions::{
 use crate::shell::destination::{SidebarAction, VmBarAction};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::debugger::control::{DumpOutcome, DumpRequest, Wanted};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::debugger::xref::service::{ModuleKey, XrefQuery};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::shell::debugger_page::references::{copy_module, copy_request, scope_modules, ModuleRow, ReferencesView};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::shell::debugger_page::DebuggerTab;
 use crate::shell::destination::{Destination, ShellPage};
 use crate::shell::sidebar::{Drawer, VmLibraryEntry};
 #[cfg(not(target_arch = "wasm32"))]
@@ -2377,6 +2383,23 @@ impl NativeShellApp {
         // The processor switch shows the processor the run reads, which a
         // breakpoint stop sets to the one that stopped.
         session.debugger_mut().cpu = control.view().cpu;
+        // The References tab's answer, read from the indexes as they are now:
+        // a module still indexing is named as waiting, and the next frame
+        // reads again.
+        let references_view = {
+            let pane = session.debugger_mut();
+            match (&pane.references, snapshot.as_deref()) {
+                (Some(target), Some(shown)) if pane.tab == DebuggerTab::References => {
+                    let query = XrefQuery { target: target.clone(), scope: pane.references_scope };
+                    let keys: Vec<ModuleKey> =
+                        scope_modules(shown, query.scope, &query.target).into_iter().map(|module| module.key).collect();
+                    let answer = control.xrefs().answer(&query, &keys);
+                    let modules = keys.into_iter().map(|key| ModuleRow { state: control.xrefs().state(&key), key }).collect();
+                    Some(ReferencesView { answer, modules })
+                }
+                (Some(_) | None, Some(_) | None) => None,
+            }
+        };
         let action = draw_debugger_page(
             ui,
             DebuggerPageState {
@@ -2395,6 +2418,7 @@ impl NativeShellApp {
                 targets: &targets,
                 breakpoints: &breakpoints,
                 stopped_at,
+                references: references_view.as_ref(),
             },
         );
         // A paused run answers on its own thread; keep looking while it may.
@@ -2420,6 +2444,34 @@ impl NativeShellApp {
             Some(DebuggerAction::DumpRam) => self.ask_for_ram_dump(),
             Some(DebuggerAction::ShowMemory(memory)) => {
                 control.set_view(ViewRequest { memory, ..control.view() });
+            }
+            Some(DebuggerAction::ShowCode(code)) => {
+                self.sessions.open(&vm).debugger_mut().tab = DebuggerTab::Cpu;
+                control.set_view(ViewRequest { code, ..control.view() });
+            }
+            Some(DebuggerAction::FindReferences(target)) => {
+                let pane = self.sessions.open(&vm).debugger_mut();
+                pane.tab = DebuggerTab::References;
+                pane.references = Some(target.clone());
+                let scope = pane.references_scope;
+                if let Some(shown) = snapshot.as_deref() {
+                    control.find_references(copy_request(shown, scope_modules(shown, scope, &target)));
+                }
+            }
+            Some(DebuggerAction::CancelReferences) => control.cancel_references(),
+            Some(DebuggerAction::Reindex(bases)) => {
+                if let Some(shown) = snapshot.as_deref() {
+                    let modules: Vec<_> = shown
+                        .symbols
+                        .modules
+                        .iter()
+                        .filter(|module| bases.contains(&module.base))
+                        .map(|module| copy_module(shown, module))
+                        .collect();
+                    let keys: Vec<_> = modules.iter().map(|module| module.key.clone()).collect();
+                    control.xrefs().forget(&keys);
+                    control.find_references(copy_request(shown, modules));
+                }
             }
             Some(DebuggerAction::SelectCpu(cpu)) => {
                 control.set_view(ViewRequest { cpu, ..control.view() });
@@ -10091,6 +10143,18 @@ mod tests {
             kittest::{NodeT, Queryable},
             Harness,
         };
+        use crate::debugger::control::Task;
+        use crate::debugger::inspect::{
+            AddressSpace, CodeTarget, GuestAddress, ModuleSpace, SymModule, SymbolIndex, ViewRequest,
+        };
+        use crate::debugger::module_identity::GuestIdentity;
+        use crate::debugger::xref::index::ModuleSpan;
+        use crate::debugger::xref::service::{IndexJob, IndexState};
+        use crate::debugger::xref::test_image::{module_image, ImageSpec};
+        use crate::shell::debugger_page::references::{
+            ALL_MODULES, CANCEL, REFERENCES_FIELD, REFERENCES_TO, REINDEX, REINDEX_ALL, REINDEX_MODULE,
+        };
+        use crate::shell::debugger_page::BACK_TO_RIP;
 
         /// A frame every sixtieth of a second, as a desktop draws them, so a
         /// double-click's two clicks land inside egui's double-click delay,
@@ -10241,6 +10305,29 @@ mod tests {
                     .is_some_and(|text| text.contains("64-bit mode")))
                 .next()
                 .is_some());
+        }
+
+        /// Code shown at an address other than RIP says so, and its button
+        /// shows RIP again.
+        #[test]
+        fn showing_code_elsewhere_has_a_way_back() {
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_vm(&mut app);
+            let mut snapshot = paused_snapshot();
+            let elsewhere = CodeTarget::At(GuestAddress { space: AddressSpace::Linear, value: snapshot.rip + 4 });
+            snapshot.code_at = elsewhere;
+            control.set_view(ViewRequest { code: elsewhere, ..control.view() });
+            control.publish(snapshot);
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            assert!(window
+                .query_all_by(|node| node.label().or(node.value()).is_some_and(|text| text.starts_with("Showing code at")))
+                .next()
+                .is_some());
+            window.get_by_label(BACK_TO_RIP).click();
+            window.run();
+            assert_eq!(control.view().code, CodeTarget::Rip);
         }
 
         /// A pause's modules are asked of the symbol engine when the page
@@ -10951,6 +11038,280 @@ mod tests {
             assert!(control.breakpoints().is_empty());
         }
 
+        /// The paused snapshot with one kernel module, `flat.sys`, holding
+        /// RIP: its base, and the snapshot.
+        struct FlatModule {
+            base: u64,
+            rip: u64,
+            snapshot: crate::debugger::inspect::DebugSnapshot,
+        }
+
+        const FLAT_SIZE: u64 = 0x6000;
+
+        fn flat_module() -> FlatModule {
+            let mut snapshot = paused_snapshot();
+            let rip = snapshot.rip;
+            let base = rip & !0xFFF;
+            snapshot.symbols = SymbolIndex {
+                modules: vec![SymModule { base, size: FLAT_SIZE, name: "flat.sys".into(), space: ModuleSpace::Kernel, identity: GuestIdentity::Unnamed }],
+                kernel: None,
+            };
+            FlatModule { base, rip, snapshot }
+        }
+
+        /// The shown VM's control, paused in `flat.sys`.
+        struct PausedInFlat {
+            control: Arc<crate::debugger::control::RunControl>,
+            flat: FlatModule,
+        }
+
+        fn paused_in_flat(app: &mut NativeShellApp) -> PausedInFlat {
+            let control = paused_vm(app);
+            // A snapshot is not `Clone`: the published one is read again,
+            // the same as the one kept.
+            control.publish(flat_module().snapshot);
+            PausedInFlat { control, flat: flat_module() }
+        }
+
+        /// `flat.sys` indexed: `call rip` at `.text`, then `call [rip+slot]`,
+        /// the slot in `.data` holding RIP.
+        fn index_flat(control: &crate::debugger::control::RunControl, flat: &FlatModule) {
+            let spec = ImageSpec::bits64(0x1000);
+            let slot = flat.base + u64::from(spec.data_free());
+            let mut text = vec![0xE8];
+            text.extend_from_slice(&(flat.rip.wrapping_sub(flat.base + 0x1005) as u32).to_le_bytes());
+            text.extend_from_slice(&[0xFF, 0x15]);
+            text.extend_from_slice(&(slot.wrapping_sub(flat.base + 0x100B) as u32).to_le_bytes());
+            let image = module_image(flat.base, &spec, &text, &flat.rip.to_le_bytes(), &[0x1000]);
+            assert_eq!(image.bytes.len() as u64, FLAT_SIZE);
+            let key = copy_module(&flat.snapshot, &flat.snapshot.symbols.modules[0]).key;
+            control.xrefs().accept(IndexJob {
+                key: key.clone(),
+                image,
+                extra_sync: Vec::new(),
+                spans: Arc::from(vec![ModuleSpan { base: flat.base, size: FLAT_SIZE }]),
+                taken_at: 1,
+            });
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while !matches!(control.xrefs().state(&key), Some(IndexState::Ready(_))) {
+                assert!(std::time::Instant::now() < deadline, "flat.sys was not indexed");
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
+
+        fn has_text_starting(window: &Harness<'_, Window>, start: &str) -> bool {
+            window.query_all_by(|node| node.label().or(node.value()).is_some_and(|text| text.starts_with(start))).next().is_some()
+        }
+
+        /// Opens RIP's code line menu and asks who refers to it.
+        fn ask_references_to_rip(window: &mut Harness<'_, Window>, rip: u64) {
+            let row = format!("{rip:016X}");
+            window
+                .query_all_by(|node| node.label().or(node.value()).is_some_and(|text| text.starts_with(&row)))
+                .next()
+                .expect("the code line at RIP")
+                .click_secondary();
+            window.run();
+            window.get_by_label(&format!("{REFERENCES_TO} {rip:#X}")).click();
+            window.run();
+        }
+
+        #[test]
+        fn references_to_a_code_line_open_the_tab_and_ask_for_the_module() {
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let PausedInFlat { control, flat } = paused_in_flat(&mut app);
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            ask_references_to_rip(&mut window, flat.rip);
+            assert!(window.query_by_label(REFERENCES_FIELD).is_some(), "the References tab is shown");
+            let queued = control.queued();
+            let [Task::CopyImages(request)] = queued.as_slice() else {
+                panic!("one copy is asked: {queued:?}")
+            };
+            let names: Vec<&str> = request.modules.iter().map(|module| module.key.name.as_str()).collect();
+            assert_eq!(names, ["flat.sys"]);
+        }
+
+        #[test]
+        fn a_found_site_opens_in_the_code_pane() {
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let PausedInFlat { control, flat } = paused_in_flat(&mut app);
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            ask_references_to_rip(&mut window, flat.rip);
+            index_flat(&control, &flat);
+            window.run();
+            let call = flat.base + 0x1000;
+            window
+                .query_all_by(|node| node.label().or(node.value()).is_some_and(|text| text.starts_with(&format!("{call:016X}"))))
+                .next()
+                .expect("the call's row")
+                .click();
+            window.run();
+            assert_eq!(control.view().code, CodeTarget::At(GuestAddress { space: AddressSpace::Linear, value: call }));
+            assert!(window.query_by_label("Registers").is_some(), "the CPU tab is shown");
+        }
+
+        #[test]
+        fn a_pointer_row_lists_its_readers_under_it() {
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let PausedInFlat { control, flat } = paused_in_flat(&mut app);
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            ask_references_to_rip(&mut window, flat.rip);
+            index_flat(&control, &flat);
+            window.run();
+            let slot = flat.base + u64::from(crate::debugger::xref::test_image::ImageSpec::bits64(0x1000).data_free());
+            assert!(has_text_starting(&window, &format!("{slot:016X}")), "the pointer's row");
+            assert!(has_text_starting(&window, &format!("{:016X}", flat.base + 0x1005)), "its reader's row");
+            assert!(has_text_starting(&window, "1 reference") || has_text_starting(&window, "2 references"));
+        }
+
+        #[test]
+        fn indexing_shows_progress_and_cancels() {
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let PausedInFlat { control, flat } = paused_in_flat(&mut app);
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            ask_references_to_rip(&mut window, flat.rip);
+            assert!(window.query_by_label("waiting to be copied").is_some());
+            window.get_by_label(CANCEL).click();
+            window.run();
+            assert_eq!(control.queued(), []);
+        }
+
+        #[test]
+        fn the_field_takes_a_name_or_an_address() {
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let PausedInFlat { flat, .. } = paused_in_flat(&mut app);
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            let vm = window.state().app.shown_vm();
+            window.state_mut().app.sessions.open(&vm).debugger_mut().tab = DebuggerTab::References;
+            window.run();
+            let field = || egui::accesskit::Role::TextInput;
+            window.get_by_role_and_label(field(), REFERENCES_FIELD).click();
+            window.run();
+            window.get_by_role_and_label(field(), REFERENCES_FIELD).type_text(&format!("{:#x}", flat.rip));
+            window.run();
+            window.get_by_label("Find").click();
+            window.run();
+            let asked = window.state_mut().app.sessions.open(&vm).debugger_mut().references.clone();
+            assert_eq!(asked.map(|target| target.ranges[0].start), Some(flat.rip));
+            window.get_by_role_and_label(field(), REFERENCES_FIELD).click();
+            window.run();
+            window.get_by_role_and_label(field(), REFERENCES_FIELD).type_text("zz");
+            window.run();
+            window.get_by_label("Find").click();
+            window.run();
+            assert!(has_text_starting(&window, "An address is hexadecimal digits"));
+        }
+
+        #[test]
+        fn all_modules_asks_for_every_module_of_the_pause() {
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_vm(&mut app);
+            let mut flat = flat_module();
+            flat.snapshot.symbols.modules.push(SymModule {
+                base: 0xFFFF_F800_0100_0000,
+                size: 0x10_0000,
+                name: "ntoskrnl.exe".into(),
+                space: ModuleSpace::Kernel,
+                identity: GuestIdentity::Unnamed,
+            });
+            control.publish(flat.snapshot);
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            ask_references_to_rip(&mut window, flat.rip);
+            window.get_by_label(ALL_MODULES).click();
+            window.run();
+            let names: Vec<String> = control
+                .queued()
+                .into_iter()
+                .flat_map(|task| match task {
+                    Task::CopyImages(request) => request.modules.into_iter().map(|module| module.key.name).collect(),
+                    _ => Vec::new(),
+                })
+                .collect();
+            assert_eq!(names, ["flat.sys", "ntoskrnl.exe"], "flat.sys is asked once, then the kernel");
+        }
+
+        #[test]
+        fn reindexing_a_module_copies_it_again() {
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let PausedInFlat { control, flat } = paused_in_flat(&mut app);
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            ask_references_to_rip(&mut window, flat.rip);
+            control.cancel_references();
+            index_flat(&control, &flat);
+            window.run();
+            assert!(has_text_starting(&window, "indexed at instruction 1"));
+            window.get_by_label(&format!("{REINDEX} flat.sys")).click();
+            window.run();
+            let key = copy_module(&flat.snapshot, &flat.snapshot.symbols.modules[0]).key;
+            assert_eq!(control.xrefs().state(&key), Some(IndexState::Copying), "its old index is gone");
+            assert!(matches!(control.queued().as_slice(), [Task::CopyImages(request)] if request.modules[0].key == key));
+        }
+
+        #[test]
+        fn reindex_all_copies_every_module_of_the_scope() {
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let PausedInFlat { control, flat } = paused_in_flat(&mut app);
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            ask_references_to_rip(&mut window, flat.rip);
+            control.cancel_references();
+            index_flat(&control, &flat);
+            window.run();
+            window.get_by_label(REINDEX_ALL).click();
+            window.run();
+            assert!(matches!(control.queued().as_slice(), [Task::CopyImages(request)] if request.modules.len() == 1));
+        }
+
+        #[test]
+        fn a_module_row_menu_reindexes_it() {
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_vm(&mut app);
+            let mut snapshot = kernel_listing_snapshot(None);
+            snapshot.symbols = SymbolIndex {
+                modules: vec![SymModule {
+                    base: TCPIP_BASE,
+                    size: 0x11_0000,
+                    name: "tcpip.sys".into(),
+                    space: ModuleSpace::Kernel,
+                    identity: GuestIdentity::Unnamed,
+                }],
+                kernel: None,
+            };
+            control.publish(snapshot);
+            let mut window = tall_window(app);
+            window.run();
+            open_kernel_modules(&mut window);
+            window
+                .query_all_by(|node| node.label().or(node.value()).is_some_and(|text| text.contains("tcpip.sys")))
+                .next()
+                .expect("tcpip.sys's row")
+                .click_secondary();
+            window.run();
+            window.get_by_label(REINDEX_MODULE).click();
+            window.run();
+            // The listing's own refresh is queued too.
+            let copies: Vec<Task> = control.queued().into_iter().filter(|task| matches!(task, Task::CopyImages(_))).collect();
+            assert!(matches!(
+                copies.as_slice(),
+                [Task::CopyImages(request)] if request.modules.len() == 1 && request.modules[0].key.base == TCPIP_BASE
+            ));
+        }
+
         /// A run paused at a breakpoint says which, on which processor.
         #[test]
         fn a_breakpoint_stop_is_said_under_the_header() {
@@ -11212,9 +11573,9 @@ mod tests {
                     "{name} at {rect:?} runs past the window's edge"
                 );
             }
-            // The tab switch wrapped under the buttons, and the chips under it.
+            // The tab switch has its own row, under the buttons and the chips.
             assert!(tabs.top() > step.bottom() - 1.0, "tabs {tabs:?} step {step:?}");
-            assert!(chip.top() > tabs.bottom() - 1.0, "chip {chip:?} tabs {tabs:?}");
+            assert!(tabs.top() > chip.bottom() - 1.0, "tabs {tabs:?} chip {chip:?}");
         }
 
         /// A guest's process list and the modules of one process.

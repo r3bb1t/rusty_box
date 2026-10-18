@@ -499,6 +499,13 @@ impl PdbTables {
         (at < end).then(|| ProcedureSpan { name: procedure.name.clone(), start: Rva(procedure.rva), end: Rva(end) })
     }
 
+    #[must_use]
+    pub fn procedure_starts(&self) -> Vec<Rva> {
+        let mut starts: Vec<Rva> = self.procedures.iter().map(|procedure| Rva(procedure.rva)).collect();
+        starts.dedup();
+        starts
+    }
+
     /// A public symbol's RVA, else a procedure's.
     #[must_use]
     pub fn address_of(&self, name: &str) -> Option<Rva> {

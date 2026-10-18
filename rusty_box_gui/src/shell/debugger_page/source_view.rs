@@ -16,6 +16,8 @@ use egui::{Color32, RichText};
 
 use crate::debugger::inspect::SymbolIndex;
 use crate::debugger::source_breakpoints::{resolve, BreakpointTarget, SourceResolution, SourceTarget};
+use crate::debugger::xref::service::{AddressRange, XrefTarget};
+use super::references::REFERENCES_TO;
 use crate::shell::listing::{lead_arrow, lead_dot, lead_ring, list_row, Cell, RowSense, Tone, ROW_PAD};
 use crate::shell::theme::{ACCENT_AMBER, ACCENT_CYAN, ACCENT_RED, TEXT_MUTED, TEXT_PRIMARY};
 use crate::source::find::{FoundBy, PathMap, SourceCheck, SourceFound};
@@ -219,6 +221,25 @@ pub(crate) enum SourceAsk {
     /// Keep this map the owner made by locating the file in its project's
     /// settings.
     SaveMap { project: String, map: PathMap },
+    /// Who refers to this line's code.
+    References(u32),
+}
+
+/// Every code range of `line` of `source`'s file, as a cross-reference
+/// target named `file:line`; `None` when the line has no code.
+pub(crate) fn line_target(source: &PauseSource, line: u32) -> Option<XrefTarget> {
+    let ranges: Vec<AddressRange> = source
+        .tables
+        .lines_of(&source.build_path, line)
+        .iter()
+        .flat_map(|resolved| resolved.ranges.iter())
+        .filter(|range| range.file == source.key.file)
+        .map(|range| AddressRange {
+            start: source.module_base.wrapping_add(range.start.0),
+            end: source.module_base.wrapping_add(range.end.0),
+        })
+        .collect();
+    (!ranges.is_empty()).then(|| XrefTarget { ranges, label: format!("{}:{line}", file_name(&source.build_path)) })
 }
 
 /// What the source view draws from.
@@ -226,6 +247,42 @@ pub(crate) struct SourcePane<'a> {
     pub(crate) source: &'a PauseSource,
     pub(crate) slot: Option<&'a SourceSlot>,
     pub(crate) marks: &'a [LineMarkAt],
+    /// Whether `source`'s line is where the processor stands, or a place the
+    /// owner opened.
+    pub(crate) place: PlaceMark,
+}
+
+/// What the source view's line is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PlaceMark {
+    /// The line the processor runs next: the arrow.
+    Current,
+    /// A line the owner opened (a cross reference, a Go to): ringed, since
+    /// the arrow means RIP.
+    Shown,
+}
+
+/// What a line's gutter draws.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Lead {
+    Arrow(Color32),
+    /// The ring of a line the owner opened.
+    Shown,
+    Dot(Color32),
+    Ring(Color32),
+    Nothing,
+}
+
+/// The gutter of a line: `current` is whether it is the view's line.
+pub(crate) fn line_lead(current: bool, place: PlaceMark, mark: Option<LineMark>) -> Lead {
+    match (current, place, mark) {
+        (true, PlaceMark::Shown, _) => Lead::Shown,
+        (true, PlaceMark::Current, Some(LineMark::Set)) => Lead::Arrow(ACCENT_RED),
+        (true, PlaceMark::Current, Some(LineMark::Pending) | None) => Lead::Arrow(ACCENT_CYAN),
+        (false, _, Some(LineMark::Set)) => Lead::Dot(ACCENT_RED),
+        (false, _, Some(LineMark::Pending)) => Lead::Ring(ACCENT_RED),
+        (false, _, None) => Lead::Nothing,
+    }
 }
 
 fn file_name(path: &str) -> &str {
@@ -358,13 +415,19 @@ pub(crate) fn source_rows(ui: &mut egui::Ui, pane: &SourcePane<'_>, cursor: &mut
         ];
         let response = list_row(ui, GUTTER, &cells, tone, RowSense::Pick { selected: picked });
         let mark = pane.marks.iter().find(|at| at.line == number).map(|at| at.mark);
-        match (current, mark) {
-            (true, Some(LineMark::Set)) => lead_arrow(ui, response.rect, ACCENT_RED),
-            (true, Some(LineMark::Pending) | None) => lead_arrow(ui, response.rect, ACCENT_CYAN),
-            (false, Some(LineMark::Set)) => lead_dot(ui, response.rect, GUTTER, ACCENT_RED),
-            (false, Some(LineMark::Pending)) => lead_ring(ui, response.rect, GUTTER, ACCENT_RED),
-            (false, None) => {}
+        match line_lead(current, pane.place, mark) {
+            Lead::Arrow(color) => lead_arrow(ui, response.rect, color),
+            Lead::Shown => lead_ring(ui, response.rect, GUTTER, ACCENT_CYAN),
+            Lead::Dot(color) => lead_dot(ui, response.rect, GUTTER, color),
+            Lead::Ring(color) => lead_ring(ui, response.rect, GUTTER, color),
+            Lead::Nothing => {}
         }
+        response.context_menu(|ui| {
+            if ui.button(format!("{REFERENCES_TO} line {number}")).clicked() {
+                ask = Some(SourceAsk::References(number));
+                ui.close();
+            }
+        });
         if response.clicked() {
             let in_gutter = response
                 .interact_pointer_pos()
@@ -441,6 +504,18 @@ mod tests {
         assert_eq!(toggled_line(&[address.clone()], &source, 104, Some(&symbols), &view), []);
         let added = BreakpointTarget::Source(SourceTarget { file: TRAP.into(), line: 104 });
         assert_eq!(toggled_line(&[trap_line(100)], &source, 104, Some(&symbols), &view), [trap_line(100), added]);
+    }
+
+    /// The shown line of a Go to is ringed, not arrowed: the arrow means RIP.
+    #[test]
+    fn the_source_view_marks_a_shown_line_not_the_current_one() {
+        assert_eq!(line_lead(true, PlaceMark::Current, None), Lead::Arrow(ACCENT_CYAN));
+        assert_eq!(line_lead(true, PlaceMark::Current, Some(LineMark::Set)), Lead::Arrow(ACCENT_RED));
+        assert_eq!(line_lead(true, PlaceMark::Shown, None), Lead::Shown);
+        assert_eq!(line_lead(true, PlaceMark::Shown, Some(LineMark::Set)), Lead::Shown);
+        assert_eq!(line_lead(false, PlaceMark::Shown, Some(LineMark::Set)), Lead::Dot(ACCENT_RED));
+        assert_eq!(line_lead(false, PlaceMark::Current, Some(LineMark::Pending)), Lead::Ring(ACCENT_RED));
+        assert_eq!(line_lead(false, PlaceMark::Current, None), Lead::Nothing);
     }
 
     #[test]

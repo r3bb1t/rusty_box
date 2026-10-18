@@ -845,6 +845,14 @@ impl DwarfTables {
 
     /// The DWARF subprogram holding `rva`.
     #[must_use]
+    pub fn procedure_starts(&self) -> Vec<Rva> {
+        let mut starts: Vec<Rva> =
+            self.functions.iter().filter_map(|span| span.start.checked_sub(self.link_base).map(Rva)).collect();
+        starts.dedup();
+        starts
+    }
+
+    #[must_use]
     pub fn procedure_at(&self, rva: Rva) -> Option<ProcedureSpan> {
         let address = self.link_base.checked_add(rva.0)?;
         let index = self.functions.partition_point(|span| span.start <= address).checked_sub(1)?;

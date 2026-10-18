@@ -48,3 +48,4 @@ pub(crate) mod threads;
 pub(crate) mod unwind;
 pub(crate) mod vad;
 pub(crate) mod windows;
+pub(crate) mod xref;

@@ -331,6 +331,16 @@ impl SymbolTables {
         }
     }
 
+    /// Where every function starts, ascending, each once: the PDB's
+    /// procedures, or the DWARF subprograms.
+    #[must_use]
+    pub fn procedure_starts(&self) -> Vec<Rva> {
+        match self {
+            SymbolTables::Pdb(tables) => tables.procedure_starts(),
+            SymbolTables::Dwarf(tables) => tables.procedure_starts(),
+        }
+    }
+
     pub fn layout(&self, type_name: &str) -> Result<Option<TypeLayout>, LayoutError> {
         match self {
             SymbolTables::Pdb(tables) => tables.layout(type_name),
@@ -353,7 +363,9 @@ mod tests {
     use crate::units::Rva;
     use rusty_box_symbols_fixtures::dwarf::{build_dwarf, dwz_pair, DwarfFormat, DwarfSpec, DwzForms, SUPPLEMENT_BUILD_ID};
     use rusty_box_symbols_fixtures::elf::{build_elf, ElfSpec, BUILD_ID, TEXT_RVA};
-    use rusty_box_symbols_fixtures::pdb::{build_pdb, FixtureContainer, FixturePublic, PdbFixture, PublicKind};
+    use rusty_box_symbols_fixtures::pdb::{
+        build_pdb, FixtureContainer, FixtureLine, FixtureProcedure, FixturePublic, PdbFixture, PublicKind,
+    };
 
     fn pdb(container: FixtureContainer) -> Vec<u8> {
         let mut fixture = PdbFixture::new([3; 16], 2);
@@ -386,6 +398,27 @@ mod tests {
         assert_eq!(tables.procedure_at(Rva(TEXT_RVA)).map(|span| span.name), Some("widget_init".to_owned()));
         assert_eq!(tables.symbolize(Rva(TEXT_RVA)).map(|hit| hit.name), Some("widget_init".to_owned()));
         assert_eq!(tables.layout("Widget").unwrap().map(|layout| layout.size), Some(16));
+    }
+
+    #[test]
+    fn procedure_starts_list_every_function() {
+        let procedure = |name: &str, offset: u32| FixtureProcedure {
+            name: name.into(),
+            section: 1,
+            offset,
+            len: 0x10,
+            file: r"C:\src\a.c".into(),
+            checksum: None,
+            lines: vec![FixtureLine { offset: 0, line: 1 }],
+        };
+        let mut fixture = PdbFixture::new([4; 16], 1);
+        fixture.procedures.push(procedure("second", 0x200));
+        fixture.procedures.push(procedure("first", 0x100));
+        let tables = SymbolTables::parse(&build_pdb(&fixture)).unwrap();
+        assert_eq!(tables.procedure_starts(), [Rva(0x1100), Rva(0x1200)]);
+        let dwarf = SymbolTables::parse(&elf()).unwrap().procedure_starts();
+        assert_eq!(dwarf.first(), Some(&Rva(TEXT_RVA)));
+        assert!(dwarf.windows(2).all(|pair| pair[0] < pair[1]), "ascending, each once");
     }
 
     #[test]

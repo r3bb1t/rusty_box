@@ -474,6 +474,35 @@ pub(crate) fn exception_directory(header: &[u8]) -> Option<DataDirectory> {
 
 /// `IMAGE_OPTIONAL_HEADER.SizeOfImage`, at one offset in PE32 and PE32+.
 const SIZE_OF_IMAGE: usize = 0x38;
+/// `IMAGE_OPTIONAL_HEADER.AddressOfEntryPoint`, at one offset in PE32 and
+/// PE32+.
+const ADDRESS_OF_ENTRY_POINT: usize = 16;
+
+/// The width of the code an image holds, as its optional header's magic
+/// says: PE32 is 32-bit, PE32+ 64-bit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ImageWidth {
+    Bits32,
+    Bits64,
+}
+
+/// The width of the image whose headers begin at `header`; `None` when they
+/// do not read as PE.
+pub(crate) fn image_width(header: &[u8]) -> Option<ImageWidth> {
+    match read_u16(header, optional_header(header)?)? {
+        PE32_PLUS_MAGIC => Some(ImageWidth::Bits64),
+        PE32_MAGIC => Some(ImageWidth::Bits32),
+        _ => None,
+    }
+}
+
+/// The RVA the image starts running at; `None` for an image without one (a
+/// DLL may have none) or headers that do not read as PE.
+pub(crate) fn entry_point(header: &[u8]) -> Option<u32> {
+    image_width(header)?;
+    let at = optional_header(header)?.checked_add(ADDRESS_OF_ENTRY_POINT)?;
+    read_u32(header, at).filter(|rva| *rva != 0)
+}
 
 /// A name-table entry's shape: its width in bytes, and the bit that marks an
 /// import by ordinal.
@@ -657,6 +686,21 @@ pub(crate) mod tests {
         put_u32(&mut bytes, entry, directory.rva);
         put_u32(&mut bytes, entry + 4, directory.size);
         bytes
+    }
+
+    #[test]
+    fn the_width_and_entry_point_read_from_the_optional_header() {
+        for wide in [false, true] {
+            let mut header = with_exception_directory(wide, DataDirectory { rva: 0, size: 0 });
+            let width = if wide { ImageWidth::Bits64 } else { ImageWidth::Bits32 };
+            assert_eq!(image_width(&header), Some(width));
+            assert_eq!(entry_point(&header), None, "no entry point");
+            // AddressOfEntryPoint sits 16 bytes into either optional header.
+            put_u32(&mut header, 0x98 + 16, 0x1234);
+            assert_eq!(entry_point(&header), Some(0x1234));
+        }
+        assert_eq!(image_width(b"MZ"), None);
+        assert_eq!(entry_point(&[0u8; 0x200]), None);
     }
 
     #[test]

@@ -11,13 +11,16 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use rusty_box::cpu::{BreakpointRefusal, CodeBreakpoint, CodeBreakpointHit};
 use rusty_box::emulator::PowerState;
 
-use super::inspect::{DebugSnapshot, MemoryTarget, ViewRequest};
+use super::inspect::{CodeTarget, DebugSnapshot, MemoryTarget, ViewRequest};
 use super::source_breakpoints::BreakpointTarget;
 use super::stepping::{StepCeiling, StepRequest};
 use crate::symbols::hub::SymbolsView;
 use super::kernel_layout::{same_layouts, KernelLayout};
 use super::search::{FindOutcome, FindRequest};
 use super::windows::WindowsDiscovery;
+use super::xref::service::{CopyRequest, XrefService};
+#[cfg(feature = "gui-egui")]
+use super::xref::service::{CopyModule, IndexState};
 
 /// What the shell asked of the run.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -46,6 +49,8 @@ pub(crate) enum Task {
     Find(FindRequest),
     /// Give the machine this set of code breakpoints.
     ApplyBreakpoints(Vec<CodeBreakpoint>),
+    /// Copy these modules' images for the cross-reference service.
+    CopyImages(CopyRequest),
 }
 
 /// What a run thread does once its machine handed control back.
@@ -179,6 +184,9 @@ pub(crate) struct RunControl {
     /// What the run's pauses have learned about the guest's structures. Only
     /// the run thread reads it, so the lock is never contended.
     discovery: Mutex<WindowsDiscovery>,
+    /// The VM's cross-reference indexes: the run thread hands it images, the
+    /// shell reads answers from it.
+    xrefs: Arc<XrefService>,
 }
 
 impl RunControl {
@@ -212,7 +220,43 @@ impl RunControl {
             }),
             changed: Condvar::new(),
             discovery: Mutex::new(WindowsDiscovery::default()),
+            xrefs: Arc::new(XrefService::new()),
         }
+    }
+
+    /// The VM's cross-reference service.
+    pub(crate) fn xrefs(&self) -> &Arc<XrefService> {
+        &self.xrefs
+    }
+
+    /// Asks a paused run to copy the modules of `request` that have no index
+    /// and are not being copied or indexed (a failed one is tried again).
+    #[cfg(feature = "gui-egui")]
+    pub(crate) fn find_references(&self, request: CopyRequest) {
+        let wanted: Vec<CopyModule> = request
+            .modules
+            .into_iter()
+            .filter(|module| matches!(self.xrefs.state(&module.key), None | Some(IndexState::Failed(_))))
+            .collect();
+        if wanted.is_empty() {
+            return;
+        }
+        let mut state = self.lock();
+        if state.phase != RunPhase::Paused || state.wanted != Wanted::Pause || state.ending {
+            return;
+        }
+        let keys: Vec<_> = wanted.iter().map(|module| module.key.clone()).collect();
+        self.xrefs.mark_copying(&keys);
+        state.tasks.push_back(Task::CopyImages(CopyRequest { modules: wanted, ..request }));
+        self.changed.notify_all();
+    }
+
+    /// Stops finding references: copies not yet made are dropped, and the
+    /// index under way and those queued are stopped.
+    #[cfg(feature = "gui-egui")]
+    pub(crate) fn cancel_references(&self) {
+        self.lock().tasks.retain(|task| !matches!(task, Task::CopyImages(_)));
+        self.xrefs.cancel();
     }
 
     /// A lock a panicking thread poisoned still holds a whole state: every
@@ -537,16 +581,18 @@ impl RunControl {
                     Task::DumpRam(_) => state.dump_in_flight = true,
                     // The step executes instructions: the snapshot it
                     // publishes follows the guest's move, off the breakpoint
-                    // it may have been paused at. A cancel asked before it
-                    // began was for an earlier step.
+                    // it may have been paused at, and its code is read at RIP
+                    // again. A cancel asked before it began was for an
+                    // earlier step.
                     Task::Step(_) => {
+                        state.view.code = CodeTarget::Rip;
                         state.guest_ran = true;
                         state.stopped_at = None;
                         state.note = None;
                         self.step_cancel.store(false, Ordering::Relaxed);
                         self.stepping.store(true, Ordering::Relaxed);
                     }
-                    Task::Refresh | Task::Find(_) | Task::ApplyBreakpoints(_) => {}
+                    Task::Refresh | Task::Find(_) | Task::ApplyBreakpoints(_) | Task::CopyImages(_) => {}
                 }
                 return BetweenRuns::Perform(task);
             }
@@ -555,6 +601,8 @@ impl RunControl {
                     self.stop_flag.store(false, Ordering::Relaxed);
                     state.serve_requested = false;
                     state.phase = RunPhase::Running;
+                    // The next pause's code is read where it stops.
+                    state.view.code = CodeTarget::Rip;
                     return BetweenRuns::Resume;
                 }
                 Wanted::Pause => {
@@ -720,6 +768,12 @@ impl RunControl {
                     path,
                     reason: NOT_SAVED_VM_STOPPED.to_owned(),
                 }),
+                // Modules the run did not copy are no longer being copied: a
+                // later find asks for them again.
+                Task::CopyImages(request) => {
+                    let keys: Vec<_> = request.modules.into_iter().map(|module| module.key).collect();
+                    self.xrefs.forget(&keys);
+                }
                 Task::Refresh | Task::Step(_) | Task::Find(_) | Task::ApplyBreakpoints(_) => {}
             }
         }
@@ -730,6 +784,10 @@ impl RunControl {
 #[cfg(all(test, feature = "gui-egui"))]
 mod tests {
     use super::*;
+    use crate::debugger::guest::Root;
+    use crate::debugger::inspect::{AddressSpace, GuestAddress};
+    use crate::debugger::module_identity::GuestIdentity;
+    use crate::debugger::xref::service::{IndexSpace, ModuleKey};
 
     fn control() -> RunControl {
         RunControl::new(Arc::new(AtomicBool::new(false)))
@@ -737,6 +795,54 @@ mod tests {
 
     fn raised(control: &RunControl) -> bool {
         control.stop_flag().load(Ordering::Relaxed)
+    }
+
+    /// Code shown somewhere else (a Go to) is shown at RIP again once the
+    /// guest moves: the reset happens before the run thread reads.
+    #[test]
+    fn a_step_or_a_run_returns_the_code_pane_to_rip() {
+        let elsewhere = CodeTarget::At(GuestAddress { space: AddressSpace::Linear, value: 0x1000 });
+        let control = control();
+        control.begin_run(RunStart::PowerOn);
+        control.pause();
+        assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::Refresh));
+        control.set_view(ViewRequest { code: elsewhere, ..control.view() });
+        assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::Refresh));
+        assert_eq!(control.view().code, elsewhere);
+        control.step(StepRequest::instruction_into(0));
+        assert!(matches!(control.next_between_runs(), BetweenRuns::Perform(Task::Step(_))));
+        assert_eq!(control.view().code, CodeTarget::Rip);
+        control.set_view(ViewRequest { code: elsewhere, ..control.view() });
+        assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::Refresh));
+        control.resume();
+        assert_eq!(control.next_between_runs(), BetweenRuns::Resume);
+        assert_eq!(control.view().code, CodeTarget::Rip);
+    }
+
+    /// Modules `a.sys` (never asked), `b.sys` (being copied) and `c.sys` (its
+    /// copy failed): a find copies `a` and `c` once.
+    #[test]
+    fn finding_references_queues_one_copy_for_modules_not_indexed() {
+        let module = |name: &str, base: u64| CopyModule {
+            key: ModuleKey { identity: GuestIdentity::Unnamed, name: name.to_owned(), base, size: 0x3000, space: IndexSpace::Kernel },
+            root: Root::Live,
+        };
+        let modules = vec![module("a.sys", 0x1_0000), module("b.sys", 0x2_0000), module("c.sys", 0x3_0000)];
+        let request = CopyRequest { modules: modules.clone(), spans: Vec::new(), taken_at: 9 };
+        let control = control();
+        control.begin_run(RunStart::PowerOn);
+        control.pause();
+        assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::Refresh));
+        control.xrefs().mark_copying(std::slice::from_ref(&modules[1].key));
+        control.xrefs().fail(modules[2].key.clone(), "its headers do not read".into());
+        control.find_references(request.clone());
+        let copied = vec![modules[0].clone(), modules[2].clone()];
+        assert_eq!(control.queued(), [Task::CopyImages(CopyRequest { modules: copied, spans: Vec::new(), taken_at: 9 })]);
+        assert_eq!(control.xrefs().state(&modules[2].key), Some(IndexState::Copying));
+        control.find_references(request);
+        assert_eq!(control.queued().len(), 1, "nothing is asked twice");
+        control.cancel_references();
+        assert_eq!(control.queued(), []);
     }
 
     #[test]
@@ -851,6 +957,8 @@ mod tests {
             cpus: Vec::new(),
             cpu: 0,
             code: Vec::new(),
+            code_at: CodeTarget::Rip,
+            rip: 0,
             memory: crate::debugger::inspect::MemoryWindow {
                 start: crate::debugger::inspect::GuestAddress {
                     space: crate::debugger::inspect::AddressSpace::Linear,
@@ -920,6 +1028,8 @@ mod tests {
             cpus: Vec::new(),
             cpu: 0,
             code: Vec::new(),
+            code_at: CodeTarget::Rip,
+            rip,
             memory: MemoryWindow {
                 start: GuestAddress { space: AddressSpace::Linear, value: rip },
                 rows: Vec::new(),

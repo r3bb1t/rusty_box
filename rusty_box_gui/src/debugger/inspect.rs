@@ -11,6 +11,7 @@ use rusty_box::emulator::{Emulator, SliceEngine};
 use super::guest::{vmx_guest_view, GuestMemory, GuestRead, PausedCpu, Root};
 use super::kernel_layout::{same_layouts, KernelLayout};
 use super::module_identity::GuestIdentity;
+use super::xref::decode::{bare_displacement, branch_target, has_no_index};
 use super::windows::{
     read_thread_view, read_windows, KernelLayouts, LiveTeb, ReadThrough, SystemListing, SystemView,
     ThreadView, ThreadViewRead, ViewMiss, ViewTarget, WindowsDiscovery,
@@ -65,6 +66,14 @@ pub(crate) enum ViewContext {
     Thread { eprocess: u64, tid: u64 },
 }
 
+/// Where the code pane reads: at RIP, or at an address the owner opened (a
+/// cross reference, a Go to).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CodeTarget {
+    Rip,
+    At(GuestAddress),
+}
+
 /// What the page asks to be read.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ViewRequest {
@@ -73,6 +82,7 @@ pub(crate) struct ViewRequest {
     /// The guest OS's processes or kernel modules, when the page lists them.
     pub(crate) system: SystemView,
     pub(crate) context: ViewContext,
+    pub(crate) code: CodeTarget,
 }
 
 impl Default for ViewRequest {
@@ -82,6 +92,7 @@ impl Default for ViewRequest {
             memory: MemoryTarget::Rip,
             system: SystemView::Off,
             context: ViewContext::Live,
+            code: CodeTarget::Rip,
         }
     }
 }
@@ -178,7 +189,12 @@ pub(crate) struct DebugSnapshot {
     pub(crate) cpus: Vec<CpuDebugView>,
     /// The processor the panes below were read through.
     pub(crate) cpu: usize,
+    /// The code at `code_at`: its first line is that address.
     pub(crate) code: Vec<CodeLine>,
+    pub(crate) code_at: CodeTarget,
+    /// Where the panes' processor or thread stands: the linear address of the
+    /// instruction it runs next.
+    pub(crate) rip: u64,
     pub(crate) memory: MemoryWindow,
     pub(crate) stack: Vec<StackSlot>,
     /// The Windows process the shown processor is running for, by its image
@@ -297,6 +313,8 @@ pub(crate) fn read_snapshot<T: Instrumentation, E: SliceEngine<T>>(
             cpus,
             cpu: index,
             code: Vec::new(),
+            code_at: view.code,
+            rip: 0,
             memory: MemoryWindow {
                 start: GuestAddress {
                     space: AddressSpace::Linear,
@@ -379,7 +397,10 @@ pub(crate) fn read_snapshot<T: Instrumentation, E: SliceEngine<T>>(
             size: shown.code_size,
         },
     };
-    let code = read_code(&mut cpu, vantage.space, vantage.rip, vantage.size);
+    let code = match view.code {
+        CodeTarget::Rip => read_code(&mut cpu, vantage.space, vantage.rip, vantage.size),
+        CodeTarget::At(at) => read_code(&mut cpu, at.space, at.value, vantage.size),
+    };
     let start = match view.memory {
         MemoryTarget::At(address) => address,
         MemoryTarget::Rip => GuestAddress {
@@ -431,6 +452,8 @@ pub(crate) fn read_snapshot<T: Instrumentation, E: SliceEngine<T>>(
         cpus,
         cpu: index,
         code,
+        code_at: view.code,
+        rip: vantage.rip,
         memory,
         stack,
         process,
@@ -699,99 +722,20 @@ struct DecodedLine {
 }
 
 /// Where `instruction`, whose next instruction is at `next`, branches to or
-/// what address it loads, as the processor computes it: a relative branch is
-/// `next` plus its sign-extended displacement (Bochs ctrl_xfer32.cc `JMP_Jd`
-/// and the `Jcc`/`LOOP`/`JECXZ` forms, ctrl_xfer64.cc `JMP_Jq`, `CALL_Jq`,
-/// `JRCXZ_Jb`), wrapping at 4 GiB in 32-bit code; a `lea` is RIP plus its
-/// displacement, or the bare displacement. A 16-bit branch is an offset in
-/// CS, whose base the lines do not carry, so it gives none.
+/// what address it loads, as the processor computes it: a relative branch by
+/// [`branch_target`] (the rule the cross-reference index uses too); a `lea`
+/// is RIP plus its displacement, or the bare displacement.
 fn target_of(instruction: &Instruction, next: u64, size: CodeSize) -> Option<u64> {
-    let displacement = i64::from(instruction.id() as i32);
+    if let Some(target) = branch_target(instruction, next, size) {
+        return Some(target);
+    }
     match size {
         CodeSize::Bits16 => None,
         CodeSize::Bits32 => match instruction.get_ia_opcode() {
-            Opcode::CallJd
-            | Opcode::JmpJd
-            | Opcode::JmpJbd
-            | Opcode::JoJd
-            | Opcode::JnoJd
-            | Opcode::JbJd
-            | Opcode::JnbJd
-            | Opcode::JzJd
-            | Opcode::JnzJd
-            | Opcode::JbeJd
-            | Opcode::JnbeJd
-            | Opcode::JsJd
-            | Opcode::JnsJd
-            | Opcode::JpJd
-            | Opcode::JnpJd
-            | Opcode::JlJd
-            | Opcode::JnlJd
-            | Opcode::JleJd
-            | Opcode::JnleJd
-            | Opcode::JoJbd
-            | Opcode::JnoJbd
-            | Opcode::JbJbd
-            | Opcode::JnbJbd
-            | Opcode::JzJbd
-            | Opcode::JnzJbd
-            | Opcode::JbeJbd
-            | Opcode::JnbeJbd
-            | Opcode::JsJbd
-            | Opcode::JnsJbd
-            | Opcode::JpJbd
-            | Opcode::JnpJbd
-            | Opcode::JlJbd
-            | Opcode::JnlJbd
-            | Opcode::JleJbd
-            | Opcode::JnleJbd
-            | Opcode::JecxzJbd
-            | Opcode::LoopJbd
-            | Opcode::LoopeJbd
-            | Opcode::LoopneJbd => Some(u64::from((next as u32).wrapping_add(displacement as u32))),
             Opcode::LeaGdM => bare_displacement(instruction).map(|value| u64::from(value as u32)),
             _ => None,
         },
         CodeSize::Bits64 => match instruction.get_ia_opcode() {
-            Opcode::CallJq
-            | Opcode::JmpJq
-            | Opcode::JmpJbq
-            | Opcode::JoJq
-            | Opcode::JnoJq
-            | Opcode::JbJq
-            | Opcode::JnbJq
-            | Opcode::JzJq
-            | Opcode::JnzJq
-            | Opcode::JbeJq
-            | Opcode::JnbeJq
-            | Opcode::JsJq
-            | Opcode::JnsJq
-            | Opcode::JpJq
-            | Opcode::JnpJq
-            | Opcode::JlJq
-            | Opcode::JnlJq
-            | Opcode::JleJq
-            | Opcode::JnleJq
-            | Opcode::JoJbq
-            | Opcode::JnoJbq
-            | Opcode::JbJbq
-            | Opcode::JnbJbq
-            | Opcode::JzJbq
-            | Opcode::JnzJbq
-            | Opcode::JbeJbq
-            | Opcode::JnbeJbq
-            | Opcode::JsJbq
-            | Opcode::JnsJbq
-            | Opcode::JpJbq
-            | Opcode::JnpJbq
-            | Opcode::JlJbq
-            | Opcode::JnlJbq
-            | Opcode::JleJbq
-            | Opcode::JnleJbq
-            | Opcode::JrcxzJbq
-            | Opcode::LoopJbq
-            | Opcode::LoopeJbq
-            | Opcode::LoopneJbq => Some(next.wrapping_add(displacement as u64)),
             Opcode::LeaGqM | Opcode::LeaGdM => {
                 let rip_relative = instruction.base_reg() == GprIndex::Rip && has_no_index(instruction);
                 let address = if rip_relative {
@@ -807,19 +751,6 @@ fn target_of(instruction: &Instruction, next: u64, size: CodeSize) -> Option<u64
             _ => None,
         },
     }
-}
-
-/// The address an operand of no base and no index names: its displacement,
-/// sign-extended.
-fn bare_displacement(instruction: &Instruction) -> Option<i64> {
-    (instruction.base_reg() == GprIndex::Nil && has_no_index(instruction)).then(|| i64::from(instruction.displ32s()))
-}
-
-/// Whether a memory operand has no index register: the decoder leaves the
-/// index slot at 4, RSP's number, which no SIB byte can name as an index
-/// (Bochs fetchdecode `BX_NO_INDEX`).
-fn has_no_index(instruction: &Instruction) -> bool {
-    instruction.index_reg() == GprIndex::Rsp
 }
 
 fn read_memory<G: GuestMemory>(
@@ -1007,6 +938,23 @@ mod tests {
                 "{target:?} reads as ?? rows"
             );
         }
+    }
+
+    #[test]
+    fn code_is_read_where_the_view_asks() {
+        let mut machine = long_mode_machine();
+        let code = CpuSetupMode::FlatLong64.first_free_physical_address();
+        machine.mem_write(code, &[0x90, 0x90, 0xF4]).expect("write");
+        machine.reg_write(X86Reg::Rip, code);
+        let elsewhere = GuestAddress { space: AddressSpace::Linear, value: code + 2 };
+        let request = ViewRequest { code: CodeTarget::At(elsewhere), ..ViewRequest::default() };
+        let snapshot = read_snapshot(&mut machine, &request, &mut WindowsDiscovery::default(), None, None);
+        assert_eq!(snapshot.code[0].address, code + 2);
+        assert_eq!(snapshot.code_at, CodeTarget::At(elsewhere));
+        assert_eq!(snapshot.rip, code, "the pause stays where RIP is");
+        let at_rip = read_snapshot(&mut machine, &ViewRequest::default(), &mut WindowsDiscovery::default(), None, None);
+        assert_eq!(at_rip.code[0].address, code);
+        assert_eq!(at_rip.code_at, CodeTarget::Rip);
     }
 
     #[test]

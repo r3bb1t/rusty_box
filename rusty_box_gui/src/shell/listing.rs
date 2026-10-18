@@ -479,7 +479,9 @@ pub(crate) struct Segment<T> {
 }
 
 /// A segmented switch over `options`: the picked one filled. Returns whether
-/// the pick changed.
+/// the pick changed. It starts a new row when it does not fit what is left
+/// of this one; a switch wider than a whole row wraps its buttons inside its
+/// frame, so it never runs past the row's edge.
 pub(crate) fn segmented<T: Copy + PartialEq>(
     ui: &mut egui::Ui,
     current: &mut T,
@@ -498,16 +500,18 @@ pub(crate) fn segmented<T: Copy + PartialEq>(
         })
         .sum();
     let gaps = SEGMENT_GAP * options.len().saturating_sub(1) as f32;
-    wrap_before(ui, buttons + gaps + SEGMENT_FRAME_X);
+    let width = buttons + gaps + SEGMENT_FRAME_X;
+    wrap_before(ui, width);
+    let row = ui.max_rect().width();
     egui::Frame::new()
         .fill(BG_WELL)
         .stroke(Stroke::new(1.0_f32, STROKE_HAIRLINE))
         .corner_radius(8)
         .inner_margin(egui::Margin::same(2))
         .show(ui, |ui| {
-            ui.spacing_mut().item_spacing.x = SEGMENT_GAP;
+            ui.spacing_mut().item_spacing = egui::vec2(SEGMENT_GAP, SEGMENT_GAP);
             ui.spacing_mut().button_padding = egui::vec2(SEGMENT_PADDING_X, 3.0);
-            ui.horizontal(|ui| {
+            let buttons = |ui: &mut egui::Ui| {
                 for segment in options {
                     let selected = *current == segment.value;
                     let button = egui::Button::selectable(selected, segment.label).corner_radius(6);
@@ -516,7 +520,13 @@ pub(crate) fn segmented<T: Copy + PartialEq>(
                         changed = true;
                     }
                 }
-            });
+            };
+            if width > row {
+                ui.set_max_width((row - SEGMENT_FRAME_X).max(0.0));
+                ui.horizontal_wrapped(buttons);
+            } else {
+                ui.horizontal(buttons);
+            }
         });
     changed
 }

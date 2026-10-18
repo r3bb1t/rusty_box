@@ -8,6 +8,7 @@
 //! memory pane searches for hex, text or UTF-16. Like the VM bar, it draws
 //! from borrowed state and reports what was asked for; the app acts on it.
 
+pub(crate) mod references;
 pub(crate) mod source_view;
 
 use std::collections::{BTreeSet, HashMap};
@@ -27,15 +28,17 @@ use crate::debugger::source_breakpoints::{
 use crate::debugger::stepping::{StepCeiling, StepKind, StepUnit};
 use crate::source::find::PathMap;
 use source_view::{
-    line_address, line_marks, source_at, source_rows, toggled_line, CodeView, PauseSource, SourceAsk, SourcePane,
-    DISASSEMBLY_SWITCH, NO_SOURCE_HERE, SOURCE_SWITCH,
+    line_address, line_marks, line_target, source_at, source_rows, toggled_line, CodeView, PauseSource, PlaceMark, SourceAsk,
+    SourcePane, DISASSEMBLY_SWITCH, NO_SOURCE_HERE, SOURCE_SWITCH,
 };
 use crate::debugger::inspect::{
-    AddressSpace, CodeText, DebugSnapshot, GuestAddress, MemoryTarget, ModuleSpace, ViewContext,
+    AddressSpace, CodeTarget, CodeText, DebugSnapshot, GuestAddress, MemoryTarget, ModuleSpace, ViewContext,
     Viewing, MEMORY_WINDOW_BYTES, ROW_BYTES, WOW64_CODE_SELECTOR,
 };
 use crate::debugger::threads::SavedRegisters;
+use crate::debugger::xref::service::{XrefScope, XrefTarget};
 use crate::symbols::hub::SymbolsView;
+use references::{address_target, references_page, ReferencesView, REFERENCES_TO, REINDEX_MODULE};
 use crate::symbols::names::{NameMiss, NameTrust, NamedAddress, Namer};
 
 mod symbols_tab;
@@ -58,7 +61,7 @@ use crate::debugger::windows::{
     SystemListing, SystemView, TablePlace, TreeRow, WinDriver, WinModule, WinProcess,
 };
 use crate::shell::listing::{
-    card_title, char_width, chip, empty_state, header_row, lead_arrow, lead_chevron, lead_dot,
+    card_title, char_width, chip, empty_state, header_row, lead_arrow, lead_chevron, lead_dot, lead_ring,
     list_row, mono_font, row_visible, segmented, skip_row, title_label, tree_guides, Cell, RowSense,
     Segment, Tone, ROW_PAD, TREE_INDENT,
 };
@@ -327,6 +330,12 @@ pub(crate) struct DebuggerPane {
     pub(crate) symbol_cursor: Option<usize>,
     /// The module the Symbols tab acts on (its base).
     pub(crate) picked_symbol: Option<u64>,
+    /// The References tab's field, and why its text was not taken.
+    pub(crate) references_text: String,
+    pub(crate) references_error: Option<AddressError>,
+    /// What references were last asked for, and in which modules.
+    pub(crate) references: Option<XrefTarget>,
+    pub(crate) references_scope: XrefScope,
 }
 
 impl Default for DebuggerPane {
@@ -373,6 +382,10 @@ impl Default for DebuggerPane {
             symbol_filter: SymbolFilter::All,
             symbol_cursor: None,
             picked_symbol: None,
+            references_text: String::new(),
+            references_error: None,
+            references: None,
+            references_scope: XrefScope::TargetModule,
         }
     }
 }
@@ -404,12 +417,15 @@ pub(crate) enum DebuggerTab {
     Symbols,
     /// The debugger's code breakpoints.
     Breakpoints,
+    /// Who refers to an address: the cross-reference index's answers.
+    References,
 }
 
 impl DebuggerTab {
-    const ALL: [Self; 7] = [
+    const ALL: [Self; 8] = [
         Self::Cpu,
         Self::Breakpoints,
+        Self::References,
         Self::Processes,
         Self::KernelModules,
         Self::Drivers,
@@ -421,6 +437,7 @@ impl DebuggerTab {
         match self {
             Self::Cpu => "CPU",
             Self::Breakpoints => "Breakpoints",
+            Self::References => "References",
             Self::Processes => "Processes",
             Self::KernelModules => "Kernel modules",
             Self::Drivers => "Drivers",
@@ -434,7 +451,7 @@ impl DebuggerTab {
     /// tab lists the shell's own set.
     fn system_view(self, pane: &DebuggerPane) -> SystemView {
         match self {
-            Self::Cpu | Self::Symbols | Self::Breakpoints => SystemView::Off,
+            Self::Cpu | Self::Symbols | Self::Breakpoints | Self::References => SystemView::Off,
             Self::Processes => SystemView::Processes {
                 selected: pane.selected_process,
                 detail: pane.process_detail,
@@ -476,6 +493,8 @@ pub(crate) struct DebuggerPageState<'a> {
     pub(crate) breakpoints: &'a [CodeBreakpoint],
     /// The code breakpoint the run is paused at.
     pub(crate) stopped_at: Option<CodeBreakpointHit>,
+    /// What the References tab shows, when something was asked.
+    pub(crate) references: Option<&'a ReferencesView>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -508,10 +527,20 @@ pub(crate) enum DebuggerAction {
     Symbols(SymbolsAction),
     /// The owner's breakpoints become these.
     SetTargets(Vec<BreakpointTarget>),
+    /// Show the code here, on the CPU tab: at RIP, or at an address opened.
+    ShowCode(CodeTarget),
+    /// Find who refers to this, in the References tab's scope.
+    FindReferences(XrefTarget),
+    /// Stop the copies and indexing under way.
+    CancelReferences,
+    /// Index these modules (by base) again from their bytes as they are now.
+    Reindex(Vec<u64>),
 }
 
 /// The banner's way back from a thread's view.
 pub(crate) const BACK_TO_LIVE: &str = "Back to live CPU";
+/// The code pane's way back from an address opened.
+pub(crate) const BACK_TO_RIP: &str = "Back to RIP";
 const STEP_WHILE_VIEWING: &str =
     "Step runs the live processor; go back to the live CPU to step.";
 
@@ -691,6 +720,28 @@ fn viewing_banner(ui: &mut egui::Ui, snapshot: &DebugSnapshot, action: &mut Opti
         });
 }
 
+/// Over the panes while the code pane shows an address other than RIP:
+/// where, and the way back.
+fn code_elsewhere_banner(ui: &mut egui::Ui, snapshot: &DebugSnapshot, names: Namer<'_>, action: &mut Option<DebuggerAction>) {
+    let CodeTarget::At(at) = snapshot.code_at else {
+        return;
+    };
+    let place = names.name(at.value).map_or_else(|| format!("{:X}", at.value), |named| named.label());
+    egui::Frame::new()
+        .fill(ACCENT_CYAN.gamma_multiply(0.10))
+        .stroke(egui::Stroke::new(1.0_f32, ACCENT_CYAN.gamma_multiply(0.5)))
+        .corner_radius(8)
+        .inner_margin(egui::Margin::symmetric(10, 5))
+        .show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new(format!("Showing code at {place}")).color(ACCENT_CYAN));
+                if ui.button(BACK_TO_RIP).clicked() {
+                    *action = Some(DebuggerAction::ShowCode(CodeTarget::Rip));
+                }
+            });
+        });
+}
+
 pub(crate) fn draw_debugger_page(
     ui: &mut egui::Ui,
     state: DebuggerPageState<'_>,
@@ -712,6 +763,7 @@ pub(crate) fn draw_debugger_page(
         targets,
         breakpoints,
         stopped_at,
+        references,
     } = state;
     // What was read from somewhere else is no baseline for what changed: a
     // live snapshot and a thread's view are compared with neither.
@@ -786,6 +838,9 @@ pub(crate) fn draw_debugger_page(
                 return;
             };
             viewing_banner(ui, snapshot, &mut action);
+            if pane.tab == DebuggerTab::Cpu {
+                code_elsewhere_banner(ui, snapshot, names, &mut action);
+            }
             follow_window(pane, snapshot);
             ui.add_space(density.gap());
             if pane.tab == DebuggerTab::Cpu {
@@ -800,6 +855,9 @@ pub(crate) fn draw_debugger_page(
                 }
                 // Drawn above, before a pause is needed.
                 (DebuggerTab::Breakpoints, _) => {}
+                (DebuggerTab::References, _) => {
+                    references_page(ui, density, references, names, pane, &mut action);
+                }
                 (
                     DebuggerTab::Processes
                     | DebuggerTab::KernelModules
@@ -1315,6 +1373,12 @@ fn header(
         {
             *action = Some(DebuggerAction::DumpRam);
         }
+        if let Some(snapshot) = snapshot {
+            processor_status(ui, snapshot, symbols, pane, action, bar.paused);
+        }
+        // The tabs take a row of their own under the buttons and the
+        // processor's status.
+        ui.end_row();
         let tabs = DebuggerTab::ALL.map(|tab| Segment { value: tab, label: tab.label() });
         if segmented(ui, &mut pane.tab, &tabs) {
             // A tab's keys start on its list, standing on no detail row.
@@ -1326,37 +1390,45 @@ fn header(
                 pane.tab.system_view(pane),
             ));
         }
-        let Some(snapshot) = snapshot else {
-            return;
-        };
-        if snapshot.cpus.len() > 1 {
-            let mut chosen = pane.cpu;
-            egui::ComboBox::from_id_salt("debugger_cpu")
-                .selected_text(cpu_label(chosen))
-                .show_ui(ui, |ui| {
-                    for index in 0..snapshot.cpus.len() {
-                        ui.selectable_value(&mut chosen, index, cpu_label(index));
-                    }
-                });
-            if chosen != pane.cpu {
-                pane.cpu = chosen;
-                *action = Some(DebuggerAction::SelectCpu(chosen));
-            }
-        }
-        status_chips(ui, snapshot, Namer::new(&snapshot.symbols, symbols), bar.paused);
-        if !snapshot.symbols.modules.is_empty() {
-            let counts = symbol_counts(&snapshot.symbols, symbols);
-            let color = if counts.missing > 0 { ACCENT_AMBER } else { TEXT_MUTED };
-            let opened = chip(ui, &counts.label(), color)
-                .interact(egui::Sense::click())
-                .on_hover_text("Open the Symbols tab.")
-                .clicked();
-            if opened && pane.tab != DebuggerTab::Symbols {
-                pane.tab = DebuggerTab::Symbols;
-                *action = Some(DebuggerAction::ShowSystem(DebuggerTab::Symbols.system_view(pane)));
-            }
-        }
     });
+}
+
+/// The header's processor switch and status chips, after its buttons.
+fn processor_status(
+    ui: &mut egui::Ui,
+    snapshot: &DebugSnapshot,
+    symbols: &SymbolsView,
+    pane: &mut DebuggerPane,
+    action: &mut Option<DebuggerAction>,
+    paused: bool,
+) {
+    if snapshot.cpus.len() > 1 {
+        let mut chosen = pane.cpu;
+        egui::ComboBox::from_id_salt("debugger_cpu")
+            .selected_text(cpu_label(chosen))
+            .show_ui(ui, |ui| {
+                for index in 0..snapshot.cpus.len() {
+                    ui.selectable_value(&mut chosen, index, cpu_label(index));
+                }
+            });
+        if chosen != pane.cpu {
+            pane.cpu = chosen;
+            *action = Some(DebuggerAction::SelectCpu(chosen));
+        }
+    }
+    status_chips(ui, snapshot, Namer::new(&snapshot.symbols, symbols), paused);
+    if !snapshot.symbols.modules.is_empty() {
+        let counts = symbol_counts(&snapshot.symbols, symbols);
+        let color = if counts.missing > 0 { ACCENT_AMBER } else { TEXT_MUTED };
+        let opened = chip(ui, &counts.label(), color)
+            .interact(egui::Sense::click())
+            .on_hover_text("Open the Symbols tab.")
+            .clicked();
+        if opened && pane.tab != DebuggerTab::Symbols {
+            pane.tab = DebuggerTab::Symbols;
+            *action = Some(DebuggerAction::ShowSystem(DebuggerTab::Symbols.system_view(pane)));
+        }
+    }
 }
 
 fn cpu_label(index: usize) -> String {
@@ -1947,7 +2019,11 @@ fn code_pane(
         return;
     };
     let gutter = line_marks(source, marks.breakpoints, marks.targets, Some(&snapshot.symbols), marks.symbols);
-    let pane = SourcePane { source, slot: marks.symbols.sources.get(&source.key), marks: &gutter };
+    let place = match snapshot.code_at {
+        CodeTarget::Rip => PlaceMark::Current,
+        CodeTarget::At(_) => PlaceMark::Shown,
+    };
+    let pane = SourcePane { source, slot: marks.symbols.sources.get(&source.key), marks: &gutter, place };
     match source_rows(ui, &pane, &mut picks.line) {
         None => {}
         Some(SourceAsk::Toggle(line)) => {
@@ -1958,6 +2034,11 @@ fn code_pane(
             *action = Some(DebuggerAction::LocateSource { build_path: source.build_path.clone() });
         }
         Some(SourceAsk::SaveMap { project, map }) => *action = Some(DebuggerAction::SaveRunMap { project, map }),
+        Some(SourceAsk::References(line)) => {
+            if let Some(target) = line_target(source, line) {
+                *action = Some(DebuggerAction::FindReferences(target));
+            }
+        }
     }
 }
 
@@ -1987,8 +2068,9 @@ fn code_rows(
         if line.bytes.len() > shown {
             bytes.push("…".to_owned());
         }
-        // The first line is the instruction at RIP.
-        let at_rip = index == 0;
+        // The first line is the instruction at RIP, or the address opened.
+        let at_rip = line.address == snapshot.rip;
+        let opened = index == 0 && snapshot.code_at != CodeTarget::Rip;
         let mut text_color = match &line.text {
             CodeText::Opcode(_) if at_rip => ACCENT_CYAN,
             CodeText::Opcode(_) => TEXT_PRIMARY,
@@ -2034,6 +2116,7 @@ fn code_rows(
             (true, true) => lead_arrow(ui, response.rect, ACCENT_RED),
             (true, false) => lead_arrow(ui, response.rect, ACCENT_CYAN),
             (false, true) => lead_dot(ui, response.rect, MARKER_LEAD, ACCENT_RED),
+            (false, false) if opened => lead_ring(ui, response.rect, MARKER_LEAD, ACCENT_CYAN),
             (false, false) => {}
         }
         response.context_menu(|ui| {
@@ -2041,6 +2124,22 @@ fn code_rows(
             if ui.button(label).clicked() {
                 *action = Some(DebuggerAction::SetTargets(toggled(marks.targets, line.address, Some(&snapshot.symbols), marks.symbols)));
                 ui.close();
+            }
+            // Who refers to this instruction, to the function it starts, and
+            // to where it goes.
+            let mut asks = vec![address_target(line.address, format!("{:#X}", line.address))];
+            if let Some(start) = named.as_ref().filter(|named| named.starts_function()) {
+                asks.push(address_target(line.address, start.label()));
+            }
+            if let Some(target) = line.target {
+                let label = names.name(target).map_or_else(|| format!("{target:#X}"), |named| named.label());
+                asks.push(address_target(target, label));
+            }
+            for ask in asks {
+                if ui.button(format!("{REFERENCES_TO} {}", ask.label)).clicked() {
+                    *action = Some(DebuggerAction::FindReferences(ask));
+                    ui.close();
+                }
             }
         });
     }
@@ -4520,6 +4619,14 @@ fn export_rows(
         ];
         let response = list_row(ui, 0.0, &cells, keyed_tone(key, n), RowSense::Pick { selected: false });
         follow_key(&response, key, n);
+        if let Some(at) = target {
+            response.context_menu(|ui| {
+                if ui.button(format!("{REFERENCES_TO} {name}")).clicked() {
+                    *action = Some(DebuggerAction::FindReferences(address_target(at, name.to_owned())));
+                    ui.close();
+                }
+            });
+        }
         click_opens(
             response,
             card.opener,
@@ -5988,6 +6095,12 @@ fn module_rows(
         let response = response.on_hover_text(format!(
             "{path}\nClick to see its sections, exports and imports; {then}"
         ));
+        response.context_menu(|ui| {
+            if ui.button(REINDEX_MODULE).clicked() {
+                *action = Some(DebuggerAction::Reindex(vec![module.base]));
+                ui.close();
+            }
+        });
         if response.double_clicked() || response.triple_clicked() {
             match opens {
                 RowOpen::Act(open) => *action = Some(open),

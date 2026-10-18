@@ -203,6 +203,27 @@ fn read_function<G: GuestMemory>(memory: &mut G, root: Root, at: u64) -> Result<
     Ok(RuntimeFunction { begin: field(0), end: field(4), unwind_data: field(8) })
 }
 
+/// The `BeginAddress` of every `RUNTIME_FUNCTION` the exception directory
+/// `directory` lists, read from `image` — the image as mapped, each RVA its
+/// own offset — in table order. At most `MAX_FUNCTIONS` are read; the list
+/// ends at an entry past the image's end.
+pub(crate) fn function_starts(image: &[u8], directory: pe::DataDirectory) -> Vec<u32> {
+    let count = directory.size.checked_div(RUNTIME_FUNCTION_BYTES).unwrap_or(0).min(MAX_FUNCTIONS);
+    let mut starts = Vec::new();
+    let mut at = usize::try_from(directory.rva).unwrap_or(usize::MAX);
+    for _ in 0..count {
+        let Some(begin) = image.get(at..).and_then(<[u8]>::first_chunk::<4>) else {
+            break;
+        };
+        starts.push(u32::from_le_bytes(*begin));
+        let Some(next) = at.checked_add(RUNTIME_FUNCTION_BYTES as usize) else {
+            break;
+        };
+        at = next;
+    }
+    starts
+}
+
 /// The table entry of the function holding `rva`, by binary search;
 /// `None` when no entry holds it (a leaf). An entry whose unwind data has
 /// its low bit set names the entry it shares.

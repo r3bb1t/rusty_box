@@ -19,6 +19,10 @@ use super::stepping::{
     Stepped, Stepper, STEP_LIMITS,
 };
 use super::unwind::{caller_of, Frame, FrameFound, FrameRegisters, UnwindModule, Unwinding};
+use super::guest::PausedCpu;
+use super::xref::image::{copy_image, ImageAt, ImageOffset};
+use super::xref::index::ModuleSpan;
+use super::xref::service::{CopyRequest, IndexJob, IndexState};
 use crate::symbols::hub::SymbolsView;
 
 /// Whether the engine can stop after one instruction.
@@ -104,6 +108,55 @@ pub(crate) fn perform<T: Instrumentation, E: SliceEngine<T>>(
         Task::ApplyBreakpoints(set) => {
             apply_breakpoints(emu, control, &set);
             Ok(live(0))
+        }
+        Task::CopyImages(request) => {
+            copy_images(emu, control, request);
+            Ok(live(0))
+        }
+    }
+}
+
+/// Copies each module `request` names, through the processor the page shows,
+/// and hands it to the cross-reference service with its PDB procedures as
+/// sync points; the service indexes it off this thread while the next one is
+/// copied. A module that does not copy is recorded as failed, with why.
+fn copy_images<T: Instrumentation, E: SliceEngine<T>>(emu: &mut Emulator<T, E>, control: &RunControl, request: CopyRequest) {
+    let cpu = control.view().cpu;
+    let cpu = if cpu < emu.cpu_count() { cpu } else { 0 };
+    let symbols = control.symbols();
+    let mut spans = request.spans;
+    spans.sort_unstable();
+    let spans: Arc<[ModuleSpan]> = Arc::from(spans);
+    for module in request.modules {
+        // A module cancelled or forgotten since it was asked for is not copied.
+        if control.xrefs().state(&module.key) != Some(IndexState::Copying) {
+            continue;
+        }
+        let Some(mut debug) = emu.debug_cpu(cpu) else {
+            control.xrefs().fail(module.key, "the processor it is read through is gone".to_owned());
+            continue;
+        };
+        // Paused in VMX root operation, the modules listed are the guest's,
+        // read as the walk read them.
+        let vmx_guest = debug.vmx_guest();
+        let mut paused = PausedCpu { cpu: &mut debug, vmx_guest };
+        let at = ImageAt { base: module.key.base, size: module.key.size, root: module.root };
+        match copy_image(&mut paused.walked(), at) {
+            Ok(image) => {
+                let extra_sync = symbols
+                    .as_ref()
+                    .and_then(|view| view.tables(module.key.identity.known()?).map(Arc::clone))
+                    .map(|tables| tables.procedure_starts().into_iter().map(|rva| ImageOffset(rva.0)).collect())
+                    .unwrap_or_default();
+                control.xrefs().accept(IndexJob {
+                    key: module.key,
+                    image,
+                    extra_sync,
+                    spans: Arc::clone(&spans),
+                    taken_at: request.taken_at,
+                });
+            }
+            Err(miss) => control.xrefs().fail(module.key, miss.describe()),
         }
     }
 }
@@ -491,6 +544,12 @@ mod tests {
     use crate::debugger::inspect::{ModuleSpace, SymModule, SymbolIndex};
     use crate::debugger::module_identity::GuestIdentity;
     use crate::debugger::stepping::{StepKind, StepRequest, StepUnit};
+    use crate::debugger::guest::Root;
+    use crate::debugger::xref::decode::XrefKind;
+    use crate::debugger::xref::service::{
+        AddressRange, CopyModule, FoundSite, IndexSpace, IndexState, ModuleKey, XrefQuery, XrefScope, XrefTarget,
+    };
+    use crate::debugger::xref::test_image::{module_image, Function, ImageSpec};
     use crate::symbols::hub::{ModuleEntry, ModuleSymbols, SymbolsView};
     use rusty_box::cpu::{CodeBreakpointHit, CpuSetupMode, X86Reg};
     use rusty_box::emulator::EmulatorConfig;
@@ -750,6 +809,128 @@ mod tests {
         let over = request(StepKind::Over, StepUnit::Line);
         perform(&mut calling.machine, &calling.control, Task::Step(over), Stepping::Instructions).expect("step");
         assert_eq!(landing(&calling.machine), Landing { rip: calling.code + 6, rsp: calling.code + STACK });
+    }
+
+    /// A PE image written into a long-mode machine's memory is copied by the
+    /// run thread and indexed by the service.
+    #[test]
+    fn the_copy_task_hands_each_image_to_the_service() {
+        let (mut machine, control, code) = paused();
+        let base = (code + 0x1_0000) & !0xFFF;
+        let spec = ImageSpec::bits64(0x1000);
+        let mut text = vec![0xE8];
+        text.extend_from_slice(&0xFBu32.to_le_bytes());
+        let image = module_image(base, &spec, &text, &[], &[]);
+        machine.mem_write(base, &image.bytes).expect("write");
+        let size = image.bytes.len() as u64;
+        let key = ModuleKey { identity: GuestIdentity::Unnamed, name: "flat.sys".into(), base, size, space: IndexSpace::Kernel };
+        control.find_references(CopyRequest {
+            modules: vec![CopyModule { key: key.clone(), root: Root::Live }],
+            spans: vec![ModuleSpan { base, size }],
+            taken_at: 5,
+        });
+        let BetweenRuns::Perform(task) = control.next_between_runs() else {
+            panic!("the copy is queued")
+        };
+        assert!(matches!(task, Task::CopyImages(_)));
+        perform(&mut machine, &control, task, Stepping::Instructions).expect("copy");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let index = loop {
+            match control.xrefs().state(&key) {
+                Some(IndexState::Ready(index)) => break index,
+                Some(IndexState::Failed(reason)) => panic!("indexing failed: {reason}"),
+                Some(_) | None if std::time::Instant::now() < deadline => std::thread::sleep(std::time::Duration::from_millis(5)),
+                other => panic!("not indexed: {other:?}"),
+            }
+        };
+        assert_eq!(index.taken_at, 5);
+        assert!(index.sites.iter().any(|site| site.site == base + 0x1000 && site.target == base + 0x1100));
+    }
+
+    /// Spec §11-style end to end: a 64-bit image in a long-mode machine,
+    /// `main: call f ; call [rip+slot] ; hlt` and `f: ret`, its slot holding
+    /// `f`, found through the control as the shell finds it.
+    #[test]
+    fn references_are_found_in_a_running_machine() {
+        let (mut machine, control, code) = paused();
+        let base = (code + 0x1_0000) & !0xFFF;
+        let mut spec = ImageSpec::bits64(0x1000);
+        let main = 0x1000u64;
+        let f = 0x1100u64;
+        spec.functions = vec![Function { begin: 0x1000, end: 0x1010 }, Function { begin: 0x1100, end: 0x1101 }];
+        let slot = u64::from(spec.data_free());
+        let mut text = vec![0xE8];
+        text.extend_from_slice(&((f - (main + 5)) as u32).to_le_bytes());
+        text.extend_from_slice(&[0xFF, 0x15]);
+        text.extend_from_slice(&((slot - (main + 11)) as u32).to_le_bytes());
+        text.push(0xF4);
+        text.resize(0x100, 0xCC);
+        text.push(0xC3);
+        let image = module_image(base, &spec, &text, &(base + f).to_le_bytes(), &[]);
+        machine.mem_write(base, &image.bytes).expect("write");
+        let size = image.bytes.len() as u64;
+        let key = ModuleKey { identity: GuestIdentity::Unnamed, name: "flat.exe".into(), base, size, space: IndexSpace::Kernel };
+        control.find_references(CopyRequest {
+            modules: vec![CopyModule { key: key.clone(), root: Root::Live }],
+            spans: vec![ModuleSpan { base, size }],
+            taken_at: 77,
+        });
+        let BetweenRuns::Perform(task) = control.next_between_runs() else {
+            panic!("the copy is queued")
+        };
+        perform(&mut machine, &control, task, Stepping::Instructions).expect("copy");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !matches!(control.xrefs().state(&key), Some(IndexState::Ready(_))) {
+            assert!(std::time::Instant::now() < deadline, "not indexed: {:?}", control.xrefs().state(&key));
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let query = XrefQuery {
+            target: XrefTarget { ranges: vec![AddressRange { start: base + f, end: base + f + 1 }], label: "f".into() },
+            scope: XrefScope::TargetModule,
+        };
+        let answer = control.xrefs().answer(&query, std::slice::from_ref(&key));
+        assert_eq!(
+            answer.found,
+            [
+                FoundSite { site: base + main, kind: XrefKind::Call, module: "flat.exe".into(), through: Vec::new() },
+                FoundSite {
+                    site: base + slot,
+                    kind: XrefKind::Pointer,
+                    module: "flat.exe".into(),
+                    through: vec![FoundSite {
+                        site: base + main + 5,
+                        kind: XrefKind::CallThrough,
+                        module: "flat.exe".into(),
+                        through: Vec::new(),
+                    }],
+                },
+            ]
+        );
+        assert_eq!(answer.taken_at, Some(77));
+        assert!(answer.waiting.is_empty() && answer.failed.is_empty());
+    }
+
+    /// Cancel while the run thread holds the copy task: the modules it has not
+    /// copied yet are not copied, so nothing of them is indexed.
+    #[test]
+    fn a_copy_cancelled_after_its_task_was_taken_is_skipped() {
+        let (mut machine, control, code) = paused();
+        let base = (code + 0x1_0000) & !0xFFF;
+        let image = module_image(base, &ImageSpec::bits64(0x1000), &[0xC3], &[], &[]);
+        machine.mem_write(base, &image.bytes).expect("write");
+        let size = image.bytes.len() as u64;
+        let key = ModuleKey { identity: GuestIdentity::Unnamed, name: "flat.exe".into(), base, size, space: IndexSpace::Kernel };
+        control.find_references(CopyRequest {
+            modules: vec![CopyModule { key: key.clone(), root: Root::Live }],
+            spans: vec![ModuleSpan { base, size }],
+            taken_at: 1,
+        });
+        let BetweenRuns::Perform(task) = control.next_between_runs() else {
+            panic!("the copy is queued")
+        };
+        control.cancel_references();
+        perform(&mut machine, &control, task, Stepping::Instructions).expect("copy");
+        assert_eq!(control.xrefs().state(&key), None);
     }
 
     #[test]

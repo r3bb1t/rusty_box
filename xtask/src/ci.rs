@@ -267,6 +267,7 @@ const SHAPE_CHECKED: &[&str] = &[
     "rusty_box_gui/src/debugger/fake_windows.rs",
     "rusty_box_gui/src/debugger/module_identity.rs",
     "rusty_box_gui/src/debugger/kernel_layout.rs",
+    "rusty_box_gui/src/debugger/xref",
     "rusty_box_gui/src/symbols",
     "rusty_box_gui/src/symbol_settings.rs",
     "rusty_box_gui/src/shell/debugger_page/symbols_tab.rs",
