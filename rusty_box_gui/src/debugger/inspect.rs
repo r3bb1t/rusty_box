@@ -8,6 +8,7 @@ use rusty_box::cpu::decoder::{GprIndex, Instruction, Opcode};
 use rusty_box::cpu::{CodeSize, CpuDebugView, Instrumentation};
 use rusty_box::emulator::{Emulator, SliceEngine};
 
+use super::frames::FramesRead;
 use super::guest::{vmx_guest_view, GuestMemory, GuestRead, PausedCpu, Root};
 use super::kernel_layout::{same_layouts, KernelLayout};
 use super::module_identity::GuestIdentity;
@@ -222,6 +223,8 @@ pub(crate) struct DebugSnapshot {
     /// processor was paused in VMX root operation: its guest-physical
     /// address.
     pub(crate) vmcs: Option<u64>,
+    /// The call stack, the picked frame and what was read in it.
+    pub(crate) frames: FramesRead,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -334,6 +337,7 @@ pub(crate) fn read_snapshot<T: Instrumentation, E: SliceEngine<T>>(
             layouts: None,
             through: ReadThrough::ProcessorTables,
             vmcs: None,
+            frames: FramesRead::default(),
         };
     };
     let shown = cpu.view();
@@ -467,6 +471,7 @@ pub(crate) fn read_snapshot<T: Instrumentation, E: SliceEngine<T>>(
         layouts,
         through,
         vmcs: cpu.vmx_guest.map(|guest| guest.vmcs),
+        frames: FramesRead::default(),
     }
 }
 

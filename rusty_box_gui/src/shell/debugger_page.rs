@@ -8,6 +8,7 @@
 //! memory pane searches for hex, text or UTF-16. Like the VM bar, it draws
 //! from borrowed state and reports what was asked for; the app acts on it.
 
+pub(crate) mod frames_view;
 pub(crate) mod references;
 pub(crate) mod source_view;
 
@@ -27,9 +28,13 @@ use crate::debugger::source_breakpoints::{
 };
 use crate::debugger::stepping::{StepCeiling, StepKind, StepUnit};
 use crate::source::find::PathMap;
+use frames_view::{
+    call_stack_rows, locals_rows, watch_rows, LowerLeft, LowerRight, VariableState, CALLER_LINE, CALL_STACK, LOCALS,
+    MEMORY, STACK, WATCH,
+};
 use source_view::{
     line_address, line_marks, line_target, source_at, source_rows, toggled_line, CodeView, PauseSource, PlaceMark, SourceAsk,
-    SourcePane, DISASSEMBLY_SWITCH, NO_SOURCE_HERE, SOURCE_SWITCH,
+    SourcePane, SourceTip, TipView, DISASSEMBLY_SWITCH, NO_SOURCE_HERE, SOURCE_SWITCH,
 };
 use crate::debugger::inspect::{
     AddressSpace, CodeTarget, CodeText, DebugSnapshot, GuestAddress, MemoryTarget, ModuleSpace, ViewContext,
@@ -61,7 +66,7 @@ use crate::debugger::windows::{
     SystemListing, SystemView, TablePlace, TreeRow, WinDriver, WinModule, WinProcess,
 };
 use crate::shell::listing::{
-    card_title, char_width, chip, empty_state, header_row, lead_arrow, lead_chevron, lead_dot, lead_ring,
+    card_title, char_width, chip, empty_state, header_row, lead_arrow, lead_chevron, lead_dot, lead_hollow_arrow, lead_ring,
     list_row, mono_font, row_visible, segmented, skip_row, title_label, tree_guides, Cell, RowSense,
     Segment, Tone, ROW_PAD, TREE_INDENT,
 };
@@ -336,6 +341,11 @@ pub(crate) struct DebuggerPane {
     /// What references were last asked for, and in which modules.
     pub(crate) references: Option<XrefTarget>,
     pub(crate) references_scope: XrefScope,
+    /// The CPU tab's lower panes as switched; `None` until the owner picks.
+    pub(crate) lower_left: Option<LowerLeft>,
+    pub(crate) lower_right: Option<LowerRight>,
+    /// The watches and which values are open.
+    pub(crate) variables: VariableState,
 }
 
 impl Default for DebuggerPane {
@@ -386,6 +396,9 @@ impl Default for DebuggerPane {
             references_error: None,
             references: None,
             references_scope: XrefScope::TargetModule,
+            lower_left: None,
+            lower_right: None,
+            variables: VariableState::default(),
         }
     }
 }
@@ -535,6 +548,11 @@ pub(crate) enum DebuggerAction {
     CancelReferences,
     /// Index these modules (by base) again from their bytes as they are now.
     Reindex(Vec<u64>),
+    /// Show frame `n` of the call stack: its variables, and its code.
+    SelectFrame(usize),
+    /// Show the value of what a click in the source named.
+    ShowTip(SourceTip),
+    CloseTip,
 }
 
 /// The banner's way back from a thread's view.
@@ -558,6 +576,42 @@ struct Marks<'a> {
     targets: &'a [BreakpointTarget],
     /// The pause's place in the owner's source, when its code has a line.
     pause: Option<&'a PauseSource>,
+    /// Whether the code pane follows the innermost frame or a picked caller.
+    frame: FrameMark,
+}
+
+/// The frame the code pane follows: the innermost, or caller `number`,
+/// picked, whose return address the pane was asked to show; `code` is the
+/// call it returns from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FrameMark {
+    Innermost,
+    Caller { number: usize, code: u64 },
+}
+
+impl FrameMark {
+    fn of(snapshot: &DebugSnapshot) -> FrameMark {
+        let selected = snapshot.frames.selected;
+        let Some(frame) = snapshot.frames.frames.get(selected).filter(|_| selected > 0) else {
+            return FrameMark::Innermost;
+        };
+        match snapshot.code_at {
+            CodeTarget::At(at) if at.value == frame.registers.rip => {
+                FrameMark::Caller { number: selected, code: frame.code_address() }
+            }
+            CodeTarget::At(_) | CodeTarget::Rip => FrameMark::Innermost,
+        }
+    }
+}
+
+/// Where the code pane's source view stands: a picked caller's call, else
+/// the first instruction the pane shows (RIP, or the address opened).
+pub(crate) fn pause_source(snapshot: &DebugSnapshot, view: &SymbolsView) -> Option<PauseSource> {
+    let address = match FrameMark::of(snapshot) {
+        FrameMark::Caller { code, .. } => code,
+        FrameMark::Innermost => snapshot.code.first()?.address,
+    };
+    source_at(address, &snapshot.symbols, view)
 }
 
 /// The colour a name is drawn in: amber when it comes from a file of
@@ -720,13 +774,26 @@ fn viewing_banner(ui: &mut egui::Ui, snapshot: &DebugSnapshot, action: &mut Opti
         });
 }
 
-/// Over the panes while the code pane shows an address other than RIP:
-/// where, and the way back.
-fn code_elsewhere_banner(ui: &mut egui::Ui, snapshot: &DebugSnapshot, names: Namer<'_>, action: &mut Option<DebuggerAction>) {
+/// Over the panes while the code pane shows an address other than RIP (a
+/// picked caller frame's code, or an address opened): where, and the way
+/// back.
+fn code_elsewhere_banner(
+    ui: &mut egui::Ui,
+    snapshot: &DebugSnapshot,
+    names: Namer<'_>,
+    frame: FrameMark,
+    action: &mut Option<DebuggerAction>,
+) {
     let CodeTarget::At(at) = snapshot.code_at else {
         return;
     };
-    let place = names.name(at.value).map_or_else(|| format!("{:X}", at.value), |named| named.label());
+    let text = match frame {
+        FrameMark::Caller { number, .. } => format!("Showing caller frame {number}"),
+        FrameMark::Innermost => {
+            let place = names.name(at.value).map_or_else(|| format!("{:X}", at.value), |named| named.label());
+            format!("Showing code at {place}")
+        }
+    };
     egui::Frame::new()
         .fill(ACCENT_CYAN.gamma_multiply(0.10))
         .stroke(egui::Stroke::new(1.0_f32, ACCENT_CYAN.gamma_multiply(0.5)))
@@ -734,7 +801,7 @@ fn code_elsewhere_banner(ui: &mut egui::Ui, snapshot: &DebugSnapshot, names: Nam
         .inner_margin(egui::Margin::symmetric(10, 5))
         .show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
-                ui.label(RichText::new(format!("Showing code at {place}")).color(ACCENT_CYAN));
+                ui.label(RichText::new(text).color(ACCENT_CYAN));
                 if ui.button(BACK_TO_RIP).clicked() {
                     *action = Some(DebuggerAction::ShowCode(CodeTarget::Rip));
                 }
@@ -770,9 +837,7 @@ pub(crate) fn draw_debugger_page(
     let previous = previous.filter(|before| snapshot.is_some_and(|now| now.context == before.context));
     // The pause's place in the owner's source: its first code line is the
     // instruction at RIP.
-    let pause = snapshot.and_then(|snapshot| {
-        source_at(snapshot.code.first()?.address, &snapshot.symbols, symbols)
-    });
+    let pause = snapshot.and_then(|snapshot| pause_source(snapshot, symbols));
     let source_shown = pause.is_some() && CodeView::shown(pane.code_view, pause.is_some()) == CodeView::Source;
     let run_to = if source_shown {
         pane.source_cursor.and_then(|line| line_address(pause.as_ref()?, line))
@@ -787,6 +852,7 @@ pub(crate) fn draw_debugger_page(
         breakpoints,
         targets,
         pause: pause.as_ref(),
+        frame: snapshot.map_or(FrameMark::Innermost, FrameMark::of),
     };
     // The room the page was given, measured here and nowhere else: every
     // layout choice below follows from it.
@@ -839,7 +905,7 @@ pub(crate) fn draw_debugger_page(
             };
             viewing_banner(ui, snapshot, &mut action);
             if pane.tab == DebuggerTab::Cpu {
-                code_elsewhere_banner(ui, snapshot, names, &mut action);
+                code_elsewhere_banner(ui, snapshot, names, marks.frame, &mut action);
             }
             follow_window(pane, snapshot);
             ui.add_space(density.gap());
@@ -1506,9 +1572,10 @@ fn grid_layout(
     let right = page.x - gap - left;
     // The code pane's pick is read before the panes borrow the pane state,
     // and written back once they are drawn, as the split is.
-    let mut left_panes = LeftPanes {
+    let mut panes = GridPanes {
         action: &mut *action,
         picks: CodePicks::of(pane),
+        lower: LowerPicks::of(pane),
     };
     ui.horizontal_top(|ui| {
         ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
@@ -1517,20 +1584,14 @@ fn grid_layout(
             egui::vec2(left, page.y),
             gap,
             Split { share: &mut split.left_rows, default: TOP_SHARE, label: RESIZE_CODE_MEMORY },
-            &mut left_panes,
+            &mut panes,
             |ui, size, panes| {
                 fixed_card(ui, size, Title::plain("Code"), |_| {}, |ui| {
-                    code_pane(ui, snapshot, marks, &mut panes.picks, panes.action);
+                    code_pane(ui, snapshot, marks, &mut panes.picks, &mut panes.lower.variables, panes.action);
                 });
             },
             |ui, size, panes| {
-                fixed_card(
-                    ui,
-                    size,
-                    Title::plain("Memory"),
-                    |ui| memory_bar(ui, snapshot, marks, pane, panes.action),
-                    |ui| memory_rows(ui, snapshot, marks),
-                );
+                lower_left_card(ui, Room::Fixed(size), snapshot, marks, pane, &mut panes.lower, panes.action);
             },
         );
         match splitter(ui, egui::vec2(gap, page.y), SplitAxis::Columns, RESIZE_COLUMNS) {
@@ -1549,28 +1610,140 @@ fn grid_layout(
                 default: TOP_SHARE,
                 label: RESIZE_REGISTERS_STACK,
             },
-            &mut (),
+            &mut panes,
             |ui, size, _| {
                 fixed_card(ui, size, Title::plain("Registers"), |_| {}, |ui| {
                     register_rows(ui, snapshot, marks);
                 });
             },
-            |ui, size, _| {
-                fixed_card(ui, size, Title::plain("Stack"), |_| {}, |ui| {
-                    stack_rows(ui, snapshot, marks);
-                });
+            |ui, size, panes| {
+                lower_right_card(ui, Room::Fixed(size), snapshot, marks, &mut panes.lower, panes.action);
             },
         );
     });
-    left_panes.picks.keep(pane);
+    panes.picks.keep(pane);
+    panes.lower.keep(pane);
     pane.split = split;
 }
 
-/// What the grid's left column lends its code and memory panes: the action,
-/// and the code pane's picks.
-struct LeftPanes<'a> {
+/// What the grid's columns lend their panes in turn: the action, the code
+/// pane's picks, and the lower panes'.
+struct GridPanes<'a> {
     action: &'a mut Option<DebuggerAction>,
     picks: CodePicks,
+    lower: LowerPicks,
+}
+
+/// The lower panes' picks, lent to the layouts and written back: which pane
+/// each shows, and the variable panes' state.
+#[derive(Clone, Debug)]
+struct LowerPicks {
+    left: Option<LowerLeft>,
+    right: Option<LowerRight>,
+    variables: VariableState,
+}
+
+impl LowerPicks {
+    fn of(pane: &mut DebuggerPane) -> Self {
+        LowerPicks { left: pane.lower_left, right: pane.lower_right, variables: std::mem::take(&mut pane.variables) }
+    }
+
+    fn keep(self, pane: &mut DebuggerPane) {
+        pane.lower_left = self.left;
+        pane.lower_right = self.right;
+        pane.variables = self.variables;
+    }
+}
+
+/// The lower-left pane, switched between Memory, the picked frame's Locals
+/// and the Watches; before the owner picks, Locals where the pause is in the
+/// owner's source.
+fn lower_left_card(
+    ui: &mut egui::Ui,
+    room: Room,
+    snapshot: &DebugSnapshot,
+    marks: Marks<'_>,
+    pane: &mut DebuggerPane,
+    lower: &mut LowerPicks,
+    action: &mut Option<DebuggerAction>,
+) {
+    let shown = LowerLeft::shown(lower.left, marks.pause.is_some());
+    let mut switched = shown;
+    let mut ask = None;
+    let names = Namer::new(&snapshot.symbols, marks.symbols);
+    let variables = &mut lower.variables;
+    pane_card(
+        ui,
+        room,
+        Title::plain(shown.label()).inlined(),
+        |ui| {
+            let switch = [
+                Segment { value: LowerLeft::Memory, label: MEMORY },
+                Segment { value: LowerLeft::Locals, label: LOCALS },
+                Segment { value: LowerLeft::Watch, label: WATCH },
+            ];
+            ui.horizontal_wrapped(|ui| {
+                if segmented(ui, &mut switched, &switch) {
+                    lower.left = Some(switched);
+                }
+            });
+            if shown == LowerLeft::Memory {
+                memory_bar(ui, snapshot, marks, pane, action);
+            }
+        },
+        |ui| match shown {
+            LowerLeft::Memory => memory_rows(ui, snapshot, marks),
+            LowerLeft::Locals => ask = locals_rows(ui, &snapshot.frames.locals, names, &snapshot.symbols),
+            LowerLeft::Watch => {
+                ask = watch_rows(ui, &snapshot.frames.watches, variables, names, &snapshot.symbols);
+            }
+        },
+    );
+    if let Some(target) = ask.and_then(|ask| lower.variables.apply(ask)) {
+        *action = Some(DebuggerAction::FindReferences(target));
+    }
+}
+
+/// The lower-right pane, switched between the stack's slots and the call
+/// stack; before the owner picks, the call stack where the pause is in the
+/// owner's source.
+fn lower_right_card(
+    ui: &mut egui::Ui,
+    room: Room,
+    snapshot: &DebugSnapshot,
+    marks: Marks<'_>,
+    lower: &mut LowerPicks,
+    action: &mut Option<DebuggerAction>,
+) {
+    let shown = LowerRight::shown(lower.right, marks.pause.is_some());
+    let mut switched = shown;
+    let mut picked = None;
+    let names = Namer::new(&snapshot.symbols, marks.symbols);
+    pane_card(
+        ui,
+        room,
+        Title::plain(shown.label()).inlined(),
+        |ui| {
+            let switch = [
+                Segment { value: LowerRight::Stack, label: STACK },
+                Segment { value: LowerRight::CallStack, label: CALL_STACK },
+            ];
+            ui.horizontal_wrapped(|ui| {
+                if segmented(ui, &mut switched, &switch) {
+                    lower.right = Some(switched);
+                }
+            });
+        },
+        |ui| match shown {
+            LowerRight::Stack => stack_rows(ui, snapshot, marks),
+            LowerRight::CallStack => {
+                picked = call_stack_rows(ui, &snapshot.frames, names, &snapshot.symbols, marks.symbols);
+            }
+        },
+    );
+    if let Some(number) = picked {
+        *action = Some(DebuggerAction::SelectFrame(number));
+    }
 }
 
 /// How the grid's panes divide the page, as shares of the room between
@@ -1751,8 +1924,13 @@ fn scrolling_layout(
     action: &mut Option<DebuggerAction>,
 ) {
     let gap = density.gap();
-    // The code pane's picks, written back once the panes are drawn.
-    let mut picks = CodePicks::of(pane);
+    // The panes' picks, written back once the panes are drawn.
+    let mut panes = GridPanes {
+        action: &mut *action,
+        picks: CodePicks::of(pane),
+        lower: LowerPicks::of(pane),
+    };
+    let room = Room::Content(density);
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| match columns {
@@ -1760,28 +1938,20 @@ fn scrolling_layout(
                 ui,
                 gap,
                 LEFT_SHARE,
-                &mut (),
-                |ui, _| {
+                &mut panes,
+                |ui, panes| {
                     card(ui, density, Title::plain("Code"), |_| {}, |ui| {
-                        code_pane(ui, snapshot, marks, &mut picks, &mut *action);
+                        code_pane(ui, snapshot, marks, &mut panes.picks, &mut panes.lower.variables, panes.action);
                     });
                     ui.add_space(gap);
-                    card(
-                        ui,
-                        density,
-                        Title::plain("Memory"),
-                        |ui| memory_bar(ui, snapshot, marks, pane, action),
-                        |ui| memory_rows(ui, snapshot, marks),
-                    );
+                    lower_left_card(ui, room, snapshot, marks, pane, &mut panes.lower, panes.action);
                 },
-                |ui, _| {
+                |ui, panes| {
                     card(ui, density, Title::plain("Registers"), |_| {}, |ui| {
                         register_rows(ui, snapshot, marks);
                     });
                     ui.add_space(gap);
-                    card(ui, density, Title::plain("Stack"), |_| {}, |ui| {
-                        stack_rows(ui, snapshot, marks);
-                    });
+                    lower_right_card(ui, room, snapshot, marks, &mut panes.lower, panes.action);
                 },
             ),
             Columns::One => {
@@ -1790,23 +1960,16 @@ fn scrolling_layout(
                 });
                 ui.add_space(gap);
                 card(ui, density, Title::plain("Code"), |_| {}, |ui| {
-                    code_pane(ui, snapshot, marks, &mut picks, &mut *action);
+                    code_pane(ui, snapshot, marks, &mut panes.picks, &mut panes.lower.variables, panes.action);
                 });
                 ui.add_space(gap);
-                card(ui, density, Title::plain("Stack"), |_| {}, |ui| {
-                    stack_rows(ui, snapshot, marks);
-                });
+                lower_right_card(ui, room, snapshot, marks, &mut panes.lower, panes.action);
                 ui.add_space(gap);
-                card(
-                    ui,
-                    density,
-                    Title::plain("Memory"),
-                    |ui| memory_bar(ui, snapshot, marks, pane, action),
-                    |ui| memory_rows(ui, snapshot, marks),
-                );
+                lower_left_card(ui, room, snapshot, marks, pane, &mut panes.lower, panes.action);
             }
         });
-    picks.keep(pane);
+    panes.picks.keep(pane);
+    panes.lower.keep(pane);
 }
 
 /// Two columns, the left `left_share` of the width and a `gap` between them,
@@ -2001,6 +2164,7 @@ fn code_pane(
     snapshot: &DebugSnapshot,
     marks: Marks<'_>,
     picks: &mut CodePicks,
+    variables: &mut VariableState,
     action: &mut Option<DebuggerAction>,
 ) {
     let mut shown = CodeView::shown(picks.view, marks.pause.is_some());
@@ -2019,11 +2183,20 @@ fn code_pane(
         return;
     };
     let gutter = line_marks(source, marks.breakpoints, marks.targets, Some(&snapshot.symbols), marks.symbols);
-    let place = match snapshot.code_at {
-        CodeTarget::Rip => PlaceMark::Current,
-        CodeTarget::At(_) => PlaceMark::Shown,
+    let place = match marks.frame {
+        FrameMark::Caller { .. } => PlaceMark::Caller,
+        FrameMark::Innermost => match snapshot.code_at {
+            CodeTarget::Rip => PlaceMark::Current,
+            CodeTarget::At(_) => PlaceMark::Shown,
+        },
     };
-    let pane = SourcePane { source, slot: marks.symbols.sources.get(&source.key), marks: &gutter, place };
+    let tip = variables.tip.as_ref().map(|tip| TipView {
+        tip,
+        read: &snapshot.frames.tip,
+        names: Namer::new(&snapshot.symbols, marks.symbols),
+        index: &snapshot.symbols,
+    });
+    let pane = SourcePane { source, slot: marks.symbols.sources.get(&source.key), marks: &gutter, place, tip };
     match source_rows(ui, &pane, &mut picks.line) {
         None => {}
         Some(SourceAsk::Toggle(line)) => {
@@ -2036,6 +2209,13 @@ fn code_pane(
         Some(SourceAsk::SaveMap { project, map }) => *action = Some(DebuggerAction::SaveRunMap { project, map }),
         Some(SourceAsk::References(line)) => {
             if let Some(target) = line_target(source, line) {
+                *action = Some(DebuggerAction::FindReferences(target));
+            }
+        }
+        Some(SourceAsk::ShowTip(tip)) => *action = Some(DebuggerAction::ShowTip(tip)),
+        Some(SourceAsk::CloseTip) => *action = Some(DebuggerAction::CloseTip),
+        Some(SourceAsk::TipRow(ask)) => {
+            if let Some(target) = variables.apply(ask) {
                 *action = Some(DebuggerAction::FindReferences(target));
             }
         }
@@ -2116,6 +2296,9 @@ fn code_rows(
             (true, true) => lead_arrow(ui, response.rect, ACCENT_RED),
             (true, false) => lead_arrow(ui, response.rect, ACCENT_CYAN),
             (false, true) => lead_dot(ui, response.rect, MARKER_LEAD, ACCENT_RED),
+            (false, false) if opened && marks.frame != FrameMark::Innermost => {
+                lead_hollow_arrow(ui, response.rect, ACCENT_CYAN, CALLER_LINE);
+            }
             (false, false) if opened => lead_ring(ui, response.rect, MARKER_LEAD, ACCENT_CYAN),
             (false, false) => {}
         }

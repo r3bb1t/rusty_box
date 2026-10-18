@@ -135,6 +135,7 @@ pub mod info;
 pub mod lines;
 pub mod msf;
 pub mod msfz;
+pub mod scope;
 pub mod source_block;
 pub mod symbols;
 pub mod tables;

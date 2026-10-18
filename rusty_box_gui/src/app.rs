@@ -24,7 +24,9 @@ use crate::debugger::xref::service::{ModuleKey, XrefQuery};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::shell::debugger_page::references::{copy_module, copy_request, scope_modules, ModuleRow, ReferencesView};
 #[cfg(not(target_arch = "wasm32"))]
-use crate::shell::debugger_page::DebuggerTab;
+use crate::shell::debugger_page::{pause_source, DebuggerTab};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::debugger::inspect::{AddressSpace, CodeTarget, GuestAddress};
 use crate::shell::destination::{Destination, ShellPage};
 use crate::shell::sidebar::{Drawer, VmLibraryEntry};
 #[cfg(not(target_arch = "wasm32"))]
@@ -2366,9 +2368,7 @@ impl NativeShellApp {
         control.set_symbols(Arc::clone(&symbols));
         // The pause's source file is read as soon as its module's tables say
         // which it is.
-        let pause_source = snapshot.as_deref().and_then(|shown| {
-            crate::shell::debugger_page::source_view::source_at(shown.code.first()?.address, &shown.symbols, &symbols)
-        });
+        let pause_source = snapshot.as_deref().and_then(|shown| pause_source(shown, &symbols));
         if let Some(source) = &pause_source {
             self.symbols.want_source(&source.key);
         }
@@ -2383,6 +2383,12 @@ impl NativeShellApp {
         // The processor switch shows the processor the run reads, which a
         // breakpoint stop sets to the one that stopped.
         session.debugger_mut().cpu = control.view().cpu;
+        // A tip the run closed, as the guest ran, closes in the pane too.
+        let asked_tip = control.inspect().tip;
+        let variables = &mut session.debugger_mut().variables;
+        if variables.tip.as_ref().is_some_and(|tip| asked_tip.as_deref() != Some(tip.expression.as_str())) {
+            variables.tip = None;
+        }
         // The References tab's answer, read from the indexes as they are now:
         // a module still indexing is named as waiting, and the next frame
         // reads again.
@@ -2421,6 +2427,9 @@ impl NativeShellApp {
                 references: references_view.as_ref(),
             },
         );
+        // The watches and the values open, as the panes left them: a paused
+        // run reads them again when they changed.
+        control.set_inspect(self.sessions.open(&vm).debugger_mut().variables.ask());
         // A paused run answers on its own thread; keep looking while it may.
         if status.running {
             ui.ctx()
@@ -2447,7 +2456,35 @@ impl NativeShellApp {
             }
             Some(DebuggerAction::ShowCode(code)) => {
                 self.sessions.open(&vm).debugger_mut().tab = DebuggerTab::Cpu;
+                // Back at RIP is back in the innermost frame.
+                if code == CodeTarget::Rip {
+                    control.select_frame(0);
+                }
                 control.set_view(ViewRequest { code, ..control.view() });
+            }
+            Some(DebuggerAction::SelectFrame(number)) => {
+                // A caller's code is shown from its return address; the
+                // innermost frame's is RIP's.
+                let frame = snapshot.as_deref().and_then(|shown| shown.frames.frames.get(number));
+                let code = match frame {
+                    Some(frame) if number > 0 => {
+                        CodeTarget::At(GuestAddress { space: AddressSpace::Linear, value: frame.registers.rip })
+                    }
+                    Some(_) | None => CodeTarget::Rip,
+                };
+                control.select_frame(number);
+                control.set_view(ViewRequest { code, ..control.view() });
+                // A tip was read in the frame picked before.
+                control.show_tip(None);
+                self.sessions.open(&vm).debugger_mut().variables.tip = None;
+            }
+            Some(DebuggerAction::ShowTip(tip)) => {
+                control.show_tip(Some(tip.expression.clone()));
+                self.sessions.open(&vm).debugger_mut().variables.tip = Some(tip);
+            }
+            Some(DebuggerAction::CloseTip) => {
+                control.show_tip(None);
+                self.sessions.open(&vm).debugger_mut().variables.tip = None;
             }
             Some(DebuggerAction::FindReferences(target)) => {
                 let pane = self.sessions.open(&vm).debugger_mut();
@@ -10155,6 +10192,20 @@ mod tests {
             ALL_MODULES, CANCEL, REFERENCES_FIELD, REFERENCES_TO, REINDEX, REINDEX_ALL, REINDEX_MODULE,
         };
         use crate::shell::debugger_page::BACK_TO_RIP;
+        use crate::debugger::control::RunControl;
+        use crate::debugger::frames::{FramesRead, LocalsRead, TipRead, WatchRead};
+        use crate::debugger::unwind::{Frame, FrameFound, FrameRegisters, StackEnd};
+        use crate::debugger::variables::{
+            Expand, MemorySpan, PathRoot, PathStep, Preview, RowKind, ShownValue, Signedness, ValuePath, VariableRow,
+        };
+        use crate::debugger::xref::service::{AddressRange, XrefTarget};
+        use crate::shell::debugger_page::frames_view::{
+            ADD_WATCH, CALLER_LINE, CALL_STACK, MORE_ELEMENTS, TIP_READING, VALUE_TIP, WATCH,
+        };
+        use crate::shell::debugger_page::source_view::line_char_x;
+        use crate::shell::listing::mono_font;
+        use crate::source::find::SourceCheck;
+        use crate::symbols::kernel::tests::KERNEL_BASE;
 
         /// A frame every sixtieth of a second, as a desktop draws them, so a
         /// double-click's two clicks land inside egui's double-click delay,
@@ -10827,6 +10878,342 @@ mod tests {
             open_debugger(&mut window);
             assert!(shown_anywhere(&window, &format!("Source not found: {TRAP_ASM}")));
             assert!(window.query_by_label(LOCATE).is_some());
+        }
+
+        /// `KiSystemCall64` paused at line 100 of `trap.asm`, called from
+        /// line 104 (its return address `KERNEL_BASE + 0x1051`).
+        fn two_frames() -> Vec<Frame> {
+            vec![
+                Frame {
+                    registers: FrameRegisters { rip: KERNEL_BASE + 0x1040, rsp: 0x7_0000, registers: [Some(0); 16] },
+                    how: FrameFound::Registers,
+                },
+                Frame {
+                    registers: FrameRegisters { rip: KERNEL_BASE + 0x1051, rsp: 0x7_0040, registers: [None; 16] },
+                    how: FrameFound::Unwind,
+                },
+            ]
+        }
+
+        /// The caller's code, as Go to shows it.
+        const CALLER_CODE: CodeTarget = CodeTarget::At(GuestAddress { space: AddressSpace::Linear, value: KERNEL_BASE + 0x1051 });
+
+        fn frames_read(selected: usize, locals: LocalsRead) -> FramesRead {
+            FramesRead {
+                frames: two_frames(),
+                end: StackEnd::Top,
+                selected,
+                locals,
+                watches: Vec::new(),
+                tip: TipRead::None,
+                awaiting: Vec::new(),
+            }
+        }
+
+        /// The published pause again, with `frames` and its code at `code_at`.
+        fn republish(control: &RunControl, frames: FramesRead, code_at: CodeTarget) {
+            let again = control.snapshot().expect("published");
+            let mut next = paused_snapshot();
+            next.symbols = again.symbols.clone();
+            next.code = again.code.clone();
+            next.frames = frames;
+            next.code_at = code_at;
+            control.publish(next);
+        }
+
+        fn local_path(name: &str, steps: Vec<PathStep>) -> ValuePath {
+            ValuePath { root: PathRoot::Variable(name.into()), steps }
+        }
+
+        fn variable_row(path: ValuePath, type_name: &str, value: ShownValue, expand: Expand) -> VariableRow {
+            let name = match path.steps.last() {
+                Some(PathStep::Element(index)) => format!("[{index}]"),
+                Some(PathStep::Field(field)) => field.clone(),
+                Some(PathStep::Deref) | None => match &path.root {
+                    PathRoot::Variable(name) => name.clone(),
+                    PathRoot::Watch(index) => format!("watch {index}"),
+                    PathRoot::Tip => "tip".to_owned(),
+                },
+            };
+            VariableRow {
+                depth: u8::try_from(path.steps.len()).unwrap_or(u8::MAX),
+                name,
+                type_name: type_name.into(),
+                kind: if path.steps.is_empty() { RowKind::Local } else { RowKind::Element },
+                value,
+                expand,
+                memory: None,
+                path,
+            }
+        }
+
+        /// The pause in `trap.asm` with two frames, `locals` read in frame 0.
+        fn paused_with_locals(app: &mut NativeShellApp, locals: Vec<VariableRow>) -> Arc<RunControl> {
+            let control = paused_in_trap_asm(app, found_in_folders(SourceCheck::Matches));
+            republish(&control, frames_read(0, LocalsRead::Rows(locals)), CodeTarget::Rip);
+            control
+        }
+
+        #[test]
+        fn the_call_stack_lists_frames_and_a_click_selects_one() {
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_with_locals(&mut app, Vec::new());
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            assert!(window.query_by_label(CALL_STACK).is_some(), "a pause with source shows the call stack");
+            window
+                .query_all_by(|node| node.label().is_some_and(|label| label.contains("ntoskrnl!KiSystemCall64+0x11")))
+                .next()
+                .expect("the caller's row")
+                .click();
+            window.run();
+            assert_eq!(control.inspect().frame, 1);
+            assert!(control.queued().contains(&Task::Refresh));
+            assert_eq!(control.view().code, CALLER_CODE, "the code pane shows the caller's code");
+        }
+
+        #[test]
+        fn a_selected_caller_frame_shows_its_line_with_a_hollow_arrow() {
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_in_trap_asm(&mut app, found_in_folders(SourceCheck::Matches));
+            control.select_frame(1);
+            control.set_view(ViewRequest { code: CALLER_CODE, ..control.view() });
+            republish(&control, frames_read(1, LocalsRead::Rows(Vec::new())), CALLER_CODE);
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            assert!(window.query_by_label(CALLER_LINE).is_some(), "the caller's line is marked");
+            assert!(shown_anywhere(&window, "source line 104"), "the call's line");
+            assert!(shown_anywhere(&window, "Showing caller frame 1"));
+            window.get_by_label(BACK_TO_RIP).click();
+            window.run();
+            assert_eq!(control.inspect().frame, 0, "back at RIP is back in the innermost frame");
+            assert_eq!(control.view().code, CodeTarget::Rip);
+        }
+
+        #[test]
+        fn locals_show_names_values_and_types() {
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let count = variable_row(
+                local_path("count", Vec::new()),
+                "int",
+                ShownValue::Integer { raw: 0xFFFF_FFFB, size: 4, signedness: Signedness::Signed },
+                Expand::Leaf,
+            );
+            paused_with_locals(&mut app, vec![count]);
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            assert!(shown_anywhere(&window, "count  -5 (0xfffffffb)  int"));
+        }
+
+        #[test]
+        fn expanding_a_structure_asks_for_its_members() {
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let flags = local_path("flags", Vec::new());
+            let row = variable_row(
+                flags.clone(),
+                "_MMVAD_FLAGS",
+                ShownValue::Aggregate { count: None, preview: Vec::new(), more: Preview::Cut },
+                Expand::Closed,
+            );
+            let control = paused_with_locals(&mut app, vec![row]);
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            window
+                .query_all_by(|node| node.label().is_some_and(|label| label.starts_with("flags")))
+                .next()
+                .expect("the structure's row")
+                .click();
+            window.run();
+            assert!(control.inspect().expanded.contains(&flags));
+        }
+
+        #[test]
+        fn show_more_asks_for_the_next_hundred() {
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let table = local_path("table", Vec::new());
+            let mut rows = vec![variable_row(
+                table.clone(),
+                "int[250]",
+                ShownValue::Aggregate { count: Some(250), preview: Vec::new(), more: Preview::Cut },
+                Expand::Open,
+            )];
+            rows.push(VariableRow {
+                kind: RowKind::MoreElements { shown: 100, of: 250 },
+                ..variable_row(table.clone(), "", ShownValue::NotAvailable, Expand::Leaf)
+            });
+            let control = paused_with_locals(&mut app, rows);
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            window.get_by_label(MORE_ELEMENTS).click();
+            window.run();
+            assert_eq!(control.inspect().pages.get(&table), Some(&1));
+        }
+
+        #[test]
+        fn a_watch_is_added_and_removed() {
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_with_locals(&mut app, Vec::new());
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            window.get_by_label(WATCH).click();
+            window.run();
+            let field = || egui::accesskit::Role::TextInput;
+            window.get_by_role_and_label(field(), ADD_WATCH).click();
+            window.run();
+            window.get_by_role_and_label(field(), ADD_WATCH).type_text("node->value");
+            window.run();
+            window.key_press(egui::Key::Enter);
+            window.run();
+            assert_eq!(control.inspect().watches, ["node->value"]);
+            window.get_by_label("Remove watch node->value").click();
+            window.run();
+            assert!(control.inspect().watches.is_empty());
+        }
+
+        /// A click on character `column` of line `line` of `trap.asm` (lines
+        /// 88 to 167 are shown, so numbers take three digits).
+        fn click_source_character(window: &mut Harness<'_, Window>, line: u32, column: usize) {
+            let label = format!("{line}  source line {line}");
+            let rect = window
+                .query_all_by(|node| node.label().is_some_and(|text| text == label))
+                .next()
+                .expect("the source line")
+                .rect();
+            let width = window.ctx.fonts_mut(|fonts| fonts.glyph_width(&mono_font(), '0'));
+            let x = line_char_x(rect, 3, width, column).expect("the column") + width / 2.0;
+            let at = egui::pos2(x, rect.center().y);
+            window.hover_at(at);
+            window.drag_at(at);
+            window.event(egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            });
+            window.run();
+        }
+
+        /// The pause republished with `tip` read.
+        fn answer_tip(control: &RunControl, tip: TipRead) {
+            let mut frames = frames_read(0, LocalsRead::Rows(Vec::new()));
+            frames.tip = tip;
+            republish(control, frames, CodeTarget::Rip);
+        }
+
+        fn tip_row(name: &str, type_name: &str, value: ShownValue, expand: Expand) -> VariableRow {
+            VariableRow {
+                name: name.into(),
+                kind: RowKind::Watch,
+                ..variable_row(ValuePath { root: PathRoot::Tip, steps: Vec::new() }, type_name, value, expand)
+            }
+        }
+
+        /// The tip open on the word `source` of line 100.
+        fn tip_on_source(app: NativeShellApp) -> Harness<'static, Window> {
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            click_source_character(&mut window, 100, 2);
+            window
+        }
+
+        #[test]
+        fn clicking_a_variable_in_the_source_shows_its_value() {
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_with_locals(&mut app, Vec::new());
+            let mut window = tip_on_source(app);
+            assert_eq!(control.inspect().tip.as_deref(), Some("source"));
+            assert!(control.queued().contains(&Task::Refresh));
+            assert!(shown_anywhere(&window, TIP_READING), "the tip waits for its read");
+            let count = ShownValue::Integer { raw: 0xFFFF_FFFB, size: 4, signedness: Signedness::Signed };
+            let rows = vec![tip_row("source", "int", count, Expand::Leaf)];
+            answer_tip(&control, TipRead::Rows(WatchRead { text: "source".into(), rows }));
+            window.run();
+            assert!(window.query_by_label(VALUE_TIP).is_some());
+            assert!(shown_anywhere(&window, "-5 (0xfffffffb)"));
+        }
+
+        #[test]
+        fn a_structure_in_a_tip_expands_in_place() {
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_with_locals(&mut app, Vec::new());
+            let mut window = tip_on_source(app);
+            let pair = ShownValue::Aggregate { count: None, preview: Vec::new(), more: Preview::Cut };
+            let rows = vec![tip_row("source", "Pair", pair, Expand::Closed)];
+            answer_tip(&control, TipRead::Rows(WatchRead { text: "source".into(), rows }));
+            window.run();
+            window
+                .query_all_by(|node| node.label().is_some_and(|label| label.starts_with("source  {…}")))
+                .next()
+                .expect("the tip's row")
+                .click();
+            window.run();
+            assert!(control.inspect().expanded.contains(&ValuePath { root: PathRoot::Tip, steps: Vec::new() }));
+            assert!(window.query_by_label(VALUE_TIP).is_some(), "a click inside keeps the tip open");
+        }
+
+        #[test]
+        fn escape_closes_the_tip() {
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_with_locals(&mut app, Vec::new());
+            let mut window = tip_on_source(app);
+            assert!(window.query_by_label(VALUE_TIP).is_some());
+            window.key_press(egui::Key::Escape);
+            window.run();
+            assert!(window.query_by_label(VALUE_TIP).is_none());
+            assert_eq!(control.inspect().tip, None);
+        }
+
+        #[test]
+        fn clicking_a_word_that_is_no_variable_shows_nothing() {
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = paused_with_locals(&mut app, Vec::new());
+            let mut window = tip_on_source(app);
+            answer_tip(&control, TipRead::NoVariable { text: "source".into() });
+            window.run();
+            assert!(window.query_by_label(VALUE_TIP).is_none());
+            assert_eq!(control.inspect().tip, None);
+        }
+
+        #[test]
+        fn a_global_in_locals_asks_for_references_over_its_bytes() {
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let at = KERNEL_BASE + 0x3000;
+            let global = VariableRow {
+                kind: RowKind::Static,
+                memory: Some(MemorySpan { address: at, size: 4 }),
+                ..variable_row(
+                    local_path("g_count", Vec::new()),
+                    "int",
+                    ShownValue::Integer { raw: 7, size: 4, signedness: Signedness::Signed },
+                    Expand::Leaf,
+                )
+            };
+            paused_with_locals(&mut app, vec![global]);
+            let mut window = tall_window(app);
+            window.run();
+            open_debugger(&mut window);
+            window
+                .query_all_by(|node| node.label().is_some_and(|label| label.starts_with("g_count")))
+                .next()
+                .expect("the global's row")
+                .click_secondary();
+            window.run();
+            window.get_by_label(&format!("{REFERENCES_TO} g_count")).click();
+            window.run();
+            let vm = window.state().app.shown_vm();
+            let pane = window.state_mut().app.sessions.open(&vm).debugger_mut();
+            assert_eq!(pane.tab, DebuggerTab::References);
+            assert_eq!(
+                pane.references,
+                Some(XrefTarget { ranges: vec![AddressRange { start: at, end: at + 4 }], label: "g_count".into() })
+            );
         }
 
         /// The owner's pick of Disassembly stays when a step brings a new

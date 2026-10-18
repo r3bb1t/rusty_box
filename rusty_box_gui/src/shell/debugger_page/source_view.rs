@@ -18,7 +18,14 @@ use crate::debugger::inspect::SymbolIndex;
 use crate::debugger::source_breakpoints::{resolve, BreakpointTarget, SourceResolution, SourceTarget};
 use crate::debugger::xref::service::{AddressRange, XrefTarget};
 use super::references::REFERENCES_TO;
-use crate::shell::listing::{lead_arrow, lead_dot, lead_ring, list_row, Cell, RowSense, Tone, ROW_PAD};
+use super::frames_view::{variable_rows, RowAsk, CALLER_LINE, TIP_READING, VALUE_TIP};
+use crate::debugger::frames::TipRead;
+use crate::debugger::watch::expression_at;
+use crate::shell::listing::{
+    char_at, char_width, char_x, lead_arrow, lead_dot, lead_hollow_arrow, lead_ring, list_row, Cell, RowSense, Tone,
+    ROW_PAD,
+};
+use crate::symbols::names::Namer;
 use crate::shell::theme::{ACCENT_AMBER, ACCENT_CYAN, ACCENT_RED, TEXT_MUTED, TEXT_PRIMARY};
 use crate::source::find::{FoundBy, PathMap, SourceCheck, SourceFound};
 use crate::symbols::hub::{ModuleSymbols, SourceKey, SourceSlot, SymbolsView};
@@ -223,6 +230,46 @@ pub(crate) enum SourceAsk {
     SaveMap { project: String, map: PathMap },
     /// Who refers to this line's code.
     References(u32),
+    /// A click on a name: show its value.
+    ShowTip(SourceTip),
+    /// Escape, a click outside the tip, or a word that names nothing.
+    CloseTip,
+    /// A row of the tip was clicked.
+    TipRow(RowAsk),
+}
+
+/// A value tip: the expression a click on line `line`, character `column`,
+/// named.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SourceTip {
+    pub(crate) expression: String,
+    pub(crate) line: u32,
+    pub(crate) column: usize,
+}
+
+/// The open tip and what the pause read of it, with what names its values.
+pub(crate) struct TipView<'a> {
+    pub(crate) tip: &'a SourceTip,
+    pub(crate) read: &'a TipRead,
+    pub(crate) names: Namer<'a>,
+    pub(crate) index: &'a SymbolIndex,
+}
+
+/// The cells of a source line, as `source_rows` lays one out.
+fn line_cells(number: String, digits: usize, text: String, color: Color32) -> [Cell; 2] {
+    [Cell::right(number, TEXT_MUTED, digits), Cell::fill(text, color)]
+}
+
+/// Where character `column` of a source line in `row` starts, its numbers
+/// `digits` wide, `char_width` a character.
+pub(crate) fn line_char_x(row: egui::Rect, digits: usize, char_width: f32, column: usize) -> Option<f32> {
+    let cells = line_cells(String::new(), digits, String::new(), TEXT_PRIMARY);
+    char_x(row, GUTTER, &cells, char_width, 1, column)
+}
+
+fn line_char_at(row: egui::Rect, digits: usize, char_width: f32, x: f32) -> Option<usize> {
+    let cells = line_cells(String::new(), digits, String::new(), TEXT_PRIMARY);
+    char_at(row, GUTTER, &cells, char_width, 1, x)
 }
 
 /// Every code range of `line` of `source`'s file, as a cross-reference
@@ -250,6 +297,8 @@ pub(crate) struct SourcePane<'a> {
     /// Whether `source`'s line is where the processor stands, or a place the
     /// owner opened.
     pub(crate) place: PlaceMark,
+    /// The value tip, when one is open.
+    pub(crate) tip: Option<TipView<'a>>,
 }
 
 /// What the source view's line is.
@@ -260,12 +309,16 @@ pub(crate) enum PlaceMark {
     /// A line the owner opened (a cross reference, a Go to): ringed, since
     /// the arrow means RIP.
     Shown,
+    /// The call a picked caller frame returns from: the hollow arrow.
+    Caller,
 }
 
 /// What a line's gutter draws.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Lead {
     Arrow(Color32),
+    /// The hollow arrow of a caller frame's line.
+    Hollow,
     /// The ring of a line the owner opened.
     Shown,
     Dot(Color32),
@@ -277,6 +330,7 @@ pub(crate) enum Lead {
 pub(crate) fn line_lead(current: bool, place: PlaceMark, mark: Option<LineMark>) -> Lead {
     match (current, place, mark) {
         (true, PlaceMark::Shown, _) => Lead::Shown,
+        (true, PlaceMark::Caller, _) => Lead::Hollow,
         (true, PlaceMark::Current, Some(LineMark::Set)) => Lead::Arrow(ACCENT_RED),
         (true, PlaceMark::Current, Some(LineMark::Pending) | None) => Lead::Arrow(ACCENT_CYAN),
         (false, _, Some(LineMark::Set)) => Lead::Dot(ACCENT_RED),
@@ -285,7 +339,7 @@ pub(crate) fn line_lead(current: bool, place: PlaceMark, mark: Option<LineMark>)
     }
 }
 
-fn file_name(path: &str) -> &str {
+pub(crate) fn file_name(path: &str) -> &str {
     components(path).last().unwrap_or(path)
 }
 
@@ -387,6 +441,9 @@ pub(crate) fn source_rows(ui: &mut egui::Ui, pane: &SourcePane<'_>, cursor: &mut
     let first = pane.source.line.saturating_sub(LINES_ABOVE).max(1);
     let last = first.saturating_add(LINES_SHOWN);
     let digits = last.to_string().len();
+    let character = char_width(ui);
+    // Where the open tip hangs: under its word, on its line's row.
+    let mut tip_anchor = None;
     for number in first..last {
         let Some(line) = usize::try_from(number).ok().and_then(|number| number.checked_sub(1)).and_then(|at| text.lines.get(at))
         else {
@@ -409,14 +466,17 @@ pub(crate) fn source_rows(ui: &mut egui::Ui, pane: &SourcePane<'_>, cursor: &mut
         } else {
             Tone::Plain
         };
-        let cells = [
-            Cell::right(number.to_string(), TEXT_MUTED, digits),
-            Cell::fill(line.replace('\t', "    "), color),
-        ];
+        let shown = line.replace('\t', "    ");
+        let cells = line_cells(number.to_string(), digits, shown.clone(), color);
         let response = list_row(ui, GUTTER, &cells, tone, RowSense::Pick { selected: picked });
+        if let Some(view) = pane.tip.as_ref().filter(|view| view.tip.line == number) {
+            let x = line_char_x(response.rect, digits, character, view.tip.column).unwrap_or(response.rect.left());
+            tip_anchor = Some(egui::pos2(x, response.rect.bottom()));
+        }
         let mark = pane.marks.iter().find(|at| at.line == number).map(|at| at.mark);
         match line_lead(current, pane.place, mark) {
             Lead::Arrow(color) => lead_arrow(ui, response.rect, color),
+            Lead::Hollow => lead_hollow_arrow(ui, response.rect, ACCENT_CYAN, CALLER_LINE),
             Lead::Shown => lead_ring(ui, response.rect, GUTTER, ACCENT_CYAN),
             Lead::Dot(color) => lead_dot(ui, response.rect, GUTTER, color),
             Lead::Ring(color) => lead_ring(ui, response.rect, GUTTER, color),
@@ -436,8 +496,66 @@ pub(crate) fn source_rows(ui: &mut egui::Ui, pane: &SourcePane<'_>, cursor: &mut
                 ask = Some(SourceAsk::Toggle(number));
             } else {
                 *cursor = Some(number);
+                let clicked = response
+                    .interact_pointer_pos()
+                    .and_then(|at| line_char_at(response.rect, digits, character, at.x))
+                    .and_then(|column| expression_at(&shown, column).map(|expression| SourceTip { expression, line: number, column }));
+                if let Some(tip) = clicked {
+                    ask = Some(SourceAsk::ShowTip(tip));
+                }
             }
         }
+    }
+    if let Some(view) = &pane.tip {
+        let tip_ask = tip_popup(ui, view, tip_anchor);
+        if ask.is_none() {
+            ask = tip_ask;
+        }
+    }
+    ask
+}
+
+/// The widest a value tip grows, points.
+const TIP_WIDTH: f32 = 520.0;
+
+/// The value tip under its word (`anchor`, where its line is drawn): the
+/// expression, then its rows as the Locals pane draws them. Escape, a click
+/// outside it, or a word that names nothing closes it.
+fn tip_popup(ui: &mut egui::Ui, view: &TipView<'_>, anchor: Option<egui::Pos2>) -> Option<SourceAsk> {
+    if let TipRead::NoVariable { text } = view.read {
+        if *text == view.tip.expression {
+            return Some(SourceAsk::CloseTip);
+        }
+    }
+    if ui.input(|input| input.key_pressed(egui::Key::Escape)) {
+        return Some(SourceAsk::CloseTip);
+    }
+    let anchor = anchor?;
+    let mut ask = None;
+    let area = egui::Area::new(ui.id().with(VALUE_TIP)).order(egui::Order::Foreground).fixed_pos(anchor).show(ui.ctx(), |ui| {
+        let frame = egui::Frame::popup(ui.style()).show(ui, |ui| {
+            ui.set_max_width(TIP_WIDTH);
+            ui.spacing_mut().item_spacing.y = 0.0;
+            ui.label(RichText::new(&view.tip.expression).monospace().strong());
+            ui.add_space(4.0);
+            match view.read {
+                TipRead::Rows(read) if read.text == view.tip.expression => {
+                    if let Some(row) = variable_rows(ui, &read.rows, view.names, view.index) {
+                        ask = Some(SourceAsk::TipRow(row));
+                    }
+                }
+                TipRead::Rows(_) | TipRead::None | TipRead::NoVariable { .. } => {
+                    ui.label(RichText::new(TIP_READING).color(TEXT_MUTED));
+                }
+            }
+        });
+        frame.response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Other, true, VALUE_TIP));
+    });
+    let clicked_outside = ui.input(|input| {
+        input.pointer.primary_clicked() && input.pointer.interact_pos().is_some_and(|at| !area.response.rect.contains(at))
+    });
+    if ask.is_none() && clicked_outside {
+        ask = Some(SourceAsk::CloseTip);
     }
     ask
 }
@@ -513,6 +631,8 @@ mod tests {
         assert_eq!(line_lead(true, PlaceMark::Current, Some(LineMark::Set)), Lead::Arrow(ACCENT_RED));
         assert_eq!(line_lead(true, PlaceMark::Shown, None), Lead::Shown);
         assert_eq!(line_lead(true, PlaceMark::Shown, Some(LineMark::Set)), Lead::Shown);
+        assert_eq!(line_lead(true, PlaceMark::Caller, Some(LineMark::Set)), Lead::Hollow, "a caller's line");
+        assert_eq!(line_lead(false, PlaceMark::Caller, Some(LineMark::Set)), Lead::Dot(ACCENT_RED));
         assert_eq!(line_lead(false, PlaceMark::Shown, Some(LineMark::Set)), Lead::Dot(ACCENT_RED));
         assert_eq!(line_lead(false, PlaceMark::Current, Some(LineMark::Pending)), Lead::Ring(ACCENT_RED));
         assert_eq!(line_lead(false, PlaceMark::Current, None), Lead::Nothing);

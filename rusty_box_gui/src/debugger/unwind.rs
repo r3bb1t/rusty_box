@@ -12,7 +12,6 @@ use super::guest::{GuestMemory, GuestRead, Root};
 use super::pe;
 
 /// The most frames a stack is unwound to.
-#[cfg_attr(not(test), allow(dead_code, reason = "the call-stack pane (plan 4b) walks whole stacks"))]
 pub(crate) const MAX_FRAMES: usize = 256;
 /// The most chained infos followed for one frame.
 const MAX_CHAIN: u32 = 32;
@@ -26,14 +25,10 @@ const RUNTIME_FUNCTION_BYTES: u32 = 12;
 pub(crate) const RAX: usize = 0;
 pub(crate) const RCX: usize = 1;
 pub(crate) const RDX: usize = 2;
-#[cfg_attr(not(test), allow(dead_code, reason = "the variables pane (plan 4b) reads registers by number"))]
 pub(crate) const RBX: usize = 3;
-#[cfg_attr(not(test), allow(dead_code, reason = "the variables pane (plan 4b) reads registers by number"))]
 pub(crate) const RSP: usize = 4;
 pub(crate) const RBP: usize = 5;
-#[cfg_attr(not(test), allow(dead_code, reason = "the variables pane (plan 4b) reads registers by number"))]
 pub(crate) const RSI: usize = 6;
-#[cfg_attr(not(test), allow(dead_code, reason = "the variables pane (plan 4b) reads registers by number"))]
 pub(crate) const RDI: usize = 7;
 /// The registers a call may change (the x64 calling convention's volatile
 /// ones): not known in a caller's frame.
@@ -91,6 +86,21 @@ pub(crate) struct Frame {
     pub(crate) how: FrameFound,
 }
 
+impl Frame {
+    /// The address the frame's code is at, for naming it and finding its
+    /// line and scope: a frame resumed by a return is at the instruction
+    /// before its return address (the call may be its function's last
+    /// instruction); a frame the processor or a trap stopped is at RIP.
+    pub(crate) fn code_address(&self) -> u64 {
+        match self.how {
+            FrameFound::Registers | FrameFound::MachineFrame => self.registers.rip,
+            FrameFound::Unwind | FrameFound::Leaf | FrameFound::Epilog | FrameFound::FramePointer => {
+                self.registers.rip.wrapping_sub(1)
+            }
+        }
+    }
+}
+
 /// Why a stack ends where it does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum StackEnd {
@@ -108,11 +118,11 @@ pub(crate) enum StackEnd {
     NotGrowing,
     Unreadable { at: u64 },
     /// [`MAX_FRAMES`] frames.
-    #[cfg_attr(not(test), allow(dead_code, reason = "the call-stack pane (plan 4b) walks whole stacks"))]
     Ceiling,
+    /// 16-bit code: its stack is not unwound.
+    SixteenBit,
 }
 
-#[cfg_attr(not(test), allow(dead_code, reason = "the call-stack pane (plan 4b) walks whole stacks"))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Stack {
     pub(crate) frames: Vec<Frame>,
@@ -136,7 +146,6 @@ pub(crate) struct Unwinding<'a> {
 }
 
 /// The stack from `start`, the paused processor's registers.
-#[cfg_attr(not(test), allow(dead_code, reason = "the call-stack pane (plan 4b) walks whole stacks"))]
 pub(crate) fn unwind<G: GuestMemory>(memory: &mut G, unwinding: &Unwinding<'_>, start: FrameRegisters) -> Stack {
     let mut frames = vec![Frame { registers: start, how: FrameFound::Registers }];
     let mut last = frames.first().copied();

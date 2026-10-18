@@ -18,6 +18,9 @@ use crate::symbols::hub::SymbolsView;
 use super::kernel_layout::{same_layouts, KernelLayout};
 use super::search::{FindOutcome, FindRequest};
 use super::windows::WindowsDiscovery;
+use super::frames::InspectRequest;
+#[cfg(feature = "gui-egui")]
+use super::frames::InspectAsk;
 use super::xref::service::{CopyRequest, XrefService};
 #[cfg(feature = "gui-egui")]
 use super::xref::service::{CopyModule, IndexState};
@@ -169,6 +172,9 @@ struct ControlState {
     applied: Vec<CodeBreakpoint>,
     /// The symbol engine's latest view, which a step reads line rows from.
     symbols: Option<Arc<SymbolsView>>,
+    /// What the variables panes ask of each read: the picked frame, the
+    /// watches, the expansions.
+    inspect: InspectRequest,
 }
 
 /// One VM's run control, shared by the shell and the VM's run thread.
@@ -217,6 +223,7 @@ impl RunControl {
                 stopped_at: None,
                 applied: Vec::new(),
                 symbols: None,
+                inspect: InspectRequest::default(),
             }),
             changed: Condvar::new(),
             discovery: Mutex::new(WindowsDiscovery::default()),
@@ -383,7 +390,71 @@ impl RunControl {
         if state.symbols.as_ref().is_some_and(|held| Arc::ptr_eq(held, &view)) {
             return;
         }
+        // A paused read that waited for a module's tables is read again once
+        // they are here; any other new view asks nothing, so a refresh never
+        // feeds itself.
+        let arrived = state
+            .snapshot
+            .as_ref()
+            .is_some_and(|shown| shown.frames.awaiting.iter().any(|identity| view.tables(identity).is_some()));
         state.symbols = Some(view);
+        if arrived {
+            self.refresh_paused(&mut state);
+        }
+    }
+
+    /// Queues one refresh of a paused run.
+    fn refresh_paused(&self, state: &mut ControlState) {
+        if state.phase == RunPhase::Paused && !state.tasks.contains(&Task::Refresh) {
+            state.tasks.push_back(Task::Refresh);
+            self.changed.notify_all();
+        }
+    }
+
+    /// Picks the frame the variables panes show; a paused run reads again.
+    #[cfg(feature = "gui-egui")]
+    pub(crate) fn select_frame(&self, frame: usize) {
+        let mut state = self.lock();
+        if state.inspect.frame == frame {
+            return;
+        }
+        state.inspect.frame = frame;
+        self.refresh_paused(&mut state);
+    }
+
+    /// The watches and expansions the panes ask for; a paused run reads
+    /// again when they changed.
+    #[cfg(feature = "gui-egui")]
+    pub(crate) fn set_inspect(&self, ask: InspectAsk) {
+        let mut state = self.lock();
+        let InspectAsk { watches, expanded, pages } = ask;
+        if state.inspect.watches == watches && state.inspect.expanded == expanded && state.inspect.pages == pages {
+            return;
+        }
+        state.inspect.watches = watches;
+        state.inspect.expanded = expanded;
+        state.inspect.pages = pages;
+        self.refresh_paused(&mut state);
+    }
+
+    /// The expression the value tip shows, or none; a paused run reads it.
+    /// The tip closes when the guest runs.
+    #[cfg(feature = "gui-egui")]
+    pub(crate) fn show_tip(&self, tip: Option<String>) {
+        let mut state = self.lock();
+        if state.inspect.tip == tip {
+            return;
+        }
+        let asked = tip.is_some();
+        state.inspect.tip = tip;
+        if asked {
+            self.refresh_paused(&mut state);
+        }
+    }
+
+    /// What the run thread reads the variables for.
+    pub(crate) fn inspect(&self) -> InspectRequest {
+        self.lock().inspect.clone()
     }
 
     /// What the page wants to see. A paused run reads it again at once.
@@ -586,6 +657,8 @@ impl RunControl {
                     // earlier step.
                     Task::Step(_) => {
                         state.view.code = CodeTarget::Rip;
+                        state.inspect.frame = 0;
+                        state.inspect.tip = None;
                         state.guest_ran = true;
                         state.stopped_at = None;
                         state.note = None;
@@ -601,8 +674,11 @@ impl RunControl {
                     self.stop_flag.store(false, Ordering::Relaxed);
                     state.serve_requested = false;
                     state.phase = RunPhase::Running;
-                    // The next pause's code is read where it stops.
+                    // The next pause's code is read where it stops, in its
+                    // innermost frame.
                     state.view.code = CodeTarget::Rip;
+                    state.inspect.frame = 0;
+                    state.inspect.tip = None;
                     return BetweenRuns::Resume;
                 }
                 Wanted::Pause => {
@@ -788,6 +864,12 @@ mod tests {
     use crate::debugger::inspect::{AddressSpace, GuestAddress};
     use crate::debugger::module_identity::GuestIdentity;
     use crate::debugger::xref::service::{IndexSpace, ModuleKey};
+    use crate::symbols::hub::{ModuleEntry, ModuleSymbols};
+    use rusty_box_symbols::identity::{ModuleIdentity, PeImageId};
+    use rusty_box_symbols::service::SymbolSource;
+    use rusty_box_symbols::tables::SymbolTables;
+    use rusty_box_symbols_fixtures::pdb::{build_pdb, PdbFixture};
+    use std::collections::{BTreeMap, BTreeSet};
 
     fn control() -> RunControl {
         RunControl::new(Arc::new(AtomicBool::new(false)))
@@ -795,6 +877,89 @@ mod tests {
 
     fn raised(control: &RunControl) -> bool {
         control.stop_flag().load(Ordering::Relaxed)
+    }
+
+    fn paused_control() -> RunControl {
+        let control = control();
+        control.begin_run(RunStart::PowerOn);
+        control.pause();
+        assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::Refresh));
+        control
+    }
+
+    #[test]
+    fn a_step_or_a_run_selects_the_innermost_frame() {
+        let control = paused_control();
+        control.select_frame(2);
+        assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::Refresh));
+        assert_eq!(control.inspect().frame, 2);
+        control.step(StepRequest::instruction_into(0));
+        assert!(matches!(control.next_between_runs(), BetweenRuns::Perform(Task::Step(_))));
+        assert_eq!(control.inspect().frame, 0);
+        control.select_frame(1);
+        assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::Refresh));
+        control.resume();
+        assert_eq!(control.next_between_runs(), BetweenRuns::Resume);
+        assert_eq!(control.inspect().frame, 0);
+    }
+
+    #[test]
+    fn a_step_or_a_run_closes_the_tip() {
+        let control = paused_control();
+        control.show_tip(Some("count".into()));
+        assert_eq!(control.queued(), [Task::Refresh], "a paused run reads the tip");
+        assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::Refresh));
+        assert_eq!(control.inspect().tip.as_deref(), Some("count"));
+        control.show_tip(Some("count".into()));
+        assert_eq!(control.queued(), [], "the same tip again asks nothing");
+        control.step(StepRequest::instruction_into(0));
+        assert!(matches!(control.next_between_runs(), BetweenRuns::Perform(Task::Step(_))));
+        assert_eq!(control.inspect().tip, None);
+        control.show_tip(Some("count".into()));
+        assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::Refresh));
+        control.resume();
+        assert_eq!(control.next_between_runs(), BetweenRuns::Resume);
+        assert_eq!(control.inspect().tip, None);
+    }
+
+    #[test]
+    fn picking_a_frame_or_a_watch_refreshes_a_paused_run_once() {
+        let control = paused_control();
+        control.select_frame(1);
+        assert_eq!(control.queued(), [Task::Refresh]);
+        control.select_frame(1);
+        assert_eq!(control.queued(), [Task::Refresh], "the same pick again asks nothing");
+        assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::Refresh));
+        let ask = InspectAsk { watches: vec!["count".into()], expanded: BTreeSet::new(), pages: BTreeMap::new() };
+        control.set_inspect(ask.clone());
+        assert_eq!(control.queued(), [Task::Refresh]);
+        assert_eq!(control.inspect().watches, ["count"]);
+        assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::Refresh));
+        control.set_inspect(ask);
+        assert_eq!(control.queued(), []);
+    }
+
+    #[test]
+    fn new_symbols_refresh_only_a_read_that_waited_for_them() {
+        let identity = ModuleIdentity::Pe {
+            file_name: "flat.exe".into(),
+            image: PeImageId { time_date_stamp: 1, size_of_image: 0x1_0000 },
+            pdb: None,
+        };
+        let control = paused_control();
+        let mut snapshot = empty_snapshot(0x1000);
+        snapshot.frames.awaiting = vec![identity.clone()];
+        control.publish(snapshot);
+        control.set_symbols(Arc::new(SymbolsView::default()));
+        assert_eq!(control.queued(), [], "the module's tables have not loaded");
+        let tables = SymbolTables::parse(&build_pdb(&PdbFixture::new([1; 16], 1))).expect("a PDB");
+        let mut view = SymbolsView::default();
+        view.modules.insert(
+            identity,
+            ModuleEntry { state: ModuleSymbols::Loaded { from: SymbolSource::Store { path: "flat.pdb".into() } }, tables: Some(Arc::new(tables)) },
+        );
+        control.set_symbols(Arc::new(view));
+        assert_eq!(control.queued(), [Task::Refresh]);
     }
 
     /// Code shown somewhere else (a Go to) is shown at RIP again once the
@@ -959,6 +1124,7 @@ mod tests {
             code: Vec::new(),
             code_at: CodeTarget::Rip,
             rip: 0,
+            frames: crate::debugger::frames::FramesRead::default(),
             memory: crate::debugger::inspect::MemoryWindow {
                 start: crate::debugger::inspect::GuestAddress {
                     space: crate::debugger::inspect::AddressSpace::Linear,
@@ -1030,6 +1196,7 @@ mod tests {
             code: Vec::new(),
             code_at: CodeTarget::Rip,
             rip,
+            frames: crate::debugger::frames::FramesRead::default(),
             memory: MemoryWindow {
                 start: GuestAddress { space: AddressSpace::Linear, value: rip },
                 rows: Vec::new(),

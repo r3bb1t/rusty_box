@@ -11,6 +11,17 @@ pub struct Rva(pub u64);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FieldOffset(pub u64);
 
+/// A type as a PDB's TPI stream indexes it: below 0x1000 a primitive type
+/// (its kind and pointer mode), from 0x1000 a type record.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TypeRef(pub u32);
+
+/// A register as CodeView numbers it (LLVM `CodeViewRegisters.def`): the
+/// number a variable's record names, before it is mapped to a machine
+/// register.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct CvRegister(pub u16);
+
 /// A bitfield's bits inside the storage unit at its member's offset, least
 /// significant bit first: `position` is the lowest bit, `length` the width.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

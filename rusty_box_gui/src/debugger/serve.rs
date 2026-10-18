@@ -19,6 +19,7 @@ use super::stepping::{
     Stepped, Stepper, STEP_LIMITS,
 };
 use super::unwind::{caller_of, Frame, FrameFound, FrameRegisters, UnwindModule, Unwinding};
+use super::frames::{frames_at, read_frames};
 use super::guest::PausedCpu;
 use super::xref::image::{copy_image, ImageAt, ImageOffset};
 use super::xref::index::ModuleSpan;
@@ -495,8 +496,21 @@ fn read_for<T: Instrumentation, E: SliceEngine<T>>(
     let view = control.view();
     let unmoved = control.unmoved_snapshot();
     let layout = control.kernel_layout();
-    let mut discovery = control.discovery();
-    read_snapshot(emu, &view, &mut discovery, unmoved.as_deref(), layout.as_ref())
+    let mut snapshot = {
+        let mut discovery = control.discovery();
+        read_snapshot(emu, &view, &mut discovery, unmoved.as_deref(), layout.as_ref())
+    };
+    // The call stack from where the panes stand, through the processor they
+    // were read through (as the guest's own structures were, in VMX root).
+    let at = frames_at(&snapshot);
+    let request = control.inspect();
+    let symbols = control.symbols();
+    if let Some(mut debug) = emu.debug_cpu(snapshot.cpu) {
+        let vmx_guest = debug.vmx_guest();
+        let mut paused = PausedCpu { cpu: &mut debug, vmx_guest };
+        snapshot.frames = read_frames(&mut paused.walked(), &at, &snapshot.symbols, symbols.as_deref(), &request);
+    }
+    snapshot
 }
 
 /// Serves the shell until it lets the machine run on or ends the run.
@@ -556,7 +570,12 @@ mod tests {
     use rusty_box_symbols::identity::{Guid, ModuleIdentity, PdbId, PeImageId};
     use rusty_box_symbols::service::SymbolSource;
     use rusty_box_symbols::tables::SymbolTables;
-    use rusty_box_symbols_fixtures::pdb::{build_pdb, FixtureLine, FixtureProcedure, PdbFixture};
+    use rusty_box_symbols_fixtures::pdb::{
+        build_pdb, FixtureLine, FixtureLocal, FixturePlace, FixtureProcedure, FixtureScope, FixtureType, PdbFixture,
+    };
+    use crate::debugger::frames::{LocalsRead, TipRead};
+    use crate::debugger::source_breakpoints::{applied_set, BreakpointTarget, SourceTarget};
+    use crate::debugger::variables::{ShownValue, Signedness};
     use std::sync::{atomic::AtomicBool, Arc};
 
     const ONE: StepRequest = StepRequest::instruction_into(0);
@@ -698,15 +717,109 @@ mod tests {
         Landing { rip: snapshot.rip, rsp: snapshot.rsp }
     }
 
-    /// The pause's modules: one, unnamed, holding the code, so the unwinder
-    /// finds no unwind data in it and takes its functions for leaves.
+    /// The pause read with one module, `identity`, holding the code (as a
+    /// Windows guest's discovery would list it), and its frames read under
+    /// that module; with no unwind data in it, the unwinder takes its
+    /// functions for leaves.
     fn publish_module_over(calling: &mut Calling, identity: GuestIdentity, base: u64) {
         let mut snapshot = read_for(&mut calling.machine, &calling.control);
         snapshot.symbols = SymbolIndex {
             modules: vec![SymModule { base, size: 0x10_0000, name: "flat.exe".into(), space: ModuleSpace::User, identity }],
             kernel: None,
         };
+        let at = frames_at(&snapshot);
+        let symbols = calling.control.symbols();
+        let mut debug = calling.machine.debug_cpu(snapshot.cpu).expect("the processor");
+        let vmx_guest = debug.vmx_guest();
+        let mut paused = PausedCpu { cpu: &mut debug, vmx_guest };
+        snapshot.frames =
+            read_frames(&mut paused.walked(), &at, &snapshot.symbols, symbols.as_deref(), &calling.control.inspect());
         calling.control.publish(snapshot);
+    }
+
+    fn flat_identity() -> ModuleIdentity {
+        ModuleIdentity::Pe {
+            file_name: "flat.exe".into(),
+            image: PeImageId { time_date_stamp: 1, size_of_image: 0x10_0000 },
+            pdb: Some(PdbId { name: "flat.pdb".into(), guid: Guid::from_le_bytes([5; 16]), age: 1 }),
+        }
+    }
+
+    fn main_c(name: &str, offset: u32, lines: Vec<FixtureLine>) -> FixtureProcedure {
+        FixtureProcedure { name: name.into(), section: 1, offset, len: 0x10, file: r"C:\src\main.c".into(), checksum: None, lines }
+    }
+
+    /// Spec §11's last bullet: `main: call f ; nop ; hlt` (lines 1–2) and
+    /// `f: mov dword [rsp-8], 42 ; nop ; ret` (lines 10–11, its local `x` at
+    /// `[rsp-8]`), run to a `main.c:10` breakpoint, stepped over a line, and
+    /// read as the panes read it: the call stack, `x`, a tip on `x`, the
+    /// caller picked; then stepped out.
+    #[test]
+    fn the_call_stack_and_a_local_read_on_a_running_machine() {
+        let (mut machine, control, code) = paused();
+        let mut program = vec![0xE8, 0x0B, 0, 0, 0, 0x90, 0xF4];
+        program.resize(0x10, 0x90);
+        program.extend_from_slice(&[0xC7, 0x44, 0x24, 0xF8, 0x2A, 0, 0, 0, 0x90, 0xC3]);
+        machine.mem_write(code, &program).expect("write");
+        machine.reg_write(X86Reg::Rsp, code + STACK);
+        let mut calling = Calling { machine, control, code };
+        let mut fixture = PdbFixture::new([5; 16], 1);
+        fixture.procedures.push(main_c("main", 0x100, vec![FixtureLine { offset: 0, line: 1 }, FixtureLine { offset: 6, line: 2 }]));
+        fixture.procedures.push(main_c("f", 0x110, vec![FixtureLine { offset: 0, line: 10 }, FixtureLine { offset: 8, line: 11 }]));
+        fixture.scopes.push(FixtureScope {
+            procedure: "f".into(),
+            debug_start: 0,
+            debug_end: 0x10,
+            parameters: None,
+            frame: None,
+            locals: vec![FixtureLocal { name: "x".into(), ty: FixtureType::I32, place: FixturePlace::RegRel { register: 335, offset: -8 } }],
+            inline_locals: Vec::new(),
+            blocks: Vec::new(),
+        });
+        let tables = SymbolTables::parse(&build_pdb(&fixture)).expect("the fixture parses");
+        let mut view = SymbolsView::default();
+        view.modules.insert(
+            flat_identity(),
+            ModuleEntry {
+                state: ModuleSymbols::Loaded { from: SymbolSource::Store { path: "flat.pdb".into() } },
+                tables: Some(Arc::new(tables)),
+            },
+        );
+        let view = Arc::new(view);
+        calling.control.set_symbols(Arc::clone(&view));
+        // `.text` is at RVA 0x1000, `main` 0x100 into it and `f` 0x110.
+        let base = code - 0x1100;
+        publish_module_over(&mut calling, GuestIdentity::Known(flat_identity()), base);
+        let index = calling.control.snapshot().expect("published").symbols.clone();
+        let line_10 = BreakpointTarget::Source(SourceTarget { file: "main.c".into(), line: 10 });
+        let set = applied_set(&[line_10], Some(&index), &view);
+        assert_eq!(set, [CodeBreakpoint::Linear(code + F)]);
+        perform(&mut calling.machine, &calling.control, Task::ApplyBreakpoints(set), Stepping::Instructions).expect("apply");
+        let stop = calling.machine.step(RunBudget::Instructions(1_000)).expect("run").stop;
+        assert!(matches!(stop, StopReason::Breakpoint(hit) if hit.linear == code + F), "{stop:?}");
+        let over = request(StepKind::Over, StepUnit::Line);
+        perform(&mut calling.machine, &calling.control, Task::Step(over), Stepping::Instructions).expect("step");
+        assert_eq!(calling.machine.cpu_snapshot().rip, code + 0x18, "line 11");
+        publish_module_over(&mut calling, GuestIdentity::Known(flat_identity()), base);
+        let shown = calling.control.snapshot().expect("published");
+        assert!(shown.frames.frames.len() >= 2, "{:?}", shown.frames.frames);
+        assert_eq!(shown.frames.frames[1].registers.rip, code + CALL_LENGTH);
+        let forty_two = ShownValue::Integer { raw: 42, size: 4, signedness: Signedness::Signed };
+        let LocalsRead::Rows(rows) = &shown.frames.locals else { panic!("locals: {:?}", shown.frames.locals) };
+        assert_eq!(rows.iter().map(|row| row.name.as_str()).collect::<Vec<&str>>(), ["x"]);
+        assert_eq!(rows[0].value, forty_two);
+        calling.control.show_tip(Some("x".into()));
+        publish_module_over(&mut calling, GuestIdentity::Known(flat_identity()), base);
+        let TipRead::Rows(tip) = &calling.control.snapshot().expect("published").frames.tip else { panic!("a tip") };
+        assert_eq!(tip.rows[0].value, forty_two);
+        calling.control.select_frame(1);
+        publish_module_over(&mut calling, GuestIdentity::Known(flat_identity()), base);
+        assert_eq!(calling.control.snapshot().expect("published").frames.selected, 1);
+        // Out by line returns past the call and runs to the end of its line:
+        // line 2 of `main`.
+        let out = request(StepKind::Out, StepUnit::Line);
+        perform(&mut calling.machine, &calling.control, Task::Step(out), Stepping::Instructions).expect("out");
+        assert_eq!(calling.machine.cpu_snapshot().rip, code + 6, "back in main, at line 2");
     }
 
     #[test]

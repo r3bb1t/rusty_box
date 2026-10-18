@@ -201,6 +201,23 @@ fn column_rects(
         .collect()
 }
 
+/// The character of cell `cell` that `x` falls on, in a row of `cells`
+/// laid out in `row` after `lead`: monospace, `char_width` a character.
+pub(crate) fn char_at(row: Rect, lead: f32, cells: &[Cell], char_width: f32, cell: usize, x: f32) -> Option<usize> {
+    let column = *column_rects(row, lead, cells, char_width).get(cell)?;
+    if x < column.left() || x > column.right() || char_width <= 0.0 {
+        return None;
+    }
+    Some(((x - column.left()) / char_width).floor() as usize)
+}
+
+/// Where character `index` of cell `cell` starts, in a row laid out as
+/// [`char_at`] reads one.
+pub(crate) fn char_x(row: Rect, lead: f32, cells: &[Cell], char_width: f32, cell: usize, index: usize) -> Option<f32> {
+    let column = *column_rects(row, lead, cells, char_width).get(cell)?;
+    Some(column.left() + index as f32 * char_width)
+}
+
 /// The narrowest a row of `cells` can be.
 fn min_width(lead: f32, cells: &[Cell], char_width: f32) -> f32 {
     let columns: f32 = cells
@@ -398,6 +415,24 @@ pub(crate) fn lead_arrow(ui: &egui::Ui, row: Rect, color: Color32) {
         color,
         Stroke::NONE,
     ));
+}
+
+/// [`lead_arrow`]'s outline: where a caller frame resumes. It is named
+/// `label` for assistive technology, since its row's text does not say it.
+pub(crate) fn lead_hollow_arrow(ui: &mut egui::Ui, row: Rect, color: Color32, label: &str) {
+    let left = row.left() + ROW_PAD;
+    let middle = row.center().y;
+    let points = vec![
+        egui::pos2(left + 0.5, middle - 4.0),
+        egui::pos2(left + 6.5, middle),
+        egui::pos2(left + 0.5, middle + 4.0),
+    ];
+    ui.painter().add(egui::Shape::closed_line(points, Stroke::new(1.2, color)));
+    let marker = Rect::from_min_max(egui::pos2(left, middle - 4.5), egui::pos2(left + 7.0, middle + 4.5));
+    let id = ui.id().with(label).with(row.top().to_bits());
+    let enabled = ui.is_enabled();
+    ui.interact(marker, id, egui::Sense::hover())
+        .widget_info(|| WidgetInfo::labeled(WidgetType::Label, enabled, label));
 }
 
 /// A disclosure chevron in a row's lead: pointing right when closed, down

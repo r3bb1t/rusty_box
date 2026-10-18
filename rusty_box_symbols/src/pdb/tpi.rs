@@ -16,11 +16,18 @@ use std::collections::BTreeMap;
 use no_panic::no_panic;
 
 use crate::read::{Bytes, ReadError};
-use crate::tables::{FieldLayout, LayoutError, MemberLocation, TypeLayout};
-use crate::units::{BitRange, FieldOffset};
+use crate::tables::{
+    BaseKind, BaseType, Constness, Enumerator, FieldLayout, LayoutError, MemberLocation, PointerKind, RecordField, RecordKind,
+    TypeError, TypeLayout, TypeShape, Volatility,
+};
+use crate::units::{BitRange, FieldOffset, TypeRef};
 
 const LF_MODIFIER: u16 = 0x1001;
 const LF_POINTER: u16 = 0x1002;
+/// Function types: return type, calling convention, options, parameter
+/// count, argument list (`LF_MFUNCTION` adds class and this types first).
+const LF_PROCEDURE: u16 = 0x1008;
+const LF_MFUNCTION: u16 = 0x1009;
 const LF_FIELDLIST: u16 = 0x1203;
 const LF_BITFIELD: u16 = 0x1205;
 const LF_BCLASS: u16 = 0x1400;
@@ -120,6 +127,107 @@ pub fn decode_numeric(bytes: Bytes<'_>, at: usize) -> Result<Numeric, ReadError>
     })
 }
 
+/// A numeric leaf read as a signed value (an enumerator's): below 0x8000
+/// the value itself, else `LF_CHAR`, `LF_SHORT`, `LF_USHORT`, `LF_LONG`,
+/// `LF_ULONG`, `LF_QUADWORD` or `LF_UQUADWORD` and the value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SignedNumeric {
+    pub value: Option<i128>,
+    pub next: usize,
+}
+
+#[cfg_attr(all(test, not(debug_assertions)), no_panic)]
+pub fn decode_signed_numeric(bytes: Bytes<'_>, at: usize) -> Result<SignedNumeric, ReadError> {
+    let leaf = bytes.u16_le(at)?;
+    let after = at.checked_add(2).ok_or(ReadError::Truncated { at, len: 2 })?;
+    if leaf < LF_CHAR {
+        return Ok(SignedNumeric { value: Some(i128::from(leaf)), next: after });
+    }
+    let past = |len: usize| after.checked_add(len).ok_or(ReadError::Truncated { at, len });
+    Ok(match leaf {
+        LF_CHAR => SignedNumeric { value: Some(i128::from(bytes.u8(after)? as i8)), next: past(1)? },
+        LF_SHORT => SignedNumeric { value: Some(i128::from(bytes.u16_le(after)? as i16)), next: past(2)? },
+        LF_USHORT => SignedNumeric { value: Some(i128::from(bytes.u16_le(after)?)), next: past(2)? },
+        LF_LONG => SignedNumeric { value: Some(i128::from(bytes.u32_le(after)? as i32)), next: past(4)? },
+        LF_ULONG => SignedNumeric { value: Some(i128::from(bytes.u32_le(after)?)), next: past(4)? },
+        LF_QUADWORD => SignedNumeric { value: Some(i128::from(bytes.u64_le(after)? as i64)), next: past(8)? },
+        LF_UQUADWORD => SignedNumeric { value: Some(i128::from(bytes.u64_le(after)?)), next: past(8)? },
+        _ => return Err(ReadError::Truncated { at, len: usize::MAX }),
+    })
+}
+
+/// `LF_POINTER`: referent, attributes (bits 0–4 kind, 5–7 mode, 13–18 size).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PointerRecord {
+    pub referent: u32,
+    pub attributes: u32,
+}
+
+#[cfg_attr(all(test, not(debug_assertions)), no_panic)]
+pub fn decode_pointer(data: Bytes<'_>) -> Result<PointerRecord, ReadError> {
+    Ok(PointerRecord { referent: data.u32_le(0)?, attributes: data.u32_le(4)? })
+}
+
+/// `LF_MODIFIER`: type, attributes (1 const, 2 volatile, 4 unaligned).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ModifierRecord {
+    pub ty: u32,
+    pub attributes: u16,
+}
+
+#[cfg_attr(all(test, not(debug_assertions)), no_panic)]
+pub fn decode_modifier(data: Bytes<'_>) -> Result<ModifierRecord, ReadError> {
+    Ok(ModifierRecord { ty: data.u32_le(0)?, attributes: data.u16_le(4)? })
+}
+
+/// `LF_ARRAY`: element type, index type, size in bytes, name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ArrayRecord {
+    pub element: u32,
+    pub index: u32,
+    pub size: Numeric,
+}
+
+#[cfg_attr(all(test, not(debug_assertions)), no_panic)]
+pub fn decode_array(data: Bytes<'_>) -> Result<ArrayRecord, ReadError> {
+    Ok(ArrayRecord { element: data.u32_le(0)?, index: data.u32_le(4)?, size: decode_numeric(data, 8)? })
+}
+
+/// `LF_ENUM`: count, property, underlying type, field list, name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EnumRecord<'a> {
+    pub count: u16,
+    pub property: u16,
+    pub underlying: u32,
+    pub field_list: u32,
+    pub name: &'a [u8],
+}
+
+#[cfg_attr(all(test, not(debug_assertions)), no_panic)]
+pub fn decode_enum(data: Bytes<'_>) -> Result<EnumRecord<'_>, ReadError> {
+    Ok(EnumRecord {
+        count: data.u16_le(0)?,
+        property: data.u16_le(2)?,
+        underlying: data.u32_le(4)?,
+        field_list: data.u32_le(8)?,
+        name: data.cstr(12, MAX_NAME_BYTES)?,
+    })
+}
+
+/// `LF_PROCEDURE`: return type, calling convention, options, parameter
+/// count, argument list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProcedureType {
+    pub returns: u32,
+    pub parameters: u16,
+    pub arguments: u32,
+}
+
+#[cfg_attr(all(test, not(debug_assertions)), no_panic)]
+pub fn decode_procedure_type(data: Bytes<'_>) -> Result<ProcedureType, ReadError> {
+    Ok(ProcedureType { returns: data.u32_le(0)?, parameters: data.u16_le(6)?, arguments: data.u32_le(8)? })
+}
+
 /// A structure, class, interface or union record, in either form.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct UdtRecord<'a> {
@@ -182,8 +290,9 @@ struct UdtHead {
 pub enum FieldRecord<'a> {
     Member { type_index: u32, offset: Option<u64>, name: &'a [u8], next: usize },
     Index { continued: u32, next: usize },
-    /// A base class, method, nested type, static member or enumerator:
-    /// stepped over.
+    /// An enum's enumerator.
+    Enumerator { value: Option<i128>, name: &'a [u8], next: usize },
+    /// A base class, method, nested type or static member: stepped over.
     Other { next: usize },
 }
 
@@ -245,8 +354,9 @@ pub fn decode_field(list: Bytes<'_>, at: usize) -> Result<FieldRecord<'_>, Field
         LF_VFUNCTAB => FieldRecord::Other { next: skip_padding(list, field(8)?)? },
         LF_VFUNCOFF => FieldRecord::Other { next: skip_padding(list, field(12)?)? },
         LF_ENUMERATE => {
-            let value = decode_numeric(list, field(4)?)?;
-            FieldRecord::Other { next: after_name(list, value.next)? }
+            let value = decode_signed_numeric(list, field(4)?)?;
+            let name = list.cstr(value.next, MAX_NAME_BYTES)?;
+            FieldRecord::Enumerator { value: value.value, name, next: after_name(list, value.next)? }
         }
         LF_STMEMBER | LF_NESTTYPE | LF_NESTTYPEEX | LF_METHOD => FieldRecord::Other { next: after_name(list, field(8)?)? },
         LF_ONEMETHOD => {
@@ -440,7 +550,7 @@ impl TypeTables {
                         next_list = Some(continued);
                         next
                     }
-                    FieldRecord::Other { next } => next,
+                    FieldRecord::Enumerator { next, .. } | FieldRecord::Other { next } => next,
                 };
                 if next <= at {
                     return Err(LayoutError::Unreadable { what: "field list" });
@@ -512,6 +622,180 @@ impl TypeTables {
             }
         }
         Err(LayoutError::EndlessTypeChain { index: u64::from(index) })
+    }
+
+    /// Type `ty` one level deep: a primitive by its kind and pointer mode, a
+    /// record by its leaf; a forward reference resolved to its definition.
+    /// A pointer, modifier, array or bitfield naming itself has no end; a
+    /// record of a leaf this reader does not know is `Unknown` with its bytes.
+    pub fn shape(&self, ty: TypeRef) -> Result<TypeShape, TypeError> {
+        if ty.0 < FIRST_RECORD {
+            return Ok(simple_shape(ty.0));
+        }
+        let unreadable = |what: &'static str| TypeError::Unreadable { what };
+        let record = self.record(ty.0).map_err(|_| unreadable("type record"))?;
+        let shape = match record.kind {
+            LF_POINTER => {
+                let pointer = decode_pointer(record.data).map_err(|_| unreadable("pointer"))?;
+                let kind = match pointer.attributes.wrapping_shr(5) & 7 {
+                    0 => PointerKind::Pointer,
+                    1 => PointerKind::Reference,
+                    4 => PointerKind::RvalueReference,
+                    // Pointers to members: not a kind this reader formats.
+                    _ => return Ok(unknown_record(ty, record.kind, record.data)),
+                };
+                let size = (pointer.attributes.wrapping_shr(13) & 0x3F) as u8;
+                TypeShape::Pointer { to: TypeRef(pointer.referent), size, kind }
+            }
+            LF_MODIFIER => {
+                let modifier = decode_modifier(record.data).map_err(|_| unreadable("modifier"))?;
+                TypeShape::Modified {
+                    of: TypeRef(modifier.ty),
+                    constant: if modifier.attributes & 1 != 0 { Constness::Const } else { Constness::Mutable },
+                    volatile: if modifier.attributes & 2 != 0 { Volatility::Volatile } else { Volatility::Plain },
+                }
+            }
+            LF_ARRAY => {
+                let array = decode_array(record.data).map_err(|_| unreadable("array"))?;
+                TypeShape::Array { element: TypeRef(array.element), bytes: array.size.value.ok_or(unreadable("array size"))? }
+            }
+            LF_BITFIELD => {
+                let storage = record.data.u32_le(0).map_err(|_| unreadable("bitfield"))?;
+                if storage == ty.0 {
+                    return Err(TypeError::EndlessTypeChain { index: ty.0 });
+                }
+                return self.shape(TypeRef(storage));
+            }
+            LF_PROCEDURE => {
+                let procedure = decode_procedure_type(record.data).map_err(|_| unreadable("procedure type"))?;
+                TypeShape::Function { returns: TypeRef(procedure.returns), parameters: procedure.parameters }
+            }
+            LF_MFUNCTION => TypeShape::Function {
+                returns: TypeRef(record.data.u32_le(0).map_err(|_| unreadable("member function type"))?),
+                parameters: record.data.u16_le(14).map_err(|_| unreadable("member function type"))?,
+            },
+            LF_ENUM => self.enum_shape(record.data)?,
+            kind if is_udt(kind) => self.record_shape(ty, kind, record.data)?,
+            kind => unknown_record(ty, kind, record.data),
+        };
+        let names_itself = match &shape {
+            TypeShape::Pointer { to, .. } => *to == ty,
+            TypeShape::Modified { of, .. } => *of == ty,
+            TypeShape::Array { element, .. } => *element == ty,
+            TypeShape::Base(_)
+            | TypeShape::Record { .. }
+            | TypeShape::Incomplete { .. }
+            | TypeShape::Enum { .. }
+            | TypeShape::Function { .. }
+            | TypeShape::Unknown { .. } => false,
+        };
+        if names_itself {
+            return Err(TypeError::EndlessTypeChain { index: ty.0 });
+        }
+        Ok(shape)
+    }
+
+    /// A structure, class, interface or union: its definition's members,
+    /// a bitfield member by its storage type and bits.
+    fn record_shape(&self, ty: TypeRef, kind: u16, data: Bytes<'_>) -> Result<TypeShape, TypeError> {
+        let found = self.udt(ty.0).map_err(type_error)?;
+        let Some(found) = found else {
+            let udt = decode_udt(kind, data).map_err(|_| TypeError::Unreadable { what: "structure record" })?;
+            return Ok(TypeShape::Incomplete { name: String::from_utf8_lossy(udt.name).into_owned() });
+        };
+        let definition = self.record(found.index).map_err(type_error)?;
+        let udt = decode_udt(definition.kind, definition.data).map_err(|_| TypeError::Unreadable { what: "structure record" })?;
+        let name = String::from_utf8_lossy(udt.name).into_owned();
+        let size = found.size.ok_or(TypeError::Unreadable { what: "structure size" })?;
+        let members = self.members(found.field_list, &name).map_err(type_error)?;
+        let mut fields = Vec::new();
+        fields.try_reserve_exact(members.len()).map_err(|_| TypeError::Unreadable { what: "members (no memory)" })?;
+        for member in members {
+            let field = match self.resolve(member.type_index).map_err(type_error)? {
+                Resolved::Bitfield { storage, position, length } => RecordField {
+                    name: member.name,
+                    offset: FieldOffset(member.offset),
+                    ty: TypeRef(storage),
+                    bits: Some(BitRange { position: u32::from(position), length: u32::from(length) }),
+                },
+                Resolved::Udt { .. } | Resolved::Other { .. } => {
+                    RecordField { name: member.name, offset: FieldOffset(member.offset), ty: TypeRef(member.type_index), bits: None }
+                }
+            };
+            fields.push(field);
+        }
+        let kind = match definition.kind {
+            LF_CLASS | LF_CLASS2 => RecordKind::Class,
+            LF_UNION | LF_UNION2 => RecordKind::Union,
+            LF_INTERFACE | LF_INTERFACE2 => RecordKind::Interface,
+            _ => RecordKind::Struct,
+        };
+        Ok(TypeShape::Record { kind, name, size, fields })
+    }
+
+    /// An enum and its enumerators, in order; a forward reference to one is
+    /// incomplete.
+    fn enum_shape(&self, data: Bytes<'_>) -> Result<TypeShape, TypeError> {
+        let enumeration = decode_enum(data).map_err(|_| TypeError::Unreadable { what: "enum" })?;
+        let name = String::from_utf8_lossy(enumeration.name).into_owned();
+        if u32::from(enumeration.property) & PROPERTY_FORWARD != 0 {
+            return Ok(TypeShape::Incomplete { name });
+        }
+        let mut values = Vec::new();
+        let mut next_list = Some(enumeration.field_list);
+        let mut hops = 0u32;
+        while let Some(list) = next_list.take() {
+            hops = hops.saturating_add(1);
+            if hops > MAX_FIELD_LIST_HOPS {
+                return Err(TypeError::Unreadable { what: "enumerators (an endless field list)" });
+            }
+            let record = self.record(list).map_err(type_error)?;
+            if record.kind != LF_FIELDLIST {
+                return Err(TypeError::Unreadable { what: "enumerators" });
+            }
+            let mut at = 0usize;
+            while at < record.data.len() {
+                let entry = decode_field(record.data, at).map_err(|_| TypeError::Unreadable { what: "enumerators" })?;
+                let next = match entry {
+                    FieldRecord::Enumerator { value, name, next } => {
+                        let value = value.ok_or(TypeError::Unreadable { what: "enumerator value" })?;
+                        values.try_reserve(1).map_err(|_| TypeError::Unreadable { what: "enumerators (no memory)" })?;
+                        values.push(Enumerator { name: String::from_utf8_lossy(name).into_owned(), value });
+                        next
+                    }
+                    FieldRecord::Index { continued, next } => {
+                        next_list = Some(continued);
+                        next
+                    }
+                    FieldRecord::Member { next, .. } | FieldRecord::Other { next } => next,
+                };
+                if next <= at {
+                    return Err(TypeError::Unreadable { what: "enumerators" });
+                }
+                at = next;
+            }
+        }
+        Ok(TypeShape::Enum { name, underlying: TypeRef(enumeration.underlying), values })
+    }
+
+    /// How many parameters the function type `index` takes: an
+    /// `LF_PROCEDURE`'s count, an `LF_MFUNCTION`'s plus one for `this` when
+    /// it has a this type. Any other index, or a record that does not read,
+    /// counts none.
+    #[must_use]
+    pub fn parameter_count(&self, index: u32) -> u16 {
+        let Ok(record) = self.record(index) else {
+            return 0;
+        };
+        match record.kind {
+            LF_PROCEDURE => record.data.u16_le(6).unwrap_or(0),
+            LF_MFUNCTION => {
+                let count = record.data.u16_le(14).unwrap_or(0);
+                let this = record.data.u32_le(8).unwrap_or(0);
+                if this == 0 { count } else { count.saturating_add(1) }
+            }
+            _ => 0,
+        }
     }
 
     /// The layout of the structure or union named `name`.
@@ -588,6 +872,76 @@ impl TypeTables {
     }
 }
 
+/// A layout question's error as a type question's.
+fn type_error(error: LayoutError) -> TypeError {
+    match error {
+        LayoutError::EndlessTypeChain { index } => TypeError::EndlessTypeChain { index: u32::try_from(index).unwrap_or(u32::MAX) },
+        LayoutError::Unreadable { what } => TypeError::Unreadable { what },
+        LayoutError::EndlessFieldList { .. } => TypeError::Unreadable { what: "a field list that does not end" },
+        LayoutError::UnknownFieldRecord { .. } => TypeError::Unreadable { what: "a field list record this reader cannot step over" },
+        LayoutError::BadNumber { .. } => TypeError::Unreadable { what: "a size or offset" },
+        LayoutError::UnreadableTypeRecords { .. }
+        | LayoutError::NotAStructure { .. }
+        | LayoutError::UnsupportedMemberLocation { .. }
+        | LayoutError::MissingSupplement { .. } => TypeError::Unreadable { what: "type records" },
+    }
+}
+
+/// A record of a leaf this reader does not describe: its leaf and bytes.
+fn unknown_record(ty: TypeRef, leaf: u16, data: Bytes<'_>) -> TypeShape {
+    TypeShape::Unknown { index: ty, leaf, bytes: data.as_slice().to_vec() }
+}
+
+/// A primitive index's base type (LLVM `SimpleTypeKind`), when it is one
+/// this reader knows.
+fn base_type(kind: u32) -> Option<BaseType> {
+    let base = |kind: BaseKind, size: u8| Some(BaseType { kind, size });
+    match kind {
+        0x03 => base(BaseKind::Void, 0),
+        0x08 => base(BaseKind::Hresult, 4),
+        0x10 => base(BaseKind::SignedChar, 1),
+        0x20 => base(BaseKind::UnsignedChar, 1),
+        0x70 => base(BaseKind::Char, 1),
+        0x71 => base(BaseKind::WideChar, 2),
+        0x7A => base(BaseKind::Char16, 2),
+        0x7B => base(BaseKind::Char32, 4),
+        0x7C => base(BaseKind::Char8, 1),
+        0x68 => base(BaseKind::Signed, 1),
+        0x69 => base(BaseKind::Unsigned, 1),
+        0x11 | 0x72 => base(BaseKind::Signed, 2),
+        0x21 | 0x73 => base(BaseKind::Unsigned, 2),
+        0x12 | 0x74 => base(BaseKind::Signed, 4),
+        0x22 | 0x75 => base(BaseKind::Unsigned, 4),
+        0x13 | 0x76 => base(BaseKind::Signed, 8),
+        0x23 | 0x77 => base(BaseKind::Unsigned, 8),
+        0x14 | 0x78 => base(BaseKind::Signed, 16),
+        0x24 | 0x79 => base(BaseKind::Unsigned, 16),
+        0x30 => base(BaseKind::Bool, 1),
+        0x31 => base(BaseKind::Bool, 2),
+        0x32 => base(BaseKind::Bool, 4),
+        0x33 => base(BaseKind::Bool, 8),
+        0x46 => base(BaseKind::Float, 2),
+        0x40 => base(BaseKind::Float, 4),
+        0x41 => base(BaseKind::Float, 8),
+        0x42 => base(BaseKind::Float, 10),
+        0x43 => base(BaseKind::Float, 16),
+        _ => None,
+    }
+}
+
+/// A primitive index (below 0x1000): its kind in bits 0–7, its pointer mode
+/// in bits 8–11 (LLVM `SimpleTypeMode`: 4 a 32-bit, 6 a 64-bit near pointer).
+fn simple_shape(index: u32) -> TypeShape {
+    let kind = index & 0xFF;
+    let unknown = || TypeShape::Unknown { index: TypeRef(index), leaf: 0, bytes: Vec::new() };
+    match index.wrapping_shr(8) & 0xF {
+        0 => base_type(kind).map_or_else(unknown, TypeShape::Base),
+        4 => TypeShape::Pointer { to: TypeRef(kind), size: 4, kind: PointerKind::Pointer },
+        6 => TypeShape::Pointer { to: TypeRef(kind), size: 8, kind: PointerKind::Pointer },
+        _ => unknown(),
+    }
+}
+
 /// A UDT definition's index, field list and size.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct UdtFound {
@@ -625,10 +979,16 @@ fn primitive_size(index: u32) -> Option<u64> {
 mod tests {
     use super::*;
     use crate::pdb::tables::PdbTables;
-    use crate::tables::{FieldLayout, MemberLocation};
-    use crate::units::{BitRange, FieldOffset};
+    use crate::tables::{
+        BaseKind, BaseType, Constness, Enumerator, FieldLayout, GlobalVariable, MemberLocation, PointerKind, RecordField,
+        RecordKind, SymbolTables, TypeError, TypeShape, Volatility,
+    };
+    use crate::units::{BitRange, FieldOffset, Rva, TypeRef};
+    use rusty_box_symbols_fixtures::dwarf::{build_dwarf, DwarfFormat, DwarfSpec};
+    use rusty_box_symbols_fixtures::elf::{build_elf, ElfSpec, TEXT_RVA};
     use rusty_box_symbols_fixtures::pdb::{
-        build_pdb, FixtureContainer, FixtureField, FixtureType, FixtureUdt, PdbFixture, RecordForm, UdtKind,
+        build_pdb, FixtureContainer, FixtureEnum, FixtureEnumerator, FixtureField, FixtureGlobal, FixtureType, FixtureUdt,
+        PdbFixture, RecordForm, UdtKind,
     };
 
     fn field(name: &str, offset: u64, ty: FixtureType) -> FixtureField {
@@ -828,6 +1188,163 @@ mod tests {
         list.extend_from_slice(b"m\0");
         let types = TypeTables::parse(tpi(&[modifier, list, structure("Self", 0x1001)])).unwrap();
         assert_eq!(types.member_location("Self", &["m"]), Err(LayoutError::EndlessTypeChain { index: 0x1000 }));
+    }
+
+    /// A PDB of `globals` (in `.data`), over the kernel types.
+    fn with_globals(globals: Vec<FixtureGlobal>) -> SymbolTables {
+        let mut fixture = PdbFixture::new([8; 16], 1);
+        fixture.types = kernel_types();
+        fixture.globals = globals;
+        SymbolTables::parse(&build_pdb(&fixture)).expect("the fixture parses")
+    }
+
+    fn global(name: &str, offset: u32, ty: FixtureType) -> FixtureGlobal {
+        FixtureGlobal { name: name.into(), section: 2, offset, ty }
+    }
+
+    /// The type of global `name`.
+    fn type_of_global(tables: &SymbolTables, name: &str) -> TypeShape {
+        let found = tables.global(name).expect("the global");
+        tables.type_of(found.ty).expect("its type reads")
+    }
+
+    #[test]
+    fn simple_types_describe_their_kind_and_size() {
+        let tables = with_globals(Vec::new());
+        let base = |kind: BaseKind, size: u8| Ok(TypeShape::Base(BaseType { kind, size }));
+        assert_eq!(tables.type_of(TypeRef(0x74)), base(BaseKind::Signed, 4));
+        assert_eq!(tables.type_of(TypeRef(0x23)), base(BaseKind::Unsigned, 8));
+        assert_eq!(tables.type_of(TypeRef(0x70)), base(BaseKind::Char, 1));
+        assert_eq!(tables.type_of(TypeRef(0x71)), base(BaseKind::WideChar, 2));
+        assert_eq!(tables.type_of(TypeRef(0x30)), base(BaseKind::Bool, 1));
+        assert_eq!(tables.type_of(TypeRef(0x41)), base(BaseKind::Float, 8));
+        assert_eq!(tables.type_of(TypeRef(0x08)), base(BaseKind::Hresult, 4));
+        assert_eq!(tables.type_of(TypeRef(0x03)), base(BaseKind::Void, 0));
+        assert_eq!(
+            tables.type_of(TypeRef(0x0670)),
+            Ok(TypeShape::Pointer { to: TypeRef(0x70), size: 8, kind: PointerKind::Pointer })
+        );
+        assert_eq!(
+            tables.type_of(TypeRef(0x0470)),
+            Ok(TypeShape::Pointer { to: TypeRef(0x70), size: 4, kind: PointerKind::Pointer })
+        );
+        assert_eq!(tables.type_of(TypeRef(0xFF)), Ok(TypeShape::Unknown { index: TypeRef(0xFF), leaf: 0, bytes: Vec::new() }));
+    }
+
+    #[test]
+    fn a_pointer_a_modifier_and_an_array_name_what_they_hold() {
+        let tables = with_globals(vec![
+            global("name", 0, FixtureType::PointerTo(Box::new(FixtureType::Const(Box::new(FixtureType::Char))))),
+            global("table", 8, FixtureType::Array { element: Box::new(FixtureType::I32), count: 10 }),
+        ]);
+        let TypeShape::Pointer { to, size: 8, kind: PointerKind::Pointer } = type_of_global(&tables, "name") else {
+            panic!("a 64-bit pointer")
+        };
+        assert_eq!(
+            tables.type_of(to),
+            Ok(TypeShape::Modified { of: TypeRef(0x70), constant: Constness::Const, volatile: Volatility::Plain })
+        );
+        assert_eq!(type_of_global(&tables, "table"), TypeShape::Array { element: TypeRef(0x74), bytes: 40 });
+    }
+
+    #[test]
+    fn a_structure_lists_its_members_with_their_types() {
+        let tables = with_globals(vec![
+            global("process", 0, FixtureType::Named("_EPROCESS".into())),
+            global("flags", 0x1000, FixtureType::Named("_MMVAD_FLAGS".into())),
+        ]);
+        let TypeShape::Record { kind, name, size, fields } = type_of_global(&tables, "process") else {
+            panic!("a structure")
+        };
+        assert_eq!(kind, RecordKind::Struct);
+        assert_eq!(name, "_EPROCESS");
+        assert_eq!(size, 0xA40);
+        assert_eq!(
+            fields[1],
+            RecordField { name: "UniqueProcessId".into(), offset: FieldOffset(0x440), ty: TypeRef(0x0603), bits: None }
+        );
+        let TypeShape::Record { fields, .. } = type_of_global(&tables, "flags") else {
+            panic!("a structure")
+        };
+        let protection = fields.iter().find(|field| field.name == "Protection").expect("Protection");
+        assert_eq!(protection.bits, Some(BitRange { position: 7, length: 5 }));
+        assert_eq!(protection.ty, TypeRef(0x22), "the storage unit's type");
+    }
+
+    #[test]
+    fn an_enum_lists_its_enumerators_negative_ones_included() {
+        let enumerator = |name: &str, value: i64| FixtureEnumerator { name: name.into(), value };
+        let values = vec![enumerator("Off", -1), enumerator("Read", 1), enumerator("Write", 2), enumerator("Both", 3)];
+        let mode = FixtureEnum { name: "Mode".into(), underlying: Box::new(FixtureType::I32), values };
+        let tables = with_globals(vec![global("mode", 0, FixtureType::Enum(mode))]);
+        let TypeShape::Enum { name, underlying, values } = type_of_global(&tables, "mode") else {
+            panic!("an enum")
+        };
+        assert_eq!(name, "Mode");
+        assert_eq!(underlying, TypeRef(0x74));
+        assert_eq!(values[0], Enumerator { name: "Off".into(), value: -1 });
+        assert_eq!(values.len(), 4);
+    }
+
+    #[test]
+    fn a_function_pointer_names_its_function_type() {
+        let tables = with_globals(vec![global("callback", 0, FixtureType::PointerTo(Box::new(FixtureType::Function)))]);
+        let TypeShape::Pointer { to, .. } = type_of_global(&tables, "callback") else {
+            panic!("a pointer")
+        };
+        assert_eq!(tables.type_of(to), Ok(TypeShape::Function { returns: TypeRef(0x03), parameters: 0 }));
+    }
+
+    #[test]
+    fn an_unknown_record_shows_its_leaf_and_bytes() {
+        let tables = with_globals(vec![global("odd", 0, FixtureType::Raw { leaf: 0x1234, payload: vec![1, 2, 3] })]);
+        let TypeShape::Unknown { leaf, bytes, .. } = type_of_global(&tables, "odd") else {
+            panic!("an unknown record")
+        };
+        assert_eq!(leaf, 0x1234);
+        assert!(bytes.starts_with(&[1, 2, 3]));
+    }
+
+    #[test]
+    fn a_type_that_refers_to_itself_is_an_error() {
+        let mut modifier = 0x1001u16.to_le_bytes().to_vec();
+        modifier.extend_from_slice(&0x1000u32.to_le_bytes());
+        modifier.extend_from_slice(&0u16.to_le_bytes());
+        modifier.extend_from_slice(&[0xF2, 0xF1]);
+        let types = TypeTables::parse(tpi(&[modifier])).unwrap();
+        assert_eq!(types.shape(TypeRef(0x1000)), Err(TypeError::EndlessTypeChain { index: 0x1000 }));
+    }
+
+    #[test]
+    fn a_global_is_found_by_name_with_its_type() {
+        let tables = with_globals(vec![global("g_count", 0x10, FixtureType::U32)]);
+        assert_eq!(tables.global("g_count"), Some(GlobalVariable { rva: Rva(0x3010), ty: TypeRef(0x22) }));
+        assert_eq!(tables.global("missing"), None);
+        let elf = build_elf(ElfSpec::pie(), &build_dwarf(DwarfSpec { version: 5, format: DwarfFormat::Dwarf32, text_va: TEXT_RVA }));
+        assert_eq!(SymbolTables::parse(&elf).unwrap().global("widget_init"), None);
+    }
+
+    #[test]
+    fn each_type_record_refuses_a_short_record() {
+        let short = Bytes::new(&[0; 3]);
+        assert!(decode_pointer(short).is_err());
+        assert!(decode_modifier(short).is_err());
+        assert!(decode_array(short).is_err());
+        assert!(decode_enum(short).is_err());
+        assert!(decode_procedure_type(short).is_err());
+        assert!(decode_signed_numeric(Bytes::new(&[0x03, 0x80, 0xFF]), 0).is_err());
+        let negative = [0x00, 0x80, 0xFF];
+        assert_eq!(decode_signed_numeric(Bytes::new(&negative), 0), Ok(SignedNumeric { value: Some(-1), next: 3 }));
+        let whole = [0u8; 8];
+        assert!(decode_pointer(Bytes::new(&whole)).is_ok());
+        assert!(decode_modifier(Bytes::new(&whole[..6])).is_ok());
+        assert!(decode_procedure_type(Bytes::new(&[0u8; 12])).is_ok());
+        let mut array = vec![0u8; 8];
+        array.extend_from_slice(&[4, 0, 0]);
+        assert!(decode_array(Bytes::new(&array)).is_ok());
+        let mut enumeration = vec![0u8; 12];
+        enumeration.push(0);
+        assert!(decode_enum(Bytes::new(&enumeration)).is_ok());
     }
 
     #[test]

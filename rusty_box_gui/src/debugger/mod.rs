@@ -32,6 +32,7 @@ pub(crate) mod drivers;
 pub(crate) mod dump;
 #[cfg(test)]
 pub(crate) mod fake_windows;
+pub(crate) mod frames;
 pub(crate) mod guest;
 pub(crate) mod inspect;
 pub(crate) mod kernel_layout;
@@ -44,8 +45,12 @@ pub(crate) mod serve;
 pub(crate) mod source_breakpoints;
 pub(crate) mod ssdt;
 pub(crate) mod stepping;
+#[cfg(test)]
+pub(crate) mod test_frame;
 pub(crate) mod threads;
 pub(crate) mod unwind;
 pub(crate) mod vad;
+pub(crate) mod variables;
+pub(crate) mod watch;
 pub(crate) mod windows;
 pub(crate) mod xref;

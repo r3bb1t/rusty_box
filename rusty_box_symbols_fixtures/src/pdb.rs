@@ -112,6 +112,89 @@ pub struct FixtureProcedure {
     pub lines: Vec<FixtureLine>,
 }
 
+/// What one procedure's scope holds, written after its `S_GPROC32` (LLVM
+/// `SymbolRecordMapping.cpp` gives each record's fields): `S_FRAMEPROC`, its
+/// variables, an inline site holding `inline_locals`, then its blocks.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FixtureScope {
+    /// The procedure's name in `PdbFixture::procedures`.
+    pub procedure: String,
+    /// Where the prolog ends and the epilog starts, from the procedure's start.
+    pub debug_start: u32,
+    pub debug_end: u32,
+    /// When set, the procedure's type is an `LF_PROCEDURE` of this many
+    /// `int` parameters; else it has none (type 0).
+    pub parameters: Option<u16>,
+    pub frame: Option<FixtureFrameProc>,
+    pub locals: Vec<FixtureLocal>,
+    pub inline_locals: Vec<FixtureLocal>,
+    pub blocks: Vec<FixtureBlock>,
+}
+
+/// `S_FRAMEPROC`'s encoded base pointers: 0 none, 1 stack pointer, 2 frame
+/// pointer, 3 base pointer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FixtureFrameProc {
+    pub locals: u8,
+    pub params: u8,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FixtureLocal {
+    pub name: String,
+    pub ty: FixtureType,
+    pub place: FixturePlace,
+}
+
+/// Where a variable lives, as the record that names it says.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FixturePlace {
+    /// `S_REGREL32`.
+    RegRel { register: u16, offset: i32 },
+    /// `S_BPREL32`.
+    BpRel { offset: i32 },
+    /// `S_REGISTER`.
+    Register { register: u16 },
+    /// `S_LDATA32` inside the scope: a static.
+    Static { section: u16, offset: u32 },
+    /// `S_LOCAL` with its flags, then its `S_DEFRANGE_*` records.
+    Ranged { flags: u16, ranges: Vec<FixtureDefRange> },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FixtureDefRange {
+    Register { register: u16, range: FixtureRange },
+    FramePointerRel { offset: i32, range: FixtureRange },
+    Subfield { register: u16, offset_in_parent: u32, range: FixtureRange },
+    RegisterRel { register: u16, offset: i32, range: FixtureRange },
+    FullScope { offset: i32 },
+}
+
+/// A def-range's code: `len` bytes from `offset` past the procedure's start,
+/// less its gaps.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FixtureRange {
+    pub offset: u32,
+    pub len: u16,
+    pub gaps: Vec<FixtureGap>,
+}
+
+/// A gap: `len` bytes from `start` past the range's start.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FixtureGap {
+    pub start: u16,
+    pub len: u16,
+}
+
+/// `S_BLOCK32` over `len` bytes from `offset` past the procedure's start.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FixtureBlock {
+    pub offset: u32,
+    pub len: u32,
+    pub locals: Vec<FixtureLocal>,
+    pub blocks: Vec<FixtureBlock>,
+}
+
 /// A C13 file checksum: `kind` 1 MD5, 2 SHA-1, 3 SHA-256 (another value is
 /// written as given), and its bytes.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -153,6 +236,47 @@ pub enum FixtureType {
     Named(String),
     /// A structure or union defined in place (an `<unnamed-tag>`).
     Nested(Box<FixtureUdt>),
+    I8,
+    I16,
+    I32,
+    I64,
+    /// `char` (`T_RCHAR`) and `wchar_t`.
+    Char,
+    WChar,
+    Bool,
+    F32,
+    F64,
+    /// An `LF_POINTER` (64-bit) to the type.
+    PointerTo(Box<FixtureType>),
+    /// An `LF_MODIFIER` making the type `const`.
+    Const(Box<FixtureType>),
+    Enum(FixtureEnum),
+    /// `void ()`: an `LF_PROCEDURE` of no parameters.
+    Function,
+    /// A record of `leaf` holding `payload`, as given.
+    Raw { leaf: u16, payload: Vec<u8> },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FixtureEnum {
+    pub name: String,
+    pub underlying: Box<FixtureType>,
+    pub values: Vec<FixtureEnumerator>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FixtureEnumerator {
+    pub name: String,
+    pub value: i64,
+}
+
+/// An `S_GDATA32` in the global symbol stream: `name` at `section:offset`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FixtureGlobal {
+    pub name: String,
+    pub section: u16,
+    pub offset: u32,
+    pub ty: FixtureType,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -203,6 +327,9 @@ pub struct PdbFixture {
     pub embedded: Vec<FixtureEmbedded>,
     /// Cuts the `/src/headerblock` stream to this many bytes.
     pub header_block_len: Option<usize>,
+    /// Procedures' variables and scopes, by procedure name.
+    pub scopes: Vec<FixtureScope>,
+    pub globals: Vec<FixtureGlobal>,
 }
 
 /// A source file embedded in the PDB, as `/src/headerblock` names it.
@@ -240,6 +367,8 @@ impl PdbFixture {
             container: FixtureContainer::Msf,
             embedded: Vec::new(),
             header_block_len: None,
+            scopes: Vec::new(),
+            globals: Vec::new(),
         }
     }
 }
@@ -407,7 +536,7 @@ fn section_headers(sections: &[FixtureSection]) -> Vec<u8> {
     out
 }
 
-fn global_symbols(fixture: &PdbFixture) -> Vec<u8> {
+fn global_symbols(fixture: &PdbFixture, types: &TypeRecords) -> Vec<u8> {
     let mut builder = SymBuilder::new();
     for public in &fixture.publics {
         // cvpsfFunction is bit 1 of a public's flags.
@@ -417,8 +546,19 @@ fn global_symbols(fixture: &PdbFixture) -> Vec<u8> {
         };
         builder.pub32(flags, public.offset, public.section, &public.name);
     }
+    // S_GDATA32: type, offset, segment, name.
+    for global in &fixture.globals {
+        let ty = types.indices.get(&type_key(&global.ty)).expect("the global's type was written").0;
+        let mut data = ty.to_le_bytes().to_vec();
+        data.extend_from_slice(&global.offset.to_le_bytes());
+        data.extend_from_slice(&global.section.to_le_bytes());
+        strz(&mut data, &global.name);
+        raw_record(&mut builder.buffer, S_GDATA32, &data);
+    }
     builder.finish()
 }
+
+const S_GDATA32: u16 = 0x110D;
 
 struct ModuleStream {
     bytes: Vec<u8>,
@@ -426,9 +566,174 @@ struct ModuleStream {
     c13_byte_size: u32,
 }
 
-/// The one module's stream: an `S_GPROC32` + `S_END` per procedure, then
-/// the C13 file checksums and one LINES subsection per procedure.
-fn module_stream(fixture: &PdbFixture, file_names: &[u32]) -> ModuleStream {
+/// One symbol record appended to `out`: its length, `kind`, `data`, padded
+/// to four bytes as a module stream keeps them.
+fn raw_record(out: &mut Vec<u8>, kind: u16, data: &[u8]) -> usize {
+    let start = out.len();
+    let mut body = data.to_vec();
+    while (body.len() + 4) % 4 != 0 {
+        body.push(0);
+    }
+    out.extend_from_slice(&((body.len() + 2) as u16).to_le_bytes());
+    out.extend_from_slice(&kind.to_le_bytes());
+    out.extend_from_slice(&body);
+    start
+}
+
+const S_END: u16 = 0x0006;
+const S_FRAMEPROC: u16 = 0x1012;
+const S_BLOCK32: u16 = 0x1103;
+const S_REGISTER: u16 = 0x1106;
+const S_BPREL32: u16 = 0x110B;
+const S_LDATA32: u16 = 0x110C;
+const S_REGREL32: u16 = 0x1111;
+const S_LOCAL: u16 = 0x113E;
+const S_DEFRANGE_REGISTER: u16 = 0x1141;
+const S_DEFRANGE_FRAMEPOINTER_REL: u16 = 0x1142;
+const S_DEFRANGE_SUBFIELD_REGISTER: u16 = 0x1143;
+const S_DEFRANGE_FRAMEPOINTER_REL_FULL_SCOPE: u16 = 0x1144;
+const S_DEFRANGE_REGISTER_REL: u16 = 0x1145;
+const S_INLINESITE: u16 = 0x114D;
+const S_INLINESITE_END: u16 = 0x114E;
+
+/// A def-range's range and gaps, its offset from `procedure`'s start.
+fn range_bytes(out: &mut Vec<u8>, procedure: &FixtureProcedure, range: &FixtureRange) {
+    out.extend_from_slice(&(procedure.offset + range.offset).to_le_bytes());
+    out.extend_from_slice(&procedure.section.to_le_bytes());
+    out.extend_from_slice(&range.len.to_le_bytes());
+    for gap in &range.gaps {
+        out.extend_from_slice(&gap.start.to_le_bytes());
+        out.extend_from_slice(&gap.len.to_le_bytes());
+    }
+}
+
+/// One variable's records.
+fn write_local(out: &mut Vec<u8>, local: &FixtureLocal, procedure: &FixtureProcedure, types: &TypeRecords) {
+    let ty = types.indices.get(&type_key(&local.ty)).expect("the variable's type was written").0;
+    let mut data = Vec::new();
+    match &local.place {
+        FixturePlace::RegRel { register, offset } => {
+            data.extend_from_slice(&offset.to_le_bytes());
+            data.extend_from_slice(&ty.to_le_bytes());
+            data.extend_from_slice(&register.to_le_bytes());
+            strz(&mut data, &local.name);
+            raw_record(out, S_REGREL32, &data);
+        }
+        FixturePlace::BpRel { offset } => {
+            data.extend_from_slice(&offset.to_le_bytes());
+            data.extend_from_slice(&ty.to_le_bytes());
+            strz(&mut data, &local.name);
+            raw_record(out, S_BPREL32, &data);
+        }
+        FixturePlace::Register { register } => {
+            data.extend_from_slice(&ty.to_le_bytes());
+            data.extend_from_slice(&register.to_le_bytes());
+            strz(&mut data, &local.name);
+            raw_record(out, S_REGISTER, &data);
+        }
+        FixturePlace::Static { section, offset } => {
+            data.extend_from_slice(&ty.to_le_bytes());
+            data.extend_from_slice(&offset.to_le_bytes());
+            data.extend_from_slice(&section.to_le_bytes());
+            strz(&mut data, &local.name);
+            raw_record(out, S_LDATA32, &data);
+        }
+        FixturePlace::Ranged { flags, ranges } => {
+            data.extend_from_slice(&ty.to_le_bytes());
+            data.extend_from_slice(&flags.to_le_bytes());
+            strz(&mut data, &local.name);
+            raw_record(out, S_LOCAL, &data);
+            for def in ranges {
+                let mut data = Vec::new();
+                let kind = match def {
+                    FixtureDefRange::Register { register, range } => {
+                        data.extend_from_slice(&register.to_le_bytes());
+                        data.extend_from_slice(&0u16.to_le_bytes());
+                        range_bytes(&mut data, procedure, range);
+                        S_DEFRANGE_REGISTER
+                    }
+                    FixtureDefRange::FramePointerRel { offset, range } => {
+                        data.extend_from_slice(&offset.to_le_bytes());
+                        range_bytes(&mut data, procedure, range);
+                        S_DEFRANGE_FRAMEPOINTER_REL
+                    }
+                    FixtureDefRange::Subfield { register, offset_in_parent, range } => {
+                        data.extend_from_slice(&register.to_le_bytes());
+                        data.extend_from_slice(&0u16.to_le_bytes());
+                        data.extend_from_slice(&offset_in_parent.to_le_bytes());
+                        range_bytes(&mut data, procedure, range);
+                        S_DEFRANGE_SUBFIELD_REGISTER
+                    }
+                    FixtureDefRange::RegisterRel { register, offset, range } => {
+                        data.extend_from_slice(&register.to_le_bytes());
+                        data.extend_from_slice(&0u16.to_le_bytes());
+                        data.extend_from_slice(&offset.to_le_bytes());
+                        range_bytes(&mut data, procedure, range);
+                        S_DEFRANGE_REGISTER_REL
+                    }
+                    FixtureDefRange::FullScope { offset } => {
+                        data.extend_from_slice(&offset.to_le_bytes());
+                        S_DEFRANGE_FRAMEPOINTER_REL_FULL_SCOPE
+                    }
+                };
+                // Def-ranges carry no alignment padding of their own beyond
+                // the record's.
+                raw_record(out, kind, &data);
+            }
+        }
+    }
+}
+
+/// A block and what it holds, its `end` pointing at its `S_END` (offsets in
+/// a module stream count its 4-byte signature).
+fn write_block(out: &mut Vec<u8>, block: &FixtureBlock, procedure: &FixtureProcedure, types: &TypeRecords) {
+    let mut data = Vec::new();
+    data.extend_from_slice(&0u32.to_le_bytes());
+    data.extend_from_slice(&0u32.to_le_bytes());
+    data.extend_from_slice(&block.len.to_le_bytes());
+    data.extend_from_slice(&(procedure.offset + block.offset).to_le_bytes());
+    data.extend_from_slice(&procedure.section.to_le_bytes());
+    strz(&mut data, "");
+    let start = raw_record(out, S_BLOCK32, &data);
+    for local in &block.locals {
+        write_local(out, local, procedure, types);
+    }
+    for inner in &block.blocks {
+        write_block(out, inner, procedure, types);
+    }
+    let end = (out.len() + 4) as u32;
+    raw_record(out, S_END, &[]);
+    out[start + 8..start + 12].copy_from_slice(&end.to_le_bytes());
+}
+
+/// What `scope` adds after its procedure's `S_GPROC32`.
+fn write_scope(out: &mut Vec<u8>, scope: &FixtureScope, procedure: &FixtureProcedure, types: &TypeRecords) {
+    if let Some(frame) = scope.frame {
+        let mut data = vec![0u8; 5 * 4 + 2];
+        let flags = (u32::from(frame.locals) << 14) | (u32::from(frame.params) << 16);
+        data.extend_from_slice(&flags.to_le_bytes());
+        raw_record(out, S_FRAMEPROC, &data);
+    }
+    for local in &scope.locals {
+        write_local(out, local, procedure, types);
+    }
+    if !scope.inline_locals.is_empty() {
+        // Parent, end, inlinee; no annotations.
+        raw_record(out, S_INLINESITE, &[0; 12]);
+        for local in &scope.inline_locals {
+            write_local(out, local, procedure, types);
+        }
+        raw_record(out, S_INLINESITE_END, &[]);
+    }
+    for block in &scope.blocks {
+        write_block(out, block, procedure, types);
+    }
+}
+
+/// The one module's stream: an `S_GPROC32`, its scope's records and an
+/// `S_END` per procedure, then the C13 file checksums and one LINES
+/// subsection per procedure.
+fn module_stream(fixture: &PdbFixture, file_names: &[u32], types: &TypeRecords) -> ModuleStream {
     let mut builder = SymBuilder::new();
     {
         let mut record = builder.record(SymKind::S_OBJNAME);
@@ -437,14 +742,15 @@ fn module_stream(fixture: &PdbFixture, file_names: &[u32]) -> ModuleStream {
     }
     for procedure in &fixture.procedures {
         let start = builder.buffer.len();
+        let scope = fixture.scopes.iter().find(|scope| scope.procedure == procedure.name);
         let fixed = ProcFixed {
             p_parent: U32::new(0),
             p_end: U32::new(0),
             p_next: U32::new(0),
             proc_len: U32::new(procedure.len),
-            debug_start: U32::new(0),
-            debug_end: U32::new(procedure.len),
-            proc_type: TypeIndexLe::from(TypeIndex(0)),
+            debug_start: U32::new(scope.map_or(0, |scope| scope.debug_start)),
+            debug_end: U32::new(scope.map_or(procedure.len, |scope| scope.debug_end)),
+            proc_type: TypeIndexLe::from(types.indices.get(&procedure_key(&procedure.name)).copied().unwrap_or(TypeIndex(0))),
             offset_segment: OffsetSegment::new(procedure.offset, procedure.section),
             flags: 0,
         };
@@ -452,6 +758,9 @@ fn module_stream(fixture: &PdbFixture, file_names: &[u32]) -> ModuleStream {
             let mut record = builder.record(SymKind::S_GPROC32);
             record.enc.t(&fixed);
             record.enc.strz(BStr::new(&procedure.name));
+        }
+        if let Some(scope) = scope {
+            write_scope(&mut builder.buffer, scope, procedure, types);
         }
         // Offsets in a module stream count its 4-byte CodeView signature;
         // `p_end` (after the record's length and kind, and `p_parent`)
@@ -647,6 +956,26 @@ const MEMBERS_PER_RECORD: usize = 3;
 const LF_STRUCTURE2: u16 = 0x1609;
 const LF_UNION2: u16 = 0x160A;
 
+/// A signed CodeView numeric leaf: the value itself for 0..0x8000, else
+/// `LF_CHAR`, `LF_SHORT`, `LF_LONG` or `LF_QUADWORD` and the value.
+fn signed_numeric(out: &mut Vec<u8>, value: i64) {
+    if (0..0x8000).contains(&value) {
+        out.extend_from_slice(&(value as u16).to_le_bytes());
+    } else if let Ok(value) = i8::try_from(value) {
+        out.extend_from_slice(&0x8000u16.to_le_bytes());
+        out.extend_from_slice(&value.to_le_bytes());
+    } else if let Ok(value) = i16::try_from(value) {
+        out.extend_from_slice(&0x8001u16.to_le_bytes());
+        out.extend_from_slice(&value.to_le_bytes());
+    } else if let Ok(value) = i32::try_from(value) {
+        out.extend_from_slice(&0x8003u16.to_le_bytes());
+        out.extend_from_slice(&value.to_le_bytes());
+    } else {
+        out.extend_from_slice(&0x8009u16.to_le_bytes());
+        out.extend_from_slice(&value.to_le_bytes());
+    }
+}
+
 /// A CodeView numeric leaf: the value itself below 0x8000, else a leaf
 /// naming its width, then the value.
 fn numeric(out: &mut Vec<u8>, value: u64) {
@@ -780,6 +1109,13 @@ impl TypeScope<'_> {
                 self.types.iter().find(|udt| &udt.name == name).expect("a named type the fixture defines").size
             }
             FixtureType::Nested(udt) => udt.size,
+            FixtureType::I8 | FixtureType::Char | FixtureType::Bool => 1,
+            FixtureType::I16 | FixtureType::WChar => 2,
+            FixtureType::I32 | FixtureType::F32 => 4,
+            FixtureType::I64 | FixtureType::F64 | FixtureType::PointerTo(_) => 8,
+            FixtureType::Const(of) => self.size(of),
+            FixtureType::Enum(enumeration) => self.size(&enumeration.underlying),
+            FixtureType::Function | FixtureType::Raw { .. } => 0,
         }
     }
 
@@ -808,6 +1144,55 @@ impl TypeScope<'_> {
             }
             FixtureType::Named(name) => *self.forwards.get(name).expect("a named type the fixture defines"),
             FixtureType::Nested(udt) => self.define(writer, udt, None),
+            FixtureType::I8 => TypeIndex(0x0068),
+            FixtureType::I16 => TypeIndex(0x0072),
+            FixtureType::I32 => TypeIndex(T_INT4),
+            FixtureType::I64 => TypeIndex(0x0076),
+            FixtureType::Char => TypeIndex(0x0070),
+            FixtureType::WChar => TypeIndex(0x0071),
+            FixtureType::Bool => TypeIndex(0x0030),
+            FixtureType::F32 => TypeIndex(0x0040),
+            FixtureType::F64 => TypeIndex(0x0041),
+            FixtureType::PointerTo(to) => {
+                let referent = self.index(writer, to);
+                let mut payload = referent.0.to_le_bytes().to_vec();
+                // CV_PTR_64, mode pointer, size 8.
+                payload.extend_from_slice(&(0x0Cu32 | (8 << 13)).to_le_bytes());
+                writer.record(Leaf::LF_POINTER.0, &payload)
+            }
+            FixtureType::Const(of) => {
+                let of = self.index(writer, of);
+                let mut payload = of.0.to_le_bytes().to_vec();
+                payload.extend_from_slice(&1u16.to_le_bytes());
+                writer.record(Leaf::LF_MODIFIER.0, &payload)
+            }
+            FixtureType::Enum(enumeration) => {
+                let underlying = self.index(writer, &enumeration.underlying);
+                let mut list = Vec::new();
+                for enumerator in &enumeration.values {
+                    list.extend_from_slice(&Leaf::LF_ENUMERATE.0.to_le_bytes());
+                    list.extend_from_slice(&ATTR_PUBLIC.to_le_bytes());
+                    signed_numeric(&mut list, enumerator.value);
+                    strz(&mut list, &enumerator.name);
+                    pad_cv(&mut list, 0);
+                }
+                let field_list = writer.record(Leaf::LF_FIELDLIST.0, &list);
+                let mut payload = (enumeration.values.len() as u16).to_le_bytes().to_vec();
+                payload.extend_from_slice(&0u16.to_le_bytes());
+                payload.extend_from_slice(&underlying.0.to_le_bytes());
+                payload.extend_from_slice(&field_list.0.to_le_bytes());
+                strz(&mut payload, &enumeration.name);
+                writer.record(Leaf::LF_ENUM.0, &payload)
+            }
+            FixtureType::Function => {
+                let arguments = writer.record(LF_ARGLIST, &0u32.to_le_bytes());
+                let mut payload = 0x0003u32.to_le_bytes().to_vec();
+                payload.extend_from_slice(&[0, 0]);
+                payload.extend_from_slice(&0u16.to_le_bytes());
+                payload.extend_from_slice(&arguments.0.to_le_bytes());
+                writer.record(LF_PROCEDURE, &payload)
+            }
+            FixtureType::Raw { leaf, payload } => writer.record(*leaf, payload),
         }
     }
 
@@ -857,10 +1242,41 @@ impl TypeScope<'_> {
     }
 }
 
-/// The TPI stream's records and the first index past them.
+/// The TPI stream's records, the first index past them, and the index of
+/// every variable's type, by the type's `Debug` text.
 struct TypeRecords {
     bytes: Vec<u8>,
     end: u32,
+    indices: BTreeMap<String, TypeIndex>,
+}
+
+/// A type's key in `TypeRecords::indices`.
+fn type_key(ty: &FixtureType) -> String {
+    format!("{ty:?}")
+}
+
+/// A procedure type's key in `TypeRecords::indices`.
+fn procedure_key(name: &str) -> String {
+    format!("procedure {name}")
+}
+
+const LF_PROCEDURE: u16 = 0x1008;
+const LF_ARGLIST: u16 = 0x1201;
+const T_INT4: u32 = 0x0074;
+
+/// Every variable of `scope`, its blocks' included.
+fn scope_locals(scope: &FixtureScope) -> Vec<&FixtureLocal> {
+    fn block_locals<'a>(block: &'a FixtureBlock, out: &mut Vec<&'a FixtureLocal>) {
+        out.extend(&block.locals);
+        for inner in &block.blocks {
+            block_locals(inner, out);
+        }
+    }
+    let mut out: Vec<&FixtureLocal> = scope.locals.iter().chain(&scope.inline_locals).collect();
+    for block in &scope.blocks {
+        block_locals(block, &mut out);
+    }
+    out
 }
 
 /// Every fixture UDT as MSVC writes one: a forward reference first (which
@@ -888,12 +1304,41 @@ fn type_records(fixture: &PdbFixture) -> TypeRecords {
         let unique = unique_name(&udt.name);
         scope.define(&mut writer, udt, Some(&unique));
     }
+    let mut indices = BTreeMap::new();
+    for scope_of in &fixture.scopes {
+        if let Some(count) = scope_of.parameters {
+            let mut arguments = u32::from(count).to_le_bytes().to_vec();
+            for _ in 0..count {
+                arguments.extend_from_slice(&T_INT4.to_le_bytes());
+            }
+            let list = writer.record(LF_ARGLIST, &arguments);
+            let mut procedure = 0x0003u32.to_le_bytes().to_vec(); // returns void
+            procedure.extend_from_slice(&[0, 0]); // near C call, no options
+            procedure.extend_from_slice(&count.to_le_bytes());
+            procedure.extend_from_slice(&list.0.to_le_bytes());
+            let index = writer.record(LF_PROCEDURE, &procedure);
+            indices.insert(procedure_key(&scope_of.procedure), index);
+        }
+    }
+    let variable_types = fixture
+        .scopes
+        .iter()
+        .flat_map(scope_locals)
+        .map(|local| &local.ty)
+        .chain(fixture.globals.iter().map(|global| &global.ty));
+    for ty in variable_types {
+        let key = type_key(ty);
+        if !indices.contains_key(&key) {
+            let index = scope.index(&mut writer, ty);
+            indices.insert(key, index);
+        }
+    }
     for _ in 0..fixture.broken_udt_records {
         // A member count and half a property: the record ends before its
         // field-list index.
         writer.record(Leaf::LF_STRUCTURE.0, &[1, 0, 0]);
     }
-    TypeRecords { bytes: writer.bytes, end: writer.next }
+    TypeRecords { bytes: writer.bytes, end: writer.next, indices }
 }
 
 /// The fixture's streams, by stream index.
@@ -920,9 +1365,10 @@ pub fn fixture_streams(fixture: &PdbFixture) -> Vec<FixtureStream> {
         .zip(&virtual_names)
         .map(|(embedded, virtual_name)| EmbeddedNames { file: offset_of(&embedded.path), virtual_file: offset_of(virtual_name) })
         .collect();
-    let gss = global_symbols(fixture);
+    let types = type_records(fixture);
+    let gss = global_symbols(fixture, &types);
     let indexes = build_global_symbols_index(&gss, get_v1_default_bucket(false)).expect("symbol indexes");
-    let module = module_stream(fixture, &names.offsets);
+    let module = module_stream(fixture, &names.offsets, &types);
 
     let mut named = NamedStreams::default();
     assert!(named.insert("/names", NAMES), "the /names stream is named once");
@@ -944,7 +1390,6 @@ pub fn fixture_streams(fixture: &PdbFixture) -> Vec<FixtureStream> {
         named_streams: named,
         features: vec![FeatureCode(PDBI_VERSION_VC140)],
     };
-    let types = type_records(fixture);
     let mut streams = vec![
         FixtureStream { index: 1, bytes: pdbi.to_bytes().expect("PDBI stream") },
         FixtureStream { index: 2, bytes: type_stream(&types.bytes, types.end) },

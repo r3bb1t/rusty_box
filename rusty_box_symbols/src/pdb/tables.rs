@@ -17,10 +17,11 @@ use crate::read::Bytes;
 use super::source_block;
 use crate::line_index::{CodeSpan, LineIndex};
 use crate::tables::{
-    push, ChecksumKind, EmbeddedSource, FileChecksum, LayoutError, LineRow, MemberLocation, ParseError, ProcedureSpan, ResolvedLine,
-    SourceFile, SourceLine, SymbolHit, TypeLayout,
+    push, ChecksumKind, EmbeddedSource, FileChecksum, FrameScope, GlobalVariable, LayoutError, LineRow, LocalsError,
+    MemberLocation, ParseError, ProcedureSpan, ResolvedLine, SourceFile, SourceLine, SymbolHit, TypeError, TypeLayout,
+    TypeShape,
 };
-use crate::units::Rva;
+use crate::units::{Rva, TypeRef};
 
 /// Modules past this are not a real PDB's (a browser's has tens of
 /// thousands).
@@ -37,24 +38,48 @@ struct Named {
     rva: u64,
 }
 
+/// A global variable: its name, address and type index.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Global {
+    name: String,
+    rva: u64,
+    ty: u32,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Procedure {
     name: String,
     rva: u64,
     len: u64,
+    /// The function's type index (`LF_PROCEDURE` or `LF_MFUNCTION`), or 0.
+    ty: u32,
+    /// Where its scope's records are kept, when they are.
+    scope: Option<ScopeAt>,
 }
+
+/// A procedure's `S_GPROC32`: in `PdbTables::scopes[module]`, at `record`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ScopeAt {
+    module: u32,
+    record: u32,
+}
+
+/// Modules' symbol records kept, all together, past this are not kept; a
+/// function whose module's were not answers `NotKept`.
+const MAX_SCOPE_BYTES: usize = 512 << 20;
+const MAX_SCOPE_MIB: u64 = 512;
 
 /// Maps a section and offset to an RVA: through the image's own section
 /// headers, or, for a binary rewritten after linking, through the original
 /// section headers and the OMAP table.
-struct Addresses {
+pub(crate) struct Addresses {
     /// Each section's RVA, by CodeView section number minus one.
     sections: Vec<u64>,
     omap: Option<Vec<OmapEntry>>,
 }
 
 impl Addresses {
-    fn rva(&self, segment: u16, offset: u32) -> Option<u64> {
+    pub(crate) fn rva(&self, segment: u16, offset: u32) -> Option<u64> {
         let index = usize::from(segment).checked_sub(1)?;
         let source = self.sections.get(index)?.checked_add(u64::from(offset))?;
         match &self.omap {
@@ -72,6 +97,8 @@ pub struct PdbTables {
     publics: Vec<Named>,
     /// Publics then procedures, sorted by name.
     by_name: Vec<Named>,
+    /// `S_GDATA32`/`S_LDATA32` of the symbol-record stream, sorted by name.
+    globals: Vec<Global>,
     /// Sorted by RVA.
     procedures: Vec<Procedure>,
     lines: LineIndex,
@@ -80,6 +107,12 @@ pub struct PdbTables {
     /// Files the PDB embeds, by place in `files`.
     embedded: BTreeMap<usize, EmbeddedSource>,
     types: Result<super::tpi::TypeTables, LayoutError>,
+    /// The symbol records of each module with a procedure kept for its
+    /// scopes, and their bytes all together.
+    scopes: Vec<Vec<u8>>,
+    scope_bytes: usize,
+    /// How the PDB's section offsets become RVAs.
+    addresses: Addresses,
 }
 
 /// One embedded file's bytes past this are not kept.
@@ -234,11 +267,15 @@ impl PdbTables {
             age: header.age,
             publics: Vec::new(),
             by_name: Vec::new(),
+            globals: Vec::new(),
             procedures: Vec::new(),
             lines: LineIndex::default(),
             files: Vec::new(),
             embedded: BTreeMap::new(),
             types,
+            scopes: Vec::new(),
+            scope_bytes: 0,
+            addresses: Addresses { sections: Vec::new(), omap: None },
         };
         let mut rows = Vec::new();
         if header.symbol_records != NO_STREAM {
@@ -273,7 +310,9 @@ impl PdbTables {
             tables.read_module(&stream, &entry.info, &addresses, names, found)?;
         }
         tables.embedded = read_embedded(&mut file, &info_stream, Bytes::new(&names), &file_index);
+        tables.addresses = addresses;
         tables.publics.sort_unstable_by_key(|named| named.rva);
+        tables.globals.sort_unstable_by(|a, b| a.name.cmp(&b.name).then(a.rva.cmp(&b.rva)));
         tables.procedures.sort_unstable_by_key(|procedure| procedure.rva);
         let mut spans = Vec::new();
         spans
@@ -310,6 +349,10 @@ impl PdbTables {
                 continue;
             };
             let name = text(named.name);
+            if matches!(record.kind, S_GDATA32 | S_LDATA32) {
+                let data = symbols::decode_data(record.data).map_err(|_| PdbError::BadRecord { what: "global data", at })?;
+                push(&mut self.globals, Global { name: name.clone(), rva, ty: data.ty }, "globals")?;
+            }
             push(&mut self.by_name, Named { name: name.clone(), rva }, "name index")?;
             push(&mut self.publics, Named { name, rva }, "publics")?;
         }
@@ -329,10 +372,17 @@ impl PdbTables {
         // Symbols follow the 4-byte CodeView signature.
         let symbols_len = (module.symbol_bytes as usize).saturating_sub(4);
         let records = stream.sub(4, symbols_len).map_err(|source| short("module symbols", source))?;
+        // The module's records are kept for its procedures' scopes while the
+        // total stays within `MAX_SCOPE_BYTES`.
+        let kept_as = u32::try_from(self.scopes.len()).ok();
+        let keep = kept_as.is_some()
+            && self.scope_bytes.checked_add(records.len()).is_some_and(|total| total <= MAX_SCOPE_BYTES);
+        let mut kept_any = false;
         let mut at = 0usize;
         while at < records.len() {
             let record = symbols::decode_record_header(records, at)
                 .map_err(|_| PdbError::BadRecord { what: "module symbol", at })?;
+            let record_at = at;
             at = record.next;
             if !matches!(record.kind, S_GPROC32 | S_LPROC32 | S_GPROC32_ID | S_LPROC32_ID) {
                 continue;
@@ -342,11 +392,25 @@ impl PdbTables {
             let Some(rva) = addresses.rva(procedure.segment, procedure.offset) else {
                 continue;
             };
+            let scope = match (keep, kept_as, u32::try_from(record_at).ok()) {
+                (true, Some(module), Some(record)) => Some(ScopeAt { module, record }),
+                _ => None,
+            };
+            kept_any |= scope.is_some();
             push(
                 &mut self.procedures,
-                Procedure { name: text(procedure.name), rva, len: u64::from(procedure.len) },
+                Procedure { name: text(procedure.name), rva, len: u64::from(procedure.len), ty: procedure.ty, scope },
                 "procedures",
             )?;
+        }
+        if kept_any {
+            let mut bytes = Vec::new();
+            bytes
+                .try_reserve_exact(records.len())
+                .map_err(|_| ParseError::Allocation { what: "module scopes" })?;
+            bytes.extend_from_slice(records.as_slice());
+            self.scope_bytes = self.scope_bytes.saturating_add(bytes.len());
+            push(&mut self.scopes, bytes, "module scopes")?;
         }
         let c13_at = (module.symbol_bytes as usize).saturating_add(module.c11_bytes as usize);
         let Ok(c13) = stream.sub(c13_at, module.c13_bytes as usize) else {
@@ -499,11 +563,58 @@ impl PdbTables {
         (at < end).then(|| ProcedureSpan { name: procedure.name.clone(), start: Rva(procedure.rva), end: Rva(end) })
     }
 
+    /// The variables in scope at `rva`, from the records of the procedure
+    /// holding it; `Ok(None)` when none does.
+    pub fn frame_locals(&self, rva: Rva) -> Result<Option<FrameScope>, LocalsError> {
+        let at = rva.0;
+        let procedure = self
+            .procedures
+            .partition_point(|procedure| procedure.rva <= at)
+            .checked_sub(1)
+            .and_then(|index| self.procedures.get(index))
+            .filter(|procedure| at < procedure.rva.saturating_add(procedure.len));
+        let Some(procedure) = procedure else {
+            return Ok(None);
+        };
+        let Some(scope) = procedure.scope else {
+            return Err(LocalsError::NotKept { cap_mib: MAX_SCOPE_MIB });
+        };
+        let records = usize::try_from(scope.module)
+            .ok()
+            .and_then(|module| self.scopes.get(module))
+            .ok_or(LocalsError::Unreadable { what: "module symbols" })?;
+        let parameters = match &self.types {
+            Ok(types) => types.parameter_count(procedure.ty),
+            Err(_) => 0,
+        };
+        let record = usize::try_from(scope.record).map_err(|_| LocalsError::Unreadable { what: "procedure record" })?;
+        super::scope::read_scope(Bytes::new(records), record, rva, &self.addresses, parameters).map(Some)
+    }
+
     #[must_use]
     pub fn procedure_starts(&self) -> Vec<Rva> {
         let mut starts: Vec<Rva> = self.procedures.iter().map(|procedure| Rva(procedure.rva)).collect();
         starts.dedup();
         starts
+    }
+
+    /// Type `ty` one level deep.
+    pub fn type_of(&self, ty: TypeRef) -> Result<TypeShape, TypeError> {
+        match &self.types {
+            Ok(types) => types.shape(ty),
+            Err(_) => Err(TypeError::Unreadable { what: "TPI stream" }),
+        }
+    }
+
+    /// The global variable `name`: an `S_GDATA32` or `S_LDATA32` of the
+    /// symbol-record stream.
+    #[must_use]
+    pub fn global(&self, name: &str) -> Option<GlobalVariable> {
+        let first = self.globals.partition_point(|global| global.name.as_str() < name);
+        self.globals
+            .get(first)
+            .filter(|global| global.name == name)
+            .map(|global| GlobalVariable { rva: Rva(global.rva), ty: TypeRef(global.ty) })
     }
 
     /// A public symbol's RVA, else a procedure's.

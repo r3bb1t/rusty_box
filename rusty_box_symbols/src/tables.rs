@@ -7,7 +7,7 @@ use crate::elf::{AltLink, ElfFile};
 use crate::identity::TablesIdentity;
 use crate::pdb::tables::{pdb_identity, PdbTables};
 use crate::pdb::{PdbError, MSFZ_MAGIC, MSF_MAGIC, PDB2_MAGIC};
-use crate::units::{BitRange, FieldOffset, Rva};
+use crate::units::{BitRange, CvRegister, FieldOffset, Rva, TypeRef};
 
 /// A source position.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -95,6 +95,217 @@ pub struct ProcedureSpan {
     pub name: String,
     pub start: Rva,
     pub end: Rva,
+}
+
+/// What a variable is to its function.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VariableKind {
+    Parameter,
+    Local,
+    /// At a fixed address: a function's `static`.
+    Static,
+}
+
+/// Where a variable lives, as its records say (spec §8.1).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum VariableLocation {
+    /// At `register + offset` for the whole function: `S_REGREL32`, and
+    /// `S_BPREL32` (whose register is the frame pointer, `CV_REG_EBP`).
+    RegisterRelative { register: CvRegister, offset: i64 },
+    /// In `register` for the whole function: `S_REGISTER`.
+    Register { register: CvRegister },
+    /// At `offset` from the frame's base register (`S_FRAMEPROC` names it)
+    /// for the whole function: `S_DEFRANGE_FRAMEPOINTER_REL_FULL_SCOPE`.
+    FrameRelative { offset: i64 },
+    /// At a fixed address in the module: `S_LDATA32` inside the scope.
+    Static { rva: Rva },
+    /// Where its `S_LOCAL`'s def-ranges put it, address by address.
+    Ranged(Vec<LiveRange>),
+    /// The compiler recorded no place: an `S_LOCAL` with no range, or one it
+    /// flagged optimized out.
+    OptimizedOut,
+}
+
+/// Where a variable is while the code runs in `start..end`, outside its gaps.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LiveRange {
+    pub start: Rva,
+    pub end: Rva,
+    pub gaps: Vec<RangeGap>,
+    pub place: RangedPlace,
+}
+
+/// Code inside a live range where the variable is not at its place.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RangeGap {
+    pub start: Rva,
+    pub end: Rva,
+}
+
+/// A live range's place.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RangedPlace {
+    Register { register: CvRegister },
+    /// Part of the variable (from `offset_in_parent`) in `register`.
+    Subfield { register: CvRegister, offset_in_parent: u32 },
+    /// At `offset` from the frame's base register.
+    FrameRelative { offset: i64 },
+    RegisterRelative { register: CvRegister, offset: i64 },
+}
+
+/// Which register a frame's variables are addressed from (`S_FRAMEPROC`'s
+/// encoded base pointers).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BaseRegister {
+    None,
+    StackPointer,
+    FramePointer,
+    BasePointer,
+}
+
+/// The base registers of a frame's locals and of its parameters.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FrameBase {
+    pub locals: BaseRegister,
+    pub params: BaseRegister,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FrameVariable {
+    pub name: String,
+    pub ty: TypeRef,
+    pub kind: VariableKind,
+    pub location: VariableLocation,
+}
+
+/// The variables in scope at one address of a function: its own, then those
+/// of the blocks holding the address, an outer one hidden by an inner one of
+/// its name left out. `body_start..body_end` is the code between the
+/// function's prolog and epilog.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FrameScope {
+    pub function: ProcedureSpan,
+    pub body_start: Rva,
+    pub body_end: Rva,
+    pub base: FrameBase,
+    pub variables: Vec<FrameVariable>,
+}
+
+/// Why a function's variables cannot be read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum LocalsError {
+    #[error("DWARF variables are read with Linux guests (sub-project 5)")]
+    NotInThisFormat,
+    #[error("this function's records were not kept: the PDB's symbols pass {cap_mib} MiB")]
+    NotKept { cap_mib: u64 },
+    #[error("the function's records do not read: {what}")]
+    Unreadable { what: &'static str },
+}
+
+/// A primitive type's kind (LLVM `SimpleTypeKind`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BaseKind {
+    Void,
+    Bool,
+    SignedChar,
+    UnsignedChar,
+    /// `char`: plain, of no stated sign.
+    Char,
+    WideChar,
+    Char8,
+    Char16,
+    Char32,
+    Signed,
+    Unsigned,
+    Float,
+    Hresult,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BaseType {
+    pub kind: BaseKind,
+    /// Bytes.
+    pub size: u8,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PointerKind {
+    Pointer,
+    Reference,
+    RvalueReference,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RecordKind {
+    Struct,
+    Class,
+    Union,
+    Interface,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Constness {
+    Const,
+    Mutable,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Volatility {
+    Volatile,
+    Plain,
+}
+
+/// One member of a record as a value is read: a bitfield's `ty` is its
+/// storage unit's type and `bits` its bits.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecordField {
+    pub name: String,
+    pub offset: FieldOffset,
+    pub ty: TypeRef,
+    pub bits: Option<BitRange>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Enumerator {
+    pub name: String,
+    pub value: i128,
+}
+
+/// A type, one level deep, as a value is formatted (spec §8.2): what it
+/// points at, holds or is made of is named by `TypeRef`, so a reader walks
+/// it as far as it needs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TypeShape {
+    Base(BaseType),
+    Pointer { to: TypeRef, size: u8, kind: PointerKind },
+    Modified { of: TypeRef, constant: Constness, volatile: Volatility },
+    Array { element: TypeRef, bytes: u64 },
+    Record { kind: RecordKind, name: String, size: u64, fields: Vec<RecordField> },
+    /// A forward reference whose definition this file does not hold.
+    Incomplete { name: String },
+    Enum { name: String, underlying: TypeRef, values: Vec<Enumerator> },
+    Function { returns: TypeRef, parameters: u16 },
+    /// A type this reader does not know: its index, its record's leaf (0 for
+    /// a primitive index), and its bytes, never guessed at.
+    Unknown { index: TypeRef, leaf: u16, bytes: Vec<u8> },
+}
+
+/// Why a type cannot be described.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum TypeError {
+    #[error("DWARF types are read with Linux guests (sub-project 5)")]
+    NotInThisFormat,
+    #[error("the type records do not read: {what}")]
+    Unreadable { what: &'static str },
+    #[error("type {index:#x} is reached through a chain that does not end")]
+    EndlessTypeChain { index: u32 },
+}
+
+/// A global variable: where it is, and its type.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GlobalVariable {
+    pub rva: Rva,
+    pub ty: TypeRef,
 }
 
 /// An address named: the function or symbol it lies in, how far into it,
@@ -328,6 +539,32 @@ impl SymbolTables {
         match self {
             SymbolTables::Pdb(tables) => tables.procedure_at(rva),
             SymbolTables::Dwarf(tables) => tables.procedure_at(rva),
+        }
+    }
+
+    /// The variables in scope at `rva` (PDB); `Ok(None)` when no function
+    /// holds it.
+    pub fn frame_locals(&self, rva: Rva) -> Result<Option<FrameScope>, LocalsError> {
+        match self {
+            SymbolTables::Pdb(tables) => tables.frame_locals(rva),
+            SymbolTables::Dwarf(_) => Err(LocalsError::NotInThisFormat),
+        }
+    }
+
+    /// Type `ty` described one level deep (PDB).
+    pub fn type_of(&self, ty: TypeRef) -> Result<TypeShape, TypeError> {
+        match self {
+            SymbolTables::Pdb(tables) => tables.type_of(ty),
+            SymbolTables::Dwarf(_) => Err(TypeError::NotInThisFormat),
+        }
+    }
+
+    /// The global variable `name` (PDB `S_GDATA32`/`S_LDATA32`).
+    #[must_use]
+    pub fn global(&self, name: &str) -> Option<GlobalVariable> {
+        match self {
+            SymbolTables::Pdb(tables) => tables.global(name),
+            SymbolTables::Dwarf(_) => None,
         }
     }
 
