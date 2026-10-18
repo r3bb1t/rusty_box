@@ -1,6 +1,6 @@
 use crate::{
     args::{Args, BootDevice, DisplayBackend, LogLevel},
-    config::{Engine, ResolvedConfig},
+    config::{DiskMode, Engine, ResolvedConfig},
     error::RunError,
 };
 #[cfg(feature = "gui-egui")]
@@ -45,8 +45,8 @@ use rusty_box::gui::{shared_display::SharedDisplay, BridgeGui};
 use rusty_box::emulator::RunBudget;
 use rusty_box::emulator::{
     AtaSlot, BootDevice as GuestBootDevice, BootOrder, DeviceClock,
-    DiskGeometry as GuestDiskGeometry, Emulator, EmulatorConfig, Ips, MachineBuilder, MemorySize,
-    SliceEngine,
+    DiskGeometry as GuestDiskGeometry, Emulator, EmulatorConfig, Ips, Journal, MachineBuilder,
+    MemorySize, SliceEngine,
 };
 use rusty_box::gui::{BxGui, NoGui, TermGui};
 #[cfg(all(not(feature = "guest-trace"), feature = "hv-whp", windows))]
@@ -293,12 +293,18 @@ where
         builder = builder.vga_bios(data);
     }
     if let (Some(disk), Some(slot)) = (&config.disk, slots.disk) {
-        let geometry = disk.geometry;
-        builder = builder.disk_file(
-            slot,
-            path_to_str(&disk.path)?,
-            GuestDiskGeometry::new(geometry.cylinders, geometry.heads, geometry.sectors_per_track),
+        let geometry = GuestDiskGeometry::new(
+            disk.geometry.cylinders,
+            disk.geometry.heads,
+            disk.geometry.sectors_per_track,
         );
+        let path = path_to_str(&disk.path)?;
+        builder = match &disk.mode {
+            DiskMode::Flat => builder.disk_file(slot, path, geometry),
+            DiskMode::Volatile { journal } => {
+                builder.volatile_disk_file(slot, path, journal_for(journal.as_deref()), geometry)
+            }
+        };
     }
     if let (Some(cdrom), Some(slot)) = (&config.cdrom, slots.cdrom) {
         builder = builder.cdrom_file(slot, path_to_str(&cdrom.path)?);
@@ -1366,6 +1372,15 @@ fn read_vga_bios_file(path: &Path) -> Result<Vec<u8>, RunError> {
     Ok(data)
 }
 
+/// Where a volatile disk's journal is made: beside the image, named after it,
+/// unless the configuration names the file it is to be named after.
+fn journal_for(named: Option<&Path>) -> Journal {
+    match named {
+        None => Journal::BesideImage,
+        Some(template) => Journal::Named(template.to_path_buf()),
+    }
+}
+
 fn verify_media_file(kind: &'static str, path: &Path) -> Result<(), RunError> {
     let metadata = fs::metadata(path).map_err(|source| RunError::FileRead {
         kind,
@@ -1592,6 +1607,7 @@ mod tests {
                 },
                 channel: 0,
                 drive: 0,
+                mode: DiskMode::Flat,
                 creation: Some(ResolvedDiskCreation {
                     path,
                     size: ImageSize::mib(10),
@@ -3143,6 +3159,7 @@ mod tests {
             },
             channel,
             drive,
+            mode: DiskMode::Flat,
             creation: None,
         }
     }

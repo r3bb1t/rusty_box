@@ -39,6 +39,10 @@ use core::sync::atomic::AtomicBool;
 
 mod builder;
 pub use builder::{AtaSlot, BootDevice, BootOrder, BuildError, DiskGeometry, MachineBuilder};
+/// Where a volatile disk keeps its writes; named here beside the builder that
+/// takes it.
+#[cfg(feature = "std")]
+pub use crate::iodev::hdimage::Journal;
 mod debug;
 pub use debug::{DebugCpu, RamOffset};
 mod display;
@@ -1967,6 +1971,28 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
             .ide
             .drives
             .attach_disk(channel, drive, path, cylinders, heads, spt)
+    }
+
+    /// Attach a hard disk image the guest cannot change: it is opened
+    /// read-only and every sector written goes to a journal placed as
+    /// `journal` says and removed when the drive closes (Bochs
+    /// `volatile_image_t`).
+    #[cfg(feature = "std")]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn attach_volatile_disk(
+        &mut self,
+        channel: usize,
+        drive: usize,
+        path: &str,
+        journal: &Journal,
+        cylinders: u32,
+        heads: u8,
+        spt: u8,
+    ) -> std::io::Result<()> {
+        self.device_manager
+            .ide
+            .drives
+            .attach_volatile_disk(channel, drive, path, journal, cylinders, heads, spt)
     }
 
     /// Attach a CD-ROM ISO image to a channel/drive (requires std feature)

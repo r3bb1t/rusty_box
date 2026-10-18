@@ -616,6 +616,11 @@ struct NativeVmSettings {
     disk_drive: usize,
     disk_chs_override: Option<crate::args::DiskGeometry>,
     disk_creation: Option<crate::config::ResolvedDiskCreation>,
+    /// Where the guest's writes go: the Hard disk page's Writes choice.
+    disk_mode: crate::config::DiskModeName,
+    /// The file a volatile disk's journal is named after, as typed; blank
+    /// keeps it beside the image.
+    disk_journal: String,
     cdrom_enabled: bool,
     cdrom_path: String,
     cdrom_channel: usize,
@@ -672,6 +677,20 @@ impl NativeVmSettings {
             // unreachable, which is where a boot loader keeps its map.
             disk_chs_override: disk.map(|disk| disk.geometry),
             disk_creation: disk.and_then(|disk| disk.creation.clone()),
+            disk_mode: match disk.map(|disk| &disk.mode) {
+                None | Some(crate::config::DiskMode::Flat) => crate::config::DiskModeName::Flat,
+                Some(crate::config::DiskMode::Volatile { .. }) => {
+                    crate::config::DiskModeName::Volatile
+                }
+            },
+            disk_journal: match disk.map(|disk| &disk.mode) {
+                Some(crate::config::DiskMode::Volatile {
+                    journal: Some(journal),
+                }) => journal.display().to_string(),
+                None
+                | Some(crate::config::DiskMode::Flat)
+                | Some(crate::config::DiskMode::Volatile { journal: None }) => String::new(),
+            },
             cdrom_enabled: cdrom.is_some(),
             cdrom_path: cdrom.map_or_else(String::new, |cdrom| cdrom.path.display().to_string()),
             cdrom_channel: cdrom.map_or(1, |cdrom| cdrom.channel),
@@ -751,6 +770,12 @@ impl NativeVmSettings {
                 geometry,
                 channel: self.disk_channel,
                 drive: self.disk_drive,
+                mode: match self.disk_mode {
+                    crate::config::DiskModeName::Flat => crate::config::DiskMode::Flat,
+                    crate::config::DiskModeName::Volatile => crate::config::DiskMode::Volatile {
+                        journal: trimmed_optional_path(&self.disk_journal),
+                    },
+                },
                 creation,
             });
         } else {
@@ -3543,6 +3568,8 @@ impl NativeShellApp {
                         );
                     }
                     ui.add_space(SPACE_ITEM);
+                    changed |= self.draw_disk_writes(ui);
+                    ui.add_space(SPACE_ITEM);
                     ui.horizontal_wrapped(|ui| {
                         if ui.button("Change").clicked() {
                             changed |= self.browse(BrowseTarget::HardDisk);
@@ -3566,6 +3593,51 @@ impl NativeShellApp {
         }
         if open_sheet {
             self.open_new_disk_sheet();
+        }
+        changed
+    }
+
+    /// Where the guest's writes to the attached disk go (Bochs `mode=`) and,
+    /// for a volatile disk, the file its journal is named after (Bochs
+    /// `journal=`). Returns whether the VM's settings changed.
+    fn draw_disk_writes(&mut self, ui: &mut egui::Ui) -> bool {
+        let mut changed = false;
+        field_row(ui, "Writes", |ui| {
+            egui::ComboBox::from_id_salt("Disk writes")
+                .selected_text(disk_writes_label(self.settings.disk_mode))
+                .show_ui(ui, |ui| {
+                    for mode in [
+                        crate::config::DiskModeName::Flat,
+                        crate::config::DiskModeName::Volatile,
+                    ] {
+                        changed |= ui
+                            .selectable_value(
+                                &mut self.settings.disk_mode,
+                                mode,
+                                disk_writes_label(mode),
+                            )
+                            .on_hover_text(disk_writes_hint(mode))
+                            .changed();
+                    }
+                });
+        });
+        match self.settings.disk_mode {
+            crate::config::DiskModeName::Flat => {}
+            crate::config::DiskModeName::Volatile => {
+                field_row(ui, "Journal", |ui| {
+                    changed |= ui
+                        .add(
+                            egui::TextEdit::singleline(&mut self.settings.disk_journal)
+                                .hint_text("Beside the image, named after it")
+                                .desired_width(path_field_width(ui)),
+                        )
+                        .on_hover_text(
+                            "The file the journal is named after, with a random suffix added. \
+                             Leave blank to keep it beside the image.",
+                        )
+                        .changed();
+                });
+            }
         }
         changed
     }
@@ -6874,6 +6946,27 @@ fn engine_label(engine: crate::config::Engine) -> &'static str {
     }
 }
 
+/// The Hard disk page's name for where a disk's writes go.
+#[cfg(not(target_arch = "wasm32"))]
+fn disk_writes_label(mode: crate::config::DiskModeName) -> &'static str {
+    match mode {
+        crate::config::DiskModeName::Flat => "Saved to the image",
+        crate::config::DiskModeName::Volatile => "Kept until power-off",
+    }
+}
+
+/// What each choice of [`disk_writes_label`] does to the image.
+#[cfg(not(target_arch = "wasm32"))]
+fn disk_writes_hint(mode: crate::config::DiskModeName) -> &'static str {
+    match mode {
+        crate::config::DiskModeName::Flat => "The guest's writes change the image file.",
+        crate::config::DiskModeName::Volatile => {
+            "The image is opened read-only. Writes go to a journal that is removed at \
+             power-off, so every run starts from the same disk."
+        }
+    }
+}
+
 #[cfg(test)]
 #[cfg(feature = "gui-egui")]
 mod tests {
@@ -7166,6 +7259,7 @@ mod tests {
             },
             channel: 0,
             drive: 0,
+            mode: crate::config::DiskMode::Flat,
             creation: Some(crate::config::ResolvedDiskCreation {
                 path: disk,
                 size: rusty_box_bximage::ImageSize::mib(10),
@@ -8377,6 +8471,7 @@ mod tests {
             },
             channel: 0,
             drive: 0,
+            mode: crate::config::DiskMode::Flat,
             creation: Some(crate::config::ResolvedDiskCreation {
                 path: disk.to_path_buf(),
                 size: rusty_box_bximage::ImageSize::mib(8),
@@ -9014,6 +9109,7 @@ mod tests {
             },
             channel: 0,
             drive: 0,
+            mode: crate::config::DiskMode::Flat,
             creation: Some(crate::config::ResolvedDiskCreation {
                 path: disk_path.clone(),
                 size: rusty_box_bximage::ImageSize::mib(10),
@@ -9028,6 +9124,50 @@ mod tests {
         assert_eq!(disk.path, disk_path);
         assert!(disk.creation.is_some());
         assert_eq!(disk.geometry.cylinders, 20);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_vm_settings_keep_where_writes_go() {
+        let mut config = test_resolved_config();
+        let disk_path = unique_temp_path("rusty-box-gui-volatile-settings");
+        let journal = disk_path.with_extension("journal");
+        config.disk = Some(crate::config::ResolvedDisk {
+            path: disk_path.clone(),
+            geometry: crate::args::DiskGeometry {
+                cylinders: 20,
+                heads: 16,
+                sectors_per_track: 63,
+            },
+            channel: 0,
+            drive: 0,
+            mode: crate::config::DiskMode::Volatile {
+                journal: Some(journal.clone()),
+            },
+            creation: None,
+        });
+        let mut settings = NativeVmSettings::from_config(&config);
+        assert_eq!(settings.disk_mode, crate::config::DiskModeName::Volatile);
+        assert_eq!(settings.disk_journal, journal.display().to_string());
+        settings.apply_to_config(&mut config).unwrap();
+        assert_eq!(
+            config.disk.as_ref().unwrap().mode,
+            crate::config::DiskMode::Volatile {
+                journal: Some(journal)
+            }
+        );
+
+        settings.disk_journal = "   ".to_owned();
+        settings.apply_to_config(&mut config).unwrap();
+        assert_eq!(
+            config.disk.as_ref().unwrap().mode,
+            crate::config::DiskMode::Volatile { journal: None },
+            "a blank journal is none"
+        );
+
+        settings.disk_mode = crate::config::DiskModeName::Flat;
+        settings.apply_to_config(&mut config).unwrap();
+        assert_eq!(config.disk.as_ref().unwrap().mode, crate::config::DiskMode::Flat);
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -13596,6 +13736,39 @@ mod tests {
                 "Windows XP is off: its fields can be edited: {xp_fields:?}"
             );
             drop(alpine);
+        }
+
+        /// The Hard disk page's Writes choice reaches the VM's configuration:
+        /// "Kept until power-off" makes the disk volatile, the power-on
+        /// configuration says so, and the Journal row appears only then.
+        #[test]
+        fn the_hard_disk_page_chooses_where_writes_go() {
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let disk = unique_temp_path("rusty-box-gui-writes-choice");
+            write_test_disk(&disk);
+            app.settings.disk_enabled = true;
+            app.settings.disk_path = disk.display().to_string();
+            app.apply_pending_settings().expect("a disk the shell can use");
+            app.chrome.go_to(ShellPage::Hardware);
+            app.chrome.selected_hardware = HardwareDevice::HardDisk;
+            let mut window = tall_window(app);
+            window.run_steps(2);
+            assert!(window.query_by_label("Journal").is_none(), "a flat disk has no journal");
+
+            window
+                .query_all_by_role(egui::accesskit::Role::ComboBox)
+                .find(|node| node.accesskit_node().value().as_deref() == Some("Saved to the image"))
+                .expect("the Writes choice shows where writes go")
+                .click();
+            window.run_steps(2);
+            window.get_by_label("Kept until power-off").click();
+            window.run_steps(2);
+
+            let mode = window.state().app.config.disk.as_ref().map(|disk| disk.mode.clone());
+            assert_eq!(mode, Some(crate::config::DiskMode::Volatile { journal: None }));
+            assert!(window.query_by_label("Journal").is_some(), "a volatile disk names its journal");
+            drop(window);
+            remove_test_file(&disk);
         }
 
         /// The floppy maker does not replace a file a running VM uses as its

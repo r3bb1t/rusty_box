@@ -60,6 +60,17 @@ pub struct Args {
     #[arg(long = "disk-chs", value_name = "CYLINDERS:HEADS:SPT")]
     pub disk_chs: Option<DiskGeometry>,
 
+    /// Where the guest's writes to the disk go — Bochs `mode=`: `flat`
+    /// changes the image, `volatile` keeps them in a journal removed at
+    /// power-off and never changes the image.
+    #[arg(long = "disk-mode", value_enum)]
+    pub disk_mode: Option<crate::config::DiskModeName>,
+
+    /// The file a volatile disk's journal is named after, with a random
+    /// suffix added (Bochs `journal=`); by default the image itself.
+    #[arg(long = "disk-journal", value_name = "PATH")]
+    pub disk_journal: Option<PathBuf>,
+
     #[arg(long = "create-disk", value_name = "PATH", conflicts_with_all = ["disk", "disk_chs"])]
     pub create_disk: Option<PathBuf>,
 
@@ -152,6 +163,8 @@ impl Args {
             boot,
             disk,
             disk_chs,
+            disk_mode,
+            disk_journal,
             create_disk,
             create_disk_size,
             overwrite_created_disk,
@@ -181,6 +194,8 @@ impl Args {
             || !boot.is_empty()
             || disk.is_some()
             || disk_chs.is_some()
+            || disk_mode.is_some()
+            || disk_journal.is_some()
             || create_disk.is_some()
             || create_disk_size.is_some()
             || *overwrite_created_disk
@@ -224,6 +239,8 @@ impl Args {
             boot: _,
             disk: _,
             disk_chs: _,
+            disk_mode: _,
+            disk_journal: _,
             create_disk: _,
             create_disk_size: _,
             overwrite_created_disk: _,

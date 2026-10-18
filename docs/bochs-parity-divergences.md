@@ -1371,6 +1371,57 @@ owner).
 
 ---
 
+## D23 — A volatile disk's journal is a slot file, unnamed the moment it is made
+
+**Bochs:** `iodev/hdimage/hdimage.cc` `volatile_image_t::open`,
+`volatile_image_t::close`, `redolog_t`. The journal is a redolog: a 512-byte
+`redolog_header_t` (`"Bochs Virtual HD Image"`, type `Redolog`, subtype
+`Volatile`), a catalog of extents, a bitmap per extent, then the extents'
+sectors. It is named `<journal or image path>.XXXXXX` by `mkstemp`; it is
+unlinked as soon as it is created, except on Windows and Bochs's classic Mac
+OS port (`BX_WITH_MACOS`), where it is unlinked at `close`. A snapshot copies
+the redolog file beside the machine's state (`save_state`), and
+`restore_state` checks the copy against the base image (`coherency_check`)
+before swapping it in.
+
+**rusty_box:** `iodev/hdimage.rs` `VolatileImage`. The journal is a file of
+512-byte slots, one per sector written, in the order the sectors were first
+written; the LBA-to-slot map is in memory (`slots`). It is named as Bochs names
+it, and its name is removed as soon as it is made, on every platform. A
+snapshot carries the written sectors themselves in the HARDDRV section (media
+tag 5: the image's identity, then each LBA and its bytes) and refills the
+journal from them.
+
+### What the guest observes
+
+Nothing. A read returns the sector's latest write, else the image's bytes; the
+image is never written; nothing of the journal outlives the drive.
+
+### Why the divergence is the correct side
+
+The redolog format exists so a journal can outlive a run and be read back by
+Bochs — `undoable` mode commits one, a snapshot copies one. A volatile journal
+is read by nothing but the drive that made it, and the one thing a snapshot
+needs from it is the set of written sectors, which the section carries itself.
+A slot file holds exactly that set, with no header, catalog or bitmap to keep
+coherent, and no second file beside a snapshot.
+
+Unlinking at once on Windows: Bochs waits for `close` because its C runtime
+opens the file without delete sharing, so `unlink` fails while it is open.
+Rust's `File` opens with `FILE_SHARE_DELETE`, so `remove_file` on the open
+journal succeeds; the name is gone at once, or on an older Windows when the
+last handle closes, and in both cases a crash cannot leave a journal behind —
+the one outcome Bochs's close-time unlink cannot promise.
+
+### Price of closing it
+
+Porting `redolog_t` (header, catalog, bitmap, extent allocation; about 500
+lines of hdimage.cc) for a file no other program reads. Not paid.
+
+**Status:** deliberate (2026-10-18, volatile hard disks, approved by the owner).
+
+---
+
 ## Hypervisor-engine divergences (`H<n>`)
 
 A machine running its guest on `rusty_box_whp_engine` executes on the host's

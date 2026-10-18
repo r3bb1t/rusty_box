@@ -337,6 +337,8 @@ Every key, with its default and matching flag:
 | `boot.order` | One or both of `"disk"`, `"cdrom"`, in order, with no repeats | inferred, see below | `--boot` |
 | `disk.path` | Existing raw disk image | none | `--disk` |
 | `disk.chs` | `{ cylinders = …, heads = …, sectors_per_track = … }` | auto-detected | `--disk-chs` |
+| `disk.mode` | `"flat"` or `"volatile"`: where the guest's writes go, into the image or into a journal removed at power-off | `"flat"` | `--disk-mode` |
+| `disk.journal` | The volatile journal's name, a random suffix added | beside the image | `--disk-journal` |
 | `disk.channel`, `disk.drive` | ATA slot of the disk | `0`, `0` | none |
 | `disk.create.path` | Disk to provision at startup | none | `--create-disk` |
 | `disk.create.size` | Its size, in bximage syntax | `"20G"` | `--create-disk-size` |
@@ -391,6 +393,7 @@ Validation rules:
 - The disk and CD-ROM must each name a valid ATA slot (channel 0 or 1, drive 0 or 1), and they cannot share one.
 - A VGA BIOS file must be a non-zero multiple of 512 bytes.
 - Disk and CD-ROM paths must be valid UTF-8, because `MachineBuilder::disk_file` / `cdrom_file` take `&str`. A non-UTF-8 path is rejected with `path must be valid UTF-8 for current emulator media API`.
+- `disk.journal` (or `--disk-journal`) needs `disk.mode = "volatile"` (or `--disk-mode volatile`).
 - `disk.create` cannot be combined with `disk.path` or `disk.chs` in the TOML file. A CLI disk option picks one mode explicitly: `--disk` wins over a TOML `disk.create`, and `--create-disk` wins over a TOML `disk.path`. A creation size or overwrite flag with no creation path is an error.
 - A created disk must be at least 10 MiB and have fewer than 2^24 cylinders, so under 8064 GiB. It uses the same geometry as a disk the shell's new-disk sheet makes.
 

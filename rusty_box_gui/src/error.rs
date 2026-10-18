@@ -141,6 +141,13 @@ pub enum RunError {
         second: &'static str,
     },
 
+    /// A journal named for a disk whose writes go to the image: the file or
+    /// flag that names one expects the image to stay unchanged.
+    #[error(
+        "disk.journal names a journal, which only a volatile disk has; set disk.mode = \"volatile\" (or --disk-mode volatile)"
+    )]
+    JournalWithoutVolatileDisk,
+
     #[error("existing disk image {} is not a usable flat image ({len} bytes, not a non-zero multiple of 512); set disk.create.overwrite = true to replace it, or delete it", path.display())]
     InvalidExistingDiskImage { path: PathBuf, len: u64 },
 

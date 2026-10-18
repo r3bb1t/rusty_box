@@ -16,6 +16,8 @@ use crate::{
 };
 
 use super::{Emulator, EmulatorConfig, SliceEngine};
+#[cfg(feature = "std")]
+use super::Journal;
 // Only the alloc-gated `build` names the interpreter; a no-alloc host places
 // its machine itself and takes the default engine with it.
 #[cfg(feature = "alloc")]
@@ -191,6 +193,14 @@ enum Media {
         path: alloc::string::String,
         geometry: DiskGeometry,
     },
+    /// A file the guest writes into a journal, never into the file itself
+    /// (Bochs `volatile`).
+    #[cfg(feature = "std")]
+    VolatileDiskFile {
+        path: alloc::string::String,
+        journal: Journal,
+        geometry: DiskGeometry,
+    },
     #[cfg(feature = "alloc")]
     DiskBytes {
         data: alloc::vec::Vec<u8>,
@@ -214,6 +224,8 @@ impl Media {
         match self {
             #[cfg(feature = "std")]
             Media::DiskFile { geometry, .. } => Some(*geometry),
+            #[cfg(feature = "std")]
+            Media::VolatileDiskFile { geometry, .. } => Some(*geometry),
             #[cfg(feature = "alloc")]
             Media::DiskBytes { geometry, .. } => Some(*geometry),
             Media::DiskStatic { geometry, .. } => Some(*geometry),
@@ -363,6 +375,28 @@ impl<'r, T: Instrumentation> MachineBuilder<'r, T> {
     pub fn disk_file(mut self, slot: AtaSlot, path: &str, geometry: DiskGeometry) -> Self {
         self.settings.media[slot.index()] = Some(Media::DiskFile {
             path: alloc::string::ToString::to_string(path),
+            geometry,
+        });
+        self
+    }
+
+    /// Attach a hard disk backed by a file on the host that the guest can
+    /// write but never changes — Bochs's `volatile` mode: the image is
+    /// read-only and the writes live in a journal removed at power-off, so
+    /// every run starts from the same disk. `journal` says where the journal
+    /// is made; a journal that cannot be made fails `build()`, naming the
+    /// file it was to be named after.
+    #[cfg(feature = "std")]
+    pub fn volatile_disk_file(
+        mut self,
+        slot: AtaSlot,
+        path: &str,
+        journal: Journal,
+        geometry: DiskGeometry,
+    ) -> Self {
+        self.settings.media[slot.index()] = Some(Media::VolatileDiskFile {
+            path: alloc::string::ToString::to_string(path),
+            journal,
             geometry,
         });
         self
@@ -614,6 +648,20 @@ fn attach<T: Instrumentation, E: SliceEngine<T>>(
             geometry.heads,
             geometry.sectors_per_track,
         )?,
+        #[cfg(feature = "std")]
+        Media::VolatileDiskFile {
+            path,
+            journal,
+            geometry,
+        } => machine.attach_volatile_disk(
+            slot.channel(),
+            slot.drive(),
+            &path,
+            &journal,
+            geometry.cylinders,
+            geometry.heads,
+            geometry.sectors_per_track,
+        )?,
         #[cfg(feature = "alloc")]
         Media::DiskBytes { data, geometry } => machine.attach_disk_data(
             slot.channel(),
@@ -732,6 +780,44 @@ mod tests {
             assert_eq!(cmos_register(&mut machine, 0x12) & 0x0F, 0x0F);
             // Nothing hangs off drive 0, so its nibble stays clear.
             assert_eq!(cmos_register(&mut machine, 0x12) & 0xF0, 0x00);
+        });
+    }
+
+    /// How many files beside `image` are named the image's name and a dot:
+    /// where a journal named after it would be.
+    fn journals_beside(image: &std::path::Path) -> usize {
+        let prefix = format!("{}.", image.file_name().expect("name").to_string_lossy());
+        std::fs::read_dir(image.parent().expect("folder"))
+            .expect("list")
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with(&prefix))
+            .count()
+    }
+
+    #[test]
+    fn a_volatile_disk_reaches_the_cmos_and_leaves_no_journal_named() {
+        on_a_big_stack(|| {
+            let path = std::env::temp_dir()
+                .join(format!("rusty-box-builder-volatile-{}.img", std::process::id()));
+            std::fs::write(&path, [7u8; 1024]).expect("image");
+            let mut machine = MachineBuilder::new(small_machine())
+                .volatile_disk_file(
+                    AtaSlot::PRIMARY_SLAVE,
+                    path.to_str().expect("utf-8"),
+                    Journal::BesideImage,
+                    DiskGeometry::new(0x1234, 9, 17),
+                )
+                .build()
+                .expect("build");
+
+            assert_eq!(cmos_register(&mut machine, 0x24), 0x34);
+            assert_eq!(cmos_register(&mut machine, 0x25), 0x12);
+            assert_eq!(cmos_register(&mut machine, 0x26), 9);
+            assert_eq!(cmos_register(&mut machine, 0x2C), 17);
+            assert_eq!(journals_beside(&path), 0, "the journal has no name while the machine runs");
+            drop(machine);
+            assert_eq!(std::fs::read(&path).expect("image"), [7u8; 1024]);
+            std::fs::remove_file(&path).expect("remove");
         });
     }
 
