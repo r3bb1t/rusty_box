@@ -1387,10 +1387,23 @@ before swapping it in.
 **rusty_box:** `iodev/hdimage.rs` `VolatileImage`. The journal is a file of
 512-byte slots, one per sector written, in the order the sectors were first
 written; the LBA-to-slot map is in memory (`slots`). It is named as Bochs names
-it, and its name is removed as soon as it is made, on every platform. A
-snapshot carries the written sectors themselves in the HARDDRV section (media
-tag 5: the image's identity, then each LBA and its bytes) and refills the
-journal from them.
+it, an empty `journal` or `none` naming it after the image as Bochs's
+constructor does, and its name is removed as soon as it is made on every
+platform that allows it; where one refuses, the name goes at close, as on
+Bochs's Windows. Each name is tried with create-new, where Bochs's own
+`bx_mkstemp` (osdep.cc), used without a C-library `mkstemp`, opens with
+`O_TRUNC` and so could empty a file that took the name first. A snapshot
+carries the written sectors themselves in the HARDDRV section (media tag 5:
+the image's identity and its modification time when it was opened, then each
+LBA and its bytes). A restore writes them into a fresh journal, which takes
+over only once every record is read and checked, and is refused when the
+image's size or modification time is not what was saved: `coherency_check`'s
+two checks, the time kept to the nanosecond rather than as a 2-second FAT
+local time.
+
+The shell refuses a `journal` on a flat disk, where Bochs's configuration
+ignores it: a VM that names a journal expects its image to stay unchanged, and
+running it flat would change it without a word.
 
 ### What the guest observes
 
@@ -1419,6 +1432,44 @@ Porting `redolog_t` (header, catalog, bitmap, extent allocation; about 500
 lines of hdimage.cc) for a file no other program reads. Not paid.
 
 **Status:** deliberate (2026-10-18, volatile hard disks, approved by the owner).
+
+---
+
+## D24 — A disk geometry larger than its image is attached, not refused
+
+**Bochs:** `iodev/harddrv.cc` `bx_hard_drive_c::init` multiplies the
+configured cylinders, heads, sectors per track and sector size, and stops with
+`BX_PANIC("ata%d-%d: specified geometry doesn't fit on disk image")` when that
+is more than the image holds. When it is less, it logs `extra data outside of
+CHS address range`.
+
+**rusty_box:** `iodev/harddrv.rs` `AtaDrive::attach_opened` logs both cases,
+the first as a warning, and attaches the image either way. Every access is
+still checked against the image's own sector count
+(`calculate_logical_address`, for every sector of every transfer), so a sector
+past the image is refused when it is addressed, as Bochs refuses any address
+past the disk.
+
+### What the guest observes
+
+A BIOS and an IDENTIFY that report the configured geometry, whose last
+cylinder is partly past the image. A CHS access there is aborted with ERR.
+
+### Why the divergence is the correct side
+
+The shell's geometry detection rounds the cylinder count up, so that the tail
+of an image whose size is not a whole number of cylinders stays reachable by
+CHS; VM files saved by the shell carry that geometry. Refusing it, as Bochs
+does, would refuse VMs that boot today.
+
+### Price of closing it
+
+Detect the geometry by rounding down, as Bochs's own auto-geometry does
+(`hd_size / (heads * spt * sect_size)`), and refuse a larger one here. A VM
+whose saved geometry was rounded up would then need its geometry changed,
+which moves every CHS address past the change for an installed guest.
+
+**Status:** proposed (2026-10-18), awaiting the owner's agreement.
 
 ---
 

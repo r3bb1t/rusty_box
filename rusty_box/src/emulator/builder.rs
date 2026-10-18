@@ -17,7 +17,7 @@ use crate::{
 
 use super::{Emulator, EmulatorConfig, SliceEngine};
 #[cfg(feature = "std")]
-use super::Journal;
+use super::{Journal, VolatileDisk};
 // Only the alloc-gated `build` names the interpreter; a no-alloc host places
 // its machine itself and takes the default engine with it.
 #[cfg(feature = "alloc")]
@@ -201,6 +201,12 @@ enum Media {
         journal: Journal,
         geometry: DiskGeometry,
     },
+    /// A volatile disk already open, or taken back from another machine.
+    #[cfg(feature = "std")]
+    VolatileDisk {
+        disk: VolatileDisk,
+        geometry: DiskGeometry,
+    },
     #[cfg(feature = "alloc")]
     DiskBytes {
         data: alloc::vec::Vec<u8>,
@@ -226,6 +232,8 @@ impl Media {
             Media::DiskFile { geometry, .. } => Some(*geometry),
             #[cfg(feature = "std")]
             Media::VolatileDiskFile { geometry, .. } => Some(*geometry),
+            #[cfg(feature = "std")]
+            Media::VolatileDisk { geometry, .. } => Some(*geometry),
             #[cfg(feature = "alloc")]
             Media::DiskBytes { geometry, .. } => Some(*geometry),
             Media::DiskStatic { geometry, .. } => Some(*geometry),
@@ -399,6 +407,17 @@ impl<'r, T: Instrumentation> MachineBuilder<'r, T> {
             journal,
             geometry,
         });
+        self
+    }
+
+    /// Attach a volatile disk already open ([`VolatileDisk::open`]), or taken
+    /// back from the machine before this one
+    /// ([`Emulator::take_volatile_disk`]): a front end that builds a new
+    /// machine for a restart gives it the same disk, so the guest's writes
+    /// last until power-off.
+    #[cfg(feature = "std")]
+    pub fn volatile_disk(mut self, slot: AtaSlot, disk: VolatileDisk, geometry: DiskGeometry) -> Self {
+        self.settings.media[slot.index()] = Some(Media::VolatileDisk { disk, geometry });
         self
     }
 
@@ -662,6 +681,8 @@ fn attach<T: Instrumentation, E: SliceEngine<T>>(
             geometry.heads,
             geometry.sectors_per_track,
         )?,
+        #[cfg(feature = "std")]
+        Media::VolatileDisk { disk, geometry } => machine.attach_open_volatile_disk(slot, disk, geometry)?,
         #[cfg(feature = "alloc")]
         Media::DiskBytes { data, geometry } => machine.attach_disk_data(
             slot.channel(),
@@ -814,9 +835,46 @@ mod tests {
             assert_eq!(cmos_register(&mut machine, 0x25), 0x12);
             assert_eq!(cmos_register(&mut machine, 0x26), 9);
             assert_eq!(cmos_register(&mut machine, 0x2C), 17);
-            assert_eq!(journals_beside(&path), 0, "the journal has no name while the machine runs");
+            // Unix removes an open file's name at once; Windows does only with
+            // POSIX delete semantics, else at close.
+            if cfg!(unix) {
+                assert_eq!(journals_beside(&path), 0, "the journal has no name while the machine runs");
+            }
             drop(machine);
+            assert_eq!(journals_beside(&path), 0, "nothing of the journal outlives the machine");
             assert_eq!(std::fs::read(&path).expect("image"), [7u8; 1024]);
+            std::fs::remove_file(&path).expect("remove");
+        });
+    }
+
+    /// A front end that builds a new machine for a restart hands it the
+    /// volatile disk the last one had, journal and all.
+    #[test]
+    fn a_volatile_disk_taken_back_from_one_machine_serves_the_next() {
+        on_a_big_stack(|| {
+            let path = std::env::temp_dir()
+                .join(format!("rusty-box-builder-carry-{}.img", std::process::id()));
+            std::fs::write(&path, [7u8; 1024]).expect("image");
+            let disk = VolatileDisk::open(path.to_str().expect("utf-8"), &Journal::BesideImage).expect("open");
+            let journal = disk.journal_path().to_path_buf();
+            let mut first = MachineBuilder::new(small_machine())
+                .volatile_disk(AtaSlot::PRIMARY_MASTER, disk, DiskGeometry::new(2, 1, 1))
+                .build()
+                .expect("build");
+            let disk = first.take_volatile_disk(AtaSlot::PRIMARY_MASTER).expect("given back");
+            assert_eq!(disk.journal_path(), journal, "the same journal");
+            assert!(first.take_volatile_disk(AtaSlot::PRIMARY_MASTER).is_none(), "and none left behind");
+            drop(first);
+
+            let mut next = MachineBuilder::new(small_machine())
+                .volatile_disk(AtaSlot::PRIMARY_MASTER, disk, DiskGeometry::new(2, 1, 1))
+                .build()
+                .expect("build");
+            assert_eq!(
+                next.take_volatile_disk(AtaSlot::PRIMARY_MASTER).map(|disk| disk.journal_path().to_path_buf()),
+                Some(journal)
+            );
+            drop(next);
             std::fs::remove_file(&path).expect("remove");
         });
     }

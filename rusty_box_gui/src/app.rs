@@ -765,17 +765,30 @@ impl NativeVmSettings {
                 crate::config::detect_disk_geometry(&path)
                     .map_err(|error| format!("Failed to inspect hard disk: {error}"))?
             };
+            let mode = match self.disk_mode {
+                crate::config::DiskModeName::Flat => crate::config::DiskMode::Flat,
+                crate::config::DiskModeName::Volatile => {
+                    let named = trimmed_optional_path(&self.disk_journal)
+                        .filter(|journal| !crate::config::names_no_journal(journal));
+                    // A relative name is kept as the file it names now, in the
+                    // folder the shell runs in, so the VM file means the same
+                    // file when it is loaded again.
+                    let journal = match named {
+                        Some(journal) => Some(
+                            std::path::absolute(&journal)
+                                .map_err(|error| format!("Journal path {}: {error}", journal.display()))?,
+                        ),
+                        None => None,
+                    };
+                    crate::config::DiskMode::Volatile { journal }
+                }
+            };
             config.disk = Some(crate::config::ResolvedDisk {
                 path,
                 geometry,
                 channel: self.disk_channel,
                 drive: self.disk_drive,
-                mode: match self.disk_mode {
-                    crate::config::DiskModeName::Flat => crate::config::DiskMode::Flat,
-                    crate::config::DiskModeName::Volatile => crate::config::DiskMode::Volatile {
-                        journal: trimmed_optional_path(&self.disk_journal),
-                    },
-                },
+                mode,
                 creation,
             });
         } else {
@@ -9163,6 +9176,23 @@ mod tests {
             config.disk.as_ref().unwrap().mode,
             crate::config::DiskMode::Volatile { journal: None },
             "a blank journal is none"
+        );
+
+        // Bochs hdimage.cc `volatile_image_t::volatile_image_t`: `none`
+        // names no journal either.
+        settings.disk_journal = "none".to_owned();
+        settings.apply_to_config(&mut config).unwrap();
+        assert_eq!(config.disk.as_ref().unwrap().mode, crate::config::DiskMode::Volatile { journal: None });
+
+        // A relative name is kept as the file it names now, so the VM file
+        // means the same file when it is loaded again.
+        settings.disk_journal = "rel-journal".to_owned();
+        settings.apply_to_config(&mut config).unwrap();
+        assert_eq!(
+            config.disk.as_ref().unwrap().mode,
+            crate::config::DiskMode::Volatile {
+                journal: Some(std::path::absolute("rel-journal").unwrap())
+            }
         );
 
         settings.disk_mode = crate::config::DiskModeName::Flat;

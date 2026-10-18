@@ -393,7 +393,7 @@ Validation rules:
 - The disk and CD-ROM must each name a valid ATA slot (channel 0 or 1, drive 0 or 1), and they cannot share one.
 - A VGA BIOS file must be a non-zero multiple of 512 bytes.
 - Disk and CD-ROM paths must be valid UTF-8, because `MachineBuilder::disk_file` / `cdrom_file` take `&str`. A non-UTF-8 path is rejected with `path must be valid UTF-8 for current emulator media API`.
-- `disk.journal` (or `--disk-journal`) needs `disk.mode = "volatile"` (or `--disk-mode volatile`).
+- `disk.journal` (or `--disk-journal`) needs `disk.mode = "volatile"` (or `--disk-mode volatile`). `--disk-mode flat` sets a file's volatile mode and its journal aside together. An empty journal or `"none"` means beside the image (Bochs's own rule), and a relative `--disk-journal` is kept as the absolute path it names when the run starts.
 - `disk.create` cannot be combined with `disk.path` or `disk.chs` in the TOML file. A CLI disk option picks one mode explicitly: `--disk` wins over a TOML `disk.create`, and `--create-disk` wins over a TOML `disk.path`. A creation size or overwrite flag with no creation path is an error.
 - A created disk must be at least 10 MiB and have fewer than 2^24 cylinders, so under 8064 GiB. It uses the same geometry as a disk the shell's new-disk sheet makes.
 

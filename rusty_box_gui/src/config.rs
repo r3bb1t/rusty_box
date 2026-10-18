@@ -885,6 +885,13 @@ fn resolve_existing_disk(
     }))
 }
 
+/// Whether `journal` names no journal of its own, so the journal goes beside
+/// the image: Bochs hdimage.cc `volatile_image_t::volatile_image_t` takes an
+/// empty `journal` or `none` so.
+pub(crate) fn names_no_journal(journal: &Path) -> bool {
+    journal.as_os_str().is_empty() || journal.as_os_str() == "none"
+}
+
 /// Where the disk's writes go: the command line's mode over the file's, and
 /// its journal over the file's, by one rule for both. A journal with a flat
 /// disk is refused rather than dropped — the file or flag that names one
@@ -898,11 +905,24 @@ fn resolve_disk_mode(
         .disk_mode
         .or_else(|| disk_toml.and_then(|disk| disk.mode))
         .unwrap_or_default();
-    let journal = args.disk_journal.clone().or_else(|| {
-        disk_toml
+    // `--disk-mode` picks the mode outright: a flat disk named there sets
+    // the file's journal aside with the file's volatile mode.
+    let file_journal = match args.disk_mode {
+        Some(DiskModeName::Flat) => None,
+        Some(DiskModeName::Volatile) | None => disk_toml
             .and_then(|disk| disk.journal.clone())
-            .map(|journal| resolve_toml_path(config_dir, journal))
-    });
+            .filter(|journal| !names_no_journal(journal))
+            .map(|journal| resolve_toml_path(config_dir, journal)),
+    };
+    let journal = match args.disk_journal.clone().filter(|journal| !names_no_journal(journal)) {
+        // A relative journal on the command line names a file in the folder
+        // the run starts in. Kept absolute, it names the same file when a VM
+        // saved from this run is loaded again.
+        Some(journal) => Some(
+            std::path::absolute(&journal).map_err(|source| RunError::JournalPath { path: journal, source })?,
+        ),
+        None => file_journal,
+    };
     match name {
         DiskModeName::Flat => match journal {
             None => Ok(DiskMode::Flat),
@@ -2199,10 +2219,14 @@ chs = { cylinders = 306, heads = 4, sectors_per_track = 17 }
             &args(["rusty_box_gui", "--disk-journal", "j"]),
         )
         .unwrap();
+        // A relative journal on the command line names a file in the folder
+        // the run starts in, and is kept as that absolute path, so a VM saved
+        // from this run means the same file when it is loaded again.
+        let absolute = std::path::absolute("j").unwrap();
         assert_eq!(
             named.disk.unwrap().mode,
             DiskMode::Volatile {
-                journal: Some(PathBuf::from("j"))
+                journal: Some(absolute.clone())
             },
             "the file's mode, the flag's journal"
         );
@@ -2214,9 +2238,45 @@ chs = { cylinders = 306, heads = 4, sectors_per_track = 17 }
         assert_eq!(
             both.disk.unwrap().mode,
             DiskMode::Volatile {
-                journal: Some(PathBuf::from("j"))
+                journal: Some(absolute)
             }
         );
+    }
+
+    /// `--disk-mode flat` picks the mode outright: the file's volatile mode
+    /// and the journal that goes with it are both set aside.
+    #[test]
+    fn a_flat_disk_on_the_command_line_sets_the_files_journal_aside() {
+        let file = config(
+            "[rom]\nbios = \"bios.bin\"\n\n[disk]\npath = \"disk.img\"\nmode = \"volatile\"\njournal = \"j\"\nchs = { cylinders = 306, heads = 4, sectors_per_track = 17 }\n",
+        );
+        let flat = resolve_config(file, &args(["rusty_box_gui", "--disk-mode", "flat"])).unwrap();
+        assert_eq!(flat.disk.unwrap().mode, DiskMode::Flat);
+    }
+
+    /// Bochs hdimage.cc `volatile_image_t::volatile_image_t`: an empty
+    /// `journal` and `none` name no journal, so the journal goes beside the
+    /// image, and neither asks anything of a flat disk.
+    #[test]
+    fn a_journal_named_empty_or_none_is_no_journal() {
+        for journal in ["", "none"] {
+            let volatile = config(&format!(
+                "[rom]\nbios = \"bios.bin\"\n\n[disk]\npath = \"disk.img\"\nmode = \"volatile\"\njournal = \"{journal}\"\nchs = {{ cylinders = 306, heads = 4, sectors_per_track = 17 }}\n"
+            ));
+            let resolved = resolve_config(volatile, &args(["rusty_box_gui"])).unwrap();
+            assert_eq!(resolved.disk.unwrap().mode, DiskMode::Volatile { journal: None }, "{journal:?}");
+
+            let flat = config(&format!(
+                "[rom]\nbios = \"bios.bin\"\n\n[disk]\npath = \"disk.img\"\njournal = \"{journal}\"\nchs = {{ cylinders = 306, heads = 4, sectors_per_track = 17 }}\n"
+            ));
+            let resolved = resolve_config(flat, &args(["rusty_box_gui"])).unwrap();
+            assert_eq!(resolved.disk.unwrap().mode, DiskMode::Flat, "{journal:?}");
+        }
+        // The command line refuses an empty value itself; `none` is the
+        // spelling that reaches the rule.
+        let on_the_line =
+            resolve_config(config(FLAT_DISK_TOML), &args(["rusty_box_gui", "--disk-journal", "none"]));
+        assert_eq!(on_the_line.unwrap().disk.unwrap().mode, DiskMode::Flat);
     }
 
     #[test]

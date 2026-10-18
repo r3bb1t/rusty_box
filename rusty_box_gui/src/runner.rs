@@ -46,7 +46,7 @@ use rusty_box::emulator::RunBudget;
 use rusty_box::emulator::{
     AtaSlot, BootDevice as GuestBootDevice, BootOrder, DeviceClock,
     DiskGeometry as GuestDiskGeometry, Emulator, EmulatorConfig, Ips, Journal, MachineBuilder,
-    MemorySize, SliceEngine,
+    MemorySize, SliceEngine, VolatileDisk,
 };
 use rusty_box::gui::{BxGui, NoGui, TermGui};
 #[cfg(all(not(feature = "guest-trace"), feature = "hv-whp", windows))]
@@ -71,6 +71,24 @@ pub struct RunSummary {
     /// instructions the host never tallies, and an approximate count would be
     /// indistinguishable from a real one.
     pub instructions_executed: Option<u64>,
+}
+
+/// What one run leaves when its machine is done: its summary, and the
+/// volatile disk the machine ran on, journal and all, for the machine a
+/// restart builds next. `None` when the disk is not volatile.
+#[derive(Debug)]
+struct RunEnd {
+    summary: RunSummary,
+    volatile_disk: Option<VolatileDisk>,
+}
+
+/// The volatile disk in `slot`, taken back from a machine whose run is over.
+fn take_back<T, E>(emu: &mut Emulator<T, E>, slot: Option<AtaSlot>) -> Option<VolatileDisk>
+where
+    T: Instrumentation,
+    E: SliceEngine<T>,
+{
+    slot.and_then(|slot| emu.take_volatile_disk(slot))
 }
 
 /// The stack a thread that runs a machine is given: each VM's thread the
@@ -188,7 +206,9 @@ where
     G: BxGui + 'static,
 {
     let prepared = prepare_run(config, create_startup_disks)?;
-    run_prepared(prepared, gui, control)
+    // One run is the whole power-on here, so its volatile disk, and the
+    // guest's writes with it, end with it.
+    run_prepared(prepared, gui, control, None).map(|end| end.summary)
 }
 
 /// A run's inputs, read and checked, with its startup disk provisioned.
@@ -245,12 +265,15 @@ fn prepare_run(
 }
 
 /// Builds the machine `prepared` describes and runs it on `gui` until it
-/// stops, or until `control` ends the run; `control` also pauses it.
+/// stops, or until `control` ends the run; `control` also pauses it. A
+/// volatile disk is the one `carried` holds when a run before this one handed
+/// it on, else a new one; either way it is handed back at the end.
 fn run_prepared<G>(
     prepared: PreparedRun,
     gui: G,
     control: Option<RunLink>,
-) -> Result<RunSummary, RunError>
+    carried: Option<VolatileDisk>,
+) -> Result<RunEnd, RunError>
 where
     G: BxGui + 'static,
 {
@@ -292,6 +315,12 @@ where
     if let Some(data) = &vga_data {
         builder = builder.vga_bios(data);
     }
+    // The slot whose volatile disk is handed back when the run is over.
+    let volatile_slot = config
+        .disk
+        .as_ref()
+        .filter(|disk| matches!(disk.mode, DiskMode::Volatile { .. }))
+        .and(slots.disk);
     if let (Some(disk), Some(slot)) = (&config.disk, slots.disk) {
         let geometry = GuestDiskGeometry::new(
             disk.geometry.cylinders,
@@ -302,7 +331,17 @@ where
         builder = match &disk.mode {
             DiskMode::Flat => builder.disk_file(slot, path, geometry),
             DiskMode::Volatile { journal } => {
-                builder.volatile_disk_file(slot, path, journal_for(journal.as_deref()), geometry)
+                let volatile = match carried {
+                    Some(volatile) => volatile,
+                    None => VolatileDisk::open(path, &journal_for(journal.as_deref())).map_err(|source| {
+                        RunError::MediaAttach {
+                            kind: "disk",
+                            path: disk.path.clone(),
+                            source,
+                        }
+                    })?,
+                };
+                builder.volatile_disk(slot, volatile, geometry)
             }
         };
     }
@@ -327,7 +366,7 @@ where
             return Err(RunError::NoHypervisor);
         }
         let emu = builder.build_on::<WhpEngine>()?;
-        return drive_on_the_hypervisor(emu, &config, control);
+        return drive_on_the_hypervisor(emu, &config, control, volatile_slot);
     }
 
     #[cfg(not(feature = "guest-trace"))]
@@ -348,7 +387,7 @@ where
         builder.tracer(tracer).build()?
     };
 
-    drive(emu, &config, control)
+    drive(emu, &config, control, volatile_slot)
 }
 
 /// Everything a built machine needs arranged before it runs, whichever engine
@@ -397,7 +436,8 @@ fn drive<T, E>(
     mut emu: Box<Emulator<T, E>>,
     config: &ResolvedConfig,
     control: Option<RunLink>,
-) -> Result<RunSummary, RunError>
+    volatile_slot: Option<AtaSlot>,
+) -> Result<RunEnd, RunError>
 where
     T: Instrumentation,
     E: SliceEngine<T>,
@@ -406,11 +446,14 @@ where
     // A run nobody can pause runs to its end in one call.
     let Some(control) = control else {
         let instructions_executed = emu.run_interactive(config.max_instructions)?;
-        return Ok(RunSummary {
-            instructions_executed: Some(instructions_executed),
+        return Ok(RunEnd {
+            summary: RunSummary {
+                instructions_executed: Some(instructions_executed),
+            },
+            volatile_disk: take_back(emu.as_mut(), volatile_slot),
         });
     };
-    drive_served(emu, config, control)
+    drive_served(emu, config, control, volatile_slot)
 }
 
 /// `drive` for a run the shell can pause: `run_interactive` returns whenever
@@ -422,7 +465,8 @@ fn drive_served<T, E>(
     mut emu: Box<Emulator<T, E>>,
     config: &ResolvedConfig,
     control: RunLink,
-) -> Result<RunSummary, RunError>
+    volatile_slot: Option<AtaSlot>,
+) -> Result<RunEnd, RunError>
 where
     T: Instrumentation,
     E: SliceEngine<T>,
@@ -449,8 +493,11 @@ where
             }
         }
     }
-    Ok(RunSummary {
-        instructions_executed: Some(retired),
+    Ok(RunEnd {
+        summary: RunSummary {
+            instructions_executed: Some(retired),
+        },
+        volatile_disk: take_back(emu.as_mut(), volatile_slot),
     })
 }
 
@@ -460,7 +507,8 @@ fn drive_served<T, E>(
     _emu: Box<Emulator<T, E>>,
     _config: &ResolvedConfig,
     control: RunLink,
-) -> Result<RunSummary, RunError>
+    _volatile_slot: Option<AtaSlot>,
+) -> Result<RunEnd, RunError>
 where
     T: Instrumentation,
     E: SliceEngine<T>,
@@ -508,7 +556,8 @@ fn drive_on_the_hypervisor(
     mut emu: Box<Emulator<(), WhpEngine>>,
     config: &ResolvedConfig,
     control: Option<RunLink>,
-) -> Result<RunSummary, RunError> {
+    volatile_slot: Option<AtaSlot>,
+) -> Result<RunEnd, RunError> {
     // Refused, not approximated: nothing on the hypervisor counts the guest's
     // instructions, so a limit in them would end the run at a guess, and a
     // caller who asked for a limit wants to know it did not get one.
@@ -589,9 +638,20 @@ fn drive_on_the_hypervisor(
         }
     }
 
-    Ok(RunSummary {
-        // Nothing here counted, so nothing is claimed — see `RunSummary`.
-        instructions_executed: None,
+    // Every exit from the loop leaves the processors parked, so the machine
+    // can be reached to give its volatile disk back.
+    let volatile_disk = match volatile_slot {
+        Some(slot) => machine
+            .with_machine(|m| m.take_volatile_disk(slot))
+            .map_err(|source| RunError::Hypervisor { source })?,
+        None => None,
+    };
+    Ok(RunEnd {
+        summary: RunSummary {
+            // Nothing here counted, so nothing is claimed — see `RunSummary`.
+            instructions_executed: None,
+        },
+        volatile_disk,
     })
 }
 
@@ -1153,9 +1213,10 @@ fn run_egui_launcher(
 }
 
 /// One power-on, restarts included, on its own thread. What the power-on
-/// holds — the hypervisor, its hard disk — is held across every restart and
-/// given back once the last run's machine is gone. Returns what it retired,
-/// `None` when a run on the hypervisor counted nothing.
+/// holds — the hypervisor, its hard disk, a volatile disk's journal — is held
+/// across every restart and given back once the last run's machine is gone.
+/// Returns what it retired, `None` when a run on the hypervisor counted
+/// nothing.
 #[cfg(feature = "gui-egui")]
 fn run_one_vm(start: crate::app::StartRun, provisioned: &Mutex<HashSet<PathBuf>>) -> Option<u64> {
     let crate::app::StartRun {
@@ -1166,6 +1227,10 @@ fn run_one_vm(start: crate::app::StartRun, provisioned: &Mutex<HashSet<PathBuf>>
     } = start;
     let mut retired = Some(0u64);
     let mut how = RunStart::PowerOn;
+    // The volatile disk each run hands on to the machine the next restart
+    // builds, so the guest's writes last until power-off (Bochs hdimage.cc
+    // `volatile_image_t::close` runs only when Bochs exits, not at a reset).
+    let mut carried: Option<VolatileDisk> = None;
     loop {
         // A restart lowers the stop that ended the run before it, unless a
         // stop was asked for since; a power-on finds the flag the shell
@@ -1205,11 +1270,14 @@ fn run_one_vm(start: crate::app::StartRun, provisioned: &Mutex<HashSet<PathBuf>>
                         .filter(|creation| creation.overwrite)
                         .map(|creation| creation.path.clone()),
                 );
-            run_prepared(prepared, bridge, Some(Arc::clone(&control)))
+            run_prepared(prepared, bridge, Some(Arc::clone(&control)), carried.take())
         });
         control.finish_run();
         let summary = match run {
-            Ok(summary) => summary,
+            Ok(end) => {
+                carried = end.volatile_disk;
+                end.summary
+            }
             Err(error) => {
                 record_egui_error(&display, &error);
                 break;
@@ -1229,6 +1297,9 @@ fn run_one_vm(start: crate::app::StartRun, provisioned: &Mutex<HashSet<PathBuf>>
         }
         how = RunStart::Restart;
     }
+    // Power-off: the volatile disk's journal is closed, and with it goes
+    // everything the guest wrote to it.
+    drop(carried);
     // Every machine this power-on built is gone: the next VM may take the
     // hypervisor, the disk may have its next writer, and with the last VM off
     // a phone no longer keeps the app running.
@@ -2593,6 +2664,66 @@ mod tests {
             console_stretch: false,
             pointer_speed: crate::config::PointerSpeed::DEFAULT,
         }
+    }
+
+    /// `run_prepared` for `config` on a thread with room for a machine,
+    /// given the volatile disk a run before it handed back.
+    #[cfg(feature = "gui-egui")]
+    fn run_to_its_end(config: &ResolvedConfig, carried: Option<VolatileDisk>) -> RunEnd {
+        let config = config.clone();
+        std::thread::Builder::new()
+            .name("rusty_box_gui_test_run_to_its_end".to_owned())
+            .stack_size(16 * 1024 * 1024)
+            .spawn(move || {
+                let prepared = prepare_run(config, false).expect("prepared");
+                run_prepared(prepared, NoGui::new(), None, carried).expect("ran")
+            })
+            .expect("spawn the run")
+            .join()
+            .expect("the run")
+    }
+
+    /// The shell's Restart builds a new machine. The volatile disk the last
+    /// one ran on is handed to it, journal and all, so the guest's writes
+    /// last until power-off, as Bochs's redolog lasts across a reset
+    /// (hdimage.cc `volatile_image_t::close` runs only at exit).
+    #[cfg(feature = "gui-egui")]
+    #[test]
+    fn a_run_hands_its_volatile_disk_on_to_the_next_machine() {
+        let bios = spinning_bios();
+        let disk = unique_temp_path("rusty-box-gui-volatile-carry");
+        fs::write(&disk, vec![0u8; 512 * 16 * 63]).unwrap();
+        let mut config = spinning_config(&bios);
+        config.max_instructions = 10_000;
+        config.disk = Some(ResolvedDisk {
+            path: disk.clone(),
+            geometry: DiskGeometry {
+                cylinders: 1,
+                heads: 16,
+                sectors_per_track: 63,
+            },
+            channel: 0,
+            drive: 0,
+            mode: DiskMode::Volatile { journal: None },
+            creation: None,
+        });
+
+        let first = run_to_its_end(&config, None);
+        let handed = first.volatile_disk.expect("the run hands its volatile disk back");
+        let journal = handed.journal_path().to_path_buf();
+        let next = run_to_its_end(&config, Some(handed));
+        assert_eq!(
+            next.volatile_disk.map(|disk| disk.journal_path().to_path_buf()),
+            Some(journal),
+            "the next machine ran on the same journal"
+        );
+
+        if let Some(disk_config) = config.disk.as_mut() {
+            disk_config.mode = DiskMode::Flat;
+        }
+        assert!(run_to_its_end(&config, None).volatile_disk.is_none(), "a flat disk has none to hand on");
+        remove_test_file(&disk);
+        remove_test_file(&bios);
     }
 
     /// Two VMs powered on one after the other both run their guests at once,

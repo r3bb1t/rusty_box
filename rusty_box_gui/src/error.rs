@@ -148,6 +148,11 @@ pub enum RunError {
     )]
     JournalWithoutVolatileDisk,
 
+    /// A relative journal path that cannot be made absolute: the folder the
+    /// run starts in cannot be read.
+    #[error("journal path {}: {source}", path.display())]
+    JournalPath { path: PathBuf, source: io::Error },
+
     #[error("existing disk image {} is not a usable flat image ({len} bytes, not a non-zero multiple of 512); set disk.create.overwrite = true to replace it, or delete it", path.display())]
     InvalidExistingDiskImage { path: PathBuf, len: u64 },
 
