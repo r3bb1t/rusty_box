@@ -11,7 +11,8 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use rusty_box_symbols::http::{Flow, Progress, Retry};
-use rusty_box_symbols::identity::{ModuleIdentity, TablesIdentity};
+use rusty_box_symbols::identity::{ModuleIdentity, PeImageId, TablesIdentity};
+use rusty_box_symbols::module_file::ModuleFile;
 use rusty_box_symbols::projects::{ProjectFolders, ProjectIndex};
 use rusty_box_symbols::service::{Consent, ServiceConfig, SymbolSource};
 use rusty_box_symbols::store::StoreUsage;
@@ -56,6 +57,44 @@ impl ModuleEntry {
     }
 }
 
+/// A PE module's binary, by its name and image identity: what a loaded
+/// module's bytes the guest has not paged in are read from.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct ImageKey {
+    pub(crate) file_name: String,
+    pub(crate) image: PeImageId,
+}
+
+impl ImageKey {
+    /// The binary of a PE module; an ELF module has none here.
+    pub(crate) fn of(identity: &ModuleIdentity) -> Option<ImageKey> {
+        match identity {
+            ModuleIdentity::Pe { file_name, image, .. } => Some(ImageKey { file_name: file_name.clone(), image: *image }),
+            ModuleIdentity::Elf { .. } => None,
+        }
+    }
+}
+
+/// What the engine has for one module's binary.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ImageState {
+    /// Asked for, not looked up yet.
+    Pending,
+    Downloading { done: u64, total: Option<u64> },
+    Loaded { from: SymbolSource },
+    /// Every server answered that it does not have the file. Kept for the
+    /// run.
+    NotOnServer,
+    Failed { reason: String, retry: Retry },
+}
+
+/// One binary's state, and the file when it loaded.
+#[derive(Clone)]
+pub(crate) struct ImageEntry {
+    pub(crate) state: ImageState,
+    pub(crate) file: Option<Arc<ModuleFile>>,
+}
+
 /// What measuring the symbol store came to.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum StoreMeasure {
@@ -83,6 +122,9 @@ pub(crate) enum SourceSlot {
 #[derive(Clone, Default)]
 pub(crate) struct SymbolsView {
     pub(crate) modules: BTreeMap<ModuleIdentity, ModuleEntry>,
+    /// The binaries asked for, for the bytes of loaded modules the guest has
+    /// not paged in.
+    pub(crate) images: BTreeMap<ImageKey, ImageEntry>,
     pub(crate) projects: Arc<ProjectIndex>,
     /// Why the project folders could not be indexed, when they could not.
     pub(crate) projects_problem: Option<String>,
@@ -108,6 +150,14 @@ impl SymbolsView {
 
     pub(crate) fn state(&self, identity: &ModuleIdentity) -> Option<&ModuleSymbols> {
         self.modules.get(identity).map(|entry| &entry.state)
+    }
+
+    pub(crate) fn image(&self, key: &ImageKey) -> Option<&Arc<ModuleFile>> {
+        self.images.get(key).and_then(|entry| entry.file.as_ref())
+    }
+
+    pub(crate) fn image_state(&self, key: &ImageKey) -> Option<&ImageState> {
+        self.images.get(key).map(|entry| &entry.state)
     }
 }
 
@@ -171,15 +221,17 @@ pub(crate) enum Job {
     MeasureStore,
     /// Find and read a source file.
     ReadSource { key: SourceKey },
+    /// Find a module's binary.
+    LocateImage { key: ImageKey },
 }
 
 impl Job {
-    /// The module a lookup is for; a source read is not one, and runs
-    /// beside its module's lookups.
+    /// The module a lookup is for; a source read or a binary's lookup is not
+    /// one, and runs beside its module's lookups.
     fn module(&self) -> Option<&ModuleIdentity> {
         match self {
             Job::Locate { identity } | Job::Attach { identity, .. } => Some(identity),
-            Job::Rescan | Job::MeasureStore | Job::ReadSource { .. } => None,
+            Job::Rescan | Job::MeasureStore | Job::ReadSource { .. } | Job::LocateImage { .. } => None,
         }
     }
 }
@@ -474,6 +526,57 @@ impl SymbolHub {
         });
     }
 
+    /// Asks for binaries: one never asked for is looked up, beside the
+    /// symbols the panes show.
+    pub(crate) fn want_images(&self, keys: &[ImageKey]) {
+        self.update(|state| {
+            let fresh: Vec<ImageKey> = keys
+                .iter()
+                .filter(|key| !state.view.images.contains_key(*key))
+                .cloned()
+                .collect::<BTreeSet<ImageKey>>()
+                .into_iter()
+                .collect();
+            if fresh.is_empty() {
+                return;
+            }
+            for key in &fresh {
+                state.enqueue(Job::LocateImage { key: key.clone() }, Priority::Shown);
+            }
+            state.publish(|view| {
+                for key in fresh {
+                    view.images.insert(key, ImageEntry { state: ImageState::Pending, file: None });
+                }
+            });
+            self.shared.wake.notify_all();
+        });
+    }
+
+    /// A binary's download progress; `Flow::Cancel` once the hub is closing.
+    pub(crate) fn image_progress(&self, key: &ImageKey, progress: Progress) -> Flow {
+        self.update(|state| {
+            if state.closing {
+                return Flow::Cancel;
+            }
+            state.publish(|view| {
+                view.images.insert(
+                    key.clone(),
+                    ImageEntry { state: ImageState::Downloading { done: progress.done, total: progress.total }, file: None },
+                );
+            });
+            Flow::Continue
+        })
+    }
+
+    /// What looking up `key`'s binary came to.
+    pub(crate) fn finish_image(&self, key: &ImageKey, entry: ImageEntry) {
+        self.update(|state| {
+            state.publish(|view| {
+                view.images.insert(key.clone(), entry);
+            });
+        });
+    }
+
     /// Measures the store again, behind every lookup.
     pub(crate) fn measure_store(&self) {
         let mut state = self.lock();
@@ -513,6 +616,21 @@ impl SymbolHub {
             state.publish_modules(|modules| {
                 for identity in missing {
                     modules.insert(identity, ModuleEntry::pending());
+                }
+            });
+            let missing_images: Vec<ImageKey> = state
+                .view
+                .images
+                .iter()
+                .filter(|(_, entry)| matches!(entry.state, ImageState::NotOnServer | ImageState::Failed { .. }))
+                .map(|(key, _)| key.clone())
+                .collect();
+            for key in &missing_images {
+                state.enqueue(Job::LocateImage { key: key.clone() }, Priority::Rest);
+            }
+            state.publish(|view| {
+                for key in missing_images {
+                    view.images.insert(key, ImageEntry { state: ImageState::Pending, file: None });
                 }
             });
             self.shared.wake.notify_all();

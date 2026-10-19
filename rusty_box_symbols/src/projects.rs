@@ -6,7 +6,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use crate::identity::{BuildId, Guid, ModuleIdentity, TablesIdentity};
+use crate::identity::{BuildId, Guid, ModuleIdentity, PeImageId, TablesIdentity};
+use crate::pe::FileImage;
 use crate::store::{FileStore, ListedFile, StoreError};
 use crate::tables::{declared_identity, ParseError};
 
@@ -17,12 +18,19 @@ pub struct ProjectFolders {
     pub symbols: Vec<PathBuf>,
 }
 
-/// What a debug file is indexed under.
+/// What a debug file or a binary is indexed under.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum IndexKey {
     Pdb { guid: Guid, age: u32 },
     Build(BuildId),
+    /// A PE binary: a loaded module's bytes the guest has not paged in are
+    /// read from it.
+    Image(PeImageId),
 }
+
+/// The extensions of PE binaries: executables, libraries, drivers, and the
+/// other names Windows gives a loadable image.
+const BINARY_EXTENSIONS: [&str; 8] = ["exe", "dll", "sys", "efi", "ocx", "cpl", "drv", "scr"];
 
 /// A debug file found in a project.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -53,13 +61,15 @@ pub struct ProjectIndex {
     pub problems: Vec<IndexProblem>,
 }
 
-/// Whether a file may be a debug file: a PDB by its extension, an ELF
-/// executable, library, kernel module or separate debug file by its name.
+/// Whether a file may be a debug file or a binary: a PDB or a PE binary by
+/// its extension, an ELF executable, library, kernel module or separate
+/// debug file by its name.
 fn is_candidate(path: &Path) -> bool {
     match path.extension().and_then(|extension| extension.to_str()) {
         Some(extension) => {
             let extension = extension.to_ascii_lowercase();
-            extension == "pdb"
+            BINARY_EXTENSIONS.contains(&extension.as_str())
+                || extension == "pdb"
                 || extension == "debug"
                 || extension == "ko"
                 || extension == "so"
@@ -105,6 +115,16 @@ impl ProjectIndex {
                     continue;
                 }
             };
+            if bytes.starts_with(b"MZ") {
+                match FileImage::new(bytes.as_slice()) {
+                    Ok(image) => {
+                        let key = IndexKey::Image(image.headers().image_id());
+                        index.files.entry(key).or_insert(IndexedFile { project: listed.project, path: listed.file.path });
+                    }
+                    Err(error) => index.problems.push(IndexProblem { path: listed.file.path, reason: error.to_string() }),
+                }
+                continue;
+            }
             let key = match declared_identity(&bytes) {
                 Ok(TablesIdentity::Pdb { guid, age }) => IndexKey::Pdb { guid, age },
                 Ok(TablesIdentity::Elf { build_id: Some(build_id) }) => IndexKey::Build(build_id),
@@ -112,7 +132,7 @@ impl ProjectIndex {
                 Ok(TablesIdentity::Elf { build_id: None }) => continue,
                 // A file of another kind with a candidate's name is no
                 // problem; one that claims a format and breaks is.
-                Err(ParseError::NotSymbols) => continue,
+                Err(ParseError::NotSymbols | ParseError::CompilerTypes) => continue,
                 Err(error) => {
                     index.problems.push(IndexProblem { path: listed.file.path, reason: error.to_string() });
                     continue;
@@ -132,6 +152,31 @@ impl ProjectIndex {
             ModuleIdentity::Elf { build_id, .. } => IndexKey::Build(build_id.clone()),
         };
         self.files.get(&key)
+    }
+
+    /// The project binary of the image `image`.
+    #[must_use]
+    pub fn find_image(&self, image: PeImageId) -> Option<&IndexedFile> {
+        self.files.get(&IndexKey::Image(image))
+    }
+
+    /// The file names of the projects' binaries, each once, in order: what
+    /// a guest's loaded modules are matched against to find the owner's own.
+    #[must_use]
+    pub fn binary_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = Vec::new();
+        for (key, file) in &self.files {
+            let IndexKey::Image(_) = key else {
+                continue;
+            };
+            let Some(name) = file.path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            if !names.iter().any(|known| known.eq_ignore_ascii_case(name)) {
+                names.push(name.to_owned());
+            }
+        }
+        names
     }
 
     /// The project file of an ELF build-id: a dwz supplement is named so.
@@ -164,6 +209,7 @@ mod tests {
     use crate::identity::{PdbId, PeImageId};
     use crate::memory_store::MemoryStore;
     use rusty_box_symbols_fixtures::pdb::{build_pdb, PdbFixture};
+    use rusty_box_symbols_fixtures::pe::{pe64_file, Pe64Spec, SpecSection, SECTION_CODE};
 
     fn pdb_bytes(guid: [u8; 16], age: u32) -> Vec<u8> {
         build_pdb(&PdbFixture::new(guid, age))
@@ -207,6 +253,46 @@ mod tests {
         assert!(index.is_empty());
         assert_eq!(index.problems.len(), 1);
         assert_eq!(index.problems[0].path, path);
+    }
+
+    fn binary(time_date_stamp: u32) -> Vec<u8> {
+        pe64_file(&Pe64Spec {
+            time_date_stamp,
+            size_of_image: 0x2000,
+            image_base: 0x1_4000_0000,
+            sections: vec![SpecSection { name: b".text", rva: 0x1000, bytes: vec![0xC3; 0x10], characteristics: SECTION_CODE }],
+            exception: None,
+            base_relocations: None,
+            import_address_table: None,
+        })
+    }
+
+    #[test]
+    fn a_binary_is_indexed_by_its_image_identity() {
+        let mut files = MemoryStore::default();
+        let build = PathBuf::from("work").join("build");
+        files.insert(build.join("x64").join("mydriver.sys"), binary(7));
+        files.insert(build.join("old").join("mydriver.sys"), binary(6));
+        files.insert(build.join("readme.exe"), b"a text file with a binary's name".to_vec());
+        let index = ProjectIndex::build(&mut files, &[project()]).unwrap();
+        assert_eq!(
+            index.find_image(PeImageId { time_date_stamp: 7, size_of_image: 0x2000 }),
+            Some(&IndexedFile { project: "mydriver".to_owned(), path: build.join("x64").join("mydriver.sys") })
+        );
+        assert_eq!(index.find_image(PeImageId { time_date_stamp: 7, size_of_image: 0x3000 }), None);
+        assert!(index.problems.is_empty(), "a file that is no image is passed by: {:?}", index.problems);
+        assert_eq!(index.binary_names(), ["mydriver.sys"], "each name once");
+    }
+
+    #[test]
+    fn a_binary_whose_headers_break_is_a_problem() {
+        let mut files = MemoryStore::default();
+        let mut broken = binary(7);
+        broken.truncate(0x90);
+        files.insert(PathBuf::from("work").join("build").join("mydriver.dll"), broken);
+        let index = ProjectIndex::build(&mut files, &[project()]).unwrap();
+        assert!(index.is_empty());
+        assert_eq!(index.problems.len(), 1);
     }
 
     #[test]

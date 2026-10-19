@@ -357,6 +357,10 @@ pub enum ParseError {
     Dwarf(#[from] crate::dwarf::DwarfError),
     #[error("the file is neither a PDB nor an ELF file")]
     NotSymbols,
+    /// A compiler's per-build type database (MSVC's `vc*.pdb`): a PDB with no
+    /// DBI header, which describes no linked module.
+    #[error("the PDB is a compiler's type database, which describes no linked module")]
+    CompilerTypes,
 }
 
 /// Why a layout question has no answer that can be trusted.

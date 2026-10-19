@@ -14,7 +14,7 @@ use super::kernel_layout::{same_layouts, KernelLayout};
 use super::module_identity::GuestIdentity;
 use super::xref::decode::{bare_displacement, branch_target, has_no_index};
 use super::windows::{
-    read_thread_view, read_windows, KernelLayouts, LiveTeb, ReadThrough, SystemListing, SystemView,
+    read_thread_view, read_windows, KernelLayouts, LiveTeb, ModulesElsewhere, ReadThrough, SystemListing, SystemView,
     ThreadView, ThreadViewRead, ViewMiss, ViewTarget, WindowsDiscovery,
 };
 
@@ -225,6 +225,9 @@ pub(crate) struct DebugSnapshot {
     pub(crate) vmcs: Option<u64>,
     /// The call stack, the picked frame and what was read in it.
     pub(crate) frames: FramesRead,
+    /// The owner's modules in the processes the panes do not show, which
+    /// source breakpoints resolve in too; read while the owner has any.
+    pub(crate) elsewhere: ModulesElsewhere,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -338,6 +341,7 @@ pub(crate) fn read_snapshot<T: Instrumentation, E: SliceEngine<T>>(
             through: ReadThrough::ProcessorTables,
             vmcs: None,
             frames: FramesRead::default(),
+            elsewhere: ModulesElsewhere::default(),
         };
     };
     let shown = cpu.view();
@@ -472,6 +476,7 @@ pub(crate) fn read_snapshot<T: Instrumentation, E: SliceEngine<T>>(
         through,
         vmcs: cpu.vmx_guest.map(|guest| guest.vmcs),
         frames: FramesRead::default(),
+        elsewhere: ModulesElsewhere::default(),
     }
 }
 

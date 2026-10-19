@@ -22,9 +22,8 @@ use rusty_box::cpu::{
 };
 
 use crate::debugger::control::{DebugNote, StepCut};
-use crate::debugger::inspect::SymbolIndex;
 use crate::debugger::source_breakpoints::{
-    parse_target, resolve, BreakpointTarget, PendingWhy, SourceResolution, TargetError, TargetText,
+    parse_target, resolve, BreakpointModules, BreakpointTarget, PendingWhy, SourceResolution, TargetError, TargetText,
 };
 use crate::debugger::stepping::{StepCeiling, StepKind, StepUnit};
 use crate::source::find::PathMap;
@@ -323,6 +322,10 @@ pub(crate) struct DebuggerPane {
     pub(crate) source_cursor: Option<u32>,
     /// Source or disassembly, once the owner picked one; it stays picked.
     pub(crate) code_view: Option<CodeView>,
+    /// The place the code pane last brought into view: a new one (a pause,
+    /// a step, a picked frame, a Go to) is scrolled to once, and the owner's
+    /// own scrolling stands until the place changes.
+    pub(crate) code_followed: Option<CodePlace>,
     /// Which system-service table the SSDT view lists.
     pub(crate) ssdt_table: SsdtTable,
     /// The snapshot whose modules were last asked of the symbol engine.
@@ -386,6 +389,7 @@ impl Default for DebuggerPane {
             code_cursor: None,
             source_cursor: None,
             code_view: None,
+            code_followed: None,
             ssdt_table: SsdtTable::Kernel,
             symbols_asked: None,
             kernel_layout: None,
@@ -891,7 +895,7 @@ pub(crate) fn draw_debugger_page(
                     targets,
                     applied: breakpoints,
                     names,
-                    index: snapshot.map(|snapshot| &snapshot.symbols),
+                    index: snapshot.map(BreakpointModules::of),
                     view: symbols,
                     available: step_available,
                 };
@@ -1011,7 +1015,7 @@ struct BreakpointList<'a> {
     applied: &'a [CodeBreakpoint],
     names: Namer<'a>,
     /// The pause's modules, which a source line resolves against.
-    index: Option<&'a SymbolIndex>,
+    index: Option<BreakpointModules<'a>>,
     view: &'a SymbolsView,
     /// The VM runs on the interpreter, which can stop at one.
     available: bool,
@@ -1039,7 +1043,6 @@ fn breakpoint_columns() -> [Cell; 3] {
 /// line, the first place it resolved to, the line that has the code when it
 /// is not the one asked, and how many places; or why it is pending.
 fn target_place(target: &BreakpointTarget, list: &BreakpointList<'_>) -> String {
-    let name = |address: u64| list.names.name(address).map_or_else(|| format!("{address:X}"), |named| named.label());
     match target {
         BreakpointTarget::Address(CodeBreakpoint::Linear(address)) => {
             list.names.name(*address).map(|named| named.label()).unwrap_or_default()
@@ -1049,12 +1052,17 @@ fn target_place(target: &BreakpointTarget, list: &BreakpointList<'_>) -> String 
             let Some(index) = list.index else {
                 return PENDING_NO_PAUSE.to_owned();
             };
-            match resolve(source, index, list.view) {
+            match resolve(source, &index, list.view) {
                 SourceResolution::Resolved { places } => {
                     let Some(first) = places.first() else {
                         return PENDING_NO_LINE.to_owned();
                     };
-                    let mut text = name(first.address);
+                    // A place in a process the pause does not stand in is
+                    // named by its module alone.
+                    let mut text = list
+                        .names
+                        .name(first.address)
+                        .map_or_else(|| format!("{}!{:X}", first.module, first.address), |named| named.label());
                     if first.line != source.line {
                         text.push_str(&format!(" · line {} ({} has no code)", first.line, source.line));
                     }
@@ -1188,7 +1196,7 @@ fn code_key(
             marks.targets,
             source,
             line,
-            Some(&snapshot.symbols),
+            Some(BreakpointModules::of(snapshot)),
             marks.symbols,
         )));
         return;
@@ -1199,7 +1207,7 @@ fn code_key(
         .filter(shown)
         .or_else(|| snapshot.code.first().map(|line| line.address));
     if let Some(address) = address {
-        *action = Some(DebuggerAction::SetTargets(toggled(marks.targets, address, Some(&snapshot.symbols), marks.symbols)));
+        *action = Some(DebuggerAction::SetTargets(toggled(marks.targets, address, Some(BreakpointModules::of(snapshot)), marks.symbols)));
     }
 }
 
@@ -1286,13 +1294,13 @@ impl BreakpointFieldError {
 fn toggled(
     targets: &[BreakpointTarget],
     address: u64,
-    index: Option<&SymbolIndex>,
+    index: Option<BreakpointModules<'_>>,
     view: &SymbolsView,
 ) -> Vec<BreakpointTarget> {
     let at = BreakpointTarget::Address(CodeBreakpoint::Linear(address));
     let resolves_here = |target: &BreakpointTarget| match target {
         BreakpointTarget::Source(source) => index.is_some_and(|index| {
-            matches!(resolve(source, index, view), SourceResolution::Resolved { places } if places.iter().any(|place| place.address == address))
+            matches!(resolve(source, &index, view), SourceResolution::Resolved { places } if places.iter().any(|place| place.address == address))
         }),
         BreakpointTarget::Address(_) => *target == at,
     };
@@ -2143,18 +2151,37 @@ struct CodePicks {
     instruction: Option<u64>,
     line: Option<u32>,
     view: Option<CodeView>,
+    followed: Option<CodePlace>,
 }
 
 impl CodePicks {
     fn of(pane: &DebuggerPane) -> Self {
-        CodePicks { instruction: pane.code_cursor, line: pane.source_cursor, view: pane.code_view }
+        CodePicks { instruction: pane.code_cursor, line: pane.source_cursor, view: pane.code_view, followed: pane.code_followed }
     }
 
     fn keep(self, pane: &mut DebuggerPane) {
         pane.code_cursor = self.instruction;
         pane.source_cursor = self.line;
         pane.code_view = self.view;
+        pane.code_followed = self.followed;
     }
+
+    /// Whether the pane brings `place` into view this frame: once, the first
+    /// frame it is shown.
+    fn follow(&mut self, place: CodePlace) -> bool {
+        let new = self.followed != Some(place);
+        self.followed = Some(place);
+        new
+    }
+}
+
+/// Where the code pane stands: which view, the address it shows (RIP, an
+/// address opened, a caller's call) and the source line, in the source view.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct CodePlace {
+    view: CodeView,
+    address: u64,
+    line: Option<u32>,
 }
 
 /// The code pane: a Source | Disassembly switch, then the owner's source at
@@ -2175,14 +2202,21 @@ fn code_pane(
     if segmented(ui, &mut shown, &switch) {
         picks.view = Some(shown);
     }
+    let address = match (marks.frame, snapshot.code_at) {
+        (FrameMark::Caller { code, .. }, _) => code,
+        (FrameMark::Innermost, CodeTarget::At(at)) => at.value,
+        (FrameMark::Innermost, CodeTarget::Rip) => snapshot.rip,
+    };
     let Some(source) = marks.pause.filter(|_| shown == CodeView::Source) else {
         if shown == CodeView::Source {
             ui.label(RichText::new(NO_SOURCE_HERE).color(TEXT_MUTED));
         }
-        code_rows(ui, snapshot, marks, &mut picks.instruction, action);
+        let follow = picks.follow(CodePlace { view: CodeView::Disassembly, address, line: None });
+        code_rows(ui, snapshot, marks, &mut picks.instruction, follow, action);
         return;
     };
-    let gutter = line_marks(source, marks.breakpoints, marks.targets, Some(&snapshot.symbols), marks.symbols);
+    let follow = picks.follow(CodePlace { view: CodeView::Source, address, line: Some(source.line) });
+    let gutter = line_marks(source, marks.breakpoints, marks.targets, Some(BreakpointModules::of(snapshot)), marks.symbols);
     let place = match marks.frame {
         FrameMark::Caller { .. } => PlaceMark::Caller,
         FrameMark::Innermost => match snapshot.code_at {
@@ -2196,11 +2230,11 @@ fn code_pane(
         names: Namer::new(&snapshot.symbols, marks.symbols),
         index: &snapshot.symbols,
     });
-    let pane = SourcePane { source, slot: marks.symbols.sources.get(&source.key), marks: &gutter, place, tip };
+    let pane = SourcePane { source, slot: marks.symbols.sources.get(&source.key), marks: &gutter, place, tip, follow };
     match source_rows(ui, &pane, &mut picks.line) {
         None => {}
         Some(SourceAsk::Toggle(line)) => {
-            let targets = toggled_line(marks.targets, source, line, Some(&snapshot.symbols), marks.symbols);
+            let targets = toggled_line(marks.targets, source, line, Some(BreakpointModules::of(snapshot)), marks.symbols);
             *action = Some(DebuggerAction::SetTargets(targets));
         }
         Some(SourceAsk::Locate) => {
@@ -2227,6 +2261,7 @@ fn code_rows(
     snapshot: &DebugSnapshot,
     marks: Marks<'_>,
     cursor: &mut Option<u64>,
+    follow: bool,
     action: &mut Option<DebuggerAction>,
 ) {
     let names = Namer::new(&snapshot.symbols, marks.symbols);
@@ -2291,6 +2326,11 @@ fn code_rows(
         if response.clicked() {
             *cursor = Some(line.address);
         }
+        // A new place is brought into view: the row at RIP, or the address
+        // opened (a caller's call, a Go to).
+        if follow && ((at_rip && snapshot.code_at == CodeTarget::Rip) || opened) {
+            response.scroll_to_me(Some(egui::Align::Center));
+        }
         let at_breakpoint = marks.breakpoints.contains(&CodeBreakpoint::Linear(line.address));
         match (at_rip, at_breakpoint) {
             (true, true) => lead_arrow(ui, response.rect, ACCENT_RED),
@@ -2305,7 +2345,8 @@ fn code_rows(
         response.context_menu(|ui| {
             let label = if at_breakpoint { REMOVE_BREAKPOINT_HERE } else { SET_BREAKPOINT_HERE };
             if ui.button(label).clicked() {
-                *action = Some(DebuggerAction::SetTargets(toggled(marks.targets, line.address, Some(&snapshot.symbols), marks.symbols)));
+                *action =
+                    Some(DebuggerAction::SetTargets(toggled(marks.targets, line.address, Some(BreakpointModules::of(snapshot)), marks.symbols)));
                 ui.close();
             }
             // Who refers to this instruction, to the function it starts, and
@@ -3055,6 +3096,15 @@ mod name_tests {
         BreakpointTarget::Source(crate::debugger::source_breakpoints::SourceTarget { file: "trap.asm".into(), line })
     }
 
+    /// No module of the owner's runs in another process.
+    static NOWHERE: crate::debugger::windows::ModulesElsewhere =
+        crate::debugger::windows::ModulesElsewhere { current: None, modules: Vec::new() };
+
+    /// A pause's modules: `symbols`, and nothing in other processes.
+    fn only(symbols: &crate::debugger::inspect::SymbolIndex) -> BreakpointModules<'_> {
+        BreakpointModules { index: symbols, elsewhere: &NOWHERE }
+    }
+
     /// F2 on the code a source breakpoint resolved to removes that source
     /// breakpoint, as its mark says; elsewhere it adds an address.
     #[test]
@@ -3063,14 +3113,14 @@ mod name_tests {
         let symbols = kernel_symbols();
         let at_line = KERNEL_BASE + 0x1040;
         let targets = [trap_line(100)];
-        assert_eq!(toggled(&targets, at_line, Some(&symbols), &view), []);
+        assert_eq!(toggled(&targets, at_line, Some(only(&symbols)), &view), []);
         let elsewhere = KERNEL_BASE + 0x1100;
         assert_eq!(
-            toggled(&targets, elsewhere, Some(&symbols), &view),
+            toggled(&targets, elsewhere, Some(only(&symbols)), &view),
             [trap_line(100), BreakpointTarget::Address(CodeBreakpoint::Linear(elsewhere))]
         );
         let address = [BreakpointTarget::Address(CodeBreakpoint::Linear(elsewhere))];
-        assert_eq!(toggled(&address, elsewhere, Some(&symbols), &view), []);
+        assert_eq!(toggled(&address, elsewhere, Some(only(&symbols)), &view), []);
         assert_eq!(toggled(&targets, at_line, None, &view).len(), 2, "without a pause nothing resolves");
     }
 
@@ -3085,7 +3135,7 @@ mod name_tests {
             targets: &targets,
             applied: &[],
             names: Namer::new(&symbols, &view),
-            index: Some(&symbols),
+            index: Some(only(&symbols)),
             view: &view,
             available: true,
         };

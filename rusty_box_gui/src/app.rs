@@ -2392,6 +2392,22 @@ impl NativeShellApp {
                     &shown.symbols,
                     &addresses,
                 ));
+                // The binaries its call stack needed for bytes the guest had
+                // not paged in.
+                self.symbols.want_images(&shown.frames.awaiting_images);
+                // The owner's programs in other processes, for source lines
+                // to bind in.
+                let elsewhere: Vec<crate::symbols::hub::WantedModule> = shown
+                    .elsewhere
+                    .modules
+                    .iter()
+                    .filter_map(|found| found.module.identity.known())
+                    .map(|identity| crate::symbols::hub::WantedModule {
+                        identity: identity.clone(),
+                        priority: crate::symbols::hub::Priority::Shown,
+                    })
+                    .collect();
+                self.symbols.want(&elsewhere);
             }
             // The kernel's layouts go to the run as soon as its tables load,
             // whether or not a new pause brought them.
@@ -2413,7 +2429,7 @@ impl NativeShellApp {
         let targets = control.targets();
         control.set_breakpoints(crate::debugger::source_breakpoints::applied_set(
             &targets,
-            snapshot.as_deref().map(|shown| &shown.symbols),
+            snapshot.as_deref().map(crate::debugger::source_breakpoints::BreakpointModules::of).as_ref(),
             &symbols,
         ));
         let breakpoints = control.breakpoints();
@@ -2601,7 +2617,7 @@ impl NativeShellApp {
             Some(DebuggerAction::SetTargets(targets)) => {
                 let applied = crate::debugger::source_breakpoints::applied_set(
                     &targets,
-                    snapshot.as_deref().map(|shown| &shown.symbols),
+                    snapshot.as_deref().map(crate::debugger::source_breakpoints::BreakpointModules::of).as_ref(),
                     &symbols,
                 );
                 control.set_targets(targets);
@@ -10596,6 +10612,70 @@ mod tests {
             assert_eq!(window.state().app.symbols.view().generation, generation);
         }
 
+        /// A pause whose call stack wanted a module's binary, for bytes the
+        /// guest had not paged in, asks the symbol engine for it.
+        #[test]
+        fn a_pauses_awaited_binaries_are_asked_for() {
+            let key = crate::symbols::hub::ImageKey {
+                file_name: "rbdemo.exe".to_owned(),
+                image: rusty_box_symbols::identity::PeImageId { time_date_stamp: 0x6AD5_0324, size_of_image: 0x8000 },
+            };
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = live_vm(&mut app);
+            control.pause();
+            assert_eq!(
+                control.next_between_runs(),
+                crate::debugger::control::BetweenRuns::Perform(crate::debugger::control::Task::Refresh)
+            );
+            let mut snapshot = paused_snapshot();
+            snapshot.frames.awaiting_images = vec![key.clone()];
+            control.publish(snapshot);
+            let mut window = window(app);
+            window.run();
+            open_debugger(&mut window);
+            let view = window.state().app.symbols.view();
+            assert_eq!(view.image_state(&key), Some(&crate::symbols::hub::ImageState::Pending));
+        }
+
+        /// The owner's program found in a process the pause does not stand
+        /// in has its symbols asked for, so a source line binds in it.
+        #[test]
+        fn a_pauses_modules_in_other_processes_are_asked_for() {
+            let program = rusty_box_symbols::identity::ModuleIdentity::Pe {
+                file_name: "rbdemo.exe".to_owned(),
+                image: rusty_box_symbols::identity::PeImageId { time_date_stamp: 0x6AD5_0324, size_of_image: 0x8000 },
+                pdb: None,
+            };
+            let (mut app, _command_rx, _scratch) = native_test_app();
+            let control = live_vm(&mut app);
+            control.pause();
+            assert_eq!(
+                control.next_between_runs(),
+                crate::debugger::control::BetweenRuns::Perform(crate::debugger::control::Task::Refresh)
+            );
+            let mut snapshot = paused_snapshot();
+            snapshot.elsewhere = crate::debugger::windows::ModulesElsewhere {
+                current: Some(0x195_E000),
+                modules: vec![crate::debugger::windows::ProcessModule {
+                    cr3: 0x494_F000,
+                    process: "rbdemo.exe".to_owned(),
+                    module: crate::debugger::inspect::SymModule {
+                        base: 0x1_4000_0000,
+                        size: 0x8000,
+                        name: "rbdemo.exe".to_owned(),
+                        space: crate::debugger::inspect::ModuleSpace::User,
+                        identity: crate::debugger::module_identity::GuestIdentity::Known(program.clone()),
+                    },
+                }],
+            };
+            control.publish(snapshot);
+            let mut window = window(app);
+            window.run();
+            open_debugger(&mut window);
+            let view = window.state().app.symbols.view();
+            assert_eq!(view.state(&program), Some(&crate::symbols::hub::ModuleSymbols::Pending));
+        }
+
         /// Once the kernel's tables load, its layouts go to the paused run,
         /// which reads the guest again under them.
         #[test]
@@ -11077,6 +11157,7 @@ mod tests {
                 watches: Vec::new(),
                 tip: TipRead::None,
                 awaiting: Vec::new(),
+                awaiting_images: Vec::new(),
             }
         }
 

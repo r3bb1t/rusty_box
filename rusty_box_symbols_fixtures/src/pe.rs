@@ -57,6 +57,120 @@ pub fn loaded_image(codeview: &[u8]) -> Vec<u8> {
     image
 }
 
+/// `IMAGE_SCN_CNT_CODE | IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_MEM_READ`.
+pub const SECTION_CODE: u32 = 0x6000_0020;
+/// `IMAGE_SCN_CNT_INITIALIZED_DATA | IMAGE_SCN_MEM_READ`.
+pub const SECTION_READ_ONLY: u32 = 0x4000_0040;
+/// `IMAGE_SCN_CNT_INITIALIZED_DATA | IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_WRITE`.
+pub const SECTION_WRITABLE: u32 = 0xC000_0040;
+
+/// `IMAGE_REL_BASED_HIGHLOW`.
+pub const REL_BASED_HIGHLOW: u16 = 3;
+/// `IMAGE_REL_BASED_DIR64`.
+pub const REL_BASED_DIR64: u16 = 10;
+
+/// A data-directory entry of [`pe64_file`].
+#[derive(Clone, Copy, Debug)]
+pub struct Directory {
+    pub rva: u32,
+    pub size: u32,
+}
+
+/// A section of [`pe64_file`]: its bytes are its raw data, and its virtual
+/// size is their length.
+#[derive(Clone, Debug)]
+pub struct SpecSection {
+    pub name: &'static [u8],
+    pub rva: u32,
+    pub bytes: Vec<u8>,
+    pub characteristics: u32,
+}
+
+/// What [`pe64_file`] lays out.
+#[derive(Clone, Debug)]
+pub struct Pe64Spec {
+    pub time_date_stamp: u32,
+    pub size_of_image: u32,
+    pub image_base: u64,
+    pub sections: Vec<SpecSection>,
+    pub exception: Option<Directory>,
+    pub base_relocations: Option<Directory>,
+    pub import_address_table: Option<Directory>,
+}
+
+/// A data directory at its place in the optional header.
+struct DirectorySlot {
+    index: usize,
+    directory: Option<Directory>,
+}
+
+/// The headers' size in a [`pe64_file`], and where its first section's raw
+/// data starts.
+pub const PE64_HEADERS: u32 = 0x400;
+const FILE_ALIGNMENT: usize = 0x200;
+
+/// A PE32+ file as a linker writes it: headers in the first
+/// [`PE64_HEADERS`] bytes, then each section's raw data in turn, each
+/// padded to 0x200, so no section sits at its RVA.
+pub fn pe64_file(spec: &Pe64Spec) -> Vec<u8> {
+    let mut file = vec![0u8; PE64_HEADERS as usize];
+    file[0..2].copy_from_slice(b"MZ");
+    put32(&mut file, 0x3C, 0x80);
+    let nt = 0x80;
+    file[nt..nt + 4].copy_from_slice(b"PE\0\0");
+    put16(&mut file, nt + 4, 0x8664);
+    put16(&mut file, nt + 6, spec.sections.len() as u16);
+    put32(&mut file, nt + 8, spec.time_date_stamp);
+    put16(&mut file, nt + 20, 240);
+    let opt = nt + 24;
+    put16(&mut file, opt, 0x20B);
+    file[opt + 24..opt + 32].copy_from_slice(&spec.image_base.to_le_bytes());
+    put32(&mut file, opt + 56, spec.size_of_image);
+    put32(&mut file, opt + 60, PE64_HEADERS);
+    put32(&mut file, opt + 108, 16);
+    let directories = [
+        DirectorySlot { index: 3, directory: spec.exception },
+        DirectorySlot { index: 5, directory: spec.base_relocations },
+        DirectorySlot { index: 12, directory: spec.import_address_table },
+    ];
+    for slot in directories {
+        if let Some(directory) = slot.directory {
+            put32(&mut file, opt + 112 + slot.index * 8, directory.rva);
+            put32(&mut file, opt + 112 + slot.index * 8 + 4, directory.size);
+        }
+    }
+    let table = opt + 240;
+    for (index, section) in spec.sections.iter().enumerate() {
+        let raw = file.len();
+        let raw_size = section.bytes.len().div_ceil(FILE_ALIGNMENT) * FILE_ALIGNMENT;
+        file.extend_from_slice(&section.bytes);
+        file.resize(raw + raw_size, 0);
+        let at = table + index * 40;
+        file[at..at + section.name.len()].copy_from_slice(section.name);
+        put32(&mut file, at + 8, section.bytes.len() as u32);
+        put32(&mut file, at + 12, section.rva);
+        put32(&mut file, at + 16, raw_size as u32);
+        put32(&mut file, at + 20, raw as u32);
+        put32(&mut file, at + 36, section.characteristics);
+    }
+    file
+}
+
+/// One base-relocation block: the page's RVA, then each entry as
+/// `kind << 12 | offset`, padded to a 4-byte multiple as linkers pad it.
+pub fn relocation_block(page_rva: u32, entries: &[u16]) -> Vec<u8> {
+    let mut entries = entries.to_vec();
+    if entries.len() % 2 == 1 {
+        entries.push(0);
+    }
+    let mut block = page_rva.to_le_bytes().to_vec();
+    block.extend_from_slice(&((8 + entries.len() * 2) as u32).to_le_bytes());
+    for entry in entries {
+        block.extend_from_slice(&entry.to_le_bytes());
+    }
+    block
+}
+
 /// A section of [`pe32_file`]: its name, RVA and file offset.
 struct FileSection {
     name: &'static [u8],

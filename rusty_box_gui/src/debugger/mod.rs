@@ -34,6 +34,7 @@ pub(crate) mod dump;
 pub(crate) mod fake_windows;
 pub(crate) mod frames;
 pub(crate) mod guest;
+pub(crate) mod image_memory;
 pub(crate) mod inspect;
 pub(crate) mod kernel_layout;
 pub(crate) mod memory_map;

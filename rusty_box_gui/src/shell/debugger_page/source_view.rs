@@ -15,7 +15,7 @@ use rusty_box_symbols::units::Rva;
 use egui::{Color32, RichText};
 
 use crate::debugger::inspect::SymbolIndex;
-use crate::debugger::source_breakpoints::{resolve, BreakpointTarget, SourceResolution, SourceTarget};
+use crate::debugger::source_breakpoints::{resolve, BreakpointModules, BreakpointTarget, SourceResolution, SourceTarget};
 use crate::debugger::xref::service::{AddressRange, XrefTarget};
 use super::references::REFERENCES_TO;
 use super::frames_view::{variable_rows, RowAsk, CALLER_LINE, TIP_READING, VALUE_TIP};
@@ -100,7 +100,7 @@ pub(crate) fn line_marks(
     source: &PauseSource,
     applied: &[CodeBreakpoint],
     targets: &[BreakpointTarget],
-    index: Option<&SymbolIndex>,
+    index: Option<BreakpointModules<'_>>,
     view: &SymbolsView,
 ) -> Vec<LineMarkAt> {
     let mut marks: BTreeMap<u32, LineMark> = BTreeMap::new();
@@ -115,7 +115,7 @@ pub(crate) fn line_marks(
         let BreakpointTarget::Source(target) = target else {
             continue;
         };
-        let pending = !index.is_some_and(|index| matches!(resolve(target, index, view), SourceResolution::Resolved { .. }));
+        let pending = !index.is_some_and(|index| matches!(resolve(target, &index, view), SourceResolution::Resolved { .. }));
         if pending && names_file(target, source) {
             marks.entry(target.line).or_insert(LineMark::Pending);
         }
@@ -131,14 +131,14 @@ pub(crate) fn toggled_line(
     targets: &[BreakpointTarget],
     source: &PauseSource,
     line: u32,
-    index: Option<&SymbolIndex>,
+    index: Option<BreakpointModules<'_>>,
     view: &SymbolsView,
 ) -> Vec<BreakpointTarget> {
     let marks_line = |target: &BreakpointTarget| match target {
         BreakpointTarget::Source(target) => {
             names_file(target, source)
                 && (target.line == line
-                    || index.is_some_and(|index| match resolve(target, index, view) {
+                    || index.is_some_and(|index| match resolve(target, &index, view) {
                         SourceResolution::Resolved { places } => places.iter().any(|place| line_of(source, place.address) == Some(line)),
                         SourceResolution::Pending(_) => false,
                     }))
@@ -299,6 +299,8 @@ pub(crate) struct SourcePane<'a> {
     pub(crate) place: PlaceMark,
     /// The value tip, when one is open.
     pub(crate) tip: Option<TipView<'a>>,
+    /// The line is new to the pane: it is scrolled into view this frame.
+    pub(crate) follow: bool,
 }
 
 /// What the source view's line is.
@@ -469,6 +471,9 @@ pub(crate) fn source_rows(ui: &mut egui::Ui, pane: &SourcePane<'_>, cursor: &mut
         let shown = line.replace('\t', "    ");
         let cells = line_cells(number.to_string(), digits, shown.clone(), color);
         let response = list_row(ui, GUTTER, &cells, tone, RowSense::Pick { selected: picked });
+        if current && pane.follow {
+            response.scroll_to_me(Some(egui::Align::Center));
+        }
         if let Some(view) = pane.tip.as_ref().filter(|view| view.tip.line == number) {
             let x = line_char_x(response.rect, digits, character, view.tip.column).unwrap_or(response.rect.left());
             tip_anchor = Some(egui::pos2(x, response.rect.bottom()));
@@ -590,6 +595,15 @@ mod tests {
         BreakpointTarget::Source(SourceTarget { file: "trap.asm".into(), line })
     }
 
+    /// No module of the owner's runs in another process.
+    static NOWHERE: crate::debugger::windows::ModulesElsewhere =
+        crate::debugger::windows::ModulesElsewhere { current: None, modules: Vec::new() };
+
+    /// A pause's modules: `symbols`, and nothing in other processes.
+    fn only(symbols: &SymbolIndex) -> BreakpointModules<'_> {
+        BreakpointModules { index: symbols, elsewhere: &NOWHERE }
+    }
+
     #[test]
     fn lines_with_breakpoints_are_marked_set_or_pending() {
         let view = hub_with_kernel_code(loaded()).view();
@@ -598,7 +612,7 @@ mod tests {
         // Line 104 by its address, line 100 by source, line 300 pending.
         let applied = [CodeBreakpoint::Linear(KERNEL_BASE + 0x1050), CodeBreakpoint::Linear(KERNEL_BASE + 0x1040)];
         let targets = [trap_line(100), BreakpointTarget::Address(applied[0]), trap_line(300)];
-        let marks = line_marks(&source, &applied, &targets, Some(&symbols), &view);
+        let marks = line_marks(&source, &applied, &targets, Some(only(&symbols)), &view);
         assert_eq!(
             marks.into_iter().collect::<Vec<LineMarkAt>>(),
             [
@@ -618,10 +632,10 @@ mod tests {
         let symbols = kernel_symbols();
         let source = at_line_100();
         let address = BreakpointTarget::Address(CodeBreakpoint::Linear(KERNEL_BASE + 0x1050));
-        assert_eq!(toggled_line(&[trap_line(100)], &source, 100, Some(&symbols), &view), []);
-        assert_eq!(toggled_line(&[address.clone()], &source, 104, Some(&symbols), &view), []);
+        assert_eq!(toggled_line(&[trap_line(100)], &source, 100, Some(only(&symbols)), &view), []);
+        assert_eq!(toggled_line(&[address.clone()], &source, 104, Some(only(&symbols)), &view), []);
         let added = BreakpointTarget::Source(SourceTarget { file: TRAP.into(), line: 104 });
-        assert_eq!(toggled_line(&[trap_line(100)], &source, 104, Some(&symbols), &view), [trap_line(100), added]);
+        assert_eq!(toggled_line(&[trap_line(100)], &source, 104, Some(only(&symbols)), &view), [trap_line(100), added]);
     }
 
     /// The shown line of a Go to is ringed, not arrowed: the arrow means RIP.

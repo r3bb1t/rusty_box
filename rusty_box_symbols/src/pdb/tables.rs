@@ -79,6 +79,20 @@ pub(crate) struct Addresses {
 }
 
 impl Addresses {
+    /// Whether no section starts between RVAs `a` and `b`, so a public at one
+    /// may name the other (a public has no size, so its section bounds it).
+    /// A rewritten binary's sections are its original layout's, which bound
+    /// nothing in the final one: there every pair passes.
+    pub(crate) fn one_section(&self, a: u64, b: u64) -> bool {
+        match &self.omap {
+            Some(_) => true,
+            None => {
+                let starts_at_or_below = |rva: u64| self.sections.iter().filter(|start| **start <= rva).count();
+                starts_at_or_below(a) == starts_at_or_below(b)
+            }
+        }
+    }
+
     pub(crate) fn rva(&self, segment: u16, offset: u32) -> Option<u64> {
         let index = usize::from(segment).checked_sub(1)?;
         let source = self.sections.get(index)?.checked_add(u64::from(offset))?;
@@ -214,6 +228,11 @@ pub fn pdb_identity(bytes: &[u8]) -> Result<TablesIdentity, ParseError> {
     let info_stream = required(&mut file, INFO_STREAM, "PDB info")?;
     let head = info::decode_head(Bytes::new(&info_stream)).map_err(|source| short("PDB info", source))?;
     let dbi_stream = required(&mut file, DBI_STREAM, "DBI")?;
+    // The compiler's own PDB beside a build's objects has an info stream
+    // and no DBI header: nothing links to it.
+    if dbi_stream.len() < dbi::HEADER_BYTES {
+        return Err(ParseError::CompilerTypes);
+    }
     let header = dbi::decode_header(Bytes::new(&dbi_stream)).map_err(|source| short("DBI header", source))?;
     Ok(TablesIdentity::Pdb { guid: head.guid, age: header.age })
 }
@@ -518,7 +537,8 @@ impl PdbTables {
             .publics
             .partition_point(|public| public.rva <= at)
             .checked_sub(1)
-            .and_then(|index| self.publics.get(index))?;
+            .and_then(|index| self.publics.get(index))
+            .filter(|public| self.addresses.one_section(public.rva, at))?;
         Some(SymbolHit {
             name: public.name.clone(),
             offset: at.saturating_sub(public.rva),

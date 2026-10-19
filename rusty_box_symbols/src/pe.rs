@@ -33,8 +33,12 @@ const SECTION_HEADER_BYTES: usize = 40;
 /// The optional-header bytes read: every field used lies in the first 168
 /// (PE32+'s debug data-directory entry ends there); 240 is PE32+'s size.
 const OPTIONAL_READ_BYTES: usize = 240;
+/// `IMAGE_DIRECTORY_ENTRY_BASERELOC`.
+const BASE_RELOCATION_DIRECTORY_INDEX: u32 = 5;
 /// `IMAGE_DIRECTORY_ENTRY_DEBUG`.
 const DEBUG_DIRECTORY_INDEX: u32 = 6;
+/// `IMAGE_DIRECTORY_ENTRY_IAT`.
+const IAT_DIRECTORY_INDEX: u32 = 12;
 const DEBUG_ENTRY_BYTES: usize = 28;
 /// A debug directory with more entries than this is not a real image's
 /// (link.exe writes a handful: CodeView, POGO, VC feature, repro).
@@ -78,22 +82,37 @@ pub struct FileHeader {
     pub size_of_optional_header: u16,
 }
 
-/// The fields of the optional header the identity needs.
+/// The fields of the optional header the identity and a file's loaded view
+/// need.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OptionalHeader {
     pub kind: OptionalHeaderKind,
+    /// The address the image is linked to load at.
+    pub image_base: u64,
     pub size_of_image: u32,
     pub size_of_headers: u32,
     /// Data directory 6, when the header has it and it is not empty.
     pub debug_directory: Option<DataDirectory>,
+    /// Data directory 5: the fixups the loader applies at another base.
+    pub base_relocations: Option<DataDirectory>,
+    /// Data directory 12: the slots the loader fills with imports.
+    pub import_address_table: Option<DataDirectory>,
 }
 
 /// Where one kind's optional-header fields sit.
 #[derive(Clone, Copy)]
 struct OptionalLayout {
     kind: OptionalHeaderKind,
+    image_base: ImageBaseField,
     rva_count_at: usize,
     directories_at: usize,
+}
+
+/// `ImageBase`: a `u32` at +28 in PE32, a `u64` at +24 in PE32+.
+#[derive(Clone, Copy)]
+enum ImageBaseField {
+    Narrow,
+    Wide,
 }
 
 /// One `IMAGE_SECTION_HEADER`.
@@ -117,7 +136,7 @@ impl SectionHeader {
 
     /// How far the loader maps the section: its virtual size, or its raw
     /// size when that is larger.
-    fn span(&self) -> u64 {
+    pub(crate) fn span(&self) -> u64 {
         u64::from(self.virtual_size.max(self.size_of_raw_data))
     }
 
@@ -156,9 +175,12 @@ pub struct PeHeaders {
     pub machine: u16,
     pub time_date_stamp: u32,
     pub kind: OptionalHeaderKind,
+    pub image_base: u64,
     pub size_of_image: u32,
     pub size_of_headers: u32,
     pub debug_directory: Option<DataDirectory>,
+    pub base_relocations: Option<DataDirectory>,
+    pub import_address_table: Option<DataDirectory>,
     pub sections: Vec<SectionHeader>,
 }
 
@@ -320,39 +342,64 @@ pub fn decode_optional_header(optional: Bytes<'_>, declared_size: u16) -> Result
     let layout = match magic {
         0x10B => OptionalLayout {
             kind: OptionalHeaderKind::Pe32,
+            image_base: ImageBaseField::Narrow,
             rva_count_at: 92,
             directories_at: 96,
         },
         0x20B => OptionalLayout {
             kind: OptionalHeaderKind::Pe32Plus,
+            image_base: ImageBaseField::Wide,
             rva_count_at: 108,
             directories_at: 112,
         },
         found => return Err(HeaderError::BadOptionalMagic { found }),
     };
+    let image_base = match layout.image_base {
+        ImageBaseField::Narrow => optional.u32_le(28).map(u64::from),
+        ImageBaseField::Wide => optional.array::<8>(24).map(u64::from_le_bytes),
+    }
+    .map_err(|source| cut_short(what, source))?;
     let size_of_image = optional.u32_le(56).map_err(|source| cut_short(what, source))?;
     let size_of_headers = optional.u32_le(60).map_err(|source| cut_short(what, source))?;
     let rva_count = optional.u32_le(layout.rva_count_at).unwrap_or(0);
-    // Directory 6, 8 bytes each: offsets far below usize's limit.
-    let debug_at = layout.directories_at.wrapping_add(48);
-    let in_header = debug_at.wrapping_add(8) <= usize::from(declared_size);
-    let debug_directory = if rva_count > DEBUG_DIRECTORY_INDEX && in_header {
-        match (optional.u32_le(debug_at), optional.u32_le(debug_at.wrapping_add(4))) {
-            (Ok(rva), Ok(size)) if rva != 0 && size != 0 => Some(DataDirectory {
-                rva: Rva(u64::from(rva)),
-                size,
-            }),
-            (Ok(_) | Err(_), Ok(_) | Err(_)) => None,
-        }
-    } else {
-        None
-    };
+    let directories = Directories { optional, layout, rva_count, declared_size };
     Ok(OptionalHeader {
         kind: layout.kind,
+        image_base,
         size_of_image,
         size_of_headers,
-        debug_directory,
+        debug_directory: directories.entry(DEBUG_DIRECTORY_INDEX),
+        base_relocations: directories.entry(BASE_RELOCATION_DIRECTORY_INDEX),
+        import_address_table: directories.entry(IAT_DIRECTORY_INDEX),
     })
+}
+
+/// An optional header's data directory, as far as the header holds it.
+struct Directories<'a> {
+    optional: Bytes<'a>,
+    layout: OptionalLayout,
+    rva_count: u32,
+    declared_size: u16,
+}
+
+impl Directories<'_> {
+    /// Entry `index`, when the header has it and it is not empty: an entry
+    /// past the header's declared size, or past `NumberOfRvaAndSizes`, is
+    /// absent.
+    #[cfg_attr(all(test, not(debug_assertions)), no_panic)]
+    fn entry(&self, index: u32) -> Option<DataDirectory> {
+        // Entries are 8 bytes; every index read is below 16, so the offsets
+        // stay far below usize's limit.
+        let at = self.layout.directories_at.wrapping_add(usize::try_from(index).ok()?.wrapping_mul(8));
+        let in_header = at.wrapping_add(8) <= usize::from(self.declared_size);
+        if self.rva_count <= index || !in_header {
+            return None;
+        }
+        match (self.optional.u32_le(at), self.optional.u32_le(at.wrapping_add(4))) {
+            (Ok(rva), Ok(size)) if rva != 0 && size != 0 => Some(DataDirectory { rva: Rva(u64::from(rva)), size }),
+            (Ok(_) | Err(_), Ok(_) | Err(_)) => None,
+        }
+    }
 }
 
 /// One `IMAGE_SECTION_HEADER` (40 bytes).
@@ -492,9 +539,12 @@ where
         machine: file.machine,
         time_date_stamp: file.time_date_stamp,
         kind: optional.kind,
+        image_base: optional.image_base,
         size_of_image: optional.size_of_image,
         size_of_headers: optional.size_of_headers,
         debug_directory: optional.debug_directory,
+        base_relocations: optional.base_relocations,
+        import_address_table: optional.import_address_table,
         sections,
     })
 }

@@ -8,11 +8,13 @@ use rusty_box_symbols::fs_store::FsStore;
 use rusty_box_symbols::http::HttpClient;
 use rusty_box_symbols::identity::ModuleIdentity;
 use rusty_box_symbols::projects::{Freshness, ProjectIndex};
-use rusty_box_symbols::service::{attach_file, LocateOutcome, SymbolService, SymbolSource};
+use rusty_box_symbols::service::{attach_file, ImageOutcome, LocateOutcome, SymbolService, SymbolSource};
 use rusty_box_symbols::store::{FileStore, StoreError, SymbolStore, MAX_FILE_BYTES};
 use rusty_box_symbols::ureq_http::UreqHttp;
 
-use super::hub::{HubConfig, Job, ModuleEntry, ModuleSymbols, SourceKey, StoreMeasure, SymbolHub, Ticket};
+use super::hub::{
+    HubConfig, ImageEntry, ImageState, Job, ModuleEntry, ModuleSymbols, SourceKey, StoreMeasure, SymbolHub, Ticket,
+};
 use crate::source::find::{load_source, ProjectLookup, SourceFolders, SourceRequest, MAX_SOURCE_BYTES};
 
 /// How many lookups run at once.
@@ -142,6 +144,13 @@ pub(crate) fn perform<F, H, M, B>(
                     ),
                     Job::Rescan => hub.fail_projects(reason),
                     Job::MeasureStore => hub.set_store_usage(StoreMeasure::Failed(reason)),
+                    Job::LocateImage { key } => hub.finish_image(
+                        key,
+                        ImageEntry {
+                            state: ImageState::Failed { reason, retry: rusty_box_symbols::http::Retry::Retryable },
+                            file: None,
+                        },
+                    ),
                     // Taken before the service is made.
                     Job::ReadSource { .. } => {}
                 }
@@ -187,8 +196,26 @@ pub(crate) fn perform<F, H, M, B>(
             Ok(usage) => StoreMeasure::Measured(usage),
             Err(error) => StoreMeasure::Failed(error.to_string()),
         }),
+        Job::LocateImage { key } => {
+            let projects = hub.view().projects.clone();
+            let outcome = current.service.locate_image(&key.file_name, key.image, &projects, |progress| {
+                hub.image_progress(&key, progress)
+            });
+            hub.finish_image(&key, image_entry_of(outcome));
+        }
         // Taken before the service is made.
         Job::ReadSource { .. } => {}
+    }
+}
+
+/// What a binary's lookup is to the shell.
+fn image_entry_of(outcome: ImageOutcome) -> ImageEntry {
+    match outcome {
+        ImageOutcome::Loaded { file, from } => ImageEntry { state: ImageState::Loaded { from }, file: Some(file) },
+        ImageOutcome::NotOnServer => ImageEntry { state: ImageState::NotOnServer, file: None },
+        ImageOutcome::Unavailable { reason } => {
+            ImageEntry { state: ImageState::Failed { retry: reason.retry(), reason: reason.to_string() }, file: None }
+        }
     }
 }
 
@@ -300,7 +327,8 @@ pub(crate) fn entry_of(outcome: LocateOutcome) -> ModuleEntry {
 mod tests {
     use super::*;
     use crate::source::find::{FoundBy, PathMap, SourceCheck, SourceFound};
-    use crate::symbols::hub::{Priority, ProjectSources, SourceKey, SourceSlot, WantedModule};
+    use crate::symbols::hub::{ImageKey, ImageState, Priority, ProjectSources, SourceKey, SourceSlot, WantedModule};
+    use rusty_box_symbols_fixtures::pe::{pe64_file, Pe64Spec, SpecSection, SECTION_CODE};
     use rusty_box_symbols::http::{Flow, Progress, Retry};
     use rusty_box_symbols::identity::{Guid, PdbId, PeImageId};
     use rusty_box_symbols::memory_store::MemoryStore;
@@ -755,6 +783,57 @@ mod tests {
         assert!(before.modules.is_empty(), "a published view never changes");
         assert_eq!(after.modules.len(), 1);
         assert_ne!(after.generation, before.generation);
+    }
+
+    const WIDGET: PeImageId = PeImageId { time_date_stamp: 0x4549_AD6E, size_of_image: 0x2000 };
+
+    fn widget_key() -> ImageKey {
+        ImageKey { file_name: "widget.dll".into(), image: WIDGET }
+    }
+
+    fn widget_binary() -> Vec<u8> {
+        pe64_file(&Pe64Spec {
+            time_date_stamp: WIDGET.time_date_stamp,
+            size_of_image: WIDGET.size_of_image,
+            image_base: 0x7FF_0000_0000,
+            sections: vec![SpecSection { name: b".text", rva: 0x1000, bytes: vec![0xC3; 0x10], characteristics: SECTION_CODE }],
+            exception: None,
+            base_relocations: None,
+            import_address_table: None,
+        })
+    }
+
+    #[test]
+    fn a_wanted_binary_is_looked_up_once_and_published() {
+        let mut http = ScriptedHttp::default();
+        http.respond(&format!("{MSDL}/widget.dll/4549AD6E2000/widget.dll"), 200, widget_binary());
+        let config = config(Vec::new());
+        let hub = SymbolHub::new(config.clone());
+        let mut worker = Worker::new(&config, MemoryStore::default(), http);
+        hub.want_images(&[widget_key()]);
+        hub.want_images(&[widget_key()]);
+        assert_eq!(hub.view().image_state(&widget_key()), Some(&ImageState::Pending));
+        let ticket = hub.try_next_job().expect("the lookup");
+        assert_eq!(ticket.job, Job::LocateImage { key: widget_key() });
+        assert!(hub.try_next_job().is_none(), "asked twice, looked up once");
+        worker.perform(&hub, ticket);
+        let view = hub.view();
+        assert!(matches!(view.image_state(&widget_key()), Some(ImageState::Loaded { from: SymbolSource::Server { .. } })));
+        assert_eq!(view.image(&widget_key()).map(|file| file.image_id()), Some(WIDGET));
+    }
+
+    #[test]
+    fn a_binary_no_server_has_is_not_on_the_server_and_settings_ask_again() {
+        let config = config(Vec::new());
+        let hub = SymbolHub::new(config.clone());
+        let mut worker = Worker::new(&config, MemoryStore::default(), ScriptedHttp::default());
+        hub.want_images(&[widget_key()]);
+        worker.drain(&hub);
+        assert_eq!(hub.view().image_state(&widget_key()), Some(&ImageState::NotOnServer));
+        hub.want_images(&[widget_key()]);
+        assert!(hub.try_next_job().is_none(), "not asked again this run");
+        hub.reconfigure(config);
+        assert_eq!(hub.view().image_state(&widget_key()), Some(&ImageState::Pending), "new settings may find it");
     }
 
     #[test]

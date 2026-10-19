@@ -7,12 +7,15 @@ use rusty_box::cpu::{CodeSize, CpuDebugView};
 use rusty_box_symbols::identity::ModuleIdentity;
 
 use super::guest::{GuestMemory, Root};
-use super::inspect::{linear_of, DebugSnapshot, SymbolIndex, Viewing, WOW64_CODE_SELECTOR};
+use super::image_memory::ImageBacked;
+use super::inspect::{linear_of, DebugSnapshot, SymModule, SymbolIndex, Viewing, WOW64_CODE_SELECTOR};
 use super::threads::SavedRegisters;
-use super::unwind::{unwind, CodeWidth, Frame, FrameFound, FrameRegisters, Stack, StackEnd, UnwindModule, Unwinding, RBP, RSP};
+use super::unwind::{
+    caller_of, unwind, CodeWidth, Frame, FrameFound, FrameRegisters, Stack, StackEnd, UnwindModule, Unwinding, RBP, RSP,
+};
 use super::variables::{frame_scope, locals_of, FrameContext, Innermost, PathRoot, ValuePath, VariableRow};
 use super::watch::{read_tip, read_watch, unread_watch};
-use crate::symbols::hub::SymbolsView;
+use crate::symbols::hub::{ImageKey, SymbolsView};
 
 /// What the variables panes ask of a pause: the picked frame, the watches,
 /// which values are expanded, and how many pages of each expanded array.
@@ -80,6 +83,9 @@ pub(crate) struct FramesRead {
     pub(crate) tip: TipRead,
     /// Modules whose tables the read wanted and the symbol view did not have.
     pub(crate) awaiting: Vec<ModuleIdentity>,
+    /// Binaries the read wanted, for bytes the guest had not paged in, and
+    /// the symbol view did not have yet.
+    pub(crate) awaiting_images: Vec<ImageKey>,
 }
 
 impl Default for FramesRead {
@@ -92,6 +98,7 @@ impl Default for FramesRead {
             watches: Vec::new(),
             tip: TipRead::None,
             awaiting: Vec::new(),
+            awaiting_images: Vec::new(),
         }
     }
 }
@@ -170,6 +177,32 @@ pub(crate) fn frames_at(snapshot: &DebugSnapshot) -> FramesAt {
     }
 }
 
+/// Where a caller is looked for: the address space, the modules its code
+/// may be in, and the code's width.
+#[derive(Clone, Copy)]
+pub(crate) struct CallerOf<'a> {
+    pub(crate) root: Root,
+    pub(crate) modules: &'a [SymModule],
+    pub(crate) width: CodeWidth,
+}
+
+/// The frame `frame` returns to, the modules' bytes the guest has not paged
+/// in read from their binaries: where Step Out runs to.
+pub(crate) fn caller_frame<G: GuestMemory>(
+    memory: &mut G,
+    of: &CallerOf<'_>,
+    symbols: Option<&SymbolsView>,
+    frame: &Frame,
+) -> Option<Frame> {
+    let mut memory = ImageBacked::new(memory, of.modules, symbols);
+    let modules = unwind_modules(of.modules);
+    caller_of(&mut memory, &Unwinding { root: of.root, modules: &modules, width: of.width }, frame).ok()
+}
+
+fn unwind_modules(modules: &[SymModule]) -> Vec<UnwindModule> {
+    modules.iter().map(|module| UnwindModule { base: module.base, size: module.size }).collect()
+}
+
 /// The stack from `at` and the frame `request` picks (the innermost when
 /// the stack is shorter).
 pub(crate) fn read_frames<G: GuestMemory>(
@@ -179,11 +212,12 @@ pub(crate) fn read_frames<G: GuestMemory>(
     symbols: Option<&SymbolsView>,
     request: &InspectRequest,
 ) -> FramesRead {
+    // A module's bytes the guest has not paged in are read from its binary.
+    let mut memory = ImageBacked::new(memory, &index.modules, symbols);
     let stack = match at.width {
         Some(width) => {
-            let modules: Vec<UnwindModule> =
-                index.modules.iter().map(|module| UnwindModule { base: module.base, size: module.size }).collect();
-            unwind(memory, &Unwinding { root: at.root, modules: &modules, width }, at.start)
+            let modules = unwind_modules(&index.modules);
+            unwind(&mut memory, &Unwinding { root: at.root, modules: &modules, width }, at.start)
         }
         None => Stack { frames: vec![Frame { registers: at.start, how: FrameFound::Registers }], end: StackEnd::SixteenBit },
     };
@@ -198,9 +232,10 @@ pub(crate) fn read_frames<G: GuestMemory>(
         .unwrap_or_default();
     let picked = at.width.and_then(|width| stack.frames.get(selected).map(|frame| Picked { frame, selected, width }));
     let read = match picked {
-        Some(picked) => read_in_frame(memory, at, index, symbols, &picked, request),
+        Some(picked) => read_in_frame(&mut memory, at, index, symbols, &picked, request),
         None => FrameRead::unread(LocalsRead::NotAsked, request, "16-bit code's variables are not read"),
     };
+    let awaiting_images = memory.into_awaited();
     FramesRead {
         frames: stack.frames,
         end: stack.end,
@@ -209,6 +244,7 @@ pub(crate) fn read_frames<G: GuestMemory>(
         watches: read.watches,
         tip: read.tip,
         awaiting,
+        awaiting_images,
     }
 }
 
@@ -291,14 +327,16 @@ mod tests {
     use crate::debugger::module_identity::GuestIdentity;
     use crate::debugger::unwind::RBX;
     use crate::debugger::variables::{ShownValue, Signedness};
-    use crate::symbols::hub::{ModuleEntry, ModuleSymbols};
+    use crate::symbols::hub::{ImageEntry, ImageKey, ImageState, ModuleEntry, ModuleSymbols};
     use rusty_box_symbols::identity::PeImageId;
+    use rusty_box_symbols::module_file::ModuleFile;
     use rusty_box_symbols::service::SymbolSource;
     use rusty_box_symbols::tables::SymbolTables;
     use rusty_box_symbols_fixtures::pdb::{
         build_pdb, FixtureField, FixtureLine, FixtureLocal, FixturePlace, FixtureProcedure, FixtureScope, FixtureType,
         FixtureUdt, PdbFixture, UdtKind,
     };
+    use rusty_box_symbols_fixtures::pe::{pe64_file, Directory, Pe64Spec, SpecSection, SECTION_CODE, SECTION_READ_ONLY};
     use std::sync::Arc;
 
     /// CodeView's `RSP`.
@@ -558,6 +596,124 @@ mod tests {
         let read = read_frames(&mut leaf_called_from_main(), &at_f(None), &index(), None, &request(0));
         assert_eq!(read.frames.len(), 1);
         assert_eq!(read.end, StackEnd::SixteenBit);
+    }
+
+    const UNWOUND: PeImageId = PeImageId { time_date_stamp: 0x5E1F_0002, size_of_image: 0x4000 };
+
+    fn unwound_identity() -> ModuleIdentity {
+        ModuleIdentity::Pe { file_name: "unwound.exe".into(), image: UNWOUND, pdb: None }
+    }
+
+    fn unwound_key() -> ImageKey {
+        ImageKey { file_name: "unwound.exe".into(), image: UNWOUND }
+    }
+
+    /// `unwound.exe` linked at `BASE`: `main` at 0x1000 and `f` at 0x1100,
+    /// whose prolog is `sub rsp, 0x18` (four bytes), its unwind info at
+    /// 0x2000 and its `RUNTIME_FUNCTION` at 0x3000.
+    fn unwound_binary() -> Vec<u8> {
+        let mut text = vec![0x90u8; 0x200];
+        text[0x100..0x104].copy_from_slice(&[0x48, 0x83, 0xEC, 0x18]);
+        // Version 1, a 4-byte prolog, one code: UWOP_ALLOC_SMALL of 0x18 at 4.
+        let info = vec![0x01, 0x04, 0x01, 0x00, 0x04, 0x22, 0x00, 0x00];
+        let mut pdata = Vec::new();
+        for field in [0x1100u32, 0x1140, 0x2000] {
+            pdata.extend_from_slice(&field.to_le_bytes());
+        }
+        pe64_file(&Pe64Spec {
+            time_date_stamp: UNWOUND.time_date_stamp,
+            size_of_image: UNWOUND.size_of_image,
+            image_base: BASE,
+            sections: vec![
+                SpecSection { name: b".text", rva: 0x1000, bytes: text, characteristics: SECTION_CODE },
+                SpecSection { name: b".rdata", rva: 0x2000, bytes: info, characteristics: SECTION_READ_ONLY },
+                SpecSection { name: b".pdata", rva: 0x3000, bytes: pdata, characteristics: SECTION_READ_ONLY },
+            ],
+            exception: Some(Directory { rva: 0x3000, size: 12 }),
+            base_relocations: None,
+            import_address_table: None,
+        })
+    }
+
+    /// Paused in `f` past its prolog, called from `main + 5`; the guest has
+    /// paged in the code alone, not the headers or the unwind data.
+    fn f_with_unwind_data_paged_out() -> FakeGuest {
+        let mut guest = FakeGuest::new(CR3);
+        guest.write(CR3, BASE + 0x1000, &[0x90; 0x1000]);
+        guest.write_u64(CR3, STACK + 0x18, MAIN + 5);
+        guest.write_u64(CR3, STACK + 0x20, 0);
+        guest
+    }
+
+    fn unwound_index() -> SymbolIndex {
+        let mut index = index();
+        index.modules[0].name = "unwound.exe".into();
+        index.modules[0].size = u64::from(UNWOUND.size_of_image);
+        index.modules[0].identity = GuestIdentity::Known(unwound_identity());
+        index
+    }
+
+    fn view_with_image(entry: ImageEntry) -> SymbolsView {
+        let mut view = SymbolsView::default();
+        view.images.insert(unwound_key(), entry);
+        view
+    }
+
+    fn at_f_past_prolog() -> FramesAt {
+        FramesAt { root: Root::Live, width: Some(CodeWidth::Long64), start: registers_at(F + 0x10, STACK), xmm: None }
+    }
+
+    #[test]
+    fn unwind_data_the_guest_has_not_paged_in_is_read_from_the_modules_binary() {
+        let file = ModuleFile::parse(unwound_binary()).expect("the fixture parses");
+        let view = view_with_image(ImageEntry {
+            state: ImageState::Loaded { from: SymbolSource::Store { path: "unwound.exe".into() } },
+            file: Some(Arc::new(file)),
+        });
+        let read = read_frames(&mut f_with_unwind_data_paged_out(), &at_f_past_prolog(), &unwound_index(), Some(&view), &request(0));
+        assert_eq!(read.frames.len(), 2, "f, then main: {:?}", read.end);
+        assert_eq!(read.frames[1].registers.rip, MAIN + 5);
+        assert_eq!(read.frames[1].registers.rsp, STACK + 0x20);
+        assert_eq!(read.frames[1].how, FrameFound::Unwind);
+        assert!(read.awaiting_images.is_empty());
+    }
+
+    /// Step Out finds where `f` returns the same way the call stack does.
+    #[test]
+    fn the_caller_step_out_runs_to_is_found_through_the_binary() {
+        let file = ModuleFile::parse(unwound_binary()).expect("the fixture parses");
+        let view = view_with_image(ImageEntry {
+            state: ImageState::Loaded { from: SymbolSource::Store { path: "unwound.exe".into() } },
+            file: Some(Arc::new(file)),
+        });
+        let frame = Frame { registers: registers_at(F + 0x10, STACK), how: FrameFound::Registers };
+        let index = unwound_index();
+        let unwinding = CallerOf { root: Root::Live, modules: &index.modules, width: CodeWidth::Long64 };
+        let caller = caller_frame(&mut f_with_unwind_data_paged_out(), &unwinding, Some(&view), &frame);
+        assert_eq!(caller.map(|caller| caller.registers.rip), Some(MAIN + 5));
+        let without = caller_frame(&mut f_with_unwind_data_paged_out(), &unwinding, None, &frame);
+        assert_eq!(without, None, "no binary, no caller");
+    }
+
+    #[test]
+    fn a_binary_the_view_does_not_have_yet_is_awaited() {
+        let read = read_frames(&mut f_with_unwind_data_paged_out(), &at_f_past_prolog(), &unwound_index(), None, &request(0));
+        assert_eq!(read.frames.len(), 1);
+        assert_eq!(read.end, StackEnd::Unreadable { at: BASE });
+        assert_eq!(read.awaiting_images, [unwound_key()]);
+        let pending = view_with_image(ImageEntry { state: ImageState::Pending, file: None });
+        let read =
+            read_frames(&mut f_with_unwind_data_paged_out(), &at_f_past_prolog(), &unwound_index(), Some(&pending), &request(0));
+        assert_eq!(read.awaiting_images, [unwound_key()], "still being looked up");
+    }
+
+    #[test]
+    fn a_binary_that_was_not_found_is_not_awaited_again() {
+        let missing = view_with_image(ImageEntry { state: ImageState::NotOnServer, file: None });
+        let read =
+            read_frames(&mut f_with_unwind_data_paged_out(), &at_f_past_prolog(), &unwound_index(), Some(&missing), &request(0));
+        assert_eq!(read.end, StackEnd::Unreadable { at: BASE });
+        assert!(read.awaiting_images.is_empty(), "a refresh would find nothing new");
     }
 
     #[test]

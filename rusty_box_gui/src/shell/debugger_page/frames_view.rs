@@ -550,12 +550,16 @@ pub(crate) fn variable_rows(
             | RowKind::MoreElements { .. }
             | RowKind::Ceiling => TEXT_PRIMARY,
         };
+        let value = value_text(&row.value, names);
+        // The whole value, however narrow the pane cuts its cell.
+        let whole = format!("{} = {value}\n{}", row.name, row.type_name);
         let cells = [
             Cell::left(format!("{}{}", " ".repeat(indent(row)), row.name), name_color, name_chars),
-            Cell::fill(value_text(&row.value, names), value_color(&row.value)),
+            Cell::fill(value, value_color(&row.value)),
             Cell::left(row.type_name.clone(), TEXT_MUTED, type_chars),
         ];
-        let response = list_row(ui, CHEVRON_LEAD, &cells, Tone::Plain, RowSense::Pick { selected: false });
+        let response =
+            list_row(ui, CHEVRON_LEAD, &cells, Tone::Plain, RowSense::Pick { selected: false }).on_hover_text(whole);
         let chevron = response.rect.translate(egui::vec2(indent(row) as f32 * character, 0.0));
         match row.expand {
             Expand::Leaf => {}

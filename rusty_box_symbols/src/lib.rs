@@ -53,6 +53,7 @@ pub mod identity;
 mod line_index;
 #[cfg(any(test, feature = "fakes"))]
 pub mod memory_store;
+pub mod module_file;
 pub mod pdb;
 pub mod pe;
 pub mod projects;

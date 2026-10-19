@@ -928,6 +928,90 @@ pub(crate) fn read_windows<G: GuestMemory>(
     }
 }
 
+/// A module of a process other than the one the processor runs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ProcessModule {
+    /// The process's address space: its `DirectoryTableBase`.
+    pub(crate) cr3: u64,
+    /// `EPROCESS.ImageFileName`.
+    pub(crate) process: String,
+    pub(crate) module: SymModule,
+}
+
+/// The modules of a name asked for, in every process but the running one,
+/// and the running process's own address space.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ModulesElsewhere {
+    /// The `DirectoryTableBase` of the process the processor runs, when one
+    /// is listed as running.
+    pub(crate) current: Option<u64>,
+    pub(crate) modules: Vec<ProcessModule>,
+}
+
+/// The user modules whose file names are among `names` (any case) in every
+/// process but the running one, each read in its own process's address
+/// space: where the owner's own programs run while the pause stands
+/// elsewhere.
+pub(crate) fn modules_elsewhere<G: GuestMemory>(
+    cpu: &mut G,
+    view: &CpuDebugView,
+    discovery: &mut WindowsDiscovery,
+    layout: Option<&Arc<KernelLayout>>,
+    names: &[String],
+) -> ModulesElsewhere {
+    if names.is_empty() {
+        return ModulesElsewhere::default();
+    }
+    discovery.under(layout);
+    match kernel_tables(cpu, view, discovery) {
+        ReadThrough::ProcessorTables => {
+            modules_elsewhere_through(cpu, view, discovery, layout, ReadThrough::ProcessorTables, names)
+        }
+        ReadThrough::KernelTables { cr3 } => {
+            let mut kernel = KernelTablesView { cpu, cr3 };
+            modules_elsewhere_through(&mut kernel, view, discovery, layout, ReadThrough::KernelTables { cr3 }, names)
+        }
+    }
+}
+
+/// [`modules_elsewhere`] through the page tables `through` names.
+fn modules_elsewhere_through<G: GuestMemory>(
+    cpu: &mut G,
+    view: &CpuDebugView,
+    discovery: &mut WindowsDiscovery,
+    layout: Option<&Arc<KernelLayout>>,
+    through: ReadThrough,
+    names: &[String],
+) -> ModulesElsewhere {
+    let live_cr3 = through.live_cr3(view);
+    let Ok(state) = find_kernel(cpu, view, &mut discovery.state, layout) else {
+        return ModulesElsewhere::default();
+    };
+    let processes = list_processes(cpu, &state.kernel, live_cr3, &mut state.parent_offset);
+    let current = processes.iter().find(|process| process.current).map(|process| process.cr3);
+    let wanted: Vec<String> = names.iter().map(|name| name.to_ascii_lowercase()).collect();
+    let mut modules = Vec::new();
+    for process in processes.iter().filter(|process| !process.current) {
+        let ModuleRead::Listed(listed) =
+            process_modules(cpu, &processes, process, &mut state.peb_offset, &mut state.wow64_offset)
+        else {
+            continue;
+        };
+        let ours: Vec<WinModule> = listed
+            .into_iter()
+            .filter(|module| module.name.as_deref().is_some_and(|name| wanted.contains(&name.to_ascii_lowercase())))
+            .collect();
+        let mut found = Vec::new();
+        gather_modules(cpu, Root::Process(process.cr3), &mut found, &ours, ModuleSpace::User);
+        modules.extend(found.into_iter().map(|module| ProcessModule {
+            cr3: process.cr3,
+            process: process.name.clone(),
+            module,
+        }));
+    }
+    ModulesElsewhere { current, modules }
+}
+
 /// [`read_windows`] through the page tables `through` names, which
 /// `Root::Live` already walks.
 fn read_windows_through<G: GuestMemory>(
@@ -3434,8 +3518,15 @@ fn place(
 
 /// Two CR3 values name one address space when their table addresses match
 /// (the low 12 bits are flags or a PCID).
-fn same_address_space(a: u64, b: u64) -> bool {
+pub(crate) fn same_address_space(a: u64, b: u64) -> bool {
     (a & !0xFFF) == (b & !0xFFF)
+}
+
+/// The address space of the process the processor runs: its CR3, or the
+/// process's own `DirectoryTableBase` when it runs user mode on KVA-shadow
+/// tables (as [`read_windows`] reads the kernel through).
+pub(crate) fn running_space<G: GuestMemory>(cpu: &mut G, view: &CpuDebugView, discovery: &mut WindowsDiscovery) -> u64 {
+    kernel_tables(cpu, view, discovery).live_cr3(view)
 }
 
 /// The modules `process` has loaded: its PEB's loader list, read through its
@@ -4876,5 +4967,32 @@ mod tests {
         assert_eq!(avl_table_root(table, root, root, table), None);
         // The right child must be a kernel pointer.
         assert_eq!(avl_table_root(table, 0, 0, table), None);
+    }
+
+    /// The owner's program runs in `csrss.exe` here: its module is read in
+    /// that process's address space, while the pause stands in System.
+    #[test]
+    fn the_owners_modules_are_found_in_every_other_process() {
+        let mut fake = crate::debugger::fake_windows::FakeWindows::build(
+            crate::debugger::fake_windows::FakeWindowsSpec::with_services(),
+        );
+        let view = fake.view;
+        let mut discovery = WindowsDiscovery::default();
+        let names = ["CSRSS.EXE".to_owned()];
+        let read = modules_elsewhere(&mut fake.guest, &view, &mut discovery, None, &names);
+        assert_eq!(read.current, Some(crate::debugger::fake_windows::LIVE_CR3), "System runs");
+        assert_eq!(read.modules.len(), 1, "{:?}", read.modules);
+        let found = &read.modules[0];
+        assert_eq!(found.cr3, 0x3_0000);
+        assert_eq!(found.process, "csrss.exe");
+        assert_eq!(found.module.base, 0x4A00_0000);
+        assert_eq!(found.module.space, ModuleSpace::User);
+        assert!(
+            matches!(&found.module.identity, GuestIdentity::Known(rusty_box_symbols::identity::ModuleIdentity::Pe { file_name, pdb: Some(_), .. }) if file_name == "csrss.exe"),
+            "{:?}",
+            found.module.identity
+        );
+        let none = modules_elsewhere(&mut fake.guest, &view, &mut discovery, None, &[]);
+        assert!(none.modules.is_empty(), "no names, nothing read");
     }
 }

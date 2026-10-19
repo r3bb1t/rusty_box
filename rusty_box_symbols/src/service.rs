@@ -15,7 +15,8 @@ use crate::cab::{extract_single, is_cabinet, CabError};
 use crate::elf::AltLink;
 use crate::http::{classify, Flow, HttpClient, HttpError, Progress, Retry, StatusClass};
 use crate::identity::{BuildId, IdentityMatch, ModuleIdentity, PdbId, PeImageId, TablesIdentity};
-use crate::pe::{pdb_from_binary, BinaryPdbError};
+use crate::module_file::ModuleFile;
+use crate::pe::{pdb_from_binary, BinaryPdbError, HeaderError};
 use crate::projects::ProjectIndex;
 use crate::store::{checked_file_name, FileStore, Placed, StoreError, SymbolStore};
 use crate::tables::{declared_identity, supplement_of, ParseError, SymbolTables};
@@ -106,6 +107,14 @@ pub enum LocateError {
     WrongBuild { origin: String, found: TablesIdentity },
     #[error("the module's binary does not give its PDB: {0}")]
     Binary(BinaryPdbError),
+    #[error("{origin} is not a binary whose headers read: {source}")]
+    ImageHeaders {
+        origin: String,
+        #[source]
+        source: HeaderError,
+    },
+    #[error("{origin} is image {}, not this module's build", found.store_key())]
+    WrongImage { origin: String, found: PeImageId },
 }
 
 impl LocateError {
@@ -122,9 +131,19 @@ impl LocateError {
             | LocateError::Parse { .. }
             | LocateError::Cabinet { .. }
             | LocateError::WrongBuild { .. }
-            | LocateError::Binary(_) => Retry::Final,
+            | LocateError::Binary(_)
+            | LocateError::ImageHeaders { .. }
+            | LocateError::WrongImage { .. } => Retry::Final,
         }
     }
+}
+
+/// What looking up a module's binary came to.
+pub enum ImageOutcome {
+    Loaded { file: Arc<ModuleFile>, from: SymbolSource },
+    /// Every server answered that it does not have the file.
+    NotOnServer,
+    Unavailable { reason: LocateError },
 }
 
 /// What a lookup came to.
@@ -224,6 +243,20 @@ fn debuginfod_urls(servers: &[String], build_id: &BuildId) -> Vec<Vec<String>> {
         .iter()
         .map(|server| vec![format!("{}/buildid/{}/debuginfo", server.trim_end_matches('/'), build_id.to_hex())])
         .collect()
+}
+
+/// `bytes`, read from `origin`, as the binary of `wanted`.
+fn image_of(bytes: Vec<u8>, wanted: PeImageId, origin: String) -> Result<ModuleFile, LocateError> {
+    let file = match ModuleFile::parse(bytes) {
+        Ok(file) => file,
+        Err(source) => return Err(LocateError::ImageHeaders { origin, source }),
+    };
+    let found = file.image_id();
+    if found == wanted {
+        Ok(file)
+    } else {
+        Err(LocateError::WrongImage { origin, found })
+    }
 }
 
 /// What an attached file comes to: taken when it is `wanted`'s build, else
@@ -544,6 +577,59 @@ impl<F: FileStore, H: HttpClient> SymbolService<F, H> {
         LocateOutcome::Loaded { tables: Arc::new(tables), from: SymbolSource::Server { url: fetched.url, kept } }
     }
 
+    /// The binary of the PE module `file_name` whose image key is `image`:
+    /// a project's, the store's, else the server's, each taken only when it
+    /// is that image.
+    pub fn locate_image<P>(&mut self, file_name: &str, image: PeImageId, projects: &ProjectIndex, mut progress: P) -> ImageOutcome
+    where
+        P: FnMut(Progress) -> Flow,
+    {
+        if let Some(found) = projects.find_image(image) {
+            // A file changed since it was indexed is passed by.
+            if let Ok(bytes) = self.store.files().read(&found.path) {
+                if let Ok(file) = image_of(bytes, image, found.path.display().to_string()) {
+                    return ImageOutcome::Loaded {
+                        file: Arc::new(file),
+                        from: SymbolSource::Project { name: found.project.clone(), path: found.path.clone() },
+                    };
+                }
+            }
+        }
+        let binary = ModuleIdentity::Pe { file_name: file_name.to_owned(), image, pdb: None };
+        let keyed = match self.keyed(&binary) {
+            Ok(keyed) => keyed,
+            Err(reason) => return ImageOutcome::Unavailable { reason },
+        };
+        // Not this image, or broken: fetched again, and replaced only by a
+        // verified download.
+        let store_copy = match self.store.lookup(&keyed.store_path) {
+            Ok(Some(bytes)) => match image_of(bytes, image, keyed.store_path.display().to_string()) {
+                Ok(file) => {
+                    return ImageOutcome::Loaded { file: Arc::new(file), from: SymbolSource::Store { path: keyed.store_path } };
+                }
+                Err(reason) => StoreCopy::Unusable { reason },
+            },
+            Ok(None) => StoreCopy::Absent,
+            Err(error) => return ImageOutcome::Unavailable { reason: error.into() },
+        };
+        match self.config.downloads {
+            Downloads::Off => return ImageOutcome::Unavailable { reason: store_copy.without_downloads() },
+            Downloads::Automatic => {}
+        }
+        let fetched = match self.fetch(&keyed, &mut progress) {
+            Ok(Some(fetched)) => fetched,
+            Ok(None) => return ImageOutcome::NotOnServer,
+            Err(reason) => return ImageOutcome::Unavailable { reason },
+        };
+        // The bytes are kept as fetched; the parsed file holds its own copy.
+        let file = match image_of(fetched.bytes.clone(), image, fetched.url.clone()) {
+            Ok(file) => file,
+            Err(reason) => return ImageOutcome::Unavailable { reason },
+        };
+        let kept = self.keep(keyed.store_path, &fetched.bytes, store_copy);
+        ImageOutcome::Loaded { file: Arc::new(file), from: SymbolSource::Server { url: fetched.url, kept } }
+    }
+
     /// The PDB identity of the PE module whose image key is `image`, read
     /// from its binary: the store's copy, else the server's (verified to be
     /// that image before it is stored).
@@ -590,7 +676,8 @@ mod tests {
     use rusty_box_symbols_fixtures::dwarf::{dwz_pair, DwzForms, SUPPLEMENT_BUILD_ID};
     use rusty_box_symbols_fixtures::elf::{build_elf, ElfSpec, Symtab, BUILD_ID, TEXT_RVA};
     use rusty_box_symbols_fixtures::pdb::{build_pdb, FixturePublic, PdbFixture, PublicKind};
-    use rusty_box_symbols_fixtures::pe::{pe32_file, rsds};
+    use crate::pe::ImageRead;
+    use rusty_box_symbols_fixtures::pe::{pe32_file, pe64_file, rsds, Pe64Spec, SpecSection, SECTION_CODE};
 
     const MSDL: &str = "https://msdl.example/download/symbols";
     const DEBUGINFOD: &str = "https://debuginfod.example";
@@ -996,5 +1083,116 @@ mod tests {
         let tables = loaded_tables(go(&mut service, &module));
         assert_eq!(tables.symbolize(Rva(TEXT_RVA + 0x14)).map(|hit| hit.name), Some("own_function".to_owned()));
         assert_eq!(tables.symbolize(Rva(TEXT_RVA)), None, "missing, not wrong");
+    }
+
+    const IMAGE: PeImageId = PeImageId { time_date_stamp: 0x4549_AD6E, size_of_image: 0x2000 };
+
+    /// `widget.dll` of `image`'s build: one `.text` page of `ret`s.
+    fn widget(image: PeImageId) -> Vec<u8> {
+        pe64_file(&Pe64Spec {
+            time_date_stamp: image.time_date_stamp,
+            size_of_image: image.size_of_image,
+            image_base: 0x7FF_0000_0000,
+            sections: vec![SpecSection { name: b".text", rva: 0x1000, bytes: vec![0xC3; 0x10], characteristics: SECTION_CODE }],
+            exception: None,
+            base_relocations: None,
+            import_address_table: None,
+        })
+    }
+
+    fn widget_url() -> String {
+        format!("{MSDL}/widget.dll/4549AD6E2000/widget.dll")
+    }
+
+    fn widget_store_path() -> PathBuf {
+        PathBuf::from("store").join("widget.dll").join("4549AD6E2000").join("widget.dll")
+    }
+
+    fn image_from(outcome: &ImageOutcome) -> Option<&SymbolSource> {
+        match outcome {
+            ImageOutcome::Loaded { from, .. } => Some(from),
+            ImageOutcome::NotOnServer | ImageOutcome::Unavailable { .. } => None,
+        }
+    }
+
+    fn find_widget(service: &mut SymbolService<MemoryStore, ScriptedHttp>, projects: &ProjectIndex) -> ImageOutcome {
+        service.locate_image("widget.dll", IMAGE, projects, |_| Flow::Continue)
+    }
+
+    #[test]
+    fn a_binary_comes_from_a_project_before_the_store_and_the_store_before_the_server() {
+        let mut files = MemoryStore::default();
+        let build = PathBuf::from("work").join("widget.dll");
+        files.insert(build.clone(), widget(IMAGE));
+        let projects = [ProjectFolders { name: "widget".into(), symbols: vec![PathBuf::from("work")] }];
+        let index = ProjectIndex::build(&mut files, &projects).unwrap();
+        files.insert(widget_store_path(), widget(IMAGE));
+        let mut http = ScriptedHttp::default();
+        http.respond(&widget_url(), 200, widget(IMAGE));
+        let mut service = service(files, http, Downloads::Automatic);
+        let outcome = find_widget(&mut service, &index);
+        assert_eq!(image_from(&outcome), Some(&SymbolSource::Project { name: "widget".into(), path: build }));
+        let outcome = find_widget(&mut service, &ProjectIndex::default());
+        assert_eq!(image_from(&outcome), Some(&SymbolSource::Store { path: widget_store_path() }));
+        assert!(service.http().requests().is_empty(), "the server is never asked for a local file");
+    }
+
+    #[test]
+    fn a_downloaded_binary_is_read_as_its_image_and_kept() {
+        let mut http = ScriptedHttp::default();
+        http.respond(&widget_url(), 200, widget(IMAGE));
+        let mut service = service(MemoryStore::default(), http, Downloads::Automatic);
+        let outcome = find_widget(&mut service, &ProjectIndex::default());
+        assert_eq!(
+            image_from(&outcome),
+            Some(&SymbolSource::Server { url: widget_url(), kept: Kept::InStore { path: widget_store_path() } })
+        );
+        let ImageOutcome::Loaded { file, .. } = outcome else { panic!("expected the binary") };
+        let mut code = [0u8; 4];
+        assert_eq!(file.read_loaded(0x7FF_0000_0000, Rva(0x1000), &mut code), ImageRead::Read);
+        assert_eq!(code, [0xC3; 4]);
+        assert!(service.store().lookup(&widget_store_path()).unwrap().is_some());
+    }
+
+    #[test]
+    fn a_binary_of_another_build_is_refused_and_never_enters_the_store() {
+        let other = PeImageId { time_date_stamp: 0x1111_1111, ..IMAGE };
+        let mut http = ScriptedHttp::default();
+        http.respond(&widget_url(), 200, widget(other));
+        let mut service = service(MemoryStore::default(), http, Downloads::Automatic);
+        let outcome = find_widget(&mut service, &ProjectIndex::default());
+        assert!(
+            matches!(&outcome, ImageOutcome::Unavailable { reason: LocateError::WrongImage { found, .. } } if *found == other),
+            "a server answering with another build"
+        );
+        assert_eq!(service.store().lookup(&widget_store_path()).unwrap(), None);
+    }
+
+    #[test]
+    fn a_store_binary_of_another_build_is_fetched_again() {
+        let mut http = ScriptedHttp::default();
+        http.respond(&widget_url(), 200, widget(IMAGE));
+        let mut service = service(MemoryStore::default(), http, Downloads::Automatic);
+        let other = PeImageId { time_date_stamp: 0x1111_1111, ..IMAGE };
+        service.store().files().insert(widget_store_path(), widget(other));
+        let outcome = find_widget(&mut service, &ProjectIndex::default());
+        assert!(matches!(image_from(&outcome), Some(SymbolSource::Server { kept: Kept::Replaced { .. }, .. })));
+        assert_eq!(service.store().lookup(&widget_store_path()).unwrap(), Some(widget(IMAGE)));
+    }
+
+    #[test]
+    fn a_binary_no_server_has_is_not_on_the_server_and_one_not_local_without_downloads_is_unavailable() {
+        let mut service = service(MemoryStore::default(), ScriptedHttp::default(), Downloads::Automatic);
+        assert!(matches!(find_widget(&mut service, &ProjectIndex::default()), ImageOutcome::NotOnServer));
+        let mut off = service_off();
+        assert!(matches!(
+            find_widget(&mut off, &ProjectIndex::default()),
+            ImageOutcome::Unavailable { reason: LocateError::DownloadsOff }
+        ));
+        assert!(off.http().requests().is_empty());
+    }
+
+    fn service_off() -> SymbolService<MemoryStore, ScriptedHttp> {
+        service(MemoryStore::default(), ScriptedHttp::default(), Downloads::Off)
     }
 }

@@ -5,8 +5,8 @@ use crate::{
 };
 #[cfg(feature = "gui-egui")]
 use crate::debugger::{
-    control::{AfterRun, RunControl, RunStart},
-    serve::{apply_breakpoints, serve, Next, Stepping},
+    control::{AfterRun, Passing, RunControl, RunStart},
+    serve::{apply_breakpoints, owners_stop, serve, Next, Stepping},
 };
 #[cfg(all(not(feature = "guest-trace"), feature = "hv-whp", windows, feature = "gui-egui"))]
 use crate::debugger::{
@@ -477,11 +477,23 @@ where
     while retired < config.max_instructions {
         let left = config.max_instructions - retired;
         retired = retired.saturating_add(emu.run_interactive(left)?);
-        // A processor that stopped at a breakpoint pauses the run on it.
-        if let Some(hit) = emu.stopped_at_breakpoint() {
-            control.stopped_at_breakpoint(hit);
-        }
-        match control.after_run(emu.power().state()) {
+        // A processor that stopped at a breakpoint pauses the run on it,
+        // unless the breakpoint is a program's line and this is another
+        // process: the run goes on through it, serving what was asked.
+        let after = match emu.stopped_at_breakpoint() {
+            Some(hit) if !owners_stop(emu.as_mut(), &control, &hit) => {
+                match control.after_passing(emu.power().state()) {
+                    Passing::RunOn => continue,
+                    Passing::Then(after) => after,
+                }
+            }
+            Some(hit) => {
+                control.stopped_at_breakpoint(hit);
+                control.after_run(emu.power().state())
+            }
+            None => control.after_run(emu.power().state()),
+        };
+        match after {
             AfterRun::End => break,
             AfterRun::Serve => {
                 let served = serve(emu.as_mut(), &control, Stepping::Instructions)?;
@@ -1563,6 +1575,8 @@ fn path_to_str(path: &PathBuf) -> Result<&str, RunError> {
 mod tests {
     use super::*;
     use crate::args::DiskGeometry;
+    #[cfg(feature = "gui-egui")]
+    use crate::debugger::source_breakpoints::{AppliedBreakpoints, ScopedAddress};
     use crate::config::{
         CpuCapabilities, Engine, ResolvedCdrom, ResolvedDisk, ResolvedDiskCreation,
     };
@@ -3099,7 +3113,7 @@ mod tests {
         // The BIOS's `JMP $` at the reset vector: CS base FFFF0000 plus FFF0.
         let at = CodeBreakpoint::Linear(0xFFFF_FFF0);
         let hit = CodeBreakpointHit { cpu: 0, breakpoint: at, linear: 0xFFFF_FFF0 };
-        vm.control.set_breakpoints(vec![at]);
+        vm.control.set_breakpoints(AppliedBreakpoints { set: vec![at], scopes: Vec::new() });
         let snapshot = vm.paused_snapshot();
         assert_eq!(vm.control.stopped_at(), Some(hit));
         assert_eq!(snapshot.cpus[0].registers.rip, 0xFFF0);
@@ -3113,6 +3127,45 @@ mod tests {
                     .snapshot()
                     .is_some_and(|again| again.cpus[0].registers.icount == icount + 1)
         });
+
+        vm.stop();
+        drop(commands);
+        let result = join_launcher(launcher);
+        remove_test_file(&bios);
+        assert!(result.is_ok());
+        assert_eq!(vm.display.lock().unwrap().runtime_error, None);
+    }
+
+    /// A breakpoint that is the owner's only in another address space (a
+    /// program's line, another program at the same address here) is run
+    /// through; in its own space it stops the VM.
+    #[cfg(feature = "gui-egui")]
+    #[test]
+    fn a_breakpoint_scoped_to_another_address_space_is_run_through() {
+        use rusty_box::cpu::{CodeBreakpoint, CodeBreakpointHit};
+        let bios = spinning_bios();
+        let (commands, command_rx) = mpsc::channel();
+        let launcher = spawn_launcher(command_rx);
+        let vm = TestVm::spinning(&commands, &bios);
+
+        let at = CodeBreakpoint::Linear(0xFFFF_FFF0);
+        let scoped = |space: u64| AppliedBreakpoints {
+            set: vec![at],
+            scopes: vec![ScopedAddress { linear: 0xFFFF_FFF0, spaces: vec![space] }],
+        };
+        vm.control.set_breakpoints(scoped(0x5000));
+        // The machine takes the set, then runs on: the `JMP $` reaches the
+        // breakpoint with every instruction.
+        wait_until(|| vm.control.applied_breakpoints() == [at]);
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        vm.control.pause();
+        assert_eq!(vm.paused_snapshot().cpus[0].registers.rip, 0xFFF0, "paused in the `JMP $`");
+        assert_eq!(vm.control.stopped_at(), None, "the BIOS runs with CR3 0, not 0x5000");
+
+        vm.control.set_breakpoints(scoped(0));
+        vm.control.resume();
+        let hit = CodeBreakpointHit { cpu: 0, breakpoint: at, linear: 0xFFFF_FFF0 };
+        wait_until(|| vm.control.stopped_at() == Some(hit));
 
         vm.stop();
         drop(commands);

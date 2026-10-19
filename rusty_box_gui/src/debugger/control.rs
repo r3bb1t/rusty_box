@@ -12,7 +12,7 @@ use rusty_box::cpu::{BreakpointRefusal, CodeBreakpoint, CodeBreakpointHit};
 use rusty_box::emulator::PowerState;
 
 use super::inspect::{CodeTarget, DebugSnapshot, MemoryTarget, ViewRequest};
-use super::source_breakpoints::BreakpointTarget;
+use super::source_breakpoints::{admits, AppliedBreakpoints, BreakpointTarget, ScopedAddress};
 use super::stepping::{StepCeiling, StepRequest};
 use crate::symbols::hub::SymbolsView;
 use super::kernel_layout::{same_layouts, KernelLayout};
@@ -61,6 +61,16 @@ pub(crate) enum Task {
 pub(crate) enum AfterRun {
     End,
     Serve,
+}
+
+/// What a run thread does once its machine stopped at a breakpoint that is
+/// not the owner's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Passing {
+    /// Nothing was asked: the run goes on through it.
+    RunOn,
+    /// What [`RunControl::after_run`] says.
+    Then(AfterRun),
 }
 
 /// A run thread's next move while it serves.
@@ -165,6 +175,9 @@ struct ControlState {
     /// machine at every run's start, and again whenever the shell changes
     /// them.
     breakpoints: Vec<CodeBreakpoint>,
+    /// The addresses of `breakpoints` that are the owner's only in some
+    /// address spaces: a user program's lines.
+    scopes: Vec<ScopedAddress>,
     /// The code breakpoint the run is paused at, until it runs on or steps.
     stopped_at: Option<CodeBreakpointHit>,
     /// The set the machine took last: what a step gives it back after its
@@ -220,6 +233,7 @@ impl RunControl {
                 kernel_layout: None,
                 targets: Vec::new(),
                 breakpoints: Vec::new(),
+                scopes: Vec::new(),
                 stopped_at: None,
                 applied: Vec::new(),
                 symbols: None,
@@ -312,12 +326,15 @@ impl RunControl {
         self.changed.notify_all();
     }
 
-    /// The shell's code breakpoints become `set`. A live run is given them
-    /// at once: a paused one between its tasks, a running one stopped for
-    /// them and run on after, as a dump is.
+    /// The shell's code breakpoints become `applied`. A live run is given a
+    /// changed set at once: a paused one between its tasks, a running one
+    /// stopped for them and run on after, as a dump is. Scopes alone are the
+    /// run thread's to judge hits by, and ask nothing of the machine.
     #[cfg(feature = "gui-egui")]
-    pub(crate) fn set_breakpoints(&self, set: Vec<CodeBreakpoint>) {
+    pub(crate) fn set_breakpoints(&self, applied: AppliedBreakpoints) {
         let mut state = self.lock();
+        let AppliedBreakpoints { set, scopes } = applied;
+        state.scopes = scopes;
         if state.breakpoints == set {
             return;
         }
@@ -390,13 +407,13 @@ impl RunControl {
         if state.symbols.as_ref().is_some_and(|held| Arc::ptr_eq(held, &view)) {
             return;
         }
-        // A paused read that waited for a module's tables is read again once
-        // they are here; any other new view asks nothing, so a refresh never
-        // feeds itself.
-        let arrived = state
-            .snapshot
-            .as_ref()
-            .is_some_and(|shown| shown.frames.awaiting.iter().any(|identity| view.tables(identity).is_some()));
+        // A paused read that waited for a module's tables or binary is read
+        // again once they are here; any other new view asks nothing, so a
+        // refresh never feeds itself.
+        let arrived = state.snapshot.as_ref().is_some_and(|shown| {
+            shown.frames.awaiting.iter().any(|identity| view.tables(identity).is_some())
+                || shown.frames.awaiting_images.iter().any(|key| view.image(key).is_some())
+        });
         state.symbols = Some(view);
         if arrived {
             self.refresh_paused(&mut state);
@@ -637,6 +654,24 @@ impl RunControl {
         }
     }
 
+    /// What the run thread does once the machine stopped at a breakpoint that
+    /// is not the owner's: it ran no budget out, so with nothing asked it
+    /// runs on, the stop flag the hit raised lowered under this lock (a pause
+    /// asked meanwhile is seen here first, so it is never lowered by
+    /// mistake); anything asked, or a guest that switched off, is
+    /// [`Self::after_run`]'s.
+    pub(crate) fn after_passing(&self, power: PowerState) -> Passing {
+        {
+            let state = self.lock();
+            let asked = state.ending || state.serve_requested || state.wanted == Wanted::Pause || !state.tasks.is_empty();
+            if power == PowerState::Running && !asked {
+                self.stop_flag.store(false, Ordering::Relaxed);
+                return Passing::RunOn;
+            }
+        }
+        Passing::Then(self.after_run(power))
+    }
+
     /// The run thread's next move. A stop comes first, then queued work; a
     /// run the shell wants running resumes with its stop flag lowered under
     /// this lock; a run newly paused publishes first, then sleeps until the
@@ -724,6 +759,22 @@ impl RunControl {
     pub(crate) fn stepped_onto_breakpoint(&self, hit: CodeBreakpointHit) {
         let mut state = self.lock();
         self.record_stop(&mut state, hit);
+    }
+
+    /// Whether `hit`, taken where the running process's address space is
+    /// `space` (its `DirectoryTableBase`), is one of the owner's stops: a
+    /// user program's line stops only in the processes that run it.
+    pub(crate) fn admits(&self, hit: &CodeBreakpointHit, space: u64) -> bool {
+        match hit.breakpoint {
+            CodeBreakpoint::Linear(linear) => admits(&self.lock().scopes, linear, space),
+            CodeBreakpoint::Physical(_) => true,
+        }
+    }
+
+    /// Whether any of the owner's breakpoints stops only in some address
+    /// spaces, so a hit needs its address space read to be judged.
+    pub(crate) fn has_scopes(&self) -> bool {
+        !self.lock().scopes.is_empty()
     }
 
     /// The machine took `set`.
@@ -864,11 +915,13 @@ mod tests {
     use crate::debugger::inspect::{AddressSpace, GuestAddress};
     use crate::debugger::module_identity::GuestIdentity;
     use crate::debugger::xref::service::{IndexSpace, ModuleKey};
-    use crate::symbols::hub::{ModuleEntry, ModuleSymbols};
+    use crate::symbols::hub::{ImageEntry, ImageKey, ImageState, ModuleEntry, ModuleSymbols};
     use rusty_box_symbols::identity::{ModuleIdentity, PeImageId};
+    use rusty_box_symbols::module_file::ModuleFile;
     use rusty_box_symbols::service::SymbolSource;
     use rusty_box_symbols::tables::SymbolTables;
     use rusty_box_symbols_fixtures::pdb::{build_pdb, PdbFixture};
+    use rusty_box_symbols_fixtures::pe::{pe64_file, Pe64Spec, SpecSection, SECTION_CODE};
     use std::collections::{BTreeMap, BTreeSet};
 
     fn control() -> RunControl {
@@ -959,6 +1012,39 @@ mod tests {
             ModuleEntry { state: ModuleSymbols::Loaded { from: SymbolSource::Store { path: "flat.pdb".into() } }, tables: Some(Arc::new(tables)) },
         );
         control.set_symbols(Arc::new(view));
+        assert_eq!(control.queued(), [Task::Refresh]);
+    }
+
+    #[test]
+    fn a_binary_refreshes_only_a_read_that_waited_for_it() {
+        let key = ImageKey { file_name: "flat.exe".into(), image: PeImageId { time_date_stamp: 1, size_of_image: 0x2000 } };
+        let control = paused_control();
+        let mut snapshot = empty_snapshot(0x1000);
+        snapshot.frames.awaiting_images = vec![key.clone()];
+        control.publish(snapshot);
+        let with = |entry: ImageEntry| {
+            let mut view = SymbolsView::default();
+            view.images.insert(key.clone(), entry);
+            Arc::new(view)
+        };
+        control.set_symbols(with(ImageEntry { state: ImageState::Pending, file: None }));
+        assert_eq!(control.queued(), [], "still being looked up");
+        control.set_symbols(with(ImageEntry { state: ImageState::NotOnServer, file: None }));
+        assert_eq!(control.queued(), [], "nothing new to read with");
+        let binary = pe64_file(&Pe64Spec {
+            time_date_stamp: 1,
+            size_of_image: 0x2000,
+            image_base: 0x40_0000,
+            sections: vec![SpecSection { name: b".text", rva: 0x1000, bytes: vec![0xC3; 0x10], characteristics: SECTION_CODE }],
+            exception: None,
+            base_relocations: None,
+            import_address_table: None,
+        });
+        let file = ModuleFile::parse(binary).expect("the binary parses");
+        control.set_symbols(with(ImageEntry {
+            state: ImageState::Loaded { from: SymbolSource::Store { path: "flat.exe".into() } },
+            file: Some(Arc::new(file)),
+        }));
         assert_eq!(control.queued(), [Task::Refresh]);
     }
 
@@ -1144,6 +1230,7 @@ mod tests {
             layouts: None,
             through: crate::debugger::windows::ReadThrough::ProcessorTables,
             vmcs: None,
+            elsewhere: crate::debugger::windows::ModulesElsewhere::default(),
         });
         control.finish_run();
         control.begin_run(RunStart::PowerOn);
@@ -1213,6 +1300,7 @@ mod tests {
             layouts: None,
             through: crate::debugger::windows::ReadThrough::ProcessorTables,
             vmcs: None,
+            elsewhere: crate::debugger::windows::ModulesElsewhere::default(),
         }
     }
 
@@ -1389,16 +1477,57 @@ mod tests {
         control.begin_run(RunStart::PowerOn);
         let first = vec![CodeBreakpoint::Linear(0x1000)];
         let newest = vec![CodeBreakpoint::Linear(0x2000)];
-        control.set_breakpoints(first);
-        control.set_breakpoints(newest.clone());
+        control.set_breakpoints(global(first));
+        control.set_breakpoints(global(newest.clone()));
         assert!(raised(&control), "the run stops for the change");
         assert_eq!(control.after_run(PowerState::Running), AfterRun::Serve);
         assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::ApplyBreakpoints(newest.clone())));
         assert_eq!(control.next_between_runs(), BetweenRuns::Resume);
         assert!(!raised(&control), "and runs on");
         assert_eq!(control.breakpoints(), newest, "kept for the next run");
-        control.set_breakpoints(newest);
+        control.set_breakpoints(global(newest));
         assert!(!raised(&control), "an unchanged set asks nothing");
+    }
+
+    /// A stop at a breakpoint that was not the owner's runs on, unless the
+    /// owner asked for something meanwhile or the guest switched off.
+    #[test]
+    fn a_breakpoint_passed_over_runs_on_unless_something_was_asked() {
+        let control = control();
+        control.begin_run(RunStart::PowerOn);
+        // The machine's hit raised the run's stop flag; running on lowers it.
+        control.stop_flag().store(true, Ordering::Relaxed);
+        assert_eq!(control.after_passing(PowerState::Running), Passing::RunOn);
+        assert!(!raised(&control), "the run goes on");
+        assert_eq!(control.after_passing(PowerState::PoweredOff), Passing::Then(AfterRun::End));
+        control.pause();
+        assert_eq!(control.after_passing(PowerState::Running), Passing::Then(AfterRun::Serve));
+        control.end_run();
+        assert_eq!(control.after_passing(PowerState::Running), Passing::Then(AfterRun::End));
+    }
+
+    fn global(set: Vec<CodeBreakpoint>) -> AppliedBreakpoints {
+        AppliedBreakpoints { set, scopes: Vec::new() }
+    }
+
+    /// A breakpoint on a user program's line is the owner's only in the
+    /// processes that run it; a new scope alone asks nothing of the machine.
+    #[test]
+    fn a_hit_outside_its_breakpoints_address_spaces_is_not_the_owners() {
+        let control = control();
+        control.begin_run(RunStart::PowerOn);
+        let set = vec![CodeBreakpoint::Linear(0x1000), CodeBreakpoint::Linear(0x2000)];
+        control.set_breakpoints(global(set.clone()));
+        assert_eq!(control.after_run(PowerState::Running), AfterRun::Serve);
+        assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::ApplyBreakpoints(set.clone())));
+        assert_eq!(control.next_between_runs(), BetweenRuns::Resume);
+        let scopes = vec![ScopedAddress { linear: 0x1000, spaces: vec![0x5000] }];
+        control.set_breakpoints(AppliedBreakpoints { set, scopes });
+        assert!(!raised(&control), "the machine's set did not change");
+        let hit = |linear| CodeBreakpointHit { cpu: 0, breakpoint: CodeBreakpoint::Linear(linear), linear };
+        assert!(control.admits(&hit(0x1000), 0x5000));
+        assert!(!control.admits(&hit(0x1000), 0x6000), "another program at the same address");
+        assert!(control.admits(&hit(0x2000), 0x6000), "an address with no scope");
     }
 
     /// A breakpoint stop pauses the run on the processor that stopped; a

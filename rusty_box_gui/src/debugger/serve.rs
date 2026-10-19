@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use rusty_box::cpu::decoder::Opcode;
-use rusty_box::cpu::{BreakpointRefusal, CodeBreakpoint, CodeSize, CpuDebugView, Instrumentation};
+use rusty_box::cpu::{BreakpointRefusal, CodeBreakpoint, CodeBreakpointHit, CodeSize, CpuDebugView, Instrumentation};
 use rusty_box::emulator::{Emulator, RunBudget, SliceEngine, StopReason};
 use rusty_box_symbols::units::Rva;
 
@@ -18,9 +18,11 @@ use super::stepping::{
     step, CallerFrame, CodeWidth, Decoded, Flow, RowSpan, RunStop, SourcePlace, StepEnd, StepRegisters, StepRequest,
     Stepped, Stepper, STEP_LIMITS,
 };
-use super::unwind::{caller_of, Frame, FrameFound, FrameRegisters, UnwindModule, Unwinding};
-use super::frames::{frames_at, read_frames};
-use super::guest::PausedCpu;
+use super::unwind::{Frame, FrameFound, FrameRegisters};
+use super::frames::{caller_frame, frames_at, read_frames, CallerOf};
+use super::guest::{vmx_guest_view, PausedCpu};
+use super::source_breakpoints::binaries_to_find;
+use super::windows::{modules_elsewhere, running_space};
 use super::xref::image::{copy_image, ImageAt, ImageOffset};
 use super::xref::index::ModuleSpan;
 use super::xref::service::{CopyRequest, IndexJob, IndexState};
@@ -326,10 +328,11 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> MachineStepper<'a, T, E> {
                     if hit.cpu == self.cpu && targets.contains(&hit.linear) {
                         return RunStop::AtTarget;
                     }
-                    if self.user.contains(&hit.breakpoint) {
+                    if self.user.contains(&hit.breakpoint) && owners_stop(self.emu, self.control, &hit) {
                         return RunStop::UserBreakpoint(hit);
                     }
-                    // A target another processor reached: it runs on.
+                    // A target another processor reached, or a program's line
+                    // in another process: it runs on.
                 }
                 Some(StopReason::GuestPowerOff | StopReason::CpuShutdown) | None => return RunStop::MachineOver,
                 Some(StopReason::BudgetExhausted | StopReason::Halted | StopReason::StopRequested | StopReason::EngineFault) => {}
@@ -398,7 +401,9 @@ impl<T: Instrumentation, E: SliceEngine<T>> Stepper for MachineStepper<'_, T, E>
 
     fn single_step(&mut self) -> Stepped {
         match self.run(RunBudget::Instructions(1)) {
-            Some(StopReason::Breakpoint(hit)) => Stepped::UserBreakpoint(hit),
+            Some(StopReason::Breakpoint(hit)) if owners_stop(self.emu, self.control, &hit) => Stepped::UserBreakpoint(hit),
+            // A program's line in another process: the step goes on.
+            Some(StopReason::Breakpoint(_)) => Stepped::Retired,
             Some(StopReason::GuestPowerOff | StopReason::CpuShutdown) | None => Stepped::MachineOver,
             Some(StopReason::BudgetExhausted | StopReason::Halted | StopReason::StopRequested | StopReason::EngineFault) => {
                 Stepped::Retired
@@ -466,12 +471,10 @@ impl<T: Instrumentation, E: SliceEngine<T>> Stepper for MachineStepper<'_, T, E>
         ]) {
             *slot = Some(value);
         }
-        let modules: Vec<UnwindModule> =
-            self.modules.iter().map(|module| UnwindModule { base: module.base, size: module.size }).collect();
-        let unwinding = Unwinding { root: Root::Live, modules: &modules, width: at.width };
+        let of = CallerOf { root: Root::Live, modules: &self.modules, width: at.width };
         let frame = Frame { registers: FrameRegisters { rip: at.rip, rsp: at.rsp, registers }, how: FrameFound::Registers };
         let mut debug = self.emu.debug_cpu(self.cpu)?;
-        let caller = caller_of(&mut debug, &unwinding, &frame).ok()?;
+        let caller = caller_frame(&mut debug, &of, self.symbols.as_deref(), &frame)?;
         Some(CallerFrame { rip: caller.registers.rip, rsp: caller.registers.rsp })
     }
 
@@ -482,6 +485,33 @@ impl<T: Instrumentation, E: SliceEngine<T>> Stepper for MachineStepper<'_, T, E>
     fn elapsed(&mut self) -> Duration {
         self.started.elapsed()
     }
+}
+
+/// Whether a breakpoint stop at `hit` is one of the owner's: a user
+/// program's line stops only in the processes running it, which the address
+/// space processor `hit.cpu` runs in tells (read as the pause read reads it:
+/// the guest a VMCS holds when paused in VMX root, KVA-shadow tables seen
+/// through). A stop on a machine without that processor is the owner's.
+pub(crate) fn owners_stop<T: Instrumentation, E: SliceEngine<T>>(
+    emu: &mut Emulator<T, E>,
+    control: &RunControl,
+    hit: &CodeBreakpointHit,
+) -> bool {
+    if !control.has_scopes() {
+        return true;
+    }
+    let Some(mut debug) = emu.debug_cpu(hit.cpu) else {
+        return true;
+    };
+    let processor = debug.view();
+    let vmx_guest = debug.vmx_guest();
+    let view = match &vmx_guest {
+        Some(guest) => vmx_guest_view(guest, &processor),
+        None => processor,
+    };
+    let mut paused = PausedCpu { cpu: &mut debug, vmx_guest };
+    let space = running_space(&mut paused.walked(), &view, &mut control.discovery());
+    control.admits(hit, space)
 }
 
 /// Reads the snapshot the shell's view asks for, under the kernel layouts the
@@ -506,9 +536,21 @@ fn read_for<T: Instrumentation, E: SliceEngine<T>>(
     let request = control.inspect();
     let symbols = control.symbols();
     if let Some(mut debug) = emu.debug_cpu(snapshot.cpu) {
+        let processor = debug.view();
         let vmx_guest = debug.vmx_guest();
+        let view = match &vmx_guest {
+            Some(guest) => vmx_guest_view(guest, &processor),
+            None => processor,
+        };
         let mut paused = PausedCpu { cpu: &mut debug, vmx_guest };
         snapshot.frames = read_frames(&mut paused.walked(), &at, &snapshot.symbols, symbols.as_deref(), &request);
+        // The owner's programs in the processes the panes do not show, which
+        // a source line binds in as well.
+        let names = symbols
+            .as_deref()
+            .map(|view| binaries_to_find(&control.targets(), &view.projects))
+            .unwrap_or_default();
+        snapshot.elsewhere = modules_elsewhere(&mut paused.walked(), &view, &mut control.discovery(), layout.as_ref(), &names);
     }
     snapshot
 }
@@ -574,7 +616,9 @@ mod tests {
         build_pdb, FixtureLine, FixtureLocal, FixturePlace, FixtureProcedure, FixtureScope, FixtureType, PdbFixture,
     };
     use crate::debugger::frames::{LocalsRead, TipRead};
-    use crate::debugger::source_breakpoints::{applied_set, BreakpointTarget, SourceTarget};
+    use crate::debugger::source_breakpoints::{
+        applied_set, AppliedBreakpoints, BreakpointModules, BreakpointTarget, ModulesElsewhere, ScopedAddress, SourceTarget,
+    };
     use crate::debugger::variables::{ShownValue, Signedness};
     use std::sync::{atomic::AtomicBool, Arc};
 
@@ -792,7 +836,8 @@ mod tests {
         publish_module_over(&mut calling, GuestIdentity::Known(flat_identity()), base);
         let index = calling.control.snapshot().expect("published").symbols.clone();
         let line_10 = BreakpointTarget::Source(SourceTarget { file: "main.c".into(), line: 10 });
-        let set = applied_set(&[line_10], Some(&index), &view);
+        let elsewhere = ModulesElsewhere::default();
+        let set = applied_set(&[line_10], Some(&BreakpointModules { index: &index, elsewhere: &elsewhere }), &view).set;
         assert_eq!(set, [CodeBreakpoint::Linear(code + F)]);
         perform(&mut calling.machine, &calling.control, Task::ApplyBreakpoints(set), Stepping::Instructions).expect("apply");
         let stop = calling.machine.step(RunBudget::Instructions(1_000)).expect("run").stop;
@@ -864,6 +909,23 @@ mod tests {
             calling.control.stopped_at(),
             Some(CodeBreakpointHit { cpu: 0, breakpoint: at, linear: calling.code + F })
         );
+    }
+
+    /// A program's line in another process at the callee's address is not
+    /// the owner's here: the step runs over the call to its end.
+    #[test]
+    fn a_breakpoint_of_another_address_space_does_not_stop_a_step() {
+        let mut calling = calling();
+        let at = CodeBreakpoint::Linear(calling.code + F);
+        let elsewhere = ScopedAddress { linear: calling.code + F, spaces: vec![0xDEAD_B000] };
+        calling.control.set_breakpoints(AppliedBreakpoints { set: vec![at], scopes: vec![elsewhere] });
+        perform(&mut calling.machine, &calling.control, Task::ApplyBreakpoints(vec![at]), Stepping::Instructions)
+            .expect("apply");
+        let over = request(StepKind::Over, StepUnit::Instruction);
+        perform(&mut calling.machine, &calling.control, Task::Step(over), Stepping::Instructions).expect("step");
+        assert_eq!(landing(&calling.machine), Landing { rip: calling.code + CALL_LENGTH, rsp: calling.code + STACK });
+        assert_eq!(calling.control.stopped_at(), None);
+        assert_eq!(calling.control.note(), None, "the step was not cut");
     }
 
     /// The owner stops a step that would never end.
