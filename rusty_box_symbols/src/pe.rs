@@ -89,6 +89,8 @@ pub struct OptionalHeader {
     pub kind: OptionalHeaderKind,
     /// The address the image is linked to load at.
     pub image_base: u64,
+    /// Where sections start in the image: a multiple of this.
+    pub section_alignment: u32,
     pub size_of_image: u32,
     pub size_of_headers: u32,
     /// Data directory 6, when the header has it and it is not empty.
@@ -176,6 +178,7 @@ pub struct PeHeaders {
     pub time_date_stamp: u32,
     pub kind: OptionalHeaderKind,
     pub image_base: u64,
+    pub section_alignment: u32,
     pub size_of_image: u32,
     pub size_of_headers: u32,
     pub debug_directory: Option<DataDirectory>,
@@ -359,6 +362,8 @@ pub fn decode_optional_header(optional: Bytes<'_>, declared_size: u16) -> Result
         ImageBaseField::Wide => optional.array::<8>(24).map(u64::from_le_bytes),
     }
     .map_err(|source| cut_short(what, source))?;
+    // `SectionAlignment` sits at +32 in both kinds.
+    let section_alignment = optional.u32_le(32).map_err(|source| cut_short(what, source))?;
     let size_of_image = optional.u32_le(56).map_err(|source| cut_short(what, source))?;
     let size_of_headers = optional.u32_le(60).map_err(|source| cut_short(what, source))?;
     let rva_count = optional.u32_le(layout.rva_count_at).unwrap_or(0);
@@ -366,6 +371,7 @@ pub fn decode_optional_header(optional: Bytes<'_>, declared_size: u16) -> Result
     Ok(OptionalHeader {
         kind: layout.kind,
         image_base,
+        section_alignment,
         size_of_image,
         size_of_headers,
         debug_directory: directories.entry(DEBUG_DIRECTORY_INDEX),
@@ -540,6 +546,7 @@ where
         time_date_stamp: file.time_date_stamp,
         kind: optional.kind,
         image_base: optional.image_base,
+        section_alignment: optional.section_alignment,
         size_of_image: optional.size_of_image,
         size_of_headers: optional.size_of_headers,
         debug_directory: optional.debug_directory,
@@ -677,6 +684,12 @@ impl<B: AsRef<[u8]>> FileImage<B> {
     #[must_use]
     pub fn headers(&self) -> &PeHeaders {
         &self.headers
+    }
+
+    /// The file's bytes.
+    #[must_use]
+    pub fn bytes(&self) -> &[u8] {
+        self.bytes.as_ref()
     }
 
     /// `buf.len()` bytes at `rva` as the loader would map them: file bytes,

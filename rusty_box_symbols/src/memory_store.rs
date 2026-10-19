@@ -20,6 +20,8 @@ pub struct MemoryStore {
     unreadable: BTreeSet<PathBuf>,
     /// How many recursive listings were asked for.
     listings: u64,
+    /// How many whole files were read.
+    whole_reads: u64,
 }
 
 impl MemoryStore {
@@ -53,10 +55,15 @@ impl MemoryStore {
     pub fn listings(&self) -> u64 {
         self.listings
     }
-}
 
-impl FileStore for MemoryStore {
-    fn read(&mut self, path: &Path) -> Result<Vec<u8>, StoreError> {
+    /// How many whole files were read: the costly read a header-only one
+    /// spares.
+    #[must_use]
+    pub fn whole_reads(&self) -> u64 {
+        self.whole_reads
+    }
+
+    fn stored(&self, path: &Path) -> Result<&[u8], StoreError> {
         if self.unreadable.contains(path) {
             return Err(StoreError::Read {
                 path: path.to_owned(),
@@ -65,11 +72,23 @@ impl FileStore for MemoryStore {
         }
         self.files
             .get(path)
-            .map(|file| file.bytes.clone())
+            .map(|file| file.bytes.as_slice())
             .ok_or_else(|| StoreError::Read {
                 path: path.to_owned(),
                 source: io::Error::from(io::ErrorKind::NotFound),
             })
+    }
+}
+
+impl FileStore for MemoryStore {
+    fn read(&mut self, path: &Path) -> Result<Vec<u8>, StoreError> {
+        self.whole_reads = self.whole_reads.saturating_add(1);
+        self.stored(path).map(<[u8]>::to_vec)
+    }
+
+    fn read_prefix(&mut self, path: &Path, len: usize) -> Result<Vec<u8>, StoreError> {
+        let bytes = self.stored(path)?;
+        Ok(bytes.get(..len).unwrap_or(bytes).to_vec())
     }
 
     fn presence(&mut self, path: &Path) -> Result<Presence, StoreError> {

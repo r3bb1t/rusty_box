@@ -1415,19 +1415,41 @@ pub fn fixture_streams(fixture: &PdbFixture) -> Vec<FixtureStream> {
     streams
 }
 
+/// `streams` in an MSF container.
+fn msf_file(streams: &[FixtureStream]) -> Vec<u8> {
+    let mut msf = Msf::create_with_file(MemFile::default(), CreateOptions::default()).expect("MSF");
+    for stream in streams {
+        let mut writer = msf.write_stream(stream.index).expect("MSF stream");
+        writer.set_contents(&stream.bytes).expect("MSF stream contents");
+    }
+    assert!(msf.commit().expect("MSF commit"), "the MSF commit wrote nothing");
+    msf.into_file().data.into_inner().expect("fixture file")
+}
+
+/// A compiler's own type database, as MSVC's `vc140.pdb` beside a build's
+/// objects is: a PDB info stream, a type stream, and an empty DBI stream,
+/// since no linked module is described by it.
+pub fn compiler_types_pdb(guid: [u8; 16]) -> Vec<u8> {
+    let pdbi = PdbiStream {
+        signature: 0x6700_0000,
+        version: PDBI_VERSION_VC70,
+        age: 1,
+        unique_id: Some(Uuid::from_bytes_le(guid)),
+        named_streams: NamedStreams::default(),
+        features: vec![FeatureCode(PDBI_VERSION_VC140)],
+    };
+    msf_file(&[
+        FixtureStream { index: 1, bytes: pdbi.to_bytes().expect("PDBI stream") },
+        FixtureStream { index: 2, bytes: type_stream(&[], TypeIndex::MIN_BEGIN.0) },
+        FixtureStream { index: 3, bytes: Vec::new() },
+    ])
+}
+
 /// The fixture as a PDB file.
 pub fn build_pdb(fixture: &PdbFixture) -> Vec<u8> {
     let streams = fixture_streams(fixture);
     match fixture.container {
-        FixtureContainer::Msf => {
-            let mut msf = Msf::create_with_file(MemFile::default(), CreateOptions::default()).expect("MSF");
-            for stream in &streams {
-                let mut writer = msf.write_stream(stream.index).expect("MSF stream");
-                writer.set_contents(&stream.bytes).expect("MSF stream contents");
-            }
-            assert!(msf.commit().expect("MSF commit"), "the MSF commit wrote nothing");
-            msf.into_file().data.into_inner().expect("fixture file")
-        }
+        FixtureContainer::Msf => msf_file(&streams),
         FixtureContainer::MsfzZstd
         | FixtureContainer::MsfzDeflate
         | FixtureContainer::MsfzSmallChunks

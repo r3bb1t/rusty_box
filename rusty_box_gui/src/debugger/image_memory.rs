@@ -8,84 +8,65 @@
 use std::sync::Arc;
 
 use rusty_box::cpu::{LinearRange, MappingWalk, PageMapping, WalkStep};
-use rusty_box_symbols::http::Retry;
 use rusty_box_symbols::module_file::ModuleFile;
 use rusty_box_symbols::pe::ImageRead;
 use rusty_box_symbols::units::Rva;
 
 use super::guest::{GuestMemory, GuestRead, Root};
 use super::inspect::SymModule;
-use crate::symbols::hub::{ImageKey, ImageState, SymbolsView};
-
-const PAGE_BYTES: u64 = 0x1000;
+use crate::symbols::hub::{ImageKey, ImageRetry, ImageState, SymbolsView};
 
 /// What stands behind one module's bytes.
 enum Backing {
     File(Arc<ModuleFile>),
-    /// The binary is being looked up, or has not been asked for: a read
-    /// that needs it names it.
+    /// The binary is being looked up, has not been asked for, or failed in
+    /// a way asking again may mend: a read that needs it names it.
     Awaited(ImageKey),
     /// No binary: an unnamed or ELF module, or one whose binary was not
     /// found.
     Nothing,
 }
 
-struct BackedModule {
-    base: u64,
-    size: u64,
-    backing: Backing,
-}
-
-impl BackedModule {
-    /// Whether `[at, at + len)` lies inside the module.
-    fn holds(&self, at: u64, len: u64) -> bool {
-        at.checked_sub(self.base)
-            .and_then(|offset| offset.checked_add(len))
-            .is_some_and(|end| end <= self.size)
+/// What stands behind `module`'s bytes, as `symbols` has its binary.
+fn backing_of(module: &SymModule, symbols: Option<&SymbolsView>) -> Backing {
+    let Some(key) = module.identity.known().and_then(ImageKey::of) else {
+        return Backing::Nothing;
+    };
+    if let Some(file) = symbols.and_then(|view| view.image(&key)) {
+        return Backing::File(Arc::clone(file));
+    }
+    match symbols.and_then(|view| view.image_state(&key)) {
+        None
+        | Some(
+            ImageState::Pending | ImageState::Downloading { .. } | ImageState::Failed { retry: ImageRetry::From(_), .. },
+        ) => Backing::Awaited(key),
+        Some(ImageState::Loaded { .. } | ImageState::NotOnServer | ImageState::Failed { retry: ImageRetry::Never, .. }) => {
+            Backing::Nothing
+        }
     }
 }
 
-/// `memory`, with the binaries of its loaded modules behind it.
+/// Whether `[at, at + len)` lies inside `module`.
+fn holds(module: &SymModule, at: u64, len: u64) -> bool {
+    at.checked_sub(module.base)
+        .and_then(|offset| offset.checked_add(len))
+        .is_some_and(|end| end <= module.size)
+}
+
+/// `memory`, with the binaries of its loaded modules behind it. A module's
+/// binary is looked up only when a page of it does not read.
 pub(crate) struct ImageBacked<'a, G> {
     memory: &'a mut G,
-    modules: Vec<BackedModule>,
+    modules: &'a [SymModule],
+    symbols: Option<&'a SymbolsView>,
     awaited: Vec<ImageKey>,
 }
 
 impl<'a, G: GuestMemory> ImageBacked<'a, G> {
     /// Each PE module of `modules` backed by its binary when `symbols` has
     /// it, awaiting it while it is looked up or was never asked for.
-    pub(crate) fn new(memory: &'a mut G, modules: &[SymModule], symbols: Option<&SymbolsView>) -> Self {
-        let modules = modules
-            .iter()
-            .map(|module| {
-                let key = module.identity.known().and_then(ImageKey::of);
-                let backing = match key {
-                    Some(key) => match symbols.and_then(|view| view.image(&key)) {
-                        Some(file) => Backing::File(Arc::clone(file)),
-                        // A lookup that may succeed if asked again (the
-                        // network was down) is awaited again; one that
-                        // cannot is not.
-                        None => match symbols.and_then(|view| view.image_state(&key)) {
-                            None
-                            | Some(
-                                ImageState::Pending
-                                | ImageState::Downloading { .. }
-                                | ImageState::Failed { retry: Retry::Retryable, .. },
-                            ) => Backing::Awaited(key),
-                            Some(
-                                ImageState::Loaded { .. }
-                                | ImageState::NotOnServer
-                                | ImageState::Failed { retry: Retry::Final, .. },
-                            ) => Backing::Nothing,
-                        },
-                    },
-                    None => Backing::Nothing,
-                };
-                BackedModule { base: module.base, size: module.size, backing }
-            })
-            .collect();
-        ImageBacked { memory, modules, awaited: Vec::new() }
+    pub(crate) fn new(memory: &'a mut G, modules: &'a [SymModule], symbols: Option<&'a SymbolsView>) -> Self {
+        ImageBacked { memory, modules, symbols, awaited: Vec::new() }
     }
 
     /// The binaries reads wanted and did not have, each once, in the order
@@ -98,17 +79,17 @@ impl<'a, G: GuestMemory> ImageBacked<'a, G> {
     /// module holding them.
     fn from_binary(&mut self, linear: u64, buf: &mut [u8]) -> GuestRead {
         let len = u64::try_from(buf.len()).unwrap_or(u64::MAX);
-        let Some(module) = self.modules.iter().find(|module| module.holds(linear, len)) else {
+        let Some(module) = self.modules.iter().find(|module| holds(module, linear, len)) else {
             return GuestRead::Unreadable;
         };
-        match &module.backing {
+        match backing_of(module, self.symbols) {
             Backing::File(file) => match file.read_loaded(module.base, Rva(linear.wrapping_sub(module.base)), buf) {
                 ImageRead::Read => GuestRead::Read,
                 ImageRead::Unreadable => GuestRead::Unreadable,
             },
             Backing::Awaited(key) => {
-                if !self.awaited.contains(key) {
-                    self.awaited.push(key.clone());
+                if !self.awaited.contains(&key) {
+                    self.awaited.push(key);
                 }
                 GuestRead::Unreadable
             }
@@ -133,32 +114,12 @@ impl<G: GuestMemory> GuestMemory for ImageBacked<'_, G> {
         self.memory.page_mappings(cr3, range, visit)
     }
 
-    /// The guest's bytes a page at a time, as [`GuestMemory::read_linear`]
-    /// reads them; a page that does not map, or does not read, from the
-    /// binary of the module that holds it.
-    fn read_linear(&mut self, root: Root, linear: u64, buf: &mut [u8]) -> GuestRead {
-        let mut at = linear;
-        let mut rest: &mut [u8] = buf;
-        while !rest.is_empty() {
-            let in_page = PAGE_BYTES.wrapping_sub(at & (PAGE_BYTES - 1));
-            let take = usize::try_from(in_page).map_or(rest.len(), |in_page| in_page.min(rest.len()));
-            let Some((chunk, tail)) = std::mem::take(&mut rest).split_at_mut_checked(take) else {
-                return GuestRead::Unreadable;
-            };
-            let guest = match self.memory.translate(root, at) {
-                Some(physical) => self.memory.read_physical(physical, chunk),
-                None => GuestRead::Unreadable,
-            };
-            match guest {
-                GuestRead::Read => {}
-                GuestRead::Unreadable => match self.from_binary(at, chunk) {
-                    GuestRead::Read => {}
-                    GuestRead::Unreadable => return GuestRead::Unreadable,
-                },
-            }
-            rest = tail;
-            at = at.wrapping_add(in_page);
+    /// The guest's bytes; a page that does not map, or does not read, from
+    /// the binary of the module that holds it.
+    fn read_linear_page(&mut self, root: Root, linear: u64, chunk: &mut [u8]) -> GuestRead {
+        match self.memory.read_linear_page(root, linear, chunk) {
+            GuestRead::Read => GuestRead::Read,
+            GuestRead::Unreadable => self.from_binary(linear, chunk),
         }
-        GuestRead::Read
     }
 }

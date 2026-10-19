@@ -612,7 +612,7 @@ mod tests {
     use crate::debugger::inspect::SymbolIndex;
     use crate::debugger::unwind::{FrameFound, FrameRegisters};
     use crate::debugger::variables::{PointedString, Preview, PreviewItem, ShownValue, Signedness, StringEnd};
-    use crate::symbols::hub::SymbolsView;
+    use crate::symbols::hub::{ImageEntry, ImageRetry, SymbolsView};
     use crate::symbols::kernel::tests::{kernel_symbols, KERNEL_BASE};
     use crate::symbols::names::tests::{hub_with_kernel_code, loaded};
 
@@ -744,6 +744,32 @@ mod tests {
     struct Ended {
         end: StackEnd,
         text: &'static str,
+    }
+
+    /// A stack that ends on a module's byte the guest has not paged in says
+    /// what became of the module's binary, which such bytes are read from.
+    #[test]
+    fn a_stack_ending_in_a_module_says_what_became_of_its_binary() {
+        let index = kernel_symbols();
+        let at = KERNEL_BASE + 0x10;
+        let module = index.module_at(at).expect("the kernel");
+        let key = module.identity.known().and_then(ImageKey::of).expect("a PE build");
+        let name = module.name.clone();
+        let end = StackEnd::Unreadable { at };
+        let mut view = SymbolsView::default();
+        let note = |view: &SymbolsView| binary_note(end, &index, view);
+        assert_eq!(note(&view), Some(format!("{name}'s binary was not asked for")));
+        let state = |view: &mut SymbolsView, state: ImageState| {
+            view.images.insert(key.clone(), ImageEntry { state, file: None });
+        };
+        state(&mut view, ImageState::Pending);
+        assert_eq!(note(&view), Some(format!("{name}'s binary is being looked up")));
+        state(&mut view, ImageState::NotOnServer);
+        assert_eq!(note(&view), Some(format!("{name}'s binary is not on the symbol servers")));
+        state(&mut view, ImageState::Failed { reason: "the server timed out".into(), retry: ImageRetry::Never });
+        assert_eq!(note(&view), Some(format!("{name}'s binary did not load: the server timed out")));
+        assert_eq!(binary_note(StackEnd::Top, &index, &view), None, "a stack that ends at its top");
+        assert_eq!(binary_note(StackEnd::Unreadable { at: 0x10 }, &index, &view), None, "no module there");
     }
 
     #[test]

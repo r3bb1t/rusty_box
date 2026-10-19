@@ -6,7 +6,7 @@
 //! loader fills, hold the guest's own values, which no file has.
 
 use crate::identity::PeImageId;
-use crate::pe::{DataDirectory, FileImage, HeaderError, ImageRead, PeHeaders};
+use crate::pe::{DataDirectory, FileImage, HeaderError, ImageRead, PeHeaders, SectionHeader};
 use crate::read::Bytes;
 use crate::units::Rva;
 
@@ -92,6 +92,13 @@ impl ModuleFile {
     pub fn headers(&self) -> &PeHeaders {
         self.file.headers()
     }
+
+    /// The file's bytes, as read.
+    #[must_use]
+    pub fn bytes(&self) -> &[u8] {
+        self.file.bytes()
+    }
+
     /// `buf.len()` bytes at `rva` of the image loaded at `base`, when every
     /// one of them is a byte the loader maps unchanged from the file (base
     /// relocations aside).
@@ -147,27 +154,48 @@ impl ModuleFile {
         }
     }
 
-    /// The region the loader maps unchanged that holds `rva`: the headers'
-    /// page, or the pages of a section it maps read-only. Each is the file's
-    /// bytes up to `file_end` and zeros from there to the end of its last
-    /// page; `None` for a writable section's bytes and for bytes no region
-    /// holds.
+    /// The region the loader maps unchanged that holds `rva`: the headers, or
+    /// a section it maps read-only. Each is the file's bytes up to
+    /// `file_end`, then zeros to `end`: the end of its last page when
+    /// sections start on page boundaries. With a smaller `SectionAlignment`
+    /// a page holds more than one region, and the bytes between them are the
+    /// file's, so a region ends where its bytes do. No region reaches past
+    /// the next one's start. `None` for a writable section's bytes and for
+    /// bytes no region holds.
     fn region_of(&self, rva: u64) -> Option<Region> {
         let headers = self.headers();
+        let paged = u64::from(headers.section_alignment) >= PAGE_BYTES;
+        let rounded = |end: u64| if paged { page_end(end) } else { end };
+        // Where the first section after `start` begins; the image's end when
+        // none does.
+        let next_start = |start: u64| {
+            headers
+                .sections
+                .iter()
+                .map(|section| section.virtual_address.0)
+                .filter(|section_start| *section_start > start)
+                .min()
+                .unwrap_or(u64::from(headers.size_of_image))
+        };
         let size_of_headers = u64::from(headers.size_of_headers);
-        let headers_end = page_end(size_of_headers);
+        let headers_end = rounded(size_of_headers).min(next_start(0));
         if rva < headers_end {
-            return Some(Region { file_end: size_of_headers, end: headers_end });
+            return Some(Region { file_end: size_of_headers.min(headers_end), end: headers_end });
         }
+        let region_of_section = |section: &SectionHeader| {
+            let start = section.virtual_address.0;
+            let bytes_end = start.saturating_add(section.span());
+            let end = rounded(bytes_end).min(next_start(start));
+            Region { file_end: bytes_end.min(end), end }
+        };
         let section = headers
             .sections
             .iter()
-            .find(|section| rva.checked_sub(section.virtual_address.0).is_some_and(|within| within < page_end(section.span())))?;
+            .find(|section| section.virtual_address.0 <= rva && rva < region_of_section(section).end)?;
         if section.characteristics & SECTION_WRITABLE != 0 {
             return None;
         }
-        let start = section.virtual_address.0;
-        Some(Region { file_end: start.saturating_add(section.span()), end: start.saturating_add(page_end(section.span())) })
+        Some(region_of_section(section))
     }
 
     /// Applies, to `buf` read at `start`, every fixup whose bytes it covers,
@@ -230,7 +258,6 @@ struct Region {
     file_end: u64,
     end: u64,
 }
-
 /// The loader maps whole pages.
 const PAGE_BYTES: u64 = 0x1000;
 
@@ -305,8 +332,8 @@ fn read_relocations(file: &FileImage<Vec<u8>>, directory: DataDirectory) -> Relo
 mod tests {
     use super::*;
     use rusty_box_symbols_fixtures::pe::{
-        pe64_file, relocation_block, Directory, Pe64Spec, SpecSection, PE64_HEADERS, REL_BASED_DIR64, REL_BASED_HIGHLOW,
-        SECTION_CODE, SECTION_READ_ONLY, SECTION_WRITABLE,
+        pe64_file, relocation_block, Directory, Pe64Spec, SpecSection, PAGE_ALIGNED, PE64_HEADERS, REL_BASED_DIR64,
+        REL_BASED_HIGHLOW, SECTION_CODE, SECTION_READ_ONLY, SECTION_WRITABLE,
     };
 
     const LINKED: u64 = 0x1_4000_0000;
@@ -332,6 +359,7 @@ mod tests {
             time_date_stamp: 0x5E1F_0001,
             size_of_image: 0x5000,
             image_base: LINKED,
+            section_alignment: PAGE_ALIGNED,
             sections: vec![
                 SpecSection { name: b".text", rva: 0x1000, bytes: text, characteristics: SECTION_CODE },
                 SpecSection { name: b".rdata", rva: 0x2000, bytes: rdata, characteristics: SECTION_READ_ONLY },
@@ -376,6 +404,32 @@ mod tests {
         assert!(text[0x200..].iter().all(|byte| *byte == 0), "past the section's raw data");
         assert_eq!(read(&file, LINKED, 0x1FFC, 8), Some(vec![0, 0, 0, 0, 0x11, 0x11, 0x11, 0x11]), "across into .rdata");
         assert_eq!(read(&file, LINKED, 0x2FFC, 8), None, "across into the writable .data");
+    }
+
+    /// A driver linked with `/ALIGN:0x200`: its sections share pages, and
+    /// none is rounded out with zeros over the next one's bytes.
+    #[test]
+    fn sections_aligned_below_a_page_are_read_where_they_lie() {
+        let file = ModuleFile::parse(pe64_file(&Pe64Spec {
+            time_date_stamp: 0x5E1F_0003,
+            size_of_image: 0xA00,
+            image_base: LINKED,
+            section_alignment: 0x200,
+            sections: vec![
+                SpecSection { name: b".text", rva: 0x400, bytes: vec![0xC3; 0x80], characteristics: SECTION_CODE },
+                SpecSection { name: b".rdata", rva: 0x600, bytes: vec![0x11; 0x40], characteristics: SECTION_READ_ONLY },
+                SpecSection { name: b".data", rva: 0x800, bytes: vec![0x22; 0x40], characteristics: SECTION_WRITABLE },
+            ],
+            exception: None,
+            base_relocations: None,
+            import_address_table: None,
+        }))
+        .unwrap();
+        assert_eq!(read(&file, LINKED, 0x400, 4), Some(vec![0xC3; 4]), "not the header page's zeros");
+        assert_eq!(read(&file, LINKED, 0x600, 4), Some(vec![0x11; 4]), "not .text's page's zeros");
+        assert_eq!(read(&file, LINKED, 0x3FC, 8), Some(vec![0, 0, 0, 0, 0xC3, 0xC3, 0xC3, 0xC3]), "across into .text");
+        assert_eq!(read(&file, LINKED, 0x800, 4), None, "the writable .data");
+        assert_eq!(read(&file, LINKED, 0x7FE, 4), None, "a read reaching into it");
     }
 
     #[test]

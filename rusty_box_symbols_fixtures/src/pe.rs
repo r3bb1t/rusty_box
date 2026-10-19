@@ -92,6 +92,9 @@ pub struct Pe64Spec {
     pub time_date_stamp: u32,
     pub size_of_image: u32,
     pub image_base: u64,
+    /// `SectionAlignment`: [`PAGE_ALIGNED`] as linkers write it by default,
+    /// or less, as `/ALIGN` makes a driver's.
+    pub section_alignment: u32,
     pub sections: Vec<SpecSection>,
     pub exception: Option<Directory>,
     pub base_relocations: Option<Directory>,
@@ -108,6 +111,8 @@ struct DirectorySlot {
 /// data starts.
 pub const PE64_HEADERS: u32 = 0x400;
 const FILE_ALIGNMENT: usize = 0x200;
+/// A page: the `SectionAlignment` linkers write by default.
+pub const PAGE_ALIGNED: u32 = 0x1000;
 
 /// A PE32+ file as a linker writes it: headers in the first
 /// [`PE64_HEADERS`] bytes, then each section's raw data in turn, each
@@ -125,6 +130,7 @@ pub fn pe64_file(spec: &Pe64Spec) -> Vec<u8> {
     let opt = nt + 24;
     put16(&mut file, opt, 0x20B);
     file[opt + 24..opt + 32].copy_from_slice(&spec.image_base.to_le_bytes());
+    put32(&mut file, opt + 32, spec.section_alignment);
     put32(&mut file, opt + 56, spec.size_of_image);
     put32(&mut file, opt + 60, PE64_HEADERS);
     put32(&mut file, opt + 108, 16);

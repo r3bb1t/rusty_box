@@ -85,8 +85,34 @@ pub(crate) enum ImageState {
     /// Every server answered that it does not have the file. Kept for the
     /// run.
     NotOnServer,
-    Failed { reason: String, retry: Retry },
+    Failed { reason: String, retry: ImageRetry },
 }
+
+/// Whether a binary whose lookup failed is looked up again when a pause
+/// needs it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ImageRetry {
+    /// From this instant: the failure may mend (the network was down), and
+    /// a lookup asked sooner would most likely fail the same way.
+    From(Instant),
+    /// The failure will not mend by asking again (the file is broken).
+    Never,
+}
+
+impl ImageRetry {
+    /// A failure `retry` says may or may not mend, as of `now`.
+    pub(crate) fn of(retry: Retry, now: Instant) -> ImageRetry {
+        match retry {
+            Retry::Retryable => ImageRetry::From(now.checked_add(IMAGE_RETRY_AFTER).unwrap_or(now)),
+            Retry::Final => ImageRetry::Never,
+        }
+    }
+}
+
+/// How long a binary whose lookup may mend waits before it is looked up
+/// again: each pause or step needs it again, and asking each time would
+/// spend the worker on the same timeout.
+pub(crate) const IMAGE_RETRY_AFTER: Duration = Duration::from_secs(30);
 
 /// One binary's state, and the file when it loaded.
 #[derive(Clone)]
@@ -526,21 +552,23 @@ impl SymbolHub {
         });
     }
 
-    /// Asks for binaries: one never asked for, or whose lookup failed in a
-    /// way asking again may mend, is looked up, beside the symbols the panes
+    /// Asks for binaries, as of `now`: one never asked for, or whose lookup
+    /// failed in a way asking again may mend and has waited its
+    /// [`IMAGE_RETRY_AFTER`], is looked up, beside the symbols the panes
     /// show.
-    pub(crate) fn want_images(&self, keys: &[ImageKey]) {
+    pub(crate) fn want_images(&self, keys: &[ImageKey], now: Instant) {
         self.update(|state| {
             let fresh: Vec<ImageKey> = keys
                 .iter()
                 .filter(|key| match state.view.image_state(key) {
-                    None | Some(ImageState::Failed { retry: Retry::Retryable, .. }) => true,
+                    None => true,
+                    Some(ImageState::Failed { retry: ImageRetry::From(when), .. }) => now >= *when,
                     Some(
                         ImageState::Pending
                         | ImageState::Downloading { .. }
                         | ImageState::Loaded { .. }
                         | ImageState::NotOnServer
-                        | ImageState::Failed { retry: Retry::Final, .. },
+                        | ImageState::Failed { retry: ImageRetry::Never, .. },
                     ) => false,
                 })
                 .cloned()

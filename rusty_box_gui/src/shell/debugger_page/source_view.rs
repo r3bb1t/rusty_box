@@ -15,7 +15,9 @@ use rusty_box_symbols::units::Rva;
 use egui::{Color32, RichText};
 
 use crate::debugger::inspect::SymbolIndex;
-use crate::debugger::source_breakpoints::{resolve, BreakpointModules, BreakpointTarget, SourceResolution, SourceTarget};
+use crate::debugger::source_breakpoints::{
+    resolve, BreakpointModules, BreakpointTarget, Resolutions, SourceResolution, SourceTarget,
+};
 use crate::debugger::xref::service::{AddressRange, XrefTarget};
 use super::references::REFERENCES_TO;
 use super::frames_view::{variable_rows, RowAsk, CALLER_LINE, TIP_READING, VALUE_TIP};
@@ -100,8 +102,7 @@ pub(crate) fn line_marks(
     source: &PauseSource,
     applied: &[CodeBreakpoint],
     targets: &[BreakpointTarget],
-    index: Option<BreakpointModules<'_>>,
-    view: &SymbolsView,
+    resolutions: &Resolutions,
 ) -> Vec<LineMarkAt> {
     let mut marks: BTreeMap<u32, LineMark> = BTreeMap::new();
     for breakpoint in applied {
@@ -115,7 +116,7 @@ pub(crate) fn line_marks(
         let BreakpointTarget::Source(target) = target else {
             continue;
         };
-        let pending = !index.is_some_and(|index| matches!(resolve(target, &index, view), SourceResolution::Resolved { .. }));
+        let pending = !matches!(resolutions.source(target), Some(SourceResolution::Resolved { .. }));
         if pending && names_file(target, source) {
             marks.entry(target.line).or_insert(LineMark::Pending);
         }
@@ -597,7 +598,7 @@ mod tests {
 
     /// No module of the owner's runs in another process.
     static NOWHERE: crate::debugger::windows::ModulesElsewhere =
-        crate::debugger::windows::ModulesElsewhere { current: None, modules: Vec::new() };
+        crate::debugger::windows::ModulesElsewhere { names: Vec::new(), modules: Vec::new() };
 
     /// A pause's modules: `symbols`, and nothing in other processes.
     fn only(symbols: &SymbolIndex) -> BreakpointModules<'_> {
@@ -612,7 +613,8 @@ mod tests {
         // Line 104 by its address, line 100 by source, line 300 pending.
         let applied = [CodeBreakpoint::Linear(KERNEL_BASE + 0x1050), CodeBreakpoint::Linear(KERNEL_BASE + 0x1040)];
         let targets = [trap_line(100), BreakpointTarget::Address(applied[0]), trap_line(300)];
-        let marks = line_marks(&source, &applied, &targets, Some(only(&symbols)), &view);
+        let resolutions = Resolutions::of(&targets, Some(&only(&symbols)), &view);
+        let marks = line_marks(&source, &applied, &targets, &resolutions);
         assert_eq!(
             marks.into_iter().collect::<Vec<LineMarkAt>>(),
             [

@@ -14,7 +14,8 @@ use super::kernel_layout::{same_layouts, KernelLayout};
 use super::module_identity::GuestIdentity;
 use super::xref::decode::{bare_displacement, branch_target, has_no_index};
 use super::windows::{
-    read_thread_view, read_windows, KernelLayouts, LiveTeb, ModulesElsewhere, ReadThrough, SystemListing, SystemView,
+    read_thread_view, read_windows_finding, FindElsewhere, KernelLayouts, LiveTeb, ModulesElsewhere, ReadThrough,
+    SystemListing, SystemView,
     ThreadView, ThreadViewRead, ViewMiss, ViewTarget, WindowsDiscovery,
 };
 
@@ -298,11 +299,13 @@ pub(crate) fn linear_of(base: u64, offset: u64, size: CodeSize) -> u64 {
 /// shown, when the guest has not executed since it was read: the guest's own
 /// structures (its process, symbols and listing) are carried over from it when
 /// it was read through the same processor for the same request under the
-/// same kernel layouts, and read afresh otherwise. `discovery` keeps what
-/// those reads learn of the guest's layouts; `layout` is the kernel PDB's.
+/// same kernel layouts, looking for the same `binaries` in the other
+/// processes, and read afresh otherwise. `discovery` keeps what those reads
+/// learn of the guest's layouts; `layout` is the kernel PDB's.
 pub(crate) fn read_snapshot<T: Instrumentation, E: SliceEngine<T>>(
     emu: &mut Emulator<T, E>,
     view: &ViewRequest,
+    binaries: &[String],
     discovery: &mut WindowsDiscovery,
     unmoved: Option<&DebugSnapshot>,
     layout: Option<&Arc<KernelLayout>>,
@@ -354,13 +357,14 @@ pub(crate) fn read_snapshot<T: Instrumentation, E: SliceEngine<T>>(
     };
     let mut cpu = PausedCpu { cpu: &mut cpu, vmx_guest };
     // What was read of the guest's structures is carried over only for the
-    // same processor, the same listing, the same point of view and the same
-    // kernel layouts.
+    // same processor, the same listing, the same point of view, the same
+    // kernel layouts and the same binaries looked for.
     let carried = unmoved.filter(|last| {
         last.cpu == index
             && last.asked == view.system
             && last.context == view.context
             && same_layouts(last.layout.as_ref(), layout)
+            && last.elsewhere.names == binaries
     });
     let viewing = match carried {
         Some(last) => last.viewing.clone(),
@@ -429,9 +433,17 @@ pub(crate) fn read_snapshot<T: Instrumentation, E: SliceEngine<T>>(
             system: last.system.clone(),
             layouts: last.layouts,
             through: last.through,
+            elsewhere: last.elsewhere.clone(),
         },
         None => {
-            let windows = read_windows(&mut cpu.walked(), &walked_view, view.system, discovery, layout);
+            // A thread view's process names the pause's addresses, so the
+            // owner's programs are looked for in every other one.
+            let shown = match &viewing {
+                Viewing::Thread(thread) => Some(thread.cr3),
+                Viewing::Live | Viewing::Running { .. } | Viewing::Miss(_) => None,
+            };
+            let find = FindElsewhere { names: binaries, shown };
+            let windows = read_windows_finding(&mut cpu.walked(), &walked_view, view.system, find, discovery, layout);
             match &viewing {
                 // The view's own process names its addresses.
                 Viewing::Thread(thread) => GuestStructures {
@@ -440,6 +452,7 @@ pub(crate) fn read_snapshot<T: Instrumentation, E: SliceEngine<T>>(
                     system: windows.system,
                     layouts: windows.layouts,
                     through: windows.through,
+                    elsewhere: windows.elsewhere,
                 },
                 Viewing::Live | Viewing::Running { .. } | Viewing::Miss(_) => GuestStructures {
                     process: windows_image_path(&mut cpu.walked(), &walked_view),
@@ -447,11 +460,12 @@ pub(crate) fn read_snapshot<T: Instrumentation, E: SliceEngine<T>>(
                     system: windows.system,
                     layouts: windows.layouts,
                     through: windows.through,
+                    elsewhere: windows.elsewhere,
                 },
             }
         }
     };
-    let GuestStructures { process, symbols, system, layouts, through } = structures;
+    let GuestStructures { process, symbols, system, layouts, through, elsewhere } = structures;
     let memory_space = match start.space {
         AddressSpace::Process { cr3 } => Some(cr3),
         AddressSpace::Linear | AddressSpace::Physical => None,
@@ -476,7 +490,7 @@ pub(crate) fn read_snapshot<T: Instrumentation, E: SliceEngine<T>>(
         through,
         vmcs: cpu.vmx_guest.map(|guest| guest.vmcs),
         frames: FramesRead::default(),
-        elsewhere: ModulesElsewhere::default(),
+        elsewhere,
     }
 }
 
@@ -487,6 +501,7 @@ struct GuestStructures {
     system: SystemListing,
     layouts: Option<KernelLayouts>,
     through: ReadThrough,
+    elsewhere: ModulesElsewhere,
 }
 
 /// A thread-view read as the snapshot carries it.
@@ -893,6 +908,7 @@ mod tests {
         let snapshot = read_snapshot(
             &mut machine,
             &ViewRequest::default(),
+            &[],
             &mut WindowsDiscovery::default(),
             None,
             None,
@@ -938,6 +954,7 @@ mod tests {
                     memory: MemoryTarget::At(target),
                     ..ViewRequest::default()
                 },
+                &[],
                 &mut WindowsDiscovery::default(),
                 None,
                 None,
@@ -958,11 +975,11 @@ mod tests {
         machine.reg_write(X86Reg::Rip, code);
         let elsewhere = GuestAddress { space: AddressSpace::Linear, value: code + 2 };
         let request = ViewRequest { code: CodeTarget::At(elsewhere), ..ViewRequest::default() };
-        let snapshot = read_snapshot(&mut machine, &request, &mut WindowsDiscovery::default(), None, None);
+        let snapshot = read_snapshot(&mut machine, &request, &[], &mut WindowsDiscovery::default(), None, None);
         assert_eq!(snapshot.code[0].address, code + 2);
         assert_eq!(snapshot.code_at, CodeTarget::At(elsewhere));
         assert_eq!(snapshot.rip, code, "the pause stays where RIP is");
-        let at_rip = read_snapshot(&mut machine, &ViewRequest::default(), &mut WindowsDiscovery::default(), None, None);
+        let at_rip = read_snapshot(&mut machine, &ViewRequest::default(), &[], &mut WindowsDiscovery::default(), None, None);
         assert_eq!(at_rip.code[0].address, code);
         assert_eq!(at_rip.code_at, CodeTarget::Rip);
     }
@@ -976,6 +993,7 @@ mod tests {
                 cpu: 5,
                 ..ViewRequest::default()
             },
+            &[],
             &mut WindowsDiscovery::default(),
             None,
             None,
@@ -989,14 +1007,14 @@ mod tests {
     fn an_unmoved_guest_carries_its_structure_reads_into_the_next_snapshot() {
         let mut machine = long_mode_machine();
         let mut discovery = WindowsDiscovery::default();
-        let mut first = read_snapshot(&mut machine, &ViewRequest::default(), &mut discovery, None, None);
+        let mut first = read_snapshot(&mut machine, &ViewRequest::default(), &[], &mut discovery, None, None);
         // A marker no real read could produce, so a re-read would drop it.
         first.process = Some("carried.exe".to_owned());
         let paged = ViewRequest {
             memory: MemoryTarget::Rsp,
             ..ViewRequest::default()
         };
-        let carried = read_snapshot(&mut machine, &paged, &mut discovery, Some(&first), None);
+        let carried = read_snapshot(&mut machine, &paged, &[], &mut discovery, Some(&first), None);
         assert_eq!(carried.process.as_deref(), Some("carried.exe"));
         // A different listing asked for is read afresh.
         let kernel = SystemView::KernelModules {
@@ -1007,9 +1025,13 @@ mod tests {
             system: kernel,
             ..ViewRequest::default()
         };
-        let read = read_snapshot(&mut machine, &listed, &mut discovery, Some(&first), None);
+        let read = read_snapshot(&mut machine, &listed, &[], &mut discovery, Some(&first), None);
         assert_eq!(read.process, None);
         assert_eq!(read.asked, kernel);
+        // So is a pause that looks for other binaries in the other processes.
+        let binaries = ["prog.exe".to_owned()];
+        let read = read_snapshot(&mut machine, &paged, &binaries, &mut discovery, Some(&first), None);
+        assert_eq!(read.process, None);
     }
 
     /// Layouts handed over while the guest stands still are read under at
@@ -1019,7 +1041,7 @@ mod tests {
         use crate::symbols::kernel::tests::kernel_identity;
         let mut machine = long_mode_machine();
         let mut discovery = WindowsDiscovery::default();
-        let mut first = read_snapshot(&mut machine, &ViewRequest::default(), &mut discovery, None, None);
+        let mut first = read_snapshot(&mut machine, &ViewRequest::default(), &[], &mut discovery, None, None);
         first.process = Some("carried.exe".to_owned());
         let layout = Arc::new(KernelLayout {
             kernel: kernel_identity(),
@@ -1031,7 +1053,7 @@ mod tests {
             object_era: None,
             failures: Vec::new(),
         });
-        let read = read_snapshot(&mut machine, &ViewRequest::default(), &mut discovery, Some(&first), Some(&layout));
+        let read = read_snapshot(&mut machine, &ViewRequest::default(), &[], &mut discovery, Some(&first), Some(&layout));
         assert_eq!(read.process, None);
         assert!(read.layout.is_some_and(|read| Arc::ptr_eq(&read, &layout)));
     }
@@ -1050,7 +1072,7 @@ mod tests {
             ..ViewRequest::default()
         };
         let snapshot =
-            read_snapshot(&mut machine, &request, &mut WindowsDiscovery::default(), None, None);
+            read_snapshot(&mut machine, &request, &[], &mut WindowsDiscovery::default(), None, None);
         assert!(
             matches!(snapshot.viewing, Viewing::Miss(ViewMiss::NoWindowsKernel(KernelMiss::NoKpcr))),
             "{:?}",
@@ -1081,13 +1103,13 @@ mod tests {
     fn a_different_view_context_is_read_afresh() {
         let mut machine = long_mode_machine();
         let mut discovery = WindowsDiscovery::default();
-        let mut first = read_snapshot(&mut machine, &ViewRequest::default(), &mut discovery, None, None);
+        let mut first = read_snapshot(&mut machine, &ViewRequest::default(), &[], &mut discovery, None, None);
         first.process = Some("carried.exe".to_owned());
         let viewing = ViewRequest {
             context: ViewContext::Thread { eprocess: 0xFFFF_FA80_0000_1000, tid: 0x1A4 },
             ..ViewRequest::default()
         };
-        let read = read_snapshot(&mut machine, &viewing, &mut discovery, Some(&first), None);
+        let read = read_snapshot(&mut machine, &viewing, &[], &mut discovery, Some(&first), None);
         assert_eq!(read.process, None);
     }
 

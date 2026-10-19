@@ -327,7 +327,7 @@ mod tests {
     use crate::debugger::module_identity::GuestIdentity;
     use crate::debugger::unwind::RBX;
     use crate::debugger::variables::{ShownValue, Signedness};
-    use crate::symbols::hub::{ImageEntry, ImageKey, ImageState, ModuleEntry, ModuleSymbols};
+    use crate::symbols::hub::{ImageEntry, ImageKey, ImageRetry, ImageState, ModuleEntry, ModuleSymbols};
     use rusty_box_symbols::identity::PeImageId;
     use rusty_box_symbols::module_file::ModuleFile;
     use rusty_box_symbols::service::SymbolSource;
@@ -336,7 +336,9 @@ mod tests {
         build_pdb, FixtureField, FixtureLine, FixtureLocal, FixturePlace, FixtureProcedure, FixtureScope, FixtureType,
         FixtureUdt, PdbFixture, UdtKind,
     };
-    use rusty_box_symbols_fixtures::pe::{pe64_file, Directory, Pe64Spec, SpecSection, SECTION_CODE, SECTION_READ_ONLY};
+    use rusty_box_symbols_fixtures::pe::{
+        pe64_file, Directory, Pe64Spec, SpecSection, PAGE_ALIGNED, SECTION_CODE, SECTION_READ_ONLY,
+    };
     use std::sync::Arc;
 
     /// CodeView's `RSP`.
@@ -624,6 +626,7 @@ mod tests {
             time_date_stamp: UNWOUND.time_date_stamp,
             size_of_image: UNWOUND.size_of_image,
             image_base: BASE,
+            section_alignment: PAGE_ALIGNED,
             sections: vec![
                 SpecSection { name: b".text", rva: 0x1000, bytes: text, characteristics: SECTION_CODE },
                 SpecSection { name: b".rdata", rva: 0x2000, bytes: info, characteristics: SECTION_READ_ONLY },
@@ -705,6 +708,24 @@ mod tests {
         let read =
             read_frames(&mut f_with_unwind_data_paged_out(), &at_f_past_prolog(), &unwound_index(), Some(&pending), &request(0));
         assert_eq!(read.awaiting_images, [unwound_key()], "still being looked up");
+    }
+
+    /// A lookup the network failed may mend: the read names the binary
+    /// again, for the shell to ask once its wait passes; a broken file's
+    /// lookup will not mend, and is not named.
+    #[test]
+    fn a_binary_whose_lookup_may_mend_is_awaited_and_a_broken_one_is_not() {
+        let failed = |retry| {
+            view_with_image(ImageEntry { state: ImageState::Failed { reason: "down".into(), retry }, file: None })
+        };
+        let may_mend = failed(ImageRetry::From(std::time::Instant::now()));
+        let read =
+            read_frames(&mut f_with_unwind_data_paged_out(), &at_f_past_prolog(), &unwound_index(), Some(&may_mend), &request(0));
+        assert_eq!(read.awaiting_images, [unwound_key()]);
+        let broken = failed(ImageRetry::Never);
+        let read =
+            read_frames(&mut f_with_unwind_data_paged_out(), &at_f_past_prolog(), &unwound_index(), Some(&broken), &request(0));
+        assert!(read.awaiting_images.is_empty());
     }
 
     #[test]

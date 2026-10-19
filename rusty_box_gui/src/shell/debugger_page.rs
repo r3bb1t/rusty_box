@@ -23,7 +23,8 @@ use rusty_box::cpu::{
 
 use crate::debugger::control::{DebugNote, StepCut};
 use crate::debugger::source_breakpoints::{
-    parse_target, resolve, BreakpointModules, BreakpointTarget, PendingWhy, SourceResolution, TargetError, TargetText,
+    parse_target, resolve, BreakpointModules, BreakpointTarget, PendingWhy, Resolutions, SourceResolution, TargetError,
+    TargetText,
 };
 use crate::debugger::stepping::{StepCeiling, StepKind, StepUnit};
 use crate::source::find::PathMap;
@@ -326,6 +327,9 @@ pub(crate) struct DebuggerPane {
     /// a step, a picked frame, a Go to) is scrolled to once, and the owner's
     /// own scrolling stands until the place changes.
     pub(crate) code_followed: Option<CodePlace>,
+    /// How the owner's source lines resolved, kept until the targets, the
+    /// pause or the symbols change.
+    pub(crate) resolutions: Resolutions,
     /// Which system-service table the SSDT view lists.
     pub(crate) ssdt_table: SsdtTable,
     /// The snapshot whose modules were last asked of the symbol engine.
@@ -390,6 +394,7 @@ impl Default for DebuggerPane {
             source_cursor: None,
             code_view: None,
             code_followed: None,
+            resolutions: Resolutions::default(),
             ssdt_table: SsdtTable::Kernel,
             symbols_asked: None,
             kernel_layout: None,
@@ -506,6 +511,8 @@ pub(crate) struct DebuggerPageState<'a> {
     pub(crate) symbols: &'a SymbolsView,
     /// The owner's breakpoints as named: addresses and source lines.
     pub(crate) targets: &'a [BreakpointTarget],
+    /// How each source line resolved under the pause.
+    pub(crate) resolutions: &'a Resolutions,
     /// The code breakpoints they come to, which the machine holds.
     pub(crate) breakpoints: &'a [CodeBreakpoint],
     /// The code breakpoint the run is paused at.
@@ -578,6 +585,8 @@ struct Marks<'a> {
     breakpoints: &'a [CodeBreakpoint],
     /// The owner's breakpoints, which a code line's menu changes.
     targets: &'a [BreakpointTarget],
+    /// How each source line resolved under the pause.
+    resolutions: &'a Resolutions,
     /// The pause's place in the owner's source, when its code has a line.
     pause: Option<&'a PauseSource>,
     /// Whether the code pane follows the innermost frame or a picked caller.
@@ -832,6 +841,7 @@ pub(crate) fn draw_debugger_page(
         pane,
         symbols,
         targets,
+        resolutions,
         breakpoints,
         stopped_at,
         references,
@@ -855,6 +865,7 @@ pub(crate) fn draw_debugger_page(
         symbols,
         breakpoints,
         targets,
+        resolutions,
         pause: pause.as_ref(),
         frame: snapshot.map_or(FrameMark::Innermost, FrameMark::of),
     };
@@ -895,8 +906,7 @@ pub(crate) fn draw_debugger_page(
                     targets,
                     applied: breakpoints,
                     names,
-                    index: snapshot.map(BreakpointModules::of),
-                    view: symbols,
+                    resolutions,
                     available: step_available,
                 };
                 ui.add_space(density.gap());
@@ -1014,9 +1024,8 @@ struct BreakpointList<'a> {
     /// The code breakpoints they come to.
     applied: &'a [CodeBreakpoint],
     names: Namer<'a>,
-    /// The pause's modules, which a source line resolves against.
-    index: Option<BreakpointModules<'a>>,
-    view: &'a SymbolsView,
+    /// How each source line resolved under the pause.
+    resolutions: &'a Resolutions,
     /// The VM runs on the interpreter, which can stop at one.
     available: bool,
 }
@@ -1049,10 +1058,10 @@ fn target_place(target: &BreakpointTarget, list: &BreakpointList<'_>) -> String 
         }
         BreakpointTarget::Address(CodeBreakpoint::Physical(_)) => "physical address".to_owned(),
         BreakpointTarget::Source(source) => {
-            let Some(index) = list.index else {
+            let Some(resolution) = list.resolutions.source(source) else {
                 return PENDING_NO_PAUSE.to_owned();
             };
-            match resolve(source, &index, list.view) {
+            match resolution {
                 SourceResolution::Resolved { places } => {
                     let Some(first) = places.first() else {
                         return PENDING_NO_LINE.to_owned();
@@ -2216,7 +2225,7 @@ fn code_pane(
         return;
     };
     let follow = picks.follow(CodePlace { view: CodeView::Source, address, line: Some(source.line) });
-    let gutter = line_marks(source, marks.breakpoints, marks.targets, Some(BreakpointModules::of(snapshot)), marks.symbols);
+    let gutter = line_marks(source, marks.breakpoints, marks.targets, marks.resolutions);
     let place = match marks.frame {
         FrameMark::Caller { .. } => PlaceMark::Caller,
         FrameMark::Innermost => match snapshot.code_at {
@@ -3098,7 +3107,7 @@ mod name_tests {
 
     /// No module of the owner's runs in another process.
     static NOWHERE: crate::debugger::windows::ModulesElsewhere =
-        crate::debugger::windows::ModulesElsewhere { current: None, modules: Vec::new() };
+        crate::debugger::windows::ModulesElsewhere { names: Vec::new(), modules: Vec::new() };
 
     /// A pause's modules: `symbols`, and nothing in other processes.
     fn only(symbols: &crate::debugger::inspect::SymbolIndex) -> BreakpointModules<'_> {
@@ -3124,25 +3133,44 @@ mod name_tests {
         assert_eq!(toggled(&targets, at_line, None, &view).len(), 2, "without a pause nothing resolves");
     }
 
+    /// The code pane brings a place into view once: a new pause, step,
+    /// frame or Go to. The owner's own scrolling stands until the place
+    /// changes, across frames.
+    #[test]
+    fn the_code_pane_follows_each_new_place_once() {
+        let mut picks = CodePicks::of(&DebuggerPane::default());
+        let at_rip = CodePlace { view: CodeView::Source, address: KERNEL_BASE + 0x1040, line: Some(100) };
+        assert!(picks.follow(at_rip), "a new pause");
+        assert!(!picks.follow(at_rip), "the owner scrolls freely after");
+        let stepped = CodePlace { address: KERNEL_BASE + 0x1050, line: Some(104), ..at_rip };
+        assert!(picks.follow(stepped), "a step");
+        let disassembly = CodePlace { view: CodeView::Disassembly, line: None, ..stepped };
+        assert!(picks.follow(disassembly), "the other view brings it into view");
+        let mut pane = DebuggerPane::default();
+        picks.keep(&mut pane);
+        assert!(!CodePicks::of(&pane).follow(disassembly), "kept from one frame to the next");
+    }
+
     /// A source breakpoint's row names where it resolved, and says when the
     /// line that has the code is not the one asked.
     #[test]
     fn a_source_breakpoints_row_says_where_it_resolved() {
         let view = hub_with_kernel_code(crate::symbols::names::tests::loaded()).view();
         let symbols = kernel_symbols();
-        let targets = [trap_line(100), trap_line(101)];
+        let targets = [trap_line(100), trap_line(101), trap_line(200)];
+        let resolved = Resolutions::of(&targets, Some(&only(&symbols)), &view);
         let list = BreakpointList {
             targets: &targets,
             applied: &[],
             names: Namer::new(&symbols, &view),
-            index: Some(only(&symbols)),
-            view: &view,
+            resolutions: &resolved,
             available: true,
         };
         assert_eq!(target_place(&trap_line(100), &list), "ntoskrnl!KiSystemCall64");
         assert_eq!(target_place(&trap_line(101), &list), "ntoskrnl!KiSystemCall64+0x10 · line 104 (101 has no code)");
         assert_eq!(target_place(&trap_line(200), &list), PENDING_NO_LINE);
-        let before_a_pause = BreakpointList { index: None, ..list };
+        let unresolved = Resolutions::of(&targets, None, &view);
+        let before_a_pause = BreakpointList { resolutions: &unresolved, ..list };
         assert_eq!(target_place(&trap_line(100), &before_a_pause), PENDING_NO_PAUSE);
     }
 }
@@ -6500,7 +6528,7 @@ mod tests {
             Emulator::new_with_mode(EmulatorConfig::default(), CpuSetupMode::FlatLong64)
                 .expect("machine");
         let read = |machine: &mut Emulator| {
-            read_snapshot(machine, &ViewRequest::default(), &mut WindowsDiscovery::default(), None, None)
+            read_snapshot(machine, &ViewRequest::default(), &[], &mut WindowsDiscovery::default(), None, None)
         };
         let live = read(&mut machine);
         let mut viewed = read(&mut machine);

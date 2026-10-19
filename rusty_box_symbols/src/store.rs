@@ -98,6 +98,9 @@ pub trait FileStore {
     /// The whole file; one over [`MAX_FILE_BYTES`] (or the adapter's own,
     /// lower cap) is [`StoreError::TooLarge`] before it is read.
     fn read(&mut self, path: &Path) -> Result<Vec<u8>, StoreError>;
+    /// The file's first `len` bytes, or all of it when it is shorter: what a
+    /// file's headers are read from without reading the rest.
+    fn read_prefix(&mut self, path: &Path, len: usize) -> Result<Vec<u8>, StoreError>;
     /// An I/O error is not "absent", so this is not a `bool`.
     fn presence(&mut self, path: &Path) -> Result<Presence, StoreError>;
     /// Writes `bytes` to a uniquely named file beside `path`, then renames it

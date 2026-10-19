@@ -3,8 +3,8 @@
 //! record names. The record may lie on a page the guest paged out; the
 //! module then keeps its image identity, which finds its binary.
 
-use rusty_box_symbols::identity::ModuleIdentity;
-use rusty_box_symbols::pe::{read_pe_identity, HeaderError, ImageRead};
+use rusty_box_symbols::identity::{ModuleIdentity, PeImageId};
+use rusty_box_symbols::pe::{read_headers, read_pe_identity, HeaderError, ImageRead};
 use rusty_box_symbols::units::Rva;
 
 use super::guest::{GuestMemory, GuestRead, Root};
@@ -51,11 +51,44 @@ pub(crate) fn read_module_identity<G: GuestMemory>(
     }
 }
 
+/// What the headers at an address say of the image there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BuildAt {
+    /// An image of this build (TimeDateStamp and SizeOfImage).
+    Image(PeImageId),
+    /// The bytes read, and are no image's headers.
+    NoImage,
+    /// They do not read: the guest has not paged them in, or nothing maps
+    /// there.
+    Unreadable,
+}
+
+/// The build of the image at `base` under `root`, from its headers alone.
+pub(crate) fn read_build_at<G: GuestMemory>(mem: &mut G, root: Root, base: u64) -> BuildAt {
+    let mut read = |rva: Rva, buf: &mut [u8]| match mem.read_linear(root, base.wrapping_add(rva.0), buf) {
+        GuestRead::Read => ImageRead::Read,
+        GuestRead::Unreadable => ImageRead::Unreadable,
+    };
+    match read_headers(&mut read) {
+        Ok(headers) => BuildAt::Image(headers.image_id()),
+        // Nothing read, or the host could not hold what did: nothing told.
+        Err(HeaderError::Unreadable { .. } | HeaderError::Allocation { .. }) => BuildAt::Unreadable,
+        Err(
+            HeaderError::Short { .. }
+            | HeaderError::BadDosMagic { .. }
+            | HeaderError::BadLfanew { .. }
+            | HeaderError::BadPeSignature { .. }
+            | HeaderError::BadOptionalMagic { .. }
+            | HeaderError::TooManySections { .. },
+        ) => BuildAt::NoImage,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::debugger::fake_windows::{
-        FakeWindows, FakeWindowsSpec, DEBUG_DIRECTORY_RVA, KERNEL_BASE, LIVE_CR3,
+        FakeWindows, FakeWindowsSpec, ACTIVE_PROCESS_HEAD_RVA, DEBUG_DIRECTORY_RVA, KERNEL_BASE, LIVE_CR3,
     };
     use rusty_box_symbols::identity::{Guid, PdbId, PeImageId};
 
@@ -94,6 +127,23 @@ mod tests {
         };
         assert_eq!(image.store_key(), "5E1D2A4B100000");
         assert_eq!(*pdb, None);
+    }
+
+    /// What a breakpoint scoped to a program checks at a hit: the build at
+    /// the program's base, which needs no CodeView record.
+    #[test]
+    fn an_images_build_reads_from_its_headers_alone() {
+        let mut fake = FakeWindows::build(FakeWindowsSpec::typical());
+        fake.guest.page_out(LIVE_CR3, KERNEL_BASE + DEBUG_DIRECTORY_RVA);
+        let build = PeImageId { time_date_stamp: 0x5E1D_2A4B, size_of_image: 0x10_0000 };
+        assert_eq!(read_build_at(&mut fake.guest, Root::Live, KERNEL_BASE), BuildAt::Image(build));
+        assert_eq!(
+            read_build_at(&mut fake.guest, Root::Live, KERNEL_BASE + ACTIVE_PROCESS_HEAD_RVA),
+            BuildAt::NoImage,
+            "the kernel's data page: it reads, and holds no headers"
+        );
+        fake.guest.page_out(LIVE_CR3, KERNEL_BASE);
+        assert_eq!(read_build_at(&mut fake.guest, Root::Live, KERNEL_BASE), BuildAt::Unreadable);
     }
 
     #[test]

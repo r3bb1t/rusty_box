@@ -12,7 +12,7 @@ use rusty_box::cpu::{BreakpointRefusal, CodeBreakpoint, CodeBreakpointHit};
 use rusty_box::emulator::PowerState;
 
 use super::inspect::{CodeTarget, DebugSnapshot, MemoryTarget, ViewRequest};
-use super::source_breakpoints::{admits, AppliedBreakpoints, BreakpointTarget, ScopedAddress};
+use super::source_breakpoints::{AppliedBreakpoints, BreakpointTarget, ScopedAddress};
 use super::stepping::{StepCeiling, StepRequest};
 use crate::symbols::hub::SymbolsView;
 use super::kernel_layout::{same_layouts, KernelLayout};
@@ -175,8 +175,8 @@ struct ControlState {
     /// machine at every run's start, and again whenever the shell changes
     /// them.
     breakpoints: Vec<CodeBreakpoint>,
-    /// The addresses of `breakpoints` that are the owner's only in some
-    /// address spaces: a user program's lines.
+    /// The addresses of `breakpoints` that are the owner's only where some
+    /// program is loaded: a user program's lines.
     scopes: Vec<ScopedAddress>,
     /// The code breakpoint the run is paused at, until it runs on or steps.
     stopped_at: Option<CodeBreakpointHit>,
@@ -761,20 +761,14 @@ impl RunControl {
         self.record_stop(&mut state, hit);
     }
 
-    /// Whether `hit`, taken where the running process's address space is
-    /// `space` (its `DirectoryTableBase`), is one of the owner's stops: a
-    /// user program's line stops only in the processes that run it.
-    pub(crate) fn admits(&self, hit: &CodeBreakpointHit, space: u64) -> bool {
+    /// The scope of the breakpoint `hit` stopped at, when it stops only where
+    /// some program is loaded (a user program's line); `None` when it stops
+    /// wherever it is reached.
+    pub(crate) fn scope_of(&self, hit: &CodeBreakpointHit) -> Option<ScopedAddress> {
         match hit.breakpoint {
-            CodeBreakpoint::Linear(linear) => admits(&self.lock().scopes, linear, space),
-            CodeBreakpoint::Physical(_) => true,
+            CodeBreakpoint::Linear(linear) => self.lock().scopes.iter().find(|scope| scope.linear == linear).cloned(),
+            CodeBreakpoint::Physical(_) => None,
         }
-    }
-
-    /// Whether any of the owner's breakpoints stops only in some address
-    /// spaces, so a hit needs its address space read to be judged.
-    pub(crate) fn has_scopes(&self) -> bool {
-        !self.lock().scopes.is_empty()
     }
 
     /// The machine took `set`.
@@ -921,7 +915,8 @@ mod tests {
     use rusty_box_symbols::service::SymbolSource;
     use rusty_box_symbols::tables::SymbolTables;
     use rusty_box_symbols_fixtures::pdb::{build_pdb, PdbFixture};
-    use rusty_box_symbols_fixtures::pe::{pe64_file, Pe64Spec, SpecSection, SECTION_CODE};
+    use rusty_box_symbols_fixtures::pe::{pe64_file, Pe64Spec, SpecSection, PAGE_ALIGNED, SECTION_CODE};
+    use crate::debugger::source_breakpoints::PlacedImage;
     use std::collections::{BTreeMap, BTreeSet};
 
     fn control() -> RunControl {
@@ -1035,6 +1030,7 @@ mod tests {
             time_date_stamp: 1,
             size_of_image: 0x2000,
             image_base: 0x40_0000,
+            section_alignment: PAGE_ALIGNED,
             sections: vec![SpecSection { name: b".text", rva: 0x1000, bytes: vec![0xC3; 0x10], characteristics: SECTION_CODE }],
             exception: None,
             base_relocations: None,
@@ -1510,10 +1506,10 @@ mod tests {
         AppliedBreakpoints { set, scopes: Vec::new() }
     }
 
-    /// A breakpoint on a user program's line is the owner's only in the
-    /// processes that run it; a new scope alone asks nothing of the machine.
+    /// A breakpoint on a user program's line is scoped to the program's
+    /// build; a new scope alone asks nothing of the machine.
     #[test]
-    fn a_hit_outside_its_breakpoints_address_spaces_is_not_the_owners() {
+    fn a_hit_is_judged_by_its_breakpoints_scope() {
         let control = control();
         control.begin_run(RunStart::PowerOn);
         let set = vec![CodeBreakpoint::Linear(0x1000), CodeBreakpoint::Linear(0x2000)];
@@ -1521,13 +1517,15 @@ mod tests {
         assert_eq!(control.after_run(PowerState::Running), AfterRun::Serve);
         assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::ApplyBreakpoints(set.clone())));
         assert_eq!(control.next_between_runs(), BetweenRuns::Resume);
-        let scopes = vec![ScopedAddress { linear: 0x1000, spaces: vec![0x5000] }];
-        control.set_breakpoints(AppliedBreakpoints { set, scopes });
+        let program = PlacedImage { base: 0x400, image: PeImageId { time_date_stamp: 7, size_of_image: 0x2000 } };
+        let scoped = ScopedAddress { linear: 0x1000, images: vec![program] };
+        control.set_breakpoints(AppliedBreakpoints { set, scopes: vec![scoped.clone()] });
         assert!(!raised(&control), "the machine's set did not change");
         let hit = |linear| CodeBreakpointHit { cpu: 0, breakpoint: CodeBreakpoint::Linear(linear), linear };
-        assert!(control.admits(&hit(0x1000), 0x5000));
-        assert!(!control.admits(&hit(0x1000), 0x6000), "another program at the same address");
-        assert!(control.admits(&hit(0x2000), 0x6000), "an address with no scope");
+        assert_eq!(control.scope_of(&hit(0x1000)), Some(scoped));
+        assert_eq!(control.scope_of(&hit(0x2000)), None, "an address with no scope");
+        let physical = CodeBreakpointHit { cpu: 0, breakpoint: CodeBreakpoint::Physical(0x1000), linear: 0x1000 };
+        assert_eq!(control.scope_of(&physical), None, "a physical breakpoint stops wherever it is reached");
     }
 
     /// A breakpoint stop pauses the run on the processor that stopped; a

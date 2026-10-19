@@ -750,6 +750,8 @@ pub(crate) struct WindowsRead {
     pub(crate) layouts: Option<KernelLayouts>,
     /// Whose page tables the kernel was read through.
     pub(crate) through: ReadThrough,
+    /// The modules looked for in the other processes.
+    pub(crate) elsewhere: ModulesElsewhere,
 }
 
 /// Whose page tables a pause's kernel reads go through.
@@ -902,13 +904,8 @@ fn shadow_kernel_cr3<G: GuestMemory>(
     None
 }
 
-/// The modules the code, stack and memory panes name an address against (the
-/// kernel's loaded modules, and the shown processor's process's own modules
-/// when it runs one) and the listing `request` asks for, through the
-/// processor `view` describes. The symbols are read whatever is requested.
-/// A read that comes up short leaves the index short; it never fails the
-/// snapshot, so a non-Windows guest simply names nothing. `layout` is the
-/// kernel PDB's, when the shell handed one over.
+/// [`read_windows_finding`], finding no module in other processes.
+#[cfg(test)]
 pub(crate) fn read_windows<G: GuestMemory>(
     cpu: &mut G,
     view: &CpuDebugView,
@@ -916,19 +913,65 @@ pub(crate) fn read_windows<G: GuestMemory>(
     discovery: &mut WindowsDiscovery,
     layout: Option<&Arc<KernelLayout>>,
 ) -> WindowsRead {
+    read_windows_finding(cpu, view, request, FindElsewhere::NOTHING, discovery, layout)
+}
+
+/// The modules the code, stack and memory panes name an address against (the
+/// kernel's loaded modules, and the shown processor's process's own modules
+/// when it runs one), the listing `request` asks for, and the modules `find`
+/// asks for in the other processes, through the processor `view` describes.
+/// The symbols are read whatever is requested. A read that comes up short
+/// leaves the index short; it never fails the snapshot, so a non-Windows
+/// guest simply names nothing. `layout` is the kernel PDB's, when the shell
+/// handed one over.
+pub(crate) fn read_windows_finding<G: GuestMemory>(
+    cpu: &mut G,
+    view: &CpuDebugView,
+    request: SystemView,
+    find: FindElsewhere<'_>,
+    discovery: &mut WindowsDiscovery,
+    layout: Option<&Arc<KernelLayout>>,
+) -> WindowsRead {
     discovery.under(layout);
+    let asked = Asked { request, find };
     match kernel_tables(cpu, view, discovery) {
         ReadThrough::ProcessorTables => {
-            read_windows_through(cpu, view, request, discovery, layout, ReadThrough::ProcessorTables)
+            read_windows_through(cpu, view, asked, discovery, layout, ReadThrough::ProcessorTables)
         }
         ReadThrough::KernelTables { cr3 } => {
             let mut kernel = KernelTablesView { cpu, cr3 };
-            read_windows_through(&mut kernel, view, request, discovery, layout, ReadThrough::KernelTables { cr3 })
+            read_windows_through(&mut kernel, view, asked, discovery, layout, ReadThrough::KernelTables { cr3 })
         }
     }
 }
 
-/// A module of a process other than the one the processor runs.
+/// What a Windows read is asked for: a listing, and modules in other
+/// processes.
+#[derive(Clone, Copy)]
+struct Asked<'a> {
+    request: SystemView,
+    find: FindElsewhere<'a>,
+}
+
+/// The modules a pause looks for in the processes its panes do not stand
+/// in: the owner's binaries by file name, in every process but the one
+/// whose modules the pause already names.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct FindElsewhere<'a> {
+    /// The file names (any case); none reads no other process.
+    pub(crate) names: &'a [String],
+    /// The address space (`DirectoryTableBase`) of the process the pause's
+    /// modules are: a thread view's; the running process's when `None`.
+    pub(crate) shown: Option<u64>,
+}
+
+#[cfg(test)]
+impl FindElsewhere<'_> {
+    /// Nothing looked for.
+    pub(crate) const NOTHING: FindElsewhere<'static> = FindElsewhere { names: &[], shown: None };
+}
+
+/// A module of a process other than the one the pause's modules are.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ProcessModule {
     /// The process's address space: its `DirectoryTableBase`.
@@ -938,63 +981,51 @@ pub(crate) struct ProcessModule {
     pub(crate) module: SymModule,
 }
 
-/// The modules of a name asked for, in every process but the running one,
-/// and the running process's own address space.
+/// The modules of the names asked for, in every process but the one whose
+/// modules the pause names.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ModulesElsewhere {
-    /// The `DirectoryTableBase` of the process the processor runs, when one
-    /// is listed as running.
-    pub(crate) current: Option<u64>,
+    /// The file names looked for: a pause that asks for the same ones while
+    /// the guest has not moved finds the same modules.
+    pub(crate) names: Vec<String>,
     pub(crate) modules: Vec<ProcessModule>,
 }
 
-/// The user modules whose file names are among `names` (any case) in every
-/// process but the running one, each read in its own process's address
-/// space: where the owner's own programs run while the pause stands
-/// elsewhere.
-pub(crate) fn modules_elsewhere<G: GuestMemory>(
-    cpu: &mut G,
-    view: &CpuDebugView,
-    discovery: &mut WindowsDiscovery,
-    layout: Option<&Arc<KernelLayout>>,
-    names: &[String],
-) -> ModulesElsewhere {
-    if names.is_empty() {
-        return ModulesElsewhere::default();
-    }
-    discovery.under(layout);
-    match kernel_tables(cpu, view, discovery) {
-        ReadThrough::ProcessorTables => {
-            modules_elsewhere_through(cpu, view, discovery, layout, ReadThrough::ProcessorTables, names)
-        }
-        ReadThrough::KernelTables { cr3 } => {
-            let mut kernel = KernelTablesView { cpu, cr3 };
-            modules_elsewhere_through(&mut kernel, view, discovery, layout, ReadThrough::KernelTables { cr3 }, names)
-        }
-    }
+/// Where a process's PEB and its WOW64 PEB pointer sit in `EPROCESS`, as far
+/// as they were found.
+struct ProcessOffsets<'a> {
+    peb: &'a mut Option<u64>,
+    wow64: &'a mut Option<u64>,
 }
 
-/// [`modules_elsewhere`] through the page tables `through` names.
-fn modules_elsewhere_through<G: GuestMemory>(
+/// The user modules whose file names are among `find.names` (any case), in
+/// every process of `processes` but the one `find.shown` names (the running
+/// one when it names none), each read in its own process's address space:
+/// where the owner's own programs run while the pause stands elsewhere. The
+/// running process's list, read already as `current_read`, is not read
+/// again.
+fn modules_elsewhere<G: GuestMemory>(
     cpu: &mut G,
-    view: &CpuDebugView,
-    discovery: &mut WindowsDiscovery,
-    layout: Option<&Arc<KernelLayout>>,
-    through: ReadThrough,
-    names: &[String],
+    processes: &[WinProcess],
+    current_read: Option<&ModuleRead>,
+    find: FindElsewhere<'_>,
+    offsets: ProcessOffsets<'_>,
 ) -> ModulesElsewhere {
-    let live_cr3 = through.live_cr3(view);
-    let Ok(state) = find_kernel(cpu, view, &mut discovery.state, layout) else {
+    if find.names.is_empty() {
         return ModulesElsewhere::default();
+    }
+    let shown = |process: &WinProcess| match find.shown {
+        Some(cr3) => same_address_space(process.cr3, cr3),
+        None => process.current,
     };
-    let processes = list_processes(cpu, &state.kernel, live_cr3, &mut state.parent_offset);
-    let current = processes.iter().find(|process| process.current).map(|process| process.cr3);
-    let wanted: Vec<String> = names.iter().map(|name| name.to_ascii_lowercase()).collect();
+    let wanted: Vec<String> = find.names.iter().map(|name| name.to_ascii_lowercase()).collect();
     let mut modules = Vec::new();
-    for process in processes.iter().filter(|process| !process.current) {
-        let ModuleRead::Listed(listed) =
-            process_modules(cpu, &processes, process, &mut state.peb_offset, &mut state.wow64_offset)
-        else {
+    for process in processes.iter().filter(|process| !shown(process)) {
+        let read = match current_read.filter(|_| process.current) {
+            Some(read) => read.clone(),
+            None => process_modules(cpu, processes, process, &mut *offsets.peb, &mut *offsets.wow64),
+        };
+        let ModuleRead::Listed(listed) = read else {
             continue;
         };
         let ours: Vec<WinModule> = listed
@@ -1009,19 +1040,20 @@ fn modules_elsewhere_through<G: GuestMemory>(
             module,
         }));
     }
-    ModulesElsewhere { current, modules }
+    ModulesElsewhere { names: find.names.to_vec(), modules }
 }
 
-/// [`read_windows`] through the page tables `through` names, which
+/// [`read_windows_finding`] through the page tables `through` names, which
 /// `Root::Live` already walks.
 fn read_windows_through<G: GuestMemory>(
     cpu: &mut G,
     view: &CpuDebugView,
-    request: SystemView,
+    asked: Asked<'_>,
     discovery: &mut WindowsDiscovery,
     layout: Option<&Arc<KernelLayout>>,
     through: ReadThrough,
 ) -> WindowsRead {
+    let Asked { request, find } = asked;
     let live_cr3 = through.live_cr3(view);
     let state = match find_kernel(cpu, view, &mut discovery.state, layout) {
         Ok(state) => state,
@@ -1038,6 +1070,7 @@ fn read_windows_through<G: GuestMemory>(
                 system,
                 layouts: None,
                 through,
+                elsewhere: ModulesElsewhere::default(),
             };
         }
     };
@@ -1073,6 +1106,13 @@ fn read_windows_through<G: GuestMemory>(
         modules: named,
         kernel: Some(kernel.image.base),
     };
+    let elsewhere = modules_elsewhere(
+        cpu,
+        &processes,
+        current_read.as_ref(),
+        find,
+        ProcessOffsets { peb: &mut *peb_offset, wow64: &mut *wow64_offset },
+    );
 
     let system = match request {
         SystemView::Off => SystemListing::NotAsked,
@@ -1215,7 +1255,7 @@ fn read_windows_through<G: GuestMemory>(
             }
         }
     };
-    WindowsRead { symbols, system, layouts: Some(layouts), through }
+    WindowsRead { symbols, system, layouts: Some(layouts), through, elsewhere }
 }
 
 // ───────────────────────────── drivers ──────────────────────────────
@@ -3518,15 +3558,8 @@ fn place(
 
 /// Two CR3 values name one address space when their table addresses match
 /// (the low 12 bits are flags or a PCID).
-pub(crate) fn same_address_space(a: u64, b: u64) -> bool {
+fn same_address_space(a: u64, b: u64) -> bool {
     (a & !0xFFF) == (b & !0xFFF)
-}
-
-/// The address space of the process the processor runs: its CR3, or the
-/// process's own `DirectoryTableBase` when it runs user mode on KVA-shadow
-/// tables (as [`read_windows`] reads the kernel through).
-pub(crate) fn running_space<G: GuestMemory>(cpu: &mut G, view: &CpuDebugView, discovery: &mut WindowsDiscovery) -> u64 {
-    kernel_tables(cpu, view, discovery).live_cr3(view)
 }
 
 /// The modules `process` has loaded: its PEB's loader list, read through its
@@ -4979,8 +5012,9 @@ mod tests {
         let view = fake.view;
         let mut discovery = WindowsDiscovery::default();
         let names = ["CSRSS.EXE".to_owned()];
-        let read = modules_elsewhere(&mut fake.guest, &view, &mut discovery, None, &names);
-        assert_eq!(read.current, Some(crate::debugger::fake_windows::LIVE_CR3), "System runs");
+        let find = FindElsewhere { names: &names, shown: None };
+        let read = read_windows_finding(&mut fake.guest, &view, SystemView::Off, find, &mut discovery, None).elsewhere;
+        assert_eq!(read.names, names, "what was looked for");
         assert_eq!(read.modules.len(), 1, "{:?}", read.modules);
         let found = &read.modules[0];
         assert_eq!(found.cr3, 0x3_0000);
@@ -4992,7 +5026,11 @@ mod tests {
             "{:?}",
             found.module.identity
         );
-        let none = modules_elsewhere(&mut fake.guest, &view, &mut discovery, None, &[]);
-        assert!(none.modules.is_empty(), "no names, nothing read");
+        let none = read_windows_finding(&mut fake.guest, &view, SystemView::Off, FindElsewhere::NOTHING, &mut discovery, None);
+        assert!(none.elsewhere.modules.is_empty(), "no names, nothing read");
+        // A thread view in csrss names csrss's modules already.
+        let viewing = FindElsewhere { names: &names, shown: Some(0x3_0000) };
+        let read = read_windows_finding(&mut fake.guest, &view, SystemView::Off, viewing, &mut discovery, None);
+        assert!(read.elsewhere.modules.is_empty(), "{:?}", read.elsewhere.modules);
     }
 }

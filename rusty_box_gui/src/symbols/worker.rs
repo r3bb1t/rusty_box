@@ -3,6 +3,7 @@
 //! hub so at most four downloads run at once.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use rusty_box_symbols::fs_store::FsStore;
 use rusty_box_symbols::http::HttpClient;
@@ -13,7 +14,8 @@ use rusty_box_symbols::store::{FileStore, StoreError, SymbolStore, MAX_FILE_BYTE
 use rusty_box_symbols::ureq_http::UreqHttp;
 
 use super::hub::{
-    HubConfig, ImageEntry, ImageState, Job, ModuleEntry, ModuleSymbols, SourceKey, StoreMeasure, SymbolHub, Ticket,
+    HubConfig, ImageEntry, ImageRetry, ImageState, Job, ModuleEntry, ModuleSymbols, SourceKey, StoreMeasure, SymbolHub,
+    Ticket,
 };
 use crate::source::find::{load_source, ProjectLookup, SourceFolders, SourceRequest, MAX_SOURCE_BYTES};
 
@@ -147,7 +149,10 @@ pub(crate) fn perform<F, H, M, B>(
                     Job::LocateImage { key } => hub.finish_image(
                         key,
                         ImageEntry {
-                            state: ImageState::Failed { reason, retry: rusty_box_symbols::http::Retry::Retryable },
+                            state: ImageState::Failed {
+                                reason,
+                                retry: ImageRetry::of(rusty_box_symbols::http::Retry::Retryable, Instant::now()),
+                            },
                             file: None,
                         },
                     ),
@@ -214,7 +219,8 @@ fn image_entry_of(outcome: ImageOutcome) -> ImageEntry {
         ImageOutcome::Loaded { file, from } => ImageEntry { state: ImageState::Loaded { from }, file: Some(file) },
         ImageOutcome::NotOnServer => ImageEntry { state: ImageState::NotOnServer, file: None },
         ImageOutcome::Unavailable { reason } => {
-            ImageEntry { state: ImageState::Failed { retry: reason.retry(), reason: reason.to_string() }, file: None }
+            let retry = ImageRetry::of(reason.retry(), Instant::now());
+            ImageEntry { state: ImageState::Failed { retry, reason: reason.to_string() }, file: None }
         }
     }
 }
@@ -327,8 +333,10 @@ pub(crate) fn entry_of(outcome: LocateOutcome) -> ModuleEntry {
 mod tests {
     use super::*;
     use crate::source::find::{FoundBy, PathMap, SourceCheck, SourceFound};
-    use crate::symbols::hub::{ImageKey, ImageState, Priority, ProjectSources, SourceKey, SourceSlot, WantedModule};
-    use rusty_box_symbols_fixtures::pe::{pe64_file, Pe64Spec, SpecSection, SECTION_CODE};
+    use crate::symbols::hub::{
+        ImageKey, ImageState, Priority, ProjectSources, SourceKey, SourceSlot, WantedModule, IMAGE_RETRY_AFTER,
+    };
+    use rusty_box_symbols_fixtures::pe::{pe64_file, Pe64Spec, SpecSection, PAGE_ALIGNED, SECTION_CODE};
     use rusty_box_symbols::http::{Flow, Progress, Retry};
     use rusty_box_symbols::identity::{Guid, PdbId, PeImageId};
     use rusty_box_symbols::memory_store::MemoryStore;
@@ -796,6 +804,7 @@ mod tests {
             time_date_stamp: WIDGET.time_date_stamp,
             size_of_image: WIDGET.size_of_image,
             image_base: 0x7FF_0000_0000,
+            section_alignment: PAGE_ALIGNED,
             sections: vec![SpecSection { name: b".text", rva: 0x1000, bytes: vec![0xC3; 0x10], characteristics: SECTION_CODE }],
             exception: None,
             base_relocations: None,
@@ -810,8 +819,8 @@ mod tests {
         let config = config(Vec::new());
         let hub = SymbolHub::new(config.clone());
         let mut worker = Worker::new(&config, MemoryStore::default(), http);
-        hub.want_images(&[widget_key()]);
-        hub.want_images(&[widget_key()]);
+        hub.want_images(&[widget_key()], Instant::now());
+        hub.want_images(&[widget_key()], Instant::now());
         assert_eq!(hub.view().image_state(&widget_key()), Some(&ImageState::Pending));
         let ticket = hub.try_next_job().expect("the lookup");
         assert_eq!(ticket.job, Job::LocateImage { key: widget_key() });
@@ -827,32 +836,39 @@ mod tests {
         let config = config(Vec::new());
         let hub = SymbolHub::new(config.clone());
         let mut worker = Worker::new(&config, MemoryStore::default(), ScriptedHttp::default());
-        hub.want_images(&[widget_key()]);
+        hub.want_images(&[widget_key()], Instant::now());
         worker.drain(&hub);
         assert_eq!(hub.view().image_state(&widget_key()), Some(&ImageState::NotOnServer));
-        hub.want_images(&[widget_key()]);
+        hub.want_images(&[widget_key()], Instant::now() + IMAGE_RETRY_AFTER);
         assert!(hub.try_next_job().is_none(), "not asked again this run");
         hub.reconfigure(config);
         assert_eq!(hub.view().image_state(&widget_key()), Some(&ImageState::Pending), "new settings may find it");
     }
 
-    /// The network was down for the first lookup: the next pause that needs
-    /// the binary asks again, and it loads.
+    /// The network was down for the first lookup: a pause that needs the
+    /// binary once its wait has passed asks again, and it loads; the pauses
+    /// and steps before it ask nothing.
     #[test]
-    fn a_binary_whose_lookup_may_mend_is_asked_again() {
+    fn a_binary_whose_lookup_may_mend_is_asked_again_after_its_wait() {
         let url = format!("{MSDL}/widget.dll/4549AD6E2000/widget.dll");
         let mut down = ScriptedHttp::default();
         down.unreachable(&url);
         let config = config(Vec::new());
         let hub = SymbolHub::new(config.clone());
         let mut worker = Worker::new(&config, MemoryStore::default(), down);
-        hub.want_images(&[widget_key()]);
+        let asked = Instant::now();
+        hub.want_images(&[widget_key()], asked);
         worker.drain(&hub);
-        assert!(matches!(hub.view().image_state(&widget_key()), Some(ImageState::Failed { retry: Retry::Retryable, .. })));
+        let Some(ImageState::Failed { retry: ImageRetry::From(when), .. }) = hub.view().image_state(&widget_key()).cloned() else {
+            panic!("a failure that may mend: {:?}", hub.view().image_state(&widget_key()));
+        };
+        assert!(when >= asked + IMAGE_RETRY_AFTER);
+        hub.want_images(&[widget_key()], asked);
+        assert!(hub.try_next_job().is_none(), "the next step asks nothing");
         let mut up = ScriptedHttp::default();
         up.respond(&url, 200, widget_binary());
         let mut worker = Worker::new(&config, MemoryStore::default(), up);
-        hub.want_images(&[widget_key()]);
+        hub.want_images(&[widget_key()], when);
         assert_eq!(hub.view().image_state(&widget_key()), Some(&ImageState::Pending));
         worker.drain(&hub);
         assert!(hub.view().image(&widget_key()).is_some());

@@ -3,12 +3,16 @@
 //! whose tables have the line, into one linear breakpoint per code range
 //! start; until one does, it is pending and says why.
 
+use std::sync::{Arc, Weak};
+
 use rusty_box::cpu::CodeBreakpoint;
+use rusty_box_symbols::identity::{ModuleIdentity, PeImageId};
 use rusty_box_symbols::projects::ProjectIndex;
+use rusty_box_symbols::tables::ResolvedLine;
 
 use super::inspect::{DebugSnapshot, ModuleSpace, SymModule};
+use super::module_identity::BuildAt;
 pub(crate) use super::inspect::SymbolIndex;
-use super::windows::same_address_space;
 pub(crate) use super::windows::ModulesElsewhere;
 pub(crate) use crate::symbols::hub::SymbolsView;
 use crate::symbols::hub::ModuleSymbols;
@@ -85,7 +89,7 @@ pub(crate) fn parse_target(text: &str) -> Result<TargetText<'_>, TargetError> {
 
 /// Where a source breakpoint resolved: a code address, the module it is in,
 /// the line that has the code (the next one when the asked line has none),
-/// and the address spaces it stops in.
+/// and where it stops.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ResolvedPlace {
     pub(crate) address: u64,
@@ -94,20 +98,29 @@ pub(crate) struct ResolvedPlace {
     pub(crate) space: PlaceSpace,
 }
 
-/// The address spaces a place stops in.
+/// A user module's image as a place in it is bound to: where it is loaded,
+/// and which build it is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PlacedImage {
+    pub(crate) base: u64,
+    pub(crate) image: PeImageId,
+}
+
+/// Where a place stops.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PlaceSpace {
-    /// Kernel code, which every address space maps; or a user module when no
-    /// process list says whose it is.
+    /// Kernel code, which every address space maps; or a user module with no
+    /// PE build to tell it by.
     Everywhere,
-    /// User code of the process whose `DirectoryTableBase` is `cr3`: another
-    /// program may sit at the same address in another process.
-    Process { cr3: u64 },
+    /// User code of a PE image: it stops in whichever process has that build
+    /// loaded at that base, a process started after the pause included, and
+    /// in no process where another program sits at the same address.
+    Image(PlacedImage),
 }
 
 /// What a source breakpoint is resolved against: the pause's modules (the
-/// kernel's and the running process's), and the owner's modules found in
-/// every other process.
+/// kernel's and those of the process the panes stand in), and the owner's
+/// modules found in every other process.
 #[derive(Clone, Copy)]
 pub(crate) struct BreakpointModules<'a> {
     pub(crate) index: &'a SymbolIndex,
@@ -121,16 +134,16 @@ impl<'a> BreakpointModules<'a> {
     }
 }
 
-/// A breakpoint address that stops only in some address spaces, by their
-/// `DirectoryTableBase`s; an address without one stops in every space.
+/// A breakpoint address that stops only where one of `images` is loaded; an
+/// address without one stops wherever it is reached.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ScopedAddress {
     pub(crate) linear: u64,
-    pub(crate) spaces: Vec<u64>,
+    pub(crate) images: Vec<PlacedImage>,
 }
 
 /// The breakpoints the machine is given, and the addresses of them that
-/// stop only in some address spaces.
+/// stop only where some program is loaded.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct AppliedBreakpoints {
     pub(crate) set: Vec<CodeBreakpoint>,
@@ -141,21 +154,27 @@ pub(crate) struct AppliedBreakpoints {
 /// owner's projects' binaries, while any of the owner's breakpoints is a
 /// source line; none otherwise, so a pause without one reads no other
 /// process.
-pub(crate) fn binaries_to_find(targets: &[BreakpointTarget], projects: &ProjectIndex) -> Vec<String> {
+pub(crate) fn binaries_to_find<'a>(targets: &[BreakpointTarget], projects: &'a ProjectIndex) -> &'a [String] {
     if targets.iter().any(|target| matches!(target, BreakpointTarget::Source(_))) {
         projects.binary_names()
     } else {
-        Vec::new()
+        &[]
     }
 }
 
-/// Whether a stop at `linear` in the address space `cr3` is one of the
-/// owner's: an address with no scope stops everywhere.
-pub(crate) fn admits(scopes: &[ScopedAddress], linear: u64, cr3: u64) -> bool {
-    match scopes.iter().find(|scope| scope.linear == linear) {
-        Some(scope) => scope.spaces.iter().any(|space| same_address_space(*space, cr3)),
-        None => true,
-    }
+/// Whether a stop at `scope`'s address is one of the owner's: the image
+/// loaded at one of its places' bases (`build_at` reads it from the
+/// stopped processor's address space) is that place's build. Headers that
+/// do not read rule the program out of nothing, so they stop it.
+pub(crate) fn admits<F>(scope: &ScopedAddress, mut build_at: F) -> bool
+where
+    F: FnMut(u64) -> BuildAt,
+{
+    scope.images.iter().any(|placed| match build_at(placed.base) {
+        BuildAt::Image(found) => found == placed.image,
+        BuildAt::NoImage => false,
+        BuildAt::Unreadable => true,
+    })
 }
 
 /// Why a source breakpoint has no place yet.
@@ -172,30 +191,34 @@ pub(crate) enum SourceResolution {
     Pending(PendingWhy),
 }
 
-/// A module a place may be in, and the spaces its places stop in.
-struct Placed<'a> {
-    module: &'a SymModule,
-    space: PlaceSpace,
+/// One build's answer for a line: looked up once, however many processes
+/// load the build.
+struct BuildLines<'a> {
+    identity: &'a ModuleIdentity,
+    lines: Vec<ResolvedLine>,
+}
+
+/// Where `module`'s places stop: a user module's PE build at its base, the
+/// kernel's everywhere.
+fn space_of(module: &SymModule, identity: &ModuleIdentity) -> PlaceSpace {
+    match (module.space, identity) {
+        (ModuleSpace::User, ModuleIdentity::Pe { image, .. }) => {
+            PlaceSpace::Image(PlacedImage { base: module.base, image: *image })
+        }
+        (ModuleSpace::User, ModuleIdentity::Elf { .. }) | (ModuleSpace::Kernel, _) => PlaceSpace::Everywhere,
+    }
 }
 
 /// `target` in every module of `modules` whose tables (in `view`) have the
-/// line, in the modules' order, each code range's start a place.
+/// line, in the modules' order, each code range's start a place, and each
+/// place once: a build loaded at the same base in several processes is one
+/// place.
 pub(crate) fn resolve(target: &SourceTarget, modules: &BreakpointModules<'_>, view: &SymbolsView) -> SourceResolution {
-    // The pause's own modules: the kernel's stop everywhere; the running
-    // process's in its space, when the process list names it.
-    let running = |module: &SymModule| match (module.space, modules.elsewhere.current) {
-        (ModuleSpace::User, Some(cr3)) => PlaceSpace::Process { cr3 },
-        (ModuleSpace::User, None) | (ModuleSpace::Kernel, _) => PlaceSpace::Everywhere,
-    };
-    let pause = modules.index.modules.iter().map(|module| Placed { module, space: running(module) });
-    let elsewhere = modules
-        .elsewhere
-        .modules
-        .iter()
-        .map(|found| Placed { module: &found.module, space: PlaceSpace::Process { cr3: found.cr3 } });
-    let mut places = Vec::new();
+    let elsewhere = modules.elsewhere.modules.iter().map(|found| &found.module);
+    let mut places: Vec<ResolvedPlace> = Vec::new();
     let mut loading = Vec::new();
-    for Placed { module, space } in pause.chain(elsewhere) {
+    let mut looked_up: Vec<BuildLines<'_>> = Vec::new();
+    for module in modules.index.modules.iter().chain(elsewhere) {
         let Some(identity) = module.identity.known() else {
             continue;
         };
@@ -215,16 +238,32 @@ pub(crate) fn resolve(target: &SourceTarget, modules: &BreakpointModules<'_>, vi
             )
             | None => {}
         }
-        let Some(tables) = view.tables(identity) else {
+        let known = match looked_up.iter().position(|build| build.identity == identity) {
+            Some(known) => known,
+            None => {
+                let Some(tables) = view.tables(identity) else {
+                    continue;
+                };
+                looked_up.push(BuildLines { identity, lines: tables.lines_of(&target.file, target.line) });
+                looked_up.len().saturating_sub(1)
+            }
+        };
+        let Some(build) = looked_up.get(known) else {
             continue;
         };
-        for resolved in tables.lines_of(&target.file, target.line) {
-            places.extend(resolved.ranges.iter().map(|range| ResolvedPlace {
-                address: module.base.wrapping_add(range.start.0),
-                module: module.name.clone(),
-                line: resolved.line,
-                space,
-            }));
+        let space = space_of(module, identity);
+        for resolved in &build.lines {
+            for range in &resolved.ranges {
+                let place = ResolvedPlace {
+                    address: module.base.wrapping_add(range.start.0),
+                    module: module.name.clone(),
+                    line: resolved.line,
+                    space,
+                };
+                if !places.contains(&place) {
+                    places.push(place);
+                }
+            }
         }
     }
     if !places.is_empty() {
@@ -244,14 +283,101 @@ pub(crate) fn applied_set(
     modules: Option<&BreakpointModules<'_>>,
     view: &SymbolsView,
 ) -> AppliedBreakpoints {
+    Resolutions::of(targets, modules, view).applied
+}
+
+/// A source target and how it resolved.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SourceResolved {
+    target: SourceTarget,
+    resolution: SourceResolution,
+}
+
+/// What a set of resolutions was worked out under.
+#[derive(Clone, Debug)]
+struct ResolvedUnder {
+    targets: Vec<BreakpointTarget>,
+    /// The pause's snapshot; none before a first pause. Held weakly, which
+    /// keeps its allocation, so no later snapshot shares its address.
+    pause: Option<Weak<DebugSnapshot>>,
+    generation: u64,
+}
+
+impl ResolvedUnder {
+    /// Whether these are `targets` under the pause `snapshot` and `view`.
+    fn same(&self, targets: &[BreakpointTarget], snapshot: Option<&Arc<DebugSnapshot>>, view: &SymbolsView) -> bool {
+        let same_pause = match (&self.pause, snapshot) {
+            (Some(held), Some(shown)) => std::ptr::eq(held.as_ptr(), Arc::as_ptr(shown)),
+            (None, None) => true,
+            (Some(_), None) | (None, Some(_)) => false,
+        };
+        same_pause && self.generation == view.generation && self.targets == targets
+    }
+}
+
+/// Every source target's resolution under one pause and one symbol view,
+/// and the breakpoints the targets come to. The shell reads them every
+/// frame; they are worked out again only when the targets, the pause or the
+/// view change.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Resolutions {
+    under: Option<ResolvedUnder>,
+    sources: Vec<SourceResolved>,
+    applied: AppliedBreakpoints,
+}
+
+impl Resolutions {
+    /// `targets` resolved under `modules`, none before a first pause.
+    pub(crate) fn of(targets: &[BreakpointTarget], modules: Option<&BreakpointModules<'_>>, view: &SymbolsView) -> Resolutions {
+        let mut sources: Vec<SourceResolved> = Vec::new();
+        if let Some(modules) = modules {
+            for target in targets {
+                if let BreakpointTarget::Source(source) = target {
+                    if !sources.iter().any(|known| known.target == *source) {
+                        sources.push(SourceResolved { target: source.clone(), resolution: resolve(source, modules, view) });
+                    }
+                }
+            }
+        }
+        let applied = applied_of(targets, &sources);
+        Resolutions { under: None, sources, applied }
+    }
+
+    /// Brings them up to `targets` under the pause `snapshot` and `view`,
+    /// worked out again only when one of those changed.
+    pub(crate) fn follow(&mut self, targets: &[BreakpointTarget], snapshot: Option<&Arc<DebugSnapshot>>, view: &SymbolsView) {
+        if self.under.as_ref().is_some_and(|under| under.same(targets, snapshot, view)) {
+            return;
+        }
+        let modules = snapshot.map(|shown| BreakpointModules::of(shown));
+        *self = Resolutions::of(targets, modules.as_ref(), view);
+        self.under =
+            Some(ResolvedUnder { targets: targets.to_vec(), pause: snapshot.map(Arc::downgrade), generation: view.generation });
+    }
+
+    /// How `target` resolved; `None` before a first pause.
+    pub(crate) fn source(&self, target: &SourceTarget) -> Option<&SourceResolution> {
+        self.sources.iter().find(|known| known.target == *target).map(|known| &known.resolution)
+    }
+
+    /// The breakpoints the targets come to.
+    pub(crate) fn applied(&self) -> &AppliedBreakpoints {
+        &self.applied
+    }
+}
+
+/// The breakpoints `targets` come to, their source lines resolved as
+/// `sources` says: each address once, and the addresses that stop only
+/// where some program is loaded with the images they stop in. An address
+/// that also stops everywhere (one the owner typed, or kernel code) has no
+/// scope.
+fn applied_of(targets: &[BreakpointTarget], sources: &[SourceResolved]) -> AppliedBreakpoints {
     let mut set: Vec<CodeBreakpoint> = Vec::new();
     let mut add = |breakpoint: CodeBreakpoint| {
         if !set.contains(&breakpoint) {
             set.push(breakpoint);
         }
     };
-    // Every address that stops everywhere, and the spaces of every one that
-    // does not; an address both kinds name stops everywhere.
     let mut everywhere: Vec<u64> = Vec::new();
     let mut scopes: Vec<ScopedAddress> = Vec::new();
     for target in targets {
@@ -263,27 +389,23 @@ pub(crate) fn applied_set(
                 }
             }
             BreakpointTarget::Source(source) => {
-                let Some(modules) = modules else {
+                let resolution = sources.iter().find(|known| known.target == *source).map(|known| &known.resolution);
+                let Some(SourceResolution::Resolved { places }) = resolution else {
                     continue;
                 };
-                match resolve(source, modules, view) {
-                    SourceResolution::Resolved { places } => {
-                        for place in places {
-                            add(CodeBreakpoint::Linear(place.address));
-                            match place.space {
-                                PlaceSpace::Everywhere => everywhere.push(place.address),
-                                PlaceSpace::Process { cr3 } => match scopes.iter_mut().find(|scope| scope.linear == place.address) {
-                                    Some(scope) => {
-                                        if !scope.spaces.contains(&cr3) {
-                                            scope.spaces.push(cr3);
-                                        }
-                                    }
-                                    None => scopes.push(ScopedAddress { linear: place.address, spaces: vec![cr3] }),
-                                },
+                for place in places {
+                    add(CodeBreakpoint::Linear(place.address));
+                    match place.space {
+                        PlaceSpace::Everywhere => everywhere.push(place.address),
+                        PlaceSpace::Image(image) => match scopes.iter_mut().find(|scope| scope.linear == place.address) {
+                            Some(scope) => {
+                                if !scope.images.contains(&image) {
+                                    scope.images.push(image);
+                                }
                             }
-                        }
+                            None => scopes.push(ScopedAddress { linear: place.address, images: vec![image] }),
+                        },
                     }
-                    SourceResolution::Pending(_) => {}
                 }
             }
         }
@@ -295,15 +417,15 @@ pub(crate) fn applied_set(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::debugger::inspect::{ModuleSpace, SymModule};
-    use crate::debugger::windows::ProcessModule;
+    use crate::debugger::inspect::{AddressSpace, CodeTarget, GuestAddress, MemoryWindow, ViewContext, Viewing};
+    use crate::debugger::windows::{ProcessModule, ReadThrough, SystemListing, SystemView};
     use crate::debugger::module_identity::GuestIdentity;
     use crate::symbols::hub::{ModuleEntry, ModuleSymbols};
-    use rusty_box_symbols::identity::{Guid, ModuleIdentity, PdbId, PeImageId};
+    use rusty_box_symbols::identity::{Guid, PdbId};
     use rusty_box_symbols::service::SymbolSource;
     use rusty_box_symbols::tables::SymbolTables;
     use rusty_box_symbols_fixtures::pdb::{build_pdb, FixtureLine, FixtureProcedure, PdbFixture};
-    use std::sync::Arc;
+    use rusty_box_symbols_fixtures::pe::PAGE_ALIGNED;
 
     fn source(file: &str, line: u32) -> SourceTarget {
         SourceTarget { file: file.to_owned(), line }
@@ -393,10 +515,9 @@ mod tests {
         super::applied_set(targets, modules.as_ref(), view).set
     }
 
-    static NOWHERE: ModulesElsewhere = ModulesElsewhere { current: None, modules: Vec::new() };
+    static NOWHERE: ModulesElsewhere = ModulesElsewhere { names: Vec::new(), modules: Vec::new() };
 
     const PROGRAM: u64 = 0x1_4000_0000;
-    const RUNNING: u64 = 0x494_F000;
     const SECOND: u64 = 0x3B0_0000;
     const MOVED: u64 = 0x5C0_0000;
 
@@ -406,6 +527,11 @@ mod tests {
 
     fn in_process(cr3: u64, base: u64) -> ProcessModule {
         ProcessModule { cr3, process: "prog.exe".into(), module: user("prog.exe", base, 3) }
+    }
+
+    /// `prog.exe`'s build (fixture byte 3) loaded at `base`.
+    fn program_at(base: u64) -> PlacedImage {
+        PlacedImage { base, image: PeImageId { time_date_stamp: 3, size_of_image: 0x10_0000 } }
     }
 
     /// A pause's modules, the owner's modules in other processes, and the
@@ -421,7 +547,7 @@ mod tests {
     fn program_three_times() -> Pause {
         let index = SymbolIndex { modules: vec![module("a.sys", A, 1), user("prog.exe", PROGRAM, 3)], kernel: None };
         let elsewhere = ModulesElsewhere {
-            current: Some(RUNNING),
+            names: vec!["prog.exe".into()],
             modules: vec![in_process(SECOND, PROGRAM), in_process(MOVED, PROGRAM + 0x10_0000)],
         };
         let mut view = SymbolsView::default();
@@ -431,25 +557,25 @@ mod tests {
     }
 
     #[test]
-    fn a_user_line_resolves_in_every_process_running_its_module_and_a_kernel_line_everywhere() {
+    fn a_user_line_resolves_once_per_base_its_build_is_loaded_at_and_a_kernel_line_everywhere() {
         let Pause { index, elsewhere, view } = program_three_times();
         let modules = BreakpointModules { index: &index, elsewhere: &elsewhere };
-        let process = |cr3| PlaceSpace::Process { cr3 };
+        let image = |base| PlaceSpace::Image(program_at(base));
         assert_eq!(
             super::resolve(&source("read.c", 10), &modules, &view),
             SourceResolution::Resolved {
                 places: vec![
                     place(A + 0x1100, "a.sys", 10),
-                    ResolvedPlace { space: process(RUNNING), ..place(PROGRAM + 0x1100, "prog.exe", 10) },
-                    ResolvedPlace { space: process(SECOND), ..place(PROGRAM + 0x1100, "prog.exe", 10) },
-                    ResolvedPlace { space: process(MOVED), ..place(PROGRAM + 0x10_1100, "prog.exe", 10) },
+                    ResolvedPlace { space: image(PROGRAM), ..place(PROGRAM + 0x1100, "prog.exe", 10) },
+                    ResolvedPlace { space: image(PROGRAM + 0x10_0000), ..place(PROGRAM + 0x10_1100, "prog.exe", 10) },
                 ]
-            }
+            },
+            "the copy at the running one's base is the same place"
         );
     }
 
     #[test]
-    fn a_user_place_fires_only_in_its_processes_and_a_typed_address_everywhere() {
+    fn a_user_place_stops_where_its_build_is_loaded_and_a_typed_address_everywhere() {
         let Pause { index, elsewhere, view } = program_three_times();
         let modules = BreakpointModules { index: &index, elsewhere: &elsewhere };
         let line = [BreakpointTarget::Source(source("read.c", 10))];
@@ -461,8 +587,8 @@ mod tests {
         assert_eq!(
             applied.scopes,
             [
-                ScopedAddress { linear: PROGRAM + 0x1100, spaces: vec![RUNNING, SECOND] },
-                ScopedAddress { linear: PROGRAM + 0x10_1100, spaces: vec![MOVED] },
+                ScopedAddress { linear: PROGRAM + 0x1100, images: vec![program_at(PROGRAM)] },
+                ScopedAddress { linear: PROGRAM + 0x10_1100, images: vec![program_at(PROGRAM + 0x10_0000)] },
             ],
             "the driver's line is global"
         );
@@ -470,18 +596,93 @@ mod tests {
         let applied = super::applied_set(&typed, Some(&modules), &view);
         assert_eq!(
             applied.scopes,
-            [ScopedAddress { linear: PROGRAM + 0x10_1100, spaces: vec![MOVED] }],
+            [ScopedAddress { linear: PROGRAM + 0x10_1100, images: vec![program_at(PROGRAM + 0x10_0000)] }],
             "an address the owner typed stops in every process"
         );
     }
 
+    /// The scope names the build, not a process: it needs no process list,
+    /// and holds for a process started after the pause.
     #[test]
-    fn a_user_line_with_no_running_process_known_is_global() {
+    fn a_user_line_is_scoped_by_its_build_without_a_process_list() {
         let Pause { index, view, .. } = program_three_times();
         let modules = BreakpointModules { index: &index, elsewhere: &NOWHERE };
         let applied = super::applied_set(&[BreakpointTarget::Source(source("read.c", 10))], Some(&modules), &view);
-        assert!(applied.scopes.is_empty(), "no Windows process list: nothing to scope by");
+        assert_eq!(applied.scopes, [ScopedAddress { linear: PROGRAM + 0x1100, images: vec![program_at(PROGRAM)] }]);
         assert_eq!(applied.set.len(), 2);
+    }
+
+    /// A thread view stands in another process: its modules are the pause's,
+    /// and the running process's copy of the program is found elsewhere. The
+    /// line binds in both, by build.
+    #[test]
+    fn a_thread_views_pause_keeps_the_running_programs_line() {
+        let Pause { view, .. } = program_three_times();
+        let viewed = SymbolIndex { modules: vec![module("a.sys", A, 1), user("other.exe", PROGRAM, 4)], kernel: None };
+        let elsewhere = ModulesElsewhere { names: vec!["prog.exe".into()], modules: vec![in_process(SECOND, PROGRAM)] };
+        let modules = BreakpointModules { index: &viewed, elsewhere: &elsewhere };
+        let applied = super::applied_set(&[BreakpointTarget::Source(source("read.c", 10))], Some(&modules), &view);
+        assert_eq!(applied.set, [CodeBreakpoint::Linear(A + 0x1100), CodeBreakpoint::Linear(PROGRAM + 0x1100)]);
+        assert_eq!(
+            applied.scopes,
+            [ScopedAddress { linear: PROGRAM + 0x1100, images: vec![program_at(PROGRAM)] }],
+            "other.exe at the same base is not the program"
+        );
+    }
+
+    /// The shell asks for the resolutions every frame: they are worked out
+    /// again when the targets, the pause or the symbols change, and kept
+    /// otherwise.
+    #[test]
+    fn resolutions_are_kept_until_the_targets_the_pause_or_the_symbols_change() {
+        let Pause { index, view, .. } = program_three_times();
+        let pause = Arc::new(pause_over(index.clone()));
+        let line = [BreakpointTarget::Source(source("read.c", 10))];
+        let mut resolutions = Resolutions::default();
+        resolutions.follow(&line, None, &view);
+        assert_eq!(resolutions.source(&source("read.c", 10)), None, "before a pause");
+        resolutions.follow(&line, Some(&pause), &view);
+        assert!(matches!(resolutions.source(&source("read.c", 10)), Some(SourceResolution::Resolved { .. })));
+        assert_eq!(resolutions.applied().set.len(), 2);
+        // The same generation is the same view: nothing is worked out again.
+        let mut emptied = SymbolsView { generation: view.generation, ..SymbolsView::default() };
+        resolutions.follow(&line, Some(&pause), &emptied);
+        assert_eq!(resolutions.applied().set.len(), 2, "kept");
+        emptied.generation = view.generation.wrapping_add(1);
+        resolutions.follow(&line, Some(&pause), &emptied);
+        assert_eq!(resolutions.applied().set, [], "the new view has no tables");
+        let another = Arc::new(pause_over(index));
+        resolutions.follow(&line, Some(&another), &view);
+        assert_eq!(resolutions.applied().set.len(), 2, "a new pause");
+        let typed = [line[0].clone(), BreakpointTarget::Address(CodeBreakpoint::Linear(0x1000))];
+        resolutions.follow(&typed, Some(&another), &view);
+        assert_eq!(resolutions.applied().set.len(), 3, "new targets");
+    }
+
+    /// A pause whose modules are `symbols`.
+    fn pause_over(symbols: SymbolIndex) -> DebugSnapshot {
+        DebugSnapshot {
+            cpus: Vec::new(),
+            cpu: 0,
+            code: Vec::new(),
+            code_at: CodeTarget::Rip,
+            rip: 0,
+            frames: crate::debugger::frames::FramesRead::default(),
+            memory: MemoryWindow { start: GuestAddress { space: AddressSpace::Linear, value: 0 }, rows: Vec::new() },
+            stack: Vec::new(),
+            process: None,
+            asked: SystemView::Off,
+            system: SystemListing::NotAsked,
+            symbols,
+            memory_space: None,
+            context: ViewContext::Live,
+            viewing: Viewing::Live,
+            layout: None,
+            layouts: None,
+            through: ReadThrough::ProcessorTables,
+            vmcs: None,
+            elsewhere: ModulesElsewhere::default(),
+        }
     }
 
     /// Other processes are searched only while a source line is set, and
@@ -493,6 +694,7 @@ mod tests {
             time_date_stamp: 1,
             size_of_image: 0x2000,
             image_base: PROGRAM,
+            section_alignment: PAGE_ALIGNED,
             sections: Vec::new(),
             exception: None,
             base_relocations: None,
@@ -507,13 +709,21 @@ mod tests {
         assert_eq!(binaries_to_find(&[address, line], &projects), ["rbdemo.exe"]);
     }
 
+    /// A hit stops where the program's build is loaded at its base (a
+    /// restarted program's new process too), and runs on where another
+    /// program sits at the same address.
     #[test]
-    fn a_hit_is_taken_only_in_the_spaces_of_its_address() {
-        let scopes = [ScopedAddress { linear: PROGRAM + 0x1100, spaces: vec![RUNNING, SECOND] }];
-        assert!(admits(&scopes, PROGRAM + 0x1100, RUNNING));
-        assert!(admits(&scopes, PROGRAM + 0x1100, SECOND | 0x18), "CR3's flag bits are not its address space");
-        assert!(!admits(&scopes, PROGRAM + 0x1100, MOVED));
-        assert!(admits(&scopes, A + 0x1100, MOVED), "an address with no scope stops everywhere");
+    fn a_hit_is_taken_where_its_programs_build_is_loaded() {
+        let program = program_at(PROGRAM);
+        let scope = ScopedAddress { linear: PROGRAM + 0x1100, images: vec![program] };
+        let image_only_at = |base| if base == PROGRAM { BuildAt::Image(program.image) } else { BuildAt::NoImage };
+        assert!(admits(&scope, image_only_at));
+        let other = PeImageId { time_date_stamp: 4, size_of_image: 0x10_0000 };
+        assert!(!admits(&scope, |_| BuildAt::Image(other)), "another program at the same base");
+        assert!(!admits(&scope, |_| BuildAt::NoImage), "code that is no image's");
+        assert!(admits(&scope, |_| BuildAt::Unreadable), "headers that do not read rule nothing out");
+        let two = ScopedAddress { linear: PROGRAM + 0x1100, images: vec![PlacedImage { base: PROGRAM, image: other }, program] };
+        assert!(admits(&two, |_| BuildAt::Image(program.image)), "either of the owner's programs there");
     }
 
     /// A file both drivers were built from (a shared library) breaks in

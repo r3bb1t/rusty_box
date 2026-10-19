@@ -42,9 +42,10 @@ pub(crate) trait GuestMemory {
     where
         F: FnMut(PageMapping) -> WalkStep;
 
-    /// Fills `buf` from linear `linear` under `root`, translating a page at a
-    /// time, since consecutive linear pages need not be consecutive in
-    /// physical memory. Linear addresses wrap at 2^64, as the processor's do.
+    /// Fills `buf` from linear `linear` under `root`, a page at a time
+    /// ([`Self::read_linear_page`]), since consecutive linear pages need not
+    /// be consecutive in physical memory. Linear addresses wrap at 2^64, as
+    /// the processor's do.
     fn read_linear(&mut self, root: Root, linear: u64, buf: &mut [u8]) -> GuestRead {
         let mut at = linear;
         let mut rest: &mut [u8] = buf;
@@ -52,13 +53,10 @@ pub(crate) trait GuestMemory {
             // The bytes left in `at`'s page: 1 to `PAGE_BYTES`.
             let in_page = PAGE_BYTES.wrapping_sub(at & (PAGE_BYTES - 1));
             let take = usize::try_from(in_page).map_or(rest.len(), |in_page| in_page.min(rest.len()));
-            let Some(physical) = self.translate(root, at) else {
-                return GuestRead::Unreadable;
-            };
             let Some((chunk, tail)) = std::mem::take(&mut rest).split_at_mut_checked(take) else {
                 return GuestRead::Unreadable;
             };
-            match self.read_physical(physical, chunk) {
+            match self.read_linear_page(root, at, chunk) {
                 GuestRead::Read => {}
                 GuestRead::Unreadable => return GuestRead::Unreadable,
             }
@@ -66,6 +64,15 @@ pub(crate) trait GuestMemory {
             at = at.wrapping_add(in_page);
         }
         GuestRead::Read
+    }
+
+    /// Fills `chunk`, which lies within one page, from linear `linear` under
+    /// `root`: where the page maps, from the physical memory it maps to.
+    fn read_linear_page(&mut self, root: Root, linear: u64, chunk: &mut [u8]) -> GuestRead {
+        match self.translate(root, linear) {
+            Some(physical) => self.read_physical(physical, chunk),
+            None => GuestRead::Unreadable,
+        }
     }
 }
 

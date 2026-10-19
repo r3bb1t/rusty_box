@@ -621,12 +621,12 @@ impl<F: FileStore, H: HttpClient> SymbolService<F, H> {
             Ok(None) => return ImageOutcome::NotOnServer,
             Err(reason) => return ImageOutcome::Unavailable { reason },
         };
-        // The bytes are kept as fetched; the parsed file holds its own copy.
-        let file = match image_of(fetched.bytes.clone(), image, fetched.url.clone()) {
+        // Kept only once verified, from the bytes the parsed file holds.
+        let file = match image_of(fetched.bytes, image, fetched.url.clone()) {
             Ok(file) => file,
             Err(reason) => return ImageOutcome::Unavailable { reason },
         };
-        let kept = self.keep(keyed.store_path, &fetched.bytes, store_copy);
+        let kept = self.keep(keyed.store_path, file.bytes(), store_copy);
         ImageOutcome::Loaded { file: Arc::new(file), from: SymbolSource::Server { url: fetched.url, kept } }
     }
 
@@ -677,7 +677,7 @@ mod tests {
     use rusty_box_symbols_fixtures::elf::{build_elf, ElfSpec, Symtab, BUILD_ID, TEXT_RVA};
     use rusty_box_symbols_fixtures::pdb::{build_pdb, FixturePublic, PdbFixture, PublicKind};
     use crate::pe::ImageRead;
-    use rusty_box_symbols_fixtures::pe::{pe32_file, pe64_file, rsds, Pe64Spec, SpecSection, SECTION_CODE};
+    use rusty_box_symbols_fixtures::pe::{pe32_file, pe64_file, rsds, Pe64Spec, SpecSection, PAGE_ALIGNED, SECTION_CODE};
 
     const MSDL: &str = "https://msdl.example/download/symbols";
     const DEBUGINFOD: &str = "https://debuginfod.example";
@@ -1093,6 +1093,7 @@ mod tests {
             time_date_stamp: image.time_date_stamp,
             size_of_image: image.size_of_image,
             image_base: 0x7FF_0000_0000,
+            section_alignment: PAGE_ALIGNED,
             sections: vec![SpecSection { name: b".text", rva: 0x1000, bytes: vec![0xC3; 0x10], characteristics: SECTION_CODE }],
             exception: None,
             base_relocations: None,

@@ -669,8 +669,8 @@ mod tests {
     use super::*;
     use crate::tables::{ChecksumKind, EmbeddedSource, FileChecksum, LineRow, ProcedureSpan, ResolvedLine, SourceFile};
     use rusty_box_symbols_fixtures::pdb::{
-        build_pdb, FixtureChecksum, FixtureContainer, FixtureEmbedded, FixtureLine, FixtureOmap, FixtureOmapEntry, FixtureProcedure,
-        FixturePublic, FixtureSection, PdbFixture, PublicKind, CODE_SECTION,
+        build_pdb, compiler_types_pdb, FixtureChecksum, FixtureContainer, FixtureEmbedded, FixtureLine, FixtureOmap,
+        FixtureOmapEntry, FixtureProcedure, FixturePublic, FixtureSection, PdbFixture, PublicKind, CODE_SECTION,
     };
 
     const GUID: [u8; 16] = [
@@ -940,6 +940,32 @@ mod tests {
             assert_eq!(tables.address_of("KiOtherProc"), Some(Rva(0x1180)));
             assert_eq!(tables.address_of("Nope"), None);
         }
+    }
+
+    /// A public has no size: the last one in `.text` does not name an
+    /// address of `.data` that no public of `.data` reaches.
+    #[test]
+    fn a_public_names_no_address_in_the_next_section() {
+        let tables = PdbTables::parse(&build_pdb(&named(FixtureContainer::Msf))).unwrap();
+        assert_eq!(tables.symbolize(Rva(0x3004)), None, "not KiOtherProc+0x1E84");
+        assert_eq!(tables.symbolize(Rva(0x1FF0)).map(|hit| hit.name), Some("KiOtherProc".to_owned()), "its own section");
+    }
+
+    #[test]
+    fn publics_are_bounded_by_the_sections_they_lie_in() {
+        let addresses = Addresses { sections: vec![0x1000, 0x3000], omap: None };
+        assert!(addresses.one_section(0x1180, 0x2FFF));
+        assert!(!addresses.one_section(0x1180, 0x3000));
+        assert!(!addresses.one_section(0x0800, 0x1000), "the headers are no section");
+        let rewritten = Addresses { sections: vec![0x1000, 0x3000], omap: Some(Vec::new()) };
+        assert!(rewritten.one_section(0x1180, 0x3004), "a rewritten image's sections bound nothing");
+    }
+
+    /// MSVC's `vc140.pdb` describes no linked module: it is told apart from
+    /// a broken PDB, so a project folder holding one has no problem.
+    #[test]
+    fn a_compiler_type_database_is_no_linked_modules_pdb() {
+        assert_eq!(pdb_identity(&compiler_types_pdb(GUID)), Err(ParseError::CompilerTypes));
     }
 
     /// A PDB whose info-stream age is above its DBI age is the DBI age's

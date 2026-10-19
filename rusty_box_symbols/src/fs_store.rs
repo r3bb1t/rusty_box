@@ -69,6 +69,18 @@ fn remove_partial(partial: &Path) -> io::Result<()> {
 }
 
 impl FileStore for FsStore {
+    fn read_prefix(&mut self, path: &Path, len: usize) -> Result<Vec<u8>, StoreError> {
+        let read_error = |source| StoreError::Read {
+            path: path.to_owned(),
+            source,
+        };
+        let file = fs::File::open(path).map_err(read_error)?;
+        let wanted = u64::try_from(len).unwrap_or(u64::MAX).min(self.read_cap);
+        let mut out = Vec::new();
+        file.take(wanted).read_to_end(&mut out).map_err(read_error)?;
+        Ok(out)
+    }
+
     fn read(&mut self, path: &Path) -> Result<Vec<u8>, StoreError> {
         let read_error = |source| StoreError::Read {
             path: path.to_owned(),

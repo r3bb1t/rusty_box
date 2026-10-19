@@ -478,8 +478,9 @@ where
         let left = config.max_instructions - retired;
         retired = retired.saturating_add(emu.run_interactive(left)?);
         // A processor that stopped at a breakpoint pauses the run on it,
-        // unless the breakpoint is a program's line and this is another
-        // process: the run goes on through it, serving what was asked.
+        // unless the breakpoint is a program's line and that program is not
+        // loaded where it stopped: the run goes on through it, serving what
+        // was asked.
         let after = match emu.stopped_at_breakpoint() {
             Some(hit) if !owners_stop(emu.as_mut(), &control, &hit) => {
                 match control.after_passing(emu.power().state()) {
@@ -1576,7 +1577,11 @@ mod tests {
     use super::*;
     use crate::args::DiskGeometry;
     #[cfg(feature = "gui-egui")]
-    use crate::debugger::source_breakpoints::{AppliedBreakpoints, ScopedAddress};
+    use crate::debugger::source_breakpoints::{AppliedBreakpoints, PlacedImage, ScopedAddress};
+    #[cfg(feature = "gui-egui")]
+    use rusty_box::cpu::{CodeBreakpoint, CodeBreakpointHit};
+    #[cfg(feature = "gui-egui")]
+    use rusty_box_symbols::identity::PeImageId;
     use crate::config::{
         CpuCapabilities, Engine, ResolvedCdrom, ResolvedDisk, ResolvedDiskCreation,
     };
@@ -3104,7 +3109,6 @@ mod tests {
     #[cfg(feature = "gui-egui")]
     #[test]
     fn a_breakpoint_set_on_a_running_vm_pauses_it_there() {
-        use rusty_box::cpu::{CodeBreakpoint, CodeBreakpointHit};
         let bios = spinning_bios();
         let (commands, command_rx) = mpsc::channel();
         let launcher = spawn_launcher(command_rx);
@@ -3136,33 +3140,37 @@ mod tests {
         assert_eq!(vm.display.lock().unwrap().runtime_error, None);
     }
 
-    /// A breakpoint that is the owner's only in another address space (a
-    /// program's line, another program at the same address here) is run
-    /// through; in its own space it stops the VM.
+    /// A breakpoint that is the owner's only where a program is loaded (a
+    /// program's line) is run through where the bytes at the program's base
+    /// are no image's; where its headers do not read, it stops the VM.
     #[cfg(feature = "gui-egui")]
     #[test]
-    fn a_breakpoint_scoped_to_another_address_space_is_run_through() {
-        use rusty_box::cpu::{CodeBreakpoint, CodeBreakpointHit};
+    fn a_breakpoint_scoped_to_a_program_not_loaded_here_is_run_through() {
         let bios = spinning_bios();
         let (commands, command_rx) = mpsc::channel();
         let launcher = spawn_launcher(command_rx);
         let vm = TestVm::spinning(&commands, &bios);
 
         let at = CodeBreakpoint::Linear(0xFFFF_FFF0);
-        let scoped = |space: u64| AppliedBreakpoints {
+        let scoped = |base: u64| AppliedBreakpoints {
             set: vec![at],
-            scopes: vec![ScopedAddress { linear: 0xFFFF_FFF0, spaces: vec![space] }],
+            scopes: vec![ScopedAddress {
+                linear: 0xFFFF_FFF0,
+                images: vec![PlacedImage { base, image: PeImageId { time_date_stamp: 7, size_of_image: 0x1_0000 } }],
+            }],
         };
-        vm.control.set_breakpoints(scoped(0x5000));
+        // The BIOS ROM's first bytes: they read, and are no image's headers.
+        vm.control.set_breakpoints(scoped(0xFFFF_0000));
         // The machine takes the set, then runs on: the `JMP $` reaches the
         // breakpoint with every instruction.
         wait_until(|| vm.control.applied_breakpoints() == [at]);
         std::thread::sleep(std::time::Duration::from_millis(50));
         vm.control.pause();
         assert_eq!(vm.paused_snapshot().cpus[0].registers.rip, 0xFFF0, "paused in the `JMP $`");
-        assert_eq!(vm.control.stopped_at(), None, "the BIOS runs with CR3 0, not 0x5000");
+        assert_eq!(vm.control.stopped_at(), None, "the program is not loaded at the ROM");
 
-        vm.control.set_breakpoints(scoped(0));
+        // Past the RAM, where nothing reads: nothing rules the program out.
+        vm.control.set_breakpoints(scoped(0xD000_0000));
         vm.control.resume();
         let hit = CodeBreakpointHit { cpu: 0, breakpoint: at, linear: 0xFFFF_FFF0 };
         wait_until(|| vm.control.stopped_at() == Some(hit));

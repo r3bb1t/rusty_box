@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use crate::identity::{BuildId, Guid, ModuleIdentity, PeImageId, TablesIdentity};
-use crate::pe::FileImage;
+use crate::pe::{FileImage, HeaderError};
 use crate::store::{FileStore, ListedFile, StoreError};
 use crate::tables::{declared_identity, ParseError};
 
@@ -58,7 +58,59 @@ pub struct ProjectIndex {
     files: BTreeMap<IndexKey, IndexedFile>,
     /// The newest modification time under every folder when indexed.
     newest: Option<SystemTime>,
+    /// The binaries' file names, each once (any case).
+    binary_names: Vec<String>,
     pub problems: Vec<IndexProblem>,
+}
+
+/// How much of a binary is read to index it: its headers and section table,
+/// which link.exe keeps within the first page or two.
+const BINARY_HEADER_BYTES: usize = 0x1_0000;
+
+/// Whether a file is named as a PE binary is.
+fn is_binary(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| BINARY_EXTENSIONS.contains(&extension.to_ascii_lowercase().as_str()))
+}
+
+/// What reading a file as a binary came to.
+enum BinaryRead {
+    Image(PeImageId),
+    /// It does not start as a PE file does: not a binary, whatever its name.
+    NotBinary,
+    Broken { reason: String },
+}
+
+/// The image identity of the binary at `path`, read from its headers alone;
+/// the whole file only when they reach past [`BINARY_HEADER_BYTES`].
+fn read_binary<F: FileStore>(files: &mut F, path: &Path) -> BinaryRead {
+    let prefix = match files.read_prefix(path, BINARY_HEADER_BYTES) {
+        Ok(prefix) => prefix,
+        Err(error) => return BinaryRead::Broken { reason: error.to_string() },
+    };
+    if let Some(read) = image_identity(&prefix) {
+        return read;
+    }
+    match files.read(path) {
+        Ok(whole) => match FileImage::new(whole.as_slice()) {
+            Ok(image) => BinaryRead::Image(image.headers().image_id()),
+            Err(error) => BinaryRead::Broken { reason: error.to_string() },
+        },
+        Err(error) => BinaryRead::Broken { reason: error.to_string() },
+    }
+}
+
+/// What `bytes` say of a binary, unless its headers reach past them.
+fn image_identity(bytes: &[u8]) -> Option<BinaryRead> {
+    if !bytes.starts_with(b"MZ") {
+        return Some(BinaryRead::NotBinary);
+    }
+    match FileImage::new(bytes) {
+        Ok(image) => Some(BinaryRead::Image(image.headers().image_id())),
+        Err(HeaderError::Unreadable { .. }) if bytes.len() >= BINARY_HEADER_BYTES => None,
+        Err(error) => Some(BinaryRead::Broken { reason: error.to_string() }),
+    }
 }
 
 /// Whether a file may be a debug file or a binary: a PDB or a PE binary by
@@ -108,6 +160,14 @@ impl ProjectIndex {
             if !is_candidate(&listed.file.path) {
                 continue;
             }
+            if is_binary(&listed.file.path) {
+                match read_binary(files, &listed.file.path) {
+                    BinaryRead::Image(image) => index.add_binary(image, listed),
+                    BinaryRead::NotBinary => {}
+                    BinaryRead::Broken { reason } => index.problems.push(IndexProblem { path: listed.file.path, reason }),
+                }
+                continue;
+            }
             let bytes = match files.read(&listed.file.path) {
                 Ok(bytes) => bytes,
                 Err(error) => {
@@ -117,10 +177,7 @@ impl ProjectIndex {
             };
             if bytes.starts_with(b"MZ") {
                 match FileImage::new(bytes.as_slice()) {
-                    Ok(image) => {
-                        let key = IndexKey::Image(image.headers().image_id());
-                        index.files.entry(key).or_insert(IndexedFile { project: listed.project, path: listed.file.path });
-                    }
+                    Ok(image) => index.add_binary(image.headers().image_id(), listed),
                     Err(error) => index.problems.push(IndexProblem { path: listed.file.path, reason: error.to_string() }),
                 }
                 continue;
@@ -143,6 +200,19 @@ impl ProjectIndex {
         Ok(index)
     }
 
+    /// Indexes `listed` as the binary of `image`, the first of an image
+    /// winning, and its file name among the binaries' names.
+    fn add_binary(&mut self, image: PeImageId, listed: ProjectFile) {
+        if let Some(name) = listed.file.path.file_name().and_then(|name| name.to_str()) {
+            if !self.binary_names.iter().any(|known| known.eq_ignore_ascii_case(name)) {
+                self.binary_names.push(name.to_owned());
+            }
+        }
+        self.files
+            .entry(IndexKey::Image(image))
+            .or_insert(IndexedFile { project: listed.project, path: listed.file.path });
+    }
+
     /// The project file of `wanted`'s own build.
     #[must_use]
     pub fn find(&self, wanted: &ModuleIdentity) -> Option<&IndexedFile> {
@@ -160,23 +230,12 @@ impl ProjectIndex {
         self.files.get(&IndexKey::Image(image))
     }
 
-    /// The file names of the projects' binaries, each once, in order: what
-    /// a guest's loaded modules are matched against to find the owner's own.
+    /// The file names of the projects' binaries, each once, in the order
+    /// indexed: what a guest's loaded modules are matched against to find
+    /// the owner's own.
     #[must_use]
-    pub fn binary_names(&self) -> Vec<String> {
-        let mut names: Vec<String> = Vec::new();
-        for (key, file) in &self.files {
-            let IndexKey::Image(_) = key else {
-                continue;
-            };
-            let Some(name) = file.path.file_name().and_then(|name| name.to_str()) else {
-                continue;
-            };
-            if !names.iter().any(|known| known.eq_ignore_ascii_case(name)) {
-                names.push(name.to_owned());
-            }
-        }
-        names
+    pub fn binary_names(&self) -> &[String] {
+        &self.binary_names
     }
 
     /// The project file of an ELF build-id: a dwz supplement is named so.
@@ -209,7 +268,7 @@ mod tests {
     use crate::identity::{PdbId, PeImageId};
     use crate::memory_store::MemoryStore;
     use rusty_box_symbols_fixtures::pdb::{build_pdb, PdbFixture};
-    use rusty_box_symbols_fixtures::pe::{pe64_file, Pe64Spec, SpecSection, SECTION_CODE};
+    use rusty_box_symbols_fixtures::pe::{pe64_file, Pe64Spec, SpecSection, PAGE_ALIGNED, SECTION_CODE};
 
     fn pdb_bytes(guid: [u8; 16], age: u32) -> Vec<u8> {
         build_pdb(&PdbFixture::new(guid, age))
@@ -260,11 +319,33 @@ mod tests {
             time_date_stamp,
             size_of_image: 0x2000,
             image_base: 0x1_4000_0000,
+            section_alignment: PAGE_ALIGNED,
             sections: vec![SpecSection { name: b".text", rva: 0x1000, bytes: vec![0xC3; 0x10], characteristics: SECTION_CODE }],
             exception: None,
             base_relocations: None,
             import_address_table: None,
         })
+    }
+
+    /// A build folder's binaries can be large: only their headers are read.
+    #[test]
+    fn a_binary_is_indexed_from_its_headers_alone() {
+        let mut files = MemoryStore::default();
+        let large = pe64_file(&Pe64Spec {
+            time_date_stamp: 9,
+            size_of_image: 0x5_1000,
+            image_base: 0x1_4000_0000,
+            section_alignment: PAGE_ALIGNED,
+            sections: vec![SpecSection { name: b".text", rva: 0x1000, bytes: vec![0xC3; 0x5_0000], characteristics: SECTION_CODE }],
+            exception: None,
+            base_relocations: None,
+            import_address_table: None,
+        });
+        assert!(large.len() > BINARY_HEADER_BYTES);
+        files.insert(PathBuf::from("work").join("build").join("large.dll"), large);
+        let index = ProjectIndex::build(&mut files, &[project()]).unwrap();
+        assert!(index.find_image(PeImageId { time_date_stamp: 9, size_of_image: 0x5_1000 }).is_some());
+        assert_eq!(files.whole_reads(), 0, "no binary is read whole");
     }
 
     #[test]

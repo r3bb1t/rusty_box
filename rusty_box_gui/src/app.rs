@@ -2394,7 +2394,7 @@ impl NativeShellApp {
                 ));
                 // The binaries its call stack needed for bytes the guest had
                 // not paged in.
-                self.symbols.want_images(&shown.frames.awaiting_images);
+                self.symbols.want_images(&shown.frames.awaiting_images, std::time::Instant::now());
                 // The owner's programs in other processes, for source lines
                 // to bind in.
                 let elsewhere: Vec<crate::symbols::hub::WantedModule> = shown
@@ -2427,11 +2427,11 @@ impl NativeShellApp {
             self.symbols.want_source(&source.key);
         }
         let targets = control.targets();
-        control.set_breakpoints(crate::debugger::source_breakpoints::applied_set(
-            &targets,
-            snapshot.as_deref().map(crate::debugger::source_breakpoints::BreakpointModules::of).as_ref(),
-            &symbols,
-        ));
+        // Worked out again only when the targets, the pause or the symbols
+        // changed; the page reads the same answers.
+        let mut resolutions = std::mem::take(&mut session.debugger_mut().resolutions);
+        resolutions.follow(&targets, snapshot.as_ref(), &symbols);
+        control.set_breakpoints(resolutions.applied().clone());
         let breakpoints = control.breakpoints();
         let stopped_at = control.stopped_at();
         // The processor switch shows the processor the run reads, which a
@@ -2476,11 +2476,13 @@ impl NativeShellApp {
                 pane: session.debugger_mut(),
                 symbols: &symbols,
                 targets: &targets,
+                resolutions: &resolutions,
                 breakpoints: &breakpoints,
                 stopped_at,
                 references: references_view.as_ref(),
             },
         );
+        self.sessions.open(&vm).debugger_mut().resolutions = resolutions;
         // The watches and the values open, as the panes left them: a paused
         // run reads them again when they changed.
         control.set_inspect(self.sessions.open(&vm).debugger_mut().variables.ask());
@@ -10477,6 +10479,7 @@ mod tests {
             crate::debugger::inspect::read_snapshot(
                 &mut machine,
                 &crate::debugger::inspect::ViewRequest::default(),
+                &[],
                 &mut crate::debugger::windows::WindowsDiscovery::default(),
                 None,
                 None,
@@ -10655,7 +10658,7 @@ mod tests {
             );
             let mut snapshot = paused_snapshot();
             snapshot.elsewhere = crate::debugger::windows::ModulesElsewhere {
-                current: Some(0x195_E000),
+                names: vec!["rbdemo.exe".to_owned()],
                 modules: vec![crate::debugger::windows::ProcessModule {
                     cr3: 0x494_F000,
                     process: "rbdemo.exe".to_owned(),
