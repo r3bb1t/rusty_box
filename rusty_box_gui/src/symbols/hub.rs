@@ -526,13 +526,23 @@ impl SymbolHub {
         });
     }
 
-    /// Asks for binaries: one never asked for is looked up, beside the
-    /// symbols the panes show.
+    /// Asks for binaries: one never asked for, or whose lookup failed in a
+    /// way asking again may mend, is looked up, beside the symbols the panes
+    /// show.
     pub(crate) fn want_images(&self, keys: &[ImageKey]) {
         self.update(|state| {
             let fresh: Vec<ImageKey> = keys
                 .iter()
-                .filter(|key| !state.view.images.contains_key(*key))
+                .filter(|key| match state.view.image_state(key) {
+                    None | Some(ImageState::Failed { retry: Retry::Retryable, .. }) => true,
+                    Some(
+                        ImageState::Pending
+                        | ImageState::Downloading { .. }
+                        | ImageState::Loaded { .. }
+                        | ImageState::NotOnServer
+                        | ImageState::Failed { retry: Retry::Final, .. },
+                    ) => false,
+                })
                 .cloned()
                 .collect::<BTreeSet<ImageKey>>()
                 .into_iter()

@@ -836,6 +836,28 @@ mod tests {
         assert_eq!(hub.view().image_state(&widget_key()), Some(&ImageState::Pending), "new settings may find it");
     }
 
+    /// The network was down for the first lookup: the next pause that needs
+    /// the binary asks again, and it loads.
+    #[test]
+    fn a_binary_whose_lookup_may_mend_is_asked_again() {
+        let url = format!("{MSDL}/widget.dll/4549AD6E2000/widget.dll");
+        let mut down = ScriptedHttp::default();
+        down.unreachable(&url);
+        let config = config(Vec::new());
+        let hub = SymbolHub::new(config.clone());
+        let mut worker = Worker::new(&config, MemoryStore::default(), down);
+        hub.want_images(&[widget_key()]);
+        worker.drain(&hub);
+        assert!(matches!(hub.view().image_state(&widget_key()), Some(ImageState::Failed { retry: Retry::Retryable, .. })));
+        let mut up = ScriptedHttp::default();
+        up.respond(&url, 200, widget_binary());
+        let mut worker = Worker::new(&config, MemoryStore::default(), up);
+        hub.want_images(&[widget_key()]);
+        assert_eq!(hub.view().image_state(&widget_key()), Some(&ImageState::Pending));
+        worker.drain(&hub);
+        assert!(hub.view().image(&widget_key()).is_some());
+    }
+
     #[test]
     fn closing_the_hub_ends_a_waiting_worker() {
         let hub = SymbolHub::new(config(Vec::new()));

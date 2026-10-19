@@ -92,7 +92,6 @@ impl ModuleFile {
     pub fn headers(&self) -> &PeHeaders {
         self.file.headers()
     }
-
     /// `buf.len()` bytes at `rva` of the image loaded at `base`, when every
     /// one of them is a byte the loader maps unchanged from the file (base
     /// relocations aside).

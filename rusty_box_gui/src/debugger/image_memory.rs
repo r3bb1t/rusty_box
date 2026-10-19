@@ -8,6 +8,7 @@
 use std::sync::Arc;
 
 use rusty_box::cpu::{LinearRange, MappingWalk, PageMapping, WalkStep};
+use rusty_box_symbols::http::Retry;
 use rusty_box_symbols::module_file::ModuleFile;
 use rusty_box_symbols::pe::ImageRead;
 use rusty_box_symbols::units::Rva;
@@ -62,11 +63,21 @@ impl<'a, G: GuestMemory> ImageBacked<'a, G> {
                 let backing = match key {
                     Some(key) => match symbols.and_then(|view| view.image(&key)) {
                         Some(file) => Backing::File(Arc::clone(file)),
+                        // A lookup that may succeed if asked again (the
+                        // network was down) is awaited again; one that
+                        // cannot is not.
                         None => match symbols.and_then(|view| view.image_state(&key)) {
-                            None | Some(ImageState::Pending | ImageState::Downloading { .. }) => Backing::Awaited(key),
-                            Some(ImageState::Loaded { .. } | ImageState::NotOnServer | ImageState::Failed { .. }) => {
-                                Backing::Nothing
-                            }
+                            None
+                            | Some(
+                                ImageState::Pending
+                                | ImageState::Downloading { .. }
+                                | ImageState::Failed { retry: Retry::Retryable, .. },
+                            ) => Backing::Awaited(key),
+                            Some(
+                                ImageState::Loaded { .. }
+                                | ImageState::NotOnServer
+                                | ImageState::Failed { retry: Retry::Final, .. },
+                            ) => Backing::Nothing,
                         },
                     },
                     None => Backing::Nothing,

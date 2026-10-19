@@ -18,7 +18,7 @@ use crate::shell::listing::{
     char_width, lead_arrow, lead_chevron, lead_hollow_arrow, list_row, Cell, RowSense, Tone,
 };
 use crate::shell::theme::{ACCENT_AMBER, ACCENT_BLUE, ACCENT_CYAN, TEXT_MUTED, TEXT_PRIMARY};
-use crate::symbols::hub::SymbolsView;
+use crate::symbols::hub::{ImageKey, ImageState, SymbolsView};
 use crate::symbols::names::Namer;
 
 pub(crate) const MEMORY: &str = "Memory";
@@ -420,7 +420,30 @@ pub(crate) fn call_stack_rows(
     if let Some(end) = stack_end_text(frames.end) {
         list_row(ui, CHEVRON_LEAD, &[Cell::fill(end, TEXT_MUTED)], Tone::Plain, RowSense::Look);
     }
+    if let Some(note) = binary_note(frames.end, index, view) {
+        list_row(ui, CHEVRON_LEAD, &[Cell::fill(note, TEXT_MUTED)], Tone::Plain, RowSense::Look);
+    }
     picked
+}
+
+/// For a stack that ends on a module's byte the guest has not paged in,
+/// what became of the module's binary, which such bytes are read from.
+pub(crate) fn binary_note(end: StackEnd, index: &SymbolIndex, view: &SymbolsView) -> Option<String> {
+    let StackEnd::Unreadable { at } = end else {
+        return None;
+    };
+    let module = index.module_at(at)?;
+    let key = module.identity.known().and_then(ImageKey::of)?;
+    let name = &module.name;
+    let note = match view.image_state(&key) {
+        None => format!("{name}'s binary was not asked for"),
+        Some(ImageState::Pending) => format!("{name}'s binary is being looked up"),
+        Some(ImageState::Downloading { .. }) => format!("{name}'s binary is downloading"),
+        Some(ImageState::Loaded { .. }) => format!("{name}'s binary does not hold that byte as loaded"),
+        Some(ImageState::NotOnServer) => format!("{name}'s binary is not on the symbol servers"),
+        Some(ImageState::Failed { reason, .. }) => format!("{name}'s binary did not load: {reason}"),
+    };
+    Some(note)
 }
 
 /// The Locals pane: the picked frame's variables, or why there are none.
