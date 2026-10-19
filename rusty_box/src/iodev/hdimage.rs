@@ -380,8 +380,15 @@ impl VolatileDisk {
     /// The image at `path`, opened read-only, and a journal made new as
     /// `journal` says (Bochs hdimage.cc `volatile_image_t::open`).
     pub fn open(path: &str, journal: &Journal) -> io::Result<VolatileDisk> {
+        let image = VolatileImage::open(Path::new(path), journal)?;
+        // Bochs hdimage.cc volatile_image_t::open's line.
+        tracing::info!(
+            "'volatile' disk opened: ro-file is '{}', redolog is '{}'",
+            path,
+            image.journal_path().display()
+        );
         Ok(VolatileDisk {
-            image: VolatileImage::open(Path::new(path), journal)?,
+            image,
             path: path.to_owned(),
         })
     }
