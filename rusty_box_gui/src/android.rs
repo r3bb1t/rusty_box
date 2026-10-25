@@ -708,7 +708,13 @@ impl FileBrowser {
             BrowseTarget::HardDisk | BrowseTarget::NewDisk | BrowseTarget::NewFloppy => {
                 FileFilter::Extension("img")
             }
-            BrowseTarget::Bios | BrowseTarget::VgaBios => FileFilter::Any,
+            BrowseTarget::Bios
+            | BrowseTarget::VgaBios
+            | BrowseTarget::Firmware
+            | BrowseTarget::FirmwareVars
+            | BrowseTarget::Kernel
+            | BrowseTarget::Initrd
+            | BrowseTarget::DeviceTree => FileFilter::Any,
             BrowseTarget::RamDump => FileFilter::Extension("bin"),
         };
         let dir = request

@@ -57,6 +57,13 @@ eframe = { workspace = true, optional = true, features = ["inspection"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 rusty_box = { path = "../rusty_box", default-features = false, features = ["std"] }
+# The Arm `virt` machine a VM may be instead of a PC (`[vm] machine =
+# "arm-virt"`).
+rusty_box_aarch64 = { path = "../rusty_box_aarch64", features = ["std"] }
+# The terminal an Arm machine's serial console takes over for a
+# `display = "terminal"` run; the PC's terminal display reaches the same
+# crate through `rusty_box`.
+crossterm = "0.29"
 
 [target.'cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))'.dependencies]
 rfd = "0.17.2"
@@ -82,6 +89,7 @@ rusty_box_whp_engine = { path = "../rusty_box_whp_engine", optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 rusty_box = { path = "../rusty_box", default-features = false, features = ["alloc"] }
+rusty_box_aarch64 = { path = "../rusty_box_aarch64", features = ["alloc"] }
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"

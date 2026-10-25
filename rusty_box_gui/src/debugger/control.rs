@@ -41,6 +41,36 @@ pub(crate) enum Task {
     Find(FindRequest),
 }
 
+/// Whether a guest can run on, whatever machine it is: the one fact
+/// [`RunControl::after_run`] needs from a machine's own power state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GuestPower {
+    /// Executing, or waiting for an interrupt.
+    On,
+    /// Switched itself off, or its processor stopped for good.
+    Over,
+}
+
+impl From<PowerState> for GuestPower {
+    fn from(power: PowerState) -> Self {
+        match power {
+            PowerState::Running => Self::On,
+            PowerState::PoweredOff | PowerState::CpuShutdown => Self::Over,
+        }
+    }
+}
+
+impl From<rusty_box_aarch64::PowerState> for GuestPower {
+    fn from(power: rusty_box_aarch64::PowerState) -> Self {
+        match power {
+            rusty_box_aarch64::PowerState::Running => Self::On,
+            rusty_box_aarch64::PowerState::PoweredOff | rusty_box_aarch64::PowerState::ProcessorOff => {
+                Self::Over
+            }
+        }
+    }
+}
+
 /// What a run thread does once its machine handed control back.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AfterRun {
@@ -358,10 +388,10 @@ impl RunControl {
     /// guest that switched itself off, or a stop the shell asked for, ends
     /// the run; a flag raised for a pause or a dump is served, even when the
     /// pause was withdrawn since; a budget spent with nothing asked ends it.
-    pub(crate) fn after_run(&self, power: PowerState) -> AfterRun {
+    pub(crate) fn after_run(&self, power: GuestPower) -> AfterRun {
         match power {
-            PowerState::Running => {}
-            PowerState::PoweredOff | PowerState::CpuShutdown => return AfterRun::End,
+            GuestPower::On => {}
+            GuestPower::Over => return AfterRun::End,
         }
         let state = self.lock();
         if state.ending {
@@ -531,7 +561,7 @@ mod tests {
         control.begin_run(RunStart::PowerOn);
         control.pause();
         control.end_run();
-        assert_eq!(control.after_run(PowerState::Running), AfterRun::End);
+        assert_eq!(control.after_run(PowerState::Running.into()), AfterRun::End);
         assert_eq!(control.next_between_runs(), BetweenRuns::End);
     }
 
@@ -540,8 +570,14 @@ mod tests {
         let control = control();
         control.begin_run(RunStart::PowerOn);
         control.pause();
-        assert_eq!(control.after_run(PowerState::PoweredOff), AfterRun::End);
-        assert_eq!(control.after_run(PowerState::CpuShutdown), AfterRun::End);
+        assert_eq!(control.after_run(PowerState::PoweredOff.into()), AfterRun::End);
+        assert_eq!(control.after_run(PowerState::CpuShutdown.into()), AfterRun::End);
+        for arm in [
+            rusty_box_aarch64::PowerState::PoweredOff,
+            rusty_box_aarch64::PowerState::ProcessorOff,
+        ] {
+            assert_eq!(control.after_run(arm.into()), AfterRun::End, "{arm:?}");
+        }
     }
 
     #[test]
@@ -550,7 +586,7 @@ mod tests {
         control.begin_run(RunStart::PowerOn);
         control.pause();
         assert!(raised(&control));
-        assert_eq!(control.after_run(PowerState::Running), AfterRun::Serve);
+        assert_eq!(control.after_run(PowerState::Running.into()), AfterRun::Serve);
         assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::Refresh));
         assert_eq!(control.phase(), RunPhase::Paused);
     }
@@ -582,7 +618,7 @@ mod tests {
         assert_eq!(control.request_dump(path.clone()), DumpRequest::Queued);
         assert!(raised(&control));
         assert!(control.dump_pending());
-        assert_eq!(control.after_run(PowerState::Running), AfterRun::Serve);
+        assert_eq!(control.after_run(PowerState::Running.into()), AfterRun::Serve);
         assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::DumpRam(path)));
         assert_eq!(control.next_between_runs(), BetweenRuns::Resume);
         assert!(!raised(&control));
@@ -603,7 +639,7 @@ mod tests {
         let path = PathBuf::from("memory.bin");
         assert_eq!(control.request_dump(path.clone()), DumpRequest::Queued);
         control.end_run();
-        assert_eq!(control.after_run(PowerState::Running), AfterRun::End);
+        assert_eq!(control.after_run(PowerState::Running.into()), AfterRun::End);
         control.finish_run();
         assert!(!control.dump_pending());
         assert_eq!(
@@ -623,10 +659,10 @@ mod tests {
         control.begin_run(RunStart::PowerOn);
         control.pause();
         control.resume();
-        assert_eq!(control.after_run(PowerState::Running), AfterRun::Serve);
+        assert_eq!(control.after_run(PowerState::Running.into()), AfterRun::Serve);
         assert_eq!(control.next_between_runs(), BetweenRuns::Resume);
         assert!(!raised(&control));
-        assert_eq!(control.after_run(PowerState::Running), AfterRun::End);
+        assert_eq!(control.after_run(PowerState::Running.into()), AfterRun::End);
     }
 
     #[test]
@@ -676,7 +712,7 @@ mod tests {
         control.end_run(); // a power-off between the two runs
         control.begin_run(RunStart::Restart);
         assert!(raised(&control), "a stop after the run ended still stands");
-        assert_eq!(control.after_run(PowerState::Running), AfterRun::End);
+        assert_eq!(control.after_run(PowerState::Running.into()), AfterRun::End);
     }
 
     /// A dump being written still counts as pending, so the page keeps
@@ -687,7 +723,7 @@ mod tests {
         control.begin_run(RunStart::PowerOn);
         let path = PathBuf::from("memory.bin");
         assert_eq!(control.request_dump(path.clone()), DumpRequest::Queued);
-        assert_eq!(control.after_run(PowerState::Running), AfterRun::Serve);
+        assert_eq!(control.after_run(PowerState::Running.into()), AfterRun::Serve);
         assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::DumpRam(path.clone())));
         assert!(control.dump_pending(), "taken off the queue, but not written yet");
         control.record_dump(DumpOutcome::Saved { path, bytes: 1 });
@@ -804,7 +840,7 @@ mod tests {
     fn a_run_that_spent_its_budget_with_nothing_asked_ends() {
         let control = control();
         control.begin_run(RunStart::PowerOn);
-        assert_eq!(control.after_run(PowerState::Running), AfterRun::End);
+        assert_eq!(control.after_run(PowerState::Running.into()), AfterRun::End);
     }
 
     #[test]
@@ -812,7 +848,7 @@ mod tests {
         let control = control();
         control.begin_run(RunStart::PowerOn);
         control.step();
-        assert_eq!(control.after_run(PowerState::Running), AfterRun::End, "no step queued");
+        assert_eq!(control.after_run(PowerState::Running.into()), AfterRun::End, "no step queued");
         control.pause();
         assert_eq!(control.next_between_runs(), BetweenRuns::Perform(Task::Refresh));
         control.step();

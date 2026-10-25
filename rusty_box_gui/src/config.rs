@@ -38,6 +38,9 @@ pub struct FileConfig {
     pub boot: BootToml,
     pub disk: Option<DiskToml>,
     pub cdrom: Option<CdromToml>,
+    /// The Arm `virt` board's hardware, for a VM whose `[vm] machine` is
+    /// `"arm-virt"`.
+    pub virt: Option<VirtToml>,
     pub logging: LoggingToml,
 }
 
@@ -49,6 +52,8 @@ pub struct VmToml {
     /// The name the shell shows. A library file without one is shown under
     /// its file name.
     pub name: Option<String>,
+    /// Which machine the VM is: `"pc"` (the default) or `"arm-virt"`.
+    pub machine: Option<MachineKind>,
 }
 
 impl VmToml {
@@ -56,8 +61,72 @@ impl VmToml {
     /// `[vm]` header at all: a bare header would be an unknown table to a
     /// reader without this key.
     pub fn is_empty(&self) -> bool {
-        self.name.is_none()
+        self.name.is_none() && self.machine.is_none()
     }
+}
+
+/// Which machine a VM is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum MachineKind {
+    /// The Bochs PC: x86 processors, a BIOS, IDE media.
+    #[default]
+    Pc,
+    /// QEMU's Arm `virt` board with an AArch64 processor
+    /// (`rusty_box_aarch64`).
+    ArmVirt,
+}
+
+impl MachineKind {
+    /// Every machine, in the order the shell offers them.
+    pub const ALL: [Self; 2] = [Self::Pc, Self::ArmVirt];
+
+    /// The machine's name as the shell and refusals show it.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Pc => "a PC",
+            Self::ArmVirt => "an Arm virt board",
+        }
+    }
+}
+
+impl std::fmt::Display for MachineKind {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.label())
+    }
+}
+
+/// The `[virt]` table: the Arm `virt` board's hardware.
+///
+/// It boots UEFI firmware from flash (`firmware`, with `firmware_vars` for its
+/// variable store) or a Linux kernel directly (`kernel`, with `initrd`,
+/// `command_line` and `device_tree`), never both. `display` plugs in a
+/// virtio-gpu asking the guest for that size; `keyboard` and `tablet` plug
+/// in the virtio keyboard and tablet.
+// NOTE: field order matters for TOML serialization — `display`, a sub-table,
+// must follow the scalar fields.
+#[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct VirtToml {
+    pub memory_mib: Option<u32>,
+    pub ips: Option<u32>,
+    pub firmware: Option<PathBuf>,
+    pub firmware_vars: Option<PathBuf>,
+    pub kernel: Option<PathBuf>,
+    pub initrd: Option<PathBuf>,
+    pub command_line: Option<String>,
+    pub device_tree: Option<PathBuf>,
+    pub keyboard: Option<bool>,
+    pub tablet: Option<bool>,
+    pub display: Option<VirtDisplayToml>,
+}
+
+/// `[virt.display]`: the size a virtio-gpu asks the guest for.
+#[derive(Debug, Clone, Copy, Default, serde::Deserialize, serde::Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct VirtDisplayToml {
+    pub width: Option<u32>,
+    pub height: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
@@ -253,8 +322,91 @@ pub enum CpuCapabilities {
     HostShared,
 }
 
+/// A VM's settings, resolved: the machine and its hardware, and how the
+/// front end shows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedConfig {
+    /// The machine and its hardware.
+    pub machine: MachineConfig,
+    pub display: DisplayBackend,
+    pub log_level: LogLevel,
+    /// The phone's full-screen console fills the screen instead of keeping the
+    /// guest's shape.
+    pub console_stretch: bool,
+    /// The phone trackpad's cursor speed.
+    pub pointer_speed: PointerSpeed,
+}
+
+/// A VM's machine, with the hardware settings that machine has.
+///
+/// Closed (R5): every machine the runner can build.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MachineConfig {
+    Pc(PcConfig),
+    ArmVirt(ArmVirtConfig),
+}
+
+impl MachineConfig {
+    pub fn kind(&self) -> MachineKind {
+        match self {
+            Self::Pc(_) => MachineKind::Pc,
+            Self::ArmVirt(_) => MachineKind::ArmVirt,
+        }
+    }
+}
+
+impl ResolvedConfig {
+    /// The PC's settings, when the VM is a PC.
+    pub fn pc(&self) -> Option<&PcConfig> {
+        match &self.machine {
+            MachineConfig::Pc(pc) => Some(pc),
+            MachineConfig::ArmVirt(_) => None,
+        }
+    }
+
+    pub fn pc_mut(&mut self) -> Option<&mut PcConfig> {
+        match &mut self.machine {
+            MachineConfig::Pc(pc) => Some(pc),
+            MachineConfig::ArmVirt(_) => None,
+        }
+    }
+
+    /// The Arm `virt` board's settings, when the VM is one.
+    pub fn arm_virt(&self) -> Option<&ArmVirtConfig> {
+        match &self.machine {
+            MachineConfig::ArmVirt(virt) => Some(virt),
+            MachineConfig::Pc(_) => None,
+        }
+    }
+
+    pub fn arm_virt_mut(&mut self) -> Option<&mut ArmVirtConfig> {
+        match &mut self.machine {
+            MachineConfig::ArmVirt(virt) => Some(virt),
+            MachineConfig::Pc(_) => None,
+        }
+    }
+
+    /// The engine that retires the guest's instructions: a PC's chosen one;
+    /// the Arm board has only the interpreter.
+    pub fn engine(&self) -> Engine {
+        match &self.machine {
+            MachineConfig::Pc(pc) => pc.engine,
+            MachineConfig::ArmVirt(_) => Engine::Interpreter,
+        }
+    }
+
+    /// The guest's memory, MiB, whatever the machine.
+    pub fn memory_mib(&self) -> u32 {
+        match &self.machine {
+            MachineConfig::Pc(pc) => pc.memory_mib,
+            MachineConfig::ArmVirt(virt) => virt.memory_mib,
+        }
+    }
+}
+
+/// The Bochs PC's hardware.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PcConfig {
     /// Which engine retires the guest's instructions.
     pub engine: Engine,
     /// Which processor the machine offers its guest.
@@ -271,23 +423,58 @@ pub struct ResolvedConfig {
     pub port_e9_hack: PortE9Hack,
     pub max_instructions: u64,
     pub cpu_params: BxParams,
-    pub display: DisplayBackend,
     pub bios: PathBuf,
     pub vga_bios: Option<PathBuf>,
     pub boot_order: Vec<BootDevice>,
     pub disk: Option<ResolvedDisk>,
     pub cdrom: Option<ResolvedCdrom>,
-    pub log_level: LogLevel,
     /// Optional pre-boot VBE mode (width, height, bpp) applied to the VGA
     /// controller before reset. `None` leaves the built-in defaults.
     pub vga_mode: Option<VgaMode>,
     /// Register the VGA on PCI (experimental KMS / `bochs-drm` path). Default off.
     pub pci_vga: bool,
-    /// The phone's full-screen console fills the screen instead of keeping the
-    /// guest's shape.
-    pub console_stretch: bool,
-    /// The phone trackpad's cursor speed.
-    pub pointer_speed: PointerSpeed,
+}
+
+/// The Arm `virt` board's hardware.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArmVirtConfig {
+    pub memory_mib: u32,
+    /// The guest's instruction rate, which its timers count against.
+    pub ips: u32,
+    pub boot: ArmBoot,
+    /// The virtio-gpu, by the size it asks the guest for; `None` for none.
+    pub display: Option<VirtioDisplaySize>,
+    /// A virtio keyboard is plugged in.
+    pub keyboard: bool,
+    /// A virtio tablet is plugged in.
+    pub tablet: bool,
+}
+
+/// What the Arm `virt` board boots.
+///
+/// Closed (R5): the ways `rusty_box_aarch64::MachineBuilder` starts a guest,
+/// and nothing chosen yet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ArmBoot {
+    /// No firmware and no kernel chosen yet: a VM the shell made and the user
+    /// has not finished.
+    Unset,
+    /// UEFI firmware from flash, with its variable store when one is given.
+    Firmware { code: PathBuf, vars: Option<PathBuf> },
+    /// A Linux `Image` entered directly, as QEMU's `-kernel` does.
+    Linux {
+        kernel: PathBuf,
+        initrd: Option<PathBuf>,
+        command_line: String,
+        device_tree: Option<PathBuf>,
+    },
+}
+
+/// The size a virtio-gpu asks its guest for, in pixels; neither is zero.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VirtioDisplaySize {
+    pub width: u32,
+    pub height: u32,
 }
 
 /// A pre-boot VBE display mode.
@@ -340,36 +527,70 @@ pub fn resolve_config(file: FileConfig, args: &Args) -> Result<ResolvedConfig, R
     resolve_config_with_base(file, args, None)
 }
 
-/// A configuration with nothing chosen yet: no firmware, no media, and every
-/// setting at the value `resolve_config` gives a missing key. The shell shows
-/// it as "New VM" when it has no other VM to show.
+/// A configuration with nothing chosen yet: a PC with no firmware, no media,
+/// and every setting at the value `resolve_config` gives a missing key. The
+/// shell shows it as "New VM" when it has no other VM to show.
 pub fn blank_config() -> ResolvedConfig {
     ResolvedConfig {
-        engine: Engine::default(),
-        cpu_capabilities: CpuCapabilities::default(),
-        memory_mib: DEFAULT_MEMORY_MIB,
-        host_memory_mib: DEFAULT_MEMORY_MIB,
-        memory_block_kib: DEFAULT_MEMORY_BLOCK_KIB,
-        ips: DEFAULT_IPS,
-        pci: DEFAULT_PCI,
-        sync_slowdown: DEFAULT_SYNC_SLOWDOWN,
-        sync_realtime: DEFAULT_SYNC_REALTIME,
-        smp_quantum: DEFAULT_SMP_QUANTUM,
-        cpuid_freq: DEFAULT_CPUID_FREQ,
-        port_e9_hack: PortE9Hack::Off,
-        max_instructions: DEFAULT_MAX_INSTRUCTIONS,
-        cpu_params: BxParams::default(),
+        machine: MachineConfig::Pc(PcConfig::blank()),
         display: default_display_backend(),
-        bios: PathBuf::new(),
-        vga_bios: None,
-        boot_order: Vec::new(),
-        disk: None,
-        cdrom: None,
         log_level: DEFAULT_LOG_LEVEL,
-        vga_mode: None,
-        pci_vga: DEFAULT_PCI_VGA,
         console_stretch: false,
         pointer_speed: PointerSpeed::DEFAULT,
+    }
+}
+
+impl PcConfig {
+    /// A PC with nothing chosen yet: what a file with no keys resolves to,
+    /// less the BIOS it would be refused for.
+    pub fn blank() -> Self {
+        Self {
+            engine: Engine::default(),
+            cpu_capabilities: CpuCapabilities::default(),
+            memory_mib: DEFAULT_MEMORY_MIB,
+            host_memory_mib: DEFAULT_MEMORY_MIB,
+            memory_block_kib: DEFAULT_MEMORY_BLOCK_KIB,
+            ips: DEFAULT_IPS,
+            pci: DEFAULT_PCI,
+            sync_slowdown: DEFAULT_SYNC_SLOWDOWN,
+            sync_realtime: DEFAULT_SYNC_REALTIME,
+            smp_quantum: DEFAULT_SMP_QUANTUM,
+            cpuid_freq: DEFAULT_CPUID_FREQ,
+            port_e9_hack: PortE9Hack::Off,
+            max_instructions: DEFAULT_MAX_INSTRUCTIONS,
+            cpu_params: BxParams::default(),
+            bios: PathBuf::new(),
+            vga_bios: None,
+            boot_order: Vec::new(),
+            disk: None,
+            cdrom: None,
+            vga_mode: None,
+            pci_vga: DEFAULT_PCI_VGA,
+        }
+    }
+}
+
+/// The Arm `virt` board's RAM when a VM names none: QEMU's default.
+const DEFAULT_VIRT_MEMORY_MIB: u32 = (rusty_box_aarch64::RamSize::DEFAULT.get() >> 20) as u32;
+/// The Arm `virt` board's instruction rate when a VM names none.
+const DEFAULT_VIRT_IPS: u32 = {
+    let ips = rusty_box_aarch64::VirtConfig::DEFAULT.ips.get();
+    assert!(ips <= u32::MAX as u64);
+    ips as u32
+};
+
+impl ArmVirtConfig {
+    /// An Arm `virt` board with nothing chosen yet: what an empty `[virt]`
+    /// table resolves to, with nothing to boot.
+    pub fn blank() -> Self {
+        Self {
+            memory_mib: DEFAULT_VIRT_MEMORY_MIB,
+            ips: DEFAULT_VIRT_IPS,
+            boot: ArmBoot::Unset,
+            display: None,
+            keyboard: false,
+            tablet: false,
+        }
     }
 }
 
@@ -387,6 +608,194 @@ fn resolve_config_with_base(
     args: &Args,
     config_dir: Option<&Path>,
 ) -> Result<ResolvedConfig, RunError> {
+    let display = args
+        .display
+        .or(file.display.backend)
+        .unwrap_or_else(default_display_backend);
+    let log_level = args
+        .log_level
+        .or(file.logging.level)
+        .unwrap_or(DEFAULT_LOG_LEVEL);
+    let console_stretch = file.display.stretch.unwrap_or(false);
+    let pointer_speed = file
+        .display
+        .pointer_speed_percent
+        .map_or(PointerSpeed::DEFAULT, PointerSpeed::from_percent);
+    let machine = match file.vm.machine.unwrap_or_default() {
+        MachineKind::Pc => {
+            if file.virt.is_some() {
+                return Err(RunError::NotForMachine {
+                    setting: "[virt]",
+                    machine: MachineKind::Pc,
+                });
+            }
+            MachineConfig::Pc(resolve_pc(&file, args, config_dir, display)?)
+        }
+        MachineKind::ArmVirt => MachineConfig::ArmVirt(resolve_arm_virt(&file, args, config_dir)?),
+    };
+    Ok(ResolvedConfig {
+        machine,
+        display,
+        log_level,
+        console_stretch,
+        pointer_speed,
+    })
+}
+
+/// The Arm `virt` board `file`'s `[virt]` table and `args` describe. Every
+/// PC setting, in the file or on the command line, is refused: it would be
+/// dropped without a word otherwise.
+fn resolve_arm_virt(file: &FileConfig, args: &Args, config_dir: Option<&Path>) -> Result<ArmVirtConfig, RunError> {
+    let pc_tables = [
+        ("[emulator]", file.emulator.is_set()),
+        ("[rom]", file.rom.bios.is_some() || file.rom.vga_bios.is_some()),
+        ("[boot]", !file.boot.order.is_empty()),
+        ("[disk]", file.disk.is_some()),
+        ("[cdrom]", file.cdrom.is_some()),
+        ("display.width", file.display.width.is_some()),
+        ("display.height", file.display.height.is_some()),
+        ("display.bpp", file.display.bpp.is_some()),
+        ("display.pci_vga", file.display.pci_vga.is_some()),
+    ];
+    let pc_settings = pc_tables
+        .into_iter()
+        .filter_map(|(name, set)| set.then_some(name))
+        .chain(args.pc_flags());
+    if let Some(setting) = pc_settings.into_iter().next() {
+        return Err(RunError::NotForMachine {
+            setting,
+            machine: MachineKind::ArmVirt,
+        });
+    }
+    let virt = file.virt.clone().unwrap_or_default();
+
+    let memory_mib = args.memory_mib.or(virt.memory_mib).unwrap_or(DEFAULT_VIRT_MEMORY_MIB);
+    if rusty_box_aarch64::RamSize::mib(u64::from(memory_mib)).is_none() {
+        return Err(RunError::InvalidVirtMemory { memory_mib });
+    }
+    let ips = args.ips.or(virt.ips).unwrap_or(DEFAULT_VIRT_IPS);
+    ensure_nonzero("ips", ips)?;
+
+    let path = |p: &Option<PathBuf>| p.clone().map(|p| resolve_toml_path(config_dir, p));
+    let boot = match (path(&virt.firmware), path(&virt.kernel)) {
+        (Some(_), Some(_)) => {
+            return Err(RunError::ConflictingVirtBoot);
+        }
+        (Some(code), None) => {
+            for (name, set) in [
+                ("virt.initrd", virt.initrd.is_some()),
+                ("virt.command_line", virt.command_line.is_some()),
+                ("virt.device_tree", virt.device_tree.is_some()),
+            ] {
+                if set {
+                    return Err(RunError::VirtSettingNeedsKernel { setting: name });
+                }
+            }
+            ArmBoot::Firmware {
+                code,
+                vars: path(&virt.firmware_vars),
+            }
+        }
+        (None, Some(kernel)) => {
+            if virt.firmware_vars.is_some() {
+                return Err(RunError::VirtSettingNeedsFirmware {
+                    setting: "virt.firmware_vars",
+                });
+            }
+            ArmBoot::Linux {
+                kernel,
+                initrd: path(&virt.initrd),
+                command_line: virt
+                    .command_line
+                    .clone()
+                    .unwrap_or_else(|| rusty_box_aarch64::boot::SERIAL_CONSOLE_COMMAND_LINE.to_owned()),
+                device_tree: path(&virt.device_tree),
+            }
+        }
+        (None, None) => {
+            for (name, set) in [
+                ("virt.firmware_vars", virt.firmware_vars.is_some()),
+                ("virt.initrd", virt.initrd.is_some()),
+                ("virt.command_line", virt.command_line.is_some()),
+                ("virt.device_tree", virt.device_tree.is_some()),
+            ] {
+                if set {
+                    return Err(RunError::VirtSettingWithoutBoot { setting: name });
+                }
+            }
+            ArmBoot::Unset
+        }
+    };
+    let display = match virt.display {
+        None => None,
+        Some(VirtDisplayToml {
+            width: Some(width),
+            height: Some(height),
+        }) if width != 0 && height != 0 => Some(VirtioDisplaySize { width, height }),
+        Some(VirtDisplayToml { width, height }) => {
+            return Err(RunError::InvalidVirtDisplay { width, height });
+        }
+    };
+    Ok(ArmVirtConfig {
+        memory_mib,
+        ips,
+        boot,
+        display,
+        keyboard: virt.keyboard.unwrap_or(false),
+        tablet: virt.tablet.unwrap_or(false),
+    })
+}
+
+impl EmulatorToml {
+    /// Whether the table sets any key. The destructuring is exhaustive, so a
+    /// new key is counted.
+    fn is_set(&self) -> bool {
+        let Self {
+            engine,
+            cpu_capabilities,
+            memory_mib,
+            host_memory_mib,
+            memory_block_kib,
+            cpus,
+            cpu_sockets,
+            cpu_cores,
+            cpu_threads,
+            ips,
+            pci,
+            sync_slowdown,
+            sync_realtime,
+            smp_quantum,
+            max_instructions,
+            cpuid_freq,
+            port_e9_hack,
+        } = self;
+        engine.is_some()
+            || cpu_capabilities.is_some()
+            || memory_mib.is_some()
+            || host_memory_mib.is_some()
+            || memory_block_kib.is_some()
+            || cpus.is_some()
+            || cpu_sockets.is_some()
+            || cpu_cores.is_some()
+            || cpu_threads.is_some()
+            || ips.is_some()
+            || pci.is_some()
+            || sync_slowdown.is_some()
+            || sync_realtime.is_some()
+            || smp_quantum.is_some()
+            || max_instructions.is_some()
+            || cpuid_freq.is_some()
+            || port_e9_hack.is_some()
+    }
+}
+
+/// The PC `file` and `args` describe.
+fn resolve_pc(
+    file: &FileConfig,
+    args: &Args,
+    config_dir: Option<&Path>,
+    display: DisplayBackend,
+) -> Result<PcConfig, RunError> {
     let engine = args.engine.or(file.emulator.engine).unwrap_or_default();
     let cpu_capabilities = args
         .cpu_capabilities
@@ -478,16 +887,8 @@ fn resolve_config_with_base(
             }
         })?,
     };
-    let cpu_params = resolve_cpu_topology(&file, args)?;
+    let cpu_params = resolve_cpu_topology(file, args)?;
 
-    let display = args
-        .display
-        .or(file.display.backend)
-        .unwrap_or_else(default_display_backend);
-    let log_level = args
-        .log_level
-        .or(file.logging.level)
-        .unwrap_or(DEFAULT_LOG_LEVEL);
     let bios = match args.bios.clone() {
         Some(path) => path,
         None => file
@@ -517,18 +918,13 @@ fn resolve_config_with_base(
     };
 
     let pci_vga = file.display.pci_vga.unwrap_or(DEFAULT_PCI_VGA);
-    let console_stretch = file.display.stretch.unwrap_or(false);
-    let pointer_speed = file
-        .display
-        .pointer_speed_percent
-        .map_or(PointerSpeed::DEFAULT, PointerSpeed::from_percent);
 
-    let disk = resolve_disk(&file, args, config_dir)?;
-    let cdrom = resolve_cdrom(&file, args, config_dir);
-    let boot_order = resolve_boot_order(&file, args, display, disk.is_some(), cdrom.is_some())?;
+    let disk = resolve_disk(file, args, config_dir)?;
+    let cdrom = resolve_cdrom(file, args, config_dir);
+    let boot_order = resolve_boot_order(file, args, display, disk.is_some(), cdrom.is_some())?;
     validate_boot_order(&boot_order, disk.is_some(), cdrom.is_some())?;
 
-    Ok(ResolvedConfig {
+    Ok(PcConfig {
         engine,
         cpu_capabilities,
         memory_mib,
@@ -543,17 +939,13 @@ fn resolve_config_with_base(
         port_e9_hack,
         max_instructions,
         cpu_params,
-        display,
         bios,
         vga_bios,
         boot_order,
         disk,
         cdrom,
-        log_level,
         vga_mode,
         pci_vga,
-        console_stretch,
-        pointer_speed,
     })
 }
 
@@ -606,6 +998,70 @@ impl ResolvedConfig {
     /// makes relative ones absolute first, so reading its file back resolves
     /// to an equal configuration.
     pub fn to_file_config(&self) -> FileConfig {
+        let mut file = match &self.machine {
+            MachineConfig::Pc(pc) => pc.to_file_config(),
+            MachineConfig::ArmVirt(virt) => FileConfig {
+                vm: VmToml {
+                    name: None,
+                    machine: Some(MachineKind::ArmVirt),
+                },
+                virt: Some(virt.to_toml()),
+                ..FileConfig::default()
+            },
+        };
+        file.display.backend = Some(self.display);
+        // Only persist a stretched console so existing configs stay stable.
+        file.display.stretch = self.console_stretch.then_some(true);
+        // Only persist a non-default speed so existing configs stay stable.
+        file.display.pointer_speed_percent =
+            (self.pointer_speed != PointerSpeed::DEFAULT).then_some(self.pointer_speed.percent());
+        file.logging = LoggingToml {
+            level: Some(self.log_level),
+        };
+        file
+    }
+}
+
+impl ArmVirtConfig {
+    /// The `[virt]` table that resolves to these settings.
+    fn to_toml(&self) -> VirtToml {
+        let mut virt = VirtToml {
+            memory_mib: Some(self.memory_mib),
+            ips: Some(self.ips),
+            keyboard: Some(self.keyboard),
+            tablet: Some(self.tablet),
+            display: self.display.map(|size| VirtDisplayToml {
+                width: Some(size.width),
+                height: Some(size.height),
+            }),
+            ..VirtToml::default()
+        };
+        match &self.boot {
+            ArmBoot::Unset => {}
+            ArmBoot::Firmware { code, vars } => {
+                virt.firmware = Some(code.clone());
+                virt.firmware_vars = vars.clone();
+            }
+            ArmBoot::Linux {
+                kernel,
+                initrd,
+                command_line,
+                device_tree,
+            } => {
+                virt.kernel = Some(kernel.clone());
+                virt.initrd = initrd.clone();
+                virt.command_line = Some(command_line.clone());
+                virt.device_tree = device_tree.clone();
+            }
+        }
+        virt
+    }
+}
+
+impl PcConfig {
+    /// The PC tables that resolve to these settings; the front end's keys
+    /// are [`ResolvedConfig::to_file_config`]'s to add.
+    fn to_file_config(&self) -> FileConfig {
         let topology = self.cpu_params.cpu_topology();
         let emulator = EmulatorToml {
             // Only persist a non-default engine and processor so existing
@@ -637,16 +1093,13 @@ impl ResolvedConfig {
                 .then(|| port_e9_hack_toml(self.port_e9_hack).to_owned()),
         };
         let display = DisplayToml {
-            backend: Some(self.display),
+            backend: None,
             width: self.vga_mode.map(|mode| mode.width),
             height: self.vga_mode.map(|mode| mode.height),
             bpp: self.vga_mode.map(|mode| mode.bpp),
             pci_vga: (self.pci_vga != DEFAULT_PCI_VGA).then_some(self.pci_vga),
-            // Only persist a stretched console so existing configs stay stable.
-            stretch: self.console_stretch.then_some(true),
-            // Only persist a non-default speed so existing configs stay stable.
-            pointer_speed_percent: (self.pointer_speed != PointerSpeed::DEFAULT)
-                .then_some(self.pointer_speed.percent()),
+            stretch: None,
+            pointer_speed_percent: None,
         };
         let rom = RomToml {
             bios: Some(self.bios.clone()),
@@ -680,9 +1133,6 @@ impl ResolvedConfig {
             channel: Some(cdrom.channel),
             drive: Some(cdrom.drive),
         });
-        let logging = LoggingToml {
-            level: Some(self.log_level),
-        };
         FileConfig {
             vm: VmToml::default(),
             emulator,
@@ -691,7 +1141,8 @@ impl ResolvedConfig {
             boot,
             disk,
             cdrom,
-            logging,
+            virt: None,
+            logging: LoggingToml::default(),
         }
     }
 }
@@ -1202,8 +1653,8 @@ mod tests {
     #[test]
     fn without_config_the_command_line_alone_describes_the_machine() {
         let resolved = load_config(&args(["rusty_box_gui", "--bios", "b.bin"])).unwrap();
-        assert_eq!(resolved.bios, PathBuf::from("b.bin"));
-        assert_eq!(resolved.memory_mib, 32);
+        assert_eq!(resolved.pc().expect("a PC").bios, PathBuf::from("b.bin"));
+        assert_eq!(resolved.memory_mib(), 32);
     }
     #[test]
     fn cli_overrides_toml_without_losing_other_toml_values() {
@@ -1222,8 +1673,8 @@ chs = { cylinders = 306, heads = 4, sectors_per_track = 17 }
         );
         let resolved = resolve_config(file, &args(["rusty_box_gui", "--bios", "new.bin"])).unwrap();
 
-        assert_eq!(resolved.bios, PathBuf::from("new.bin"));
-        assert_eq!(resolved.memory_mib, 64);
+        assert_eq!(resolved.pc().expect("a PC").bios, PathBuf::from("new.bin"));
+        assert_eq!(resolved.memory_mib(), 64);
     }
 
     #[test]
@@ -1233,7 +1684,7 @@ chs = { cylinders = 306, heads = 4, sectors_per_track = 17 }
             &args(["rusty_box_gui"]),
         )
         .unwrap();
-        assert_eq!(resolved.cpuid_freq, CpuidFreq::None);
+        assert_eq!(resolved.pc().expect("a PC").cpuid_freq, CpuidFreq::None);
 
         let toml_hardware = r#"
 [emulator]
@@ -1246,7 +1697,7 @@ bios = "bios.bin"
 path = "boot.iso"
 "#;
         let resolved = resolve_config(config(toml_hardware), &args(["rusty_box_gui"])).unwrap();
-        assert_eq!(resolved.cpuid_freq, CpuidFreq::Hardware);
+        assert_eq!(resolved.pc().expect("a PC").cpuid_freq, CpuidFreq::Hardware);
 
         // CLI overrides the TOML value.
         let resolved = resolve_config(
@@ -1254,7 +1705,7 @@ path = "boot.iso"
             &args(["rusty_box_gui", "--cpuid-freq", "ips"]),
         )
         .unwrap();
-        assert_eq!(resolved.cpuid_freq, CpuidFreq::Ips);
+        assert_eq!(resolved.pc().expect("a PC").cpuid_freq, CpuidFreq::Ips);
 
         // Save-roundtrip: non-default modes persist, the default stays absent.
         assert_eq!(
@@ -1273,7 +1724,7 @@ path = "boot.iso"
             &args(["rusty_box_gui"]),
         )
         .unwrap();
-        assert_eq!(resolved.port_e9_hack, PortE9Hack::Off);
+        assert_eq!(resolved.pc().expect("a PC").port_e9_hack, PortE9Hack::Off);
         assert_eq!(
             resolved.to_file_config().emulator.port_e9_hack,
             None,
@@ -1291,14 +1742,14 @@ bios = "bios.bin"
 path = "boot.iso"
 "#;
         let resolved = resolve_config(config(toml_on), &args(["rusty_box_gui"])).unwrap();
-        assert_eq!(resolved.port_e9_hack, PortE9Hack::On);
+        assert_eq!(resolved.pc().expect("a PC").port_e9_hack, PortE9Hack::On);
 
         let resolved = resolve_config(
             config(toml_on),
             &args(["rusty_box_gui", "--port-e9-hack", "all-rings"]),
         )
         .unwrap();
-        assert_eq!(resolved.port_e9_hack, PortE9Hack::AllRings);
+        assert_eq!(resolved.pc().expect("a PC").port_e9_hack, PortE9Hack::AllRings);
         assert_eq!(
             resolved.to_file_config().emulator.port_e9_hack.as_deref(),
             Some("all-rings")
@@ -1309,7 +1760,7 @@ path = "boot.iso"
             &args(["rusty_box_gui", "--port-e9-hack", "off"]),
         )
         .unwrap();
-        assert_eq!(resolved.port_e9_hack, PortE9Hack::Off, "the flag can turn it back off");
+        assert_eq!(resolved.pc().expect("a PC").port_e9_hack, PortE9Hack::Off, "the flag can turn it back off");
     }
 
     #[test]
@@ -1356,16 +1807,16 @@ path = "boot.iso"
         )
         .unwrap();
 
-        assert_eq!(resolved.engine, Engine::Interpreter);
-        assert_eq!(resolved.cpu_capabilities, CpuCapabilities::Preset);
+        assert_eq!(resolved.engine(), Engine::Interpreter);
+        assert_eq!(resolved.pc().expect("a PC").cpu_capabilities, CpuCapabilities::Preset);
     }
 
     #[test]
     fn the_file_s_engine_and_capabilities_hold_when_the_command_line_names_none() {
         let resolved = resolve_config(config(WHP_FILE), &args(["rusty_box_gui"])).unwrap();
 
-        assert_eq!(resolved.engine, Engine::Whp);
-        assert_eq!(resolved.cpu_capabilities, CpuCapabilities::HostShared);
+        assert_eq!(resolved.engine(), Engine::Whp);
+        assert_eq!(resolved.pc().expect("a PC").cpu_capabilities, CpuCapabilities::HostShared);
     }
 
     #[test]
@@ -1376,8 +1827,8 @@ path = "boot.iso"
         )
         .unwrap();
 
-        assert_eq!(resolved.engine, Engine::Interpreter);
-        assert_eq!(resolved.cpu_capabilities, CpuCapabilities::Preset);
+        assert_eq!(resolved.engine(), Engine::Interpreter);
+        assert_eq!(resolved.pc().expect("a PC").cpu_capabilities, CpuCapabilities::Preset);
         // At their defaults, neither is written back.
         let emulator = resolved.to_file_config().emulator;
         assert_eq!(emulator.engine, None);
@@ -1390,9 +1841,9 @@ path = "boot.iso"
         let file = config("[rom]\nbios = \"\"\n\n[cdrom]\npath = \"boot.iso\"\n");
         let resolved = resolve_config_in(file, Path::new("library")).unwrap();
 
-        assert_eq!(resolved.bios, PathBuf::new());
+        assert_eq!(resolved.pc().expect("a PC").bios, PathBuf::new());
         assert_eq!(
-            resolved.cdrom.map(|cdrom| cdrom.path),
+            resolved.pc().expect("a PC").cdrom.as_ref().map(|cdrom| cdrom.path.clone()),
             Some(Path::new("library").join("boot.iso"))
         );
     }
@@ -1426,7 +1877,7 @@ chs = { cylinders = 306, heads = 4, sectors_per_track = 17 }
         );
         let resolved = resolve_config(file, &args(["rusty_box_gui"])).unwrap();
 
-        assert_eq!(resolved.boot_order, vec![BootDevice::Disk]);
+        assert_eq!(resolved.pc().expect("a PC").boot_order, vec![BootDevice::Disk]);
     }
 
     #[test]
@@ -1441,7 +1892,7 @@ path = "c.img"
 "#,
         );
         let resolved = resolve_config(file, &args(["rusty_box_gui"])).unwrap();
-        let disk = resolved.disk.unwrap();
+        let disk = resolved.pc().expect("a PC").disk.clone().unwrap();
         let creation = disk.creation.unwrap();
 
         assert_eq!(disk.path, PathBuf::from("c.img"));
@@ -1455,7 +1906,7 @@ path = "c.img"
         );
         assert_eq!(creation.size, ImageSize::gib(20));
         assert!(!creation.overwrite);
-        assert_eq!(resolved.boot_order, vec![BootDevice::Disk]);
+        assert_eq!(resolved.pc().expect("a PC").boot_order, vec![BootDevice::Disk]);
     }
 
     #[test]
@@ -1471,7 +1922,7 @@ size = "512M"
 "#,
         );
         let resolved = resolve_config(file, &args(["rusty_box_gui"])).unwrap();
-        let creation = resolved.disk.unwrap().creation.unwrap();
+        let creation = resolved.pc().expect("a PC").disk.clone().unwrap().creation.unwrap();
 
         assert_eq!(creation.size, ImageSize::mib(512));
     }
@@ -1490,7 +1941,7 @@ chs = { cylinders = 306, heads = 4, sectors_per_track = 17 }
         );
         let resolved =
             resolve_config(file, &args(["rusty_box_gui", "--create-disk", "new.img"])).unwrap();
-        let disk = resolved.disk.unwrap();
+        let disk = resolved.pc().expect("a PC").disk.clone().unwrap();
 
         assert_eq!(disk.path, PathBuf::from("new.img"));
         assert!(disk.creation.is_some());
@@ -1551,7 +2002,7 @@ size = "32G"
 "#,
         );
         let resolved = resolve_config(file, &args(["rusty_box_gui"])).unwrap();
-        let disk = resolved.disk.unwrap();
+        let disk = resolved.pc().expect("a PC").disk.clone().unwrap();
 
         assert_eq!(disk.path, PathBuf::from("huge.img"));
         assert_eq!(
@@ -1713,14 +2164,14 @@ path = "boot.iso"
         ]))
         .unwrap();
 
-        assert_eq!(resolved.bios, dir.join("bios.bin"));
-        assert_eq!(resolved.vga_bios, Some(dir.join("vgabios.bin")));
+        assert_eq!(resolved.pc().expect("a PC").bios, dir.join("bios.bin"));
+        assert_eq!(resolved.pc().expect("a PC").vga_bios, Some(dir.join("vgabios.bin")));
         assert_eq!(
-            resolved.disk.as_ref().map(|disk| disk.path.as_path()),
+            resolved.pc().expect("a PC").disk.as_ref().map(|disk| disk.path.as_path()),
             Some(dir.join("disk.img").as_path())
         );
         assert_eq!(
-            resolved.cdrom.as_ref().map(|cdrom| cdrom.path.as_path()),
+            resolved.pc().expect("a PC").cdrom.as_ref().map(|cdrom| cdrom.path.as_path()),
             Some(dir.join("boot.iso").as_path())
         );
 
@@ -1759,9 +2210,9 @@ chs = { cylinders = 306, heads = 4, sectors_per_track = 17 }
         ]))
         .unwrap();
 
-        assert_eq!(resolved.bios, PathBuf::from("new.bin"));
+        assert_eq!(resolved.pc().expect("a PC").bios, PathBuf::from("new.bin"));
         assert_eq!(
-            resolved.disk.as_ref().map(|disk| disk.path.as_path()),
+            resolved.pc().expect("a PC").disk.as_ref().map(|disk| disk.path.as_path()),
             Some(Path::new("new.img"))
         );
 
@@ -1783,9 +2234,9 @@ bios = "bios.bin"
 
         let resolved = resolve_config(file, &args(["rusty_box_gui"])).unwrap();
 
-        assert!(resolved.boot_order.is_empty());
-        assert!(resolved.disk.is_none());
-        assert!(resolved.cdrom.is_none());
+        assert!(resolved.pc().expect("a PC").boot_order.is_empty());
+        assert!(resolved.pc().expect("a PC").disk.is_none());
+        assert!(resolved.pc().expect("a PC").cdrom.is_none());
     }
 
     #[test]
@@ -1814,8 +2265,8 @@ chs = { cylinders = 306, heads = 4, sectors_per_track = 17 }
         );
         let resolved = resolve_config(file, &args(["rusty_box_gui"])).unwrap();
 
-        assert_eq!(resolved.cpu_params.cpu_count(), 8);
-        let topology = resolved.cpu_params.cpu_topology();
+        assert_eq!(resolved.pc().expect("a PC").cpu_params.cpu_count(), 8);
+        let topology = resolved.pc().expect("a PC").cpu_params.cpu_topology();
         assert_eq!(topology.n_processors(), 2);
         assert_eq!(topology.n_cores(), 2);
         assert_eq!(topology.n_threads(), 2);
@@ -1838,8 +2289,8 @@ chs = { cylinders = 306, heads = 4, sectors_per_track = 17 }
         );
         let resolved = resolve_config(file, &args(["rusty_box_gui"])).unwrap();
 
-        assert_eq!(resolved.cpu_params.cpu_count(), 4);
-        let topology = resolved.cpu_params.cpu_topology();
+        assert_eq!(resolved.pc().expect("a PC").cpu_params.cpu_count(), 4);
+        let topology = resolved.pc().expect("a PC").cpu_params.cpu_topology();
         assert_eq!(topology.n_processors(), 4);
         assert_eq!(topology.n_cores(), 1);
         assert_eq!(topology.n_threads(), 1);
@@ -1864,7 +2315,7 @@ chs = { cylinders = 306, heads = 4, sectors_per_track = 17 }
         let resolved = resolve_config(file, &args(["rusty_box_gui"])).unwrap();
 
         // Any topology field present ignores the flat count: (1 socket, 2 cores, 1 thread).
-        assert_eq!(resolved.cpu_params.cpu_count(), 2);
+        assert_eq!(resolved.pc().expect("a PC").cpu_params.cpu_count(), 2);
     }
 
     #[test]
@@ -1907,7 +2358,7 @@ chs = { cylinders = 306, heads = 4, sectors_per_track = 17 }
 
         // bpp defaults to 32 when omitted.
         assert_eq!(
-            resolved.vga_mode,
+            resolved.pc().expect("a PC").vga_mode,
             Some(VgaMode {
                 width: 1920,
                 height: 1080,
@@ -1972,7 +2423,7 @@ chs = { cylinders = 306, heads = 4, sectors_per_track = 17 }
         );
         let resolved = resolve_config(file, &args(["rusty_box_gui"])).unwrap();
 
-        assert_eq!(resolved.vga_mode, None);
+        assert_eq!(resolved.pc().expect("a PC").vga_mode, None);
     }
 
     #[test]
@@ -2055,7 +2506,7 @@ overwrite = false
 
         assert_eq!(resolved, round_tripped);
         let creation = round_tripped
-            .disk
+            .pc().expect("a PC").disk
             .as_ref()
             .and_then(|disk| disk.creation.as_ref())
             .expect("created disk should survive the round trip");
@@ -2087,51 +2538,53 @@ overwrite = false
         )
         .unwrap();
         let resolved = ResolvedConfig {
-            engine: Engine::Whp,
-            cpu_capabilities: CpuCapabilities::HostShared,
-            memory_mib: 512,
-            host_memory_mib: 256,
-            memory_block_kib: 256,
-            ips: 100_000_000,
-            pci: !DEFAULT_PCI,
-            sync_slowdown: !DEFAULT_SYNC_SLOWDOWN,
-            sync_realtime: !DEFAULT_SYNC_REALTIME,
-            smp_quantum: 8,
-            cpuid_freq: CpuidFreq::Hardware,
-            port_e9_hack: PortE9Hack::AllRings,
-            max_instructions: 15_000_000_000,
-            cpu_params: BxParams::default().with_topology(2, 2, 1).unwrap(),
-            display: DisplayBackend::Headless,
-            bios: PathBuf::from("roms/bios.bin"),
-            vga_bios: Some(PathBuf::from("roms/vgabios.bin")),
-            boot_order: vec![BootDevice::Cdrom, BootDevice::Disk],
-            disk: Some(ResolvedDisk {
-                path: PathBuf::from("c.img"),
-                geometry: DiskGeometry {
-                    cylinders: geometry.cylinders as u32,
-                    heads: geometry.heads as u8,
-                    sectors_per_track: geometry.sectors_per_track as u8,
-                },
-                channel: 0,
-                drive: 1,
-                creation: Some(ResolvedDiskCreation {
+            machine: MachineConfig::Pc(PcConfig {
+                engine: Engine::Whp,
+                cpu_capabilities: CpuCapabilities::HostShared,
+                memory_mib: 512,
+                host_memory_mib: 256,
+                memory_block_kib: 256,
+                ips: 100_000_000,
+                pci: !DEFAULT_PCI,
+                sync_slowdown: !DEFAULT_SYNC_SLOWDOWN,
+                sync_realtime: !DEFAULT_SYNC_REALTIME,
+                smp_quantum: 8,
+                cpuid_freq: CpuidFreq::Hardware,
+                port_e9_hack: PortE9Hack::AllRings,
+                max_instructions: 15_000_000_000,
+                cpu_params: BxParams::default().with_topology(2, 2, 1).unwrap(),
+                bios: PathBuf::from("roms/bios.bin"),
+                vga_bios: Some(PathBuf::from("roms/vgabios.bin")),
+                boot_order: vec![BootDevice::Cdrom, BootDevice::Disk],
+                disk: Some(ResolvedDisk {
                     path: PathBuf::from("c.img"),
-                    size,
-                    overwrite: true,
+                    geometry: DiskGeometry {
+                        cylinders: geometry.cylinders as u32,
+                        heads: geometry.heads as u8,
+                        sectors_per_track: geometry.sectors_per_track as u8,
+                    },
+                    channel: 0,
+                    drive: 1,
+                    creation: Some(ResolvedDiskCreation {
+                        path: PathBuf::from("c.img"),
+                        size,
+                        overwrite: true,
+                    }),
                 }),
+                cdrom: Some(ResolvedCdrom {
+                    path: PathBuf::from("boot.iso"),
+                    channel: 1,
+                    drive: 1,
+                }),
+                vga_mode: Some(VgaMode {
+                    width: 1280,
+                    height: 1024,
+                    bpp: 16,
+                }),
+                pci_vga: !DEFAULT_PCI_VGA,
             }),
-            cdrom: Some(ResolvedCdrom {
-                path: PathBuf::from("boot.iso"),
-                channel: 1,
-                drive: 1,
-            }),
+            display: DisplayBackend::Headless,
             log_level: LogLevel::Debug,
-            vga_mode: Some(VgaMode {
-                width: 1280,
-                height: 1024,
-                bpp: 16,
-            }),
-            pci_vga: !DEFAULT_PCI_VGA,
             console_stretch: true,
             pointer_speed: PointerSpeed::from_percent(175),
         };
@@ -2141,5 +2594,171 @@ overwrite = false
         let round_tripped = resolve_config(reparsed, &args(["rusty_box_gui"])).unwrap();
 
         assert_eq!(round_tripped, resolved, "{serialized}");
+    }
+
+    /// An Arm board read back from what the library writes for it is the
+    /// board it wrote, for each way it boots.
+    #[test]
+    fn an_arm_virt_vm_round_trips_through_its_file() {
+        let boots = [
+            ArmBoot::Unset,
+            ArmBoot::Firmware {
+                code: PathBuf::from("QEMU_EFI.fd"),
+                vars: Some(PathBuf::from("vars.fd")),
+            },
+            ArmBoot::Linux {
+                kernel: PathBuf::from("Image"),
+                initrd: Some(PathBuf::from("initramfs.cpio.gz")),
+                command_line: "console=ttyAMA0 console=tty0".to_owned(),
+                device_tree: Some(PathBuf::from("virt.dtb")),
+            },
+        ];
+        for boot in boots {
+            let resolved = ResolvedConfig {
+                machine: MachineConfig::ArmVirt(ArmVirtConfig {
+                    memory_mib: 1024,
+                    ips: 75_000_000,
+                    boot,
+                    display: Some(VirtioDisplaySize {
+                        width: 1024,
+                        height: 768,
+                    }),
+                    keyboard: true,
+                    tablet: true,
+                }),
+                display: DisplayBackend::Headless,
+                log_level: LogLevel::Info,
+                console_stretch: true,
+                pointer_speed: PointerSpeed::from_percent(150),
+            };
+
+            let serialized = toml::to_string_pretty(&resolved.to_file_config()).unwrap();
+            assert!(serialized.contains("machine = \"arm-virt\""), "{serialized}");
+            let reparsed: FileConfig = toml::from_str(&serialized).unwrap();
+            let round_tripped = resolve_config(reparsed, &args(["rusty_box_gui"])).unwrap();
+
+            assert_eq!(round_tripped, resolved, "{serialized}");
+        }
+    }
+
+    #[test]
+    fn an_empty_virt_table_is_a_board_with_nothing_to_boot_at_qemu_defaults() {
+        let file: FileConfig = toml::from_str("[vm]\nmachine = \"arm-virt\"\n").unwrap();
+        let resolved = resolve_config(file, &args(["rusty_box_gui"])).unwrap();
+
+        assert_eq!(resolved.arm_virt(), Some(&ArmVirtConfig::blank()));
+        assert_eq!(ArmVirtConfig::blank().memory_mib, 256, "QEMU virt's default RAM");
+    }
+
+    #[test]
+    fn a_kernel_boot_without_a_command_line_gets_the_serial_console() {
+        let file: FileConfig =
+            toml::from_str("[vm]\nmachine = \"arm-virt\"\n[virt]\nkernel = \"Image\"\n").unwrap();
+        let resolved = resolve_config(file, &args(["rusty_box_gui"])).unwrap();
+
+        match &resolved.arm_virt().expect("an Arm board").boot {
+            ArmBoot::Linux { command_line, .. } => {
+                assert_eq!(command_line, rusty_box_aarch64::boot::SERIAL_CONSOLE_COMMAND_LINE);
+            }
+            other => panic!("not a kernel boot: {other:?}"),
+        }
+    }
+
+    /// Each machine refuses the other's settings, in the file and on the
+    /// command line, rather than dropping them.
+    #[test]
+    fn a_setting_of_the_other_machine_is_refused() {
+        let pc_with_virt: FileConfig = toml::from_str("[virt]\nmemory_mib = 512\n").unwrap();
+        assert!(matches!(
+            resolve_config(pc_with_virt, &args(["rusty_box_gui"])),
+            Err(RunError::NotForMachine {
+                setting: "[virt]",
+                machine: MachineKind::Pc
+            })
+        ));
+
+        let arm = "[vm]\nmachine = \"arm-virt\"\n";
+        for (extra, setting) in [
+            ("[emulator]\npci = false\n", "[emulator]"),
+            ("[rom]\nbios = \"bios.bin\"\n", "[rom]"),
+            ("[boot]\norder = [\"cdrom\"]\n", "[boot]"),
+            ("[cdrom]\npath = \"boot.iso\"\n", "[cdrom]"),
+            ("[display]\nwidth = 1024\n", "display.width"),
+        ] {
+            let file: FileConfig = toml::from_str(&format!("{arm}{extra}")).unwrap();
+            let refused = resolve_config(file, &args(["rusty_box_gui"]));
+            assert!(
+                matches!(
+                    refused,
+                    Err(RunError::NotForMachine {
+                        setting: named,
+                        machine: MachineKind::ArmVirt
+                    }) if named == setting
+                ),
+                "{extra}: {refused:?}"
+            );
+        }
+
+        let file: FileConfig = toml::from_str(arm).unwrap();
+        let refused = resolve_config(file, &args(["rusty_box_gui", "--cdrom", "boot.iso"]));
+        assert!(matches!(
+            refused,
+            Err(RunError::NotForMachine {
+                setting: "--cdrom",
+                machine: MachineKind::ArmVirt
+            })
+        ));
+    }
+
+    /// The flags every machine reads apply to an Arm board too.
+    #[test]
+    fn memory_and_rate_flags_apply_to_an_arm_board() {
+        let file: FileConfig = toml::from_str("[vm]\nmachine = \"arm-virt\"\n").unwrap();
+        let resolved = resolve_config(
+            file,
+            &args(["rusty_box_gui", "--memory-mib", "512", "--ips", "20000000"]),
+        )
+        .unwrap();
+        let virt = resolved.arm_virt().expect("an Arm board");
+
+        assert_eq!(virt.memory_mib, 512);
+        assert_eq!(virt.ips, 20_000_000);
+    }
+
+    #[test]
+    fn an_arm_board_refuses_what_its_boot_cannot_use() {
+        let refusal = |virt: &str| {
+            let file: FileConfig =
+                toml::from_str(&format!("[vm]\nmachine = \"arm-virt\"\n[virt]\n{virt}")).unwrap();
+            resolve_config(file, &args(["rusty_box_gui"])).unwrap_err()
+        };
+
+        assert!(matches!(
+            refusal("firmware = \"QEMU_EFI.fd\"\nkernel = \"Image\"\n"),
+            RunError::ConflictingVirtBoot
+        ));
+        assert!(matches!(
+            refusal("firmware = \"QEMU_EFI.fd\"\ninitrd = \"initrd\"\n"),
+            RunError::VirtSettingNeedsKernel { setting: "virt.initrd" }
+        ));
+        assert!(matches!(
+            refusal("kernel = \"Image\"\nfirmware_vars = \"vars.fd\"\n"),
+            RunError::VirtSettingNeedsFirmware { setting: "virt.firmware_vars" }
+        ));
+        assert!(matches!(
+            refusal("command_line = \"quiet\"\n"),
+            RunError::VirtSettingWithoutBoot { setting: "virt.command_line" }
+        ));
+        assert!(matches!(
+            refusal("memory_mib = 0\n"),
+            RunError::InvalidVirtMemory { memory_mib: 0 }
+        ));
+        assert!(matches!(
+            refusal("[virt.display]\nwidth = 1024\n"),
+            RunError::InvalidVirtDisplay {
+                width: Some(1024),
+                height: None
+            }
+        ));
     }
 }

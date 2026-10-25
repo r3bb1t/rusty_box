@@ -43,6 +43,10 @@ pub(crate) struct VmLibraryEntry {
     pub(crate) cdrom: String,
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) source: EntrySource,
+    /// The pages the VM's node opens to, which its machine decides
+    /// ([`ShellPage::of`]).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) pages: &'static [ShellPage],
 }
 
 impl VmLibraryEntry {
@@ -61,7 +65,15 @@ impl VmLibraryEntry {
             cdrom: cdrom.into(),
             #[cfg(not(target_arch = "wasm32"))]
             source: EntrySource::Saved,
+            #[cfg(not(target_arch = "wasm32"))]
+            pages: &ShellPage::ALL,
         }
+    }
+
+    /// The same entry, for a VM whose node opens to `pages`.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn with_pages(self, pages: &'static [ShellPage]) -> Self {
+        Self { pages, ..self }
     }
 
     /// The same entry, marked as a VM that is not in the library.
@@ -249,7 +261,7 @@ impl Sidebar<'_> {
                             if !is_selected_vm {
                                 continue;
                             }
-                            for page in ShellPage::ALL {
+                            for &page in entries[index].pages {
                                 let page_mark = if destination.page() == page {
                                     RowMark::Destination
                                 } else {

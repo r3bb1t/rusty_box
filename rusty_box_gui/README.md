@@ -53,7 +53,7 @@ cargo run --release -p rusty_box_gui -- `
 
 The egui shell runs `eframe` on the main thread and a launcher thread, which starts every power-on on a thread of its own with a 1500 MiB stack: one thread for each running VM. The window has four parts:
 
-- **Sidebar tree.** Every VM is a row, and the selected one opens to its three pages: **Summary**, **Console** and **Hardware**. The `+` button adds a new VM to the library, copied from the selected one, and a "Search VMs" field filters the list. The command line's temporary VM is marked "(unsaved)", and a library VM whose last save failed "(save failed)". Library files that do not load are listed under **Could not load**. The list scrolls by the wheel, by its scroll bar, and by a finger on a touch screen. Dragging the sidebar's edge in past its narrowest width folds it away; a folded sidebar comes back with a drag from the window's left edge, where the guest's image does not reach it, or with `☰`.
+- **Sidebar tree.** Every VM is a row, and the selected one opens to its pages: **Summary**, **Console**, **Hardware** and, for a PC, **Debugger**. The `+` button adds a new VM to the library, copied from the selected one, and a "Search VMs" field filters the list. The command line's temporary VM is marked "(unsaved)", and a library VM whose last save failed "(save failed)". Library files that do not load are listed under **Could not load**. The list scrolls by the wheel, by its scroll bar, and by a finger on a touch screen. Dragging the sidebar's edge in past its narrowest width folds it away; a folded sidebar comes back with a drag from the window's left edge, where the guest's image does not reach it, or with `☰`.
 - **VM bar** above the page. It carries the selected VM's name, its state, and the verbs that change the state:
   - `▶ Power on` is enabled while the VM is stopped. `■ Power off` and `↻ Restart` are enabled only while it runs.
   - On the Console page only, the bar adds `Ctrl+Alt+Del`, `Capture mouse` / `Release mouse` and `Show serial` / `Hide serial`. The first two are enabled only while the VM runs; `Show serial` / `Hide serial` always is. When the window is too narrow, these fold into the `…` menu.
@@ -65,7 +65,7 @@ The egui shell runs `eframe` on the main thread and a launcher thread, which sta
 The pages:
 
 - **Summary** shows the state and engine and the VM's name, which you can edit here. It lists the memory, processors, boot order, CD/DVD and disk. Its tiles are `Power On VM`, `New Hard Disk` (opens the new-disk sheet under Hardware › Hard Disk) and `Hardware Settings`. A library VM has `Delete VM`; the temporary VM has `Keep in library` and `Discard`. `Delete VM` and `Discard` ask first (`Delete <name>?` / `Discard <name>?`) and work only while the VM is stopped and another VM remains; deleting removes the VM's file, and the disk images it uses are kept. A caption says where the VM is kept: `Saved automatically to <path>`, `Saving to <path> when the edit ends`, or `Not saved: the last write to <path> failed. It is tried again at the next change, selection or power-on.`; for the temporary VM it reads `Temporary VM. Not saved until it is kept in the library.`
-- **Console** shows the guest's display, or `This VM is powered off`, or, while a startup disk is being created, a spinner and a notice naming the image. The serial pane below it, headed `Serial Console (ttyS0)`, shows what the guest writes to COM1, has a `serial input` line (`Send`, or Enter, sends the line with a newline added, and works only while the VM runs), a `Copy Log` button and a `Paste` button that is always disabled. It is shown by default.
+- **Console** shows the guest's display, or `This VM is powered off`, or, while a startup disk is being created, a spinner and a notice naming the image. The serial pane below it, headed `Serial Console`, shows what the guest writes to its first serial port (COM1 on a PC, the PL011 UART on an Arm board), has a `serial input` line (`Send`, or Enter, sends the line with a newline added, and works only while the VM runs), a `Copy Log` button and a `Paste` button that is always disabled. It is shown by default.
 - **Hardware** edits the selected VM. Changes can be made only while the VM is powered off, and apply at the next power-on:
 
   | Pane | Settings |
@@ -82,6 +82,28 @@ The pages:
   An edit to a library VM is written to its file when the edit ends — when the field loses focus or the drag ends — and at once when you switch VMs, add a VM, keep one, power on, or the window goes behind another or closes. The Hardware page shows the file's path; for the temporary VM it reads `Not saved. Keep this VM in the library from its Summary page.` A write that fails is shown as an error and marks the VM "(save failed)" in the sidebar; it is tried again at the next change, selection or power-on. The file is rewritten whole each time, so hand-written comments in it are lost. The CPU topology is written as `cpu_sockets` / `cpu_cores` / `cpu_threads` rather than `cpus`; `engine`, `cpu_capabilities`, `sync_realtime`, `smp_quantum`, `max_instructions`, `cpuid_freq`, `port_e9_hack` and `pci_vga` are written only when they differ from their defaults; relative paths are written absolute.
 
 A confirmation dialog is dismissed by `Cancel`, Escape or a click outside it. The `Search VMs` field matches a VM's name, boot order, and disk and CD/DVD paths, ignoring case.
+
+### Arm VMs
+
+A VM is a PC or an Arm `virt` board, QEMU's `virt` machine with one Cortex-A57 (the `rusty_box_aarch64` crate). The **Machine** choice at the top of the Hardware page switches between them while the VM is off; switching back within an edit restores what the other machine held. An Arm VM differs from a PC in the shell as follows:
+
+- **Pages.** It has no Debugger page, which reads a PC's processors and memory. Pause, Resume and Save RAM work from the VM bar as for a PC; the dump is the board's RAM from its base, `0x4000_0000`.
+- **Summary** shows `1 CPU` and what it boots (`Linux kernel` or `UEFI firmware`); its middle tile is `Open Console` instead of `New Hard Disk`.
+- **Hardware** lists the board's own panes:
+
+  | Pane | Settings |
+  | --- | --- |
+  | Memory | Guest memory, from 1 MB up to what the board maps below its high PCIe window |
+  | Processors | The IPS target guest time counts instructions at |
+  | Boot | `Nothing yet`, `UEFI firmware` (firmware and variable-store paths) or `Linux kernel` (an arm64 `Image`, an initrd, a device tree and the command line) |
+  | Display | `virtio-gpu`, and the size it asks the guest for: a preset from 800 × 600 to 1920 × 1080, or any width and height; the log level |
+  | Input | A virtio `Keyboard` and a virtio `Tablet (absolute pointer)` |
+
+- **Console.** With a virtio-gpu the page shows what the guest's driver draws (Linux's `virtio_gpu` with `console=tty0` puts its console there at the size asked for). With a tablet the host pointer is the guest's absolute pointer over the picture, and the cursor is hidden there; nothing needs capturing. Keys go to the virtio keyboard, or, without one, to the serial console as an xterm would send them. Input the guest takes none of for two seconds (its driver not loaded yet) is dropped rather than sent late. EDK2's `ArmVirtQemu` puts no console on a virtio-gpu (QEMU's does not either), so a firmware boot's menus are on the serial console.
+- **Time.** Guest time keeps to the host clock, as QEMU's does for `virt`: a guest that waits leaves the host idle, and one the interpreter cannot keep up with runs flat out. The RTC starts at the host's time.
+- **Power.** A guest's PSCI `SYSTEM_RESET` resets the board in place; `SYSTEM_OFF` ends the run. A firmware boot's variable store is written back to its file when the run ends, if the firmware changed it.
+
+A power-on with nothing to boot is refused with `Choose a firmware or a kernel under Hardware › Boot before powering on.`
 
 ### Several VMs at once
 
@@ -344,6 +366,42 @@ Every key, with its default and matching flag:
 | `cdrom.path` | ISO image | none | `--cdrom` |
 | `cdrom.channel`, `cdrom.drive` | ATA slot of the CD-ROM | `1`, `0` | none |
 | `logging.level` | `trace`, `debug`, `info`, `warn` or `error` | `warn` | `--log-level` |
+
+An Arm `virt` VM's file sets `[vm] machine = "arm-virt"` and describes the board in a `[virt]` table; every PC table and key above, other than `vm.name`, `display.backend`, `display.stretch`, `display.pointer_speed_percent` and `logging.level`, is refused in it, as `[virt]` is in a PC's. An example, the Alpine recipe the board boots to a graphical console:
+
+```toml
+[vm]
+name = "Alpine (Arm)"
+machine = "arm-virt"
+
+[virt]
+memory_mib = 512
+kernel = "C:/path/Image"
+initrd = "C:/path/initramfs.cpio.gz"
+command_line = "console=ttyAMA0 console=tty0"
+keyboard = true
+tablet = true
+
+[virt.display]
+width = 1024
+height = 768
+```
+
+| Key | Meaning | Default | CLI flag |
+| --- | --- | --- | --- |
+| `vm.machine` | `"pc"` or `"arm-virt"` | `"pc"` | none |
+| `virt.memory_mib` | Guest memory, MiB | `256` (QEMU's) | `--memory-mib` |
+| `virt.ips` | The rate guest time counts instructions at | `50000000` | `--ips` |
+| `virt.firmware` | UEFI firmware for flash bank 0, as QEMU's `-bios` (EDK2 `ArmVirtQemu`); not with `virt.kernel` | none | none |
+| `virt.firmware_vars` | Its variable store, flash bank 1; written back when the firmware changes it | none | none |
+| `virt.kernel` | An arm64 Linux `Image`, entered directly as QEMU's `-kernel` does; not with `virt.firmware` | none | none |
+| `virt.initrd` | Its initial RAM filesystem | none | none |
+| `virt.command_line` | Its command line | `console=ttyAMA0 earlycon=pl011,0x9000000` | none |
+| `virt.device_tree` | A device tree to boot it with instead of the board's own | the board's | none |
+| `virt.keyboard`, `virt.tablet` | Plug in a virtio keyboard, a virtio tablet | `false` | none |
+| `virt.display.width`, `virt.display.height` | Plug in a virtio-gpu that asks the guest for this size; both are needed and neither may be zero | no display | none |
+
+`virt.initrd`, `virt.command_line` and `virt.device_tree` need `virt.kernel`, and `virt.firmware_vars` needs `virt.firmware`, as QEMU's `-initrd`, `-append` and `-dtb` need `-kernel`. A file with neither boots nothing yet: the shell keeps it and refuses to power it on. On the command line, an Arm VM takes `--config`, `--no-config`, `--display`, `--log-level`, `--memory-mib` and `--ips`; any other flag is refused with `<flag> is not a setting of an Arm virt board`. With `--display headless` the guest's serial console goes to standard output; with `--display terminal` this terminal also sends it keys, and Ctrl-A then X ends the run, as in QEMU's `-nographic` console (Ctrl-A twice sends one Ctrl-A).
 
 Release builds compile out `debug` and `trace` output: the workspace builds `tracing` with `release_max_level_info`.
 

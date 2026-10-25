@@ -7,7 +7,9 @@
 //! is derived from its name but cut down to a safe alphabet, so no name can
 //! climb out of the folder or land on a Windows device name.
 
-use crate::config::{load_toml_file, resolve_config_in, ResolvedConfig, DEFAULT_CONFIG_FILE};
+use crate::config::{
+    load_toml_file, resolve_config_in, ArmBoot, MachineConfig, ResolvedConfig, DEFAULT_CONFIG_FILE,
+};
 pub use crate::error::LibraryError;
 use crate::error::RunError;
 use std::cmp::Ordering;
@@ -457,18 +459,45 @@ fn stem_of(path: &Path) -> Result<VmStem, LibraryError> {
 /// kept as it is.
 fn with_absolute_paths(config: &ResolvedConfig) -> Result<ResolvedConfig, LibraryError> {
     let mut anchored = config.clone();
-    anchored.bios = absolute_path(&config.bios)?;
-    if let Some(vga_bios) = &mut anchored.vga_bios {
-        *vga_bios = absolute_path(vga_bios)?;
-    }
-    if let Some(disk) = &mut anchored.disk {
-        disk.path = absolute_path(&disk.path)?;
-        if let Some(creation) = &mut disk.creation {
-            creation.path = absolute_path(&creation.path)?;
+    match &mut anchored.machine {
+        MachineConfig::Pc(pc) => {
+            pc.bios = absolute_path(&pc.bios)?;
+            if let Some(vga_bios) = &mut pc.vga_bios {
+                *vga_bios = absolute_path(vga_bios)?;
+            }
+            if let Some(disk) = &mut pc.disk {
+                disk.path = absolute_path(&disk.path)?;
+                if let Some(creation) = &mut disk.creation {
+                    creation.path = absolute_path(&creation.path)?;
+                }
+            }
+            if let Some(cdrom) = &mut pc.cdrom {
+                cdrom.path = absolute_path(&cdrom.path)?;
+            }
         }
-    }
-    if let Some(cdrom) = &mut anchored.cdrom {
-        cdrom.path = absolute_path(&cdrom.path)?;
+        MachineConfig::ArmVirt(virt) => match &mut virt.boot {
+            ArmBoot::Unset => {}
+            ArmBoot::Firmware { code, vars } => {
+                *code = absolute_path(code)?;
+                if let Some(vars) = vars {
+                    *vars = absolute_path(vars)?;
+                }
+            }
+            ArmBoot::Linux {
+                kernel,
+                initrd,
+                command_line: _,
+                device_tree,
+            } => {
+                *kernel = absolute_path(kernel)?;
+                if let Some(initrd) = initrd {
+                    *initrd = absolute_path(initrd)?;
+                }
+                if let Some(device_tree) = device_tree {
+                    *device_tree = absolute_path(device_tree)?;
+                }
+            }
+        },
     }
     Ok(anchored)
 }
@@ -741,8 +770,8 @@ mod tests {
         let dir = scratch_dir("create");
         let library = VmLibrary::open(dir.clone()).expect("open");
         let mut config = sample_config(&dir);
-        config.engine = Engine::Whp;
-        config.cpu_capabilities = CpuCapabilities::HostShared;
+        config.pc_mut().expect("a PC").engine = Engine::Whp;
+        config.pc_mut().expect("a PC").cpu_capabilities = CpuCapabilities::HostShared;
 
         let stem = library.create("Alpine", &config).expect("create");
         let contents = library.load().expect("load");
@@ -750,7 +779,7 @@ mod tests {
         assert_eq!(stem.as_str(), "alpine");
         assert_eq!(contents.vms.len(), 1);
         assert_eq!(contents.vms[0].name, "Alpine");
-        assert_eq!(contents.vms[0].config.engine, Engine::Whp);
+        assert_eq!(contents.vms[0].config.engine(), Engine::Whp);
         assert_eq!(contents.vms[0].config, config);
         assert!(contents.broken.is_empty());
         remove_dir(&dir);
@@ -1030,7 +1059,7 @@ mod tests {
         let contents = library.load().expect("load");
 
         assert_eq!(contents.vms[0].name, "dos-lab");
-        assert_eq!(contents.vms[0].config.bios, dir.join("bios.bin"));
+        assert_eq!(contents.vms[0].config.pc().expect("a PC").bios, dir.join("bios.bin"));
         remove_dir(&dir);
     }
 
@@ -1234,9 +1263,10 @@ mod tests {
         let dir = scratch_dir("relative");
         let library = VmLibrary::open(dir.clone()).expect("open");
         let mut config = sample_config(&dir);
-        config.bios = PathBuf::from("roms/bios.bin");
-        config.vga_bios = Some(PathBuf::from("roms/vgabios.bin"));
-        config.cdrom = config.cdrom.map(|cdrom| crate::config::ResolvedCdrom {
+        config.pc_mut().expect("a PC").bios = PathBuf::from("roms/bios.bin");
+        config.pc_mut().expect("a PC").vga_bios = Some(PathBuf::from("roms/vgabios.bin"));
+        let pc = config.pc_mut().expect("a PC");
+        pc.cdrom = pc.cdrom.take().map(|cdrom| crate::config::ResolvedCdrom {
             path: PathBuf::from("boot.iso"),
             ..cdrom
         });
@@ -1246,10 +1276,10 @@ mod tests {
 
         let cwd = std::env::current_dir().expect("working directory");
         let saved = &contents.vms[0].config;
-        assert_eq!(saved.bios, cwd.join("roms/bios.bin"));
-        assert_eq!(saved.vga_bios, Some(cwd.join("roms/vgabios.bin")));
+        assert_eq!(saved.pc().expect("a PC").bios, cwd.join("roms/bios.bin"));
+        assert_eq!(saved.pc().expect("a PC").vga_bios, Some(cwd.join("roms/vgabios.bin")));
         assert_eq!(
-            saved.cdrom.as_ref().map(|cdrom| cdrom.path.as_path()),
+            saved.pc().expect("a PC").cdrom.as_ref().map(|cdrom| cdrom.path.as_path()),
             Some(cwd.join("boot.iso").as_path())
         );
         remove_dir(&dir);
@@ -1272,7 +1302,7 @@ mod tests {
 
         assert_eq!(stem.map(|stem| stem.as_str().to_owned()), Some("rusty-box".to_owned()));
         assert_eq!(contents.vms[0].name, DEFAULT_VM_NAME);
-        assert_eq!(contents.vms[0].config.bios, exe_dir.join("roms/BIOS-bochs-latest"));
+        assert_eq!(contents.vms[0].config.pc().expect("a PC").bios, exe_dir.join("roms/BIOS-bochs-latest"));
         remove_dir(&library_dir);
         remove_dir(&exe_dir);
     }

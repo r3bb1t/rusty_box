@@ -260,6 +260,79 @@ impl Args {
         flags
     }
 
+    /// The flags this command line sets that only a PC has, as spelled on it.
+    /// An Arm `virt` machine refuses each rather than dropping it. The flags
+    /// every machine reads are `--config`, `--no-config`, `--display`,
+    /// `--log-level`, `--memory-mib` and `--ips`. The destructuring is
+    /// exhaustive, so a new flag must be sorted here too.
+    pub fn pc_flags(&self) -> Vec<&'static str> {
+        let Args {
+            config: _,
+            no_config: _,
+            bios,
+            vga_bios,
+            display: _,
+            engine,
+            cpu_capabilities,
+            boot,
+            disk,
+            disk_chs,
+            create_disk,
+            create_disk_size,
+            overwrite_created_disk,
+            cdrom,
+            memory_mib: _,
+            host_memory_mib,
+            memory_block_kib,
+            ips: _,
+            max_instructions,
+            smp_quantum,
+            cpuid_freq,
+            port_e9_hack,
+            sync_realtime,
+            cpus,
+            cpu_sockets,
+            cpu_cores,
+            cpu_threads,
+            pci,
+            no_pci,
+            sync_slowdown,
+            no_sync_slowdown,
+            log_level: _,
+        } = self;
+        [
+            ("--bios", bios.is_some()),
+            ("--vga-bios", vga_bios.is_some()),
+            ("--engine", engine.is_some()),
+            ("--cpu-capabilities", cpu_capabilities.is_some()),
+            ("--boot", !boot.is_empty()),
+            ("--disk", disk.is_some()),
+            ("--disk-chs", disk_chs.is_some()),
+            ("--create-disk", create_disk.is_some()),
+            ("--create-disk-size", create_disk_size.is_some()),
+            ("--overwrite-created-disk", *overwrite_created_disk),
+            ("--cdrom", cdrom.is_some()),
+            ("--host-memory-mib", host_memory_mib.is_some()),
+            ("--memory-block-kib", memory_block_kib.is_some()),
+            ("--max-instructions", max_instructions.is_some()),
+            ("--smp-quantum", smp_quantum.is_some()),
+            ("--cpuid-freq", cpuid_freq.is_some()),
+            ("--port-e9-hack", port_e9_hack.is_some()),
+            ("--sync-realtime", *sync_realtime),
+            ("--cpus", cpus.is_some()),
+            ("--cpu-sockets", cpu_sockets.is_some()),
+            ("--cpu-cores", cpu_cores.is_some()),
+            ("--cpu-threads", cpu_threads.is_some()),
+            ("--pci", *pci),
+            ("--no-pci", *no_pci),
+            ("--sync-slowdown", *sync_slowdown),
+            ("--no-sync-slowdown", *no_sync_slowdown),
+        ]
+        .into_iter()
+        .filter_map(|(flag, set)| set.then_some(flag))
+        .collect()
+    }
+
     /// Whether `--config` is all this command line says about the machine:
     /// it names a file, and without it the command line would name no
     /// machine ([`Self::names_a_machine`]) and set no run flag

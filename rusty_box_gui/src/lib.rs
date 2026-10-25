@@ -37,6 +37,8 @@ pub mod guest_trace;
 pub mod runner;
 #[cfg(all(not(target_arch = "wasm32"), feature = "gui-egui"))]
 pub(crate) mod sessions;
+#[cfg(not(target_arch = "wasm32"))]
+mod virt_runner;
 
 pub use args::{Args, BootDevice, DiskGeometry, DisplayBackend};
 pub use config::{FileConfig, ResolvedConfig};

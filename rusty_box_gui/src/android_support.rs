@@ -878,14 +878,14 @@ mod tests {
         assert_eq!(contents.vms.len(), 1);
         let vm = &contents.vms[0];
         assert_eq!(vm.name, DEFAULT_VM_NAME);
-        assert_eq!(vm.config.memory_mib, 96);
-        assert_eq!(vm.config.ips, machine.ips);
-        assert_eq!(vm.config.bios, machine.bios);
-        assert_eq!(vm.config.vga_bios, Some(machine.vga_bios.clone()));
+        assert_eq!(vm.config.memory_mib(), 96);
+        assert_eq!(vm.config.pc().expect("a PC").ips, machine.ips);
+        assert_eq!(vm.config.pc().expect("a PC").bios, machine.bios);
+        assert_eq!(vm.config.pc().expect("a PC").vga_bios, Some(machine.vga_bios.clone()));
         assert_eq!(vm.config.display, DisplayBackend::Egui);
         // The file's own CD is kept, resolved against the file's folder.
         assert_eq!(
-            vm.config.cdrom.as_ref().map(|cdrom| cdrom.path.clone()),
+            vm.config.pc().expect("a PC").cdrom.as_ref().map(|cdrom| cdrom.path.clone()),
             Some(storage.join("other.iso"))
         );
         assert_eq!(library.last_selected(), Some(vm.stem.clone()));
@@ -912,13 +912,13 @@ mod tests {
         assert_eq!(contents.vms.len(), 1);
         let vm = &contents.vms[0];
         assert_eq!(vm.name, DEFAULT_VM_NAME);
-        assert_eq!(vm.config.memory_mib, 256);
-        assert_eq!(vm.config.ips, 300_000_000);
-        assert_eq!(vm.config.bios, machine.bios);
-        assert_eq!(vm.config.vga_bios, Some(machine.vga_bios.clone()));
+        assert_eq!(vm.config.memory_mib(), 256);
+        assert_eq!(vm.config.pc().expect("a PC").ips, 300_000_000);
+        assert_eq!(vm.config.pc().expect("a PC").bios, machine.bios);
+        assert_eq!(vm.config.pc().expect("a PC").vga_bios, Some(machine.vga_bios.clone()));
         assert_eq!(vm.config.display, DisplayBackend::Egui);
-        assert_eq!(vm.config.cdrom, None);
-        assert!(vm.config.boot_order.is_empty());
+        assert_eq!(vm.config.pc().expect("a PC").cdrom, None);
+        assert!(vm.config.pc().expect("a PC").boot_order.is_empty());
         assert_eq!(library.last_selected(), Some(vm.stem.clone()));
         fs::remove_dir_all(&storage).expect("remove scratch dir");
     }

@@ -1568,6 +1568,7 @@ fn search_bar(
                 TEXT_MUTED,
             ),
             FindOutcome::Abandoned => ("Search stopped: the VM is stopping".to_owned(), TEXT_MUTED),
+            FindOutcome::NoDebugger => ("This machine's memory cannot be searched".to_owned(), TEXT_MUTED),
         };
         ui.label(RichText::new(text).color(color));
     }
@@ -1588,7 +1589,12 @@ fn search_start(snapshot: &DebugSnapshot, find: Option<FindOutcome>) -> GuestAdd
                 value: found.at.value.wrapping_add(1),
             }
         }
-        Some(FindOutcome::Found(_) | FindOutcome::NotFound { .. } | FindOutcome::Abandoned)
+        Some(
+            FindOutcome::Found(_)
+            | FindOutcome::NotFound { .. }
+            | FindOutcome::Abandoned
+            | FindOutcome::NoDebugger,
+        )
         | None => window,
     }
 }
@@ -1620,7 +1626,12 @@ fn memory_rows(ui: &mut egui::Ui, snapshot: &DebugSnapshot, marks: Marks<'_>) {
         Some(FindOutcome::Found(found)) if found.at.space == snapshot.memory.start.space => {
             Some(found)
         }
-        Some(FindOutcome::Found(_) | FindOutcome::NotFound { .. } | FindOutcome::Abandoned)
+        Some(
+            FindOutcome::Found(_)
+            | FindOutcome::NotFound { .. }
+            | FindOutcome::Abandoned
+            | FindOutcome::NoDebugger,
+        )
         | None => None,
     };
     let font = mono_font();

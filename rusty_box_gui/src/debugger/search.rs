@@ -90,6 +90,9 @@ pub(crate) enum FindOutcome {
     NotFound { searched_to: GuestAddress },
     /// The VM was told to stop while the search ran.
     Abandoned,
+    /// The machine has no debugger to search with: the Arm `virt` board,
+    /// whose RAM and translation the Debugger page does not read.
+    NoDebugger,
 }
 
 /// How far past its start a search of linear memory looks: linear address

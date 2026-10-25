@@ -28,6 +28,18 @@ pub struct SharedDisplay {
     pub pending_scancodes: Vec<u8>,
     /// Relative PS/2 mouse events from GUI to emulator, drained by the pump.
     pub pending_mouse: Vec<super::host_input::HostMouseEvent>,
+    /// The pointing device the running machine has, set by its run thread:
+    /// it decides whether the GUI captures the pointer and queues
+    /// `pending_mouse`, or leaves it free and queues `pending_pointer`.
+    pub pointer_device: super::host_input::PointerDevice,
+    /// Absolute pointer events from GUI to a machine with a tablet, drained
+    /// by its run thread.
+    pub pending_pointer: Vec<super::host_input::AbsolutePointerEvent>,
+    /// How many runs have begun on this display, counted by the run thread
+    /// as each begins. A new run's input devices start from their reset
+    /// state, so what the front end last told the last run's — where the
+    /// tablet was, which of its buttons were down — is not this run's.
+    pub runs_started: u64,
     /// Whether the GUI currently captures the mouse for the guest (forwarding
     /// motion/buttons and routing chords past egui). Toggled by the frontend.
     pub mouse_captured: bool,
@@ -114,6 +126,9 @@ impl SharedDisplay {
             fb_dirty: false,
             pending_scancodes: Vec::new(),
             pending_mouse: Vec::new(),
+            pointer_device: super::host_input::PointerDevice::RelativeMouse,
+            pending_pointer: Vec::new(),
+            runs_started: 0,
             mouse_captured: false,
             screen_cols: cols,
             screen_rows: rows,
@@ -132,6 +147,21 @@ impl SharedDisplay {
             pending_keys: Vec::new(),
             vga_charmap: [Vec::new(), Vec::new()],
             charmap_loaded: false,
+        }
+    }
+
+    /// Add what the guest wrote to its serial console to the log the GUI
+    /// shows, which keeps the last 48 KiB once it passes 64 KiB.
+    pub fn append_serial_log(&mut self, text: &str) {
+        const CAP: usize = 64 * 1024;
+        const KEPT: usize = 48 * 1024;
+        self.serial_log.push_str(text);
+        if self.serial_log.len() > CAP {
+            let mut cut = self.serial_log.len() - KEPT;
+            while !self.serial_log.is_char_boundary(cut) {
+                cut += 1;
+            }
+            self.serial_log.drain(..cut);
         }
     }
 

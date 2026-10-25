@@ -5,7 +5,7 @@
 //! translated by `host_input` into guest key and mouse events, queued on the
 //! `SharedDisplay` for the emulator thread to drain.
 
-use super::host_input::HeldModifiers;
+use super::host_input::{HeldModifiers, PointerDevice};
 use super::touchpad::{TouchSample, TouchZone, Touchpad};
 use crate::iodev::scancodes::BxKey;
 use super::shared_display::SharedDisplay;
@@ -64,7 +64,39 @@ pub struct RustyBoxApp {
     pointer_speed: f32,
     /// The gestures in progress while touch drives the guest's mouse.
     touchpad: Touchpad,
+    /// What the guest's tablet was last told, when the machine has one.
+    tablet: TabletState,
 }
+
+/// What a machine's tablet was last told: where the pointer is, which
+/// buttons are down, and the part of a wheel detent turned so far — so each
+/// change is sent once.
+#[derive(Debug, Default)]
+struct TabletState {
+    /// The run ([`SharedDisplay::runs_started`]) this state was told to.
+    run: u64,
+    position: Option<rusty_box_core::input::pointer::PointerPos>,
+    held: [bool; 5],
+    wheel_detents: f32,
+    /// The finger that holds the left button down, while touch drives the
+    /// tablet; a second finger does nothing.
+    finger: Option<egui::TouchId>,
+}
+
+/// The points one wheel line scrolls in egui on a native window
+/// (`egui::InputOptions::line_scroll_speed`'s default there), which turns a
+/// wheel reported in points back into detents.
+const POINTS_PER_WHEEL_DETENT: f32 = 40.0;
+
+/// egui's pointer buttons, in [`rusty_box_core::input::pointer::PointerButton`]'s
+/// terms.
+const TABLET_BUTTONS: [(egui::PointerButton, rusty_box_core::input::pointer::PointerButton); 5] = [
+    (egui::PointerButton::Primary, rusty_box_core::input::pointer::PointerButton::Left),
+    (egui::PointerButton::Secondary, rusty_box_core::input::pointer::PointerButton::Right),
+    (egui::PointerButton::Middle, rusty_box_core::input::pointer::PointerButton::Middle),
+    (egui::PointerButton::Extra1, rusty_box_core::input::pointer::PointerButton::Side),
+    (egui::PointerButton::Extra2, rusty_box_core::input::pointer::PointerButton::Extra),
+];
 
 impl RustyBoxApp {
     /// Create a new RustyBoxApp with the given shared display.
@@ -92,6 +124,171 @@ impl RustyBoxApp {
             pointer_mode: PointerMode::Mouse,
             pointer_speed: 1.0,
             touchpad: Touchpad::new(),
+            tablet: TabletState::default(),
+        }
+    }
+
+    /// The pointing device of the machine on the display.
+    fn pointer_device(&self) -> super::host_input::PointerDevice {
+        self.shared
+            .lock()
+            .map(|display| display.pointer_device)
+            .unwrap_or_default()
+    }
+
+    /// Forgets what the tablet was told once a new run has begun on the
+    /// display: the new run's tablet starts from its reset state, with no
+    /// position and no button down.
+    fn tablet_for_this_run(&mut self) {
+        let run = self.shared.lock().map_or(self.tablet.run, |display| display.runs_started);
+        if run != self.tablet.run {
+            self.tablet = TabletState {
+                run,
+                ..TabletState::default()
+            };
+        }
+    }
+
+    /// The point of the guest's picture under `pos`, on the tablet's scale,
+    /// for a picture drawn in `image_rect`.
+    fn tablet_position(&self, image_rect: egui::Rect, pos: egui::Pos2) -> rusty_box_core::input::pointer::PointerPos {
+        let (w, h) = (self.last_width.max(1), self.last_height.max(1));
+        let x = ((pos.x - image_rect.min.x) / image_rect.width().max(1.0) * w as f32).clamp(0.0, (w - 1) as f32);
+        let y = ((pos.y - image_rect.min.y) / image_rect.height().max(1.0) * h as f32).clamp(0.0, (h - 1) as f32);
+        rusty_box_core::input::pointer::PointerPos::from_pixel(x as u32, y as u32, w, h)
+    }
+
+    /// Route the host pointer over the picture to a machine's tablet: where
+    /// it is, its buttons and its wheel, each as it changes. The pointer is
+    /// never captured — it is the guest's while it is over the picture, and
+    /// the guest draws its own cursor there, so the host's is hidden.
+    fn handle_tablet_pointer(&mut self, ui: &egui::Ui, image_rect: egui::Rect) {
+        use super::host_input::AbsolutePointerEvent;
+        use rusty_box_core::input::pointer::WheelSteps;
+        use rusty_box_core::input::KeyAction;
+
+        if !self.shared_emu_running() {
+            return;
+        }
+        self.tablet_for_this_run();
+        // A button pressed over the picture is the guest's until it is
+        // released, wherever the pointer then goes: the pointer follows to
+        // the picture's edge, and the release is sent. Over nothing else is
+        // anything the guest's.
+        let over = ui.rect_contains_pointer(image_rect);
+        if !over && !self.tablet.held.contains(&true) {
+            return;
+        }
+        if over {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::None);
+        }
+        let (hover, buttons, wheel) = ui.ctx().input(|input| {
+            let buttons = TABLET_BUTTONS.map(|(egui_button, _)| input.pointer.button_down(egui_button));
+            let wheel: f32 = input
+                .raw
+                .events
+                .iter()
+                .filter_map(|event| match event {
+                    egui::Event::MouseWheel { unit, delta, .. } => Some(match unit {
+                        egui::MouseWheelUnit::Line | egui::MouseWheelUnit::Page => delta.y,
+                        egui::MouseWheelUnit::Point => delta.y / POINTS_PER_WHEEL_DETENT,
+                    }),
+                    _ => None,
+                })
+                .sum();
+            (input.pointer.hover_pos(), buttons, wheel)
+        });
+        let mut events = Vec::new();
+        if let Some(pos) = hover {
+            let at = self.tablet_position(image_rect, pos);
+            if self.tablet.position != Some(at) {
+                self.tablet.position = Some(at);
+                events.push(AbsolutePointerEvent::MoveTo(at));
+            }
+        }
+        for (i, &down) in buttons.iter().enumerate() {
+            // A press off the picture is not the guest's.
+            if down != self.tablet.held[i] && (over || !down) {
+                self.tablet.held[i] = down;
+                let action = if down { KeyAction::Press } else { KeyAction::Release };
+                events.push(AbsolutePointerEvent::Button(TABLET_BUTTONS[i].1, action));
+            }
+        }
+        if !over {
+            if !events.is_empty() {
+                if let Ok(mut display) = self.shared.lock() {
+                    display.pending_pointer.extend(events);
+                }
+            }
+            return;
+        }
+        self.tablet.wheel_detents += wheel;
+        let whole = self.tablet.wheel_detents.trunc();
+        if whole != 0.0 {
+            self.tablet.wheel_detents -= whole;
+            events.push(AbsolutePointerEvent::Wheel(WheelSteps(whole as i32)));
+        }
+        if !events.is_empty() {
+            if let Ok(mut display) = self.shared.lock() {
+                display.pending_pointer.extend(events);
+            }
+        }
+    }
+
+    /// Touch on a machine with a tablet is a touchscreen: a finger down on
+    /// the picture moves the pointer there and presses the left button, a
+    /// finger moving drags, and lifting it releases.
+    fn handle_tablet_touch(&mut self, ui: &egui::Ui, image_rect: egui::Rect) {
+        use super::host_input::AbsolutePointerEvent;
+        use rusty_box_core::input::pointer::PointerButton;
+        use rusty_box_core::input::KeyAction;
+
+        if !self.shared_emu_running() {
+            return;
+        }
+        self.tablet_for_this_run();
+        let touches: Vec<(egui::TouchId, egui::TouchPhase, egui::Pos2)> = ui.ctx().input(|input| {
+            input
+                .raw
+                .events
+                .iter()
+                .filter_map(|event| match event {
+                    egui::Event::Touch { id, phase, pos, .. } => Some((*id, *phase, *pos)),
+                    _ => None,
+                })
+                .collect()
+        });
+        let mut events = Vec::new();
+        // One finger is the pointer, from its touch to its lift; any other
+        // finger meanwhile does nothing.
+        for (id, phase, pos) in touches {
+            let on_picture = image_rect.contains(pos) && ui.ctx().layer_id_at(pos) == Some(ui.layer_id());
+            let at = self.tablet_position(image_rect, pos);
+            let holding = self.tablet.finger == Some(id);
+            match phase {
+                egui::TouchPhase::Start if on_picture && self.tablet.finger.is_none() => {
+                    self.tablet.finger = Some(id);
+                    self.tablet.position = Some(at);
+                    self.tablet.held[0] = true;
+                    events.push(AbsolutePointerEvent::MoveTo(at));
+                    events.push(AbsolutePointerEvent::Button(PointerButton::Left, KeyAction::Press));
+                }
+                egui::TouchPhase::Move if holding && self.tablet.position != Some(at) => {
+                    self.tablet.position = Some(at);
+                    events.push(AbsolutePointerEvent::MoveTo(at));
+                }
+                egui::TouchPhase::End | egui::TouchPhase::Cancel if holding => {
+                    self.tablet.finger = None;
+                    self.tablet.held[0] = false;
+                    events.push(AbsolutePointerEvent::Button(PointerButton::Left, KeyAction::Release));
+                }
+                egui::TouchPhase::Start | egui::TouchPhase::Move | egui::TouchPhase::End | egui::TouchPhase::Cancel => {}
+            }
+        }
+        if !events.is_empty() {
+            if let Ok(mut display) = self.shared.lock() {
+                display.pending_pointer.extend(events);
+            }
         }
     }
 
@@ -546,7 +743,7 @@ impl RustyBoxApp {
                 )
                 .show(ui, |ui| {
                     ui.label(
-                        egui::RichText::new("Serial Console (ttyS0)")
+                        egui::RichText::new("Serial Console")
                             .monospace()
                             .size(10.0)
                             .color(egui::Color32::from_rgb(0x66, 0x66, 0x88)),
@@ -666,9 +863,12 @@ impl RustyBoxApp {
                     });
                 }
                 if let Some(rect) = image_rect {
-                    match self.pointer_mode {
-                        PointerMode::Mouse => self.handle_display_pointer(ui, rect),
-                        PointerMode::Touchpad => self.handle_touchpad(ui, rect, region),
+                    match (self.pointer_device(), self.pointer_mode) {
+                        (PointerDevice::RelativeMouse, PointerMode::Mouse) => self.handle_display_pointer(ui, rect),
+                        (PointerDevice::RelativeMouse, PointerMode::Touchpad) => self.handle_touchpad(ui, rect, region),
+                        (PointerDevice::AbsoluteTablet, PointerMode::Mouse) => self.handle_tablet_pointer(ui, rect),
+                        (PointerDevice::AbsoluteTablet, PointerMode::Touchpad) => self.handle_tablet_touch(ui, rect),
+                        (PointerDevice::Absent, PointerMode::Mouse | PointerMode::Touchpad) => {}
                     }
                 }
             });

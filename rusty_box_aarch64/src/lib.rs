@@ -74,7 +74,7 @@ pub use rusty_box_devices::display::vga::VgaTextModeInfo;
 pub use rusty_box_devices::display::Resolution;
 /// The verbs every rusty_box machine shares, whatever it emulates.
 pub use rusty_box_core::machine::{Machine, RunOutcome, SerialPort};
-pub use rusty_box_core::{Progress, RunBudget};
+pub use rusty_box_core::{ClockHz, Progress, RunBudget};
 #[cfg(feature = "alloc")]
 pub use storage::OwnedStorage;
 pub use storage::{GuestStorage, LentStorage};

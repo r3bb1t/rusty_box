@@ -3830,6 +3830,7 @@ version = "0.0.3"
 dependencies = [
  "android_logger",
  "clap",
+ "crossterm",
  "eframe",
  "egui",
  "egui_kittest",
@@ -3838,6 +3839,7 @@ dependencies = [
  "log",
  "rfd",
  "rusty_box",
+ "rusty_box_aarch64",
  "rusty_box_bximage",
  "rusty_box_whp_engine",
  "serde",
