@@ -181,7 +181,6 @@ impl Cpu {
             Ok(flow) => {
                 self.icount += 1;
                 self.retired += 1;
-                self.pc_history.push_back(pc);
                 if let Some(insn) = fetched {
                     observer.after_execution(pc, insn);
                 }
@@ -195,6 +194,7 @@ impl Cpu {
                         // `AArch64.BranchAddr` (Arm ARM `BranchTo`).
                         let target = self.branch_addr(target);
                         self.pc = target;
+                        self.history.jump(target, self.retired);
                         observer.branch(pc, target);
                         Step::Retired
                     }
@@ -209,7 +209,6 @@ impl Cpu {
             Err(Fault::Exception(e)) => {
                 self.icount += 1;
                 self.retired += 1;
-                self.pc_history.push_back(pc);
                 let taken = self.take_sync_exception(e, pc);
                 observer.exception(taken);
                 Step::Retired

@@ -1034,11 +1034,7 @@ impl<S: GuestStorage, I: Instrumentation> VirtMachine<S, I> {
         }
         // Host actions since the last run (serial input, the power button, a
         // register write) may have changed what the processor sees.
-        if self.events_moved() {
-            self.sync_events();
-        } else {
-            self.cpu.set_interrupt_lines(self.board.gic.irq_out(), self.board.gic.fiq_out());
-        }
+        self.after_device_access();
         let (tick_end, instruction_end) = match budget {
             RunBudget::Ticks(n) => (self.cpu.icount.saturating_add(n), u64::MAX),
             RunBudget::Instructions(n) => (u64::MAX, self.cpu.retired.saturating_add(n)),
@@ -1064,9 +1060,19 @@ impl<S: GuestStorage, I: Instrumentation> VirtMachine<S, I> {
     }
 
     /// The interpreter loop, to tick `slice_end` at most.
+    ///
+    /// The checks between two instructions are split by how often their
+    /// answers can change. The time, budget and wait checks run once per
+    /// burst: every instruction retires exactly one tick, so they cannot
+    /// change until the burst reaches the nearest of the next event, the
+    /// slice end and the instruction budget, or an instruction moves the
+    /// next event or puts the processor to sleep, which ends the burst.
+    /// Interrupt delivery and the exit check run before every instruction,
+    /// and the interrupt lines are re-driven after one only if it reached a
+    /// device or wrote a timer register, which nothing else changes.
     #[inline(always)]
     fn run_slice<const WATCH: bool>(&mut self, slice_end: u64, tick_end: u64, instruction_end: u64) -> Slice {
-        loop {
+        'slice: loop {
             if self.cpu.icount >= self.next_event {
                 self.sync_events();
             }
@@ -1092,26 +1098,53 @@ impl<S: GuestStorage, I: Instrumentation> VirtMachine<S, I> {
             if self.cpu.retired >= instruction_end {
                 return Slice::Stopped(StopReason::BudgetExhausted);
             }
-            if self.cpu.interrupt_deliverable() {
-                if let Some(taken) = self.cpu.deliver_interrupt() {
-                    self.observer.exception(taken);
+            // At least one instruction: a next event already due is worked
+            // out again before every instruction until it is in the future.
+            let burst = self
+                .next_event
+                .saturating_sub(self.cpu.icount)
+                .max(1)
+                .min(slice_end - self.cpu.icount)
+                .min(instruction_end - self.cpu.retired);
+            for _ in 0..burst {
+                if self.cpu.interrupt_deliverable() {
+                    if let Some(taken) = self.cpu.deliver_interrupt() {
+                        self.observer.exception(taken);
+                    }
+                }
+                if WATCH && self.exits.contains(self.cpu.pc()) {
+                    return Slice::Stopped(StopReason::ExitReached);
+                }
+                match self.cpu.step(&mut self.board, &mut self.observer) {
+                    Step::Retired => {}
+                    Step::Waiting => {
+                        self.after_device_access();
+                        continue 'slice;
+                    }
+                    Step::Stop(cause) => match self.stopped(cause) {
+                        Some(reason) => return Slice::Stopped(reason),
+                        None => continue 'slice,
+                    },
+                }
+                if (self.cpu.timer_dirty || self.board.touched) && self.after_device_access() {
+                    continue 'slice;
                 }
             }
-            if WATCH && self.exits.contains(self.cpu.pc()) {
-                return Slice::Stopped(StopReason::ExitReached);
-            }
-            match self.cpu.step(&mut self.board, &mut self.observer) {
-                Step::Retired | Step::Waiting => {}
-                Step::Stop(cause) => match self.stopped(cause) {
-                    Some(reason) => return Slice::Stopped(reason),
-                    None => continue,
-                },
-            }
-            if self.events_moved() {
-                self.sync_events();
-            } else {
-                self.cpu.set_interrupt_lines(self.board.gic.irq_out(), self.board.gic.fiq_out());
-            }
+        }
+    }
+
+    /// Bring the processor's interrupt inputs and the next event up to date
+    /// after an instruction that may have changed them; true when the next
+    /// event was worked out again.
+    #[inline]
+    fn after_device_access(&mut self) -> bool {
+        self.board.touched = false;
+        if self.events_moved() {
+            self.sync_events();
+            true
+        } else {
+            self.cpu.set_interrupt_lines(self.board.gic.irq_out(), self.board.gic.fiq_out());
+            false
         }
     }
 
@@ -1403,7 +1436,7 @@ impl<S: GuestStorage, I: Instrumentation> VirtMachine<S, I> {
 
     /// Recently executed instruction addresses, oldest first: where the
     /// guest was before it stopped.
-    pub fn recent_pcs(&self) -> rusty_box_core::ring_buffer::Iter<'_, u64, { crate::cpu::PC_HISTORY }> {
+    pub fn recent_pcs(&self) -> crate::cpu::RecentPcs {
         self.cpu.recent_pcs()
     }
 

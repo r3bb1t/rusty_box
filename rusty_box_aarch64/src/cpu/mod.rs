@@ -18,6 +18,7 @@ mod exception;
 mod exec;
 mod fp;
 mod fp_estimate;
+mod history;
 mod isa;
 mod ldst;
 mod mmu;
@@ -30,10 +31,11 @@ mod sysreg;
 mod system;
 mod timer;
 
-use rusty_box_core::{ClockHz, RingBuffer, VmClock, VmInstant};
+use rusty_box_core::{ClockHz, VmClock, VmInstant};
 
 pub use exception::ExceptionClass;
 pub use exec::{DebugStops, Step, StopCause, UndefinedInsn};
+pub use history::RecentPcs;
 pub use mmu::{Tlb, TranslationFault};
 pub use regs::{CpuState, Reg, SysReg, SysRegRefusal, VReg};
 pub use timer::TimerLines;
@@ -336,7 +338,9 @@ pub struct Cpu {
     pub(crate) irq_line: bool,
     pub(crate) fiq_line: bool,
     pub(crate) debug_stops: DebugStops,
-    pub(crate) pc_history: RingBuffer<u64, PC_HISTORY>,
+    /// Where the last [`PC_HISTORY`] instructions ran. Every write of `pc`
+    /// other than the step to the next sequential instruction tells it.
+    pub(crate) history: history::PcHistory,
 }
 
 impl Cpu {
@@ -371,7 +375,7 @@ impl Cpu {
                 on_undefined: false,
                 on_bus_fault: false,
             },
-            pc_history: RingBuffer::new(),
+            history: history::PcHistory::new(config.reset_pc, 0),
         }
     }
 
@@ -477,9 +481,11 @@ impl Cpu {
         self.ips
     }
 
-    /// Recently executed instruction addresses, oldest first.
-    pub fn recent_pcs(&self) -> rusty_box_core::ring_buffer::Iter<'_, u64, PC_HISTORY> {
-        self.pc_history.iter()
+    /// Recently executed instruction addresses, oldest first: the last
+    /// [`PC_HISTORY`] instructions that retired or took an exception in
+    /// their place.
+    pub fn recent_pcs(&self) -> RecentPcs {
+        self.history.recent(self.retired)
     }
 
     // ----- register file -----

@@ -156,6 +156,11 @@ pub struct VirtBoard<S> {
     /// A guest access moved a device's next deadline (the RTC's alarm was
     /// re-armed), so the machine's next event has to be worked out again.
     pub(crate) deadline_moved: bool,
+    /// A guest access reached something other than RAM since the machine
+    /// last looked. Only such an access changes a device: what the
+    /// interrupt controller drives, a device's deadline, RAM a device
+    /// writes. While it is clear, none of them has changed.
+    pub(crate) touched: bool,
     /// The virtio devices, each behind its transport.
     pub(crate) virtio: [Option<Transport>; MAX_DEVICES],
     /// The register layout of every transport, plugged or empty.
@@ -204,6 +209,7 @@ impl<S: GuestStorage> VirtBoard<S> {
             serial_input: RingBuffer::new(),
             power_button_release: None,
             deadline_moved: false,
+            touched: false,
             virtio,
             mmio_layout,
         }
@@ -455,6 +461,7 @@ impl<S: GuestStorage> PhysBus for VirtBoard<S> {
 impl<S: GuestStorage> VirtBoard<S> {
     #[inline(never)]
     fn read_outside_ram(&mut self, addr: PhysAddr, width: AccessWidth, clock: VmClock) -> Result<u64, BusFault> {
+        self.touched = true;
         let a = addr.get();
         if let Some(off) = addr.offset_in(FLASH0_BASE, FLASH_BANK_SIZE) {
             return Ok(self.flash0.read(self.storage.code(), off, width));
@@ -505,6 +512,7 @@ impl<S: GuestStorage> VirtBoard<S> {
 
     #[inline(never)]
     fn write_outside_ram(&mut self, addr: PhysAddr, width: AccessWidth, value: u64, clock: VmClock) -> Result<(), BusFault> {
+        self.touched = true;
         let a = addr.get();
         if let Some(off) = addr.offset_in(FLASH0_BASE, FLASH_BANK_SIZE) {
             self.flash0.write(FlashArray::ReadOnly(self.storage.code()), off, width, value);

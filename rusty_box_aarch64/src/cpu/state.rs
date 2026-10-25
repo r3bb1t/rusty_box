@@ -131,12 +131,13 @@ impl Cpu {
             counter_hz: self.counter_hz,
             reset_pc,
         });
-        let pc_history = core::mem::take(&mut self.pc_history);
+        let mut history = self.history.clone();
+        history.jump(reset_pc, self.retired);
         *self = Cpu {
             icount: self.icount,
             retired: self.retired,
             debug_stops: self.debug_stops,
-            pc_history,
+            history,
             ..fresh
         };
     }
@@ -165,7 +166,10 @@ impl Cpu {
             RegClass::Sp => self.set_sp_current(value),
             RegClass::SpEl0 => self.sp_el0 = value,
             RegClass::SpEl1 => self.sp_el1 = value,
-            RegClass::Pc => self.pc = value,
+            RegClass::Pc => {
+                self.pc = value;
+                self.history.jump(value, self.retired);
+            }
             RegClass::Nzcv => self.pstate.set_nzcv(value),
             RegClass::Daif => self.pstate.set_daif(value),
             RegClass::Fpcr => self.fpcr = value & FPCR_MASK,
@@ -245,8 +249,9 @@ impl Cpu {
         w.write_u64(self.icount)?;
         w.write_u64(self.retired)?;
         self.tlb.save(w)?;
-        w.write_u8(self.pc_history.len() as u8)?;
-        for pc in self.pc_history.iter() {
+        let recent = self.recent_pcs();
+        w.write_u8(recent.len() as u8)?;
+        for pc in recent {
             w.write_u64(pc)?;
         }
         Ok(())
@@ -296,10 +301,14 @@ impl Cpu {
         if history_len > PC_HISTORY {
             return Err(SnapError::Invalid("processor PC history is longer than it holds"));
         }
-        self.pc_history.clear();
-        for _ in 0..history_len {
-            self.pc_history.push_back(r.read_u64()?);
+        if history_len as u64 > retired {
+            return Err(SnapError::Invalid("processor PC history is longer than the instructions it retired"));
         }
+        let mut recent = [0u64; PC_HISTORY];
+        for slot in recent.iter_mut().take(history_len) {
+            *slot = r.read_u64()?;
+        }
+        self.history = super::history::PcHistory::from_addresses(&recent[..history_len], retired, pc);
         self.x = x;
         self.sp_el0 = sp_el0;
         self.sp_el1 = sp_el1;
@@ -381,7 +390,7 @@ mod tests {
         c.sys.vbar_el1 = 0x8000;
         c.icount = 99;
         c.retired = 90;
-        c.pc_history.push_back(0x40);
+        c.history = crate::cpu::history::PcHistory::from_addresses(&[0x40], 90, 0x1000);
         let mut image = std::vec::Vec::new();
         c.save(&mut image).expect("save");
         let mut restored = cpu();

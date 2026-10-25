@@ -195,6 +195,7 @@ impl Cpu {
             il: false,
         };
         self.pc = self.branch_addr((self.sys.vbar_el1 & !0x7FF).wrapping_add(quadrant + kind.offset()));
+        self.history.jump(self.pc, self.retired);
         self.monitor.armed = false;
         self.activity = Activity::Running;
         self.pc
