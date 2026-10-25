@@ -792,6 +792,17 @@ impl Exits {
     fn contains(&self, pc: u64) -> bool {
         self.addrs[..self.len].contains(&pc)
     }
+
+    /// How many instructions, at most `limit`, run in sequence from `pc`
+    /// before one at an exit address.
+    #[inline]
+    fn instructions_before(&self, pc: u64, limit: u64) -> u64 {
+        self.addrs[..self.len]
+            .iter()
+            .filter(|&&exit| exit > pc && (exit - pc).is_multiple_of(4))
+            .map(|&exit| (exit - pc) / 4)
+            .fold(limit, u64::min)
+    }
 }
 
 /// Where a machine's stop flag comes from.
@@ -1067,9 +1078,17 @@ impl<S: GuestStorage, I: Instrumentation> VirtMachine<S, I> {
     /// change until the burst reaches the nearest of the next event, the
     /// slice end and the instruction budget, or an instruction moves the
     /// next event or puts the processor to sleep, which ends the burst.
-    /// Interrupt delivery and the exit check run before every instruction,
-    /// and the interrupt lines are re-driven after one only if it reached a
-    /// device or wrote a timer register, which nothing else changes.
+    ///
+    /// Within a burst the processor runs traces. Interrupt delivery and the
+    /// exit check happen before each; within one, neither can change: the
+    /// interrupt lines are re-driven only after an instruction that reached
+    /// a device or wrote a timer register, which ends the trace, and the
+    /// masks change only by instructions that end a trace. A trace runs no
+    /// further than what is left of the burst and the next exit address, so
+    /// it stops where the per-instruction checks would have — as QEMU's
+    /// icount, when fewer instructions are left than a translation block
+    /// holds, runs a block of exactly that many (accel/tcg/cpu-exec.c
+    /// `cpu_loop_exec_tb`, with `CF_COUNT_MASK`).
     #[inline(always)]
     fn run_slice<const WATCH: bool>(&mut self, slice_end: u64, tick_end: u64, instruction_end: u64) -> Slice {
         'slice: loop {
@@ -1106,16 +1125,24 @@ impl<S: GuestStorage, I: Instrumentation> VirtMachine<S, I> {
                 .max(1)
                 .min(slice_end - self.cpu.icount)
                 .min(instruction_end - self.cpu.retired);
-            for _ in 0..burst {
+            let mut left = burst;
+            while left > 0 {
                 if self.cpu.interrupt_deliverable() {
                     if let Some(taken) = self.cpu.deliver_interrupt() {
                         self.observer.exception(taken);
                     }
                 }
-                if WATCH && self.exits.contains(self.cpu.pc()) {
-                    return Slice::Stopped(StopReason::ExitReached);
-                }
-                match self.cpu.step(&mut self.board, &mut self.observer) {
+                let pc = self.cpu.pc();
+                let limit = if WATCH {
+                    if self.exits.contains(pc) {
+                        return Slice::Stopped(StopReason::ExitReached);
+                    }
+                    self.exits.instructions_before(pc, left)
+                } else {
+                    left
+                };
+                let retired = self.cpu.retired;
+                match self.cpu.run_trace(&mut self.board, &mut self.observer, limit) {
                     Step::Retired => {}
                     Step::Waiting => {
                         self.after_device_access();
@@ -1126,6 +1153,7 @@ impl<S: GuestStorage, I: Instrumentation> VirtMachine<S, I> {
                         None => continue 'slice,
                     },
                 }
+                left -= self.cpu.retired - retired;
                 if (self.cpu.timer_dirty || self.board.touched) && self.after_device_access() {
                     continue 'slice;
                 }
@@ -1139,6 +1167,11 @@ impl<S: GuestStorage, I: Instrumentation> VirtMachine<S, I> {
     #[inline]
     fn after_device_access(&mut self) -> bool {
         self.board.touched = false;
+        // What a device wrote may be code the processor decoded.
+        let written = self.board.dma.take();
+        for span in written.spans() {
+            self.cpu.forget_code(span.start, span.end);
+        }
         if self.events_moved() {
             self.sync_events();
             true
@@ -1321,6 +1354,7 @@ impl<S: GuestStorage, I: Instrumentation> VirtMachine<S, I> {
         let ram = self.board.storage.ram_mut();
         let off = ram_offset(ram.len(), addr, data.len())?;
         ram[off..off + data.len()].copy_from_slice(data);
+        self.cpu.forget_code(addr, addr + data.len() as u64);
         Ok(())
     }
 

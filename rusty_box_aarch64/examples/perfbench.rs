@@ -523,7 +523,7 @@ fn bench() -> Result<(), String> {
 }
 
 fn main() -> ExitCode {
-    // A machine is about half a megabyte and is built by value.
+    // A machine is built and moved by value; see examples/common.
     let thread = std::thread::Builder::new().stack_size(16 << 20).spawn(bench);
     match thread.map(std::thread::JoinHandle::join) {
         Ok(Ok(Ok(()))) => ExitCode::SUCCESS,

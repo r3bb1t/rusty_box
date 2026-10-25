@@ -628,7 +628,7 @@ impl Cpu {
         let key = SysRegKey::from_sysreg(reg);
         match self.sysreg_write_as(key, value, Accessor::Host) {
             Ok(WriteEffect::FlushTlb) => {
-                self.tlb.flush();
+                self.flush_tlb();
                 Ok(WriteEffect::FlushTlb)
             }
             Ok(WriteEffect::Timer) => {

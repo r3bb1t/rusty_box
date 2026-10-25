@@ -37,7 +37,7 @@ struct Addressing {
 impl Cpu {
     /// The base register value for an access, with the SP alignment check
     /// applied when the base is SP.
-    fn base_register(&self, rn: u32) -> Result<u64, super::exec::Fault> {
+    pub(super) fn base_register(&self, rn: u32) -> Result<u64, super::exec::Fault> {
         let base = self.x_or_sp(rn);
         self.check_sp_alignment(rn == 31, base)?;
         Ok(base)

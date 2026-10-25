@@ -109,7 +109,7 @@ impl Cpu {
                 let value = self.x_or_zr(rt);
                 match self.sysreg_write(key, value) {
                     Ok(WriteEffect::None) => {}
-                    Ok(WriteEffect::FlushTlb) => self.tlb.flush(),
+                    Ok(WriteEffect::FlushTlb) => self.flush_tlb(),
                     Ok(WriteEffect::Timer) => self.timer_dirty = true,
                     Err(e) => return self.sysreg_fault(pc, insn, e, key, rt, false),
                 }
@@ -181,15 +181,27 @@ impl Cpu {
             SysRegKey::from_insn(insn).trap_iss(rt, false),
         ));
         match (op1, crn, crm, op2) {
-            // IC IALLUIS, IC IALLU: there is no instruction cache to invalidate.
+            // IC IALLUIS, IC IALLU: the processor's decoded traces are its
+            // instruction cache, and every one is dropped.
             (0, 7, 1, 0) | (0, 7, 5, 0) => {
                 if el0 {
                     return self.undefined(pc, insn);
                 }
+                self.flush_traces();
                 Ok(Flow::Next)
             }
-            // IC IVAU, DC CVAC, DC CVAU, DC CIVAC: EL0 needs SCTLR_EL1.UCI.
-            (3, 7, 5, 1) | (3, 7, 10, 1) | (3, 7, 11, 1) | (3, 7, 14, 1) => {
+            // IC IVAU: EL0 needs SCTLR_EL1.UCI.
+            (3, 7, 5, 1) => {
+                if el0 && self.sys.sctlr_el1 & SCTLR_UCI == 0 {
+                    return Err(trap);
+                }
+                let va = self.x_or_zr(rt);
+                self.invalidate_icache_line(bus, va);
+                Ok(Flow::Next)
+            }
+            // DC CVAC, DC CVAU, DC CIVAC: EL0 needs SCTLR_EL1.UCI. With no
+            // data cache model, cleaning has nothing to act on.
+            (3, 7, 10, 1) | (3, 7, 11, 1) | (3, 7, 14, 1) => {
                 if el0 && self.sys.sctlr_el1 & SCTLR_UCI == 0 {
                     return Err(trap);
                 }
@@ -233,7 +245,7 @@ impl Cpu {
                 if el0 {
                     return self.undefined(pc, insn);
                 }
-                self.tlb.flush();
+                self.flush_tlb();
                 Ok(Flow::Next)
             }
             _ => self.undefined(pc, insn),

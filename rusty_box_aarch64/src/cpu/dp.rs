@@ -169,7 +169,7 @@ pub(crate) fn decode_bit_masks(n: bool, imms: u32, immr: u32, immediate: bool, s
 
 impl Cpu {
     #[inline]
-    fn set_flags(&mut self, r: AddResult) {
+    pub(super) fn set_flags(&mut self, r: AddResult) {
         self.pstate.n = r.n;
         self.pstate.z = r.z;
         self.pstate.c = r.c;
@@ -178,7 +178,7 @@ impl Cpu {
 
     /// Flags of a logical result: N and Z from the value, C and V cleared.
     #[inline]
-    fn set_logic_flags(&mut self, value: u64, sf: bool) {
+    pub(super) fn set_logic_flags(&mut self, value: u64, sf: bool) {
         let top = datasize(sf) - 1;
         self.pstate.n = (value >> top) & 1 != 0;
         self.pstate.z = value & ones(datasize(sf)) == 0;

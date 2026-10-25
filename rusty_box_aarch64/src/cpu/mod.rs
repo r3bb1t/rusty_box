@@ -22,6 +22,7 @@ mod history;
 mod isa;
 mod ldst;
 mod mmu;
+mod op;
 mod regs;
 mod simd;
 mod simd_arith;
@@ -30,6 +31,7 @@ mod state;
 mod sysreg;
 mod system;
 mod timer;
+mod trace;
 
 use rusty_box_core::{ClockHz, VmClock, VmInstant};
 
@@ -213,6 +215,15 @@ pub(crate) struct ExclusiveMonitor {
     pub(crate) bytes: u64,
 }
 
+impl ExclusiveMonitor {
+    /// Open Access: no granule monitored.
+    pub(crate) const CLEAR: Self = Self {
+        armed: false,
+        addr: 0,
+        bytes: 0,
+    };
+}
+
 /// System registers that are plain storage, plus the ones whose effects the
 /// MMU, exception and timer code read. The access rules live in `sysreg.rs`.
 #[derive(Debug, Clone)]
@@ -320,7 +331,12 @@ pub struct Cpu {
     pub(crate) sys: SysRegs,
     pub(crate) monitor: ExclusiveMonitor,
     pub(crate) tlb: Tlb,
-    pub(crate) decode_cache: decode::DecodeCache,
+    pub(crate) traces: trace::TraceCache,
+    /// Set by anything that may change how the next instruction is fetched
+    /// or found — a TLB fill or flush, a write over cached code, a cache
+    /// invalidation — so that the running trace stops after the current
+    /// instruction. Cleared when a trace starts.
+    pub(crate) trace_break: bool,
     pub(crate) activity: Activity,
     /// Ticks since the machine was built: one per retired (or faulting)
     /// instruction, plus the span skipped while waiting for an interrupt.
@@ -356,13 +372,10 @@ impl Cpu {
             fpcr: 0,
             fpsr: 0,
             sys: SysRegs::reset(config.counter_hz),
-            monitor: ExclusiveMonitor {
-                armed: false,
-                addr: 0,
-                bytes: 0,
-            },
+            monitor: ExclusiveMonitor::CLEAR,
             tlb: Tlb::new(),
-            decode_cache: decode::DecodeCache::new(),
+            traces: trace::TraceCache::new(),
+            trace_break: false,
             activity: Activity::Running,
             icount: 0,
             retired: 0,

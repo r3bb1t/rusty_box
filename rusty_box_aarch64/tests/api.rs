@@ -510,6 +510,134 @@ fn a_halted_machine_lets_a_tick_budget_pass() {
     assert_eq!(m.ticks(), 5000, "an instruction budget cannot bound an idle wait");
 }
 
+/// `mov x9, #300; loop: add x0, x0, x9; str x0, [x10], #8;
+/// eor x1, x1, x0, lsl #1; ldur x2, [x10, #-8]; add x3, x3, x2;
+/// subs x9, x9, #1; b.ne loop; b .` — 2,102 instructions of loads, stores
+/// and arithmetic, then a spin.
+const SLICED_LOOP: [u32; 9] =
+    [0xD280_2589, 0x8B09_0000, 0xF800_8540, 0xCA00_0421, 0xF85F_8142, 0x8B02_0063, 0xF100_0529, 0x54FF_FF41, SPIN];
+
+/// The guest-visible state: the registers and RAM.
+fn registers_and_ram<I: Instrumentation>(m: &VirtMachine<LentStorage<'_>, I>) -> (rusty_box_aarch64::CpuState, Vec<u8>) {
+    (m.cpu_snapshot(), m.ram().to_vec())
+}
+
+/// However an instruction budget is cut into runs — one instruction at a
+/// time, at every count that ends a run inside a block of straight-line
+/// code, or all at once — the machine ends in the same state after the
+/// same instructions.
+#[test]
+fn every_slicing_of_a_run_ends_in_the_same_state() {
+    const TOTAL: u64 = 2_200;
+    let run = |slice: u64| {
+        let mut ram = vec![0u8; RAM_LEN];
+        let mut m = bare(&mut ram, rusty_box_aarch64::NoInstrumentation);
+        load(&mut m, RAM_BASE, &SLICED_LOOP);
+        m.reg_write(Reg::X10, RAM_BASE + 0x8000);
+        let mut done = 0;
+        while done < TOTAL {
+            let out = m.step(RunBudget::Instructions(slice.min(TOTAL - done)));
+            assert_eq!(out.stop, StopReason::BudgetExhausted);
+            done += out.progress.instructions().unwrap_or(0);
+        }
+        assert_eq!(m.instructions(), TOTAL);
+        registers_and_ram(&m)
+    };
+    let whole = run(TOTAL);
+    // x3 sums x0 after each iteration k, which is 300 + 299 + ... (k terms).
+    assert_eq!(whole.0.x[3], (1..=300u64).map(|k| 300 * k - k * (k - 1) / 2).sum::<u64>(), "the loop's sum");
+    for slice in [1, 2, 3, 5, 7, 11, 13, 31, 32, 33, 64, 100, 1000] {
+        assert!(run(slice) == whole, "runs of {slice} instructions");
+    }
+}
+
+/// Set up the GIC for SPI 40 and unmask IRQs, then `str w2, [x1, #0x204]`
+/// (GICD_ISPENDR1: SPI 40 pending) followed by three `add x20, x20, #1`
+/// and `b .`; the IRQ vector records x20 and ELR_EL1 (`mov x21, x20;
+/// mrs x22, elr_el1; b .`). Source:
+///
+/// ```text
+/// _start: ldr x0, =0x40001000 ; msr vbar_el1, x0
+///         ldr x1, =0x08000000 ; mov w2, #1        ; str w2, [x1]          // GICD_CTLR
+///         mov w2, #(1 << 8)   ; str w2, [x1, #0x104]                      // ISENABLER1
+///         ldr x3, =0x08010000 ; mov w4, #1        ; str w4, [x3]          // GICC_CTLR
+///         mov w4, #0xff       ; str w4, [x3, #4]                          // GICC_PMR
+///         mov x20, #0         ; msr daifclr, #2
+///         str w2, [x1, #0x204]                                            // ISPENDR1
+///         add x20, x20, #1    ; add x20, x20, #1  ; add x20, x20, #1 ; b .
+///         .org 0x1280         // IRQ, current EL with SP_ELx
+///         mov x21, x20        ; mrs x22, elr_el1  ; b .
+/// ```
+const PEND_THEN_COUNT: &[(u64, u32)] = &[
+    (0x00, 0x5800_0280),
+    (0x04, 0xD518_C000),
+    (0x08, 0x5800_0281),
+    (0x0C, 0x5280_0022),
+    (0x10, 0xB900_0022),
+    (0x14, 0x5280_2002),
+    (0x18, 0xB901_0422),
+    (0x1C, 0x5800_0223),
+    (0x20, 0x5280_0024),
+    (0x24, 0xB900_0064),
+    (0x28, 0x5280_1FE4),
+    (0x2C, 0xB900_0464),
+    (0x30, 0xD280_0014),
+    (0x34, 0xD503_42FF),
+    (0x38, 0xB902_0422),
+    (0x3C, 0x9100_0694),
+    (0x40, 0x9100_0694),
+    (0x44, 0x9100_0694),
+    (0x48, SPIN),
+    (0x50, 0x4000_1000),
+    (0x58, 0x0800_0000),
+    (0x60, 0x0801_0000),
+    (0x1280, 0xAA14_03F5),
+    (0x1284, 0xD538_4036),
+    (0x1288, SPIN),
+];
+
+/// An interrupt a store raises is taken at the very next instruction
+/// boundary, before any instruction after the store runs.
+#[test]
+fn an_interrupt_a_store_raises_is_taken_before_the_next_instruction() {
+    let mut ram = vec![0u8; RAM_LEN];
+    let mut m = bare(&mut ram, rusty_box_aarch64::NoInstrumentation);
+    for &(offset, word) in PEND_THEN_COUNT {
+        m.mem_write(RAM_BASE + offset, &word.to_le_bytes()).expect("code is in RAM");
+    }
+    let out = m.step(RunBudget::Instructions(100));
+    assert_eq!(out.stop, StopReason::BudgetExhausted);
+    assert_eq!(m.reg_read(Reg::X22), RAM_BASE + 0x3C, "the IRQ returns to the first add");
+    assert_eq!(m.reg_read(Reg::X21), 0, "no add ran before the IRQ");
+}
+
+/// `add x0, x0, #1`, forty times, then `b .`.
+fn straight_line() -> Vec<u32> {
+    let mut code = vec![0x9100_0400; 40];
+    code.push(SPIN);
+    code
+}
+
+/// An exit at any instruction of straight-line code stops the run before
+/// that instruction, with exactly the instructions before it retired.
+#[test]
+fn an_exit_inside_straight_line_code_stops_right_before_it() {
+    let mut ram = vec![0u8; RAM_LEN];
+    let mut m = bare(&mut ram, rusty_box_aarch64::NoInstrumentation);
+    load(&mut m, RAM_BASE, &straight_line());
+    for at in 0..=40u64 {
+        m.reg_write(Reg::X0, 0);
+        let out = m.emu_start(RAM_BASE, Some(RAM_BASE + 4 * at), None);
+        assert_eq!(out.stop, StopReason::ExitReached, "exit at instruction {at}");
+        assert_eq!(out.progress, Progress::Instructions(at), "exit at instruction {at}");
+        assert_eq!((m.reg_read(Reg::X0), m.reg_read(Reg::Pc)), (at, RAM_BASE + 4 * at));
+    }
+    // An exit nowhere on the path, and one not on an instruction boundary,
+    // leave the count bound to decide.
+    let out = m.emu_start(RAM_BASE, Some(RAM_BASE + 2), Some(25));
+    assert_eq!((out.stop, out.progress), (StopReason::BudgetExhausted, Progress::Instructions(25)));
+}
+
 /// A 64-byte arm64 `Image` header (text_offset 0, so it loads 2 MiB up),
 /// followed by `b .` as the kernel.
 fn fake_kernel(image_size: u64) -> Vec<u8> {

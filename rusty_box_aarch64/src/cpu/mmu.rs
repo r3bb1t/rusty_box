@@ -17,7 +17,7 @@ use super::dp::ones;
 use super::exception::{Exception, ExceptionClass};
 use super::exec::{Fault, StopCause};
 use super::{id, Cpu, El};
-use crate::bus::{AccessWidth, BusFault, PhysAddr, PhysBus};
+use crate::bus::{AccessWidth, BusFault, FetchSource, PhysAddr, PhysBus};
 
 /// What an access does, for permission checks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -140,11 +140,26 @@ const fn permitted(perms: u8, kind: AccessKind, el: El) -> bool {
     perms & needed != 0
 }
 
-/// An instruction word and the physical address it was fetched from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Fetched {
-    pub(crate) word: u32,
-    pub(crate) pa: u64,
+/// A bus a walk on the side reads its descriptors through: only memory the
+/// bus calls a stable fetch source (RAM, ROM in its read mode), whose reads
+/// change nothing; anything else reads as nothing there.
+struct SideEffectFree<'a, B>(&'a mut B);
+
+impl<B: PhysBus> PhysBus for SideEffectFree<'_, B> {
+    fn read(&mut self, _addr: PhysAddr, _width: AccessWidth, _clock: rusty_box_core::VmClock) -> Result<u64, BusFault> {
+        Err(BusFault::Unmapped)
+    }
+
+    fn write(&mut self, _addr: PhysAddr, _width: AccessWidth, _value: u64, _clock: rusty_box_core::VmClock) -> Result<(), BusFault> {
+        Err(BusFault::Unmapped)
+    }
+
+    fn read_descriptor(&mut self, addr: PhysAddr, clock: rusty_box_core::VmClock) -> Result<u64, BusFault> {
+        match self.0.fetch_source(addr) {
+            FetchSource::Stable(_) => self.0.read_descriptor(addr, clock),
+            FetchSource::Volatile => Err(BusFault::Unmapped),
+        }
+    }
 }
 
 /// The outcome of a translation.
@@ -256,6 +271,29 @@ impl Cpu {
         self.sys.sctlr_el1 & 1 != 0
     }
 
+    /// Empty the TLB. The running trace ends: its fetches translate again.
+    pub(crate) fn flush_tlb(&mut self) {
+        self.tlb.flush();
+        self.trace_break = true;
+    }
+
+    /// The physical address `va` translates to, found without changing
+    /// anything: as the MMU is off, from the TLB, or by a walk that reads
+    /// its descriptors only where the bus says a read has no side effect
+    /// and fills no TLB entry. No permission is checked. `None` when it has
+    /// no translation, or the walk would have to read anything else.
+    pub(crate) fn translate_quietly<B: PhysBus>(&self, bus: &mut B, va: u64) -> Option<u64> {
+        if !self.mmu_enabled() {
+            let address = self.untagged(va);
+            return (address >> id::PA_BITS == 0).then_some(address);
+        }
+        let entry = self.tlb.entries[Tlb::slot(va)];
+        if entry.tag == va >> 12 {
+            return Some(entry.pa_page | (va & 0xFFF));
+        }
+        self.walk(&mut SideEffectFree(bus), va).ok().map(|w| w.pa)
+    }
+
     /// `SCTLR_EL1.A`: every misaligned data access faults.
     #[inline]
     fn strict_alignment(&self) -> bool {
@@ -306,6 +344,9 @@ impl Cpu {
     fn translate_miss<B: PhysBus>(&mut self, bus: &mut B, va: u64, kind: AccessKind, el: El) -> Result<Translated, Fsc> {
         let slot = Tlb::slot(va);
         let walked = self.walk(bus, va)?;
+        // The fill may evict the entry the running trace's fetches hit; the
+        // next instruction's fetch translates again, as it would have.
+        self.trace_break = true;
         // A tagged address keeps its tag in the entry's tag, so it hits only
         // itself; a TCR_EL1 write, which can change what the walk ignores,
         // empties the TLB.
@@ -532,6 +573,8 @@ impl Cpu {
         Exception::new(ExceptionClass::DataAbort, iss).with_far(va).into()
     }
 
+    #[cold]
+    #[inline(never)]
     fn external_abort(&self, va: u64, pa: u64, kind: AccessKind) -> Fault {
         if self.debug_stops.on_bus_fault {
             return Fault::Stop(StopCause::BusFault { pc: self.pc, addr: pa });
@@ -545,16 +588,22 @@ impl Cpu {
         }
     }
 
-    /// Fetch the instruction at `pc` (already known to be aligned).
+    /// The physical address of the instruction at `pc` (already known to be
+    /// aligned), or the Instruction Abort its translation raises.
     #[inline]
-    pub(crate) fn fetch<B: PhysBus>(&mut self, bus: &mut B, pc: u64) -> Result<Fetched, Fault> {
+    pub(crate) fn fetch_translate<B: PhysBus>(&mut self, bus: &mut B, pc: u64) -> Result<u64, Fault> {
         let el = self.pstate.el;
-        let t = self
-            .translate(bus, pc, AccessKind::Fetch, el)
-            .map_err(|f| Fault::from(Exception::new(ExceptionClass::InstructionAbort, f.code()).with_far(pc)))?;
-        match bus.fetch(PhysAddr::new(t.pa), self.clock()) {
-            Ok(word) => Ok(Fetched { word, pa: t.pa }),
-            Err(BusFault::Unmapped) => Err(self.external_abort(pc, t.pa, AccessKind::Fetch)),
+        self.translate(bus, pc, AccessKind::Fetch, el)
+            .map(|t| t.pa)
+            .map_err(|f| Fault::from(Exception::new(ExceptionClass::InstructionAbort, f.code()).with_far(pc)))
+    }
+
+    /// Read the instruction word at `pa`, which `pc` translated to.
+    #[inline]
+    pub(crate) fn fetch_word<B: PhysBus>(&mut self, bus: &mut B, pc: u64, pa: u64) -> Result<u32, Fault> {
+        match bus.fetch(PhysAddr::new(pa), self.clock()) {
+            Ok(word) => Ok(word),
+            Err(BusFault::Unmapped) => Err(self.external_abort(pc, pa, AccessKind::Fetch)),
         }
     }
 
@@ -569,6 +618,7 @@ impl Cpu {
 
     /// Alignment checks that precede translation, then translation and the
     /// Device-memory alignment check, for an access that stays in one page.
+    #[inline(always)]
     fn translate_data<B: PhysBus>(
         &mut self,
         bus: &mut B,
@@ -604,7 +654,10 @@ impl Cpu {
         self.translate_data(bus, va, bytes, kind, acc).map(|t| t.pa)
     }
 
-    /// Read `1 << log2` bytes (`log2` in 0..=3) at `va`, zero-extended.
+    /// Read `1 << log2` bytes (`log2` in 0..=3) at `va`, zero-extended. An
+    /// access within one page is inlined into the instruction that makes
+    /// it; one that crosses a page boundary is out of line.
+    #[inline(always)]
     pub(crate) fn read_mem<B: PhysBus>(&mut self, bus: &mut B, va: u64, log2: u32, acc: DataAccess) -> Result<u64, Fault> {
         let bytes = 1u64 << log2;
         if (va & 0xFFF) + bytes <= 0x1000 {
@@ -615,6 +668,12 @@ impl Cpu {
                 Err(BusFault::Unmapped) => Err(self.external_abort(va, t.pa, AccessKind::Read)),
             };
         }
+        self.read_mem_across_pages(bus, va, bytes, acc)
+    }
+
+    /// A read of `bytes` at `va` that crosses a page boundary.
+    #[inline(never)]
+    fn read_mem_across_pages<B: PhysBus>(&mut self, bus: &mut B, va: u64, bytes: u64, acc: DataAccess) -> Result<u64, Fault> {
         // Crosses a page boundary, so it is misaligned: Normal memory only.
         // Each byte is an access of its own (Arm ARM `AArch64.MemSingle` on
         // an unaligned address), so a translation or external fault reports
@@ -643,7 +702,9 @@ impl Cpu {
         Ok(value)
     }
 
-    /// Write the low `1 << log2` bytes of `value` at `va`.
+    /// Write the low `1 << log2` bytes of `value` at `va`. As for a read, an
+    /// access within one page is inlined and one across pages is not.
+    #[inline(always)]
     pub(crate) fn write_mem<B: PhysBus>(
         &mut self,
         bus: &mut B,
@@ -662,6 +723,13 @@ impl Cpu {
                 Err(BusFault::Unmapped) => Err(self.external_abort(va, t.pa, AccessKind::Write)),
             };
         }
+        self.write_mem_across_pages(bus, va, bytes, value, acc)
+    }
+
+    /// A write of the low `bytes` bytes of `value` at `va` that crosses a
+    /// page boundary.
+    #[inline(never)]
+    fn write_mem_across_pages<B: PhysBus>(&mut self, bus: &mut B, va: u64, bytes: u64, value: u64, acc: DataAccess) -> Result<(), Fault> {
         if acc.strict_align || self.strict_alignment() {
             return Err(Self::data_abort(va, Fsc::Alignment, true));
         }
@@ -740,15 +808,22 @@ impl Cpu {
         Ok(())
     }
 
-    /// A store to `pa` clears the local exclusive monitor if it overlaps the
+    /// What a store of `bytes` at `pa`, within one page, does besides
+    /// writing: it clears the local exclusive monitor if it overlaps the
     /// monitored granule (the IMPLEMENTATION DEFINED choice of Arm ARM
     /// B2.9.5 that every store by this processor clears it, which is what
-    /// makes an interrupted `LDXR`/`STXR` sequence retry).
+    /// makes an interrupted `LDXR`/`STXR` sequence retry), and it forgets
+    /// every trace holding an instruction it may overwrite. Every store the
+    /// processor makes comes through here (R5: the one choke point for
+    /// self-modifying code), before the bus sees it.
     #[inline]
     fn note_store(&mut self, pa: u64, bytes: u64) {
         let m = self.monitor;
         if m.armed && pa < m.addr + m.bytes && m.addr < pa + bytes {
             self.monitor.armed = false;
+        }
+        if self.traces.holds_code(pa) {
+            self.forget_code(pa, pa + bytes);
         }
     }
 

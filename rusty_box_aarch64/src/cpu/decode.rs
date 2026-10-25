@@ -1,11 +1,9 @@
-//! Instruction classification, cached by instruction word.
+//! Instruction classification: which handler class executes a word.
 //!
-//! What an instruction word decodes to depends on nothing but the word, so
-//! an entry is validated by the word itself: a hit can never be stale, and
-//! code that rewrites itself needs no invalidation. Entries are *placed* by
-//! the instruction's physical address, so straight-line code walks the table
-//! sequentially and stays in cache. The cache only spares the decoder's
-//! walk; every handler still reads its operands from the word.
+//! What an instruction word decodes to depends on nothing but the word. The
+//! decoder runs when a trace is built (`trace.rs`) and when an instruction
+//! is fetched from memory whose words cannot be kept; the trace cache keeps
+//! what it found, so straight-line code is decoded once.
 
 use super::isa::{self, Class};
 
@@ -18,89 +16,25 @@ pub(crate) fn classify(word: u32) -> Class {
     }
 }
 
-/// 2^16 slots, 64K instructions of code, in 320 KiB: Alpine's kernel and
-/// user space together execute about 94,000 distinct words, and a
-/// direct-mapped table an eighth this size misses on about one fetch in ten.
-const INDEX_BITS: u32 = 16;
-const ENTRIES: usize = 1 << INDEX_BITS;
-
-/// The class of word 0, a UDF: what every slot starts out holding, with
-/// word 0, so that an empty slot is a correct entry and a hit needs no
-/// validity flag. `classify(0)` is pinned to it by a test.
-const EMPTY_CLASS: Class = Class::Undefined;
-
-/// A direct-mapped table of classified words, kept as two arrays indexed
-/// alike: five bytes a slot rather than an eight-byte padded pair.
-pub struct DecodeCache {
-    words: [u32; ENTRIES],
-    classes: [Class; ENTRIES],
-}
-
-impl DecodeCache {
-    pub(crate) const fn new() -> Self {
-        Self {
-            words: [0; ENTRIES],
-            classes: [EMPTY_CLASS; ENTRIES],
-        }
-    }
-
-    /// Classify `word`, fetched from physical address `pa`.
-    #[inline]
-    pub(crate) fn decode(&mut self, pa: u64, word: u32) -> Class {
-        let slot = ((pa >> 2) as usize) & (ENTRIES - 1);
-        if self.words[slot] == word {
-            return self.classes[slot];
-        }
-        self.fill(slot, word)
-    }
-
-    /// The miss path, kept out of the dispatch loop: the decoder is large,
-    /// and almost every fetch hits.
-    #[cold]
-    #[inline(never)]
-    fn fill(&mut self, slot: usize, word: u32) -> Class {
-        let class = classify(word);
-        self.words[slot] = word;
-        self.classes[slot] = class;
-        class
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::cpu::isa::Encoding;
 
-    /// A slot reused by a different word — another address, or code that was
-    /// rewritten in place — classifies the new word, never the old one.
+    /// Words of different classes, the hints among them, and a word of an
+    /// absent feature.
     #[test]
-    fn a_rewritten_or_aliasing_slot_classifies_the_new_word() {
-        let mut c = DecodeCache::new();
-        let add = 0x9100_1020; // add x0, x1, #4
-        let ret = 0xD65F_03C0; // ret
-        assert_eq!(c.decode(0x1000, add), Class::AddSubImmediate);
-        assert_eq!(c.decode(0x1000, ret), Class::BranchRegister, "same address, new code");
-        let aliasing = 0x1000 + (ENTRIES as u64) * 4;
-        assert_eq!(c.decode(aliasing, add), Class::AddSubImmediate, "same slot, other address");
-        assert_eq!(c.decode(0x2000, 0xD503_203F), Class::Hint, "YIELD");
-        assert_eq!(c.decode(0x2004, 0xD503_233F), Class::Hint, "PACIASP is a hint");
+    fn words_classify_by_their_encoding() {
+        assert_eq!(classify(0x9100_1020), Class::AddSubImmediate, "add x0, x1, #4");
+        assert_eq!(classify(0xD65F_03C0), Class::BranchRegister, "ret");
+        assert_eq!(classify(0xD503_203F), Class::Hint, "YIELD");
+        assert_eq!(classify(0xD503_233F), Class::Hint, "PACIASP is a hint");
+        assert_eq!(classify(0), Class::Undefined, "udf #0");
         assert_eq!(
-            c.decode(0x2008, 0x0420_0000),
+            classify(0x0420_0000),
             Class::Undefined,
             "an SVE encoding: the feature is absent from ID_AA64PFR0_EL1"
         );
-    }
-
-    /// An empty slot holds word 0 with [`EMPTY_CLASS`], which must be what
-    /// word 0 classifies as, or a fetch of word 0 from a slot never filled
-    /// would execute as the wrong class.
-    #[test]
-    fn an_empty_slot_is_a_correct_entry_for_word_zero() {
-        assert_eq!(classify(0), EMPTY_CLASS);
-        let mut c = DecodeCache::new();
-        for pa in [0, 0x4000_0000, 0xFFFF_FFFC] {
-            assert_eq!(c.decode(pa, 0), Class::Undefined, "udf #0 at {pa:#x}");
-        }
     }
 
     /// An RPRFM word (FEAT_RPRFM, Armv8.8) is a PRFM (register) with a

@@ -144,6 +144,105 @@ pub enum BusFault {
     Unmapped,
 }
 
+/// Guest-physical bytes `start..end`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct PhysSpan {
+    pub(crate) start: u64,
+    pub(crate) end: u64,
+}
+
+/// How many spans [`Writes`] keeps apart.
+const WRITE_SPANS: usize = 4;
+
+/// Memory something other than the processor wrote — a device, by DMA —
+/// for the processor to forget the code it decoded there
+/// (`Cpu::forget_code`). Spans beyond what it keeps apart merge into their
+/// hull, which only ever covers more.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct Writes {
+    spans: [PhysSpan; WRITE_SPANS],
+    len: usize,
+}
+
+impl Writes {
+    pub(crate) const NONE: Self = Self {
+        spans: [PhysSpan { start: 0, end: 0 }; WRITE_SPANS],
+        len: 0,
+    };
+
+    /// Note `len` bytes written at `start`.
+    pub(crate) fn add(&mut self, start: u64, len: u64) {
+        let Some(end) = start.checked_add(len).filter(|&end| end > start) else {
+            return;
+        };
+        for span in self.spans[..self.len].iter_mut() {
+            if start <= span.end && span.start <= end {
+                span.start = span.start.min(start);
+                span.end = span.end.max(end);
+                return;
+            }
+        }
+        if self.len < WRITE_SPANS {
+            self.spans[self.len] = PhysSpan { start, end };
+            self.len += 1;
+        } else {
+            let last = &mut self.spans[WRITE_SPANS - 1];
+            last.start = last.start.min(start);
+            last.end = last.end.max(end);
+        }
+    }
+
+    /// Note everything `other` noted.
+    pub(crate) fn merge(&mut self, other: &Self) {
+        for span in other.spans() {
+            self.add(span.start, span.end - span.start);
+        }
+    }
+
+    pub(crate) fn spans(&self) -> &[PhysSpan] {
+        &self.spans[..self.len]
+    }
+
+    /// The spans noted, leaving none.
+    pub(crate) fn take(&mut self) -> Self {
+        core::mem::replace(self, Self::NONE)
+    }
+}
+
+/// A count of the changes to what fetches from some memory read, other than
+/// the writes a processor sees as stores: a processor keeps what it decoded
+/// from that memory only while its epoch stays the same. 64 bits, so that a
+/// count never comes round again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CodeEpoch(u64);
+
+impl CodeEpoch {
+    #[inline]
+    pub const fn new(count: u64) -> Self {
+        Self(count)
+    }
+
+    #[inline]
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+/// Whether a processor may keep the instructions it decoded from an
+/// address, or must fetch them again each time it executes them.
+///
+/// Closed (R5): a processor either caches or it does not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FetchSource {
+    /// A fetch has no side effect, and the word it reads changes only by a
+    /// store the processor makes itself, by a write its owner reports to it
+    /// (a device's DMA, a host's), or with the epoch: RAM, and ROM in its
+    /// read mode.
+    Stable(CodeEpoch),
+    /// Anything else: a fetch is a device access like any other.
+    Volatile,
+}
+
 /// The guest-physical address space as the processor sees it.
 ///
 /// Static dispatch only (R8): a machine names its bus type. `clock` is the
@@ -178,5 +277,23 @@ pub trait PhysBus {
     #[inline]
     fn read_descriptor(&mut self, addr: PhysAddr, clock: VmClock) -> Result<u64, BusFault> {
         self.read(addr, AccessWidth::Dword, clock)
+    }
+
+    /// Whether the instructions fetched from an address may be kept. The
+    /// default, [`FetchSource::Volatile`], has every instruction fetched as
+    /// it executes.
+    #[inline]
+    fn fetch_source(&self, _addr: PhysAddr) -> FetchSource {
+        FetchSource::Volatile
+    }
+
+    /// Whether an access since its owner last cleared the mark reached
+    /// something other than memory, and so may have changed what the
+    /// processor looks at between instructions: its interrupt inputs, the
+    /// next timed event, what fetches read. The default, `true`, has the
+    /// processor look after every instruction.
+    #[inline]
+    fn devices_touched(&self) -> bool {
+        true
     }
 }

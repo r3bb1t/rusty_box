@@ -24,6 +24,7 @@
 use rusty_box_core::snap::{SnapError, SnapRead, SnapResult, SnapWrite};
 
 use crate::board::RAM_BASE;
+use crate::bus::Writes;
 
 /// A rule the driver broke, each one of QEMU's `virtio_error` reports. The
 /// device stops using its queues until it is reset (virtio 1.2 2.1.2,
@@ -135,14 +136,22 @@ impl QueueFault {
     }
 }
 
-/// Guest RAM, addressed by guest-physical address.
+/// Guest RAM, addressed by guest-physical address, as a device reaches it:
+/// what the device writes is noted, for the processor to forget any code it
+/// decoded there.
 pub struct GuestRam<'a> {
     ram: &'a mut [u8],
+    written: Writes,
 }
 
 impl<'a> GuestRam<'a> {
     pub fn new(ram: &'a mut [u8]) -> Self {
-        Self { ram }
+        Self { ram, written: Writes::NONE }
+    }
+
+    /// The memory the device wrote, or took to write in place.
+    pub(crate) fn written(&self) -> Writes {
+        self.written
     }
 
     fn range(&self, addr: u64, len: u64) -> Option<core::ops::Range<usize>> {
@@ -170,6 +179,7 @@ impl<'a> GuestRam<'a> {
     #[cfg(feature = "alloc")]
     pub fn bytes_mut(&mut self, addr: u64, len: u64) -> Option<&mut [u8]> {
         let range = self.range(addr, len)?;
+        self.written.add(addr, len);
         Some(&mut self.ram[range])
     }
 
@@ -188,6 +198,7 @@ impl<'a> GuestRam<'a> {
     pub fn store(&mut self, addr: u64, data: &[u8]) {
         if let Some(range) = self.range(addr, data.len() as u64) {
             self.ram[range].copy_from_slice(data);
+            self.written.add(addr, data.len() as u64);
         }
     }
 

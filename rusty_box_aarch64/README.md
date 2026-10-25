@@ -84,7 +84,32 @@ vocabulary are `rusty_box_core`'s, shared with the x86 machine.
   from the word, following the Arm ARM, and raises UNDEFINED for the
   reserved values its decode pseudocode names. Dispatch is an exhaustive
   match over the closed class enum, so every encoding has a handler.
-  Decisions are cached per word, so straight-line code skips the decoder.
+- **Instructions are decoded once, into traces.** The design is Bochs's
+  trace cache (`cpu/icache.h`, `cpu/icache.cc`, `cpu/cpu.cc`), as
+  rusty_box's x86 interpreter ports it. [`src/cpu/op.rs`](src/cpu/op.rs)
+  turns a word into an `Op`: for the integer, branch and general-register
+  load/store forms that dominate guest code, the operand fields extracted
+  once, with what depends on the word alone worked out ahead (a logical
+  immediate's mask, a branch offset); every other word stays on its class
+  handler. [`src/cpu/trace.rs`](src/cpu/trace.rs) keeps straight-line runs
+  of ops, at most 32 and never across a page, keyed by the physical address
+  of their first: the PC is translated, with the fetch permission check,
+  once per trace, and a trace ends after a branch that always leaves, an
+  exception-generating instruction, `ERET`, `WFI`/`WFE`, `ISB`, every `MSR`
+  and `SYS`. A trace runs only as far as the instruction-at-a-time loop
+  would without looking outside the processor — the budget, the next timed
+  event, the exits — and stops early after an instruction that reached a
+  device, wrote a timer register, filled or flushed the TLB, or wrote over
+  cached code. Code stays coherent with memory without the guest's help:
+  each page's 128-byte lines that hold cached instructions are marked
+  (Bochs's page write stamps), and every store the processor makes, every
+  device DMA write and every host write forgets the traces on the lines it
+  touches; `IC IVAU` and `IC IALLU` drop traces too, and only RAM and a
+  flash bank in read-array mode are cached at all (the bus says which, and
+  counts the flash writes that could change it). Every instruction is
+  still fetched, checked, executed and reported to an observer exactly as
+  one at a time would be, so a run ends in the same state either way: the
+  equivalence hashes in the speed table below are equal before and after.
 - **Floating point is software.** `src/softfloat` is rusty_box's own port of
   Berkeley SoftFloat 3e (via Bochs softfloat3e), restricted to half, single
   and double precision and given an Arm specialization: Arm's default NaN and
@@ -96,6 +121,36 @@ vocabulary are `rusty_box_core`'s, shared with the x86 machine.
   FRECPS and FRSQRTS — and `cpu/fp_estimate.rs` the bit-exact
   FRECPE/FRSQRTE/URECPE/URSQRTE/FRECPX algorithms. Exceptions accumulate into
   FPSR; like a Cortex-A57, the core does not trap them.
+
+## Speed
+
+`aarch64_perfbench` ([`examples/perfbench.rs`](examples/perfbench.rs))
+measures the interpreter on four embedded loops and two boots; `cargo xtask
+perf-baseline` archives it for A/B runs. Host: Intel Xeon @ 2.1 GHz, a
+4-core VM, 2026-10-25. Each figure is the median of 10 interleaved rounds,
+in millions of instructions a second; "hooked" runs under an observer with
+a code hook and a memory hook.
+
+| Workload | Before the trace cache | Now | |
+|---|---:|---:|---:|
+| `alu` | 71.1 | 158.2 | 2.23× |
+| `alu`, hooked | 75.5 | 166.8 | 2.21× |
+| `memcpy` (`ldp`/`stp`) | 41.9 | 66.1 | 1.58× |
+| `memcpy`, hooked | 40.2 | 65.7 | 1.63× |
+| `fnv` (byte loads, `mul`) | 75.8 | 141.9 | 1.87× |
+| `fnv`, hooked | 73.7 | 140.3 | 1.90× |
+| `fp` (`fmadd`/`fmul`/`fadd`) | 56.2 | 61.0 | 1.08× |
+| `fp`, hooked | 54.7 | 62.7 | 1.15× |
+| EDK2 (AAVMF) to `Shell>`, 647.7M instructions | 71.0 | 104.1 | 1.47× |
+| Linux 6.18 + initramfs to `login:` | 50.4 | 77.6 | 1.54× |
+
+Every run ends in the same state before and after; for the boots, the state
+hashes at 10M, 100M and 400M instructions are:
+
+| | 10M | 100M | 400M |
+|---|---|---|---|
+| EDK2 | `9cf8cd4686ce4463` | `e3e98f8e2c20afc7` | `cd35ddd4435e80fd` |
+| Linux | `55803c9740c289d7` | `f573c06f44a5c887` | `13aa27f25afc0dea` |
 
 ## What is modelled
 
@@ -223,7 +278,24 @@ integration tests of the public API.
   store's data abort reporting the page that faulted, the terminal keyboard's
   bytes reaching a polling guest, PSCI power-off and reset, the power button's
   100 ms on GPIO line 3, an observer's view, direct kernel placement and its
-  device tree, refused builds.
+  device tree, refused builds; and that a run cut into instruction budgets of
+  any size, or stopped by an exit at any instruction of straight-line code,
+  ends exactly where one instruction at a time would.
+- The pre-decoded ops are checked against the class handlers they stand in
+  for (`tests/unit/op.rs`): 400,000 words drawn from the templates of the
+  classes `op.rs` specialises, and wholly random ones, each executed both
+  ways from the same random state — registers pointing into RAM or not, the
+  exception level, the alignment checks, the MMU off or on over a mapping of
+  random permissions — must end in the same result, processor snapshot (TLB
+  included) and memory. Every specialised form runs hundreds of times.
+- `tests/self_modifying.rs`: code changed after it ran runs as changed —
+  rewritten just ahead of the store that rewrites it, in the same trace;
+  rewritten through a second virtual mapping of its page; read over by a
+  virtio-blk request the guest itself sets up; made visible with `DC CVAU`,
+  `IC IVAU` (whose address is or is not in the TLB) and `IC IALLU`, with the
+  MMU off and on; and in flash, where the CFI Read Status command makes the
+  next fetch of code that already ran read the status register, an
+  UNDEFINED instruction.
 
 ## Where the references differ
 
@@ -264,10 +336,12 @@ choice is listed here with its evidence.
   a Cortex-A57, so exceptions only accumulate in FPSR.
 - Debug: breakpoint and watchpoint registers exist (two of each, as
   advertised) but never fire; no Debug state, no PMU.
-- No instruction or data cache model: cache maintenance is accepted and has
-  nothing to act on.
-- No network or block device, and nothing on the PCIe bus: storage is the
-  initramfs, and the display and input devices are the opt-in virtio ones.
+- No data cache model, and no instruction cache a guest can see: the
+  decoded traces are kept coherent with every write, so `IC` maintenance
+  only drops traces and data cache maintenance has nothing to act on.
+- No network device, and nothing on the PCIe bus: storage is the initramfs
+  or the opt-in virtio-blk disk, and the display and input devices are the
+  opt-in virtio ones.
 - UEFI firmware draws nothing on the virtio display: `ArmVirtQemu`'s boot
   manager (`PlatformBootManagerLibLight`) puts only PCI displays on its
   console, as it does on QEMU, so the screen waits for the operating

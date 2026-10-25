@@ -5,7 +5,7 @@ use rusty_box_core::snap::{SnapRead, SnapResult, SnapWrite};
 use rusty_box_core::SnapError;
 
 use super::regs::{CpuState, Reg, RegClass, VReg};
-use super::{Activity, Cpu, CpuConfig, El, ExclusiveMonitor, Pstate, SysRegs, PC_HISTORY};
+use super::{Activity, Cpu, El, ExclusiveMonitor, Pstate, SysRegs, PC_HISTORY};
 
 /// `FPCR` bits this core keeps: AHP, DN, FZ and RMode. The trap enables read
 /// as zero on a core without trapped floating-point exceptions.
@@ -125,21 +125,57 @@ impl Cpu {
     /// interrupts masked. Time is the machine's, not the processor's, so the
     /// tick and instruction counts carry on, as QEMU's virtual clock does
     /// across a system reset.
+    ///
+    /// The processor is reset where it is, rather than replaced by a new
+    /// one: it holds its trace cache, which is far larger than the rest of
+    /// it and would be a second copy on the stack. Every field is named, so
+    /// a field added to [`Cpu`] has to be decided here; the values are
+    /// [`Cpu::new`]'s, which `a_reset_keeps_time_and_restores_reset_values`
+    /// checks.
     pub(crate) fn reset_keeping_time(&mut self, reset_pc: u64) {
-        let fresh = Cpu::new(CpuConfig {
-            ips: self.ips,
-            counter_hz: self.counter_hz,
-            reset_pc,
-        });
-        let mut history = self.history.clone();
-        history.jump(reset_pc, self.retired);
-        *self = Cpu {
-            icount: self.icount,
-            retired: self.retired,
-            debug_stops: self.debug_stops,
+        let Cpu {
+            x,
+            sp_el0,
+            sp_el1,
+            pc,
+            pstate,
+            v,
+            fpcr,
+            fpsr,
+            sys,
+            monitor,
+            tlb,
+            traces,
+            trace_break,
+            activity,
+            icount: _,
+            retired,
+            ips: _,
+            counter_hz,
+            timer_dirty,
+            irq_line,
+            fiq_line,
+            debug_stops: _,
             history,
-            ..fresh
-        };
+        } = self;
+        *x = [0; 31];
+        *sp_el0 = 0;
+        *sp_el1 = 0;
+        *pc = reset_pc;
+        *pstate = Pstate::RESET;
+        *v = [0; 32];
+        *fpcr = 0;
+        *fpsr = 0;
+        *sys = SysRegs::reset(*counter_hz);
+        *monitor = ExclusiveMonitor::CLEAR;
+        tlb.flush();
+        traces.flush();
+        *trace_break = true;
+        *activity = Activity::Running;
+        *timer_dirty = true;
+        *irq_line = false;
+        *fiq_line = false;
+        history.jump(reset_pc, *retired);
     }
 
     /// The value of `reg`.
@@ -223,8 +259,9 @@ impl Cpu {
     /// Everything that decides what the processor does next, TLB included:
     /// a translation cached before the save is cached after the restore, so
     /// a guest that changed a table without invalidating sees the same stale
-    /// entry either way. The decode cache is not saved — it is keyed by the
-    /// instruction word and cannot change an outcome.
+    /// entry either way. The trace cache is not saved: it is kept coherent
+    /// with memory, so it cannot change an outcome, and a restore empties
+    /// it.
     pub(crate) fn save<W: SnapWrite>(&self, w: &mut W) -> SnapResult {
         for x in self.x {
             w.write_u64(x)?;
@@ -323,6 +360,8 @@ impl Cpu {
         self.icount = icount;
         self.retired = retired;
         self.timer_dirty = true;
+        // The image's memory replaces the memory the traces were read from.
+        self.flush_traces();
         Ok(())
     }
 }
@@ -330,6 +369,7 @@ impl Cpu {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cpu::CpuConfig;
     use rusty_box_core::ClockHz;
 
     fn cpu() -> Cpu {
@@ -374,11 +414,30 @@ mod tests {
         c.icount = 500;
         c.retired = 400;
         c.set_reg(Reg::X0, 1);
+        c.set_reg(Reg::Sp, 0x8000);
+        c.set_v(VReg::new(3).expect("V3 exists"), 7);
         c.sys.sctlr_el1 = 1;
+        c.sys.vbar_el1 = 0x4000;
+        c.sys.cntv_cval_el0 = 99;
+        c.fpcr = FPCR_MASK;
+        c.monitor.armed = true;
+        c.activity = Activity::WaitingForInterrupt;
+        c.set_interrupt_lines(true, true);
         c.reset_keeping_time(0x2000);
         assert_eq!((c.icount, c.retired), (500, 400));
-        assert_eq!(c.reg(Reg::X0), 0);
         assert_eq!(c.reg(Reg::Pc), 0x2000);
+        // Everything else is as a processor built to start there has it.
+        let mut fresh = Cpu::new(CpuConfig {
+            ips: ClockHz::BOCHS_DEFAULT,
+            counter_hz: ClockHz::BOCHS_DEFAULT,
+            reset_pc: 0x2000,
+        });
+        fresh.icount = 500;
+        fresh.retired = 400;
+        assert_eq!(c.state(), fresh.state());
+        assert_eq!(c.sys.to_array(), fresh.sys.to_array());
+        assert_eq!(c.monitor, fresh.monitor);
+        assert_eq!((c.irq_line, c.fiq_line, c.timer_dirty), (fresh.irq_line, fresh.fiq_line, fresh.timer_dirty));
         assert_eq!(c.sys.sctlr_el1, super::super::id::SCTLR_EL1_RESET);
     }
 

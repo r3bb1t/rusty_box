@@ -21,7 +21,7 @@
 use rusty_box_core::{RingBuffer, VmClock, VmInstant};
 use rusty_box_devices::display::Resolution;
 
-use crate::bus::{le_value, store_le, AccessWidth, BusFault, PhysAddr, PhysBus, RegOffset};
+use crate::bus::{le_value, store_le, AccessWidth, BusFault, CodeEpoch, FetchSource, PhysAddr, PhysBus, RegOffset, Writes};
 use crate::devices::cfi_flash::{CfiFlash, FlashArray};
 use crate::devices::fw_cfg::FwCfg;
 use crate::devices::gicv2::GicV2;
@@ -156,11 +156,18 @@ pub struct VirtBoard<S> {
     /// A guest access moved a device's next deadline (the RTC's alarm was
     /// re-armed), so the machine's next event has to be worked out again.
     pub(crate) deadline_moved: bool,
-    /// A guest access reached something other than RAM since the machine
-    /// last looked. Only such an access changes a device: what the
-    /// interrupt controller drives, a device's deadline, RAM a device
-    /// writes. While it is clear, none of them has changed.
+    /// A guest access reached a device since the machine last looked — any
+    /// access outside RAM but a read of a flash bank in read-array mode,
+    /// which changes nothing. Only such an access changes a device: what
+    /// the interrupt controller drives, a device's deadline, RAM a device
+    /// writes, a flash bank's mode. While it is clear, none of them has
+    /// changed.
     pub(crate) touched: bool,
+    /// Counts the writes to the flash banks, each of which may change what
+    /// a fetch from them reads: their [`CodeEpoch`].
+    pub(crate) flash_epoch: u64,
+    /// The RAM the devices wrote since the machine last looked.
+    pub(crate) dma: Writes,
     /// The virtio devices, each behind its transport.
     pub(crate) virtio: [Option<Transport>; MAX_DEVICES],
     /// The register layout of every transport, plugged or empty.
@@ -210,6 +217,8 @@ impl<S: GuestStorage> VirtBoard<S> {
             power_button_release: None,
             deadline_moved: false,
             touched: false,
+            flash_epoch: 0,
+            dma: Writes::NONE,
             virtio,
             mmio_layout,
         }
@@ -237,6 +246,7 @@ impl<S: GuestStorage> VirtBoard<S> {
             #[cfg(feature = "alloc")]
             Device::Gpu(_) | Device::Block(_) => false,
         });
+        self.dma.merge(&ram.written());
         self.sync_device_lines();
         delivered
     }
@@ -293,6 +303,7 @@ impl<S: GuestStorage> VirtBoard<S> {
     pub(crate) fn reset_devices(&mut self) {
         self.flash0.reset();
         self.flash1.reset();
+        self.flash_epoch += 1;
         self.gic = GicV2::new();
         self.uart.reset();
         self.gpio = Pl061::new();
@@ -456,19 +467,52 @@ impl<S: GuestStorage> PhysBus for VirtBoard<S> {
         }
         self.write_outside_ram(addr, width, value, clock)
     }
+
+    /// RAM, whose every writer the processor hears of (its own stores, and
+    /// the devices' through the log of what they wrote), and a flash bank in
+    /// read-array mode, whose epoch counts the writes to the banks. A bank
+    /// in any other mode answers a fetch with its status or query data, and
+    /// may change mode as it does.
+    #[inline]
+    fn fetch_source(&self, addr: PhysAddr) -> FetchSource {
+        let a = addr.get();
+        if a.wrapping_sub(RAM_BASE) < self.storage.ram().len() as u64 {
+            return FetchSource::Stable(CodeEpoch::new(0));
+        }
+        let reads_array = if addr.offset_in(FLASH0_BASE, FLASH_BANK_SIZE).is_some() {
+            self.flash0.reads_array()
+        } else if addr.offset_in(FLASH1_BASE, FLASH_BANK_SIZE).is_some() {
+            self.flash1.reads_array()
+        } else {
+            false
+        };
+        if reads_array {
+            FetchSource::Stable(CodeEpoch::new(self.flash_epoch))
+        } else {
+            FetchSource::Volatile
+        }
+    }
+
+    #[inline(always)]
+    fn devices_touched(&self) -> bool {
+        self.touched
+    }
 }
 
 impl<S: GuestStorage> VirtBoard<S> {
     #[inline(never)]
     fn read_outside_ram(&mut self, addr: PhysAddr, width: AccessWidth, clock: VmClock) -> Result<u64, BusFault> {
-        self.touched = true;
         let a = addr.get();
+        // A flash read changes at most the bank's own mode, back to read
+        // array — which a fetch from the bank was not reading, or it would
+        // be in that mode already.
         if let Some(off) = addr.offset_in(FLASH0_BASE, FLASH_BANK_SIZE) {
             return Ok(self.flash0.read(self.storage.code(), off, width));
         }
         if let Some(off) = addr.offset_in(FLASH1_BASE, FLASH_BANK_SIZE) {
             return Ok(self.flash1.read(self.storage.vars(), off, width));
         }
+        self.touched = true;
         if let Some(off) = addr.offset_in(GIC_DIST_BASE, GIC_DIST_SIZE) {
             return Ok(self.gic.dist_read(off, width));
         }
@@ -516,10 +560,12 @@ impl<S: GuestStorage> VirtBoard<S> {
         let a = addr.get();
         if let Some(off) = addr.offset_in(FLASH0_BASE, FLASH_BANK_SIZE) {
             self.flash0.write(FlashArray::ReadOnly(self.storage.code()), off, width, value);
+            self.flash_epoch += 1;
             return Ok(());
         }
         if let Some(off) = addr.offset_in(FLASH1_BASE, FLASH_BANK_SIZE) {
             self.flash1.write(FlashArray::Writable(self.storage.vars_mut()), off, width, value);
+            self.flash_epoch += 1;
             return Ok(());
         }
         if let Some(off) = addr.offset_in(GIC_DIST_BASE, GIC_DIST_SIZE) {
@@ -562,6 +608,7 @@ impl<S: GuestStorage> VirtBoard<S> {
             if let Some(transport) = self.virtio.iter_mut().flatten().find(|t| u64::from(t.slot()) == slot) {
                 let mut ram = GuestRam::new(self.storage.ram_mut());
                 transport.write(&mut ram, reg, width, value);
+                self.dma.merge(&ram.written());
                 self.sync_device_lines();
             }
             return Ok(());

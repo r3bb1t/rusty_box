@@ -1,21 +1,26 @@
 //! Fetch, decode and dispatch: one call of [`Cpu::step`] executes one
-//! instruction or takes one exception.
+//! instruction or takes one exception; `trace.rs` runs many from a trace
+//! through the same pieces.
 //!
 //! Decoding is split in two. The decoder (`isa/`, cached by `decode.rs`)
 //! finds the word's A64 encoding, if it is one of a feature this core
 //! implements, and the handler class that executes it; anything else is
-//! UNDEFINED. The handler for that *class* then reads every operand field
-//! from the word itself, following the field layout and decode pseudocode of
-//! the Arm ARM. A class handler therefore covers its whole encoding group,
-//! and a field the decoder does not expose cannot be misread through it.
+//! UNDEFINED. `op.rs` then extracts the operand fields of the commonest
+//! integer, branch and load/store forms once; every other word goes to the
+//! handler for its *class*, which reads every operand field from the word
+//! itself, following the field layout and decode pseudocode of the Arm ARM.
+//! A class handler therefore covers its whole encoding group, and a field
+//! the decoder does not expose cannot be misread through it.
 
 use rusty_box_core::VmClock;
 
 use super::exception::{Exception, ExceptionClass};
 use super::isa::Class;
 use super::ldst::SingleForm;
+use super::decode::classify;
+use super::op::predecode;
 use super::{Activity, Cpu};
-use crate::bus::{AccessWidth, BusFault, PhysAddr, PhysBus};
+use crate::bus::{AccessWidth, BusFault, FetchSource, PhysAddr, PhysBus};
 use crate::instrumentation::{Direction, Instrumentation, MemoryAccess};
 
 /// The bus one step executes against: the machine's own, with the observer
@@ -23,7 +28,7 @@ use crate::instrumentation::{Direction, Instrumentation, MemoryAccess};
 /// through unreported — the observer hears of the instruction itself, and a
 /// walk is not an access the program made.
 pub(crate) struct Observed<'a, B, I> {
-    bus: &'a mut B,
+    pub(crate) bus: &'a mut B,
     pub(crate) observer: &'a mut I,
 }
 
@@ -60,6 +65,16 @@ impl<B: PhysBus, I: Instrumentation> PhysBus for Observed<'_, B, I> {
     #[inline(always)]
     fn read_descriptor(&mut self, addr: PhysAddr, clock: VmClock) -> Result<u64, BusFault> {
         self.bus.read_descriptor(addr, clock)
+    }
+
+    #[inline(always)]
+    fn fetch_source(&self, addr: PhysAddr) -> FetchSource {
+        self.bus.fetch_source(addr)
+    }
+
+    #[inline(always)]
+    fn devices_touched(&self) -> bool {
+        self.bus.devices_touched()
     }
 }
 
@@ -102,6 +117,32 @@ pub enum StopCause {
     Reset,
     /// PSCI `CPU_OFF` on the only processor: nothing can ever run again.
     CpuOff,
+}
+
+/// What one instruction did, for the loop that runs the next.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Done {
+    /// It retired, and the next instruction is the next in sequence.
+    Next,
+    /// It retired or took an exception, and execution goes on elsewhere:
+    /// a taken branch, an exception return, an exception's vector.
+    Elsewhere,
+    /// It retired, and the processor waits for an interrupt.
+    Waiting,
+    /// The machine stops before it.
+    Stop(StopCause),
+}
+
+impl Done {
+    /// The public account of the step.
+    #[inline(always)]
+    pub(crate) const fn step(self) -> Step {
+        match self {
+            Self::Next | Self::Elsewhere => Step::Retired,
+            Self::Waiting => Step::Waiting,
+            Self::Stop(cause) => Step::Stop(cause),
+        }
+    }
 }
 
 /// How control leaves an instruction that completed.
@@ -171,12 +212,58 @@ impl Cpu {
     /// Execute one instruction (or take the exception it raises) against
     /// `bus`, advancing time by one tick unless the step stops the machine,
     /// and tell `observer` what happened.
+    ///
+    /// Inlined into the machine's run loop, so that the loop and the step
+    /// share one frame and the result never goes through memory.
+    #[inline(always)]
     pub fn step<B: PhysBus, I: Instrumentation>(&mut self, bus: &mut B, observer: &mut I) -> Step {
         let pc = self.pc;
         let mut observed = Observed { bus, observer };
         let mut fetched = None;
-        let result = self.execute(&mut observed, pc, &mut fetched);
-        let observer = observed.observer;
+        let result = match self.fetch_address(&mut observed, pc) {
+            Ok(pa) => self.execute_at(&mut observed, pc, pa, &mut fetched),
+            Err(fault) => Err(fault),
+        };
+        self.finish(pc, fetched, result, observed.observer).step()
+    }
+
+    /// The checks that come before an instruction's fetch — an illegal
+    /// exception return pending, a misaligned PC — and the fetch's
+    /// translation: the physical address of the instruction at `pc`.
+    #[inline(always)]
+    pub(crate) fn fetch_address<B: PhysBus>(&mut self, bus: &mut B, pc: u64) -> Result<u64, Fault> {
+        // An illegal exception return left PSTATE.IL set: the next
+        // instruction raises Illegal Execution State instead of executing.
+        if self.pstate.il {
+            return Err(Exception::new(ExceptionClass::IllegalState, 0).into());
+        }
+        if pc & 3 != 0 {
+            return Err(Exception::new(ExceptionClass::PcAlignment, 0).with_far(pc).into());
+        }
+        self.fetch_translate(bus, pc)
+    }
+
+    /// Fetch the instruction at `pc` from physical address `pa`, decode it
+    /// and execute it.
+    #[inline(always)]
+    pub(crate) fn execute_at<B: PhysBus, I: Instrumentation>(
+        &mut self,
+        bus: &mut Observed<'_, B, I>,
+        pc: u64,
+        pa: u64,
+        fetched_word: &mut Option<u32>,
+    ) -> ExecResult {
+        let insn = self.fetch_word(bus, pc, pa)?;
+        *fetched_word = Some(insn);
+        bus.observer.before_execution(pc, insn);
+        self.exec_op(bus, pc, predecode(classify(insn), insn))
+    }
+
+    /// Account for the instruction at `pc`, whose word `fetched` is (`None`
+    /// when its fetch faulted), having ended in `result`: retire it or take
+    /// its exception, move the PC, and tell `observer`.
+    #[inline(always)]
+    pub(crate) fn finish<I: Instrumentation>(&mut self, pc: u64, fetched: Option<u32>, result: ExecResult, observer: &mut I) -> Done {
         match result {
             Ok(flow) => {
                 self.icount += 1;
@@ -187,7 +274,7 @@ impl Cpu {
                 match flow {
                     Flow::Next => {
                         self.pc = pc.wrapping_add(4);
-                        Step::Retired
+                        Done::Next
                     }
                     Flow::Jump(target) => {
                         // Every branch, ERET included, writes the PC through
@@ -196,13 +283,13 @@ impl Cpu {
                         self.pc = target;
                         self.history.jump(target, self.retired);
                         observer.branch(pc, target);
-                        Step::Retired
+                        Done::Elsewhere
                     }
                     Flow::Wait => {
                         self.pc = pc.wrapping_add(4);
                         self.activity = Activity::WaitingForInterrupt;
                         observer.wait_for_interrupt(pc);
-                        Step::Waiting
+                        Done::Waiting
                     }
                 }
             }
@@ -211,31 +298,15 @@ impl Cpu {
                 self.retired += 1;
                 let taken = self.take_sync_exception(e, pc);
                 observer.exception(taken);
-                Step::Retired
+                Done::Elsewhere
             }
-            Err(Fault::Stop(cause)) => Step::Stop(cause),
+            Err(Fault::Stop(cause)) => Done::Stop(cause),
         }
     }
 
-    fn execute<B: PhysBus, I: Instrumentation>(
-        &mut self,
-        bus: &mut Observed<'_, B, I>,
-        pc: u64,
-        fetched_word: &mut Option<u32>,
-    ) -> ExecResult {
-        // An illegal exception return left PSTATE.IL set: the next
-        // instruction raises Illegal Execution State instead of executing.
-        if self.pstate.il {
-            return Err(Exception::new(ExceptionClass::IllegalState, 0).into());
-        }
-        if pc & 3 != 0 {
-            return Err(Exception::new(ExceptionClass::PcAlignment, 0).with_far(pc).into());
-        }
-        let fetched = self.fetch(bus, pc)?;
-        let insn = fetched.word;
-        *fetched_word = Some(insn);
-        bus.observer.before_execution(pc, insn);
-        match self.decode_cache.decode(fetched.pa, insn) {
+    /// Execute an instruction its class handler executes from the word.
+    pub(crate) fn exec_class<B: PhysBus>(&mut self, bus: &mut B, pc: u64, class: Class, insn: u32) -> ExecResult {
+        match class {
             Class::Undefined => self.undefined(pc, insn),
             Class::Hint => self.exec_hint(insn, pc),
             Class::AddSubImmediate => self.exec_addsub_imm(pc, insn),

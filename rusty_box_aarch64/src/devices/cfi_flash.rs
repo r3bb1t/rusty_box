@@ -130,6 +130,13 @@ impl CfiFlash {
         }
     }
 
+    /// Whether a read returns the array, without changing anything (QEMU
+    /// `pflash_read` in read-array mode, the mode `pflash_mem_read_with_attrs`
+    /// serves straight from the ROM device).
+    pub fn reads_array(&self) -> bool {
+        self.cmd == 0
+    }
+
     /// QEMU `pflash_reset`: back to read-array mode, any buffered write
     /// abandoned.
     pub fn reset(&mut self) {
