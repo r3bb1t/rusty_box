@@ -24,9 +24,10 @@
 //! rusty_box for `x86_64-unknown-uefi`, and of the GUI without its default
 //! features.
 //!
-//! `cargo xtask perf-baseline` builds the release perfbench binary and archives it
-//! (with the git revision) under `target/perf-baselines/<rev>/` for interleaved
-//! A/B comparison against later phases.
+//! `cargo xtask perf-baseline` builds the release perfbench binaries — the x86
+//! machine's `perfbench` and the AArch64 interpreter's `aarch64_perfbench` — and
+//! archives them (with the git revision) under `target/perf-baselines/<rev>/` for
+//! interleaved A/B comparison against later phases.
 
 use std::{
     env,
@@ -1134,42 +1135,70 @@ pub fn execute_perf_baseline(_command: PerfBaselineCommand) -> Result<(), String
         String::from_utf8_lossy(&output.stdout).trim().to_string()
     };
 
-    let status = Command::new("cargo")
-        .args([
-            "build", "--release", "-p", "rusty_box", "--example", "perfbench", "--features", "std",
-        ])
-        .current_dir(&root)
-        .status()
-        .map_err(|err| format!("failed to spawn cargo: {err}"))?;
-    if !status.success() {
-        return Err(format!("perfbench build exited with {status}"));
-    }
-
-    let exe = if cfg!(windows) {
-        "perfbench.exe"
-    } else {
-        "perfbench"
-    };
-    let built = root
-        .join("target")
-        .join("release")
-        .join("examples")
-        .join(exe);
-    if !built.exists() {
-        return Err(format!("built perfbench not found at {}", built.display()));
-    }
-
     let dest_dir = root.join("target").join("perf-baselines").join(&rev);
     std::fs::create_dir_all(&dest_dir)
         .map_err(|err| format!("failed to create {}: {err}", dest_dir.display()))?;
-    let dest = dest_dir.join(exe);
-    std::fs::copy(&built, &dest)
-        .map_err(|err| format!("failed to copy perfbench to {}: {err}", dest.display()))?;
+    for bench in PERF_BENCHES {
+        let status = Command::new("cargo")
+            .args([
+                "build",
+                "--release",
+                "-p",
+                bench.package,
+                "--example",
+                bench.example,
+                "--features",
+                "std",
+            ])
+            .current_dir(&root)
+            .status()
+            .map_err(|err| format!("failed to spawn cargo: {err}"))?;
+        if !status.success() {
+            return Err(format!("{} build exited with {status}", bench.example));
+        }
 
-    println!("perf baseline archived: {}", dest.display());
+        let exe = if cfg!(windows) {
+            format!("{}.exe", bench.example)
+        } else {
+            bench.example.to_string()
+        };
+        let built = root
+            .join("target")
+            .join("release")
+            .join("examples")
+            .join(&exe);
+        if !built.exists() {
+            return Err(format!("built {} not found at {}", bench.example, built.display()));
+        }
+        let dest = dest_dir.join(&exe);
+        std::fs::copy(&built, &dest).map_err(|err| {
+            format!("failed to copy {} to {}: {err}", bench.example, dest.display())
+        })?;
+        println!("perf baseline archived: {}", dest.display());
+    }
+
     println!("A/B usage: alternate baseline and candidate binaries >= 10 pairs, compare medians.");
     Ok(())
 }
+
+/// A benchmark example `perf-baseline` builds and archives.
+struct PerfBench {
+    package: &'static str,
+    example: &'static str,
+}
+
+/// The x86 machine's CPU-core benchmark, and the AArch64 interpreter's
+/// loops and boots (`rusty_box_aarch64/examples/perfbench.rs`).
+const PERF_BENCHES: &[PerfBench] = &[
+    PerfBench {
+        package: "rusty_box",
+        example: "perfbench",
+    },
+    PerfBench {
+        package: "rusty_box_aarch64",
+        example: "aarch64_perfbench",
+    },
+];
 
 pub fn parse_ci_args(args: &[String]) -> Result<CiCommand, String> {
     let mut command = CiCommand::default();
