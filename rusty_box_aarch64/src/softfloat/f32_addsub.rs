@@ -125,9 +125,10 @@ fn sub_mags_f32(ui_a: u32, ui_b: u32, status: &mut SoftFloatStatus) -> Float32 {
             shift_dist = exp_a;
             exp_z = 0;
         }
-        // An equal-exponent difference is exact: a subnormal result
-        // underflows only when FPCR.FZ flushes it.
-        if exp_z == 0 && softfloat_flush_underflow_to_zero(status) {
+        // An equal-exponent difference is exact: a subnormal result (no
+        // implicit bit after the shift; Bochs s_subMagsF32) underflows
+        // only when FPCR.FZ flushes it.
+        if exp_z == 0 && (sig_diff << shift_dist) < 0x0080_0000 && softfloat_flush_underflow_to_zero(status) {
             softfloat_raise_flags(status, FLAG_UNDERFLOW);
             return pack_to_f32(sign_z, 0, 0);
         }

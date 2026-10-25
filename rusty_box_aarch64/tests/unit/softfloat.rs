@@ -473,6 +473,18 @@ fn flush_to_zero_flushes_inputs_and_tiny_results() {
     let mut fp = status_with(FZ);
     assert_eq!(f64_to_f32(1.0e-40f64.to_bits(), &mut fp), POS_ZERO);
     assert_eq!(fp.cumulative_fpsr(), UFC);
+    // The difference of two numbers of one exponent is exact: flushed when
+    // it is subnormal, kept when it is normal, the smallest normal included.
+    let mut fp = status_with(FZ);
+    assert_eq!(f32_sub(0x0120_0000, 0x0100_0000, &mut fp), POS_ZERO);
+    assert_eq!(f64_sub(0x0024_0000_0000_0000, 0x0020_0000_0000_0000, &mut fp), 0);
+    assert_eq!(fp.cumulative_fpsr(), UFC);
+    let mut fp = status_with(FZ);
+    assert_eq!(f32_sub(0x0178_0000, 0x0100_0000, &mut fp), 0x00F0_0000);
+    assert_eq!(f32_sub(0x0140_0000, 0x0100_0000, &mut fp), 0x0080_0000);
+    assert_eq!(f64_sub(0x002F_0000_0000_0000, 0x0020_0000_0000_0000, &mut fp), 0x001E_0000_0000_0000);
+    assert_eq!(f64_add(0x8028_0000_0000_0000, 0x0020_0000_0000_0000, &mut fp), 0x8010_0000_0000_0000);
+    assert_eq!(fp.cumulative_fpsr(), 0);
     // Comparisons and conversions see the flushed operand.
     let mut fp = status_with(FZ);
     assert_eq!(f32_compare(0x0000_0001, POS_ZERO, NanSignal::Quiet, &mut fp), FpOrdering::Equal);
