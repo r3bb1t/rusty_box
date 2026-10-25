@@ -306,6 +306,10 @@ impl Cpu {
             Class::FpConditionalSelect => self.exec_fcsel(pc, insn),
             Class::FpIntegerConversion => self.exec_fp_int(pc, insn),
             Class::FpFixedPointConversion => self.exec_fp_fixed(pc, insn),
+            Class::CryptoAes => self.exec_aes(insn),
+            Class::CryptoShaThreeRegister => self.exec_sha_three(pc, insn),
+            Class::CryptoShaTwoRegister => self.exec_sha_two(pc, insn),
+            Class::Crc32 => self.exec_crc32(insn),
         }
     }
 

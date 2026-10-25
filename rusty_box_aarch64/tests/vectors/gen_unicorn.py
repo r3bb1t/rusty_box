@@ -11,9 +11,13 @@ small and the Rust side needs no Unicorn to check against it.
 
 Unicorn runs as QEMU's cortex-a57 model, so it rejects every post-ARMv8.0
 encoding (FP16, RDM, LSE, ...), and encodings it rejects are dropped: every
-vector is an instruction a Cortex-A57 executes. QEMU's cortex-a57 also has
-the optional crypto and CRC32 extensions, which this core does not advertise;
-the Rust replay skips exactly those. Families that touch memory pin their
+vector is an instruction a Cortex-A57 executes, the optional crypto and
+CRC32 extensions included. The Rust replay skips only the words that set a
+should-be field otherwise (SMULH/UMULH Ra, FCMP/FCMPE with zero Rm), which
+QEMU executes and this core treats as UNDEFINED. Families are appended,
+never reordered: one random stream picks every family's words, so the
+vectors of the families before a new one stay as they were. Families that
+touch memory pin their
 base register into the data region and keep every access aligned, because
 with the MMU off data accesses are Device memory, where an unaligned access
 is an alignment fault on this core (Unicorn's older QEMU does not check).
@@ -272,6 +276,17 @@ FAMILIES = [
     ("scalar_elem_fp", "F", 0x5F000000, 0x20FFFBFF, fp_elem_opcode),
     ("scalar_pair_fp", "F", 0x7E300800, 0x00C013FF, fp_pair_opcode),
     ("fp_cvt_precision", "F", 0x1E224000, 0x00C183FF, None),
+    # The Cortex-A57's optional extensions: AESE/AESD/AESMC/AESIMC, the
+    # three- and two-register SHA-1 and SHA-256 instructions, PMULL and
+    # PMULL2 on 64-bit elements, and CRC32/CRC32C of every size.
+    ("crypto_aes", "V", 0x4E284800, 0x000033FF, None),
+    ("crypto_sha3", "V", 0x5E000000, 0x001F73FF, None),
+    ("crypto_sha2", "V", 0x5E280800, 0x000033FF, None),
+    ("pmull_64", "V", 0x0EE0E000, 0x401F03FF, None),
+    ("crc32", "D", 0x1AC04000, 0x801F1FFF, None),
+    # FCMP and FCMPE with zero with Rm = 00000, as their encoding fixes it
+    # (fp_cmp draws Rm at random, and the replay skips those).
+    ("fp_cmp_zero", "F", 0x1E202008, 0x00C003F0, None),
 ]
 
 

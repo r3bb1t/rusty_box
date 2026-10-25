@@ -4,6 +4,7 @@
 
 use super::asimd;
 use super::asisd;
+use super::crypto;
 use super::float;
 use super::Encoding;
 use crate::cpu::exec::bits;
@@ -22,6 +23,7 @@ pub(super) fn simd_dp(word: u32) -> Option<Encoding> {
 
 /// `op0 = 0xx0`: Advanced SIMD vector, and AES.
 fn vector(word: u32) -> Option<Encoding> {
+    let op0 = bits(word, 31, 28);
     let op1 = bits(word, 24, 23);
     let op2 = bits(word, 22, 19);
     // op1<1>, then op3<0>.
@@ -38,12 +40,15 @@ fn vector(word: u32) -> Option<Encoding> {
             0b1 => match bits(word, 11, 10) {
                 0b01 | 0b11 => asimd::asimdsame(word).map(Encoding::Asimdsame),
                 0b00 => asimd::asimddiff(word).map(Encoding::Asimddiff),
-                // op2<1:0> and op3<8:7>. op2 = x101 is cryptoaes at
-                // op0 = 0100 (FEAT_AES), op2 = 1111 asimdmiscfp16
+                // op2<1:0> and op3<8:7>. op2 = 1111 is asimdmiscfp16
                 // (FEAT_FP16).
                 0b10 => match (bits(word, 20, 19), bits(word, 18, 17)) {
                     (0b00, 0b00) => asimd::asimdmisc(word).map(Encoding::Asimdmisc),
                     (0b10, 0b00) => asimd::asimdall(word).map(Encoding::Asimdall),
+                    (0b01, 0b00) => match op0 {
+                        0b0100 => crypto::cryptoaes(word).map(Encoding::Cryptoaes),
+                        _ => None,
+                    },
                     _ => None,
                 },
                 _ => None,
@@ -73,6 +78,7 @@ fn vector(word: u32) -> Option<Encoding> {
 
 /// `op0 = 01x1`: Advanced SIMD scalar, and SHA.
 fn scalar(word: u32) -> Option<Encoding> {
+    let op0 = bits(word, 31, 28);
     let op1 = bits(word, 24, 23);
     // op1<1>, then op3<0>.
     match (bits(word, 24, 24), bits(word, 10, 10)) {
@@ -87,23 +93,30 @@ fn scalar(word: u32) -> Option<Encoding> {
             0b1 => match bits(word, 11, 10) {
                 0b01 | 0b11 => asisd::asisdsame(word).map(Encoding::Asisdsame),
                 0b00 => asisd::asisddiff(word).map(Encoding::Asisddiff),
-                // op2<1:0> and op3<8:7>. op2 = x101 is cryptosha2 at
-                // op0 = 0101 (FEAT_SHA1, FEAT_SHA256), op2 = 1111
-                // asisdmiscfp16 (FEAT_FP16).
+                // op2<1:0> and op3<8:7>. op2 = 1111 is asisdmiscfp16
+                // (FEAT_FP16).
                 0b10 => match (bits(word, 20, 19), bits(word, 18, 17)) {
                     (0b00, 0b00) => asisd::asisdmisc(word).map(Encoding::Asisdmisc),
                     (0b10, 0b00) => asisd::asisdpair(word).map(Encoding::Asisdpair),
+                    (0b01, 0b00) => match op0 {
+                        0b0101 => crypto::cryptosha2(word).map(Encoding::Cryptosha2),
+                        _ => None,
+                    },
                     _ => None,
                 },
                 _ => None,
             },
-            // op3<0> and op3<5>. op3<1:0> = 00 is cryptosha3 at op0 = 0101
-            // (FEAT_SHA1, FEAT_SHA256); op3<5> = 1 with op3<0> = 1 is
-            // asisdsame2 (FEAT_RDM), and op2 = 10xx with op3<0> = 1
-            // asisdsamefp16 (FEAT_FP16).
+            // op3<0> and op3<5>. op3<5> = 1 with op3<0> = 1 is asisdsame2
+            // (FEAT_RDM), and op2 = 10xx with op3<0> = 1 asisdsamefp16
+            // (FEAT_FP16).
             0b0 => match (bits(word, 10, 10), bits(word, 15, 15)) {
                 (0b1, 0b0) => match (op1, bits(word, 22, 22)) {
                     (0b00, 0b0) => asisd::asisdone(word).map(Encoding::Asisdone),
+                    _ => None,
+                },
+                // op0, then op3<1>.
+                (0b0, 0b0) => match (op0, bits(word, 11, 11)) {
+                    (0b0101, 0b0) => crypto::cryptosha3(word).map(Encoding::Cryptosha3),
                     _ => None,
                 },
                 _ => None,

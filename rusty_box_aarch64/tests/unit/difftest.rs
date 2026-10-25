@@ -25,9 +25,6 @@ use std::vec::Vec;
 
 use rusty_box_core::{ClockHz, VmClock};
 
-use disarm64::InsnOpcode;
-use disarm64_defn::InsnFeatureSet;
-
 use super::{Cpu, CpuConfig, Step};
 use crate::bus::{AccessWidth, BusFault, PhysAddr, PhysBus};
 use crate::instrumentation::NoInstrumentation;
@@ -273,7 +270,14 @@ fn parse_pairs(field: &str, prefix: &str, key_radix: u32) -> Vec<(usize, u128)> 
 #[test]
 fn reserved_simd_and_fp_encodings_are_undefined_before_the_fp_trap() {
     let ips = ClockHz::new(1_000_000).unwrap_or(ClockHz::BOCHS_DEFAULT);
-    let cases: [(u32, &str, u64); 11] = [
+    let cases: [(u32, &str, u64); 18] = [
+        (0x0E22_E020, "pmull v0.8h, v1.8b, v2.8b", 0x07),
+        (0x0EE2_E020, "pmull v0.1q, v1.1d, v2.1d", 0x07),
+        (0x0E62_E020, "pmull with size 01", 0x00),
+        (0x0EA2_E020, "pmull with size 10", 0x00),
+        (0x2EE2_E020, "opcode 1110 with U = 1 and size 11", 0x00),
+        (0x4E68_4820, "aese with size 01", 0x00),
+        (0x5E02_7020, "sha3 class opcode 111", 0x00),
         (0x0E08_0420, "dup v0.1d, v1.d[0] (Q = 0)", 0x00),
         (0x0E04_2C20, "smov w0, v1.s[0]", 0x00),
         (0x4E01_3C20, "umov x0, v1.b[0]", 0x00),
@@ -480,9 +484,19 @@ mod against_disarm64 {
     use std::sync::Mutex;
     use std::vec::Vec;
 
-    /// The feature sets of disarm64's table this core implements.
+    /// The feature sets of disarm64's table this core implements: binutils'
+    /// AES set holds the 64-bit PMULL too, and its SHA2 set SHA-1 and
+    /// SHA-256.
     fn implemented(set: InsnFeatureSet) -> bool {
-        matches!(set, InsnFeatureSet::V8 | InsnFeatureSet::FP | InsnFeatureSet::SIMD)
+        matches!(
+            set,
+            InsnFeatureSet::V8
+                | InsnFeatureSet::FP
+                | InsnFeatureSet::SIMD
+                | InsnFeatureSet::AES
+                | InsnFeatureSet::SHA2
+                | InsnFeatureSet::CRC
+        )
     }
 
     /// Which reason, if any, has `word` execute here though disarm64
@@ -661,37 +675,17 @@ fn disassemble(insn: u32) -> String {
     disarm64::decoder::decode(insn).map(|op| format!("{op}")).unwrap_or_default()
 }
 
-/// Why a word Unicorn executed may be UNDEFINED on this core.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ExpectedUndefined {
-    /// An optional ARMv8.0 extension QEMU's cortex-a57 implements and this
-    /// core's ID_AA64ISAR0_EL1 does not advertise: AES and PMULL, SHA-1 and
-    /// SHA-256, CRC32.
-    AbsentExtension,
-    /// A should-be field set otherwise: `Ra != 11111` in SMULH and UMULH,
-    /// `Rm != 00000` in FCMP and FCMPE with zero. UNDEFINED is one of the
-    /// CONSTRAINED UNPREDICTABLE behaviours the Arm ARM permits, and the
-    /// one Arm's encodings give (they fix the field); QEMU executes the
-    /// word, ignoring the field.
-    ShouldBeFieldSet,
-}
-
-/// The reason a word may be UNDEFINED on this core though Unicorn executed
-/// it, or `None` when it should have executed.
-fn expected_undefined(insn: u32) -> Option<ExpectedUndefined> {
-    // The vectors come from a Cortex-A57 model: the optional ARMv8.0
-    // extensions it has are the only features it may execute that this
-    // core lacks. disarm64 names the extension a word belongs to.
-    let extension = disarm64::decoder::decode(insn).is_some_and(|op| {
-        matches!(op.definition().feature_set, InsnFeatureSet::AES | InsnFeatureSet::SHA2 | InsnFeatureSet::CRC)
-    });
-    if extension {
-        return Some(ExpectedUndefined::AbsentExtension);
-    }
+/// Whether `insn` sets a should-be field otherwise, the one reason a word
+/// Unicorn executed may be UNDEFINED on this core: `Ra != 11111` in SMULH and
+/// UMULH, `Rm != 00000` in FCMP and FCMPE with zero. UNDEFINED is one of the
+/// CONSTRAINED UNPREDICTABLE behaviours the Arm ARM permits, and the one
+/// Arm's encodings give (they fix the field); Unicorn's QEMU executes the
+/// word, ignoring the field (README, "Where the references differ").
+fn should_be_field_set(insn: u32) -> bool {
     let mul_high_ra_set = insn & 0xFF60_8000 == 0x9B40_0000 && (insn >> 10) & 0x1F != 0x1F;
     let compare_with_zero_rm_set =
         insn & 0xFF20_FC0F == 0x1E20_2008 && (insn >> 22) & 0b11 < 0b10 && (insn >> 16) & 0x1F != 0;
-    (mul_high_ra_set || compare_with_zero_rm_set).then_some(ExpectedUndefined::ShouldBeFieldSet)
+    mul_high_ra_set || compare_with_zero_rm_set
 }
 
 #[test]
@@ -746,12 +740,11 @@ fn every_unicorn_vector_matches_after_one_step() {
             Step::Retired | Step::Waiting => {}
         }
         if cpu.sys.esr_el1 >> 26 == 0x00 {
-            match expected_undefined(insn) {
-                Some(_) => tally.skipped += 1,
-                None => {
-                    tally.mismatched += 1;
-                    failures.push(format!("{name} {insn:08x} `{}`: UNDEFINED here, executed by Unicorn", disassemble(insn)));
-                }
+            if should_be_field_set(insn) {
+                tally.skipped += 1;
+            } else {
+                tally.mismatched += 1;
+                failures.push(format!("{name} {insn:08x} `{}`: UNDEFINED here, executed by Unicorn", disassemble(insn)));
             }
             continue;
         }

@@ -63,8 +63,9 @@ enum Verdict {
 }
 
 /// The feature sets the Cortex-A57 model advertises: ARMv8.0 base, FP and
-/// Advanced SIMD.
-const ADVERTISED: &[&str] = &["V8", "FP", "SIMD"];
+/// Advanced SIMD, and the optional AES (with the 64-bit PMULL), SHA-1 and
+/// SHA-256 (binutils' SHA2 set) and CRC32.
+const ADVERTISED: &[&str] = &["V8", "FP", "SIMD", "AES", "SHA2", "CRC"];
 
 /// Encodings of advertised feature sets that are UNDEFINED in the state the
 /// harness runs them in — EL1, no EL2 or EL3, not in Debug state — with the

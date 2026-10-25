@@ -14,6 +14,7 @@
 //!
 //! The floating-point opcodes of these classes are handed to `simd_fp`.
 
+use super::crypto::polynomial_mult;
 use super::dp::ones;
 use super::exec::{bit, bits, sext, ExecResult, Flow};
 use super::simd::{at_datasize, elem, set_elem};
@@ -129,17 +130,6 @@ fn shift_by_register(
     }
 }
 
-/// Polynomial (carry-less) product of two 8-bit elements, 16 bits wide.
-fn poly_mul8(a: u64, b: u64) -> u64 {
-    let mut product = 0;
-    for i in 0..8 {
-        if (b >> i) & 1 == 1 {
-            product ^= (a & 0xFF) << i;
-        }
-    }
-    product
-}
-
 /// Arm ARM `CountLeadingZeroBits` of an `width`-bit value.
 #[inline]
 fn clz(value: u64, width: u32) -> u64 {
@@ -205,7 +195,7 @@ fn long_lane(op: LongOp, x: i128, y: i128, acc: u64, wide: u32, qc: &mut bool) -
             };
             sat(sum, wide, false, qc)
         }
-        LongOp::PolyMul => poly_mul8(low(x, 8), low(y, 8)),
+        LongOp::PolyMul => polynomial_mult(low(x, 8), low(y, 8), 8) as u64,
     }
 }
 
@@ -319,7 +309,7 @@ impl Cpu {
             (0b10010, false) => |a, b, d, _, _| d.wrapping_add(a.wrapping_mul(b)),
             (0b10010, true) => |a, b, d, _, _| d.wrapping_sub(a.wrapping_mul(b)),
             (0b10011, false) => |a, b, _, _, _| a.wrapping_mul(b),
-            (0b10011, true) => |a, b, _, _, _| poly_mul8(a, b),
+            (0b10011, true) => |a, b, _, _, _| polynomial_mult(a, b, 8) as u64,
             // SQDMULH, SQRDMULH
             (0b10110, false) => |a, b, _, e, qc| sat((2 * sint(a, e) * sint(b, e)) >> e, e, false, qc),
             (0b10110, true) => {
@@ -680,14 +670,23 @@ impl Cpu {
         let rd = bits(insn, 4, 0) as usize;
         let d = self.v[rd];
         let saturating = matches!(opcode, 0b1001 | 0b1011 | 0b1101);
-        // Size 3 is reserved; PMULL's 64-bit form needs the AES extension,
-        // which this core does not advertise.
-        let reserved = size == 3
+        // PMULL and PMULL2 (Arm ARM PMULL, PMULL2): size 0 multiplies bytes
+        // into halfwords, size 3 one doubleword into a quadword (FEAT_PMULL,
+        // advertised by ID_AA64ISAR0_EL1.AES = 2), and sizes 1 and 2 are
+        // reserved. Size 3 is reserved for every other opcode.
+        let pmull_64 = opcode == 0b1110 && !u && !scalar && size == 3;
+        let reserved = (size == 3 && !pmull_64)
             || (scalar && !(saturating && !u))
             || (saturating && (u || size == 0))
-            || (opcode == 0b1110 && (u || size != 0));
+            || (opcode == 0b1110 && (u || matches!(size, 1 | 2)));
         if reserved {
             return self.undefined(pc, insn);
+        }
+        if pmull_64 {
+            self.simd_check()?;
+            let half = u32::from(q);
+            self.v[rd] = polynomial_mult(elem(n, half, 64), elem(m, half, 64), 64);
+            return Ok(Flow::Next);
         }
         // ADDHN, RADDHN, SUBHN, RSUBHN narrow; everything else widens.
         let narrowing = opcode == 0b0100 || opcode == 0b0110;
@@ -936,9 +935,4 @@ mod tests {
         }
     }
 
-    #[test]
-    fn polynomial_multiply_is_carry_less() {
-        assert_eq!(poly_mul8(0b11, 0b11), 0b101);
-        assert_eq!(poly_mul8(0xFF, 0xFF), 0x5555);
-    }
 }

@@ -3,7 +3,9 @@
 //! The processor is shaped like a Cortex-A57 r1p0 (the value QEMU's
 //! `cortex-a57` model reports in `MIDR_EL1`), cut down to what this
 //! interpreter implements: AArch64 at EL0 and EL1 only, FP and Advanced SIMD,
-//! the 4 KiB translation granule, no PMU, no crypto, no CRC32. Every value here
+//! the Cryptographic Extension's AES, PMULL, SHA-1 and SHA-256 and CRC32 (the
+//! Cortex-A57's optional extensions, all of them, as QEMU's `cortex-a57`
+//! has them), the 4 KiB translation granule, no PMU. Every value here
 //! is consistent with that cut — an ID register that advertised a feature the
 //! executor rejects would make the feature unreachable (or worse, reachable
 //! and wrong), so the two change together.
@@ -30,8 +32,12 @@ pub const ID_AA64PFR1_EL1: u64 = 0;
 /// each, the architectural minimum), CTX_CMPs = 0, PMUVer = 0 (no PMU).
 pub const ID_AA64DFR0_EL1: u64 = 0x0000_0000_0010_1006;
 
-/// `ID_AA64ISAR0_EL1`: no AES, SHA, CRC32 or LSE atomics.
-pub const ID_AA64ISAR0_EL1: u64 = 0;
+/// `ID_AA64ISAR0_EL1`: AES = 2 (AESE, AESD, AESMC, AESIMC and the 64-bit
+/// PMULL), SHA1 = 1, SHA2 = 1 (SHA-256 only), CRC32 = 1; no SHA-512, SHA3,
+/// SM3, SM4, LSE atomics or any later field. QEMU sets the same in
+/// `aarch64_aa32_a57_init` (target/arm/cpu-max.c), which
+/// `aarch64_a57_initfn` calls.
+pub const ID_AA64ISAR0_EL1: u64 = 0x0000_0000_0001_1120;
 
 /// `ID_AA64ISAR1_EL1`: no v8.2+ instructions.
 pub const ID_AA64ISAR1_EL1: u64 = 0;

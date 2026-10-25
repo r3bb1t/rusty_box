@@ -1,7 +1,9 @@
 //! Arm group `dpreg` (Arm ARM C4.1, "Data Processing -- Register"): the A64
 //! space with `op1 = x101`.
 
-use super::Encoding;
+#[cfg(test)]
+use super::Feature;
+use super::{Class, Encoding};
 use crate::cpu::exec::bits;
 
 /// Arm group `dp_2src`: Data-processing (2 source).
@@ -19,6 +21,14 @@ pub(crate) enum Dp2src {
     Lsrv64,
     Asrv64,
     Rorv64,
+    Crc32b32c,
+    Crc32h32c,
+    Crc32w32c,
+    Crc32cb32c,
+    Crc32ch32c,
+    Crc32cw32c,
+    Crc32x64c,
+    Crc32cx64c,
 }
 
 /// Arm group `dp_1src`: Data-processing (1 source).
@@ -188,10 +198,11 @@ fn dp_2src(word: u32) -> Option<Dp2src> {
     let sf = bits(word, 31, 31);
     let s = bits(word, 29, 29);
     let opcode = bits(word, 15, 10);
-    // opcode 0100xx is CRC32 and 0101xx CRC32C (FEAT_CRC32), and 0110xx
-    // the register minimum and maximum (FEAT_CSSC); with sf = 1, 000000,
-    // 000100 and 000101 are SUBP(S), IRG and GMI (FEAT_MTE), and 001100
-    // PACGA (FEAT_PAuth).
+    // opcode 0110xx is the register minimum and maximum (FEAT_CSSC); with
+    // sf = 1, 000000, 000100 and 000101 are SUBP(S), IRG and GMI
+    // (FEAT_MTE), and 001100 PACGA (FEAT_PAuth). CRC32 and CRC32C
+    // (opcode 010 C sz) take a 64-bit operand exactly when sz = 11, and
+    // only with sf = 1.
     match (sf, s, opcode) {
         (0b0, 0b0, 0b000010) => Some(Dp2src::Udiv32),
         (0b0, 0b0, 0b000011) => Some(Dp2src::Sdiv32),
@@ -205,6 +216,14 @@ fn dp_2src(word: u32) -> Option<Dp2src> {
         (0b1, 0b0, 0b001001) => Some(Dp2src::Lsrv64),
         (0b1, 0b0, 0b001010) => Some(Dp2src::Asrv64),
         (0b1, 0b0, 0b001011) => Some(Dp2src::Rorv64),
+        (0b0, 0b0, 0b010000) => Some(Dp2src::Crc32b32c),
+        (0b0, 0b0, 0b010001) => Some(Dp2src::Crc32h32c),
+        (0b0, 0b0, 0b010010) => Some(Dp2src::Crc32w32c),
+        (0b0, 0b0, 0b010100) => Some(Dp2src::Crc32cb32c),
+        (0b0, 0b0, 0b010101) => Some(Dp2src::Crc32ch32c),
+        (0b0, 0b0, 0b010110) => Some(Dp2src::Crc32cw32c),
+        (0b1, 0b0, 0b010011) => Some(Dp2src::Crc32x64c),
+        (0b1, 0b0, 0b010111) => Some(Dp2src::Crc32cx64c),
         _ => None,
     }
 }
@@ -378,5 +397,62 @@ fn dp_3src(word: u32) -> Option<Dp3src> {
         (0b1, 0b00, 0b101, 0b1, _) => Some(Dp3src::Umsubl64wa),
         (0b1, 0b00, 0b110, 0b0, 0b11111) => Some(Dp3src::Umulh64),
         _ => None,
+    }
+}
+
+impl Dp2src {
+    /// The handler class: CRC32 and CRC32C have their own; the rest share
+    /// the data-processing one. [`Dp2src::feature`] splits the same way.
+    pub(crate) const fn class(self) -> Class {
+        match self {
+            Self::Udiv32
+            | Self::Sdiv32
+            | Self::Lslv32
+            | Self::Lsrv32
+            | Self::Asrv32
+            | Self::Rorv32
+            | Self::Udiv64
+            | Self::Sdiv64
+            | Self::Lslv64
+            | Self::Lsrv64
+            | Self::Asrv64
+            | Self::Rorv64 => Class::DataProcessing2Source,
+            Self::Crc32b32c
+            | Self::Crc32h32c
+            | Self::Crc32w32c
+            | Self::Crc32cb32c
+            | Self::Crc32ch32c
+            | Self::Crc32cw32c
+            | Self::Crc32x64c
+            | Self::Crc32cx64c => Class::Crc32,
+        }
+    }
+}
+
+#[cfg(test)]
+impl Dp2src {
+    pub(crate) const fn feature(self) -> Feature {
+        match self {
+            Self::Udiv32
+            | Self::Sdiv32
+            | Self::Lslv32
+            | Self::Lsrv32
+            | Self::Asrv32
+            | Self::Rorv32
+            | Self::Udiv64
+            | Self::Sdiv64
+            | Self::Lslv64
+            | Self::Lsrv64
+            | Self::Asrv64
+            | Self::Rorv64 => Feature::Base,
+            Self::Crc32b32c
+            | Self::Crc32h32c
+            | Self::Crc32w32c
+            | Self::Crc32cb32c
+            | Self::Crc32ch32c
+            | Self::Crc32cw32c
+            | Self::Crc32x64c
+            | Self::Crc32cx64c => Feature::Crc32,
+        }
     }
 }

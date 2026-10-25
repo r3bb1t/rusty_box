@@ -43,6 +43,7 @@
 mod asimd;
 mod asisd;
 mod control;
+mod crypto;
 mod dpimm;
 mod dpreg;
 mod float;
@@ -58,6 +59,7 @@ use crate::cpu::exec::bits;
 use asimd::{Asimdall, Asimddiff, Asimdelem, Asimdext, Asimdimm, Asimdins, Asimdmisc, Asimdperm, Asimdsame, Asimdshf, Asimdtbl};
 use asisd::{Asisddiff, Asisdelem, Asisdmisc, Asisdone, Asisdpair, Asisdsame, Asisdshf};
 use control::{Barriers, BranchImm, BranchReg, Compbranch, Condbranch, Exception, Hints, Pstate, Systeminstrs, Systemmove, Testbranch};
+use crypto::{Cryptoaes, Cryptosha2, Cryptosha3};
 use dpimm::{AddsubImm, Bitfield, Extract, LogImm, Movewide, Pcreladdr};
 use dpreg::{AddsubCarry, AddsubExt, AddsubShift, CondcmpImm, CondcmpReg, Condsel, Dp1src, Dp2src, Dp3src, LogShift};
 use float::{Float2fix, Float2int, Floatccmp, Floatcmp, Floatdp1, Floatdp2, Floatdp3, Floatimm, Floatsel};
@@ -125,6 +127,9 @@ pub(crate) enum Encoding {
     Condsel(Condsel),
     Dp3src(Dp3src),
     // simd_dp
+    Cryptoaes(Cryptoaes),
+    Cryptosha3(Cryptosha3),
+    Cryptosha2(Cryptosha2),
     Asisdone(Asisdone),
     Asisdmisc(Asisdmisc),
     Asisdpair(Asisdpair),
@@ -204,7 +209,7 @@ impl Encoding {
             Self::LdstUnpriv(_) => Class::LoadStoreUnprivileged,
             Self::LdstRegoff(_) => Class::LoadStoreRegisterOffset,
             Self::LdstPos(_) => Class::LoadStoreUnsignedImmediate,
-            Self::Dp2src(_) => Class::DataProcessing2Source,
+            Self::Dp2src(e) => e.class(),
             Self::Dp1src(_) => Class::DataProcessing1Source,
             Self::LogShift(_) => Class::LogicalShiftedRegister,
             Self::AddsubShift(_) => Class::AddSubShiftedRegister,
@@ -214,6 +219,9 @@ impl Encoding {
             Self::CondcmpImm(_) => Class::ConditionalCompareImmediate,
             Self::Condsel(_) => Class::ConditionalSelect,
             Self::Dp3src(_) => Class::DataProcessing3Source,
+            Self::Cryptoaes(_) => Class::CryptoAes,
+            Self::Cryptosha3(_) => Class::CryptoShaThreeRegister,
+            Self::Cryptosha2(_) => Class::CryptoShaTwoRegister,
             Self::Asisdone(_) => Class::SimdScalarCopy,
             Self::Asisdmisc(_) => Class::SimdScalarTwoRegisterMisc,
             Self::Asisdpair(_) => Class::SimdScalarPairwise,
@@ -326,6 +334,15 @@ pub(crate) enum Class {
     FpDataProcessing2Source,
     FpConditionalSelect,
     FpDataProcessing3Source,
+    /// AESE, AESD, AESMC, AESIMC.
+    CryptoAes,
+    /// SHA1C, SHA1P, SHA1M, SHA1SU0, SHA256H, SHA256H2, SHA256SU1.
+    CryptoShaThreeRegister,
+    /// SHA1H, SHA1SU1, SHA256SU0.
+    CryptoShaTwoRegister,
+    /// CRC32B/H/W/X and CRC32CB/CH/CW/CX: the handler reads the size and
+    /// the polynomial from `sz` and `C`.
+    Crc32,
 }
 
 /// An architectural feature this processor implements, by the Arm ARM's
@@ -342,11 +359,29 @@ pub(crate) enum Feature {
     Fp,
     /// FEAT_AdvSIMD: Advanced SIMD.
     AdvSimd,
+    /// FEAT_AES: AESE, AESD, AESMC, AESIMC. FEAT_PMULL, the 64-bit PMULL
+    /// the same ID field advertises, is no encoding of its own: PMULL's
+    /// decode pseudocode checks it.
+    Aes,
+    /// FEAT_SHA1: SHA1C, SHA1P, SHA1M, SHA1H, SHA1SU0, SHA1SU1.
+    Sha1,
+    /// FEAT_SHA256: SHA256H, SHA256H2, SHA256SU0, SHA256SU1.
+    Sha256,
+    /// FEAT_CRC32: CRC32B/H/W/X, CRC32CB/CH/CW/CX.
+    Crc32,
 }
 
 #[cfg(test)]
 impl Feature {
-    pub(crate) const ALL: [Feature; 3] = [Feature::Base, Feature::Fp, Feature::AdvSimd];
+    pub(crate) const ALL: [Feature; 7] = [
+        Feature::Base,
+        Feature::Fp,
+        Feature::AdvSimd,
+        Feature::Aes,
+        Feature::Sha1,
+        Feature::Sha256,
+        Feature::Crc32,
+    ];
 
     /// The name Arm's data gives the feature, `None` for the base set.
     pub(crate) const fn arm_name(self) -> Option<&'static str> {
@@ -354,6 +389,10 @@ impl Feature {
             Self::Base => None,
             Self::Fp => Some("FEAT_FP"),
             Self::AdvSimd => Some("FEAT_AdvSIMD"),
+            Self::Aes => Some("FEAT_AES"),
+            Self::Sha1 => Some("FEAT_SHA1"),
+            Self::Sha256 => Some("FEAT_SHA256"),
+            Self::Crc32 => Some("FEAT_CRC32"),
         }
     }
 }
@@ -385,7 +424,6 @@ impl Encoding {
             | Self::Ldstexclr(_)
             | Self::Ldstord(_)
             | Self::LdstUnpriv(_)
-            | Self::Dp2src(_)
             | Self::Dp1src(_)
             | Self::LogShift(_)
             | Self::AddsubShift(_)
@@ -395,6 +433,10 @@ impl Encoding {
             | Self::CondcmpImm(_)
             | Self::Condsel(_)
             | Self::Dp3src(_) => Feature::Base,
+            Self::Dp2src(e) => e.feature(),
+            Self::Cryptoaes(_) => Feature::Aes,
+            Self::Cryptosha3(e) => e.feature(),
+            Self::Cryptosha2(e) => e.feature(),
             Self::Loadlit(e) => e.feature(),
             Self::LdstnapairOffs(e) => e.feature(),
             Self::LdstpairPost(e) => e.feature(),
@@ -482,6 +524,10 @@ mod tests {
                 Feature::Base => true,
                 Feature::Fp => field(pfr0, 16) != 0xF,
                 Feature::AdvSimd => field(pfr0, 20) != 0xF,
+                Feature::Aes => field(isar0, 4) != 0,
+                Feature::Sha1 => field(isar0, 8) != 0,
+                Feature::Sha256 => field(isar0, 12) != 0,
+                Feature::Crc32 => field(isar0, 16) != 0,
             };
             assert!(advertised, "{feature:?} is not advertised");
             assert!(carried.contains(&feature), "{feature:?} has no encoding");
@@ -489,6 +535,9 @@ mod tests {
         // Half precision would be FP = AdvSIMD = 1; every other
         // instruction-set feature is a nonzero field of these registers.
         assert_eq!((field(pfr0, 16), field(pfr0, 20)), (0, 0), "FP and AdvSIMD, without half precision");
-        assert_eq!((pfr1, isar0, isar1, isar2, isar3), (0, 0, 0, 0, 0));
+        // ID_AA64ISAR0_EL1: AES = 2 (AES and the 64-bit PMULL), SHA1 = 1,
+        // SHA2 = 1 (SHA-256, not SHA-512), CRC32 = 1; nothing else.
+        assert_eq!(isar0, 0x0000_0000_0001_1120);
+        assert_eq!((pfr1, isar1, isar2, isar3), (0, 0, 0, 0));
     }
 }

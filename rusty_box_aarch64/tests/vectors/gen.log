@@ -70,3 +70,9 @@ scalar_shift_fixed: 600 vectors from 1156 encodings
 scalar_elem_fp: 600 vectors from 1289 encodings
 scalar_pair_fp: 600 vectors from 798 encodings
 fp_cvt_precision: 600 vectors from 1582 encodings
+crypto_aes: 200 vectors from 200 encodings
+crypto_sha3: 200 vectors from 226 encodings
+crypto_sha2: 200 vectors from 264 encodings
+pmull_64: 200 vectors from 200 encodings
+crc32: 200 vectors from 402 encodings
+fp_cmp_zero: 600 vectors from 1215 encodings

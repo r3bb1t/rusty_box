@@ -8,6 +8,7 @@
 
 pub mod id;
 
+mod crypto;
 mod decode;
 #[cfg(test)]
 #[path = "../../tests/unit/difftest.rs"]
