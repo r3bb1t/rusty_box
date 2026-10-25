@@ -3788,6 +3788,7 @@ dependencies = [
  "disarm64",
  "disarm64_defn",
  "rusty_box_core",
+ "rusty_box_devices",
  "serde_json",
  "syn 2.0.117",
 ]

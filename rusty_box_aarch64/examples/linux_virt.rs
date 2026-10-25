@@ -119,7 +119,8 @@ fn boot() -> ExitCode {
         debug_stops: args.run.debug_stops(),
         ..VirtConfig::DEFAULT
     };
-    let mut builder = MachineBuilder::new(config).ram(ram).linux(image).command_line(&args.append);
+    let mut builder =
+        common::plug_devices(MachineBuilder::new(config).ram(ram).linux(image).command_line(&args.append), &args.run);
     if let Some(initrd) = &initrd {
         builder = builder.initrd(initrd);
     }

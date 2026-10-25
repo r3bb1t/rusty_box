@@ -3,12 +3,16 @@
 //! guest's UART to stdout while following the script, and the end-of-run
 //! report.
 
+use std::collections::VecDeque;
 use std::io::Write;
 use std::process::ExitCode;
 use std::time::Instant;
 
 use rusty_box_aarch64::cpu::DebugStops;
-use rusty_box_aarch64::{GuestStorage, KeyboardInput, Reg, RunBudget, StopReason, SysReg, Typed, VirtMachine};
+use rusty_box_aarch64::{
+    CursorPos, Dimensions, DisplaySink, GuestStorage, KeyboardInput, MachineBuilder, Redraw, Reg, Refreshed,
+    Resolution, Rgb, RunBudget, StopReason, SysReg, TilePos, Typed, VgaTextModeInfo, VirtMachine,
+};
 use rusty_box_core::ClockHz;
 
 /// Ticks per step: how often the console is drained and typed keys are
@@ -46,12 +50,22 @@ where
     }
 }
 
+/// Which keyboard a script types on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Keys {
+    /// The machine's keyboard: the virtio keyboard if one is plugged in,
+    /// else the terminal's.
+    Machine,
+    /// The keyboard of the terminal on the UART.
+    Terminal,
+}
+
 /// One step of the console script.
 pub enum Action {
     /// Wait until this text has appeared on the console.
     Until(Vec<u8>),
-    /// Type this text on the terminal's keyboard.
-    Type(String),
+    /// Type this text on a keyboard.
+    Type(Keys, String),
 }
 
 /// Whether [`RunArgs::parse_flag`] consumed a flag.
@@ -68,6 +82,12 @@ pub struct RunArgs {
     pub script: Vec<Action>,
     pub stop_on_undefined: bool,
     pub stop_on_bus_fault: bool,
+    /// A virtio-gpu asking the guest for this size.
+    pub display: Option<Resolution>,
+    pub virtio_keyboard: bool,
+    pub virtio_tablet: bool,
+    /// Where to write the display's last frame, as a binary PPM.
+    pub screenshot: Option<String>,
 }
 
 /// How a run ended.
@@ -78,8 +98,85 @@ pub struct Outcome {
 
 /// The usage text for the shared options.
 pub const RUN_USAGE: &str = "[--ips N] [--max-ticks N] [--slice-ticks N]\n\
-     \x20      [--until <console text>]... [--type <keys>]...\n\
-     \x20      [--stop-on-undefined] [--stop-on-bus-fault]";
+     \x20      [--until <console text>]... [--type <keys>]... [--type-serial <keys>]...\n\
+     \x20      [--stop-on-undefined] [--stop-on-bus-fault]\n\
+     \x20      [--display WIDTHxHEIGHT] [--virtio-keyboard] [--virtio-tablet] [--screenshot <file.ppm>]";
+
+/// The display's frames, kept as the host would show them.
+#[derive(Default)]
+pub struct Screen {
+    pub width: u32,
+    pub height: u32,
+    /// Four bytes a pixel, red first.
+    pub rgba: Vec<u8>,
+    pub frames: u64,
+}
+
+impl DisplaySink for Screen {
+    fn dimension_update(&mut self, dims: Dimensions) {
+        self.width = dims.width;
+        self.height = dims.height;
+        self.rgba = vec![0; dims.width as usize * dims.height as usize * 4];
+    }
+
+    fn text_update(&mut self, _previous: &[u8], _current: &[u8], _cursor: Option<CursorPos>, _info: &VgaTextModeInfo) {}
+
+    fn graphics_tile_update(&mut self, rgba: &[u8], at: TilePos) {
+        let stride = self.width as usize * 4;
+        let row_bytes = at.width as usize * 4;
+        for row in 0..at.height as usize {
+            let dst = (at.y as usize + row) * stride + at.x as usize * 4;
+            let src = row * row_bytes;
+            if let (Some(d), Some(s)) = (self.rgba.get_mut(dst..dst + row_bytes), rgba.get(src..src + row_bytes)) {
+                d.copy_from_slice(s);
+            }
+        }
+    }
+
+    fn palette_change(&mut self, _index: u8, _colour: Rgb) -> Redraw {
+        Redraw::NotNeeded
+    }
+
+    fn set_text_charmap(&mut self, _map: usize, _glyphs: &[u8]) {}
+
+    fn clear_screen(&mut self) {
+        self.rgba.fill(0);
+    }
+
+    fn flush(&mut self) {
+        self.frames += 1;
+    }
+}
+
+impl Screen {
+    /// The frame as a binary PPM.
+    pub fn ppm(&self) -> Vec<u8> {
+        let mut out = format!("P6\n{} {}\n255\n", self.width, self.height).into_bytes();
+        for p in self.rgba.chunks_exact(4) {
+            out.extend_from_slice(&p[..3]);
+        }
+        out
+    }
+
+    /// How many pixels are not black.
+    pub fn lit_pixels(&self) -> usize {
+        self.rgba.chunks_exact(4).filter(|p| p[..3] != [0, 0, 0]).count()
+    }
+}
+
+/// Plug the devices `args` asks for into `builder`.
+pub fn plug_devices<'i, B, I>(mut builder: MachineBuilder<'i, B, I>, args: &RunArgs) -> MachineBuilder<'i, B, I> {
+    if let Some(size) = args.display {
+        builder = builder.virtio_display(size);
+    }
+    if args.virtio_keyboard {
+        builder = builder.virtio_keyboard();
+    }
+    if args.virtio_tablet {
+        builder = builder.virtio_tablet();
+    }
+    builder
+}
 
 /// `\r` and `\n` (Enter), `\e` (Escape), `\t` (Tab) and `\\`; everything
 /// else as written.
@@ -111,6 +208,10 @@ impl RunArgs {
             script: Vec::new(),
             stop_on_undefined: false,
             stop_on_bus_fault: false,
+            display: None,
+            virtio_keyboard: false,
+            virtio_tablet: false,
+            screenshot: None,
         }
     }
 
@@ -131,9 +232,20 @@ impl RunArgs {
                 }
             }
             "--until" => self.script.push(Action::Until(unescape(&value(flag)?).into_bytes())),
-            "--type" => self.script.push(Action::Type(unescape(&value(flag)?))),
+            "--type" => self.script.push(Action::Type(Keys::Machine, unescape(&value(flag)?))),
+            "--type-serial" => self.script.push(Action::Type(Keys::Terminal, unescape(&value(flag)?))),
             "--stop-on-undefined" => self.stop_on_undefined = true,
             "--stop-on-bus-fault" => self.stop_on_bus_fault = true,
+            "--display" => {
+                let text = value(flag)?;
+                let (w, h) = text.split_once('x').ok_or("--display takes WIDTHxHEIGHT")?;
+                let width = w.parse::<u32>().map_err(|e| format!("--display width: {e}"))?;
+                let height = h.parse::<u32>().map_err(|e| format!("--display height: {e}"))?;
+                self.display = Some(Resolution::new(width, height));
+            }
+            "--virtio-keyboard" => self.virtio_keyboard = true,
+            "--virtio-tablet" => self.virtio_tablet = true,
+            "--screenshot" => self.screenshot = Some(value(flag)?),
             _ => return Ok(Parsed::NotMine),
         }
         Ok(Parsed::Consumed)
@@ -151,11 +263,26 @@ impl RunArgs {
     }
 }
 
-/// Type as much of `pending` as the terminal takes now, leaving the rest in
-/// it. A character with no key on a US layout goes in as its UTF-8 bytes.
-fn type_pending<S: GuestStorage>(machine: &mut VirtMachine<S>, pending: &mut String) {
+/// Type as much of `pending`, in order, as its keyboards take now, leaving
+/// the rest in it.
+fn type_pending<S: GuestStorage>(machine: &mut VirtMachine<S>, pending: &mut VecDeque<(Keys, String)>) {
+    while let Some((keys, text)) = pending.front_mut() {
+        type_text(machine, *keys, text);
+        if !text.is_empty() {
+            return;
+        }
+        pending.pop_front();
+    }
+}
+
+/// Type as much of `pending` as `keys` takes now, leaving the rest in it. A
+/// character with no key on a US layout goes in as its UTF-8 bytes.
+fn type_text<S: GuestStorage>(machine: &mut VirtMachine<S>, keys: Keys, pending: &mut String) {
     while !pending.is_empty() {
-        let mut keyboard = machine.keyboard();
+        let mut keyboard = match keys {
+            Keys::Machine => machine.keyboard(),
+            Keys::Terminal => machine.terminal_keyboard(),
+        };
         match keyboard.type_text(pending) {
             Typed::All { .. } => pending.clear(),
             Typed::Refused { delivered } => {
@@ -176,18 +303,42 @@ fn type_pending<S: GuestStorage>(machine: &mut VirtMachine<S>, pending: &mut Str
 }
 
 /// Run until the script completes, the tick budget is spent, or the machine
-/// stops, streaming the console to stdout and typing the script's keys as
-/// the terminal takes them.
+/// stops, streaming the console to stdout, typing the script's keys as the
+/// guest takes them, and keeping the display's picture; then write the
+/// screenshot, if one was asked for.
 pub fn run<S: GuestStorage>(machine: &mut VirtMachine<S>, args: &RunArgs) -> Outcome {
+    let mut screen = Screen::default();
+    let outcome = run_with_screen(machine, args, &mut screen);
+    if let Some(mut display) = machine.display() {
+        match display.refresh(&mut screen) {
+            Refreshed::Frame | Refreshed::Unchanged => {}
+        }
+        eprintln!(
+            "display: {}x{} shown, {} frames, {} lit pixels",
+            screen.width,
+            screen.height,
+            screen.frames,
+            screen.lit_pixels()
+        );
+    }
+    if let Some(path) = &args.screenshot {
+        if let Err(e) = std::fs::write(path, screen.ppm()) {
+            eprintln!("{path}: {e}");
+        }
+    }
+    outcome
+}
+
+fn run_with_screen<S: GuestStorage>(machine: &mut VirtMachine<S>, args: &RunArgs, screen: &mut Screen) -> Outcome {
     let mut stdout = std::io::stdout().lock();
     let mut script = args.script.iter();
     let mut current = script.next();
     let mut window: Vec<u8> = Vec::new();
-    let mut pending = String::new();
+    let mut pending: VecDeque<(Keys, String)> = VecDeque::new();
     loop {
         // Run every Type step that is now current; stop at the next Until.
-        while let Some(Action::Type(text)) = current {
-            pending.push_str(text);
+        while let Some(Action::Type(keys, text)) = current {
+            pending.push_back((*keys, text.clone()));
             current = script.next();
         }
         type_pending(machine, &mut pending);
@@ -199,6 +350,12 @@ pub fn run<S: GuestStorage>(machine: &mut VirtMachine<S>, args: &RunArgs) -> Out
             };
         }
         let outcome = machine.step(RunBudget::Ticks(remaining.min(args.slice_ticks)));
+        if let Some(mut display) = machine.display() {
+            // Whether a frame came is the screen's business: it counts them.
+            match display.refresh(screen) {
+                Refreshed::Frame | Refreshed::Unchanged => {}
+            }
+        }
         let out: Vec<u8> = machine.serial(0).map(|mut uart| uart.take_output().collect()).unwrap_or_default();
         if !out.is_empty() {
             if stdout.write_all(&out).and_then(|()| stdout.flush()).is_err() {

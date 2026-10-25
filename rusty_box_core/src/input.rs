@@ -8,6 +8,7 @@
 //! serial-console machine renders it as the bytes a terminal sends
 //! ([`terminal`]).
 
+pub mod pointer;
 pub mod terminal;
 
 /// A key, numbered as Bochs's `BX_KEY_*` enumeration (`gui/gui.h`), so the

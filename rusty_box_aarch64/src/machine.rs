@@ -27,7 +27,13 @@ use rusty_box_core::machine::{Machine, RunOutcome, SerialPort};
 use rusty_box_core::snap::{SnapRead, SnapResult, SnapWrite};
 use rusty_box_core::{ClockHz, Progress, RunBudget, SnapError, VmInstant};
 
-use crate::board::{VirtBoard, FLASH0_BASE, FLASH_BANK_SIZE, RAM_BASE, RAM_LIMIT};
+use crate::board::{Plugged, VirtBoard, VirtioDevices, FLASH0_BASE, FLASH_BANK_SIZE, RAM_BASE, RAM_LIMIT};
+use crate::devices::virtio::input::InputKind;
+use rusty_box_core::input::pointer::{PointerButton, PointerInput, PointerPos, WheelSteps};
+#[cfg(feature = "alloc")]
+use rusty_box_devices::display::sink::{DisplaySink, Refreshed};
+#[cfg(feature = "alloc")]
+use rusty_box_devices::display::Resolution;
 use crate::boot::fdt::{self, Edit, Value};
 use crate::boot::{self, DeviceTreeError, KernelLayout, LinuxImage, PlacementError, DEVICE_TREE_CAPACITY};
 use crate::bus::{le_value, AccessWidth, BusFault, PhysAddr, PhysBus};
@@ -235,6 +241,7 @@ pub struct MachineBuilder<'i, B = NoBoot, I = NoInstrumentation> {
     device_tree: &'i [u8],
     boot: B,
     observer: I,
+    devices: VirtioDevices,
 }
 
 impl<'i> MachineBuilder<'i, NoBoot, NoInstrumentation> {
@@ -247,6 +254,7 @@ impl<'i> MachineBuilder<'i, NoBoot, NoInstrumentation> {
             device_tree: boot::QEMU_VIRT_DEVICE_TREE,
             boot: NoBoot,
             observer: NoInstrumentation,
+            devices: VirtioDevices::NONE,
         }
     }
 }
@@ -275,7 +283,34 @@ impl<'i, B, I> MachineBuilder<'i, B, I> {
             device_tree: self.device_tree,
             boot: self.boot,
             observer,
+            devices: self.devices,
         }
+    }
+
+    /// Plug in a virtio-gpu (QEMU `-device virtio-gpu-device`) whose display
+    /// asks the guest for `preferred` pixels. The guest draws through it —
+    /// Linux's `virtio_gpu` DRM driver and fbcon, EDK2's `VirtioGpuDxe` —
+    /// and the host shows it through [`VirtMachine::display`]. Its resources
+    /// are host memory the guest sizes, hence `alloc`.
+    #[cfg(feature = "alloc")]
+    pub fn virtio_display(mut self, preferred: Resolution) -> Self {
+        self.devices.display = Some(preferred);
+        self
+    }
+
+    /// Plug in a virtio keyboard (QEMU `-device virtio-keyboard-device`).
+    /// [`VirtMachine::keyboard`] then types into it rather than into the
+    /// serial console.
+    pub fn virtio_keyboard(mut self) -> Self {
+        self.devices.keyboard = Plugged::Yes;
+        self
+    }
+
+    /// Plug in a virtio tablet (QEMU `-device virtio-tablet-device`), the
+    /// absolute pointer [`VirtMachine::pointer`] drives.
+    pub fn virtio_tablet(mut self) -> Self {
+        self.devices.tablet = Plugged::Yes;
+        self
     }
 }
 
@@ -307,6 +342,7 @@ impl<'i, I> MachineBuilder<'i, NoBoot, I> {
             device_tree: self.device_tree,
             boot,
             observer: self.observer,
+            devices: self.devices,
         }
     }
 }
@@ -393,7 +429,7 @@ macro_rules! build_methods {
                 let choice = ($choice)(self.boot);
                 let plan = plan(self.device_tree, choice, self.ram)?;
                 let storage = owned_storage(self.ram, choice)?;
-                Ok(assemble(self.config, plan, storage, self.observer))
+                Ok(assemble(self.config, plan, storage, self.observer, self.devices))
             }
         }
 
@@ -412,7 +448,7 @@ macro_rules! build_methods {
                 let choice = ($choice)(self.boot);
                 let plan = plan(self.device_tree, choice, self.ram)?;
                 let storage = lent_storage(self.ram, choice, loan)?;
-                Ok(assemble(self.config, plan, storage, self.observer))
+                Ok(assemble(self.config, plan, storage, self.observer, self.devices))
             }
         }
     };
@@ -595,7 +631,7 @@ fn plan(source_tree: &[u8], choice: BootChoice<'_>, ram: RamSize) -> Result<Plan
 }
 
 /// The machine `plan` describes, in `storage`, started.
-fn assemble<S: GuestStorage, I: Instrumentation>(config: VirtConfig, plan: Plan, storage: S, observer: I) -> VirtMachine<S, I> {
+fn assemble<S: GuestStorage, I: Instrumentation>(config: VirtConfig, plan: Plan, storage: S, observer: I, devices: VirtioDevices) -> VirtMachine<S, I> {
     let Plan { boot, device_tree } = plan;
     let mut cpu = Cpu::new(CpuConfig {
         ips: config.ips,
@@ -605,10 +641,11 @@ fn assemble<S: GuestStorage, I: Instrumentation>(config: VirtConfig, plan: Plan,
     cpu.set_debug_stops(config.debug_stops);
     let mut machine = VirtMachine {
         cpu,
-        board: VirtBoard::new(storage, config.rtc_epoch_seconds),
+        board: VirtBoard::new(storage, config.rtc_epoch_seconds, devices),
         observer,
         config,
         boot,
+        devices,
         device_tree,
         next_event: 0,
         power: PowerState::Running,
@@ -806,6 +843,8 @@ pub struct VirtMachine<S, I = NoInstrumentation> {
     observer: I,
     config: VirtConfig,
     boot: BootRecord,
+    /// The virtio devices it was built with.
+    devices: VirtioDevices,
     device_tree: DeviceTree,
     /// The next tick at which a timer or device output changes by itself.
     next_event: u64,
@@ -1154,12 +1193,47 @@ impl<S: GuestStorage, I: Instrumentation> VirtMachine<S, I> {
         (port == 0).then_some(Serial { board: &mut self.board })
     }
 
-    /// The keyboard of the terminal on the UART: key events become the bytes
-    /// an xterm sends for them.
+    /// The machine's keyboard: the virtio keyboard if the machine was built
+    /// with one, else the keyboard of the terminal on the UART.
     pub fn keyboard(&mut self) -> Keyboard<'_, S> {
+        let target = if self.board.has_input(InputKind::Keyboard) {
+            KeyboardTarget::Virtio
+        } else {
+            KeyboardTarget::Terminal
+        };
         Keyboard {
             board: &mut self.board,
             terminal: &mut self.terminal,
+            target,
+        }
+    }
+
+    /// The keyboard of the terminal on the UART, whatever else is plugged
+    /// in: key events become the bytes an xterm sends for them.
+    pub fn terminal_keyboard(&mut self) -> Keyboard<'_, S> {
+        Keyboard {
+            board: &mut self.board,
+            terminal: &mut self.terminal,
+            target: KeyboardTarget::Terminal,
+        }
+    }
+
+    /// The virtio tablet, if the machine was built with one.
+    pub fn pointer(&mut self) -> Option<Pointer<'_, S>> {
+        if self.board.has_input(InputKind::Tablet) {
+            Some(Pointer { board: &mut self.board })
+        } else {
+            None
+        }
+    }
+
+    /// The virtio-gpu's display, if the machine was built with one.
+    #[cfg(feature = "alloc")]
+    pub fn display(&mut self) -> Option<Display<'_, S>> {
+        if self.devices.display.is_some() {
+            Some(Display { board: &mut self.board })
+        } else {
+            None
         }
     }
 
@@ -1357,6 +1431,7 @@ impl<S: GuestStorage, I: Instrumentation> VirtMachine<S, I> {
             boot: self.boot.tag(),
             kernel_offset,
             initrd_offset,
+            devices: self.devices.mask(),
         }
     }
 
@@ -1391,6 +1466,9 @@ impl<S: GuestStorage, I: Instrumentation> VirtMachine<S, I> {
         self.board.fw_cfg.save(w)?;
         self.board.flash0.save(w)?;
         self.board.flash1.save(w)?;
+        for transport in self.board.virtio.iter().flatten() {
+            transport.save(w)?;
+        }
         match self.board.power_button_release {
             Some(at) => {
                 w.write_bool(true)?;
@@ -1456,6 +1534,9 @@ impl<S: GuestStorage, I: Instrumentation> VirtMachine<S, I> {
         self.board.fw_cfg.restore(r)?;
         self.board.flash0.restore(r)?;
         self.board.flash1.restore(r)?;
+        for transport in self.board.virtio.iter_mut().flatten() {
+            transport.restore(r)?;
+        }
         self.board.power_button_release = if r.read_bool()? {
             Some(VmInstant::from_ticks(r.read_u64()?))
         } else {
@@ -1474,7 +1555,7 @@ impl<S: GuestStorage, I: Instrumentation> VirtMachine<S, I> {
 }
 
 const SNAPSHOT_MAGIC: [u8; 8] = *b"RBA64SNP";
-const SNAPSHOT_VERSION: u32 = 1;
+const SNAPSHOT_VERSION: u32 = 2;
 
 /// Everything about how a machine was built that a snapshot depends on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1489,6 +1570,8 @@ struct Shape {
     boot: u8,
     kernel_offset: u64,
     initrd_offset: u64,
+    /// Which virtio devices are plugged in ([`VirtioDevices::mask`]).
+    devices: u8,
 }
 
 impl Shape {
@@ -1506,7 +1589,8 @@ impl Shape {
         ] {
             w.write_u64(v)?;
         }
-        w.write_u8(self.boot)
+        w.write_u8(self.boot)?;
+        w.write_u8(self.devices)
     }
 
     fn restore<R: SnapRead>(r: &mut R) -> SnapResult<Self> {
@@ -1526,6 +1610,7 @@ impl Shape {
             boot: r.read_u8()?,
             kernel_offset,
             initrd_offset,
+            devices: r.read_u8()?,
         })
     }
 }
@@ -1595,19 +1680,32 @@ impl<S: GuestStorage> Serial<'_, S> {
     }
 }
 
-/// The keyboard of the terminal on the machine's UART.
+/// Where a [`Keyboard`]'s keys go.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeyboardTarget {
+    /// The virtio keyboard, as Linux input events.
+    Virtio,
+    /// The terminal on the UART, as the bytes its keys send.
+    Terminal,
+}
+
+/// A keyboard of the machine: the same key vocabulary and the same verbs as
+/// an x86 machine's PS/2 keyboard ([`KeyboardInput`]).
 ///
-/// `virt` has no keyboard device: what a person types reaches the guest as
-/// the bytes their terminal emulator sends, which is what QEMU's
-/// `-nographic` console carries. This is that terminal's keyboard — the same
-/// key vocabulary and the same verbs as an x86 machine's PS/2 keyboard
-/// ([`KeyboardInput`]), rendered as xterm renders keys. The key verbs are
-/// whole or nothing: a key, a tap or a typed character whose bytes do not
-/// all fit in the serial input buffer is refused, never cut. Raw
-/// [`Keyboard::bytes`] is a paste, and takes as much as fits.
+/// The virtio keyboard ([`MachineBuilder::virtio_keyboard`],
+/// [`VirtMachine::keyboard`]) sends keys as Linux input events, once its
+/// driver is ready. The terminal's ([`VirtMachine::terminal_keyboard`], and
+/// `keyboard` on a machine without a virtio keyboard, where `virt` has no
+/// keyboard device) sends what a person types as the bytes their terminal
+/// emulator sends, which is what QEMU's `-nographic` console carries,
+/// rendered as xterm renders keys. Either way the key verbs are whole or
+/// nothing: a key, a tap or a typed character that does not all fit is
+/// refused, never cut. Raw [`Keyboard::bytes`] goes to the serial console
+/// whatever the keyboard; it is a paste, and takes as much as fits.
 pub struct Keyboard<'m, S> {
     board: &'m mut VirtBoard<S>,
     terminal: &'m mut TerminalKeyboard,
+    target: KeyboardTarget,
 }
 
 impl<S: GuestStorage> Keyboard<'_, S> {
@@ -1620,9 +1718,31 @@ impl<S: GuestStorage> Keyboard<'_, S> {
         self.board.send_serial(bytes)
     }
 
-    /// Apply `events` to the terminal and send what they produce, if all of
-    /// it fits; otherwise change nothing.
+    /// Send `events` to the virtio keyboard, or apply them to the terminal
+    /// and send what they produce, if all of it fits; otherwise change
+    /// nothing.
     fn send_events<E: Iterator<Item = (Key, KeyAction)>>(&mut self, events: E) -> bool {
+        match self.target {
+            KeyboardTarget::Virtio => self.send_to_virtio(events),
+            KeyboardTarget::Terminal => self.send_to_terminal(events),
+        }
+    }
+
+    fn send_to_virtio<E: Iterator<Item = (Key, KeyAction)>>(&mut self, events: E) -> bool {
+        // A stroke is at most Shift around a key: four events.
+        let mut batch = [(Key::CtrlL, KeyAction::Press); 4];
+        let mut count = 0;
+        for event in events {
+            let Some(slot) = batch.get_mut(count) else {
+                return false;
+            };
+            *slot = event;
+            count += 1;
+        }
+        self.board.input_event(InputKind::Keyboard, |input, vdev| input.keys(vdev, &batch[..count]))
+    }
+
+    fn send_to_terminal<E: Iterator<Item = (Key, KeyAction)>>(&mut self, events: E) -> bool {
         let mut terminal = *self.terminal;
         let mut out = [0u8; 32];
         let mut len = 0;
@@ -1665,6 +1785,68 @@ impl<S: GuestStorage> KeyboardInput for Keyboard<'_, S> {
             delivered += 1;
         }
         Typed::All { delivered }
+    }
+}
+
+/// The virtio tablet ([`MachineBuilder::virtio_tablet`]): an absolute
+/// pointer, the same verbs every rusty_box machine's pointer has
+/// ([`PointerInput`]). An event reaches the guest once the tablet's driver
+/// is ready; before that, every one is refused.
+pub struct Pointer<'m, S> {
+    board: &'m mut VirtBoard<S>,
+}
+
+impl<S: GuestStorage> PointerInput for Pointer<'_, S> {
+    fn move_to(&mut self, pos: PointerPos) -> bool {
+        self.board.input_event(InputKind::Tablet, |input, vdev| input.move_to(vdev, pos))
+    }
+
+    fn button(&mut self, button: PointerButton, action: KeyAction) -> bool {
+        self.board.input_event(InputKind::Tablet, |input, vdev| input.button(vdev, button, action))
+    }
+
+    fn wheel(&mut self, steps: WheelSteps) -> bool {
+        self.board.input_event(InputKind::Tablet, |input, vdev| input.wheel(vdev, steps))
+    }
+}
+
+/// The virtio-gpu's display ([`MachineBuilder::virtio_display`]), as the
+/// host sees it.
+#[cfg(feature = "alloc")]
+pub struct Display<'m, S> {
+    board: &'m mut VirtBoard<S>,
+}
+
+#[cfg(feature = "alloc")]
+impl<S: GuestStorage> Display<'_, S> {
+    /// The size of the picture the guest shows, or `None` while it shows
+    /// none (before its driver sets a scanout).
+    pub fn resolution(&mut self) -> Option<Resolution> {
+        self.board.gpu().and_then(|gpu| gpu.resolution())
+    }
+
+    /// The size the display asks the guest for.
+    pub fn preferred_resolution(&mut self) -> Option<Resolution> {
+        self.board.gpu().map(|gpu| gpu.preferred())
+    }
+
+    /// Ask the guest to show `size` pixels instead, as a host window being
+    /// resized does on QEMU; a size of no pixels says the display is off,
+    /// as a closed window does. A guest whose driver follows display events
+    /// (Linux's `virtio_gpu`) changes mode; the picture changes size when
+    /// it does.
+    pub fn request_resolution(&mut self, size: Resolution) {
+        self.board.request_display_size(size);
+    }
+
+    /// Push what changed since the last refresh into `sink`: a new size
+    /// first, then the changed rectangle, with the guest's cursor drawn
+    /// over it.
+    pub fn refresh<D: DisplaySink>(&mut self, sink: &mut D) -> Refreshed {
+        match self.board.gpu() {
+            Some(gpu) => gpu.refresh(sink),
+            None => Refreshed::Unchanged,
+        }
     }
 }
 

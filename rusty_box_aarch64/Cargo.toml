@@ -10,6 +10,9 @@ homepage.workspace = true
 
 [dependencies]
 rusty_box_core = { workspace = true }
+# The display vocabulary (`DisplaySink`, `Resolution`) the virtio-gpu device
+# shows its frames through, shared with the x86 machine's display cards.
+rusty_box_devices = { workspace = true }
 
 [dev-dependencies]
 # Tests save snapshots into a `Vec<u8>`, which is a snapshot sink with `alloc`.

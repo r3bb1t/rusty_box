@@ -10,7 +10,9 @@
 //!
 //! `--until` and `--type` form a script, run in order: wait for text on the
 //! console, then type keys (`\r` is Enter, `\e` Escape). The run succeeds when
-//! the whole script completes.
+//! the whole script completes. `--type` types on the machine's keyboard,
+//! which is the virtio keyboard when `--virtio-keyboard` plugs one in;
+//! `--type-serial` always types on the serial console's terminal.
 //!
 //! The variable store is copied, never written back, unless `--persist-vars`
 //! names a file to save it to. The device tree is QEMU's for this board
@@ -108,7 +110,7 @@ fn boot() -> ExitCode {
         debug_stops: args.run.debug_stops(),
         ..VirtConfig::DEFAULT
     };
-    let mut builder = MachineBuilder::new(config).ram(ram).firmware(&code);
+    let mut builder = common::plug_devices(MachineBuilder::new(config).ram(ram).firmware(&code), &args.run);
     if let Some(vars) = &vars {
         builder = builder.variables(vars);
     }

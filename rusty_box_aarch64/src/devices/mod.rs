@@ -8,4 +8,5 @@ pub mod gicv2;
 pub mod pl011;
 pub mod pl031;
 pub mod pl061;
+pub(crate) mod virtio;
 pub mod virtio_mmio;

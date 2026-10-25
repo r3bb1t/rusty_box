@@ -104,7 +104,7 @@ vocabulary are `rusty_box_core`'s, shared with the x86 machine.
 | Processor | Cortex-A57-shaped ARMv8.0: EL0/EL1 AArch64 only, the whole ARMv8.0 FP and Advanced SIMD instruction set (integer and floating point, vector and scalar, saturation setting FPSR.QC), the Cortex-A57's optional Cryptographic Extension (AES, 64-bit PMULL, SHA-1, SHA-256) and CRC32, as QEMU's `cortex-a57` has them, 4 KiB-granule stage-1 MMU with TLB, exclusives, PSCI over `HVC` as QEMU provides it |
 | Interrupts | GICv2 (no Security Extensions) + GICv2m frame |
 | Timers | EL1 physical and virtual generic timers |
-| Devices | PL011 UART (QEMU's 16-entry receive FIFO), PL031 RTC, PL061 GPIO with QEMU's `gpio-key` power button on line 3, CFI flash ×2 (QEMU `pflash_cfi01` semantics, whole 64 MiB banks decoded), `fw_cfg` (traditional interface, no files), 32 empty virtio-mmio transports, an empty PCIe ECAM/windows |
+| Devices | PL011 UART (QEMU's 16-entry receive FIFO), PL031 RTC, PL061 GPIO with QEMU's `gpio-key` power button on line 3, CFI flash ×2 (QEMU `pflash_cfi01` semantics, whole 64 MiB banks decoded), `fw_cfg` (traditional interface, no files), 32 virtio-mmio transports (QEMU's legacy layout while empty; non-legacy, as QEMU's `force-legacy=false`, once the host plugs in QEMU's 2D `virtio-gpu-device` with its EDID, `virtio-keyboard-device` or `virtio-tablet-device`, which take the highest free ones), an empty PCIe ECAM/windows |
 | Board | QEMU `virt` memory map and IRQ wiring; QEMU 8.2's device tree in `assets/`, its memory node and `/chosen` set per machine |
 | Boot | UEFI firmware from flash; or a Linux `Image`, initramfs and device tree placed as QEMU's `hw/arm/boot.c` places them, entered with the register state its boot stub leaves |
 
@@ -202,6 +202,23 @@ integration tests of the public API.
 - `tests/timer_interrupts.rs`: a hand-written guest drives GIC + timer + `WFI`
   + IRQ entry/`ERET` + PSCI; its outcome is identical for every budget
   slicing, and a snapshot taken mid-wait restores the same future.
+- The virtio devices are driven register by register and ring by ring, as a
+  driver drives them, by a test driver laid out like Linux's
+  (`tests/unit/virtio_driver.rs`): the transport's registers, feature
+  negotiation, resets, interrupt and configuration-change behaviour and
+  every rule whose breach QEMU reports with `virtio_error`
+  (`tests/unit/virtio_transport.rs`); QEMU's keyboard and tablet
+  configuration byte for byte and the events each host action becomes
+  (`tests/unit/virtio_input.rs`); every 2D GPU command and its errors in
+  QEMU's order, frames and the cursor as the host receives them
+  (`tests/unit/virtio_gpu.rs`). The EDID matches QEMU's own generator byte
+  for byte at nine sizes (`tests/vectors/qemu_edid.txt`, from
+  `tests/vectors/gen_qemu_edid.sh`, which builds `edid-generate.c` from a
+  QEMU checkout). Alpine with the three devices binds `virtio_gpu` (`+edid`),
+  shows its console in the framebuffer at the requested size, and receives a
+  key typed on the virtio keyboard in its evdev; a snapshot taken after the
+  drivers bound, restored in place or into a fresh machine, gives the same
+  machine and the same picture as the uninterrupted run.
 - `tests/api.rs`: the host API with guest-visible assertions — a page-crossing
   store's data abort reporting the page that faulted, the terminal keyboard's
   bytes reaching a polling guest, PSCI power-off and reset, the power button's
@@ -249,5 +266,9 @@ choice is listed here with its evidence.
   advertised) but never fire; no Debug state, no PMU.
 - No instruction or data cache model: cache maintenance is accepted and has
   nothing to act on.
-- No display, keyboard or network device: the console is the UART, and the
-  PCIe bus and virtio-mmio slots are empty.
+- No network or block device, and nothing on the PCIe bus: storage is the
+  initramfs, and the display and input devices are the opt-in virtio ones.
+- UEFI firmware draws nothing on the virtio display: `ArmVirtQemu`'s boot
+  manager (`PlatformBootManagerLibLight`) puts only PCI displays on its
+  console, as it does on QEMU, so the screen waits for the operating
+  system's driver.

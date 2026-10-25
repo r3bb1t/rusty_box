@@ -1,10 +1,11 @@
 # Driving an AArch64 guest from Rust
 
 `rusty_box_aarch64` runs QEMU's `virt` board — a Cortex-A57-shaped ARMv8.0
-processor, a GICv2, a PL011 UART, flash, an RTC and a power button —
-without a human at the console. A program builds a machine, boots UEFI
-firmware or a Linux kernel on it, reads the serial console, types at it, and
-watches what it does, all in process.
+processor, a GICv2, a PL011 UART, flash, an RTC and a power button, and,
+when asked, QEMU's virtio display, keyboard and tablet — without a human at
+the console. A program builds a machine, boots UEFI firmware or a Linux
+kernel on it, reads the serial console or the screen, types at it, points
+at it, and watches what it does, all in process.
 
 The verbs are the ones [automation.md](automation.md) teaches for the x86
 machine: `step` with a `RunBudget`, `serial(n)` and `keyboard()` handles,
@@ -161,10 +162,13 @@ screen to read — the console is the screen.
 
 ## 3. Keys and text
 
-`keyboard()` is the keyboard of the terminal on the UART: key events become
-the bytes an xterm sends for them — letters as characters, Ctrl as control
-codes, cursor and function keys as escape sequences. It implements
-`KeyboardInput`, the trait the x86 machine's PS/2 keyboard implements too:
+`keyboard()` is the machine's keyboard. `virt` has no keyboard device of its
+own, so on a machine built without a virtio keyboard (section 8) it is the
+keyboard of the terminal on the UART, as `terminal_keyboard()` always is: key
+events become the bytes an xterm sends for them — letters as characters,
+Ctrl as control codes, cursor and function keys as escape sequences. It
+implements `KeyboardInput`, the trait the x86 machine's PS/2 keyboard
+implements too:
 
 ```rust
 use rusty_box_aarch64::{Key, KeyAction, KeyboardInput, Typed};
@@ -443,8 +447,71 @@ an image restores only into a machine built the same way — the same RAM,
 images, boot method and clock — and is refused, with nothing changed, by any
 other. Host-side state stays with the host: serial input not yet taken is
 dropped and the terminal's held modifiers released, so type again after a
-restore. A restore that fails part-way through an image leaves the machine
-switched off until `power().reset()`.
+restore; the display's next refresh sends the whole picture. A restore that
+fails part-way through an image leaves the machine switched off until
+`power().reset()`.
+
+---
+
+## 8. A screen, a keyboard and a pointer
+
+QEMU's `virt` takes a display and input devices as `-device` options. The
+builder takes the three QEMU's display front ends drive — `virtio-gpu-device`
+(2D, with QEMU's EDID), `virtio-keyboard-device` and `virtio-tablet-device`
+— and plugs each into the highest free virtio-mmio transport, as QEMU does.
+A board with them has non-legacy transports (QEMU's
+`-global virtio-mmio.force-legacy=false`): these are virtio 1.0 devices,
+which Linux's drivers refuse on a legacy transport.
+
+```rust
+use rusty_box_aarch64::{
+    MachineBuilder, NullDisplay, PointerInput, PointerPos, Refreshed, Resolution, VirtConfig,
+};
+
+let mut machine = MachineBuilder::new(VirtConfig::default())
+    .bare()
+    .virtio_display(Resolution::new(1024, 768))
+    .virtio_keyboard()
+    .virtio_tablet()
+    .build()?;
+
+let mut display = machine.display().expect("built with a display");
+// The size the display asks the guest for, as a QEMU window of that size
+// would: in its display information and its EDID.
+assert_eq!(display.preferred_resolution(), Some(Resolution::new(1024, 768)));
+// No driver has set a scanout yet: the screen is blank at that size.
+assert_eq!(display.resolution(), None);
+assert_eq!(display.refresh(&mut NullDisplay), Refreshed::Frame);
+assert_eq!(display.refresh(&mut NullDisplay), Refreshed::Unchanged);
+// A window resized: a display event the guest's driver answers by
+// changing mode.
+display.request_resolution(Resolution::new(1280, 800));
+
+// The tablet places the pointer anywhere on the picture, whatever its size.
+let mut pointer = machine.pointer().expect("built with a tablet");
+let middle = PointerPos::from_pixel(512, 384, 1024, 768);
+// Nothing has driven the tablet on this bare machine, so it takes nothing.
+assert!(!pointer.move_to(middle));
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+`refresh` pushes what changed since the last refresh into any
+`DisplaySink` — the trait the x86 machine's VGA pushes into, so a front end
+draws either — a new size first, then the changed rectangle as RGBA, with
+the guest's hardware cursor drawn over it. `keyboard()` on such a machine is
+the virtio keyboard: keys reach the guest as Linux input events, each
+followed by a sync, as QEMU's front ends send them; `terminal_keyboard()`
+still types on the serial console. `pointer()` is the tablet: positions on
+`PointerPos`'s 0 to `0x7FFF` scale (`from_pixel` scales a pixel of the
+picture), buttons, and wheel detents, through `PointerInput`.
+
+**Limits.** An input device takes nothing until its driver is ready, and an
+event only when the driver has queued a buffer for each of its parts: a key
+or a move it cannot take whole is refused (`false`), never cut, so offer it
+again after stepping. UEFI firmware built for `virt` (`ArmVirtQemu`) binds the
+display but, as on QEMU, draws its console only on PCI displays, so the
+screen stays blank until the operating system's driver takes it. The display
+needs `alloc`.
 
 ---
 
@@ -488,9 +555,9 @@ An AArch64 machine's runs always end with an outcome, so its `Error` is
 |---|---|---|
 | Budget and progress | `RunBudget`, `Progress` | the same types |
 | Shared verbs | `Machine`, `RunOutcome`, `SerialPort` | the same traits |
-| Keyboard | PS/2 scancodes, `KeyboardInput` | xterm bytes on the UART, `KeyboardInput` |
-| Screen | VGA text and graphics | none: the serial console |
-| Mouse | PS/2 | none |
+| Keyboard | PS/2 scancodes, `KeyboardInput` | xterm bytes on the UART, or the virtio keyboard; `KeyboardInput` |
+| Screen | VGA text and graphics, into a `DisplaySink` | the serial console, or virtio-gpu into a `DisplaySink` |
+| Mouse | PS/2 | the virtio tablet, `PointerInput` |
 | Power | ACPI power button, reset | `gpio-key` power button, PSCI, reset |
 | Registers | `X86Reg`, MSRs by index | `Reg`, `VReg`, `SysReg` by encoding |
 | Observer | `Instrumentation` | `Instrumentation` (its own hooks) |

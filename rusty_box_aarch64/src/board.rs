@@ -19,6 +19,7 @@
 //! (`hw/gpio/gpio_key.c`, `GPIO_KEY_LATENCY`).
 
 use rusty_box_core::{RingBuffer, VmClock, VmInstant};
+use rusty_box_devices::display::Resolution;
 
 use crate::bus::{le_value, store_le, AccessWidth, BusFault, PhysAddr, PhysBus, RegOffset};
 use crate::devices::cfi_flash::{CfiFlash, FlashArray};
@@ -27,7 +28,12 @@ use crate::devices::gicv2::GicV2;
 use crate::devices::pl011::Pl011;
 use crate::devices::pl031::Pl031;
 use crate::devices::pl061::{Pl061, POWER_BUTTON_LINE};
-use crate::devices::virtio_mmio;
+use crate::devices::virtio::input::{Input, InputKind};
+use crate::devices::virtio::queue::GuestRam;
+#[cfg(feature = "alloc")]
+use crate::devices::virtio::gpu::Gpu;
+use crate::devices::virtio::{Device, Transport, Vdev, MAX_DEVICES};
+use crate::devices::virtio_mmio::{self, Layout};
 use crate::storage::GuestStorage;
 
 pub const FLASH0_BASE: u64 = 0x0000_0000;
@@ -65,6 +71,9 @@ pub const RAM_LIMIT: u64 = PCIE_ECAM_BASE - RAM_BASE;
 pub const IRQ_UART0: u32 = 32 + 1;
 pub const IRQ_RTC: u32 = 32 + 2;
 pub const IRQ_GPIO: u32 = 32 + 7;
+/// Virtio-mmio transport `n` raises SPI `16 + n` (QEMU `a15irqmap`
+/// `VIRT_MMIO`).
+pub const IRQ_VIRTIO_BASE: u32 = 32 + 16;
 pub const PPI_VIRTUAL_TIMER: u32 = 16 + 11;
 pub const PPI_PHYSICAL_TIMER: u32 = 16 + 14;
 
@@ -75,6 +84,40 @@ pub const SERIAL_INPUT_CAPACITY: usize = 4096;
 
 /// How long QEMU's `gpio-key` holds the power button down.
 const POWER_BUTTON_HOLD_MICROS: u64 = 100_000;
+
+/// The virtio devices plugged into the board, in the order QEMU would be
+/// given them as `-device` options: the display, the keyboard, the tablet.
+/// Each takes the highest transport the ones before it left free.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct VirtioDevices {
+    /// A virtio-gpu, asking the guest for this size.
+    pub(crate) display: Option<Resolution>,
+    pub(crate) keyboard: Plugged,
+    pub(crate) tablet: Plugged,
+}
+
+/// Whether a device is on the board.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum Plugged {
+    #[default]
+    No,
+    Yes,
+}
+
+impl VirtioDevices {
+    /// None: every transport empty.
+    pub const NONE: Self = Self {
+        display: None,
+        keyboard: Plugged::No,
+        tablet: Plugged::No,
+    };
+
+    /// A bit per device, for a snapshot's record of how a machine was
+    /// built.
+    pub(crate) fn mask(&self) -> u8 {
+        u8::from(self.display.is_some()) | (u8::from(self.keyboard == Plugged::Yes) << 1) | (u8::from(self.tablet == Plugged::Yes) << 2)
+    }
+}
 
 /// Everything on the board's bus.
 pub struct VirtBoard<S> {
@@ -93,10 +136,37 @@ pub struct VirtBoard<S> {
     /// A guest access moved a device's next deadline (the RTC's alarm was
     /// re-armed), so the machine's next event has to be worked out again.
     pub(crate) deadline_moved: bool,
+    /// The virtio devices, each behind its transport.
+    pub(crate) virtio: [Option<Transport>; MAX_DEVICES],
+    /// The register layout of every transport, plugged or empty.
+    pub(crate) mmio_layout: Layout,
 }
 
 impl<S: GuestStorage> VirtBoard<S> {
-    pub(crate) fn new(storage: S, rtc_epoch_seconds: u64) -> Self {
+    pub(crate) fn new(storage: S, rtc_epoch_seconds: u64, devices: VirtioDevices) -> Self {
+        let mut virtio: [Option<Transport>; MAX_DEVICES] = [None, None, None, None];
+        let mut next_slot = (virtio_mmio::TRANSPORT_COUNT - 1) as u8;
+        let mut plug = |device: Device, virtio: &mut [Option<Transport>; MAX_DEVICES]| {
+            if let Some(free) = virtio.iter_mut().find(|t| t.is_none()) {
+                *free = Some(Transport::new(next_slot, device));
+                next_slot -= 1;
+            }
+        };
+        #[cfg(feature = "alloc")]
+        if let Some(size) = devices.display {
+            plug(Device::Gpu(Gpu::new(size)), &mut virtio);
+        }
+        if devices.keyboard == Plugged::Yes {
+            plug(Device::Input(Input::new(InputKind::Keyboard)), &mut virtio);
+        }
+        if devices.tablet == Plugged::Yes {
+            plug(Device::Input(Input::new(InputKind::Tablet)), &mut virtio);
+        }
+        let mmio_layout = if virtio.iter().any(Option::is_some) {
+            Layout::Modern
+        } else {
+            Layout::Legacy
+        };
         Self {
             storage,
             flash0: CfiFlash::new(FLASH_BANK_SIZE),
@@ -109,7 +179,61 @@ impl<S: GuestStorage> VirtBoard<S> {
             serial_input: RingBuffer::new(),
             power_button_release: None,
             deadline_moved: false,
+            virtio,
+            mmio_layout,
         }
+    }
+
+    /// The transport at `slot`, if a device is plugged into it.
+    fn transport_mut(&mut self, slot: u64) -> Option<&mut Transport> {
+        self.virtio.iter_mut().flatten().find(|t| u64::from(t.slot()) == slot)
+    }
+
+    /// The virtio input device of `kind`, if one is plugged in.
+    pub(crate) fn has_input(&self, kind: InputKind) -> bool {
+        self.virtio.iter().flatten().any(|t| t.input_kind() == Some(kind))
+    }
+
+    /// Have the virtio input device of `kind` send the guest what `send`
+    /// sends. `false` when there is no such device or it delivered nothing.
+    pub(crate) fn input_event<F: FnOnce(&mut Input, &mut Vdev<'_, '_>) -> bool>(&mut self, kind: InputKind, send: F) -> bool {
+        let Some(transport) = self.virtio.iter_mut().flatten().find(|t| t.input_kind() == Some(kind)) else {
+            return false;
+        };
+        let mut ram = GuestRam::new(self.storage.ram_mut());
+        let delivered = transport.with_device(&mut ram, |device, vdev| match device {
+            Device::Input(input) => send(input, vdev),
+            #[cfg(feature = "alloc")]
+            Device::Gpu(_) => false,
+        });
+        self.sync_device_lines();
+        delivered
+    }
+
+    /// The virtio-gpu, if one is plugged in.
+    #[cfg(feature = "alloc")]
+    pub(crate) fn gpu(&mut self) -> Option<&mut Gpu> {
+        self.virtio.iter_mut().flatten().find_map(|t| match &mut t.device {
+            Device::Gpu(gpu) => Some(gpu),
+            Device::Input(_) => None,
+        })
+    }
+
+    /// Ask the guest for a display of `size`, as a QEMU window being resized
+    /// does (`virtio_gpu_ui_info`): a display event and a
+    /// configuration-change interrupt.
+    #[cfg(feature = "alloc")]
+    pub(crate) fn request_display_size(&mut self, size: Resolution) {
+        for transport in self.virtio.iter_mut().flatten() {
+            let changed = match &mut transport.device {
+                Device::Gpu(gpu) => gpu.ui_info(size),
+                Device::Input(_) => false,
+            };
+            if changed {
+                transport.notify_config();
+            }
+        }
+        self.sync_device_lines();
     }
 
     /// QEMU's system reset of the board's devices. The RTC keeps counting
@@ -126,6 +250,9 @@ impl<S: GuestStorage> VirtBoard<S> {
         self.gpio = Pl061::new();
         self.fw_cfg = FwCfg::new();
         self.power_button_release = None;
+        for transport in self.virtio.iter_mut().flatten() {
+            transport.reset();
+        }
         self.pump_serial_input();
         self.sync_device_lines();
     }
@@ -136,6 +263,9 @@ impl<S: GuestStorage> VirtBoard<S> {
         self.gic.set_line(IRQ_UART0, uart);
         self.gic.set_line(IRQ_RTC, rtc);
         self.gic.set_line(IRQ_GPIO, gpio);
+        for transport in self.virtio.iter().flatten() {
+            self.gic.set_line(IRQ_VIRTIO_BASE + u32::from(transport.slot()), transport.irq());
+        }
     }
 
     /// Drive the timer PPIs.
@@ -318,10 +448,12 @@ impl<S: GuestStorage> VirtBoard<S> {
             VIRTIO_MMIO_BASE,
             virtio_mmio::TRANSPORT_SIZE * virtio_mmio::TRANSPORT_COUNT,
         ) {
-            return Ok(virtio_mmio::read_empty_transport(
-                RegOffset::new(off.get() % virtio_mmio::TRANSPORT_SIZE),
-                width,
-            ));
+            let reg = RegOffset::new(off.get() % virtio_mmio::TRANSPORT_SIZE);
+            let layout = self.mmio_layout;
+            return Ok(match self.transport_mut(off.get() / virtio_mmio::TRANSPORT_SIZE) {
+                Some(transport) => transport.read(reg, width),
+                None => virtio_mmio::read_empty_transport(reg, width, layout),
+            });
         }
         if in_pci_window(a) {
             return Ok(width.value_mask());
@@ -374,11 +506,17 @@ impl<S: GuestStorage> VirtBoard<S> {
             self.sync_device_lines();
             return Ok(());
         }
-        if addr
-            .offset_in(VIRTIO_MMIO_BASE, virtio_mmio::TRANSPORT_SIZE * virtio_mmio::TRANSPORT_COUNT)
-            .is_some()
-            || in_pci_window(a)
-        {
+        if let Some(off) = addr.offset_in(VIRTIO_MMIO_BASE, virtio_mmio::TRANSPORT_SIZE * virtio_mmio::TRANSPORT_COUNT) {
+            let slot = off.get() / virtio_mmio::TRANSPORT_SIZE;
+            let reg = RegOffset::new(off.get() % virtio_mmio::TRANSPORT_SIZE);
+            if let Some(transport) = self.virtio.iter_mut().flatten().find(|t| u64::from(t.slot()) == slot) {
+                let mut ram = GuestRam::new(self.storage.ram_mut());
+                transport.write(&mut ram, reg, width, value);
+                self.sync_device_lines();
+            }
+            return Ok(());
+        }
+        if in_pci_window(a) {
             return Ok(());
         }
         Err(BusFault::Unmapped)

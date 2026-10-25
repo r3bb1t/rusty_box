@@ -58,7 +58,20 @@ pub use machine::{
     BatchOutcome, BuildError, MachineBuilder, MemoryError, MemoryLoan, OnResetRequest, PowerState, RamSize,
     StopReason, VirtConfig, VirtMachine,
 };
+pub use board::{Plugged, VirtioDevices};
+#[cfg(feature = "alloc")]
+pub use machine::Display;
+pub use machine::{Keyboard, Pointer};
+pub use rusty_box_core::input::pointer::{PointerButton, PointerInput, PointerPos, WheelSteps};
 pub use rusty_box_core::input::{Key, KeyAction, KeyboardInput, Typed};
+/// What the display shows through: the size of a picture and the sink a
+/// host implements to receive its frames, with every type its methods take,
+/// shared with the x86 machine.
+pub use rusty_box_devices::display::sink::{
+    CursorPos, Dimensions, DisplaySink, NullDisplay, Redraw, Refreshed, Rgb, TilePos,
+};
+pub use rusty_box_devices::display::vga::VgaTextModeInfo;
+pub use rusty_box_devices::display::Resolution;
 /// The verbs every rusty_box machine shares, whatever it emulates.
 pub use rusty_box_core::machine::{Machine, RunOutcome, SerialPort};
 pub use rusty_box_core::{Progress, RunBudget};
