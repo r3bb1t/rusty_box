@@ -1,0 +1,516 @@
+//! The processor: architectural state and the interpreter that advances it.
+//!
+//! One `Cpu` is one processing element. It executes against any
+//! [`PhysBus`](crate::bus::PhysBus) through `Cpu::step`, and keeps the
+//! machine's time: `icount` is the tick count every clock in the machine is
+//! derived from (one tick per instruction, time skipped forward only while the
+//! processor waits for an interrupt).
+
+pub mod id;
+
+mod decode;
+#[cfg(test)]
+mod difftest;
+mod dp;
+mod exception;
+mod exec;
+mod fp;
+mod fp_estimate;
+mod ldst;
+mod mmu;
+mod simd;
+mod simd_arith;
+mod simd_fp;
+mod sysreg;
+mod system;
+mod timer;
+
+use rusty_box_core::{ClockHz, RingBuffer, VmClock, VmInstant};
+
+pub use exception::ExceptionClass;
+pub use exec::{DebugStops, Step, StopCause, UndefinedInsn};
+pub use mmu::Tlb;
+pub use timer::TimerLines;
+
+/// An exception level this processor implements.
+///
+/// Closed (R5): EL2 and EL3 do not exist on this core, and an `ERET` that
+/// names them is an illegal exception return, not a third variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum El {
+    El0,
+    El1,
+}
+
+impl El {
+    #[inline]
+    pub const fn index(self) -> u64 {
+        match self {
+            Self::El0 => 0,
+            Self::El1 => 1,
+        }
+    }
+}
+
+/// `PSTATE`, held as separate fields; [`Pstate::to_spsr`] and
+/// [`Pstate::from_spsr`] are the only conversions to and from the packed
+/// `SPSR` layout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Pstate {
+    pub n: bool,
+    pub z: bool,
+    pub c: bool,
+    pub v: bool,
+    pub d: bool,
+    pub a: bool,
+    pub i: bool,
+    pub f: bool,
+    pub el: El,
+    /// `PSTATE.SP`: true selects `SP_ELx` for the current EL, false `SP_EL0`.
+    pub sp_sel: bool,
+    pub ss: bool,
+    pub il: bool,
+}
+
+impl Pstate {
+    /// The state out of reset: EL1 with `SP_EL1`, every interrupt masked.
+    pub const RESET: Self = Self {
+        n: false,
+        z: false,
+        c: false,
+        v: false,
+        d: true,
+        a: true,
+        i: true,
+        f: true,
+        el: El::El1,
+        sp_sel: true,
+        ss: false,
+        il: false,
+    };
+
+    /// The `SPSR_ELx` encoding of this state (AArch64 form, M[4] = 0).
+    pub const fn to_spsr(self) -> u64 {
+        let mut v = 0u64;
+        v |= (self.n as u64) << 31;
+        v |= (self.z as u64) << 30;
+        v |= (self.c as u64) << 29;
+        v |= (self.v as u64) << 28;
+        v |= (self.ss as u64) << 21;
+        v |= (self.il as u64) << 20;
+        v |= (self.d as u64) << 9;
+        v |= (self.a as u64) << 8;
+        v |= (self.i as u64) << 7;
+        v |= (self.f as u64) << 6;
+        v |= self.el.index() << 2;
+        v |= self.sp_sel as u64;
+        v
+    }
+
+    /// `NZCV` in its register layout (bits 31:28).
+    #[inline]
+    pub const fn nzcv(self) -> u64 {
+        ((self.n as u64) << 31) | ((self.z as u64) << 30) | ((self.c as u64) << 29) | ((self.v as u64) << 28)
+    }
+
+    #[inline]
+    pub fn set_nzcv(&mut self, bits: u64) {
+        self.n = bits & (1 << 31) != 0;
+        self.z = bits & (1 << 30) != 0;
+        self.c = bits & (1 << 29) != 0;
+        self.v = bits & (1 << 28) != 0;
+    }
+
+    /// `DAIF` in its register layout (bits 9:6).
+    #[inline]
+    pub const fn daif(self) -> u64 {
+        ((self.d as u64) << 9) | ((self.a as u64) << 8) | ((self.i as u64) << 7) | ((self.f as u64) << 6)
+    }
+
+    #[inline]
+    pub fn set_daif(&mut self, bits: u64) {
+        self.d = bits & (1 << 9) != 0;
+        self.a = bits & (1 << 8) != 0;
+        self.i = bits & (1 << 7) != 0;
+        self.f = bits & (1 << 6) != 0;
+    }
+}
+
+/// Construction parameters for a processor.
+#[derive(Debug, Clone, Copy)]
+pub struct CpuConfig {
+    /// Emulated instructions per second: the rate of the tick count, and so
+    /// of every clock derived from it (Bochs `cpu: ips`).
+    pub ips: ClockHz,
+    /// The system counter's frequency, which is what `CNTPCT_EL0` counts at
+    /// and what `CNTFRQ_EL0` reads at reset. QEMU's `virt` (machine types
+    /// before 9.0) runs it at 62.5 MHz.
+    pub counter_hz: ClockHz,
+    /// The address execution starts at.
+    pub reset_pc: u64,
+}
+
+impl CpuConfig {
+    /// QEMU's `virt` system counter frequency (`GTIMER_SCALE` 16 ns).
+    pub const QEMU_VIRT_COUNTER_HZ: ClockHz = match ClockHz::new(62_500_000) {
+        Some(hz) => hz,
+        None => ClockHz::BOCHS_DEFAULT,
+    };
+}
+
+/// What the processor is doing between instructions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Activity {
+    Running,
+    /// Executed `WFI` (or a PSCI `CPU_SUSPEND`) and waits for a wake-up event:
+    /// any pending physical interrupt, masked or not.
+    WaitingForInterrupt,
+}
+
+/// The local exclusive monitor (`LDXR`/`STXR`), tracking one physical
+/// granule. Single processor: there is no global monitor to model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ExclusiveMonitor {
+    pub(crate) armed: bool,
+    pub(crate) addr: u64,
+    pub(crate) bytes: u64,
+}
+
+/// System registers that are plain storage, plus the ones whose effects the
+/// MMU, exception and timer code read. The access rules live in `sysreg.rs`.
+#[derive(Debug, Clone)]
+pub(crate) struct SysRegs {
+    pub(crate) sctlr_el1: u64,
+    pub(crate) actlr_el1: u64,
+    pub(crate) cpacr_el1: u64,
+    pub(crate) ttbr0_el1: u64,
+    pub(crate) ttbr1_el1: u64,
+    pub(crate) tcr_el1: u64,
+    pub(crate) spsr_el1: u64,
+    pub(crate) elr_el1: u64,
+    pub(crate) esr_el1: u64,
+    pub(crate) far_el1: u64,
+    pub(crate) afsr0_el1: u64,
+    pub(crate) afsr1_el1: u64,
+    pub(crate) par_el1: u64,
+    pub(crate) mair_el1: u64,
+    pub(crate) amair_el1: u64,
+    pub(crate) vbar_el1: u64,
+    pub(crate) contextidr_el1: u64,
+    pub(crate) tpidr_el0: u64,
+    pub(crate) tpidrro_el0: u64,
+    pub(crate) tpidr_el1: u64,
+    pub(crate) csselr_el1: u64,
+    pub(crate) cntkctl_el1: u64,
+    pub(crate) cntfrq_el0: u64,
+    pub(crate) cntp_ctl_el0: u64,
+    pub(crate) cntp_cval_el0: u64,
+    pub(crate) cntv_ctl_el0: u64,
+    pub(crate) cntv_cval_el0: u64,
+    pub(crate) mdscr_el1: u64,
+    pub(crate) mdccint_el1: u64,
+    pub(crate) oslsr_el1: u64,
+    pub(crate) osdlr_el1: u64,
+    pub(crate) oseccr_el1: u64,
+    pub(crate) dbgprcr_el1: u64,
+    pub(crate) dbgclaim: u64,
+    pub(crate) dbgbvr: [u64; 2],
+    pub(crate) dbgbcr: [u64; 2],
+    pub(crate) dbgwvr: [u64; 2],
+    pub(crate) dbgwcr: [u64; 2],
+}
+
+impl SysRegs {
+    fn reset(counter_hz: ClockHz) -> Self {
+        Self {
+            sctlr_el1: id::SCTLR_EL1_RESET,
+            actlr_el1: 0,
+            cpacr_el1: 0,
+            ttbr0_el1: 0,
+            ttbr1_el1: 0,
+            tcr_el1: 0,
+            spsr_el1: 0,
+            elr_el1: 0,
+            esr_el1: 0,
+            far_el1: 0,
+            afsr0_el1: 0,
+            afsr1_el1: 0,
+            par_el1: 0,
+            mair_el1: 0,
+            amair_el1: 0,
+            vbar_el1: 0,
+            contextidr_el1: 0,
+            tpidr_el0: 0,
+            tpidrro_el0: 0,
+            tpidr_el1: 0,
+            csselr_el1: 0,
+            cntkctl_el1: 0,
+            cntfrq_el0: counter_hz.get(),
+            cntp_ctl_el0: 0,
+            cntp_cval_el0: 0,
+            cntv_ctl_el0: 0,
+            cntv_cval_el0: 0,
+            mdscr_el1: 0,
+            mdccint_el1: 0,
+            oslsr_el1: id::OSLSR_EL1_RESET,
+            osdlr_el1: 0,
+            oseccr_el1: 0,
+            dbgprcr_el1: 0,
+            dbgclaim: 0,
+            dbgbvr: [0; 2],
+            dbgbcr: [0; 2],
+            dbgwvr: [0; 2],
+            dbgwcr: [0; 2],
+        }
+    }
+}
+
+/// How many recently executed instruction addresses a processor remembers for
+/// post-mortem diagnostics.
+pub const PC_HISTORY: usize = 64;
+
+/// One AArch64 processing element.
+pub struct Cpu {
+    pub(crate) x: [u64; 31],
+    pub(crate) sp_el0: u64,
+    pub(crate) sp_el1: u64,
+    pub(crate) pc: u64,
+    pub(crate) pstate: Pstate,
+    /// SIMD&FP registers V0..V31, little-endian lanes in a `u128`.
+    pub(crate) v: [u128; 32],
+    pub(crate) fpcr: u64,
+    pub(crate) fpsr: u64,
+    pub(crate) sys: SysRegs,
+    pub(crate) monitor: ExclusiveMonitor,
+    pub(crate) tlb: Tlb,
+    pub(crate) decode_cache: decode::DecodeCache,
+    pub(crate) activity: Activity,
+    /// Ticks since reset: one per retired (or faulting) instruction, plus the
+    /// span skipped while waiting for an interrupt.
+    pub(crate) icount: u64,
+    pub(crate) ips: ClockHz,
+    pub(crate) counter_hz: ClockHz,
+    /// Set when a register write may have changed a timer's output line or
+    /// next deadline; the machine re-evaluates and clears it.
+    pub(crate) timer_dirty: bool,
+    /// The interrupt controller's IRQ and FIQ outputs, as the machine last
+    /// sampled them. `ISR_EL1` reads them and `WFI` wakes on them.
+    pub(crate) irq_line: bool,
+    pub(crate) fiq_line: bool,
+    pub(crate) debug_stops: DebugStops,
+    pub(crate) pc_history: RingBuffer<u64, PC_HISTORY>,
+}
+
+impl Cpu {
+    /// A processor in its reset state.
+    pub fn new(config: CpuConfig) -> Self {
+        Self {
+            x: [0; 31],
+            sp_el0: 0,
+            sp_el1: 0,
+            pc: config.reset_pc,
+            pstate: Pstate::RESET,
+            v: [0; 32],
+            fpcr: 0,
+            fpsr: 0,
+            sys: SysRegs::reset(config.counter_hz),
+            monitor: ExclusiveMonitor {
+                armed: false,
+                addr: 0,
+                bytes: 0,
+            },
+            tlb: Tlb::new(),
+            decode_cache: decode::DecodeCache::new(),
+            activity: Activity::Running,
+            icount: 0,
+            ips: config.ips,
+            counter_hz: config.counter_hz,
+            timer_dirty: true,
+            irq_line: false,
+            fiq_line: false,
+            debug_stops: DebugStops {
+                on_undefined: false,
+                on_bus_fault: false,
+            },
+            pc_history: RingBuffer::new(),
+        }
+    }
+
+    /// Drive the processor's interrupt inputs from the interrupt controller.
+    #[inline]
+    pub fn set_interrupt_lines(&mut self, irq: bool, fiq: bool) {
+        self.irq_line = irq;
+        self.fiq_line = fiq;
+    }
+
+    /// Whether an interrupt input is asserted and unmasked, so that it would
+    /// be taken at the next instruction boundary.
+    #[inline]
+    pub fn interrupt_deliverable(&self) -> bool {
+        (self.irq_line && !self.pstate.i) || (self.fiq_line && !self.pstate.f)
+    }
+
+    /// Take the highest-priority deliverable interrupt, if any (FIQ before
+    /// IRQ); [`Cpu::interrupt_deliverable`] says beforehand whether one will
+    /// be taken.
+    pub fn deliver_interrupt(&mut self) {
+        if self.fiq_line && !self.pstate.f {
+            self.take_fiq();
+        } else if self.irq_line && !self.pstate.i {
+            self.take_irq();
+        }
+    }
+
+    /// Leave the wait state if a wake-up event is pending: any asserted
+    /// physical interrupt, masked by `PSTATE` or not (Arm ARM D1.16.2).
+    /// Returns whether the processor is now running.
+    pub fn wake_if_pending(&mut self) -> bool {
+        if self.activity == Activity::WaitingForInterrupt && (self.irq_line || self.fiq_line) {
+            self.activity = Activity::Running;
+        }
+        self.activity == Activity::Running
+    }
+
+    /// Advance time while waiting, to `until` (never backwards).
+    pub fn wait_until(&mut self, until: VmInstant) {
+        if until.ticks() > self.icount {
+            self.icount = until.ticks();
+        }
+    }
+
+    /// The address of the next instruction to execute.
+    #[inline]
+    pub fn pc(&self) -> u64 {
+        self.pc
+    }
+
+    /// General-purpose register `n` (0..=30); 31 reads as zero (XZR).
+    #[inline]
+    pub fn xreg(&self, n: u32) -> u64 {
+        self.x_or_zr(n)
+    }
+
+    /// The stack pointer currently selected by `PSTATE.SP` and the EL.
+    #[inline]
+    pub fn sp(&self) -> u64 {
+        self.sp_current()
+    }
+
+    #[inline]
+    pub fn pstate(&self) -> Pstate {
+        self.pstate
+    }
+
+    #[inline]
+    pub fn el(&self) -> El {
+        self.pstate.el
+    }
+
+    #[inline]
+    pub fn activity(&self) -> Activity {
+        self.activity
+    }
+
+    /// SIMD&FP register `n` as 128 bits.
+    #[inline]
+    pub fn vreg(&self, n: u32) -> u128 {
+        self.v[(n & 31) as usize]
+    }
+
+    /// Emulated time since reset.
+    #[inline]
+    pub fn now(&self) -> VmInstant {
+        VmInstant::from_ticks(self.icount)
+    }
+
+    /// The reading devices see for an access made now.
+    #[inline]
+    pub fn clock(&self) -> VmClock {
+        VmClock::new(self.now(), self.ips)
+    }
+
+    /// The rate of the tick count.
+    #[inline]
+    pub fn ips(&self) -> ClockHz {
+        self.ips
+    }
+
+    /// Recently executed instruction addresses, oldest first.
+    pub fn recent_pcs(&self) -> rusty_box_core::ring_buffer::Iter<'_, u64, PC_HISTORY> {
+        self.pc_history.iter()
+    }
+
+    /// Read a system register by its `MRS` encoding fields, with EL1
+    /// privilege and no side effects beyond those of a guest `MRS` — for
+    /// debuggers and tests. `None` for an encoding this core does not
+    /// implement.
+    pub fn read_sysreg(&self, op0: u32, op1: u32, crn: u32, crm: u32, op2: u32) -> Option<u64> {
+        sysreg::debug_read(self, sysreg::SysRegKey::new(op0, op1, crn, crm, op2))
+    }
+
+    // ----- register file -----
+
+    #[inline]
+    pub(crate) fn x_or_zr(&self, n: u32) -> u64 {
+        if n == 31 {
+            0
+        } else {
+            self.x[n as usize]
+        }
+    }
+
+    #[inline]
+    pub(crate) fn set_x_or_zr(&mut self, n: u32, value: u64) {
+        if n != 31 {
+            self.x[n as usize] = value;
+        }
+    }
+
+    /// Register `n` where 31 names the stack pointer.
+    #[inline]
+    pub(crate) fn x_or_sp(&self, n: u32) -> u64 {
+        if n == 31 {
+            self.sp_current()
+        } else {
+            self.x[n as usize]
+        }
+    }
+
+    #[inline]
+    pub(crate) fn set_x_or_sp(&mut self, n: u32, value: u64) {
+        if n == 31 {
+            self.set_sp_current(value);
+        } else {
+            self.x[n as usize] = value;
+        }
+    }
+
+    /// Write a result of the given width: a 32-bit result zero-extends.
+    #[inline]
+    pub(crate) fn set_x_or_zr_sized(&mut self, n: u32, value: u64, sf: bool) {
+        self.set_x_or_zr(n, if sf { value } else { value & 0xFFFF_FFFF });
+    }
+
+    #[inline]
+    pub(crate) fn set_x_or_sp_sized(&mut self, n: u32, value: u64, sf: bool) {
+        self.set_x_or_sp(n, if sf { value } else { value & 0xFFFF_FFFF });
+    }
+
+    #[inline]
+    pub(crate) fn sp_current(&self) -> u64 {
+        if self.pstate.sp_sel && self.pstate.el == El::El1 {
+            self.sp_el1
+        } else {
+            self.sp_el0
+        }
+    }
+
+    #[inline]
+    pub(crate) fn set_sp_current(&mut self, value: u64) {
+        if self.pstate.sp_sel && self.pstate.el == El::El1 {
+            self.sp_el1 = value;
+        } else {
+            self.sp_el0 = value;
+        }
+    }
+}

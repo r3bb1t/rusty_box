@@ -1,0 +1,164 @@
+//! The guest-physical address space a processor reaches, and the units that
+//! name it.
+//!
+//! A physical address is not a virtual address (R4): the MMU is the only thing
+//! that turns one into the other, and these are distinct types so that a
+//! device can never be handed an address the MMU has not translated.
+
+use rusty_box_core::VmClock;
+
+/// A guest-physical address.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PhysAddr(u64);
+
+impl PhysAddr {
+    #[inline]
+    pub const fn new(addr: u64) -> Self {
+        Self(addr)
+    }
+
+    #[inline]
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+
+    /// The offset of this address into a window starting at `base`, if it is
+    /// inside a window of `len` bytes.
+    #[inline]
+    pub const fn offset_in(self, base: u64, len: u64) -> Option<RegOffset> {
+        if self.0 >= base && self.0 - base < len {
+            Some(RegOffset(self.0 - base))
+        } else {
+            None
+        }
+    }
+}
+
+/// How far into a device's register window an access landed.
+///
+/// Distinct from [`PhysAddr`] (R4): a device decodes offsets, never absolute
+/// addresses, so the same model works wherever a board places it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RegOffset(u64);
+
+impl RegOffset {
+    #[inline]
+    pub const fn new(offset: u64) -> Self {
+        Self(offset)
+    }
+
+    #[inline]
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+/// The byte width of one bus access.
+///
+/// Wider architectural accesses (a 128-bit Q register, a pair) are split by
+/// the processor into accesses of these widths before they reach the bus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccessWidth {
+    Byte,
+    Half,
+    Word,
+    Dword,
+}
+
+impl AccessWidth {
+    /// The width whose size is `1 << log2` bytes, for `log2` in `0..=3`.
+    #[inline]
+    pub const fn from_log2(log2: u32) -> Option<Self> {
+        match log2 {
+            0 => Some(Self::Byte),
+            1 => Some(Self::Half),
+            2 => Some(Self::Word),
+            3 => Some(Self::Dword),
+            _ => None,
+        }
+    }
+
+    #[inline]
+    pub const fn bytes(self) -> u64 {
+        match self {
+            Self::Byte => 1,
+            Self::Half => 2,
+            Self::Word => 4,
+            Self::Dword => 8,
+        }
+    }
+
+    #[inline]
+    pub const fn log2(self) -> u32 {
+        match self {
+            Self::Byte => 0,
+            Self::Half => 1,
+            Self::Word => 2,
+            Self::Dword => 3,
+        }
+    }
+
+    /// The mask selecting the low `bytes()` bytes of a 64-bit value.
+    #[inline]
+    pub const fn value_mask(self) -> u64 {
+        match self {
+            Self::Byte => 0xFF,
+            Self::Half => 0xFFFF,
+            Self::Word => 0xFFFF_FFFF,
+            Self::Dword => u64::MAX,
+        }
+    }
+}
+
+/// The little-endian value of a 1-, 2-, 4- or 8-byte slice.
+#[inline(always)]
+pub(crate) fn le_value(bytes: &[u8]) -> u64 {
+    match bytes.len() {
+        1 => u64::from(bytes[0]),
+        2 => bytes.try_into().map_or(0, |b| u64::from(u16::from_le_bytes(b))),
+        4 => bytes.try_into().map_or(0, |b| u64::from(u32::from_le_bytes(b))),
+        _ => bytes.try_into().map_or(0, u64::from_le_bytes),
+    }
+}
+
+/// Store `value` little-endian into a 1-, 2-, 4- or 8-byte slice.
+#[inline(always)]
+pub(crate) fn store_le(bytes: &mut [u8], value: u64) {
+    match bytes.len() {
+        1 => bytes[0] = value as u8,
+        2 => bytes.copy_from_slice(&(value as u16).to_le_bytes()),
+        4 => bytes.copy_from_slice(&(value as u32).to_le_bytes()),
+        _ => bytes.copy_from_slice(&value.to_le_bytes()),
+    }
+}
+
+/// Why the bus could not complete an access.
+///
+/// Closed on purpose (R5): the processor turns every variant into a
+/// synchronous external abort, and a new variant must be decided there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BusFault {
+    /// Nothing decodes this address. QEMU's `virt` raises a synchronous
+    /// external abort for an access to unassigned memory
+    /// (`arm_cpu_do_transaction_failed`); so does this board.
+    Unmapped,
+}
+
+/// The guest-physical address space as the processor sees it.
+///
+/// Static dispatch only (R8): a machine names its bus type. `clock` is the
+/// emulated time of the access, which is all a device needs to answer a read
+/// of a counter or arm a deadline.
+pub trait PhysBus {
+    /// Read `width` bytes at `addr`, little-endian, zero-extended to 64 bits.
+    fn read(&mut self, addr: PhysAddr, width: AccessWidth, clock: VmClock) -> Result<u64, BusFault>;
+
+    /// Write the low `width` bytes of `value` at `addr`, little-endian.
+    fn write(
+        &mut self,
+        addr: PhysAddr,
+        width: AccessWidth,
+        value: u64,
+        clock: VmClock,
+    ) -> Result<(), BusFault>;
+}

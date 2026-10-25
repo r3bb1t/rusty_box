@@ -1,0 +1,29 @@
+[package]
+name = "rusty_box_aarch64"
+description = "AArch64 (ARMv8.0-A) interpreter and a QEMU-virt-compatible board: deterministic, no_std and allocation-free"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+rusty_box_core = { workspace = true }
+# Classifies an instruction word into its A64 encoding (the canonical form, not
+# the disassembly alias). Operand fields are read from the word itself.
+disarm64 = { version = "0.2", default-features = false, features = ["full"] }
+disarm64_defn = { version = "0.2", default-features = false }
+
+[features]
+default = []
+# Additive, as in rusty_box_core: neither changes the shape of the core.
+alloc = ["rusty_box_core/alloc"]
+std = ["alloc", "rusty_box_core/std"]
+
+[lints]
+workspace = true
+
+[[example]]
+name = "uefi_virt"
+required-features = ["std"]

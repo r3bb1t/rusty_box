@@ -1,0 +1,449 @@
+//! Advanced SIMD floating point (Arm ARM C7.2), vector and scalar: the FP
+//! opcodes of the three-same, two-register-miscellaneous, shift-by-immediate
+//! (fixed-point conversions), by-element, across-lanes and scalar-pairwise
+//! classes. Every element goes through the operations in `fp` under one
+//! `FpEnv` per instruction, so each lane's exceptions accumulate into FPSR.
+//!
+//! As in `simd_arith`, a scalar form is the vector operation on one element,
+//! and building results up from zero gives the zeroed upper bits. A vector
+//! of doubles needs `Q = 1`.
+
+use super::exec::{bit, bits, ExecResult, Flow};
+use super::fp::{
+    fp_binary, fp_compare, fp_compare_holds, fp_convert, fp_convert_round_odd, fp_mul_add, fp_to_int, fp_unary,
+    int_to_fp, FpBinary, FpCompare, FpConversion, FpType, FpUnary,
+};
+use super::fp_estimate::{urecpe, ursqrte};
+use super::simd::{elem, set_elem};
+use super::simd_arith::narrow_into;
+use super::Cpu;
+use crate::softfloat::{FpOrdering, FpRounding, FusedMulAdd, InexactReport, NanSignal};
+
+#[inline]
+const fn datasize(q: bool) -> u32 {
+    if q {
+        128
+    } else {
+        64
+    }
+}
+
+/// A comparison against +0.0 (FCMGT, FCMGE, FCMEQ, FCMLE, FCMLT `#0.0`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ZeroCompare {
+    Gt,
+    Ge,
+    Eq,
+    Le,
+    Lt,
+}
+
+impl Cpu {
+    /// Three-same floating point, vector (`0 Q U 01110 a sz 1 Rm 11 opc 1
+    /// Rn Rd`) and scalar (`01 U 11110 a sz 1 Rm 11 opc 1 Rn Rd`).
+    pub(crate) fn exec_simd_same_fp(&mut self, pc: u64, insn: u32, scalar: bool) -> ExecResult {
+        let q = bit(insn, 30);
+        let u = bit(insn, 29);
+        let a = bit(insn, 23);
+        let ty = FpType::from_sz(bit(insn, 22));
+        let opc = bits(insn, 13, 11);
+
+        #[derive(Clone, Copy)]
+        enum Op {
+            Binary(FpBinary),
+            Fused(FusedMulAdd),
+            Compare(FpCompare),
+            Pairwise(FpBinary),
+        }
+        let op = match (u, a, opc) {
+            (false, false, 0b000) => Op::Binary(FpBinary::MaxNum),
+            (false, false, 0b001) => Op::Fused(FusedMulAdd::Fmadd),
+            (false, false, 0b010) => Op::Binary(FpBinary::Add),
+            (false, false, 0b011) => Op::Binary(FpBinary::MulX),
+            (false, false, 0b100) => Op::Compare(FpCompare::Eq),
+            (false, false, 0b110) => Op::Binary(FpBinary::Max),
+            (false, false, 0b111) => Op::Binary(FpBinary::RecipStep),
+            (false, true, 0b000) => Op::Binary(FpBinary::MinNum),
+            (false, true, 0b001) => Op::Fused(FusedMulAdd::Fmsub),
+            (false, true, 0b010) => Op::Binary(FpBinary::Sub),
+            (false, true, 0b110) => Op::Binary(FpBinary::Min),
+            (false, true, 0b111) => Op::Binary(FpBinary::RSqrtStep),
+            (true, false, 0b000) => Op::Pairwise(FpBinary::MaxNum),
+            (true, false, 0b010) => Op::Pairwise(FpBinary::Add),
+            (true, false, 0b011) => Op::Binary(FpBinary::Mul),
+            (true, false, 0b100) => Op::Compare(FpCompare::Ge),
+            (true, false, 0b101) => Op::Compare(FpCompare::AbsGe),
+            (true, false, 0b110) => Op::Pairwise(FpBinary::Max),
+            (true, false, 0b111) => Op::Binary(FpBinary::Div),
+            (true, true, 0b000) => Op::Pairwise(FpBinary::MinNum),
+            (true, true, 0b010) => Op::Binary(FpBinary::AbsDiff),
+            (true, true, 0b100) => Op::Compare(FpCompare::Gt),
+            (true, true, 0b101) => Op::Compare(FpCompare::AbsGt),
+            (true, true, 0b110) => Op::Pairwise(FpBinary::Min),
+            _ => return self.undefined(pc, insn),
+        };
+        let has_scalar_form = matches!(
+            op,
+            Op::Binary(FpBinary::MulX | FpBinary::RecipStep | FpBinary::RSqrtStep | FpBinary::AbsDiff)
+                | Op::Compare(_)
+        );
+        if (scalar && !has_scalar_form) || (!scalar && ty == FpType::Double && !q) {
+            return self.undefined(pc, insn);
+        }
+        self.simd_check()?;
+        let n = self.v[bits(insn, 9, 5) as usize];
+        let m = self.v[bits(insn, 20, 16) as usize];
+        let rd = bits(insn, 4, 0) as usize;
+        let d = self.v[rd];
+        let esize = ty.esize();
+        let lanes = if scalar { 1 } else { datasize(q) / esize };
+        let mut env = self.fp_env();
+        let mut r = 0u128;
+        for e in 0..lanes {
+            let (x, y) = (elem(n, e, esize), elem(m, e, esize));
+            let value = match op {
+                Op::Binary(op) => fp_binary(op, ty, x, y, &mut env),
+                Op::Fused(form) => fp_mul_add(form, ty, elem(d, e, esize), x, y, &mut env),
+                Op::Compare(cmp) => {
+                    if fp_compare_holds(cmp, ty, x, y, &mut env) {
+                        u64::MAX
+                    } else {
+                        0
+                    }
+                }
+                Op::Pairwise(op) => {
+                    // concat = Vm:Vn; result[e] = op(concat[2e], concat[2e+1]).
+                    let pick = |i: u32| {
+                        if i < lanes {
+                            elem(n, i, esize)
+                        } else {
+                            elem(m, i - lanes, esize)
+                        }
+                    };
+                    fp_binary(op, ty, pick(2 * e), pick(2 * e + 1), &mut env)
+                }
+            };
+            set_elem(&mut r, e, esize, value);
+        }
+        self.fp_commit(&env);
+        self.v[rd] = r;
+        Ok(Flow::Next)
+    }
+
+    /// Two-register miscellaneous floating point, vector (`0 Q U 01110 a sz
+    /// 10000 opcode 10 Rn Rd`) and scalar (`01 U 11110 a sz 10000 opcode 10
+    /// Rn Rd`), with URECPE and URSQRTE.
+    pub(crate) fn exec_simd_misc_fp(&mut self, pc: u64, insn: u32, scalar: bool) -> ExecResult {
+        let q = bit(insn, 30);
+        let u = bit(insn, 29);
+        let a = bit(insn, 23);
+        let sz = bit(insn, 22);
+        let ty = FpType::from_sz(sz);
+        let opcode = bits(insn, 16, 12);
+        let env = self.fp_env();
+
+        /// An operation on each element, at the element's own width.
+        #[derive(Clone, Copy)]
+        enum Each {
+            Unary(FpUnary),
+            Zero(ZeroCompare),
+            ToInt(FpRounding, bool),
+            FromInt(bool),
+            URecipEstimate,
+            URSqrtEstimate,
+        }
+        #[derive(Clone, Copy)]
+        enum Op {
+            Each(Each),
+            /// FCVTN: halve each element's precision.
+            Narrow,
+            /// FCVTXN: double to single, rounding to odd.
+            NarrowOdd,
+            /// FCVTL: double each element's precision.
+            Long,
+        }
+        let round = |rounding| Op::Each(Each::Unary(FpUnary::RoundInt(rounding, InexactReport::Suppress)));
+        let op = match (u, a, opcode) {
+            (false, false, 0b10110) => Op::Narrow,
+            (false, false, 0b10111) => Op::Long,
+            (false, false, 0b11000) => round(FpRounding::TieEven),
+            (false, false, 0b11001) => round(FpRounding::NegInf),
+            (false, false, 0b11010) => Op::Each(Each::ToInt(FpRounding::TieEven, true)),
+            (false, false, 0b11011) => Op::Each(Each::ToInt(FpRounding::NegInf, true)),
+            (false, false, 0b11100) => Op::Each(Each::ToInt(FpRounding::TieAway, true)),
+            (false, false, 0b11101) => Op::Each(Each::FromInt(true)),
+            (false, true, 0b01100) => Op::Each(Each::Zero(ZeroCompare::Gt)),
+            (false, true, 0b01101) => Op::Each(Each::Zero(ZeroCompare::Eq)),
+            (false, true, 0b01110) => Op::Each(Each::Zero(ZeroCompare::Lt)),
+            (false, true, 0b01111) => Op::Each(Each::Unary(FpUnary::Abs)),
+            (false, true, 0b11000) => round(FpRounding::PosInf),
+            (false, true, 0b11001) => round(FpRounding::Zero),
+            (false, true, 0b11010) => Op::Each(Each::ToInt(FpRounding::PosInf, true)),
+            (false, true, 0b11011) => Op::Each(Each::ToInt(FpRounding::Zero, true)),
+            (false, true, 0b11100) => Op::Each(Each::URecipEstimate),
+            (false, true, 0b11101) => Op::Each(Each::Unary(FpUnary::RecipEstimate)),
+            (false, true, 0b11111) => Op::Each(Each::Unary(FpUnary::RecpX)),
+            (true, false, 0b10110) => Op::NarrowOdd,
+            (true, false, 0b11000) => round(FpRounding::TieAway),
+            (true, false, 0b11001) => Op::Each(Each::Unary(FpUnary::RoundInt(env.rounding(), InexactReport::Raise))),
+            (true, false, 0b11010) => Op::Each(Each::ToInt(FpRounding::TieEven, false)),
+            (true, false, 0b11011) => Op::Each(Each::ToInt(FpRounding::NegInf, false)),
+            (true, false, 0b11100) => Op::Each(Each::ToInt(FpRounding::TieAway, false)),
+            (true, false, 0b11101) => Op::Each(Each::FromInt(false)),
+            (true, true, 0b01100) => Op::Each(Each::Zero(ZeroCompare::Ge)),
+            (true, true, 0b01101) => Op::Each(Each::Zero(ZeroCompare::Le)),
+            (true, true, 0b01111) => Op::Each(Each::Unary(FpUnary::Neg)),
+            (true, true, 0b11001) => {
+                Op::Each(Each::Unary(FpUnary::RoundInt(env.rounding(), InexactReport::Suppress)))
+            }
+            (true, true, 0b11010) => Op::Each(Each::ToInt(FpRounding::PosInf, false)),
+            (true, true, 0b11011) => Op::Each(Each::ToInt(FpRounding::Zero, false)),
+            (true, true, 0b11100) => Op::Each(Each::URSqrtEstimate),
+            (true, true, 0b11101) => Op::Each(Each::Unary(FpUnary::RSqrtEstimate)),
+            (true, true, 0b11111) => Op::Each(Each::Unary(FpUnary::Sqrt)),
+            _ => return self.undefined(pc, insn),
+        };
+        let reserved = match op {
+            // Only the estimates, conversions and comparisons have scalar
+            // forms, and FRECPX has only a scalar form.
+            Op::Each(Each::Unary(FpUnary::RecpX)) => !scalar,
+            Op::Each(
+                Each::Unary(FpUnary::RecipEstimate | FpUnary::RSqrtEstimate)
+                | Each::Zero(_)
+                | Each::ToInt(..)
+                | Each::FromInt(_),
+            ) => !scalar && sz && !q,
+            Op::Each(Each::Unary(_)) => scalar || (sz && !q),
+            Op::Each(Each::URecipEstimate | Each::URSqrtEstimate) => scalar || sz,
+            Op::Narrow | Op::Long => scalar,
+            Op::NarrowOdd => !sz,
+        };
+        if reserved {
+            return self.undefined(pc, insn);
+        }
+        self.simd_check()?;
+        let n = self.v[bits(insn, 9, 5) as usize];
+        let rd = bits(insn, 4, 0) as usize;
+        let d = self.v[rd];
+        let mut env = env;
+        let mut r = 0u128;
+        match op {
+            Op::Narrow | Op::NarrowOdd => {
+                // Source elements of 2×esize from all of Vn; the narrow result
+                // fills half of Vd (the upper half for the `2` forms).
+                let (esize, conversion) = if sz {
+                    (32, FpConversion::DoubleToSingle)
+                } else {
+                    (16, FpConversion::SingleToHalf)
+                };
+                let count = if scalar { 1 } else { 64 / esize };
+                let mut part = 0u128;
+                for e in 0..count {
+                    let x = elem(n, e, 2 * esize);
+                    let v = if matches!(op, Op::NarrowOdd) {
+                        fp_convert_round_odd(x, &mut env)
+                    } else {
+                        fp_convert(conversion, x, &mut env)
+                    };
+                    set_elem(&mut part, e, esize, v);
+                }
+                r = if scalar { part } else { narrow_into(d, part, q) };
+            }
+            Op::Long => {
+                let (esize, conversion) = if sz {
+                    (32, FpConversion::SingleToDouble)
+                } else {
+                    (16, FpConversion::HalfToSingle)
+                };
+                let half = if q { n >> 64 } else { n };
+                for e in 0..64 / esize {
+                    let v = fp_convert(conversion, elem(half, e, esize), &mut env);
+                    set_elem(&mut r, e, 2 * esize, v);
+                }
+            }
+            Op::Each(each) => {
+                let esize = ty.esize();
+                let lanes = if scalar { 1 } else { datasize(q) / esize };
+                let wide = ty == FpType::Double;
+                for e in 0..lanes {
+                    let x = elem(n, e, esize);
+                    let v = match each {
+                        Each::Unary(op) => fp_unary(op, ty, x, &mut env),
+                        Each::Zero(cmp) => {
+                            let signal = if cmp == ZeroCompare::Eq {
+                                NanSignal::Quiet
+                            } else {
+                                NanSignal::Signaling
+                            };
+                            let ordering = fp_compare(ty, x, FpType::ZERO, signal, &mut env);
+                            let holds = match cmp {
+                                ZeroCompare::Gt => ordering == FpOrdering::Greater,
+                                ZeroCompare::Ge => matches!(ordering, FpOrdering::Greater | FpOrdering::Equal),
+                                ZeroCompare::Eq => ordering == FpOrdering::Equal,
+                                ZeroCompare::Le => matches!(ordering, FpOrdering::Less | FpOrdering::Equal),
+                                ZeroCompare::Lt => ordering == FpOrdering::Less,
+                            };
+                            if holds {
+                                u64::MAX
+                            } else {
+                                0
+                            }
+                        }
+                        Each::ToInt(rounding, signed) => fp_to_int(ty, x, 0, rounding, signed, wide, &mut env),
+                        Each::FromInt(signed) => int_to_fp(ty, x, 0, signed, wide, &mut env),
+                        Each::URecipEstimate => u64::from(urecpe(x as u32)),
+                        Each::URSqrtEstimate => u64::from(ursqrte(x as u32)),
+                    };
+                    set_elem(&mut r, e, esize, v);
+                }
+            }
+        }
+        self.fp_commit(&env);
+        self.v[rd] = r;
+        Ok(Flow::Next)
+    }
+
+    /// SCVTF, UCVTF, FCVTZS, FCVTZU (vector and scalar, fixed point):
+    /// shift-by-immediate opcodes 11100 and 11111, with
+    /// `fbits = 2 × esize − immh:immb`.
+    pub(crate) fn exec_simd_shift_fixed(&mut self, pc: u64, insn: u32, scalar: bool) -> ExecResult {
+        let q = bit(insn, 30);
+        let u = bit(insn, 29);
+        let immh = bits(insn, 22, 19);
+        let to_float = bits(insn, 15, 11) == 0b11100;
+        // immh 001x is half precision (FEAT_FP16).
+        let ty = if immh & 0b1000 != 0 {
+            FpType::Double
+        } else if immh & 0b0100 != 0 {
+            FpType::Single
+        } else {
+            return self.undefined(pc, insn);
+        };
+        if !scalar && ty == FpType::Double && !q {
+            return self.undefined(pc, insn);
+        }
+        self.simd_check()?;
+        let esize = ty.esize();
+        let fbits = 2 * esize - bits(insn, 22, 16);
+        let n = self.v[bits(insn, 9, 5) as usize];
+        let rd = bits(insn, 4, 0) as usize;
+        let lanes = if scalar { 1 } else { datasize(q) / esize };
+        let wide = ty == FpType::Double;
+        let mut env = self.fp_env();
+        let mut r = 0u128;
+        for e in 0..lanes {
+            let x = elem(n, e, esize);
+            let v = if to_float {
+                int_to_fp(ty, x, fbits, !u, wide, &mut env)
+            } else {
+                fp_to_int(ty, x, fbits, FpRounding::Zero, !u, wide, &mut env)
+            };
+            set_elem(&mut r, e, esize, v);
+        }
+        self.fp_commit(&env);
+        self.v[rd] = r;
+        Ok(Flow::Next)
+    }
+
+    /// FMLA, FMLS, FMUL, FMULX (by element), vector (`0 Q U 01111 1 sz L M
+    /// Rm opcode H 0 Rn Rd`) and scalar (`01 U 11111 1 sz L M Rm opcode H 0
+    /// Rn Rd`).
+    pub(crate) fn exec_simd_elem_fp(&mut self, pc: u64, insn: u32, scalar: bool) -> ExecResult {
+        let q = bit(insn, 30);
+        let u = bit(insn, 29);
+        #[derive(Clone, Copy)]
+        enum Op {
+            Fused(FusedMulAdd),
+            Binary(FpBinary),
+        }
+        let op = match (bits(insn, 15, 12), u) {
+            (0b0001, false) => Op::Fused(FusedMulAdd::Fmadd),
+            (0b0101, false) => Op::Fused(FusedMulAdd::Fmsub),
+            (0b1001, false) => Op::Binary(FpBinary::Mul),
+            (0b1001, true) => Op::Binary(FpBinary::MulX),
+            _ => return self.undefined(pc, insn),
+        };
+        // size<1> = 0 is half precision (FEAT_FP16) or unallocated.
+        if !bit(insn, 23) {
+            return self.undefined(pc, insn);
+        }
+        let ty = FpType::from_sz(bit(insn, 22));
+        let (h, l) = (bits(insn, 11, 11), bits(insn, 21, 21));
+        let index = match ty {
+            FpType::Single => (h << 1) | l,
+            FpType::Double if l == 0 => h,
+            FpType::Double => return self.undefined(pc, insn),
+        };
+        if !scalar && ty == FpType::Double && !q {
+            return self.undefined(pc, insn);
+        }
+        self.simd_check()?;
+        let esize = ty.esize();
+        let element = elem(self.v[bits(insn, 20, 16) as usize], index, esize);
+        let n = self.v[bits(insn, 9, 5) as usize];
+        let rd = bits(insn, 4, 0) as usize;
+        let d = self.v[rd];
+        let lanes = if scalar { 1 } else { datasize(q) / esize };
+        let mut env = self.fp_env();
+        let mut r = 0u128;
+        for e in 0..lanes {
+            let x = elem(n, e, esize);
+            let v = match op {
+                Op::Fused(form) => fp_mul_add(form, ty, elem(d, e, esize), x, element, &mut env),
+                Op::Binary(op) => fp_binary(op, ty, x, element, &mut env),
+            };
+            set_elem(&mut r, e, esize, v);
+        }
+        self.fp_commit(&env);
+        self.v[rd] = r;
+        Ok(Flow::Next)
+    }
+
+    /// FMAXNMV, FMINNMV, FMAXV, FMINV: `0 1 1 01110 a 0 11000 opcode 10 Rn
+    /// Rd`, single precision ×4 only. Arm `Reduce` pairs the halves:
+    /// `op(op(e0, e1), op(e2, e3))`.
+    pub(crate) fn exec_simd_across_fp(&mut self, pc: u64, insn: u32) -> ExecResult {
+        let op = match (bits(insn, 16, 12), bit(insn, 23)) {
+            (0b01100, false) => FpBinary::MaxNum,
+            (0b01100, true) => FpBinary::MinNum,
+            (0b01111, false) => FpBinary::Max,
+            (0b01111, true) => FpBinary::Min,
+            _ => return self.undefined(pc, insn),
+        };
+        if !bit(insn, 29) || bit(insn, 22) || !bit(insn, 30) {
+            return self.undefined(pc, insn);
+        }
+        self.simd_check()?;
+        let n = self.v[bits(insn, 9, 5) as usize];
+        let mut env = self.fp_env();
+        let ty = FpType::Single;
+        let low = fp_binary(op, ty, elem(n, 0, 32), elem(n, 1, 32), &mut env);
+        let high = fp_binary(op, ty, elem(n, 2, 32), elem(n, 3, 32), &mut env);
+        let result = fp_binary(op, ty, low, high, &mut env);
+        self.fp_commit(&env);
+        self.v[bits(insn, 4, 0) as usize] = u128::from(result);
+        Ok(Flow::Next)
+    }
+
+    /// FMAXNMP, FMINNMP, FADDP, FMAXP, FMINP (scalar): `01 1 11110 a sz 11000
+    /// opcode 10 Rn Rd` — the two low elements of Vn.
+    pub(crate) fn exec_simd_pair_fp(&mut self, pc: u64, insn: u32) -> ExecResult {
+        let op = match (bits(insn, 16, 12), bit(insn, 23)) {
+            (0b01100, false) => FpBinary::MaxNum,
+            (0b01100, true) => FpBinary::MinNum,
+            (0b01101, false) => FpBinary::Add,
+            (0b01111, false) => FpBinary::Max,
+            (0b01111, true) => FpBinary::Min,
+            _ => return self.undefined(pc, insn),
+        };
+        self.simd_check()?;
+        let ty = FpType::from_sz(bit(insn, 22));
+        let esize = ty.esize();
+        let n = self.v[bits(insn, 9, 5) as usize];
+        let mut env = self.fp_env();
+        let result = fp_binary(op, ty, elem(n, 0, esize), elem(n, 1, esize), &mut env);
+        self.fp_commit(&env);
+        self.v[bits(insn, 4, 0) as usize] = u128::from(result);
+        Ok(Flow::Next)
+    }
+}
