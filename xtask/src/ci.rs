@@ -3,7 +3,9 @@
 //! `cargo xtask ci` runs the doctrine ratchets, then a fixed matrix of `cargo`
 //! steps, every one but the last a release build: tests for rusty_box_core and
 //! rusty_box_devices (their no_std + no_alloc builds included) and bare-metal
-//! (`x86_64-unknown-none`) checks of both, devices with alloc; tests for the
+//! (`x86_64-unknown-none`) checks of both, devices with alloc; tests for
+//! rusty_box_aarch64 without features and with std, and its bare-metal check
+//! with alloc; tests for the
 //! three WHP crates, the engine's with every target, and a check of
 //! rusty_box_whp's examples; tests for the decoder and the rusty_box library;
 //! checks of rusty_box as no_std with and without alloc, for
@@ -96,6 +98,10 @@ const UNSAFE_TOKEN_BASELINES: &[(&str, usize)] = &[
     // `#![forbid(unsafe_code)]`. A device model has no business with raw memory
     // — it is handed what it may touch.
     ("rusty_box_devices/src", 0),
+    // Zero, structurally, for the same reason again: the AArch64 interpreter
+    // carries `#![forbid(unsafe_code)]`. Naming it here is also what puts it
+    // under the production-panic and blanket-`dead_code` scans.
+    ("rusty_box_aarch64/src", 0),
     // The host-FFI leaf, and the one crate whose baseline is not zero and is
     // not aiming there: calling the WinHvPlatform C API is its whole purpose.
     // What the ratchet enforces here is CONFINEMENT — every host call lives in
@@ -286,7 +292,7 @@ const BLANKET_DEAD_CODE_BASELINES: &[(&str, usize)] = &[
 
 /// `.unwrap()` / `.expect(…)` outside test code, in each crate
 /// `UNSAFE_TOKEN_BASELINES` names: rusty_box, the decoder, core, devices, the
-/// three WHP crates and the GUI.
+/// AArch64 interpreter, the three WHP crates and the GUI.
 /// Zero, and it is to stay zero: a library that panics on a condition it could
 /// have returned is a library its caller cannot contain.
 ///
@@ -702,6 +708,37 @@ const MATRIX: &[Step] = &[
             "--release",
             "-p",
             "rusty_box_devices",
+            "--features",
+            "alloc",
+            "--target",
+            "x86_64-unknown-none",
+        ],
+        envs: &[],
+        stdout_marker: None,
+    },
+    // The AArch64 machine, under the same rule: its default build has no
+    // allocator, and the guide's examples (`docs/aarch64-automation.md`)
+    // compile only with `std`, so both configurations are tested and the bare
+    // target proves the core of it needs no host at all.
+    Step {
+        name: "aarch64 tests (no_std + no_alloc)",
+        args: &["test", "--release", "-p", "rusty_box_aarch64"],
+        envs: &[],
+        stdout_marker: None,
+    },
+    Step {
+        name: "aarch64 tests (std)",
+        args: &["test", "--release", "-p", "rusty_box_aarch64", "--features", "std"],
+        envs: &[],
+        stdout_marker: None,
+    },
+    Step {
+        name: "aarch64 bare-metal target check",
+        args: &[
+            "check",
+            "--release",
+            "-p",
+            "rusty_box_aarch64",
             "--features",
             "alloc",
             "--target",

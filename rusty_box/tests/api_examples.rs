@@ -18,8 +18,9 @@ use rusty_box::cpu::{
     PageMapping, ResetReason, WalkStep, X86Reg,
 };
 use rusty_box::emulator::{
-    AtaSlot, BootDevice, BootOrder, DiskGeometry, Emulator, EmulatorConfig, Ips, MachineBuilder,
-    MemorySize, PowerState, RunBudget, StopReason, Typed,
+    AtaSlot, BootDevice, BootOrder, DiskGeometry, Emulator, EmulatorConfig, Ips, KeyAction,
+    KeyboardInput, Machine, MachineBuilder, MemorySize, PowerState, RunBudget, RunOutcome,
+    SerialPort, StopReason, Typed,
 };
 use rusty_box::gui::NoGui;
 use rusty_box::{GpaPerms, GpaPlan, HostOffset, MemoryPlanError};
@@ -328,25 +329,33 @@ fn input_reports_what_the_guest_actually_received() {
         .build()
         .expect("build");
 
-    // The guest's ring is 16 bytes, so a long string is delivered short and
-    // the outcome carries the resume point.
+    // Nothing drains the ring on a halted BIOS. Each character is a make and
+    // a translated break, two bytes, and one starts only while fewer than
+    // eight wait (Bochs `service_paste_buf`'s fill threshold), so typing
+    // stops before the newline and the outcome carries the resume point.
     let text = "root\n";
     let typed = machine.keyboard().type_text(text);
-    assert!(typed.delivered() <= text.chars().count());
+    assert_eq!(typed, Typed::Refused { delivered: 4 });
     // Resuming past an untypable character, rather than at it, is the whole
     // reason the outcome names one.
-    let _remaining: String = match typed {
+    let remaining: String = match typed {
         Typed::All { .. } => String::new(),
         Typed::Refused { delivered } => text.chars().skip(delivered).collect(),
         Typed::Unmappable { delivered, .. } => text.chars().skip(delivered + 1).collect(),
     };
+    assert_eq!(remaining, "\n");
 
-    assert!(machine.keyboard().tap(BxKey::F1) || true, "tap reports delivery");
-    let _held = machine.keyboard().key(BxKey::CtrlL, true);
+    // A tap follows the same threshold; a lone key and raw bytes need only
+    // room in the 16-byte ring.
+    assert!(!machine.keyboard().tap(BxKey::F1), "a tap waits for the ring to drain");
+    assert!(machine.keyboard().key(BxKey::CtrlL, KeyAction::Press), "a lone press fits");
     let accepted = machine.keyboard().scancodes(&[0x3B, 0xBB]);
-    assert!(accepted <= 2);
+    assert_eq!(accepted, 2);
 
-    let _moved = machine.mouse().motion(4, -2, 0, 0x01);
+    // A PS/2 mouse reports nothing until the guest enables it, and this
+    // guest never does.
+    let moved = machine.mouse().motion(4, -2, 0, 0x01);
+    assert!(!moved, "the guest has not enabled mouse reporting");
 }
 
 #[test]
@@ -421,6 +430,47 @@ fn the_uart_and_the_debug_console_drain_as_bytes() {
         .take_output()
         .collect();
     assert!(e9.is_empty(), "nothing has run to write to it yet");
+}
+
+// ── The verbs every machine shares ──────────────────────────────────────────
+
+/// What [`drive_any_machine`] saw.
+struct Driven {
+    retired: u64,
+    console_bytes: usize,
+    sent: usize,
+    ticks: u64,
+}
+
+/// Code written against the shared `Machine` trait drives this machine as it
+/// drives an AArch64 one: step, drain the console, send it a byte, press a
+/// key.
+fn drive_any_machine<M: Machine>(machine: &mut M) -> Result<Driven, M::Error> {
+    let outcome = machine.step(RunBudget::Instructions(16))?;
+    let console_bytes = machine.serial(0).map_or(0, |mut port| port.take_output().count());
+    let sent = machine.serial(0).map_or(0, |mut port| port.send(b"x"));
+    let tapped = machine.keyboard().tap(BxKey::A);
+    assert!(tapped, "the keyboard took the key");
+    Ok(Driven {
+        retired: outcome.progress().instructions().unwrap_or(0),
+        console_bytes,
+        sent,
+        ticks: machine.ticks(),
+    })
+}
+
+#[test]
+fn the_shared_machine_verbs_drive_this_machine_too() {
+    let bios = vec![0xF4u8; HALT_BIOS_BYTES];
+    let mut machine = MachineBuilder::new(small_config())
+        .bios(&bios)
+        .build()
+        .expect("build");
+    let driven = drive_any_machine(&mut machine).expect("step");
+    assert!(driven.retired > 0, "the HLT at the reset vector retired");
+    assert_eq!(driven.console_bytes, 0, "a BIOS of HLTs writes nothing");
+    assert_eq!(driven.sent, 1, "COM1 takes host input");
+    assert!(driven.ticks > 0);
 }
 
 // ── Stopping from another thread ────────────────────────────────────────────

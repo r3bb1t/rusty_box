@@ -13,8 +13,6 @@
 //! reason [`expected_undefined`] names; any other UNDEFINED word, and any
 //! encoding the interpreter stops on as unimplemented, fails the test.
 
-extern crate std;
-
 use std::collections::BTreeMap;
 use std::format;
 use std::string::String;
@@ -27,6 +25,7 @@ use rusty_box_core::{ClockHz, VmClock};
 use super::decode::{classify, Decoded};
 use super::{Cpu, CpuConfig, Step, StopCause};
 use crate::bus::{AccessWidth, BusFault, PhysAddr, PhysBus};
+use crate::instrumentation::NoInstrumentation;
 
 const VECTORS: &str = include_str!("../../tests/vectors/unicorn.txt");
 
@@ -289,7 +288,7 @@ fn reserved_simd_and_fp_encodings_are_undefined_before_the_fp_trap() {
             insn,
             data: std::vec![0; DATA_SIZE],
         };
-        let step = cpu.step(&mut bus);
+        let step = cpu.step(&mut bus, &mut NoInstrumentation);
         assert_eq!(step, Step::Retired, "{text}");
         assert_eq!(cpu.sys.esr_el1 >> 26, want_ec, "{text}");
     }
@@ -389,7 +388,7 @@ fn every_unicorn_vector_matches_after_one_step() {
             data: st.data.clone(),
         };
 
-        match cpu.step(&mut bus) {
+        match cpu.step(&mut bus, &mut NoInstrumentation) {
             Step::Stop(StopCause::Unimplemented(_)) => {
                 tally.unimplemented += 1;
                 unimplemented.entry(insn).or_insert_with(|| String::from(name));

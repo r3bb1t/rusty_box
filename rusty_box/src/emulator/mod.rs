@@ -57,11 +57,11 @@ pub use io::PcIo;
 mod interactive;
 mod run;
 pub use run::{
-    BatchOutcome, EngineRefusal, Keyboard, Mouse, Power, PowerState, Progress, RunBudget,
-    StopReason,
+    BatchOutcome, EngineRefusal, KeyAction, Keyboard, KeyboardInput, Mouse, Power, PowerState,
+    Progress, RunBudget, StopReason, Typed,
 };
-#[cfg(feature = "alloc")]
-pub use run::Typed;
+/// The verbs every rusty_box machine shares, whatever it emulates.
+pub use rusty_box_core::machine::{Machine, RunOutcome, SerialPort};
 pub(crate) use run::StopCause;
 mod scheduler;
 mod timers;

@@ -109,6 +109,64 @@ impl Serial<'_> {
     }
 }
 
+/// The serial verbs every rusty_box machine shares. Input needs the host
+/// buffer an allocator gives, as [`Serial::send`] does.
+#[cfg(feature = "alloc")]
+impl rusty_box_core::machine::SerialPort for Serial<'_> {
+    type Output<'a>
+        = SerialTxDrain<'a>
+    where
+        Self: 'a;
+
+    fn take_output(&mut self) -> SerialTxDrain<'_> {
+        Serial::take_output(self)
+    }
+
+    fn send(&mut self, bytes: &[u8]) -> usize {
+        Serial::send(self, bytes)
+    }
+}
+
+/// The verbs every interpreted rusty_box machine shares, for code written
+/// against any of them ([`rusty_box_core::machine`]).
+///
+/// Only the interpreter's machine has them. A machine on a hypervisor engine
+/// runs through its own driver (`FastMachine`), not through slices, so it is
+/// left out by type: code that tries to step one through this trait does not
+/// compile, where an impl for every engine would compile and then refuse at
+/// run time.
+#[cfg(feature = "alloc")]
+impl<T: crate::cpu::instrumentation::Instrumentation> rusty_box_core::machine::Machine
+    for Emulator<T, crate::emulator::SoftwareEngine>
+{
+    type Outcome = crate::emulator::BatchOutcome;
+    type Error = Error;
+    type Serial<'a>
+        = Serial<'a>
+    where
+        Self: 'a;
+    type Keyboard<'a>
+        = crate::emulator::Keyboard<'a>
+    where
+        Self: 'a;
+
+    fn step(&mut self, budget: rusty_box_core::run::RunBudget) -> Result<crate::emulator::BatchOutcome> {
+        Emulator::step(self, budget)
+    }
+
+    fn ticks(&self) -> u64 {
+        Emulator::ticks(self)
+    }
+
+    fn serial(&mut self, port: usize) -> Option<Serial<'_>> {
+        Emulator::serial(self, port)
+    }
+
+    fn keyboard(&mut self) -> crate::emulator::Keyboard<'_> {
+        Emulator::keyboard(self)
+    }
+}
+
 /// Transient borrow of the port-0xE9 debug console, from
 /// [`Emulator::debug_port`].
 ///

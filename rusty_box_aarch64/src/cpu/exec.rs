@@ -11,10 +11,58 @@
 
 use disarm64_defn::InsnClass;
 
+use rusty_box_core::VmClock;
+
 use super::decode::Decoded;
 use super::exception::{Exception, ExceptionClass};
 use super::{Activity, Cpu};
-use crate::bus::PhysBus;
+use crate::bus::{AccessWidth, BusFault, PhysAddr, PhysBus};
+use crate::instrumentation::{Direction, Instrumentation, MemoryAccess};
+
+/// The bus one step executes against: the machine's own, with the observer
+/// told of every data access that completes. Fetches and table walks pass
+/// through unreported — the observer hears of the instruction itself, and a
+/// walk is not an access the program made.
+pub(crate) struct Observed<'a, B, I> {
+    bus: &'a mut B,
+    pub(crate) observer: &'a mut I,
+}
+
+impl<B: PhysBus, I: Instrumentation> PhysBus for Observed<'_, B, I> {
+    #[inline(always)]
+    fn read(&mut self, addr: PhysAddr, width: AccessWidth, clock: VmClock) -> Result<u64, BusFault> {
+        let value = self.bus.read(addr, width, clock)?;
+        self.observer.memory_access(MemoryAccess {
+            address: addr,
+            width,
+            direction: Direction::Read,
+            value,
+        });
+        Ok(value)
+    }
+
+    #[inline(always)]
+    fn write(&mut self, addr: PhysAddr, width: AccessWidth, value: u64, clock: VmClock) -> Result<(), BusFault> {
+        self.bus.write(addr, width, value, clock)?;
+        self.observer.memory_access(MemoryAccess {
+            address: addr,
+            width,
+            direction: Direction::Write,
+            value,
+        });
+        Ok(())
+    }
+
+    #[inline(always)]
+    fn fetch(&mut self, addr: PhysAddr, clock: VmClock) -> Result<u32, BusFault> {
+        self.bus.fetch(addr, clock)
+    }
+
+    #[inline(always)]
+    fn read_descriptor(&mut self, addr: PhysAddr, clock: VmClock) -> Result<u64, BusFault> {
+        self.bus.read_descriptor(addr, clock)
+    }
+}
 
 /// What one [`Cpu::step`] did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,7 +78,7 @@ pub enum Step {
 }
 
 /// The address and word of an instruction that stopped the machine.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct UndefinedInsn {
     pub pc: u64,
     pub insn: u32,
@@ -124,40 +172,61 @@ impl Cpu {
     }
 
     /// Execute one instruction (or take the exception it raises) against
-    /// `bus`, advancing time by one tick unless the step stops the machine.
-    pub fn step<B: PhysBus>(&mut self, bus: &mut B) -> Step {
+    /// `bus`, advancing time by one tick unless the step stops the machine,
+    /// and tell `observer` what happened.
+    pub fn step<B: PhysBus, I: Instrumentation>(&mut self, bus: &mut B, observer: &mut I) -> Step {
         let pc = self.pc;
-        match self.execute(bus, pc) {
+        let mut observed = Observed { bus, observer };
+        let mut fetched = None;
+        let result = self.execute(&mut observed, pc, &mut fetched);
+        let observer = observed.observer;
+        match result {
             Ok(flow) => {
                 self.icount += 1;
+                self.retired += 1;
                 self.pc_history.push_back(pc);
+                if let Some(insn) = fetched {
+                    observer.after_execution(pc, insn);
+                }
                 match flow {
                     Flow::Next => {
                         self.pc = pc.wrapping_add(4);
                         Step::Retired
                     }
                     Flow::Jump(target) => {
+                        // Every branch, ERET included, writes the PC through
+                        // `AArch64.BranchAddr` (Arm ARM `BranchTo`).
+                        let target = self.branch_addr(target);
                         self.pc = target;
+                        observer.branch(pc, target);
                         Step::Retired
                     }
                     Flow::Wait => {
                         self.pc = pc.wrapping_add(4);
                         self.activity = Activity::WaitingForInterrupt;
+                        observer.wait_for_interrupt(pc);
                         Step::Waiting
                     }
                 }
             }
             Err(Fault::Exception(e)) => {
                 self.icount += 1;
+                self.retired += 1;
                 self.pc_history.push_back(pc);
-                self.take_sync_exception(e, pc);
+                let taken = self.take_sync_exception(e, pc);
+                observer.exception(taken);
                 Step::Retired
             }
             Err(Fault::Stop(cause)) => Step::Stop(cause),
         }
     }
 
-    fn execute<B: PhysBus>(&mut self, bus: &mut B, pc: u64) -> ExecResult {
+    fn execute<B: PhysBus, I: Instrumentation>(
+        &mut self,
+        bus: &mut Observed<'_, B, I>,
+        pc: u64,
+        fetched_word: &mut Option<u32>,
+    ) -> ExecResult {
         // An illegal exception return left PSTATE.IL set: the next
         // instruction raises Illegal Execution State instead of executing.
         if self.pstate.il {
@@ -168,6 +237,8 @@ impl Cpu {
         }
         let fetched = self.fetch(bus, pc)?;
         let insn = fetched.word;
+        *fetched_word = Some(insn);
+        bus.observer.before_execution(pc, insn);
         let class = match self.decode_cache.decode(fetched.pa, insn) {
             Decoded::Hint => return self.exec_hint(insn, pc),
             Decoded::Undefined => return self.undefined(pc, insn),

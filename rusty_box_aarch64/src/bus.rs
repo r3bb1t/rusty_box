@@ -57,7 +57,7 @@ impl RegOffset {
 ///
 /// Wider architectural accesses (a 128-bit Q register, a pair) are split by
 /// the processor into accesses of these widths before they reach the bus.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AccessWidth {
     Byte,
     Half,
@@ -149,6 +149,12 @@ pub enum BusFault {
 /// Static dispatch only (R8): a machine names its bus type. `clock` is the
 /// emulated time of the access, which is all a device needs to answer a read
 /// of a counter or arm a deadline.
+///
+/// The processor reaches the bus for three purposes — data, instruction
+/// fetch, and translation table walks — and names the latter two with their
+/// own methods. Both default to an ordinary read, which is what the board
+/// does; a bus that tells the purposes apart (an observer reporting data
+/// accesses only) overrides them.
 pub trait PhysBus {
     /// Read `width` bytes at `addr`, little-endian, zero-extended to 64 bits.
     fn read(&mut self, addr: PhysAddr, width: AccessWidth, clock: VmClock) -> Result<u64, BusFault>;
@@ -161,4 +167,16 @@ pub trait PhysBus {
         value: u64,
         clock: VmClock,
     ) -> Result<(), BusFault>;
+
+    /// Fetch the instruction word at `addr`.
+    #[inline]
+    fn fetch(&mut self, addr: PhysAddr, clock: VmClock) -> Result<u32, BusFault> {
+        self.read(addr, AccessWidth::Word, clock).map(|word| word as u32)
+    }
+
+    /// Read the translation table descriptor at `addr`.
+    #[inline]
+    fn read_descriptor(&mut self, addr: PhysAddr, clock: VmClock) -> Result<u64, BusFault> {
+        self.read(addr, AccessWidth::Dword, clock)
+    }
 }

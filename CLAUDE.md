@@ -127,8 +127,9 @@ MachineBuilder::new(config).bios(rom).build_at(storage, cpus, mem_stub)  // mach
 ## Workspace Structure
 
 - **rusty_box/** -- Main emulator library: CPU, memory, the machine and the devices still bound to it
-- **rusty_box_core/** -- Architecture-neutral foundations shared by the library, the device models and the engines (`VmClock`, `RingBuffer`, `forbid(unsafe)`)
+- **rusty_box_core/** -- Architecture-neutral foundations shared by the library, the device models, the engines and both machines (`VmClock`, `RingBuffer`, `RunBudget`/`Progress`, the key vocabulary and `KeyboardInput`, the interpreted machines' `Machine` trait; `forbid(unsafe)`)
 - **rusty_box_devices/** -- Device models that depend on no host and no execution engine
+- **rusty_box_aarch64/** -- A deterministic ARMv8.0 interpreter on a QEMU-`virt`-compatible board (boots EDK2 and Linux); shares the run budget, key vocabulary and `Machine` trait with the x86 interpreter through `rusty_box_core` (a hypervisor-engine machine is deliberately not a `Machine`). Its provenance is QEMU and the Arm ARM, cited per file, since Bochs has no ARM
 - **rusty_box_decoder/** -- Separate crate for x86 instruction decoding
 - **rusty_box_whp_sys/** -- The Windows Hypervisor Platform seam: host FFI and its ABI vocabulary
 - **rusty_box_whp/** -- Safe WHP backing over that seam

@@ -1,22 +1,57 @@
 # rusty_box_aarch64
 
 A deterministic AArch64 (ARMv8.0-A) interpreter and a board compatible with
-QEMU's `virt` machine, built the way rusty_box is: `no_std`, allocation-free,
-no `unsafe`, time counted in retired instructions.
+QEMU's `virt` machine, built the way rusty_box is: `no_std`, no `unsafe`,
+time counted in retired instructions, and allocation-free unless asked to
+own its memory.
 
 It boots unmodified UEFI firmware — Ubuntu's stock EDK2 `ArmVirtQemu` build
-(`/usr/share/AAVMF/AAVMF_CODE.no-secboot.fd`) — to the UEFI Shell, and the
-console output up to `Shell> ` is byte-for-byte what QEMU prints for the same
-firmware.
+(`/usr/share/AAVMF/AAVMF_CODE.no-secboot.fd`) — to the UEFI Shell, with
+console output up to `Shell> ` byte-for-byte what QEMU prints for the same
+firmware; and it boots a Linux kernel directly, as QEMU's `-kernel` does —
+Alpine Linux 3.23 (kernel 6.18) to a root shell that runs pipelines, checksums
+and `apk`, reboots through PSCI, and powers off.
 
 ```text
 cargo run --release -p rusty_box_aarch64 --example uefi_virt --features std -- \
     --code /usr/share/AAVMF/AAVMF_CODE.no-secboot.fd \
     --vars /usr/share/AAVMF/AAVMF_VARS.fd \
     --until 'Shell>' --type 'memmap\r' --until 'Shell>'
+
+cargo run --release -p rusty_box_aarch64 --example linux_virt --features std -- \
+    --kernel Image --initrd initramfs.cpio.gz \
+    --until 'login: ' --type 'root\r' --until '# ' \
+    --type 'uname -a\r' --until '# '
 ```
 
 (`apt install qemu-efi-aarch64` provides the firmware.)
+
+## Driving it from Rust
+
+```rust,no_run
+use rusty_box_aarch64::boot::{LinuxImage, SERIAL_CONSOLE_COMMAND_LINE};
+use rusty_box_aarch64::{KeyboardInput, MachineBuilder, RunBudget, VirtConfig};
+
+let kernel = std::fs::read("Image")?;
+let initrd = std::fs::read("initramfs.cpio.gz")?;
+let mut machine = MachineBuilder::new(VirtConfig::default())
+    .linux(LinuxImage::parse(&kernel)?)
+    .initrd(&initrd)
+    .command_line(SERIAL_CONSOLE_COMMAND_LINE)
+    .build()?;
+machine.step(RunBudget::Ticks(600_000_000));
+let console: Vec<u8> = machine.serial(0).map(|mut s| s.take_output().collect()).unwrap_or_default();
+let typed = machine.keyboard().type_text("root\n");
+assert!(typed.is_complete());
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+[docs/aarch64-automation.md](../docs/aarch64-automation.md) is the guide:
+building (firmware, direct kernel or bare; owned or lent memory), the serial
+console and the terminal keyboard, budgets and stop reasons, the power button
+and reset, memory and registers by name, Unicorn-style `emu_start`, the
+observer type parameter, and snapshots. The budget, progress and keyboard
+vocabulary are `rusty_box_core`'s, shared with the x86 machine.
 
 ## Design
 
@@ -26,11 +61,15 @@ cargo run --release -p rusty_box_aarch64 --example uefi_virt --features std -- \
   the exact first tick whose count reaches `CVAL`; the PL031 RTC counts
   emulated seconds from a fixed epoch. Nothing reads the host clock.
 - **Waiting is free and slicing is invisible.** `WFI` jumps time to the next
-  event, and the processor stays in the waiting state across `run` calls, so a
-  run cut into any budgets ends in exactly the same state
-  (`tests/timer_interrupts.rs` asserts this, mutation-checked).
-- **Memory is borrowed.** `VirtMemory` lends RAM and both flash banks as
-  slices; the machine never allocates.
+  event, and the processor stays in the waiting state across `step` calls, so
+  a run cut into any budgets ends in exactly the same state
+  (`tests/timer_interrupts.rs` asserts this, mutation-checked). Host input —
+  serial bytes, keys, the power button — lands only between steps.
+- **The builder's type is the boot.** `MachineBuilder<Firmware>`,
+  `<DirectKernel>` and `<Bare>` build; `<NoBoot>` cannot. A machine owns its
+  memory (`build`, with `alloc`) or runs in buffers a caller lends it
+  (`build_in`, no allocator needed); a sealed `GuestStorage` trait is the
+  difference, with static dispatch throughout.
 - **Decoding is split.** [`disarm64`](https://crates.io/crates/disarm64)
   classifies each word into its canonical encoding (never an alias) and its
   feature set; one handler per encoding *class* reads every operand field from
@@ -57,8 +96,9 @@ cargo run --release -p rusty_box_aarch64 --example uefi_virt --features std -- \
 | Processor | Cortex-A57-shaped ARMv8.0: EL0/EL1 AArch64 only, the whole ARMv8.0 FP and Advanced SIMD instruction set (integer and floating point, vector and scalar, saturation setting FPSR.QC), 4 KiB-granule stage-1 MMU with TLB, exclusives, PSCI over `HVC` as QEMU provides it |
 | Interrupts | GICv2 (no Security Extensions) + GICv2m frame |
 | Timers | EL1 physical and virtual generic timers |
-| Devices | PL011 UART, PL031 RTC, PL061 GPIO, CFI flash ×2 (QEMU `pflash_cfi01` semantics), `fw_cfg` (traditional interface, no files), 32 empty virtio-mmio transports, an empty PCIe ECAM/windows |
-| Board | QEMU `virt` memory map and IRQ wiring; QEMU 8.2's device tree in `assets/` |
+| Devices | PL011 UART (QEMU's 16-entry receive FIFO), PL031 RTC, PL061 GPIO with QEMU's `gpio-key` power button on line 3, CFI flash ×2 (QEMU `pflash_cfi01` semantics, whole 64 MiB banks decoded), `fw_cfg` (traditional interface, no files), 32 empty virtio-mmio transports, an empty PCIe ECAM/windows |
+| Board | QEMU `virt` memory map and IRQ wiring; QEMU 8.2's device tree in `assets/`, its memory node and `/chosen` set per machine |
+| Boot | UEFI firmware from flash; or a Linux `Image`, initramfs and device tree placed as QEMU's `hw/arm/boot.c` places them, entered with the register state its boot stub leaves |
 
 Provenance: instruction semantics follow the Arm ARM pseudocode; every device
 cites the QEMU source file and symbols it was ported from.
@@ -82,9 +122,18 @@ cites the QEMU source file and symbols it was ported from.
   on purpose makes dozens to hundreds of vectors fail.
 - The EDK2 boot was compared with QEMU 8.2 running the same firmware, device
   tree and memory size: identical console bytes.
+- Alpine Linux 3.23.7 (kernel 6.18.58, Alpine's `virt` configuration) boots to
+  a login prompt with no warnings in its log, logs in, and runs commands whose
+  output matches the host (`seq 1 20000 | sha256sum`); `reboot` comes back to
+  the login prompt and `poweroff` stops the machine.
 - `tests/timer_interrupts.rs`: a hand-written guest drives GIC + timer + `WFI`
-  + IRQ entry/`ERET` + PSCI, and its outcome is identical for every budget
-  slicing.
+  + IRQ entry/`ERET` + PSCI; its outcome is identical for every budget
+  slicing, and a snapshot taken mid-wait restores the same future.
+- `tests/api.rs`: the host API with guest-visible assertions — a page-crossing
+  store's data abort reporting the page that faulted, the terminal keyboard's
+  bytes reaching a polling guest, PSCI power-off and reset, the power button's
+  100 ms on GPIO line 3, an observer's view, direct kernel placement and its
+  device tree, refused builds.
 
 ## Not implemented
 
@@ -96,3 +145,5 @@ cites the QEMU source file and symbols it was ported from.
   advertised) but never fire; no Debug state, no PMU.
 - No instruction or data cache model: cache maintenance is accepted and has
   nothing to act on.
+- No display, keyboard or network device: the console is the UART, and the
+  PCIe bus and virtio-mmio slots are empty.

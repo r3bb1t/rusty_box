@@ -222,6 +222,7 @@ guest actually took.
 
 ```rust,no_run
 # use rusty_box::emulator::{EmulatorConfig, MachineBuilder, Typed};
+use rusty_box::emulator::KeyAction;
 use rusty_box::iodev::scancodes::BxKey;
 # let mut machine = MachineBuilder::new(EmulatorConfig::default()).build()?;
 
@@ -242,7 +243,7 @@ match machine.keyboard().type_text(text) {
 
 // Individual keys: press and release, or hold.
 let tapped = machine.keyboard().tap(BxKey::F1);
-let held = machine.keyboard().key(BxKey::CtrlL, true);
+let held = machine.keyboard().key(BxKey::CtrlL, KeyAction::Press);
 
 // Raw scancode bytes, for a set this layout does not cover. The count is how
 // many the guest's ring took.
@@ -262,6 +263,34 @@ loss. Step the machine between bursts.
 reported, not guessed at. `tap` and `key` answer whether the byte reached the
 ring, so a `false` means "type it again after stepping", not "the key does not
 exist".
+
+**The same verbs on every interpreted machine.** The key vocabulary
+(`BxKey` is `rusty_box_core::input::Key`), `KeyAction`, `Typed` and the
+`KeyboardInput` trait are shared with the AArch64 machine, and so is
+`Machine` — step, the serial console, the keyboard — with `RunOutcome` and
+`SerialPort`. Logic written against them drives either guest
+([aarch64-automation.md](aarch64-automation.md)). A machine built on the
+hypervisor engine is not a `Machine`: it runs through `FastMachine`
+(section 9), so stepping it through these verbs is a compile error rather
+than a refusal at run time.
+
+```rust,no_run
+use rusty_box::emulator::{KeyboardInput, Machine, RunBudget, RunOutcome, SerialPort, Typed};
+
+fn log_in<M: Machine>(machine: &mut M) -> Result<bool, M::Error> {
+    for _ in 0..200 {
+        let outcome = machine.step(RunBudget::Ticks(5_000_000))?;
+        let console: Vec<u8> = machine.serial(0).map(|mut p| p.take_output().collect()).unwrap_or_default();
+        if console.windows(6).any(|w| w == b"login:") {
+            return Ok(matches!(machine.keyboard().type_text("root\n"), Typed::All { .. }));
+        }
+        if outcome.is_terminal() {
+            break;
+        }
+    }
+    Ok(false)
+}
+```
 
 ---
 

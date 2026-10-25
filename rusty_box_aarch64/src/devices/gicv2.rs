@@ -11,6 +11,9 @@
 //! input line change; the machine reads `irq_out`/`fiq_out` between
 //! instructions.
 
+use rusty_box_core::snap::{SnapRead, SnapResult, SnapWrite};
+use rusty_box_core::SnapError;
+
 use crate::bus::{AccessWidth, RegOffset};
 
 /// SGIs, PPIs and QEMU `virt`'s 256 SPIs.
@@ -76,7 +79,6 @@ pub struct GicV2 {
     /// Edge-triggered (ICFGR bit 2n+1).
     edge: Bits,
     priority: [u8; NUM_IRQ],
-    targets: [u8; NUM_IRQ],
     /// Acknowledged interrupts whose priority has not been dropped, oldest
     /// first: the running priority is the last one's.
     stack: [u16; 64],
@@ -97,10 +99,6 @@ impl GicV2 {
         for sgi in 0..16 {
             edge.set(sgi, true);
         }
-        let mut targets = [0u8; NUM_IRQ];
-        for t in targets.iter_mut().take(32) {
-            *t = 1;
-        }
         Self {
             dist_ctlr: 0,
             cpu_ctlr: 0,
@@ -114,7 +112,6 @@ impl GicV2 {
             level: Bits::new(),
             edge,
             priority: [0; NUM_IRQ],
-            targets,
             stack: [0; 64],
             stack_len: 0,
             irq_out: false,
@@ -132,6 +129,59 @@ impl GicV2 {
     #[inline]
     pub fn fiq_out(&self) -> bool {
         self.fiq_out
+    }
+
+    pub(crate) fn save<W: SnapWrite>(&self, w: &mut W) -> SnapResult {
+        w.write_u32(self.dist_ctlr)?;
+        w.write_u32(self.cpu_ctlr)?;
+        w.write_bytes(&[self.pmr, self.bpr, self.abpr])?;
+        for bits in [&self.enabled, &self.pending_latch, &self.active, &self.group1, &self.level, &self.edge] {
+            for word in bits.0 {
+                w.write_u32(word)?;
+            }
+        }
+        w.write_bytes(&self.priority)?;
+        w.write_u8(self.stack_len as u8)?;
+        for &id in &self.stack[..self.stack_len] {
+            w.write_u16(id)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn restore<R: SnapRead>(&mut self, r: &mut R) -> SnapResult {
+        self.dist_ctlr = r.read_u32()?;
+        self.cpu_ctlr = r.read_u32()?;
+        let mut prio = [0u8; 3];
+        r.read_bytes(&mut prio)?;
+        [self.pmr, self.bpr, self.abpr] = prio;
+        for bits in [
+            &mut self.enabled,
+            &mut self.pending_latch,
+            &mut self.active,
+            &mut self.group1,
+            &mut self.level,
+            &mut self.edge,
+        ] {
+            for word in bits.0.iter_mut() {
+                *word = r.read_u32()?;
+            }
+        }
+        r.read_bytes(&mut self.priority)?;
+        let depth = usize::from(r.read_u8()?);
+        if depth > self.stack.len() {
+            return Err(SnapError::Invalid("GIC active-priority stack is deeper than the controller holds"));
+        }
+        self.stack = [0; 64];
+        for slot in self.stack.iter_mut().take(depth) {
+            let id = r.read_u16()?;
+            if usize::from(id) >= NUM_IRQ {
+                return Err(SnapError::Invalid("GIC active-priority stack names an interrupt that does not exist"));
+            }
+            *slot = id;
+        }
+        self.stack_len = depth;
+        self.update();
+        Ok(())
     }
 
     /// Drive input line `intid` (a PPI or SPI) to `level`.
@@ -276,7 +326,9 @@ impl GicV2 {
             0x300..=0x33F => word_bit(&self.active, 0x300),
             0x380..=0x3BF => word_bit(&self.active, 0x380),
             0x400..=0x7FF => self.priority.get((off - 0x400) as usize).copied().unwrap_or(0),
-            0x800..=0xBFF => self.targets.get((off - 0x800) as usize).copied().unwrap_or(0),
+            // GICD_ITARGETSR is RAZ/WI on a uniprocessor GIC (GICv2 spec
+            // 4.3.12; QEMU arm_gic.c `gic_dist_readb`).
+            0x800..=0xBFF => 0,
             0xC00..=0xCFF => {
                 // Two bits per interrupt, bit 1 of each pair = edge.
                 let first = ((off - 0xC00) * 4) as usize;
@@ -341,15 +393,9 @@ impl GicV2 {
                     *p = v;
                 }
             }
-            0x800..=0xBFF => {
-                // SGI and PPI targets are read-only: this processor.
-                let i = (off - 0x800) as usize;
-                if i >= 32 {
-                    if let Some(t) = self.targets.get_mut(i) {
-                        *t = v & 1;
-                    }
-                }
-            }
+            // GICD_ITARGETSR: RAZ/WI on a uniprocessor GIC (QEMU arm_gic.c
+            // `gic_dist_writeb`).
+            0x800..=0xBFF => {}
             0xC00..=0xCFF => {
                 let first = ((off - 0xC00) * 4) as usize;
                 for k in 0..4 {

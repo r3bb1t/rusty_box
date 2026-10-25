@@ -8,7 +8,21 @@
 //! RAZ").
 
 use super::id;
+use super::regs::{SysReg, SysRegRefusal};
 use super::{Cpu, El};
+
+/// Who is accessing a system register.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Accessor {
+    /// An `MRS`/`MSR` at the current exception level, with every trap and
+    /// enable control applying.
+    Guest,
+    /// A host (a debugger, an automation script): EL1's privilege, and none
+    /// of the controls that exist to trap a guest — `CPACR_EL1.FPEN`, the EL0
+    /// enables, and the rule that `SP_EL0` cannot be named while it is the
+    /// stack pointer in use.
+    Host,
+}
 
 /// A system register encoding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,6 +36,11 @@ impl SysRegKey {
     /// From an `MRS`/`MSR`/`SYS` instruction word.
     pub(crate) const fn from_insn(insn: u32) -> Self {
         Self((insn >> 5) & 0xFFFF)
+    }
+
+    /// From a host's name for the register: the same packing.
+    pub(crate) const fn from_sysreg(reg: SysReg) -> Self {
+        Self(reg.encoding() as u32)
     }
 
     const fn op0(self) -> u32 {
@@ -180,12 +199,21 @@ impl Cpu {
     /// `MRS`: the value of the register `key` names, read at the current EL.
     #[inline]
     pub(crate) fn sysreg_read(&self, key: SysRegKey) -> Result<u64, SysRegError> {
-        self.sysreg_read_at(key, self.pstate.el)
+        self.sysreg_read_as(key, Accessor::Guest)
     }
 
-    /// The value of the register `key` names, as an `MRS` at `el` would read
-    /// it. Reading has no side effects on this core.
-    fn sysreg_read_at(&self, key: SysRegKey, el: El) -> Result<u64, SysRegError> {
+    /// The exception level an accessor reads and writes at.
+    fn access_level(&self, accessor: Accessor) -> El {
+        match accessor {
+            Accessor::Guest => self.pstate.el,
+            Accessor::Host => El::El1,
+        }
+    }
+
+    /// The value of the register `key` names, as `accessor` reads it.
+    /// Reading has no side effects on this core.
+    fn sysreg_read_as(&self, key: SysRegKey, accessor: Accessor) -> Result<u64, SysRegError> {
+        let el = self.access_level(accessor);
         let el0 = el == El::El0;
         let k = key.0;
 
@@ -199,7 +227,7 @@ impl Cpu {
                 return Ok(self.pstate.daif());
             }
             FPCR | FPSR => {
-                if !self.fp_enabled() {
+                if accessor == Accessor::Guest && !self.fp_enabled() {
                     return Err(SysRegError::FpTrap);
                 }
                 return Ok(if k == FPCR { self.fpcr } else { self.fpsr });
@@ -283,7 +311,7 @@ impl Cpu {
             SP_EL0 => {
                 // SP_EL0 is not accessible by name while it is the stack
                 // pointer in use.
-                if !self.pstate.sp_sel {
+                if accessor == Accessor::Guest && !self.pstate.sp_sel {
                     return Err(SysRegError::Undefined);
                 }
                 self.sp_el0
@@ -356,8 +384,15 @@ impl Cpu {
     }
 
     /// `MSR`: write `value` to the register `key` names at the current EL.
+    #[inline]
     pub(crate) fn sysreg_write(&mut self, key: SysRegKey, value: u64) -> Result<WriteEffect, SysRegError> {
-        let el0 = self.pstate.el == El::El0;
+        self.sysreg_write_as(key, value, Accessor::Guest)
+    }
+
+    /// Write `value` to the register `key` names, as `accessor` writes it.
+    fn sysreg_write_as(&mut self, key: SysRegKey, value: u64, accessor: Accessor) -> Result<WriteEffect, SysRegError> {
+        let el = self.access_level(accessor);
+        let el0 = el == El::El0;
         let k = key.0;
 
         match k {
@@ -373,17 +408,17 @@ impl Cpu {
                 return Ok(WriteEffect::None);
             }
             FPCR | FPSR => {
-                if !self.fp_enabled() {
+                if accessor == Accessor::Guest && !self.fp_enabled() {
                     return Err(SysRegError::FpTrap);
                 }
                 // FPCR: AHP, DN, FZ, RMode, and the trap enables (which read
                 // as zero on a core without trapped exception support).
                 if k == FPCR {
-                    self.fpcr = value & 0x07C0_0000;
+                    self.fpcr = value & super::state::FPCR_MASK;
                 } else {
                     // N, Z, C, V (bits 31:28), QC and the cumulative
                     // exception bits.
-                    self.fpsr = value & (0xF000_0000 | super::simd_arith::FPSR_QC | crate::softfloat::FPSR_CUMULATIVE_MASK);
+                    self.fpsr = value & super::state::FPSR_MASK;
                 }
                 return Ok(WriteEffect::None);
             }
@@ -392,7 +427,7 @@ impl Cpu {
                 return Ok(WriteEffect::None);
             }
             CNTP_CTL_EL0 | CNTP_CVAL_EL0 | CNTP_TVAL_EL0 => {
-                self.el0_timer_check(self.pstate.el, EL0PTEN)?;
+                self.el0_timer_check(el, EL0PTEN)?;
                 match k {
                     CNTP_CTL_EL0 => self.sys.cntp_ctl_el0 = value & 3,
                     CNTP_CVAL_EL0 => self.sys.cntp_cval_el0 = value,
@@ -401,7 +436,7 @@ impl Cpu {
                 return Ok(WriteEffect::Timer);
             }
             CNTV_CTL_EL0 | CNTV_CVAL_EL0 | CNTV_TVAL_EL0 => {
-                self.el0_timer_check(self.pstate.el, EL0VTEN)?;
+                self.el0_timer_check(el, EL0VTEN)?;
                 match k {
                     CNTV_CTL_EL0 => self.sys.cntv_ctl_el0 = value & 3,
                     CNTV_CVAL_EL0 => self.sys.cntv_cval_el0 = value,
@@ -454,14 +489,18 @@ impl Cpu {
                 WriteEffect::None
             }
             SP_EL0 => {
-                if !self.pstate.sp_sel {
+                if accessor == Accessor::Guest && !self.pstate.sp_sel {
                     return Err(SysRegError::Undefined);
                 }
                 self.sp_el0 = value;
                 WriteEffect::None
             }
             SPSEL => {
-                self.pstate.sp_sel = value & 1 != 0;
+                // EL0 has only SP_EL0. A guest at EL0 never gets here (its
+                // MSR is UNDEFINED above); a host write made while the
+                // processor is at EL0 leaves SP_EL0 selected, as
+                // `set_pstate` does, so the state stays one SPSR can encode.
+                self.pstate.sp_sel = value & 1 != 0 && self.pstate.el == El::El1;
                 WriteEffect::None
             }
             AFSR0_EL1 => {
@@ -563,12 +602,49 @@ impl Cpu {
     }
 }
 
-/// A read with EL1 privileges for a debugger, without side effects. `SP_EL0`
-/// is reported whichever stack pointer is selected, where a guest `MRS`
-/// would be UNDEFINED.
-pub(crate) fn debug_read(cpu: &Cpu, key: SysRegKey) -> Option<u64> {
-    if key.0 == SP_EL0 {
-        return Some(cpu.sp_el0);
+impl Cpu {
+    /// A host's read of `reg`: what an EL1 `MRS` returns, with no control
+    /// that traps a guest in the way. Reading has no side effects.
+    ///
+    /// # Errors
+    ///
+    /// [`SysRegRefusal::Absent`] for a register this processor does not
+    /// implement, [`SysRegRefusal::WriteOnly`] for one that cannot be read.
+    pub fn sysreg(&self, reg: SysReg) -> Result<u64, SysRegRefusal> {
+        let key = SysRegKey::from_sysreg(reg);
+        match self.sysreg_read_as(key, Accessor::Host) {
+            Ok(value) => Ok(value),
+            Err(_) if key.0 == OSLAR_EL1 => Err(SysRegRefusal::WriteOnly),
+            // A host reads at EL1 past the FP enable and the EL0 controls,
+            // so only UNDEFINED is left to come back.
+            Err(SysRegError::Undefined | SysRegError::TrapToEl1 | SysRegError::FpTrap) => Err(SysRegRefusal::Absent),
+        }
     }
-    cpu.sysreg_read_at(key, El::El1).ok()
+
+    /// A host's write of `reg`, with the effect an EL1 `MSR` has: a write to
+    /// a register the table walk reads flushes the TLB, and a timer write is
+    /// reported for the machine to re-evaluate its lines.
+    pub(crate) fn host_sysreg_write(&mut self, reg: SysReg, value: u64) -> Result<WriteEffect, SysRegRefusal> {
+        let key = SysRegKey::from_sysreg(reg);
+        match self.sysreg_write_as(key, value, Accessor::Host) {
+            Ok(WriteEffect::FlushTlb) => {
+                self.tlb.flush();
+                Ok(WriteEffect::FlushTlb)
+            }
+            Ok(WriteEffect::Timer) => {
+                self.timer_dirty = true;
+                Ok(WriteEffect::Timer)
+            }
+            Ok(WriteEffect::None) => Ok(WriteEffect::None),
+            // As for reads, a host write can only be UNDEFINED: either the
+            // register is read-only, or there is no such register.
+            Err(SysRegError::Undefined | SysRegError::TrapToEl1 | SysRegError::FpTrap) => {
+                if self.sysreg_read_as(key, Accessor::Host).is_ok() {
+                    Err(SysRegRefusal::ReadOnly)
+                } else {
+                    Err(SysRegRefusal::Absent)
+                }
+            }
+        }
+    }
 }

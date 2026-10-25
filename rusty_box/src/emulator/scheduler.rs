@@ -306,7 +306,7 @@ impl<'a, T: Instrumentation, E: SliceEngine<T>> Emulator<T, E> {
                         // machine to read, because the hardware did the work.
                         if !smp {
                             total_up_advanced = Some(match total_up_advanced {
-                                Some(so_far) => so_far.add(advanced),
+                                Some(so_far) => super::run::accumulate_progress(so_far, advanced),
                                 None => advanced,
                             });
                         }

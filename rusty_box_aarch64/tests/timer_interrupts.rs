@@ -2,11 +2,12 @@
 //! and the virtual timer, sleeps in `WFI`, counts timer interrupts in its IRQ
 //! handler, and powers off through PSCI after ten.
 //!
-//! Guest source (assembled with GNU as for aarch64; flash offsets and words
-//! below are its `objdump`):
+//! Guest source (assembled with GNU as for aarch64 and linked at the base of
+//! RAM, where a bare machine starts; offsets and words below are its
+//! `objdump`):
 //!
 //! ```text
-//! _start: ldr x0, =0x1000          ; msr vbar_el1, x0
+//! _start: ldr x0, =0x40001000      ; msr vbar_el1, x0
 //!         ldr x0, =0x40010000      ; mov sp, x0
 //!         ldr x1, =0x08000000      ; mov w2, #1        ; str w2, [x1]          // GICD_CTLR
 //!         mov w2, #(1 << 27)       ; str w2, [x1, #0x100]                      // ISENABLER0
@@ -24,7 +25,8 @@
 //!         str w5, [x3, #0x10]      ; eret              // GICC_EOIR
 //! ```
 
-use rusty_box_aarch64::{RunBudget, StopReason, VirtConfig, VirtMachine, VirtMemory};
+use rusty_box_aarch64::board::RAM_BASE;
+use rusty_box_aarch64::{MachineBuilder, MemoryLoan, RamSize, Reg, RunBudget, StopReason, VirtConfig};
 
 const PROGRAM: &[(usize, u32)] = &[
     (0x00, 0x5800_0340),
@@ -53,7 +55,7 @@ const PROGRAM: &[(usize, u32)] = &[
     (0x5C, 0x5800_0160),
     (0x60, 0xD400_0002),
     (0x64, 0x1400_0000),
-    (0x68, 0x0000_1000),
+    (0x68, 0x4000_1000),
     (0x6C, 0x0000_0000),
     (0x70, 0x4001_0000),
     (0x74, 0x0000_0000),
@@ -82,32 +84,31 @@ struct Outcome {
     pc: u64,
 }
 
+const RAM_LEN: usize = 1 << 20;
+
 fn run_sliced(slice: u64) -> Outcome {
-    let mut flash0 = vec![0u8; 256 * 1024];
+    let mut ram = vec![0u8; RAM_LEN];
+    let mut machine = MachineBuilder::new(VirtConfig::DEFAULT)
+        .ram(RamSize::bytes(RAM_LEN as u64).expect("a valid size"))
+        .bare()
+        .build_in(MemoryLoan {
+            ram: &mut ram,
+            vars: &mut [],
+        })
+        .expect("the test board builds");
     for (offset, word) in PROGRAM {
-        flash0[*offset..*offset + 4].copy_from_slice(&word.to_le_bytes());
+        machine.mem_write(RAM_BASE + *offset as u64, &word.to_le_bytes()).expect("the program is in RAM");
     }
-    let mut flash1 = vec![0xFFu8; 256 * 1024];
-    let mut ram = vec![0u8; 1 << 20];
-    let memory = VirtMemory {
-        ram: &mut ram,
-        flash0: &flash0,
-        flash1: &mut flash1,
-        dtb: &[],
-    };
-    let mut machine = match VirtMachine::new(VirtConfig::DEFAULT, memory) {
-        Ok(m) => m,
-        Err(e) => panic!("the test board must build: {e:?}"),
-    };
     loop {
-        match machine.run(RunBudget::ticks(slice)) {
-            StopReason::BudgetExhausted if machine.now().ticks() < GIVE_UP_AFTER => continue,
+        let outcome = machine.step(RunBudget::Ticks(slice));
+        match outcome.stop {
+            StopReason::BudgetExhausted if machine.ticks() < GIVE_UP_AFTER => continue,
             reason => {
                 return Outcome {
                     reason,
-                    ticks: machine.now().ticks(),
-                    interrupts_counted: machine.cpu().xreg(20),
-                    pc: machine.cpu().pc(),
+                    ticks: machine.ticks(),
+                    interrupts_counted: machine.reg_read(Reg::X20),
+                    pc: machine.reg_read(Reg::Pc),
                 }
             }
         }
@@ -127,6 +128,65 @@ fn the_guest_counts_ten_timer_interrupts_then_powers_off() {
         "ten periods of the timer must have elapsed, not {} ticks",
         out.ticks
     );
+}
+
+/// A snapshot taken mid-run, in the middle of a wait, restores the same
+/// future: the restored machine powers off at the same tick with the same
+/// count as the one that kept going, and an image is refused by a machine
+/// built differently without changing it.
+#[test]
+fn a_snapshot_restores_the_same_future() {
+    let mut ram = vec![0u8; RAM_LEN];
+    let mut machine = MachineBuilder::new(VirtConfig::DEFAULT)
+        .ram(RamSize::bytes(RAM_LEN as u64).expect("a valid size"))
+        .bare()
+        .build_in(MemoryLoan {
+            ram: &mut ram,
+            vars: &mut [],
+        })
+        .expect("the test board builds");
+    for (offset, word) in PROGRAM {
+        machine.mem_write(RAM_BASE + *offset as u64, &word.to_le_bytes()).expect("the program is in RAM");
+    }
+    // Five periods in: the guest has counted a few interrupts and waits.
+    assert_eq!(machine.step(RunBudget::Ticks(5 * TICKS_PER_PERIOD + 123)).stop, StopReason::BudgetExhausted);
+    let mut image = Vec::new();
+    machine.save_snapshot(&mut image).expect("a snapshot saves");
+    let midway = (machine.ticks(), machine.reg_read(Reg::X20));
+    assert!(midway.1 > 0 && midway.1 < 10, "{midway:?}");
+
+    let finish = |m: &mut rusty_box_aarch64::VirtMachine<rusty_box_aarch64::LentStorage<'_>>| {
+        let out = m.step(RunBudget::Ticks(GIVE_UP_AFTER));
+        (out.stop, m.ticks(), m.reg_read(Reg::X20))
+    };
+    let kept_going = finish(&mut machine);
+    assert_eq!(kept_going.0, StopReason::PoweredOff);
+
+    machine.restore_snapshot(&mut image.as_slice()).expect("the image restores");
+    assert_eq!((machine.ticks(), machine.reg_read(Reg::X20)), midway);
+    assert_eq!(finish(&mut machine), kept_going);
+
+    // Twice the RAM is a different machine.
+    let mut other_ram = vec![0u8; 2 * RAM_LEN];
+    let mut other = MachineBuilder::new(VirtConfig::DEFAULT)
+        .ram(RamSize::bytes(2 * RAM_LEN as u64).expect("a valid size"))
+        .bare()
+        .build_in(MemoryLoan {
+            ram: &mut other_ram,
+            vars: &mut [],
+        })
+        .expect("builds");
+    let before = other.cpu_snapshot();
+    assert!(other.restore_snapshot(&mut image.as_slice()).is_err());
+    assert_eq!(other.cpu_snapshot(), before, "a refused image changes nothing");
+    assert_eq!(other.power().state(), rusty_box_aarch64::PowerState::Running);
+
+    // A truncated one leaves the machine off until it is reset.
+    let truncated = &image[..image.len() / 2];
+    assert!(machine.restore_snapshot(&mut &truncated[..]).is_err());
+    assert_eq!(machine.power().state(), rusty_box_aarch64::PowerState::PoweredOff);
+    machine.power().reset();
+    assert_eq!(machine.power().state(), rusty_box_aarch64::PowerState::Running);
 }
 
 /// Determinism across budgets: however the run is cut, it powers off at the

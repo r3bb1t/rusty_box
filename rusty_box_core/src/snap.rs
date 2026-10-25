@@ -57,6 +57,8 @@ impl core::fmt::Display for SnapError {
     }
 }
 
+impl core::error::Error for SnapError {}
+
 pub type SnapResult<T = ()> = Result<T, SnapError>;
 
 /// Somewhere a snapshot body can be written.

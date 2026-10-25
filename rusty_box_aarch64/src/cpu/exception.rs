@@ -5,13 +5,14 @@
 //! there is no routing to decide.
 
 use super::{Activity, Cpu, El, Pstate};
+use crate::instrumentation::{ExceptionKind, ExceptionTaken};
 
 /// `ESR_ELx.EC`, the exception classes this core can raise.
 ///
 /// Closed (R5). "Lower" and "same" EL variants of the aborts are chosen when
 /// the exception is taken, from the EL it is taken from, so a handler raises
 /// the abort without knowing which it will be.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ExceptionClass {
     /// EC 0x00: UNDEFINED instruction, or an access to a register that does
     /// not exist at this EL.
@@ -122,9 +123,10 @@ impl VectorKind {
 
 impl Cpu {
     /// Take synchronous exception `e` raised by the instruction at `pc`.
-    pub(crate) fn take_sync_exception(&mut self, e: Exception, pc: u64) {
+    pub(crate) fn take_sync_exception(&mut self, e: Exception, pc: u64) -> ExceptionTaken {
+        let from = self.pstate.el;
         // ESR_EL1.IL is 1: every A64 instruction is 32 bits.
-        let esr = (e.class.code(self.pstate.el) << 26) | (1 << 25) | u64::from(e.iss & 0x01FF_FFFF);
+        let esr = (e.class.code(from) << 26) | (1 << 25) | u64::from(e.iss & 0x01FF_FFFF);
         let return_addr = if e.class.returns_to_next() {
             pc.wrapping_add(4)
         } else {
@@ -134,23 +136,43 @@ impl Cpu {
         if let Some(far) = e.far {
             self.sys.far_el1 = far;
         }
-        self.enter_el1(VectorKind::Synchronous, return_addr);
+        let vector = self.enter_el1(VectorKind::Synchronous, return_addr);
+        ExceptionTaken {
+            kind: ExceptionKind::Synchronous(e.class),
+            from,
+            return_address: return_addr,
+            vector,
+            syndrome: esr,
+            fault_address: e.far,
+        }
     }
 
     /// Take an IRQ at the current instruction boundary.
-    pub fn take_irq(&mut self) {
-        let pc = self.pc;
-        self.enter_el1(VectorKind::Irq, pc);
+    pub fn take_irq(&mut self) -> ExceptionTaken {
+        self.take_interrupt(VectorKind::Irq, ExceptionKind::Irq)
     }
 
     /// Take an FIQ at the current instruction boundary.
-    pub fn take_fiq(&mut self) {
-        let pc = self.pc;
-        self.enter_el1(VectorKind::Fiq, pc);
+    pub fn take_fiq(&mut self) -> ExceptionTaken {
+        self.take_interrupt(VectorKind::Fiq, ExceptionKind::Fiq)
     }
 
-    /// `AArch64.TakeException` to EL1.
-    fn enter_el1(&mut self, kind: VectorKind, return_addr: u64) {
+    fn take_interrupt(&mut self, vector_kind: VectorKind, kind: ExceptionKind) -> ExceptionTaken {
+        let from = self.pstate.el;
+        let pc = self.pc;
+        let vector = self.enter_el1(vector_kind, pc);
+        ExceptionTaken {
+            kind,
+            from,
+            return_address: pc,
+            vector,
+            syndrome: 0,
+            fault_address: None,
+        }
+    }
+
+    /// `AArch64.TakeException` to EL1. Returns the vector now executing.
+    fn enter_el1(&mut self, kind: VectorKind, return_addr: u64) -> u64 {
         let quadrant = match (self.pstate.el, self.pstate.sp_sel) {
             (El::El0, _) => 0x400,
             (El::El1, false) => 0x000,
@@ -172,9 +194,10 @@ impl Cpu {
             ss: false,
             il: false,
         };
-        self.pc = (self.sys.vbar_el1 & !0x7FF).wrapping_add(quadrant + kind.offset());
+        self.pc = self.branch_addr((self.sys.vbar_el1 & !0x7FF).wrapping_add(quadrant + kind.offset()));
         self.monitor.armed = false;
         self.activity = Activity::Running;
+        self.pc
     }
 
     /// `ERET`: `AArch64.ExceptionReturn(ELR_EL1, SPSR_EL1)`. Returns the new PC.

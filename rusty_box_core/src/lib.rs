@@ -1,9 +1,13 @@
 //! Architecture-neutral foundations for the rusty_box emulator.
 //!
-//! Nothing here knows what an x86 is, what a PC is, or how a guest is executed.
+//! Nothing here knows what an x86 processor is or how a guest is executed.
 //! The rule that keeps it that way: a type belongs in this crate only if a
-//! device model, an execution engine and a future non-x86 machine could all
-//! name it without any of them naming each other.
+//! device model, an execution engine and every machine — the x86 PC and the
+//! AArch64 `virt` board alike — could all name it without any of them naming
+//! each other. The PC keyboard's keys in [`input`] pass that test: the x86
+//! machine renders them as PS/2 scancodes in its own crate, and the AArch64
+//! machine sends them as a serial terminal's bytes ([`input::terminal`]),
+//! which belong to any machine with a UART console, not to a processor.
 //!
 //! `no_std` and allocation-free unconditionally; `alloc` and `std` are additive
 //! features that add conveniences and never change the shape of what exists
@@ -25,8 +29,11 @@ extern crate std;
 
 pub mod engine;
 pub mod float;
+pub mod input;
+pub mod machine;
 pub mod reset;
 pub mod ring_buffer;
+pub mod run;
 pub mod snap;
 pub mod time;
 
@@ -37,6 +44,7 @@ pub use engine::{
 pub use float::FloatExt;
 pub use reset::ResetReason;
 pub use ring_buffer::RingBuffer;
+pub use run::{MixedProgress, Progress, RunBudget};
 pub use snap::{
     SnapError, SnapRead, SnapResult, SnapWrite, SnapshotSection, MAX_COUNT, MAX_SECTION_LEN,
 };

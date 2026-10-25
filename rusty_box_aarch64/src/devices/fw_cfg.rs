@@ -11,6 +11,9 @@
 //! device tree for everything a missing item would have told it. The numeric
 //! items QEMU's `virt` installs are present with this board's values.
 
+use rusty_box_core::snap::{SnapRead, SnapResult, SnapWrite};
+use rusty_box_core::SnapError;
+
 use crate::bus::{AccessWidth, RegOffset};
 
 const FW_CFG_SIGNATURE: u16 = 0x0000;
@@ -104,6 +107,21 @@ impl FwCfg {
             self.selector = (value as u16).swap_bytes();
             self.offset = 0;
         }
+    }
+
+    pub(crate) fn save<W: SnapWrite>(&self, w: &mut W) -> SnapResult {
+        w.write_u16(self.selector)?;
+        w.write_u32(self.offset as u32)
+    }
+
+    pub(crate) fn restore<R: SnapRead>(&mut self, r: &mut R) -> SnapResult {
+        self.selector = r.read_u16()?;
+        let offset = r.read_u32()? as usize;
+        if offset > MAX_ITEM {
+            return Err(SnapError::Invalid("fw_cfg read offset is past the longest item"));
+        }
+        self.offset = offset;
+        Ok(())
     }
 }
 

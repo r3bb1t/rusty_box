@@ -10,6 +10,9 @@
 //! (`SCTLR_EL1`, `TCR_EL1`, `TTBR0/1_EL1`, `MAIR_EL1`) — invalidation is never
 //! narrower than the architecture requires, so ASIDs need no tagging.
 
+use rusty_box_core::snap::{SnapRead, SnapResult, SnapWrite};
+use rusty_box_core::SnapError;
+
 use super::dp::ones;
 use super::exception::{Exception, ExceptionClass};
 use super::exec::{Fault, StopCause};
@@ -75,6 +78,48 @@ impl Fsc {
     }
 }
 
+/// Why a virtual address has no translation.
+///
+/// Closed (R5): the faults a stage-1 walk can end in before permissions are
+/// considered. `level` is the lookup level the walk had reached.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TranslationFault {
+    /// The address, or a table or output address, is wider than the
+    /// configured address size.
+    AddressSize { level: u8 },
+    /// No valid descriptor maps it.
+    Translation { level: u8 },
+    /// The descriptor that maps it has its access flag clear, which this
+    /// ARMv8.0 core faults on rather than sets.
+    AccessFlag { level: u8 },
+    /// A descriptor read reached nothing on the bus.
+    ExternalAbortOnWalk { level: u8 },
+}
+
+impl core::fmt::Display for TranslationFault {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::AddressSize { level } => write!(f, "address size fault at level {level}"),
+            Self::Translation { level } => write!(f, "translation fault at level {level}"),
+            Self::AccessFlag { level } => write!(f, "access flag fault at level {level}"),
+            Self::ExternalAbortOnWalk { level } => write!(f, "external abort on the walk at level {level}"),
+        }
+    }
+}
+
+impl core::error::Error for TranslationFault {}
+
+impl From<TranslationFault> for Fsc {
+    fn from(fault: TranslationFault) -> Self {
+        match fault {
+            TranslationFault::AddressSize { level } => Self::AddressSize(level),
+            TranslationFault::Translation { level } => Self::Translation(level),
+            TranslationFault::AccessFlag { level } => Self::AccessFlag(level),
+            TranslationFault::ExternalAbortOnWalk { level } => Self::SyncExternalOnWalk(level),
+        }
+    }
+}
+
 const PERM_EL1_R: u8 = 1 << 0;
 const PERM_EL1_W: u8 = 1 << 1;
 const PERM_EL1_X: u8 = 1 << 2;
@@ -119,6 +164,8 @@ struct Walked {
     level: u8,
     /// The `MAIR_EL1` attribute byte, as `PAR_EL1` reports it.
     attr: u8,
+    /// The descriptor's SH[1:0] field (bits [9:8]).
+    shareability: u8,
 }
 
 const TLB_ENTRIES: usize = 1024;
@@ -162,6 +209,45 @@ impl Tlb {
     fn slot(va: u64) -> usize {
         ((va >> 12) as usize) & (TLB_ENTRIES - 1)
     }
+
+    /// The valid entries, for a snapshot.
+    pub(crate) fn save<W: SnapWrite>(&self, w: &mut W) -> SnapResult {
+        let valid = self.entries.iter().filter(|e| e.tag != INVALID_TAG).count();
+        w.write_u32(valid as u32)?;
+        for e in self.entries.iter().filter(|e| e.tag != INVALID_TAG) {
+            w.write_u64(e.tag)?;
+            w.write_u64(e.pa_page)?;
+            w.write_bytes(&[e.perms, u8::from(e.device), e.level])?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn restore<R: SnapRead>(&mut self, r: &mut R) -> SnapResult {
+        let valid = r.read_count(TLB_ENTRIES)?;
+        self.flush();
+        for _ in 0..valid {
+            let tag = r.read_u64()?;
+            let pa_page = r.read_u64()?;
+            let mut rest = [0u8; 3];
+            r.read_bytes(&mut rest)?;
+            let [perms, device, level] = rest;
+            if tag == INVALID_TAG || pa_page & 0xFFF != 0 || perms >= 1 << 6 || device > 1 || level > 3 {
+                return Err(SnapError::Invalid("TLB entry is not one a walk can produce"));
+            }
+            let slot = &mut self.entries[Self::slot(tag << 12)];
+            if slot.tag != INVALID_TAG {
+                return Err(SnapError::Invalid("two TLB entries claim one slot"));
+            }
+            *slot = TlbEntry {
+                tag,
+                pa_page,
+                perms,
+                device: device == 1,
+                level,
+            };
+        }
+        Ok(())
+    }
 }
 
 impl Cpu {
@@ -177,7 +263,9 @@ impl Cpu {
     }
 
     /// Translate `va` for an access of `kind` checked against `el`'s
-    /// permissions. `data` selects whether top-byte-ignore applies.
+    /// permissions. The TLB hit is inlined into every access path; a miss
+    /// walks out of line.
+    #[inline(always)]
     pub(crate) fn translate<B: PhysBus>(
         &mut self,
         bus: &mut B,
@@ -186,20 +274,21 @@ impl Cpu {
         el: El,
     ) -> Result<Translated, Fsc> {
         if !self.mmu_enabled() {
-            // Arm ARM D8.2.11: with stage 1 disabled the output address is
-            // the input address, data accesses are Device-nGnRnE and
-            // instruction fetches are Normal.
-            if va >> id::PA_BITS != 0 {
+            // Arm ARM D8.2.11 (`AArch64.TranslateAddressS1Off`): with stage 1
+            // disabled the output address is the input address below
+            // `AddrTop`, data accesses are Device-nGnRnE and instruction
+            // fetches are Normal.
+            let address = self.untagged(va);
+            if address >> id::PA_BITS != 0 {
                 return Err(Fsc::AddressSize(0));
             }
             return Ok(Translated {
-                pa: va,
+                pa: address,
                 device: kind != AccessKind::Fetch,
             });
         }
 
-        let slot = Tlb::slot(va);
-        let entry = self.tlb.entries[slot];
+        let entry = self.tlb.entries[Tlb::slot(va)];
         if entry.tag == va >> 12 {
             if !permitted(entry.perms, kind, el) {
                 return Err(Fsc::Permission(entry.level));
@@ -209,24 +298,24 @@ impl Cpu {
                 device: entry.device,
             });
         }
+        self.translate_miss(bus, va, kind, el)
+    }
 
-        let walked = self.walk(bus, va, kind != AccessKind::Fetch)?;
-        // Only addresses with a canonical top byte are cached: a tagged data
-        // address (TBI) and the untagged fetch of the same page must not
-        // share an entry, because top-byte-ignore applies to data only.
-        let canonical = {
-            let top = va >> 55;
-            top == 0 || top == 0x1FF
+    /// A TLB miss: walk, cache what the walk found, check permissions.
+    #[inline(never)]
+    fn translate_miss<B: PhysBus>(&mut self, bus: &mut B, va: u64, kind: AccessKind, el: El) -> Result<Translated, Fsc> {
+        let slot = Tlb::slot(va);
+        let walked = self.walk(bus, va)?;
+        // A tagged address keeps its tag in the entry's tag, so it hits only
+        // itself; a TCR_EL1 write, which can change what the walk ignores,
+        // empties the TLB.
+        self.tlb.entries[slot] = TlbEntry {
+            tag: va >> 12,
+            pa_page: walked.pa & !0xFFF,
+            perms: walked.perms,
+            device: walked.device,
+            level: walked.level,
         };
-        if canonical {
-            self.tlb.entries[slot] = TlbEntry {
-                tag: va >> 12,
-                pa_page: walked.pa & !0xFFF,
-                perms: walked.perms,
-                device: walked.device,
-                level: walked.level,
-            };
-        }
         if !permitted(walked.perms, kind, el) {
             return Err(Fsc::Permission(walked.level));
         }
@@ -236,28 +325,54 @@ impl Cpu {
         })
     }
 
+    /// Whether top-byte-ignore covers `va` (Arm ARM `AddrTop`): TCR_EL1.TBI1
+    /// for the upper half of the address space, TBI0 for the lower. ARMv8.0
+    /// has no TBID, so the bit covers instruction addresses as well as data.
+    #[inline]
+    fn tbi(&self, va: u64) -> bool {
+        let bit = if (va >> 55) & 1 == 1 { 38 } else { 37 };
+        (self.sys.tcr_el1 >> bit) & 1 == 1
+    }
+
+    /// `va` with its tag cleared when top-byte-ignore covers it.
+    #[inline]
+    fn untagged(&self, va: u64) -> u64 {
+        if self.tbi(va) { va & 0x00FF_FFFF_FFFF_FFFF } else { va }
+    }
+
+    /// Arm ARM `AArch64.BranchAddr`: the address a branch, an exception
+    /// entry or an exception return writes to the PC. Under top-byte-ignore
+    /// the tag is dropped, bits [63:56] becoming copies of bit 55 (the sign
+    /// extension EL0 and EL1 use, and this core has no other level). QEMU
+    /// does the same: `gen_a64_set_pc` (translate-a64.c) for branches and
+    /// `HELPER(exception_return)` (helper-a64.c) for ERET.
+    #[inline]
+    pub(crate) fn branch_addr(&self, target: u64) -> u64 {
+        if self.tbi(target) { (((target << 8) as i64) >> 8) as u64 } else { target }
+    }
+
     /// The translation table walk (Arm ARM `AArch64.TranslationTableWalk`)
     /// for the 4 KiB granule, with hierarchical permissions and no hardware
     /// access-flag management (ARMv8.0).
-    fn walk<B: PhysBus>(&mut self, bus: &mut B, va: u64, data: bool) -> Result<Walked, Fsc> {
+    fn walk<B: PhysBus>(&self, bus: &mut B, va: u64) -> Result<Walked, TranslationFault> {
         let tcr = self.sys.tcr_el1;
         let upper = (va >> 55) & 1 == 1;
-        let (txsz, tbi, epd, ttbr) = if upper {
-            ((tcr >> 16) & 0x3F, (tcr >> 38) & 1 == 1, (tcr >> 23) & 1 == 1, self.sys.ttbr1_el1)
+        let (txsz, epd, ttbr) = if upper {
+            ((tcr >> 16) & 0x3F, (tcr >> 23) & 1 == 1, self.sys.ttbr1_el1)
         } else {
-            (tcr & 0x3F, (tcr >> 37) & 1 == 1, (tcr >> 7) & 1 == 1, self.sys.ttbr0_el1)
+            (tcr & 0x3F, (tcr >> 7) & 1 == 1, self.sys.ttbr0_el1)
         };
         // T0SZ/T1SZ outside 16..=39 behave as the nearest supported value
         // (Arm ARM D8.1.6, an IMPLEMENTATION DEFINED choice made here).
         let txsz = txsz.clamp(16, 39) as u32;
         let ia_bits = 64 - txsz;
-        let top = if tbi && data { 56 } else { 64 };
+        let top = if self.tbi(va) { 56 } else { 64 };
         let check = ones(top - ia_bits) << ia_bits;
         if va & check != if upper { check } else { 0 } {
-            return Err(Fsc::Translation(0));
+            return Err(TranslationFault::Translation { level: 0 });
         }
         if epd {
-            return Err(Fsc::Translation(0));
+            return Err(TranslationFault::Translation { level: 0 });
         }
 
         let start_level: u32 = if ia_bits > 39 {
@@ -278,17 +393,18 @@ impl Cpu {
             let shift = 12 + 9 * (3 - level);
             let index_bits = if level == start_level { start_bits } else { 9 };
             let index = (va >> shift) & ones(index_bits);
-            let desc = match bus.read(PhysAddr::new(table + index * 8), AccessWidth::Dword, clock) {
+            let at_level = level as u8;
+            let desc = match bus.read_descriptor(PhysAddr::new(table + index * 8), clock) {
                 Ok(d) => d,
-                Err(BusFault::Unmapped) => return Err(Fsc::SyncExternalOnWalk(level as u8)),
+                Err(BusFault::Unmapped) => return Err(TranslationFault::ExternalAbortOnWalk { level: at_level }),
             };
             if desc & 1 == 0 {
-                return Err(Fsc::Translation(level as u8));
+                return Err(TranslationFault::Translation { level: at_level });
             }
             if level < 3 && desc & 2 != 0 {
                 let next = desc & 0x0000_FFFF_FFFF_F000;
                 if next >> id::PA_BITS != 0 {
-                    return Err(Fsc::AddressSize(level as u8));
+                    return Err(TranslationFault::AddressSize { level: at_level });
                 }
                 ap_table |= (desc >> 61) & 3;
                 uxn_table |= (desc >> 60) & 1 == 1;
@@ -300,14 +416,14 @@ impl Cpu {
             // A level-3 descriptor with bit 1 clear is reserved; level 0 has
             // no block descriptors with the 4 KiB granule.
             if (level == 3 && desc & 2 == 0) || level == 0 {
-                return Err(Fsc::Translation(level as u8));
+                return Err(TranslationFault::Translation { level: at_level });
             }
             let out = desc & 0x0000_FFFF_FFFF_F000 & !ones(shift);
             if out >> id::PA_BITS != 0 {
-                return Err(Fsc::AddressSize(level as u8));
+                return Err(TranslationFault::AddressSize { level: at_level });
             }
             if (desc >> 10) & 1 == 0 {
-                return Err(Fsc::AccessFlag(level as u8));
+                return Err(TranslationFault::AccessFlag { level: at_level });
             }
 
             let ap = (desc >> 6) & 3;
@@ -352,30 +468,60 @@ impl Cpu {
                 device: attr & 0xF0 == 0,
                 level: level as u8,
                 attr,
+                shareability: ((desc >> 8) & 3) as u8,
             });
         }
     }
 
-    /// `AT S1E1R/S1E1W/S1E0R/S1E0W`: translate and report in `PAR_EL1`.
+    /// Where data address `va` translates to now, for a debugger: the walk a
+    /// data access would make, with no permission check, no TLB lookup or
+    /// fill, and descriptors read through `bus` — which a caller makes a view
+    /// that cannot disturb a device. Nothing in the processor changes.
+    pub(crate) fn debug_translate<B: PhysBus>(&self, bus: &mut B, va: u64) -> Result<u64, TranslationFault> {
+        if !self.mmu_enabled() {
+            let address = self.untagged(va);
+            if address >> id::PA_BITS != 0 {
+                return Err(TranslationFault::AddressSize { level: 0 });
+            }
+            return Ok(address);
+        }
+        self.walk(bus, va).map(|w| w.pa)
+    }
+
+    /// `AT S1E1R/S1E1W/S1E0R/S1E0W`: translate and report in `PAR_EL1`,
+    /// in the 64-bit format QEMU's `do_ats_write` (cpregs-at.c) builds.
     pub(crate) fn address_translate<B: PhysBus>(&mut self, bus: &mut B, va: u64, write: bool, el: El) {
+        const RES1: u64 = 1 << 11;
+        // This core runs in Non-secure state, as QEMU's `virt` does without
+        // `secure=on`, so a successful translation reports NS = 1.
+        const NS: u64 = 1 << 9;
         let kind = if write { AccessKind::Write } else { AccessKind::Read };
         let result = if self.mmu_enabled() {
-            match self.walk(bus, va, true) {
-                Ok(w) if permitted(w.perms, kind, el) => Ok((w.pa, u64::from(w.attr))),
+            match self.walk(bus, va) {
+                Ok(w) if permitted(w.perms, kind, el) => Ok((w.pa, w.attr, w.shareability)),
                 Ok(w) => Err(Fsc::Permission(w.level)),
-                Err(f) => Err(f),
+                Err(f) => Err(Fsc::from(f)),
             }
-        } else if va >> id::PA_BITS != 0 {
-            Err(Fsc::AddressSize(0))
         } else {
-            // Device-nGnRnE (attribute 0x00) with stage 1 disabled.
-            Ok((va, 0))
+            let address = self.untagged(va);
+            if address >> id::PA_BITS != 0 {
+                Err(Fsc::AddressSize(0))
+            } else {
+                // Device-nGnRnE (attribute 0x00) with stage 1 disabled.
+                Ok((address, 0, 0))
+            }
         };
         self.sys.par_el1 = match result {
-            Ok((pa, attr)) => (attr << 56) | (pa & 0x0000_FFFF_FFFF_F000),
+            Ok((pa, attr, shareability)) => {
+                // Arm ARM `PAREncodeShareability`, as QEMU's
+                // `par_el1_shareability`: Device and Normal Non-cacheable
+                // memory report Outer Shareable.
+                let sh = if attr & 0xF0 == 0 || attr == 0x44 || attr == 0x40 { 2 } else { shareability };
+                (u64::from(attr) << 56) | (pa & 0x0000_FFFF_FFFF_F000) | NS | (u64::from(sh) << 7) | RES1
+            }
             // F = 1, FST, bit 11 RES1. PTW and S are 0: stage 1, not on a walk
             // of a stage-2 table.
-            Err(f) => (1 << 11) | (u64::from(f.code()) << 1) | 1,
+            Err(f) => RES1 | (u64::from(f.code()) << 1) | 1,
         };
     }
 
@@ -406,11 +552,8 @@ impl Cpu {
         let t = self
             .translate(bus, pc, AccessKind::Fetch, el)
             .map_err(|f| Fault::from(Exception::new(ExceptionClass::InstructionAbort, f.code()).with_far(pc)))?;
-        match bus.read(PhysAddr::new(t.pa), AccessWidth::Word, self.clock()) {
-            Ok(word) => Ok(Fetched {
-                word: word as u32,
-                pa: t.pa,
-            }),
+        match bus.fetch(PhysAddr::new(t.pa), self.clock()) {
+            Ok(word) => Ok(Fetched { word, pa: t.pa }),
             Err(BusFault::Unmapped) => Err(self.external_abort(pc, t.pa, AccessKind::Fetch)),
         }
     }
@@ -473,8 +616,11 @@ impl Cpu {
             };
         }
         // Crosses a page boundary, so it is misaligned: Normal memory only.
-        // Each byte is translated on its own; a fault reports the access's
-        // own address.
+        // Each byte is an access of its own (Arm ARM `AArch64.MemSingle` on
+        // an unaligned address), so a translation or external fault reports
+        // the first byte that faulted — an address in the page that needs
+        // mapping, which is what an OS's fault handler goes by. An alignment
+        // fault is the whole access's, and reports its address.
         if acc.strict_align || self.strict_alignment() {
             return Err(Self::data_abort(va, Fsc::Alignment, false));
         }
@@ -484,13 +630,13 @@ impl Cpu {
             let byte_va = va.wrapping_add(i);
             let t = self
                 .translate(bus, byte_va, AccessKind::Read, el)
-                .map_err(|f| Self::data_abort(va, f, false))?;
+                .map_err(|f| Self::data_abort(byte_va, f, false))?;
             if t.device {
                 return Err(Self::data_abort(va, Fsc::Alignment, false));
             }
             let b = match bus.read(PhysAddr::new(t.pa), AccessWidth::Byte, self.clock()) {
                 Ok(b) => b & 0xFF,
-                Err(BusFault::Unmapped) => return Err(self.external_abort(va, t.pa, AccessKind::Read)),
+                Err(BusFault::Unmapped) => return Err(self.external_abort(byte_va, t.pa, AccessKind::Read)),
             };
             value |= b << (8 * i);
         }
@@ -520,13 +666,15 @@ impl Cpu {
             return Err(Self::data_abort(va, Fsc::Alignment, true));
         }
         // Translate both pages before writing anything, so a fault on the
-        // second page leaves memory untouched.
+        // second page leaves memory untouched. As for a read, a translation
+        // fault reports the first byte that faulted: the access's own address
+        // in the first page, the start of the second page in the second.
         let el = self.access_el(acc);
-        let last = va.wrapping_add(bytes - 1);
-        for probe in [va, last] {
+        let second_page = va.wrapping_add(bytes - 1) & !0xFFF;
+        for probe in [va, second_page] {
             let t = self
                 .translate(bus, probe, AccessKind::Write, el)
-                .map_err(|f| Self::data_abort(va, f, true))?;
+                .map_err(|f| Self::data_abort(probe, f, true))?;
             if t.device {
                 return Err(Self::data_abort(va, Fsc::Alignment, true));
             }
@@ -535,13 +683,13 @@ impl Cpu {
             let byte_va = va.wrapping_add(i);
             let t = self
                 .translate(bus, byte_va, AccessKind::Write, el)
-                .map_err(|f| Self::data_abort(va, f, true))?;
+                .map_err(|f| Self::data_abort(byte_va, f, true))?;
             self.note_store(t.pa, 1);
             if bus
                 .write(PhysAddr::new(t.pa), AccessWidth::Byte, (value >> (8 * i)) & 0xFF, self.clock())
                 .is_err()
             {
-                return Err(self.external_abort(va, t.pa, AccessKind::Write));
+                return Err(self.external_abort(byte_va, t.pa, AccessKind::Write));
             }
         }
         Ok(())

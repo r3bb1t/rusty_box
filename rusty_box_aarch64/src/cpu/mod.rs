@@ -18,9 +18,11 @@ mod fp;
 mod fp_estimate;
 mod ldst;
 mod mmu;
+mod regs;
 mod simd;
 mod simd_arith;
 mod simd_fp;
+mod state;
 mod sysreg;
 mod system;
 mod timer;
@@ -29,14 +31,15 @@ use rusty_box_core::{ClockHz, RingBuffer, VmClock, VmInstant};
 
 pub use exception::ExceptionClass;
 pub use exec::{DebugStops, Step, StopCause, UndefinedInsn};
-pub use mmu::Tlb;
+pub use mmu::{Tlb, TranslationFault};
+pub use regs::{CpuState, Reg, SysReg, SysRegRefusal, VReg};
 pub use timer::TimerLines;
 
 /// An exception level this processor implements.
 ///
 /// Closed (R5): EL2 and EL3 do not exist on this core, and an `ERET` that
 /// names them is an illegal exception return, not a third variant.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum El {
     El0,
     El1,
@@ -89,7 +92,7 @@ impl Pstate {
         il: false,
     };
 
-    /// The `SPSR_ELx` encoding of this state (AArch64 form, M[4] = 0).
+    /// The `SPSR_ELx` encoding of this state (AArch64 form, `M[4]` = 0).
     pub const fn to_spsr(self) -> u64 {
         let mut v = 0u64;
         v |= (self.n as u64) << 31;
@@ -105,6 +108,35 @@ impl Pstate {
         v |= self.el.index() << 2;
         v |= self.sp_sel as u64;
         v
+    }
+
+    /// The state an `SPSR_ELx` value describes, if it is one this processor
+    /// can be in: AArch64 (`M[4]` clear), EL0 or EL1, and at EL0 the only stack
+    /// pointer EL0 has.
+    pub const fn from_spsr(spsr: u64) -> Option<Self> {
+        let m = spsr & 0x1F;
+        let el = match (m >> 2) & 3 {
+            0 => El::El0,
+            1 => El::El1,
+            _ => return None,
+        };
+        if m & 0x10 != 0 || m & 0x2 != 0 || (matches!(el, El::El0) && m & 1 != 0) {
+            return None;
+        }
+        Some(Self {
+            n: spsr & (1 << 31) != 0,
+            z: spsr & (1 << 30) != 0,
+            c: spsr & (1 << 29) != 0,
+            v: spsr & (1 << 28) != 0,
+            d: spsr & (1 << 9) != 0,
+            a: spsr & (1 << 8) != 0,
+            i: spsr & (1 << 7) != 0,
+            f: spsr & (1 << 6) != 0,
+            el,
+            sp_sel: m & 1 != 0,
+            ss: spsr & (1 << 21) != 0,
+            il: spsr & (1 << 20) != 0,
+        })
     }
 
     /// `NZCV` in its register layout (bits 31:28).
@@ -159,7 +191,7 @@ impl CpuConfig {
 }
 
 /// What the processor is doing between instructions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Activity {
     Running,
     /// Executed `WFI` (or a PSCI `CPU_SUSPEND`) and waits for a wake-up event:
@@ -285,9 +317,12 @@ pub struct Cpu {
     pub(crate) tlb: Tlb,
     pub(crate) decode_cache: decode::DecodeCache,
     pub(crate) activity: Activity,
-    /// Ticks since reset: one per retired (or faulting) instruction, plus the
-    /// span skipped while waiting for an interrupt.
+    /// Ticks since the machine was built: one per retired (or faulting)
+    /// instruction, plus the span skipped while waiting for an interrupt.
     pub(crate) icount: u64,
+    /// Instructions retired (or that took an exception in their place) since
+    /// the machine was built — `icount` without the waiting.
+    pub(crate) retired: u64,
     pub(crate) ips: ClockHz,
     pub(crate) counter_hz: ClockHz,
     /// Set when a register write may have changed a timer's output line or
@@ -323,6 +358,7 @@ impl Cpu {
             decode_cache: decode::DecodeCache::new(),
             activity: Activity::Running,
             icount: 0,
+            retired: 0,
             ips: config.ips,
             counter_hz: config.counter_hz,
             timer_dirty: true,
@@ -353,11 +389,13 @@ impl Cpu {
     /// Take the highest-priority deliverable interrupt, if any (FIQ before
     /// IRQ); [`Cpu::interrupt_deliverable`] says beforehand whether one will
     /// be taken.
-    pub fn deliver_interrupt(&mut self) {
+    pub fn deliver_interrupt(&mut self) -> Option<crate::instrumentation::ExceptionTaken> {
         if self.fiq_line && !self.pstate.f {
-            self.take_fiq();
+            Some(self.take_fiq())
         } else if self.irq_line && !self.pstate.i {
-            self.take_irq();
+            Some(self.take_irq())
+        } else {
+            None
         }
     }
 
@@ -417,7 +455,8 @@ impl Cpu {
         self.v[(n & 31) as usize]
     }
 
-    /// Emulated time since reset.
+    /// Emulated time since the processor was created; a reset keeps
+    /// counting.
     #[inline]
     pub fn now(&self) -> VmInstant {
         VmInstant::from_ticks(self.icount)
@@ -438,14 +477,6 @@ impl Cpu {
     /// Recently executed instruction addresses, oldest first.
     pub fn recent_pcs(&self) -> rusty_box_core::ring_buffer::Iter<'_, u64, PC_HISTORY> {
         self.pc_history.iter()
-    }
-
-    /// Read a system register by its `MRS` encoding fields, with EL1
-    /// privilege and no side effects beyond those of a guest `MRS` — for
-    /// debuggers and tests. `None` for an encoding this core does not
-    /// implement.
-    pub fn read_sysreg(&self, op0: u32, op1: u32, crn: u32, crm: u32, op2: u32) -> Option<u64> {
-        sysreg::debug_read(self, sysreg::SysRegKey::new(op0, op1, crn, crm, op2))
     }
 
     // ----- register file -----

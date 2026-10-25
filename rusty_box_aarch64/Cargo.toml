@@ -15,6 +15,10 @@ rusty_box_core = { workspace = true }
 disarm64 = { version = "0.2", default-features = false, features = ["full"] }
 disarm64_defn = { version = "0.2", default-features = false }
 
+[dev-dependencies]
+# Tests save snapshots into a `Vec<u8>`, which is a snapshot sink with `alloc`.
+rusty_box_core = { workspace = true, features = ["alloc"] }
+
 [features]
 default = []
 # Additive, as in rusty_box_core: neither changes the shape of the core.
@@ -26,4 +30,8 @@ workspace = true
 
 [[example]]
 name = "uefi_virt"
+required-features = ["std"]
+
+[[example]]
+name = "linux_virt"
 required-features = ["std"]

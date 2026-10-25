@@ -19,10 +19,10 @@ This is the local gate suite, defined in `xtask/src/ci.rs`. It runs its steps in
 
 | Invocation | Steps |
 | --- | --- |
-| `cargo xtask ci` | 29 |
-| `cargo xtask ci --skip-boot` | 28 |
-| `cargo xtask ci --full` | 31 |
-| `cargo xtask ci --full --skip-boot` | 30 |
+| `cargo xtask ci` | 32 |
+| `cargo xtask ci --skip-boot` | 31 |
+| `cargo xtask ci --full` | 34 |
+| `cargo xtask ci --full --skip-boot` | 33 |
 
 ### Prerequisites
 
@@ -36,7 +36,7 @@ This is the local gate suite, defined in `xtask/src/ci.rs`. It runs its steps in
 
 ### Step 1: doctrine ratchets
 
-This step is an in-process text scan, not a cargo command. It enforces the Safety Doctrine counts (`docs/safety-doctrine.md`) over eight source trees: `rusty_box`, `rusty_box_decoder`, `rusty_box_core`, `rusty_box_devices`, `rusty_box_whp_sys`, `rusty_box_whp`, `rusty_box_whp_engine` and `rusty_box_gui`. It checks four counts:
+This step is an in-process text scan, not a cargo command. It enforces the Safety Doctrine counts (`docs/safety-doctrine.md`) over nine source trees: `rusty_box`, `rusty_box_decoder`, `rusty_box_core`, `rusty_box_devices`, `rusty_box_aarch64`, `rusty_box_whp_sys`, `rusty_box_whp`, `rusty_box_whp_engine` and `rusty_box_gui`. It checks four counts:
 
 - **`unsafe` tokens per crate (R1)**, with comment lines stripped, against `UNSAFE_TOKEN_BASELINES`. A count above its baseline fails the step. A count below it passes, but prints a reminder to lower the baseline in the same commit.
 - **`unsafe impl … Send` / `Sync` lines in `rusty_box/src` (R6).** Baseline zero.
@@ -45,7 +45,7 @@ This step is an in-process text scan, not a cargo command. It enforces the Safet
 
 It is a line scan, not a parser. The baseline constants and the reason each one moved are in `xtask/src/ci.rs`.
 
-### Steps 2 to 28: the build and test matrix
+### Steps 2 to 31: the build and test matrix
 
 Every step is `--release` except the debug-assertions check, which exists to compile the `#[cfg(debug_assertions)]` code that release builds leave out.
 
@@ -58,33 +58,37 @@ Every step is `--release` except the debug-assertions check, which exists to com
 | 6 | devices tests (no_std + no_alloc) | `cargo test --release -p rusty_box_devices` |
 | 7 | devices tests (std) | `cargo test --release -p rusty_box_devices --features std` |
 | 8 | devices bare-metal target check | `cargo check --release -p rusty_box_devices --features alloc --target x86_64-unknown-none` |
-| 9 | WHP sys tests | `cargo test --release -p rusty_box_whp_sys` |
-| 10 | WHP leaf tests | `cargo test --release -p rusty_box_whp` |
-| 11 | WHP probe builds | `cargo check --release -p rusty_box_whp --examples` |
-| 12 | WHP engine tests | `cargo test --release -p rusty_box_whp_engine --all-targets` |
-| 13 | decoder tests | `cargo test --release -p rusty_box_decoder` |
-| 14 | lib tests (default features) | `cargo test --release -p rusty_box --lib` |
-| 15 | no_std + no_alloc check | `cargo check --release -p rusty_box --no-default-features` |
-| 16 | no_std + alloc check | `cargo check --release -p rusty_box --no-default-features --features alloc` |
-| 17 | bare-metal target check | `cargo check --release -p rusty_box --no-default-features --target x86_64-unknown-none` |
-| 18 | UEFI example build | `cargo build --release -p rusty_box_uefi --target x86_64-unknown-uefi` |
-| 19 | wasm target check (lib, alloc) | `cargo check --release -p rusty_box --no-default-features --features alloc --target wasm32-unknown-unknown` |
-| 20 | public API examples | `cargo test --release -p rusty_box --features std --test api_examples` |
-| 21 | doc examples | `cargo test --release -p rusty_box --doc` |
-| 22 | doctrine compile-fail fixtures | `cargo test --release -p rusty_box --features std --test compile_fail` |
-| 23 | GUI wasm target check | `cargo check --release -p rusty_box_gui --target wasm32-unknown-unknown` |
-| 24 | GUI host check, tests included | `cargo check --release -p rusty_box_gui --all-targets` |
-| 25 | GUI guest-trace check, tests included | `cargo check --release -p rusty_box_gui --features guest-trace --all-targets` |
-| 26 | GUI guest-trace tests | `cargo test --release -p rusty_box_gui --features guest-trace --lib guest_trace` |
-| 27 | all-features check | `cargo check --release -p rusty_box --all-features` |
-| 28 | debug-assertions check (all targets, all features) | `cargo check -p rusty_box --all-targets --all-features` |
+| 9 | aarch64 tests (no_std + no_alloc) | `cargo test --release -p rusty_box_aarch64` |
+| 10 | aarch64 tests (std) | `cargo test --release -p rusty_box_aarch64 --features std` |
+| 11 | aarch64 bare-metal target check | `cargo check --release -p rusty_box_aarch64 --features alloc --target x86_64-unknown-none` |
+| 12 | WHP sys tests | `cargo test --release -p rusty_box_whp_sys` |
+| 13 | WHP leaf tests | `cargo test --release -p rusty_box_whp` |
+| 14 | WHP probe builds | `cargo check --release -p rusty_box_whp --examples` |
+| 15 | WHP engine tests | `cargo test --release -p rusty_box_whp_engine --all-targets` |
+| 16 | decoder tests | `cargo test --release -p rusty_box_decoder` |
+| 17 | lib tests (default features) | `cargo test --release -p rusty_box --lib` |
+| 18 | no_std + no_alloc check | `cargo check --release -p rusty_box --no-default-features` |
+| 19 | no_std + alloc check | `cargo check --release -p rusty_box --no-default-features --features alloc` |
+| 20 | bare-metal target check | `cargo check --release -p rusty_box --no-default-features --target x86_64-unknown-none` |
+| 21 | UEFI example build | `cargo build --release -p rusty_box_uefi --target x86_64-unknown-uefi` |
+| 22 | wasm target check (lib, alloc) | `cargo check --release -p rusty_box --no-default-features --features alloc --target wasm32-unknown-unknown` |
+| 23 | public API examples | `cargo test --release -p rusty_box --features std --test api_examples` |
+| 24 | doc examples | `cargo test --release -p rusty_box --doc` |
+| 25 | doctrine compile-fail fixtures | `cargo test --release -p rusty_box --features std --test compile_fail` |
+| 26 | GUI wasm target check | `cargo check --release -p rusty_box_gui --target wasm32-unknown-unknown` |
+| 27 | GUI host check, tests included | `cargo check --release -p rusty_box_gui --all-targets` |
+| 28 | GUI guest-trace check, tests included | `cargo check --release -p rusty_box_gui --features guest-trace --all-targets` |
+| 29 | GUI guest-trace tests | `cargo test --release -p rusty_box_gui --features guest-trace --lib guest_trace` |
+| 30 | all-features check | `cargo check --release -p rusty_box --all-features` |
+| 31 | debug-assertions check (all targets, all features) | `cargo check -p rusty_box --all-targets --all-features` |
 
 Notes on specific steps:
 
-- **WHP steps (9 to 12)** need no hypervisor. The sys and wrapper tests cover layouts and arithmetic. Engine tests that need hardware skip themselves on a host without it. `--all-targets` on step 12 also compiles the engine's example harnesses.
-- **Doc examples (step 21)** compile the crate's doc comments and the Rust blocks of [`docs/automation.md`](../docs/automation.md), which `rusty_box/src/lib.rs` includes behind `#[cfg(doctest)]`. An example in that guide that names a signature the crate does not have fails here.
-- **Compile-fail fixtures (step 22)** are the doctrine's trybuild tests. Their goldens are rustc's rendered diagnostics, so they change when the quoted code or the toolchain changes. Once you have confirmed the rule still holds, regenerate them with `TRYBUILD=overwrite cargo test --release -p rusty_box --features std --test compile_fail`.
-- **Guest-trace steps (25 and 26)** cover `rusty_box_gui/src/guest_trace.rs`, which only the `guest-trace` feature compiles. Step 26 passes only if its stdout shows `test guest_trace::tests::flight_dump_names_the_opcodes_it_recorded ... ok`, so a test filter that matches nothing fails it.
+- **AArch64 steps (9 to 11)** run the interpreter's unit tests (the Unicorn vector replay among them), its integration tests, and with `std` the Rust blocks of [`docs/aarch64-automation.md`](../docs/aarch64-automation.md), which `rusty_box_aarch64/src/lib.rs` includes behind `#[cfg(all(doctest, feature = "std"))]`.
+- **WHP steps (12 to 15)** need no hypervisor. The sys and wrapper tests cover layouts and arithmetic. Engine tests that need hardware skip themselves on a host without it. `--all-targets` on step 15 also compiles the engine's example harnesses.
+- **Doc examples (step 24)** compile the crate's doc comments and the Rust blocks of [`docs/automation.md`](../docs/automation.md), which `rusty_box/src/lib.rs` includes behind `#[cfg(doctest)]`. An example in that guide that names a signature the crate does not have fails here.
+- **Compile-fail fixtures (step 25)** are the doctrine's trybuild tests. Their goldens are rustc's rendered diagnostics, so they change when the quoted code or the toolchain changes. Once you have confirmed the rule still holds, regenerate them with `TRYBUILD=overwrite cargo test --release -p rusty_box --features std --test compile_fail`.
+- **Guest-trace steps (28 and 29)** cover `rusty_box_gui/src/guest_trace.rs`, which only the `guest-trace` feature compiles. Step 29 passes only if its stdout shows `test guest_trace::tests::flight_dump_names_the_opcodes_it_recorded ... ok`, so a test filter that matches nothing fails it.
 
 ### `--full`: two more steps
 

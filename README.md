@@ -113,7 +113,7 @@ There is no network adapter, no sound card (not even the PC speaker), no USB con
 
 ## Using it as a library
 
-[docs/automation.md](docs/automation.md) is the task-based guide: boot a machine headless, read the screen, type at it, run and stop it, read and write its memory and registers, watch what it does, and what differs on the hypervisor engine. Its examples are compiled by the gate.
+[docs/automation.md](docs/automation.md) is the task-based guide: boot a machine headless, read the screen, type at it, run and stop it, read and write its memory and registers, watch what it does, and what differs on the hypervisor engine. Its examples are compiled by the gate. [docs/aarch64-automation.md](docs/aarch64-automation.md) is its counterpart for the AArch64 machine; the run budget, the key vocabulary and the `Machine` trait are shared, so the same driving code runs either guest.
 
 - **Building a machine.** `MachineBuilder::new(config).build()` builds an interpreter machine, and `build_on::<WhpEngine>()` builds a hypervisor one. The engine is part of the machine's type.
 - **Instrumentation.** A machine's type parameter `T: Instrumentation` observes the CPU. `()` observes nothing, and its empty hook mask makes the CPU skip every dispatch. A hook such as `pre_syscall` sees each system call: `shellcode_trace` uses it to intercept a shellcode's syscalls, and `alpine_strace` to trace Alpine's.
@@ -249,12 +249,12 @@ cd rusty_box_decoder && cargo +nightly fuzz run fuzz_fetchdecode64
 
 A bare `cargo test` tests only the default workspace member (`rusty_box`), in a debug build.
 
-`cargo xtask ci` runs 29 steps; [xtask/README.md](xtask/README.md) lists every one.
+`cargo xtask ci` runs 32 steps; [xtask/README.md](xtask/README.md) lists every one.
 
-1. The doctrine ratchets, over eight source trees, the GUI's included. They check the unsafe-token baselines, that there is no `unsafe impl Send/Sync`, the blanket `dead_code` allows, and that there is no production `unwrap`/`expect`.
-2. A 27-step matrix:
-   - It tests `rusty_box_core`, `rusty_box_devices`, the three WHP crates, the decoder and `rusty_box`.
-   - It checks `rusty_box_core` and `rusty_box_devices` for bare metal, and builds the WHP probe examples.
+1. The doctrine ratchets, over nine source trees, the GUI's and the AArch64 interpreter's included. They check the unsafe-token baselines, that there is no `unsafe impl Send/Sync`, the blanket `dead_code` allows, and that there is no production `unwrap`/`expect`.
+2. A 30-step matrix:
+   - It tests `rusty_box_core`, `rusty_box_devices`, `rusty_box_aarch64` (without features and with std), the three WHP crates, the decoder and `rusty_box`.
+   - It checks `rusty_box_core`, `rusty_box_devices` and `rusty_box_aarch64` for bare metal, and builds the WHP probe examples.
    - It checks `rusty_box` without std (with and without alloc), for bare metal, for wasm, with all features, and with debug assertions.
    - It checks `rusty_box_gui` for the host, with its tests, for wasm, and with its `guest-trace` feature, whose tracer tests it runs.
    - It builds the UEFI application.
@@ -272,6 +272,7 @@ It needs the rustup targets `x86_64-unknown-none`, `x86_64-unknown-uefi` and `wa
 - [docs/getting-started.md](docs/getting-started.md) -- using the shell: the guests and their settings, the VM file, pacing, CPU topology, disks, display
 - [rusty_box_gui/README.md](rusty_box_gui/README.md) -- the shell in full: the VM library, pages, engines, disk images, Android, browser
 - [docs/automation.md](docs/automation.md) -- driving a guest from Rust: boot it headless, read the screen, type at it, watch what it does
+- [docs/aarch64-automation.md](docs/aarch64-automation.md) -- the same for the AArch64 `virt` machine ([rusty_box_aarch64](rusty_box_aarch64/README.md)): boot UEFI or a Linux kernel, the serial console and its keyboard, registers, snapshots
 - [docs/whp-guest-capabilities.md](docs/whp-guest-capabilities.md) -- what a machine on the hypervisor may advertise to its guest
 
 **Contributing**

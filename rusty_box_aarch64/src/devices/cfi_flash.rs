@@ -10,6 +10,13 @@
 //! against (erase happens when the setup command is written; programming
 //! stores the value rather than AND-ing it into the array; a buffered write of
 //! a single word reports a programming error), is QEMU's.
+//!
+//! The model holds the command state machine only. The array itself belongs
+//! to the machine's storage and is lent to each access, so the same model
+//! serves a bank the machine owns and one a caller lends it.
+
+use rusty_box_core::snap::{SnapRead, SnapResult, SnapWrite};
+use rusty_box_core::SnapError;
 
 use crate::bus::{AccessWidth, RegOffset};
 
@@ -30,30 +37,27 @@ const STATUS_READY: u8 = 0x80;
 const STATUS_ERASE_ERROR: u8 = 0x20;
 const STATUS_PROGRAM_ERROR: u8 = 0x10;
 
-/// The backing store of one bank.
-pub enum FlashStorage<'m> {
+/// The array of one bank, lent for one write.
+pub enum FlashArray<'a> {
     /// Mapped read-only (QEMU `readonly=on`): commands are accepted, but
     /// erases and programs fail and set the error bits.
-    ReadOnly(&'m [u8]),
-    Writable(&'m mut [u8]),
+    ReadOnly(&'a [u8]),
+    Writable(&'a mut [u8]),
 }
 
-impl FlashStorage<'_> {
+impl FlashArray<'_> {
     fn bytes(&self) -> &[u8] {
         match self {
             Self::ReadOnly(b) => b,
             Self::Writable(b) => b,
         }
     }
-
-    fn len(&self) -> u64 {
-        self.bytes().len() as u64
-    }
 }
 
-/// One CFI flash bank.
-pub struct CfiFlash<'m> {
-    storage: FlashStorage<'m>,
+/// One CFI flash bank's command state.
+pub struct CfiFlash {
+    /// The bank's length in bytes: what its window decodes.
+    len: u64,
     cfi_table: [u8; CFI_TABLE_LEN],
     /// The command in progress; 0x00 is QEMU's encoding of read-array mode.
     cmd: u8,
@@ -65,10 +69,25 @@ pub struct CfiFlash<'m> {
     blk_bytes: [u8; WRITEBLOCK_SIZE],
 }
 
-impl<'m> CfiFlash<'m> {
-    /// A bank over `storage`, whose length must be a whole number of sectors.
-    pub fn new(storage: FlashStorage<'m>) -> Self {
-        let blocks_per_device = (storage.len() / SECTOR_LEN).max(1);
+/// The little-endian value of `bytes` bytes at `offset`, reading erased
+/// flash (all ones) past the end of a short image.
+fn array_read(store: &[u8], offset: u64, bytes: u64) -> u64 {
+    let start = offset as usize;
+    if let Some(slice) = start.checked_add(bytes as usize).and_then(|end| store.get(start..end)) {
+        return crate::bus::le_value(slice);
+    }
+    let mut v = 0u64;
+    for i in 0..bytes {
+        let b = store.get((offset + i) as usize).copied().unwrap_or(0xFF);
+        v |= u64::from(b) << (8 * i);
+    }
+    v
+}
+
+impl CfiFlash {
+    /// A bank of `len` bytes, which must be a whole number of sectors.
+    pub fn new(len: u64) -> Self {
+        let blocks_per_device = (len / SECTOR_LEN).max(1);
         let sector_len_per_device = SECTOR_LEN / NUM_DEVICES;
         let device_len = sector_len_per_device * blocks_per_device;
         let mut t = [0u8; CFI_TABLE_LEN];
@@ -100,7 +119,7 @@ impl<'m> CfiFlash<'m> {
         t[0x35] = b'0';
         t[0x3F] = 0x01;
         Self {
-            storage,
+            len,
             cfi_table: t,
             cmd: 0,
             wcycle: 0,
@@ -111,39 +130,19 @@ impl<'m> CfiFlash<'m> {
         }
     }
 
-    /// Size of the bank in bytes.
-    pub fn len(&self) -> u64 {
-        self.storage.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.storage.len() == 0
-    }
-
-    /// The array's current contents (for a front end that persists the
-    /// variable store).
-    pub fn contents(&self) -> &[u8] {
-        self.storage.bytes()
+    /// QEMU `pflash_reset`: back to read-array mode, any buffered write
+    /// abandoned.
+    pub fn reset(&mut self) {
+        self.cmd = 0;
+        self.wcycle = 0;
+        self.status = STATUS_READY;
+        self.counter = 0;
+        self.blk_offset = None;
     }
 
     fn set_read_array(&mut self) {
         self.wcycle = 0;
         self.cmd = 0;
-    }
-
-    fn data_read(&self, offset: u64, bytes: u64) -> u64 {
-        let store = self.storage.bytes();
-        let start = offset as usize;
-        if let Some(slice) = store.get(start..start + bytes as usize) {
-            return crate::bus::le_value(slice);
-        }
-        // Past the end of a short image: erased flash.
-        let mut v = 0u64;
-        for i in 0..bytes {
-            let b = store.get((offset + i) as usize).copied().unwrap_or(0xFF);
-            v |= u64::from(b) << (8 * i);
-        }
-        v
     }
 
     /// Replicate one device's response across the bank.
@@ -169,7 +168,7 @@ impl<'m> CfiFlash<'m> {
     }
 
     /// QEMU `pflash_read`, for accesses up to the bank width.
-    fn read32(&mut self, offset: u64, bytes: u64) -> u32 {
+    fn read32(&mut self, store: &[u8], offset: u64, bytes: u64) -> u32 {
         match self.cmd {
             0x10 | 0x20 | 0x28 | 0x40 | 0x50 | 0x60 | 0x70 | 0xE8 => {
                 let s = u32::from(self.status);
@@ -181,39 +180,41 @@ impl<'m> CfiFlash<'m> {
             }
             0x90 => self.devid_query(offset),
             0x98 => self.cfi_query(offset),
-            0x00 => self.data_read(offset, bytes) as u32,
+            0x00 => array_read(store, offset, bytes) as u32,
             _ => {
                 self.set_read_array();
-                self.data_read(offset, bytes) as u32
+                array_read(store, offset, bytes) as u32
             }
         }
     }
 
-    pub fn read(&mut self, offset: RegOffset, width: AccessWidth) -> u64 {
+    /// A read of the bank whose array is `store`.
+    pub fn read(&mut self, store: &[u8], offset: RegOffset, width: AccessWidth) -> u64 {
         let off = offset.get();
         if self.cmd == 0 {
-            return self.data_read(off, width.bytes());
+            return array_read(store, off, width.bytes());
         }
         match width {
             AccessWidth::Dword => {
-                u64::from(self.read32(off, 4)) | (u64::from(self.read32(off + 4, 4)) << 32)
+                u64::from(self.read32(store, off, 4)) | (u64::from(self.read32(store, off + 4, 4)) << 32)
             }
-            _ => u64::from(self.read32(off, width.bytes())) & width.value_mask(),
+            _ => u64::from(self.read32(store, off, width.bytes())) & width.value_mask(),
         }
     }
 
-    pub fn write(&mut self, offset: RegOffset, width: AccessWidth, value: u64) {
+    /// A write to the bank whose array is `array`.
+    pub fn write(&mut self, mut array: FlashArray<'_>, offset: RegOffset, width: AccessWidth, value: u64) {
         let off = offset.get();
         match width {
             AccessWidth::Dword => {
-                self.write32(off, value as u32, 4);
-                self.write32(off + 4, (value >> 32) as u32, 4);
+                self.write32(&mut array, off, value as u32, 4);
+                self.write32(&mut array, off + 4, (value >> 32) as u32, 4);
             }
-            _ => self.write32(off, value as u32, width.bytes()),
+            _ => self.write32(&mut array, off, value as u32, width.bytes()),
         }
     }
 
-    fn store(&mut self, offset: u64, value: u32, bytes: u64) {
+    fn store(&mut self, array: &mut FlashArray<'_>, offset: u64, value: u32, bytes: u64) {
         match self.blk_offset {
             Some(blk) => {
                 if offset < blk || offset + bytes > blk + WRITEBLOCK_SIZE as u64 {
@@ -227,7 +228,7 @@ impl<'m> CfiFlash<'m> {
                 }
             }
             None => {
-                if let FlashStorage::Writable(store) = &mut self.storage {
+                if let FlashArray::Writable(store) = array {
                     for i in 0..bytes {
                         if let Some(b) = store.get_mut((offset + i) as usize) {
                             *b = (value >> (8 * i)) as u8;
@@ -238,12 +239,9 @@ impl<'m> CfiFlash<'m> {
         }
     }
 
-    fn read_only(&self) -> bool {
-        matches!(self.storage, FlashStorage::ReadOnly(_))
-    }
-
     /// QEMU `pflash_write`.
-    fn write32(&mut self, offset: u64, value: u32, bytes: u64) {
+    fn write32(&mut self, array: &mut FlashArray<'_>, offset: u64, value: u32, bytes: u64) {
+        let read_only = matches!(array, FlashArray::ReadOnly(_));
         let cmd = value as u8;
         match self.wcycle {
             0 => match cmd {
@@ -254,7 +252,7 @@ impl<'m> CfiFlash<'m> {
                 }
                 0x20 => {
                     let start = offset & !(SECTOR_LEN - 1);
-                    if let FlashStorage::Writable(store) = &mut self.storage {
+                    if let FlashArray::Writable(store) = array {
                         let end = (start + SECTOR_LEN).min(store.len() as u64);
                         if let Some(region) = store.get_mut(start as usize..end as usize) {
                             region.fill(0xFF);
@@ -280,10 +278,10 @@ impl<'m> CfiFlash<'m> {
             },
             1 => match self.cmd {
                 0x10 | 0x40 => {
-                    if self.read_only() {
+                    if read_only {
                         self.status |= STATUS_PROGRAM_ERROR;
                     } else {
-                        self.store(offset, value, bytes);
+                        self.store(array, offset, value, bytes);
                     }
                     self.status |= STATUS_READY;
                     self.wcycle = 0;
@@ -315,14 +313,14 @@ impl<'m> CfiFlash<'m> {
                 0xE8 => {
                     if self.blk_offset.is_none() && self.counter != 0 {
                         let start = offset & !(WRITEBLOCK_SIZE as u64 - 1);
-                        let store = self.storage.bytes();
+                        let store = array.bytes();
                         for (i, b) in self.blk_bytes.iter_mut().enumerate() {
                             *b = store.get(start as usize + i).copied().unwrap_or(0xFF);
                         }
                         self.blk_offset = Some(start);
                     }
-                    if !self.read_only() && self.blk_offset.is_some() {
-                        self.store(offset, value, bytes);
+                    if !read_only && self.blk_offset.is_some() {
+                        self.store(array, offset, value, bytes);
                     } else {
                         self.status |= STATUS_PROGRAM_ERROR;
                     }
@@ -339,8 +337,8 @@ impl<'m> CfiFlash<'m> {
                 // Confirm: commit the collected block, unless a programming
                 // error was recorded while collecting it.
                 0xE8 if cmd == 0xD0 && self.status & STATUS_PROGRAM_ERROR == 0 => {
-                    if let (Some(blk), FlashStorage::Writable(store)) = (self.blk_offset, &mut self.storage) {
-                        let end = (blk as usize + WRITEBLOCK_SIZE).min(store.len());
+                    if let (Some(blk), FlashArray::Writable(store)) = (self.blk_offset, array) {
+                        let end = (blk as usize).saturating_add(WRITEBLOCK_SIZE).min(store.len());
                         let n = end.saturating_sub(blk as usize);
                         if let (Some(dst), Some(src)) = (store.get_mut(blk as usize..end), self.blk_bytes.get(..n)) {
                             dst.copy_from_slice(src);
@@ -358,11 +356,88 @@ impl<'m> CfiFlash<'m> {
             _ => self.set_read_array(),
         }
     }
+
+    /// The command state, for a snapshot. The array is the machine's storage
+    /// and is saved with it.
+    pub(crate) fn save<W: SnapWrite>(&self, w: &mut W) -> SnapResult {
+        w.write_bytes(&[self.cmd, self.wcycle, self.status])?;
+        w.write_u32(self.counter)?;
+        match self.blk_offset {
+            Some(blk) => {
+                w.write_bool(true)?;
+                w.write_u64(blk)?;
+            }
+            None => w.write_bool(false)?,
+        }
+        w.write_bytes(&self.blk_bytes)
+    }
+
+    pub(crate) fn restore<R: SnapRead>(&mut self, r: &mut R) -> SnapResult {
+        let mut head = [0u8; 3];
+        r.read_bytes(&mut head)?;
+        [self.cmd, self.wcycle, self.status] = head;
+        if self.wcycle > 3 {
+            return Err(SnapError::Invalid("CFI flash write cycle is past the last one a command has"));
+        }
+        self.counter = r.read_u32()?;
+        self.blk_offset = if r.read_bool()? { Some(r.read_u64()?) } else { None };
+        // A buffered write only ever opens on a write-block boundary inside
+        // the bank (`write32`'s second cycle).
+        if self
+            .blk_offset
+            .is_some_and(|blk| blk % WRITEBLOCK_SIZE as u64 != 0 || blk >= self.len)
+        {
+            return Err(SnapError::Invalid("CFI flash buffered write is not at a write block in the bank"));
+        }
+        r.read_bytes(&mut self.blk_bytes)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A snapshot sink in a fixed buffer, so the test needs no allocator.
+    struct Image {
+        bytes: [u8; 64 + WRITEBLOCK_SIZE],
+        len: usize,
+    }
+
+    impl SnapWrite for Image {
+        fn write_bytes(&mut self, bytes: &[u8]) -> SnapResult {
+            let end = self.len + bytes.len();
+            self.bytes.get_mut(self.len..end).ok_or(SnapError::Truncated)?.copy_from_slice(bytes);
+            self.len = end;
+            Ok(())
+        }
+    }
+
+    /// A snapshot naming a buffered write outside the bank, or off a block
+    /// boundary, is refused rather than kept for the confirm cycle to use.
+    #[test]
+    fn a_restored_buffered_write_must_lie_on_a_block_in_the_bank() {
+        let bank = SECTOR_LEN * 4;
+        let image = |blk: u64| -> Result<Image, SnapError> {
+            let mut w = Image {
+                bytes: [0; 64 + WRITEBLOCK_SIZE],
+                len: 0,
+            };
+            w.write_bytes(&[0xE8, 2, STATUS_READY])?;
+            w.write_u32(3)?;
+            w.write_bool(true)?;
+            w.write_u64(blk)?;
+            w.write_bytes(&[0xAA; WRITEBLOCK_SIZE])?;
+            Ok(w)
+        };
+        let restore = |blk: u64| {
+            let w = image(blk)?;
+            CfiFlash::new(bank).restore(&mut &w.bytes[..w.len])
+        };
+        assert_eq!(restore(WRITEBLOCK_SIZE as u64), Ok(()));
+        for wrong in [bank, u64::MAX - 1, WRITEBLOCK_SIZE as u64 + 4] {
+            assert!(matches!(restore(wrong), Err(SnapError::Invalid(_))), "{wrong:#x}");
+        }
+    }
 
     fn dual(cmd: u32) -> u64 {
         u64::from(cmd | (cmd << 16))
@@ -375,43 +450,68 @@ mod tests {
     fn edk2s_erase_and_buffered_program_sequence_round_trips() {
         let mut backing = [0u8; (SECTOR_LEN * 2) as usize];
         backing[0x40000..0x40010].fill(0x5A);
-        let mut f = CfiFlash::new(FlashStorage::Writable(&mut backing));
+        let mut f = CfiFlash::new(backing.len() as u64);
         let at = |o: u64| RegOffset::new(o);
+        let write = |f: &mut CfiFlash, backing: &mut [u8], o: u64, v: u64| {
+            f.write(FlashArray::Writable(backing), at(o), AccessWidth::Word, v)
+        };
 
-        f.write(at(0x40000), AccessWidth::Word, dual(0x20));
-        f.write(at(0x40000), AccessWidth::Word, dual(0xD0));
-        f.write(at(0x40000), AccessWidth::Word, dual(0x70));
-        assert_eq!(f.read(at(0x40000), AccessWidth::Word) & 0x0080_0080, 0x0080_0080);
+        write(&mut f, &mut backing, 0x40000, dual(0x20));
+        write(&mut f, &mut backing, 0x40000, dual(0xD0));
+        write(&mut f, &mut backing, 0x40000, dual(0x70));
+        assert_eq!(f.read(&backing, at(0x40000), AccessWidth::Word) & 0x0080_0080, 0x0080_0080);
 
-        f.write(at(0x40000), AccessWidth::Word, dual(0xE8));
-        f.write(at(0x40000), AccessWidth::Word, dual(3));
+        write(&mut f, &mut backing, 0x40000, dual(0xE8));
+        write(&mut f, &mut backing, 0x40000, dual(3));
         for (i, w) in [0x1111_2222u64, 0x3333_4444, 0x5555_6666, 0x7777_8888].iter().enumerate() {
-            f.write(at(0x40000 + 4 * i as u64), AccessWidth::Word, *w);
+            write(&mut f, &mut backing, 0x40000 + 4 * i as u64, *w);
         }
-        f.write(at(0x40000), AccessWidth::Word, dual(0xD0));
-        f.write(at(0x40000), AccessWidth::Word, dual(0xFF));
-        assert_eq!(f.read(at(0x40004), AccessWidth::Word), 0x3333_4444);
-        assert_eq!(f.read(at(0x40010), AccessWidth::Word), 0xFFFF_FFFF, "erased by the sector erase");
+        write(&mut f, &mut backing, 0x40000, dual(0xD0));
+        write(&mut f, &mut backing, 0x40000, dual(0xFF));
+        assert_eq!(f.read(&backing, at(0x40004), AccessWidth::Word), 0x3333_4444);
+        assert_eq!(f.read(&backing, at(0x40010), AccessWidth::Word), 0xFFFF_FFFF, "erased by the sector erase");
     }
 
     #[test]
     fn device_id_and_cfi_query_replicate_across_the_bank() {
         let mut backing = [0u8; SECTOR_LEN as usize];
-        let mut f = CfiFlash::new(FlashStorage::Writable(&mut backing));
-        f.write(RegOffset::new(0), AccessWidth::Word, dual(0x90));
-        assert_eq!(f.read(RegOffset::new(0), AccessWidth::Word), 0x0089_0089);
-        assert_eq!(f.read(RegOffset::new(4), AccessWidth::Word), 0x0018_0018);
-        f.write(RegOffset::new(0), AccessWidth::Word, dual(0x98));
-        assert_eq!(f.read(RegOffset::new(0x10 * 4), AccessWidth::Word), 0x0051_0051);
+        let mut f = CfiFlash::new(backing.len() as u64);
+        f.write(FlashArray::Writable(&mut backing), RegOffset::new(0), AccessWidth::Word, dual(0x90));
+        assert_eq!(f.read(&backing, RegOffset::new(0), AccessWidth::Word), 0x0089_0089);
+        assert_eq!(f.read(&backing, RegOffset::new(4), AccessWidth::Word), 0x0018_0018);
+        f.write(FlashArray::Writable(&mut backing), RegOffset::new(0), AccessWidth::Word, dual(0x98));
+        assert_eq!(f.read(&backing, RegOffset::new(0x10 * 4), AccessWidth::Word), 0x0051_0051);
     }
 
     #[test]
     fn a_read_only_bank_reports_erase_errors_and_keeps_its_data() {
         let backing = [0xABu8; SECTOR_LEN as usize];
-        let mut f = CfiFlash::new(FlashStorage::ReadOnly(&backing));
-        f.write(RegOffset::new(0), AccessWidth::Word, dual(0x20));
-        assert_ne!(f.read(RegOffset::new(0), AccessWidth::Word) & 0x0020_0020, 0);
-        f.write(RegOffset::new(0), AccessWidth::Word, dual(0xFF));
-        assert_eq!(f.read(RegOffset::new(0), AccessWidth::Byte), 0xAB);
+        let mut f = CfiFlash::new(backing.len() as u64);
+        f.write(FlashArray::ReadOnly(&backing), RegOffset::new(0), AccessWidth::Word, dual(0x20));
+        assert_ne!(f.read(&backing, RegOffset::new(0), AccessWidth::Word) & 0x0020_0020, 0);
+        f.write(FlashArray::ReadOnly(&backing), RegOffset::new(0), AccessWidth::Word, dual(0xFF));
+        assert_eq!(f.read(&backing, RegOffset::new(0), AccessWidth::Byte), 0xAB);
+    }
+
+    #[test]
+    fn a_command_state_snapshot_round_trips_mid_buffered_write() {
+        let mut backing = [0xFFu8; SECTOR_LEN as usize];
+        let mut f = CfiFlash::new(backing.len() as u64);
+        f.write(FlashArray::Writable(&mut backing), RegOffset::new(0), AccessWidth::Word, dual(0xE8));
+        f.write(FlashArray::Writable(&mut backing), RegOffset::new(0), AccessWidth::Word, dual(1));
+        f.write(FlashArray::Writable(&mut backing), RegOffset::new(0), AccessWidth::Word, 0x1234_5678);
+        let mut image = std::vec::Vec::new();
+        f.save(&mut image).expect("save");
+        let mut restored = CfiFlash::new(backing.len() as u64);
+        let mut source: &[u8] = &image;
+        restored.restore(&mut source).expect("restore");
+        assert!(source.is_empty());
+        // Finishing the write on the restored bank commits what was collected
+        // before the snapshot.
+        restored.write(FlashArray::Writable(&mut backing), RegOffset::new(4), AccessWidth::Word, 0x9ABC_DEF0);
+        restored.write(FlashArray::Writable(&mut backing), RegOffset::new(0), AccessWidth::Word, dual(0xD0));
+        restored.write(FlashArray::Writable(&mut backing), RegOffset::new(0), AccessWidth::Word, dual(0xFF));
+        assert_eq!(restored.read(&backing, RegOffset::new(0), AccessWidth::Word), 0x1234_5678);
+        assert_eq!(restored.read(&backing, RegOffset::new(4), AccessWidth::Word), 0x9ABC_DEF0);
     }
 }

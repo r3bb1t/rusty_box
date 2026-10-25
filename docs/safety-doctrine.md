@@ -115,8 +115,8 @@ same commit.
 
 The end state is a target: `#![forbid(unsafe_code)]` on every library crate except the
 host-FFI leaf, with no_alloc placement delegated to the vetted `static_cell` crate, so that the
-one unavoidable `unsafe` lives outside this tree. Today three crates carry the `forbid`:
-`rusty_box_core`, `rusty_box_decoder` and `rusty_box_devices`. `static_cell` is not a
+one unavoidable `unsafe` lives outside this tree. Today four crates carry the `forbid`:
+`rusty_box_core`, `rusty_box_decoder`, `rusty_box_devices` and `rusty_box_aarch64`. `static_cell` is not a
 dependency. The leaf, `rusty_box_whp_sys`, is a permanent exception and is registered below.
 Four other scanned trees hold `unsafe` tokens:
 
@@ -133,9 +133,10 @@ leaf does, is the owner's call and is not decided here. This document declares n
 permanent; until that call is made, their tokens are held by their ratchet baselines, not by a
 registry entry.
 
-*Enforcement (mechanical):* the `doctrine ratchets` step of `cargo xtask ci` scans eight trees,
+*Enforcement (mechanical):* the `doctrine ratchets` step of `cargo xtask ci` scans nine trees,
 the `src` of `rusty_box`, `rusty_box_decoder`, `rusty_box_core`, `rusty_box_devices`,
-`rusty_box_whp_sys`, `rusty_box_whp`, `rusty_box_whp_engine` and `rusty_box_gui`. It fails when,
+`rusty_box_aarch64`, `rusty_box_whp_sys`, `rusty_box_whp`, `rusty_box_whp_engine` and
+`rusty_box_gui`. It fails when,
 in any of them:
 
 - the `unsafe` tokens exceed that tree's entry in `UNSAFE_TOKEN_BASELINES`. The scan counts
@@ -214,7 +215,10 @@ transitions and witnessed runtime facts.
 
 *Enforcement:* a violating field or predicate is a defect to delete, not a pattern to extend;
 trybuild fixtures pin the shape (executing an instruction on a bare CPU without a machine
-does not compile: `rusty_box/tests/compile_fail/r2_bare_cpu_cannot_execute.rs`).
+does not compile: `rusty_box/tests/compile_fail/r2_bare_cpu_cannot_execute.rs`; neither does
+stepping a machine on an engine other than the interpreter through the shared `Machine` verbs,
+which a hypervisor machine would otherwise answer with a run-time refusal:
+`rusty_box/tests/compile_fail/r2_only_the_interpreter_is_a_machine.rs`).
 
 **In the tree:**
 
@@ -681,6 +685,7 @@ recalled: a whole-word search for `dyn` over the `src` tree of every workspace c
 - `rusty_box_gui/src`: 5, all code, all below.
 - `rusty_box_devices/src`: 4. Two are code (`DeviceCtx`, below); two are comments, in
   `api.rs` and `display/card.rs`.
+- `rusty_box_aarch64/src`: 2, code, both `Error::source` signatures, below.
 - `rusty_box_decoder/src` and `rusty_box_whp_engine/src`: 1 each, code, below.
 - `rusty_box_core`, `rusty_box_whp_sys`, `rusty_box_whp`, `rusty_box_bximage`, `xtask`, and
   the three crates under `examples/`: none.
@@ -748,7 +753,8 @@ not stored closures.
   file-input change handler (`WebFilePicker`): `wasm_bindgen::closure::Closure` names its
   callback by a `dyn` trait object.
 - `Option<&(dyn core::error::Error + 'static)>`, the return type of `core::error::Error::source`,
-  implemented by `DecodeError` (`rusty_box_decoder/src/error.rs`).
+  implemented by `DecodeError` (`rusty_box_decoder/src/error.rs`) and by `BuildError` and
+  `MemoryError` (`rusty_box_aarch64/src/machine.rs`).
 
 **Not erasure, but exempted from R0 by name:**
 
