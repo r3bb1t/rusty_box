@@ -293,7 +293,6 @@ pub fn exit_code(args: &RunArgs, outcome: &Outcome) -> ExitCode {
         | StopReason::ExitReached
         | StopReason::ResetRequested
         | StopReason::ProcessorOff
-        | StopReason::Unimplemented(_)
         | StopReason::Undefined(_)
         | StopReason::BusFault { .. } => ExitCode::from(1),
     }

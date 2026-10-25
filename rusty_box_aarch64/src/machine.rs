@@ -651,8 +651,6 @@ pub enum StopReason {
     /// PSCI `CPU_OFF` on the only processor: nothing can run again until a
     /// reset.
     ProcessorOff,
-    /// A defined instruction this interpreter does not implement.
-    Unimplemented(UndefinedInsn),
     /// An UNDEFINED instruction, with `DebugStops::on_undefined` set.
     Undefined(UndefinedInsn),
     /// An access to nothing, with `DebugStops::on_bus_fault` set.
@@ -688,7 +686,6 @@ impl BatchOutcome {
             | StopReason::PoweredOff
             | StopReason::ResetRequested
             | StopReason::ProcessorOff
-            | StopReason::Unimplemented(_)
             | StopReason::Undefined(_)
             | StopReason::BusFault { .. } => true,
         }
@@ -1091,7 +1088,6 @@ impl<S: GuestStorage, I: Instrumentation> VirtMachine<S, I> {
                 }
                 OnResetRequest::Stop => StopReason::ResetRequested,
             },
-            StopCause::Unimplemented(i) => StopReason::Unimplemented(i),
             StopCause::Undefined(i) => StopReason::Undefined(i),
             StopCause::BusFault { pc, addr } => StopReason::BusFault { pc, addr },
         })

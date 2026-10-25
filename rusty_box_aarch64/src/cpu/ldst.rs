@@ -8,13 +8,24 @@
 //! the choice made is the one QEMU makes, so the reference and this
 //! interpreter agree: loaded registers are written first, the base last.
 
-use disarm64_defn::InsnClass;
-
 use super::dp::extend_reg;
 use super::exec::{bit, bits, sext, ExecResult, Flow};
 use super::mmu::DataAccess;
 use super::Cpu;
 use crate::bus::PhysBus;
+
+/// How a single-register load/store forms its address: the three offset
+/// forms of the Arm ARM's "Load/store register" classes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SingleForm {
+    /// Load/store register (unsigned immediate): `imm12` scaled by the size.
+    UnsignedImmediate,
+    /// The `imm9` classes, told apart by bits 11:10: unscaled (00),
+    /// post-indexed (01), unprivileged (10), pre-indexed (11).
+    Immediate9,
+    /// Load/store register (register offset).
+    RegisterOffset,
+}
 
 /// Where a single-register access goes and what happens to the base after.
 #[derive(Debug, Clone, Copy)]
@@ -33,8 +44,8 @@ impl Cpu {
     }
 
     /// LDR/STR and friends, every single-register form except the literal:
-    /// `size 111 V 0x opc ...` with the offset form chosen by `class`.
-    pub(crate) fn exec_ldst_single<B: PhysBus>(&mut self, bus: &mut B, pc: u64, insn: u32, class: InsnClass) -> ExecResult {
+    /// `size 111 V 0x opc ...` with the offset form `form`.
+    pub(crate) fn exec_ldst_single<B: PhysBus>(&mut self, bus: &mut B, pc: u64, insn: u32, form: SingleForm) -> ExecResult {
         let size = bits(insn, 31, 30);
         let vector = bit(insn, 26);
         let opc = bits(insn, 23, 22);
@@ -51,15 +62,15 @@ impl Cpu {
         }
 
         let mut acc = DataAccess::NORMAL;
-        let addressing = match class {
-            InsnClass::LDST_POS => {
+        let addressing = match form {
+            SingleForm::UnsignedImmediate => {
                 let base = self.base_register(rn)?;
                 Addressing {
                     address: base.wrapping_add(u64::from(bits(insn, 21, 10)) << scale),
                     writeback: None,
                 }
             }
-            InsnClass::LDST_UNSCALED | InsnClass::LDST_UNPRIV | InsnClass::LDST_IMM9 => {
+            SingleForm::Immediate9 => {
                 let base = self.base_register(rn)?;
                 let imm = sext(u64::from(bits(insn, 20, 12)), 9);
                 match bits(insn, 11, 10) {
@@ -91,7 +102,7 @@ impl Cpu {
                     }
                 }
             }
-            InsnClass::LDST_REGOFF => {
+            SingleForm::RegisterOffset => {
                 let option = bits(insn, 15, 13);
                 if option & 2 == 0 {
                     return self.undefined(pc, insn);
@@ -104,7 +115,6 @@ impl Cpu {
                     writeback: None,
                 }
             }
-            _ => return self.unimplemented(pc, insn),
         };
 
         if vector {

@@ -225,7 +225,6 @@ match outcome.stop {
     StopReason::PoweredOff => {}               // PSCI SYSTEM_OFF
     StopReason::ResetRequested => {}           // PSCI SYSTEM_RESET, if asked to stop on it
     StopReason::ProcessorOff => {}             // PSCI CPU_OFF
-    StopReason::Unimplemented(_) => {}         // an instruction this interpreter lacks
     StopReason::Undefined(_) | StopReason::BusFault { .. } => {} // debug stops
 }
 if outcome.is_terminal() {

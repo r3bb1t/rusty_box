@@ -10,14 +10,16 @@ homepage.workspace = true
 
 [dependencies]
 rusty_box_core = { workspace = true }
-# Classifies an instruction word into its A64 encoding (the canonical form, not
-# the disassembly alias). Operand fields are read from the word itself.
-disarm64 = { version = "0.2", default-features = false, features = ["full"] }
-disarm64_defn = { version = "0.2", default-features = false }
 
 [dev-dependencies]
 # Tests save snapshots into a `Vec<u8>`, which is a snapshot sink with `alloc`.
 rusty_box_core = { workspace = true, features = ["alloc"] }
+# An independent A64 decoder, generated from binutils' opcode table: the
+# reference the encoding list is proven equivalent to (src/cpu/decode.rs) and
+# measured against (tests/encoding_coverage.rs), and the disassembler for the
+# Unicorn replay's failure messages. Never a dependency of the library.
+disarm64 = { version = "0.2", default-features = false, features = ["full"] }
+disarm64_defn = { version = "0.2", default-features = false }
 
 [features]
 default = []

@@ -16,6 +16,7 @@ mod exception;
 mod exec;
 mod fp;
 mod fp_estimate;
+mod isa;
 mod ldst;
 mod mmu;
 mod regs;

@@ -1,20 +1,20 @@
 //! Fetch, decode and dispatch: one call of [`Cpu::step`] executes one
 //! instruction or takes one exception.
 //!
-//! Decoding is split in two. `disarm64` classifies the word into its
-//! canonical A64 encoding (never a disassembly alias) and names the feature
-//! that encoding belongs to (`decode.rs`); the handler for that encoding
-//! *class* then reads every operand field from the word itself, following
-//! the field layout and decode pseudocode of the Arm ARM. A class handler
-//! therefore covers its whole encoding group, and a field the classifier does
-//! not expose cannot be misread through it.
-
-use disarm64_defn::InsnClass;
+//! Decoding is split in two. The classifier (`decode.rs`, over the encoding
+//! list in `isa/`) finds the word's A64 encoding and the Arm ARM encoding
+//! class it belongs to, and makes an encoding of a feature this core lacks
+//! UNDEFINED; the handler for that *class* then reads every operand field
+//! from the word itself, following the field layout and decode pseudocode of
+//! the Arm ARM. A class handler therefore covers its whole encoding group,
+//! and a field the classifier does not expose cannot be misread through it.
 
 use rusty_box_core::VmClock;
 
 use super::decode::Decoded;
 use super::exception::{Exception, ExceptionClass};
+use super::isa::Class;
+use super::ldst::SingleForm;
 use super::{Activity, Cpu};
 use crate::bus::{AccessWidth, BusFault, PhysAddr, PhysBus};
 use crate::instrumentation::{Direction, Instrumentation, MemoryAccess};
@@ -87,12 +87,10 @@ pub struct UndefinedInsn {
 /// Why a step stopped the machine instead of executing.
 ///
 /// Closed (R5): the machine maps each variant onto its own `StopReason`.
+/// No variant says an encoding has no handler: dispatch matches every
+/// encoding class the classifier can return, so that cannot happen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StopCause {
-    /// A defined ARMv8.0 encoding inside the advertised feature set that this
-    /// interpreter does not implement. Raising UNDEFINED for it would be a
-    /// silent divergence from the architecture, so the machine stops instead.
-    Unimplemented(UndefinedInsn),
     /// The instruction is UNDEFINED and the machine was configured to stop on
     /// UNDEFINED instructions rather than deliver the exception.
     Undefined(UndefinedInsn),
@@ -245,68 +243,75 @@ impl Cpu {
             Decoded::Class(class) => class,
         };
         match class {
-            InsnClass::ADDSUB_IMM => self.exec_addsub_imm(insn),
-            InsnClass::ADDSUB_SHIFT => self.exec_addsub_shift(pc, insn),
-            InsnClass::ADDSUB_EXT => self.exec_addsub_ext(pc, insn),
-            InsnClass::ADDSUB_CARRY => self.exec_addsub_carry(pc, insn),
-            InsnClass::LOG_IMM => self.exec_logic_imm(pc, insn),
-            InsnClass::LOG_SHIFT => self.exec_logic_shift(pc, insn),
-            InsnClass::MOVEWIDE => self.exec_movewide(pc, insn),
-            InsnClass::PCRELADDR => self.exec_pcrel(pc, insn),
-            InsnClass::BITFIELD => self.exec_bitfield(pc, insn),
-            InsnClass::EXTRACT => self.exec_extract(pc, insn),
-            InsnClass::CONDBRANCH => self.exec_condbranch(pc, insn),
-            InsnClass::COMPBRANCH => self.exec_compbranch(pc, insn),
-            InsnClass::TESTBRANCH => self.exec_testbranch(pc, insn),
-            InsnClass::BRANCH_IMM => self.exec_branch_imm(pc, insn),
-            InsnClass::BRANCH_REG => self.exec_branch_reg(pc, insn),
-            InsnClass::CONDCMP_IMM | InsnClass::CONDCMP_REG => self.exec_condcmp(pc, insn),
-            InsnClass::CONDSEL => self.exec_condsel(pc, insn),
-            InsnClass::DP_1SRC => self.exec_dp1(pc, insn),
-            InsnClass::DP_2SRC => self.exec_dp2(pc, insn),
-            InsnClass::DP_3SRC => self.exec_dp3(pc, insn),
-            InsnClass::EXCEPTION => self.exec_exception_gen(pc, insn),
-            InsnClass::IC_SYSTEM => self.exec_system(bus, pc, insn),
-            InsnClass::LDST_POS
-            | InsnClass::LDST_IMM9
-            | InsnClass::LDST_UNSCALED
-            | InsnClass::LDST_REGOFF
-            | InsnClass::LDST_UNPRIV => self.exec_ldst_single(bus, pc, insn, class),
-            InsnClass::LOADLIT => self.exec_load_literal(bus, pc, insn),
-            InsnClass::LDSTPAIR_OFF | InsnClass::LDSTPAIR_INDEXED | InsnClass::LDSTNAPAIR_OFFS => {
+            // UDF: the Undefined Instruction exception, by definition.
+            Class::PermanentlyUndefined => self.undefined(pc, insn),
+            Class::AddSubImmediate => self.exec_addsub_imm(pc, insn),
+            Class::AddSubShiftedRegister => self.exec_addsub_shift(pc, insn),
+            Class::AddSubExtendedRegister => self.exec_addsub_ext(pc, insn),
+            Class::AddSubWithCarry => self.exec_addsub_carry(pc, insn),
+            Class::LogicalImmediate => self.exec_logic_imm(pc, insn),
+            Class::LogicalShiftedRegister => self.exec_logic_shift(pc, insn),
+            Class::MoveWide => self.exec_movewide(pc, insn),
+            Class::PcRelAddressing => self.exec_pcrel(pc, insn),
+            Class::Bitfield => self.exec_bitfield(pc, insn),
+            Class::Extract => self.exec_extract(pc, insn),
+            Class::ConditionalBranch => self.exec_condbranch(pc, insn),
+            Class::CompareAndBranch => self.exec_compbranch(pc, insn),
+            Class::TestAndBranch => self.exec_testbranch(pc, insn),
+            Class::BranchImmediate => self.exec_branch_imm(pc, insn),
+            Class::BranchRegister => self.exec_branch_reg(pc, insn),
+            Class::ConditionalCompareImmediate | Class::ConditionalCompareRegister => self.exec_condcmp(pc, insn),
+            Class::ConditionalSelect => self.exec_condsel(pc, insn),
+            Class::DataProcessing1Source => self.exec_dp1(pc, insn),
+            Class::DataProcessing2Source => self.exec_dp2(pc, insn),
+            Class::DataProcessing3Source => self.exec_dp3(pc, insn),
+            Class::ExceptionGeneration => self.exec_exception_gen(pc, insn),
+            Class::System => self.exec_system(bus, pc, insn),
+            Class::LoadStoreUnsignedImmediate => {
+                self.exec_ldst_single(bus, pc, insn, SingleForm::UnsignedImmediate)
+            }
+            Class::LoadStoreUnscaled | Class::LoadStoreIndexed | Class::LoadStoreUnprivileged => {
+                self.exec_ldst_single(bus, pc, insn, SingleForm::Immediate9)
+            }
+            Class::LoadStoreRegisterOffset => self.exec_ldst_single(bus, pc, insn, SingleForm::RegisterOffset),
+            Class::LoadLiteral => self.exec_load_literal(bus, pc, insn),
+            Class::LoadStorePairOffset | Class::LoadStorePairIndexed | Class::LoadStoreNoAllocatePair => {
                 self.exec_ldst_pair(bus, pc, insn)
             }
-            InsnClass::LDSTEXCL => self.exec_ldst_exclusive(bus, pc, insn),
-            InsnClass::ASISDLSE | InsnClass::ASISDLSEP => self.exec_ldst_multiple(bus, pc, insn),
-            InsnClass::ASISDLSO | InsnClass::ASISDLSOP => self.exec_ldst_single_structure(bus, pc, insn),
-            InsnClass::ASIMDIMM => self.exec_simd_imm(pc, insn),
-            InsnClass::ASIMDINS => self.exec_simd_ins(pc, insn),
-            InsnClass::ASIMDSAME => self.exec_simd_same(pc, insn, false),
-            InsnClass::ASISDSAME => self.exec_simd_same(pc, insn, true),
-            InsnClass::ASIMDMISC => self.exec_simd_misc(pc, insn, false),
-            InsnClass::ASISDMISC => self.exec_simd_misc(pc, insn, true),
-            InsnClass::ASIMDSHF => self.exec_simd_shift_imm(pc, insn, false),
-            InsnClass::ASISDSHF => self.exec_simd_shift_imm(pc, insn, true),
-            InsnClass::ASIMDDIFF => self.exec_simd_diff(pc, insn, false),
-            InsnClass::ASISDDIFF => self.exec_simd_diff(pc, insn, true),
-            InsnClass::ASIMDELEM => self.exec_simd_elem(pc, insn, false),
-            InsnClass::ASISDELEM => self.exec_simd_elem(pc, insn, true),
-            InsnClass::ASIMDALL => self.exec_simd_across(pc, insn),
-            InsnClass::ASISDPAIR => self.exec_simd_scalar_pair(pc, insn),
-            InsnClass::ASISDONE => self.exec_simd_scalar_dup(pc, insn),
-            InsnClass::ASIMDEXT => self.exec_simd_ext(pc, insn),
-            InsnClass::ASIMDPERM => self.exec_simd_perm(pc, insn),
-            InsnClass::ASIMDTBL => self.exec_simd_tbl(pc, insn),
-            InsnClass::FLOATIMM => self.exec_fmov_imm(pc, insn),
-            InsnClass::FLOATDP1 => self.exec_fp_dp1(pc, insn),
-            InsnClass::FLOATDP2 => self.exec_fp_dp2(pc, insn),
-            InsnClass::FLOATDP3 => self.exec_fp_dp3(pc, insn),
-            InsnClass::FLOATCMP => self.exec_fp_compare(pc, insn),
-            InsnClass::FLOATCCMP => self.exec_fp_cond_compare(pc, insn),
-            InsnClass::FLOATSEL => self.exec_fcsel(pc, insn),
-            InsnClass::FLOAT2INT => self.exec_fp_int(pc, insn),
-            InsnClass::FLOAT2FIX => self.exec_fp_fixed(pc, insn),
-            _ => self.unimplemented(pc, insn),
+            Class::LoadStoreExclusive => self.exec_ldst_exclusive(bus, pc, insn),
+            Class::SimdLoadStoreMultiple | Class::SimdLoadStoreMultiplePostIndexed => {
+                self.exec_ldst_multiple(bus, pc, insn)
+            }
+            Class::SimdLoadStoreSingle | Class::SimdLoadStoreSinglePostIndexed => {
+                self.exec_ldst_single_structure(bus, pc, insn)
+            }
+            Class::SimdModifiedImmediate => self.exec_simd_imm(pc, insn),
+            Class::SimdCopy => self.exec_simd_ins(pc, insn),
+            Class::SimdThreeSame => self.exec_simd_same(pc, insn, false),
+            Class::SimdScalarThreeSame => self.exec_simd_same(pc, insn, true),
+            Class::SimdTwoRegisterMisc => self.exec_simd_misc(pc, insn, false),
+            Class::SimdScalarTwoRegisterMisc => self.exec_simd_misc(pc, insn, true),
+            Class::SimdShiftImmediate => self.exec_simd_shift_imm(pc, insn, false),
+            Class::SimdScalarShiftImmediate => self.exec_simd_shift_imm(pc, insn, true),
+            Class::SimdThreeDifferent => self.exec_simd_diff(pc, insn, false),
+            Class::SimdScalarThreeDifferent => self.exec_simd_diff(pc, insn, true),
+            Class::SimdIndexedElement => self.exec_simd_elem(pc, insn, false),
+            Class::SimdScalarIndexedElement => self.exec_simd_elem(pc, insn, true),
+            Class::SimdAcrossLanes => self.exec_simd_across(pc, insn),
+            Class::SimdScalarPairwise => self.exec_simd_scalar_pair(pc, insn),
+            Class::SimdScalarCopy => self.exec_simd_scalar_dup(pc, insn),
+            Class::SimdExtract => self.exec_simd_ext(pc, insn),
+            Class::SimdPermute => self.exec_simd_perm(pc, insn),
+            Class::SimdTableLookup => self.exec_simd_tbl(pc, insn),
+            Class::FpImmediate => self.exec_fmov_imm(pc, insn),
+            Class::FpDataProcessing1Source => self.exec_fp_dp1(pc, insn),
+            Class::FpDataProcessing2Source => self.exec_fp_dp2(pc, insn),
+            Class::FpDataProcessing3Source => self.exec_fp_dp3(pc, insn),
+            Class::FpCompare => self.exec_fp_compare(pc, insn),
+            Class::FpConditionalCompare => self.exec_fp_cond_compare(pc, insn),
+            Class::FpConditionalSelect => self.exec_fcsel(pc, insn),
+            Class::FpIntegerConversion => self.exec_fp_int(pc, insn),
+            Class::FpFixedPointConversion => self.exec_fp_fixed(pc, insn),
         }
     }
 
@@ -318,12 +323,6 @@ impl Cpu {
         } else {
             Err(Exception::new(ExceptionClass::Unknown, 0).into())
         }
-    }
-
-    /// A defined encoding this interpreter does not implement.
-    #[inline]
-    pub(crate) fn unimplemented(&self, pc: u64, insn: u32) -> ExecResult {
-        Err(Fault::Stop(StopCause::Unimplemented(UndefinedInsn { pc, insn })))
     }
 
     /// The condition `cond` (Arm ARM `ConditionHolds`) against `PSTATE`.

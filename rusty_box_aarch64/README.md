@@ -70,13 +70,21 @@ vocabulary are `rusty_box_core`'s, shared with the x86 machine.
   memory (`build`, with `alloc`) or runs in buffers a caller lends it
   (`build_in`, no allocator needed); a sealed `GuestStorage` trait is the
   difference, with static dispatch throughout.
-- **Decoding is split.** [`disarm64`](https://crates.io/crates/disarm64)
-  classifies each word into its canonical encoding (never an alias) and its
-  feature set; one handler per encoding *class* reads every operand field from
-  the word, following the Arm ARM. Encodings of features the ID registers do
-  not advertise are UNDEFINED. A defined encoding the interpreter did not
-  implement would stop the machine (`StopReason::Unimplemented`) rather than
-  misbehave; no ARMv8.0 encoding is left in that state.
+- **Decoding is split, and the decoder is this crate's own.**
+  [`src/cpu/isa/encodings.txt`](src/cpu/isa/encodings.txt) lists every A64
+  encoding the processor knows, each under the encoding class of the Arm
+  ARM's A64 encoding index (DDI 0487, chapter C4) it belongs to, with that
+  class's bit diagram. `cargo xtask a64-decode` checks every row against its
+  diagram and compiles the list into a decision tree
+  ([`table.rs`](src/cpu/isa/table.rs), checked in; `cargo xtask ci` fails
+  while it is not what the list compiles to). A word decodes to the matching
+  encoding with the most fixed bits; the encoding names its class, the class
+  its feature (`FEAT_*`), and an encoding of a feature the ID registers do not
+  advertise is UNDEFINED. One handler per class then reads every operand
+  field from the word, following the Arm ARM. Dispatch is an exhaustive match
+  over the closed class enum, so every encoding the decoder can name has a
+  handler. Decisions are cached per word, so straight-line code skips the
+  tree.
 - **Floating point is software.** `src/softfloat` is rusty_box's own port of
   Berkeley SoftFloat 3e (via Bochs softfloat3e), restricted to half, single
   and double precision and given an Arm specialization: Arm's default NaN and
@@ -120,6 +128,34 @@ cites the QEMU source file and symbols it was ported from.
   non-ones Ra (CONSTRAINED UNPREDICTABLE). Every other vector agrees.
   Breaking QC saturation, round-to-odd, the AHP conversions or a decode fix
   on purpose makes dozens to hundreds of vectors fail.
+- The decoder is equivalent, on all 2^32 words, to
+  [`disarm64`](https://crates.io/crates/disarm64) 0.2 (a decoder generated
+  from binutils' opcode table, used only as a dev-dependency): wherever
+  disarm64 names an encoding of an advertised feature, this decoder names the
+  same one (by opcode and mask), and everywhere else it says UNDEFINED. The
+  deliberate exceptions are the HINT space, which executes whatever the hint
+  (CHKFEAT, one word), and two disarm64 tagging faults: RPRFM filed as a
+  base encoding (here it is PRFM (register) with a reserved prfop, 65,536
+  words), and the fixed-point conversions by immediate filed as FEAT_FP16
+  beyond `immh = 001x` (here the single- and double-precision forms, 589,824
+  words). `cargo test --release -p rusty_box_aarch64 --lib -- --ignored
+  the_classifier_matches_disarm64_on_every_word` runs it (about 14 s on four
+  threads); a sampled form runs with every test run.
+- When the encoding list was written it was also checked against QEMU 11.1.2's
+  decoder (`target/arm/tcg/a64.decode`): row instances QEMU decodes, it
+  decodes to the same instruction, and the 22,448 sampled row instances it
+  leaves unallocated are all UNDEFINED here. That check found ADD/SUB
+  (immediate) executing `shift = 1x`, a reserved value; and UDF, which the
+  list gives its own class, was decoded as an exception-generating
+  instruction, so `udf #1` and `udf #2` behaved as SVC and HVC.
+- `tests/encoding_coverage.rs` (ignored: it reads disarm64's table from the
+  cargo registry) runs 48 random instances of each of disarm64's 3,774
+  encodings on a bare machine and prints, per feature set, how many execute
+  and how many are UNDEFINED. Every ARMv8.0 base, FP and Advanced SIMD
+  encoding executes except the ten that are UNDEFINED at EL1 by rule (UDF,
+  DCPS1–3, DRPS, HLT, SMC, SYSL; MRS and MSR, whose random instances name
+  registers that do not exist, are checked with ones that do), and every
+  instance of an absent feature is UNDEFINED.
 - The EDK2 boot was compared with QEMU 8.2 running the same firmware, device
   tree and memory size: identical console bytes.
 - Alpine Linux 3.23.7 (kernel 6.18.58, Alpine's `virt` configuration) boots to

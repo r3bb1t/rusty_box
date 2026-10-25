@@ -11,19 +11,19 @@
 //! Unicorn's CPU model has more features than this core, so a word it
 //! executed may be UNDEFINED here. Such a vector is skipped only for a
 //! reason [`expected_undefined`] names; any other UNDEFINED word, and any
-//! encoding the interpreter stops on as unimplemented, fails the test.
+//! step that stops the machine, fails the test. Failure messages show
+//! disarm64's disassembly of the word.
 
 use std::collections::BTreeMap;
 use std::format;
 use std::string::String;
 use std::vec::Vec;
 
-use disarm64::InsnOpcode;
-use disarm64_defn::InsnFeatureSet;
 use rusty_box_core::{ClockHz, VmClock};
 
 use super::decode::{classify, Decoded};
-use super::{Cpu, CpuConfig, Step, StopCause};
+use super::isa::{self, Feature, Kind};
+use super::{Cpu, CpuConfig, Step};
 use crate::bus::{AccessWidth, BusFault, PhysAddr, PhysBus};
 use crate::instrumentation::NoInstrumentation;
 
@@ -294,12 +294,71 @@ fn reserved_simd_and_fp_encodings_are_undefined_before_the_fp_trap() {
     }
 }
 
+/// UDF raises the Undefined Instruction exception (EC 0x00) whatever its
+/// immediate (Arm ARM C6.2 UDF): `udf #1` and `udf #2` end in the bits SVC
+/// and HVC end in, but neither is an exception-generating instruction.
+#[test]
+fn udf_takes_the_undefined_instruction_exception_whatever_its_immediate() {
+    let ips = ClockHz::new(1_000_000).unwrap_or(ClockHz::BOCHS_DEFAULT);
+    for insn in [0x0000_0000, 0x0000_0001, 0x0000_0002, 0x0000_0003, 0x0000_ABCD] {
+        let mut cpu = Cpu::new(CpuConfig {
+            ips,
+            counter_hz: ips,
+            reset_pc: CODE,
+        });
+        cpu.x[0] = 0x8400_0008; // PSCI SYSTEM_OFF, had `udf #2` reached the PSCI conduit
+        let mut bus = TestBus {
+            insn,
+            data: std::vec![0; DATA_SIZE],
+        };
+        assert_eq!(cpu.step(&mut bus, &mut NoInstrumentation), Step::Retired, "{insn:#010x}");
+        assert_eq!(cpu.sys.esr_el1 >> 26, 0x00, "{insn:#010x}");
+    }
+}
+
+/// ADD, ADDS, SUB and SUBS (immediate) with bit 23 set are UNDEFINED: the
+/// ARMv8.0 decode makes `shift = 1x` a ReservedValue (Arm ARM ADD
+/// (immediate)), and QEMU decodes no instruction there (`a64.decode`
+/// `ADD_i` and its siblings fix bit 23 to 0). None of these is one of the
+/// later encodings that took bit 23 (ADDG/SUBG need `sf = 1, S = 0`, the
+/// min/max immediates `bits 21:18 = 00xx, S = 0`).
+#[test]
+fn add_and_sub_immediate_with_shift_1x_are_undefined() {
+    let ips = ClockHz::new(1_000_000).unwrap_or(ClockHz::BOCHS_DEFAULT);
+    let cases: [(u32, &str); 5] = [
+        (0x1180_0420, "add w0, w1, #1 with shift 10"),
+        (0x11C4_0420, "add w0, w1, #1 with shift 11"),
+        (0xB1C0_0420, "adds x0, x1, #1 with shift 11"),
+        (0x5180_0420, "sub w0, w1, #1 with shift 10"),
+        (0xF1C0_0420, "subs x0, x1, #1 with shift 11"),
+    ];
+    for (insn, text) in cases {
+        let mut cpu = Cpu::new(CpuConfig {
+            ips,
+            counter_hz: ips,
+            reset_pc: CODE,
+        });
+        cpu.x[1] = 41;
+        let mut bus = TestBus {
+            insn,
+            data: std::vec![0; DATA_SIZE],
+        };
+        assert_eq!(cpu.step(&mut bus, &mut NoInstrumentation), Step::Retired, "{text}");
+        assert_eq!(cpu.sys.esr_el1 >> 26, 0x00, "{text}: UNDEFINED");
+        assert_eq!(cpu.x[0], 0, "{text}: nothing written");
+    }
+}
+
 #[derive(Default)]
 struct Tally {
     passed: usize,
     skipped: usize,
-    unimplemented: usize,
     mismatched: usize,
+}
+
+/// disarm64's disassembly of `insn`, for a failure message.
+fn disassemble(insn: u32) -> String {
+    disarm64::decoder::decode(insn).map(|op| format!("{op}")).unwrap_or_default()
 }
 
 /// Why a word Unicorn executed may be UNDEFINED on this core.
@@ -318,14 +377,15 @@ enum ExpectedUndefined {
 /// The reason a word this core classifies as UNDEFINED may be, or `None`
 /// when it should have executed.
 fn expected_undefined(insn: u32) -> Option<ExpectedUndefined> {
-    if let Some(op) = disarm64::decoder::decode(insn) {
-        // The vectors come from a Cortex-A57 model, so a word in any other
-        // absent feature set means disarm64 mis-tagged an ARMv8.0 encoding.
-        return match op.definition().feature_set {
-            InsnFeatureSet::AES | InsnFeatureSet::SHA2 | InsnFeatureSet::CRC => {
+    if let Some(encoding) = isa::lookup(insn) {
+        // The vectors come from a Cortex-A57 model, so a word of any other
+        // absent feature means the encoding list misfiled an ARMv8.0
+        // encoding.
+        return match encoding.kind {
+            Kind::Absent(Feature::Aes | Feature::Pmull | Feature::Sha1 | Feature::Sha256 | Feature::Crc32) => {
                 Some(ExpectedUndefined::AbsentExtension)
             }
-            _ => None,
+            Kind::Absent(_) | Kind::Hint | Kind::Class(_) => None,
         };
     }
     let mul_high = insn & 0xFF60_8000 == 0x9B40_0000;
@@ -341,7 +401,6 @@ fn every_unicorn_vector_matches_after_one_step() {
     let ips = ClockHz::new(1_000_000).unwrap_or(ClockHz::BOCHS_DEFAULT);
     let mut tallies: BTreeMap<String, Tally> = BTreeMap::new();
     let mut failures: Vec<String> = Vec::new();
-    let mut unimplemented: BTreeMap<u32, String> = BTreeMap::new();
 
     for line in VECTORS.lines().filter(|l| !l.is_empty()) {
         let f: Vec<&str> = line.split(' ').collect();
@@ -389,11 +448,6 @@ fn every_unicorn_vector_matches_after_one_step() {
         };
 
         match cpu.step(&mut bus, &mut NoInstrumentation) {
-            Step::Stop(StopCause::Unimplemented(_)) => {
-                tally.unimplemented += 1;
-                unimplemented.entry(insn).or_insert_with(|| String::from(name));
-                continue;
-            }
             Step::Stop(other) => {
                 tally.mismatched += 1;
                 failures.push(format!("{name} {insn:08x}: stopped with {other:?}"));
@@ -457,28 +511,16 @@ fn every_unicorn_vector_matches_after_one_step() {
             tally.passed += 1;
         } else {
             tally.mismatched += 1;
-            let text = disarm64::decoder::decode(insn).map(|op| format!("{op}")).unwrap_or_default();
-            failures.push(format!("{name} {insn:08x} `{text}`: {}", diffs.join("; ")));
+            failures.push(format!("{name} {insn:08x} `{}`: {}", disassemble(insn), diffs.join("; ")));
         }
     }
 
-    std::eprintln!("family                 pass   skip  unimpl  MISMATCH");
+    std::eprintln!("family                 pass   skip  MISMATCH");
     for (name, t) in &tallies {
-        std::eprintln!(
-            "{name:<22} {:>5} {:>6} {:>7} {:>9}",
-            t.passed, t.skipped, t.unimplemented, t.mismatched
-        );
-    }
-    if !unimplemented.is_empty() {
-        std::eprintln!("unimplemented encodings ({}):", unimplemented.len());
-        for (insn, name) in unimplemented.iter() {
-            let text = disarm64::decoder::decode(*insn).map(|op| format!("{op}")).unwrap_or_default();
-            std::eprintln!("  {name} {insn:08x} {text}");
-        }
+        std::eprintln!("{name:<22} {:>5} {:>6} {:>9}", t.passed, t.skipped, t.mismatched);
     }
     for f in failures.iter().take(60) {
         std::eprintln!("MISMATCH {f}");
     }
     assert!(failures.is_empty(), "{} vectors disagree with Unicorn", failures.len());
-    assert!(unimplemented.is_empty(), "{} encodings are not implemented", unimplemented.len());
 }

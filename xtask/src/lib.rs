@@ -12,6 +12,7 @@ use std::{
 use adb_client::{server::ADBServer, server_device::ADBServerDevice, ADBDeviceExt};
 use std::net::{Ipv4Addr, SocketAddrV4};
 
+pub mod a64_decode;
 pub mod ci;
 
 const CMDLINE_TOOLS_VERSION: &str = "14742923";
@@ -95,6 +96,7 @@ pub enum XtaskCommand {
     Android(AndroidCommand),
     Ci(ci::CiCommand),
     PerfBaseline(ci::PerfBaselineCommand),
+    A64Decode(a64_decode::A64DecodeCommand),
 }
 
 struct AndroidContext {
@@ -245,6 +247,7 @@ where
         "android" => parse_android_args(&args[1..]).map(XtaskCommand::Android),
         "ci" => ci::parse_ci_args(&args[1..]).map(XtaskCommand::Ci),
         "perf-baseline" => Ok(XtaskCommand::PerfBaseline(ci::PerfBaselineCommand::default())),
+        "a64-decode" => a64_decode::parse_args(&args[1..]).map(XtaskCommand::A64Decode),
         _ => Err(format!("unknown xtask command {:?}\n{}", args[0], usage())),
     }
 }
@@ -340,6 +343,7 @@ fn execute(command: XtaskCommand) -> Result<(), String> {
         XtaskCommand::Android(command) => execute_android(command),
         XtaskCommand::Ci(command) => ci::execute_ci(command),
         XtaskCommand::PerfBaseline(command) => ci::execute_perf_baseline(command),
+        XtaskCommand::A64Decode(command) => a64_decode::execute(command),
     }
 }
 
@@ -1236,7 +1240,7 @@ fn jdk_program(host: HostOs, tool: &str) -> PathBuf {
 
 fn usage() -> String {
     format!(
-        "Usage:\n  cargo xtask android build [--sdk PATH] [--skip-sdk]\n  cargo xtask android run [--sdk PATH] [--skip-sdk] [--screenshot PATH]\n  cargo xtask android screenshot [PATH] [--sdk PATH] [--skip-sdk]\n  cargo xtask ci [--full] [--skip-boot]\n  cargo xtask perf-baseline"
+        "Usage:\n  cargo xtask android build [--sdk PATH] [--skip-sdk]\n  cargo xtask android run [--sdk PATH] [--skip-sdk] [--screenshot PATH]\n  cargo xtask android screenshot [PATH] [--sdk PATH] [--skip-sdk]\n  cargo xtask ci [--full] [--skip-boot]\n  cargo xtask perf-baseline\n  cargo xtask a64-decode [--check]"
     )
 }
 
