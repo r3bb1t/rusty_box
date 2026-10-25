@@ -1305,6 +1305,9 @@ fn finish_egui_run(shared: &Arc<Mutex<SharedDisplay>>) -> bool {
         display.emu_running = false;
         display.start_pending = false;
         display.startup_status = None;
+        // A machine that is off retires nothing: the rate it last published
+        // is not shown as if it still ran at it.
+        display.ips = 0;
         restart_requested
     } else {
         false
@@ -1319,6 +1322,7 @@ fn record_egui_error(shared: &Arc<Mutex<SharedDisplay>>, error: &RunError) {
         display.reset_requested = false;
         display.runtime_error = Some(format!("Emulator startup failed: {error}"));
         display.startup_status = None;
+        display.ips = 0;
     }
 }
 
@@ -1331,6 +1335,7 @@ pub(crate) fn signal_egui_stop(shared: &Arc<Mutex<SharedDisplay>>, control: &Run
         display.emu_running = false;
         display.start_pending = false;
         display.reset_requested = false;
+        display.ips = 0;
     }
     control.end_run();
 }
@@ -2086,6 +2091,27 @@ mod tests {
         prepare_egui_run(&shared, rusty_box::gui::host_input::PointerDevice::RelativeMouse);
 
         assert!(shared.lock().unwrap().pending_keys.is_empty());
+    }
+
+    /// A run that ends, cleanly or with an error, leaves no rate behind: the
+    /// status strip of a VM that is off reads no instruction rate.
+    #[cfg(feature = "gui-egui")]
+    #[test]
+    fn a_run_that_ends_leaves_no_rate_on_its_display() {
+        let shared = Arc::new(Mutex::new(SharedDisplay::new()));
+        let published = |shared: &Arc<Mutex<SharedDisplay>>| {
+            let mut display = shared.lock().unwrap();
+            display.emu_running = true;
+            display.ips = 28_000_000;
+        };
+
+        published(&shared);
+        assert!(!finish_egui_run(&shared), "no restart was asked");
+        assert_eq!(shared.lock().unwrap().ips, 0);
+
+        published(&shared);
+        record_egui_error(&shared, &RunError::MissingVirtBoot);
+        assert_eq!(shared.lock().unwrap().ips, 0);
     }
 
     /// Each run sets the display's pointer to its machine's and counts

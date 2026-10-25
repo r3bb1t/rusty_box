@@ -87,6 +87,8 @@ A confirmation dialog is dismissed by `Cancel`, Escape or a click outside it. Th
 
 A VM is a PC or an Arm `virt` board, QEMU's `virt` machine with one Cortex-A57 (the `rusty_box_aarch64` crate). The **Machine** choice at the top of the Hardware page switches between them while the VM is off; switching back within an edit restores what the other machine held. An Arm VM differs from a PC in the shell as follows:
 
+- **Colour.** The shell's accent is the shown VM's machine's: cyan, with the instruction rate in blue, for a PC; red for an Arm board. It marks the primary verb (`▶ Power on` and the like), the page and Hardware pane the shell is on, a running VM's badge, the instruction rate, and the text cursor and selection. Each running VM's dot in the sidebar is in its own machine's accent, whichever VM is shown. Info, warning, error and `Paused` keep their own colours.
+
 - **Pages.** It has no Debugger page, which reads a PC's processors and memory. Pause, Resume and Save RAM work from the VM bar as for a PC; the dump is the board's RAM from its base, `0x4000_0000`.
 - **Summary** shows `1 CPU` and what it boots (`Linux kernel` or `UEFI firmware`); its middle tile is `Open Console` instead of `New Hard Disk`.
 - **Hardware** lists the board's own panes:

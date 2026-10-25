@@ -15,7 +15,7 @@ use crate::shell::destination::ShellPage;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::shell::destination::VmBarAction;
 #[cfg(target_os = "android")]
-use crate::shell::theme::{ACCENT_CYAN, TEXT_MUTED};
+use crate::shell::theme::{Accent, TEXT_MUTED};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::shell::theme::{BG_PANEL, TEXT_BODY, TEXT_PRIMARY};
 #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
@@ -134,7 +134,7 @@ fn page_tabs(ui: &mut egui::Ui, shown: ShellPage, pages: &[ShellPage]) -> Option
             ui.painter().hline(
                 response.rect.x_range(),
                 response.rect.bottom() - 1.0,
-                egui::Stroke::new(2.0_f32, ACCENT_CYAN),
+                egui::Stroke::new(2.0_f32, Accent::current(ui.ctx()).strong),
             );
         }
         if response.clicked() {
@@ -314,7 +314,7 @@ pub(crate) fn draw_vm_bar(ui: &mut egui::Ui, state: VmBarState<'_>) -> Option<Vm
                     // beside its neighbours.
                     let can_start = !state.running && !state.start_pending;
                     let power_on = if can_start {
-                        primary_button(POWER_ON)
+                        primary_button(ui, POWER_ON)
                     } else {
                         egui::Button::new(POWER_ON)
                     };

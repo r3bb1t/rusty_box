@@ -11,7 +11,7 @@ use egui::text::LayoutJob;
 use egui::{Color32, FontId, Rect, RichText, Stroke, WidgetInfo, WidgetType};
 
 use crate::shell::theme::{
-    ACCENT_CYAN, BG_WELL, CONTROL_FILL_REST, STROKE_HAIRLINE, TEXT_CAPTION, TEXT_MUTED,
+    Accent, BG_WELL, CONTROL_FILL_REST, STROKE_HAIRLINE, TEXT_CAPTION, TEXT_MUTED,
     TEXT_PRIMARY, TEXT_SECONDARY, TEXT_TITLE,
 };
 
@@ -255,10 +255,11 @@ pub(crate) fn list_row(
         return response;
     }
     let painter = ui.painter();
+    let accent = Accent::current(ui.ctx()).strong;
     let hovered = matches!(sense, RowSense::Pick { .. }) && response.hovered();
     let fill = match tone {
         Tone::Selected => Some(SELECTED),
-        Tone::Current => Some(ACCENT_CYAN.gamma_multiply(0.14)),
+        Tone::Current => Some(accent.gamma_multiply(0.14)),
         Tone::Plain | Tone::Stripe if hovered => Some(HOVER),
         Tone::Stripe => Some(STRIPE),
         Tone::Plain => None,
@@ -270,7 +271,7 @@ pub(crate) fn list_row(
         painter.rect_filled(
             Rect::from_min_size(rect.left_top(), egui::vec2(2.0, rect.height())),
             1.0,
-            ACCENT_CYAN,
+            accent,
         );
     }
     for (cell, column) in cells.iter().zip(column_rects(rect, lead, cells, char_width)) {

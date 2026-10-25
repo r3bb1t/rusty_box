@@ -24,9 +24,9 @@ use crate::shell::sidebar::{Drawer, VmLibraryEntry};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::shell::theme::{SPACE_PAGE, STROKE_HAIRLINE, TEXT_CAPTION, TEXT_DISPLAY};
 use crate::shell::theme::{
-    configure_shell_style, shell_card_frame, ACCENT_AMBER, ACCENT_BLUE, ACCENT_CYAN, ACCENT_RED,
-    BG_BASE, BG_PANEL, SPACE_GROUP, SPACE_ITEM, TEXT_BODY, TEXT_MUTED, TEXT_PRIMARY,
-    TEXT_SECONDARY, TEXT_TITLE,
+    configure_shell_style, shell_card_frame, Accent, ACCENT_AMBER, ACCENT_CYAN, ACCENT_RED, BG_BASE,
+    BG_PANEL, SPACE_GROUP, SPACE_ITEM, TEXT_BODY, TEXT_MUTED, TEXT_PRIMARY, TEXT_SECONDARY,
+    TEXT_TITLE,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use crate::shell::vm_bar::VmBarState;
@@ -1682,7 +1682,7 @@ fn draw_new_disk_form(ui: &mut egui::Ui, draft: &mut NewDiskDraft) -> NewDiskAct
             "Create and attach"
         };
         ui.horizontal(|ui| {
-            if ui.add(primary_button(create)).clicked() {
+            if ui.add(primary_button(ui, create)).clicked() {
                 action = NewDiskAction::Create;
             }
             if ui.button("Cancel").clicked() {
@@ -2041,6 +2041,11 @@ impl NativeShellApp {
             .unwrap_or(self.settings.engine)
     }
 
+    /// The accent of the VM shown: its machine's (`Accent::of`).
+    fn shown_accent(&self) -> Accent {
+        Accent::of(self.config.machine.kind())
+    }
+
     fn is_vm_running(&self) -> bool {
         self.runtime_status().running
     }
@@ -2186,7 +2191,7 @@ impl NativeShellApp {
             VmBarState {
                 name: &self.vm_info.name,
                 #[cfg(not(target_os = "android"))]
-                badge: shell_state_badge(&status, self.has_error_notice()),
+                badge: shell_state_badge(&status, self.has_error_notice(), self.shown_accent()),
                 #[cfg(target_os = "android")]
                 page: self.chrome.page(),
                 #[cfg(target_os = "android")]
@@ -2266,13 +2271,21 @@ impl NativeShellApp {
             .map(|(index, profile)| {
                 if index == shown {
                     return Some(
-                        shell_state_badge(&self.runtime_status(), self.has_error_notice()).color,
+                        shell_state_badge(
+                            &self.runtime_status(),
+                            self.has_error_notice(),
+                            self.shown_accent(),
+                        )
+                        .color,
                     );
                 }
+                // Each VM's dot is in its own machine's accent, whichever VM
+                // the shell shows.
+                let accent = Accent::of(profile.config.machine.kind());
                 self.sessions
                     .get(&profile.origin)
                     .filter(|session| session.is_live())
-                    .map(|session| shell_state_badge(&session.status(), false).color)
+                    .map(|session| shell_state_badge(&session.status(), false, accent).color)
             })
             .collect()
     }
@@ -2336,7 +2349,8 @@ impl NativeShellApp {
                     }
 
                     let snapshot = self.runtime_status();
-                    let badge = shell_state_badge(&snapshot, self.has_error_notice());
+                    let badge =
+                        shell_state_badge(&snapshot, self.has_error_notice(), self.shown_accent());
                     status_dot(ui, badge.color);
                     ui.label(status_text(badge.label).color(badge.color));
                     ui.separator();
@@ -2354,7 +2368,7 @@ impl NativeShellApp {
                     // A published rate is a fact and reads in the data accent;
                     // an absent one is drawn muted so it cannot pass for zero.
                     let ips_color = if snapshot.ips > 0 {
-                        ACCENT_BLUE
+                        self.shown_accent().data
                     } else {
                         TEXT_MUTED
                     };
@@ -2490,7 +2504,7 @@ impl NativeShellApp {
                             &mut columns[0],
                             "Power On VM",
                             "Start this VM with the settings selected below.",
-                            ACCENT_CYAN,
+                            self.shown_accent().strong,
                             ActionTileWeight::Primary,
                             start_enabled,
                             || self.start_vm(),
@@ -2537,7 +2551,7 @@ impl NativeShellApp {
     /// bar and duplication to the sidebar's `+`, so neither is repeated here.
     fn draw_home_header(&mut self, ui: &mut egui::Ui) {
         let status = self.runtime_status();
-        let badge = shell_state_badge(&status, self.has_error_notice());
+        let badge = shell_state_badge(&status, self.has_error_notice(), self.shown_accent());
         shell_card_frame().show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
@@ -2579,7 +2593,7 @@ impl NativeShellApp {
             ui.horizontal_wrapped(|ui| {
                 if origin == VmOrigin::Launch
                     && ui
-                        .add(primary_button("Keep in library"))
+                        .add(primary_button(ui, "Keep in library"))
                         .on_hover_text("Save this VM to the library so it is listed at every launch")
                         .clicked()
                 {
@@ -2647,7 +2661,7 @@ impl NativeShellApp {
             ui.label(".toml");
             let entered =
                 field.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
-            if ui.add(primary_button("Save file name")).clicked() || entered {
+            if ui.add(primary_button(ui, "Save file name")).clicked() || entered {
                 save = true;
             }
             if ui.button("Cancel").clicked() {
@@ -3581,7 +3595,7 @@ impl NativeShellApp {
                         &mut columns[0],
                         "+ New disk",
                         "Pick a size, then create it.",
-                        ACCENT_CYAN,
+                        self.shown_accent().strong,
                         ActionTileWeight::Primary,
                         || open_sheet = true,
                     );
@@ -4274,7 +4288,7 @@ impl NativeShellApp {
             ui.label(RichText::new(wording.body).color(TEXT_MUTED));
             ui.add_space(SPACE_GROUP);
             ui.horizontal(|ui| {
-                confirmed = ui.add(primary_button(wording.verb)).clicked();
+                confirmed = ui.add(primary_button(ui, wording.verb)).clicked();
                 cancelled = ui.button("Cancel").clicked();
             });
         });
@@ -4726,7 +4740,7 @@ impl NativeShellApp {
     #[cfg(target_os = "android")]
     fn draw_full_screen_menu(&mut self, ctx: &egui::Context, area: egui::Rect, scroll: MenuScroll) {
         let status = self.runtime_status();
-        let badge = shell_state_badge(&status, self.has_error_notice());
+        let badge = shell_state_badge(&status, self.has_error_notice(), self.shown_accent());
         let vm = self.shown_vm();
         show_full_screen_menu(ctx, area, scroll, |ui| {
             ui.horizontal(|ui| {
@@ -4735,7 +4749,7 @@ impl NativeShellApp {
                 ui.label(status_text("·").color(TEXT_MUTED));
                 ui.label(status_text(engine_label(self.shown_engine())).color(TEXT_PRIMARY));
                 ui.label(status_text("·").color(TEXT_MUTED));
-                ui.label(status_text(format_ips_u32(status.ips)).color(ACCENT_BLUE));
+                ui.label(status_text(format_ips_u32(status.ips)).color(self.shown_accent().data));
             });
             ui.separator();
             if ui.button("Keys").clicked() {
@@ -5157,11 +5171,22 @@ impl eframe::App for NativeShellApp {
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        // The whole frame, dialogs included, is drawn in the shown VM's
+        // machine's accent.
+        self.shown_accent().apply(&ctx);
         self.begin_frame();
         self.handle_native_dropped_files(&ctx);
         self.draw_pending_confirm(&ctx);
         self.draw_close_question(&ctx);
         self.draw_shell(ui, frame);
+        // A VM of the other machine shown, or the shown VM's machine
+        // changed, during this frame: it was drawn in the accent it began
+        // with, so the next frame — asked for now, not left to the next
+        // input — draws it whole in the new one.
+        if Accent::current(&ctx) != self.shown_accent() {
+            self.shown_accent().apply(&ctx);
+            ctx.request_repaint();
+        }
         self.flush_when_window_focus_is_lost(&ctx);
         self.flush_unsaved_when_idle(&ctx);
         // An answer the close question got in this frame is carried out in
@@ -5255,7 +5280,7 @@ impl FloppyMaker {
                 } else {
                     "Create floppy image"
                 };
-                if ui.add(primary_button(action)).clicked() {
+                if ui.add(primary_button(ui, action)).clicked() {
                     self.create_requested = true;
                 }
                 if let Some(status) = &self.status {
@@ -6125,7 +6150,7 @@ impl WebShellApp {
                         RichText::new(format!("{} IPS", format_ips_f64(self.cached_ips)))
                             .monospace()
                             .size(11.0)
-                            .color(ACCENT_BLUE),
+                            .color(Accent::PC.data),
                     );
                     ui.separator();
                     ui.label(
@@ -6465,7 +6490,7 @@ impl WebShellApp {
                         NewDiskAction::Cancel => self.new_disk = None,
                     },
                     None => {
-                        if ui.add(primary_button("+ New disk")).clicked() {
+                        if ui.add(primary_button(ui, "+ New disk")).clicked() {
                             self.open_new_disk_sheet();
                         }
                     }
@@ -6800,10 +6825,10 @@ fn cpu_count_label(cpus: u32) -> String {
     }
 }
 
-/// The badge for a runner status: cyan runs, amber waits, red has faulted, and
-/// idle is muted.
+/// The badge for a runner status: a run in its machine's `accent`, amber
+/// waits, red has faulted, and idle is muted.
 #[cfg(not(target_arch = "wasm32"))]
-fn shell_state_badge(status: &ShellStatus, faulted: bool) -> ShellStateBadge {
+fn shell_state_badge(status: &ShellStatus, faulted: bool, accent: Accent) -> ShellStateBadge {
     if status.running && status.paused {
         ShellStateBadge {
             label: "Paused",
@@ -6812,7 +6837,7 @@ fn shell_state_badge(status: &ShellStatus, faulted: bool) -> ShellStateBadge {
     } else if status.running {
         ShellStateBadge {
             label: "Running",
-            color: ACCENT_CYAN,
+            color: accent.strong,
         }
     } else if status.start_pending {
         ShellStateBadge {
@@ -10028,6 +10053,31 @@ mod tests {
         drop(first);
     }
 
+    /// A running VM's dot is in its own machine's accent, whichever VM is
+    /// shown: red for an Arm board, cyan for a PC.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_running_vms_dot_is_its_machines_accent() {
+        let scratch = ScratchLibrary::new();
+        scratch.library().create("Arm", &test_virt_config()).expect("seed");
+        scratch.library().create("PC", &test_resolved_config()).expect("seed");
+        let (mut app, command_rx) = native_test_app_over(&scratch, None, None);
+        app.select_profile(0);
+        let arm = power_on(&mut app, &command_rx);
+        app.select_profile(1);
+        let pc = power_on(&mut app, &command_rx);
+
+        let dots = app.row_dots();
+        assert_eq!(dots[0], Some(Accent::ARM_VIRT.strong), "the running Arm board, not shown");
+        assert_eq!(dots[1], Some(Accent::PC.strong), "the running PC, shown");
+
+        app.select_profile(0);
+        let dots = app.row_dots();
+        assert_eq!(dots[0], Some(Accent::ARM_VIRT.strong), "the running Arm board, shown");
+        assert_eq!(dots[1], Some(Accent::PC.strong), "the running PC, not shown");
+        drop((arm, pc));
+    }
+
     /// The full-screen console's menu offers every VM that runs except the
     /// one shown, by name, in the order of the VM list, which follows the
     /// VMs' files and not their names; a VM that is off is not offered.
@@ -10563,6 +10613,53 @@ mod tests {
             );
             assert!(shows(&window, "Boot"));
             assert!(!shows(&window, "Hard Disk"));
+        }
+
+        /// The fills of every rectangle the last frame painted: the button
+        /// faces, rows and rules the shell draws.
+        fn painted_fills(window: &Harness<'_, Window>) -> Vec<egui::Color32> {
+            fn walk(shape: &egui::Shape, fills: &mut Vec<egui::Color32>) {
+                if let egui::Shape::Vec(shapes) = shape {
+                    for shape in shapes {
+                        walk(shape, fills);
+                    }
+                } else if let egui::Shape::Rect(rect) = shape {
+                    fills.push(rect.fill);
+                }
+            }
+            let mut fills = Vec::new();
+            for clipped in &window.output().shapes {
+                walk(&clipped.shape, &mut fills);
+            }
+            fills
+        }
+
+        /// The window is painted in the shown VM's machine's accent: red
+        /// while an Arm board is shown — its `▶ Power on` face and the
+        /// tree's destination rule among the rest — with no cyan anywhere,
+        /// and cyan again once a PC is.
+        #[test]
+        fn the_window_turns_red_for_an_arm_board_and_back_for_a_pc() {
+            let scratch = ScratchLibrary::new();
+            scratch.library().create("Arm", &test_virt_config()).expect("seed");
+            scratch.library().create("PC", &test_resolved_config()).expect("seed");
+            let (app, _command_rx) = native_test_app_over(&scratch, None, None);
+            let mut window = window(app);
+            window.state_mut().app.select_profile(0);
+            window.run();
+            let fills = painted_fills(&window);
+            assert!(fills.contains(&Accent::ARM_VIRT.strong), "nothing is painted red");
+            assert!(!fills.contains(&ACCENT_CYAN), "cyan is painted for an Arm board");
+            assert_eq!(
+                window.ctx.style_of(egui::Theme::Dark).visuals.selection.stroke.color,
+                Accent::ARM_VIRT.strong
+            );
+
+            window.state_mut().app.select_profile(1);
+            window.run();
+            let fills = painted_fills(&window);
+            assert!(fills.contains(&ACCENT_CYAN), "nothing is painted cyan");
+            assert!(!fills.contains(&Accent::ARM_VIRT.strong), "red is painted for a PC");
         }
 
         /// A VM shown on its Debugger page when it becomes an Arm board shows
