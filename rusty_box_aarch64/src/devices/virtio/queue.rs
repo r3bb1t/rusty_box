@@ -9,9 +9,10 @@
 //! `virtqueue_num_heads`, `virtqueue_get_head` and `virtqueue_map_desc` (the
 //! checks a chain must pass, each a `virtio_error`), `virtqueue_unpop`,
 //! `virtqueue_split_fill` and `virtqueue_split_flush`, and
-//! `virtio_split_should_notify` with `vring_need_event`. Neither device here
-//! turns notifications off (`virtio_queue_set_notification`), so the device
-//! always publishes its `avail_event`.
+//! `virtio_split_should_notify` with `vring_need_event`,
+//! `virtio_queue_set_notification` (which the block device turns off while
+//! it works through its queue, so it publishes its `avail_event` only once
+//! it is done) and `virtqueue_detach_element`.
 //!
 //! A chain is walked again from guest memory each time the device reads or
 //! writes it, where QEMU maps its buffers once when it takes it. The two
@@ -29,7 +30,7 @@ use crate::board::RAM_BASE;
 /// `DEVICE_NEEDS_RESET`).
 ///
 /// Closed (R5): the errors QEMU's split ring and transport raise for the
-/// features these devices offer.
+/// features these devices offer, and the block device's own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QueueFault {
     /// `QueueNum` larger than the device's queue ("queue size exceeds max
@@ -70,6 +71,18 @@ pub enum QueueFault {
     Looped,
     /// A `next` past the end of the table ("Desc next is").
     BadNext,
+    /// A block request with no device-readable or no device-writable buffer
+    /// ("virtio-blk missing headers").
+    BlockMissingHeaders,
+    /// A block request whose readable buffers are shorter than its header
+    /// ("virtio-blk request outhdr too short").
+    BlockHeaderShort,
+    /// A discard or write-zeroes request without a whole range
+    /// ("virtio-blk discard/write_zeroes header too short").
+    BlockRangeShort,
+    /// A zone report without room for one zone ("in buffer too small for
+    /// zone report").
+    BlockZoneReportShort,
 }
 
 impl QueueFault {
@@ -90,6 +103,10 @@ impl QueueFault {
             Self::OutOfOrder => 12,
             Self::Looped => 13,
             Self::BadNext => 14,
+            Self::BlockMissingHeaders => 15,
+            Self::BlockHeaderShort => 16,
+            Self::BlockRangeShort => 17,
+            Self::BlockZoneReportShort => 18,
         }
     }
 
@@ -109,6 +126,10 @@ impl QueueFault {
             12 => Self::OutOfOrder,
             13 => Self::Looped,
             14 => Self::BadNext,
+            15 => Self::BlockMissingHeaders,
+            16 => Self::BlockHeaderShort,
+            17 => Self::BlockRangeShort,
+            18 => Self::BlockZoneReportShort,
             _ => return None,
         })
     }
@@ -134,6 +155,22 @@ impl<'a> GuestRam<'a> {
     /// `dma_memory_map` needs to map them.
     pub fn contains(&self, addr: u64, len: u64) -> bool {
         self.range(addr, len).is_some()
+    }
+
+    /// The `len` bytes at `addr`, if they are all RAM.
+    #[cfg(feature = "alloc")]
+    pub fn bytes(&self, addr: u64, len: u64) -> Option<&[u8]> {
+        let range = self.range(addr, len)?;
+        Some(&self.ram[range])
+    }
+
+    /// The `len` bytes at `addr` to store into, if they are all RAM: a
+    /// buffer a device fills in place, as QEMU's block layer fills a request's
+    /// mapped buffers.
+    #[cfg(feature = "alloc")]
+    pub fn bytes_mut(&mut self, addr: u64, len: u64) -> Option<&mut [u8]> {
+        let range = self.range(addr, len)?;
+        Some(&mut self.ram[range])
     }
 
     /// `out.len()` bytes at `addr`, or `None` if they are not all RAM.
@@ -170,6 +207,8 @@ const VRING_DESC_F_NEXT: u16 = 1;
 const VRING_DESC_F_WRITE: u16 = 2;
 const VRING_DESC_F_INDIRECT: u16 = 4;
 const VRING_AVAIL_F_NO_INTERRUPT: u16 = 1;
+#[cfg(feature = "alloc")]
+const VRING_USED_F_NO_NOTIFY: u16 = 1;
 
 /// One descriptor as the driver wrote it.
 #[derive(Debug, Clone, Copy)]
@@ -220,6 +259,13 @@ pub struct Chain {
     table_len: u32,
     /// The chain's first descriptor in `table`.
     first: u32,
+    /// How many device-readable and device-writable buffers it has (QEMU
+    /// `out_num` and `in_num`).
+    pub readable: u32,
+    pub writable: u32,
+    /// The total length of each (QEMU `iov_size` of `out_sg` and `in_sg`).
+    pub readable_len: u64,
+    pub writable_len: u64,
 }
 
 /// Where a walk of a chain has got to.
@@ -228,11 +274,51 @@ struct Walk {
     steps: u32,
 }
 
+/// One buffer of a chain, as the driver described it.
+#[cfg(feature = "alloc")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Buffer {
+    pub addr: u64,
+    pub len: u32,
+    pub device_writes: bool,
+}
+
+/// A walk over a chain's buffers in order. It holds no borrow of guest
+/// memory between steps, so a device can fill one buffer before it looks at
+/// the next.
+#[cfg(feature = "alloc")]
+pub struct Buffers {
+    chain: Chain,
+    walk: Walk,
+}
+
+#[cfg(feature = "alloc")]
+impl Buffers {
+    /// The next buffer, or `None` past the last.
+    pub fn next_buffer(&mut self, ram: &GuestRam<'_>) -> Option<Buffer> {
+        let desc = self.chain.step(ram, &mut self.walk)?;
+        Some(Buffer {
+            addr: desc.addr,
+            len: desc.len,
+            device_writes: desc.device_writes(),
+        })
+    }
+}
+
 impl Chain {
     fn walk(&self) -> Walk {
         Walk {
             next: Some(self.first),
             steps: 0,
+        }
+    }
+
+    /// Its buffers, one at a time.
+    #[cfg(feature = "alloc")]
+    pub fn buffers(&self) -> Buffers {
+        Buffers {
+            chain: *self,
+            walk: self.walk(),
         }
     }
 
@@ -332,10 +418,15 @@ pub struct Queue {
     signalled_used_valid: bool,
     /// Chains taken and not yet returned.
     inuse: u16,
+    /// Whether the device wants the driver's notifications (QEMU
+    /// `vq->notification`). Off only while a device works through the
+    /// queue, so between guest accesses it is always on.
+    notification: bool,
 }
 
 impl Queue {
-    /// A queue of `size` entries, as QEMU's `virtio_add_queue` makes it.
+    /// A queue of `size` entries, as QEMU's `virtio_add_queue` makes it; a
+    /// size of 0 is a queue the device does not have.
     pub const fn new(size: u16) -> Self {
         Self {
             num_default: size,
@@ -350,6 +441,7 @@ impl Queue {
             signalled_used: 0,
             signalled_used_valid: false,
             inuse: 0,
+            notification: true,
         }
     }
 
@@ -503,8 +595,7 @@ impl Queue {
             return Err(QueueFault::BadHead);
         }
         if features.event_idx {
-            // vring_set_avail_event: used->ring[num].
-            self.set_used_u16(ram, 4 + 8 * u64::from(self.num), self.last_avail_idx);
+            self.set_avail_event(ram, self.last_avail_idx);
         }
         if !self.mapped {
             return Err(QueueFault::NoRings);
@@ -530,16 +621,19 @@ impl Queue {
 
         let max_buffers = u32::from(VIRTQUEUE_MAX_SIZE);
         let (mut readable, mut writable, mut entries) = (0u32, 0u32, 0u32);
+        let (mut readable_len, mut writable_len) = (0u64, 0u64);
         loop {
             if desc.device_writes() {
                 Self::map_buffer(ram, &desc, readable + writable, max_buffers)?;
                 writable += 1;
+                writable_len += u64::from(desc.len);
             } else {
                 if writable != 0 {
                     return Err(QueueFault::OutOfOrder);
                 }
                 Self::map_buffer(ram, &desc, readable, max_buffers)?;
                 readable += 1;
+                readable_len += u64::from(desc.len);
             }
             entries += 1;
             if entries > max {
@@ -560,7 +654,50 @@ impl Queue {
             table,
             table_len: max,
             first,
+            readable,
+            writable,
+            readable_len,
+            writable_len,
         }))
+    }
+
+    /// QEMU `vring_set_avail_event`: tell the driver where the device has
+    /// got to, unless it has turned notifications off.
+    fn set_avail_event(&self, ram: &mut GuestRam<'_>, idx: u16) {
+        if self.notification {
+            // used->ring[num].
+            self.set_used_u16(ram, 4 + 8 * u64::from(self.num), idx);
+        }
+    }
+
+    /// QEMU `virtio_queue_set_notification` for a split ring: with event
+    /// indices, publish the available index just read (once notifications
+    /// are on again); without, set or clear `VRING_USED_F_NO_NOTIFY`.
+    #[cfg(feature = "alloc")]
+    pub fn set_notification(&mut self, ram: &mut GuestRam<'_>, features: RingFeatures, enable: bool) {
+        self.notification = enable;
+        if self.desc == 0 {
+            return;
+        }
+        if features.event_idx {
+            let idx = self.read_avail_idx(ram);
+            self.set_avail_event(ram, idx);
+        } else if self.mapped {
+            let flags = ram.read_u16(self.used).unwrap_or(0);
+            let flags = if enable {
+                flags & !VRING_USED_F_NO_NOTIFY
+            } else {
+                flags | VRING_USED_F_NO_NOTIFY
+            };
+            self.set_used_u16(ram, 0, flags);
+        }
+    }
+
+    /// QEMU `virtqueue_detach_element`: forget a chain taken from the queue
+    /// without returning it.
+    #[cfg(feature = "alloc")]
+    pub fn detach(&mut self) {
+        self.inuse = self.inuse.wrapping_sub(1);
     }
 
     /// QEMU `virtqueue_map_desc` for one buffer, `mapped` buffers already
@@ -652,7 +789,9 @@ impl Queue {
 
     pub fn restore<R: SnapRead>(&mut self, r: &mut R) -> SnapResult {
         let num = r.read_u16()?;
-        if num == 0 || num > self.num_default {
+        // A queue the device has is never sized to nothing, and one it does
+        // not have never to anything else.
+        if (num == 0) != (self.num_default == 0) || num > self.num_default {
             return Err(SnapError::Invalid("virtqueue size the device does not allow"));
         }
         self.num = num;

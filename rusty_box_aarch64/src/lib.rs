@@ -44,6 +44,8 @@ pub mod boot;
 pub mod bus;
 pub mod cpu;
 pub mod devices;
+#[cfg(feature = "alloc")]
+pub mod disk;
 pub mod instrumentation;
 pub mod machine;
 mod softfloat;
@@ -59,6 +61,8 @@ pub use machine::{
     StopReason, VirtConfig, VirtMachine,
 };
 pub use board::{Plugged, VirtioDevices};
+#[cfg(feature = "alloc")]
+pub use disk::{Access, Disk};
 #[cfg(feature = "alloc")]
 pub use machine::Display;
 pub use machine::{Keyboard, Pointer};

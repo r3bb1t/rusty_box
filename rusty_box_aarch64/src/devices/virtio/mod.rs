@@ -39,6 +39,8 @@ pub(crate) mod input;
 pub(crate) mod queue;
 
 #[cfg(feature = "alloc")]
+pub(crate) mod block;
+#[cfg(feature = "alloc")]
 pub(crate) mod edid;
 #[cfg(feature = "alloc")]
 pub(crate) mod gpu;
@@ -102,7 +104,8 @@ const ISR_CONFIG: u8 = 2;
 /// The most virtio devices a board carries.
 pub const MAX_DEVICES: usize = 4;
 
-/// The queues each device here has.
+/// The most queues a device here has. A device with fewer gives the rest a
+/// size of 0, which is how QEMU leaves a queue its device never added.
 pub const QUEUES: usize = 2;
 
 /// QEMU's `VirtIODevice` core: the state the transport and the device
@@ -136,6 +139,7 @@ impl Core {
         }
     }
 
+    /// QEMU `virtio_vdev_has_feature`: whether the driver accepted `bit`.
     fn has_feature(&self, bit: u64) -> bool {
         self.guest_features & bit != 0
     }
@@ -233,6 +237,25 @@ impl Vdev<'_, '_> {
         self.queues[q].unpop();
     }
 
+    /// QEMU `virtqueue_detach_element`.
+    #[cfg(feature = "alloc")]
+    pub(crate) fn detach(&mut self, q: usize) {
+        self.queues[q].detach();
+    }
+
+    /// QEMU `virtio_queue_set_notification`.
+    #[cfg(feature = "alloc")]
+    pub(crate) fn set_notification(&mut self, q: usize, enable: bool) {
+        let features = self.core.ring_features();
+        self.queues[q].set_notification(self.ram, features, enable);
+    }
+
+    /// QEMU `virtio_error`: the driver broke a rule the device checks.
+    #[cfg(feature = "alloc")]
+    pub(crate) fn error(&mut self, fault: QueueFault) {
+        self.core.error(fault);
+    }
+
     /// QEMU `virtqueue_push`.
     pub(crate) fn push(&mut self, q: usize, chain: &Chain, len: u32) {
         let disabled = self.core.disabled();
@@ -275,6 +298,8 @@ pub(crate) enum Device {
     Input(Input),
     #[cfg(feature = "alloc")]
     Gpu(gpu::Gpu),
+    #[cfg(feature = "alloc")]
+    Block(block::Block),
 }
 
 impl Device {
@@ -284,6 +309,8 @@ impl Device {
             Self::Input(_) => 18,
             #[cfg(feature = "alloc")]
             Self::Gpu(_) => 16,
+            #[cfg(feature = "alloc")]
+            Self::Block(_) => 2,
         }
     }
 
@@ -293,6 +320,8 @@ impl Device {
             Self::Input(_) => [input::QUEUE_SIZE, input::QUEUE_SIZE],
             #[cfg(feature = "alloc")]
             Self::Gpu(_) => [gpu::CONTROL_QUEUE_SIZE, gpu::CURSOR_QUEUE_SIZE],
+            #[cfg(feature = "alloc")]
+            Self::Block(_) => [block::QUEUE_SIZE, 0],
         }
     }
 
@@ -302,6 +331,8 @@ impl Device {
             Self::Input(_) => 0,
             #[cfg(feature = "alloc")]
             Self::Gpu(_) => gpu::FEATURES,
+            #[cfg(feature = "alloc")]
+            Self::Block(d) => d.features(),
         }
     }
 
@@ -311,6 +342,8 @@ impl Device {
             Self::Input(d) => d.config_len(),
             #[cfg(feature = "alloc")]
             Self::Gpu(_) => gpu::CONFIG_LEN,
+            #[cfg(feature = "alloc")]
+            Self::Block(_) => block::CONFIG_LEN,
         }
     }
 
@@ -319,6 +352,8 @@ impl Device {
             Self::Input(d) => d.get_config(config),
             #[cfg(feature = "alloc")]
             Self::Gpu(d) => d.get_config(config),
+            #[cfg(feature = "alloc")]
+            Self::Block(d) => d.get_config(config),
         }
     }
 
@@ -327,14 +362,21 @@ impl Device {
             Self::Input(d) => d.set_config(config, core),
             #[cfg(feature = "alloc")]
             Self::Gpu(d) => d.set_config(config),
+            #[cfg(feature = "alloc")]
+            Self::Block(d) => d.set_config(config),
         }
     }
 
-    fn set_status(&mut self, status: u8) {
+    /// The device's `set_status`, before the core takes `status`. Only the
+    /// block device reads the features the driver accepted.
+    #[cfg_attr(not(feature = "alloc"), allow(unused_variables))]
+    fn set_status(&mut self, status: u8, core: &Core) {
         match self {
             Self::Input(d) => d.set_status(status),
             #[cfg(feature = "alloc")]
             Self::Gpu(_) => {}
+            #[cfg(feature = "alloc")]
+            Self::Block(d) => d.set_status(status, core),
         }
     }
 
@@ -343,6 +385,8 @@ impl Device {
             Self::Input(d) => d.reset(),
             #[cfg(feature = "alloc")]
             Self::Gpu(d) => d.reset(),
+            #[cfg(feature = "alloc")]
+            Self::Block(d) => d.reset(),
         }
     }
 
@@ -352,6 +396,8 @@ impl Device {
             Self::Input(d) => d.handle_output(vdev, q),
             #[cfg(feature = "alloc")]
             Self::Gpu(d) => d.handle_output(vdev, q),
+            #[cfg(feature = "alloc")]
+            Self::Block(d) => d.handle_output(vdev, q),
         }
     }
 
@@ -360,6 +406,8 @@ impl Device {
             Self::Input(d) => d.save(w),
             #[cfg(feature = "alloc")]
             Self::Gpu(d) => d.save(w),
+            #[cfg(feature = "alloc")]
+            Self::Block(d) => d.save(w),
         }
     }
 
@@ -368,6 +416,8 @@ impl Device {
             Self::Input(d) => d.restore(r),
             #[cfg(feature = "alloc")]
             Self::Gpu(d) => d.restore(r),
+            #[cfg(feature = "alloc")]
+            Self::Block(d) => d.restore(r),
         }
     }
 }
@@ -432,7 +482,7 @@ impl Transport {
         match &self.device {
             Device::Input(i) => Some(i.kind()),
             #[cfg(feature = "alloc")]
-            Device::Gpu(_) => None,
+            Device::Gpu(_) | Device::Block(_) => None,
         }
     }
 
@@ -462,7 +512,7 @@ impl Transport {
     /// QEMU `virtio_reset`, as a driver's write of 0 to `Status` or a
     /// system reset runs it.
     fn reset_device(&mut self) {
-        self.device.set_status(0);
+        self.device.set_status(0, &self.core);
         self.device.reset();
         self.core.broken = None;
         self.core.guest_features = 0;
@@ -670,7 +720,7 @@ impl Transport {
         if status & STATUS_FEATURES_OK != 0 {
             self.set_features(ram, (u64::from(self.guest_features[1]) << 32) | u64::from(self.guest_features[0]));
         }
-        self.device.set_status(status);
+        self.device.set_status(status, &self.core);
         self.core.status = status;
         if self.core.status == 0 {
             self.soft_reset();

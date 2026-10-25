@@ -515,6 +515,48 @@ needs `alloc`.
 
 ---
 
+## 9. A disk
+
+`virtio_disk` plugs in QEMU's `virtio-blk-device` over a raw image, as
+`-drive file=disk.img,format=raw,if=none,id=hd0 -device
+virtio-blk-device,drive=hd0` does; it takes the next transport down after
+the display and input devices, and Linux sees it as `/dev/vda`. The image is
+host memory (`Disk::memory`) or a host file read and written in place
+(`Disk::file`, with `std`), and the machine keeps it.
+
+```rust
+use rusty_box_aarch64::{Disk, MachineBuilder, VirtConfig};
+
+let mut machine = MachineBuilder::new(VirtConfig::default())
+    .bare()
+    .virtio_disk(Disk::memory(vec![0; 1 << 20]))
+    .build()?;
+
+let disk = machine.disk().expect("built with a disk");
+assert_eq!(disk.sectors(), 2048);
+// What the guest wrote, for a memory disk.
+assert_eq!(disk.memory_bytes().map(<[u8]>::len), Some(1 << 20));
+// A file disk: make what the guest wrote durable before the host lets go of
+// it, and hear of any host error a guest request met.
+let disk = machine.disk_mut().expect("built with a disk");
+assert!(disk.take_io_error().is_none());
+disk.flush()?;
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+The device is the one QEMU makes for a drive given every default: one queue
+of 256 entries, a write-back cache the driver may turn off, discard requests
+ignored, write-zeroes honoured, and no serial number. **Limits.** A request
+completes before the driver's notification returns, where QEMU's block layer
+completes it later; the guest sees the same results, sooner. A host error is
+an I/O error to the guest, which is QEMU's default except for a write that
+finds the host's disk full, where QEMU stops the machine until the user
+resumes it. A snapshot holds the disk's size but not its contents: it
+restores onto the disk as it is, like a QEMU migration over shared storage.
+A disk needs `alloc`.
+
+---
+
 ## Code for any machine
 
 `Machine` (with `RunOutcome` and `SerialPort`) is the part every interpreted
@@ -558,6 +600,7 @@ An AArch64 machine's runs always end with an outcome, so its `Error` is
 | Keyboard | PS/2 scancodes, `KeyboardInput` | xterm bytes on the UART, or the virtio keyboard; `KeyboardInput` |
 | Screen | VGA text and graphics, into a `DisplaySink` | the serial console, or virtio-gpu into a `DisplaySink` |
 | Mouse | PS/2 | the virtio tablet, `PointerInput` |
+| Disk | ATA and ATAPI on the IDE channels | virtio-blk over a `Disk` |
 | Power | ACPI power button, reset | `gpio-key` power button, PSCI, reset |
 | Registers | `X86Reg`, MSRs by index | `Reg`, `VReg`, `SysReg` by encoding |
 | Observer | `Instrumentation` | `Instrumentation` (its own hooks) |

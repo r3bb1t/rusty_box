@@ -110,7 +110,13 @@ fn boot() -> ExitCode {
         debug_stops: args.run.debug_stops(),
         ..VirtConfig::DEFAULT
     };
-    let mut builder = common::plug_devices(MachineBuilder::new(config).ram(ram).firmware(&code), &args.run);
+    let mut builder = match common::plug_devices(MachineBuilder::new(config).ram(ram).firmware(&code), &args.run) {
+        Ok(builder) => builder,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::from(2);
+        }
+    };
     if let Some(vars) = &vars {
         builder = builder.variables(vars);
     }
@@ -132,6 +138,10 @@ fn boot() -> ExitCode {
         if let Err(e) = std::fs::write(path, machine.variable_store()) {
             eprintln!("{path}: {e}");
         }
+    }
+    if let Err(e) = common::close_disk(&mut machine) {
+        eprintln!("{e}");
+        return ExitCode::from(1);
     }
     common::exit_code(&args.run, &outcome)
 }

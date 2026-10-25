@@ -24,7 +24,7 @@ fn send<F: FnOnce(&mut Input, &mut Vdev<'_, '_>) -> bool>(d: &mut Driver, f: F) 
     d.host(|device, vdev| match device {
         Device::Input(input) => f(input, vdev),
         #[cfg(feature = "alloc")]
-        Device::Gpu(_) => panic!("not an input device"),
+        Device::Gpu(_) | Device::Block(_) => panic!("not an input device"),
     })
 }
 

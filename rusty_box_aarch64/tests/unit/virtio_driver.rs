@@ -193,9 +193,15 @@ impl Driver {
     /// The whole of Linux's setup: negotiate `features`, set up both
     /// queues, `DRIVER_OK`.
     pub fn start(&mut self, features: u64) {
+        self.start_queues(features, 2);
+    }
+
+    /// Linux's setup of a device with `queues` queues.
+    pub fn start_queues(&mut self, features: u64, queues: usize) {
         self.negotiate(features);
-        self.setup_queue(0);
-        self.setup_queue(1);
+        for q in 0..queues {
+            self.setup_queue(q);
+        }
         self.write(STATUS, ACKNOWLEDGE | DRIVER | FEATURES_OK | DRIVER_OK);
     }
 
@@ -327,6 +333,18 @@ impl Driver {
     pub fn avail_event(&self, q: usize) -> u16 {
         let dq = self.queues[q];
         self.get_u16(dq.used + 4 + 8 * u64::from(dq.size))
+    }
+
+    /// The used ring's flags, which the device writes.
+    #[cfg(feature = "alloc")]
+    pub fn used_flags(&self, q: usize) -> u16 {
+        self.get_u16(self.queues[q].used)
+    }
+
+    /// The available index the driver has published.
+    #[cfg(feature = "alloc")]
+    pub fn avail_idx(&self, q: usize) -> u16 {
+        self.queues[q].avail_idx
     }
 
     /// Queue `q`'s available-ring address, for a test that writes it.

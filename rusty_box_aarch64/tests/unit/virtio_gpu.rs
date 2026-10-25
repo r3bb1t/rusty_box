@@ -152,7 +152,7 @@ impl DisplaySink for Screen {
 fn refresh(d: &mut Driver, screen: &mut Screen) -> Refreshed {
     d.host(|device, _| match device {
         Device::Gpu(g) => g.refresh(screen),
-        Device::Input(_) => panic!("not a GPU"),
+        Device::Input(_) | Device::Block(_) => panic!("not a GPU"),
     })
 }
 
@@ -321,7 +321,7 @@ fn a_frame_reaches_the_host() {
     assert_eq!(refresh(&mut d, &mut screen), Refreshed::Unchanged);
     assert_eq!(d.host(|device, _| match device {
         Device::Gpu(g) => g.resolution(),
-        Device::Input(_) => None,
+        Device::Input(_) | Device::Block(_) => None,
     }), Some(Resolution::new(32, 16)));
 }
 
@@ -385,7 +385,7 @@ fn the_scanout_and_flush_are_checked() {
     assert_eq!(status(&mut d, &cmd(SET_SCANOUT, &[0, 0, 0, 0, 0, 0])), OK_NODATA);
     assert_eq!(d.host(|device, _| match device {
         Device::Gpu(g) => g.resolution(),
-        Device::Input(_) => None,
+        Device::Input(_) | Device::Block(_) => None,
     }), None);
 }
 
@@ -394,7 +394,7 @@ fn a_new_display_size_is_a_display_event() {
     let mut d = gpu(1024, 768);
     let changed = d.host(|device, _| match device {
         Device::Gpu(g) => g.ui_info(Resolution::new(800, 600)),
-        Device::Input(_) => false,
+        Device::Input(_) | Device::Block(_) => false,
     });
     assert!(changed);
     d.transport.notify_config();
@@ -407,7 +407,7 @@ fn a_new_display_size_is_a_display_event() {
     assert_eq!(d.read(CONFIG), 0, "events_clear cleared it");
     let unchanged = d.host(|device, _| match device {
         Device::Gpu(g) => g.ui_info(Resolution::new(800, 600)),
-        Device::Input(_) => true,
+        Device::Input(_) | Device::Block(_) => true,
     });
     assert!(!unchanged);
 }
@@ -417,7 +417,7 @@ fn a_display_of_no_pixels_turns_the_output_off() {
     let mut d = gpu(1024, 768);
     let off = d.host(|device, _| match device {
         Device::Gpu(g) => g.ui_info(Resolution::new(0, 0)),
-        Device::Input(_) => false,
+        Device::Input(_) | Device::Block(_) => false,
     });
     assert!(off, "a display event");
     let resp = command(&mut d, &cmd(GET_DISPLAY_INFO, &[]), 408);
@@ -427,7 +427,7 @@ fn a_display_of_no_pixels_turns_the_output_off() {
     assert_eq!(resp[32..].to_vec(), edid::generate(1280, 800).to_vec());
     let on = d.host(|device, _| match device {
         Device::Gpu(g) => g.ui_info(Resolution::new(1024, 768)),
-        Device::Input(_) => false,
+        Device::Input(_) | Device::Block(_) => false,
     });
     assert!(on, "the same size again is a change once the output was off");
     let resp = command(&mut d, &cmd(GET_DISPLAY_INFO, &[]), 408);
@@ -440,7 +440,7 @@ fn a_reset_drops_resources_and_keeps_the_display() {
     show_picture(&mut d, 32, 16);
     d.host(|device, _| match device {
         Device::Gpu(g) => g.ui_info(Resolution::new(800, 600)),
-        Device::Input(_) => false,
+        Device::Input(_) | Device::Block(_) => false,
     });
     d.start(LINUX_FEATURES);
     assert_eq!(d.read(CONFIG), 1, "the pending display event stays");

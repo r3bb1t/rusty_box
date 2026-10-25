@@ -10,7 +10,7 @@ use std::time::Instant;
 
 use rusty_box_aarch64::cpu::DebugStops;
 use rusty_box_aarch64::{
-    CursorPos, Dimensions, DisplaySink, GuestStorage, KeyboardInput, MachineBuilder, Redraw, Reg, Refreshed,
+    CursorPos, Dimensions, Disk, DisplaySink, GuestStorage, KeyboardInput, MachineBuilder, Redraw, Reg, Refreshed,
     Resolution, Rgb, RunBudget, StopReason, SysReg, TilePos, Typed, VgaTextModeInfo, VirtMachine,
 };
 use rusty_box_core::ClockHz;
@@ -86,6 +86,8 @@ pub struct RunArgs {
     pub display: Option<Resolution>,
     pub virtio_keyboard: bool,
     pub virtio_tablet: bool,
+    /// A raw image file behind a virtio-blk, read and written in place.
+    pub disk: Option<String>,
     /// Where to write the display's last frame, as a binary PPM.
     pub screenshot: Option<String>,
 }
@@ -100,7 +102,8 @@ pub struct Outcome {
 pub const RUN_USAGE: &str = "[--ips N] [--max-ticks N] [--slice-ticks N]\n\
      \x20      [--until <console text>]... [--type <keys>]... [--type-serial <keys>]...\n\
      \x20      [--stop-on-undefined] [--stop-on-bus-fault]\n\
-     \x20      [--display WIDTHxHEIGHT] [--virtio-keyboard] [--virtio-tablet] [--screenshot <file.ppm>]";
+     \x20      [--display WIDTHxHEIGHT] [--virtio-keyboard] [--virtio-tablet] [--disk <raw image>]\n\
+     \x20      [--screenshot <file.ppm>]";
 
 /// The display's frames, kept as the host would show them.
 #[derive(Default)]
@@ -165,7 +168,11 @@ impl Screen {
 }
 
 /// Plug the devices `args` asks for into `builder`.
-pub fn plug_devices<'i, B, I>(mut builder: MachineBuilder<'i, B, I>, args: &RunArgs) -> MachineBuilder<'i, B, I> {
+///
+/// # Errors
+///
+/// The disk image cannot be opened for reading and writing.
+pub fn plug_devices<'i, B, I>(mut builder: MachineBuilder<'i, B, I>, args: &RunArgs) -> Result<MachineBuilder<'i, B, I>, String> {
     if let Some(size) = args.display {
         builder = builder.virtio_display(size);
     }
@@ -175,7 +182,27 @@ pub fn plug_devices<'i, B, I>(mut builder: MachineBuilder<'i, B, I>, args: &RunA
     if args.virtio_tablet {
         builder = builder.virtio_tablet();
     }
-    builder
+    if let Some(path) = &args.disk {
+        let file = std::fs::OpenOptions::new().read(true).write(true).open(path).map_err(|e| format!("{path}: {e}"))?;
+        builder = builder.virtio_disk(Disk::file(file).map_err(|e| format!("{path}: {e}"))?);
+    }
+    Ok(builder)
+}
+
+/// Make what the guest wrote to the disk durable, as QEMU does when it
+/// closes a drive, and say if a guest request met a host error.
+///
+/// # Errors
+///
+/// The host's error syncing the disk.
+pub fn close_disk<S: GuestStorage>(machine: &mut VirtMachine<S>) -> Result<(), String> {
+    let Some(disk) = machine.disk_mut() else {
+        return Ok(());
+    };
+    if let Some(e) = disk.take_io_error() {
+        eprintln!("the guest was told of a disk I/O error: {e}");
+    }
+    disk.flush().map_err(|e| format!("flushing the disk: {e}"))
 }
 
 /// `\r` and `\n` (Enter), `\e` (Escape), `\t` (Tab) and `\\`; everything
@@ -211,6 +238,7 @@ impl RunArgs {
             display: None,
             virtio_keyboard: false,
             virtio_tablet: false,
+            disk: None,
             screenshot: None,
         }
     }
@@ -245,6 +273,7 @@ impl RunArgs {
             }
             "--virtio-keyboard" => self.virtio_keyboard = true,
             "--virtio-tablet" => self.virtio_tablet = true,
+            "--disk" => self.disk = Some(value(flag)?),
             "--screenshot" => self.screenshot = Some(value(flag)?),
             _ => return Ok(Parsed::NotMine),
         }

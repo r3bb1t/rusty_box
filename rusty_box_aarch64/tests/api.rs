@@ -652,3 +652,44 @@ fn a_machine_can_move_to_another_thread() {
     #[cfg(feature = "alloc")]
     moves::<VirtMachine<rusty_box_aarch64::OwnedStorage>>();
 }
+
+/// The guest finds the disk where QEMU's `virt` puts the device given last:
+/// below the ones before it, so on its own at the top transport and under
+/// the keyboard with one. The machine keeps the disk, and a snapshot names
+/// its size.
+#[cfg(feature = "alloc")]
+#[test]
+fn a_disk_is_a_virtio_blk_the_guest_finds_and_the_machine_keeps() {
+    use rusty_box_aarch64::board::VIRTIO_MMIO_BASE;
+    use rusty_box_aarch64::{Disk, OwnedStorage};
+
+    /// The virtio device ID the guest reads at transport `slot`: `ldr w0,
+    /// [x1]; b .` with x1 at its `DeviceID` register.
+    fn device_id(m: &mut VirtMachine<OwnedStorage>, slot: u64) -> u64 {
+        m.mem_write(RAM_BASE, &0xB940_0020u32.to_le_bytes()).expect("code is in RAM");
+        m.mem_write(RAM_BASE + 4, &SPIN.to_le_bytes()).expect("code is in RAM");
+        m.reg_write(Reg::Pc, RAM_BASE);
+        m.reg_write(Reg::X1, VIRTIO_MMIO_BASE + 0x200 * slot + 8);
+        let out = m.step(RunBudget::Instructions(2));
+        assert_eq!(out.progress, Progress::Instructions(2), "the load and the branch ran");
+        m.reg_read(Reg::X0)
+    }
+    let build = |sectors: usize, keyboard: bool| {
+        let builder = MachineBuilder::new(VirtConfig::DEFAULT).ram(ram_size()).bare();
+        let builder = if keyboard { builder.virtio_keyboard() } else { builder };
+        builder.virtio_disk(Disk::memory(vec![0x5A; sectors * 512])).build().expect("a machine with a disk builds")
+    };
+
+    let mut m = build(8, false);
+    assert_eq!(device_id(&mut m, 31), 2, "virtio-blk at the top transport");
+    let mut with_keyboard = build(8, true);
+    assert_eq!(device_id(&mut with_keyboard, 31), 18, "the keyboard first");
+    assert_eq!(device_id(&mut with_keyboard, 30), 2, "then the disk");
+
+    assert_eq!(m.disk().map(Disk::sectors), Some(8));
+    assert_eq!(m.disk().and_then(Disk::memory_bytes), Some(&[0x5A; 8 * 512][..]));
+    let mut image = Vec::new();
+    m.save_snapshot(&mut image).expect("a snapshot saves");
+    assert!(build(16, false).restore_snapshot(&mut image.as_slice()).is_err(), "a disk of another size");
+    assert_eq!(build(8, false).restore_snapshot(&mut image.as_slice()), Ok(()));
+}

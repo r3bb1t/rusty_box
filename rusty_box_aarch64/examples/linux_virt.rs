@@ -119,8 +119,14 @@ fn boot() -> ExitCode {
         debug_stops: args.run.debug_stops(),
         ..VirtConfig::DEFAULT
     };
-    let mut builder =
-        common::plug_devices(MachineBuilder::new(config).ram(ram).linux(image).command_line(&args.append), &args.run);
+    let plugged = common::plug_devices(MachineBuilder::new(config).ram(ram).linux(image).command_line(&args.append), &args.run);
+    let mut builder = match plugged {
+        Ok(builder) => builder,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::from(2);
+        }
+    };
     if let Some(initrd) = &initrd {
         builder = builder.initrd(initrd);
     }
@@ -144,5 +150,9 @@ fn boot() -> ExitCode {
     let started = Instant::now();
     let outcome = common::run(&mut machine, &args.run);
     common::report(&machine, &args.run, &outcome, started);
+    if let Err(e) = common::close_disk(&mut machine) {
+        eprintln!("{e}");
+        return ExitCode::from(1);
+    }
     common::exit_code(&args.run, &outcome)
 }

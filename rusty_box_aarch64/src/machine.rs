@@ -27,7 +27,9 @@ use rusty_box_core::machine::{Machine, RunOutcome, SerialPort};
 use rusty_box_core::snap::{SnapRead, SnapResult, SnapWrite};
 use rusty_box_core::{ClockHz, Progress, RunBudget, SnapError, VmInstant};
 
-use crate::board::{Plugged, VirtBoard, VirtioDevices, FLASH0_BASE, FLASH_BANK_SIZE, RAM_BASE, RAM_LIMIT};
+use crate::board::{Plugged, Plugs, VirtBoard, VirtioDevices, FLASH0_BASE, FLASH_BANK_SIZE, RAM_BASE, RAM_LIMIT};
+#[cfg(feature = "alloc")]
+use crate::disk::Disk;
 use crate::devices::virtio::input::InputKind;
 use rusty_box_core::input::pointer::{PointerButton, PointerInput, PointerPos, WheelSteps};
 #[cfg(feature = "alloc")]
@@ -241,7 +243,7 @@ pub struct MachineBuilder<'i, B = NoBoot, I = NoInstrumentation> {
     device_tree: &'i [u8],
     boot: B,
     observer: I,
-    devices: VirtioDevices,
+    plugs: Plugs,
 }
 
 impl<'i> MachineBuilder<'i, NoBoot, NoInstrumentation> {
@@ -254,7 +256,7 @@ impl<'i> MachineBuilder<'i, NoBoot, NoInstrumentation> {
             device_tree: boot::QEMU_VIRT_DEVICE_TREE,
             boot: NoBoot,
             observer: NoInstrumentation,
-            devices: VirtioDevices::NONE,
+            plugs: Plugs::NONE,
         }
     }
 }
@@ -283,7 +285,7 @@ impl<'i, B, I> MachineBuilder<'i, B, I> {
             device_tree: self.device_tree,
             boot: self.boot,
             observer,
-            devices: self.devices,
+            plugs: self.plugs,
         }
     }
 
@@ -294,7 +296,7 @@ impl<'i, B, I> MachineBuilder<'i, B, I> {
     /// are host memory the guest sizes, hence `alloc`.
     #[cfg(feature = "alloc")]
     pub fn virtio_display(mut self, preferred: Resolution) -> Self {
-        self.devices.display = Some(preferred);
+        self.plugs.devices.display = Some(preferred);
         self
     }
 
@@ -302,14 +304,25 @@ impl<'i, B, I> MachineBuilder<'i, B, I> {
     /// [`VirtMachine::keyboard`] then types into it rather than into the
     /// serial console.
     pub fn virtio_keyboard(mut self) -> Self {
-        self.devices.keyboard = Plugged::Yes;
+        self.plugs.devices.keyboard = Plugged::Yes;
         self
     }
 
     /// Plug in a virtio tablet (QEMU `-device virtio-tablet-device`), the
     /// absolute pointer [`VirtMachine::pointer`] drives.
     pub fn virtio_tablet(mut self) -> Self {
-        self.devices.tablet = Plugged::Yes;
+        self.plugs.devices.tablet = Plugged::Yes;
+        self
+    }
+
+    /// Plug in a virtio-blk over `disk` (QEMU `-drive
+    /// file=…,format=raw,if=none,id=hd0 -device virtio-blk-device,drive=hd0`),
+    /// which Linux sees as `/dev/vda`. The machine keeps the disk:
+    /// [`VirtMachine::disk`] reaches it again. A disk is host memory or a
+    /// host file, hence `alloc`.
+    #[cfg(feature = "alloc")]
+    pub fn virtio_disk(mut self, disk: Disk) -> Self {
+        self.plugs.disk = Some(disk);
         self
     }
 }
@@ -342,7 +355,7 @@ impl<'i, I> MachineBuilder<'i, NoBoot, I> {
             device_tree: self.device_tree,
             boot,
             observer: self.observer,
-            devices: self.devices,
+            plugs: self.plugs,
         }
     }
 }
@@ -429,7 +442,7 @@ macro_rules! build_methods {
                 let choice = ($choice)(self.boot);
                 let plan = plan(self.device_tree, choice, self.ram)?;
                 let storage = owned_storage(self.ram, choice)?;
-                Ok(assemble(self.config, plan, storage, self.observer, self.devices))
+                Ok(assemble(self.config, plan, storage, self.observer, self.plugs))
             }
         }
 
@@ -448,7 +461,7 @@ macro_rules! build_methods {
                 let choice = ($choice)(self.boot);
                 let plan = plan(self.device_tree, choice, self.ram)?;
                 let storage = lent_storage(self.ram, choice, loan)?;
-                Ok(assemble(self.config, plan, storage, self.observer, self.devices))
+                Ok(assemble(self.config, plan, storage, self.observer, self.plugs))
             }
         }
     };
@@ -631,7 +644,7 @@ fn plan(source_tree: &[u8], choice: BootChoice<'_>, ram: RamSize) -> Result<Plan
 }
 
 /// The machine `plan` describes, in `storage`, started.
-fn assemble<S: GuestStorage, I: Instrumentation>(config: VirtConfig, plan: Plan, storage: S, observer: I, devices: VirtioDevices) -> VirtMachine<S, I> {
+fn assemble<S: GuestStorage, I: Instrumentation>(config: VirtConfig, plan: Plan, storage: S, observer: I, plugs: Plugs) -> VirtMachine<S, I> {
     let Plan { boot, device_tree } = plan;
     let mut cpu = Cpu::new(CpuConfig {
         ips: config.ips,
@@ -639,9 +652,10 @@ fn assemble<S: GuestStorage, I: Instrumentation>(config: VirtConfig, plan: Plan,
         reset_pc: FLASH0_BASE,
     });
     cpu.set_debug_stops(config.debug_stops);
+    let devices = plugs.devices;
     let mut machine = VirtMachine {
         cpu,
-        board: VirtBoard::new(storage, config.rtc_epoch_seconds, devices),
+        board: VirtBoard::new(storage, config.rtc_epoch_seconds, plugs),
         observer,
         config,
         boot,
@@ -1410,6 +1424,28 @@ impl<S: GuestStorage, I: Instrumentation> VirtMachine<S, I> {
         self.device_tree.as_slice()
     }
 
+    /// The disk behind the virtio-blk, if the machine was built with one
+    /// ([`MachineBuilder::virtio_disk`]).
+    #[cfg(feature = "alloc")]
+    pub fn disk(&self) -> Option<&Disk> {
+        self.board.block().map(|block| block.disk())
+    }
+
+    /// The disk, for a host that flushes it or takes its I/O errors.
+    #[cfg(feature = "alloc")]
+    pub fn disk_mut(&mut self) -> Option<&mut Disk> {
+        self.board.block_mut().map(|block| block.disk_mut())
+    }
+
+    /// How many sectors the disk has, if there is one.
+    fn disk_sectors(&self) -> Option<u64> {
+        #[cfg(feature = "alloc")]
+        if let Some(disk) = self.disk() {
+            return Some(disk.sectors());
+        }
+        None
+    }
+
     // ----- snapshots -----
 
     /// What a snapshot must match to be restored here.
@@ -1432,6 +1468,7 @@ impl<S: GuestStorage, I: Instrumentation> VirtMachine<S, I> {
             kernel_offset,
             initrd_offset,
             devices: self.devices.mask(),
+            disk: self.disk_sectors(),
         }
     }
 
@@ -1442,7 +1479,9 @@ impl<S: GuestStorage, I: Instrumentation> VirtMachine<S, I> {
     /// terminal keyboard's held modifiers, exit addresses, the stop flag and
     /// the observer stay with the machine they belong to. Firmware and
     /// kernel images are recorded by hash, not copied: a machine restores
-    /// only an image taken from one built the same way.
+    /// only an image taken from one built the same way. A disk's contents
+    /// are not part of it either, only its size: like a QEMU migration over
+    /// shared storage, a snapshot restores onto the disk as it is.
     ///
     /// # Errors
     ///
@@ -1555,7 +1594,7 @@ impl<S: GuestStorage, I: Instrumentation> VirtMachine<S, I> {
 }
 
 const SNAPSHOT_MAGIC: [u8; 8] = *b"RBA64SNP";
-const SNAPSHOT_VERSION: u32 = 2;
+const SNAPSHOT_VERSION: u32 = 3;
 
 /// Everything about how a machine was built that a snapshot depends on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1570,8 +1609,11 @@ struct Shape {
     boot: u8,
     kernel_offset: u64,
     initrd_offset: u64,
-    /// Which virtio devices are plugged in ([`VirtioDevices::mask`]).
+    /// Which display and input devices are plugged in
+    /// ([`VirtioDevices::mask`]).
     devices: u8,
+    /// The disk's size in sectors, if there is a disk.
+    disk: Option<u64>,
 }
 
 impl Shape {
@@ -1590,7 +1632,9 @@ impl Shape {
             w.write_u64(v)?;
         }
         w.write_u8(self.boot)?;
-        w.write_u8(self.devices)
+        w.write_u8(self.devices)?;
+        w.write_bool(self.disk.is_some())?;
+        w.write_u64(self.disk.unwrap_or(0))
     }
 
     fn restore<R: SnapRead>(r: &mut R) -> SnapResult<Self> {
@@ -1611,6 +1655,11 @@ impl Shape {
             kernel_offset,
             initrd_offset,
             devices: r.read_u8()?,
+            disk: {
+                let present = r.read_bool()?;
+                let sectors = r.read_u64()?;
+                present.then_some(sectors)
+            },
         })
     }
 }

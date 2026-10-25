@@ -28,10 +28,14 @@ use crate::devices::gicv2::GicV2;
 use crate::devices::pl011::Pl011;
 use crate::devices::pl031::Pl031;
 use crate::devices::pl061::{Pl061, POWER_BUTTON_LINE};
+#[cfg(feature = "alloc")]
+use crate::devices::virtio::block::Block;
 use crate::devices::virtio::input::{Input, InputKind};
 use crate::devices::virtio::queue::GuestRam;
 #[cfg(feature = "alloc")]
 use crate::devices::virtio::gpu::Gpu;
+#[cfg(feature = "alloc")]
+use crate::disk::Disk;
 use crate::devices::virtio::{Device, Transport, Vdev, MAX_DEVICES};
 use crate::devices::virtio_mmio::{self, Layout};
 use crate::storage::GuestStorage;
@@ -85,15 +89,31 @@ pub const SERIAL_INPUT_CAPACITY: usize = 4096;
 /// How long QEMU's `gpio-key` holds the power button down.
 const POWER_BUTTON_HOLD_MICROS: u64 = 100_000;
 
-/// The virtio devices plugged into the board, in the order QEMU would be
-/// given them as `-device` options: the display, the keyboard, the tablet.
-/// Each takes the highest transport the ones before it left free.
+/// The display and input devices plugged into the board, in the order QEMU
+/// would be given them as `-device` options: the display, the keyboard, the
+/// tablet. Each takes the highest transport the ones before it left free.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct VirtioDevices {
     /// A virtio-gpu, asking the guest for this size.
     pub(crate) display: Option<Resolution>,
     pub(crate) keyboard: Plugged,
     pub(crate) tablet: Plugged,
+}
+
+/// What a builder plugs into the board: the display and input devices, and
+/// a disk, which a virtio-blk given after them serves.
+pub(crate) struct Plugs {
+    pub(crate) devices: VirtioDevices,
+    #[cfg(feature = "alloc")]
+    pub(crate) disk: Option<Disk>,
+}
+
+impl Plugs {
+    pub(crate) const NONE: Self = Self {
+        devices: VirtioDevices::NONE,
+        #[cfg(feature = "alloc")]
+        disk: None,
+    };
 }
 
 /// Whether a device is on the board.
@@ -143,7 +163,8 @@ pub struct VirtBoard<S> {
 }
 
 impl<S: GuestStorage> VirtBoard<S> {
-    pub(crate) fn new(storage: S, rtc_epoch_seconds: u64, devices: VirtioDevices) -> Self {
+    pub(crate) fn new(storage: S, rtc_epoch_seconds: u64, plugs: Plugs) -> Self {
+        let devices = plugs.devices;
         let mut virtio: [Option<Transport>; MAX_DEVICES] = [None, None, None, None];
         let mut next_slot = (virtio_mmio::TRANSPORT_COUNT - 1) as u8;
         let mut plug = |device: Device, virtio: &mut [Option<Transport>; MAX_DEVICES]| {
@@ -161,6 +182,10 @@ impl<S: GuestStorage> VirtBoard<S> {
         }
         if devices.tablet == Plugged::Yes {
             plug(Device::Input(Input::new(InputKind::Tablet)), &mut virtio);
+        }
+        #[cfg(feature = "alloc")]
+        if let Some(disk) = plugs.disk {
+            plug(Device::Block(Block::new(disk)), &mut virtio);
         }
         let mmio_layout = if virtio.iter().any(Option::is_some) {
             Layout::Modern
@@ -204,7 +229,7 @@ impl<S: GuestStorage> VirtBoard<S> {
         let delivered = transport.with_device(&mut ram, |device, vdev| match device {
             Device::Input(input) => send(input, vdev),
             #[cfg(feature = "alloc")]
-            Device::Gpu(_) => false,
+            Device::Gpu(_) | Device::Block(_) => false,
         });
         self.sync_device_lines();
         delivered
@@ -215,7 +240,24 @@ impl<S: GuestStorage> VirtBoard<S> {
     pub(crate) fn gpu(&mut self) -> Option<&mut Gpu> {
         self.virtio.iter_mut().flatten().find_map(|t| match &mut t.device {
             Device::Gpu(gpu) => Some(gpu),
-            Device::Input(_) => None,
+            Device::Input(_) | Device::Block(_) => None,
+        })
+    }
+
+    /// The virtio-blk, if one is plugged in.
+    #[cfg(feature = "alloc")]
+    pub(crate) fn block(&self) -> Option<&Block> {
+        self.virtio.iter().flatten().find_map(|t| match &t.device {
+            Device::Block(block) => Some(block),
+            Device::Input(_) | Device::Gpu(_) => None,
+        })
+    }
+
+    #[cfg(feature = "alloc")]
+    pub(crate) fn block_mut(&mut self) -> Option<&mut Block> {
+        self.virtio.iter_mut().flatten().find_map(|t| match &mut t.device {
+            Device::Block(block) => Some(block),
+            Device::Input(_) | Device::Gpu(_) => None,
         })
     }
 
@@ -227,7 +269,7 @@ impl<S: GuestStorage> VirtBoard<S> {
         for transport in self.virtio.iter_mut().flatten() {
             let changed = match &mut transport.device {
                 Device::Gpu(gpu) => gpu.ui_info(size),
-                Device::Input(_) => false,
+                Device::Input(_) | Device::Block(_) => false,
             };
             if changed {
                 transport.notify_config();
