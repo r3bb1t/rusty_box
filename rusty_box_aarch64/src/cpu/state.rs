@@ -18,7 +18,7 @@ pub(crate) const FPSR_MASK: u64 =
 
 /// How many system register values a snapshot carries, in
 /// [`SysRegs::to_array`] order.
-const SYSREG_COUNT: usize = 42;
+const SYSREG_COUNT: usize = 44;
 
 impl SysRegs {
     fn to_array(&self) -> [u64; SYSREG_COUNT] {
@@ -43,6 +43,8 @@ impl SysRegs {
             self.tpidr_el0,
             self.tpidrro_el0,
             self.tpidr_el1,
+            self.tpidr2_el0,
+            self.smcr_el1,
             self.csselr_el1,
             self.cntkctl_el1,
             self.cntfrq_el0,
@@ -69,7 +71,7 @@ impl SysRegs {
     }
 
     fn from_array(a: [u64; SYSREG_COUNT]) -> Self {
-        let [sctlr_el1, actlr_el1, cpacr_el1, ttbr0_el1, ttbr1_el1, tcr_el1, spsr_el1, elr_el1, esr_el1, far_el1, afsr0_el1, afsr1_el1, par_el1, mair_el1, amair_el1, vbar_el1, contextidr_el1, tpidr_el0, tpidrro_el0, tpidr_el1, csselr_el1, cntkctl_el1, cntfrq_el0, cntp_ctl_el0, cntp_cval_el0, cntv_ctl_el0, cntv_cval_el0, mdscr_el1, mdccint_el1, oslsr_el1, osdlr_el1, oseccr_el1, dbgprcr_el1, dbgclaim, bvr0, bvr1, bcr0, bcr1, wvr0, wvr1, wcr0, wcr1] = a;
+        let [sctlr_el1, actlr_el1, cpacr_el1, ttbr0_el1, ttbr1_el1, tcr_el1, spsr_el1, elr_el1, esr_el1, far_el1, afsr0_el1, afsr1_el1, par_el1, mair_el1, amair_el1, vbar_el1, contextidr_el1, tpidr_el0, tpidrro_el0, tpidr_el1, tpidr2_el0, smcr_el1, csselr_el1, cntkctl_el1, cntfrq_el0, cntp_ctl_el0, cntp_cval_el0, cntv_ctl_el0, cntv_cval_el0, mdscr_el1, mdccint_el1, oslsr_el1, osdlr_el1, oseccr_el1, dbgprcr_el1, dbgclaim, bvr0, bvr1, bcr0, bcr1, wvr0, wvr1, wcr0, wcr1] = a;
         Self {
             sctlr_el1,
             actlr_el1,
@@ -91,6 +93,8 @@ impl SysRegs {
             tpidr_el0,
             tpidrro_el0,
             tpidr_el1,
+            tpidr2_el0,
+            smcr_el1,
             csselr_el1,
             cntkctl_el1,
             cntfrq_el0,
@@ -126,11 +130,14 @@ impl Cpu {
     /// tick and instruction counts carry on, as QEMU's virtual clock does
     /// across a system reset.
     pub(crate) fn reset_keeping_time(&mut self, reset_pc: u64) {
-        let fresh = Cpu::new(CpuConfig {
-            ips: self.ips,
-            counter_hz: self.counter_hz,
-            reset_pc,
-        });
+        let fresh = Cpu::implementing(
+            CpuConfig {
+                ips: self.ips,
+                counter_hz: self.counter_hz,
+                reset_pc,
+            },
+            self.imp,
+        );
         let pc_history = core::mem::take(&mut self.pc_history);
         *self = Cpu {
             icount: self.icount,
@@ -179,7 +186,7 @@ impl Cpu {
     }
 
     pub(crate) fn set_v(&mut self, reg: VReg, value: u128) {
-        self.v[usize::from(reg.index())] = value;
+        self.write_v(usize::from(reg.index()), value);
     }
 
     /// Replace `PSTATE`. At EL0 the only stack pointer is `SP_EL0`, so
@@ -222,6 +229,8 @@ impl Cpu {
     /// entry either way. The decode cache is not saved — it is keyed by the
     /// instruction word and cannot change an outcome.
     pub(crate) fn save<W: SnapWrite>(&self, w: &mut W) -> SnapResult {
+        w.write_u64(self.imp.features.bits())?;
+        w.write_u32(self.imp.max_svl.bits())?;
         for x in self.x {
             w.write_u64(x)?;
         }
@@ -249,12 +258,19 @@ impl Cpu {
         for pc in self.pc_history.iter() {
             w.write_u64(pc)?;
         }
-        Ok(())
+        self.save_sme(w)
     }
 
     /// The inverse of [`Cpu::save`]. The interrupt inputs are not part of
     /// the image: the machine drives them from its interrupt controller.
+    /// An image of a processor implementing other features, or another
+    /// streaming vector length, is refused before anything changes.
     pub(crate) fn restore<R: SnapRead>(&mut self, r: &mut R) -> SnapResult {
+        let features = r.read_u64()?;
+        let max_svl = r.read_u32()?;
+        if features != self.imp.features.bits() || max_svl != self.imp.max_svl.bits() {
+            return Err(SnapError::Invalid("snapshot of a processor implementing other features"));
+        }
         let mut x = [0u64; 31];
         for reg in x.iter_mut() {
             *reg = r.read_u64()?;
@@ -275,6 +291,10 @@ impl Cpu {
         let mut sys = [0u64; SYSREG_COUNT];
         for value in sys.iter_mut() {
             *value = r.read_u64()?;
+        }
+        let sys = SysRegs::from_array(sys);
+        if !self.sme_registers_restorable(&sys) {
+            return Err(SnapError::Invalid("snapshot holds SME register bits this processor cannot set"));
         }
         let monitor = ExclusiveMonitor {
             armed: r.read_bool()?,
@@ -308,13 +328,13 @@ impl Cpu {
         self.v = v;
         self.fpcr = fpcr;
         self.fpsr = fpsr;
-        self.sys = SysRegs::from_array(sys);
+        self.sys = sys;
         self.monitor = monitor;
         self.activity = activity;
         self.icount = icount;
         self.retired = retired;
         self.timer_dirty = true;
-        Ok(())
+        self.restore_sme(r)
     }
 }
 

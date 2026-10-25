@@ -7,7 +7,7 @@
 //! pseudocode's `V[d] = result` at datasize 64 does.
 
 use super::dp::{ones, replicate};
-use super::exec::{bit, bits, sext, ExecResult, Fault, Flow};
+use super::exec::{bit, bits, sext, ExecResult, Flow};
 use super::Cpu;
 
 /// Element `index` of `esize` bits.
@@ -92,17 +92,6 @@ fn adv_simd_expand_imm(op: bool, cmode: u32, imm8: u64) -> u64 {
 }
 
 impl Cpu {
-    /// The FP enable check every Advanced SIMD handler performs before it
-    /// touches a register.
-    #[inline]
-    pub(super) fn simd_check(&self) -> Result<(), Fault> {
-        if self.fp_enabled() {
-            Ok(())
-        } else {
-            Err(self.fp_trap())
-        }
-    }
-
     /// MOVI/MVNI/ORR/BIC (vector, immediate) and FMOV (vector, immediate):
     /// `0 Q op 0111100000 abc cmode o2 1 defgh Rd`.
     pub(crate) fn exec_simd_imm(&mut self, pc: u64, insn: u32) -> ExecResult {
@@ -144,15 +133,13 @@ impl Cpu {
             }
         };
         let current = self.v[rd];
-        self.v[rd] = at_datasize(
-            match kind {
-                Kind::Movi => imm,
-                Kind::Mvni => !imm,
-                Kind::Orr => current | imm,
-                Kind::Bic => current & !imm,
-            },
-            q,
-        );
+        let result = match kind {
+            Kind::Movi => imm,
+            Kind::Mvni => !imm,
+            Kind::Orr => current | imm,
+            Kind::Bic => current & !imm,
+        };
+        self.write_v(rd, at_datasize(result, q));
         Ok(Flow::Next)
     }
 
@@ -192,17 +179,24 @@ impl Cpu {
             (true, _) if q => Kind::InsElement,
             _ => return self.undefined(pc, insn),
         };
-        self.simd_check()?;
+        // SMOV and UMOV of element 0 are legal in Streaming SVE mode (Arm
+        // ARM SMOV, UMOV: `if index == 0 then AArch64_CheckFPEnabled()`).
+        if matches!(kind, Kind::Smov | Kind::Umov) && index == 0 {
+            self.fp_check()?;
+        } else {
+            self.simd_check()?;
+        }
         let duplicated = |element: u64| {
             let r = replicate(element, esize, 64);
             at_datasize(u128::from(r) | (u128::from(r) << 64), q)
         };
+        let d = rd as usize;
         match kind {
             Kind::DupElement => {
-                self.v[rd as usize] = duplicated(elem(self.v[rn as usize], index, esize));
+                self.write_v(d, duplicated(elem(self.v[rn as usize], index, esize)));
             }
             Kind::DupGeneral => {
-                self.v[rd as usize] = duplicated(self.x_or_zr(rn) & ones(esize));
+                self.write_v(d, duplicated(self.x_or_zr(rn) & ones(esize)));
             }
             Kind::Smov => {
                 let v = sext(elem(self.v[rn as usize], index, esize), esize);
@@ -213,13 +207,15 @@ impl Cpu {
                 self.set_x_or_zr(rd, v);
             }
             Kind::InsGeneral => {
-                let v = self.x_or_zr(rn);
-                set_elem(&mut self.v[rd as usize], index, esize, v);
+                let mut r = self.v[d];
+                set_elem(&mut r, index, esize, self.x_or_zr(rn));
+                self.write_v(d, r);
             }
             Kind::InsElement => {
                 let src = imm4 >> size;
-                let v = elem(self.v[rn as usize], src, esize);
-                set_elem(&mut self.v[rd as usize], index, esize, v);
+                let mut r = self.v[d];
+                set_elem(&mut r, index, esize, elem(self.v[rn as usize], src, esize));
+                self.write_v(d, r);
             }
         }
         Ok(Flow::Next)
@@ -236,7 +232,7 @@ impl Cpu {
         self.simd_check()?;
         let esize = 8 << size;
         let value = elem(self.v[bits(insn, 9, 5) as usize], imm5 >> (size + 1), esize);
-        self.v[bits(insn, 4, 0) as usize] = u128::from(value);
+        self.write_v(bits(insn, 4, 0) as usize, u128::from(value));
         Ok(Flow::Next)
     }
 
@@ -257,7 +253,7 @@ impl Cpu {
         } else {
             (n >> pos) | (m << (width - pos))
         };
-        self.v[bits(insn, 4, 0) as usize] = at_datasize(r, q);
+        self.write_v(bits(insn, 4, 0) as usize, at_datasize(r, q));
         Ok(Flow::Next)
     }
 
@@ -299,7 +295,7 @@ impl Cpu {
             }
             _ => return self.undefined(pc, insn),
         }
-        self.v[bits(insn, 4, 0) as usize] = at_datasize(r, q);
+        self.write_v(bits(insn, 4, 0) as usize, at_datasize(r, q));
         Ok(Flow::Next)
     }
 
@@ -325,7 +321,7 @@ impl Cpu {
                 set_elem(&mut r, i, 8, 0);
             }
         }
-        self.v[rd] = at_datasize(r, q);
+        self.write_v(rd, at_datasize(r, q));
         Ok(Flow::Next)
     }
 }

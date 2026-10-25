@@ -5,6 +5,7 @@
 
 use super::exception::{Exception, ExceptionClass};
 use super::exec::{bit, bits, ExecResult, Fault, Flow, StopCause};
+use super::sme::SmeTrap;
 use super::sysreg::{SysRegError, SysRegKey, WriteEffect};
 use super::{Cpu, El};
 use crate::bus::PhysBus;
@@ -61,11 +62,38 @@ impl Cpu {
         Exception::new(ExceptionClass::FpAccess, (1 << 24) | (0xE << 20)).into()
     }
 
+    /// Arm `AArch64_CheckFPEnabled`: the check of the scalar floating-point
+    /// instructions and the SIMD&FP register loads and stores, made after
+    /// decode has found the encoding allocated. These are legal in
+    /// Streaming SVE mode.
+    #[inline]
+    pub(crate) fn fp_check(&self) -> Result<(), Fault> {
+        if self.fp_enabled() {
+            Ok(())
+        } else {
+            Err(self.fp_trap())
+        }
+    }
+
+    /// Arm `AArch64_CheckFPAdvSIMDEnabled`: the check of the Advanced SIMD
+    /// instructions, which is [`Cpu::fp_check`] and then, in Streaming SVE
+    /// mode, the SME trap for an instruction illegal there
+    /// (`IsFullA64Enabled` is FALSE without FEAT_SME_FA64).
+    #[inline]
+    pub(crate) fn simd_check(&self) -> Result<(), Fault> {
+        self.fp_check()?;
+        if self.svcr.sm {
+            return Err(self.sme_trap(SmeTrap::Streaming));
+        }
+        Ok(())
+    }
+
     fn sysreg_fault(&self, pc: u64, insn: u32, err: SysRegError, key: SysRegKey, rt: u32, read: bool) -> ExecResult {
         match err {
             SysRegError::Undefined => self.undefined(pc, insn),
             SysRegError::TrapToEl1 => Err(Exception::new(ExceptionClass::SysRegTrap, key.trap_iss(rt, read)).into()),
             SysRegError::FpTrap => Err(self.fp_trap()),
+            SysRegError::SmeTrap => Err(self.sme_trap(SmeTrap::AccessTrap)),
         }
     }
 
@@ -165,6 +193,8 @@ impl Cpu {
                     self.pstate.set_daif(if op2 == 6 { daif | bits } else { daif & !bits });
                     Ok(Flow::Next)
                 }
+                // SVCRSM, SVCRZA, SVCRSMZA (FEAT_SME): SMSTART, SMSTOP.
+                (3, 3) => self.exec_msr_svcr(pc, insn),
                 // PAN, UAO, DIT, SSBS, TCO...: features this core lacks.
                 _ => self.undefined(pc, insn),
             },

@@ -90,7 +90,14 @@ impl Cpu {
         if (scalar && !has_scalar_form) || (!scalar && ty == FpType::Double && !q) {
             return self.undefined(pc, insn);
         }
-        self.simd_check()?;
+        // Scalar FMULX, FRECPS and FRSQRTS are legal in Streaming SVE mode
+        // (Arm ARM FMULX, FRECPS, FRSQRTS: `if elements == 1 then
+        // AArch64_CheckFPEnabled()`).
+        if scalar && matches!(op, Op::Binary(FpBinary::MulX | FpBinary::RecipStep | FpBinary::RSqrtStep)) {
+            self.fp_check()?;
+        } else {
+            self.simd_check()?;
+        }
         let n = self.v[bits(insn, 9, 5) as usize];
         let m = self.v[bits(insn, 20, 16) as usize];
         let rd = bits(insn, 4, 0) as usize;
@@ -126,7 +133,7 @@ impl Cpu {
             set_elem(&mut r, e, esize, value);
         }
         self.fp_commit(&env);
-        self.v[rd] = r;
+        self.write_v(rd, r);
         Ok(Flow::Next)
     }
 
@@ -221,7 +228,16 @@ impl Cpu {
         if reserved {
             return self.undefined(pc, insn);
         }
-        self.simd_check()?;
+        // Scalar FRECPE and FRSQRTE, and FRECPX (scalar only), are legal in
+        // Streaming SVE mode (Arm ARM FRECPE, FRSQRTE: `if elements == 1
+        // then AArch64_CheckFPEnabled()`; FRECPX: `AArch64_CheckFPEnabled()`).
+        // The scalar conversions are legal there only with FEAT_FPRCVT,
+        // which this core lacks.
+        if scalar && matches!(op, Op::Each(Each::Unary(FpUnary::RecipEstimate | FpUnary::RSqrtEstimate | FpUnary::RecpX))) {
+            self.fp_check()?;
+        } else {
+            self.simd_check()?;
+        }
         let n = self.v[bits(insn, 9, 5) as usize];
         let rd = bits(insn, 4, 0) as usize;
         let d = self.v[rd];
@@ -299,7 +315,7 @@ impl Cpu {
             }
         }
         self.fp_commit(&env);
-        self.v[rd] = r;
+        self.write_v(rd, r);
         Ok(Flow::Next)
     }
 
@@ -341,7 +357,7 @@ impl Cpu {
             set_elem(&mut r, e, esize, v);
         }
         self.fp_commit(&env);
-        self.v[rd] = r;
+        self.write_v(rd, r);
         Ok(Flow::Next)
     }
 
@@ -395,7 +411,7 @@ impl Cpu {
             set_elem(&mut r, e, esize, v);
         }
         self.fp_commit(&env);
-        self.v[rd] = r;
+        self.write_v(rd, r);
         Ok(Flow::Next)
     }
 
@@ -421,7 +437,7 @@ impl Cpu {
         let high = fp_binary(op, ty, elem(n, 2, 32), elem(n, 3, 32), &mut env);
         let result = fp_binary(op, ty, low, high, &mut env);
         self.fp_commit(&env);
-        self.v[bits(insn, 4, 0) as usize] = u128::from(result);
+        self.write_v(bits(insn, 4, 0) as usize, u128::from(result));
         Ok(Flow::Next)
     }
 
@@ -443,7 +459,7 @@ impl Cpu {
         let mut env = self.fp_env();
         let result = fp_binary(op, ty, elem(n, 0, esize), elem(n, 1, esize), &mut env);
         self.fp_commit(&env);
-        self.v[bits(insn, 4, 0) as usize] = u128::from(result);
+        self.write_v(bits(insn, 4, 0) as usize, u128::from(result));
         Ok(Flow::Next)
     }
 }

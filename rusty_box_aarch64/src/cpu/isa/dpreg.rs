@@ -1,7 +1,6 @@
 //! Arm group `dpreg` (Arm ARM C4.1, "Data Processing -- Register"): the A64
 //! space with `op1 = x101`.
 
-#[cfg(test)]
 use super::Feature;
 use super::{Class, Encoding};
 use crate::cpu::exec::bits;
@@ -429,7 +428,6 @@ impl Dp2src {
     }
 }
 
-#[cfg(test)]
 impl Dp2src {
     pub(crate) const fn feature(self) -> Feature {
         match self {

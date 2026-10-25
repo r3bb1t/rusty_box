@@ -365,7 +365,7 @@ impl Cpu {
         self.simd_check()?;
         let n = self.v[bits(insn, 9, 5) as usize];
         let rd = bits(insn, 4, 0) as usize;
-        self.v[rd] = match (bit(insn, 13), bit(insn, 12)) {
+        let result = match (bit(insn, 13), bit(insn, 12)) {
             // AESE: AddRoundKey, then ShiftRows and SubBytes.
             (false, false) => aes_shift_sub(self.v[rd] ^ n),
             // AESD: AddRoundKey, then InvShiftRows and InvSubBytes.
@@ -374,6 +374,7 @@ impl Cpu {
             (true, false) => aes_mix_columns(n),
             (true, true) => aes_inv_mix_columns(n),
         };
+        self.write_v(rd, result);
         Ok(Flow::Next)
     }
 
@@ -397,7 +398,7 @@ impl Cpu {
             _ => return self.undefined(pc, insn),
         };
         self.simd_check()?;
-        self.v[rd] = result;
+        self.write_v(rd, result);
         Ok(Flow::Next)
     }
 
@@ -415,7 +416,7 @@ impl Cpu {
             (true, true) => return self.undefined(pc, insn),
         };
         self.simd_check()?;
-        self.v[rd] = result;
+        self.write_v(rd, result);
         Ok(Flow::Next)
     }
 

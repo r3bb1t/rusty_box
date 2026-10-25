@@ -1,7 +1,6 @@
 //! Arm group `ldst` (Arm ARM C4.1, "Loads and Stores"): the A64 space with
 //! `op1 = x1x0`.
 
-#[cfg(test)]
 use super::Feature;
 use super::Encoding;
 use crate::cpu::exec::bits;
@@ -1102,7 +1101,6 @@ fn ldst_pos(word: u32) -> Option<LdstPos> {
 // The classes that hold both general-purpose and SIMD&FP register forms:
 // the latter are FEAT_FP.
 
-#[cfg(test)]
 impl Loadlit {
     pub(crate) const fn feature(self) -> Feature {
         match self {
@@ -1112,7 +1110,6 @@ impl Loadlit {
     }
 }
 
-#[cfg(test)]
 impl LdstnapairOffs {
     pub(crate) const fn feature(self) -> Feature {
         match self {
@@ -1122,7 +1119,6 @@ impl LdstnapairOffs {
     }
 }
 
-#[cfg(test)]
 impl LdstpairPost {
     pub(crate) const fn feature(self) -> Feature {
         match self {
@@ -1132,7 +1128,6 @@ impl LdstpairPost {
     }
 }
 
-#[cfg(test)]
 impl LdstpairOff {
     pub(crate) const fn feature(self) -> Feature {
         match self {
@@ -1142,7 +1137,6 @@ impl LdstpairOff {
     }
 }
 
-#[cfg(test)]
 impl LdstpairPre {
     pub(crate) const fn feature(self) -> Feature {
         match self {
@@ -1152,7 +1146,6 @@ impl LdstpairPre {
     }
 }
 
-#[cfg(test)]
 impl LdstUnscaled {
     pub(crate) const fn feature(self) -> Feature {
         match self {
@@ -1184,7 +1177,6 @@ impl LdstUnscaled {
     }
 }
 
-#[cfg(test)]
 impl LdstImmpost {
     pub(crate) const fn feature(self) -> Feature {
         match self {
@@ -1215,7 +1207,6 @@ impl LdstImmpost {
     }
 }
 
-#[cfg(test)]
 impl LdstImmpre {
     pub(crate) const fn feature(self) -> Feature {
         match self {
@@ -1246,7 +1237,6 @@ impl LdstImmpre {
     }
 }
 
-#[cfg(test)]
 impl LdstRegoff {
     pub(crate) const fn feature(self) -> Feature {
         match self {
@@ -1284,7 +1274,6 @@ impl LdstRegoff {
     }
 }
 
-#[cfg(test)]
 impl LdstPos {
     pub(crate) const fn feature(self) -> Feature {
         match self {

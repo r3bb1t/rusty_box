@@ -7,9 +7,10 @@
 //! CRm=1..7`), which reads as zero (Arm ARM D18.2, "reserved ID registers are
 //! RAZ").
 
+use super::features::Feature;
 use super::id;
 use super::regs::{SysReg, SysRegRefusal};
-use super::{Cpu, El};
+use super::{Cpu, El, SysRegs};
 
 /// Who is accessing a system register.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,6 +83,7 @@ const MPIDR_EL1: u32 = key!(3, 0, 0, 0, 5);
 const REVIDR_EL1: u32 = key!(3, 0, 0, 0, 6);
 const ID_AA64PFR0_EL1: u32 = key!(3, 0, 0, 4, 0);
 const ID_AA64PFR1_EL1: u32 = key!(3, 0, 0, 4, 1);
+const ID_AA64SMFR0_EL1: u32 = key!(3, 0, 0, 4, 5);
 const ID_AA64DFR0_EL1: u32 = key!(3, 0, 0, 5, 0);
 const ID_AA64ISAR0_EL1: u32 = key!(3, 0, 0, 6, 0);
 const ID_AA64ISAR1_EL1: u32 = key!(3, 0, 0, 6, 1);
@@ -90,6 +92,7 @@ const ID_AA64MMFR1_EL1: u32 = key!(3, 0, 0, 7, 1);
 const ID_AA64MMFR2_EL1: u32 = key!(3, 0, 0, 7, 2);
 const CCSIDR_EL1: u32 = key!(3, 1, 0, 0, 0);
 const CLIDR_EL1: u32 = key!(3, 1, 0, 0, 1);
+const SMIDR_EL1: u32 = key!(3, 1, 0, 0, 6);
 const AIDR_EL1: u32 = key!(3, 1, 0, 0, 7);
 const CSSELR_EL1: u32 = key!(3, 2, 0, 0, 0);
 const CTR_EL0: u32 = key!(3, 3, 0, 0, 1);
@@ -97,6 +100,8 @@ const DCZID_EL0: u32 = key!(3, 3, 0, 0, 7);
 const SCTLR_EL1: u32 = key!(3, 0, 1, 0, 0);
 const ACTLR_EL1: u32 = key!(3, 0, 1, 0, 1);
 const CPACR_EL1: u32 = key!(3, 0, 1, 0, 2);
+const SMPRI_EL1: u32 = key!(3, 0, 1, 2, 4);
+const SMCR_EL1: u32 = key!(3, 0, 1, 2, 6);
 const TTBR0_EL1: u32 = key!(3, 0, 2, 0, 0);
 const TTBR1_EL1: u32 = key!(3, 0, 2, 0, 1);
 const TCR_EL1: u32 = key!(3, 0, 2, 0, 2);
@@ -107,6 +112,7 @@ const SPSEL: u32 = key!(3, 0, 4, 2, 0);
 const CURRENT_EL: u32 = key!(3, 0, 4, 2, 2);
 const NZCV: u32 = key!(3, 3, 4, 2, 0);
 const DAIF: u32 = key!(3, 3, 4, 2, 1);
+const SVCR: u32 = key!(3, 3, 4, 2, 2);
 const FPCR: u32 = key!(3, 3, 4, 4, 0);
 const FPSR: u32 = key!(3, 3, 4, 4, 1);
 const AFSR0_EL1: u32 = key!(3, 0, 5, 1, 0);
@@ -122,6 +128,7 @@ const CONTEXTIDR_EL1: u32 = key!(3, 0, 13, 0, 1);
 const TPIDR_EL1: u32 = key!(3, 0, 13, 0, 4);
 const TPIDR_EL0: u32 = key!(3, 3, 13, 0, 2);
 const TPIDRRO_EL0: u32 = key!(3, 3, 13, 0, 3);
+const TPIDR2_EL0: u32 = key!(3, 3, 13, 0, 5);
 const CNTKCTL_EL1: u32 = key!(3, 0, 14, 1, 0);
 const CNTFRQ_EL0: u32 = key!(3, 3, 14, 0, 0);
 const CNTPCT_EL0: u32 = key!(3, 3, 14, 0, 1);
@@ -154,6 +161,8 @@ pub(crate) enum SysRegError {
     TrapToEl1,
     /// SIMD&FP access disabled by `CPACR_EL1.FPEN`: EC 0x07.
     FpTrap,
+    /// SME register access disabled by `CPACR_EL1.SMEN`: EC 0x1D, SMTC 0.
+    SmeTrap,
 }
 
 /// What a register write invalidates.
@@ -176,8 +185,70 @@ const EL0PTEN: u64 = 1 << 9;
 const SCTLR_UMA: u64 = 1 << 9;
 const SCTLR_DZE: u64 = 1 << 14;
 const SCTLR_UCT: u64 = 1 << 15;
+/// `SCTLR_EL1.EnTP2` (FEAT_SME): EL0 may access `TPIDR2_EL0`.
+const SCTLR_ENTP2: u64 = 1 << 60;
+
+/// `CPACR_EL1.FPEN`.
+const CPACR_FPEN: u64 = 3 << 20;
+/// `CPACR_EL1.SMEN` (FEAT_SME).
+const CPACR_SMEN: u64 = 3 << 24;
+
+/// `SMCR_EL1.LEN`: the only field this core keeps. Bits 8:4 are RAZ/WI,
+/// and `EZT0` and `FA64` RES0 without FEAT_SME2 and FEAT_SME_FA64.
+const SMCR_LEN: u64 = 0xF;
 
 impl Cpu {
+    /// The SME System register enable (`SVCR`, `SMCR_EL1`): what their
+    /// accessors' `CPACR_EL1.SMEN` checks come to, at EL0 `SMEN != '11'`
+    /// and at EL1 `SMEN IN {'x0'}`, which is `IsSMEEnabled` at either. A
+    /// host is not trapped.
+    fn sme_register_check(&self, el: El, accessor: Accessor) -> Result<(), SysRegError> {
+        if accessor == Accessor::Guest && !self.sme_enabled_at(el) {
+            Err(SysRegError::SmeTrap)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// `ID_AA64PFR1_EL1`: the Cortex-A57's, with `SME` = 1 for FEAT_SME.
+    fn id_aa64pfr1(&self) -> u64 {
+        if self.implements(Feature::Sme) {
+            id::ID_AA64PFR1_EL1 | id::ID_AA64PFR1_SME
+        } else {
+            id::ID_AA64PFR1_EL1
+        }
+    }
+
+    /// `ID_AA64SMFR0_EL1`: zero without FEAT_SME.
+    fn id_aa64smfr0(&self) -> u64 {
+        if self.implements(Feature::Sme) {
+            id::ID_AA64SMFR0_EL1_SME
+        } else {
+            0
+        }
+    }
+
+    /// Whether `sys`, read from a snapshot, holds SME register values an
+    /// `MSR` on this processor can leave: `CPACR_EL1.SMEN`, `SMCR_EL1` and
+    /// `TPIDR2_EL0` only with FEAT_SME, and `SMCR_EL1` with nothing outside
+    /// `LEN`.
+    pub(crate) fn sme_registers_restorable(&self, sys: &SysRegs) -> bool {
+        let sme = self.implements(Feature::Sme);
+        sys.cpacr_el1 & !self.cpacr_mask() == 0
+            && sys.smcr_el1 & !SMCR_LEN == 0
+            && (sme || (sys.smcr_el1 == 0 && sys.tpidr2_el0 == 0))
+    }
+
+    /// The `CPACR_EL1` bits this core keeps: `FPEN`, and `SMEN` with
+    /// FEAT_SME.
+    fn cpacr_mask(&self) -> u64 {
+        if self.implements(Feature::Sme) {
+            CPACR_FPEN | CPACR_SMEN
+        } else {
+            CPACR_FPEN
+        }
+    }
+
     /// The `CCSIDR_EL1` value for the cache `CSSELR_EL1` selects.
     fn ccsidr(&self) -> u64 {
         match self.sys.csselr_el1 & 0xF {
@@ -244,6 +315,16 @@ impl Cpu {
             }
             TPIDR_EL0 => return Ok(self.sys.tpidr_el0),
             TPIDRRO_EL0 => return Ok(self.sys.tpidrro_el0),
+            SVCR if self.implements(Feature::Sme) => {
+                self.sme_register_check(el, accessor)?;
+                return Ok(self.svcr.bits());
+            }
+            TPIDR2_EL0 if self.implements(Feature::Sme) => {
+                if el0 && self.sys.sctlr_el1 & SCTLR_ENTP2 == 0 {
+                    return Err(SysRegError::TrapToEl1);
+                }
+                return Ok(self.sys.tpidr2_el0);
+            }
             CNTFRQ_EL0 => {
                 self.el0_timer_check(el, EL0PCTEN | EL0VCTEN)?;
                 return Ok(self.sys.cntfrq_el0);
@@ -289,7 +370,8 @@ impl Cpu {
             MPIDR_EL1 => id::MPIDR_EL1,
             REVIDR_EL1 => id::REVIDR_EL1,
             ID_AA64PFR0_EL1 => id::ID_AA64PFR0_EL1,
-            ID_AA64PFR1_EL1 => id::ID_AA64PFR1_EL1,
+            ID_AA64PFR1_EL1 => self.id_aa64pfr1(),
+            ID_AA64SMFR0_EL1 => self.id_aa64smfr0(),
             ID_AA64DFR0_EL1 => id::ID_AA64DFR0_EL1,
             ID_AA64ISAR0_EL1 => id::ID_AA64ISAR0_EL1,
             ID_AA64ISAR1_EL1 => id::ID_AA64ISAR1_EL1,
@@ -298,11 +380,19 @@ impl Cpu {
             ID_AA64MMFR2_EL1 => id::ID_AA64MMFR2_EL1,
             CCSIDR_EL1 => self.ccsidr(),
             CLIDR_EL1 => id::CLIDR_EL1,
+            SMIDR_EL1 if self.implements(Feature::Sme) => id::SMIDR_EL1,
             AIDR_EL1 => 0,
             CSSELR_EL1 => self.sys.csselr_el1,
             SCTLR_EL1 => self.sys.sctlr_el1,
             ACTLR_EL1 => self.sys.actlr_el1,
             CPACR_EL1 => self.sys.cpacr_el1,
+            SMCR_EL1 if self.implements(Feature::Sme) => {
+                self.sme_register_check(el, accessor)?;
+                self.sys.smcr_el1
+            }
+            // RES0: SMIDR_EL1.SMPS is 0, there are no streaming execution
+            // priorities.
+            SMPRI_EL1 if self.implements(Feature::Sme) => 0,
             TTBR0_EL1 => self.sys.ttbr0_el1,
             TTBR1_EL1 => self.sys.ttbr1_el1,
             TCR_EL1 => self.sys.tcr_el1,
@@ -426,6 +516,21 @@ impl Cpu {
                 self.sys.tpidr_el0 = value;
                 return Ok(WriteEffect::None);
             }
+            // Arm `SVCR` setter: `SetPSTATE_SM(value<0>)`, then
+            // `SetPSTATE_ZA(value<1>)`.
+            SVCR if self.implements(Feature::Sme) => {
+                self.sme_register_check(el, accessor)?;
+                self.set_pstate_sm(value & 1 != 0);
+                self.set_pstate_za(value & 2 != 0);
+                return Ok(WriteEffect::None);
+            }
+            TPIDR2_EL0 if self.implements(Feature::Sme) => {
+                if el0 && self.sys.sctlr_el1 & SCTLR_ENTP2 == 0 {
+                    return Err(SysRegError::TrapToEl1);
+                }
+                self.sys.tpidr2_el0 = value;
+                return Ok(WriteEffect::None);
+            }
             CNTP_CTL_EL0 | CNTP_CVAL_EL0 | CNTP_TVAL_EL0 => {
                 self.el0_timer_check(el, EL0PTEN)?;
                 match k {
@@ -465,9 +570,15 @@ impl Cpu {
                 WriteEffect::None
             }
             CPACR_EL1 => {
-                self.sys.cpacr_el1 = value & (3 << 20);
+                self.sys.cpacr_el1 = value & self.cpacr_mask();
                 WriteEffect::None
             }
+            SMCR_EL1 if self.implements(Feature::Sme) => {
+                self.sme_register_check(el, accessor)?;
+                self.sys.smcr_el1 = value & SMCR_LEN;
+                WriteEffect::None
+            }
+            SMPRI_EL1 if self.implements(Feature::Sme) => WriteEffect::None,
             TTBR0_EL1 => {
                 self.sys.ttbr0_el1 = value;
                 WriteEffect::FlushTlb
@@ -615,9 +726,11 @@ impl Cpu {
         match self.sysreg_read_as(key, Accessor::Host) {
             Ok(value) => Ok(value),
             Err(_) if key.0 == OSLAR_EL1 => Err(SysRegRefusal::WriteOnly),
-            // A host reads at EL1 past the FP enable and the EL0 controls,
-            // so only UNDEFINED is left to come back.
-            Err(SysRegError::Undefined | SysRegError::TrapToEl1 | SysRegError::FpTrap) => Err(SysRegRefusal::Absent),
+            // A host reads at EL1 past the FP and SME enables and the EL0
+            // controls, so only UNDEFINED is left to come back.
+            Err(SysRegError::Undefined | SysRegError::TrapToEl1 | SysRegError::FpTrap | SysRegError::SmeTrap) => {
+                Err(SysRegRefusal::Absent)
+            }
         }
     }
 
@@ -638,7 +751,7 @@ impl Cpu {
             Ok(WriteEffect::None) => Ok(WriteEffect::None),
             // As for reads, a host write can only be UNDEFINED: either the
             // register is read-only, or there is no such register.
-            Err(SysRegError::Undefined | SysRegError::TrapToEl1 | SysRegError::FpTrap) => {
+            Err(SysRegError::Undefined | SysRegError::TrapToEl1 | SysRegError::FpTrap | SysRegError::SmeTrap) => {
                 if self.sysreg_read_as(key, Accessor::Host).is_ok() {
                     Err(SysRegRefusal::ReadOnly)
                 } else {

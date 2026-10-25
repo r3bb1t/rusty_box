@@ -28,6 +28,23 @@ pub const ID_AA64PFR0_EL1: u64 = 0x0000_0000_0000_0011;
 /// `ID_AA64PFR1_EL1`: nothing from v8.1+.
 pub const ID_AA64PFR1_EL1: u64 = 0;
 
+/// `ID_AA64PFR1_EL1.SME` (bits 27:24) = 1: FEAT_SME without FEAT_SME2, for
+/// a processor that implements it (`Features.json`: `FEAT_SME <=>
+/// UInt(ID_AA64PFR1_EL1.SME) >= 1`).
+pub(crate) const ID_AA64PFR1_SME: u64 = 1 << 24;
+
+/// `ID_AA64SMFR0_EL1` of a processor implementing FEAT_SME: the fields
+/// `Features.json` requires of it, F32F32 (bit 32), B16F32 (34), F16F32
+/// (35) and I8I32 (39:36, 0b1111); SMEver 0 (no FEAT_SME2), and no FA64,
+/// F64F64 or I16I64.
+pub(crate) const ID_AA64SMFR0_EL1_SME: u64 = (1 << 32) | (1 << 34) | (1 << 35) | (0xF << 36);
+
+/// `SMIDR_EL1`, as QEMU reports it (`target/arm/helper.c`, `sme_reginfo`):
+/// implementer 0 (software), revision 0, no streaming execution priority
+/// (`SMPS` = 0, so `SMPRI_EL1` is RES0), no affinity with another
+/// processor's Streaming SVE mode.
+pub(crate) const SMIDR_EL1: u64 = 0;
+
 /// `ID_AA64DFR0_EL1`: DebugVer = 6 (v8 debug), BRPs = 1 and WRPs = 1 (two of
 /// each, the architectural minimum), CTX_CMPs = 0, PMUVer = 0 (no PMU).
 pub const ID_AA64DFR0_EL1: u64 = 0x0000_0000_0010_1006;

@@ -27,6 +27,10 @@ pub enum ExceptionClass {
     Svc,
     /// EC 0x18: `MSR`/`MRS`/`SYS` trapped from EL0.
     SysRegTrap,
+    /// EC 0x1D: an SME instruction or register trapped by
+    /// `CPACR_EL1.SMEN`, or an instruction illegal in the current streaming
+    /// mode; `ISS.SMTC` says which.
+    SmeAccess,
     /// EC 0x20 / 0x21.
     InstructionAbort,
     /// EC 0x22.
@@ -50,6 +54,7 @@ impl ExceptionClass {
             Self::IllegalState => 0x0E,
             Self::Svc => 0x15,
             Self::SysRegTrap => 0x18,
+            Self::SmeAccess => 0x1D,
             Self::InstructionAbort => {
                 if lower {
                     0x20
@@ -172,7 +177,10 @@ impl Cpu {
     }
 
     /// `AArch64.TakeException` to EL1. Returns the vector now executing.
+    /// `PSTATE.SM` and `PSTATE.ZA` are not part of `PSTATE`'s saved image
+    /// and carry over unchanged.
     fn enter_el1(&mut self, kind: VectorKind, return_addr: u64) -> u64 {
+        self.maybe_zero_sve_uppers();
         let quadrant = match (self.pstate.el, self.pstate.sp_sel) {
             (El::El0, _) => 0x400,
             (El::El1, false) => 0x000,

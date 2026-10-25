@@ -4,7 +4,6 @@
 //! FEAT_SHA256). The Cortex-A57 has no FEAT_SHA512, FEAT_SHA3, FEAT_SM3 or
 //! FEAT_SM4, whose classes are absent.
 
-#[cfg(test)]
 use super::Feature;
 use crate::cpu::exec::bits;
 
@@ -75,7 +74,6 @@ pub(super) fn cryptosha2(word: u32) -> Option<Cryptosha2> {
     }
 }
 
-#[cfg(test)]
 impl Cryptosha3 {
     pub(crate) const fn feature(self) -> Feature {
         match self {
@@ -85,7 +83,6 @@ impl Cryptosha3 {
     }
 }
 
-#[cfg(test)]
 impl Cryptosha2 {
     pub(crate) const fn feature(self) -> Feature {
         match self {

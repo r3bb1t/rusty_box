@@ -238,7 +238,7 @@ impl Cpu {
                 (true, 2) => (d & !m) | (n & m),
                 (true, _) => (d & m) | (n & !m),
             };
-            self.v[rd] = at_datasize(r, q);
+            self.write_v(rd, at_datasize(r, q));
             return Ok(Flow::Next);
         }
 
@@ -344,7 +344,7 @@ impl Cpu {
             set_elem(&mut r, e, esize, op(a, b, elem(d, e, esize), esize, &mut qc));
         }
         self.note_saturation(qc);
-        self.v[rd] = r;
+        self.write_v(rd, r);
         Ok(Flow::Next)
     }
 
@@ -518,7 +518,7 @@ impl Cpu {
             _ => return self.undefined(pc, insn),
         }
         self.note_saturation(qc);
-        self.v[rd] = r;
+        self.write_v(rd, r);
         Ok(Flow::Next)
     }
 
@@ -652,7 +652,7 @@ impl Cpu {
             }
         }
         self.note_saturation(qc);
-        self.v[rd] = r;
+        self.write_v(rd, r);
         Ok(Flow::Next)
     }
 
@@ -685,7 +685,7 @@ impl Cpu {
         if pmull_64 {
             self.simd_check()?;
             let half = u32::from(q);
-            self.v[rd] = polynomial_mult(elem(n, half, 64), elem(m, half, 64), 64);
+            self.write_v(rd, polynomial_mult(elem(n, half, 64), elem(m, half, 64), 64));
             return Ok(Flow::Next);
         }
         // ADDHN, RADDHN, SUBHN, RSUBHN narrow; everything else widens.
@@ -723,7 +723,7 @@ impl Cpu {
                 let value = if matches!(op, LongOp::Add) { a + b } else { a - b };
                 set_elem(&mut part, e, esize, low((value + round) >> esize, esize));
             }
-            self.v[rd] = narrow_into(d, part, upper);
+            self.write_v(rd, narrow_into(d, part, upper));
             return Ok(Flow::Next);
         }
 
@@ -743,7 +743,7 @@ impl Cpu {
             set_elem(&mut r, e, wide, long_lane(op, x, y, elem(d, e, wide), wide, &mut qc));
         }
         self.note_saturation(qc);
-        self.v[rd] = r;
+        self.write_v(rd, r);
         Ok(Flow::Next)
     }
 
@@ -811,7 +811,7 @@ impl Cpu {
             }
         }
         self.note_saturation(qc);
-        self.v[rd] = r;
+        self.write_v(rd, r);
         Ok(Flow::Next)
     }
 
@@ -864,7 +864,7 @@ impl Cpu {
             Across::Max => low(max, esize),
             Across::Min => low(min, esize),
         };
-        self.v[bits(insn, 4, 0) as usize] = u128::from(value);
+        self.write_v(bits(insn, 4, 0) as usize, u128::from(value));
         Ok(Flow::Next)
     }
 
@@ -880,7 +880,7 @@ impl Cpu {
         self.simd_check()?;
         let n = self.v[bits(insn, 9, 5) as usize];
         let sum = (n as u64).wrapping_add((n >> 64) as u64);
-        self.v[bits(insn, 4, 0) as usize] = u128::from(sum);
+        self.write_v(bits(insn, 4, 0) as usize, u128::from(sum));
         Ok(Flow::Next)
     }
 }

@@ -310,6 +310,8 @@ impl Cpu {
             Class::CryptoShaThreeRegister => self.exec_sha_three(pc, insn),
             Class::CryptoShaTwoRegister => self.exec_sha_two(pc, insn),
             Class::Crc32 => self.exec_crc32(insn),
+            Class::AddStreamingVectorLength => self.exec_addsvl(insn),
+            Class::ReadStreamingVectorLength => self.exec_rdsvl(insn),
         }
     }
 

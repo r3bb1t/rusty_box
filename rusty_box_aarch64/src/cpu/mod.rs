@@ -16,6 +16,7 @@ mod difftest;
 mod dp;
 mod exception;
 mod exec;
+mod features;
 mod fp;
 mod fp_estimate;
 mod isa;
@@ -25,6 +26,7 @@ mod regs;
 mod simd;
 mod simd_arith;
 mod simd_fp;
+mod sme;
 mod state;
 mod sysreg;
 mod system;
@@ -235,6 +237,10 @@ pub(crate) struct SysRegs {
     pub(crate) tpidr_el0: u64,
     pub(crate) tpidrro_el0: u64,
     pub(crate) tpidr_el1: u64,
+    /// `TPIDR2_EL0` (FEAT_SME).
+    pub(crate) tpidr2_el0: u64,
+    /// `SMCR_EL1` (FEAT_SME): the `LEN` field this core keeps.
+    pub(crate) smcr_el1: u64,
     pub(crate) csselr_el1: u64,
     pub(crate) cntkctl_el1: u64,
     pub(crate) cntfrq_el0: u64,
@@ -278,6 +284,8 @@ impl SysRegs {
             tpidr_el0: 0,
             tpidrro_el0: 0,
             tpidr_el1: 0,
+            tpidr2_el0: 0,
+            smcr_el1: 0,
             csselr_el1: 0,
             cntkctl_el1: 0,
             cntfrq_el0: counter_hz.get(),
@@ -311,10 +319,18 @@ pub struct Cpu {
     pub(crate) sp_el1: u64,
     pub(crate) pc: u64,
     pub(crate) pstate: Pstate,
-    /// SIMD&FP registers V0..V31, little-endian lanes in a `u128`.
+    /// SIMD&FP registers V0..V31, little-endian lanes in a `u128`: the low
+    /// 128 bits of Z0..Z31. Every write goes through `write_v`.
     pub(crate) v: [u128; 32],
     pub(crate) fpcr: u64,
     pub(crate) fpsr: u64,
+    /// `PSTATE.SM` and `PSTATE.ZA` (FEAT_SME).
+    pub(crate) svcr: sme::Svcr,
+    /// Z above V, the predicates and ZA (FEAT_SME).
+    pub(crate) scalable: sme::ScalableRegs,
+    /// What this processor implements: the decoder, the ID registers and
+    /// every feature's own checks read it.
+    pub(crate) imp: features::Implementation,
     pub(crate) sys: SysRegs,
     pub(crate) monitor: ExclusiveMonitor,
     pub(crate) tlb: Tlb,
@@ -340,8 +356,14 @@ pub struct Cpu {
 }
 
 impl Cpu {
-    /// A processor in its reset state.
+    /// A processor in its reset state, shaped like the Cortex-A57
+    /// ([`id`]).
     pub fn new(config: CpuConfig) -> Self {
+        Self::implementing(config, features::Implementation::CORTEX_A57)
+    }
+
+    /// A processor implementing `imp`, in its reset state.
+    pub(crate) fn implementing(config: CpuConfig, imp: features::Implementation) -> Self {
         Self {
             x: [0; 31],
             sp_el0: 0,
@@ -351,6 +373,9 @@ impl Cpu {
             v: [0; 32],
             fpcr: 0,
             fpsr: 0,
+            svcr: sme::Svcr::RESET,
+            scalable: sme::ScalableRegs::ZERO,
+            imp,
             sys: SysRegs::reset(config.counter_hz),
             monitor: ExclusiveMonitor {
                 armed: false,
@@ -358,7 +383,7 @@ impl Cpu {
                 bytes: 0,
             },
             tlb: Tlb::new(),
-            decode_cache: decode::DecodeCache::new(),
+            decode_cache: decode::DecodeCache::new(imp.features),
             activity: Activity::Running,
             icount: 0,
             retired: 0,

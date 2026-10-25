@@ -57,8 +57,8 @@ impl Cpu {
         if vector && scale > 4 {
             return self.undefined(pc, insn);
         }
-        if vector && !self.fp_enabled() {
-            return Err(self.fp_trap());
+        if vector {
+            self.fp_check()?;
         }
 
         let mut acc = DataAccess::NORMAL;
@@ -122,14 +122,14 @@ impl Cpu {
             if scale == 4 {
                 if load {
                     let v = self.read_mem_u128(bus, addressing.address, acc)?;
-                    self.v[rt as usize] = v;
+                    self.write_v(rt as usize, v);
                 } else {
                     let v = self.v[rt as usize];
                     self.write_mem_u128(bus, addressing.address, v, acc)?;
                 }
             } else if load {
                 let v = self.read_mem(bus, addressing.address, scale, acc)?;
-                self.v[rt as usize] = u128::from(v);
+                self.write_v(rt as usize, u128::from(v));
             } else {
                 let v = self.v[rt as usize] as u64;
                 self.write_mem(bus, addressing.address, scale, v, acc)?;
@@ -187,14 +187,13 @@ impl Cpu {
             if opc == 3 {
                 return self.undefined(pc, insn);
             }
-            if !self.fp_enabled() {
-                return Err(self.fp_trap());
-            }
-            self.v[rt as usize] = match opc {
+            self.fp_check()?;
+            let value = match opc {
                 0 => u128::from(self.read_mem(bus, address, 2, DataAccess::NORMAL)?),
                 1 => u128::from(self.read_mem(bus, address, 3, DataAccess::NORMAL)?),
                 _ => self.read_mem_u128(bus, address, DataAccess::NORMAL)?,
             };
+            self.write_v(rt as usize, value);
             return Ok(Flow::Next);
         }
         match opc {
@@ -236,8 +235,8 @@ impl Cpu {
             (true, 2) => (4, false),
             _ => return self.undefined(pc, insn),
         };
-        if vector && !self.fp_enabled() {
-            return Err(self.fp_trap());
+        if vector {
+            self.fp_check()?;
         }
         let offset = sext(u64::from(bits(insn, 21, 15)), 7) << scale;
         let base = self.base_register(rn)?;
@@ -265,8 +264,8 @@ impl Cpu {
                         u128::from(self.read_mem(bus, address.wrapping_add(step), scale, acc)?),
                     )
                 };
-                self.v[rt as usize] = a;
-                self.v[rt2 as usize] = b;
+                self.write_v(rt as usize, a);
+                self.write_v(rt2 as usize, b);
             } else {
                 let (a, b) = (self.v[rt as usize], self.v[rt2 as usize]);
                 if scale == 4 {
@@ -408,9 +407,7 @@ impl Cpu {
         if size == 3 && !q && selem != 1 {
             return self.undefined(pc, insn);
         }
-        if !self.fp_enabled() {
-            return Err(self.fp_trap());
-        }
+        self.simd_check()?;
         let ebytes = 1u64 << size;
         let datasize_bytes = if q { 16 } else { 8 };
         let elements = datasize_bytes / ebytes;
@@ -444,7 +441,7 @@ impl Cpu {
             // a 64-bit form clears the upper half.
             for r in 0..(rpt * selem) {
                 let t = ((rt + r) % 32) as usize;
-                self.v[t] = if q { regs[t] } else { regs[t] & u128::from(u64::MAX) };
+                self.write_v(t, if q { regs[t] } else { regs[t] & u128::from(u64::MAX) });
             }
         }
         if post {
@@ -466,7 +463,8 @@ impl Cpu {
         let s = bit(insn, 12);
         let size = bits(insn, 11, 10);
         let rn = bits(insn, 9, 5);
-        let mut t = bits(insn, 4, 0);
+        let rt = bits(insn, 4, 0);
+        let mut t = rt;
         if !post && rm != 0 {
             return self.undefined(pc, insn);
         }
@@ -500,9 +498,7 @@ impl Cpu {
                 (size, 0, true)
             }
         };
-        if !self.fp_enabled() {
-            return Err(self.fp_trap());
-        }
+        self.simd_check()?;
         let ebytes = 1u64 << scale;
         let address = self.base_register(rn)?;
         let mut regs = self.v;
@@ -533,7 +529,10 @@ impl Cpu {
             t = (t + 1) % 32;
         }
         if load {
-            self.v = regs;
+            for r in 0..selem {
+                let t = ((rt + r) % 32) as usize;
+                self.write_v(t, regs[t]);
+            }
         }
         if post {
             let step = if rm == 31 { offs } else { self.x_or_zr(rm) };

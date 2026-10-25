@@ -5,34 +5,41 @@
 //! A-profile Architecture Machine Readable Specification (AARCHMRS) gives
 //! it, `Instructions.json`, which is the A64 encoding index of the Arm ARM
 //! (DDI 0487, chapter C4) in data form. The tree has three levels: the
-//! top-level groups (`dpimm`, `control`, `ldst`, `dpreg`, `simd_dp`, and
-//! `reserved`), each split into the encoding classes of C4 (`addsub_imm`,
-//! `asimdsame`, ...), each holding encodings (`ADD_32_addsub_imm`, ...).
-//! An encoding is the bits Arm fixes for one instruction form, the
-//! should-be (`(0)`/`(1)`) bits among them, so a word that sets a
-//! should-be bit otherwise is UNDEFINED here, one of the CONSTRAINED
-//! UNPREDICTABLE behaviours the Arm ARM permits for it.
+//! top-level groups (`dpimm`, `control`, `ldst`, `dpreg`, `simd_dp`,
+//! `reserved`, `sve`), each split into the encoding classes of C4
+//! (`addsub_imm`, `asimdsame`, ...), each holding encodings
+//! (`ADD_32_addsub_imm`, ...); `sve` and `sme` put a level of groups
+//! (`sve_alloca`, ...) between the top and the classes. An encoding is the
+//! bits Arm fixes for one instruction form, the should-be (`(0)`/`(1)`)
+//! bits among them, so a word that sets a should-be bit otherwise is
+//! UNDEFINED here, one of the CONSTRAINED UNPREDICTABLE behaviours the Arm
+//! ARM permits for it.
 //!
 //! The code follows the tree. [`decode`] dispatches on the A64 root's
 //! fields to one function per top-level group, which dispatches on that
-//! group's fields to one function per class, named as Arm names the class;
-//! the class function matches its fields to the encoding. Every field is
-//! read by `bits(word, hi, lo)` under Arm's field name, every arm of every
-//! `match` is a literal, a range, an or-pattern or `_`, and each class
-//! returns a variant of its own enum, named for Arm's encoding id without
-//! the class's name and without `only` (Arm's mark for the one encoding of
-//! an instruction in its class), in UpperCamelCase: `ADD_32_addsub_imm` is
-//! `AddsubImm::Add32`, `ADD_asimdsame_only` is `Asimdsame::Add`,
-//! `LD1_asisdlse_R1_1v` is `Asisdlse::Ld1R11v`. That
-//! shape is what lets `tests/unit/spec.rs` read this source and check it against
-//! Arm's data (see there): every encoding of a feature this processor
-//! implements is here, under its own name and class, with exactly Arm's
-//! fixed bits, and nothing else is.
+//! group's fields to one function per group or class, named as Arm names
+//! it; the class function matches its fields to the encoding. Every field
+//! is read by `bits(word, hi, lo)` under Arm's field name, every arm of
+//! every `match` is a literal, a range, an or-pattern or `_`, and each
+//! class returns a variant of its own enum, named for Arm's encoding id
+//! without the class's name and without `only` (Arm's mark for the one
+//! encoding of an instruction in its class), in UpperCamelCase (the SVE
+//! and SME ids hold no class name, and keep all of it):
+//! `ADD_32_addsub_imm` is `AddsubImm::Add32`,
+//! `ADD_asimdsame_only` is `Asimdsame::Add`, `LD1_asisdlse_R1_1v` is
+//! `Asisdlse::Ld1R11v`, `rdsvl_r_i_` is `SveIntReadSvlA::RdsvlRI`. That
+//! shape is what lets `tests/unit/spec.rs` read this source and check it
+//! against Arm's data (see there): every encoding of a feature the decoder
+//! knows ([`Feature`]) is here, under its own name and class, with exactly
+//! Arm's fixed bits, and nothing else is — but for the encodings of a
+//! feature still being built (`Feature::complete`), of which only some
+//! are here yet.
 //!
 //! What is not here is UNDEFINED: unallocated encodings, and encodings of
-//! the features this processor does not implement, every later
-//! architecture extension among them. The one place this decoder departs
-//! from the allocation Arm's data gives is PRFM (register): see
+//! the features the decoder does not know, every later architecture
+//! extension among them. What is here executes only on a processor that
+//! implements its feature (`decode::classify`). The one place this decoder
+//! departs from the allocation Arm's data gives is PRFM (register): see
 //! `ldst::ldst_regoff`.
 //!
 //! The decode stops at the encoding. Execution is by [`Class`]: the
@@ -50,11 +57,13 @@ mod float;
 mod ldst;
 mod reserved;
 mod simd_dp;
+mod sve;
 #[cfg(test)]
 #[path = "../../../tests/unit/spec.rs"]
 pub(crate) mod spec;
 
 use crate::cpu::exec::bits;
+pub(crate) use crate::cpu::features::Feature;
 
 use asimd::{Asimdall, Asimddiff, Asimdelem, Asimdext, Asimdimm, Asimdins, Asimdmisc, Asimdperm, Asimdsame, Asimdshf, Asimdtbl};
 use asisd::{Asisddiff, Asisdelem, Asisdmisc, Asisdone, Asisdpair, Asisdsame, Asisdshf};
@@ -68,6 +77,7 @@ use ldst::{
     Ldstexclp, Ldstexclr, LdstnapairOffs, LdstpairOff, LdstpairPost, LdstpairPre, Ldstord, Loadlit,
 };
 use reserved::PermUndef;
+use sve::{SveIntArithSvl, SveIntReadSvlA};
 
 /// An A64 encoding this processor implements, by its Arm class and Arm
 /// encoding id (the module documentation gives the naming).
@@ -157,16 +167,22 @@ pub(crate) enum Encoding {
     Floatdp2(Floatdp2),
     Floatsel(Floatsel),
     Floatdp3(Floatdp3),
+    // sve
+    SveIntArithSvl(SveIntArithSvl),
+    SveIntReadSvlA(SveIntReadSvlA),
 }
 
-/// The encoding `word` is, if it is one this processor implements.
+/// The encoding `word` is, if it is one of a feature the decoder knows.
+/// Which of those a processor executes is its own feature set's choice
+/// (`decode::classify`).
 pub(crate) fn decode(word: u32) -> Option<Encoding> {
     let op0 = bits(word, 31, 31);
     let op1 = bits(word, 28, 25);
     match (op0, op1) {
         (0b0, 0b0000) => reserved::reserved(word),
-        // op0 = 1, op1 = 0000 is sme, op1 = 0010 sve (FEAT_SME, FEAT_SVE);
-        // op1 = 0001 and 0011 are unallocated.
+        // op0 = 1, op1 = 0000 is sme (FEAT_SME); op1 = 0001 and 0011 are
+        // unallocated.
+        (_, 0b0010) => sve::sve(word),
         (_, 0b1000 | 0b1001) => dpimm::dpimm(word),
         (_, 0b1010 | 0b1011) => control::control(word),
         (_, 0b0100 | 0b0110 | 0b1100 | 0b1110) => ldst::ldst(word),
@@ -249,6 +265,8 @@ impl Encoding {
             Self::Floatdp2(_) => Class::FpDataProcessing2Source,
             Self::Floatsel(_) => Class::FpConditionalSelect,
             Self::Floatdp3(_) => Class::FpDataProcessing3Source,
+            Self::SveIntArithSvl(_) => Class::AddStreamingVectorLength,
+            Self::SveIntReadSvlA(_) => Class::ReadStreamingVectorLength,
         }
     }
 }
@@ -343,61 +361,12 @@ pub(crate) enum Class {
     /// CRC32B/H/W/X and CRC32CB/CH/CW/CX: the handler reads the size and
     /// the polynomial from `sz` and `C`.
     Crc32,
+    /// ADDSVL, ADDSPL: the handler reads which from `op`.
+    AddStreamingVectorLength,
+    /// RDSVL.
+    ReadStreamingVectorLength,
 }
 
-/// An architectural feature this processor implements, by the Arm ARM's
-/// `FEAT_` name: what an encoding belongs to, as the condition of the
-/// encoding in Arm's data names it.
-#[cfg(test)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) enum Feature {
-    /// The ARMv8.0 base instruction set: an encoding without a feature
-    /// condition.
-    Base,
-    /// FEAT_FP: scalar floating point, and the loads and stores of SIMD&FP
-    /// registers.
-    Fp,
-    /// FEAT_AdvSIMD: Advanced SIMD.
-    AdvSimd,
-    /// FEAT_AES: AESE, AESD, AESMC, AESIMC. FEAT_PMULL, the 64-bit PMULL
-    /// the same ID field advertises, is no encoding of its own: PMULL's
-    /// decode pseudocode checks it.
-    Aes,
-    /// FEAT_SHA1: SHA1C, SHA1P, SHA1M, SHA1H, SHA1SU0, SHA1SU1.
-    Sha1,
-    /// FEAT_SHA256: SHA256H, SHA256H2, SHA256SU0, SHA256SU1.
-    Sha256,
-    /// FEAT_CRC32: CRC32B/H/W/X, CRC32CB/CH/CW/CX.
-    Crc32,
-}
-
-#[cfg(test)]
-impl Feature {
-    pub(crate) const ALL: [Feature; 7] = [
-        Feature::Base,
-        Feature::Fp,
-        Feature::AdvSimd,
-        Feature::Aes,
-        Feature::Sha1,
-        Feature::Sha256,
-        Feature::Crc32,
-    ];
-
-    /// The name Arm's data gives the feature, `None` for the base set.
-    pub(crate) const fn arm_name(self) -> Option<&'static str> {
-        match self {
-            Self::Base => None,
-            Self::Fp => Some("FEAT_FP"),
-            Self::AdvSimd => Some("FEAT_AdvSIMD"),
-            Self::Aes => Some("FEAT_AES"),
-            Self::Sha1 => Some("FEAT_SHA1"),
-            Self::Sha256 => Some("FEAT_SHA256"),
-            Self::Crc32 => Some("FEAT_CRC32"),
-        }
-    }
-}
-
-#[cfg(test)]
 impl Encoding {
     /// The feature this encoding belongs to.
     pub(crate) const fn feature(self) -> Feature {
@@ -478,6 +447,7 @@ impl Encoding {
             | Self::Floatdp2(_)
             | Self::Floatsel(_)
             | Self::Floatdp3(_) => Feature::Fp,
+            Self::SveIntArithSvl(_) | Self::SveIntReadSvlA(_) => Feature::Sme,
         }
     }
 }
@@ -485,30 +455,17 @@ impl Encoding {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cpu::features::Implementation;
     use crate::cpu::{Cpu, CpuConfig, SysReg};
     use std::vec::Vec;
 
     /// The ID registers, read the way an EL1 guest reads them, advertise
-    /// every feature an encoding of the decoder belongs to, and no other
-    /// instruction-set feature (Arm ARM D19.2, the `ID_AA64*_EL1` field
-    /// descriptions): a capability and the register that reports it change
-    /// together.
+    /// exactly the features the processor implements, each of them one an
+    /// encoding of the decoder belongs to, and no other instruction-set
+    /// feature (Arm ARM D19.2, the `ID_AA64*_EL1` field descriptions): a
+    /// capability and the register that reports it change together.
     #[test]
     fn the_id_registers_advertise_exactly_the_features_the_decoder_executes() {
-        let cpu = Cpu::new(CpuConfig {
-            ips: rusty_box_core::ClockHz::BOCHS_DEFAULT,
-            counter_hz: CpuConfig::QEMU_VIRT_COUNTER_HZ,
-            reset_pc: 0,
-        });
-        let read = |crm: u8, op2: u8| {
-            SysReg::new(3, 0, 0, crm, op2)
-                .map(|reg| cpu.sysreg(reg).unwrap_or(u64::MAX))
-                .unwrap_or(u64::MAX)
-        };
-        let field = |value: u64, lsb: u32| (value >> lsb) & 0xF;
-        let (pfr0, pfr1) = (read(4, 0), read(4, 1));
-        let (isar0, isar1, isar2, isar3) = (read(6, 0), read(6, 1), read(6, 2), read(6, 3));
-
         let source = spec::source();
         assert!(source.errors.is_empty(), "{:?}", source.errors);
         let mut carried: Vec<Feature> = Vec::new();
@@ -520,24 +477,56 @@ mod tests {
             }
         }
         for feature in Feature::ALL {
-            let advertised = match feature {
-                Feature::Base => true,
-                Feature::Fp => field(pfr0, 16) != 0xF,
-                Feature::AdvSimd => field(pfr0, 20) != 0xF,
-                Feature::Aes => field(isar0, 4) != 0,
-                Feature::Sha1 => field(isar0, 8) != 0,
-                Feature::Sha256 => field(isar0, 12) != 0,
-                Feature::Crc32 => field(isar0, 16) != 0,
-            };
-            assert!(advertised, "{feature:?} is not advertised");
             assert!(carried.contains(&feature), "{feature:?} has no encoding");
         }
-        // Half precision would be FP = AdvSIMD = 1; every other
-        // instruction-set feature is a nonzero field of these registers.
-        assert_eq!((field(pfr0, 16), field(pfr0, 20)), (0, 0), "FP and AdvSIMD, without half precision");
-        // ID_AA64ISAR0_EL1: AES = 2 (AES and the 64-bit PMULL), SHA1 = 1,
-        // SHA2 = 1 (SHA-256, not SHA-512), CRC32 = 1; nothing else.
-        assert_eq!(isar0, 0x0000_0000_0001_1120);
-        assert_eq!((pfr1, isar1, isar2, isar3), (0, 0, 0, 0));
+
+        for imp in [Implementation::CORTEX_A57, Implementation::A57_WITH_SME] {
+            let cpu = Cpu::implementing(
+                CpuConfig {
+                    ips: rusty_box_core::ClockHz::BOCHS_DEFAULT,
+                    counter_hz: CpuConfig::QEMU_VIRT_COUNTER_HZ,
+                    reset_pc: 0,
+                },
+                imp,
+            );
+            let read = |crm: u8, op2: u8| {
+                SysReg::new(3, 0, 0, crm, op2)
+                    .map(|reg| cpu.sysreg(reg).unwrap_or(u64::MAX))
+                    .unwrap_or(u64::MAX)
+            };
+            let field = |value: u64, lsb: u32| (value >> lsb) & 0xF;
+            let (pfr0, pfr1) = (read(4, 0), read(4, 1));
+            let (zfr0, smfr0) = (read(4, 4), read(4, 5));
+            let (isar0, isar1, isar2, isar3) = (read(6, 0), read(6, 1), read(6, 2), read(6, 3));
+            for feature in Feature::ALL {
+                let advertised = match feature {
+                    Feature::Base => true,
+                    Feature::Fp => field(pfr0, 16) != 0xF,
+                    Feature::AdvSimd => field(pfr0, 20) != 0xF,
+                    Feature::Aes => field(isar0, 4) != 0,
+                    Feature::Sha1 => field(isar0, 8) != 0,
+                    Feature::Sha256 => field(isar0, 12) != 0,
+                    Feature::Crc32 => field(isar0, 16) != 0,
+                    Feature::Sme => field(pfr1, 24) != 0,
+                };
+                assert_eq!(advertised, imp.has(feature), "{feature:?} on {imp:?}");
+            }
+            // Half precision would be FP = AdvSIMD = 1; every other
+            // instruction-set feature is a nonzero field of these registers.
+            assert_eq!((field(pfr0, 16), field(pfr0, 20)), (0, 0), "FP and AdvSIMD, without half precision");
+            // ID_AA64ISAR0_EL1: AES = 2 (AES and the 64-bit PMULL), SHA1 =
+            // 1, SHA2 = 1 (SHA-256, not SHA-512), CRC32 = 1; nothing else.
+            assert_eq!(isar0, 0x0000_0000_0001_1120);
+            assert_eq!((isar1, isar2, isar3), (0, 0, 0));
+            // No SVE2 (SVEver = 0, with FEAT_SME as without), and SME's
+            // required fields only with FEAT_SME.
+            assert_eq!(zfr0, 0);
+            if imp.has(Feature::Sme) {
+                assert_eq!(pfr1, 1 << 24, "SME = 1: FEAT_SME, not FEAT_SME2");
+                assert_eq!(smfr0, 0x0000_00FD_0000_0000, "F32F32, B16F32, F16F32, I8I32; SMEver 0");
+            } else {
+                assert_eq!((pfr1, smfr0), (0, 0));
+            }
+        }
     }
 }

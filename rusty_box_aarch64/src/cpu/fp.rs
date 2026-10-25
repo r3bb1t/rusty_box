@@ -431,18 +431,7 @@ impl Cpu {
     /// Write a scalar result: the rest of the register is cleared.
     #[inline]
     pub(crate) fn fp_set(&mut self, d: u32, mask: u64, value: u64) {
-        self.v[d as usize] = u128::from(value & mask);
-    }
-
-    /// The SIMD&FP enable check, after decode has found the encoding
-    /// allocated.
-    #[inline]
-    fn fp_check(&self) -> Result<(), super::exec::Fault> {
-        if self.fp_enabled() {
-            Ok(())
-        } else {
-            Err(self.fp_trap())
-        }
+        self.write_v(d as usize, u128::from(value & mask));
     }
 
     /// FMOV (scalar, immediate): `000 11110 ftype 1 imm8 100 imm5 Rd`.
@@ -641,7 +630,10 @@ impl Cpu {
     }
 
     /// Conversions between FP and general registers:
-    /// `sf 0 0 11110 ftype 1 rmode opcode 000000 Rn Rd`.
+    /// `sf 0 0 11110 ftype 1 rmode opcode 000000 Rn Rd`. Every form, the
+    /// `FMOV` of `Vn.D[1]` among them, makes the scalar check
+    /// (`AArch64_CheckFPEnabled` on the FMOV (general) page), so each is
+    /// legal in Streaming SVE mode.
     pub(crate) fn exec_fp_int(&mut self, pc: u64, insn: u32) -> ExecResult {
         if bit(insn, 29) {
             return self.undefined(pc, insn);
@@ -676,12 +668,13 @@ impl Cpu {
                 self.set_x_or_zr(d, v);
                 return Ok(Flow::Next);
             }
-            // FMOV Vd.D[1], Xn: the low half is preserved.
+            // FMOV Vd.D[1], Xn: the low half is preserved (Arm `Vpart`,
+            // which writes all 128 bits back).
             (true, 2, 1, 0b111) => {
                 self.fp_check()?;
                 let v = self.x_or_zr(n);
-                let reg = &mut self.v[d as usize];
-                *reg = (*reg & u128::from(u64::MAX)) | (u128::from(v) << 64);
+                let low = self.v[d as usize] & u128::from(u64::MAX);
+                self.write_v(d as usize, low | (u128::from(v) << 64));
                 return Ok(Flow::Next);
             }
             _ => {}
