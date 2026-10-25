@@ -1,0 +1,382 @@
+//! Arm group `dpreg` (Arm ARM C4.1, "Data Processing -- Register"): the A64
+//! space with `op1 = x101`.
+
+use super::Encoding;
+use crate::cpu::exec::bits;
+
+/// Arm group `dp_2src`: Data-processing (2 source).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum Dp2src {
+    Udiv32,
+    Sdiv32,
+    Lslv32,
+    Lsrv32,
+    Asrv32,
+    Rorv32,
+    Udiv64,
+    Sdiv64,
+    Lslv64,
+    Lsrv64,
+    Asrv64,
+    Rorv64,
+}
+
+/// Arm group `dp_1src`: Data-processing (1 source).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum Dp1src {
+    Rbit32,
+    Rev1632,
+    Rev32,
+    Clz32,
+    Cls32,
+    Rbit64,
+    Rev1664,
+    Rev3264,
+    Rev64,
+    Clz64,
+    Cls64,
+}
+
+/// Arm group `log_shift`: Logical (shifted register).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum LogShift {
+    And32,
+    Bic32,
+    Orr32,
+    Orn32,
+    Eor32,
+    Eon32,
+    Ands32,
+    Bics32,
+    And64,
+    Bic64,
+    Orr64,
+    Orn64,
+    Eor64,
+    Eon64,
+    Ands64,
+    Bics64,
+}
+
+/// Arm group `addsub_shift`: Add/subtract (shifted register).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum AddsubShift {
+    Add32,
+    Adds32,
+    Sub32,
+    Subs32,
+    Add64,
+    Adds64,
+    Sub64,
+    Subs64,
+}
+
+/// Arm group `addsub_ext`: Add/subtract (extended register).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum AddsubExt {
+    Add32,
+    Adds32s,
+    Sub32,
+    Subs32s,
+    Add64,
+    Adds64s,
+    Sub64,
+    Subs64s,
+}
+
+/// Arm group `addsub_carry`: Add/subtract (with carry).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum AddsubCarry {
+    Adc32,
+    Adcs32,
+    Sbc32,
+    Sbcs32,
+    Adc64,
+    Adcs64,
+    Sbc64,
+    Sbcs64,
+}
+
+/// Arm group `condcmp_reg`: Conditional compare (register).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum CondcmpReg {
+    Ccmn32,
+    Ccmp32,
+    Ccmn64,
+    Ccmp64,
+}
+
+/// Arm group `condcmp_imm`: Conditional compare (immediate).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum CondcmpImm {
+    Ccmn32,
+    Ccmp32,
+    Ccmn64,
+    Ccmp64,
+}
+
+/// Arm group `condsel`: Conditional select.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum Condsel {
+    Csel32,
+    Csinc32,
+    Csinv32,
+    Csneg32,
+    Csel64,
+    Csinc64,
+    Csinv64,
+    Csneg64,
+}
+
+/// Arm group `dp_3src`: Data-processing (3 source).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum Dp3src {
+    Madd32a,
+    Msub32a,
+    Madd64a,
+    Msub64a,
+    Smaddl64wa,
+    Smsubl64wa,
+    Smulh64,
+    Umaddl64wa,
+    Umsubl64wa,
+    Umulh64,
+}
+
+pub(super) fn dpreg(word: u32) -> Option<Encoding> {
+    let op0 = bits(word, 30, 30);
+    let op1 = bits(word, 28, 28);
+    let op2 = bits(word, 24, 21);
+    let op3 = bits(word, 15, 10);
+    match op1 {
+        // op2<3>, then op2<0>.
+        0b0 => match (bits(word, 24, 24), bits(word, 21, 21)) {
+            (0b0, _) => log_shift(word).map(Encoding::LogShift),
+            (0b1, 0b0) => addsub_shift(word).map(Encoding::AddsubShift),
+            (0b1, 0b1) => addsub_ext(word).map(Encoding::AddsubExt),
+            _ => None,
+        },
+        0b1 => match bits(word, 24, 24) {
+            0b1 => dp_3src(word).map(Encoding::Dp3src),
+            0b0 => match op2 {
+                // op3 = 001xxx is addsub_pt (FEAT_CPA), x00001 rmif and
+                // xx0010 setf (FEAT_FlagM).
+                0b0000 => match op3 {
+                    0b000000 => addsub_carry(word).map(Encoding::AddsubCarry),
+                    _ => None,
+                },
+                0b0010 => match bits(word, 11, 11) {
+                    0b0 => condcmp_reg(word).map(Encoding::CondcmpReg),
+                    0b1 => condcmp_imm(word).map(Encoding::CondcmpImm),
+                    _ => None,
+                },
+                0b0100 => condsel(word).map(Encoding::Condsel),
+                0b0110 => match op0 {
+                    0b0 => dp_2src(word).map(Encoding::Dp2src),
+                    0b1 => dp_1src(word).map(Encoding::Dp1src),
+                    _ => None,
+                },
+                _ => None,
+            },
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn dp_2src(word: u32) -> Option<Dp2src> {
+    let sf = bits(word, 31, 31);
+    let s = bits(word, 29, 29);
+    let opcode = bits(word, 15, 10);
+    // opcode 0100xx is CRC32 and 0101xx CRC32C (FEAT_CRC32), and 0110xx
+    // the register minimum and maximum (FEAT_CSSC); with sf = 1, 000000,
+    // 000100 and 000101 are SUBP(S), IRG and GMI (FEAT_MTE), and 001100
+    // PACGA (FEAT_PAuth).
+    match (sf, s, opcode) {
+        (0b0, 0b0, 0b000010) => Some(Dp2src::Udiv32),
+        (0b0, 0b0, 0b000011) => Some(Dp2src::Sdiv32),
+        (0b0, 0b0, 0b001000) => Some(Dp2src::Lslv32),
+        (0b0, 0b0, 0b001001) => Some(Dp2src::Lsrv32),
+        (0b0, 0b0, 0b001010) => Some(Dp2src::Asrv32),
+        (0b0, 0b0, 0b001011) => Some(Dp2src::Rorv32),
+        (0b1, 0b0, 0b000010) => Some(Dp2src::Udiv64),
+        (0b1, 0b0, 0b000011) => Some(Dp2src::Sdiv64),
+        (0b1, 0b0, 0b001000) => Some(Dp2src::Lslv64),
+        (0b1, 0b0, 0b001001) => Some(Dp2src::Lsrv64),
+        (0b1, 0b0, 0b001010) => Some(Dp2src::Asrv64),
+        (0b1, 0b0, 0b001011) => Some(Dp2src::Rorv64),
+        _ => None,
+    }
+}
+
+fn dp_1src(word: u32) -> Option<Dp1src> {
+    let sf = bits(word, 31, 31);
+    let s = bits(word, 29, 29);
+    let opcode2 = bits(word, 20, 16);
+    let opcode = bits(word, 15, 10);
+    // opcode2 = 00001 holds the pointer authentication instructions
+    // (FEAT_PAuth, FEAT_PAuth_LR); opcode 00011x and 001000 are CTZ, CNT
+    // and ABS (FEAT_CSSC).
+    match (sf, s, opcode2, opcode) {
+        (0b0, 0b0, 0b00000, 0b000000) => Some(Dp1src::Rbit32),
+        (0b0, 0b0, 0b00000, 0b000001) => Some(Dp1src::Rev1632),
+        (0b0, 0b0, 0b00000, 0b000010) => Some(Dp1src::Rev32),
+        (0b0, 0b0, 0b00000, 0b000100) => Some(Dp1src::Clz32),
+        (0b0, 0b0, 0b00000, 0b000101) => Some(Dp1src::Cls32),
+        (0b1, 0b0, 0b00000, 0b000000) => Some(Dp1src::Rbit64),
+        (0b1, 0b0, 0b00000, 0b000001) => Some(Dp1src::Rev1664),
+        (0b1, 0b0, 0b00000, 0b000010) => Some(Dp1src::Rev3264),
+        (0b1, 0b0, 0b00000, 0b000011) => Some(Dp1src::Rev64),
+        (0b1, 0b0, 0b00000, 0b000100) => Some(Dp1src::Clz64),
+        (0b1, 0b0, 0b00000, 0b000101) => Some(Dp1src::Cls64),
+        _ => None,
+    }
+}
+
+fn log_shift(word: u32) -> Option<LogShift> {
+    let sf = bits(word, 31, 31);
+    let opc = bits(word, 30, 29);
+    let n = bits(word, 21, 21);
+    match (sf, opc, n) {
+        (0b0, 0b00, 0b0) => Some(LogShift::And32),
+        (0b0, 0b00, 0b1) => Some(LogShift::Bic32),
+        (0b0, 0b01, 0b0) => Some(LogShift::Orr32),
+        (0b0, 0b01, 0b1) => Some(LogShift::Orn32),
+        (0b0, 0b10, 0b0) => Some(LogShift::Eor32),
+        (0b0, 0b10, 0b1) => Some(LogShift::Eon32),
+        (0b0, 0b11, 0b0) => Some(LogShift::Ands32),
+        (0b0, 0b11, 0b1) => Some(LogShift::Bics32),
+        (0b1, 0b00, 0b0) => Some(LogShift::And64),
+        (0b1, 0b00, 0b1) => Some(LogShift::Bic64),
+        (0b1, 0b01, 0b0) => Some(LogShift::Orr64),
+        (0b1, 0b01, 0b1) => Some(LogShift::Orn64),
+        (0b1, 0b10, 0b0) => Some(LogShift::Eor64),
+        (0b1, 0b10, 0b1) => Some(LogShift::Eon64),
+        (0b1, 0b11, 0b0) => Some(LogShift::Ands64),
+        (0b1, 0b11, 0b1) => Some(LogShift::Bics64),
+        _ => None,
+    }
+}
+
+fn addsub_shift(word: u32) -> Option<AddsubShift> {
+    let sf = bits(word, 31, 31);
+    let op = bits(word, 30, 30);
+    let s = bits(word, 29, 29);
+    match (sf, op, s) {
+        (0b0, 0b0, 0b0) => Some(AddsubShift::Add32),
+        (0b0, 0b0, 0b1) => Some(AddsubShift::Adds32),
+        (0b0, 0b1, 0b0) => Some(AddsubShift::Sub32),
+        (0b0, 0b1, 0b1) => Some(AddsubShift::Subs32),
+        (0b1, 0b0, 0b0) => Some(AddsubShift::Add64),
+        (0b1, 0b0, 0b1) => Some(AddsubShift::Adds64),
+        (0b1, 0b1, 0b0) => Some(AddsubShift::Sub64),
+        (0b1, 0b1, 0b1) => Some(AddsubShift::Subs64),
+        _ => None,
+    }
+}
+
+fn addsub_ext(word: u32) -> Option<AddsubExt> {
+    let sf = bits(word, 31, 31);
+    let op = bits(word, 30, 30);
+    let s = bits(word, 29, 29);
+    let opt = bits(word, 23, 22);
+    match (sf, op, s, opt) {
+        (0b0, 0b0, 0b0, 0b00) => Some(AddsubExt::Add32),
+        (0b0, 0b0, 0b1, 0b00) => Some(AddsubExt::Adds32s),
+        (0b0, 0b1, 0b0, 0b00) => Some(AddsubExt::Sub32),
+        (0b0, 0b1, 0b1, 0b00) => Some(AddsubExt::Subs32s),
+        (0b1, 0b0, 0b0, 0b00) => Some(AddsubExt::Add64),
+        (0b1, 0b0, 0b1, 0b00) => Some(AddsubExt::Adds64s),
+        (0b1, 0b1, 0b0, 0b00) => Some(AddsubExt::Sub64),
+        (0b1, 0b1, 0b1, 0b00) => Some(AddsubExt::Subs64s),
+        _ => None,
+    }
+}
+
+fn addsub_carry(word: u32) -> Option<AddsubCarry> {
+    let sf = bits(word, 31, 31);
+    let op = bits(word, 30, 30);
+    let s = bits(word, 29, 29);
+    match (sf, op, s) {
+        (0b0, 0b0, 0b0) => Some(AddsubCarry::Adc32),
+        (0b0, 0b0, 0b1) => Some(AddsubCarry::Adcs32),
+        (0b0, 0b1, 0b0) => Some(AddsubCarry::Sbc32),
+        (0b0, 0b1, 0b1) => Some(AddsubCarry::Sbcs32),
+        (0b1, 0b0, 0b0) => Some(AddsubCarry::Adc64),
+        (0b1, 0b0, 0b1) => Some(AddsubCarry::Adcs64),
+        (0b1, 0b1, 0b0) => Some(AddsubCarry::Sbc64),
+        (0b1, 0b1, 0b1) => Some(AddsubCarry::Sbcs64),
+        _ => None,
+    }
+}
+
+fn condcmp_reg(word: u32) -> Option<CondcmpReg> {
+    let sf = bits(word, 31, 31);
+    let op = bits(word, 30, 30);
+    let s = bits(word, 29, 29);
+    let o2 = bits(word, 10, 10);
+    let o3 = bits(word, 4, 4);
+    match (sf, op, s, o2, o3) {
+        (0b0, 0b0, 0b1, 0b0, 0b0) => Some(CondcmpReg::Ccmn32),
+        (0b0, 0b1, 0b1, 0b0, 0b0) => Some(CondcmpReg::Ccmp32),
+        (0b1, 0b0, 0b1, 0b0, 0b0) => Some(CondcmpReg::Ccmn64),
+        (0b1, 0b1, 0b1, 0b0, 0b0) => Some(CondcmpReg::Ccmp64),
+        _ => None,
+    }
+}
+
+fn condcmp_imm(word: u32) -> Option<CondcmpImm> {
+    let sf = bits(word, 31, 31);
+    let op = bits(word, 30, 30);
+    let s = bits(word, 29, 29);
+    let o2 = bits(word, 10, 10);
+    let o3 = bits(word, 4, 4);
+    match (sf, op, s, o2, o3) {
+        (0b0, 0b0, 0b1, 0b0, 0b0) => Some(CondcmpImm::Ccmn32),
+        (0b0, 0b1, 0b1, 0b0, 0b0) => Some(CondcmpImm::Ccmp32),
+        (0b1, 0b0, 0b1, 0b0, 0b0) => Some(CondcmpImm::Ccmn64),
+        (0b1, 0b1, 0b1, 0b0, 0b0) => Some(CondcmpImm::Ccmp64),
+        _ => None,
+    }
+}
+
+fn condsel(word: u32) -> Option<Condsel> {
+    let sf = bits(word, 31, 31);
+    let op = bits(word, 30, 30);
+    let s = bits(word, 29, 29);
+    let op2 = bits(word, 11, 10);
+    match (sf, op, s, op2) {
+        (0b0, 0b0, 0b0, 0b00) => Some(Condsel::Csel32),
+        (0b0, 0b0, 0b0, 0b01) => Some(Condsel::Csinc32),
+        (0b0, 0b1, 0b0, 0b00) => Some(Condsel::Csinv32),
+        (0b0, 0b1, 0b0, 0b01) => Some(Condsel::Csneg32),
+        (0b1, 0b0, 0b0, 0b00) => Some(Condsel::Csel64),
+        (0b1, 0b0, 0b0, 0b01) => Some(Condsel::Csinc64),
+        (0b1, 0b1, 0b0, 0b00) => Some(Condsel::Csinv64),
+        (0b1, 0b1, 0b0, 0b01) => Some(Condsel::Csneg64),
+        _ => None,
+    }
+}
+
+fn dp_3src(word: u32) -> Option<Dp3src> {
+    let sf = bits(word, 31, 31);
+    let op54 = bits(word, 30, 29);
+    let op31 = bits(word, 23, 21);
+    let o0 = bits(word, 15, 15);
+    let ra = bits(word, 14, 10);
+    // Ra is should-be-one in SMULH and UMULH: fixed here. op31 = 011 is
+    // MADDPT and MSUBPT (FEAT_CPA).
+    match (sf, op54, op31, o0, ra) {
+        (0b0, 0b00, 0b000, 0b0, _) => Some(Dp3src::Madd32a),
+        (0b0, 0b00, 0b000, 0b1, _) => Some(Dp3src::Msub32a),
+        (0b1, 0b00, 0b000, 0b0, _) => Some(Dp3src::Madd64a),
+        (0b1, 0b00, 0b000, 0b1, _) => Some(Dp3src::Msub64a),
+        (0b1, 0b00, 0b001, 0b0, _) => Some(Dp3src::Smaddl64wa),
+        (0b1, 0b00, 0b001, 0b1, _) => Some(Dp3src::Smsubl64wa),
+        (0b1, 0b00, 0b010, 0b0, 0b11111) => Some(Dp3src::Smulh64),
+        (0b1, 0b00, 0b101, 0b0, _) => Some(Dp3src::Umaddl64wa),
+        (0b1, 0b00, 0b101, 0b1, _) => Some(Dp3src::Umsubl64wa),
+        (0b1, 0b00, 0b110, 0b0, 0b11111) => Some(Dp3src::Umulh64),
+        _ => None,
+    }
+}

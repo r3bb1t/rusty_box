@@ -80,7 +80,10 @@ another; either way its memory node is set to the RAM the machine has, and
 **Owned or lent.** `build()` gives a machine that owns its memory
 (`VirtMachine<OwnedStorage>`, movable to another thread). `build_in` runs in
 memory the caller lends, and borrows the firmware and kernel images where
-they are:
+they are (either way the machine itself, without its RAM, is about half a
+megabyte — mostly the processor's decode cache — and is built and returned
+by value, so build and run it on a thread with a few megabytes of stack
+rather than on a 1 MiB Windows main thread; the examples use 16 MiB):
 
 ```rust
 use rusty_box_aarch64::{MachineBuilder, MemoryLoan, RamSize, VirtConfig};

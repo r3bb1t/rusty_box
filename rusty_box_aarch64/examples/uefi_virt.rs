@@ -78,6 +78,10 @@ fn read(path: &str) -> Result<Vec<u8>, String> {
 }
 
 fn main() -> ExitCode {
+    common::on_machine_thread(boot)
+}
+
+fn boot() -> ExitCode {
     let args = match parse_args() {
         Ok(a) => a,
         Err(e) => {

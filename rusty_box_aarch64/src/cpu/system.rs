@@ -222,9 +222,14 @@ impl Cpu {
                 self.address_translate(bus, va, op2 & 1 == 1, as_el);
                 Ok(Flow::Next)
             }
-            // TLBI: every EL1 TLB maintenance operation invalidates at least
-            // what it names; flushing everything satisfies all of them.
-            (0, 8, _, _) => {
+            // TLBI VMALLE1IS, VAE1IS, ASIDE1IS, VAAE1IS, VALE1IS, VAALE1IS
+            // (CRm 3) and VMALLE1, VAE1, ASIDE1, VAAE1, VALE1, VAALE1 (CRm 7),
+            // the ARMv8.0 EL1 TLB maintenance instructions (Arm ARM TLBI
+            // pages; QEMU target/arm/tcg/tlb-insns.c `tlbi_v8_cp_reginfo`).
+            // Each invalidates at least what it names, so flushing everything
+            // satisfies all of them. The rest of op1 0, CRn 8 belongs to
+            // FEAT_TLBIOS and FEAT_TLBIRANGE.
+            (0, 8, 3 | 7, 0 | 1 | 2 | 3 | 5 | 7) => {
                 if el0 {
                     return self.undefined(pc, insn);
                 }

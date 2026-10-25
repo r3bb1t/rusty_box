@@ -10,6 +10,7 @@ pub mod id;
 
 mod decode;
 #[cfg(test)]
+#[path = "../../tests/unit/difftest.rs"]
 mod difftest;
 mod dp;
 mod exception;

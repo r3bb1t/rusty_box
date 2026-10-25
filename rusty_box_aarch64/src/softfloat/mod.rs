@@ -49,6 +49,7 @@ mod uint64_convert;
 mod uint_convert;
 
 #[cfg(test)]
+#[path = "../../tests/unit/softfloat.rs"]
 mod tests;
 
 use self::min_max::Extreme;

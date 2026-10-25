@@ -186,16 +186,11 @@ impl Cpu {
         self.pstate.v = false;
     }
 
-    /// ADD/ADDS/SUB/SUBS (immediate): `sf op S 10001 shift:2 imm12 Rn Rd`.
-    /// `shift = 1x` is a ReservedValue in the ARMv8.0 decode (Arm ARM ADD
-    /// (immediate)); later architectures give bit 23 to other classes
-    /// (ADDG/SUBG, the min/max immediates) this core does not have, so it
-    /// is UNDEFINED either way, as QEMU decodes it (`a64.decode` `ADD_i`
-    /// fixes bit 23 to 0).
-    pub(crate) fn exec_addsub_imm(&mut self, pc: u64, insn: u32) -> ExecResult {
-        if bit(insn, 23) {
-            return self.undefined(pc, insn);
-        }
+    /// ADD/ADDS/SUB/SUBS (immediate): `sf op S 100010 sh imm12 Rn Rd`. Bit
+    /// 23 is 0 in every word that reaches here (Arm's `ADD_32_addsub_imm`
+    /// and its siblings fix it; `shift = 1x` was a ReservedValue in the
+    /// ARMv8.0 decode).
+    pub(crate) fn exec_addsub_imm(&mut self, _pc: u64, insn: u32) -> ExecResult {
         let sf = bit(insn, 31);
         let sub = bit(insn, 30);
         let set_flags = bit(insn, 29);

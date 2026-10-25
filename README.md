@@ -249,18 +249,17 @@ cd rusty_box_decoder && cargo +nightly fuzz run fuzz_fetchdecode64
 
 A bare `cargo test` tests only the default workspace member (`rusty_box`), in a debug build.
 
-`cargo xtask ci` runs 33 steps; [xtask/README.md](xtask/README.md) lists every one.
+`cargo xtask ci` runs 32 steps; [xtask/README.md](xtask/README.md) lists every one.
 
 1. The doctrine ratchets, over nine source trees, the GUI's and the AArch64 interpreter's included. They check the unsafe-token baselines, that there is no `unsafe impl Send/Sync`, the blanket `dead_code` allows, and that there is no production `unwrap`/`expect`.
-2. That the AArch64 interpreter's decode table is what its encoding list compiles to (`cargo xtask a64-decode --check`).
-3. A 30-step matrix:
+2. A 30-step matrix:
    - It tests `rusty_box_core`, `rusty_box_devices`, `rusty_box_aarch64` (without features and with std), the three WHP crates, the decoder and `rusty_box`.
    - It checks `rusty_box_core`, `rusty_box_devices` and `rusty_box_aarch64` for bare metal, and builds the WHP probe examples.
    - It checks `rusty_box` without std (with and without alloc), for bare metal, for wasm, with all features, and with debug assertions.
    - It checks `rusty_box_gui` for the host, with its tests, for wasm, and with its `guest-trace` feature, whose tracer tests it runs.
    - It builds the UEFI application.
    - It runs the public-API and doc examples and the doctrine compile-fail fixtures.
-4. The DLX boot gate: DLX boots headlessly to its login prompt, on the interpreter. It is the only guest boot in the gate.
+3. The DLX boot gate: DLX boots headlessly to its login prompt, on the interpreter. It is the only guest boot in the gate.
 
 The gate does not run the tests of `rusty_box_bximage` or `xtask`, nor those of `rusty_box_gui` beyond the guest-trace tracer's, and does not build the Android APK; run those with `cargo test --release -p <crate>` and `cargo xtask android build`.
 

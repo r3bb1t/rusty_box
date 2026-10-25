@@ -13,6 +13,10 @@
 //! reason [`expected_undefined`] names; any other UNDEFINED word, and any
 //! step that stops the machine, fails the test. Failure messages show
 //! disarm64's disassembly of the word.
+//!
+//! A second check here, `against_disarm64`, steps the words the decoder
+//! hands to a handler but binutils' opcode table allocates to nothing this
+//! core implements: each must be UNDEFINED.
 
 use std::collections::BTreeMap;
 use std::format;
@@ -21,13 +25,14 @@ use std::vec::Vec;
 
 use rusty_box_core::{ClockHz, VmClock};
 
-use super::decode::{classify, Decoded};
-use super::isa::{self, Feature, Kind};
+use disarm64::InsnOpcode;
+use disarm64_defn::InsnFeatureSet;
+
 use super::{Cpu, CpuConfig, Step};
 use crate::bus::{AccessWidth, BusFault, PhysAddr, PhysBus};
 use crate::instrumentation::NoInstrumentation;
 
-const VECTORS: &str = include_str!("../../tests/vectors/unicorn.txt");
+const VECTORS: &str = include_str!("../vectors/unicorn.txt");
 
 const CODE: u64 = 0x10000;
 const DATA: u64 = 0x10_0000;
@@ -268,7 +273,7 @@ fn parse_pairs(field: &str, prefix: &str, key_radix: u32) -> Vec<(usize, u128)> 
 #[test]
 fn reserved_simd_and_fp_encodings_are_undefined_before_the_fp_trap() {
     let ips = ClockHz::new(1_000_000).unwrap_or(ClockHz::BOCHS_DEFAULT);
-    let cases: [(u32, &str, u64); 8] = [
+    let cases: [(u32, &str, u64); 11] = [
         (0x0E08_0420, "dup v0.1d, v1.d[0] (Q = 0)", 0x00),
         (0x0E04_2C20, "smov w0, v1.s[0]", 0x00),
         (0x4E01_3C20, "umov x0, v1.b[0]", 0x00),
@@ -276,6 +281,9 @@ fn reserved_simd_and_fp_encodings_are_undefined_before_the_fp_trap() {
         (0x1EA0_2820, "fadd with ftype 10", 0x00),
         (0x4E08_0420, "dup v0.2d, v1.d[0]", 0x07),
         (0x4F3F_E420, "scvtf v0.4s, v1.4s, #1", 0x07),
+        (0x5F3F_E420, "scvtf s0, s1, #1", 0x07),
+        (0x5F7F_FC20, "fcvtzs d0, d1, #1", 0x07),
+        (0x4F1F_E420, "scvtf v0.8h, v1.8h, #1 (half precision, FEAT_FP16)", 0x00),
         (0x1E20_2820, "fadd s0, s1, s0", 0x07),
     ];
     for (insn, text, want_ec) in cases {
@@ -349,6 +357,298 @@ fn add_and_sub_immediate_with_shift_1x_are_undefined() {
     }
 }
 
+/// A processor at EL1 with SIMD&FP enabled that steps one word at a time,
+/// each from the same reset state. The state comes back from a snapshot
+/// before every word, which costs far less than building a processor (its
+/// decode cache alone is 320 KiB), and the decode cache, keyed by the word,
+/// needs no reset.
+struct Stepper {
+    cpu: Cpu,
+    reset: Vec<u8>,
+}
+
+impl Stepper {
+    fn new() -> Self {
+        let ips = ClockHz::new(1_000_000).unwrap_or(ClockHz::BOCHS_DEFAULT);
+        let mut cpu = Cpu::new(CpuConfig {
+            ips,
+            counter_hz: ips,
+            reset_pc: CODE,
+        });
+        cpu.sys.cpacr_el1 = 3 << 20;
+        let mut reset = Vec::new();
+        if let Err(e) = cpu.save(&mut reset) {
+            panic!("the reset state does not save: {e:?}");
+        }
+        Self { cpu, reset }
+    }
+
+    /// One step of `insn`: the exception class it took, or `None` when it
+    /// took none.
+    fn exception_class(&mut self, insn: u32) -> Option<u64> {
+        if let Err(e) = self.cpu.restore(&mut self.reset.as_slice()) {
+            panic!("the reset state does not restore: {e:?}");
+        }
+        self.cpu.sys.esr_el1 = 0x3F << 26;
+        let mut bus = TestBus {
+            insn,
+            data: std::vec![0; DATA_SIZE],
+        };
+        assert_eq!(self.cpu.step(&mut bus, &mut NoInstrumentation), Step::Retired, "{insn:#010x}");
+        Some(self.cpu.sys.esr_el1 >> 26).filter(|&ec| ec != 0x3F)
+    }
+}
+
+/// [`Stepper::exception_class`] on a processor of its own.
+fn step_exception_class(insn: u32) -> Option<u64> {
+    Stepper::new().exception_class(insn)
+}
+
+/// The barriers are CLREX, DSB, DMB and ISB with `op1 = 011` (Arm's
+/// `barriers` group, `CLREX_BN_barriers` and its siblings); with any other
+/// `op1` the word is unallocated, so UNDEFINED, not a barrier.
+#[test]
+fn barriers_need_op1_011() {
+    for (insn, text) in [
+        (0xD503_305F, "clrex"),
+        (0xD503_3F9F, "dsb sy"),
+        (0xD503_3BBF, "dmb ish"),
+        (0xD503_3FDF, "isb"),
+    ] {
+        assert_eq!(step_exception_class(insn), None, "{text} executes");
+        for op1 in [0b000, 0b001, 0b010, 0b100, 0b111] {
+            let other = (insn & !(0b111 << 16)) | (op1 << 16);
+            assert_eq!(step_exception_class(other), Some(0x00), "{text} with op1 = {op1:03b}: UNDEFINED");
+        }
+    }
+}
+
+/// The EL1 TLB maintenance instructions of ARMv8.0 are `SYS #0, C8, Cm,
+/// #op2` with `Cm` 3 (Inner Shareable) or 7 and `op2` one of 0, 1, 2, 3, 5,
+/// 7 (QEMU target/arm/tcg/tlb-insns.c `tlbi_v8_cp_reginfo`); the rest of
+/// `CRn = 8` belongs to FEAT_TLBIOS and FEAT_TLBIRANGE, absent here, so is
+/// UNDEFINED rather than a TLB flush.
+#[test]
+fn tlb_maintenance_is_the_armv8_0_set() {
+    for crm in 0..16u32 {
+        for op2 in 0..8u32 {
+            let insn = 0xD508_8000 | (crm << 8) | (op2 << 5);
+            let allocated = matches!(crm, 3 | 7) && matches!(op2, 0 | 1 | 2 | 3 | 5 | 7);
+            let expected = if allocated { None } else { Some(0x00) };
+            assert_eq!(step_exception_class(insn), expected, "sys #0, c8, c{crm}, #{op2}, x0");
+        }
+    }
+}
+
+/// FCMP and FCMPE with zero have a should-be-zero `Rm` (Arm's
+/// `FCMP_SZ_floatcmp` fixes it to 00000): another value is UNDEFINED, one
+/// of the CONSTRAINED UNPREDICTABLE behaviours the Arm ARM permits.
+#[test]
+fn compares_with_zero_need_rm_zero() {
+    for (insn, text) in [
+        (0x1E20_2028, "fcmp s1, #0.0"),
+        (0x1E20_2038, "fcmpe s1, #0.0"),
+        (0x1E60_2028, "fcmp d1, #0.0"),
+        (0x1E60_2038, "fcmpe d1, #0.0"),
+    ] {
+        assert_eq!(step_exception_class(insn), None, "{text} executes");
+        assert_eq!(step_exception_class(insn | (0b00011 << 16)), Some(0x00), "{text} with Rm = 3: UNDEFINED");
+    }
+}
+
+/// A second differential check, against disarm64 0.2 (generated from
+/// binutils' opcode table: independent of Arm's data, and needing none):
+/// every word the decoder hands to a handler that disarm64 allocates to no
+/// encoding of a feature this core implements is UNDEFINED when it
+/// executes. Arm's encodings leave reserved field values (an element size,
+/// a register type, a lane index) to the decode pseudocode, where binutils'
+/// rows leave them out; the handlers raise UNDEFINED for them. The words
+/// that execute anyway are exactly these, each a fault in disarm64's
+/// tagging of an encoding rather than a choice:
+///
+/// - the HINT space executes whatever the hint, so CHKFEAT (FEAT_CHK,
+///   Armv9.4, a hint) is a hint here;
+/// - the fixed-point conversions SCVTF, UCVTF, FCVTZS and FCVTZU by
+///   immediate are tagged FEAT_FP16 for every `immh<1>` set, but only
+///   `immh = 001x` is half precision: `immh<3:2>` nonzero is the single- or
+///   double-precision ARMv8.0 encoding.
+mod against_disarm64 {
+    use super::{step_exception_class, Stepper};
+    use crate::cpu::isa;
+    use disarm64::InsnOpcode;
+    use disarm64_defn::{InsnClass, InsnFeatureSet};
+    use std::sync::Mutex;
+    use std::vec::Vec;
+
+    /// The feature sets of disarm64's table this core implements.
+    fn implemented(set: InsnFeatureSet) -> bool {
+        matches!(set, InsnFeatureSet::V8 | InsnFeatureSet::FP | InsnFeatureSet::SIMD)
+    }
+
+    /// Which reason, if any, has `word` execute here though disarm64
+    /// allocates it to no implemented encoding.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Executes {
+        Allocated,
+        HintSpace,
+        FixedPointConversion,
+        No,
+    }
+
+    fn executes(word: u32) -> Executes {
+        let op = disarm64::decoder::decode(word);
+        let Some(d) = op.as_ref().map(|op| op.definition()) else {
+            return if word & 0xFFFF_F01F == 0xD503_201F { Executes::HintSpace } else { Executes::No };
+        };
+        if implemented(d.feature_set) {
+            return Executes::Allocated;
+        }
+        if word & 0xFFFF_F01F == 0xD503_201F {
+            return Executes::HintSpace;
+        }
+        let immh = (word >> 19) & 0xF;
+        let mistagged = d.feature_set == InsnFeatureSet::SIMD_F16
+            && matches!(d.class, InsnClass::ASIMDSHF | InsnClass::ASISDSHF)
+            && d.mask & 0x0060_0000 == 0;
+        if mistagged && immh & 0b1100 != 0 {
+            return Executes::FixedPointConversion;
+        }
+        Executes::No
+    }
+
+    #[derive(Default)]
+    struct Tally {
+        words: u64,
+        /// Words handed to a handler that disarm64 does not allocate.
+        executed_as_undefined: u64,
+        disagreements: u64,
+        hint_space: u64,
+        fixed_point: u64,
+    }
+
+    impl Tally {
+        fn add(&mut self, other: &Tally) {
+            self.words += other.words;
+            self.executed_as_undefined += other.executed_as_undefined;
+            self.disagreements += other.disagreements;
+            self.hint_space += other.hint_space;
+            self.fixed_point += other.fixed_point;
+        }
+    }
+
+    fn check(stepper: &mut Stepper, word: u32, tally: &mut Tally, first: &Mutex<Vec<u32>>) {
+        tally.words += 1;
+        if isa::decode(word).is_none() {
+            return;
+        }
+        match executes(word) {
+            Executes::Allocated => return,
+            Executes::HintSpace => {
+                tally.hint_space += 1;
+                return;
+            }
+            Executes::FixedPointConversion => {
+                tally.fixed_point += 1;
+                return;
+            }
+            Executes::No => {}
+        }
+        tally.executed_as_undefined += 1;
+        if stepper.exception_class(word) != Some(0x00) {
+            tally.disagreements += 1;
+            if let Ok(mut words) = first.lock() {
+                if words.len() < 32 {
+                    words.push(word);
+                }
+            }
+        }
+    }
+
+    fn report(tally: &Tally, first: &Mutex<Vec<u32>>) {
+        std::eprintln!(
+            "{} words; {} handed to a handler that disarm64 does not allocate, {} of them not UNDEFINED; \
+             deliberate differences from disarm64: {} HINT-space, {} fixed-point conversions",
+            tally.words,
+            tally.executed_as_undefined,
+            tally.disagreements,
+            tally.hint_space,
+            tally.fixed_point,
+        );
+        if let Ok(words) = first.lock() {
+            for &word in words.iter() {
+                let theirs = disarm64::decoder::decode(word).map(|op| op.definition());
+                std::eprintln!(
+                    "  {word:08x}: ours {:?}, exception class {:?}, disarm64 {:?}",
+                    isa::decode(word),
+                    step_exception_class(word),
+                    theirs.map(|d| (d.mnemonic, d.opcode, d.mask, d.feature_set)),
+                );
+            }
+        }
+    }
+
+    /// Every encoding the decoder's source names, 64 random instances
+    /// each, and a million random words: fast enough for every test run.
+    #[test]
+    fn words_disarm64_does_not_allocate_are_undefined_on_sampled_words() {
+        let mut stepper = Stepper::new();
+        let mut tally = Tally::default();
+        let first = Mutex::new(Vec::new());
+        let mut state = 0x5EED_u64;
+        let mut next = || {
+            state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = state;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            (z ^ (z >> 31)) as u32
+        };
+        let source = isa::spec::source();
+        assert!(source.errors.is_empty(), "{:?}", source.errors);
+        for o in source.occurrences.iter() {
+            for _ in 0..64 {
+                check(&mut stepper, o.cube.opcode | (next() & !o.cube.mask), &mut tally, &first);
+            }
+        }
+        for _ in 0..1_000_000 {
+            check(&mut stepper, next(), &mut tally, &first);
+        }
+        report(&tally, &first);
+        assert_eq!(tally.disagreements, 0);
+    }
+
+    /// The same, on all 2^32 words.
+    #[test]
+    #[ignore = "exhaustive: every 32-bit word, on every host thread"]
+    fn words_disarm64_does_not_allocate_are_undefined_on_every_word() {
+        let total = Mutex::new(Tally::default());
+        let first = Mutex::new(Vec::new());
+        let threads = std::thread::available_parallelism().map_or(4, |n| n.get()) as u64;
+        let started = std::time::Instant::now();
+        std::thread::scope(|scope| {
+            for t in 0..threads {
+                let (total, first) = (&total, &first);
+                scope.spawn(move || {
+                    let mut stepper = Stepper::new();
+                    let mut tally = Tally::default();
+                    let mut word = t;
+                    while word < 1 << 32 {
+                        check(&mut stepper, word as u32, &mut tally, first);
+                        word += threads;
+                    }
+                    if let Ok(mut total) = total.lock() {
+                        total.add(&tally);
+                    }
+                });
+            }
+        });
+        std::eprintln!("{threads} threads, {:.1} s", started.elapsed().as_secs_f64());
+        let tally = total.into_inner().unwrap_or_default();
+        report(&tally, &first);
+        assert_eq!(tally.words, 1 << 32, "every word checked once");
+        assert_eq!(tally.disagreements, 0);
+    }
+}
+
 #[derive(Default)]
 struct Tally {
     passed: usize,
@@ -368,32 +668,30 @@ enum ExpectedUndefined {
     /// core's ID_AA64ISAR0_EL1 does not advertise: AES and PMULL, SHA-1 and
     /// SHA-256, CRC32.
     AbsentExtension,
-    /// SMULH/UMULH with `Ra != 0b11111`: Ra is should-be-one, and UNDEFINED
-    /// is one of the CONSTRAINED UNPREDICTABLE behaviours the Arm ARM permits
-    /// (QEMU executes the word, ignoring Ra).
-    MulHighRaNotOnes,
+    /// A should-be field set otherwise: `Ra != 11111` in SMULH and UMULH,
+    /// `Rm != 00000` in FCMP and FCMPE with zero. UNDEFINED is one of the
+    /// CONSTRAINED UNPREDICTABLE behaviours the Arm ARM permits, and the
+    /// one Arm's encodings give (they fix the field); QEMU executes the
+    /// word, ignoring the field.
+    ShouldBeFieldSet,
 }
 
-/// The reason a word this core classifies as UNDEFINED may be, or `None`
-/// when it should have executed.
+/// The reason a word may be UNDEFINED on this core though Unicorn executed
+/// it, or `None` when it should have executed.
 fn expected_undefined(insn: u32) -> Option<ExpectedUndefined> {
-    if let Some(encoding) = isa::lookup(insn) {
-        // The vectors come from a Cortex-A57 model, so a word of any other
-        // absent feature means the encoding list misfiled an ARMv8.0
-        // encoding.
-        return match encoding.kind {
-            Kind::Absent(Feature::Aes | Feature::Pmull | Feature::Sha1 | Feature::Sha256 | Feature::Crc32) => {
-                Some(ExpectedUndefined::AbsentExtension)
-            }
-            Kind::Absent(_) | Kind::Hint | Kind::Class(_) => None,
-        };
+    // The vectors come from a Cortex-A57 model: the optional ARMv8.0
+    // extensions it has are the only features it may execute that this
+    // core lacks. disarm64 names the extension a word belongs to.
+    let extension = disarm64::decoder::decode(insn).is_some_and(|op| {
+        matches!(op.definition().feature_set, InsnFeatureSet::AES | InsnFeatureSet::SHA2 | InsnFeatureSet::CRC)
+    });
+    if extension {
+        return Some(ExpectedUndefined::AbsentExtension);
     }
-    let mul_high = insn & 0xFF60_8000 == 0x9B40_0000;
-    if mul_high && (insn >> 10) & 0x1F != 0x1F {
-        Some(ExpectedUndefined::MulHighRaNotOnes)
-    } else {
-        None
-    }
+    let mul_high_ra_set = insn & 0xFF60_8000 == 0x9B40_0000 && (insn >> 10) & 0x1F != 0x1F;
+    let compare_with_zero_rm_set =
+        insn & 0xFF20_FC0F == 0x1E20_2008 && (insn >> 22) & 0b11 < 0b10 && (insn >> 16) & 0x1F != 0;
+    (mul_high_ra_set || compare_with_zero_rm_set).then_some(ExpectedUndefined::ShouldBeFieldSet)
 }
 
 #[test]
@@ -419,17 +717,6 @@ fn every_unicorn_vector_matches_after_one_step() {
             .unwrap_or(0);
         let tally = tallies.entry(String::from(name)).or_default();
 
-        if classify(insn) == Decoded::Undefined {
-            match expected_undefined(insn) {
-                Some(_) => tally.skipped += 1,
-                None => {
-                    tally.mismatched += 1;
-                    failures.push(format!("{name} {insn:08x}: UNDEFINED here, executed by Unicorn"));
-                }
-            }
-            continue;
-        }
-
         let st = initial_state(seed, kind, insn);
         let mut cpu = Cpu::new(CpuConfig {
             ips,
@@ -442,6 +729,9 @@ fn every_unicorn_vector_matches_after_one_step() {
         cpu.v = st.v;
         cpu.fpcr = st.fpcr;
         cpu.sys.cpacr_el1 = 3 << 20;
+        // An exception class no step leaves, to tell an UNDEFINED word
+        // (EC 0x00) from one that took no exception.
+        cpu.sys.esr_el1 = 0x3F << 26;
         let mut bus = TestBus {
             insn,
             data: st.data.clone(),
@@ -454,6 +744,16 @@ fn every_unicorn_vector_matches_after_one_step() {
                 continue;
             }
             Step::Retired | Step::Waiting => {}
+        }
+        if cpu.sys.esr_el1 >> 26 == 0x00 {
+            match expected_undefined(insn) {
+                Some(_) => tally.skipped += 1,
+                None => {
+                    tally.mismatched += 1;
+                    failures.push(format!("{name} {insn:08x} `{}`: UNDEFINED here, executed by Unicorn", disassemble(insn)));
+                }
+            }
+            continue;
         }
 
         let mut want_x = st.x;

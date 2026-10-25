@@ -3,7 +3,7 @@
 
 Each vector is one instruction word from a template family plus a seed. The
 seed drives a splitmix64 stream that both this script and the Rust test
-(src/cpu/difftest.rs) turn into the same initial state: X0-X30, SP, NZCV,
+(tests/unit/difftest.rs) turn into the same initial state: X0-X30, SP, NZCV,
 V0-V31 and a 64 KiB data region (FPSR and FPCR start at zero). Unicorn
 executes the one instruction; the vector records the PC, NZCV and FPSR after
 it and only what changed of the registers and data bytes, so the file stays

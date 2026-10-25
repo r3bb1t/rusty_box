@@ -1,8 +1,7 @@
 //! Local CI gate suite.
 //!
-//! `cargo xtask ci` runs the doctrine ratchets and checks that the AArch64
-//! decode table is what its encoding list compiles to, then a fixed matrix of
-//! `cargo` steps, every one but the last a release build: tests for rusty_box_core and
+//! `cargo xtask ci` runs the doctrine ratchets, then a fixed matrix of `cargo`
+//! steps, every one but the last a release build: tests for rusty_box_core and
 //! rusty_box_devices (their no_std + no_alloc builds included) and bare-metal
 //! (`x86_64-unknown-none`) checks of both, devices with alloc; tests for
 //! rusty_box_aarch64 without features and with std, and its bare-metal check
@@ -633,20 +632,6 @@ fn doctrine_ratchets(root: &PathBuf) -> Result<(), String> {
     Ok(())
 }
 
-/// The AArch64 interpreter's decision tree is generated from its encoding
-/// list; a list edited without regenerating would leave the decoder deciding
-/// by the old one, which no compile error and no test of the list catches.
-fn a64_decode_table_is_current() -> Result<(), String> {
-    let started = Instant::now();
-    println!("==> A64 decode table is current");
-    crate::a64_decode::execute(crate::a64_decode::A64DecodeCommand { check: true })?;
-    println!(
-        "<== A64 decode table is current ok ({:.1}s)",
-        started.elapsed().as_secs_f32()
-    );
-    Ok(())
-}
-
 fn repo_root() -> Result<PathBuf, String> {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -1110,9 +1095,6 @@ pub fn execute_ci(command: CiCommand) -> Result<(), String> {
     let mut ran = 0usize;
 
     doctrine_ratchets(&root)?;
-    ran += 1;
-
-    a64_decode_table_is_current()?;
     ran += 1;
 
     for step in MATRIX {

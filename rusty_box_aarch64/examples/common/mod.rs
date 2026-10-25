@@ -15,6 +15,37 @@ use rusty_box_core::ClockHz;
 /// delivered.
 const SLICE_TICKS: u64 = 4_000_000;
 
+/// The stack the thread that builds and runs a machine is given. A
+/// `VirtMachine` is about half a megabyte (the processor's decode cache is
+/// most of it), and a build moves it by value a few times, more than the
+/// 1 MiB a Windows main thread has; tests take the same floor from
+/// `RUST_MIN_STACK` in `.cargo/config.toml`.
+const MACHINE_STACK_BYTES: usize = 16 * 1024 * 1024;
+
+/// Run `program` on a thread with [`MACHINE_STACK_BYTES`] of stack and
+/// return its exit code; a panic or a thread that cannot start is a
+/// failure.
+pub fn on_machine_thread<F>(program: F) -> ExitCode
+where
+    F: FnOnce() -> ExitCode + Send + 'static,
+{
+    let thread = std::thread::Builder::new()
+        .name("machine".to_owned())
+        .stack_size(MACHINE_STACK_BYTES)
+        .spawn(program);
+    match thread.map(std::thread::JoinHandle::join) {
+        Ok(Ok(code)) => code,
+        Ok(Err(_)) => {
+            eprintln!("the machine thread panicked");
+            ExitCode::FAILURE
+        }
+        Err(e) => {
+            eprintln!("cannot start the machine thread: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
 /// One step of the console script.
 pub enum Action {
     /// Wait until this text has appeared on the console.

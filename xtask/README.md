@@ -7,7 +7,6 @@ cargo xtask ci                   # the local gate, run before every commit
 cargo xtask ci --skip-boot       # the same, without the DLX boot gate
 cargo xtask ci --full            # also the full rusty_box test suite and a GUI release build
 cargo xtask perf-baseline        # archive a release perfbench binary for A/B runs
-cargo xtask a64-decode           # regenerate the AArch64 decode table from its encoding list
 cargo xtask android build        # Android APK, see "Android commands"
 cargo xtask --help               # usage for every subcommand
 ```
@@ -20,10 +19,10 @@ This is the local gate suite, defined in `xtask/src/ci.rs`. It runs its steps in
 
 | Invocation | Steps |
 | --- | --- |
-| `cargo xtask ci` | 33 |
-| `cargo xtask ci --skip-boot` | 32 |
-| `cargo xtask ci --full` | 35 |
-| `cargo xtask ci --full --skip-boot` | 34 |
+| `cargo xtask ci` | 32 |
+| `cargo xtask ci --skip-boot` | 31 |
+| `cargo xtask ci --full` | 34 |
+| `cargo xtask ci --full --skip-boot` | 33 |
 
 ### Prerequisites
 
@@ -46,54 +45,50 @@ This step is an in-process text scan, not a cargo command. It enforces the Safet
 
 It is a line scan, not a parser. The baseline constants and the reason each one moved are in `xtask/src/ci.rs`.
 
-### Step 2: A64 decode table is current
-
-Also in-process: it compiles the AArch64 interpreter's encoding list, `rusty_box_aarch64/src/cpu/isa/encodings.txt`, and fails unless the result is byte for byte the checked-in `table.rs` beside it. It is `cargo xtask a64-decode --check`; see that command below.
-
-### Steps 3 to 32: the build and test matrix
+### Steps 2 to 31: the build and test matrix
 
 Every step is `--release` except the debug-assertions check, which exists to compile the `#[cfg(debug_assertions)]` code that release builds leave out.
 
 | # | Step | Command |
 | --- | --- | --- |
-| 3 | core tests (no_std + no_alloc) | `cargo test --release -p rusty_box_core` |
-| 4 | core tests (alloc) | `cargo test --release -p rusty_box_core --features alloc` |
-| 5 | core tests (std) | `cargo test --release -p rusty_box_core --features std` |
-| 6 | core bare-metal target check | `cargo check --release -p rusty_box_core --target x86_64-unknown-none` |
-| 7 | devices tests (no_std + no_alloc) | `cargo test --release -p rusty_box_devices` |
-| 8 | devices tests (std) | `cargo test --release -p rusty_box_devices --features std` |
-| 9 | devices bare-metal target check | `cargo check --release -p rusty_box_devices --features alloc --target x86_64-unknown-none` |
-| 10 | aarch64 tests (no_std + no_alloc) | `cargo test --release -p rusty_box_aarch64` |
-| 11 | aarch64 tests (std) | `cargo test --release -p rusty_box_aarch64 --features std` |
-| 12 | aarch64 bare-metal target check | `cargo check --release -p rusty_box_aarch64 --features alloc --target x86_64-unknown-none` |
-| 13 | WHP sys tests | `cargo test --release -p rusty_box_whp_sys` |
-| 14 | WHP leaf tests | `cargo test --release -p rusty_box_whp` |
-| 15 | WHP probe builds | `cargo check --release -p rusty_box_whp --examples` |
-| 16 | WHP engine tests | `cargo test --release -p rusty_box_whp_engine --all-targets` |
-| 17 | decoder tests | `cargo test --release -p rusty_box_decoder` |
-| 18 | lib tests (default features) | `cargo test --release -p rusty_box --lib` |
-| 19 | no_std + no_alloc check | `cargo check --release -p rusty_box --no-default-features` |
-| 20 | no_std + alloc check | `cargo check --release -p rusty_box --no-default-features --features alloc` |
-| 21 | bare-metal target check | `cargo check --release -p rusty_box --no-default-features --target x86_64-unknown-none` |
-| 22 | UEFI example build | `cargo build --release -p rusty_box_uefi --target x86_64-unknown-uefi` |
-| 23 | wasm target check (lib, alloc) | `cargo check --release -p rusty_box --no-default-features --features alloc --target wasm32-unknown-unknown` |
-| 24 | public API examples | `cargo test --release -p rusty_box --features std --test api_examples` |
-| 25 | doc examples | `cargo test --release -p rusty_box --doc` |
-| 26 | doctrine compile-fail fixtures | `cargo test --release -p rusty_box --features std --test compile_fail` |
-| 27 | GUI wasm target check | `cargo check --release -p rusty_box_gui --target wasm32-unknown-unknown` |
-| 28 | GUI host check, tests included | `cargo check --release -p rusty_box_gui --all-targets` |
-| 29 | GUI guest-trace check, tests included | `cargo check --release -p rusty_box_gui --features guest-trace --all-targets` |
-| 30 | GUI guest-trace tests | `cargo test --release -p rusty_box_gui --features guest-trace --lib guest_trace` |
-| 31 | all-features check | `cargo check --release -p rusty_box --all-features` |
-| 32 | debug-assertions check (all targets, all features) | `cargo check -p rusty_box --all-targets --all-features` |
+| 2 | core tests (no_std + no_alloc) | `cargo test --release -p rusty_box_core` |
+| 3 | core tests (alloc) | `cargo test --release -p rusty_box_core --features alloc` |
+| 4 | core tests (std) | `cargo test --release -p rusty_box_core --features std` |
+| 5 | core bare-metal target check | `cargo check --release -p rusty_box_core --target x86_64-unknown-none` |
+| 6 | devices tests (no_std + no_alloc) | `cargo test --release -p rusty_box_devices` |
+| 7 | devices tests (std) | `cargo test --release -p rusty_box_devices --features std` |
+| 8 | devices bare-metal target check | `cargo check --release -p rusty_box_devices --features alloc --target x86_64-unknown-none` |
+| 9 | aarch64 tests (no_std + no_alloc) | `cargo test --release -p rusty_box_aarch64` |
+| 10 | aarch64 tests (std) | `cargo test --release -p rusty_box_aarch64 --features std` |
+| 11 | aarch64 bare-metal target check | `cargo check --release -p rusty_box_aarch64 --features alloc --target x86_64-unknown-none` |
+| 12 | WHP sys tests | `cargo test --release -p rusty_box_whp_sys` |
+| 13 | WHP leaf tests | `cargo test --release -p rusty_box_whp` |
+| 14 | WHP probe builds | `cargo check --release -p rusty_box_whp --examples` |
+| 15 | WHP engine tests | `cargo test --release -p rusty_box_whp_engine --all-targets` |
+| 16 | decoder tests | `cargo test --release -p rusty_box_decoder` |
+| 17 | lib tests (default features) | `cargo test --release -p rusty_box --lib` |
+| 18 | no_std + no_alloc check | `cargo check --release -p rusty_box --no-default-features` |
+| 19 | no_std + alloc check | `cargo check --release -p rusty_box --no-default-features --features alloc` |
+| 20 | bare-metal target check | `cargo check --release -p rusty_box --no-default-features --target x86_64-unknown-none` |
+| 21 | UEFI example build | `cargo build --release -p rusty_box_uefi --target x86_64-unknown-uefi` |
+| 22 | wasm target check (lib, alloc) | `cargo check --release -p rusty_box --no-default-features --features alloc --target wasm32-unknown-unknown` |
+| 23 | public API examples | `cargo test --release -p rusty_box --features std --test api_examples` |
+| 24 | doc examples | `cargo test --release -p rusty_box --doc` |
+| 25 | doctrine compile-fail fixtures | `cargo test --release -p rusty_box --features std --test compile_fail` |
+| 26 | GUI wasm target check | `cargo check --release -p rusty_box_gui --target wasm32-unknown-unknown` |
+| 27 | GUI host check, tests included | `cargo check --release -p rusty_box_gui --all-targets` |
+| 28 | GUI guest-trace check, tests included | `cargo check --release -p rusty_box_gui --features guest-trace --all-targets` |
+| 29 | GUI guest-trace tests | `cargo test --release -p rusty_box_gui --features guest-trace --lib guest_trace` |
+| 30 | all-features check | `cargo check --release -p rusty_box --all-features` |
+| 31 | debug-assertions check (all targets, all features) | `cargo check -p rusty_box --all-targets --all-features` |
 
 Notes on specific steps:
 
-- **AArch64 steps (10 to 12)** run the interpreter's unit tests (the Unicorn vector replay and a sampled form of the decoder's equivalence with disarm64 among them), its integration tests, and with `std` the Rust blocks of [`docs/aarch64-automation.md`](../docs/aarch64-automation.md), which `rusty_box_aarch64/src/lib.rs` includes behind `#[cfg(all(doctest, feature = "std"))]`. The exhaustive equivalence over all 2^32 words and the encoding coverage report are ignored tests; [`rusty_box_aarch64/README.md`](../rusty_box_aarch64/README.md) says how to run them.
-- **WHP steps (13 to 16)** need no hypervisor. The sys and wrapper tests cover layouts and arithmetic. Engine tests that need hardware skip themselves on a host without it. `--all-targets` on step 16 also compiles the engine's example harnesses.
-- **Doc examples (step 25)** compile the crate's doc comments and the Rust blocks of [`docs/automation.md`](../docs/automation.md), which `rusty_box/src/lib.rs` includes behind `#[cfg(doctest)]`. An example in that guide that names a signature the crate does not have fails here.
-- **Compile-fail fixtures (step 26)** are the doctrine's trybuild tests. Their goldens are rustc's rendered diagnostics, so they change when the quoted code or the toolchain changes. Once you have confirmed the rule still holds, regenerate them with `TRYBUILD=overwrite cargo test --release -p rusty_box --features std --test compile_fail`.
-- **Guest-trace steps (29 and 30)** cover `rusty_box_gui/src/guest_trace.rs`, which only the `guest-trace` feature compiles. Step 30 passes only if its stdout shows `test guest_trace::tests::flight_dump_names_the_opcodes_it_recorded ... ok`, so a test filter that matches nothing fails it.
+- **AArch64 steps (9 to 11)** run the interpreter's unit tests (the Unicorn vector replay among them), its integration tests, and with `std` the Rust blocks of [`docs/aarch64-automation.md`](../docs/aarch64-automation.md), which `rusty_box_aarch64/src/lib.rs` includes behind `#[cfg(all(doctest, feature = "std"))]`. With `RUSTY_BOX_AARCHMRS` naming an unpacked copy of Arm's machine-readable specification (AARCHMRS), steps 9 and 10 also check the A64 decoder against it (`rusty_box_aarch64/tests/unit/spec.rs`); without it those tests are ignored.
+- **WHP steps (12 to 15)** need no hypervisor. The sys and wrapper tests cover layouts and arithmetic. Engine tests that need hardware skip themselves on a host without it. `--all-targets` on step 15 also compiles the engine's example harnesses.
+- **Doc examples (step 24)** compile the crate's doc comments and the Rust blocks of [`docs/automation.md`](../docs/automation.md), which `rusty_box/src/lib.rs` includes behind `#[cfg(doctest)]`. An example in that guide that names a signature the crate does not have fails here.
+- **Compile-fail fixtures (step 25)** are the doctrine's trybuild tests. Their goldens are rustc's rendered diagnostics, so they change when the quoted code or the toolchain changes. Once you have confirmed the rule still holds, regenerate them with `TRYBUILD=overwrite cargo test --release -p rusty_box --features std --test compile_fail`.
+- **Guest-trace steps (28 and 29)** cover `rusty_box_gui/src/guest_trace.rs`, which only the `guest-trace` feature compiles. Step 29 passes only if its stdout shows `test guest_trace::tests::flight_dump_names_the_opcodes_it_recorded ... ok`, so a test filter that matches nothing fails it.
 
 ### `--full`: two more steps
 
@@ -130,10 +125,6 @@ This command takes no options; anything written after it is ignored. It does thr
 3. Prints the archived path.
 
 Use it for interleaved A/B runs: alternate the baseline and candidate binaries for at least 10 pairs and compare the medians. `perfbench` runs a synthetic guest workload and needs no ROMs or disk images. The `PERFBENCH_MODE`, `PERFBENCH_INSN`, `PERFBENCH_CPUS` and `PERFBENCH_QUANTUM` environment variables select what it runs (see the environment-variable table in [`rusty_box/examples/README.md`](../rusty_box/examples/README.md)).
-
-## `cargo xtask a64-decode [--check]`
-
-Compiles `rusty_box_aarch64/src/cpu/isa/encodings.txt`, the AArch64 interpreter's list of A64 encodings, into `table.rs` beside it: the rows as a static table, and a decision tree that finds the matching row with the most fixed bits. The generator is `xtask/src/a64_decode.rs`, whose module documentation gives the list's syntax. It refuses a list whose row does not keep the bits its class's Arm ARM diagram fixes, whose rows repeat an encoding, or where two rows a word can match fix the same number of bits. Edit the list, run the command, and commit both files. With `--check` it writes nothing and fails when `table.rs` is not what the list compiles to; that is step 2 of `cargo xtask ci`.
 
 ## Android commands
 

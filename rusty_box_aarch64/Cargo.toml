@@ -14,12 +14,18 @@ rusty_box_core = { workspace = true }
 [dev-dependencies]
 # Tests save snapshots into a `Vec<u8>`, which is a snapshot sink with `alloc`.
 rusty_box_core = { workspace = true, features = ["alloc"] }
-# An independent A64 decoder, generated from binutils' opcode table: the
-# reference the encoding list is proven equivalent to (src/cpu/decode.rs) and
-# measured against (tests/encoding_coverage.rs), and the disassembler for the
-# Unicorn replay's failure messages. Never a dependency of the library.
+# An independent A64 decoder, generated from binutils' opcode table: what
+# every encoding of an advertised feature is checked to execute against
+# (tests/encoding_coverage.rs), what every word the decoder accepts that it
+# does not allocate is checked to be UNDEFINED against (tests/unit/difftest.rs),
+# and the disassembler for the Unicorn replay's failure messages. Never a
+# dependency of the library.
 disarm64 = { version = "0.2", default-features = false, features = ["full"] }
 disarm64_defn = { version = "0.2", default-features = false }
+# Read the decoder's own source (syn) and Arm's machine-readable specification
+# (serde_json) for the conformance tests in tests/unit/spec.rs.
+syn = { version = "2", default-features = false, features = ["full", "parsing"] }
+serde_json = "1"
 
 [features]
 default = []

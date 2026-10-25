@@ -3788,6 +3788,8 @@ dependencies = [
  "disarm64",
  "disarm64_defn",
  "rusty_box_core",
+ "serde_json",
+ "syn 2.0.117",
 ]
 
 [[package]]

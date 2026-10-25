@@ -1,17 +1,16 @@
 //! Fetch, decode and dispatch: one call of [`Cpu::step`] executes one
 //! instruction or takes one exception.
 //!
-//! Decoding is split in two. The classifier (`decode.rs`, over the encoding
-//! list in `isa/`) finds the word's A64 encoding and the Arm ARM encoding
-//! class it belongs to, and makes an encoding of a feature this core lacks
-//! UNDEFINED; the handler for that *class* then reads every operand field
+//! Decoding is split in two. The decoder (`isa/`, cached by `decode.rs`)
+//! finds the word's A64 encoding, if it is one of a feature this core
+//! implements, and the handler class that executes it; anything else is
+//! UNDEFINED. The handler for that *class* then reads every operand field
 //! from the word itself, following the field layout and decode pseudocode of
 //! the Arm ARM. A class handler therefore covers its whole encoding group,
-//! and a field the classifier does not expose cannot be misread through it.
+//! and a field the decoder does not expose cannot be misread through it.
 
 use rusty_box_core::VmClock;
 
-use super::decode::Decoded;
 use super::exception::{Exception, ExceptionClass};
 use super::isa::Class;
 use super::ldst::SingleForm;
@@ -88,7 +87,7 @@ pub struct UndefinedInsn {
 ///
 /// Closed (R5): the machine maps each variant onto its own `StopReason`.
 /// No variant says an encoding has no handler: dispatch matches every
-/// encoding class the classifier can return, so that cannot happen.
+/// class the decoder can return, so that cannot happen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StopCause {
     /// The instruction is UNDEFINED and the machine was configured to stop on
@@ -237,14 +236,9 @@ impl Cpu {
         let insn = fetched.word;
         *fetched_word = Some(insn);
         bus.observer.before_execution(pc, insn);
-        let class = match self.decode_cache.decode(fetched.pa, insn) {
-            Decoded::Hint => return self.exec_hint(insn, pc),
-            Decoded::Undefined => return self.undefined(pc, insn),
-            Decoded::Class(class) => class,
-        };
-        match class {
-            // UDF: the Undefined Instruction exception, by definition.
-            Class::PermanentlyUndefined => self.undefined(pc, insn),
+        match self.decode_cache.decode(fetched.pa, insn) {
+            Class::Undefined => self.undefined(pc, insn),
+            Class::Hint => self.exec_hint(insn, pc),
             Class::AddSubImmediate => self.exec_addsub_imm(pc, insn),
             Class::AddSubShiftedRegister => self.exec_addsub_shift(pc, insn),
             Class::AddSubExtendedRegister => self.exec_addsub_ext(pc, insn),

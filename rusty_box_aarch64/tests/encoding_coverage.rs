@@ -9,9 +9,8 @@
 //! enabled (`CPACR_EL1.FPEN = 0b11`) and UNDEFINED stopping the machine. A
 //! row *executes* when some instance retires (an exception it raises, such as
 //! a data abort or `SVC`, counts) and is *UNDEFINED* when every instance is.
-//! No outcome says an encoding has no handler: dispatch matches every
-//! encoding class the classifier returns, so the machine cannot stop for
-//! that.
+//! No outcome says an encoding has no handler: dispatch matches every class
+//! the decoder returns, so the machine cannot stop for that.
 //!
 //! The property asserted is the guest-visible one (R9): every encoding of a
 //! feature set this processor model advertises executes, except the ones
@@ -21,9 +20,12 @@
 //! double-precision words of the fixed-point conversions disarm64 files
 //! under FEAT_FP16.
 //!
-//! Ignored by default: it needs disarm64's source in the cargo registry
-//! (`$CARGO_HOME/registry/src/*/disarm64-0.2.*`). Run it with
-//! `cargo test --release -p rusty_box_aarch64 --features std --test encoding_coverage -- --ignored --nocapture`.
+//! It reads disarm64's source from the cargo registry
+//! (`$CARGO_HOME/registry/src/*/disarm64-0.2.*`, which building the tests
+//! fetches), and runs with every test run: it is the check, needing no Arm
+//! data, that no encoding of an advertised feature has gone missing from the
+//! decoder. `cargo test --release -p rusty_box_aarch64 --features std --test
+//! encoding_coverage -- --nocapture` prints the table.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -85,12 +87,18 @@ const UNDEFINED_AT_EL1: &[(&str, &str)] = &[
 const PINNED: &[(&str, u32, &str)] = &[
     ("mrs", 0xD538_0000, "mrs x0, midr_el1"),
     ("msr", 0xD518_D080, "msr tpidr_el1, x0"),
+    // The ARMv8.0 SYS operations reachable from EL1 (AT, DC, IC, TLBI) are
+    // 27 of the 2^14 op1:CRn:CRm:op2 values.
+    ("sys", 0xD508_871F, "tlbi vmalle1"),
 ];
 
 fn registry_file() -> Option<PathBuf> {
+    // Cargo's own resolution: CARGO_HOME (which rustup sets for every
+    // process it starts), else `.cargo` in the home directory.
     let cargo_home = std::env::var_os("CARGO_HOME")
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| Path::new(&h).join(".cargo")))?;
+        .or_else(|| std::env::var_os("HOME").map(|h| Path::new(&h).join(".cargo")))
+        .or_else(|| std::env::var_os("USERPROFILE").map(|h| Path::new(&h).join(".cargo")))?;
     let src = cargo_home.join("registry").join("src");
     for index in std::fs::read_dir(src).ok()?.flatten() {
         for krate in std::fs::read_dir(index.path()).ok()?.flatten() {
@@ -235,7 +243,6 @@ struct Tally {
 }
 
 #[test]
-#[ignore = "reads disarm64's source from the cargo registry; run with --ignored"]
 fn every_encoding_of_an_advertised_feature_executes_and_every_other_is_undefined() {
     let path = registry_file().expect("disarm64 0.2 is in the cargo registry");
     let source = std::fs::read_to_string(&path).expect("decoder_full.rs is readable");
