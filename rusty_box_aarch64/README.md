@@ -110,8 +110,8 @@ vocabulary are `rusty_box_core`'s, shared with the x86 machine.
   at all (the bus says which, and counts the flash writes that could
   change it). Every instruction a trace runs is fetched, checked, executed
   and reported to an observer exactly as one at a time would be, so a run
-  ends in the same state either way: the equivalence hashes in the speed
-  table below are equal before and after. The one exception is the counter
+  ends in the same state either way (the speed section lists the boots'
+  state hashes). The one exception is the counter
   poll, below: when the observer does not hear of every instruction, whole
   iterations of a poll may be skipped, unfetched and unreported, leaving
   exactly the state running them would leave.
@@ -160,30 +160,38 @@ cache (5028db8).
 
 | Workload | Before | Now | |
 |---|---:|---:|---:|
-| `alu` | 73.8 | 163.2 | 2.21× |
-| `alu`, hooked | 70.5 | 149.9 | 2.13× |
-| `memcpy` (`ldp`/`stp`) | 41.6 | 67.3 | 1.62× |
-| `memcpy`, hooked | 39.7 | 68.5 | 1.73× |
-| `fnv` (byte loads, `mul`) | 79.9 | 123.9 | 1.55× |
-| `fnv`, hooked | 75.2 | 123.4 | 1.64× |
-| `fp` (`fmadd`/`fmul`/`fadd`) | 55.2 | 81.3 | 1.47× |
-| `fp`, hooked | 55.3 | 78.3 | 1.42× |
-| EDK2 (AAVMF) to `Shell>` | 69.7 | 100.4 | 1.44× |
-| Linux 6.18 + initramfs to `login:` | 50.9 | 76.8 | 1.51× |
-| Alpine 3.23 with its root on virtio-blk, logged in (`linux_virt`; one run each, M ticks/s) | 50.1 | 77.6 | 1.55× |
+| `alu` | 77.2 | 204.3 | 2.65× |
+| `alu`, hooked | 73.3 | 196.8 | 2.68× |
+| `memcpy` (`ldp`/`stp`) | 43.2 | 101.3 | 2.34× |
+| `memcpy`, hooked | 41.8 | 94.8 | 2.27× |
+| `fnv` (byte loads, `mul`) | 78.3 | 172.0 | 2.20× |
+| `fnv`, hooked | 75.8 | 165.0 | 2.18× |
+| `fp` (`fmadd`/`fmul`/`fadd`) | 55.3 | 108.1 | 1.96× |
+| `fp`, hooked | 56.8 | 110.1 | 1.94× |
+| EDK2 (AAVMF) to `Shell>` | 73.6 | 237.1 | 3.22× |
+| Linux 6.18 + initramfs to `login:` | 52.6 | 106.8 | 2.03× |
+| Alpine 3.23 with its root on virtio-blk, logged in (`linux_virt`; one run each, M ticks/s) | 51.9 | 102.7 | 1.98× |
 
-On this host one loop's figure moves by up to 13% with code layout alone:
-a change to code no loop executes measured `alu`, hooked, at 0.90× and
-`memcpy` at 0.87× of its parent. Read a single row's ratio to about that
-precision; `fnv` measured 1.87× on an earlier build of the same design.
+`fp` is the one row short of the 2× set as the loops' target (the boots'
+was 1.5×). EDK2's figure counts the instructions of the counter polls it
+fast-forwards as executed, since the guest retires them.
 
-Every run ends in the same state before and after; for the boots, the state
-hashes at 10M, 100M and 400M instructions are:
+On this host (an AVX-512 Xeon) a loop's ratio moves by up to about ±10%
+with branch placement alone: one change measured `alu` at 0.87× and
+`memcpy` at 0.84× of its parent in the default build, and at 1.03× and
+1.09× with both binaries built with
+`-C llvm-args=-x86-branches-within-32B-boundaries`, from the same source.
+Read a single row's ratio to about that precision.
+
+Fixes to the processor and the board since 5028db8 change where its runs
+end; the speed work since d21b7e9 changes none, and every run ends in the
+same state on d21b7e9 and now. For the boots, the state hashes at 10M,
+100M and 400M instructions are:
 
 | | 10M | 100M | 400M |
 |---|---|---|---|
-| EDK2 | `9cf8cd4686ce4463` | `e3e98f8e2c20afc7` | `cd35ddd4435e80fd` |
-| Linux | `55803c9740c289d7` | `f573c06f44a5c887` | `13aa27f25afc0dea` |
+| EDK2 | `3eddc8be457d3db9` | `0eb363d26f0e7495` | `a7ab2001870414d5` |
+| Linux | `200880268c21867e` | `55417910c35ae1c8` | `dc93af98dd7df3cb` |
 
 ## What is modelled
 
