@@ -10,6 +10,10 @@
 //! - cancellation;
 //! - products and quotients that round up to the smallest normal.
 //!
+//! A fused multiply-add is checked the same way, with addends that cancel
+//! the product down to its rounding error, near the smallest normal, and
+//! addends at the smallest normal with products below its last bit.
+//!
 //! The pure SoftFloat routines are the reference. The surface functions
 //! in `softfloat/mod.rs` try the host first.
 
@@ -236,5 +240,180 @@ fn the_host_computes_what_softfloat_computes_wherever_it_answers() {
         assert!(reach.accepted >= 150_000, "{name}: {reach:?}");
         assert!(reach.near_smallest_normal >= 1_000, "{name}: {reach:?}");
         assert!(reach.underflowed >= 1_000, "{name}: {reach:?}");
+    }
+}
+
+/// The fused multiply-add, which the host computes only with `std`.
+#[cfg(feature = "std")]
+mod fused {
+    use super::super::super::{f32_mul_add, f64_mul_add, ArmFpStatus};
+    use super::super::{f32_fused, f64_fused};
+    use super::{fpcr, Reach, SplitMix64, FPSR_IXC};
+
+    /// A binary64 multiply-add `[addend, n, m]`.
+    ///
+    /// On half the draws the product of normal `n` and `m` is anywhere,
+    /// and on one in four of those one operand is then made a subnormal, a
+    /// zero, an infinity or a NaN. On a quarter the product is near
+    /// `2^-970`, where its rounding error is near the smallest normal. On a
+    /// quarter it is near `2^-1075`, below the smallest normal's last bit,
+    /// and the addend is the smallest normal or a few ulps above it, of
+    /// either sign, so that the exact sum may lie just below the smallest
+    /// normal and round up to it. On the other draws the addend is any
+    /// normal number, or, when `cancel` asks for it, the host's rounded
+    /// `-(n*m)` moved by -4 to 3 ulps, which leaves the product's rounding
+    /// error and those ulps.
+    fn triple64(rng: &mut SplitMix64, cancel: bool) -> [u64; 3] {
+        const SIGN: u64 = 1 << 63;
+        const MAN: u64 = (1 << 52) - 1;
+        const EXP: u64 = 0x7FF << 52;
+        let r = rng.next();
+        let (x, y, z) = (rng.next(), rng.next(), rng.next());
+        let number = |v: u64, exp: u64| (v & SIGN) | (exp << 52) | (v & MAN);
+        // `n` and `m` whose biased exponents add up to `sum`: a product from
+        // `2^(sum - 2046)` to just under four times that.
+        let multiplicands = |sum: u64| {
+            let lo = sum.saturating_sub(2046).max(1);
+            let hi = (sum - 1).min(2046);
+            let en = lo + (r >> 8) % (hi - lo + 1);
+            [number(y, en), number(z, sum - en)]
+        };
+        let [n, m] = match r % 8 {
+            0..=3 => [number(y, 1 + (r >> 8) % 2046), number(z, 1 + (r >> 20) % 2046)],
+            4 | 5 => multiplicands(1072 + (r >> 32) % 8),
+            _ => {
+                let [n, m] = multiplicands(969 + (r >> 32) % 8);
+                return [(x & SIGN) | (1 << 52) | ((x >> 8) % 4), n, m];
+            }
+        };
+        let addend = if cancel {
+            let product = (-(f64::from_bits(n) * f64::from_bits(m))).to_bits();
+            ((product & !SIGN).wrapping_add(x & 7).wrapping_sub(4)) | (product & SIGN)
+        } else {
+            number(x, 1 + (x >> 52) % 2046)
+        };
+        let mut triple = [addend, n, m];
+        if r % 8 == 3 {
+            // The operand keeps its sign, and its fraction where it has one.
+            let v = triple[((r >> 40) % 3) as usize];
+            triple[((r >> 40) % 3) as usize] = match (r >> 44) % 4 {
+                0 => (v & SIGN) | (v & MAN).max(1),
+                1 => v & SIGN,
+                2 => (v & SIGN) | EXP,
+                _ => (v & SIGN) | EXP | (v & MAN).max(1),
+            };
+        }
+        triple
+    }
+
+    /// A binary32 multiply-add `[addend, n, m]`, drawn as [`triple64`]
+    /// draws one: products anywhere, near `2^-103` and near `2^-150`.
+    fn triple32(rng: &mut SplitMix64, cancel: bool) -> [u32; 3] {
+        const SIGN: u32 = 1 << 31;
+        const MAN: u32 = (1 << 23) - 1;
+        const EXP: u32 = 0xFF << 23;
+        let r = rng.next();
+        let (x, y, z) = (rng.next(), rng.next() as u32, rng.next() as u32);
+        let number = |v: u32, exp: u64| (v & SIGN) | ((exp as u32) << 23) | (v & MAN);
+        let multiplicands = |sum: u64| {
+            let lo = sum.saturating_sub(254).max(1);
+            let hi = (sum - 1).min(254);
+            let en = lo + (r >> 8) % (hi - lo + 1);
+            [number(y, en), number(z, sum - en)]
+        };
+        let [n, m] = match r % 8 {
+            0..=3 => [number(y, 1 + (r >> 8) % 254), number(z, 1 + (r >> 20) % 254)],
+            4 | 5 => multiplicands(147 + (r >> 32) % 8),
+            _ => {
+                let [n, m] = multiplicands(102 + (r >> 32) % 8);
+                return [(x as u32 & SIGN) | (1 << 23) | ((x >> 8) % 4) as u32, n, m];
+            }
+        };
+        let addend = if cancel {
+            let product = (-(f32::from_bits(n) * f32::from_bits(m))).to_bits();
+            ((product & !SIGN).wrapping_add(x as u32 & 7).wrapping_sub(4)) | (product & SIGN)
+        } else {
+            number(x as u32, 1 + (x >> 32) % 254)
+        };
+        let mut triple = [addend, n, m];
+        if r % 8 == 3 {
+            let v = triple[((r >> 40) % 3) as usize];
+            triple[((r >> 40) % 3) as usize] = match (r >> 44) % 4 {
+                0 => (v & SIGN) | (v & MAN).max(1),
+                1 => v & SIGN,
+                2 => (v & SIGN) | EXP,
+                _ => (v & SIGN) | EXP | (v & MAN).max(1),
+            };
+        }
+        triple
+    }
+
+    #[test]
+    fn the_host_fuses_what_softfloat_fuses_wherever_it_answers() {
+        let mut rng = SplitMix64(0x0F05_ED00_0003_A11D);
+        let mut reach64 = Reach::default();
+        let mut reach32 = Reach::default();
+        for i in 0..300_000u32 {
+            // Even draws add any addend, odd ones cancel the product.
+            let cancel = i % 2 == 1;
+            let draw = rng.next();
+            let statuses = [
+                ArmFpStatus::with_fpsr(fpcr(draw & 0b1100), FPSR_IXC),
+                ArmFpStatus::with_fpsr(fpcr(draw >> 4), if draw & (1 << 8) != 0 { FPSR_IXC } else { 0 }),
+            ];
+
+            let [addend, n, m] = triple64(&mut rng, cancel);
+            for (k, fp) in statuses.iter().enumerate() {
+                let mut soft = *fp;
+                let want = f64_mul_add::f64_mul_add(n, m, addend, &mut soft.status);
+                match f64_fused(addend, n, m, fp) {
+                    Some(got) => {
+                        assert_eq!(got, want, "f64 {addend:#018x} + {n:#018x} * {m:#018x} under {fp:?}");
+                        assert_eq!(soft, *fp, "f64 {addend:#018x} + {n:#018x} * {m:#018x}: SoftFloat raised more");
+                        reach64.accepted += 1;
+                        if want & !(1 << 63) < 2 * f64::MIN_POSITIVE.to_bits() {
+                            reach64.near_smallest_normal += 1;
+                        }
+                    }
+                    None => {
+                        let normal = |v: u64| (1..0x7FF).contains(&((v >> 52) & 0x7FF));
+                        let operands_normal = normal(addend) && normal(n) && normal(m);
+                        if k == 0 && operands_normal && soft.cumulative_fpsr() & (1 << 3) != 0 {
+                            reach64.underflowed += 1;
+                        }
+                    }
+                }
+            }
+
+            let [addend, n, m] = triple32(&mut rng, cancel);
+            for (k, fp) in statuses.iter().enumerate() {
+                let mut soft = *fp;
+                let want = f32_mul_add::f32_mul_add(n, m, addend, &mut soft.status);
+                match f32_fused(addend, n, m, fp) {
+                    Some(got) => {
+                        assert_eq!(got, want, "f32 {addend:#010x} + {n:#010x} * {m:#010x} under {fp:?}");
+                        assert_eq!(soft, *fp, "f32 {addend:#010x} + {n:#010x} * {m:#010x}: SoftFloat raised more");
+                        reach32.accepted += 1;
+                        if want & !(1 << 31) < 2 * f32::MIN_POSITIVE.to_bits() {
+                            reach32.near_smallest_normal += 1;
+                        }
+                    }
+                    None => {
+                        let normal = |v: u32| (1..0xFF).contains(&((v >> 23) & 0xFF));
+                        let operands_normal = normal(addend) && normal(n) && normal(m);
+                        if k == 0 && operands_normal && soft.cumulative_fpsr() & (1 << 3) != 0 {
+                            reach32.underflowed += 1;
+                        }
+                    }
+                }
+            }
+        }
+        // The host answered often, right up to the smallest normal, and the
+        // draws reached the results it must leave to SoftFloat.
+        for (name, reach) in [("f64", &reach64), ("f32", &reach32)] {
+            assert!(reach.accepted >= 100_000, "{name}: {reach:?}");
+            assert!(reach.near_smallest_normal >= 1_000, "{name}: {reach:?}");
+            assert!(reach.underflowed >= 1_000, "{name}: {reach:?}");
+        }
     }
 }

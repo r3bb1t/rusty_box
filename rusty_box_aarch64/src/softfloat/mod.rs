@@ -349,6 +349,9 @@ pub(crate) fn f32_sqrt(a: u32, fp: &mut ArmFpStatus) -> u32 {
 pub(crate) fn f32_mul_add(form: FusedMulAdd, addend: u32, n: u32, m: u32, fp: &mut ArmFpStatus) -> u32 {
     let addend = if form.negates_addend() { addend ^ 0x8000_0000 } else { addend };
     let n = if form.negates_multiplicand() { n ^ 0x8000_0000 } else { n };
+    if let Some(fused) = host::f32_fused(addend, n, m, fp) {
+        return fused;
+    }
     let s = &mut fp.status;
     let addend = f32_flush_input(addend, s);
     let n = f32_flush_input(n, s);
@@ -465,6 +468,9 @@ pub(crate) fn f64_mul_add(form: FusedMulAdd, addend: u64, n: u64, m: u64, fp: &m
     const SIGN: u64 = 0x8000_0000_0000_0000;
     let addend = if form.negates_addend() { addend ^ SIGN } else { addend };
     let n = if form.negates_multiplicand() { n ^ SIGN } else { n };
+    if let Some(fused) = host::f64_fused(addend, n, m, fp) {
+        return fused;
+    }
     let s = &mut fp.status;
     let addend = f64_flush_input(addend, s);
     let n = f64_flush_input(n, s);

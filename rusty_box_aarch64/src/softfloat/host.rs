@@ -24,6 +24,14 @@
 //! inexact, which is already set. Every other case is `None`, and SoftFloat
 //! computes it.
 //!
+//! A fused multiply-add follows the same rule, with all three operands
+//! normal. The Arm ARM's FPMulAdd rounds the exact `addend + n*m` once
+//! (FPRound), as SoftFloat's `f64_mulAdd`/`f32_mulAdd` and IEEE 754-2019
+//! fusedMultiplyAdd do, so the result bound means for it what it means
+//! above; it also leaves out an exact zero, whose sign FPMulAdd chooses
+//! by a rule of its own. The host's fusedMultiplyAdd is Rust's `mul_add`,
+//! which needs `std`; without it every fused multiply-add is `None`.
+//!
 //! Rust's `f32` and `f64` arithmetic is IEEE 754 binary32 and binary64,
 //! rounding to nearest even, on every target but 32-bit x86 without SSE2:
 //! there x87 rounds twice, and this module answers `None`.
@@ -85,10 +93,23 @@ pub(super) fn f64_arith(op: Arith, a: u64, b: u64, fp: &ArmFpStatus) -> Option<u
         Arith::Div => x / y,
     }
     .to_bits();
-    // The magnitude, above the smallest normal and below infinity (a NaN's
-    // magnitude is above infinity's).
+    f64_bounded(r)
+}
+
+/// The binary64 result `r`, if its magnitude is above the smallest normal
+/// and below infinity (a NaN's magnitude is above infinity's).
+#[inline(always)]
+fn f64_bounded(r: u64) -> Option<u64> {
     let magnitude = r & !(1 << 63);
     (magnitude > f64::MIN_POSITIVE.to_bits() && magnitude < f64::INFINITY.to_bits()).then_some(r)
+}
+
+/// The binary32 result `r`, if its magnitude is above the smallest normal
+/// and below infinity.
+#[inline(always)]
+fn f32_bounded(r: u32) -> Option<u32> {
+    let magnitude = r & !(1 << 31);
+    (magnitude > f32::MIN_POSITIVE.to_bits() && magnitude < f32::INFINITY.to_bits()).then_some(r)
 }
 
 /// `a op b` in binary32, if the host computes it as SoftFloat does.
@@ -105,6 +126,43 @@ pub(super) fn f32_arith(op: Arith, a: u32, b: u32, fp: &ArmFpStatus) -> Option<u
         Arith::Div => x / y,
     }
     .to_bits();
-    let magnitude = r & !(1 << 31);
-    (magnitude > f32::MIN_POSITIVE.to_bits() && magnitude < f32::INFINITY.to_bits()).then_some(r)
+    f32_bounded(r)
+}
+
+/// `addend + n * m` in binary64, rounded once, if the host computes it as
+/// SoftFloat does (Arm ARM FPMulAdd; IEEE 754-2019 fusedMultiplyAdd).
+#[cfg(feature = "std")]
+#[inline(always)]
+pub(super) fn f64_fused(addend: u64, n: u64, m: u64, fp: &ArmFpStatus) -> Option<u64> {
+    if !(host_may_round(fp) && f64_normal(addend) && f64_normal(n) && f64_normal(m)) {
+        return None;
+    }
+    f64_bounded(f64::from_bits(n).mul_add(f64::from_bits(m), f64::from_bits(addend)).to_bits())
+}
+
+/// Without `std` the host has no fused multiply-add: SoftFloat computes
+/// every one.
+#[cfg(not(feature = "std"))]
+#[inline(always)]
+pub(super) fn f64_fused(_addend: u64, _n: u64, _m: u64, _fp: &ArmFpStatus) -> Option<u64> {
+    None
+}
+
+/// `addend + n * m` in binary32, rounded once, if the host computes it as
+/// SoftFloat does (Arm ARM FPMulAdd; IEEE 754-2019 fusedMultiplyAdd).
+#[cfg(feature = "std")]
+#[inline(always)]
+pub(super) fn f32_fused(addend: u32, n: u32, m: u32, fp: &ArmFpStatus) -> Option<u32> {
+    if !(host_may_round(fp) && f32_normal(addend) && f32_normal(n) && f32_normal(m)) {
+        return None;
+    }
+    f32_bounded(f32::from_bits(n).mul_add(f32::from_bits(m), f32::from_bits(addend)).to_bits())
+}
+
+/// Without `std` the host has no fused multiply-add: SoftFloat computes
+/// every one.
+#[cfg(not(feature = "std"))]
+#[inline(always)]
+pub(super) fn f32_fused(_addend: u32, _n: u32, _m: u32, _fp: &ArmFpStatus) -> Option<u32> {
+    None
 }
