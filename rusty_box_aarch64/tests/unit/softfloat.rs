@@ -481,6 +481,7 @@ fn flush_to_zero_flushes_inputs_and_tiny_results() {
     assert_eq!(fp.cumulative_fpsr(), UFC);
     let mut fp = status_with(FZ);
     assert_eq!(f32_sub(0x0178_0000, 0x0100_0000, &mut fp), 0x00F0_0000);
+    assert_eq!(f32_sub(0x01F0_4AC3, 0x01C3_8956, &mut fp), 0x00B3_05B4);
     assert_eq!(f32_sub(0x0140_0000, 0x0100_0000, &mut fp), 0x0080_0000);
     assert_eq!(f64_sub(0x002F_0000_0000_0000, 0x0020_0000_0000_0000, &mut fp), 0x001E_0000_0000_0000);
     assert_eq!(f64_add(0x8028_0000_0000_0000, 0x0020_0000_0000_0000, &mut fp), 0x8010_0000_0000_0000);

@@ -149,7 +149,9 @@ fn sub_mags_f32(ui_a: u32, ui_b: u32, status: &mut SoftFloatStatus) -> Float32 {
             shift_dist = exp_a;
             exp_z = 0;
         }
-        if exp_z == 0 && sig_diff != 0 {
+        // Bochs s_subMagsF32: subnormal only when the shifted difference has
+        // no implicit bit; with it, the pack carries into exponent 1.
+        if exp_z == 0 && (sig_diff << shift_dist) < 0x0080_0000 {
             if softfloat_flush_underflow_to_zero(status) {
                 softfloat_raise_flags(status, FLAG_UNDERFLOW | FLAG_INEXACT);
                 return pack_to_f32(sign_z, 0, 0);
@@ -280,5 +282,27 @@ mod tests {
         assert!(add(inf, -inf).is_nan()); // inf - inf → NaN
         assert!(sub(inf, inf).is_nan());
         assert_eq!(sub(1.0, 1.0).to_bits(), 0.0f32.to_bits()); // exact zero, +0
+    }
+
+    /// SUBSS under MXCSR.FZ, all exceptions masked, as an x86 SSE unit
+    /// answers (measured on a Xeon, 2026-10-26): an equal-exponent
+    /// difference is flushed only when it is subnormal, raising UE and PE;
+    /// a normal one, the smallest normal included, is kept and raises
+    /// nothing.
+    #[test]
+    fn f32_ftz_flushes_only_a_subnormal_equal_exponent_difference() {
+        for (a, b, want, flags) in [
+            (0x01F0_4AC3, 0x01C3_8956, 0x00B3_05B4, 0),
+            (0x0178_0000, 0x0100_0000, 0x00F0_0000, 0),
+            (0x0140_0000, 0x0100_0000, 0x0080_0000, 0),
+            (0x0120_0000, 0x0100_0000, 0x0000_0000, FLAG_UNDERFLOW | FLAG_INEXACT),
+        ] {
+            let mut st = SoftFloatStatus {
+                softfloat_flush_underflow_to_zero: true,
+                ..SoftFloatStatus::default()
+            };
+            assert_eq!(f32_sub(a, b, &mut st), want, "{a:#010x} - {b:#010x}");
+            assert_eq!(st.softfloat_exception_flags, flags, "{a:#010x} - {b:#010x}");
+        }
     }
 }
