@@ -663,6 +663,7 @@ mod tests {
             let (zfr0, smfr0) = (read(4, 4), read(4, 5));
             let (isar0, isar1, isar2, isar3) = (read(6, 0), read(6, 1), read(6, 2), read(6, 3));
             let (mmfr0, mmfr1, mmfr2) = (read(7, 0), read(7, 1), read(7, 2));
+            let dfr0 = read(5, 0);
             for feature in Feature::ALL {
                 let advertised = match feature {
                     Feature::Base => true,
@@ -718,6 +719,14 @@ mod tests {
                     Feature::Csv2 => field(pfr0, 56) != 0,
                     Feature::Ecv => field(mmfr0, 60) != 0,
                     Feature::WfxT => field(isar2, 0) >= 2,
+                    Feature::Ras => field(pfr0, 28) >= 1,
+                    // `Features.json`: `FEAT_RASv1p1 <=> RAS >= 2 || (RAS == 1
+                    // && RAS_frac >= 1)`, and FEAT_RASv1p1 implies
+                    // FEAT_RASSAv1p1, which has no field of its own.
+                    Feature::RasV1p1 | Feature::RasSaV1p1 => field(pfr0, 28) >= 2 || (field(pfr0, 28) == 1 && field(pfr1, 12) >= 1),
+                    Feature::Debugv8p1 => field(dfr0, 0) >= 7,
+                    Feature::Debugv8p2 => field(dfr0, 0) >= 8,
+                    Feature::Debugv8p4 => field(dfr0, 0) >= 9,
                 };
                 assert_eq!(advertised, imp.has(feature), "{feature:?} on {imp:?}");
             }
@@ -725,9 +734,12 @@ mod tests {
             // instruction-set feature is a nonzero field of these registers.
             let fp16 = u64::from(imp.has(Feature::Fp16));
             assert_eq!((field(pfr0, 16), field(pfr0, 20)), (fp16, fp16), "FP and AdvSIMD");
-            // PFR0: EL0 and EL1 (AArch64 only), FP, AdvSIMD, DIT, CSV2 = 1
-            // (no FEAT_CSV2_2) and CSV3; nothing else.
-            assert_eq!(pfr0 & !((0xFF << 16) | (0xF << 48) | (0xF << 56) | (0xF << 60)), 0x11);
+            // PFR0: EL0 and EL1 (AArch64 only), FP, AdvSIMD, RAS, DIT, CSV2 =
+            // 1 (no FEAT_CSV2_2) and CSV3; nothing else.
+            assert_eq!(pfr0 & !((0xFF << 16) | (0xF << 28) | (0xF << 48) | (0xF << 56) | (0xF << 60)), 0x11);
+            // DFR0: DebugVer, two breakpoints and two watchpoints, no PMU.
+            assert_eq!(dfr0 & !0xF, 0x0010_1000);
+            assert!((6..=9).contains(&field(dfr0, 0)), "DebugVer: Armv8.0 to FEAT_Debugv8p4");
             assert!(field(pfr0, 56) <= 1, "CSV2 = 1: FEAT_CSV2, not FEAT_CSV2_2");
             // ID_AA64ISAR0_EL1: AES = 2 (AES and the 64-bit PMULL), SHA1 =
             // 1, SHA2 = 1 (SHA-256, not SHA-512), CRC32 = 1, Atomic = 2 with

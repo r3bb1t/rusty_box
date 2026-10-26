@@ -86,6 +86,11 @@
 //    look at interrupts before its trap check.
 //      Arm:          L 0000000007e00027 ...                   (WFET trapped)
 //      QEMU 11.1.2:  L 0000000056000000 ...                   (no trap)
+//
+// M  Back at EL1: MRS of DBGAUTHSTATUS_EL1, which Arm's data gives every
+//    AArch64 processor (its accessor reads it at EL1).
+//      Arm:          M none
+//      QEMU 11.1.2:  M 0000000002000000 ...                   (UNDEFINED)
 
 #define UART 0x09000000
 
@@ -313,7 +318,7 @@ case_l:
     mov x0, #1
     msr cntv_ctl_el0, x0              // enabled, condition met: PPI 27 pending
     isb
-    adr x0, done
+    adr x0, case_m
     adr x1, l_el0
     mov w2, #'L'
     b to_el0
@@ -323,6 +328,17 @@ l_el0:
     mov x1, #-1
     wfet x1
     svc #0
+
+case_m:
+    adr x0, done
+    ldr x1, =resume
+    str x0, [x1]
+    mov w0, #'M'
+    ldr x1, =which
+    strb w0, [x1]
+    mrs x2, dbgauthstatus_el1
+    bl none
+    b done
 
 // Resume at x0 after the case, then ERET to EL0 at x1 with every interrupt
 // masked; w2 names the case.

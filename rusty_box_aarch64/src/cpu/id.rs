@@ -28,12 +28,16 @@ pub const REVIDR_EL1: u64 = 0;
 /// EL1 = 1 (AArch64 only), EL2 = EL3 = 0 (not implemented), FP (19:16) and
 /// AdvSIMD (23:20) 1 with FEAT_FP16 (half-precision arithmetic) and 0
 /// without, GIC = 0 (no system-register interface: the GIC is a
-/// memory-mapped v2), DIT (51:48) = 1 with FEAT_DIT, CSV2 (59:56) = 1 with
-/// FEAT_CSV2 (2 would be FEAT_CSV2_2, which has the `SCXTNUM_ELx`
-/// registers), CSV3 (63:60) = 1 with FEAT_CSV3.
+/// memory-mapped v2), RAS (31:28) = 1 with FEAT_RAS and 2 with FEAT_RASv1p1
+/// as well (which `Features.json` makes imply FEAT_RAS; with no EL3, 2
+/// promises no FEAT_DoubleFault), DIT (51:48) = 1 with FEAT_DIT, CSV2
+/// (59:56) = 1 with FEAT_CSV2 (2 would be FEAT_CSV2_2, which has the
+/// `SCXTNUM_ELx` registers), CSV3 (63:60) = 1 with FEAT_CSV3.
 pub(crate) const fn id_aa64pfr0(features: Features) -> u64 {
+    let ras = chain_level(features, &[Feature::Ras, Feature::RasV1p1]);
     0x11 | field(features, Feature::Fp16, 16, 1)
         | field(features, Feature::Fp16, 20, 1)
+        | (ras << 28)
         | field(features, Feature::Dit, 48, 1)
         | field(features, Feature::Csv2, 56, 1)
         | field(features, Feature::Csv3, 60, 1)
@@ -68,9 +72,31 @@ pub(crate) const fn id_aa64smfr0(features: Features) -> u64 {
 /// processor's Streaming SVE mode.
 pub(crate) const SMIDR_EL1: u64 = 0;
 
-/// `ID_AA64DFR0_EL1`: DebugVer = 6 (v8 debug), BRPs = 1 and WRPs = 1 (two of
-/// each, the architectural minimum), CTX_CMPs = 0, PMUVer = 0 (no PMU).
-pub const ID_AA64DFR0_EL1: u64 = 0x0000_0000_0010_1006;
+/// `ID_AA64DFR0_EL1` of a processor implementing `features`: DebugVer
+/// (3:0) = 6 (Armv8.0 debug), 7 with FEAT_Debugv8p1, 8 with FEAT_Debugv8p2
+/// and 9 with FEAT_Debugv8p4 (each of which `Features.json` makes imply the
+/// one before), BRPs = 1 and WRPs = 1 (two of each, the architectural
+/// minimum), CTX_CMPs = 0, PMUVer = 0 (no PMU).
+pub(crate) const fn id_aa64dfr0(features: Features) -> u64 {
+    let debug = chain_level(features, &[Feature::Debugv8p1, Feature::Debugv8p2, Feature::Debugv8p4]);
+    0x0000_0000_0010_1000 | (6 + debug)
+}
+
+/// `DBGAUTHSTATUS_EL1` of a processor implementing `features`, as Arm's
+/// `UpdateDbgAuthStatus` sets it for a processor with no Secure state and
+/// no EL3, whose security state is always Non-secure: NSID (1:0) = 0b10,
+/// Non-secure invasive debug implemented and disabled, the external
+/// debugger's `DBGEN` being low with no debugger to raise it; NSNID (3:2) =
+/// 0b10 likewise (`DBGEN` and `NIDEN` low), or 0b11 with FEAT_Debugv8p4,
+/// under which `ExternalNoninvasiveDebugEnabled` is always TRUE; SID, SNID,
+/// RLID, RLNID, RTID and RTNID 0, not implemented.
+pub(crate) const fn dbgauthstatus_el1(features: Features) -> u64 {
+    0b10_10 | field(features, Feature::Debugv8p4, 2, 1)
+}
+
+/// `ERRIDR_EL1` with FEAT_RAS: no error records (NUM = 0), as QEMU's
+/// `minimal_ras_reginfo` has it.
+pub(crate) const ERRIDR_EL1: u64 = 0;
 
 /// `ID_AA64ISAR0_EL1` of a processor implementing `features`: AES (7:4) = 2
 /// with FEAT_AES (AESE, AESD, AESMC, AESIMC and the 64-bit PMULL), SHA1

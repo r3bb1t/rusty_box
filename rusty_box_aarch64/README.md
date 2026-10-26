@@ -142,7 +142,14 @@ the LORegion registers, with no LORegions); FEAT_IDST (reads of the feature
 ID space that would be UNDEFINED trap with EC 0x18), FEAT_SPECRES (CFP, DVP
 and CPP RCTX, with SCTLR_EL1.EnRCTX), FEAT_CSV2, FEAT_ECV (CNTPCTSS_EL0,
 CNTVCTSS_EL0 and CNTKCTL_EL1.EVNTIS) and FEAT_WFxT (WFET and WFIT, which
-wait until their timeout);
+wait until their timeout); FEAT_RAS with FEAT_RASv1p1 and FEAT_RASSAv1p1
+(ESB, ERRIDR_EL1 with no error records, DISR_EL1, and the error state a
+synchronous external abort reports), and FEAT_Debugv8p1, FEAT_Debugv8p2
+and FEAT_Debugv8p4 (`DebugVer`, and DBGAUTHSTATUS_EL1's always-enabled
+non-invasive debug; what else they change is how breakpoints and
+watchpoints match, which never fire on any processor here (see "Not
+implemented"), and halting and external debug, the PMU and EL2, which this
+model does not have);
 and, being built, FEAT_SME (its state, registers, SMSTART
 and SMSTOP, RDSVL, ADDSVL and ADDSPL). No processor a machine runs has them
 yet: the tests run them on a test-only processor with every feature, whose
@@ -308,6 +315,11 @@ integration tests of the public API.
   FEAT_IDST, FEAT_SPECRES and FEAT_ECV's counter views, and `tests/api.rs`
   a machine whose WFE the event stream ends. Turning off any of 20
   of these rules on purpose fails a test.
+- `tests/unit/sysreg.rs` also checks FEAT_RAS (ESB, ERRIDR_EL1, the error
+  record registers UNDEFINED, DISR_EL1's bits and its snapshot, EL0 kept
+  out, a synchronous external abort's syndrome the same with the feature
+  as without) and DBGAUTHSTATUS_EL1 with and without FEAT_Debugv8p4;
+  `isa::tests` the RAS and DebugVer fields of the ID registers.
 - `tests/crypto.rs` runs the cryptographic and CRC32 instructions as a guest
   uses them, to the standards' own answers: AES-128 encryption and
   decryption of the FIPS-197 example, SHA-1 and SHA-256 of "abc" (FIPS
@@ -544,6 +556,29 @@ choice is listed here with its evidence.
   monitor is armed, as QEMU's `HELPER(wfe)` chooses: the global monitor's
   clearing by another observer's store, a wake-up event, is not watched,
   and a device's DMA is such a store.
+- **No RAS error records.** With FEAT_RAS, `ERRIDR_EL1.NUM` is 0, and
+  `ERRSELR_EL1` and the `ERX*` registers (those of FEAT_RASv1p1 too) are
+  UNDEFINED, as QEMU's `minimal_ras_reginfo` has them; its comment states
+  that with no error records they may be. Arm's register data gives these
+  registers to every processor with FEAT_RAS, reading the record
+  `ERRSELR_EL1.SEL` selects; the Arm ARM's rule for a processor with no
+  record to select is in its prose, which this model was not checked
+  against. Nothing on this machine raises an SError, so ESB has nothing to
+  defer into `DISR_EL1` and only an `MSR` writes that register; it keeps
+  A, IDS and bits 23:0 (which IDS makes a syndrome or RES0) and reads the
+  bits RES0 whatever IDS holds as zero, where QEMU's `disr_write` keeps all
+  64. A
+  synchronous external abort's error state (`ISS.SET`, which
+  `PEErrorState` leaves IMPLEMENTATION DEFINED) is Recoverable (UER, 0b00),
+  as QEMU reports it.
+- **DBGAUTHSTATUS_EL1 reports Non-secure debug implemented.** Arm's
+  `UpdateDbgAuthStatus` gives a Non-secure-only processor NSID and NSNID of
+  0b10 (disabled) or 0b11 (enabled), by the external debugger's `DBGEN` and
+  `NIDEN`, and FEAT_Debugv8p4 makes NSNID 0b11. With no external debugger,
+  both signals are low here: 0x0A, or 0x0E with FEAT_Debugv8p4. QEMU (to
+  master at least) has no DBGAUTHSTATUS_EL1, so reading it is UNDEFINED
+  ([docs/qemu-upstream-bugs.md](../docs/qemu-upstream-bugs.md), probe case
+  M).
 - **RPRFM is a prefetch.** Arm's data allocates PRFM (register) with
   `Rt = 11xxx` to RPRFM (FEAT_RPRFM, Armv8.8). On a core without the feature
   the word is a PRFM with a reserved `prfop`, which the Arm ARM executes as a

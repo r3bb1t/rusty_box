@@ -94,10 +94,10 @@ impl Cpu {
         }
     }
 
-    /// The HINT space: NOP, YIELD, WFE, WFI, SEV, SEVL; every other hint is
-    /// a NOP, the pointer authentication hints of a processor without
-    /// FEAT_PAuth and the BTI hint included (with FEAT_PAuth those have a
-    /// handler of their own, [`Cpu::exec_pauth_hint`]).
+    /// The HINT space: NOP, YIELD, WFE, WFI, SEV, SEVL, ESB; every other
+    /// hint is a NOP, the pointer authentication hints of a processor
+    /// without FEAT_PAuth and the BTI hint included (with FEAT_PAuth those
+    /// have a handler of their own, [`Cpu::exec_pauth_hint`]).
     pub(crate) fn exec_hint(&mut self, insn: u32, _pc: u64) -> ExecResult {
         match bits(insn, 11, 5) {
             2 => self.exec_wfe(),
@@ -108,6 +108,10 @@ impl Cpu {
                 self.send_event();
                 Ok(Flow::Next)
             }
+            // Every other hint, ESB (FEAT_RAS) included: its
+            // `AArch64_ESBOperation` defers a masked physical SError into
+            // DISR_EL1 and `TakeUnmaskedSErrorInterrupts` takes an unmasked
+            // one, and nothing on this machine raises an SError.
             _ => Ok(Flow::Next),
         }
     }

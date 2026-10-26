@@ -143,6 +143,7 @@ const FPSR: u32 = key!(3, 3, 4, 4, 1);
 const AFSR0_EL1: u32 = key!(3, 0, 5, 1, 0);
 const AFSR1_EL1: u32 = key!(3, 0, 5, 1, 1);
 const ESR_EL1: u32 = key!(3, 0, 5, 2, 0);
+const ERRIDR_EL1: u32 = key!(3, 0, 5, 3, 0);
 const FAR_EL1: u32 = key!(3, 0, 6, 0, 0);
 const PAR_EL1: u32 = key!(3, 0, 7, 4, 0);
 const MAIR_EL1: u32 = key!(3, 0, 10, 2, 0);
@@ -154,6 +155,7 @@ const LORC_EL1: u32 = key!(3, 0, 10, 4, 3);
 const LORID_EL1: u32 = key!(3, 0, 10, 4, 7);
 const VBAR_EL1: u32 = key!(3, 0, 12, 0, 0);
 const ISR_EL1: u32 = key!(3, 0, 12, 1, 0);
+const DISR_EL1: u32 = key!(3, 0, 12, 1, 1);
 const CONTEXTIDR_EL1: u32 = key!(3, 0, 13, 0, 1);
 const TPIDR_EL1: u32 = key!(3, 0, 13, 0, 4);
 const TPIDR_EL0: u32 = key!(3, 3, 13, 0, 2);
@@ -228,6 +230,13 @@ const EL0PTEN: u64 = 1 << 9;
 /// `EVNTEN`, `EVNTDIR` and `EVNTI`.
 const CNTKCTL_BASE: u64 = 0x3FF;
 
+/// The `DISR_EL1` bits a processor with FEAT_RAS keeps: A (31), IDS (24),
+/// and bits 23:0, an IMPLEMENTATION DEFINED syndrome with IDS set and AET,
+/// EA and DFSC with it clear. Bits 23:0 outside those three are RES0 only
+/// while IDS is clear, so they keep what was written; the bits RES0
+/// whatever IDS holds read as zero.
+const DISR_MASK: u64 = (1 << 31) | (1 << 24) | 0x00FF_FFFF;
+
 /// `MDSCR_EL1.TDCC`: EL0's accesses to the Debug Communications Channel
 /// registers trap to EL1.
 const MDSCR_TDCC: u64 = 1 << 12;
@@ -292,6 +301,16 @@ impl Cpu {
             CNTKCTL_BASE | super::wait::EVNTIS
         } else {
             CNTKCTL_BASE
+        }
+    }
+
+    /// The `DISR_EL1` bits this core keeps: [`DISR_MASK`] with FEAT_RAS,
+    /// none without (there is no register).
+    pub(crate) fn disr_mask(&self) -> u64 {
+        if self.implements(Feature::Ras) {
+            DISR_MASK
+        } else {
+            0
         }
     }
 
@@ -446,7 +465,7 @@ impl Cpu {
             ID_AA64PFR1_EL1 => id::id_aa64pfr1(self.imp.features),
             ID_AA64ZFR0_EL1 => id::id_aa64zfr0(self.imp.features),
             ID_AA64SMFR0_EL1 => id::id_aa64smfr0(self.imp.features),
-            ID_AA64DFR0_EL1 => id::ID_AA64DFR0_EL1,
+            ID_AA64DFR0_EL1 => id::id_aa64dfr0(self.imp.features),
             ID_AA64ISAR0_EL1 => id::id_aa64isar0(self.imp.features),
             ID_AA64ISAR1_EL1 => id::id_aa64isar1(self.imp.features),
             ID_AA64ISAR2_EL1 => id::id_aa64isar2(self.imp.features),
@@ -530,7 +549,12 @@ impl Cpu {
             OSDLR_EL1 => self.sys.osdlr_el1,
             DBGPRCR_EL1 => self.sys.dbgprcr_el1,
             DBGCLAIMSET_EL1 | DBGCLAIMCLR_EL1 => self.sys.dbgclaim,
-            DBGAUTHSTATUS_EL1 => 0,
+            DBGAUTHSTATUS_EL1 => id::dbgauthstatus_el1(self.imp.features),
+            // With no error records (`ERRIDR_EL1.NUM` = 0), `ERRSELR_EL1`
+            // and the `ERX*` registers are UNDEFINED, as QEMU's
+            // `minimal_ras_reginfo` has them.
+            ERRIDR_EL1 if self.implements(Feature::Ras) => id::ERRIDR_EL1,
+            DISR_EL1 if self.implements(Feature::Ras) => self.sys.disr_el1,
             _ => {
                 if let Some(v) = self.debug_breakpoint_read(key) {
                     v
@@ -776,6 +800,10 @@ impl Cpu {
                 WriteEffect::None
             }
             LORSA_EL1 | LOREA_EL1 | LORN_EL1 | LORC_EL1 if self.implements(Feature::Lor) => WriteEffect::None,
+            DISR_EL1 if self.implements(Feature::Ras) => {
+                self.sys.disr_el1 = value & self.disr_mask();
+                WriteEffect::None
+            }
             VBAR_EL1 => {
                 self.sys.vbar_el1 = value & !0x7FF;
                 WriteEffect::None

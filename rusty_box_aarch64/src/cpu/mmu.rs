@@ -867,6 +867,12 @@ impl Cpu {
         Exception::new(ExceptionClass::DataAbort, iss).with_far(va).into()
     }
 
+    /// A synchronous external abort: the bus refused the access. With
+    /// FEAT_RAS its syndrome reports the PE's error state in `ISS.SET`
+    /// (bits 12:11, `AArch64_EncodeSyncErrorSyndrome`), which `PEErrorState`
+    /// leaves IMPLEMENTATION DEFINED; here it is Recoverable (UER, 0b00), the
+    /// access refused before it took effect, as QEMU reports it. The
+    /// syndrome is then the same with the feature as without.
     fn external_abort(&self, va: u64, pa: u64, kind: AccessKind) -> Fault {
         if self.debug_stops.on_bus_fault {
             return Fault::Stop(StopCause::BusFault { pc: self.pc, addr: pa });

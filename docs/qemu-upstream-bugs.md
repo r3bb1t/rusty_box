@@ -21,7 +21,7 @@ with a message and sign-off of the submitter's own.
 
 Reproducers:
 - `docs/qemu-aarch64-probe.S`: a bare-metal EL1 program for
-  `qemu-system-aarch64 -M virt`, one line of output per case (A to L). Its
+  `qemu-system-aarch64 -M virt`, one line of output per case (A to M). Its
   header gives the commands and the expected and observed output.
 - `docs/qemu-aarch64-probe-user.c`: a static Linux program for
   `qemu-aarch64 -cpu max`, one case per argument, for the entries fixed
@@ -376,6 +376,42 @@ With the timer's interrupt not pending, QEMU 11.1.2 traps as Arm does
 **Fix**: `docs/qemu-wfet-trap-order.patch` moves the `cpu_has_work()`
 return after the trap check. Tested: case L prints the WFET's syndrome;
 Alpine 3.23 boots to its login prompt.
+
+### 11. DBGAUTHSTATUS_EL1 is missing
+
+**Impact**: small. An `MRS` of DBGAUTHSTATUS_EL1 at EL1 or EL2 is
+UNDEFINED, where every AArch64 processor has the register, so software
+that asks how debug is authenticated takes an Undefined Instruction
+exception instead of an answer. Linux reads it in one place: KVM's
+`trap_dbgauthstatus_el1()` (`arch/arm64/kvm/sys_regs.c`, 6.18) answers a
+guest's trapped read with the host's own `read_sysreg(dbgauthstatus_el1)`,
+which on QEMU with EL2 would be an Undefined Instruction exception in the
+host kernel. That path is read from the source, not reproduced here.
+
+**Location**: `target/arm/debug_helper.c`, `debug_cp_reginfo`, which
+defines the other debug registers (OSLAR_EL1, DBGCLAIMSET_EL1 and the
+rest) but not this one; only its fine-grained trap bit,
+`HDFGRTR_EL2.DBGAUTHSTATUS_EL1`, appears (`target/arm/cpregs.h`).
+
+**What the Arm ARM says**: Arm's register data gives DBGAUTHSTATUS_EL1 to
+every processor with AArch64 (its condition is `FEAT_AA64`), readable at
+EL1 and above. `UpdateDbgAuthStatus()` sets it from the IMPLEMENTATION
+DEFINED authentication interface: on a processor whose security state is
+always Non-secure, NSID = 0b10 or 0b11 (`ExternalInvasiveDebugEnabled()`,
+DBGEN), NSNID = 0b10 or 0b11 (`ExternalNoninvasiveDebugEnabled()`, which
+is TRUE with FEAT_Debugv8p4), and SID and SNID 0b00; with Secure state,
+SID and SNID report `ExternalSecureInvasiveDebugEnabled()` and
+`ExternalSecureNoninvasiveDebugEnabled()` likewise.
+
+**Reproduce**: probe case M, an `MRS` of DBGAUTHSTATUS_EL1 at EL1.
+
+    Arm:          M none
+    QEMU 11.1.2:  M 0000000002000000 ...   (UNDEFINED)
+
+**Fix**: no patch yet: a read-only `debug_cp_reginfo` entry (op0 2, op1 0,
+CRn 7, CRm 14, op2 6; cp14 for AArch32) whose read function follows
+`UpdateDbgAuthStatus()` with the authentication signals QEMU's model
+chooses, and with Secure state when the CPU has EL3.
 
 ---
 

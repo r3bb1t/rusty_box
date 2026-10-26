@@ -11,7 +11,7 @@
 
 use std::vec::Vec;
 
-use rusty_box_core::{VmClock, VmInstant};
+use rusty_box_core::{SnapError, VmClock, VmInstant};
 
 use super::super::features::{Feature, Implementation};
 use super::super::step::{processor, Taken, CODE, DATA, UNDEFINED, VBAR};
@@ -390,18 +390,30 @@ fn snapshots_keep_waits_and_the_event_register() {
         assert_eq!(restored.activity, activity);
     }
 
-    /// A processor, and a state it cannot reach.
-    type Unreachable = (Implementation, fn(&mut Cpu));
+    /// A processor, a state it cannot reach, and why its restore refuses it.
+    type Unreachable = (Implementation, fn(&mut Cpu), &'static str);
     let unreachable: [Unreachable; 3] = [
-        (Implementation::CORTEX_A57, |cpu| cpu.activity = Activity::Waiting(Wait::InterruptUntil(tick(9)))),
-        (Implementation::CORTEX_A57, |cpu| cpu.sys.cntkctl_el1 = EVNTIS),
-        (Implementation::EVERY_FEATURE, |cpu| cpu.activity = Activity::Waiting(Wait::EventUntil(tick(u64::MAX)))),
+        (
+            Implementation::CORTEX_A57,
+            |cpu| cpu.activity = Activity::Waiting(Wait::InterruptUntil(tick(9))),
+            "processor waits with a timeout on a processor without FEAT_WFxT",
+        ),
+        (
+            Implementation::CORTEX_A57,
+            |cpu| cpu.sys.cntkctl_el1 = EVNTIS,
+            "snapshot's CNTKCTL_EL1 holds bits this processor cannot set",
+        ),
+        (
+            Implementation::EVERY_FEATURE,
+            |cpu| cpu.activity = Activity::Waiting(Wait::EventUntil(tick(u64::MAX))),
+            "processor's timed wait ends at no tick the count reaches",
+        ),
     ];
-    for (imp, make) in unreachable {
+    for (imp, make, refusal) in unreachable {
         let mut cpu = self::cpu(imp);
         make(&mut cpu);
         let mut image = Vec::new();
         cpu.save(&mut image).expect("save");
-        assert!(self::cpu(imp).restore(&mut image.as_slice()).is_err());
+        assert_eq!(self::cpu(imp).restore(&mut image.as_slice()), Err(SnapError::Invalid(refusal)));
     }
 }

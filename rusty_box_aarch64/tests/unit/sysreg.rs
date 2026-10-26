@@ -2,6 +2,8 @@
 //! reads, what an `MSR` keeps, and the exception an access takes, as
 //! `ESR_EL1` reports it.
 
+use rusty_box_core::SnapError;
+
 use super::super::features::{Feature, Implementation};
 use super::super::step::{exec, processor, Taken, UNDEFINED};
 use super::super::{Cpu, El, Pstate};
@@ -20,6 +22,22 @@ const MRS_CNTVCTSS: u32 = 0xD53B_E0C0; // mrs x0, cntvctss_el0
 const CFP_RCTX: u32 = 0xD50B_7380; // cfp rctx, x0
 const DVP_RCTX: u32 = 0xD50B_73A0; // dvp rctx, x0
 const CPP_RCTX: u32 = 0xD50B_73E0; // cpp rctx, x0
+
+/// The words are GNU as's (`-march=armv9.2-a+ras`, objdump -d).
+const ESB: u32 = 0xD503_221F;
+const MRS_ERRIDR: u32 = 0xD538_5300; // mrs x0, erridr_el1
+const MSR_ERRIDR: u32 = 0xD518_5300;
+const MRS_ERRSELR: u32 = 0xD538_5320;
+const MSR_ERRSELR: u32 = 0xD518_5320;
+const MRS_ERXSTATUS: u32 = 0xD538_5440;
+const MSR_ERXSTATUS: u32 = 0xD518_5440;
+const MRS_ERXMISC2: u32 = 0xD538_5540;
+const MRS_ERXPFGF: u32 = 0xD538_5480;
+const MRS_DISR: u32 = 0xD538_C120; // mrs x0, disr_el1
+const MSR_DISR: u32 = 0xD518_C120;
+const MRS_DBGAUTHSTATUS: u32 = 0xD530_7EC0; // mrs x0, dbgauthstatus_el1
+const MSR_DBGAUTHSTATUS: u32 = 0xD510_7EC0;
+const LDR: u32 = 0xF940_0020; // ldr x0, [x1]
 
 /// `SCTLR_EL1.UCT` and `EnRCTX`; `CNTKCTL_EL1.EL0PCTEN` and `EL0VCTEN`.
 const UCT: u64 = 1 << 15;
@@ -173,5 +191,101 @@ fn the_self_synchronized_counter_views_need_feat_ecv() {
     let mut v80 = processor(Implementation::CORTEX_A57);
     for (insn, _, _) in views {
         assert_eq!(exec(&mut v80, insn), Some(UNDEFINED), "{insn:#010x} without FEAT_ECV");
+    }
+}
+
+/// FEAT_RAS on a processor with no error records and no source of SError
+/// interrupts: ESB completes with nothing to defer; `ERRIDR_EL1` reports no
+/// records (NUM = 0) and cannot be written, and with none `ERRSELR_EL1`
+/// and the `ERX*` registers are UNDEFINED (QEMU's `minimal_ras_reginfo`);
+/// `DISR_EL1` keeps A, IDS and bits 23:0. EL0 reaches none of them, and a
+/// processor without FEAT_RAS has none, ESB being a NOP there.
+#[test]
+fn ras_has_no_error_records_and_a_deferred_error_register() {
+    for imp in [Implementation::EVERY_FEATURE, Implementation::CORTEX_A57] {
+        let ras = imp.has(Feature::Ras);
+        let mut cpu = processor(imp);
+        cpu.x[0] = 0x1234;
+        assert_eq!(exec(&mut cpu, ESB), None, "RAS {ras}");
+        assert_eq!(cpu.x[0], 0x1234);
+
+        cpu.x[0] = 0xDEAD;
+        let erridr = exec(&mut cpu, MRS_ERRIDR);
+        assert_eq!(erridr, if ras { None } else { Some(UNDEFINED) });
+        if ras {
+            assert_eq!(cpu.x[0], 0, "ERRIDR_EL1.NUM = 0");
+        }
+        for insn in [MSR_ERRIDR, MRS_ERRSELR, MSR_ERRSELR, MRS_ERXSTATUS, MSR_ERXSTATUS, MRS_ERXMISC2, MRS_ERXPFGF] {
+            assert_eq!(exec(&mut cpu, insn), Some(UNDEFINED), "{insn:#010x}, RAS {ras}");
+        }
+
+        cpu.x[0] = u64::MAX;
+        assert_eq!(exec(&mut cpu, MSR_DISR), if ras { None } else { Some(UNDEFINED) });
+        cpu.x[0] = 0;
+        assert_eq!(exec(&mut cpu, MRS_DISR), if ras { None } else { Some(UNDEFINED) });
+        if ras {
+            assert_eq!(cpu.x[0], 0x81FF_FFFF, "A, IDS and bits 23:0");
+            let mut image = std::vec::Vec::new();
+            cpu.save(&mut image).expect("save");
+            let mut restored = processor(imp);
+            restored.restore(&mut image.as_slice()).expect("restore");
+            assert_eq!(restored.sys.disr_el1, 0x81FF_FFFF);
+            let mut v80 = processor(Implementation::CORTEX_A57);
+            assert_eq!(
+                v80.restore(&mut image.as_slice()),
+                Err(SnapError::Invalid("snapshot of a processor implementing other features"))
+            );
+        }
+
+        at_el0(&mut cpu);
+        assert_eq!(exec(&mut cpu, ESB), None, "ESB at EL0");
+        for insn in [MRS_ERRIDR, MRS_DISR, MSR_DISR] {
+            assert_eq!(exec(&mut cpu, insn), Some(UNDEFINED), "{insn:#010x} at EL0, RAS {ras}");
+        }
+    }
+
+    // A processor without FEAT_RAS refuses a snapshot holding DISR_EL1 bits.
+    let mut v80 = processor(Implementation::CORTEX_A57);
+    v80.sys.disr_el1 = 1 << 31;
+    let mut image = std::vec::Vec::new();
+    v80.save(&mut image).expect("save");
+    assert_eq!(
+        processor(Implementation::CORTEX_A57).restore(&mut image.as_slice()),
+        Err(SnapError::Invalid("snapshot's DISR_EL1 holds bits this processor cannot set"))
+    );
+}
+
+/// A synchronous external abort (here a load from no memory, the MMU off)
+/// reports the same syndrome with FEAT_RAS as without: SET, which FEAT_RAS
+/// adds, names the Recoverable state (0b00) this model chooses.
+#[test]
+fn an_external_abort_reports_a_recoverable_error_state() {
+    for imp in [Implementation::EVERY_FEATURE, Implementation::CORTEX_A57] {
+        let mut cpu = processor(imp);
+        cpu.x[1] = 0x5_0000;
+        assert_eq!(
+            exec(&mut cpu, LDR),
+            Some(Taken { ec: 0x25, iss: 0x10 }),
+            "FSC 0x10 and SET 0b00, RAS {}",
+            imp.has(Feature::Ras)
+        );
+    }
+}
+
+/// `DBGAUTHSTATUS_EL1` as Arm's `UpdateDbgAuthStatus` sets it on a
+/// Non-secure-only processor with the external debugger's `DBGEN` and
+/// `NIDEN` low: Non-secure invasive and non-invasive debug implemented and
+/// disabled (0x0A), non-invasive enabled with FEAT_Debugv8p4 (0x0E), no
+/// Secure, Realm or Root debug. It cannot be written, and EL0 cannot read
+/// it.
+#[test]
+fn dbgauthstatus_reports_non_secure_debug_implemented() {
+    for (imp, value) in [(Implementation::CORTEX_A57, 0x0A), (Implementation::EVERY_FEATURE, 0x0E)] {
+        let mut cpu = processor(imp);
+        assert_eq!(exec(&mut cpu, MRS_DBGAUTHSTATUS), None);
+        assert_eq!(cpu.x[0], value, "FEAT_Debugv8p4 {}", imp.has(Feature::Debugv8p4));
+        assert_eq!(exec(&mut cpu, MSR_DBGAUTHSTATUS), Some(UNDEFINED));
+        at_el0(&mut cpu);
+        assert_eq!(exec(&mut cpu, MRS_DBGAUTHSTATUS), Some(UNDEFINED));
     }
 }

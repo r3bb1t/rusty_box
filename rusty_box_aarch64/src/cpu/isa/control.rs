@@ -40,6 +40,7 @@ pub(crate) enum Hints {
     Pacib1716Hi,
     Autia1716Hi,
     Autib1716Hi,
+    EsbHi,
     CsdbHi,
     PaciazHi,
     PaciaspHi,
@@ -261,6 +262,7 @@ fn hints(word: u32) -> Option<Hints> {
         (0b0001, 0b010) => Some(Hints::Pacib1716Hi),
         (0b0001, 0b100) => Some(Hints::Autia1716Hi),
         (0b0001, 0b110) => Some(Hints::Autib1716Hi),
+        (0b0010, 0b000) => Some(Hints::EsbHi),
         (0b0010, 0b100) => Some(Hints::CsdbHi),
         (0b0011, 0b000) => Some(Hints::PaciazHi),
         (0b0011, 0b001) => Some(Hints::PaciaspHi),
@@ -313,6 +315,7 @@ impl Hints {
             | Self::AutibzHi
             | Self::AutibspHi => Feature::PAuth,
             Self::BtiHb => Feature::Bti,
+            Self::EsbHi => Feature::Ras,
         }
     }
 }

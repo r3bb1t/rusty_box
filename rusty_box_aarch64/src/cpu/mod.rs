@@ -381,6 +381,9 @@ pub(crate) struct SysRegs {
     pub(crate) dbgbcr: [u64; 2],
     pub(crate) dbgwvr: [u64; 2],
     pub(crate) dbgwcr: [u64; 2],
+    /// `DISR_EL1` (FEAT_RAS): with no source of SError interrupts, only an
+    /// `MSR` writes it.
+    pub(crate) disr_el1: u64,
 }
 
 impl SysRegs {
@@ -426,6 +429,7 @@ impl SysRegs {
             dbgbcr: [0; 2],
             dbgwvr: [0; 2],
             dbgwcr: [0; 2],
+            disr_el1: 0,
         }
     }
 }

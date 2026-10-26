@@ -37,7 +37,7 @@ pub(crate) const FPSR_MASK: u64 =
 
 /// How many system register values a snapshot carries, in
 /// [`SysRegs::to_array`] order.
-const SYSREG_COUNT: usize = 44;
+const SYSREG_COUNT: usize = 45;
 
 impl SysRegs {
     fn to_array(&self) -> [u64; SYSREG_COUNT] {
@@ -86,11 +86,12 @@ impl SysRegs {
             self.dbgwvr[1],
             self.dbgwcr[0],
             self.dbgwcr[1],
+            self.disr_el1,
         ]
     }
 
     fn from_array(a: [u64; SYSREG_COUNT]) -> Self {
-        let [sctlr_el1, actlr_el1, cpacr_el1, ttbr0_el1, ttbr1_el1, tcr_el1, spsr_el1, elr_el1, esr_el1, far_el1, afsr0_el1, afsr1_el1, par_el1, mair_el1, amair_el1, vbar_el1, contextidr_el1, tpidr_el0, tpidrro_el0, tpidr_el1, tpidr2_el0, smcr_el1, csselr_el1, cntkctl_el1, cntfrq_el0, cntp_ctl_el0, cntp_cval_el0, cntv_ctl_el0, cntv_cval_el0, mdscr_el1, mdccint_el1, oslsr_el1, osdlr_el1, oseccr_el1, dbgprcr_el1, dbgclaim, bvr0, bvr1, bcr0, bcr1, wvr0, wvr1, wcr0, wcr1] = a;
+        let [sctlr_el1, actlr_el1, cpacr_el1, ttbr0_el1, ttbr1_el1, tcr_el1, spsr_el1, elr_el1, esr_el1, far_el1, afsr0_el1, afsr1_el1, par_el1, mair_el1, amair_el1, vbar_el1, contextidr_el1, tpidr_el0, tpidrro_el0, tpidr_el1, tpidr2_el0, smcr_el1, csselr_el1, cntkctl_el1, cntfrq_el0, cntp_ctl_el0, cntp_cval_el0, cntv_ctl_el0, cntv_cval_el0, mdscr_el1, mdccint_el1, oslsr_el1, osdlr_el1, oseccr_el1, dbgprcr_el1, dbgclaim, bvr0, bvr1, bcr0, bcr1, wvr0, wvr1, wcr0, wcr1, disr_el1] = a;
         Self {
             sctlr_el1,
             actlr_el1,
@@ -132,6 +133,7 @@ impl SysRegs {
             dbgbcr: [bcr0, bcr1],
             dbgwvr: [wvr0, wvr1],
             dbgwcr: [wcr0, wcr1],
+            disr_el1,
         }
     }
 }
@@ -369,6 +371,9 @@ impl Cpu {
         }
         if sys.cntkctl_el1 & !self.cntkctl_mask() != 0 {
             return Err(SnapError::Invalid("snapshot's CNTKCTL_EL1 holds bits this processor cannot set"));
+        }
+        if sys.disr_el1 & !self.disr_mask() != 0 {
+            return Err(SnapError::Invalid("snapshot's DISR_EL1 holds bits this processor cannot set"));
         }
         let monitor = ExclusiveMonitor {
             armed: r.read_bool()?,

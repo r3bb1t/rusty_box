@@ -157,6 +157,28 @@ pub(crate) enum Feature {
     Ecv,
     /// FEAT_WFxT: WFET and WFIT.
     WfxT,
+    /// FEAT_RAS: ESB, `ERRIDR_EL1` and `DISR_EL1`, and the error state a
+    /// synchronous external abort reports.
+    Ras,
+    /// FEAT_RASv1p1: more error record registers (`ERXMISC2_EL1` and the
+    /// rest), which a processor with no error records does not have. No
+    /// encoding of its own.
+    RasV1p1,
+    /// FEAT_RASSAv1p1: the RAS System Architecture v1.1, which changes only
+    /// the memory-mapped error record registers (`ERRIIDR`, `ERR<n>MISC2`,
+    /// `ERR<n>MISC3` and `ERR<n>STATUS` in Arm's register data). This
+    /// processor has no error records, so nothing reads it; a processor
+    /// with FEAT_RASv1p1 declares it, as `Features.json` makes FEAT_RASv1p1
+    /// imply it. No encoding of its own.
+    #[allow(dead_code)]
+    RasSaV1p1,
+    /// FEAT_Debugv8p1: `ID_AA64DFR0_EL1.DebugVer` 7. No encoding of its own.
+    Debugv8p1,
+    /// FEAT_Debugv8p2: `DebugVer` 8. No encoding of its own.
+    Debugv8p2,
+    /// FEAT_Debugv8p4: `DebugVer` 9, and non-invasive debug always enabled
+    /// (`DBGAUTHSTATUS_EL1.NSNID`). No encoding of its own.
+    Debugv8p4,
 }
 
 /// What the conformance tests read of a feature: `tests/unit/spec.rs`
@@ -164,7 +186,7 @@ pub(crate) enum Feature {
 #[cfg(test)]
 impl Feature {
     /// Every feature, in declaration order.
-    pub(crate) const ALL: [Feature; 53] = [
+    pub(crate) const ALL: [Feature; 59] = [
         Feature::Base,
         Feature::Fp,
         Feature::AdvSimd,
@@ -218,6 +240,12 @@ impl Feature {
         Feature::Csv2,
         Feature::Ecv,
         Feature::WfxT,
+        Feature::Ras,
+        Feature::RasV1p1,
+        Feature::RasSaV1p1,
+        Feature::Debugv8p1,
+        Feature::Debugv8p2,
+        Feature::Debugv8p4,
     ];
 
     /// The name Arm's data gives the feature, `None` for the base set.
@@ -276,6 +304,12 @@ impl Feature {
             Self::Csv2 => Some("FEAT_CSV2"),
             Self::Ecv => Some("FEAT_ECV"),
             Self::WfxT => Some("FEAT_WFxT"),
+            Self::Ras => Some("FEAT_RAS"),
+            Self::RasV1p1 => Some("FEAT_RASv1p1"),
+            Self::RasSaV1p1 => Some("FEAT_RASSAv1p1"),
+            Self::Debugv8p1 => Some("FEAT_Debugv8p1"),
+            Self::Debugv8p2 => Some("FEAT_Debugv8p2"),
+            Self::Debugv8p4 => Some("FEAT_Debugv8p4"),
         }
     }
 
@@ -309,6 +343,11 @@ impl Feature {
                 | Self::SpecRes
                 | Self::Csv2
                 | Self::Ecv
+                | Self::RasV1p1
+                | Self::RasSaV1p1
+                | Self::Debugv8p1
+                | Self::Debugv8p2
+                | Self::Debugv8p4
         )
     }
 
