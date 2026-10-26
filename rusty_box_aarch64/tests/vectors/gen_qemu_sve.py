@@ -26,9 +26,13 @@ place of `v=`:
 
 Needs an AArch64 Linux C compiler that links statically (CC, default
 aarch64-linux-gnu-gcc) and QEMU's user-mode emulator (QEMU, default
-qemu-aarch64). The vectors in the tree were made with QEMU 11.1.2 (with
+qemu-aarch64). The vectors in the tree were made with QEMU 11.1.2 with
 docs/qemu-afp-vector-fabs-fneg.patch applied, which changes nothing in
-Streaming SVE mode).
+Streaming SVE mode, and docs/qemu-sve-fcmla-indexed-ah.patch and
+docs/qemu-sve-fmad-size00.patch, which bring FCMLA (indexed) and FMAD to
+the Arm ARM (docs/qemu-upstream-bugs.md, entries 13 and 14). QEMU is a
+second implementation, not the reference: where it and this core differ,
+the Arm ARM's pseudocode decides.
 
 Usage: python3 -I gen_qemu_sve.py OUT_FILE [CASES_PER_FAMILY]
 """
@@ -42,11 +46,19 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 from gen_unicorn import (  # noqa: E402
+    BF16_SPECIAL,
     CODE,
     DATA_SIZE,
+    F16_SPECIAL,
+    F32_SPECIAL,
+    F64_SPECIAL,
     MASK64,
     SplitMix64,
     initial_state,
+    ordinary_bf16,
+    ordinary_f16,
+    ordinary_f32,
+    ordinary_f64,
 )
 
 # The Streaming SVE vector length in bytes, and the predicate length.
@@ -79,8 +91,30 @@ Z_SPECIAL = [
 # Canonical predicates of each element size: one bit per element.
 P_ELEMENTS = [0xFFFFFFFFFFFFFFFF, 0x5555555555555555, 0x1111111111111111, 0x0101010101010101]
 
+# The formats a kind SF register's lanes may take, by the `size` field that
+# names them (00 standing for BFloat16): each lane's width, its special
+# values and its ordinary values.
+FP_FORMATS = [
+    (16, BF16_SPECIAL, ordinary_bf16),
+    (16, F16_SPECIAL, ordinary_f16),
+    (32, F32_SPECIAL, ordinary_f32),
+    (64, F64_SPECIAL, ordinary_f64),
+]
 
-def sve_state(seed, kind):
+
+def fp_register(r, size):
+    """A Z register of lanes of the format `size` names, each a special value
+    or an ordinary one, half and half."""
+    width, special, ordinary = FP_FORMATS[size]
+    value = 0
+    for k in range(VLB * 8 // width):
+        w = r.next()
+        lane = special[(w >> 1) % len(special)] if w & 1 else ordinary(w)
+        value |= lane << (width * k)
+    return value
+
+
+def sve_state(seed, kind, insn):
     """Z0-Z31 and P0-P15 (as integers, little-endian over their bytes) and
     the FPCR bits the kind adds. Must match `difftest::sve_state` in Rust."""
     r = SplitMix64(seed ^ 0x5356_455F_5354_4154)
@@ -121,6 +155,18 @@ def sve_state(seed, kind):
     if kind == "SA":
         # FPCR.AH, which FABS and FNEG read.
         fpcr = (r.next() & 1) << 1
+    if kind == "SF":
+        # Floating-point inputs: per register, the state above, or lanes of
+        # floating-point values, half of the registers in the format the
+        # word's `size` field names and the rest in half, single or double
+        # precision; then a random FPCR (RMode, FZ, DN, AHP, FZ16, and
+        # FEAT_AFP's FIZ, AH and NEP).
+        own = (insn >> 22) & 3
+        for i in range(32):
+            sel = r.next() & 7
+            if sel != 0:
+                z[i] = fp_register(r, own if sel <= 4 else sel - 4)
+        fpcr = ((r.next() & 0x1F) << 22) | ((r.next() & 1) << 19) | (r.next() & 7)
     return z, p, fpcr
 
 
@@ -151,11 +197,50 @@ def not_spill(w):
     return w & ~0x01000000 if (w >> 22) & 7 == 0b110 else w
 
 
+def fp_size(w):
+    """`size = 00`, where a class's floating-point encodings carry Arm's
+    `size != '00'`, is FEAT_SVE_B16B16's or FEAT_SVE_BFSCALE's BFloat16
+    form, and is UNDEFINED in the rest: half precision in its place."""
+    return w | 0x00400000 if (w >> 22) & 3 == 0 else w
+
+
+def fp_arith_pred(w):
+    """FADD to FDIV (vectors, predicated), `fp_size`'s: and `opc = 111x`,
+    FAMAX and FAMIN (FEAT_FAMINMAX), as FDIVR and FDIV."""
+    w = fp_size(w)
+    return w & ~0x00020000 if (w >> 17) & 7 == 0b111 else w
+
+
+def fp_indexed(w):
+    """FMLA, FMLS, FMUL (indexed): `o2 = 1` is FEAT_SVE_B16B16's BFMLA,
+    BFMLS and BFMUL."""
+    return w & ~0x00000800
+
+
+def bfdot_indexed(w):
+    """BFDOT (indexed): `op = 1`, `opc2 = 00`; FDOT (`op = 0`) is FEAT_SME2's
+    and the rest FP8's."""
+    return (w | 0x00400000) & ~0x00000C00
+
+
+def bfdot(w):
+    """BFDOT (vectors): `op = 1`, `o2 = 0`; FDOT (`op = 0`) is FEAT_SME2's
+    and `o2 = 1` FP8's."""
+    return (w | 0x00400000) & ~0x00000400
+
+
+def not_bfmlsl(w):
+    """FMLALB to BFMLALT: `o2 = 1` with `op = 1`, BFMLSLB and BFMLSLT, is
+    FEAT_SME2's, so BFMLALB and BFMLALT in its place."""
+    return w & ~0x00002000 if (w >> 22) & 1 and (w >> 13) & 1 else w
+
+
 # (name, kind, fixed bits, free bits, fixup): Arm's encoding classes of the
 # A64 `sve` group whose encodings FEAT_SME makes legal, with `op0 = 000`
 # and `001`, then the loads, stores and prefetches (`op0 = 100`, `101` and
-# `111`, kind M, or R for scalar plus scalar), their fixed bits from
-# AARCHMRS 2026-09.
+# `111`, kind M, or R for scalar plus scalar), then the floating-point
+# instructions (`op0 = 011`, kind SF), their fixed bits from AARCHMRS
+# 2026-09.
 FAMILIES = [
     ("sve_int_bin_pred_arit_0", "S", 0x04000000, 0x00C71FFF, None),
     ("sve_int_bin_pred_arit_1", "S", 0x04080000, 0x00C71FFF, None),
@@ -273,6 +358,31 @@ FAMILIES = [
     ("sve_mem_cst_si", "M", 0xE400E000, 0x01EF1FFF, None),
     ("sve_mem_cstnt_si", "M", 0xE410E000, 0x018F1FFF, None),
     ("sve_mem_est_si", "M", 0xE410E000, 0x01EF1FFF, structures),
+    ("sve_fp_fcmla", "SF", 0x64000000, 0x00DF7FFF, None),
+    ("sve_fp_fcadd", "SF", 0x64008000, 0x00C11FFF, None),
+    ("sve_fp_fcvt2", "SF", 0x6408A000, 0x00C31FFF, None),
+    ("sve_fp_pairwise", "SF", 0x64108000, 0x00C71FFF, None),
+    ("sve_fp_fma_by_indexed_elem", "SF", 0x64200000, 0x00DF0FFF, fp_indexed),
+    ("sve_fp_fcmla_by_indexed_elem", "SF", 0x64201000, 0x00DF0FFF, None),
+    ("sve_fp_fmul_by_indexed_elem", "SF", 0x64202000, 0x00DF0BFF, fp_indexed),
+    ("sve_fp_fdot_by_indexed_elem", "SF", 0x64204000, 0x005F0FFF, bfdot_indexed),
+    ("sve_fp_fma_long_by_indexed_elem", "SF", 0x64A04000, 0x005F2FFF, not_bfmlsl),
+    ("sve_fp_fdot", "SF", 0x64208000, 0x005F07FF, bfdot),
+    ("sve_fp_fma_long", "SF", 0x64A08000, 0x005F27FF, not_bfmlsl),
+    ("sve_fp_3op_u_zd", "SF", 0x65000000, 0x00DF1FFF, fp_size),
+    ("sve_fp_fast_red", "SF", 0x65002000, 0x00C71FFF, None),
+    ("sve_fp_3op_p_pd", "SF", 0x65004000, 0x00DFBFFF, None),
+    ("sve_fp_2op_p_zds", "SF", 0x65008000, 0x00CF1FFF, fp_arith_pred),
+    ("sve_fp_2op_i_p_zds", "SF", 0x65188000, 0x00C71C3F, None),
+    ("sve_fp_2op_p_zd_a", "SF", 0x6500A000, 0x00C71FFF, None),
+    ("sve_fp_2op_p_zd_b_0", "SF", 0x6508A000, 0x00C31FFF, None),
+    ("sve_fp_2op_p_zd_b_1", "SF", 0x650CA000, 0x00C31FFF, None),
+    ("sve_fp_2op_p_zd_c", "SF", 0x6510A000, 0x00C71FFF, None),
+    ("sve_fp_2op_p_zd_d", "SF", 0x6518A000, 0x00C71FFF, None),
+    ("sve_fp_2op_u_zd", "SF", 0x650E3000, 0x00C103FF, None),
+    ("sve_fp_2op_p_pd", "SF", 0x65102000, 0x00C31FFF, None),
+    ("sve_fp_3op_p_zds_a", "SF", 0x65200000, 0x00DF7FFF, fp_size),
+    ("sve_fp_3op_p_zds_b", "SF", 0x65208000, 0x00DF7FFF, fp_size),
 ]
 
 
@@ -376,7 +486,7 @@ def vector_line(kind, insn, seed, out_nzcv, fpsr, before, after):
 
 def run_case(harness, insn, seed, kind):
     x, sp, nzcv, _v, data, base_fpcr = initial_state(seed, kind, insn)
-    z, p, fpcr = sve_state(seed, kind)
+    z, p, fpcr = sve_state(seed, kind, insn)
     fpcr |= base_fpcr
     try:
         result = harness.run(insn, x, sp & MASK64, nzcv, fpcr, z, p, data)

@@ -12,7 +12,12 @@
 // last two abort QEMU (scalar FABS's word, 0x5ef8f820, aborts; FNEG's,
 // 0x7ef8f820, executes); on 11.1.2 every one agrees with Arm. Open:
 // fneg_vector_ah (entry 12), which prints DIFFERS on 11.1.2 and agrees with
-// docs/qemu-afp-vector-fabs-fneg.patch.
+// docs/qemu-afp-vector-fabs-fneg.patch; sve_fcmla_idx_ah (entry 13), which
+// prints DIFFERS on 11.1.2 and agrees with
+// docs/qemu-sve-fcmla-indexed-ah.patch; sve_fmad_size00 and
+// sve_fsubr_size00 (entry 14), which execute on 11.1.2 where Arm raises
+// SIGILL, the first until docs/qemu-sve-fmad-size00.patch, the second
+// until master's f2bfb1cf.
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -112,6 +117,48 @@ static void fneg_vector_ah(void) {
            neg, abs, neg == 0x7fc00001 && abs == 0xffc00001 ? "agrees" : "DIFFERS", neg_scalar);
 }
 
+// SVE FCMLA (indexed) under FPCR.AH = 1: rotation #90 negates the real
+// half's Zm element (FPNeg), which leaves a NaN unchanged under AH, so
+// 0 + 1.0 * FPNeg(NaN 0xffc1) is that NaN. The Advanced SIMD form agrees.
+static void sve_fcmla_idx_ah(void) {
+    uint32_t sve, simd;
+    fpcr_set(1 << 1); /* FPCR.AH */
+    __asm__ volatile(
+        "mov w1, #0x3c00\n mov w2, #0xffc1\n mov w3, #0\n"
+        ".inst 0x05603821\n"   /* dup z1.h, w1: 1.0 */
+        ".inst 0x05603842\n"   /* dup z2.h, w2: a negative quiet NaN */
+        ".inst 0x05603860\n"   /* dup z0.h, w3 */
+        ".inst 0x64a21420\n"   /* fcmla z0.h, z1.h, z2.h[0], #90 */
+        "umov %w0, v0.h[0]\n"
+        "movi v3.2d, #0\n fcmla v3.8h, v1.8h, v2.h[0], #90\n umov %w1, v3.h[0]"
+        : "=r"(sve), "=r"(simd) : : "x1", "x2", "x3", "v0", "v1", "v2", "v3");
+    fpcr_set(0);
+    printf("under FPCR.AH: fcmla z0.h, z1.h, z2.h[0], #90 of 1.0 by NaN 0xffc1: z0.h[0] = %#x: %s"
+           " (Arm: 0xffc1, as Advanced SIMD fcmla v3.8h = %#x)\n",
+           sve, sve == 0xffc1 ? "agrees" : "DIFFERS", simd);
+}
+
+// FMAD with size = 00, which Arm's decode makes UNDEFINED (`if size ==
+// '00' then EndOfDecode(Decode_UNDEF)`); FEAT_SVE_B16B16 has no BFloat16
+// FMAD.
+static void sve_fmad_size00(void) {
+    signal(SIGILL, on_sigill);
+    __asm__ volatile(".inst 0x2518e3e0\n"   /* ptrue p0.b */
+                     ".inst 0x65228020"     /* fmad z0.<size 00>, p0/m, z1, z2 */
+                     ::: "p0", "v0");
+    printf("0x65228020 (fmad, size = 00) executed (Arm: UNDEFINED)\n");
+}
+
+// FSUBR (vectors) with size = 00: UNDEFINED, as FMAD; FEAT_SVE_B16B16 has
+// no BFloat16 FSUBR.
+static void sve_fsubr_size00(void) {
+    signal(SIGILL, on_sigill);
+    __asm__ volatile(".inst 0x2518e3e0\n"   /* ptrue p0.b */
+                     ".inst 0x65038020"     /* fsubr z0.<size 00>, p0/m, z0, z1 */
+                     ::: "p0", "v0");
+    printf("0x65038020 (fsubr, size = 00) executed (Arm: UNDEFINED)\n");
+}
+
 int main(int argc, char **argv) {
     const char *c = argc > 1 ? argv[1] : "";
     if (!strcmp(c, "ldapur")) ldapur();
@@ -121,9 +168,12 @@ int main(int argc, char **argv) {
     else if (!strcmp(c, "fabs_scalar_half")) fabs_scalar_half();
     else if (!strcmp(c, "misc_fp16_abort")) misc_fp16_abort();
     else if (!strcmp(c, "fneg_vector_ah")) fneg_vector_ah();
+    else if (!strcmp(c, "sve_fcmla_idx_ah")) sve_fcmla_idx_ah();
+    else if (!strcmp(c, "sve_fmad_size00")) sve_fmad_size00();
+    else if (!strcmp(c, "sve_fsubr_size00")) sve_fsubr_size00();
     else {
         fprintf(stderr, "cases: ldapur fcvtzs_half fcmla_elem_q0 fjcvtzs_fz fabs_scalar_half misc_fp16_abort"
-                        " fneg_vector_ah\n");
+                        " fneg_vector_ah sve_fcmla_idx_ah sve_fmad_size00 sve_fsubr_size00\n");
         return 2;
     }
     return 0;

@@ -91,6 +91,38 @@ impl FpType {
         }
     }
 
+    /// Arm FPInfinity: the infinity of sign `negative`.
+    pub(crate) const fn infinity(self, negative: bool) -> u64 {
+        self.exponent_mask() | if negative { self.sign_bit() } else { 0 }
+    }
+
+    /// Arm FPOne('0').
+    pub(crate) const fn one(self) -> u64 {
+        match self {
+            Self::Half => 0x3C00,
+            Self::Single => 0x3F80_0000,
+            Self::Double => 0x3FF0_0000_0000_0000,
+        }
+    }
+
+    /// Arm FPTwo('0').
+    pub(crate) const fn two(self) -> u64 {
+        match self {
+            Self::Half => 0x4000,
+            Self::Single => 0x4000_0000,
+            Self::Double => 0x4000_0000_0000_0000,
+        }
+    }
+
+    /// Arm FPPointFive('0').
+    pub(crate) const fn point_five(self) -> u64 {
+        match self {
+            Self::Half => 0x3800,
+            Self::Single => 0x3F00_0000,
+            Self::Double => 0x3FE0_0000_0000_0000,
+        }
+    }
+
     /// Whether `a` is a NaN of this precision.
     pub(crate) const fn is_nan(self, a: u64) -> bool {
         let exp = self.exponent_mask();
@@ -124,7 +156,7 @@ impl IntWidth {
     }
 
     /// The integer's width in bits, for elements of `ty`.
-    const fn bits(self, ty: FpType) -> u32 {
+    pub(crate) const fn bits(self, ty: FpType) -> u32 {
         match self {
             Self::OfElement => ty.esize(),
             Self::Bits32 => 32,
@@ -261,6 +293,23 @@ pub(crate) struct FpEnv {
 impl FpEnv {
     fn ahp(&self) -> bool {
         self.fpcr & FPCR_AHP != 0
+    }
+
+    /// Arm FPDefaultNaN: the quiet NaN with no payload, negative under
+    /// FPCR.AH = 1.
+    pub(crate) fn default_nan(&self, ty: FpType) -> u64 {
+        match ty {
+            FpType::Half => u64::from(self.status.default_nan_f16()),
+            FpType::Single => u64::from(self.status.default_nan_f32()),
+            FpType::Double => self.status.default_nan_f64(),
+        }
+    }
+
+    /// The environment Arm FPConvertSVE converts in: FPCR.AHP read as 0,
+    /// half precision always IEEE.
+    pub(crate) fn with_ieee_half(mut self) -> Self {
+        self.fpcr &= !FPCR_AHP;
+        self
     }
 
     /// FPCR.RMode, for the operations that round by it.
@@ -611,6 +660,36 @@ pub(crate) fn fp_convert(conversion: FpConversion, a: u64, env: &mut FpEnv) -> u
 /// FCVTXN on one element: double to single, rounding to odd.
 pub(crate) fn fp_convert_round_odd(a: u64, env: &mut FpEnv) -> u64 {
     u64::from(sf::f64_to_f32_round_odd(a, &mut env.status))
+}
+
+/// Arm BFMulAddH: `addend` plus the product of the BFloat16 values `n`
+/// and `m`, widened to single precision, in one fused multiply-add under
+/// FPCR — under FPCR.AH = 1 with every denormal flushed, rounding to
+/// nearest and no exception.
+pub(crate) fn bf16_mul_add_long(addend: u32, n: u16, m: u16, env: &mut FpEnv) -> u32 {
+    let (n, m) = (u32::from(n) << 16, u32::from(m) << 16);
+    env.status.with_altfp_overrides(|fp| sf::f32_mul_add(FusedMulAdd::Fmadd, addend, n, m, fp))
+}
+
+/// Arm FPScale: `a` × 2^`scale`, rounded once.
+pub(crate) fn fp_scale(ty: FpType, a: u64, scale: i64, env: &mut FpEnv) -> u64 {
+    let fp = &mut env.status;
+    match ty {
+        FpType::Half => u64::from(sf::f16_scale(a as u16, scale, fp)),
+        FpType::Single => u64::from(sf::f32_scale(a as u32, scale, fp)),
+        FpType::Double => sf::f64_scale(a, scale, fp),
+    }
+}
+
+/// Arm FPLogB: the base-2 exponent of `a`'s magnitude, an integer of the
+/// element's width.
+pub(crate) fn fp_log_b(ty: FpType, a: u64, env: &mut FpEnv) -> u64 {
+    let fp = &mut env.status;
+    match ty {
+        FpType::Half => u64::from(sf::f16_log_b(a as u16, fp)),
+        FpType::Single => u64::from(sf::f32_log_b(a as u32, fp)),
+        FpType::Double => sf::f64_log_b(a, fp),
+    }
 }
 
 /// M (bit 31) or S (bit 29) set: unallocated in every scalar FP encoding

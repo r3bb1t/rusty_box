@@ -37,6 +37,7 @@
 //! FPRound, round the exact value once here, since a 64-bit integer may
 //! need more bits than double precision has.
 
+use super::arm_ops::clamp_scale;
 use super::f64_to_f16;
 use super::internals::{
     exp_f16, exp_f64, f16_tiny_after_rounding, flush_flags, frac_f16, round_pack_to_f16, sign_f16, sign_f64,
@@ -164,6 +165,33 @@ pub(crate) fn f16_div(a: u16, b: u16, fp: &mut ArmFpStatus) -> u16 {
 /// FSQRT (half). Arm FPSqrt.
 pub(crate) fn f16_sqrt(a: u16, fp: &mut ArmFpStatus) -> u16 {
     rounded(fp, |fp| super::f64_sqrt(unpack(a, fp), fp))
+}
+
+/// FSCALE (half). Arm FPScale with `N == 16`: the scale clamped by
+/// FPClampScale on the half-precision exponent, after which the scaled
+/// value is exact in double precision, then rounded once.
+pub(crate) fn f16_scale(a: u16, scale: i64, fp: &mut ArmFpStatus) -> u16 {
+    let scale = clamp_scale(scale, i64::from(exp_f16(a)), 5, 10);
+    rounded(fp, |fp| super::f64_scale(unpack(a, fp), scale, fp))
+}
+
+/// FLOGB (half). Arm FPLogB with `N == 16`: the base-2 exponent of `a`'s
+/// magnitude, a 16-bit integer; the most negative for a NaN or a zero,
+/// raising Invalid Operation, the most positive for an infinity. A
+/// denormal flushed by FPCR.FZ16 is a zero; FPProcessDenorm raises
+/// nothing at half precision.
+pub(crate) fn f16_log_b(a: u16, fp: &mut ArmFpStatus) -> u16 {
+    let a = flushed(a, fp);
+    let (exp, frac) = (i32::from(exp_f16(a)), u32::from(frac_f16(a)));
+    if exp == 0x1F && frac != 0 || exp == 0 && frac == 0 {
+        softfloat_raise_flags(&mut fp.status, FLAG_INVALID);
+        return 0x8000;
+    }
+    if exp == 0x1F {
+        return 0x7FFF;
+    }
+    let log = if exp == 0 { 31 - frac.leading_zeros() as i32 - 24 } else { exp - 15 };
+    log as u16
 }
 
 /// FMADD/FMSUB/FNMADD/FNMSUB (half) and FMLA/FMLS, `addend` being Ra (or

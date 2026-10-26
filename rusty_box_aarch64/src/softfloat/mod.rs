@@ -62,16 +62,17 @@ use self::softfloat::*;
 use self::specialize::{f32_flush_input, f32_report_denormals, f64_flush_input, f64_report_denormals};
 
 pub(crate) use self::arm_ops::{
-    f16_ahp_to_f32, f16_ahp_to_f64, f32_mulx, f32_recip_step, f32_rsqrt_step, f32_to_f16_ahp, f32_to_i32_fixed,
-    f32_to_i64_fixed, f32_to_u32_fixed, f32_to_u64_fixed, f64_mulx, f64_recip_step, f64_rsqrt_step,
-    f64_to_f16_ahp, f64_to_f32_round_odd, f64_to_i32_fixed, f64_to_i32_js, f64_to_i64_fixed, f64_to_u32_fixed,
-    f64_to_u64_fixed, i64_to_f32_fixed, i64_to_f64_fixed, u64_to_f32_fixed, u64_to_f64_fixed,
+    f16_ahp_to_f32, f16_ahp_to_f64, f32_log_b, f32_mulx, f32_recip_step, f32_rsqrt_step, f32_scale, f32_to_f16_ahp,
+    f32_to_i32_fixed, f32_to_i64_fixed, f32_to_u32_fixed, f32_to_u64_fixed, f64_log_b, f64_mulx, f64_recip_step,
+    f64_rsqrt_step, f64_scale, f64_to_f16_ahp, f64_to_f32_round_odd, f64_to_i32_fixed, f64_to_i32_js,
+    f64_to_i64_fixed, f64_to_u32_fixed, f64_to_u64_fixed, i64_to_f32_fixed, i64_to_f64_fixed, u64_to_f32_fixed,
+    u64_to_f64_fixed,
 };
 pub(crate) use self::bfloat::{bf16_dot_add, f32_to_bf16};
 pub(crate) use self::half::{
-    f16_add, f16_compare, f16_div, f16_max, f16_maxnum, f16_min, f16_minnum, f16_mul, f16_mul_add, f16_mul_add_long,
-    f16_mulx, f16_recip_step, f16_round_to_int, f16_rsqrt_step, f16_sqrt, f16_sub, f16_to_signed, f16_to_unsigned,
-    int_to_f16,
+    f16_add, f16_compare, f16_div, f16_log_b, f16_max, f16_maxnum, f16_min, f16_minnum, f16_mul, f16_mul_add,
+    f16_mul_add_long, f16_mulx, f16_recip_step, f16_round_to_int, f16_rsqrt_step, f16_scale, f16_sqrt, f16_sub,
+    f16_to_signed, f16_to_unsigned, int_to_f16,
 };
 pub(crate) use self::softfloat::{FpOrdering, Handling, InputFlush};
 
@@ -244,6 +245,21 @@ impl ArmFpStatus {
     #[inline]
     pub(crate) fn handling(&self) -> Handling {
         self.status.handling
+    }
+
+    /// Arm FPDefaultNaN{16} under these controls: negative under FPCR.AH.
+    pub(crate) fn default_nan_f16(&self) -> u16 {
+        specialize::float16_default_nan(&self.status)
+    }
+
+    /// Arm FPDefaultNaN{32}.
+    pub(crate) fn default_nan_f32(&self) -> u32 {
+        specialize::float32_default_nan(&self.status)
+    }
+
+    /// Arm FPDefaultNaN{64}.
+    pub(crate) fn default_nan_f64(&self) -> u64 {
+        specialize::float64_default_nan(&self.status)
     }
 
     /// Runs `op` as Arm runs FPRecipStepFused, FPRSqrtStepFused, BFMulAddH

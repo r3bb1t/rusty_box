@@ -25,7 +25,7 @@ Reproducers:
   header gives the commands and the expected and observed output.
 - `docs/qemu-aarch64-probe-user.c`: a static Linux program for
   `qemu-aarch64 -cpu max`, one case per argument, for the entries fixed
-  upstream and for entry 12.
+  upstream and for entries 12 to 14.
 
 What `rusty_box_aarch64` does about each entry is in its README, "Where the
 references differ".
@@ -445,6 +445,76 @@ each element with the scalar forms' `gen_vfp_ah_abs*` and
 be faster). Built and tested on `v11.1.2`: the probe agrees, and
 `rusty_box_aarch64`'s QEMU vectors, the FEAT_AFP families included, were
 generated with it.
+
+### 13. SVE FCMLA (indexed) changes a NaN's sign under FPCR.AH = 1
+
+**Impact**: small. With FEAT_AFP's FPCR.AH set, the SVE FCMLA (indexed)
+flips the sign of a NaN element of Zm that its rotation negates, which
+the architecture leaves alone; the Advanced SIMD FCMLA (by element) and
+the predicated SVE FCMLA get it right. As with entry 12, only software
+that sets FPCR.AH and then inspects a NaN's sign sees it.
+
+**Location**: `target/arm/tcg/translate-sve.c`, `trans_FCMLA_zzxz()` (the
+`TRANS_FEAT(FCMLA_zzxz, ...)` line). Its helpers,
+`HELPER(gvec_fcmlah_idx)` and `HELPER(gvec_fcmlas_idx)` in
+`target/arm/tcg/vec_helper.c`, read FPCR.AH from bit 4 of their data and
+negate with `float_muladd_negate_product` under it (which leaves a NaN
+alone), else by flipping the element's sign bit. The SVE translation
+passes `a->index * 4 + a->rot`, whose bit 4 is always 0; the Advanced SIMD
+one (`trans_FCMLA_vi()` in `translate-a64.c`) passes `(s->fpcr_ah << 4) |
+(a->idx << 2) | a->rot`.
+
+**What the Arm ARM says**: FCMLA (indexed) (`fcmla_z_zzzi`) computes
+`elt2_a = FPNeg{esize}(elt2_a, FPCR())` when `neg_r` and the same of
+`elt2_b` when `neg_i`, and FPNeg returns a NaN unchanged when
+`IsFeatureImplemented(FEAT_AFP) && !UsingAArch32() && fpcr.AH == '1'`.
+
+**Reproduce**: `docs/qemu-aarch64-probe-user.c`, case `sve_fcmla_idx_ah`.
+
+    Arm:          fcmla z0.h, z1.h, z2.h[0], #90 of 1.0 by NaN 0xffc1: z0.h[0] = 0xffc1
+    QEMU 11.1.2:  z0.h[0] = 0x7fc1 (Advanced SIMD fcmla v3.8h: 0xffc1)
+
+**Fix**: `docs/qemu-sve-fcmla-indexed-ah.patch`: pass FPCR.AH in bit 4, as
+the Advanced SIMD form does. Built and tested on `v11.1.2`: the probe
+agrees, and `rusty_box_aarch64`'s SVE vectors were generated with it.
+
+### 14. FMAD, FMSB, FNMAD and FNMSB with size = 00 execute as BFloat16 operations
+
+**Impact**: small. With FEAT_SVE_B16B16 (`-cpu max`), the SVE FMAD,
+FMSB, FNMAD and FNMSB with `size = 00`, which the architecture makes
+UNDEFINED, execute as BFloat16 fused multiply-adds instead of raising
+SIGILL. No assembler produces the word; a test of the UNDEFINED encoding
+space sees it.
+
+**Location**: `target/arm/tcg/sve.decode` decodes the four as
+`FMLA_zpzzz`, `FMLS_zpzzz`, `FNMLA_zpzzz` and `FNMLS_zpzzz` with the
+operands reordered (`@rdn_pg_rm_ra`), and `target/arm/tcg/translate-sve.c`,
+`do_fmla_zpzzz()`, accepts `esz = MO_8` as BFloat16 when FEAT_SVE_B16B16
+is implemented, for BFMLA and BFMLS, the only instructions of the eight
+that have a BFloat16 form.
+
+**What the Arm ARM says**: the encodings of FMAD, FMSB, FNMAD and FNMSB
+(class `sve_fp_3op_p_zds_b`) carry no `size != '00'` condition, so the
+word is theirs, and each one's decode begins `if size == '00' then
+EndOfDecode(Decode_UNDEF)`. FEAT_SVE_B16B16 adds BFMLA and BFMLS to
+`sve_fp_3op_p_zds_a` (where FMLA and FMLS carry `size != '00'`) and
+nothing to `sve_fp_3op_p_zds_b`.
+
+QEMU 11.1.2 does the same for FSUBR (vectors, predicated) with `size =
+00`, which it decodes as FSUB with the operands swapped; master fixed
+that with f2bfb1cf ("Split decode of BFloat SVE FADD, FSUB, FMUL, FMIN*,
+FMAX*", 2026-09-01), which is in no release yet.
+
+**Reproduce**: `docs/qemu-aarch64-probe-user.c`, cases `sve_fmad_size00`
+and `sve_fsubr_size00`.
+
+    Arm:          SIGILL (UNDEFINED), both
+    QEMU 11.1.2:  0x65228020 (fmad, size = 00) executed; 0x65038020 (fsubr, size = 00) executed
+
+**Fix**: `docs/qemu-sve-fmad-size00.patch`: decode the four as their own
+names and refuse `esz = MO_8` for them. Built and tested on `v11.1.2`:
+`sve_fmad_size00` raises SIGILL, and `rusty_box_aarch64`'s SVE vectors
+were generated with it.
 
 ---
 

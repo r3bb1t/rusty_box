@@ -7,9 +7,10 @@
 //! `BFMulAddH`, `BFMatMulAddH`); the arithmetic is in `softfloat/bfloat.rs`.
 
 use super::exec::{bit, bits, ExecResult, Flow};
+use super::fp::bf16_mul_add_long;
 use super::simd::{elem, set_elem};
 use super::Cpu;
-use crate::softfloat::{self as sf, FusedMulAdd};
+use crate::softfloat as sf;
 
 impl Cpu {
     /// BFDOT, vector (`0 Q 1 01110 01 0 Rm 1 1111 1 Rn Rd`) and by element
@@ -66,12 +67,9 @@ impl Cpu {
         let mut env = self.fp_env();
         let mut r = 0u128;
         for e in 0..4 {
-            let element1 = (elem(n, 2 * e + sel, 16) as u32) << 16;
-            let element2 = (elem(m, index.unwrap_or(2 * e + sel), 16) as u32) << 16;
-            let addend = elem(d, e, 32) as u32;
-            let sum = env
-                .status
-                .with_altfp_overrides(|fp| sf::f32_mul_add(FusedMulAdd::Fmadd, addend, element1, element2, fp));
+            let element1 = elem(n, 2 * e + sel, 16) as u16;
+            let element2 = elem(m, index.unwrap_or(2 * e + sel), 16) as u16;
+            let sum = bf16_mul_add_long(elem(d, e, 32) as u32, element1, element2, &mut env);
             set_elem(&mut r, e, 32, u64::from(sum));
         }
         self.fp_commit(&env);

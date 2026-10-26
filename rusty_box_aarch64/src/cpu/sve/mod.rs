@@ -9,7 +9,8 @@
 //! (`CheckStreamingSVEEnabled`). The instructions are in `int` (integer
 //! arithmetic, element counts and immediates), `perm` (permutes, copies and
 //! selects), `pred` (compares, predicate operations, `WHILE` and predicate
-//! counts) and `mem` (contiguous loads, stores and prefetches).
+//! counts), `fp` (floating point) and `mem` (contiguous loads, stores and
+//! prefetches).
 //!
 //! Provenance (R7): the Arm A64 ISA XML, release 2026-09 (Arm ARM M.d), the
 //! instruction pages each handler names and the shared pseudocode in
@@ -17,6 +18,7 @@
 //! operation; where a page raises UNDEFINED in its decode, the handler
 //! does so before the enable check, as the pseudocode orders it.
 
+mod fp;
 mod int;
 mod mem;
 mod perm;

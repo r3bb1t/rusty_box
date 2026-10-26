@@ -24,7 +24,8 @@ use super::internals::*;
 use super::primitives::*;
 use super::softfloat::*;
 use super::specialize::{
-    f32_flush_input, f32_report_denormals, f64_flush_input, f64_report_denormals, tininess_before_rounding,
+    f32_flush_input, f32_report_denormals, f64_flush_input, f64_report_denormals, softfloat_propagate_nan_f32,
+    softfloat_propagate_nan_f64, tininess_before_rounding,
 };
 use super::uint64_convert::f64_to_ui64 as sf_f64_to_ui64;
 use super::uint_convert::f64_to_ui32 as sf_f64_to_ui32;
@@ -557,6 +558,112 @@ fn f64_rsqrt_step_under(a: u64, b: u64, s: &mut SoftFloatStatus) -> u64 {
         (a, b)
     };
     sf_f64_mul_add(a, b, F64_ONE_POINT_FIVE, s)
+}
+
+// ============================================================
+// FSCALE, FLOGB (SVE)
+// ============================================================
+
+/// Arm FPClampScale: `scale` limited to the range over which the result
+/// of scaling an operand of biased exponent `exp`, in a format of
+/// `exp_bits` and `frac_bits`, can change; beyond it every result has
+/// overflowed or rounded to zero alike.
+pub(super) fn clamp_scale(scale: i64, exp: i64, exp_bits: u32, frac_bits: u32) -> i64 {
+    let emax = (1i64 << exp_bits) - 1;
+    let min_scale = -(i64::from(frac_bits) + 1);
+    let max_scale = emax + i64::from(frac_bits) + 1;
+    (min_scale - exp).max(scale.min(max_scale - exp))
+}
+
+/// FSCALE (single): Arm FPScale — `a` × 2^`scale` rounded once, the scale
+/// clamped first (FPClampScale). A NaN is processed (FPProcessNaN), and a
+/// zero or an infinity is its own result.
+pub(crate) fn f32_scale(a: u32, scale: i64, fp: &mut ArmFpStatus) -> u32 {
+    let s = &mut fp.status;
+    let a = f32_flush_input(a, s);
+    if is_nan_f32(a) {
+        return softfloat_propagate_nan_f32(a, a, s);
+    }
+    if f32_is_zero(a) || f32_is_inf(a) {
+        return a;
+    }
+    let exp = i64::from(exp_f32(a));
+    let scale = clamp_scale(scale, exp, 8, 23);
+    // A denormal is `frac` × 2^(1 - bias), without the hidden bit.
+    let (exp, sig) = if exp == 0 {
+        (1, frac_f32(a))
+    } else {
+        (exp, frac_f32(a) | 0x0080_0000)
+    };
+    let result = norm_round_pack_to_f32(sign_f32(a), (exp - 1 + scale) as i16, sig << 7, s);
+    f32_report_denormals(&[a], s);
+    result
+}
+
+/// FSCALE (double); see [`f32_scale`].
+pub(crate) fn f64_scale(a: u64, scale: i64, fp: &mut ArmFpStatus) -> u64 {
+    let s = &mut fp.status;
+    let a = f64_flush_input(a, s);
+    if is_nan_f64(a) {
+        return softfloat_propagate_nan_f64(a, a, s);
+    }
+    if f64_is_zero(a) || f64_is_inf(a) {
+        return a;
+    }
+    let exp = i64::from(exp_f64(a));
+    let scale = clamp_scale(scale, exp, 11, 52);
+    let (exp, sig) = if exp == 0 {
+        (1, frac_f64(a))
+    } else {
+        (exp, frac_f64(a) | 0x0010_0000_0000_0000)
+    };
+    let result = norm_round_pack_to_f64(sign_f64(a), (exp - 1 + scale) as i16, sig << 10, s);
+    f64_report_denormals(&[a], s);
+    result
+}
+
+/// FLOGB (single): Arm FPLogB — the base-2 exponent of `a`'s magnitude, a
+/// 32-bit integer: the most negative integer for a NaN or a zero, raising
+/// Invalid Operation, and the most positive for an infinity.
+pub(crate) fn f32_log_b(a: u32, fp: &mut ArmFpStatus) -> u32 {
+    let s = &mut fp.status;
+    let a = f32_flush_input(a, s);
+    if is_nan_f32(a) || f32_is_zero(a) {
+        softfloat_raise_flags(s, FLAG_INVALID);
+        return 0x8000_0000;
+    }
+    if f32_is_inf(a) {
+        return 0x7FFF_FFFF;
+    }
+    f32_report_denormals(&[a], s);
+    let exp = i32::from(exp_f32(a));
+    let log = if exp == 0 {
+        31 - frac_f32(a).leading_zeros() as i32 - 149
+    } else {
+        exp - 127
+    };
+    log as u32
+}
+
+/// FLOGB (double); see [`f32_log_b`].
+pub(crate) fn f64_log_b(a: u64, fp: &mut ArmFpStatus) -> u64 {
+    let s = &mut fp.status;
+    let a = f64_flush_input(a, s);
+    if is_nan_f64(a) || f64_is_zero(a) {
+        softfloat_raise_flags(s, FLAG_INVALID);
+        return 0x8000_0000_0000_0000;
+    }
+    if f64_is_inf(a) {
+        return 0x7FFF_FFFF_FFFF_FFFF;
+    }
+    f64_report_denormals(&[a], s);
+    let exp = i64::from(exp_f64(a));
+    let log = if exp == 0 {
+        63 - i64::from(frac_f64(a).leading_zeros()) - 1074
+    } else {
+        exp - 1023
+    };
+    log as u64
 }
 
 #[cfg(test)]

@@ -88,7 +88,10 @@ use ldst::{
 };
 use reserved::PermUndef;
 use sve::{
-    SveIntArithImm0, SveIntArithImm1, SveIntArithImm2, SveIntArithSvl, SveIntArithVl, SveIntBinConsArit0, SveIntBinConsLog,
+    SveFp2opIPZds, SveFp2opPPd, SveFp2opPZdA, SveFp2opPZdB0, SveFp2opPZdB1, SveFp2opPZdC, SveFp2opPZdD, SveFp2opPZds,
+    SveFp2opUZd, SveFp3opPPd, SveFp3opPZdsA, SveFp3opPZdsB, SveFp3opUZd, SveFpFastRed, SveFpFcadd, SveFpFcmla,
+    SveFpFcmlaByIndexedElem, SveFpFcvt2, SveFpFdot, SveFpFdotByIndexedElem, SveFpFmaByIndexedElem, SveFpFmaLong,
+    SveFpFmaLongByIndexedElem, SveFpFmulByIndexedElem, SveFpPairwise, SveIntArithImm0, SveIntArithImm1, SveIntArithImm2, SveIntArithSvl, SveIntArithVl, SveIntBinConsArit0, SveIntBinConsLog,
     SveIntBinConsMisc0D, SveIntBinConsShiftA, SveIntBinConsShiftB, SveIntBinPredArit0, SveIntBinPredArit1,
     SveIntBinPredArit2, SveIntBinPredDiv, SveIntBinPredLog, SveIntBinPredShift0, SveIntBinPredShift1,
     SveIntBinPredShift2, SveIntBreak, SveIntBrkn, SveIntBrkp, SveIntCmp0, SveIntCmp1, SveIntCount, SveIntCountR,
@@ -306,6 +309,31 @@ pub(crate) enum Encoding {
     SveIntArithImm2(SveIntArithImm2),
     SveIntDupImm(SveIntDupImm),
     SveIntDupFpimm(SveIntDupFpimm),
+    SveFpFcmla(SveFpFcmla),
+    SveFpFcadd(SveFpFcadd),
+    SveFpFcvt2(SveFpFcvt2),
+    SveFpPairwise(SveFpPairwise),
+    SveFpFmaByIndexedElem(SveFpFmaByIndexedElem),
+    SveFpFcmlaByIndexedElem(SveFpFcmlaByIndexedElem),
+    SveFpFmulByIndexedElem(SveFpFmulByIndexedElem),
+    SveFpFdotByIndexedElem(SveFpFdotByIndexedElem),
+    SveFpFmaLongByIndexedElem(SveFpFmaLongByIndexedElem),
+    SveFpFdot(SveFpFdot),
+    SveFpFmaLong(SveFpFmaLong),
+    SveFp3opUZd(SveFp3opUZd),
+    SveFpFastRed(SveFpFastRed),
+    SveFp3opPPd(SveFp3opPPd),
+    SveFp2opPZds(SveFp2opPZds),
+    SveFp2opIPZds(SveFp2opIPZds),
+    SveFp2opPZdA(SveFp2opPZdA),
+    SveFp2opPZdB0(SveFp2opPZdB0),
+    SveFp2opPZdB1(SveFp2opPZdB1),
+    SveFp2opPZdC(SveFp2opPZdC),
+    SveFp2opPZdD(SveFp2opPZdD),
+    SveFp2opUZd(SveFp2opUZd),
+    SveFp2opPPd(SveFp2opPPd),
+    SveFp3opPZdsA(SveFp3opPZdsA),
+    SveFp3opPZdsB(SveFp3opPZdsB),
     SveMem32bPfill(SveMem32bPfill),
     SveMem32bFill(SveMem32bFill),
     SveMemPrfmSi(SveMemPrfmSi),
@@ -515,6 +543,25 @@ impl Encoding {
             | Self::SveIntArithImm2(_)
             | Self::SveIntDupImm(_)
             | Self::SveIntDupFpimm(_) => Class::SveWideImmediate,
+            Self::SveFp2opPZds(_) | Self::SveFp2opIPZds(_) => Class::SveFpArithmeticPredicated,
+            Self::SveFp3opUZd(_) => Class::SveFpArithmeticUnpredicated,
+            Self::SveFpFastRed(_) => Class::SveFpReduction,
+            Self::SveFp3opPPd(_) | Self::SveFp2opPPd(_) => Class::SveFpCompare,
+            Self::SveFp2opPZdA(_)
+            | Self::SveFp2opPZdB0(_)
+            | Self::SveFp2opPZdB1(_)
+            | Self::SveFp2opPZdC(_)
+            | Self::SveFp2opPZdD(_) => Class::SveFpUnaryPredicated,
+            Self::SveFp2opUZd(_) => Class::SveFpEstimate,
+            Self::SveFp3opPZdsA(_) | Self::SveFp3opPZdsB(_) => Class::SveFpMulAdd,
+            Self::SveFpFmaByIndexedElem(_) | Self::SveFpFmulByIndexedElem(_) => Class::SveFpIndexed,
+            Self::SveFpFcmla(_) | Self::SveFpFcadd(_) | Self::SveFpFcmlaByIndexedElem(_) => Class::SveFpComplex,
+            Self::SveFpPairwise(_) => Class::SveFpPairwise,
+            Self::SveFpFcvt2(_) => Class::SveFpConvertOdd,
+            Self::SveFpFdotByIndexedElem(_)
+            | Self::SveFpFmaLongByIndexedElem(_)
+            | Self::SveFpFdot(_)
+            | Self::SveFpFmaLong(_) => Class::SveFpWidening,
             Self::SveMem32bPfill(_) | Self::SveMem32bFill(_) | Self::SveMemPspill(_) | Self::SveMemSpill(_) => {
                 Class::SveFillSpill
             }
@@ -774,6 +821,36 @@ pub(crate) enum Class {
     /// `sve_wideimm_unpred`: the add/subtract, min/max and multiply
     /// immediates, DUP (immediate), FDUP.
     SveWideImmediate,
+    /// `sve_fp_pred`: FADD, FSUB, FMUL, FSUBR, FMAXNM, FMINNM, FMAX, FMIN
+    /// of vectors and of an immediate (bit 20), and FABD, FSCALE, FMULX,
+    /// FDIVR, FDIV, predicated.
+    SveFpArithmeticPredicated,
+    /// FADD, FSUB, FMUL, FRECPS, FRSQRTS, unpredicated.
+    SveFpArithmeticUnpredicated,
+    /// FADDV, FMAXNMV, FMINNMV, FMAXV, FMINV.
+    SveFpReduction,
+    /// FCMEQ, FCMNE, FCMGE, FCMGT, FCMUO, FACGE, FACGT of vectors, and the
+    /// compares with zero (bit 14 clear).
+    SveFpCompare,
+    /// `sve_fp_unary`: FRINT*, FCVT, FCVTX, BFCVT, FRECPX, FSQRT, SCVTF,
+    /// UCVTF, FLOGB, FCVTZS, FCVTZU, merging.
+    SveFpUnaryPredicated,
+    /// FRECPE, FRSQRTE (vectors).
+    SveFpEstimate,
+    /// FMLA, FMLS, FNMLA, FNMLS and FMAD, FMSB, FNMAD, FNMSB (bit 15),
+    /// predicated.
+    SveFpMulAdd,
+    /// FMLA, FMLS and FMUL (bit 13), indexed.
+    SveFpIndexed,
+    /// FCMLA, predicated and indexed (bit 21), and FCADD.
+    SveFpComplex,
+    /// FADDP, FMAXNMP, FMINNMP, FMAXP, FMINP.
+    SveFpPairwise,
+    /// FCVTNT, FCVTXNT, BFCVTNT, FCVTLT.
+    SveFpConvertOdd,
+    /// FMLALB, FMLALT, FMLSLB, FMLSLT, BFMLALB, BFMLALT and BFDOT, by
+    /// vector and indexed.
+    SveFpWidening,
     /// LDR and STR of a vector or a predicate register: the handler reads
     /// the direction from bit 30 and the register file from bit 14.
     SveFillSpill,
@@ -1024,6 +1101,31 @@ impl Encoding {
             | Self::SveIntArithImm2(_)
             | Self::SveIntDupImm(_)
             | Self::SveIntDupFpimm(_)
+            | Self::SveFpFcmla(_)
+            | Self::SveFpFcadd(_)
+            | Self::SveFpFcvt2(_)
+            | Self::SveFpPairwise(_)
+            | Self::SveFpFmaByIndexedElem(_)
+            | Self::SveFpFcmlaByIndexedElem(_)
+            | Self::SveFpFmulByIndexedElem(_)
+            | Self::SveFpFdotByIndexedElem(_)
+            | Self::SveFpFmaLongByIndexedElem(_)
+            | Self::SveFpFdot(_)
+            | Self::SveFpFmaLong(_)
+            | Self::SveFp3opUZd(_)
+            | Self::SveFpFastRed(_)
+            | Self::SveFp3opPPd(_)
+            | Self::SveFp2opPZds(_)
+            | Self::SveFp2opIPZds(_)
+            | Self::SveFp2opPZdA(_)
+            | Self::SveFp2opPZdB0(_)
+            | Self::SveFp2opPZdB1(_)
+            | Self::SveFp2opPZdC(_)
+            | Self::SveFp2opPZdD(_)
+            | Self::SveFp2opUZd(_)
+            | Self::SveFp2opPPd(_)
+            | Self::SveFp3opPZdsA(_)
+            | Self::SveFp3opPZdsB(_)
             | Self::SveMem32bPfill(_)
             | Self::SveMem32bFill(_)
             | Self::SveMemPrfmSi(_)

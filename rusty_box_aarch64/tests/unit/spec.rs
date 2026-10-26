@@ -1118,10 +1118,15 @@ fn the_decoder_is_arms_encoding_tree_for_the_implemented_features() {
         if occurrences.is_empty() {
             continue;
         }
+        // A group whose one class bears its own name (`sve_fp_fcmla` holds
+        // the class `sve_fp_fcmla`) is one function, the class's: the
+        // path names it once.
+        let mut path: Vec<&String> = leaf.path.iter().collect();
+        path.dedup();
         let mut covered: u64 = 0;
         for (i, o) in occurrences.iter().enumerate() {
             let groups: Vec<&String> = o.chain.iter().filter(|f| f.as_str() != "A64" && arm.fields.contains_key(f.as_str())).collect();
-            if groups != leaf.path.iter().collect::<Vec<_>>() {
+            if groups != path {
                 problems.push(format!("{class}::{variant} is decoded through {:?}, Arm puts {} in {:?}", o.chain, leaf.name, leaf.path));
             }
             if !o.cube.within(leaf.cube) {
@@ -1372,6 +1377,21 @@ fn feature_implications() -> (String, Vec<(Feature, Feature)>) {
         let name = side.get("value").and_then(Value::as_str)?;
         Feature::ALL.into_iter().find(|f| f.arm_name() == Some(name))
     };
+    // The features a conjunction of identifiers names (`FEAT_SME ==>
+    // (FEAT_FCMA && FEAT_FP16 && FEAT_BF16 && FEAT_FHM)`), each implied on
+    // its own; `None` for any other shape, which implies no one feature.
+    fn conjuncts(side: Option<&Value>, out: &mut Vec<Value>) -> Option<()> {
+        let side = side?;
+        match side.get("_type").and_then(Value::as_str) {
+            Some("AST.Identifier") => out.push(side.clone()),
+            Some("AST.BinaryOp") if side.get("op").and_then(Value::as_str) == Some("&&") => {
+                conjuncts(side.get("left"), out)?;
+                conjuncts(side.get("right"), out)?;
+            }
+            _ => return None,
+        }
+        Some(())
+    }
     let parameter_constraints = root
         .get("parameters")
         .and_then(Value::as_array)
@@ -1387,7 +1407,14 @@ fn feature_implications() -> (String, Vec<(Feature, Feature)>) {
         if !is_implication {
             continue;
         }
-        if let (Some(a), Some(b)) = (named(c.get("left")), named(c.get("right"))) {
+        let Some(a) = named(c.get("left")) else {
+            continue;
+        };
+        let mut right = Vec::new();
+        if conjuncts(c.get("right"), &mut right).is_none() {
+            continue;
+        }
+        for b in right.iter().filter_map(|b| named(Some(b))) {
             if !implications.contains(&(a, b)) {
                 implications.push((a, b));
             }

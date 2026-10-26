@@ -7,16 +7,23 @@
 //! its Arm pseudocode: the enable checks (`CheckSVEEnabled`,
 //! `CheckStreamingSVEEnabled`), the vector length (`CurrentVL`, the
 //! `SVEZEROUPPER` choice), `DecodePredCount`, and the boundaries of WHILE,
-//! CTERM, SDIV, EXT, DUP (indexed), SQINCB and PSEL; and of the loads and
+//! CTERM, SDIV, EXT, DUP (indexed), SQINCB and PSEL; of the loads and
 //! stores, the inactive elements, a fault part-way, the register numbers
 //! wrapping, the alignment of LDR and STR, the SP check with no element
 //! active, and the accesses a prefetch and an all-inactive load do not
-//! make.
+//! make; and of floating point, the order of a reduction and the identity
+//! of its inactive elements, the arithmetic immediates, FSCALE's clamp,
+//! FLOGB's specials and denormals, the
+//! container a conversion writes, the multiply-add negations, FCMLA's
+//! rotations, the indexed segments, FPCR.AHP ignored, the exceptions of
+//! the active elements alone, and `size = 00` UNDEFINED.
 
 use std::vec::Vec;
 
 use super::super::features::{Implementation, VecLen};
+use super::super::fp_estimate::fpsr::{DZC, IDC, IOC, IXC, OFC, UFC};
 use super::super::sctlr;
+use crate::softfloat::FPCR_AH;
 use super::super::step::{exec, exec_in, processor, Taken, CPACR_ALL, DATA, FP_TRAP, SME_DISABLED, UNDEFINED};
 use super::super::Cpu;
 use super::{Esize, Pv, Zv};
@@ -613,4 +620,348 @@ fn an_sp_base_is_checked_with_no_element_active() {
     cpu.sp_el1 = DATA + 8;
     // ld1b {z0.b}, p0/z, [sp].
     assert_eq!(exec(&mut cpu, 0xA400_A3E0), Some(Taken { ec: 0x26, iss: 0 }));
+}
+
+// ----- Floating point -----
+
+/// FPCR.FZ and FPCR.AHP.
+const FPCR_FZ: u64 = 1 << 24;
+const FPCR_AHP: u64 = 1 << 26;
+
+/// `Z<n>` at the current length: the elements of `es` from `values`,
+/// repeated.
+fn set_elements(cpu: &mut Cpu, n: u32, es: Esize, values: &[u64]) {
+    let vl = cpu.current_svl();
+    let mut z = Zv::ZERO;
+    for e in 0..es.elements(vl) {
+        z.set(e, es, values[e % values.len()]);
+    }
+    cpu.set_z(n, vl, &z);
+}
+
+/// A processor in Streaming SVE mode with `SMCR_EL1.LEN = len`, P0 all
+/// true, FPCR `fpcr` and FPSR clear.
+fn fp_streaming(len: u64, fpcr: u64) -> Cpu {
+    let mut cpu = streaming(len);
+    let vl = cpu.current_svl();
+    cpu.set_p(0, vl, &Pv::ones(vl));
+    cpu.fpcr = fpcr;
+    cpu.fpsr = 0;
+    cpu
+}
+
+/// FADDV reduces by recursive halves (`FPReduce`): at 128 bits, the sum
+/// of `e0 + e1` and `e2 + e3`, which for 1e8, 1, -1e8, 1 is 0 where a
+/// running sum is 1; the scalar is written to Vd, the rest of Zd zeroed.
+/// An inactive element is the operation's identity: FMINV's +infinity,
+/// FMAXV's -infinity, FMAXNMV's default NaN, negative under FPCR.AH.
+#[test]
+fn faddv_reduces_by_halves_and_inactive_elements_are_the_identity() {
+    let mut cpu = fp_streaming(0, 0);
+    set_elements(&mut cpu, 1, Esize::S, &[0x4CBE_BC20, 0x3F80_0000, 0xCCBE_BC20, 0x3F80_0000]);
+    set_elements(&mut cpu, 0, Esize::S, &[0xFFFF_FFFF]);
+    // faddv s0, p0, z1.s.
+    assert_eq!(exec(&mut cpu, 0x6580_2020), None);
+    assert_eq!(elements(&cpu, 0, Esize::S), [0, 0, 0, 0]);
+    assert_eq!(cpu.fpsr, IXC);
+    // At 512 bits nothing above the scalar survives either.
+    let mut cpu = fp_streaming(3, 0);
+    set_elements(&mut cpu, 0, Esize::B, &[0xFF]);
+    set_elements(&mut cpu, 1, Esize::S, &[0x3F80_0000]);
+    assert_eq!(exec(&mut cpu, 0x6580_2020), None);
+    let mut want = [0u64; 16];
+    want[0] = 0x4180_0000;
+    assert_eq!(elements(&cpu, 0, Esize::S), want);
+
+    let mut cpu = fp_streaming(0, 0);
+    let vl = cpu.current_svl();
+    cpu.set_p(1, vl, &Pv::ZERO);
+    // fminv s2, p1, z1.s; fmaxv s3, p1, z1.s; fmaxnmv s4, p1, z1.s.
+    assert_eq!(exec(&mut cpu, 0x6587_2422), None);
+    assert_eq!(exec(&mut cpu, 0x6586_2423), None);
+    assert_eq!(exec(&mut cpu, 0x6584_2424), None);
+    assert_eq!(elements(&cpu, 2, Esize::S)[0], 0x7F80_0000);
+    assert_eq!(elements(&cpu, 3, Esize::S)[0], 0xFF80_0000);
+    assert_eq!(elements(&cpu, 4, Esize::S)[0], 0x7FC0_0000);
+    assert_eq!(cpu.fpsr, 0);
+    cpu.fpcr = FPCR_AH;
+    assert_eq!(exec(&mut cpu, 0x6584_2424), None);
+    assert_eq!(elements(&cpu, 4, Esize::S)[0], 0xFFC0_0000);
+
+    // FADDV's identity is +0: of all -0 the sum is -0, but with one
+    // element inactive it is -0 + +0 = +0.
+    let mut cpu = fp_streaming(0, 0);
+    let vl = cpu.current_svl();
+    set_elements(&mut cpu, 1, Esize::S, &[0x8000_0000]);
+    assert_eq!(exec(&mut cpu, 0x6580_2020), None);
+    assert_eq!(elements(&cpu, 0, Esize::S)[0], 0x8000_0000);
+    cpu.set_p(0, vl, &Pv::from_bytes(&[0x11, 0x01]));
+    assert_eq!(exec(&mut cpu, 0x6580_2020), None);
+    assert_eq!(elements(&cpu, 0, Esize::S)[0], 0);
+}
+
+/// The predicated arithmetic immediates are Arm's two per operation
+/// (`i1`): FADD, FSUB, FSUBR 0.5 and 1.0, FMUL 0.5 and 2.0, FMAXNM,
+/// FMINNM, FMAX, FMIN 0.0 and 1.0.
+#[test]
+fn the_arithmetic_immediates_are_each_operations_pair() {
+    let mut cpu = fp_streaming(0, 0);
+    set_elements(&mut cpu, 0, Esize::S, &[0x4040_0000]);
+    // fmul z0.s, p0/m, z0.s, #2.0; then #0.5.
+    assert_eq!(exec(&mut cpu, 0x659A_8020), None);
+    assert_eq!(elements(&cpu, 0, Esize::S), [0x40C0_0000; 4]);
+    assert_eq!(exec(&mut cpu, 0x659A_8000), None);
+    assert_eq!(elements(&cpu, 0, Esize::S), [0x4040_0000; 4]);
+    // fadd z0.s, p0/m, z0.s, #0.5; then #1.0.
+    assert_eq!(exec(&mut cpu, 0x6598_8000), None);
+    assert_eq!(elements(&cpu, 0, Esize::S), [0x4060_0000; 4]);
+    assert_eq!(exec(&mut cpu, 0x6598_8020), None);
+    assert_eq!(elements(&cpu, 0, Esize::S), [0x4090_0000; 4]);
+    // fmax z0.s, p0/m, z0.s, #0.0 of -1.0; then #1.0.
+    set_elements(&mut cpu, 0, Esize::S, &[0xBF80_0000]);
+    assert_eq!(exec(&mut cpu, 0x659E_8000), None);
+    assert_eq!(elements(&cpu, 0, Esize::S), [0; 4]);
+    assert_eq!(exec(&mut cpu, 0x659E_8020), None);
+    assert_eq!(elements(&cpu, 0, Esize::S), [0x3F80_0000; 4]);
+}
+
+/// FSCALE multiplies by 2^SInt(Zm element), the scale clamped first
+/// (`FPClampScale`) and the result rounded once (`FPRound`): 2^-1 halves,
+/// 2^(2^31 - 1) overflows to infinity, 3.0 x 2^-150 rounds to the even
+/// denormal 2, and 2^-2^31 underflows to zero.
+#[test]
+fn fscale_clamps_the_scale_and_rounds_once() {
+    let mut cpu = fp_streaming(0, 0);
+    set_elements(&mut cpu, 0, Esize::S, &[0x3F80_0000, 0x3F80_0000, 0x4040_0000, 0x3F80_0000]);
+    set_elements(&mut cpu, 1, Esize::S, &[0xFFFF_FFFF, 0x7FFF_FFFF, 0xFFFF_FF6A, 0x8000_0000]);
+    // fscale z0.s, p0/m, z0.s, z1.s.
+    assert_eq!(exec(&mut cpu, 0x6589_8020), None);
+    assert_eq!(elements(&cpu, 0, Esize::S), [0x3F00_0000, 0x7F80_0000, 0x0000_0002, 0]);
+    assert_eq!(cpu.fpsr, OFC | UFC | IXC);
+
+    // Double precision clamps by its own exponent range: 1.0 x 2^1 is 2.0,
+    // and 1.0 x 2^-1074 the smallest denormal, exactly.
+    let mut cpu = fp_streaming(0, 0);
+    set_elements(&mut cpu, 0, Esize::D, &[0x3FF0_0000_0000_0000]);
+    set_elements(&mut cpu, 1, Esize::D, &[1, 0xFFFF_FFFF_FFFF_FBCE]);
+    // fscale z0.d, p0/m, z0.d, z1.d.
+    assert_eq!(exec(&mut cpu, 0x65C9_8020), None);
+    assert_eq!(elements(&cpu, 0, Esize::D), [0x4000_0000_0000_0000, 1]);
+    assert_eq!(cpu.fpsr, 0);
+
+    // Half precision: 2.0; 3.0 x 2^-25 rounds to the even denormal 2;
+    // 2^32767 overflows and 2^-32768 underflows.
+    let mut cpu = fp_streaming(0, 0);
+    set_elements(&mut cpu, 0, Esize::H, &[0x3C00, 0x4200, 0x3C00, 0x3C00]);
+    set_elements(&mut cpu, 1, Esize::H, &[0x0001, 0xFFE7, 0x7FFF, 0x8000]);
+    // fscale z0.h, p0/m, z0.h, z1.h.
+    assert_eq!(exec(&mut cpu, 0x6549_8020), None);
+    assert_eq!(elements(&cpu, 0, Esize::H), [0x4000, 0x0002, 0x7C00, 0, 0x4000, 0x0002, 0x7C00, 0]);
+    assert_eq!(cpu.fpsr, OFC | UFC | IXC);
+}
+
+/// FLOGB gives the unbiased exponent (`FPLogB`), a denormal's from its
+/// leading bit; MaxInt for an infinity; MinInt with Invalid Operation for
+/// a zero, and for a denormal FPCR.FZ flushes, with Input Denormal too.
+#[test]
+fn flogb_gives_the_exponent_and_the_extremes_for_the_specials() {
+    let mut cpu = fp_streaming(0, 0);
+    set_elements(&mut cpu, 1, Esize::S, &[0x4100_0000, 0x0000_0001, 0x7F80_0000, 0]);
+    // flogb z0.s, p0/m, z1.s.
+    assert_eq!(exec(&mut cpu, 0x651C_A020), None);
+    assert_eq!(elements(&cpu, 0, Esize::S), [3, 0xFFFF_FF6B, 0x7FFF_FFFF, 0x8000_0000]);
+    assert_eq!(cpu.fpsr, IOC);
+    let mut cpu = fp_streaming(0, FPCR_FZ);
+    set_elements(&mut cpu, 1, Esize::S, &[0x0000_0001]);
+    assert_eq!(exec(&mut cpu, 0x651C_A020), None);
+    assert_eq!(elements(&cpu, 0, Esize::S), [0x8000_0000; 4]);
+    assert_eq!(cpu.fpsr, IOC | IDC);
+
+    // Half precision: 2^-24 and 2^-15, both denormal, give -24 and -15.
+    let mut cpu = fp_streaming(0, 0);
+    set_elements(&mut cpu, 1, Esize::H, &[0x0001, 0x0200, 0x4800, 0x7C00]);
+    // flogb z0.h, p0/m, z1.h.
+    assert_eq!(exec(&mut cpu, 0x651A_A020), None);
+    assert_eq!(elements(&cpu, 0, Esize::H), [0xFFE8, 0xFFF1, 3, 0x7FFF, 0xFFE8, 0xFFF1, 3, 0x7FFF]);
+    // Double precision: 2^-1074 gives -1074.
+    set_elements(&mut cpu, 1, Esize::D, &[1, 0x4020_0000_0000_0000]);
+    // flogb z0.d, p0/m, z1.d.
+    assert_eq!(exec(&mut cpu, 0x651E_A020), None);
+    assert_eq!(elements(&cpu, 0, Esize::D), [0xFFFF_FFFF_FFFF_FBCE, 3]);
+    assert_eq!(cpu.fpsr, 0);
+}
+
+/// FCVTZS to 32 bits of a double element rounds toward zero, saturates and
+/// sign-extends into the 64-bit container (`Extend(res, unsigned)`);
+/// FCVTZU zero-extends, a negative value saturating to 0 with Invalid
+/// Operation alone.
+#[test]
+fn fcvtzs_to_32_bits_saturates_and_sign_extends_into_the_container() {
+    let mut cpu = fp_streaming(1, 0);
+    set_elements(
+        &mut cpu,
+        1,
+        Esize::D,
+        &[0xBFF8_0000_0000_0000, 0x41E6_5A0B_C000_0000, 0xC1E6_5A0B_C000_0000, 0x4000_0000_0000_0000],
+    );
+    // fcvtzs z0.d, p0/m, z1.d (to 32 bits).
+    assert_eq!(exec(&mut cpu, 0x65D8_A020), None);
+    assert_eq!(elements(&cpu, 0, Esize::D), [u64::MAX, 0x7FFF_FFFF, 0xFFFF_FFFF_8000_0000, 2]);
+    assert_eq!(cpu.fpsr, IOC | IXC);
+    cpu.fpsr = 0;
+    // fcvtzu z2.d, p0/m, z1.d (to 32 bits).
+    assert_eq!(exec(&mut cpu, 0x65D9_A022), None);
+    assert_eq!(elements(&cpu, 2, Esize::D), [0, 0xB2D0_5E00, 0, 2]);
+    assert_eq!(cpu.fpsr, IOC);
+}
+
+/// The predicated multiply-adds negate the multiplicand (`op1_neg`) and
+/// the addend (`op3_neg`) by `opc`: FMLA, FMLS, FNMLA, FNMLS of 1 + 2 x 3
+/// are 7, -5, -7, 5. FMAD and its siblings multiply Zdn by Zm and add Za:
+/// of 1 + 4 x 2 they are 9, -7, -9, 7.
+#[test]
+fn the_multiply_adds_negate_by_opc_and_take_their_operands_by_form() {
+    for (opc, want) in [(0, 0x40E0_0000), (1, 0xC0A0_0000), (2, 0xC0E0_0000), (3, 0x40A0_0000)] {
+        let mut cpu = fp_streaming(0, 0);
+        set_elements(&mut cpu, 0, Esize::S, &[0x3F80_0000]);
+        set_elements(&mut cpu, 1, Esize::S, &[0x4000_0000]);
+        set_elements(&mut cpu, 2, Esize::S, &[0x4040_0000]);
+        // fmla z0.s, p0/m, z1.s, z2.s, and the others by `opc`.
+        assert_eq!(exec(&mut cpu, 0x65A2_0020 | (opc << 13)), None);
+        assert_eq!(elements(&cpu, 0, Esize::S), [want; 4], "opc {opc}");
+    }
+    for (opc, want) in [(0, 0x4110_0000), (1, 0xC0E0_0000), (2, 0xC110_0000), (3, 0x40E0_0000)] {
+        let mut cpu = fp_streaming(0, 0);
+        set_elements(&mut cpu, 0, Esize::S, &[0x4080_0000]);
+        set_elements(&mut cpu, 1, Esize::S, &[0x4000_0000]);
+        set_elements(&mut cpu, 2, Esize::S, &[0x3F80_0000]);
+        // fmad z0.s, p0/m, z1.s, z2.s, and the others by `opc`.
+        assert_eq!(exec(&mut cpu, 0x65A2_8020 | (opc << 13)), None);
+        assert_eq!(elements(&cpu, 0, Esize::S), [want; 4], "opc {opc}");
+    }
+}
+
+/// FCMLA rotates Zm's pair: of (1 + 2i)(3 + 4i) terms, #0 adds (3, 4), #90
+/// (-8, 6), #180 (-3, -4), #270 (8, -6). Each half of a pair is governed
+/// by its own element: with the imaginary one alone active, the real half
+/// keeps Zda's value.
+#[test]
+fn fcmla_rotates_and_governs_each_half_by_its_own_element() {
+    let rotations = [
+        (0, [0x4040_0000, 0x4080_0000]),
+        (1, [0xC100_0000, 0x40C0_0000]),
+        (2, [0xC040_0000, 0xC080_0000]),
+        (3, [0x4100_0000, 0xC0C0_0000]),
+    ];
+    for (rot, [real, imag]) in rotations {
+        let mut cpu = fp_streaming(0, 0);
+        set_elements(&mut cpu, 1, Esize::S, &[0x3F80_0000, 0x4000_0000]);
+        set_elements(&mut cpu, 2, Esize::S, &[0x4040_0000, 0x4080_0000]);
+        // fcmla z0.s, p0/m, z1.s, z2.s, #(90 * rot).
+        assert_eq!(exec(&mut cpu, 0x6482_0020 | (rot << 13)), None);
+        assert_eq!(elements(&cpu, 0, Esize::S), [real, imag, real, imag], "rot {rot}");
+    }
+    let mut cpu = fp_streaming(0, 0);
+    let vl = cpu.current_svl();
+    cpu.set_p(0, vl, &Pv::from_bytes(&[0x10, 0x00]));
+    set_elements(&mut cpu, 0, Esize::S, &[0x42C8_0000]);
+    set_elements(&mut cpu, 1, Esize::S, &[0x3F80_0000, 0x4000_0000]);
+    set_elements(&mut cpu, 2, Esize::S, &[0x4040_0000, 0x4080_0000]);
+    assert_eq!(exec(&mut cpu, 0x6482_0020), None);
+    assert_eq!(elements(&cpu, 0, Esize::S), [0x42C8_0000, 0x42D0_0000, 0x42C8_0000, 0x42C8_0000]);
+}
+
+/// The indexed forms take Zm's element (or pair) `index` of each 128-bit
+/// segment: at 256 bits FMLA by element 3 multiplies the first four
+/// elements by Zm's 4.0 and the next four by its 8.0, and FCMLA by pair 1
+/// takes pair 1 and pair 3.
+#[test]
+fn the_indexed_forms_take_their_element_from_each_segment() {
+    let counting: [u64; 8] = [
+        0x3F80_0000, 0x4000_0000, 0x4040_0000, 0x4080_0000, 0x40A0_0000, 0x40C0_0000, 0x40E0_0000, 0x4100_0000,
+    ];
+    let mut cpu = fp_streaming(1, 0);
+    set_elements(&mut cpu, 0, Esize::S, &[0]);
+    set_elements(&mut cpu, 1, Esize::S, &[0x3F80_0000]);
+    set_elements(&mut cpu, 2, Esize::S, &counting);
+    // fmla z0.s, z1.s, z2.s[3].
+    assert_eq!(exec(&mut cpu, 0x64BA_0020), None);
+    let (four, eight) = (0x4080_0000, 0x4100_0000);
+    assert_eq!(elements(&cpu, 0, Esize::S), [four, four, four, four, eight, eight, eight, eight]);
+
+    let mut cpu = fp_streaming(1, 0);
+    set_elements(&mut cpu, 0, Esize::S, &[0]);
+    set_elements(&mut cpu, 1, Esize::S, &[0x3F80_0000, 0]);
+    set_elements(&mut cpu, 2, Esize::S, &counting);
+    // fcmla z0.s, z1.s, z2.s[1], #0.
+    assert_eq!(exec(&mut cpu, 0x64F2_1020), None);
+    let (c1, d1, c3, d3) = (counting[2], counting[3], counting[6], counting[7]);
+    assert_eq!(elements(&cpu, 0, Esize::S), [c1, d1, c1, d1, c3, d3, c3, d3]);
+}
+
+/// BFCVT writes each active container's low half and zeroes its upper
+/// half; BFCVTNT writes the upper half alone. Inactive containers keep
+/// their value.
+#[test]
+fn bfcvt_zeroes_the_upper_half_and_bfcvtnt_writes_it_alone() {
+    let mut cpu = fp_streaming(0, 0);
+    let vl = cpu.current_svl();
+    cpu.set_p(0, vl, &Pv::from_bytes(&[0x01, 0x01]));
+    set_elements(&mut cpu, 1, Esize::S, &[0x3F80_0000, 0x4000_0000, 0x4040_0000, 0x4080_0000]);
+    set_elements(&mut cpu, 0, Esize::S, &[0xFFFF_FFFF]);
+    set_elements(&mut cpu, 3, Esize::S, &[0xFFFF_FFFF]);
+    // bfcvt z0.h, p0/m, z1.s; bfcvtnt z3.h, p0/m, z1.s.
+    assert_eq!(exec(&mut cpu, 0x658A_A020), None);
+    assert_eq!(exec(&mut cpu, 0x648A_A023), None);
+    assert_eq!(elements(&cpu, 0, Esize::S), [0x0000_3F80, 0xFFFF_FFFF, 0x0000_4040, 0xFFFF_FFFF]);
+    assert_eq!(elements(&cpu, 3, Esize::S), [0x3F80_FFFF, 0xFFFF_FFFF, 0x4040_FFFF, 0xFFFF_FFFF]);
+}
+
+/// The SVE precision conversions read FPCR.AHP as 0 (`FPConvertSVE`): an
+/// infinity converts to the IEEE half-precision infinity, without the
+/// alternative format's Invalid Operation, and back.
+#[test]
+fn fcvt_ignores_fpcr_ahp() {
+    let mut cpu = fp_streaming(0, FPCR_AHP);
+    set_elements(&mut cpu, 1, Esize::S, &[0x7F80_0000]);
+    // fcvt z0.h, p0/m, z1.s; fcvt z2.s, p0/m, z0.h.
+    assert_eq!(exec(&mut cpu, 0x6588_A020), None);
+    assert_eq!(elements(&cpu, 0, Esize::S), [0x7C00; 4]);
+    assert_eq!(exec(&mut cpu, 0x6589_A002), None);
+    assert_eq!(elements(&cpu, 2, Esize::S), [0x7F80_0000; 4]);
+    assert_eq!(cpu.fpsr, 0);
+}
+
+/// Only the active elements are computed, so only theirs raise
+/// exceptions: FDIV by zero with no element active changes nothing and
+/// raises nothing; with one active, that element alone divides.
+#[test]
+fn only_the_active_elements_raise_exceptions() {
+    let mut cpu = fp_streaming(0, 0);
+    let vl = cpu.current_svl();
+    cpu.set_p(1, vl, &Pv::ZERO);
+    set_elements(&mut cpu, 0, Esize::S, &[0x3F80_0000]);
+    set_elements(&mut cpu, 1, Esize::S, &[0]);
+    // fdiv z0.s, p1/m, z0.s, z1.s.
+    assert_eq!(exec(&mut cpu, 0x658D_8420), None);
+    assert_eq!(elements(&cpu, 0, Esize::S), [0x3F80_0000; 4]);
+    assert_eq!(cpu.fpsr, 0);
+    cpu.set_p(1, vl, &Pv::from_bytes(&[0x10, 0x00]));
+    assert_eq!(exec(&mut cpu, 0x658D_8420), None);
+    assert_eq!(elements(&cpu, 0, Esize::S), [0x3F80_0000, 0x7F80_0000, 0x3F80_0000, 0x3F80_0000]);
+    assert_eq!(cpu.fpsr, DZC);
+}
+
+/// `size = 00` in a floating-point instruction whose encoding is not
+/// FEAT_SVE_B16B16's is UNDEFINED in its decode, before the enable check:
+/// FSUBR, FMAD, FADDV, FCMLA and FLOGB here. FADD's is FEAT_SVE_B16B16's,
+/// which this core lacks.
+#[test]
+fn a_floating_point_size_of_00_is_undefined_before_the_sme_trap() {
+    let mut cpu = processor(Implementation::EVERY_FEATURE);
+    for insn in [0x6503_8020, 0x6522_8020, 0x6500_2020, 0x6402_0020, 0x6518_A020, 0x6500_8020] {
+        assert_eq!(exec(&mut cpu, insn), Some(UNDEFINED), "{insn:#010x}");
+    }
+    // fadd z0.h, p0/m, z0.h, z1.h.
+    assert_eq!(exec(&mut cpu, 0x6540_8020), Some(NOT_STREAMING));
 }

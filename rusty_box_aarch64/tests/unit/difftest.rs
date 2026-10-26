@@ -325,6 +325,39 @@ const Z_SPECIAL: [u64; 14] = [
 /// Mirrors `P_ELEMENTS` in gen_qemu_sve.py.
 const P_ELEMENTS: [u64; 4] = [0xFFFF_FFFF_FFFF_FFFF, 0x5555_5555_5555_5555, 0x1111_1111_1111_1111, 0x0101_0101_0101_0101];
 
+/// A format a kind SF register's lanes may take.
+struct FpFormat {
+    /// A lane's width in bytes.
+    width: usize,
+    special: &'static [u64],
+    ordinary: fn(u64) -> u64,
+}
+
+/// The formats by the `size` field that names them (00 standing for
+/// BFloat16). Mirrors `FP_FORMATS` in gen_qemu_sve.py.
+const FP_FORMATS: [FpFormat; 4] = [
+    FpFormat { width: 2, special: &BF16_SPECIAL, ordinary: ordinary_bf16 },
+    FpFormat { width: 2, special: &F16_SPECIAL, ordinary: ordinary_f16 },
+    FpFormat { width: 4, special: &F32_SPECIAL, ordinary: ordinary_f32 },
+    FpFormat { width: 8, special: &F64_SPECIAL, ordinary: ordinary_f64 },
+];
+
+/// Mirrors `fp_register` in gen_qemu_sve.py.
+fn fp_register(r: &mut SplitMix64, size: usize) -> [u8; SVE_VLB] {
+    let format = &FP_FORMATS[size];
+    let mut reg = [0u8; SVE_VLB];
+    for lane in reg.chunks_exact_mut(format.width) {
+        let w = r.next();
+        let value = if w & 1 == 1 {
+            format.special[((w >> 1) % format.special.len() as u64) as usize]
+        } else {
+            (format.ordinary)(w)
+        };
+        lane.copy_from_slice(&value.to_le_bytes()[..format.width]);
+    }
+    reg
+}
+
 /// The scalable registers of an SVE vector's initial state.
 struct SveState {
     z: [[u8; SVE_VLB]; 32],
@@ -334,7 +367,7 @@ struct SveState {
 }
 
 /// Must match `sve_state` in gen_qemu_sve.py exactly.
-fn sve_state(seed: u64, kind: &str) -> SveState {
+fn sve_state(seed: u64, kind: &str, insn: u32) -> SveState {
     let mut r = SplitMix64(seed ^ 0x5356_455F_5354_4154);
     let mut z = [[0u8; SVE_VLB]; 32];
     for reg in z.iter_mut() {
@@ -367,7 +400,17 @@ fn sve_state(seed: u64, kind: &str) -> SveState {
         };
         reg.copy_from_slice(&value.to_le_bytes());
     }
-    let fpcr = if kind == "SA" { (r.next() & 1) << 1 } else { 0 };
+    let mut fpcr = if kind == "SA" { (r.next() & 1) << 1 } else { 0 };
+    if kind == "SF" {
+        let own = ((insn >> 22) & 3) as usize;
+        for reg in z.iter_mut() {
+            let sel = (r.next() & 7) as usize;
+            if sel != 0 {
+                *reg = fp_register(&mut r, if sel <= 4 { own } else { sel - 4 });
+            }
+        }
+        fpcr = ((r.next() & 0x1F) << 22) | ((r.next() & 1) << 19) | (r.next() & 7);
+    }
     SveState { z, p, fpcr }
 }
 
@@ -430,7 +473,7 @@ fn replay_sve(vectors: &str) {
         let tally = tallies.entry(String::from(name)).or_default();
 
         let st = initial_state(seed, kind, insn);
-        let sve = sve_state(seed, kind);
+        let sve = sve_state(seed, kind, insn);
         let mut cpu = Cpu::implementing(
             CpuConfig {
                 ips,
