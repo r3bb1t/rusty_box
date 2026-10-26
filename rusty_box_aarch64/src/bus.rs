@@ -121,14 +121,32 @@ pub(crate) fn le_value(bytes: &[u8]) -> u64 {
     }
 }
 
-/// Store `value` little-endian into a 1-, 2-, 4- or 8-byte slice.
+/// Store `value` little-endian into a 1-, 2-, 4- or 8-byte slice. Each width
+/// is a fixed-size store; a slice of any other length is left untouched.
 #[inline(always)]
 pub(crate) fn store_le(bytes: &mut [u8], value: u64) {
     match bytes.len() {
-        1 => bytes[0] = value as u8,
-        2 => bytes.copy_from_slice(&(value as u16).to_le_bytes()),
-        4 => bytes.copy_from_slice(&(value as u32).to_le_bytes()),
-        _ => bytes.copy_from_slice(&value.to_le_bytes()),
+        1 => {
+            if let Some(chunk) = bytes.first_chunk_mut::<1>() {
+                *chunk = (value as u8).to_le_bytes();
+            }
+        }
+        2 => {
+            if let Some(chunk) = bytes.first_chunk_mut::<2>() {
+                *chunk = (value as u16).to_le_bytes();
+            }
+        }
+        4 => {
+            if let Some(chunk) = bytes.first_chunk_mut::<4>() {
+                *chunk = (value as u32).to_le_bytes();
+            }
+        }
+        8 => {
+            if let Some(chunk) = bytes.first_chunk_mut::<8>() {
+                *chunk = value.to_le_bytes();
+            }
+        }
+        _ => {}
     }
 }
 
@@ -319,3 +337,7 @@ pub trait PhysBus {
         true
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/unit/bus.rs"]
+mod tests;
