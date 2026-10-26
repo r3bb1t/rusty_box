@@ -24,7 +24,7 @@
 use rusty_box_core::snap::{SnapError, SnapRead, SnapResult, SnapWrite};
 
 use crate::board::RAM_BASE;
-use crate::bus::Writes;
+use crate::bus::{PhysAddr, Writes};
 
 /// A rule the driver broke, each one of QEMU's `virtio_error` reports. The
 /// device stops using its queues until it is reset (virtio 1.2 2.1.2,
@@ -179,7 +179,7 @@ impl<'a> GuestRam<'a> {
     #[cfg(feature = "alloc")]
     pub fn bytes_mut(&mut self, addr: u64, len: u64) -> Option<&mut [u8]> {
         let range = self.range(addr, len)?;
-        self.written.add(addr, len);
+        self.written.add(PhysAddr::new(addr), len);
         Some(&mut self.ram[range])
     }
 
@@ -198,7 +198,7 @@ impl<'a> GuestRam<'a> {
     pub fn store(&mut self, addr: u64, data: &[u8]) {
         if let Some(range) = self.range(addr, data.len() as u64) {
             self.ram[range].copy_from_slice(data);
-            self.written.add(addr, data.len() as u64);
+            self.written.add(PhysAddr::new(addr), data.len() as u64);
         }
     }
 

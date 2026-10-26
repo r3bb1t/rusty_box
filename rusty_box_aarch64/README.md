@@ -105,9 +105,10 @@ vocabulary are `rusty_box_core`'s, shared with the x86 machine.
   each page's 128-byte lines that hold cached instructions are marked
   (Bochs's page write stamps), and every store the processor makes, every
   device DMA write and every host write forgets the traces on the lines it
-  touches; `IC IVAU` and `IC IALLU` drop traces too, and only RAM and a
-  flash bank in read-array mode are cached at all (the bus says which, and
-  counts the flash writes that could change it). Every instruction is
+  touches, so `IC` maintenance has nothing left to do (as in QEMU's system
+  emulation); and only RAM and a flash bank in read-array mode are cached
+  at all (the bus says which, and counts the flash writes that could
+  change it). Every instruction is
   still fetched, checked, executed and reported to an observer exactly as
   one at a time would be, so a run ends in the same state either way: the
   equivalence hashes in the speed table below are equal before and after.
@@ -301,8 +302,8 @@ integration tests of the public API.
   rewritten just ahead of the store that rewrites it, in the same trace;
   rewritten through a second virtual mapping of its page; read over by a
   virtio-blk request the guest itself sets up; made visible with `DC CVAU`,
-  `IC IVAU` (whose address is or is not in the TLB) and `IC IALLU`, with the
-  MMU off and on; and in flash, where the CFI Read Status command makes the
+  `IC IVAU` and `IC IALLU`, with the MMU off and on, through either mapping
+  of the page; and in flash, where the CFI Read Status command makes the
   next fetch of code that already ran read the status register, an
   UNDEFINED instruction.
 
@@ -346,8 +347,8 @@ choice is listed here with its evidence.
 - Debug: breakpoint and watchpoint registers exist (two of each, as
   advertised) but never fire; no Debug state, no PMU.
 - No data cache model, and no instruction cache a guest can see: the
-  decoded traces are kept coherent with every write, so `IC` maintenance
-  only drops traces and data cache maintenance has nothing to act on.
+  decoded traces are kept coherent with every write, so neither `IC` nor
+  data cache maintenance has anything to act on.
 - No network device, and nothing on the PCIe bus: storage is the initramfs
   or the opt-in virtio-blk disk, and the display and input devices are the
   opt-in virtio ones.

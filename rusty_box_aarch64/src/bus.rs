@@ -145,10 +145,26 @@ pub enum BusFault {
 }
 
 /// Guest-physical bytes `start..end`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct PhysSpan {
-    pub(crate) start: u64,
-    pub(crate) end: u64,
+    pub(crate) start: PhysAddr,
+    pub(crate) end: PhysAddr,
+}
+
+impl PhysSpan {
+    /// The `len` bytes at `start`; `None` for none, or for a span past the
+    /// end of the address space.
+    #[inline]
+    pub(crate) fn new(start: PhysAddr, len: u64) -> Option<Self> {
+        let end = start.get().checked_add(len).filter(|&end| end > start.get())?;
+        Some(Self { start, end: PhysAddr::new(end) })
+    }
+
+    /// Its length in bytes.
+    #[inline]
+    pub(crate) const fn len(self) -> u64 {
+        self.end.get() - self.start.get()
+    }
 }
 
 /// How many spans [`Writes`] keeps apart.
@@ -158,7 +174,7 @@ const WRITE_SPANS: usize = 4;
 /// for the processor to forget the code it decoded there
 /// (`Cpu::forget_code`). Spans beyond what it keeps apart merge into their
 /// hull, which only ever covers more.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Writes {
     spans: [PhysSpan; WRITE_SPANS],
     len: usize,
@@ -166,36 +182,42 @@ pub(crate) struct Writes {
 
 impl Writes {
     pub(crate) const NONE: Self = Self {
-        spans: [PhysSpan { start: 0, end: 0 }; WRITE_SPANS],
+        spans: [PhysSpan {
+            start: PhysAddr::new(0),
+            end: PhysAddr::new(0),
+        }; WRITE_SPANS],
         len: 0,
     };
 
     /// Note `len` bytes written at `start`.
-    pub(crate) fn add(&mut self, start: u64, len: u64) {
-        let Some(end) = start.checked_add(len).filter(|&end| end > start) else {
-            return;
-        };
+    pub(crate) fn add(&mut self, start: PhysAddr, len: u64) {
+        if let Some(written) = PhysSpan::new(start, len) {
+            self.add_span(written);
+        }
+    }
+
+    fn add_span(&mut self, written: PhysSpan) {
         for span in self.spans[..self.len].iter_mut() {
-            if start <= span.end && span.start <= end {
-                span.start = span.start.min(start);
-                span.end = span.end.max(end);
+            if written.start <= span.end && span.start <= written.end {
+                span.start = span.start.min(written.start);
+                span.end = span.end.max(written.end);
                 return;
             }
         }
         if self.len < WRITE_SPANS {
-            self.spans[self.len] = PhysSpan { start, end };
+            self.spans[self.len] = written;
             self.len += 1;
         } else {
             let last = &mut self.spans[WRITE_SPANS - 1];
-            last.start = last.start.min(start);
-            last.end = last.end.max(end);
+            last.start = last.start.min(written.start);
+            last.end = last.end.max(written.end);
         }
     }
 
     /// Note everything `other` noted.
     pub(crate) fn merge(&mut self, other: &Self) {
-        for span in other.spans() {
-            self.add(span.start, span.end - span.start);
+        for &span in other.spans() {
+            self.add_span(span);
         }
     }
 

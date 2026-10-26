@@ -38,7 +38,7 @@ use rusty_box_devices::display::sink::{DisplaySink, Refreshed};
 use rusty_box_devices::display::Resolution;
 use crate::boot::fdt::{self, Edit, Value};
 use crate::boot::{self, DeviceTreeError, KernelLayout, LinuxImage, PlacementError, DEVICE_TREE_CAPACITY};
-use crate::bus::{le_value, AccessWidth, BusFault, PhysAddr, PhysBus};
+use crate::bus::{le_value, AccessWidth, BusFault, PhysAddr, PhysBus, PhysSpan};
 use crate::cpu::{
     Activity, Cpu, CpuConfig, CpuState, DebugStops, Pstate, Reg, Step, StopCause, SysReg, SysRegRefusal,
     TranslationFault, UndefinedInsn, VReg,
@@ -1169,8 +1169,8 @@ impl<S: GuestStorage, I: Instrumentation> VirtMachine<S, I> {
         self.board.touched = false;
         // What a device wrote may be code the processor decoded.
         let written = self.board.dma.take();
-        for span in written.spans() {
-            self.cpu.forget_code(span.start, span.end);
+        for &span in written.spans() {
+            self.cpu.forget_code(span);
         }
         if self.events_moved() {
             self.sync_events();
@@ -1354,7 +1354,9 @@ impl<S: GuestStorage, I: Instrumentation> VirtMachine<S, I> {
         let ram = self.board.storage.ram_mut();
         let off = ram_offset(ram.len(), addr, data.len())?;
         ram[off..off + data.len()].copy_from_slice(data);
-        self.cpu.forget_code(addr, addr + data.len() as u64);
+        if let Some(span) = PhysSpan::new(PhysAddr::new(addr), data.len() as u64) {
+            self.cpu.forget_code(span);
+        }
         Ok(())
     }
 

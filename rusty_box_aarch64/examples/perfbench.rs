@@ -489,6 +489,10 @@ fn bench() -> Result<(), String> {
         other => return Err(format!("PERFBENCH_HOOKS={other}: plain, hooked or both")),
     };
     let scale = env_u64("PERFBENCH_SCALE", 1)?;
+    if scale == 0 {
+        // A loop counter of 0 would count down through 2^64 iterations.
+        return Err("PERFBENCH_SCALE=0: the loops need at least 1".to_string());
+    }
     let hash_at: Option<Vec<u64>> = match std::env::var("PERFBENCH_HASH_AT") {
         Ok(text) => Some(
             text.split(',')

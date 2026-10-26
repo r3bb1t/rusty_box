@@ -151,8 +151,8 @@ const MAINTAINED: [u32; 22] = [
 const MAINTAINED_FUNC: u64 = 0x48;
 
 /// An upper-half address whose translation tables would be read from the
-/// GIC distributor's window: `IC IVAU` cannot find its line without reading
-/// a device.
+/// GIC distributor's window: `IC IVAU` of it reads no table, as QEMU's
+/// does not.
 const UPPER_HALF: u64 = 0xFFFF_FF80_0000_0000;
 
 /// With the MMU off; with the MMU on and the line's address in the TLB, or

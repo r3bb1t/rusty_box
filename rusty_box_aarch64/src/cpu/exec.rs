@@ -213,9 +213,9 @@ impl Cpu {
     /// `bus`, advancing time by one tick unless the step stops the machine,
     /// and tell `observer` what happened.
     ///
-    /// Inlined into the machine's run loop, so that the loop and the step
-    /// share one frame and the result never goes through memory.
-    #[inline(always)]
+    /// This is the per-instruction path, with no trace cache: a machine runs
+    /// traces instead (`Cpu::run_trace`), which execute each instruction
+    /// through the same `execute_at` and `finish` steps.
     pub fn step<B: PhysBus, I: Instrumentation>(&mut self, bus: &mut B, observer: &mut I) -> Step {
         let pc = self.pc;
         let mut observed = Observed { bus, observer };

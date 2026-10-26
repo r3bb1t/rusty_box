@@ -44,17 +44,19 @@ use super::decode::classify;
 use super::exec::{Done, Observed, Step};
 use super::op::{predecode, Op};
 use super::Cpu;
-use crate::bus::{CodeEpoch, FetchSource, PhysAddr, PhysBus};
+use crate::bus::{CodeEpoch, FetchSource, PhysAddr, PhysBus, PhysSpan};
 use crate::instrumentation::Instrumentation;
 
 /// The longest trace, in instructions (Bochs `BX_MAX_TRACE_LENGTH`).
 pub(crate) const MAX_TRACE: usize = 32;
 
-/// The cache's sizes. With `alloc` its tables are on the heap and large
-/// enough for a Linux boot's code (Alpine's kernel and user space run about
-/// 94,000 distinct instructions); without, they are inline in the
-/// processor, which a machine holds and is moved by value, and a quarter of
-/// that. Either way the cache changes nothing but speed.
+/// The cache's sizes. With `alloc` its tables are on the heap; without,
+/// they are inline in the processor, which a machine holds and is moved by
+/// value, and a quarter of the size. Alpine's kernel and user space run
+/// about 94,000 distinct instructions in a boot, more than the pool holds,
+/// so a boot empties it now and then; twice these sizes measured no faster
+/// (EDK2 0.98×, Alpine 1.05×, within this host's noise). Either way the
+/// cache changes nothing but speed.
 #[cfg(feature = "alloc")]
 mod size {
     /// Trace entries: a power of two, so that the entries of one page are
@@ -335,10 +337,16 @@ impl Cpu {
         Some(Trace { start, len })
     }
 
-    /// Forget every trace holding an instruction in the physical bytes
-    /// `start..end`, which something has written or is about to write; the
-    /// running trace ends if any was.
-    pub(crate) fn forget_code(&mut self, start: u64, end: u64) {
+    /// Forget every trace holding an instruction in `span`, which something
+    /// has written or is about to write; the running trace ends if any was.
+    /// A span of more pages than there are stamps would visit every stamp,
+    /// some more than once, and is answered by forgetting every trace.
+    pub(crate) fn forget_code(&mut self, span: PhysSpan) {
+        let (start, end) = (span.start.get(), span.end.get());
+        if span.len() / 0x1000 >= STAMPS as u64 {
+            self.flush_traces();
+            return;
+        }
         let mut page = start & !0xFFF;
         while page < end {
             let page_end = page.saturating_add(0x1000);
@@ -357,22 +365,5 @@ impl Cpu {
     pub(crate) fn flush_traces(&mut self) {
         self.traces.flush();
         self.trace_break = true;
-    }
-
-    /// `IC IVAU`: invalidate the instruction cache line holding `va`. The
-    /// traces are kept coherent with every write, so there is nothing stale
-    /// to drop; the line's traces are forgotten all the same, or every trace
-    /// when the line's physical address cannot be found without a side
-    /// effect.
-    pub(crate) fn invalidate_icache_line<B: PhysBus>(&mut self, bus: &mut B, va: u64) {
-        const LINE: u64 = 1 << (2 + (super::id::CTR_EL0 & 0xF));
-        match self.translate_quietly(bus, va) {
-            Some(pa) => {
-                let line = pa & !(LINE - 1);
-                self.forget_code(line, line + LINE);
-                self.trace_break = true;
-            }
-            None => self.flush_traces(),
-        }
     }
 }

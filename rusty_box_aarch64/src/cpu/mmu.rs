@@ -17,7 +17,7 @@ use super::dp::ones;
 use super::exception::{Exception, ExceptionClass};
 use super::exec::{Fault, StopCause};
 use super::{id, Cpu, El};
-use crate::bus::{AccessWidth, BusFault, FetchSource, PhysAddr, PhysBus};
+use crate::bus::{AccessWidth, BusFault, PhysAddr, PhysBus, PhysSpan};
 
 /// What an access does, for permission checks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -140,28 +140,6 @@ const fn permitted(perms: u8, kind: AccessKind, el: El) -> bool {
     perms & needed != 0
 }
 
-/// A bus a walk on the side reads its descriptors through: only memory the
-/// bus calls a stable fetch source (RAM, ROM in its read mode), whose reads
-/// change nothing; anything else reads as nothing there.
-struct SideEffectFree<'a, B>(&'a mut B);
-
-impl<B: PhysBus> PhysBus for SideEffectFree<'_, B> {
-    fn read(&mut self, _addr: PhysAddr, _width: AccessWidth, _clock: rusty_box_core::VmClock) -> Result<u64, BusFault> {
-        Err(BusFault::Unmapped)
-    }
-
-    fn write(&mut self, _addr: PhysAddr, _width: AccessWidth, _value: u64, _clock: rusty_box_core::VmClock) -> Result<(), BusFault> {
-        Err(BusFault::Unmapped)
-    }
-
-    fn read_descriptor(&mut self, addr: PhysAddr, clock: rusty_box_core::VmClock) -> Result<u64, BusFault> {
-        match self.0.fetch_source(addr) {
-            FetchSource::Stable(_) => self.0.read_descriptor(addr, clock),
-            FetchSource::Volatile => Err(BusFault::Unmapped),
-        }
-    }
-}
-
 /// The outcome of a translation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Translated {
@@ -271,27 +249,13 @@ impl Cpu {
         self.sys.sctlr_el1 & 1 != 0
     }
 
-    /// Empty the TLB. The running trace ends: its fetches translate again.
+    /// Empty the TLB. The running trace ends, whatever the caller: its
+    /// fetches translate again. (The guest's TLBI and translation-register
+    /// MSRs end their trace by `Op::ends_trace` as well;
+    /// this does not rely on it.)
     pub(crate) fn flush_tlb(&mut self) {
         self.tlb.flush();
         self.trace_break = true;
-    }
-
-    /// The physical address `va` translates to, found without changing
-    /// anything: as the MMU is off, from the TLB, or by a walk that reads
-    /// its descriptors only where the bus says a read has no side effect
-    /// and fills no TLB entry. No permission is checked. `None` when it has
-    /// no translation, or the walk would have to read anything else.
-    pub(crate) fn translate_quietly<B: PhysBus>(&self, bus: &mut B, va: u64) -> Option<u64> {
-        if !self.mmu_enabled() {
-            let address = self.untagged(va);
-            return (address >> id::PA_BITS == 0).then_some(address);
-        }
-        let entry = self.tlb.entries[Tlb::slot(va)];
-        if entry.tag == va >> 12 {
-            return Some(entry.pa_page | (va & 0xFFF));
-        }
-        self.walk(&mut SideEffectFree(bus), va).ok().map(|w| w.pa)
     }
 
     /// `SCTLR_EL1.A`: every misaligned data access faults.
@@ -823,7 +787,9 @@ impl Cpu {
             self.monitor.armed = false;
         }
         if self.traces.holds_code(pa) {
-            self.forget_code(pa, pa + bytes);
+            if let Some(span) = PhysSpan::new(PhysAddr::new(pa), bytes) {
+                self.forget_code(span);
+            }
         }
     }
 
