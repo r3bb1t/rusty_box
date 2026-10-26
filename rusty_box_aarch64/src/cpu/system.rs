@@ -181,12 +181,12 @@ impl Cpu {
             SysRegKey::from_insn(insn).trap_iss(rt, false),
         ));
         match (op1, crn, crm, op2) {
-            // IC IALLUIS, IC IALLU, and IC IVAU (EL0 needs SCTLR_EL1.UCI):
-            // the processor's decoded traces are its instruction cache, and
-            // they are never stale. Every write that can reach their memory
-            // forgets the traces it covers when it is made (`note_store`,
-            // the board's DMA log, `mem_write`), so there is nothing left
-            // to invalidate, as QEMU's system emulation, whose translation
+            // IC IALLUIS, IC IALLU (and IC IVAU, below): the processor's
+            // decoded traces are its instruction cache, and they are never
+            // stale. Every write that can reach their memory forgets the
+            // traces it covers when it is made (`note_store`, the board's
+            // DMA log, `mem_write`), so there is nothing left to
+            // invalidate, as QEMU's system emulation, whose translation
             // blocks are kept coherent the same way, makes them no-ops
             // (target/arm/helper.c `v8_cp_reginfo`: IC_IALLUIS, IC_IALLU
             // and, outside CONFIG_USER_ONLY, IC_IVAU are ARM_CP_NOP).
@@ -196,15 +196,10 @@ impl Cpu {
                 }
                 Ok(Flow::Next)
             }
-            (3, 7, 5, 1) => {
-                if el0 && self.sys.sctlr_el1 & SCTLR_UCI == 0 {
-                    return Err(trap);
-                }
-                Ok(Flow::Next)
-            }
-            // DC CVAC, DC CVAU, DC CIVAC: EL0 needs SCTLR_EL1.UCI. With no
-            // data cache model, cleaning has nothing to act on.
-            (3, 7, 10, 1) | (3, 7, 11, 1) | (3, 7, 14, 1) => {
+            // IC IVAU, DC CVAC, DC CVAU, DC CIVAC: EL0 needs SCTLR_EL1.UCI.
+            // With no data cache model, cleaning has nothing to act on, and
+            // the instruction cache is never stale (above).
+            (3, 7, 5, 1) | (3, 7, 10, 1) | (3, 7, 11, 1) | (3, 7, 14, 1) => {
                 if el0 && self.sys.sctlr_el1 & SCTLR_UCI == 0 {
                     return Err(trap);
                 }

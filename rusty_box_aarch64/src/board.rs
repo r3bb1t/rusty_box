@@ -156,12 +156,14 @@ pub struct VirtBoard<S> {
     /// A guest access moved a device's next deadline (the RTC's alarm was
     /// re-armed), so the machine's next event has to be worked out again.
     pub(crate) deadline_moved: bool,
-    /// A guest access reached a device since the machine last looked — any
-    /// access outside RAM but a read of a flash bank in read-array mode,
-    /// which changes nothing. Only such an access changes a device: what
-    /// the interrupt controller drives, a device's deadline, RAM a device
-    /// writes, a flash bank's mode. While it is clear, none of them has
-    /// changed.
+    /// A guest access reached a device since the machine last looked: any
+    /// access outside RAM but a flash read. Only such an access changes
+    /// what the interrupt controller drives, a device's deadline, RAM a
+    /// device writes, or a flash bank's array; while it is clear, none of
+    /// them has changed. A flash read changes none of them either: at most
+    /// it returns its own bank to read-array mode, which the next fetch
+    /// from the bank asks about afresh (`fetch_source`), and whose array
+    /// it leaves as it was.
     pub(crate) touched: bool,
     /// Counts the writes to the flash banks, each of which may change what
     /// a fetch from them reads: their [`CodeEpoch`].

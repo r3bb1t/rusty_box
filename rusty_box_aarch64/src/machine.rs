@@ -652,6 +652,8 @@ fn assemble<S: GuestStorage, I: Instrumentation>(config: VirtConfig, plan: Plan,
         reset_pc: FLASH0_BASE,
     });
     cpu.set_debug_stops(config.debug_stops);
+    #[cfg(feature = "alloc")]
+    cpu.cover_code_memory(storage.ram().len() as u64);
     let devices = plugs.devices;
     let mut machine = VirtMachine {
         cpu,
@@ -849,6 +851,17 @@ impl StopHandle {
     }
 }
 
+/// What bringing the machine up to date after a device access did to its
+/// next event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NextEvent {
+    /// A timer register write or a device moved a deadline, and the next
+    /// event was worked out again.
+    WorkedOutAgain,
+    /// It is where it was.
+    Unchanged,
+}
+
 /// How a slice of the run loop ended.
 enum Slice {
     /// It reached its end tick; the run decides whether that was the budget.
@@ -1044,8 +1057,12 @@ impl<S: GuestStorage, I: Instrumentation> VirtMachine<S, I> {
             PowerState::ProcessorOff => return StopReason::ProcessorOff,
         }
         // Host actions since the last run (serial input, the power button, a
-        // register write) may have changed what the processor sees.
-        self.after_device_access();
+        // register write) may have changed what the processor sees. No burst
+        // is counted yet, so the run starts from the next event as it now
+        // is either way.
+        match self.after_device_access() {
+            NextEvent::WorkedOutAgain | NextEvent::Unchanged => {}
+        }
         let (tick_end, instruction_end) = match budget {
             RunBudget::Ticks(n) => (self.cpu.icount.saturating_add(n), u64::MAX),
             RunBudget::Instructions(n) => (u64::MAX, self.cpu.retired.saturating_add(n)),
@@ -1145,8 +1162,11 @@ impl<S: GuestStorage, I: Instrumentation> VirtMachine<S, I> {
                 match self.cpu.run_trace(&mut self.board, &mut self.observer, limit) {
                     Step::Retired => {}
                     Step::Waiting => {
-                        self.after_device_access();
-                        continue 'slice;
+                        // The slice starts again either way, and a waiting
+                        // processor sleeps to the next event as it now is.
+                        match self.after_device_access() {
+                            NextEvent::WorkedOutAgain | NextEvent::Unchanged => continue 'slice,
+                        }
                     }
                     Step::Stop(cause) => match self.stopped(cause) {
                         Some(reason) => return Slice::Stopped(reason),
@@ -1154,7 +1174,9 @@ impl<S: GuestStorage, I: Instrumentation> VirtMachine<S, I> {
                     },
                 }
                 left -= self.cpu.retired - retired;
-                if (self.cpu.timer_dirty || self.board.touched) && self.after_device_access() {
+                // A burst was counted to the next event: one worked out
+                // again ends it.
+                if (self.cpu.timer_dirty || self.board.touched) && self.after_device_access() == NextEvent::WorkedOutAgain {
                     continue 'slice;
                 }
             }
@@ -1162,10 +1184,9 @@ impl<S: GuestStorage, I: Instrumentation> VirtMachine<S, I> {
     }
 
     /// Bring the processor's interrupt inputs and the next event up to date
-    /// after an instruction that may have changed them; true when the next
-    /// event was worked out again.
+    /// after an instruction that may have changed them.
     #[inline]
-    fn after_device_access(&mut self) -> bool {
+    fn after_device_access(&mut self) -> NextEvent {
         self.board.touched = false;
         // What a device wrote may be code the processor decoded.
         let written = self.board.dma.take();
@@ -1174,10 +1195,10 @@ impl<S: GuestStorage, I: Instrumentation> VirtMachine<S, I> {
         }
         if self.events_moved() {
             self.sync_events();
-            true
+            NextEvent::WorkedOutAgain
         } else {
             self.cpu.set_interrupt_lines(self.board.gic.irq_out(), self.board.gic.fiq_out());
-            false
+            NextEvent::Unchanged
         }
     }
 

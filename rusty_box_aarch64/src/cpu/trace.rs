@@ -22,9 +22,9 @@
 //!   invalidates the translation blocks of a page on any write to it, a
 //!   device's DMA included (accel/tcg/tb-maint.c
 //!   `tb_invalidate_phys_range`, which system/physmem.c calls after a write
-//!   to guest RAM). Pages share a stamp when their numbers agree modulo
-//!   [`STAMPS`] (Bochs shares them above 4 GiB): that only ever forgets
-//!   more.
+//!   to guest RAM). Pages share a stamp when their numbers agree modulo the
+//!   number of stamps, which covers the machine's RAM (see [`size`]), as
+//!   Bochs shares them above 4 GiB: that only ever forgets more.
 //! - Only memory whose fetches have no side effect and return what the
 //!   last write left is cached: the bus says which ([`FetchSource`]). Any
 //!   other fetch runs the per-instruction path.
@@ -35,10 +35,14 @@
 //! ends early after any instruction that may have changed what the
 //! processor would look at between instructions — a device access, a timer
 //! register write, a TLB fill or flush (the next fetch translates again), a
-//! write over cached code, or a cache or TLB maintenance instruction. Every
-//! instruction in it is fetched, translated, permission-checked, executed
-//! and reported to the observer exactly as `Cpu::step` would, so a machine
-//! runs the same instructions with the same results either way.
+//! write over cached code, or a TLB maintenance instruction. The first
+//! instruction's fetch is translated and permission-checked as `Cpu::step`
+//! checks every fetch; the rest of the trace is in the same page, whose
+//! translation and execute permission nothing between them can change (a
+//! change ends the trace), so each of their fetches would find the same.
+//! Every instruction is executed and reported to the observer exactly as
+//! `Cpu::step` would, so a machine runs the same instructions with the same
+//! results either way.
 
 use super::decode::classify;
 use super::exec::{Done, Observed, Step};
@@ -47,30 +51,32 @@ use super::Cpu;
 use crate::bus::{CodeEpoch, FetchSource, PhysAddr, PhysBus, PhysSpan};
 use crate::instrumentation::Instrumentation;
 
+#[cfg(all(test, feature = "alloc"))]
+#[path = "../../tests/unit/trace.rs"]
+mod tests;
+
 /// The longest trace, in instructions (Bochs `BX_MAX_TRACE_LENGTH`).
 pub(crate) const MAX_TRACE: usize = 32;
 
-/// The cache's sizes. Either way the cache changes nothing but speed.
+/// The cache's sizes. Whatever they are, the cache changes nothing but
+/// speed.
 ///
-/// With `alloc` the tables are on the heap. The pool and the entries are
-/// sized as rusty_box's x86 interpreter sizes its own
+/// With `alloc` the tables are on the heap, and the pool and the entries
+/// are sized as rusty_box's x86 interpreter sizes its own
 /// (`rusty_box/src/cpu/icache.rs`): Bochs's pool (icache.h
-/// `BxTraceCacheMemPool`) and 64 Ki entries. A Linux boot runs about
-/// 94,000 distinct instructions, and traces that start mid-run hold some of
-/// them twice. A pool a ninth of this size, with a quarter of the entries,
-/// empties 202 times in an Alpine boot and builds 5.4 times the traces
-/// (1,177,959 against 217,178), 2.9% more host instructions for the whole
-/// boot: A64's fixed-length words make a build cheap, about 2,100 host
-/// instructions, where x86's decode is not. The pool is only reserved until
-/// it is used (see [`Pool`]), so its 13.5 MiB cost a machine nothing it
-/// does not run.
+/// `BxTraceCacheMemPool`) and 64 Ki entries. A Linux boot runs about 94,000
+/// distinct instructions, and traces that start mid-run hold some of them
+/// twice; at these sizes an Alpine boot builds 217,178 traces and empties
+/// the pool 3 times. A trace build is cheap, about 2,100 host instructions
+/// for 32 of A64's fixed-length words. The pool grows as traces are built
+/// (see [`Pool`]), so a machine holds only the pool it has used.
 ///
-/// The page write stamps cover 256 MiB of pages, not Bochs's 4 GiB
-/// (`bxPageWriteStampTable`): the stamps are read at random and must exist
-/// zeroed from the start, and 4 MiB of them made every machine's build cost
-/// six times as much in a test that builds thousands. They measured no
-/// faster for a boot in the board's default 256 MiB of RAM (Alpine 0.96×).
-/// Above that, pages share stamps, which only ever forgets more.
+/// The page write stamps are a table read at random, zeroed from the start,
+/// with one stamp per page of the machine's RAM: [`MIN_STAMPS`], as many
+/// as the board's default 256 MiB has, or more for more RAM, up to
+/// [`MAX_STAMPS`] (Bochs `bxPageWriteStampTable`, 4 GiB of pages). Consecutive
+/// pages, up to the count, have stamps of their own (see
+/// [`TraceCache::cover`]).
 ///
 /// Without `alloc` the tables are inline in the processor, which a machine
 /// holds and moves by value, and much smaller.
@@ -81,24 +87,33 @@ mod size {
     pub(super) const ENTRIES: usize = 65536;
     /// Ops in the pool (Bochs icache.h `BxTraceCacheMemPool`).
     pub(super) const POOL: usize = 576 * 1024;
-    /// Page write stamps: a power of two, one per page of 256 MiB.
-    pub(super) const STAMPS: usize = 65536;
+    /// The fewest page write stamps: a power of two, one per page of
+    /// 256 MiB.
+    pub(super) const MIN_STAMPS: usize = 65536;
+    /// The most: one per page of 4 GiB (Bochs icache.h
+    /// `PHY_MEM_PAGES_IN_4G_SPACE`).
+    pub(super) const MAX_STAMPS: usize = 1024 * 1024;
 }
 #[cfg(not(feature = "alloc"))]
 mod size {
     pub(super) const ENTRIES: usize = 4096;
     pub(super) const POOL: usize = 16384;
-    pub(super) const STAMPS: usize = 8192;
+    /// Page write stamps, always this many.
+    pub(super) const MIN_STAMPS: usize = 8192;
+    pub(super) const MAX_STAMPS: usize = MIN_STAMPS;
 }
-use size::{ENTRIES, POOL, STAMPS};
+use size::{ENTRIES, MAX_STAMPS, MIN_STAMPS, POOL};
 
 const INVALID: u64 = u64::MAX;
 
 // Pages that share a stamp must share their window of entries, or a write
 // to one would clear the stamp of the other's traces without forgetting
-// them (Bochs icache.h relies on the same agreement between its hashes).
-const _: () = assert!(ENTRIES.is_power_of_two() && ENTRIES >= 1024 && (STAMPS * 1024).is_multiple_of(ENTRIES));
-const _: () = assert!(STAMPS.is_power_of_two() && POOL >= MAX_TRACE && POOL < 1 << 24);
+// them (Bochs icache.h relies on the same agreement between its hashes):
+// every stamp count is a power of two from MIN_STAMPS up, so a multiple of
+// MIN_STAMPS.
+const _: () = assert!(ENTRIES.is_power_of_two() && ENTRIES >= 1024 && (MIN_STAMPS * 1024).is_multiple_of(ENTRIES));
+const _: () = assert!(MIN_STAMPS.is_power_of_two() && MAX_STAMPS.is_power_of_two() && MIN_STAMPS <= MAX_STAMPS);
+const _: () = assert!(POOL >= MAX_TRACE && POOL < 1 << 24);
 
 /// One of the cache's tables: on the heap with `alloc`, so that the
 /// processor stays small enough to be moved by value; inline without. The
@@ -160,11 +175,12 @@ struct Slot {
 
 /// The ops of every trace, filled from the front and emptied whole
 /// (Bochs icache.h `bxICache_c::mpool`, `alloc_trace`), never past
-/// [`POOL`]. With `alloc` it is a vector reserved to [`POOL`] up front and
-/// grown into, so that a processor touches only the pool it uses: building
-/// one costs nothing for the pool, as a test that builds thousands of
-/// machines needs. Without, it is inline (R0's representation alias, as
-/// [`Table`] is).
+/// [`POOL`]. With `alloc` it is a vector that grows as traces are built and
+/// keeps its capacity when emptied, so that a processor holds only the
+/// pool it has used: building one allocates nothing for the pool, as a test
+/// that builds thousands of machines needs, and a machine that runs little
+/// code never reserves the 13.5 MiB of a full pool. Without, it is inline
+/// (R0's representation alias, as [`Table`] is).
 #[cfg(feature = "alloc")]
 struct Pool {
     slots: alloc::vec::Vec<Slot>,
@@ -177,9 +193,9 @@ struct Pool {
 
 #[cfg(feature = "alloc")]
 impl Pool {
-    fn new() -> Self {
+    const fn new() -> Self {
         Self {
-            slots: alloc::vec::Vec::with_capacity(POOL),
+            slots: alloc::vec::Vec::new(),
         }
     }
 
@@ -243,9 +259,10 @@ pub(crate) struct TraceCache {
     pool: Pool,
     generation: u32,
     /// Bochs `pageWriteStampTable::fineGranularityMapping`: per page (by
-    /// [`stamp_index`]), a bit per 128-byte line holding a cached
-    /// instruction.
-    stamps: Table<u32, STAMPS>,
+    /// [`TraceCache::stamp_index`]), a bit per 128-byte line holding a
+    /// cached instruction. A power of two from [`MIN_STAMPS`] to
+    /// [`MAX_STAMPS`] long.
+    stamps: Table<u32, MIN_STAMPS>,
 }
 
 #[inline(always)]
@@ -253,9 +270,11 @@ const fn slot(pa: u64) -> usize {
     ((pa >> 2) as usize) & (ENTRIES - 1)
 }
 
+/// The stamp of the page of `pa` among `count` (a power of two): pages
+/// whose numbers agree modulo `count` share one.
 #[inline(always)]
-const fn stamp_index(pa: u64) -> usize {
-    ((pa >> 12) as usize) & (STAMPS - 1)
+const fn stamp_index(pa: u64, count: usize) -> usize {
+    ((pa >> 12) as usize) & (count - 1)
 }
 
 /// The 128-byte lines of a page that the bytes at page offsets `first` to
@@ -291,8 +310,34 @@ impl TraceCache {
             entries: table::<_, ENTRIES>(EMPTY),
             pool: Pool::new(),
             generation: 0,
-            stamps: table::<_, STAMPS>(0),
+            stamps: table::<_, MIN_STAMPS>(0),
         }
+    }
+
+    /// Give every page of `bytes` of consecutive memory (a machine's RAM) a
+    /// stamp of its own, as far as [`MAX_STAMPS`] reach: the fewest stamps,
+    /// a power of two, that number its pages apart. Every trace is forgotten
+    /// when the table changes, since the marks of the old one go with it.
+    #[cfg(feature = "alloc")]
+    pub(crate) fn cover(&mut self, bytes: u64) {
+        let pages = usize::try_from(bytes.div_ceil(0x1000)).unwrap_or(MAX_STAMPS);
+        let stamps = pages.next_power_of_two().clamp(MIN_STAMPS, MAX_STAMPS);
+        if stamps != self.stamps.len() {
+            self.stamps = alloc::vec![0; stamps].into_boxed_slice();
+            self.flush();
+        }
+    }
+
+    /// The stamp of the page of `pa`.
+    #[inline(always)]
+    fn stamp_index(&self, pa: u64) -> usize {
+        stamp_index(pa, self.stamps.len())
+    }
+
+    /// How many stamps there are.
+    #[inline]
+    fn stamp_count(&self) -> usize {
+        self.stamps.len()
     }
 
     /// The trace starting at `pa`, built from memory of `epoch`, if it is
@@ -318,13 +363,13 @@ impl TraceCache {
     /// Whether the page of `pa` may hold a cached instruction.
     #[inline(always)]
     pub(crate) fn holds_code(&self, pa: u64) -> bool {
-        self.stamps[stamp_index(pa)] != 0
+        self.stamps[self.stamp_index(pa)] != 0
     }
 
     /// Forget the traces on the `mask` lines of the page of `pa`; whether
     /// any line was marked (Bochs `handleSMC`).
     fn forget_lines(&mut self, pa: u64, mask: u32) -> bool {
-        let index = stamp_index(pa);
+        let index = self.stamp_index(pa);
         let mask = mask & self.stamps[index];
         if mask == 0 {
             return false;
@@ -333,13 +378,14 @@ impl TraceCache {
         // 32 entries at a time; a trace reaches forward only, so none past
         // the last written line can touch it.
         let window = slot(pa & !0xFFF);
+        let count = self.stamps.len();
         for line in 0..32 {
             if 1u32 << line > mask {
                 break;
             }
             for k in 0..32 {
                 let e = &mut self.entries[(window + line * 32 + k) & (ENTRIES - 1)];
-                if e.pa != INVALID && e.generation == self.generation && stamp_index(e.pa) == index && e.lines() & mask != 0 {
+                if e.pa != INVALID && e.generation == self.generation && stamp_index(e.pa, count) == index && e.lines() & mask != 0 {
                     e.pa = INVALID;
                 }
             }
@@ -429,7 +475,8 @@ impl Cpu {
             at: ((start as u32) << 8) | len as u32,
         };
         self.traces.entries[slot(pa)] = entry;
-        self.traces.stamps[stamp_index(pa)] |= entry.lines();
+        let index = self.traces.stamp_index(pa);
+        self.traces.stamps[index] |= entry.lines();
         Some(Trace { start, len })
     }
 
@@ -439,7 +486,7 @@ impl Cpu {
     /// some more than once, and is answered by forgetting every trace.
     pub(crate) fn forget_code(&mut self, span: PhysSpan) {
         let (start, end) = (span.start.get(), span.end.get());
-        if span.len() / 0x1000 >= STAMPS as u64 {
+        if span.len() / 0x1000 >= self.traces.stamp_count() as u64 {
             self.flush_traces();
             return;
         }
@@ -460,6 +507,15 @@ impl Cpu {
     /// Forget every trace, and end the running one.
     pub(crate) fn flush_traces(&mut self) {
         self.traces.flush();
+        self.trace_break = true;
+    }
+
+    /// Give each page of `bytes` of RAM a page write stamp of its own (see
+    /// [`TraceCache::cover`]), so that a store to one page never forgets
+    /// the code of another; the running trace ends if the traces go.
+    #[cfg(feature = "alloc")]
+    pub(crate) fn cover_code_memory(&mut self, bytes: u64) {
+        self.traces.cover(bytes);
         self.trace_break = true;
     }
 }
