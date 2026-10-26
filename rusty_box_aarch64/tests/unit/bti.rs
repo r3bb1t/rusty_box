@@ -397,7 +397,8 @@ fn a_guarded_tlb_entry_needs_bti() {
     assert_eq!(m.step_at(GUARDED), None);
     let mut image = Vec::new();
     assert!(m.cpu.tlb.save(&mut image).is_ok());
-    let restored = |features| Tlb::new().restore(&mut image.as_slice(), features).is_ok();
+    let tcr = m.cpu.sys.tcr_el1;
+    let restored = |features| Tlb::new().restore(&mut image.as_slice(), features, tcr).is_ok();
     assert!(restored(Implementation::EVERY_FEATURE.features));
     assert!(!restored(Implementation::CORTEX_A57.features));
 }

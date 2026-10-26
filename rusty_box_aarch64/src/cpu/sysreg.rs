@@ -137,6 +137,11 @@ const FAR_EL1: u32 = key!(3, 0, 6, 0, 0);
 const PAR_EL1: u32 = key!(3, 0, 7, 4, 0);
 const MAIR_EL1: u32 = key!(3, 0, 10, 2, 0);
 const AMAIR_EL1: u32 = key!(3, 0, 10, 3, 0);
+const LORSA_EL1: u32 = key!(3, 0, 10, 4, 0);
+const LOREA_EL1: u32 = key!(3, 0, 10, 4, 1);
+const LORN_EL1: u32 = key!(3, 0, 10, 4, 2);
+const LORC_EL1: u32 = key!(3, 0, 10, 4, 3);
+const LORID_EL1: u32 = key!(3, 0, 10, 4, 7);
 const VBAR_EL1: u32 = key!(3, 0, 12, 0, 0);
 const ISR_EL1: u32 = key!(3, 0, 12, 1, 0);
 const CONTEXTIDR_EL1: u32 = key!(3, 0, 13, 0, 1);
@@ -465,6 +470,10 @@ impl Cpu {
             PAR_EL1 => self.sys.par_el1,
             MAIR_EL1 => self.sys.mair_el1,
             AMAIR_EL1 => self.sys.amair_el1,
+            // With no LORegions (`LORID_EL1`), the LORegion registers hold
+            // nothing: RAZ/WI, as QEMU's `lor_reginfo` has them.
+            LORSA_EL1 | LOREA_EL1 | LORN_EL1 | LORC_EL1 if self.implements(Feature::Lor) => 0,
+            LORID_EL1 if self.implements(Feature::Lor) => id::LORID_EL1,
             VBAR_EL1 => self.sys.vbar_el1,
             ISR_EL1 => (u64::from(self.irq_line) << 7) | (u64::from(self.fiq_line) << 6),
             CONTEXTIDR_EL1 => self.sys.contextidr_el1,
@@ -722,6 +731,7 @@ impl Cpu {
                 self.sys.amair_el1 = value;
                 WriteEffect::None
             }
+            LORSA_EL1 | LOREA_EL1 | LORN_EL1 | LORC_EL1 if self.implements(Feature::Lor) => WriteEffect::None,
             VBAR_EL1 => {
                 self.sys.vbar_el1 = value & !0x7FF;
                 WriteEffect::None

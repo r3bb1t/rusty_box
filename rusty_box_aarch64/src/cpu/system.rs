@@ -6,7 +6,7 @@
 use super::exception::{Exception, ExceptionClass};
 use super::exec::{bit, bits, ExecResult, Fault, Flow, StopCause};
 use super::features::Feature;
-use super::mmu::AtCheck;
+use super::mmu::{AtCheck, CacheMaintenance};
 use super::sme::SmeTrap;
 use super::sysreg::{SysRegError, SysRegKey, WriteEffect};
 use super::{sctlr, Cpu, El};
@@ -168,11 +168,12 @@ impl Cpu {
                     self.monitor.armed = false;
                     Ok(Flow::Next)
                 }
-                // DSB, DMB, ISB, and SB (FEAT_SB, which the decoder admits
-                // with CRm = 0 alone): an interpreter that retires each
-                // access in order before the next, and never speculates, has
-                // nothing to wait for.
-                4..=7 => Ok(Flow::Next),
+                // DSB, DMB, ISB, SB (FEAT_SB, which the decoder admits with
+                // CRm = 0 alone) and DSB nXS (op2 = 1, FEAT_XS, which the
+                // decoder admits with CRm<1:0> = 10 alone): an interpreter
+                // that retires each access in order before the next, and
+                // never speculates, has nothing to wait for.
+                1 | 4..=7 => Ok(Flow::Next),
                 _ => self.undefined(pc, insn),
             },
             // MSR (immediate): op1 = 000 needs EL1, op1 = 011 is open to
@@ -274,11 +275,31 @@ impl Cpu {
                 }
                 Ok(Flow::Next)
             }
-            // IC IVAU, DC CVAC, DC CVAU, DC CIVAC: EL0 needs SCTLR_EL1.UCI.
-            (3, 7, 5, 1) | (3, 7, 10, 1) | (3, 7, 11, 1) | (3, 7, 14, 1) => {
+            // IC IVAU, DC CVAC, DC CVAU, DC CIVAC, and DC CVAP (FEAT_DPB)
+            // and DC CVADP (FEAT_DPB2): EL0 needs SCTLR_EL1.UCI. CLIDR_EL1
+            // names caches to the PoU and the PoC and CTR_EL0.DIC is 0, so
+            // none is executed as a NOP (`AArch64_TreatDCAsNOP`,
+            // `AArch64_TreatICAsNOP`); a memory system with no PoP or PoDP
+            // cleans DC CVAP and DC CVADP to the PoC (`AArch64_DC`).
+            (3, 7, 5 | 10 | 11 | 12 | 13 | 14, 1) => {
+                let implemented = match crm {
+                    12 => self.implements(Feature::Dpb),
+                    13 => self.implements(Feature::Dpb2),
+                    _ => true,
+                };
+                if !implemented {
+                    return self.undefined(pc, insn);
+                }
                 if el0 && self.sys.sctlr_el1 & sctlr::UCI == 0 {
                     return Err(trap);
                 }
+                let op = if crm == 5 {
+                    CacheMaintenance::InstructionInvalidate
+                } else {
+                    CacheMaintenance::Clean
+                };
+                let va = self.x_or_zr(rt);
+                self.cache_maintenance(bus, va, op)?;
                 Ok(Flow::Next)
             }
             // DC ZVA: EL0 needs SCTLR_EL1.DZE.
@@ -290,9 +311,18 @@ impl Cpu {
                 self.dc_zva(bus, va)?;
                 Ok(Flow::Next)
             }
-            // DC IVAC, DC ISW, DC CSW, DC CISW: EL1 only. With no data cache
-            // model, invalidation and cleaning have nothing to act on.
-            (0, 7, 6, 1) | (0, 7, 6, 2) | (0, 7, 10, 2) | (0, 7, 14, 2) => {
+            // DC IVAC: EL1 only.
+            (0, 7, 6, 1) => {
+                if el0 {
+                    return self.undefined(pc, insn);
+                }
+                let va = self.x_or_zr(rt);
+                self.cache_maintenance(bus, va, CacheMaintenance::Invalidate)?;
+                Ok(Flow::Next)
+            }
+            // DC ISW, DC CSW, DC CISW: EL1 only. With no data cache model, a
+            // set and way names nothing to act on.
+            (0, 7, 6, 2) | (0, 7, 10, 2) | (0, 7, 14, 2) => {
                 if el0 {
                     return self.undefined(pc, insn);
                 }
@@ -313,21 +343,44 @@ impl Cpu {
                 self.address_translate(bus, va, op2 & 1 == 1, checked);
                 Ok(Flow::Next)
             }
-            // TLBI VMALLE1IS, VAE1IS, ASIDE1IS, VAAE1IS, VALE1IS, VAALE1IS
-            // (CRm 3) and VMALLE1, VAE1, ASIDE1, VAAE1, VALE1, VAALE1 (CRm 7),
-            // the ARMv8.0 EL1 TLB maintenance instructions (Arm ARM TLBI
-            // pages; QEMU target/arm/tcg/tlb-insns.c `tlbi_v8_cp_reginfo`).
-            // Each invalidates at least what it names, so flushing everything
-            // satisfies all of them. The rest of op1 0, CRn 8 belongs to
-            // FEAT_TLBIOS and FEAT_TLBIRANGE.
-            (0, 8, 3 | 7, 0 | 1 | 2 | 3 | 5 | 7) => {
-                if el0 {
+            // The EL1 TLB maintenance instructions (CRn 8), and their nXS
+            // forms (CRn 9, FEAT_XS). Each invalidates at least what it
+            // names, whatever its TTL hint (FEAT_TTL) or range, so flushing
+            // everything satisfies all of them.
+            (0, 8 | 9, _, _) => {
+                if el0 || !self.implements_tlbi(crn, crm, op2) {
                     return self.undefined(pc, insn);
                 }
                 self.tlb.flush();
                 Ok(Flow::Next)
             }
             _ => self.undefined(pc, insn),
+        }
+    }
+
+    /// Whether this processor implements the EL1 TLB maintenance instruction
+    /// at `CRm` and `op2` of `op1 = 0`, `CRn` 8, or `CRn` 9 for its nXS form,
+    /// which FEAT_XS adds (Arm's `TLBI` pages, and QEMU
+    /// target/arm/tcg/tlb-insns.c `tlbi_v8_cp_reginfo`, `tlbios_reginfo`
+    /// and `tlbirange_reginfo`).
+    fn implements_tlbi(&self, crn: u32, crm: u32, op2: u32) -> bool {
+        if crn == 9 && !self.implements(Feature::Xs) {
+            return false;
+        }
+        let os = self.implements(Feature::TlbiOs);
+        let range = self.implements(Feature::TlbiRange);
+        match (crm, op2) {
+            // VMALLE1IS, VAE1IS, ASIDE1IS, VAAE1IS, VALE1IS, VAALE1IS, and
+            // VMALLE1, VAE1, ASIDE1, VAAE1, VALE1, VAALE1.
+            (3 | 7, 0 | 1 | 2 | 3 | 5 | 7) => true,
+            // VMALLE1OS, VAE1OS, ASIDE1OS, VAAE1OS, VALE1OS, VAALE1OS.
+            (1, 0 | 1 | 2 | 3 | 5 | 7) => os,
+            // RVAE1IS, RVAAE1IS, RVALE1IS, RVAALE1IS, and RVAE1, RVAAE1,
+            // RVALE1, RVAALE1.
+            (2 | 6, 1 | 3 | 5 | 7) => range,
+            // RVAE1OS, RVAAE1OS, RVALE1OS, RVAALE1OS.
+            (5, 1 | 3 | 5 | 7) => range && os,
+            _ => false,
         }
     }
 

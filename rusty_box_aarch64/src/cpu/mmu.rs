@@ -1,8 +1,9 @@
 //! Stage-1 translation for the EL1&0 regime (VMSAv8-64, Arm ARM D8) with the
 //! 4 KiB granule, the one `ID_AA64MMFR0_EL1` advertises; the TLB that caches
-//! it; and the data and instruction access paths every load, store and fetch
-//! goes through — alignment checks, translation, permission checks, and the
-//! external abort when the bus has nothing at an address.
+//! it; and the data and instruction access paths every load, store, fetch
+//! and cache maintenance by address goes through — alignment checks,
+//! translation, permission checks, and the external abort when the bus has
+//! nothing at an address.
 //!
 //! The TLB is direct-mapped and holds one 4 KiB page per entry, whatever the
 //! size of the block that mapped it. It is flushed whole by every TLB
@@ -130,6 +131,26 @@ pub(crate) enum AlignmentRule {
     Ordered,
 }
 
+/// What a cache maintenance instruction by virtual address does, which
+/// decides the permission its translation needs (Arm
+/// `AArch64_S1CheckPermissions`, `AccessType_DC` and `AccessType_IC`).
+/// PSTATE.PAN takes no part (`CreateAccDescDC` and `CreateAccDescIC` leave
+/// `pan` clear).
+///
+/// Closed (R5): the maintenance by address this core implements.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CacheMaintenance {
+    /// `DC IVAC` (`CacheOp_Invalidate`): write permission, at any EL.
+    Invalidate,
+    /// `DC CVAC`, `DC CVAU`, `DC CVAP`, `DC CVADP` and `DC CIVAC`
+    /// (`CacheOp_Clean`, `CacheOp_CleanInvalidate`): read permission at
+    /// EL0, none at EL1.
+    Clean,
+    /// `IC IVAU`: none, the IMPLEMENTATION DEFINED choice "Permission fault
+    /// on EL0 IC_IVAU execution" being FALSE here.
+    InstructionInvalidate,
+}
+
 /// Whether Device memory refuses an access for its alignment, as Arm
 /// `AArch64_S1HasAlignmentFaultDueToMemType` decides after the walk and
 /// before the permission check: a misaligned access (a [`Part`] of one
@@ -217,6 +238,17 @@ const PERM_EL0_X: u8 = 1 << 5;
 const PERMS: u8 = PERM_EL1_R | PERM_EL1_W | PERM_EL1_X | PERM_EL0_R | PERM_EL0_W | PERM_EL0_X;
 /// Not a permission: the descriptor's GP bit (FEAT_BTI), a guarded page.
 const GUARDED: u8 = 1 << 6;
+/// EL0's permissions.
+const PERMS_EL0: u8 = PERM_EL0_R | PERM_EL0_W | PERM_EL0_X;
+
+/// `ESR_ELx.ISS.WnR` and `CM` of a Data Abort.
+const ISS_WNR: u32 = 1 << 6;
+const ISS_CM: u32 = 1 << 8;
+
+/// `TCR_EL1.HPD0` (FEAT_HPDS); `HPD1` is the bit above it.
+const TCR_HPD0: u32 = 41;
+/// `TCR_EL1.E0PD0` (FEAT_E0PD); `E0PD1` is the bit above it.
+const TCR_E0PD0: u32 = 55;
 
 #[inline]
 const fn permitted(perms: u8, kind: AccessKind, el: El) -> bool {
@@ -229,6 +261,14 @@ const fn permitted(perms: u8, kind: AccessKind, el: El) -> bool {
         (AccessKind::Fetch, El::El0) => PERM_EL0_X,
     };
     perms & needed != 0
+}
+
+/// Whether `tcr`'s FEAT_E0PD field for the half of the address space bit 55
+/// of `va` names refuses EL0 every access there (`TCR_EL1.E0PD0` or
+/// `E0PD1`, RES0 without the feature).
+#[inline]
+const fn e0pd_set(features: Features, tcr: u64, va: u64) -> bool {
+    features.has(Feature::E0pd) && (tcr >> (TCR_E0PD0 + ((va >> 55) & 1) as u32)) & 1 == 1
 }
 
 /// An instruction word and the physical address it was fetched from.
@@ -314,6 +354,13 @@ impl Tlb {
         ((va >> 12) as usize) & (TLB_ENTRIES - 1)
     }
 
+    /// The entry that translates `va`, if the TLB holds one.
+    #[inline(always)]
+    fn hit(&self, va: u64) -> Option<TlbEntry> {
+        let entry = self.entries[Self::slot(va)];
+        (entry.tag == va >> 12).then_some(entry)
+    }
+
     /// The valid entries, for a snapshot.
     pub(crate) fn save<W: SnapWrite>(&self, w: &mut W) -> SnapResult {
         let valid = self.entries.iter().filter(|e| e.tag != INVALID_TAG).count();
@@ -327,8 +374,9 @@ impl Tlb {
     }
 
     /// The inverse of [`Tlb::save`], for a processor implementing
-    /// `features`: an entry must be one its walk can produce.
-    pub(crate) fn restore<R: SnapRead>(&mut self, r: &mut R, features: Features) -> SnapResult {
+    /// `features` with `tcr` in TCR_EL1: an entry must be one its walk can
+    /// produce and its TLB can hold (`Cpu::walk_and_cache`).
+    pub(crate) fn restore<R: SnapRead>(&mut self, r: &mut R, features: Features, tcr: u64) -> SnapResult {
         let walked = PERMS | if features.has(Feature::Bti) { GUARDED } else { 0 };
         let valid = r.read_count(TLB_ENTRIES)?;
         self.flush();
@@ -340,6 +388,9 @@ impl Tlb {
             let [perms, device, level] = rest;
             if tag == INVALID_TAG || pa_page & 0xFFF != 0 || perms & !walked != 0 || device > 1 || level > 3 {
                 return Err(SnapError::Invalid("TLB entry is not one a walk can produce"));
+            }
+            if perms & PERMS_EL0 != 0 && e0pd_set(features, tcr, tag << 12) {
+                return Err(SnapError::Invalid("TLB entry gives EL0 a page FEAT_E0PD refuses it"));
             }
             let slot = &mut self.entries[Self::slot(tag << 12)];
             if slot.tag != INVALID_TAG {
@@ -405,14 +456,9 @@ impl Cpu {
     #[inline(always)]
     fn map<B: PhysBus>(&mut self, bus: &mut B, va: u64, kind: AccessKind, el: El, on_device: OnDevice) -> Result<Mapping, Fsc> {
         if !self.mmu_enabled() {
-            // Arm ARM D8.2.11 (`AArch64.TranslateAddressS1Off`): with stage 1
-            // disabled the output address is the input address below
-            // `AddrTop`, data accesses are Device-nGnRnE and instruction
-            // fetches are Normal.
-            let address = self.untagged(va, kind);
-            if address >> id::PA_BITS != 0 {
-                return Err(Fsc::AddressSize(0));
-            }
+            // Data accesses are Device-nGnRnE with stage 1 disabled, and
+            // instruction fetches are Normal.
+            let address = self.s1_disabled_output(va, kind).ok_or(Fsc::AddressSize(0))?;
             if on_device == OnDevice::Refused && kind != AccessKind::Fetch {
                 return Err(Fsc::Alignment);
             }
@@ -423,13 +469,15 @@ impl Cpu {
             });
         }
 
-        let entry = self.tlb.entries[Tlb::slot(va)];
-        if entry.tag == va >> 12 {
+        // The TLB holds no page FEAT_E0PD refuses EL0 that EL0 has a
+        // permission for (`walk_and_cache`), so every EL0 access E0PD
+        // refuses that hits is refused here, and `refusal` names the fault.
+        if let Some(entry) = self.tlb.hit(va) {
             if on_device == OnDevice::Refused && entry.device {
-                return Err(Fsc::Alignment);
+                return Err(self.refusal(va, el, Fsc::Alignment));
             }
             if !self.permits(entry.perms, kind, el) {
-                return Err(Fsc::Permission(entry.level));
+                return Err(self.refusal(va, el, Fsc::Permission(entry.level)));
             }
             return Ok(Mapping {
                 pa: entry.pa_page | (va & 0xFFF),
@@ -444,23 +492,7 @@ impl Cpu {
     /// and the permissions.
     #[inline(never)]
     fn translate_miss<B: PhysBus>(&mut self, bus: &mut B, va: u64, kind: AccessKind, el: El, on_device: OnDevice) -> Result<Mapping, Fsc> {
-        let slot = Tlb::slot(va);
-        let walked = self.walk(bus, va, kind)?;
-        // A tagged address keeps its tag in the entry's tag, so it hits only
-        // itself; a TCR_EL1 write, which can change what the walk ignores,
-        // empties the TLB. A data access through a tag instruction fetches
-        // do not ignore (TCR_EL1.TBIDx) leaves no entry: a fetch from the
-        // same address would hit it, where its own walk faults.
-        let fetch_faults = kind != AccessKind::Fetch && sext(va, 56) != va && !self.tbi(va, AccessKind::Fetch);
-        if !fetch_faults {
-            self.tlb.entries[slot] = TlbEntry {
-                tag: va >> 12,
-                pa_page: walked.pa & !0xFFF,
-                perms: walked.perms,
-                device: walked.device,
-                level: walked.level,
-            };
-        }
+        let walked = self.walk_and_cache(bus, va, kind, el)?;
         if on_device == OnDevice::Refused && walked.device {
             return Err(Fsc::Alignment);
         }
@@ -472,6 +504,71 @@ impl Cpu {
             flags: walked.perms,
             level: walked.level,
         })
+    }
+
+    /// The walk of a TLB miss for an access of `kind` at `va` checked
+    /// against `el`'s permissions ([`Cpu::s1_walk`]), cached in the TLB.
+    fn walk_and_cache<B: PhysBus>(&mut self, bus: &mut B, va: u64, kind: AccessKind, el: El) -> Result<Walked, TranslationFault> {
+        let walked = self.s1_walk(bus, va, kind, el)?;
+        // A tagged address keeps its tag in the entry's tag, so it hits only
+        // itself; a TCR_EL1 write, which can change what the walk ignores,
+        // empties the TLB. A data access through a tag instruction fetches
+        // do not ignore (TCR_EL1.TBIDx) leaves no entry: a fetch from the
+        // same address would hit it, where its own walk faults. Nor does a
+        // page FEAT_E0PD refuses EL0 that EL0 has a permission for: its
+        // accesses walk each time, so an EL0 access never passes a hit's
+        // permission check in a half E0PD refuses EL0, where the pages are
+        // normally all EL1's and cached.
+        let fetch_faults = kind != AccessKind::Fetch && sext(va, 56) != va && !self.tbi(va, AccessKind::Fetch);
+        let e0pd_refuses_permitted = walked.perms & PERMS_EL0 != 0 && self.e0pd_refuses(va, El::El0);
+        if !fetch_faults && !e0pd_refuses_permitted {
+            self.tlb.entries[Tlb::slot(va)] = TlbEntry {
+                tag: va >> 12,
+                pa_page: walked.pa & !0xFFF,
+                perms: walked.perms,
+                device: walked.device,
+                level: walked.level,
+            };
+        }
+        Ok(walked)
+    }
+
+    /// The E0PD rule of Arm `AArch64_S1Translate` (FEAT_E0PD): with
+    /// `TCR_EL1.E0PD0` or `E0PD1` set, an access at `va` checked against
+    /// EL0's permissions (`accdesc.el`, EL0's for LDTR and STTR at EL1
+    /// without PSTATE.UAO) takes a level 0 translation fault, ahead of the
+    /// walk. Every such access meets it: on a TLB miss in [`Cpu::s1_walk`];
+    /// on a hit in [`Cpu::refusal`], where its permission check fails, as
+    /// the TLB holds no page E0PD refuses EL0 that EL0 has a permission for
+    /// ([`Cpu::walk_and_cache`]); and in [`Cpu::cache_maintenance`], whose
+    /// accesses can need no permission.
+    fn e0pd_refuses(&self, va: u64, el: El) -> bool {
+        el == El::El0 && e0pd_set(self.imp.features, self.sys.tcr_el1, va)
+    }
+
+    /// Arm `AArch64_S1Translate` with stage 1 enabled, as far as the walk:
+    /// FEAT_E0PD's refusal of an access checked against `el`'s permissions,
+    /// then the walk for an access of `kind` at `va`.
+    fn s1_walk<B: PhysBus>(&self, bus: &mut B, va: u64, kind: AccessKind, el: El) -> Result<Walked, TranslationFault> {
+        if self.e0pd_refuses(va, el) {
+            return Err(TranslationFault::Translation { level: 0 });
+        }
+        self.walk(bus, va, kind)
+    }
+
+    /// The fault an access at `va` checked against `el`'s permissions takes
+    /// when its TLB entry refuses it `fault`: a level 0 translation fault
+    /// where FEAT_E0PD refuses EL0 the page, which Arm's
+    /// `AArch64_S1Translate` checks ahead of the walk and so of every other
+    /// fault, and `fault` otherwise.
+    #[cold]
+    #[inline(never)]
+    fn refusal(&self, va: u64, el: El, fault: Fsc) -> Fsc {
+        if self.e0pd_refuses(va, el) {
+            Fsc::Translation(0)
+        } else {
+            fault
+        }
     }
 
     /// Whether an access of `kind` checked against `el`'s permissions may
@@ -545,6 +642,16 @@ impl Cpu {
         if self.tbi(va, kind) { va & 0x00FF_FFFF_FFFF_FFFF } else { va }
     }
 
+    /// The output address of an access of `kind` at `va` with stage 1
+    /// disabled (Arm ARM D8.2.11, `AArch64_S1DisabledOutput`): `va` below
+    /// `AddrTop`, or `None` where that is wider than the physical address
+    /// size, an address size fault at level 0.
+    #[inline(always)]
+    fn s1_disabled_output(&self, va: u64, kind: AccessKind) -> Option<u64> {
+        let address = self.untagged(va, kind);
+        (address >> id::PA_BITS == 0).then_some(address)
+    }
+
     /// Arm ARM `AArch64.BranchAddr`: the address a branch, an exception
     /// entry or an exception return writes to the PC. Under top-byte-ignore
     /// of instruction addresses the tag is dropped, bits [63:56] becoming
@@ -559,8 +666,12 @@ impl Cpu {
     }
 
     /// The translation table walk (Arm ARM `AArch64.TranslationTableWalk`)
-    /// for the 4 KiB granule, with hierarchical permissions and no hardware
-    /// access-flag management (ARMv8.0).
+    /// for the 4 KiB granule, with no hardware access-flag management.
+    /// Table descriptors' hierarchical permissions apply unless FEAT_HPDS's
+    /// `TCR_EL1.HPD0` or `HPD1` turns them off for the half of the address
+    /// space being walked (`AArch64_S1NextWalkStateTable`). The base
+    /// address leaves out `TTBRn_EL1.CnP` (FEAT_TTCNP), bit 0, which has no
+    /// effect on one processor.
     fn walk<B: PhysBus>(&self, bus: &mut B, va: u64, kind: AccessKind) -> Result<Walked, TranslationFault> {
         let tcr = self.sys.tcr_el1;
         let upper = (va >> 55) & 1 == 1;
@@ -569,6 +680,7 @@ impl Cpu {
         } else {
             ((tcr >> 7) & 1 == 1, self.sys.ttbr0_el1)
         };
+        let hpd = self.implements(Feature::Hpds) && (tcr >> (TCR_HPD0 + u32::from(upper))) & 1 == 1;
         let ia_bits = 64 - self.effective_txsz(upper);
         let top = if self.tbi(va, kind) { 56 } else { 64 };
         let check = ones(top - ia_bits) << ia_bits;
@@ -610,9 +722,11 @@ impl Cpu {
                 if next >> id::PA_BITS != 0 {
                     return Err(TranslationFault::AddressSize { level: at_level });
                 }
-                ap_table |= (desc >> 61) & 3;
-                uxn_table |= (desc >> 60) & 1 == 1;
-                pxn_table |= (desc >> 59) & 1 == 1;
+                if !hpd {
+                    ap_table |= (desc >> 61) & 3;
+                    uxn_table |= (desc >> 60) & 1 == 1;
+                    pxn_table |= (desc >> 59) & 1 == 1;
+                }
                 table = next;
                 level += 1;
                 continue;
@@ -688,11 +802,9 @@ impl Cpu {
     /// that cannot disturb a device. Nothing in the processor changes.
     pub(crate) fn debug_translate<B: PhysBus>(&self, bus: &mut B, va: u64) -> Result<u64, TranslationFault> {
         if !self.mmu_enabled() {
-            let address = self.untagged(va, AccessKind::Read);
-            if address >> id::PA_BITS != 0 {
-                return Err(TranslationFault::AddressSize { level: 0 });
-            }
-            return Ok(address);
+            return self
+                .s1_disabled_output(va, AccessKind::Read)
+                .ok_or(TranslationFault::AddressSize { level: 0 });
         }
         self.walk(bus, va, AccessKind::Read).map(|w| w.pa)
     }
@@ -715,19 +827,14 @@ impl Cpu {
             AtCheck::El1Pan => cpu.permits(perms, kind, el),
         };
         let result = if self.mmu_enabled() {
-            match self.walk(bus, va, kind) {
+            match self.s1_walk(bus, va, kind, el) {
                 Ok(w) if permits(self, w.perms) => Ok((w.pa, w.attr, w.shareability)),
                 Ok(w) => Err(Fsc::Permission(w.level)),
                 Err(f) => Err(Fsc::from(f)),
             }
         } else {
-            let address = self.untagged(va, kind);
-            if address >> id::PA_BITS != 0 {
-                Err(Fsc::AddressSize(0))
-            } else {
-                // Device-nGnRnE (attribute 0x00) with stage 1 disabled.
-                Ok((address, 0, 0))
-            }
+            // Device-nGnRnE (attribute 0x00) with stage 1 disabled.
+            self.s1_disabled_output(va, kind).map(|address| (address, 0, 0)).ok_or(Fsc::AddressSize(0))
         };
         self.sys.par_el1 = match result {
             Ok((pa, attr, shareability)) => {
@@ -746,7 +853,17 @@ impl Cpu {
     // ----- access paths -----
 
     fn data_abort(va: u64, fsc: Fsc, write: bool) -> Fault {
-        let iss = fsc.code() | (u32::from(write) << 6);
+        Self::data_abort_iss(va, fsc.code() | if write { ISS_WNR } else { 0 })
+    }
+
+    /// The Data Abort of a cache maintenance instruction by address, with
+    /// `CM` and `WnR` set (`AArch64_FaultSyndrome`, `AccessType_DC` and
+    /// `AccessType_IC`).
+    fn cache_maintenance_abort(va: u64, fsc: Fsc) -> Fault {
+        Self::data_abort_iss(va, fsc.code() | ISS_CM | ISS_WNR)
+    }
+
+    fn data_abort_iss(va: u64, iss: u32) -> Fault {
         Exception::new(ExceptionClass::DataAbort, iss).with_far(va).into()
     }
 
@@ -1008,6 +1125,44 @@ impl Cpu {
         let half = Self::halves_of(va, acc);
         self.write_mem(bus, va, 3, value as u64, half)?;
         self.write_mem(bus, va.wrapping_add(8), 3, (value >> 64) as u64, half)
+    }
+
+    /// `DC IVAC`, `DC CVAC`, `DC CVAU`, `DC CVAP`, `DC CVADP`, `DC CIVAC`
+    /// and `IC IVAU` at `va`: the translation Arm `AArch64_DC` and
+    /// `AArch64_IC` make, as an aligned access of no size, checked as `op`
+    /// says. With no cache to clean or invalidate, the translation is all
+    /// they do. A fault is a Data Abort at `va` with `CM` and `WnR` set
+    /// (`AArch64_FaultSyndrome`); Device memory refuses none of them.
+    pub(crate) fn cache_maintenance<B: PhysBus>(&mut self, bus: &mut B, va: u64, op: CacheMaintenance) -> Result<(), Fault> {
+        let abort = |fsc: Fsc| Self::cache_maintenance_abort(va, fsc);
+        if !self.mmu_enabled() {
+            return match self.s1_disabled_output(va, AccessKind::Read) {
+                Some(_) => Ok(()),
+                None => Err(abort(Fsc::AddressSize(0))),
+            };
+        }
+        let el = self.pstate.el;
+        // Ahead of the TLB as well as the walk: an operation that needs no
+        // permission would pass a hit E0PD refuses.
+        if self.e0pd_refuses(va, el) {
+            return Err(abort(Fsc::Translation(0)));
+        }
+        let (perms, level) = match self.tlb.hit(va) {
+            Some(entry) => (entry.perms, entry.level),
+            None => {
+                let walked = self.walk_and_cache(bus, va, AccessKind::Read, el).map_err(|f| abort(Fsc::from(f)))?;
+                (walked.perms, walked.level)
+            }
+        };
+        let needed = match (op, el) {
+            (CacheMaintenance::Invalidate, _) => Some(AccessKind::Write),
+            (CacheMaintenance::Clean, El::El0) => Some(AccessKind::Read),
+            (CacheMaintenance::Clean, El::El1) | (CacheMaintenance::InstructionInvalidate, _) => None,
+        };
+        match needed {
+            Some(kind) if !permitted(perms, kind, el) => Err(abort(Fsc::Permission(level))),
+            _ => Ok(()),
+        }
     }
 
     /// `DC ZVA`: zero the naturally aligned block containing `va`. Device

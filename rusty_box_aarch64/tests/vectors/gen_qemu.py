@@ -202,6 +202,10 @@ FAMILIES = [
     ("flagm_setf", "D", 0x3A00080D, 0x000043E0, None),
     # FEAT_SB: SB.
     ("sb", "D", 0xD50330FF, 0x00000000, None),
+    # FEAT_LOR: LDLAR and STLLR of every size.
+    ("lor", "M", 0x089F7C00, 0xC04003FF, None),
+    # FEAT_XS: DSB nXS.
+    ("xs_dsb", "D", 0xD503323F, 0x00000C00, None),
 ]
 
 

@@ -360,7 +360,7 @@ impl Cpu {
         if retired > icount {
             return Err(SnapError::Invalid("processor retired more instructions than ticks passed"));
         }
-        self.tlb.restore(r, self.imp.features)?;
+        self.tlb.restore(r, self.imp.features, sys.tcr_el1)?;
         let history_len = usize::from(r.read_u8()?);
         if history_len > PC_HISTORY {
             return Err(SnapError::Invalid("processor PC history is longer than it holds"));

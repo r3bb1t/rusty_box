@@ -29,6 +29,9 @@ mod fp_estimate;
 mod fp_extensions;
 mod isa;
 mod ldst;
+#[cfg(test)]
+#[path = "../../tests/unit/memory_system.rs"]
+mod memory_system;
 mod mmu;
 mod pauth;
 #[cfg(test)]

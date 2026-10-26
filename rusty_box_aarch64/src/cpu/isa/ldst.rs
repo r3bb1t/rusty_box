@@ -215,14 +215,45 @@ pub(crate) enum Ldstexclr {
 /// Arm group `ldstord`: Load/store ordered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum Ldstord {
+    StllrbSl32,
     StlrbSl32,
+    LdlarbLr32,
     LdarbLr32,
+    StllrhSl32,
     StlrhSl32,
+    LdlarhLr32,
     LdarhLr32,
+    StllrSl32,
     StlrSl32,
+    LdlarLr32,
     LdarLr32,
+    StllrSl64,
     StlrSl64,
+    LdlarLr64,
     LdarLr64,
+}
+
+impl Ldstord {
+    pub(crate) const fn feature(self) -> Feature {
+        match self {
+            Self::StlrbSl32
+            | Self::LdarbLr32
+            | Self::StlrhSl32
+            | Self::LdarhLr32
+            | Self::StlrSl32
+            | Self::LdarLr32
+            | Self::StlrSl64
+            | Self::LdarLr64 => Feature::Base,
+            Self::StllrbSl32
+            | Self::LdlarbLr32
+            | Self::StllrhSl32
+            | Self::LdlarhLr32
+            | Self::StllrSl32
+            | Self::LdlarLr32
+            | Self::StllrSl64
+            | Self::LdlarLr64 => Feature::Lor,
+        }
+    }
 }
 
 /// Arm group `loadlit`: Load register (literal).
@@ -802,16 +833,23 @@ fn ldstord(word: u32) -> Option<Ldstord> {
     let rs = bits(word, 20, 16);
     let o0 = bits(word, 15, 15);
     let rt2 = bits(word, 14, 10);
-    // o0 = 0 is LDLAR and STLLR (FEAT_LOR). Rs and Rt2 are should-be-one:
-    // fixed here.
+    // Rs and Rt2 are should-be-one: fixed here.
     match (size, l, rs, o0, rt2) {
+        (0b00, 0b0, 0b11111, 0b0, 0b11111) => Some(Ldstord::StllrbSl32),
         (0b00, 0b0, 0b11111, 0b1, 0b11111) => Some(Ldstord::StlrbSl32),
+        (0b00, 0b1, 0b11111, 0b0, 0b11111) => Some(Ldstord::LdlarbLr32),
         (0b00, 0b1, 0b11111, 0b1, 0b11111) => Some(Ldstord::LdarbLr32),
+        (0b01, 0b0, 0b11111, 0b0, 0b11111) => Some(Ldstord::StllrhSl32),
         (0b01, 0b0, 0b11111, 0b1, 0b11111) => Some(Ldstord::StlrhSl32),
+        (0b01, 0b1, 0b11111, 0b0, 0b11111) => Some(Ldstord::LdlarhLr32),
         (0b01, 0b1, 0b11111, 0b1, 0b11111) => Some(Ldstord::LdarhLr32),
+        (0b10, 0b0, 0b11111, 0b0, 0b11111) => Some(Ldstord::StllrSl32),
         (0b10, 0b0, 0b11111, 0b1, 0b11111) => Some(Ldstord::StlrSl32),
+        (0b10, 0b1, 0b11111, 0b0, 0b11111) => Some(Ldstord::LdlarLr32),
         (0b10, 0b1, 0b11111, 0b1, 0b11111) => Some(Ldstord::LdarLr32),
+        (0b11, 0b0, 0b11111, 0b0, 0b11111) => Some(Ldstord::StllrSl64),
         (0b11, 0b0, 0b11111, 0b1, 0b11111) => Some(Ldstord::StlrSl64),
+        (0b11, 0b1, 0b11111, 0b0, 0b11111) => Some(Ldstord::LdlarLr64),
         (0b11, 0b1, 0b11111, 0b1, 0b11111) => Some(Ldstord::LdarLr64),
         _ => None,
     }

@@ -28,9 +28,13 @@ pub const REVIDR_EL1: u64 = 0;
 /// EL1 = 1 (AArch64 only), EL2 = EL3 = 0 (not implemented), FP (19:16) and
 /// AdvSIMD (23:20) 1 with FEAT_FP16 (half-precision arithmetic) and 0
 /// without, GIC = 0 (no system-register interface: the GIC is a
-/// memory-mapped v2), DIT (51:48) = 1 with FEAT_DIT.
+/// memory-mapped v2), DIT (51:48) = 1 with FEAT_DIT, CSV3 (63:60) = 1 with
+/// FEAT_CSV3.
 pub(crate) const fn id_aa64pfr0(features: Features) -> u64 {
-    0x11 | field(features, Feature::Fp16, 16, 1) | field(features, Feature::Fp16, 20, 1) | field(features, Feature::Dit, 48, 1)
+    0x11 | field(features, Feature::Fp16, 16, 1)
+        | field(features, Feature::Fp16, 20, 1)
+        | field(features, Feature::Dit, 48, 1)
+        | field(features, Feature::Csv3, 60, 1)
 }
 
 /// `ID_AA64PFR1_EL1` of a processor implementing `features`: `BT` (bits
@@ -70,13 +74,16 @@ pub const ID_AA64DFR0_EL1: u64 = 0x0000_0000_0010_1006;
 /// with FEAT_AES (AESE, AESD, AESMC, AESIMC and the 64-bit PMULL), SHA1
 /// (11:8) = 1, SHA2 (15:12) = 1 (SHA-256 only), CRC32 (19:16) = 1, Atomic
 /// (23:20) = 2 with FEAT_LSE, RDM (31:28) = 1, DP (47:44) = 1 with
-/// FEAT_DotProd, FHM (51:48) = 1, and TS (55:52) = 1 with FEAT_FlagM and 2
-/// with FEAT_FlagM2 as well (which `Features.json` makes imply FEAT_FlagM);
-/// no SHA-512, SHA3, SM3, SM4 or other field. The Cortex-A57's is 0x11120,
-/// as QEMU sets it in `aarch64_aa32_a57_init` (target/arm/cpu-max.c), which
+/// FEAT_DotProd, FHM (51:48) = 1, TS (55:52) = 1 with FEAT_FlagM and 2
+/// with FEAT_FlagM2 as well (which `Features.json` makes imply FEAT_FlagM),
+/// and TLB (59:56) = 1 with FEAT_TLBIOS and 2 with FEAT_TLBIRANGE as well
+/// (which `Features.json` makes imply FEAT_TLBIOS); no SHA-512, SHA3, SM3,
+/// SM4 or other field. The Cortex-A57's is 0x11120, as QEMU sets it in
+/// `aarch64_aa32_a57_init` (target/arm/cpu-max.c), which
 /// `aarch64_a57_initfn` calls.
 pub(crate) const fn id_aa64isar0(features: Features) -> u64 {
     let ts = chain_level(features, &[Feature::FlagM, Feature::FlagM2]);
+    let tlb = chain_level(features, &[Feature::TlbiOs, Feature::TlbiRange]);
     field(features, Feature::Aes, 4, 2)
         | field(features, Feature::Sha1, 8, 1)
         | field(features, Feature::Sha256, 12, 1)
@@ -86,6 +93,7 @@ pub(crate) const fn id_aa64isar0(features: Features) -> u64 {
         | field(features, Feature::DotProd, 44, 1)
         | field(features, Feature::Fhm, 48, 1)
         | (ts << 52)
+        | (tlb << 56)
 }
 
 /// `ID_AA64ISAR1_EL1` of a processor implementing `features`: JSCVT
@@ -100,8 +108,11 @@ pub(crate) const fn id_aa64isar0(features: Features) -> u64 {
 /// acting only with FEAT_PAuth2 (which `Features.json` makes them imply),
 /// and GPA (27:24) = 1 (`FEAT_PACQARMA5 <=> UInt(GPA) >= 1`); API and GPI
 /// stay 0, as no IMPLEMENTATION DEFINED algorithm is implemented. SB
-/// (39:36) = 1 with FEAT_SB. Nothing else from v8.2+.
+/// (39:36) = 1 with FEAT_SB, DPB (3:0) = 1 with FEAT_DPB and 2 with
+/// FEAT_DPB2 as well (which `Features.json` makes imply FEAT_DPB), XS
+/// (59:56) = 1 with FEAT_XS. Nothing else from v8.2+.
 pub(crate) const fn id_aa64isar1(features: Features) -> u64 {
+    let dpb = chain_level(features, &[Feature::Dpb, Feature::Dpb2]);
     let lrcpc = chain_level(features, &[Feature::Lrcpc, Feature::Lrcpc2]);
     let apa = if !(features.has(Feature::PAuth) && features.has(Feature::PacQarma5)) {
         0
@@ -114,7 +125,7 @@ pub(crate) const fn id_aa64isar1(features: Features) -> u64 {
     } else {
         3
     };
-    (apa << 4)
+    dpb | (apa << 4)
         | field(features, Feature::Jscvt, 12, 1)
         | field(features, Feature::Fcma, 16, 1)
         | (lrcpc << 20)
@@ -123,6 +134,7 @@ pub(crate) const fn id_aa64isar1(features: Features) -> u64 {
         | field(features, Feature::Sb, 36, 1)
         | field(features, Feature::Bf16, 44, 1)
         | field(features, Feature::I8mm, 52, 1)
+        | field(features, Feature::Xs, 56, 1)
 }
 
 /// `ID_AA64ZFR0_EL1` of a processor implementing `features`: SVEver = 0
@@ -142,19 +154,33 @@ pub(crate) const fn id_aa64zfr0(features: Features) -> u64 {
     }
 }
 
-/// `ID_AA64MMFR1_EL1` of a processor implementing `features`: PAN (23:20)
-/// names the newest of FEAT_PAN (1), FEAT_PAN2 (2) and FEAT_PAN3 (3) the
-/// processor implements, each of which `Features.json` makes imply the one
-/// before; nothing else from v8.1+.
+/// `ID_AA64MMFR1_EL1` of a processor implementing `features`: HPDS (15:12)
+/// = 1 with FEAT_HPDS (2 would be FEAT_HPDS2), LO (19:16) = 1 with
+/// FEAT_LOR, and PAN (23:20) names the newest of FEAT_PAN (1), FEAT_PAN2
+/// (2) and FEAT_PAN3 (3) the processor implements, each of which
+/// `Features.json` makes imply the one before; nothing else from v8.1+.
 pub(crate) const fn id_aa64mmfr1(features: Features) -> u64 {
-    chain_level(features, &[Feature::Pan, Feature::Pan2, Feature::Pan3]) << 20
+    field(features, Feature::Hpds, 12, 1)
+        | field(features, Feature::Lor, 16, 1)
+        | (chain_level(features, &[Feature::Pan, Feature::Pan2, Feature::Pan3]) << 20)
 }
 
-/// `ID_AA64MMFR2_EL1` of a processor implementing `features`: UAO (7:4) = 1
-/// with FEAT_UAO, AT (35:32) = 1 with FEAT_LSE2; nothing else from v8.1+.
+/// `ID_AA64MMFR2_EL1` of a processor implementing `features`: CnP (3:0) = 1
+/// with FEAT_TTCNP, UAO (7:4) = 1 with FEAT_UAO, AT (35:32) = 1 with
+/// FEAT_LSE2, TTL (51:48) = 1 with FEAT_TTL, E0PD (63:60) = 1 with
+/// FEAT_E0PD; nothing else from v8.1+.
 pub(crate) const fn id_aa64mmfr2(features: Features) -> u64 {
-    field(features, Feature::Uao, 4, 1) | field(features, Feature::Lse2, 32, 1)
+    field(features, Feature::Ttcnp, 0, 1)
+        | field(features, Feature::Uao, 4, 1)
+        | field(features, Feature::Lse2, 32, 1)
+        | field(features, Feature::Ttl, 48, 1)
+        | field(features, Feature::E0pd, 60, 1)
 }
+
+/// `LORID_EL1` with FEAT_LOR: no LORegions (LR = 0) and no LORegion
+/// descriptors (LD = 0), as QEMU's `lor_reginfo` has it, so `LORSA_EL1`,
+/// `LOREA_EL1`, `LORN_EL1` and `LORC_EL1` hold nothing.
+pub(crate) const LORID_EL1: u64 = 0;
 
 /// The ID register field of a chain of features each of which
 /// `Features.json` makes imply the one before (FEAT_PAN, FEAT_PAN2,

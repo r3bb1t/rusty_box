@@ -38,6 +38,32 @@
 //      QEMU 11.1.2:  D qbcdefghijklmnopq   (the 17th overwrote the 1st,
 //                                           and 17 characters come back)
 //      QEMU 8.2.2:   D                     (no loopback)
+//
+// E to I run with the MMU on, over a level-1 table of 1 GiB blocks: VA 0
+// the UART's Device block, VA 1 GiB RAM (EL1's), VA 2 GiB nothing, VA 3 GiB
+// RAM again with EL0 read/write, VA 4 GiB RAM again read-only. A case that
+// faults prints ESR_EL1 and FAR_EL1, one that does not prints "none".
+// Arm's AArch64_DC and AArch64_IC translate the address of every DC and IC
+// by address and abort on a fault, with ISS.CM and WnR set
+// (AArch64_FaultSyndrome) and FAR the register's value; DC IVAC needs
+// write permission, a clean from EL1 none (AArch64_S1CheckPermissions),
+// and PAN takes no part (CreateAccDescDC).
+// E  DC CIVAC of 0x80000123 (unmapped).
+//      Arm:          E 0000000096000145 0000000080000123
+//      QEMU 11.1.2:  E none                                   (a NOP)
+// F  DC CVAP of 0x80000123 (unmapped).
+//      Arm:          F 0000000096000145 0000000080000123
+//      QEMU 11.1.2:  F 0000000096000005 0000000080000100      (a load:
+//                    no CM, no WnR, FAR rounded down to the line)
+// G  DC CVAP of 0xc0000100 (EL0 read/write) at EL1 with PSTATE.PAN = 1.
+//      Arm:          G none
+//      QEMU 11.1.2:  G 000000009600000d 00000000c0000100      (PAN applied)
+// H  IC IVAU of 0x80000123 (unmapped).
+//      Arm:          H 0000000096000145 0000000080000123
+//      QEMU 11.1.2:  H none                                   (a NOP)
+// I  DC IVAC of 0x100000100 (read-only).
+//      Arm:          I 000000009600014d 0000000100000100
+//      QEMU 11.1.2:  I none                                   (a NOP)
 
 #define UART 0x09000000
 
@@ -141,12 +167,88 @@ case_d:
 5:  mov w0, #'\n'
     bl putc
 
+mmu_on:
+    ldr x0, =0xff00                   // MAIR: attr 0 Device-nGnRnE, attr 1 Normal WB
+    msr mair_el1, x0
+    // T0SZ 25, inner and outer write-back, inner shareable, EPD1, IPS 36
+    // bits.
+    ldr x0, =(25 | (0x5 << 8) | (3 << 12) | (1 << 23) | (1 << 32))
+    msr tcr_el1, x0
+    ldr x0, =l1
+    msr ttbr0_el1, x0
+    isb
+    tlbi vmalle1
+    dsb sy
+    mrs x0, sctlr_el1
+    orr x0, x0, #1                    // M
+    msr sctlr_el1, x0
+    isb
+
+case_e:
+    adr x0, case_f
+    ldr x1, =resume
+    str x0, [x1]
+    mov w0, #'E'
+    ldr x1, =which
+    strb w0, [x1]
+    ldr x2, =0x80000123
+    dc civac, x2
+    bl none
+
+case_f:
+    adr x0, case_g
+    ldr x1, =resume
+    str x0, [x1]
+    mov w0, #'F'
+    ldr x1, =which
+    strb w0, [x1]
+    ldr x2, =0x80000123
+    dc cvap, x2
+    bl none
+
+case_g:
+    adr x0, case_h
+    ldr x1, =resume
+    str x0, [x1]
+    mov w0, #'G'
+    ldr x1, =which
+    strb w0, [x1]
+    msr pan, #1
+    ldr x2, =0xc0000100
+    dc cvap, x2
+    msr pan, #0
+    bl none
+
+case_h:
+    adr x0, case_i
+    ldr x1, =resume
+    str x0, [x1]
+    mov w0, #'H'
+    ldr x1, =which
+    strb w0, [x1]
+    ldr x2, =0x80000123
+    ic ivau, x2
+    bl none
+
+case_i:
+    adr x0, done
+    ldr x1, =resume
+    str x0, [x1]
+    mov w0, #'I'
+    ldr x1, =which
+    strb w0, [x1]
+    ldr x2, =0x100000100
+    dc ivac, x2
+    bl none
+
+done:
     ldr x0, =0x84000008               // PSCI SYSTEM_OFF
     hvc #0
     b .
 
 // The synchronous exception from the current EL with SP_ELx: print the
-// case, ESR_EL1 and SPSR_EL1, and go on to the next case.
+// case, ESR_EL1, and SPSR_EL1 for cases A to D or FAR_EL1 for the rest,
+// and go on to the next case with PSTATE.PAN clear.
 handler:
     ldr x1, =which
     ldrb w0, [x1]
@@ -157,13 +259,36 @@ handler:
     bl puthex
     mov w0, #' '
     bl putc
+    ldr x1, =which
+    ldrb w0, [x1]
+    cmp w0, #'E'
     mrs x0, spsr_el1
-    bl puthex
+    b.lo 1f
+    mrs x0, far_el1
+1:  bl puthex
     mov w0, #'\n'
     bl putc
+    msr pan, #0
     ldr x1, =resume
     ldr x0, [x1]
     br x0
+
+// A case that did not fault: print it and "none".
+none:
+    mov x14, x30
+    ldr x1, =which
+    ldrb w0, [x1]
+    bl putc
+    adr x15, none_text
+1:  ldrb w0, [x15], #1
+    cbz w0, 2f
+    bl putc
+    b 1b
+2:  mov x30, x14
+    ret
+none_text:
+    .asciz " none\n"
+    .balign 4
 
 putc:
     ldr x1, =UART
@@ -201,3 +326,14 @@ rxbuf:  .skip 32
     .balign 16
     .skip 4096
 stack_top:
+
+// The level-1 table of cases E to I: 1 GiB blocks, each with the access
+// flag; VA 1 GiB, 3 GiB and 4 GiB are RAM (attr 1, inner shareable).
+    .balign 4096
+l1:
+    .quad 0x00000000 | (1 << 54) | (1 << 53) | (1 << 10) | 1                   // Device, EL1's
+    .quad 0x40000000 | (3 << 8) | (1 << 10) | (1 << 2) | 1                     // EL1's
+    .quad 0                                                                    // nothing
+    .quad 0x40000000 | (1 << 54) | (1 << 53) | (3 << 8) | (1 << 10) | (1 << 6) | (1 << 2) | 1  // EL0 read/write
+    .quad 0x40000000 | (1 << 54) | (1 << 53) | (3 << 8) | (1 << 10) | (2 << 6) | (1 << 2) | 1  // read-only
+    .skip 4096 - 5 * 8

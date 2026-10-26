@@ -21,7 +21,7 @@ with a message and sign-off of the submitter's own.
 
 Reproducers:
 - `docs/qemu-aarch64-probe.S`: a bare-metal EL1 program for
-  `qemu-system-aarch64 -M virt`, one line of output per case (A to D). Its
+  `qemu-system-aarch64 -M virt`, one line of output per case (A to I). Its
   header gives the commands and the expected and observed output.
 - `docs/qemu-aarch64-probe-user.c`: a static Linux program for
   `qemu-aarch64 -cpu max`, one case per argument, for the entries fixed
@@ -245,6 +245,48 @@ description of UARTMSINTR, is asserted when a modem status line changes,
 either way, and cleared only through UARTICR. `rusty_box_aarch64` follows
 QEMU here until the TRM settles it.
 
+### 7. DC CVAP and DC CVADP fault as loads
+
+**Impact**: small. A fault on DC CVAP or DC CVADP (FEAT_DPB, FEAT_DPB2)
+reaches the guest as a load's: ESR_ELx.CM and WnR clear, and FAR_ELx the
+address rounded down to the cache line rather than the register's value.
+At EL1 with PSTATE.PAN set, one to memory EL0 can reach takes a permission
+fault, which Arm's rules never give a clean from EL1. Linux tells a cache
+maintenance fault from a write by CM (`is_write_abort()` in
+`arch/arm64/mm/fault.c`), so it handles QEMU's as a read, which is what
+it would decide anyway; a guest that keys anything else on CM, or cleans
+user memory with PAN set, sees the difference.
+
+**Location**: `target/arm/helper.c`, `dccvap_writefn()`, which calls
+`probe_read(env, vaddr, dline_size, mem_idx, GETPC())` with `vaddr` the
+register rounded down to `CTR_EL0.DminLine`'s line and `mem_idx` the
+current one (`arm_env_mmu_index()`, the PAN index under PAN).
+
+**What the Arm ARM says**: `AArch64_DC()` translates the register's value
+with `CreateAccDescDC()`, an `AccessType_DC` access whose `pan` is
+FALSE. `AArch64_S1CheckPermissions()` gives a clean (`CacheOp_Clean`) a
+permission fault only at EL0, for want of read permission ("DC from
+privileged context which clean cannot generate a Permission fault"). On a
+fault, `AArch64_DC()` sets `fault.vaddress` to the register's value, and
+`AArch64_FaultSyndrome()` sets ISS bit 8 (CM) and bit 6 (WnR) for
+`AccessType_DC`.
+
+**Reproduce**: probe cases F (DC CVAP of an unmapped `0x80000123`) and G
+(DC CVAP of memory EL0 can reach, at EL1 with PAN set).
+
+    Arm:          F 0000000096000145 0000000080000123
+    QEMU 11.1.2:  F 0000000096000005 0000000080000100
+    Arm:          G none
+    QEMU 11.1.2:  G 000000009600000d 00000000c0000100
+
+**Fix**: no patch yet. The probe needs a translation with an
+`AccessType_DC`-like access type, which QEMU's `MMUAccessType` lacks:
+one that skips the PAN index and the EL1 permission check, keeps EL0's
+read check, and makes `arm_deliver_fault()` set CM and WnR and report the
+unrounded address. `arm_deliver_fault()` (`target/arm/tcg/tlb_helper.c`)
+passes `cm = 0` to the syndrome builders on every path today; only the AT
+instructions' faults on a stage 2 walk set CM (`target/arm/tcg/cpregs-at.c`).
+
 ---
 
 ## Deliberate QEMU omissions
@@ -262,6 +304,15 @@ feature patch.
   `target/arm/tcg/helper-a64.c` zeroes it; Arm's
   `AArch64_S1HasAlignmentFaultDueToMemType()` returns TRUE for
   `AccessType_DCZero` on Device memory, an Alignment fault.
+- **Cache maintenance by address is a NOP.** `v8_cp_reginfo` in
+  `target/arm/helper.c` makes IC IVAU, DC IVAC, DC CVAC, DC CVAU and DC
+  CIVAC `ARM_CP_NOP` ("Cache ops: all NOPs since we don't emulate
+  caches"). Arm's `AArch64_IC()` and `AArch64_DC()` translate the address
+  first and abort on a fault, with CM and WnR set, and DC IVAC needs write
+  permission (`AArch64_S1CheckPermissions()`): probe cases E (DC CIVAC), H
+  (IC IVAU) and I (DC IVAC of read-only memory) fault on Arm and print
+  "none" on QEMU. A kernel's cache maintenance of a bad user address, which
+  faults on hardware and goes to its exception fixup, completes on QEMU.
 - **Should-be fields.** QEMU executes the exclusive loads and stores
   (`STXR`, `LDXR`, `STXP`, `LDXP`) with `Rs` or `Rt2` other than their
   should-be values, and FCMP/FCMPE with zero whatever `Rm` holds. Such a

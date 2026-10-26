@@ -304,24 +304,27 @@ impl Cpu {
     }
 
     /// Exclusive and acquire/release accesses:
-    /// `size 001000 o2 L o1 Rs o0 Rt2 Rn Rt`, the ARMv8.0 forms (Arm groups
-    /// `ldstexclr`, `ldstexclp` and `ldstord`). CAS and CASP share the space
-    /// and are `exec_cas` and `exec_casp`; the LORegion forms (FEAT_LOR)
-    /// are not implemented.
+    /// `size 001000 o2 L o1 Rs o0 Rt2 Rn Rt` (Arm groups `ldstexclr`,
+    /// `ldstexclp` and `ldstord`). CAS and CASP share the space and are
+    /// `exec_cas` and `exec_casp`.
     pub(crate) fn exec_ldst_exclusive<B: PhysBus>(&mut self, bus: &mut B, pc: u64, insn: u32) -> ExecResult {
         let size = bits(insn, 31, 30);
         let o2 = bit(insn, 23);
         let load = bit(insn, 22);
         let pair = bit(insn, 21);
         let rs = bits(insn, 20, 16);
-        let o0 = bit(insn, 15);
         let rt2 = bits(insn, 14, 10);
         let rn = bits(insn, 9, 5);
         let rt = bits(insn, 4, 0);
 
         if o2 {
-            // LDAR/STLR (o0 = 1). o0 = 0 is LDLAR/STLLR (LOR, absent).
-            if pair || !o0 {
+            // LDAR/STLR (o0 = 1), and LDLAR/STLLR (o0 = 0, FEAT_LOR, which
+            // the decoder admits only on a processor implementing it). The
+            // LORegion forms are acquire and release accesses as LDAR and
+            // STLR are (Arm `CreateAccDescLOR`: `acqsc`, `relsc`), ordered
+            // only within a LORegion; with one processor retiring each
+            // access before the next, both order nothing further.
+            if pair {
                 return self.undefined(pc, insn);
             }
             let address = self.base_register(rn)?;

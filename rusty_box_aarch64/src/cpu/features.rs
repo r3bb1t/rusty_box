@@ -113,6 +113,35 @@ pub(crate) enum Feature {
     Ssbs,
     /// FEAT_SSBS2: the SSBS register. No encoding of its own.
     Ssbs2,
+    /// FEAT_HPDS: TCR_EL1.HPD0 and HPD1, which turn off the hierarchical
+    /// permissions of table descriptors. No encoding of its own.
+    Hpds,
+    /// FEAT_TTCNP: TTBR0_EL1.CnP and TTBR1_EL1.CnP. No encoding of its own.
+    Ttcnp,
+    /// FEAT_E0PD: TCR_EL1.E0PD0 and E0PD1, under which an EL0 access to
+    /// that half of the address space takes a level 0 translation fault.
+    /// No encoding of its own.
+    E0pd,
+    /// FEAT_CSV3: no data loaded under speculation from a faulting access
+    /// is used, which FEAT_E0PD requires. No encoding of its own.
+    Csv3,
+    /// FEAT_TLBIOS: the Outer Shareable TLBI forms, which are SYS. No
+    /// encoding of its own.
+    TlbiOs,
+    /// FEAT_TLBIRANGE: the TLBI range forms, which are SYS. No encoding of
+    /// its own.
+    TlbiRange,
+    /// FEAT_TTL: the TTL hint of a TLBI by address. No encoding of its own.
+    Ttl,
+    /// FEAT_XS: DSB nXS, and the TLBI nXS forms, which are SYS.
+    Xs,
+    /// FEAT_DPB: DC CVAP, which is SYS. No encoding of its own.
+    Dpb,
+    /// FEAT_DPB2: DC CVADP, which is SYS. No encoding of its own.
+    Dpb2,
+    /// FEAT_LOR: LDLAR, STLLR, their byte and halfword forms, and the
+    /// LORegion registers.
+    Lor,
 }
 
 /// What the conformance tests read of a feature: `tests/unit/spec.rs`
@@ -120,7 +149,7 @@ pub(crate) enum Feature {
 #[cfg(test)]
 impl Feature {
     /// Every feature, in declaration order.
-    pub(crate) const ALL: [Feature; 37] = [
+    pub(crate) const ALL: [Feature; 48] = [
         Feature::Base,
         Feature::Fp,
         Feature::AdvSimd,
@@ -158,6 +187,17 @@ impl Feature {
         Feature::Dit,
         Feature::Ssbs,
         Feature::Ssbs2,
+        Feature::Hpds,
+        Feature::Ttcnp,
+        Feature::E0pd,
+        Feature::Csv3,
+        Feature::TlbiOs,
+        Feature::TlbiRange,
+        Feature::Ttl,
+        Feature::Xs,
+        Feature::Dpb,
+        Feature::Dpb2,
+        Feature::Lor,
     ];
 
     /// The name Arm's data gives the feature, `None` for the base set.
@@ -200,6 +240,17 @@ impl Feature {
             Self::Dit => Some("FEAT_DIT"),
             Self::Ssbs => Some("FEAT_SSBS"),
             Self::Ssbs2 => Some("FEAT_SSBS2"),
+            Self::Hpds => Some("FEAT_HPDS"),
+            Self::Ttcnp => Some("FEAT_TTCNP"),
+            Self::E0pd => Some("FEAT_E0PD"),
+            Self::Csv3 => Some("FEAT_CSV3"),
+            Self::TlbiOs => Some("FEAT_TLBIOS"),
+            Self::TlbiRange => Some("FEAT_TLBIRANGE"),
+            Self::Ttl => Some("FEAT_TTL"),
+            Self::Xs => Some("FEAT_XS"),
+            Self::Dpb => Some("FEAT_DPB"),
+            Self::Dpb2 => Some("FEAT_DPB2"),
+            Self::Lor => Some("FEAT_LOR"),
         }
     }
 
@@ -220,6 +271,15 @@ impl Feature {
                 | Self::Dit
                 | Self::Ssbs
                 | Self::Ssbs2
+                | Self::Hpds
+                | Self::Ttcnp
+                | Self::E0pd
+                | Self::Csv3
+                | Self::TlbiOs
+                | Self::TlbiRange
+                | Self::Ttl
+                | Self::Dpb
+                | Self::Dpb2
         )
     }
 

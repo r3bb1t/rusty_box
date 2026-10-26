@@ -50,3 +50,5 @@ flagm_pstate: 200 vectors from 200 encodings
 flagm_rmif: 200 vectors from 200 encodings
 flagm_setf: 200 vectors from 200 encodings
 sb: 200 vectors from 200 encodings
+lor: 200 vectors from 200 encodings
+xs_dsb: 200 vectors from 200 encodings

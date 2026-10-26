@@ -57,6 +57,7 @@ pub(crate) enum Hints {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum Barriers {
     ClrexBn,
+    DsbBon,
     DsbBo,
     DmbBo,
     IsbBi,
@@ -67,6 +68,7 @@ impl Barriers {
     pub(crate) const fn feature(self) -> Feature {
         match self {
             Self::ClrexBn | Self::DsbBo | Self::DmbBo | Self::IsbBi => Feature::Base,
+            Self::DsbBon => Feature::Xs,
             Self::Sb => Feature::Sb,
         }
     }
@@ -311,12 +313,12 @@ fn barriers(word: u32) -> Option<Barriers> {
     let op2 = bits(word, 7, 5);
     let rt = bits(word, 4, 0);
     match (crm, op2, rt) {
+        (0b0010 | 0b0110 | 0b1010 | 0b1110, 0b001, 0b11111) => Some(Barriers::DsbBon),
         (_, 0b010, 0b11111) => Some(Barriers::ClrexBn),
         (_, 0b100, 0b11111) => Some(Barriers::DsbBo),
         (_, 0b101, 0b11111) => Some(Barriers::DmbBo),
         (_, 0b110, 0b11111) => Some(Barriers::IsbBi),
         (0b0000, 0b111, 0b11111) => Some(Barriers::Sb),
-        // DSB nXS (FEAT_XS).
         _ => None,
     }
 }

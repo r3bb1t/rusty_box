@@ -531,7 +531,6 @@ impl Encoding {
             | Self::Testbranch(_)
             | Self::Ldstexclp(_)
             | Self::Ldstexclr(_)
-            | Self::Ldstord(_)
             | Self::LdstUnpriv(_)
             | Self::LogShift(_)
             | Self::AddsubShift(_)
@@ -543,6 +542,7 @@ impl Encoding {
             | Self::Dp3src(_) => Feature::Base,
             Self::Rmif(_) | Self::Setf(_) => Feature::FlagM,
             Self::Barriers(e) => e.feature(),
+            Self::Ldstord(e) => e.feature(),
             Self::Pstate(e) => e.feature(),
             Self::Hints(e) => e.feature(),
             Self::BranchReg(e) => e.feature(),
@@ -694,6 +694,17 @@ mod tests {
                     Feature::Dit => field(pfr0, 48) != 0,
                     Feature::Ssbs => field(pfr1, 4) >= 1,
                     Feature::Ssbs2 => field(pfr1, 4) >= 2,
+                    Feature::Hpds => field(mmfr1, 12) >= 1,
+                    Feature::Ttcnp => field(mmfr2, 0) != 0,
+                    Feature::E0pd => field(mmfr2, 60) != 0,
+                    Feature::Csv3 => field(pfr0, 60) != 0,
+                    Feature::TlbiOs => field(isar0, 56) >= 1,
+                    Feature::TlbiRange => field(isar0, 56) >= 2,
+                    Feature::Ttl => field(mmfr2, 48) != 0,
+                    Feature::Xs => field(isar1, 56) != 0,
+                    Feature::Dpb => field(isar1, 0) >= 1,
+                    Feature::Dpb2 => field(isar1, 0) >= 2,
+                    Feature::Lor => field(mmfr1, 16) != 0,
                 };
                 assert_eq!(advertised, imp.has(feature), "{feature:?} on {imp:?}");
             }
@@ -701,26 +712,29 @@ mod tests {
             // instruction-set feature is a nonzero field of these registers.
             let fp16 = u64::from(imp.has(Feature::Fp16));
             assert_eq!((field(pfr0, 16), field(pfr0, 20)), (fp16, fp16), "FP and AdvSIMD");
-            // PFR0: EL0 and EL1 (AArch64 only), FP, AdvSIMD and DIT; nothing
-            // else.
-            assert_eq!(pfr0 & !((0xFF << 16) | (0xF << 48)), 0x11);
+            // PFR0: EL0 and EL1 (AArch64 only), FP, AdvSIMD, DIT and CSV3;
+            // nothing else.
+            assert_eq!(pfr0 & !((0xFF << 16) | (0xF << 48) | (0xF << 60)), 0x11);
             // ID_AA64ISAR0_EL1: AES = 2 (AES and the 64-bit PMULL), SHA1 =
             // 1, SHA2 = 1 (SHA-256, not SHA-512), CRC32 = 1, Atomic = 2 with
-            // FEAT_LSE, RDM = 1, DP = 1, FHM = 1 and TS; nothing else. ISAR1
-            // holds APA, JSCVT, FCMA, LRCPC, GPA, FRINTTS, SB, BF16 = 1 (no
-            // FEAT_EBF16) and I8MM alone (no API or GPI: no IMPLEMENTATION
-            // DEFINED algorithm, and APA is never 2, FEAT_EPAC), MMFR1 PAN
-            // alone, MMFR2 UAO and AT alone.
+            // FEAT_LSE, RDM = 1, DP = 1, FHM = 1, TS and TLB; nothing else.
+            // ISAR1 holds DPB, APA, JSCVT, FCMA, LRCPC, GPA, FRINTTS, SB,
+            // BF16 = 1 (no FEAT_EBF16), I8MM and XS alone (no API or GPI: no
+            // IMPLEMENTATION DEFINED algorithm, and APA is never 2,
+            // FEAT_EPAC), MMFR1 HPDS = 1 (no FEAT_HPDS2), LO and PAN alone,
+            // MMFR2 CnP, UAO, AT, TTL and E0PD alone.
             let at = |feature: Feature, lsb: u32, value: u64| if imp.has(feature) { value << lsb } else { 0 };
             let isar0_later =
                 at(Feature::Lse, 20, 2) | at(Feature::Rdm, 28, 1) | at(Feature::DotProd, 44, 1) | at(Feature::Fhm, 48, 1);
-            assert_eq!(isar0 & !(0xF << 52), 0x0000_0000_0001_1120 | isar0_later);
-            let isar1_fields = [4, 12, 16, 20, 24, 32, 36, 44, 52].into_iter().fold(0, |acc, lsb| acc | (0xF << lsb));
+            assert_eq!(isar0 & !((0xF << 52) | (0xF << 56)), 0x0000_0000_0001_1120 | isar0_later);
+            let isar1_fields =
+                [0, 4, 12, 16, 20, 24, 32, 36, 44, 52, 56].into_iter().fold(0, |acc, lsb| acc | (0xF << lsb));
             assert_eq!(isar1 & !isar1_fields, 0);
             assert_ne!(field(isar1, 4), 2, "APA = 2 is FEAT_EPAC, which FEAT_PAuth2 excludes");
             assert!(field(isar1, 44) <= 1, "BF16 = 1: FEAT_BF16, not FEAT_EBF16");
-            assert_eq!(mmfr1 & !(0xF << 20), 0);
-            assert_eq!(mmfr2 & !((0xF << 32) | (0xF << 4)), 0);
+            assert!(field(mmfr1, 12) <= 1, "HPDS = 1: FEAT_HPDS, not FEAT_HPDS2");
+            assert_eq!(mmfr1 & !((0xF << 12) | (0xF << 16) | (0xF << 20)), 0);
+            assert_eq!(mmfr2 & !(0xF | (0xF << 4) | (0xF << 32) | (0xF << 48) | (0xF << 60)), 0);
             assert_eq!((isar2, isar3), (0, 0));
             // No SVE2 (SVEver = 0, with FEAT_SME as without); with FEAT_SME,
             // BF16 and I8MM report FEAT_BF16 and FEAT_I8MM as ISAR1 does.
