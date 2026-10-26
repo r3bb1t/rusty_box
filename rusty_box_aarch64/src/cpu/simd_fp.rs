@@ -5,8 +5,11 @@
 //! `FpEnv` per instruction, so each lane's exceptions accumulate into FPSR.
 //!
 //! As in `simd_arith`, a scalar form is the vector operation on one element,
-//! and building results up from zero gives the zeroed upper bits. A vector
-//! of doubles needs `Q = 1`.
+//! and building results up from zero gives the zeroed upper bits — or,
+//! under FPCR.NEP (FEAT_AFP), those of the source register each scalar
+//! form's page names (`Cpu::fp_set_merging`); the pairwise, across-lanes
+//! and compare-with-zero forms zero them whatever FPCR.NEP is. A vector of
+//! doubles needs `Q = 1`.
 
 use super::exec::{bit, bits, ExecResult, Flow};
 use super::features::Feature;
@@ -140,7 +143,17 @@ impl Cpu {
             set_elem(&mut r, e, esize, value);
         }
         self.fp_commit(&env);
-        self.write_v(rd, r);
+        if scalar {
+            // `elements == 1 && IsMerging(FPCR())`: the compares merge
+            // into Vm, FABD, FMULX, FRECPS and FRSQRTS into Vn.
+            let merge = match op {
+                Op::Compare(_) => bits(insn, 20, 16),
+                Op::Binary(_) | Op::Fused(_) | Op::Pairwise(_) => bits(insn, 9, 5),
+            };
+            self.fp_set_merging(rd as u32, merge, ty.mask(), r as u64);
+        } else {
+            self.write_v(rd, r);
+        }
         Ok(Flow::Next)
     }
 
@@ -359,7 +372,15 @@ impl Cpu {
             }
         }
         self.fp_commit(&env);
-        self.write_v(rd, r);
+        match op {
+            // The compares with zero clear the rest of the register whatever
+            // FPCR.NEP is; the estimates, FCVTXN and the conversions merge
+            // into Vd (`elements == 1 && IsMerging(FPCR())`).
+            Op::Each(Each::Zero(_)) => self.write_v(rd, r),
+            Op::NarrowOdd if scalar => self.fp_set_merging(rd as u32, rd as u32, 0xFFFF_FFFF, r as u64),
+            Op::Each(_) if scalar => self.fp_set_merging(rd as u32, rd as u32, ty.mask(), r as u64),
+            Op::Each(_) | Op::Narrow | Op::NarrowOdd | Op::NarrowBf16 | Op::Long => self.write_v(rd, r),
+        }
         Ok(Flow::Next)
     }
 
@@ -411,7 +432,11 @@ impl Cpu {
             set_elem(&mut r, e, esize, v);
         }
         self.fp_commit(&env);
-        self.write_v(rd, r);
+        if scalar {
+            self.fp_set_merging(rd as u32, rd as u32, ty.mask(), r as u64);
+        } else {
+            self.write_v(rd, r);
+        }
         Ok(Flow::Next)
     }
 
@@ -470,7 +495,16 @@ impl Cpu {
             set_elem(&mut r, e, esize, v);
         }
         self.fp_commit(&env);
-        self.write_v(rd, r);
+        if scalar {
+            // FMLA and FMLS merge into Vd, FMUL and FMULX into Vn.
+            let merge = match op {
+                Op::Fused(_) => rd as u32,
+                Op::Binary(_) => bits(insn, 9, 5),
+            };
+            self.fp_set_merging(rd as u32, merge, ty.mask(), r as u64);
+        } else {
+            self.write_v(rd, r);
+        }
         Ok(Flow::Next)
     }
 

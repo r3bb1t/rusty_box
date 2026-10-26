@@ -17,13 +17,14 @@ dropped, and so is one QEMU itself aborts on; the harness restarts after
 it.
 
 QEMU's max implements features this core does not, in the encoding space
-of three families: FEAT_FPRCVT's conversions between half precision and a
+of some families: FEAT_FPRCVT's conversions between half precision and a
 SIMD&FP register (`fp16_int`), FEAT_FAMINMAX's FAMAX and FAMIN and
-FEAT_FP8's FSCALE (`fp16_same`), and FEAT_FP8DOT4's FDOT and FEAT_FP8FMA's
-FMLALL by element (`fp16_elem`). Those families' fixups turn such a word
-into an instruction this core has. QEMU 8.2.2 gets instructions of five
-families wrong against the Arm ARM's pseudocode, which 11.1.2 gets right
-(docs/qemu-upstream-bugs.md lists them).
+FEAT_FP8's FSCALE (`fp16_same`, `simd_same_fp_afp`), FEAT_FP8DOT4's FDOT
+and FEAT_FP8FMA's FMLALL by element (`fp16_elem`), and FEAT_FP8's F1CVTL,
+F2CVTL, BF1CVTL and BF2CVTL (`simd_misc_fp_afp`). Those families' fixups
+turn such a word into an instruction this core has. QEMU 8.2.2 gets
+instructions of five families wrong against the Arm ARM's pseudocode,
+which 11.1.2 gets right (docs/qemu-upstream-bugs.md lists them).
 
 The program runs at EL0 with the MMU on, over Normal memory: families keep
 every access aligned (the replay runs at EL1 with the MMU off, over Device
@@ -33,7 +34,11 @@ appended, never reordered, as in gen_unicorn.py.
 
 Needs an AArch64 Linux C compiler that links statically (CC, default
 aarch64-linux-gnu-gcc) and QEMU's user-mode emulator (QEMU, default
-qemu-aarch64). The vectors in the tree were made with QEMU 11.1.2.
+qemu-aarch64). The vectors in the tree were made with QEMU 11.1.2 with
+docs/qemu-afp-vector-fabs-fneg.patch applied: QEMU's vector FABS and FNEG
+ignore FPCR.AH, and the `_afp` families set it (docs/qemu-upstream-bugs.md);
+the patch changes nothing with FPCR.AH = 0, so every other family is as
+QEMU 11.1.2 makes it.
 
 Usage: python3 -I gen_qemu.py OUT_FILE [CASES_PER_FAMILY]
 """
@@ -46,7 +51,18 @@ import tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
-from gen_unicorn import CODE, DATA_SIZE, MASK64, SplitMix64, initial_state, vector_line  # noqa: E402
+from gen_unicorn import (  # noqa: E402
+    CODE,
+    DATA_SIZE,
+    MASK64,
+    SplitMix64,
+    fp_across_opcode,
+    fp_elem_opcode,
+    fp_immh,
+    fp_pair_opcode,
+    initial_state,
+    vector_line,
+)
 
 MASK128 = (1 << 128) - 1
 # A record as qemu_harness.c lays it out: a 16-byte header (the word or the
@@ -94,12 +110,23 @@ def without_fprcvt(w):
 
 
 def without_faminmax_fscale(w):
-    """Three-same half precision: FAMAX and FAMIN (FEAT_FAMINMAX, `a = 1`,
-    opcode 011) become FMULX and FMUL, FSCALE (FEAT_FP8, `U = 1`, `a = 1`,
-    opcode 111) becomes FDIV (`a = 0`)."""
+    """Three-same floating point, half, single or double precision: FAMAX
+    and FAMIN (FEAT_FAMINMAX, `a = 1`, opcode 011) become FMULX and FMUL,
+    FSCALE (FEAT_FP8, `U = 1`, `a = 1`, opcode 111) becomes FDIV (`a = 0`).
+    The `a` bit (23) and the opcode (13:11) are where they are for every
+    precision."""
     opcode = w >> 11 & 7
     if w >> 23 & 1 and (opcode == 0b011 or (w >> 29 & 1 and opcode == 0b111)):
         return w & ~(1 << 23)
+    return w
+
+
+def without_fp8_cvtl(w):
+    """Two-register miscellaneous at `U = 1`, opcode 10111: F1CVTL, F2CVTL,
+    BF1CVTL and BF2CVTL (FEAT_FP8) become opcode 10110, FCVTXN (or
+    unallocated, at `sz = 0` or `a = 1`)."""
+    if w >> 29 & 1 and w >> 12 & 0x1F == 0b10111:
+        return w & ~(1 << 12)
     return w
 
 
@@ -206,6 +233,63 @@ FAMILIES = [
     ("lor", "M", 0x089F7C00, 0xC04003FF, None),
     # FEAT_XS: DSB nXS.
     ("xs_dsb", "D", 0xD503323F, 0x00000C00, None),
+    # FEAT_AFP and FEAT_RPRES: the floating-point families of single and
+    # double precision (gen_unicorn.py's, and this file's FCMA, JSCVT,
+    # FRINTTS and BFCVT ones), of half precision and of BFloat16 again,
+    # under FPCR.FIZ, AH and NEP at random (kinds FA, HA and BA).
+    ("fp_dp1_afp", "FA", 0x1E204000, 0x00DF83FF, None),
+    ("fp_dp2_afp", "FA", 0x1E200800, 0x00DFF3FF, None),
+    ("fp_dp3_afp", "FA", 0x1F000000, 0x00FFFFFF, None),
+    ("fp_cmp_afp", "FA", 0x1E202000, 0x00DF03F8, fcmp_zero_rm),
+    ("fp_ccmp_afp", "FA", 0x1E200400, 0x00DFF3FF, None),
+    ("fp_csel_afp", "FA", 0x1E200C00, 0x00DFF3FF, None),
+    ("fp_to_int_afp", "FA", 0x1E200000, 0x80DF03FF, without_fprcvt),
+    ("fp_to_fixed_afp", "FA", 0x1E000000, 0x80DFFFFF, None),
+    ("fp_cvt_precision_afp", "FA", 0x1E224000, 0x00C183FF, None),
+    ("simd_same_fp_afp", "FA", 0x0E20C400, 0x60DF3BFF, without_faminmax_fscale),
+    ("simd_misc_fp_afp", "FA", 0x0E210800, 0x60C0F3FF, without_fp8_cvtl),
+    ("simd_misc_fpcmp_afp", "FA", 0x0EA0C800, 0x604033FF, None),
+    ("simd_shift_fixed_afp", "FA", 0x0F00E400, 0x607F1BFF, fp_immh),
+    ("simd_elem_fp_afp", "FA", 0x0F000000, 0x60FFFBFF, fp_elem_opcode),
+    ("simd_across_fp_afp", "FA", 0x2E300800, 0x40C013FF, fp_across_opcode),
+    ("scalar_same_fp_afp", "FA", 0x5E20C400, 0x20DF3BFF, None),
+    ("scalar_misc_fp_afp", "FA", 0x5E210800, 0x20C0F3FF, None),
+    ("scalar_misc_fpcmp_afp", "FA", 0x5EA0C800, 0x204033FF, None),
+    ("scalar_shift_fixed_afp", "FA", 0x5F00E400, 0x207F1BFF, fp_immh),
+    ("scalar_elem_fp_afp", "FA", 0x5F000000, 0x20FFFBFF, fp_elem_opcode),
+    ("scalar_pair_fp_afp", "FA", 0x7E300800, 0x00C013FF, fp_pair_opcode),
+    ("fcma_vector_afp", "FA", 0x2E80C400, 0x405F3BFF, fcadd_opcode),
+    ("fcma_elem_afp", "FA", 0x2F801000, 0x403F6BFF, None),
+    ("jscvt_afp", "FA", 0x1E7E0000, 0x000003FF, None),
+    ("frintts_scalar_afp", "FA", 0x1E284000, 0x004183FF, None),
+    ("frintts_vector_afp", "FA", 0x0E21E800, 0x604013FF, None),
+    ("bf16_cvt_afp", "FA", 0x1E634000, 0x000003FF, None),
+    ("bf16_cvtn_afp", "FA", 0x0EA16800, 0x400003FF, None),
+    ("fp16_dp1_afp", "HA", 0x1EE04000, 0x001F83FF, None),
+    ("fp16_dp2_afp", "HA", 0x1EE00800, 0x001FF3FF, None),
+    ("fp16_dp3_afp", "HA", 0x1FC00000, 0x003FFFFF, None),
+    ("fp16_cmp_afp", "HA", 0x1EE02000, 0x001F03F8, fcmp_zero_rm),
+    ("fp16_int_afp", "HA", 0x1EE00000, 0x801F03FF, without_fprcvt),
+    ("fp16_fixed_afp", "HA", 0x1EC00000, 0x801FFFFF, None),
+    ("fp16_same_afp", "HA", 0x0E400400, 0x609F3BFF, without_faminmax_fscale),
+    ("fp16_scalar_same_afp", "HA", 0x5E400400, 0x209F3BFF, None),
+    ("fp16_misc_afp", "HA", 0x0E780800, 0x6081F3FF, None),
+    ("fp16_scalar_misc_afp", "HA", 0x5E780800, 0x2081F3FF, None),
+    ("fp16_elem_afp", "HA", 0x0F000000, 0x603FFBFF, without_fp8_elem),
+    ("fp16_scalar_elem_afp", "HA", 0x5F000000, 0x203FFBFF, None),
+    ("fp16_across_afp", "HA", 0x0E300800, 0x4081F3FF, None),
+    ("fp16_pair_afp", "HA", 0x5E300800, 0x0081F3FF, None),
+    ("fp16_shift_fixed_afp", "HA", 0x0F10E400, 0x600F1BFF, None),
+    ("fp16_scalar_shift_fixed_afp", "HA", 0x5F10E400, 0x200F1BFF, None),
+    ("fhm_vector_afp", "HA", 0x0E20CC00, 0x60BF23FF, None),
+    ("fhm_elem_afp", "HA", 0x0F800000, 0x603FCBFF, None),
+    ("fcma_vector_half_afp", "HA", 0x2E40C400, 0x401F3BFF, fcadd_opcode),
+    ("fcma_elem_half_afp", "HA", 0x2F401000, 0x403F6BFF, None),
+    ("bf16_dot_afp", "BA", 0x2E40FC00, 0x401F03FF, None),
+    ("bf16_dot_elem_afp", "BA", 0x0F40F000, 0x403F0BFF, None),
+    ("bf16_mlal_afp", "BA", 0x2EC0FC00, 0x401F03FF, None),
+    ("bf16_mlal_elem_afp", "BA", 0x0FC0F000, 0x403F0BFF, None),
+    ("bf16_mmla_afp", "BA", 0x6E40EC00, 0x001F03FF, None),
 ]
 
 
@@ -309,7 +393,7 @@ def main():
     with tempfile.TemporaryDirectory() as workdir:
         harness = Harness(workdir)
         for name, kind, base, mask, fixup in FAMILIES:
-            wanted = per_family * (3 if kind == "F" else 1)
+            wanted = per_family * (3 if kind in ("F", "FA") else 1)
             kept = 0
             attempts = 0
             while kept < wanted and attempts < wanted * 20:

@@ -19,15 +19,15 @@ mod activity_tag {
 }
 
 /// `FPCR` bits a processor implementing `imp` keeps: AHP, DN, FZ and RMode,
-/// and FZ16 with FEAT_FP16 (RES0 without it). The trap enables read as zero
-/// on a core without trapped floating-point exceptions.
+/// FZ16 with FEAT_FP16, and FIZ, AH and NEP with FEAT_AFP (RES0 without
+/// them). The trap enables read as zero on a core without trapped
+/// floating-point exceptions.
 pub(crate) const fn fpcr_mask(imp: Implementation) -> u64 {
+    use crate::softfloat::{FPCR_AH, FPCR_FIZ, FPCR_FZ16, FPCR_NEP};
     const BASE: u64 = 0x07C0_0000;
-    if imp.has(Feature::Fp16) {
-        BASE | crate::softfloat::FPCR_FZ16
-    } else {
-        BASE
-    }
+    let fp16 = if imp.has(Feature::Fp16) { FPCR_FZ16 } else { 0 };
+    let afp = if imp.has(Feature::Afp) { FPCR_FIZ | FPCR_AH | FPCR_NEP } else { 0 };
+    BASE | fp16 | afp
 }
 
 /// `FPSR` bits this core keeps: N, Z, C, V, QC and the cumulative exception

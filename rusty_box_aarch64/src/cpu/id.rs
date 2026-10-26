@@ -169,9 +169,9 @@ pub(crate) const fn id_aa64isar1(features: Features) -> u64 {
 
 /// `ID_AA64ISAR2_EL1` of a processor implementing `features`: WFxT (3:0) =
 /// 2 with FEAT_WFxT (`Features.json`: `FEAT_WFxT <=> UInt(WFxT) >= 2`; 1 is
-/// reserved); nothing else from v8.7+.
+/// reserved), RPRES (7:4) = 1 with FEAT_RPRES; nothing else from v8.7+.
 pub(crate) const fn id_aa64isar2(features: Features) -> u64 {
-    field(features, Feature::WfxT, 0, 2)
+    field(features, Feature::WfxT, 0, 2) | field(features, Feature::Rpres, 4, 1)
 }
 
 /// `ID_AA64ZFR0_EL1` of a processor implementing `features`: SVEver = 0
@@ -193,13 +193,15 @@ pub(crate) const fn id_aa64zfr0(features: Features) -> u64 {
 
 /// `ID_AA64MMFR1_EL1` of a processor implementing `features`: HPDS (15:12)
 /// = 1 with FEAT_HPDS (2 would be FEAT_HPDS2), LO (19:16) = 1 with
-/// FEAT_LOR, and PAN (23:20) names the newest of FEAT_PAN (1), FEAT_PAN2
-/// (2) and FEAT_PAN3 (3) the processor implements, each of which
-/// `Features.json` makes imply the one before; nothing else from v8.1+.
+/// FEAT_LOR, PAN (23:20) names the newest of FEAT_PAN (1), FEAT_PAN2 (2)
+/// and FEAT_PAN3 (3) the processor implements, each of which
+/// `Features.json` makes imply the one before, and AFP (47:44) = 1 with
+/// FEAT_AFP; nothing else from v8.1+.
 pub(crate) const fn id_aa64mmfr1(features: Features) -> u64 {
     field(features, Feature::Hpds, 12, 1)
         | field(features, Feature::Lor, 16, 1)
         | (chain_level(features, &[Feature::Pan, Feature::Pan2, Feature::Pan3]) << 20)
+        | field(features, Feature::Afp, 44, 1)
 }
 
 /// `ID_AA64MMFR2_EL1` of a processor implementing `features`: CnP (3:0) = 1

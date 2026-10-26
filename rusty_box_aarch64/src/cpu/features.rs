@@ -179,6 +179,13 @@ pub(crate) enum Feature {
     /// FEAT_Debugv8p4: `DebugVer` 9, and non-invasive debug always enabled
     /// (`DBGAUTHSTATUS_EL1.NSNID`). No encoding of its own.
     Debugv8p4,
+    /// FEAT_AFP: FPCR.FIZ, FPCR.AH (Arm's alternate floating-point
+    /// behaviours) and FPCR.NEP (scalar results merged into a source
+    /// register). No encoding of its own.
+    Afp,
+    /// FEAT_RPRES: 12-bit single-precision FRECPE and FRSQRTE estimates
+    /// under FPCR.AH = 1. No encoding of its own.
+    Rpres,
 }
 
 /// What the conformance tests read of a feature: `tests/unit/spec.rs`
@@ -186,7 +193,7 @@ pub(crate) enum Feature {
 #[cfg(test)]
 impl Feature {
     /// Every feature, in declaration order.
-    pub(crate) const ALL: [Feature; 59] = [
+    pub(crate) const ALL: [Feature; 61] = [
         Feature::Base,
         Feature::Fp,
         Feature::AdvSimd,
@@ -246,6 +253,8 @@ impl Feature {
         Feature::Debugv8p1,
         Feature::Debugv8p2,
         Feature::Debugv8p4,
+        Feature::Afp,
+        Feature::Rpres,
     ];
 
     /// The name Arm's data gives the feature, `None` for the base set.
@@ -310,6 +319,8 @@ impl Feature {
             Self::Debugv8p1 => Some("FEAT_Debugv8p1"),
             Self::Debugv8p2 => Some("FEAT_Debugv8p2"),
             Self::Debugv8p4 => Some("FEAT_Debugv8p4"),
+            Self::Afp => Some("FEAT_AFP"),
+            Self::Rpres => Some("FEAT_RPRES"),
         }
     }
 
@@ -348,6 +359,8 @@ impl Feature {
                 | Self::Debugv8p1
                 | Self::Debugv8p2
                 | Self::Debugv8p4
+                | Self::Afp
+                | Self::Rpres
         )
     }
 

@@ -25,7 +25,7 @@ pub(crate) fn f32_div(a: Float32, b: Float32, status: &mut SoftFloatStatus) -> F
             }
             // invalid: inf/inf
             softfloat_raise_flags(status, FLAG_INVALID);
-            return FLOAT32_DEFAULT_NAN;
+            return float32_default_nan(status);
         }
         if sig_b != 0 && exp_b == 0 {
             softfloat_raise_flags(status, FLAG_DENORMAL);
@@ -47,7 +47,7 @@ pub(crate) fn f32_div(a: Float32, b: Float32, status: &mut SoftFloatStatus) -> F
             if exp_a == 0 && sig_a == 0 {
                 // 0/0 invalid
                 softfloat_raise_flags(status, FLAG_INVALID);
-                return FLOAT32_DEFAULT_NAN;
+                return float32_default_nan(status);
             }
             softfloat_raise_flags(status, FLAG_INFINITE); // divide-by-zero
             return pack_to_f32(sign_z, 0xFF, 0);

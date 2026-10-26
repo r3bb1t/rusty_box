@@ -128,7 +128,7 @@ fn idst_traps_the_reads_of_the_id_space_that_would_be_undefined() {
         assert_eq!(exec(&mut cpu, MRS_S3_0_C0_C3_7), None);
         assert_eq!(cpu.x[0], 0, "a reserved ID register is RAZ at EL1");
         assert_eq!(exec(&mut cpu, MRS_ID_AA64ISAR2), None);
-        assert_eq!(cpu.x[0], if imp.has(Feature::WfxT) { 2 } else { 0 }, "ISAR2.WFxT");
+        assert_eq!(cpu.x[0] & 0xF, if imp.has(Feature::WfxT) { 2 } else { 0 }, "ISAR2.WFxT");
         assert_eq!(exec(&mut cpu, MSR_MIDR), Some(UNDEFINED), "IDST {idst}: writes are not trapped");
 
         at_el0(&mut cpu);

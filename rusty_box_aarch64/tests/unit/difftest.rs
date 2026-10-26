@@ -183,7 +183,7 @@ fn initial_state(seed: u64, kind: &str, insn: u32) -> State {
         }
     }
     let mut fpcr = 0;
-    if kind == "F" {
+    if kind == "F" || kind == "FA" {
         for slot in v.iter_mut() {
             let sel = r.next() & 7;
             if sel >= 2 {
@@ -208,7 +208,7 @@ fn initial_state(seed: u64, kind: &str, insn: u32) -> State {
         }
         fpcr = (r.next() & 0x1F) << 22;
     }
-    if kind == "H" {
+    if kind == "H" || kind == "HA" {
         for slot in v.iter_mut() {
             let sel = r.next() & 7;
             if sel >= 2 {
@@ -233,7 +233,7 @@ fn initial_state(seed: u64, kind: &str, insn: u32) -> State {
         }
         fpcr = ((r.next() & 0x1F) << 22) | ((r.next() & 1) << 19);
     }
-    if kind == "B" {
+    if kind == "B" || kind == "BA" {
         for slot in v.iter_mut() {
             let sel = r.next() & 7;
             if sel >= 2 {
@@ -257,6 +257,10 @@ fn initial_state(seed: u64, kind: &str, insn: u32) -> State {
             }
         }
         fpcr = (r.next() & 0x1F) << 22;
+    }
+    if matches!(kind, "FA" | "HA" | "BA") {
+        // FEAT_AFP's FPCR.FIZ, AH and NEP at random too.
+        fpcr |= r.next() & 0x7;
     }
     let rn = ((insn >> 5) & 31) as usize;
     if kind == "T" && rn != 31 {

@@ -1,15 +1,18 @@
 // User-mode probe for the QEMU AArch64 bugs docs/qemu-upstream-bugs.md lists
-// as fixed upstream since QEMU 8.2.2. Each case prints one line: what the
-// instruction did, and what the Arm ARM's pseudocode says it must do.
+// as fixed upstream since QEMU 8.2.2, and for the open ones a Linux program
+// reaches. Each case prints one line: what the instruction did, and what the
+// Arm ARM's pseudocode says it must do.
 //
 //   aarch64-linux-gnu-gcc -O1 -static -march=armv8.4-a+fp16+fp16fml \
 //       -o qemu-aarch64-probe-user qemu-aarch64-probe-user.c
 //   qemu-aarch64 -cpu max ./qemu-aarch64-probe-user <case>
 //
 // Cases: ldapur fcvtzs_half fcmla_elem_q0 fjcvtzs_fz fabs_scalar_half
-// misc_fp16_abort. On QEMU 8.2.2 the first four print DIFFERS and the last
-// two abort QEMU (scalar FABS's word, 0x5ef8f820, aborts; FNEG's,
-// 0x7ef8f820, executes); on 11.1.2 every case agrees with Arm.
+// misc_fp16_abort, fixed: on QEMU 8.2.2 the first four print DIFFERS and the
+// last two abort QEMU (scalar FABS's word, 0x5ef8f820, aborts; FNEG's,
+// 0x7ef8f820, executes); on 11.1.2 every one agrees with Arm. Open:
+// fneg_vector_ah (entry 12), which prints DIFFERS on 11.1.2 and agrees with
+// docs/qemu-afp-vector-fabs-fneg.patch.
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -92,6 +95,23 @@ static void misc_fp16_abort(void) {
     printf("0x4ef9fabd executed (Arm: UNDEFINED)\n");
 }
 
+// FNEG and FABS (vector) under FPCR.AH = 1 (FEAT_AFP): Arm's FPNeg() and
+// FPAbs() leave a NaN unchanged, as the scalar forms do.
+static void fneg_vector_ah(void) {
+    uint32_t neg, neg_scalar, abs;
+    fpcr_set(1 << 1); /* FPCR.AH */
+    __asm__ volatile(
+        "movz w1, #0x0001\n movk w1, #0x7fc0, lsl #16\n dup v1.4s, w1\n"
+        "fneg v2.4s, v1.4s\n fneg s3, s1\n umov %w0, v2.s[0]\n umov %w1, v3.s[0]\n"
+        "movz w1, #0x0001\n movk w1, #0xffc0, lsl #16\n dup v4.4s, w1\n"
+        "fabs v5.4s, v4.4s\n umov %w2, v5.s[0]"
+        : "=r"(neg), "=r"(neg_scalar), "=r"(abs) : : "x1", "v1", "v2", "v3", "v4", "v5");
+    fpcr_set(0);
+    printf("under FPCR.AH: fneg v2.4s of 0x7fc00001 = %#x, fabs v5.4s of 0xffc00001 = %#x: %s"
+           " (Arm: unchanged, as scalar fneg s3 = %#x)\n",
+           neg, abs, neg == 0x7fc00001 && abs == 0xffc00001 ? "agrees" : "DIFFERS", neg_scalar);
+}
+
 int main(int argc, char **argv) {
     const char *c = argc > 1 ? argv[1] : "";
     if (!strcmp(c, "ldapur")) ldapur();
@@ -100,6 +120,11 @@ int main(int argc, char **argv) {
     else if (!strcmp(c, "fjcvtzs_fz")) fjcvtzs_fz();
     else if (!strcmp(c, "fabs_scalar_half")) fabs_scalar_half();
     else if (!strcmp(c, "misc_fp16_abort")) misc_fp16_abort();
-    else { fprintf(stderr, "cases: ldapur fcvtzs_half fcmla_elem_q0 fjcvtzs_fz fabs_scalar_half misc_fp16_abort\n"); return 2; }
+    else if (!strcmp(c, "fneg_vector_ah")) fneg_vector_ah();
+    else {
+        fprintf(stderr, "cases: ldapur fcvtzs_half fcmla_elem_q0 fjcvtzs_fz fabs_scalar_half misc_fp16_abort"
+                        " fneg_vector_ah\n");
+        return 2;
+    }
     return 0;
 }

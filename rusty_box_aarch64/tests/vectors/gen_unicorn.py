@@ -91,7 +91,7 @@ def initial_state(seed, kind, insn):
             if sel == 1:
                 v[i] = (v[i] & LOW_NIBBLES) | ((signs & ONE_PER_BYTE) * 0xF0)
     fpcr = 0
-    if kind == "F":
+    if kind in ("F", "FA"):
         # Floating-point inputs: per register, random bits, or lanes of
         # special and ordinary single or double values; then a random FPCR
         # (RMode, FZ, DN, AHP).
@@ -113,7 +113,7 @@ def initial_state(seed, kind, insn):
                 width = 32 if single else 64
                 v[i] = sum(lane << (width * k) for k, lane in enumerate(lanes))
         fpcr = (r.next() & 0x1F) << 22
-    if kind == "H":
+    if kind in ("H", "HA"):
         # Half-precision inputs (FEAT_FP16, FEAT_FHM): per register, random
         # bits, lanes of special and ordinary half values, or of single
         # values (FMLAL's accumulators); then a random FPCR (RMode, FZ, DN,
@@ -136,7 +136,7 @@ def initial_state(seed, kind, insn):
                 width = 16 if half else 32
                 v[i] = sum(lane << (width * k) for k, lane in enumerate(lanes))
         fpcr = ((r.next() & 0x1F) << 22) | ((r.next() & 1) << 19)
-    if kind == "B":
+    if kind in ("B", "BA"):
         # BFloat16 inputs (FEAT_BF16): per register, random bits, lanes of
         # special and ordinary BFloat16 values, or of single values (the
         # accumulators); then a random FPCR (RMode, FZ, DN, AHP).
@@ -158,6 +158,9 @@ def initial_state(seed, kind, insn):
                 width = 16 if bf16 else 32
                 v[i] = sum(lane << (width * k) for k, lane in enumerate(lanes))
         fpcr = (r.next() & 0x1F) << 22
+    if kind in ("FA", "HA", "BA"):
+        # The same inputs with FEAT_AFP's FPCR.FIZ, AH and NEP at random.
+        fpcr |= r.next() & 0x7
     if kind == "T":
         rn = (insn >> 5) & 31
         if rn != 31:

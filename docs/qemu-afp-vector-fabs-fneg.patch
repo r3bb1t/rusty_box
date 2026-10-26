@@ -1,0 +1,59 @@
+--- a/target/arm/tcg/translate-a64.c
++++ b/target/arm/tcg/translate-a64.c
+@@ -10610,20 +10610,52 @@
+     return true;
+ }
+ 
+-static bool do_fabs_fneg_v(DisasContext *s, arg_qrr_e *a, GVecGen2Fn *fn)
++static bool do_fabs_fneg_v(DisasContext *s, arg_qrr_e *a, GVecGen2Fn *fn,
++                           const FPScalar1Int *ah_fn)
+ {
+     int check = fp_access_check_vector_hsd(s, a->q, a->esz);
++    int elements = (a->q ? 16 : 8) >> a->esz;
+ 
+     if (check <= 0) {
+         return check == 0;
+     }
+ 
+-    gen_gvec_fn2(s, a->q, a->rd, a->rn, fn, a->esz);
++    if (!s->fpcr_ah) {
++        gen_gvec_fn2(s, a->q, a->rd, a->rn, fn, a->esz);
++        return true;
++    }
++
++    /*
++     * With FPCR.AH = 1, FPAbs() and FPNeg() leave a NaN unchanged, as
++     * the scalar FABS and FNEG (f_scalar_ah_fabs, f_scalar_ah_fneg) do.
++     */
++    if (a->esz == MO_64) {
++        TCGv_i64 t = tcg_temp_new_i64();
++
++        for (int i = 0; i < elements; i++) {
++            read_vec_element(s, t, a->rn, i, MO_64);
++            ah_fn->gen_d(t, t);
++            write_vec_element(s, t, a->rd, i, MO_64);
++        }
++    } else {
++        TCGv_i32 t = tcg_temp_new_i32();
++
++        for (int i = 0; i < elements; i++) {
++            read_vec_element_i32(s, t, a->rn, i, a->esz);
++            if (a->esz == MO_16) {
++                ah_fn->gen_h(t, t);
++            } else {
++                ah_fn->gen_s(t, t);
++            }
++            write_vec_element_i32(s, t, a->rd, i, a->esz);
++        }
++    }
++    clear_vec_high(s, a->q, a->rd);
+     return true;
+ }
+ 
+-TRANS(FABS_v, do_fabs_fneg_v, a, gen_gvec_fabs)
+-TRANS(FNEG_v, do_fabs_fneg_v, a, gen_gvec_fneg)
++TRANS(FABS_v, do_fabs_fneg_v, a, gen_gvec_fabs, &f_scalar_ah_fabs)
++TRANS(FNEG_v, do_fabs_fneg_v, a, gen_gvec_fneg, &f_scalar_ah_fneg)
+ 
+ static bool do_fp1_vector(DisasContext *s, arg_qrr_e *a,
+                           const FPScalar1 *f, int rmode)

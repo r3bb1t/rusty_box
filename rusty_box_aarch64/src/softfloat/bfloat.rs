@@ -9,16 +9,19 @@
 //! exception. Round to odd is round toward zero with the lowest bit set
 //! where that lost anything, so each is a single-precision operation in
 //! round toward zero with flush to zero and the default NaN, on a status of
-//! its own, with its overflow and its inexact result corrected.
+//! its own, with its overflow and its inexact result corrected. Of FPCR,
+//! they read FPCR.AH alone: it is the default NaN's sign (FPDefaultNaN).
 //!
 //! BFCVT and BFCVTN (Arm FPConvertBF) round a single-precision value to
 //! BFloat16 under FPCR, as any FPRound does, with BFloat16's 7 fraction
-//! bits in single precision's exponent range.
+//! bits in single precision's exponent range — under FPCR.AH = 1 with every
+//! denormal flushed, rounding to nearest and no exception.
 
 use super::softfloat::{
-    softfloat_raise_flags, SoftFloatStatus, FLAG_INEXACT, FLAG_INVALID, FLAG_OVERFLOW, FLAG_UNDERFLOW, ROUND_MINMAG,
+    softfloat_raise_flags, Handling, SoftFloatStatus, FLAG_INEXACT, FLAG_INVALID, FLAG_OVERFLOW, FLAG_UNDERFLOW,
+    ROUND_MINMAG,
 };
-use super::specialize::{f32_flush_input, FLOAT32_DEFAULT_NAN};
+use super::specialize::{f32_flush_input, float32_default_nan};
 use super::{f32_addsub, f32_mul, ArmFpStatus, FpRounding};
 
 /// Arm BFUnpack's fixed flush to zero: a denormal is a zero of its sign.
@@ -32,13 +35,15 @@ fn unpacked(a: u32) -> u32 {
 
 /// Arm BFRound of the exact result `op` computes: rounded to odd, a result
 /// below 2^-126 before rounding flushed to a zero of its sign, an overflow
-/// an infinity.
-fn rounded_to_odd<F: FnOnce(&mut SoftFloatStatus) -> u32>(op: F) -> u32 {
+/// an infinity, a NaN the default NaN of FPCR.AH (`handling`).
+fn rounded_to_odd<F: FnOnce(&mut SoftFloatStatus) -> u32>(handling: Handling, op: F) -> u32 {
+    // BFRound flushes before rounding whatever FPCR.AH is: the status is
+    // the standard one, and only the default NaN follows `handling`.
     let mut status = SoftFloatStatus {
         softfloat_rounding_mode: ROUND_MINMAG,
-        softfloat_exception_flags: 0,
         default_nan_mode: true,
         flush_to_zero: true,
+        ..SoftFloatStatus::default()
     };
     let r = op(&mut status);
     let flags = status.softfloat_exception_flags;
@@ -47,7 +52,10 @@ fn rounded_to_odd<F: FnOnce(&mut SoftFloatStatus) -> u32>(op: F) -> u32 {
         return (r & 0x8000_0000) | 0x7F80_0000;
     }
     let exp = (r >> 23) & 0xFF;
-    // A zero, exact or flushed, stays one; so does an infinity or a NaN.
+    if exp == 0xFF && r & 0x007F_FFFF != 0 {
+        return float32_default_nan(&SoftFloatStatus { handling, ..status });
+    }
+    // A zero, exact or flushed, stays one; so does an infinity.
     if exp != 0 && exp != 0xFF && flags & FLAG_INEXACT != 0 {
         r | 1
     } else {
@@ -56,19 +64,22 @@ fn rounded_to_odd<F: FnOnce(&mut SoftFloatStatus) -> u32>(op: F) -> u32 {
 }
 
 /// Arm BFMulH: the product of two BFloat16 values, in single precision.
-fn bf16_mul(a: u16, b: u16) -> u32 {
-    rounded_to_odd(|s| f32_mul::f32_mul(unpacked(u32::from(a) << 16), unpacked(u32::from(b) << 16), s))
+fn bf16_mul(a: u16, b: u16, handling: Handling) -> u32 {
+    rounded_to_odd(handling, |s| {
+        f32_mul::f32_mul(unpacked(u32::from(a) << 16), unpacked(u32::from(b) << 16), s)
+    })
 }
 
 /// Arm FPAdd_BF16: the sum of two single-precision values.
-fn bf16_add(a: u32, b: u32) -> u32 {
-    rounded_to_odd(|s| f32_addsub::f32_add(unpacked(a), unpacked(b), s))
+fn bf16_add(a: u32, b: u32, handling: Handling) -> u32 {
+    rounded_to_odd(handling, |s| f32_addsub::f32_add(unpacked(a), unpacked(b), s))
 }
 
 /// BFDOT and BFMMLA on one element: Arm BFDotAdd without FEAT_EBF16,
-/// `addend + (op1_a*op2_a + op1_b*op2_b)`.
-pub(crate) fn bf16_dot_add(addend: u32, op1_a: u16, op1_b: u16, op2_a: u16, op2_b: u16) -> u32 {
-    bf16_add(addend, bf16_add(bf16_mul(op1_a, op2_a), bf16_mul(op1_b, op2_b)))
+/// `addend + (op1_a*op2_a + op1_b*op2_b)`, under FPCR.AH (`handling`).
+pub(crate) fn bf16_dot_add(addend: u32, op1_a: u16, op1_b: u16, op2_a: u16, op2_b: u16, handling: Handling) -> u32 {
+    let product = bf16_add(bf16_mul(op1_a, op2_a, handling), bf16_mul(op1_b, op2_b, handling), handling);
+    bf16_add(addend, product, handling)
 }
 
 /// BFCVT and BFCVTN on one element: Arm FPConvertBF, single-precision `a`
@@ -76,9 +87,18 @@ pub(crate) fn bf16_dot_add(addend: u32, op1_a: u16, op1_b: u16, op2_a: u16, op2_
 /// zero, raising input denormal) and FPCR.DN, raising Arm FPRoundBase's
 /// exceptions: inexact, underflow for an inexact result tiny before
 /// rounding, overflow for one rounded to an infinity, and invalid for a
-/// signalling NaN.
+/// signalling NaN. Under FPCR.AH = 1 it runs with every denormal flushed,
+/// rounding to nearest and no exception (FPConvertBF's `altfp`).
 pub(crate) fn f32_to_bf16(a: u32, rounding: FpRounding, fp: &mut ArmFpStatus) -> u16 {
-    let s = &mut fp.status;
+    let rounding = match fp.handling() {
+        Handling::Standard => rounding,
+        Handling::Alternate => FpRounding::TieEven,
+    };
+    fp.with_altfp_overrides(|fp| to_bf16(a, rounding, &mut fp.status))
+}
+
+/// [`f32_to_bf16`] in the environment it chose.
+fn to_bf16(a: u32, rounding: FpRounding, s: &mut SoftFloatStatus) -> u16 {
     let a = f32_flush_input(a, s);
     let negative = a >> 31 == 1;
     let exp = (a >> 23) & 0xFF;
@@ -88,7 +108,7 @@ pub(crate) fn f32_to_bf16(a: u32, rounding: FpRounding, fp: &mut ArmFpStatus) ->
         if frac & 0x0040_0000 == 0 {
             softfloat_raise_flags(s, FLAG_INVALID);
         }
-        let nan = if s.default_nan_mode { FLOAT32_DEFAULT_NAN } else { a | 0x0040_0000 };
+        let nan = if s.default_nan_mode { float32_default_nan(s) } else { a | 0x0040_0000 };
         return (nan >> 16) as u16;
     }
     let truncated = a >> 16;

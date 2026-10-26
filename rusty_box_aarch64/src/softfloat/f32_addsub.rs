@@ -26,7 +26,7 @@ fn add_mags_f32(ui_a: u32, ui_b: u32, status: &mut SoftFloatStatus) -> Float32 {
             if (sig_a | sig_b) != 0 {
                 softfloat_raise_flags(status, FLAG_DENORMAL);
                 if exp_f32(ui_z) == 0 && softfloat_flush_underflow_to_zero(status) {
-                    softfloat_raise_flags(status, FLAG_UNDERFLOW);
+                    softfloat_raise_flags(status, flush_flags(status));
                     return pack_to_f32(sign_z, 0, 0);
                 }
             }
@@ -102,7 +102,7 @@ fn sub_mags_f32(ui_a: u32, ui_b: u32, status: &mut SoftFloatStatus) -> Float32 {
                 return softfloat_propagate_nan_f32(ui_a, ui_b, status);
             }
             softfloat_raise_flags(status, FLAG_INVALID);
-            return FLOAT32_DEFAULT_NAN;
+            return float32_default_nan(status);
         }
         if exp_a == 0 && (sig_a | sig_b) != 0 {
             softfloat_raise_flags(status, FLAG_DENORMAL);
@@ -128,7 +128,7 @@ fn sub_mags_f32(ui_a: u32, ui_b: u32, status: &mut SoftFloatStatus) -> Float32 {
         // An equal-exponent difference is exact: a subnormal result
         // underflows only when FPCR.FZ flushes it.
         if exp_z == 0 && softfloat_flush_underflow_to_zero(status) {
-            softfloat_raise_flags(status, FLAG_UNDERFLOW);
+            softfloat_raise_flags(status, flush_flags(status));
             return pack_to_f32(sign_z, 0, 0);
         }
         pack_to_f32(sign_z, exp_z, (sig_diff << shift_dist) as u32)

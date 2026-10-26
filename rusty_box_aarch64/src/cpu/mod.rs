@@ -8,6 +8,9 @@
 
 pub mod id;
 
+#[cfg(test)]
+#[path = "../../tests/unit/afp.rs"]
+mod afp;
 mod atomic;
 mod bti;
 #[cfg(test)]

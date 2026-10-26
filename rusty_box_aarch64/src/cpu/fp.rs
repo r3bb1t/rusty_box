@@ -3,19 +3,27 @@
 //!
 //! Values are handled as their register bits. FMOV, FABS, FNEG and FCSEL
 //! only move or select bits: the architecture defines them to raise no
-//! exception and to pass NaNs through unchanged. Everything else goes
-//! through `crate::softfloat` (the rusty_box softfloat3e port with the Arm
-//! specialization) under an [`FpEnv`] built from FPCR, and the exceptions an
-//! instruction raises are ORed into FPSR's cumulative bits when it
-//! completes. Floating-point exceptions never trap on this core
+//! exception and to pass NaNs through unchanged but for FABS's and FNEG's
+//! sign, which under FPCR.AH = 1 (FEAT_AFP) a NaN keeps too. Everything
+//! else goes through `crate::softfloat` (the rusty_box softfloat3e port
+//! with the Arm specialization) under an [`FpEnv`] built from FPCR, and the
+//! exceptions an instruction raises are ORed into FPSR's cumulative bits
+//! when it completes. Floating-point exceptions never trap on this core
 //! (FPCR.{IOE,DZE,OFE,UFE,IXE,IDE} are RAZ/WI), so every instruction
 //! completes.
+//!
+//! A scalar result zeroes the rest of its register, or under FPCR.NEP
+//! (FEAT_AFP, Arm `IsMerging`) takes it from the source register the
+//! instruction's page names ([`Cpu::fp_set_merging`]).
 
 use super::exec::{bit, bits, sext, ExecResult, Flow};
-use super::fp_estimate::{self, EstimateControl, DOUBLE, HALF, SINGLE};
+use super::features::Feature;
+use super::fp_estimate::{self, EstimateControl, EstimatePrecision, DOUBLE, HALF, SINGLE};
 use super::simd::vfp_expand_imm;
 use super::Cpu;
-use crate::softfloat::{self as sf, ArmFpStatus, FpOrdering, FpRounding, FusedMulAdd, InexactReport, NanSignal};
+use crate::softfloat::{
+    self as sf, ArmFpStatus, FpOrdering, FpRounding, FusedMulAdd, Handling, InexactReport, NanSignal,
+};
 
 /// FPCR.AHP: half-precision conversions use the alternative format.
 const FPCR_AHP: u64 = 1 << 26;
@@ -72,6 +80,21 @@ impl FpType {
             Self::Single => 0xFFFF_FFFF,
             Self::Double => u64::MAX,
         }
+    }
+
+    /// The exponent field's bits.
+    const fn exponent_mask(self) -> u64 {
+        match self {
+            Self::Half => 0x7C00,
+            Self::Single => 0x7F80_0000,
+            Self::Double => 0x7FF0_0000_0000_0000,
+        }
+    }
+
+    /// Whether `a` is a NaN of this precision.
+    pub(crate) const fn is_nan(self, a: u64) -> bool {
+        let exp = self.exponent_mask();
+        a & exp == exp && a & self.mask() & !(exp | self.sign_bit()) != 0
     }
 
     /// Positive zero is all zero bits in every precision.
@@ -231,6 +254,8 @@ impl FpConversion {
 pub(crate) struct FpEnv {
     pub(crate) status: ArmFpStatus,
     fpcr: u64,
+    /// The processor's single-precision FRECPE and FRSQRTE estimates.
+    estimates: EstimatePrecision,
 }
 
 impl FpEnv {
@@ -243,10 +268,35 @@ impl FpEnv {
         self.status.rounding()
     }
 
+    /// FPCR.AH.
+    pub(crate) fn handling(&self) -> Handling {
+        self.status.handling()
+    }
+
     /// Raise FPSR cumulative exception bits computed outside softfloat.
     fn raise(&mut self, fpsr_bits: u64) {
         let raised = self.status.cumulative_fpsr();
         self.status.set_cumulative_fpsr(raised | fpsr_bits);
+    }
+
+    /// Arm FPNeg: `a` with its sign flipped — except, under FPCR.AH = 1, a
+    /// NaN, whose sign has no consequence.
+    pub(crate) fn neg(&self, ty: FpType, a: u64) -> u64 {
+        if self.handling() == Handling::Alternate && ty.is_nan(a) {
+            a
+        } else {
+            (a ^ ty.sign_bit()) & ty.mask()
+        }
+    }
+
+    /// Arm FPAbs: `a` with its sign cleared — except, under FPCR.AH = 1, a
+    /// NaN.
+    pub(crate) fn abs(&self, ty: FpType, a: u64) -> u64 {
+        if self.handling() == Handling::Alternate && ty.is_nan(a) {
+            a
+        } else {
+            a & !ty.sign_bit() & ty.mask()
+        }
     }
 }
 
@@ -305,13 +355,14 @@ pub(crate) enum FpCompare {
 /// `op(a, b)` on one element.
 pub(crate) fn fp_binary(op: FpBinary, ty: FpType, a: u64, b: u64, env: &mut FpEnv) -> u64 {
     let fp = &mut env.status;
-    match ty {
+    // FABD's difference and FNMUL's product; FPAbs and FPNeg follow.
+    let result = match ty {
         FpType::Half => {
             let (a, b) = (a as u16, b as u16);
             u64::from(match op {
                 FpBinary::Add => sf::f16_add(a, b, fp),
-                FpBinary::Sub => sf::f16_sub(a, b, fp),
-                FpBinary::Mul => sf::f16_mul(a, b, fp),
+                FpBinary::Sub | FpBinary::AbsDiff => sf::f16_sub(a, b, fp),
+                FpBinary::Mul | FpBinary::NegMul => sf::f16_mul(a, b, fp),
                 FpBinary::Div => sf::f16_div(a, b, fp),
                 FpBinary::Max => sf::f16_max(a, b, fp),
                 FpBinary::Min => sf::f16_min(a, b, fp),
@@ -320,16 +371,14 @@ pub(crate) fn fp_binary(op: FpBinary, ty: FpType, a: u64, b: u64, env: &mut FpEn
                 FpBinary::MulX => sf::f16_mulx(a, b, fp),
                 FpBinary::RecipStep => sf::f16_recip_step(a, b, fp),
                 FpBinary::RSqrtStep => sf::f16_rsqrt_step(a, b, fp),
-                FpBinary::AbsDiff => sf::f16_sub(a, b, fp) & 0x7FFF,
-                FpBinary::NegMul => sf::f16_mul(a, b, fp) ^ 0x8000,
             })
         }
         FpType::Single => {
             let (a, b) = (a as u32, b as u32);
             u64::from(match op {
                 FpBinary::Add => sf::f32_add(a, b, fp),
-                FpBinary::Sub => sf::f32_sub(a, b, fp),
-                FpBinary::Mul => sf::f32_mul(a, b, fp),
+                FpBinary::Sub | FpBinary::AbsDiff => sf::f32_sub(a, b, fp),
+                FpBinary::Mul | FpBinary::NegMul => sf::f32_mul(a, b, fp),
                 FpBinary::Div => sf::f32_div(a, b, fp),
                 FpBinary::Max => sf::f32_max(a, b, fp),
                 FpBinary::Min => sf::f32_min(a, b, fp),
@@ -338,14 +387,12 @@ pub(crate) fn fp_binary(op: FpBinary, ty: FpType, a: u64, b: u64, env: &mut FpEn
                 FpBinary::MulX => sf::f32_mulx(a, b, fp),
                 FpBinary::RecipStep => sf::f32_recip_step(a, b, fp),
                 FpBinary::RSqrtStep => sf::f32_rsqrt_step(a, b, fp),
-                FpBinary::AbsDiff => sf::f32_sub(a, b, fp) & 0x7FFF_FFFF,
-                FpBinary::NegMul => sf::f32_mul(a, b, fp) ^ 0x8000_0000,
             })
         }
         FpType::Double => match op {
             FpBinary::Add => sf::f64_add(a, b, fp),
-            FpBinary::Sub => sf::f64_sub(a, b, fp),
-            FpBinary::Mul => sf::f64_mul(a, b, fp),
+            FpBinary::Sub | FpBinary::AbsDiff => sf::f64_sub(a, b, fp),
+            FpBinary::Mul | FpBinary::NegMul => sf::f64_mul(a, b, fp),
             FpBinary::Div => sf::f64_div(a, b, fp),
             FpBinary::Max => sf::f64_max(a, b, fp),
             FpBinary::Min => sf::f64_min(a, b, fp),
@@ -354,9 +401,22 @@ pub(crate) fn fp_binary(op: FpBinary, ty: FpType, a: u64, b: u64, env: &mut FpEn
             FpBinary::MulX => sf::f64_mulx(a, b, fp),
             FpBinary::RecipStep => sf::f64_recip_step(a, b, fp),
             FpBinary::RSqrtStep => sf::f64_rsqrt_step(a, b, fp),
-            FpBinary::AbsDiff => sf::f64_sub(a, b, fp) & !(1 << 63),
-            FpBinary::NegMul => sf::f64_mul(a, b, fp) ^ (1 << 63),
         },
+    };
+    match op {
+        FpBinary::AbsDiff => env.abs(ty, result),
+        FpBinary::NegMul => env.neg(ty, result),
+        FpBinary::Add
+        | FpBinary::Sub
+        | FpBinary::Mul
+        | FpBinary::Div
+        | FpBinary::Max
+        | FpBinary::Min
+        | FpBinary::MaxNum
+        | FpBinary::MinNum
+        | FpBinary::MulX
+        | FpBinary::RecipStep
+        | FpBinary::RSqrtStep => result,
     }
 }
 
@@ -371,10 +431,10 @@ pub(crate) fn fp_unary(op: FpUnary, ty: FpType, a: u64, env: &mut FpEnv) -> u64 
         env.raise(e.fpsr);
         e.bits
     };
-    let control = EstimateControl::from_fpcr(env.fpcr);
+    let control = EstimateControl::from_fpcr(env.fpcr, env.estimates);
     match op {
-        FpUnary::Abs => a & !ty.sign_bit(),
-        FpUnary::Neg => (a ^ ty.sign_bit()) & ty.mask(),
+        FpUnary::Abs => env.abs(ty, a),
+        FpUnary::Neg => env.neg(ty, a),
         FpUnary::Sqrt => match ty {
             FpType::Half => u64::from(sf::f16_sqrt(a as u16, &mut env.status)),
             FpType::Single => u64::from(sf::f32_sqrt(a as u32, &mut env.status)),
@@ -412,8 +472,8 @@ pub(crate) fn fp_compare(ty: FpType, a: u64, b: u64, signal: NanSignal, env: &mu
 /// FPCompareEQ/GE/GT (and the absolute forms): whether `a op b` holds.
 pub(crate) fn fp_compare_holds(op: FpCompare, ty: FpType, a: u64, b: u64, env: &mut FpEnv) -> bool {
     let (a, b) = match op {
-        FpCompare::AbsGe | FpCompare::AbsGt => (a & !ty.sign_bit(), b & !ty.sign_bit()),
-        _ => (a, b),
+        FpCompare::AbsGe | FpCompare::AbsGt => (env.abs(ty, a), env.abs(ty, b)),
+        FpCompare::Eq | FpCompare::Ge | FpCompare::Gt => (a, b),
     };
     match op {
         FpCompare::Eq => fp_compare(ty, a, b, NanSignal::Quiet, env) == FpOrdering::Equal,
@@ -574,10 +634,50 @@ impl Cpu {
     /// The floating-point environment for an instruction about to execute.
     #[inline]
     pub(crate) fn fp_env(&self) -> FpEnv {
+        let estimates = if self.implements(Feature::Rpres) {
+            EstimatePrecision::Increased
+        } else {
+            EstimatePrecision::Base
+        };
         FpEnv {
             status: ArmFpStatus::from_fpcr(self.fpcr),
             fpcr: self.fpcr,
+            estimates,
         }
+    }
+
+    /// FPCR.AH, which the operations that read nothing else of FPCR (BFDOT,
+    /// BFMMLA) take without a whole [`FpEnv`].
+    #[inline]
+    pub(crate) fn fp_handling(&self) -> Handling {
+        if self.fpcr & sf::FPCR_AH != 0 {
+            Handling::Alternate
+        } else {
+            Handling::Standard
+        }
+    }
+
+    /// Arm `IsMerging(FPCR)`: whether a scalar result's upper elements come
+    /// from a source register (FPCR.NEP, FEAT_AFP) instead of being zeroed.
+    /// In Streaming SVE mode NEP reads as 0 unless the full A64 instruction
+    /// set is enabled there (`IsFullA64Enabled`), which takes
+    /// FEAT_SME_FA64, which this processor lacks.
+    #[inline]
+    pub(crate) fn fp_merging(&self) -> bool {
+        self.fpcr & sf::FPCR_NEP != 0 && !self.svcr.sm
+    }
+
+    /// Write a scalar result to `Vd`: `result = if IsMerging(FPCR()) then
+    /// V(merge) else Zeros` with the low `mask` bits replaced, `merge` being
+    /// the source register the instruction's page names.
+    #[inline]
+    pub(crate) fn fp_set_merging(&mut self, d: u32, merge: u32, mask: u64, value: u64) {
+        let upper = if self.fp_merging() {
+            self.v[merge as usize] & !u128::from(mask)
+        } else {
+            0
+        };
+        self.write_v(d as usize, upper | u128::from(value & mask));
     }
 
     /// Accumulate the exceptions an instruction raised into FPSR.
@@ -650,7 +750,7 @@ impl Cpu {
                 let a = self.fp_get(n, FpType::Single.mask());
                 let result = sf::f32_to_bf16(a as u32, rounding, &mut env.status);
                 self.fp_commit(&env);
-                self.fp_set(d, FpType::Half.mask(), u64::from(result));
+                self.fp_set_merging(d, d, FpType::Half.mask(), u64::from(result));
                 return Ok(Flow::Next);
             }
             // FCVT: ftype is the source precision, opc (bits 16:15) the
@@ -674,7 +774,7 @@ impl Cpu {
             let mut env = self.fp_env();
             let result = fp_convert(conversion, self.fp_get(n, from_mask), &mut env);
             self.fp_commit(&env);
-            self.fp_set(d, to_mask, result);
+            self.fp_set_merging(d, d, to_mask, result);
             return Ok(Flow::Next);
         }
         if opcode >> 2 == 0b0100 {
@@ -694,7 +794,7 @@ impl Cpu {
             let mask = precision.ty().mask();
             let result = round_int_n(precision, self.fp_get(n, mask), rounding, size, &mut env);
             self.fp_commit(&env);
-            self.fp_set(d, mask, result);
+            self.fp_set_merging(d, d, mask, result);
             return Ok(Flow::Next);
         }
 
@@ -718,13 +818,16 @@ impl Cpu {
         };
         self.fp_check()?;
         let a = self.fp_get(n, ty.mask());
-        let result = match op {
-            // FMOV (register)
-            None => a,
-            Some(op) => fp_unary(op, ty, a, &mut env),
-        };
-        self.fp_commit(&env);
-        self.fp_set(d, ty.mask(), result);
+        match op {
+            // FMOV (register) zeroes the rest of the register whatever
+            // FPCR.NEP is.
+            None => self.fp_set(d, ty.mask(), a),
+            Some(op) => {
+                let result = fp_unary(op, ty, a, &mut env);
+                self.fp_commit(&env);
+                self.fp_set_merging(d, d, ty.mask(), result);
+            }
+        }
         Ok(Flow::Next)
     }
 
@@ -746,12 +849,13 @@ impl Cpu {
             _ => return self.undefined(pc, insn),
         };
         self.fp_check()?;
-        let a = self.fp_get(bits(insn, 9, 5), ty.mask());
+        let n = bits(insn, 9, 5);
+        let a = self.fp_get(n, ty.mask());
         let b = self.fp_get(bits(insn, 20, 16), ty.mask());
         let mut env = self.fp_env();
         let result = fp_binary(op, ty, a, b, &mut env);
         self.fp_commit(&env);
-        self.fp_set(bits(insn, 4, 0), ty.mask(), result);
+        self.fp_set_merging(bits(insn, 4, 0), n, ty.mask(), result);
         Ok(Flow::Next)
     }
 
@@ -769,11 +873,12 @@ impl Cpu {
         self.fp_check()?;
         let n = self.fp_get(bits(insn, 9, 5), ty.mask());
         let m = self.fp_get(bits(insn, 20, 16), ty.mask());
-        let a = self.fp_get(bits(insn, 14, 10), ty.mask());
+        let ra = bits(insn, 14, 10);
+        let a = self.fp_get(ra, ty.mask());
         let mut env = self.fp_env();
         let result = fp_mul_add(form, ty, a, n, m, &mut env);
         self.fp_commit(&env);
-        self.fp_set(bits(insn, 4, 0), ty.mask(), result);
+        self.fp_set_merging(bits(insn, 4, 0), ra, ty.mask(), result);
         Ok(Flow::Next)
     }
 
@@ -929,7 +1034,7 @@ impl Cpu {
                 let x = self.x_or_zr(n);
                 let v = int_to_fp(ty, x, 0, signed, IntWidth::from_sf(sf), &mut env);
                 self.fp_commit(&env);
-                self.fp_set(d, ty.mask(), v);
+                self.fp_set_merging(d, d, ty.mask(), v);
             }
         }
         Ok(Flow::Next)
@@ -979,7 +1084,7 @@ impl Cpu {
                     &mut env,
                 );
                 self.fp_commit(&env);
-                self.fp_set(d, ty.mask(), v);
+                self.fp_set_merging(d, d, ty.mask(), v);
             }
             _ => return self.undefined(pc, insn),
         }

@@ -1,7 +1,7 @@
 //! Float64 fused multiply-add: a*b + c.
 //! Ported from Berkeley SoftFloat 3e f64_mulAdd.c / s_mulAddF64.c (via
 //! Bochs softfloat3e). As in [`super::f32_mul_add`], the Berkeley `op`
-//! negation modifiers are absent: Arm negates operands bitwise beforehand.
+//! negation modifiers are absent: Arm negates operands beforehand.
 
 use super::internals::*;
 use super::primitives::*;
@@ -198,7 +198,7 @@ fn zero_prod_f64(
     if exp_c == 0 && sig_c != 0 {
         softfloat_raise_flags(status, FLAG_DENORMAL);
         if softfloat_flush_underflow_to_zero(status) {
-            softfloat_raise_flags(status, FLAG_UNDERFLOW);
+            softfloat_raise_flags(status, flush_flags(status));
             return pack_to_f64(sign_c, 0, 0);
         }
     }
@@ -237,6 +237,6 @@ fn inf_prod_arg_f64(
         }
     }
     softfloat_raise_flags(status, FLAG_INVALID);
-    let ui_z = FLOAT64_DEFAULT_NAN;
+    let ui_z = float64_default_nan(status);
     softfloat_propagate_nan_f64(ui_z, ui_c, status)
 }

@@ -20,7 +20,7 @@ pub(crate) fn f64_sqrt(a: Float64, status: &mut SoftFloatStatus) -> Float64 {
             return a; // +inf
         }
         softfloat_raise_flags(status, FLAG_INVALID);
-        return FLOAT64_DEFAULT_NAN;
+        return float64_default_nan(status);
     }
 
     if sign_a {
@@ -28,7 +28,7 @@ pub(crate) fn f64_sqrt(a: Float64, status: &mut SoftFloatStatus) -> Float64 {
             return ui_a; // -0
         }
         softfloat_raise_flags(status, FLAG_INVALID);
-        return FLOAT64_DEFAULT_NAN;
+        return float64_default_nan(status);
     }
 
     if exp_a == 0 {

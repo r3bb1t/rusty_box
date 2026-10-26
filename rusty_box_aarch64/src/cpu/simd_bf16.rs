@@ -16,8 +16,8 @@ impl Cpu {
     /// (`0 Q 0 01111 01 L M Rm 1111 H 0 Rn Rd`). Each 32-bit lane of Vd
     /// accumulates the dot product of the matching pair of BFloat16
     /// elements of Vn with Vm's pair, by element the pair `H:L` of all of
-    /// `V[M:Rm]` (Arm BFDotAdd, which follows BFloat16's own behaviours and
-    /// not FPCR).
+    /// `V[M:Rm]` (Arm BFDotAdd, which follows BFloat16's own behaviours,
+    /// reading of FPCR only AH, the default NaN's sign).
     pub(crate) fn exec_simd_bfdot(&mut self, insn: u32, by_element: bool) -> ExecResult {
         let q = bit(insn, 30);
         self.simd_check()?;
@@ -26,6 +26,7 @@ impl Cpu {
         let index = (bits(insn, 11, 11) << 1) | bits(insn, 21, 21);
         let rd = bits(insn, 4, 0) as usize;
         let d = self.v[rd];
+        let handling = self.fp_handling();
         let mut r = 0u128;
         for e in 0..if q { 4 } else { 2 } {
             let pair = if by_element { index } else { e };
@@ -35,6 +36,7 @@ impl Cpu {
                 elem(n, 2 * e + 1, 16) as u16,
                 elem(m, 2 * pair, 16) as u16,
                 elem(m, 2 * pair + 1, 16) as u16,
+                handling,
             );
             set_elem(&mut r, e, 32, u64::from(sum));
         }
@@ -47,7 +49,8 @@ impl Cpu {
     /// Rd`). Each 32-bit lane of Vd accumulates the product of the even
     /// (`B`) or odd (`T`) BFloat16 element of Vn's matching pair with Vm's,
     /// by element with the element `H:L:M` of V0-V15: a single-precision
-    /// fused multiply-add under FPCR (Arm BFMulAddH).
+    /// fused multiply-add under FPCR (Arm BFMulAddH) — under FPCR.AH = 1
+    /// with every denormal flushed, rounding to nearest and no exception.
     pub(crate) fn exec_simd_bfmlal(&mut self, insn: u32, by_element: bool) -> ExecResult {
         let sel = u32::from(bit(insn, 30));
         self.simd_check()?;
@@ -66,7 +69,9 @@ impl Cpu {
             let element1 = (elem(n, 2 * e + sel, 16) as u32) << 16;
             let element2 = (elem(m, index.unwrap_or(2 * e + sel), 16) as u32) << 16;
             let addend = elem(d, e, 32) as u32;
-            let sum = sf::f32_mul_add(FusedMulAdd::Fmadd, addend, element1, element2, &mut env.status);
+            let sum = env
+                .status
+                .with_altfp_overrides(|fp| sf::f32_mul_add(FusedMulAdd::Fmadd, addend, element1, element2, fp));
             set_elem(&mut r, e, 32, u64::from(sum));
         }
         self.fp_commit(&env);
@@ -84,6 +89,7 @@ impl Cpu {
         let m = self.v[bits(insn, 20, 16) as usize];
         let rd = bits(insn, 4, 0) as usize;
         let d = self.v[rd];
+        let handling = self.fp_handling();
         let mut r = 0u128;
         for i in 0..2 {
             for j in 0..2 {
@@ -95,6 +101,7 @@ impl Cpu {
                         elem(n, 4 * i + 2 * k + 1, 16) as u16,
                         elem(m, 4 * j + 2 * k, 16) as u16,
                         elem(m, 4 * j + 2 * k + 1, 16) as u16,
+                        handling,
                     );
                 }
                 set_elem(&mut r, 2 * i + j, 32, u64::from(sum));

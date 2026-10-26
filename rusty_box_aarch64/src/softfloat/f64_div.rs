@@ -25,7 +25,7 @@ pub(crate) fn f64_div(a: Float64, b: Float64, status: &mut SoftFloatStatus) -> F
             }
             // inf / inf
             softfloat_raise_flags(status, FLAG_INVALID);
-            return FLOAT64_DEFAULT_NAN;
+            return float64_default_nan(status);
         }
         if sig_b != 0 && exp_b == 0 {
             softfloat_raise_flags(status, FLAG_DENORMAL);
@@ -47,7 +47,7 @@ pub(crate) fn f64_div(a: Float64, b: Float64, status: &mut SoftFloatStatus) -> F
             if (exp_a as u64 | sig_a) == 0 {
                 // 0 / 0
                 softfloat_raise_flags(status, FLAG_INVALID);
-                return FLOAT64_DEFAULT_NAN;
+                return float64_default_nan(status);
             }
             softfloat_raise_flags(status, FLAG_INFINITE); // divide-by-zero
             return pack_to_f64(sign_z, 0x7FF, 0);

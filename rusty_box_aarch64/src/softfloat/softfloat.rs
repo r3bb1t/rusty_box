@@ -1,9 +1,39 @@
 //! SoftFloat status, rounding modes, exception flags and field helpers.
 //! Ported from Berkeley SoftFloat 3e softfloat.h / Bochs
 //! softfloat3e/include/softfloat.h and softfloat-extra.h. The status carries
-//! the Arm FPCR controls the arithmetic reads (DN, FZ, RMode) in place of the
-//! x86 exception masks, which Arm has no use for: every exception here is
-//! untrapped and only accumulates into the FPSR cumulative bits.
+//! the Arm FPCR controls the arithmetic reads (AH, DN, FIZ, FZ, RMode) in
+//! place of the x86 exception masks, which Arm has no use for: every
+//! exception here is untrapped and only accumulates into the FPSR
+//! cumulative bits.
+
+/// FPCR.AH (FEAT_AFP): which of Arm's two sets of floating-point behaviours
+/// an operation follows, the pseudocode's `altfp`. A processor without
+/// FEAT_AFP keeps FPCR.AH zero.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Handling {
+    /// FPCR.AH = 0: tininess and flush to zero before rounding, the first
+    /// signalling NaN of the operands chosen, a positive default NaN.
+    Standard,
+    /// FPCR.AH = 1: tininess and flush to zero after rounding (a flushed
+    /// result raising Inexact too), FPCR.FZ leaving the operands alone, the
+    /// first NaN operand chosen whatever its kind, a negative default NaN,
+    /// and the other rules each operation names.
+    Alternate,
+}
+
+/// What Arm FPUnpack makes of a single- or double-precision denormal
+/// operand, by FPCR.FZ, FPCR.FIZ (FEAT_AFP) and FPCR.AH. Half-precision
+/// operands follow FPCR.FZ16 alone and are never flushed here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InputFlush {
+    /// The denormal is used as it is.
+    Off,
+    /// FPCR.FZ with FPCR.AH = 0: a zero of its sign, raising Input
+    /// Denormal.
+    Reported,
+    /// FPCR.FIZ alone: a zero of its sign, raising nothing.
+    Unreported,
+}
 
 /// Software floating-point status — passed by `&mut` to every operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -14,10 +44,15 @@ pub(crate) struct SoftFloatStatus {
     pub(crate) softfloat_exception_flags: i32,
     /// FPCR.DN: every NaN result is the default NaN.
     pub(crate) default_nan_mode: bool,
-    /// FPCR.FZ: a single- or double-precision result that is tiny before
-    /// rounding becomes a zero of the same sign, raising underflow alone.
-    /// Input flushing (FPUnpack) is applied by the callers in `mod.rs`.
+    /// FPCR.FZ: a single- or double-precision result that is tiny becomes a
+    /// zero of the same sign — tiny before rounding, raising Underflow
+    /// alone, under [`Handling::Standard`]; tiny after rounding, raising
+    /// Underflow and Inexact, under [`Handling::Alternate`].
     pub(crate) flush_to_zero: bool,
+    /// FPCR.AH.
+    pub(crate) handling: Handling,
+    /// The operand flushing (Arm FPUnpack) the callers in `mod.rs` apply.
+    pub(crate) input_flush: InputFlush,
 }
 
 impl Default for SoftFloatStatus {
@@ -27,6 +62,8 @@ impl Default for SoftFloatStatus {
             softfloat_exception_flags: 0,
             default_nan_mode: false,
             flush_to_zero: false,
+            handling: Handling::Standard,
+            input_flush: InputFlush::Off,
         }
     }
 }
@@ -41,15 +78,18 @@ pub(crate) const ROUND_NEAR_MAXMAG: u8 = 4;
 // Exception flags (Berkeley `softfloat_flag_*`).
 pub(crate) const FLAG_INVALID: i32 = 0x01;
 /// A denormal operand took part in the operation without being flushed
-/// (x86 DE; QEMU `float_flag_input_denormal_used`). Arm with FPCR.AH = 0
-/// does not report it, so it never reaches the FPSR.
+/// (x86 DE; QEMU `float_flag_input_denormal_used`). It never reaches the
+/// FPSR: Arm reports a used denormal only under FPCR.AH = 1, and only in
+/// the cases its FPProcessDenorms calls name, which the callers in `mod.rs`
+/// decide themselves and raise as [`FLAG_INPUT_DENORMAL`].
 pub(crate) const FLAG_DENORMAL: i32 = 0x02;
 pub(crate) const FLAG_DIVBYZERO: i32 = 0x04;
 pub(crate) const FLAG_INFINITE: i32 = FLAG_DIVBYZERO;
 pub(crate) const FLAG_OVERFLOW: i32 = 0x08;
 pub(crate) const FLAG_UNDERFLOW: i32 = 0x10;
 pub(crate) const FLAG_INEXACT: i32 = 0x20;
-/// A denormal input was flushed to zero under FPCR.FZ (Arm FPSR.IDC).
+/// Arm FPSR.IDC: a denormal input was flushed to zero under FPCR.FZ with
+/// FPCR.AH = 0, or used unflushed under FPCR.AH = 1.
 pub(crate) const FLAG_INPUT_DENORMAL: i32 = 0x40;
 
 /// Result of an ordered/unordered comparison (Arm FPCompare).

@@ -25,7 +25,7 @@ Reproducers:
   header gives the commands and the expected and observed output.
 - `docs/qemu-aarch64-probe-user.c`: a static Linux program for
   `qemu-aarch64 -cpu max`, one case per argument, for the entries fixed
-  upstream.
+  upstream and for entry 12.
 
 What `rusty_box_aarch64` does about each entry is in its README, "Where the
 references differ".
@@ -412,6 +412,39 @@ SID and SNID report `ExternalSecureInvasiveDebugEnabled()` and
 CRn 7, CRm 14, op2 6; cp14 for AArch32) whose read function follows
 `UpdateDbgAuthStatus()` with the authentication signals QEMU's model
 chooses, and with Secure state when the CPU has EL3.
+
+### 12. FABS and FNEG (vector) change a NaN's sign under FPCR.AH = 1
+
+**Impact**: small. With FEAT_AFP's FPCR.AH set, the Advanced SIMD vector
+FABS and FNEG clear or flip the sign bit of a NaN element, which the
+architecture leaves alone; the scalar forms, and SVE's, get it right, so
+the same value negated as a scalar and as a vector element differs. Only
+software that sets FPCR.AH (x86 emulators running on Arm, for x86's NaN
+rules) and then inspects a NaN's sign sees it.
+
+**Location**: `target/arm/tcg/translate-a64.c`, `do_fabs_fneg_v()`, which
+expands both instructions as one bitwise AND or XOR over the vector
+(`gen_gvec_fabs()`, `gen_gvec_fneg()`) whatever `s->fpcr_ah` is. The scalar
+forms choose between `f_scalar_fabs` and `f_scalar_ah_fabs` (and FNEG's
+pair) by FPCR.AH, and SVE has `sve_ah_fabs_*` and `sve_ah_fneg_*`.
+
+**What the Arm ARM says**: FABS (vector) and FNEG (vector) compute
+`FPAbs{esize}(element, FPCR())` and `FPNeg{esize}(element, FPCR())` for
+each element, and both return the operand unchanged when it is a NaN and
+`IsFeatureImplemented(FEAT_AFP) && !UsingAArch32() && fpcr.AH == '1'`
+("When fpcr.AH=1, sign of NaN has no consequence").
+
+**Reproduce**: `docs/qemu-aarch64-probe-user.c`, case `fneg_vector_ah`.
+
+    Arm:          fneg v2.4s of 0x7fc00001 = 0x7fc00001, fabs v5.4s of 0xffc00001 = 0xffc00001
+    QEMU 11.1.2:  fneg v2.4s of 0x7fc00001 = 0xffc00001, fabs v5.4s of 0xffc00001 = 0x7fc00001
+
+**Fix**: `docs/qemu-afp-vector-fabs-fneg.patch`: under FPCR.AH, expand
+each element with the scalar forms' `gen_vfp_ah_abs*` and
+`gen_vfp_ah_neg*` (an element at a time; a gvec helper like SVE's would
+be faster). Built and tested on `v11.1.2`: the probe agrees, and
+`rusty_box_aarch64`'s QEMU vectors, the FEAT_AFP families included, were
+generated with it.
 
 ---
 

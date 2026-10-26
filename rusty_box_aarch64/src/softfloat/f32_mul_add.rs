@@ -1,8 +1,9 @@
 //! Float32 fused multiply-add: a*b + c.
 //! Ported from Berkeley SoftFloat 3e f32_mulAdd.c / s_mulAddF32.c (via
-//! Bochs softfloat3e). Arm negates FMSUB/FNMADD/FNMSUB operands bitwise
-//! before the fused operation (FPNeg, which also flips a NaN's sign), so the
-//! Berkeley `op` negation modifiers have no Arm caller and are absent.
+//! Bochs softfloat3e). Arm negates FMSUB/FNMADD/FNMSUB operands before the
+//! fused operation (FPNeg, which flips a NaN's sign too under FPCR.AH = 0
+//! and leaves a NaN as it is under FPCR.AH = 1), so the Berkeley `op`
+//! negation modifiers have no Arm caller and are absent.
 
 use super::internals::*;
 use super::primitives::*;
@@ -178,7 +179,7 @@ fn zero_prod_f32(
     if exp_c == 0 && sig_c != 0 {
         softfloat_raise_flags(status, FLAG_DENORMAL);
         if softfloat_flush_underflow_to_zero(status) {
-            softfloat_raise_flags(status, FLAG_UNDERFLOW);
+            softfloat_raise_flags(status, flush_flags(status));
             return pack_to_f32(sign_c, 0, 0);
         }
     }
@@ -217,6 +218,6 @@ fn inf_prod_arg_f32(
         }
     }
     softfloat_raise_flags(status, FLAG_INVALID);
-    let ui_z = FLOAT32_DEFAULT_NAN;
+    let ui_z = float32_default_nan(status);
     softfloat_propagate_nan_f32(ui_z, ui_c, status)
 }

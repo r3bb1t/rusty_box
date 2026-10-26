@@ -19,7 +19,7 @@ pub(crate) fn f32_sqrt(a: Float32, status: &mut SoftFloatStatus) -> Float32 {
             return a; // +inf
         }
         softfloat_raise_flags(status, FLAG_INVALID); // sqrt(-inf)
-        return FLOAT32_DEFAULT_NAN;
+        return float32_default_nan(status);
     }
 
     if sign_a {
@@ -27,7 +27,7 @@ pub(crate) fn f32_sqrt(a: Float32, status: &mut SoftFloatStatus) -> Float32 {
             return a; // -0
         }
         softfloat_raise_flags(status, FLAG_INVALID); // sqrt(negative)
-        return FLOAT32_DEFAULT_NAN;
+        return float32_default_nan(status);
     }
 
     if exp_a == 0 {

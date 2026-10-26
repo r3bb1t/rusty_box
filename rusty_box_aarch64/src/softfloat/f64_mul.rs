@@ -79,7 +79,7 @@ pub(crate) fn f64_mul(a: Float64, b: Float64, status: &mut SoftFloatStatus) -> F
 fn mul_inf_arg(sign_z: bool, mag_bits: u64, status: &mut SoftFloatStatus) -> Float64 {
     if mag_bits == 0 {
         softfloat_raise_flags(status, FLAG_INVALID);
-        FLOAT64_DEFAULT_NAN
+        float64_default_nan(status)
     } else {
         pack_to_f64(sign_z, 0x7FF, 0)
     }

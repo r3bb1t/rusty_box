@@ -727,6 +727,8 @@ mod tests {
                     Feature::Debugv8p1 => field(dfr0, 0) >= 7,
                     Feature::Debugv8p2 => field(dfr0, 0) >= 8,
                     Feature::Debugv8p4 => field(dfr0, 0) >= 9,
+                    Feature::Afp => field(mmfr1, 44) >= 1,
+                    Feature::Rpres => field(isar2, 4) >= 1,
                 };
                 assert_eq!(advertised, imp.has(feature), "{feature:?} on {imp:?}");
             }
@@ -750,7 +752,8 @@ mod tests {
             // algorithm, and APA is never 2, FEAT_EPAC), ISAR2 WFxT = 2
             // alone, MMFR0 the 4 KiB granule's fields and ECV = 1 (no
             // FEAT_ECV_POFF), MMFR1 HPDS = 1 (no FEAT_HPDS2), LO and PAN
-            // alone, MMFR2 CnP, UAO, AT, IDS, TTL and E0PD alone.
+            // alone, MMFR2 CnP, UAO, AT, IDS, TTL and E0PD alone. MMFR1
+            // AFP and ISAR2 RPRES are each 1 or 0.
             let at = |feature: Feature, lsb: u32, value: u64| if imp.has(feature) { value << lsb } else { 0 };
             let isar0_later =
                 at(Feature::Lse, 20, 2) | at(Feature::Rdm, 28, 1) | at(Feature::DotProd, 44, 1) | at(Feature::Fhm, 48, 1);
@@ -764,9 +767,9 @@ mod tests {
             assert_eq!(mmfr0 & !(0xF << 60), 0x0F00_0024, "PARange 44 bits, 16-bit ASIDs, the 4 KiB granule alone");
             assert!(field(mmfr0, 60) <= 1, "ECV = 1: FEAT_ECV, not FEAT_ECV_POFF");
             assert!(field(mmfr1, 12) <= 1, "HPDS = 1: FEAT_HPDS, not FEAT_HPDS2");
-            assert_eq!(mmfr1 & !((0xF << 12) | (0xF << 16) | (0xF << 20)), 0);
+            assert_eq!(mmfr1 & !((0xF << 12) | (0xF << 16) | (0xF << 20)), at(Feature::Afp, 44, 1));
             assert_eq!(mmfr2 & !(0xF | (0xF << 4) | (0xF << 32) | (0xF << 36) | (0xF << 48) | (0xF << 60)), 0);
-            assert_eq!((isar2, isar3), (at(Feature::WfxT, 0, 2), 0));
+            assert_eq!((isar2, isar3), (at(Feature::WfxT, 0, 2) | at(Feature::Rpres, 4, 1), 0));
             // No SVE2 (SVEver = 0, with FEAT_SME as without); with FEAT_SME,
             // BF16 and I8MM report FEAT_BF16 and FEAT_I8MM as ISAR1 does.
             let zfr0_later = if imp.has(Feature::Sme) { (field(isar1, 44) << 20) | (field(isar1, 52) << 44) } else { 0 };

@@ -26,17 +26,23 @@
 //!
 //! FPCR.FZ16 is half precision's flush to zero (Arm FPUnpackBase and
 //! FPRoundBase with `N == 16`): a denormal operand is a zero, with no
-//! exception, and a result below the smallest normal before rounding is a
-//! zero of its sign, raising underflow. FPCR.AHP does not apply: FPUnpack
-//! and FPRound clear it.
+//! exception, whatever FPCR.AH is, and a tiny result is a zero of its sign
+//! — below the smallest normal before rounding, raising underflow, under
+//! FPCR.AH = 0; below it after rounding with an unbounded exponent, raising
+//! underflow and inexact, under FPCR.AH = 1. FPCR.FIZ does not apply to
+//! half precision, and FPCR.AHP does not either: FPUnpack and FPRound
+//! clear it.
 //!
 //! The conversions from an integer, which Arm defines as FixedToFP with
 //! FPRound, round the exact value once here, since a 64-bit integer may
 //! need more bits than double precision has.
 
 use super::f64_to_f16;
-use super::internals::{exp_f16, exp_f64, frac_f16, frac_f64, round_pack_to_f16, sign_f16, sign_f64};
-use super::softfloat::{softfloat_raise_flags, FLAG_UNDERFLOW};
+use super::internals::{
+    exp_f16, exp_f64, f16_tiny_after_rounding, flush_flags, frac_f16, round_pack_to_f16, sign_f16, sign_f64,
+};
+use super::min_max::Extreme;
+use super::softfloat::{softfloat_raise_flags, Handling, FLAG_INVALID};
 use super::{ArmFpStatus, FpOrdering, FpRounding, FusedMulAdd, InexactReport, NanSignal};
 
 /// A binary interchange format wider than half precision, by the widths of
@@ -88,23 +94,51 @@ fn unpack(a: u16, fp: &ArmFpStatus) -> u64 {
     widen(flushed(a, fp), DOUBLE)
 }
 
+/// Whether the nonzero finite double `v` is tiny as Arm FPRoundBase with
+/// `N == 16` decides it: below 2^-14 under FPCR.AH = 0; rounding, at half
+/// precision's 11 significant bits with an unbounded exponent and by the
+/// current rounding mode, to below 2^-14 under FPCR.AH = 1.
+fn half_tiny(v: u64, fp: &ArmFpStatus) -> bool {
+    let exp = exp_f64(v);
+    match fp.status.handling {
+        Handling::Standard => exp < 1023 - 14,
+        Handling::Alternate => {
+            let unrounded = f64_to_f16::unrounded_f16(v);
+            unrounded.exp < 0
+                && f16_tiny_after_rounding(
+                    unrounded.sign,
+                    unrounded.exp,
+                    unrounded.sig,
+                    fp.status.softfloat_rounding_mode,
+                )
+        }
+    }
+}
+
 /// Arm FPRound with `N == 16` of the double-precision result `op` computes:
-/// under FPCR.FZ16 a nonzero finite value below 2^-14 is a zero of its sign
-/// and raises underflow alone (FPRoundBase flushes before it rounds, so the
-/// inexact the double-precision operation may have raised is not); any
-/// other is rounded by FPCR.RMode (a NaN converted by FPConvertNaN), with
-/// the operation's exceptions.
+/// under FPCR.FZ16 a tiny nonzero finite value ([`half_tiny`]) is a zero of
+/// its sign, raising underflow alone under FPCR.AH = 0 (FPRoundBase flushes
+/// before it rounds, so the inexact the double-precision operation may have
+/// raised is not) and underflow and inexact under FPCR.AH = 1; any other is
+/// rounded by FPCR.RMode (a NaN converted by FPConvertNaN), with the
+/// operation's exceptions.
 fn rounded<F: FnOnce(&mut ArmFpStatus) -> u64>(fp: &mut ArmFpStatus, op: F) -> u16 {
     let before = fp.status.softfloat_exception_flags;
     let v = op(fp);
-    let exp = exp_f64(v);
-    let tiny = exp < 1023 - 14 && (exp != 0 || frac_f64(v) != 0);
-    if fp.flush_half && tiny {
+    let nonzero_finite = exp_f64(v) != 0x7FF && v & !(1 << 63) != 0;
+    if fp.flush_half && nonzero_finite && half_tiny(v, fp) {
+        let flags = flush_flags(&fp.status);
         fp.status.softfloat_exception_flags = before;
-        softfloat_raise_flags(&mut fp.status, FLAG_UNDERFLOW);
+        softfloat_raise_flags(&mut fp.status, flags);
         return (u16::from(sign_f64(v))) << 15;
     }
     f64_to_f16::f64_to_f16(v, &mut fp.status)
+}
+
+/// Whether `a` is a half-precision NaN.
+#[inline]
+fn is_nan_f16(a: u16) -> bool {
+    exp_f16(a) == 0x1F && frac_f16(a) != 0
 }
 
 /// FADD (half). Arm FPAdd.
@@ -138,14 +172,36 @@ pub(crate) fn f16_mul_add(form: FusedMulAdd, addend: u16, n: u16, m: u16, fp: &m
     rounded(fp, |fp| super::f64_mul_add(form, unpack(addend, fp), unpack(n, fp), unpack(m, fp), fp))
 }
 
+/// Arm FPMax / FPMin with `N == 16`. Under FPCR.AH = 1 a NaN operand, or
+/// two zeros of opposite signs, give the second operand as it is — a
+/// signalling NaN not quietened, which the double-precision path would —
+/// a NaN raising Invalid Operation.
+fn f16_min_max(a: u16, b: u16, extreme: Extreme, fp: &mut ArmFpStatus) -> u16 {
+    let (a, b) = (flushed(a, fp), flushed(b, fp));
+    if fp.status.handling == Handling::Alternate {
+        if (a | b) & 0x7FFF == 0 && (a ^ b) & 0x8000 != 0 {
+            return b;
+        }
+        if is_nan_f16(a) || is_nan_f16(b) {
+            softfloat_raise_flags(&mut fp.status, FLAG_INVALID);
+            return b;
+        }
+    }
+    let (a, b) = (widen(a, DOUBLE), widen(b, DOUBLE));
+    rounded(fp, |fp| match extreme {
+        Extreme::Max => super::f64_max(a, b, fp),
+        Extreme::Min => super::f64_min(a, b, fp),
+    })
+}
+
 /// FMAX (half). Arm FPMax.
 pub(crate) fn f16_max(a: u16, b: u16, fp: &mut ArmFpStatus) -> u16 {
-    rounded(fp, |fp| super::f64_max(unpack(a, fp), unpack(b, fp), fp))
+    f16_min_max(a, b, Extreme::Max, fp)
 }
 
 /// FMIN (half). Arm FPMin.
 pub(crate) fn f16_min(a: u16, b: u16, fp: &mut ArmFpStatus) -> u16 {
-    rounded(fp, |fp| super::f64_min(unpack(a, fp), unpack(b, fp), fp))
+    f16_min_max(a, b, Extreme::Min, fp)
 }
 
 /// FMAXNM (half). Arm FPMaxNum.
@@ -164,15 +220,16 @@ pub(crate) fn f16_mulx(a: u16, b: u16, fp: &mut ArmFpStatus) -> u16 {
 }
 
 /// FRECPS (half). Arm FPRecipStepFused: `2.0 - a*b` fused, exact in double
-/// precision.
+/// precision; under FPCR.AH = 1 rounding to nearest with no exception, and
+/// FPCR.FZ16 still applying ([`ArmFpStatus::with_altfp_overrides`]).
 pub(crate) fn f16_recip_step(a: u16, b: u16, fp: &mut ArmFpStatus) -> u16 {
-    rounded(fp, |fp| super::f64_recip_step(unpack(a, fp), unpack(b, fp), fp))
+    fp.with_altfp_overrides(|fp| rounded(fp, |fp| super::f64_recip_step(unpack(a, fp), unpack(b, fp), fp)))
 }
 
 /// FRSQRTS (half). Arm FPRSqrtStepFused: `(3.0 - a*b) / 2.0` fused, exact
-/// in double precision.
+/// in double precision; under FPCR.AH = 1 as [`f16_recip_step`].
 pub(crate) fn f16_rsqrt_step(a: u16, b: u16, fp: &mut ArmFpStatus) -> u16 {
-    rounded(fp, |fp| super::f64_rsqrt_step(unpack(a, fp), unpack(b, fp), fp))
+    fp.with_altfp_overrides(|fp| rounded(fp, |fp| super::f64_rsqrt_step(unpack(a, fp), unpack(b, fp), fp)))
 }
 
 /// FCMP/FCMPE (half) and the ordering behind FCMEQ/FCMGE/FCMGT. Arm
@@ -238,12 +295,17 @@ pub(crate) fn int_to_f16(
     } else {
         (magnitude << (14 - top)) as u16
     };
-    if fp.flush_half && exp < 0 {
-        softfloat_raise_flags(&mut fp.status, FLAG_UNDERFLOW);
-        return u16::from(negative) << 15;
-    }
     // `top` <= 63 and `fbits` <= 64: the exponent is within -50..=77.
     let exp = exp as i16;
+    let tiny = match fp.status.handling {
+        Handling::Standard => exp < 0,
+        Handling::Alternate => exp < 0 && f16_tiny_after_rounding(negative, exp, sig, rounding.softfloat_mode()),
+    };
+    if fp.flush_half && tiny {
+        let flags = flush_flags(&fp.status);
+        softfloat_raise_flags(&mut fp.status, flags);
+        return u16::from(negative) << 15;
+    }
     super::with_rounding(fp, rounding, |s| round_pack_to_f16(negative, exp, sig, s))
 }
 
