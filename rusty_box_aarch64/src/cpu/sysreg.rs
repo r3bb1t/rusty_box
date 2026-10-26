@@ -352,7 +352,7 @@ impl Cpu {
             MIDR_EL1 => id::MIDR_EL1,
             MPIDR_EL1 => id::MPIDR_EL1,
             REVIDR_EL1 => id::REVIDR_EL1,
-            ID_AA64PFR0_EL1 => id::ID_AA64PFR0_EL1,
+            ID_AA64PFR0_EL1 => id::id_aa64pfr0(self.imp.features),
             ID_AA64PFR1_EL1 => id::id_aa64pfr1(self.imp.features),
             ID_AA64ZFR0_EL1 => id::id_aa64zfr0(self.imp.features),
             ID_AA64SMFR0_EL1 => id::id_aa64smfr0(self.imp.features),
@@ -485,10 +485,8 @@ impl Cpu {
                 if accessor == Accessor::Guest && !self.fp_enabled() {
                     return Err(SysRegError::FpTrap);
                 }
-                // FPCR: AHP, DN, FZ, RMode, and the trap enables (which read
-                // as zero on a core without trapped exception support).
                 if k == FPCR {
-                    self.fpcr = value & super::state::FPCR_MASK;
+                    self.fpcr = value & super::state::fpcr_mask(self.imp);
                 } else {
                     // N, Z, C, V (bits 31:28), QC and the cumulative
                     // exception bits.

@@ -20,6 +20,7 @@
 use super::crypto::polynomial_mult;
 use super::dp::ones;
 use super::exec::{bit, bits, sext, ExecResult, Flow};
+use super::fp::FpType;
 use super::simd::{at_datasize, elem, set_elem};
 use super::Cpu;
 
@@ -249,7 +250,7 @@ impl Cpu {
         let d = self.v[rd];
 
         if opcode >= 0b11000 {
-            return self.exec_simd_same_fp(pc, insn, scalar);
+            return self.exec_simd_same_fp(pc, insn, scalar, FpType::from_sz(bit(insn, 22)));
         }
         if opcode == 0b00011 {
             // AND, BIC, ORR, ORN, EOR, BSL, BIT, BIF.
@@ -391,7 +392,7 @@ impl Cpu {
         let lanes = if scalar { 1 } else { datasize(q) / esize };
 
         if opcode >= 0b10110 || ((0b01100..=0b01111).contains(&opcode) && size >= 2) {
-            return self.exec_simd_misc_fp(pc, insn, scalar);
+            return self.exec_simd_misc_fp(pc, insn, scalar, FpType::from_sz(bit(insn, 22)));
         }
 
         let mut qc = false;
@@ -1010,9 +1011,14 @@ impl Cpu {
     /// (scalar).
     pub(crate) fn exec_simd_scalar_pair(&mut self, pc: u64, insn: u32) -> ExecResult {
         if bit(insn, 29) {
-            return self.exec_simd_pair_fp(pc, insn);
+            return self.exec_simd_pair_fp(pc, insn, FpType::from_sz(bit(insn, 22)));
         }
-        if bits(insn, 16, 12) != 0b11011 || bits(insn, 23, 22) != 3 {
+        // With U = 0 every opcode but ADDP's is half precision (FEAT_FP16,
+        // which the decoder checks).
+        if bits(insn, 16, 12) != 0b11011 {
+            return self.exec_simd_pair_fp(pc, insn, FpType::Half);
+        }
+        if bits(insn, 23, 22) != 3 {
             return self.undefined(pc, insn);
         }
         self.simd_check()?;

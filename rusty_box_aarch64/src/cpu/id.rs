@@ -24,10 +24,14 @@ pub const MPIDR_EL1: u64 = 0x8000_0000;
 /// `REVIDR_EL1`: no revision-specific fixes to report.
 pub const REVIDR_EL1: u64 = 0;
 
-/// `ID_AA64PFR0_EL1`: EL0 = 1 and EL1 = 1 (AArch64 only), EL2 = EL3 = 0 (not
-/// implemented), FP = 0 and AdvSIMD = 0 (implemented, without half precision),
-/// GIC = 0 (no system-register interface: the GIC is a memory-mapped v2).
-pub const ID_AA64PFR0_EL1: u64 = 0x0000_0000_0000_0011;
+/// `ID_AA64PFR0_EL1` of a processor implementing `features`: EL0 = 1 and
+/// EL1 = 1 (AArch64 only), EL2 = EL3 = 0 (not implemented), FP (19:16) and
+/// AdvSIMD (23:20) 1 with FEAT_FP16 (half-precision arithmetic) and 0
+/// without, GIC = 0 (no system-register interface: the GIC is a
+/// memory-mapped v2).
+pub(crate) const fn id_aa64pfr0(features: Features) -> u64 {
+    0x11 | field(features, Feature::Fp16, 16, 1) | field(features, Feature::Fp16, 20, 1)
+}
 
 /// `ID_AA64PFR1_EL1` of a processor implementing `features`: `SME` (bits
 /// 27:24) = 1 with FEAT_SME, without FEAT_SME2 (`Features.json`: `FEAT_SME
@@ -61,8 +65,9 @@ pub const ID_AA64DFR0_EL1: u64 = 0x0000_0000_0010_1006;
 /// `ID_AA64ISAR0_EL1` of a processor implementing `features`: AES (7:4) = 2
 /// with FEAT_AES (AESE, AESD, AESMC, AESIMC and the 64-bit PMULL), SHA1
 /// (11:8) = 1, SHA2 (15:12) = 1 (SHA-256 only), CRC32 (19:16) = 1, Atomic
-/// (23:20) = 2 with FEAT_LSE, RDM (31:28) = 1 and DP (47:44) = 1 with
-/// FEAT_DotProd; no SHA-512, SHA3, SM3, SM4 or other field. The Cortex-A57's is 0x11120, as QEMU sets it in
+/// (23:20) = 2 with FEAT_LSE, RDM (31:28) = 1, DP (47:44) = 1 with
+/// FEAT_DotProd and FHM (51:48) = 1; no SHA-512, SHA3, SM3, SM4 or other
+/// field. The Cortex-A57's is 0x11120, as QEMU sets it in
 /// `aarch64_aa32_a57_init` (target/arm/cpu-max.c), which
 /// `aarch64_a57_initfn` calls.
 pub(crate) const fn id_aa64isar0(features: Features) -> u64 {
@@ -73,6 +78,7 @@ pub(crate) const fn id_aa64isar0(features: Features) -> u64 {
         | field(features, Feature::Lse, 20, 2)
         | field(features, Feature::Rdm, 28, 1)
         | field(features, Feature::DotProd, 44, 1)
+        | field(features, Feature::Fhm, 48, 1)
 }
 
 /// `ID_AA64ISAR1_EL1` of a processor implementing `features`: LRCPC

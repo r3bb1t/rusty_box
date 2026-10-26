@@ -59,6 +59,10 @@ pub(crate) enum Feature {
     DotProd,
     /// FEAT_I8MM: USDOT, SUDOT, SMMLA, USMMLA, UMMLA.
     I8mm,
+    /// FEAT_FP16: half-precision arithmetic, scalar and Advanced SIMD.
+    Fp16,
+    /// FEAT_FHM: FMLAL, FMLSL, FMLAL2, FMLSL2.
+    Fhm,
 }
 
 /// What the conformance tests read of a feature: `tests/unit/spec.rs`
@@ -66,7 +70,7 @@ pub(crate) enum Feature {
 #[cfg(test)]
 impl Feature {
     /// Every feature, in declaration order.
-    pub(crate) const ALL: [Feature; 15] = [
+    pub(crate) const ALL: [Feature; 17] = [
         Feature::Base,
         Feature::Fp,
         Feature::AdvSimd,
@@ -82,6 +86,8 @@ impl Feature {
         Feature::Rdm,
         Feature::DotProd,
         Feature::I8mm,
+        Feature::Fp16,
+        Feature::Fhm,
     ];
 
     /// The name Arm's data gives the feature, `None` for the base set.
@@ -102,6 +108,8 @@ impl Feature {
             Self::Rdm => Some("FEAT_RDM"),
             Self::DotProd => Some("FEAT_DotProd"),
             Self::I8mm => Some("FEAT_I8MM"),
+            Self::Fp16 => Some("FEAT_FP16"),
+            Self::Fhm => Some("FEAT_FHM"),
         }
     }
 

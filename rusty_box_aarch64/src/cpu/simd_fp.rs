@@ -9,15 +9,16 @@
 //! of doubles needs `Q = 1`.
 
 use super::exec::{bit, bits, ExecResult, Flow};
+use super::features::Feature;
 use super::fp::{
     fp_binary, fp_compare, fp_compare_holds, fp_convert, fp_convert_round_odd, fp_mul_add, fp_to_int, fp_unary,
-    int_to_fp, FpBinary, FpCompare, FpConversion, FpType, FpUnary,
+    int_to_fp, FpBinary, FpCompare, FpConversion, FpType, FpUnary, IntWidth,
 };
 use super::fp_estimate::{urecpe, ursqrte};
 use super::simd::{elem, set_elem};
 use super::simd_arith::narrow_into;
 use super::Cpu;
-use crate::softfloat::{FpOrdering, FpRounding, FusedMulAdd, InexactReport, NanSignal};
+use crate::softfloat::{self as sf, FpOrdering, FpRounding, FusedMulAdd, InexactReport, NanSignal};
 
 #[inline]
 const fn datasize(q: bool) -> u32 {
@@ -39,13 +40,19 @@ enum ZeroCompare {
 }
 
 impl Cpu {
-    /// Three-same floating point, vector (`0 Q U 01110 a sz 1 Rm 11 opc 1
-    /// Rn Rd`) and scalar (`01 U 11110 a sz 1 Rm 11 opc 1 Rn Rd`).
-    pub(crate) fn exec_simd_same_fp(&mut self, pc: u64, insn: u32, scalar: bool) -> ExecResult {
+    /// Three-same floating point of precision `ty`, vector (`0 Q U 01110 a
+    /// sz 1 Rm 11 opc 1 Rn Rd`, and `0 Q U 01110 a 10 Rm 00 opc 1 Rn Rd` for
+    /// half precision) and scalar (`01 U 11110 ...`, likewise).
+    pub(crate) fn exec_simd_same_fp(
+        &mut self,
+        pc: u64,
+        insn: u32,
+        scalar: bool,
+        ty: FpType,
+    ) -> ExecResult {
         let q = bit(insn, 30);
         let u = bit(insn, 29);
         let a = bit(insn, 23);
-        let ty = FpType::from_sz(bit(insn, 22));
         let opc = bits(insn, 13, 11);
 
         #[derive(Clone, Copy)]
@@ -137,15 +144,23 @@ impl Cpu {
         Ok(Flow::Next)
     }
 
-    /// Two-register miscellaneous floating point, vector (`0 Q U 01110 a sz
-    /// 10000 opcode 10 Rn Rd`) and scalar (`01 U 11110 a sz 10000 opcode 10
-    /// Rn Rd`), with URECPE and URSQRTE.
-    pub(crate) fn exec_simd_misc_fp(&mut self, pc: u64, insn: u32, scalar: bool) -> ExecResult {
+    /// Two-register miscellaneous floating point of precision `ty`, vector
+    /// (`0 Q U 01110 a sz 10000 opcode 10 Rn Rd`, and `0 Q U 01110 a 1111 00
+    /// opcode 10 Rn Rd` for half precision) and scalar (`01 U 11110 ...`,
+    /// likewise), with URECPE and URSQRTE. Half precision has no FCVTN,
+    /// FCVTL, FCVTXN, URECPE or URSQRTE.
+    pub(crate) fn exec_simd_misc_fp(
+        &mut self,
+        pc: u64,
+        insn: u32,
+        scalar: bool,
+        ty: FpType,
+    ) -> ExecResult {
         let q = bit(insn, 30);
         let u = bit(insn, 29);
         let a = bit(insn, 23);
-        let sz = bit(insn, 22);
-        let ty = FpType::from_sz(sz);
+        let sz = ty == FpType::Double;
+        let half = ty == FpType::Half;
         let opcode = bits(insn, 16, 12);
         let env = self.fp_env();
 
@@ -221,8 +236,8 @@ impl Cpu {
                 | Each::FromInt(_),
             ) => !scalar && sz && !q,
             Op::Each(Each::Unary(_)) => scalar || (sz && !q),
-            Op::Each(Each::URecipEstimate | Each::URSqrtEstimate) => scalar || sz,
-            Op::Narrow | Op::Long => scalar,
+            Op::Each(Each::URecipEstimate | Each::URSqrtEstimate) => scalar || sz || half,
+            Op::Narrow | Op::Long => scalar || half,
             Op::NarrowOdd => !sz,
         };
         if reserved {
@@ -280,7 +295,6 @@ impl Cpu {
             Op::Each(each) => {
                 let esize = ty.esize();
                 let lanes = if scalar { 1 } else { datasize(q) / esize };
-                let wide = ty == FpType::Double;
                 for e in 0..lanes {
                     let x = elem(n, e, esize);
                     let v = match each {
@@ -305,8 +319,10 @@ impl Cpu {
                                 0
                             }
                         }
-                        Each::ToInt(rounding, signed) => fp_to_int(ty, x, 0, rounding, signed, wide, &mut env),
-                        Each::FromInt(signed) => int_to_fp(ty, x, 0, signed, wide, &mut env),
+                        Each::ToInt(rounding, signed) => {
+                            fp_to_int(ty, x, 0, rounding, signed, IntWidth::OfElement, &mut env)
+                        }
+                        Each::FromInt(signed) => int_to_fp(ty, x, 0, signed, IntWidth::OfElement, &mut env),
                         Each::URecipEstimate => u64::from(urecpe(x as u32)),
                         Each::URSqrtEstimate => u64::from(ursqrte(x as u32)),
                     };
@@ -327,11 +343,14 @@ impl Cpu {
         let u = bit(insn, 29);
         let immh = bits(insn, 22, 19);
         let to_float = bits(insn, 15, 11) == 0b11100;
-        // immh 001x is half precision (FEAT_FP16).
+        // immh 001x is half precision, UNDEFINED without FEAT_FP16 (the
+        // decode pseudocode of each page); 000x is unallocated.
         let ty = if immh & 0b1000 != 0 {
             FpType::Double
         } else if immh & 0b0100 != 0 {
             FpType::Single
+        } else if immh & 0b0010 != 0 && self.implements(Feature::Fp16) {
+            FpType::Half
         } else {
             return self.undefined(pc, insn);
         };
@@ -344,15 +363,22 @@ impl Cpu {
         let n = self.v[bits(insn, 9, 5) as usize];
         let rd = bits(insn, 4, 0) as usize;
         let lanes = if scalar { 1 } else { datasize(q) / esize };
-        let wide = ty == FpType::Double;
         let mut env = self.fp_env();
         let mut r = 0u128;
         for e in 0..lanes {
             let x = elem(n, e, esize);
             let v = if to_float {
-                int_to_fp(ty, x, fbits, !u, wide, &mut env)
+                int_to_fp(ty, x, fbits, !u, IntWidth::OfElement, &mut env)
             } else {
-                fp_to_int(ty, x, fbits, FpRounding::Zero, !u, wide, &mut env)
+                fp_to_int(
+                    ty,
+                    x,
+                    fbits,
+                    FpRounding::Zero,
+                    !u,
+                    IntWidth::OfElement,
+                    &mut env,
+                )
             };
             set_elem(&mut r, e, esize, v);
         }
@@ -362,8 +388,8 @@ impl Cpu {
     }
 
     /// FMLA, FMLS, FMUL, FMULX (by element), vector (`0 Q U 01111 1 sz L M
-    /// Rm opcode H 0 Rn Rd`) and scalar (`01 U 11111 1 sz L M Rm opcode H 0
-    /// Rn Rd`).
+    /// Rm opcode H 0 Rn Rd`, and `0 Q U 01111 00 L M Rm opcode H 0 Rn Rd`
+    /// for half precision) and scalar (`01 U 11111 ...`, likewise).
     pub(crate) fn exec_simd_elem_fp(&mut self, pc: u64, insn: u32, scalar: bool) -> ExecResult {
         let q = bit(insn, 30);
         let u = bit(insn, 29);
@@ -379,15 +405,20 @@ impl Cpu {
             (0b1001, true) => Op::Binary(FpBinary::MulX),
             _ => return self.undefined(pc, insn),
         };
-        // size<1> = 0 is half precision (FEAT_FP16) or unallocated.
-        if !bit(insn, 23) {
-            return self.undefined(pc, insn);
-        }
-        let ty = FpType::from_sz(bit(insn, 22));
-        let (h, l) = (bits(insn, 11, 11), bits(insn, 21, 21));
-        let index = match ty {
-            FpType::Single => (h << 1) | l,
-            FpType::Double if l == 0 => h,
+        // size 00 is half precision (FEAT_FP16, which the decoder checks);
+        // 01 is unallocated.
+        let ty = match bits(insn, 23, 22) {
+            0b00 => FpType::Half,
+            0b10 => FpType::Single,
+            0b11 => FpType::Double,
+            _ => return self.undefined(pc, insn),
+        };
+        let (h, l, m) = (bits(insn, 11, 11), bits(insn, 21, 21), bits(insn, 20, 20));
+        // Half precision indexes with H:L:M and so reaches V0-V15 only.
+        let (index, rm) = match ty {
+            FpType::Half => ((h << 2) | (l << 1) | m, bits(insn, 19, 16)),
+            FpType::Single => ((h << 1) | l, bits(insn, 20, 16)),
+            FpType::Double if l == 0 => (h, bits(insn, 20, 16)),
             FpType::Double => return self.undefined(pc, insn),
         };
         if !scalar && ty == FpType::Double && !q {
@@ -395,7 +426,7 @@ impl Cpu {
         }
         self.simd_check()?;
         let esize = ty.esize();
-        let element = elem(self.v[bits(insn, 20, 16) as usize], index, esize);
+        let element = elem(self.v[rm as usize], index, esize);
         let n = self.v[bits(insn, 9, 5) as usize];
         let rd = bits(insn, 4, 0) as usize;
         let d = self.v[rd];
@@ -415,9 +446,10 @@ impl Cpu {
         Ok(Flow::Next)
     }
 
-    /// FMAXNMV, FMINNMV, FMAXV, FMINV: `0 1 1 01110 a 0 11000 opcode 10 Rn
-    /// Rd`, single precision ×4 only. Arm `Reduce` pairs the halves:
-    /// `op(op(e0, e1), op(e2, e3))`.
+    /// FMAXNMV, FMINNMV, FMAXV, FMINV: `0 Q U 01110 a 0 11000 opcode 10 Rn
+    /// Rd`, single precision ×4 with `U = 1`, half precision ×4 or ×8 with
+    /// `U = 0` (FEAT_FP16, which the decoder checks). Arm `Reduce` pairs
+    /// halves recursively: `op(op(e0, e1), op(e2, e3))` for four elements.
     pub(crate) fn exec_simd_across_fp(&mut self, pc: u64, insn: u32) -> ExecResult {
         let op = match (bits(insn, 16, 12), bit(insn, 23)) {
             (0b01100, false) => FpBinary::MaxNum,
@@ -426,24 +458,39 @@ impl Cpu {
             (0b01111, true) => FpBinary::Min,
             _ => return self.undefined(pc, insn),
         };
-        if !bit(insn, 29) || bit(insn, 22) || !bit(insn, 30) {
+        let q = bit(insn, 30);
+        let ty = if bit(insn, 29) {
+            FpType::Single
+        } else {
+            FpType::Half
+        };
+        if bit(insn, 22) || (ty == FpType::Single && !q) {
             return self.undefined(pc, insn);
         }
         self.simd_check()?;
         let n = self.v[bits(insn, 9, 5) as usize];
+        let esize = ty.esize();
+        let mut lanes = [0u64; 8];
+        let mut count = (datasize(q) / esize) as usize;
+        for (e, lane) in lanes.iter_mut().enumerate().take(count) {
+            *lane = elem(n, e as u32, esize);
+        }
         let mut env = self.fp_env();
-        let ty = FpType::Single;
-        let low = fp_binary(op, ty, elem(n, 0, 32), elem(n, 1, 32), &mut env);
-        let high = fp_binary(op, ty, elem(n, 2, 32), elem(n, 3, 32), &mut env);
-        let result = fp_binary(op, ty, low, high, &mut env);
+        while count > 1 {
+            for i in 0..count / 2 {
+                lanes[i] = fp_binary(op, ty, lanes[2 * i], lanes[2 * i + 1], &mut env);
+            }
+            count /= 2;
+        }
         self.fp_commit(&env);
-        self.write_v(bits(insn, 4, 0) as usize, u128::from(result));
+        self.write_v(bits(insn, 4, 0) as usize, u128::from(lanes[0]));
         Ok(Flow::Next)
     }
 
-    /// FMAXNMP, FMINNMP, FADDP, FMAXP, FMINP (scalar): `01 1 11110 a sz 11000
-    /// opcode 10 Rn Rd` — the two low elements of Vn.
-    pub(crate) fn exec_simd_pair_fp(&mut self, pc: u64, insn: u32) -> ExecResult {
+    /// FMAXNMP, FMINNMP, FADDP, FMAXP, FMINP (scalar) of precision `ty`:
+    /// `01 1 11110 a sz 11000 opcode 10 Rn Rd`, and `01 0 11110 a 0 11000
+    /// opcode 10 Rn Rd` for half precision — the two low elements of Vn.
+    pub(crate) fn exec_simd_pair_fp(&mut self, pc: u64, insn: u32, ty: FpType) -> ExecResult {
         let op = match (bits(insn, 16, 12), bit(insn, 23)) {
             (0b01100, false) => FpBinary::MaxNum,
             (0b01100, true) => FpBinary::MinNum,
@@ -453,7 +500,6 @@ impl Cpu {
             _ => return self.undefined(pc, insn),
         };
         self.simd_check()?;
-        let ty = FpType::from_sz(bit(insn, 22));
         let esize = ty.esize();
         let n = self.v[bits(insn, 9, 5) as usize];
         let mut env = self.fp_env();
@@ -462,4 +508,57 @@ impl Cpu {
         self.write_v(bits(insn, 4, 0) as usize, u128::from(result));
         Ok(Flow::Next)
     }
+
+    /// FMLAL, FMLSL, FMLAL2, FMLSL2 (FEAT_FHM), vector (`0 Q U 01110 S 0 1
+    /// Rm 11x01 1 Rn Rd`) and by element (`0 Q U 01111 1 0 L M Rm x S 00 H 0
+    /// Rn Rd`, `S` at bit 14). Each 32-bit lane of Vd accumulates the product
+    /// of two half-precision elements (Arm `FPMulAddH`), negated for FMLSL:
+    /// the elements of the low half of Vn, or with `U = 1` (the `2` forms)
+    /// the high half, times the matching elements of Vm's same half, or by
+    /// element one element of V0-V15.
+    pub(crate) fn exec_simd_fmlal(&mut self, insn: u32, by_element: bool) -> ExecResult {
+        let q = bit(insn, 30);
+        let upper = bit(insn, 29);
+        let subtract = if by_element { bit(insn, 14) } else { bit(insn, 23) };
+        self.simd_check()?;
+        let datasize = datasize(q);
+        let half = datasize / 2;
+        // Arm `Vpart[n, part]` at `datasize / 2` bits.
+        let part = |v: u128| {
+            let v = if upper { v >> half } else { v };
+            v & ((1u128 << half) - 1)
+        };
+        let operand1 = part(self.v[bits(insn, 9, 5) as usize]);
+        // By element, `V[Rm<3:0>]` and the element `H:L:M` of it for every
+        // lane; otherwise Vm's part, element for element.
+        let operand2 = if by_element {
+            self.v[bits(insn, 19, 16) as usize]
+        } else {
+            part(self.v[bits(insn, 20, 16) as usize])
+        };
+        let index = (bits(insn, 11, 11) << 2) | (bits(insn, 21, 21) << 1) | bits(insn, 20, 20);
+        let rd = bits(insn, 4, 0) as usize;
+        let d = self.v[rd];
+        let form = if subtract { FusedMulAdd::Fmsub } else { FusedMulAdd::Fmadd };
+        let mut env = self.fp_env();
+        let mut r = 0u128;
+        for e in 0..datasize / 32 {
+            let a = elem(operand1, e, 16) as u16;
+            let b = elem(operand2, if by_element { index } else { e }, 16) as u16;
+            let acc = elem(d, e, 32) as u32;
+            set_elem(
+                &mut r,
+                e,
+                32,
+                u64::from(sf::f16_mul_add_long(form, acc, a, b, &mut env.status)),
+            );
+        }
+        self.fp_commit(&env);
+        self.write_v(rd, r);
+        Ok(Flow::Next)
+    }
 }
+
+#[cfg(test)]
+#[path = "../../tests/unit/fp16.rs"]
+mod fp16_tests;

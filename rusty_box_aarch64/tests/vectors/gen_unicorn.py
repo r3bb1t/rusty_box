@@ -113,6 +113,29 @@ def initial_state(seed, kind, insn):
                 width = 32 if single else 64
                 v[i] = sum(lane << (width * k) for k, lane in enumerate(lanes))
         fpcr = (r.next() & 0x1F) << 22
+    if kind == "H":
+        # Half-precision inputs (FEAT_FP16, FEAT_FHM): per register, random
+        # bits, lanes of special and ordinary half values, or of single
+        # values (FMLAL's accumulators); then a random FPCR (RMode, FZ, DN,
+        # AHP) and FZ16.
+        for i in range(32):
+            sel = r.next() & 7
+            if sel >= 2:
+                half = sel <= 5
+                mixed = sel in (2, 3, 6)
+                lanes = []
+                for _ in range(8 if half else 4):
+                    w = r.next()
+                    if mixed and w & 1:
+                        table = F16_SPECIAL if half else F32_SPECIAL
+                        lanes.append(table[(w >> 1) % len(table)])
+                    elif half:
+                        lanes.append(ordinary_f16(w))
+                    else:
+                        lanes.append(ordinary_f32(w))
+                width = 16 if half else 32
+                v[i] = sum(lane << (width * k) for k, lane in enumerate(lanes))
+        fpcr = ((r.next() & 0x1F) << 22) | ((r.next() & 1) << 19)
     if kind == "T":
         rn = (insn >> 5) & 31
         if rn != 31:
@@ -156,6 +179,19 @@ F64_SPECIAL = [
     0x43F0000000000000, 0x47EFFFFFE0000000, 0x36A0000000000000,
     0x3810000000000000, 0x380FFFFFFFFFFFFF,
 ]
+
+
+F16_SPECIAL = [
+    0x0000, 0x8000, 0x7C00, 0xFC00, 0x7E00, 0xFE12, 0x7C01, 0xFD00,
+    0x0001, 0x83FF, 0x0400, 0x8400, 0x7BFF, 0xFBFF, 0x3C00, 0xBC00,
+    0x3800, 0xB800, 0x3E00, 0x4100, 0xC100, 0x4300, 0x6400, 0x67FF,
+    0x7800, 0xF800, 0x7BFE, 0x0200, 0x3BFF, 0x3C01, 0x0401, 0x03FF,
+]
+
+
+def ordinary_f16(w):
+    """A finite half value of moderate size: exponent 9..21 (2^-6..2^6)."""
+    return ((w >> 63) << 15) | ((9 + ((w >> 32) % 13)) << 10) | (w & 0x3FF)
 
 
 def ordinary_f32(w):

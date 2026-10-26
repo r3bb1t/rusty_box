@@ -4,12 +4,21 @@
 use rusty_box_core::snap::{SnapRead, SnapResult, SnapWrite};
 use rusty_box_core::SnapError;
 
+use super::features::{Feature, Implementation};
 use super::regs::{CpuState, Reg, RegClass, VReg};
 use super::{Activity, Cpu, CpuConfig, El, ExclusiveMonitor, Pstate, SysRegs, PC_HISTORY};
 
-/// `FPCR` bits this core keeps: AHP, DN, FZ and RMode. The trap enables read
-/// as zero on a core without trapped floating-point exceptions.
-pub(crate) const FPCR_MASK: u64 = 0x07C0_0000;
+/// `FPCR` bits a processor implementing `imp` keeps: AHP, DN, FZ and RMode,
+/// and FZ16 with FEAT_FP16 (RES0 without it). The trap enables read as zero
+/// on a core without trapped floating-point exceptions.
+pub(crate) const fn fpcr_mask(imp: Implementation) -> u64 {
+    const BASE: u64 = 0x07C0_0000;
+    if imp.has(Feature::Fp16) {
+        BASE | crate::softfloat::FPCR_FZ16
+    } else {
+        BASE
+    }
+}
 
 /// `FPSR` bits this core keeps: N, Z, C, V, QC and the cumulative exception
 /// flags.
@@ -175,7 +184,7 @@ impl Cpu {
             RegClass::Pc => self.pc = value,
             RegClass::Nzcv => self.pstate.set_nzcv(value),
             RegClass::Daif => self.pstate.set_daif(value),
-            RegClass::Fpcr => self.fpcr = value & FPCR_MASK,
+            RegClass::Fpcr => self.fpcr = value & fpcr_mask(self.imp),
             RegClass::Fpsr => self.fpsr = value & FPSR_MASK,
         }
     }
@@ -286,7 +295,7 @@ impl Cpu {
             let hi = r.read_u64()?;
             *reg = u128::from(lo) | (u128::from(hi) << 64);
         }
-        let fpcr = r.read_u64()? & FPCR_MASK;
+        let fpcr = r.read_u64()? & fpcr_mask(self.imp);
         let fpsr = r.read_u64()? & FPSR_MASK;
         let mut sys = [0u64; SYSREG_COUNT];
         for value in sys.iter_mut() {

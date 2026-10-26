@@ -37,6 +37,7 @@ mod f64_sqrt;
 mod f64_to_f16;
 mod f64_to_f32;
 mod f64_to_int;
+mod half;
 mod int_to_float;
 mod internals;
 mod min_max;
@@ -62,11 +63,18 @@ pub(crate) use self::arm_ops::{
     f64_to_f16_ahp, f64_to_f32_round_odd, f64_to_i32_fixed, f64_to_i64_fixed, f64_to_u32_fixed,
     f64_to_u64_fixed, i64_to_f32_fixed, i64_to_f64_fixed, u64_to_f32_fixed, u64_to_f64_fixed,
 };
+pub(crate) use self::half::{
+    f16_add, f16_compare, f16_div, f16_max, f16_maxnum, f16_min, f16_minnum, f16_mul, f16_mul_add, f16_mul_add_long,
+    f16_mulx, f16_recip_step, f16_round_to_int, f16_rsqrt_step, f16_sqrt, f16_sub, f16_to_signed, f16_to_unsigned,
+    int_to_f16,
+};
 pub(crate) use self::softfloat::FpOrdering;
 
 // FPCR fields (Arm ARM FPCR).
 const FPCR_RMODE_SHIFT: u32 = 22;
 const FPCR_FZ: u64 = 1 << 24;
+/// FPCR.FZ16 (FEAT_FP16): flush to zero for half-precision arithmetic.
+pub(crate) const FPCR_FZ16: u64 = 1 << 19;
 const FPCR_DN: u64 = 1 << 25;
 
 // FPSR cumulative exception bits (Arm ARM FPSR).
@@ -182,6 +190,9 @@ impl FusedMulAdd {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ArmFpStatus {
     status: SoftFloatStatus,
+    /// FPCR.FZ16, which only the half-precision arithmetic in `half`
+    /// reads.
+    flush_half: bool,
 }
 
 impl ArmFpStatus {
@@ -189,6 +200,7 @@ impl ArmFpStatus {
     pub(crate) fn from_fpcr(fpcr: u64) -> Self {
         let mut fp = Self {
             status: SoftFloatStatus::default(),
+            flush_half: false,
         };
         fp.set_fpcr(fpcr);
         fp
@@ -200,6 +212,7 @@ impl ArmFpStatus {
         self.status.softfloat_rounding_mode = FpRounding::from_fpcr(fpcr).softfloat_mode();
         self.status.flush_to_zero = fpcr & FPCR_FZ != 0;
         self.status.default_nan_mode = fpcr & FPCR_DN != 0;
+        self.flush_half = fpcr & FPCR_FZ16 != 0;
     }
 
     /// The FPCR.RMode rounding, for the operations Arm defines to use it

@@ -109,6 +109,18 @@ const F64_SPECIAL: [u64; 35] = [
     0x380F_FFFF_FFFF_FFFF,
 ];
 
+/// Mirrors `F16_SPECIAL` in gen_unicorn.py.
+const F16_SPECIAL: [u64; 32] = [
+    0x0000, 0x8000, 0x7C00, 0xFC00, 0x7E00, 0xFE12, 0x7C01, 0xFD00, 0x0001, 0x83FF, 0x0400, 0x8400,
+    0x7BFF, 0xFBFF, 0x3C00, 0xBC00, 0x3800, 0xB800, 0x3E00, 0x4100, 0xC100, 0x4300, 0x6400, 0x67FF,
+    0x7800, 0xF800, 0x7BFE, 0x0200, 0x3BFF, 0x3C01, 0x0401, 0x03FF,
+];
+
+/// Mirrors `ordinary_f16` in gen_unicorn.py.
+fn ordinary_f16(w: u64) -> u64 {
+    ((w >> 63) << 15) | ((9 + ((w >> 32) % 13)) << 10) | (w & 0x3FF)
+}
+
 /// Mirrors `ordinary_f32` in gen_unicorn.py.
 fn ordinary_f32(w: u64) -> u64 {
     ((w >> 63) << 31) | ((117 + ((w >> 32) % 21)) << 23) | (w & 0x7F_FFFF)
@@ -184,6 +196,31 @@ fn initial_state(seed: u64, kind: &str, insn: u32) -> State {
             }
         }
         fpcr = (r.next() & 0x1F) << 22;
+    }
+    if kind == "H" {
+        for slot in v.iter_mut() {
+            let sel = r.next() & 7;
+            if sel >= 2 {
+                let half = sel <= 5;
+                let mixed = matches!(sel, 2 | 3 | 6);
+                let (count, width) = if half { (8, 16) } else { (4, 32) };
+                let mut value = 0u128;
+                for k in 0..count {
+                    let w = r.next();
+                    let lane = if mixed && w & 1 == 1 {
+                        let table: &[u64] = if half { &F16_SPECIAL } else { &F32_SPECIAL };
+                        table[((w >> 1) % table.len() as u64) as usize]
+                    } else if half {
+                        ordinary_f16(w)
+                    } else {
+                        ordinary_f32(w)
+                    };
+                    value |= u128::from(lane) << (width * k);
+                }
+                *slot = value;
+            }
+        }
+        fpcr = ((r.next() & 0x1F) << 22) | ((r.next() & 1) << 19);
     }
     let rn = ((insn >> 5) & 31) as usize;
     if kind == "T" && rn != 31 {

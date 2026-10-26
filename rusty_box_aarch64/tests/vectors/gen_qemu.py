@@ -13,12 +13,17 @@ static program, qemu_harness.c with qemu_trampoline.S, under `qemu-aarch64
 -cpu max`, into qemu_max.txt, which the Rust replay runs on a processor
 with every feature this core implements. A word the program could not run
 (it raised a signal: unallocated, or a feature QEMU's max lacks) is
-dropped.
+dropped, and so is one QEMU aborts on (QEMU 8.2.2 asserts on some
+unallocated two-register miscellaneous half-precision words, in
+`disas_simd_two_reg_misc_fp16`); the harness restarts after it.
 
 QEMU is wrong too in places, and a family steers clear of what it is
 known to get wrong, against the Arm ARM's pseudocode: QEMU 8.2.2 adds the
 `imm9` of LDAPUR and STLUR unsigned, where Arm's `SignExtend(imm9)` makes
-it signed, so `rcpc_unscaled` keeps the offset non-negative.
+it signed, so `rcpc_unscaled` keeps the offset non-negative; it executes
+the scalar half-precision FABS and FNEG, which Arm does not allocate; and
+it sign-extends the result of FCVTZS (scalar, fixed-point) to half
+precision into 32 bits. The fixups below say how each family avoids them.
 
 The program runs at EL0 with the MMU on, over Normal memory: families keep
 every access aligned (the replay runs at EL1 with the MMU off, over Device
@@ -68,6 +73,36 @@ def dot_elem_size(w):
     return w & ~(1 << 22)
 
 
+def fcmp_zero_rm(w):
+    """FCMP, FCMPE: the compares with zero keep `Rm = 00000`, a should-be
+    field QEMU ignores (README, "Where the references differ")."""
+    return w & ~(0x1F << 16) if w & 0x8 else w
+
+
+def fmov_imm5(w):
+    """FMOV (scalar, immediate): `imm5 = 00000`."""
+    return w & ~(0x1F << 5)
+
+
+def scalar_misc_fp16(w):
+    """The scalar two-register miscellaneous half-precision class has no
+    FABS or FNEG (`a = 1`, opcode 01111), which QEMU 8.2.2 executes: the
+    opcode becomes 11111, FRECPX (`U = 0`) or unallocated."""
+    if w >> 23 & 1 and w >> 12 & 0x1F == 0b01111:
+        return w | (1 << 16)
+    return w
+
+
+def unsigned_fcvtz(w):
+    """FCVTZS (scalar, fixed-point) to half precision: QEMU 8.2.2 writes the
+    16-bit result sign-extended to 32 bits, where Arm's `V[d] = result`
+    zeroes the bits above it, so the family converts to unsigned (FCVTZU);
+    SCVTF and UCVTF keep both."""
+    if w >> 11 & 0x1F == 0b11111:
+        return w | (1 << 29)
+    return w
+
+
 FAMILIES = [
     # FEAT_LSE: LDADD, LDCLR, LDEOR, LDSET, LDSMAX, LDSMIN, LDUMAX, LDUMIN
     # and SWP of every size and ordering (o3 = 1 with another opc is
@@ -89,6 +124,35 @@ FAMILIES = [
     ("dot_vector", "V", 0x0E009400, 0x60DF0BFF, None),
     ("dot_elem", "V", 0x0F00E000, 0x60FF1BFF, dot_elem_size),
     ("mmla", "V", 0x4E80A400, 0x201F0BFF, None),
+    # FEAT_FP16, scalar: data processing with one, two and three sources,
+    # compares, conditional compare and select, FMOV (immediate), and the
+    # conversions to and from general registers, fixed point included.
+    ("fp16_dp1", "H", 0x1EE04000, 0x001F83FF, None),
+    ("fp16_dp2", "H", 0x1EE00800, 0x001FF3FF, None),
+    ("fp16_dp3", "H", 0x1FC00000, 0x003FFFFF, None),
+    ("fp16_cmp", "H", 0x1EE02000, 0x001F03F8, fcmp_zero_rm),
+    ("fp16_ccmp", "H", 0x1EE00400, 0x001FF3FF, None),
+    ("fp16_csel", "H", 0x1EE00C00, 0x001FF3FF, None),
+    ("fp16_imm", "H", 0x1EE01000, 0x001FE01F, fmov_imm5),
+    ("fp16_int", "H", 0x1EE00000, 0x801F03FF, None),
+    ("fp16_fixed", "H", 0x1EC00000, 0x801FFFFF, None),
+    # FEAT_FP16, Advanced SIMD: three-same and two-register miscellaneous,
+    # vector and scalar, by element, across lanes, pairwise, FMOV (vector,
+    # immediate) and the fixed-point conversions.
+    ("fp16_same", "H", 0x0E400400, 0x609F3BFF, None),
+    ("fp16_scalar_same", "H", 0x5E400400, 0x209F3BFF, None),
+    ("fp16_misc", "H", 0x0E780800, 0x6081F3FF, None),
+    ("fp16_scalar_misc", "H", 0x5E780800, 0x2081F3FF, scalar_misc_fp16),
+    ("fp16_elem", "H", 0x0F000000, 0x603FFBFF, None),
+    ("fp16_scalar_elem", "H", 0x5F000000, 0x203FFBFF, None),
+    ("fp16_across", "H", 0x0E300800, 0x4081F3FF, None),
+    ("fp16_pair", "H", 0x5E300800, 0x0081F3FF, None),
+    ("fp16_movi", "H", 0x0F00FC00, 0x400703FF, None),
+    ("fp16_shift_fixed", "H", 0x0F10E400, 0x600F1BFF, None),
+    ("fp16_scalar_shift_fixed", "H", 0x5F10E400, 0x200F1BFF, unsigned_fcvtz),
+    # FEAT_FHM: FMLAL, FMLSL, FMLAL2, FMLSL2, vector and by element.
+    ("fhm_vector", "H", 0x0E20CC00, 0x60BF23FF, None),
+    ("fhm_elem", "H", 0x0F800000, 0x603FCBFF, None),
 ]
 
 
@@ -100,9 +164,15 @@ def unpack_v(raw):
     return [int.from_bytes(raw[16 * i : 16 * i + 16], "little") for i in range(32)]
 
 
+class EmulatorAborted(Exception):
+    """QEMU itself stopped on a word, killed by a signal (it asserts on
+    some unallocated ones). Any other early exit is the harness's fault and
+    stops the run."""
+
+
 class Harness:
     """The harness program, built into a temporary directory and running
-    under QEMU until closed."""
+    under QEMU until closed; restarted after QEMU aborts on a word."""
 
     def __init__(self, workdir):
         cc = os.environ.get("CC", "aarch64-linux-gnu-gcc")
@@ -122,8 +192,12 @@ class Harness:
             ],
             check=True,
         )
+        self.command = [qemu, "-cpu", "max", exe]
+        self.start()
+
+    def start(self):
         self.proc = subprocess.Popen(
-            [qemu, "-cpu", "max", exe], stdin=subprocess.PIPE, stdout=subprocess.PIPE
+            self.command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
         )
 
     def run(self, insn, x, sp, nzcv, v, data, fpcr):
@@ -145,7 +219,11 @@ class Harness:
     def read(self, n):
         got = self.proc.stdout.read(n)
         if len(got) != n:
-            raise RuntimeError(f"harness exited with {self.proc.wait()}")
+            code = self.proc.wait()
+            if code >= 0:
+                raise RuntimeError(f"harness exited with {code} mid-record")
+            self.start()
+            raise EmulatorAborted(f"QEMU exited with {code}")
         return got
 
     def close(self):
@@ -157,7 +235,11 @@ class Harness:
 
 def run_case(harness, insn, seed, kind):
     x, sp, nzcv, v, data, fpcr = initial_state(seed, kind, insn)
-    result = harness.run(insn, x, sp & MASK64, nzcv, v, data, fpcr)
+    try:
+        result = harness.run(insn, x, sp & MASK64, nzcv, v, data, fpcr)
+    except EmulatorAborted as aborted:
+        print(f"{insn:08x}: {aborted}; dropped", file=sys.stderr)
+        return None
     if result is None:
         return None
     xs, out_sp, out_nzcv, fpsr, vs, out_data = result
@@ -188,6 +270,8 @@ def main():
                     lines.append(f"{name} {line}")
                     kept += 1
             print(f"{name}: {kept} vectors from {attempts} encodings", file=sys.stderr)
+            if kept < wanted:
+                raise SystemExit(f"{name}: {kept} of {wanted} vectors; is the family or the harness broken?")
         harness.close()
     with open(out, "w") as f:
         f.write("\n".join(lines) + "\n")

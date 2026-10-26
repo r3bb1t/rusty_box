@@ -12,6 +12,7 @@
 use rusty_box_core::VmClock;
 
 use super::exception::{Exception, ExceptionClass};
+use super::fp::FpType;
 use super::isa::Class;
 use super::ldst::SingleForm;
 use super::{Activity, Cpu};
@@ -299,6 +300,14 @@ impl Cpu {
             Class::SimdDotProduct => self.exec_simd_dot(pc, insn, false),
             Class::SimdDotProductIndexedElement => self.exec_simd_dot(pc, insn, true),
             Class::SimdMatrixMultiply => self.exec_simd_mmla(pc, insn),
+            Class::SimdThreeSameHalf => self.exec_simd_same_fp(pc, insn, false, FpType::Half),
+            Class::SimdScalarThreeSameHalf => self.exec_simd_same_fp(pc, insn, true, FpType::Half),
+            Class::SimdTwoRegisterMiscHalf => self.exec_simd_misc_fp(pc, insn, false, FpType::Half),
+            Class::SimdScalarTwoRegisterMiscHalf => {
+                self.exec_simd_misc_fp(pc, insn, true, FpType::Half)
+            }
+            Class::SimdFpMulAddLong => self.exec_simd_fmlal(insn, false),
+            Class::SimdFpMulAddLongIndexedElement => self.exec_simd_fmlal(insn, true),
             Class::SimdScalarIndexedElement => self.exec_simd_elem(pc, insn, true),
             Class::SimdAcrossLanes => self.exec_simd_across(pc, insn),
             Class::SimdScalarPairwise => self.exec_simd_scalar_pair(pc, insn),

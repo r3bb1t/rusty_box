@@ -27,8 +27,10 @@ pub(crate) struct EstimateControl {
     /// `FPCR.RMode`: 0 nearest, 1 toward +infinity, 2 toward -infinity,
     /// 3 toward zero.
     pub(crate) rmode: u64,
-    /// `FPCR.FZ`.
+    /// `FPCR.FZ`, for single and double precision.
     pub(crate) flush_to_zero: bool,
+    /// `FPCR.FZ16`, for half precision (FEAT_FP16).
+    pub(crate) flush_half: bool,
     /// `FPCR.DN`.
     pub(crate) default_nan: bool,
 }
@@ -38,7 +40,18 @@ impl EstimateControl {
         Self {
             rmode: (fpcr >> 22) & 3,
             flush_to_zero: (fpcr >> 24) & 1 == 1,
+            flush_half: (fpcr >> 19) & 1 == 1,
             default_nan: (fpcr >> 25) & 1 == 1,
+        }
+    }
+
+    /// Whether denormals of format `f` flush to zero: FPCR.FZ16 for half
+    /// precision, FPCR.FZ otherwise (Arm FPUnpackBase, FPRecipEstimate).
+    const fn flushes(self, f: Format) -> bool {
+        if f.is_half() {
+            self.flush_half
+        } else {
+            self.flush_to_zero
         }
     }
 
@@ -68,6 +81,10 @@ pub(crate) struct Format {
     frac_bits: u32,
 }
 
+pub(crate) const HALF: Format = Format {
+    exp_bits: 5,
+    frac_bits: 10,
+};
 pub(crate) const SINGLE: Format = Format {
     exp_bits: 8,
     frac_bits: 23,
@@ -78,6 +95,9 @@ pub(crate) const DOUBLE: Format = Format {
 };
 
 impl Format {
+    const fn is_half(self) -> bool {
+        self.exp_bits == 5
+    }
     const fn sign_bit(self) -> u64 {
         1 << (self.exp_bits + self.frac_bits)
     }
@@ -137,11 +157,14 @@ fn process_nan(f: Format, bits: u64, ctl: EstimateControl) -> Estimate {
     }
 }
 
-/// `FPCR.FZ` input flushing: a denormal input becomes a zero of its sign
-/// and raises Input Denormal.
+/// Input flushing: under `FPCR.FZ` (`FPCR.FZ16` for half precision) a
+/// denormal input becomes a zero of its sign, raising Input Denormal for
+/// single and double precision only (Arm FPUnpackBase).
 fn flush_input(f: Format, bits: u64, ctl: EstimateControl, raised: &mut u64) -> u64 {
-    if ctl.flush_to_zero && f.exponent(bits) == 0 && f.fraction(bits) != 0 {
-        *raised |= fpsr::IDC;
+    if ctl.flushes(f) && f.exponent(bits) == 0 && f.fraction(bits) != 0 {
+        if !f.is_half() {
+            *raised |= fpsr::IDC;
+        }
         bits & f.sign_bit()
     } else {
         bits
@@ -200,7 +223,7 @@ pub(crate) fn frecpe(f: Format, operand: u64, ctl: EstimateControl) -> Estimate 
     }
     // Abs(value) >= 2^(bias-1) under flush-to-zero: the reciprocal is tiny.
     let bias = f.exp_max() >> 1;
-    if ctl.flush_to_zero && f.exponent(bits) >= 2 * bias - 1 {
+    if ctl.flushes(f) && f.exponent(bits) >= 2 * bias - 1 {
         return done(f.zero(negative), fpsr::UFC);
     }
 

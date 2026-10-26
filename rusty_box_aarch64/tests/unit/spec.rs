@@ -26,7 +26,8 @@
 //!   features the decoder knows ([`Feature`]), and every one of them whose
 //!   condition holds for the complete features alone
 //!   ([`Feature::complete`]); each encoding's arms fix exactly Arm's fixed
-//!   bits; each encoding carries Arm's feature.
+//!   bits; each encoding carries Arm's feature (where Arm's condition names
+//!   several, the one that implies the others in Arm's feature model).
 //! - [`the_decoder_allocates_as_arm_does_on_sampled_words`] and
 //!   [`the_decoder_allocates_as_arm_does_on_every_word`]: on every word,
 //!   [`decode`] names the encoding Arm's data allocates the word to among
@@ -1054,6 +1055,7 @@ fn rust_names(leaf: &Leaf) -> Option<(String, String)> {
 #[cfg_attr(not(aarchmrs), ignore = "reads Arm's AARCHMRS from the directory RUSTY_BOX_AARCHMRS names")]
 fn the_decoder_is_arms_encoding_tree_for_the_implemented_features() {
     let arm = Arm::load();
+    let (_, implications) = feature_implications();
     let src = source();
     assert!(src.errors.is_empty(), "{:#?}", src.errors);
     let mut problems: Vec<String> = Vec::new();
@@ -1137,13 +1139,25 @@ fn the_decoder_is_arms_encoding_tree_for_the_implemented_features() {
                 1u64 << leaf.cube.free_bits()
             ));
         }
+        // The tag is the condition's feature, or, where the condition
+        // names several, the one Arm's feature model makes imply the others
+        // (FEAT_FP16 for `FEAT_AdvSIMD && FEAT_FP16`): gating on it is
+        // gating on the whole condition for every feature set Arm permits,
+        // and every implementation is one
+        // ([`every_implementation_has_what_its_features_imply`]).
         let tag = src.features.get(&(class.clone(), variant.clone())).cloned().unwrap_or_default();
         let tagged: BTreeSet<String> = Feature::ALL
             .iter()
             .filter(|f| format!("{f:?}") == tag)
             .filter_map(|f| f.arm_name().map(str::to_string))
             .collect();
-        if tagged != leaf.features {
+        let implied: BTreeSet<String> = Feature::ALL
+            .iter()
+            .filter(|f| format!("{f:?}") == tag)
+            .flat_map(|&f| implied_by(f, &implications))
+            .filter_map(|f| f.arm_name().map(str::to_string))
+            .collect();
+        if !tagged.is_subset(&leaf.features) || !leaf.features.is_subset(&implied) {
             problems.push(format!("{class}::{variant} is tagged {tag}; Arm's condition for {} names {:?}", leaf.name, leaf.features));
         }
     }
@@ -1368,6 +1382,21 @@ fn feature_implications() -> (String, Vec<(Feature, Feature)>) {
         }
     }
     (release, implications)
+}
+
+/// `feature` and every known feature Arm's implications lead to from it.
+fn implied_by(feature: Feature, implications: &[(Feature, Feature)]) -> Vec<Feature> {
+    let mut found = vec![feature];
+    let mut i = 0;
+    while i < found.len() {
+        for &(a, b) in implications {
+            if a == found[i] && !found.contains(&b) {
+                found.push(b);
+            }
+        }
+        i += 1;
+    }
+    found
 }
 
 /// Each processor this crate builds, and the test-only one with every
