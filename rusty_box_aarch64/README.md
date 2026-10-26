@@ -108,10 +108,13 @@ vocabulary are `rusty_box_core`'s, shared with the x86 machine.
   touches, so `IC` maintenance has nothing left to do (as in QEMU's system
   emulation); and only RAM and a flash bank in read-array mode are cached
   at all (the bus says which, and counts the flash writes that could
-  change it). Every instruction is
-  still fetched, checked, executed and reported to an observer exactly as
-  one at a time would be, so a run ends in the same state either way: the
-  equivalence hashes in the speed table below are equal before and after.
+  change it). Every instruction a trace runs is fetched, checked, executed
+  and reported to an observer exactly as one at a time would be, so a run
+  ends in the same state either way: the equivalence hashes in the speed
+  table below are equal before and after. The one exception is the counter
+  poll, below: when the observer does not hear of every instruction, whole
+  iterations of a poll may be skipped, unfetched and unreported, leaving
+  exactly the state running them would leave.
 - **Counter polls fast-forward exactly.** When nobody watches every
   instruction, a loop that reads the system counter, compares it once with a
   value it does not change and branches on an ordering of the two jumps over

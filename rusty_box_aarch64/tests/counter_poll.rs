@@ -21,8 +21,8 @@
 
 use rusty_box_aarch64::board::RAM_BASE;
 use rusty_box_aarch64::{
-    Instrumentation, LentStorage, MachineBuilder, MemoryLoan, RamSize, Reg, RunBudget, StopReason, VirtConfig,
-    VirtMachine,
+    Instrumentation, LentStorage, MachineBuilder, MemoryLoan, RamSize, Reg, RunBudget, StopReason, SysReg,
+    VirtConfig, VirtMachine,
 };
 
 /// Lets the machine fast-forward; counts the branches it hears of.
@@ -231,6 +231,257 @@ const IRQ_POLL: &[(u64, u32)] = &[
     (0x1294, 0xD69F_03E0),
 ];
 
+/// A poll comparing the counter with an immediate on a signed ordering:
+/// wait until it reaches 0x10000, then set `x2`.
+///
+/// ```text
+/// 1:      mrs  x0, cntvct_el0
+///         cmp  x0, #0x10, lsl #12
+///         b.lt 1b
+///         mov  x2, #1
+///         b    .                         // 0x10
+/// ```
+const IMMEDIATE_SIGNED: &[(u64, u32)] = &[
+    (0x00, 0xD53B_E040),
+    (0x04, 0xF140_401F),
+    (0x08, 0x54FF_FFCB),
+    (0x0C, 0xD280_0022),
+    (0x10, 0x1400_0000),
+];
+
+/// [`DIRECT`] with the compare's operands the other way round, the counter
+/// first, on the unsigned ordering that then waits the same way.
+///
+/// ```text
+///         mrs  x1, cntvct_el0
+///         add  x19, x1, #0x10, lsl #12
+/// 1:      mrs  x0, cntvct_el0
+///         cmp  x0, x19
+///         b.lo 1b
+///         mov  x2, #1
+///         b    .                         // 0x18
+/// ```
+const COUNTER_FIRST: &[(u64, u32)] = &[
+    (0x00, 0xD53B_E041),
+    (0x04, 0x9140_4033),
+    (0x08, 0xD53B_E040),
+    (0x0C, 0xEB13_001F),
+    (0x10, 0x54FF_FFC3),
+    (0x14, 0xD280_0022),
+    (0x18, 0x1400_0000),
+];
+
+/// A poll that leaves forward on a signed ordering and otherwise goes back
+/// with `B`, so each iteration runs a `B.cond` it does not take.
+///
+/// ```text
+///         mrs  x1, cntvct_el0
+///         add  x19, x1, #0x10, lsl #12
+/// 1:      mrs  x0, cntvct_el0
+///         cmp  x0, x19
+///         b.ge 2f
+///         b    1b
+/// 2:      mov  x2, #1
+///         b    .                         // 0x1C
+/// ```
+const FORWARD_SIGNED: &[(u64, u32)] = &[
+    (0x00, 0xD53B_E041),
+    (0x04, 0x9140_4033),
+    (0x08, 0xD53B_E040),
+    (0x0C, 0xEB13_001F),
+    (0x10, 0x5400_004A),
+    (0x14, 0x17FF_FFFD),
+    (0x18, 0xD280_0022),
+    (0x1C, 0x1400_0000),
+];
+
+/// A poll that goes round through registers: a `BLR` to a `BR` back to the
+/// read. The `BLR` writes `x30` the same in every iteration; before the
+/// first one runs, `x30` holds something else, so that iteration is not
+/// one of the loop's.
+///
+/// ```text
+///         mrs  x1, cntvct_el0
+///         add  x19, x1, #0x10, lsl #12
+///         adr  x21, loop
+///         adr  x22, back
+/// loop:   mrs  x0, cntvct_el0
+///         cmp  x19, x0
+///         b.ls done
+///         blr  x22
+///         b    .
+/// back:   br   x21
+/// done:   mov  x2, #1
+///         b    .                         // 0x2C
+/// ```
+const THROUGH_REGISTERS: &[(u64, u32)] = &[
+    (0x00, 0xD53B_E041),
+    (0x04, 0x9140_4033),
+    (0x08, 0x1000_0055),
+    (0x0C, 0x1000_00D6),
+    (0x10, 0xD53B_E040),
+    (0x14, 0xEB00_027F),
+    (0x18, 0x5400_0089),
+    (0x1C, 0xD63F_02C0),
+    (0x20, 0x1400_0000),
+    (0x24, 0xD61F_02A0),
+    (0x28, 0xD280_0022),
+    (0x2C, 0x1400_0000),
+];
+
+/// [`DIRECT`] with a `NOP` between the read and the compare.
+///
+/// ```text
+///         mrs  x1, cntvct_el0
+///         add  x19, x1, #0x10, lsl #12
+/// 1:      mrs  x0, cntvct_el0
+///         nop
+///         cmp  x19, x0
+///         b.hi 1b
+///         mov  x2, #1
+///         b    .                         // 0x1C
+/// ```
+const WITH_NOP: &[(u64, u32)] = &[
+    (0x00, 0xD53B_E041),
+    (0x04, 0x9140_4033),
+    (0x08, 0xD53B_E040),
+    (0x0C, 0xD503_201F),
+    (0x10, 0xEB00_027F),
+    (0x14, 0x54FF_FFA8),
+    (0x18, 0xD280_0022),
+    (0x1C, 0x1400_0000),
+];
+
+/// [`DIRECT`] reading the physical counter.
+///
+/// ```text
+///         mrs  x1, cntpct_el0
+///         add  x19, x1, #0x10, lsl #12
+/// 1:      mrs  x0, cntpct_el0
+///         cmp  x19, x0
+///         b.hi 1b
+///         mov  x2, #1
+///         b    .                         // 0x18
+/// ```
+const PHYSICAL: &[(u64, u32)] = &[
+    (0x00, 0xD53B_E021),
+    (0x04, 0x9140_4033),
+    (0x08, 0xD53B_E020),
+    (0x0C, 0xEB00_027F),
+    (0x10, 0x54FF_FFC8),
+    (0x14, 0xD280_0022),
+    (0x18, 0x1400_0000),
+];
+
+/// The virtual address [`TRANSLATED`]'s tables also map RAM at.
+const ALIAS: u64 = 0x8000_0000;
+
+/// [`DIRECT`] run with stage 1 translation on, from an alias of RAM that
+/// only the translation tables provide, so every fetch of it is
+/// translated. The level 1 table at offset 0x10000 maps two 1 GiB blocks
+/// of Normal memory (attribute 0, inner shareable, EL1 read/write) to the
+/// base of RAM: VA 0x4000_0000, where the code runs as it turns
+/// translation on, and VA [`ALIAS`].
+///
+/// ```text
+///         mov  x0, #0xff                 ; msr mair_el1, x0
+///         mov  x0, #0x19                 ; movk x0, #0x80, lsl #16
+///         msr  tcr_el1, x0               // T0SZ 25, 4 KiB granule, EPD1
+///         adr  x0, l1                    ; msr ttbr0_el1, x0
+///         mrs  x0, sctlr_el1             ; orr x0, x0, #1
+///         msr  sctlr_el1, x0             ; isb
+///         mov  x0, #0x80000000           ; add x0, x0, #(alias - _start)
+///         br   x0
+/// alias:  mrs  x1, cntvct_el0
+///         add  x19, x1, #0x10, lsl #12
+/// 1:      mrs  x0, cntvct_el0
+///         cmp  x19, x0
+///         b.hi 1b
+///         mov  x2, #1
+///         b    .                         // ALIAS + 0x50
+///         .org 0x10000
+/// l1:     .quad 0, 0x40000701, 0x40000701
+/// ```
+const TRANSLATED: &[(u64, u32)] = &[
+    (0x00, 0xD280_1FE0),
+    (0x04, 0xD518_A200),
+    (0x08, 0xD280_0320),
+    (0x0C, 0xF2A0_1000),
+    (0x10, 0xD518_2040),
+    (0x14, 0x1007_FF60),
+    (0x18, 0xD518_2000),
+    (0x1C, 0xD538_1000),
+    (0x20, 0xB240_0000),
+    (0x24, 0xD518_1000),
+    (0x28, 0xD503_3FDF),
+    (0x2C, 0xD2B0_0000),
+    (0x30, 0x9100_E000),
+    (0x34, 0xD61F_0000),
+    (0x38, 0xD53B_E041),
+    (0x3C, 0x9140_4033),
+    (0x40, 0xD53B_E040),
+    (0x44, 0xEB00_027F),
+    (0x48, 0x54FF_FFC8),
+    (0x4C, 0xD280_0022),
+    (0x50, 0x1400_0000),
+    (0x1_0008, 0x4000_0701),
+    (0x1_000C, 0x0000_0000),
+    (0x1_0010, 0x4000_0701),
+    (0x1_0014, 0x0000_0000),
+];
+
+/// A poll at EL0. EL1 sets `CNTKCTL_EL1` from `x11`, its vectors and the
+/// target 0x10000, and returns to EL0 at the poll, whose counter read is
+/// the first instruction EL0 runs; a synchronous exception from EL0 lands
+/// at 0xC00 and stays there.
+///
+/// ```text
+/// _start: msr  cntkctl_el1, x11
+///         adr  x0, vectors               ; msr vbar_el1, x0
+///         adr  x0, 1f                    ; msr elr_el1, x0
+///         msr  spsr_el1, xzr             // EL0t
+///         mov  x19, #0x10000
+///         isb
+///         eret
+/// 1:      mrs  x0, cntvct_el0            // 0x24
+///         cmp  x19, x0
+///         b.hi 1b
+///         mov  x2, #1
+///         b    .                         // 0x34
+///         .org 0x800
+/// vectors:
+///         .org vectors + 0x400           // lower EL, AArch64, synchronous
+///         b    .                         // 0xC00
+/// ```
+const AT_EL0: &[(u64, u32)] = &[
+    (0x00, 0xD518_E10B),
+    (0x04, 0x1000_3FE0),
+    (0x08, 0xD518_C000),
+    (0x0C, 0x1000_00C0),
+    (0x10, 0xD518_4020),
+    (0x14, 0xD518_401F),
+    (0x18, 0xD2A0_0033),
+    (0x1C, 0xD503_3FDF),
+    (0x20, 0xD69F_03E0),
+    (0x24, 0xD53B_E040),
+    (0x28, 0xEB00_027F),
+    (0x2C, 0x54FF_FFC8),
+    (0x30, 0xD280_0022),
+    (0x34, 0x1400_0000),
+    (0xC00, 0x1400_0000),
+];
+
+/// `CNTKCTL_EL1.EL0PCTEN` and `EL0VCTEN`: EL0 may read `CNTPCT_EL0`, and
+/// `CNTVCT_EL0`, without a trap.
+const EL0PCTEN: u64 = 1 << 0;
+const EL0VCTEN: u64 = 1 << 1;
+
+/// `ESR_EL1` of [`AT_EL0`]'s `mrs x0, cntvct_el0` trapped from EL0 (Arm ARM
+/// `CNTVCT_EL0` access pseudocode: `AArch64.SystemAccessTrap(EL1, 0x18)`):
+/// EC 0x18, IL, and the ISS of a read (direction 1) of op0 3, op2 2,
+/// op1 3, CRn 14, CRm 0 into `x0`.
+const ESR_CNTVCT_TRAP: u64 = (0x18 << 26) | (1 << 25) | (3 << 20) | (2 << 17) | (3 << 14) | (14 << 10) | 1;
+
 /// A bare machine watched by `observer`, with `program`'s words at their
 /// offsets from the base of RAM and `regs` set.
 fn machine<'r, I: Instrumentation>(
@@ -271,6 +522,11 @@ struct Both {
     stop: StopReason,
     skipping_x20: u64,
     watching_x20: u64,
+    /// `ESR_EL1` at the end, the same for both.
+    esr: u64,
+    /// `x2` at the end, the same for both: each program sets it once its
+    /// poll is over.
+    x2: u64,
 }
 
 /// Run `program` on a [`Skipping`] and a [`Watching`] machine, `slice`
@@ -311,6 +567,8 @@ fn run_both(program: &[(u64, u32)], regs: &[(Reg, u64)], slice: u64, done: Optio
         stop,
         skipping_x20: a.reg_read(Reg::X20),
         watching_x20: b.reg_read(Reg::X20),
+        esr: b.sysreg_read(SysReg::ESR_EL1).expect("ESR_EL1"),
+        x2: b.reg_read(Reg::X2),
     }
 }
 
@@ -442,4 +700,68 @@ fn an_exit_address_inside_a_poll_is_never_skipped() {
     assert_eq!(a.instructions(), 6);
     assert_eq!(a.ticks(), b.ticks());
     assert!(snapshot(&a) == snapshot(&b), "the machines differ");
+}
+
+#[test]
+fn polls_of_every_shape_the_rule_covers_are_fast_forwarded() {
+    struct Case {
+        name: &'static str,
+        program: &'static [(u64, u32)],
+        done: u64,
+    }
+    let cases = [
+        Case { name: "immediate, b.lt", program: IMMEDIATE_SIGNED, done: 0x10 },
+        Case { name: "counter first, b.lo", program: COUNTER_FIRST, done: 0x18 },
+        Case { name: "b.ge forward, b back", program: FORWARD_SIGNED, done: 0x1C },
+        Case { name: "blr, br", program: THROUGH_REGISTERS, done: 0x2C },
+        Case { name: "nop", program: WITH_NOP, done: 0x1C },
+        Case { name: "cntpct_el0", program: PHYSICAL, done: 0x18 },
+        Case { name: "translated", program: TRANSLATED, done: ALIAS - RAM_BASE + 0x50 },
+    ];
+    // Where a step ends inside a skip is the direct poll's subject; these
+    // need one step that ends inside a poll and one that runs it whole.
+    for Case { name, program, done } in cases {
+        for slice in [1000, 1 << 24] {
+            let both = run_both(program, &[], slice, Some(done));
+            assert!(both.finished, "{name}, slice {slice}");
+            assert_eq!(both.stop, StopReason::ExitReached, "{name}, slice {slice}");
+            assert_eq!(both.x2, 1, "{name}, slice {slice}");
+            if slice == 1 << 24 {
+                assert!(
+                    both.skipping.branches * 10 < both.watching.branches,
+                    "{name}, slice {slice}: {} of {} branches run",
+                    both.skipping.branches,
+                    both.watching.branches
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn a_poll_at_el0_traps_where_el0_may_not_read_the_counter_and_is_fast_forwarded_where_it_may() {
+    for cntkctl in [0, EL0PCTEN] {
+        for slice in [1, 1 << 24] {
+            let both = run_both(AT_EL0, &[(Reg::X11, cntkctl)], slice, Some(0xC00));
+            assert!(both.finished, "CNTKCTL_EL1 {cntkctl:#x}, slice {slice}");
+            assert_eq!(both.stop, StopReason::ExitReached, "CNTKCTL_EL1 {cntkctl:#x}, slice {slice}");
+            assert_eq!(both.esr, ESR_CNTVCT_TRAP, "CNTKCTL_EL1 {cntkctl:#x}, slice {slice}");
+            assert_eq!(both.x2, 0, "CNTKCTL_EL1 {cntkctl:#x}, slice {slice}");
+            assert_eq!(both.skipping.branches, both.watching.branches, "CNTKCTL_EL1 {cntkctl:#x}");
+        }
+    }
+    for slice in [1000, 1 << 24] {
+        let both = run_both(AT_EL0, &[(Reg::X11, EL0VCTEN)], slice, Some(0x34));
+        assert!(both.finished, "slice {slice}");
+        assert_eq!(both.stop, StopReason::ExitReached, "slice {slice}");
+        assert_eq!(both.x2, 1, "slice {slice}");
+        if slice == 1 << 24 {
+            assert!(
+                both.skipping.branches * 10 < both.watching.branches,
+                "slice {slice}: {} of {} branches run",
+                both.skipping.branches,
+                both.watching.branches
+            );
+        }
+    }
 }

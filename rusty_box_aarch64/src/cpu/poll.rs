@@ -1,12 +1,14 @@
 //! Exact fast-forward of counter polls: loops that wait for time to pass by
 //! reading the system counter until it passes a value.
 //!
-//! Firmware and kernels wait this way (EDK2's delays spend most of a boot
-//! in such loops). Each iteration's only effect is the passage of time, so
-//! when the processor reaches the counter read of one, and nothing outside
-//! it looks at the instructions in between, it moves straight to the end of
-//! the last iteration that goes the same way as this one, leaving exactly
-//! the state running every instruction would leave.
+//! Firmware and kernels wait this way: of the 630.8 million instructions
+//! EDK2 retires in `aarch64_perfbench`'s run of it, 39.5% are iterations of
+//! its delays' polls that this module skips. Each iteration's only effect
+//! is the passage of time, so when the processor reaches the counter read
+//! of one, and nothing outside it looks at the instructions in between, it
+//! moves straight to the end of the last iteration that goes the same way
+//! as this one, leaving exactly the state running every instruction would
+//! leave.
 //!
 //! # The rule
 //!

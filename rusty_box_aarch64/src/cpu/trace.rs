@@ -321,10 +321,12 @@ pub(crate) struct TraceCache {
     /// the processor make before it next looks outside it, as a tick
     /// modulo 2^32 ([`Cpu::bound_run`]): a run is shorter than 2^32
     /// instructions, each of which retires in one tick. Only the miss path
-    /// of a trace marked [`POLL`] reads it. It is a `u32` so that it fills
-    /// the padding after `generation`, and the processor's layout, on
-    /// which the trace loop's register allocation depends, is the one it
-    /// has without it.
+    /// of a trace marked [`POLL`] reads it. It is a `u32`: with
+    /// `generation`, the only other field narrower than 8 bytes, it fills
+    /// one 8-byte slot that `generation` would otherwise pad out (asserted
+    /// below the struct), so it adds nothing to the cache's size, and the
+    /// processor's layout, on which the trace loop's register allocation
+    /// depends, takes no room for it.
     run_end: u32,
     /// Bochs `pageWriteStampTable::fineGranularityMapping`: per page (by
     /// [`TraceCache::stamp_index`]), a bit per 128-byte line holding a
@@ -332,6 +334,15 @@ pub(crate) struct TraceCache {
     /// [`MAX_STAMPS`] long.
     stamps: Table<u32, MIN_STAMPS>,
 }
+
+// `generation` and `run_end` together take one 8-byte slot of the cache.
+const _: () = assert!(
+    core::mem::size_of::<TraceCache>()
+        == core::mem::size_of::<Table<Entry, ENTRIES>>()
+            + core::mem::size_of::<Pool>()
+            + core::mem::size_of::<Table<u32, MIN_STAMPS>>()
+            + 8
+);
 
 #[inline(always)]
 const fn slot(pa: u64) -> usize {
