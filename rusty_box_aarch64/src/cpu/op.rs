@@ -2,15 +2,16 @@
 //!
 //! [`predecode`] turns an instruction word and the handler class the
 //! decoder gave it into an [`Op`]. For the instructions that dominate
-//! integer code — the arithmetic and logical immediates, the shifted
+//! guest code — the arithmetic and logical immediates, the shifted
 //! register forms, moves, bitfields, conditional selects, multiply-add,
-//! branches, and the single-register and pair loads and stores of general
-//! registers — the op carries the operand fields its handler reads,
-//! extracted once, with what depends on the word alone worked out ahead
-//! (a logical immediate's bit mask, a branch's offset, a load's scaled
-//! offset). Every other instruction, and every word of those classes that
-//! sets a reserved value, is [`Op::Class`]: its class handler reads its
-//! operands from the word, as the Arm ARM lays them out.
+//! branches, the single-register and pair loads and stores of general
+//! registers, and scalar floating-point arithmetic — the op carries the
+//! operand fields its handler reads, extracted once, with what depends on
+//! the word alone worked out ahead (a logical immediate's bit mask, a
+//! branch's offset, a load's scaled offset). Every other instruction, and
+//! every word of those classes that sets a reserved value, is
+//! [`Op::Class`]: its class handler reads its operands from the word, as
+//! the Arm ARM lays them out.
 //!
 //! An op depends on nothing but the word: not the address it was fetched
 //! from (a trace is keyed by physical address, and one physical page may be
@@ -25,10 +26,12 @@
 
 use super::dp::{add_with_carry, datasize, decode_bit_masks, ones, ror, shift_reg};
 use super::exec::{bit, bits, sext, ExecResult, Flow};
+use super::fp::{dp2_operation, dp3_form, scalar_type, FpBinary, FpDp3Regs, FpType};
 use super::isa::Class;
 use super::mmu::DataAccess;
 use super::Cpu;
 use crate::bus::PhysBus;
+use crate::softfloat::FusedMulAdd;
 
 /// How a load extends what it read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -126,6 +129,11 @@ pub(crate) enum Op {
     LoadPair { size: u8, index: Index, rt: u8, rt2: u8, rn: u8, imm: u64 },
     /// STP/STNP of 32- or 64-bit general registers.
     StorePair { size: u8, index: Index, rt: u8, rt2: u8, rn: u8, imm: u64 },
+    /// FMUL/FDIV/FADD/FSUB/FMAX/FMIN/FMAXNM/FMINNM/FNMUL (scalar), of
+    /// SIMD&FP registers.
+    FpDp2 { op: FpBinary, ty: FpType, rd: u8, rn: u8, rm: u8 },
+    /// FMADD/FMSUB/FNMADD/FNMSUB, of SIMD&FP registers.
+    FpDp3 { form: FusedMulAdd, ty: FpType, rd: u8, rn: u8, rm: u8, ra: u8 },
 }
 
 const _: () = assert!(core::mem::size_of::<Op>() == 16);
@@ -359,6 +367,14 @@ pub(crate) fn predecode(class: Class, word: u32) -> Op {
                 Op::StorePair { size, index, rt, rt2, rn, imm }
             }
         }
+        Class::FpDataProcessing2Source => match (scalar_type(word), dp2_operation(word)) {
+            (Some(ty), Some(op)) => Op::FpDp2 { op, ty, rd, rn, rm },
+            _ => generic,
+        },
+        Class::FpDataProcessing3Source => match scalar_type(word) {
+            Some(ty) => Op::FpDp3 { form: dp3_form(word), ty, rd, rn, rm, ra: reg(word, 10) },
+            None => generic,
+        },
         Class::Undefined
         | Class::Extract
         | Class::ExceptionGeneration
@@ -400,9 +416,7 @@ pub(crate) fn predecode(class: Class, word: u32) -> Op {
         | Class::FpCompare
         | Class::FpImmediate
         | Class::FpConditionalCompare
-        | Class::FpDataProcessing2Source
         | Class::FpConditionalSelect
-        | Class::FpDataProcessing3Source
         | Class::CryptoAes
         | Class::CryptoShaThreeRegister
         | Class::CryptoShaTwoRegister
@@ -460,7 +474,9 @@ impl Op {
             | Self::LoadReg { .. }
             | Self::StoreReg { .. }
             | Self::LoadPair { .. }
-            | Self::StorePair { .. } => false,
+            | Self::StorePair { .. }
+            | Self::FpDp2 { .. }
+            | Self::FpDp3 { .. } => false,
         }
     }
 }
@@ -781,6 +797,16 @@ impl Cpu {
                     self.set_x_or_sp(u32::from(rn), wb);
                 }
                 Ok(Flow::Next)
+            }
+            Op::FpDp2 { op, ty, rd, rn, rm } => self.fp_dp2(op, ty, u32::from(rd), u32::from(rn), u32::from(rm)),
+            Op::FpDp3 { form, ty, rd, rn, rm, ra } => {
+                let regs = FpDp3Regs {
+                    d: u32::from(rd),
+                    n: u32::from(rn),
+                    m: u32::from(rm),
+                    a: u32::from(ra),
+                };
+                self.fp_dp3(form, ty, regs)
             }
         }
     }

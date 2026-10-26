@@ -396,6 +396,55 @@ const fn m_or_s(insn: u32) -> bool {
     bit(insn, 31) || bit(insn, 29)
 }
 
+/// The precision of a scalar FP data-processing word: `None` when M or S
+/// is set or `ftype` is half precision or reserved.
+pub(crate) const fn scalar_type(insn: u32) -> Option<FpType> {
+    if m_or_s(insn) {
+        return None;
+    }
+    FpType::from_ftype(bits(insn, 23, 22))
+}
+
+/// The operation of an FP data-processing (2 source) word, from its
+/// `opcode`: `None` for the unallocated opcodes.
+pub(crate) const fn dp2_operation(insn: u32) -> Option<FpBinary> {
+    Some(match bits(insn, 15, 12) {
+        0b0000 => FpBinary::Mul,
+        0b0001 => FpBinary::Div,
+        0b0010 => FpBinary::Add,
+        0b0011 => FpBinary::Sub,
+        0b0100 => FpBinary::Max,
+        0b0101 => FpBinary::Min,
+        0b0110 => FpBinary::MaxNum,
+        0b0111 => FpBinary::MinNum,
+        0b1000 => FpBinary::NegMul,
+        _ => return None,
+    })
+}
+
+/// The form of an FP data-processing (3 source) word, from `o1` and `o0`.
+pub(crate) const fn dp3_form(insn: u32) -> FusedMulAdd {
+    match (bit(insn, 21), bit(insn, 15)) {
+        (false, false) => FusedMulAdd::Fmadd,
+        (false, true) => FusedMulAdd::Fmsub,
+        (true, false) => FusedMulAdd::Fnmadd,
+        (true, true) => FusedMulAdd::Fnmsub,
+    }
+}
+
+/// The registers of an FP data-processing (3 source) instruction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FpDp3Regs {
+    /// Rd, the result.
+    pub(crate) d: u32,
+    /// Rn, the multiplicand.
+    pub(crate) n: u32,
+    /// Rm, the multiplier.
+    pub(crate) m: u32,
+    /// Ra, the addend.
+    pub(crate) a: u32,
+}
+
 /// The rounding an FCVT{N,P,M,Z}* `rmode` field selects.
 pub(crate) const fn rounding_from_rmode(rmode: u32) -> FpRounding {
     match rmode {
@@ -407,11 +456,12 @@ pub(crate) const fn rounding_from_rmode(rmode: u32) -> FpRounding {
 }
 
 impl Cpu {
-    /// The floating-point environment for an instruction about to execute.
+    /// The floating-point environment for an instruction about to execute:
+    /// the FPCR controls, and the exceptions FPSR has accumulated so far.
     #[inline]
     pub(crate) fn fp_env(&self) -> FpEnv {
         FpEnv {
-            status: ArmFpStatus::from_fpcr(self.fpcr),
+            status: ArmFpStatus::with_fpsr(self.fpcr, self.fpsr),
             fpcr: self.fpcr,
         }
     }
@@ -548,50 +598,51 @@ impl Cpu {
 
     /// Two sources: `000 11110 ftype 1 Rm opcode 10 Rn Rd`.
     pub(crate) fn exec_fp_dp2(&mut self, pc: u64, insn: u32) -> ExecResult {
-        let Some(ty) = FpType::from_ftype(bits(insn, 23, 22)).filter(|_| !m_or_s(insn)) else {
+        let (Some(ty), Some(op)) = (scalar_type(insn), dp2_operation(insn)) else {
             return self.undefined(pc, insn);
         };
-        let op = match bits(insn, 15, 12) {
-            0b0000 => FpBinary::Mul,
-            0b0001 => FpBinary::Div,
-            0b0010 => FpBinary::Add,
-            0b0011 => FpBinary::Sub,
-            0b0100 => FpBinary::Max,
-            0b0101 => FpBinary::Min,
-            0b0110 => FpBinary::MaxNum,
-            0b0111 => FpBinary::MinNum,
-            0b1000 => FpBinary::NegMul,
-            _ => return self.undefined(pc, insn),
-        };
+        self.fp_dp2(op, ty, bits(insn, 4, 0), bits(insn, 9, 5), bits(insn, 20, 16))
+    }
+
+    /// The FP data-processing (2 source) operation `op` of precision `ty`:
+    /// `Vd = Vn op Vm`.
+    #[inline]
+    pub(crate) fn fp_dp2(&mut self, op: FpBinary, ty: FpType, d: u32, n: u32, m: u32) -> ExecResult {
         self.fp_check()?;
-        let a = self.fp_get(bits(insn, 9, 5), ty.mask());
-        let b = self.fp_get(bits(insn, 20, 16), ty.mask());
+        let a = self.fp_get(n, ty.mask());
+        let b = self.fp_get(m, ty.mask());
         let mut env = self.fp_env();
         let result = fp_binary(op, ty, a, b, &mut env);
         self.fp_commit(&env);
-        self.fp_set(bits(insn, 4, 0), ty.mask(), result);
+        self.fp_set(d, ty.mask(), result);
         Ok(Flow::Next)
     }
 
     /// FMADD/FMSUB/FNMADD/FNMSUB: `000 11111 ftype o1 Rm o0 Ra Rn Rd`.
     pub(crate) fn exec_fp_dp3(&mut self, pc: u64, insn: u32) -> ExecResult {
-        let Some(ty) = FpType::from_ftype(bits(insn, 23, 22)).filter(|_| !m_or_s(insn)) else {
+        let Some(ty) = scalar_type(insn) else {
             return self.undefined(pc, insn);
         };
-        let form = match (bit(insn, 21), bit(insn, 15)) {
-            (false, false) => FusedMulAdd::Fmadd,
-            (false, true) => FusedMulAdd::Fmsub,
-            (true, false) => FusedMulAdd::Fnmadd,
-            (true, true) => FusedMulAdd::Fnmsub,
+        let regs = FpDp3Regs {
+            d: bits(insn, 4, 0),
+            n: bits(insn, 9, 5),
+            m: bits(insn, 20, 16),
+            a: bits(insn, 14, 10),
         };
+        self.fp_dp3(dp3_form(insn), ty, regs)
+    }
+
+    /// The fused multiply-add `form` of precision `ty` over `regs`.
+    #[inline]
+    pub(crate) fn fp_dp3(&mut self, form: FusedMulAdd, ty: FpType, regs: FpDp3Regs) -> ExecResult {
         self.fp_check()?;
-        let n = self.fp_get(bits(insn, 9, 5), ty.mask());
-        let m = self.fp_get(bits(insn, 20, 16), ty.mask());
-        let a = self.fp_get(bits(insn, 14, 10), ty.mask());
+        let n = self.fp_get(regs.n, ty.mask());
+        let m = self.fp_get(regs.m, ty.mask());
+        let a = self.fp_get(regs.a, ty.mask());
         let mut env = self.fp_env();
         let result = fp_mul_add(form, ty, a, n, m, &mut env);
         self.fp_commit(&env);
-        self.fp_set(bits(insn, 4, 0), ty.mask(), result);
+        self.fp_set(regs.d, ty.mask(), result);
         Ok(Flow::Next)
     }
 

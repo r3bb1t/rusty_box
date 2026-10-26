@@ -10,9 +10,12 @@
 //! word on its class handler, and the boundaries between classes are all
 //! reached; and from wholly random words. States are random: general and
 //! SP registers (half of them pointing into a small RAM, aligned or not),
-//! NZCV, the exception level and stack pointer selection, the SP and
-//! strict alignment checks, and the MMU off (Device memory, so misaligned
-//! accesses fault) or on over an identity map whose permissions vary.
+//! SIMD&FP registers (mostly numbers of moderate size, sometimes a zero,
+//! an infinity, a NaN or a denormal), FPCR's controls, FPSR's cumulative
+//! bits, the SIMD&FP enable, NZCV, the exception level and stack pointer
+//! selection, the SP and strict alignment checks, and the MMU off (Device
+//! memory, so misaligned accesses fault) or on over an identity map whose
+//! permissions vary.
 
 use std::collections::BTreeMap;
 use std::vec::Vec;
@@ -95,12 +98,54 @@ fn register(rng: &mut SplitMix64) -> u64 {
     }
 }
 
+/// A random floating-point value: a zero, an infinity, a NaN, a denormal
+/// or the largest number now and then, any bits now and then, and most of
+/// the time a number of moderate magnitude, so that sums and products are
+/// mostly normal and inexact; double precision in the low 64 bits, or
+/// single precision in the low 32.
+fn fp_register(rng: &mut SplitMix64) -> u128 {
+    const DOUBLE_SPECIALS: [u64; 8] = [
+        0,
+        1 << 63,
+        0x7FF0_0000_0000_0000,
+        0xFFF0_0000_0000_0000,
+        0x7FF8_0000_0000_0001,
+        0x7FF0_0000_0000_0001,
+        0x0000_0000_0000_0001,
+        0x7FEF_FFFF_FFFF_FFFF,
+    ];
+    const SINGLE_SPECIALS: [u32; 8] = [0, 1 << 31, 0x7F80_0000, 0xFF80_0000, 0x7FC0_0001, 0x7F80_0001, 1, 0x7F7F_FFFF];
+    let r = rng.next();
+    let bits = rng.next();
+    let upper = u128::from(rng.next()) << 64;
+    let single = r & 8 != 0;
+    let low = match (r % 8, single) {
+        (0, false) => DOUBLE_SPECIALS[(bits % 8) as usize],
+        (0, true) => u64::from(SINGLE_SPECIALS[(bits % 8) as usize]) | (rng.next() << 32),
+        (1, _) => bits,
+        (_, false) => (bits & 0x800F_FFFF_FFFF_FFFF) | ((1023 - 40 + (r >> 8) % 80) << 52),
+        (_, true) => u64::from((bits as u32 & 0x807F_FFFF) | ((127 - 20 + ((r >> 8) % 40) as u32) << 23)) | (bits & !0xFFFF_FFFF),
+    };
+    upper | u128::from(low)
+}
+
 /// Put `cpu` and `bus` in the state `seed` names.
 fn set_up(cpu: &mut Cpu, bus: &mut TestBus, seed: u64) {
     let mut rng = SplitMix64(seed);
     for x in cpu.x.iter_mut() {
         *x = register(&mut rng);
     }
+    for v in cpu.v.iter_mut() {
+        *v = fp_register(&mut rng);
+    }
+    // FPCR.RMode, FZ, DN and AHP, to nearest half the time; FPSR's
+    // cumulative bits, IXC set half the time; the SIMD&FP enable, mostly
+    // on.
+    let fp = rng.next();
+    let rmode = if fp & 1 == 0 { 0 } else { (fp >> 1) & 3 };
+    cpu.fpcr = (rmode << 22) | (((fp >> 3) & 0b111) << 24);
+    cpu.fpsr = (fp >> 8) & 0b1001_1111;
+    cpu.sys.cpacr_el1 = if fp & (3 << 16) == 0 { ((fp >> 18) & 3) << 20 } else { 3 << 20 };
     cpu.sp_el0 = register(&mut rng);
     cpu.sp_el1 = register(&mut rng);
     let flags = rng.next();
@@ -142,7 +187,7 @@ fn snapshot(cpu: &Cpu) -> Vec<u8> {
 }
 
 /// `(mask, value)`: the fixed bits of an encoding class.
-const TEMPLATES: [(u32, u32, &str); 19] = [
+const TEMPLATES: [(u32, u32, &str); 21] = [
     (0x1F80_0000, 0x1100_0000, "add/sub (immediate)"),
     (0x1F20_0000, 0x0B00_0000, "add/sub (shifted register)"),
     (0x1F80_0000, 0x1200_0000, "logical (immediate)"),
@@ -162,6 +207,8 @@ const TEMPLATES: [(u32, u32, &str); 19] = [
     (0x3B20_0000, 0x3800_0000, "load/store (immediate, unscaled and indexed)"),
     (0x3B20_0C00, 0x3820_0800, "load/store (register offset)"),
     (0x3800_0000, 0x2800_0000, "load/store pair"),
+    (0x1F20_0C00, 0x1E20_0800, "floating-point data processing (2 source)"),
+    (0x1F00_0000, 0x1F00_0000, "floating-point data processing (3 source)"),
 ];
 
 #[test]
@@ -179,7 +226,7 @@ fn every_pre_decoded_op_executes_as_its_class_handler_does() {
     let mut hits: BTreeMap<&'static str, u32> = BTreeMap::new();
     for i in 0..400_000u32 {
         let random = rng.next();
-        let word = match TEMPLATES.get((i % 21) as usize) {
+        let word = match TEMPLATES.get(i as usize % (TEMPLATES.len() + 2)) {
             Some(&(mask, value, _)) => (random as u32 & !mask) | value,
             None => random as u32,
         };
@@ -208,10 +255,10 @@ fn every_pre_decoded_op_executes_as_its_class_handler_does() {
 }
 
 /// The name of every `Op` variant but `Class`.
-const VARIANTS: [&str; 28] = [
+const VARIANTS: [&str; 30] = [
     "AddImm", "AddsImm", "AddSubShift", "LogImm", "LogShift", "MovImm", "Movk", "Adr", "Adrp", "Ubfm", "Sbfm", "Bfm",
     "CondSel", "Madd", "BCond", "Cbz", "Tbz", "B", "Bl", "Br", "Blr", "Nop", "LoadImm", "StoreImm", "LoadReg",
-    "StoreReg", "LoadPair", "StorePair",
+    "StoreReg", "LoadPair", "StorePair", "FpDp2", "FpDp3",
 ];
 
 fn variant(op: Op) -> &'static str {
@@ -245,5 +292,7 @@ fn variant(op: Op) -> &'static str {
         Op::StoreReg { .. } => "StoreReg",
         Op::LoadPair { .. } => "LoadPair",
         Op::StorePair { .. } => "StorePair",
+        Op::FpDp2 { .. } => "FpDp2",
+        Op::FpDp3 { .. } => "FpDp3",
     }
 }

@@ -87,8 +87,9 @@ vocabulary are `rusty_box_core`'s, shared with the x86 machine.
 - **Instructions are decoded once, into traces.** The design is Bochs's
   trace cache (`cpu/icache.h`, `cpu/icache.cc`, `cpu/cpu.cc`), as
   rusty_box's x86 interpreter ports it. [`src/cpu/op.rs`](src/cpu/op.rs)
-  turns a word into an `Op`: for the integer, branch and general-register
-  load/store forms that dominate guest code, the operand fields extracted
+  turns a word into an `Op`: for the integer, branch, general-register
+  load/store and scalar FP arithmetic forms that dominate guest code, the
+  operand fields extracted
   once, with what depends on the word alone worked out ahead (a logical
   immediate's mask, a branch offset); every other word stays on its class
   handler. [`src/cpu/trace.rs`](src/cpu/trace.rs) keeps straight-line runs
@@ -110,17 +111,25 @@ vocabulary are `rusty_box_core`'s, shared with the x86 machine.
   still fetched, checked, executed and reported to an observer exactly as
   one at a time would be, so a run ends in the same state either way: the
   equivalence hashes in the speed table below are equal before and after.
-- **Floating point is software.** `src/softfloat` is rusty_box's own port of
-  Berkeley SoftFloat 3e (via Bochs softfloat3e), restricted to half, single
-  and double precision and given an Arm specialization: Arm's default NaN and
-  NaN-propagation order (including fused multiply-add), FPCR.DN, FPCR.FZ
+- **Floating point is defined in software.** `src/softfloat` is rusty_box's
+  own port of Berkeley SoftFloat 3e (via Bochs softfloat3e), restricted to
+  half, single and double precision and given an Arm specialization: Arm's
+  default NaN and NaN-propagation order (including fused multiply-add),
+  FPCR.DN, FPCR.FZ
   input and output flushing, tininess before rounding, and saturating
   float-to-integer conversions. On top of it `softfloat/arm_ops.rs` adds what
   Berkeley has no counterpart for — fixed-point conversions, FCVTXN's
   round-to-odd, the FPCR.AHP alternative half-precision format, FMULX,
   FRECPS and FRSQRTS — and `cpu/fp_estimate.rs` the bit-exact
   FRECPE/FRSQRTE/URECPE/URSQRTE/FRECPX algorithms. Exceptions accumulate into
-  FPSR; like a Cortex-A57, the core does not trap them.
+  FPSR; like a Cortex-A57, the core does not trap them. SoftFloat is the
+  definition: [`src/softfloat/host.rs`](src/softfloat/host.rs) lets the host
+  compute a single- or double-precision add, subtract, multiply or divide
+  only where IEEE 754 makes the host's answer SoftFloat's (QEMU's
+  "hardfloat" rule, narrowed). Rounding must be to nearest even with inexact
+  already raised, both operands normal, and the result normal, finite and
+  above the smallest normal. `tests/unit/host_float.rs` checks the host
+  against SoftFloat at those boundaries under every FPCR, mutation-checked.
 
 ## Speed
 

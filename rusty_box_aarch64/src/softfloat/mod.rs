@@ -37,6 +37,7 @@ mod f64_sqrt;
 mod f64_to_f16;
 mod f64_to_f32;
 mod f64_to_int;
+mod host;
 mod int_to_float;
 mod internals;
 mod min_max;
@@ -52,6 +53,7 @@ mod uint_convert;
 #[path = "../../tests/unit/softfloat.rs"]
 mod tests;
 
+use self::host::Arith;
 use self::min_max::Extreme;
 use self::softfloat::*;
 use self::specialize::{f32_flush_input, f64_flush_input};
@@ -186,6 +188,7 @@ pub(crate) struct ArmFpStatus {
 
 impl ArmFpStatus {
     /// A status with the controls of `fpcr` and no exception accumulated.
+    #[inline]
     pub(crate) fn from_fpcr(fpcr: u64) -> Self {
         let mut fp = Self {
             status: SoftFloatStatus::default(),
@@ -194,8 +197,20 @@ impl ArmFpStatus {
         fp
     }
 
+    /// The status an instruction starts from: the controls of `fpcr`, with
+    /// the cumulative bits `fpsr` holds already accumulated. Committing it
+    /// ORs those bits back unchanged, and an operation can see that inexact
+    /// is already raised (see [`host`]).
+    #[inline]
+    pub(crate) fn with_fpsr(fpcr: u64, fpsr: u64) -> Self {
+        let mut fp = Self::from_fpcr(fpcr);
+        fp.set_cumulative_fpsr(fpsr);
+        fp
+    }
+
     /// Adopts the controls of a new FPCR value (MSR FPCR), keeping the
     /// accumulated exception bits.
+    #[inline]
     pub(crate) fn set_fpcr(&mut self, fpcr: u64) {
         self.status.softfloat_rounding_mode = FpRounding::from_fpcr(fpcr).softfloat_mode();
         self.status.flush_to_zero = fpcr & FPCR_FZ != 0;
@@ -216,24 +231,47 @@ impl ArmFpStatus {
 
     /// The accumulated exceptions as FPSR cumulative bits (IOC = bit 0,
     /// DZC = 1, OFC = 2, UFC = 3, IXC = 4, IDC = 7); every other bit is 0.
+    #[inline]
     pub(crate) fn cumulative_fpsr(&self) -> u64 {
-        let flags = self.status.softfloat_exception_flags;
-        FLAG_TO_FPSR
-            .iter()
-            .filter(|(flag, _)| flags & flag != 0)
-            .fold(0, |bits, (_, fpsr_bit)| bits | fpsr_bit)
+        flags_to_fpsr(self.status.softfloat_exception_flags)
     }
 
     /// Replaces the accumulated exceptions with the cumulative bits of an
     /// FPSR value (MSR FPSR); bits outside [`FPSR_CUMULATIVE_MASK`] are
     /// ignored.
+    #[inline]
     pub(crate) fn set_cumulative_fpsr(&mut self, fpsr: u64) {
-        self.status.softfloat_exception_flags = FLAG_TO_FPSR
-            .iter()
-            .filter(|(_, fpsr_bit)| fpsr & fpsr_bit != 0)
-            .fold(0, |flags, (flag, _)| flags | flag);
+        self.status.softfloat_exception_flags = fpsr_to_flags(fpsr);
     }
 }
+
+/// [`FLAG_TO_FPSR`] from flags to FPSR bits, as bit moves: IOC stays at
+/// bit 0, DZC to IXC come one place down from bits 2 to 5, and IDC one
+/// place up from bit 6.
+#[inline(always)]
+const fn flags_to_fpsr(flags: i32) -> u64 {
+    let f = flags as u64;
+    (f & 0x01) | ((f >> 1) & 0x1E) | ((f << 1) & 0x80)
+}
+
+/// [`FLAG_TO_FPSR`] from FPSR bits to flags, the moves of
+/// [`flags_to_fpsr`] reversed.
+#[inline(always)]
+const fn fpsr_to_flags(fpsr: u64) -> i32 {
+    ((fpsr & 0x01) | ((fpsr & 0x1E) << 1) | ((fpsr & 0x80) >> 1)) as i32
+}
+
+// The bit moves are the table, and FLAG_DENORMAL moves nowhere.
+const _: () = {
+    let mut i = 0;
+    while i < FLAG_TO_FPSR.len() {
+        let (flag, fpsr_bit) = FLAG_TO_FPSR[i];
+        assert!(flags_to_fpsr(flag) == fpsr_bit && fpsr_to_flags(fpsr_bit) == flag);
+        i += 1;
+    }
+    assert!(flags_to_fpsr(FLAG_DENORMAL) == 0);
+    assert!(fpsr_to_flags(!FPSR_CUMULATIVE_MASK) == 0);
+};
 
 /// Runs `op` under `rounding` instead of FPCR.RMode, accumulating its
 /// exceptions into `fp`.
@@ -257,6 +295,9 @@ fn with_rounding<T>(
 
 /// FADD (single). Arm FPAdd.
 pub(crate) fn f32_add(a: u32, b: u32, fp: &mut ArmFpStatus) -> u32 {
+    if let Some(sum) = host::f32_arith(Arith::Add, a, b, fp) {
+        return sum;
+    }
     let s = &mut fp.status;
     let a = f32_flush_input(a, s);
     let b = f32_flush_input(b, s);
@@ -265,6 +306,9 @@ pub(crate) fn f32_add(a: u32, b: u32, fp: &mut ArmFpStatus) -> u32 {
 
 /// FSUB (single). Arm FPSub.
 pub(crate) fn f32_sub(a: u32, b: u32, fp: &mut ArmFpStatus) -> u32 {
+    if let Some(difference) = host::f32_arith(Arith::Sub, a, b, fp) {
+        return difference;
+    }
     let s = &mut fp.status;
     let a = f32_flush_input(a, s);
     let b = f32_flush_input(b, s);
@@ -273,6 +317,9 @@ pub(crate) fn f32_sub(a: u32, b: u32, fp: &mut ArmFpStatus) -> u32 {
 
 /// FMUL (single). Arm FPMul.
 pub(crate) fn f32_mul(a: u32, b: u32, fp: &mut ArmFpStatus) -> u32 {
+    if let Some(product) = host::f32_arith(Arith::Mul, a, b, fp) {
+        return product;
+    }
     let s = &mut fp.status;
     let a = f32_flush_input(a, s);
     let b = f32_flush_input(b, s);
@@ -281,6 +328,9 @@ pub(crate) fn f32_mul(a: u32, b: u32, fp: &mut ArmFpStatus) -> u32 {
 
 /// FDIV (single). Arm FPDiv.
 pub(crate) fn f32_div(a: u32, b: u32, fp: &mut ArmFpStatus) -> u32 {
+    if let Some(quotient) = host::f32_arith(Arith::Div, a, b, fp) {
+        return quotient;
+    }
     let s = &mut fp.status;
     let a = f32_flush_input(a, s);
     let b = f32_flush_input(b, s);
@@ -360,6 +410,9 @@ pub(crate) fn f32_round_to_int(a: u32, rounding: FpRounding, report: InexactRepo
 
 /// FADD (double). Arm FPAdd.
 pub(crate) fn f64_add(a: u64, b: u64, fp: &mut ArmFpStatus) -> u64 {
+    if let Some(sum) = host::f64_arith(Arith::Add, a, b, fp) {
+        return sum;
+    }
     let s = &mut fp.status;
     let a = f64_flush_input(a, s);
     let b = f64_flush_input(b, s);
@@ -368,6 +421,9 @@ pub(crate) fn f64_add(a: u64, b: u64, fp: &mut ArmFpStatus) -> u64 {
 
 /// FSUB (double). Arm FPSub.
 pub(crate) fn f64_sub(a: u64, b: u64, fp: &mut ArmFpStatus) -> u64 {
+    if let Some(difference) = host::f64_arith(Arith::Sub, a, b, fp) {
+        return difference;
+    }
     let s = &mut fp.status;
     let a = f64_flush_input(a, s);
     let b = f64_flush_input(b, s);
@@ -376,6 +432,9 @@ pub(crate) fn f64_sub(a: u64, b: u64, fp: &mut ArmFpStatus) -> u64 {
 
 /// FMUL (double). Arm FPMul.
 pub(crate) fn f64_mul(a: u64, b: u64, fp: &mut ArmFpStatus) -> u64 {
+    if let Some(product) = host::f64_arith(Arith::Mul, a, b, fp) {
+        return product;
+    }
     let s = &mut fp.status;
     let a = f64_flush_input(a, s);
     let b = f64_flush_input(b, s);
@@ -384,6 +443,9 @@ pub(crate) fn f64_mul(a: u64, b: u64, fp: &mut ArmFpStatus) -> u64 {
 
 /// FDIV (double). Arm FPDiv.
 pub(crate) fn f64_div(a: u64, b: u64, fp: &mut ArmFpStatus) -> u64 {
+    if let Some(quotient) = host::f64_arith(Arith::Div, a, b, fp) {
+        return quotient;
+    }
     let s = &mut fp.status;
     let a = f64_flush_input(a, s);
     let b = f64_flush_input(b, s);
