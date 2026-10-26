@@ -8,7 +8,7 @@
 //! vector length; outside it, `CheckSVEEnabled` takes the SME trap
 //! (`CheckStreamingSVEEnabled`). The instructions are in `int` (integer
 //! arithmetic, element counts and immediates), `intx` (SVE2's integer
-//! multiply-adds, multiplies by element and predicated operations), `perm`
+//! instructions), `perm`
 //! (permutes, copies and selects), `pred` (compares, predicate operations,
 //! `WHILE` and predicate counts), `fp` (floating point) and `mem`
 //! (contiguous loads, stores and prefetches).

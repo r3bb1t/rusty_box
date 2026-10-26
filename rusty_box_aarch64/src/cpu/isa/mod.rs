@@ -105,14 +105,17 @@ use sve::{
     SveIntPermUnpk, SveIntPfalse, SveIntPfirst, SveIntPnext, SveIntPredDup, SveIntPredLog, SveIntPredPatternA,
     SveIntPredPatternB, SveIntPtest, SveIntPtrue, SveIntReadSvlA, SveIntReadVlA, SveIntReduce0, SveIntReduce1,
     SveIntReduce2, SveIntRotateImm, SveIntScmpVi, SveIntSelVvv, SveIntSqdmulh, SveIntTernLog, SveIntUcmpVi,
-    SveIntUnPredArit0, SveIntUnPredArit1, SveIntWhileRr, SveIntWhilenc, SveIntxAccumulateLongPairs,
-    SveIntxArithBinaryPairs, SveIntxBinPredShiftSatRound, SveIntxCdot, SveIntxCdotByIndexedElem, SveIntxClamp,
-    SveIntxCmla, SveIntxCmlaByIndexedElem, SveIntxDot, SveIntxDotByIndexedElem, SveIntxMixedDot,
+    SveIntUnPredArit0, SveIntUnPredArit1, SveIntWhileRr, SveIntWhilenc, SveIntxAba, SveIntxAbaLong,
+    SveIntxAccumulateLongPairs, SveIntxAdcLong, SveIntxArithBinaryPairs, SveIntxArithNarrow,
+    SveIntxBinPredShiftSatRound, SveIntxCadd, SveIntxCdot, SveIntxCdotByIndexedElem, SveIntxClamp, SveIntxClong,
+    SveIntxCmla, SveIntxCmlaByIndexedElem, SveIntxConsArithLong, SveIntxConsArithWide, SveIntxConsMulLong,
+    SveIntxDot, SveIntxDotByIndexedElem, SveIntxEorx, SveIntxExtractNarrow, SveIntxMixedDot,
     SveIntxMixedDotByIndexedElem, SveIntxMlaByIndexedElem, SveIntxMlaLongByIndexedElem, SveIntxMlalLong,
     SveIntxMulByIndexedElem, SveIntxMulLongByIndexedElem, SveIntxPermExtractI, SveIntxPermSplice,
     SveIntxPredArithBinary, SveIntxPredArithBinarySat, SveIntxPredArithUnary, SveIntxQdmlaLongByIndexedElem,
     SveIntxQdmlalLong, SveIntxQdmlalbt, SveIntxQdmulLongByIndexedElem, SveIntxQdmulhByIndexedElem,
-    SveIntxQrdcmlaByIndexedElem, SveIntxQrdmlah, SveIntxQrdmlahByIndexedElem, SveMem32bFill, SveMem32bPfill, SveMemCldSi, SveMemCldSs, SveMemCldntSi, SveMemCldntSs, SveMemCstSi, SveMemCstSs,
+    SveIntxQrdcmlaByIndexedElem, SveIntxQrdmlah, SveIntxQrdmlahByIndexedElem, SveIntxShiftInsert,
+    SveIntxShiftLong, SveIntxShiftNarrow, SveIntxSra, SveMem32bFill, SveMem32bPfill, SveMemCldSi, SveMemCldSs, SveMemCldntSi, SveMemCldntSs, SveMemCstSi, SveMemCstSs,
     SveMemCstntSi, SveMemCstntSs, SveMemEldSi, SveMemEldSs, SveMemEstSi, SveMemEstSs, SveMemLdDup, SveMemLdqrSi,
     SveMemLdqrSs, SveMemPrfmSi, SveMemPrfmSs, SveMemPspill, SveMemSpill,
 };
@@ -343,6 +346,21 @@ pub(crate) enum Encoding {
     SveIntxQdmulLongByIndexedElem(SveIntxQdmulLongByIndexedElem),
     SveIntxQdmulhByIndexedElem(SveIntxQdmulhByIndexedElem),
     SveIntxMulByIndexedElem(SveIntxMulByIndexedElem),
+    SveIntxConsArithLong(SveIntxConsArithLong),
+    SveIntxConsArithWide(SveIntxConsArithWide),
+    SveIntxConsMulLong(SveIntxConsMulLong),
+    SveIntxClong(SveIntxClong),
+    SveIntxEorx(SveIntxEorx),
+    SveIntxShiftLong(SveIntxShiftLong),
+    SveIntxAbaLong(SveIntxAbaLong),
+    SveIntxAdcLong(SveIntxAdcLong),
+    SveIntxCadd(SveIntxCadd),
+    SveIntxSra(SveIntxSra),
+    SveIntxShiftInsert(SveIntxShiftInsert),
+    SveIntxAba(SveIntxAba),
+    SveIntxShiftNarrow(SveIntxShiftNarrow),
+    SveIntxExtractNarrow(SveIntxExtractNarrow),
+    SveIntxArithNarrow(SveIntxArithNarrow),
     SveFpFcmla(SveFpFcmla),
     SveFpFcadd(SveFpFcadd),
     SveFpFcvt2(SveFpFcvt2),
@@ -592,7 +610,20 @@ impl Encoding {
             | Self::SveIntxMlaLongByIndexedElem(_)
             | Self::SveIntxQdmlaLongByIndexedElem(_)
             | Self::SveIntxMulLongByIndexedElem(_)
-            | Self::SveIntxQdmulLongByIndexedElem(_) => Class::SveIntxMulLong,
+            | Self::SveIntxQdmulLongByIndexedElem(_)
+            | Self::SveIntxConsMulLong(_) => Class::SveIntxMulLong,
+            Self::SveIntxConsArithLong(_) | Self::SveIntxConsArithWide(_) | Self::SveIntxClong(_) => {
+                Class::SveIntxLongArithmetic
+            }
+            Self::SveIntxEorx(_) => Class::SveIntxEorInterleaved,
+            Self::SveIntxShiftLong(_) => Class::SveIntxShiftLong,
+            Self::SveIntxAbaLong(_) | Self::SveIntxAba(_) => Class::SveIntxAbsDiffAccumulate,
+            Self::SveIntxAdcLong(_) => Class::SveIntxCarryLong,
+            Self::SveIntxCadd(_) => Class::SveIntxComplexAdd,
+            Self::SveIntxSra(_) | Self::SveIntxShiftInsert(_) => Class::SveIntxShiftAccumulate,
+            Self::SveIntxShiftNarrow(_) | Self::SveIntxExtractNarrow(_) | Self::SveIntxArithNarrow(_) => {
+                Class::SveIntxNarrow
+            }
             Self::SveIntxQrdmlah(_)
             | Self::SveIntxMlaByIndexedElem(_)
             | Self::SveIntxQrdmlahByIndexedElem(_)
@@ -890,8 +921,29 @@ pub(crate) enum Class {
     /// The long multiplies and multiply-adds: SMLALB to UMLSLT, SQDMLALB to
     /// SQDMLSLT, SQDMLALBT and SQDMLSLBT by vector; SMLALB to UMLSLT,
     /// SQDMLALB to SQDMLSLT, SMULLB to UMULLT, SQDMULLB and SQDMULLT
-    /// indexed (bit 21).
+    /// indexed (bit 21); SMULLB to UMULLT, SQDMULLB, SQDMULLT, PMULLB and
+    /// PMULLT by vector (bit 24).
     SveIntxMulLong,
+    /// SADDLB to UABDLT, SADDWB to USUBWT, SADDLBT, SSUBLBT, SSUBLTB: the
+    /// sums, differences and absolute differences of half-size elements,
+    /// or of a wide element and a half-size one.
+    SveIntxLongArithmetic,
+    /// EORBT, EORTB.
+    SveIntxEorInterleaved,
+    /// SSHLLB, SSHLLT, USHLLB, USHLLT.
+    SveIntxShiftLong,
+    /// SABA, UABA and SABALB to UABALT.
+    SveIntxAbsDiffAccumulate,
+    /// ADCLB, ADCLT, SBCLB, SBCLT.
+    SveIntxCarryLong,
+    /// CADD, SQCADD.
+    SveIntxComplexAdd,
+    /// SSRA, SRSRA, USRA, URSRA, SRI, SLI.
+    SveIntxShiftAccumulate,
+    /// The narrowing shifts (SHRNB to UQRSHRNT), the saturating extracts
+    /// (SQXTNB to UQXTNT) and the high halves of sums and differences
+    /// (ADDHNB to RSUBHNT).
+    SveIntxNarrow,
     /// SQRDMLAH and SQRDMLSH by vector and indexed (bit 21); MLA, MLS,
     /// MUL, SQDMULH and SQRDMULH indexed.
     SveIntxMul,
@@ -1211,6 +1263,21 @@ impl Encoding {
             | Self::SveIntxQdmulLongByIndexedElem(_)
             | Self::SveIntxQdmulhByIndexedElem(_)
             | Self::SveIntxMulByIndexedElem(_)
+            | Self::SveIntxConsArithLong(_)
+            | Self::SveIntxConsArithWide(_)
+            | Self::SveIntxConsMulLong(_)
+            | Self::SveIntxClong(_)
+            | Self::SveIntxEorx(_)
+            | Self::SveIntxShiftLong(_)
+            | Self::SveIntxAbaLong(_)
+            | Self::SveIntxAdcLong(_)
+            | Self::SveIntxCadd(_)
+            | Self::SveIntxSra(_)
+            | Self::SveIntxShiftInsert(_)
+            | Self::SveIntxAba(_)
+            | Self::SveIntxShiftNarrow(_)
+            | Self::SveIntxExtractNarrow(_)
+            | Self::SveIntxArithNarrow(_)
             | Self::SveFpFcmla(_)
             | Self::SveFpFcadd(_)
             | Self::SveFpFcvt2(_)

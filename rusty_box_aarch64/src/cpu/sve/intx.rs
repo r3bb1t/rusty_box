@@ -1,28 +1,33 @@
 //! SVE2's integer instructions FEAT_SME makes legal in Streaming SVE mode
-//! with `op1<7> = 0` (Arm's `sve_intx_muladd_unpred`,
-//! `sve_intx_predicated`, `sve_intx_clamp` and `sve_intx_by_indexed_elem`
-//! groups), with SVE's SDOT and UDOT and FEAT_I8MM's USDOT and SUDOT
-//! among them: the dot products, the complex integer multiply-adds and
-//! CDOT, the long multiply-adds and multiplies, the rounding doubling
-//! multiplies, the multiplies by element, the predicated saturating,
-//! rounding, halving and pairwise operations, URECPE, URSQRTE, SQABS,
-//! SQNEG, SADALP, UADALP, SCLAMP and UCLAMP.
+//! (Arm's `sve_intx` groups of `op0 = 010`), with SVE's SDOT and UDOT and
+//! FEAT_I8MM's USDOT and SUDOT among them: the dot products, the complex
+//! integer multiply-adds, CDOT and CADD, the long multiply-adds and
+//! multiplies with PMULL, the rounding doubling multiplies, the multiplies
+//! by element, the predicated saturating, rounding, halving and pairwise
+//! operations, URECPE, URSQRTE, SQABS, SQNEG, SADALP, UADALP, SCLAMP and
+//! UCLAMP; the long and wide additions and subtractions, the shifts left
+//! long, EORBT and EORTB, the absolute differences and the additions with
+//! carry that accumulate, the shifts right that accumulate and the shift
+//! inserts; and the narrowing shifts, extracts and high halves.
 //!
 //! An SVE saturation never sets FPSR.QC ([`sat_q`]). Every product and sum
 //! is exact in `i128` before it is truncated or saturated, as the
 //! pseudocode's integers are unbounded; the doubling multiplies of 64-bit
 //! elements stay exact through [`doubling_mul_high`] and
-//! [`rounding_doubling_mul_add`]. Each handler decodes its word again into
-//! a closed set of operations; a word its classes do not hold, which the
-//! decoder never passes, is UNDEFINED.
+//! [`rounding_doubling_mul_add`]. Each handler decodes the fields that
+//! choose its operation into a closed set (R5), a pattern its classes do
+//! not hold, which the decoder never passes, UNDEFINED; the bits the
+//! decoder fixes it does not check again.
 //!
 //! Provenance (R7): the Arm A64 ISA XML, release 2026-09, the instruction
 //! pages each handler names and the shared pseudocode they call
 //! (`SignedSat`, `UnsignedSat`, `ShiftSat`, `UnsignedRecipEstimate`,
 //! `UnsignedRSqrtEstimate`).
 
-use super::int::BinOp;
+use super::int::{shift_amounts, BinOp};
 use super::{int, sat_q, segment_base, Esize, Zv};
+use crate::cpu::crypto::polynomial_mult;
+use crate::cpu::dp::add_with_carry;
 use crate::cpu::exec::{bit, bits, ExecResult, Flow};
 use crate::cpu::fp_estimate::{urecpe, ursqrte};
 use crate::cpu::simd_arith::{doubling_mul_high, rounding_doubling_mul_add, shift_signed};
@@ -105,6 +110,39 @@ impl Indexed {
     }
 }
 
+/// The two element sizes of a long or narrowing instruction: the wide
+/// element and the half-size one.
+#[derive(Debug, Clone, Copy)]
+struct Widths {
+    wide: Esize,
+    half: Esize,
+}
+
+impl Widths {
+    /// By `size`, the wide element's `8 << UInt(size)`: `None` for `00`,
+    /// which such an instruction's decode makes UNDEFINED.
+    const fn of_size(size: u32) -> Option<Self> {
+        match size & 3 {
+            0b01 => Some(Self { wide: Esize::H, half: Esize::B }),
+            0b10 => Some(Self { wide: Esize::S, half: Esize::H }),
+            0b11 => Some(Self { wide: Esize::D, half: Esize::S }),
+            _ => None,
+        }
+    }
+
+    /// By a three-bit `tsize`, the half-size element's `8 <<
+    /// HighestSetBitNZ(tsize)`: `None` for `000`, which the decode makes
+    /// UNDEFINED.
+    const fn of_tsize(tsize: u32) -> Option<Self> {
+        match tsize & 7 {
+            0b001 => Some(Self { wide: Esize::H, half: Esize::B }),
+            0b010 | 0b011 => Some(Self { wide: Esize::S, half: Esize::H }),
+            0b100..=0b111 => Some(Self { wide: Esize::D, half: Esize::S }),
+            _ => None,
+        }
+    }
+}
+
 /// What a long instruction makes of the product of two half-size
 /// elements.
 ///
@@ -117,22 +155,25 @@ enum LongOp {
     /// SQDMLALB to SQDMLSLT, SQDMLALBT, SQDMLSLBT: `SignedSat(acc +/-
     /// SInt(SignedSat(2 * product)))`.
     DoublingMulAdd { subtract: bool },
-    /// SMULLB to UMULLT (indexed): the product.
+    /// SMULLB to UMULLT: the product.
     Mul { unsigned: bool },
-    /// SQDMULLB, SQDMULLT (indexed): `SignedSat(2 * product)`.
+    /// SQDMULLB, SQDMULLT: `SignedSat(2 * product)`.
     DoublingMul,
+    /// PMULLB, PMULLT: the polynomial product, `PolynomialMult`.
+    PolynomialMul,
 }
 
 impl LongOp {
     const fn unsigned(self) -> bool {
         match self {
             Self::MulAdd { unsigned, .. } | Self::Mul { unsigned } => unsigned,
+            Self::PolynomialMul => true,
             Self::DoublingMulAdd { .. } | Self::DoublingMul => false,
         }
     }
 
     /// The element of `es` it writes, from the accumulator's element `acc`
-    /// and the sources `a` and `b`.
+    /// and the sources `a` and `b`, of half its size.
     fn apply(self, acc: u64, a: i128, b: i128, es: Esize) -> u64 {
         let product = a * b;
         match self {
@@ -147,6 +188,7 @@ impl LongOp {
             }
             Self::Mul { .. } => product as u64,
             Self::DoublingMul => sat_q(2 * product, es, false),
+            Self::PolynomialMul => polynomial_mult(a as u64, b as u64, es.bits() / 2) as u64,
         }
     }
 }
@@ -237,9 +279,9 @@ enum UnaryOp {
     Estimate { square_root: bool },
     /// SQABS, SQNEG (`negate`).
     Saturating { negate: bool },
-    /// SADALP, UADALP: the pair of half-size elements of Zn, `Int`'d by
+    /// SADALP, UADALP: the pair of `half`-size elements of Zn, `Int`'d by
     /// `unsigned`, added to Zda's element.
-    AccumulatePairs { unsigned: bool },
+    AccumulatePairs { unsigned: bool, half: Esize },
 }
 
 /// The signedness of a dot product's operands: SDOT's, UDOT's, USDOT's
@@ -248,6 +290,66 @@ enum UnaryOp {
 struct DotSigns {
     n_unsigned: bool,
     m_unsigned: bool,
+}
+
+/// What a long arithmetic instruction makes of its two operands.
+///
+/// Closed (R5).
+#[derive(Debug, Clone, Copy)]
+enum LongArith {
+    Add,
+    Sub,
+    /// SABDLB to UABDLT: `Abs(a - b)`.
+    AbsDiff,
+}
+
+/// The first operand of a long arithmetic instruction.
+///
+/// Closed (R5).
+#[derive(Debug, Clone, Copy)]
+enum FirstOperand {
+    /// The half-size element `2e + sel` of Zn: SADDLB to UABDLT, SADDLBT,
+    /// SSUBLBT, SSUBLTB.
+    Half { sel: usize },
+    /// The wide element `e` of Zn: SADDWB to USUBWT.
+    Wide,
+}
+
+/// What a narrowing instruction does with its exact result: truncate it
+/// to the half-size element, or saturate it, signed or unsigned.
+///
+/// Closed (R5).
+#[derive(Debug, Clone, Copy)]
+enum Saturation {
+    Truncate,
+    Signed,
+    Unsigned,
+}
+
+impl Saturation {
+    fn apply(self, value: i128, es: Esize) -> u64 {
+        match self {
+            Self::Truncate => value as u64,
+            Self::Signed => sat_q(value, es, false),
+            Self::Unsigned => sat_q(value, es, true),
+        }
+    }
+}
+
+/// What a narrowing instruction computes from the wide elements.
+///
+/// Closed (R5).
+#[derive(Debug, Clone, Copy)]
+enum NarrowOp {
+    /// SHRNB to UQRSHRNT: Zn's element, `Int`'d by `unsigned`, shifted
+    /// right by `shift`, rounding with `rounding`.
+    Shift { shift: u32, rounding: bool, unsigned: bool },
+    /// SQXTNB to UQXTNT: Zn's element, `Int`'d by `unsigned`.
+    Extract { unsigned: bool },
+    /// ADDHNB to RSUBHNT: the high half of the sum or (`subtract`) the
+    /// difference of Zn's and Zm's elements, unsigned, rounding with
+    /// `rounding`.
+    HighHalf { subtract: bool, rounding: bool },
 }
 
 impl Cpu {
@@ -302,15 +404,25 @@ impl Cpu {
     /// SQDMLALT, SQDMLSLB, SQDMLSLT (vectors: `... 0110 S T`; indexed:
     /// `... 001 S il T`), SQDMLALBT and SQDMLSLBT (`... 00010 S`), and
     /// indexed SMULLB, SMULLT, UMULLB, UMULLT (`... 110 U il T`), SQDMULLB
-    /// and SQDMULLT (`... 1110 il T`). The even (`B`) or odd (`T`) source
-    /// element of each pair of Zn is multiplied by the same of Zm
-    /// (SQDMLALBT: Zn's even by Zm's odd), or by index by the source element
-    /// `index` of its 128-bit segment of Zm. `size = 00` is UNDEFINED; the
-    /// indexed forms are of `size = 1x` alone.
+    /// and SQDMULLT (`... 1110 il T`); and by vector SQDMULLB, SQDMULLT,
+    /// PMULLB, PMULLT, SMULLB to UMULLT (`01000101 size 0 Zm 011 op U T Zn
+    /// Zd`). The even (`B`) or odd (`T`) source element of each pair of Zn
+    /// is multiplied by the same of Zm (SQDMLALBT: Zn's even by Zm's odd),
+    /// or by index by the source element `index` of its 128-bit segment of
+    /// Zm. `size = 00` is UNDEFINED, and PMULLB's and PMULLT's `size = 10`;
+    /// the indexed forms are of `size = 1x` alone.
     pub(crate) fn exec_sve_intx_mul_long(&mut self, pc: u64, insn: u32) -> ExecResult {
         let indexed = bit(insn, 21);
         let t = usize::from(bit(insn, 10));
-        let (op, sel1, sel2) = if indexed {
+        let (op, sel1, sel2) = if bit(insn, 24) {
+            let op = match (bit(insn, 12), bit(insn, 11)) {
+                (false, false) => LongOp::DoublingMul,
+                (false, true) if bits(insn, 23, 22) != 0b10 => LongOp::PolynomialMul,
+                (true, unsigned) => LongOp::Mul { unsigned },
+                (false, true) => return self.undefined(pc, insn),
+            };
+            (op, t, t)
+        } else if indexed {
             let op = match bits(insn, 15, 13) {
                 0b100 | 0b101 => LongOp::MulAdd { subtract: bit(insn, 13), unsigned: bit(insn, 12) },
                 0b001 => LongOp::DoublingMulAdd { subtract: bit(insn, 12) },
@@ -328,11 +440,8 @@ impl Cpu {
                 _ => return self.undefined(pc, insn),
             }
         };
-        let (es, src) = match bits(insn, 23, 22) {
-            0b00 => return self.undefined(pc, insn),
-            0b01 => (Esize::H, Esize::B),
-            0b10 => (Esize::S, Esize::H),
-            _ => (Esize::D, Esize::S),
+        let Some(Widths { wide: es, half: src }) = Widths::of_size(bits(insn, 23, 22)) else {
+            return self.undefined(pc, insn);
         };
         let form = if indexed { Some(Indexed::long(insn)) } else { None };
         let m = form.map_or(bits(insn, 20, 16), |f| f.m);
@@ -489,15 +598,13 @@ impl Cpu {
     pub(crate) fn exec_sve_intx_unary_pred(&mut self, pc: u64, insn: u32) -> ExecResult {
         let size = bits(insn, 23, 22);
         let op16 = bit(insn, 16);
-        let op = match (bits(insn, 20, 17), size) {
-            (0b0000, 0b10) => UnaryOp::Estimate { square_root: op16 },
+        let op = match (bits(insn, 20, 17), Widths::of_size(size)) {
+            (0b0000, _) if size == 0b10 => UnaryOp::Estimate { square_root: op16 },
             (0b0100, _) => UnaryOp::Saturating { negate: op16 },
-            (0b0010, 0b01..) => UnaryOp::AccumulatePairs { unsigned: op16 },
+            (0b0010, Some(w)) => UnaryOp::AccumulatePairs { unsigned: op16, half: w.half },
             _ => return self.undefined(pc, insn),
         };
         let es = Esize::from_size(size);
-        // SADALP's and UADALP's source elements: `size` is not `00`.
-        let half = Esize::from_size(size.saturating_sub(1));
         let (g, n, d) = (bits(insn, 12, 10), bits(insn, 9, 5), bits(insn, 4, 0));
         let vl = self.sve_check()?;
         let mask = self.p(g, vl);
@@ -513,7 +620,7 @@ impl Cpu {
                     let element = int(operand.get(e, es), es, false);
                     sat_q(if negate { -element } else { element.abs() }, es, false)
                 }
-                UnaryOp::AccumulatePairs { unsigned } => {
+                UnaryOp::AccumulatePairs { unsigned, half } => {
                     let sum = int(operand.get(2 * e, half), half, unsigned)
                         + int(operand.get(2 * e + 1, half), half, unsigned);
                     result.get(e, es).wrapping_add(sum as u64)
@@ -637,6 +744,312 @@ impl Cpu {
             }
         }
         self.set_z(da, vl, &result);
+        Ok(Flow::Next)
+    }
+
+    /// SADDLB to UABDLT (`01000101 size 0 Zm 00 op S U T Zn Zd`), SADDWB to
+    /// USUBWT (`... 010 S U T`), SADDLBT, SSUBLBT and SSUBLTB (`... 1000 S
+    /// tb`, the bits `U` and `T` hold elsewhere). Each wide element of Zd is
+    /// the sum, difference or absolute difference (`op`, with `S` set) of
+    /// Zn's and Zm's half-size elements, the even (`B`) or odd (`T`) of
+    /// each pair, or of Zn's wide element and Zm's half-size one (`W`),
+    /// `Int`'d by `U` and truncated. SADDLBT takes Zn's even element and
+    /// Zm's odd, SSUBLTB Zn's odd and Zm's even, both signed. `size = 00` is
+    /// UNDEFINED.
+    pub(crate) fn exec_sve_intx_long_arith(&mut self, pc: u64, insn: u32) -> ExecResult {
+        let (s, u, t) = (bit(insn, 12), bit(insn, 11), usize::from(bit(insn, 10)));
+        let add_or_sub = if s { LongArith::Sub } else { LongArith::Add };
+        let (op, first, sel2, unsigned) = match bits(insn, 15, 13) {
+            0b000 => (add_or_sub, FirstOperand::Half { sel: t }, t, u),
+            0b001 if s => (LongArith::AbsDiff, FirstOperand::Half { sel: t }, t, u),
+            0b010 => (add_or_sub, FirstOperand::Wide, t, u),
+            // SADDLBT, SSUBLBT, SSUBLTB: their `S` is bit 11 and `tb` bit 10.
+            0b100 if !s => match (u, t) {
+                (false, 0) => (LongArith::Add, FirstOperand::Half { sel: 0 }, 1, false),
+                (true, 0) => (LongArith::Sub, FirstOperand::Half { sel: 0 }, 1, false),
+                (true, _) => (LongArith::Sub, FirstOperand::Half { sel: 1 }, 0, false),
+                (false, _) => return self.undefined(pc, insn),
+            },
+            _ => return self.undefined(pc, insn),
+        };
+        let Some(Widths { wide: es, half }) = Widths::of_size(bits(insn, 23, 22)) else {
+            return self.undefined(pc, insn);
+        };
+        let (m, n, d) = (bits(insn, 20, 16), bits(insn, 9, 5), bits(insn, 4, 0));
+        let vl = self.sve_check()?;
+        let op1 = self.z(n, vl);
+        let op2 = self.z(m, vl);
+        let mut result = Zv::ZERO;
+        for e in 0..es.elements(vl) {
+            let a = match first {
+                FirstOperand::Half { sel } => int(op1.get(2 * e + sel, half), half, unsigned),
+                FirstOperand::Wide => int(op1.get(e, es), es, unsigned),
+            };
+            let b = int(op2.get(2 * e + sel2, half), half, unsigned);
+            let r = match op {
+                LongArith::Add => a + b,
+                LongArith::Sub => a - b,
+                LongArith::AbsDiff => (a - b).abs(),
+            };
+            result.set(e, es, r as u64);
+        }
+        self.set_z(d, vl, &result);
+        Ok(Flow::Next)
+    }
+
+    /// EORBT, EORTB: `01000101 size 0 Zm 10010 tb Zn Zd`. The even (EORBT)
+    /// or odd (EORTB) element of each pair of Zd becomes Zn's same element
+    /// exclusive-OR Zm's other one of the pair; Zd's other elements are
+    /// kept.
+    pub(crate) fn exec_sve_intx_eor_interleaved(&mut self, insn: u32) -> ExecResult {
+        let (sel1, sel2) = if bit(insn, 10) { (1, 0) } else { (0, 1) };
+        let es = Esize::from_size(bits(insn, 23, 22));
+        let (m, n, d) = (bits(insn, 20, 16), bits(insn, 9, 5), bits(insn, 4, 0));
+        let vl = self.sve_check()?;
+        let op1 = self.z(n, vl);
+        let op2 = self.z(m, vl);
+        let mut result = self.z(d, vl);
+        for p in 0..es.elements(vl) / 2 {
+            result.set(2 * p + sel1, es, op1.get(2 * p + sel1, es) ^ op2.get(2 * p + sel2, es));
+        }
+        self.set_z(d, vl, &result);
+        Ok(Flow::Next)
+    }
+
+    /// SSHLLB, SSHLLT, USHLLB, USHLLT: `01000101 0 tszh 0 tszl imm3 1010 U T
+    /// Zn Zd`. Each wide element of Zd is the even (`B`) or odd (`T`)
+    /// half-size element of Zn, `Int`'d by `U`, shifted left by
+    /// `UInt(tsize:imm3) - esize`, 0 to `esize - 1`. `tsize = 000` is
+    /// UNDEFINED.
+    pub(crate) fn exec_sve_intx_shift_long(&mut self, pc: u64, insn: u32) -> ExecResult {
+        let tsize = (bits(insn, 22, 22) << 2) | bits(insn, 20, 19);
+        let Some(Widths { wide: es, half }) = Widths::of_tsize(tsize) else {
+            return self.undefined(pc, insn);
+        };
+        let shift = shift_amounts((tsize << 3) | bits(insn, 18, 16), half).left;
+        let (unsigned, t) = (bit(insn, 11), usize::from(bit(insn, 10)));
+        let (n, d) = (bits(insn, 9, 5), bits(insn, 4, 0));
+        let vl = self.sve_check()?;
+        let operand = self.z(n, vl);
+        let mut result = Zv::ZERO;
+        for e in 0..es.elements(vl) {
+            result.set(e, es, (int(operand.get(2 * e + t, half), half, unsigned) << shift) as u64);
+        }
+        self.set_z(d, vl, &result);
+        Ok(Flow::Next)
+    }
+
+    /// SABA, UABA (`01000101 size 0 Zm 11111 U Zn Zda`) and SABALB, SABALT,
+    /// UABALB, UABALT (`... 1100 U T`): each element of Zda accumulates,
+    /// wrapping, the absolute difference of Zn's and Zm's elements, `Int`'d
+    /// by `U`; of the long forms, of their even (`B`) or odd (`T`)
+    /// half-size elements (`size = 00` UNDEFINED).
+    pub(crate) fn exec_sve_intx_abs_diff_acc(&mut self, pc: u64, insn: u32) -> ExecResult {
+        let size = bits(insn, 23, 22);
+        let (es, src, unsigned, sel) = match bits(insn, 15, 12) {
+            0b1100 => match Widths::of_size(size) {
+                Some(w) => (w.wide, w.half, bit(insn, 11), Some(usize::from(bit(insn, 10)))),
+                None => return self.undefined(pc, insn),
+            },
+            0b1111 if bit(insn, 11) => (Esize::from_size(size), Esize::from_size(size), bit(insn, 10), None),
+            _ => return self.undefined(pc, insn),
+        };
+        let (m, n, da) = (bits(insn, 20, 16), bits(insn, 9, 5), bits(insn, 4, 0));
+        let vl = self.sve_check()?;
+        let op1 = self.z(n, vl);
+        let op2 = self.z(m, vl);
+        let mut result = self.z(da, vl);
+        for e in 0..es.elements(vl) {
+            let s = sel.map_or(e, |t| 2 * e + t);
+            let difference = (int(op1.get(s, src), src, unsigned) - int(op2.get(s, src), src, unsigned)).abs();
+            result.set(e, es, result.get(e, es).wrapping_add(difference as u64));
+        }
+        self.set_z(da, vl, &result);
+        Ok(Flow::Next)
+    }
+
+    /// ADCLB, ADCLT, SBCLB, SBCLT: `01000101 0 sz 0 Zm 11010 T Zn Zda`
+    /// (`1 sz` for SBC). Each pair of Zda's words (`sz` clear) or
+    /// doublewords becomes the sum `AddWithCarry` makes of its even element,
+    /// Zn's even (`B`) or odd (`T`) element of the pair (inverted for SBC)
+    /// and the low bit of Zm's odd element, and the carry out.
+    pub(crate) fn exec_sve_intx_carry_long(&mut self, insn: u32) -> ExecResult {
+        let es = if bit(insn, 22) { Esize::D } else { Esize::S };
+        let subtract = bit(insn, 23);
+        let t = usize::from(bit(insn, 10));
+        let (m, n, da) = (bits(insn, 20, 16), bits(insn, 9, 5), bits(insn, 4, 0));
+        let vl = self.sve_check()?;
+        let operand = self.z(n, vl);
+        let carries = self.z(m, vl);
+        let mut result = self.z(da, vl);
+        for p in 0..es.elements(vl) / 2 {
+            let element2 = operand.get(2 * p + t, es);
+            let element2 = if subtract { !element2 & es.mask() } else { element2 };
+            let carry_in = carries.get(2 * p + 1, es) & 1 != 0;
+            let sum = add_with_carry(result.get(2 * p, es), element2, carry_in, es == Esize::D);
+            result.set(2 * p, es, sum.value);
+            result.set(2 * p + 1, es, u64::from(sum.c));
+        }
+        self.set_z(da, vl, &result);
+        Ok(Flow::Next)
+    }
+
+    /// CADD, SQCADD: `01000101 size 0 0000 op 11011 rot Zm Zdn`. Each pair
+    /// (real, imaginary) of Zdn adds Zm's pair rotated by 90 (`rot = 0`) or
+    /// 270 degrees, wrapping, or saturating in SQCADD.
+    pub(crate) fn exec_sve_intx_complex_add(&mut self, insn: u32) -> ExecResult {
+        let saturating = bit(insn, 16);
+        // `sub_i = rot == '0'`: the real part takes Zm's imaginary away.
+        let sub_i = !bit(insn, 10);
+        let es = Esize::from_size(bits(insn, 23, 22));
+        let (m, dn) = (bits(insn, 9, 5), bits(insn, 4, 0));
+        let vl = self.sve_check()?;
+        let op1 = self.z(dn, vl);
+        let op2 = self.z(m, vl);
+        let mut result = Zv::ZERO;
+        for p in 0..es.elements(vl) / 2 {
+            let (acc_r, acc_i) = (int(op1.get(2 * p, es), es, false), int(op1.get(2 * p + 1, es), es, false));
+            let (elt2_r, elt2_i) = (int(op2.get(2 * p, es), es, false), int(op2.get(2 * p + 1, es), es, false));
+            let (real, imag) =
+                if sub_i { (acc_r - elt2_i, acc_i + elt2_r) } else { (acc_r + elt2_i, acc_i - elt2_r) };
+            let (real, imag) = if saturating {
+                (sat_q(real, es, false), sat_q(imag, es, false))
+            } else {
+                (real as u64, imag as u64)
+            };
+            result.set(2 * p, es, real);
+            result.set(2 * p + 1, es, imag);
+        }
+        self.set_z(dn, vl, &result);
+        Ok(Flow::Next)
+    }
+
+    /// SSRA, SRSRA, USRA, URSRA (`01000101 tszh 0 tszl imm3 1110 R U Zn
+    /// Zda`) and SRI, SLI (`... 11110 op Zn Zd`). The element size is `8 <<
+    /// HighestSetBitNZ(tsize)` (`tsize = 0000` UNDEFINED). SRA adds to each
+    /// element of Zda Zn's, `Int`'d by `U`, shifted right by `2 * esize -
+    /// UInt(tsize:imm3)`, 1 to esize, rounding with `R`, wrapping. SRI
+    /// shifts Zn's element right by the same and SLI left by
+    /// `UInt(tsize:imm3) - esize`, and each inserts it into Zd's element,
+    /// whose bits the shift leaves are kept.
+    pub(crate) fn exec_sve_intx_shift_acc(&mut self, pc: u64, insn: u32) -> ExecResult {
+        let tsize = (bits(insn, 23, 22) << 2) | bits(insn, 20, 19);
+        if tsize == 0 {
+            return self.undefined(pc, insn);
+        }
+        let es = Esize::from_tsize(tsize);
+        let amounts = shift_amounts((tsize << 3) | bits(insn, 18, 16), es);
+        let (n, d) = (bits(insn, 9, 5), bits(insn, 4, 0));
+        match bits(insn, 15, 11) {
+            0b11100 | 0b11101 => {
+                let (rounding, unsigned) = (bit(insn, 11), bit(insn, 10));
+                let right = -(amounts.right as i32);
+                let vl = self.sve_check()?;
+                let operand = self.z(n, vl);
+                let mut result = self.z(d, vl);
+                for e in 0..es.elements(vl) {
+                    let element = shift_signed(int(operand.get(e, es), es, unsigned), right, es.bits(), rounding);
+                    result.set(e, es, result.get(e, es).wrapping_add(element as u64));
+                }
+                self.set_z(d, vl, &result);
+            }
+            0b11110 => {
+                // SLI's left shift or SRI's right one (by up to the element
+                // size, which shifts every bit out), and the bits of Zd's
+                // element it replaces.
+                let shift = |value: u64| {
+                    if bit(insn, 10) {
+                        value << amounts.left
+                    } else {
+                        value.checked_shr(amounts.right as u32).unwrap_or(0)
+                    }
+                };
+                let mask = shift(es.mask()) & es.mask();
+                let vl = self.sve_check()?;
+                let operand = self.z(n, vl);
+                let mut result = self.z(d, vl);
+                for e in 0..es.elements(vl) {
+                    result.set(e, es, (result.get(e, es) & !mask) | (shift(operand.get(e, es)) & mask));
+                }
+                self.set_z(d, vl, &result);
+            }
+            _ => return self.undefined(pc, insn),
+        }
+        Ok(Flow::Next)
+    }
+
+    /// The narrowing instructions: SHRNB to UQRSHRNT (`01000101 0 tszh 1
+    /// tszl imm3 00 op U R T Zn Zd`), shifting each wide element of Zn right
+    /// by `2 * esize - UInt(tsize:imm3)`, 1 to esize (`tsize = 000`
+    /// UNDEFINED), `Int`'d signed (`op` or `U` clear) or unsigned (SHRN,
+    /// UQSHRN), rounding with `R`, and saturating signed (SQSHRN), unsigned
+    /// (SQSHRUN, UQSHRN) or truncating (SHRN); SQXTNB to UQXTNT (`01000101
+    /// 0 tszh 1 tszl 000 010 opc T Zn Zd`, `tsize` 001, 010 or 100, else
+    /// UNDEFINED), saturating each wide element (SQXTN signed, UQXTN
+    /// unsigned, SQXTUN signed to unsigned); and ADDHNB to RSUBHNT
+    /// (`01000101 size 1 Zm 011 S R T Zn Zd`, `size = 00` UNDEFINED), the
+    /// high half of each unsigned sum or difference, rounding with `R`. The
+    /// `B` forms write the even half-size elements of Zd and zero the odd
+    /// ones; the `T` forms write the odd ones and keep the even.
+    pub(crate) fn exec_sve_intx_narrow(&mut self, pc: u64, insn: u32) -> ExecResult {
+        let tsize = (bits(insn, 22, 22) << 2) | bits(insn, 20, 19);
+        let (rounding, t) = (bit(insn, 11), usize::from(bit(insn, 10)));
+        let (op, saturation, widths) = match bits(insn, 15, 13) {
+            0b000 | 0b001 => {
+                let Some(w) = Widths::of_tsize(tsize) else { return self.undefined(pc, insn) };
+                let shift = shift_amounts((tsize << 3) | bits(insn, 18, 16), w.half).right as u32;
+                // `U` the source's signedness; with `op`, the saturation.
+                let unsigned = bit(insn, 12);
+                let saturation = match (bit(insn, 13), unsigned) {
+                    (false, false) | (true, true) => Saturation::Unsigned,
+                    (false, true) => Saturation::Truncate,
+                    (true, false) => Saturation::Signed,
+                };
+                (NarrowOp::Shift { shift, rounding, unsigned }, saturation, w)
+            }
+            0b010 => {
+                let widths = match tsize {
+                    0b001 => Widths { wide: Esize::H, half: Esize::B },
+                    0b010 => Widths { wide: Esize::S, half: Esize::H },
+                    0b100 => Widths { wide: Esize::D, half: Esize::S },
+                    _ => return self.undefined(pc, insn),
+                };
+                let (op, saturation) = match bits(insn, 12, 11) {
+                    0b00 => (NarrowOp::Extract { unsigned: false }, Saturation::Signed),
+                    0b01 => (NarrowOp::Extract { unsigned: true }, Saturation::Unsigned),
+                    0b10 => (NarrowOp::Extract { unsigned: false }, Saturation::Unsigned),
+                    _ => return self.undefined(pc, insn),
+                };
+                (op, saturation, widths)
+            }
+            0b011 => {
+                let Some(w) = Widths::of_size(bits(insn, 23, 22)) else { return self.undefined(pc, insn) };
+                (NarrowOp::HighHalf { subtract: bit(insn, 12), rounding }, Saturation::Truncate, w)
+            }
+            _ => return self.undefined(pc, insn),
+        };
+        let Widths { wide: es, half } = widths;
+        let (m, n, d) = (bits(insn, 20, 16), bits(insn, 9, 5), bits(insn, 4, 0));
+        let vl = self.sve_check()?;
+        let op1 = self.z(n, vl);
+        let op2 = if matches!(op, NarrowOp::HighHalf { .. }) { self.z(m, vl) } else { Zv::ZERO };
+        let mut result = if t == 1 { self.z(d, vl) } else { Zv::ZERO };
+        for e in 0..es.elements(vl) {
+            let value = match op {
+                NarrowOp::Shift { shift, rounding, unsigned } => {
+                    shift_signed(int(op1.get(e, es), es, unsigned), -(shift as i32), es.bits(), rounding)
+                }
+                NarrowOp::Extract { unsigned } => int(op1.get(e, es), es, unsigned),
+                NarrowOp::HighHalf { subtract, rounding } => {
+                    let (a, b) = (int(op1.get(e, es), es, true), int(op2.get(e, es), es, true));
+                    let sum = if subtract { a - b } else { a + b };
+                    let round = if rounding { 1i128 << (half.bits() - 1) } else { 0 };
+                    (sum + round) >> half.bits()
+                }
+            };
+            result.set(2 * e + t, half, saturation.apply(value, half));
+        }
+        self.set_z(d, vl, &result);
         Ok(Flow::Next)
     }
 }

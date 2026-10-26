@@ -192,13 +192,22 @@ enum ElementCount {
     SaturatingScalar { wide: bool },
 }
 
-/// The element shift by immediate's amount, from `tsize:imm3`: right
-/// shifts take `2 * esize - UInt(tsize:imm3)`, left shifts
-/// `UInt(tsize:imm3) - esize`.
-fn shift_amounts(tsize_imm3: u32, es: Esize) -> (u64, u64) {
+/// The amounts an element shift by immediate takes from `tsize:imm3`.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct ShiftAmounts {
+    /// A right shift's `2 * esize - UInt(tsize:imm3)`, 1 to `esize`.
+    pub(super) right: u64,
+    /// A left shift's `UInt(tsize:imm3) - esize`, 0 to `esize - 1`.
+    pub(super) left: u64,
+}
+
+/// The shift amounts of `tsize:imm3` for elements of `es`, the size
+/// `tsize`'s highest set bit gives (the source elements' of the long and
+/// narrowing shifts).
+pub(super) fn shift_amounts(tsize_imm3: u32, es: Esize) -> ShiftAmounts {
     let encoded = u64::from(tsize_imm3);
     let width = u64::from(es.bits());
-    (2 * width - encoded, encoded - width)
+    ShiftAmounts { right: 2 * width - encoded, left: encoded - width }
 }
 
 impl Cpu {
@@ -312,7 +321,7 @@ impl Cpu {
                     return self.undefined(pc, insn);
                 }
                 let es = Esize::from_tsize(tsize);
-                let (right, left) = shift_amounts((tsize << 3) | bits(insn, 7, 5), es);
+                let ShiftAmounts { right, left } = shift_amounts((tsize << 3) | bits(insn, 7, 5), es);
                 let op = match bits(insn, 19, 16) {
                     0b0000 => ShiftImmediate::Asr,
                     0b0001 => ShiftImmediate::Lsr,
@@ -547,7 +556,7 @@ impl Cpu {
                     return self.undefined(pc, insn);
                 }
                 let es = Esize::from_tsize(tsize);
-                let (rotate, _) = shift_amounts((tsize << 3) | bits(insn, 18, 16), es);
+                let rotate = shift_amounts((tsize << 3) | bits(insn, 18, 16), es).right;
                 let (m, dn) = (bits(insn, 9, 5), bits(insn, 4, 0));
                 let vl = self.sve_check()?;
                 let operand1 = self.z(dn, vl);
@@ -605,7 +614,7 @@ impl Cpu {
                 return self.undefined(pc, insn);
             }
             let es = Esize::from_tsize(tsize);
-            let (right, left) = shift_amounts((tsize << 3) | bits(insn, 18, 16), es);
+            let ShiftAmounts { right, left } = shift_amounts((tsize << 3) | bits(insn, 18, 16), es);
             let amount = if shift == Shift::Lsl { left } else { right };
             let vl = self.sve_check()?;
             let operand1 = self.z(n, vl);

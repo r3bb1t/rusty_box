@@ -21,8 +21,10 @@
 //! shift by the whole element, the reversed and pairwise operands, the
 //! mixed-sign and halving ranges, the saturation of the product before the
 //! accumulate, the dot products' signedness and wrap, the complex
-//! rotations, the indexed source elements, the clamp's order, and the
-//! reserved sizes.
+//! rotations, the indexed source elements, the clamp's order, the
+//! elements of the long, wide and interleaved forms, PMULL, the carry
+//! chain, the shift accumulates and inserts at the element size, the
+//! narrowing halves, and the reserved sizes and `tsize` values.
 
 use std::vec::Vec;
 
@@ -1300,6 +1302,208 @@ fn clamp_takes_the_maximum_first_and_compares_by_signedness() {
     }
 }
 
+/// The long arithmetic takes its elements by form: SADDLBT Zn's even
+/// halfword and Zm's odd (2 + 7), SSUBLBT the same (2 - 7), SSUBLTB Zn's
+/// odd and Zm's even (3 - 5). SABDLB of 0x00 and 0xFF is 1, UABDLB's 255;
+/// SADDWT adds Zm's odd halfword to Zn's word, wrapping.
+#[test]
+fn the_long_arithmetic_takes_its_elements_by_form() {
+    // saddlbt, ssublbt, ssubltb z0.s, z1.h, z2.h.
+    for (insn, want) in [(0x4582_8020, 9), (0x4582_8820, 0xFFFF_FFFB), (0x4582_8C20, 0xFFFF_FFFE)] {
+        let mut cpu = fp_streaming(0, 0);
+        set_elements(&mut cpu, 1, Esize::H, &[2, 3]);
+        set_elements(&mut cpu, 2, Esize::H, &[5, 7]);
+        assert_eq!(exec(&mut cpu, insn), None);
+        assert_eq!(elements(&cpu, 0, Esize::S), [want; 4], "{insn:#010x}");
+    }
+    // sabdlb, uabdlb z0.h, z1.b, z2.b.
+    for (insn, want) in [(0x4542_3020, 1), (0x4542_3820, 0xFF)] {
+        let mut cpu = fp_streaming(0, 0);
+        set_elements(&mut cpu, 1, Esize::B, &[0x00, 0x11]);
+        set_elements(&mut cpu, 2, Esize::B, &[0xFF, 0x22]);
+        assert_eq!(exec(&mut cpu, insn), None);
+        assert_eq!(elements(&cpu, 0, Esize::H), [want; 8], "{insn:#010x}");
+    }
+    let mut cpu = fp_streaming(0, 0);
+    set_elements(&mut cpu, 1, Esize::S, &[0x7FFF_FFFF]);
+    set_elements(&mut cpu, 2, Esize::H, &[0x0000, 0x0001]);
+    // saddwt z0.s, z1.s, z2.h.
+    assert_eq!(exec(&mut cpu, 0x4582_4420), None);
+    assert_eq!(elements(&cpu, 0, Esize::S), [0x8000_0000; 4]);
+}
+
+/// PMULLB and PMULLT multiply polynomials over GF(2): 3 x 3 is 5, 5 x 7 is
+/// 0x1B, 0x80 x 0x80 is 0x4000 and 0xFF x 0xFF 0x5555. SQDMULLB of
+/// -128 x -128 doubled saturates to 0x7FFF.
+#[test]
+fn pmull_multiplies_polynomials_and_sqdmull_saturates() {
+    let cases = [
+        // pmullb, pmullt, sqdmullb z0.h, z1.b, z2.b.
+        (0x4542_6820, [0x0005, 0x4000]),
+        (0x4542_6C20, [0x001B, 0x5555]),
+        (0x4542_6020, [0x0012, 0x7FFF]),
+    ];
+    for (insn, want) in cases {
+        let mut cpu = fp_streaming(0, 0);
+        set_elements(&mut cpu, 1, Esize::B, &[0x03, 0x05, 0x80, 0xFF]);
+        set_elements(&mut cpu, 2, Esize::B, &[0x03, 0x07, 0x80, 0xFF]);
+        assert_eq!(exec(&mut cpu, insn), None);
+        assert_eq!(elements(&cpu, 0, Esize::H)[..2], want, "{insn:#010x}");
+    }
+}
+
+/// SSHLLT and USHLLT shift the odd byte, extended by signedness, left by
+/// up to 7: 0x80 is 0xC000 and 0x4000. EORBT writes the even bytes of Zd,
+/// Zn's even exclusive-OR Zm's odd, and keeps the odd ones; SABALB
+/// accumulates |0 - -128| into 0xFFFF, wrapping to 0x7F.
+#[test]
+fn the_shifts_long_eorbt_and_sabalb_take_their_halves() {
+    // sshllt, ushllt z0.h, z1.b, #7.
+    for (insn, want) in [(0x450F_A420, 0xC000), (0x450F_AC20, 0x4000)] {
+        let mut cpu = fp_streaming(0, 0);
+        set_elements(&mut cpu, 1, Esize::B, &[0x11, 0x80]);
+        assert_eq!(exec(&mut cpu, insn), None);
+        assert_eq!(elements(&cpu, 0, Esize::H), [want; 8], "{insn:#010x}");
+    }
+    let mut cpu = fp_streaming(0, 0);
+    set_elements(&mut cpu, 0, Esize::B, &[0xAA, 0xBB]);
+    set_elements(&mut cpu, 1, Esize::B, &[0x0F, 0x1F]);
+    set_elements(&mut cpu, 2, Esize::B, &[0xF0, 0x33]);
+    // eorbt z0.b, z1.b, z2.b.
+    assert_eq!(exec(&mut cpu, 0x4502_9020), None);
+    assert_eq!(elements(&cpu, 0, Esize::B)[..2], [0x3C, 0xBB]);
+
+    let mut cpu = fp_streaming(0, 0);
+    set_elements(&mut cpu, 0, Esize::H, &[0xFFFF]);
+    set_elements(&mut cpu, 1, Esize::B, &[0x00, 0x11]);
+    set_elements(&mut cpu, 2, Esize::B, &[0x80, 0x22]);
+    // sabalb z0.h, z1.b, z2.b.
+    assert_eq!(exec(&mut cpu, 0x4542_C020), None);
+    assert_eq!(elements(&cpu, 0, Esize::H), [0x7F; 8]);
+}
+
+/// ADCLB, ADCLT and SBCLB add with the carry in the low bit of Zm's odd
+/// word (the even one is ignored), writing the sum to the even word and
+/// the carry out to the odd: 0xFFFFFFFF + 0 + 1 carries; SBCLB inverts
+/// Zn's word, so 5 - 6 - 1 borrows.
+#[test]
+fn the_long_adds_with_carry_chain_through_the_odd_elements() {
+    let cases = [
+        // adclb, adclt, sbclb z0.s, z1.s, z2.s.
+        (0x4502_D020, [0, 1, 0xB, 0]),
+        (0x4502_D420, [1, 1, 7, 0]),
+        (0x4582_D020, [0xFFFF_FFFF, 1, 0xFFFF_FFFE, 0]),
+    ];
+    for (insn, want) in cases {
+        let mut cpu = fp_streaming(0, 0);
+        set_elements(&mut cpu, 0, Esize::S, &[0xFFFF_FFFF, 0x1234, 5, 0x5678]);
+        set_elements(&mut cpu, 1, Esize::S, &[0, 1, 6, 2]);
+        set_elements(&mut cpu, 2, Esize::S, &[0, 1, 1, 0]);
+        assert_eq!(exec(&mut cpu, insn), None);
+        assert_eq!(elements(&cpu, 0, Esize::S), want, "{insn:#010x}");
+    }
+}
+
+/// CADD adds Zm's pair rotated: of (1 + 2i) and (3 + 4i), #90 gives (-3,
+/// 5) and #270 (5, -1). SQCADD saturates: 127 - -128 is 127.
+#[test]
+fn cadd_rotates_and_sqcadd_saturates() {
+    // cadd z0.h, z0.h, z1.h, #90 and #270.
+    for (insn, want) in [(0x4540_D820, [0xFFFD, 5]), (0x4540_DC20, [5, 0xFFFF])] {
+        let mut cpu = fp_streaming(0, 0);
+        set_elements(&mut cpu, 0, Esize::H, &[1, 2]);
+        set_elements(&mut cpu, 1, Esize::H, &[3, 4]);
+        assert_eq!(exec(&mut cpu, insn), None);
+        assert_eq!(elements(&cpu, 0, Esize::H)[..2], want, "{insn:#010x}");
+    }
+    let mut cpu = fp_streaming(0, 0);
+    set_elements(&mut cpu, 0, Esize::B, &[0x7F, 0x80]);
+    set_elements(&mut cpu, 1, Esize::B, &[0x00, 0x80]);
+    // sqcadd z0.b, z0.b, z1.b, #90.
+    assert_eq!(exec(&mut cpu, 0x4501_D820), None);
+    assert_eq!(elements(&cpu, 0, Esize::B)[..2], [0x7F, 0x80]);
+}
+
+/// URSRA of doublewords by 64 rounds `(element + 2^63) >> 64` up to 1
+/// before it accumulates. SRI by the element size keeps Zd, of bytes and
+/// of doublewords, SLI by 0 replaces it, SRI by 4 keeps Zd's top four
+/// bits, and SLI of doublewords by 63 replaces bit 63 alone.
+#[test]
+fn the_shift_accumulates_and_inserts_reach_the_element_size() {
+    let mut cpu = fp_streaming(0, 0);
+    set_elements(&mut cpu, 0, Esize::D, &[10, 20]);
+    set_elements(&mut cpu, 1, Esize::D, &[u64::MAX, I64_MIN]);
+    // ursra z0.d, z1.d, #64.
+    assert_eq!(exec(&mut cpu, 0x4580_EC20), None);
+    assert_eq!(elements(&cpu, 0, Esize::D), [11, 21]);
+
+    // sri z0.b, z1.b, #8; sli z0.b, z1.b, #0.
+    for (insn, want) in [(0x4508_F020, 0xAB), (0x4508_F420, 0xFF)] {
+        let mut cpu = fp_streaming(0, 0);
+        set_elements(&mut cpu, 0, Esize::B, &[0xAB]);
+        set_elements(&mut cpu, 1, Esize::B, &[0xFF]);
+        assert_eq!(exec(&mut cpu, insn), None);
+        assert_eq!(elements(&cpu, 0, Esize::B), [want; 16], "{insn:#010x}");
+    }
+    let mut cpu = fp_streaming(0, 0);
+    set_elements(&mut cpu, 0, Esize::H, &[0xABCD]);
+    set_elements(&mut cpu, 1, Esize::H, &[0x1234]);
+    // sri z0.h, z1.h, #4.
+    assert_eq!(exec(&mut cpu, 0x451C_F020), None);
+    assert_eq!(elements(&cpu, 0, Esize::H), [0xA123; 8]);
+
+    // Doublewords: SRI by 64 keeps Zd; SLI by 63 moves Zn's bit 0 to bit 63.
+    for (insn, want) in [(0x4580_F020, 0x0123_4567_89AB_CDEF), (0x45DF_F420, 0x8123_4567_89AB_CDEF)] {
+        let mut cpu = fp_streaming(0, 0);
+        set_elements(&mut cpu, 0, Esize::D, &[0x0123_4567_89AB_CDEF]);
+        set_elements(&mut cpu, 1, Esize::D, &[0xFFFF_FFFF_FFFF_FFFF]);
+        assert_eq!(exec(&mut cpu, insn), None);
+        assert_eq!(elements(&cpu, 0, Esize::D), [want; 2], "{insn:#010x}");
+    }
+}
+
+/// The narrowing instructions: a `B` form writes the even bytes and zeroes
+/// the odd, a `T` form writes the odd and keeps the even. SQRSHRUN
+/// saturates a negative value to 0 and 256 to 0xFF; RSHRNB rounds 0x17F
+/// up to 1 and 0xFF80 to 0x100, truncated to 0; the extracts saturate by
+/// their signedness; ADDHNB keeps the high byte of the sum, RADDHNB rounds
+/// it, SUBHNB of 0 - 1 is 0xFF.
+#[test]
+fn the_narrowing_instructions_write_their_half_and_saturate() {
+    // sqrshrunb, sqrshrunt z0.b, z1.h, #1.
+    let shifted = [0x8000, 0x0003, 0x01FF, 0x0000];
+    assert_eq!(narrowed(0x452F_0820, &shifted, &[0]), [0, 0, 2, 0, 0xFF, 0, 0, 0]);
+    assert_eq!(narrowed(0x452F_0C20, &shifted, &[0]), [0xEE, 0, 0xEE, 2, 0xEE, 0xFF, 0xEE, 0]);
+    // rshrnb, shrnb z0.b, z1.h, #8.
+    let rounded = [0x0180, 0x017F, 0xFF80, 0x0000];
+    assert_eq!(narrowed(0x4528_1820, &rounded, &[0]), [2, 0, 1, 0, 0, 0, 0, 0]);
+    assert_eq!(narrowed(0x4528_1020, &rounded, &[0]), [1, 0, 1, 0, 0xFF, 0, 0, 0]);
+    // sqxtnb, uqxtnb, sqxtunb, sqxtnt z0.b, z1.h.
+    let extracted = [0x0080, 0xFF7F, 0x00FF, 0xFFFF];
+    assert_eq!(narrowed(0x4528_4020, &extracted, &[0]), [0x7F, 0, 0x80, 0, 0x7F, 0, 0xFF, 0]);
+    assert_eq!(narrowed(0x4528_4820, &extracted, &[0]), [0x80, 0, 0xFF, 0, 0xFF, 0, 0xFF, 0]);
+    assert_eq!(narrowed(0x4528_5020, &extracted, &[0]), [0x80, 0, 0, 0, 0xFF, 0, 0, 0]);
+    assert_eq!(narrowed(0x4528_4420, &extracted, &[0]), [0xEE, 0x7F, 0xEE, 0x80, 0xEE, 0x7F, 0xEE, 0xFF]);
+    // addhnb, raddhnb, subhnb, rsubhnt z0.b, z1.h, z2.h.
+    let (n, m) = ([0x00FF, 0x007F, 0x0000, 0x8000], [1, 1, 1, 0x8000]);
+    assert_eq!(narrowed(0x4562_6020, &n, &m), [1, 0, 0, 0, 0, 0, 0, 0]);
+    assert_eq!(narrowed(0x4562_6820, &n, &m), [1, 0, 1, 0, 0, 0, 0, 0]);
+    assert_eq!(narrowed(0x4562_7020, &n, &m), [0, 0, 0, 0, 0xFF, 0, 0, 0]);
+    assert_eq!(narrowed(0x4562_7C20, &n, &m), [0xEE, 1, 0xEE, 0, 0xEE, 0, 0xEE, 0]);
+}
+
+/// Zd's first eight bytes after `insn`, from Zd's bytes all 0xEE and Zn's
+/// and Zm's halfwords `n` and `m`, repeated; no saturation sets FPSR.QC.
+fn narrowed(insn: u32, n: &[u64], m: &[u64]) -> Vec<u64> {
+    let mut cpu = fp_streaming(0, 0);
+    set_elements(&mut cpu, 0, Esize::B, &[0xEE]);
+    set_elements(&mut cpu, 1, Esize::H, n);
+    set_elements(&mut cpu, 2, Esize::H, m);
+    assert_eq!(exec(&mut cpu, insn), None, "{insn:#010x}");
+    assert_eq!(cpu.fpsr, 0, "{insn:#010x}");
+    elements(&cpu, 0, Esize::B)[..8].to_vec()
+}
+
 /// The sizes an SVE2 integer page's decode makes UNDEFINED, before the
 /// enable check: URECPE of halfwords and doublewords, SADALP, SMLALB,
 /// SQDMLALB and SQDMLALBT of bytes, CDOT of `size = 0x`. SQRDMLAH of
@@ -1312,4 +1516,23 @@ fn the_reserved_sve2_integer_sizes_are_undefined_before_the_sme_trap() {
     }
     // sqrdmlah z0.b, z1.b, z2.b.
     assert_eq!(exec(&mut cpu, 0x4402_7020), Some(NOT_STREAMING));
+}
+
+/// The widening, narrowing and accumulating instructions' reserved
+/// encodings are UNDEFINED before the enable check: SADDLB and SABALB of
+/// bytes, PMULLB of words (`size = 10`) and of `size = 00` (FEAT_SVE_
+/// PMULL128's), SSHLLB, SRSRA and SHRNB with no `tsize` bit set, SQXTNB
+/// with `tsize = 011`, ADDHNB of bytes. EORBT of bytes is legal.
+#[test]
+fn the_reserved_sve2_widening_and_narrowing_encodings_are_undefined_before_the_sme_trap() {
+    let mut cpu = processor(Implementation::EVERY_FEATURE);
+    let reserved = [
+        0x4502_0020, 0x4502_C020, 0x4582_6820, 0x4502_6820, 0x4507_A020, 0x4500_E820, 0x4520_1020, 0x4538_4020,
+        0x4522_6020,
+    ];
+    for insn in reserved {
+        assert_eq!(exec(&mut cpu, insn), Some(UNDEFINED), "{insn:#010x}");
+    }
+    // eorbt z0.b, z1.b, z2.b.
+    assert_eq!(exec(&mut cpu, 0x4502_9020), Some(NOT_STREAMING));
 }

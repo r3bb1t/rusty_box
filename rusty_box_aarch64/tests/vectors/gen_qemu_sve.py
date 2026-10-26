@@ -291,13 +291,20 @@ def not_subp(w):
     return w | 0x00010000 if (w >> 17) & 3 == 0 else w
 
 
+def not_pmull128(w):
+    """PMULLB, PMULLT (`op = 0`, `U = 1`): `size = 00` is FEAT_SVE_PMULL128's
+    128-bit form, so `size = 01` in its place."""
+    pmull = (w >> 12) & 1 == 0 and (w >> 11) & 1 == 1
+    return w | 0x00400000 if pmull and (w >> 22) & 3 == 0 else w
+
+
 # (name, kind, fixed bits, free bits, fixup): Arm's encoding classes of the
 # A64 `sve` group whose encodings FEAT_SME makes legal, with `op0 = 000`
 # and `001`, then the loads, stores and prefetches (`op0 = 100`, `101` and
 # `111`, kind M, or R for scalar plus scalar), then the floating-point
 # instructions (`op0 = 011`, kind SF), then SVE2's integer instructions
-# with `op1<7> = 0` (`op0 = 010`, kind SI), their fixed bits from AARCHMRS
-# 2026-09.
+# (`op0 = 010`, kind SI), `op1<7> = 0` first, their fixed bits from
+# AARCHMRS 2026-09.
 FAMILIES = [
     ("sve_int_bin_pred_arit_0", "S", 0x04000000, 0x00C71FFF, None),
     ("sve_int_bin_pred_arit_1", "S", 0x04080000, 0x00C71FFF, None),
@@ -468,6 +475,21 @@ FAMILIES = [
     ("sve_intx_qdmul_long_by_indexed_elem", "SI", 0x4420E000, 0x00DF0FFF, None),
     ("sve_intx_qdmulh_by_indexed_elem", "SI", 0x4420F000, 0x00DF07FF, None),
     ("sve_intx_mul_by_indexed_elem", "SI", 0x4420F800, 0x00DF03FF, None),
+    ("sve_intx_cons_arith_long", "SI", 0x45000000, 0x00DF3FFF, None),
+    ("sve_intx_cons_arith_wide", "SI", 0x45004000, 0x00DF1FFF, None),
+    ("sve_intx_cons_mul_long", "SI", 0x45006000, 0x00DF1FFF, not_pmull128),
+    ("sve_intx_clong", "SI", 0x45008000, 0x00DF0FFF, None),
+    ("sve_intx_eorx", "SI", 0x45009000, 0x00DF07FF, None),
+    ("sve_intx_shift_long", "SI", 0x4500A000, 0x005F0FFF, None),
+    ("sve_intx_aba_long", "SI", 0x4500C000, 0x00DF0FFF, None),
+    ("sve_intx_adc_long", "SI", 0x4500D000, 0x00DF07FF, None),
+    ("sve_intx_cadd", "SI", 0x4500D800, 0x00C107FF, None),
+    ("sve_intx_sra", "SI", 0x4500E000, 0x00DF0FFF, None),
+    ("sve_intx_shift_insert", "SI", 0x4500F000, 0x00DF07FF, None),
+    ("sve_intx_aba", "SI", 0x4500F800, 0x00DF07FF, None),
+    ("sve_intx_shift_narrow", "SI", 0x45200000, 0x005F3FFF, None),
+    ("sve_intx_extract_narrow", "SI", 0x45204000, 0x00581FFF, None),
+    ("sve_intx_arith_narrow", "SI", 0x45206000, 0x00DF1FFF, None),
 ]
 
 

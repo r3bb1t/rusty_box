@@ -164,13 +164,12 @@ element count, immediate, permute, compare, predicate and WHILE
 instructions, the integer dot products (SVE's SDOT and UDOT, FEAT_I8MM's
 USDOT and SUDOT) and SVE2's complex, long and saturating multiply-adds,
 multiplies by element and predicated shifts, halving, pairwise and
-saturating operations, SCLAMP and UCLAMP (FEAT_SME's), the contiguous
-loads, stores and prefetches, and the SVE and
-SVE2 floating-point and BFloat16 instructions it makes legal in Streaming
-SVE mode, 738 encodings, which outside that mode take the SME trap, this
-processor having no FEAT_SVE; SVE2's widening, narrowing and
-accumulating integer instructions and the ZA instructions are still to
-come). No processor a machine runs has them
+saturating operations, SCLAMP and UCLAMP (FEAT_SME's), its widening,
+narrowing and accumulating integer instructions, the contiguous loads,
+stores and prefetches, and the SVE and SVE2 floating-point and BFloat16
+instructions it makes legal in Streaming SVE mode, 823 encodings, which
+outside that mode take the SME trap, this processor having no FEAT_SVE;
+the ZA instructions are still to come). No processor a machine runs has them
 yet: the tests run them on a test-only processor with every feature, whose
 ID registers advertise each one.
 
@@ -361,13 +360,12 @@ integration tests of the public API.
   GNU as assembles; and `CPACR_EL1.FPEN` traps the cryptographic
   instructions, which are Advanced SIMD, but not CRC32, which is not.
 - `tests/unit/difftest.rs` also replays `tests/vectors/qemu_sve.txt`, in
-  Streaming SVE mode at a 512-bit vector length: 6,760 vectors, 40 for each
-  of the 169 encoding classes of SVE integer arithmetic, element counts,
+  Streaming SVE mode at a 512-bit vector length: 7,360 vectors, 40 for each
+  of the 184 encoding classes of SVE integer arithmetic, element counts,
   immediates, permutes, compares, predicate operations, WHILE, contiguous
   loads, stores and prefetches, floating point, and SVE2's integer
-  multiply-adds, multiplies by element and predicated operations that
-  FEAT_SME makes legal there, each the class's fixed bits with the rest
-  random. The
+  instructions that FEAT_SME makes legal there, each the class's fixed
+  bits with the rest random. The
   initial state is `qemu_max.txt`'s with Z0-Z31 and P0-P15 in place of the
   SIMD&FP registers (random bits, small elements, element extremes;
   random, all-true and per-size canonical predicates), a load's or
@@ -406,8 +404,13 @@ integration tests of the public API.
   operations' range, SQDMLALB's saturation of the product before the
   accumulate, the dot products' wrap and USDOT's and SUDOT's signedness,
   CDOT's and CMLA's rotations, SQRDCMLAH's rounding, the source element of
-  the long forms by element, SCLAMP's order, and the reserved sizes
-  UNDEFINED before the SME trap; no SVE saturation sets FPSR.QC.
+  the long forms by element, SCLAMP's order, the elements the long and
+  wide arithmetic, SSHLLT, EORBT and SABALB take, PMULL's polynomial
+  products and SQDMULLB's saturation, the carry chain of ADCLB and SBCLB,
+  CADD's rotations and SQCADD's saturation, URSRA, SRI and SLI at the
+  element size, the narrowing instructions' halves, rounding and
+  saturation, and the reserved sizes and `tsize` values UNDEFINED before
+  the SME trap; no SVE saturation sets FPSR.QC.
 - The decoder is checked against Arm's machine-readable specification
   (`tests/unit/spec.rs`). `syn` reads the decoder's source and follows
   `decode` through every `match` to every encoding it returns. Against
