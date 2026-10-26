@@ -33,6 +33,22 @@ const STORE_W: [u32; 2] = [0xB900_0022, 0x1400_0000];
 /// `str x2, [x1]; b .`
 const STORE_X: [u32; 2] = [0xF900_0022, 0x1400_0000];
 
+// Two accesses to one page: an aligned load, which fills the page's TLB
+// entry, then the access under test, which hits that entry.
+
+/// `ldr w3, [x1]; ldur w3, [x1, #1]; b .`
+const WARM_THEN_MISALIGNED_LOAD: [u32; 3] = [0xB940_0023, 0xB840_1023, 0x1400_0000];
+/// `ldr w3, [x1]; stur w2, [x1, #1]; b .`
+const WARM_THEN_MISALIGNED_STORE: [u32; 3] = [0xB940_0023, 0xB800_1022, 0x1400_0000];
+/// `ldr w3, [x1]; str w2, [x1]; b .`
+const WARM_THEN_STORE: [u32; 3] = [0xB940_0023, 0xB900_0022, 0x1400_0000];
+/// `ldr w3, [x2]; ldar w3, [x1]; b .`
+const WARM_THEN_LOAD_ACQUIRE: [u32; 3] = [0xB940_0043, 0x88DF_FC23, 0x1400_0000];
+/// `ldr w3, [x1]; ldtr w3, [x1]; b .`
+const WARM_THEN_UNPRIVILEGED_LOAD: [u32; 3] = [0xB940_0023, 0xB840_0823, 0x1400_0000];
+/// `ldr w3, [x1]; sttr w2, [x1]; b .`
+const WARM_THEN_UNPRIVILEGED_STORE: [u32; 3] = [0xB940_0023, 0xB800_0822, 0x1400_0000];
+
 /// ESR_EL1.EC of a Data Abort taken without a change of EL.
 const EC_DATA_ABORT_SAME_EL: u64 = 0x25;
 /// DFSC values (Arm ARM `ESR_ELx.ISS` for Data Aborts).
@@ -41,6 +57,8 @@ const DFSC_TRANSLATION_L3: u64 = 0x07;
 const DFSC_PERMISSION_L3: u64 = 0x0F;
 /// ESR_EL1.ISS.WnR.
 const WNR: u64 = 1 << 6;
+/// SCTLR_EL1.A: every misaligned data access faults.
+const SCTLR_A: u64 = 1 << 1;
 
 const Q_VALUE: u128 = 0x0011_2233_4455_6677_8899_AABB_CCDD_EEFF;
 const FILL: [u8; 16] = [0x5A; 16];
@@ -69,6 +87,18 @@ fn fault<S: GuestStorage, I: Instrumentation>(m: &mut VirtMachine<S, I>) -> (u64
     let far = m.sysreg_read(SysReg::FAR_EL1).expect("FAR_EL1");
     assert_eq!(esr >> 26, EC_DATA_ABORT_SAME_EL, "a data abort, ESR {esr:#x}");
     (esr, far)
+}
+
+/// Run the warming load at `RAM_BASE`, which must complete, then the access
+/// after it, and return what that one reported, as [`fault`] does. The
+/// tests that use it access VA 0x8000_1000 or 0x8000_2000, never
+/// 0x8000_0000, whose entry in this core's direct-mapped TLB is the code
+/// page's: the fetch between the two accesses would evict it.
+fn fault_on_a_warm_tlb<S: GuestStorage, I: Instrumentation>(m: &mut VirtMachine<S, I>) -> (u64, u64) {
+    let out = m.step(RunBudget::Instructions(1));
+    assert_eq!(out.stop, StopReason::BudgetExhausted);
+    assert_eq!(m.reg_read(Reg::Pc), RAM_BASE + 4, "the warming load completes");
+    fault(m)
 }
 
 fn bytes_at<S: GuestStorage, I: Instrumentation>(m: &VirtMachine<S, I>, addr: u64) -> [u8; 16] {
@@ -199,6 +229,135 @@ fn an_aligned_store_to_a_read_only_device_page_is_a_permission_fault() {
     let (esr, far) = fault(&mut m);
     assert_eq!(esr & 0x3F, DFSC_PERMISSION_L3, "ESR {esr:#x}");
     assert_eq!(far, 0x8000_2000);
+}
+
+/// The bytes the warm-TLB tests put at the start of the tested page, and
+/// the word an aligned load of them gives.
+const PAGE_BYTES: [u8; 8] = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];
+const ALIGNED_WORD: u64 = 0x4433_2211;
+
+#[test]
+fn a_misaligned_load_from_a_device_page_already_in_the_tlb_is_an_alignment_fault() {
+    let mut ram = vec![0u8; RAM_LEN];
+    let mut m = bare(&mut ram);
+    load(&mut m, &WARM_THEN_MISALIGNED_LOAD);
+    map_test_pages(&mut m);
+    m.mem_write(RAM_BASE + 0x4000, &PAGE_BYTES).expect("in RAM");
+    m.reg_write(Reg::X1, 0x8000_2000);
+    let (esr, far) = fault_on_a_warm_tlb(&mut m);
+    assert_eq!(esr & 0x3F, DFSC_ALIGNMENT, "ESR {esr:#x}");
+    assert_eq!(esr & WNR, 0);
+    assert_eq!(far, 0x8000_2001);
+    assert_eq!(m.reg_read(Reg::X3), ALIGNED_WORD, "only the warming load loaded");
+}
+
+#[test]
+fn a_misaligned_store_to_a_read_only_device_page_already_in_the_tlb_is_an_alignment_fault() {
+    let mut ram = vec![0u8; RAM_LEN];
+    let mut m = bare(&mut ram);
+    load(&mut m, &WARM_THEN_MISALIGNED_STORE);
+    map_test_pages(&mut m);
+    m.mem_write(RAM_BASE + 0x4000, &FILL).expect("in RAM");
+    m.reg_write(Reg::X1, 0x8000_2000);
+    m.reg_write(Reg::X2, u64::MAX);
+    let (esr, far) = fault_on_a_warm_tlb(&mut m);
+    assert_eq!(esr & 0x3F, DFSC_ALIGNMENT, "alignment before permission, ESR {esr:#x}");
+    assert_eq!(esr & WNR, WNR);
+    assert_eq!(far, 0x8000_2001);
+    assert_eq!(bytes_at(&m, RAM_BASE + 0x4000), FILL, "nothing is written");
+}
+
+#[test]
+fn an_aligned_store_to_a_read_only_page_already_in_the_tlb_is_a_permission_fault() {
+    let mut ram = vec![0u8; RAM_LEN];
+    let mut m = bare(&mut ram);
+    load(&mut m, &WARM_THEN_STORE);
+    map_test_pages(&mut m);
+    m.mem_write(RAM_BASE + 0x4000, &FILL).expect("in RAM");
+    m.reg_write(Reg::X1, 0x8000_2000);
+    m.reg_write(Reg::X2, u64::MAX);
+    let (esr, far) = fault_on_a_warm_tlb(&mut m);
+    assert_eq!(esr & 0x3F, DFSC_PERMISSION_L3, "ESR {esr:#x}");
+    assert_eq!(esr & WNR, WNR);
+    assert_eq!(far, 0x8000_2000);
+    assert_eq!(bytes_at(&m, RAM_BASE + 0x4000), FILL, "nothing is written");
+}
+
+#[test]
+fn a_misaligned_load_from_normal_memory_already_in_the_tlb_loads() {
+    let mut ram = vec![0u8; RAM_LEN];
+    let mut m = bare(&mut ram);
+    load(&mut m, &WARM_THEN_MISALIGNED_LOAD);
+    map_test_pages(&mut m);
+    m.mem_write(RAM_BASE + 0x5000, &PAGE_BYTES).expect("in RAM");
+    m.reg_write(Reg::X1, 0x8000_1000);
+    let out = m.step(RunBudget::Instructions(2));
+    assert_eq!(out.stop, StopReason::BudgetExhausted);
+    assert_eq!(m.reg_read(Reg::Pc), RAM_BASE + 8);
+    assert_eq!(m.reg_read(Reg::X3), 0x5544_3322);
+}
+
+#[test]
+fn with_sctlr_a_set_a_misaligned_load_from_normal_memory_already_in_the_tlb_faults() {
+    let mut ram = vec![0u8; RAM_LEN];
+    let mut m = bare(&mut ram);
+    load(&mut m, &WARM_THEN_MISALIGNED_LOAD);
+    map_test_pages(&mut m);
+    let sctlr = m.sysreg_read(SysReg::SCTLR_EL1).expect("SCTLR");
+    m.sysreg_write(SysReg::SCTLR_EL1, sctlr | SCTLR_A).expect("SCTLR");
+    m.mem_write(RAM_BASE + 0x5000, &PAGE_BYTES).expect("in RAM");
+    m.reg_write(Reg::X1, 0x8000_1000);
+    let (esr, far) = fault_on_a_warm_tlb(&mut m);
+    assert_eq!(esr & 0x3F, DFSC_ALIGNMENT, "ESR {esr:#x}");
+    assert_eq!(esr & WNR, 0);
+    assert_eq!(far, 0x8000_1001);
+    assert_eq!(m.reg_read(Reg::X3), ALIGNED_WORD, "only the warming load loaded");
+}
+
+#[test]
+fn a_misaligned_load_acquire_from_normal_memory_already_in_the_tlb_faults() {
+    let mut ram = vec![0u8; RAM_LEN];
+    let mut m = bare(&mut ram);
+    load(&mut m, &WARM_THEN_LOAD_ACQUIRE);
+    map_test_pages(&mut m);
+    m.mem_write(RAM_BASE + 0x5000, &PAGE_BYTES).expect("in RAM");
+    m.reg_write(Reg::X2, 0x8000_1000);
+    m.reg_write(Reg::X1, 0x8000_1001);
+    let (esr, far) = fault_on_a_warm_tlb(&mut m);
+    assert_eq!(esr & 0x3F, DFSC_ALIGNMENT, "ESR {esr:#x}");
+    assert_eq!(esr & WNR, 0);
+    assert_eq!(far, 0x8000_1001);
+    assert_eq!(m.reg_read(Reg::X3), ALIGNED_WORD, "only the warming load loaded");
+}
+
+#[test]
+fn an_unprivileged_load_from_an_el1_only_page_already_in_the_tlb_is_a_permission_fault() {
+    let mut ram = vec![0u8; RAM_LEN];
+    let mut m = bare(&mut ram);
+    load(&mut m, &WARM_THEN_UNPRIVILEGED_LOAD);
+    map_test_pages(&mut m);
+    m.mem_write(RAM_BASE + 0x5000, &PAGE_BYTES).expect("in RAM");
+    m.reg_write(Reg::X1, 0x8000_1000);
+    let (esr, far) = fault_on_a_warm_tlb(&mut m);
+    assert_eq!(esr & 0x3F, DFSC_PERMISSION_L3, "ESR {esr:#x}");
+    assert_eq!(esr & WNR, 0);
+    assert_eq!(far, 0x8000_1000);
+}
+
+#[test]
+fn an_unprivileged_store_to_an_el1_only_page_already_in_the_tlb_is_a_permission_fault() {
+    let mut ram = vec![0u8; RAM_LEN];
+    let mut m = bare(&mut ram);
+    load(&mut m, &WARM_THEN_UNPRIVILEGED_STORE);
+    map_test_pages(&mut m);
+    m.mem_write(RAM_BASE + 0x5000, &FILL).expect("in RAM");
+    m.reg_write(Reg::X1, 0x8000_1000);
+    m.reg_write(Reg::X2, u64::MAX);
+    let (esr, far) = fault_on_a_warm_tlb(&mut m);
+    assert_eq!(esr & 0x3F, DFSC_PERMISSION_L3, "ESR {esr:#x}");
+    assert_eq!(esr & WNR, WNR);
+    assert_eq!(far, 0x8000_1000);
+    assert_eq!(bytes_at(&m, RAM_BASE + 0x5000), FILL, "nothing is written");
 }
 
 #[test]

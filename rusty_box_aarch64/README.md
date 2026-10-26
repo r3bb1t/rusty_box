@@ -324,7 +324,13 @@ integration tests of the public API.
   bytes, an alignment fault on a Device page taken ahead of its permission
   fault, an access running from Normal memory into a Device page faulting
   where that page starts, and a Q register store across into an unmapped
-  page writing nothing.
+  page writing nothing. Each fault is also taken on a page already in the
+  TLB, after an aligned load filled its entry: a misaligned access to a
+  Device page (an alignment fault, ahead of a store's permission fault), a
+  misaligned access to Normal memory with `SCTLR_EL1.A` set or by a
+  load-acquire, a store to a read-only page, and an `LDTR`/`STTR` at EL1 to
+  a page EL0 cannot reach; a misaligned load from Normal memory in the TLB
+  completes.
 - `tests/wfx_and_debug.rs`: WFI and WFE trap from EL0 only when they would
   wait — WFI not when an interrupt is pending, masked or not; WFE not when
   the Event Register, set by `SEV`, `SEVL`, an exception return or the
