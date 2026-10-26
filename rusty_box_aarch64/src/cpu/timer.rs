@@ -105,9 +105,9 @@ impl Cpu {
             stream_from: self.counter(),
         };
     }
-    /// The system counter at the tick `icount`.
+    /// The system counter at the tick `icount`: non-decreasing in `icount`.
     #[inline]
-    fn counter_at(&self, icount: u64) -> u64 {
+    pub(crate) fn counter_at(&self, icount: u64) -> u64 {
         let value = u128::from(icount) * u128::from(self.counter_hz.get()) / u128::from(self.ips.get());
         u64::try_from(value).unwrap_or(u64::MAX)
     }

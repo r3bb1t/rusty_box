@@ -23,6 +23,7 @@ mod isa;
 mod ldst;
 mod mmu;
 mod op;
+mod poll;
 mod regs;
 mod simd;
 mod simd_arith;

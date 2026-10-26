@@ -231,7 +231,8 @@ impl Cpu {
     ///
     /// This is the per-instruction path, with no trace cache: a machine runs
     /// traces instead (`Cpu::run_trace`), which execute each instruction
-    /// through the same `execute_at` and `finish` steps.
+    /// through the same `execute_at` and `finish` steps. It runs exactly
+    /// one instruction, so it fast-forwards nothing.
     pub fn step<B: PhysBus, I: Instrumentation>(&mut self, bus: &mut B, observer: &mut I) -> Step {
         let pc = self.pc;
         let mut observed = Observed { bus, observer };
@@ -454,7 +455,6 @@ pub(crate) struct Nzcv {
 /// `b.cond` of the trace loop: reading `PSTATE`'s fields in each arm loads
 /// only the flags that condition names, where a [`Nzcv`] argument is loaded
 /// whole ahead of the condition switch.
-#[allow(dead_code)] // Arm ARM `ConditionHolds` over a flag value; no caller holds one yet.
 #[inline(always)]
 pub(crate) const fn cond_holds(flags: Nzcv, cond: u32) -> bool {
     let Nzcv { n, z, c, v } = flags;

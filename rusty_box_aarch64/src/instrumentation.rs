@@ -16,6 +16,10 @@
 //!   exception, IRQ and FIQ the processor takes;
 //! - **memory** — [`Instrumentation::memory_access`], for every data access
 //!   that reaches the physical bus.
+//!
+//! [`Instrumentation::SEES_EXECUTION`] says whether the observer must hear
+//! of every instruction: [`NoInstrumentation`] does not, which lets the
+//! machine fast-forward a loop that only waits for the system counter.
 
 use crate::bus::{AccessWidth, PhysAddr};
 use crate::cpu::{El, ExceptionClass};
@@ -81,6 +85,12 @@ pub struct ExceptionTaken {
 /// nothing.
 #[allow(unused_variables)]
 pub trait Instrumentation {
+    /// Whether the observer must hear of every instruction executed.
+    /// `false` lets the machine fast-forward instructions whose only effect
+    /// is the passage of time. The observer is then not called for them, and
+    /// it is called as usual for every instruction it does run.
+    const SEES_EXECUTION: bool = true;
+
     /// The instruction at `pc` was fetched and is about to execute.
     #[inline(always)]
     fn before_execution(&mut self, pc: u64, insn: u32) {}
@@ -114,4 +124,6 @@ pub trait Instrumentation {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct NoInstrumentation;
 
-impl Instrumentation for NoInstrumentation {}
+impl Instrumentation for NoInstrumentation {
+    const SEES_EXECUTION: bool = false;
+}

@@ -42,11 +42,20 @@
 //! change ends the trace), so each of their fetches would find the same.
 //! Every instruction is executed and reported to the observer exactly as
 //! `Cpu::step` would, so a machine runs the same instructions with the same
-//! results either way.
+//! results either way. The one exception is the whole iterations of a
+//! counter poll, which a trace whose first instruction is the poll's
+//! counter read may fast-forward, within the bound its caller gives
+//! ([`PollBound`]), when the observer does not hear of every instruction:
+//! they leave exactly the state running them would (`poll.rs`). A trace
+//! that may begin a poll is marked when it is built ([`POLL`]), so that
+//! its lookup misses and the decision is made on the miss path: any other
+//! trace costs nothing more to find or run.
 
 use super::decode::classify;
 use super::exec::{Done, Fault, Observed, Step};
+use super::id::PA_BITS;
 use super::op::{predecode, Op, OpSource};
+use super::poll::PollStep;
 use super::Cpu;
 use crate::bus::{CodeEpoch, FetchSource, PhysAddr, PhysBus, PhysSpan};
 use crate::instrumentation::Instrumentation;
@@ -106,6 +115,16 @@ use size::{ENTRIES, MAX_STAMPS, MIN_STAMPS, POOL};
 
 const INVALID: u64 = u64::MAX;
 
+/// Set in an entry's `pa` when the trace may begin a counter poll
+/// ([`TraceCache::may_poll`]): its first instruction reads the system
+/// counter ([`Op::ReadCounter`]). No physical address has this bit,
+/// so [`TraceCache::lookup`] misses such a trace and
+/// [`TraceCache::lookup_poll`] finds it. An entry's address is 4-aligned,
+/// so a marked one is never [`INVALID`].
+const POLL: u64 = 1 << 63;
+
+const _: () = assert!(PA_BITS < 63);
+
 // Pages that share a stamp must share their window of entries, or a write
 // to one would clear the stamp of the other's traces without forgetting
 // them (Bochs icache.h relies on the same agreement between its hashes):
@@ -137,7 +156,8 @@ const fn table<T: Copy, const N: usize>(fill: T) -> Table<T, N> {
 /// One cached trace.
 #[derive(Debug, Clone, Copy)]
 struct Entry {
-    /// The physical address of its first instruction; [`INVALID`] for none.
+    /// The physical address of its first instruction, with [`POLL`] set
+    /// when the trace may begin a counter poll; [`INVALID`] for none.
     pa: u64,
     /// The epoch of the memory it was read from, when it was read.
     epoch: CodeEpoch,
@@ -277,11 +297,35 @@ impl OpSource for PoolSlot {
     }
 }
 
+/// How far a counter poll whose read starts a trace may be fast-forwarded
+/// (`poll.rs`), when the observer does not hear of every instruction
+/// ([`Instrumentation::SEES_EXECUTION`]).
+#[derive(Debug, Clone, Copy)]
+pub(super) struct PollBound<'x> {
+    /// The instructions, the read included, that [`Cpu::run_trace`]'s
+    /// caller lets run before it next looks outside the processor: what is
+    /// left of its budget, of its slice and before the next event
+    /// ([`Cpu::bound_run`]).
+    pub(super) left: u64,
+    /// The addresses the caller stops at, before the instruction there
+    /// runs: no instruction a skip passes is at one.
+    pub(super) exits: &'x [u64],
+}
+
 /// The traces a processor has built.
 pub(crate) struct TraceCache {
     entries: Table<Entry, ENTRIES>,
     pool: Pool,
     generation: u32,
+    /// The end of the run of instructions [`Cpu::run_trace`]'s caller lets
+    /// the processor make before it next looks outside it, as a tick
+    /// modulo 2^32 ([`Cpu::bound_run`]): a run is shorter than 2^32
+    /// instructions, each of which retires in one tick. Only the miss path
+    /// of a trace marked [`POLL`] reads it. It is a `u32` so that it fills
+    /// the padding after `generation`, and the processor's layout, on
+    /// which the trace loop's register allocation depends, is the one it
+    /// has without it.
+    run_end: u32,
     /// Bochs `pageWriteStampTable::fineGranularityMapping`: per page (by
     /// [`TraceCache::stamp_index`]), a bit per 128-byte line holding a
     /// cached instruction. A power of two from [`MIN_STAMPS`] to
@@ -320,10 +364,16 @@ impl Entry {
         }
     }
 
+    /// The physical address of its first instruction, unmarked.
+    #[inline]
+    const fn address(&self) -> u64 {
+        self.pa & !POLL
+    }
+
     /// The lines of its page its instructions are on.
     #[inline]
     const fn lines(&self) -> u32 {
-        let first = self.pa & 0xFFF;
+        let first = self.address() & 0xFFF;
         line_mask(first, first + 4 * self.trace().len as u64 - 1)
     }
 }
@@ -334,6 +384,7 @@ impl TraceCache {
             entries: table::<_, ENTRIES>(EMPTY),
             pool: Pool::new(),
             generation: 0,
+            run_end: 0,
             stamps: table::<_, MIN_STAMPS>(0),
         }
     }
@@ -370,6 +421,34 @@ impl TraceCache {
     fn lookup(&self, pa: u64, epoch: CodeEpoch) -> Option<Trace> {
         let e = self.entries[slot(pa)];
         (e.pa == pa && e.generation == self.generation && e.epoch == epoch).then_some(e.trace())
+    }
+
+    /// The trace starting at `pa`, built from memory of `epoch`, if it is
+    /// cached and marked [`POLL`]: the traces [`Self::lookup`] does not
+    /// give.
+    #[inline]
+    fn lookup_poll(&self, pa: u64, epoch: CodeEpoch) -> Option<Trace> {
+        let e = self.entries[slot(pa)];
+        (e.pa == pa | POLL && e.generation == self.generation && e.epoch == epoch).then_some(e.trace())
+    }
+
+    /// Whether the trace of the `len` ops at `start` in the pool may begin
+    /// a counter poll (`poll.rs`): its first op reads the counter, and the
+    /// walk of a poll may pass each op after it as far as the first that
+    /// may branch, or the trace's end. A poll's walk from any other trace
+    /// fails whatever the registers hold.
+    fn may_poll(&self, start: usize, len: usize) -> bool {
+        if !matches!(self.pool.op(start), Op::ReadCounter { .. }) {
+            return false;
+        }
+        for i in start + 1..start + len {
+            match PollStep::of(*self.pool.op(i)) {
+                PollStep::Rejected => return false,
+                PollStep::Straight => {}
+                PollStep::Branch => return true,
+            }
+        }
+        true
     }
 
     /// Forget every trace (Bochs `flushTraceCacheEntries`). The stamps stay:
@@ -409,7 +488,7 @@ impl TraceCache {
             }
             for k in 0..32 {
                 let e = &mut self.entries[(window + line * 32 + k) & (ENTRIES - 1)];
-                if e.pa != INVALID && e.generation == self.generation && stamp_index(e.pa, count) == index && e.lines() & mask != 0 {
+                if e.pa != INVALID && e.generation == self.generation && stamp_index(e.address(), count) == index && e.lines() & mask != 0 {
                     e.pa = INVALID;
                 }
             }
@@ -424,8 +503,24 @@ impl Cpu {
     /// of them: a cached trace's, or a single instruction by the
     /// per-instruction path where no trace can be used. Returns what the
     /// last instruction run did.
+    ///
+    /// When `observer` does not hear of every instruction, a counter poll
+    /// whose read starts the trace may first be fast-forwarded (`poll.rs`)
+    /// within the run [`Cpu::bound_run`] set, which `limit` must not pass,
+    /// and past none of `exits`, the addresses the caller stops at. Every
+    /// instruction skipped counts as retired, and the skip leaves more than
+    /// the rest of the trace before the end of that run. A poll's iteration
+    /// comes back to its read by a taken branch, which starts a trace
+    /// there, so the check is made once per trace, on the miss path a
+    /// poll's trace takes ([`POLL`]).
     #[inline(always)]
-    pub(crate) fn run_trace<B: PhysBus, I: Instrumentation>(&mut self, bus: &mut B, observer: &mut I, limit: u64) -> Step {
+    pub(crate) fn run_trace<B: PhysBus, I: Instrumentation>(
+        &mut self,
+        bus: &mut B,
+        observer: &mut I,
+        limit: u64,
+        exits: &[u64],
+    ) -> Step {
         let pc = self.pc;
         let mut observed = Observed { bus, observer };
         let pa = match self.fetch_address(&mut observed, pc) {
@@ -435,7 +530,7 @@ impl Cpu {
         let trace = match observed.fetch_source(PhysAddr::new(pa)) {
             FetchSource::Stable(epoch) => match self.traces.lookup(pa, epoch) {
                 Some(trace) => Some(trace),
-                None => self.build_trace(&mut observed, pa, epoch),
+                None => self.trace_miss(&mut observed, pa, epoch, exits),
             },
             FetchSource::Volatile => None,
         };
@@ -488,6 +583,61 @@ impl Cpu {
         self.finish(pc, fetched, result, observed.observer).step()
     }
 
+    /// Let the next `instructions` (fewer than 2^32) run with nothing
+    /// outside the processor looking: the run within which a counter poll
+    /// may be fast-forwarded (`poll.rs`). The caller sets it before each run
+    /// of traces it counts, in which every instruction retires in one tick
+    /// and nothing else moves time, and passes no trace a `limit` beyond it.
+    #[inline(always)]
+    pub(crate) fn bound_run(&mut self, instructions: u64) {
+        debug_assert!(instructions <= u64::from(u32::MAX));
+        // Modulo 2^32, as `TraceCache::run_end` keeps it.
+        self.traces.run_end = self.icount.wrapping_add(instructions) as u32;
+    }
+
+    /// What is left of the run [`Cpu::bound_run`] last set, in
+    /// instructions: nothing runs past its end, so the difference of ticks
+    /// modulo 2^32 is the difference.
+    #[inline]
+    fn run_left(&self) -> u64 {
+        u64::from(self.traces.run_end.wrapping_sub(self.icount as u32))
+    }
+
+    /// The trace starting at `pa`, of `epoch`, that [`TraceCache::lookup`]
+    /// does not give: a cached trace marked [`POLL`], or one built now.
+    /// Before the read of a poll such a trace begins runs, when the
+    /// observer does not hear of every instruction, the poll is
+    /// fast-forwarded as far as `poll.rs`'s rule allows, within what is left
+    /// of the run [`Cpu::bound_run`] set and past none of `exits`. `None` as
+    /// [`Cpu::build_trace`] gives it. Out of line, and cold, so that the
+    /// trace loop's register allocation does not depend on it; it takes the
+    /// run's end from the processor, not as an argument, for the same
+    /// reason.
+    #[cold]
+    #[inline(never)]
+    fn trace_miss<B: PhysBus, I: Instrumentation>(
+        &mut self,
+        observed: &mut Observed<'_, B, I>,
+        pa: u64,
+        epoch: CodeEpoch,
+        exits: &[u64],
+    ) -> Option<Trace> {
+        let trace = match self.traces.lookup_poll(pa, epoch) {
+            Some(trace) => trace,
+            None => self.build_trace(observed, pa, epoch)?,
+        };
+        if !I::SEES_EXECUTION && self.traces.may_poll(trace.start, trace.len) {
+            if let Op::ReadCounter { word } = *self.traces.pool.op(trace.start) {
+                let bound = PollBound {
+                    left: self.run_left(),
+                    exits,
+                };
+                self.fast_forward_poll(observed, self.pc, word, bound);
+            }
+        }
+        Some(trace)
+    }
+
     /// Decode the trace starting at `pa`, of `epoch`, into the cache.
     /// `None` when its first word cannot be read, which a stable source
     /// never refuses; the per-instruction path then takes the fetch's
@@ -517,8 +667,9 @@ impl Cpu {
         if len == 0 {
             return None;
         }
+        let mark = if self.traces.may_poll(start, len) { POLL } else { 0 };
         let entry = Entry {
-            pa,
+            pa: pa | mark,
             epoch,
             generation: self.traces.generation,
             at: ((start as u32) << 8) | len as u32,

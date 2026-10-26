@@ -672,6 +672,23 @@ impl Cpu {
         }
     }
 
+    /// The physical address a fetch at `pc` reads now, when the fetch raises
+    /// no exception and needs no walk: `None` on `PSTATE.IL`, a misaligned
+    /// `pc`, or anything but a TLB hit that permits a fetch at the current
+    /// EL. With stage 1 disabled it is [`Cpu::translate`]'s
+    /// `AArch64.TranslateAddressS1Off` address. It never fills, flushes or
+    /// marks anything.
+    pub(crate) fn fetch_probe(&self, pc: u64) -> Option<u64> {
+        if self.pstate.il || pc & 3 != 0 {
+            return None;
+        }
+        if !self.mmu_enabled() {
+            let address = self.untagged(pc);
+            return (address >> id::PA_BITS == 0).then_some(address);
+        }
+        self.permitted_hit(pc, AccessKind::Fetch, self.pstate.el).map(|t| t.pa)
+    }
+
     /// [`Cpu::fetch_translate`] with every check made: stage 1 disabled, a
     /// TLB miss, or a page that does not permit the fetch.
     #[cold]

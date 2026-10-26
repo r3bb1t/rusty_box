@@ -112,6 +112,17 @@ vocabulary are `rusty_box_core`'s, shared with the x86 machine.
   still fetched, checked, executed and reported to an observer exactly as
   one at a time would be, so a run ends in the same state either way: the
   equivalence hashes in the speed table below are equal before and after.
+- **Counter polls fast-forward exactly.** When nobody watches every
+  instruction, a loop that reads the system counter, compares it once with a
+  value it does not change and branches on an ordering of the two jumps over
+  every whole iteration that goes as the current one does: along a growing
+  counter each such branch changes its outcome at most once, so a binary
+  search finds the last of them. The skip stops short of the budget and of
+  the next timer or device event, passes no exit address, and leaves
+  iterations to run that refill the PC history. A trace that may begin such
+  a loop is marked when it is built, so no other trace pays for the check
+  ([`src/cpu/poll.rs`](src/cpu/poll.rs); `tests/counter_poll.rs` compares
+  whole snapshots with a machine that runs every instruction).
 - **Floating point is defined in software.** `src/softfloat` is rusty_box's
   own port of Berkeley SoftFloat 3e (via Bochs softfloat3e), restricted to
   half, single and double precision and given an Arm specialization: Arm's

@@ -764,6 +764,10 @@ pub enum PowerState {
 /// look is free.
 const STOP_POLL_TICKS: u64 = 1 << 16;
 
+// A slice bounds the run of a burst (`Cpu::bound_run`), which is shorter
+// than 2^32 instructions.
+const _: () = assert!(STOP_POLL_TICKS < 1 << 32);
+
 /// The most exit addresses a machine watches at once.
 pub const MAX_EXITS: usize = 16;
 
@@ -796,6 +800,12 @@ impl Exits {
     #[inline]
     fn contains(&self, pc: u64) -> bool {
         self.addrs[..self.len].contains(&pc)
+    }
+
+    /// The exit addresses.
+    #[inline]
+    fn addresses(&self) -> &[u64] {
+        &self.addrs[..self.len]
     }
 
     /// How many instructions, at most `limit`, run in sequence from `pc`
@@ -1146,6 +1156,8 @@ impl<S: GuestStorage, I: Instrumentation> VirtMachine<S, I> {
                 .min(slice_end - self.cpu.icount)
                 .min(instruction_end - self.cpu.retired);
             let mut left = burst;
+            // A burst is at most a slice, fewer than 2^32 instructions.
+            self.cpu.bound_run(burst);
             while left > 0 {
                 if self.cpu.interrupt_deliverable() {
                     if let Some(taken) = self.cpu.deliver_interrupt() {
@@ -1162,7 +1174,10 @@ impl<S: GuestStorage, I: Instrumentation> VirtMachine<S, I> {
                     left
                 };
                 let retired = self.cpu.retired;
-                match self.cpu.run_trace(&mut self.board, &mut self.observer, limit) {
+                // A counter poll may be fast-forwarded through the rest of
+                // the burst, but past no exit address.
+                let exits = if WATCH { self.exits.addresses() } else { &[] };
+                match self.cpu.run_trace(&mut self.board, &mut self.observer, limit, exits) {
                     Step::Retired => {}
                     Step::Waiting => {
                         // The slice starts again either way, and a waiting
