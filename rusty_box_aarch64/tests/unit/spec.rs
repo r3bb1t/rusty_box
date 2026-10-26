@@ -27,7 +27,8 @@
 //!   condition holds for the complete features alone
 //!   ([`Feature::complete`]); each encoding's arms fix exactly Arm's fixed
 //!   bits; each encoding carries Arm's feature (where Arm's condition names
-//!   several, the one that implies the others in Arm's feature model).
+//!   several the decoder knows, the one that implies the others in Arm's
+//!   feature model).
 //! - [`the_decoder_allocates_as_arm_does_on_sampled_words`] and
 //!   [`the_decoder_allocates_as_arm_does_on_every_word`]: on every word,
 //!   [`decode`] names the encoding Arm's data allocates the word to among
@@ -1148,8 +1149,15 @@ fn the_decoder_is_arms_encoding_tree_for_the_implemented_features() {
         // (FEAT_FP16 for `FEAT_AdvSIMD && FEAT_FP16`): gating on it is
         // gating on the whole condition for every feature set Arm permits,
         // and every implementation is one
-        // ([`every_implementation_has_what_its_features_imply`]).
+        // ([`every_implementation_has_what_its_features_imply`]). A feature
+        // the decoder does not know drops out: in `FEAT_SVE || FEAT_SME` it
+        // is false on every processor this crate builds. An encoding whose
+        // condition needs one (`FEAT_SVE && FEAT_X`) holds for no word with
+        // every [`Feature`], so it is no encoding of an implemented feature,
+        // and the class check above already refuses a decoder that names
+        // it.
         let tag = src.features.get(&(class.clone(), variant.clone())).cloned().unwrap_or_default();
+        let named: BTreeSet<String> = leaf.features.iter().filter(|f| Status::of(f) != Status::Absent).cloned().collect();
         let tagged: BTreeSet<String> = Feature::ALL
             .iter()
             .filter(|f| format!("{f:?}") == tag)
@@ -1161,7 +1169,7 @@ fn the_decoder_is_arms_encoding_tree_for_the_implemented_features() {
             .flat_map(|&f| implied_by(f, &implications))
             .filter_map(|f| f.arm_name().map(str::to_string))
             .collect();
-        if !tagged.is_subset(&leaf.features) || !leaf.features.is_subset(&implied) {
+        if !tagged.is_subset(&named) || !named.is_subset(&implied) {
             problems.push(format!("{class}::{variant} is tagged {tag}; Arm's condition for {} names {:?}", leaf.name, leaf.features));
         }
     }

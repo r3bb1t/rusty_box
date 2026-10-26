@@ -4,6 +4,11 @@
 //! features, produced by `tests/vectors/gen_qemu.py` with QEMU's user-mode
 //! `max` processor, on a processor with every feature this core
 //! implements. The two files share one format and one initial state.
+//! `tests/vectors/qemu_sve.txt`, from `tests/vectors/gen_qemu_sve.py`, holds
+//! the SVE instructions FEAT_SME makes legal, run in Streaming SVE mode at
+//! a 512-bit vector length: the same initial state with Z0-Z31 and P0-P15
+//! in place of the SIMD&FP registers, and Z and P changes in place of V
+//! ones ([`replay_sve`]).
 //!
 //! Each vector is an instruction word and a seed. The seed rebuilds the exact
 //! initial state the generator gave the reference (registers, flags, vector
@@ -29,12 +34,14 @@ use std::vec::Vec;
 use rusty_box_core::{ClockHz, VmClock};
 
 use super::features::Implementation;
+use super::sve::{Pv, Zv};
 use super::{Cpu, CpuConfig, Step};
 use crate::bus::{AccessWidth, BusFault, PhysAddr, PhysBus};
 use crate::instrumentation::NoInstrumentation;
 
 const VECTORS: &str = include_str!("../vectors/unicorn.txt");
 const MAX_VECTORS: &str = include_str!("../vectors/qemu_max.txt");
+const SVE_VECTORS: &str = include_str!("../vectors/qemu_sve.txt");
 
 const CODE: u64 = 0x10000;
 const DATA: u64 = 0x10_0000;
@@ -289,6 +296,259 @@ fn initial_state(seed: u64, kind: &str, insn: u32) -> State {
         data,
         fpcr,
     }
+}
+
+/// The Streaming SVE vector length the SVE vectors run at, in bytes.
+const SVE_VLB: usize = 64;
+
+/// The predicate length at [`SVE_VLB`], in bytes.
+const SVE_PLB: usize = SVE_VLB / 8;
+
+/// Mirrors `Z_SPECIAL` in gen_qemu_sve.py.
+const Z_SPECIAL: [u64; 14] = [
+    0x0000_0000_0000_0000,
+    0xFFFF_FFFF_FFFF_FFFF,
+    0x8000_0000_0000_0000,
+    0x7FFF_FFFF_FFFF_FFFF,
+    0x8000_0000_8000_0000,
+    0x7FFF_FFFF_7FFF_FFFF,
+    0x8000_8000_8000_8000,
+    0x7FFF_7FFF_7FFF_7FFF,
+    0x8080_8080_8080_8080,
+    0x7F7F_7F7F_7F7F_7F7F,
+    0x0000_0000_0000_0001,
+    0x0101_0101_0101_0101,
+    0xFFFF_FFFF_0000_0000,
+    0x0000_0000_FFFF_FFFF,
+];
+
+/// Mirrors `P_ELEMENTS` in gen_qemu_sve.py.
+const P_ELEMENTS: [u64; 4] = [0xFFFF_FFFF_FFFF_FFFF, 0x5555_5555_5555_5555, 0x1111_1111_1111_1111, 0x0101_0101_0101_0101];
+
+/// The scalable registers of an SVE vector's initial state.
+struct SveState {
+    z: [[u8; SVE_VLB]; 32],
+    p: [[u8; SVE_PLB]; 16],
+    /// FPCR bits the kind adds to [`State::fpcr`].
+    fpcr: u64,
+}
+
+/// Must match `sve_state` in gen_qemu_sve.py exactly.
+fn sve_state(seed: u64, kind: &str) -> SveState {
+    let mut r = SplitMix64(seed ^ 0x5356_455F_5354_4154);
+    let mut z = [[0u8; SVE_VLB]; 32];
+    for reg in z.iter_mut() {
+        let sel = r.next() & 7;
+        for lane in reg.chunks_exact_mut(8) {
+            let w = r.next();
+            let value = match sel {
+                0 => {
+                    let signs = r.next();
+                    (w & 0x0F0F_0F0F_0F0F_0F0F) | ((signs & 0x0101_0101_0101_0101) * 0xF0)
+                }
+                1 => w & 0x0707_0707_0707_0707,
+                2 => Z_SPECIAL[(w % Z_SPECIAL.len() as u64) as usize],
+                3 => 0,
+                _ => w,
+            };
+            lane.copy_from_slice(&value.to_le_bytes());
+        }
+    }
+    let mut p = [[0u8; SVE_PLB]; 16];
+    for reg in p.iter_mut() {
+        let sel = r.next() & 7;
+        let w = r.next();
+        let value = match sel {
+            0 => w,
+            1 => u64::MAX,
+            2 => 0,
+            3..=6 => P_ELEMENTS[sel as usize - 3],
+            _ => w & P_ELEMENTS[(r.next() & 3) as usize],
+        };
+        reg.copy_from_slice(&value.to_le_bytes());
+    }
+    let fpcr = if kind == "SA" { (r.next() & 1) << 1 } else { 0 };
+    SveState { z, p, fpcr }
+}
+
+/// `key:value` pairs of an SVE vector's `z=` or `p=` field: the register
+/// number in decimal, its value as one big-endian hex number `len` bytes
+/// wide, returned little-endian like the register. A malformed pair fails
+/// the test: dropping it would leave the register's expected value its
+/// initial one.
+fn parse_registers(field: &str, prefix: &str, len: usize) -> Vec<(usize, Vec<u8>)> {
+    let Some(body) = field.strip_prefix(prefix) else { panic!("`{field}` is no `{prefix}` field") };
+    if body == "-" {
+        return Vec::new();
+    }
+    body.split(',')
+        .map(|pair| {
+            let Some((k, hex)) = pair.split_once(':') else { panic!("`{pair}` in `{prefix}` is no `n:value` pair") };
+            assert_eq!(hex.len(), 2 * len, "`{pair}` in `{prefix}` is not {len} bytes");
+            let bytes = (0..len)
+                .map(|i| {
+                    let at = 2 * (len - 1 - i);
+                    match u8::from_str_radix(&hex[at..at + 2], 16) {
+                        Ok(byte) => byte,
+                        Err(e) => panic!("`{pair}` in `{prefix}`: {e}"),
+                    }
+                })
+                .collect();
+            match k.parse() {
+                Ok(n) => (n, bytes),
+                Err(e) => panic!("`{pair}` in `{prefix}`: {e}"),
+            }
+        })
+        .collect()
+}
+
+/// Step each SVE vector once on a processor implementing every feature, in
+/// Streaming SVE mode at a 512-bit vector length (`SMCR_EL1.LEN = 3`), and
+/// fail unless every one ends in the state the reference left: PC, NZCV,
+/// FPSR, the general registers, SP, Z0-Z31, P0-P15 and the data region.
+fn replay_sve(vectors: &str) {
+    let ips = ClockHz::new(1_000_000).unwrap_or(ClockHz::BOCHS_DEFAULT);
+    let mut tallies: BTreeMap<String, Tally> = BTreeMap::new();
+    let mut failures: Vec<String> = Vec::new();
+
+    for line in vectors.lines().filter(|l| !l.is_empty()) {
+        let f: Vec<&str> = line.split(' ').collect();
+        let (name, kind) = (f[0], f[1]);
+        let insn = u32::from_str_radix(f[2], 16).unwrap_or(0);
+        let seed = u64::from_str_radix(f[3], 16).unwrap_or(0);
+        let want_pc = u64::from_str_radix(f[4], 16).unwrap_or(0);
+        let want_nzcv = u64::from_str_radix(f[5], 16).unwrap_or(0);
+        let reg_changes = parse_pairs(f[6], "r=", 10);
+        let z_changes = parse_registers(f[7], "z=", SVE_VLB);
+        let p_changes = parse_registers(f[8], "p=", SVE_PLB);
+        let mem_changes = parse_pairs(f[9], "m=", 16);
+        let want_fpsr = f
+            .get(10)
+            .and_then(|field| field.strip_prefix("f="))
+            .and_then(|hex| u64::from_str_radix(hex, 16).ok())
+            .unwrap_or(0);
+        let tally = tallies.entry(String::from(name)).or_default();
+
+        let st = initial_state(seed, kind, insn);
+        let sve = sve_state(seed, kind);
+        let mut cpu = Cpu::implementing(
+            CpuConfig {
+                ips,
+                counter_hz: ips,
+                reset_pc: CODE,
+            },
+            Implementation::EVERY_FEATURE,
+        );
+        cpu.x = st.x;
+        cpu.sp_el1 = st.sp;
+        cpu.pstate.set_nzcv(st.nzcv);
+        cpu.sys.cpacr_el1 = (3 << 24) | (3 << 20);
+        cpu.sys.smcr_el1 = 3;
+        cpu.set_pstate_sm(true);
+        cpu.fpcr = st.fpcr | sve.fpcr;
+        cpu.fpsr = 0;
+        let vl = cpu.current_svl();
+        for (n, bytes) in sve.z.iter().enumerate() {
+            cpu.set_z(n as u32, vl, &Zv::from_parts(u128::from_le_bytes(bytes[..16].try_into().unwrap_or([0; 16])), &bytes[16..]));
+        }
+        for (n, bytes) in sve.p.iter().enumerate() {
+            cpu.set_p(n as u32, vl, &Pv::from_bytes(bytes));
+        }
+        cpu.sys.esr_el1 = 0x3F << 26;
+        let mut bus = TestBus {
+            insn,
+            data: st.data.clone(),
+        };
+
+        match cpu.step(&mut bus, &mut NoInstrumentation) {
+            Step::Stop(other) => {
+                tally.mismatched += 1;
+                failures.push(format!("{name} {insn:08x}: stopped with {other:?}"));
+                continue;
+            }
+            Step::Retired | Step::Waiting => {}
+        }
+        if cpu.sys.esr_el1 >> 26 == 0x00 {
+            tally.mismatched += 1;
+            failures.push(format!("{name} {insn:08x} `{}`: UNDEFINED here, executed by the reference", disassemble(insn)));
+            continue;
+        }
+
+        let mut want_x = st.x;
+        let mut want_sp = st.sp;
+        for (i, val) in &reg_changes {
+            if *i == 31 {
+                want_sp = *val as u64;
+            } else {
+                want_x[*i] = *val as u64;
+            }
+        }
+        let mut want_z: Vec<Vec<u8>> = sve.z.iter().map(|b| b.to_vec()).collect();
+        for (i, bytes) in &z_changes {
+            want_z[*i] = bytes.clone();
+        }
+        let mut want_p: Vec<Vec<u8>> = sve.p.iter().map(|b| b.to_vec()).collect();
+        for (i, bytes) in &p_changes {
+            want_p[*i] = bytes.clone();
+        }
+        let mut want_data = st.data.clone();
+        for (off, b) in &mem_changes {
+            want_data[*off] = *b as u8;
+        }
+
+        let mut diffs: Vec<String> = Vec::new();
+        if cpu.pc != want_pc {
+            diffs.push(format!("pc {:#x} want {:#x} (esr {:#x})", cpu.pc, want_pc, cpu.sys.esr_el1));
+        }
+        if cpu.pstate.nzcv() != want_nzcv {
+            diffs.push(format!("nzcv {:#x} want {:#x}", cpu.pstate.nzcv(), want_nzcv));
+        }
+        if cpu.fpsr != want_fpsr {
+            diffs.push(format!("fpsr {:#x} want {:#x}", cpu.fpsr, want_fpsr));
+        }
+        for (i, (got, want)) in cpu.x.iter().zip(&want_x).enumerate() {
+            if got != want {
+                diffs.push(format!("x{i} {got:#x} want {want:#x}"));
+            }
+        }
+        if cpu.sp_el1 != want_sp {
+            diffs.push(format!("sp {:#x} want {:#x}", cpu.sp_el1, want_sp));
+        }
+        for (i, want) in want_z.iter().enumerate() {
+            let got = cpu.z(i as u32, vl);
+            let got: Vec<u8> = (0..SVE_VLB).map(|b| got.byte(b)).collect();
+            if &got != want {
+                let at = got.iter().zip(want).position(|(a, b)| a != b).unwrap_or(0);
+                diffs.push(format!("z{i} byte {at} {:#x} want {:#x}", got[at], want[at]));
+            }
+        }
+        for (i, want) in want_p.iter().enumerate() {
+            let got = cpu.p(i as u32, vl);
+            let got: Vec<u8> = (0..SVE_PLB).map(|b| got.byte(b)).collect();
+            if &got != want {
+                diffs.push(format!("p{i} {got:02x?} want {want:02x?}"));
+            }
+        }
+        if bus.data != want_data {
+            let first = bus.data.iter().zip(&want_data).position(|(a, b)| a != b).unwrap_or(0);
+            diffs.push(format!("data[{first:#x}] {:#x} want {:#x}", bus.data[first], want_data[first]));
+        }
+        if diffs.is_empty() {
+            tally.passed += 1;
+        } else {
+            tally.mismatched += 1;
+            failures.push(format!("{name} {insn:08x} `{}`: {}", disassemble(insn), diffs.join("; ")));
+        }
+    }
+
+    std::eprintln!("family                       pass  MISMATCH");
+    for (name, t) in &tallies {
+        std::eprintln!("{name:<28} {:>5} {:>9}", t.passed, t.mismatched);
+    }
+    for f in failures.iter().take(60) {
+        std::eprintln!("MISMATCH {f}");
+    }
+    assert!(failures.is_empty(), "{} SVE vectors disagree with the reference", failures.len());
 }
 
 struct TestBus {
@@ -778,6 +1038,11 @@ fn every_unicorn_vector_matches_after_one_step() {
 #[test]
 fn every_qemu_max_vector_matches_after_one_step_with_every_feature() {
     replay(MAX_VECTORS, Implementation::EVERY_FEATURE);
+}
+
+#[test]
+fn every_qemu_sve_vector_matches_after_one_step_in_streaming_mode() {
+    replay_sve(SVE_VECTORS);
 }
 
 /// Step each vector of `vectors` once on a processor implementing `imp`,

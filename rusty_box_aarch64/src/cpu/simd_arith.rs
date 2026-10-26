@@ -49,9 +49,10 @@ fn uint(v: u64) -> i128 {
     i128::from(v)
 }
 
-/// Arm ARM `Int(x, unsigned)`.
+/// Arm ARM `Int(x, unsigned)`, of an element already masked to `esize`
+/// bits.
 #[inline]
-fn int(v: u64, esize: u32, unsigned: bool) -> i128 {
+pub(crate) fn int(v: u64, esize: u32, unsigned: bool) -> i128 {
     if unsigned {
         uint(v)
     } else {
@@ -66,7 +67,7 @@ fn low(value: i128, esize: u32) -> u64 {
 }
 
 /// Arm ARM `SatQ(value, esize, unsigned)`; records a clamp in `qc`.
-fn sat(value: i128, esize: u32, unsigned: bool, qc: &mut bool) -> u64 {
+pub(crate) fn sat(value: i128, esize: u32, unsigned: bool, qc: &mut bool) -> u64 {
     let (min, max) = if unsigned {
         (0, (1i128 << esize) - 1)
     } else {

@@ -54,6 +54,7 @@ mod state;
 #[cfg(test)]
 #[path = "../../tests/unit/step.rs"]
 mod step;
+mod sve;
 mod sysreg;
 mod system;
 mod timer;

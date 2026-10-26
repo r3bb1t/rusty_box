@@ -23,9 +23,10 @@ use rusty_box_core::SnapError;
 mod tests;
 
 use super::exception::{Exception, ExceptionClass};
-use super::exec::{bit, bits, sext, ExecResult, Fault, Flow};
+use super::exec::{bits, ExecResult, Fault, Flow};
 use super::features::{Feature, VecLen};
 use super::state::FPSR_MASK;
+use super::sve::{Pv, Zv};
 use super::{Cpu, El};
 
 /// `MAX_VL` in bytes: the storage behind every Z register and every
@@ -104,6 +105,10 @@ pub(crate) enum SmeTrap {
     AccessTrap,
     /// SMTC 0b001: an instruction that is illegal in Streaming SVE mode.
     Streaming,
+    /// SMTC 0b010: an instruction that is illegal outside Streaming SVE
+    /// mode, which every SVE instruction is on a processor without
+    /// FEAT_SVE.
+    NotStreaming,
 }
 
 impl SmeTrap {
@@ -111,6 +116,7 @@ impl SmeTrap {
         match self {
             Self::AccessTrap => 0b000,
             Self::Streaming => 0b001,
+            Self::NotStreaming => 0b010,
         }
     }
 }
@@ -133,6 +139,45 @@ impl Cpu {
     pub(crate) fn write_v(&mut self, n: usize, value: u128) {
         self.v[n] = value;
         self.scalable.z_upper_live &= !(1 << n);
+    }
+
+    /// Arm `Z{VL}(n)`: the low `vl` bits of `Z<n>`, whose low 128 are
+    /// `V<n>`.
+    pub(crate) fn z(&self, n: u32, vl: VecLen) -> Zv {
+        let n = n as usize;
+        let upper = vl.bytes() - 16;
+        if self.scalable.z_upper_live & (1 << n) != 0 {
+            Zv::from_parts(self.v[n], &self.scalable.z_upper[n][..upper])
+        } else {
+            Zv::from_parts(self.v[n], &[])
+        }
+    }
+
+    /// Arm `Z{VL}(n) = value`: the bits above `vl` zeroed
+    /// (`Unpredictable_SVEZEROUPPER` taken as TRUE).
+    pub(crate) fn set_z(&mut self, n: u32, vl: VecLen, value: &Zv) {
+        let n = n as usize;
+        let upper = vl.bytes() - 16;
+        self.v[n] = value.low128();
+        let s = &mut self.scalable;
+        s.z_upper[n][..upper].copy_from_slice(&value.upper()[..upper]);
+        s.z_upper[n][upper..].fill(0);
+        s.z_upper_live |= 1 << n;
+    }
+
+    /// Arm `P{PL}(n)`: the low `PL` bits of `P<n>` for vectors of length
+    /// `vl`.
+    pub(crate) fn p(&self, n: u32, vl: VecLen) -> Pv {
+        Pv::from_bytes(&self.scalable.p[n as usize][..vl.predicate_bytes()])
+    }
+
+    /// Arm `P{PL}(n) = value`: the bits above `PL` zeroed
+    /// (`Unpredictable_SVEZEROUPPER` taken as TRUE).
+    pub(crate) fn set_p(&mut self, n: u32, vl: VecLen, value: &Pv) {
+        let len = vl.predicate_bytes();
+        let p = &mut self.scalable.p[n as usize];
+        p[..len].copy_from_slice(&value.as_bytes()[..len]);
+        p[len..].fill(0);
     }
 
     /// Whether this processor implements `feature`.
@@ -293,9 +338,7 @@ impl Cpu {
     /// becomes `imm6` times the Streaming SVE vector length in bytes.
     pub(crate) fn exec_rdsvl(&mut self, insn: u32) -> ExecResult {
         self.check_sme_enabled()?;
-        let imm = sext(u64::from(bits(insn, 10, 5)), 6);
-        let len = imm.wrapping_mul(self.current_svl().bytes() as u64);
-        self.set_x_or_zr(bits(insn, 4, 0), len);
+        self.read_vector_length(insn, self.current_svl());
         Ok(Flow::Next)
     }
 
@@ -305,11 +348,7 @@ impl Cpu {
     /// `op` = 1, `SVL DIV 64`).
     pub(crate) fn exec_addsvl(&mut self, insn: u32) -> ExecResult {
         self.check_sme_enabled()?;
-        let imm = sext(u64::from(bits(insn, 10, 5)), 6);
-        let svl = self.current_svl();
-        let unit = if bit(insn, 22) { svl.predicate_bytes() } else { svl.bytes() };
-        let result = self.x_or_sp(bits(insn, 20, 16)).wrapping_add(imm.wrapping_mul(unit as u64));
-        self.set_x_or_sp(bits(insn, 4, 0), result);
+        self.add_vector_length(insn, self.current_svl());
         Ok(Flow::Next)
     }
 

@@ -87,7 +87,23 @@ use ldst::{
     LdstUnscaled, Ldstexclp, Ldstexclr, LdstnapairOffs, LdstpairOff, LdstpairPost, LdstpairPre, Ldstord, Loadlit,
 };
 use reserved::PermUndef;
-use sve::{SveIntArithSvl, SveIntReadSvlA};
+use sve::{
+    SveIntArithImm0, SveIntArithImm1, SveIntArithImm2, SveIntArithSvl, SveIntArithVl, SveIntBinConsArit0, SveIntBinConsLog,
+    SveIntBinConsMisc0D, SveIntBinConsShiftA, SveIntBinConsShiftB, SveIntBinPredArit0, SveIntBinPredArit1,
+    SveIntBinPredArit2, SveIntBinPredDiv, SveIntBinPredLog, SveIntBinPredShift0, SveIntBinPredShift1,
+    SveIntBinPredShift2, SveIntBreak, SveIntBrkn, SveIntBrkp, SveIntCmp0, SveIntCmp1, SveIntCount, SveIntCountR,
+    SveIntCountRSat, SveIntCountV, SveIntCountVSat, SveIntCountvlv0, SveIntCountvlv1, SveIntCterm, SveIntDupFpimm,
+    SveIntDupFpimmPred, SveIntDupImm, SveIntDupImmPred, SveIntDupMaskImm, SveIntIndexIi, SveIntIndexIr, SveIntIndexRi,
+    SveIntIndexRr, SveIntLogImm, SveIntMladdsubVvvPred, SveIntMlasVvvPred, SveIntMovprfxPred, SveIntMulB,
+    SveIntPcountPred, SveIntPermBinPermPp, SveIntPermBinPermZz, SveIntPermClastRz, SveIntPermClastVz,
+    SveIntPermClastZz, SveIntPermCpyR, SveIntPermCpyV, SveIntPermDupI, SveIntPermDupR, SveIntPermExtractI,
+    SveIntPermInsrs, SveIntPermInsrv, SveIntPermLastR, SveIntPermLastV, SveIntPermPunpk, SveIntPermRev,
+    SveIntPermRevd, SveIntPermReverseP, SveIntPermReverseZ, SveIntPermSplice, SveIntPermTbl, SveIntPermTbl3src,
+    SveIntPermUnpk, SveIntPfalse, SveIntPfirst, SveIntPnext, SveIntPredDup, SveIntPredLog, SveIntPredPatternA,
+    SveIntPredPatternB, SveIntPtest, SveIntPtrue, SveIntReadSvlA, SveIntReadVlA, SveIntReduce0, SveIntReduce1,
+    SveIntReduce2, SveIntRotateImm, SveIntScmpVi, SveIntSelVvv, SveIntSqdmulh, SveIntTernLog, SveIntUcmpVi,
+    SveIntUnPredArit0, SveIntUnPredArit1, SveIntWhileRr, SveIntWhilenc, SveIntxPermExtractI, SveIntxPermSplice,
+};
 
 /// An A64 encoding this processor implements, by its Arm class and Arm
 /// encoding id (the module documentation gives the naming).
@@ -192,8 +208,101 @@ pub(crate) enum Encoding {
     Floatsel(Floatsel),
     Floatdp3(Floatdp3),
     // sve
+    SveIntBinPredArit0(SveIntBinPredArit0),
+    SveIntBinPredArit1(SveIntBinPredArit1),
+    SveIntBinPredArit2(SveIntBinPredArit2),
+    SveIntBinPredDiv(SveIntBinPredDiv),
+    SveIntBinPredLog(SveIntBinPredLog),
+    SveIntReduce0(SveIntReduce0),
+    SveIntReduce1(SveIntReduce1),
+    SveIntMovprfxPred(SveIntMovprfxPred),
+    SveIntReduce2(SveIntReduce2),
+    SveIntBinPredShift0(SveIntBinPredShift0),
+    SveIntBinPredShift1(SveIntBinPredShift1),
+    SveIntBinPredShift2(SveIntBinPredShift2),
+    SveIntUnPredArit0(SveIntUnPredArit0),
+    SveIntUnPredArit1(SveIntUnPredArit1),
+    SveIntMlasVvvPred(SveIntMlasVvvPred),
+    SveIntMladdsubVvvPred(SveIntMladdsubVvvPred),
+    SveIntBinConsArit0(SveIntBinConsArit0),
+    SveIntBinConsLog(SveIntBinConsLog),
+    SveIntRotateImm(SveIntRotateImm),
+    SveIntTernLog(SveIntTernLog),
+    SveIntBinConsShiftA(SveIntBinConsShiftA),
+    SveIntBinConsShiftB(SveIntBinConsShiftB),
+    SveIntBinConsMisc0D(SveIntBinConsMisc0D),
+    SveIntIndexIi(SveIntIndexIi),
+    SveIntIndexRi(SveIntIndexRi),
+    SveIntIndexIr(SveIntIndexIr),
+    SveIntIndexRr(SveIntIndexRr),
+    SveIntArithVl(SveIntArithVl),
     SveIntArithSvl(SveIntArithSvl),
+    SveIntReadVlA(SveIntReadVlA),
     SveIntReadSvlA(SveIntReadSvlA),
+    SveIntMulB(SveIntMulB),
+    SveIntSqdmulh(SveIntSqdmulh),
+    SveIntCountvlv0(SveIntCountvlv0),
+    SveIntCountvlv1(SveIntCountvlv1),
+    SveIntCount(SveIntCount),
+    SveIntPredPatternA(SveIntPredPatternA),
+    SveIntPredPatternB(SveIntPredPatternB),
+    SveIntLogImm(SveIntLogImm),
+    SveIntDupMaskImm(SveIntDupMaskImm),
+    SveIntDupImmPred(SveIntDupImmPred),
+    SveIntDupFpimmPred(SveIntDupFpimmPred),
+    SveIntPermExtractI(SveIntPermExtractI),
+    SveIntxPermExtractI(SveIntxPermExtractI),
+    SveIntPermDupI(SveIntPermDupI),
+    SveIntPermTbl3src(SveIntPermTbl3src),
+    SveIntPermTbl(SveIntPermTbl),
+    SveIntPermDupR(SveIntPermDupR),
+    SveIntPermInsrs(SveIntPermInsrs),
+    SveIntPermUnpk(SveIntPermUnpk),
+    SveIntPermInsrv(SveIntPermInsrv),
+    SveIntPermReverseZ(SveIntPermReverseZ),
+    SveIntPermBinPermPp(SveIntPermBinPermPp),
+    SveIntPermPunpk(SveIntPermPunpk),
+    SveIntPermReverseP(SveIntPermReverseP),
+    SveIntPermBinPermZz(SveIntPermBinPermZz),
+    SveIntPermCpyV(SveIntPermCpyV),
+    SveIntPermLastV(SveIntPermLastV),
+    SveIntPermRev(SveIntPermRev),
+    SveIntPermClastZz(SveIntPermClastZz),
+    SveIntPermClastVz(SveIntPermClastVz),
+    SveIntPermSplice(SveIntPermSplice),
+    SveIntxPermSplice(SveIntxPermSplice),
+    SveIntPermLastR(SveIntPermLastR),
+    SveIntPermCpyR(SveIntPermCpyR),
+    SveIntPermClastRz(SveIntPermClastRz),
+    SveIntPermRevd(SveIntPermRevd),
+    SveIntSelVvv(SveIntSelVvv),
+    SveIntCmp0(SveIntCmp0),
+    SveIntCmp1(SveIntCmp1),
+    SveIntUcmpVi(SveIntUcmpVi),
+    SveIntScmpVi(SveIntScmpVi),
+    SveIntPredLog(SveIntPredLog),
+    SveIntBrkp(SveIntBrkp),
+    SveIntBreak(SveIntBreak),
+    SveIntBrkn(SveIntBrkn),
+    SveIntPtest(SveIntPtest),
+    SveIntPfirst(SveIntPfirst),
+    SveIntPnext(SveIntPnext),
+    SveIntPtrue(SveIntPtrue),
+    SveIntPfalse(SveIntPfalse),
+    SveIntPredDup(SveIntPredDup),
+    SveIntWhileRr(SveIntWhileRr),
+    SveIntCterm(SveIntCterm),
+    SveIntWhilenc(SveIntWhilenc),
+    SveIntPcountPred(SveIntPcountPred),
+    SveIntCountVSat(SveIntCountVSat),
+    SveIntCountV(SveIntCountV),
+    SveIntCountRSat(SveIntCountRSat),
+    SveIntCountR(SveIntCountR),
+    SveIntArithImm0(SveIntArithImm0),
+    SveIntArithImm1(SveIntArithImm1),
+    SveIntArithImm2(SveIntArithImm2),
+    SveIntDupImm(SveIntDupImm),
+    SveIntDupFpimm(SveIntDupFpimm),
 }
 
 /// The encoding `word` is, if it is one of a feature the decoder knows.
@@ -306,6 +415,82 @@ impl Encoding {
             Self::Floatdp3(_) => Class::FpDataProcessing3Source,
             Self::SveIntArithSvl(_) => Class::AddStreamingVectorLength,
             Self::SveIntReadSvlA(_) => Class::ReadStreamingVectorLength,
+            Self::SveIntBinPredArit0(_)
+            | Self::SveIntBinPredArit1(_)
+            | Self::SveIntBinPredArit2(_)
+            | Self::SveIntBinPredDiv(_)
+            | Self::SveIntBinPredLog(_) => Class::SveIntBinaryPredicated,
+            Self::SveIntReduce0(_) | Self::SveIntReduce1(_) | Self::SveIntReduce2(_) => Class::SveIntReduction,
+            Self::SveIntMovprfxPred(_) | Self::SveIntBinConsMisc0D(_) => Class::SveMovprfx,
+            Self::SveIntBinPredShift0(_) | Self::SveIntBinPredShift1(_) | Self::SveIntBinPredShift2(_) => {
+                Class::SveShiftPredicated
+            }
+            Self::SveIntUnPredArit0(_) | Self::SveIntUnPredArit1(_) => Class::SveIntUnaryPredicated,
+            Self::SveIntMlasVvvPred(_) | Self::SveIntMladdsubVvvPred(_) => Class::SveIntMulAddPredicated,
+            Self::SveIntBinConsArit0(_) => Class::SveIntAddSubUnpredicated,
+            Self::SveIntBinConsLog(_) | Self::SveIntRotateImm(_) | Self::SveIntTernLog(_) => Class::SveBitwiseUnpredicated,
+            Self::SveIntBinConsShiftA(_) | Self::SveIntBinConsShiftB(_) => Class::SveShiftUnpredicated,
+            Self::SveIntIndexIi(_) | Self::SveIntIndexRi(_) | Self::SveIntIndexIr(_) | Self::SveIntIndexRr(_) => {
+                Class::SveIndex
+            }
+            Self::SveIntArithVl(_) => Class::AddVectorLength,
+            Self::SveIntReadVlA(_) => Class::ReadVectorLength,
+            Self::SveIntMulB(_) | Self::SveIntSqdmulh(_) => Class::SveIntMulUnpredicated,
+            Self::SveIntCountvlv0(_)
+            | Self::SveIntCountvlv1(_)
+            | Self::SveIntCount(_)
+            | Self::SveIntPredPatternA(_)
+            | Self::SveIntPredPatternB(_) => Class::SveElementCount,
+            Self::SveIntLogImm(_) | Self::SveIntDupMaskImm(_) => Class::SveBitmaskImmediate,
+            Self::SveIntDupImmPred(_) | Self::SveIntDupFpimmPred(_) => Class::SveCopyImmediate,
+            Self::SveIntPermExtractI(_) | Self::SveIntxPermExtractI(_) => Class::SveExtract,
+            Self::SveIntPermDupI(_)
+            | Self::SveIntPermTbl3src(_)
+            | Self::SveIntPermTbl(_)
+            | Self::SveIntPermDupR(_)
+            | Self::SveIntPermInsrs(_)
+            | Self::SveIntPermUnpk(_)
+            | Self::SveIntPermInsrv(_)
+            | Self::SveIntPermReverseZ(_) => Class::SvePermuteUnpredicated,
+            Self::SveIntPermBinPermPp(_) | Self::SveIntPermPunpk(_) | Self::SveIntPermReverseP(_) => {
+                Class::SvePermutePredicate
+            }
+            Self::SveIntPermBinPermZz(_) => Class::SvePermuteElements,
+            Self::SveIntPermCpyV(_)
+            | Self::SveIntPermLastV(_)
+            | Self::SveIntPermRev(_)
+            | Self::SveIntPermClastZz(_)
+            | Self::SveIntPermClastVz(_)
+            | Self::SveIntPermSplice(_)
+            | Self::SveIntxPermSplice(_)
+            | Self::SveIntPermLastR(_)
+            | Self::SveIntPermCpyR(_)
+            | Self::SveIntPermClastRz(_)
+            | Self::SveIntPermRevd(_) => Class::SvePermutePredicated,
+            Self::SveIntSelVvv(_) => Class::SveSelect,
+            Self::SveIntCmp0(_) | Self::SveIntCmp1(_) | Self::SveIntUcmpVi(_) | Self::SveIntScmpVi(_) => {
+                Class::SveIntCompare
+            }
+            Self::SveIntPredLog(_) => Class::SvePredicateLogical,
+            Self::SveIntBrkp(_) | Self::SveIntBreak(_) | Self::SveIntBrkn(_) => Class::SveBreak,
+            Self::SveIntPtest(_)
+            | Self::SveIntPfirst(_)
+            | Self::SveIntPnext(_)
+            | Self::SveIntPtrue(_)
+            | Self::SveIntPfalse(_)
+            | Self::SveIntPredDup(_) => Class::SvePredicateMisc,
+            Self::SveIntWhileRr(_) | Self::SveIntWhilenc(_) => Class::SveWhile,
+            Self::SveIntCterm(_) => Class::SveConditionallyTerminate,
+            Self::SveIntPcountPred(_)
+            | Self::SveIntCountVSat(_)
+            | Self::SveIntCountV(_)
+            | Self::SveIntCountRSat(_)
+            | Self::SveIntCountR(_) => Class::SvePredicateCount,
+            Self::SveIntArithImm0(_)
+            | Self::SveIntArithImm1(_)
+            | Self::SveIntArithImm2(_)
+            | Self::SveIntDupImm(_)
+            | Self::SveIntDupFpimm(_) => Class::SveWideImmediate,
         }
     }
 }
@@ -479,6 +664,78 @@ pub(crate) enum Class {
     AddStreamingVectorLength,
     /// RDSVL.
     ReadStreamingVectorLength,
+    /// ADDVL, ADDPL: the handler reads which from `op`.
+    AddVectorLength,
+    /// RDVL.
+    ReadVectorLength,
+    // The SVE classes: each handler reads which instruction from the
+    // fields its Arm group tells its classes apart by.
+    /// `sve_int_pred_bin`: ADD, SUB, SUBR, the min/max/difference, multiply
+    /// and divide forms, and the bitwise operations, predicated.
+    SveIntBinaryPredicated,
+    /// `sve_int_reduce_0`, `_1`, `_2`: SADDV, UADDV, SMAXV, SMINV, UMAXV,
+    /// UMINV, ORV, EORV, ANDV.
+    SveIntReduction,
+    /// MOVPRFX, predicated and unpredicated.
+    SveMovprfx,
+    /// `sve_int_pred_shift`: shifts by immediate, by vector and by wide
+    /// elements, predicated, ASRD and the SVE2 rounding and saturating
+    /// shifts.
+    SveShiftPredicated,
+    /// `sve_int_pred_un`: the integer and bitwise unary operations,
+    /// predicated.
+    SveIntUnaryPredicated,
+    /// MLA, MLS, MAD, MSB.
+    SveIntMulAddPredicated,
+    /// ADD, SUB and the saturating forms, unpredicated.
+    SveIntAddSubUnpredicated,
+    /// AND, ORR, EOR, BIC (vectors), XAR, EOR3, BCAX and the bitwise
+    /// selects.
+    SveBitwiseUnpredicated,
+    /// Shifts by immediate and by wide elements, unpredicated.
+    SveShiftUnpredicated,
+    /// INDEX, its four forms.
+    SveIndex,
+    /// MUL, PMUL, SMULH, UMULH, SQDMULH, SQRDMULH (vectors, unpredicated).
+    SveIntMulUnpredicated,
+    /// `sve_countelt`: CNTx, INCx and DECx and their saturating forms.
+    SveElementCount,
+    /// AND, ORR, EOR (immediate) and DUPM.
+    SveBitmaskImmediate,
+    /// CPY (immediate) and FCPY.
+    SveCopyImmediate,
+    /// EXT, destructive and constructive.
+    SveExtract,
+    /// DUP (indexed), TBL, TBX, DUP (scalar), INSR, the unpacks and REV
+    /// (vector).
+    SvePermuteUnpredicated,
+    /// ZIP, UZP, TRN, PUNPK and REV of predicates.
+    SvePermutePredicate,
+    /// ZIP, UZP, TRN of vectors.
+    SvePermuteElements,
+    /// `sve_perm_pred`: CPY (scalar), LASTA, LASTB, CLASTA, CLASTB, REVB,
+    /// REVH, REVW, RBIT, REVD and SPLICE.
+    SvePermutePredicated,
+    /// SEL (vectors).
+    SveSelect,
+    /// CMP<cc>, by vector, wide element and immediate.
+    SveIntCompare,
+    /// AND, BIC, ORR, ORN, EOR, NOR, NAND, SEL of predicates, and the
+    /// flag-setting forms.
+    SvePredicateLogical,
+    /// BRKA, BRKB, BRKN, BRKPA, BRKPB and their flag-setting forms.
+    SveBreak,
+    /// PTEST, PFIRST, PNEXT, PTRUE, PTRUES, PFALSE, PSEL.
+    SvePredicateMisc,
+    /// WHILE<cc>, WHILEWR, WHILERW.
+    SveWhile,
+    /// CTERMEQ, CTERMNE.
+    SveConditionallyTerminate,
+    /// CNTP, INCP, DECP and their saturating forms.
+    SvePredicateCount,
+    /// `sve_wideimm_unpred`: the add/subtract, min/max and multiply
+    /// immediates, DUP (immediate), FDUP.
+    SveWideImmediate,
 }
 
 /// What an encoding's decode does about the branch that led to it into a
@@ -611,7 +868,103 @@ impl Encoding {
             Self::Floatdp2(e) => e.feature(),
             Self::Floatsel(e) => e.feature(),
             Self::Floatdp3(e) => e.feature(),
-            Self::SveIntArithSvl(_) | Self::SveIntReadSvlA(_) => Feature::Sme,
+            // FEAT_SVE or FEAT_SME (or FEAT_SVE2 or FEAT_SME): of the two,
+            // the decoder knows FEAT_SME alone.
+            Self::SveIntBinPredArit0(_)
+            | Self::SveIntBinPredArit1(_)
+            | Self::SveIntBinPredArit2(_)
+            | Self::SveIntBinPredDiv(_)
+            | Self::SveIntBinPredLog(_)
+            | Self::SveIntReduce0(_)
+            | Self::SveIntReduce1(_)
+            | Self::SveIntMovprfxPred(_)
+            | Self::SveIntReduce2(_)
+            | Self::SveIntBinPredShift0(_)
+            | Self::SveIntBinPredShift1(_)
+            | Self::SveIntBinPredShift2(_)
+            | Self::SveIntUnPredArit0(_)
+            | Self::SveIntUnPredArit1(_)
+            | Self::SveIntMlasVvvPred(_)
+            | Self::SveIntMladdsubVvvPred(_)
+            | Self::SveIntBinConsArit0(_)
+            | Self::SveIntBinConsLog(_)
+            | Self::SveIntRotateImm(_)
+            | Self::SveIntTernLog(_)
+            | Self::SveIntBinConsShiftA(_)
+            | Self::SveIntBinConsShiftB(_)
+            | Self::SveIntBinConsMisc0D(_)
+            | Self::SveIntIndexIi(_)
+            | Self::SveIntIndexRi(_)
+            | Self::SveIntIndexIr(_)
+            | Self::SveIntIndexRr(_)
+            | Self::SveIntArithVl(_)
+            | Self::SveIntArithSvl(_)
+            | Self::SveIntReadVlA(_)
+            | Self::SveIntReadSvlA(_)
+            | Self::SveIntMulB(_)
+            | Self::SveIntSqdmulh(_)
+            | Self::SveIntCountvlv0(_)
+            | Self::SveIntCountvlv1(_)
+            | Self::SveIntCount(_)
+            | Self::SveIntPredPatternA(_)
+            | Self::SveIntPredPatternB(_)
+            | Self::SveIntLogImm(_)
+            | Self::SveIntDupMaskImm(_)
+            | Self::SveIntDupImmPred(_)
+            | Self::SveIntDupFpimmPred(_)
+            | Self::SveIntPermExtractI(_)
+            | Self::SveIntxPermExtractI(_)
+            | Self::SveIntPermDupI(_)
+            | Self::SveIntPermTbl3src(_)
+            | Self::SveIntPermTbl(_)
+            | Self::SveIntPermDupR(_)
+            | Self::SveIntPermInsrs(_)
+            | Self::SveIntPermUnpk(_)
+            | Self::SveIntPermInsrv(_)
+            | Self::SveIntPermReverseZ(_)
+            | Self::SveIntPermBinPermPp(_)
+            | Self::SveIntPermPunpk(_)
+            | Self::SveIntPermReverseP(_)
+            | Self::SveIntPermBinPermZz(_)
+            | Self::SveIntPermCpyV(_)
+            | Self::SveIntPermLastV(_)
+            | Self::SveIntPermRev(_)
+            | Self::SveIntPermClastZz(_)
+            | Self::SveIntPermClastVz(_)
+            | Self::SveIntPermSplice(_)
+            | Self::SveIntxPermSplice(_)
+            | Self::SveIntPermLastR(_)
+            | Self::SveIntPermCpyR(_)
+            | Self::SveIntPermClastRz(_)
+            | Self::SveIntPermRevd(_)
+            | Self::SveIntSelVvv(_)
+            | Self::SveIntCmp0(_)
+            | Self::SveIntCmp1(_)
+            | Self::SveIntUcmpVi(_)
+            | Self::SveIntScmpVi(_)
+            | Self::SveIntPredLog(_)
+            | Self::SveIntBrkp(_)
+            | Self::SveIntBreak(_)
+            | Self::SveIntBrkn(_)
+            | Self::SveIntPtest(_)
+            | Self::SveIntPfirst(_)
+            | Self::SveIntPnext(_)
+            | Self::SveIntPtrue(_)
+            | Self::SveIntPfalse(_)
+            | Self::SveIntPredDup(_)
+            | Self::SveIntWhileRr(_)
+            | Self::SveIntCterm(_)
+            | Self::SveIntWhilenc(_)
+            | Self::SveIntPcountPred(_)
+            | Self::SveIntCountVSat(_)
+            | Self::SveIntCountV(_)
+            | Self::SveIntCountRSat(_)
+            | Self::SveIntCountR(_)
+            | Self::SveIntArithImm0(_)
+            | Self::SveIntArithImm1(_)
+            | Self::SveIntArithImm2(_)
+            | Self::SveIntDupImm(_)
+            | Self::SveIntDupFpimm(_) => Feature::Sme,
         }
     }
 }
