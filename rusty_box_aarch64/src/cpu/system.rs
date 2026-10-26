@@ -97,8 +97,10 @@ impl Cpu {
         }
     }
 
-    /// The HINT space: NOP, YIELD, WFE, WFI, SEV, SEVL; every other hint
-    /// (including the pointer-authentication and BTI hints) is a NOP.
+    /// The HINT space: NOP, YIELD, WFE, WFI, SEV, SEVL; every other hint is
+    /// a NOP, the pointer authentication hints of a processor without
+    /// FEAT_PAuth and the BTI hint included (with FEAT_PAuth those have a
+    /// handler of their own, [`Cpu::exec_pauth_hint`]).
     pub(crate) fn exec_hint(&mut self, insn: u32, _pc: u64) -> ExecResult {
         match bits(insn, 11, 5) {
             // WFE: there is no other processor to send an event, and WFE may

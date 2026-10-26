@@ -27,6 +27,9 @@ pub enum ExceptionClass {
     Svc,
     /// EC 0x18: `MSR`/`MRS`/`SYS` trapped from EL0.
     SysRegTrap,
+    /// EC 0x1C: a pointer authentication that failed, with FEAT_FPAC;
+    /// `ISS[1:0]` says whether the key was a data key and which.
+    PacFail,
     /// EC 0x1D: an SME instruction or register trapped by
     /// `CPACR_EL1.SMEN`, or an instruction illegal in the current streaming
     /// mode; `ISS.SMTC` says which.
@@ -54,6 +57,7 @@ impl ExceptionClass {
             Self::IllegalState => 0x0E,
             Self::Svc => 0x15,
             Self::SysRegTrap => 0x18,
+            Self::PacFail => 0x1C,
             Self::SmeAccess => 0x1D,
             Self::InstructionAbort => {
                 if lower {
@@ -208,10 +212,11 @@ impl Cpu {
         self.pc
     }
 
-    /// `ERET`: `AArch64.ExceptionReturn(ELR_EL1, SPSR_EL1)`. Returns the new PC.
-    pub(crate) fn exception_return(&mut self) -> u64 {
+    /// `AArch64.ExceptionReturn(target, SPSR_EL1)`: what `ERET` does with
+    /// `ELR_EL1` and `ERETAA`/`ERETAB` with `ELR_EL1` authenticated. Returns
+    /// the new PC.
+    pub(crate) fn exception_return(&mut self, target: u64) -> u64 {
         let spsr = self.sys.spsr_el1;
-        let target = self.sys.elr_el1;
         self.monitor.armed = false;
 
         // M[4] = 1 names AArch32, M[3:2] an EL; this core has neither AArch32

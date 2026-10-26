@@ -453,7 +453,8 @@ impl Cpu {
     }
 
     /// BR/BLR/RET/ERET/DRPS: `1101011 opc op2 op3 Rn op4`. The pointer
-    /// authentication forms are a separate feature set and never reach here.
+    /// authentication forms have a handler of their own
+    /// ([`Cpu::exec_branch_auth`]).
     pub(crate) fn exec_branch_reg(&mut self, pc: u64, insn: u32) -> ExecResult {
         let opc = bits(insn, 24, 21);
         let rn = bits(insn, 9, 5);
@@ -471,7 +472,7 @@ impl Cpu {
                 if self.pstate.el == super::El::El0 {
                     return self.undefined(pc, insn);
                 }
-                Ok(Flow::Jump(self.exception_return()))
+                Ok(Flow::Jump(self.exception_return(self.sys.elr_el1)))
             }
             // DRPS is UNDEFINED outside Debug state; nothing else is defined.
             _ => self.undefined(pc, insn),

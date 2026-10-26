@@ -106,6 +106,16 @@ const SMCR_EL1: u32 = key!(3, 0, 1, 2, 6);
 const TTBR0_EL1: u32 = key!(3, 0, 2, 0, 0);
 const TTBR1_EL1: u32 = key!(3, 0, 2, 0, 1);
 const TCR_EL1: u32 = key!(3, 0, 2, 0, 2);
+const APIAKEYLO_EL1: u32 = key!(3, 0, 2, 1, 0);
+const APIAKEYHI_EL1: u32 = key!(3, 0, 2, 1, 1);
+const APIBKEYLO_EL1: u32 = key!(3, 0, 2, 1, 2);
+const APIBKEYHI_EL1: u32 = key!(3, 0, 2, 1, 3);
+const APDAKEYLO_EL1: u32 = key!(3, 0, 2, 2, 0);
+const APDAKEYHI_EL1: u32 = key!(3, 0, 2, 2, 1);
+const APDBKEYLO_EL1: u32 = key!(3, 0, 2, 2, 2);
+const APDBKEYHI_EL1: u32 = key!(3, 0, 2, 2, 3);
+const APGAKEYLO_EL1: u32 = key!(3, 0, 2, 3, 0);
+const APGAKEYHI_EL1: u32 = key!(3, 0, 2, 3, 1);
 const SPSR_EL1: u32 = key!(3, 0, 4, 0, 0);
 const ELR_EL1: u32 = key!(3, 0, 4, 0, 1);
 const SP_EL0: u32 = key!(3, 0, 4, 1, 0);
@@ -151,6 +161,13 @@ const DBGPRCR_EL1: u32 = key!(2, 0, 1, 4, 4);
 const DBGCLAIMSET_EL1: u32 = key!(2, 0, 7, 8, 6);
 const DBGCLAIMCLR_EL1: u32 = key!(2, 0, 7, 9, 6);
 const DBGAUTHSTATUS_EL1: u32 = key!(2, 0, 7, 14, 6);
+
+/// A write to a pointer authentication key register: all 64 bits, with
+/// nothing to invalidate.
+fn set_key(half: &mut u64, value: u64) -> WriteEffect {
+    *half = value;
+    WriteEffect::None
+}
 
 /// Why an `MRS`/`MSR` did not complete.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -348,6 +365,8 @@ impl Cpu {
             return Err(SysRegError::Undefined);
         }
 
+        let pauth = self.implements(Feature::PAuth);
+        let keys = &self.pac_keys;
         let value = match k {
             MIDR_EL1 => id::MIDR_EL1,
             MPIDR_EL1 => id::MPIDR_EL1,
@@ -380,6 +399,16 @@ impl Cpu {
             TTBR0_EL1 => self.sys.ttbr0_el1,
             TTBR1_EL1 => self.sys.ttbr1_el1,
             TCR_EL1 => self.sys.tcr_el1,
+            APIAKEYLO_EL1 if pauth => keys.ia.lo,
+            APIAKEYHI_EL1 if pauth => keys.ia.hi,
+            APIBKEYLO_EL1 if pauth => keys.ib.lo,
+            APIBKEYHI_EL1 if pauth => keys.ib.hi,
+            APDAKEYLO_EL1 if pauth => keys.da.lo,
+            APDAKEYHI_EL1 if pauth => keys.da.hi,
+            APDBKEYLO_EL1 if pauth => keys.db.lo,
+            APDBKEYHI_EL1 if pauth => keys.db.hi,
+            APGAKEYLO_EL1 if pauth => keys.ga.lo,
+            APGAKEYHI_EL1 if pauth => keys.ga.hi,
             SPSR_EL1 => self.sys.spsr_el1,
             ELR_EL1 => self.sys.elr_el1,
             SP_EL0 => {
@@ -538,7 +567,19 @@ impl Cpu {
             return Err(SysRegError::Undefined);
         }
 
+        let pauth = self.implements(Feature::PAuth);
+        let keys = &mut self.pac_keys;
         let effect = match k {
+            APIAKEYLO_EL1 if pauth => set_key(&mut keys.ia.lo, value),
+            APIAKEYHI_EL1 if pauth => set_key(&mut keys.ia.hi, value),
+            APIBKEYLO_EL1 if pauth => set_key(&mut keys.ib.lo, value),
+            APIBKEYHI_EL1 if pauth => set_key(&mut keys.ib.hi, value),
+            APDAKEYLO_EL1 if pauth => set_key(&mut keys.da.lo, value),
+            APDAKEYHI_EL1 if pauth => set_key(&mut keys.da.hi, value),
+            APDBKEYLO_EL1 if pauth => set_key(&mut keys.db.lo, value),
+            APDBKEYHI_EL1 if pauth => set_key(&mut keys.db.hi, value),
+            APGAKEYLO_EL1 if pauth => set_key(&mut keys.ga.lo, value),
+            APGAKEYHI_EL1 if pauth => set_key(&mut keys.ga.hi, value),
             CSSELR_EL1 => {
                 self.sys.csselr_el1 = value & 0xF;
                 WriteEffect::None

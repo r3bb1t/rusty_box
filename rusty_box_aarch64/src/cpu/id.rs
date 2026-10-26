@@ -87,7 +87,13 @@ pub(crate) const fn id_aa64isar0(features: Features) -> u64 {
 /// feature model makes imply FEAT_LRCPC, so the field never promises LDAPR
 /// to a processor without it), FRINTTS (35:32) = 1 with FEAT_FRINTTS, BF16
 /// (47:44) = 1 with FEAT_BF16 (2 would be FEAT_EBF16) and I8MM (55:52) = 1
-/// with FEAT_I8MM; nothing else from v8.2+.
+/// with FEAT_I8MM. With FEAT_PAuth computed by QARMA5, APA (7:4) names the
+/// newest of FEAT_PAuth (1), FEAT_PAuth2 (3), FEAT_FPAC (4) and
+/// FEAT_FPACCOMBINE (5) the pointer authentication follows, the last two
+/// acting only with FEAT_PAuth2 (which `Features.json` makes them imply),
+/// and GPA (27:24) = 1 (`FEAT_PACQARMA5 <=> UInt(GPA) >= 1`); API and GPI
+/// stay 0, as no IMPLEMENTATION DEFINED algorithm is implemented. Nothing
+/// else from v8.2+.
 pub(crate) const fn id_aa64isar1(features: Features) -> u64 {
     let lrcpc = if !features.has(Feature::Lrcpc) {
         0
@@ -96,9 +102,22 @@ pub(crate) const fn id_aa64isar1(features: Features) -> u64 {
     } else {
         1
     };
-    field(features, Feature::Jscvt, 12, 1)
+    let apa = if !(features.has(Feature::PAuth) && features.has(Feature::PacQarma5)) {
+        0
+    } else if !features.has(Feature::PAuth2) {
+        1
+    } else if features.has(Feature::FpacCombine) {
+        5
+    } else if features.has(Feature::Fpac) {
+        4
+    } else {
+        3
+    };
+    (apa << 4)
+        | field(features, Feature::Jscvt, 12, 1)
         | field(features, Feature::Fcma, 16, 1)
         | (lrcpc << 20)
+        | field(features, Feature::PacQarma5, 24, 1)
         | field(features, Feature::Frintts, 32, 1)
         | field(features, Feature::Bf16, 44, 1)
         | field(features, Feature::I8mm, 52, 1)

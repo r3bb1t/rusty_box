@@ -12,13 +12,15 @@ use super::features::Features;
 use super::isa::{self, Class};
 
 /// Classify `word` on a processor implementing `features`: the class of the
-/// encoding [`isa::decode`] finds, or [`Class::Undefined`] where it finds
-/// none or finds one of a feature the processor does not implement (the
-/// `IsFeatureImplemented` check every encoding's decode makes).
+/// encoding [`isa::decode`] finds; for one of a feature the processor does
+/// not implement, the class the `IsFeatureImplemented` check of its decode
+/// leaves ([`isa::Encoding::class_without_feature`]); and
+/// [`Class::Undefined`] where it finds none.
 pub(crate) fn classify(word: u32, features: Features) -> Class {
     match isa::decode(word) {
         Some(encoding) if features.has(encoding.feature()) => encoding.class(),
-        Some(_) | None => Class::Undefined,
+        Some(encoding) => encoding.class_without_feature(),
+        None => Class::Undefined,
     }
 }
 

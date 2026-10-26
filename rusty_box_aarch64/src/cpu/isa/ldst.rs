@@ -467,6 +467,15 @@ pub(crate) enum LdstPos {
     LdrD,
 }
 
+/// Arm group `ldst_pac`: Load/store register (pac).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum LdstPac {
+    Ldraa64,
+    Ldraa64w,
+    Ldrab64,
+    Ldrab64w,
+}
+
 pub(super) fn ldst(word: u32) -> Option<Encoding> {
     let op1 = bits(word, 26, 26);
     // op0<1:0>, then op2<14:13>.
@@ -523,8 +532,7 @@ pub(super) fn ldst(word: u32) -> Option<Encoding> {
             _ => None,
         },
         0b11 => match bits(word, 24, 24) {
-            // op2<11>, then op2<1:0>. op2<11> = 1 with op2<0> = 1 is
-            // ldst_pac (FEAT_PAuth).
+            // op2<11>, then op2<1:0>.
             0b0 => match (bits(word, 21, 21), bits(word, 11, 10)) {
                 (0b0, 0b00) => ldst_unscaled(word).map(Encoding::LdstUnscaled),
                 (0b0, 0b01) => ldst_immpost(word).map(Encoding::LdstImmpost),
@@ -532,6 +540,7 @@ pub(super) fn ldst(word: u32) -> Option<Encoding> {
                 (0b0, 0b11) => ldst_immpre(word).map(Encoding::LdstImmpre),
                 (0b1, 0b00) => atomic::memop(word).map(Encoding::Memop),
                 (0b1, 0b10) => ldst_regoff(word).map(Encoding::LdstRegoff),
+                (0b1, 0b01 | 0b11) => ldst_pac(word).map(Encoding::LdstPac),
                 _ => None,
             },
             0b1 => ldst_pos(word).map(Encoding::LdstPos),
@@ -1105,6 +1114,20 @@ fn ldst_pos(word: u32) -> Option<LdstPos> {
     }
 }
 
+fn ldst_pac(word: u32) -> Option<LdstPac> {
+    let size = bits(word, 31, 30);
+    let vr = bits(word, 26, 26);
+    let m = bits(word, 23, 23);
+    let w = bits(word, 11, 11);
+    match (size, vr, m, w) {
+        (0b11, 0b0, 0b0, 0b0) => Some(LdstPac::Ldraa64),
+        (0b11, 0b0, 0b0, 0b1) => Some(LdstPac::Ldraa64w),
+        (0b11, 0b0, 0b1, 0b0) => Some(LdstPac::Ldrab64),
+        (0b11, 0b0, 0b1, 0b1) => Some(LdstPac::Ldrab64w),
+        _ => None,
+    }
+}
+
 // The classes that hold both general-purpose and SIMD&FP register forms:
 // the latter are FEAT_FP.
 
@@ -1308,6 +1331,14 @@ impl LdstPos {
             | Self::LdrS
             | Self::StrD
             | Self::LdrD => Feature::Fp,
+        }
+    }
+}
+
+impl LdstPac {
+    pub(crate) const fn feature(self) -> Feature {
+        match self {
+            Self::Ldraa64 | Self::Ldraa64w | Self::Ldrab64 | Self::Ldrab64w => Feature::PAuth,
         }
     }
 }

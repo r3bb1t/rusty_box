@@ -26,6 +26,10 @@ mod fp_extensions;
 mod isa;
 mod ldst;
 mod mmu;
+mod pauth;
+#[cfg(test)]
+#[path = "../../tests/unit/pointer_auth.rs"]
+mod pointer_auth;
 mod regs;
 mod simd;
 mod simd_arith;
@@ -336,6 +340,9 @@ pub struct Cpu {
     pub(crate) svcr: sme::Svcr,
     /// Z above V, the predicates and ZA (FEAT_SME).
     pub(crate) scalable: sme::ScalableRegs,
+    /// The pointer authentication keys (FEAT_PAuth), zero at reset as QEMU
+    /// sets them, where the architecture leaves them UNKNOWN.
+    pub(crate) pac_keys: pauth::PacKeys,
     /// What this processor implements: the decoder, the ID registers and
     /// every feature's own checks read it.
     pub(crate) imp: features::Implementation,
@@ -383,6 +390,7 @@ impl Cpu {
             fpsr: 0,
             svcr: sme::Svcr::RESET,
             scalable: sme::ScalableRegs::ZERO,
+            pac_keys: pauth::PacKeys::ZERO,
             imp,
             sys: SysRegs::reset(config.counter_hz),
             monitor: ExclusiveMonitor {

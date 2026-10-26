@@ -71,6 +71,21 @@ pub(crate) enum Feature {
     Frintts,
     /// FEAT_BF16: BFCVT, BFCVTN, BFDOT, BFMLALB, BFMLALT, BFMMLA.
     Bf16,
+    /// FEAT_PAuth: the pointer authentication instructions, keys and
+    /// enables.
+    PAuth,
+    /// FEAT_PAuth2: a code XORed into the pointer, and no error code in a
+    /// failed one. No encoding of its own.
+    PAuth2,
+    /// FEAT_FPAC: a failed authentication alone faults. No encoding of its
+    /// own.
+    Fpac,
+    /// FEAT_FPACCOMBINE: a failed authentication in a branch, return or load
+    /// faults too. No encoding of its own.
+    FpacCombine,
+    /// FEAT_PACQARMA5: the code computed with QARMA5. No encoding of its
+    /// own.
+    PacQarma5,
 }
 
 /// What the conformance tests read of a feature: `tests/unit/spec.rs`
@@ -78,7 +93,7 @@ pub(crate) enum Feature {
 #[cfg(test)]
 impl Feature {
     /// Every feature, in declaration order.
-    pub(crate) const ALL: [Feature; 21] = [
+    pub(crate) const ALL: [Feature; 26] = [
         Feature::Base,
         Feature::Fp,
         Feature::AdvSimd,
@@ -100,6 +115,11 @@ impl Feature {
         Feature::Jscvt,
         Feature::Frintts,
         Feature::Bf16,
+        Feature::PAuth,
+        Feature::PAuth2,
+        Feature::Fpac,
+        Feature::FpacCombine,
+        Feature::PacQarma5,
     ];
 
     /// The name Arm's data gives the feature, `None` for the base set.
@@ -126,13 +146,18 @@ impl Feature {
             Self::Jscvt => Some("FEAT_JSCVT"),
             Self::Frintts => Some("FEAT_FRINTTS"),
             Self::Bf16 => Some("FEAT_BF16"),
+            Self::PAuth => Some("FEAT_PAuth"),
+            Self::PAuth2 => Some("FEAT_PAuth2"),
+            Self::Fpac => Some("FEAT_FPAC"),
+            Self::FpacCombine => Some("FEAT_FPACCOMBINE"),
+            Self::PacQarma5 => Some("FEAT_PACQARMA5"),
         }
     }
 
     /// Whether the feature has encodings of its own; one that has none
     /// changes how other instructions behave.
     pub(crate) const fn encodes(self) -> bool {
-        !matches!(self, Self::Lse2)
+        !matches!(self, Self::Lse2 | Self::PAuth2 | Self::Fpac | Self::FpacCombine | Self::PacQarma5)
     }
 
     /// Whether the decoder names every encoding of the feature: a feature
@@ -289,6 +314,18 @@ mod tests {
             if Implementation::CORTEX_A57.has(feature) {
                 assert!(Implementation::EVERY_FEATURE.has(feature), "{feature:?}");
             }
+        }
+    }
+
+    /// QARMA5 is the one algorithm the pointer authentication instructions
+    /// compute, so a processor with FEAT_PAuth implements FEAT_PACQARMA5,
+    /// and its ID registers name the algorithm (Arm requires one:
+    /// `FEAT_PAuth` with none of `FEAT_PACQARMA5`, `FEAT_PACQARMA3` and
+    /// `FEAT_PACIMP` advertises no pointer authentication).
+    #[test]
+    fn a_processor_with_pauth_computes_with_qarma5() {
+        for imp in [Implementation::CORTEX_A57, Implementation::EVERY_FEATURE] {
+            assert!(!imp.has(Feature::PAuth) || imp.has(Feature::PacQarma5), "{imp:?}");
         }
     }
 

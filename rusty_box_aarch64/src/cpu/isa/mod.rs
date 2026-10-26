@@ -80,8 +80,8 @@ use dpimm::{AddsubImm, Bitfield, Extract, LogImm, Movewide, Pcreladdr};
 use dpreg::{AddsubCarry, AddsubExt, AddsubShift, CondcmpImm, CondcmpReg, Condsel, Dp1src, Dp2src, Dp3src, LogShift};
 use float::{Float2fix, Float2int, Floatccmp, Floatcmp, Floatdp1, Floatdp2, Floatdp3, Floatimm, Floatsel};
 use ldst::{
-    Asisdlse, Asisdlsep, Asisdlso, Asisdlsop, LdstImmpost, LdstImmpre, LdstPos, LdstRegoff, LdstUnpriv, LdstUnscaled,
-    Ldstexclp, Ldstexclr, LdstnapairOffs, LdstpairOff, LdstpairPost, LdstpairPre, Ldstord, Loadlit,
+    Asisdlse, Asisdlsep, Asisdlso, Asisdlsop, LdstImmpost, LdstImmpre, LdstPac, LdstPos, LdstRegoff, LdstUnpriv,
+    LdstUnscaled, Ldstexclp, Ldstexclr, LdstnapairOffs, LdstpairOff, LdstpairPost, LdstpairPre, Ldstord, Loadlit,
 };
 use reserved::PermUndef;
 use sve::{SveIntArithSvl, SveIntReadSvlA};
@@ -132,6 +132,7 @@ pub(crate) enum Encoding {
     LdstImmpre(LdstImmpre),
     LdstRegoff(LdstRegoff),
     LdstPos(LdstPos),
+    LdstPac(LdstPac),
     Memop(Memop),
     Comswap(Comswap),
     Comswappr(Comswappr),
@@ -222,9 +223,9 @@ impl Encoding {
             Self::Extract(_) => Class::Extract,
             Self::Condbranch(_) => Class::ConditionalBranch,
             Self::Exception(_) => Class::ExceptionGeneration,
-            Self::Hints(_) => Class::Hint,
+            Self::Hints(e) => e.class(),
             Self::Barriers(_) | Self::Pstate(_) | Self::Systeminstrs(_) | Self::Systemmove(_) => Class::System,
-            Self::BranchReg(_) => Class::BranchRegister,
+            Self::BranchReg(e) => e.class(),
             Self::BranchImm(_) => Class::BranchImmediate,
             Self::Compbranch(_) => Class::CompareAndBranch,
             Self::Testbranch(_) => Class::TestAndBranch,
@@ -242,12 +243,13 @@ impl Encoding {
             Self::LdstUnpriv(_) => Class::LoadStoreUnprivileged,
             Self::LdstRegoff(_) => Class::LoadStoreRegisterOffset,
             Self::LdstPos(_) => Class::LoadStoreUnsignedImmediate,
+            Self::LdstPac(_) => Class::LoadAuthenticated,
             Self::Memop(_) => Class::AtomicMemoryOperation,
             Self::Comswap(_) => Class::CompareAndSwap,
             Self::Comswappr(_) => Class::CompareAndSwapPair,
             Self::LdapstlUnscaled(_) => Class::LoadStoreOrderedUnscaled,
             Self::Dp2src(e) => e.class(),
-            Self::Dp1src(_) => Class::DataProcessing1Source,
+            Self::Dp1src(e) => e.class(),
             Self::LogShift(_) => Class::LogicalShiftedRegister,
             Self::AddsubShift(_) => Class::AddSubShiftedRegister,
             Self::AddsubExt(_) => Class::AddSubExtendedRegister,
@@ -316,14 +318,20 @@ pub(crate) enum Class {
     ConditionalBranch,
     ExceptionGeneration,
     /// The hint space: every hint executes, as a NOP when it is not one
-    /// this core implements, including the Armv8.3 pointer authentication
-    /// and Armv8.5 BTI hints, which is what lets code built with branch
-    /// protection run on an ARMv8.0 core.
+    /// this core implements, including the pointer authentication and BTI
+    /// hints of a processor without FEAT_PAuth or FEAT_BTI, which is what
+    /// lets code built with branch protection run on an ARMv8.0 core.
     Hint,
+    /// PACIASP, AUTIASP and the other pointer authentication hints
+    /// (FEAT_PAuth): the handler reads which from `CRm` and `op2`.
+    PointerAuthHint,
     /// Barriers, PSTATE, the system instructions and the system register
     /// moves.
     System,
     BranchRegister,
+    /// BRAA, BRAAZ, BLRAA, BLRAAZ, RETAA, ERETAA and their key B forms
+    /// (FEAT_PAuth): the handler reads which from `opc`, `op3` and `op4`.
+    AuthenticatedBranch,
     BranchImmediate,
     CompareAndBranch,
     TestAndBranch,
@@ -342,8 +350,17 @@ pub(crate) enum Class {
     LoadStoreUnprivileged,
     LoadStoreRegisterOffset,
     LoadStoreUnsignedImmediate,
+    /// LDRAA, LDRAB (FEAT_PAuth): the handler reads which from `M` and
+    /// `W`.
+    LoadAuthenticated,
     DataProcessing2Source,
     DataProcessing1Source,
+    /// PACIA, AUTDZB, XPACI and the other one-source pointer
+    /// authentication instructions (FEAT_PAuth): the handler reads which
+    /// from `opcode`.
+    PointerAuth,
+    /// PACGA (FEAT_PAuth).
+    PointerAuthGeneric,
     LogicalShiftedRegister,
     AddSubShiftedRegister,
     AddSubExtendedRegister,
@@ -446,6 +463,17 @@ pub(crate) enum Class {
 }
 
 impl Encoding {
+    /// The handler of this encoding on a processor without its feature: a
+    /// hint executes as a NOP (its decode's `EndOfDecode(Decode_NOP)`),
+    /// any other encoding is UNDEFINED (`EndOfDecode(Decode_UNDEF)`).
+    pub(crate) const fn class_without_feature(self) -> Class {
+        if matches!(self, Self::Hints(_)) {
+            Class::Hint
+        } else {
+            Class::Undefined
+        }
+    }
+
     /// The feature this encoding belongs to.
     pub(crate) const fn feature(self) -> Feature {
         match self {
@@ -458,12 +486,10 @@ impl Encoding {
             | Self::Extract(_)
             | Self::Condbranch(_)
             | Self::Exception(_)
-            | Self::Hints(_)
             | Self::Barriers(_)
             | Self::Pstate(_)
             | Self::Systeminstrs(_)
             | Self::Systemmove(_)
-            | Self::BranchReg(_)
             | Self::BranchImm(_)
             | Self::Compbranch(_)
             | Self::Testbranch(_)
@@ -471,7 +497,6 @@ impl Encoding {
             | Self::Ldstexclr(_)
             | Self::Ldstord(_)
             | Self::LdstUnpriv(_)
-            | Self::Dp1src(_)
             | Self::LogShift(_)
             | Self::AddsubShift(_)
             | Self::AddsubExt(_)
@@ -480,6 +505,9 @@ impl Encoding {
             | Self::CondcmpImm(_)
             | Self::Condsel(_)
             | Self::Dp3src(_) => Feature::Base,
+            Self::Hints(e) => e.feature(),
+            Self::BranchReg(e) => e.feature(),
+            Self::Dp1src(e) => e.feature(),
             Self::Dp2src(e) => e.feature(),
             Self::Cryptoaes(_) => Feature::Aes,
             Self::Cryptosha3(e) => e.feature(),
@@ -494,6 +522,7 @@ impl Encoding {
             Self::LdstImmpre(e) => e.feature(),
             Self::LdstRegoff(e) => e.feature(),
             Self::LdstPos(e) => e.feature(),
+            Self::LdstPac(e) => e.feature(),
             Self::Memop(e) => e.feature(),
             Self::Comswap(e) => e.feature(),
             Self::Comswappr(e) => e.feature(),
@@ -610,6 +639,11 @@ mod tests {
                     Feature::Jscvt => field(isar1, 12) != 0,
                     Feature::Frintts => field(isar1, 32) != 0,
                     Feature::Bf16 => field(isar1, 44) != 0,
+                    Feature::PAuth => field(isar1, 4) >= 1,
+                    Feature::PAuth2 => field(isar1, 4) >= 3,
+                    Feature::Fpac => field(isar1, 4) >= 4,
+                    Feature::FpacCombine => field(isar1, 4) >= 5,
+                    Feature::PacQarma5 => field(isar1, 24) != 0,
                 };
                 assert_eq!(advertised, imp.has(feature), "{feature:?} on {imp:?}");
             }
@@ -620,14 +654,16 @@ mod tests {
             // ID_AA64ISAR0_EL1: AES = 2 (AES and the 64-bit PMULL), SHA1 =
             // 1, SHA2 = 1 (SHA-256, not SHA-512), CRC32 = 1, Atomic = 2 with
             // FEAT_LSE, RDM = 1, DP = 1 and FHM = 1; nothing else. ISAR1 holds
-            // JSCVT, FCMA, LRCPC, FRINTTS, BF16 = 1 (no FEAT_EBF16) and I8MM
-            // alone, MMFR2 AT alone.
+            // APA, JSCVT, FCMA, LRCPC, GPA, FRINTTS, BF16 = 1 (no FEAT_EBF16)
+            // and I8MM alone (no API or GPI: no IMPLEMENTATION DEFINED
+            // algorithm, and APA is never 2, FEAT_EPAC), MMFR2 AT alone.
             let at = |feature: Feature, lsb: u32, value: u64| if imp.has(feature) { value << lsb } else { 0 };
             let isar0_later =
                 at(Feature::Lse, 20, 2) | at(Feature::Rdm, 28, 1) | at(Feature::DotProd, 44, 1) | at(Feature::Fhm, 48, 1);
             assert_eq!(isar0, 0x0000_0000_0001_1120 | isar0_later);
-            let isar1_fields = (0xF << 12) | (0xF << 16) | (0xF << 20) | (0xF << 32) | (0xF << 44) | (0xF << 52);
+            let isar1_fields = [4, 12, 16, 20, 24, 32, 44, 52].into_iter().fold(0, |acc, lsb| acc | (0xF << lsb));
             assert_eq!(isar1 & !isar1_fields, 0);
+            assert_ne!(field(isar1, 4), 2, "APA = 2 is FEAT_EPAC, which FEAT_PAuth2 excludes");
             assert!(field(isar1, 44) <= 1, "BF16 = 1: FEAT_BF16, not FEAT_EBF16");
             assert_eq!(mmfr2 & !(0xF << 32), 0);
             assert_eq!((isar2, isar3), (0, 0));

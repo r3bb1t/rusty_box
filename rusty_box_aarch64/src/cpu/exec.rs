@@ -240,6 +240,7 @@ impl Cpu {
         match self.decode_cache.decode(fetched.pa, insn) {
             Class::Undefined => self.undefined(pc, insn),
             Class::Hint => self.exec_hint(insn, pc),
+            Class::PointerAuthHint => self.exec_pauth_hint(insn),
             Class::AddSubImmediate => self.exec_addsub_imm(pc, insn),
             Class::AddSubShiftedRegister => self.exec_addsub_shift(pc, insn),
             Class::AddSubExtendedRegister => self.exec_addsub_ext(pc, insn),
@@ -255,10 +256,13 @@ impl Cpu {
             Class::TestAndBranch => self.exec_testbranch(pc, insn),
             Class::BranchImmediate => self.exec_branch_imm(pc, insn),
             Class::BranchRegister => self.exec_branch_reg(pc, insn),
+            Class::AuthenticatedBranch => self.exec_branch_auth(pc, insn),
             Class::ConditionalCompareImmediate | Class::ConditionalCompareRegister => self.exec_condcmp(pc, insn),
             Class::ConditionalSelect => self.exec_condsel(pc, insn),
             Class::DataProcessing1Source => self.exec_dp1(pc, insn),
             Class::DataProcessing2Source => self.exec_dp2(pc, insn),
+            Class::PointerAuth => self.exec_pauth(insn),
+            Class::PointerAuthGeneric => self.exec_pacga(insn),
             Class::DataProcessing3Source => self.exec_dp3(pc, insn),
             Class::ExceptionGeneration => self.exec_exception_gen(pc, insn),
             Class::System => self.exec_system(bus, pc, insn),
@@ -269,6 +273,7 @@ impl Cpu {
                 self.exec_ldst_single(bus, pc, insn, SingleForm::Immediate9)
             }
             Class::LoadStoreRegisterOffset => self.exec_ldst_single(bus, pc, insn, SingleForm::RegisterOffset),
+            Class::LoadAuthenticated => self.exec_load_auth(bus, insn),
             Class::LoadLiteral => self.exec_load_literal(bus, pc, insn),
             Class::LoadStorePairOffset | Class::LoadStorePairIndexed | Class::LoadStoreNoAllocatePair => {
                 self.exec_ldst_pair(bus, pc, insn)

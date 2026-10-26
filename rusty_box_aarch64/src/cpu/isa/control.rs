@@ -1,7 +1,7 @@
 //! Arm group `control` (Arm ARM C4.1, "Branches, Exception Generating and
 //! System instructions"): the A64 space with `op1 = 101x`.
 
-use super::Encoding;
+use super::{Class, Encoding, Feature};
 use crate::cpu::exec::bits;
 
 /// Arm group `condbranch`: Conditional branch (immediate).
@@ -24,7 +24,9 @@ pub(crate) enum Exception {
 }
 
 /// Arm group `hints`: Hints. `HintHm` is every hint without an encoding of
-/// its own here, which executes as a NOP (Arm ARM C6.2, HINT).
+/// its own here, which executes as a NOP (Arm ARM C6.2, HINT), and so does
+/// a hint of a feature the processor does not implement (its decode's
+/// `EndOfDecode(Decode_NOP)`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum Hints {
     NopHi,
@@ -33,7 +35,20 @@ pub(crate) enum Hints {
     WfiHi,
     SevHi,
     SevlHi,
+    XpaclriHi,
+    Pacia1716Hi,
+    Pacib1716Hi,
+    Autia1716Hi,
+    Autib1716Hi,
     CsdbHi,
+    PaciazHi,
+    PaciaspHi,
+    PacibzHi,
+    PacibspHi,
+    AutiazHi,
+    AutiaspHi,
+    AutibzHi,
+    AutibspHi,
     HintHm,
 }
 
@@ -70,10 +85,22 @@ pub(crate) enum Systemmove {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum BranchReg {
     Br64,
+    Braaz64,
+    Brabz64,
     Blr64,
+    Blraaz64,
+    Blrabz64,
     Ret64r,
+    Retaa64e,
+    Retab64e,
     Eret64e,
+    Eretaa64e,
+    Eretab64e,
     Drps64e,
+    Braa64p,
+    Brab64p,
+    Blraa64p,
+    Blrab64p,
 }
 
 /// Arm group `branch_imm`: Unconditional branch (immediate).
@@ -185,8 +212,60 @@ fn hints(word: u32) -> Option<Hints> {
         (0b0000, 0b011) => Some(Hints::WfiHi),
         (0b0000, 0b100) => Some(Hints::SevHi),
         (0b0000, 0b101) => Some(Hints::SevlHi),
+        (0b0000, 0b111) => Some(Hints::XpaclriHi),
+        (0b0001, 0b000) => Some(Hints::Pacia1716Hi),
+        (0b0001, 0b010) => Some(Hints::Pacib1716Hi),
+        (0b0001, 0b100) => Some(Hints::Autia1716Hi),
+        (0b0001, 0b110) => Some(Hints::Autib1716Hi),
         (0b0010, 0b100) => Some(Hints::CsdbHi),
+        (0b0011, 0b000) => Some(Hints::PaciazHi),
+        (0b0011, 0b001) => Some(Hints::PaciaspHi),
+        (0b0011, 0b010) => Some(Hints::PacibzHi),
+        (0b0011, 0b011) => Some(Hints::PacibspHi),
+        (0b0011, 0b100) => Some(Hints::AutiazHi),
+        (0b0011, 0b101) => Some(Hints::AutiaspHi),
+        (0b0011, 0b110) => Some(Hints::AutibzHi),
+        (0b0011, 0b111) => Some(Hints::AutibspHi),
         _ => Some(Hints::HintHm),
+    }
+}
+
+impl Hints {
+    /// The handler class, by [`Hints::feature`]: the pointer authentication
+    /// hints have their own; every other hint shares the hint one. Both
+    /// handlers read which hint from `CRm` and `op2`.
+    pub(crate) const fn class(self) -> Class {
+        if matches!(self.feature(), Feature::PAuth) {
+            Class::PointerAuthHint
+        } else {
+            Class::Hint
+        }
+    }
+
+    pub(crate) const fn feature(self) -> Feature {
+        match self {
+            Self::NopHi
+            | Self::YieldHi
+            | Self::WfeHi
+            | Self::WfiHi
+            | Self::SevHi
+            | Self::SevlHi
+            | Self::CsdbHi
+            | Self::HintHm => Feature::Base,
+            Self::XpaclriHi
+            | Self::Pacia1716Hi
+            | Self::Pacib1716Hi
+            | Self::Autia1716Hi
+            | Self::Autib1716Hi
+            | Self::PaciazHi
+            | Self::PaciaspHi
+            | Self::PacibzHi
+            | Self::PacibspHi
+            | Self::AutiazHi
+            | Self::AutiaspHi
+            | Self::AutibzHi
+            | Self::AutibspHi => Feature::PAuth,
+        }
     }
 }
 
@@ -239,22 +318,99 @@ fn branch_reg(word: u32) -> Option<BranchReg> {
     let op3 = bits(word, 15, 10);
     let rn = bits(word, 9, 5);
     let op4 = bits(word, 4, 0);
-    match (opc, op2, op3, op4) {
-        (0b0000, 0b11111, 0b000000, 0b00000) => Some(BranchReg::Br64),
-        (0b0001, 0b11111, 0b000000, 0b00000) => Some(BranchReg::Blr64),
-        (0b0010, 0b11111, 0b000000, 0b00000) => Some(BranchReg::Ret64r),
-        (0b0100, 0b11111, 0b000000, 0b00000) => match rn {
-            0b11111 => Some(BranchReg::Eret64e),
+    // RETAASPPCR and RETABSPPCR (FEAT_PAuth_LR) are RETAA and RETAB with
+    // op4 other than 11111; TEXIT (FEAT_TEV), and tchange_reg and
+    // tchange_imm (FEAT_S1POE2) share this op1.
+    match (opc, op2, op3) {
+        (0b0000, 0b11111, 0b000000) => match op4 {
+            0b00000 => Some(BranchReg::Br64),
             _ => None,
         },
-        (0b0101, 0b11111, 0b000000, 0b00000) => match rn {
-            0b11111 => Some(BranchReg::Drps64e),
+        (0b0000, 0b11111, 0b000010) => match op4 {
+            0b11111 => Some(BranchReg::Braaz64),
             _ => None,
         },
-        // The pointer-authenticating branches (FEAT_PAuth, FEAT_PAuth_LR),
-        // TEXIT (FEAT_TEV), and tchange_reg and tchange_imm (FEAT_S1POE2),
-        // which share this op1.
+        (0b0000, 0b11111, 0b000011) => match op4 {
+            0b11111 => Some(BranchReg::Brabz64),
+            _ => None,
+        },
+        (0b0001, 0b11111, 0b000000) => match op4 {
+            0b00000 => Some(BranchReg::Blr64),
+            _ => None,
+        },
+        (0b0001, 0b11111, 0b000010) => match op4 {
+            0b11111 => Some(BranchReg::Blraaz64),
+            _ => None,
+        },
+        (0b0001, 0b11111, 0b000011) => match op4 {
+            0b11111 => Some(BranchReg::Blrabz64),
+            _ => None,
+        },
+        (0b0010, 0b11111, 0b000000) => match op4 {
+            0b00000 => Some(BranchReg::Ret64r),
+            _ => None,
+        },
+        (0b0010, 0b11111, 0b000010) => match (rn, op4) {
+            (0b11111, 0b11111) => Some(BranchReg::Retaa64e),
+            _ => None,
+        },
+        (0b0010, 0b11111, 0b000011) => match (rn, op4) {
+            (0b11111, 0b11111) => Some(BranchReg::Retab64e),
+            _ => None,
+        },
+        (0b0100, 0b11111, 0b000000) => match (rn, op4) {
+            (0b11111, 0b00000) => Some(BranchReg::Eret64e),
+            _ => None,
+        },
+        (0b0100, 0b11111, 0b000010) => match (rn, op4) {
+            (0b11111, 0b11111) => Some(BranchReg::Eretaa64e),
+            _ => None,
+        },
+        (0b0100, 0b11111, 0b000011) => match (rn, op4) {
+            (0b11111, 0b11111) => Some(BranchReg::Eretab64e),
+            _ => None,
+        },
+        (0b0101, 0b11111, 0b000000) => match (rn, op4) {
+            (0b11111, 0b00000) => Some(BranchReg::Drps64e),
+            _ => None,
+        },
+        (0b1000, 0b11111, 0b000010) => Some(BranchReg::Braa64p),
+        (0b1000, 0b11111, 0b000011) => Some(BranchReg::Brab64p),
+        (0b1001, 0b11111, 0b000010) => Some(BranchReg::Blraa64p),
+        (0b1001, 0b11111, 0b000011) => Some(BranchReg::Blrab64p),
         _ => None,
+    }
+}
+
+impl BranchReg {
+    /// The handler class, by [`BranchReg::feature`]: the branches and
+    /// returns that authenticate their target have their own (the handler
+    /// reads which from `opc`, `op3` and `op4`); the rest share the
+    /// register-branch one.
+    pub(crate) const fn class(self) -> Class {
+        if matches!(self.feature(), Feature::PAuth) {
+            Class::AuthenticatedBranch
+        } else {
+            Class::BranchRegister
+        }
+    }
+
+    pub(crate) const fn feature(self) -> Feature {
+        match self {
+            Self::Br64 | Self::Blr64 | Self::Ret64r | Self::Eret64e | Self::Drps64e => Feature::Base,
+            Self::Braaz64
+            | Self::Brabz64
+            | Self::Blraaz64
+            | Self::Blrabz64
+            | Self::Retaa64e
+            | Self::Retab64e
+            | Self::Eretaa64e
+            | Self::Eretab64e
+            | Self::Braa64p
+            | Self::Brab64p
+            | Self::Blraa64p
+            | Self::Blrab64p => Feature::PAuth,
+        }
     }
 }
 

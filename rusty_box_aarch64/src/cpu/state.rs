@@ -267,7 +267,8 @@ impl Cpu {
         for pc in self.pc_history.iter() {
             w.write_u64(pc)?;
         }
-        self.save_sme(w)
+        self.save_sme(w)?;
+        self.save_pauth(w)
     }
 
     /// The inverse of [`Cpu::save`]. The interrupt inputs are not part of
@@ -343,7 +344,8 @@ impl Cpu {
         self.icount = icount;
         self.retired = retired;
         self.timer_dirty = true;
-        self.restore_sme(r)
+        self.restore_sme(r)?;
+        self.restore_pauth(r)
     }
 }
 

@@ -28,6 +28,7 @@ pub(crate) enum Dp2src {
     Crc32cw32c,
     Crc32x64c,
     Crc32cx64c,
+    Pacga64p,
 }
 
 /// Arm group `dp_1src`: Data-processing (1 source).
@@ -44,6 +45,24 @@ pub(crate) enum Dp1src {
     Rev64,
     Clz64,
     Cls64,
+    Pacia64p,
+    Pacib64p,
+    Pacda64p,
+    Pacdb64p,
+    Autia64p,
+    Autib64p,
+    Autda64p,
+    Autdb64p,
+    Paciza64z,
+    Pacizb64z,
+    Pacdza64z,
+    Pacdzb64z,
+    Autiza64z,
+    Autizb64z,
+    Autdza64z,
+    Autdzb64z,
+    Xpaci64z,
+    Xpacd64z,
 }
 
 /// Arm group `log_shift`: Logical (shifted register).
@@ -199,9 +218,8 @@ fn dp_2src(word: u32) -> Option<Dp2src> {
     let opcode = bits(word, 15, 10);
     // opcode 0110xx is the register minimum and maximum (FEAT_CSSC); with
     // sf = 1, 000000, 000100 and 000101 are SUBP(S), IRG and GMI
-    // (FEAT_MTE), and 001100 PACGA (FEAT_PAuth). CRC32 and CRC32C
-    // (opcode 010 C sz) take a 64-bit operand exactly when sz = 11, and
-    // only with sf = 1.
+    // (FEAT_MTE). CRC32 and CRC32C (opcode 010 C sz) take a 64-bit operand
+    // exactly when sz = 11, and only with sf = 1.
     match (sf, s, opcode) {
         (0b0, 0b0, 0b000010) => Some(Dp2src::Udiv32),
         (0b0, 0b0, 0b000011) => Some(Dp2src::Sdiv32),
@@ -215,6 +233,7 @@ fn dp_2src(word: u32) -> Option<Dp2src> {
         (0b1, 0b0, 0b001001) => Some(Dp2src::Lsrv64),
         (0b1, 0b0, 0b001010) => Some(Dp2src::Asrv64),
         (0b1, 0b0, 0b001011) => Some(Dp2src::Rorv64),
+        (0b1, 0b0, 0b001100) => Some(Dp2src::Pacga64p),
         (0b0, 0b0, 0b010000) => Some(Dp2src::Crc32b32c),
         (0b0, 0b0, 0b010001) => Some(Dp2src::Crc32h32c),
         (0b0, 0b0, 0b010010) => Some(Dp2src::Crc32w32c),
@@ -232,9 +251,10 @@ fn dp_1src(word: u32) -> Option<Dp1src> {
     let s = bits(word, 29, 29);
     let opcode2 = bits(word, 20, 16);
     let opcode = bits(word, 15, 10);
-    // opcode2 = 00001 holds the pointer authentication instructions
-    // (FEAT_PAuth, FEAT_PAuth_LR); opcode 00011x and 001000 are CTZ, CNT
-    // and ABS (FEAT_CSSC).
+    let rn = bits(word, 9, 5);
+    // opcode 00011x and 001000 are CTZ, CNT and ABS (FEAT_CSSC); with
+    // opcode2 = 00001, opcode 10xxxx holds the pointer authentication
+    // instructions of FEAT_PAuth_LR.
     match (sf, s, opcode2, opcode) {
         (0b0, 0b0, 0b00000, 0b000000) => Some(Dp1src::Rbit32),
         (0b0, 0b0, 0b00000, 0b000001) => Some(Dp1src::Rev1632),
@@ -247,6 +267,54 @@ fn dp_1src(word: u32) -> Option<Dp1src> {
         (0b1, 0b0, 0b00000, 0b000011) => Some(Dp1src::Rev64),
         (0b1, 0b0, 0b00000, 0b000100) => Some(Dp1src::Clz64),
         (0b1, 0b0, 0b00000, 0b000101) => Some(Dp1src::Cls64),
+        (0b1, 0b0, 0b00001, 0b000000) => Some(Dp1src::Pacia64p),
+        (0b1, 0b0, 0b00001, 0b000001) => Some(Dp1src::Pacib64p),
+        (0b1, 0b0, 0b00001, 0b000010) => Some(Dp1src::Pacda64p),
+        (0b1, 0b0, 0b00001, 0b000011) => Some(Dp1src::Pacdb64p),
+        (0b1, 0b0, 0b00001, 0b000100) => Some(Dp1src::Autia64p),
+        (0b1, 0b0, 0b00001, 0b000101) => Some(Dp1src::Autib64p),
+        (0b1, 0b0, 0b00001, 0b000110) => Some(Dp1src::Autda64p),
+        (0b1, 0b0, 0b00001, 0b000111) => Some(Dp1src::Autdb64p),
+        (0b1, 0b0, 0b00001, 0b001000) => match rn {
+            0b11111 => Some(Dp1src::Paciza64z),
+            _ => None,
+        },
+        (0b1, 0b0, 0b00001, 0b001001) => match rn {
+            0b11111 => Some(Dp1src::Pacizb64z),
+            _ => None,
+        },
+        (0b1, 0b0, 0b00001, 0b001010) => match rn {
+            0b11111 => Some(Dp1src::Pacdza64z),
+            _ => None,
+        },
+        (0b1, 0b0, 0b00001, 0b001011) => match rn {
+            0b11111 => Some(Dp1src::Pacdzb64z),
+            _ => None,
+        },
+        (0b1, 0b0, 0b00001, 0b001100) => match rn {
+            0b11111 => Some(Dp1src::Autiza64z),
+            _ => None,
+        },
+        (0b1, 0b0, 0b00001, 0b001101) => match rn {
+            0b11111 => Some(Dp1src::Autizb64z),
+            _ => None,
+        },
+        (0b1, 0b0, 0b00001, 0b001110) => match rn {
+            0b11111 => Some(Dp1src::Autdza64z),
+            _ => None,
+        },
+        (0b1, 0b0, 0b00001, 0b001111) => match rn {
+            0b11111 => Some(Dp1src::Autdzb64z),
+            _ => None,
+        },
+        (0b1, 0b0, 0b00001, 0b010000) => match rn {
+            0b11111 => Some(Dp1src::Xpaci64z),
+            _ => None,
+        },
+        (0b1, 0b0, 0b00001, 0b010001) => match rn {
+            0b11111 => Some(Dp1src::Xpacd64z),
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -400,8 +468,9 @@ fn dp_3src(word: u32) -> Option<Dp3src> {
 }
 
 impl Dp2src {
-    /// The handler class: CRC32 and CRC32C have their own; the rest share
-    /// the data-processing one. [`Dp2src::feature`] splits the same way.
+    /// The handler class: CRC32 and CRC32C have their own, as does PACGA;
+    /// the rest share the data-processing one. [`Dp2src::feature`] splits
+    /// the same way.
     pub(crate) const fn class(self) -> Class {
         match self {
             Self::Udiv32
@@ -424,6 +493,7 @@ impl Dp2src {
             | Self::Crc32cw32c
             | Self::Crc32x64c
             | Self::Crc32cx64c => Class::Crc32,
+            Self::Pacga64p => Class::PointerAuthGeneric,
         }
     }
 }
@@ -451,6 +521,54 @@ impl Dp2src {
             | Self::Crc32cw32c
             | Self::Crc32x64c
             | Self::Crc32cx64c => Feature::Crc32,
+            Self::Pacga64p => Feature::PAuth,
+        }
+    }
+}
+
+impl Dp1src {
+    /// The handler class, by [`Dp1src::feature`]: the pointer
+    /// authentication instructions have their own (the handler reads which
+    /// from `opcode`); the rest share the data-processing one.
+    pub(crate) const fn class(self) -> Class {
+        if matches!(self.feature(), Feature::PAuth) {
+            Class::PointerAuth
+        } else {
+            Class::DataProcessing1Source
+        }
+    }
+
+    pub(crate) const fn feature(self) -> Feature {
+        match self {
+            Self::Rbit32
+            | Self::Rev1632
+            | Self::Rev32
+            | Self::Clz32
+            | Self::Cls32
+            | Self::Rbit64
+            | Self::Rev1664
+            | Self::Rev3264
+            | Self::Rev64
+            | Self::Clz64
+            | Self::Cls64 => Feature::Base,
+            Self::Pacia64p
+            | Self::Pacib64p
+            | Self::Pacda64p
+            | Self::Pacdb64p
+            | Self::Autia64p
+            | Self::Autib64p
+            | Self::Autda64p
+            | Self::Autdb64p
+            | Self::Paciza64z
+            | Self::Pacizb64z
+            | Self::Pacdza64z
+            | Self::Pacdzb64z
+            | Self::Autiza64z
+            | Self::Autizb64z
+            | Self::Autdza64z
+            | Self::Autdzb64z
+            | Self::Xpaci64z
+            | Self::Xpacd64z => Feature::PAuth,
         }
     }
 }

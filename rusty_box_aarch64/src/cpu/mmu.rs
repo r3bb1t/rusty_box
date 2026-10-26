@@ -15,7 +15,7 @@ use rusty_box_core::SnapError;
 
 use super::dp::ones;
 use super::exception::{Exception, ExceptionClass};
-use super::exec::{Fault, StopCause};
+use super::exec::{sext, Fault, StopCause};
 use super::features::Feature;
 use super::{id, Cpu, El};
 use crate::bus::{AccessWidth, BusFault, PhysAddr, PhysBus};
@@ -323,7 +323,7 @@ impl Cpu {
             // disabled the output address is the input address below
             // `AddrTop`, data accesses are Device-nGnRnE and instruction
             // fetches are Normal.
-            let address = self.untagged(va);
+            let address = self.untagged(va, kind);
             if address >> id::PA_BITS != 0 {
                 return Err(Fsc::AddressSize(0));
             }
@@ -350,17 +350,22 @@ impl Cpu {
     #[inline(never)]
     fn translate_miss<B: PhysBus>(&mut self, bus: &mut B, va: u64, kind: AccessKind, el: El) -> Result<Translated, Fsc> {
         let slot = Tlb::slot(va);
-        let walked = self.walk(bus, va)?;
+        let walked = self.walk(bus, va, kind)?;
         // A tagged address keeps its tag in the entry's tag, so it hits only
         // itself; a TCR_EL1 write, which can change what the walk ignores,
-        // empties the TLB.
-        self.tlb.entries[slot] = TlbEntry {
-            tag: va >> 12,
-            pa_page: walked.pa & !0xFFF,
-            perms: walked.perms,
-            device: walked.device,
-            level: walked.level,
-        };
+        // empties the TLB. A data access through a tag instruction fetches
+        // do not ignore (TCR_EL1.TBIDx) leaves no entry: a fetch from the
+        // same address would hit it, where its own walk faults.
+        let fetch_faults = kind != AccessKind::Fetch && sext(va, 56) != va && !self.tbi(va, AccessKind::Fetch);
+        if !fetch_faults {
+            self.tlb.entries[slot] = TlbEntry {
+                tag: va >> 12,
+                pa_page: walked.pa & !0xFFF,
+                perms: walked.perms,
+                device: walked.device,
+                level: walked.level,
+            };
+        }
         if !permitted(walked.perms, kind, el) {
             return Err(Fsc::Permission(walked.level));
         }
@@ -370,48 +375,77 @@ impl Cpu {
         })
     }
 
-    /// Whether top-byte-ignore covers `va` (Arm ARM `AddrTop`): TCR_EL1.TBI1
-    /// for the upper half of the address space, TBI0 for the lower. ARMv8.0
-    /// has no TBID, so the bit covers instruction addresses as well as data.
+    /// Whether top-byte-ignore covers `va` for an access of `kind` (Arm ARM
+    /// `AddrTop`).
     #[inline]
-    fn tbi(&self, va: u64) -> bool {
-        let bit = if (va >> 55) & 1 == 1 { 38 } else { 37 };
-        (self.sys.tcr_el1 >> bit) & 1 == 1
+    fn tbi(&self, va: u64, kind: AccessKind) -> bool {
+        self.effective_tbi(va, kind == AccessKind::Fetch)
+    }
+
+    /// Arm `EffectiveTBI` for the EL1&0 regime: whether top-byte-ignore
+    /// covers `address`, an instruction address or a data one, in the half
+    /// of the address space its bit 55 selects.
+    #[inline]
+    pub(crate) fn effective_tbi(&self, address: u64, instruction: bool) -> bool {
+        self.tbi_applies((address >> 55) & 1 == 1, instruction)
+    }
+
+    /// Whether top-byte-ignore applies to the instruction or data addresses
+    /// of the half of the address space `upper` names: TCR_EL1.TBI1 or
+    /// TBI0, and with FEAT_PAuth not for an instruction address TBID1 or
+    /// TBID0 takes out of it.
+    #[inline]
+    pub(crate) fn tbi_applies(&self, upper: bool, instruction: bool) -> bool {
+        let tcr = self.sys.tcr_el1;
+        let tbi = (tcr >> if upper { 38 } else { 37 }) & 1 == 1;
+        let tbid = (tcr >> if upper { 52 } else { 51 }) & 1 == 1;
+        tbi && !(instruction && tbid && self.implements(Feature::PAuth))
+    }
+
+    /// TCR_EL1.T1SZ or T0SZ, of the half of the address space `upper`
+    /// names, held within 16..=39: a value outside them behaves as the
+    /// nearest (Arm ARM D8.1.6, an IMPLEMENTATION DEFINED choice made
+    /// here), for the walk and for the bottom bit of a pointer
+    /// authentication code alike (`AArch64_PACEffectiveTxSZ`).
+    #[inline]
+    pub(crate) fn effective_txsz(&self, upper: bool) -> u32 {
+        let tcr = self.sys.tcr_el1;
+        let txsz = if upper { (tcr >> 16) & 0x3F } else { tcr & 0x3F };
+        txsz.clamp(16, 39) as u32
     }
 
     /// `va` with its tag cleared when top-byte-ignore covers it.
     #[inline]
-    fn untagged(&self, va: u64) -> u64 {
-        if self.tbi(va) { va & 0x00FF_FFFF_FFFF_FFFF } else { va }
+    fn untagged(&self, va: u64, kind: AccessKind) -> u64 {
+        if self.tbi(va, kind) { va & 0x00FF_FFFF_FFFF_FFFF } else { va }
     }
 
     /// Arm ARM `AArch64.BranchAddr`: the address a branch, an exception
     /// entry or an exception return writes to the PC. Under top-byte-ignore
-    /// the tag is dropped, bits [63:56] becoming copies of bit 55 (the sign
-    /// extension EL0 and EL1 use, and this core has no other level). QEMU
-    /// does the same: `gen_a64_set_pc` (translate-a64.c) for branches and
-    /// `HELPER(exception_return)` (helper-a64.c) for ERET.
+    /// of instruction addresses the tag is dropped, bits [63:56] becoming
+    /// copies of bit 55 (the sign extension EL0 and EL1 use, and this core
+    /// has no other level); a tag TBID keeps from being ignored stays, for
+    /// the fetch to fault on. QEMU does the same: `gen_a64_set_pc`
+    /// (translate-a64.c) for branches and `HELPER(exception_return)`
+    /// (helper-a64.c) for ERET.
     #[inline]
     pub(crate) fn branch_addr(&self, target: u64) -> u64 {
-        if self.tbi(target) { (((target << 8) as i64) >> 8) as u64 } else { target }
+        if self.tbi(target, AccessKind::Fetch) { sext(target, 56) } else { target }
     }
 
     /// The translation table walk (Arm ARM `AArch64.TranslationTableWalk`)
     /// for the 4 KiB granule, with hierarchical permissions and no hardware
     /// access-flag management (ARMv8.0).
-    fn walk<B: PhysBus>(&self, bus: &mut B, va: u64) -> Result<Walked, TranslationFault> {
+    fn walk<B: PhysBus>(&self, bus: &mut B, va: u64, kind: AccessKind) -> Result<Walked, TranslationFault> {
         let tcr = self.sys.tcr_el1;
         let upper = (va >> 55) & 1 == 1;
-        let (txsz, epd, ttbr) = if upper {
-            ((tcr >> 16) & 0x3F, (tcr >> 23) & 1 == 1, self.sys.ttbr1_el1)
+        let (epd, ttbr) = if upper {
+            ((tcr >> 23) & 1 == 1, self.sys.ttbr1_el1)
         } else {
-            (tcr & 0x3F, (tcr >> 7) & 1 == 1, self.sys.ttbr0_el1)
+            ((tcr >> 7) & 1 == 1, self.sys.ttbr0_el1)
         };
-        // T0SZ/T1SZ outside 16..=39 behave as the nearest supported value
-        // (Arm ARM D8.1.6, an IMPLEMENTATION DEFINED choice made here).
-        let txsz = txsz.clamp(16, 39) as u32;
-        let ia_bits = 64 - txsz;
-        let top = if self.tbi(va) { 56 } else { 64 };
+        let ia_bits = 64 - self.effective_txsz(upper);
+        let top = if self.tbi(va, kind) { 56 } else { 64 };
         let check = ones(top - ia_bits) << ia_bits;
         if va & check != if upper { check } else { 0 } {
             return Err(TranslationFault::Translation { level: 0 });
@@ -524,13 +558,13 @@ impl Cpu {
     /// that cannot disturb a device. Nothing in the processor changes.
     pub(crate) fn debug_translate<B: PhysBus>(&self, bus: &mut B, va: u64) -> Result<u64, TranslationFault> {
         if !self.mmu_enabled() {
-            let address = self.untagged(va);
+            let address = self.untagged(va, AccessKind::Read);
             if address >> id::PA_BITS != 0 {
                 return Err(TranslationFault::AddressSize { level: 0 });
             }
             return Ok(address);
         }
-        self.walk(bus, va).map(|w| w.pa)
+        self.walk(bus, va, AccessKind::Read).map(|w| w.pa)
     }
 
     /// `AT S1E1R/S1E1W/S1E0R/S1E0W`: translate and report in `PAR_EL1`,
@@ -542,13 +576,13 @@ impl Cpu {
         const NS: u64 = 1 << 9;
         let kind = if write { AccessKind::Write } else { AccessKind::Read };
         let result = if self.mmu_enabled() {
-            match self.walk(bus, va) {
+            match self.walk(bus, va, kind) {
                 Ok(w) if permitted(w.perms, kind, el) => Ok((w.pa, w.attr, w.shareability)),
                 Ok(w) => Err(Fsc::Permission(w.level)),
                 Err(f) => Err(Fsc::from(f)),
             }
         } else {
-            let address = self.untagged(va);
+            let address = self.untagged(va, kind);
             if address >> id::PA_BITS != 0 {
                 Err(Fsc::AddressSize(0))
             } else {
