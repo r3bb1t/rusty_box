@@ -105,8 +105,14 @@ use sve::{
     SveIntPermUnpk, SveIntPfalse, SveIntPfirst, SveIntPnext, SveIntPredDup, SveIntPredLog, SveIntPredPatternA,
     SveIntPredPatternB, SveIntPtest, SveIntPtrue, SveIntReadSvlA, SveIntReadVlA, SveIntReduce0, SveIntReduce1,
     SveIntReduce2, SveIntRotateImm, SveIntScmpVi, SveIntSelVvv, SveIntSqdmulh, SveIntTernLog, SveIntUcmpVi,
-    SveIntUnPredArit0, SveIntUnPredArit1, SveIntWhileRr, SveIntWhilenc, SveIntxPermExtractI, SveIntxPermSplice,
-    SveMem32bFill, SveMem32bPfill, SveMemCldSi, SveMemCldSs, SveMemCldntSi, SveMemCldntSs, SveMemCstSi, SveMemCstSs,
+    SveIntUnPredArit0, SveIntUnPredArit1, SveIntWhileRr, SveIntWhilenc, SveIntxAccumulateLongPairs,
+    SveIntxArithBinaryPairs, SveIntxBinPredShiftSatRound, SveIntxCdot, SveIntxCdotByIndexedElem, SveIntxClamp,
+    SveIntxCmla, SveIntxCmlaByIndexedElem, SveIntxDot, SveIntxDotByIndexedElem, SveIntxMixedDot,
+    SveIntxMixedDotByIndexedElem, SveIntxMlaByIndexedElem, SveIntxMlaLongByIndexedElem, SveIntxMlalLong,
+    SveIntxMulByIndexedElem, SveIntxMulLongByIndexedElem, SveIntxPermExtractI, SveIntxPermSplice,
+    SveIntxPredArithBinary, SveIntxPredArithBinarySat, SveIntxPredArithUnary, SveIntxQdmlaLongByIndexedElem,
+    SveIntxQdmlalLong, SveIntxQdmlalbt, SveIntxQdmulLongByIndexedElem, SveIntxQdmulhByIndexedElem,
+    SveIntxQrdcmlaByIndexedElem, SveIntxQrdmlah, SveIntxQrdmlahByIndexedElem, SveMem32bFill, SveMem32bPfill, SveMemCldSi, SveMemCldSs, SveMemCldntSi, SveMemCldntSs, SveMemCstSi, SveMemCstSs,
     SveMemCstntSi, SveMemCstntSs, SveMemEldSi, SveMemEldSs, SveMemEstSi, SveMemEstSs, SveMemLdDup, SveMemLdqrSi,
     SveMemLdqrSs, SveMemPrfmSi, SveMemPrfmSs, SveMemPspill, SveMemSpill,
 };
@@ -309,6 +315,34 @@ pub(crate) enum Encoding {
     SveIntArithImm2(SveIntArithImm2),
     SveIntDupImm(SveIntDupImm),
     SveIntDupFpimm(SveIntDupFpimm),
+    SveIntxDot(SveIntxDot),
+    SveIntxQdmlalbt(SveIntxQdmlalbt),
+    SveIntxCdot(SveIntxCdot),
+    SveIntxCmla(SveIntxCmla),
+    SveIntxMlalLong(SveIntxMlalLong),
+    SveIntxQdmlalLong(SveIntxQdmlalLong),
+    SveIntxQrdmlah(SveIntxQrdmlah),
+    SveIntxMixedDot(SveIntxMixedDot),
+    SveIntxBinPredShiftSatRound(SveIntxBinPredShiftSatRound),
+    SveIntxPredArithUnary(SveIntxPredArithUnary),
+    SveIntxAccumulateLongPairs(SveIntxAccumulateLongPairs),
+    SveIntxPredArithBinary(SveIntxPredArithBinary),
+    SveIntxArithBinaryPairs(SveIntxArithBinaryPairs),
+    SveIntxPredArithBinarySat(SveIntxPredArithBinarySat),
+    SveIntxClamp(SveIntxClamp),
+    SveIntxDotByIndexedElem(SveIntxDotByIndexedElem),
+    SveIntxMlaByIndexedElem(SveIntxMlaByIndexedElem),
+    SveIntxQrdmlahByIndexedElem(SveIntxQrdmlahByIndexedElem),
+    SveIntxMixedDotByIndexedElem(SveIntxMixedDotByIndexedElem),
+    SveIntxQdmlaLongByIndexedElem(SveIntxQdmlaLongByIndexedElem),
+    SveIntxCdotByIndexedElem(SveIntxCdotByIndexedElem),
+    SveIntxCmlaByIndexedElem(SveIntxCmlaByIndexedElem),
+    SveIntxQrdcmlaByIndexedElem(SveIntxQrdcmlaByIndexedElem),
+    SveIntxMlaLongByIndexedElem(SveIntxMlaLongByIndexedElem),
+    SveIntxMulLongByIndexedElem(SveIntxMulLongByIndexedElem),
+    SveIntxQdmulLongByIndexedElem(SveIntxQdmulLongByIndexedElem),
+    SveIntxQdmulhByIndexedElem(SveIntxQdmulhByIndexedElem),
+    SveIntxMulByIndexedElem(SveIntxMulByIndexedElem),
     SveFpFcmla(SveFpFcmla),
     SveFpFcadd(SveFpFcadd),
     SveFpFcvt2(SveFpFcvt2),
@@ -543,6 +577,33 @@ impl Encoding {
             | Self::SveIntArithImm2(_)
             | Self::SveIntDupImm(_)
             | Self::SveIntDupFpimm(_) => Class::SveWideImmediate,
+            Self::SveIntxDot(_)
+            | Self::SveIntxMixedDot(_)
+            | Self::SveIntxDotByIndexedElem(_)
+            | Self::SveIntxMixedDotByIndexedElem(_) => Class::SveIntxDot,
+            Self::SveIntxCdot(_)
+            | Self::SveIntxCmla(_)
+            | Self::SveIntxCdotByIndexedElem(_)
+            | Self::SveIntxCmlaByIndexedElem(_)
+            | Self::SveIntxQrdcmlaByIndexedElem(_) => Class::SveIntxComplex,
+            Self::SveIntxQdmlalbt(_)
+            | Self::SveIntxMlalLong(_)
+            | Self::SveIntxQdmlalLong(_)
+            | Self::SveIntxMlaLongByIndexedElem(_)
+            | Self::SveIntxQdmlaLongByIndexedElem(_)
+            | Self::SveIntxMulLongByIndexedElem(_)
+            | Self::SveIntxQdmulLongByIndexedElem(_) => Class::SveIntxMulLong,
+            Self::SveIntxQrdmlah(_)
+            | Self::SveIntxMlaByIndexedElem(_)
+            | Self::SveIntxQrdmlahByIndexedElem(_)
+            | Self::SveIntxQdmulhByIndexedElem(_)
+            | Self::SveIntxMulByIndexedElem(_) => Class::SveIntxMul,
+            Self::SveIntxBinPredShiftSatRound(_)
+            | Self::SveIntxPredArithBinary(_)
+            | Self::SveIntxArithBinaryPairs(_)
+            | Self::SveIntxPredArithBinarySat(_) => Class::SveIntxBinaryPredicated,
+            Self::SveIntxPredArithUnary(_) | Self::SveIntxAccumulateLongPairs(_) => Class::SveIntxUnaryPredicated,
+            Self::SveIntxClamp(_) => Class::SveIntxClamp,
             Self::SveFp2opPZds(_) | Self::SveFp2opIPZds(_) => Class::SveFpArithmeticPredicated,
             Self::SveFp3opUZd(_) => Class::SveFpArithmeticUnpredicated,
             Self::SveFpFastRed(_) => Class::SveFpReduction,
@@ -821,6 +882,27 @@ pub(crate) enum Class {
     /// `sve_wideimm_unpred`: the add/subtract, min/max and multiply
     /// immediates, DUP (immediate), FDUP.
     SveWideImmediate,
+    /// SDOT, UDOT, USDOT, by vector and indexed (bit 21), and SUDOT
+    /// (indexed).
+    SveIntxDot,
+    /// CDOT, CMLA and SQRDCMLAH, by vector and indexed (bit 21).
+    SveIntxComplex,
+    /// The long multiplies and multiply-adds: SMLALB to UMLSLT, SQDMLALB to
+    /// SQDMLSLT, SQDMLALBT and SQDMLSLBT by vector; SMLALB to UMLSLT,
+    /// SQDMLALB to SQDMLSLT, SMULLB to UMULLT, SQDMULLB and SQDMULLT
+    /// indexed (bit 21).
+    SveIntxMulLong,
+    /// SQRDMLAH and SQRDMLSH by vector and indexed (bit 21); MLA, MLS,
+    /// MUL, SQDMULH and SQRDMULH indexed.
+    SveIntxMul,
+    /// `sve_intx_predicated`'s binary operations: the saturating and
+    /// rounding shifts, the halving adds and subtracts, the pairwise
+    /// operations and the saturating adds and subtracts.
+    SveIntxBinaryPredicated,
+    /// URECPE, URSQRTE, SQABS, SQNEG, SADALP, UADALP.
+    SveIntxUnaryPredicated,
+    /// SCLAMP, UCLAMP.
+    SveIntxClamp,
     /// `sve_fp_pred`: FADD, FSUB, FMUL, FSUBR, FMAXNM, FMINNM, FMAX, FMIN
     /// of vectors and of an immediate (bit 20), and FABD, FSCALE, FMULX,
     /// FDIVR, FDIV, predicated.
@@ -1101,6 +1183,34 @@ impl Encoding {
             | Self::SveIntArithImm2(_)
             | Self::SveIntDupImm(_)
             | Self::SveIntDupFpimm(_)
+            | Self::SveIntxDot(_)
+            | Self::SveIntxQdmlalbt(_)
+            | Self::SveIntxCdot(_)
+            | Self::SveIntxCmla(_)
+            | Self::SveIntxMlalLong(_)
+            | Self::SveIntxQdmlalLong(_)
+            | Self::SveIntxQrdmlah(_)
+            | Self::SveIntxMixedDot(_)
+            | Self::SveIntxBinPredShiftSatRound(_)
+            | Self::SveIntxPredArithUnary(_)
+            | Self::SveIntxAccumulateLongPairs(_)
+            | Self::SveIntxPredArithBinary(_)
+            | Self::SveIntxArithBinaryPairs(_)
+            | Self::SveIntxPredArithBinarySat(_)
+            | Self::SveIntxClamp(_)
+            | Self::SveIntxDotByIndexedElem(_)
+            | Self::SveIntxMlaByIndexedElem(_)
+            | Self::SveIntxQrdmlahByIndexedElem(_)
+            | Self::SveIntxMixedDotByIndexedElem(_)
+            | Self::SveIntxQdmlaLongByIndexedElem(_)
+            | Self::SveIntxCdotByIndexedElem(_)
+            | Self::SveIntxCmlaByIndexedElem(_)
+            | Self::SveIntxQrdcmlaByIndexedElem(_)
+            | Self::SveIntxMlaLongByIndexedElem(_)
+            | Self::SveIntxMulLongByIndexedElem(_)
+            | Self::SveIntxQdmulLongByIndexedElem(_)
+            | Self::SveIntxQdmulhByIndexedElem(_)
+            | Self::SveIntxMulByIndexedElem(_)
             | Self::SveFpFcmla(_)
             | Self::SveFpFcadd(_)
             | Self::SveFpFcvt2(_)

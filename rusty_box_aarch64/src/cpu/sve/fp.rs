@@ -15,7 +15,7 @@
 //! (`FPReducePredicated`, `FPReduce`, `FPConvertSVE`, `FPScale`,
 //! `FPClampScale`, `FPLogB`, `FPMulAddH`, `BFMulAddH`, `BFDotAdd`).
 
-use super::{Esize, Pv, Zv};
+use super::{segment_base, Esize, Pv, Zv};
 use crate::cpu::exec::{bit, bits, sext, ExecResult, Flow};
 use crate::cpu::fp::{
     bf16_mul_add_long, fp_binary, fp_compare, fp_compare_holds, fp_convert, fp_convert_round_odd, fp_log_b, fp_mul_add,
@@ -52,14 +52,6 @@ const fn mul_add_form(negate_multiplicand: bool, negate_addend: bool) -> FusedMu
         (true, true) => FusedMulAdd::Fnmadd,
         (false, true) => FusedMulAdd::Fnmsub,
     }
-}
-
-/// The first of the units of element `e`'s 128-bit segment, of which a
-/// segment holds `per_segment`: `e - e MOD eltspersegment`, the
-/// `segmentbase` an indexed operation adds its index to.
-#[inline]
-const fn segment_base(e: usize, per_segment: usize) -> usize {
-    e - e % per_segment
 }
 
 /// A predicated arithmetic operation of `sve_fp_2op_p_zds` or

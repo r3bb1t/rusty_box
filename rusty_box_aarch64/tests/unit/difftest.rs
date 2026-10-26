@@ -411,7 +411,39 @@ fn sve_state(seed: u64, kind: &str, insn: u32) -> SveState {
         }
         fpcr = ((r.next() & 0x1F) << 22) | ((r.next() & 1) << 19) | (r.next() & 7);
     }
+    if kind == "SI" {
+        let own = ((insn >> 22) & 3) as usize;
+        for reg in z.iter_mut() {
+            match r.next() & 3 {
+                0 => {}
+                1 => *reg = int_register(&mut r, own, false),
+                2 => *reg = int_register(&mut r, own, true),
+                _ => *reg = int_register(&mut r, own.saturating_sub(1), true),
+            }
+        }
+    }
     SveState { z, p, fpcr }
+}
+
+/// A Z register of elements of `size` (`8 << size` bits): with `extreme`
+/// each zero, one, minus one, the largest or the smallest value, or one
+/// above the smallest; else each a shift amount from -(esize+2) to
+/// esize+2. Must match `int_register` in gen_qemu_sve.py.
+fn int_register(r: &mut SplitMix64, size: usize, extreme: bool) -> [u8; SVE_VLB] {
+    let bytes = 1usize << size;
+    let n = 8 * bytes as u64;
+    let mask = u64::MAX >> (64 - n);
+    let mut reg = [0u8; SVE_VLB];
+    for lane in reg.chunks_exact_mut(bytes) {
+        let w = r.next();
+        let value = if extreme {
+            [0, 1, mask, mask >> 1, (mask >> 1) + 1, (mask >> 1) + 2][(w % 6) as usize]
+        } else {
+            (w % (2 * n + 5)).wrapping_sub(n + 2) & mask
+        };
+        lane.copy_from_slice(&value.to_le_bytes()[..bytes]);
+    }
+    reg
 }
 
 /// `key:value` pairs of an SVE vector's `z=` or `p=` field: the register

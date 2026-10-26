@@ -7,10 +7,11 @@
 //! instruction executes only in Streaming SVE mode, at the Streaming SVE
 //! vector length; outside it, `CheckSVEEnabled` takes the SME trap
 //! (`CheckStreamingSVEEnabled`). The instructions are in `int` (integer
-//! arithmetic, element counts and immediates), `perm` (permutes, copies and
-//! selects), `pred` (compares, predicate operations, `WHILE` and predicate
-//! counts), `fp` (floating point) and `mem` (contiguous loads, stores and
-//! prefetches).
+//! arithmetic, element counts and immediates), `intx` (SVE2's integer
+//! multiply-adds, multiplies by element and predicated operations), `perm`
+//! (permutes, copies and selects), `pred` (compares, predicate operations,
+//! `WHILE` and predicate counts), `fp` (floating point) and `mem`
+//! (contiguous loads, stores and prefetches).
 //!
 //! Provenance (R7): the Arm A64 ISA XML, release 2026-09 (Arm ARM M.d), the
 //! instruction pages each handler names and the shared pseudocode in
@@ -20,6 +21,7 @@
 
 mod fp;
 mod int;
+mod intx;
 mod mem;
 mod perm;
 mod pred;
@@ -326,6 +328,14 @@ pub(crate) fn decode_pred_count(pattern: u32, es: Esize, vl: VecLen) -> usize {
 /// FPSR.QC).
 pub(crate) fn sat_q(value: i128, es: Esize, unsigned: bool) -> u64 {
     sat_q_bits(value, es.bits(), unsigned)
+}
+
+/// The first of the units of element `e`'s 128-bit segment, of which a
+/// segment holds `per_segment`: `e - e MOD eltspersegment`, the
+/// `segmentbase` an indexed operation adds its index to.
+#[inline]
+pub(crate) const fn segment_base(e: usize, per_segment: usize) -> usize {
+    e - e % per_segment
 }
 
 /// [`sat_q`] for an `n`-bit result, `n` at most 64: the scalar forms

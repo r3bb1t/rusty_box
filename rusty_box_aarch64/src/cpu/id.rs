@@ -180,9 +180,8 @@ pub(crate) const fn id_aa64isar2(features: Features) -> u64 {
 /// ==> (FEAT_BF16 <=> UInt(ID_AA64ZFR0_EL1.BF16) >= 1)`, and the same of
 /// I8MM); zero without FEAT_SME, as a processor without SVE or SME reports
 /// it. The fields promise the SVE BFloat16 instructions (BFDOT, BFMLALB,
-/// BFMLALT, BFCVT, BFCVTNT), which are implemented, and USDOT and SUDOT in
-/// Streaming SVE mode, which are among the encodings of FEAT_SME still
-/// being built (`Feature::complete`).
+/// BFMLALT, BFCVT, BFCVTNT) and USDOT and SUDOT in Streaming SVE mode,
+/// all implemented.
 pub(crate) const fn id_aa64zfr0(features: Features) -> u64 {
     if features.has(Feature::Sme) {
         field(features, Feature::Bf16, 20, 1) | field(features, Feature::I8mm, 44, 1)

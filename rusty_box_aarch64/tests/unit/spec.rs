@@ -1360,8 +1360,12 @@ fn the_decoder_allocates_as_arm_does_on_every_word() {
 
 // ----- the feature sets -----
 
-/// Every constraint `FEAT_A ==> FEAT_B` of Arm's `Features.json` whose two
-/// features are both a [`Feature`], with the release it was read from.
+/// Every pair of [`Feature`]s `(A, B)` that Arm's `Features.json` makes
+/// `FEAT_A` imply `FEAT_B`, directly or through other identifiers, with the
+/// release it was read from. An architecture version carries an
+/// implication on: `FEAT_SME ==> v9Ap2`, `v9Ap2 ==> (v9Ap1 && v8Ap7)`,
+/// `v9Ap1 ==> (v9Ap0 && v8Ap6)` and `v8Ap6 ==> FEAT_I8MM` make FEAT_SME
+/// imply FEAT_I8MM.
 fn feature_implications() -> (String, Vec<(Feature, Feature)>) {
     let dir = std::env::var_os(SPEC_DIR_VAR)
         .unwrap_or_else(|| panic!("set {SPEC_DIR_VAR} to the unpacked AARCHMRS directory (holding Features.json)"));
@@ -1369,21 +1373,20 @@ fn feature_implications() -> (String, Vec<(Feature, Feature)>) {
     let text = std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
     let root: Value = serde_json::from_slice(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
     let release = root.pointer("/_meta/version/ref").and_then(Value::as_str).unwrap_or("?").to_string();
-    let named = |side: Option<&Value>| {
+    let identifier = |side: Option<&Value>| {
         let side = side?;
         if side.get("_type").and_then(Value::as_str) != Some("AST.Identifier") {
             return None;
         }
-        let name = side.get("value").and_then(Value::as_str)?;
-        Feature::ALL.into_iter().find(|f| f.arm_name() == Some(name))
+        side.get("value").and_then(Value::as_str).map(str::to_string)
     };
-    // The features a conjunction of identifiers names (`FEAT_SME ==>
-    // (FEAT_FCMA && FEAT_FP16 && FEAT_BF16 && FEAT_FHM)`), each implied on
-    // its own; `None` for any other shape, which implies no one feature.
-    fn conjuncts(side: Option<&Value>, out: &mut Vec<Value>) -> Option<()> {
+    // The identifiers a conjunction names (`FEAT_SME ==> (FEAT_FCMA &&
+    // FEAT_FP16 && FEAT_BF16 && FEAT_FHM)`), each implied on its own;
+    // `None` for any other shape, which implies no one identifier.
+    fn conjuncts(side: Option<&Value>, out: &mut Vec<String>) -> Option<()> {
         let side = side?;
         match side.get("_type").and_then(Value::as_str) {
-            Some("AST.Identifier") => out.push(side.clone()),
+            Some("AST.Identifier") => out.push(side.get("value").and_then(Value::as_str)?.to_string()),
             Some("AST.BinaryOp") if side.get("op").and_then(Value::as_str) == Some("&&") => {
                 conjuncts(side.get("left"), out)?;
                 conjuncts(side.get("right"), out)?;
@@ -1400,24 +1403,39 @@ fn feature_implications() -> (String, Vec<(Feature, Feature)>) {
         .filter_map(|p| p.get("constraints").and_then(Value::as_array))
         .flatten();
     let global_constraints = root.get("constraints").and_then(Value::as_array).into_iter().flatten();
-    let mut implications = Vec::new();
+    let mut edges: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for c in parameter_constraints.chain(global_constraints) {
         let is_implication = c.get("_type").and_then(Value::as_str) == Some("AST.BinaryOp")
             && c.get("op").and_then(Value::as_str) == Some("==>");
         if !is_implication {
             continue;
         }
-        let Some(a) = named(c.get("left")) else {
+        let Some(a) = identifier(c.get("left")) else {
             continue;
         };
         let mut right = Vec::new();
         if conjuncts(c.get("right"), &mut right).is_none() {
             continue;
         }
-        for b in right.iter().filter_map(|b| named(Some(b))) {
-            if !implications.contains(&(a, b)) {
-                implications.push((a, b));
+        edges.entry(a).or_default().extend(right);
+    }
+    let mut implications = Vec::new();
+    for a in Feature::ALL {
+        let Some(name) = a.arm_name() else {
+            continue;
+        };
+        let mut reached: Vec<&str> = vec![name];
+        let mut i = 0;
+        while i < reached.len() {
+            for next in edges.get(reached[i]).into_iter().flatten() {
+                if !reached.contains(&next.as_str()) {
+                    reached.push(next);
+                }
             }
+            i += 1;
+        }
+        for b in Feature::ALL.into_iter().filter(|b| *b != a && b.arm_name().is_some_and(|n| reached.contains(&n))) {
+            implications.push((a, b));
         }
     }
     (release, implications)

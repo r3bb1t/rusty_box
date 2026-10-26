@@ -10,6 +10,7 @@ use crate::cpu::dp::{decode_bit_masks, ror};
 use crate::cpu::exec::{bit, bits, sext, ExecResult, Flow};
 use crate::cpu::fp::FpType;
 use crate::cpu::simd::vfp_expand_imm;
+use crate::cpu::simd_arith::doubling_mul_high;
 use crate::cpu::Cpu;
 
 /// The shifts the SVE instructions apply to an element: Arm `ASR`, `LSR`
@@ -39,9 +40,9 @@ impl Shift {
 }
 
 /// The two-operand operations of `sve_int_pred_bin`, by `op0:opc`
-/// (bits 20:16).
+/// (bits 20:16); ADD, MAX and MIN are also SVE2's pairwise operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BinOp {
+pub(super) enum BinOp {
     Add,
     Sub,
     SubReversed,
@@ -86,7 +87,7 @@ impl BinOp {
     }
 
     /// The operation on elements `a` and `b` of `es`.
-    fn apply(self, a: u64, b: u64, es: Esize) -> u64 {
+    pub(super) fn apply(self, a: u64, b: u64, es: Esize) -> u64 {
         let m = es.mask();
         match self {
             Self::Add => a.wrapping_add(b) & m,
@@ -676,13 +677,8 @@ impl Cpu {
                 MulUnpredicated::Mul => a.wrapping_mul(b),
                 MulUnpredicated::Pmul => polynomial_mult(a, b, 8) as u64,
                 MulUnpredicated::MulHigh { unsigned } => mul_high(a, b, es, unsigned),
-                // SQDMULH, SQRDMULH: `(2 * a * b + rounding) >> esize`,
-                // saturated, computed as `(a * b + rounding / 2) >> (esize
-                // - 1)` so that it is exact for 64-bit elements.
                 MulUnpredicated::DoublingHigh { rounding } => {
-                    let product = int(a, es, false) * int(b, es, false);
-                    let half_rounding = if rounding { 1i128 << (es.bits() - 2) } else { 0 };
-                    sat_q((product + half_rounding) >> (es.bits() - 1), es, false)
+                    sat_q(doubling_mul_high(int(a, es, false), int(b, es, false), es.bits(), rounding), es, false)
                 }
             };
             result.set(e, es, r);

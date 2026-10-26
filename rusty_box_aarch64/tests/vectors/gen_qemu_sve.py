@@ -114,6 +114,24 @@ def fp_register(r, size):
     return value
 
 
+def int_register(r, size, extreme):
+    """A Z register of elements of `size` (`8 << size` bits): with `extreme`
+    each zero, one, minus one, the largest or the smallest value, or one
+    above the smallest; else each a shift amount from -(esize+2) to
+    esize+2."""
+    n = 8 << size
+    mask = (1 << n) - 1
+    value = 0
+    for k in range(VLB * 8 // n):
+        w = r.next()
+        if extreme:
+            element = [0, 1, mask, mask >> 1, (mask >> 1) + 1, (mask >> 1) + 2][w % 6]
+        else:
+            element = ((w % (2 * n + 5)) - (n + 2)) & mask
+        value |= element << (n * k)
+    return value
+
+
 def sve_state(seed, kind, insn):
     """Z0-Z31 and P0-P15 (as integers, little-endian over their bytes) and
     the FPCR bits the kind adds. Must match `difftest::sve_state` in Rust."""
@@ -167,6 +185,20 @@ def sve_state(seed, kind, insn):
             if sel != 0:
                 z[i] = fp_register(r, own if sel <= 4 else sel - 4)
         fpcr = ((r.next() & 0x1F) << 22) | ((r.next() & 1) << 19) | (r.next() & 7)
+    if kind == "SI":
+        # SVE2 integer inputs: per register, the state above, or elements
+        # of the size the word's `size` field names, each a shift amount
+        # in range or an extreme, or elements half that size (bytes for
+        # `size = 00`), each an extreme: a long operation's sources.
+        own = (insn >> 22) & 3
+        for i in range(32):
+            sel = r.next() & 3
+            if sel == 1:
+                z[i] = int_register(r, own, False)
+            elif sel == 2:
+                z[i] = int_register(r, own, True)
+            elif sel == 3:
+                z[i] = int_register(r, max(own - 1, 0), True)
     return z, p, fpcr
 
 
@@ -235,11 +267,36 @@ def not_bfmlsl(w):
     return w & ~0x00002000 if (w >> 22) & 1 and (w >> 13) & 1 else w
 
 
+def size_1x(w):
+    """SDOT and UDOT, by vector and indexed: `size<1> = 0` is the
+    halfword-to-word forms of FEAT_SVE2p3 and FEAT_SME2p3, or unallocated,
+    so `size<1>` set."""
+    return w | 0x00800000
+
+
+def size_10(w):
+    """USDOT and SUDOT: `size = 10` alone."""
+    return (w & ~0x00400000) | 0x00800000
+
+
+def merging(w):
+    """URECPE, URSQRTE, SQABS, SQNEG: `Z = 1` is the zeroing forms of
+    FEAT_SVE2p2 and FEAT_SME2p2, so `Z` clear."""
+    return w & ~0x00020000
+
+
+def not_subp(w):
+    """ADDP to UMINP: `opc = 00` with `U = 0` is SUBP, FEAT_SVE2p3's and
+    FEAT_SME2p3's, so ADDP in its place."""
+    return w | 0x00010000 if (w >> 17) & 3 == 0 else w
+
+
 # (name, kind, fixed bits, free bits, fixup): Arm's encoding classes of the
 # A64 `sve` group whose encodings FEAT_SME makes legal, with `op0 = 000`
 # and `001`, then the loads, stores and prefetches (`op0 = 100`, `101` and
 # `111`, kind M, or R for scalar plus scalar), then the floating-point
-# instructions (`op0 = 011`, kind SF), their fixed bits from AARCHMRS
+# instructions (`op0 = 011`, kind SF), then SVE2's integer instructions
+# with `op1<7> = 0` (`op0 = 010`, kind SI), their fixed bits from AARCHMRS
 # 2026-09.
 FAMILIES = [
     ("sve_int_bin_pred_arit_0", "S", 0x04000000, 0x00C71FFF, None),
@@ -383,6 +440,34 @@ FAMILIES = [
     ("sve_fp_2op_p_pd", "SF", 0x65102000, 0x00C31FFF, None),
     ("sve_fp_3op_p_zds_a", "SF", 0x65200000, 0x00DF7FFF, fp_size),
     ("sve_fp_3op_p_zds_b", "SF", 0x65208000, 0x00DF7FFF, fp_size),
+    ("sve_intx_dot", "SI", 0x44000000, 0x00DF07FF, size_1x),
+    ("sve_intx_qdmlalbt", "SI", 0x44000800, 0x00DF07FF, None),
+    ("sve_intx_cdot", "SI", 0x44001000, 0x00DF0FFF, None),
+    ("sve_intx_cmla", "SI", 0x44002000, 0x00DF1FFF, None),
+    ("sve_intx_mlal_long", "SI", 0x44004000, 0x00DF1FFF, None),
+    ("sve_intx_qdmlal_long", "SI", 0x44006000, 0x00DF0FFF, None),
+    ("sve_intx_qrdmlah", "SI", 0x44007000, 0x00DF07FF, None),
+    ("sve_intx_mixed_dot", "SI", 0x44007800, 0x00DF03FF, size_10),
+    ("sve_intx_bin_pred_shift_sat_round", "SI", 0x44008000, 0x00CF1FFF, None),
+    ("sve_intx_pred_arith_unary", "SI", 0x4400A000, 0x00CB1FFF, merging),
+    ("sve_intx_accumulate_long_pairs", "SI", 0x4404A000, 0x00C11FFF, None),
+    ("sve_intx_pred_arith_binary", "SI", 0x44108000, 0x00C71FFF, None),
+    ("sve_intx_arith_binary_pairs", "SI", 0x4410A000, 0x00C71FFF, not_subp),
+    ("sve_intx_pred_arith_binary_sat", "SI", 0x44188000, 0x00C71FFF, None),
+    ("sve_intx_clamp", "SI", 0x4400C000, 0x00DF07FF, None),
+    ("sve_intx_dot_by_indexed_elem", "SI", 0x44200000, 0x00DF07FF, size_1x),
+    ("sve_intx_mla_by_indexed_elem", "SI", 0x44200800, 0x00DF07FF, None),
+    ("sve_intx_qrdmlah_by_indexed_elem", "SI", 0x44201000, 0x00DF07FF, None),
+    ("sve_intx_mixed_dot_by_indexed_elem", "SI", 0x44201800, 0x00DF07FF, size_10),
+    ("sve_intx_qdmla_long_by_indexed_elem", "SI", 0x44202000, 0x00DF1FFF, None),
+    ("sve_intx_cdot_by_indexed_elem", "SI", 0x44204000, 0x00DF0FFF, None),
+    ("sve_intx_cmla_by_indexed_elem", "SI", 0x44206000, 0x00DF0FFF, None),
+    ("sve_intx_qrdcmla_by_indexed_elem", "SI", 0x44207000, 0x00DF0FFF, None),
+    ("sve_intx_mla_long_by_indexed_elem", "SI", 0x44208000, 0x00DF3FFF, None),
+    ("sve_intx_mul_long_by_indexed_elem", "SI", 0x4420C000, 0x00DF1FFF, None),
+    ("sve_intx_qdmul_long_by_indexed_elem", "SI", 0x4420E000, 0x00DF0FFF, None),
+    ("sve_intx_qdmulh_by_indexed_elem", "SI", 0x4420F000, 0x00DF07FF, None),
+    ("sve_intx_mul_by_indexed_elem", "SI", 0x4420F800, 0x00DF03FF, None),
 ]
 
 
