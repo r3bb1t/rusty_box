@@ -242,7 +242,8 @@ fn every_pre_decoded_op_executes_as_its_class_handler_does() {
         set_up(&mut by_op, &mut bus_op, seed);
         let pc = by_class.pc;
         let want = by_class.exec_class(&mut bus_class, pc, class, word);
-        let got = by_op.exec_op(&mut bus_op, pc, op);
+        let mut raised = None;
+        let got = by_op.exec_op(&mut bus_op, pc, op, &mut raised).map_err(|fault| *fault);
         assert_eq!(got, want, "{word:#010x} ({name}) seed {seed:#x}: result");
         assert!(snapshot(&by_op) == snapshot(&by_class), "{word:#010x} ({name}) seed {seed:#x}: processor state");
         assert!(bus_op.ram == bus_class.ram, "{word:#010x} ({name}) seed {seed:#x}: memory");

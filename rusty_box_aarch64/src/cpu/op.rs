@@ -25,7 +25,7 @@
 //! register states for every one.
 
 use super::dp::{add_with_carry, datasize, decode_bit_masks, ones, ror, shift_reg};
-use super::exec::{bit, bits, sext, ExecResult, Flow};
+use super::exec::{bit, bits, keep_fault, sext, Fault, Flow, OpResult};
 use super::fp::{dp2_operation, dp3_form, scalar_type, FpBinary, FpDp3Regs, FpType};
 use super::isa::Class;
 use super::mmu::DataAccess;
@@ -570,12 +570,50 @@ const fn class_ends_trace(class: Class, word: u32) -> bool {
     }
 }
 
-impl Cpu {
-    /// Execute `op`, the instruction at `pc`.
+/// Where [`Cpu::exec_op`] reads the op it executes: an op of its own, or
+/// one that lies in the processor (a trace's, in the pool).
+pub(crate) trait OpSource {
+    /// The op, borrowed from `self` or from `cpu`.
+    fn op<'c>(&'c self, cpu: &'c Cpu) -> &'c Op;
+}
+
+impl OpSource for Op {
     #[inline(always)]
-    pub(crate) fn exec_op<B: PhysBus>(&mut self, bus: &mut B, pc: u64, op: Op) -> ExecResult {
-        match op {
-            Op::Class { class, word } => self.exec_class(bus, pc, class, word),
+    fn op<'c>(&'c self, _: &'c Cpu) -> &'c Op {
+        self
+    }
+}
+
+impl Cpu {
+    /// Execute the op `source` gives, the instruction at `pc`. A fault it
+    /// raises is kept in `raised`, which the result's `Err` refers to (see
+    /// [`OpResult`]).
+    ///
+    /// The match reads the op where it lies, not a copy: the dispatch loads
+    /// only the variant, and each arm loads its own fields as it binds them.
+    /// A copy of the op would be split into one register per field before
+    /// the dispatch, every field of every variant at once, and the trace
+    /// loop's register allocation would then depend on every arm's fields.
+    #[inline(always)]
+    pub(crate) fn exec_op<'f, B: PhysBus, S: OpSource>(
+        &mut self,
+        bus: &mut B,
+        pc: u64,
+        source: S,
+        raised: &'f mut Option<Fault>,
+    ) -> OpResult<'f> {
+        // The value of a step that completed; a fault ends the instruction,
+        // kept in `raised`.
+        macro_rules! completed {
+            ($step:expr) => {
+                match $step {
+                    Ok(value) => value,
+                    Err(fault) => return Err(keep_fault(raised, fault)),
+                }
+            };
+        }
+        match *source.op(self) {
+            Op::Class { class, word } => Ok(completed!(self.exec_class(bus, pc, class, word))),
             Op::AddImm { sf, rd, rn, imm } => {
                 let value = self.x_or_sp(u32::from(rn)).wrapping_add(imm);
                 self.set_x_or_sp_sized(u32::from(rd), value, sf);
@@ -733,9 +771,9 @@ impl Cpu {
             }
             Op::Nop => Ok(Flow::Next),
             Op::LoadImm { size, extend, index, rt, rn, imm } => {
-                let base = self.base_register(u32::from(rn))?;
+                let base = completed!(self.base_register(u32::from(rn)));
                 let (address, writeback) = indexed(base, imm, index);
-                let v = self.read_mem(bus, address, u32::from(size), DataAccess::NORMAL)?;
+                let v = completed!(self.read_mem(bus, address, u32::from(size), DataAccess::NORMAL));
                 self.set_x_or_zr(u32::from(rt), extended(v, size, extend));
                 if let Some(wb) = writeback {
                     self.set_x_or_sp(u32::from(rn), wb);
@@ -743,10 +781,10 @@ impl Cpu {
                 Ok(Flow::Next)
             }
             Op::StoreImm { size, index, rt, rn, imm } => {
-                let base = self.base_register(u32::from(rn))?;
+                let base = completed!(self.base_register(u32::from(rn)));
                 let (address, writeback) = indexed(base, imm, index);
                 let v = self.x_or_zr(u32::from(rt));
-                self.write_mem(bus, address, u32::from(size), v, DataAccess::NORMAL)?;
+                completed!(self.write_mem(bus, address, u32::from(size), v, DataAccess::NORMAL));
                 if let Some(wb) = writeback {
                     self.set_x_or_sp(u32::from(rn), wb);
                 }
@@ -754,24 +792,24 @@ impl Cpu {
             }
             Op::LoadReg { size, extend, option, shift, rt, rn, rm } => {
                 let offset = super::dp::extend_reg(self.x_or_zr(u32::from(rm)), u32::from(option), u32::from(shift), 64);
-                let address = self.base_register(u32::from(rn))?.wrapping_add(offset);
-                let v = self.read_mem(bus, address, u32::from(size), DataAccess::NORMAL)?;
+                let address = completed!(self.base_register(u32::from(rn))).wrapping_add(offset);
+                let v = completed!(self.read_mem(bus, address, u32::from(size), DataAccess::NORMAL));
                 self.set_x_or_zr(u32::from(rt), extended(v, size, extend));
                 Ok(Flow::Next)
             }
             Op::StoreReg { size, option, shift, rt, rn, rm } => {
                 let offset = super::dp::extend_reg(self.x_or_zr(u32::from(rm)), u32::from(option), u32::from(shift), 64);
-                let address = self.base_register(u32::from(rn))?.wrapping_add(offset);
+                let address = completed!(self.base_register(u32::from(rn))).wrapping_add(offset);
                 let v = self.x_or_zr(u32::from(rt));
-                self.write_mem(bus, address, u32::from(size), v, DataAccess::NORMAL)?;
+                completed!(self.write_mem(bus, address, u32::from(size), v, DataAccess::NORMAL));
                 Ok(Flow::Next)
             }
             Op::LoadPair { size, index, rt, rt2, rn, imm } => {
-                let base = self.base_register(u32::from(rn))?;
+                let base = completed!(self.base_register(u32::from(rn)));
                 let (address, writeback) = indexed(base, imm, index);
                 let scale = u32::from(size);
-                let a = self.read_mem(bus, address, scale, DataAccess::NORMAL)?;
-                let b = self.read_mem(bus, address.wrapping_add(1 << scale), scale, DataAccess::NORMAL)?;
+                let a = completed!(self.read_mem(bus, address, scale, DataAccess::NORMAL));
+                let b = completed!(self.read_mem(bus, address.wrapping_add(1 << scale), scale, DataAccess::NORMAL));
                 // The order `exec_ldst_pair` writes them in, which decides
                 // the CONSTRAINED UNPREDICTABLE Rt == Rt2 case.
                 if scale == 2 {
@@ -787,18 +825,20 @@ impl Cpu {
                 Ok(Flow::Next)
             }
             Op::StorePair { size, index, rt, rt2, rn, imm } => {
-                let base = self.base_register(u32::from(rn))?;
+                let base = completed!(self.base_register(u32::from(rn)));
                 let (address, writeback) = indexed(base, imm, index);
                 let scale = u32::from(size);
                 let (a, b) = (self.x_or_zr(u32::from(rt)), self.x_or_zr(u32::from(rt2)));
-                self.write_mem(bus, address, scale, a, DataAccess::NORMAL)?;
-                self.write_mem(bus, address.wrapping_add(1 << scale), scale, b, DataAccess::NORMAL)?;
+                completed!(self.write_mem(bus, address, scale, a, DataAccess::NORMAL));
+                completed!(self.write_mem(bus, address.wrapping_add(1 << scale), scale, b, DataAccess::NORMAL));
                 if let Some(wb) = writeback {
                     self.set_x_or_sp(u32::from(rn), wb);
                 }
                 Ok(Flow::Next)
             }
-            Op::FpDp2 { op, ty, rd, rn, rm } => self.fp_dp2(op, ty, u32::from(rd), u32::from(rn), u32::from(rm)),
+            Op::FpDp2 { op, ty, rd, rn, rm } => {
+                Ok(completed!(self.fp_dp2(op, ty, u32::from(rd), u32::from(rn), u32::from(rm))))
+            }
             Op::FpDp3 { form, ty, rd, rn, rm, ra } => {
                 let regs = FpDp3Regs {
                     d: u32::from(rd),
@@ -806,7 +846,7 @@ impl Cpu {
                     m: u32::from(rm),
                     a: u32::from(ra),
                 };
-                self.fp_dp3(form, ty, regs)
+                Ok(completed!(self.fp_dp3(form, ty, regs)))
             }
         }
     }

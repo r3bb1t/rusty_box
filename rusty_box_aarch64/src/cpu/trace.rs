@@ -45,8 +45,8 @@
 //! results either way.
 
 use super::decode::classify;
-use super::exec::{Done, Observed, Step};
-use super::op::{predecode, Op};
+use super::exec::{Done, Fault, Observed, Step};
+use super::op::{predecode, Op, OpSource};
 use super::Cpu;
 use crate::bus::{CodeEpoch, FetchSource, PhysAddr, PhysBus, PhysSpan};
 use crate::instrumentation::Instrumentation;
@@ -215,9 +215,16 @@ impl Pool {
         self.slots.clear();
     }
 
+    /// The op in slot `index`, where it lies.
     #[inline(always)]
-    fn get(&self, index: usize) -> Slot {
-        self.slots[index]
+    fn op(&self, index: usize) -> &Op {
+        &self.slots[index].op
+    }
+
+    /// The word the op in slot `index` was decoded from.
+    #[inline(always)]
+    fn word(&self, index: usize) -> u32 {
+        self.slots[index].word
     }
 }
 
@@ -247,9 +254,26 @@ impl Pool {
         self.len = 0;
     }
 
+    /// The op in slot `index`, where it lies.
     #[inline(always)]
-    fn get(&self, index: usize) -> Slot {
-        self.slots[index]
+    fn op(&self, index: usize) -> &Op {
+        &self.slots[index].op
+    }
+
+    /// The word the op in slot `index` was decoded from.
+    #[inline(always)]
+    fn word(&self, index: usize) -> u32 {
+        self.slots[index].word
+    }
+}
+
+/// The op in slot `.0` of the pool, which [`Cpu::exec_op`] reads in place.
+struct PoolSlot(usize);
+
+impl OpSource for PoolSlot {
+    #[inline(always)]
+    fn op<'c>(&'c self, cpu: &'c Cpu) -> &'c Op {
+        cpu.traces.pool.op(self.0)
     }
 }
 
@@ -406,7 +430,7 @@ impl Cpu {
         let mut observed = Observed { bus, observer };
         let pa = match self.fetch_address(&mut observed, pc) {
             Ok(pa) => pa,
-            Err(fault) => return self.finish(pc, None, Err(fault), observed.observer).step(),
+            Err(fault) => return self.take_fault(pc, fault, observed.observer),
         };
         let trace = match observed.fetch_source(PhysAddr::new(pa)) {
             FetchSource::Stable(epoch) => match self.traces.lookup(pa, epoch) {
@@ -416,18 +440,20 @@ impl Cpu {
             FetchSource::Volatile => None,
         };
         let Some(trace) = trace else {
-            let mut fetched = None;
-            let result = self.execute_at(&mut observed, pc, pa, &mut fetched);
-            return self.finish(pc, fetched, result, observed.observer).step();
+            return self.step_uncached(&mut observed, pc, pa);
         };
         self.trace_break = false;
         let count = (trace.len as u64).min(limit) as usize;
         let mut pc = pc;
+        let mut raised = None;
         for i in trace.start..trace.start + count {
-            let Slot { op, word } = self.traces.pool.get(i);
+            let word = self.traces.pool.word(i);
             observed.observer.before_execution(pc, word);
-            let result = self.exec_op(&mut observed, pc, op);
-            match self.finish(pc, Some(word), result, observed.observer) {
+            let flow = match self.exec_op(&mut observed, pc, PoolSlot(i), &mut raised) {
+                Ok(flow) => flow,
+                Err(fault) => return self.take_fault(pc, *fault, observed.observer),
+            };
+            match self.retire(pc, Some(word), flow, observed.observer) {
                 Done::Next => {}
                 done => return done.step(),
             }
@@ -437,6 +463,29 @@ impl Cpu {
             pc = pc.wrapping_add(4);
         }
         Step::Retired
+    }
+
+    /// Account for the instruction at `pc` having raised `fault`, in its
+    /// fetch or in its execution, as [`Cpu::finish`] does. Out of line, and
+    /// cold, so that the trace loop's register allocation does not depend
+    /// on it.
+    #[cold]
+    #[inline(never)]
+    fn take_fault<I: Instrumentation>(&mut self, pc: u64, fault: Fault, observer: &mut I) -> Step {
+        self.finish(pc, None, Err(fault), observer).step()
+    }
+
+    /// Run the instruction at `pc`, at physical address `pa`, by the
+    /// per-instruction path: its memory is not cached, or its first word
+    /// could not be read into a trace. Out of line, and cold, so that the
+    /// trace loop's register allocation does not depend on this second copy
+    /// of the decoder and of `exec_op`.
+    #[cold]
+    #[inline(never)]
+    fn step_uncached<B: PhysBus, I: Instrumentation>(&mut self, observed: &mut Observed<'_, B, I>, pc: u64, pa: u64) -> Step {
+        let mut fetched = None;
+        let result = self.execute_at(observed, pc, pa, &mut fetched);
+        self.finish(pc, fetched, result, observed.observer).step()
     }
 
     /// Decode the trace starting at `pa`, of `epoch`, into the cache.

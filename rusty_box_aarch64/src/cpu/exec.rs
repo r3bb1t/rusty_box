@@ -174,6 +174,22 @@ impl From<Exception> for Fault {
 
 pub(crate) type ExecResult = Result<Flow, Fault>;
 
+/// What [`Cpu::exec_op`](super::Cpu::exec_op) returns: an [`ExecResult`]
+/// whose fault is kept in a slot its caller provides. A `Fault` is larger
+/// than two registers, so a result that holds one is returned, and merged
+/// from every arm, through memory; this one fits in two, so the trace loop
+/// carries each instruction's result in registers.
+pub(crate) type OpResult<'f> = Result<Flow, &'f Fault>;
+
+/// Keep `fault` in `slot`, for an [`OpResult`] to refer to. Out of line,
+/// and cold, so that the trace loop's register allocation does not depend
+/// on it.
+#[cold]
+#[inline(never)]
+pub(crate) fn keep_fault(slot: &mut Option<Fault>, fault: Fault) -> &Fault {
+    slot.insert(fault)
+}
+
 /// Which faults stop the machine instead of being delivered to the guest.
 /// Both default to delivering, which is what hardware does; stopping is a
 /// bring-up aid.
@@ -256,7 +272,9 @@ impl Cpu {
         let insn = self.fetch_word(bus, pc, pa)?;
         *fetched_word = Some(insn);
         bus.observer.before_execution(pc, insn);
-        self.exec_op(bus, pc, predecode(classify(insn), insn))
+        let mut raised = None;
+        self.exec_op(bus, pc, predecode(classify(insn), insn), &mut raised)
+            .map_err(|fault| *fault)
     }
 
     /// Account for the instruction at `pc`, whose word `fetched` is (`None`
@@ -265,34 +283,7 @@ impl Cpu {
     #[inline(always)]
     pub(crate) fn finish<I: Instrumentation>(&mut self, pc: u64, fetched: Option<u32>, result: ExecResult, observer: &mut I) -> Done {
         match result {
-            Ok(flow) => {
-                self.icount += 1;
-                self.retired += 1;
-                if let Some(insn) = fetched {
-                    observer.after_execution(pc, insn);
-                }
-                match flow {
-                    Flow::Next => {
-                        self.pc = pc.wrapping_add(4);
-                        Done::Next
-                    }
-                    Flow::Jump(target) => {
-                        // Every branch, ERET included, writes the PC through
-                        // `AArch64.BranchAddr` (Arm ARM `BranchTo`).
-                        let target = self.branch_addr(target);
-                        self.pc = target;
-                        self.history.jump(target, self.retired);
-                        observer.branch(pc, target);
-                        Done::Elsewhere
-                    }
-                    Flow::Wait => {
-                        self.pc = pc.wrapping_add(4);
-                        self.activity = Activity::WaitingForInterrupt;
-                        observer.wait_for_interrupt(pc);
-                        Done::Waiting
-                    }
-                }
-            }
+            Ok(flow) => self.retire(pc, fetched, flow, observer),
             Err(Fault::Exception(e)) => {
                 self.icount += 1;
                 self.retired += 1;
@@ -301,6 +292,37 @@ impl Cpu {
                 Done::Elsewhere
             }
             Err(Fault::Stop(cause)) => Done::Stop(cause),
+        }
+    }
+
+    /// [`Cpu::finish`] for an instruction that completed, leaving by `flow`.
+    #[inline(always)]
+    pub(crate) fn retire<I: Instrumentation>(&mut self, pc: u64, fetched: Option<u32>, flow: Flow, observer: &mut I) -> Done {
+        self.icount += 1;
+        self.retired += 1;
+        if let Some(insn) = fetched {
+            observer.after_execution(pc, insn);
+        }
+        match flow {
+            Flow::Next => {
+                self.pc = pc.wrapping_add(4);
+                Done::Next
+            }
+            Flow::Jump(target) => {
+                // Every branch, ERET included, writes the PC through
+                // `AArch64.BranchAddr` (Arm ARM `BranchTo`).
+                let target = self.branch_addr(target);
+                self.pc = target;
+                self.history.jump(target, self.retired);
+                observer.branch(pc, target);
+                Done::Elsewhere
+            }
+            Flow::Wait => {
+                self.pc = pc.wrapping_add(4);
+                self.activity = Activity::WaitingForInterrupt;
+                observer.wait_for_interrupt(pc);
+                Done::Waiting
+            }
         }
     }
 
