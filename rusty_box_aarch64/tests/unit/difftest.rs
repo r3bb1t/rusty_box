@@ -364,7 +364,9 @@ fn add_and_sub_immediate_with_shift_1x_are_undefined() {
 /// A processor at EL1 with SIMD&FP enabled that steps one word at a time,
 /// each from the same reset state. The state comes back from a snapshot
 /// before every word, which costs far less than building a processor (its
-/// trace cache alone is 448 KiB), and drops the traces, which a test bus's
+/// trace cache alone is about half a megabyte without `alloc`, and with it
+/// 1.5 MiB of entries are filled),
+/// and drops the traces, which a test bus's
 /// fetches never fill.
 struct Stepper {
     cpu: Cpu,

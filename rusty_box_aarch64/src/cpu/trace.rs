@@ -50,20 +50,37 @@ use crate::instrumentation::Instrumentation;
 /// The longest trace, in instructions (Bochs `BX_MAX_TRACE_LENGTH`).
 pub(crate) const MAX_TRACE: usize = 32;
 
-/// The cache's sizes. With `alloc` its tables are on the heap; without,
-/// they are inline in the processor, which a machine holds and is moved by
-/// value, and a quarter of the size. Alpine's kernel and user space run
-/// about 94,000 distinct instructions in a boot, more than the pool holds,
-/// so a boot empties it now and then; twice these sizes measured no faster
-/// (EDK2 0.98×, Alpine 1.05×, within this host's noise). Either way the
-/// cache changes nothing but speed.
+/// The cache's sizes. Either way the cache changes nothing but speed.
+///
+/// With `alloc` the tables are on the heap. The pool and the entries are
+/// sized as rusty_box's x86 interpreter sizes its own
+/// (`rusty_box/src/cpu/icache.rs`): Bochs's pool (icache.h
+/// `BxTraceCacheMemPool`) and 64 Ki entries. A Linux boot runs about
+/// 94,000 distinct instructions, and traces that start mid-run hold some of
+/// them twice. A pool a ninth of this size, with a quarter of the entries,
+/// empties 202 times in an Alpine boot and builds 5.4 times the traces
+/// (1,177,959 against 217,178), 2.9% more host instructions for the whole
+/// boot: A64's fixed-length words make a build cheap, about 2,100 host
+/// instructions, where x86's decode is not. The pool is only reserved until
+/// it is used (see [`Pool`]), so its 13.5 MiB cost a machine nothing it
+/// does not run.
+///
+/// The page write stamps cover 256 MiB of pages, not Bochs's 4 GiB
+/// (`bxPageWriteStampTable`): the stamps are read at random and must exist
+/// zeroed from the start, and 4 MiB of them made every machine's build cost
+/// six times as much in a test that builds thousands. They measured no
+/// faster for a boot in the board's default 256 MiB of RAM (Alpine 0.96×).
+/// Above that, pages share stamps, which only ever forgets more.
+///
+/// Without `alloc` the tables are inline in the processor, which a machine
+/// holds and moves by value, and much smaller.
 #[cfg(feature = "alloc")]
 mod size {
     /// Trace entries: a power of two, so that the entries of one page are
     /// one contiguous window of 1,024.
-    pub(super) const ENTRIES: usize = 16384;
-    /// Ops in the pool.
-    pub(super) const POOL: usize = 65536;
+    pub(super) const ENTRIES: usize = 65536;
+    /// Ops in the pool (Bochs icache.h `BxTraceCacheMemPool`).
+    pub(super) const POOL: usize = 576 * 1024;
     /// Page write stamps: a power of two, one per page of 256 MiB.
     pub(super) const STAMPS: usize = 65536;
 }
@@ -133,14 +150,97 @@ struct Trace {
     len: usize,
 }
 
+/// One instruction of a trace: its op, and the word it was decoded from,
+/// for the observer.
+#[derive(Debug, Clone, Copy)]
+struct Slot {
+    op: Op,
+    word: u32,
+}
+
+/// The ops of every trace, filled from the front and emptied whole
+/// (Bochs icache.h `bxICache_c::mpool`, `alloc_trace`), never past
+/// [`POOL`]. With `alloc` it is a vector reserved to [`POOL`] up front and
+/// grown into, so that a processor touches only the pool it uses: building
+/// one costs nothing for the pool, as a test that builds thousands of
+/// machines needs. Without, it is inline (R0's representation alias, as
+/// [`Table`] is).
+#[cfg(feature = "alloc")]
+struct Pool {
+    slots: alloc::vec::Vec<Slot>,
+}
+#[cfg(not(feature = "alloc"))]
+struct Pool {
+    slots: [Slot; POOL],
+    len: usize,
+}
+
+#[cfg(feature = "alloc")]
+impl Pool {
+    fn new() -> Self {
+        Self {
+            slots: alloc::vec::Vec::with_capacity(POOL),
+        }
+    }
+
+    /// The first free slot.
+    #[inline(always)]
+    fn len(&self) -> usize {
+        self.slots.len()
+    }
+
+    /// Add `slot` at [`Self::len`]; the caller has made room.
+    #[inline]
+    fn push(&mut self, slot: Slot) {
+        self.slots.push(slot);
+    }
+
+    fn clear(&mut self) {
+        self.slots.clear();
+    }
+
+    #[inline(always)]
+    fn get(&self, index: usize) -> Slot {
+        self.slots[index]
+    }
+}
+
+#[cfg(not(feature = "alloc"))]
+impl Pool {
+    const fn new() -> Self {
+        Self {
+            slots: [Slot { op: Op::Nop, word: 0 }; POOL],
+            len: 0,
+        }
+    }
+
+    /// The first free slot.
+    #[inline(always)]
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Add `slot` at [`Self::len`]; the caller has made room.
+    #[inline]
+    fn push(&mut self, slot: Slot) {
+        self.slots[self.len] = slot;
+        self.len += 1;
+    }
+
+    fn clear(&mut self) {
+        self.len = 0;
+    }
+
+    #[inline(always)]
+    fn get(&self, index: usize) -> Slot {
+        self.slots[index]
+    }
+}
+
 /// The traces a processor has built.
 pub(crate) struct TraceCache {
     entries: Table<Entry, ENTRIES>,
-    ops: Table<Op, POOL>,
-    /// The word each op was decoded from, for the observer.
-    words: Table<u32, POOL>,
-    /// The first free op in the pool.
-    next: usize,
+    pool: Pool,
     generation: u32,
     /// Bochs `pageWriteStampTable::fineGranularityMapping`: per page (by
     /// [`stamp_index`]), a bit per 128-byte line holding a cached
@@ -189,9 +289,7 @@ impl TraceCache {
     pub(crate) fn new() -> Self {
         Self {
             entries: table::<_, ENTRIES>(EMPTY),
-            ops: table::<_, POOL>(Op::Nop),
-            words: table::<_, POOL>(0),
-            next: 0,
+            pool: Pool::new(),
             generation: 0,
             stamps: table::<_, STAMPS>(0),
         }
@@ -208,7 +306,7 @@ impl TraceCache {
     /// Forget every trace (Bochs `flushTraceCacheEntries`). The stamps stay:
     /// a stamp with no trace behind it costs a write one look.
     pub(crate) fn flush(&mut self) {
-        self.next = 0;
+        self.pool.clear();
         if self.generation == u32::MAX {
             self.entries.fill(EMPTY);
             self.generation = 0;
@@ -280,7 +378,7 @@ impl Cpu {
         let count = (trace.len as u64).min(limit) as usize;
         let mut pc = pc;
         for i in trace.start..trace.start + count {
-            let (op, word) = (self.traces.ops[i], self.traces.words[i]);
+            let Slot { op, word } = self.traces.pool.get(i);
             observed.observer.before_execution(pc, word);
             let result = self.exec_op(&mut observed, pc, op);
             match self.finish(pc, Some(word), result, observed.observer) {
@@ -302,10 +400,10 @@ impl Cpu {
     #[cold]
     #[inline(never)]
     fn build_trace<B: PhysBus, I: Instrumentation>(&mut self, bus: &mut Observed<'_, B, I>, pa: u64, epoch: CodeEpoch) -> Option<Trace> {
-        if self.traces.next + MAX_TRACE > POOL {
+        if self.traces.pool.len() + MAX_TRACE > POOL {
             self.traces.flush();
         }
-        let start = self.traces.next;
+        let start = self.traces.pool.len();
         let room = ((0x1000 - (pa & 0xFFF)) / 4) as usize;
         let clock = self.clock();
         let mut len = 0;
@@ -315,8 +413,7 @@ impl Cpu {
                 break;
             };
             let op = predecode(classify(word), word);
-            self.traces.ops[start + len] = op;
-            self.traces.words[start + len] = word;
+            self.traces.pool.push(Slot { op, word });
             len += 1;
             if op.ends_trace() {
                 break;
@@ -333,7 +430,6 @@ impl Cpu {
         };
         self.traces.entries[slot(pa)] = entry;
         self.traces.stamps[stamp_index(pa)] |= entry.lines();
-        self.traces.next += len;
         Some(Trace { start, len })
     }
 
