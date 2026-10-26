@@ -1,18 +1,21 @@
-//! Differential check against Unicorn (QEMU's TCG): replays
-//! `tests/vectors/unicorn.txt`, produced by `tests/vectors/gen_unicorn.py`.
+//! Differential check against QEMU's TCG: replays `tests/vectors/unicorn.txt`,
+//! produced by `tests/vectors/gen_unicorn.py` with Unicorn, on the
+//! Cortex-A57, and `tests/vectors/qemu_max.txt`, the encodings of later
+//! features, produced by `tests/vectors/gen_qemu.py` with QEMU's user-mode
+//! `max` processor, on a processor with every feature this core
+//! implements. The two files share one format and one initial state.
 //!
 //! Each vector is an instruction word and a seed. The seed rebuilds the exact
-//! initial state the generator gave Unicorn (registers, flags, vector
-//! registers, a 64 KiB data region); the vector lists what Unicorn changed.
-//! The property asserted is the guest-visible one (R9): after one step, PC,
-//! NZCV, FPSR, every general and vector register, SP and every data byte
-//! equal Unicorn's.
+//! initial state the generator gave the reference (registers, flags, vector
+//! registers, a 64 KiB data region); the vector lists what the reference
+//! changed. The property asserted is the guest-visible one (R9): after one
+//! step, PC, NZCV, FPSR, every general and vector register, SP and every
+//! data byte equal the reference's.
 //!
-//! Unicorn's CPU model has more features than this core, so a word it
-//! executed may be UNDEFINED here. Such a vector is skipped only for a
-//! reason [`expected_undefined`] names; any other UNDEFINED word, and any
-//! step that stops the machine, fails the test. Failure messages show
-//! disarm64's disassembly of the word.
+//! A word the reference executed may be UNDEFINED here. Such a vector is
+//! skipped only for the reason [`should_be_field_set`] names; any other
+//! UNDEFINED word, and any step that stops the machine, fails the test.
+//! Failure messages show disarm64's disassembly of the word.
 //!
 //! A second check here, `against_disarm64`, steps the words the decoder
 //! hands to a handler but binutils' opcode table allocates to nothing this
@@ -25,11 +28,13 @@ use std::vec::Vec;
 
 use rusty_box_core::{ClockHz, VmClock};
 
+use super::features::Implementation;
 use super::{Cpu, CpuConfig, Step};
 use crate::bus::{AccessWidth, BusFault, PhysAddr, PhysBus};
 use crate::instrumentation::NoInstrumentation;
 
 const VECTORS: &str = include_str!("../vectors/unicorn.txt");
+const MAX_VECTORS: &str = include_str!("../vectors/qemu_max.txt");
 
 const CODE: u64 = 0x10000;
 const DATA: u64 = 0x10_0000;
@@ -690,11 +695,22 @@ fn should_be_field_set(insn: u32) -> bool {
 
 #[test]
 fn every_unicorn_vector_matches_after_one_step() {
+    replay(VECTORS, Implementation::CORTEX_A57);
+}
+
+#[test]
+fn every_qemu_max_vector_matches_after_one_step_with_every_feature() {
+    replay(MAX_VECTORS, Implementation::EVERY_FEATURE);
+}
+
+/// Step each vector of `vectors` once on a processor implementing `imp`,
+/// and fail unless every one ends in the state the reference left.
+fn replay(vectors: &str, imp: Implementation) {
     let ips = ClockHz::new(1_000_000).unwrap_or(ClockHz::BOCHS_DEFAULT);
     let mut tallies: BTreeMap<String, Tally> = BTreeMap::new();
     let mut failures: Vec<String> = Vec::new();
 
-    for line in VECTORS.lines().filter(|l| !l.is_empty()) {
+    for line in vectors.lines().filter(|l| !l.is_empty()) {
         let f: Vec<&str> = line.split(' ').collect();
         let (name, kind) = (f[0], f[1]);
         let insn = u32::from_str_radix(f[2], 16).unwrap_or(0);
@@ -712,11 +728,14 @@ fn every_unicorn_vector_matches_after_one_step() {
         let tally = tallies.entry(String::from(name)).or_default();
 
         let st = initial_state(seed, kind, insn);
-        let mut cpu = Cpu::new(CpuConfig {
-            ips,
-            counter_hz: ips,
-            reset_pc: CODE,
-        });
+        let mut cpu = Cpu::implementing(
+            CpuConfig {
+                ips,
+                counter_hz: ips,
+                reset_pc: CODE,
+            },
+            imp,
+        );
         cpu.x = st.x;
         cpu.sp_el1 = st.sp;
         cpu.pstate.set_nzcv(st.nzcv);
@@ -744,7 +763,7 @@ fn every_unicorn_vector_matches_after_one_step() {
                 tally.skipped += 1;
             } else {
                 tally.mismatched += 1;
-                failures.push(format!("{name} {insn:08x} `{}`: UNDEFINED here, executed by Unicorn", disassemble(insn)));
+                failures.push(format!("{name} {insn:08x} `{}`: UNDEFINED here, executed by the reference", disassemble(insn)));
             }
             continue;
         }
@@ -815,5 +834,5 @@ fn every_unicorn_vector_matches_after_one_step() {
     for f in failures.iter().take(60) {
         std::eprintln!("MISMATCH {f}");
     }
-    assert!(failures.is_empty(), "{} vectors disagree with Unicorn", failures.len());
+    assert!(failures.is_empty(), "{} vectors disagree with the reference", failures.len());
 }

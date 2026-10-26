@@ -35,6 +35,9 @@
 //!   and nothing where Arm allocates it to none, or to an encoding of a
 //!   feature still being built that the decoder does not name yet; with
 //!   the one departure [`DEPARTURES`] lists.
+//! - [`every_implementation_has_what_its_features_imply`]: each feature
+//!   set a processor implements holds what Arm's `Features.json` makes its
+//!   features imply, among the features the decoder knows.
 
 use std::boxed::Box;
 use std::collections::{BTreeMap, BTreeSet};
@@ -1322,4 +1325,66 @@ fn the_decoder_allocates_as_arm_does_on_every_word() {
         started.elapsed().as_secs_f64()
     );
     assert_eq!(total, 0, "{:#?}", first.into_inner().unwrap_or_default());
+}
+
+// ----- the feature sets -----
+
+/// Every constraint `FEAT_A ==> FEAT_B` of Arm's `Features.json` whose two
+/// features are both a [`Feature`], with the release it was read from.
+fn feature_implications() -> (String, Vec<(Feature, Feature)>) {
+    let dir = std::env::var_os(SPEC_DIR_VAR)
+        .unwrap_or_else(|| panic!("set {SPEC_DIR_VAR} to the unpacked AARCHMRS directory (holding Features.json)"));
+    let path = PathBuf::from(dir).join("Features.json");
+    let text = std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let root: Value = serde_json::from_slice(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let release = root.pointer("/_meta/version/ref").and_then(Value::as_str).unwrap_or("?").to_string();
+    let named = |side: Option<&Value>| {
+        let side = side?;
+        if side.get("_type").and_then(Value::as_str) != Some("AST.Identifier") {
+            return None;
+        }
+        let name = side.get("value").and_then(Value::as_str)?;
+        Feature::ALL.into_iter().find(|f| f.arm_name() == Some(name))
+    };
+    let parameter_constraints = root
+        .get("parameters")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|p| p.get("constraints").and_then(Value::as_array))
+        .flatten();
+    let global_constraints = root.get("constraints").and_then(Value::as_array).into_iter().flatten();
+    let mut implications = Vec::new();
+    for c in parameter_constraints.chain(global_constraints) {
+        let is_implication = c.get("_type").and_then(Value::as_str) == Some("AST.BinaryOp")
+            && c.get("op").and_then(Value::as_str) == Some("==>");
+        if !is_implication {
+            continue;
+        }
+        if let (Some(a), Some(b)) = (named(c.get("left")), named(c.get("right"))) {
+            if !implications.contains(&(a, b)) {
+                implications.push((a, b));
+            }
+        }
+    }
+    (release, implications)
+}
+
+/// Each processor this crate builds, and the test-only one with every
+/// feature, implements what Arm's feature model makes each of its features
+/// imply, among the features the decoder knows: a set Arm does not permit
+/// would advertise an ID register field no processor reports.
+#[test]
+#[cfg_attr(not(aarchmrs), ignore = "reads Arm's AARCHMRS from the directory RUSTY_BOX_AARCHMRS names")]
+fn every_implementation_has_what_its_features_imply() {
+    use crate::cpu::features::Implementation;
+
+    let (release, implications) = feature_implications();
+    std::eprintln!("AARCHMRS {release}: {} implications between known features", implications.len());
+    assert!(implications.contains(&(Feature::Lrcpc2, Feature::Lrcpc)), "{implications:?}");
+    for imp in [Implementation::CORTEX_A57, Implementation::EVERY_FEATURE] {
+        for &(a, b) in &implications {
+            assert!(!imp.has(a) || imp.has(b), "{imp:?} has {a:?}, which implies {b:?}");
+        }
+    }
 }

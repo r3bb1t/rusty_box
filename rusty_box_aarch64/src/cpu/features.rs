@@ -43,6 +43,16 @@ pub(crate) enum Feature {
     /// FEAT_SME: Streaming SVE mode, the ZA array and the instructions that
     /// use them.
     Sme,
+    /// FEAT_LSE: the atomic memory operations, SWP, CAS and CASP.
+    Lse,
+    /// FEAT_LSE2: unaligned exclusive and atomic accesses within a 16-byte
+    /// granule, and `SCTLR_EL1.nAA` for the ordered ones. No encoding of its
+    /// own.
+    Lse2,
+    /// FEAT_LRCPC: LDAPR, LDAPRB, LDAPRH.
+    Lrcpc,
+    /// FEAT_LRCPC2: LDAPUR*, STLUR*.
+    Lrcpc2,
 }
 
 /// What the conformance tests read of a feature: `tests/unit/spec.rs`
@@ -50,7 +60,7 @@ pub(crate) enum Feature {
 #[cfg(test)]
 impl Feature {
     /// Every feature, in declaration order.
-    pub(crate) const ALL: [Feature; 8] = [
+    pub(crate) const ALL: [Feature; 12] = [
         Feature::Base,
         Feature::Fp,
         Feature::AdvSimd,
@@ -59,6 +69,10 @@ impl Feature {
         Feature::Sha256,
         Feature::Crc32,
         Feature::Sme,
+        Feature::Lse,
+        Feature::Lse2,
+        Feature::Lrcpc,
+        Feature::Lrcpc2,
     ];
 
     /// The name Arm's data gives the feature, `None` for the base set.
@@ -72,7 +86,17 @@ impl Feature {
             Self::Sha256 => Some("FEAT_SHA256"),
             Self::Crc32 => Some("FEAT_CRC32"),
             Self::Sme => Some("FEAT_SME"),
+            Self::Lse => Some("FEAT_LSE"),
+            Self::Lse2 => Some("FEAT_LSE2"),
+            Self::Lrcpc => Some("FEAT_LRCPC"),
+            Self::Lrcpc2 => Some("FEAT_LRCPC2"),
         }
+    }
+
+    /// Whether the feature has encodings of its own; one that has none
+    /// changes how other instructions behave.
+    pub(crate) const fn encodes(self) -> bool {
+        !matches!(self, Self::Lse2)
     }
 
     /// Whether the decoder names every encoding of the feature: a feature
@@ -116,12 +140,6 @@ impl Features {
             i += 1;
         }
         Self(bits)
-    }
-
-    /// The same set with `feature` added.
-    #[cfg(test)]
-    pub(crate) const fn with(self, feature: Feature) -> Self {
-        Self(self.0 | feature.bit())
     }
 
     #[inline(always)]
@@ -204,17 +222,17 @@ impl Implementation {
     }
 }
 
-/// What the SME tests run on while no processor model implements FEAT_SME.
+/// What the tests of a feature run on while no processor model implements
+/// it.
 #[cfg(test)]
 impl Implementation {
-    /// The Cortex-A57 shape with FEAT_SME and Streaming SVE vectors of up
-    /// to 512 bits. It is no processor Arm permits: `Features.json` has
-    /// FEAT_SME imply Armv9.2 and FEAT_FP16, FEAT_BF16, FEAT_FCMA and
-    /// FEAT_FHM, none of which it has. It exercises SME's own rules, which
-    /// read none of those; a processor model that implements FEAT_SME
-    /// implements them too.
-    pub(crate) const A57_WITH_SME: Self = Self {
-        features: Features::CORTEX_A57.with(Feature::Sme),
+    /// Every feature, with Streaming SVE vectors of up to 512 bits. It is
+    /// no processor Arm permits while the Armv9.2 features FEAT_SME
+    /// requires are still being added (`Features.json`: FEAT_SME implies
+    /// Armv9.2, FEAT_FP16, FEAT_BF16, FEAT_FCMA and FEAT_FHM); each
+    /// feature's tests exercise that feature's own rules.
+    pub(crate) const EVERY_FEATURE: Self = Self {
+        features: Features::of(&Feature::ALL),
         max_svl: VecLen(512),
     };
 }
@@ -234,7 +252,7 @@ mod tests {
                 "{feature:?} is incomplete"
             );
             if Implementation::CORTEX_A57.has(feature) {
-                assert!(Implementation::A57_WITH_SME.has(feature), "{feature:?}");
+                assert!(Implementation::EVERY_FEATURE.has(feature), "{feature:?}");
             }
         }
     }

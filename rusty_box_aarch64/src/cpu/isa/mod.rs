@@ -49,6 +49,7 @@
 
 mod asimd;
 mod asisd;
+mod atomic;
 mod control;
 mod crypto;
 mod dpimm;
@@ -67,6 +68,7 @@ pub(crate) use crate::cpu::features::Feature;
 
 use asimd::{Asimdall, Asimddiff, Asimdelem, Asimdext, Asimdimm, Asimdins, Asimdmisc, Asimdperm, Asimdsame, Asimdshf, Asimdtbl};
 use asisd::{Asisddiff, Asisdelem, Asisdmisc, Asisdone, Asisdpair, Asisdsame, Asisdshf};
+use atomic::{Comswap, Comswappr, LdapstlUnscaled, Memop};
 use control::{Barriers, BranchImm, BranchReg, Compbranch, Condbranch, Exception, Hints, Pstate, Systeminstrs, Systemmove, Testbranch};
 use crypto::{Cryptoaes, Cryptosha2, Cryptosha3};
 use dpimm::{AddsubImm, Bitfield, Extract, LogImm, Movewide, Pcreladdr};
@@ -125,6 +127,10 @@ pub(crate) enum Encoding {
     LdstImmpre(LdstImmpre),
     LdstRegoff(LdstRegoff),
     LdstPos(LdstPos),
+    Memop(Memop),
+    Comswap(Comswap),
+    Comswappr(Comswappr),
+    LdapstlUnscaled(LdapstlUnscaled),
     // dpreg
     Dp2src(Dp2src),
     Dp1src(Dp1src),
@@ -225,6 +231,10 @@ impl Encoding {
             Self::LdstUnpriv(_) => Class::LoadStoreUnprivileged,
             Self::LdstRegoff(_) => Class::LoadStoreRegisterOffset,
             Self::LdstPos(_) => Class::LoadStoreUnsignedImmediate,
+            Self::Memop(_) => Class::AtomicMemoryOperation,
+            Self::Comswap(_) => Class::CompareAndSwap,
+            Self::Comswappr(_) => Class::CompareAndSwapPair,
+            Self::LdapstlUnscaled(_) => Class::LoadStoreOrderedUnscaled,
             Self::Dp2src(e) => e.class(),
             Self::Dp1src(_) => Class::DataProcessing1Source,
             Self::LogShift(_) => Class::LogicalShiftedRegister,
@@ -361,6 +371,18 @@ pub(crate) enum Class {
     /// CRC32B/H/W/X and CRC32CB/CH/CW/CX: the handler reads the size and
     /// the polynomial from `sz` and `C`.
     Crc32,
+    /// LDADD, LDCLR, LDEOR, LDSET, LD{S,U}{MAX,MIN} and SWP, every size
+    /// and ordering, and LDAPR: the handler reads which from `o3` and
+    /// `opc`, which tell them apart once the decoder has fixed LDAPR's `A`,
+    /// `R` and `Rs`. With one processor executing one instruction at a
+    /// time, `A` and `R` order nothing.
+    AtomicMemoryOperation,
+    /// CAS of every size and ordering.
+    CompareAndSwap,
+    /// CASP, 32- and 64-bit pairs.
+    CompareAndSwapPair,
+    /// LDAPUR*, STLUR*: the handler reads which from `size` and `opc`.
+    LoadStoreOrderedUnscaled,
     /// ADDSVL, ADDSPL: the handler reads which from `op`.
     AddStreamingVectorLength,
     /// RDSVL.
@@ -416,6 +438,10 @@ impl Encoding {
             Self::LdstImmpre(e) => e.feature(),
             Self::LdstRegoff(e) => e.feature(),
             Self::LdstPos(e) => e.feature(),
+            Self::Memop(e) => e.feature(),
+            Self::Comswap(e) => e.feature(),
+            Self::Comswappr(e) => e.feature(),
+            Self::LdapstlUnscaled(e) => e.feature(),
             Self::Asisdlse(_)
             | Self::Asisdlsep(_)
             | Self::Asisdlso(_)
@@ -477,10 +503,10 @@ mod tests {
             }
         }
         for feature in Feature::ALL {
-            assert!(carried.contains(&feature), "{feature:?} has no encoding");
+            assert_eq!(carried.contains(&feature), feature.encodes(), "{feature:?}");
         }
 
-        for imp in [Implementation::CORTEX_A57, Implementation::A57_WITH_SME] {
+        for imp in [Implementation::CORTEX_A57, Implementation::EVERY_FEATURE] {
             let cpu = Cpu::implementing(
                 CpuConfig {
                     ips: rusty_box_core::ClockHz::BOCHS_DEFAULT,
@@ -498,6 +524,7 @@ mod tests {
             let (pfr0, pfr1) = (read(4, 0), read(4, 1));
             let (zfr0, smfr0) = (read(4, 4), read(4, 5));
             let (isar0, isar1, isar2, isar3) = (read(6, 0), read(6, 1), read(6, 2), read(6, 3));
+            let mmfr2 = read(7, 2);
             for feature in Feature::ALL {
                 let advertised = match feature {
                     Feature::Base => true,
@@ -508,6 +535,10 @@ mod tests {
                     Feature::Sha256 => field(isar0, 12) != 0,
                     Feature::Crc32 => field(isar0, 16) != 0,
                     Feature::Sme => field(pfr1, 24) != 0,
+                    Feature::Lse => field(isar0, 20) != 0,
+                    Feature::Lse2 => field(mmfr2, 32) != 0,
+                    Feature::Lrcpc => field(isar1, 20) >= 1,
+                    Feature::Lrcpc2 => field(isar1, 20) >= 2,
                 };
                 assert_eq!(advertised, imp.has(feature), "{feature:?} on {imp:?}");
             }
@@ -515,9 +546,13 @@ mod tests {
             // instruction-set feature is a nonzero field of these registers.
             assert_eq!((field(pfr0, 16), field(pfr0, 20)), (0, 0), "FP and AdvSIMD, without half precision");
             // ID_AA64ISAR0_EL1: AES = 2 (AES and the 64-bit PMULL), SHA1 =
-            // 1, SHA2 = 1 (SHA-256, not SHA-512), CRC32 = 1; nothing else.
-            assert_eq!(isar0, 0x0000_0000_0001_1120);
-            assert_eq!((isar1, isar2, isar3), (0, 0, 0));
+            // 1, SHA2 = 1 (SHA-256, not SHA-512), CRC32 = 1, Atomic = 2 with
+            // FEAT_LSE; nothing else. ISAR1 holds LRCPC alone, MMFR2 AT alone.
+            let lse = if imp.has(Feature::Lse) { 2 << 20 } else { 0 };
+            assert_eq!(isar0, 0x0000_0000_0001_1120 | lse);
+            assert_eq!(isar1 & !(0xF << 20), 0);
+            assert_eq!(mmfr2 & !(0xF << 32), 0);
+            assert_eq!((isar2, isar3), (0, 0));
             // No SVE2 (SVEver = 0, with FEAT_SME as without), and SME's
             // required fields only with FEAT_SME.
             assert_eq!(zfr0, 0);

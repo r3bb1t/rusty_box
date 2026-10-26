@@ -8,7 +8,11 @@
 //! has them), the 4 KiB translation granule, no PMU. Every value here
 //! is consistent with that cut — an ID register that advertised a feature the
 //! executor rejects would make the feature unreachable (or worse, reachable
-//! and wrong), so the two change together.
+//! and wrong), so the two change together. The registers that report
+//! instruction-set features are functions of the processor's feature set,
+//! which the decoder reads too.
+
+use super::features::{Feature, Features};
 
 /// `MIDR_EL1`: Arm Ltd, variant 1, architecture 0xF, part 0xD07 (Cortex-A57),
 /// revision 0. QEMU `aarch64_a57_initfn` sets the same.
@@ -25,19 +29,24 @@ pub const REVIDR_EL1: u64 = 0;
 /// GIC = 0 (no system-register interface: the GIC is a memory-mapped v2).
 pub const ID_AA64PFR0_EL1: u64 = 0x0000_0000_0000_0011;
 
-/// `ID_AA64PFR1_EL1`: nothing from v8.1+.
-pub const ID_AA64PFR1_EL1: u64 = 0;
+/// `ID_AA64PFR1_EL1` of a processor implementing `features`: `SME` (bits
+/// 27:24) = 1 with FEAT_SME, without FEAT_SME2 (`Features.json`: `FEAT_SME
+/// <=> UInt(ID_AA64PFR1_EL1.SME) >= 1`); nothing else from v8.1+.
+pub(crate) const fn id_aa64pfr1(features: Features) -> u64 {
+    field(features, Feature::Sme, 24, 1)
+}
 
-/// `ID_AA64PFR1_EL1.SME` (bits 27:24) = 1: FEAT_SME without FEAT_SME2, for
-/// a processor that implements it (`Features.json`: `FEAT_SME <=>
-/// UInt(ID_AA64PFR1_EL1.SME) >= 1`).
-pub(crate) const ID_AA64PFR1_SME: u64 = 1 << 24;
-
-/// `ID_AA64SMFR0_EL1` of a processor implementing FEAT_SME: the fields
-/// `Features.json` requires of it, F32F32 (bit 32), B16F32 (34), F16F32
-/// (35) and I8I32 (39:36, 0b1111); SMEver 0 (no FEAT_SME2), and no FA64,
-/// F64F64 or I16I64.
-pub(crate) const ID_AA64SMFR0_EL1_SME: u64 = (1 << 32) | (1 << 34) | (1 << 35) | (0xF << 36);
+/// `ID_AA64SMFR0_EL1` of a processor implementing `features`: with
+/// FEAT_SME, the fields `Features.json` requires of it, F32F32 (bit 32),
+/// B16F32 (34), F16F32 (35) and I8I32 (39:36, 0b1111), with SMEver 0 (no
+/// FEAT_SME2), and no FA64, F64F64 or I16I64; zero without.
+pub(crate) const fn id_aa64smfr0(features: Features) -> u64 {
+    if features.has(Feature::Sme) {
+        (1 << 32) | (1 << 34) | (1 << 35) | (0xF << 36)
+    } else {
+        0
+    }
+}
 
 /// `SMIDR_EL1`, as QEMU reports it (`target/arm/helper.c`, `sme_reginfo`):
 /// implementer 0 (software), revision 0, no streaming execution priority
@@ -49,15 +58,51 @@ pub(crate) const SMIDR_EL1: u64 = 0;
 /// each, the architectural minimum), CTX_CMPs = 0, PMUVer = 0 (no PMU).
 pub const ID_AA64DFR0_EL1: u64 = 0x0000_0000_0010_1006;
 
-/// `ID_AA64ISAR0_EL1`: AES = 2 (AESE, AESD, AESMC, AESIMC and the 64-bit
-/// PMULL), SHA1 = 1, SHA2 = 1 (SHA-256 only), CRC32 = 1; no SHA-512, SHA3,
-/// SM3, SM4, LSE atomics or any later field. QEMU sets the same in
+/// `ID_AA64ISAR0_EL1` of a processor implementing `features`: AES (7:4) = 2
+/// with FEAT_AES (AESE, AESD, AESMC, AESIMC and the 64-bit PMULL), SHA1
+/// (11:8) = 1, SHA2 (15:12) = 1 (SHA-256 only), CRC32 (19:16) = 1 and
+/// Atomic (23:20) = 2 with FEAT_LSE; no SHA-512, SHA3, SM3, SM4 or later
+/// field. The Cortex-A57's is 0x11120, as QEMU sets it in
 /// `aarch64_aa32_a57_init` (target/arm/cpu-max.c), which
 /// `aarch64_a57_initfn` calls.
-pub const ID_AA64ISAR0_EL1: u64 = 0x0000_0000_0001_1120;
+pub(crate) const fn id_aa64isar0(features: Features) -> u64 {
+    field(features, Feature::Aes, 4, 2)
+        | field(features, Feature::Sha1, 8, 1)
+        | field(features, Feature::Sha256, 12, 1)
+        | field(features, Feature::Crc32, 16, 1)
+        | field(features, Feature::Lse, 20, 2)
+}
 
-/// `ID_AA64ISAR1_EL1`: no v8.2+ instructions.
-pub const ID_AA64ISAR1_EL1: u64 = 0;
+/// `ID_AA64ISAR1_EL1` of a processor implementing `features`: LRCPC
+/// (23:20) = 1 with FEAT_LRCPC, 2 with FEAT_LRCPC2 as well (which Arm's
+/// feature model makes imply FEAT_LRCPC, so the field never promises LDAPR
+/// to a processor without it); nothing else from v8.2+.
+pub(crate) const fn id_aa64isar1(features: Features) -> u64 {
+    let lrcpc = if !features.has(Feature::Lrcpc) {
+        0
+    } else if features.has(Feature::Lrcpc2) {
+        2
+    } else {
+        1
+    };
+    lrcpc << 20
+}
+
+/// `ID_AA64MMFR2_EL1` of a processor implementing `features`: AT (35:32) =
+/// 1 with FEAT_LSE2; nothing else from v8.1+.
+pub(crate) const fn id_aa64mmfr2(features: Features) -> u64 {
+    field(features, Feature::Lse2, 32, 1)
+}
+
+/// `value` in the ID register field at `lsb` when `features` holds
+/// `feature`, zero (not implemented) otherwise.
+const fn field(features: Features, feature: Feature, lsb: u32, value: u64) -> u64 {
+    if features.has(feature) {
+        value << lsb
+    } else {
+        0
+    }
+}
 
 /// `ID_AA64MMFR0_EL1`: PARange = 4 (44-bit physical addresses, as the
 /// Cortex-A57), ASIDBits = 2 (16-bit ASIDs), mixed endianness not supported,
@@ -65,9 +110,8 @@ pub const ID_AA64ISAR1_EL1: u64 = 0;
 /// (supported). Only the 4 KiB granule is implemented, so only it is offered.
 pub const ID_AA64MMFR0_EL1: u64 = 0x0000_0000_0F00_0024;
 
-/// `ID_AA64MMFR1_EL1` / `ID_AA64MMFR2_EL1`: nothing from v8.1+.
+/// `ID_AA64MMFR1_EL1`: nothing from v8.1+.
 pub const ID_AA64MMFR1_EL1: u64 = 0;
-pub const ID_AA64MMFR2_EL1: u64 = 0;
 
 /// Physical address width implied by `ID_AA64MMFR0_EL1.PARange`.
 pub const PA_BITS: u32 = 44;

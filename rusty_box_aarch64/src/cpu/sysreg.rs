@@ -210,24 +210,6 @@ impl Cpu {
         }
     }
 
-    /// `ID_AA64PFR1_EL1`: the Cortex-A57's, with `SME` = 1 for FEAT_SME.
-    fn id_aa64pfr1(&self) -> u64 {
-        if self.implements(Feature::Sme) {
-            id::ID_AA64PFR1_EL1 | id::ID_AA64PFR1_SME
-        } else {
-            id::ID_AA64PFR1_EL1
-        }
-    }
-
-    /// `ID_AA64SMFR0_EL1`: zero without FEAT_SME.
-    fn id_aa64smfr0(&self) -> u64 {
-        if self.implements(Feature::Sme) {
-            id::ID_AA64SMFR0_EL1_SME
-        } else {
-            0
-        }
-    }
-
     /// Whether `sys`, read from a snapshot, holds SME register values an
     /// `MSR` on this processor can leave: `CPACR_EL1.SMEN`, `SMCR_EL1` and
     /// `TPIDR2_EL0` only with FEAT_SME, and `SMCR_EL1` with nothing outside
@@ -370,14 +352,14 @@ impl Cpu {
             MPIDR_EL1 => id::MPIDR_EL1,
             REVIDR_EL1 => id::REVIDR_EL1,
             ID_AA64PFR0_EL1 => id::ID_AA64PFR0_EL1,
-            ID_AA64PFR1_EL1 => self.id_aa64pfr1(),
-            ID_AA64SMFR0_EL1 => self.id_aa64smfr0(),
+            ID_AA64PFR1_EL1 => id::id_aa64pfr1(self.imp.features),
+            ID_AA64SMFR0_EL1 => id::id_aa64smfr0(self.imp.features),
             ID_AA64DFR0_EL1 => id::ID_AA64DFR0_EL1,
-            ID_AA64ISAR0_EL1 => id::ID_AA64ISAR0_EL1,
-            ID_AA64ISAR1_EL1 => id::ID_AA64ISAR1_EL1,
+            ID_AA64ISAR0_EL1 => id::id_aa64isar0(self.imp.features),
+            ID_AA64ISAR1_EL1 => id::id_aa64isar1(self.imp.features),
             ID_AA64MMFR0_EL1 => id::ID_AA64MMFR0_EL1,
             ID_AA64MMFR1_EL1 => id::ID_AA64MMFR1_EL1,
-            ID_AA64MMFR2_EL1 => id::ID_AA64MMFR2_EL1,
+            ID_AA64MMFR2_EL1 => id::id_aa64mmfr2(self.imp.features),
             CCSIDR_EL1 => self.ccsidr(),
             CLIDR_EL1 => id::CLIDR_EL1,
             SMIDR_EL1 if self.implements(Feature::Sme) => id::SMIDR_EL1,

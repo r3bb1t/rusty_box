@@ -8,6 +8,7 @@
 
 pub mod id;
 
+mod atomic;
 mod crypto;
 mod decode;
 #[cfg(test)]

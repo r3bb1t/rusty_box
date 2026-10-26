@@ -1,6 +1,7 @@
 //! Arm group `ldst` (Arm ARM C4.1, "Loads and Stores"): the A64 space with
 //! `op1 = x1x0`.
 
+use super::atomic;
 use super::Feature;
 use super::Encoding;
 use crate::cpu::exec::bits;
@@ -487,26 +488,31 @@ pub(super) fn ldst(word: u32) -> Option<Encoding> {
                 0b0 => asisdlsop(word).map(Encoding::Asisdlsop),
                 _ => None,
             },
-            // op2<11> = 1 with op0<3> = 0 is comswappr (FEAT_LSE).
             (0b0, 0b00) => match (bits(word, 31, 31), bits(word, 21, 21)) {
                 (_, 0b0) => ldstexclr(word).map(Encoding::Ldstexclr),
+                (0b0, 0b1) => atomic::comswappr(word).map(Encoding::Comswappr),
                 (0b1, 0b1) => ldstexclp(word).map(Encoding::Ldstexclp),
                 _ => None,
             },
-            // comswap (FEAT_LSE) at op2<11> = 1.
             (0b0, 0b01) => match bits(word, 21, 21) {
                 0b0 => ldstord(word).map(Encoding::Ldstord),
+                0b1 => atomic::comswap(word).map(Encoding::Comswap),
                 _ => None,
             },
             // The unprivileged exclusive and compare-and-swap forms
             // (FEAT_LSUI).
             _ => None,
         },
-        // op2<14> = 1 holds the load/store groups of later features
-        // (FEAT_MOPS, FEAT_LRCPC2, FEAT_LRCPC3, FEAT_LSE128, FEAT_THE,
-        // FEAT_LSUI, FEAT_MTE, FEAT_GCS).
+        // op2<14> = 1 holds ldapstl_unscaled (op1 = 0, op2<11> = 0, op2<1:0>
+        // = 00) and the load/store groups of later features (FEAT_MOPS,
+        // FEAT_LRCPC3, FEAT_LSE128, FEAT_THE, FEAT_LSUI, FEAT_MTE,
+        // FEAT_GCS).
         0b01 => match bits(word, 24, 24) {
             0b0 => loadlit(word).map(Encoding::Loadlit),
+            0b1 => match (op1, bits(word, 21, 21), bits(word, 11, 10)) {
+                (0b0, 0b0, 0b00) => atomic::ldapstl_unscaled(word).map(Encoding::LdapstlUnscaled),
+                _ => None,
+            },
             _ => None,
         },
         0b10 => match bits(word, 24, 23) {
@@ -517,13 +523,14 @@ pub(super) fn ldst(word: u32) -> Option<Encoding> {
             _ => None,
         },
         0b11 => match bits(word, 24, 24) {
-            // op2<11>, then op2<1:0>. op2<11> = 1 with op2<1:0> = 00 is
-            // memop (FEAT_LSE), and with op2<0> = 1 ldst_pac (FEAT_PAuth).
+            // op2<11>, then op2<1:0>. op2<11> = 1 with op2<0> = 1 is
+            // ldst_pac (FEAT_PAuth).
             0b0 => match (bits(word, 21, 21), bits(word, 11, 10)) {
                 (0b0, 0b00) => ldst_unscaled(word).map(Encoding::LdstUnscaled),
                 (0b0, 0b01) => ldst_immpost(word).map(Encoding::LdstImmpost),
                 (0b0, 0b10) => ldst_unpriv(word).map(Encoding::LdstUnpriv),
                 (0b0, 0b11) => ldst_immpre(word).map(Encoding::LdstImmpre),
+                (0b1, 0b00) => atomic::memop(word).map(Encoding::Memop),
                 (0b1, 0b10) => ldst_regoff(word).map(Encoding::LdstRegoff),
                 _ => None,
             },

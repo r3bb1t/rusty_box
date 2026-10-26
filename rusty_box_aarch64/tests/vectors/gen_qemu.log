@@ -1,0 +1,5 @@
+lse_memop: 200 vectors from 383 encodings
+lse_cas: 200 vectors from 200 encodings
+lse_casp: 200 vectors from 200 encodings
+rcpc_ldapr: 200 vectors from 200 encodings
+rcpc_unscaled: 200 vectors from 241 encodings

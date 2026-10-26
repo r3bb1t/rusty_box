@@ -22,12 +22,13 @@ base register into the data region and keep every access aligned, because
 with the MMU off data accesses are Device memory, where an unaligned access
 is an alignment fault on this core (Unicorn's older QEMU does not check).
 
+gen_qemu.py builds the vectors of later features with QEMU's user-mode
+emulator from the same initial states and writes them in the same format;
+it imports this module for both, so Unicorn is imported only to run it.
+
 Usage: python3 -I gen_unicorn.py OUT_FILE [CASES_PER_FAMILY]
 """
 import sys
-
-from unicorn import Uc, UcError, UC_ARCH_ARM64, UC_MODE_ARM
-from unicorn import arm64_const as A
 
 MASK64 = (1 << 64) - 1
 CODE = 0x10000
@@ -291,6 +292,9 @@ FAMILIES = [
 
 
 def run_case(insn, seed, kind):
+    from unicorn import Uc, UcError, UC_ARCH_ARM64, UC_MODE_ARM
+    from unicorn import arm64_const as A
+
     x, sp, nzcv, v, data, fpcr = initial_state(seed, kind, insn)
     uc = Uc(UC_ARCH_ARM64, UC_MODE_ARM)
     uc.ctl_set_cpu_model(A.UC_CPU_ARM64_A57)
@@ -321,7 +325,18 @@ def run_case(insn, seed, kind):
     vs = [uc.reg_read(A.UC_ARM64_REG_Q0 + i) for i in range(32)]
     out_data = uc.mem_read(DATA, DATA_SIZE)
     fpsr = uc.reg_read(A.UC_ARM64_REG_FPSR)
-    regs =[f"{i}:{xs[i]:x}" for i in range(31) if xs[i] != x[i]]
+    before = (x, sp, v, data)
+    after = (xs, out_sp, vs, out_data)
+    return vector_line(kind, insn, seed, pc, out_nzcv, fpsr, before, after)
+
+
+def vector_line(kind, insn, seed, pc, out_nzcv, fpsr, before, after):
+    """A vector's fields after its family name: the PC, NZCV and FPSR after
+    the step and what changed of the registers, SP and data bytes, from
+    `before` and `after`, each `(x, sp, v, data)`."""
+    x, sp, v, data = before
+    xs, out_sp, vs, out_data = after
+    regs = [f"{i}:{xs[i]:x}" for i in range(31) if xs[i] != x[i]]
     if out_sp != sp:
         regs.append(f"31:{out_sp:x}")
     vregs = [f"{i}:{vs[i]:x}" for i in range(32) if vs[i] != v[i]]

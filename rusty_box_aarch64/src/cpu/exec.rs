@@ -273,6 +273,10 @@ impl Cpu {
                 self.exec_ldst_pair(bus, pc, insn)
             }
             Class::LoadStoreExclusive => self.exec_ldst_exclusive(bus, pc, insn),
+            Class::AtomicMemoryOperation => self.exec_memop(bus, pc, insn),
+            Class::CompareAndSwap => self.exec_cas(bus, insn),
+            Class::CompareAndSwapPair => self.exec_casp(bus, pc, insn),
+            Class::LoadStoreOrderedUnscaled => self.exec_ldapstl_unscaled(bus, insn),
             Class::SimdLoadStoreMultiple | Class::SimdLoadStoreMultiplePostIndexed => {
                 self.exec_ldst_multiple(bus, pc, insn)
             }

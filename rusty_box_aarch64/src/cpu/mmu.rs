@@ -16,6 +16,7 @@ use rusty_box_core::SnapError;
 use super::dp::ones;
 use super::exception::{Exception, ExceptionClass};
 use super::exec::{Fault, StopCause};
+use super::features::Feature;
 use super::{id, Cpu, El};
 use crate::bus::{AccessWidth, BusFault, PhysAddr, PhysBus};
 
@@ -32,25 +33,54 @@ pub(crate) enum AccessKind {
 pub(crate) struct DataAccess {
     /// `LDTR`/`STTR`: checked against EL0 permissions when executed at EL1.
     pub(crate) unprivileged: bool,
-    /// Exclusive and acquire/release accesses fault when misaligned whatever
-    /// the memory type (Arm ARM B2.5.2).
-    pub(crate) strict_align: bool,
+    pub(crate) alignment: AlignmentRule,
 }
 
 impl DataAccess {
     pub(crate) const NORMAL: Self = Self {
         unprivileged: false,
-        strict_align: false,
+        alignment: AlignmentRule::Any,
     };
+    /// A load-acquire or store-release.
     pub(crate) const ORDERED: Self = Self {
         unprivileged: false,
-        strict_align: true,
+        alignment: AlignmentRule::Ordered,
+    };
+    /// An exclusive or atomic access.
+    pub(crate) const ATOMIC: Self = Self {
+        unprivileged: false,
+        alignment: AlignmentRule::Atomic,
     };
     pub(crate) const UNPRIVILEGED: Self = Self {
         unprivileged: true,
-        strict_align: false,
+        alignment: AlignmentRule::Any,
     };
 }
+
+/// Which misaligned data accesses fault before translation, the part of Arm
+/// `AArch64_UnalignedAccessFaults` an access's kind decides.
+/// `SCTLR_EL1.A` faults every misaligned access whatever the rule, and
+/// Device memory every one after translation.
+///
+/// Closed (R5): the kinds of access the instruction set has.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AlignmentRule {
+    /// An ordinary load or store: none.
+    Any,
+    /// An exclusive or atomic access (`accdesc.exclusive`, `atomicop`):
+    /// every one, but with FEAT_LSE2 those that lie in one 16-byte granule
+    /// (`AllInSCAGranule`, whose IMPLEMENTATION DEFINED quantity is 16 here).
+    Atomic,
+    /// A load-acquire or store-release (`acqsc`, `acqpc`, `relsc`): with
+    /// FEAT_LSE2, those that cross a 16-byte boundary while `SCTLR_EL1.nAA`
+    /// is 0. Without it, every one, the rule before FEAT_LSE2 that QEMU
+    /// keeps (`check_ordered_align`): the pseudocode's rule reads `nAA`,
+    /// which FEAT_LSE2 adds.
+    Ordered,
+}
+
+/// `SCTLR_EL1.nAA` (FEAT_LSE2).
+const SCTLR_NAA: u64 = 1 << 6;
 
 /// A fault status code (`ESR_ELx.ISS.DFSC`/`IFSC`) with its lookup level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -260,6 +290,21 @@ impl Cpu {
     #[inline]
     fn strict_alignment(&self) -> bool {
         self.sys.sctlr_el1 & 2 != 0
+    }
+
+    /// Arm `AArch64_UnalignedAccessFaults` for a misaligned access of
+    /// `bytes` at `va`: whether it faults before translation.
+    fn misaligned_faults(&self, va: u64, bytes: u64, acc: DataAccess) -> bool {
+        if self.strict_alignment() {
+            return true;
+        }
+        let lse2 = self.implements(Feature::Lse2);
+        let in_granule = (va & 15) + bytes <= 16;
+        match acc.alignment {
+            AlignmentRule::Any => false,
+            AlignmentRule::Atomic => !(lse2 && in_granule),
+            AlignmentRule::Ordered => !lse2 || (self.sys.sctlr_el1 & SCTLR_NAA == 0 && !in_granule),
+        }
     }
 
     /// Translate `va` for an access of `kind` checked against `el`'s
@@ -579,7 +624,7 @@ impl Cpu {
     ) -> Result<Translated, Fault> {
         let write = kind == AccessKind::Write;
         let misaligned = va & (bytes - 1) != 0;
-        if misaligned && (acc.strict_align || self.strict_alignment()) {
+        if misaligned && self.misaligned_faults(va, bytes, acc) {
             return Err(Self::data_abort(va, Fsc::Alignment, write));
         }
         let el = self.access_el(acc);
@@ -590,8 +635,10 @@ impl Cpu {
         Ok(t)
     }
 
-    /// The physical address an aligned access of `bytes` at `va` would reach,
-    /// with every check of a real access applied. For the exclusive monitor.
+    /// The physical address an access of `bytes` at `va` reaches, with every
+    /// check of a real access applied: for the exclusive monitor, and for
+    /// an atomic access, which then reads and writes it (an access that
+    /// stays in one page, as both are).
     pub(crate) fn translate_for<B: PhysBus>(
         &mut self,
         bus: &mut B,
@@ -599,9 +646,35 @@ impl Cpu {
         bytes: u64,
         write: bool,
         acc: DataAccess,
-    ) -> Result<u64, Fault> {
+    ) -> Result<PhysAddr, Fault> {
         let kind = if write { AccessKind::Write } else { AccessKind::Read };
-        self.translate_data(bus, va, bytes, kind, acc).map(|t| t.pa)
+        self.translate_data(bus, va, bytes, kind, acc).map(|t| PhysAddr::new(t.pa))
+    }
+
+    /// The bus half of every data read: `1 << log2` bytes (`log2` in 0..=3)
+    /// at `pa`, which `va` translated to, in one bus access, zero-extended.
+    /// A bus fault is a synchronous external abort reported at `va`.
+    #[inline(always)]
+    fn bus_read<B: PhysBus>(&mut self, bus: &mut B, va: u64, pa: PhysAddr, log2: u32) -> Result<u64, Fault> {
+        let width = AccessWidth::from_log2(log2).unwrap_or(AccessWidth::Dword);
+        match bus.read(pa, width, self.clock()) {
+            Ok(v) => Ok(v & width.value_mask()),
+            Err(BusFault::Unmapped) => Err(self.external_abort(va, pa.get(), AccessKind::Read)),
+        }
+    }
+
+    /// The bus half of every data write: the low `1 << log2` bytes of
+    /// `value` at `pa`, which `va` translated to, in one bus access, after
+    /// clearing an exclusive monitor the store overlaps. A bus fault is a
+    /// synchronous external abort reported at `va`.
+    #[inline(always)]
+    fn bus_write<B: PhysBus>(&mut self, bus: &mut B, va: u64, pa: PhysAddr, log2: u32, value: u64) -> Result<(), Fault> {
+        let width = AccessWidth::from_log2(log2).unwrap_or(AccessWidth::Dword);
+        self.note_store(pa.get(), 1 << log2);
+        match bus.write(pa, width, value & width.value_mask(), self.clock()) {
+            Ok(()) => Ok(()),
+            Err(BusFault::Unmapped) => Err(self.external_abort(va, pa.get(), AccessKind::Write)),
+        }
     }
 
     /// Read `1 << log2` bytes (`log2` in 0..=3) at `va`, zero-extended.
@@ -609,11 +682,7 @@ impl Cpu {
         let bytes = 1u64 << log2;
         if (va & 0xFFF) + bytes <= 0x1000 {
             let t = self.translate_data(bus, va, bytes, AccessKind::Read, acc)?;
-            let width = AccessWidth::from_log2(log2).unwrap_or(AccessWidth::Dword);
-            return match bus.read(PhysAddr::new(t.pa), width, self.clock()) {
-                Ok(v) => Ok(v & width.value_mask()),
-                Err(BusFault::Unmapped) => Err(self.external_abort(va, t.pa, AccessKind::Read)),
-            };
+            return self.bus_read(bus, va, PhysAddr::new(t.pa), log2);
         }
         // Crosses a page boundary, so it is misaligned: Normal memory only.
         // Each byte is an access of its own (Arm ARM `AArch64.MemSingle` on
@@ -621,7 +690,7 @@ impl Cpu {
         // the first byte that faulted — an address in the page that needs
         // mapping, which is what an OS's fault handler goes by. An alignment
         // fault is the whole access's, and reports its address.
-        if acc.strict_align || self.strict_alignment() {
+        if self.misaligned_faults(va, bytes, acc) {
             return Err(Self::data_abort(va, Fsc::Alignment, false));
         }
         let el = self.access_el(acc);
@@ -634,11 +703,7 @@ impl Cpu {
             if t.device {
                 return Err(Self::data_abort(va, Fsc::Alignment, false));
             }
-            let b = match bus.read(PhysAddr::new(t.pa), AccessWidth::Byte, self.clock()) {
-                Ok(b) => b & 0xFF,
-                Err(BusFault::Unmapped) => return Err(self.external_abort(byte_va, t.pa, AccessKind::Read)),
-            };
-            value |= b << (8 * i);
+            value |= self.bus_read(bus, byte_va, PhysAddr::new(t.pa), 0)? << (8 * i);
         }
         Ok(value)
     }
@@ -655,14 +720,9 @@ impl Cpu {
         let bytes = 1u64 << log2;
         if (va & 0xFFF) + bytes <= 0x1000 {
             let t = self.translate_data(bus, va, bytes, AccessKind::Write, acc)?;
-            self.note_store(t.pa, bytes);
-            let width = AccessWidth::from_log2(log2).unwrap_or(AccessWidth::Dword);
-            return match bus.write(PhysAddr::new(t.pa), width, value & width.value_mask(), self.clock()) {
-                Ok(()) => Ok(()),
-                Err(BusFault::Unmapped) => Err(self.external_abort(va, t.pa, AccessKind::Write)),
-            };
+            return self.bus_write(bus, va, PhysAddr::new(t.pa), log2, value);
         }
-        if acc.strict_align || self.strict_alignment() {
+        if self.misaligned_faults(va, bytes, acc) {
             return Err(Self::data_abort(va, Fsc::Alignment, true));
         }
         // Translate both pages before writing anything, so a fault on the
@@ -684,21 +744,38 @@ impl Cpu {
             let t = self
                 .translate(bus, byte_va, AccessKind::Write, el)
                 .map_err(|f| Self::data_abort(byte_va, f, true))?;
-            self.note_store(t.pa, 1);
-            if bus
-                .write(PhysAddr::new(t.pa), AccessWidth::Byte, (value >> (8 * i)) & 0xFF, self.clock())
-                .is_err()
-            {
-                return Err(self.external_abort(byte_va, t.pa, AccessKind::Write));
-            }
+            self.bus_write(bus, byte_va, PhysAddr::new(t.pa), 0, value >> (8 * i))?;
         }
         Ok(())
+    }
+
+    /// The read half of an atomic access: `1 << log2` bytes (`log2` in
+    /// 0..=4) at `pa`, which [`Cpu::translate_for`] translated `va` to with
+    /// every check, as [`Cpu::read_mem`] reads them; 16 bytes, which are
+    /// aligned (no 16-byte atomic may be misaligned), are two 8-byte halves.
+    pub(crate) fn read_translated<B: PhysBus>(&mut self, bus: &mut B, va: u64, pa: PhysAddr, log2: u32) -> Result<u128, Fault> {
+        if log2 == 4 {
+            let lo = self.bus_read(bus, va, pa, 3)?;
+            let hi = self.bus_read(bus, va.wrapping_add(8), PhysAddr::new(pa.get() + 8), 3)?;
+            return Ok(u128::from(lo) | (u128::from(hi) << 64));
+        }
+        self.bus_read(bus, va, pa, log2).map(u128::from)
+    }
+
+    /// The write half of an atomic access: the low `1 << log2` bytes of
+    /// `value` at `pa`, as [`Cpu::read_translated`] reads them.
+    pub(crate) fn write_translated<B: PhysBus>(&mut self, bus: &mut B, va: u64, pa: PhysAddr, log2: u32, value: u128) -> Result<(), Fault> {
+        if log2 == 4 {
+            self.bus_write(bus, va, pa, 3, value as u64)?;
+            return self.bus_write(bus, va.wrapping_add(8), PhysAddr::new(pa.get() + 8), 3, (value >> 64) as u64);
+        }
+        self.bus_write(bus, va, pa, log2, value as u64)
     }
 
     /// Read 16 bytes (a Q register) at `va`, as two 8-byte halves. Alignment
     /// is judged on the whole access.
     pub(crate) fn read_mem_u128<B: PhysBus>(&mut self, bus: &mut B, va: u64, acc: DataAccess) -> Result<u128, Fault> {
-        if va & 15 != 0 && (acc.strict_align || self.strict_alignment()) {
+        if va & 15 != 0 && self.misaligned_faults(va, 16, acc) {
             return Err(Self::data_abort(va, Fsc::Alignment, false));
         }
         let lo = self.read_mem(bus, va, 3, acc)?;
@@ -713,7 +790,7 @@ impl Cpu {
         value: u128,
         acc: DataAccess,
     ) -> Result<(), Fault> {
-        if va & 15 != 0 && (acc.strict_align || self.strict_alignment()) {
+        if va & 15 != 0 && self.misaligned_faults(va, 16, acc) {
             return Err(Self::data_abort(va, Fsc::Alignment, true));
         }
         self.write_mem(bus, va, 3, value as u64, acc)?;

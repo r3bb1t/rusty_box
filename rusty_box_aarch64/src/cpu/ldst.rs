@@ -37,7 +37,7 @@ struct Addressing {
 impl Cpu {
     /// The base register value for an access, with the SP alignment check
     /// applied when the base is SP.
-    fn base_register(&self, rn: u32) -> Result<u64, super::exec::Fault> {
+    pub(super) fn base_register(&self, rn: u32) -> Result<u64, super::exec::Fault> {
         let base = self.x_or_sp(rn);
         self.check_sp_alignment(rn == 31, base)?;
         Ok(base)
@@ -304,8 +304,10 @@ impl Cpu {
     }
 
     /// Exclusive and acquire/release accesses:
-    /// `size 001000 o2 L o1 Rs o0 Rt2 Rn Rt` (ARMv8.0 forms only; CAS and
-    /// the LORegion forms belong to feature sets this core lacks).
+    /// `size 001000 o2 L o1 Rs o0 Rt2 Rn Rt`, the ARMv8.0 forms (Arm groups
+    /// `ldstexclr`, `ldstexclp` and `ldstord`). CAS and CASP share the space
+    /// and are `exec_cas` and `exec_casp`; the LORegion forms (FEAT_LOR)
+    /// are not implemented.
     pub(crate) fn exec_ldst_exclusive<B: PhysBus>(&mut self, bus: &mut B, pc: u64, insn: u32) -> ExecResult {
         let size = bits(insn, 31, 30);
         let o2 = bit(insn, 23);
@@ -342,38 +344,38 @@ impl Cpu {
         let total = 1u64 << total_log2;
 
         if load {
-            let pa = self.translate_for(bus, address, total, false, DataAccess::ORDERED)?;
+            let pa = self.translate_for(bus, address, total, false, DataAccess::ATOMIC)?;
             if pair {
                 let elem = 1u64 << size;
-                let a = self.read_mem(bus, address, size, DataAccess::ORDERED)?;
-                let b = self.read_mem(bus, address.wrapping_add(elem), size, DataAccess::ORDERED)?;
+                let a = self.read_mem(bus, address, size, DataAccess::ATOMIC)?;
+                let b = self.read_mem(bus, address.wrapping_add(elem), size, DataAccess::ATOMIC)?;
                 self.set_x_or_zr(rt, a);
                 self.set_x_or_zr(rt2, b);
             } else {
-                let v = self.read_mem(bus, address, size, DataAccess::ORDERED)?;
+                let v = self.read_mem(bus, address, size, DataAccess::ATOMIC)?;
                 self.set_x_or_zr(rt, v);
             }
             self.monitor.armed = true;
-            self.monitor.addr = pa;
+            self.monitor.addr = pa.get();
             self.monitor.bytes = total;
             return Ok(Flow::Next);
         }
 
         // Store-exclusive: translation and permission faults are reported
         // whether or not the monitor would have let the store happen.
-        let pa = self.translate_for(bus, address, total, true, DataAccess::ORDERED)?;
+        let pa = self.translate_for(bus, address, total, true, DataAccess::ATOMIC)?;
         let m = self.monitor;
-        let pass = m.armed && m.addr == pa && m.bytes == total;
+        let pass = m.armed && m.addr == pa.get() && m.bytes == total;
         self.monitor.armed = false;
         if pass {
             if pair {
                 let elem = 1u64 << size;
                 let (a, b) = (self.x_or_zr(rt), self.x_or_zr(rt2));
-                self.write_mem(bus, address, size, a, DataAccess::ORDERED)?;
-                self.write_mem(bus, address.wrapping_add(elem), size, b, DataAccess::ORDERED)?;
+                self.write_mem(bus, address, size, a, DataAccess::ATOMIC)?;
+                self.write_mem(bus, address.wrapping_add(elem), size, b, DataAccess::ATOMIC)?;
             } else {
                 let v = self.x_or_zr(rt);
-                self.write_mem(bus, address, size, v, DataAccess::ORDERED)?;
+                self.write_mem(bus, address, size, v, DataAccess::ATOMIC)?;
             }
         }
         self.set_x_or_zr(rs, u64::from(!pass));

@@ -1,5 +1,5 @@
 //! FEAT_SME's state, registers and traps, on a processor that implements it
-//! ([`Implementation::A57_WITH_SME`]) and on one that does not.
+//! ([`Implementation::EVERY_FEATURE`]) and on one that does not.
 //!
 //! Each property is the guest-visible one (R9): what a register reads, the
 //! exception a word takes (`ESR_EL1`), and what an instruction leaves in
@@ -101,7 +101,7 @@ fn processor(imp: Implementation) -> Cpu {
 }
 
 fn sme() -> Cpu {
-    processor(Implementation::A57_WITH_SME)
+    processor(Implementation::EVERY_FEATURE)
 }
 
 /// A taken exception, as `ESR_EL1` reports it.
@@ -489,9 +489,9 @@ fn a_snapshot_with_sme_bits_no_msr_can_set_is_refused() {
         processor(imp).restore(&mut image.as_slice()).is_err()
     };
     let mut cpu = sme();
-    assert!(!refused(&cpu, Implementation::A57_WITH_SME));
+    assert!(!refused(&cpu, Implementation::EVERY_FEATURE));
     cpu.sys.smcr_el1 = 0x10;
-    assert!(refused(&cpu, Implementation::A57_WITH_SME), "SMCR_EL1 bit 4");
+    assert!(refused(&cpu, Implementation::EVERY_FEATURE), "SMCR_EL1 bit 4");
 
     let a57 = processor(Implementation::CORTEX_A57);
     assert!(!refused(&a57, Implementation::CORTEX_A57));
