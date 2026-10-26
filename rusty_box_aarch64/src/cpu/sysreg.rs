@@ -136,6 +136,12 @@ const MDCCINT_EL1: u32 = key!(2, 0, 0, 2, 0);
 const MDSCR_EL1: u32 = key!(2, 0, 0, 2, 2);
 const OSECCR_EL1: u32 = key!(2, 0, 0, 6, 2);
 const MDCCSR_EL0: u32 = key!(2, 3, 0, 1, 0);
+// The Debug Communications Channel data registers. `DBGDTRTX_EL0` is named
+// `DBGDTRRX_EL0` when read.
+const OSDTRRX_EL1: u32 = key!(2, 0, 0, 0, 2);
+const OSDTRTX_EL1: u32 = key!(2, 0, 0, 3, 2);
+const DBGDTR_EL0: u32 = key!(2, 3, 0, 4, 0);
+const DBGDTRTX_EL0: u32 = key!(2, 3, 0, 5, 0);
 const OSLAR_EL1: u32 = key!(2, 0, 1, 0, 4);
 const OSLSR_EL1: u32 = key!(2, 0, 1, 1, 4);
 const OSDLR_EL1: u32 = key!(2, 0, 1, 3, 4);
@@ -173,6 +179,11 @@ const EL0VTEN: u64 = 1 << 8;
 const EL0PTEN: u64 = 1 << 9;
 
 /// `SCTLR_EL1` EL0 controls.
+/// `MDSCR_EL1.TDCC`: trap EL0 accesses to the Debug Communications Channel.
+const MDSCR_TDCC: u64 = 1 << 12;
+
+/// `SCTLR_EL1` FEAT_MTE fields: ITFSB, TCF0, TCF, ATA0, ATA, TCSO0, TCSO.
+const SCTLR_MTE: u64 = (1 << 37) | (3 << 38) | (3 << 40) | (1 << 42) | (1 << 43) | (1 << 58) | (1 << 59);
 const SCTLR_UMA: u64 = 1 << 9;
 const SCTLR_DZE: u64 = 1 << 14;
 const SCTLR_UCT: u64 = 1 << 15;
@@ -185,6 +196,17 @@ impl Cpu {
             1 => id::CCSIDR_L1I,
             2 => id::CCSIDR_L2,
             _ => 0,
+        }
+    }
+
+    /// The Debug Communications Channel registers EL0 may reach trap to EL1
+    /// when `MDSCR_EL1.TDCC` is set (QEMU target/arm/debug_helper.c
+    /// `access_tdcc`).
+    fn dcc_check(&self, el: El) -> Result<(), SysRegError> {
+        if el == El::El0 && self.sys.mdscr_el1 & MDSCR_TDCC != 0 {
+            Err(SysRegError::TrapToEl1)
+        } else {
+            Ok(())
         }
     }
 
@@ -276,7 +298,15 @@ impl Cpu {
                     _ => self.timer_tval_read(cval),
                 });
             }
-            MDCCSR_EL0 => return Ok(0),
+            // The Debug Communications Channel is not implemented: its
+            // status reads as zero (nothing to receive, room to transmit)
+            // and its data registers are RAZ/WI, so that a guest that writes
+            // them, having no way to probe for the channel, takes no
+            // exception (QEMU target/arm/debug_helper.c `debug_cp_reginfo`).
+            MDCCSR_EL0 | DBGDTR_EL0 | DBGDTRTX_EL0 => {
+                self.dcc_check(el)?;
+                return Ok(0);
+            }
             _ => {}
         }
 
@@ -285,6 +315,7 @@ impl Cpu {
         }
 
         let value = match k {
+            OSDTRRX_EL1 | OSDTRTX_EL1 => 0,
             MIDR_EL1 => id::MIDR_EL1,
             MPIDR_EL1 => id::MPIDR_EL1,
             REVIDR_EL1 => id::REVIDR_EL1,
@@ -444,6 +475,11 @@ impl Cpu {
                 }
                 return Ok(WriteEffect::Timer);
             }
+            // RAZ/WI, as for reads.
+            DBGDTR_EL0 | DBGDTRTX_EL0 => {
+                self.dcc_check(el)?;
+                return Ok(WriteEffect::None);
+            }
             _ => {}
         }
 
@@ -452,13 +488,22 @@ impl Cpu {
         }
 
         let effect = match k {
+            OSDTRRX_EL1 | OSDTRTX_EL1 => WriteEffect::None,
             CSSELR_EL1 => {
                 self.sys.csselr_el1 = value & 0xF;
                 WriteEffect::None
             }
+            // The memory-tagging controls read as zero on a core without
+            // FEAT_MTE, and a write that changes nothing keeps the TLB
+            // (QEMU target/arm/helper.c `sctlr_write`).
             SCTLR_EL1 => {
-                self.sys.sctlr_el1 = value;
-                WriteEffect::FlushTlb
+                let value = value & !SCTLR_MTE;
+                if value == self.sys.sctlr_el1 {
+                    WriteEffect::None
+                } else {
+                    self.sys.sctlr_el1 = value;
+                    WriteEffect::FlushTlb
+                }
             }
             ACTLR_EL1 => {
                 self.sys.actlr_el1 = value;
@@ -548,6 +593,9 @@ impl Cpu {
                 WriteEffect::None
             }
             CNTKCTL_EL1 => {
+                // The event stream's events so far count under the old
+                // controls.
+                self.settle_event_stream();
                 self.sys.cntkctl_el1 = value & 0x3FF;
                 WriteEffect::None
             }

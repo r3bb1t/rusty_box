@@ -202,10 +202,13 @@ impl Cpu {
     }
 
     /// `ERET`: `AArch64.ExceptionReturn(ELR_EL1, SPSR_EL1)`. Returns the new PC.
+    /// Every return, legal or not, clears the local exclusive monitor and
+    /// sets the Event Register (`ClearExclusiveLocal`, `SendEventLocal`).
     pub(crate) fn exception_return(&mut self) -> u64 {
         let spsr = self.sys.spsr_el1;
         let target = self.sys.elr_el1;
         self.monitor.armed = false;
+        self.send_event_local();
 
         // M[4] = 1 names AArch32, M[3:2] an EL; this core has neither AArch32
         // nor EL2/EL3, and EL0 has only SP_EL0 (M[0] must be 0 there).

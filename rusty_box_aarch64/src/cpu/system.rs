@@ -41,6 +41,11 @@ mod psci {
     pub(super) const IMPLEMENTED_VERSION: u64 = 0x0001_0001;
     /// "Trusted OS is not present or does not require migration".
     pub(super) const MIGRATE_NOT_REQUIRED: u64 = 2;
+
+    /// The processor's affinity value, the form a PSCI call names it in:
+    /// `MPIDR_EL1`'s Aff3 (bits 39:32) and Aff2..Aff0 (bits 23:0), as QEMU's
+    /// `arm_cpu_mp_affinity` gives it.
+    pub(super) const AFFINITY: u64 = crate::cpu::id::MPIDR_EL1 & 0xFF_00FF_FFFF;
 }
 
 impl Cpu {
@@ -70,22 +75,41 @@ impl Cpu {
     }
 
     /// The HINT space: NOP, YIELD, WFE, WFI, SEV, SEVL; every other hint
-    /// (including the pointer-authentication and BTI hints) is a NOP.
+    /// (including the pointer-authentication and BTI hints) is a NOP. A WFx
+    /// traps from EL0 only when it would wait (Arm ARM `Hint_WFE`,
+    /// `Hint_WFI`; QEMU target/arm/tcg/op_helper.c `HELPER(wfe)`,
+    /// `HELPER(wfi)`).
     pub(crate) fn exec_hint(&mut self, insn: u32, _pc: u64) -> ExecResult {
         match bits(insn, 11, 5) {
-            // WFE: there is no other processor to send an event, and WFE may
-            // complete at any time, so it completes at once.
+            // WFE: a set Event Register is consumed and the instruction
+            // completes. Otherwise it may wait; there is no other processor
+            // to send an event, and WFE may complete at any time, so it
+            // completes at once.
             2 => {
+                if self.take_event() {
+                    return Ok(Flow::Next);
+                }
                 if self.pstate.el == El::El0 && self.sys.sctlr_el1 & SCTLR_NTWE == 0 {
                     return Err(Exception::new(ExceptionClass::WfxTrap, (1 << 24) | (0xE << 20) | 1).into());
                 }
                 Ok(Flow::Next)
             }
+            // WFI: a pending interrupt, masked or not (`InterruptPending`),
+            // ends it before it would wait.
             3 => {
+                if self.irq_line || self.fiq_line {
+                    return Ok(Flow::Next);
+                }
                 if self.pstate.el == El::El0 && self.sys.sctlr_el1 & SCTLR_NTWI == 0 {
                     return Err(Exception::new(ExceptionClass::WfxTrap, (1 << 24) | (0xE << 20)).into());
                 }
                 Ok(Flow::Wait)
+            }
+            // SEV signals every processor, and this is the only one; SEVL
+            // signals this one.
+            4 | 5 => {
+                self.send_event_local();
+                Ok(Flow::Next)
             }
             _ => Ok(Flow::Next),
         }
@@ -229,7 +253,7 @@ impl Cpu {
                 }
                 let va = self.x_or_zr(rt);
                 let as_el = if op2 >= 2 { El::El0 } else { El::El1 };
-                self.address_translate(bus, va, op2 & 1 == 1, as_el);
+                self.address_translate(bus, va, op2 & 1 == 1, as_el)?;
                 Ok(Flow::Next)
             }
             // TLBI VMALLE1IS, VAE1IS, ASIDE1IS, VAAE1IS, VALE1IS, VAALE1IS
@@ -303,17 +327,21 @@ impl Cpu {
                 }
             }
             psci::CPU_OFF => return Err(Fault::Stop(StopCause::CpuOff)),
+            // A misaligned entry point is refused before the target is
+            // looked up, and the target is the processor whose affinity
+            // value equals the argument exactly (QEMU target/arm/arm-powerctl.c
+            // `arm_set_cpu_on`, `arm_get_cpu_by_id`). The only processor is on.
             psci::CPU_ON_32 | psci::CPU_ON_64 => {
-                if self.x[1] & 0xFF_00FF_FFFF == 0 {
-                    psci::ALREADY_ON
-                } else {
+                if self.x[2] & 3 != 0 || self.x[1] != psci::AFFINITY {
                     psci::INVALID_PARAMETERS
+                } else {
+                    psci::ALREADY_ON
                 }
             }
             psci::AFFINITY_INFO_32 | psci::AFFINITY_INFO_64 => {
                 // Levels above 0 are always on; at level 0 only this
                 // processor's affinity exists.
-                if self.x[2] != 0 || self.x[1] & 0xFF_00FF_FFFF == 0 {
+                if self.x[2] != 0 || self.x[1] == psci::AFFINITY {
                     0 // ON
                 } else {
                     psci::INVALID_PARAMETERS

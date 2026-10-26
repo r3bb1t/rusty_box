@@ -133,6 +133,7 @@ impl Cpu {
     /// [`Cpu::new`]'s, which `a_reset_keeps_time_and_restores_reset_values`
     /// checks.
     pub(crate) fn reset_keeping_time(&mut self, reset_pc: u64) {
+        let count = self.counter();
         let Cpu {
             x,
             sp_el0,
@@ -144,6 +145,7 @@ impl Cpu {
             fpsr,
             sys,
             monitor,
+            event,
             tlb,
             traces,
             trace_break,
@@ -168,6 +170,7 @@ impl Cpu {
         *fpsr = 0;
         *sys = SysRegs::reset(*counter_hz);
         *monitor = ExclusiveMonitor::CLEAR;
+        *event = super::timer::EventRegister::clear_at(count);
         tlb.flush();
         traces.flush();
         *trace_break = true;
@@ -281,7 +284,10 @@ impl Cpu {
         }
         w.write_bool(self.monitor.armed)?;
         w.write_u64(self.monitor.addr)?;
+        w.write_u64(self.monitor.va)?;
         w.write_u64(self.monitor.bytes)?;
+        w.write_bool(self.event.set)?;
+        w.write_u64(self.event.stream_from)?;
         w.write_bool(self.activity == Activity::WaitingForInterrupt)?;
         w.write_u64(self.icount)?;
         w.write_u64(self.retired)?;
@@ -321,7 +327,12 @@ impl Cpu {
         let monitor = ExclusiveMonitor {
             armed: r.read_bool()?,
             addr: r.read_u64()?,
+            va: r.read_u64()?,
             bytes: r.read_u64()?,
+        };
+        let event = super::timer::EventRegister {
+            set: r.read_bool()?,
+            stream_from: r.read_u64()?,
         };
         let activity = if r.read_bool()? {
             Activity::WaitingForInterrupt
@@ -356,6 +367,7 @@ impl Cpu {
         self.fpsr = fpsr;
         self.sys = SysRegs::from_array(sys);
         self.monitor = monitor;
+        self.event = event;
         self.activity = activity;
         self.icount = icount;
         self.retired = retired;
@@ -421,9 +433,12 @@ mod tests {
         c.sys.cntv_cval_el0 = 99;
         c.fpcr = FPCR_MASK;
         c.monitor.armed = true;
+        c.send_event_local();
         c.activity = Activity::WaitingForInterrupt;
         c.set_interrupt_lines(true, true);
         c.reset_keeping_time(0x2000);
+        // The Event Register is clear, with the event stream counted from now.
+        assert_eq!(c.event, crate::cpu::timer::EventRegister::clear_at(c.counter()));
         assert_eq!((c.icount, c.retired), (500, 400));
         assert_eq!(c.reg(Reg::Pc), 0x2000);
         // Everything else is as a processor built to start there has it.

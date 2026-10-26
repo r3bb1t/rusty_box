@@ -313,6 +313,22 @@ integration tests of the public API.
   of the page; and in flash, where the CFI Read Status command makes the
   next fetch of code that already ran read the status register, an
   UNDEFINED instruction.
+- `tests/alignment.rs`: alignment faults as the guest sees them — a Q
+  register access to Device memory (and with the MMU off) checked against 16
+  bytes, an alignment fault on a Device page taken ahead of its permission
+  fault, an access running from Normal memory into a Device page faulting
+  where that page starts, and a Q register store across into an unmapped
+  page writing nothing.
+- `tests/wfx_and_debug.rs`: WFI and WFE trap from EL0 only when they would
+  wait — WFI not when an interrupt is pending, masked or not; WFE not when
+  the Event Register, set by `SEV`, `SEVL`, an exception return or the
+  virtual event stream, is set — and the Debug Communications Channel
+  registers read as zero, ignore writes and trap from EL0 under
+  `MDSCR_EL1.TDCC`.
+- `tests/translation_and_firmware.rs`: an out-of-range T1SZ, a table base or
+  block beyond the output size `TCR_EL1.IPS` selects, `AT` meeting an
+  external abort on its walk, PSCI's affinity and entry-point checks, and a
+  store-exclusive to an unmonitored address failing without a fault.
 
 ## Where the references differ
 
@@ -340,6 +356,27 @@ choice is listed here with its evidence.
   the word is a PRFM with a reserved `prfop`, which the Arm ARM executes as a
   hint, as QEMU does; the decoder conformance test lists it as its one
   departure from Arm's allocation.
+- **`DC ZVA` on Device memory is an alignment fault.** Arm ARM
+  `AArch64.S1HasAlignmentFault` faults every `DC ZVA` to Device memory, and
+  with the MMU off every data access is to Device memory. QEMU 11.1.2 zeroes
+  the block instead (`target/arm/tcg/helper-a64.c` `HELPER(dc_zva)`, whose
+  comment notes that it does not implement the architecturally mandated
+  fault); this model takes the fault.
+- **The Event Register is set by exception returns and the event stream
+  too.** Arm ARM `AArch64.ExceptionReturn` sets it (`SendEventLocal`), and
+  so does each event of the virtual event stream (`TestEventCNTV`, under
+  `CNTKCTL_EL1.EVNTEN`). QEMU 11.1.2 sets it for `SEV` and `SEVL` only. The
+  register decides whether a WFE at EL0 traps under `SCTLR_EL1.nTWE`; this
+  model follows the Arm ARM. A WFE that does not consume an event completes
+  at once rather than waiting, as the Arm ARM permits, so only the
+  instruction count of a WFE loop differs from QEMU, whose WFE sleeps.
+- **A pair or a 16-byte store across a page boundary.** Arm ARM `STP`
+  makes two accesses, so a fault on the second element's page comes after
+  the first element is written; QEMU 11.1.2 stores a pair of X registers as
+  one 16-byte access whose pages are both translated first. This model makes
+  the pseudocode's two accesses. A single 16-byte `STR Q` across a page, like
+  a scalar store across one, translates both pages before writing anything,
+  as QEMU does.
 
 ## Not implemented
 

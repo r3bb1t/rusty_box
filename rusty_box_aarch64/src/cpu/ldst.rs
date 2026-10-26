@@ -11,7 +11,7 @@
 use super::dp::extend_reg;
 use super::exec::{bit, bits, sext, ExecResult, Flow};
 use super::mmu::DataAccess;
-use super::Cpu;
+use super::{Cpu, ExclusiveMonitor};
 use crate::bus::PhysBus;
 
 /// How a single-register load/store forms its address: the three offset
@@ -354,17 +354,30 @@ impl Cpu {
                 let v = self.read_mem(bus, address, size, DataAccess::ORDERED)?;
                 self.set_x_or_zr(rt, v);
             }
-            self.monitor.armed = true;
-            self.monitor.addr = pa;
-            self.monitor.bytes = total;
+            self.monitor = ExclusiveMonitor {
+                armed: true,
+                addr: pa,
+                va: address,
+                bytes: total,
+            };
             return Ok(Flow::Next);
         }
 
-        // Store-exclusive: translation and permission faults are reported
-        // whether or not the monitor would have let the store happen.
-        let pa = self.translate_for(bus, address, total, true, DataAccess::ORDERED)?;
+        // Store-exclusive (Arm ARM `AArch64.ExclusiveMonitorsPass`): a
+        // misaligned address faults first. A store to an address other than
+        // the one the monitor holds then fails without being translated, as
+        // in QEMU, which compares the address before any access
+        // (target/arm/tcg/translate-a64.c `gen_store_exclusive`); otherwise
+        // its translation and permission faults are reported, and the
+        // physical address it reaches must be the monitored one.
         let m = self.monitor;
-        let pass = m.armed && m.addr == pa && m.bytes == total;
+        let same_va = m.armed && m.va == address && m.bytes == total;
+        let pass = if same_va || address & (total - 1) != 0 {
+            let pa = self.translate_for(bus, address, total, true, DataAccess::ORDERED)?;
+            same_va && m.addr == pa
+        } else {
+            false
+        };
         self.monitor.armed = false;
         if pass {
             if pair {

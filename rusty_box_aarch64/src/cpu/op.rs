@@ -305,8 +305,8 @@ pub(crate) fn predecode(class: Class, word: u32) -> Op {
             }
         }
         Class::Hint => match bits(word, 11, 5) {
-            // WFE and WFI have their own effects.
-            2 | 3 => generic,
+            // WFE, WFI, SEV and SEVL have their own effects.
+            2..=5 => generic,
             _ => Op::Nop,
         },
         Class::LoadStoreUnsignedImmediate => {
@@ -487,7 +487,7 @@ const fn class_ends_trace(class: Class, word: u32) -> bool {
         // UNDEFINED, SVC/HVC/BRK, and BR/BLR/RET/ERET forms with any field
         // the handler rejects: control leaves, or the instruction faults.
         Class::Undefined | Class::ExceptionGeneration | Class::BranchImmediate | Class::BranchRegister => true,
-        // WFE and WFI.
+        // WFE, WFI, SEV and SEVL.
         Class::Hint => true,
         Class::System => {
             let read = bit(word, 21);

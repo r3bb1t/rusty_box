@@ -211,7 +211,11 @@ pub enum Activity {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ExclusiveMonitor {
     pub(crate) armed: bool,
+    /// The physical address of the monitored granule.
     pub(crate) addr: u64,
+    /// The virtual address the load-exclusive used, which a store-exclusive
+    /// compares first (Arm ARM `AArch64.IsExclusiveVA`).
+    pub(crate) va: u64,
     pub(crate) bytes: u64,
 }
 
@@ -220,6 +224,7 @@ impl ExclusiveMonitor {
     pub(crate) const CLEAR: Self = Self {
         armed: false,
         addr: 0,
+        va: 0,
         bytes: 0,
     };
 }
@@ -330,6 +335,7 @@ pub struct Cpu {
     pub(crate) fpsr: u64,
     pub(crate) sys: SysRegs,
     pub(crate) monitor: ExclusiveMonitor,
+    pub(crate) event: timer::EventRegister,
     pub(crate) tlb: Tlb,
     pub(crate) traces: trace::TraceCache,
     /// Set by anything that may change how the next instruction is fetched
@@ -373,6 +379,7 @@ impl Cpu {
             fpsr: 0,
             sys: SysRegs::reset(config.counter_hz),
             monitor: ExclusiveMonitor::CLEAR,
+            event: timer::EventRegister::clear_at(0),
             tlb: Tlb::new(),
             traces: trace::TraceCache::new(),
             trace_break: false,
