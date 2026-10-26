@@ -42,6 +42,8 @@ pub use mmu::{Tlb, TranslationFault};
 pub use regs::{CpuState, Reg, SysReg, SysRegRefusal, VReg};
 pub use timer::TimerLines;
 
+use exec::Nzcv;
+
 /// An exception level this processor implements.
 ///
 /// Closed (R5): EL2 and EL3 do not exist on this core, and an `ERET` that
@@ -150,6 +152,14 @@ impl Pstate {
     #[inline]
     pub const fn nzcv(self) -> u64 {
         ((self.n as u64) << 31) | ((self.z as u64) << 30) | ((self.c as u64) << 29) | ((self.v as u64) << 28)
+    }
+
+    #[inline]
+    pub(crate) fn set_flags(&mut self, flags: Nzcv) {
+        self.n = flags.n;
+        self.z = flags.z;
+        self.c = flags.c;
+        self.v = flags.v;
     }
 
     #[inline]

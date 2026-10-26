@@ -4,7 +4,7 @@
 //! comment on each names the encodings it accepts and the pseudocode helper
 //! it follows.
 
-use super::exec::{bit, bits, sext, ExecResult, Flow};
+use super::exec::{bit, bits, sext, ExecResult, Flow, Nzcv};
 use super::Cpu;
 
 /// `AddWithCarry` result: the value and the flags it would set.
@@ -15,6 +15,14 @@ pub(crate) struct AddResult {
     pub(crate) z: bool,
     pub(crate) c: bool,
     pub(crate) v: bool,
+}
+
+impl AddResult {
+    /// The flags the result would set.
+    #[inline(always)]
+    pub(crate) const fn nzcv(&self) -> Nzcv {
+        Nzcv { n: self.n, z: self.z, c: self.c, v: self.v }
+    }
 }
 
 /// Arm ARM `AddWithCarry(x, y, carry_in)` at 64 or 32 bits.
@@ -170,10 +178,7 @@ pub(crate) fn decode_bit_masks(n: bool, imms: u32, immr: u32, immediate: bool, s
 impl Cpu {
     #[inline]
     pub(super) fn set_flags(&mut self, r: AddResult) {
-        self.pstate.n = r.n;
-        self.pstate.z = r.z;
-        self.pstate.c = r.c;
-        self.pstate.v = r.v;
+        self.pstate.set_flags(r.nzcv());
     }
 
     /// Flags of a logical result: N and Z from the value, C and V cleared.

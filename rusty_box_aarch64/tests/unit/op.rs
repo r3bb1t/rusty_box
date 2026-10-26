@@ -25,6 +25,7 @@ use rusty_box_core::{ClockHz, VmClock};
 use super::{predecode, Op};
 use crate::bus::{AccessWidth, BusFault, PhysAddr, PhysBus};
 use crate::cpu::decode::classify;
+use crate::cpu::exec::{cond_holds, Nzcv};
 use crate::cpu::{Cpu, CpuConfig, El, Pstate};
 
 /// The RAM: one page at the base of the 1 GiB the identity map covers.
@@ -187,7 +188,7 @@ fn snapshot(cpu: &Cpu) -> Vec<u8> {
 }
 
 /// `(mask, value)`: the fixed bits of an encoding class.
-const TEMPLATES: [(u32, u32, &str); 21] = [
+const TEMPLATES: [(u32, u32, &str); 22] = [
     (0x1F80_0000, 0x1100_0000, "add/sub (immediate)"),
     (0x1F20_0000, 0x0B00_0000, "add/sub (shifted register)"),
     (0x1F80_0000, 0x1200_0000, "logical (immediate)"),
@@ -209,6 +210,7 @@ const TEMPLATES: [(u32, u32, &str); 21] = [
     (0x3800_0000, 0x2800_0000, "load/store pair"),
     (0x1F20_0C00, 0x1E20_0800, "floating-point data processing (2 source)"),
     (0x1F00_0000, 0x1F00_0000, "floating-point data processing (3 source)"),
+    (0xFFFF_FF00, 0xD53B_E000, "MRS of a generic timer counter register"),
 ];
 
 #[test]
@@ -255,11 +257,39 @@ fn every_pre_decoded_op_executes_as_its_class_handler_does() {
     }
 }
 
+#[test]
+fn counter_reads_predecode_to_their_own_op() {
+    for word in [0xD53B_E040, 0xD53B_E05F, 0xD53B_E020] {
+        assert_eq!(predecode(classify(word), word), Op::ReadCounter { word }, "{word:#010x}");
+    }
+    // MRS CNTFRQ_EL0 and MSR CNTV_TVAL_EL0 stay with their class.
+    for word in [0xD53B_E000, 0xD51B_E304] {
+        assert!(matches!(predecode(classify(word), word), Op::Class { .. }), "{word:#010x}");
+    }
+}
+
+#[test]
+fn a_condition_holds_on_a_flag_value_as_it_does_on_pstate() {
+    let mut cpu = Cpu::new(CpuConfig {
+        ips: ClockHz::BOCHS_DEFAULT,
+        counter_hz: ClockHz::BOCHS_DEFAULT,
+        reset_pc: RAM,
+    });
+    for bits in 0..16u32 {
+        let flags = Nzcv { n: bits & 8 != 0, z: bits & 4 != 0, c: bits & 2 != 0, v: bits & 1 != 0 };
+        cpu.pstate.set_flags(flags);
+        assert_eq!((cpu.pstate.n, cpu.pstate.z, cpu.pstate.c, cpu.pstate.v), (flags.n, flags.z, flags.c, flags.v));
+        for cond in 0..16 {
+            assert_eq!(cond_holds(flags, cond), cpu.condition_holds(cond), "flags {bits:#06b} cond {cond:#06b}");
+        }
+    }
+}
+
 /// The name of every `Op` variant but `Class`.
-const VARIANTS: [&str; 30] = [
+const VARIANTS: [&str; 31] = [
     "AddImm", "AddsImm", "AddSubShift", "LogImm", "LogShift", "MovImm", "Movk", "Adr", "Adrp", "Ubfm", "Sbfm", "Bfm",
     "CondSel", "Madd", "BCond", "Cbz", "Tbz", "B", "Bl", "Br", "Blr", "Nop", "LoadImm", "StoreImm", "LoadReg",
-    "StoreReg", "LoadPair", "StorePair", "FpDp2", "FpDp3",
+    "StoreReg", "LoadPair", "StorePair", "FpDp2", "FpDp3", "ReadCounter",
 ];
 
 fn variant(op: Op) -> &'static str {
@@ -295,5 +325,6 @@ fn variant(op: Op) -> &'static str {
         Op::StorePair { .. } => "StorePair",
         Op::FpDp2 { .. } => "FpDp2",
         Op::FpDp3 { .. } => "FpDp3",
+        Op::ReadCounter { .. } => "ReadCounter",
     }
 }

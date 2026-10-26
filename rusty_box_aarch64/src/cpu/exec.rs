@@ -436,3 +436,41 @@ impl Cpu {
         }
     }
 }
+
+/// The condition flags N, Z, C and V as a value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Nzcv {
+    pub(crate) n: bool,
+    pub(crate) z: bool,
+    pub(crate) c: bool,
+    pub(crate) v: bool,
+}
+
+/// The condition `cond` (Arm ARM `ConditionHolds`) against `flags`.
+///
+/// This is [`Cpu::condition_holds`]'s table over a flag value, and
+/// `tests/unit/op.rs` checks the two agree on every condition and flag
+/// state. `condition_holds` keeps its own copy because it runs on every
+/// `b.cond` of the trace loop: reading `PSTATE`'s fields in each arm loads
+/// only the flags that condition names, where a [`Nzcv`] argument is loaded
+/// whole ahead of the condition switch.
+#[allow(dead_code)] // Arm ARM `ConditionHolds` over a flag value; no caller holds one yet.
+#[inline(always)]
+pub(crate) const fn cond_holds(flags: Nzcv, cond: u32) -> bool {
+    let Nzcv { n, z, c, v } = flags;
+    let result = match cond >> 1 {
+        0 => z,
+        1 => c,
+        2 => n,
+        3 => v,
+        4 => c && !z,
+        5 => n == v,
+        6 => n == v && !z,
+        _ => true,
+    };
+    if cond & 1 == 1 && cond != 0b1111 {
+        !result
+    } else {
+        result
+    }
+}

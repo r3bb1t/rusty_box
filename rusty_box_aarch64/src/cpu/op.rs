@@ -134,6 +134,9 @@ pub(crate) enum Op {
     FpDp2 { op: FpBinary, ty: FpType, rd: u8, rn: u8, rm: u8 },
     /// FMADD/FMSUB/FNMADD/FNMSUB, of SIMD&FP registers.
     FpDp3 { form: FusedMulAdd, ty: FpType, rd: u8, rn: u8, rm: u8, ra: u8 },
+    /// MRS Xt, CNTPCT_EL0 and MRS Xt, CNTVCT_EL0: the system counter read,
+    /// executed by the System class handler from `word`.
+    ReadCounter { word: u32 },
 }
 
 const _: () = assert!(core::mem::size_of::<Op>() == 16);
@@ -375,10 +378,18 @@ pub(crate) fn predecode(class: Class, word: u32) -> Op {
             Some(ty) => Op::FpDp3 { form: dp3_form(word), ty, rd, rn, rm, ra: reg(word, 10) },
             None => generic,
         },
+        Class::System => {
+            // MRS Xt, CNTPCT_EL0 (op2 1) and MRS Xt, CNTVCT_EL0 (op2 2):
+            // the system register encoding with Rt masked off.
+            if matches!(word & !0x1F, 0xD53B_E020 | 0xD53B_E040) {
+                Op::ReadCounter { word }
+            } else {
+                generic
+            }
+        }
         Class::Undefined
         | Class::Extract
         | Class::ExceptionGeneration
-        | Class::System
         | Class::SimdLoadStoreMultiple
         | Class::SimdLoadStoreMultiplePostIndexed
         | Class::SimdLoadStoreSingle
@@ -476,7 +487,8 @@ impl Op {
             | Self::LoadPair { .. }
             | Self::StorePair { .. }
             | Self::FpDp2 { .. }
-            | Self::FpDp3 { .. } => false,
+            | Self::FpDp3 { .. }
+            | Self::ReadCounter { .. } => false,
         }
     }
 }
@@ -614,6 +626,7 @@ impl Cpu {
         }
         match *source.op(self) {
             Op::Class { class, word } => Ok(completed!(self.exec_class(bus, pc, class, word))),
+            Op::ReadCounter { word } => Ok(completed!(self.exec_class(bus, pc, Class::System, word))),
             Op::AddImm { sf, rd, rn, imm } => {
                 let value = self.x_or_sp(u32::from(rn)).wrapping_add(imm);
                 self.set_x_or_sp_sized(u32::from(rd), value, sf);
