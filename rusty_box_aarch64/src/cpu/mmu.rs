@@ -326,9 +326,8 @@ impl Cpu {
     }
 
     /// Translate `va` for an access of `kind` checked against `el`'s
-    /// permissions. The TLB hit is inlined into every access path; a miss
-    /// walks out of line.
-    #[inline(always)]
+    /// permissions.
+    #[inline]
     pub(crate) fn translate<B: PhysBus>(
         &mut self,
         bus: &mut B,
@@ -338,6 +337,26 @@ impl Cpu {
     ) -> Result<Translated, Fsc> {
         let r = self.resolve(bus, va, kind)?;
         r.permit(kind, el)
+    }
+
+    /// The translation of `va` when stage 1 is enabled and the TLB holds an
+    /// entry for it that permits an access of `kind` at `el`: the one case
+    /// that raises no fault of the walk or of the page's permissions. Every
+    /// access path tries it inline, and makes its checks in their order out
+    /// of line only when it is `None`.
+    #[inline(always)]
+    fn permitted_hit(&self, va: u64, kind: AccessKind, el: El) -> Option<Translated> {
+        if !self.mmu_enabled() {
+            return None;
+        }
+        let entry = self.tlb.entries[Tlb::slot(va)];
+        if entry.tag != va >> 12 || !permitted(entry.perms, kind, el) {
+            return None;
+        }
+        Some(Translated {
+            pa: entry.pa_page | (va & 0xFFF),
+            device: entry.device,
+        })
     }
 
     /// What `va` translates to, before any permission check: the walk's
@@ -645,8 +664,19 @@ impl Cpu {
 
     /// The physical address of the instruction at `pc` (already known to be
     /// aligned), or the Instruction Abort its translation raises.
-    #[inline]
+    #[inline(always)]
     pub(crate) fn fetch_translate<B: PhysBus>(&mut self, bus: &mut B, pc: u64) -> Result<u64, Fault> {
+        match self.permitted_hit(pc, AccessKind::Fetch, self.pstate.el) {
+            Some(t) => Ok(t.pa),
+            None => self.fetch_translate_checked(bus, pc),
+        }
+    }
+
+    /// [`Cpu::fetch_translate`] with every check made: stage 1 disabled, a
+    /// TLB miss, or a page that does not permit the fetch.
+    #[cold]
+    #[inline(never)]
+    fn fetch_translate_checked<B: PhysBus>(&mut self, bus: &mut B, pc: u64) -> Result<u64, Fault> {
         let el = self.pstate.el;
         self.translate(bus, pc, AccessKind::Fetch, el)
             .map(|t| t.pa)
@@ -676,8 +706,31 @@ impl Cpu {
     /// the Device-memory alignment fault (`AArch64.S1HasAlignmentFault`)
     /// before the permission fault. For an access, or a part of a larger one
     /// whose alignment is `fit`, that stays in one page.
+    ///
+    /// A permitted TLB hit that is aligned, or is on Normal memory with no
+    /// alignment check enabled, raises none of these faults, and is answered
+    /// inline; everything else makes the checks in order out of line.
     #[inline(always)]
     fn translate_data<B: PhysBus>(
+        &mut self,
+        bus: &mut B,
+        va: u64,
+        fit: Fit,
+        kind: AccessKind,
+        acc: DataAccess,
+    ) -> Result<Translated, Fault> {
+        if let Some(t) = self.permitted_hit(va, kind, self.access_el(acc)) {
+            if fit == Fit::Aligned || !(t.device || acc.strict_align || self.strict_alignment()) {
+                return Ok(t);
+            }
+        }
+        self.translate_data_checked(bus, va, fit, kind, acc)
+    }
+
+    /// [`Cpu::translate_data`] with every check made, in order.
+    #[cold]
+    #[inline(never)]
+    fn translate_data_checked<B: PhysBus>(
         &mut self,
         bus: &mut B,
         va: u64,
