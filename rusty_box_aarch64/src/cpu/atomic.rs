@@ -9,7 +9,7 @@
 //! (`A`, `R`) order nothing further here.
 
 use super::exec::{bit, bits, sext, ExecResult, Flow};
-use super::mmu::DataAccess;
+use super::mmu::{DataAccess, DataDirection};
 use super::Cpu;
 use crate::bus::PhysBus;
 
@@ -76,10 +76,11 @@ fn atomic_result(op: AtomicOp, old: u128, operand: u128, bits: u32) -> Option<u1
 impl Cpu {
     /// Arm `MemAtomic`: an atomic read-modify-write of `1 << log2` bytes at
     /// `va` (`log2` in 0..=4), returning the value read. The alignment rule
-    /// is the atomic one, and translation is for writing: an atomic access
-    /// reads and writes, and reports every fault with WnR set.
+    /// is the atomic one, and the access reads and writes
+    /// (`CreateAccDescAtomicOp`): a fault reports WnR set only when it is
+    /// the write that the page refuses.
     fn atomic_rmw<B: PhysBus>(&mut self, bus: &mut B, va: u64, log2: u32, op: AtomicOp, operand: u128) -> Result<u128, super::exec::Fault> {
-        let pa = self.translate_for(bus, va, 1 << log2, true, DataAccess::ATOMIC)?;
+        let pa = self.translate_for(bus, va, 1 << log2, DataDirection::ReadWrite, DataAccess::ATOMIC)?;
         let old = self.read_translated(bus, va, pa, log2)?;
         if let Some(new) = atomic_result(op, old, operand, 8 << log2) {
             self.write_translated(bus, va, pa, log2, new)?;

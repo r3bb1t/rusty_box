@@ -156,6 +156,19 @@ pub(crate) enum Condsel {
     Csneg64,
 }
 
+/// Arm group `rmif`: Rotate right into flags.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum Rmif {
+    Rmif,
+}
+
+/// Arm group `setf`: Evaluate into flags.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum Setf {
+    Setf8,
+    Setf16,
+}
+
 /// Arm group `dp_3src`: Data-processing (3 source).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum Dp3src {
@@ -187,10 +200,11 @@ pub(super) fn dpreg(word: u32) -> Option<Encoding> {
         0b1 => match bits(word, 24, 24) {
             0b1 => dp_3src(word).map(Encoding::Dp3src),
             0b0 => match op2 {
-                // op3 = 001xxx is addsub_pt (FEAT_CPA), x00001 rmif and
-                // xx0010 setf (FEAT_FlagM).
+                // op3 = 001xxx is addsub_pt (FEAT_CPA).
                 0b0000 => match op3 {
                     0b000000 => addsub_carry(word).map(Encoding::AddsubCarry),
+                    0b000001 | 0b100001 => rmif(word).map(Encoding::Rmif),
+                    0b000010 | 0b010010 | 0b100010 | 0b110010 => setf(word).map(Encoding::Setf),
                     _ => None,
                 },
                 0b0010 => match bits(word, 11, 11) {
@@ -208,6 +222,32 @@ pub(super) fn dpreg(word: u32) -> Option<Encoding> {
             },
             _ => None,
         },
+        _ => None,
+    }
+}
+
+fn rmif(word: u32) -> Option<Rmif> {
+    let sf = bits(word, 31, 31);
+    let op = bits(word, 30, 30);
+    let s = bits(word, 29, 29);
+    let o2 = bits(word, 4, 4);
+    match (sf, op, s, o2) {
+        (0b1, 0b0, 0b1, 0b0) => Some(Rmif::Rmif),
+        _ => None,
+    }
+}
+
+fn setf(word: u32) -> Option<Setf> {
+    let sf = bits(word, 31, 31);
+    let op = bits(word, 30, 30);
+    let s = bits(word, 29, 29);
+    let opcode2 = bits(word, 20, 15);
+    let sz = bits(word, 14, 14);
+    let o3 = bits(word, 4, 4);
+    let mask = bits(word, 3, 0);
+    match (sf, op, s, opcode2, sz, o3, mask) {
+        (0b0, 0b0, 0b1, 0b000000, 0b0, 0b0, 0b1101) => Some(Setf::Setf8),
+        (0b0, 0b0, 0b1, 0b000000, 0b1, 0b0, 0b1101) => Some(Setf::Setf16),
         _ => None,
     }
 }

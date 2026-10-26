@@ -34,7 +34,11 @@ mod pauth;
 #[cfg(test)]
 #[path = "../../tests/unit/pointer_auth.rs"]
 mod pointer_auth;
+#[cfg(test)]
+#[path = "../../tests/unit/pstate_features.rs"]
+mod pstate_features;
 mod regs;
+mod sctlr;
 mod simd;
 mod simd_arith;
 mod simd_bf16;
@@ -139,10 +143,27 @@ pub struct Pstate {
     pub il: bool,
     /// [`Btype::None`] on a processor without FEAT_BTI.
     pub btype: Btype,
+    /// `PSTATE.PAN` (FEAT_PAN): EL1 data accesses to memory EL0 can reach
+    /// fault. False on a processor without the feature.
+    pub pan: bool,
+    /// `PSTATE.UAO` (FEAT_UAO): LDTR and STTR at EL1 are checked against
+    /// EL1's permissions. False on a processor without the feature.
+    pub uao: bool,
+    /// `PSTATE.DIT` (FEAT_DIT): data-independent timing, which an
+    /// interpreter's timing has whatever the bit says. False on a processor
+    /// without the feature.
+    pub dit: bool,
+    /// `PSTATE.SSBS` (FEAT_SSBS): whether speculative loads may bypass
+    /// stores, which an interpreter never speculates. False on a processor
+    /// without the feature.
+    pub ssbs: bool,
 }
 
 impl Pstate {
-    /// The state out of reset: EL1 with `SP_EL1`, every interrupt masked.
+    /// The state out of reset (Arm `AArch64_TakeReset`): EL1 with `SP_EL1`,
+    /// every interrupt masked, DIT clear. PAN and UAO, which reset leaves
+    /// UNKNOWN, and SSBS, which it sets to an IMPLEMENTATION DEFINED value,
+    /// are clear, as QEMU's `arm_cpu_reset_hold` leaves them.
     pub const RESET: Self = Self {
         n: false,
         z: false,
@@ -157,7 +178,23 @@ impl Pstate {
         ss: false,
         il: false,
         btype: Btype::None,
+        pan: false,
+        uao: false,
+        dit: false,
+        ssbs: false,
     };
+
+    /// `SPSR_ELx.SSBS`, and the bit the `SSBS` register reads it at.
+    pub(crate) const SSBS: u64 = 1 << 12;
+    /// `SPSR_ELx.PAN`, and the bit the `PAN` register reads it at.
+    pub(crate) const PAN: u64 = 1 << 22;
+    /// `SPSR_ELx.UAO`, and the bit the `UAO` register reads it at.
+    pub(crate) const UAO: u64 = 1 << 23;
+    /// `SPSR_ELx.DIT`, and the bit the `DIT` register reads it at.
+    pub(crate) const DIT: u64 = 1 << 24;
+    /// The `SPSR_ELx` bits of the fields every processor has: NZCV, SS, IL,
+    /// DAIF and M.
+    pub(crate) const BASE: u64 = 0xF030_03DF;
 
     /// The `SPSR_ELx` encoding of this state (AArch64 form, `M[4]` = 0).
     pub const fn to_spsr(self) -> u64 {
@@ -166,8 +203,20 @@ impl Pstate {
         v |= (self.z as u64) << 30;
         v |= (self.c as u64) << 29;
         v |= (self.v as u64) << 28;
+        if self.dit {
+            v |= Self::DIT;
+        }
+        if self.uao {
+            v |= Self::UAO;
+        }
+        if self.pan {
+            v |= Self::PAN;
+        }
         v |= (self.ss as u64) << 21;
         v |= (self.il as u64) << 20;
+        if self.ssbs {
+            v |= Self::SSBS;
+        }
         v |= self.btype.bits() << 10;
         v |= (self.d as u64) << 9;
         v |= (self.a as u64) << 8;
@@ -205,6 +254,10 @@ impl Pstate {
             ss: spsr & (1 << 21) != 0,
             il: spsr & (1 << 20) != 0,
             btype: Btype::from_bits(spsr >> 10),
+            pan: spsr & Self::PAN != 0,
+            uao: spsr & Self::UAO != 0,
+            dit: spsr & Self::DIT != 0,
+            ssbs: spsr & Self::SSBS != 0,
         })
     }
 

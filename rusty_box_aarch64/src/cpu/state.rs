@@ -202,12 +202,40 @@ impl Cpu {
         self.write_v(usize::from(reg.index()), value);
     }
 
-    /// Replace `PSTATE`. At EL0 the only stack pointer is `SP_EL0`, so
-    /// `sp_sel` is cleared there, and without FEAT_BTI `btype` is 00.
+    /// Replace `PSTATE` with what of `pstate` this processor can hold.
     pub(crate) fn set_pstate(&mut self, pstate: Pstate) {
-        let sp_sel = pstate.sp_sel && pstate.el == El::El1;
-        let btype = if self.implements(Feature::Bti) { pstate.btype } else { Btype::None };
-        self.pstate = Pstate { sp_sel, btype, ..pstate };
+        self.pstate = self.held(pstate);
+    }
+
+    /// `pstate` as this processor holds it: at EL0 the only stack pointer
+    /// is `SP_EL0`, so `sp_sel` is cleared there, and a field of a feature
+    /// the processor lacks is clear (`btype` 00).
+    pub(crate) fn held(&self, pstate: Pstate) -> Pstate {
+        let has = |feature| self.implements(feature);
+        Pstate {
+            sp_sel: pstate.sp_sel && pstate.el == El::El1,
+            btype: if has(Feature::Bti) { pstate.btype } else { Btype::None },
+            pan: pstate.pan && has(Feature::Pan),
+            uao: pstate.uao && has(Feature::Uao),
+            dit: pstate.dit && has(Feature::Dit),
+            ssbs: pstate.ssbs && has(Feature::Ssbs),
+            ..pstate
+        }
+    }
+
+    /// The `SPSR_EL1` bits that hold a field of this processor's `PSTATE`:
+    /// [`Pstate::BASE`], and those of the fields [`Cpu::held`] keeps. The
+    /// rest are RES0.
+    pub(crate) fn spsr_mask(&self) -> u64 {
+        let every = Pstate {
+            btype: Btype::Jump,
+            pan: true,
+            uao: true,
+            dit: true,
+            ssbs: true,
+            ..Pstate::RESET
+        };
+        Pstate::BASE | self.held(every).to_spsr()
     }
 
     /// A copy of the architectural state now.
@@ -295,8 +323,8 @@ impl Cpu {
         let pc = r.read_u64()?;
         let pstate = Pstate::from_spsr(r.read_u64()?)
             .ok_or(SnapError::Invalid("processor state names an exception level or mode this core lacks"))?;
-        if pstate.btype != Btype::None && !self.implements(Feature::Bti) {
-            return Err(SnapError::Invalid("processor state holds a BTYPE on a processor without FEAT_BTI"));
+        if self.held(pstate) != pstate {
+            return Err(SnapError::Invalid("processor state holds a field of a feature this processor lacks"));
         }
         let mut v = [0u128; 32];
         for reg in v.iter_mut() {
@@ -313,6 +341,9 @@ impl Cpu {
         let sys = SysRegs::from_array(sys);
         if !self.sme_registers_restorable(&sys) {
             return Err(SnapError::Invalid("snapshot holds SME register bits this processor cannot set"));
+        }
+        if sys.spsr_el1 & !self.spsr_mask() != 0 {
+            return Err(SnapError::Invalid("snapshot's SPSR_EL1 holds bits this processor cannot set"));
         }
         let monitor = ExclusiveMonitor {
             armed: r.read_bool()?,

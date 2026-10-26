@@ -633,6 +633,32 @@ impl Cpu {
         self.set_x_or_zr_sized(bits(insn, 4, 0), value, sf);
         Ok(Flow::Next)
     }
+
+    /// RMIF (FEAT_FlagM): `1 0 1 11010000 imm6 00001 Rn 0 mask`. The four
+    /// bits of `Xn` from bit `imm6` up, wrapping past bit 63 (`(reg ::
+    /// reg)[imm+3:imm]`), go into the flags `mask` selects, N to V from
+    /// bit 3 to bit 0.
+    pub(crate) fn exec_rmif(&mut self, insn: u32) -> ExecResult {
+        let flags = self.x_or_zr(bits(insn, 9, 5)).rotate_right(bits(insn, 20, 15)) & 0xF;
+        let mask = u64::from(bits(insn, 3, 0));
+        let nzcv = self.pstate.nzcv();
+        self.pstate.set_nzcv((nzcv & !(mask << 28)) | ((flags & mask) << 28));
+        Ok(Flow::Next)
+    }
+
+    /// SETF8, SETF16 (FEAT_FlagM): `0 0 1 11010000 000000 sz 0010 Rn 0
+    /// 1101`. For the low `8 << sz` bits of `Wn` as a signed value, N is
+    /// its sign, Z whether it is zero, V whether bit `8 << sz` differs from
+    /// the sign (the value does not fit); C is unchanged.
+    pub(crate) fn exec_setf(&mut self, insn: u32) -> ExecResult {
+        let size = 8u32 << bits(insn, 14, 14);
+        let reg = self.x_or_zr(bits(insn, 9, 5)) as u32;
+        let sign = (reg >> (size - 1)) & 1;
+        self.pstate.n = sign == 1;
+        self.pstate.z = reg & ((1 << size) - 1) == 0;
+        self.pstate.v = (reg >> size) & 1 != sign;
+        Ok(Flow::Next)
+    }
 }
 
 #[cfg(test)]

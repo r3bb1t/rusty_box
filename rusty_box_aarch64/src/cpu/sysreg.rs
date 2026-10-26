@@ -10,7 +10,7 @@
 use super::features::Feature;
 use super::id;
 use super::regs::{SysReg, SysRegRefusal};
-use super::{Cpu, El, SysRegs};
+use super::{sctlr, Cpu, El, Pstate, SysRegs};
 
 /// Who is accessing a system register.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,9 +121,13 @@ const ELR_EL1: u32 = key!(3, 0, 4, 0, 1);
 const SP_EL0: u32 = key!(3, 0, 4, 1, 0);
 const SPSEL: u32 = key!(3, 0, 4, 2, 0);
 const CURRENT_EL: u32 = key!(3, 0, 4, 2, 2);
+const PAN: u32 = key!(3, 0, 4, 2, 3);
+const UAO: u32 = key!(3, 0, 4, 2, 4);
 const NZCV: u32 = key!(3, 3, 4, 2, 0);
 const DAIF: u32 = key!(3, 3, 4, 2, 1);
 const SVCR: u32 = key!(3, 3, 4, 2, 2);
+const DIT: u32 = key!(3, 3, 4, 2, 5);
+const SSBS: u32 = key!(3, 3, 4, 2, 6);
 const FPCR: u32 = key!(3, 3, 4, 4, 0);
 const FPSR: u32 = key!(3, 3, 4, 4, 1);
 const AFSR0_EL1: u32 = key!(3, 0, 5, 1, 0);
@@ -198,13 +202,6 @@ const EL0PCTEN: u64 = 1 << 0;
 const EL0VCTEN: u64 = 1 << 1;
 const EL0VTEN: u64 = 1 << 8;
 const EL0PTEN: u64 = 1 << 9;
-
-/// `SCTLR_EL1` EL0 controls.
-const SCTLR_UMA: u64 = 1 << 9;
-const SCTLR_DZE: u64 = 1 << 14;
-const SCTLR_UCT: u64 = 1 << 15;
-/// `SCTLR_EL1.EnTP2` (FEAT_SME): EL0 may access `TPIDR2_EL0`.
-const SCTLR_ENTP2: u64 = 1 << 60;
 
 /// `CPACR_EL1.FPEN`.
 const CPACR_FPEN: u64 = 3 << 20;
@@ -292,7 +289,7 @@ impl Cpu {
         match k {
             NZCV => return Ok(self.pstate.nzcv()),
             DAIF => {
-                if el0 && self.sys.sctlr_el1 & SCTLR_UMA == 0 {
+                if el0 && self.sys.sctlr_el1 & sctlr::UMA == 0 {
                     return Err(SysRegError::TrapToEl1);
                 }
                 return Ok(self.pstate.daif());
@@ -304,23 +301,25 @@ impl Cpu {
                 return Ok(if k == FPCR { self.fpcr } else { self.fpsr });
             }
             CTR_EL0 => {
-                if el0 && self.sys.sctlr_el1 & SCTLR_UCT == 0 {
+                if el0 && self.sys.sctlr_el1 & sctlr::UCT == 0 {
                     return Err(SysRegError::TrapToEl1);
                 }
                 return Ok(id::CTR_EL0);
             }
             DCZID_EL0 => {
-                let prohibited = el0 && self.sys.sctlr_el1 & SCTLR_DZE == 0;
+                let prohibited = el0 && self.sys.sctlr_el1 & sctlr::DZE == 0;
                 return Ok(id::DCZID_BLOCK_LOG2_WORDS | (u64::from(prohibited) << 4));
             }
             TPIDR_EL0 => return Ok(self.sys.tpidr_el0),
             TPIDRRO_EL0 => return Ok(self.sys.tpidrro_el0),
+            DIT if self.implements(Feature::Dit) => return Ok(if self.pstate.dit { Pstate::DIT } else { 0 }),
+            SSBS if self.implements(Feature::Ssbs2) => return Ok(if self.pstate.ssbs { Pstate::SSBS } else { 0 }),
             SVCR if self.implements(Feature::Sme) => {
                 self.sme_register_check(el, accessor)?;
                 return Ok(self.svcr.bits());
             }
             TPIDR2_EL0 if self.implements(Feature::Sme) => {
-                if el0 && self.sys.sctlr_el1 & SCTLR_ENTP2 == 0 {
+                if el0 && self.sys.sctlr_el1 & sctlr::ENTP2 == 0 {
                     return Err(SysRegError::TrapToEl1);
                 }
                 return Ok(self.sys.tpidr2_el0);
@@ -379,7 +378,7 @@ impl Cpu {
             ID_AA64ISAR0_EL1 => id::id_aa64isar0(self.imp.features),
             ID_AA64ISAR1_EL1 => id::id_aa64isar1(self.imp.features),
             ID_AA64MMFR0_EL1 => id::ID_AA64MMFR0_EL1,
-            ID_AA64MMFR1_EL1 => id::ID_AA64MMFR1_EL1,
+            ID_AA64MMFR1_EL1 => id::id_aa64mmfr1(self.imp.features),
             ID_AA64MMFR2_EL1 => id::id_aa64mmfr2(self.imp.features),
             CCSIDR_EL1 => self.ccsidr(),
             CLIDR_EL1 => id::CLIDR_EL1,
@@ -421,6 +420,20 @@ impl Cpu {
             }
             SPSEL => u64::from(self.pstate.sp_sel),
             CURRENT_EL => self.pstate.el.index() << 2,
+            PAN if self.implements(Feature::Pan) => {
+                if self.pstate.pan {
+                    Pstate::PAN
+                } else {
+                    0
+                }
+            }
+            UAO if self.implements(Feature::Uao) => {
+                if self.pstate.uao {
+                    Pstate::UAO
+                } else {
+                    0
+                }
+            }
             AFSR0_EL1 => self.sys.afsr0_el1,
             AFSR1_EL1 => self.sys.afsr1_el1,
             ESR_EL1 => self.sys.esr_el1,
@@ -504,7 +517,7 @@ impl Cpu {
                 return Ok(WriteEffect::None);
             }
             DAIF => {
-                if el0 && self.sys.sctlr_el1 & SCTLR_UMA == 0 {
+                if el0 && self.sys.sctlr_el1 & sctlr::UMA == 0 {
                     return Err(SysRegError::TrapToEl1);
                 }
                 self.pstate.set_daif(value);
@@ -527,6 +540,14 @@ impl Cpu {
                 self.sys.tpidr_el0 = value;
                 return Ok(WriteEffect::None);
             }
+            DIT if self.implements(Feature::Dit) => {
+                self.pstate.dit = value & Pstate::DIT != 0;
+                return Ok(WriteEffect::None);
+            }
+            SSBS if self.implements(Feature::Ssbs2) => {
+                self.pstate.ssbs = value & Pstate::SSBS != 0;
+                return Ok(WriteEffect::None);
+            }
             // Arm `SVCR` setter: `SetPSTATE_SM(value<0>)`, then
             // `SetPSTATE_ZA(value<1>)`.
             SVCR if self.implements(Feature::Sme) => {
@@ -536,7 +557,7 @@ impl Cpu {
                 return Ok(WriteEffect::None);
             }
             TPIDR2_EL0 if self.implements(Feature::Sme) => {
-                if el0 && self.sys.sctlr_el1 & SCTLR_ENTP2 == 0 {
+                if el0 && self.sys.sctlr_el1 & sctlr::ENTP2 == 0 {
                     return Err(SysRegError::TrapToEl1);
                 }
                 self.sys.tpidr2_el0 = value;
@@ -615,9 +636,7 @@ impl Cpu {
                 WriteEffect::FlushTlb
             }
             SPSR_EL1 => {
-                // BTYPE, bits 11:10, with FEAT_BTI.
-                let btype = if self.implements(Feature::Bti) { 0b11 << 10 } else { 0 };
-                self.sys.spsr_el1 = value & (0xF030_03DF | btype);
+                self.sys.spsr_el1 = value & self.spsr_mask();
                 WriteEffect::None
             }
             ELR_EL1 => {
@@ -637,6 +656,14 @@ impl Cpu {
                 // processor is at EL0 leaves SP_EL0 selected, as
                 // `set_pstate` does, so the state stays one SPSR can encode.
                 self.pstate.sp_sel = value & 1 != 0 && self.pstate.el == El::El1;
+                WriteEffect::None
+            }
+            PAN if self.implements(Feature::Pan) => {
+                self.pstate.pan = value & Pstate::PAN != 0;
+                WriteEffect::None
+            }
+            UAO if self.implements(Feature::Uao) => {
+                self.pstate.uao = value & Pstate::UAO != 0;
                 WriteEffect::None
             }
             AFSR0_EL1 => {

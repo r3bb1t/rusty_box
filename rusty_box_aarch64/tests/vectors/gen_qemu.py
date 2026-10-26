@@ -110,6 +110,11 @@ def fcadd_opcode(w):
     return w & ~(1 << 11) if w >> 13 & 1 else w
 
 
+def flag_op2(w):
+    """CFINV, XAFLAG, AXFLAG: `op2` 000, 001 or 010; 011 is MSR UAO."""
+    return w & ~(1 << 5) if w >> 5 & 3 == 3 else w
+
+
 def unsigned_fcvtz(w):
     """FCVTZS (scalar, fixed-point) to half precision: QEMU 8.2.2 writes the
     16-bit result sign-extended to 32 bits, where Arm's `V[d] = result`
@@ -191,6 +196,13 @@ FAMILIES = [
     ("bf16_mlal", "B", 0x2EC0FC00, 0x401F03FF, None),
     ("bf16_mlal_elem", "B", 0x0FC0F000, 0x403F0BFF, None),
     ("bf16_mmla", "B", 0x6E40EC00, 0x001F03FF, None),
+    # FEAT_FlagM and FEAT_FlagM2: CFINV, XAFLAG, AXFLAG; RMIF; SETF8 and
+    # SETF16.
+    ("flagm_pstate", "D", 0xD500401F, 0x00000060, flag_op2),
+    ("flagm_rmif", "D", 0xBA000400, 0x001F83EF, None),
+    ("flagm_setf", "D", 0x3A00080D, 0x000043E0, None),
+    # FEAT_SB: SB.
+    ("sb", "D", 0xD50330FF, 0x00000000, None),
 ]
 
 

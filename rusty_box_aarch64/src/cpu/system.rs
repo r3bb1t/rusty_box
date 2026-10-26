@@ -5,17 +5,13 @@
 
 use super::exception::{Exception, ExceptionClass};
 use super::exec::{bit, bits, ExecResult, Fault, Flow, StopCause};
+use super::features::Feature;
+use super::mmu::AtCheck;
 use super::sme::SmeTrap;
 use super::sysreg::{SysRegError, SysRegKey, WriteEffect};
-use super::{Cpu, El};
+use super::{sctlr, Cpu, El};
 use crate::bus::PhysBus;
 
-/// `SCTLR_EL1` EL0 controls the instructions here consult.
-const SCTLR_UMA: u64 = 1 << 9;
-const SCTLR_DZE: u64 = 1 << 14;
-const SCTLR_NTWI: u64 = 1 << 16;
-const SCTLR_NTWE: u64 = 1 << 18;
-const SCTLR_UCI: u64 = 1 << 26;
 
 /// PSCI function identifiers (Arm DEN 0022) and return codes.
 mod psci {
@@ -106,13 +102,13 @@ impl Cpu {
             // WFE: there is no other processor to send an event, and WFE may
             // complete at any time, so it completes at once.
             2 => {
-                if self.pstate.el == El::El0 && self.sys.sctlr_el1 & SCTLR_NTWE == 0 {
+                if self.pstate.el == El::El0 && self.sys.sctlr_el1 & sctlr::NTWE == 0 {
                     return Err(Exception::new(ExceptionClass::WfxTrap, (1 << 24) | (0xE << 20) | 1).into());
                 }
                 Ok(Flow::Next)
             }
             3 => {
-                if self.pstate.el == El::El0 && self.sys.sctlr_el1 & SCTLR_NTWI == 0 {
+                if self.pstate.el == El::El0 && self.sys.sctlr_el1 & sctlr::NTWI == 0 {
                     return Err(Exception::new(ExceptionClass::WfxTrap, (1 << 24) | (0xE << 20)).into());
                 }
                 Ok(Flow::Wait)
@@ -163,6 +159,8 @@ impl Cpu {
         if rt != 31 {
             return self.undefined(pc, insn);
         }
+        let el0 = self.pstate.el == El::El0;
+        let operand = crm & 1 != 0;
         match crn {
             3 => match op2 {
                 // CLREX
@@ -170,23 +168,48 @@ impl Cpu {
                     self.monitor.armed = false;
                     Ok(Flow::Next)
                 }
-                // DSB, DMB, ISB: an interpreter that retires each access in
-                // order before the next has nothing to wait for.
-                4..=6 => Ok(Flow::Next),
+                // DSB, DMB, ISB, and SB (FEAT_SB, which the decoder admits
+                // with CRm = 0 alone): an interpreter that retires each
+                // access in order before the next, and never speculates, has
+                // nothing to wait for.
+                4..=7 => Ok(Flow::Next),
                 _ => self.undefined(pc, insn),
             },
+            // MSR (immediate): op1 = 000 needs EL1, op1 = 011 is open to
+            // EL0 but for the DAIF controls; a field of a feature this
+            // processor lacks is UNDEFINED.
             4 => match (op1, op2) {
+                // UAO (FEAT_UAO)
+                (0, 3) if self.implements(Feature::Uao) && !el0 => {
+                    self.pstate.uao = operand;
+                    Ok(Flow::Next)
+                }
+                // PAN (FEAT_PAN)
+                (0, 4) if self.implements(Feature::Pan) && !el0 => {
+                    self.pstate.pan = operand;
+                    Ok(Flow::Next)
+                }
                 // SPSel
                 (0, 5) => {
-                    if self.pstate.el == El::El0 {
+                    if el0 {
                         return self.undefined(pc, insn);
                     }
-                    self.pstate.sp_sel = crm & 1 != 0;
+                    self.pstate.sp_sel = operand;
+                    Ok(Flow::Next)
+                }
+                // SSBS (FEAT_SSBS)
+                (3, 1) if self.implements(Feature::Ssbs) => {
+                    self.pstate.ssbs = operand;
+                    Ok(Flow::Next)
+                }
+                // DIT (FEAT_DIT)
+                (3, 2) if self.implements(Feature::Dit) => {
+                    self.pstate.dit = operand;
                     Ok(Flow::Next)
                 }
                 // DAIFSet / DAIFClr
                 (3, 6) | (3, 7) => {
-                    if self.pstate.el == El::El0 && self.sys.sctlr_el1 & SCTLR_UMA == 0 {
+                    if self.pstate.el == El::El0 && self.sys.sctlr_el1 & sctlr::UMA == 0 {
                         let key = SysRegKey::from_insn(insn);
                         return Err(Exception::new(ExceptionClass::SysRegTrap, key.trap_iss(rt, false)).into());
                     }
@@ -197,11 +220,42 @@ impl Cpu {
                 }
                 // SVCRSM, SVCRZA, SVCRSMZA (FEAT_SME): SMSTART, SMSTOP.
                 (3, 3) => self.exec_msr_svcr(pc, insn),
-                // PAN, UAO, DIT, SSBS, TCO...: features this core lacks.
+                // ALLINT and PM (op1 001), TCO (3, 4): features this core
+                // lacks.
                 _ => self.undefined(pc, insn),
             },
             _ => self.undefined(pc, insn),
         }
+    }
+
+    /// CFINV (FEAT_FlagM), XAFLAG and AXFLAG (FEAT_FlagM2), by `op2`. XAFLAG
+    /// turns the flags a floating-point compare sets into the ones an
+    /// integer compare would for the same outcome, AXFLAG the reverse,
+    /// with an unordered result as Z and C both set.
+    pub(crate) fn exec_flag_manipulation(&mut self, pc: u64, insn: u32) -> ExecResult {
+        let p = &mut self.pstate;
+        let (z, c, v) = (p.z, p.c, p.v);
+        match bits(insn, 7, 5) {
+            // CFINV
+            0b000 => p.c = !c,
+            // XAFLAG
+            0b001 => {
+                p.n = !c && !z;
+                p.z = z && c;
+                p.c = c || z;
+                p.v = !c && z;
+            }
+            // AXFLAG
+            0b010 => {
+                p.n = false;
+                p.z = z || v;
+                p.c = c && !v;
+                p.v = false;
+            }
+            // MSR (immediate), which the decoder does not send here.
+            _ => return self.undefined(pc, insn),
+        }
+        Ok(Flow::Next)
     }
 
     /// `SYS`: cache maintenance, address translation and TLB maintenance.
@@ -222,14 +276,14 @@ impl Cpu {
             }
             // IC IVAU, DC CVAC, DC CVAU, DC CIVAC: EL0 needs SCTLR_EL1.UCI.
             (3, 7, 5, 1) | (3, 7, 10, 1) | (3, 7, 11, 1) | (3, 7, 14, 1) => {
-                if el0 && self.sys.sctlr_el1 & SCTLR_UCI == 0 {
+                if el0 && self.sys.sctlr_el1 & sctlr::UCI == 0 {
                     return Err(trap);
                 }
                 Ok(Flow::Next)
             }
             // DC ZVA: EL0 needs SCTLR_EL1.DZE.
             (3, 7, 4, 1) => {
-                if el0 && self.sys.sctlr_el1 & SCTLR_DZE == 0 {
+                if el0 && self.sys.sctlr_el1 & sctlr::DZE == 0 {
                     return Err(trap);
                 }
                 let va = self.x_or_zr(rt);
@@ -244,14 +298,19 @@ impl Cpu {
                 }
                 Ok(Flow::Next)
             }
-            // AT S1E1R, S1E1W, S1E0R, S1E0W.
-            (0, 7, 8, 0..=3) => {
-                if el0 {
+            // AT S1E1R, S1E1W, S1E0R, S1E0W, and with FEAT_PAN2 AT S1E1RP
+            // and S1E1WP, which PSTATE.PAN takes part in.
+            (0, 7, 8, 0..=3) | (0, 7, 9, 0 | 1) => {
+                if el0 || (crm == 9 && !self.implements(Feature::Pan2)) {
                     return self.undefined(pc, insn);
                 }
                 let va = self.x_or_zr(rt);
-                let as_el = if op2 >= 2 { El::El0 } else { El::El1 };
-                self.address_translate(bus, va, op2 & 1 == 1, as_el);
+                let checked = match (crm, op2 >> 1) {
+                    (9, _) => AtCheck::El1Pan,
+                    (_, 0) => AtCheck::El1,
+                    _ => AtCheck::El0,
+                };
+                self.address_translate(bus, va, op2 & 1 == 1, checked);
                 Ok(Flow::Next)
             }
             // TLBI VMALLE1IS, VAE1IS, ASIDE1IS, VAAE1IS, VALE1IS, VAALE1IS

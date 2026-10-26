@@ -65,3 +65,7 @@ bf16_dot_elem: 200 vectors from 200 encodings
 bf16_mlal: 200 vectors from 200 encodings
 bf16_mlal_elem: 200 vectors from 200 encodings
 bf16_mmla: 200 vectors from 200 encodings
+flagm_pstate: 200 vectors from 200 encodings
+flagm_rmif: 200 vectors from 200 encodings
+flagm_setf: 200 vectors from 200 encodings
+sb: 200 vectors from 200 encodings

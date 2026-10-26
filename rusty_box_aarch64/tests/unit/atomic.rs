@@ -87,8 +87,10 @@ fn data_abort(far: u64, dfsc: u64, write: bool) -> Taken {
     }
 }
 
-/// `DFSC` of an alignment fault, and of a permission fault at level 2.
+/// `DFSC` of an alignment fault, and of a translation and a permission
+/// fault at level 2.
 const ALIGNMENT: u64 = 0b10_0001;
+const TRANSLATION_L2: u64 = 0b00_0110;
 const PERMISSION_L2: u64 = 0b00_1110;
 
 /// A processor at EL1 with the MMU on over [`Ram`]: a level-1 table whose
@@ -273,12 +275,14 @@ fn without_lse_and_rcpc_their_encodings_are_undefined() {
 }
 
 /// `CreateAccDescAtomicOp` makes an atomic access a read and a write, and
-/// `AArch64.FaultSyndrome` reports `fault.write` in WnR: an atomic that
-/// faults on a read-only page reports a write, whatever it would compute,
-/// even a compare-and-swap whose comparison would fail. A load-acquire is
-/// a read.
+/// `AArch64_FaultSyndrome` reports `fault.write` in WnR. A permission
+/// fault's is the access the page refuses, read before write
+/// (`AArch64_S1CheckPermissions`): an atomic on a read-only page reports a
+/// write, whatever it would compute, even a compare-and-swap whose
+/// comparison would fail. Any other fault's is `NoFault`'s, `!read &&
+/// write`: a translation fault reports a read. A load-acquire is a read.
 #[test]
-fn an_atomic_reports_its_fault_as_a_write() {
+fn an_atomic_reports_a_refused_write_as_a_write() {
     let mut m = Machine::new(Implementation::EVERY_FEATURE);
     m.poke(RO, 0x1234, 8);
     m.cpu.x[1] = 1;
@@ -291,6 +295,13 @@ fn an_atomic_reports_its_fault_as_a_write() {
     }
     assert_eq!(m.exec(ldapr(3, 3, 2)), None);
     assert_eq!(m.cpu.x[2], 0x1234);
+
+    // The level-2 entry past the three blocks is invalid.
+    const UNMAPPED: u64 = 0x60_0000;
+    m.cpu.x[3] = UNMAPPED;
+    for insn in [ldadd(3, 1, 3, 2), cas(3, 1, 3, 2), casp(1, 0, 3, 2)] {
+        assert_eq!(m.exec(insn), Some(data_abort(UNMAPPED, TRANSLATION_L2, false)), "{insn:#010x}");
+    }
 }
 
 /// `MemAtomic`: a compare-and-swap whose comparison fails makes no write
@@ -342,7 +353,9 @@ fn casp_with_an_odd_register_is_undefined() {
 /// `AArch64_UnalignedAccessFaults` for an atomic or exclusive access: with
 /// FEAT_LSE2 a misaligned one faults only when it leaves its 16-byte
 /// granule; without, always. Device memory faults on any misaligned
-/// access, and `SCTLR_EL1.A` makes every one fault.
+/// access, and `SCTLR_EL1.A` makes every one fault. An atomic's alignment
+/// fault reports WnR clear (`AlignmentFault` is `NoFault`'s record, whose
+/// `write` is `!accdesc.read && accdesc.write`).
 #[test]
 fn with_lse2_an_atomic_may_be_misaligned_within_16_bytes() {
     let mut m = Machine::new(Implementation::EVERY_FEATURE);
@@ -354,19 +367,19 @@ fn with_lse2_an_atomic_may_be_misaligned_within_16_bytes() {
 
     for (size, address) in [(2, RW + 0xE), (3, RW + 0x9)] {
         m.cpu.x[3] = address;
-        assert_eq!(m.exec(ldadd(size, 1, 3, 2)), Some(data_abort(address, ALIGNMENT, true)));
+        assert_eq!(m.exec(ldadd(size, 1, 3, 2)), Some(data_abort(address, ALIGNMENT, false)));
         assert!(m.ram.writes.is_empty());
     }
     m.cpu.x[4] = RW + 8;
-    assert_eq!(m.exec(casp(1, 0, 4, 2)), Some(data_abort(RW + 8, ALIGNMENT, true)));
+    assert_eq!(m.exec(casp(1, 0, 4, 2)), Some(data_abort(RW + 8, ALIGNMENT, false)));
 
     m.cpu.x[3] = DEVICE + 1;
-    assert_eq!(m.exec(ldadd(1, 1, 3, 2)), Some(data_abort(DEVICE + 1, ALIGNMENT, true)));
+    assert_eq!(m.exec(ldadd(1, 1, 3, 2)), Some(data_abort(DEVICE + 1, ALIGNMENT, false)));
 
     m.cpu.x[3] = RW + 0x2;
     assert_eq!(m.exec(ldxr(2, 3, 2)), None);
     m.cpu.sys.sctlr_el1 |= SCTLR_A;
-    assert_eq!(m.exec(ldadd(2, 1, 3, 2)), Some(data_abort(RW + 0x2, ALIGNMENT, true)));
+    assert_eq!(m.exec(ldadd(2, 1, 3, 2)), Some(data_abort(RW + 0x2, ALIGNMENT, false)));
     assert_eq!(m.exec(ldxr(2, 3, 2)), Some(data_abort(RW + 0x2, ALIGNMENT, false)));
 
     let mut a57 = Machine::new(Implementation::CORTEX_A57);

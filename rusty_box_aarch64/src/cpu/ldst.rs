@@ -10,7 +10,7 @@
 
 use super::dp::extend_reg;
 use super::exec::{bit, bits, sext, ExecResult, Flow};
-use super::mmu::DataAccess;
+use super::mmu::{DataAccess, DataDirection};
 use super::Cpu;
 use crate::bus::PhysBus;
 
@@ -344,7 +344,7 @@ impl Cpu {
         let total = 1u64 << total_log2;
 
         if load {
-            let pa = self.translate_for(bus, address, total, false, DataAccess::ATOMIC)?;
+            let pa = self.translate_for(bus, address, total, DataDirection::Read, DataAccess::ATOMIC)?;
             if pair {
                 let elem = 1u64 << size;
                 let a = self.read_mem(bus, address, size, DataAccess::ATOMIC)?;
@@ -363,7 +363,7 @@ impl Cpu {
 
         // Store-exclusive: translation and permission faults are reported
         // whether or not the monitor would have let the store happen.
-        let pa = self.translate_for(bus, address, total, true, DataAccess::ATOMIC)?;
+        let pa = self.translate_for(bus, address, total, DataDirection::Write, DataAccess::ATOMIC)?;
         let m = self.monitor;
         let pass = m.armed && m.addr == pa.get() && m.bytes == total;
         self.monitor.armed = false;

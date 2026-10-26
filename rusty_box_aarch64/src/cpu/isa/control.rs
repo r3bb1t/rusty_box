@@ -60,12 +60,44 @@ pub(crate) enum Barriers {
     DsbBo,
     DmbBo,
     IsbBi,
+    Sb,
+}
+
+impl Barriers {
+    pub(crate) const fn feature(self) -> Feature {
+        match self {
+            Self::ClrexBn | Self::DsbBo | Self::DmbBo | Self::IsbBi => Feature::Base,
+            Self::Sb => Feature::Sb,
+        }
+    }
 }
 
 /// Arm group `pstate`: PSTATE.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum Pstate {
     MsrSi,
+    CfinvM,
+    XaflagM,
+    AxflagM,
+}
+
+impl Pstate {
+    /// MSR (immediate) is a system instruction; CFINV, XAFLAG and AXFLAG
+    /// share a handler, which reads which from `op2`.
+    pub(crate) const fn class(self) -> Class {
+        match self {
+            Self::MsrSi => Class::System,
+            Self::CfinvM | Self::XaflagM | Self::AxflagM => Class::FlagManipulation,
+        }
+    }
+
+    pub(crate) const fn feature(self) -> Feature {
+        match self {
+            Self::MsrSi => Feature::Base,
+            Self::CfinvM => Feature::FlagM,
+            Self::XaflagM | Self::AxflagM => Feature::FlagM2,
+        }
+    }
 }
 
 /// Arm group `systeminstrs`: System instructions.
@@ -275,26 +307,32 @@ impl Hints {
 }
 
 fn barriers(word: u32) -> Option<Barriers> {
+    let crm = bits(word, 11, 8);
     let op2 = bits(word, 7, 5);
     let rt = bits(word, 4, 0);
-    match (op2, rt) {
-        (0b010, 0b11111) => Some(Barriers::ClrexBn),
-        (0b100, 0b11111) => Some(Barriers::DsbBo),
-        (0b101, 0b11111) => Some(Barriers::DmbBo),
-        (0b110, 0b11111) => Some(Barriers::IsbBi),
-        // DSB nXS (FEAT_XS), SB (FEAT_SB).
+    match (crm, op2, rt) {
+        (_, 0b010, 0b11111) => Some(Barriers::ClrexBn),
+        (_, 0b100, 0b11111) => Some(Barriers::DsbBo),
+        (_, 0b101, 0b11111) => Some(Barriers::DmbBo),
+        (_, 0b110, 0b11111) => Some(Barriers::IsbBi),
+        (0b0000, 0b111, 0b11111) => Some(Barriers::Sb),
+        // DSB nXS (FEAT_XS).
         _ => None,
     }
 }
 
 fn pstate(word: u32) -> Option<Pstate> {
     let op1 = bits(word, 18, 16);
+    let crm = bits(word, 11, 8);
     let op2 = bits(word, 7, 5);
     let rt = bits(word, 4, 0);
-    match (op1, op2, rt) {
-        // CFINV, XAFLAG and AXFLAG (FEAT_FlagM, FEAT_FlagM2).
-        (0b000, 0b000..=0b010, _) => None,
-        (_, _, 0b11111) => Some(Pstate::MsrSi),
+    match (op1, crm, op2, rt) {
+        (0b000, 0b0000, 0b000, 0b11111) => Some(Pstate::CfinvM),
+        (0b000, 0b0000, 0b001, 0b11111) => Some(Pstate::XaflagM),
+        (0b000, 0b0000, 0b010, 0b11111) => Some(Pstate::AxflagM),
+        // MSR (immediate) is not these op1 and op2, whatever CRm.
+        (0b000, _, 0b000..=0b010, _) => None,
+        (_, _, _, 0b11111) => Some(Pstate::MsrSi),
         _ => None,
     }
 }

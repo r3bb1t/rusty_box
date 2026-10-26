@@ -28,17 +28,20 @@ pub const REVIDR_EL1: u64 = 0;
 /// EL1 = 1 (AArch64 only), EL2 = EL3 = 0 (not implemented), FP (19:16) and
 /// AdvSIMD (23:20) 1 with FEAT_FP16 (half-precision arithmetic) and 0
 /// without, GIC = 0 (no system-register interface: the GIC is a
-/// memory-mapped v2).
+/// memory-mapped v2), DIT (51:48) = 1 with FEAT_DIT.
 pub(crate) const fn id_aa64pfr0(features: Features) -> u64 {
-    0x11 | field(features, Feature::Fp16, 16, 1) | field(features, Feature::Fp16, 20, 1)
+    0x11 | field(features, Feature::Fp16, 16, 1) | field(features, Feature::Fp16, 20, 1) | field(features, Feature::Dit, 48, 1)
 }
 
 /// `ID_AA64PFR1_EL1` of a processor implementing `features`: `BT` (bits
-/// 3:0) = 1 with FEAT_BTI (2 would be FEAT_BTIE), `SME` (bits 27:24) = 1
-/// with FEAT_SME, without FEAT_SME2 (`Features.json`: `FEAT_SME <=>
-/// UInt(ID_AA64PFR1_EL1.SME) >= 1`); nothing else from v8.1+.
+/// 3:0) = 1 with FEAT_BTI (2 would be FEAT_BTIE), `SSBS` (7:4) = 1 with
+/// FEAT_SSBS and 2 with FEAT_SSBS2 as well (which `Features.json` makes
+/// imply FEAT_SSBS), `SME` (bits 27:24) = 1 with FEAT_SME, without
+/// FEAT_SME2 (`Features.json`: `FEAT_SME <=> UInt(ID_AA64PFR1_EL1.SME) >=
+/// 1`); nothing else from v8.1+.
 pub(crate) const fn id_aa64pfr1(features: Features) -> u64 {
-    field(features, Feature::Bti, 0, 1) | field(features, Feature::Sme, 24, 1)
+    let ssbs = chain_level(features, &[Feature::Ssbs, Feature::Ssbs2]);
+    field(features, Feature::Bti, 0, 1) | (ssbs << 4) | field(features, Feature::Sme, 24, 1)
 }
 
 /// `ID_AA64SMFR0_EL1` of a processor implementing `features`: with
@@ -67,11 +70,13 @@ pub const ID_AA64DFR0_EL1: u64 = 0x0000_0000_0010_1006;
 /// with FEAT_AES (AESE, AESD, AESMC, AESIMC and the 64-bit PMULL), SHA1
 /// (11:8) = 1, SHA2 (15:12) = 1 (SHA-256 only), CRC32 (19:16) = 1, Atomic
 /// (23:20) = 2 with FEAT_LSE, RDM (31:28) = 1, DP (47:44) = 1 with
-/// FEAT_DotProd and FHM (51:48) = 1; no SHA-512, SHA3, SM3, SM4 or other
-/// field. The Cortex-A57's is 0x11120, as QEMU sets it in
-/// `aarch64_aa32_a57_init` (target/arm/cpu-max.c), which
+/// FEAT_DotProd, FHM (51:48) = 1, and TS (55:52) = 1 with FEAT_FlagM and 2
+/// with FEAT_FlagM2 as well (which `Features.json` makes imply FEAT_FlagM);
+/// no SHA-512, SHA3, SM3, SM4 or other field. The Cortex-A57's is 0x11120,
+/// as QEMU sets it in `aarch64_aa32_a57_init` (target/arm/cpu-max.c), which
 /// `aarch64_a57_initfn` calls.
 pub(crate) const fn id_aa64isar0(features: Features) -> u64 {
+    let ts = chain_level(features, &[Feature::FlagM, Feature::FlagM2]);
     field(features, Feature::Aes, 4, 2)
         | field(features, Feature::Sha1, 8, 1)
         | field(features, Feature::Sha256, 12, 1)
@@ -80,6 +85,7 @@ pub(crate) const fn id_aa64isar0(features: Features) -> u64 {
         | field(features, Feature::Rdm, 28, 1)
         | field(features, Feature::DotProd, 44, 1)
         | field(features, Feature::Fhm, 48, 1)
+        | (ts << 52)
 }
 
 /// `ID_AA64ISAR1_EL1` of a processor implementing `features`: JSCVT
@@ -93,16 +99,10 @@ pub(crate) const fn id_aa64isar0(features: Features) -> u64 {
 /// FEAT_FPACCOMBINE (5) the pointer authentication follows, the last two
 /// acting only with FEAT_PAuth2 (which `Features.json` makes them imply),
 /// and GPA (27:24) = 1 (`FEAT_PACQARMA5 <=> UInt(GPA) >= 1`); API and GPI
-/// stay 0, as no IMPLEMENTATION DEFINED algorithm is implemented. Nothing
-/// else from v8.2+.
+/// stay 0, as no IMPLEMENTATION DEFINED algorithm is implemented. SB
+/// (39:36) = 1 with FEAT_SB. Nothing else from v8.2+.
 pub(crate) const fn id_aa64isar1(features: Features) -> u64 {
-    let lrcpc = if !features.has(Feature::Lrcpc) {
-        0
-    } else if features.has(Feature::Lrcpc2) {
-        2
-    } else {
-        1
-    };
+    let lrcpc = chain_level(features, &[Feature::Lrcpc, Feature::Lrcpc2]);
     let apa = if !(features.has(Feature::PAuth) && features.has(Feature::PacQarma5)) {
         0
     } else if !features.has(Feature::PAuth2) {
@@ -120,6 +120,7 @@ pub(crate) const fn id_aa64isar1(features: Features) -> u64 {
         | (lrcpc << 20)
         | field(features, Feature::PacQarma5, 24, 1)
         | field(features, Feature::Frintts, 32, 1)
+        | field(features, Feature::Sb, 36, 1)
         | field(features, Feature::Bf16, 44, 1)
         | field(features, Feature::I8mm, 52, 1)
 }
@@ -141,10 +142,29 @@ pub(crate) const fn id_aa64zfr0(features: Features) -> u64 {
     }
 }
 
-/// `ID_AA64MMFR2_EL1` of a processor implementing `features`: AT (35:32) =
-/// 1 with FEAT_LSE2; nothing else from v8.1+.
+/// `ID_AA64MMFR1_EL1` of a processor implementing `features`: PAN (23:20)
+/// names the newest of FEAT_PAN (1), FEAT_PAN2 (2) and FEAT_PAN3 (3) the
+/// processor implements, each of which `Features.json` makes imply the one
+/// before; nothing else from v8.1+.
+pub(crate) const fn id_aa64mmfr1(features: Features) -> u64 {
+    chain_level(features, &[Feature::Pan, Feature::Pan2, Feature::Pan3]) << 20
+}
+
+/// `ID_AA64MMFR2_EL1` of a processor implementing `features`: UAO (7:4) = 1
+/// with FEAT_UAO, AT (35:32) = 1 with FEAT_LSE2; nothing else from v8.1+.
 pub(crate) const fn id_aa64mmfr2(features: Features) -> u64 {
-    field(features, Feature::Lse2, 32, 1)
+    field(features, Feature::Uao, 4, 1) | field(features, Feature::Lse2, 32, 1)
+}
+
+/// The ID register field of a chain of features each of which
+/// `Features.json` makes imply the one before (FEAT_PAN, FEAT_PAN2,
+/// FEAT_PAN3): how many of `chain`, from its first, `features` holds.
+const fn chain_level(features: Features, chain: &[Feature]) -> u64 {
+    let mut n = 0;
+    while n < chain.len() && features.has(chain[n]) {
+        n += 1;
+    }
+    n as u64
 }
 
 /// `value` in the ID register field at `lsb` when `features` holds
@@ -162,9 +182,6 @@ const fn field(features: Features, feature: Feature, lsb: u32, value: u64) -> u6
 /// TGran16 = 0 (not supported), TGran64 = 0xF (not supported), TGran4 = 0
 /// (supported). Only the 4 KiB granule is implemented, so only it is offered.
 pub const ID_AA64MMFR0_EL1: u64 = 0x0000_0000_0F00_0024;
-
-/// `ID_AA64MMFR1_EL1`: nothing from v8.1+.
-pub const ID_AA64MMFR1_EL1: u64 = 0;
 
 /// Physical address width implied by `ID_AA64MMFR0_EL1.PARange`.
 pub const PA_BITS: u32 = 44;

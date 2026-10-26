@@ -88,6 +88,31 @@ pub(crate) enum Feature {
     PacQarma5,
     /// FEAT_BTI: BTI, PSTATE.BTYPE and guarded pages.
     Bti,
+    /// FEAT_FlagM: CFINV, RMIF, SETF8, SETF16.
+    FlagM,
+    /// FEAT_FlagM2: AXFLAG, XAFLAG.
+    FlagM2,
+    /// FEAT_SB: SB.
+    Sb,
+    /// FEAT_PAN: PSTATE.PAN, which refuses EL1 data accesses to memory EL0
+    /// can reach. No encoding of its own.
+    Pan,
+    /// FEAT_PAN2: AT S1E1RP and AT S1E1WP, which are SYS. No encoding of
+    /// its own.
+    Pan2,
+    /// FEAT_PAN3: SCTLR_EL1.EPAN, under which memory EL0 can execute counts
+    /// as memory EL0 can reach. No encoding of its own.
+    Pan3,
+    /// FEAT_UAO: PSTATE.UAO, which gives LDTR and STTR at EL1 EL1's
+    /// permissions. No encoding of its own.
+    Uao,
+    /// FEAT_DIT: PSTATE.DIT. No encoding of its own.
+    Dit,
+    /// FEAT_SSBS: PSTATE.SSBS, written by MSR (immediate). No encoding of
+    /// its own.
+    Ssbs,
+    /// FEAT_SSBS2: the SSBS register. No encoding of its own.
+    Ssbs2,
 }
 
 /// What the conformance tests read of a feature: `tests/unit/spec.rs`
@@ -95,7 +120,7 @@ pub(crate) enum Feature {
 #[cfg(test)]
 impl Feature {
     /// Every feature, in declaration order.
-    pub(crate) const ALL: [Feature; 27] = [
+    pub(crate) const ALL: [Feature; 37] = [
         Feature::Base,
         Feature::Fp,
         Feature::AdvSimd,
@@ -123,6 +148,16 @@ impl Feature {
         Feature::FpacCombine,
         Feature::PacQarma5,
         Feature::Bti,
+        Feature::FlagM,
+        Feature::FlagM2,
+        Feature::Sb,
+        Feature::Pan,
+        Feature::Pan2,
+        Feature::Pan3,
+        Feature::Uao,
+        Feature::Dit,
+        Feature::Ssbs,
+        Feature::Ssbs2,
     ];
 
     /// The name Arm's data gives the feature, `None` for the base set.
@@ -155,13 +190,37 @@ impl Feature {
             Self::FpacCombine => Some("FEAT_FPACCOMBINE"),
             Self::PacQarma5 => Some("FEAT_PACQARMA5"),
             Self::Bti => Some("FEAT_BTI"),
+            Self::FlagM => Some("FEAT_FlagM"),
+            Self::FlagM2 => Some("FEAT_FlagM2"),
+            Self::Sb => Some("FEAT_SB"),
+            Self::Pan => Some("FEAT_PAN"),
+            Self::Pan2 => Some("FEAT_PAN2"),
+            Self::Pan3 => Some("FEAT_PAN3"),
+            Self::Uao => Some("FEAT_UAO"),
+            Self::Dit => Some("FEAT_DIT"),
+            Self::Ssbs => Some("FEAT_SSBS"),
+            Self::Ssbs2 => Some("FEAT_SSBS2"),
         }
     }
 
     /// Whether the feature has encodings of its own; one that has none
     /// changes how other instructions behave.
     pub(crate) const fn encodes(self) -> bool {
-        !matches!(self, Self::Lse2 | Self::PAuth2 | Self::Fpac | Self::FpacCombine | Self::PacQarma5)
+        !matches!(
+            self,
+            Self::Lse2
+                | Self::PAuth2
+                | Self::Fpac
+                | Self::FpacCombine
+                | Self::PacQarma5
+                | Self::Pan
+                | Self::Pan2
+                | Self::Pan3
+                | Self::Uao
+                | Self::Dit
+                | Self::Ssbs
+                | Self::Ssbs2
+        )
     }
 
     /// Whether the decoder names every encoding of the feature: a feature

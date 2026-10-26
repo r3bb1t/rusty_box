@@ -5,7 +5,7 @@
 //! there is no routing to decide.
 
 use super::features::Feature;
-use super::{Activity, Btype, Cpu, El, Pstate};
+use super::{sctlr, Activity, Btype, Cpu, El, Pstate};
 use crate::instrumentation::{ExceptionKind, ExceptionTaken};
 
 /// `ESR_ELx.EC`, the exception classes this core can raise.
@@ -224,6 +224,10 @@ impl Cpu {
         };
         self.sys.spsr_el1 = spsr;
         self.sys.elr_el1 = return_addr;
+        // With FEAT_PAN, PAN is set when SCTLR_EL1.SPAN is 0 and otherwise
+        // kept; UAO is cleared; SSBS becomes SCTLR_EL1.DSSBS; DIT is kept.
+        let pan = self.pstate.pan || (self.implements(Feature::Pan) && self.sys.sctlr_el1 & sctlr::SPAN == 0);
+        let ssbs = self.implements(Feature::Ssbs) && self.sys.sctlr_el1 & sctlr::DSSBS != 0;
         self.pstate = Pstate {
             n: self.pstate.n,
             z: self.pstate.z,
@@ -238,6 +242,10 @@ impl Cpu {
             ss: false,
             il: false,
             btype: Btype::None,
+            pan,
+            uao: false,
+            dit: self.pstate.dit,
+            ssbs,
         };
         self.pc = self.branch_addr((self.sys.vbar_el1 & !0x7FF).wrapping_add(quadrant + kind.offset()));
         self.monitor.armed = false;
@@ -268,7 +276,9 @@ impl Cpu {
                 None => false,
             };
 
-        let bti = self.implements(Feature::Bti);
+        // SPSR_EL1 holds no bit of a feature this processor lacks: an MSR
+        // writes only `spsr_mask`'s bits, and a snapshot that holds others
+        // is refused.
         let p = &mut self.pstate;
         p.n = spsr & (1 << 31) != 0;
         p.z = spsr & (1 << 30) != 0;
@@ -279,17 +289,24 @@ impl Cpu {
         p.a = spsr & (1 << 8) != 0;
         p.i = spsr & (1 << 7) != 0;
         p.f = spsr & (1 << 6) != 0;
+        // Arm `SetPSTATEFromPSR` restores NZCV, SS, DAIF and PAN whether or
+        // not the return is legal.
+        p.pan = spsr & Pstate::PAN != 0;
         match (legal, target_el) {
             (true, Some(el)) => {
                 p.el = el;
                 p.sp_sel = m & 1 != 0;
                 p.il = spsr & (1 << 20) != 0;
-                p.btype = if bti { Btype::from_bits(spsr >> 10) } else { Btype::None };
+                p.btype = Btype::from_bits(spsr >> 10);
+                p.ssbs = spsr & Pstate::SSBS != 0;
+                p.uao = spsr & Pstate::UAO != 0;
+                p.dit = spsr & Pstate::DIT != 0;
             }
             // Illegal exception return (Arm ARM D1.11.4): EL and SP are
             // unchanged, PSTATE.IL is set, and the next instruction raises
-            // an Illegal Execution State exception. PSTATE.BTYPE is UNKNOWN
-            // (Arm `SetPSTATEFromPSR`): 00 here.
+            // an Illegal Execution State exception. PSTATE.BTYPE, SSBS, UAO
+            // and DIT are UNKNOWN (Arm `SetPSTATEFromPSR`); this model's
+            // choice is BTYPE 00 and the other three unchanged.
             _ => {
                 p.il = true;
                 p.btype = Btype::None;

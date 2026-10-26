@@ -17,7 +17,7 @@ use super::dp::ones;
 use super::exception::{Exception, ExceptionClass};
 use super::exec::{sext, Fault, StopCause};
 use super::features::{Feature, Features};
-use super::{id, Cpu, El};
+use super::{id, sctlr, Cpu, El};
 use crate::bus::{AccessWidth, BusFault, PhysAddr, PhysBus};
 
 /// What an access does, for permission checks.
@@ -28,10 +28,41 @@ pub(crate) enum AccessKind {
     Fetch,
 }
 
+/// What a data access does at its address, which decides the WnR its
+/// faults report: Arm `NoFault`'s `!accdesc.read && accdesc.write`, so a
+/// read-modify-write reports an alignment or translation fault as a read,
+/// and `AArch64_S1CheckPermissions`, which checks read permission before
+/// write permission.
+///
+/// Closed (R5): the directions of a data access.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DataDirection {
+    Read,
+    Write,
+    /// An atomic read-modify-write (`CreateAccDescAtomicOp`).
+    ReadWrite,
+}
+
+/// Whose permissions an `AT` instruction checks a translation against.
+///
+/// Closed (R5): the address translation instructions of the EL1&0 regime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AtCheck {
+    /// `AT S1E0R`, `AT S1E0W`: EL0's.
+    El0,
+    /// `AT S1E1R`, `AT S1E1W`: EL1's, which PSTATE.PAN takes no part in
+    /// (Arm `CreateAccDescAT`, `ATAccess_Read`/`ATAccess_Write`).
+    El1,
+    /// `AT S1E1RP`, `AT S1E1WP` (FEAT_PAN2): EL1's, with PSTATE.PAN as a
+    /// data access has it (`ATAccess_ReadPAN`/`ATAccess_WritePAN`).
+    El1Pan,
+}
+
 /// The constraints a data access carries beyond its size.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct DataAccess {
-    /// `LDTR`/`STTR`: checked against EL0 permissions when executed at EL1.
+    /// `LDTR`/`STTR`: checked against EL0 permissions when executed at EL1
+    /// with PSTATE.UAO clear (Arm `AArch64_IsUnprivAccessPriv`).
     pub(crate) unprivileged: bool,
     pub(crate) alignment: AlignmentRule,
 }
@@ -78,9 +109,6 @@ pub(crate) enum AlignmentRule {
     /// which FEAT_LSE2 adds.
     Ordered,
 }
-
-/// `SCTLR_EL1.nAA` (FEAT_LSE2).
-const SCTLR_NAA: u64 = 1 << 6;
 
 /// A fault status code (`ESR_ELx.ISS.DFSC`/`IFSC`) with its lookup level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -190,15 +218,18 @@ pub(crate) struct Translated {
     pub(crate) device: bool,
 }
 
-/// A translation with the flags of the TLB entry it came from, which only
-/// an instruction fetch reads past the permission check: whether the page
-/// is guarded (FEAT_BTI). With stage 1 disabled no page is guarded
-/// (`AArch64_S1DisabledOutput`).
+/// A translation with the flags and lookup level of the TLB entry it came
+/// from, which only an instruction fetch and a read-modify-write read past
+/// the permission check: whether the page is guarded (FEAT_BTI), and the
+/// permissions a read-modify-write's write needs as well. With stage 1
+/// disabled no page is guarded (`AArch64_S1DisabledOutput`) and no access
+/// is refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Mapping {
     pa: u64,
     device: bool,
     flags: u8,
+    level: u8,
 }
 
 /// A completed walk, before permissions are checked against an access.
@@ -302,13 +333,13 @@ impl Tlb {
 impl Cpu {
     #[inline]
     fn mmu_enabled(&self) -> bool {
-        self.sys.sctlr_el1 & 1 != 0
+        self.sys.sctlr_el1 & sctlr::M != 0
     }
 
     /// `SCTLR_EL1.A`: every misaligned data access faults.
     #[inline]
     fn strict_alignment(&self) -> bool {
-        self.sys.sctlr_el1 & 2 != 0
+        self.sys.sctlr_el1 & sctlr::A != 0
     }
 
     /// Arm `AArch64_UnalignedAccessFaults` for a misaligned access of
@@ -322,7 +353,7 @@ impl Cpu {
         match acc.alignment {
             AlignmentRule::Any => false,
             AlignmentRule::Atomic => !(lse2 && in_granule),
-            AlignmentRule::Ordered => !lse2 || (self.sys.sctlr_el1 & SCTLR_NAA == 0 && !in_granule),
+            AlignmentRule::Ordered => !lse2 || (self.sys.sctlr_el1 & sctlr::NAA == 0 && !in_granule),
         }
     }
 
@@ -359,18 +390,20 @@ impl Cpu {
                 pa: address,
                 device: kind != AccessKind::Fetch,
                 flags: 0,
+                level: 0,
             });
         }
 
         let entry = self.tlb.entries[Tlb::slot(va)];
         if entry.tag == va >> 12 {
-            if !permitted(entry.perms, kind, el) {
+            if !self.permits(entry.perms, kind, el) {
                 return Err(Fsc::Permission(entry.level));
             }
             return Ok(Mapping {
                 pa: entry.pa_page | (va & 0xFFF),
                 device: entry.device,
                 flags: entry.perms,
+                level: entry.level,
             });
         }
         self.translate_miss(bus, va, kind, el)
@@ -396,14 +429,41 @@ impl Cpu {
                 level: walked.level,
             };
         }
-        if !permitted(walked.perms, kind, el) {
+        if !self.permits(walked.perms, kind, el) {
             return Err(Fsc::Permission(walked.level));
         }
         Ok(Mapping {
             pa: walked.pa,
             device: walked.device,
             flags: walked.perms,
+            level: walked.level,
         })
+    }
+
+    /// Whether an access of `kind` checked against `el`'s permissions may
+    /// use a page the walk gave `perms`: it has the permission it needs,
+    /// and a data access is not one PSTATE.PAN refuses (every data access
+    /// is subject to PAN, Arm `AccessDescriptor.pan`; an instruction fetch
+    /// is not).
+    #[inline(always)]
+    fn permits(&self, perms: u8, kind: AccessKind, el: El) -> bool {
+        permitted(perms, kind, el) && (kind == AccessKind::Fetch || !self.pan_refuses(perms, el))
+    }
+
+    /// The PAN rule of Arm `AArch64_S1DirectBasePermissions` (FEAT_PAN):
+    /// while PSTATE.PAN is set, an EL1 access subject to it has no access
+    /// to memory EL0 can read or write, nor, with FEAT_PAN3 and
+    /// `SCTLR_EL1.EPAN` set, to memory EL0 can execute. EL0's execute
+    /// permission in `perms` is after WXN, which differs from the rule's
+    /// `ux` only where EL0 can write, which the rule refuses anyway.
+    #[inline(always)]
+    fn pan_refuses(&self, perms: u8, el: El) -> bool {
+        if !self.pstate.pan || el != El::El1 {
+            return false;
+        }
+        let epan = self.implements(Feature::Pan3) && self.sys.sctlr_el1 & sctlr::EPAN != 0;
+        let reachable = PERM_EL0_R | PERM_EL0_W | if epan { PERM_EL0_X } else { 0 };
+        perms & reachable != 0
     }
 
     /// Whether top-byte-ignore covers `va` for an access of `kind` (Arm ARM
@@ -550,7 +610,7 @@ impl Cpu {
             }
             let uxn = (desc >> 54) & 1 == 1 || uxn_table;
             let pxn = (desc >> 53) & 1 == 1 || pxn_table;
-            let wxn = (self.sys.sctlr_el1 >> 19) & 1 == 1;
+            let wxn = self.sys.sctlr_el1 & sctlr::WXN != 0;
             // EL1 never executes memory EL0 can write (Arm ARM D8.4.1.2), and
             // WXN makes every writable region execute-never at its own EL.
             let el1_x = !pxn && !el0_w && !(wxn && el1_w);
@@ -603,17 +663,26 @@ impl Cpu {
         self.walk(bus, va, AccessKind::Read).map(|w| w.pa)
     }
 
-    /// `AT S1E1R/S1E1W/S1E0R/S1E0W`: translate and report in `PAR_EL1`,
-    /// in the 64-bit format QEMU's `do_ats_write` (cpregs-at.c) builds.
-    pub(crate) fn address_translate<B: PhysBus>(&mut self, bus: &mut B, va: u64, write: bool, el: El) {
+    /// `AT S1E1R/S1E1W/S1E0R/S1E0W/S1E1RP/S1E1WP`: translate, checking
+    /// permissions as `check` says, and report in `PAR_EL1`, in the 64-bit
+    /// format QEMU's `do_ats_write` (cpregs-at.c) builds.
+    pub(crate) fn address_translate<B: PhysBus>(&mut self, bus: &mut B, va: u64, write: bool, check: AtCheck) {
         const RES1: u64 = 1 << 11;
         // This core runs in Non-secure state, as QEMU's `virt` does without
         // `secure=on`, so a successful translation reports NS = 1.
         const NS: u64 = 1 << 9;
         let kind = if write { AccessKind::Write } else { AccessKind::Read };
+        let el = match check {
+            AtCheck::El0 => El::El0,
+            AtCheck::El1 | AtCheck::El1Pan => El::El1,
+        };
+        let permits = |cpu: &Self, perms: u8| match check {
+            AtCheck::El0 | AtCheck::El1 => permitted(perms, kind, el),
+            AtCheck::El1Pan => cpu.permits(perms, kind, el),
+        };
         let result = if self.mmu_enabled() {
             match self.walk(bus, va, kind) {
-                Ok(w) if permitted(w.perms, kind, el) => Ok((w.pa, w.attr, w.shareability)),
+                Ok(w) if permits(self, w.perms) => Ok((w.pa, w.attr, w.shareability)),
                 Ok(w) => Err(Fsc::Permission(w.level)),
                 Err(f) => Err(Fsc::from(f)),
             }
@@ -677,9 +746,13 @@ impl Cpu {
         }
     }
 
+    /// The EL whose permissions a data access is checked against: EL0's for
+    /// LDTR and STTR unless PSTATE.UAO is set (Arm
+    /// `AArch64_IsUnprivAccessPriv`, at EL1 with no EL2), the current EL's
+    /// for every other access.
     #[inline]
     fn access_el(&self, acc: DataAccess) -> El {
-        if acc.unprivileged {
+        if acc.unprivileged && !self.pstate.uao {
             El::El0
         } else {
             self.pstate.el
@@ -688,25 +761,45 @@ impl Cpu {
 
     /// Alignment checks that precede translation, then translation and the
     /// Device-memory alignment check, for an access that stays in one page.
+    /// A read-modify-write checks read permission, then write permission.
     fn translate_data<B: PhysBus>(
         &mut self,
         bus: &mut B,
         va: u64,
         bytes: u64,
-        kind: AccessKind,
+        direction: DataDirection,
         acc: DataAccess,
     ) -> Result<Translated, Fault> {
-        let write = kind == AccessKind::Write;
+        // WnR: `!read && write` for every fault but a refused write.
+        let wnr = direction == DataDirection::Write;
         let misaligned = va & (bytes - 1) != 0;
         if misaligned && self.misaligned_faults(va, bytes, acc) {
-            return Err(Self::data_abort(va, Fsc::Alignment, write));
+            return Err(Self::data_abort(va, Fsc::Alignment, wnr));
         }
         let el = self.access_el(acc);
-        let t = self.translate(bus, va, kind, el).map_err(|f| Self::data_abort(va, f, write))?;
+        let t = match direction {
+            DataDirection::Read => self.translate(bus, va, AccessKind::Read, el).map_err(|f| Self::data_abort(va, f, false))?,
+            DataDirection::Write => self.translate(bus, va, AccessKind::Write, el).map_err(|f| Self::data_abort(va, f, true))?,
+            DataDirection::ReadWrite => self.translate_rmw(bus, va, el)?,
+        };
         if misaligned && t.device {
-            return Err(Self::data_abort(va, Fsc::Alignment, write));
+            return Err(Self::data_abort(va, Fsc::Alignment, wnr));
         }
         Ok(t)
+    }
+
+    /// The translation of a read-modify-write at `va`: read permission,
+    /// then write permission, checked against the flags of the one lookup.
+    #[inline(never)]
+    fn translate_rmw<B: PhysBus>(&mut self, bus: &mut B, va: u64, el: El) -> Result<Translated, Fault> {
+        let m = self.map(bus, va, AccessKind::Read, el).map_err(|f| Self::data_abort(va, f, false))?;
+        if self.mmu_enabled() && !self.permits(m.flags, AccessKind::Write, el) {
+            return Err(Self::data_abort(va, Fsc::Permission(m.level), true));
+        }
+        Ok(Translated {
+            pa: m.pa,
+            device: m.device,
+        })
     }
 
     /// The physical address an access of `bytes` at `va` reaches, with every
@@ -718,11 +811,10 @@ impl Cpu {
         bus: &mut B,
         va: u64,
         bytes: u64,
-        write: bool,
+        direction: DataDirection,
         acc: DataAccess,
     ) -> Result<PhysAddr, Fault> {
-        let kind = if write { AccessKind::Write } else { AccessKind::Read };
-        self.translate_data(bus, va, bytes, kind, acc).map(|t| PhysAddr::new(t.pa))
+        self.translate_data(bus, va, bytes, direction, acc).map(|t| PhysAddr::new(t.pa))
     }
 
     /// The bus half of every data read: `1 << log2` bytes (`log2` in 0..=3)
@@ -755,7 +847,7 @@ impl Cpu {
     pub(crate) fn read_mem<B: PhysBus>(&mut self, bus: &mut B, va: u64, log2: u32, acc: DataAccess) -> Result<u64, Fault> {
         let bytes = 1u64 << log2;
         if (va & 0xFFF) + bytes <= 0x1000 {
-            let t = self.translate_data(bus, va, bytes, AccessKind::Read, acc)?;
+            let t = self.translate_data(bus, va, bytes, DataDirection::Read, acc)?;
             return self.bus_read(bus, va, PhysAddr::new(t.pa), log2);
         }
         // Crosses a page boundary, so it is misaligned: Normal memory only.
@@ -793,7 +885,7 @@ impl Cpu {
     ) -> Result<(), Fault> {
         let bytes = 1u64 << log2;
         if (va & 0xFFF) + bytes <= 0x1000 {
-            let t = self.translate_data(bus, va, bytes, AccessKind::Write, acc)?;
+            let t = self.translate_data(bus, va, bytes, DataDirection::Write, acc)?;
             return self.bus_write(bus, va, PhysAddr::new(t.pa), log2, value);
         }
         if self.misaligned_faults(va, bytes, acc) {
@@ -911,8 +1003,8 @@ impl Cpu {
             return Ok(());
         }
         let enabled = match self.pstate.el {
-            El::El1 => self.sys.sctlr_el1 & (1 << 3) != 0,
-            El::El0 => self.sys.sctlr_el1 & (1 << 4) != 0,
+            El::El1 => self.sys.sctlr_el1 & sctlr::SA != 0,
+            El::El0 => self.sys.sctlr_el1 & sctlr::SA0 != 0,
         };
         if enabled {
             Err(Exception::new(ExceptionClass::SpAlignment, 0).into())
