@@ -137,22 +137,29 @@ vocabulary are `rusty_box_core`'s, shared with the x86 machine.
 `aarch64_perfbench` ([`examples/perfbench.rs`](examples/perfbench.rs))
 measures the interpreter on four embedded loops and two boots; `cargo xtask
 perf-baseline` archives it for A/B runs. Host: Intel Xeon @ 2.1 GHz, a
-4-core VM, 2026-10-25. Each figure is the median of 10 interleaved rounds,
+4-core VM, 2026-10-26. Each figure is the median of 10 interleaved rounds,
 in millions of instructions a second; "hooked" runs under an observer with
-a code hook and a memory hook.
+a code hook and a memory hook. "Before" is the interpreter without a trace
+cache (5028db8).
 
-| Workload | Before the trace cache | Now | |
+| Workload | Before | Now | |
 |---|---:|---:|---:|
-| `alu` | 71.1 | 158.2 | 2.23× |
-| `alu`, hooked | 75.5 | 166.8 | 2.21× |
-| `memcpy` (`ldp`/`stp`) | 41.9 | 66.1 | 1.58× |
-| `memcpy`, hooked | 40.2 | 65.7 | 1.63× |
-| `fnv` (byte loads, `mul`) | 75.8 | 141.9 | 1.87× |
-| `fnv`, hooked | 73.7 | 140.3 | 1.90× |
-| `fp` (`fmadd`/`fmul`/`fadd`) | 56.2 | 61.0 | 1.08× |
-| `fp`, hooked | 54.7 | 62.7 | 1.15× |
-| EDK2 (AAVMF) to `Shell>`, 647.7M instructions | 71.0 | 104.1 | 1.47× |
-| Linux 6.18 + initramfs to `login:` | 50.4 | 77.6 | 1.54× |
+| `alu` | 73.8 | 163.2 | 2.21× |
+| `alu`, hooked | 70.5 | 149.9 | 2.13× |
+| `memcpy` (`ldp`/`stp`) | 41.6 | 67.3 | 1.62× |
+| `memcpy`, hooked | 39.7 | 68.5 | 1.73× |
+| `fnv` (byte loads, `mul`) | 79.9 | 123.9 | 1.55× |
+| `fnv`, hooked | 75.2 | 123.4 | 1.64× |
+| `fp` (`fmadd`/`fmul`/`fadd`) | 55.2 | 81.3 | 1.47× |
+| `fp`, hooked | 55.3 | 78.3 | 1.42× |
+| EDK2 (AAVMF) to `Shell>` | 69.7 | 100.4 | 1.44× |
+| Linux 6.18 + initramfs to `login:` | 50.9 | 76.8 | 1.51× |
+| Alpine 3.23 with its root on virtio-blk, logged in (`linux_virt`; one run each, M ticks/s) | 50.1 | 77.6 | 1.55× |
+
+On this host one loop's figure moves by up to 13% with code layout alone:
+a change to code no loop executes measured `alu`, hooked, at 0.90× and
+`memcpy` at 0.87× of its parent. Read a single row's ratio to about that
+precision; `fnv` measured 1.87× on an earlier build of the same design.
 
 Every run ends in the same state before and after; for the boots, the state
 hashes at 10M, 100M and 400M instructions are:
