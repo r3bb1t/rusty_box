@@ -63,6 +63,14 @@ pub(crate) enum Feature {
     Fp16,
     /// FEAT_FHM: FMLAL, FMLSL, FMLAL2, FMLSL2.
     Fhm,
+    /// FEAT_FCMA: FCMLA and FCADD.
+    Fcma,
+    /// FEAT_JSCVT: FJCVTZS.
+    Jscvt,
+    /// FEAT_FRINTTS: FRINT32Z, FRINT32X, FRINT64Z, FRINT64X.
+    Frintts,
+    /// FEAT_BF16: BFCVT, BFCVTN, BFDOT, BFMLALB, BFMLALT, BFMMLA.
+    Bf16,
 }
 
 /// What the conformance tests read of a feature: `tests/unit/spec.rs`
@@ -70,7 +78,7 @@ pub(crate) enum Feature {
 #[cfg(test)]
 impl Feature {
     /// Every feature, in declaration order.
-    pub(crate) const ALL: [Feature; 17] = [
+    pub(crate) const ALL: [Feature; 21] = [
         Feature::Base,
         Feature::Fp,
         Feature::AdvSimd,
@@ -88,6 +96,10 @@ impl Feature {
         Feature::I8mm,
         Feature::Fp16,
         Feature::Fhm,
+        Feature::Fcma,
+        Feature::Jscvt,
+        Feature::Frintts,
+        Feature::Bf16,
     ];
 
     /// The name Arm's data gives the feature, `None` for the base set.
@@ -110,6 +122,10 @@ impl Feature {
             Self::I8mm => Some("FEAT_I8MM"),
             Self::Fp16 => Some("FEAT_FP16"),
             Self::Fhm => Some("FEAT_FHM"),
+            Self::Fcma => Some("FEAT_FCMA"),
+            Self::Jscvt => Some("FEAT_JSCVT"),
+            Self::Frintts => Some("FEAT_FRINTTS"),
+            Self::Bf16 => Some("FEAT_BF16"),
         }
     }
 
@@ -247,10 +263,9 @@ impl Implementation {
 #[cfg(test)]
 impl Implementation {
     /// Every feature, with Streaming SVE vectors of up to 512 bits. It is
-    /// no processor Arm permits while the Armv9.2 features FEAT_SME
-    /// requires are still being added (`Features.json`: FEAT_SME implies
-    /// Armv9.2, FEAT_FP16, FEAT_BF16, FEAT_FCMA and FEAT_FHM); each
-    /// feature's tests exercise that feature's own rules.
+    /// no processor Arm permits while the rest of Armv9.2, which FEAT_SME
+    /// requires (`Features.json`: FEAT_SME implies Armv9.2), is still being
+    /// added; each feature's tests exercise that feature's own rules.
     pub(crate) const EVERY_FEATURE: Self = Self {
         features: Features::of(&Feature::ALL),
         max_svl: VecLen(512),

@@ -136,6 +136,28 @@ def initial_state(seed, kind, insn):
                 width = 16 if half else 32
                 v[i] = sum(lane << (width * k) for k, lane in enumerate(lanes))
         fpcr = ((r.next() & 0x1F) << 22) | ((r.next() & 1) << 19)
+    if kind == "B":
+        # BFloat16 inputs (FEAT_BF16): per register, random bits, lanes of
+        # special and ordinary BFloat16 values, or of single values (the
+        # accumulators); then a random FPCR (RMode, FZ, DN, AHP).
+        for i in range(32):
+            sel = r.next() & 7
+            if sel >= 2:
+                bf16 = sel <= 5
+                mixed = sel in (2, 3, 6)
+                lanes = []
+                for _ in range(8 if bf16 else 4):
+                    w = r.next()
+                    if mixed and w & 1:
+                        table = BF16_SPECIAL if bf16 else F32_SPECIAL
+                        lanes.append(table[(w >> 1) % len(table)])
+                    elif bf16:
+                        lanes.append(ordinary_bf16(w))
+                    else:
+                        lanes.append(ordinary_f32(w))
+                width = 16 if bf16 else 32
+                v[i] = sum(lane << (width * k) for k, lane in enumerate(lanes))
+        fpcr = (r.next() & 0x1F) << 22
     if kind == "T":
         rn = (insn >> 5) & 31
         if rn != 31:
@@ -192,6 +214,21 @@ F16_SPECIAL = [
 def ordinary_f16(w):
     """A finite half value of moderate size: exponent 9..21 (2^-6..2^6)."""
     return ((w >> 63) << 15) | ((9 + ((w >> 32) % 13)) << 10) | (w & 0x3FF)
+
+
+# BFloat16's zeros, infinities, quiet and signalling NaNs, denormals, the
+# extreme normals, ones, halves, and magnitudes whose products overflow or
+# underflow single precision.
+BF16_SPECIAL = [
+    0x0000, 0x8000, 0x7F80, 0xFF80, 0x7FC0, 0xFFC1, 0x7F81, 0xFFA0,
+    0x0001, 0x807F, 0x0080, 0x8080, 0x7F7F, 0xFF7F, 0x3F80, 0xBF80,
+    0x3F00, 0x3FC0, 0x5F80, 0x1F80, 0x7F00, 0x0100, 0x3F81, 0xC040,
+]
+
+
+def ordinary_bf16(w):
+    """A normal BFloat16 value with exponent within 2^±10, as ordinary_f32."""
+    return ((w >> 63) << 15) | ((117 + ((w >> 32) % 21)) << 7) | (w & 0x7F)
 
 
 def ordinary_f32(w):

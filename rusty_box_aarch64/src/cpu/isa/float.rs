@@ -95,6 +95,7 @@ pub(crate) enum Float2int {
     Fcvtmu32d,
     Fcvtzs32d,
     Fcvtzu32d,
+    Fjcvtzs32d,
     Fcvtns32h,
     Fcvtnu32h,
     ScvtfH32,
@@ -210,6 +211,7 @@ impl Float2int {
             | Self::Fcvtzu64d
             | Self::Fmov64vx
             | Self::FmovV64i => Feature::Fp,
+            Self::Fjcvtzs32d => Feature::Jscvt,
             Self::Fcvtns32h
             | Self::Fcvtnu32h
             | Self::ScvtfH32
@@ -258,11 +260,16 @@ pub(crate) enum Floatdp1 {
     FrintaS,
     FrintxS,
     FrintiS,
+    Frint32zS,
+    Frint32xS,
+    Frint64zS,
+    Frint64xS,
     FmovD,
     FabsD,
     FnegD,
     FsqrtD,
     FcvtSd,
+    BfcvtBs,
     FcvtHd,
     FrintnD,
     FrintpD,
@@ -271,6 +278,10 @@ pub(crate) enum Floatdp1 {
     FrintaD,
     FrintxD,
     FrintiD,
+    Frint32zD,
+    Frint32xD,
+    Frint64zD,
+    Frint64xD,
     FmovH,
     FabsH,
     FnegH,
@@ -317,6 +328,15 @@ impl Floatdp1 {
             | Self::FrintiD
             | Self::FcvtSh
             | Self::FcvtDh => Feature::Fp,
+            Self::Frint32zS
+            | Self::Frint32xS
+            | Self::Frint64zS
+            | Self::Frint64xS
+            | Self::Frint32zD
+            | Self::Frint32xD
+            | Self::Frint64zD
+            | Self::Frint64xD => Feature::Frintts,
+            Self::BfcvtBs => Feature::Bf16,
             Self::FmovH
             | Self::FabsH
             | Self::FnegH
@@ -586,6 +606,7 @@ pub(super) fn float2int(word: u32) -> Option<Float2int> {
         (0b0, 0b0, 0b01, 0b10, 0b001) => Some(Float2int::Fcvtmu32d),
         (0b0, 0b0, 0b01, 0b11, 0b000) => Some(Float2int::Fcvtzs32d),
         (0b0, 0b0, 0b01, 0b11, 0b001) => Some(Float2int::Fcvtzu32d),
+        (0b0, 0b0, 0b01, 0b11, 0b110) => Some(Float2int::Fjcvtzs32d),
         (0b0, 0b0, 0b11, 0b00, 0b000) => Some(Float2int::Fcvtns32h),
         (0b0, 0b0, 0b11, 0b00, 0b001) => Some(Float2int::Fcvtnu32h),
         (0b0, 0b0, 0b11, 0b00, 0b010) => Some(Float2int::ScvtfH32),
@@ -665,11 +686,16 @@ pub(super) fn floatdp1(word: u32) -> Option<Floatdp1> {
         (0b0, 0b0, 0b00, 0b001100) => Some(Floatdp1::FrintaS),
         (0b0, 0b0, 0b00, 0b001110) => Some(Floatdp1::FrintxS),
         (0b0, 0b0, 0b00, 0b001111) => Some(Floatdp1::FrintiS),
+        (0b0, 0b0, 0b00, 0b010000) => Some(Floatdp1::Frint32zS),
+        (0b0, 0b0, 0b00, 0b010001) => Some(Floatdp1::Frint32xS),
+        (0b0, 0b0, 0b00, 0b010010) => Some(Floatdp1::Frint64zS),
+        (0b0, 0b0, 0b00, 0b010011) => Some(Floatdp1::Frint64xS),
         (0b0, 0b0, 0b01, 0b000000) => Some(Floatdp1::FmovD),
         (0b0, 0b0, 0b01, 0b000001) => Some(Floatdp1::FabsD),
         (0b0, 0b0, 0b01, 0b000010) => Some(Floatdp1::FnegD),
         (0b0, 0b0, 0b01, 0b000011) => Some(Floatdp1::FsqrtD),
         (0b0, 0b0, 0b01, 0b000100) => Some(Floatdp1::FcvtSd),
+        (0b0, 0b0, 0b01, 0b000110) => Some(Floatdp1::BfcvtBs),
         (0b0, 0b0, 0b01, 0b000111) => Some(Floatdp1::FcvtHd),
         (0b0, 0b0, 0b01, 0b001000) => Some(Floatdp1::FrintnD),
         (0b0, 0b0, 0b01, 0b001001) => Some(Floatdp1::FrintpD),
@@ -678,6 +704,10 @@ pub(super) fn floatdp1(word: u32) -> Option<Floatdp1> {
         (0b0, 0b0, 0b01, 0b001100) => Some(Floatdp1::FrintaD),
         (0b0, 0b0, 0b01, 0b001110) => Some(Floatdp1::FrintxD),
         (0b0, 0b0, 0b01, 0b001111) => Some(Floatdp1::FrintiD),
+        (0b0, 0b0, 0b01, 0b010000) => Some(Floatdp1::Frint32zD),
+        (0b0, 0b0, 0b01, 0b010001) => Some(Floatdp1::Frint32xD),
+        (0b0, 0b0, 0b01, 0b010010) => Some(Floatdp1::Frint64zD),
+        (0b0, 0b0, 0b01, 0b010011) => Some(Floatdp1::Frint64xD),
         (0b0, 0b0, 0b11, 0b000000) => Some(Floatdp1::FmovH),
         (0b0, 0b0, 0b11, 0b000001) => Some(Floatdp1::FabsH),
         (0b0, 0b0, 0b11, 0b000010) => Some(Floatdp1::FnegH),

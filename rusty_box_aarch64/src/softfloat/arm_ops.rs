@@ -3,6 +3,7 @@
 //!
 //! - the fixed-point conversions (Arm `FixedToFP` and `FPToFixed` with
 //!   fraction bits: SCVTF, UCVTF, FCVTZS, FCVTZU with `#fbits`);
+//! - FJCVTZS's JavaScript conversion (`FPToFixedJS`);
 //! - FCVTXN's round-to-odd narrowing (`FPRounding_ODD`);
 //! - the alternative half-precision format selected by FPCR.AHP, which has
 //!   no infinities or NaNs (`FPConvert`, `FPRoundBase` with `fpcr.AHP`);
@@ -211,6 +212,61 @@ pub(crate) fn f64_to_u64_fixed(a: u64, fbits: u32, rounding: FpRounding, fp: &mu
     let s = &mut fp.status;
     let a = f64_flush_input(a, s);
     sf_f64_to_ui64(f64_scaled(a, fbits), rounding.softfloat_mode(), true, s)
+}
+
+// ============================================================
+// JavaScript conversion (FJCVTZS, Arm FPToFixedJS)
+// ============================================================
+
+/// What FJCVTZS makes of a double: the 32 bits it writes, and `Z`, whether
+/// they are the value exactly.
+pub(crate) struct JsConversion {
+    pub(crate) value: u32,
+    pub(crate) exact: bool,
+}
+
+/// FJCVTZS: Arm FPToFixedJS, `op` rounded toward zero to an integer and
+/// wrapped to its low 32 bits (JavaScript's ToInt32). A NaN, an infinity or
+/// an integer outside the 32-bit signed range raises invalid, and gives 0
+/// for the first two; a rounded value raises inexact; `exact` holds when
+/// neither did and the value is not -0.0 or a denormal FPCR.FZ flushed.
+pub(crate) fn f64_to_i32_js(op: u64, fp: &mut ArmFpStatus) -> JsConversion {
+    const FRAC: u64 = (1 << 52) - 1;
+    let s = &mut fp.status;
+    let a = f64_flush_input(op, s);
+    let negative = op >> 63 == 1;
+    let exp = ((a >> 52) & 0x7FF) as i32;
+    let frac = a & FRAC;
+    if exp == 0x7FF {
+        softfloat_raise_flags(s, FLAG_INVALID);
+        return JsConversion { value: 0, exact: false };
+    }
+    if exp == 0 && frac == 0 {
+        return JsConversion { value: 0, exact: !negative && op & FRAC == 0 };
+    }
+    // The value is `sig` × 2^`shift`.
+    let (sig, shift) = if exp == 0 { (frac, -1074) } else { (frac | (1 << 52), exp - 1075) };
+    let (low, in_range, rounded) = if shift >= 0 {
+        // At least 2^52 in magnitude: beyond the range, the low bits zero
+        // from 2^32 up.
+        let low = if shift >= 32 { 0 } else { (sig << shift) as u32 };
+        (low, false, false)
+    } else {
+        let (magnitude, rounded) = if shift <= -64 {
+            (0, true)
+        } else {
+            (sig >> -shift, sig & ((1 << -shift) - 1) != 0)
+        };
+        let limit = if negative { 1 << 31 } else { (1 << 31) - 1 };
+        (magnitude as u32, magnitude <= limit, rounded)
+    };
+    let value = if negative { low.wrapping_neg() } else { low };
+    if !in_range {
+        softfloat_raise_flags(s, FLAG_INVALID);
+    } else if rounded {
+        softfloat_raise_flags(s, FLAG_INEXACT);
+    }
+    JsConversion { value, exact: in_range && !rounded }
 }
 
 // ============================================================

@@ -12,7 +12,7 @@ use super::exec::{bit, bits, ExecResult, Flow};
 use super::features::Feature;
 use super::fp::{
     fp_binary, fp_compare, fp_compare_holds, fp_convert, fp_convert_round_odd, fp_mul_add, fp_to_int, fp_unary,
-    int_to_fp, FpBinary, FpCompare, FpConversion, FpType, FpUnary, IntWidth,
+    int_to_fp, round_int_n, FpBinary, FpCompare, FpConversion, FpType, FpUnary, FrintPrecision, IntSize, IntWidth,
 };
 use super::fp_estimate::{urecpe, ursqrte};
 use super::simd::{elem, set_elem};
@@ -171,6 +171,8 @@ impl Cpu {
             Zero(ZeroCompare),
             ToInt(FpRounding, bool),
             FromInt(bool),
+            /// FRINT32Z, FRINT32X, FRINT64Z, FRINT64X (FEAT_FRINTTS).
+            RoundIntN(FpRounding, IntSize),
             URecipEstimate,
             URSqrtEstimate,
         }
@@ -181,6 +183,8 @@ impl Cpu {
             Narrow,
             /// FCVTXN: double to single, rounding to odd.
             NarrowOdd,
+            /// BFCVTN: single precision to BFloat16.
+            NarrowBf16,
             /// FCVTL: double each element's precision.
             Long,
         }
@@ -194,6 +198,9 @@ impl Cpu {
             (false, false, 0b11011) => Op::Each(Each::ToInt(FpRounding::NegInf, true)),
             (false, false, 0b11100) => Op::Each(Each::ToInt(FpRounding::TieAway, true)),
             (false, false, 0b11101) => Op::Each(Each::FromInt(true)),
+            (false, false, 0b11110) => Op::Each(Each::RoundIntN(FpRounding::Zero, IntSize::Bits32)),
+            (false, false, 0b11111) => Op::Each(Each::RoundIntN(FpRounding::Zero, IntSize::Bits64)),
+            (false, true, 0b10110) => Op::NarrowBf16,
             (false, true, 0b01100) => Op::Each(Each::Zero(ZeroCompare::Gt)),
             (false, true, 0b01101) => Op::Each(Each::Zero(ZeroCompare::Eq)),
             (false, true, 0b01110) => Op::Each(Each::Zero(ZeroCompare::Lt)),
@@ -212,6 +219,8 @@ impl Cpu {
             (true, false, 0b11011) => Op::Each(Each::ToInt(FpRounding::NegInf, false)),
             (true, false, 0b11100) => Op::Each(Each::ToInt(FpRounding::TieAway, false)),
             (true, false, 0b11101) => Op::Each(Each::FromInt(false)),
+            (true, false, 0b11110) => Op::Each(Each::RoundIntN(env.rounding(), IntSize::Bits32)),
+            (true, false, 0b11111) => Op::Each(Each::RoundIntN(env.rounding(), IntSize::Bits64)),
             (true, true, 0b01100) => Op::Each(Each::Zero(ZeroCompare::Ge)),
             (true, true, 0b01101) => Op::Each(Each::Zero(ZeroCompare::Le)),
             (true, true, 0b01111) => Op::Each(Each::Unary(FpUnary::Neg)),
@@ -229,6 +238,11 @@ impl Cpu {
             // Only the estimates, conversions and comparisons have scalar
             // forms, and FRECPX has only a scalar form.
             Op::Each(Each::Unary(FpUnary::RecpX)) => !scalar,
+            // FRINT32* and FRINT64* (`if sz::Q == '10'`) are single and
+            // double precision vectors, BFCVTN a vector of singles; the
+            // half-precision class has neither.
+            Op::Each(Each::RoundIntN(..)) => scalar || half || (sz && !q),
+            Op::NarrowBf16 => scalar || half || sz,
             Op::Each(
                 Each::Unary(FpUnary::RecipEstimate | FpUnary::RSqrtEstimate)
                 | Each::Zero(_)
@@ -280,6 +294,16 @@ impl Cpu {
                 }
                 r = if scalar { part } else { narrow_into(d, part, q) };
             }
+            Op::NarrowBf16 => {
+                // Arm FPConvertBF of each single of Vn into `Vpart(d, Q)`.
+                let rounding = env.rounding();
+                let mut part = 0u128;
+                for e in 0..4 {
+                    let v = sf::f32_to_bf16(elem(n, e, 32) as u32, rounding, &mut env.status);
+                    set_elem(&mut part, e, 16, u64::from(v));
+                }
+                r = narrow_into(d, part, q);
+            }
             Op::Long => {
                 let (esize, conversion) = if sz {
                     (32, FpConversion::SingleToDouble)
@@ -323,6 +347,10 @@ impl Cpu {
                             fp_to_int(ty, x, 0, rounding, signed, IntWidth::OfElement, &mut env)
                         }
                         Each::FromInt(signed) => int_to_fp(ty, x, 0, signed, IntWidth::OfElement, &mut env),
+                        Each::RoundIntN(rounding, size) => {
+                            let precision = if sz { FrintPrecision::Double } else { FrintPrecision::Single };
+                            round_int_n(precision, x, rounding, size, &mut env)
+                        }
                         Each::URecipEstimate => u64::from(urecpe(x as u32)),
                         Each::URSqrtEstimate => u64::from(ursqrte(x as u32)),
                     };
@@ -555,6 +583,105 @@ impl Cpu {
         }
         self.fp_commit(&env);
         self.write_v(rd, r);
+        Ok(Flow::Next)
+    }
+
+    /// The element type FCMLA and FCADD read from `size`: `if size == '00'
+    /// then EndOfDecode(Decode_UNDEF)`, and half precision (`01`) only
+    /// with FEAT_FP16.
+    fn complex_type(&self, size: u32) -> Option<FpType> {
+        match size {
+            0b01 if self.implements(Feature::Fp16) => Some(FpType::Half),
+            0b10 => Some(FpType::Single),
+            0b11 => Some(FpType::Double),
+            _ => None,
+        }
+    }
+
+    /// FCMLA (FEAT_FCMA), vector (`0 Q 1 01110 size 0 Rm 110 rot 1 Rn Rd`)
+    /// and by element (`0 Q 1 01111 size L M Rm 0 rot 1 H 0 Rn Rd`). Each
+    /// pair of elements of Vd, a complex number (real, imaginary),
+    /// accumulates with two fused multiply-adds (Arm FPMulAdd) the product
+    /// of Vn's pair and Vm's pair (by element, the pair `index` of Vm)
+    /// rotated by `rot` × 90°: the rotation picks which element of Vn's
+    /// pair both halves take, and negates Vm's elements (FPNeg).
+    pub(crate) fn exec_simd_fcmla(&mut self, pc: u64, insn: u32, by_element: bool) -> ExecResult {
+        let q = bit(insn, 30);
+        let size = bits(insn, 23, 22);
+        let h = bits(insn, 11, 11);
+        let l = bits(insn, 21, 21);
+        let refused = if by_element {
+            size == 0b11 || (size == 0b10 && (l == 1 || !q)) || (size == 0b01 && h == 1 && !q)
+        } else {
+            size == 0b11 && !q
+        };
+        let Some(ty) = self.complex_type(size).filter(|_| !refused) else {
+            return self.undefined(pc, insn);
+        };
+        self.simd_check()?;
+        let (rm, rot, index) = if by_element {
+            let index = if size == 0b01 { (h << 1) | l } else { h };
+            (bits(insn, 20, 16), bits(insn, 14, 13), Some(index))
+        } else {
+            (bits(insn, 20, 16), bits(insn, 12, 11), None)
+        };
+        let esize = ty.esize();
+        let n = self.v[bits(insn, 9, 5) as usize];
+        let m = self.v[rm as usize];
+        let rd = bits(insn, 4, 0) as usize;
+        let d = self.v[rd];
+        let mut env = self.fp_env();
+        let mut r = 0u128;
+        for e in 0..datasize(q) / esize / 2 {
+            let mut neg = |x: u64| fp_unary(FpUnary::Neg, ty, x, &mut env);
+            let pair = index.unwrap_or(e);
+            let (m_real, m_imag) = (elem(m, 2 * pair, esize), elem(m, 2 * pair + 1, esize));
+            let (n_real, n_imag) = (elem(n, 2 * e, esize), elem(n, 2 * e + 1, esize));
+            // Arm's element1 to element4: Vm's factor and Vn's for the real
+            // half, then for the imaginary half.
+            let (element1, element2, element3, element4) = match rot {
+                0b00 => (m_real, n_real, m_imag, n_real),
+                0b01 => (neg(m_imag), n_imag, m_real, n_imag),
+                0b10 => (neg(m_real), n_real, neg(m_imag), n_real),
+                _ => (m_imag, n_imag, neg(m_real), n_imag),
+            };
+            let real = fp_mul_add(FusedMulAdd::Fmadd, ty, elem(d, 2 * e, esize), element2, element1, &mut env);
+            let imag = fp_mul_add(FusedMulAdd::Fmadd, ty, elem(d, 2 * e + 1, esize), element4, element3, &mut env);
+            set_elem(&mut r, 2 * e, esize, real);
+            set_elem(&mut r, 2 * e + 1, esize, imag);
+        }
+        self.fp_commit(&env);
+        self.write_v(rd, r);
+        Ok(Flow::Next)
+    }
+
+    /// FCADD (FEAT_FCMA): `0 Q 1 01110 size 0 Rm 111 rot 0 1 Rn Rd`. Each
+    /// pair of elements of Vn, a complex number, adds Vm's pair rotated by
+    /// 90° (`rot = 0`) or 270° (Arm FPAdd, FPNeg).
+    pub(crate) fn exec_simd_fcadd(&mut self, pc: u64, insn: u32) -> ExecResult {
+        let q = bit(insn, 30);
+        let size = bits(insn, 23, 22);
+        let Some(ty) = self.complex_type(size).filter(|_| !(size == 0b11 && !q)) else {
+            return self.undefined(pc, insn);
+        };
+        self.simd_check()?;
+        let rot = bit(insn, 12);
+        let esize = ty.esize();
+        let n = self.v[bits(insn, 9, 5) as usize];
+        let m = self.v[bits(insn, 20, 16) as usize];
+        let mut env = self.fp_env();
+        let mut r = 0u128;
+        for e in 0..datasize(q) / esize / 2 {
+            let mut neg = |x: u64| fp_unary(FpUnary::Neg, ty, x, &mut env);
+            let (m_real, m_imag) = (elem(m, 2 * e, esize), elem(m, 2 * e + 1, esize));
+            let (element1, element3) = if rot { (m_imag, neg(m_real)) } else { (neg(m_imag), m_real) };
+            let real = fp_binary(FpBinary::Add, ty, elem(n, 2 * e, esize), element1, &mut env);
+            let imag = fp_binary(FpBinary::Add, ty, elem(n, 2 * e + 1, esize), element3, &mut env);
+            set_elem(&mut r, 2 * e, esize, real);
+            set_elem(&mut r, 2 * e + 1, esize, imag);
+        }
+        self.fp_commit(&env);
+        self.write_v(bits(insn, 4, 0) as usize, r);
         Ok(Flow::Next)
     }
 }

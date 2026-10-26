@@ -394,6 +394,21 @@ pub(crate) enum Class {
     /// FMLAL, FMLSL, FMLAL2, FMLSL2 (FEAT_FHM), vector and by element.
     SimdFpMulAddLong,
     SimdFpMulAddLongIndexedElement,
+    /// FCMLA (FEAT_FCMA), vector and by element: the handler reads the
+    /// rotation from `rot`.
+    SimdComplexMultiplyAccumulate,
+    SimdComplexMultiplyAccumulateIndexedElement,
+    /// FCADD (FEAT_FCMA).
+    SimdComplexAdd,
+    /// BFDOT (FEAT_BF16), vector and by element.
+    SimdBfDotProduct,
+    SimdBfDotProductIndexedElement,
+    /// BFMLALB, BFMLALT (FEAT_BF16), vector and by element: the handler
+    /// reads which from `Q`.
+    SimdBfMulAddLong,
+    SimdBfMulAddLongIndexedElement,
+    /// BFMMLA (FEAT_BF16).
+    SimdBfMatrixMultiply,
     FpFixedPointConversion,
     FpIntegerConversion,
     FpDataProcessing1Source,
@@ -496,9 +511,9 @@ impl Encoding {
             | Self::Asimdperm(_)
             | Self::Asimdext(_)
             | Self::Asimdins(_)
-            | Self::Asimdmisc(_)
             | Self::Asimddiff(_)
             | Self::Asimdshf(_) => Feature::AdvSimd,
+            Self::Asimdmisc(e) => e.feature(),
             Self::Asisdpair(e) => e.feature(),
             Self::Asimdall(e) => e.feature(),
             Self::Asimdsame(e) => e.feature(),
@@ -591,6 +606,10 @@ mod tests {
                     Feature::I8mm => field(isar1, 52) != 0,
                     Feature::Fp16 => field(pfr0, 16) == 1 && field(pfr0, 20) == 1,
                     Feature::Fhm => field(isar0, 48) != 0,
+                    Feature::Fcma => field(isar1, 16) != 0,
+                    Feature::Jscvt => field(isar1, 12) != 0,
+                    Feature::Frintts => field(isar1, 32) != 0,
+                    Feature::Bf16 => field(isar1, 44) != 0,
                 };
                 assert_eq!(advertised, imp.has(feature), "{feature:?} on {imp:?}");
             }
@@ -600,19 +619,22 @@ mod tests {
             assert_eq!((field(pfr0, 16), field(pfr0, 20)), (fp16, fp16), "FP and AdvSIMD");
             // ID_AA64ISAR0_EL1: AES = 2 (AES and the 64-bit PMULL), SHA1 =
             // 1, SHA2 = 1 (SHA-256, not SHA-512), CRC32 = 1, Atomic = 2 with
-            // FEAT_LSE, RDM = 1, DP = 1 and FHM = 1; nothing else. ISAR1 holds LRCPC
-            // and I8MM alone, MMFR2 AT alone.
+            // FEAT_LSE, RDM = 1, DP = 1 and FHM = 1; nothing else. ISAR1 holds
+            // JSCVT, FCMA, LRCPC, FRINTTS, BF16 = 1 (no FEAT_EBF16) and I8MM
+            // alone, MMFR2 AT alone.
             let at = |feature: Feature, lsb: u32, value: u64| if imp.has(feature) { value << lsb } else { 0 };
             let isar0_later =
                 at(Feature::Lse, 20, 2) | at(Feature::Rdm, 28, 1) | at(Feature::DotProd, 44, 1) | at(Feature::Fhm, 48, 1);
             assert_eq!(isar0, 0x0000_0000_0001_1120 | isar0_later);
-            assert_eq!(isar1 & !((0xF << 20) | (0xF << 52)), 0);
+            let isar1_fields = (0xF << 12) | (0xF << 16) | (0xF << 20) | (0xF << 32) | (0xF << 44) | (0xF << 52);
+            assert_eq!(isar1 & !isar1_fields, 0);
+            assert!(field(isar1, 44) <= 1, "BF16 = 1: FEAT_BF16, not FEAT_EBF16");
             assert_eq!(mmfr2 & !(0xF << 32), 0);
             assert_eq!((isar2, isar3), (0, 0));
             // No SVE2 (SVEver = 0, with FEAT_SME as without); with FEAT_SME,
-            // I8MM reports FEAT_I8MM as ISAR1 does.
-            let zfr0_i8mm = if imp.has(Feature::Sme) { field(isar1, 52) << 44 } else { 0 };
-            assert_eq!(zfr0, zfr0_i8mm);
+            // BF16 and I8MM report FEAT_BF16 and FEAT_I8MM as ISAR1 does.
+            let zfr0_later = if imp.has(Feature::Sme) { (field(isar1, 44) << 20) | (field(isar1, 52) << 44) } else { 0 };
+            assert_eq!(zfr0, zfr0_later);
             if imp.has(Feature::Sme) {
                 assert_eq!(pfr1, 1 << 24, "SME = 1: FEAT_SME, not FEAT_SME2");
                 assert_eq!(smfr0, 0x0000_00FD_0000_0000, "F32F32, B16F32, F16F32, I8I32; SMEver 0");

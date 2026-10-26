@@ -13,6 +13,7 @@
 //! never flushed (FPUnpackCV forces FZ16 off).
 
 mod arm_ops;
+mod bfloat;
 mod f16_to_f32;
 mod f16_to_f64;
 mod f32_addsub;
@@ -60,9 +61,10 @@ use self::specialize::{f32_flush_input, f64_flush_input};
 pub(crate) use self::arm_ops::{
     f16_ahp_to_f32, f16_ahp_to_f64, f32_mulx, f32_recip_step, f32_rsqrt_step, f32_to_f16_ahp, f32_to_i32_fixed,
     f32_to_i64_fixed, f32_to_u32_fixed, f32_to_u64_fixed, f64_mulx, f64_recip_step, f64_rsqrt_step,
-    f64_to_f16_ahp, f64_to_f32_round_odd, f64_to_i32_fixed, f64_to_i64_fixed, f64_to_u32_fixed,
+    f64_to_f16_ahp, f64_to_f32_round_odd, f64_to_i32_fixed, f64_to_i32_js, f64_to_i64_fixed, f64_to_u32_fixed,
     f64_to_u64_fixed, i64_to_f32_fixed, i64_to_f64_fixed, u64_to_f32_fixed, u64_to_f64_fixed,
 };
+pub(crate) use self::bfloat::{bf16_dot_add, f32_to_bf16};
 pub(crate) use self::half::{
     f16_add, f16_compare, f16_div, f16_max, f16_maxnum, f16_min, f16_minnum, f16_mul, f16_mul_add, f16_mul_add_long,
     f16_mulx, f16_recip_step, f16_round_to_int, f16_rsqrt_step, f16_sqrt, f16_sub, f16_to_signed, f16_to_unsigned,

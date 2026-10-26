@@ -110,6 +110,69 @@ impl IntWidth {
     }
 }
 
+/// The integer range FRINT32* and FRINT64* round within (Arm FPRoundIntN's
+/// `intsize`). Not an [`IntWidth`]: no integer is written or read, and
+/// there is no element-sized range.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum IntSize {
+    Bits32,
+    Bits64,
+}
+
+impl IntSize {
+    const fn bits(self) -> u32 {
+        match self {
+            Self::Bits32 => 32,
+            Self::Bits64 => 64,
+        }
+    }
+}
+
+/// A precision FEAT_FRINTTS rounds: Arm FPRoundIntN's `N`, 32 or 64.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FrintPrecision {
+    Single,
+    Double,
+}
+
+impl FrintPrecision {
+    const fn ty(self) -> FpType {
+        match self {
+            Self::Single => FpType::Single,
+            Self::Double => FpType::Double,
+        }
+    }
+}
+
+/// Arm FPRoundIntN: `a` rounded to an integral value by `rounding`, raising
+/// inexact when that changed it (FPRound of the integer). An infinity, a
+/// NaN, or a value outside the signed range of `size` gives the most
+/// negative integer of `size` and raises invalid alone.
+pub(crate) fn round_int_n(precision: FrintPrecision, a: u64, rounding: FpRounding, size: IntSize, env: &mut FpEnv) -> u64 {
+    let mut scratch = env.status;
+    scratch.set_cumulative_fpsr(0);
+    let (r, frac_bits) = match precision {
+        FrintPrecision::Single => {
+            (u64::from(sf::f32_round_to_int(a as u32, rounding, InexactReport::Raise, &mut scratch)), 23)
+        }
+        FrintPrecision::Double => (sf::f64_round_to_int(a, rounding, InexactReport::Raise, &mut scratch), 52),
+    };
+    let ty = precision.ty();
+    let exp_mask = ty.mask() >> (frac_bits + 1);
+    let bias = exp_mask >> 1;
+    let exp = (r >> frac_bits) & exp_mask;
+    let limit_exp = bias + u64::from(size.bits()) - 1;
+    let most_negative = ty.sign_bit() | (limit_exp << frac_bits);
+    // An integral value at least 2^(size - 1) in magnitude, an infinity or
+    // a NaN is outside the range, -2^(size - 1) itself apart.
+    if exp >= limit_exp && r != most_negative {
+        env.raise(fp_estimate::fpsr::IOC);
+        return most_negative;
+    }
+    env.raise(scratch.cumulative_fpsr());
+    r
+}
+
 /// A format FCVT converts between.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Precision {
@@ -566,7 +629,7 @@ impl Cpu {
     }
 
     /// One source: `000 11110 ftype 1 opcode 10000 Rn Rd` — FMOV, FABS,
-    /// FNEG, FSQRT, FCVT and FRINT*.
+    /// FNEG, FSQRT, FCVT, BFCVT and FRINT*.
     pub(crate) fn exec_fp_dp1(&mut self, pc: u64, insn: u32) -> ExecResult {
         if m_or_s(insn) {
             return self.undefined(pc, insn);
@@ -577,6 +640,19 @@ impl Cpu {
         let d = bits(insn, 4, 0);
 
         if opcode >> 2 == 0b0001 {
+            if (ftype, opcode & 3) == (0b01, 0b10) {
+                // BFCVT (FEAT_BF16, which the decoder checks), in the space
+                // of FCVT's reserved destination: single precision to
+                // BFloat16.
+                self.fp_check()?;
+                let mut env = self.fp_env();
+                let rounding = env.rounding();
+                let a = self.fp_get(n, FpType::Single.mask());
+                let result = sf::f32_to_bf16(a as u32, rounding, &mut env.status);
+                self.fp_commit(&env);
+                self.fp_set(d, FpType::Half.mask(), u64::from(result));
+                return Ok(Flow::Next);
+            }
             // FCVT: ftype is the source precision, opc (bits 16:15) the
             // destination's.
             let conversion = match (Precision::from_field(ftype), Precision::from_field(opcode & 3)) {
@@ -599,6 +675,26 @@ impl Cpu {
             let result = fp_convert(conversion, self.fp_get(n, from_mask), &mut env);
             self.fp_commit(&env);
             self.fp_set(d, to_mask, result);
+            return Ok(Flow::Next);
+        }
+        if opcode >> 2 == 0b0100 {
+            // FRINT32Z, FRINT32X, FRINT64Z, FRINT64X (FEAT_FRINTTS, which
+            // the decoder checks): `if ftype IN {'1x'} then
+            // EndOfDecode(Decode_UNDEF)`. `op<0>` rounds by FPCR.RMode
+            // rather than toward zero, `op<1>` within 64 bits rather than 32.
+            let precision = match ftype {
+                0b00 => FrintPrecision::Single,
+                0b01 => FrintPrecision::Double,
+                _ => return self.undefined(pc, insn),
+            };
+            self.fp_check()?;
+            let mut env = self.fp_env();
+            let rounding = if opcode & 1 == 1 { env.rounding() } else { FpRounding::Zero };
+            let size = if opcode & 2 == 2 { IntSize::Bits64 } else { IntSize::Bits32 };
+            let mask = precision.ty().mask();
+            let result = round_int_n(precision, self.fp_get(n, mask), rounding, size, &mut env);
+            self.fp_commit(&env);
+            self.fp_set(d, mask, result);
             return Ok(Flow::Next);
         }
 
@@ -727,10 +823,10 @@ impl Cpu {
     }
 
     /// Conversions between FP and general registers:
-    /// `sf 0 0 11110 ftype 1 rmode opcode 000000 Rn Rd`. Every form, the
-    /// `FMOV` of `Vn.D[1]` among them, makes the scalar check
+    /// `sf 0 0 11110 ftype 1 rmode opcode 000000 Rn Rd`. Every form but
+    /// FJCVTZS, the `FMOV` of `Vn.D[1]` among them, makes the scalar check
     /// (`AArch64_CheckFPEnabled` on the FMOV (general) page), so each is
-    /// legal in Streaming SVE mode.
+    /// legal in Streaming SVE mode; FJCVTZS makes the Advanced SIMD one.
     pub(crate) fn exec_fp_int(&mut self, pc: u64, insn: u32) -> ExecResult {
         if bit(insn, 29) {
             return self.undefined(pc, insn);
@@ -742,6 +838,17 @@ impl Cpu {
         let n = bits(insn, 9, 5);
         let d = bits(insn, 4, 0);
         match (sf, ftype, rmode, opcode) {
+            // FJCVTZS Wd, Dn (FEAT_JSCVT, which the decoder checks): the
+            // W register zero-extended, and NZCV = 0, Z, 0, 0.
+            (false, 1, 3, 0b110) => {
+                self.simd_check()?;
+                let mut env = self.fp_env();
+                let converted = sf::f64_to_i32_js(self.fp_get(n, FpType::Double.mask()), &mut env.status);
+                self.fp_commit(&env);
+                self.set_x_or_zr(d, u64::from(converted.value));
+                self.pstate.set_nzcv(u64::from(converted.exact) << 30);
+                return Ok(Flow::Next);
+            }
             // FMOV Wd, Sn / FMOV Xd, Dn
             (false, 0, 0, 0b110) | (true, 1, 0, 0b110) => {
                 self.fp_check()?;

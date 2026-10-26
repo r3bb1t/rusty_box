@@ -51,3 +51,17 @@ fp16_shift_fixed: 200 vectors from 423 encodings
 fp16_scalar_shift_fixed: 200 vectors from 404 encodings
 fhm_vector: 200 vectors from 200 encodings
 fhm_elem: 200 vectors from 200 encodings
+fcma_vector: 600 vectors from 815 encodings
+fcma_vector_half: 200 vectors from 200 encodings
+fcma_elem: 600 vectors from 2484 encodings
+fcma_elem_half: 200 vectors from 200 encodings
+jscvt: 600 vectors from 603 encodings
+frintts_scalar: 600 vectors from 600 encodings
+frintts_vector: 600 vectors from 794 encodings
+bf16_cvt: 600 vectors from 600 encodings
+bf16_cvtn: 600 vectors from 600 encodings
+bf16_dot: 200 vectors from 200 encodings
+bf16_dot_elem: 200 vectors from 200 encodings
+bf16_mlal: 200 vectors from 200 encodings
+bf16_mlal_elem: 200 vectors from 200 encodings
+bf16_mmla: 200 vectors from 200 encodings

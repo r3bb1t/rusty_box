@@ -81,11 +81,13 @@ pub(crate) const fn id_aa64isar0(features: Features) -> u64 {
         | field(features, Feature::Fhm, 48, 1)
 }
 
-/// `ID_AA64ISAR1_EL1` of a processor implementing `features`: LRCPC
+/// `ID_AA64ISAR1_EL1` of a processor implementing `features`: JSCVT
+/// (15:12) = 1 with FEAT_JSCVT, FCMA (19:16) = 1 with FEAT_FCMA, LRCPC
 /// (23:20) = 1 with FEAT_LRCPC, 2 with FEAT_LRCPC2 as well (which Arm's
 /// feature model makes imply FEAT_LRCPC, so the field never promises LDAPR
-/// to a processor without it), and I8MM (55:52) = 1 with FEAT_I8MM;
-/// nothing else from v8.2+.
+/// to a processor without it), FRINTTS (35:32) = 1 with FEAT_FRINTTS, BF16
+/// (47:44) = 1 with FEAT_BF16 (2 would be FEAT_EBF16) and I8MM (55:52) = 1
+/// with FEAT_I8MM; nothing else from v8.2+.
 pub(crate) const fn id_aa64isar1(features: Features) -> u64 {
     let lrcpc = if !features.has(Feature::Lrcpc) {
         0
@@ -94,20 +96,26 @@ pub(crate) const fn id_aa64isar1(features: Features) -> u64 {
     } else {
         1
     };
-    (lrcpc << 20) | field(features, Feature::I8mm, 52, 1)
+    field(features, Feature::Jscvt, 12, 1)
+        | field(features, Feature::Fcma, 16, 1)
+        | (lrcpc << 20)
+        | field(features, Feature::Frintts, 32, 1)
+        | field(features, Feature::Bf16, 44, 1)
+        | field(features, Feature::I8mm, 52, 1)
 }
 
 /// `ID_AA64ZFR0_EL1` of a processor implementing `features`: SVEver = 0
-/// (no SVE2), and I8MM (47:44) = 1 when FEAT_I8MM comes with FEAT_SME
-/// (`Features.json`: `(FEAT_SME || FEAT_SVE) ==> (FEAT_I8MM <=>
-/// UInt(ID_AA64ZFR0_EL1.I8MM) >= 1)`); zero without FEAT_SME, as a
-/// processor without SVE or SME reports it. The field promises the SVE
-/// USDOT and SUDOT in Streaming SVE mode, which are among the encodings
-/// of FEAT_SME still being built (`Feature::complete`), as is every SVE
-/// instruction that mode allows.
+/// (no SVE2), BF16 (23:20) = 1 and I8MM (47:44) = 1 when FEAT_BF16 and
+/// FEAT_I8MM come with FEAT_SME (`Features.json`: `(FEAT_SME || FEAT_SVE)
+/// ==> (FEAT_BF16 <=> UInt(ID_AA64ZFR0_EL1.BF16) >= 1)`, and the same of
+/// I8MM); zero without FEAT_SME, as a processor without SVE or SME reports
+/// it. The fields promise the SVE BFloat16 instructions, USDOT and SUDOT
+/// in Streaming SVE mode, which are among the encodings of FEAT_SME still
+/// being built (`Feature::complete`), as is every SVE instruction that
+/// mode allows.
 pub(crate) const fn id_aa64zfr0(features: Features) -> u64 {
     if features.has(Feature::Sme) {
-        field(features, Feature::I8mm, 44, 1)
+        field(features, Feature::Bf16, 20, 1) | field(features, Feature::I8mm, 44, 1)
     } else {
         0
     }

@@ -155,11 +155,15 @@ fn camel(snake: &str) -> String {
 /// The variant name of Arm encoding `encoding` of class `class`: the
 /// encoding id without the class name and without `only` (Arm's mark for
 /// the one encoding of an instruction in its class), in UpperCamelCase;
-/// `None` when the id does not hold the class name.
+/// the whole id when it does not hold the class name (`FCMLA_advsimd_elt`
+/// in `asimdelem`).
 fn variant_name(encoding: &str, class: &str) -> Option<String> {
     let parts: Vec<&str> = encoding.split('_').collect();
     let class_parts: Vec<&str> = class.split('_').collect();
-    let at = (0..=parts.len().checked_sub(class_parts.len())?).find(|&i| parts[i..i + class_parts.len()] == class_parts[..])?;
+    let found = (0..=parts.len().checked_sub(class_parts.len())?).find(|&i| parts[i..i + class_parts.len()] == class_parts[..]);
+    let Some(at) = found else {
+        return Some(camel(encoding));
+    };
     let rest: Vec<&str> = parts[..at]
         .iter()
         .chain(parts[at + class_parts.len()..].iter())

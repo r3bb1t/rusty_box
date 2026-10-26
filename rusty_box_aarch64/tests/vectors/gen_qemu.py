@@ -21,9 +21,12 @@ QEMU is wrong too in places, and a family steers clear of what it is
 known to get wrong, against the Arm ARM's pseudocode: QEMU 8.2.2 adds the
 `imm9` of LDAPUR and STLUR unsigned, where Arm's `SignExtend(imm9)` makes
 it signed, so `rcpc_unscaled` keeps the offset non-negative; it executes
-the scalar half-precision FABS and FNEG, which Arm does not allocate; and
-it sign-extends the result of FCVTZS (scalar, fixed-point) to half
-precision into 32 bits. The fixups below say how each family avoids them.
+the scalar half-precision FABS and FNEG, which Arm does not allocate; it
+sign-extends the result of FCVTZS (scalar, fixed-point) to half precision
+into 32 bits; it raises exceptions from elements beyond a 64-bit FCMLA (by
+element) of half precision; and it sets FJCVTZS's Z for a denormal FPCR.FZ
+flushes. The fixups and STATE_AVOIDED below say how each family avoids
+them.
 
 The program runs at EL0 with the MMU on, over Normal memory: families keep
 every access aligned (the replay runs at EL1 with the MMU off, over Device
@@ -93,6 +96,20 @@ def scalar_misc_fp16(w):
     return w
 
 
+def fcmla_elem_q(w):
+    """FCMLA (by element) of half precision with `Q = 1`: with `Q = 0`
+    QEMU 8.2.2 raises exceptions from the four elements above the 64-bit
+    vector, where Arm computes only the elements of `datasize`."""
+    return w | (1 << 30)
+
+
+def fcadd_opcode(w):
+    """FCMLA has opcode (bits 14:11) 10xx, FCADD 11x0: with `opcode<2>` set,
+    `opcode<0>` clear (1101 is BFMMLA and later matrix multiplies, 1111
+    BFDOT and BFMLAL)."""
+    return w & ~(1 << 11) if w >> 13 & 1 else w
+
+
 def unsigned_fcvtz(w):
     """FCVTZS (scalar, fixed-point) to half precision: QEMU 8.2.2 writes the
     16-bit result sign-extended to 32 bits, where Arm's `V[d] = result`
@@ -153,6 +170,27 @@ FAMILIES = [
     # FEAT_FHM: FMLAL, FMLSL, FMLAL2, FMLSL2, vector and by element.
     ("fhm_vector", "H", 0x0E20CC00, 0x60BF23FF, None),
     ("fhm_elem", "H", 0x0F800000, 0x603FCBFF, None),
+    # FEAT_FCMA: FCMLA and FCADD, vector, and FCMLA by element, of single
+    # and double precision, and of half precision (FEAT_FP16).
+    ("fcma_vector", "F", 0x2E80C400, 0x405F3BFF, fcadd_opcode),
+    ("fcma_vector_half", "H", 0x2E40C400, 0x401F3BFF, fcadd_opcode),
+    ("fcma_elem", "F", 0x2F801000, 0x403F6BFF, None),
+    ("fcma_elem_half", "H", 0x2F401000, 0x403F6BFF, fcmla_elem_q),
+    # FEAT_JSCVT: FJCVTZS.
+    ("jscvt", "F", 0x1E7E0000, 0x000003FF, None),
+    # FEAT_FRINTTS: FRINT32Z, FRINT32X, FRINT64Z, FRINT64X, scalar and
+    # vector.
+    ("frintts_scalar", "F", 0x1E284000, 0x004183FF, None),
+    ("frintts_vector", "F", 0x0E21E800, 0x604013FF, None),
+    # FEAT_BF16: BFCVT, BFCVTN, BFDOT (vector and by element), BFMLALB and
+    # BFMLALT (vector and by element), BFMMLA.
+    ("bf16_cvt", "F", 0x1E634000, 0x000003FF, None),
+    ("bf16_cvtn", "F", 0x0EA16800, 0x400003FF, None),
+    ("bf16_dot", "B", 0x2E40FC00, 0x401F03FF, None),
+    ("bf16_dot_elem", "B", 0x0F40F000, 0x403F0BFF, None),
+    ("bf16_mlal", "B", 0x2EC0FC00, 0x401F03FF, None),
+    ("bf16_mlal_elem", "B", 0x0FC0F000, 0x403F0BFF, None),
+    ("bf16_mmla", "B", 0x6E40EC00, 0x001F03FF, None),
 ]
 
 
@@ -233,8 +271,23 @@ class Harness:
             raise RuntimeError(f"harness exited with {code}")
 
 
-def run_case(harness, insn, seed, kind):
+def flushed_jscvt_operand(insn, v, fpcr):
+    """FJCVTZS of a denormal under FPCR.FZ, of either sign: QEMU 8.2.2 sets
+    Z where Arm's FPToFixedJS clears it (the operand flushed to a zero of
+    its sign, then `sign == '1' && value == 0.0`, or `op<51:0>` nonzero)."""
+    d = v[(insn >> 5) & 31] & MASK64
+    return fpcr >> 24 & 1 and (d >> 52) & 0x7FF == 0 and d & ((1 << 52) - 1) != 0
+
+
+# The initial states a family leaves out, where QEMU is wrong for the state
+# rather than the word.
+STATE_AVOIDED = {"jscvt": flushed_jscvt_operand}
+
+
+def run_case(harness, insn, seed, kind, avoided):
     x, sp, nzcv, v, data, fpcr = initial_state(seed, kind, insn)
+    if avoided is not None and avoided(insn, v, fpcr):
+        return None
     try:
         result = harness.run(insn, x, sp & MASK64, nzcv, v, data, fpcr)
     except EmulatorAborted as aborted:
@@ -265,7 +318,7 @@ def main():
                 if fixup:
                     insn = fixup(insn)
                 seed = picker.next()
-                line = run_case(harness, insn, seed, kind)
+                line = run_case(harness, insn, seed, kind, STATE_AVOIDED.get(name))
                 if line is not None:
                     lines.append(f"{name} {line}")
                     kept += 1

@@ -20,12 +20,16 @@ mod exec;
 mod features;
 mod fp;
 mod fp_estimate;
+#[cfg(test)]
+#[path = "../../tests/unit/fp_extensions.rs"]
+mod fp_extensions;
 mod isa;
 mod ldst;
 mod mmu;
 mod regs;
 mod simd;
 mod simd_arith;
+mod simd_bf16;
 mod simd_fp;
 mod sme;
 mod state;

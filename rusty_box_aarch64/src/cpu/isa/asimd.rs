@@ -113,6 +113,82 @@ pub(crate) enum Asimdmisc {
     UrsqrteR,
     FrsqrteR,
     FsqrtR,
+    Frint32zR,
+    Frint64zR,
+    Bfcvtn4s,
+    Frint32xR,
+    Frint64xR,
+}
+
+impl Asimdmisc {
+    pub(crate) const fn feature(self) -> Feature {
+        match self {
+            Self::Frint32zR | Self::Frint64zR | Self::Frint32xR | Self::Frint64xR => Feature::Frintts,
+            Self::Bfcvtn4s => Feature::Bf16,
+            Self::Rev64R
+            | Self::Rev16R
+            | Self::SaddlpP
+            | Self::SuqaddR
+            | Self::ClsR
+            | Self::CntR
+            | Self::SadalpP
+            | Self::SqabsR
+            | Self::CmgtZ
+            | Self::CmeqZ
+            | Self::CmltZ
+            | Self::AbsR
+            | Self::XtnN
+            | Self::SqxtnN
+            | Self::FcvtnN
+            | Self::FcvtlL
+            | Self::FrintnR
+            | Self::FrintmR
+            | Self::FcvtnsR
+            | Self::FcvtmsR
+            | Self::FcvtasR
+            | Self::ScvtfR
+            | Self::FcmgtFz
+            | Self::FcmeqFz
+            | Self::FcmltFz
+            | Self::FabsR
+            | Self::FrintpR
+            | Self::FrintzR
+            | Self::FcvtpsR
+            | Self::FcvtzsR
+            | Self::UrecpeR
+            | Self::FrecpeR
+            | Self::Rev32R
+            | Self::UaddlpP
+            | Self::UsqaddR
+            | Self::ClzR
+            | Self::UadalpP
+            | Self::SqnegR
+            | Self::CmgeZ
+            | Self::CmleZ
+            | Self::NegR
+            | Self::SqxtunN
+            | Self::ShllS
+            | Self::UqxtnN
+            | Self::FcvtxnN
+            | Self::FrintaR
+            | Self::FrintxR
+            | Self::FcvtnuR
+            | Self::FcvtmuR
+            | Self::FcvtauR
+            | Self::UcvtfR
+            | Self::NotR
+            | Self::RbitR
+            | Self::FcmgeFz
+            | Self::FcmleFz
+            | Self::FnegR
+            | Self::FrintiR
+            | Self::FcvtpuR
+            | Self::FcvtzuR
+            | Self::UrsqrteR
+            | Self::FrsqrteR
+            | Self::FsqrtR => Feature::AdvSimd,
+        }
+    }
 }
 
 /// Arm group `asimdall`: Advanced SIMD across lanes.
@@ -551,6 +627,9 @@ pub(crate) enum Asimdelem {
     FmlslLh,
     Fmlal2Lh,
     Fmlsl2Lh,
+    BfdotE,
+    BfmlalF,
+    FcmlaAdvsimdElt,
 }
 
 impl Asimdelem {
@@ -582,6 +661,9 @@ impl Asimdelem {
             | Self::FmulxRhH => Class::SimdIndexedElement,
             Self::SdotD | Self::UdotD | Self::SudotD | Self::UsdotD => Class::SimdDotProductIndexedElement,
             Self::FmlalLh | Self::FmlslLh | Self::Fmlal2Lh | Self::Fmlsl2Lh => Class::SimdFpMulAddLongIndexedElement,
+            Self::FcmlaAdvsimdElt => Class::SimdComplexMultiplyAccumulateIndexedElement,
+            Self::BfdotE => Class::SimdBfDotProductIndexedElement,
+            Self::BfmlalF => Class::SimdBfMulAddLongIndexedElement,
         }
     }
 
@@ -610,6 +692,8 @@ impl Asimdelem {
             Self::SqrdmlahR | Self::SqrdmlshR => Feature::Rdm,
             Self::FmlaRhH | Self::FmlsRhH | Self::FmulRhH | Self::FmulxRhH => Feature::Fp16,
             Self::FmlalLh | Self::FmlslLh | Self::Fmlal2Lh | Self::Fmlsl2Lh => Feature::Fhm,
+            Self::FcmlaAdvsimdElt => Feature::Fcma,
+            Self::BfdotE | Self::BfmlalF => Feature::Bf16,
         }
     }
 }
@@ -625,6 +709,11 @@ pub(crate) enum Asimdsame2 {
     SmmlaG,
     UsmmlaG,
     UmmlaG,
+    FcmlaC,
+    FcaddC,
+    BfdotD,
+    BfmlalF,
+    BfmmlaE,
 }
 
 impl Asimdsame2 {
@@ -633,6 +722,11 @@ impl Asimdsame2 {
             Self::Sqrdmlah | Self::Sqrdmlsh => Class::SimdRoundingDoublingMultiplyAccumulate,
             Self::SdotD | Self::UdotD | Self::UsdotD => Class::SimdDotProduct,
             Self::SmmlaG | Self::UsmmlaG | Self::UmmlaG => Class::SimdMatrixMultiply,
+            Self::FcmlaC => Class::SimdComplexMultiplyAccumulate,
+            Self::FcaddC => Class::SimdComplexAdd,
+            Self::BfdotD => Class::SimdBfDotProduct,
+            Self::BfmlalF => Class::SimdBfMulAddLong,
+            Self::BfmmlaE => Class::SimdBfMatrixMultiply,
         }
     }
 
@@ -641,6 +735,8 @@ impl Asimdsame2 {
             Self::SdotD | Self::UdotD => Feature::DotProd,
             Self::UsdotD | Self::SmmlaG | Self::UsmmlaG | Self::UmmlaG => Feature::I8mm,
             Self::Sqrdmlah | Self::Sqrdmlsh => Feature::Rdm,
+            Self::FcmlaC | Self::FcaddC => Feature::Fcma,
+            Self::BfdotD | Self::BfmlalF | Self::BfmmlaE => Feature::Bf16,
         }
     }
 }
@@ -706,8 +802,7 @@ pub(super) fn asimdmisc(word: u32) -> Option<Asimdmisc> {
     let u = bits(word, 29, 29);
     let size = bits(word, 23, 22);
     let opcode = bits(word, 16, 12);
-    // FRINT32Z, FRINT64Z, FRINT32X and FRINT64X are FEAT_FRINTTS, BFCVTN
-    // FEAT_BF16, and F1CVTL, F2CVTL, BF1CVTL and BF2CVTL FEAT_FP8.
+    // F1CVTL, F2CVTL, BF1CVTL and BF2CVTL are FEAT_FP8.
     match (u, size, opcode) {
         (0b0, _, 0b00000) => Some(Asimdmisc::Rev64R),
         (0b0, _, 0b00001) => Some(Asimdmisc::Rev16R),
@@ -731,6 +826,9 @@ pub(super) fn asimdmisc(word: u32) -> Option<Asimdmisc> {
         (0b0, 0b00 | 0b01, 0b11011) => Some(Asimdmisc::FcvtmsR),
         (0b0, 0b00 | 0b01, 0b11100) => Some(Asimdmisc::FcvtasR),
         (0b0, 0b00 | 0b01, 0b11101) => Some(Asimdmisc::ScvtfR),
+        (0b0, 0b00 | 0b01, 0b11110) => Some(Asimdmisc::Frint32zR),
+        (0b0, 0b00 | 0b01, 0b11111) => Some(Asimdmisc::Frint64zR),
+        (0b0, 0b10, 0b10110) => Some(Asimdmisc::Bfcvtn4s),
         (0b0, 0b10 | 0b11, 0b01100) => Some(Asimdmisc::FcmgtFz),
         (0b0, 0b10 | 0b11, 0b01101) => Some(Asimdmisc::FcmeqFz),
         (0b0, 0b10 | 0b11, 0b01110) => Some(Asimdmisc::FcmltFz),
@@ -760,6 +858,8 @@ pub(super) fn asimdmisc(word: u32) -> Option<Asimdmisc> {
         (0b1, 0b00 | 0b01, 0b11011) => Some(Asimdmisc::FcvtmuR),
         (0b1, 0b00 | 0b01, 0b11100) => Some(Asimdmisc::FcvtauR),
         (0b1, 0b00 | 0b01, 0b11101) => Some(Asimdmisc::UcvtfR),
+        (0b1, 0b00 | 0b01, 0b11110) => Some(Asimdmisc::Frint32xR),
+        (0b1, 0b00 | 0b01, 0b11111) => Some(Asimdmisc::Frint64xR),
         (0b1, 0b00, 0b00101) => Some(Asimdmisc::NotR),
         (0b1, 0b01, 0b00101) => Some(Asimdmisc::RbitR),
         (0b1, 0b10 | 0b11, 0b01100) => Some(Asimdmisc::FcmgeFz),
@@ -1003,7 +1103,7 @@ pub(super) fn asimdelem(word: u32) -> Option<Asimdelem> {
     let u = bits(word, 29, 29);
     let size = bits(word, 23, 22);
     let opcode = bits(word, 15, 12);
-    // The remaining opcodes are FEAT_FCMA, FEAT_BF16 and FEAT_FP8 forms.
+    // The remaining opcodes are FEAT_FP8 forms.
     match (u, size, opcode) {
         (0b0, _, 0b0010) => Some(Asimdelem::SmlalL),
         (0b0, _, 0b0011) => Some(Asimdelem::SqdmlalL),
@@ -1037,6 +1137,9 @@ pub(super) fn asimdelem(word: u32) -> Option<Asimdelem> {
         (0b0, 0b10, 0b0100) => Some(Asimdelem::FmlslLh),
         (0b1, 0b10, 0b1000) => Some(Asimdelem::Fmlal2Lh),
         (0b1, 0b10, 0b1100) => Some(Asimdelem::Fmlsl2Lh),
+        (0b0, 0b01, 0b1111) => Some(Asimdelem::BfdotE),
+        (0b0, 0b11, 0b1111) => Some(Asimdelem::BfmlalF),
+        (0b1, _, 0b0001 | 0b0011 | 0b0101 | 0b0111) => Some(Asimdelem::FcmlaAdvsimdElt),
         _ => None,
     }
 }
@@ -1046,8 +1149,7 @@ pub(super) fn asimdsame2(word: u32) -> Option<Asimdsame2> {
     let u = bits(word, 29, 29);
     let size = bits(word, 23, 22);
     let opcode = bits(word, 14, 11);
-    // The other opcodes are FEAT_FCMA, FEAT_BF16 and FEAT_FP8 forms and
-    // later matrix multiplies.
+    // The other opcodes are FEAT_FP8 forms and later matrix multiplies.
     match (u, opcode) {
         (0b0, 0b0010) => Some(Asimdsame2::SdotD),
         (0b0, 0b0011) => match size {
@@ -1067,6 +1169,17 @@ pub(super) fn asimdsame2(word: u32) -> Option<Asimdsame2> {
         },
         (0b1, 0b0100) => match (q, size) {
             (0b1, 0b10) => Some(Asimdsame2::UmmlaG),
+            _ => None,
+        },
+        (0b1, 0b1000..=0b1011) => Some(Asimdsame2::FcmlaC),
+        (0b1, 0b1100 | 0b1110) => Some(Asimdsame2::FcaddC),
+        (0b1, 0b1101) => match (q, size) {
+            (0b1, 0b01) => Some(Asimdsame2::BfmmlaE),
+            _ => None,
+        },
+        (0b1, 0b1111) => match size {
+            0b01 => Some(Asimdsame2::BfdotD),
+            0b11 => Some(Asimdsame2::BfmlalF),
             _ => None,
         },
         _ => None,
