@@ -11,6 +11,14 @@
 //! (`target/arm/ptw.c`, the Device check ahead of the permission check,
 //! citing R_XCHFJ).
 //!
+//! A pair is two such accesses, one per element: Arm ARM `LDP`, `LDPSW`
+//! and `STP`, general-purpose and SIMD&FP alike, make `Mem[address,
+//! dbytes]` and then `Mem[address + dbytes, dbytes]`, so each element is
+//! checked against its own size, never the pair's. (The single 2 × `dbytes`
+//! access of FEAT_LSE2 is not this processor's: `ID_AA64MMFR2_EL1.AT` is
+//! 0.) A pair of words at 4 mod 8 is aligned, on Device memory and with
+//! SCTLR_EL1.A set; a pair of doublewords there is not.
+//!
 //! Guest code is hand-assembled (GNU as for aarch64); each snippet's source
 //! is beside its words.
 
@@ -28,6 +36,22 @@ const LOAD_Q: [u32; 2] = [0x3DC0_0020, 0x1400_0000];
 const STORE_Q: [u32; 2] = [0x3D80_0020, 0x1400_0000];
 /// `ldp q0, q1, [x1]; b .`
 const LOAD_PAIR_Q: [u32; 2] = [0xAD40_0420, 0x1400_0000];
+/// `ldp w3, w4, [x1]; b .`
+const LOAD_PAIR_W: [u32; 2] = [0x2940_1023, 0x1400_0000];
+/// `stp w2, w3, [x1]; b .`
+const STORE_PAIR_W: [u32; 2] = [0x2900_0C22, 0x1400_0000];
+/// `ldpsw x3, x4, [x1]; b .`
+const LOAD_PAIR_SW: [u32; 2] = [0x6940_1023, 0x1400_0000];
+/// `ldp x3, x4, [x1]; b .`
+const LOAD_PAIR_X: [u32; 2] = [0xA940_1023, 0x1400_0000];
+/// `ldp s0, s1, [x1]; b .`
+const LOAD_PAIR_S: [u32; 2] = [0x2D40_0420, 0x1400_0000];
+/// `stp s0, s1, [x1]; b .`
+const STORE_PAIR_S: [u32; 2] = [0x2D00_0420, 0x1400_0000];
+/// `ldp d0, d1, [x1]; b .`
+const LOAD_PAIR_D: [u32; 2] = [0x6D40_0420, 0x1400_0000];
+/// `stp d0, d1, [x1]; b .`
+const STORE_PAIR_D: [u32; 2] = [0x6D00_0420, 0x1400_0000];
 /// `str w2, [x1]; b .`
 const STORE_W: [u32; 2] = [0xB900_0022, 0x1400_0000];
 /// `str x2, [x1]; b .`
@@ -62,6 +86,15 @@ const SCTLR_A: u64 = 1 << 1;
 
 const Q_VALUE: u128 = 0x0011_2233_4455_6677_8899_AABB_CCDD_EEFF;
 const FILL: [u8; 16] = [0x5A; 16];
+
+/// A pair's elements: words (the first negative, for `LDPSW`) and
+/// doublewords.
+const FIRST_WORD: u32 = 0x8899_AABB;
+const SECOND_WORD: u32 = 0x1122_3344;
+const FIRST_DWORD: u64 = 0x8899_AABB_CCDD_EEFF;
+const SECOND_DWORD: u64 = 0x0011_2233_4455_6677;
+/// What a register holds before a load that must not write it.
+const UNTOUCHED: u64 = 0x5555;
 
 fn bare(ram: &mut [u8]) -> VirtMachine<LentStorage<'_>> {
     MachineBuilder::new(VirtConfig::DEFAULT)
@@ -389,4 +422,221 @@ fn a_q_register_store_running_into_an_unmapped_page_writes_nothing() {
     assert_eq!(esr & WNR, WNR);
     assert_eq!(far, 0x8000_4000);
     assert_eq!(bytes_at(&m, RAM_BASE + 0x6FF0), FILL, "the first page is untouched");
+}
+
+// Pairs whose elements are aligned and the pair is not: words at 4 mod 8,
+// doublewords at 8 mod 16. With stage 1 disabled the data is on Device
+// memory at RAM_BASE + 0x1000; with it enabled, on the Normal page at VA
+// 0x8000_1000 (RAM + 0x5000) with SCTLR_EL1.A set.
+
+/// Device memory: a word pair's address, and a doubleword pair's.
+const DEVICE_WORDS: u64 = RAM_BASE + 0x1004;
+const DEVICE_DWORDS: u64 = RAM_BASE + 0x1008;
+/// Normal memory under SCTLR_EL1.A: the same, as VA and as PA.
+const NORMAL_WORDS: u64 = 0x8000_1004;
+const NORMAL_WORDS_PA: u64 = RAM_BASE + 0x5004;
+const NORMAL_DWORDS: u64 = 0x8000_1008;
+const NORMAL_DWORDS_PA: u64 = RAM_BASE + 0x5008;
+
+/// Run the one instruction at `RAM_BASE`, which must complete.
+fn completes<S: GuestStorage, I: Instrumentation>(m: &mut VirtMachine<S, I>) {
+    let out = m.step(RunBudget::Instructions(1));
+    assert_eq!(out.stop, StopReason::BudgetExhausted);
+    assert_eq!(m.reg_read(Reg::Pc), RAM_BASE + 4, "no fault");
+}
+
+/// The pages of [`map_test_pages`], with SCTLR_EL1.A set.
+fn map_test_pages_strictly<S: GuestStorage, I: Instrumentation>(m: &mut VirtMachine<S, I>) {
+    map_test_pages(m);
+    let sctlr = m.sysreg_read(SysReg::SCTLR_EL1).expect("SCTLR");
+    m.sysreg_write(SysReg::SCTLR_EL1, sctlr | SCTLR_A).expect("SCTLR");
+}
+
+fn put_words<S: GuestStorage, I: Instrumentation>(m: &mut VirtMachine<S, I>, pa: u64) {
+    m.mem_write(pa, &FIRST_WORD.to_le_bytes()).expect("in RAM");
+    m.mem_write(pa + 4, &SECOND_WORD.to_le_bytes()).expect("in RAM");
+}
+
+fn put_dwords<S: GuestStorage, I: Instrumentation>(m: &mut VirtMachine<S, I>, pa: u64) {
+    m.mem_write(pa, &FIRST_DWORD.to_le_bytes()).expect("in RAM");
+    m.mem_write(pa + 8, &SECOND_DWORD.to_le_bytes()).expect("in RAM");
+}
+
+/// The 16 bytes from 4 below a stored word pair: the fill on either side.
+fn words_stored() -> [u8; 16] {
+    let mut bytes = FILL;
+    bytes[4..8].copy_from_slice(&FIRST_WORD.to_le_bytes());
+    bytes[8..12].copy_from_slice(&SECOND_WORD.to_le_bytes());
+    bytes
+}
+
+fn dwords_stored() -> [u8; 16] {
+    let mut bytes = [0u8; 16];
+    bytes[..8].copy_from_slice(&FIRST_DWORD.to_le_bytes());
+    bytes[8..].copy_from_slice(&SECOND_DWORD.to_le_bytes());
+    bytes
+}
+
+#[test]
+fn a_word_pair_load_from_device_memory_needs_word_alignment_only() {
+    let mut ram = vec![0u8; RAM_LEN];
+    let mut m = bare(&mut ram);
+    load(&mut m, &LOAD_PAIR_W);
+    put_words(&mut m, DEVICE_WORDS);
+    m.reg_write(Reg::X1, DEVICE_WORDS);
+    completes(&mut m);
+    assert_eq!(m.reg_read(Reg::X3), u64::from(FIRST_WORD));
+    assert_eq!(m.reg_read(Reg::X4), u64::from(SECOND_WORD));
+}
+
+#[test]
+fn a_word_pair_store_to_device_memory_needs_word_alignment_only() {
+    let mut ram = vec![0u8; RAM_LEN];
+    let mut m = bare(&mut ram);
+    load(&mut m, &STORE_PAIR_W);
+    m.mem_write(DEVICE_WORDS - 4, &FILL).expect("in RAM");
+    m.reg_write(Reg::X1, DEVICE_WORDS);
+    m.reg_write(Reg::X2, u64::from(FIRST_WORD));
+    m.reg_write(Reg::X3, u64::from(SECOND_WORD));
+    completes(&mut m);
+    assert_eq!(bytes_at(&m, DEVICE_WORDS - 4), words_stored());
+}
+
+#[test]
+fn a_signed_word_pair_load_from_device_memory_needs_word_alignment_only() {
+    let mut ram = vec![0u8; RAM_LEN];
+    let mut m = bare(&mut ram);
+    load(&mut m, &LOAD_PAIR_SW);
+    put_words(&mut m, DEVICE_WORDS);
+    m.reg_write(Reg::X1, DEVICE_WORDS);
+    completes(&mut m);
+    assert_eq!(m.reg_read(Reg::X3), 0xFFFF_FFFF_8899_AABB, "sign-extended");
+    assert_eq!(m.reg_read(Reg::X4), u64::from(SECOND_WORD));
+}
+
+#[test]
+fn a_single_precision_pair_load_from_device_memory_needs_word_alignment_only() {
+    let mut ram = vec![0u8; RAM_LEN];
+    let mut m = bare(&mut ram);
+    load(&mut m, &LOAD_PAIR_S);
+    put_words(&mut m, DEVICE_WORDS);
+    m.vreg_write(v(0), Q_VALUE);
+    m.vreg_write(v(1), Q_VALUE);
+    m.reg_write(Reg::X1, DEVICE_WORDS);
+    completes(&mut m);
+    assert_eq!(m.vreg_read(v(0)), u128::from(FIRST_WORD), "the rest of V0 is cleared");
+    assert_eq!(m.vreg_read(v(1)), u128::from(SECOND_WORD), "the rest of V1 is cleared");
+}
+
+#[test]
+fn a_double_precision_pair_store_to_device_memory_needs_doubleword_alignment_only() {
+    let mut ram = vec![0u8; RAM_LEN];
+    let mut m = bare(&mut ram);
+    load(&mut m, &STORE_PAIR_D);
+    m.vreg_write(v(0), (Q_VALUE << 64) | u128::from(FIRST_DWORD));
+    m.vreg_write(v(1), (Q_VALUE << 64) | u128::from(SECOND_DWORD));
+    m.reg_write(Reg::X1, DEVICE_DWORDS);
+    completes(&mut m);
+    assert_eq!(bytes_at(&m, DEVICE_DWORDS), dwords_stored(), "the low doubleword of each");
+}
+
+#[test]
+fn a_doubleword_pair_load_from_device_memory_at_a_word_boundary_faults() {
+    let mut ram = vec![0u8; RAM_LEN];
+    let mut m = bare(&mut ram);
+    load(&mut m, &LOAD_PAIR_X);
+    m.reg_write(Reg::X1, DEVICE_WORDS);
+    m.reg_write(Reg::X3, UNTOUCHED);
+    m.reg_write(Reg::X4, UNTOUCHED);
+    let (esr, far) = fault(&mut m);
+    assert_eq!(esr & 0x3F, DFSC_ALIGNMENT, "ESR {esr:#x}");
+    assert_eq!(esr & WNR, 0);
+    assert_eq!(far, DEVICE_WORDS, "the first element's address");
+    assert_eq!(m.reg_read(Reg::X3), UNTOUCHED, "X3 is not loaded");
+    assert_eq!(m.reg_read(Reg::X4), UNTOUCHED, "X4 is not loaded");
+}
+
+#[test]
+fn with_sctlr_a_set_a_word_pair_load_from_normal_memory_needs_word_alignment_only() {
+    let mut ram = vec![0u8; RAM_LEN];
+    let mut m = bare(&mut ram);
+    load(&mut m, &LOAD_PAIR_W);
+    map_test_pages_strictly(&mut m);
+    put_words(&mut m, NORMAL_WORDS_PA);
+    m.reg_write(Reg::X1, NORMAL_WORDS);
+    completes(&mut m);
+    assert_eq!(m.reg_read(Reg::X3), u64::from(FIRST_WORD));
+    assert_eq!(m.reg_read(Reg::X4), u64::from(SECOND_WORD));
+}
+
+#[test]
+fn with_sctlr_a_set_a_word_pair_store_to_normal_memory_needs_word_alignment_only() {
+    let mut ram = vec![0u8; RAM_LEN];
+    let mut m = bare(&mut ram);
+    load(&mut m, &STORE_PAIR_W);
+    map_test_pages_strictly(&mut m);
+    m.mem_write(NORMAL_WORDS_PA - 4, &FILL).expect("in RAM");
+    m.reg_write(Reg::X1, NORMAL_WORDS);
+    m.reg_write(Reg::X2, u64::from(FIRST_WORD));
+    m.reg_write(Reg::X3, u64::from(SECOND_WORD));
+    completes(&mut m);
+    assert_eq!(bytes_at(&m, NORMAL_WORDS_PA - 4), words_stored());
+}
+
+#[test]
+fn with_sctlr_a_set_a_signed_word_pair_load_from_normal_memory_needs_word_alignment_only() {
+    let mut ram = vec![0u8; RAM_LEN];
+    let mut m = bare(&mut ram);
+    load(&mut m, &LOAD_PAIR_SW);
+    map_test_pages_strictly(&mut m);
+    put_words(&mut m, NORMAL_WORDS_PA);
+    m.reg_write(Reg::X1, NORMAL_WORDS);
+    completes(&mut m);
+    assert_eq!(m.reg_read(Reg::X3), 0xFFFF_FFFF_8899_AABB, "sign-extended");
+    assert_eq!(m.reg_read(Reg::X4), u64::from(SECOND_WORD));
+}
+
+#[test]
+fn with_sctlr_a_set_a_single_precision_pair_store_to_normal_memory_needs_word_alignment_only() {
+    let mut ram = vec![0u8; RAM_LEN];
+    let mut m = bare(&mut ram);
+    load(&mut m, &STORE_PAIR_S);
+    map_test_pages_strictly(&mut m);
+    m.mem_write(NORMAL_WORDS_PA - 4, &FILL).expect("in RAM");
+    m.vreg_write(v(0), (Q_VALUE << 32) | u128::from(FIRST_WORD));
+    m.vreg_write(v(1), (Q_VALUE << 32) | u128::from(SECOND_WORD));
+    m.reg_write(Reg::X1, NORMAL_WORDS);
+    completes(&mut m);
+    assert_eq!(bytes_at(&m, NORMAL_WORDS_PA - 4), words_stored(), "the low word of each");
+}
+
+#[test]
+fn with_sctlr_a_set_a_double_precision_pair_load_from_normal_memory_needs_doubleword_alignment_only() {
+    let mut ram = vec![0u8; RAM_LEN];
+    let mut m = bare(&mut ram);
+    load(&mut m, &LOAD_PAIR_D);
+    map_test_pages_strictly(&mut m);
+    put_dwords(&mut m, NORMAL_DWORDS_PA);
+    m.reg_write(Reg::X1, NORMAL_DWORDS);
+    completes(&mut m);
+    assert_eq!(m.vreg_read(v(0)), u128::from(FIRST_DWORD));
+    assert_eq!(m.vreg_read(v(1)), u128::from(SECOND_DWORD));
+}
+
+#[test]
+fn with_sctlr_a_set_a_word_pair_load_at_a_halfword_boundary_faults() {
+    let mut ram = vec![0u8; RAM_LEN];
+    let mut m = bare(&mut ram);
+    load(&mut m, &LOAD_PAIR_W);
+    map_test_pages_strictly(&mut m);
+    let at = NORMAL_WORDS - 2;
+    m.reg_write(Reg::X1, at);
+    m.reg_write(Reg::X3, UNTOUCHED);
+    m.reg_write(Reg::X4, UNTOUCHED);
+    let (esr, far) = fault(&mut m);
+    assert_eq!(esr & 0x3F, DFSC_ALIGNMENT, "ESR {esr:#x}");
+    assert_eq!(esr & WNR, 0);
+    assert_eq!(far, at, "the first element's address");
+    assert_eq!(m.reg_read(Reg::X3), UNTOUCHED, "W3 is not loaded");
+    assert_eq!(m.reg_read(Reg::X4), UNTOUCHED, "W4 is not loaded");
 }

@@ -7,15 +7,20 @@
 //! second element's store is seen on its own: rewriting the next
 //! instruction where the first element touches no decoded code, and, for a
 //! Q register's high half, clearing the exclusive monitor that only it
-//! overlaps.
+//! overlaps. A pair within one page whose second element alone reaches an
+//! address nothing answers takes that element's external abort after the
+//! first element's access, as Arm ARM `LDP`/`STP` order them: a load writes
+//! neither register, a store has made its first element's write, and
+//! neither writes the base back.
 //!
 //! Guest code is hand-assembled (GNU as for aarch64); each snippet's source
 //! is beside its words.
 
-use rusty_box_aarch64::board::RAM_BASE;
+use rusty_box_aarch64::board::{FW_CFG_BASE, RAM_BASE};
+use rusty_box_aarch64::instrumentation::{Direction, MemoryAccess};
 use rusty_box_aarch64::{
-    Instrumentation, LentStorage, MachineBuilder, MemoryLoan, RamSize, Reg, RunBudget, StopReason, SysReg, VirtConfig,
-    VirtMachine,
+    AccessWidth, Instrumentation, LentStorage, MachineBuilder, MemoryLoan, PhysAddr, RamSize, Reg, RunBudget,
+    StopReason, SysReg, VirtConfig, VirtMachine,
 };
 
 const RAM_LEN: usize = 4 << 20;
@@ -24,6 +29,15 @@ fn bare(ram: &mut [u8]) -> VirtMachine<LentStorage<'_>> {
     MachineBuilder::new(VirtConfig::DEFAULT)
         .ram(RamSize::bytes(RAM_LEN as u64).expect("a valid size"))
         .bare()
+        .build_in(MemoryLoan { ram, vars: &mut [] })
+        .expect("a bare machine builds")
+}
+
+fn observed<I: Instrumentation>(ram: &mut [u8], observer: I) -> VirtMachine<LentStorage<'_>, I> {
+    MachineBuilder::new(VirtConfig::DEFAULT)
+        .ram(RamSize::bytes(RAM_LEN as u64).expect("a valid size"))
+        .bare()
+        .instrumentation(observer)
         .build_in(MemoryLoan { ram, vars: &mut [] })
         .expect("a bare machine builds")
 }
@@ -134,4 +148,80 @@ fn a_load_pair_within_a_page_reads_both_words() {
     assert_eq!(out.stop, StopReason::BudgetExhausted);
     assert_eq!(m.reg_read(Reg::X3), FIRST);
     assert_eq!(m.reg_read(Reg::X4), SECOND);
+}
+
+// The one hole inside a page of the board's address map: fw_cfg decodes
+// 0x18 bytes (QEMU 11.1.2 hw/arm/virt.c `base_memmap`, `VIRT_FW_CFG`), the
+// last of them the low word of its DMA address register, and the rest of
+// its page is unassigned. A word pair at FW_CFG_BASE + 0x14, which is on
+// Device memory with stage 1 disabled and aligned there, reaches the
+// register with its first element and the hole with its second.
+
+/// `ldp w3, w4, [x1, #20]!; b .`
+const LOAD_PAIR_INTO_HOLE: [u32; 2] = [0x29C2_9023, 0x1400_0000];
+/// `stp w2, w3, [x1, #20]!; b .`
+const STORE_PAIR_INTO_HOLE: [u32; 2] = [0x2982_8C22, 0x1400_0000];
+
+const EC_DATA_ABORT_SAME_EL: u64 = 0x25;
+const DFSC_SYNC_EXTERNAL: u64 = 0x10;
+const WNR: u64 = 1 << 6;
+
+/// Run the pair at `RAM_BASE` with `x1 = FW_CFG_BASE` and check the Data
+/// Abort it must take: the second element's synchronous external abort,
+/// with the pair's own address to return to and its base not written back.
+fn second_element_aborts<S: rusty_box_aarch64::GuestStorage, I: Instrumentation>(m: &mut VirtMachine<S, I>, write: bool) {
+    let out = m.step(RunBudget::Instructions(1));
+    assert_eq!(out.stop, StopReason::BudgetExhausted);
+    let esr = m.sysreg_read(SysReg::ESR_EL1).expect("ESR_EL1");
+    assert_eq!(esr >> 26, EC_DATA_ABORT_SAME_EL, "ESR {esr:#x}");
+    assert_eq!(esr & 0x3F, DFSC_SYNC_EXTERNAL, "ESR {esr:#x}");
+    assert_eq!(esr & WNR != 0, write, "ESR {esr:#x}");
+    assert_eq!(m.sysreg_read(SysReg::FAR_EL1), Ok(FW_CFG_BASE + 0x18), "the second element's address");
+    assert_eq!(m.sysreg_read(SysReg::ELR_EL1), Ok(RAM_BASE), "the pair is where it returns to");
+    assert_eq!(m.reg_read(Reg::X1), FW_CFG_BASE, "the base is not written back");
+}
+
+#[test]
+fn a_load_pair_within_a_page_whose_second_word_alone_reaches_a_hole_loads_neither_register() {
+    let mut ram = vec![0u8; RAM_LEN];
+    let mut m = bare(&mut ram);
+    load(&mut m, RAM_BASE, &LOAD_PAIR_INTO_HOLE);
+    m.reg_write(Reg::X1, FW_CFG_BASE);
+    m.reg_write(Reg::X3, 0x5555);
+    m.reg_write(Reg::X4, 0x5555);
+    second_element_aborts(&mut m, false);
+    assert_eq!(m.reg_read(Reg::X3), 0x5555, "the first register is not written");
+    assert_eq!(m.reg_read(Reg::X4), 0x5555, "the second register is not written");
+}
+
+/// Every data access that reaches the bus, in order.
+#[derive(Default)]
+struct BusLog(Vec<MemoryAccess>);
+
+impl Instrumentation for BusLog {
+    fn memory_access(&mut self, access: MemoryAccess) {
+        self.0.push(access);
+    }
+}
+
+#[test]
+fn a_store_pair_within_a_page_whose_second_word_alone_reaches_a_hole_writes_its_first_word_only() {
+    // fw_cfg ignores the write, so the bus is where the first element is
+    // seen to land.
+    const FIRST: u32 = 0x1234_5678;
+    const SECOND: u32 = 0x9ABC_DEF0;
+    let mut ram = vec![0u8; RAM_LEN];
+    let mut m = observed(&mut ram, BusLog::default());
+    load(&mut m, RAM_BASE, &STORE_PAIR_INTO_HOLE);
+    m.reg_write(Reg::X1, FW_CFG_BASE);
+    m.reg_write(Reg::X2, u64::from(FIRST));
+    m.reg_write(Reg::X3, u64::from(SECOND));
+    second_element_aborts(&mut m, true);
+    let first_store = MemoryAccess {
+        address: PhysAddr::new(FW_CFG_BASE + 0x14),
+        width: AccessWidth::Word,
+        direction: Direction::Write,
+        value: u64::from(FIRST),
+    };
+    assert_eq!(m.instrumentation().0, [first_store], "the first word is written, the second is not");
 }

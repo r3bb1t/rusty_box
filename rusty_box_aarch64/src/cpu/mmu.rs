@@ -192,9 +192,12 @@ impl Resolved {
     }
 }
 
-/// Whether a data access is aligned to its own size, as Arm ARM
-/// `AArch64.CheckAlignment` judges it: for every part of an access made
-/// in parts, the alignment of the whole.
+/// Whether a data access is aligned as Arm ARM `AArch64.CheckAlignment`
+/// requires: a whole access to its own size, and every part of an access
+/// made in parts to what its caller requires of each part. For an element
+/// of an `LDP`/`STP` pair, general-purpose or SIMD&FP, that is the
+/// element's own size, each element being an access of its own; for each
+/// half of a Q register access, the whole 16 bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Fit {
     Aligned,
@@ -729,8 +732,9 @@ impl Cpu {
     /// Alignment checks that precede translation, then translation, then
     /// the faults the page raises, in Arm ARM `AArch64.S1Translate`'s order:
     /// the Device-memory alignment fault (`AArch64.S1HasAlignmentFault`)
-    /// before the permission fault. For an access, or a part of a larger one
-    /// whose alignment is `fit`, that stays in one page.
+    /// before the permission fault. For an access, or a part of a larger
+    /// one, that stays in one page, with the alignment `fit` its caller
+    /// requires of it ([`Fit`]).
     ///
     /// A permitted TLB hit that is aligned, or is on Normal memory with no
     /// alignment check enabled, raises none of these faults, and is answered
@@ -811,8 +815,8 @@ impl Cpu {
         self.read_part(bus, va, log2, Fit::of(va, 1 << log2), acc)
     }
 
-    /// Read `1 << log2` bytes at `va`: a whole access, or a part of a larger
-    /// one whose alignment is `fit`.
+    /// Read `1 << log2` bytes at `va`, with the alignment `fit` its caller
+    /// requires of it: a whole access, or a part of a larger one.
     #[inline(always)]
     fn read_part<B: PhysBus>(&mut self, bus: &mut B, va: u64, log2: u32, fit: Fit, acc: DataAccess) -> Result<u64, Fault> {
         let bytes = 1u64 << log2;
@@ -835,10 +839,11 @@ impl Cpu {
     }
 
     /// Read two adjacent elements of `1 << log2` bytes (`log2` in 0..=3),
-    /// at `va` and `va + (1 << log2)`, each zero-extended: the parts of an
-    /// access whose alignment is `fit`. Arm ARM `LDP` makes its elements'
-    /// accesses so, `Mem[address, dbytes]` then `Mem[address + dbytes,
-    /// dbytes]`, each aligned exactly when `address` is.
+    /// at `va` and `va + (1 << log2)`, each zero-extended. `fit` is the
+    /// alignment the caller requires of each element: for Arm ARM `LDP`,
+    /// the element's own, as `LDP` makes its elements' accesses
+    /// `Mem[address, dbytes]` then `Mem[address + dbytes, dbytes]`, each
+    /// aligned to `dbytes` exactly when `address` is.
     ///
     /// The result is that of two reads of the elements made in order: the
     /// same values, and the same fault with the same address. A pair within
@@ -923,8 +928,9 @@ impl Cpu {
         self.write_part(bus, va, log2, value, Fit::of(va, 1 << log2), acc)
     }
 
-    /// Write the low `1 << log2` bytes of `value` at `va`: a whole access,
-    /// or a part of a larger one whose alignment is `fit`.
+    /// Write the low `1 << log2` bytes of `value` at `va`, with the
+    /// alignment `fit` its caller requires of it: a whole access, or a part
+    /// of a larger one.
     #[inline(always)]
     fn write_part<B: PhysBus>(
         &mut self,
@@ -964,9 +970,9 @@ impl Cpu {
     }
 
     /// Write the low `1 << log2` bytes (`log2` in 0..=3) of each element of
-    /// `value`, `first` at `va` and `second` at `va + (1 << log2)`: the
-    /// parts of an access whose alignment is `fit`, in Arm ARM `STP`'s
-    /// order.
+    /// `value`, `first` at `va` and `second` at `va + (1 << log2)`, in Arm
+    /// ARM `STP`'s order. `fit` is the alignment the caller requires of
+    /// each element: for `STP`, the element's own, as for [`Cpu::read_pair`].
     ///
     /// The result is that of two writes of the elements made in order: the
     /// same fault with the same address, and the same stores noted
