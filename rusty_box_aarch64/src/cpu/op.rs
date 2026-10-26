@@ -28,7 +28,7 @@ use super::dp::{add_with_carry, datasize, decode_bit_masks, ones, ror, shift_reg
 use super::exec::{bit, bits, keep_fault, sext, Fault, Flow, OpResult};
 use super::fp::{dp2_operation, dp3_form, scalar_type, FpBinary, FpDp3Regs, FpType};
 use super::isa::Class;
-use super::mmu::DataAccess;
+use super::mmu::{DataAccess, ElementPair, Fit};
 use super::Cpu;
 use crate::bus::PhysBus;
 use crate::softfloat::FusedMulAdd;
@@ -821,8 +821,9 @@ impl Cpu {
                 let base = completed!(self.base_register(u32::from(rn)));
                 let (address, writeback) = indexed(base, imm, index);
                 let scale = u32::from(size);
-                let a = completed!(self.read_mem(bus, address, scale, DataAccess::NORMAL));
-                let b = completed!(self.read_mem(bus, address.wrapping_add(1 << scale), scale, DataAccess::NORMAL));
+                let fit = Fit::of(address, 1 << scale);
+                let ElementPair { first: a, second: b } =
+                    completed!(self.read_pair(bus, address, scale, fit, DataAccess::NORMAL));
                 // The order `exec_ldst_pair` writes them in, which decides
                 // the CONSTRAINED UNPREDICTABLE Rt == Rt2 case.
                 if scale == 2 {
@@ -841,9 +842,12 @@ impl Cpu {
                 let base = completed!(self.base_register(u32::from(rn)));
                 let (address, writeback) = indexed(base, imm, index);
                 let scale = u32::from(size);
-                let (a, b) = (self.x_or_zr(u32::from(rt)), self.x_or_zr(u32::from(rt2)));
-                completed!(self.write_mem(bus, address, scale, a, DataAccess::NORMAL));
-                completed!(self.write_mem(bus, address.wrapping_add(1 << scale), scale, b, DataAccess::NORMAL));
+                let value = ElementPair {
+                    first: self.x_or_zr(u32::from(rt)),
+                    second: self.x_or_zr(u32::from(rt2)),
+                };
+                let fit = Fit::of(address, 1 << scale);
+                completed!(self.write_pair(bus, address, scale, value, fit, DataAccess::NORMAL));
                 if let Some(wb) = writeback {
                     self.set_x_or_sp(u32::from(rn), wb);
                 }

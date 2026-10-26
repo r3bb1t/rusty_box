@@ -196,7 +196,7 @@ impl Resolved {
 /// `AArch64.CheckAlignment` judges it: for every part of an access made
 /// in parts, the alignment of the whole.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Fit {
+pub(crate) enum Fit {
     Aligned,
     Misaligned,
 }
@@ -204,9 +204,17 @@ enum Fit {
 impl Fit {
     /// The fit of an access of `bytes` (a power of two) at `va`.
     #[inline(always)]
-    const fn of(va: u64, bytes: u64) -> Self {
+    pub(crate) const fn of(va: u64, bytes: u64) -> Self {
         if va & (bytes - 1) == 0 { Self::Aligned } else { Self::Misaligned }
     }
+}
+
+/// The two adjacent elements of a pair access: `first` at the lower
+/// address, `second` just above it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ElementPair {
+    pub(crate) first: u64,
+    pub(crate) second: u64,
 }
 
 /// A completed walk, before permissions are checked against an access.
@@ -811,12 +819,68 @@ impl Cpu {
         if (va & 0xFFF) + bytes <= 0x1000 {
             let t = self.translate_data(bus, va, fit, AccessKind::Read, acc)?;
             let width = AccessWidth::from_log2(log2).unwrap_or(AccessWidth::Dword);
-            return match bus.read(PhysAddr::new(t.pa), width, self.clock()) {
-                Ok(v) => Ok(v & width.value_mask()),
-                Err(BusFault::Unmapped) => Err(self.external_abort(va, t.pa, AccessKind::Read)),
-            };
+            return self.read_translated(bus, va, t.pa, width);
         }
         self.read_mem_across_pages(bus, va, bytes, acc)
+    }
+
+    /// Read `width` at `pa`, which `va` translated to, zero-extended; an
+    /// address nothing answers is the external abort of `va`.
+    #[inline(always)]
+    fn read_translated<B: PhysBus>(&mut self, bus: &mut B, va: u64, pa: u64, width: AccessWidth) -> Result<u64, Fault> {
+        match bus.read(PhysAddr::new(pa), width, self.clock()) {
+            Ok(v) => Ok(v & width.value_mask()),
+            Err(BusFault::Unmapped) => Err(self.external_abort(va, pa, AccessKind::Read)),
+        }
+    }
+
+    /// Read two adjacent elements of `1 << log2` bytes (`log2` in 0..=3),
+    /// at `va` and `va + (1 << log2)`, each zero-extended: the parts of an
+    /// access whose alignment is `fit`. Arm ARM `LDP` makes its elements'
+    /// accesses so, `Mem[address, dbytes]` then `Mem[address + dbytes,
+    /// dbytes]`, each aligned exactly when `address` is.
+    ///
+    /// The result is that of two reads of the elements made in order: the
+    /// same values, and the same fault with the same address. A pair within
+    /// one page translates once, as the second translation would find what
+    /// the first did: the second element is on the first's page, with the
+    /// first's `fit`, and the first translation leaves the page in the TLB
+    /// (or, with stage 1 disabled, maps the page to itself). Each element
+    /// still takes its own external abort.
+    #[inline(always)]
+    pub(crate) fn read_pair<B: PhysBus>(
+        &mut self,
+        bus: &mut B,
+        va: u64,
+        log2: u32,
+        fit: Fit,
+        acc: DataAccess,
+    ) -> Result<ElementPair, Fault> {
+        let bytes = 1u64 << log2;
+        if (va & 0xFFF) + 2 * bytes <= 0x1000 {
+            let t = self.translate_data(bus, va, fit, AccessKind::Read, acc)?;
+            let width = AccessWidth::from_log2(log2).unwrap_or(AccessWidth::Dword);
+            let first = self.read_translated(bus, va, t.pa, width)?;
+            let second = self.read_translated(bus, va + bytes, t.pa + bytes, width)?;
+            return Ok(ElementPair { first, second });
+        }
+        self.read_pair_across_pages(bus, va, log2, fit, acc)
+    }
+
+    /// A [`Cpu::read_pair`] that does not fit in one page: each element is
+    /// read on its own.
+    #[inline(never)]
+    fn read_pair_across_pages<B: PhysBus>(
+        &mut self,
+        bus: &mut B,
+        va: u64,
+        log2: u32,
+        fit: Fit,
+        acc: DataAccess,
+    ) -> Result<ElementPair, Fault> {
+        let first = self.read_part(bus, va, log2, fit, acc)?;
+        let second = self.read_part(bus, va.wrapping_add(1 << log2), log2, fit, acc)?;
+        Ok(ElementPair { first, second })
     }
 
     /// A read of `bytes` at `va` that crosses a page boundary.
@@ -874,14 +938,75 @@ impl Cpu {
         let bytes = 1u64 << log2;
         if (va & 0xFFF) + bytes <= 0x1000 {
             let t = self.translate_data(bus, va, fit, AccessKind::Write, acc)?;
-            self.note_store(t.pa, bytes);
             let width = AccessWidth::from_log2(log2).unwrap_or(AccessWidth::Dword);
-            return match bus.write(PhysAddr::new(t.pa), width, value & width.value_mask(), self.clock()) {
-                Ok(()) => Ok(()),
-                Err(BusFault::Unmapped) => Err(self.external_abort(va, t.pa, AccessKind::Write)),
-            };
+            return self.write_translated(bus, va, t.pa, width, value);
         }
         self.write_mem_across_pages(bus, va, bytes, value, acc)
+    }
+
+    /// Write the low `width` of `value` at `pa`, which `va` translated to,
+    /// after [`Cpu::note_store`]; an address nothing answers is the external
+    /// abort of `va`.
+    #[inline(always)]
+    fn write_translated<B: PhysBus>(
+        &mut self,
+        bus: &mut B,
+        va: u64,
+        pa: u64,
+        width: AccessWidth,
+        value: u64,
+    ) -> Result<(), Fault> {
+        self.note_store(pa, width.bytes());
+        match bus.write(PhysAddr::new(pa), width, value & width.value_mask(), self.clock()) {
+            Ok(()) => Ok(()),
+            Err(BusFault::Unmapped) => Err(self.external_abort(va, pa, AccessKind::Write)),
+        }
+    }
+
+    /// Write the low `1 << log2` bytes (`log2` in 0..=3) of each element of
+    /// `value`, `first` at `va` and `second` at `va + (1 << log2)`: the
+    /// parts of an access whose alignment is `fit`, in Arm ARM `STP`'s
+    /// order.
+    ///
+    /// The result is that of two writes of the elements made in order: the
+    /// same fault with the same address, and the same stores noted
+    /// ([`Cpu::note_store`]) in the same order, each just before its
+    /// element is written. A pair within one page translates once, for the
+    /// reasons [`Cpu::read_pair`] gives.
+    #[inline(always)]
+    pub(crate) fn write_pair<B: PhysBus>(
+        &mut self,
+        bus: &mut B,
+        va: u64,
+        log2: u32,
+        value: ElementPair,
+        fit: Fit,
+        acc: DataAccess,
+    ) -> Result<(), Fault> {
+        let bytes = 1u64 << log2;
+        if (va & 0xFFF) + 2 * bytes <= 0x1000 {
+            let t = self.translate_data(bus, va, fit, AccessKind::Write, acc)?;
+            let width = AccessWidth::from_log2(log2).unwrap_or(AccessWidth::Dword);
+            self.write_translated(bus, va, t.pa, width, value.first)?;
+            return self.write_translated(bus, va + bytes, t.pa + bytes, width, value.second);
+        }
+        self.write_pair_across_pages(bus, va, log2, value, fit, acc)
+    }
+
+    /// A [`Cpu::write_pair`] that does not fit in one page: each element is
+    /// written on its own.
+    #[inline(never)]
+    fn write_pair_across_pages<B: PhysBus>(
+        &mut self,
+        bus: &mut B,
+        va: u64,
+        log2: u32,
+        value: ElementPair,
+        fit: Fit,
+        acc: DataAccess,
+    ) -> Result<(), Fault> {
+        self.write_part(bus, va, log2, value.first, fit, acc)?;
+        self.write_part(bus, va.wrapping_add(1 << log2), log2, value.second, fit, acc)
     }
 
     /// A write of the low `bytes` bytes of `value` at `va` that crosses a
@@ -934,9 +1059,8 @@ impl Cpu {
         if fit == Fit::Misaligned && (acc.strict_align || self.strict_alignment()) {
             return Err(Self::data_abort(va, Fsc::Alignment, false));
         }
-        let lo = self.read_part(bus, va, 3, fit, acc)?;
-        let hi = self.read_part(bus, va.wrapping_add(8), 3, fit, acc)?;
-        Ok(u128::from(lo) | (u128::from(hi) << 64))
+        let halves = self.read_pair(bus, va, 3, fit, acc)?;
+        Ok(u128::from(halves.first) | (u128::from(halves.second) << 64))
     }
 
     /// Write 16 bytes (a Q register) at `va`, as two 8-byte halves, with
@@ -958,8 +1082,11 @@ impl Cpu {
             let el = self.access_el(acc);
             self.probe_pages(bus, va, 16, el)?;
         }
-        self.write_part(bus, va, 3, value as u64, fit, acc)?;
-        self.write_part(bus, va.wrapping_add(8), 3, (value >> 64) as u64, fit, acc)
+        let halves = ElementPair {
+            first: value as u64,
+            second: (value >> 64) as u64,
+        };
+        self.write_pair(bus, va, 3, halves, fit, acc)
     }
 
     /// `DC ZVA`: zero the naturally aligned block containing `va`. On

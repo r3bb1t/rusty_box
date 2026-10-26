@@ -3,7 +3,11 @@
 //! second element of a store pair that rewrites the next instruction is
 //! run as rewritten, a load pair whose second element runs off the end of
 //! RAM takes the second element's external abort and writes neither
-//! register, and a load pair within a page reads both elements.
+//! register, and a load pair within a page reads both elements. The
+//! second element's store is seen on its own: rewriting the next
+//! instruction where the first element touches no decoded code, and, for a
+//! Q register's high half, clearing the exclusive monitor that only it
+//! overlaps.
 //!
 //! Guest code is hand-assembled (GNU as for aarch64); each snippet's source
 //! is beside its words.
@@ -43,6 +47,54 @@ fn a_store_pair_whose_second_word_rewrites_the_next_instruction_runs_it_rewritte
     let out = m.step(RunBudget::Instructions(20));
     assert_eq!(out.stop, StopReason::BudgetExhausted);
     assert_eq!(m.reg_read(Reg::X0), 2, "the rewritten mov ran");
+}
+
+/// `mov x0, #2`, the word the store pair below puts over the `mov x0, #1`
+/// that follows it.
+const MOV_X0_2: u64 = 0xD280_0040;
+
+/// `stp x2, x3, [x1]; mov x0, #1; b .`
+const PAIR_X_THEN_MOV: [u32; 3] = [0xA900_0C22, 0xD280_0020, 0x1400_0000];
+
+#[test]
+fn a_store_pair_whose_second_doubleword_alone_rewrites_the_next_instruction_runs_it_rewritten() {
+    // The pair starts the trace, at the start of a 128-byte line, and its
+    // first element is the doubleword just below, in the line before: only
+    // the second element, which holds the pair's own word and then
+    // `mov x0, #2`, writes where the trace was decoded from.
+    let mut ram = vec![0u8; RAM_LEN];
+    let mut m = bare(&mut ram);
+    let code = RAM_BASE + 0x80;
+    load(&mut m, code, &PAIR_X_THEN_MOV);
+    m.reg_write(Reg::Pc, code);
+    m.reg_write(Reg::X1, code - 8);
+    m.reg_write(Reg::X2, 0x5555);
+    m.reg_write(Reg::X3, (MOV_X0_2 << 32) | u64::from(PAIR_X_THEN_MOV[0]));
+    let out = m.step(RunBudget::Instructions(20));
+    assert_eq!(out.stop, StopReason::BudgetExhausted);
+    assert_eq!(m.reg_read(Reg::X0), 2, "the rewritten mov ran");
+}
+
+/// `ldxr x5, [x2]; str q3, [x1]; stxr w6, x5, [x2]; b .`
+const Q_STORE_UNDER_MONITOR: [u32; 4] = [0xC85F_7C45, 0x3D80_0023, 0xC806_7C45, 0x1400_0000];
+
+#[test]
+fn a_q_register_store_whose_high_half_alone_overlaps_the_monitored_doubleword_clears_the_monitor() {
+    // Every store this processor makes that overlaps the monitored bytes
+    // clears the local monitor (Arm ARM B2.9.5, the IMPLEMENTATION DEFINED
+    // choice), so the store-exclusive after it fails and writes 1.
+    let mut ram = vec![0u8; RAM_LEN];
+    let mut m = bare(&mut ram);
+    load(&mut m, RAM_BASE, &Q_STORE_UNDER_MONITOR);
+    m.sysreg_write(SysReg::CPACR_EL1, 3 << 20).expect("CPACR_EL1 is writable");
+    let data = RAM_BASE + 0x1000;
+    m.reg_write(Reg::X1, data);
+    m.reg_write(Reg::X2, data + 8);
+    m.reg_write(Reg::X6, 0x5555);
+    let out = m.step(RunBudget::Instructions(3));
+    assert_eq!(out.stop, StopReason::BudgetExhausted);
+    assert_eq!(m.reg_read(Reg::Pc), RAM_BASE + 12, "no instruction faulted");
+    assert_eq!(m.reg_read(Reg::X6), 1, "the store-exclusive failed");
 }
 
 /// `ldp x3, x4, [x1]; b .`

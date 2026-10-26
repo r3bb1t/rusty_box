@@ -10,7 +10,7 @@
 
 use super::dp::extend_reg;
 use super::exec::{bit, bits, sext, ExecResult, Flow};
-use super::mmu::DataAccess;
+use super::mmu::{DataAccess, ElementPair, Fit};
 use super::{Cpu, ExclusiveMonitor};
 use crate::bus::PhysBus;
 
@@ -251,6 +251,7 @@ impl Cpu {
         };
         let step = 1u64 << scale;
         let acc = DataAccess::NORMAL;
+        let fit = Fit::of(address, step);
 
         if vector {
             if load {
@@ -260,10 +261,8 @@ impl Cpu {
                         self.read_mem_u128(bus, address.wrapping_add(step), acc)?,
                     )
                 } else {
-                    (
-                        u128::from(self.read_mem(bus, address, scale, acc)?),
-                        u128::from(self.read_mem(bus, address.wrapping_add(step), scale, acc)?),
-                    )
+                    let pair = self.read_pair(bus, address, scale, fit, acc)?;
+                    (u128::from(pair.first), u128::from(pair.second))
                 };
                 self.v[rt as usize] = a;
                 self.v[rt2 as usize] = b;
@@ -273,13 +272,15 @@ impl Cpu {
                     self.write_mem_u128(bus, address, a, acc)?;
                     self.write_mem_u128(bus, address.wrapping_add(step), b, acc)?;
                 } else {
-                    self.write_mem(bus, address, scale, a as u64, acc)?;
-                    self.write_mem(bus, address.wrapping_add(step), scale, b as u64, acc)?;
+                    let value = ElementPair {
+                        first: a as u64,
+                        second: b as u64,
+                    };
+                    self.write_pair(bus, address, scale, value, fit, acc)?;
                 }
             }
         } else if load {
-            let a = self.read_mem(bus, address, scale, acc)?;
-            let b = self.read_mem(bus, address.wrapping_add(step), scale, acc)?;
+            let ElementPair { first: a, second: b } = self.read_pair(bus, address, scale, fit, acc)?;
             let (a, b) = if signed { (sext(a, 32), sext(b, 32)) } else { (a, b) };
             // With Rt == Rt2 the result is CONSTRAINED UNPREDICTABLE. QEMU
             // (translate-a64.c `trans_LDP`) loads a 32-bit pair as one
@@ -293,9 +294,11 @@ impl Cpu {
                 self.set_x_or_zr(rt2, b);
             }
         } else {
-            let (a, b) = (self.x_or_zr(rt), self.x_or_zr(rt2));
-            self.write_mem(bus, address, scale, a, acc)?;
-            self.write_mem(bus, address.wrapping_add(step), scale, b, acc)?;
+            let value = ElementPair {
+                first: self.x_or_zr(rt),
+                second: self.x_or_zr(rt2),
+            };
+            self.write_pair(bus, address, scale, value, fit, acc)?;
         }
 
         if let Some(wb) = writeback {
