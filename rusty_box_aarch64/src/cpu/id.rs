@@ -200,9 +200,11 @@ pub const DC_ZVA_BYTES: u64 = 4 << DCZID_BLOCK_LOG2_WORDS;
 /// — the Cortex-A57 hierarchy QEMU reports.
 pub const CLIDR_EL1: u64 = 0x0A20_0023;
 
-/// `CCSIDR_EL1` for each `CSSELR_EL1` selection QEMU's Cortex-A57 answers:
-/// L1 data (32 KiB, 2-way, 64-byte lines), L1 instruction (48 KiB, 3-way),
-/// L2 unified (2 MiB, 16-way). Any other selection reads as zero.
+/// `CCSIDR_EL1` for each `CSSELR_EL1` selection the Cortex-A57 answers: L1
+/// data (32 KiB, 2-way, 64-byte lines), L1 instruction (48 KiB, 3-way), L2
+/// unified (2 MiB, 16-way). The L1 geometry is the TRM's (DDI 0488C, 6.1);
+/// QEMU 9.2 and later report a 4-way L1 data cache (README, "Where the
+/// references differ"). Any other selection reads as zero.
 pub const CCSIDR_L1D: u64 = 0x701F_E00A;
 pub const CCSIDR_L1I: u64 = 0x201F_E012;
 pub const CCSIDR_L2: u64 = 0x70FF_E07A;

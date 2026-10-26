@@ -6,8 +6,10 @@ User-mode QEMU runs a program at EL0 with keys Linux chose, so it cannot
 show what an instruction does under keys, enables and TCR_EL1 fields of
 the test's choosing. This script runs each case in a bare-metal EL1
 program instead, qemu_pauth_runner.S linked by qemu_pauth.ld, under
-`qemu-system-aarch64 -M virt -cpu max` (QARMA5, with FEAT_PAuth2, FEAT_FPAC
-and FEAT_FPACCOMBINE: ID_AA64ISAR1_EL1.APA = 5, which the script checks).
+`qemu-system-aarch64 -M virt -cpu max,pauth-qarma5=on` (QARMA5, with
+FEAT_PAuth2, FEAT_FPAC and FEAT_FPACCOMBINE: ID_AA64ISAR1_EL1.APA = 5,
+which the script checks; since QEMU 10.0 `max` defaults to QEMU's own
+algorithm, and the property selects the architected one).
 A case sets the keys, SCTLR_EL1.{EnIA, EnIB, EnDA, EnDB}, TCR_EL1,
 ELR_EL1, NZCV, SP and X0-X30, runs up to three setup words (typically a
 PAC instruction that signs what the word under test authenticates, then a
@@ -45,8 +47,8 @@ pointer_auth.rs pins Arm's), and it makes no SP alignment check
 (`fam_ldra`).
 
 Needs an AArch64 bare-metal toolchain (CC, default aarch64-linux-gnu-gcc)
-and QEMU's system emulator (QEMU, default qemu-system-aarch64). The
-vectors in the tree were made with QEMU 8.2.2.
+and QEMU 10.0 or later's system emulator (QEMU, default
+qemu-system-aarch64). The vectors in the tree were made with QEMU 11.1.2.
 
 Usage: python3 -I gen_qemu_pauth.py OUT_FILE [CASES_PER_FAMILY]
 """
@@ -188,13 +190,13 @@ def reg(r, avoid=()):
 
 
 def qemu_selects_differently(tcr, ptr, data):
-    """Whether QEMU 8.2.2 signs `ptr` with another extension or bottom PAC
-    bit than Arm's InsertPAC. Arm takes the half of the address space from
-    bit 55 where a TBI bit applies to the access, of either half, and from
-    bit 63 otherwise (the case InsertPAC's comment calls awkward); QEMU's
-    `pauth_addpac` takes the bottom bit from bit 55's half always, and the
-    extension from bit 55 only where that half's TBI applies. A pointer
-    whose bits 55 and 63 agree cannot tell them apart."""
+    """Whether QEMU (to 11.1.2) signs `ptr` with another extension or
+    bottom PAC bit than Arm's InsertPAC. Arm takes the half of the address
+    space from bit 55 where a TBI bit applies to the access, of either
+    half, and from bit 63 otherwise (the case InsertPAC's comment calls
+    awkward); QEMU's `pauth_addpac` takes the bottom bit from bit 55's half
+    always, and the extension from bit 55 only where that half's TBI
+    applies. A pointer whose bits 55 and 63 agree cannot tell them apart."""
     b55, b63 = (ptr >> 55) & 1, ptr >> 63
     if b55 == b63:
         return False
@@ -351,7 +353,7 @@ def fam_ldra(r):
     """LDRAA, LDRAB, with and without writeback, of a pointer the offset
     takes into the data region, PACDZA or PACDZB signed, perhaps with a bit
     flipped; the base is SP a fifth of the time, then 16-byte aligned
-    (QEMU 8.2.2 makes no SP alignment check, `gen_check_sp_alignment`)."""
+    (QEMU makes no SP alignment check, `gen_check_sp_alignment`)."""
     c = Case(r)
     m = r.next() % 2
     w = r.next() % 2
@@ -414,7 +416,7 @@ def run(cases, workdir):
         check=True,
     )
     out = subprocess.run(
-        [qemu, "-M", "virt", "-cpu", "max", "-m", "256M", "-display", "none", "-monitor", "none", "-nic", "none",
+        [qemu, "-M", "virt", "-cpu", "max,pauth-qarma5=on", "-m", "256M", "-display", "none", "-monitor", "none", "-nic", "none",
          "-serial", "stdio", "-kernel", elf],
         check=True, capture_output=True, text=True, timeout=600,
     ).stdout

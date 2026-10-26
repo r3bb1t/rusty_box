@@ -33,7 +33,10 @@ const RW: u64 = 0x4_0000;
 const RO: u64 = 0x24_0000;
 /// Data in the third: Device-nGnRnE, read/write.
 const DEVICE: u64 = 0x44_0000;
-const RAM_BYTES: usize = 0x60_0000;
+/// The fourth level-2 entry is invalid. Data in the fifth: Device-nGnRnE,
+/// read-only at EL1 and out of EL0's reach.
+const DEVICE_RO: u64 = 0x84_0000;
+const RAM_BYTES: usize = 0xA0_0000;
 
 /// `SCTLR_EL1.A`, alignment checking for every access.
 const SCTLR_A: u64 = 1 << 1;
@@ -94,8 +97,9 @@ const TRANSLATION_L2: u64 = 0b00_0110;
 const PERMISSION_L2: u64 = 0b00_1110;
 
 /// A processor at EL1 with the MMU on over [`Ram`]: a level-1 table whose
-/// first entry points to a level-2 table of three 2 MiB blocks, identity
-/// mapped: Normal read/write, Normal read-only and Device.
+/// first entry points to a level-2 table of 2 MiB blocks, identity mapped:
+/// Normal read/write, Normal read-only, Device, an invalid entry, and
+/// read-only Device.
 struct Machine {
     cpu: Cpu,
     ram: Ram,
@@ -124,6 +128,7 @@ impl Machine {
             (L2, AF | INNER_SHAREABLE | BLOCK),
             (L2 + 8, 0x20_0000 | AF | INNER_SHAREABLE | (0b10 << 6) | BLOCK),
             (L2 + 16, 0x40_0000 | AF | (1 << 2) | BLOCK),
+            (L2 + 32, 0x80_0000 | AF | (0b10 << 6) | (1 << 2) | BLOCK),
         ];
         for (at, desc) in descriptors {
             let at = at as usize;
@@ -221,6 +226,25 @@ const fn ldur(size: u32, imm9: i32, rn: u32, rt: u32) -> u32 {
     (size << 30) | 0x3840_0000 | (((imm9 as u32) & 0x1FF) << 12) | (rn << 5) | rt
 }
 
+/// STR (immediate, unsigned offset) of offset 0: `size 111 0 01 00 imm12 Rn Rt`.
+const fn str_imm(size: u32, rn: u32, rt: u32) -> u32 {
+    (size << 30) | 0x3900_0000 | (rn << 5) | rt
+}
+
+/// LDTR of offset 0: `size 111 0 00 01 0 imm9 10 Rn Rt`.
+const fn ldtr(size: u32, rn: u32, rt: u32) -> u32 {
+    (size << 30) | 0x3840_0800 | (rn << 5) | rt
+}
+
+/// `DC ZVA, Xt`: `SYS #3, C7, C4, #1, Xt`.
+const fn dc_zva(rt: u32) -> u32 {
+    0xD50B_7420 | rt
+}
+
+/// `str q1, [x3]` and `ldr q1, [x3]`.
+const STR_Q1_X3: u32 = 0x3D80_0061;
+const LDR_Q1_X3: u32 = 0x3DC0_0061;
+
 #[test]
 fn the_encoders_match_the_assembler() {
     // aarch64-linux-gnu-as -march=armv8.4-a+rcpc2, objdump -d.
@@ -234,6 +258,78 @@ fn the_encoders_match_the_assembler() {
     assert_eq!(ldxr(2, 3, 1), 0x885F_7C61, "ldxr w1, [x3]");
     assert_eq!(ldar(3, 3, 1), 0xC8DF_FC61, "ldar x1, [x3]");
     assert_eq!(ldur(3, 12, 3, 1), 0xF840_C061, "ldur x1, [x3, #12]");
+    assert_eq!(str_imm(2, 3, 2), 0xB900_0062, "str w2, [x3]");
+    assert_eq!(str_imm(3, 3, 1), 0xF900_0061, "str x1, [x3]");
+    assert_eq!(ldtr(2, 3, 2), 0xB840_0862, "ldtr w2, [x3]");
+    assert_eq!(ldtr(3, 3, 2), 0xF840_0862, "ldtr x2, [x3]");
+    assert_eq!(dc_zva(3), 0xD50B_7423, "dc zva, x3");
+}
+
+/// Arm `AArch64_S1Translate` checks the memory type before the
+/// permissions (`AArch64_S1HasAlignmentFaultDueToMemType`, then
+/// `AArch64_S1CheckPermissions`): an access Device memory refuses for its
+/// alignment takes an Alignment fault where the page refuses its
+/// permission too — on one page, across two (reported at the access's
+/// address), and for a read-modify-write whose read is allowed and write is
+/// not. `DC ZVA` is refused by Device memory whatever its alignment. An
+/// aligned access to the same page takes the Permission fault.
+#[test]
+fn device_memory_refuses_misalignment_before_permission() {
+    // A permission fault at level 2 with the WnR the access has.
+    let permission = |far, write| data_abort(far, PERMISSION_L2, write);
+    let mut m = Machine::new(Implementation::EVERY_FEATURE);
+    m.cpu.x[1] = 1;
+    for (address, expected) in [
+        (DEVICE_RO + 2, data_abort(DEVICE_RO + 2, ALIGNMENT, true)),
+        (DEVICE_RO + 0xFFC, data_abort(DEVICE_RO + 0xFFC, ALIGNMENT, true)),
+        (DEVICE_RO + 8, permission(DEVICE_RO + 8, true)),
+    ] {
+        m.cpu.x[3] = address;
+        assert_eq!(m.exec(str_imm(3, 3, 1)), Some(expected), "str x1 at {address:#x}");
+    }
+    // LDTR reads with EL0's permissions, which the page refuses.
+    for (address, expected) in [
+        (DEVICE_RO + 3, data_abort(DEVICE_RO + 3, ALIGNMENT, false)),
+        (DEVICE_RO + 0xFFE, data_abort(DEVICE_RO + 0xFFE, ALIGNMENT, false)),
+        (DEVICE_RO + 4, permission(DEVICE_RO + 4, false)),
+    ] {
+        m.cpu.x[3] = address;
+        assert_eq!(m.exec(ldtr(2, 3, 2)), Some(expected), "ldtr w2 at {address:#x}");
+    }
+    // A read-modify-write's alignment fault reports WnR clear, its refused
+    // write WnR set.
+    m.cpu.x[3] = DEVICE_RO + 2;
+    assert_eq!(m.exec(ldadd(2, 1, 3, 2)), Some(data_abort(DEVICE_RO + 2, ALIGNMENT, false)));
+    m.cpu.x[3] = DEVICE_RO + 4;
+    assert_eq!(m.exec(ldadd(2, 1, 3, 2)), Some(permission(DEVICE_RO + 4, true)));
+    for address in [DEVICE_RO + 0x40, DEVICE_RO + 0x48] {
+        m.cpu.x[3] = address;
+        assert_eq!(m.exec(dc_zva(3)), Some(data_abort(address, ALIGNMENT, true)), "dc zva at {address:#x}");
+    }
+    assert!(m.ram.writes.is_empty());
+    // Normal read-only memory refuses only the permission.
+    m.cpu.x[3] = RO + 2;
+    assert_eq!(m.exec(str_imm(3, 3, 1)), Some(permission(RO + 2, true)));
+}
+
+/// Arm `Mem[]` makes a 16-byte SIMD&FP access two 8-byte single-copy
+/// atomic halves, each translated with the whole access's alignment: 8
+/// bytes past a 16-byte boundary, Device memory refuses it though each
+/// half is aligned, writable or not. Normal memory takes it.
+#[test]
+fn device_memory_judges_a_q_register_access_whole() {
+    let mut m = Machine::new(Implementation::EVERY_FEATURE);
+    m.cpu.sys.cpacr_el1 = 3 << 20;
+    for (insn, write) in [(STR_Q1_X3, true), (LDR_Q1_X3, false)] {
+        for base in [DEVICE, DEVICE_RO] {
+            m.cpu.x[3] = base + 8;
+            assert_eq!(m.exec(insn), Some(data_abort(base + 8, ALIGNMENT, write)), "{insn:#010x} at {base:#x} + 8");
+        }
+        m.cpu.x[3] = DEVICE + 16;
+        assert_eq!(m.exec(insn), None, "{insn:#010x}, aligned");
+        m.cpu.x[3] = RW + 8;
+        assert_eq!(m.exec(insn), None, "{insn:#010x} on Normal memory");
+    }
 }
 
 #[test]

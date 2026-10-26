@@ -65,33 +65,53 @@ pub(crate) struct DataAccess {
     /// with PSTATE.UAO clear (Arm `AArch64_IsUnprivAccessPriv`).
     pub(crate) unprivileged: bool,
     pub(crate) alignment: AlignmentRule,
+    pub(crate) part: Part,
 }
 
 impl DataAccess {
     pub(crate) const NORMAL: Self = Self {
         unprivileged: false,
         alignment: AlignmentRule::Any,
+        part: Part::Whole,
     };
     /// A load-acquire or store-release.
     pub(crate) const ORDERED: Self = Self {
         unprivileged: false,
         alignment: AlignmentRule::Ordered,
+        part: Part::Whole,
     };
     /// An exclusive or atomic access.
     pub(crate) const ATOMIC: Self = Self {
         unprivileged: false,
         alignment: AlignmentRule::Atomic,
+        part: Part::Whole,
     };
     pub(crate) const UNPRIVILEGED: Self = Self {
         unprivileged: true,
         alignment: AlignmentRule::Any,
+        part: Part::Whole,
     };
+}
+
+/// What a data access is of the access an instruction makes, for Device
+/// memory's alignment check.
+///
+/// Closed (R5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Part {
+    /// All of it: judged by its own size and address.
+    Whole,
+    /// One 8-byte half of a 16-byte SIMD&FP access that is misaligned as a
+    /// whole: Arm `Mem[]` translates each half with the whole access's
+    /// `aligned`, so Device memory refuses the half however it is aligned.
+    HalfOfMisaligned,
 }
 
 /// Which misaligned data accesses fault before translation, the part of Arm
 /// `AArch64_UnalignedAccessFaults` an access's kind decides.
 /// `SCTLR_EL1.A` faults every misaligned access whatever the rule, and
-/// Device memory every one after translation.
+/// Device memory every one, after the walk and before the permissions
+/// ([`OnDevice`]).
 ///
 /// Closed (R5): the kinds of access the instruction set has.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -108,6 +128,16 @@ pub(crate) enum AlignmentRule {
     /// keeps (`check_ordered_align`): the pseudocode's rule reads `nAA`,
     /// which FEAT_LSE2 adds.
     Ordered,
+}
+
+/// Whether Device memory refuses an access for its alignment, as Arm
+/// `AArch64_S1HasAlignmentFaultDueToMemType` decides after the walk and
+/// before the permission check: a misaligned access (a [`Part`] of one
+/// included), and `DC ZVA`, are refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OnDevice {
+    Refused,
+    Permitted,
 }
 
 /// A fault status code (`ESR_ELx.ISS.DFSC`/`IFSC`) with its lookup level.
@@ -214,8 +244,6 @@ pub(crate) struct Fetched {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Translated {
     pub(crate) pa: u64,
-    /// Device memory: unaligned accesses fault, `DC ZVA` faults.
-    pub(crate) device: bool,
 }
 
 /// A translation with the flags and lookup level of the TLB entry it came
@@ -223,11 +251,10 @@ pub(crate) struct Translated {
 /// the permission check: whether the page is guarded (FEAT_BTI), and the
 /// permissions a read-modify-write's write needs as well. With stage 1
 /// disabled no page is guarded (`AArch64_S1DisabledOutput`) and no access
-/// is refused.
+/// is refused its permissions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Mapping {
     pa: u64,
-    device: bool,
     flags: u8,
     level: u8,
 }
@@ -358,8 +385,10 @@ impl Cpu {
     }
 
     /// Translate `va` for an access of `kind` checked against `el`'s
-    /// permissions. The TLB hit is inlined into every access path; a miss
-    /// walks out of line.
+    /// permissions, after Device memory's alignment check
+    /// (`AArch64_S1Translate`'s order: the walk's faults, then the memory
+    /// type's, then the permissions'). The TLB hit is inlined into every
+    /// access path; a miss walks out of line.
     #[inline(always)]
     pub(crate) fn translate<B: PhysBus>(
         &mut self,
@@ -367,16 +396,14 @@ impl Cpu {
         va: u64,
         kind: AccessKind,
         el: El,
+        on_device: OnDevice,
     ) -> Result<Translated, Fsc> {
-        self.map(bus, va, kind, el).map(|m| Translated {
-            pa: m.pa,
-            device: m.device,
-        })
+        self.map(bus, va, kind, el, on_device).map(|m| Translated { pa: m.pa })
     }
 
     /// [`Cpu::translate`], with the entry's flags.
     #[inline(always)]
-    fn map<B: PhysBus>(&mut self, bus: &mut B, va: u64, kind: AccessKind, el: El) -> Result<Mapping, Fsc> {
+    fn map<B: PhysBus>(&mut self, bus: &mut B, va: u64, kind: AccessKind, el: El, on_device: OnDevice) -> Result<Mapping, Fsc> {
         if !self.mmu_enabled() {
             // Arm ARM D8.2.11 (`AArch64.TranslateAddressS1Off`): with stage 1
             // disabled the output address is the input address below
@@ -386,9 +413,11 @@ impl Cpu {
             if address >> id::PA_BITS != 0 {
                 return Err(Fsc::AddressSize(0));
             }
+            if on_device == OnDevice::Refused && kind != AccessKind::Fetch {
+                return Err(Fsc::Alignment);
+            }
             return Ok(Mapping {
                 pa: address,
-                device: kind != AccessKind::Fetch,
                 flags: 0,
                 level: 0,
             });
@@ -396,22 +425,25 @@ impl Cpu {
 
         let entry = self.tlb.entries[Tlb::slot(va)];
         if entry.tag == va >> 12 {
+            if on_device == OnDevice::Refused && entry.device {
+                return Err(Fsc::Alignment);
+            }
             if !self.permits(entry.perms, kind, el) {
                 return Err(Fsc::Permission(entry.level));
             }
             return Ok(Mapping {
                 pa: entry.pa_page | (va & 0xFFF),
-                device: entry.device,
                 flags: entry.perms,
                 level: entry.level,
             });
         }
-        self.translate_miss(bus, va, kind, el)
+        self.translate_miss(bus, va, kind, el, on_device)
     }
 
-    /// A TLB miss: walk, cache what the walk found, check permissions.
+    /// A TLB miss: walk, cache what the walk found, check the memory type
+    /// and the permissions.
     #[inline(never)]
-    fn translate_miss<B: PhysBus>(&mut self, bus: &mut B, va: u64, kind: AccessKind, el: El) -> Result<Mapping, Fsc> {
+    fn translate_miss<B: PhysBus>(&mut self, bus: &mut B, va: u64, kind: AccessKind, el: El, on_device: OnDevice) -> Result<Mapping, Fsc> {
         let slot = Tlb::slot(va);
         let walked = self.walk(bus, va, kind)?;
         // A tagged address keeps its tag in the entry's tag, so it hits only
@@ -429,12 +461,14 @@ impl Cpu {
                 level: walked.level,
             };
         }
+        if on_device == OnDevice::Refused && walked.device {
+            return Err(Fsc::Alignment);
+        }
         if !self.permits(walked.perms, kind, el) {
             return Err(Fsc::Permission(walked.level));
         }
         Ok(Mapping {
             pa: walked.pa,
-            device: walked.device,
             flags: walked.perms,
             level: walked.level,
         })
@@ -734,7 +768,7 @@ impl Cpu {
     pub(crate) fn fetch<B: PhysBus>(&mut self, bus: &mut B, pc: u64) -> Result<Fetched, Fault> {
         let el = self.pstate.el;
         let m = self
-            .map(bus, pc, AccessKind::Fetch, el)
+            .map(bus, pc, AccessKind::Fetch, el, OnDevice::Permitted)
             .map_err(|f| Fault::from(Exception::new(ExceptionClass::InstructionAbort, f.code()).with_far(pc)))?;
         match bus.fetch(PhysAddr::new(m.pa), self.clock()) {
             Ok(word) => Ok(Fetched {
@@ -759,9 +793,11 @@ impl Cpu {
         }
     }
 
-    /// Alignment checks that precede translation, then translation and the
-    /// Device-memory alignment check, for an access that stays in one page.
-    /// A read-modify-write checks read permission, then write permission.
+    /// Alignment checks that precede translation, then translation, with
+    /// Device memory's alignment check ahead of the permissions, for an
+    /// access that stays in one page. A read-modify-write checks read
+    /// permission, then write permission. WnR is `!read && write` for every
+    /// fault but a refused write.
     fn translate_data<B: PhysBus>(
         &mut self,
         bus: &mut B,
@@ -770,36 +806,36 @@ impl Cpu {
         direction: DataDirection,
         acc: DataAccess,
     ) -> Result<Translated, Fault> {
-        // WnR: `!read && write` for every fault but a refused write.
-        let wnr = direction == DataDirection::Write;
         let misaligned = va & (bytes - 1) != 0;
         if misaligned && self.misaligned_faults(va, bytes, acc) {
-            return Err(Self::data_abort(va, Fsc::Alignment, wnr));
+            return Err(Self::data_abort(va, Fsc::Alignment, direction == DataDirection::Write));
         }
-        let el = self.access_el(acc);
-        let t = match direction {
-            DataDirection::Read => self.translate(bus, va, AccessKind::Read, el).map_err(|f| Self::data_abort(va, f, false))?,
-            DataDirection::Write => self.translate(bus, va, AccessKind::Write, el).map_err(|f| Self::data_abort(va, f, true))?,
-            DataDirection::ReadWrite => self.translate_rmw(bus, va, el)?,
+        let on_device = if misaligned || acc.part == Part::HalfOfMisaligned {
+            OnDevice::Refused
+        } else {
+            OnDevice::Permitted
         };
-        if misaligned && t.device {
-            return Err(Self::data_abort(va, Fsc::Alignment, wnr));
+        let el = self.access_el(acc);
+        match direction {
+            DataDirection::Read => {
+                self.translate(bus, va, AccessKind::Read, el, on_device).map_err(|f| Self::data_abort(va, f, false))
+            }
+            DataDirection::Write => {
+                self.translate(bus, va, AccessKind::Write, el, on_device).map_err(|f| Self::data_abort(va, f, true))
+            }
+            DataDirection::ReadWrite => self.translate_rmw(bus, va, el, on_device),
         }
-        Ok(t)
     }
 
     /// The translation of a read-modify-write at `va`: read permission,
     /// then write permission, checked against the flags of the one lookup.
     #[inline(never)]
-    fn translate_rmw<B: PhysBus>(&mut self, bus: &mut B, va: u64, el: El) -> Result<Translated, Fault> {
-        let m = self.map(bus, va, AccessKind::Read, el).map_err(|f| Self::data_abort(va, f, false))?;
+    fn translate_rmw<B: PhysBus>(&mut self, bus: &mut B, va: u64, el: El, on_device: OnDevice) -> Result<Translated, Fault> {
+        let m = self.map(bus, va, AccessKind::Read, el, on_device).map_err(|f| Self::data_abort(va, f, false))?;
         if self.mmu_enabled() && !self.permits(m.flags, AccessKind::Write, el) {
             return Err(Self::data_abort(va, Fsc::Permission(m.level), true));
         }
-        Ok(Translated {
-            pa: m.pa,
-            device: m.device,
-        })
+        Ok(Translated { pa: m.pa })
     }
 
     /// The physical address an access of `bytes` at `va` reaches, with every
@@ -864,11 +900,8 @@ impl Cpu {
         for i in 0..bytes {
             let byte_va = va.wrapping_add(i);
             let t = self
-                .translate(bus, byte_va, AccessKind::Read, el)
-                .map_err(|f| Self::data_abort(byte_va, f, false))?;
-            if t.device {
-                return Err(Self::data_abort(va, Fsc::Alignment, false));
-            }
+                .translate(bus, byte_va, AccessKind::Read, el, OnDevice::Refused)
+                .map_err(|f| Self::data_abort(if f == Fsc::Alignment { va } else { byte_va }, f, false))?;
             value |= self.bus_read(bus, byte_va, PhysAddr::new(t.pa), 0)? << (8 * i);
         }
         Ok(value)
@@ -898,17 +931,13 @@ impl Cpu {
         let el = self.access_el(acc);
         let second_page = va.wrapping_add(bytes - 1) & !0xFFF;
         for probe in [va, second_page] {
-            let t = self
-                .translate(bus, probe, AccessKind::Write, el)
-                .map_err(|f| Self::data_abort(probe, f, true))?;
-            if t.device {
-                return Err(Self::data_abort(va, Fsc::Alignment, true));
-            }
+            self.translate(bus, probe, AccessKind::Write, el, OnDevice::Refused)
+                .map_err(|f| Self::data_abort(if f == Fsc::Alignment { va } else { probe }, f, true))?;
         }
         for i in 0..bytes {
             let byte_va = va.wrapping_add(i);
             let t = self
-                .translate(bus, byte_va, AccessKind::Write, el)
+                .translate(bus, byte_va, AccessKind::Write, el, OnDevice::Refused)
                 .map_err(|f| Self::data_abort(byte_va, f, true))?;
             self.bus_write(bus, byte_va, PhysAddr::new(t.pa), 0, value >> (8 * i))?;
         }
@@ -938,17 +967,34 @@ impl Cpu {
         self.bus_write(bus, va, pa, log2, value as u64)
     }
 
-    /// Read 16 bytes (a Q register) at `va`, as two 8-byte halves. Alignment
-    /// is judged on the whole access.
+    /// Read 16 bytes (a Q register) at `va`, as two 8-byte halves, each
+    /// translated with the whole access's alignment (Arm `Mem[]`: a 16-byte
+    /// SIMD&FP access is two single-copy atomic 8-byte accesses, each passed
+    /// the access's own `aligned`).
     pub(crate) fn read_mem_u128<B: PhysBus>(&mut self, bus: &mut B, va: u64, acc: DataAccess) -> Result<u128, Fault> {
         if va & 15 != 0 && self.misaligned_faults(va, 16, acc) {
             return Err(Self::data_abort(va, Fsc::Alignment, false));
         }
-        let lo = self.read_mem(bus, va, 3, acc)?;
-        let hi = self.read_mem(bus, va.wrapping_add(8), 3, acc)?;
+        let half = Self::halves_of(va, acc);
+        let lo = self.read_mem(bus, va, 3, half)?;
+        let hi = self.read_mem(bus, va.wrapping_add(8), 3, half)?;
         Ok(u128::from(lo) | (u128::from(hi) << 64))
     }
 
+    /// The access each 8-byte half of a 16-byte access at `va` makes.
+    fn halves_of(va: u64, acc: DataAccess) -> DataAccess {
+        if va & 15 != 0 {
+            DataAccess {
+                part: Part::HalfOfMisaligned,
+                ..acc
+            }
+        } else {
+            acc
+        }
+    }
+
+    /// Write 16 bytes (a Q register) at `va`, as [`Cpu::read_mem_u128`]
+    /// reads them.
     pub(crate) fn write_mem_u128<B: PhysBus>(
         &mut self,
         bus: &mut B,
@@ -959,20 +1005,20 @@ impl Cpu {
         if va & 15 != 0 && self.misaligned_faults(va, 16, acc) {
             return Err(Self::data_abort(va, Fsc::Alignment, true));
         }
-        self.write_mem(bus, va, 3, value as u64, acc)?;
-        self.write_mem(bus, va.wrapping_add(8), 3, (value >> 64) as u64, acc)
+        let half = Self::halves_of(va, acc);
+        self.write_mem(bus, va, 3, value as u64, half)?;
+        self.write_mem(bus, va.wrapping_add(8), 3, (value >> 64) as u64, half)
     }
 
-    /// `DC ZVA`: zero the naturally aligned block containing `va`.
+    /// `DC ZVA`: zero the naturally aligned block containing `va`. Device
+    /// memory refuses it whatever its alignment
+    /// (`AArch64_S1HasAlignmentFaultDueToMemType`, `AccessType_DCZero`).
     pub(crate) fn dc_zva<B: PhysBus>(&mut self, bus: &mut B, va: u64) -> Result<(), Fault> {
         let base = va & !(id::DC_ZVA_BYTES - 1);
         let el = self.pstate.el;
         let t = self
-            .translate(bus, base, AccessKind::Write, el)
+            .translate(bus, base, AccessKind::Write, el, OnDevice::Refused)
             .map_err(|f| Self::data_abort(va, f, true))?;
-        if t.device {
-            return Err(Self::data_abort(va, Fsc::Alignment, true));
-        }
         self.note_store(t.pa, id::DC_ZVA_BYTES);
         let clock = self.clock();
         for i in 0..id::DC_ZVA_BYTES / 8 {

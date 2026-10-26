@@ -158,6 +158,9 @@ const MDCCINT_EL1: u32 = key!(2, 0, 0, 2, 0);
 const MDSCR_EL1: u32 = key!(2, 0, 0, 2, 2);
 const OSECCR_EL1: u32 = key!(2, 0, 0, 6, 2);
 const MDCCSR_EL0: u32 = key!(2, 3, 0, 1, 0);
+const DBGDTR_EL0: u32 = key!(2, 3, 0, 4, 0);
+/// `DBGDTRRX_EL0` to a read, `DBGDTRTX_EL0` to a write.
+const DBGDTRRX_TX_EL0: u32 = key!(2, 3, 0, 5, 0);
 const OSLAR_EL1: u32 = key!(2, 0, 1, 0, 4);
 const OSLSR_EL1: u32 = key!(2, 0, 1, 1, 4);
 const OSDLR_EL1: u32 = key!(2, 0, 1, 3, 4);
@@ -202,6 +205,10 @@ const EL0PCTEN: u64 = 1 << 0;
 const EL0VCTEN: u64 = 1 << 1;
 const EL0VTEN: u64 = 1 << 8;
 const EL0PTEN: u64 = 1 << 9;
+
+/// `MDSCR_EL1.TDCC`: EL0's accesses to the Debug Communications Channel
+/// registers trap to EL1.
+const MDSCR_TDCC: u64 = 1 << 12;
 
 /// `CPACR_EL1.FPEN`.
 const CPACR_FPEN: u64 = 3 << 20;
@@ -258,6 +265,16 @@ impl Cpu {
 
     fn el0_timer_check(&self, el: El, enable_bits: u64) -> Result<(), SysRegError> {
         if el == El::El0 && self.sys.cntkctl_el1 & enable_bits == 0 {
+            Err(SysRegError::TrapToEl1)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// The access check of `MDCCSR_EL0`, `DBGDTR_EL0`, `DBGDTRRX_EL0` and
+    /// `DBGDTRTX_EL0` with no EL2: `MDSCR_EL1.TDCC` traps EL0's to EL1.
+    fn el0_dcc_check(&self, el: El) -> Result<(), SysRegError> {
+        if el == El::El0 && self.sys.mdscr_el1 & MDSCR_TDCC != 0 {
             Err(SysRegError::TrapToEl1)
         } else {
             Ok(())
@@ -356,7 +373,14 @@ impl Cpu {
                     _ => self.timer_tval_read(cval),
                 });
             }
-            MDCCSR_EL0 => return Ok(0),
+            // The Debug Communications Channel with no debugger attached,
+            // as QEMU's `virt` has it: nothing received, nothing waiting to
+            // be sent (`MDCCSR_EL0.RXfull` and `TXfull` clear), and its data
+            // registers RAZ/WI.
+            MDCCSR_EL0 | DBGDTR_EL0 | DBGDTRRX_TX_EL0 => {
+                self.el0_dcc_check(el)?;
+                return Ok(0);
+            }
             _ => {}
         }
 
@@ -580,6 +604,10 @@ impl Cpu {
                     _ => self.sys.cntv_cval_el0 = self.timer_cval_from_tval(value),
                 }
                 return Ok(WriteEffect::Timer);
+            }
+            DBGDTR_EL0 | DBGDTRRX_TX_EL0 => {
+                self.el0_dcc_check(el)?;
+                return Ok(WriteEffect::None);
             }
             _ => {}
         }
@@ -813,3 +841,7 @@ impl Cpu {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/unit/sysreg.rs"]
+mod tests;

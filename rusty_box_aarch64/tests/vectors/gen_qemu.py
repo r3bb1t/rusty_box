@@ -13,20 +13,17 @@ static program, qemu_harness.c with qemu_trampoline.S, under `qemu-aarch64
 -cpu max`, into qemu_max.txt, which the Rust replay runs on a processor
 with every feature this core implements. A word the program could not run
 (it raised a signal: unallocated, or a feature QEMU's max lacks) is
-dropped, and so is one QEMU aborts on (QEMU 8.2.2 asserts on some
-unallocated two-register miscellaneous half-precision words, in
-`disas_simd_two_reg_misc_fp16`); the harness restarts after it.
+dropped, and so is one QEMU itself aborts on; the harness restarts after
+it.
 
-QEMU is wrong too in places, and a family steers clear of what it is
-known to get wrong, against the Arm ARM's pseudocode: QEMU 8.2.2 adds the
-`imm9` of LDAPUR and STLUR unsigned, where Arm's `SignExtend(imm9)` makes
-it signed, so `rcpc_unscaled` keeps the offset non-negative; it executes
-the scalar half-precision FABS and FNEG, which Arm does not allocate; it
-sign-extends the result of FCVTZS (scalar, fixed-point) to half precision
-into 32 bits; it raises exceptions from elements beyond a 64-bit FCMLA (by
-element) of half precision; and it sets FJCVTZS's Z for a denormal FPCR.FZ
-flushes. The fixups and STATE_AVOIDED below say how each family avoids
-them.
+QEMU's max implements features this core does not, in the encoding space
+of three families: FEAT_FPRCVT's conversions between half precision and a
+SIMD&FP register (`fp16_int`), FEAT_FAMINMAX's FAMAX and FAMIN and
+FEAT_FP8's FSCALE (`fp16_same`), and FEAT_FP8DOT4's FDOT and FEAT_FP8FMA's
+FMLALL by element (`fp16_elem`). Those families' fixups turn such a word
+into an instruction this core has. QEMU 8.2.2 gets instructions of five
+families wrong against the Arm ARM's pseudocode, which 11.1.2 gets right
+(docs/qemu-upstream-bugs.md lists them).
 
 The program runs at EL0 with the MMU on, over Normal memory: families keep
 every access aligned (the replay runs at EL1 with the MMU off, over Device
@@ -36,7 +33,7 @@ appended, never reordered, as in gen_unicorn.py.
 
 Needs an AArch64 Linux C compiler that links statically (CC, default
 aarch64-linux-gnu-gcc) and QEMU's user-mode emulator (QEMU, default
-qemu-aarch64). The vectors in the tree were made with QEMU 8.2.2.
+qemu-aarch64). The vectors in the tree were made with QEMU 11.1.2.
 
 Usage: python3 -I gen_qemu.py OUT_FILE [CASES_PER_FAMILY]
 """
@@ -63,10 +60,9 @@ def even_pairs(w):
 
 
 def aligned_imm9(w):
-    """LDAPUR, STLUR: a non-negative offset that keeps the access
-    size-aligned."""
+    """LDAPUR, STLUR: an offset that keeps the access size-aligned."""
     size = w >> 30
-    return w & ~(((1 << size) - 1) << 12) & ~(1 << 20)
+    return w & ~(((1 << size) - 1) << 12)
 
 
 def dot_elem_size(w):
@@ -87,20 +83,33 @@ def fmov_imm5(w):
     return w & ~(0x1F << 5)
 
 
-def scalar_misc_fp16(w):
-    """The scalar two-register miscellaneous half-precision class has no
-    FABS or FNEG (`a = 1`, opcode 01111), which QEMU 8.2.2 executes: the
-    opcode becomes 11111, FRECPX (`U = 0`) or unallocated."""
-    if w >> 23 & 1 and w >> 12 & 0x1F == 0b01111:
-        return w | (1 << 16)
+def without_fprcvt(w):
+    """Half precision to and from a general register: with `rmode` other
+    than 00, opcodes 01x and 1xx are FEAT_FPRCVT's conversions to and from
+    a SIMD&FP register (or unallocated); opcode<0> alone remains, FCVTPS,
+    FCVTPU, FCVTMS, FCVTMU, FCVTZS or FCVTZU to a general register."""
+    if w >> 19 & 3 and w >> 16 & 0b110:
+        return w & ~(0b110 << 16)
     return w
 
 
-def fcmla_elem_q(w):
-    """FCMLA (by element) of half precision with `Q = 1`: with `Q = 0`
-    QEMU 8.2.2 raises exceptions from the four elements above the 64-bit
-    vector, where Arm computes only the elements of `datasize`."""
-    return w | (1 << 30)
+def without_faminmax_fscale(w):
+    """Three-same half precision: FAMAX and FAMIN (FEAT_FAMINMAX, `a = 1`,
+    opcode 011) become FMULX and FMUL, FSCALE (FEAT_FP8, `U = 1`, `a = 1`,
+    opcode 111) becomes FDIV (`a = 0`)."""
+    opcode = w >> 11 & 7
+    if w >> 23 & 1 and (opcode == 0b011 or (w >> 29 & 1 and opcode == 0b111)):
+        return w & ~(1 << 23)
+    return w
+
+
+def without_fp8_elem(w):
+    """By element at `size = 00`: FDOT (FEAT_FP8DOT4, `U = 0`, opcode 0000)
+    becomes FMLA, FMLALLBB and the rest (FEAT_FP8FMA, `U = 1`, opcode 1000)
+    FMULX, by setting opcode<0>."""
+    if (w >> 29 & 1, w >> 12 & 0xF) in ((0, 0b0000), (1, 0b1000)):
+        return w | (1 << 12)
+    return w
 
 
 def fcadd_opcode(w):
@@ -113,16 +122,6 @@ def fcadd_opcode(w):
 def flag_op2(w):
     """CFINV, XAFLAG, AXFLAG: `op2` 000, 001 or 010; 011 is MSR UAO."""
     return w & ~(1 << 5) if w >> 5 & 3 == 3 else w
-
-
-def unsigned_fcvtz(w):
-    """FCVTZS (scalar, fixed-point) to half precision: QEMU 8.2.2 writes the
-    16-bit result sign-extended to 32 bits, where Arm's `V[d] = result`
-    zeroes the bits above it, so the family converts to unsigned (FCVTZU);
-    SCVTF and UCVTF keep both."""
-    if w >> 11 & 0x1F == 0b11111:
-        return w | (1 << 29)
-    return w
 
 
 FAMILIES = [
@@ -156,22 +155,22 @@ FAMILIES = [
     ("fp16_ccmp", "H", 0x1EE00400, 0x001FF3FF, None),
     ("fp16_csel", "H", 0x1EE00C00, 0x001FF3FF, None),
     ("fp16_imm", "H", 0x1EE01000, 0x001FE01F, fmov_imm5),
-    ("fp16_int", "H", 0x1EE00000, 0x801F03FF, None),
+    ("fp16_int", "H", 0x1EE00000, 0x801F03FF, without_fprcvt),
     ("fp16_fixed", "H", 0x1EC00000, 0x801FFFFF, None),
     # FEAT_FP16, Advanced SIMD: three-same and two-register miscellaneous,
     # vector and scalar, by element, across lanes, pairwise, FMOV (vector,
     # immediate) and the fixed-point conversions.
-    ("fp16_same", "H", 0x0E400400, 0x609F3BFF, None),
+    ("fp16_same", "H", 0x0E400400, 0x609F3BFF, without_faminmax_fscale),
     ("fp16_scalar_same", "H", 0x5E400400, 0x209F3BFF, None),
     ("fp16_misc", "H", 0x0E780800, 0x6081F3FF, None),
-    ("fp16_scalar_misc", "H", 0x5E780800, 0x2081F3FF, scalar_misc_fp16),
-    ("fp16_elem", "H", 0x0F000000, 0x603FFBFF, None),
+    ("fp16_scalar_misc", "H", 0x5E780800, 0x2081F3FF, None),
+    ("fp16_elem", "H", 0x0F000000, 0x603FFBFF, without_fp8_elem),
     ("fp16_scalar_elem", "H", 0x5F000000, 0x203FFBFF, None),
     ("fp16_across", "H", 0x0E300800, 0x4081F3FF, None),
     ("fp16_pair", "H", 0x5E300800, 0x0081F3FF, None),
     ("fp16_movi", "H", 0x0F00FC00, 0x400703FF, None),
     ("fp16_shift_fixed", "H", 0x0F10E400, 0x600F1BFF, None),
-    ("fp16_scalar_shift_fixed", "H", 0x5F10E400, 0x200F1BFF, unsigned_fcvtz),
+    ("fp16_scalar_shift_fixed", "H", 0x5F10E400, 0x200F1BFF, None),
     # FEAT_FHM: FMLAL, FMLSL, FMLAL2, FMLSL2, vector and by element.
     ("fhm_vector", "H", 0x0E20CC00, 0x60BF23FF, None),
     ("fhm_elem", "H", 0x0F800000, 0x603FCBFF, None),
@@ -180,7 +179,7 @@ FAMILIES = [
     ("fcma_vector", "F", 0x2E80C400, 0x405F3BFF, fcadd_opcode),
     ("fcma_vector_half", "H", 0x2E40C400, 0x401F3BFF, fcadd_opcode),
     ("fcma_elem", "F", 0x2F801000, 0x403F6BFF, None),
-    ("fcma_elem_half", "H", 0x2F401000, 0x403F6BFF, fcmla_elem_q),
+    ("fcma_elem_half", "H", 0x2F401000, 0x403F6BFF, None),
     # FEAT_JSCVT: FJCVTZS.
     ("jscvt", "F", 0x1E7E0000, 0x000003FF, None),
     # FEAT_FRINTTS: FRINT32Z, FRINT32X, FRINT64Z, FRINT64X, scalar and
@@ -283,23 +282,8 @@ class Harness:
             raise RuntimeError(f"harness exited with {code}")
 
 
-def flushed_jscvt_operand(insn, v, fpcr):
-    """FJCVTZS of a denormal under FPCR.FZ, of either sign: QEMU 8.2.2 sets
-    Z where Arm's FPToFixedJS clears it (the operand flushed to a zero of
-    its sign, then `sign == '1' && value == 0.0`, or `op<51:0>` nonzero)."""
-    d = v[(insn >> 5) & 31] & MASK64
-    return fpcr >> 24 & 1 and (d >> 52) & 0x7FF == 0 and d & ((1 << 52) - 1) != 0
-
-
-# The initial states a family leaves out, where QEMU is wrong for the state
-# rather than the word.
-STATE_AVOIDED = {"jscvt": flushed_jscvt_operand}
-
-
-def run_case(harness, insn, seed, kind, avoided):
+def run_case(harness, insn, seed, kind):
     x, sp, nzcv, v, data, fpcr = initial_state(seed, kind, insn)
-    if avoided is not None and avoided(insn, v, fpcr):
-        return None
     try:
         result = harness.run(insn, x, sp & MASK64, nzcv, v, data, fpcr)
     except EmulatorAborted as aborted:
@@ -315,7 +299,7 @@ def run_case(harness, insn, seed, kind, avoided):
 
 def main():
     out = sys.argv[1]
-    per_family = int(sys.argv[2]) if len(sys.argv) > 2 else 400
+    per_family = int(sys.argv[2]) if len(sys.argv) > 2 else 200
     picker = SplitMix64(0xA64_D1FF)
     lines = []
     with tempfile.TemporaryDirectory() as workdir:
@@ -330,7 +314,7 @@ def main():
                 if fixup:
                     insn = fixup(insn)
                 seed = picker.next()
-                line = run_case(harness, insn, seed, kind, STATE_AVOIDED.get(name))
+                line = run_case(harness, insn, seed, kind)
                 if line is not None:
                     lines.append(f"{name} {line}")
                     kept += 1

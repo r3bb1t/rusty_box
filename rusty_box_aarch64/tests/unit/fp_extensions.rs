@@ -5,8 +5,8 @@
 //! The values the instructions compute are checked against QEMU
 //! (`tests/vectors/qemu_max.txt`); this file holds what those vectors cannot
 //! show (R9): the sizes the decode pseudocode refuses, the half-precision
-//! forms of FCMA without FEAT_FP16, the cases QEMU 8.2.2 gets wrong (README,
-//! "Where the references differ") and the ones random inputs rarely reach,
+//! forms of FCMA without FEAT_FP16, the cases QEMU 8.2.2 gets wrong
+//! (docs/qemu-upstream-bugs.md) and the ones random inputs rarely reach,
 //! each pinned to the Arm ARM's pseudocode (FPToFixedJS, FPRoundIntN,
 //! FPConvertBF, BFDotAdd, BFMulAddH), and the enable checks after decode.
 //!
@@ -158,8 +158,8 @@ fn the_half_precision_complex_forms_need_fp16() {
 
 /// FCMLA (by element) with `Q = 0` computes the two complex numbers of the
 /// 64-bit vector and nothing above it: signalling NaNs in the upper halves
-/// raise nothing. QEMU 8.2.2 raises their invalid operation, so no vector
-/// holds the form.
+/// raise nothing. QEMU 8.2.2 raises their invalid operation; random inputs
+/// rarely put a signalling NaN in every upper element.
 #[test]
 fn a_64_bit_fcmla_by_element_reads_only_its_elements() {
     let mut cpu = processor(Implementation::EVERY_FEATURE);

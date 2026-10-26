@@ -368,40 +368,53 @@ pub(crate) fn rebuild(source: &[u8], edits: &[Edit<'_>], dst: &mut [u8]) -> Resu
     Ok(total)
 }
 
-/// The value of `property` of the top-level node `node` in `tree`, if both
-/// exist — for a host that wants to check what a machine was given
+/// The value of `property` of the node at `path` in `tree`, if both exist —
+/// for a host that wants to check what a machine was given
 /// ([`VirtMachine::device_tree`](crate::machine::VirtMachine::device_tree)).
+/// `path` names the node below the root, its components separated by `/`
+/// (`"chosen"`, `"cpus/cpu@0"`); the empty path is the root.
 ///
 /// # Errors
 ///
 /// [`DeviceTreeError`] when `tree` is not a well-formed device tree.
-pub fn property<'t>(tree: &'t [u8], node: &str, property: &str) -> Result<Option<&'t [u8]>, DeviceTreeError> {
+pub fn property<'t>(tree: &'t [u8], path: &str, property: &str) -> Result<Option<&'t [u8]>, DeviceTreeError> {
     if be32(tree, 0).ok() != Some(FDT_MAGIC) {
         return Err(DeviceTreeError::NotADeviceTree);
     }
     let off_struct = be32(tree, 8)? as usize;
     let off_strings = be32(tree, 12)? as usize;
     let strings = tree.get(off_strings..).ok_or(DeviceTreeError::Malformed)?;
+    let want = if path.is_empty() { 0 } else { path.split('/').count() };
+    // The root is at depth 1; the node at depth `d` matches `path`'s
+    // component `d - 2`. `matched` counts the open nodes that match, which
+    // are always the outermost ones below the root.
     let mut depth = 0usize;
-    let mut in_node = false;
+    let mut matched = 0usize;
     let mut at = off_struct;
     loop {
         match be32(tree, at)? {
             FDT_BEGIN_NODE => {
                 let name = name_at(tree, at + 4)?;
                 depth += 1;
-                in_node = depth == 2 && name == node.as_bytes();
+                if depth >= 2
+                    && matched == depth - 2
+                    && path.split('/').nth(matched).filter(|_| matched < want).map(str::as_bytes) == Some(name)
+                {
+                    matched += 1;
+                }
                 at += 4 + align4(name.len() + 1);
             }
             FDT_END_NODE => {
+                if depth >= 2 && matched == depth - 1 {
+                    matched -= 1;
+                }
                 depth = depth.checked_sub(1).ok_or(DeviceTreeError::Malformed)?;
-                in_node = false;
                 at += 4;
             }
             FDT_PROP => {
                 let len = be32(tree, at + 4)? as usize;
                 let name = name_at(strings, be32(tree, at + 8)? as usize)?;
-                if in_node && name == property.as_bytes() {
+                if matched == want && depth == want + 1 && name == property.as_bytes() {
                     return Ok(Some(tree.get(at + 12..at + 12 + len).ok_or(DeviceTreeError::Malformed)?));
                 }
                 at += 12 + align4(len);
@@ -455,6 +468,26 @@ mod tests {
         );
         assert_eq!(property(tree, "chosen", "stdout-path"), property(QEMU_DTB, "chosen", "stdout-path"));
         assert!(len < 16 * 1024, "the rebuild is compact: {len} bytes");
+    }
+
+    #[test]
+    fn a_property_is_found_by_its_node_path() {
+        assert_eq!(property(QEMU_DTB, "", "compatible"), Ok(Some(&b"linux,dummy-virt\0"[..])));
+        assert_eq!(property(QEMU_DTB, "", "dma-coherent"), Ok(Some(&[][..])));
+        // `cpu@0` follows its sibling `cpu-map`, whose nested subtree matches
+        // no further than `cpus`.
+        assert_eq!(property(QEMU_DTB, "cpus/cpu@0", "compatible"), Ok(Some(&b"arm,cortex-a57\0"[..])));
+        assert_eq!(property(QEMU_DTB, "aliases", "serial0"), Ok(Some(&b"/pl011@9000000\0"[..])));
+        assert_eq!(
+            property(QEMU_DTB, "cpus/cpu-map/socket0/cluster0/core0", "cpu"),
+            Ok(Some(&0x8001u32.to_be_bytes()[..]))
+        );
+        // A path names nodes from the root down, and only the node at its end.
+        assert_eq!(property(QEMU_DTB, "cpu@0", "compatible"), Ok(None));
+        assert_eq!(property(QEMU_DTB, "cpus", "compatible"), Ok(None));
+        assert_eq!(property(QEMU_DTB, "cpus/cpu@0/l2-cache", "compatible"), Ok(None));
+        assert_eq!(property(QEMU_DTB, "cpus/core0", "cpu"), Ok(None));
+        assert_eq!(property(QEMU_DTB, "chosen", "compatible"), Ok(None));
     }
 
     #[test]

@@ -1,0 +1,48 @@
+--- a/target/arm/cpu-max.c
++++ b/target/arm/cpu-max.c
+@@ -72,7 +72,7 @@
+     cpu->isar.reset_pmcr_el0 = 0x41013000;
+     SET_IDREG(isar, CLIDR, 0x0a200023);
+     /* 32KB L1 dcache */
+-    cpu->ccsidr[0] = make_ccsidr(CCSIDR_FORMAT_LEGACY, 4, 64, 32 * KiB, 7);
++    cpu->ccsidr[0] = make_ccsidr(CCSIDR_FORMAT_LEGACY, 2, 64, 32 * KiB, 7);
+     /* 48KB L1 icache */
+     cpu->ccsidr[1] = make_ccsidr(CCSIDR_FORMAT_LEGACY, 3, 64, 48 * KiB, 2);
+     /* 2048KB L2 cache */
+--- a/target/arm/cpu64.c
++++ b/target/arm/cpu64.c
+@@ -742,7 +742,7 @@
+     /* 32KB L1 dcache */
+     cpu->ccsidr[0] = make_ccsidr(CCSIDR_FORMAT_LEGACY, 4, 64, 32 * KiB, 7);
+     /* 32KB L1 icache */
+-    cpu->ccsidr[1] = make_ccsidr(CCSIDR_FORMAT_LEGACY, 1, 64, 32 * KiB, 2);
++    cpu->ccsidr[1] = make_ccsidr(CCSIDR_FORMAT_LEGACY, 2, 64, 32 * KiB, 2);
+     /* 1024KB L2 cache */
+     cpu->ccsidr[2] = make_ccsidr(CCSIDR_FORMAT_LEGACY, 16, 64, 1 * MiB, 7);
+     set_dczid_bs(cpu, 4); /* 64 bytes */
+--- a/target/arm/tcg/cpu64.c
++++ b/target/arm/tcg/cpu64.c
+@@ -84,9 +84,9 @@
+     /* 32KB L1 dcache */
+     cpu->ccsidr[0] = make_ccsidr(CCSIDR_FORMAT_LEGACY, 4, 64, 32 * KiB, 7);
+     /* 32KB L1 icache */
+-    cpu->ccsidr[1] = make_ccsidr(CCSIDR_FORMAT_LEGACY, 4, 64, 32 * KiB, 2);
+-    /* 512KB L2 cache */
+-    cpu->ccsidr[2] = make_ccsidr(CCSIDR_FORMAT_LEGACY, 16, 64, 512 * KiB, 7);
++    cpu->ccsidr[1] = make_ccsidr(CCSIDR_FORMAT_LEGACY, 2, 64, 32 * KiB, 2);
++    /* 256KB L2 cache */
++    cpu->ccsidr[2] = make_ccsidr(CCSIDR_FORMAT_LEGACY, 8, 64, 256 * KiB, 7);
+ 
+     /* From B3.5 VGIC Type register */
+     cpu->gic_num_lrs = 4;
+@@ -320,8 +320,8 @@
+     cpu->isar.reset_pmcr_el0 = 0x41023000;
+     SET_IDREG(isar, CLIDR, 0x0a200023);
+     /* 32KB L1 dcache */
+-    cpu->ccsidr[0] = make_ccsidr(CCSIDR_FORMAT_LEGACY, 4, 64, 32 * KiB, 7);
+-    /* 48KB L1 dcache */
++    cpu->ccsidr[0] = make_ccsidr(CCSIDR_FORMAT_LEGACY, 2, 64, 32 * KiB, 7);
++    /* 48KB L1 icache */
+     cpu->ccsidr[1] = make_ccsidr(CCSIDR_FORMAT_LEGACY, 3, 64, 48 * KiB, 2);
+     /* 1MB L2 cache */
+     cpu->ccsidr[2] = make_ccsidr(CCSIDR_FORMAT_LEGACY, 16, 64, 1 * MiB, 7);

@@ -4,10 +4,10 @@
 //!
 //! The values the instructions compute are checked against QEMU
 //! (`tests/vectors/qemu_max.txt`); this file holds what those vectors cannot
-//! show (R9): the words Arm does not allocate, the forms the vectors leave
-//! out where QEMU 8.2.2 is wrong, FPCR.FZ16 as a guest sets it and the
-//! exceptions it changes, pinned to the Arm ARM's FPUnpack, FPRound and
-//! FPMulAddH, and the enable checks after decode.
+//! show (R9): the words Arm does not allocate, FPCR.FZ16 as a guest sets it
+//! and the exceptions it changes, pinned to the Arm ARM's FPUnpack, FPRound
+//! and FPMulAddH, the enable checks after decode, and the forms QEMU 8.2.2
+//! gets wrong (docs/qemu-upstream-bugs.md), pinned to their pages.
 //!
 //! The words are GNU as's (`-march=armv8.4-a+fp16+fp16fml`, objdump -d).
 
@@ -121,7 +121,7 @@ fn a_half_precision_fixed_point_shift_needs_fp16() {
 
 /// The scalar two-register miscellaneous half-precision class has no FABS
 /// or FNEG (`a = 1`, opcode 01111), which the vector class has. QEMU 8.2.2
-/// executes them, so no vector holds them.
+/// executes FNEG and aborts on FABS.
 #[test]
 fn the_scalar_half_precision_fabs_and_fneg_are_unallocated() {
     let mut cpu = processor(Implementation::EVERY_FEATURE);
@@ -131,8 +131,7 @@ fn the_scalar_half_precision_fabs_and_fneg_are_unallocated() {
 }
 
 /// FCVTZS (scalar, fixed-point) writes `V[d]` at 128 bits, the 16-bit
-/// result zero-extended. QEMU 8.2.2 sign-extends it into 32 bits, so the
-/// vectors convert to unsigned only.
+/// result zero-extended. QEMU 8.2.2 sign-extends it into 32 bits.
 #[test]
 fn fcvtzs_to_a_half_precision_fixed_point_zeroes_the_bits_above_it() {
     let mut cpu = processor(Implementation::EVERY_FEATURE);

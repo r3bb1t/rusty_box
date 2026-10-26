@@ -12,10 +12,10 @@
 //! Arm ARM's pseudocode (`InsertPAC`, `Authenticate`, `EffectiveTBI`,
 //! `AArch64.BranchAddr`, the instruction pages): the processors without
 //! FEAT_PAuth2, FEAT_FPAC or FEAT_FPACCOMBINE and without FEAT_PAuth at
-//! all, the pointer QEMU 8.2.2 signs for the wrong half of the address
-//! space, the SP alignment check QEMU does not make, the keys as
-//! registers and in a snapshot, and a tag TCR_EL1.TBID keeps for the
-//! fetch to fault on.
+//! all, the pointer QEMU signs for the wrong half of the address space
+//! (to 11.1.2 at least), the SP alignment check QEMU does not make, the
+//! keys as registers and in a snapshot, and a tag TCR_EL1.TBID keeps for
+//! the fetch to fault on.
 //!
 //! The words are GNU as's (`-march=armv8.3-a`, objdump -d).
 
@@ -349,8 +349,9 @@ fn apply(cpu: &mut Cpu, insn: u32, ptr: u64, modifier: u64) -> u64 {
 /// names unless a top-byte-ignore applies to the access, in either half,
 /// and then for the half bit 55 names (`InsertPAC`'s `selbit`): the code
 /// is the one of the pointer of that half with the same low bits, the
-/// pointer's own bits XORed over it, and bit 55 that half's. QEMU 8.2.2
-/// takes bit 55's half always (README, "Where the references differ").
+/// pointer's own bits XORed over it, and bit 55 that half's. QEMU, to
+/// 11.1.2 at least, takes bit 55's half always (README, "Where the
+/// references differ").
 #[test]
 fn a_pointer_whose_bits_55_and_63_differ_is_signed_for_insertpacs_half() {
     let mut cpu = keyed(&FPACCOMBINE);
@@ -554,7 +555,7 @@ fn the_keys_are_el1_registers() {
 }
 
 /// LDRAA with SP as the base authenticates first and checks SP's
-/// alignment after (the instruction page; QEMU 8.2.2 makes no SP alignment
+/// alignment after (the instruction page; QEMU makes no SP alignment
 /// check): an unsigned SP fails the authentication, a signed misaligned
 /// one the alignment check. LDRAB with writeback leaves the authenticated
 /// address in the base.
