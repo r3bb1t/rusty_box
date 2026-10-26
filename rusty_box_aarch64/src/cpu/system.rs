@@ -9,6 +9,7 @@ use super::features::Feature;
 use super::mmu::{AtCheck, CacheMaintenance};
 use super::sme::SmeTrap;
 use super::sysreg::{SysRegError, SysRegKey, WriteEffect};
+use super::wait::Wait;
 use super::{sctlr, Cpu, El};
 use crate::bus::PhysBus;
 
@@ -99,19 +100,13 @@ impl Cpu {
     /// handler of their own, [`Cpu::exec_pauth_hint`]).
     pub(crate) fn exec_hint(&mut self, insn: u32, _pc: u64) -> ExecResult {
         match bits(insn, 11, 5) {
-            // WFE: there is no other processor to send an event, and WFE may
-            // complete at any time, so it completes at once.
-            2 => {
-                if self.pstate.el == El::El0 && self.sys.sctlr_el1 & sctlr::NTWE == 0 {
-                    return Err(Exception::new(ExceptionClass::WfxTrap, (1 << 24) | (0xE << 20) | 1).into());
-                }
+            2 => self.exec_wfe(),
+            3 => self.exec_wfi(),
+            // SEV and SEVL: with one processor, `SendEvent` is
+            // `SendEventLocal`.
+            4 | 5 => {
+                self.send_event();
                 Ok(Flow::Next)
-            }
-            3 => {
-                if self.pstate.el == El::El0 && self.sys.sctlr_el1 & sctlr::NTWI == 0 {
-                    return Err(Exception::new(ExceptionClass::WfxTrap, (1 << 24) | (0xE << 20)).into());
-                }
-                Ok(Flow::Wait)
             }
             _ => Ok(Flow::Next),
         }
@@ -302,6 +297,19 @@ impl Cpu {
                 self.cache_maintenance(bus, va, op)?;
                 Ok(Flow::Next)
             }
+            // CFP, DVP and CPP RCTX (FEAT_SPECRES): EL0 needs
+            // SCTLR_EL1.EnRCTX. Each restricts predictions
+            // (`AArch64_RestrictPrediction`), which a processor that never
+            // speculates does not make.
+            (3, 7, 3, 4 | 5 | 7) => {
+                if !self.implements(Feature::SpecRes) {
+                    return self.undefined(pc, insn);
+                }
+                if el0 && self.sys.sctlr_el1 & sctlr::ENRCTX == 0 {
+                    return Err(trap);
+                }
+                Ok(Flow::Next)
+            }
             // DC ZVA: EL0 needs SCTLR_EL1.DZE.
             (3, 7, 4, 1) => {
                 if el0 && self.sys.sctlr_el1 & sctlr::DZE == 0 {
@@ -433,7 +441,7 @@ impl Cpu {
                     // A standby request: wait for an interrupt, then return
                     // success, as QEMU does.
                     self.x[0] = psci::SUCCESS;
-                    return Ok(Flow::Wait);
+                    return Ok(self.begin_wait(Wait::Interrupt));
                 }
             }
             psci::CPU_OFF => return Err(Fault::Stop(StopCause::CpuOff)),

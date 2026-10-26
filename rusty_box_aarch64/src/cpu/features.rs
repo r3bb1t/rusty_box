@@ -142,6 +142,21 @@ pub(crate) enum Feature {
     /// FEAT_LOR: LDLAR, STLLR, their byte and halfword forms, and the
     /// LORegion registers.
     Lor,
+    /// FEAT_IDST: a read of the feature ID register space that is not
+    /// permitted traps with EC 0x18 instead of being UNDEFINED. No encoding
+    /// of its own.
+    Idst,
+    /// FEAT_SPECRES: CFP, DVP and CPP RCTX, which are SYS. No encoding of
+    /// its own.
+    SpecRes,
+    /// FEAT_CSV2: branch targets trained in one context do not steer
+    /// speculation in another. No encoding of its own.
+    Csv2,
+    /// FEAT_ECV: CNTPCTSS_EL0, CNTVCTSS_EL0 and CNTKCTL_EL1.EVNTIS. No
+    /// encoding of its own.
+    Ecv,
+    /// FEAT_WFxT: WFET and WFIT.
+    WfxT,
 }
 
 /// What the conformance tests read of a feature: `tests/unit/spec.rs`
@@ -149,7 +164,7 @@ pub(crate) enum Feature {
 #[cfg(test)]
 impl Feature {
     /// Every feature, in declaration order.
-    pub(crate) const ALL: [Feature; 48] = [
+    pub(crate) const ALL: [Feature; 53] = [
         Feature::Base,
         Feature::Fp,
         Feature::AdvSimd,
@@ -198,6 +213,11 @@ impl Feature {
         Feature::Dpb,
         Feature::Dpb2,
         Feature::Lor,
+        Feature::Idst,
+        Feature::SpecRes,
+        Feature::Csv2,
+        Feature::Ecv,
+        Feature::WfxT,
     ];
 
     /// The name Arm's data gives the feature, `None` for the base set.
@@ -251,6 +271,11 @@ impl Feature {
             Self::Dpb => Some("FEAT_DPB"),
             Self::Dpb2 => Some("FEAT_DPB2"),
             Self::Lor => Some("FEAT_LOR"),
+            Self::Idst => Some("FEAT_IDST"),
+            Self::SpecRes => Some("FEAT_SPECRES"),
+            Self::Csv2 => Some("FEAT_CSV2"),
+            Self::Ecv => Some("FEAT_ECV"),
+            Self::WfxT => Some("FEAT_WFxT"),
         }
     }
 
@@ -280,6 +305,10 @@ impl Feature {
                 | Self::Ttl
                 | Self::Dpb
                 | Self::Dpb2
+                | Self::Idst
+                | Self::SpecRes
+                | Self::Csv2
+                | Self::Ecv
         )
     }
 

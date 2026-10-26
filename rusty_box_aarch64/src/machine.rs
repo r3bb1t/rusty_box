@@ -7,9 +7,10 @@
 //!   that change only at instructions (an MMIO access, a timer register
 //!   write), at a precomputed tick (`next_event`), or at a host action
 //!   between runs;
-//! - waiting for an interrupt jumps time straight to the next event, and the
-//!   processor stays in the waiting state across calls, so a run that is cut
-//!   into budgets behaves exactly like one that is not;
+//! - a waiting processor (`WFI`, `WFE`, `WFIT`, `WFET`) jumps time straight
+//!   to the next event or to the tick its wait ends by itself, and stays in
+//!   the waiting state across calls, so a run that is cut into budgets
+//!   behaves exactly like one that is not;
 //! - nothing reads the host clock.
 //!
 //! A machine is built by [`MachineBuilder`], whose type says how the guest
@@ -684,9 +685,10 @@ fn assemble<S: GuestStorage, I: Instrumentation>(config: VirtConfig, plan: Plan,
 pub enum StopReason {
     /// The budget was spent; running again continues.
     BudgetExhausted,
-    /// The processor waits for an interrupt and nothing is scheduled to
-    /// raise one. With a tick budget, time advanced to the end of it; only
-    /// the host (serial input, the power button) can wake the guest now.
+    /// The processor waits and nothing is scheduled to end its wait: no
+    /// interrupt, no event, no timeout. With a tick budget, time advanced to
+    /// the end of it; only the host (serial input, the power button) can
+    /// wake the guest now.
     Halted,
     /// A stop handle or stop flag was raised. It stays raised: every run
     /// returns this until the host lowers it.
@@ -746,7 +748,8 @@ impl BatchOutcome {
 /// What state a machine's power is in, asked at any time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PowerState {
-    /// Executing, or waiting for an interrupt — either way, alive.
+    /// Executing, or waiting (`WFI`, `WFE` and their timed forms) — either
+    /// way, alive.
     Running,
     /// The guest called PSCI `SYSTEM_OFF`.
     PoweredOff,
@@ -965,13 +968,9 @@ impl<S: GuestStorage, I: Instrumentation> VirtMachine<S, I> {
         self.cpu.take_timer_dirty();
         let lines = self.cpu.timer_lines();
         self.board.set_timer_lines(lines.physical, lines.virtual_);
-        let device_deadline = self.board.advance_devices(self.cpu.clock()).map(|t| t.ticks());
+        let device_deadline = self.board.advance_devices(self.cpu.clock());
         let timer_deadline = self.cpu.next_timer_deadline();
-        self.next_event = match (timer_deadline, device_deadline) {
-            (Some(a), Some(b)) => a.min(b),
-            (Some(a), None) | (None, Some(a)) => a,
-            (None, None) => u64::MAX,
-        };
+        self.next_event = timer_deadline.into_iter().chain(device_deadline).min().map_or(u64::MAX, VmInstant::ticks);
         self.cpu.set_interrupt_lines(self.board.gic.irq_out(), self.board.gic.fiq_out());
     }
 
@@ -987,8 +986,8 @@ impl<S: GuestStorage, I: Instrumentation> VirtMachine<S, I> {
 
     /// Unicorn's `uc_emu_start`: run from `begin` until the program counter
     /// reaches `until` or an exit address, or `count` instructions retire.
-    /// `None` leaves that bound off. A processor waiting for an interrupt is
-    /// woken to run from `begin`.
+    /// `None` leaves that bound off. A waiting processor is woken to run from
+    /// `begin`.
     pub fn emu_start(&mut self, begin: u64, until: Option<u64>, count: Option<u64>) -> BatchOutcome {
         self.cpu.set_reg(Reg::Pc, begin);
         self.cpu.activity = Activity::Running;
@@ -1070,8 +1069,9 @@ impl<S: GuestStorage, I: Instrumentation> VirtMachine<S, I> {
             if self.cpu.icount >= self.next_event {
                 self.sync_events();
             }
-            if self.cpu.activity == Activity::WaitingForInterrupt && !self.cpu.wake_if_pending() {
-                if self.next_event == u64::MAX {
+            if matches!(self.cpu.activity, Activity::Waiting(_)) && !self.cpu.wake_if_pending() {
+                let wake = self.next_event.min(self.cpu.wake_deadline().map_or(u64::MAX, VmInstant::ticks));
+                if wake == u64::MAX {
                     // Nothing will ever wake it but the host: let a tick
                     // budget's time pass at once, as it would idly.
                     if tick_end != u64::MAX {
@@ -1079,7 +1079,7 @@ impl<S: GuestStorage, I: Instrumentation> VirtMachine<S, I> {
                     }
                     return Slice::Stopped(StopReason::Halted);
                 }
-                let until = self.next_event.min(slice_end);
+                let until = wake.min(slice_end);
                 self.cpu.wait_until(VmInstant::from_ticks(until));
                 if until == slice_end {
                     return Slice::Done;
@@ -1163,19 +1163,15 @@ impl<S: GuestStorage, I: Instrumentation> VirtMachine<S, I> {
         self.cpu.instructions()
     }
 
-    /// How many ticks until a timer or device changes an output by itself —
-    /// how far a host may skip a waiting machine with
-    /// [`RunBudget::Ticks`]. `None` when nothing is scheduled.
+    /// How many ticks until a timer or device changes an output by itself,
+    /// or a waiting processor's wait ends by itself (a `WFIT` or `WFET`
+    /// timeout, the event stream ending a `WFE`) — how far a host may skip
+    /// a waiting machine with [`RunBudget::Ticks`]. `None` when nothing is
+    /// scheduled.
     pub fn ticks_to_next_timer_deadline(&self) -> Option<u64> {
-        let now = self.cpu.icount;
-        let timer = self.cpu.next_timer_deadline();
-        let device = self.board.next_deadline().map(|t| t.ticks());
-        let next = match (timer, device) {
-            (Some(a), Some(b)) => a.min(b),
-            (Some(a), None) | (None, Some(a)) => a,
-            (None, None) => return None,
-        };
-        Some(next.saturating_sub(now))
+        let deadlines = [self.cpu.next_timer_deadline(), self.board.next_deadline(), self.cpu.wake_deadline()];
+        let next = deadlines.into_iter().flatten().min()?;
+        Some(next.since(self.cpu.now()).ticks())
     }
 
     // ----- stopping -----
@@ -1594,7 +1590,7 @@ impl<S: GuestStorage, I: Instrumentation> VirtMachine<S, I> {
 }
 
 const SNAPSHOT_MAGIC: [u8; 8] = *b"RBA64SNP";
-const SNAPSHOT_VERSION: u32 = 5;
+const SNAPSHOT_VERSION: u32 = 6;
 
 /// Everything about how a machine was built that a snapshot depends on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

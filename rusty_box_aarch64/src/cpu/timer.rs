@@ -11,7 +11,27 @@
 //! next tick a line can rise, which this module computes exactly: the first
 //! tick whose count reaches `CVAL`.
 
+use rusty_box_core::VmInstant;
+
 use super::Cpu;
+
+/// A value of the system counter: what `CNTPCT_EL0` reads, and with no EL2
+/// `CNTVCT_EL0` too. A count, never a tick (R4): [`Cpu::tick_reaching`] is
+/// the one way from a count to the tick count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct Count(u64);
+
+impl Count {
+    #[inline]
+    pub(crate) const fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    #[inline]
+    pub(crate) const fn get(self) -> u64 {
+        self.0
+    }
+}
 
 /// The timer outputs, as levels on their PPIs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -29,27 +49,29 @@ const CTL_ISTATUS: u64 = 1 << 2;
 impl Cpu {
     /// The system counter at the tick `icount`.
     #[inline]
-    fn counter_at(&self, icount: u64) -> u64 {
+    fn counter_at(&self, icount: u64) -> Count {
         let value = u128::from(icount) * u128::from(self.counter_hz.get()) / u128::from(self.ips.get());
-        u64::try_from(value).unwrap_or(u64::MAX)
+        Count(u64::try_from(value).unwrap_or(u64::MAX))
     }
 
     /// `CNTPCT_EL0` now.
     #[inline]
-    pub(crate) fn counter(&self) -> u64 {
+    pub(crate) fn counter(&self) -> Count {
         self.counter_at(self.icount)
     }
 
-    /// The first tick at which the counter reaches `cval`.
-    fn tick_reaching(&self, cval: u64) -> u64 {
-        let needed = u128::from(cval) * u128::from(self.ips.get());
+    /// The first tick at which the counter reaches `count`. `None` when that
+    /// is the last tick the count of ticks holds or past it: the machine
+    /// reads `u64::MAX` as "never", and a deadline is never there.
+    pub(super) fn tick_reaching(&self, count: Count) -> Option<VmInstant> {
+        let needed = u128::from(count.0) * u128::from(self.ips.get());
         let ticks = needed.div_ceil(u128::from(self.counter_hz.get()));
-        u64::try_from(ticks).unwrap_or(u64::MAX)
+        u64::try_from(ticks).ok().filter(|&t| t != u64::MAX).map(VmInstant::from_ticks)
     }
 
     #[inline]
     fn condition_met(&self, ctl: u64, cval: u64) -> bool {
-        ctl & CTL_ENABLE != 0 && self.counter() >= cval
+        ctl & CTL_ENABLE != 0 && self.counter() >= Count(cval)
     }
 
     /// `CNTx_CTL_EL0` as read: `ISTATUS` reports the condition, whatever
@@ -62,13 +84,13 @@ impl Cpu {
     /// `CNTx_TVAL_EL0` as read: `CVAL - count`, truncated to 32 bits (a
     /// signed value; the upper word reads as zero).
     pub(crate) fn timer_tval_read(&self, cval: u64) -> u64 {
-        cval.wrapping_sub(self.counter()) & 0xFFFF_FFFF
+        cval.wrapping_sub(self.counter().0) & 0xFFFF_FFFF
     }
 
     /// The `CVAL` a write of `value` to `CNTx_TVAL_EL0` sets: the count plus
     /// the low word of `value`, sign-extended.
     pub(crate) fn timer_cval_from_tval(&self, value: u64) -> u64 {
-        self.counter().wrapping_add(value as u32 as i32 as i64 as u64)
+        self.counter().0.wrapping_add(value as u32 as i32 as i64 as u64)
     }
 
     /// Both timer outputs now.
@@ -82,21 +104,17 @@ impl Cpu {
 
     /// The earliest future tick at which a timer output rises, if one will
     /// without further register writes.
-    pub fn next_timer_deadline(&self) -> Option<u64> {
+    pub fn next_timer_deadline(&self) -> Option<VmInstant> {
         let rise = |ctl: u64, cval: u64| {
-            if ctl & CTL_ENABLE != 0 && ctl & CTL_IMASK == 0 && self.counter() < cval {
-                Some(self.tick_reaching(cval))
+            if ctl & CTL_ENABLE != 0 && ctl & CTL_IMASK == 0 && self.counter() < Count(cval) {
+                self.tick_reaching(Count(cval))
             } else {
                 None
             }
         };
         let p = rise(self.sys.cntp_ctl_el0, self.sys.cntp_cval_el0);
         let v = rise(self.sys.cntv_ctl_el0, self.sys.cntv_cval_el0);
-        match (p, v) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, None) => a,
-            (None, b) => b,
-        }
+        p.into_iter().chain(v).min()
     }
 
     /// Whether a timer register changed since the machine last sampled the
@@ -128,11 +146,11 @@ mod tests {
         let mut c = cpu(50_000_000, 62_500_000);
         c.sys.cntp_ctl_el0 = CTL_ENABLE;
         c.sys.cntp_cval_el0 = 1_000_003;
-        let deadline = c.next_timer_deadline().unwrap_or(0);
+        let deadline = c.next_timer_deadline().map_or(0, VmInstant::ticks);
         c.icount = deadline - 1;
-        assert!(c.counter() < 1_000_003 && !c.timer_lines().physical);
+        assert!(c.counter() < Count(1_000_003) && !c.timer_lines().physical);
         c.icount = deadline;
-        assert!(c.counter() >= 1_000_003 && c.timer_lines().physical);
+        assert!(c.counter() >= Count(1_000_003) && c.timer_lines().physical);
     }
 
     /// IMASK hides the line but not ISTATUS, and a masked timer has no

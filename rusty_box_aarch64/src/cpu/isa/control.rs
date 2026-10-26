@@ -102,6 +102,14 @@ impl Pstate {
     }
 }
 
+/// Arm group `systeminstrswithreg`: System instructions with register
+/// argument, all of them FEAT_WFxT's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum Systeminstrswithreg {
+    Wfet,
+    Wfit,
+}
+
 /// Arm group `systeminstrs`: System instructions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum Systeminstrs {
@@ -200,6 +208,7 @@ fn system(word: u32) -> Option<Encoding> {
                 0b11111 => hints(word).map(Encoding::Hints),
                 _ => None,
             },
+            (0b011, 0b0001) => systeminstrswithreg(word).map(Encoding::Systeminstrswithreg),
             (0b011, 0b0011) => barriers(word).map(Encoding::Barriers),
             (_, 0b0100) => pstate(word).map(Encoding::Pstate),
             _ => None,
@@ -335,6 +344,16 @@ fn pstate(word: u32) -> Option<Pstate> {
         // MSR (immediate) is not these op1 and op2, whatever CRm.
         (0b000, _, 0b000..=0b010, _) => None,
         (_, _, _, 0b11111) => Some(Pstate::MsrSi),
+        _ => None,
+    }
+}
+
+fn systeminstrswithreg(word: u32) -> Option<Systeminstrswithreg> {
+    let crm = bits(word, 11, 8);
+    let op2 = bits(word, 7, 5);
+    match (crm, op2) {
+        (0b0000, 0b000) => Some(Systeminstrswithreg::Wfet),
+        (0b0000, 0b001) => Some(Systeminstrswithreg::Wfit),
         _ => None,
     }
 }

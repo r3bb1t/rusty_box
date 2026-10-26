@@ -5,7 +5,9 @@
 //! `MRS` packs it in bits 20:5. An encoding not listed is UNDEFINED, except the
 //! unallocated part of the ID register space (`op0=3, op1=0, CRn=0,
 //! CRm=1..7`), which reads as zero (Arm ARM D18.2, "reserved ID registers are
-//! RAZ").
+//! RAZ"). With FEAT_IDST, a read of the feature ID space (`op0=3, op1=0, 1
+//! or 3, CRn=0, CRm=0..7`) that would be UNDEFINED traps with EC 0x18
+//! instead: EL0's reads of the ID registers, and `UnimplementedIDRegister`.
 
 use super::features::Feature;
 use super::id;
@@ -60,6 +62,13 @@ impl SysRegKey {
         self.0 & 7
     }
 
+    /// Whether the encoding is in the feature ID space FEAT_IDST traps
+    /// reads of: `op0=3, op1=0, 1 or 3, CRn=0, CRm=0..7`, as QEMU's
+    /// `arm_cpreg_encoding_in_idspace` has it.
+    const fn in_id_space(self) -> bool {
+        self.op0() == 3 && matches!(self.op1(), 0 | 1 | 3) && self.crn() == 0 && self.crm() < 8
+    }
+
     /// `ESR_ELx.ISS` for a trapped `MSR`/`MRS` (EC 0x18).
     pub(crate) const fn trap_iss(self, rt: u32, read: bool) -> u32 {
         (self.op0() << 20)
@@ -88,6 +97,7 @@ const ID_AA64SMFR0_EL1: u32 = key!(3, 0, 0, 4, 5);
 const ID_AA64DFR0_EL1: u32 = key!(3, 0, 0, 5, 0);
 const ID_AA64ISAR0_EL1: u32 = key!(3, 0, 0, 6, 0);
 const ID_AA64ISAR1_EL1: u32 = key!(3, 0, 0, 6, 1);
+const ID_AA64ISAR2_EL1: u32 = key!(3, 0, 0, 6, 2);
 const ID_AA64MMFR0_EL1: u32 = key!(3, 0, 0, 7, 0);
 const ID_AA64MMFR1_EL1: u32 = key!(3, 0, 0, 7, 1);
 const ID_AA64MMFR2_EL1: u32 = key!(3, 0, 0, 7, 2);
@@ -153,6 +163,8 @@ const CNTKCTL_EL1: u32 = key!(3, 0, 14, 1, 0);
 const CNTFRQ_EL0: u32 = key!(3, 3, 14, 0, 0);
 const CNTPCT_EL0: u32 = key!(3, 3, 14, 0, 1);
 const CNTVCT_EL0: u32 = key!(3, 3, 14, 0, 2);
+const CNTPCTSS_EL0: u32 = key!(3, 3, 14, 0, 5);
+const CNTVCTSS_EL0: u32 = key!(3, 3, 14, 0, 6);
 const CNTP_TVAL_EL0: u32 = key!(3, 3, 14, 2, 0);
 const CNTP_CTL_EL0: u32 = key!(3, 3, 14, 2, 1);
 const CNTP_CVAL_EL0: u32 = key!(3, 3, 14, 2, 2);
@@ -187,7 +199,9 @@ pub(crate) enum SysRegError {
     /// The encoding does not exist, or not at this EL, or not in this
     /// direction: UNDEFINED.
     Undefined,
-    /// EL0 access disabled by a control bit: trapped to EL1 with EC 0x18.
+    /// Trapped to EL1 with EC 0x18: an EL0 access a control bit disables,
+    /// or with FEAT_IDST a read of the feature ID space that would be
+    /// UNDEFINED.
     TrapToEl1,
     /// SIMD&FP access disabled by `CPACR_EL1.FPEN`: EC 0x07.
     FpTrap,
@@ -210,6 +224,9 @@ const EL0PCTEN: u64 = 1 << 0;
 const EL0VCTEN: u64 = 1 << 1;
 const EL0VTEN: u64 = 1 << 8;
 const EL0PTEN: u64 = 1 << 9;
+/// `CNTKCTL_EL1` bits 9:0: the EL0 access controls and the event stream's
+/// `EVNTEN`, `EVNTDIR` and `EVNTI`.
+const CNTKCTL_BASE: u64 = 0x3FF;
 
 /// `MDSCR_EL1.TDCC`: EL0's accesses to the Debug Communications Channel
 /// registers trap to EL1.
@@ -268,6 +285,16 @@ impl Cpu {
         }
     }
 
+    /// The `CNTKCTL_EL1` bits this core keeps: bits 9:0, and `EVNTIS` with
+    /// FEAT_ECV.
+    pub(crate) fn cntkctl_mask(&self) -> u64 {
+        if self.implements(Feature::Ecv) {
+            CNTKCTL_BASE | super::wait::EVNTIS
+        } else {
+            CNTKCTL_BASE
+        }
+    }
+
     fn el0_timer_check(&self, el: El, enable_bits: u64) -> Result<(), SysRegError> {
         if el == El::El0 && self.sys.cntkctl_el1 & enable_bits == 0 {
             Err(SysRegError::TrapToEl1)
@@ -287,9 +314,15 @@ impl Cpu {
     }
 
     /// `MRS`: the value of the register `key` names, read at the current EL.
+    /// With FEAT_IDST, a read of the feature ID space that would be
+    /// UNDEFINED traps instead (each ID register's accessor at EL0, and Arm
+    /// `UnimplementedIDRegister` at any EL).
     #[inline]
     pub(crate) fn sysreg_read(&self, key: SysRegKey) -> Result<u64, SysRegError> {
-        self.sysreg_read_as(key, Accessor::Guest)
+        match self.sysreg_read_as(key, Accessor::Guest) {
+            Err(SysRegError::Undefined) if key.in_id_space() && self.implements(Feature::Idst) => Err(SysRegError::TrapToEl1),
+            result => result,
+        }
     }
 
     /// The exception level an accessor reads and writes at.
@@ -352,11 +385,21 @@ impl Cpu {
             }
             CNTPCT_EL0 => {
                 self.el0_timer_check(el, EL0PCTEN)?;
-                return Ok(self.counter());
+                return Ok(self.counter().get());
             }
             CNTVCT_EL0 => {
                 self.el0_timer_check(el, EL0VCTEN)?;
-                return Ok(self.counter());
+                return Ok(self.counter().get());
+            }
+            // The self-synchronized views of the counters (FEAT_ECV): every
+            // read here is in program order already.
+            CNTPCTSS_EL0 if self.implements(Feature::Ecv) => {
+                self.el0_timer_check(el, EL0PCTEN)?;
+                return Ok(self.counter().get());
+            }
+            CNTVCTSS_EL0 if self.implements(Feature::Ecv) => {
+                self.el0_timer_check(el, EL0VCTEN)?;
+                return Ok(self.counter().get());
             }
             CNTP_CTL_EL0 | CNTP_CVAL_EL0 | CNTP_TVAL_EL0 => {
                 self.el0_timer_check(el, EL0PTEN)?;
@@ -406,7 +449,8 @@ impl Cpu {
             ID_AA64DFR0_EL1 => id::ID_AA64DFR0_EL1,
             ID_AA64ISAR0_EL1 => id::id_aa64isar0(self.imp.features),
             ID_AA64ISAR1_EL1 => id::id_aa64isar1(self.imp.features),
-            ID_AA64MMFR0_EL1 => id::ID_AA64MMFR0_EL1,
+            ID_AA64ISAR2_EL1 => id::id_aa64isar2(self.imp.features),
+            ID_AA64MMFR0_EL1 => id::id_aa64mmfr0(self.imp.features),
             ID_AA64MMFR1_EL1 => id::id_aa64mmfr1(self.imp.features),
             ID_AA64MMFR2_EL1 => id::id_aa64mmfr2(self.imp.features),
             CCSIDR_EL1 => self.ccsidr(),
@@ -749,7 +793,10 @@ impl Cpu {
                 WriteEffect::None
             }
             CNTKCTL_EL1 => {
-                self.sys.cntkctl_el1 = value & 0x3FF;
+                // The event stream's events so far are judged by the
+                // controls that generated them.
+                self.fold_event_stream();
+                self.sys.cntkctl_el1 = value & self.cntkctl_mask();
                 WriteEffect::None
             }
             // Writable only at the highest implemented EL, which is EL1 here.

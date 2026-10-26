@@ -60,8 +60,10 @@ vocabulary are `rusty_box_core`'s, shared with the x86 machine.
   counter is `floor(ticks × counter_hz ÷ ips)` in `u128`; timer deadlines are
   the exact first tick whose count reaches `CVAL`; the PL031 RTC counts
   emulated seconds from a fixed epoch. Nothing reads the host clock.
-- **Waiting is free and slicing is invisible.** `WFI` jumps time to the next
-  event, and the processor stays in the waiting state across `step` calls, so
+- **Waiting is free and slicing is invisible.** `WFI`, `WFE` and the timed
+  `WFIT` and `WFET` jump time to the next event that can end them (an
+  interrupt, the timer's event stream, their timeout), and the processor
+  stays in the waiting state across `step` calls, so
   a run cut into any budgets ends in exactly the same state
   (`tests/timer_interrupts.rs` asserts this, mutation-checked). Host input —
   serial bytes, keys, the power button — lands only between steps.
@@ -136,7 +138,11 @@ FEAT_E0PD (TCR_EL1.E0PD0 and E0PD1) with the FEAT_CSV3 it requires,
 FEAT_TLBIOS, FEAT_TLBIRANGE and FEAT_TTL (the Outer Shareable and range
 TLBI forms and the TTL hint), FEAT_XS (DSB nXS and the TLBI nXS forms),
 FEAT_DPB and FEAT_DPB2 (DC CVAP, DC CVADP), and FEAT_LOR (LDLAR, STLLR and
-the LORegion registers, with no LORegions);
+the LORegion registers, with no LORegions); FEAT_IDST (reads of the feature
+ID space that would be UNDEFINED trap with EC 0x18), FEAT_SPECRES (CFP, DVP
+and CPP RCTX, with SCTLR_EL1.EnRCTX), FEAT_CSV2, FEAT_ECV (CNTPCTSS_EL0,
+CNTVCTSS_EL0 and CNTKCTL_EL1.EVNTIS) and FEAT_WFxT (WFET and WFIT, which
+wait until their timeout);
 and, being built, FEAT_SME (its state, registers, SMSTART
 and SMSTOP, RDSVL, ADDSVL and ADDSPL). No processor a machine runs has them
 yet: the tests run them on a test-only processor with every feature, whose
@@ -286,6 +292,22 @@ integration tests of the public API.
   stale translation with them; DSB nXS; LDLAR and STLLR as ordered
   accesses PAN applies to; the LORegion registers; and each feature's
   bits RES0 or its encodings UNDEFINED without it.
+- `tests/unit/wait.rs` checks the waits every processor has and FEAT_WFxT's
+  against Arm's pseudocode (`Hint_WFI`, `Hint_WFE`, `Hint_WFIT`,
+  `Hint_WFET`, `TestEventCNTV`): SEV, SEVL and every exception return,
+  legal or not, setting the Event Register and WFE consuming it; WFE and
+  WFET completing on it ahead of the EL0 trap, WFI and WFIT on a pending
+  interrupt, masked or not, and WFIT and WFET on a passed timeout, each
+  trap's syndrome; the timed waits ending at the tick `CNTVCT_EL0` reaches
+  the timeout and not one before; the event stream's event, rising or
+  falling, ending a WFE at its tick and setting the register while the
+  processor runs, `EVNTIS` with FEAT_ECV only, and a `CNTKCTL_EL1` write
+  judging the count before it by the controls that held then; WFE not
+  waiting while the exclusive monitor is armed; and snapshots keeping the
+  wait, its timeout and the register. `tests/unit/sysreg.rs` checks
+  FEAT_IDST, FEAT_SPECRES and FEAT_ECV's counter views, and `tests/api.rs`
+  a machine whose WFE the event stream ends. Turning off any of 20
+  of these rules on purpose fails a test.
 - `tests/crypto.rs` runs the cryptographic and CRC32 instructions as a guest
   uses them, to the standards' own answers: AES-128 encryption and
   decryption of the FIPS-197 example, SHA-1 and SHA-256 of "abc" (FIPS
@@ -494,6 +516,34 @@ choice is listed here with its evidence.
   gives the registers' fields, and how many LORegions a processor has is
   its own choice. LDLAR and STLLR are then the acquire and release accesses
   their pseudocode makes them (`CreateAccDescLOR`).
+- **An exception return and the event stream set the Event Register.**
+  Arm's `AArch64_ExceptionReturn` calls `SendEventLocal` on every return,
+  legal or not, and `TestEventCNTV` sets the register at each selected
+  transition of the count whatever the processor is doing; this model
+  does both (the stream's events reach the register when it is next read,
+  from the count it was last brought up to). QEMU 11.1.2 sets it on ERET
+  not at all, and from the stream only while a WFE waits, so a WFE right
+  after an ERET, or after a stream event while running, waits instead of
+  completing, and at EL0 with SCTLR_EL1.nTWE clear traps.
+  [docs/qemu-upstream-bugs.md](../docs/qemu-upstream-bugs.md) has probe
+  cases J and K and the ERET patch.
+- **WFET traps before it looks at interrupts.** Arm's `Hint_WFET` completes
+  ahead of the trap check only for a set Event Register or a passed
+  timeout; `Hint_WFI` and `Hint_WFIT` complete on a pending interrupt
+  first. QEMU 11.1.2's `HELPER(wfet)` completes on a pending interrupt
+  ahead of the trap check too (probe case L and its patch).
+- **A WFE wait ends on any pending interrupt, and its end clears the Event
+  Register.** WFE's wake-up events include interrupts; a masked one ends
+  the wait here too, which a PE may do (it may leave its low-power state
+  for any reason), as QEMU's `arm_cpu_has_work` does. Whether a PE's
+  restart after the wait clears the Event Register is IMPLEMENTATION
+  DEFINED (`WaitForEvent`); here it does, so the event that ended a wait
+  is consumed with it. QEMU's `arm_wfxt_timer_cb` leaves the register set
+  after the event stream or a WFET timeout ends a wait, so the next WFE
+  completes at once. WFE and WFET do not wait while the local exclusive
+  monitor is armed, as QEMU's `HELPER(wfe)` chooses: the global monitor's
+  clearing by another observer's store, a wake-up event, is not watched,
+  and a device's DMA is such a store.
 - **RPRFM is a prefetch.** Arm's data allocates PRFM (register) with
   `Rt = 11xxx` to RPRFM (FEAT_RPRFM, Armv8.8). On a core without the feature
   the word is a PRFM with a reserved `prfop`, which the Arm ARM executes as a

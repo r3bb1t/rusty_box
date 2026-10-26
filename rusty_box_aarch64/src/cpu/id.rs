@@ -28,12 +28,14 @@ pub const REVIDR_EL1: u64 = 0;
 /// EL1 = 1 (AArch64 only), EL2 = EL3 = 0 (not implemented), FP (19:16) and
 /// AdvSIMD (23:20) 1 with FEAT_FP16 (half-precision arithmetic) and 0
 /// without, GIC = 0 (no system-register interface: the GIC is a
-/// memory-mapped v2), DIT (51:48) = 1 with FEAT_DIT, CSV3 (63:60) = 1 with
-/// FEAT_CSV3.
+/// memory-mapped v2), DIT (51:48) = 1 with FEAT_DIT, CSV2 (59:56) = 1 with
+/// FEAT_CSV2 (2 would be FEAT_CSV2_2, which has the `SCXTNUM_ELx`
+/// registers), CSV3 (63:60) = 1 with FEAT_CSV3.
 pub(crate) const fn id_aa64pfr0(features: Features) -> u64 {
     0x11 | field(features, Feature::Fp16, 16, 1)
         | field(features, Feature::Fp16, 20, 1)
         | field(features, Feature::Dit, 48, 1)
+        | field(features, Feature::Csv2, 56, 1)
         | field(features, Feature::Csv3, 60, 1)
 }
 
@@ -109,8 +111,9 @@ pub(crate) const fn id_aa64isar0(features: Features) -> u64 {
 /// and GPA (27:24) = 1 (`FEAT_PACQARMA5 <=> UInt(GPA) >= 1`); API and GPI
 /// stay 0, as no IMPLEMENTATION DEFINED algorithm is implemented. SB
 /// (39:36) = 1 with FEAT_SB, DPB (3:0) = 1 with FEAT_DPB and 2 with
-/// FEAT_DPB2 as well (which `Features.json` makes imply FEAT_DPB), XS
-/// (59:56) = 1 with FEAT_XS. Nothing else from v8.2+.
+/// FEAT_DPB2 as well (which `Features.json` makes imply FEAT_DPB), SPECRES
+/// (43:40) = 1 with FEAT_SPECRES (2 would be FEAT_SPECRES2, which has COSP
+/// RCTX), XS (59:56) = 1 with FEAT_XS. Nothing else from v8.2+.
 pub(crate) const fn id_aa64isar1(features: Features) -> u64 {
     let dpb = chain_level(features, &[Feature::Dpb, Feature::Dpb2]);
     let lrcpc = chain_level(features, &[Feature::Lrcpc, Feature::Lrcpc2]);
@@ -132,9 +135,17 @@ pub(crate) const fn id_aa64isar1(features: Features) -> u64 {
         | field(features, Feature::PacQarma5, 24, 1)
         | field(features, Feature::Frintts, 32, 1)
         | field(features, Feature::Sb, 36, 1)
+        | field(features, Feature::SpecRes, 40, 1)
         | field(features, Feature::Bf16, 44, 1)
         | field(features, Feature::I8mm, 52, 1)
         | field(features, Feature::Xs, 56, 1)
+}
+
+/// `ID_AA64ISAR2_EL1` of a processor implementing `features`: WFxT (3:0) =
+/// 2 with FEAT_WFxT (`Features.json`: `FEAT_WFxT <=> UInt(WFxT) >= 2`; 1 is
+/// reserved); nothing else from v8.7+.
+pub(crate) const fn id_aa64isar2(features: Features) -> u64 {
+    field(features, Feature::WfxT, 0, 2)
 }
 
 /// `ID_AA64ZFR0_EL1` of a processor implementing `features`: SVEver = 0
@@ -167,12 +178,13 @@ pub(crate) const fn id_aa64mmfr1(features: Features) -> u64 {
 
 /// `ID_AA64MMFR2_EL1` of a processor implementing `features`: CnP (3:0) = 1
 /// with FEAT_TTCNP, UAO (7:4) = 1 with FEAT_UAO, AT (35:32) = 1 with
-/// FEAT_LSE2, TTL (51:48) = 1 with FEAT_TTL, E0PD (63:60) = 1 with
-/// FEAT_E0PD; nothing else from v8.1+.
+/// FEAT_LSE2, IDS (39:36) = 1 with FEAT_IDST, TTL (51:48) = 1 with
+/// FEAT_TTL, E0PD (63:60) = 1 with FEAT_E0PD; nothing else from v8.1+.
 pub(crate) const fn id_aa64mmfr2(features: Features) -> u64 {
     field(features, Feature::Ttcnp, 0, 1)
         | field(features, Feature::Uao, 4, 1)
         | field(features, Feature::Lse2, 32, 1)
+        | field(features, Feature::Idst, 36, 1)
         | field(features, Feature::Ttl, 48, 1)
         | field(features, Feature::E0pd, 60, 1)
 }
@@ -203,11 +215,15 @@ const fn field(features: Features, feature: Feature, lsb: u32, value: u64) -> u6
     }
 }
 
-/// `ID_AA64MMFR0_EL1`: PARange = 4 (44-bit physical addresses, as the
-/// Cortex-A57), ASIDBits = 2 (16-bit ASIDs), mixed endianness not supported,
-/// TGran16 = 0 (not supported), TGran64 = 0xF (not supported), TGran4 = 0
-/// (supported). Only the 4 KiB granule is implemented, so only it is offered.
-pub const ID_AA64MMFR0_EL1: u64 = 0x0000_0000_0F00_0024;
+/// `ID_AA64MMFR0_EL1` of a processor implementing `features`: PARange = 4
+/// (44-bit physical addresses, as the Cortex-A57), ASIDBits = 2 (16-bit
+/// ASIDs), mixed endianness not supported, TGran16 = 0 (not supported),
+/// TGran64 = 0xF (not supported), TGran4 = 0 (supported): only the 4 KiB
+/// granule is implemented, so only it is offered. ECV (63:60) = 1 with
+/// FEAT_ECV (2 would be FEAT_ECV_POFF, which needs EL2).
+pub(crate) const fn id_aa64mmfr0(features: Features) -> u64 {
+    0x0F00_0024 | field(features, Feature::Ecv, 60, 1)
+}
 
 /// Physical address width implied by `ID_AA64MMFR0_EL1.PARange`.
 pub const PA_BITS: u32 = 44;

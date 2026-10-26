@@ -510,6 +510,36 @@ fn a_halted_machine_lets_a_tick_budget_pass() {
     assert_eq!(m.ticks(), 5000, "an instruction budget cannot bound an idle wait");
 }
 
+/// `msr cntkctl_el1, x0; wfe; b .`
+const STREAM_WFE: [u32; 3] = [0xD518_E100, 0xD503_205F, SPIN];
+
+/// A guest that turns on the timer's event stream and sleeps in `WFE` is
+/// woken by the stream's next event, which the machine schedules: with
+/// `CNTKCTL_EL1.EVNTEN` and `EVNTI` = 4, bit 4 of the count first rises at
+/// count 16, the first tick at which the 62.5 MHz count reaches it at 50 M
+/// ticks/s being 13. Without the stream nothing can end the wait.
+#[test]
+fn the_event_stream_ends_a_wfe() {
+    let mut ram = vec![0u8; RAM_LEN];
+    let mut m = bare(&mut ram, rusty_box_aarch64::NoInstrumentation);
+    load(&mut m, RAM_BASE, &STREAM_WFE);
+    m.reg_write(Reg::X0, (1 << 2) | (4 << 4));
+    let out = m.step(RunBudget::Ticks(2));
+    assert_eq!((out.stop, out.progress), (StopReason::BudgetExhausted, Progress::Instructions(2)));
+    assert_eq!(m.ticks_to_next_timer_deadline(), Some(13 - 2), "the stream's event at tick 13");
+    let out = m.step(RunBudget::Ticks(10));
+    assert_eq!((out.stop, out.progress), (StopReason::BudgetExhausted, Progress::Instructions(0)), "still waiting");
+    let out = m.step(RunBudget::Ticks(1 + 100));
+    assert_eq!(out.progress, Progress::Instructions(100), "woken at tick 13, it spins");
+
+    let mut ram = vec![0u8; RAM_LEN];
+    let mut m = bare(&mut ram, rusty_box_aarch64::NoInstrumentation);
+    load(&mut m, RAM_BASE, &STREAM_WFE);
+    m.reg_write(Reg::X0, 0);
+    let out = m.step(RunBudget::Ticks(5000));
+    assert_eq!((out.stop, out.progress), (StopReason::Halted, Progress::Instructions(2)));
+}
+
 /// A 64-byte arm64 `Image` header (text_offset 0, so it loads 2 MiB up),
 /// followed by `b .` as the kernel.
 fn fake_kernel(image_size: u64) -> Vec<u8> {

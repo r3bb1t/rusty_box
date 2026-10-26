@@ -2,11 +2,21 @@
 //! state at one moment, reset, and saving and restoring the whole processor.
 
 use rusty_box_core::snap::{SnapRead, SnapResult, SnapWrite};
-use rusty_box_core::SnapError;
+use rusty_box_core::{SnapError, VmInstant};
 
 use super::features::{Feature, Implementation};
 use super::regs::{CpuState, Reg, RegClass, VReg};
+use super::wait::{EventRegister, Wait};
 use super::{Activity, Btype, Cpu, CpuConfig, El, ExclusiveMonitor, Pstate, SysRegs, PC_HISTORY};
+
+/// How a snapshot names the processor's activity.
+mod activity_tag {
+    pub(super) const RUNNING: u8 = 0;
+    pub(super) const INTERRUPT: u8 = 1;
+    pub(super) const INTERRUPT_UNTIL: u8 = 2;
+    pub(super) const EVENT: u8 = 3;
+    pub(super) const EVENT_UNTIL: u8 = 4;
+}
 
 /// `FPCR` bits a processor implementing `imp` keeps: AHP, DN, FZ and RMode,
 /// and FZ16 with FEAT_FP16 (RES0 without it). The trap enables read as zero
@@ -149,6 +159,7 @@ impl Cpu {
         );
         let pc_history = core::mem::take(&mut self.pc_history);
         *self = Cpu {
+            event: EventRegister::at(false, self.counter()),
             icount: self.icount,
             retired: self.retired,
             debug_stops: self.debug_stops,
@@ -174,8 +185,8 @@ impl Cpu {
 
     /// Set `reg`. `Nzcv`, `Daif`, `Fpcr` and `Fpsr` keep only the bits an
     /// `MSR` would. Writing `Pc` moves execution, by no branch: PSTATE.BTYPE
-    /// becomes 00, so no branch check applies at the new PC. A processor
-    /// waiting for an interrupt keeps waiting.
+    /// becomes 00, so no branch check applies at the new PC. A waiting
+    /// processor keeps waiting.
     pub(crate) fn set_reg(&mut self, reg: Reg, value: u64) {
         match reg.class() {
             RegClass::General(n) => self.x[n] = value,
@@ -292,7 +303,18 @@ impl Cpu {
         w.write_bool(self.monitor.armed)?;
         w.write_u64(self.monitor.addr)?;
         w.write_u64(self.monitor.bytes)?;
-        w.write_bool(self.activity == Activity::WaitingForInterrupt)?;
+        let (tag, timeout) = match self.activity {
+            Activity::Running => (activity_tag::RUNNING, None),
+            Activity::Waiting(Wait::Interrupt) => (activity_tag::INTERRUPT, None),
+            Activity::Waiting(Wait::InterruptUntil(t)) => (activity_tag::INTERRUPT_UNTIL, Some(t)),
+            Activity::Waiting(Wait::Event) => (activity_tag::EVENT, None),
+            Activity::Waiting(Wait::EventUntil(t)) => (activity_tag::EVENT_UNTIL, Some(t)),
+        };
+        w.write_u8(tag)?;
+        if let Some(t) = timeout {
+            w.write_u64(t.ticks())?;
+        }
+        w.write_bool(self.event_register())?;
         w.write_u64(self.icount)?;
         w.write_u64(self.retired)?;
         self.tlb.save(w)?;
@@ -345,16 +367,31 @@ impl Cpu {
         if sys.spsr_el1 & !self.spsr_mask() != 0 {
             return Err(SnapError::Invalid("snapshot's SPSR_EL1 holds bits this processor cannot set"));
         }
+        if sys.cntkctl_el1 & !self.cntkctl_mask() != 0 {
+            return Err(SnapError::Invalid("snapshot's CNTKCTL_EL1 holds bits this processor cannot set"));
+        }
         let monitor = ExclusiveMonitor {
             armed: r.read_bool()?,
             addr: r.read_u64()?,
             bytes: r.read_u64()?,
         };
-        let activity = if r.read_bool()? {
-            Activity::WaitingForInterrupt
-        } else {
-            Activity::Running
+        let activity = match r.read_u8()? {
+            activity_tag::RUNNING => Activity::Running,
+            activity_tag::INTERRUPT => Activity::Waiting(Wait::Interrupt),
+            activity_tag::INTERRUPT_UNTIL => Activity::Waiting(Wait::InterruptUntil(VmInstant::from_ticks(r.read_u64()?))),
+            activity_tag::EVENT => Activity::Waiting(Wait::Event),
+            activity_tag::EVENT_UNTIL => Activity::Waiting(Wait::EventUntil(VmInstant::from_ticks(r.read_u64()?))),
+            _ => return Err(SnapError::Invalid("processor activity names a wait this core lacks")),
         };
+        if let Activity::Waiting(Wait::InterruptUntil(deadline) | Wait::EventUntil(deadline)) = activity {
+            if !self.implements(Feature::WfxT) {
+                return Err(SnapError::Invalid("processor waits with a timeout on a processor without FEAT_WFxT"));
+            }
+            if deadline.ticks() == u64::MAX {
+                return Err(SnapError::Invalid("processor's timed wait ends at no tick the count reaches"));
+            }
+        }
+        let event = r.read_bool()?;
         let icount = r.read_u64()?;
         let retired = r.read_u64()?;
         if retired > icount {
@@ -382,6 +419,7 @@ impl Cpu {
         self.activity = activity;
         self.icount = icount;
         self.retired = retired;
+        self.event = EventRegister::at(event, self.counter());
         self.timer_dirty = true;
         self.restore_sme(r)?;
         self.restore_pauth(r)

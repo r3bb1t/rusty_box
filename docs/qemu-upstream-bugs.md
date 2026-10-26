@@ -21,7 +21,7 @@ with a message and sign-off of the submitter's own.
 
 Reproducers:
 - `docs/qemu-aarch64-probe.S`: a bare-metal EL1 program for
-  `qemu-system-aarch64 -M virt`, one line of output per case (A to I). Its
+  `qemu-system-aarch64 -M virt`, one line of output per case (A to L). Its
   header gives the commands and the expected and observed output.
 - `docs/qemu-aarch64-probe-user.c`: a static Linux program for
   `qemu-aarch64 -cpu max`, one case per argument, for the entries fixed
@@ -286,6 +286,96 @@ read check, and makes `arm_deliver_fault()` set CM and WnR and report the
 unrounded address. `arm_deliver_fault()` (`target/arm/tcg/tlb_helper.c`)
 passes `cm = 0` to the syndrome builders on every path today; only the AT
 instructions' faults on a stage 2 walk set CM (`target/arm/tcg/cpregs-at.c`).
+
+### 8. An exception return does not send an event
+
+**Impact**: harmless to Linux, whose EL0 runs with SCTLR_EL1.nTWE set.
+The Event Register stays clear across an ERET, so a WFE soon after one
+waits for the next event instead of completing, and at EL0 with nTWE
+clear it traps. A wait loop whose condition an interrupt handler changed
+between the loop's check and its WFE sleeps until the next event (the
+event stream's, if on) instead of going round again at once, which is
+what the architecture's event on exception return is for.
+
+**Location**: `target/arm/tcg/helper-a64.c`, `HELPER(exception_return)`.
+QEMU 11 sets the Event Register for SEV and SEVL only (`trans_SEV`,
+`trans_SEVL` in `target/arm/tcg/translate-a64.c`).
+
+**What the Arm ARM says**: `AArch64_ExceptionReturn()` calls
+`SendEventLocal()` after `SetPSTATEFromPSR()`, on a legal and an illegal
+return alike. (`AArch32_ExceptionReturn()` does the same, for
+`HELPER(cpsr_write_eret)`.)
+
+**Reproduce**: probe case J: WFE as the first EL0 instruction after the
+ERET to EL0, with SCTLR_EL1.nTWE clear.
+
+    Arm:          J 0000000056000000 ...   (the SVC after the WFE)
+    QEMU 11.1.2:  J 0000000007e00001 ...   (the WFE trapped)
+
+**Fix**: `docs/qemu-eret-event.patch` sets the Event Register in
+`HELPER(exception_return)`, ahead of the illegal-return branch so both
+paths send it. Tested: case J prints the SVC's syndrome; Alpine 3.23
+boots to its login prompt.
+
+### 9. The event stream sets the Event Register only while a WFE waits
+
+**Impact**: harmless. QEMU arms the event stream's timer only from inside
+`HELPER(wfe)` and `HELPER(wfet)`, and its callback sets the Event Register
+only if the CPU is halted in WFE. An event the stream generates while the
+CPU runs is lost, so the next WFE waits for the stream's following event
+instead of completing at once, and at EL0 with SCTLR_EL1.nTWE clear it
+traps. A loop that polls with WFE sees at most one stream period of extra
+latency.
+
+**Location**: `target/arm/tcg/op_helper.c`, `gt_calc_next_event_stream()`
+and its callers; `target/arm/cpu.c`, `arm_wfxt_timer_cb()`.
+
+**What the Arm ARM says**: `TestEventCNTV()` (and `TestEventCNTP()` for
+CNTHCTL_EL2) runs on every count of the generic counter and calls
+`SetEventRegister()` at each selected transition of the count's bit
+`EVNTI`, whatever the PE is doing.
+
+**Reproduce**: probe case K: SEVL and WFE at EL0 (an event, consumed),
+a delay with CNTKCTL_EL1.EVNTEN set and EVNTI = 0, then WFE.
+
+    Arm:          K 0000000056000000 ...
+    QEMU 11.1.2:  K 0000000007e00001 ...   (the WFE trapped)
+
+**Fix**: no patch yet. WFE and WFET would need to know whether the stream
+has passed a selected transition since the Event Register was last
+cleared: the count at that moment kept in `CPUARMState` and compared at
+the next WFE or WFET (the same bit test `gt_recalc_one_evt()` makes), and
+brought up to date when CNTKCTL_EL1 or CNTHCTL_EL2 is written, so each
+stretch of the count is judged by the controls that held then.
+`rusty_box_aarch64` does exactly this (`cpu/wait.rs`).
+
+### 10. WFET does not trap when an interrupt is pending
+
+**Impact**: harmless. At EL0 with SCTLR_EL1.nTWE clear, a WFET whose
+timeout has not passed completes instead of trapping when an interrupt is
+pending, masked or not.
+
+**Location**: `target/arm/tcg/op_helper.c`, `HELPER(wfet)`, which returns
+on `cpu_has_work(cs)` before `check_wfx_trap()`.
+
+**What the Arm ARM says**: `Hint_WFET()` completes ahead of
+`AArch64_CheckForWFxTrap()` only when the Event Register is set or the
+local timeout has passed (`LocalTimeoutEvent()`). Interrupts come before
+the trap check only in `Hint_WFI()` and `Hint_WFIT()`, which QEMU follows.
+
+**Reproduce**: probe case L: SEVL and WFE at EL0, then WFET with a
+timeout of all ones while the virtual timer's interrupt is pending
+(masked by PSTATE.I).
+
+    Arm:          L 0000000007e00027 ...   (the WFET trapped: TI = 3, RV, RN = 1)
+    QEMU 11.1.2:  L 0000000056000000 ...
+
+With the timer's interrupt not pending, QEMU 11.1.2 traps as Arm does
+(`0000000007e00027`).
+
+**Fix**: `docs/qemu-wfet-trap-order.patch` moves the `cpu_has_work()`
+return after the trap check. Tested: case L prints the WFET's syndrome;
+Alpine 3.23 boots to its login prompt.
 
 ---
 

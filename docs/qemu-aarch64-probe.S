@@ -1,7 +1,7 @@
 // Bare-metal EL1 probe for the QEMU AArch64 bugs in docs/qemu-upstream-bugs.md
 // that need system mode. Each case prints one line on the PL011.
 //
-//   aarch64-linux-gnu-gcc -march=armv8.5-a+pauth -nostdlib -static \
+//   aarch64-linux-gnu-gcc -march=armv8.7-a+pauth -nostdlib -static \
 //       -Wl,-Ttext=0x40100000 -o qemu-aarch64-probe qemu-aarch64-probe.S
 //   qemu-system-aarch64 -M virt -cpu max,pauth-qarma5=on -m 256M \
 //       -display none -monitor none -nic none -serial stdio \
@@ -64,6 +64,28 @@
 // I  DC IVAC of 0x100000100 (read-only).
 //      Arm:          I 000000009600014d 0000000100000100
 //      QEMU 11.1.2:  I none                                   (a NOP)
+//
+// J to L run at EL0 (in the VA 1 GiB block, which EL0 may execute) with
+// SCTLR_EL1.nTWE clear, so a WFE or WFET that would wait traps to EL1. Each
+// ends in SVC, and prints ESR_EL1 and ELR_EL1 of the exception that ended
+// it: the SVC (EC 0x15) when nothing trapped, the wait (EC 0x01) when it
+// did. Arm's Hint_WFE and Hint_WFET complete without the trap check when
+// the Event Register is set, and Hint_WFET when the timeout has passed;
+// nothing else does.
+// J  WFE first thing after the ERET to EL0: AArch64_ExceptionReturn calls
+//    SendEventLocal, so the Event Register is set.
+//      Arm:          J 0000000056000000 ...                   (the SVC)
+//      QEMU 11.1.2:  J 0000000007e00001 ...                   (WFE trapped)
+// K  SEVL and WFE (an event, consumed), a delay with the event stream on
+//    (CNTKCTL_EL1.EVNTEN, EVNTI = 0: every change of the count's bit 0),
+//    then WFE: TestEventCNTV set the Event Register during the delay.
+//      Arm:          K 0000000056000000 ...
+//      QEMU 11.1.2:  K 0000000007e00001 ...                   (WFE trapped)
+// L  SEVL and WFE, then WFET with a timeout far ahead while the virtual
+//    timer's interrupt is pending (masked by PSTATE.I): Hint_WFET does not
+//    look at interrupts before its trap check.
+//      Arm:          L 0000000007e00027 ...                   (WFET trapped)
+//      QEMU 11.1.2:  L 0000000056000000 ...                   (no trap)
 
 #define UART 0x09000000
 
@@ -231,7 +253,7 @@ case_h:
     bl none
 
 case_i:
-    adr x0, done
+    adr x0, el0_setup
     ldr x1, =resume
     str x0, [x1]
     mov w0, #'I'
@@ -241,14 +263,88 @@ case_i:
     dc ivac, x2
     bl none
 
+el0_setup:
+    mrs x0, sctlr_el1
+    bic x0, x0, #(1 << 18)            // nTWE: EL0's WFE and WFET trap
+    msr sctlr_el1, x0
+    // The event stream on bit 0 of the count, and EL0 may read CNTVCT_EL0.
+    mov x0, #((1 << 2) | (1 << 1))
+    msr cntkctl_el1, x0
+    // The virtual timer's PPI (27) pending at the CPU interface: the GIC's
+    // distributor and CPU interface on, the PPI enabled, and the timer
+    // expired (CVAL 0) and enabled.
+    ldr x1, =0x08000000
+    mov w2, #1
+    str w2, [x1]                      // GICD_CTLR
+    mov w2, #(1 << 27)
+    str w2, [x1, #0x100]              // GICD_ISENABLER0
+    ldr x1, =0x08010000
+    mov w2, #1
+    str w2, [x1]                      // GICC_CTLR
+    mov w2, #0xff
+    str w2, [x1, #4]                  // GICC_PMR
+    isb
+
+case_j:
+    adr x0, case_k
+    adr x1, j_el0
+    mov w2, #'J'
+    b to_el0
+j_el0:
+    wfe
+    svc #0
+
+case_k:
+    adr x0, case_l
+    adr x1, k_el0
+    mov w2, #'K'
+    b to_el0
+k_el0:
+    sevl
+    wfe
+    mov x3, #(1 << 16)
+1:  subs x3, x3, #1
+    b.ne 1b
+    wfe
+    svc #0
+
+case_l:
+    msr cntv_cval_el0, xzr
+    mov x0, #1
+    msr cntv_ctl_el0, x0              // enabled, condition met: PPI 27 pending
+    isb
+    adr x0, done
+    adr x1, l_el0
+    mov w2, #'L'
+    b to_el0
+l_el0:
+    sevl
+    wfe
+    mov x1, #-1
+    wfet x1
+    svc #0
+
+// Resume at x0 after the case, then ERET to EL0 at x1 with every interrupt
+// masked; w2 names the case.
+to_el0:
+    ldr x3, =resume
+    str x0, [x3]
+    ldr x3, =which
+    strb w2, [x3]
+    msr elr_el1, x1
+    mov x0, #0x3c0                    // EL0t, D, A, I and F masked
+    msr spsr_el1, x0
+    eret
+
 done:
     ldr x0, =0x84000008               // PSCI SYSTEM_OFF
     hvc #0
     b .
 
-// The synchronous exception from the current EL with SP_ELx: print the
-// case, ESR_EL1, and SPSR_EL1 for cases A to D or FAR_EL1 for the rest,
-// and go on to the next case with PSTATE.PAN clear.
+// A synchronous exception, from EL1 with SP_ELx or from EL0: print the
+// case, ESR_EL1, and SPSR_EL1 for cases A to D, FAR_EL1 for E to I or
+// ELR_EL1 for the rest, and go on to the next case at EL1 with PSTATE.PAN
+// clear.
 handler:
     ldr x1, =which
     ldrb w0, [x1]
@@ -260,11 +356,14 @@ handler:
     mov w0, #' '
     bl putc
     ldr x1, =which
-    ldrb w0, [x1]
-    cmp w0, #'E'
+    ldrb w2, [x1]
     mrs x0, spsr_el1
+    cmp w2, #'E'
     b.lo 1f
     mrs x0, far_el1
+    cmp w2, #'J'
+    b.lo 1f
+    mrs x0, elr_el1
 1:  bl puthex
     mov w0, #'\n'
     bl putc
@@ -315,7 +414,9 @@ puthex:                                // x0, as 16 hex digits
 vectors:
     .skip 0x200
     b handler                          // current EL, SP_ELx, synchronous
-    .skip 0x800 - 0x204
+    .skip 0x400 - 0x204
+    b handler                          // lower EL, AArch64, synchronous
+    .skip 0x800 - 0x404
 
     .data
     .balign 16

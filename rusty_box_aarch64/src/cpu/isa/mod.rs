@@ -74,7 +74,10 @@ use asisd::{
     Asisddiff, Asisdelem, Asisdmisc, Asisdmiscfp16, Asisdone, Asisdpair, Asisdsame, Asisdsame2, Asisdsamefp16, Asisdshf,
 };
 use atomic::{Comswap, Comswappr, LdapstlUnscaled, Memop};
-use control::{Barriers, BranchImm, BranchReg, Compbranch, Condbranch, Exception, Hints, Pstate, Systeminstrs, Systemmove, Testbranch};
+use control::{
+    Barriers, BranchImm, BranchReg, Compbranch, Condbranch, Exception, Hints, Pstate, Systeminstrs, Systeminstrswithreg, Systemmove,
+    Testbranch,
+};
 use crypto::{Cryptoaes, Cryptosha2, Cryptosha3};
 use dpimm::{AddsubImm, Bitfield, Extract, LogImm, Movewide, Pcreladdr};
 use dpreg::{AddsubCarry, AddsubExt, AddsubShift, CondcmpImm, CondcmpReg, Condsel, Dp1src, Dp2src, Dp3src, LogShift, Rmif, Setf};
@@ -107,6 +110,7 @@ pub(crate) enum Encoding {
     Hints(Hints),
     Barriers(Barriers),
     Pstate(Pstate),
+    Systeminstrswithreg(Systeminstrswithreg),
     Systeminstrs(Systeminstrs),
     Systemmove(Systemmove),
     BranchReg(BranchReg),
@@ -227,6 +231,7 @@ impl Encoding {
             Self::Exception(_) => Class::ExceptionGeneration,
             Self::Hints(e) => e.class(),
             Self::Pstate(e) => e.class(),
+            Self::Systeminstrswithreg(_) => Class::WaitWithTimeout,
             Self::Barriers(_) | Self::Systeminstrs(_) | Self::Systemmove(_) => Class::System,
             Self::BranchReg(e) => e.class(),
             Self::BranchImm(_) => Class::BranchImmediate,
@@ -330,6 +335,8 @@ pub(crate) enum Class {
     /// PACIASP, AUTIASP and the other pointer authentication hints
     /// (FEAT_PAuth): the handler reads which from `CRm` and `op2`.
     PointerAuthHint,
+    /// WFET and WFIT (FEAT_WFxT): the handler reads which from `op2`.
+    WaitWithTimeout,
     /// Barriers, MSR (immediate), the system instructions and the system
     /// register moves.
     System,
@@ -544,6 +551,7 @@ impl Encoding {
             Self::Barriers(e) => e.feature(),
             Self::Ldstord(e) => e.feature(),
             Self::Pstate(e) => e.feature(),
+            Self::Systeminstrswithreg(_) => Feature::WfxT,
             Self::Hints(e) => e.feature(),
             Self::BranchReg(e) => e.feature(),
             Self::Dp1src(e) => e.feature(),
@@ -654,7 +662,7 @@ mod tests {
             let (pfr0, pfr1) = (read(4, 0), read(4, 1));
             let (zfr0, smfr0) = (read(4, 4), read(4, 5));
             let (isar0, isar1, isar2, isar3) = (read(6, 0), read(6, 1), read(6, 2), read(6, 3));
-            let (mmfr1, mmfr2) = (read(7, 1), read(7, 2));
+            let (mmfr0, mmfr1, mmfr2) = (read(7, 0), read(7, 1), read(7, 2));
             for feature in Feature::ALL {
                 let advertised = match feature {
                     Feature::Base => true,
@@ -705,6 +713,11 @@ mod tests {
                     Feature::Dpb => field(isar1, 0) >= 1,
                     Feature::Dpb2 => field(isar1, 0) >= 2,
                     Feature::Lor => field(mmfr1, 16) != 0,
+                    Feature::Idst => field(mmfr2, 36) != 0,
+                    Feature::SpecRes => field(isar1, 40) != 0,
+                    Feature::Csv2 => field(pfr0, 56) != 0,
+                    Feature::Ecv => field(mmfr0, 60) != 0,
+                    Feature::WfxT => field(isar2, 0) >= 2,
                 };
                 assert_eq!(advertised, imp.has(feature), "{feature:?} on {imp:?}");
             }
@@ -712,30 +725,36 @@ mod tests {
             // instruction-set feature is a nonzero field of these registers.
             let fp16 = u64::from(imp.has(Feature::Fp16));
             assert_eq!((field(pfr0, 16), field(pfr0, 20)), (fp16, fp16), "FP and AdvSIMD");
-            // PFR0: EL0 and EL1 (AArch64 only), FP, AdvSIMD, DIT and CSV3;
-            // nothing else.
-            assert_eq!(pfr0 & !((0xFF << 16) | (0xF << 48) | (0xF << 60)), 0x11);
+            // PFR0: EL0 and EL1 (AArch64 only), FP, AdvSIMD, DIT, CSV2 = 1
+            // (no FEAT_CSV2_2) and CSV3; nothing else.
+            assert_eq!(pfr0 & !((0xFF << 16) | (0xF << 48) | (0xF << 56) | (0xF << 60)), 0x11);
+            assert!(field(pfr0, 56) <= 1, "CSV2 = 1: FEAT_CSV2, not FEAT_CSV2_2");
             // ID_AA64ISAR0_EL1: AES = 2 (AES and the 64-bit PMULL), SHA1 =
             // 1, SHA2 = 1 (SHA-256, not SHA-512), CRC32 = 1, Atomic = 2 with
             // FEAT_LSE, RDM = 1, DP = 1, FHM = 1, TS and TLB; nothing else.
             // ISAR1 holds DPB, APA, JSCVT, FCMA, LRCPC, GPA, FRINTTS, SB,
-            // BF16 = 1 (no FEAT_EBF16), I8MM and XS alone (no API or GPI: no
-            // IMPLEMENTATION DEFINED algorithm, and APA is never 2,
-            // FEAT_EPAC), MMFR1 HPDS = 1 (no FEAT_HPDS2), LO and PAN alone,
-            // MMFR2 CnP, UAO, AT, TTL and E0PD alone.
+            // SPECRES = 1 (no FEAT_SPECRES2), BF16 = 1 (no FEAT_EBF16), I8MM
+            // and XS alone (no API or GPI: no IMPLEMENTATION DEFINED
+            // algorithm, and APA is never 2, FEAT_EPAC), ISAR2 WFxT = 2
+            // alone, MMFR0 the 4 KiB granule's fields and ECV = 1 (no
+            // FEAT_ECV_POFF), MMFR1 HPDS = 1 (no FEAT_HPDS2), LO and PAN
+            // alone, MMFR2 CnP, UAO, AT, IDS, TTL and E0PD alone.
             let at = |feature: Feature, lsb: u32, value: u64| if imp.has(feature) { value << lsb } else { 0 };
             let isar0_later =
                 at(Feature::Lse, 20, 2) | at(Feature::Rdm, 28, 1) | at(Feature::DotProd, 44, 1) | at(Feature::Fhm, 48, 1);
             assert_eq!(isar0 & !((0xF << 52) | (0xF << 56)), 0x0000_0000_0001_1120 | isar0_later);
             let isar1_fields =
-                [0, 4, 12, 16, 20, 24, 32, 36, 44, 52, 56].into_iter().fold(0, |acc, lsb| acc | (0xF << lsb));
+                [0, 4, 12, 16, 20, 24, 32, 36, 40, 44, 52, 56].into_iter().fold(0, |acc, lsb| acc | (0xF << lsb));
             assert_eq!(isar1 & !isar1_fields, 0);
             assert_ne!(field(isar1, 4), 2, "APA = 2 is FEAT_EPAC, which FEAT_PAuth2 excludes");
+            assert!(field(isar1, 40) <= 1, "SPECRES = 1: FEAT_SPECRES, not FEAT_SPECRES2");
             assert!(field(isar1, 44) <= 1, "BF16 = 1: FEAT_BF16, not FEAT_EBF16");
+            assert_eq!(mmfr0 & !(0xF << 60), 0x0F00_0024, "PARange 44 bits, 16-bit ASIDs, the 4 KiB granule alone");
+            assert!(field(mmfr0, 60) <= 1, "ECV = 1: FEAT_ECV, not FEAT_ECV_POFF");
             assert!(field(mmfr1, 12) <= 1, "HPDS = 1: FEAT_HPDS, not FEAT_HPDS2");
             assert_eq!(mmfr1 & !((0xF << 12) | (0xF << 16) | (0xF << 20)), 0);
-            assert_eq!(mmfr2 & !(0xF | (0xF << 4) | (0xF << 32) | (0xF << 48) | (0xF << 60)), 0);
-            assert_eq!((isar2, isar3), (0, 0));
+            assert_eq!(mmfr2 & !(0xF | (0xF << 4) | (0xF << 32) | (0xF << 36) | (0xF << 48) | (0xF << 60)), 0);
+            assert_eq!((isar2, isar3), (at(Feature::WfxT, 0, 2), 0));
             // No SVE2 (SVEver = 0, with FEAT_SME as without); with FEAT_SME,
             // BF16 and I8MM report FEAT_BF16 and FEAT_I8MM as ISAR1 does.
             let zfr0_later = if imp.has(Feature::Sme) { (field(isar1, 44) << 20) | (field(isar1, 52) << 44) } else { 0 };

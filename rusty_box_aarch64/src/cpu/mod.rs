@@ -4,7 +4,7 @@
 //! [`PhysBus`](crate::bus::PhysBus) through `Cpu::step`, and keeps the
 //! machine's time: `icount` is the tick count every clock in the machine is
 //! derived from (one tick per instruction, time skipped forward only while the
-//! processor waits for an interrupt).
+//! processor waits).
 
 pub mod id;
 
@@ -54,6 +54,7 @@ mod step;
 mod sysreg;
 mod system;
 mod timer;
+mod wait;
 
 use rusty_box_core::{ClockHz, RingBuffer, VmClock, VmInstant};
 
@@ -62,6 +63,7 @@ pub use exec::{DebugStops, Step, StopCause, UndefinedInsn};
 pub use mmu::{Tlb, TranslationFault};
 pub use regs::{CpuState, Reg, SysReg, SysRegRefusal, VReg};
 pub use timer::TimerLines;
+pub use wait::Wait;
 
 /// An exception level this processor implements.
 ///
@@ -319,9 +321,9 @@ impl CpuConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Activity {
     Running,
-    /// Executed `WFI` (or a PSCI `CPU_SUSPEND`) and waits for a wake-up event:
-    /// any pending physical interrupt, masked or not.
-    WaitingForInterrupt,
+    /// Executed `WFI`, `WFE`, `WFIT`, `WFET` or a PSCI `CPU_SUSPEND`, and
+    /// sleeps until what it waits for.
+    Waiting(Wait),
 }
 
 /// The local exclusive monitor (`LDXR`/`STXR`), tracking one physical
@@ -456,11 +458,12 @@ pub struct Cpu {
     pub(crate) imp: features::Implementation,
     pub(crate) sys: SysRegs,
     pub(crate) monitor: ExclusiveMonitor,
+    pub(crate) event: wait::EventRegister,
     pub(crate) tlb: Tlb,
     pub(crate) decode_cache: decode::DecodeCache,
     pub(crate) activity: Activity,
     /// Ticks since the machine was built: one per retired (or faulting)
-    /// instruction, plus the span skipped while waiting for an interrupt.
+    /// instruction, plus the span skipped while waiting.
     pub(crate) icount: u64,
     /// Instructions retired (or that took an exception in their place) since
     /// the machine was built — `icount` without the waiting.
@@ -506,6 +509,7 @@ impl Cpu {
                 addr: 0,
                 bytes: 0,
             },
+            event: wait::EventRegister::at(false, timer::Count::new(0)),
             tlb: Tlb::new(),
             decode_cache: decode::DecodeCache::new(imp.features),
             activity: Activity::Running,
@@ -549,16 +553,6 @@ impl Cpu {
         } else {
             None
         }
-    }
-
-    /// Leave the wait state if a wake-up event is pending: any asserted
-    /// physical interrupt, masked by `PSTATE` or not (Arm ARM D1.16.2).
-    /// Returns whether the processor is now running.
-    pub fn wake_if_pending(&mut self) -> bool {
-        if self.activity == Activity::WaitingForInterrupt && (self.irq_line || self.fiq_line) {
-            self.activity = Activity::Running;
-        }
-        self.activity == Activity::Running
     }
 
     /// Advance time while waiting, to `until` (never backwards).

@@ -15,6 +15,8 @@ pub(crate) const SA0: u64 = 1 << 4;
 pub(crate) const NAA: u64 = 1 << 6;
 /// UMA: EL0 may access the DAIF bits.
 pub(crate) const UMA: u64 = 1 << 9;
+/// EnRCTX (FEAT_SPECRES): EL0 may execute `CFP`, `DVP` and `CPP RCTX`.
+pub(crate) const ENRCTX: u64 = 1 << 10;
 /// DZE: EL0 may execute `DC ZVA`.
 pub(crate) const DZE: u64 = 1 << 14;
 /// UCT: EL0 may read `CTR_EL0`.

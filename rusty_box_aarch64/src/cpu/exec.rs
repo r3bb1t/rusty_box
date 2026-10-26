@@ -69,8 +69,9 @@ impl<B: PhysBus, I: Instrumentation> PhysBus for Observed<'_, B, I> {
 pub enum Step {
     /// An instruction retired, or an exception was taken in its place.
     Retired,
-    /// `WFI` (or PSCI `CPU_SUSPEND`) retired and the processor now waits for
-    /// an interrupt; [`Cpu::activity`] says so until one arrives.
+    /// A wait (`WFI`, `WFE`, `WFIT`, `WFET`, or a PSCI `CPU_SUSPEND`)
+    /// retired and the processor now sleeps; [`Cpu::activity`] says what for
+    /// until its wait ends.
     Waiting,
     /// The machine must stop before this instruction; the processor state is
     /// exactly as it was before it.
@@ -112,7 +113,10 @@ pub(crate) enum Flow {
     Next,
     /// Continue at this address (a taken branch, an exception return).
     Jump(u64),
-    /// The instruction retired and the processor waits for an interrupt.
+    /// The instruction retired and the processor waits: its activity, which
+    /// [`Cpu::begin_wait`] alone sets, names what for. The wait is not
+    /// carried here, so that every instruction's result stays as small as a
+    /// branch's.
     Wait,
 }
 
@@ -207,8 +211,9 @@ impl Cpu {
                     }
                     Flow::Wait => {
                         self.pc = pc.wrapping_add(4);
-                        self.activity = Activity::WaitingForInterrupt;
-                        observer.wait_for_interrupt(pc);
+                        if let Activity::Waiting(wait) = self.activity {
+                            observer.wait(pc, wait);
+                        }
                         Step::Waiting
                     }
                 }
@@ -249,6 +254,7 @@ impl Cpu {
         match self.decode_cache.decode(fetched.pa, insn) {
             Class::Undefined => self.undefined(pc, insn),
             Class::Hint => self.exec_hint(insn, pc),
+            Class::WaitWithTimeout => self.exec_wfxt(insn),
             Class::PointerAuthHint => self.exec_pauth_hint(insn),
             Class::AddSubImmediate => self.exec_addsub_imm(pc, insn),
             Class::AddSubShiftedRegister => self.exec_addsub_shift(pc, insn),

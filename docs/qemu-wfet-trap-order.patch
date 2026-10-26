@@ -1,0 +1,27 @@
+--- a/target/arm/tcg/op_helper.c
++++ b/target/arm/tcg/op_helper.c
+@@ -678,7 +678,7 @@
+     offset = gt_direct_access_timer_offset(env, GTIMER_VIRT);
+     cntvct = cntval - offset;
+     timeout = env->xregs[rd];
+-    if (cpu_has_work(cs) || cntvct >= timeout) {
++    if (cntvct >= timeout) {
+         return;
+     }
+ 
+@@ -690,6 +690,15 @@
+     }
+ 
+     /*
++     * A pending interrupt would wake us at once. Unlike WFIT, Hint_WFET()
++     * does not look at interrupts before the trap check, so this comes
++     * after it.
++     */
++    if (cpu_has_work(cs)) {
++        return;
++    }
++
++    /*
+      * If the CPU has entered the exclusive region we could sleep
+      * until the global monitor moves from Exclusive to Open Access.
+      * However it would be expensive for QEMU to fully model the

@@ -312,6 +312,9 @@ impl Cpu {
                 p.btype = Btype::None;
             }
         }
+        // Arm `AArch64.ExceptionReturn`: `SendEventLocal` after
+        // `SetPSTATEFromPSR`, legal return or not.
+        self.send_event();
         target
     }
 }
