@@ -54,9 +54,10 @@ pub const CURSOR_QUEUE_SIZE: u16 = 16;
 
 /// `VIRTIO_GPU_F_EDID`.
 pub const FEATURES: u64 = 1 << 1;
-/// `sizeof(struct virtio_gpu_config)`: `events_read`, `events_clear`,
-/// `num_scanouts`, `num_capsets`.
-pub const CONFIG_LEN: usize = 16;
+/// `sizeof(struct virtio_gpu_config)` in QEMU 11.1.2's copy of the Linux
+/// header: `events_read`, `events_clear`, `num_scanouts`, `num_capsets`,
+/// `blob_alignment`.
+pub const CONFIG_LEN: usize = 20;
 
 /// QEMU `virtio-gpu`'s default `max_hostmem`: the guest's resources must
 /// stay below it.
@@ -408,7 +409,7 @@ impl Gpu {
     /// changes, the output is enabled unless the size is empty, and a
     /// display event is raised. Returns whether there was anything to
     /// change, as QEMU's console passes on only a change
-    /// (`dpy_set_ui_info`); the caller then notifies the configuration
+    /// (`qemu_console_set_ui_info`); the caller then notifies the configuration
     /// change, as `virtio_gpu_notify_event` does.
     pub fn ui_info(&mut self, size: Resolution) -> bool {
         let output = if size.width != 0 && size.height != 0 {
@@ -425,12 +426,14 @@ impl Gpu {
         true
     }
 
-    /// QEMU `virtio_gpu_get_config`.
+    /// QEMU `virtio_gpu_get_config`: `events_clear` is never kept, one
+    /// scanout, no capability sets, and no blob alignment (a 2D device has
+    /// no blobs).
     pub fn get_config(&self, config: &mut [u8]) {
         config[..4].copy_from_slice(&self.events_read.to_le_bytes());
         config[4..8].fill(0);
         config[8..12].copy_from_slice(&1u32.to_le_bytes());
-        config[12..16].fill(0);
+        config[12..CONFIG_LEN].fill(0);
     }
 
     /// QEMU `virtio_gpu_set_config`: `events_clear` clears those events.
@@ -452,6 +455,17 @@ impl Gpu {
 
     fn resource_index(&self, id: u32) -> Option<usize> {
         self.resources.iter().position(|r| r.id == id)
+    }
+
+    /// QEMU `virtio_gpu_find_check_resource` with `require_backing`: the
+    /// resource, if it exists (else `RESP_ERR_INVALID_RESOURCE_ID`) and has
+    /// backing attached (else `RESP_ERR_UNSPEC`).
+    fn backed_resource_index(&self, id: u32) -> Result<usize, Reply> {
+        let index = self.resource_index(id).ok_or(Reply::Error(RESP_ERR_INVALID_RESOURCE_ID))?;
+        if self.resources[index].backing.is_empty() {
+            return Err(Reply::Error(RESP_ERR_UNSPEC));
+        }
+        Ok(index)
     }
 
     /// The driver notified queue `q`.
@@ -725,8 +739,9 @@ impl Gpu {
             self.disable_scanout();
             return Reply::Done;
         }
-        let Some(res) = self.resource(resource_id) else {
-            return Reply::Error(RESP_ERR_INVALID_RESOURCE_ID);
+        let res = match self.backed_resource_index(resource_id) {
+            Ok(index) => &self.resources[index],
+            Err(reply) => return reply,
         };
         // virtio_gpu_check_scanout_bounds.
         if rect.width < 16 || rect.height < 16 || !rect.within(res.width, res.height) {
@@ -773,13 +788,11 @@ impl Gpu {
     /// QEMU `virtio_gpu_transfer_to_host_2d`, its offsets 32-bit as QEMU
     /// computes them.
     fn transfer(&mut self, ram: &GuestRam<'_>, rect: Rect, offset: u64, resource_id: u32) -> Reply {
-        let Some(index) = self.resource_index(resource_id) else {
-            return Reply::Error(RESP_ERR_INVALID_RESOURCE_ID);
+        let index = match self.backed_resource_index(resource_id) {
+            Ok(index) => index,
+            Err(reply) => return reply,
         };
         let res = &self.resources[index];
-        if res.backing.is_empty() {
-            return Reply::Error(RESP_ERR_INVALID_RESOURCE_ID);
-        }
         if !rect.within(res.width, res.height) {
             return Reply::Error(RESP_ERR_INVALID_PARAMETER);
         }
@@ -830,8 +843,9 @@ impl Gpu {
 
     /// QEMU `virtio_gpu_resource_detach_backing`.
     fn detach_backing(&mut self, resource_id: u32) -> Reply {
-        let Some(index) = self.resource_index(resource_id) else {
-            return Reply::Error(RESP_ERR_INVALID_RESOURCE_ID);
+        let index = match self.backed_resource_index(resource_id) {
+            Ok(index) => index,
+            Err(reply) => return reply,
         };
         self.resources[index].backing.clear();
         Reply::Done

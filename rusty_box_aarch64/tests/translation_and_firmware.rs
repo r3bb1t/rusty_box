@@ -39,7 +39,6 @@ const LDXR_STXR: [u32; 3] = [0xC85F_7C22, 0xC803_7C22, 0x1400_0000];
 /// The upper half of the address space under T1SZ = 25.
 const UPPER_VA: u64 = 0xFFFF_FF80_0000_0000;
 const AF: u64 = 1 << 10;
-const TABLE: u64 = 0b11;
 const BLOCK: u64 = 0b01;
 /// PAR_EL1: F, and bit 11 RES1.
 const PAR_F: u64 = 1;

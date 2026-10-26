@@ -3,10 +3,11 @@
 //! table-free integer algorithms in the Arm ARM (`RecipEstimate`,
 //! `RecipSqrtEstimate`, `FPRecipEstimate`, `FPRSqrtEstimate`, `FPRecpX`,
 //! `UnsignedRecipEstimate`, `UnsignedRSqrtEstimate`); this follows them, in
-//! the integer form QEMU uses (`target/arm/tcg/vfp_helper.c`:
+//! the integer form QEMU 11.1.2 uses (`target/arm/tcg/vfp_helper.c`:
 //! `recip_estimate`, `do_recip_sqrt_estimate`, `call_recip_estimate`,
 //! `recip_sqrt_estimate`, `HELPER(recpe_f32/f64)`, `HELPER(rsqrte_f32/f64)`,
-//! `HELPER(recpe_u32)`, `HELPER(rsqrte_u32)`, `HELPER(frecpx_f32/f64)`).
+//! `HELPER(recpe_u32)`, `HELPER(rsqrte_u32)`; `target/arm/tcg/helper-a64.c`:
+//! `HELPER(frecpx_f32/f64)`).
 //!
 //! FEAT_RPRES (the increased-precision single estimates) is not part of
 //! ARMv8.0 and is not modelled.

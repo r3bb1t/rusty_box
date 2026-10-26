@@ -23,10 +23,18 @@ pub mod fdt;
 use crate::board::UART0_BASE;
 pub use fdt::DeviceTreeError;
 
-/// The device tree QEMU 8.2 generates for `-M virt -cpu cortex-a57 -m 256`,
-/// which describes exactly this board. A machine patches its memory node to
-/// the RAM it was built with, so the 256 MiB it was dumped with is only a
-/// default.
+/// The device tree QEMU 11.1.2 generates for `-M virt -cpu cortex-a57 -m 256`
+/// (`-machine dumpdtb=`), which describes exactly this board. A machine
+/// patches its memory node to the RAM it was built with, so the 256 MiB it
+/// was dumped with is only a default.
+///
+/// Two values differ from that dump, in place and at the same width. The
+/// `/chosen` `rng-seed` and `kaslr-seed` are fixed: QEMU draws fresh ones on
+/// every run, and a fixed pair keeps runs deterministic. The cpu node's
+/// `d-cache-sets` is `0x100` (2-way): QEMU 11's `cortex-a57` gives the L1
+/// D-cache a 4-way CCSIDR that the Cortex-A57 MPCore TRM contradicts; this
+/// board's CCSIDR is the TRM's ([`crate::cpu::id::CCSIDR_L1D`]), and the
+/// tree agrees with it.
 pub const QEMU_VIRT_DEVICE_TREE: &[u8] = include_bytes!("../assets/qemu-virt-a57-256m.dtb");
 
 /// The largest edited device tree a machine keeps (QEMU's is under 8 KiB).

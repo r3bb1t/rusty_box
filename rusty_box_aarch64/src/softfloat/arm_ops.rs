@@ -10,8 +10,12 @@
 //!   and FRSQRTS (`FPRSqrtStepFused`).
 //!
 //! Behaviour follows the Arm ARM pseudocode named on each function; where it
-//! is ambiguous, QEMU's `target/arm/tcg/vfp_helper.c` and
-//! `fpu/softfloat-parts.c.inc` (round-to-odd) were the reference.
+//! is ambiguous, QEMU 11.1.2 was the reference: `target/arm/tcg/vfp_helper.c`
+//! for the conversions, `target/arm/tcg/helper-a64.c` for FMULX
+//! (`HELPER(vfp_mulxs)`, `HELPER(vfp_mulxd)`), FRECPS (`DO_RECPS`), FRSQRTS
+//! (`DO_RSQRTSF`) and FCVTXN (`HELPER(fcvtx_f64_to_f32)`, which narrows
+//! under `float_round_to_odd`), and `fpu/softfloat-parts.c.inc`
+//! (`partsN(uncanon_normal)`) for round-to-odd itself.
 
 use super::f32_mul::f32_mul as sf_f32_mul;
 use super::f32_mul_add::f32_mul_add as sf_f32_mul_add;

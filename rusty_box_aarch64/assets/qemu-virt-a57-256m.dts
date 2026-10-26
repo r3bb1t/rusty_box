@@ -2,6 +2,7 @@
 
 / {
 	interrupt-parent = <0x8002>;
+	dma-coherent;
 	model = "linux,dummy-virt";
 	#size-cells = <0x02>;
 	#address-cells = <0x02>;
@@ -359,6 +360,13 @@
 		};
 
 		cpu@0 {
+			next-level-cache = <0x00>;
+			i-cache-sets = <0x100>;
+			i-cache-size = <0xc000>;
+			i-cache-block-size = <0x40>;
+			d-cache-sets = <0x100>;
+			d-cache-size = <0x8000>;
+			d-cache-block-size = <0x40>;
 			phandle = <0x8001>;
 			reg = <0x00>;
 			compatible = "arm,cortex-a57";
@@ -378,6 +386,10 @@
 		clock-frequency = <0x16e3600>;
 		#clock-cells = <0x00>;
 		compatible = "fixed-clock";
+	};
+
+	aliases {
+		serial0 = "/pl011@9000000";
 	};
 
 	chosen {

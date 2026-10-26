@@ -8,11 +8,12 @@
 //! function at 00:00.0 — so configuration reads find nothing and the I/O and
 //! memory windows answer like an empty bus (all ones, writes ignored).
 //!
-//! Each flash bank decodes its whole 64 MiB window, as QEMU's `virt_flash`
-//! does, whatever the length of the array behind it: QEMU insists on a drive
-//! of exactly the bank's size, and this board reads the part of the bank an
-//! array does not cover as erased flash instead, so a 2 MiB firmware image
-//! needs no padding and a directly booted kernel needs no flash images at all.
+//! Each flash bank decodes its whole 64 MiB window, as QEMU's
+//! `virt_flash_map` maps it, whatever the length of the array behind it:
+//! QEMU insists on a drive of exactly the bank's size, and this board reads
+//! the part of the bank an array does not cover as erased flash instead, so
+//! a 2 MiB firmware image needs no padding and a directly booted kernel
+//! needs no flash images at all.
 //!
 //! The power button is QEMU's `gpio-key` on GPIO line 3: a press drives the
 //! line high and a timer releases it 100 ms of guest time later
@@ -44,9 +45,14 @@ pub const FLASH0_BASE: u64 = 0x0000_0000;
 pub const FLASH_BANK_SIZE: u64 = 0x0400_0000;
 pub const FLASH1_BASE: u64 = FLASH0_BASE + FLASH_BANK_SIZE;
 pub const GIC_DIST_BASE: u64 = 0x0800_0000;
-pub const GIC_DIST_SIZE: u64 = 0x1_0000;
+/// The distributor's region (QEMU `gic_init_irqs_and_mmio`'s `gic_dist`).
+/// `virt` reserves 64 KiB for it; the rest of that window is unassigned.
+pub const GIC_DIST_SIZE: u64 = 0x1000;
 pub const GIC_CPU_BASE: u64 = 0x0801_0000;
-pub const GIC_CPU_SIZE: u64 = 0x1_0000;
+/// The CPU interface's region (QEMU's GICv2 `gic_cpu`, which reaches
+/// `GICC_DIR` at 0x1000). `virt` reserves 64 KiB for it; the rest of that
+/// window is unassigned.
+pub const GIC_CPU_SIZE: u64 = 0x2000;
 pub const GIC_V2M_BASE: u64 = 0x0802_0000;
 pub const GIC_V2M_SIZE: u64 = 0x1000;
 pub const UART0_BASE: u64 = 0x0900_0000;
@@ -368,17 +374,19 @@ impl<S: GuestStorage> VirtBoard<S> {
         self.sync_device_lines();
     }
 
-    /// Hand the UART's receive FIFO as many waiting host bytes as it has room
+    /// Hand the UART as many waiting host bytes as its receive FIFO has room
     /// for — what a QEMU character backend does whenever `pl011_can_receive`
     /// says there is room. Run after every UART access and on reset; a host
     /// send fills the FIFO itself before it queues anything. Either way the
-    /// FIFO is full or the host buffer empty whenever the guest looks.
+    /// FIFO is full or the host buffer empty whenever the guest looks. In
+    /// loopback the UART consumes and drops what it is handed, as QEMU's
+    /// `pl011_receive` does.
     pub(crate) fn pump_serial_input(&mut self) {
         while self.uart.can_receive() {
             let Some(byte) = self.serial_input.pop_front() else {
                 break;
             };
-            if !self.uart.put_fifo(byte) {
+            if !self.uart.receive(byte) {
                 break;
             }
         }
@@ -391,7 +399,7 @@ impl<S: GuestStorage> VirtBoard<S> {
         let mut taken = 0;
         for &byte in bytes {
             let accepted = if self.serial_input.is_empty() && self.uart.can_receive() {
-                self.uart.put_fifo(byte)
+                self.uart.receive(byte)
             } else if self.serial_input.len() < SERIAL_INPUT_CAPACITY {
                 self.serial_input.push_back(byte);
                 true

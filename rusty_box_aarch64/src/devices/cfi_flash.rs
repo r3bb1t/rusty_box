@@ -137,8 +137,8 @@ impl CfiFlash {
         self.cmd == 0
     }
 
-    /// QEMU `pflash_reset`: back to read-array mode, any buffered write
-    /// abandoned.
+    /// QEMU `pflash_cfi01_system_reset`: back to read-array mode, any
+    /// buffered write abandoned.
     pub fn reset(&mut self) {
         self.cmd = 0;
         self.wcycle = 0;

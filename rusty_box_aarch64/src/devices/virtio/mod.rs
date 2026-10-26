@@ -208,13 +208,7 @@ impl Vdev<'_, '_> {
         if self.core.disabled() {
             return 0;
         }
-        match self.queues[q].available(self.ram) {
-            Ok(heads) => heads,
-            Err(fault) => {
-                self.core.error(fault);
-                0
-            }
-        }
+        self.queues[q].available(self.ram)
     }
 
     /// QEMU `virtqueue_pop`.

@@ -174,14 +174,15 @@ hashes at 10M, 100M and 400M instructions are:
 | Part | Model |
 |---|---|
 | Processor | Cortex-A57-shaped ARMv8.0: EL0/EL1 AArch64 only, the whole ARMv8.0 FP and Advanced SIMD instruction set (integer and floating point, vector and scalar, saturation setting FPSR.QC), the Cortex-A57's optional Cryptographic Extension (AES, 64-bit PMULL, SHA-1, SHA-256) and CRC32, as QEMU's `cortex-a57` has them, 4 KiB-granule stage-1 MMU with TLB, exclusives, PSCI over `HVC` as QEMU provides it |
-| Interrupts | GICv2 (no Security Extensions) + GICv2m frame |
+| Interrupts | QEMU's GICv2 (no Security Extensions): its running priority and active priority registers, SGI source processors, and 4 KiB distributor and 8 KiB CPU interface regions; + GICv2m frame |
 | Timers | EL1 physical and virtual generic timers |
-| Devices | PL011 UART (QEMU's 16-entry receive FIFO), PL031 RTC, PL061 GPIO with QEMU's `gpio-key` power button on line 3, CFI flash ×2 (QEMU `pflash_cfi01` semantics, whole 64 MiB banks decoded), `fw_cfg` (traditional interface, no files), 32 virtio-mmio transports (QEMU's legacy layout while empty; non-legacy, as QEMU's `force-legacy=false`, once the host plugs in QEMU's 2D `virtio-gpu-device` with its EDID, `virtio-keyboard-device`, `virtio-tablet-device` or `virtio-blk-device` over a raw image in memory or a host file, which take the highest free ones), an empty PCIe ECAM/windows |
-| Board | QEMU `virt` memory map and IRQ wiring; QEMU 8.2's device tree in `assets/`, its memory node and `/chosen` set per machine |
+| Devices | PL011 UART (QEMU's 16-entry receive FIFO and loopback), PL031 RTC, PL061 GPIO with QEMU's `gpio-key` power button on line 3, CFI flash ×2 (QEMU `pflash_cfi01` semantics, whole 64 MiB banks decoded), `fw_cfg` (traditional interface, no files), 32 virtio-mmio transports (QEMU's legacy layout while empty; non-legacy, as QEMU's `force-legacy=false`, once the host plugs in QEMU's 2D `virtio-gpu-device` with its EDID, `virtio-keyboard-device`, `virtio-tablet-device` or `virtio-blk-device` over a raw image in memory or a host file, which take the highest free ones), an empty PCIe ECAM/windows |
+| Board | QEMU `virt` memory map and IRQ wiring; QEMU 11.1.2's device tree in `assets/` (two values pinned; see below), its memory node and `/chosen` set per machine |
 | Boot | UEFI firmware from flash; or a Linux `Image`, initramfs and device tree placed as QEMU's `hw/arm/boot.c` places them, entered with the register state its boot stub leaves |
 
 Provenance: instruction semantics follow the Arm ARM pseudocode; every device
-cites the QEMU source file and symbols it was ported from.
+cites the QEMU source file and symbols it was ported from. The QEMU
+reference is release 11.1.2 and its newest `virt` machine, `virt-11.1`.
 
 ## Verification
 
@@ -265,8 +266,13 @@ integration tests of the public API.
   It reads disarm64's table from the cargo registry and runs with every test
   run, so an encoding gone missing from the decoder fails it without Arm's
   data.
-- The EDK2 boot was compared with QEMU 8.2 running the same firmware, device
-  tree and memory size: identical console bytes.
+- The EDK2 boot to the UEFI shell was compared with QEMU 11.1.2 running the
+  same firmware (Debian's AAVMF), device tree and memory size, without a
+  network card (`-nic none`): identical console bytes. The shell's `memmap`
+  differs where this board leaves QEMU's parts out: QEMU's ACPI tables,
+  which EDK2 installs from `fw_cfg` files, and allocations still present
+  with `acpi=off` and fw_cfg DMA off, which this comparison does not
+  attribute further.
 - Alpine Linux 3.23.7 (kernel 6.18.58, Alpine's `virt` configuration) boots to
   a login prompt with no warnings in its log, logs in, and runs commands whose
   output matches the host (`seq 1 20000 | sha256sum`); `reboot` comes back to
@@ -329,6 +335,9 @@ integration tests of the public API.
   block beyond the output size `TCR_EL1.IPS` selects, `AT` meeting an
   external abort on its walk, PSCI's affinity and entry-point checks, and a
   store-exclusive to an unmonitored address failing without a fault.
+- `tests/device_regions.rs`: the GIC distributor and CPU interface answer
+  in their 4 KiB and 8 KiB regions, and an access to the rest of their 64
+  KiB windows is a synchronous external abort.
 
 ## Where the references differ
 
@@ -345,7 +354,7 @@ choice is listed here with its evidence.
   and UMULH, and `Rm` of FCMP and FCMPE with zero. A word that sets one of
   them otherwise is CONSTRAINED UNPREDICTABLE, and UNDEFINED is among the
   behaviours the Arm ARM permits; it is this model's, so the decoder is
-  exactly Arm's encoding table, which fixes those bits. QEMU 11
+  exactly Arm's encoding table, which fixes those bits. QEMU 11.1.2
   (`target/arm/tcg/a64.decode`) fixes them for LDAR, STLR, SMULH and UMULH
   only and executes the exclusives (`STXR`, `LDXR`, `STXP`, `LDXP`) and the
   compares with zero (`FCMP`, whose `rm` it ignores when `z` is set) as if the
@@ -377,6 +386,32 @@ choice is listed here with its evidence.
   the pseudocode's two accesses. A single 16-byte `STR Q` across a page, like
   a scalar store across one, translates both pages before writing anything,
   as QEMU does.
+- **The device tree's seeds and L1 data cache.** The tree in `assets/` is
+  QEMU 11.1.2's `dumpdtb` output with two values replaced in place. QEMU
+  draws a fresh `/chosen` `rng-seed` and `kaslr-seed` on every run; this
+  board's are fixed, so runs are deterministic. QEMU 11's `cortex-a57`
+  (`aarch64_aa32_a57_init` in `target/arm/cpu-max.c`) makes the L1 data
+  cache 4-way, where the Cortex-A57 MPCore TRM, and QEMU 8.2, make it 2-way;
+  this model's `CCSIDR_EL1` is the TRM's, and the tree's `d-cache-sets` is
+  `0x100` to agree with it.
+- **virtio DMA reaches RAM only.** QEMU's `dma_memory_map` maps a ring or
+  buffer wherever the address space has a region (`address_space_map`):
+  RAM and, for reading, a flash bank in read-array mode directly, anything
+  else through its bounce buffer. This
+  board's virtio devices reach guest RAM only, so a ring or buffer anywhere
+  else breaks the device, as one in an unassigned hole does in QEMU. Linux
+  and EDK2 place their rings and buffers in RAM.
+- **`fw_cfg` without DMA or files.** QEMU's `virt` offers the DMA interface
+  and a file directory (ACPI tables, SMBIOS, boot order); this board reports
+  the traditional interface only (`FW_CFG_ID` = 1) and an empty directory, a
+  configuration the interface defines, so firmware describes the machine
+  from the device tree (`src/devices/fw_cfg.rs`).
+- **Where QEMU has no defined behaviour.** Acknowledging an SGI that is
+  pending from no processor, which only a `GICD_SPENDSGIR` write of zero
+  leaves, fails an assertion in QEMU (`gic_clear_pending_sgi`); this model
+  acknowledges it as from processor 0. The PL011's receive count, which
+  loopback can push past the FIFO depth, is a signed `int` in QEMU whose
+  overflow is undefined; this model's saturates.
 
 ## Not implemented
 

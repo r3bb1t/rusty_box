@@ -1,7 +1,7 @@
 //! QEMU firmware configuration interface, memory-mapped form.
 //!
 //! Provenance (R7): QEMU `hw/nvram/fw_cfg.c` (`fw_cfg_data_read`,
-//! `fw_cfg_select`, `fw_cfg_init_mem_wide`) and the items `hw/arm/virt.c`
+//! `fw_cfg_select`, `fw_cfg_init_mem_dma`) and the items `hw/arm/virt.c`
 //! installs. Layout at the device's base: data at +0 (1 to 8 bytes), the
 //! 16-bit big-endian selector at +8, the DMA address at +16.
 //!

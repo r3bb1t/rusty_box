@@ -179,9 +179,9 @@ fn show_picture(d: &mut Driver, width: u32, height: u32) {
 fn the_device_offers_edid_and_one_scanout() {
     let mut d = gpu(1024, 768);
     assert_eq!(d.device_features(), F_INDIRECT_DESC | F_EVENT_IDX | F_VERSION_1 | (1 << 40) | (1 << 1));
-    let config: Vec<u32> = (0..4).map(|i| d.read(CONFIG + 4 * i)).collect();
-    assert_eq!(config, [0, 0, 1, 0], "events_read, events_clear, num_scanouts, num_capsets");
-    assert_eq!(d.read_width(CONFIG + 16, AccessWidth::Byte), 0xFF);
+    let config: Vec<u32> = (0..5).map(|i| d.read(CONFIG + 4 * i)).collect();
+    assert_eq!(config, [0, 0, 1, 0, 0], "events_read, events_clear, num_scanouts, num_capsets, blob_alignment");
+    assert_eq!(d.read_width(CONFIG + 20, AccessWidth::Byte), 0xFF);
     d.write(QUEUE_SEL, 0);
     assert_eq!(d.read(QUEUE_NUM_MAX), 64);
     d.write(QUEUE_SEL, 1);
@@ -350,11 +350,13 @@ fn backing_is_checked_as_qemu_maps_it() {
     let mut d = gpu(640, 480);
     assert_eq!(status(&mut d, &cmd(RESOURCE_CREATE_2D, &[1, B8G8R8X8, 16, 16])), OK_NODATA);
     let transfer = cmd(TRANSFER_TO_HOST_2D, &[0, 0, 16, 16, 0, 0, 1, 0]);
-    assert_eq!(status(&mut d, &transfer), ERR_INVALID_RESOURCE_ID, "no backing");
+    // virtio_gpu_find_check_resource with require_backing.
+    assert_eq!(status(&mut d, &transfer), ERR_UNSPEC, "no backing");
+    assert_eq!(status(&mut d, &cmd(RESOURCE_DETACH_BACKING, &[1, 0])), ERR_UNSPEC, "nothing to detach");
     // An attachment of no entries is no backing at all.
     assert_eq!(status(&mut d, &cmd(RESOURCE_ATTACH_BACKING, &[1, 0])), OK_NODATA);
-    assert_eq!(status(&mut d, &transfer), ERR_INVALID_RESOURCE_ID);
-    for (addr, len) in [(0x1000u64, 64u32), (0x4010_0000, 0)] {
+    assert_eq!(status(&mut d, &transfer), ERR_UNSPEC);
+    for (addr, len) in [(UNASSIGNED, 64u32), (0x4010_0000, 0)] {
         let mut req = cmd(RESOURCE_ATTACH_BACKING, &[1, 1]);
         req.extend_from_slice(&addr.to_le_bytes());
         req.extend_from_slice(&len.to_le_bytes());
@@ -366,8 +368,11 @@ fn backing_is_checked_as_qemu_maps_it() {
     assert_eq!(status(&mut d, &cmd(RESOURCE_ATTACH_BACKING, &[1, 0])), ERR_UNSPEC, "already attached");
     assert_eq!(status(&mut d, &transfer), OK_NODATA);
     assert_eq!(status(&mut d, &cmd(RESOURCE_DETACH_BACKING, &[1, 0])), OK_NODATA);
-    assert_eq!(status(&mut d, &transfer), ERR_INVALID_RESOURCE_ID);
+    assert_eq!(status(&mut d, &transfer), ERR_UNSPEC);
+    assert_eq!(status(&mut d, &cmd(RESOURCE_DETACH_BACKING, &[1, 0])), ERR_UNSPEC);
+    assert_eq!(status(&mut d, &transfer), ERR_UNSPEC);
     assert_eq!(status(&mut d, &cmd(RESOURCE_DETACH_BACKING, &[2, 0])), ERR_INVALID_RESOURCE_ID);
+    assert_eq!(status(&mut d, &cmd(TRANSFER_TO_HOST_2D, &[0, 0, 16, 16, 0, 0, 2, 0])), ERR_INVALID_RESOURCE_ID);
 }
 
 #[test]
@@ -376,6 +381,9 @@ fn the_scanout_and_flush_are_checked() {
     assert_eq!(status(&mut d, &cmd(RESOURCE_CREATE_2D, &[1, B8G8R8X8, 32, 32])), OK_NODATA);
     assert_eq!(status(&mut d, &cmd(SET_SCANOUT, &[0, 0, 32, 32, 1, 1])), ERR_INVALID_SCANOUT_ID);
     assert_eq!(status(&mut d, &cmd(SET_SCANOUT, &[0, 0, 32, 32, 0, 2])), ERR_INVALID_RESOURCE_ID);
+    // A scanout needs backing, checked before the rectangle.
+    assert_eq!(status(&mut d, &cmd(SET_SCANOUT, &[0, 0, 15, 32, 0, 1])), ERR_UNSPEC);
+    attach(&mut d, 1, &picture(32, 32));
     assert_eq!(status(&mut d, &cmd(SET_SCANOUT, &[0, 0, 15, 32, 0, 1])), ERR_INVALID_PARAMETER, "narrower than 16");
     assert_eq!(status(&mut d, &cmd(SET_SCANOUT, &[17, 0, 16, 16, 0, 1])), ERR_INVALID_PARAMETER, "past the resource");
     assert_eq!(status(&mut d, &cmd(SET_SCANOUT, &[16, 16, 16, 16, 0, 1])), OK_NODATA);

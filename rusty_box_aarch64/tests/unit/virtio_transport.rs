@@ -131,9 +131,9 @@ fn rings_take_effect_when_the_driver_sets_queue_ready() {
     let mut d = keyboard();
     d.start(LINUX_FEATURES);
     d.write(QUEUE_SEL, 1);
-    // New addresses, outside RAM, are only latched...
-    d.write(QUEUE_DESC_LOW, 0x1000);
-    d.write(QUEUE_DESC_HIGH, 0);
+    // New addresses, in no memory region, are only latched...
+    d.write(QUEUE_DESC_LOW, UNASSIGNED as u32);
+    d.write(QUEUE_DESC_HIGH, (UNASSIGNED >> 32) as u32);
     report(&mut d);
     assert_eq!(d.used(1).len(), 1, "the queue still runs on the rings it was enabled with");
     // ...until QueueReady hands them to the device, which cannot map them.
@@ -210,10 +210,27 @@ fn a_buffer_of_no_bytes_breaks_the_device() {
     });
 }
 
+/// QEMU's `virtqueue_split_pop` asks only whether the queue is empty, so an
+/// available index further ahead than the queue holds is taken as it
+/// stands: every head it reaches is popped, here the one chain at ring
+/// entry 0 a hundred times.
 #[test]
-fn a_buffer_outside_ram_breaks_the_device() {
+fn an_available_index_past_the_queue_size_is_popped_to_its_end() {
+    let mut d = keyboard();
+    d.start(LINUX_FEATURES);
+    let at = d.alloc_with(&[0x11, 0, 0, 0, 1, 0, 0, 0]);
+    d.offer(1, &[Buf::readable(at, 8)]);
+    let ring = d.avail_ring(1);
+    d.put_u16(ring + 2, 100);
+    d.notify(1);
+    assert_eq!(d.read(STATUS) & NEEDS_RESET, 0);
+    assert_eq!(d.used(1), std::vec![(0, 8); 100]);
+}
+
+#[test]
+fn a_buffer_in_no_memory_region_breaks_the_device() {
     breaks_the_device(|d| {
-        d.offer(1, &[Buf::readable(0x1000, 8)]);
+        d.offer(1, &[Buf::readable(UNASSIGNED, 8)]);
         d.notify(1);
     });
 }
@@ -286,9 +303,9 @@ fn an_indirect_table_of_part_of_an_entry_breaks_the_device() {
 }
 
 #[test]
-fn an_indirect_table_outside_ram_breaks_the_device() {
+fn an_indirect_table_in_no_memory_region_breaks_the_device() {
     breaks_the_device(|d| {
-        d.put_desc(1, 0, 0x1000, 32, DESC_INDIRECT, 0);
+        d.put_desc(1, 0, UNASSIGNED, 32, DESC_INDIRECT, 0);
         d.publish(1, 0);
         d.notify(1);
     });
@@ -308,7 +325,7 @@ fn an_indirect_chain_is_read_across_its_buffers() {
 fn a_broken_device_keeps_its_interrupt_line_until_reset() {
     let mut d = keyboard();
     d.start(LINUX_FEATURES);
-    d.offer(1, &[Buf::readable(0x1000, 8)]);
+    d.offer(1, &[Buf::readable(UNASSIGNED, 8)]);
     d.notify(1);
     assert!(d.irq());
     assert_eq!(d.take_interrupt(), 3);

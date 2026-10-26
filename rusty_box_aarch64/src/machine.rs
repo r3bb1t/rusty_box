@@ -107,7 +107,10 @@ impl Default for VirtConfig {
 pub struct RamSize(u64);
 
 impl RamSize {
-    /// QEMU's `virt` default.
+    /// The RAM the bundled device tree describes (QEMU's `-m 256`). QEMU's
+    /// own default for `virt` is 128 MiB (`machine_class_init`
+    /// `default_ram_size` in `hw/core/machine.c`); a machine of that size is
+    /// `RamSize::mib(128)`.
     pub const DEFAULT: Self = Self(256 << 20);
     /// The least a machine can have: room for the device tree.
     pub const MIN: Self = Self(DEVICE_TREE_CAPACITY as u64);
@@ -1684,7 +1687,7 @@ impl<S: GuestStorage, I: Instrumentation> VirtMachine<S, I> {
 }
 
 const SNAPSHOT_MAGIC: [u8; 8] = *b"RBA64SNP";
-const SNAPSHOT_VERSION: u32 = 4;
+const SNAPSHOT_VERSION: u32 = 5;
 
 /// Everything about how a machine was built that a snapshot depends on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

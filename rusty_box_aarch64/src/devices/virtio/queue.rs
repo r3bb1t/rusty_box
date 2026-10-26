@@ -40,9 +40,6 @@ pub enum QueueFault {
     /// A ring the driver enabled lies outside guest memory ("Failed to map
     /// descriptor ring" and its used and available ring siblings).
     UnmappableRing,
-    /// The available index moved further than the queue holds ("Guest moved
-    /// used index").
-    MovedIndex,
     /// More chains taken than the queue holds ("Virtqueue size exceeded").
     SizeExceeded,
     /// An available-ring entry past the descriptor table ("Guest says index
@@ -92,22 +89,21 @@ impl QueueFault {
         match self {
             Self::QueueTooLarge => 1,
             Self::UnmappableRing => 2,
-            Self::MovedIndex => 3,
-            Self::SizeExceeded => 4,
-            Self::BadHead => 5,
-            Self::NoRings => 6,
-            Self::BadIndirectSize => 7,
-            Self::UnmappableIndirect => 8,
-            Self::ZeroSized => 9,
-            Self::TooManyBuffers => 10,
-            Self::UnmappableBuffer => 11,
-            Self::OutOfOrder => 12,
-            Self::Looped => 13,
-            Self::BadNext => 14,
-            Self::BlockMissingHeaders => 15,
-            Self::BlockHeaderShort => 16,
-            Self::BlockRangeShort => 17,
-            Self::BlockZoneReportShort => 18,
+            Self::SizeExceeded => 3,
+            Self::BadHead => 4,
+            Self::NoRings => 5,
+            Self::BadIndirectSize => 6,
+            Self::UnmappableIndirect => 7,
+            Self::ZeroSized => 8,
+            Self::TooManyBuffers => 9,
+            Self::UnmappableBuffer => 10,
+            Self::OutOfOrder => 11,
+            Self::Looped => 12,
+            Self::BadNext => 13,
+            Self::BlockMissingHeaders => 14,
+            Self::BlockHeaderShort => 15,
+            Self::BlockRangeShort => 16,
+            Self::BlockZoneReportShort => 17,
         }
     }
 
@@ -115,22 +111,21 @@ impl QueueFault {
         Some(match code {
             1 => Self::QueueTooLarge,
             2 => Self::UnmappableRing,
-            3 => Self::MovedIndex,
-            4 => Self::SizeExceeded,
-            5 => Self::BadHead,
-            6 => Self::NoRings,
-            7 => Self::BadIndirectSize,
-            8 => Self::UnmappableIndirect,
-            9 => Self::ZeroSized,
-            10 => Self::TooManyBuffers,
-            11 => Self::UnmappableBuffer,
-            12 => Self::OutOfOrder,
-            13 => Self::Looped,
-            14 => Self::BadNext,
-            15 => Self::BlockMissingHeaders,
-            16 => Self::BlockHeaderShort,
-            17 => Self::BlockRangeShort,
-            18 => Self::BlockZoneReportShort,
+            3 => Self::SizeExceeded,
+            4 => Self::BadHead,
+            5 => Self::NoRings,
+            6 => Self::BadIndirectSize,
+            7 => Self::UnmappableIndirect,
+            8 => Self::ZeroSized,
+            9 => Self::TooManyBuffers,
+            10 => Self::UnmappableBuffer,
+            11 => Self::OutOfOrder,
+            12 => Self::Looped,
+            13 => Self::BadNext,
+            14 => Self::BlockMissingHeaders,
+            15 => Self::BlockHeaderShort,
+            16 => Self::BlockRangeShort,
+            17 => Self::BlockZoneReportShort,
             _ => return None,
         })
     }
@@ -160,8 +155,10 @@ impl<'a> GuestRam<'a> {
         (end <= self.ram.len()).then_some(start..end)
     }
 
-    /// Whether `len` bytes at `addr` are all guest RAM, which is what QEMU's
-    /// `dma_memory_map` needs to map them.
+    /// Whether `len` bytes at `addr` are all guest RAM, the only memory the
+    /// board's devices reach (QEMU's `dma_memory_map` also maps the flash
+    /// banks and, through its bounce buffer, MMIO; see the README's "Where
+    /// the references differ").
     pub fn contains(&self, addr: u64, len: u64) -> bool {
         self.range(addr, len).is_some()
     }
@@ -410,7 +407,9 @@ impl Chain {
 #[derive(Debug, Clone, Copy)]
 pub struct Queue {
     /// `vring.num_default`: the size the device gave the queue, which
-    /// `QueueNumMax` reports and a driver may not exceed.
+    /// `QueueNumMax` reports and a driver may not exceed. This is QEMU
+    /// 11.1.2's `virt-11.1` machine; `hw_compat_11_0` overrides every
+    /// virtio-mmio queue to 1024 on `virt-11.0` and older.
     num_default: u16,
     /// `vring.num`.
     num: u16,
@@ -547,34 +546,17 @@ impl Queue {
     }
 
     /// How many chains the driver has made available that the device has not
-    /// taken, the available index read afresh — what successive pops find,
-    /// since QEMU's `virtqueue_num_heads` reads the index again whenever
-    /// the device has taken every chain the last read showed.
-    pub fn available(&mut self, ram: &GuestRam<'_>) -> Result<u16, QueueFault> {
+    /// taken, the available index read afresh: how many successive pops find
+    /// the queue not empty, since QEMU's `virtio_queue_split_empty` reads
+    /// the index again whenever the device has caught up with the last
+    /// read. An index further ahead than the queue holds is counted as it
+    /// stands; QEMU's pop does not check it, and the chains past the queue's
+    /// size fail as theirs do (`SizeExceeded`, `BadHead`).
+    pub fn available(&mut self, ram: &GuestRam<'_>) -> u16 {
         if self.avail == 0 {
-            return Ok(0);
+            return 0;
         }
-        let heads = self.read_avail_idx(ram).wrapping_sub(self.last_avail_idx);
-        if heads > self.num {
-            return Err(QueueFault::MovedIndex);
-        }
-        Ok(heads)
-    }
-
-    /// QEMU `virtqueue_num_heads`: how many chains the driver has made
-    /// available that the device has not taken, by the index last read
-    /// while the device has not caught up with it.
-    fn num_heads(&mut self, ram: &GuestRam<'_>) -> Result<u16, QueueFault> {
-        let avail_idx = if self.shadow_avail_idx != self.last_avail_idx {
-            self.shadow_avail_idx
-        } else {
-            self.read_avail_idx(ram)
-        };
-        let heads = avail_idx.wrapping_sub(self.last_avail_idx);
-        if heads > self.num {
-            return Err(QueueFault::MovedIndex);
-        }
-        Ok(heads)
+        self.read_avail_idx(ram).wrapping_sub(self.last_avail_idx)
     }
 
     /// QEMU `virtio_queue_split_empty`.
@@ -589,12 +571,10 @@ impl Queue {
     }
 
     /// QEMU `virtqueue_split_pop`: take the next chain the driver made
-    /// available, after checking every descriptor of it.
+    /// available, after checking every descriptor of it. The caller has
+    /// checked that the device is not disabled.
     pub fn pop(&mut self, ram: &mut GuestRam<'_>, features: RingFeatures) -> Result<Option<Chain>, QueueFault> {
-        if self.avail == 0 || self.num == 0 {
-            return Ok(None);
-        }
-        if self.num_heads(ram)? == 0 {
+        if self.num == 0 || self.is_empty(ram, false) {
             return Ok(None);
         }
         if self.inuse >= self.num {
