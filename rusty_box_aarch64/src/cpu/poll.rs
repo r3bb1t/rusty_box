@@ -1,14 +1,13 @@
 //! Exact fast-forward of counter polls: loops that wait for time to pass by
 //! reading the system counter until it passes a value.
 //!
-//! Firmware and kernels wait this way: of the 630.8 million instructions
-//! EDK2 retires in `aarch64_perfbench`'s run of it, 39.5% are iterations of
-//! its delays' polls that this module skips. Each iteration's only effect
-//! is the passage of time, so when the processor reaches the counter read
-//! of one, and nothing outside it looks at the instructions in between, it
-//! moves straight to the end of the last iteration that goes the same way
-//! as this one, leaving exactly the state running every instruction would
-//! leave.
+//! Firmware and kernels wait this way, and their delays spend many
+//! instructions in such loops (the README's Speed section gives EDK2's
+//! share). Each iteration's only effect is the passage of time, so when
+//! the processor reaches the counter read of one, and nothing outside it
+//! looks at the instructions in between, it moves straight to the end of
+//! the last iteration that goes the same way as this one, leaving exactly
+//! the state running every instruction would leave.
 //!
 //! # The rule
 //!
@@ -128,7 +127,8 @@ impl PollCycle {
 
 /// What an op is to [`Cpu::walk_poll`], by its shape alone: the walk
 /// accepts no op of a shape [`PollStep::Rejected`] names, whatever the
-/// registers hold.
+/// registers hold. A `B.cond` on a condition other than an ordering is
+/// one: both this and the walk ask [`ordering`].
 ///
 /// Closed (R5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -148,8 +148,10 @@ impl PollStep {
             Op::Nop
             | Op::AddSubShift { sf: true, sub: true, flags: true, rd: 31, amount: 0, .. }
             | Op::AddsImm { sf: true, rd: 31, carry: true, .. } => Self::Straight,
-            Op::BCond { .. } | Op::B { .. } | Op::Bl { .. } | Op::Br { .. } | Op::Blr { .. } => Self::Branch,
+            Op::BCond { cond, .. } if ordering(cond) => Self::Branch,
+            Op::B { .. } | Op::Bl { .. } | Op::Br { .. } | Op::Blr { .. } => Self::Branch,
             Op::Class { .. }
+            | Op::BCond { .. }
             | Op::AddImm { .. }
             | Op::AddsImm { .. }
             | Op::AddSubShift { .. }

@@ -279,7 +279,8 @@ impl Cpu {
     }
 
     /// Account for the instruction at `pc`, whose word `fetched` is (`None`
-    /// when its fetch faulted), having ended in `result`: retire it or take
+    /// only when `result` is a fault, in its fetch or in its execution,
+    /// which does not read it), having ended in `result`: retire it or take
     /// its exception, move the PC, and tell `observer`.
     #[inline(always)]
     pub(crate) fn finish<I: Instrumentation>(&mut self, pc: u64, fetched: Option<u32>, result: ExecResult, observer: &mut I) -> Done {

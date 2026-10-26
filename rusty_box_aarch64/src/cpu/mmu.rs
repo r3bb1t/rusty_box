@@ -352,9 +352,11 @@ impl Cpu {
 
     /// The translation of `va` when stage 1 is enabled and the TLB holds an
     /// entry for it that permits an access of `kind` at `el`: the one case
-    /// that raises no fault of the walk or of the page's permissions. Every
-    /// access path tries it inline, and makes its checks in their order out
-    /// of line only when it is `None`.
+    /// that raises no fault of the walk or of the page's permissions.
+    /// [`Cpu::translate_data`] and [`Cpu::fetch_translate`] try it inline,
+    /// and make their checks in their order out of line only when it is
+    /// `None`; [`Cpu::fetch_probe`] answers from it alone with stage 1
+    /// enabled. Every other translation goes through [`Cpu::resolve`].
     #[inline(always)]
     fn permitted_hit(&self, va: u64, kind: AccessKind, el: El) -> Option<Translated> {
         if !self.mmu_enabled() {

@@ -172,11 +172,13 @@ cache (5028db8).
 | Linux 6.18 + initramfs to `login:` | 52.6 | 106.8 | 2.03× |
 | Alpine 3.23 with its root on virtio-blk, logged in (`linux_virt`; one run each, M ticks/s) | 51.9 | 102.7 | 1.98× |
 
-`fp` is the one row short of the 2× set as the loops' target (the boots'
-was 1.5×). EDK2's figure counts the instructions of the counter polls it
-fast-forwards as executed, since the guest retires them.
+`fp`, plain and hooked, is the one workload short of the 2× set as the
+loops' target (the boots' was 1.5×). EDK2's figure counts the instructions
+of the counter polls it fast-forwards as executed, since the guest retires
+them: of the 630.8 million instructions EDK2 retires in this run, 39.5%
+are iterations of its delays' polls that are skipped.
 
-On this host (an AVX-512 Xeon) a loop's ratio moves by up to about ±10%
+On this host (an AVX-512 Xeon) a loop's ratio moves by as much as 16%
 with branch placement alone: one change measured `alu` at 0.87× and
 `memcpy` at 0.84× of its parent in the default build, and at 1.03× and
 1.09× with both binaries built with
@@ -354,7 +356,31 @@ integration tests of the public API.
   misaligned access to Normal memory with `SCTLR_EL1.A` set or by a
   load-acquire, a store to a read-only page, and an `LDTR`/`STTR` at EL1 to
   a page EL0 cannot reach; a misaligned load from Normal memory in the TLB
-  completes.
+  completes. A load or store pair checks each element against its own
+  size, not the pair's (ARMv8.0 has no FEAT_LSE2): word, signed-word,
+  single- and double-precision pairs to Device memory, and to Normal
+  memory with `SCTLR_EL1.A` set, complete where each element is aligned
+  and the pair is not, and fault where an element is misaligned.
+- `tests/pair_access.rs`: a load or store pair acts as its two elements'
+  accesses made one after the other — a store pair whose second element
+  alone rewrites the next instruction runs it rewritten, a Q register
+  store whose high half alone overlaps the monitored doubleword clears the
+  exclusive monitor, a load pair within a page reads both elements, and a
+  pair whose second element alone runs off the end of RAM, or within a
+  page reaches an address nothing answers, takes that element's external
+  abort after the first element's access: a load writes neither register,
+  a store has made its first element's write.
+- `tests/counter_poll.rs`: a counter poll fast-forwarded ends as running
+  every instruction ends it — two machines, one skipping and one hearing
+  of every instruction, compared snapshot for snapshot after every step at
+  budget slices from 1 to 2^24 instructions: direct polls, polls through a
+  call and return, through `BR`/`BLR`, with a `NOP`, on `CNTPCT_EL0`,
+  comparing with a register (in either order) or an immediate on signed
+  and unsigned conditions, and through the MMU; a timer interrupt during a
+  poll arrives at the same instruction; an exit address inside or after a
+  poll is reached by both; an EL0 poll traps where `CNTKCTL_EL1` denies
+  the counter and is fast-forwarded where it allows it; and polls outside
+  the rule (an equality, a 32-bit compare, a store) run every instruction.
 - `tests/wfx_and_debug.rs`: WFI and WFE trap from EL0 only when they would
   wait — WFI not when an interrupt is pending, masked or not; WFE not when
   the Event Register, set by `SEV`, `SEVL`, an exception return or the

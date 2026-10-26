@@ -50,8 +50,13 @@
 //!   the CPU has it, and otherwise `fma_round`, a port of musl's `fma.c`,
 //!   which rounds once for every input, and `fma_wide_round`, a port of
 //!   musl's `fmaf.c`, which rounds once wherever the result is normal.
-//!   glibc's own `fma`/`fmaf` (sysdeps/ieee754/dbl-64/s_fma.c,
-//!   flt-32/s_fmaf.c) round once for every input.
+//!   glibc's own `fma`/`fmaf` round once for every input too: on x86_64
+//!   (`sysdeps/x86_64/fpu/multiarch/s_fma.c`, `s_fmaf.c`) they run
+//!   VFMADD213SD/SS, or FMA4's VFMADDSD/SS, where the CPU has it, and
+//!   otherwise `sysdeps/ieee754/dbl-64/s_fma.c`, which forms the exact
+//!   result in integers and rounds it once, and `dbl-64/s_fmaf.c`, which
+//!   forms the sum in binary64 and corrects its last bit wherever rounding
+//!   it again to binary32 could err.
 //!
 //! Rust's `f32` and `f64` arithmetic is IEEE 754 binary32 and binary64,
 //! rounding to nearest even, on every target but 32-bit x86 without SSE2:

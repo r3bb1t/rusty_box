@@ -510,15 +510,17 @@ impl TraceCache {
 }
 
 impl Cpu {
-    /// Run the instructions from the PC on, at most `limit` (at least one)
-    /// of them: a cached trace's, or a single instruction by the
+    /// Run the instructions from the PC on: a cached trace's, at most
+    /// `limit` (at least one) of them, or a single instruction by the
     /// per-instruction path where no trace can be used. Returns what the
     /// last instruction run did.
     ///
     /// When `observer` does not hear of every instruction, a counter poll
-    /// whose read starts the trace may first be fast-forwarded (`poll.rs`)
-    /// within the run [`Cpu::bound_run`] set, which `limit` must not pass,
-    /// and past none of `exits`, the addresses the caller stops at. Every
+    /// whose read starts the trace may first be fast-forwarded (`poll.rs`):
+    /// whole iterations of it are skipped before the trace runs, so one
+    /// call may retire more than `limit` instructions, but never past the
+    /// end of the run [`Cpu::bound_run`] set, which `limit` must not pass,
+    /// nor past any of `exits`, the addresses the caller stops at. Every
     /// instruction skipped counts as retired, and the skip leaves more than
     /// the rest of the trace before the end of that run. A poll's iteration
     /// comes back to its read by a taken branch, which starts a trace
@@ -532,6 +534,7 @@ impl Cpu {
         limit: u64,
         exits: &[u64],
     ) -> Step {
+        debug_assert!(limit <= self.run_left(), "a trace's limit passes the end of its run");
         let pc = self.pc;
         let mut observed = Observed { bus, observer };
         let pa = match self.fetch_address(&mut observed, pc) {
