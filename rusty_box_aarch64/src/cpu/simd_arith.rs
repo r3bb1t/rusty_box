@@ -13,6 +13,9 @@
 //! clamps.
 //!
 //! The floating-point opcodes of these classes are handed to `simd_fp`.
+//! The later integer extensions are here too: SQRDMLAH and SQRDMLSH
+//! (FEAT_RDM), the dot products (FEAT_DotProd, FEAT_I8MM) and the 8-bit
+//! matrix multiplies (FEAT_I8MM), from the Arm A64 ISA XML pages of each.
 
 use super::crypto::polynomial_mult;
 use super::dp::ones;
@@ -87,6 +90,32 @@ const fn all_if(condition: bool) -> u64 {
     } else {
         0
     }
+}
+
+/// SQRDMLAH and SQRDMLSH on one lane (FEAT_RDM): `element3 << esize`
+/// plus, or with `subtract` minus, twice the product, shifted right by
+/// `esize` with rounding (Arm `RShr`) and saturated (`SignedSatQ`).
+fn rdm_lane(a: u64, b: u64, d: u64, esize: u32, subtract: bool, qc: &mut bool) -> u64 {
+    let product = 2 * sint(a, esize) * sint(b, esize);
+    let accum = (sint(d, esize) << esize) + if subtract { -product } else { product };
+    sat((accum + (1i128 << (esize - 1))) >> esize, esize, false, qc)
+}
+
+/// A register's bytes as one operand of a dot product or an 8-bit matrix
+/// multiply, each read signed or, with `unsigned`, unsigned.
+#[derive(Clone, Copy)]
+struct Bytes {
+    v: u128,
+    unsigned: bool,
+}
+
+/// The sum of the `count` products of the bytes of `a` from byte `a_first`
+/// with those of `b` from byte `b_first`, each byte Arm's `Int(byte,
+/// unsigned)`: the inner loop of the dot products and of `MatMulAdd`.
+fn byte_products(a: Bytes, a_first: u32, b: Bytes, b_first: u32, count: u32) -> i128 {
+    (0..count)
+        .map(|k| int(elem(a.v, a_first + k, 8), 8, a.unsigned) * int(elem(b.v, b_first + k, 8), 8, b.unsigned))
+        .sum()
 }
 
 /// The shift of SSHL/USHL/SRSHL/URSHL/SQSHL/UQSHL/SQRSHL/UQRSHL (register):
@@ -781,6 +810,8 @@ impl Cpu {
             (0b1101, false) => Kind::Same(|a, b, _, e, qc| {
                 sat((2 * sint(a, e) * sint(b, e) + (1i128 << (e - 1))) >> e, e, false, qc)
             }),
+            (0b1101, true) => Kind::Same(|a, b, d, e, qc| rdm_lane(a, b, d, e, false, qc)),
+            (0b1111, true) => Kind::Same(|a, b, d, e, qc| rdm_lane(a, b, d, e, true, qc)),
             (0b0010, _) if !scalar => Kind::Long(LongOp::MulAcc),
             (0b0110, _) if !scalar => Kind::Long(LongOp::MulSub),
             (0b1010, _) if !scalar => Kind::Long(LongOp::Mul),
@@ -868,6 +899,113 @@ impl Cpu {
         Ok(Flow::Next)
     }
 
+    /// SQRDMLAH and SQRDMLSH (FEAT_RDM), vector (`0 Q 1 01110 size 0 Rm 1
+    /// 000 S 1 Rn Rd`) and scalar (`01 1 11110 size 0 Rm 1 000 S 1 Rn Rd`):
+    /// 16- and 32-bit elements only.
+    pub(crate) fn exec_simd_rdm(&mut self, pc: u64, insn: u32, scalar: bool) -> ExecResult {
+        let q = bit(insn, 30);
+        let size = bits(insn, 23, 22);
+        if size == 0b00 || size == 0b11 {
+            return self.undefined(pc, insn);
+        }
+        let subtract = bit(insn, 11);
+        self.simd_check()?;
+        let esize = 8u32 << size;
+        let n = self.v[bits(insn, 9, 5) as usize];
+        let m = self.v[bits(insn, 20, 16) as usize];
+        let rd = bits(insn, 4, 0) as usize;
+        let d = self.v[rd];
+        let lanes = if scalar { 1 } else { datasize(q) / esize };
+        let mut qc = false;
+        let mut r = 0u128;
+        for e in 0..lanes {
+            let lane = rdm_lane(elem(n, e, esize), elem(m, e, esize), elem(d, e, esize), esize, subtract, &mut qc);
+            set_elem(&mut r, e, esize, lane);
+        }
+        self.note_saturation(qc);
+        self.write_v(rd, r);
+        Ok(Flow::Next)
+    }
+
+    /// The dot products: SDOT, UDOT (FEAT_DotProd) and USDOT, SUDOT
+    /// (FEAT_I8MM), vector (`0 Q U 01110 size 0 Rm 1 001 x 1 Rn Rd`) and by
+    /// element (`0 Q U 01111 size L M Rm 111 x H 0 Rn Rd`, `size` being
+    /// `US 0` for SUDOT and USDOT). Each 32-bit lane of Vd adds, wrapping,
+    /// the four products of the bytes of its lane of Vn with those of the
+    /// same lane of Vm, or of lane `H:L` of Vm by element.
+    pub(crate) fn exec_simd_dot(&mut self, pc: u64, insn: u32, by_element: bool) -> ExecResult {
+        let q = bit(insn, 30);
+        let u = bit(insn, 29);
+        let mixed = if by_element { bit(insn, 12) } else { bit(insn, 11) };
+        // Whether Vn's bytes and Vm's are unsigned. USDOT is unsigned by
+        // signed, SUDOT signed by unsigned (by element, `US` says which).
+        let (n_unsigned, m_unsigned) = if mixed {
+            let us = !by_element || bit(insn, 23);
+            (us, !us)
+        } else {
+            if bits(insn, 23, 22) != 0b10 {
+                return self.undefined(pc, insn);
+            }
+            (u, u)
+        };
+        self.simd_check()?;
+        let n = Bytes {
+            v: self.v[bits(insn, 9, 5) as usize],
+            unsigned: n_unsigned,
+        };
+        let m = Bytes {
+            v: self.v[bits(insn, 20, 16) as usize],
+            unsigned: m_unsigned,
+        };
+        // By element, every lane takes lane H:L of Vm.
+        let index = by_element.then(|| (bits(insn, 11, 11) << 1) | bits(insn, 21, 21));
+        let rd = bits(insn, 4, 0) as usize;
+        let d = self.v[rd];
+        let mut r = 0u128;
+        for e in 0..datasize(q) / 32 {
+            let m_lane = index.unwrap_or(e);
+            let sum = uint(elem(d, e, 32)) + byte_products(n, 4 * e, m, 4 * m_lane, 4);
+            set_elem(&mut r, e, 32, low(sum, 32));
+        }
+        self.write_v(rd, r);
+        Ok(Flow::Next)
+    }
+
+    /// SMMLA, USMMLA, UMMLA (FEAT_I8MM): `0 1 U 01110 10 0 Rm 1 010 B 1 Rn
+    /// Rd`, Arm `MatMulAdd`. Vn holds a 2x8 matrix of bytes by rows, Vm a
+    /// 2x8 one whose rows are the columns of the 8x2 matrix it stands for,
+    /// and Vd a 2x2 matrix of 32-bit words by rows, which the product is
+    /// added to, wrapping. USMMLA's Vn is unsigned and its Vm signed.
+    pub(crate) fn exec_simd_mmla(&mut self, pc: u64, insn: u32) -> ExecResult {
+        let (n_unsigned, m_unsigned) = match (bit(insn, 29), bit(insn, 11)) {
+            (false, false) => (false, false),
+            (false, true) => (true, false),
+            (true, false) => (true, true),
+            // The decoder allocates no such word to this class.
+            (true, true) => return self.undefined(pc, insn),
+        };
+        self.simd_check()?;
+        let n = Bytes {
+            v: self.v[bits(insn, 9, 5) as usize],
+            unsigned: n_unsigned,
+        };
+        let m = Bytes {
+            v: self.v[bits(insn, 20, 16) as usize],
+            unsigned: m_unsigned,
+        };
+        let rd = bits(insn, 4, 0) as usize;
+        let d = self.v[rd];
+        let mut r = 0u128;
+        for i in 0..2 {
+            for j in 0..2 {
+                let sum = uint(elem(d, 2 * i + j, 32)) + byte_products(n, 8 * i, m, 8 * j, 8);
+                set_elem(&mut r, 2 * i + j, 32, low(sum, 32));
+            }
+        }
+        self.write_v(rd, r);
+        Ok(Flow::Next)
+    }
+
     /// Scalar pairwise: `01 U 11110 size 11000 opcode 10 Rn Rd` — ADDP
     /// (scalar).
     pub(crate) fn exec_simd_scalar_pair(&mut self, pc: u64, insn: u32) -> ExecResult {
@@ -884,6 +1022,10 @@ impl Cpu {
         Ok(Flow::Next)
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/unit/simd_extensions.rs"]
+mod extension_tests;
 
 #[cfg(test)]
 mod tests {

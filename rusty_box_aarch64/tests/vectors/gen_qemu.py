@@ -61,6 +61,13 @@ def aligned_imm9(w):
     return w & ~(((1 << size) - 1) << 12) & ~(1 << 20)
 
 
+def dot_elem_size(w):
+    """SDOT, UDOT, SUDOT, USDOT (by element): `size<0>` = 0. SDOT and UDOT
+    need size 10, SUDOT and USDOT have `US 0` there; with `size<0>` = 1,
+    opcode 1111 is BFDOT and BFMLAL (FEAT_BF16)."""
+    return w & ~(1 << 22)
+
+
 FAMILIES = [
     # FEAT_LSE: LDADD, LDCLR, LDEOR, LDSET, LDSMAX, LDSMIN, LDUMAX, LDUMIN
     # and SWP of every size and ordering (o3 = 1 with another opc is
@@ -71,6 +78,17 @@ FAMILIES = [
     # FEAT_LRCPC: LDAPR, LDAPRB, LDAPRH. FEAT_LRCPC2: LDAPUR* and STLUR*.
     ("rcpc_ldapr", "M", 0x38BFC000, 0xC00003FF, None),
     ("rcpc_unscaled", "M", 0x19000000, 0xC0DFF3FF, aligned_imm9),
+    # FEAT_RDM: SQRDMLAH and SQRDMLSH, vector, scalar and by element, of
+    # every size (16 and 32 bits are allocated).
+    ("rdm_vector", "V", 0x2E008400, 0x40DF0BFF, None),
+    ("rdm_scalar", "V", 0x7E008400, 0x00DF0BFF, None),
+    ("rdm_elem", "V", 0x2F00D000, 0x40FF2BFF, None),
+    ("rdm_scalar_elem", "V", 0x7F00D000, 0x00FF2BFF, None),
+    # FEAT_DotProd and FEAT_I8MM: SDOT, UDOT and USDOT (vector), SDOT, UDOT,
+    # SUDOT and USDOT (by element), SMMLA, USMMLA and UMMLA.
+    ("dot_vector", "V", 0x0E009400, 0x60DF0BFF, None),
+    ("dot_elem", "V", 0x0F00E000, 0x60FF1BFF, dot_elem_size),
+    ("mmla", "V", 0x4E80A400, 0x201F0BFF, None),
 ]
 
 

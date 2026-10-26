@@ -83,6 +83,7 @@ const MPIDR_EL1: u32 = key!(3, 0, 0, 0, 5);
 const REVIDR_EL1: u32 = key!(3, 0, 0, 0, 6);
 const ID_AA64PFR0_EL1: u32 = key!(3, 0, 0, 4, 0);
 const ID_AA64PFR1_EL1: u32 = key!(3, 0, 0, 4, 1);
+const ID_AA64ZFR0_EL1: u32 = key!(3, 0, 0, 4, 4);
 const ID_AA64SMFR0_EL1: u32 = key!(3, 0, 0, 4, 5);
 const ID_AA64DFR0_EL1: u32 = key!(3, 0, 0, 5, 0);
 const ID_AA64ISAR0_EL1: u32 = key!(3, 0, 0, 6, 0);
@@ -353,6 +354,7 @@ impl Cpu {
             REVIDR_EL1 => id::REVIDR_EL1,
             ID_AA64PFR0_EL1 => id::ID_AA64PFR0_EL1,
             ID_AA64PFR1_EL1 => id::id_aa64pfr1(self.imp.features),
+            ID_AA64ZFR0_EL1 => id::id_aa64zfr0(self.imp.features),
             ID_AA64SMFR0_EL1 => id::id_aa64smfr0(self.imp.features),
             ID_AA64DFR0_EL1 => id::ID_AA64DFR0_EL1,
             ID_AA64ISAR0_EL1 => id::id_aa64isar0(self.imp.features),

@@ -2,6 +2,7 @@
 //! "Data Processing -- Scalar Floating-Point and Advanced SIMD", the rows
 //! with `op0 = 01x1`).
 
+use super::Feature;
 use crate::cpu::exec::bits;
 
 /// Arm group `asisdone`: Advanced SIMD scalar copy.
@@ -146,6 +147,40 @@ pub(crate) enum Asisdelem {
     FmlsRSd,
     FmulRSd,
     FmulxRSd,
+    SqrdmlahR,
+    SqrdmlshR,
+}
+
+impl Asisdelem {
+    pub(crate) const fn feature(self) -> Feature {
+        match self {
+            Self::SqdmlalL
+            | Self::SqdmlslL
+            | Self::SqdmullL
+            | Self::SqdmulhR
+            | Self::SqrdmulhR
+            | Self::FmlaRSd
+            | Self::FmlsRSd
+            | Self::FmulRSd
+            | Self::FmulxRSd => Feature::AdvSimd,
+            Self::SqrdmlahR | Self::SqrdmlshR => Feature::Rdm,
+        }
+    }
+}
+
+/// Arm group `asisdsame2`: Advanced SIMD scalar three same extra.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum Asisdsame2 {
+    Sqrdmlah,
+    Sqrdmlsh,
+}
+
+impl Asisdsame2 {
+    pub(crate) const fn feature(self) -> Feature {
+        match self {
+            Self::Sqrdmlah | Self::Sqrdmlsh => Feature::Rdm,
+        }
+    }
 }
 
 pub(super) fn asisdone(word: u32) -> Option<Asisdone> {
@@ -309,7 +344,7 @@ pub(super) fn asisdelem(word: u32) -> Option<Asisdelem> {
     let size = bits(word, 23, 22);
     let opcode = bits(word, 15, 12);
     // size = 00 with a floating-point opcode is half precision
-    // (FEAT_FP16); SQRDMLAH and SQRDMLSH are FEAT_RDM.
+    // (FEAT_FP16).
     match (u, size, opcode) {
         (0b0, _, 0b0011) => Some(Asisdelem::SqdmlalL),
         (0b0, _, 0b0111) => Some(Asisdelem::SqdmlslL),
@@ -320,6 +355,19 @@ pub(super) fn asisdelem(word: u32) -> Option<Asisdelem> {
         (0b0, 0b10 | 0b11, 0b0101) => Some(Asisdelem::FmlsRSd),
         (0b0, 0b10 | 0b11, 0b1001) => Some(Asisdelem::FmulRSd),
         (0b1, 0b10 | 0b11, 0b1001) => Some(Asisdelem::FmulxRSd),
+        (0b1, _, 0b1101) => Some(Asisdelem::SqrdmlahR),
+        (0b1, _, 0b1111) => Some(Asisdelem::SqrdmlshR),
+        _ => None,
+    }
+}
+
+pub(super) fn asisdsame2(word: u32) -> Option<Asisdsame2> {
+    let u = bits(word, 29, 29);
+    let opcode = bits(word, 14, 11);
+    // The other opcodes are unallocated.
+    match (u, opcode) {
+        (0b1, 0b0000) => Some(Asisdsame2::Sqrdmlah),
+        (0b1, 0b0001) => Some(Asisdsame2::Sqrdmlsh),
         _ => None,
     }
 }

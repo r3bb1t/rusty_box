@@ -53,10 +53,10 @@ fn vector(word: u32) -> Option<Encoding> {
                 },
                 _ => None,
             },
-            // op3<0> and op3<5>. op3<5> = 1 with op3<0> = 1 is asimdsame2
-            // (FEAT_RDM, FEAT_DotProd and later), and op2 = 10xx with
-            // op3<0> = 1 asimdsamefp16 (FEAT_FP16).
+            // op3<0> and op3<5>. op2 = 10xx with op3<0> = 1 and op3<5> =
+            // 0 is asimdsamefp16 (FEAT_FP16).
             0b0 => match (bits(word, 10, 10), bits(word, 15, 15)) {
+                (0b1, 0b1) => asimd::asimdsame2(word).map(Encoding::Asimdsame2),
                 (0b1, 0b0) => match (op1, bits(word, 22, 22)) {
                     (0b00, 0b0) => asimd::asimdins(word).map(Encoding::Asimdins),
                     _ => None,
@@ -106,10 +106,10 @@ fn scalar(word: u32) -> Option<Encoding> {
                 },
                 _ => None,
             },
-            // op3<0> and op3<5>. op3<5> = 1 with op3<0> = 1 is asisdsame2
-            // (FEAT_RDM), and op2 = 10xx with op3<0> = 1 asisdsamefp16
-            // (FEAT_FP16).
+            // op3<0> and op3<5>. op2 = 10xx with op3<0> = 1 and op3<5> =
+            // 0 is asisdsamefp16 (FEAT_FP16).
             0b0 => match (bits(word, 10, 10), bits(word, 15, 15)) {
+                (0b1, 0b1) => asisd::asisdsame2(word).map(Encoding::Asisdsame2),
                 (0b1, 0b0) => match (op1, bits(word, 22, 22)) {
                     (0b00, 0b0) => asisd::asisdone(word).map(Encoding::Asisdone),
                     _ => None,

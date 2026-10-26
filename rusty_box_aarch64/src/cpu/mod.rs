@@ -29,6 +29,9 @@ mod simd_arith;
 mod simd_fp;
 mod sme;
 mod state;
+#[cfg(test)]
+#[path = "../../tests/unit/step.rs"]
+mod step;
 mod sysreg;
 mod system;
 mod timer;

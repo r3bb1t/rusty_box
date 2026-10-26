@@ -10,17 +10,10 @@
 
 use std::vec::Vec;
 
-use rusty_box_core::{ClockHz, VmClock};
-
-use super::super::features::{Feature, Implementation, VecLen};
-use super::super::{Cpu, CpuConfig, El, Pstate, Step};
+use super::super::features::{Implementation, VecLen};
+use super::super::step::{exec, processor, Taken, CPACR_ALL, DATA, FP_TRAP, ILLEGAL_WHEN_STREAMING, SME_DISABLED, UNDEFINED};
+use super::super::{Cpu, El, Pstate};
 use super::Svcr;
-use crate::bus::{AccessWidth, BusFault, PhysAddr, PhysBus};
-use crate::instrumentation::NoInstrumentation;
-
-const CODE: u64 = 0x10000;
-const VBAR: u64 = 0x20000;
-const DATA: u64 = 0x30000;
 
 const SMSTART: u32 = 0xD503_477F;
 const SMSTOP: u32 = 0xD503_467F;
@@ -41,9 +34,6 @@ const MRS_TPIDR2: u32 = 0xD53B_D0A0;
 /// `svc #0`.
 const SVC: u32 = 0xD400_0001;
 
-/// `CPACR_EL1` with SIMD&FP and SME enabled at EL0 and EL1.
-const CPACR_ALL: u64 = (3 << 20) | (3 << 24);
-
 /// `rdsvl x0, #imm`.
 const fn rdsvl(imm: i32) -> u32 {
     0x04BF_5800 | (((imm as u32) & 0x3F) << 5)
@@ -54,88 +44,8 @@ const fn addsvl(rd: u32, rn: u32, imm: i32, predicate: bool) -> u32 {
     0x0420_5800 | ((predicate as u32) << 22) | (rn << 16) | (((imm as u32) & 0x3F) << 5) | rd
 }
 
-/// The one instruction at `CODE`, a data region, and every other read a
-/// bus fault.
-struct OneWord {
-    insn: u32,
-    data: [u8; 64],
-}
-
-impl PhysBus for OneWord {
-    fn read(&mut self, addr: PhysAddr, width: AccessWidth, _clock: VmClock) -> Result<u64, BusFault> {
-        let a = addr.get();
-        let n = width.bytes();
-        if a >= CODE && a + n <= CODE + 4 {
-            return Ok(u64::from(self.insn >> (8 * (a - CODE))) & width.value_mask());
-        }
-        if a >= DATA && a + n <= DATA + self.data.len() as u64 {
-            let off = (a - DATA) as usize;
-            let mut v = 0u64;
-            for i in 0..n as usize {
-                v |= u64::from(self.data[off + i]) << (8 * i);
-            }
-            return Ok(v);
-        }
-        Err(BusFault::Unmapped)
-    }
-
-    fn write(&mut self, _addr: PhysAddr, _width: AccessWidth, _value: u64, _clock: VmClock) -> Result<(), BusFault> {
-        Err(BusFault::Unmapped)
-    }
-}
-
-fn processor(imp: Implementation) -> Cpu {
-    let ips = ClockHz::new(1_000_000).unwrap_or(ClockHz::BOCHS_DEFAULT);
-    let mut cpu = Cpu::implementing(
-        CpuConfig {
-            ips,
-            counter_hz: ips,
-            reset_pc: CODE,
-        },
-        imp,
-    );
-    // SIMD&FP enabled, and SME where there is one.
-    cpu.sys.cpacr_el1 = if imp.has(Feature::Sme) { CPACR_ALL } else { 3 << 20 };
-    cpu.sys.vbar_el1 = VBAR;
-    cpu
-}
-
 fn sme() -> Cpu {
     processor(Implementation::EVERY_FEATURE)
-}
-
-/// A taken exception, as `ESR_EL1` reports it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Taken {
-    ec: u64,
-    iss: u64,
-}
-
-const UNDEFINED: Taken = Taken { ec: 0x00, iss: 0 };
-const FP_TRAP: Taken = Taken { ec: 0x07, iss: 0x01E0_0000 };
-const SME_DISABLED: Taken = Taken { ec: 0x1D, iss: 0 };
-const ILLEGAL_WHEN_STREAMING: Taken = Taken { ec: 0x1D, iss: 1 };
-
-/// Step `insn` at `CODE` from the processor's current state (EL1h unless
-/// the test moved it), returning the exception it took, if any. A taken
-/// exception leaves EL1; the processor is put back at the exception level
-/// it executed at, so that tests can carry on from there.
-fn exec(cpu: &mut Cpu, insn: u32) -> Option<Taken> {
-    let pstate = cpu.pstate;
-    cpu.pc = CODE;
-    cpu.sys.esr_el1 = 0x3F << 26;
-    let mut bus = OneWord { insn, data: [0x5A; 64] };
-    assert_eq!(cpu.step(&mut bus, &mut NoInstrumentation), Step::Retired, "{insn:#010x}");
-    let esr = cpu.sys.esr_el1;
-    if esr >> 26 == 0x3F {
-        return None;
-    }
-    assert_eq!(cpu.pc & !0x7FF, VBAR, "{insn:#010x} took an exception to the vector table");
-    cpu.pstate = pstate;
-    Some(Taken {
-        ec: esr >> 26,
-        iss: esr & 0x01FF_FFFF,
-    })
 }
 
 fn at_el0(cpu: &mut Cpu) {

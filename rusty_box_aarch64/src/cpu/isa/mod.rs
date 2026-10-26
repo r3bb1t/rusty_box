@@ -66,8 +66,8 @@ pub(crate) mod spec;
 use crate::cpu::exec::bits;
 pub(crate) use crate::cpu::features::Feature;
 
-use asimd::{Asimdall, Asimddiff, Asimdelem, Asimdext, Asimdimm, Asimdins, Asimdmisc, Asimdperm, Asimdsame, Asimdshf, Asimdtbl};
-use asisd::{Asisddiff, Asisdelem, Asisdmisc, Asisdone, Asisdpair, Asisdsame, Asisdshf};
+use asimd::{Asimdall, Asimddiff, Asimdelem, Asimdext, Asimdimm, Asimdins, Asimdmisc, Asimdperm, Asimdsame, Asimdsame2, Asimdshf, Asimdtbl};
+use asisd::{Asisddiff, Asisdelem, Asisdmisc, Asisdone, Asisdpair, Asisdsame, Asisdsame2, Asisdshf};
 use atomic::{Comswap, Comswappr, LdapstlUnscaled, Memop};
 use control::{Barriers, BranchImm, BranchReg, Compbranch, Condbranch, Exception, Hints, Pstate, Systeminstrs, Systemmove, Testbranch};
 use crypto::{Cryptoaes, Cryptosha2, Cryptosha3};
@@ -151,6 +151,7 @@ pub(crate) enum Encoding {
     Asisdpair(Asisdpair),
     Asisddiff(Asisddiff),
     Asisdsame(Asisdsame),
+    Asisdsame2(Asisdsame2),
     Asisdshf(Asisdshf),
     Asisdelem(Asisdelem),
     Asimdtbl(Asimdtbl),
@@ -161,6 +162,7 @@ pub(crate) enum Encoding {
     Asimdall(Asimdall),
     Asimddiff(Asimddiff),
     Asimdsame(Asimdsame),
+    Asimdsame2(Asimdsame2),
     Asimdimm(Asimdimm),
     Asimdshf(Asimdshf),
     Asimdelem(Asimdelem),
@@ -253,6 +255,7 @@ impl Encoding {
             Self::Asisdpair(_) => Class::SimdScalarPairwise,
             Self::Asisddiff(_) => Class::SimdScalarThreeDifferent,
             Self::Asisdsame(_) => Class::SimdScalarThreeSame,
+            Self::Asisdsame2(_) => Class::SimdScalarRoundingDoublingMultiplyAccumulate,
             Self::Asisdshf(_) => Class::SimdScalarShiftImmediate,
             Self::Asisdelem(_) => Class::SimdScalarIndexedElement,
             Self::Asimdtbl(_) => Class::SimdTableLookup,
@@ -263,9 +266,10 @@ impl Encoding {
             Self::Asimdall(_) => Class::SimdAcrossLanes,
             Self::Asimddiff(_) => Class::SimdThreeDifferent,
             Self::Asimdsame(_) => Class::SimdThreeSame,
+            Self::Asimdsame2(e) => e.class(),
             Self::Asimdimm(_) => Class::SimdModifiedImmediate,
             Self::Asimdshf(_) => Class::SimdShiftImmediate,
-            Self::Asimdelem(_) => Class::SimdIndexedElement,
+            Self::Asimdelem(e) => e.class(),
             Self::Float2fix(_) => Class::FpFixedPointConversion,
             Self::Float2int(_) => Class::FpIntegerConversion,
             Self::Floatdp1(_) => Class::FpDataProcessing1Source,
@@ -353,6 +357,18 @@ pub(crate) enum Class {
     SimdModifiedImmediate,
     SimdShiftImmediate,
     SimdIndexedElement,
+    /// SQRDMLAH, SQRDMLSH (vector): the handler reads which from `S`.
+    SimdRoundingDoublingMultiplyAccumulate,
+    /// SQRDMLAH, SQRDMLSH (scalar).
+    SimdScalarRoundingDoublingMultiplyAccumulate,
+    /// SDOT, UDOT, USDOT (vector): the handler reads which from `U` and
+    /// `opcode<0>`.
+    SimdDotProduct,
+    /// SDOT, UDOT, SUDOT, USDOT (by element): the handler reads which from
+    /// `U`, `opcode<0>` and `US`.
+    SimdDotProductIndexedElement,
+    /// SMMLA, USMMLA, UMMLA: the handler reads which from `U` and `B`.
+    SimdMatrixMultiply,
     FpFixedPointConversion,
     FpIntegerConversion,
     FpDataProcessing1Source,
@@ -452,7 +468,6 @@ impl Encoding {
             | Self::Asisddiff(_)
             | Self::Asisdsame(_)
             | Self::Asisdshf(_)
-            | Self::Asisdelem(_)
             | Self::Asimdtbl(_)
             | Self::Asimdperm(_)
             | Self::Asimdext(_)
@@ -462,8 +477,11 @@ impl Encoding {
             | Self::Asimddiff(_)
             | Self::Asimdsame(_)
             | Self::Asimdimm(_)
-            | Self::Asimdshf(_)
-            | Self::Asimdelem(_) => Feature::AdvSimd,
+            | Self::Asimdshf(_) => Feature::AdvSimd,
+            Self::Asisdsame2(e) => e.feature(),
+            Self::Asisdelem(e) => e.feature(),
+            Self::Asimdsame2(e) => e.feature(),
+            Self::Asimdelem(e) => e.feature(),
             Self::Float2fix(_)
             | Self::Float2int(_)
             | Self::Floatdp1(_)
@@ -539,6 +557,9 @@ mod tests {
                     Feature::Lse2 => field(mmfr2, 32) != 0,
                     Feature::Lrcpc => field(isar1, 20) >= 1,
                     Feature::Lrcpc2 => field(isar1, 20) >= 2,
+                    Feature::Rdm => field(isar0, 28) != 0,
+                    Feature::DotProd => field(isar0, 44) != 0,
+                    Feature::I8mm => field(isar1, 52) != 0,
                 };
                 assert_eq!(advertised, imp.has(feature), "{feature:?} on {imp:?}");
             }
@@ -547,15 +568,18 @@ mod tests {
             assert_eq!((field(pfr0, 16), field(pfr0, 20)), (0, 0), "FP and AdvSIMD, without half precision");
             // ID_AA64ISAR0_EL1: AES = 2 (AES and the 64-bit PMULL), SHA1 =
             // 1, SHA2 = 1 (SHA-256, not SHA-512), CRC32 = 1, Atomic = 2 with
-            // FEAT_LSE; nothing else. ISAR1 holds LRCPC alone, MMFR2 AT alone.
-            let lse = if imp.has(Feature::Lse) { 2 << 20 } else { 0 };
-            assert_eq!(isar0, 0x0000_0000_0001_1120 | lse);
-            assert_eq!(isar1 & !(0xF << 20), 0);
+            // FEAT_LSE, RDM = 1 and DP = 1; nothing else. ISAR1 holds LRCPC
+            // and I8MM alone, MMFR2 AT alone.
+            let at = |feature: Feature, lsb: u32, value: u64| if imp.has(feature) { value << lsb } else { 0 };
+            let isar0_later = at(Feature::Lse, 20, 2) | at(Feature::Rdm, 28, 1) | at(Feature::DotProd, 44, 1);
+            assert_eq!(isar0, 0x0000_0000_0001_1120 | isar0_later);
+            assert_eq!(isar1 & !((0xF << 20) | (0xF << 52)), 0);
             assert_eq!(mmfr2 & !(0xF << 32), 0);
             assert_eq!((isar2, isar3), (0, 0));
-            // No SVE2 (SVEver = 0, with FEAT_SME as without), and SME's
-            // required fields only with FEAT_SME.
-            assert_eq!(zfr0, 0);
+            // No SVE2 (SVEver = 0, with FEAT_SME as without); with FEAT_SME,
+            // I8MM reports FEAT_I8MM as ISAR1 does.
+            let zfr0_i8mm = if imp.has(Feature::Sme) { field(isar1, 52) << 44 } else { 0 };
+            assert_eq!(zfr0, zfr0_i8mm);
             if imp.has(Feature::Sme) {
                 assert_eq!(pfr1, 1 << 24, "SME = 1: FEAT_SME, not FEAT_SME2");
                 assert_eq!(smfr0, 0x0000_00FD_0000_0000, "F32F32, B16F32, F16F32, I8I32; SMEver 0");

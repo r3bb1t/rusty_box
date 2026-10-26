@@ -60,9 +60,9 @@ pub const ID_AA64DFR0_EL1: u64 = 0x0000_0000_0010_1006;
 
 /// `ID_AA64ISAR0_EL1` of a processor implementing `features`: AES (7:4) = 2
 /// with FEAT_AES (AESE, AESD, AESMC, AESIMC and the 64-bit PMULL), SHA1
-/// (11:8) = 1, SHA2 (15:12) = 1 (SHA-256 only), CRC32 (19:16) = 1 and
-/// Atomic (23:20) = 2 with FEAT_LSE; no SHA-512, SHA3, SM3, SM4 or later
-/// field. The Cortex-A57's is 0x11120, as QEMU sets it in
+/// (11:8) = 1, SHA2 (15:12) = 1 (SHA-256 only), CRC32 (19:16) = 1, Atomic
+/// (23:20) = 2 with FEAT_LSE, RDM (31:28) = 1 and DP (47:44) = 1 with
+/// FEAT_DotProd; no SHA-512, SHA3, SM3, SM4 or other field. The Cortex-A57's is 0x11120, as QEMU sets it in
 /// `aarch64_aa32_a57_init` (target/arm/cpu-max.c), which
 /// `aarch64_a57_initfn` calls.
 pub(crate) const fn id_aa64isar0(features: Features) -> u64 {
@@ -71,12 +71,15 @@ pub(crate) const fn id_aa64isar0(features: Features) -> u64 {
         | field(features, Feature::Sha256, 12, 1)
         | field(features, Feature::Crc32, 16, 1)
         | field(features, Feature::Lse, 20, 2)
+        | field(features, Feature::Rdm, 28, 1)
+        | field(features, Feature::DotProd, 44, 1)
 }
 
 /// `ID_AA64ISAR1_EL1` of a processor implementing `features`: LRCPC
 /// (23:20) = 1 with FEAT_LRCPC, 2 with FEAT_LRCPC2 as well (which Arm's
 /// feature model makes imply FEAT_LRCPC, so the field never promises LDAPR
-/// to a processor without it); nothing else from v8.2+.
+/// to a processor without it), and I8MM (55:52) = 1 with FEAT_I8MM;
+/// nothing else from v8.2+.
 pub(crate) const fn id_aa64isar1(features: Features) -> u64 {
     let lrcpc = if !features.has(Feature::Lrcpc) {
         0
@@ -85,7 +88,23 @@ pub(crate) const fn id_aa64isar1(features: Features) -> u64 {
     } else {
         1
     };
-    lrcpc << 20
+    (lrcpc << 20) | field(features, Feature::I8mm, 52, 1)
+}
+
+/// `ID_AA64ZFR0_EL1` of a processor implementing `features`: SVEver = 0
+/// (no SVE2), and I8MM (47:44) = 1 when FEAT_I8MM comes with FEAT_SME
+/// (`Features.json`: `(FEAT_SME || FEAT_SVE) ==> (FEAT_I8MM <=>
+/// UInt(ID_AA64ZFR0_EL1.I8MM) >= 1)`); zero without FEAT_SME, as a
+/// processor without SVE or SME reports it. The field promises the SVE
+/// USDOT and SUDOT in Streaming SVE mode, which are among the encodings
+/// of FEAT_SME still being built (`Feature::complete`), as is every SVE
+/// instruction that mode allows.
+pub(crate) const fn id_aa64zfr0(features: Features) -> u64 {
+    if features.has(Feature::Sme) {
+        field(features, Feature::I8mm, 44, 1)
+    } else {
+        0
+    }
 }
 
 /// `ID_AA64MMFR2_EL1` of a processor implementing `features`: AT (35:32) =

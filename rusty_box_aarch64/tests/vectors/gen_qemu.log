@@ -3,3 +3,10 @@ lse_cas: 200 vectors from 200 encodings
 lse_casp: 200 vectors from 200 encodings
 rcpc_ldapr: 200 vectors from 200 encodings
 rcpc_unscaled: 200 vectors from 241 encodings
+rdm_vector: 200 vectors from 435 encodings
+rdm_scalar: 200 vectors from 422 encodings
+rdm_elem: 200 vectors from 403 encodings
+rdm_scalar_elem: 200 vectors from 390 encodings
+dot_vector: 200 vectors from 1136 encodings
+dot_elem: 200 vectors from 311 encodings
+mmla: 200 vectors from 265 encodings

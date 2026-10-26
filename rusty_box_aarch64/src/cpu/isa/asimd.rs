@@ -2,6 +2,7 @@
 //! "Data Processing -- Scalar Floating-Point and Advanced SIMD", the rows
 //! with `op0 = 0xx0`).
 
+use super::{Class, Feature};
 use crate::cpu::exec::bits;
 
 /// Arm group `asimdtbl`: Advanced SIMD table lookup.
@@ -317,6 +318,97 @@ pub(crate) enum Asimdelem {
     UmlslL,
     UmullL,
     FmulxRSd,
+    SdotD,
+    SudotD,
+    UsdotD,
+    SqrdmlahR,
+    UdotD,
+    SqrdmlshR,
+}
+
+impl Asimdelem {
+    pub(crate) const fn class(self) -> Class {
+        match self {
+            Self::SmlalL
+            | Self::SqdmlalL
+            | Self::SmlslL
+            | Self::SqdmlslL
+            | Self::MulR
+            | Self::SmullL
+            | Self::SqdmullL
+            | Self::SqdmulhR
+            | Self::SqrdmulhR
+            | Self::FmlaRSd
+            | Self::FmlsRSd
+            | Self::FmulRSd
+            | Self::MlaR
+            | Self::UmlalL
+            | Self::MlsR
+            | Self::UmlslL
+            | Self::UmullL
+            | Self::FmulxRSd
+            | Self::SqrdmlahR
+            | Self::SqrdmlshR => Class::SimdIndexedElement,
+            Self::SdotD | Self::UdotD | Self::SudotD | Self::UsdotD => Class::SimdDotProductIndexedElement,
+        }
+    }
+
+    pub(crate) const fn feature(self) -> Feature {
+        match self {
+            Self::SmlalL
+            | Self::SqdmlalL
+            | Self::SmlslL
+            | Self::SqdmlslL
+            | Self::MulR
+            | Self::SmullL
+            | Self::SqdmullL
+            | Self::SqdmulhR
+            | Self::SqrdmulhR
+            | Self::FmlaRSd
+            | Self::FmlsRSd
+            | Self::FmulRSd
+            | Self::MlaR
+            | Self::UmlalL
+            | Self::MlsR
+            | Self::UmlslL
+            | Self::UmullL
+            | Self::FmulxRSd => Feature::AdvSimd,
+            Self::SdotD | Self::UdotD => Feature::DotProd,
+            Self::SudotD | Self::UsdotD => Feature::I8mm,
+            Self::SqrdmlahR | Self::SqrdmlshR => Feature::Rdm,
+        }
+    }
+}
+
+/// Arm group `asimdsame2`: Advanced SIMD three-register extension.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum Asimdsame2 {
+    SdotD,
+    UsdotD,
+    Sqrdmlah,
+    Sqrdmlsh,
+    UdotD,
+    SmmlaG,
+    UsmmlaG,
+    UmmlaG,
+}
+
+impl Asimdsame2 {
+    pub(crate) const fn class(self) -> Class {
+        match self {
+            Self::Sqrdmlah | Self::Sqrdmlsh => Class::SimdRoundingDoublingMultiplyAccumulate,
+            Self::SdotD | Self::UdotD | Self::UsdotD => Class::SimdDotProduct,
+            Self::SmmlaG | Self::UsmmlaG | Self::UmmlaG => Class::SimdMatrixMultiply,
+        }
+    }
+
+    pub(crate) const fn feature(self) -> Feature {
+        match self {
+            Self::SdotD | Self::UdotD => Feature::DotProd,
+            Self::UsdotD | Self::SmmlaG | Self::UsmmlaG | Self::UmmlaG => Feature::I8mm,
+            Self::Sqrdmlah | Self::Sqrdmlsh => Feature::Rdm,
+        }
+    }
 }
 
 pub(super) fn asimdtbl(word: u32) -> Option<Asimdtbl> {
@@ -659,8 +751,8 @@ pub(super) fn asimdelem(word: u32) -> Option<Asimdelem> {
     let size = bits(word, 23, 22);
     let opcode = bits(word, 15, 12);
     // size = 00 with a floating-point opcode is half precision
-    // (FEAT_FP16); the remaining opcodes are FEAT_RDM, FEAT_DotProd,
-    // FEAT_I8MM, FEAT_FHM, FEAT_FCMA, FEAT_BF16 and FEAT_FP8 forms.
+    // (FEAT_FP16); the remaining opcodes are FEAT_FHM, FEAT_FCMA,
+    // FEAT_BF16 and FEAT_FP8 forms.
     match (u, size, opcode) {
         (0b0, _, 0b0010) => Some(Asimdelem::SmlalL),
         (0b0, _, 0b0011) => Some(Asimdelem::SqdmlalL),
@@ -680,6 +772,44 @@ pub(super) fn asimdelem(word: u32) -> Option<Asimdelem> {
         (0b1, _, 0b0110) => Some(Asimdelem::UmlslL),
         (0b1, _, 0b1010) => Some(Asimdelem::UmullL),
         (0b1, 0b10 | 0b11, 0b1001) => Some(Asimdelem::FmulxRSd),
+        (0b0, _, 0b1110) => Some(Asimdelem::SdotD),
+        (0b0, 0b00, 0b1111) => Some(Asimdelem::SudotD),
+        (0b0, 0b10, 0b1111) => Some(Asimdelem::UsdotD),
+        (0b1, _, 0b1101) => Some(Asimdelem::SqrdmlahR),
+        (0b1, _, 0b1110) => Some(Asimdelem::UdotD),
+        (0b1, _, 0b1111) => Some(Asimdelem::SqrdmlshR),
+        _ => None,
+    }
+}
+
+pub(super) fn asimdsame2(word: u32) -> Option<Asimdsame2> {
+    let q = bits(word, 30, 30);
+    let u = bits(word, 29, 29);
+    let size = bits(word, 23, 22);
+    let opcode = bits(word, 14, 11);
+    // The other opcodes are FEAT_FCMA, FEAT_BF16 and FEAT_FP8 forms and
+    // later matrix multiplies.
+    match (u, opcode) {
+        (0b0, 0b0010) => Some(Asimdsame2::SdotD),
+        (0b0, 0b0011) => match size {
+            0b10 => Some(Asimdsame2::UsdotD),
+            _ => None,
+        },
+        (0b1, 0b0000) => Some(Asimdsame2::Sqrdmlah),
+        (0b1, 0b0001) => Some(Asimdsame2::Sqrdmlsh),
+        (0b1, 0b0010) => Some(Asimdsame2::UdotD),
+        (0b0, 0b0100) => match (q, size) {
+            (0b1, 0b10) => Some(Asimdsame2::SmmlaG),
+            _ => None,
+        },
+        (0b0, 0b0101) => match (q, size) {
+            (0b1, 0b10) => Some(Asimdsame2::UsmmlaG),
+            _ => None,
+        },
+        (0b1, 0b0100) => match (q, size) {
+            (0b1, 0b10) => Some(Asimdsame2::UmmlaG),
+            _ => None,
+        },
         _ => None,
     }
 }
