@@ -86,6 +86,8 @@ pub(crate) enum Feature {
     /// FEAT_PACQARMA5: the code computed with QARMA5. No encoding of its
     /// own.
     PacQarma5,
+    /// FEAT_BTI: BTI, PSTATE.BTYPE and guarded pages.
+    Bti,
 }
 
 /// What the conformance tests read of a feature: `tests/unit/spec.rs`
@@ -93,7 +95,7 @@ pub(crate) enum Feature {
 #[cfg(test)]
 impl Feature {
     /// Every feature, in declaration order.
-    pub(crate) const ALL: [Feature; 26] = [
+    pub(crate) const ALL: [Feature; 27] = [
         Feature::Base,
         Feature::Fp,
         Feature::AdvSimd,
@@ -120,6 +122,7 @@ impl Feature {
         Feature::Fpac,
         Feature::FpacCombine,
         Feature::PacQarma5,
+        Feature::Bti,
     ];
 
     /// The name Arm's data gives the feature, `None` for the base set.
@@ -151,6 +154,7 @@ impl Feature {
             Self::Fpac => Some("FEAT_FPAC"),
             Self::FpacCombine => Some("FEAT_FPACCOMBINE"),
             Self::PacQarma5 => Some("FEAT_PACQARMA5"),
+            Self::Bti => Some("FEAT_BTI"),
         }
     }
 

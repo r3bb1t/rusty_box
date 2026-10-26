@@ -508,8 +508,9 @@ impl Cpu {
     /// with key A or B as `M` says, under the modifier `Rm` (31 being SP)
     /// for the `Z = 1` branches, zero for the `Z = 0` ones and SP for the
     /// returns; a failure to authenticate faults with FEAT_FPACCOMBINE and
-    /// otherwise leaves a target the fetch faults on.
-    pub(crate) fn exec_branch_auth(&mut self, pc: u64, insn: u32) -> ExecResult {
+    /// otherwise leaves a target the fetch faults on. Whether the branch was
+    /// fetched from a guarded page decides its BTYPE (FEAT_BTI).
+    pub(crate) fn exec_branch_auth(&mut self, pc: u64, insn: u32, in_guarded_page: bool) -> ExecResult {
         let key = PacKey::instruction(bit(insn, 10));
         let rn = bits(insn, 9, 5);
         let rm = bits(insn, 4, 0);
@@ -533,6 +534,9 @@ impl Cpu {
                 let target = self.auth(self.x_or_zr(rn), modifier, key, AuthUse::Combined)?;
                 if opc & 1 == 1 {
                     self.x[30] = pc.wrapping_add(4);
+                    self.set_btype_call();
+                } else {
+                    self.set_btype_jump(in_guarded_page, rn);
                 }
                 Ok(Flow::Jump(target))
             }

@@ -9,6 +9,10 @@
 pub mod id;
 
 mod atomic;
+mod bti;
+#[cfg(test)]
+#[path = "../../tests/unit/bti.rs"]
+mod bti_tests;
 mod crypto;
 mod decode;
 #[cfg(test)]
@@ -72,6 +76,49 @@ impl El {
     }
 }
 
+/// `PSTATE.BTYPE` (FEAT_BTI): the kind of indirect branch that led to the
+/// instruction about to execute, which that instruction must accept when
+/// it is in a guarded page (Arm `BranchTargetCheck`). Each variant is named
+/// by the BTI that accepts it.
+///
+/// Closed (R5): the field's four values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Btype {
+    /// 00: no indirect branch; every instruction but BR, BLR and their
+    /// authenticating forms leaves this, and no check is made.
+    None,
+    /// 01: BR from X16 or X17, or from a page that is not guarded: a
+    /// `BTI c`, `BTI j` or `BTI jc` accepts it.
+    JumpOrCall,
+    /// 10: BLR: a `BTI c` or `BTI jc` accepts it.
+    Call,
+    /// 11: BR from any other register in a guarded page: a `BTI j` or
+    /// `BTI jc` accepts it.
+    Jump,
+}
+
+impl Btype {
+    /// The field's encoding.
+    pub const fn bits(self) -> u64 {
+        match self {
+            Self::None => 0b00,
+            Self::JumpOrCall => 0b01,
+            Self::Call => 0b10,
+            Self::Jump => 0b11,
+        }
+    }
+
+    /// The value the low two bits of `bits` encode.
+    pub const fn from_bits(bits: u64) -> Self {
+        match bits & 0b11 {
+            0b00 => Self::None,
+            0b01 => Self::JumpOrCall,
+            0b10 => Self::Call,
+            _ => Self::Jump,
+        }
+    }
+}
+
 /// `PSTATE`, held as separate fields; [`Pstate::to_spsr`] and
 /// [`Pstate::from_spsr`] are the only conversions to and from the packed
 /// `SPSR` layout.
@@ -90,6 +137,8 @@ pub struct Pstate {
     pub sp_sel: bool,
     pub ss: bool,
     pub il: bool,
+    /// [`Btype::None`] on a processor without FEAT_BTI.
+    pub btype: Btype,
 }
 
 impl Pstate {
@@ -107,6 +156,7 @@ impl Pstate {
         sp_sel: true,
         ss: false,
         il: false,
+        btype: Btype::None,
     };
 
     /// The `SPSR_ELx` encoding of this state (AArch64 form, `M[4]` = 0).
@@ -118,6 +168,7 @@ impl Pstate {
         v |= (self.v as u64) << 28;
         v |= (self.ss as u64) << 21;
         v |= (self.il as u64) << 20;
+        v |= self.btype.bits() << 10;
         v |= (self.d as u64) << 9;
         v |= (self.a as u64) << 8;
         v |= (self.i as u64) << 7;
@@ -153,6 +204,7 @@ impl Pstate {
             sp_sel: m & 1 != 0,
             ss: spsr & (1 << 21) != 0,
             il: spsr & (1 << 20) != 0,
+            btype: Btype::from_bits(spsr >> 10),
         })
     }
 

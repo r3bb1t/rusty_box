@@ -16,7 +16,7 @@ use rusty_box_core::SnapError;
 use super::dp::ones;
 use super::exception::{Exception, ExceptionClass};
 use super::exec::{sext, Fault, StopCause};
-use super::features::Feature;
+use super::features::{Feature, Features};
 use super::{id, Cpu, El};
 use crate::bus::{AccessWidth, BusFault, PhysAddr, PhysBus};
 
@@ -156,6 +156,9 @@ const PERM_EL1_X: u8 = 1 << 2;
 const PERM_EL0_R: u8 = 1 << 3;
 const PERM_EL0_W: u8 = 1 << 4;
 const PERM_EL0_X: u8 = 1 << 5;
+const PERMS: u8 = PERM_EL1_R | PERM_EL1_W | PERM_EL1_X | PERM_EL0_R | PERM_EL0_W | PERM_EL0_X;
+/// Not a permission: the descriptor's GP bit (FEAT_BTI), a guarded page.
+const GUARDED: u8 = 1 << 6;
 
 #[inline]
 const fn permitted(perms: u8, kind: AccessKind, el: El) -> bool {
@@ -175,6 +178,8 @@ const fn permitted(perms: u8, kind: AccessKind, el: El) -> bool {
 pub(crate) struct Fetched {
     pub(crate) word: u32,
     pub(crate) pa: u64,
+    /// Arm `InGuardedPage` (FEAT_BTI), as the fetch's translation sets it.
+    pub(crate) guarded: bool,
 }
 
 /// The outcome of a translation.
@@ -183,6 +188,17 @@ pub(crate) struct Translated {
     pub(crate) pa: u64,
     /// Device memory: unaligned accesses fault, `DC ZVA` faults.
     pub(crate) device: bool,
+}
+
+/// A translation with the flags of the TLB entry it came from, which only
+/// an instruction fetch reads past the permission check: whether the page
+/// is guarded (FEAT_BTI). With stage 1 disabled no page is guarded
+/// (`AArch64_S1DisabledOutput`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Mapping {
+    pa: u64,
+    device: bool,
+    flags: u8,
 }
 
 /// A completed walk, before permissions are checked against an access.
@@ -252,7 +268,10 @@ impl Tlb {
         Ok(())
     }
 
-    pub(crate) fn restore<R: SnapRead>(&mut self, r: &mut R) -> SnapResult {
+    /// The inverse of [`Tlb::save`], for a processor implementing
+    /// `features`: an entry must be one its walk can produce.
+    pub(crate) fn restore<R: SnapRead>(&mut self, r: &mut R, features: Features) -> SnapResult {
+        let walked = PERMS | if features.has(Feature::Bti) { GUARDED } else { 0 };
         let valid = r.read_count(TLB_ENTRIES)?;
         self.flush();
         for _ in 0..valid {
@@ -261,7 +280,7 @@ impl Tlb {
             let mut rest = [0u8; 3];
             r.read_bytes(&mut rest)?;
             let [perms, device, level] = rest;
-            if tag == INVALID_TAG || pa_page & 0xFFF != 0 || perms >= 1 << 6 || device > 1 || level > 3 {
+            if tag == INVALID_TAG || pa_page & 0xFFF != 0 || perms & !walked != 0 || device > 1 || level > 3 {
                 return Err(SnapError::Invalid("TLB entry is not one a walk can produce"));
             }
             let slot = &mut self.entries[Self::slot(tag << 12)];
@@ -318,6 +337,15 @@ impl Cpu {
         kind: AccessKind,
         el: El,
     ) -> Result<Translated, Fsc> {
+        self.map(bus, va, kind, el).map(|m| Translated {
+            pa: m.pa,
+            device: m.device,
+        })
+    }
+
+    /// [`Cpu::translate`], with the entry's flags.
+    #[inline(always)]
+    fn map<B: PhysBus>(&mut self, bus: &mut B, va: u64, kind: AccessKind, el: El) -> Result<Mapping, Fsc> {
         if !self.mmu_enabled() {
             // Arm ARM D8.2.11 (`AArch64.TranslateAddressS1Off`): with stage 1
             // disabled the output address is the input address below
@@ -327,9 +355,10 @@ impl Cpu {
             if address >> id::PA_BITS != 0 {
                 return Err(Fsc::AddressSize(0));
             }
-            return Ok(Translated {
+            return Ok(Mapping {
                 pa: address,
                 device: kind != AccessKind::Fetch,
+                flags: 0,
             });
         }
 
@@ -338,9 +367,10 @@ impl Cpu {
             if !permitted(entry.perms, kind, el) {
                 return Err(Fsc::Permission(entry.level));
             }
-            return Ok(Translated {
+            return Ok(Mapping {
                 pa: entry.pa_page | (va & 0xFFF),
                 device: entry.device,
+                flags: entry.perms,
             });
         }
         self.translate_miss(bus, va, kind, el)
@@ -348,7 +378,7 @@ impl Cpu {
 
     /// A TLB miss: walk, cache what the walk found, check permissions.
     #[inline(never)]
-    fn translate_miss<B: PhysBus>(&mut self, bus: &mut B, va: u64, kind: AccessKind, el: El) -> Result<Translated, Fsc> {
+    fn translate_miss<B: PhysBus>(&mut self, bus: &mut B, va: u64, kind: AccessKind, el: El) -> Result<Mapping, Fsc> {
         let slot = Tlb::slot(va);
         let walked = self.walk(bus, va, kind)?;
         // A tagged address keeps its tag in the entry's tag, so it hits only
@@ -369,9 +399,10 @@ impl Cpu {
         if !permitted(walked.perms, kind, el) {
             return Err(Fsc::Permission(walked.level));
         }
-        Ok(Translated {
+        Ok(Mapping {
             pa: walked.pa,
             device: walked.device,
+            flags: walked.perms,
         })
     }
 
@@ -540,6 +571,11 @@ impl Cpu {
             if el0_x {
                 perms |= PERM_EL0_X;
             }
+            // GP, bit 50 of a block or page descriptor, RES0 without
+            // FEAT_BTI.
+            if (desc >> 50) & 1 == 1 && self.implements(Feature::Bti) {
+                perms |= GUARDED;
+            }
             let attr = ((self.sys.mair_el1 >> (((desc >> 2) & 7) * 8)) & 0xFF) as u8;
             return Ok(Walked {
                 pa: out | (va & ones(shift)),
@@ -628,12 +664,16 @@ impl Cpu {
     #[inline]
     pub(crate) fn fetch<B: PhysBus>(&mut self, bus: &mut B, pc: u64) -> Result<Fetched, Fault> {
         let el = self.pstate.el;
-        let t = self
-            .translate(bus, pc, AccessKind::Fetch, el)
+        let m = self
+            .map(bus, pc, AccessKind::Fetch, el)
             .map_err(|f| Fault::from(Exception::new(ExceptionClass::InstructionAbort, f.code()).with_far(pc)))?;
-        match bus.fetch(PhysAddr::new(t.pa), self.clock()) {
-            Ok(word) => Ok(Fetched { word, pa: t.pa }),
-            Err(BusFault::Unmapped) => Err(self.external_abort(pc, t.pa, AccessKind::Fetch)),
+        match bus.fetch(PhysAddr::new(m.pa), self.clock()) {
+            Ok(word) => Ok(Fetched {
+                word,
+                pa: m.pa,
+                guarded: m.flags & GUARDED != 0,
+            }),
+            Err(BusFault::Unmapped) => Err(self.external_abort(pc, m.pa, AccessKind::Fetch)),
         }
     }
 

@@ -615,7 +615,9 @@ impl Cpu {
                 WriteEffect::FlushTlb
             }
             SPSR_EL1 => {
-                self.sys.spsr_el1 = value & 0xF030_03DF;
+                // BTYPE, bits 11:10, with FEAT_BTI.
+                let btype = if self.implements(Feature::Bti) { 0b11 << 10 } else { 0 };
+                self.sys.spsr_el1 = value & (0xF030_03DF | btype);
                 WriteEffect::None
             }
             ELR_EL1 => {

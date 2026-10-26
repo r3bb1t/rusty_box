@@ -49,6 +49,7 @@ pub(crate) enum Hints {
     AutiaspHi,
     AutibzHi,
     AutibspHi,
+    BtiHb,
     HintHm,
 }
 
@@ -226,6 +227,7 @@ fn hints(word: u32) -> Option<Hints> {
         (0b0011, 0b101) => Some(Hints::AutiaspHi),
         (0b0011, 0b110) => Some(Hints::AutibzHi),
         (0b0011, 0b111) => Some(Hints::AutibspHi),
+        (0b0100, 0b000 | 0b010 | 0b100 | 0b110) => Some(Hints::BtiHb),
         _ => Some(Hints::HintHm),
     }
 }
@@ -233,7 +235,9 @@ fn hints(word: u32) -> Option<Hints> {
 impl Hints {
     /// The handler class, by [`Hints::feature`]: the pointer authentication
     /// hints have their own; every other hint shares the hint one. Both
-    /// handlers read which hint from `CRm` and `op2`.
+    /// handlers read which hint from `CRm` and `op2`. BTI executes as a NOP:
+    /// what it does is the check of PSTATE.BTYPE every instruction makes
+    /// before it executes ([`crate::cpu::Cpu::branch_target_check`]).
     pub(crate) const fn class(self) -> Class {
         if matches!(self.feature(), Feature::PAuth) {
             Class::PointerAuthHint
@@ -265,6 +269,7 @@ impl Hints {
             | Self::AutiaspHi
             | Self::AutibzHi
             | Self::AutibspHi => Feature::PAuth,
+            Self::BtiHb => Feature::Bti,
         }
     }
 }

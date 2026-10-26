@@ -15,7 +15,7 @@ use super::exception::{Exception, ExceptionClass};
 use super::fp::FpType;
 use super::isa::Class;
 use super::ldst::SingleForm;
-use super::{Activity, Cpu};
+use super::{Activity, Btype, Cpu};
 use crate::bus::{AccessWidth, BusFault, PhysAddr, PhysBus};
 use crate::instrumentation::{Direction, Instrumentation, MemoryAccess};
 
@@ -174,10 +174,16 @@ impl Cpu {
     /// and tell `observer` what happened.
     pub fn step<B: PhysBus, I: Instrumentation>(&mut self, bus: &mut B, observer: &mut I) -> Step {
         let pc = self.pc;
+        let btype = self.pstate.btype;
         let mut observed = Observed { bus, observer };
         let mut fetched = None;
         let result = self.execute(&mut observed, pc, &mut fetched);
         let observer = observed.observer;
+        if result.is_err() {
+            // An instruction that faults or stops completes nothing:
+            // PSTATE.BTYPE stays what the branch to it left.
+            self.pstate.btype = btype;
+        }
         match result {
             Ok(flow) => {
                 self.icount += 1;
@@ -237,6 +243,9 @@ impl Cpu {
         let insn = fetched.word;
         *fetched_word = Some(insn);
         bus.observer.before_execution(pc, insn);
+        if self.pstate.btype != Btype::None {
+            self.branch_target_check(fetched.guarded, insn)?;
+        }
         match self.decode_cache.decode(fetched.pa, insn) {
             Class::Undefined => self.undefined(pc, insn),
             Class::Hint => self.exec_hint(insn, pc),
@@ -255,8 +264,8 @@ impl Cpu {
             Class::CompareAndBranch => self.exec_compbranch(pc, insn),
             Class::TestAndBranch => self.exec_testbranch(pc, insn),
             Class::BranchImmediate => self.exec_branch_imm(pc, insn),
-            Class::BranchRegister => self.exec_branch_reg(pc, insn),
-            Class::AuthenticatedBranch => self.exec_branch_auth(pc, insn),
+            Class::BranchRegister => self.exec_branch_reg(pc, insn, fetched.guarded),
+            Class::AuthenticatedBranch => self.exec_branch_auth(pc, insn, fetched.guarded),
             Class::ConditionalCompareImmediate | Class::ConditionalCompareRegister => self.exec_condcmp(pc, insn),
             Class::ConditionalSelect => self.exec_condsel(pc, insn),
             Class::DataProcessing1Source => self.exec_dp1(pc, insn),

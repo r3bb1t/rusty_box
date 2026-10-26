@@ -462,6 +462,21 @@ pub(crate) enum Class {
     ReadStreamingVectorLength,
 }
 
+/// What an encoding's decode does about the branch that led to it into a
+/// guarded page (FEAT_BTI): which `BTypeCompatible` it sets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BranchTarget {
+    /// BTI accepts the branches `op2<2:1>` names (`BTypeCompatible_BTI`).
+    Bti,
+    /// PACIASP and PACIBSP accept a branch unless SCTLR_EL1's BT0 or BT1
+    /// says otherwise (`BTypeCompatible_PAC`).
+    PacSp,
+    /// BRK accepts any branch.
+    Any,
+    /// Every other encoding's decode leaves `BTypeCompatible` FALSE.
+    Refused,
+}
+
 impl Encoding {
     /// The handler of this encoding on a processor without its feature: a
     /// hint executes as a NOP (its decode's `EndOfDecode(Decode_NOP)`),
@@ -471,6 +486,17 @@ impl Encoding {
             Class::Hint
         } else {
             Class::Undefined
+        }
+    }
+
+    /// What this encoding does about a branch into a guarded page, on a
+    /// processor implementing its feature.
+    pub(crate) const fn branch_target(self) -> BranchTarget {
+        match self {
+            Self::Hints(Hints::BtiHb) => BranchTarget::Bti,
+            Self::Hints(Hints::PaciaspHi | Hints::PacibspHi) => BranchTarget::PacSp,
+            Self::Exception(Exception::BrkEx) => BranchTarget::Any,
+            _ => BranchTarget::Refused,
         }
     }
 
@@ -644,6 +670,7 @@ mod tests {
                     Feature::Fpac => field(isar1, 4) >= 4,
                     Feature::FpacCombine => field(isar1, 4) >= 5,
                     Feature::PacQarma5 => field(isar1, 24) != 0,
+                    Feature::Bti => field(pfr1, 0) != 0,
                 };
                 assert_eq!(advertised, imp.has(feature), "{feature:?} on {imp:?}");
             }
@@ -671,11 +698,14 @@ mod tests {
             // BF16 and I8MM report FEAT_BF16 and FEAT_I8MM as ISAR1 does.
             let zfr0_later = if imp.has(Feature::Sme) { (field(isar1, 44) << 20) | (field(isar1, 52) << 44) } else { 0 };
             assert_eq!(zfr0, zfr0_later);
+            // PFR1: BT = 1 (FEAT_BTI, not FEAT_BTIE) and SME alone.
+            assert_eq!(pfr1 & !((0xF << 24) | 0xF), 0);
+            assert!(field(pfr1, 0) <= 1, "BT = 1: FEAT_BTI, not FEAT_BTIE");
             if imp.has(Feature::Sme) {
-                assert_eq!(pfr1, 1 << 24, "SME = 1: FEAT_SME, not FEAT_SME2");
+                assert_eq!(field(pfr1, 24), 1, "SME = 1: FEAT_SME, not FEAT_SME2");
                 assert_eq!(smfr0, 0x0000_00FD_0000_0000, "F32F32, B16F32, F16F32, I8I32; SMEver 0");
             } else {
-                assert_eq!((pfr1, smfr0), (0, 0));
+                assert_eq!((field(pfr1, 24), smfr0), (0, 0));
             }
         }
     }

@@ -4,7 +4,8 @@
 //! Every exception targets EL1: this core implements neither EL2 nor EL3, so
 //! there is no routing to decide.
 
-use super::{Activity, Cpu, El, Pstate};
+use super::features::Feature;
+use super::{Activity, Btype, Cpu, El, Pstate};
 use crate::instrumentation::{ExceptionKind, ExceptionTaken};
 
 /// `ESR_ELx.EC`, the exception classes this core can raise.
@@ -21,6 +22,9 @@ pub enum ExceptionClass {
     WfxTrap,
     /// EC 0x07: SIMD&FP access trapped by `CPACR_EL1.FPEN`.
     FpAccess,
+    /// EC 0x0D: an indirect branch to an instruction in a guarded page
+    /// that does not accept it (FEAT_BTI); `ISS[1:0]` is `PSTATE.BTYPE`.
+    BranchTarget,
     /// EC 0x0E: execution with `PSTATE.IL` set.
     IllegalState,
     /// EC 0x15.
@@ -54,6 +58,7 @@ impl ExceptionClass {
             Self::Unknown => 0x00,
             Self::WfxTrap => 0x01,
             Self::FpAccess => 0x07,
+            Self::BranchTarget => 0x0D,
             Self::IllegalState => 0x0E,
             Self::Svc => 0x15,
             Self::SysRegTrap => 0x18,
@@ -76,6 +81,25 @@ impl ExceptionClass {
             }
             Self::SpAlignment => 0x26,
             Self::Brk => 0x3C,
+        }
+    }
+
+    /// Whether the exception keeps `PSTATE.BTYPE` in `SPSR_EL1.BTYPE`
+    /// (Arm `AArch64_TakeException`): the classes whose return can resume
+    /// the branch target check, IRQ and FIQ too. Every other one saves 00,
+    /// the choice `ConstrainUnpredictable(Unpredictable_ZEROBTYPE)` makes.
+    const fn preserves_btype(self) -> bool {
+        match self {
+            Self::BranchTarget | Self::IllegalState | Self::InstructionAbort | Self::PcAlignment | Self::Brk => true,
+            Self::Unknown
+            | Self::WfxTrap
+            | Self::FpAccess
+            | Self::Svc
+            | Self::SysRegTrap
+            | Self::PacFail
+            | Self::SmeAccess
+            | Self::DataAbort
+            | Self::SpAlignment => false,
         }
     }
 
@@ -145,7 +169,15 @@ impl Cpu {
         if let Some(far) = e.far {
             self.sys.far_el1 = far;
         }
-        let vector = self.enter_el1(VectorKind::Synchronous, return_addr);
+        let saved = if e.class.preserves_btype() {
+            self.pstate
+        } else {
+            Pstate {
+                btype: Btype::None,
+                ..self.pstate
+            }
+        };
+        let vector = self.enter_el1(VectorKind::Synchronous, return_addr, saved.to_spsr());
         ExceptionTaken {
             kind: ExceptionKind::Synchronous(e.class),
             from,
@@ -169,7 +201,7 @@ impl Cpu {
     fn take_interrupt(&mut self, vector_kind: VectorKind, kind: ExceptionKind) -> ExceptionTaken {
         let from = self.pstate.el;
         let pc = self.pc;
-        let vector = self.enter_el1(vector_kind, pc);
+        let vector = self.enter_el1(vector_kind, pc, self.pstate.to_spsr());
         ExceptionTaken {
             kind,
             from,
@@ -180,17 +212,17 @@ impl Cpu {
         }
     }
 
-    /// `AArch64.TakeException` to EL1. Returns the vector now executing.
-    /// `PSTATE.SM` and `PSTATE.ZA` are not part of `PSTATE`'s saved image
-    /// and carry over unchanged.
-    fn enter_el1(&mut self, kind: VectorKind, return_addr: u64) -> u64 {
+    /// `AArch64.TakeException` to EL1, saving `spsr`, the image of `PSTATE`
+    /// the exception keeps. Returns the vector now executing. `PSTATE.SM`
+    /// and `PSTATE.ZA` are not part of that image and carry over unchanged.
+    fn enter_el1(&mut self, kind: VectorKind, return_addr: u64, spsr: u64) -> u64 {
         self.maybe_zero_sve_uppers();
         let quadrant = match (self.pstate.el, self.pstate.sp_sel) {
             (El::El0, _) => 0x400,
             (El::El1, false) => 0x000,
             (El::El1, true) => 0x200,
         };
-        self.sys.spsr_el1 = self.pstate.to_spsr();
+        self.sys.spsr_el1 = spsr;
         self.sys.elr_el1 = return_addr;
         self.pstate = Pstate {
             n: self.pstate.n,
@@ -205,6 +237,7 @@ impl Cpu {
             sp_sel: true,
             ss: false,
             il: false,
+            btype: Btype::None,
         };
         self.pc = self.branch_addr((self.sys.vbar_el1 & !0x7FF).wrapping_add(quadrant + kind.offset()));
         self.monitor.armed = false;
@@ -235,6 +268,7 @@ impl Cpu {
                 None => false,
             };
 
+        let bti = self.implements(Feature::Bti);
         let p = &mut self.pstate;
         p.n = spsr & (1 << 31) != 0;
         p.z = spsr & (1 << 30) != 0;
@@ -250,12 +284,15 @@ impl Cpu {
                 p.el = el;
                 p.sp_sel = m & 1 != 0;
                 p.il = spsr & (1 << 20) != 0;
+                p.btype = if bti { Btype::from_bits(spsr >> 10) } else { Btype::None };
             }
             // Illegal exception return (Arm ARM D1.11.4): EL and SP are
             // unchanged, PSTATE.IL is set, and the next instruction raises
-            // an Illegal Execution State exception.
+            // an Illegal Execution State exception. PSTATE.BTYPE is UNKNOWN
+            // (Arm `SetPSTATEFromPSR`): 00 here.
             _ => {
                 p.il = true;
+                p.btype = Btype::None;
             }
         }
         target

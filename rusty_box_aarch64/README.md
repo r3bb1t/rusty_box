@@ -123,7 +123,9 @@ FRINT64X) and FEAT_BF16 (BFCVT, BFCVTN, BFDOT, BFMLALB, BFMLALT, BFMMLA);
 FEAT_PAuth with FEAT_PAuth2, FEAT_FPAC, FEAT_FPACCOMBINE and the QARMA5
 algorithm (FEAT_PACQARMA5), as QEMU's `max` has them: the keys, every PAC,
 AUT, XPAC and PACGA instruction and hint, the branches, returns, exception
-returns and loads that authenticate, and TCR_EL1.TBID0/TBID1;
+returns and loads that authenticate, and TCR_EL1.TBID0/TBID1; FEAT_BTI
+(BTI, PSTATE.BTYPE, guarded pages, the Branch Target exception and
+SCTLR_EL1.BT0/BT1);
 and, being built, FEAT_SME (its state, registers, SMSTART
 and SMSTOP, RDSVL, ADDSVL and ADDSPL). No processor a machine runs has them
 yet: the tests run them on a test-only processor with every feature, whose
@@ -217,6 +219,18 @@ integration tests of the public API.
   and off, a TLB entry a load filled for the same address included.
   Making the signing take its half of the address space from bit 55 alone
   fails both the replay and the test that pins InsertPAC's choice.
+- `tests/unit/bti.rs` checks FEAT_BTI against Arm's pseudocode, over a
+  stage-1 table with guarded and unguarded blocks: the BTYPE each branch
+  leaves (BR in and out of a guarded page, through X16 and X17 and other
+  registers, BLR, RET, the authenticating forms), which BTI, PACIASP and
+  PACIBSP (under SCTLR_EL1.BT0 and BT1) and BRK accept it, the check
+  before an UNDEFINED decode, no check outside a guarded page or with the
+  MMU off, BTYPE kept in SPSR_EL1 by an instruction abort, a BRK and an
+  IRQ and zeroed by an SVC, restored by ERET, cleared by a host write of
+  the PC, carried by a snapshot with the TLB's guarded pages (which only a
+  processor with the feature restores), and none of it on a processor
+  without the feature. Leaving PSTATE.BTYPE as the faulting instruction
+  found it fails the BRK case.
 - `tests/crypto.rs` runs the cryptographic and CRC32 instructions as a guest
   uses them, to the standards' own answers: AES-128 encryption and
   decryption of the FIPS-197 example, SHA-1 and SHA-256 of "abc" (FIPS

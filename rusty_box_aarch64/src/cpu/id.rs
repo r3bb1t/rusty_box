@@ -33,11 +33,12 @@ pub(crate) const fn id_aa64pfr0(features: Features) -> u64 {
     0x11 | field(features, Feature::Fp16, 16, 1) | field(features, Feature::Fp16, 20, 1)
 }
 
-/// `ID_AA64PFR1_EL1` of a processor implementing `features`: `SME` (bits
-/// 27:24) = 1 with FEAT_SME, without FEAT_SME2 (`Features.json`: `FEAT_SME
-/// <=> UInt(ID_AA64PFR1_EL1.SME) >= 1`); nothing else from v8.1+.
+/// `ID_AA64PFR1_EL1` of a processor implementing `features`: `BT` (bits
+/// 3:0) = 1 with FEAT_BTI (2 would be FEAT_BTIE), `SME` (bits 27:24) = 1
+/// with FEAT_SME, without FEAT_SME2 (`Features.json`: `FEAT_SME <=>
+/// UInt(ID_AA64PFR1_EL1.SME) >= 1`); nothing else from v8.1+.
 pub(crate) const fn id_aa64pfr1(features: Features) -> u64 {
-    field(features, Feature::Sme, 24, 1)
+    field(features, Feature::Bti, 0, 1) | field(features, Feature::Sme, 24, 1)
 }
 
 /// `ID_AA64SMFR0_EL1` of a processor implementing `features`: with

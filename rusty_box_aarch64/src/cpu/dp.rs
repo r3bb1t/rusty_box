@@ -452,22 +452,27 @@ impl Cpu {
         Ok(Flow::Jump(pc.wrapping_add(sext(u64::from(bits(insn, 25, 0)) << 2, 28))))
     }
 
-    /// BR/BLR/RET/ERET/DRPS: `1101011 opc op2 op3 Rn op4`. The pointer
-    /// authentication forms have a handler of their own
-    /// ([`Cpu::exec_branch_auth`]).
-    pub(crate) fn exec_branch_reg(&mut self, pc: u64, insn: u32) -> ExecResult {
+    /// BR/BLR/RET/ERET/DRPS: `1101011 opc op2 op3 Rn op4`, fetched from a
+    /// guarded page or not (FEAT_BTI). The pointer authentication forms
+    /// have a handler of their own ([`Cpu::exec_branch_auth`]).
+    pub(crate) fn exec_branch_reg(&mut self, pc: u64, insn: u32, in_guarded_page: bool) -> ExecResult {
         let opc = bits(insn, 24, 21);
         let rn = bits(insn, 9, 5);
         if bits(insn, 20, 16) != 0x1F || bits(insn, 15, 10) != 0 || bits(insn, 4, 0) != 0 {
             return self.undefined(pc, insn);
         }
         match opc {
-            0 | 2 => Ok(Flow::Jump(self.x_or_zr(rn))),
+            0 => {
+                self.set_btype_jump(in_guarded_page, rn);
+                Ok(Flow::Jump(self.x_or_zr(rn)))
+            }
             1 => {
                 let target = self.x_or_zr(rn);
                 self.x[30] = pc.wrapping_add(4);
+                self.set_btype_call();
                 Ok(Flow::Jump(target))
             }
+            2 => Ok(Flow::Jump(self.x_or_zr(rn))),
             4 if rn == 0x1F => {
                 if self.pstate.el == super::El::El0 {
                     return self.undefined(pc, insn);

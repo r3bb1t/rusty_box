@@ -6,7 +6,7 @@ use rusty_box_core::SnapError;
 
 use super::features::{Feature, Implementation};
 use super::regs::{CpuState, Reg, RegClass, VReg};
-use super::{Activity, Cpu, CpuConfig, El, ExclusiveMonitor, Pstate, SysRegs, PC_HISTORY};
+use super::{Activity, Btype, Cpu, CpuConfig, El, ExclusiveMonitor, Pstate, SysRegs, PC_HISTORY};
 
 /// `FPCR` bits a processor implementing `imp` keeps: AHP, DN, FZ and RMode,
 /// and FZ16 with FEAT_FP16 (RES0 without it). The trap enables read as zero
@@ -173,15 +173,19 @@ impl Cpu {
     }
 
     /// Set `reg`. `Nzcv`, `Daif`, `Fpcr` and `Fpsr` keep only the bits an
-    /// `MSR` would. Writing `Pc` moves execution; a processor waiting for an
-    /// interrupt keeps waiting.
+    /// `MSR` would. Writing `Pc` moves execution, by no branch: PSTATE.BTYPE
+    /// becomes 00, so no branch check applies at the new PC. A processor
+    /// waiting for an interrupt keeps waiting.
     pub(crate) fn set_reg(&mut self, reg: Reg, value: u64) {
         match reg.class() {
             RegClass::General(n) => self.x[n] = value,
             RegClass::Sp => self.set_sp_current(value),
             RegClass::SpEl0 => self.sp_el0 = value,
             RegClass::SpEl1 => self.sp_el1 = value,
-            RegClass::Pc => self.pc = value,
+            RegClass::Pc => {
+                self.pc = value;
+                self.pstate.btype = Btype::None;
+            }
             RegClass::Nzcv => self.pstate.set_nzcv(value),
             RegClass::Daif => self.pstate.set_daif(value),
             RegClass::Fpcr => self.fpcr = value & fpcr_mask(self.imp),
@@ -199,10 +203,11 @@ impl Cpu {
     }
 
     /// Replace `PSTATE`. At EL0 the only stack pointer is `SP_EL0`, so
-    /// `sp_sel` is cleared there.
+    /// `sp_sel` is cleared there, and without FEAT_BTI `btype` is 00.
     pub(crate) fn set_pstate(&mut self, pstate: Pstate) {
         let sp_sel = pstate.sp_sel && pstate.el == El::El1;
-        self.pstate = Pstate { sp_sel, ..pstate };
+        let btype = if self.implements(Feature::Bti) { pstate.btype } else { Btype::None };
+        self.pstate = Pstate { sp_sel, btype, ..pstate };
     }
 
     /// A copy of the architectural state now.
@@ -290,6 +295,9 @@ impl Cpu {
         let pc = r.read_u64()?;
         let pstate = Pstate::from_spsr(r.read_u64()?)
             .ok_or(SnapError::Invalid("processor state names an exception level or mode this core lacks"))?;
+        if pstate.btype != Btype::None && !self.implements(Feature::Bti) {
+            return Err(SnapError::Invalid("processor state holds a BTYPE on a processor without FEAT_BTI"));
+        }
         let mut v = [0u128; 32];
         for reg in v.iter_mut() {
             let lo = r.read_u64()?;
@@ -321,7 +329,7 @@ impl Cpu {
         if retired > icount {
             return Err(SnapError::Invalid("processor retired more instructions than ticks passed"));
         }
-        self.tlb.restore(r)?;
+        self.tlb.restore(r, self.imp.features)?;
         let history_len = usize::from(r.read_u8()?);
         if history_len > PC_HISTORY {
             return Err(SnapError::Invalid("processor PC history is longer than it holds"));
