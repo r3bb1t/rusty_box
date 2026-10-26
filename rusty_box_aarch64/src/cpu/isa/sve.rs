@@ -3,11 +3,13 @@
 //! groups': `sve` holds groups (`sve_alloca`, ...), which hold the classes.
 //!
 //! The encodings here are those of FEAT_SME, which is still being built
-//! (`Feature::complete`): the streaming vector length instructions, and the
+//! (`Feature::complete`): the streaming vector length instructions, the
 //! SVE integer, permute and predicate instructions FEAT_SME makes legal in
-//! Streaming SVE mode (`op0 = 000` and `001`). The SVE loads and stores,
-//! the floating-point instructions and the rest of SVE2 FEAT_SME allows are
-//! not here yet; neither is anything only FEAT_SVE allows, which this
+//! Streaming SVE mode (`op0 = 000` and `001`), and its contiguous loads,
+//! stores and prefetches (`op0 = 100`, `101` and `111`). The
+//! floating-point instructions and the rest of SVE2 FEAT_SME allows are
+//! not here yet; neither is anything only FEAT_SVE allows (the gathers,
+//! scatters, first-fault and non-fault loads among it), which this
 //! decoder does not know.
 //!
 //! The variants are Arm's encoding ids, whole (the module documentation of
@@ -25,6 +27,23 @@ pub(super) fn sve(word: u32) -> Option<Encoding> {
     match op0 {
         0b000 => integer_and_permute(word),
         0b001 => compare_and_predicate(word),
+        0b100 => sve_mem32(word),
+        0b101 => sve_memcld(word),
+        // 110 is sve_mem64, the 64-bit gathers and prefetches (FEAT_SVE
+        // alone).
+        0b111 => stores(word),
+        _ => None,
+    }
+}
+
+/// `op0 = 111`: the stores, by op2; 001xxx is sve_memsst_nt, 1x0xxx
+/// sve_memst_ss and 101xxx sve_memst_ss2, the scatters (FEAT_SVE alone).
+fn stores(word: u32) -> Option<Encoding> {
+    let op2 = bits(word, 15, 10);
+    match op2 {
+        0b000000..=0b000111 | 0b010000..=0b010111 => sve_memst_cs(word),
+        0b011000..=0b011111 => sve_memcst_nt(word),
+        0b111000..=0b111111 => sve_memst_si(word),
         _ => None,
     }
 }
@@ -2361,6 +2380,652 @@ fn sve_int_dup_fpimm(word: u32) -> Option<SveIntDupFpimm> {
     let o2 = bits(word, 13, 13);
     match (opc, o2) {
         (0b00, 0b0) => Some(SveIntDupFpimm::FdupZI),
+        _ => None,
+    }
+}
+
+// ----- op0 = 100, 101 and 111: contiguous loads, stores and prefetches -----
+//
+// A class whose encodings carry Arm's condition `Rm != '11111'` opens with
+// an arm taking that `Rm` to no encoding: with XZR as the offset register
+// the word is none of the class's.
+
+/// Arm group `sve_mem32`: SVE Memory - 32-bit Gather and Unsized
+/// Contiguous. By op0, op1, op2 and op3; the 32-bit gathers and their
+/// prefetches are FEAT_SVE's alone, and `sve_mem_32b_acqfill` (LDAPR of a
+/// vector) FEAT_SVE_LRCPC's.
+fn sve_mem32(word: u32) -> Option<Encoding> {
+    let op0 = bits(word, 24, 23);
+    let op1 = bits(word, 22, 21);
+    let op2 = bits(word, 15, 13);
+    let op3 = bits(word, 4, 4);
+    match (op0, op1, op2, op3) {
+        (0b11, 0b00 | 0b01, 0b000, 0b0) => sve_mem_32b_pfill(word).map(Encoding::SveMem32bPfill),
+        (0b11, 0b00 | 0b01, 0b010, _) => sve_mem_32b_fill(word).map(Encoding::SveMem32bFill),
+        (0b11, 0b10 | 0b11, 0b000..=0b011, 0b0) => sve_mem_prfm_si(word).map(Encoding::SveMemPrfmSi),
+        (_, 0b00, 0b110, 0b0) => sve_mem_prfm_ss(word).map(Encoding::SveMemPrfmSs),
+        (_, 0b10 | 0b11, 0b100..=0b111, _) => sve_mem_ld_dup(word).map(Encoding::SveMemLdDup),
+        _ => None,
+    }
+}
+
+/// Arm group `sve_memcld`: SVE Memory - Contiguous Load. By op0, op1 and
+/// op2; the first-fault and non-fault loads (`sve_mem_cldff_ss`,
+/// `sve_mem_cldnf_si`) are FEAT_SVE's alone, and the quadword loads
+/// (`sve_mem_cld_si_q`, `_cld_ss_q`, `_eldq_si`, `_eldq_ss`) later
+/// features'.
+fn sve_memcld(word: u32) -> Option<Encoding> {
+    let op0 = bits(word, 22, 21);
+    let op1 = bits(word, 20, 20);
+    let op2 = bits(word, 15, 13);
+    match (op0, op1, op2) {
+        (_, _, 0b000) => sve_mem_ldqr_ss(word).map(Encoding::SveMemLdqrSs),
+        (_, 0b0, 0b001) => sve_mem_ldqr_si(word).map(Encoding::SveMemLdqrSi),
+        (_, _, 0b010) => sve_mem_cld_ss(word).map(Encoding::SveMemCldSs),
+        (_, 0b0, 0b101) => sve_mem_cld_si(word).map(Encoding::SveMemCldSi),
+        (0b00, _, 0b110) => sve_mem_cldnt_ss(word).map(Encoding::SveMemCldntSs),
+        (0b01..=0b11, _, 0b110) => sve_mem_eld_ss(word).map(Encoding::SveMemEldSs),
+        (0b00, 0b0, 0b111) => sve_mem_cldnt_si(word).map(Encoding::SveMemCldntSi),
+        (0b01..=0b11, 0b0, 0b111) => sve_mem_eld_si(word).map(Encoding::SveMemEldSi),
+        _ => None,
+    }
+}
+
+/// Arm group `sve_memst_cs`: SVE Memory - Contiguous Store and Unsized
+/// Contiguous. By op0, op2 and op3; the quadword structure stores
+/// (`sve_mem_estq_si`, `_estq_ss`) are later features', and
+/// `sve_mem_relspill` (STLR of a vector) FEAT_SVE_LRCPC's.
+fn sve_memst_cs(word: u32) -> Option<Encoding> {
+    let op0 = bits(word, 24, 22);
+    let op2 = bits(word, 14, 14);
+    let op3 = bits(word, 4, 4);
+    match (op0, op2, op3) {
+        (0b110, 0b0, 0b0) => sve_mem_pspill(word).map(Encoding::SveMemPspill),
+        (0b110, 0b1, _) => sve_mem_spill(word).map(Encoding::SveMemSpill),
+        (0b000..=0b101 | 0b111, 0b1, _) => sve_mem_cst_ss(word).map(Encoding::SveMemCstSs),
+        _ => None,
+    }
+}
+
+/// Arm group `sve_memcst_nt`: SVE Memory - Non-temporal and Multi-register
+/// Contiguous Store. By op0.
+fn sve_memcst_nt(word: u32) -> Option<Encoding> {
+    let op0 = bits(word, 22, 21);
+    match op0 {
+        0b00 => sve_mem_cstnt_ss(word).map(Encoding::SveMemCstntSs),
+        0b01..=0b11 => sve_mem_est_ss(word).map(Encoding::SveMemEstSs),
+        _ => None,
+    }
+}
+
+/// Arm group `sve_memst_si`: SVE Memory - Contiguous Store with Immediate
+/// Offset. By op0 and op1.
+fn sve_memst_si(word: u32) -> Option<Encoding> {
+    let op0 = bits(word, 22, 21);
+    let op1 = bits(word, 20, 20);
+    match (op0, op1) {
+        (_, 0b0) => sve_mem_cst_si(word).map(Encoding::SveMemCstSi),
+        (0b00, 0b1) => sve_mem_cstnt_si(word).map(Encoding::SveMemCstntSi),
+        (0b01..=0b11, 0b1) => sve_mem_est_si(word).map(Encoding::SveMemEstSi),
+        _ => None,
+    }
+}
+
+/// Arm group `sve_mem_32b_pfill`: SVE load predicate register.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SveMem32bPfill {
+    LdrPBi,
+}
+
+fn sve_mem_32b_pfill(_word: u32) -> Option<SveMem32bPfill> {
+    Some(SveMem32bPfill::LdrPBi)
+}
+
+/// Arm group `sve_mem_32b_fill`: SVE load vector register.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SveMem32bFill {
+    LdrZBi,
+}
+
+fn sve_mem_32b_fill(_word: u32) -> Option<SveMem32bFill> {
+    Some(SveMem32bFill::LdrZBi)
+}
+
+/// Arm group `sve_mem_prfm_si`: SVE contiguous prefetch (scalar plus
+/// immediate).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SveMemPrfmSi {
+    PrfbIPBiS,
+    PrfhIPBiS,
+    PrfwIPBiS,
+    PrfdIPBiS,
+}
+
+fn sve_mem_prfm_si(word: u32) -> Option<SveMemPrfmSi> {
+    let msz = bits(word, 14, 13);
+    match msz {
+        0b00 => Some(SveMemPrfmSi::PrfbIPBiS),
+        0b01 => Some(SveMemPrfmSi::PrfhIPBiS),
+        0b10 => Some(SveMemPrfmSi::PrfwIPBiS),
+        0b11 => Some(SveMemPrfmSi::PrfdIPBiS),
+        _ => None,
+    }
+}
+
+/// Arm group `sve_mem_prfm_ss`: SVE contiguous prefetch (scalar plus
+/// scalar).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SveMemPrfmSs {
+    PrfbIPBrS,
+    PrfhIPBrS,
+    PrfwIPBrS,
+    PrfdIPBrS,
+}
+
+fn sve_mem_prfm_ss(word: u32) -> Option<SveMemPrfmSs> {
+    let msz = bits(word, 24, 23);
+    let rm = bits(word, 20, 16);
+    match (msz, rm) {
+        (_, 0b11111) => None,
+        (0b00, _) => Some(SveMemPrfmSs::PrfbIPBrS),
+        (0b01, _) => Some(SveMemPrfmSs::PrfhIPBrS),
+        (0b10, _) => Some(SveMemPrfmSs::PrfwIPBrS),
+        (0b11, _) => Some(SveMemPrfmSs::PrfdIPBrS),
+        _ => None,
+    }
+}
+
+/// Arm group `sve_mem_ld_dup`: SVE load and broadcast element.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SveMemLdDup {
+    Ld1rbZPBiU8,
+    Ld1rbZPBiU16,
+    Ld1rbZPBiU32,
+    Ld1rbZPBiU64,
+    Ld1rswZPBiS64,
+    Ld1rhZPBiU16,
+    Ld1rhZPBiU32,
+    Ld1rhZPBiU64,
+    Ld1rshZPBiS64,
+    Ld1rshZPBiS32,
+    Ld1rwZPBiU32,
+    Ld1rwZPBiU64,
+    Ld1rsbZPBiS64,
+    Ld1rsbZPBiS32,
+    Ld1rsbZPBiS16,
+    Ld1rdZPBiU64,
+}
+
+fn sve_mem_ld_dup(word: u32) -> Option<SveMemLdDup> {
+    let dtypeh = bits(word, 24, 23);
+    let dtypel = bits(word, 14, 13);
+    match (dtypeh, dtypel) {
+        (0b00, 0b00) => Some(SveMemLdDup::Ld1rbZPBiU8),
+        (0b00, 0b01) => Some(SveMemLdDup::Ld1rbZPBiU16),
+        (0b00, 0b10) => Some(SveMemLdDup::Ld1rbZPBiU32),
+        (0b00, 0b11) => Some(SveMemLdDup::Ld1rbZPBiU64),
+        (0b01, 0b00) => Some(SveMemLdDup::Ld1rswZPBiS64),
+        (0b01, 0b01) => Some(SveMemLdDup::Ld1rhZPBiU16),
+        (0b01, 0b10) => Some(SveMemLdDup::Ld1rhZPBiU32),
+        (0b01, 0b11) => Some(SveMemLdDup::Ld1rhZPBiU64),
+        (0b10, 0b00) => Some(SveMemLdDup::Ld1rshZPBiS64),
+        (0b10, 0b01) => Some(SveMemLdDup::Ld1rshZPBiS32),
+        (0b10, 0b10) => Some(SveMemLdDup::Ld1rwZPBiU32),
+        (0b10, 0b11) => Some(SveMemLdDup::Ld1rwZPBiU64),
+        (0b11, 0b00) => Some(SveMemLdDup::Ld1rsbZPBiS64),
+        (0b11, 0b01) => Some(SveMemLdDup::Ld1rsbZPBiS32),
+        (0b11, 0b10) => Some(SveMemLdDup::Ld1rsbZPBiS16),
+        (0b11, 0b11) => Some(SveMemLdDup::Ld1rdZPBiU64),
+        _ => None,
+    }
+}
+
+/// Arm group `sve_mem_ldqr_ss`: SVE load and broadcast quadword (scalar
+/// plus scalar). `ssz = 01` is LD1RO (FEAT_F64MM, FEAT_SVE's alone).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SveMemLdqrSs {
+    Ld1rqbZPBrContiguous,
+    Ld1rqhZPBrContiguous,
+    Ld1rqwZPBrContiguous,
+    Ld1rqdZPBrContiguous,
+}
+
+fn sve_mem_ldqr_ss(word: u32) -> Option<SveMemLdqrSs> {
+    let msz = bits(word, 24, 23);
+    let ssz = bits(word, 22, 21);
+    let rm = bits(word, 20, 16);
+    match (msz, ssz, rm) {
+        (_, _, 0b11111) => None,
+        (0b00, 0b00, _) => Some(SveMemLdqrSs::Ld1rqbZPBrContiguous),
+        (0b01, 0b00, _) => Some(SveMemLdqrSs::Ld1rqhZPBrContiguous),
+        (0b10, 0b00, _) => Some(SveMemLdqrSs::Ld1rqwZPBrContiguous),
+        (0b11, 0b00, _) => Some(SveMemLdqrSs::Ld1rqdZPBrContiguous),
+        _ => None,
+    }
+}
+
+/// Arm group `sve_mem_ldqr_si`: SVE load and broadcast quadword (scalar
+/// plus immediate).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SveMemLdqrSi {
+    Ld1rqbZPBiU8,
+    Ld1rqhZPBiU16,
+    Ld1rqwZPBiU32,
+    Ld1rqdZPBiU64,
+}
+
+fn sve_mem_ldqr_si(word: u32) -> Option<SveMemLdqrSi> {
+    let msz = bits(word, 24, 23);
+    let ssz = bits(word, 22, 21);
+    match (msz, ssz) {
+        (0b00, 0b00) => Some(SveMemLdqrSi::Ld1rqbZPBiU8),
+        (0b01, 0b00) => Some(SveMemLdqrSi::Ld1rqhZPBiU16),
+        (0b10, 0b00) => Some(SveMemLdqrSi::Ld1rqwZPBiU32),
+        (0b11, 0b00) => Some(SveMemLdqrSi::Ld1rqdZPBiU64),
+        _ => None,
+    }
+}
+
+/// Arm group `sve_mem_cld_ss`: SVE contiguous load (scalar plus scalar).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SveMemCldSs {
+    Ld1bZPBrU8,
+    Ld1bZPBrU16,
+    Ld1bZPBrU32,
+    Ld1bZPBrU64,
+    Ld1swZPBrS64,
+    Ld1hZPBrU16,
+    Ld1hZPBrU32,
+    Ld1hZPBrU64,
+    Ld1shZPBrS64,
+    Ld1shZPBrS32,
+    Ld1wZPBrU32,
+    Ld1wZPBrU64,
+    Ld1sbZPBrS64,
+    Ld1sbZPBrS32,
+    Ld1sbZPBrS16,
+    Ld1dZPBrU64,
+}
+
+fn sve_mem_cld_ss(word: u32) -> Option<SveMemCldSs> {
+    let dtype = bits(word, 24, 21);
+    let rm = bits(word, 20, 16);
+    match (dtype, rm) {
+        (_, 0b11111) => None,
+        (0b0000, _) => Some(SveMemCldSs::Ld1bZPBrU8),
+        (0b0001, _) => Some(SveMemCldSs::Ld1bZPBrU16),
+        (0b0010, _) => Some(SveMemCldSs::Ld1bZPBrU32),
+        (0b0011, _) => Some(SveMemCldSs::Ld1bZPBrU64),
+        (0b0100, _) => Some(SveMemCldSs::Ld1swZPBrS64),
+        (0b0101, _) => Some(SveMemCldSs::Ld1hZPBrU16),
+        (0b0110, _) => Some(SveMemCldSs::Ld1hZPBrU32),
+        (0b0111, _) => Some(SveMemCldSs::Ld1hZPBrU64),
+        (0b1000, _) => Some(SveMemCldSs::Ld1shZPBrS64),
+        (0b1001, _) => Some(SveMemCldSs::Ld1shZPBrS32),
+        (0b1010, _) => Some(SveMemCldSs::Ld1wZPBrU32),
+        (0b1011, _) => Some(SveMemCldSs::Ld1wZPBrU64),
+        (0b1100, _) => Some(SveMemCldSs::Ld1sbZPBrS64),
+        (0b1101, _) => Some(SveMemCldSs::Ld1sbZPBrS32),
+        (0b1110, _) => Some(SveMemCldSs::Ld1sbZPBrS16),
+        (0b1111, _) => Some(SveMemCldSs::Ld1dZPBrU64),
+        _ => None,
+    }
+}
+
+/// Arm group `sve_mem_cld_si`: SVE contiguous load (scalar plus
+/// immediate).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SveMemCldSi {
+    Ld1bZPBiU8,
+    Ld1bZPBiU16,
+    Ld1bZPBiU32,
+    Ld1bZPBiU64,
+    Ld1swZPBiS64,
+    Ld1hZPBiU16,
+    Ld1hZPBiU32,
+    Ld1hZPBiU64,
+    Ld1shZPBiS64,
+    Ld1shZPBiS32,
+    Ld1wZPBiU32,
+    Ld1wZPBiU64,
+    Ld1sbZPBiS64,
+    Ld1sbZPBiS32,
+    Ld1sbZPBiS16,
+    Ld1dZPBiU64,
+}
+
+fn sve_mem_cld_si(word: u32) -> Option<SveMemCldSi> {
+    let dtype = bits(word, 24, 21);
+    match dtype {
+        0b0000 => Some(SveMemCldSi::Ld1bZPBiU8),
+        0b0001 => Some(SveMemCldSi::Ld1bZPBiU16),
+        0b0010 => Some(SveMemCldSi::Ld1bZPBiU32),
+        0b0011 => Some(SveMemCldSi::Ld1bZPBiU64),
+        0b0100 => Some(SveMemCldSi::Ld1swZPBiS64),
+        0b0101 => Some(SveMemCldSi::Ld1hZPBiU16),
+        0b0110 => Some(SveMemCldSi::Ld1hZPBiU32),
+        0b0111 => Some(SveMemCldSi::Ld1hZPBiU64),
+        0b1000 => Some(SveMemCldSi::Ld1shZPBiS64),
+        0b1001 => Some(SveMemCldSi::Ld1shZPBiS32),
+        0b1010 => Some(SveMemCldSi::Ld1wZPBiU32),
+        0b1011 => Some(SveMemCldSi::Ld1wZPBiU64),
+        0b1100 => Some(SveMemCldSi::Ld1sbZPBiS64),
+        0b1101 => Some(SveMemCldSi::Ld1sbZPBiS32),
+        0b1110 => Some(SveMemCldSi::Ld1sbZPBiS16),
+        0b1111 => Some(SveMemCldSi::Ld1dZPBiU64),
+        _ => None,
+    }
+}
+
+/// Arm group `sve_mem_cldnt_ss`: SVE contiguous non-temporal load (scalar
+/// plus scalar).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SveMemCldntSs {
+    Ldnt1bZPBrContiguous,
+    Ldnt1hZPBrContiguous,
+    Ldnt1wZPBrContiguous,
+    Ldnt1dZPBrContiguous,
+}
+
+fn sve_mem_cldnt_ss(word: u32) -> Option<SveMemCldntSs> {
+    let msz = bits(word, 24, 23);
+    let rm = bits(word, 20, 16);
+    match (msz, rm) {
+        (_, 0b11111) => None,
+        (0b00, _) => Some(SveMemCldntSs::Ldnt1bZPBrContiguous),
+        (0b01, _) => Some(SveMemCldntSs::Ldnt1hZPBrContiguous),
+        (0b10, _) => Some(SveMemCldntSs::Ldnt1wZPBrContiguous),
+        (0b11, _) => Some(SveMemCldntSs::Ldnt1dZPBrContiguous),
+        _ => None,
+    }
+}
+
+/// Arm group `sve_mem_eld_ss`: SVE load multiple structures (scalar plus
+/// scalar).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SveMemEldSs {
+    Ld2bZPBrContiguous,
+    Ld3bZPBrContiguous,
+    Ld4bZPBrContiguous,
+    Ld2hZPBrContiguous,
+    Ld3hZPBrContiguous,
+    Ld4hZPBrContiguous,
+    Ld2wZPBrContiguous,
+    Ld3wZPBrContiguous,
+    Ld4wZPBrContiguous,
+    Ld2dZPBrContiguous,
+    Ld3dZPBrContiguous,
+    Ld4dZPBrContiguous,
+}
+
+fn sve_mem_eld_ss(word: u32) -> Option<SveMemEldSs> {
+    let msz = bits(word, 24, 23);
+    let opc = bits(word, 22, 21);
+    let rm = bits(word, 20, 16);
+    match (msz, opc, rm) {
+        (_, _, 0b11111) => None,
+        (0b00, 0b01, _) => Some(SveMemEldSs::Ld2bZPBrContiguous),
+        (0b00, 0b10, _) => Some(SveMemEldSs::Ld3bZPBrContiguous),
+        (0b00, 0b11, _) => Some(SveMemEldSs::Ld4bZPBrContiguous),
+        (0b01, 0b01, _) => Some(SveMemEldSs::Ld2hZPBrContiguous),
+        (0b01, 0b10, _) => Some(SveMemEldSs::Ld3hZPBrContiguous),
+        (0b01, 0b11, _) => Some(SveMemEldSs::Ld4hZPBrContiguous),
+        (0b10, 0b01, _) => Some(SveMemEldSs::Ld2wZPBrContiguous),
+        (0b10, 0b10, _) => Some(SveMemEldSs::Ld3wZPBrContiguous),
+        (0b10, 0b11, _) => Some(SveMemEldSs::Ld4wZPBrContiguous),
+        (0b11, 0b01, _) => Some(SveMemEldSs::Ld2dZPBrContiguous),
+        (0b11, 0b10, _) => Some(SveMemEldSs::Ld3dZPBrContiguous),
+        (0b11, 0b11, _) => Some(SveMemEldSs::Ld4dZPBrContiguous),
+        _ => None,
+    }
+}
+
+/// Arm group `sve_mem_cldnt_si`: SVE contiguous non-temporal load (scalar
+/// plus immediate).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SveMemCldntSi {
+    Ldnt1bZPBiContiguous,
+    Ldnt1hZPBiContiguous,
+    Ldnt1wZPBiContiguous,
+    Ldnt1dZPBiContiguous,
+}
+
+fn sve_mem_cldnt_si(word: u32) -> Option<SveMemCldntSi> {
+    let msz = bits(word, 24, 23);
+    match msz {
+        0b00 => Some(SveMemCldntSi::Ldnt1bZPBiContiguous),
+        0b01 => Some(SveMemCldntSi::Ldnt1hZPBiContiguous),
+        0b10 => Some(SveMemCldntSi::Ldnt1wZPBiContiguous),
+        0b11 => Some(SveMemCldntSi::Ldnt1dZPBiContiguous),
+        _ => None,
+    }
+}
+
+/// Arm group `sve_mem_eld_si`: SVE load multiple structures (scalar plus
+/// immediate).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SveMemEldSi {
+    Ld2bZPBiContiguous,
+    Ld3bZPBiContiguous,
+    Ld4bZPBiContiguous,
+    Ld2hZPBiContiguous,
+    Ld3hZPBiContiguous,
+    Ld4hZPBiContiguous,
+    Ld2wZPBiContiguous,
+    Ld3wZPBiContiguous,
+    Ld4wZPBiContiguous,
+    Ld2dZPBiContiguous,
+    Ld3dZPBiContiguous,
+    Ld4dZPBiContiguous,
+}
+
+fn sve_mem_eld_si(word: u32) -> Option<SveMemEldSi> {
+    let msz = bits(word, 24, 23);
+    let opc = bits(word, 22, 21);
+    match (msz, opc) {
+        (0b00, 0b01) => Some(SveMemEldSi::Ld2bZPBiContiguous),
+        (0b00, 0b10) => Some(SveMemEldSi::Ld3bZPBiContiguous),
+        (0b00, 0b11) => Some(SveMemEldSi::Ld4bZPBiContiguous),
+        (0b01, 0b01) => Some(SveMemEldSi::Ld2hZPBiContiguous),
+        (0b01, 0b10) => Some(SveMemEldSi::Ld3hZPBiContiguous),
+        (0b01, 0b11) => Some(SveMemEldSi::Ld4hZPBiContiguous),
+        (0b10, 0b01) => Some(SveMemEldSi::Ld2wZPBiContiguous),
+        (0b10, 0b10) => Some(SveMemEldSi::Ld3wZPBiContiguous),
+        (0b10, 0b11) => Some(SveMemEldSi::Ld4wZPBiContiguous),
+        (0b11, 0b01) => Some(SveMemEldSi::Ld2dZPBiContiguous),
+        (0b11, 0b10) => Some(SveMemEldSi::Ld3dZPBiContiguous),
+        (0b11, 0b11) => Some(SveMemEldSi::Ld4dZPBiContiguous),
+        _ => None,
+    }
+}
+
+/// Arm group `sve_mem_pspill`: SVE store predicate register.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SveMemPspill {
+    StrPBi,
+}
+
+fn sve_mem_pspill(_word: u32) -> Option<SveMemPspill> {
+    Some(SveMemPspill::StrPBi)
+}
+
+/// Arm group `sve_mem_cst_ss`: SVE contiguous store (scalar plus scalar).
+/// `opc = 100` and `111` with `o2 = 0` are the 128-bit element stores
+/// (FEAT_SVE2p1, outside Streaming SVE mode alone).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SveMemCstSs {
+    St1bZPBr,
+    St1hZPBr,
+    St1wZPBr,
+    St1dZPBr,
+}
+
+fn sve_mem_cst_ss(word: u32) -> Option<SveMemCstSs> {
+    let opc = bits(word, 24, 22);
+    let o2 = bits(word, 21, 21);
+    let rm = bits(word, 20, 16);
+    match (opc, o2, rm) {
+        (_, _, 0b11111) => None,
+        (0b000 | 0b001, _, _) => Some(SveMemCstSs::St1bZPBr),
+        (0b010 | 0b011, _, _) => Some(SveMemCstSs::St1hZPBr),
+        (0b101, _, _) => Some(SveMemCstSs::St1wZPBr),
+        (0b111, 0b1, _) => Some(SveMemCstSs::St1dZPBr),
+        _ => None,
+    }
+}
+
+/// Arm group `sve_mem_spill`: SVE store vector register.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SveMemSpill {
+    StrZBi,
+}
+
+fn sve_mem_spill(_word: u32) -> Option<SveMemSpill> {
+    Some(SveMemSpill::StrZBi)
+}
+
+/// Arm group `sve_mem_cstnt_ss`: SVE contiguous non-temporal store (scalar
+/// plus scalar).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SveMemCstntSs {
+    Stnt1bZPBrContiguous,
+    Stnt1hZPBrContiguous,
+    Stnt1wZPBrContiguous,
+    Stnt1dZPBrContiguous,
+}
+
+fn sve_mem_cstnt_ss(word: u32) -> Option<SveMemCstntSs> {
+    let msz = bits(word, 24, 23);
+    let rm = bits(word, 20, 16);
+    match (msz, rm) {
+        (_, 0b11111) => None,
+        (0b00, _) => Some(SveMemCstntSs::Stnt1bZPBrContiguous),
+        (0b01, _) => Some(SveMemCstntSs::Stnt1hZPBrContiguous),
+        (0b10, _) => Some(SveMemCstntSs::Stnt1wZPBrContiguous),
+        (0b11, _) => Some(SveMemCstntSs::Stnt1dZPBrContiguous),
+        _ => None,
+    }
+}
+
+/// Arm group `sve_mem_est_ss`: SVE store multiple structures (scalar plus
+/// scalar).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SveMemEstSs {
+    St2bZPBrContiguous,
+    St3bZPBrContiguous,
+    St4bZPBrContiguous,
+    St2hZPBrContiguous,
+    St3hZPBrContiguous,
+    St4hZPBrContiguous,
+    St2wZPBrContiguous,
+    St3wZPBrContiguous,
+    St4wZPBrContiguous,
+    St2dZPBrContiguous,
+    St3dZPBrContiguous,
+    St4dZPBrContiguous,
+}
+
+fn sve_mem_est_ss(word: u32) -> Option<SveMemEstSs> {
+    let msz = bits(word, 24, 23);
+    let opc = bits(word, 22, 21);
+    let rm = bits(word, 20, 16);
+    match (msz, opc, rm) {
+        (_, _, 0b11111) => None,
+        (0b00, 0b01, _) => Some(SveMemEstSs::St2bZPBrContiguous),
+        (0b00, 0b10, _) => Some(SveMemEstSs::St3bZPBrContiguous),
+        (0b00, 0b11, _) => Some(SveMemEstSs::St4bZPBrContiguous),
+        (0b01, 0b01, _) => Some(SveMemEstSs::St2hZPBrContiguous),
+        (0b01, 0b10, _) => Some(SveMemEstSs::St3hZPBrContiguous),
+        (0b01, 0b11, _) => Some(SveMemEstSs::St4hZPBrContiguous),
+        (0b10, 0b01, _) => Some(SveMemEstSs::St2wZPBrContiguous),
+        (0b10, 0b10, _) => Some(SveMemEstSs::St3wZPBrContiguous),
+        (0b10, 0b11, _) => Some(SveMemEstSs::St4wZPBrContiguous),
+        (0b11, 0b01, _) => Some(SveMemEstSs::St2dZPBrContiguous),
+        (0b11, 0b10, _) => Some(SveMemEstSs::St3dZPBrContiguous),
+        (0b11, 0b11, _) => Some(SveMemEstSs::St4dZPBrContiguous),
+        _ => None,
+    }
+}
+
+/// Arm group `sve_mem_cst_si`: SVE contiguous store (scalar plus
+/// immediate). `msz = 10` with `opc = 0x`, and `msz = 11` with `opc = 10`,
+/// are the 128-bit element stores (FEAT_SVE2p1, outside Streaming SVE mode
+/// alone).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SveMemCstSi {
+    St1bZPBi,
+    St1hZPBi,
+    St1wZPBi,
+    St1dZPBi,
+}
+
+fn sve_mem_cst_si(word: u32) -> Option<SveMemCstSi> {
+    let msz = bits(word, 24, 23);
+    let opc = bits(word, 22, 21);
+    match (msz, opc) {
+        (0b00, _) => Some(SveMemCstSi::St1bZPBi),
+        (0b01, _) => Some(SveMemCstSi::St1hZPBi),
+        (0b10, 0b10 | 0b11) => Some(SveMemCstSi::St1wZPBi),
+        (0b11, 0b11) => Some(SveMemCstSi::St1dZPBi),
+        _ => None,
+    }
+}
+
+/// Arm group `sve_mem_cstnt_si`: SVE contiguous non-temporal store (scalar
+/// plus immediate).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SveMemCstntSi {
+    Stnt1bZPBiContiguous,
+    Stnt1hZPBiContiguous,
+    Stnt1wZPBiContiguous,
+    Stnt1dZPBiContiguous,
+}
+
+fn sve_mem_cstnt_si(word: u32) -> Option<SveMemCstntSi> {
+    let msz = bits(word, 24, 23);
+    match msz {
+        0b00 => Some(SveMemCstntSi::Stnt1bZPBiContiguous),
+        0b01 => Some(SveMemCstntSi::Stnt1hZPBiContiguous),
+        0b10 => Some(SveMemCstntSi::Stnt1wZPBiContiguous),
+        0b11 => Some(SveMemCstntSi::Stnt1dZPBiContiguous),
+        _ => None,
+    }
+}
+
+/// Arm group `sve_mem_est_si`: SVE store multiple structures (scalar plus
+/// immediate).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SveMemEstSi {
+    St2bZPBiContiguous,
+    St3bZPBiContiguous,
+    St4bZPBiContiguous,
+    St2hZPBiContiguous,
+    St3hZPBiContiguous,
+    St4hZPBiContiguous,
+    St2wZPBiContiguous,
+    St3wZPBiContiguous,
+    St4wZPBiContiguous,
+    St2dZPBiContiguous,
+    St3dZPBiContiguous,
+    St4dZPBiContiguous,
+}
+
+fn sve_mem_est_si(word: u32) -> Option<SveMemEstSi> {
+    let msz = bits(word, 24, 23);
+    let opc = bits(word, 22, 21);
+    match (msz, opc) {
+        (0b00, 0b01) => Some(SveMemEstSi::St2bZPBiContiguous),
+        (0b00, 0b10) => Some(SveMemEstSi::St3bZPBiContiguous),
+        (0b00, 0b11) => Some(SveMemEstSi::St4bZPBiContiguous),
+        (0b01, 0b01) => Some(SveMemEstSi::St2hZPBiContiguous),
+        (0b01, 0b10) => Some(SveMemEstSi::St3hZPBiContiguous),
+        (0b01, 0b11) => Some(SveMemEstSi::St4hZPBiContiguous),
+        (0b10, 0b01) => Some(SveMemEstSi::St2wZPBiContiguous),
+        (0b10, 0b10) => Some(SveMemEstSi::St3wZPBiContiguous),
+        (0b10, 0b11) => Some(SveMemEstSi::St4wZPBiContiguous),
+        (0b11, 0b01) => Some(SveMemEstSi::St2dZPBiContiguous),
+        (0b11, 0b10) => Some(SveMemEstSi::St3dZPBiContiguous),
+        (0b11, 0b11) => Some(SveMemEstSi::St4dZPBiContiguous),
         _ => None,
     }
 }

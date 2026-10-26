@@ -102,10 +102,12 @@ impl DataAccess {
 pub(crate) enum Part {
     /// All of it: judged by its own size and address.
     Whole,
-    /// One 8-byte half of a 16-byte SIMD&FP access that is misaligned as a
-    /// whole: Arm `Mem[]` translates each half with the whole access's
-    /// `aligned`, so Device memory refuses the half however it is aligned.
-    HalfOfMisaligned,
+    /// One single-copy access of a transfer that is misaligned as a whole:
+    /// an 8-byte half of a 16-byte SIMD&FP access, or a byte of an SVE
+    /// `LDR`/`STR` whose base is misaligned. Arm passes the whole
+    /// transfer's `aligned` to `AArch64_MemSingle` for each part, so Device
+    /// memory refuses the part however it is itself aligned.
+    OfMisaligned,
 }
 
 /// Which misaligned data accesses fault before translation, the part of Arm
@@ -933,7 +935,7 @@ impl Cpu {
         if misaligned && self.misaligned_faults(va, bytes, acc) {
             return Err(Self::data_abort(va, Fsc::Alignment, direction == DataDirection::Write));
         }
-        let on_device = if misaligned || acc.part == Part::HalfOfMisaligned {
+        let on_device = if misaligned || acc.part == Part::OfMisaligned {
             OnDevice::Refused
         } else {
             OnDevice::Permitted
@@ -1108,7 +1110,7 @@ impl Cpu {
     fn halves_of(va: u64, acc: DataAccess) -> DataAccess {
         if va & 15 != 0 {
             DataAccess {
-                part: Part::HalfOfMisaligned,
+                part: Part::OfMisaligned,
                 ..acc
             }
         } else {
@@ -1200,6 +1202,18 @@ impl Cpu {
         if m.armed && pa < m.addr + m.bytes && m.addr < pa + bytes {
             self.monitor.armed = false;
         }
+    }
+
+    /// The alignment check SVE `LDR` and `STR` make before their byte
+    /// accesses: `if !aligned && AlignmentEnforced() then AArch64_Abort(
+    /// AlignmentFault(accdesc, addr))`, `aligned` being the base register's
+    /// alignment to the transfer's natural size, and the fault reported at
+    /// `va`, the first byte's address.
+    pub(crate) fn check_transfer_alignment(&self, aligned: bool, va: u64, write: bool) -> Result<(), Fault> {
+        if !aligned && self.strict_alignment() {
+            return Err(Self::data_abort(va, Fsc::Alignment, write));
+        }
+        Ok(())
     }
 
     /// The SP alignment check (`SCTLR_EL1.SA`/`SA0`) for an access whose

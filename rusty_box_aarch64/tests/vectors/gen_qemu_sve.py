@@ -139,9 +139,23 @@ def ptest(w):
     return (w & ~0x00C0000F) | 0x00400000
 
 
+def structures(w):
+    """LD2-LD4, ST2-ST4: `opc` (bits 22:21) nonzero, 00 being LDNT1 and
+    STNT1."""
+    return w | 0x00200000 if (w >> 21) & 3 == 0 else w
+
+
+def not_spill(w):
+    """ST1 (scalar plus scalar): `opc = 110` is STR (vector), so ST1H's
+    010 in its place."""
+    return w & ~0x01000000 if (w >> 22) & 7 == 0b110 else w
+
+
 # (name, kind, fixed bits, free bits, fixup): Arm's encoding classes of the
-# A64 `sve` group with `op0 = 000` and `001` whose encodings FEAT_SME makes
-# legal, their fixed bits from AARCHMRS 2026-09.
+# A64 `sve` group whose encodings FEAT_SME makes legal, with `op0 = 000`
+# and `001`, then the loads, stores and prefetches (`op0 = 100`, `101` and
+# `111`, kind M, or R for scalar plus scalar), their fixed bits from
+# AARCHMRS 2026-09.
 FAMILIES = [
     ("sve_int_bin_pred_arit_0", "S", 0x04000000, 0x00C71FFF, None),
     ("sve_int_bin_pred_arit_1", "S", 0x04080000, 0x00C71FFF, None),
@@ -238,6 +252,27 @@ FAMILIES = [
     ("sve_int_arith_imm2", "S", 0x2530C000, 0x00C73FFF, None),
     ("sve_int_dup_imm", "S", 0x2538C000, 0x00C63FFF, None),
     ("sve_int_dup_fpimm", "S", 0x2539C000, 0x00C63FFF, None),
+    ("sve_mem_32b_pfill", "M", 0x85800000, 0x003F1FEF, None),
+    ("sve_mem_32b_fill", "M", 0x85804000, 0x003F1FFF, None),
+    ("sve_mem_prfm_si", "M", 0x85C00000, 0x003F7FEF, None),
+    ("sve_mem_prfm_ss", "R", 0x8400C000, 0x019F1FEF, None),
+    ("sve_mem_ld_dup", "M", 0x84408000, 0x01BF7FFF, None),
+    ("sve_mem_ldqr_ss", "R", 0xA4000000, 0x01FF1FFF, None),
+    ("sve_mem_ldqr_si", "M", 0xA4002000, 0x01EF1FFF, None),
+    ("sve_mem_cld_ss", "R", 0xA4004000, 0x01FF1FFF, None),
+    ("sve_mem_cld_si", "M", 0xA400A000, 0x01EF1FFF, None),
+    ("sve_mem_cldnt_ss", "R", 0xA400C000, 0x019F1FFF, None),
+    ("sve_mem_eld_ss", "R", 0xA400C000, 0x01FF1FFF, structures),
+    ("sve_mem_cldnt_si", "M", 0xA400E000, 0x018F1FFF, None),
+    ("sve_mem_eld_si", "M", 0xA400E000, 0x01EF1FFF, structures),
+    ("sve_mem_pspill", "M", 0xE5800000, 0x003F1FEF, None),
+    ("sve_mem_cst_ss", "R", 0xE4004000, 0x01FF1FFF, not_spill),
+    ("sve_mem_spill", "M", 0xE5804000, 0x003F1FFF, None),
+    ("sve_mem_cstnt_ss", "R", 0xE4006000, 0x019F1FFF, None),
+    ("sve_mem_est_ss", "R", 0xE4006000, 0x01FF1FFF, structures),
+    ("sve_mem_cst_si", "M", 0xE400E000, 0x01EF1FFF, None),
+    ("sve_mem_cstnt_si", "M", 0xE410E000, 0x018F1FFF, None),
+    ("sve_mem_est_si", "M", 0xE410E000, 0x01EF1FFF, structures),
 ]
 
 

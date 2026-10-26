@@ -7,12 +7,17 @@
 //! its Arm pseudocode: the enable checks (`CheckSVEEnabled`,
 //! `CheckStreamingSVEEnabled`), the vector length (`CurrentVL`, the
 //! `SVEZEROUPPER` choice), `DecodePredCount`, and the boundaries of WHILE,
-//! CTERM, SDIV, EXT, DUP (indexed), SQINCB and PSEL.
+//! CTERM, SDIV, EXT, DUP (indexed), SQINCB and PSEL; and of the loads and
+//! stores, the inactive elements, a fault part-way, the register numbers
+//! wrapping, the alignment of LDR and STR, the SP check with no element
+//! active, and the accesses a prefetch and an all-inactive load do not
+//! make.
 
 use std::vec::Vec;
 
 use super::super::features::{Implementation, VecLen};
-use super::super::step::{exec, processor, Taken, CPACR_ALL, FP_TRAP, SME_DISABLED};
+use super::super::sctlr;
+use super::super::step::{exec, exec_in, processor, Taken, CPACR_ALL, DATA, FP_TRAP, SME_DISABLED, UNDEFINED};
 use super::super::Cpu;
 use super::{Esize, Pv, Zv};
 
@@ -339,4 +344,273 @@ fn psel_index_wraps_modulo_the_element_count() {
     cpu.x[12] = 4;
     assert_eq!(exec(&mut cpu, psel), None);
     assert_eq!(cpu.p(0, vl).as_bytes()[..2], [0x00, 0x00], "element 4, inactive");
+}
+
+// ----- loads, stores and prefetches -----
+
+/// A Data Abort from the current exception level (EC 0x25) with `dfsc`,
+/// of a write when `write`.
+const fn data_abort(dfsc: u64, write: bool) -> Taken {
+    Taken {
+        ec: 0x25,
+        iss: dfsc | ((write as u64) << 6),
+    }
+}
+
+/// The DFSC of an alignment fault and of a synchronous external abort.
+const ALIGNMENT: u64 = 0x21;
+const EXTERNAL: u64 = 0x10;
+
+/// An address the bus maps nothing at.
+const UNMAPPED: u64 = 0x9000_0000;
+
+/// `size` bytes of RAM counting up from 0.
+fn counting(size: usize) -> Vec<u8> {
+    (0..size).map(|i| i as u8).collect()
+}
+
+/// The elements of `es` of `Z<n>` at the current length.
+fn elements(cpu: &Cpu, n: u32, es: Esize) -> Vec<u64> {
+    let vl = cpu.current_svl();
+    let z = cpu.z(n, vl);
+    (0..es.elements(vl)).map(|e| z.get(e, es)).collect()
+}
+
+/// LD1 zeroes its inactive elements; ST1 writes its active ones alone, at
+/// a multiple of the vector's bytes past the base.
+#[test]
+fn ld1_zeroes_inactive_elements_and_st1_writes_the_active_ones_alone() {
+    let mut cpu = streaming(0);
+    let vl = cpu.current_svl();
+    let mut ram = counting(64);
+    cpu.x[0] = DATA;
+    // P0: words 0 and 2.
+    cpu.set_p(0, vl, &Pv::from_bytes(&[0x01, 0x01]));
+    cpu.set_z(0, vl, &Zv::replicate(0xFFFF_FFFF, Esize::S, vl));
+    // ld1w {z0.s}, p0/z, [x0].
+    assert_eq!(exec_in(&mut cpu, &mut ram, 0xA540_A000), None);
+    assert_eq!(elements(&cpu, 0, Esize::S), [0x0302_0100, 0, 0x0B0A_0908, 0]);
+    // st1w {z1.s}, p0, [x0, #1, mul vl]: 16 bytes on.
+    cpu.set_z(1, vl, &Zv::replicate(0xA1A2_A3A4, Esize::S, vl));
+    assert_eq!(exec_in(&mut cpu, &mut ram, 0xE541_E001), None);
+    let mut want = counting(64);
+    want[16..20].copy_from_slice(&[0xA4, 0xA3, 0xA2, 0xA1]);
+    want[24..28].copy_from_slice(&[0xA4, 0xA3, 0xA2, 0xA1]);
+    assert_eq!(ram, want);
+}
+
+/// LD1SB sign-extends a byte to the element; ST1B stores an element's low
+/// byte.
+#[test]
+fn ld1sb_sign_extends_and_st1b_stores_the_low_byte() {
+    let mut cpu = streaming(0);
+    let vl = cpu.current_svl();
+    let mut ram = counting(64);
+    ram[0] = 0x80;
+    ram[1] = 0x7F;
+    cpu.x[0] = DATA;
+    cpu.set_p(0, vl, &Pv::ones(vl));
+    // ld1sb {z0.d}, p0/z, [x0].
+    assert_eq!(exec_in(&mut cpu, &mut ram, 0xA580_A000), None);
+    assert_eq!(elements(&cpu, 0, Esize::D), [0xFFFF_FFFF_FFFF_FF80, 0x7F]);
+    // st1b {z0.d}, p0, [x0, #1, mul vl]: two bytes on.
+    assert_eq!(exec_in(&mut cpu, &mut ram, 0xE461_E000), None);
+    assert_eq!(ram[..4], [0x80, 0x7F, 0x80, 0x7F]);
+}
+
+/// A load that faults part-way has written no register; a store that does
+/// has written the elements before the fault. The fault reports the
+/// faulting element's address.
+#[test]
+fn a_fault_part_way_writes_no_register_and_keeps_the_stores_before_it() {
+    let mut cpu = streaming(1);
+    let vl = cpu.current_svl();
+    let mut ram = counting(64);
+    // Four doublewords from 16 bytes before the end of the RAM.
+    cpu.x[0] = DATA + 48;
+    cpu.set_p(0, vl, &Pv::ones(vl));
+    cpu.set_z(0, vl, &Zv::replicate(0x5555, Esize::D, vl));
+    // ld1d {z0.d}, p0/z, [x0].
+    assert_eq!(exec_in(&mut cpu, &mut ram, 0xA5E0_A000), Some(data_abort(EXTERNAL, false)));
+    assert_eq!(cpu.sys.far_el1, DATA + 64);
+    assert_eq!(elements(&cpu, 0, Esize::D), [0x5555; 4]);
+    // st1d {z1.d}, p0, [x0].
+    cpu.set_z(1, vl, &Zv::replicate(0xA5A5_A5A5_A5A5_A5A5, Esize::D, vl));
+    assert_eq!(exec_in(&mut cpu, &mut ram, 0xE5E0_E001), Some(data_abort(EXTERNAL, true)));
+    assert_eq!(cpu.sys.far_el1, DATA + 64);
+    assert_eq!(ram[..48], counting(48)[..]);
+    assert!(ram[48..].iter().all(|&b| b == 0xA5));
+}
+
+/// LDR and STR move `VL DIV 8` bytes of a vector and `PL DIV 8` of a
+/// predicate, at the immediate times that length.
+#[test]
+fn ldr_and_str_move_the_register_length_in_bytes() {
+    let mut cpu = streaming(1);
+    let vl = cpu.current_svl();
+    let mut ram = counting(64);
+    cpu.x[0] = DATA;
+    // ldr z0, [x0, #1, mul vl]: bytes 32 to 63.
+    assert_eq!(exec_in(&mut cpu, &mut ram, 0x8580_4400), None);
+    let z0 = cpu.z(0, vl);
+    assert_eq!((0..32).map(|i| z0.byte(i)).collect::<Vec<u8>>(), counting(64)[32..]);
+    // ldr p1, [x0]: four bytes.
+    assert_eq!(exec_in(&mut cpu, &mut ram, 0x8580_0001), None);
+    assert_eq!(cpu.p(1, vl).as_bytes()[..4], [0, 1, 2, 3]);
+    // str p1, [x0, #1, mul vl]: to bytes 4 to 7.
+    assert_eq!(exec_in(&mut cpu, &mut ram, 0xE580_0401), None);
+    assert_eq!(ram[..12], [0, 1, 2, 3, 0, 1, 2, 3, 8, 9, 10, 11]);
+}
+
+/// LDR's transfer is misaligned when its base is, whatever the byte: it
+/// faults at its first byte when SCTLR_EL1.A enforces alignment, and on
+/// Device memory (all of it, with the MMU off) every byte is refused. A
+/// predicate's transfer needs two-byte alignment alone.
+#[test]
+fn a_misaligned_ldr_faults_when_enforced_and_on_device_memory() {
+    let mut cpu = streaming(0);
+    let mut ram = counting(64);
+    // ldr z0, [x0, #1, mul vl] from a base one byte past alignment.
+    let ldr_z = 0x8580_4400;
+    cpu.x[0] = DATA + 1;
+    cpu.sys.sctlr_el1 |= sctlr::A;
+    assert_eq!(exec_in(&mut cpu, &mut ram, ldr_z), Some(data_abort(ALIGNMENT, false)));
+    assert_eq!(cpu.sys.far_el1, DATA + 17);
+    cpu.sys.sctlr_el1 &= !sctlr::A;
+    cpu.sys.far_el1 = 0;
+    assert_eq!(exec_in(&mut cpu, &mut ram, ldr_z), Some(data_abort(ALIGNMENT, false)));
+    assert_eq!(cpu.sys.far_el1, DATA + 17);
+    cpu.x[0] = DATA;
+    assert_eq!(exec_in(&mut cpu, &mut ram, ldr_z), None);
+    // ldr p0, [x0]: two-byte alignment.
+    cpu.x[0] = DATA + 2;
+    assert_eq!(exec_in(&mut cpu, &mut ram, 0x8580_0000), None);
+    cpu.x[0] = DATA + 1;
+    assert_eq!(exec_in(&mut cpu, &mut ram, 0x8580_0000), Some(data_abort(ALIGNMENT, false)));
+}
+
+/// On Normal memory a misaligned LDR moves its bytes, unless SCTLR_EL1.A
+/// enforces alignment, when it faults at its first byte.
+#[test]
+fn a_misaligned_ldr_on_normal_memory_faults_only_when_enforced() {
+    let mut cpu = streaming(0);
+    let vl = cpu.current_svl();
+    // The MMU on, its tables at the start of the RAM: the level-1 table's
+    // first entry points to a level-2 table whose first entry maps the low
+    // 2 MiB, code and RAM included, as Normal memory (attribute 0).
+    let mut ram = counting(0x3000);
+    ram[..8].copy_from_slice(&((DATA + 0x1000) | 0b11).to_le_bytes());
+    const AF: u64 = 1 << 10;
+    const INNER_SHAREABLE: u64 = 3 << 8;
+    ram[0x1000..0x1008].copy_from_slice(&(AF | INNER_SHAREABLE | 0b01).to_le_bytes());
+    cpu.sys.mair_el1 = 0xFF;
+    // T0SZ = 25: walks start at level 1; TTBR1 walks disabled (EPD1).
+    cpu.sys.tcr_el1 = 25 | (1 << 23);
+    cpu.sys.ttbr0_el1 = DATA;
+    cpu.sys.sctlr_el1 = (cpu.sys.sctlr_el1 | sctlr::M) & !sctlr::A;
+    // ldr z0, [x0] from a base one byte past alignment.
+    let ldr_z = 0x8580_4000;
+    cpu.x[0] = DATA + 0x2001;
+    assert_eq!(exec_in(&mut cpu, &mut ram, ldr_z), None);
+    let z0 = cpu.z(0, vl);
+    assert_eq!((0..16).map(|i| z0.byte(i)).collect::<Vec<u8>>(), ram[0x2001..0x2011]);
+    cpu.sys.sctlr_el1 |= sctlr::A;
+    assert_eq!(exec_in(&mut cpu, &mut ram, ldr_z), Some(data_abort(ALIGNMENT, false)));
+    assert_eq!(cpu.sys.far_el1, DATA + 0x2001);
+}
+
+/// LD1RQ reads a quadword under the low 16 bits of the predicate, the
+/// bits above them ignored, its inactive elements zero, into every
+/// quadword of the vector.
+#[test]
+fn ld1rq_broadcasts_a_quadword_under_the_low_sixteen_predicate_bits() {
+    let mut cpu = streaming(3);
+    let vl = cpu.current_svl();
+    let mut ram = counting(64);
+    cpu.x[0] = DATA;
+    // Words 1 and 3 of the quadword; every bit above it set.
+    let mut p0 = [0xFFu8; 8];
+    p0[..2].copy_from_slice(&[0x10, 0x10]);
+    cpu.set_p(0, vl, &Pv::from_bytes(&p0));
+    // ld1rqw {z0.s}, p0/z, [x0].
+    assert_eq!(exec_in(&mut cpu, &mut ram, 0xA500_2000), None);
+    let quadword = [0, 0x0706_0504, 0, 0x0F0E_0D0C];
+    let want: Vec<u64> = quadword.iter().copied().cycle().take(16).collect();
+    assert_eq!(elements(&cpu, 0, Esize::S), want);
+}
+
+/// With no element active, LD1R and LD1 read nothing, so an unmapped base
+/// does not fault, and the result is zero; one active element reads.
+#[test]
+fn a_load_with_no_element_active_reads_nothing() {
+    let mut cpu = streaming(0);
+    let vl = cpu.current_svl();
+    let mut ram = counting(64);
+    cpu.x[0] = UNMAPPED;
+    cpu.set_p(0, vl, &Pv::ZERO);
+    cpu.set_z(0, vl, &Zv::replicate(0xFF, Esize::B, vl));
+    // ld1rb {z0.b}, p0/z, [x0].
+    assert_eq!(exec_in(&mut cpu, &mut ram, 0x8440_8000), None);
+    assert_eq!(elements(&cpu, 0, Esize::B), [0; 16]);
+    // ld1b {z0.b}, p0/z, [x0].
+    assert_eq!(exec_in(&mut cpu, &mut ram, 0xA400_A000), None);
+    let mut p0 = Pv::ZERO;
+    p0.set_bit(5, true);
+    cpu.set_p(0, vl, &p0);
+    assert_eq!(exec_in(&mut cpu, &mut ram, 0x8440_8000), Some(data_abort(EXTERNAL, false)));
+    assert_eq!(cpu.sys.far_el1, UNMAPPED);
+}
+
+/// LD3 fills three consecutive registers, wrapping from Z31 to Z0, from
+/// interleaved elements.
+#[test]
+fn ld3_interleaves_and_wraps_the_register_numbers() {
+    let mut cpu = streaming(0);
+    let vl = cpu.current_svl();
+    let mut ram = counting(64);
+    cpu.x[0] = DATA;
+    cpu.set_p(0, vl, &Pv::ones(vl));
+    // ld3b {z30.b, z31.b, z0.b}, p0/z, [x0].
+    assert_eq!(exec_in(&mut cpu, &mut ram, 0xA440_E01E), None);
+    for (r, z) in [30, 31, 0].into_iter().enumerate() {
+        let want: Vec<u64> = (0..16).map(|e| 3 * e + r as u64).collect();
+        assert_eq!(elements(&cpu, z, Esize::B), want, "z{z}");
+    }
+}
+
+/// ST1H of byte elements (`size = 00`) is UNDEFINED, which the decode
+/// raises before the enable check.
+#[test]
+fn st1h_of_byte_elements_is_undefined_before_the_sme_trap() {
+    let mut cpu = processor(Implementation::EVERY_FEATURE);
+    // st1h {z0.b}, p0, [x0].
+    assert_eq!(exec(&mut cpu, 0xE480_E000), Some(UNDEFINED));
+}
+
+/// A prefetch reads nothing, whatever its address, and outside Streaming
+/// SVE mode takes the SME trap like any other SVE instruction.
+#[test]
+fn a_prefetch_reads_nothing() {
+    let mut cpu = streaming(0);
+    let vl = cpu.current_svl();
+    cpu.x[0] = UNMAPPED;
+    cpu.set_p(0, vl, &Pv::ones(vl));
+    // prfb pldl1keep, p0, [x0].
+    let prfb = 0x85C0_0000;
+    assert_eq!(exec(&mut cpu, prfb), None);
+    cpu.set_pstate_sm(false);
+    assert_eq!(exec(&mut cpu, prfb), Some(NOT_STREAMING));
+}
+
+/// An SP base takes the SP alignment check even with no element active
+/// (`Unpredictable_CHECKSPNONEACTIVE` taken as TRUE).
+#[test]
+fn an_sp_base_is_checked_with_no_element_active() {
+    let mut cpu = streaming(0);
+    let vl = cpu.current_svl();
+    cpu.set_p(0, vl, &Pv::ZERO);
+    cpu.sys.sctlr_el1 |= sctlr::SA;
+    cpu.sp_el1 = DATA + 8;
+    // ld1b {z0.b}, p0/z, [sp].
+    assert_eq!(exec(&mut cpu, 0xA400_A3E0), Some(Taken { ec: 0x26, iss: 0 }));
 }

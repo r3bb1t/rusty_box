@@ -8,8 +8,8 @@
 //! vector length; outside it, `CheckSVEEnabled` takes the SME trap
 //! (`CheckStreamingSVEEnabled`). The instructions are in `int` (integer
 //! arithmetic, element counts and immediates), `perm` (permutes, copies and
-//! selects) and `pred` (compares, predicate operations, `WHILE` and
-//! predicate counts).
+//! selects), `pred` (compares, predicate operations, `WHILE` and predicate
+//! counts) and `mem` (contiguous loads, stores and prefetches).
 //!
 //! Provenance (R7): the Arm A64 ISA XML, release 2026-09 (Arm ARM M.d), the
 //! instruction pages each handler names and the shared pseudocode in
@@ -18,6 +18,7 @@
 //! does so before the enable check, as the pseudocode orders it.
 
 mod int;
+mod mem;
 mod perm;
 mod pred;
 #[cfg(test)]
@@ -74,6 +75,13 @@ impl Esize {
     #[inline]
     pub(crate) const fn bytes(self) -> usize {
         1 << self as u32
+    }
+
+    /// `log2(esize DIV 8)`: the size of an access of one element, as
+    /// [`Cpu::read_mem`] and [`Cpu::write_mem`] take it.
+    #[inline]
+    pub(crate) const fn log2_bytes(self) -> u32 {
+        self as u32
     }
 
     /// The element's bits, as a mask of the low `esize` bits.
@@ -159,6 +167,19 @@ impl Zv {
     #[inline]
     pub(crate) fn upper(&self) -> &[u8] {
         &self.bytes[16..]
+    }
+
+    /// The vector whose bytes are `bytes`, the rest zero.
+    pub(crate) fn from_bytes(bytes: &[u8]) -> Self {
+        let mut z = Self::ZERO;
+        z.bytes[..bytes.len()].copy_from_slice(bytes);
+        z
+    }
+
+    /// The bytes the storage holds.
+    #[inline]
+    pub(crate) fn as_bytes(&self) -> &[u8] {
+        &self.bytes
     }
 
     /// A vector whose low 128 bits are `low` and whose bytes above are

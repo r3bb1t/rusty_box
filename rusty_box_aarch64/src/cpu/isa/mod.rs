@@ -103,6 +103,9 @@ use sve::{
     SveIntPredPatternB, SveIntPtest, SveIntPtrue, SveIntReadSvlA, SveIntReadVlA, SveIntReduce0, SveIntReduce1,
     SveIntReduce2, SveIntRotateImm, SveIntScmpVi, SveIntSelVvv, SveIntSqdmulh, SveIntTernLog, SveIntUcmpVi,
     SveIntUnPredArit0, SveIntUnPredArit1, SveIntWhileRr, SveIntWhilenc, SveIntxPermExtractI, SveIntxPermSplice,
+    SveMem32bFill, SveMem32bPfill, SveMemCldSi, SveMemCldSs, SveMemCldntSi, SveMemCldntSs, SveMemCstSi, SveMemCstSs,
+    SveMemCstntSi, SveMemCstntSs, SveMemEldSi, SveMemEldSs, SveMemEstSi, SveMemEstSs, SveMemLdDup, SveMemLdqrSi,
+    SveMemLdqrSs, SveMemPrfmSi, SveMemPrfmSs, SveMemPspill, SveMemSpill,
 };
 
 /// An A64 encoding this processor implements, by its Arm class and Arm
@@ -303,6 +306,27 @@ pub(crate) enum Encoding {
     SveIntArithImm2(SveIntArithImm2),
     SveIntDupImm(SveIntDupImm),
     SveIntDupFpimm(SveIntDupFpimm),
+    SveMem32bPfill(SveMem32bPfill),
+    SveMem32bFill(SveMem32bFill),
+    SveMemPrfmSi(SveMemPrfmSi),
+    SveMemPrfmSs(SveMemPrfmSs),
+    SveMemLdDup(SveMemLdDup),
+    SveMemLdqrSs(SveMemLdqrSs),
+    SveMemLdqrSi(SveMemLdqrSi),
+    SveMemCldSs(SveMemCldSs),
+    SveMemCldSi(SveMemCldSi),
+    SveMemCldntSs(SveMemCldntSs),
+    SveMemEldSs(SveMemEldSs),
+    SveMemCldntSi(SveMemCldntSi),
+    SveMemEldSi(SveMemEldSi),
+    SveMemPspill(SveMemPspill),
+    SveMemCstSs(SveMemCstSs),
+    SveMemSpill(SveMemSpill),
+    SveMemCstntSs(SveMemCstntSs),
+    SveMemEstSs(SveMemEstSs),
+    SveMemCstSi(SveMemCstSi),
+    SveMemCstntSi(SveMemCstntSi),
+    SveMemEstSi(SveMemEstSi),
 }
 
 /// The encoding `word` is, if it is one of a feature the decoder knows.
@@ -491,6 +515,20 @@ impl Encoding {
             | Self::SveIntArithImm2(_)
             | Self::SveIntDupImm(_)
             | Self::SveIntDupFpimm(_) => Class::SveWideImmediate,
+            Self::SveMem32bPfill(_) | Self::SveMem32bFill(_) | Self::SveMemPspill(_) | Self::SveMemSpill(_) => {
+                Class::SveFillSpill
+            }
+            Self::SveMemPrfmSi(_) | Self::SveMemPrfmSs(_) => Class::SvePrefetch,
+            Self::SveMemLdDup(_) => Class::SveLoadBroadcast,
+            Self::SveMemLdqrSs(_) | Self::SveMemLdqrSi(_) => Class::SveLoadBroadcastQuadword,
+            Self::SveMemCldSs(_) | Self::SveMemCldSi(_) => Class::SveLoadContiguous,
+            Self::SveMemCldntSs(_) | Self::SveMemEldSs(_) | Self::SveMemCldntSi(_) | Self::SveMemEldSi(_) => {
+                Class::SveLoadStructures
+            }
+            Self::SveMemCstSs(_) | Self::SveMemCstSi(_) => Class::SveStoreContiguous,
+            Self::SveMemCstntSs(_) | Self::SveMemEstSs(_) | Self::SveMemCstntSi(_) | Self::SveMemEstSi(_) => {
+                Class::SveStoreStructures
+            }
         }
     }
 }
@@ -736,6 +774,27 @@ pub(crate) enum Class {
     /// `sve_wideimm_unpred`: the add/subtract, min/max and multiply
     /// immediates, DUP (immediate), FDUP.
     SveWideImmediate,
+    /// LDR and STR of a vector or a predicate register: the handler reads
+    /// the direction from bit 30 and the register file from bit 14.
+    SveFillSpill,
+    /// PRFB, PRFH, PRFW, PRFD, scalar plus immediate and scalar plus
+    /// scalar.
+    SvePrefetch,
+    /// LD1RB, LD1RH, LD1RW, LD1RD and the sign-extending LD1RSB, LD1RSH,
+    /// LD1RSW.
+    SveLoadBroadcast,
+    /// LD1RQB, LD1RQH, LD1RQW, LD1RQD.
+    SveLoadBroadcastQuadword,
+    /// `sve_mem_cld_ss`, `_cld_si`: LD1B, LD1H, LD1W, LD1D and the
+    /// sign-extending LD1SB, LD1SH, LD1SW, by `dtype`.
+    SveLoadContiguous,
+    /// LDNT1 and LD2, LD3, LD4 of bytes to doublewords: the handler reads
+    /// the registers from `opc`, which is 00 for LDNT1.
+    SveLoadStructures,
+    /// ST1B, ST1H, ST1W, ST1D.
+    SveStoreContiguous,
+    /// STNT1 and ST2, ST3, ST4, as [`Class::SveLoadStructures`].
+    SveStoreStructures,
 }
 
 /// What an encoding's decode does about the branch that led to it into a
@@ -964,7 +1023,28 @@ impl Encoding {
             | Self::SveIntArithImm1(_)
             | Self::SveIntArithImm2(_)
             | Self::SveIntDupImm(_)
-            | Self::SveIntDupFpimm(_) => Feature::Sme,
+            | Self::SveIntDupFpimm(_)
+            | Self::SveMem32bPfill(_)
+            | Self::SveMem32bFill(_)
+            | Self::SveMemPrfmSi(_)
+            | Self::SveMemPrfmSs(_)
+            | Self::SveMemLdDup(_)
+            | Self::SveMemLdqrSs(_)
+            | Self::SveMemLdqrSi(_)
+            | Self::SveMemCldSs(_)
+            | Self::SveMemCldSi(_)
+            | Self::SveMemCldntSs(_)
+            | Self::SveMemEldSs(_)
+            | Self::SveMemCldntSi(_)
+            | Self::SveMemEldSi(_)
+            | Self::SveMemPspill(_)
+            | Self::SveMemCstSs(_)
+            | Self::SveMemSpill(_)
+            | Self::SveMemCstntSs(_)
+            | Self::SveMemEstSs(_)
+            | Self::SveMemCstSi(_)
+            | Self::SveMemCstntSi(_)
+            | Self::SveMemEstSi(_) => Feature::Sme,
         }
     }
 }

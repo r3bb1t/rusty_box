@@ -391,6 +391,14 @@ impl Cpu {
             Class::SveConditionallyTerminate => self.exec_sve_cterm(insn),
             Class::SvePredicateCount => self.exec_sve_pred_count(pc, insn),
             Class::SveWideImmediate => self.exec_sve_wide_imm(pc, insn),
+            Class::SveFillSpill => self.exec_sve_fill_spill(bus, insn),
+            Class::SvePrefetch => self.exec_sve_prefetch(),
+            Class::SveLoadBroadcast => self.exec_sve_load_broadcast(bus, insn),
+            Class::SveLoadBroadcastQuadword => self.exec_sve_load_broadcast_quadword(bus, insn),
+            Class::SveLoadContiguous => self.exec_sve_load_contiguous(bus, insn),
+            Class::SveLoadStructures => self.exec_sve_load_structures(bus, insn),
+            Class::SveStoreContiguous => self.exec_sve_store_contiguous(bus, pc, insn),
+            Class::SveStoreStructures => self.exec_sve_store_structures(bus, insn),
         }
     }
 
