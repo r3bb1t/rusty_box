@@ -243,11 +243,12 @@ fn the_host_computes_what_softfloat_computes_wherever_it_answers() {
     }
 }
 
-/// The fused multiply-add, which the host computes only with `std`.
+/// The fused multiply-add, which the host computes only with `std`, and
+/// only where its `mul_add` rounds once (`HOST_FUSES_ONCE`).
 #[cfg(feature = "std")]
 mod fused {
-    use super::super::super::{f32_mul_add, f64_mul_add, ArmFpStatus};
-    use super::super::{f32_fused, f64_fused};
+    use super::super::super::{f32_mul_add, f64_mul_add, ArmFpStatus, FusedMulAdd};
+    use super::super::{f32_fused, f64_fused, HOST_FUSES_ONCE};
     use super::{fpcr, Reach, SplitMix64, FPSR_IXC};
 
     /// A binary64 multiply-add `[addend, n, m]`.
@@ -408,12 +409,55 @@ mod fused {
                 }
             }
         }
-        // The host answered often, right up to the smallest normal, and the
-        // draws reached the results it must leave to SoftFloat.
+        // Where the host fuses, it answered often, right up to the smallest
+        // normal, and the draws reached the results it must leave to
+        // SoftFloat. Elsewhere it never answered.
         for (name, reach) in [("f64", &reach64), ("f32", &reach32)] {
-            assert!(reach.accepted >= 100_000, "{name}: {reach:?}");
-            assert!(reach.near_smallest_normal >= 1_000, "{name}: {reach:?}");
+            if HOST_FUSES_ONCE {
+                assert!(reach.accepted >= 100_000, "{name}: {reach:?}");
+                assert!(reach.near_smallest_normal >= 1_000, "{name}: {reach:?}");
+            } else {
+                assert_eq!(reach.accepted, 0, "{name}: {reach:?}");
+            }
             assert!(reach.underflowed >= 1_000, "{name}: {reach:?}");
+        }
+    }
+
+    /// FMSUB, FNMADD and FNMSUB negate their operands before the host sees
+    /// them. With inexact already raised and every result normal and
+    /// inexact, each form gives the bits and the FPSR SoftFloat gives for
+    /// the negated operands, and the host answers for those operands.
+    #[test]
+    fn the_host_fuses_after_the_forms_negations() {
+        // (form, Ra negated, Rn negated), as Arm FPMulAdd's callers negate.
+        const FORMS: [(FusedMulAdd, bool, bool); 4] = [
+            (FusedMulAdd::Fmadd, false, false),
+            (FusedMulAdd::Fmsub, false, true),
+            (FusedMulAdd::Fnmadd, true, true),
+            (FusedMulAdd::Fnmsub, true, false),
+        ];
+        let fp = ArmFpStatus::with_fpsr(fpcr(0), FPSR_IXC);
+        for (form, negate_addend, negate_n) in FORMS {
+            // 1.5 + 0.1 * 0.3, with the form's signs.
+            let [addend, n, m] = [1.5f64.to_bits(), 0.1f64.to_bits(), 0.3f64.to_bits()];
+            let a = if negate_addend { addend ^ (1 << 63) } else { addend };
+            let x = if negate_n { n ^ (1 << 63) } else { n };
+            let mut soft = fp;
+            let want = f64_mul_add::f64_mul_add(x, m, a, &mut soft.status);
+            let mut surface = fp;
+            assert_eq!(f64_mul_add(form, addend, n, m, &mut surface), want, "f64 {form:?}");
+            assert_eq!(surface, soft, "f64 {form:?}");
+            assert_eq!(f64_fused(a, x, m, &fp).is_some(), HOST_FUSES_ONCE, "f64 {form:?}");
+
+            let [addend, n, m] = [1.5f32.to_bits(), 0.1f32.to_bits(), 0.3f32.to_bits()];
+            let a = if negate_addend { addend ^ (1 << 31) } else { addend };
+            let x = if negate_n { n ^ (1 << 31) } else { n };
+            let mut soft = fp;
+            let want = f32_mul_add::f32_mul_add(x, m, a, &mut soft.status);
+            let mut surface = fp;
+            assert_eq!(f32_mul_add(form, addend, n, m, &mut surface), want, "f32 {form:?}");
+            assert_eq!(surface, soft, "f32 {form:?}");
+            assert_eq!(f32_fused(a, x, m, &fp).is_some(), HOST_FUSES_ONCE, "f32 {form:?}");
         }
     }
 }

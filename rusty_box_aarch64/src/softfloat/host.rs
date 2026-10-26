@@ -32,6 +32,27 @@
 //! by a rule of its own. The host's fusedMultiplyAdd is Rust's `mul_add`,
 //! which needs `std`; without it every fused multiply-add is `None`.
 //!
+//! `mul_add` is only as exact as what it lowers to, and where that is a
+//! C library's `fma`/`fmaf` some round normal results wrongly: MinGW-w64
+//! on MSVCRT (rust-lang/rust#140515), and FreeBSD msun's `s_fmaf.c`, which
+//! bionic uses on Android's non-Arm ABIs (JuliaMath/openlibm#357). So the
+//! host fuses only where its `mul_add` is known to round once, and every
+//! other host's fused multiply-add is `None`:
+//!
+//! - aarch64, where `mul_add` is FMADD/FMSUB of the base Armv8-A floating
+//!   point, which rounds once (Arm ARM FPMulAdd);
+//! - x86 and x86_64 built with the `fma` target feature, where it is
+//!   VFMADD, which rounds once (Intel SDM, VFMADD132SD/VFMADD213SD/
+//!   VFMADD231SD and their SS forms);
+//! - x86_64 Linux with glibc, where it is a call to `fma`/`fmaf`. The Rust
+//!   toolchain's compiler-builtins defines those in the program itself:
+//!   its port of the `libm` crate runs VFMADD (or AMD's VFMADDSD) where
+//!   the CPU has it, and otherwise `fma_round`, a port of musl's `fma.c`,
+//!   which rounds once for every input, and `fma_wide_round`, a port of
+//!   musl's `fmaf.c`, which rounds once wherever the result is normal.
+//!   glibc's own `fma`/`fmaf` (sysdeps/ieee754/dbl-64/s_fma.c,
+//!   flt-32/s_fmaf.c) round once for every input.
+//!
 //! Rust's `f32` and `f64` arithmetic is IEEE 754 binary32 and binary64,
 //! rounding to nearest even, on every target but 32-bit x86 without SSE2:
 //! there x87 rounds twice, and this module answers `None`.
@@ -46,6 +67,16 @@ mod tests;
 /// Whether the host's arithmetic rounds once, as IEEE 754 binary32 and
 /// binary64 do.
 const HOST_ROUNDS_ONCE: bool = !cfg!(all(target_arch = "x86", not(target_feature = "sse2")));
+
+/// Whether the host's `mul_add` is known to round once, as IEEE 754
+/// fusedMultiplyAdd does, on every result the bound accepts: the hosts
+/// the module doc lists. `mul_add` needs `std`.
+#[cfg(feature = "std")]
+const HOST_FUSES_ONCE: bool = cfg!(any(
+    target_arch = "aarch64",
+    all(any(target_arch = "x86", target_arch = "x86_64"), target_feature = "fma"),
+    all(target_arch = "x86_64", target_os = "linux", target_env = "gnu"),
+));
 
 /// The operations the host computes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -134,7 +165,7 @@ pub(super) fn f32_arith(op: Arith, a: u32, b: u32, fp: &ArmFpStatus) -> Option<u
 #[cfg(feature = "std")]
 #[inline(always)]
 pub(super) fn f64_fused(addend: u64, n: u64, m: u64, fp: &ArmFpStatus) -> Option<u64> {
-    if !(host_may_round(fp) && f64_normal(addend) && f64_normal(n) && f64_normal(m)) {
+    if !(HOST_FUSES_ONCE && host_may_round(fp) && f64_normal(addend) && f64_normal(n) && f64_normal(m)) {
         return None;
     }
     f64_bounded(f64::from_bits(n).mul_add(f64::from_bits(m), f64::from_bits(addend)).to_bits())
@@ -153,7 +184,7 @@ pub(super) fn f64_fused(_addend: u64, _n: u64, _m: u64, _fp: &ArmFpStatus) -> Op
 #[cfg(feature = "std")]
 #[inline(always)]
 pub(super) fn f32_fused(addend: u32, n: u32, m: u32, fp: &ArmFpStatus) -> Option<u32> {
-    if !(host_may_round(fp) && f32_normal(addend) && f32_normal(n) && f32_normal(m)) {
+    if !(HOST_FUSES_ONCE && host_may_round(fp) && f32_normal(addend) && f32_normal(n) && f32_normal(m)) {
         return None;
     }
     f32_bounded(f32::from_bits(n).mul_add(f32::from_bits(m), f32::from_bits(addend)).to_bits())

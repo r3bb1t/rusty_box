@@ -140,7 +140,8 @@ vocabulary are `rusty_box_core`'s, shared with the x86 machine.
   FPSR; like a Cortex-A57, the core does not trap them. SoftFloat is the
   definition: [`src/softfloat/host.rs`](src/softfloat/host.rs) lets the host
   compute a single- or double-precision add, subtract, multiply, divide or,
-  with `std`, fused multiply-add only where IEEE 754 makes the host's answer
+  with `std` on a host whose `fma` is known to round once, fused
+  multiply-add only where IEEE 754 makes the host's answer
   SoftFloat's (QEMU's "hardfloat" rule, narrowed). Rounding must be to
   nearest even with inexact already raised, every operand normal, and the
   result normal, finite and above the smallest normal.
