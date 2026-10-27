@@ -857,6 +857,55 @@ fn a_directly_booted_kernel_finds_the_console_set_up() {
     assert_eq!(m.serial(0).expect("UART0").take_output().collect::<Vec<u8>>(), b"K");
 }
 
+/// DDI 0183F §3.4.4: the receive timeout interrupt is raised when the
+/// receive FIFO holds something and nothing more has arrived for 32 bit
+/// periods. At 115200 baud from the 24 MHz `UARTCLK` (`UARTIBRD` 13,
+/// `UARTFBRD` 1) that is 512 × (13 + 1/64) = 6664 cycles, 13883.3 ticks of
+/// a machine running 50 million a second, so the guest polling `UARTRIS`
+/// sees `RTRIS` from the first load at or after tick 13884 past the
+/// arrival — however the run is sliced. The guest sets the UART up, enables
+/// `RTIM` and polls:
+///
+/// ```text
+/// movz x0, #0x0900, lsl #16 ; mov w1, #13 ; str w1, [x0, #0x24]
+/// mov w1, #1 ; str w1, [x0, #0x28] ; mov w1, #0x70 ; str w1, [x0, #0x2c]
+/// mov w1, #0x40 ; str w1, [x0, #0x38] ; mov w1, #0x301 ; str w1, [x0, #0x30]
+/// 1: ldr w2, [x0, #0x3c] ; tbz w2, #6, 1b ; b .
+/// ```
+#[test]
+fn the_receive_timeout_comes_32_bit_periods_after_the_last_character() {
+    const PROBE: [u32; 14] = [
+        0xD2A1_2000, 0x5280_01A1, 0xB900_2401, 0x5280_0021, 0xB900_2801, 0x5280_0E01, 0xB900_2C01, 0x5280_0801,
+        0xB900_3801, 0x5280_6021, 0xB900_3001, 0xB940_3C02, 0x3637_FFE2, SPIN,
+    ];
+    const DONE: u64 = RAM_BASE + 0x34;
+    let elapsed = |slice: u64| {
+        let mut ram = vec![0u8; RAM_LEN];
+        let mut m = bare(&mut ram, rusty_box_aarch64::NoInstrumentation);
+        load(&mut m, RAM_BASE, &PROBE);
+        m.set_exits(&[DONE]).expect("one exit");
+        assert_eq!(m.step(RunBudget::Instructions(100)).stop, StopReason::BudgetExhausted);
+        assert_eq!(m.serial(0).expect("UART0").send(b"a"), 1);
+        let arrived = m.ticks();
+        assert_eq!(m.step(RunBudget::Ticks(13_000)).stop, StopReason::BudgetExhausted, "not yet");
+        loop {
+            match m.step(RunBudget::Ticks(slice)).stop {
+                StopReason::ExitReached => break,
+                StopReason::BudgetExhausted => assert!(m.ticks() - arrived < 20_000, "the timeout never came"),
+                other => panic!("{other:?}"),
+            }
+        }
+        m.ticks() - arrived
+    };
+    let whole = elapsed(1 << 20);
+    // The load that sees RTRIS runs at tick 13884 or 13885 past the
+    // arrival, and the branch after it: the exit is two ticks later.
+    assert!((13_884 + 2..=13_885 + 2).contains(&whole), "{whole}");
+    for slice in [1, 7, 1000] {
+        assert_eq!(elapsed(slice), whole, "slices of {slice} ticks");
+    }
+}
+
 #[test]
 fn a_machine_that_cannot_be_built_says_why() {
     let mut ram = vec![0u8; RAM_LEN];

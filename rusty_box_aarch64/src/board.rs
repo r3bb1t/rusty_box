@@ -26,7 +26,7 @@ use crate::bus::{le_value, store_le, AccessWidth, BusFault, CodeEpoch, FetchSour
 use crate::devices::cfi_flash::{CfiFlash, FlashArray};
 use crate::devices::fw_cfg::FwCfg;
 use crate::devices::gicv2::GicV2;
-use crate::devices::pl011::Pl011;
+use crate::devices::pl011::{Pl011, UartClocks};
 use crate::devices::pl031::Pl031;
 use crate::devices::pl061::{Pl061, POWER_BUTTON_LINE};
 #[cfg(feature = "alloc")]
@@ -94,6 +94,14 @@ pub const UART_CLOCK: ClockHz = match ClockHz::new(24_000_000) {
     Some(hz) => hz,
     None => ClockHz::BOCHS_DEFAULT,
 };
+
+/// The UART's clocks at `clock`: the machine's, and [`UART_CLOCK`].
+fn uart_clocks(clock: VmClock) -> UartClocks {
+    UartClocks {
+        machine: clock,
+        uartclk: UART_CLOCK,
+    }
+}
 
 /// Bytes a host may have sent to the UART that its receive FIFO has not yet
 /// taken: the buffer a QEMU character backend holds between the host and
@@ -315,9 +323,9 @@ impl<S: GuestStorage> VirtBoard<S> {
     /// handler). The UART empties its receive FIFO, as `pl011_reset` does;
     /// what the guest transmitted stays for the host to drain, and host bytes
     /// still waiting for the FIFO stay queued for it, which takes them once
-    /// the guest switches the receiver back on. Memory is
+    /// the guest switches the receiver back on, at `clock`. Memory is
     /// untouched.
-    pub(crate) fn reset_devices(&mut self) {
+    pub(crate) fn reset_devices(&mut self, clock: VmClock) {
         self.flash0.reset();
         self.flash1.reset();
         self.flash_epoch += 1;
@@ -329,16 +337,16 @@ impl<S: GuestStorage> VirtBoard<S> {
         for transport in self.virtio.iter_mut().flatten() {
             transport.reset();
         }
-        self.pump_serial_input();
+        self.pump_serial_input(clock);
         self.sync_device_lines();
     }
 
     /// Leave the UART as boot firmware leaves a console it has set up, at
     /// `baud` ([`Pl011::set_up_console`]); host bytes waiting for its
-    /// receiver go in.
-    pub(crate) fn set_up_console(&mut self, baud: u32) {
-        self.uart.set_up_console(baud, UART_CLOCK);
-        self.pump_serial_input();
+    /// receiver go in, at `clock`.
+    pub(crate) fn set_up_console(&mut self, baud: u32, clock: VmClock) {
+        self.uart.set_up_console(baud, uart_clocks(clock));
+        self.pump_serial_input(clock);
         self.sync_device_lines();
     }
 
@@ -364,6 +372,7 @@ impl<S: GuestStorage> VirtBoard<S> {
     pub(crate) fn advance_devices(&mut self, clock: VmClock) -> Option<VmInstant> {
         self.deadline_moved = false;
         self.rtc.update(clock);
+        self.uart.update(clock);
         if let Some(release) = self.power_button_release {
             if clock.now() >= release {
                 self.gpio.set_input(POWER_BUTTON_LINE, false);
@@ -377,11 +386,10 @@ impl<S: GuestStorage> VirtBoard<S> {
     /// The next instant a time-driven device changes an output on its own,
     /// without letting any of them catch up first.
     pub(crate) fn next_deadline(&self) -> Option<VmInstant> {
-        match (self.rtc.next_deadline(), self.power_button_release) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (Some(a), None) | (None, Some(a)) => Some(a),
-            (None, None) => None,
-        }
+        [self.rtc.next_deadline(), self.power_button_release, self.uart.next_deadline()]
+            .into_iter()
+            .flatten()
+            .min()
     }
 
     /// QEMU `gpio_key_set_irq`: press the power button now; it releases on
@@ -399,26 +407,38 @@ impl<S: GuestStorage> VirtBoard<S> {
     /// whenever the guest looks, the FIFO is full, the host buffer empty, or
     /// the receiver off (`UARTCR.UARTEN` or `RXE` clear). In
     /// loopback the UART consumes and drops what it is handed, as QEMU's
-    /// `pl011_receive` does.
-    pub(crate) fn pump_serial_input(&mut self) {
+    /// `pl011_receive` does. The bytes arrive at `clock`; an arrival that
+    /// moves the UART's receive timeout moves the board's next deadline.
+    pub(crate) fn pump_serial_input(&mut self, clock: VmClock) {
+        let deadline = self.uart.next_deadline();
         while self.uart.can_receive() {
             let Some(byte) = self.serial_input.pop_front() else {
                 break;
             };
-            if !self.uart.receive(byte) {
+            if !self.uart.receive(byte, uart_clocks(clock)) {
                 break;
             }
         }
+        self.note_uart_deadline(deadline);
     }
 
-    /// Queue host bytes for the UART, returning how many fit: each goes
-    /// straight into the receive FIFO when nothing waits ahead of it and the
-    /// FIFO has room, and into the host buffer otherwise.
-    pub(crate) fn send_serial(&mut self, bytes: &[u8]) -> usize {
+    /// Record that the next deadline has to be worked out again if the
+    /// UART's receive timeout is no longer `before`.
+    fn note_uart_deadline(&mut self, before: Option<VmInstant>) {
+        if self.uart.next_deadline() != before {
+            self.deadline_moved = true;
+        }
+    }
+
+    /// Queue host bytes for the UART at `clock`, returning how many fit:
+    /// each goes straight into the receive FIFO when nothing waits ahead of
+    /// it and the FIFO has room, and into the host buffer otherwise.
+    pub(crate) fn send_serial(&mut self, bytes: &[u8], clock: VmClock) -> usize {
+        let deadline = self.uart.next_deadline();
         let mut taken = 0;
         for &byte in bytes {
             let accepted = if self.serial_input.is_empty() && self.uart.can_receive() {
-                self.uart.receive(byte)
+                self.uart.receive(byte, uart_clocks(clock))
             } else if self.serial_input.len() < SERIAL_INPUT_CAPACITY {
                 self.serial_input.push_back(byte);
                 true
@@ -430,6 +450,7 @@ impl<S: GuestStorage> VirtBoard<S> {
             }
             taken += 1;
         }
+        self.note_uart_deadline(deadline);
         self.sync_device_lines();
         taken
     }
@@ -552,8 +573,10 @@ impl<S: GuestStorage> VirtBoard<S> {
             return Ok(self.gic.v2m_read(off, width));
         }
         if let Some(off) = addr.offset_in(UART0_BASE, PRIMECELL_SIZE) {
+            let deadline = self.uart.next_deadline();
             let v = self.uart.read(off, width);
-            self.pump_serial_input();
+            self.pump_serial_input(clock);
+            self.note_uart_deadline(deadline);
             self.sync_device_lines();
             return Ok(v);
         }
@@ -610,8 +633,10 @@ impl<S: GuestStorage> VirtBoard<S> {
             return Ok(());
         }
         if let Some(off) = addr.offset_in(UART0_BASE, PRIMECELL_SIZE) {
-            self.uart.write(off, width, value);
-            self.pump_serial_input();
+            let deadline = self.uart.next_deadline();
+            self.uart.write(off, width, value, uart_clocks(clock));
+            self.pump_serial_input(clock);
+            self.note_uart_deadline(deadline);
             self.sync_device_lines();
             return Ok(());
         }

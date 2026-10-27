@@ -25,7 +25,7 @@ use rusty_box_core::input::terminal::TerminalKeyboard;
 use rusty_box_core::input::{Key, KeyAction, KeyStroke, KeyboardInput, Typed};
 use rusty_box_core::machine::{Machine, RunOutcome, SerialPort};
 use rusty_box_core::snap::{SnapRead, SnapResult, SnapWrite};
-use rusty_box_core::{ClockHz, Progress, RunBudget, SnapError, VmInstant};
+use rusty_box_core::{ClockHz, Progress, RunBudget, SnapError, VmClock, VmInstant};
 
 use crate::board::{Plugged, Plugs, VirtBoard, VirtioDevices, FLASH0_BASE, FLASH_BANK_SIZE, RAM_BASE, RAM_LIMIT};
 #[cfg(feature = "alloc")]
@@ -973,7 +973,7 @@ impl<S: GuestStorage, I: Instrumentation> VirtMachine<S, I> {
             BootRecord::Bare => RAM_BASE,
         };
         self.cpu.reset_keeping_time(reset_pc);
-        self.board.reset_devices();
+        self.board.reset_devices(self.cpu.clock());
         let parts = self.board.storage.parts();
         match self.boot {
             // Firmware finds the tree at the base of RAM, as on QEMU.
@@ -989,7 +989,7 @@ impl<S: GuestStorage, I: Instrumentation> VirtMachine<S, I> {
                 self.cpu.set_reg(Reg::X0, RAM_BASE + layout.device_tree_offset);
                 self.cpu.set_reg(Reg::X4, reset_pc);
                 // And the console set up, as firmware would leave it.
-                self.board.set_up_console(boot::DIRECT_BOOT_CONSOLE_BAUD);
+                self.board.set_up_console(boot::DIRECT_BOOT_CONSOLE_BAUD, self.cpu.clock());
             }
             BootRecord::Bare => {}
         }
@@ -1311,7 +1311,10 @@ impl<S: GuestStorage, I: Instrumentation> VirtMachine<S, I> {
 
     /// The UART `port` (0 is the only one `virt` has). `None` for any other.
     pub fn serial(&mut self, port: usize) -> Option<Serial<'_, S>> {
-        (port == 0).then_some(Serial { board: &mut self.board })
+        (port == 0).then_some(Serial {
+            board: &mut self.board,
+            clock: self.cpu.clock(),
+        })
     }
 
     /// The machine's keyboard: the virtio keyboard if the machine was built
@@ -1326,6 +1329,7 @@ impl<S: GuestStorage, I: Instrumentation> VirtMachine<S, I> {
             board: &mut self.board,
             terminal: &mut self.terminal,
             target,
+            clock: self.cpu.clock(),
         }
     }
 
@@ -1336,6 +1340,7 @@ impl<S: GuestStorage, I: Instrumentation> VirtMachine<S, I> {
             board: &mut self.board,
             terminal: &mut self.terminal,
             target: KeyboardTarget::Terminal,
+            clock: self.cpu.clock(),
         }
     }
 
@@ -1704,7 +1709,7 @@ impl<S: GuestStorage, I: Instrumentation> VirtMachine<S, I> {
 }
 
 const SNAPSHOT_MAGIC: [u8; 8] = *b"RBA64SNP";
-const SNAPSHOT_VERSION: u32 = 7;
+const SNAPSHOT_VERSION: u32 = 8;
 
 /// Everything about how a machine was built that a snapshot depends on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1813,6 +1818,8 @@ fn ram_range(ram: &[u8], addr: u64, len: usize) -> Result<&[u8], MemoryError> {
 /// The machine's UART, as a host driving it sees it.
 pub struct Serial<'m, S> {
     board: &'m mut VirtBoard<S>,
+    /// The machine's clock, at which sent bytes reach the UART.
+    clock: VmClock,
 }
 
 impl<S: GuestStorage> Serial<'_, S> {
@@ -1831,7 +1838,7 @@ impl<S: GuestStorage> Serial<'_, S> {
     /// means the guest has stopped reading; send the rest later.
     #[must_use = "a short count means the rest never reached the guest"]
     pub fn send(&mut self, bytes: &[u8]) -> usize {
-        self.board.send_serial(bytes)
+        self.board.send_serial(bytes, self.clock)
     }
 
     /// How many more bytes [`Serial::send`] would take now.
@@ -1866,6 +1873,8 @@ pub struct Keyboard<'m, S> {
     board: &'m mut VirtBoard<S>,
     terminal: &'m mut TerminalKeyboard,
     target: KeyboardTarget,
+    /// The machine's clock, at which typed bytes reach the UART.
+    clock: VmClock,
 }
 
 impl<S: GuestStorage> Keyboard<'_, S> {
@@ -1875,7 +1884,7 @@ impl<S: GuestStorage> Keyboard<'_, S> {
     /// not by characters.
     #[must_use = "a short count means the rest never reached the guest"]
     pub fn bytes(&mut self, bytes: &[u8]) -> usize {
-        self.board.send_serial(bytes)
+        self.board.send_serial(bytes, self.clock)
     }
 
     /// Send `events` to the virtio keyboard, or apply them to the terminal
@@ -1919,7 +1928,7 @@ impl<S: GuestStorage> Keyboard<'_, S> {
             return false;
         }
         *self.terminal = terminal;
-        let sent = self.board.send_serial(&out[..len]);
+        let sent = self.board.send_serial(&out[..len], self.clock);
         sent == len
     }
 }

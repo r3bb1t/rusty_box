@@ -202,7 +202,7 @@ same state on d21b7e9 and now. For the boots, the state hashes at 10M,
 | Processor | Cortex-A57-shaped ARMv8.0: EL0/EL1 AArch64 only, the whole ARMv8.0 FP and Advanced SIMD instruction set (integer and floating point, vector and scalar, saturation setting FPSR.QC), the Cortex-A57's optional Cryptographic Extension (AES, 64-bit PMULL, SHA-1, SHA-256) and CRC32, as QEMU's `cortex-a57` has them, 4 KiB-granule stage-1 MMU with TLB, exclusives, PSCI 1.1 (DEN 0022D) over `HVC`, the conduit QEMU's `virt` provides (see "Where the references differ") |
 | Interrupts | GICv2 without the Security Extensions, for one processor, as IHI 0048B specifies it, in QEMU's structure: both interrupt groups, with Group 0 on FIQ under `FIQEn`, the Group 1 aliases (`GICC_AIAR`, `GICC_AEOIR`, `GICC_AHPPIR`, `GICC_ABPR`), preemption by group priority, the running priority and active priority registers, and 4 KiB distributor and 8 KiB CPU interface regions; + GICv2m frame |
 | Timers | EL1 physical and virtual generic timers |
-| Devices | PL011 UART (`UARTPeriphID2` revision 1, QEMU's ID, as DDI 0183F describes the revisions up to r1p4: a 16-entry receive FIFO with overrun and break status, receive and receive-timeout interrupts at the `UARTIFLS` level, modem-status interrupts on line changes, loopback, a receiver gated by `UARTEN` and `RXE`, a transmitter gated by `UARTEN` and `TXE` whose 16-entry transmit FIFO holds what is written meanwhile; a zero bit period, so enabled transmission completes at once; see "Where the references differ"), PL031 RTC, PL061 GPIO with QEMU's `gpio-key` power button on line 3, CFI flash ×2 (QEMU `pflash_cfi01` semantics, whole 64 MiB banks decoded), `fw_cfg` (traditional interface, no files), 32 virtio-mmio transports (QEMU's legacy layout while empty; non-legacy, as QEMU's `force-legacy=false`, once the host plugs in QEMU's 2D `virtio-gpu-device` with its EDID, `virtio-keyboard-device`, `virtio-tablet-device` or `virtio-blk-device` over a raw image in memory or a host file, which take the highest free ones), an empty PCIe ECAM/windows |
+| Devices | PL011 UART (`UARTPeriphID2` revision 1, QEMU's ID, as DDI 0183F describes the revisions up to r1p4: a 16-entry receive FIFO with overrun and break status, receive interrupts at the `UARTIFLS` level, modem-status interrupts on line changes, loopback, a receiver gated by `UARTEN` and `RXE`, a transmitter gated by `UARTEN` and `TXE` whose 16-entry transmit FIFO holds what is written meanwhile, and the receive timeout counted in bit periods of the programmed baud rate on the machine's clock, while characters themselves cross the line in no time; see "Where the references differ"), PL031 RTC, PL061 GPIO with QEMU's `gpio-key` power button on line 3, CFI flash ×2 (QEMU `pflash_cfi01` semantics, whole 64 MiB banks decoded), `fw_cfg` (traditional interface, no files), 32 virtio-mmio transports (QEMU's legacy layout while empty; non-legacy, as QEMU's `force-legacy=false`, once the host plugs in QEMU's 2D `virtio-gpu-device` with its EDID, `virtio-keyboard-device`, `virtio-tablet-device` or `virtio-blk-device` over a raw image in memory or a host file, which take the highest free ones), an empty PCIe ECAM/windows |
 | Board | QEMU `virt` memory map and IRQ wiring; QEMU 11.1.2's device tree in `assets/` (two values pinned; see below), its memory node and `/chosen` set per machine |
 | Boot | UEFI firmware from flash; or a Linux `Image`, initramfs and device tree placed as QEMU's `hw/arm/boot.c` places them, entered with the register state its boot stub leaves, and the UART's console set up at 115200 baud, 8N1, as firmware leaves it (see "Where the references differ") |
 
@@ -329,7 +329,9 @@ integration tests of the public API.
   (and waiting until then), a guest's character leaving the UART only once
   it has enabled it, PSCI power-off and reset, the power button's 100 ms on
   GPIO line 3, an observer's view, direct kernel placement, its device tree
-  and the console it finds set up, refused builds, a snapshot of an earlier
+  and the console it finds set up, the receive timeout a polling guest sees
+  32 bit periods after a character, at the same tick however the run is
+  sliced, refused builds, a snapshot of an earlier
   version refused with nothing changed; and that a run cut into instruction
   budgets of
   any size, or stopped by an exit at any instruction of straight-line code,
@@ -633,7 +635,7 @@ choice is listed here with its evidence.
   keeps that rule under `#if 0`, with a comment that Linux worked better
   with an interrupt per character, and raises it at one entry. This model
   follows the TRM; the reserved encodings 0b101–0b111 select the half-full
-  level. Linux waits for the receive timeout (next entry) for anything
+  level. Linux waits for the receive timeout (below) for anything
   shorter than the level, as on hardware.
 - **Emptying the PL011 FIFO through `FEN` clears its receive interrupts.**
   A change of `UARTLCR_H.FEN` empties the receive FIFO (QEMU 11.1.2
@@ -642,20 +644,30 @@ choice is listed here with its evidence.
   asserts `RTRIS` only while the FIFO is not empty. QEMU 11.1.2 leaves its
   interrupt state as it was, so `RXRIS` stays set with nothing to read.
   This model clears `RXRIS` and `RTRIS` with the FIFO.
-- **The PL011 raises the receive timeout interrupt.** DDI 0183F §3.4.4:
-  `RTRIS` is set when the FIFO is not empty and nothing has arrived for 32
-  bit periods, only while `RTIM` is set (note a to Table 3-15), and cleared
-  when reads empty the FIFO or by `UARTICR`. QEMU 11.1.2 never sets it.
-  This model's bit period is zero — a character written to `UARTDR` while
-  transmission is enabled is transmitted by the time the write completes,
-  as in QEMU, and the host's
-  bytes arrive the moment there is room — so the 32 quiet bit periods have
-  passed as soon as a delivery ends: each arrival sets `RTRIS` while `RTIM`
-  is set, and setting `RTIM` sets it while the FIFO holds anything. Real
-  hardware sets it 32 bit periods (512 × the baud divisor `UARTIBRD` +
-  `UARTFBRD`/64, in `UARTCLK` cycles) after the last arrival; timing it so
-  needs the instant of that arrival in the snapshot, which this model does
-  not keep.
+- **The PL011 raises the receive timeout interrupt, 32 bit periods after
+  the last character.** DDI 0183F §3.4.4: `RTRIS` is set when the FIFO is
+  not empty and nothing has arrived for 32 bit periods, only while `RTIM`
+  is set (note a to Table 3-15: the mask "acts as an enable"), and cleared
+  when reads empty the FIFO or by `UARTICR`. A bit is 16 periods of
+  `Baud16`, whose period is the divisor `UARTIBRD` + `UARTFBRD`/64 in
+  `UARTCLK` cycles (§2.2.3, §2.4.3), so 32 bits are 512 × that divisor:
+  6664 cycles of the 24 MHz `UARTCLK` at 115200 baud. The divisor counts
+  from the last `UARTLCR_H` write, the strobe that updates `UARTIBRD` and
+  `UARTFBRD` (§3.3.7, Note); the frame format `UARTLCR_H` sets does not
+  change the bit period. QEMU 11.1.2 never sets `RTRIS`. This model counts
+  on the machine's clock: `RTRIS` is set at the first tick by which 32 bit
+  periods have passed since the last character arrived, or since `RTIM`
+  was set with characters waiting, and the count, with the divisor it ran
+  at, is part of a snapshot. Where the TRM leaves the details open: every
+  character the receiver takes starts the count again, one lost to an
+  overrun included; a count fires once, and the next character or `RTIM`
+  set again starts another; a count running when a new divisor is latched
+  keeps the deadline it started with; and without a baud clock (`UARTIBRD`
+  0, invalid, or 0xFFFF with `UARTFBRD` above 0, which aborts reception,
+  §3.3.6) nothing counts. Characters themselves cross the line in no time:
+  the transmitter sends the moment it is enabled, and the host's bytes
+  arrive the moment the receiver has room, as with a QEMU character
+  backend.
 - **PL011 modem status interrupts mark changes.** DDI 0183F §3.4.1 raises
   `RIRMIS`, `CTSRMIS`, `DCDRMIS` and `DSRRMIS` when their modem status line
   changes, and only `UARTICR` clears them. QEMU 11.1.2

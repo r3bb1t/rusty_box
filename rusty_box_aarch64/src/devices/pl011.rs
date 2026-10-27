@@ -38,7 +38,15 @@
 //! - `RTRIS` (§3.4.4, Table 3-15 note a): set when the FIFO is not empty
 //!   and nothing has arrived for 32 bit periods, and only while `RTIM` is
 //!   set; cleared when reads empty the FIFO, or by `UARTICR`, and absent
-//!   once a change of `FEN` has emptied it.
+//!   once a change of `FEN` has emptied it. The count runs on the
+//!   machine's clock: 32 bit periods are 512 × (`UARTIBRD` + `UARTFBRD` /
+//!   64) cycles of `UARTCLK` (§2.2.3, §2.4.3), at the divisor the last
+//!   `UARTLCR_H` write latched (§3.3.7), and `RTRIS` is set at the first
+//!   tick by which they have passed since the last character arrived, or
+//!   since `RTIM` was set with characters waiting. It fires once; the next
+//!   character, or setting `RTIM` again, starts another count. Without a
+//!   baud clock (`UARTIBRD` 0, or 0xFFFF with `UARTFBRD` above 0, §3.3.6)
+//!   nothing counts.
 //! - The modem status interrupts (§3.4.1) are set by a change of their
 //!   line and cleared only by `UARTICR`.
 //! - Transmission needs `UARTCR.UARTEN` and `UARTCR.TXE` (§3.3.8, Note).
@@ -49,15 +57,12 @@
 //!   `TXFF` once it is full (Table 3-4). Enabling transmission sends what
 //!   waits; a change of `FEN` flushes it (§3.3.8, Note).
 //!
-//! Time: this model's bit period is zero. A character goes out the moment
-//! transmission is enabled to send it (the transmit FIFO empties at once,
-//! and `TXRIS` is raised for what it sends, as QEMU raises it after every
-//! write), and the host line delivers its bytes the moment the
-//! receiver has room. So 32 bit periods without a character have passed as
-//! soon as a delivery ends: a character's arrival raises `RTRIS` while
-//! `RTIM` is set, and setting `RTIM` raises it while the FIFO holds
-//! anything. A timed line would need the instant of the last arrival as
-//! state.
+//! Time on the line: characters take no time to cross it. A character goes
+//! out the moment transmission is enabled to send it (the transmit FIFO
+//! empties at once, and `TXRIS` is raised for what it sends, as QEMU raises
+//! it after every write), and the host line delivers its bytes the moment
+//! the receiver has room, as a QEMU character backend does. The receive
+//! timeout is the one interval the UART times, as above.
 //!
 //! From QEMU 11.1.2 where DDI 0183F leaves the choice to the system: the
 //! flag register QEMU keeps as state, `UARTDR` reads of an empty FIFO
@@ -79,7 +84,7 @@
 //! `offset + 4`.
 
 use rusty_box_core::snap::{SnapRead, SnapResult, SnapWrite};
-use rusty_box_core::{ClockHz, RingBuffer, SnapError};
+use rusty_box_core::{ClockHz, RingBuffer, SnapError, VmClock, VmDuration, VmInstant};
 
 use crate::bus::{AccessWidth, RegOffset};
 
@@ -171,6 +176,15 @@ const OVERRUN_PENDING: u32 = 1 << 31;
 /// that never drains loses the oldest bytes, never stalls the guest.
 pub const TX_CAPACITY: usize = 64 * 1024;
 
+/// The clocks a UART access is timed by: the machine's, at the access, and
+/// the UART's reference clock `UARTCLK`, from which the baud rate divisor
+/// makes the bit period (DDI 0183F §2.2.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UartClocks {
+    pub machine: VmClock,
+    pub uartclk: ClockHz,
+}
+
 pub struct Pl011 {
     /// Bytes transmitted, for the host.
     tx: RingBuffer<u8, TX_CAPACITY>,
@@ -180,14 +194,23 @@ pub struct Pl011 {
     tx_fifo: [u8; TX_FIFO_DEPTH],
     /// Characters waiting: at most the FIFO's depth, and zero while
     /// transmission is on.
-    tx_count: u32,
+    tx_count: u8,
     /// QEMU `read_fifo`: each entry is a `UARTDR` value, a received byte or
     /// [`DR_BE`], with [`DR_OE`] when an overrun came before it.
     read_fifo: [u32; RX_FIFO_DEPTH],
     /// Below [`RX_FIFO_DEPTH`], and zero while the FIFO is disabled.
-    read_pos: u32,
+    read_pos: u8,
     /// Entries queued: at most the FIFO's depth.
     read_count: u32,
+    /// The baud rate divisor in 64ths, `64 × UARTIBRD + UARTFBRD` (DDI 0183F
+    /// Figure 2-3), as the last `UARTLCR_H` write latched it: `UARTLCR_H`,
+    /// `UARTIBRD` and `UARTFBRD` form one register that only a `UARTLCR_H`
+    /// write updates (§3.3.7, Note).
+    divisor: u32,
+    /// The receive timeout's count, while one runs: the first instant at
+    /// which 32 bit periods (§3.4.4) have passed since it started. It runs
+    /// only while the receive FIFO holds something and `RTIM` is set.
+    rx_timeout: Option<VmInstant>,
     /// `UARTFR`, and [`OVERRUN_PENDING`].
     flags: u32,
     rsr: u32,
@@ -219,6 +242,8 @@ impl Pl011 {
             read_fifo: [0; RX_FIFO_DEPTH],
             read_pos: 0,
             read_count: 0,
+            divisor: 0,
+            rx_timeout: None,
             flags: FLAG_RXFE | FLAG_TXFE,
             rsr: 0,
             ilpr: 0,
@@ -310,13 +335,13 @@ impl Pl011 {
     /// not say what a write to a full transmit FIFO does; here the
     /// character is lost and the FIFO keeps what it holds, as the receive
     /// FIFO does on an overrun.
-    fn write_txdata(&mut self, byte: u8) {
-        if self.tx_count == self.fifo_depth() {
+    fn write_txdata(&mut self, byte: u8, clocks: UartClocks) {
+        if u32::from(self.tx_count) == self.fifo_depth() {
             return;
         }
-        self.tx_fifo[self.tx_count as usize] = byte;
+        self.tx_fifo[usize::from(self.tx_count)] = byte;
         self.tx_count += 1;
-        self.transmit();
+        self.transmit(clocks);
     }
 
     /// Send what the transmit FIFO holds, if transmission is enabled. With
@@ -326,12 +351,12 @@ impl Pl011 {
     /// each character sent. `UARTFR` reports the FIFO (Table 3-4): `TXFE`
     /// while it is empty, `TXFF` while it is full, and `BUSY` while it holds
     /// anything, whether or not the UART is enabled.
-    fn transmit(&mut self) {
+    fn transmit(&mut self, clocks: UartClocks) {
         if self.transmitting() && self.tx_count > 0 {
-            for i in 0..self.tx_count as usize {
+            for i in 0..usize::from(self.tx_count) {
                 let byte = self.tx_fifo[i];
                 self.tx.push_back(byte);
-                self.loopback_tx(u32::from(byte));
+                self.loopback_tx(u32::from(byte), clocks);
             }
             self.tx_count = 0;
             self.int_level |= INT_TX;
@@ -344,7 +369,7 @@ impl Pl011 {
     fn tx_flags(&self) -> u32 {
         if self.tx_count == 0 {
             FLAG_TXFE
-        } else if self.tx_count == self.fifo_depth() {
+        } else if u32::from(self.tx_count) == self.fifo_depth() {
             FLAG_TXFF | FLAG_BUSY
         } else {
             FLAG_BUSY
@@ -354,19 +379,61 @@ impl Pl011 {
     /// Leave the UART as boot firmware leaves a console it has set up, the
     /// state a kernel booted without firmware expects (Linux's
     /// `earlycon=pl011` writes to the port as it finds it): `baud` from
-    /// `uart_clock` with the divisor TF-A's `console_pl011_core_init` and
+    /// `UARTCLK` with the divisor TF-A's `console_pl011_core_init` and
     /// EDK2's `PL011UartInitializePort` program, `UARTCLK × 4 / baud` in
     /// 64ths (`UARTIBRD` its integer part, `UARTFBRD` its fraction), latched
     /// by a `UARTLCR_H` write of eight data bits, no parity, one stop bit and
     /// the FIFOs enabled (TF-A's `PL011_LINE_CONTROL`, 0x70), then
     /// `UARTCR` with the UART, its transmitter and its receiver enabled
     /// (0x301, as both write it).
-    pub(crate) fn set_up_console(&mut self, baud: u32, uart_clock: ClockHz) {
-        let divisor = uart_clock.get() * 4 / u64::from(baud);
-        self.write_register(0x24, (divisor >> 6) as u32); // UARTIBRD
-        self.write_register(0x28, (divisor & 0x3F) as u32); // UARTFBRD
-        self.write_register(0x2C, LCR_WLEN_8 | LCR_FEN); // UARTLCR_H
-        self.write_register(0x30, CR_UARTEN | CR_TXE | CR_RXE); // UARTCR
+    pub(crate) fn set_up_console(&mut self, baud: u32, clocks: UartClocks) {
+        let divisor = clocks.uartclk.get() * 4 / u64::from(baud);
+        self.write_register(0x24, (divisor >> 6) as u32, clocks); // UARTIBRD
+        self.write_register(0x28, (divisor & 0x3F) as u32, clocks); // UARTFBRD
+        self.write_register(0x2C, LCR_WLEN_8 | LCR_FEN, clocks); // UARTLCR_H
+        self.write_register(0x30, CR_UARTEN | CR_TXE | CR_RXE, clocks); // UARTCR
+    }
+
+    /// 32 bit periods (DDI 0183F §3.4.4) at the latched divisor, in
+    /// `UARTCLK` cycles: a bit is 16 periods of `Baud16`, whose period is the
+    /// divisor `UARTIBRD + UARTFBRD / 64` in `UARTCLK` cycles (§2.2.3,
+    /// §2.4.3, Figure 2-3), so 32 bits are 512 × that, 8 × [`Pl011::divisor`].
+    /// `None` while the divisor makes no baud clock: `UARTIBRD` 0 is invalid,
+    /// and `UARTIBRD` 0xFFFF with `UARTFBRD` above 0 aborts reception
+    /// (§3.3.6).
+    fn timeout_cycles(&self) -> Option<u64> {
+        let ibrd = self.divisor >> 6;
+        if ibrd == 0 || (ibrd == 0xFFFF && self.divisor & 0x3F != 0) {
+            None
+        } else {
+            Some(8 * u64::from(self.divisor))
+        }
+    }
+
+    /// Start the receive timeout's count now: it expires at the first tick
+    /// of the machine's clock by which 32 bit periods of `UARTCLK` time have
+    /// passed, and not at all without a baud clock.
+    fn start_rx_timeout(&mut self, clocks: UartClocks) {
+        self.rx_timeout = self.timeout_cycles().map(|cycles| {
+            let rate = u128::from(clocks.machine.rate().get());
+            let ticks = (u128::from(cycles) * rate).div_ceil(u128::from(clocks.uartclk.get()));
+            clocks.machine.after(VmDuration::from_ticks(u64::try_from(ticks).unwrap_or(u64::MAX)))
+        });
+    }
+
+    /// Let the receive timeout catch up to `clock`: a count that has run
+    /// its 32 bit periods sets `RTRIS` and stops (DDI 0183F §3.4.4); the
+    /// next character, or `RTIM` set again, starts another.
+    pub fn update(&mut self, clock: VmClock) {
+        if self.rx_timeout.is_some_and(|at| clock.now() >= at) {
+            self.rx_timeout = None;
+            self.int_level |= INT_RT;
+        }
+    }
+
+    /// When the running receive timeout expires, if one runs.
+    pub fn next_deadline(&self) -> Option<VmInstant> {
+        self.rx_timeout
     }
 
     /// Whether the receive side takes a host byte.
@@ -390,22 +457,28 @@ impl Pl011 {
     /// there was room for: received, or consumed and dropped while loopback
     /// disconnects the receive input. Returns false, taking nothing, when
     /// there is no room.
-    pub fn receive(&mut self, byte: u8) -> bool {
+    pub fn receive(&mut self, byte: u8, clocks: UartClocks) -> bool {
         if !self.can_receive() {
             return false;
         }
         if !self.loopback() {
-            self.receive_character(u32::from(byte));
+            self.receive_character(u32::from(byte), clocks);
         }
         true
     }
 
     /// The receive logic taking one character off the line, the receiver
     /// enabled (DDI 0183F §2.4.3; QEMU `pl011_fifo_rx_put`). A full FIFO
-    /// keeps its entries and the character is lost to an overrun.
-    fn receive_character(&mut self, value: u32) {
+    /// keeps its entries and the character is lost to an overrun. Either
+    /// way a character has been received, and while `RTIM` is set the
+    /// receive timeout counts its 32 bit periods afresh from now (§3.4.4:
+    /// "no further data is received over a 32-bit period").
+    fn receive_character(&mut self, value: u32, clocks: UartClocks) {
         if value & DR_BE != 0 {
             self.int_level |= INT_BE;
+        }
+        if self.int_enabled & INT_RT != 0 {
+            self.start_rx_timeout(clocks);
         }
         let depth = self.fifo_depth();
         if self.read_count == depth {
@@ -416,7 +489,7 @@ impl Pl011 {
         }
         let entry = if self.flags & OVERRUN_PENDING != 0 { value | DR_OE } else { value };
         self.flags &= !OVERRUN_PENDING;
-        let slot = (self.read_pos + self.read_count) & (depth - 1);
+        let slot = (u32::from(self.read_pos) + self.read_count) & (depth - 1);
         self.read_fifo[slot as usize] = entry;
         self.read_count += 1;
         self.flags &= !FLAG_RXFE;
@@ -426,16 +499,13 @@ impl Pl011 {
         if self.read_count == self.rx_trigger() {
             self.int_level |= INT_RX;
         }
-        if self.int_enabled & INT_RT != 0 {
-            self.int_level |= INT_RT;
-        }
     }
 
     /// QEMU `pl011_loopback_tx`: in loopback the receiver hears what is
     /// transmitted, when it is enabled.
-    fn loopback_tx(&mut self, value: u32) {
+    fn loopback_tx(&mut self, value: u32, clocks: UartClocks) {
         if self.loopback() && self.receiving() {
-            self.receive_character(value);
+            self.receive_character(value, clocks);
         }
     }
 
@@ -444,14 +514,16 @@ impl Pl011 {
     fn read_rxdata(&mut self) -> u32 {
         let depth = self.fifo_depth();
         self.flags &= !FLAG_RXFF;
-        let c = self.read_fifo[self.read_pos as usize];
+        let c = self.read_fifo[usize::from(self.read_pos)];
         if self.read_count > 0 {
             self.read_count -= 1;
-            self.read_pos = (self.read_pos + 1) & (depth - 1);
+            self.read_pos = (self.read_pos + 1) & (depth as u8 - 1);
         }
+        // Emptied, the FIFO has no receive timeout (§3.4.4).
         if self.read_count == 0 {
             self.flags |= FLAG_RXFE;
             self.int_level &= !INT_RT;
+            self.rx_timeout = None;
         }
         if self.read_count < self.rx_trigger() {
             self.int_level &= !INT_RX;
@@ -474,6 +546,7 @@ impl Pl011 {
         self.flags &= !(FLAG_RXFF | FLAG_TXFF | FLAG_BUSY);
         self.flags |= FLAG_RXFE | FLAG_TXFE;
         self.int_level &= !(INT_RT | INT_RX);
+        self.rx_timeout = None;
     }
 
     /// QEMU `pl011_loopback_mdmctrl`: in loopback the modem control outputs
@@ -511,15 +584,17 @@ impl Pl011 {
     }
 
     /// A `UARTIMSC` write. `RTIM` enables the receive timeout as well as
-    /// masking it (DDI 0183F Table 3-15, note a): clearing it clears
-    /// `RTRIS`, and setting it starts the timeout, which with the FIFO
-    /// holding anything has expired at once (see the module's "Time").
-    fn set_interrupt_mask(&mut self, v: u32) {
+    /// masking it (DDI 0183F Table 3-15, note a: "the mask acts as an enable
+    /// for power saving"): clearing it clears `RTRIS` and stops the count,
+    /// and setting it with the FIFO holding anything starts counting 32 bit
+    /// periods from now.
+    fn set_interrupt_mask(&mut self, v: u32, clocks: UartClocks) {
         let mask = v & IMSC_MASK;
         if mask & INT_RT == 0 {
             self.int_level &= !INT_RT;
+            self.rx_timeout = None;
         } else if self.int_enabled & INT_RT == 0 && self.read_count > 0 {
-            self.int_level |= INT_RT;
+            self.start_rx_timeout(clocks);
         }
         self.int_enabled = mask;
     }
@@ -556,22 +631,22 @@ impl Pl011 {
         }
     }
 
-    pub fn write(&mut self, offset: RegOffset, width: AccessWidth, value: u64) {
+    pub fn write(&mut self, offset: RegOffset, width: AccessWidth, value: u64, clocks: UartClocks) {
         match width {
             AccessWidth::Dword => {
-                self.write_register(offset.get(), value as u32);
-                self.write_register(offset.get() + 4, (value >> 32) as u32);
+                self.write_register(offset.get(), value as u32, clocks);
+                self.write_register(offset.get() + 4, (value >> 32) as u32, clocks);
             }
             AccessWidth::Byte | AccessWidth::Half | AccessWidth::Word => {
-                self.write_register(offset.get(), value as u32);
+                self.write_register(offset.get(), value as u32, clocks);
             }
         }
     }
 
     /// QEMU `pl011_write`.
-    fn write_register(&mut self, off: u64, v: u32) {
+    fn write_register(&mut self, off: u64, v: u32, clocks: UartClocks) {
         match off >> 2 {
-            0 => self.write_txdata(v as u8),
+            0 => self.write_txdata(v as u8, clocks),
             1 => self.rsr = 0,
             8 => self.ilpr = v & ILPR_MASK,
             9 => self.ibrd = v & IBRD_MASK,
@@ -584,18 +659,22 @@ impl Pl011 {
                 // QEMU `pl011_loopback_break`; the host side of a break
                 // (`CHR_IOCTL_SERIAL_SET_BREAK`) has no backend here.
                 if (self.lcr ^ v) & LCR_BRK != 0 && v & LCR_BRK != 0 {
-                    self.loopback_tx(DR_BE);
+                    self.loopback_tx(DR_BE, clocks);
                 }
                 self.lcr = v;
+                // The write strobe that updates `UARTIBRD` and `UARTFBRD`
+                // (§3.3.7, Note). A count already running keeps the
+                // deadline its divisor gave it.
+                self.divisor = (self.ibrd << 6) | self.fbrd;
             }
             12 => {
                 self.cr = v & CR_MASK;
                 self.loopback_mdmctrl();
                 // Enabling transmission sends what waits in the FIFO.
-                self.transmit();
+                self.transmit(clocks);
             }
             13 => self.ifl = v & IFLS_MASK,
-            14 => self.set_interrupt_mask(v),
+            14 => self.set_interrupt_mask(v, clocks),
             17 => self.int_level &= !v,
             18 => self.dmacr = v & DMACR_MASK,
             _ => {}
@@ -623,16 +702,26 @@ impl Pl011 {
         for entry in self.read_fifo {
             w.write_u32(entry)?;
         }
-        w.write_u8(self.read_pos as u8)?;
+        w.write_u8(self.read_pos)?;
         w.write_u32(self.read_count)?;
-        w.write_u8(self.tx_count as u8)?;
-        w.write_bytes(&self.tx_fifo)
+        w.write_u8(self.tx_count)?;
+        w.write_bytes(&self.tx_fifo)?;
+        w.write_u32(self.divisor)?;
+        match self.rx_timeout {
+            Some(at) => {
+                w.write_bool(true)?;
+                w.write_u64(at.ticks())
+            }
+            None => w.write_bool(false),
+        }
     }
 
     /// Refuses a read position outside the FIFO, and a nonzero one while the
     /// FIFO is disabled (QEMU `pl011_post_load`'s checks), more entries in
-    /// either FIFO than it holds, and characters waiting to be transmitted
-    /// while transmission is enabled. Reserved register bits are dropped, as
+    /// either FIFO than it holds, characters waiting to be transmitted while
+    /// transmission is enabled, a latched divisor wider than its 22 bits,
+    /// and a receive timeout running where none can: with the FIFO empty,
+    /// `RTIM` clear or no baud clock. Reserved register bits are dropped, as
     /// a guest write drops them, and `UARTFR`'s transmit bits are those of
     /// the transmit FIFO restored.
     pub(crate) fn restore<R: SnapRead>(&mut self, r: &mut R) -> SnapResult {
@@ -645,12 +734,18 @@ impl Pl011 {
         for entry in read_fifo.iter_mut() {
             *entry = r.read_u32()?;
         }
-        let read_pos = u32::from(r.read_u8()?);
+        let read_pos = r.read_u8()?;
         let read_count = r.read_u32()?;
-        let tx_count = u32::from(r.read_u8()?);
+        let tx_count = r.read_u8()?;
         let mut tx_fifo = [0u8; TX_FIFO_DEPTH];
         r.read_bytes(&mut tx_fifo)?;
-        if read_pos >= RX_FIFO_DEPTH as u32 {
+        let divisor = r.read_u32()?;
+        let rx_timeout = if r.read_bool()? {
+            Some(VmInstant::from_ticks(r.read_u64()?))
+        } else {
+            None
+        };
+        if usize::from(read_pos) >= RX_FIFO_DEPTH {
             return Err(SnapError::Invalid("PL011 read position outside the receive FIFO"));
         }
         let depth = if lcr & LCR_FEN != 0 { RX_FIFO_DEPTH as u32 } else { 1 };
@@ -660,21 +755,26 @@ impl Pl011 {
         if read_count > depth {
             return Err(SnapError::Invalid("PL011 receive count beyond the receive FIFO's depth"));
         }
-        if tx_count > depth {
+        if u32::from(tx_count) > depth {
             return Err(SnapError::Invalid("PL011 transmit count beyond the transmit FIFO's depth"));
         }
         let cr = cr & CR_MASK;
         if tx_count > 0 && cr & (CR_UARTEN | CR_TXE) == CR_UARTEN | CR_TXE {
             return Err(SnapError::Invalid("PL011 characters waiting to be transmitted while transmission is enabled"));
         }
-        let tx = core::mem::take(&mut self.tx);
-        *self = Self {
-            tx,
+        if divisor > (IBRD_MASK << 6) | FBRD_MASK {
+            return Err(SnapError::Invalid("PL011 baud rate divisor wider than UARTIBRD and UARTFBRD"));
+        }
+        let int_enabled = int_enabled & IMSC_MASK;
+        let mut restored = Self {
+            tx: RingBuffer::new(),
             tx_fifo,
             tx_count,
             read_fifo,
             read_pos,
             read_count,
+            divisor,
+            rx_timeout,
             flags: flags & (FR_MASK | OVERRUN_PENDING) & !(FLAG_TXFE | FLAG_TXFF | FLAG_BUSY),
             rsr: rsr & (RSR_OE | RSR_CHARACTER_ERRORS),
             ilpr: ilpr & ILPR_MASK,
@@ -683,11 +783,16 @@ impl Pl011 {
             lcr: lcr & LCR_MASK,
             cr,
             ifl: ifl & IFLS_MASK,
-            int_enabled: int_enabled & IMSC_MASK,
+            int_enabled,
             int_level: int_level & IMSC_MASK,
             dmacr: dmacr & DMACR_MASK,
         };
-        self.flags |= self.tx_flags();
+        if rx_timeout.is_some() && (read_count == 0 || int_enabled & INT_RT == 0 || restored.timeout_cycles().is_none()) {
+            return Err(SnapError::Invalid("PL011 receive timeout running with nothing to time"));
+        }
+        restored.flags |= restored.tx_flags();
+        restored.tx = core::mem::take(&mut self.tx);
+        *self = restored;
         Ok(())
     }
 }
@@ -704,8 +809,28 @@ mod tests {
         uart.read(reg(n), AccessWidth::Word) as u32
     }
 
+    /// This board's `UARTCLK`, and a machine clock as fast: a cycle of one
+    /// is a tick of the other.
+    const UARTCLK: ClockHz = crate::board::UART_CLOCK;
+
+    fn at(ticks: u64) -> UartClocks {
+        UartClocks {
+            machine: VmClock::new(VmInstant::from_ticks(ticks), UARTCLK),
+            uartclk: UARTCLK,
+        }
+    }
+
     fn write(uart: &mut Pl011, n: u64, value: u32) {
-        uart.write(reg(n), AccessWidth::Word, u64::from(value));
+        write_at(uart, n, value, 0);
+    }
+
+    fn write_at(uart: &mut Pl011, n: u64, value: u32, ticks: u64) {
+        uart.write(reg(n), AccessWidth::Word, u64::from(value), at(ticks));
+    }
+
+    /// A host byte arriving at tick 0.
+    fn rx(uart: &mut Pl011, byte: u8) -> bool {
+        Pl011::receive(uart, byte, at(0))
     }
 
     const DR: u64 = 0;
@@ -737,12 +862,12 @@ mod tests {
             write(&mut uart, CR, cr);
             assert!(!uart.can_receive(), "UARTCR {cr:#x}");
             assert_eq!(uart.rx_room(), 0);
-            assert!(!uart.receive(b'a'), "the host's byte waits");
+            assert!(!rx(&mut uart, b'a'), "the host's byte waits");
             assert_eq!(read(&mut uart, FR) & FLAG_RXFE, FLAG_RXFE);
         }
         write(&mut uart, CR, CR_UARTEN | CR_RXE);
         assert_eq!(uart.rx_room(), 1);
-        assert!(uart.receive(b'a'));
+        assert!(rx(&mut uart, b'a'));
         assert_eq!(read(&mut uart, DR), u32::from(b'a'));
     }
 
@@ -834,22 +959,21 @@ mod tests {
     #[test]
     fn a_console_set_up_runs_at_the_rate_asked_with_everything_enabled() {
         let mut uart = Pl011::new();
-        let clock = ClockHz::new(24_000_000).expect("non-zero");
-        uart.set_up_console(115_200, clock);
+        uart.set_up_console(115_200, at(0));
         // 24 MHz × 4 / 115200 = 833 64ths: 13 + 1/64.
         assert_eq!([9, 10, LCR_H, CR].map(|n| read(&mut uart, n)), [13, 1, 0x70, 0x301]);
         write(&mut uart, DR, u32::from(b'k'));
         assert_eq!(sent(&mut uart), b"k");
-        assert!(uart.receive(b'r'));
+        assert!(rx(&mut uart, b'r'));
         assert_eq!(read(&mut uart, DR), u32::from(b'r'));
     }
 
     #[test]
     fn with_the_fifo_disabled_the_receiver_holds_one_byte() {
         let mut uart = enabled();
-        assert!(uart.receive(b'a'));
+        assert!(rx(&mut uart, b'a'));
         assert!(!uart.can_receive());
-        assert!(!uart.receive(b'b'), "a second byte has nowhere to go");
+        assert!(!rx(&mut uart, b'b'), "a second byte has nowhere to go");
         assert_eq!(read(&mut uart, FR) & FLAG_RXFF, FLAG_RXFF);
         assert_eq!(read(&mut uart, DR), u32::from(b'a'));
         assert_eq!(read(&mut uart, FR) & FLAG_RXFE, FLAG_RXFE);
@@ -865,10 +989,10 @@ mod tests {
             write(&mut uart, IFLS, rxiflsel << 3);
             write(&mut uart, IMSC, INT_RX);
             for i in 0..level - 1 {
-                assert!(uart.receive(i as u8));
+                assert!(rx(&mut uart, i as u8));
             }
             assert_eq!(read(&mut uart, RIS) & INT_RX, 0, "RXIFLSEL {rxiflsel}: below the level");
-            assert!(uart.receive(0xAA));
+            assert!(rx(&mut uart, 0xAA));
             assert_eq!(read(&mut uart, RIS) & INT_RX, INT_RX, "RXIFLSEL {rxiflsel}: at the level");
             assert!(uart.irq());
             assert_eq!(read(&mut uart, DR), 0);
@@ -883,16 +1007,16 @@ mod tests {
         write(&mut uart, LCR_H, LCR_FEN);
         write(&mut uart, IFLS, 0); // 1/8: two entries
         for byte in [1, 2] {
-            assert!(uart.receive(byte));
+            assert!(rx(&mut uart, byte));
         }
         assert_eq!(read(&mut uart, RIS) & INT_RX, INT_RX);
         write(&mut uart, ICR, INT_RX);
-        assert!(uart.receive(3));
+        assert!(rx(&mut uart, 3));
         assert_eq!(read(&mut uart, RIS) & INT_RX, 0, "filling further crosses nothing");
         // Back below the level, then up through it again.
         assert_eq!(read(&mut uart, DR), 1);
         assert_eq!(read(&mut uart, DR), 2);
-        assert!(uart.receive(4));
+        assert!(rx(&mut uart, 4));
         assert_eq!(read(&mut uart, RIS) & INT_RX, INT_RX);
     }
 
@@ -900,45 +1024,147 @@ mod tests {
     fn with_the_fifo_disabled_each_character_raises_the_receive_interrupt() {
         let mut uart = enabled();
         write(&mut uart, IFLS, 4 << 3);
-        assert!(uart.receive(b'a'));
+        assert!(rx(&mut uart, b'a'));
         assert_eq!(read(&mut uart, RIS) & INT_RX, INT_RX, "UARTIFLS has no say");
         assert_eq!(read(&mut uart, DR), u32::from(b'a'));
         assert_eq!(read(&mut uart, RIS) & INT_RX, 0, "a single read clears it");
-        assert!(uart.receive(b'b'));
+        assert!(rx(&mut uart, b'b'));
         assert_eq!(read(&mut uart, RIS) & INT_RX, INT_RX);
     }
 
-    #[test]
-    fn the_receive_timeout_follows_an_arrival_while_rtim_enables_it() {
+    /// 115200 baud from 24 MHz, `UARTIBRD` 13 and `UARTFBRD` 1, latched by
+    /// a `UARTLCR_H` write enabling the FIFOs.
+    fn timed() -> Pl011 {
         let mut uart = enabled();
+        write(&mut uart, 9, 13);
+        write(&mut uart, 10, 1);
         write(&mut uart, LCR_H, LCR_FEN);
-        assert!(uart.receive(b'a'));
-        assert_eq!(read(&mut uart, RIS) & (INT_RT | INT_RX), 0, "RTIM clear: RTRIS cannot be set");
+        uart
+    }
+
+    /// 32 bit periods at `UARTIBRD` 13, `UARTFBRD` 1: 512 × (13 + 1/64)
+    /// cycles of `UARTCLK`, which [`at`] makes ticks.
+    const TIMEOUT_13_1: u64 = 512 * 13 + 512 / 64;
+
+    fn rx_at(uart: &mut Pl011, byte: u8, ticks: u64) -> bool {
+        uart.receive(byte, at(ticks))
+    }
+
+    fn update(uart: &mut Pl011, ticks: u64) {
+        uart.update(at(ticks).machine);
+    }
+
+    #[test]
+    fn the_receive_timeout_expires_32_bit_periods_after_the_last_arrival() {
+        let mut uart = timed();
         write(&mut uart, IMSC, INT_RT);
-        assert_eq!(read(&mut uart, RIS) & INT_RT, INT_RT, "enabling it with data waiting");
+        assert!(rx_at(&mut uart, b'a', 100));
+        assert_eq!(uart.next_deadline(), Some(VmInstant::from_ticks(100 + TIMEOUT_13_1)));
+        update(&mut uart, 100 + TIMEOUT_13_1 - 1);
+        assert_eq!(read(&mut uart, RIS) & INT_RT, 0, "one tick short");
+        assert!(rx_at(&mut uart, b'b', 1000));
+        assert_eq!(uart.next_deadline(), Some(VmInstant::from_ticks(1000 + TIMEOUT_13_1)), "an arrival restarts it");
+        update(&mut uart, 100 + TIMEOUT_13_1);
+        assert_eq!(read(&mut uart, RIS) & INT_RT, 0, "the first arrival's deadline is gone");
+        update(&mut uart, 1000 + TIMEOUT_13_1);
+        assert_eq!(read(&mut uart, RIS) & INT_RT, INT_RT, "32 bit periods without a character");
         assert_eq!(read(&mut uart, MIS), INT_RT);
         assert!(uart.irq());
-        write(&mut uart, ICR, INT_RT);
-        assert_eq!(read(&mut uart, RIS) & INT_RT, 0);
-        write(&mut uart, IMSC, INT_RT);
-        assert_eq!(read(&mut uart, RIS) & INT_RT, 0, "nothing new arrived");
-        assert!(uart.receive(b'b'));
-        assert_eq!(read(&mut uart, RIS) & INT_RT, INT_RT, "an arrival restarts it");
+        assert_eq!(uart.next_deadline(), None, "it fires once");
         assert_eq!(read(&mut uart, DR), u32::from(b'a'));
         assert_eq!(read(&mut uart, RIS) & INT_RT, INT_RT, "the FIFO still holds a byte");
         assert_eq!(read(&mut uart, DR), u32::from(b'b'));
         assert_eq!(read(&mut uart, RIS) & INT_RT, 0, "reading it empty clears it");
-        assert!(uart.receive(b'c'));
+    }
+
+    #[test]
+    fn the_receive_timeout_counts_only_while_rtim_is_set() {
+        let mut uart = timed();
+        assert!(rx_at(&mut uart, b'a', 0));
+        assert_eq!(uart.next_deadline(), None, "RTIM clear: no count");
+        update(&mut uart, 100_000);
+        assert_eq!(read(&mut uart, RIS) & (INT_RT | INT_RX), 0, "RTIM clear: RTRIS cannot be set");
+        write_at(&mut uart, IMSC, INT_RT, 5000);
+        assert_eq!(uart.next_deadline(), Some(VmInstant::from_ticks(5000 + TIMEOUT_13_1)), "setting RTIM starts it");
+        update(&mut uart, 5000 + TIMEOUT_13_1);
+        assert_eq!(read(&mut uart, RIS) & INT_RT, INT_RT);
+        write(&mut uart, ICR, INT_RT);
+        write_at(&mut uart, IMSC, INT_RT, 20_000);
+        assert_eq!(uart.next_deadline(), None, "RTIM was set already: nothing starts");
+        update(&mut uart, 50_000);
+        assert_eq!(read(&mut uart, RIS) & INT_RT, 0, "nothing new arrived");
+        assert!(rx_at(&mut uart, b'b', 60_000));
+        write_at(&mut uart, IMSC, 0, 60_001);
+        assert_eq!(uart.next_deadline(), None, "clearing RTIM stops it");
+        update(&mut uart, 70_000);
+        assert_eq!(read(&mut uart, RIS) & INT_RT, 0);
+        write_at(&mut uart, IMSC, INT_RT, 70_000);
+        assert_eq!(uart.next_deadline(), Some(VmInstant::from_ticks(70_000 + TIMEOUT_13_1)));
+        update(&mut uart, 70_000 + TIMEOUT_13_1);
         write(&mut uart, IMSC, 0);
         assert_eq!(read(&mut uart, RIS) & INT_RT, 0, "clearing RTIM clears it");
+        write_at(&mut uart, IMSC, INT_RT, 80_000);
+        assert_eq!(read(&mut uart, DR), u32::from(b'a'));
+        assert_eq!(read(&mut uart, DR), u32::from(b'b'));
+        assert_eq!(uart.next_deadline(), None, "emptying the FIFO stops it");
+    }
+
+    #[test]
+    fn the_bit_period_is_the_divisor_the_last_lcr_h_write_latched() {
+        let deadline = |uart: &mut Pl011| {
+            assert_eq!(read(uart, DR) & 0xFF, u32::from(b'x'), "the FIFO is emptied for the next count");
+            assert!(rx_at(uart, b'x', 0));
+            uart.next_deadline().map(VmInstant::ticks)
+        };
+        let mut uart = timed();
+        write(&mut uart, IMSC, INT_RT);
+        assert!(rx_at(&mut uart, b'x', 0));
+        write(&mut uart, 9, 26);
+        assert_eq!(deadline(&mut uart), Some(TIMEOUT_13_1), "UARTIBRD alone changes nothing (§3.3.7)");
+        write(&mut uart, LCR_H, LCR_FEN);
+        assert_eq!(deadline(&mut uart), Some(512 * 26 + 8), "the UARTLCR_H write latches 26 + 1/64");
+        write(&mut uart, LCR_H, LCR_FEN | LCR_WLEN_8 | (1 << 3) | (1 << 1));
+        assert_eq!(deadline(&mut uart), Some(512 * 26 + 8), "word length, stop bits and parity leave the bit period");
+        write(&mut uart, 10, 0);
+        write(&mut uart, LCR_H, LCR_FEN);
+        assert_eq!(deadline(&mut uart), Some(512 * 26));
+        write(&mut uart, 9, 0);
+        write(&mut uart, LCR_H, LCR_FEN);
+        assert_eq!(deadline(&mut uart), None, "UARTIBRD 0 gives no baud clock");
+        write(&mut uart, 9, 0xFFFF);
+        write(&mut uart, 10, 1);
+        write(&mut uart, LCR_H, LCR_FEN);
+        assert_eq!(deadline(&mut uart), None, "0xFFFF with a fraction aborts reception");
+        write(&mut uart, 10, 0);
+        write(&mut uart, LCR_H, LCR_FEN);
+        assert_eq!(deadline(&mut uart), Some(512 * 0xFFFF));
+    }
+
+    #[test]
+    fn the_receive_timeout_ends_at_the_first_whole_tick_after_32_bit_periods() {
+        // At 50 million ticks a second, 6664 cycles of 24 MHz are
+        // 13883.3 ticks: the timeout is seen at tick 13884.
+        let mut uart = timed();
+        write(&mut uart, IMSC, INT_RT);
+        let rate = ClockHz::new(50_000_000).expect("non-zero");
+        let clocks = UartClocks {
+            machine: VmClock::new(VmInstant::from_ticks(7), rate),
+            uartclk: UARTCLK,
+        };
+        assert!(uart.receive(b'a', clocks));
+        assert_eq!(uart.next_deadline(), Some(VmInstant::from_ticks(7 + 13_884)));
+        uart.update(VmClock::new(VmInstant::from_ticks(7 + 13_883), rate));
+        assert_eq!(read(&mut uart, RIS) & INT_RT, 0);
+        uart.update(VmClock::new(VmInstant::from_ticks(7 + 13_884), rate));
+        assert_eq!(read(&mut uart, RIS) & INT_RT, INT_RT);
     }
 
     #[test]
     fn changing_fen_empties_the_receive_fifo() {
         let mut uart = enabled();
         write(&mut uart, LCR_H, LCR_FEN);
-        assert!(uart.receive(1));
-        assert!(uart.receive(2));
+        assert!(rx(&mut uart, 1));
+        assert!(rx(&mut uart, 2));
         write(&mut uart, LCR_H, 0);
         assert_eq!(read(&mut uart, FR) & FLAG_RXFE, FLAG_RXFE);
     }
@@ -946,12 +1172,12 @@ mod tests {
     #[test]
     fn emptying_the_fifo_through_fen_clears_the_receive_interrupts() {
         // FIFO enabled, then disabled: two entries at the 1/8 level.
-        let mut uart = enabled();
-        write(&mut uart, LCR_H, LCR_FEN);
+        let mut uart = timed();
         write(&mut uart, IFLS, 0);
         write(&mut uart, IMSC, INT_RT | INT_RX);
-        assert!(uart.receive(1));
-        assert!(uart.receive(2));
+        assert!(rx(&mut uart, 1));
+        assert!(rx(&mut uart, 2));
+        update(&mut uart, TIMEOUT_13_1);
         assert_eq!(read(&mut uart, RIS) & (INT_RT | INT_RX), INT_RT | INT_RX);
         write(&mut uart, LCR_H, 0);
         assert_eq!(read(&mut uart, FR) & FLAG_RXFE, FLAG_RXFE);
@@ -959,11 +1185,16 @@ mod tests {
         assert_eq!(read(&mut uart, RIS) & INT_RX, 0, "an empty FIFO is below the trigger level");
         assert!(!uart.irq());
         // FIFO disabled, then enabled: the holding register.
-        assert!(uart.receive(3));
+        assert!(rx_at(&mut uart, 3, 10_000));
+        update(&mut uart, 10_000 + TIMEOUT_13_1);
         assert_eq!(read(&mut uart, RIS) & (INT_RT | INT_RX), INT_RT | INT_RX);
+        write_at(&mut uart, IMSC, INT_RX, 20_000);
+        write_at(&mut uart, IMSC, INT_RT | INT_RX, 20_000);
+        assert!(uart.next_deadline().is_some(), "RTIM set again with the holding register full");
         write(&mut uart, LCR_H, LCR_FEN);
         assert_eq!(read(&mut uart, FR) & FLAG_RXFE, FLAG_RXFE);
         assert_eq!(read(&mut uart, RIS) & (INT_RT | INT_RX), 0);
+        assert_eq!(uart.next_deadline(), None, "and stops the count");
         assert!(!uart.irq());
     }
 
@@ -971,9 +1202,9 @@ mod tests {
     fn an_empty_fifo_reads_the_slot_at_the_read_position() {
         let mut uart = enabled();
         write(&mut uart, LCR_H, LCR_FEN);
-        assert!(uart.receive(b'p'));
+        assert!(rx(&mut uart, b'p'));
         assert_eq!(read(&mut uart, DR), u32::from(b'p'));
-        assert!(uart.receive(b'q'));
+        assert!(rx(&mut uart, b'q'));
         assert_eq!(read(&mut uart, DR), u32::from(b'q'));
         // The read position is now slot 2, which nothing has written.
         assert_eq!(read(&mut uart, DR), 0);
@@ -1021,11 +1252,11 @@ mod tests {
         write(&mut uart, CR, ENABLED | CR_LBE);
         write(&mut uart, DR, u32::from(b'L'));
         assert_eq!(uart.drain_tx().collect::<std::vec::Vec<u8>>(), b"L", "the byte still leaves");
-        assert!(uart.receive(b'h'), "host input is consumed");
+        assert!(rx(&mut uart, b'h'), "host input is consumed");
         assert_eq!(read(&mut uart, DR), u32::from(b'L'));
         assert_eq!(read(&mut uart, FR) & FLAG_RXFE, FLAG_RXFE, "and dropped");
         write(&mut uart, CR, ENABLED);
-        assert!(uart.receive(b'h'));
+        assert!(rx(&mut uart, b'h'));
         assert_eq!(read(&mut uart, DR), u32::from(b'h'));
     }
 
@@ -1141,7 +1372,7 @@ mod tests {
         // UARTDR first, which pops the break and sets UARTRSR, then UARTRSR.
         let pair = uart.read(reg(0), AccessWidth::Dword);
         assert_eq!(pair, u64::from(DR_BE) | (u64::from(DR_BE >> 8) << 32));
-        uart.write(reg(13), AccessWidth::Dword, 0x0000_0050_0000_0012);
+        uart.write(reg(13), AccessWidth::Dword, 0x0000_0050_0000_0012, at(0));
         assert_eq!(read(&mut uart, 13), 0x12);
         assert_eq!(read(&mut uart, IMSC), 0x50);
     }
@@ -1151,10 +1382,10 @@ mod tests {
         let mut uart = enabled();
         write(&mut uart, LCR_H, LCR_FEN);
         write(&mut uart, IMSC, 0x50);
-        assert!(uart.receive(b'w'));
+        assert!(rx(&mut uart, b'w'));
         assert_eq!(read(&mut uart, DR), u32::from(b'w'));
-        assert!(uart.receive(b'x'));
-        assert!(uart.receive(b'y'));
+        assert!(rx(&mut uart, b'x'));
+        assert!(rx(&mut uart, b'y'));
         write(&mut uart, CR, ENABLED | CR_LBE | CR_RTS);
         let mut image = std::vec::Vec::new();
         uart.save(&mut image).expect("save");
@@ -1229,6 +1460,61 @@ mod tests {
         image[cr..cr + 4].copy_from_slice(&0x300u32.to_le_bytes());
         let mut source: &[u8] = &image;
         assert!(Pl011::new().restore(&mut source).is_ok());
+    }
+
+    #[test]
+    fn a_snapshot_keeps_the_latched_divisor_and_the_running_receive_timeout() {
+        let mut uart = timed();
+        write(&mut uart, IMSC, INT_RT);
+        assert!(rx_at(&mut uart, b'a', 500));
+        write(&mut uart, 9, 99);
+        let mut image = std::vec::Vec::new();
+        uart.save(&mut image).expect("save");
+        let mut restored = Pl011::new();
+        let mut source: &[u8] = &image;
+        restored.restore(&mut source).expect("restore");
+        assert!(source.is_empty(), "the restore consumed exactly what the save wrote");
+        assert_eq!(restored.next_deadline(), Some(VmInstant::from_ticks(500 + TIMEOUT_13_1)));
+        assert_eq!(read(&mut restored, DR), u32::from(b'a'));
+        assert!(rx_at(&mut restored, b'b', 0));
+        assert_eq!(restored.next_deadline(), Some(VmInstant::from_ticks(TIMEOUT_13_1)), "13 + 1/64 still, not 99");
+    }
+
+    #[test]
+    fn a_snapshot_with_a_receive_timeout_that_cannot_run_is_refused() {
+        // The registers, the receive FIFO, its read position and count, the
+        // transmit FIFO and its count, then the divisor and the timeout.
+        const DIVISOR: usize = 11 * 4 + RX_FIFO_DEPTH * 4 + 1 + 4 + 1 + TX_FIFO_DEPTH;
+        let image_of = |uart: &Pl011| {
+            let mut image = std::vec::Vec::new();
+            uart.save(&mut image).expect("save");
+            image
+        };
+        let refused = |image: &[u8]| {
+            let mut source: &[u8] = image;
+            Pl011::new().restore(&mut source).is_err()
+        };
+        let mut uart = timed();
+        write(&mut uart, IMSC, INT_RT);
+        assert!(rx_at(&mut uart, b'a', 0));
+        let running = image_of(&uart);
+        assert_eq!(running[DIVISOR..DIVISOR + 4], 833u32.to_le_bytes());
+        assert_eq!(running[DIVISOR + 4], 1, "a timeout runs");
+        assert!(!refused(&running));
+        let mut wide = running.clone();
+        wide[DIVISOR + 3] = 1;
+        assert!(refused(&wide), "a divisor wider than 22 bits");
+        let mut empty = running.clone();
+        let count = 11 * 4 + RX_FIFO_DEPTH * 4 + 1;
+        empty[count] = 0;
+        assert!(refused(&empty), "a count with nothing in the FIFO");
+        let mut unmasked = running.clone();
+        // UARTIMSC, the ninth register saved.
+        unmasked[8 * 4..9 * 4].copy_from_slice(&0u32.to_le_bytes());
+        assert!(refused(&unmasked), "a count with RTIM clear");
+        let mut no_clock = running;
+        no_clock[DIVISOR..DIVISOR + 4].copy_from_slice(&1u32.to_le_bytes());
+        assert!(refused(&no_clock), "a count with UARTIBRD 0 latched");
     }
 
     #[test]
