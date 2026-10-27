@@ -186,6 +186,9 @@ pub(crate) enum Feature {
     /// FEAT_RPRES: 12-bit single-precision FRECPE and FRSQRTE estimates
     /// under FPCR.AH = 1. No encoding of its own.
     Rpres,
+    /// FEAT_SME2: the ZT0 register, predicate-as-counter, and the
+    /// multi-vector instructions.
+    Sme2,
 }
 
 /// What the conformance tests read of a feature: `tests/unit/spec.rs`
@@ -193,7 +196,7 @@ pub(crate) enum Feature {
 #[cfg(test)]
 impl Feature {
     /// Every feature, in declaration order.
-    pub(crate) const ALL: [Feature; 61] = [
+    pub(crate) const ALL: [Feature; 62] = [
         Feature::Base,
         Feature::Fp,
         Feature::AdvSimd,
@@ -255,6 +258,7 @@ impl Feature {
         Feature::Debugv8p4,
         Feature::Afp,
         Feature::Rpres,
+        Feature::Sme2,
     ];
 
     /// The name Arm's data gives the feature, `None` for the base set.
@@ -321,6 +325,7 @@ impl Feature {
             Self::Debugv8p4 => Some("FEAT_Debugv8p4"),
             Self::Afp => Some("FEAT_AFP"),
             Self::Rpres => Some("FEAT_RPRES"),
+            Self::Sme2 => Some("FEAT_SME2"),
         }
     }
 
@@ -368,7 +373,7 @@ impl Feature {
     /// still being built has some of its encodings, each of them Arm's, and
     /// no processor this crate builds implements it yet.
     pub(crate) const fn complete(self) -> bool {
-        !matches!(self, Self::Sme)
+        !matches!(self, Self::Sme | Self::Sme2)
     }
 }
 

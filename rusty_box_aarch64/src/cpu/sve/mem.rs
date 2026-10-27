@@ -1,6 +1,8 @@
 //! The SVE loads, stores and prefetches FEAT_SME makes legal in Streaming
 //! SVE mode: the contiguous accesses of one to four vectors, the
-//! load-and-broadcasts, and LDR and STR of vector and predicate registers.
+//! load-and-broadcasts, and LDR and STR of vector and predicate registers;
+//! and FEAT_SME2's contiguous accesses of two or four vectors under a
+//! predicate-as-counter, to consecutive or strided registers.
 //!
 //! An element access is `Mem[addr, mbytes]` of the element's memory size,
 //! checked for alignment by that size. A fault ends the instruction: a load
@@ -15,6 +17,7 @@
 //! Provenance (R7): the Arm A64 ISA XML, release 2026-09, the instruction
 //! pages each handler names.
 
+use super::counter::PredCounter;
 use super::{Esize, Pv, Zv};
 use crate::bus::PhysBus;
 use crate::cpu::exec::{bit, bits, sext, ExecResult, Fault, Flow};
@@ -31,6 +34,50 @@ struct Predicated {
     base: u64,
     /// `Zt` (bits 4:0): the first register the access transfers.
     t: u32,
+}
+
+/// What a multi-vector access starts with, in its pseudocode's order: the
+/// element size `msz` (bits 14:13) and the [`MultiVectors`], the enable
+/// check and `CurrentVL`, the governing predicate-as-counter `PNg` (PN8 to
+/// PN15 by bits 12:10), and the base register `Xn|SP` (bits 9:5) with its
+/// SP check; then the first address, `X[m]` elements or the immediate in
+/// whole transfers past the base.
+struct MultiAccess {
+    vl: VecLen,
+    es: Esize,
+    regs: MultiVectors,
+    counter: PredCounter,
+    addr: u64,
+}
+
+/// The vectors a multi-vector access transfers: two or four by bit 15,
+/// consecutive from `Zt:'0'` or `Zt:'00'` (bits 4:1 or 4:2) with bit 24
+/// clear, else strided, from `T:'0':Zt` 8 apart or from `T:'00':Zt` 4
+/// apart (`T` bit 4, `Zt` bits 2:0 or 1:0).
+#[derive(Debug, Clone, Copy)]
+struct MultiVectors {
+    first: u32,
+    nreg: usize,
+    stride: u32,
+}
+
+impl MultiVectors {
+    fn of(insn: u32) -> Self {
+        let four = bit(insn, 15);
+        let (nreg, (first, stride)) = match (four, bit(insn, 24)) {
+            (false, false) => (2, (bits(insn, 4, 1) << 1, 1)),
+            (true, false) => (4, (bits(insn, 4, 2) << 2, 1)),
+            (false, true) => (2, ((bits(insn, 4, 4) << 4) | bits(insn, 2, 0), 8)),
+            (true, true) => (4, ((bits(insn, 4, 4) << 4) | bits(insn, 1, 0), 4)),
+        };
+        Self { first, nreg, stride }
+    }
+
+    /// The `r`th vector transferred.
+    #[inline]
+    fn register(self, r: usize) -> u32 {
+        self.first + r as u32 * self.stride
+    }
 }
 
 /// The elements a contiguous access moves: `esize` bits in the register,
@@ -123,6 +170,27 @@ impl Cpu {
         let mask = self.p(g, vl);
         let base = self.base_register(n)?;
         Ok(Predicated { vl, mask, base, t })
+    }
+
+    /// The [`MultiAccess`] start of the multi-vector access `insn`, scalar
+    /// plus scalar or plus immediate by bit 22.
+    fn sve_multi_access(&self, insn: u32) -> Result<MultiAccess, Fault> {
+        let es = Esize::from_size(bits(insn, 14, 13));
+        let regs = MultiVectors::of(insn);
+        let offset = Offset::of(insn, bit(insn, 22));
+        let (g, n) = (8 + bits(insn, 12, 10), bits(insn, 9, 5));
+        let vl = self.sve_check()?;
+        let counter = PredCounter::of(&self.p(g, vl), vl);
+        let base = self.base_register(n)?;
+        let mbytes = es.bytes();
+        let addr = self.sve_first_address(base, offset, mbytes, es.elements(vl) * regs.nreg * mbytes);
+        Ok(MultiAccess {
+            vl,
+            es,
+            regs,
+            counter,
+            addr,
+        })
     }
 
     /// The first address of a contiguous access from `base`: `X[m] *
@@ -230,6 +298,64 @@ impl Cpu {
         let el = Elements::same(Esize::from_size(bits(insn, 24, 23)));
         let nreg = bits(insn, 22, 21) as usize + 1;
         self.sve_store(bus, insn, el, nreg, Offset::of(insn, bit(insn, 15)))
+    }
+
+    /// LD1B, LD1H, LD1W, LD1D and LDNT1B to LDNT1D of two or four vectors
+    /// (`ld1b_mz_p_br_2` to `ldnt1d_mzx_p_bi_4x4`: `1010000 x 0 x 0
+    /// Rm|0imm4 x msz PNg Rn Zt`, scalar plus scalar or plus immediate by
+    /// bit 22, [`MultiVectors`] by bits 24, 15 and 4:0): `8 << msz`-bit
+    /// elements, register after register in memory, element `e` of
+    /// register `r` active as element `r * elements + e` of the
+    /// predicate-as-counter, the others zero; the registers are written
+    /// once every access is done. Non-temporal is a hint, which changes
+    /// nothing here.
+    pub(crate) fn exec_sve_load_multi<B: PhysBus>(&mut self, bus: &mut B, insn: u32) -> ExecResult {
+        let MultiAccess {
+            vl,
+            es,
+            regs,
+            counter,
+            mut addr,
+        } = self.sve_multi_access(insn)?;
+        let elements = es.elements(vl);
+        let mut values = [Zv::ZERO; 4];
+        for (r, value) in values[..regs.nreg].iter_mut().enumerate() {
+            for e in 0..elements {
+                if counter.active(r * elements + e, es) {
+                    value.set(e, es, self.read_mem(bus, addr, es.log2_bytes(), DataAccess::NORMAL)?);
+                }
+                addr = addr.wrapping_add(es.bytes() as u64);
+            }
+        }
+        for (r, value) in values[..regs.nreg].iter().enumerate() {
+            self.set_z(regs.register(r), vl, value);
+        }
+        Ok(Flow::Next)
+    }
+
+    /// ST1B, ST1H, ST1W, ST1D and STNT1B to STNT1D of two or four vectors
+    /// (`st1b_mz_p_br_2` to `stnt1d_mzx_p_bi_4x4`: `1010000 x 0 x 1
+    /// Rm|0imm4 x msz PNg Rn Zt`), in [`Cpu::exec_sve_load_multi`]'s
+    /// order: each active element.
+    pub(crate) fn exec_sve_store_multi<B: PhysBus>(&mut self, bus: &mut B, insn: u32) -> ExecResult {
+        let MultiAccess {
+            vl,
+            es,
+            regs,
+            counter,
+            mut addr,
+        } = self.sve_multi_access(insn)?;
+        let elements = es.elements(vl);
+        for r in 0..regs.nreg {
+            let source = self.z(regs.register(r), vl);
+            for e in 0..elements {
+                if counter.active(r * elements + e, es) {
+                    self.write_mem(bus, addr, es.log2_bytes(), source.get(e, es), DataAccess::NORMAL)?;
+                }
+                addr = addr.wrapping_add(es.bytes() as u64);
+            }
+        }
+        Ok(Flow::Next)
     }
 
     /// LD1RB, LD1RH, LD1RW, LD1RD and the sign-extending LD1RSB, LD1RSH,

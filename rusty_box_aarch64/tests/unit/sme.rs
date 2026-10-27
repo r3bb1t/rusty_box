@@ -170,7 +170,8 @@ fn enabling_za_zeroes_it_and_leaves_the_vectors() {
 
 /// `SVCR` reads `PSTATE.SM` and `PSTATE.ZA`, and a write is
 /// `SetPSTATE_SM(value<0>)` then `SetPSTATE_ZA(value<1>)`. At EL0 it needs
-/// `SMEN` = 11; `SMCR_EL1` is EL1's, and keeps only `LEN`.
+/// `SMEN` = 11; `SMCR_EL1` is EL1's, and keeps only `LEN` and, with
+/// FEAT_SME2, `EZT0`.
 #[test]
 fn svcr_and_smcr_el1_are_reached_through_cpacr_smen() {
     let mut cpu = sme();
@@ -192,7 +193,7 @@ fn svcr_and_smcr_el1_are_reached_through_cpacr_smen() {
 
     cpu.x[0] = u64::MAX;
     assert_eq!(exec(&mut cpu, MSR_SMCR), None);
-    assert_eq!(cpu.sys.smcr_el1, 0xF, "LEN only: EZT0 and FA64 are RES0 here, bits 8:4 RAZ/WI");
+    assert_eq!(cpu.sys.smcr_el1, (1 << 30) | 0xF, "LEN and EZT0: FA64 is RES0 here, bits 8:4 RAZ/WI");
     cpu.sys.cpacr_el1 = 3 << 20;
     assert_eq!(exec(&mut cpu, MRS_SMCR), Some(SME_DISABLED), "SMEN x0 at EL1");
     assert_eq!(exec(&mut cpu, MSR_SVCR), Some(SME_DISABLED));
@@ -370,6 +371,7 @@ fn a_snapshot_carries_the_sme_state() {
     cpu.scalable.p[15][3] = 0x0F;
     cpu.scalable.ffr[0] = 1;
     cpu.scalable.za[5][9] = 0x59;
+    cpu.scalable.zt0[63] = 0x3F;
     let mut image = Vec::new();
     cpu.save(&mut image).expect("save");
 
@@ -383,6 +385,7 @@ fn a_snapshot_carries_the_sme_state() {
     assert_eq!(restored.scalable.p, cpu.scalable.p);
     assert_eq!(restored.scalable.ffr, cpu.scalable.ffr);
     assert_eq!(restored.scalable.za[5][9], 0x59);
+    assert_eq!(restored.scalable.zt0, cpu.scalable.zt0);
 
     let mut a57 = processor(Implementation::CORTEX_A57);
     assert!(a57.restore(&mut image.as_slice()).is_err(), "an SME image on a Cortex-A57");

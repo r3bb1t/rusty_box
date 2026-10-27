@@ -48,6 +48,70 @@ fn count_active(mask: &Pv, operand: &Pv, es: Esize, vl: VecLen) -> usize {
     (0..es.elements(vl)).filter(|&e| mask.active(e, es) && operand.active(e, es)).count()
 }
 
+/// What a WHILE compares: `Xn` stepping by one each element, and `Xm`, as
+/// `UInt` or `SInt` of their low `rsize` bits.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct WhileCompare {
+    operand1: u64,
+    operand2: u64,
+    rsize: Esize,
+    unsigned: bool,
+    cmp: CmpOp,
+    /// Counting up (`operand1 + 1` each element, from the first element),
+    /// else down (from the last).
+    pub(super) up: bool,
+}
+
+impl WhileCompare {
+    /// The comparison of the WHILE `insn` between `Xn` (`operand1`) and
+    /// `Xm` (`operand2`) at `rsize` bits: WHILELT, WHILELE, WHILELO and
+    /// WHILELS count up by `lt` (bit 10), WHILEGE, WHILEGT, WHILEHS and
+    /// WHILEHI down; unsigned by `U` (bit 11), and with `eq` the inclusive
+    /// compare.
+    pub(super) fn of(insn: u32, eq: bool, rsize: Esize, operand1: u64, operand2: u64) -> Self {
+        let up = bit(insn, 10);
+        let cmp = match (up, eq) {
+            (true, false) => CmpOp::Lt,
+            (true, true) => CmpOp::Le,
+            (false, false) => CmpOp::Ge,
+            (false, true) => CmpOp::Gt,
+        };
+        Self {
+            operand1,
+            operand2,
+            rsize,
+            unsigned: bit(insn, 11),
+            cmp,
+            up,
+        }
+    }
+
+    /// How many of `iterations` elements a WHILE makes active, in the
+    /// order it visits them: the compare holding each time in a row (Arm's
+    /// `last`), `operand1` wrapping at `rsize` bits.
+    pub(super) fn count(self, iterations: usize) -> usize {
+        let element2 = int(self.operand2, self.rsize, self.unsigned);
+        let mut operand1 = self.operand1;
+        let mut count = 0;
+        while count < iterations && self.cmp.holds(int(operand1, self.rsize, self.unsigned), element2) {
+            count += 1;
+            operand1 = if self.up { operand1.wrapping_add(1) } else { operand1.wrapping_sub(1) };
+        }
+        count
+    }
+
+    /// Whether element `e` of `elements` is one the WHILE makes active,
+    /// `count` of them having compared true: the first `count` counting
+    /// up, the last `count` counting down.
+    pub(super) fn active(self, e: usize, elements: usize, count: usize) -> bool {
+        if self.up {
+            e < count
+        } else {
+            e >= elements - count
+        }
+    }
+}
+
 impl Cpu {
     /// The integer compares: CMP<cc> (vectors, `00100100 size 0 Zm op 0 o2
     /// Pg Zn ne Pd`), CMP<cc> (wide elements, `... size 0 Zm U 1 lt Pg Zn ne
@@ -350,24 +414,11 @@ impl Cpu {
                 result.set_element(e, es, diff <= 0 || (e as i128) < diff);
             }
         } else {
-            let wide = bit(insn, 12);
-            let unsigned = bit(insn, 11);
-            let up = bit(insn, 10);
-            let cmp = match (up, bit(insn, 4)) {
-                (true, false) => CmpOp::Lt,
-                (true, true) => CmpOp::Le,
-                (false, false) => CmpOp::Ge,
-                (false, true) => CmpOp::Gt,
-            };
-            let rsize = if wide { Esize::D } else { Esize::S };
-            let element2 = int(y, rsize, unsigned);
-            let mut operand1 = x;
-            let mut last = true;
-            for i in 0..elements {
-                let e = if up { i } else { elements - 1 - i };
-                last = last && cmp.holds(int(operand1, rsize, unsigned), element2);
-                result.set_element(e, es, last);
-                operand1 = if up { operand1.wrapping_add(1) } else { operand1.wrapping_sub(1) };
+            let rsize = if bit(insn, 12) { Esize::D } else { Esize::S };
+            let compare = WhileCompare::of(insn, bit(insn, 4), rsize, x, y);
+            let count = compare.count(elements);
+            for e in 0..elements {
+                result.set_element(e, es, compare.active(e, elements, count));
             }
         }
         self.pstate.set_nzcv(pred_test(&Pv::ones(vl), &result, es, vl));

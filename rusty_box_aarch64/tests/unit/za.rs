@@ -507,12 +507,13 @@ fn ldr_and_str_of_za_move_a_vector_at_the_offset_times_its_length() {
 
 /// The encodings of other features in the SME space are UNDEFINED, before
 /// any SME check: MOVA's `Q = 1` with a `size` other than 11, FMOPA,
-/// SMOPA and ADDHA into 64-bit tiles (FEAT_SME_F64F64, FEAT_SME_I16I64)
-/// and ZERO of ZT0 (FEAT_SME2).
+/// SMOPA and ADDHA into 64-bit tiles (FEAT_SME_F64F64, FEAT_SME_I16I64),
+/// ZERO of ZA array vectors (FEAT_SME2p1) and MOVT from a vector to ZT0
+/// (FEAT_SME_LUTv2).
 #[test]
 fn the_encodings_of_other_features_are_undefined() {
     let mut cpu = processor(Implementation::EVERY_FEATURE);
-    for insn in [0xC001_0020, 0x80C0_0000, 0xA0C0_0000, 0xC0D0_0000, 0xC048_0001] {
+    for insn in [0xC001_0020, 0x80C0_0000, 0xA0C0_0000, 0xC0D0_0000, 0xC00C_0000, 0xC04F_03E0] {
         assert_eq!(exec(&mut cpu, insn), Some(UNDEFINED), "{insn:#010x}");
     }
 }

@@ -25,7 +25,7 @@ Reproducers:
   header gives the commands and the expected and observed output.
 - `docs/qemu-aarch64-probe-user.c`: a static Linux program for
   `qemu-aarch64 -cpu max`, one case per argument, for the entries fixed
-  upstream and for entries 12 to 15.
+  upstream and for entries 12 to 16.
 
 What `rusty_box_aarch64` does about each entry is in its README, "Where the
 references differ".
@@ -552,6 +552,41 @@ LD1Q are the same.
 before loading, vertical or horizontal, which makes the per-element
 clears redundant. Built and tested on `v11.1.2`: the probe agrees, and
 `rusty_box_aarch64`'s ZA vectors were generated with it.
+
+---
+
+### 16. MOVT between ZT0 and a general register executes outside Debug state
+
+**Impact**: harmless. MOVT (table to scalar) and MOVT (scalar to table),
+`movt x0, zt0[0]` and `movt zt0[0], x0`, execute in any state on QEMU,
+reading or writing a doubleword of ZT0. The architecture defines them
+only in Debug state, for an external debugger to reach ZT0; a program
+that executes one gets the Undefined Instruction exception on hardware,
+and a doubleword move on QEMU. MOVT (vector to table), FEAT_SME_LUTv2's,
+is defined in any state and is not affected.
+
+**Location**: `target/arm/tcg/translate-sme.c`, `do_movt()` through
+`TRANS_FEAT(MOVT_rzt, aa64_sme2, ...)` and `TRANS_FEAT(MOVT_ztr, ...)`,
+which check only FEAT_SME2 and then `sme2_zt0_enabled_check()`. QEMU
+implements no Debug state for TCG, so these encodings are UNDEFINED in
+every state it has.
+
+**What the Arm ARM says**: the decode of `movt_r_zt_` and of
+`movt_zt_r_` is `if !IsFeatureImplemented(FEAT_SME2) || !Halted() then
+EndOfDecode(Decode_UNDEF); end;`, and `Halted()` is TRUE only in Debug
+state.
+
+**Reproduce**: `docs/qemu-aarch64-probe-user.c`, case `sme2_movt`.
+
+    Arm:          SIGILL (UNDEFINED)
+    QEMU 11.1.2:  0xc04c03e0 (movt x0, zt0[0]) executed
+
+QEMU master as of 2026-10-27 has the same `do_movt()`.
+
+**Fix**: `docs/qemu-sme2-movt-debug-state.patch`: the two encodings'
+translators return false, which raises the Undefined Instruction
+exception. Built and tested on `v11.1.2`: the probe raises SIGILL, and
+the other cases print what they did before.
 
 ---
 

@@ -90,8 +90,14 @@ use ldst::{
 use reserved::PermUndef;
 use sme::{
     MortlachAddhv, MortlachB16f32Prod, MortlachContigLoad, MortlachContigQload, MortlachContigQstore,
-    MortlachContigStore, MortlachCtxtLdst, MortlachExtractPred, MortlachF16f32Prod, MortlachF32f32Prod,
-    MortlachI8i32Prod, MortlachInsertPred, MortlachZero,
+    MortlachContigStore, MortlachCtxtLdst, MortlachExtractPred, MortlachExtractZt, MortlachF16f32Prod,
+    MortlachF32f32Prod, MortlachI8i32Prod, MortlachInsertPred, MortlachInsertZt, MortlachMulti2CldCldntSiCtg,
+    MortlachMulti2CldCldntSiNctg, MortlachMulti2CldCldntSsCtg, MortlachMulti2CldCldntSsNctg,
+    MortlachMulti2CstCstntSiCtg, MortlachMulti2CstCstntSiNctg, MortlachMulti2CstCstntSsCtg,
+    MortlachMulti2CstCstntSsNctg, MortlachMulti4CldCldntSiCtg, MortlachMulti4CldCldntSiNctg,
+    MortlachMulti4CldCldntSsCtg, MortlachMulti4CldCldntSsNctg, MortlachMulti4CstCstntSiCtg,
+    MortlachMulti4CstCstntSiNctg, MortlachMulti4CstCstntSsCtg, MortlachMulti4CstCstntSsNctg, MortlachZero,
+    MortlachZeroZt, MortlachZtLdst,
 };
 use sve::{
     SveFp2opIPZds, SveFp2opPPd, SveFp2opPZdA, SveFp2opPZdB0, SveFp2opPZdB1, SveFp2opPZdC, SveFp2opPZdD, SveFp2opPZds,
@@ -104,7 +110,7 @@ use sve::{
     SveIntCountRSat, SveIntCountV, SveIntCountVSat, SveIntCountvlv0, SveIntCountvlv1, SveIntCterm, SveIntDupFpimm,
     SveIntDupFpimmPred, SveIntDupImm, SveIntDupImmPred, SveIntDupMaskImm, SveIntIndexIi, SveIntIndexIr, SveIntIndexRi,
     SveIntIndexRr, SveIntLogImm, SveIntMladdsubVvvPred, SveIntMlasVvvPred, SveIntMovprfxPred, SveIntMulB,
-    SveIntPcountPred, SveIntPermBinPermPp, SveIntPermBinPermZz, SveIntPermClastRz, SveIntPermClastVz,
+    SveIntCtrToMask, SveIntPcountPn, SveIntPcountPred, SveIntPnPtrue, SveIntWhileRrPair, SveIntWhileRrPn, SveIntPermBinPermPp, SveIntPermBinPermZz, SveIntPermClastRz, SveIntPermClastVz,
     SveIntPermClastZz, SveIntPermCpyR, SveIntPermCpyV, SveIntPermDupI, SveIntPermDupR, SveIntPermExtractI,
     SveIntPermInsrs, SveIntPermInsrv, SveIntPermLastR, SveIntPermLastV, SveIntPermPunpk, SveIntPermRev,
     SveIntPermRevd, SveIntPermReverseP, SveIntPermReverseZ, SveIntPermSplice, SveIntPermTbl, SveIntPermTbl3src,
@@ -314,7 +320,12 @@ pub(crate) enum Encoding {
     SveIntWhileRr(SveIntWhileRr),
     SveIntCterm(SveIntCterm),
     SveIntWhilenc(SveIntWhilenc),
+    SveIntWhileRrPn(SveIntWhileRrPn),
+    SveIntWhileRrPair(SveIntWhileRrPair),
+    SveIntCtrToMask(SveIntCtrToMask),
+    SveIntPnPtrue(SveIntPnPtrue),
     SveIntPcountPred(SveIntPcountPred),
+    SveIntPcountPn(SveIntPcountPn),
     SveIntCountVSat(SveIntCountVSat),
     SveIntCountV(SveIntCountV),
     SveIntCountRSat(SveIntCountRSat),
@@ -427,6 +438,26 @@ pub(crate) enum Encoding {
     MortlachCtxtLdst(MortlachCtxtLdst),
     MortlachContigQload(MortlachContigQload),
     MortlachContigQstore(MortlachContigQstore),
+    MortlachMulti2CldCldntSsCtg(MortlachMulti2CldCldntSsCtg),
+    MortlachMulti4CldCldntSsCtg(MortlachMulti4CldCldntSsCtg),
+    MortlachMulti2CstCstntSsCtg(MortlachMulti2CstCstntSsCtg),
+    MortlachMulti4CstCstntSsCtg(MortlachMulti4CstCstntSsCtg),
+    MortlachMulti2CldCldntSiCtg(MortlachMulti2CldCldntSiCtg),
+    MortlachMulti4CldCldntSiCtg(MortlachMulti4CldCldntSiCtg),
+    MortlachMulti2CstCstntSiCtg(MortlachMulti2CstCstntSiCtg),
+    MortlachMulti4CstCstntSiCtg(MortlachMulti4CstCstntSiCtg),
+    MortlachMulti2CldCldntSsNctg(MortlachMulti2CldCldntSsNctg),
+    MortlachMulti4CldCldntSsNctg(MortlachMulti4CldCldntSsNctg),
+    MortlachMulti2CstCstntSsNctg(MortlachMulti2CstCstntSsNctg),
+    MortlachMulti4CstCstntSsNctg(MortlachMulti4CstCstntSsNctg),
+    MortlachMulti2CldCldntSiNctg(MortlachMulti2CldCldntSiNctg),
+    MortlachMulti4CldCldntSiNctg(MortlachMulti4CldCldntSiNctg),
+    MortlachMulti2CstCstntSiNctg(MortlachMulti2CstCstntSiNctg),
+    MortlachMulti4CstCstntSiNctg(MortlachMulti4CstCstntSiNctg),
+    MortlachZeroZt(MortlachZeroZt),
+    MortlachExtractZt(MortlachExtractZt),
+    MortlachInsertZt(MortlachInsertZt),
+    MortlachZtLdst(MortlachZtLdst),
 }
 
 /// The encoding `word` is, if it is one of a feature the decoder knows.
@@ -604,6 +635,11 @@ impl Encoding {
             | Self::SveIntPfalse(_)
             | Self::SveIntPredDup(_) => Class::SvePredicateMisc,
             Self::SveIntWhileRr(_) | Self::SveIntWhilenc(_) => Class::SveWhile,
+            Self::SveIntWhileRrPn(_) => Class::SveWhileCounter,
+            Self::SveIntWhileRrPair(_) => Class::SveWhilePair,
+            Self::SveIntCtrToMask(_) => Class::SvePext,
+            Self::SveIntPnPtrue(_) => Class::SvePtrueCounter,
+            Self::SveIntPcountPn(_) => Class::SveCntpCounter,
             Self::SveIntCterm(_) => Class::SveConditionallyTerminate,
             Self::SveIntPcountPred(_)
             | Self::SveIntCountVSat(_)
@@ -699,6 +735,28 @@ impl Encoding {
             Self::MortlachContigLoad(_) | Self::MortlachContigQload(_) => Class::SmeLoadSlice,
             Self::MortlachContigStore(_) | Self::MortlachContigQstore(_) => Class::SmeStoreSlice,
             Self::MortlachCtxtLdst(_) => Class::SmeFillSpill,
+            Self::MortlachMulti2CldCldntSsCtg(_)
+            | Self::MortlachMulti4CldCldntSsCtg(_)
+            | Self::MortlachMulti2CldCldntSiCtg(_)
+            | Self::MortlachMulti4CldCldntSiCtg(_)
+            | Self::MortlachMulti2CldCldntSsNctg(_)
+            | Self::MortlachMulti4CldCldntSsNctg(_)
+            | Self::MortlachMulti2CldCldntSiNctg(_)
+            | Self::MortlachMulti4CldCldntSiNctg(_) => Class::SveLoadMulti,
+            Self::MortlachMulti2CstCstntSsCtg(_)
+            | Self::MortlachMulti4CstCstntSsCtg(_)
+            | Self::MortlachMulti2CstCstntSiCtg(_)
+            | Self::MortlachMulti4CstCstntSiCtg(_)
+            | Self::MortlachMulti2CstCstntSsNctg(_)
+            | Self::MortlachMulti4CstCstntSsNctg(_)
+            | Self::MortlachMulti2CstCstntSiNctg(_)
+            | Self::MortlachMulti4CstCstntSiNctg(_) => Class::SveStoreMulti,
+            Self::MortlachZeroZt(_) => Class::SmeZeroZt0,
+            // MOVT between ZT0 and a general register is defined only in
+            // Debug state (its decode's `!Halted()`), which this processor
+            // never enters.
+            Self::MortlachExtractZt(_) | Self::MortlachInsertZt(_) => Class::Undefined,
+            Self::MortlachZtLdst(_) => Class::SmeFillSpillZt0,
         }
     }
 }
@@ -710,7 +768,9 @@ impl Encoding {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum Class {
     /// The Undefined Instruction exception: UDF, which is permanently
-    /// undefined, and every word [`decode`] finds no encoding for.
+    /// undefined, every word [`decode`] finds no encoding for, and the
+    /// encodings defined only in Debug state, which this processor never
+    /// enters.
     Undefined,
     PcRelAddressing,
     AddSubImmediate,
@@ -937,6 +997,16 @@ pub(crate) enum Class {
     SvePredicateMisc,
     /// WHILE<cc>, WHILEWR, WHILERW.
     SveWhile,
+    /// WHILE<cc> (predicate-as-counter).
+    SveWhileCounter,
+    /// WHILE<cc> (pair of predicates).
+    SveWhilePair,
+    /// PEXT of one predicate and of a pair.
+    SvePext,
+    /// PTRUE (predicate-as-counter).
+    SvePtrueCounter,
+    /// CNTP (predicate-as-counter).
+    SveCntpCounter,
     /// CTERMEQ, CTERMNE.
     SveConditionallyTerminate,
     /// CNTP, INCP, DECP and their saturating forms.
@@ -1037,6 +1107,13 @@ pub(crate) enum Class {
     SveStoreContiguous,
     /// STNT1 and ST2, ST3, ST4, as [`Class::SveLoadStructures`].
     SveStoreStructures,
+    /// LD1B to LD1D and LDNT1B to LDNT1D of two or four vectors under a
+    /// predicate-as-counter: the handler reads the registers, the
+    /// addressing form and the element size from the word.
+    SveLoadMulti,
+    /// ST1B to ST1D and STNT1B to STNT1D of two or four vectors, as
+    /// [`Class::SveLoadMulti`].
+    SveStoreMulti,
     /// FMOPA and FMOPS of single-precision and of half-precision values,
     /// BFMOPA and BFMOPS, into 32-bit tiles: the handler reads which from
     /// bits 24, 21 and 4.
@@ -1059,6 +1136,10 @@ pub(crate) enum Class {
     /// LDR and STR of a ZA array vector: the handler reads the direction
     /// from bit 21.
     SmeFillSpill,
+    /// ZERO {ZT0}.
+    SmeZeroZt0,
+    /// LDR and STR of ZT0: the handler reads the direction from bit 21.
+    SmeFillSpillZt0,
 }
 
 /// What an encoding's decode does about the branch that led to it into a
@@ -1390,6 +1471,34 @@ impl Encoding {
             | Self::MortlachCtxtLdst(_)
             | Self::MortlachContigQload(_)
             | Self::MortlachContigQstore(_) => Feature::Sme,
+            // FEAT_SVE2p1 has the predicate-as-counter instructions and the
+            // consecutive multi-vector loads and stores as well, which this
+            // decoder does not separate, implementing FEAT_SME2 alone.
+            Self::SveIntWhileRrPn(_)
+            | Self::SveIntWhileRrPair(_)
+            | Self::SveIntCtrToMask(_)
+            | Self::SveIntPnPtrue(_)
+            | Self::SveIntPcountPn(_)
+            | Self::MortlachMulti2CldCldntSsCtg(_)
+            | Self::MortlachMulti4CldCldntSsCtg(_)
+            | Self::MortlachMulti2CstCstntSsCtg(_)
+            | Self::MortlachMulti4CstCstntSsCtg(_)
+            | Self::MortlachMulti2CldCldntSiCtg(_)
+            | Self::MortlachMulti4CldCldntSiCtg(_)
+            | Self::MortlachMulti2CstCstntSiCtg(_)
+            | Self::MortlachMulti4CstCstntSiCtg(_)
+            | Self::MortlachMulti2CldCldntSsNctg(_)
+            | Self::MortlachMulti4CldCldntSsNctg(_)
+            | Self::MortlachMulti2CstCstntSsNctg(_)
+            | Self::MortlachMulti4CstCstntSsNctg(_)
+            | Self::MortlachMulti2CldCldntSiNctg(_)
+            | Self::MortlachMulti4CldCldntSiNctg(_)
+            | Self::MortlachMulti2CstCstntSiNctg(_)
+            | Self::MortlachMulti4CstCstntSiNctg(_)
+            | Self::MortlachZeroZt(_)
+            | Self::MortlachExtractZt(_)
+            | Self::MortlachInsertZt(_)
+            | Self::MortlachZtLdst(_) => Feature::Sme2,
         }
     }
 }
@@ -1451,7 +1560,8 @@ mod tests {
                     Feature::Sha1 => field(isar0, 8) != 0,
                     Feature::Sha256 => field(isar0, 12) != 0,
                     Feature::Crc32 => field(isar0, 16) != 0,
-                    Feature::Sme => field(pfr1, 24) != 0,
+                    Feature::Sme => field(pfr1, 24) >= 1,
+                    Feature::Sme2 => field(pfr1, 24) >= 2,
                     Feature::Lse => field(isar0, 20) != 0,
                     Feature::Lse2 => field(mmfr2, 32) != 0,
                     Feature::Lrcpc => field(isar1, 20) >= 1,
@@ -1555,11 +1665,19 @@ mod tests {
             // PFR1: BT = 1 (FEAT_BTI, not FEAT_BTIE), SSBS and SME alone.
             assert_eq!(pfr1 & !((0xF << 24) | (0xF << 4) | 0xF), 0);
             assert!(field(pfr1, 0) <= 1, "BT = 1: FEAT_BTI, not FEAT_BTIE");
-            if imp.has(Feature::Sme) {
-                assert_eq!(field(pfr1, 24), 1, "SME = 1: FEAT_SME, not FEAT_SME2");
-                assert_eq!(smfr0, 0x0000_00FD_0000_0000, "F32F32, B16F32, F16F32, I8I32; SMEver 0");
-            } else {
-                assert_eq!((field(pfr1, 24), smfr0), (0, 0));
+            match (imp.has(Feature::Sme), imp.has(Feature::Sme2)) {
+                (true, false) => {
+                    assert_eq!(field(pfr1, 24), 1, "SME = 1: FEAT_SME, not FEAT_SME2");
+                    assert_eq!(smfr0, 0x0000_00FD_0000_0000, "F32F32, B16F32, F16F32, I8I32; SMEver 0");
+                }
+                (true, true) => {
+                    assert_eq!(field(pfr1, 24), 2, "SME = 2: FEAT_SME2");
+                    assert_eq!(
+                        smfr0, 0x0100_50FF_0000_0000,
+                        "F32F32, BI32I32, B16F32, F16F32, I8I32, I16I32 = 0b0101; SMEver 1"
+                    );
+                }
+                (false, _) => assert_eq!((field(pfr1, 24), smfr0), (0, 0)),
             }
         }
     }

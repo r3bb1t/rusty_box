@@ -2,7 +2,8 @@
  * The guest side of gen_qemu_sve.py: a static AArch64 Linux program run
  * under QEMU's user-mode emulator (`qemu-aarch64 -cpu max,sme_fa64=off,
  * sme-default-vector-length=64`), which runs each word in Streaming SVE
- * mode at a 512-bit vector length, with ZA storage enabled.
+ * mode at a 512-bit vector length, with ZA storage enabled and ZT0
+ * accessible.
  *
  * It maps the 64 KiB data region at DATA, then for each case read from
  * stdin (a record: the instruction word, the register state as `struct
@@ -36,6 +37,8 @@ struct state {
 	uint8_t p[16][PLB];
 	/* ZA's horizontal vectors, ZA[0] to ZA[VLB - 1]. */
 	uint8_t za[VLB][VLB];
+	/* ZT0 (FEAT_SME2), byte 0 first. */
+	uint8_t zt0[64];
 };
 
 _Static_assert(offsetof(struct state, sp) == 248, "OFF_SP");
@@ -45,7 +48,8 @@ _Static_assert(offsetof(struct state, fpsr) == 272, "OFF_FPSR");
 _Static_assert(offsetof(struct state, z) == 288, "OFF_Z");
 _Static_assert(offsetof(struct state, p) == 2336, "OFF_P");
 _Static_assert(offsetof(struct state, za) == 2464, "OFF_ZA");
-_Static_assert(sizeof(struct state) == 6560, "state size");
+_Static_assert(offsetof(struct state, zt0) == 6560, "OFF_ZT0");
+_Static_assert(sizeof(struct state) == 6624, "state size");
 
 struct request {
 	uint32_t insn;

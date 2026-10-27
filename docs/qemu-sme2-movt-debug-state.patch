@@ -1,0 +1,32 @@
+--- a/target/arm/tcg/translate-sme.c
++++ b/target/arm/tcg/translate-sme.c
+@@ -378,18 +378,20 @@
+ TRANS_FEAT(MOVAZ_za2, aa64_sme2p1, do_mova_array_n, a, 2, true, true)
+ TRANS_FEAT(MOVAZ_za4, aa64_sme2p1, do_mova_array_n, a, 4, true, true)
+
+-static bool do_movt(DisasContext *s, arg_MOVT_rzt *a,
+-                    void (*func)(TCGv_i64, TCGv_ptr, tcg_target_long))
++/*
++ * MOVT between ZT0 and a general-purpose register is defined only in
++ * Debug state (the decode's !Halted()), which QEMU does not implement:
++ * outside it the encodings are UNDEFINED.
++ */
++static bool trans_MOVT_rzt(DisasContext *s, arg_MOVT_rzt *a)
+ {
+-    if (sme2_zt0_enabled_check(s)) {
+-        func(cpu_reg(s, a->rt), tcg_env,
+-             offsetof(CPUARMState, za_state.zt0) + a->off * 8);
+-    }
+-    return true;
++    return false;
+ }
+
+-TRANS_FEAT(MOVT_rzt, aa64_sme2, do_movt, a, tcg_gen_ld_i64)
+-TRANS_FEAT(MOVT_ztr, aa64_sme2, do_movt, a, tcg_gen_st_i64)
++static bool trans_MOVT_ztr(DisasContext *s, arg_MOVT_ztr *a)
++{
++    return false;
++}
+
+ static bool trans_MOVT_ztz(DisasContext *s, arg_MOVT_ztz *a)
+ {

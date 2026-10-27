@@ -46,23 +46,29 @@ pub(crate) const fn id_aa64pfr0(features: Features) -> u64 {
 /// `ID_AA64PFR1_EL1` of a processor implementing `features`: `BT` (bits
 /// 3:0) = 1 with FEAT_BTI (2 would be FEAT_BTIE), `SSBS` (7:4) = 1 with
 /// FEAT_SSBS and 2 with FEAT_SSBS2 as well (which `Features.json` makes
-/// imply FEAT_SSBS), `SME` (bits 27:24) = 1 with FEAT_SME, without
-/// FEAT_SME2 (`Features.json`: `FEAT_SME <=> UInt(ID_AA64PFR1_EL1.SME) >=
-/// 1`); nothing else from v8.1+.
+/// imply FEAT_SSBS), `SME` (bits 27:24) = 1 with FEAT_SME and 2 with
+/// FEAT_SME2 as well (`Features.json`: `FEAT_SME <=>
+/// UInt(ID_AA64PFR1_EL1.SME) >= 1`, `FEAT_SME2 <=> ... >= 2`, and FEAT_SME2
+/// implies FEAT_SME); nothing else from v8.1+.
 pub(crate) const fn id_aa64pfr1(features: Features) -> u64 {
     let ssbs = chain_level(features, &[Feature::Ssbs, Feature::Ssbs2]);
-    field(features, Feature::Bti, 0, 1) | (ssbs << 4) | field(features, Feature::Sme, 24, 1)
+    let sme = chain_level(features, &[Feature::Sme, Feature::Sme2]);
+    field(features, Feature::Bti, 0, 1) | (ssbs << 4) | (sme << 24)
 }
 
 /// `ID_AA64SMFR0_EL1` of a processor implementing `features`: with
 /// FEAT_SME, the fields `Features.json` requires of it, F32F32 (bit 32),
-/// B16F32 (34), F16F32 (35) and I8I32 (39:36, 0b1111), with SMEver 0 (no
-/// FEAT_SME2), and no FA64, F64F64 or I16I64; zero without.
+/// B16F32 (34), F16F32 (35) and I8I32 (39:36, 0b1111); with FEAT_SME2 as
+/// well, those it requires of FEAT_SME2, SMEver (59:56) = 1, BI32I32 (33)
+/// and I16I32 (47:44, 0b0101); no FA64, F64F64 or I16I64; zero without
+/// FEAT_SME.
 pub(crate) const fn id_aa64smfr0(features: Features) -> u64 {
-    if features.has(Feature::Sme) {
-        (1 << 32) | (1 << 34) | (1 << 35) | (0xF << 36)
-    } else {
-        0
+    let sme = (1 << 32) | (1 << 34) | (1 << 35) | (0xF << 36);
+    let sme2 = (1 << 56) | (1 << 33) | (0b0101 << 44);
+    match (features.has(Feature::Sme), features.has(Feature::Sme2)) {
+        (true, true) => sme | sme2,
+        (true, false) => sme,
+        (false, _) => 0,
     }
 }
 

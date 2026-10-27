@@ -35,7 +35,9 @@ use std::vec::Vec;
 use rusty_box_core::{ClockHz, VmClock};
 
 use super::features::Implementation;
+use super::sme::ZT0_BYTES;
 use super::sve::{Pv, Zv};
+use super::sysreg::SMCR_EZT0;
 use super::{Cpu, CpuConfig, Step};
 use crate::bus::{AccessWidth, BusFault, PhysAddr, PhysBus};
 use crate::instrumentation::NoInstrumentation;
@@ -468,6 +470,19 @@ fn za_state(seed: u64, kind: &str) -> [[u8; SVE_VLB]; SVE_VLB] {
     za
 }
 
+/// ZT0, zero but for the Z kinds, whose ZT0 is random. Must match
+/// `zt0_state` in gen_qemu_sve.py exactly.
+fn zt0_state(seed: u64, kind: &str) -> [u8; ZT0_BYTES] {
+    let mut zt0 = [0u8; ZT0_BYTES];
+    if kind.starts_with('Z') {
+        let mut r = SplitMix64(seed ^ 0x5A54_305F_5354_4154);
+        for lane in zt0.chunks_exact_mut(8) {
+            lane.copy_from_slice(&r.next().to_le_bytes());
+        }
+    }
+    zt0
+}
+
 /// A Z register of elements of `size` (`8 << size` bits): with `extreme`
 /// each zero, one, minus one, the largest or the smallest value, or one
 /// above the smallest; else each a shift amount from -(esize+2) to
@@ -522,9 +537,10 @@ fn parse_registers(field: &str, prefix: &str, len: usize) -> Vec<(usize, Vec<u8>
 
 /// Step each SVE vector once on a processor implementing every feature, in
 /// Streaming SVE mode at a 512-bit vector length (`SMCR_EL1.LEN = 3`) with
-/// ZA enabled, and fail unless every one ends in the state the reference
-/// left: PC, NZCV, FPSR, the general registers, SP, Z0-Z31, P0-P15, ZA and
-/// the data region.
+/// ZA enabled and ZT0 accessible (`SMCR_EL1.EZT0`, as Linux leaves it), and
+/// fail unless every one ends in the state the reference left: PC, NZCV,
+/// FPSR, the general registers, SP, Z0-Z31, P0-P15, ZA, ZT0 and the data
+/// region.
 fn replay_sve(vectors: &str) {
     let ips = ClockHz::new(1_000_000).unwrap_or(ClockHz::BOCHS_DEFAULT);
     let mut tallies: BTreeMap<String, Tally> = BTreeMap::new();
@@ -550,11 +566,16 @@ fn replay_sve(vectors: &str) {
             Some(field) => parse_registers(field, "za=", SVE_VLB),
             None => Vec::new(),
         };
+        let zt0_changes = match f.get(12) {
+            Some(field) => parse_registers(field, "zt=", ZT0_BYTES),
+            None => Vec::new(),
+        };
         let tally = tallies.entry(String::from(name)).or_default();
 
         let st = initial_state(seed, kind, insn);
         let sve = sve_state(seed, kind, insn);
         let za = za_state(seed, kind);
+        let zt0 = zt0_state(seed, kind);
         let mut cpu = Cpu::implementing(
             CpuConfig {
                 ips,
@@ -567,9 +588,10 @@ fn replay_sve(vectors: &str) {
         cpu.sp_el1 = st.sp;
         cpu.pstate.set_nzcv(st.nzcv);
         cpu.sys.cpacr_el1 = (3 << 24) | (3 << 20);
-        cpu.sys.smcr_el1 = 3;
+        cpu.sys.smcr_el1 = SMCR_EZT0 | 3;
         cpu.set_pstate_sm(true);
         cpu.set_pstate_za(true);
+        cpu.set_zt0(&zt0);
         cpu.fpcr = st.fpcr | sve.fpcr;
         cpu.fpsr = 0;
         let vl = cpu.current_svl();
@@ -623,6 +645,10 @@ fn replay_sve(vectors: &str) {
         for (i, bytes) in &za_changes {
             want_za[*i] = bytes.clone();
         }
+        let mut want_zt0 = zt0.to_vec();
+        for (_, bytes) in &zt0_changes {
+            want_zt0 = bytes.clone();
+        }
         let mut want_data = st.data.clone();
         for (off, b) in &mem_changes {
             want_data[*off] = *b as u8;
@@ -667,6 +693,11 @@ fn replay_sve(vectors: &str) {
                 let at = got.iter().zip(want).position(|(a, b)| a != b).unwrap_or(0);
                 diffs.push(format!("za{i} byte {at} {:#x} want {:#x}", got[at], want[at]));
             }
+        }
+        let got_zt0 = cpu.zt0();
+        if got_zt0[..] != want_zt0[..] {
+            let at = got_zt0.iter().zip(&want_zt0).position(|(a, b)| a != b).unwrap_or(0);
+            diffs.push(format!("zt0 byte {at} {:#x} want {:#x}", got_zt0[at], want_zt0[at]));
         }
         if bus.data != want_data {
             let first = bus.data.iter().zip(&want_data).position(|(a, b)| a != b).unwrap_or(0);

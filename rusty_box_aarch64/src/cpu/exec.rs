@@ -388,6 +388,11 @@ impl Cpu {
             Class::SveBreak => self.exec_sve_break(insn),
             Class::SvePredicateMisc => self.exec_sve_pred_misc(pc, insn),
             Class::SveWhile => self.exec_sve_while(insn),
+            Class::SveWhileCounter => self.exec_sve_while_counter(insn),
+            Class::SveWhilePair => self.exec_sve_while_pair(insn),
+            Class::SvePext => self.exec_sve_pext(insn),
+            Class::SvePtrueCounter => self.exec_sve_ptrue_counter(insn),
+            Class::SveCntpCounter => self.exec_sve_cntp_counter(insn),
             Class::SveConditionallyTerminate => self.exec_sve_cterm(insn),
             Class::SvePredicateCount => self.exec_sve_pred_count(pc, insn),
             Class::SveWideImmediate => self.exec_sve_wide_imm(pc, insn),
@@ -426,6 +431,8 @@ impl Cpu {
             Class::SveLoadStructures => self.exec_sve_load_structures(bus, insn),
             Class::SveStoreContiguous => self.exec_sve_store_contiguous(bus, pc, insn),
             Class::SveStoreStructures => self.exec_sve_store_structures(bus, insn),
+            Class::SveLoadMulti => self.exec_sve_load_multi(bus, insn),
+            Class::SveStoreMulti => self.exec_sve_store_multi(bus, insn),
             Class::SmeFpOuterProduct => self.exec_sme_fp_outer_product(insn),
             Class::SmeIntOuterProduct => self.exec_sme_int_outer_product(insn),
             Class::SmeMoveToSlice => self.exec_sme_move_to_slice(insn),
@@ -435,6 +442,8 @@ impl Cpu {
             Class::SmeLoadSlice => self.exec_sme_load_slice(bus, insn),
             Class::SmeStoreSlice => self.exec_sme_store_slice(bus, insn),
             Class::SmeFillSpill => self.exec_sme_fill_spill(bus, insn),
+            Class::SmeZeroZt0 => self.exec_sme_zero_zt0(),
+            Class::SmeFillSpillZt0 => self.exec_sme_fill_spill_zt0(bus, insn),
         }
     }
 

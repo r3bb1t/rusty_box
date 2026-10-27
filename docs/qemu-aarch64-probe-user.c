@@ -18,7 +18,9 @@
 // sve_fsubr_size00 (entry 14), which execute on 11.1.2 where Arm raises
 // SIGILL, the first until docs/qemu-sve-fmad-size00.patch, the second
 // until master's f2bfb1cf; sme_ld1_vertical_tail (entry 15), which prints
-// DIFFERS on 11.1.2 and agrees with docs/qemu-sme-ld1-vertical-tail.patch.
+// DIFFERS on 11.1.2 and agrees with docs/qemu-sme-ld1-vertical-tail.patch;
+// sme2_movt (entry 16), which executes on 11.1.2 and master where Arm
+// raises SIGILL.
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -187,6 +189,18 @@ static void sme_ld1_vertical_tail(void) {
            out[1] == 0 ? "agrees" : "DIFFERS");
 }
 
+// MOVT from ZT0 to a general register: defined only in Debug state
+// (`movt_r_zt_`'s decode, `!Halted()`), so UNDEFINED in a program. ZA
+// storage is enabled first, which SMSTART ZA does and ZT0's check needs.
+static void sme2_movt(void) {
+    signal(SIGILL, on_sigill);
+    __asm__ volatile(".inst 0xd503457f\n"   /* smstart za */
+                     ".inst 0xc04c03e0\n"   /* movt x0, zt0[0] */
+                     ".inst 0xd503447f"     /* smstop za */
+                     ::: "x0");
+    printf("0xc04c03e0 (movt x0, zt0[0]) executed (Arm: UNDEFINED outside Debug state)\n");
+}
+
 int main(int argc, char **argv) {
     const char *c = argc > 1 ? argv[1] : "";
     if (!strcmp(c, "ldapur")) ldapur();
@@ -200,10 +214,11 @@ int main(int argc, char **argv) {
     else if (!strcmp(c, "sve_fmad_size00")) sve_fmad_size00();
     else if (!strcmp(c, "sve_fsubr_size00")) sve_fsubr_size00();
     else if (!strcmp(c, "sme_ld1_vertical_tail")) sme_ld1_vertical_tail();
+    else if (!strcmp(c, "sme2_movt")) sme2_movt();
     else {
         fprintf(stderr, "cases: ldapur fcvtzs_half fcmla_elem_q0 fjcvtzs_fz fabs_scalar_half misc_fp16_abort"
                         " fneg_vector_ah sve_fcmla_idx_ah sve_fmad_size00 sve_fsubr_size00"
-                        " sme_ld1_vertical_tail\n");
+                        " sme_ld1_vertical_tail sme2_movt\n");
         return 2;
     }
     return 0;

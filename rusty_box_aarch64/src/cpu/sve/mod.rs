@@ -10,8 +10,10 @@
 //! arithmetic, element counts and immediates), `intx` (SVE2's integer
 //! instructions), `perm`
 //! (permutes, copies and selects), `pred` (compares, predicate operations,
-//! `WHILE` and predicate counts), `fp` (floating point) and `mem`
-//! (contiguous loads, stores and prefetches).
+//! `WHILE` and predicate counts), `counter` (FEAT_SME2's
+//! predicate-as-counter), `fp` (floating point) and `mem` (contiguous
+//! loads, stores and prefetches, FEAT_SME2's of two or four vectors among
+//! them).
 //!
 //! Provenance (R7): the Arm A64 ISA XML, release 2026-09 (Arm ARM M.d), the
 //! instruction pages each handler names and the shared pseudocode in
@@ -19,6 +21,7 @@
 //! operation; where a page raises UNDEFINED in its decode, the handler
 //! does so before the enable check, as the pseudocode orders it.
 
+mod counter;
 mod fp;
 mod int;
 mod intx;

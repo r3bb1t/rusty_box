@@ -4,10 +4,10 @@
 // int run_one(const struct state *in, struct state *out)
 //
 // Saves what the C caller expects preserved, enters Streaming SVE mode
-// with ZA storage enabled (SMSTART, which zeroes Z0-Z31, P0-P15, FFR and
-// ZA and sets FPSR), loads X0-X30, SP, NZCV, FPCR, FPSR, Z0-Z31, P0-P15
-// and ZA's horizontal vectors from `in`, executes the word, stores the
-// same state into `out` and returns 0. A word that raises a signal resumes
+// with ZA storage enabled (SMSTART, which zeroes Z0-Z31, P0-P15, FFR, ZA
+// and ZT0 and sets FPSR), loads X0-X30, SP, NZCV, FPCR, FPSR, Z0-Z31,
+// P0-P15, ZA's horizontal vectors and ZT0 from `in`, executes the word,
+// stores the same state into `out` and returns 0. A word that raises a signal resumes
 // at `fault_return` (the signal handler moves the PC there), which returns
 // 1 with `out` untouched. Both leave Streaming SVE mode and disable ZA
 // (SMSTOP) before restoring D8-D15, which it zeroes. TPIDR_EL0 holds X0
@@ -23,8 +23,9 @@
 #define OFF_ZA   2464
 // The Streaming SVE vector length in bytes: ZA's vectors, and their bytes.
 #define VLB      64
+// ZT0 follows ZA, at OFF_ZA + VLB * VLB.
 
-    .arch armv9-a+sme
+    .arch armv9-a+sme2
 
     .bss
     .balign 16
@@ -65,6 +66,7 @@ run_one:
     add     w12, w12, #1
     cmp     w12, #VLB
     b.ne    1b
+    ldr     zt0, [x10]
     ldr     x10, [x0, #OFF_NZCV]
     msr     nzcv, x10
     ldr     x10, [x0, #OFF_FPCR]
@@ -229,6 +231,7 @@ insn_slot:
     add     w12, w12, #1
     cmp     w12, #VLB
     b.ne    2b
+    str     zt0, [x1]
     mov     w0, #0
     b       restore
 fault_return:

@@ -246,11 +246,24 @@ const CPACR_FPEN: u64 = 3 << 20;
 /// `CPACR_EL1.SMEN` (FEAT_SME).
 const CPACR_SMEN: u64 = 3 << 24;
 
-/// `SMCR_EL1.LEN`: the only field this core keeps. Bits 8:4 are RAZ/WI,
-/// and `EZT0` and `FA64` RES0 without FEAT_SME2 and FEAT_SME_FA64.
+/// `SMCR_EL1.LEN`. Bits 8:4 are RAZ/WI, and `FA64` RES0 without
+/// FEAT_SME_FA64, which this core lacks.
 const SMCR_LEN: u64 = 0xF;
+/// `SMCR_EL1.EZT0` (FEAT_SME2): ZT0 is accessible at EL0 and EL1; RES0
+/// without FEAT_SME2.
+pub(crate) const SMCR_EZT0: u64 = 1 << 30;
 
 impl Cpu {
+    /// The `SMCR_EL1` bits this core keeps: `LEN`, and `EZT0` with
+    /// FEAT_SME2.
+    fn smcr_mask(&self) -> u64 {
+        if self.implements(Feature::Sme2) {
+            SMCR_LEN | SMCR_EZT0
+        } else {
+            SMCR_LEN
+        }
+    }
+
     /// The SME System register enable (`SVCR`, `SMCR_EL1`): what their
     /// accessors' `CPACR_EL1.SMEN` checks come to, at EL0 `SMEN != '11'`
     /// and at EL1 `SMEN IN {'x0'}`, which is `IsSMEEnabled` at either. A
@@ -266,11 +279,11 @@ impl Cpu {
     /// Whether `sys`, read from a snapshot, holds SME register values an
     /// `MSR` on this processor can leave: `CPACR_EL1.SMEN`, `SMCR_EL1` and
     /// `TPIDR2_EL0` only with FEAT_SME, and `SMCR_EL1` with nothing outside
-    /// `LEN`.
+    /// the bits it keeps.
     pub(crate) fn sme_registers_restorable(&self, sys: &SysRegs) -> bool {
         let sme = self.implements(Feature::Sme);
         sys.cpacr_el1 & !self.cpacr_mask() == 0
-            && sys.smcr_el1 & !SMCR_LEN == 0
+            && sys.smcr_el1 & !self.smcr_mask() == 0
             && (sme || (sys.smcr_el1 == 0 && sys.tpidr2_el0 == 0))
     }
 
@@ -724,7 +737,7 @@ impl Cpu {
             }
             SMCR_EL1 if self.implements(Feature::Sme) => {
                 self.sme_register_check(el, accessor)?;
-                self.sys.smcr_el1 = value & SMCR_LEN;
+                self.sys.smcr_el1 = value & self.smcr_mask();
                 WriteEffect::None
             }
             SMPRI_EL1 if self.implements(Feature::Sme) => WriteEffect::None,

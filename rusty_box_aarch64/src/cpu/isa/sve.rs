@@ -2,13 +2,15 @@
 //! `op1 = 0010`. Its groups nest one level deeper than the other top-level
 //! groups': `sve` holds groups (`sve_alloca`, ...), which hold the classes.
 //!
-//! The encodings here are those of FEAT_SME, which is still being built
-//! (`Feature::complete`): the streaming vector length instructions, the
-//! SVE integer, permute and predicate instructions FEAT_SME makes legal in
-//! Streaming SVE mode (`op0 = 000` and `001`), SVE2's integer
-//! instructions (`op0 = 010`), its floating-point instructions (`op0 =
-//! 011`), and its contiguous loads, stores and prefetches (`op0 = 100`,
-//! `101` and `111`). Nothing only FEAT_SVE allows (the gathers, scatters,
+//! The encodings here are those of FEAT_SME and FEAT_SME2, which are still
+//! being built (`Feature::complete`): the streaming vector length
+//! instructions, the SVE integer, permute and predicate instructions
+//! FEAT_SME makes legal in Streaming SVE mode (`op0 = 000` and `001`),
+//! SVE2's integer instructions (`op0 = 010`), its floating-point
+//! instructions (`op0 = 011`), and its contiguous loads, stores and
+//! prefetches (`op0 = 100`, `101` and `111`); and FEAT_SME2's
+//! predicate-as-counter instructions (`sve_while_pn`, `sve_int_pcount_pn`).
+//! Nothing only FEAT_SVE allows (the gathers, scatters,
 //! first-fault and non-fault loads, FADDA, FTMAD, FTSMUL, SVE2's MATCH,
 //! HISTCNT and the SVE AES instructions among it) is here, which this
 //! decoder does not know.
@@ -120,13 +122,13 @@ fn compare_and_predicate(word: u32) -> Option<Encoding> {
             (0b11, 0b1) => sve_pred_gen_d(word),
             _ => None,
         },
-        // op2<5:4>; op3 = 1 under 01 is sve_while_pn (FEAT_SVE2p1 and
-        // FEAT_SME2), and op2 = 1001xx under 10 is sve_pred_wrffr
-        // (FEAT_SVE alone).
+        // op2<5:4>, then op3 under 01; op2 = 1001xx under 10 is
+        // sve_pred_wrffr (FEAT_SVE alone).
         (0b1, 0b1) => match bits(word, 15, 14) {
             0b00 => sve_cmpgpr(word),
             0b01 => match op3 {
                 0b0 => sve_pred_dup(word),
+                0b1 => sve_while_pn(word),
                 _ => None,
             },
             // op1<3:2>, then op2<3:2>.
@@ -2068,6 +2070,116 @@ fn sve_int_pred_dup(word: u32) -> Option<SveIntPredDup> {
     }
 }
 
+/// Arm group `sve_while_pn`: SVE2.1 and SME2 predicate-as-counter and
+/// pair-of-predicates generation, by op0 (bits 20:16) and op1 (bits
+/// 13:11), PTRUE's by op2 (bits 10:5) and op3 (bit 3) as well.
+fn sve_while_pn(word: u32) -> Option<Encoding> {
+    let op0 = bits(word, 20, 16);
+    let op1 = bits(word, 13, 11);
+    let op2 = bits(word, 10, 5);
+    let op3 = bits(word, 3, 3);
+    match (op0, op1) {
+        (_, 0b000 | 0b001 | 0b100 | 0b101) => sve_int_while_rr_pn(word).map(Encoding::SveIntWhileRrPn),
+        (_, 0b010 | 0b011) => sve_int_while_rr_pair(word).map(Encoding::SveIntWhileRrPair),
+        (0b00000, 0b110) => sve_int_ctr_to_mask(word).map(Encoding::SveIntCtrToMask),
+        (0b00000, 0b111) => match (op2, op3) {
+            (0b000000, 0b0) => sve_int_pn_ptrue(word).map(Encoding::SveIntPnPtrue),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Arm class `sve_int_while_rr_pn`: SVE integer compare scalar count and
+/// limit, to a predicate-as-counter of `2 << vl` vectors' elements.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SveIntWhileRrPn {
+    WhilegePnRr,
+    WhilehsPnRr,
+    WhilegtPnRr,
+    WhilehiPnRr,
+    WhileltPnRr,
+    WhileloPnRr,
+    WhilelePnRr,
+    WhilelsPnRr,
+}
+
+fn sve_int_while_rr_pn(word: u32) -> Option<SveIntWhileRrPn> {
+    let u = bits(word, 11, 11);
+    let lt = bits(word, 10, 10);
+    let eq = bits(word, 3, 3);
+    match (u, lt, eq) {
+        (0b0, 0b0, 0b0) => Some(SveIntWhileRrPn::WhilegePnRr),
+        (0b1, 0b0, 0b0) => Some(SveIntWhileRrPn::WhilehsPnRr),
+        (0b0, 0b0, 0b1) => Some(SveIntWhileRrPn::WhilegtPnRr),
+        (0b1, 0b0, 0b1) => Some(SveIntWhileRrPn::WhilehiPnRr),
+        (0b0, 0b1, 0b0) => Some(SveIntWhileRrPn::WhileltPnRr),
+        (0b1, 0b1, 0b0) => Some(SveIntWhileRrPn::WhileloPnRr),
+        (0b0, 0b1, 0b1) => Some(SveIntWhileRrPn::WhilelePnRr),
+        (0b1, 0b1, 0b1) => Some(SveIntWhileRrPn::WhilelsPnRr),
+        _ => None,
+    }
+}
+
+/// Arm class `sve_int_while_rr_pair`: SVE integer compare scalar count and
+/// limit, to a pair of predicates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SveIntWhileRrPair {
+    WhilegePpRr,
+    WhilehsPpRr,
+    WhilegtPpRr,
+    WhilehiPpRr,
+    WhileltPpRr,
+    WhileloPpRr,
+    WhilelePpRr,
+    WhilelsPpRr,
+}
+
+fn sve_int_while_rr_pair(word: u32) -> Option<SveIntWhileRrPair> {
+    let u = bits(word, 11, 11);
+    let lt = bits(word, 10, 10);
+    let eq = bits(word, 0, 0);
+    match (u, lt, eq) {
+        (0b0, 0b0, 0b0) => Some(SveIntWhileRrPair::WhilegePpRr),
+        (0b1, 0b0, 0b0) => Some(SveIntWhileRrPair::WhilehsPpRr),
+        (0b0, 0b0, 0b1) => Some(SveIntWhileRrPair::WhilegtPpRr),
+        (0b1, 0b0, 0b1) => Some(SveIntWhileRrPair::WhilehiPpRr),
+        (0b0, 0b1, 0b0) => Some(SveIntWhileRrPair::WhileltPpRr),
+        (0b1, 0b1, 0b0) => Some(SveIntWhileRrPair::WhileloPpRr),
+        (0b0, 0b1, 0b1) => Some(SveIntWhileRrPair::WhilelePpRr),
+        (0b1, 0b1, 0b1) => Some(SveIntWhileRrPair::WhilelsPpRr),
+        _ => None,
+    }
+}
+
+/// Arm class `sve_int_ctr_to_mask`: predicate-as-counter to predicate, one
+/// vector's or (`opc<2>`) a pair's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SveIntCtrToMask {
+    PextPnRr,
+    PextPpRr,
+}
+
+fn sve_int_ctr_to_mask(word: u32) -> Option<SveIntCtrToMask> {
+    let opc = bits(word, 10, 8);
+    match opc {
+        0b000..=0b011 => Some(SveIntCtrToMask::PextPnRr),
+        0b100 | 0b101 => Some(SveIntCtrToMask::PextPpRr),
+        _ => None,
+    }
+}
+
+/// Arm class `sve_int_pn_ptrue`: initialise a predicate-as-counter to all
+/// active.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SveIntPnPtrue {
+    PtruePnI,
+}
+
+fn sve_int_pn_ptrue(_word: u32) -> Option<SveIntPnPtrue> {
+    Some(SveIntPnPtrue::PtruePnI)
+}
+
 /// Arm group `sve_cmpgpr`: SVE integer compare scalar count and limit.
 fn sve_cmpgpr(word: u32) -> Option<Encoding> {
     let op0 = bits(word, 13, 12);
@@ -2148,12 +2260,30 @@ fn sve_int_whilenc(word: u32) -> Option<SveIntWhilenc> {
     }
 }
 
-/// Arm group `sve_pred_count_a`: SVE predicate count. `op1 = 1` is
-/// FEAT_SVE2p1's and FEAT_SME2's predicate-as-counter form.
+/// Arm group `sve_pred_count_a`: SVE predicate count, of a predicate by
+/// `op1` (bit 9) = 0, else of a predicate-as-counter, which fixes op0
+/// (bits 13:11).
 fn sve_pred_count_a(word: u32) -> Option<Encoding> {
+    let op0 = bits(word, 13, 11);
     let op1 = bits(word, 9, 9);
-    match op1 {
-        0b0 => sve_int_pcount_pred(word).map(Encoding::SveIntPcountPred),
+    match (op0, op1) {
+        (_, 0b0) => sve_int_pcount_pred(word).map(Encoding::SveIntPcountPred),
+        (0b000, 0b1) => sve_int_pcount_pn(word).map(Encoding::SveIntPcountPn),
+        _ => None,
+    }
+}
+
+/// Arm class `sve_int_pcount_pn`: SVE predicate count of a
+/// predicate-as-counter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SveIntPcountPn {
+    CntpRPn,
+}
+
+fn sve_int_pcount_pn(word: u32) -> Option<SveIntPcountPn> {
+    let opc = bits(word, 18, 16);
+    match opc {
+        0b000 => Some(SveIntPcountPn::CntpRPn),
         _ => None,
     }
 }
