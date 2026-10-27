@@ -135,12 +135,7 @@ fn floating_point(word: u32) -> Option<Encoding> {
         (0b0, 0b0) => float::float2fix(word).map(Encoding::Float2fix),
         // op3<1:0>, then op3<5:2>.
         (0b0, 0b1) => match bits(word, 11, 10) {
-            0b00 => match (
-                bits(word, 15, 15),
-                bits(word, 14, 14),
-                bits(word, 13, 13),
-                bits(word, 12, 12),
-            ) {
+            0b00 => match (bits(word, 15, 15), bits(word, 14, 14), bits(word, 13, 13), bits(word, 12, 12)) {
                 (_, _, _, 0b1) => float::floatimm(word).map(Encoding::Floatimm),
                 (_, _, 0b1, 0b0) => float::floatcmp(word).map(Encoding::Floatcmp),
                 (_, 0b1, 0b0, 0b0) => float::floatdp1(word).map(Encoding::Floatdp1),

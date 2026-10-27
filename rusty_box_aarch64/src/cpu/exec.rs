@@ -14,10 +14,10 @@
 
 use rusty_box_core::VmClock;
 
-use super::decode::classify;
 use super::exception::{Exception, ExceptionClass};
 use super::isa::Class;
 use super::ldst::SingleForm;
+use super::decode::classify;
 use super::op::predecode;
 use super::{Activity, Cpu};
 use crate::bus::{AccessWidth, BusFault, FetchSource, PhysAddr, PhysBus};
@@ -34,12 +34,7 @@ pub(crate) struct Observed<'a, B, I> {
 
 impl<B: PhysBus, I: Instrumentation> PhysBus for Observed<'_, B, I> {
     #[inline(always)]
-    fn read(
-        &mut self,
-        addr: PhysAddr,
-        width: AccessWidth,
-        clock: VmClock,
-    ) -> Result<u64, BusFault> {
+    fn read(&mut self, addr: PhysAddr, width: AccessWidth, clock: VmClock) -> Result<u64, BusFault> {
         let value = self.bus.read(addr, width, clock)?;
         self.observer.memory_access(MemoryAccess {
             address: addr,
@@ -51,13 +46,7 @@ impl<B: PhysBus, I: Instrumentation> PhysBus for Observed<'_, B, I> {
     }
 
     #[inline(always)]
-    fn write(
-        &mut self,
-        addr: PhysAddr,
-        width: AccessWidth,
-        value: u64,
-        clock: VmClock,
-    ) -> Result<(), BusFault> {
+    fn write(&mut self, addr: PhysAddr, width: AccessWidth, value: u64, clock: VmClock) -> Result<(), BusFault> {
         self.bus.write(addr, width, value, clock)?;
         self.observer.memory_access(MemoryAccess {
             address: addr,
@@ -266,9 +255,7 @@ impl Cpu {
             return Err(Exception::new(ExceptionClass::IllegalState, 0).into());
         }
         if pc & 3 != 0 {
-            return Err(Exception::new(ExceptionClass::PcAlignment, 0)
-                .with_far(pc)
-                .into());
+            return Err(Exception::new(ExceptionClass::PcAlignment, 0).with_far(pc).into());
         }
         self.fetch_translate(bus, pc)
     }
@@ -300,13 +287,7 @@ impl Cpu {
     /// word when the per-instruction path's execution raised it; a fault
     /// does not read it.
     #[inline(always)]
-    pub(crate) fn finish<I: Instrumentation>(
-        &mut self,
-        pc: u64,
-        fetched: Option<u32>,
-        result: ExecResult,
-        observer: &mut I,
-    ) -> Done {
+    pub(crate) fn finish<I: Instrumentation>(&mut self, pc: u64, fetched: Option<u32>, result: ExecResult, observer: &mut I) -> Done {
         match result {
             Ok(flow) => self.retire(pc, fetched, flow, observer),
             Err(Fault::Exception(e)) => {
@@ -358,13 +339,7 @@ impl Cpu {
     }
 
     /// Execute an instruction its class handler executes from the word.
-    pub(crate) fn exec_class<B: PhysBus>(
-        &mut self,
-        bus: &mut B,
-        pc: u64,
-        class: Class,
-        insn: u32,
-    ) -> ExecResult {
+    pub(crate) fn exec_class<B: PhysBus>(&mut self, bus: &mut B, pc: u64, class: Class, insn: u32) -> ExecResult {
         match class {
             Class::Undefined => self.undefined(pc, insn),
             Class::Hint => self.exec_hint(insn, pc),
@@ -383,9 +358,7 @@ impl Cpu {
             Class::TestAndBranch => self.exec_testbranch(pc, insn),
             Class::BranchImmediate => self.exec_branch_imm(pc, insn),
             Class::BranchRegister => self.exec_branch_reg(pc, insn),
-            Class::ConditionalCompareImmediate | Class::ConditionalCompareRegister => {
-                self.exec_condcmp(pc, insn)
-            }
+            Class::ConditionalCompareImmediate | Class::ConditionalCompareRegister => self.exec_condcmp(pc, insn),
             Class::ConditionalSelect => self.exec_condsel(pc, insn),
             Class::DataProcessing1Source => self.exec_dp1(pc, insn),
             Class::DataProcessing2Source => self.exec_dp2(pc, insn),
@@ -398,13 +371,11 @@ impl Cpu {
             Class::LoadStoreUnscaled | Class::LoadStoreIndexed | Class::LoadStoreUnprivileged => {
                 self.exec_ldst_single(bus, pc, insn, SingleForm::Immediate9)
             }
-            Class::LoadStoreRegisterOffset => {
-                self.exec_ldst_single(bus, pc, insn, SingleForm::RegisterOffset)
-            }
+            Class::LoadStoreRegisterOffset => self.exec_ldst_single(bus, pc, insn, SingleForm::RegisterOffset),
             Class::LoadLiteral => self.exec_load_literal(bus, pc, insn),
-            Class::LoadStorePairOffset
-            | Class::LoadStorePairIndexed
-            | Class::LoadStoreNoAllocatePair => self.exec_ldst_pair(bus, pc, insn),
+            Class::LoadStorePairOffset | Class::LoadStorePairIndexed | Class::LoadStoreNoAllocatePair => {
+                self.exec_ldst_pair(bus, pc, insn)
+            }
             Class::LoadStoreExclusive => self.exec_ldst_exclusive(bus, pc, insn),
             Class::SimdLoadStoreMultiple | Class::SimdLoadStoreMultiplePostIndexed => {
                 self.exec_ldst_multiple(bus, pc, insn)
@@ -450,10 +421,7 @@ impl Cpu {
     #[inline]
     pub(crate) fn undefined(&self, pc: u64, insn: u32) -> ExecResult {
         if self.debug_stops.on_undefined {
-            Err(Fault::Stop(StopCause::Undefined(UndefinedInsn {
-                pc,
-                insn,
-            })))
+            Err(Fault::Stop(StopCause::Undefined(UndefinedInsn { pc, insn })))
         } else {
             Err(Exception::new(ExceptionClass::Unknown, 0).into())
         }

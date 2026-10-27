@@ -329,10 +329,7 @@ impl ConfigEntry {
     /// A bitmap with bit `code` set for every code, sized to its highest
     /// set byte (QEMU `virtio_input_extend_config`).
     fn bitmap<I: Iterator<Item = u16>>(codes: I) -> Self {
-        let mut entry = Self {
-            size: 0,
-            data: [0; 128],
-        };
+        let mut entry = Self { size: 0, data: [0; 128] };
         for code in codes {
             let byte = usize::from(code / 8);
             entry.data[byte] |= 1 << (code % 8);
@@ -389,12 +386,8 @@ impl Input {
     fn entry(&self, select: u8, subsel: u8) -> Option<ConfigEntry> {
         let subsel = u16::from(subsel);
         Some(match (self.kind, select) {
-            (InputKind::Keyboard, CFG_ID_NAME) if subsel == 0 => {
-                ConfigEntry::from_bytes(b"QEMU Virtio Keyboard\0")
-            }
-            (InputKind::Tablet, CFG_ID_NAME) if subsel == 0 => {
-                ConfigEntry::from_bytes(b"QEMU Virtio Tablet\0")
-            }
+            (InputKind::Keyboard, CFG_ID_NAME) if subsel == 0 => ConfigEntry::from_bytes(b"QEMU Virtio Keyboard\0"),
+            (InputKind::Tablet, CFG_ID_NAME) if subsel == 0 => ConfigEntry::from_bytes(b"QEMU Virtio Tablet\0"),
             (_, CFG_ID_DEVIDS) if subsel == 0 => {
                 let (product, version): (u16, u16) = match self.kind {
                     InputKind::Keyboard => (0x0001, 0x0001),
@@ -407,22 +400,14 @@ impl Input {
                 ids[6..].copy_from_slice(&version.to_le_bytes());
                 ConfigEntry::from_bytes(&ids)
             }
-            (InputKind::Keyboard, CFG_EV_BITS) if subsel == EV_KEY => {
-                ConfigEntry::bitmap(KEY_ESC..KEY_REPLY)
-            }
+            (InputKind::Keyboard, CFG_EV_BITS) if subsel == EV_KEY => ConfigEntry::bitmap(KEY_ESC..KEY_REPLY),
             (InputKind::Keyboard, CFG_EV_BITS) if subsel == EV_REP => ConfigEntry::from_bytes(&[0]),
             (InputKind::Keyboard, CFG_EV_BITS) if subsel == EV_LED => {
                 ConfigEntry::from_bytes(&[(1 << LED_NUML) | (1 << LED_CAPSL) | (1 << LED_SCROLLL)])
             }
-            (InputKind::Tablet, CFG_EV_BITS) if subsel == EV_KEY => {
-                ConfigEntry::bitmap(BUTTON_CODES.into_iter())
-            }
-            (InputKind::Tablet, CFG_EV_BITS) if subsel == EV_REL => {
-                ConfigEntry::from_bytes(&[0, 1 << (REL_WHEEL - 8)])
-            }
-            (InputKind::Tablet, CFG_EV_BITS) if subsel == EV_ABS => {
-                ConfigEntry::from_bytes(&[(1 << ABS_X) | (1 << ABS_Y)])
-            }
+            (InputKind::Tablet, CFG_EV_BITS) if subsel == EV_KEY => ConfigEntry::bitmap(BUTTON_CODES.into_iter()),
+            (InputKind::Tablet, CFG_EV_BITS) if subsel == EV_REL => ConfigEntry::from_bytes(&[0, 1 << (REL_WHEEL - 8)]),
+            (InputKind::Tablet, CFG_EV_BITS) if subsel == EV_ABS => ConfigEntry::from_bytes(&[(1 << ABS_X) | (1 << ABS_Y)]),
             (InputKind::Tablet, CFG_ABS_INFO) if subsel == ABS_X || subsel == ABS_Y => {
                 // min, max, fuzz, flat, res.
                 let mut info = [0u8; 20];
@@ -474,11 +459,7 @@ impl Input {
     /// device is not active or the driver has not queued a buffer for every
     /// event; `false` too if the driver's buffers break a rule part of the
     /// way through, which leaves the device broken.
-    fn deliver<I: Iterator<Item = Batch> + Clone>(
-        &mut self,
-        vdev: &mut Vdev<'_, '_>,
-        batches: I,
-    ) -> bool {
+    fn deliver<I: Iterator<Item = Batch> + Clone>(&mut self, vdev: &mut Vdev<'_, '_>, batches: I) -> bool {
         if !self.active {
             return false;
         }
@@ -513,9 +494,8 @@ impl Input {
         match self.kind {
             InputKind::Keyboard => self.deliver(
                 vdev,
-                keys.iter().map(|&(key, action)| {
-                    Batch::of(&[Event::new(EV_KEY, linux_key_code(key), key_value(action))])
-                }),
+                keys.iter()
+                    .map(|&(key, action)| Batch::of(&[Event::new(EV_KEY, linux_key_code(key), key_value(action))])),
             ),
             InputKind::Tablet => false,
         }
@@ -536,19 +516,10 @@ impl Input {
     }
 
     /// A button, for the tablet.
-    pub fn button(
-        &mut self,
-        vdev: &mut Vdev<'_, '_>,
-        button: PointerButton,
-        action: KeyAction,
-    ) -> bool {
+    pub fn button(&mut self, vdev: &mut Vdev<'_, '_>, button: PointerButton, action: KeyAction) -> bool {
         match self.kind {
             InputKind::Tablet => {
-                let batch = Batch::of(&[Event::new(
-                    EV_KEY,
-                    linux_button_code(button),
-                    key_value(action),
-                )]);
+                let batch = Batch::of(&[Event::new(EV_KEY, linux_button_code(button), key_value(action))]);
                 self.deliver(vdev, core::iter::once(batch))
             }
             InputKind::Keyboard => false,

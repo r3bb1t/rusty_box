@@ -15,9 +15,7 @@ use super::exec::{bit, bits, sext, ExecResult, Flow};
 use super::fp_estimate::{self, EstimateControl, DOUBLE, SINGLE};
 use super::simd::{vfp_expand_imm32, vfp_expand_imm64};
 use super::Cpu;
-use crate::softfloat::{
-    self as sf, ArmFpStatus, FpOrdering, FpRounding, FusedMulAdd, InexactReport, NanSignal,
-};
+use crate::softfloat::{self as sf, ArmFpStatus, FpOrdering, FpRounding, FusedMulAdd, InexactReport, NanSignal};
 
 /// FPCR.AHP: half-precision conversions use the alternative format.
 const FPCR_AHP: u64 = 1 << 26;
@@ -263,12 +261,7 @@ pub(crate) fn fp_unary(op: FpUnary, ty: FpType, a: u64, env: &mut FpEnv) -> u64 
             FpType::Double => sf::f64_sqrt(a, &mut env.status),
         },
         FpUnary::RoundInt(rounding, report) => match ty {
-            FpType::Single => u64::from(sf::f32_round_to_int(
-                a as u32,
-                rounding,
-                report,
-                &mut env.status,
-            )),
+            FpType::Single => u64::from(sf::f32_round_to_int(a as u32, rounding, report, &mut env.status)),
             FpType::Double => sf::f64_round_to_int(a, rounding, report, &mut env.status),
         },
         FpUnary::RecipEstimate => estimate(fp_estimate::frecpe(format, a, control), env),
@@ -278,34 +271,15 @@ pub(crate) fn fp_unary(op: FpUnary, ty: FpType, a: u64, env: &mut FpEnv) -> u64 
 }
 
 /// Arm FPMulAdd in one of the four A64 forms; `addend` is Ra (or Vd).
-pub(crate) fn fp_mul_add(
-    form: FusedMulAdd,
-    ty: FpType,
-    addend: u64,
-    n: u64,
-    m: u64,
-    env: &mut FpEnv,
-) -> u64 {
+pub(crate) fn fp_mul_add(form: FusedMulAdd, ty: FpType, addend: u64, n: u64, m: u64, env: &mut FpEnv) -> u64 {
     match ty {
-        FpType::Single => u64::from(sf::f32_mul_add(
-            form,
-            addend as u32,
-            n as u32,
-            m as u32,
-            &mut env.status,
-        )),
+        FpType::Single => u64::from(sf::f32_mul_add(form, addend as u32, n as u32, m as u32, &mut env.status)),
         FpType::Double => sf::f64_mul_add(form, addend, n, m, &mut env.status),
     }
 }
 
 /// Arm FPCompare.
-pub(crate) fn fp_compare(
-    ty: FpType,
-    a: u64,
-    b: u64,
-    signal: NanSignal,
-    env: &mut FpEnv,
-) -> FpOrdering {
+pub(crate) fn fp_compare(ty: FpType, a: u64, b: u64, signal: NanSignal, env: &mut FpEnv) -> FpOrdering {
     match ty {
         FpType::Single => sf::f32_compare(a as u32, b as u32, signal, &mut env.status),
         FpType::Double => sf::f64_compare(a, b, signal, &mut env.status),
@@ -324,9 +298,7 @@ pub(crate) fn fp_compare_holds(op: FpCompare, ty: FpType, a: u64, b: u64, env: &
             fp_compare(ty, a, b, NanSignal::Signaling, env),
             FpOrdering::Greater | FpOrdering::Equal
         ),
-        FpCompare::Gt | FpCompare::AbsGt => {
-            fp_compare(ty, a, b, NanSignal::Signaling, env) == FpOrdering::Greater
-        }
+        FpCompare::Gt | FpCompare::AbsGt => fp_compare(ty, a, b, NanSignal::Signaling, env) == FpOrdering::Greater,
     }
 }
 
@@ -344,9 +316,7 @@ pub(crate) fn fp_to_int(
 ) -> u64 {
     let fp = &mut env.status;
     match (ty, signed, wide, fbits) {
-        (FpType::Single, true, false, 0) => {
-            u64::from(sf::f32_to_i32(a as u32, rounding, fp) as u32)
-        }
+        (FpType::Single, true, false, 0) => u64::from(sf::f32_to_i32(a as u32, rounding, fp) as u32),
         (FpType::Single, true, true, 0) => sf::f32_to_i64(a as u32, rounding, fp) as u64,
         (FpType::Single, false, false, 0) => u64::from(sf::f32_to_u32(a as u32, rounding, fp)),
         (FpType::Single, false, true, 0) => sf::f32_to_u64(a as u32, rounding, fp),
@@ -354,37 +324,20 @@ pub(crate) fn fp_to_int(
         (FpType::Double, true, true, 0) => sf::f64_to_i64(a, rounding, fp) as u64,
         (FpType::Double, false, false, 0) => u64::from(sf::f64_to_u32(a, rounding, fp)),
         (FpType::Double, false, true, 0) => sf::f64_to_u64(a, rounding, fp),
-        (FpType::Single, true, false, _) => {
-            u64::from(sf::f32_to_i32_fixed(a as u32, fbits, rounding, fp) as u32)
-        }
-        (FpType::Single, true, true, _) => {
-            sf::f32_to_i64_fixed(a as u32, fbits, rounding, fp) as u64
-        }
-        (FpType::Single, false, false, _) => {
-            u64::from(sf::f32_to_u32_fixed(a as u32, fbits, rounding, fp))
-        }
+        (FpType::Single, true, false, _) => u64::from(sf::f32_to_i32_fixed(a as u32, fbits, rounding, fp) as u32),
+        (FpType::Single, true, true, _) => sf::f32_to_i64_fixed(a as u32, fbits, rounding, fp) as u64,
+        (FpType::Single, false, false, _) => u64::from(sf::f32_to_u32_fixed(a as u32, fbits, rounding, fp)),
         (FpType::Single, false, true, _) => sf::f32_to_u64_fixed(a as u32, fbits, rounding, fp),
-        (FpType::Double, true, false, _) => {
-            u64::from(sf::f64_to_i32_fixed(a, fbits, rounding, fp) as u32)
-        }
+        (FpType::Double, true, false, _) => u64::from(sf::f64_to_i32_fixed(a, fbits, rounding, fp) as u32),
         (FpType::Double, true, true, _) => sf::f64_to_i64_fixed(a, fbits, rounding, fp) as u64,
-        (FpType::Double, false, false, _) => {
-            u64::from(sf::f64_to_u32_fixed(a, fbits, rounding, fp))
-        }
+        (FpType::Double, false, false, _) => u64::from(sf::f64_to_u32_fixed(a, fbits, rounding, fp)),
         (FpType::Double, false, true, _) => sf::f64_to_u64_fixed(a, fbits, rounding, fp),
     }
 }
 
 /// Arm FixedToFP: a signed or unsigned integer of 64 bits (`wide`) or 32
 /// (the low half of `value`), divided by 2^`fbits`, rounded by FPCR.RMode.
-pub(crate) fn int_to_fp(
-    ty: FpType,
-    value: u64,
-    fbits: u32,
-    signed: bool,
-    wide: bool,
-    env: &mut FpEnv,
-) -> u64 {
+pub(crate) fn int_to_fp(ty: FpType, value: u64, fbits: u32, signed: bool, wide: bool, env: &mut FpEnv) -> u64 {
     let rounding = env.rounding();
     let fp = &mut env.status;
     match (ty, signed, wide, fbits) {
@@ -397,11 +350,7 @@ pub(crate) fn int_to_fp(
         (FpType::Double, false, false, 0) => sf::u32_to_f64(value as u32),
         (FpType::Double, false, true, 0) => sf::u64_to_f64(value, rounding, fp),
         (_, true, _, _) => {
-            let v = if wide {
-                value as i64
-            } else {
-                sext(value, 32) as i64
-            };
+            let v = if wide { value as i64 } else { sext(value, 32) as i64 };
             match ty {
                 FpType::Single => u64::from(sf::i64_to_f32_fixed(v, fbits, rounding, fp)),
                 FpType::Double => sf::i64_to_f64_fixed(v, fbits, rounding, fp),
@@ -594,10 +543,7 @@ impl Cpu {
         if opcode >> 2 == 0b0001 {
             // FCVT: ftype is the source precision, opc (bits 16:15) the
             // destination's.
-            let conversion = match (
-                Precision::from_field(ftype),
-                Precision::from_field(opcode & 3),
-            ) {
+            let conversion = match (Precision::from_field(ftype), Precision::from_field(opcode & 3)) {
                 (Some(from), Some(to)) => FpConversion::between(from, to),
                 _ => None,
             };
@@ -609,13 +555,9 @@ impl Cpu {
                 FpConversion::HalfToSingle => (Precision::Half.mask(), Precision::Single.mask()),
                 FpConversion::HalfToDouble => (Precision::Half.mask(), Precision::Double.mask()),
                 FpConversion::SingleToHalf => (Precision::Single.mask(), Precision::Half.mask()),
-                FpConversion::SingleToDouble => {
-                    (Precision::Single.mask(), Precision::Double.mask())
-                }
+                FpConversion::SingleToDouble => (Precision::Single.mask(), Precision::Double.mask()),
                 FpConversion::DoubleToHalf => (Precision::Double.mask(), Precision::Half.mask()),
-                FpConversion::DoubleToSingle => {
-                    (Precision::Double.mask(), Precision::Single.mask())
-                }
+                FpConversion::DoubleToSingle => (Precision::Double.mask(), Precision::Single.mask()),
             };
             let mut env = self.fp_env();
             let result = fp_convert(conversion, self.fp_get(n, from_mask), &mut env);
@@ -633,23 +575,11 @@ impl Cpu {
             0b000001 => Some(FpUnary::Abs),
             0b000010 => Some(FpUnary::Neg),
             0b000011 => Some(FpUnary::Sqrt),
-            0b001000 => Some(FpUnary::RoundInt(
-                FpRounding::TieEven,
-                InexactReport::Suppress,
-            )),
-            0b001001 => Some(FpUnary::RoundInt(
-                FpRounding::PosInf,
-                InexactReport::Suppress,
-            )),
-            0b001010 => Some(FpUnary::RoundInt(
-                FpRounding::NegInf,
-                InexactReport::Suppress,
-            )),
+            0b001000 => Some(FpUnary::RoundInt(FpRounding::TieEven, InexactReport::Suppress)),
+            0b001001 => Some(FpUnary::RoundInt(FpRounding::PosInf, InexactReport::Suppress)),
+            0b001010 => Some(FpUnary::RoundInt(FpRounding::NegInf, InexactReport::Suppress)),
             0b001011 => Some(FpUnary::RoundInt(FpRounding::Zero, InexactReport::Suppress)),
-            0b001100 => Some(FpUnary::RoundInt(
-                FpRounding::TieAway,
-                InexactReport::Suppress,
-            )),
+            0b001100 => Some(FpUnary::RoundInt(FpRounding::TieAway, InexactReport::Suppress)),
             0b001110 => Some(FpUnary::RoundInt(env.rounding(), InexactReport::Raise)),
             0b001111 => Some(FpUnary::RoundInt(env.rounding(), InexactReport::Suppress)),
             _ => return self.undefined(pc, insn),
@@ -671,26 +601,13 @@ impl Cpu {
         let (Some(ty), Some(op)) = (scalar_type(insn), dp2_operation(insn)) else {
             return self.undefined(pc, insn);
         };
-        self.fp_dp2(
-            op,
-            ty,
-            bits(insn, 4, 0),
-            bits(insn, 9, 5),
-            bits(insn, 20, 16),
-        )
+        self.fp_dp2(op, ty, bits(insn, 4, 0), bits(insn, 9, 5), bits(insn, 20, 16))
     }
 
     /// The FP data-processing (2 source) operation `op` of precision `ty`:
     /// `Vd = Vn op Vm`.
     #[inline]
-    pub(crate) fn fp_dp2(
-        &mut self,
-        op: FpBinary,
-        ty: FpType,
-        d: u32,
-        n: u32,
-        m: u32,
-    ) -> ExecResult {
+    pub(crate) fn fp_dp2(&mut self, op: FpBinary, ty: FpType, d: u32, n: u32, m: u32) -> ExecResult {
         self.fp_check()?;
         let a = self.fp_get(n, ty.mask());
         let b = self.fp_get(m, ty.mask());
@@ -746,11 +663,7 @@ impl Cpu {
         } else {
             self.fp_get(bits(insn, 20, 16), ty.mask())
         };
-        let signal = if bit(insn, 4) {
-            NanSignal::Signaling
-        } else {
-            NanSignal::Quiet
-        };
+        let signal = if bit(insn, 4) { NanSignal::Signaling } else { NanSignal::Quiet };
         let mut env = self.fp_env();
         let ordering = fp_compare(ty, a, b, signal, &mut env);
         self.fp_commit(&env);
@@ -767,11 +680,7 @@ impl Cpu {
         if self.condition_holds(bits(insn, 15, 12)) {
             let a = self.fp_get(bits(insn, 9, 5), ty.mask());
             let b = self.fp_get(bits(insn, 20, 16), ty.mask());
-            let signal = if bit(insn, 4) {
-                NanSignal::Signaling
-            } else {
-                NanSignal::Quiet
-            };
+            let signal = if bit(insn, 4) { NanSignal::Signaling } else { NanSignal::Quiet };
             let mut env = self.fp_env();
             let ordering = fp_compare(ty, a, b, signal, &mut env);
             self.fp_commit(&env);

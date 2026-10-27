@@ -487,11 +487,7 @@ impl Transport {
 
     /// Run `f` on the device with what it works with: guest memory, its
     /// queues and the shared core.
-    pub(crate) fn with_device<T, F: FnOnce(&mut Device, &mut Vdev<'_, '_>) -> T>(
-        &mut self,
-        ram: &mut GuestRam<'_>,
-        f: F,
-    ) -> T {
+    pub(crate) fn with_device<T, F: FnOnce(&mut Device, &mut Vdev<'_, '_>) -> T>(&mut self, ram: &mut GuestRam<'_>, f: F) -> T {
         let mut vdev = Vdev {
             ram,
             queues: &mut self.queues,
@@ -577,13 +573,8 @@ impl Transport {
             0x004 => MODERN_VERSION,
             0x008 => self.device.id(),
             0x00C => VENDOR_QEMU,
-            0x010 => {
-                ((self.core.host_features & !LEGACY_FEATURES) >> (32 * self.host_features_sel))
-                    as u32
-            }
-            0x034 => self
-                .selected()
-                .map_or(0, |q| u32::from(self.queues[q].num_default())),
+            0x010 => ((self.core.host_features & !LEGACY_FEATURES) >> (32 * self.host_features_sel)) as u32,
+            0x034 => self.selected().map_or(0, |q| u32::from(self.queues[q].num_default())),
             0x044 => u32::from(self.queue_enabled(self.core.queue_sel)),
             0x060 => u32::from(self.core.isr),
             0x070 => u32::from(self.core.status),
@@ -622,13 +613,7 @@ impl Transport {
         self.device.set_config(&self.config[..len], &mut self.core);
     }
 
-    pub(crate) fn write(
-        &mut self,
-        ram: &mut GuestRam<'_>,
-        offset: RegOffset,
-        width: AccessWidth,
-        value: u64,
-    ) {
+    pub(crate) fn write(&mut self, ram: &mut GuestRam<'_>, offset: RegOffset, width: AccessWidth, value: u64) {
         if width == AccessWidth::Dword {
             self.write_word(ram, offset.get(), AccessWidth::Word, value & 0xFFFF_FFFF);
             self.write_word(ram, offset.get() + 4, AccessWidth::Word, value >> 32);
@@ -706,9 +691,7 @@ impl Transport {
                 ProxyQueue::address(proxy.avail),
                 ProxyQueue::address(proxy.used),
             );
-            if let Err(fault) =
-                self.queues[q].set_rings(ram, desc, avail, used, self.core.ring_features())
-            {
+            if let Err(fault) = self.queues[q].set_rings(ram, desc, avail, used, self.core.ring_features()) {
                 self.core.error(fault);
             }
         }
@@ -729,10 +712,7 @@ impl Transport {
     /// is 0.
     fn write_status(&mut self, ram: &GuestRam<'_>, status: u8) {
         if status & STATUS_FEATURES_OK != 0 {
-            self.set_features(
-                ram,
-                (u64::from(self.guest_features[1]) << 32) | u64::from(self.guest_features[0]),
-            );
+            self.set_features(ram, (u64::from(self.guest_features[1]) << 32) | u64::from(self.guest_features[0]));
         }
         self.device.set_status(status, &self.core);
         self.core.status = status;
@@ -803,31 +783,23 @@ impl Transport {
         self.core.isr = r.read_u8()?;
         self.core.queue_sel = r.read_u16()?;
         if u32::from(self.core.queue_sel) >= VIRTIO_QUEUE_MAX {
-            return Err(SnapError::Invalid(
-                "virtio queue selector past the last queue index",
-            ));
+            return Err(SnapError::Invalid("virtio queue selector past the last queue index"));
         }
         let guest_features = r.read_u64()?;
         if guest_features & !self.core.host_features != 0 {
-            return Err(SnapError::Invalid(
-                "virtio driver features the device does not offer",
-            ));
+            return Err(SnapError::Invalid("virtio driver features the device does not offer"));
         }
         self.core.guest_features = guest_features;
         self.core.generation = r.read_u32()?;
         self.core.broken = match r.read_u8()? {
             0 => None,
-            code => Some(QueueFault::from_code(code).ok_or(SnapError::Invalid(
-                "virtio device broken by an unknown fault",
-            ))?),
+            code => Some(QueueFault::from_code(code).ok_or(SnapError::Invalid("virtio device broken by an unknown fault"))?),
         };
         self.core.irq_level = r.read_bool()?;
         self.host_features_sel = r.read_u32()?;
         self.guest_features_sel = r.read_u32()?;
         if self.host_features_sel > 1 || self.guest_features_sel > 1 {
-            return Err(SnapError::Invalid(
-                "virtio feature selector past the second word",
-            ));
+            return Err(SnapError::Invalid("virtio feature selector past the second word"));
         }
         self.guest_features[0] = r.read_u32()?;
         self.guest_features[1] = r.read_u32()?;

@@ -135,7 +135,10 @@ mod tests {
     #[test]
     fn f64_mul_specials() {
         assert!(mul(f64::INFINITY, 0.0).is_nan()); // inf * 0 → invalid
-        assert_eq!(mul(f64::INFINITY, 2.0).to_bits(), f64::INFINITY.to_bits());
+        assert_eq!(
+            mul(f64::INFINITY, 2.0).to_bits(),
+            f64::INFINITY.to_bits()
+        );
         assert_eq!(
             mul(f64::INFINITY, -2.0).to_bits(),
             f64::NEG_INFINITY.to_bits()

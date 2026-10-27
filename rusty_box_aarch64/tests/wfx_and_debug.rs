@@ -71,8 +71,8 @@
 
 use rusty_box_aarch64::board::RAM_BASE;
 use rusty_box_aarch64::{
-    GuestStorage, Instrumentation, LentStorage, MachineBuilder, MemoryLoan, RamSize, Reg,
-    RunBudget, StopReason, SysReg, VirtConfig, VirtMachine,
+    GuestStorage, Instrumentation, LentStorage, MachineBuilder, MemoryLoan, RamSize, Reg, RunBudget, StopReason,
+    SysReg, VirtConfig, VirtMachine,
 };
 
 const RAM_LEN: usize = 1 << 20;
@@ -237,12 +237,10 @@ fn run(ram: &mut [u8], setup: Setup, instructions: u64) -> VirtMachine<LentStora
         .build_in(MemoryLoan { ram, vars: &mut [] })
         .expect("a bare machine builds");
     for (offset, word) in PROGRAM {
-        m.mem_write(RAM_BASE + offset, &word.to_le_bytes())
-            .expect("the program is in RAM");
+        m.mem_write(RAM_BASE + offset, &word.to_le_bytes()).expect("the program is in RAM");
     }
     let sctlr = m.sysreg_read(SysReg::SCTLR_EL1).expect("SCTLR");
-    m.sysreg_write(SysReg::SCTLR_EL1, sctlr & !(SCTLR_NTWI | SCTLR_NTWE))
-        .expect("SCTLR");
+    m.sysreg_write(SysReg::SCTLR_EL1, sctlr & !(SCTLR_NTWI | SCTLR_NTWE)).expect("SCTLR");
     m.sysreg_write(SysReg::VBAR_EL1, VBAR).expect("VBAR");
     m.reg_write(Reg::X10, u64::from(setup.raise_irq));
     m.reg_write(Reg::X11, setup.cntkctl);
@@ -318,11 +316,7 @@ fn wfi_with_a_masked_interrupt_pending_completes_at_el0() {
 fn the_exception_return_sets_the_event_register_for_one_wfe() {
     let mut ram = vec![0u8; RAM_LEN];
     let m = run(&mut ram, el0(WFE_TWICE), 60);
-    assert_eq!(
-        m.reg_read(Reg::X5),
-        1,
-        "the first WFE consumed the ERET's event"
-    );
+    assert_eq!(m.reg_read(Reg::X5), 1, "the first WFE consumed the ERET's event");
     assert_eq!(m.reg_read(Reg::X6), 0, "the second WFE trapped");
     assert_eq!(m.reg_read(Reg::Pc), TRAPPED);
     assert_eq!(esr(&m) >> 26, EC_WFX);
@@ -348,12 +342,7 @@ fn the_event_stream_sets_the_event_register() {
             ..el0(STREAM_WFE)
         };
         let m = run(&mut ram, setup, 9_000);
-        assert_eq!(
-            m.reg_read(Reg::X5),
-            u64::from(completes),
-            "CNTKCTL_EL1 {cntkctl:#x}, ESR {:#x}",
-            esr(&m)
-        );
+        assert_eq!(m.reg_read(Reg::X5), u64::from(completes), "CNTKCTL_EL1 {cntkctl:#x}, ESR {:#x}", esr(&m));
         if !completes {
             assert_eq!(m.reg_read(Reg::Pc), TRAPPED);
         }
@@ -635,11 +624,7 @@ fn the_debug_communications_channel_is_reachable_from_el0_unless_mdscr_tdcc_trap
             ..el0(DCC_EL0)
         };
         let m = run(&mut ram, setup, 60);
-        assert_eq!(
-            m.reg_read(Reg::X5),
-            u64::from(completes),
-            "MDSCR_EL1 {mdscr:#x}"
-        );
+        assert_eq!(m.reg_read(Reg::X5), u64::from(completes), "MDSCR_EL1 {mdscr:#x}");
         let status = m.sysreg_read(mdccsr).expect("MDCCSR_EL0");
         if completes {
             assert_eq!(status, TXFULL, "the write from EL0 filled DTRTX");
@@ -664,11 +649,6 @@ fn sctlr_el1_memory_tagging_controls_read_as_zero() {
     let sctlr = m.sysreg_read(SysReg::SCTLR_EL1).expect("SCTLR");
     // ITFSB, TCF0, TCF, ATA0, ATA, TCSO0, TCSO.
     let mte = (1u64 << 37) | (3 << 38) | (3 << 40) | (1 << 42) | (1 << 43) | (1 << 58) | (1 << 59);
-    m.sysreg_write(SysReg::SCTLR_EL1, sctlr | mte | (1 << 44))
-        .expect("SCTLR");
-    assert_eq!(
-        m.sysreg_read(SysReg::SCTLR_EL1),
-        Ok(sctlr | (1 << 44)),
-        "only the MTE fields read as zero"
-    );
+    m.sysreg_write(SysReg::SCTLR_EL1, sctlr | mte | (1 << 44)).expect("SCTLR");
+    assert_eq!(m.sysreg_read(SysReg::SCTLR_EL1), Ok(sctlr | (1 << 44)), "only the MTE fields read as zero");
 }

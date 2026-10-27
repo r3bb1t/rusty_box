@@ -26,11 +26,7 @@ fn mix_columns_and_its_inverse() {
     let column = u128::from_le_bytes([0xDB, 0x13, 0x53, 0x45, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1]);
     let mixed = aes_mix_columns(column);
     assert_eq!(mixed.to_le_bytes()[..4], [0x8E, 0x4D, 0xA1, 0xBC]);
-    assert_eq!(
-        mixed.to_le_bytes()[12..],
-        [1, 1, 1, 1],
-        "{{01}} columns are fixed points"
-    );
+    assert_eq!(mixed.to_le_bytes()[12..], [1, 1, 1, 1], "{{01}} columns are fixed points");
     assert_eq!(aes_inv_mix_columns(mixed), column);
 }
 
@@ -41,15 +37,8 @@ fn mix_columns_and_its_inverse() {
 fn polynomial_multiplication_is_carry_less() {
     assert_eq!(polynomial_mult(0b11, 0b11, 8), 0b101);
     assert_eq!(polynomial_mult(0xFF, 0xFF, 8), 0x5555);
-    assert_eq!(
-        polynomial_mult(0x1FF, 0x101, 8),
-        0xFF,
-        "bits above the width are not operands"
-    );
-    assert_eq!(
-        polynomial_mult(0xDEAD_BEEF_0123_4567, 1, 64),
-        0xDEAD_BEEF_0123_4567
-    );
+    assert_eq!(polynomial_mult(0x1FF, 0x101, 8), 0xFF, "bits above the width are not operands");
+    assert_eq!(polynomial_mult(0xDEAD_BEEF_0123_4567, 1, 64), 0xDEAD_BEEF_0123_4567);
     assert_eq!(polynomial_mult(1 << 63, 1 << 63, 64), 1 << 126);
     assert_eq!(polynomial_mult(u64::MAX, 0, 64), 0);
 }
@@ -82,9 +71,7 @@ fn pseudocode_crc32(acc: u32, value: u64, size: u32, poly: u32) -> u32 {
 fn the_table_crc_is_the_pseudocode_crc() {
     let mut seed = 0x1234_5678_9ABC_DEF0u64;
     for _ in 0..2000 {
-        seed = seed
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1_442_695_040_888_963_407);
+        seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
         let acc = (seed >> 32) as u32;
         let value = seed.rotate_left(17) ^ 0xA5A5_5A5A_0F0F_F0F0;
         for (poly, table) in [(CRC32_POLY, &CRC32_TABLE), (CRC32C_POLY, &CRC32C_TABLE)] {

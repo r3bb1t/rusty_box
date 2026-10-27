@@ -140,12 +140,8 @@ const _: () = assert!(PA_BITS < 63);
 // them (Bochs icache.h relies on the same agreement between its hashes):
 // every stamp count is a power of two from MIN_STAMPS up, so a multiple of
 // MIN_STAMPS.
-const _: () = assert!(
-    ENTRIES.is_power_of_two() && ENTRIES >= 1024 && (MIN_STAMPS * 1024).is_multiple_of(ENTRIES)
-);
-const _: () = assert!(
-    MIN_STAMPS.is_power_of_two() && MAX_STAMPS.is_power_of_two() && MIN_STAMPS <= MAX_STAMPS
-);
+const _: () = assert!(ENTRIES.is_power_of_two() && ENTRIES >= 1024 && (MIN_STAMPS * 1024).is_multiple_of(ENTRIES));
+const _: () = assert!(MIN_STAMPS.is_power_of_two() && MAX_STAMPS.is_power_of_two() && MIN_STAMPS <= MAX_STAMPS);
 const _: () = assert!(POOL >= MAX_TRACE && POOL < 1 << 24);
 
 /// One of the cache's tables: on the heap with `alloc`, so that the
@@ -266,10 +262,7 @@ impl Pool {
 impl Pool {
     const fn new() -> Self {
         Self {
-            slots: [Slot {
-                op: Op::Nop,
-                word: 0,
-            }; POOL],
+            slots: [Slot { op: Op::Nop, word: 0 }; POOL],
             len: 0,
         }
     }
@@ -397,11 +390,7 @@ const fn stamp_index(pa: u64, count: usize) -> usize {
 const fn line_mask(first: u64, last: u64) -> u32 {
     let first_line = (first >> 7) as u32;
     let lines = (last >> 7) as u32 - first_line + 1;
-    let range = if lines >= 32 {
-        u32::MAX
-    } else {
-        (1u32 << lines) - 1
-    };
+    let range = if lines >= 32 { u32::MAX } else { (1u32 << lines) - 1 };
     range << first_line
 }
 
@@ -631,9 +620,7 @@ impl Cpu {
             match self.retire(pc, Some(word), flow, observed.observer) {
                 Done::Next => {}
                 Done::Elsewhere if exits.is_empty() => {
-                    debug_assert!(
-                        !self.trace_break && !self.timer_dirty && !observed.devices_touched()
-                    );
+                    debug_assert!(!self.trace_break && !self.timer_dirty && !observed.devices_touched());
                     match self.linked_trace(i, pc, pa, epoch) {
                         Some(next) => {
                             i = next.start;
@@ -691,13 +678,7 @@ impl Cpu {
     /// the trace loop's register allocation does not depend on it.
     #[cold]
     #[inline(never)]
-    fn linked_trace(
-        &mut self,
-        slot: usize,
-        branch_pc: u64,
-        pa: u64,
-        epoch: CodeEpoch,
-    ) -> Option<Trace> {
+    fn linked_trace(&mut self, slot: usize, branch_pc: u64, pa: u64, epoch: CodeEpoch) -> Option<Trace> {
         let target = self.pc;
         if !matches!(
             self.traces.pool.op(slot),
@@ -708,9 +689,7 @@ impl Cpu {
         {
             return None;
         }
-        let trace = self
-            .traces
-            .lookup((pa & !0xFFF) | (target & 0xFFF), epoch)?;
+        let trace = self.traces.lookup((pa & !0xFFF) | (target & 0xFFF), epoch)?;
         Some(Trace {
             start: trace.start,
             len: (trace.len as u64).min(self.run_left()) as usize,
@@ -810,12 +789,7 @@ impl Cpu {
     /// abort.
     #[cold]
     #[inline(never)]
-    fn build_trace<B: PhysBus, I: Instrumentation>(
-        &mut self,
-        bus: &mut Observed<'_, B, I>,
-        pa: u64,
-        epoch: CodeEpoch,
-    ) -> Option<Trace> {
+    fn build_trace<B: PhysBus, I: Instrumentation>(&mut self, bus: &mut Observed<'_, B, I>, pa: u64, epoch: CodeEpoch) -> Option<Trace> {
         if self.traces.pool.len() + MAX_TRACE > POOL {
             self.traces.flush();
         }

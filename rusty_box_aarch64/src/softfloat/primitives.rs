@@ -178,13 +178,11 @@ pub(crate) fn approx_recip_sqrt32_1(odd_exp: u32, a: u32) -> u32 {
     }
     // C: sigma0 = ~(uint32_t)(((uint32_t) ESqrR0 * (uint64_t) a) >> 23)
     let sigma0: u32 = !(((e_sqr_r0 as u64).wrapping_mul(a as u64) >> 23) as u32);
-    let mut r: u32 =
-        ((r0 as u32) << 16).wrapping_add(((r0 as u64).wrapping_mul(sigma0 as u64) >> 25) as u32);
+    let mut r: u32 = ((r0 as u32) << 16)
+        .wrapping_add(((r0 as u64).wrapping_mul(sigma0 as u64) >> 25) as u32);
     let sqr_sigma0: u32 = ((sigma0 as u64).wrapping_mul(sigma0 as u64) >> 32) as u32;
     // C: r += ((uint32_t)((r>>1)+(r>>3)-((uint32_t)r0<<14)) * (uint64_t)sqrSigma0) >> 48
-    let inner: u32 = (r >> 1)
-        .wrapping_add(r >> 3)
-        .wrapping_sub((r0 as u32) << 14);
+    let inner: u32 = (r >> 1).wrapping_add(r >> 3).wrapping_sub((r0 as u32) << 14);
     r = r.wrapping_add(((inner as u64).wrapping_mul(sqr_sigma0 as u64) >> 48) as u32);
     if r & 0x8000_0000 == 0 {
         r = 0x8000_0000;

@@ -87,10 +87,7 @@ const fn align4(n: usize) -> usize {
 /// The NUL-terminated name at `at` in a block.
 fn name_at(block: &[u8], at: usize) -> Result<&[u8], DeviceTreeError> {
     let rest = block.get(at..).ok_or(DeviceTreeError::Malformed)?;
-    let len = rest
-        .iter()
-        .position(|&b| b == 0)
-        .ok_or(DeviceTreeError::Malformed)?;
+    let len = rest.iter().position(|&b| b == 0).ok_or(DeviceTreeError::Malformed)?;
     Ok(&rest[..len])
 }
 
@@ -98,10 +95,7 @@ fn name_at(block: &[u8], at: usize) -> Result<&[u8], DeviceTreeError> {
 fn find_string(strings: &[u8], name: &str) -> Option<usize> {
     let mut at = 0;
     while at < strings.len() {
-        let len = strings[at..]
-            .iter()
-            .position(|&b| b == 0)
-            .unwrap_or(strings.len() - at);
+        let len = strings[at..].iter().position(|&b| b == 0).unwrap_or(strings.len() - at);
         if &strings[at..at + len] == name.as_bytes() {
             return Some(at);
         }
@@ -119,15 +113,9 @@ struct Out<'a> {
 
 impl Out<'_> {
     fn put(&mut self, bytes: &[u8]) -> Result<(), DeviceTreeError> {
-        let end = self
-            .pos
-            .checked_add(bytes.len())
-            .ok_or(DeviceTreeError::TooLarge)?;
+        let end = self.pos.checked_add(bytes.len()).ok_or(DeviceTreeError::TooLarge)?;
         if !self.measuring {
-            self.buf
-                .get_mut(self.pos..end)
-                .ok_or(DeviceTreeError::TooLarge)?
-                .copy_from_slice(bytes);
+            self.buf.get_mut(self.pos..end).ok_or(DeviceTreeError::TooLarge)?.copy_from_slice(bytes);
         }
         self.pos = end;
         Ok(())
@@ -181,25 +169,16 @@ impl Names<'_, '_> {
     /// The bytes appended after the source block.
     fn appended_len(&self) -> usize {
         (0..self.edits.len())
-            .filter(|&i| {
-                find_string(self.source, self.edits[i].property).is_none()
-                    && self.first_named(i).is_none()
-            })
+            .filter(|&i| find_string(self.source, self.edits[i].property).is_none() && self.first_named(i).is_none())
             .map(|i| self.edits[i].property.len() + 1)
             .sum()
     }
 }
 
-fn put_prop(
-    out: &mut Out<'_>,
-    names: &Names<'_, '_>,
-    edit: &Edit<'_>,
-) -> Result<(), DeviceTreeError> {
+fn put_prop(out: &mut Out<'_>, names: &Names<'_, '_>, edit: &Edit<'_>) -> Result<(), DeviceTreeError> {
     out.put_u32(FDT_PROP)?;
     out.put_u32(u32::try_from(edit.value.len()).map_err(|_| DeviceTreeError::TooLarge)?)?;
-    out.put_u32(
-        u32::try_from(names.offset(edit.property)).map_err(|_| DeviceTreeError::TooLarge)?,
-    )?;
+    out.put_u32(u32::try_from(names.offset(edit.property)).map_err(|_| DeviceTreeError::TooLarge)?)?;
     match edit.value {
         Value::Bytes(b) => out.put(b)?,
         Value::String(s) => {
@@ -211,12 +190,7 @@ fn put_prop(
 }
 
 /// Write the structure block with the edits applied.
-fn structure(
-    source: &[u8],
-    strings: &[u8],
-    names: &Names<'_, '_>,
-    out: &mut Out<'_>,
-) -> Result<(), DeviceTreeError> {
+fn structure(source: &[u8], strings: &[u8], names: &Names<'_, '_>, out: &mut Out<'_>) -> Result<(), DeviceTreeError> {
     let edits = names.edits;
     let mut depth = 0usize;
     // The top-level node being copied, while its properties are.
@@ -315,11 +289,7 @@ fn node_exists(source: &[u8], node: &str) -> Result<bool, DeviceTreeError> {
 
 /// Write `source` with `edits` applied into `dst`, returning the edited
 /// tree's length. The result is compact: no slack after the strings block.
-pub(crate) fn rebuild(
-    source: &[u8],
-    edits: &[Edit<'_>],
-    dst: &mut [u8],
-) -> Result<usize, DeviceTreeError> {
+pub(crate) fn rebuild(source: &[u8], edits: &[Edit<'_>], dst: &mut [u8]) -> Result<usize, DeviceTreeError> {
     if be32(source, 0).ok() != Some(FDT_MAGIC) {
         return Err(DeviceTreeError::NotADeviceTree);
     }
@@ -330,27 +300,15 @@ pub(crate) fn rebuild(
     let size_strings = be32(source, 32)? as usize;
     let size_struct = be32(source, 36)? as usize;
     let structure_src = source
-        .get(
-            off_struct
-                ..off_struct
-                    .checked_add(size_struct)
-                    .ok_or(DeviceTreeError::Malformed)?,
-        )
+        .get(off_struct..off_struct.checked_add(size_struct).ok_or(DeviceTreeError::Malformed)?)
         .ok_or(DeviceTreeError::Malformed)?;
     let strings = source
-        .get(
-            off_strings
-                ..off_strings
-                    .checked_add(size_strings)
-                    .ok_or(DeviceTreeError::Malformed)?,
-        )
+        .get(off_strings..off_strings.checked_add(size_strings).ok_or(DeviceTreeError::Malformed)?)
         .ok_or(DeviceTreeError::Malformed)?;
     // The reservation block runs to its all-zero terminating entry.
     let mut rsv_end = off_rsvmap;
     loop {
-        let entry = source
-            .get(rsv_end..rsv_end + 16)
-            .ok_or(DeviceTreeError::Malformed)?;
+        let entry = source.get(rsv_end..rsv_end + 16).ok_or(DeviceTreeError::Malformed)?;
         rsv_end += 16;
         if entry.iter().all(|&b| b == 0) {
             break;
@@ -417,11 +375,7 @@ pub(crate) fn rebuild(
 /// # Errors
 ///
 /// [`DeviceTreeError`] when `tree` is not a well-formed device tree.
-pub fn property<'t>(
-    tree: &'t [u8],
-    node: &str,
-    property: &str,
-) -> Result<Option<&'t [u8]>, DeviceTreeError> {
+pub fn property<'t>(tree: &'t [u8], node: &str, property: &str) -> Result<Option<&'t [u8]>, DeviceTreeError> {
     if be32(tree, 0).ok() != Some(FDT_MAGIC) {
         return Err(DeviceTreeError::NotADeviceTree);
     }
@@ -448,10 +402,7 @@ pub fn property<'t>(
                 let len = be32(tree, at + 4)? as usize;
                 let name = name_at(strings, be32(tree, at + 8)? as usize)?;
                 if in_node && name == property.as_bytes() {
-                    return Ok(Some(
-                        tree.get(at + 12..at + 12 + len)
-                            .ok_or(DeviceTreeError::Malformed)?,
-                    ));
+                    return Ok(Some(tree.get(at + 12..at + 12 + len).ok_or(DeviceTreeError::Malformed)?));
                 }
                 at += 12 + align4(len);
             }
@@ -495,36 +446,21 @@ mod tests {
         let len = rebuild(QEMU_DTB, &edits, &mut dst).expect("rebuild");
         let tree = &dst[..len];
         assert_eq!(property(tree, "memory@40000000", "reg"), Ok(Some(&reg[..])));
-        assert_eq!(
-            property(tree, "chosen", "bootargs"),
-            Ok(Some(&b"console=ttyAMA0\0"[..]))
-        );
-        assert_eq!(
-            property(tree, "rusty-box-test", "made-here"),
-            Ok(Some(&[0u8, 0, 0, 1][..]))
-        );
+        assert_eq!(property(tree, "chosen", "bootargs"), Ok(Some(&b"console=ttyAMA0\0"[..])));
+        assert_eq!(property(tree, "rusty-box-test", "made-here"), Ok(Some(&[0u8, 0, 0, 1][..])));
         // Untouched: the UART's compatible string and chosen's stdout-path.
         assert_eq!(
             property(tree, "pl011@9000000", "compatible"),
             property(QEMU_DTB, "pl011@9000000", "compatible")
         );
-        assert_eq!(
-            property(tree, "chosen", "stdout-path"),
-            property(QEMU_DTB, "chosen", "stdout-path")
-        );
+        assert_eq!(property(tree, "chosen", "stdout-path"), property(QEMU_DTB, "chosen", "stdout-path"));
         assert!(len < 16 * 1024, "the rebuild is compact: {len} bytes");
     }
 
     #[test]
     fn a_tree_that_does_not_fit_is_refused_whole() {
         let mut dst = [0u8; 256];
-        assert_eq!(
-            rebuild(QEMU_DTB, &[], &mut dst),
-            Err(DeviceTreeError::TooLarge)
-        );
-        assert_eq!(
-            rebuild(b"not a tree at all, honestly....", &[], &mut dst),
-            Err(DeviceTreeError::NotADeviceTree)
-        );
+        assert_eq!(rebuild(QEMU_DTB, &[], &mut dst), Err(DeviceTreeError::TooLarge));
+        assert_eq!(rebuild(b"not a tree at all, honestly....", &[], &mut dst), Err(DeviceTreeError::NotADeviceTree));
     }
 }

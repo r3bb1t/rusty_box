@@ -76,15 +76,9 @@ const UNDEFINED_AT_EL1: &[(&str, &str)] = &[
     ("dcps2", "DCPS2: UNDEFINED in Non-debug state (C6.2 DCPS2)"),
     ("dcps3", "DCPS3: UNDEFINED in Non-debug state (C6.2 DCPS3)"),
     ("drps", "DRPS: UNDEFINED in Non-debug state (C6.2 DRPS)"),
-    (
-        "hlt",
-        "HLT: UNDEFINED while halting is not allowed (C6.2 HLT, EDSCR.HDE = 0)",
-    ),
+    ("hlt", "HLT: UNDEFINED while halting is not allowed (C6.2 HLT, EDSCR.HDE = 0)"),
     ("smc", "SMC: UNDEFINED without EL3 (C6.2 SMC)"),
-    (
-        "sysl",
-        "SYSL: every encoding is IMPLEMENTATION DEFINED, and this core defines none (C5.1)",
-    ),
+    ("sysl", "SYSL: every encoding is IMPLEMENTATION DEFINED, and this core defines none (C5.1)"),
 ];
 
 /// Encodings whose random instances name system registers this core does
@@ -142,18 +136,11 @@ fn parse_rows(source: &str) -> Vec<Row> {
                 u32::from_str_radix(text.trim_start_matches("0x"), 16).expect("a 32-bit value")
             };
             Row {
-                mnemonic: field(block, "mnemonic:")
-                    .expect("a mnemonic")
-                    .trim_matches('"')
-                    .to_string(),
+                mnemonic: field(block, "mnemonic:").expect("a mnemonic").trim_matches('"').to_string(),
                 opcode: hex("opcode:"),
                 mask: hex("mask:"),
-                class: field(block, "class: InsnClass::")
-                    .expect("a class")
-                    .to_string(),
-                feature_set: field(block, "feature_set: InsnFeatureSet::")
-                    .expect("a feature set")
-                    .to_string(),
+                class: field(block, "class: InsnClass::").expect("a class").to_string(),
+                feature_set: field(block, "feature_set: InsnFeatureSet::").expect("a feature set").to_string(),
             }
         })
         .collect()
@@ -207,9 +194,7 @@ fn executes(ram: &mut [u8], word: u32) -> bool {
         .bare()
         .build_in(MemoryLoan { ram, vars: &mut [] })
         .expect("a bare machine builds");
-    machine
-        .mem_write(RAM_BASE, &word.to_le_bytes())
-        .expect("code is in RAM");
+    machine.mem_write(RAM_BASE, &word.to_le_bytes()).expect("code is in RAM");
     machine
         .sysreg_write(SysReg::CPACR_EL1, 3 << 20)
         .expect("CPACR_EL1 is writable");
@@ -237,11 +222,7 @@ fn must_execute(row: &Row, word: u32) -> Option<bool> {
         // ARMv8.0 single- or double-precision form, whose handler rejects
         // its own reserved values (immh = 1xxx with Q = 0).
         let immh = (word >> 19) & 0xF;
-        return if immh & 0b1100 == 0 {
-            Some(false)
-        } else {
-            None
-        };
+        return if immh & 0b1100 == 0 { Some(false) } else { None };
     }
     if !ADVERTISED.contains(&row.feature_set.as_str()) {
         return Some(false);
@@ -319,10 +300,7 @@ fn every_encoding_of_an_advertised_feature_executes_and_every_other_is_undefined
                     }
                 }
                 None if explained => {}
-                None => failures.push(format!(
-                    "{} {:08x}/{:08x}: no instance executes",
-                    row.mnemonic, row.opcode, row.mask
-                )),
+                None => failures.push(format!("{} {:08x}/{:08x}: no instance executes", row.mnemonic, row.opcode, row.mask)),
             }
         }
     }
@@ -334,19 +312,12 @@ fn every_encoding_of_an_advertised_feature_executes_and_every_other_is_undefined
             t.rows, t.executes, t.undefined, t.no_instances
         );
     }
-    println!(
-        "UNDEFINED encodings of advertised feature sets ({}):",
-        undefined_advertised.len()
-    );
+    println!("UNDEFINED encodings of advertised feature sets ({}):", undefined_advertised.len());
     for line in &undefined_advertised {
         println!("  {line}");
     }
     for line in &failures {
         println!("FAIL {line}");
     }
-    assert!(
-        failures.is_empty(),
-        "{} instances disagree with the model",
-        failures.len()
-    );
+    assert!(failures.is_empty(), "{} instances disagree with the model", failures.len());
 }

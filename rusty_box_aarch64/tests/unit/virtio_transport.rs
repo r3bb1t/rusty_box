@@ -49,15 +49,7 @@ fn write_only_registers_read_as_zero() {
     d.write(QUEUE_NUM, 32);
     d.write(QUEUE_DESC_LOW, 0x4001_0000);
     d.write(DRIVER_FEATURES, 0xFFFF_FFFF);
-    for off in [
-        QUEUE_SEL,
-        QUEUE_NUM,
-        QUEUE_DESC_LOW,
-        DRIVER_FEATURES,
-        DEVICE_FEATURES_SEL,
-        QUEUE_NOTIFY,
-        INTERRUPT_ACK,
-    ] {
+    for off in [QUEUE_SEL, QUEUE_NUM, QUEUE_DESC_LOW, DRIVER_FEATURES, DEVICE_FEATURES_SEL, QUEUE_NOTIFY, INTERRUPT_ACK] {
         assert_eq!(d.read(off), 0, "{off:#x}");
     }
 }
@@ -67,17 +59,10 @@ fn registers_take_four_byte_accesses_and_eight_byte_ones_split() {
     let mut d = keyboard();
     assert_eq!(d.read_width(MAGIC_VALUE, AccessWidth::Byte), 0);
     assert_eq!(d.read_width(MAGIC_VALUE, AccessWidth::Half), 0);
-    assert_eq!(
-        d.read_width(MAGIC_VALUE, AccessWidth::Dword),
-        0x7472_6976 | (2 << 32)
-    );
+    assert_eq!(d.read_width(MAGIC_VALUE, AccessWidth::Dword), 0x7472_6976 | (2 << 32));
     d.write_width(STATUS, AccessWidth::Byte, u64::from(ACKNOWLEDGE));
     assert_eq!(d.read(STATUS), 0, "a byte write to a register is ignored");
-    d.write_width(
-        STATUS,
-        AccessWidth::Dword,
-        u64::from(ACKNOWLEDGE) | (0xFFFF_FFFF << 32),
-    );
+    d.write_width(STATUS, AccessWidth::Dword, u64::from(ACKNOWLEDGE) | (0xFFFF_FFFF << 32));
     assert_eq!(d.read(STATUS), ACKNOWLEDGE);
 }
 
@@ -86,10 +71,7 @@ fn the_device_offers_qemus_common_features() {
     let mut d = keyboard();
     // Indirect descriptors, event index, VERSION_1 and queue reset; QEMU's
     // notify-on-empty and any-layout are legacy, so not shown.
-    assert_eq!(
-        d.device_features(),
-        F_INDIRECT_DESC | F_EVENT_IDX | F_VERSION_1 | (1 << 40)
-    );
+    assert_eq!(d.device_features(), F_INDIRECT_DESC | F_EVENT_IDX | F_VERSION_1 | (1 << 40));
 }
 
 #[test]
@@ -139,11 +121,7 @@ fn queue_ready_is_kept_for_every_queue_index() {
     d.write(QUEUE_READY, 1);
     assert_eq!(d.read(QUEUE_READY), 1);
     d.write(QUEUE_SEL, 1024);
-    assert_eq!(
-        d.read(QUEUE_READY),
-        1,
-        "a selector past VIRTIO_QUEUE_MAX is ignored"
-    );
+    assert_eq!(d.read(QUEUE_READY), 1, "a selector past VIRTIO_QUEUE_MAX is ignored");
     d.write(QUEUE_READY, 0);
     assert_eq!(d.read(QUEUE_READY), 0);
 }
@@ -157,11 +135,7 @@ fn rings_take_effect_when_the_driver_sets_queue_ready() {
     d.write(QUEUE_DESC_LOW, UNASSIGNED as u32);
     d.write(QUEUE_DESC_HIGH, (UNASSIGNED >> 32) as u32);
     report(&mut d);
-    assert_eq!(
-        d.used(1).len(),
-        1,
-        "the queue still runs on the rings it was enabled with"
-    );
+    assert_eq!(d.used(1).len(), 1, "the queue still runs on the rings it was enabled with");
     // ...until QueueReady hands them to the device, which cannot map them.
     d.write(QUEUE_READY, 1);
     assert_eq!(d.read(STATUS) & NEEDS_RESET, NEEDS_RESET);
@@ -179,11 +153,7 @@ fn a_driver_reset_keeps_the_latched_rings_and_a_system_reset_forgets_them() {
     d.write(QUEUE_READY, 1);
     d.write(STATUS, ACKNOWLEDGE | DRIVER | FEATURES_OK | DRIVER_OK);
     report(&mut d);
-    assert_eq!(
-        d.used(1).len(),
-        1,
-        "the rings latched before the driver's reset"
-    );
+    assert_eq!(d.used(1).len(), 1, "the rings latched before the driver's reset");
 
     d.transport.reset();
     d.write(STATUS, ACKNOWLEDGE | DRIVER);
@@ -193,11 +163,7 @@ fn a_driver_reset_keeps_the_latched_rings_and_a_system_reset_forgets_them() {
     d.write(QUEUE_READY, 1);
     d.write(STATUS, ACKNOWLEDGE | DRIVER | FEATURES_OK | DRIVER_OK);
     report(&mut d);
-    assert_eq!(
-        d.used(1).len(),
-        0,
-        "no rings: the queue has no descriptor table"
-    );
+    assert_eq!(d.used(1).len(), 0, "no rings: the queue has no descriptor table");
     assert_eq!(d.read(STATUS) & NEEDS_RESET, 0);
 }
 
@@ -214,11 +180,7 @@ fn a_queue_larger_than_the_devices_breaks_it() {
     d.negotiate(0);
     d.write(QUEUE_SEL, 0);
     d.write(QUEUE_NUM, 65);
-    assert_eq!(
-        d.read(STATUS) & NEEDS_RESET,
-        0,
-        "only a VERSION_1 driver is told"
-    );
+    assert_eq!(d.read(STATUS) & NEEDS_RESET, 0, "only a VERSION_1 driver is told");
 }
 
 /// Start the keyboard, break it with `bad` (which offers something on the
@@ -368,10 +330,7 @@ fn a_broken_device_keeps_its_interrupt_line_until_reset() {
     assert!(d.irq());
     assert_eq!(d.take_interrupt(), 3);
     assert_eq!(d.read(INTERRUPT_STATUS), 0);
-    assert!(
-        d.irq(),
-        "QEMU's virtio_notify_vector leaves a broken device's line alone"
-    );
+    assert!(d.irq(), "QEMU's virtio_notify_vector leaves a broken device's line alone");
     report(&mut d);
     assert!(d.used(1).is_empty(), "a broken device ignores its queues");
     d.write(STATUS, 0);
@@ -412,11 +371,7 @@ fn configuration_past_its_end_reads_all_ones() {
     assert_eq!(d.read_width(CONFIG + 37, AccessWidth::Byte), 0xFF);
     assert_eq!(d.read_width(CONFIG + 36, AccessWidth::Half), 0xFFFF);
     assert_eq!(d.read_width(CONFIG + 34, AccessWidth::Word), 0xFFFF_FFFF);
-    assert_eq!(
-        d.read_width(CONFIG + 36, AccessWidth::Byte),
-        0,
-        "the last byte is inside"
-    );
+    assert_eq!(d.read_width(CONFIG + 36, AccessWidth::Byte), 0, "the last byte is inside");
 }
 
 #[test]

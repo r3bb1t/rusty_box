@@ -59,11 +59,10 @@ use self::softfloat::*;
 use self::specialize::{f32_flush_input, f64_flush_input};
 
 pub(crate) use self::arm_ops::{
-    f16_ahp_to_f32, f16_ahp_to_f64, f32_mulx, f32_recip_step, f32_rsqrt_step, f32_to_f16_ahp,
-    f32_to_i32_fixed, f32_to_i64_fixed, f32_to_u32_fixed, f32_to_u64_fixed, f64_mulx,
-    f64_recip_step, f64_rsqrt_step, f64_to_f16_ahp, f64_to_f32_round_odd, f64_to_i32_fixed,
-    f64_to_i64_fixed, f64_to_u32_fixed, f64_to_u64_fixed, i64_to_f32_fixed, i64_to_f64_fixed,
-    u64_to_f32_fixed, u64_to_f64_fixed,
+    f16_ahp_to_f32, f16_ahp_to_f64, f32_mulx, f32_recip_step, f32_rsqrt_step, f32_to_f16_ahp, f32_to_i32_fixed,
+    f32_to_i64_fixed, f32_to_u32_fixed, f32_to_u64_fixed, f64_mulx, f64_recip_step, f64_rsqrt_step,
+    f64_to_f16_ahp, f64_to_f32_round_odd, f64_to_i32_fixed, f64_to_i64_fixed, f64_to_u32_fixed,
+    f64_to_u64_fixed, i64_to_f32_fixed, i64_to_f64_fixed, u64_to_f32_fixed, u64_to_f64_fixed,
 };
 pub(crate) use self::softfloat::FpOrdering;
 
@@ -347,23 +346,9 @@ pub(crate) fn f32_sqrt(a: u32, fp: &mut ArmFpStatus) -> u32 {
 
 /// FMADD/FMSUB/FNMADD/FNMSUB (single), `addend` being Ra. Arm FPMulAdd
 /// after the form's operand negations.
-pub(crate) fn f32_mul_add(
-    form: FusedMulAdd,
-    addend: u32,
-    n: u32,
-    m: u32,
-    fp: &mut ArmFpStatus,
-) -> u32 {
-    let addend = if form.negates_addend() {
-        addend ^ 0x8000_0000
-    } else {
-        addend
-    };
-    let n = if form.negates_multiplicand() {
-        n ^ 0x8000_0000
-    } else {
-        n
-    };
+pub(crate) fn f32_mul_add(form: FusedMulAdd, addend: u32, n: u32, m: u32, fp: &mut ArmFpStatus) -> u32 {
+    let addend = if form.negates_addend() { addend ^ 0x8000_0000 } else { addend };
+    let n = if form.negates_multiplicand() { n ^ 0x8000_0000 } else { n };
     if let Some(fused) = host::f32_fused(addend, n, m, fp) {
         return fused;
     }
@@ -416,20 +401,10 @@ pub(crate) fn f32_compare(a: u32, b: u32, signal: NanSignal, fp: &mut ArmFpStatu
 }
 
 /// FRINT* (single). Arm FPRoundInt.
-pub(crate) fn f32_round_to_int(
-    a: u32,
-    rounding: FpRounding,
-    report: InexactReport,
-    fp: &mut ArmFpStatus,
-) -> u32 {
+pub(crate) fn f32_round_to_int(a: u32, rounding: FpRounding, report: InexactReport, fp: &mut ArmFpStatus) -> u32 {
     let s = &mut fp.status;
     let a = f32_flush_input(a, s);
-    f32_round_to_int::f32_round_to_int(
-        a,
-        rounding.softfloat_mode(),
-        report == InexactReport::Raise,
-        s,
-    )
+    f32_round_to_int::f32_round_to_int(a, rounding.softfloat_mode(), report == InexactReport::Raise, s)
 }
 
 // ============================================================
@@ -489,24 +464,10 @@ pub(crate) fn f64_sqrt(a: u64, fp: &mut ArmFpStatus) -> u64 {
 
 /// FMADD/FMSUB/FNMADD/FNMSUB (double), `addend` being Ra. Arm FPMulAdd
 /// after the form's operand negations.
-pub(crate) fn f64_mul_add(
-    form: FusedMulAdd,
-    addend: u64,
-    n: u64,
-    m: u64,
-    fp: &mut ArmFpStatus,
-) -> u64 {
+pub(crate) fn f64_mul_add(form: FusedMulAdd, addend: u64, n: u64, m: u64, fp: &mut ArmFpStatus) -> u64 {
     const SIGN: u64 = 0x8000_0000_0000_0000;
-    let addend = if form.negates_addend() {
-        addend ^ SIGN
-    } else {
-        addend
-    };
-    let n = if form.negates_multiplicand() {
-        n ^ SIGN
-    } else {
-        n
-    };
+    let addend = if form.negates_addend() { addend ^ SIGN } else { addend };
+    let n = if form.negates_multiplicand() { n ^ SIGN } else { n };
     if let Some(fused) = host::f64_fused(addend, n, m, fp) {
         return fused;
     }
@@ -559,20 +520,10 @@ pub(crate) fn f64_compare(a: u64, b: u64, signal: NanSignal, fp: &mut ArmFpStatu
 }
 
 /// FRINT* (double). Arm FPRoundInt.
-pub(crate) fn f64_round_to_int(
-    a: u64,
-    rounding: FpRounding,
-    report: InexactReport,
-    fp: &mut ArmFpStatus,
-) -> u64 {
+pub(crate) fn f64_round_to_int(a: u64, rounding: FpRounding, report: InexactReport, fp: &mut ArmFpStatus) -> u64 {
     let s = &mut fp.status;
     let a = f64_flush_input(a, s);
-    f64_round_to_int::f64_round_to_int(
-        a,
-        rounding.softfloat_mode(),
-        report == InexactReport::Raise,
-        s,
-    )
+    f64_round_to_int::f64_round_to_int(a, rounding.softfloat_mode(), report == InexactReport::Raise, s)
 }
 
 // ============================================================

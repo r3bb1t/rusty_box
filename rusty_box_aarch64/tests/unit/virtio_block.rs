@@ -23,14 +23,7 @@ const F_CONFIG_WCE: u64 = 1 << 11;
 const F_DISCARD: u64 = 1 << 13;
 const F_WRITE_ZEROES: u64 = 1 << 14;
 /// Every feature of the device's own, all of which Linux's driver knows.
-const BLK_FEATURES: u64 = F_SEG_MAX
-    | F_GEOMETRY
-    | F_BLK_SIZE
-    | F_WCE
-    | F_TOPOLOGY
-    | F_CONFIG_WCE
-    | F_DISCARD
-    | F_WRITE_ZEROES;
+const BLK_FEATURES: u64 = F_SEG_MAX | F_GEOMETRY | F_BLK_SIZE | F_WCE | F_TOPOLOGY | F_CONFIG_WCE | F_DISCARD | F_WRITE_ZEROES;
 /// What Linux accepts of what the device offers.
 const LINUX_FEATURES: u64 = F_VERSION_1 | F_INDIRECT_DESC | F_EVENT_IDX | BLK_FEATURES;
 
@@ -56,9 +49,7 @@ const UNMAP: u32 = 1;
 
 /// `sectors` sectors, each byte telling its sector and offset apart.
 fn image(sectors: usize) -> Vec<u8> {
-    (0..sectors * 512)
-        .map(|i| ((i / 512) as u8).wrapping_mul(31) ^ (i as u8))
-        .collect()
+    (0..sectors * 512).map(|i| ((i / 512) as u8).wrapping_mul(31) ^ (i as u8)).collect()
 }
 
 fn blk_over(disk: Disk, features: u64) -> Driver {
@@ -163,10 +154,7 @@ fn the_device_is_qemus_virtio_blk_with_one_queue() {
     assert_eq!(d.read(DEVICE_ID), 2);
     // QEMU's common features: indirect descriptors, event index, VERSION_1
     // and queue reset.
-    assert_eq!(
-        d.device_features(),
-        F_INDIRECT_DESC | F_EVENT_IDX | F_VERSION_1 | (1 << 40) | BLK_FEATURES
-    );
+    assert_eq!(d.device_features(), F_INDIRECT_DESC | F_EVENT_IDX | F_VERSION_1 | (1 << 40) | BLK_FEATURES);
     d.write(QUEUE_SEL, 0);
     assert_eq!(d.read(QUEUE_NUM_MAX), 256);
     d.write(QUEUE_SEL, 1);
@@ -193,18 +181,10 @@ fn the_configuration_describes_the_disk() {
     assert_eq!(config_u32(&mut d, 36), 0x3F_FFFF, "max_discard_sectors");
     assert_eq!(config_u32(&mut d, 40), 1, "max_discard_seg");
     assert_eq!(config_u32(&mut d, 44), 1, "discard_sector_alignment");
-    assert_eq!(
-        config_u32(&mut d, 48),
-        0x3F_FFFF,
-        "max_write_zeroes_sectors"
-    );
+    assert_eq!(config_u32(&mut d, 48), 0x3F_FFFF, "max_write_zeroes_sectors");
     assert_eq!(config_u32(&mut d, 52), 1, "max_write_zeroes_seg");
     assert_eq!(config_byte(&mut d, 56), 1, "write_zeroes_may_unmap");
-    assert_eq!(
-        config_byte(&mut d, 57),
-        0xFF,
-        "the configuration ends there"
-    );
+    assert_eq!(config_byte(&mut d, 57), 0xFF, "the configuration ends there");
 }
 
 #[test]
@@ -234,12 +214,7 @@ fn a_read_fills_the_buffers_from_the_disk() {
     let disk = image(64);
     let mut d = blk(disk.clone());
     let (a, b) = (fresh(&mut d, 512), fresh(&mut d, 1024));
-    let done = submit(
-        &mut d,
-        T_IN,
-        3,
-        &[Buf::writable(a, 512), Buf::writable(b, 1024)],
-    );
+    let done = submit(&mut d, T_IN, 3, &[Buf::writable(a, 512), Buf::writable(b, 1024)]);
     assert_eq!(done.status, S_OK);
     // Every writable byte counts as used, the status byte too.
     assert_eq!(done.used, [(u32::from(done.head), 512 + 1024 + 1)]);
@@ -252,12 +227,7 @@ fn a_write_reaches_the_disk() {
     let mut d = blk(image(64));
     let data: Vec<u8> = (0..1024).map(|i| (i % 251) as u8).collect();
     let at = d.alloc_with(&data);
-    let done = submit(
-        &mut d,
-        T_OUT,
-        10,
-        &[Buf::readable(at, 300), Buf::readable(at + 300, 724)],
-    );
+    let done = submit(&mut d, T_OUT, 10, &[Buf::readable(at, 300), Buf::readable(at + 300, 724)]);
     assert_eq!(done.status, S_OK);
     assert_eq!(done.used, [(u32::from(done.head), 1)]);
     assert_eq!(&disk_bytes(&mut d)[10 * 512..12 * 512], data.as_slice());
@@ -271,14 +241,7 @@ fn a_header_split_across_buffers_is_read_whole() {
     let first = d.alloc_with(&header(T_OUT, 7)[..8]);
     let rest = d.alloc_with(&payload);
     let status = d.alloc_with(&[0xEE]);
-    d.offer(
-        0,
-        &[
-            Buf::readable(first, 8),
-            Buf::readable(rest, 8 + 512),
-            Buf::writable(status, 1),
-        ],
-    );
+    d.offer(0, &[Buf::readable(first, 8), Buf::readable(rest, 8 + 512), Buf::writable(status, 1)]);
     d.notify(0);
     assert_eq!(d.mem(status, 1), [S_OK]);
     assert_eq!(&disk_bytes(&mut d)[7 * 512..8 * 512], &[0xA5; 512]);
@@ -306,10 +269,7 @@ fn a_request_past_the_disk_or_of_part_of_a_sector_fails() {
     let partial = submit(&mut d, T_IN, 0, &[Buf::writable(buf, 513)]);
     assert_eq!(partial.status, S_IOERR);
     let at = d.alloc_with(&[0x11; 1024]);
-    assert_eq!(
-        submit(&mut d, T_OUT, 64, &[Buf::readable(at, 512)]).status,
-        S_IOERR
-    );
+    assert_eq!(submit(&mut d, T_OUT, 64, &[Buf::readable(at, 512)]).status, S_IOERR);
     assert_eq!(disk_bytes(&mut d), disk, "nothing was written");
     // No data at the very end is still inside the disk.
     assert_eq!(submit(&mut d, T_IN, 64, &[]).status, S_OK);
@@ -342,10 +302,7 @@ fn types_the_device_does_not_handle_are_unsupported() {
         assert_eq!(submit(&mut d, kind, 0, &[]).status, S_UNSUPP, "type {kind}");
     }
     let report = fresh(&mut d, 256);
-    assert_eq!(
-        submit(&mut d, T_ZONE_REPORT, 0, &[Buf::writable(report, 256)]).status,
-        S_UNSUPP
-    );
+    assert_eq!(submit(&mut d, T_ZONE_REPORT, 0, &[Buf::writable(report, 256)]).status, S_UNSUPP);
 }
 
 #[test]
@@ -354,10 +311,7 @@ fn write_zeroes_clears_the_range_and_may_unmap() {
     let mut d = blk(disk.clone());
     for (sector, flags) in [(2, 0), (20, UNMAP)] {
         let r = d.alloc_with(&range(sector, 3, flags));
-        assert_eq!(
-            submit(&mut d, T_WRITE_ZEROES, 0, &[Buf::readable(r, 16)]).status,
-            S_OK
-        );
+        assert_eq!(submit(&mut d, T_WRITE_ZEROES, 0, &[Buf::readable(r, 16)]).status, S_OK);
     }
     let bytes = disk_bytes(&mut d);
     assert_eq!(&bytes[2 * 512..5 * 512], &[0; 3 * 512]);
@@ -365,23 +319,11 @@ fn write_zeroes_clears_the_range_and_may_unmap() {
     assert_eq!(&bytes[5 * 512..20 * 512], &disk[5 * 512..20 * 512]);
 
     let r = d.alloc_with(&range(0, 1, 2));
-    assert_eq!(
-        submit(&mut d, T_WRITE_ZEROES, 0, &[Buf::readable(r, 16)]).status,
-        S_UNSUPP,
-        "an unknown flag"
-    );
+    assert_eq!(submit(&mut d, T_WRITE_ZEROES, 0, &[Buf::readable(r, 16)]).status, S_UNSUPP, "an unknown flag");
     let r = d.alloc_with(&range(63, 2, 0));
-    assert_eq!(
-        submit(&mut d, T_WRITE_ZEROES, 0, &[Buf::readable(r, 16)]).status,
-        S_IOERR,
-        "past the disk"
-    );
+    assert_eq!(submit(&mut d, T_WRITE_ZEROES, 0, &[Buf::readable(r, 16)]).status, S_IOERR, "past the disk");
     let r = d.alloc_with(&range(0, 0x40_0000, 0));
-    assert_eq!(
-        submit(&mut d, T_WRITE_ZEROES, 0, &[Buf::readable(r, 16)]).status,
-        S_IOERR,
-        "past the limit"
-    );
+    assert_eq!(submit(&mut d, T_WRITE_ZEROES, 0, &[Buf::readable(r, 16)]).status, S_IOERR, "past the limit");
 }
 
 #[test]
@@ -389,32 +331,14 @@ fn a_discard_is_ignored_and_refuses_unmap() {
     let disk = image(64);
     let mut d = blk(disk.clone());
     let r = d.alloc_with(&range(4, 8, 0));
-    assert_eq!(
-        submit(&mut d, T_DISCARD, 0, &[Buf::readable(r, 16)]).status,
-        S_OK
-    );
-    assert_eq!(
-        disk_bytes(&mut d),
-        disk,
-        "a drive without discard=unmap keeps its data"
-    );
+    assert_eq!(submit(&mut d, T_DISCARD, 0, &[Buf::readable(r, 16)]).status, S_OK);
+    assert_eq!(disk_bytes(&mut d), disk, "a drive without discard=unmap keeps its data");
     let r = d.alloc_with(&range(4, 8, UNMAP));
-    assert_eq!(
-        submit(&mut d, T_DISCARD, 0, &[Buf::readable(r, 16)]).status,
-        S_UNSUPP
-    );
+    assert_eq!(submit(&mut d, T_DISCARD, 0, &[Buf::readable(r, 16)]).status, S_UNSUPP);
     let r = d.alloc_with(&range(4, 8, 0));
-    assert_eq!(
-        submit(&mut d, T_DISCARD & !T_OUT, 0, &[Buf::readable(r, 16)]).status,
-        S_UNSUPP,
-        "without T_OUT"
-    );
+    assert_eq!(submit(&mut d, T_DISCARD & !T_OUT, 0, &[Buf::readable(r, 16)]).status, S_UNSUPP, "without T_OUT");
     let two = d.alloc_with(&[range(4, 8, 0), range(20, 8, 0)].concat());
-    assert_eq!(
-        submit(&mut d, T_DISCARD, 0, &[Buf::readable(two, 32)]).status,
-        S_UNSUPP,
-        "two ranges"
-    );
+    assert_eq!(submit(&mut d, T_DISCARD, 0, &[Buf::readable(two, 32)]).status, S_UNSUPP, "two ranges");
 }
 
 /// Check the device said it needs a reset and answered nothing, then that
@@ -452,14 +376,7 @@ fn a_short_discard_range_breaks_the_device() {
     let r = d.alloc_with(&range(0, 1, 0));
     let hdr = d.alloc_with(&header(T_DISCARD, 0));
     let status = d.alloc_with(&[0xEE]);
-    d.offer(
-        0,
-        &[
-            Buf::readable(hdr, 16),
-            Buf::readable(r, 8),
-            Buf::writable(status, 1),
-        ],
-    );
+    d.offer(0, &[Buf::readable(hdr, 16), Buf::readable(r, 8), Buf::writable(status, 1)]);
     d.notify(0);
     assert_eq!(d.mem(status, 1), [0xEE], "no status");
     assert_broken(&mut d);
@@ -479,43 +396,15 @@ fn the_legacy_scsi_command_is_refused_through_its_header() {
     let mut d = blk(image(8));
     let cdb = d.alloc_with(&[0x12; 6]);
     let (sense, scsi) = (fresh(&mut d, 96), fresh(&mut d, 16));
-    let done = submit(
-        &mut d,
-        T_SCSI_CMD,
-        0,
-        &[
-            Buf::readable(cdb, 6),
-            Buf::writable(sense, 96),
-            Buf::writable(scsi, 16),
-        ],
-    );
+    let done = submit(&mut d, T_SCSI_CMD, 0, &[Buf::readable(cdb, 6), Buf::writable(sense, 96), Buf::writable(scsi, 16)]);
     assert_eq!(done.status, S_UNSUPP);
     assert_eq!(d.mem(scsi, 4), 255u32.to_le_bytes(), "errors");
     assert_eq!(done.used, [(u32::from(done.head), 96 + 16 + 1)]);
 
     let scsi = fresh(&mut d, 16);
-    assert_eq!(
-        submit(
-            &mut d,
-            T_SCSI_CMD,
-            0,
-            &[Buf::readable(cdb, 6), Buf::writable(scsi, 16)]
-        )
-        .status,
-        S_IOERR,
-        "no sense buffer"
-    );
+    assert_eq!(submit(&mut d, T_SCSI_CMD, 0, &[Buf::readable(cdb, 6), Buf::writable(scsi, 16)]).status, S_IOERR, "no sense buffer");
     let (sense, scsi) = (fresh(&mut d, 96), fresh(&mut d, 12));
-    let done = submit(
-        &mut d,
-        T_SCSI_CMD,
-        0,
-        &[
-            Buf::readable(cdb, 6),
-            Buf::writable(sense, 96),
-            Buf::writable(scsi, 12),
-        ],
-    );
+    let done = submit(&mut d, T_SCSI_CMD, 0, &[Buf::readable(cdb, 6), Buf::writable(sense, 96), Buf::writable(scsi, 12)]);
     assert_eq!(done.status, S_IOERR, "a SCSI header of the wrong size");
 }
 
@@ -526,10 +415,7 @@ fn the_driver_chooses_write_through_through_wce() {
     assert_eq!(config_byte(&mut d, 32), 0);
     // Writes still land.
     let at = d.alloc_with(&[0x77; 512]);
-    assert_eq!(
-        submit(&mut d, T_OUT, 1, &[Buf::readable(at, 512)]).status,
-        S_OK
-    );
+    assert_eq!(submit(&mut d, T_OUT, 1, &[Buf::readable(at, 512)]).status, S_OK);
     assert_eq!(&disk_bytes(&mut d)[512..1024], &[0x77; 512]);
     // A reset brings the write-back cache back.
     d.write(STATUS, 0);
@@ -538,10 +424,7 @@ fn the_driver_chooses_write_through_through_wce() {
 
 #[test]
 fn without_config_wce_the_accepted_features_choose_the_cache() {
-    let mut d = blk_over(
-        Disk::memory(image(8)),
-        LINUX_FEATURES & !(F_CONFIG_WCE | F_WCE),
-    );
+    let mut d = blk_over(Disk::memory(image(8)), LINUX_FEATURES & !(F_CONFIG_WCE | F_WCE));
     assert_eq!(config_byte(&mut d, 32), 0, "write-through");
     let mut d = blk_over(Disk::memory(image(8)), LINUX_FEATURES & !F_CONFIG_WCE);
     assert_eq!(config_byte(&mut d, 32), 1, "write-back");
@@ -557,11 +440,7 @@ fn the_device_works_through_every_request_before_it_publishes_where_it_got_to() 
     }
     d.notify(0);
     assert_eq!(d.used(0).len(), 3);
-    assert_eq!(
-        d.avail_event(0),
-        d.avail_idx(0),
-        "the driver is asked to notify the next request"
-    );
+    assert_eq!(d.avail_event(0), d.avail_idx(0), "the driver is asked to notify the next request");
 
     let mut d = blk_over(Disk::memory(image(8)), LINUX_FEATURES & !F_EVENT_IDX);
     assert_eq!(submit(&mut d, T_FLUSH, 0, &[]).status, S_OK);
@@ -574,35 +453,14 @@ fn a_read_only_disk_says_so_and_refuses_every_write() {
     let mut d = blk_over(Disk::memory(disk.clone()).read_only(), LINUX_FEATURES);
     assert_eq!(d.device_features() & (1 << 5), 1 << 5, "VIRTIO_BLK_F_RO");
     let at = d.alloc_with(&[0x11; 512]);
-    assert_eq!(
-        submit(&mut d, T_OUT, 0, &[Buf::readable(at, 512)]).status,
-        S_IOERR
-    );
-    assert_eq!(
-        submit(&mut d, T_OUT, 0, &[]).status,
-        S_IOERR,
-        "even of no bytes"
-    );
+    assert_eq!(submit(&mut d, T_OUT, 0, &[Buf::readable(at, 512)]).status, S_IOERR);
+    assert_eq!(submit(&mut d, T_OUT, 0, &[]).status, S_IOERR, "even of no bytes");
     let r = d.alloc_with(&range(0, 1, 0));
-    assert_eq!(
-        submit(&mut d, T_WRITE_ZEROES, 0, &[Buf::readable(r, 16)]).status,
-        S_IOERR
-    );
-    assert_eq!(
-        submit(&mut d, T_DISCARD, 0, &[Buf::readable(r, 16)]).status,
-        S_OK,
-        "ignored"
-    );
-    assert_eq!(
-        submit(&mut d, T_FLUSH, 0, &[]).status,
-        S_OK,
-        "nothing to flush"
-    );
+    assert_eq!(submit(&mut d, T_WRITE_ZEROES, 0, &[Buf::readable(r, 16)]).status, S_IOERR);
+    assert_eq!(submit(&mut d, T_DISCARD, 0, &[Buf::readable(r, 16)]).status, S_OK, "ignored");
+    assert_eq!(submit(&mut d, T_FLUSH, 0, &[]).status, S_OK, "nothing to flush");
     let buf = fresh(&mut d, 512);
-    assert_eq!(
-        submit(&mut d, T_IN, 2, &[Buf::writable(buf, 512)]).status,
-        S_OK
-    );
+    assert_eq!(submit(&mut d, T_IN, 2, &[Buf::writable(buf, 512)]).status, S_OK);
     assert_eq!(d.mem(buf, 512), &disk[1024..1536]);
     assert_eq!(disk_bytes(&mut d), disk);
 }
@@ -625,11 +483,7 @@ fn a_request_the_devices_own_read_made_available_waits_for_the_next_notification
     let ring = d.avail_ring(0);
     let read = submit(&mut d, T_IN, 0, &[Buf::writable(ring, 512)]);
     assert_eq!(read.status, S_OK);
-    assert_eq!(
-        read.used.len(),
-        1,
-        "only the request the driver notified about"
-    );
+    assert_eq!(read.used.len(), 1, "only the request the driver notified about");
     assert_eq!(d.mem(status, 1), [0xEE]);
     d.notify(0);
     assert_eq!(d.used(0), [(3, 1)]);
@@ -651,10 +505,7 @@ fn an_image_of_part_of_a_sector_reads_as_zeros_to_its_end() {
     let mut d = blk(vec![0xAB; 700]);
     assert_eq!(config_u64(&mut d, 0), 2);
     let buf = fresh(&mut d, 512);
-    assert_eq!(
-        submit(&mut d, T_IN, 1, &[Buf::writable(buf, 512)]).status,
-        S_OK
-    );
+    assert_eq!(submit(&mut d, T_IN, 1, &[Buf::writable(buf, 512)]).status, S_OK);
     assert_eq!(&d.mem(buf, 512)[..188], &[0xAB; 188]);
     assert_eq!(&d.mem(buf, 512)[188..], &[0; 324]);
 }
@@ -666,20 +517,13 @@ struct TempFile(std::path::PathBuf);
 #[cfg(feature = "std")]
 impl TempFile {
     fn new(name: &str, contents: &[u8]) -> Self {
-        let path = std::env::temp_dir().join(format!(
-            "rusty_box_virtio_blk_{}_{name}",
-            std::process::id()
-        ));
+        let path = std::env::temp_dir().join(format!("rusty_box_virtio_blk_{}_{name}", std::process::id()));
         std::fs::write(&path, contents).expect("the temporary file is written");
         Self(path)
     }
 
     fn open(&self) -> std::fs::File {
-        std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&self.0)
-            .expect("the temporary file opens")
+        std::fs::OpenOptions::new().read(true).write(true).open(&self.0).expect("the temporary file opens")
     }
 
     fn contents(&self) -> Vec<u8> {
@@ -707,22 +551,12 @@ fn a_file_disk_is_read_and_written_in_place() {
     let mut d = blk_over(disk, LINUX_FEATURES);
 
     let buf = fresh(&mut d, 512);
-    assert_eq!(
-        submit(&mut d, T_IN, 3, &[Buf::writable(buf, 512)]).status,
-        S_OK
-    );
+    assert_eq!(submit(&mut d, T_IN, 3, &[Buf::writable(buf, 512)]).status, S_OK);
     assert_eq!(&d.mem(buf, 512)[..264], &contents[1536..1800]);
-    assert_eq!(
-        &d.mem(buf, 512)[264..],
-        &[0; 248],
-        "past the end of the file"
-    );
+    assert_eq!(&d.mem(buf, 512)[264..], &[0; 248], "past the end of the file");
 
     let at = d.alloc_with(&[0x3C; 1024]);
-    assert_eq!(
-        submit(&mut d, T_OUT, 2, &[Buf::readable(at, 1024)]).status,
-        S_OK
-    );
+    assert_eq!(submit(&mut d, T_OUT, 2, &[Buf::readable(at, 1024)]).status, S_OK);
     assert_eq!(submit(&mut d, T_FLUSH, 0, &[]).status, S_OK);
     let after = file.contents();
     assert_eq!(after.len(), 2048, "the write extended the file");
@@ -730,10 +564,7 @@ fn a_file_disk_is_read_and_written_in_place() {
     assert_eq!(&after[1024..], &[0x3C; 1024]);
 
     let r = d.alloc_with(&range(0, 1, 0));
-    assert_eq!(
-        submit(&mut d, T_WRITE_ZEROES, 0, &[Buf::readable(r, 16)]).status,
-        S_OK
-    );
+    assert_eq!(submit(&mut d, T_WRITE_ZEROES, 0, &[Buf::readable(r, 16)]).status, S_OK);
     assert_eq!(&file.contents()[..512], &[0; 512]);
     let flushed = d.host(|device, _| match device {
         Device::Block(b) => b.disk_mut().flush().is_ok() && b.disk_mut().take_io_error().is_none(),
@@ -747,15 +578,9 @@ fn a_file_disk_is_read_and_written_in_place() {
 fn a_host_error_is_an_io_error_the_host_can_take() {
     let file = TempFile::new("read_only", &image(4));
     let read_only = std::fs::File::open(&file.0).expect("the temporary file opens");
-    let mut d = blk_over(
-        Disk::file(read_only).expect("the file's length reads"),
-        LINUX_FEATURES,
-    );
+    let mut d = blk_over(Disk::file(read_only).expect("the file's length reads"), LINUX_FEATURES);
     let at = d.alloc_with(&[0x3C; 512]);
-    assert_eq!(
-        submit(&mut d, T_OUT, 0, &[Buf::readable(at, 512)]).status,
-        S_IOERR
-    );
+    assert_eq!(submit(&mut d, T_OUT, 0, &[Buf::readable(at, 512)]).status, S_IOERR);
     assert_eq!(file.contents(), image(4));
     let error = d.host(|device, _| match device {
         Device::Block(b) => b.disk_mut().take_io_error().map(|e| e.kind()),

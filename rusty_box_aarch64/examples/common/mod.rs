@@ -10,9 +10,8 @@ use std::time::Instant;
 
 use rusty_box_aarch64::cpu::DebugStops;
 use rusty_box_aarch64::{
-    CursorPos, Dimensions, Disk, DisplaySink, GuestStorage, KeyboardInput, MachineBuilder, Redraw,
-    Refreshed, Reg, Resolution, Rgb, RunBudget, StopReason, SysReg, TilePos, Typed,
-    VgaTextModeInfo, VirtMachine,
+    CursorPos, Dimensions, Disk, DisplaySink, GuestStorage, KeyboardInput, MachineBuilder, Redraw, Reg, Refreshed,
+    Resolution, Rgb, RunBudget, StopReason, SysReg, TilePos, Typed, VgaTextModeInfo, VirtMachine,
 };
 use rusty_box_core::ClockHz;
 
@@ -123,14 +122,7 @@ impl DisplaySink for Screen {
         self.rgba = vec![0; dims.width as usize * dims.height as usize * 4];
     }
 
-    fn text_update(
-        &mut self,
-        _previous: &[u8],
-        _current: &[u8],
-        _cursor: Option<CursorPos>,
-        _info: &VgaTextModeInfo,
-    ) {
-    }
+    fn text_update(&mut self, _previous: &[u8], _current: &[u8], _cursor: Option<CursorPos>, _info: &VgaTextModeInfo) {}
 
     fn graphics_tile_update(&mut self, rgba: &[u8], at: TilePos) {
         let stride = self.width as usize * 4;
@@ -138,10 +130,7 @@ impl DisplaySink for Screen {
         for row in 0..at.height as usize {
             let dst = (at.y as usize + row) * stride + at.x as usize * 4;
             let src = row * row_bytes;
-            if let (Some(d), Some(s)) = (
-                self.rgba.get_mut(dst..dst + row_bytes),
-                rgba.get(src..src + row_bytes),
-            ) {
+            if let (Some(d), Some(s)) = (self.rgba.get_mut(dst..dst + row_bytes), rgba.get(src..src + row_bytes)) {
                 d.copy_from_slice(s);
             }
         }
@@ -174,10 +163,7 @@ impl Screen {
 
     /// How many pixels are not black.
     pub fn lit_pixels(&self) -> usize {
-        self.rgba
-            .chunks_exact(4)
-            .filter(|p| p[..3] != [0, 0, 0])
-            .count()
+        self.rgba.chunks_exact(4).filter(|p| p[..3] != [0, 0, 0]).count()
     }
 }
 
@@ -186,10 +172,7 @@ impl Screen {
 /// # Errors
 ///
 /// The disk image cannot be opened for reading and writing.
-pub fn plug_devices<'i, B, I>(
-    mut builder: MachineBuilder<'i, B, I>,
-    args: &RunArgs,
-) -> Result<MachineBuilder<'i, B, I>, String> {
+pub fn plug_devices<'i, B, I>(mut builder: MachineBuilder<'i, B, I>, args: &RunArgs) -> Result<MachineBuilder<'i, B, I>, String> {
     if let Some(size) = args.display {
         builder = builder.virtio_display(size);
     }
@@ -200,11 +183,7 @@ pub fn plug_devices<'i, B, I>(
         builder = builder.virtio_tablet();
     }
     if let Some(path) = &args.disk {
-        let file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(path)
-            .map_err(|e| format!("{path}: {e}"))?;
+        let file = std::fs::OpenOptions::new().read(true).write(true).open(path).map_err(|e| format!("{path}: {e}"))?;
         builder = builder.virtio_disk(Disk::file(file).map_err(|e| format!("{path}: {e}"))?);
     }
     Ok(builder)
@@ -270,8 +249,7 @@ impl RunArgs {
         flag: &str,
         mut value: F,
     ) -> Result<Parsed, String> {
-        let number =
-            |name: &str, text: String| text.parse::<u64>().map_err(|e| format!("{name}: {e}"));
+        let number = |name: &str, text: String| text.parse::<u64>().map_err(|e| format!("{name}: {e}"));
         match flag {
             "--ips" => self.ips = number(flag, value(flag)?)?,
             "--max-ticks" => self.max_ticks = number(flag, value(flag)?)?,
@@ -281,26 +259,16 @@ impl RunArgs {
                     return Err(String::from("--slice-ticks must be non-zero"));
                 }
             }
-            "--until" => self
-                .script
-                .push(Action::Until(unescape(&value(flag)?).into_bytes())),
-            "--type" => self
-                .script
-                .push(Action::Type(Keys::Machine, unescape(&value(flag)?))),
-            "--type-serial" => self
-                .script
-                .push(Action::Type(Keys::Terminal, unescape(&value(flag)?))),
+            "--until" => self.script.push(Action::Until(unescape(&value(flag)?).into_bytes())),
+            "--type" => self.script.push(Action::Type(Keys::Machine, unescape(&value(flag)?))),
+            "--type-serial" => self.script.push(Action::Type(Keys::Terminal, unescape(&value(flag)?))),
             "--stop-on-undefined" => self.stop_on_undefined = true,
             "--stop-on-bus-fault" => self.stop_on_bus_fault = true,
             "--display" => {
                 let text = value(flag)?;
                 let (w, h) = text.split_once('x').ok_or("--display takes WIDTHxHEIGHT")?;
-                let width = w
-                    .parse::<u32>()
-                    .map_err(|e| format!("--display width: {e}"))?;
-                let height = h
-                    .parse::<u32>()
-                    .map_err(|e| format!("--display height: {e}"))?;
+                let width = w.parse::<u32>().map_err(|e| format!("--display width: {e}"))?;
+                let height = h.parse::<u32>().map_err(|e| format!("--display height: {e}"))?;
                 self.display = Some(Resolution::new(width, height));
             }
             "--virtio-keyboard" => self.virtio_keyboard = true,
@@ -326,10 +294,7 @@ impl RunArgs {
 
 /// Type as much of `pending`, in order, as its keyboards take now, leaving
 /// the rest in it.
-fn type_pending<S: GuestStorage>(
-    machine: &mut VirtMachine<S>,
-    pending: &mut VecDeque<(Keys, String)>,
-) {
+fn type_pending<S: GuestStorage>(machine: &mut VirtMachine<S>, pending: &mut VecDeque<(Keys, String)>) {
     while let Some((keys, text)) = pending.front_mut() {
         type_text(machine, *keys, text);
         if !text.is_empty() {
@@ -393,11 +358,7 @@ pub fn run<S: GuestStorage>(machine: &mut VirtMachine<S>, args: &RunArgs) -> Out
     outcome
 }
 
-fn run_with_screen<S: GuestStorage>(
-    machine: &mut VirtMachine<S>,
-    args: &RunArgs,
-    screen: &mut Screen,
-) -> Outcome {
+fn run_with_screen<S: GuestStorage>(machine: &mut VirtMachine<S>, args: &RunArgs, screen: &mut Screen) -> Outcome {
     let mut stdout = std::io::stdout().lock();
     let mut script = args.script.iter();
     let mut current = script.next();
@@ -414,9 +375,7 @@ fn run_with_screen<S: GuestStorage>(
         if remaining == 0 {
             return Outcome {
                 reason: StopReason::BudgetExhausted,
-                script_completed: current.is_none()
-                    && pending.is_empty()
-                    && !args.script.is_empty(),
+                script_completed: current.is_none() && pending.is_empty() && !args.script.is_empty(),
             };
         }
         let outcome = machine.step(RunBudget::Ticks(remaining.min(args.slice_ticks)));
@@ -426,16 +385,9 @@ fn run_with_screen<S: GuestStorage>(
                 Refreshed::Frame | Refreshed::Unchanged => {}
             }
         }
-        let out: Vec<u8> = machine
-            .serial(0)
-            .map(|mut uart| uart.take_output().collect())
-            .unwrap_or_default();
+        let out: Vec<u8> = machine.serial(0).map(|mut uart| uart.take_output().collect()).unwrap_or_default();
         if !out.is_empty() {
-            if stdout
-                .write_all(&out)
-                .and_then(|()| stdout.flush())
-                .is_err()
-            {
+            if stdout.write_all(&out).and_then(|()| stdout.flush()).is_err() {
                 return Outcome {
                     reason: outcome.stop,
                     script_completed: false,
@@ -465,9 +417,7 @@ fn run_with_screen<S: GuestStorage>(
             // its last keys are in, however the guest then stops.
             return Outcome {
                 reason: outcome.stop,
-                script_completed: current.is_none()
-                    && pending.is_empty()
-                    && !args.script.is_empty(),
+                script_completed: current.is_none() && pending.is_empty() && !args.script.is_empty(),
             };
         }
     }
@@ -502,12 +452,7 @@ pub fn state_hash<S: GuestStorage>(machine: &VirtMachine<S>) -> u64 {
 
 /// Print how the run ended, its speed and state hash, and — when it did not
 /// end as intended — the processor state a debugger would show first.
-pub fn report<S: GuestStorage>(
-    machine: &VirtMachine<S>,
-    args: &RunArgs,
-    outcome: &Outcome,
-    started: Instant,
-) {
+pub fn report<S: GuestStorage>(machine: &VirtMachine<S>, args: &RunArgs, outcome: &Outcome, started: Instant) {
     let elapsed = started.elapsed().as_secs_f64();
     let ticks = machine.ticks();
     let cpu = machine.cpu_snapshot();
@@ -523,15 +468,10 @@ pub fn report<S: GuestStorage>(
         machine.instructions(),
         ticks as f64 / elapsed.max(1e-9) / 1e6
     );
-    eprintln!(
-        "pc: {:#x}  el: {:?}  sp: {:#x}",
-        cpu.pc,
-        cpu.pstate.el,
-        machine.reg_read(Reg::Sp)
-    );
+    eprintln!("pc: {:#x}  el: {:?}  sp: {:#x}", cpu.pc, cpu.pstate.el, machine.reg_read(Reg::Sp));
     eprintln!("state hash: {:016x}", state_hash(machine));
-    let ended_as_intended = outcome.reason == StopReason::BudgetExhausted
-        && (outcome.script_completed || args.script.is_empty());
+    let ended_as_intended =
+        outcome.reason == StopReason::BudgetExhausted && (outcome.script_completed || args.script.is_empty());
     if !ended_as_intended {
         let recent: Vec<String> = machine.recent_pcs().map(|pc| format!("{pc:#x}")).collect();
         eprintln!("recent pcs: {}", recent.join(" "));
@@ -565,9 +505,7 @@ pub fn exit_code(args: &RunArgs, outcome: &Outcome) -> ExitCode {
         };
     }
     match outcome.reason {
-        StopReason::PoweredOff | StopReason::BudgetExhausted | StopReason::Halted => {
-            ExitCode::SUCCESS
-        }
+        StopReason::PoweredOff | StopReason::BudgetExhausted | StopReason::Halted => ExitCode::SUCCESS,
         StopReason::StopRequested
         | StopReason::ExitReached
         | StopReason::ResetRequested

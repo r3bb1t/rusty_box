@@ -98,20 +98,10 @@ impl Cpu {
         Exception::new(ExceptionClass::FpAccess, (1 << 24) | (0xE << 20)).into()
     }
 
-    fn sysreg_fault(
-        &self,
-        pc: u64,
-        insn: u32,
-        err: SysRegError,
-        key: SysRegKey,
-        rt: u32,
-        read: bool,
-    ) -> ExecResult {
+    fn sysreg_fault(&self, pc: u64, insn: u32, err: SysRegError, key: SysRegKey, rt: u32, read: bool) -> ExecResult {
         match err {
             SysRegError::Undefined => self.undefined(pc, insn),
-            SysRegError::TrapToEl1 => {
-                Err(Exception::new(ExceptionClass::SysRegTrap, key.trap_iss(rt, read)).into())
-            }
+            SysRegError::TrapToEl1 => Err(Exception::new(ExceptionClass::SysRegTrap, key.trap_iss(rt, read)).into()),
             SysRegError::FpTrap => Err(self.fp_trap()),
         }
     }
@@ -132,11 +122,7 @@ impl Cpu {
                     return Ok(Flow::Next);
                 }
                 if self.pstate.el == El::El0 && self.sys.sctlr_el1 & SCTLR_NTWE == 0 {
-                    return Err(Exception::new(
-                        ExceptionClass::WfxTrap,
-                        (1 << 24) | (0xE << 20) | 1,
-                    )
-                    .into());
+                    return Err(Exception::new(ExceptionClass::WfxTrap, (1 << 24) | (0xE << 20) | 1).into());
                 }
                 Ok(Flow::Next)
             }
@@ -147,9 +133,7 @@ impl Cpu {
                     return Ok(Flow::Next);
                 }
                 if self.pstate.el == El::El0 && self.sys.sctlr_el1 & SCTLR_NTWI == 0 {
-                    return Err(
-                        Exception::new(ExceptionClass::WfxTrap, (1 << 24) | (0xE << 20)).into(),
-                    );
+                    return Err(Exception::new(ExceptionClass::WfxTrap, (1 << 24) | (0xE << 20)).into());
                 }
                 Ok(Flow::Wait)
             }
@@ -164,12 +148,7 @@ impl Cpu {
     }
 
     /// `1101 0101 00 L op0 op1 CRn CRm op2 Rt`.
-    pub(crate) fn exec_system<B: PhysBus>(
-        &mut self,
-        bus: &mut B,
-        pc: u64,
-        insn: u32,
-    ) -> ExecResult {
+    pub(crate) fn exec_system<B: PhysBus>(&mut self, bus: &mut B, pc: u64, insn: u32) -> ExecResult {
         let l = bit(insn, 21);
         let op0 = bits(insn, 20, 19);
         let op1 = bits(insn, 18, 16);
@@ -206,16 +185,7 @@ impl Cpu {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn exec_pstate_or_barrier(
-        &mut self,
-        pc: u64,
-        insn: u32,
-        op1: u32,
-        crn: u32,
-        crm: u32,
-        op2: u32,
-        rt: u32,
-    ) -> ExecResult {
+    fn exec_pstate_or_barrier(&mut self, pc: u64, insn: u32, op1: u32, crn: u32, crm: u32, op2: u32, rt: u32) -> ExecResult {
         if rt != 31 {
             return self.undefined(pc, insn);
         }
@@ -244,16 +214,11 @@ impl Cpu {
                 (3, 6) | (3, 7) => {
                     if self.pstate.el == El::El0 && self.sys.sctlr_el1 & SCTLR_UMA == 0 {
                         let key = SysRegKey::from_insn(insn);
-                        return Err(Exception::new(
-                            ExceptionClass::SysRegTrap,
-                            key.trap_iss(rt, false),
-                        )
-                        .into());
+                        return Err(Exception::new(ExceptionClass::SysRegTrap, key.trap_iss(rt, false)).into());
                     }
                     let bits = u64::from(crm) << 6;
                     let daif = self.pstate.daif();
-                    self.pstate
-                        .set_daif(if op2 == 6 { daif | bits } else { daif & !bits });
+                    self.pstate.set_daif(if op2 == 6 { daif | bits } else { daif & !bits });
                     Ok(Flow::Next)
                 }
                 // PAN, UAO, DIT, SSBS, TCO...: features this core lacks.
@@ -265,17 +230,7 @@ impl Cpu {
 
     /// `SYS`: cache maintenance, address translation and TLB maintenance.
     #[allow(clippy::too_many_arguments)]
-    fn exec_sys<B: PhysBus>(
-        &mut self,
-        bus: &mut B,
-        pc: u64,
-        insn: u32,
-        op1: u32,
-        crn: u32,
-        crm: u32,
-        op2: u32,
-        rt: u32,
-    ) -> ExecResult {
+    fn exec_sys<B: PhysBus>(&mut self, bus: &mut B, pc: u64, insn: u32, op1: u32, crn: u32, crm: u32, op2: u32, rt: u32) -> ExecResult {
         let el0 = self.pstate.el == El::El0;
         let trap = Fault::from(Exception::new(
             ExceptionClass::SysRegTrap,

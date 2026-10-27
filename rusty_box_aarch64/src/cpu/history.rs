@@ -39,14 +39,8 @@ impl PcHistory {
     /// A record whose only run starts at `pc` with `retired` instructions
     /// retired: nothing executed yet.
     pub(crate) const fn new(pc: u64, retired: u64) -> Self {
-        let run = Run {
-            start: pc,
-            first: retired,
-        };
-        Self {
-            runs: [run; RUNS],
-            count: 1,
-        }
+        let run = Run { start: pc, first: retired };
+        Self { runs: [run; RUNS], count: 1 }
     }
 
     /// The record of `pcs` (oldest first) as the last instructions retired
@@ -61,10 +55,7 @@ impl PcHistory {
                 first: earliest + k as u64,
             };
         }
-        history.runs[pcs.len() % RUNS] = Run {
-            start: pc,
-            first: retired,
-        };
+        history.runs[pcs.len() % RUNS] = Run { start: pc, first: retired };
         history.count = pcs.len() + 1;
         history
     }
@@ -79,10 +70,7 @@ impl PcHistory {
             newest.start = pc;
             return;
         }
-        self.runs[self.count % RUNS] = Run {
-            start: pc,
-            first: retired,
-        };
+        self.runs[self.count % RUNS] = Run { start: pc, first: retired };
         self.count += 1;
     }
 
@@ -177,9 +165,7 @@ mod tests {
         let mut pc = 0x4000_0000u64;
         let mut retired = 0u64;
         let mut history = PcHistory::new(pc, retired);
-        let mut naive = Naive {
-            pcs: VecDeque::new(),
-        };
+        let mut naive = Naive { pcs: VecDeque::new() };
         for _ in 0..20_000 {
             match rand() % 8 {
                 // Sequential instructions, the last of them wrapping the
@@ -201,11 +187,7 @@ mod tests {
                 }
                 // An interrupt or a host write of the PC: nothing retires.
                 _ => {
-                    pc = if rand() % 4 == 0 {
-                        u64::MAX - 7
-                    } else {
-                        rand() & !3
-                    };
+                    pc = if rand() % 4 == 0 { u64::MAX - 7 } else { rand() & !3 };
                     history.jump(pc, retired);
                 }
             }
@@ -230,9 +212,6 @@ mod tests {
         retired += 3;
         history.jump(0x5000, retired);
         rebuilt.jump(0x5000, retired);
-        assert_eq!(
-            rebuilt.recent(retired).collect::<Vec<_>>(),
-            history.recent(retired).collect::<Vec<_>>()
-        );
+        assert_eq!(rebuilt.recent(retired).collect::<Vec<_>>(), history.recent(retired).collect::<Vec<_>>());
     }
 }

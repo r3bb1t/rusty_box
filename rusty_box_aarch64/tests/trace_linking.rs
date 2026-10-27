@@ -17,8 +17,8 @@
 use rusty_box_aarch64::board::RAM_BASE;
 use rusty_box_aarch64::instrumentation::ExceptionTaken;
 use rusty_box_aarch64::{
-    Execution, Instrumentation, LentStorage, MachineBuilder, MemoryLoan, RamSize, Reg, RunBudget,
-    StopReason, VirtConfig, VirtMachine,
+    Execution, Instrumentation, LentStorage, MachineBuilder, MemoryLoan, RamSize, Reg, RunBudget, StopReason,
+    VirtConfig, VirtMachine,
 };
 
 const RAM_LEN: usize = 1 << 17;
@@ -83,11 +83,7 @@ impl Instrumentation for Quiet {
     const EXECUTION: Execution = Execution::Skippable;
 }
 
-fn machine<'r, I: Instrumentation>(
-    ram: &'r mut [u8],
-    observer: I,
-    program: &[(u64, u32)],
-) -> VirtMachine<LentStorage<'r>, I> {
+fn machine<'r, I: Instrumentation>(ram: &'r mut [u8], observer: I, program: &[(u64, u32)]) -> VirtMachine<LentStorage<'r>, I> {
     let mut m = MachineBuilder::new(VirtConfig::DEFAULT)
         .ram(RamSize::bytes(RAM_LEN as u64).expect("a valid size"))
         .bare()
@@ -121,10 +117,7 @@ struct Ended {
 /// count and the two must be the same machine whose observers heard the
 /// same. Until a step stops for a reason other than its budget, or
 /// [`GIVE_UP_AFTER`] ticks.
-fn run_both<I: Instrumentation + Default + PartialEq + core::fmt::Debug>(
-    program: &[(u64, u32)],
-    slice: u64,
-) -> Ended {
+fn run_both<I: Instrumentation + Default + PartialEq + core::fmt::Debug>(program: &[(u64, u32)], slice: u64) -> Ended {
     let mut ram_a = vec![0u8; RAM_LEN];
     let mut ram_b = vec![0u8; RAM_LEN];
     let mut a = machine(&mut ram_a, I::default(), program);
@@ -140,16 +133,8 @@ fn run_both<I: Instrumentation + Default + PartialEq + core::fmt::Debug>(
         }
         assert_eq!(stepped.stop, single, "slice {slice}, tick {}", a.ticks());
         assert_eq!(a.instructions(), b.instructions(), "slice {slice}");
-        assert!(
-            snapshot(&a) == snapshot(&b),
-            "slice {slice}: the machines differ at tick {}",
-            a.ticks()
-        );
-        assert_eq!(
-            a.instrumentation(),
-            b.instrumentation(),
-            "slice {slice}: the observers heard different runs"
-        );
+        assert!(snapshot(&a) == snapshot(&b), "slice {slice}: the machines differ at tick {}", a.ticks());
+        assert_eq!(a.instrumentation(), b.instrumentation(), "slice {slice}: the observers heard different runs");
         if stepped.stop != StopReason::BudgetExhausted {
             return Ended {
                 stop: stepped.stop,
@@ -158,10 +143,7 @@ fn run_both<I: Instrumentation + Default + PartialEq + core::fmt::Debug>(
                 x21: a.reg_read(Reg::X21),
             };
         }
-        assert!(
-            a.ticks() < GIVE_UP_AFTER,
-            "slice {slice}: the guest has not finished"
-        );
+        assert!(a.ticks() < GIVE_UP_AFTER, "slice {slice}: the guest has not finished");
     }
 }
 
@@ -279,16 +261,9 @@ const INTERRUPTED_LOOP: &[(u64, u32)] = &[
 #[test]
 fn a_linked_trace_rewritten_by_a_store_runs_as_rewritten() {
     for slice in SLICES {
-        for ended in [
-            run_both::<Heard>(REWRITTEN_LOOP, slice),
-            run_both::<Quiet>(REWRITTEN_LOOP, slice),
-        ] {
+        for ended in [run_both::<Heard>(REWRITTEN_LOOP, slice), run_both::<Quiet>(REWRITTEN_LOOP, slice)] {
             assert_eq!(ended.stop, StopReason::Halted, "slice {slice}");
-            assert_eq!(
-                ended.x0,
-                1000 + 2 * 1000,
-                "slice {slice}: the second pass ran the old add"
-            );
+            assert_eq!(ended.x0, 1000 + 2 * 1000, "slice {slice}: the second pass ran the old add");
         }
     }
 }
@@ -296,10 +271,7 @@ fn a_linked_trace_rewritten_by_a_store_runs_as_rewritten() {
 #[test]
 fn an_interrupt_due_inside_a_run_of_linked_traces_is_taken_where_it_is_due() {
     for slice in SLICES {
-        for ended in [
-            run_both::<Heard>(INTERRUPTED_LOOP, slice),
-            run_both::<Quiet>(INTERRUPTED_LOOP, slice),
-        ] {
+        for ended in [run_both::<Heard>(INTERRUPTED_LOOP, slice), run_both::<Quiet>(INTERRUPTED_LOOP, slice)] {
             assert_eq!(ended.stop, StopReason::PoweredOff, "slice {slice}");
             assert!(ended.x20 > 10, "slice {slice}: {} interrupts", ended.x20);
             assert_ne!(ended.x21, 0, "slice {slice}");

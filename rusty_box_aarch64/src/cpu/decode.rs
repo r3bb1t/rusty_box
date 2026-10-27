@@ -25,11 +25,7 @@ mod tests {
     /// absent feature.
     #[test]
     fn words_classify_by_their_encoding() {
-        assert_eq!(
-            classify(0x9100_1020),
-            Class::AddSubImmediate,
-            "add x0, x1, #4"
-        );
+        assert_eq!(classify(0x9100_1020), Class::AddSubImmediate, "add x0, x1, #4");
         assert_eq!(classify(0xD65F_03C0), Class::BranchRegister, "ret");
         assert_eq!(classify(0xD503_203F), Class::Hint, "YIELD");
         assert_eq!(classify(0xD503_233F), Class::Hint, "PACIASP is a hint");
@@ -71,10 +67,7 @@ mod tests {
     #[test]
     fn udf_is_permanently_undefined_whatever_its_immediate() {
         for word in [0x0000_0000, 0x0000_0001, 0x0000_0002, 0x0000_FFFF] {
-            assert!(
-                matches!(isa::decode(word), Some(Encoding::PermUndef(_))),
-                "{word:#010x}"
-            );
+            assert!(matches!(isa::decode(word), Some(Encoding::PermUndef(_))), "{word:#010x}");
             assert_eq!(classify(word), Class::Undefined, "{word:#010x}");
         }
         assert_eq!(isa::decode(0x0001_0000), None, "outside UDF: unallocated");

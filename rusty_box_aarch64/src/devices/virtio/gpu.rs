@@ -188,8 +188,7 @@ impl Rect {
 
     /// Whether this rectangle lies inside a `width` by `height` area.
     fn within(self, width: u32, height: u32) -> bool {
-        u64::from(self.x) + u64::from(self.width) <= u64::from(width)
-            && u64::from(self.y) + u64::from(self.height) <= u64::from(height)
+        u64::from(self.x) + u64::from(self.width) <= u64::from(width) && u64::from(self.y) + u64::from(self.height) <= u64::from(height)
     }
 
     fn is_empty(self) -> bool {
@@ -206,10 +205,8 @@ impl Rect {
         }
         let x0 = self.x.min(other.x);
         let y0 = self.y.min(other.y);
-        let x1 = (u64::from(self.x) + u64::from(self.width))
-            .max(u64::from(other.x) + u64::from(other.width));
-        let y1 = (u64::from(self.y) + u64::from(self.height))
-            .max(u64::from(other.y) + u64::from(other.height));
+        let x1 = (u64::from(self.x) + u64::from(self.width)).max(u64::from(other.x) + u64::from(other.width));
+        let y1 = (u64::from(self.y) + u64::from(self.height)).max(u64::from(other.y) + u64::from(other.height));
         Rect {
             x: x0,
             y: y0,
@@ -223,10 +220,8 @@ impl Rect {
     fn intersect(self, other: Rect) -> Rect {
         let x0 = self.x.max(other.x);
         let y0 = self.y.max(other.y);
-        let x1 = (u64::from(self.x) + u64::from(self.width))
-            .min(u64::from(other.x) + u64::from(other.width));
-        let y1 = (u64::from(self.y) + u64::from(self.height))
-            .min(u64::from(other.y) + u64::from(other.height));
+        let x1 = (u64::from(self.x) + u64::from(self.width)).min(u64::from(other.x) + u64::from(other.width));
+        let y1 = (u64::from(self.y) + u64::from(self.height)).min(u64::from(other.y) + u64::from(other.height));
         if x1 <= u64::from(x0) || y1 <= u64::from(y0) {
             return Rect::default();
         }
@@ -244,16 +239,7 @@ fn le32(b: &[u8], at: usize) -> u32 {
 }
 
 fn le64(b: &[u8], at: usize) -> u64 {
-    u64::from_le_bytes([
-        b[at],
-        b[at + 1],
-        b[at + 2],
-        b[at + 3],
-        b[at + 4],
-        b[at + 5],
-        b[at + 6],
-        b[at + 7],
-    ])
+    u64::from_le_bytes([b[at], b[at + 1], b[at + 2], b[at + 3], b[at + 4], b[at + 5], b[at + 6], b[at + 7]])
 }
 
 /// One guest buffer backing a resource (`struct virtio_gpu_mem_entry`).
@@ -460,10 +446,7 @@ impl Gpu {
 
     /// The size of the picture the guest shows, if it shows one.
     pub fn resolution(&self) -> Option<Resolution> {
-        (self.scanout.resource_id != 0).then_some(Resolution::new(
-            self.scanout.rect.width,
-            self.scanout.rect.height,
-        ))
+        (self.scanout.resource_id != 0).then_some(Resolution::new(self.scanout.rect.width, self.scanout.rect.height))
     }
 
     fn resource(&self, id: u32) -> Option<&Resource> {
@@ -478,9 +461,7 @@ impl Gpu {
     /// resource, if it exists (else `RESP_ERR_INVALID_RESOURCE_ID`) and has
     /// backing attached (else `RESP_ERR_UNSPEC`).
     fn backed_resource_index(&self, id: u32) -> Result<usize, Reply> {
-        let index = self
-            .resource_index(id)
-            .ok_or(Reply::Error(RESP_ERR_INVALID_RESOURCE_ID))?;
+        let index = self.resource_index(id).ok_or(Reply::Error(RESP_ERR_INVALID_RESOURCE_ID))?;
         if self.resources[index].backing.is_empty() {
             return Err(Reply::Error(RESP_ERR_UNSPEC));
         }
@@ -545,8 +526,7 @@ impl Gpu {
             if resource_id > 0 {
                 // virtio_gpu_update_cursor_data: only a 64 by 64 resource.
                 let res = self.resources.iter().find(|r| r.id == resource_id);
-                if let Some(res) = res.filter(|r| r.width == CURSOR_SIZE && r.height == CURSOR_SIZE)
-                {
+                if let Some(res) = res.filter(|r| r.width == CURSOR_SIZE && r.height == CURSOR_SIZE) {
                     let pixels = res.pixels.chunks_exact(4).map(|p| [p[0], p[1], p[2], p[3]]);
                     for (dst, src) in self.cursor.image.iter_mut().zip(pixels) {
                         *dst = src;
@@ -632,12 +612,7 @@ impl Gpu {
                 None => short,
             },
             CMD_TRANSFER_TO_HOST_2D => match Self::fill::<56>(vdev, chain) {
-                Some(b) => self.transfer(
-                    vdev.ram(),
-                    Rect::from_le(&b[24..40]),
-                    le64(&b, 40),
-                    le32(&b, 48),
-                ),
+                Some(b) => self.transfer(vdev.ram(), Rect::from_le(&b[24..40]), le64(&b, 40), le32(&b, 48)),
                 None => short,
             },
             CMD_SET_SCANOUT => match Self::fill::<48>(vdev, chain) {
@@ -691,10 +666,8 @@ impl Gpu {
         match self.output {
             Output::Enabled => {
                 // pmodes[0]: r = (0, 0, width, height), enabled = 1, flags = 0.
-                resp[HDR_LEN + 8..HDR_LEN + 12]
-                    .copy_from_slice(&self.preferred.width.to_le_bytes());
-                resp[HDR_LEN + 12..HDR_LEN + 16]
-                    .copy_from_slice(&self.preferred.height.to_le_bytes());
+                resp[HDR_LEN + 8..HDR_LEN + 12].copy_from_slice(&self.preferred.width.to_le_bytes());
+                resp[HDR_LEN + 12..HDR_LEN + 16].copy_from_slice(&self.preferred.height.to_le_bytes());
                 resp[HDR_LEN + 16..HDR_LEN + 20].copy_from_slice(&1u32.to_le_bytes());
             }
             Output::Disabled => {}
@@ -707,8 +680,7 @@ impl Gpu {
         let mut resp = [0u8; EDID_RESPONSE_LEN];
         resp[..4].copy_from_slice(&RESP_OK_EDID.to_le_bytes());
         resp[HDR_LEN..HDR_LEN + 4].copy_from_slice(&(edid::EDID_LEN as u32).to_le_bytes());
-        resp[HDR_LEN + 8..]
-            .copy_from_slice(&edid::generate(self.preferred.width, self.preferred.height));
+        resp[HDR_LEN + 8..].copy_from_slice(&edid::generate(self.preferred.width, self.preferred.height));
         Self::respond(vdev, chain, cmd, &mut resp);
     }
 
@@ -846,13 +818,7 @@ impl Gpu {
     /// QEMU `virtio_gpu_resource_attach_backing` and
     /// `virtio_gpu_create_mapping_iov`: the entries follow the command in
     /// the driver's buffers, and each must lie in guest RAM.
-    fn attach_backing(
-        &mut self,
-        vdev: &Vdev<'_, '_>,
-        chain: &Chain,
-        resource_id: u32,
-        entries: u32,
-    ) -> Reply {
+    fn attach_backing(&mut self, vdev: &Vdev<'_, '_>, chain: &Chain, resource_id: u32, entries: u32) -> Reply {
         let Some(index) = self.resource_index(resource_id) else {
             return Reply::Error(RESP_ERR_INVALID_RESOURCE_ID);
         };
@@ -937,8 +903,7 @@ impl Gpu {
         let cursor = self.cursor_rect();
         let origin = self.cursor_origin();
         self.frame.clear();
-        self.frame
-            .reserve(rect.width as usize * rect.height as usize * 4);
+        self.frame.reserve(rect.width as usize * rect.height as usize * 4);
         for row in rect.y..rect.y + rect.height {
             let src_row = (s.y + row) as usize * stride;
             for col in rect.x..rect.x + rect.width {
@@ -954,14 +919,12 @@ impl Gpu {
                 if in_cursor {
                     let image_row = i64::from(row) - origin.top;
                     let image_col = i64::from(col) - origin.left;
-                    let raw = self.cursor.image
-                        [(image_row * i64::from(CURSOR_SIZE) + image_col) as usize];
+                    let raw = self.cursor.image[(image_row * i64::from(CURSOR_SIZE) + image_col) as usize];
                     let c = Format::B8G8R8A8.rgba(raw);
                     // The cursor's colours are premultiplied by its alpha.
                     let a = u16::from(c[3]);
                     for i in 0..3 {
-                        rgba[i] =
-                            (u16::from(c[i]) + u16::from(rgba[i]) * (255 - a) / 255).min(255) as u8;
+                        rgba[i] = (u16::from(c[i]) + u16::from(rgba[i]) * (255 - a) / 255).min(255) as u8;
                     }
                 }
                 self.frame.extend_from_slice(&rgba);
@@ -999,24 +962,14 @@ impl Gpu {
             }
         }
         w.write_u32(self.scanout.resource_id)?;
-        for v in [
-            self.scanout.rect.x,
-            self.scanout.rect.y,
-            self.scanout.rect.width,
-            self.scanout.rect.height,
-        ] {
+        for v in [self.scanout.rect.x, self.scanout.rect.y, self.scanout.rect.width, self.scanout.rect.height] {
             w.write_u32(v)?;
         }
         w.write_u32(self.cursor.image.len() as u32)?;
         for p in &self.cursor.image {
             w.write_bytes(p)?;
         }
-        for v in [
-            self.cursor.hot_x,
-            self.cursor.hot_y,
-            self.cursor.x,
-            self.cursor.y,
-        ] {
+        for v in [self.cursor.hot_x, self.cursor.hot_y, self.cursor.x, self.cursor.y] {
             w.write_u32(v)?;
         }
         w.write_bool(self.cursor.shown)
@@ -1026,31 +979,19 @@ impl Gpu {
         let width = r.read_u32()?;
         let height = r.read_u32()?;
         self.preferred = Resolution::new(width, height);
-        self.output = if r.read_bool()? {
-            Output::Enabled
-        } else {
-            Output::Disabled
-        };
+        self.output = if r.read_bool()? { Output::Enabled } else { Output::Disabled };
         self.events_read = r.read_u32()?;
         let count = r.read_count(1 << 16)?;
         self.resources.clear();
         self.hostmem = 0;
         for _ in 0..count {
             let id = r.read_u32()?;
-            let format = Format::from_wire(r.read_u32()?).ok_or(SnapError::Invalid(
-                "virtio-gpu resource in an unknown format",
-            ))?;
+            let format = Format::from_wire(r.read_u32()?).ok_or(SnapError::Invalid("virtio-gpu resource in an unknown format"))?;
             let width = r.read_u32()?;
             let height = r.read_u32()?;
             let bytes = u64::from(width) * u64::from(height) * 4;
-            if id == 0
-                || self.resource(id).is_some()
-                || bytes == 0
-                || self.hostmem + bytes >= MAX_HOSTMEM
-            {
-                return Err(SnapError::Invalid(
-                    "virtio-gpu resource the device could not have made",
-                ));
+            if id == 0 || self.resource(id).is_some() || bytes == 0 || self.hostmem + bytes >= MAX_HOSTMEM {
+                return Err(SnapError::Invalid("virtio-gpu resource the device could not have made"));
             }
             let mut pixels = vec![0u8; bytes as usize];
             r.read_bytes(&mut pixels)?;
@@ -1083,9 +1024,7 @@ impl Gpu {
         };
         let cursor_pixels = r.read_count(CURSOR_PIXELS)?;
         if cursor_pixels != 0 && cursor_pixels != CURSOR_PIXELS {
-            return Err(SnapError::Invalid(
-                "virtio-gpu cursor that is neither 64 by 64 nor undefined",
-            ));
+            return Err(SnapError::Invalid("virtio-gpu cursor that is neither 64 by 64 nor undefined"));
         }
         self.cursor.image.clear();
         for _ in 0..cursor_pixels {
@@ -1104,9 +1043,7 @@ impl Gpu {
                 rect.width >= 16 && rect.height >= 16 && rect.within(res.width, res.height)
             });
         if !shown {
-            return Err(SnapError::Invalid(
-                "virtio-gpu scanout the device could not have set",
-            ));
+            return Err(SnapError::Invalid("virtio-gpu scanout the device could not have set"));
         }
         self.cmdq.clear();
         self.resized = true;

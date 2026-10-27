@@ -35,9 +35,7 @@ fn entry(d: &mut Driver, select: u8, subsel: u8) -> (u8, Vec<u8>) {
     d.write_width(CONFIG, AccessWidth::Byte, u64::from(select));
     d.write_width(CONFIG + 1, AccessWidth::Byte, u64::from(subsel));
     let size = d.read_width(CONFIG + 2, AccessWidth::Byte) as u8;
-    let payload = (0..u64::from(size))
-        .map(|i| d.read_width(CONFIG + 8 + i, AccessWidth::Byte) as u8)
-        .collect();
+    let payload = (0..u64::from(size)).map(|i| d.read_width(CONFIG + 8 + i, AccessWidth::Byte) as u8).collect();
     (size, payload)
 }
 
@@ -77,25 +75,14 @@ fn the_keyboard_configuration_is_qemus() {
     assert_eq!(size, 21, "the name counts its NUL, as QEMU's sizeof does");
     assert_eq!(name, b"QEMU Virtio Keyboard\0");
     // BUS_VIRTUAL, vendor 0x0627, product 1, version 1.
-    assert_eq!(
-        entry(&mut d, 0x03, 0),
-        (8, [6, 0, 0x27, 0x06, 1, 0, 1, 0].to_vec())
-    );
+    assert_eq!(entry(&mut d, 0x03, 0), (8, [6, 0, 0x27, 0x06, 1, 0, 1, 0].to_vec()));
     // EV_KEY: every code from KEY_ESC below KEY_REPLY (232).
     let (size, keys) = entry(&mut d, 0x11, 0x01);
     assert_eq!(size, 29);
     assert_eq!(keys[0], 0xFE);
     assert!(keys[1..].iter().all(|&b| b == 0xFF));
-    assert_eq!(
-        entry(&mut d, 0x11, 0x14),
-        (1, [0].to_vec()),
-        "EV_REP, no codes"
-    );
-    assert_eq!(
-        entry(&mut d, 0x11, 0x11),
-        (1, [0x07].to_vec()),
-        "EV_LED: NumLock, CapsLock, ScrollLock"
-    );
+    assert_eq!(entry(&mut d, 0x11, 0x14), (1, [0].to_vec()), "EV_REP, no codes");
+    assert_eq!(entry(&mut d, 0x11, 0x11), (1, [0x07].to_vec()), "EV_LED: NumLock, CapsLock, ScrollLock");
     assert_eq!(entry(&mut d, 0x11, 0x02), (0, Vec::new()), "no EV_REL");
     // The configuration is the header and the largest entry.
     assert_eq!(d.read_width(CONFIG + 37, AccessWidth::Byte), 0xFF);
@@ -104,43 +91,19 @@ fn the_keyboard_configuration_is_qemus() {
 #[test]
 fn the_tablet_configuration_is_qemus() {
     let mut d = device(InputKind::Tablet);
-    assert_eq!(
-        entry(&mut d, 0x01, 0),
-        (19, b"QEMU Virtio Tablet\0".to_vec())
-    );
-    assert_eq!(
-        entry(&mut d, 0x03, 0),
-        (8, [6, 0, 0x27, 0x06, 3, 0, 2, 0].to_vec()),
-        "product 3, version 2"
-    );
+    assert_eq!(entry(&mut d, 0x01, 0), (19, b"QEMU Virtio Tablet\0".to_vec()));
+    assert_eq!(entry(&mut d, 0x03, 0), (8, [6, 0, 0x27, 0x06, 3, 0, 2, 0].to_vec()), "product 3, version 2");
     // EV_KEY: keymap_button's codes, up to BTN_GEAR_UP (0x151).
     let (size, buttons) = entry(&mut d, 0x11, 0x01);
     assert_eq!(size, 43);
-    let set: Vec<u16> = (0..43 * 8)
-        .filter(|&c| buttons[usize::from(c / 8)] & (1 << (c % 8)) != 0)
-        .collect();
-    assert_eq!(
-        set,
-        [0x110, 0x111, 0x112, 0x113, 0x114, 0x14A, 0x150, 0x151]
-    );
-    assert_eq!(
-        entry(&mut d, 0x11, 0x02),
-        (2, [0, 0x01].to_vec()),
-        "EV_REL: REL_WHEEL"
-    );
-    assert_eq!(
-        entry(&mut d, 0x11, 0x03),
-        (1, [0x03].to_vec()),
-        "EV_ABS: ABS_X, ABS_Y"
-    );
+    let set: Vec<u16> = (0..43 * 8).filter(|&c| buttons[usize::from(c / 8)] & (1 << (c % 8)) != 0).collect();
+    assert_eq!(set, [0x110, 0x111, 0x112, 0x113, 0x114, 0x14A, 0x150, 0x151]);
+    assert_eq!(entry(&mut d, 0x11, 0x02), (2, [0, 0x01].to_vec()), "EV_REL: REL_WHEEL");
+    assert_eq!(entry(&mut d, 0x11, 0x03), (1, [0x03].to_vec()), "EV_ABS: ABS_X, ABS_Y");
     for axis in [0, 1] {
         let (size, info) = entry(&mut d, 0x12, axis);
         assert_eq!(size, 20);
-        assert_eq!(
-            info[..8],
-            [0, 0, 0, 0, 0xFF, 0x7F, 0, 0],
-            "min 0, max INPUT_EVENT_ABS_MAX"
-        );
+        assert_eq!(info[..8], [0, 0, 0, 0, 0xFF, 0x7F, 0, 0], "min 0, max INPUT_EVENT_ABS_MAX");
         assert!(info[8..].iter().all(|&b| b == 0));
     }
     assert_eq!(d.read_width(CONFIG + 50, AccessWidth::Byte), 0);
@@ -152,11 +115,7 @@ fn a_selector_with_no_entry_reads_all_zeros() {
     let mut d = device(InputKind::Keyboard);
     entry(&mut d, 0x11, 0x04);
     for off in 0..37 {
-        assert_eq!(
-            d.read_width(CONFIG + off, AccessWidth::Byte),
-            0,
-            "byte {off}, select and subsel included"
-        );
+        assert_eq!(d.read_width(CONFIG + off, AccessWidth::Byte), 0, "byte {off}, select and subsel included");
     }
 }
 
@@ -166,11 +125,7 @@ fn the_selection_survives_a_device_reset() {
     entry(&mut d, 0x01, 0);
     d.start(LINUX_FEATURES);
     d.write(STATUS, 0);
-    assert_eq!(
-        d.read_width(CONFIG + 2, AccessWidth::Byte),
-        21,
-        "QEMU's reset leaves cfg_select alone"
-    );
+    assert_eq!(d.read_width(CONFIG + 2, AccessWidth::Byte), 21, "QEMU's reset leaves cfg_select alone");
 }
 
 #[test]
@@ -187,16 +142,7 @@ fn keys_reach_the_guest_each_with_its_sync() {
     assert!(send(&mut d, |input, vdev| input.keys(vdev, &stroke)));
     assert_eq!(
         events(&mut d, &buffers),
-        [
-            (1, 42, 1),
-            SYN,
-            (1, 30, 1),
-            SYN,
-            (1, 30, 0),
-            SYN,
-            (1, 42, 0),
-            SYN
-        ]
+        [(1, 42, 1), SYN, (1, 30, 1), SYN, (1, 30, 0), SYN, (1, 42, 0), SYN]
     );
     assert_eq!(d.read(INTERRUPT_STATUS), 1);
     assert!(d.irq());
@@ -209,8 +155,7 @@ fn nothing_is_delivered_before_driver_ok() {
     d.setup_queue(0);
     d.setup_queue(1);
     let buffers = event_buffers(&mut d, 2);
-    assert!(!send(&mut d, |input, vdev| input
-        .keys(vdev, &[(Key::A, KeyAction::Press)])));
+    assert!(!send(&mut d, |input, vdev| input.keys(vdev, &[(Key::A, KeyAction::Press)])));
     assert!(events(&mut d, &buffers).is_empty());
 }
 
@@ -219,15 +164,13 @@ fn an_offer_without_a_buffer_for_every_event_is_refused_whole() {
     let mut d = device(InputKind::Keyboard);
     d.start(LINUX_FEATURES);
     let mut buffers = event_buffers(&mut d, 1);
-    assert!(!send(&mut d, |input, vdev| input
-        .keys(vdev, &[(Key::A, KeyAction::Press)])));
+    assert!(!send(&mut d, |input, vdev| input.keys(vdev, &[(Key::A, KeyAction::Press)])));
     assert!(events(&mut d, &buffers).is_empty());
     assert_eq!(d.avail_event(0), 0, "the device took no buffer");
     assert!(!d.irq());
 
     buffers.extend(event_buffers(&mut d, 1));
-    assert!(send(&mut d, |input, vdev| input
-        .keys(vdev, &[(Key::A, KeyAction::Press)])));
+    assert!(send(&mut d, |input, vdev| input.keys(vdev, &[(Key::A, KeyAction::Press)])));
     assert_eq!(events(&mut d, &buffers), [(1, 30, 1), SYN]);
 }
 
@@ -236,35 +179,17 @@ fn the_tablet_reports_positions_buttons_and_the_wheel() {
     let mut d = device(InputKind::Tablet);
     d.start(LINUX_FEATURES);
     let buffers = event_buffers(&mut d, 16);
-    assert!(send(&mut d, |input, vdev| input
-        .move_to(vdev, PointerPos::new(100, 200))));
+    assert!(send(&mut d, |input, vdev| input.move_to(vdev, PointerPos::new(100, 200))));
     assert_eq!(events(&mut d, &buffers), [(3, 0, 100), (3, 1, 200), SYN]);
-    assert!(send(&mut d, |input, vdev| input.button(
-        vdev,
-        PointerButton::Left,
-        KeyAction::Press
-    )));
-    assert!(send(&mut d, |input, vdev| input.button(
-        vdev,
-        PointerButton::Left,
-        KeyAction::Release
-    )));
-    assert_eq!(
-        events(&mut d, &buffers),
-        [(1, 0x110, 1), SYN, (1, 0x110, 0), SYN]
-    );
+    assert!(send(&mut d, |input, vdev| input.button(vdev, PointerButton::Left, KeyAction::Press)));
+    assert!(send(&mut d, |input, vdev| input.button(vdev, PointerButton::Left, KeyAction::Release)));
+    assert_eq!(events(&mut d, &buffers), [(1, 0x110, 1), SYN, (1, 0x110, 0), SYN]);
     // A detent is the wheel button pressed (a REL_WHEEL step) and released
     // (its BTN_GEAR key going up).
     assert!(send(&mut d, |input, vdev| input.wheel(vdev, WheelSteps(1))));
-    assert_eq!(
-        events(&mut d, &buffers),
-        [(2, 8, 1), SYN, (1, 0x151, 0), SYN]
-    );
+    assert_eq!(events(&mut d, &buffers), [(2, 8, 1), SYN, (1, 0x151, 0), SYN]);
     assert!(send(&mut d, |input, vdev| input.wheel(vdev, WheelSteps(-1))));
-    assert_eq!(
-        events(&mut d, &buffers),
-        [(2, 8, u32::MAX), SYN, (1, 0x150, 0), SYN]
-    );
+    assert_eq!(events(&mut d, &buffers), [(2, 8, u32::MAX), SYN, (1, 0x150, 0), SYN]);
 }
 
 /// A detent is four events, so a full event queue of 64 buffers takes a
@@ -276,8 +201,7 @@ fn a_wheel_turn_longer_than_the_queue_is_refused_whole() {
     d.start(LINUX_FEATURES);
     let buffers = event_buffers(&mut d, 64);
     assert!(!send(&mut d, |input, vdev| input.wheel(vdev, WheelSteps(17))));
-    assert!(!send(&mut d, |input, vdev| input
-        .wheel(vdev, WheelSteps(i32::MIN))));
+    assert!(!send(&mut d, |input, vdev| input.wheel(vdev, WheelSteps(i32::MIN))));
     assert!(events(&mut d, &buffers).is_empty());
     assert!(send(&mut d, |input, vdev| input.wheel(vdev, WheelSteps(-16))));
     assert_eq!(events(&mut d, &buffers).len(), 64);
@@ -288,20 +212,14 @@ fn each_device_takes_only_its_own_events() {
     let mut d = device(InputKind::Keyboard);
     d.start(LINUX_FEATURES);
     event_buffers(&mut d, 8);
-    assert!(!send(&mut d, |input, vdev| input
-        .move_to(vdev, PointerPos::new(1, 1))));
-    assert!(!send(&mut d, |input, vdev| input.button(
-        vdev,
-        PointerButton::Left,
-        KeyAction::Press
-    )));
+    assert!(!send(&mut d, |input, vdev| input.move_to(vdev, PointerPos::new(1, 1))));
+    assert!(!send(&mut d, |input, vdev| input.button(vdev, PointerButton::Left, KeyAction::Press)));
     assert!(!send(&mut d, |input, vdev| input.wheel(vdev, WheelSteps(1))));
 
     let mut d = device(InputKind::Tablet);
     d.start(LINUX_FEATURES);
     event_buffers(&mut d, 8);
-    assert!(!send(&mut d, |input, vdev| input
-        .keys(vdev, &[(Key::A, KeyAction::Press)])));
+    assert!(!send(&mut d, |input, vdev| input.keys(vdev, &[(Key::A, KeyAction::Press)])));
 }
 
 #[test]
@@ -327,11 +245,9 @@ fn a_reset_makes_the_device_inactive() {
     d.setup_queue(0);
     d.setup_queue(1);
     let buffers = event_buffers(&mut d, 2);
-    assert!(!send(&mut d, |input, vdev| input
-        .keys(vdev, &[(Key::A, KeyAction::Press)])));
+    assert!(!send(&mut d, |input, vdev| input.keys(vdev, &[(Key::A, KeyAction::Press)])));
     d.write(STATUS, ACKNOWLEDGE | DRIVER | FEATURES_OK | DRIVER_OK);
-    assert!(send(&mut d, |input, vdev| input
-        .keys(vdev, &[(Key::A, KeyAction::Press)])));
+    assert!(send(&mut d, |input, vdev| input.keys(vdev, &[(Key::A, KeyAction::Press)])));
     assert_eq!(events(&mut d, &buffers), [(1, 30, 1), SYN]);
 }
 
@@ -344,7 +260,6 @@ fn a_snapshot_keeps_the_device_active_and_its_selection() {
     let saved = d.save();
     let mut resumed = d.restored(Device::Input(Input::new(InputKind::Tablet)), &saved);
     assert_eq!(resumed.read_width(CONFIG + 2, AccessWidth::Byte), 20);
-    assert!(send(&mut resumed, |input, vdev| input
-        .move_to(vdev, PointerPos::new(7, 9))));
+    assert!(send(&mut resumed, |input, vdev| input.move_to(vdev, PointerPos::new(7, 9))));
     assert_eq!(events(&mut resumed, &buffers), [(3, 0, 7), (3, 1, 9), SYN]);
 }

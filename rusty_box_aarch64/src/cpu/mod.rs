@@ -152,10 +152,7 @@ impl Pstate {
     /// `NZCV` in its register layout (bits 31:28).
     #[inline]
     pub const fn nzcv(self) -> u64 {
-        ((self.n as u64) << 31)
-            | ((self.z as u64) << 30)
-            | ((self.c as u64) << 29)
-            | ((self.v as u64) << 28)
+        ((self.n as u64) << 31) | ((self.z as u64) << 30) | ((self.c as u64) << 29) | ((self.v as u64) << 28)
     }
 
     /// Set N, Z, C and V to `flags`.
@@ -180,10 +177,7 @@ impl Pstate {
     /// `DAIF` in its register layout (bits 9:6).
     #[inline]
     pub const fn daif(self) -> u64 {
-        ((self.d as u64) << 9)
-            | ((self.a as u64) << 8)
-            | ((self.i as u64) << 7)
-            | ((self.f as u64) << 6)
+        ((self.d as u64) << 9) | ((self.a as u64) << 8) | ((self.i as u64) << 7) | ((self.f as u64) << 6)
     }
 
     /// Set D, A, I and F from `DAIF` in its register layout (bits 9:6), as

@@ -24,8 +24,8 @@
 
 use rusty_box_aarch64::board::RAM_BASE;
 use rusty_box_aarch64::{
-    GuestStorage, Instrumentation, LentStorage, MachineBuilder, MemoryLoan, RamSize, Reg,
-    RunBudget, StopReason, SysReg, VReg, VirtConfig, VirtMachine,
+    GuestStorage, Instrumentation, LentStorage, MachineBuilder, MemoryLoan, RamSize, Reg, RunBudget, StopReason,
+    SysReg, VReg, VirtConfig, VirtMachine,
 };
 
 const RAM_LEN: usize = 4 << 20;
@@ -106,11 +106,9 @@ fn bare(ram: &mut [u8]) -> VirtMachine<LentStorage<'_>> {
 
 fn load<S: GuestStorage, I: Instrumentation>(m: &mut VirtMachine<S, I>, words: &[u32]) {
     for (i, word) in words.iter().enumerate() {
-        m.mem_write(RAM_BASE + 4 * i as u64, &word.to_le_bytes())
-            .expect("code is in RAM");
+        m.mem_write(RAM_BASE + 4 * i as u64, &word.to_le_bytes()).expect("code is in RAM");
     }
-    m.sysreg_write(SysReg::CPACR_EL1, 3 << 20)
-        .expect("CPACR_EL1 is writable");
+    m.sysreg_write(SysReg::CPACR_EL1, 3 << 20).expect("CPACR_EL1 is writable");
 }
 
 /// Run the one instruction at `RAM_BASE` and return what it reported:
@@ -120,11 +118,7 @@ fn fault<S: GuestStorage, I: Instrumentation>(m: &mut VirtMachine<S, I>) -> (u64
     assert_eq!(out.stop, StopReason::BudgetExhausted);
     let esr = m.sysreg_read(SysReg::ESR_EL1).expect("ESR_EL1");
     let far = m.sysreg_read(SysReg::FAR_EL1).expect("FAR_EL1");
-    assert_eq!(
-        esr >> 26,
-        EC_DATA_ABORT_SAME_EL,
-        "a data abort, ESR {esr:#x}"
-    );
+    assert_eq!(esr >> 26, EC_DATA_ABORT_SAME_EL, "a data abort, ESR {esr:#x}");
     (esr, far)
 }
 
@@ -181,13 +175,11 @@ fn map_test_pages<S: GuestStorage, I: Instrumentation>(m: &mut VirtMachine<S, I>
         (l3, 2, page(RAM_BASE + 0x4000, DEVICE | READ_ONLY)),
         (l3, 3, page(RAM_BASE + 0x6000, NORMAL)),
     ] {
-        m.mem_write(table + 8 * index, &desc.to_le_bytes())
-            .expect("tables are in RAM");
+        m.mem_write(table + 8 * index, &desc.to_le_bytes()).expect("tables are in RAM");
     }
     // Attribute 0 Normal write-back, attribute 1 Device-nGnRnE.
     m.sysreg_write(SysReg::MAIR_EL1, 0x00FF).expect("MAIR");
-    m.sysreg_write(SysReg::TCR_EL1, 25 | (1 << 23))
-        .expect("TCR");
+    m.sysreg_write(SysReg::TCR_EL1, 25 | (1 << 23)).expect("TCR");
     m.sysreg_write(SysReg::TTBR0_EL1, l1).expect("TTBR0");
     let sctlr = m.sysreg_read(SysReg::SCTLR_EL1).expect("SCTLR");
     m.sysreg_write(SysReg::SCTLR_EL1, sctlr | 1).expect("SCTLR");
@@ -262,11 +254,7 @@ fn a_misaligned_store_to_a_read_only_device_page_is_an_alignment_fault() {
     map_test_pages(&mut m);
     m.reg_write(Reg::X1, 0x8000_2001);
     let (esr, far) = fault(&mut m);
-    assert_eq!(
-        esr & 0x3F,
-        DFSC_ALIGNMENT,
-        "alignment before permission, ESR {esr:#x}"
-    );
+    assert_eq!(esr & 0x3F, DFSC_ALIGNMENT, "alignment before permission, ESR {esr:#x}");
     assert_eq!(far, 0x8000_2001);
 }
 
@@ -439,10 +427,7 @@ fn a_store_running_from_normal_memory_into_a_device_page_faults_where_the_device
     m.reg_write(Reg::X2, u64::MAX);
     let (esr, far) = fault(&mut m);
     assert_eq!(esr & 0x3F, DFSC_ALIGNMENT, "ESR {esr:#x}");
-    assert_eq!(
-        far, 0x8000_2000,
-        "the first byte that reaches the Device page"
-    );
+    assert_eq!(far, 0x8000_2000, "the first byte that reaches the Device page");
     assert_eq!(bytes_at(&m, RAM_BASE + 0x5FF0), FILL, "nothing is written");
 }
 
@@ -459,11 +444,7 @@ fn a_q_register_store_running_into_an_unmapped_page_writes_nothing() {
     assert_eq!(esr & 0x3F, DFSC_TRANSLATION_L3, "ESR {esr:#x}");
     assert_eq!(esr & WNR, WNR);
     assert_eq!(far, 0x8000_4000);
-    assert_eq!(
-        bytes_at(&m, RAM_BASE + 0x6FF0),
-        FILL,
-        "the first page is untouched"
-    );
+    assert_eq!(bytes_at(&m, RAM_BASE + 0x6FF0), FILL, "the first page is untouched");
 }
 
 // Pairs whose elements are aligned and the pair is not: words at 4 mod 8,

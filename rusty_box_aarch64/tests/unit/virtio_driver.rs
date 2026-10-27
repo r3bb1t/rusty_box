@@ -135,8 +135,7 @@ impl Driver {
 
     pub fn write_width(&mut self, off: u64, width: AccessWidth, value: u64) {
         let mut ram = GuestRam::new(&mut self.ram);
-        self.transport
-            .write(&mut ram, RegOffset::new(off), width, value);
+        self.transport.write(&mut ram, RegOffset::new(off), width, value);
     }
 
     pub fn write(&mut self, off: u64, value: u32) {
@@ -273,8 +272,7 @@ impl Driver {
         for (i, b) in buffers.iter().enumerate() {
             let index = (head + i as u16) % size;
             let last = i + 1 == buffers.len();
-            let flags =
-                if last { 0 } else { DESC_NEXT } | if b.device_writes { DESC_WRITE } else { 0 };
+            let flags = if last { 0 } else { DESC_NEXT } | if b.device_writes { DESC_WRITE } else { 0 };
             self.put_desc(q, index, b.addr, b.len, flags, (index + 1) % size);
         }
         self.queues[q].next_desc = (head + buffers.len() as u16) % size;
@@ -288,8 +286,7 @@ impl Driver {
         let table = self.alloc(16 * buffers.len() as u64);
         for (i, b) in buffers.iter().enumerate() {
             let last = i + 1 == buffers.len();
-            let flags =
-                if last { 0 } else { DESC_NEXT } | if b.device_writes { DESC_WRITE } else { 0 };
+            let flags = if last { 0 } else { DESC_NEXT } | if b.device_writes { DESC_WRITE } else { 0 };
             self.put_desc_at(table + 16 * i as u64, b.addr, b.len, flags, i as u16 + 1);
         }
         let size = self.queues[q].size;

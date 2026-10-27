@@ -241,13 +241,7 @@ sysregs! {
 
 impl SysReg {
     const fn encode(op0: u8, op1: u8, crn: u8, crm: u8, op2: u8) -> Self {
-        Self(
-            ((op0 as u16 & 3) << 14)
-                | ((op1 as u16 & 7) << 11)
-                | ((crn as u16 & 15) << 7)
-                | ((crm as u16 & 15) << 3)
-                | (op2 as u16 & 7),
-        )
+        Self(((op0 as u16 & 3) << 14) | ((op1 as u16 & 7) << 11) | ((crn as u16 & 15) << 7) | ((crm as u16 & 15) << 3) | (op2 as u16 & 7))
     }
 
     /// The register `S<op0>_<op1>_C<crn>_C<crm>_<op2>`, if the fields name

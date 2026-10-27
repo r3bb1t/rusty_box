@@ -126,13 +126,7 @@ impl Pl031 {
     /// A register write. Returns whether it re-armed the alarm, which moves
     /// the device's next deadline.
     #[must_use = "a re-armed alarm moves the board's next deadline"]
-    pub fn write(
-        &mut self,
-        offset: RegOffset,
-        _width: AccessWidth,
-        value: u64,
-        clock: VmClock,
-    ) -> bool {
+    pub fn write(&mut self, offset: RegOffset, _width: AccessWidth, value: u64, clock: VmClock) -> bool {
         let v = value as u32;
         match offset.get() {
             0x04 => {
@@ -172,12 +166,7 @@ mod tests {
     }
 
     fn write(rtc: &mut Pl031, offset: u64, value: u32, clock: VmClock) -> bool {
-        rtc.write(
-            RegOffset::new(offset),
-            AccessWidth::Word,
-            u64::from(value),
-            clock,
-        )
+        rtc.write(RegOffset::new(offset), AccessWidth::Word, u64::from(value), clock)
     }
 
     fn read(rtc: &mut Pl031, offset: u64, clock: VmClock) -> u64 {
@@ -190,10 +179,7 @@ mod tests {
     #[test]
     fn the_alarm_fires_when_the_counter_reaches_the_match_value() {
         let mut rtc = Pl031::new(100);
-        assert!(
-            write(&mut rtc, 0x04, 110, at_second(5)),
-            "writing the match value re-arms the alarm"
-        );
+        assert!(write(&mut rtc, 0x04, 110, at_second(5)), "writing the match value re-arms the alarm");
         assert_eq!(rtc.next_deadline(), Some(VmInstant::from_ticks(10 * HZ)));
 
         rtc.update(at_second(9));
@@ -219,10 +205,7 @@ mod tests {
         assert_eq!(read(&mut rtc, 0x14, at_second(7)), 1);
         assert_eq!(rtc.next_deadline(), None);
 
-        assert!(
-            write(&mut rtc, 0x08, 4, at_second(7)),
-            "loading the counter re-arms the alarm"
-        );
+        assert!(write(&mut rtc, 0x08, 4, at_second(7)), "loading the counter re-arms the alarm");
         assert_eq!(read(&mut rtc, 0x00, at_second(7)), 4);
         assert_eq!(rtc.next_deadline(), Some(VmInstant::from_ticks(10 * HZ)));
     }

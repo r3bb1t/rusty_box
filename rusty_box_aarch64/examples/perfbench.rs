@@ -59,8 +59,8 @@ use rusty_box_aarch64::board::{GIC_DIST_BASE, RAM_BASE};
 use rusty_box_aarch64::boot::{LinuxImage, SERIAL_CONSOLE_COMMAND_LINE};
 use rusty_box_aarch64::instrumentation::MemoryAccess;
 use rusty_box_aarch64::{
-    GuestStorage, Instrumentation, MachineBuilder, NoInstrumentation, RamSize, Reg, RunBudget,
-    StopReason, SysReg, VReg, VirtConfig, VirtMachine,
+    GuestStorage, Instrumentation, MachineBuilder, NoInstrumentation, RamSize, Reg, RunBudget, StopReason, SysReg,
+    VReg, VirtConfig, VirtMachine,
 };
 
 /// Where each loop's code is placed.
@@ -91,16 +91,8 @@ const POWER_OFF: [u32; 3] = [0xD280_0100, 0xF2B0_8000, 0xD400_0002];
 /// madd x5, x0, x1, x5; lsl x6, x5, #5; add w7, w7, w0; subs x9, x9, #1;
 /// b.ne loop` — ten instructions an iteration, `x9` iterations.
 const ALU: &[u32] = &[
-    0x8B01_0000,
-    0xCA00_0C21,
-    0xCB00_0042,
-    0xAA42_1C63,
-    0x9208_9C64,
-    0x9B01_1405,
-    0xD37B_E8A6,
-    0x0B00_00E7,
-    0xF100_0529,
-    0x54FF_FEE1,
+    0x8B01_0000, 0xCA00_0C21, 0xCB00_0042, 0xAA42_1C63, 0x9208_9C64, 0x9B01_1405, 0xD37B_E8A6, 0x0B00_00E7,
+    0xF100_0529, 0x54FF_FEE1,
 ];
 
 /// `outer: mov x0, x11; mov x1, x12; mov x2, #2048;
@@ -109,17 +101,8 @@ const ALU: &[u32] = &[
 /// b.ne inner; subs x10, x10, #1; b.ne outer` — `x10` copies of 64 KiB
 /// from `x11` to `x12`.
 const MEMCPY: &[u32] = &[
-    0xAA0B_03E0,
-    0xAA0C_03E1,
-    0xD281_0002,
-    0xA8C1_1003,
-    0xA8C1_1805,
-    0xA881_1023,
-    0xA881_1825,
-    0xF100_0442,
-    0x54FF_FF61,
-    0xF100_054A,
-    0x54FF_FEC1,
+    0xAA0B_03E0, 0xAA0C_03E1, 0xD281_0002, 0xA8C1_1003, 0xA8C1_1805, 0xA881_1023, 0xA881_1825, 0xF100_0442,
+    0x54FF_FF61, 0xF100_054A, 0x54FF_FEC1,
 ];
 
 /// `x1 = 0xcbf29ce484222325; x4 = 0x100000001b3;
@@ -129,36 +112,14 @@ const MEMCPY: &[u32] = &[
 /// b.ne outer` — FNV-1a over 64 KiB at `x11`, `x10` times, the hash at
 /// `x12`.
 const FNV: &[u32] = &[
-    0xD284_64A1,
-    0xF2B0_8441,
-    0xF2D3_9C81,
-    0xF2F9_7E41,
-    0xD280_3664,
-    0xF2C0_2004,
-    0xAA0B_03E0,
-    0xD2A0_0022,
-    0x3840_1403,
-    0xCA03_0021,
-    0x9B04_7C21,
-    0xF100_0442,
-    0x54FF_FF81,
-    0xF900_0181,
-    0xF100_054A,
-    0x54FF_FEE1,
+    0xD284_64A1, 0xF2B0_8441, 0xF2D3_9C81, 0xF2F9_7E41, 0xD280_3664, 0xF2C0_2004, 0xAA0B_03E0, 0xD2A0_0022,
+    0x3840_1403, 0xCA03_0021, 0x9B04_7C21, 0xF100_0442, 0x54FF_FF81, 0xF900_0181, 0xF100_054A, 0x54FF_FEE1,
 ];
 
 /// `loop: fmadd d0, d1, d2, d0; fmul d1, d1, d3; fadd d2, d2, d4;
 /// fmadd d5, d0, d3, d5; fsub d6, d6, d1; subs x9, x9, #1; b.ne loop` —
 /// seven instructions an iteration, `x9` iterations.
-const FP: &[u32] = &[
-    0x1F42_0020,
-    0x1E63_0821,
-    0x1E64_2842,
-    0x1F43_1405,
-    0x1E61_38C6,
-    0xF100_0529,
-    0x54FF_FF41,
-];
+const FP: &[u32] = &[0x1F42_0020, 0x1E63_0821, 0x1E64_2842, 0x1F43_1405, 0x1E61_38C6, 0xF100_0529, 0x54FF_FF41];
 
 /// Where `mmio` runs the `alu` chain: the GIC distributor's priority bytes
 /// of interrupts 32 onwards (`GICD_IPRIORITYR8`), which read back what is
@@ -263,13 +224,9 @@ fn state_hash<S: GuestStorage, I: Instrumentation>(machine: &VirtMachine<S, I>) 
 }
 
 /// The whole snapshot image: processor (TLB included), devices, RAM.
-fn snapshot_hash<S: GuestStorage, I: Instrumentation>(
-    machine: &VirtMachine<S, I>,
-) -> Result<u64, String> {
+fn snapshot_hash<S: GuestStorage, I: Instrumentation>(machine: &VirtMachine<S, I>) -> Result<u64, String> {
     let mut image = Vec::new();
-    machine
-        .save_snapshot(&mut image)
-        .map_err(|e| format!("snapshot: {e:?}"))?;
+    machine.save_snapshot(&mut image).map_err(|e| format!("snapshot: {e:?}"))?;
     let mut h = Fnv::new();
     h.eat(&image);
     Ok(h.0)
@@ -306,11 +263,7 @@ fn workloads() -> [Workload; 5] {
             code: ALU,
             maps_devices: false,
             start: |scale| Start {
-                x: vec![
-                    (Reg::X0, 0x0123_4567_89AB_CDEF),
-                    (Reg::X1, 0x0F1E_2D3C_4B5A_6978),
-                    (Reg::X9, 10_000_000 * scale),
-                ],
+                x: vec![(Reg::X0, 0x0123_4567_89AB_CDEF), (Reg::X1, 0x0F1E_2D3C_4B5A_6978), (Reg::X9, 10_000_000 * scale)],
                 d: vec![],
             },
         },
@@ -320,11 +273,7 @@ fn workloads() -> [Workload; 5] {
             code: MEMCPY,
             maps_devices: false,
             start: |scale| Start {
-                x: vec![
-                    (Reg::X10, 8_000 * scale),
-                    (Reg::X11, SOURCE),
-                    (Reg::X12, DESTINATION),
-                ],
+                x: vec![(Reg::X10, 8_000 * scale), (Reg::X11, SOURCE), (Reg::X12, DESTINATION)],
                 d: vec![],
             },
         },
@@ -334,11 +283,7 @@ fn workloads() -> [Workload; 5] {
             code: FNV,
             maps_devices: false,
             start: |scale| Start {
-                x: vec![
-                    (Reg::X10, 250 * scale),
-                    (Reg::X11, SOURCE),
-                    (Reg::X12, RESULT),
-                ],
+                x: vec![(Reg::X10, 250 * scale), (Reg::X11, SOURCE), (Reg::X12, RESULT)],
                 d: vec![],
             },
         },
@@ -375,11 +320,7 @@ fn workloads() -> [Workload; 5] {
 /// A bare machine with the loop's code at [`CODE`], RAM identity-mapped
 /// as Normal memory with the MMU on, floating point enabled, and the
 /// source block filled with a fixed pseudo-random pattern.
-fn loop_machine<I: Instrumentation>(
-    work: &Workload,
-    observer: I,
-    scale: u64,
-) -> Result<VirtMachine<rusty_box_aarch64::OwnedStorage, I>, String> {
+fn loop_machine<I: Instrumentation>(work: &Workload, observer: I, scale: u64) -> Result<VirtMachine<rusty_box_aarch64::OwnedStorage, I>, String> {
     let ram = RamSize::mib(LOOP_RAM_MIB).ok_or("loop RAM size")?;
     let mut machine = MachineBuilder::new(VirtConfig::default())
         .ram(ram)
@@ -388,17 +329,10 @@ fn loop_machine<I: Instrumentation>(
         .build()
         .map_err(|e| format!("build: {e}"))?;
     let mut code: Vec<u8> = Vec::new();
-    for word in work
-        .prologue
-        .iter()
-        .chain(work.code)
-        .chain(POWER_OFF.iter())
-    {
+    for word in work.prologue.iter().chain(work.code).chain(POWER_OFF.iter()) {
         code.extend_from_slice(&word.to_le_bytes());
     }
-    machine
-        .mem_write(CODE, &code)
-        .map_err(|e| format!("code: {e}"))?;
+    machine.mem_write(CODE, &code).map_err(|e| format!("code: {e}"))?;
     let mut pattern = Vec::with_capacity(BLOCK);
     let mut seed = 0x9E37_79B9_7F4A_7C15u64;
     for _ in 0..BLOCK / 8 {
@@ -407,9 +341,7 @@ fn loop_machine<I: Instrumentation>(
         seed ^= seed << 17;
         pattern.extend_from_slice(&seed.to_le_bytes());
     }
-    machine
-        .mem_write(SOURCE, &pattern)
-        .map_err(|e| format!("data: {e}"))?;
+    machine.mem_write(SOURCE, &pattern).map_err(|e| format!("data: {e}"))?;
     // One level-1 block descriptor: 1 GiB at RAM_BASE, AttrIndx 0
     // (MAIR byte 0xFF, Normal write-back), inner shareable, AF set, EL1
     // read/write.
@@ -434,9 +366,7 @@ fn loop_machine<I: Instrumentation>(
         (SysReg::CPACR_EL1, 3 << 20),
         (SysReg::SCTLR_EL1, 0x00C5_0838 | 1 | (1 << 2) | (1 << 12)),
     ] {
-        machine
-            .sysreg_write(reg, value)
-            .map_err(|e| format!("{reg:?}: {e}"))?;
+        machine.sysreg_write(reg, value).map_err(|e| format!("{reg:?}: {e}"))?;
     }
     let start = (work.start)(scale);
     for (reg, value) in start.x {
@@ -450,11 +380,7 @@ fn loop_machine<I: Instrumentation>(
     Ok(machine)
 }
 
-fn run_loop<I: Instrumentation>(
-    work: &Workload,
-    observer: I,
-    scale: u64,
-) -> Result<Measured, String> {
+fn run_loop<I: Instrumentation>(work: &Workload, observer: I, scale: u64) -> Result<Measured, String> {
     let mut machine = loop_machine(work, observer, scale)?;
     let started = Instant::now();
     let outcome = machine.step(RunBudget::Instructions(u64::MAX));
@@ -470,14 +396,8 @@ fn run_loop<I: Instrumentation>(
 
 /// A boot image set, read from the environment.
 enum Boot {
-    Edk2 {
-        code: Vec<u8>,
-        vars: Option<Vec<u8>>,
-    },
-    Alpine {
-        kernel: Vec<u8>,
-        initrd: Option<Vec<u8>>,
-    },
+    Edk2 { code: Vec<u8>, vars: Option<Vec<u8>> },
+    Alpine { kernel: Vec<u8>, initrd: Option<Vec<u8>> },
 }
 
 impl Boot {
@@ -508,9 +428,7 @@ impl Boot {
             }
             Self::Alpine { kernel, initrd } => {
                 let image = LinuxImage::parse(kernel).map_err(|e| format!("kernel: {e}"))?;
-                let mut b = builder
-                    .linux(image)
-                    .command_line(SERIAL_CONSOLE_COMMAND_LINE);
+                let mut b = builder.linux(image).command_line(SERIAL_CONSOLE_COMMAND_LINE);
                 if let Some(initrd) = initrd {
                     b = b.initrd(initrd);
                 }
@@ -522,9 +440,7 @@ impl Boot {
 
 fn read(var: &str) -> Result<Option<Vec<u8>>, String> {
     match std::env::var_os(var) {
-        Some(path) => std::fs::read(&path)
-            .map(Some)
-            .map_err(|e| format!("{var}={}: {e}", path.to_string_lossy())),
+        Some(path) => std::fs::read(&path).map(Some).map_err(|e| format!("{var}={}: {e}", path.to_string_lossy())),
         None => Ok(None),
     }
 }
@@ -569,10 +485,7 @@ fn run_boot(boot: &Boot) -> Result<Measured, String> {
     let seconds = started.elapsed().as_secs_f64();
     let reached = window.windows(prompt.len()).any(|w| w == prompt);
     if !reached {
-        return Err(format!(
-            "{} stopped ({stop:?}) before its prompt",
-            boot.name()
-        ));
+        return Err(format!("{} stopped ({stop:?}) before its prompt", boot.name()));
     }
     Ok(Measured {
         instructions: machine.instructions(),
@@ -593,12 +506,7 @@ fn hash_boot(boot: &Boot, counts: &[u64]) -> Result<(), String> {
                 uart.take_output().for_each(drop);
             }
             if outcome.is_terminal() {
-                return Err(format!(
-                    "{} stopped ({:?}) at {} instructions",
-                    boot.name(),
-                    outcome.stop,
-                    machine.instructions()
-                ));
+                return Err(format!("{} stopped ({:?}) at {} instructions", boot.name(), outcome.stop, machine.instructions()));
             }
         }
         println!(
@@ -632,14 +540,9 @@ fn env_u64(var: &str, default: u64) -> Result<u64, String> {
 }
 
 fn bench() -> Result<(), String> {
-    let selected: Option<Vec<String>> = std::env::var("PERFBENCH_WORKLOADS")
-        .ok()
-        .map(|s| s.split(',').map(str::to_owned).collect());
-    let wants = |name: &str| {
-        selected
-            .as_ref()
-            .is_none_or(|list| list.iter().any(|s| s == name))
-    };
+    let selected: Option<Vec<String>> =
+        std::env::var("PERFBENCH_WORKLOADS").ok().map(|s| s.split(',').map(str::to_owned).collect());
+    let wants = |name: &str| selected.as_ref().is_none_or(|list| list.iter().any(|s| s == name));
     let hooks = std::env::var("PERFBENCH_HOOKS").unwrap_or_else(|_| String::from("both"));
     let (plain, hooked) = match hooks.as_str() {
         "plain" => (true, false),
@@ -655,11 +558,7 @@ fn bench() -> Result<(), String> {
     let hash_at: Option<Vec<u64>> = match std::env::var("PERFBENCH_HASH_AT") {
         Ok(text) => Some(
             text.split(',')
-                .map(|n| {
-                    n.trim()
-                        .parse::<u64>()
-                        .map_err(|e| format!("PERFBENCH_HASH_AT: {e}"))
-                })
+                .map(|n| n.trim().parse::<u64>().map_err(|e| format!("PERFBENCH_HASH_AT: {e}")))
                 .collect::<Result<_, _>>()?,
         ),
         Err(_) => None,
@@ -691,9 +590,7 @@ fn bench() -> Result<(), String> {
 
 fn main() -> ExitCode {
     // A machine is built and moved by value; see examples/common.
-    let thread = std::thread::Builder::new()
-        .stack_size(16 << 20)
-        .spawn(bench);
+    let thread = std::thread::Builder::new().stack_size(16 << 20).spawn(bench);
     match thread.map(std::thread::JoinHandle::join) {
         Ok(Ok(Ok(()))) => ExitCode::SUCCESS,
         Ok(Ok(Err(e))) => {

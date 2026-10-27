@@ -81,9 +81,10 @@ pub(crate) fn f64_div(a: Float64, b: Float64, status: &mut SoftFloatStatus) -> F
     let recip32 = approx_recip32_1((sig_b >> 32) as u32).wrapping_sub(2);
     let sig32_z = ((((sig_a >> 32) as u32 as u64).wrapping_mul(recip32 as u64)) >> 32) as u32;
     let mut double_term = sig32_z << 1;
-    let mut rem =
-        (sig_a.wrapping_sub((double_term as u64).wrapping_mul((sig_b >> 32) as u32 as u64)) << 28)
-            .wrapping_sub((double_term as u64).wrapping_mul(((sig_b as u32) >> 4) as u64));
+    let mut rem = (sig_a
+        .wrapping_sub((double_term as u64).wrapping_mul((sig_b >> 32) as u32 as u64))
+        << 28)
+        .wrapping_sub((double_term as u64).wrapping_mul(((sig_b as u32) >> 4) as u64));
     let mut q = (((rem >> 32) as u32 as u64).wrapping_mul(recip32 as u64) >> 32) as u32;
     q = q.wrapping_add(4);
     let mut sig_z = ((sig32_z as u64) << 32).wrapping_add((q as u64) << 4);
@@ -92,7 +93,8 @@ pub(crate) fn f64_div(a: Float64, b: Float64, status: &mut SoftFloatStatus) -> F
         q &= !7;
         sig_z &= !0x7Fu64;
         double_term = q << 1;
-        rem = (rem.wrapping_sub((double_term as u64).wrapping_mul((sig_b >> 32) as u32 as u64))
+        rem = (rem
+            .wrapping_sub((double_term as u64).wrapping_mul((sig_b >> 32) as u32 as u64))
             << 28)
             .wrapping_sub((double_term as u64).wrapping_mul(((sig_b as u32) >> 4) as u64));
         if (rem & 0x8000_0000_0000_0000) != 0 {

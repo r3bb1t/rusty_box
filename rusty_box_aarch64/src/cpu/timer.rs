@@ -70,11 +70,7 @@ pub(crate) fn event_stream_fired(cntkctl: u64, from: u64, to: u64) -> bool {
     let period = 1u128 << (n + 1);
     // Bit n rises at the counts `2^n` past a multiple of `2^(n+1)`, and
     // falls at the multiples themselves.
-    let edge = if cntkctl & EVNTDIR == 0 {
-        1u128 << n
-    } else {
-        0
-    };
+    let edge = if cntkctl & EVNTDIR == 0 { 1u128 << n } else { 0 };
     let from = u128::from(from);
     let mut first = from - from % period + edge;
     if first <= from {
@@ -86,8 +82,7 @@ pub(crate) fn event_stream_fired(cntkctl: u64, from: u64, to: u64) -> bool {
 impl Cpu {
     /// Whether the Event Register is set.
     pub(crate) fn event_register_set(&self) -> bool {
-        self.event.set
-            || event_stream_fired(self.sys.cntkctl_el1, self.event.stream_from, self.counter())
+        self.event.set || event_stream_fired(self.sys.cntkctl_el1, self.event.stream_from, self.counter())
     }
 
     /// `SendEventLocal`: set the Event Register.
@@ -115,8 +110,7 @@ impl Cpu {
     /// The system counter at the tick `icount`: non-decreasing in `icount`.
     #[inline]
     pub(crate) fn counter_at(&self, icount: u64) -> u64 {
-        let value =
-            u128::from(icount) * u128::from(self.counter_hz.get()) / u128::from(self.ips.get());
+        let value = u128::from(icount) * u128::from(self.counter_hz.get()) / u128::from(self.ips.get());
         u64::try_from(value).unwrap_or(u64::MAX)
     }
 
@@ -143,11 +137,7 @@ impl Cpu {
     /// `CNTx_CTL_EL0` as read: `ISTATUS` reports the condition, whatever
     /// `IMASK` says.
     pub(crate) fn timer_ctl_read(&self, ctl: u64, cval: u64) -> u64 {
-        let status = if self.condition_met(ctl, cval) {
-            CTL_ISTATUS
-        } else {
-            0
-        };
+        let status = if self.condition_met(ctl, cval) { CTL_ISTATUS } else { 0 };
         (ctl & (CTL_ENABLE | CTL_IMASK)) | status
     }
 
@@ -160,8 +150,7 @@ impl Cpu {
     /// The `CVAL` a write of `value` to `CNTx_TVAL_EL0` sets: the count plus
     /// the low word of `value`, sign-extended.
     pub(crate) fn timer_cval_from_tval(&self, value: u64) -> u64 {
-        self.counter()
-            .wrapping_add(value as u32 as i32 as i64 as u64)
+        self.counter().wrapping_add(value as u32 as i32 as i64 as u64)
     }
 
     /// Both timer outputs now.
@@ -237,10 +226,7 @@ mod tests {
         c.sys.cntv_cval_el0 = 5;
         assert_eq!(c.next_timer_deadline(), None);
         c.icount = 5;
-        assert_eq!(
-            c.timer_ctl_read(c.sys.cntv_ctl_el0, 5) & CTL_ISTATUS,
-            CTL_ISTATUS
-        );
+        assert_eq!(c.timer_ctl_read(c.sys.cntv_ctl_el0, 5) & CTL_ISTATUS, CTL_ISTATUS);
         assert!(!c.timer_lines().virtual_);
     }
 
@@ -258,18 +244,11 @@ mod tests {
         assert!(event_stream_fired(falling, 7, 8));
         assert!(!event_stream_fired(falling, 8, 15));
         assert!(event_stream_fired(falling, 8, 1 << 40));
-        assert!(
-            !event_stream_fired(rising & !EVNTEN, 0, 1 << 40),
-            "EVNTEN clear sends nothing"
-        );
+        assert!(!event_stream_fired(rising & !EVNTEN, 0, 1 << 40), "EVNTEN clear sends nothing");
         assert!(!event_stream_fired(rising, 12, 12), "no count passed");
         // EVNTI 15, from near the top of the counter.
         let top = EVNTEN | (15 << EVNTI_SHIFT);
-        assert!(event_stream_fired(
-            top,
-            u64::MAX - (1 << 16),
-            u64::MAX - (1 << 15) + 1
-        ));
+        assert!(event_stream_fired(top, u64::MAX - (1 << 16), u64::MAX - (1 << 15) + 1));
     }
 
     /// WFE consumes the register, which the stream sets again only at its

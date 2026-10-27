@@ -115,12 +115,8 @@ impl AccessWidth {
 pub(crate) fn le_value(bytes: &[u8]) -> u64 {
     match bytes.len() {
         1 => u64::from(bytes[0]),
-        2 => bytes
-            .try_into()
-            .map_or(0, |b| u64::from(u16::from_le_bytes(b))),
-        4 => bytes
-            .try_into()
-            .map_or(0, |b| u64::from(u32::from_le_bytes(b))),
+        2 => bytes.try_into().map_or(0, |b| u64::from(u16::from_le_bytes(b))),
+        4 => bytes.try_into().map_or(0, |b| u64::from(u32::from_le_bytes(b))),
         _ => bytes.try_into().map_or(0, u64::from_le_bytes),
     }
 }
@@ -177,14 +173,8 @@ impl PhysSpan {
     /// end of the address space.
     #[inline]
     pub(crate) fn new(start: PhysAddr, len: u64) -> Option<Self> {
-        let end = start
-            .get()
-            .checked_add(len)
-            .filter(|&end| end > start.get())?;
-        Some(Self {
-            start,
-            end: PhysAddr::new(end),
-        })
+        let end = start.get().checked_add(len).filter(|&end| end > start.get())?;
+        Some(Self { start, end: PhysAddr::new(end) })
     }
 
     /// Its length in bytes.
@@ -305,8 +295,7 @@ pub enum FetchSource {
 /// accesses only) overrides them.
 pub trait PhysBus {
     /// Read `width` bytes at `addr`, little-endian, zero-extended to 64 bits.
-    fn read(&mut self, addr: PhysAddr, width: AccessWidth, clock: VmClock)
-        -> Result<u64, BusFault>;
+    fn read(&mut self, addr: PhysAddr, width: AccessWidth, clock: VmClock) -> Result<u64, BusFault>;
 
     /// Write the low `width` bytes of `value` at `addr`, little-endian.
     fn write(
@@ -320,8 +309,7 @@ pub trait PhysBus {
     /// Fetch the instruction word at `addr`.
     #[inline]
     fn fetch(&mut self, addr: PhysAddr, clock: VmClock) -> Result<u32, BusFault> {
-        self.read(addr, AccessWidth::Word, clock)
-            .map(|word| word as u32)
+        self.read(addr, AccessWidth::Word, clock).map(|word| word as u32)
     }
 
     /// Read the translation table descriptor at `addr`.
