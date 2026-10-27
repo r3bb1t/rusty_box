@@ -2,6 +2,7 @@
 //! console, which outlives each of its runs; and what only one running VM
 //! may have at a time, held for a power-on's runs and given back after them.
 
+use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -13,13 +14,15 @@ use crate::app::{status_snapshot, ShellStatus, VmOrigin};
 use crate::config::Engine;
 use crate::debugger::control::{DumpOutcome, DumpRequest, RunControl, RunPhase};
 
-/// What only one running VM may have at a time.
+/// What one running VM at a time may have, or, for a disk, several VMs that
+/// only read it.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum Exclusive {
     /// The Windows Hypervisor Platform: a process holds one partition at a
     /// time (rusty_box_whp `a_process_holds_one_partition_at_a_time`).
     Hypervisor,
-    /// A hard-disk image, by its canonical path: two writers would corrupt it.
+    /// A hard-disk image, by its canonical path: two writers would corrupt
+    /// it, and a reader would see it change under it.
     Disk(PathBuf),
 }
 
@@ -32,22 +35,85 @@ pub(crate) struct HeldBy {
 /// Which VM holds what. Shared by the shell, which takes, and the run
 /// threads, which give back.
 #[derive(Clone, Default)]
-pub(crate) struct Holdings(Arc<Mutex<HashMap<Exclusive, HeldBy>>>);
+pub(crate) struct Holdings(Arc<Mutex<Held>>);
+
+#[derive(Default)]
+struct Held {
+    holders: HashMap<Exclusive, Holders>,
+    /// The number the next hold is known by.
+    next: u64,
+}
+
+/// Who holds one thing.
+enum Holders {
+    /// One VM, beside which no other may hold it.
+    Alone(Holder),
+    /// The VMs that only read it, in the order they took it. The list goes
+    /// with its last reader, so it is never empty.
+    Readers(Vec<Holder>),
+}
+
+/// One hold, by the number its [`Hold`] gives it back by.
+struct Holder {
+    hold: u64,
+    by: HeldBy,
+}
+
+/// How a hold shares what it takes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Claim {
+    Alone,
+    /// Beside other readers and no writer: QEMU's image locking, where a
+    /// read-only drive shares `BLK_PERM_CONSISTENT_READ` and refuses
+    /// `BLK_PERM_WRITE` (hw/block/block.c `blkconf_apply_backend_options`).
+    Reading,
+}
 
 impl Holdings {
-    /// Takes `what` for the VM named `by`, or says who has it. A lock a
-    /// panicking thread poisoned still holds a whole map, since every
-    /// change to it is one insert or one remove, so it is used as it is.
+    /// Takes `what` for the VM named `by` alone, or says who has it.
     pub(crate) fn take(&self, what: Exclusive, by: HeldBy) -> Result<Hold, HeldBy> {
+        self.claim(what, by, Claim::Alone)
+    }
+
+    /// Takes `what` for the VM named `by`, which only reads it, beside the
+    /// other VMs that only read it; or says which VM holds it alone.
+    pub(crate) fn share(&self, what: Exclusive, by: HeldBy) -> Result<Hold, HeldBy> {
+        self.claim(what, by, Claim::Reading)
+    }
+
+    /// A lock a panicking thread poisoned still holds a whole map, since
+    /// every change to it is made whole under the lock, so it is used as it
+    /// is. A refusal names the VM that holds `what` alone, or, to a VM that
+    /// would hold it alone, the first of its readers.
+    fn claim(&self, what: Exclusive, by: HeldBy, claim: Claim) -> Result<Hold, HeldBy> {
         let mut held = self.0.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(holder) = held.get(&what) {
-            return Err(holder.clone());
+        let hold = held.next;
+        held.next = hold.wrapping_add(1);
+        let holder = Holder { hold, by };
+        match (held.holders.entry(what.clone()), claim) {
+            (Entry::Vacant(free), Claim::Alone) => {
+                free.insert(Holders::Alone(holder));
+            }
+            (Entry::Vacant(free), Claim::Reading) => {
+                free.insert(Holders::Readers(vec![holder]));
+            }
+            (Entry::Occupied(taken), claim) => {
+                let holders = taken.into_mut();
+                match (&mut *holders, claim) {
+                    (Holders::Alone(owner), Claim::Alone | Claim::Reading) => return Err(owner.by.clone()),
+                    (Holders::Readers(readers), Claim::Reading) => readers.push(holder),
+                    (Holders::Readers(readers), Claim::Alone) => match readers.first() {
+                        Some(reader) => return Err(reader.by.clone()),
+                        // A list with no reader holds nothing.
+                        None => *holders = Holders::Alone(holder),
+                    },
+                }
+            }
         }
-        // `what` was free a line ago, under the same lock: nothing is replaced.
-        drop(held.insert(what.clone(), by));
         Ok(Hold {
             holdings: self.clone(),
             what,
+            hold,
         })
     }
 }
@@ -56,6 +122,7 @@ impl Holdings {
 pub(crate) struct Hold {
     holdings: Holdings,
     what: Exclusive,
+    hold: u64,
 }
 
 impl Drop for Hold {
@@ -65,7 +132,17 @@ impl Drop for Hold {
             .0
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        drop(held.remove(&self.what));
+        let gone = match held.holders.get_mut(&self.what) {
+            None => return,
+            Some(Holders::Alone(owner)) => owner.hold == self.hold,
+            Some(Holders::Readers(readers)) => {
+                readers.retain(|reader| reader.hold != self.hold);
+                readers.is_empty()
+            }
+        };
+        if gone {
+            drop(held.holders.remove(&self.what));
+        }
     }
 }
 
@@ -445,6 +522,38 @@ mod tests {
                 AliveChange::Stopped,
             ]
         );
+    }
+
+    /// VMs that only read a disk hold it together; one that writes it holds
+    /// it alone, refused while any reader has it and refusing them while it
+    /// does. Each hold gives back only its own share.
+    #[test]
+    fn readers_share_a_disk_that_a_writer_holds_alone() {
+        let holdings = Holdings::default();
+        let disk = || Exclusive::Disk(PathBuf::from("base.img"));
+        let vm = |name: &str| HeldBy {
+            name: name.to_owned(),
+        };
+
+        let first = holdings.share(disk(), vm("First reader")).expect("free");
+        let second = holdings.share(disk(), vm("Second reader")).expect("readers share");
+        assert_eq!(
+            holdings.take(disk(), vm("Writer")).err(),
+            Some(vm("First reader")),
+            "a writer is refused, naming the first reader"
+        );
+        drop(first);
+        assert_eq!(
+            holdings.take(disk(), vm("Writer")).err(),
+            Some(vm("Second reader")),
+            "one reader's going leaves the other's hold"
+        );
+        drop(second);
+
+        let writer = holdings.take(disk(), vm("Writer")).expect("free once every reader is gone");
+        assert_eq!(holdings.share(disk(), vm("Reader")).err(), Some(vm("Writer")));
+        drop(writer);
+        assert!(holdings.share(disk(), vm("Reader")).is_ok());
     }
 
     #[test]

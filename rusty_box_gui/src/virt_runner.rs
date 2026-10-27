@@ -21,13 +21,13 @@ use rusty_box_aarch64::boot::LinuxImage;
 #[cfg(feature = "gui-egui")]
 use rusty_box_aarch64::{Key, KeyAction, PointerInput, Refreshed};
 use rusty_box_aarch64::{
-    BatchOutcome, ClockHz, KeyboardInput, MachineBuilder, OwnedStorage, RamSize, Resolution, RunBudget,
+    BatchOutcome, ClockHz, Disk, KeyboardInput, MachineBuilder, OwnedStorage, RamSize, Resolution, RunBudget,
     StopReason, VirtConfig, VirtMachine,
 };
 #[cfg(feature = "gui-egui")]
 use rusty_box::gui::{host_input::AbsolutePointerEvent, shared_display::SharedDisplay};
 
-use crate::config::{ArmBoot, ArmVirtConfig};
+use crate::config::{ArmBoot, ArmVirtConfig, DiskAccess, VirtDisk};
 #[cfg(feature = "gui-egui")]
 use crate::debugger::{
     control::{AfterRun, BetweenRuns, RunControl, Task},
@@ -191,6 +191,9 @@ fn build(config: &ArmVirtConfig, files: &BootFiles) -> Result<Virt, RunError> {
     if config.tablet {
         builder = builder.virtio_tablet();
     }
+    if let Some(disk) = &config.disk {
+        builder = builder.virtio_disk(open_disk(disk)?);
+    }
     let built = match &files.boot {
         BootImage::Firmware { code, vars } => {
             let mut builder = builder.firmware(code);
@@ -221,6 +224,54 @@ fn build(config: &ArmVirtConfig, files: &BootFiles) -> Result<Virt, RunError> {
         }
     };
     built.map_err(|source| RunError::VirtBuild { source })
+}
+
+/// The disk `disk` names, opened as QEMU opens a raw image (block/file-posix.c
+/// `raw_open_common`): for reading and writing, or, when the guest may not
+/// write it (`readonly=on`), for reading alone, so a file the host lets this
+/// process only read can still be one.
+fn open_disk(disk: &VirtDisk) -> Result<Disk, RunError> {
+    let opened = std::fs::OpenOptions::new()
+        .read(true)
+        .write(!disk.access.is_read_only())
+        .open(&disk.path)
+        .and_then(Disk::file)
+        .map_err(|source| RunError::MediaAttach {
+            kind: "disk",
+            path: disk.path.clone(),
+            source,
+        })?;
+    Ok(match disk.access {
+        DiskAccess::ReadWrite => opened,
+        DiskAccess::ReadOnly => opened.read_only(),
+    })
+}
+
+/// Logs the host error the guest's disk last met, which the guest was told
+/// of as an I/O error (QEMU's `BLOCK_IO_ERROR` event, `rerror=report`).
+fn report_disk_error(machine: &mut Virt, config: &ArmVirtConfig) {
+    let (Some(disk), Some(named)) = (machine.disk_mut(), &config.disk) else {
+        return;
+    };
+    if let Some(error) = disk.take_io_error() {
+        tracing::warn!(
+            "the guest was told of an I/O error on its disk {}: {error}",
+            named.path.display()
+        );
+    }
+}
+
+/// Makes what the guest wrote to its disk durable, as QEMU does when it
+/// closes a drive (block.c `bdrv_close` flushing it).
+fn close_disk(machine: &mut Virt, config: &ArmVirtConfig) -> Result<(), RunError> {
+    report_disk_error(machine, config);
+    let (Some(disk), Some(named)) = (machine.disk_mut(), &config.disk) else {
+        return Ok(());
+    };
+    disk.flush().map_err(|source| RunError::DiskFlush {
+        path: named.path.clone(),
+        source,
+    })
 }
 
 /// What the RTC reads at power-on: the host's time, as QEMU's PL031 does
@@ -333,18 +384,23 @@ pub(crate) fn run_on_console(config: ArmVirtConfig, console: Console) -> Result<
         Console::Headless => None,
         Console::Terminal => Some(RawTerminal::enter()),
     };
-    let ran = drive_on_console(&mut machine, config.ips, terminal.as_mut());
+    let ran = drive_on_console(&mut machine, &config, terminal.as_mut());
     drop(terminal);
-    finish(&files, &machine, ran)
+    finish(&config, &files, &mut machine, ran)
 }
 
 /// [`run_on_console`]'s loop, until the guest switches the board off, the
 /// terminal leaves, or the board stops where no run asked it to.
-fn drive_on_console(machine: &mut Virt, ips: u32, mut terminal: Option<&mut RawTerminal>) -> Result<(), RunError> {
-    let slice = slice_ticks(ips);
-    let mut pacer = Pacer::new(machine, ips);
+fn drive_on_console(
+    machine: &mut Virt,
+    config: &ArmVirtConfig,
+    mut terminal: Option<&mut RawTerminal>,
+) -> Result<(), RunError> {
+    let slice = slice_ticks(config.ips);
+    let mut pacer = Pacer::new(machine, config.ips);
     loop {
         let outcome = machine.step(RunBudget::Ticks(slice));
+        report_disk_error(machine, config);
         let output = take_serial_output(machine);
         if !output.is_empty() {
             mirror_to_stdout(&output);
@@ -362,20 +418,30 @@ fn drive_on_console(machine: &mut Virt, ips: u32, mut terminal: Option<&mut RawT
     }
 }
 
-/// A run's end, however it came: the variable store is written back
-/// whether or not the run failed — QEMU's flash keeps what the firmware
-/// programmed whatever ends the VM — and the run's own failure is the one
-/// reported when both fail.
-fn finish(files: &BootFiles, machine: &Virt, ran: Result<(), RunError>) -> Result<RunSummary, RunError> {
+/// A run's end, however it came: the variable store is written back and
+/// the disk made durable whether or not the run failed — QEMU's flash keeps
+/// what the firmware programmed, and its drives are flushed as they close,
+/// whatever ends the VM. Of the failures, the run's own is the one
+/// reported, then the variable store's, then the disk's; the others are
+/// logged.
+fn finish(
+    config: &ArmVirtConfig,
+    files: &BootFiles,
+    machine: &mut Virt,
+    ran: Result<(), RunError>,
+) -> Result<RunSummary, RunError> {
     let persisted = files.persist(machine);
-    match (ran, persisted) {
-        (Ok(()), Ok(())) => Ok(RunSummary {
+    let closed = close_disk(machine, config);
+    let mut failures = [ran.err(), persisted.err(), closed.err()].into_iter().flatten();
+    match failures.next() {
+        None => Ok(RunSummary {
             instructions_executed: Some(machine.instructions()),
         }),
-        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
-        (Err(error), Err(unwritten)) => {
-            tracing::warn!("{unwritten}");
-            Err(error)
+        Some(reported) => {
+            for logged in failures {
+                tracing::warn!("{logged}");
+            }
+            Err(reported)
         }
     }
 }
@@ -574,8 +640,8 @@ pub(crate) fn run_in_shell(
     let files = BootFiles::read(config)?;
     let mut machine = build(config, &files)?;
     let mut window = ShellWindow::open(display, &machine);
-    let ran = drive_in_shell(&mut machine, config.ips, &mut window, control);
-    finish(&files, &machine, ran)
+    let ran = drive_in_shell(&mut machine, config, &mut window, control);
+    finish(config, &files, &mut machine, ran)
 }
 
 /// [`run_in_shell`]'s loop, until the guest switches the board off, the
@@ -583,12 +649,12 @@ pub(crate) fn run_in_shell(
 #[cfg(feature = "gui-egui")]
 fn drive_in_shell(
     machine: &mut Virt,
-    ips: u32,
+    config: &ArmVirtConfig,
     window: &mut ShellWindow<'_>,
     control: &RunControl,
 ) -> Result<(), RunError> {
-    let slice = slice_ticks(ips);
-    let mut pacer = Pacer::new(machine, ips);
+    let slice = slice_ticks(config.ips);
+    let mut pacer = Pacer::new(machine, config.ips);
     let stop_flag = Arc::clone(control.stop_flag());
     loop {
         if stop_flag.load(std::sync::atomic::Ordering::Relaxed) {
@@ -605,6 +671,7 @@ fn drive_in_shell(
             }
         }
         let outcome = machine.step(RunBudget::Ticks(slice));
+        report_disk_error(machine, config);
         window.pump_input(machine);
         window.present(machine, Presenting::WhenDue);
         match settle(outcome)? {
@@ -1046,6 +1113,76 @@ mod tests {
                 rusty_box_aarch64::CpuModel::Armv9p2 => (0x000F_0520, 1_000_000_000),
             };
             assert_eq!((midr, cntfrq), (Ok(want.0), Ok(want.1)), "{model:?}");
+        }
+    }
+
+    /// The board's virtio-blk is over the file the VM names: the guest sees
+    /// its length in whole sectors, the last one padded, and may write it
+    /// unless the VM makes it read-only.
+    #[test]
+    fn the_board_runs_on_the_disk_the_vm_names() {
+        let kernel = ScratchFile::new("Image", &test_images::power_off_kernel());
+        let image = ScratchFile::new("disk.img", &[0xA5; 3 * 512 + 1]);
+        for (access, device) in [
+            (DiskAccess::ReadWrite, rusty_box_aarch64::Access::ReadWrite),
+            (DiskAccess::ReadOnly, rusty_box_aarch64::Access::ReadOnly),
+        ] {
+            let config = ArmVirtConfig {
+                disk: Some(VirtDisk {
+                    path: image.0.clone(),
+                    access,
+                }),
+                ..kernel_board(&kernel)
+            };
+            let files = BootFiles::read(&config).expect("the kernel");
+            let machine = build(&config, &files).expect("the machine");
+            let disk = machine.disk().expect("a disk");
+            assert_eq!((disk.sectors(), disk.access()), (4, device), "{access:?}");
+        }
+    }
+
+    /// A file the host lets this process only read can be a read-only disk:
+    /// the image is opened for reading alone. (A process that permissions do
+    /// not bind, root's, could open it for writing too.)
+    #[test]
+    fn a_file_this_process_may_only_read_is_a_read_only_disk() {
+        let kernel = ScratchFile::new("Image", &test_images::power_off_kernel());
+        let image = ScratchFile::new("readable.img", &[0; 512]);
+        let writable = std::fs::metadata(&image.0).expect("the image").permissions();
+        let mut readable = writable.clone();
+        readable.set_readonly(true);
+        std::fs::set_permissions(&image.0, readable).expect("make the image read-only");
+        let config = ArmVirtConfig {
+            disk: Some(VirtDisk {
+                path: image.0.clone(),
+                access: DiskAccess::ReadOnly,
+            }),
+            ..kernel_board(&kernel)
+        };
+
+        let files = BootFiles::read(&config).expect("the kernel");
+        let built = build(&config, &files).map(|machine| machine.disk().map(|disk| disk.access()));
+        std::fs::set_permissions(&image.0, writable).expect("give the image back its permissions");
+        assert_eq!(built.expect("the machine"), Some(rusty_box_aarch64::Access::ReadOnly));
+    }
+
+    #[test]
+    fn a_disk_that_cannot_be_opened_is_refused_with_its_path() {
+        let kernel = ScratchFile::new("Image", &test_images::power_off_kernel());
+        let missing = std::env::temp_dir().join(format!("rusty-box-gui-virt-{}-absent.img", std::process::id()));
+        let config = ArmVirtConfig {
+            disk: Some(VirtDisk {
+                path: missing.clone(),
+                access: DiskAccess::ReadOnly,
+            }),
+            ..kernel_board(&kernel)
+        };
+
+        match run_on_console(config, Console::Headless) {
+            Err(RunError::MediaAttach { kind: "disk", path, source }) => {
+                assert_eq!((path, source.kind()), (missing, io::ErrorKind::NotFound));
+            }
+            other => panic!("not refused as a disk: {other:?}"),
         }
     }
 

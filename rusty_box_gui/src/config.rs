@@ -103,7 +103,8 @@ impl std::fmt::Display for MachineKind {
 /// variable store) or a Linux kernel directly (`kernel`, with `initrd`,
 /// `command_line` and `device_tree`), never both. `display` plugs in a
 /// virtio-gpu asking the guest for that size; `keyboard` and `tablet` plug
-/// in the virtio keyboard and tablet.
+/// in the virtio keyboard and tablet. `disk` plugs in a virtio-blk over that
+/// raw image, which the guest may only read with `disk_read_only`.
 // NOTE: field order matters for TOML serialization — `display`, a sub-table,
 // must follow the scalar fields.
 #[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
@@ -120,6 +121,8 @@ pub struct VirtToml {
     pub device_tree: Option<PathBuf>,
     pub keyboard: Option<bool>,
     pub tablet: Option<bool>,
+    pub disk: Option<PathBuf>,
+    pub disk_read_only: Option<bool>,
     pub display: Option<VirtDisplayToml>,
 }
 
@@ -425,6 +428,28 @@ impl ResolvedConfig {
             MachineConfig::ArmVirt(virt) => virt.memory_mib,
         }
     }
+
+    /// The hard-disk image a run opens, whatever the machine: a PC's IDE
+    /// disk, which its guest writes, or an Arm board's virtio-blk disk.
+    pub fn hard_disk(&self) -> Option<HardDiskUse<'_>> {
+        match &self.machine {
+            MachineConfig::Pc(pc) => pc.disk.as_ref().map(|disk| HardDiskUse {
+                path: &disk.path,
+                access: DiskAccess::ReadWrite,
+            }),
+            MachineConfig::ArmVirt(virt) => virt.disk.as_ref().map(|disk| HardDiskUse {
+                path: &disk.path,
+                access: disk.access,
+            }),
+        }
+    }
+}
+
+/// A hard-disk image a run opens, and whether its guest may write it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HardDiskUse<'a> {
+    pub path: &'a Path,
+    pub access: DiskAccess,
 }
 
 /// The Bochs PC's hardware.
@@ -473,6 +498,50 @@ pub struct ArmVirtConfig {
     pub keyboard: bool,
     /// A virtio tablet is plugged in.
     pub tablet: bool,
+    /// The virtio-blk's disk; `None` for none.
+    pub disk: Option<VirtDisk>,
+}
+
+/// The disk behind the Arm `virt` board's virtio-blk, as QEMU's `-drive
+/// file=…,format=raw,if=none` with a `virtio-blk-device` has it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VirtDisk {
+    /// A raw image: its bytes are the disk's, sector for sector.
+    pub path: PathBuf,
+    /// Whether the guest may write it (QEMU's `readonly=on`).
+    pub access: DiskAccess,
+}
+
+/// Whether a VM's guest may write its hard disk.
+///
+/// Closed (R5): a PC's IDE disk is always written; an Arm board's virtio-blk
+/// disk may be either.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DiskAccess {
+    ReadWrite,
+    /// QEMU's `readonly=on`: the device refuses the guest's writes, and the
+    /// image is opened for reading alone.
+    ReadOnly,
+}
+
+impl DiskAccess {
+    /// The access `virt.disk_read_only`, and the Hard disk page's
+    /// `Read-only`, name.
+    pub fn of_read_only(read_only: bool) -> Self {
+        if read_only {
+            Self::ReadOnly
+        } else {
+            Self::ReadWrite
+        }
+    }
+
+    /// Whether the guest only reads the disk: `virt.disk_read_only`.
+    pub fn is_read_only(self) -> bool {
+        match self {
+            Self::ReadWrite => false,
+            Self::ReadOnly => true,
+        }
+    }
 }
 
 /// What the Arm `virt` board boots.
@@ -616,6 +685,7 @@ impl ArmVirtConfig {
             display: None,
             keyboard: false,
             tablet: false,
+            disk: None,
         }
     }
 }
@@ -762,6 +832,18 @@ fn resolve_arm_virt(file: &FileConfig, args: &Args, config_dir: Option<&Path>) -
             return Err(RunError::InvalidVirtDisplay { width, height });
         }
     };
+    let disk = match args.disk.clone().or_else(|| path(&virt.disk)) {
+        Some(path) => Some(VirtDisk {
+            path,
+            access: DiskAccess::of_read_only(virt.disk_read_only.unwrap_or(false)),
+        }),
+        None if virt.disk_read_only.is_some() => {
+            return Err(RunError::VirtSettingWithoutDisk {
+                setting: "virt.disk_read_only",
+            });
+        }
+        None => None,
+    };
     Ok(ArmVirtConfig {
         memory_mib,
         ips,
@@ -770,6 +852,7 @@ fn resolve_arm_virt(file: &FileConfig, args: &Args, config_dir: Option<&Path>) -
         display,
         keyboard: virt.keyboard.unwrap_or(false),
         tablet: virt.tablet.unwrap_or(false),
+        disk,
     })
 }
 
@@ -1058,6 +1141,8 @@ impl ArmVirtConfig {
             cpu: Some(VirtCpuToml(self.cpu)),
             keyboard: Some(self.keyboard),
             tablet: Some(self.tablet),
+            disk: self.disk.as_ref().map(|disk| disk.path.clone()),
+            disk_read_only: self.disk.as_ref().map(|disk| disk.access.is_read_only()),
             display: self.display.map(|size| VirtDisplayToml {
                 width: Some(size.width),
                 height: Some(size.height),
@@ -2625,7 +2710,7 @@ overwrite = false
     }
 
     /// An Arm board read back from what the library writes for it is the
-    /// board it wrote, for each way it boots and each processor.
+    /// board it wrote, for each way it boots, each processor and each disk.
     #[test]
     fn an_arm_virt_vm_round_trips_through_its_file() {
         let boots = [
@@ -2642,7 +2727,18 @@ overwrite = false
             },
         ];
         let processors = rusty_box_aarch64::CpuModel::ALL.into_iter().cycle();
-        for (boot, cpu) in boots.into_iter().zip(processors) {
+        let disks = [
+            None,
+            Some(VirtDisk {
+                path: PathBuf::from("alpine.img"),
+                access: DiskAccess::ReadWrite,
+            }),
+            Some(VirtDisk {
+                path: PathBuf::from("base.img"),
+                access: DiskAccess::ReadOnly,
+            }),
+        ];
+        for ((boot, cpu), disk) in boots.into_iter().zip(processors).zip(disks) {
             let resolved = ResolvedConfig {
                 machine: MachineConfig::ArmVirt(ArmVirtConfig {
                     memory_mib: 1024,
@@ -2655,6 +2751,7 @@ overwrite = false
                     }),
                     keyboard: true,
                     tablet: true,
+                    disk,
                 }),
                 display: DisplayBackend::Headless,
                 log_level: LogLevel::Info,
@@ -2760,19 +2857,56 @@ overwrite = false
         ));
     }
 
-    /// The flags every machine reads apply to an Arm board too.
+    /// The flags every machine reads apply to an Arm board too; `--disk`
+    /// replaces the file's disk and keeps how the guest may use it.
     #[test]
-    fn memory_and_rate_flags_apply_to_an_arm_board() {
-        let file: FileConfig = toml::from_str("[vm]\nmachine = \"arm-virt\"\n").unwrap();
+    fn memory_rate_and_disk_flags_apply_to_an_arm_board() {
+        let file: FileConfig = toml::from_str(
+            "[vm]\nmachine = \"arm-virt\"\n[virt]\ndisk = \"file.img\"\ndisk_read_only = true\n",
+        )
+        .unwrap();
         let resolved = resolve_config(
             file,
-            &args(["rusty_box_gui", "--memory-mib", "512", "--ips", "20000000"]),
+            &args([
+                "rusty_box_gui",
+                "--memory-mib",
+                "512",
+                "--ips",
+                "20000000",
+                "--disk",
+                "flag.img",
+            ]),
         )
         .unwrap();
         let virt = resolved.arm_virt().expect("an Arm board");
 
         assert_eq!(virt.memory_mib, 512);
         assert_eq!(virt.ips, 20_000_000);
+        assert_eq!(
+            virt.disk,
+            Some(VirtDisk {
+                path: PathBuf::from("flag.img"),
+                access: DiskAccess::ReadOnly,
+            })
+        );
+    }
+
+    /// `virt.disk` is found beside the VM file, as its other paths are, and
+    /// the guest writes it unless `disk_read_only` says otherwise.
+    #[test]
+    fn the_virt_disk_is_found_beside_its_file_and_written_by_default() {
+        let file: FileConfig =
+            toml::from_str("[vm]\nmachine = \"arm-virt\"\n[virt]\ndisk = \"alpine.img\"\n").unwrap();
+        let dir = Path::new("vms");
+        let resolved = resolve_config_with_base(file, &args(["rusty_box_gui"]), Some(dir)).unwrap();
+
+        assert_eq!(
+            resolved.arm_virt().and_then(|virt| virt.disk.clone()),
+            Some(VirtDisk {
+                path: dir.join("alpine.img"),
+                access: DiskAccess::ReadWrite,
+            })
+        );
     }
 
     #[test]
@@ -2798,6 +2932,10 @@ overwrite = false
         assert!(matches!(
             refusal("command_line = \"quiet\"\n"),
             RunError::VirtSettingWithoutBoot { setting: "virt.command_line" }
+        ));
+        assert!(matches!(
+            refusal("disk_read_only = false\n"),
+            RunError::VirtSettingWithoutDisk { setting: "virt.disk_read_only" }
         ));
         assert!(matches!(
             refusal("memory_mib = 0\n"),

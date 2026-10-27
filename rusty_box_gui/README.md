@@ -90,7 +90,7 @@ A VM is a PC or an Arm `virt` board, QEMU's `virt` machine with one processor, a
 - **Colour.** The shell's accent is the shown VM's machine's: cyan, with the instruction rate in blue, for a PC; red for an Arm board. It marks the primary verb (`▶ Power on` and the like), the page and Hardware pane the shell is on, a running VM's badge, the instruction rate, and the text cursor and selection. Each running VM's dot in the sidebar is in its own machine's accent, whichever VM is shown. Info, warning, error and `Paused` keep their own colours.
 
 - **Pages.** It has no Debugger page, which reads a PC's processors and memory. Pause, Resume and Save RAM work from the VM bar as for a PC; the dump is the board's RAM from its base, `0x4000_0000`.
-- **Summary** shows `1 CPU` and what it boots (`Linux kernel` or `UEFI firmware`); its middle tile is `Open Console` instead of `New Hard Disk`.
+- **Summary** shows `1 CPU`, what it boots (`Linux kernel` or `UEFI firmware`) where a PC shows its boot order, and its disk.
 - **Hardware** lists the board's own panes:
 
   | Pane | Settings |
@@ -98,12 +98,14 @@ A VM is a PC or an Arm `virt` board, QEMU's `virt` machine with one processor, a
   | Memory | Guest memory, from 1 MB up to what the board maps below its high PCIe window |
   | Processors | The model (`Cortex-A57 (Armv8.0)` or `Armv9.2 with SME2`) and the IPS target guest time counts instructions at |
   | Boot | `Nothing yet`, `UEFI firmware` (firmware and variable-store paths) or `Linux kernel` (an arm64 `Image`, an initrd, a device tree and the command line) |
+  | Hard Disk | As a PC's, with the new-disk sheet: the raw image behind a virtio-blk, which Linux sees as `/dev/vda` and EDK2 boots from. `Advanced` holds `Read-only` (the guest reads the disk and cannot write it, as QEMU's `readonly=on`), which the disk's card then shows as `· read-only`. A disk the sheet makes is one the guest writes; a file chosen with `Change` keeps the setting |
   | Display | `virtio-gpu`, and the size it asks the guest for: a preset from 800 × 600 to 1920 × 1080, or any width and height; the log level |
   | Input | A virtio `Keyboard` and a virtio `Tablet (absolute pointer)` |
 
 - **Console.** With a virtio-gpu the page shows what the guest's driver draws (Linux's `virtio_gpu` with `console=tty0` puts its console there at the size asked for). With a tablet the host pointer is the guest's absolute pointer over the picture, and the cursor is hidden there; nothing needs capturing. Keys go to the virtio keyboard, or, without one, to the serial console as an xterm would send them. Input the guest takes none of for two seconds (its driver not loaded yet) is dropped rather than sent late. EDK2's `ArmVirtQemu` puts no console on a virtio-gpu (QEMU's does not either), so a firmware boot's menus are on the serial console.
 - **Time.** Guest time keeps to the host clock, as QEMU's does for `virt`: a guest that waits leaves the host idle, and one the interpreter cannot keep up with runs flat out. The RTC starts at the host's time.
 - **Power.** A guest's PSCI `SYSTEM_RESET` resets the board in place; `SYSTEM_OFF` ends the run. A firmware boot's variable store is written back to its file when the run ends, if the firmware changed it.
+- **Disk.** The guest reads and writes the image in place, and what it wrote is flushed to the host's disk when the run ends, however it ends, as QEMU flushes a drive it closes; a flush that fails ends the run with `failed to make what the guest wrote to the disk <path> durable: <error>`. A host error a guest request meets is told to the guest as an I/O error and logged as a warning.
 
 A power-on with nothing to boot is refused with `Choose a firmware or a kernel under Hardware › Boot before powering on.`
 
@@ -112,7 +114,7 @@ A power-on with nothing to boot is refused with `Choose a firmware or a kernel u
 Several VMs run at once, each on a thread of its own. Select one in the sidebar to see its console, VM bar and status strip; the others keep running, and only the VM shown gets the keyboard and mouse. A VM can be added, or another powered on, while VMs run. The selected VM's row has a dot in its state's colour, and so has the row of every other VM that runs or is starting; a VM that is off and not selected has none. A VM that runs or is starting cannot be deleted until it stops. Two things are used by one running VM at a time:
 
 - **The hypervisor.** A process holds one Windows Hypervisor Platform partition at a time, so one VM at a time runs on it. Another VM set to it starts on the interpreter, with the warning `<VM> runs on the interpreter: <VM> is using the hypervisor.` naming both, and its status strip and Summary page name the interpreter while it runs; its Engine setting is left as it is. The hypervisor is free again once the VM that holds it has stopped.
-- **A hard-disk image.** Two writers would corrupt it, so powering on a VM whose hard disk is a file another running VM in this window uses is refused, before any question about recreating the file, with `<path> is in use by <VM>; stop it first.` A new disk's `Replace it`, and the floppy maker's Create with `Replace an existing file`, are refused the same way for such a file, which is left as it is. A second `rusty_box_gui` window keeps no such record, so it can still open the same file. A CD/DVD image, which is only read, can be used by several VMs at once.
+- **A hard-disk image.** Two writers would corrupt it, so powering on a VM whose hard disk is a file another running VM in this window uses is refused, before any question about recreating the file, with `<path> is in use by <VM>; stop it first.` A new disk's `Replace it`, and the floppy maker's Create with `Replace an existing file`, are refused the same way for such a file, which is left as it is. Arm VMs whose disk is read-only only read it, so several of them can run on one file at once; a VM that writes the file is refused while any of them runs, and they are refused while it does, naming the VM that has it, as QEMU's image locking refuses a writer beside a `readonly=on` drive. A second `rusty_box_gui` window keeps no such record, so it can still open the same file. A CD/DVD image, which is only read, can be used by several VMs at once.
 
 **Closing while VMs run.** With no VM running or starting, closing the window, or `…` › `Quit`, closes it. Otherwise the window stays open and asks `VMs are still running`, naming them:
 
@@ -402,9 +404,24 @@ height = 768
 | `virt.command_line` | Its command line | `console=ttyAMA0 earlycon=pl011,0x9000000` | none |
 | `virt.device_tree` | A device tree to boot it with instead of the board's own | the board's | none |
 | `virt.keyboard`, `virt.tablet` | Plug in a virtio keyboard, a virtio tablet | `false` | none |
+| `virt.disk` | Plug in a virtio-blk over this raw disk image, read and written in place: Linux's `/dev/vda`, as QEMU's `-drive file=…,format=raw,if=none` with a `virtio-blk-device` | no disk | `--disk` |
+| `virt.disk_read_only` | The guest only reads the disk, as QEMU's `readonly=on`, and the file is opened for reading alone | `false` | none |
 | `virt.display.width`, `virt.display.height` | Plug in a virtio-gpu that asks the guest for this size; both are needed and neither may be zero | no display | none |
 
-`virt.initrd`, `virt.command_line` and `virt.device_tree` need `virt.kernel`, and `virt.firmware_vars` needs `virt.firmware`, as QEMU's `-initrd`, `-append` and `-dtb` need `-kernel`. A file with neither boots nothing yet: the shell keeps it and refuses to power it on. On the command line, an Arm VM takes `--config`, `--no-config`, `--display`, `--log-level`, `--memory-mib` and `--ips`; any other flag is refused with `<flag> is not a setting of an Arm virt board`. With `--display headless` the guest's serial console goes to standard output; with `--display terminal` this terminal also sends it keys, and Ctrl-A then X ends the run, as in QEMU's `-nographic` console (Ctrl-A twice sends one Ctrl-A).
+`virt.initrd`, `virt.command_line` and `virt.device_tree` need `virt.kernel`, and `virt.firmware_vars` needs `virt.firmware`, as QEMU's `-initrd`, `-append` and `-dtb` need `-kernel`; `virt.disk_read_only` needs `virt.disk`. A file with neither a firmware nor a kernel boots nothing yet: the shell keeps it and refuses to power it on. On the command line, an Arm VM takes `--config`, `--no-config`, `--display`, `--log-level`, `--memory-mib`, `--ips` and `--disk`; any other flag is refused with `<flag> is not a setting of an Arm virt board`. With `--display headless` the guest's serial console goes to standard output; with `--display terminal` this terminal also sends it keys, and Ctrl-A then X ends the run, as in QEMU's `-nographic` console (Ctrl-A twice sends one Ctrl-A).
+
+A kernel can mount its root filesystem from the disk rather than an initrd, given a kernel with the virtio-mmio, virtio-blk and filesystem drivers built in:
+
+```toml
+[vm]
+name = "Alpine on its disk (Arm)"
+machine = "arm-virt"
+
+[virt]
+kernel = "C:/path/Image"
+command_line = "console=ttyAMA0 root=/dev/vda rw rootwait"
+disk = "C:/path/alpine-root.img"
+```
 
 Release builds compile out `debug` and `trace` output: the workspace builds `tracing` with `release_max_level_info`.
 

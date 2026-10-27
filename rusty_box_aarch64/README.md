@@ -880,8 +880,9 @@ choice is listed here with its evidence.
   translates its address, with the faults Arm's `AArch64_DC` and
   `AArch64_IC` take, and has nothing else to act on; by set and way, or the
   whole instruction cache, it has nothing to act on at all.
-- No network or block device, and nothing on the PCIe bus: storage is the
-  initramfs, and the display and input devices are the opt-in virtio ones.
+- No network device, and nothing on the PCIe bus: storage is the initramfs
+  or the opt-in virtio-blk disk, and the display and input devices are the
+  opt-in virtio ones.
 - UEFI firmware draws nothing on the virtio display: `ArmVirtQemu`'s boot
   manager (`PlatformBootManagerLibLight`) puts only PCI displays on its
   console, as it does on QEMU, so the screen waits for the operating
