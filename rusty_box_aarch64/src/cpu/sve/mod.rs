@@ -32,7 +32,6 @@ mod tests;
 use super::exec::{sext, Fault};
 use super::features::VecLen;
 use super::simd_arith::{int as simd_int, sat};
-use super::sme::SmeTrap;
 use super::Cpu;
 
 /// `MAX_VL` in bytes.
@@ -387,14 +386,10 @@ impl Cpu {
     /// Arm `CheckSVEEnabled` on this processor, which implements FEAT_SME
     /// and not FEAT_SVE, and `CurrentVL` after it. In Streaming SVE mode
     /// that is `CheckSMEEnabled`; outside it, `CheckStreamingSVEEnabled`,
-    /// which takes the same checks and then the SME trap: an SVE
-    /// instruction executes only in Streaming SVE mode, at the Streaming
-    /// SVE vector length.
+    /// which takes the same checks and then the SME trap: on such a
+    /// processor the two are one, and an SVE instruction executes only in
+    /// Streaming SVE mode, at the Streaming SVE vector length.
     pub(crate) fn sve_check(&self) -> Result<VecLen, Fault> {
-        self.check_sme_enabled()?;
-        if !self.svcr.sm {
-            return Err(self.sme_trap(SmeTrap::NotStreaming));
-        }
-        Ok(self.current_svl())
+        self.check_streaming_sve_enabled()
     }
 }

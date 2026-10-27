@@ -426,6 +426,15 @@ impl Cpu {
             Class::SveLoadStructures => self.exec_sve_load_structures(bus, insn),
             Class::SveStoreContiguous => self.exec_sve_store_contiguous(bus, pc, insn),
             Class::SveStoreStructures => self.exec_sve_store_structures(bus, insn),
+            Class::SmeFpOuterProduct => self.exec_sme_fp_outer_product(insn),
+            Class::SmeIntOuterProduct => self.exec_sme_int_outer_product(insn),
+            Class::SmeMoveToSlice => self.exec_sme_move_to_slice(insn),
+            Class::SmeMoveFromSlice => self.exec_sme_move_from_slice(insn),
+            Class::SmeZero => self.exec_sme_zero(insn),
+            Class::SmeAddVector => self.exec_sme_add_vector(insn),
+            Class::SmeLoadSlice => self.exec_sme_load_slice(bus, insn),
+            Class::SmeStoreSlice => self.exec_sme_store_slice(bus, insn),
+            Class::SmeFillSpill => self.exec_sme_fill_spill(bus, insn),
         }
     }
 

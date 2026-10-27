@@ -6,7 +6,7 @@
 //! it, `Instructions.json`, which is the A64 encoding index of the Arm ARM
 //! (DDI 0487, chapter C4) in data form. The tree has three levels: the
 //! top-level groups (`dpimm`, `control`, `ldst`, `dpreg`, `simd_dp`,
-//! `reserved`, `sve`), each split into the encoding classes of C4
+//! `reserved`, `sve`, `sme`), each split into the encoding classes of C4
 //! (`addsub_imm`, `asimdsame`, ...), each holding encodings
 //! (`ADD_32_addsub_imm`, ...); `sve` and `sme` put a level of groups
 //! (`sve_alloca`, ...) between the top and the classes. An encoding is the
@@ -58,6 +58,7 @@ mod float;
 mod ldst;
 mod reserved;
 mod simd_dp;
+mod sme;
 mod sve;
 #[cfg(test)]
 #[path = "../../../tests/unit/spec.rs"]
@@ -87,6 +88,11 @@ use ldst::{
     LdstUnscaled, Ldstexclp, Ldstexclr, LdstnapairOffs, LdstpairOff, LdstpairPost, LdstpairPre, Ldstord, Loadlit,
 };
 use reserved::PermUndef;
+use sme::{
+    MortlachAddhv, MortlachB16f32Prod, MortlachContigLoad, MortlachContigQload, MortlachContigQstore,
+    MortlachContigStore, MortlachCtxtLdst, MortlachExtractPred, MortlachF16f32Prod, MortlachF32f32Prod,
+    MortlachI8i32Prod, MortlachInsertPred, MortlachZero,
+};
 use sve::{
     SveFp2opIPZds, SveFp2opPPd, SveFp2opPZdA, SveFp2opPZdB0, SveFp2opPZdB1, SveFp2opPZdC, SveFp2opPZdD, SveFp2opPZds,
     SveFp2opUZd, SveFp3opPPd, SveFp3opPZdsA, SveFp3opPZdsB, SveFp3opUZd, SveFpFastRed, SveFpFcadd, SveFpFcmla,
@@ -407,6 +413,20 @@ pub(crate) enum Encoding {
     SveMemCstSi(SveMemCstSi),
     SveMemCstntSi(SveMemCstntSi),
     SveMemEstSi(SveMemEstSi),
+    // sme
+    MortlachF32f32Prod(MortlachF32f32Prod),
+    MortlachB16f32Prod(MortlachB16f32Prod),
+    MortlachF16f32Prod(MortlachF16f32Prod),
+    MortlachI8i32Prod(MortlachI8i32Prod),
+    MortlachInsertPred(MortlachInsertPred),
+    MortlachExtractPred(MortlachExtractPred),
+    MortlachZero(MortlachZero),
+    MortlachAddhv(MortlachAddhv),
+    MortlachContigLoad(MortlachContigLoad),
+    MortlachContigStore(MortlachContigStore),
+    MortlachCtxtLdst(MortlachCtxtLdst),
+    MortlachContigQload(MortlachContigQload),
+    MortlachContigQstore(MortlachContigQstore),
 }
 
 /// The encoding `word` is, if it is one of a feature the decoder knows.
@@ -417,8 +437,8 @@ pub(crate) fn decode(word: u32) -> Option<Encoding> {
     let op1 = bits(word, 28, 25);
     match (op0, op1) {
         (0b0, 0b0000) => reserved::reserved(word),
-        // op0 = 1, op1 = 0000 is sme (FEAT_SME); op1 = 0001 and 0011 are
-        // unallocated.
+        (0b1, 0b0000) => sme::sme(word),
+        // op1 = 0001 and 0011 are unallocated.
         (_, 0b0010) => sve::sve(word),
         (_, 0b1000 | 0b1001) => dpimm::dpimm(word),
         (_, 0b1010 | 0b1011) => control::control(word),
@@ -668,6 +688,17 @@ impl Encoding {
             Self::SveMemCstntSs(_) | Self::SveMemEstSs(_) | Self::SveMemCstntSi(_) | Self::SveMemEstSi(_) => {
                 Class::SveStoreStructures
             }
+            Self::MortlachF32f32Prod(_) | Self::MortlachB16f32Prod(_) | Self::MortlachF16f32Prod(_) => {
+                Class::SmeFpOuterProduct
+            }
+            Self::MortlachI8i32Prod(_) => Class::SmeIntOuterProduct,
+            Self::MortlachInsertPred(_) => Class::SmeMoveToSlice,
+            Self::MortlachExtractPred(_) => Class::SmeMoveFromSlice,
+            Self::MortlachZero(_) => Class::SmeZero,
+            Self::MortlachAddhv(_) => Class::SmeAddVector,
+            Self::MortlachContigLoad(_) | Self::MortlachContigQload(_) => Class::SmeLoadSlice,
+            Self::MortlachContigStore(_) | Self::MortlachContigQstore(_) => Class::SmeStoreSlice,
+            Self::MortlachCtxtLdst(_) => Class::SmeFillSpill,
         }
     }
 }
@@ -1006,6 +1037,28 @@ pub(crate) enum Class {
     SveStoreContiguous,
     /// STNT1 and ST2, ST3, ST4, as [`Class::SveLoadStructures`].
     SveStoreStructures,
+    /// FMOPA and FMOPS of single-precision and of half-precision values,
+    /// BFMOPA and BFMOPS, into 32-bit tiles: the handler reads which from
+    /// bits 24, 21 and 4.
+    SmeFpOuterProduct,
+    /// SMOPA, SUMOPA, USMOPA, UMOPA, SMOPS, SUMOPS, USMOPS, UMOPS of bytes
+    /// into 32-bit tiles.
+    SmeIntOuterProduct,
+    /// MOVA from a vector to a tile slice.
+    SmeMoveToSlice,
+    /// MOVA from a tile slice to a vector.
+    SmeMoveFromSlice,
+    /// ZERO of a list of 64-bit tiles.
+    SmeZero,
+    /// ADDHA and ADDVA of words.
+    SmeAddVector,
+    /// LD1B, LD1H, LD1W, LD1D and LD1Q to a tile slice.
+    SmeLoadSlice,
+    /// ST1B, ST1H, ST1W, ST1D and ST1Q from a tile slice.
+    SmeStoreSlice,
+    /// LDR and STR of a ZA array vector: the handler reads the direction
+    /// from bit 21.
+    SmeFillSpill,
 }
 
 /// What an encoding's decode does about the branch that led to it into a
@@ -1323,7 +1376,20 @@ impl Encoding {
             | Self::SveMemEstSs(_)
             | Self::SveMemCstSi(_)
             | Self::SveMemCstntSi(_)
-            | Self::SveMemEstSi(_) => Feature::Sme,
+            | Self::SveMemEstSi(_)
+            | Self::MortlachF32f32Prod(_)
+            | Self::MortlachB16f32Prod(_)
+            | Self::MortlachF16f32Prod(_)
+            | Self::MortlachI8i32Prod(_)
+            | Self::MortlachInsertPred(_)
+            | Self::MortlachExtractPred(_)
+            | Self::MortlachZero(_)
+            | Self::MortlachAddhv(_)
+            | Self::MortlachContigLoad(_)
+            | Self::MortlachContigStore(_)
+            | Self::MortlachCtxtLdst(_)
+            | Self::MortlachContigQload(_)
+            | Self::MortlachContigQstore(_) => Feature::Sme,
         }
     }
 }

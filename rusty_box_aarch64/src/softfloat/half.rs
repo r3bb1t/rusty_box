@@ -40,7 +40,8 @@
 use super::arm_ops::clamp_scale;
 use super::f64_to_f16;
 use super::internals::{
-    exp_f16, exp_f64, f16_tiny_after_rounding, flush_flags, frac_f16, round_pack_to_f16, sign_f16, sign_f64,
+    exp_f16, exp_f64, f16_tiny_after_rounding, flush_flags, frac_f16, norm_round_pack_to_f32, round_pack_to_f16,
+    sign_f16, sign_f64,
 };
 use super::min_max::Extreme;
 use super::softfloat::{softfloat_raise_flags, Handling, FLAG_INVALID};
@@ -348,4 +349,87 @@ pub(crate) fn f16_mul_add_long(form: FusedMulAdd, addend: u32, n: u16, m: u16, f
     let n = widen(flushed(n, fp), SINGLE) as u32;
     let m = widen(flushed(m, fp), SINGLE) as u32;
     super::f32_mul_add(form, addend, n, m, fp)
+}
+
+/// A finite half-precision value as `sig × 2^(exp - 25)`: its significand
+/// with the leading bit, and its biased exponent, 1 for a denormal.
+fn sig_exp(a: u16) -> (u32, u32) {
+    match exp_f16(a) {
+        0 => (u32::from(frac_f16(a)), 1),
+        exp => (u32::from(frac_f16(a)) | 0x400, exp as u32),
+    }
+}
+
+/// Arm FPDot with half-precision operands (`isbfloat16` FALSE):
+/// `op1_a*op2_a + op1_b*op2_b` in single precision, rounded once. The
+/// operands are unpacked under FPCR.FZ16 alone, raising nothing; NaNs are
+/// chosen as `FPProcessNaNs4` does, the signalling ones first, each kind
+/// in operand order, and converted (Arm FPConvertNaN). A product of two
+/// half-precision values is an integer multiple of 2^-48 below 2^32, so
+/// the sum is exact in 128 bits, and in single precision it is never tiny
+/// and never overflows: rounding it by FPCR.RMode raises inexact at most.
+pub(crate) fn f16_dot(op1_a: u16, op1_b: u16, op2_a: u16, op2_b: u16, fp: &mut ArmFpStatus) -> u32 {
+    let ops = [op1_a, op1_b, op2_a, op2_b].map(|x| flushed(x, fp));
+    let signalling = |x: u16| is_nan_f16(x) && x & 0x0200 == 0;
+    if let Some(&nan) = ops.iter().find(|&&x| signalling(x)).or_else(|| ops.iter().find(|&&x| is_nan_f16(x))) {
+        if signalling(nan) {
+            softfloat_raise_flags(&mut fp.status, FLAG_INVALID);
+        }
+        return if fp.status.default_nan_mode {
+            fp.default_nan_f32()
+        } else {
+            widen(nan | 0x0200, SINGLE) as u32
+        };
+    }
+    let [a1, b1, a2, b2] = ops;
+    let inf = |x: u16| exp_f16(x) == 0x1F;
+    let zero = |x: u16| x & 0x7FFF == 0;
+    let (sign_pa, sign_pb) = (sign_f16(a1) != sign_f16(a2), sign_f16(b1) != sign_f16(b2));
+    let (inf_pa, inf_pb) = (inf(a1) || inf(a2), inf(b1) || inf(b2));
+    let (zero_pa, zero_pb) = (zero(a1) || zero(a2), zero(b1) || zero(b2));
+    let invalid = (inf(a1) && zero(a2))
+        || (zero(a1) && inf(a2))
+        || (inf(b1) && zero(b2))
+        || (zero(b1) && inf(b2))
+        || (inf_pa && inf_pb && sign_pa != sign_pb);
+    if invalid {
+        softfloat_raise_flags(&mut fp.status, FLAG_INVALID);
+        return fp.default_nan_f32();
+    }
+    if (inf_pa && !sign_pa) || (inf_pb && !sign_pb) {
+        return 0x7F80_0000;
+    }
+    if (inf_pa && sign_pa) || (inf_pb && sign_pb) {
+        return 0xFF80_0000;
+    }
+    if zero_pa && zero_pb && sign_pa == sign_pb {
+        return u32::from(sign_pa) << 31;
+    }
+    // Each product in units of 2^-48: `sig_x * sig_y × 2^(exp_x + exp_y -
+    // 50)`, the exponents at least 1 each.
+    let product = |x: u16, y: u16, negative: bool| {
+        let ((sx, ex), (sy, ey)) = (sig_exp(x), sig_exp(y));
+        let p = i128::from(sx * sy) << (ex + ey - 2);
+        if negative {
+            -p
+        } else {
+            p
+        }
+    };
+    let sum = product(a1, a2, sign_pa) + product(b1, b2, sign_pb);
+    if sum == 0 {
+        return if fp.rounding() == FpRounding::NegInf { 0x8000_0000 } else { 0 };
+    }
+    // `norm_round_pack_to_f32` rounds `sig × 2^(exp - 156)`: the sum's top
+    // 31 bits, the rest folded into the lowest.
+    let magnitude = sum.unsigned_abs();
+    let length = 128 - magnitude.leading_zeros();
+    let (sig, exp) = match length.checked_sub(31) {
+        Some(shift) if shift > 0 => {
+            let lost = magnitude & ((1 << shift) - 1) != 0;
+            (((magnitude >> shift) as u32) | u32::from(lost), 108 + shift as i16)
+        }
+        _ => (magnitude as u32, 108),
+    };
+    norm_round_pack_to_f32(sum < 0, exp, sig, &mut fp.status)
 }

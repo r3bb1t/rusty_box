@@ -58,9 +58,8 @@ use super::{decode, Encoding, Feature};
 /// The environment variable naming the unpacked AARCHMRS directory.
 const SPEC_DIR_VAR: &str = "RUSTY_BOX_AARCHMRS";
 
-/// Arm's top-level A64 groups the decoder has a function for: all but
-/// `sme`, none of whose encodings the decoder knows yet.
-const TOP_GROUPS: [&str; 7] = ["reserved", "dpimm", "control", "ldst", "dpreg", "simd_dp", "sve"];
+/// Arm's top-level A64 groups the decoder has a function for: all of them.
+const TOP_GROUPS: [&str; 8] = ["reserved", "dpimm", "control", "ldst", "dpreg", "simd_dp", "sve", "sme"];
 
 /// The encodings whose Arm condition the decoder does not follow: the
 /// encoding, the condition as Arm writes it, and why.

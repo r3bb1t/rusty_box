@@ -2,7 +2,7 @@
  * The guest side of gen_qemu_sve.py: a static AArch64 Linux program run
  * under QEMU's user-mode emulator (`qemu-aarch64 -cpu max,sme_fa64=off,
  * sme-default-vector-length=64`), which runs each word in Streaming SVE
- * mode at a 512-bit vector length.
+ * mode at a 512-bit vector length, with ZA storage enabled.
  *
  * It maps the 64 KiB data region at DATA, then for each case read from
  * stdin (a record: the instruction word, the register state as `struct
@@ -34,6 +34,8 @@ struct state {
 	uint64_t pad;
 	uint8_t z[32][VLB];
 	uint8_t p[16][PLB];
+	/* ZA's horizontal vectors, ZA[0] to ZA[VLB - 1]. */
+	uint8_t za[VLB][VLB];
 };
 
 _Static_assert(offsetof(struct state, sp) == 248, "OFF_SP");
@@ -42,7 +44,8 @@ _Static_assert(offsetof(struct state, fpcr) == 264, "OFF_FPCR");
 _Static_assert(offsetof(struct state, fpsr) == 272, "OFF_FPSR");
 _Static_assert(offsetof(struct state, z) == 288, "OFF_Z");
 _Static_assert(offsetof(struct state, p) == 2336, "OFF_P");
-_Static_assert(sizeof(struct state) == 2464, "state size");
+_Static_assert(offsetof(struct state, za) == 2464, "OFF_ZA");
+_Static_assert(sizeof(struct state) == 6560, "state size");
 
 struct request {
 	uint32_t insn;
@@ -66,7 +69,7 @@ extern char fault_return[];
 static char signal_stack[1 << 16];
 
 /* Resume a word that raised a signal at `fault_return`, which leaves
- * Streaming SVE mode and restores the caller's registers. */
+ * Streaming SVE mode, disables ZA and restores the caller's registers. */
 static void on_signal(int sig, siginfo_t *info, void *context)
 {
 	ucontext_t *uc = context;

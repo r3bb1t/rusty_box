@@ -109,6 +109,9 @@ pub(crate) enum SmeTrap {
     /// mode, which every SVE instruction is on a processor without
     /// FEAT_SVE.
     NotStreaming,
+    /// SMTC 0b011: an instruction that accesses ZA while `PSTATE.ZA` is
+    /// 0.
+    InactiveZa,
 }
 
 impl SmeTrap {
@@ -117,6 +120,7 @@ impl SmeTrap {
             Self::AccessTrap => 0b000,
             Self::Streaming => 0b001,
             Self::NotStreaming => 0b010,
+            Self::InactiveZa => 0b011,
         }
     }
 }
@@ -224,6 +228,67 @@ impl Cpu {
     pub(crate) fn check_sme_enabled(&self) -> Result<(), Fault> {
         self.check_sme_access()?;
         self.fp_check()
+    }
+
+    /// Arm `CheckSMEAndZAEnabled`, and `CurrentSVL` after it: SME's enable
+    /// checks, then the SME trap when ZA storage is disabled. ZERO, LDR
+    /// and STR of ZA take it, in or out of Streaming SVE mode.
+    pub(crate) fn check_sme_and_za_enabled(&self) -> Result<VecLen, Fault> {
+        self.check_sme_enabled()?;
+        if !self.svcr.za {
+            return Err(self.sme_trap(SmeTrap::InactiveZa));
+        }
+        Ok(self.current_svl())
+    }
+
+    /// Arm `CheckStreamingSVEEnabled`, and `CurrentVL` after it, which in
+    /// Streaming SVE mode is the Streaming SVE vector length: SME's enable
+    /// checks, then the SME trap outside Streaming SVE mode.
+    pub(crate) fn check_streaming_sve_enabled(&self) -> Result<VecLen, Fault> {
+        self.check_sme_enabled()?;
+        if !self.svcr.sm {
+            return Err(self.sme_trap(SmeTrap::NotStreaming));
+        }
+        Ok(self.current_svl())
+    }
+
+    /// Arm `CheckStreamingSVEAndZAEnabled`, and `CurrentVL` after it:
+    /// [`Cpu::check_streaming_sve_enabled`], then the SME trap when ZA
+    /// storage is disabled. The instructions on ZA other than ZERO, LDR
+    /// and STR take it: they execute only in Streaming SVE mode.
+    pub(crate) fn check_streaming_sve_and_za_enabled(&self) -> Result<VecLen, Fault> {
+        let vl = self.check_streaming_sve_enabled()?;
+        if !self.svcr.za {
+            return Err(self.sme_trap(SmeTrap::InactiveZa));
+        }
+        Ok(vl)
+    }
+
+    /// Arm `ZAvector{SVL}(index)`, as its bytes: horizontal vector `index`
+    /// of the ZA array, at the Streaming SVE vector length `svl`.
+    pub(crate) fn za_row(&self, index: usize, svl: VecLen) -> &[u8] {
+        &self.scalable.za[index][..svl.bytes()]
+    }
+
+    /// Arm `ZAvector{SVL}(index)`.
+    pub(crate) fn za_vector(&self, index: usize, svl: VecLen) -> Zv {
+        Zv::from_bytes(self.za_row(index, svl))
+    }
+
+    /// Arm `ZAvector{SVL}(index) = value`: the bits above `svl` zeroed
+    /// (`Unpredictable_SMEZEROUPPER` taken as TRUE).
+    pub(crate) fn set_za_vector(&mut self, index: usize, svl: VecLen, value: &Zv) {
+        let len = svl.bytes();
+        self.set_za_bytes(index, svl, 0, &value.as_bytes()[..len]);
+    }
+
+    /// Arm `ZAvector{SVL}(index) = value` of the vector with its bytes from
+    /// `at` replaced by `bytes`: the bits above `svl` zeroed, as
+    /// [`Cpu::set_za_vector`] leaves them.
+    pub(crate) fn set_za_bytes(&mut self, index: usize, svl: VecLen, at: usize, bytes: &[u8]) {
+        let row = &mut self.scalable.za[index];
+        row[at..at + bytes.len()].copy_from_slice(bytes);
+        row[svl.bytes()..].fill(0);
     }
 
     /// Arm `CurrentSVL`: `SMCR_EL1.LEN` reduced to a supported length, at

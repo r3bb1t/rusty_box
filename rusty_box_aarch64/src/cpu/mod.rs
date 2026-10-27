@@ -59,6 +59,7 @@ mod sysreg;
 mod system;
 mod timer;
 mod wait;
+mod za;
 
 use rusty_box_core::{ClockHz, RingBuffer, VmClock, VmInstant};
 

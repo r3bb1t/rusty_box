@@ -312,6 +312,13 @@ impl FpEnv {
         self
     }
 
+    /// The environment the SME instructions that accumulate into ZA
+    /// compute in (Arm `FPMulAdd_ZA`, `FPDotAdd_ZA`): FPCR.DN read as 1.
+    pub(crate) fn with_default_nan(mut self) -> Self {
+        self.status = self.status.with_default_nan();
+        self
+    }
+
     /// FPCR.RMode, for the operations that round by it.
     pub(crate) fn rounding(&self) -> FpRounding {
         self.status.rounding()

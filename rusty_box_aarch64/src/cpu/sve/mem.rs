@@ -301,25 +301,15 @@ impl Cpu {
         let base = self.base_register(n)?;
         let addr = base.wrapping_add(imm.wrapping_mul(len as u64));
         let aligned = base % alignment == 0;
-        self.check_transfer_alignment(aligned, addr, store)?;
-        let acc = DataAccess {
-            part: if aligned { Part::Whole } else { Part::OfMisaligned },
-            ..DataAccess::NORMAL
-        };
         if store {
             let source = if vector {
                 self.z(t, vl)
             } else {
                 Zv::from_bytes(self.p(t, vl).as_bytes())
             };
-            for (i, &byte) in (0u64..).zip(&source.as_bytes()[..len]) {
-                self.write_mem(bus, addr.wrapping_add(i), 0, u64::from(byte), acc)?;
-            }
+            self.spill_bytes(bus, addr, aligned, &source.as_bytes()[..len])?;
         } else {
-            let mut loaded = Zv::ZERO;
-            for i in 0..len {
-                loaded.set_byte(i, self.read_mem(bus, addr.wrapping_add(i as u64), 0, acc)? as u8);
-            }
+            let loaded = self.fill_bytes(bus, addr, aligned, len)?;
             if vector {
                 self.set_z(t, vl, &loaded);
             } else {
@@ -327,6 +317,41 @@ impl Cpu {
             }
         }
         Ok(Flow::Next)
+    }
+
+    /// The alignment check of an LDR or STR of a register, then the access
+    /// each of its bytes makes: `aligned` when the transfer's base is
+    /// aligned to the register's alignment; misaligned, the transfer
+    /// faults here at `addr` when alignment is enforced, and otherwise
+    /// Device memory refuses each of its bytes.
+    fn transfer_access(&self, addr: u64, aligned: bool, store: bool) -> Result<DataAccess, Fault> {
+        self.check_transfer_alignment(aligned, addr, store)?;
+        Ok(DataAccess {
+            part: if aligned { Part::Whole } else { Part::OfMisaligned },
+            ..DataAccess::NORMAL
+        })
+    }
+
+    /// The load of an LDR of a vector, a predicate or a ZA array vector,
+    /// its alignment check included: `len` bytes from `addr` up, each an
+    /// access of its own ([`Cpu::transfer_access`]).
+    pub(crate) fn fill_bytes<B: PhysBus>(&mut self, bus: &mut B, addr: u64, aligned: bool, len: usize) -> Result<Zv, Fault> {
+        let acc = self.transfer_access(addr, aligned, false)?;
+        let mut loaded = Zv::ZERO;
+        for i in 0..len {
+            loaded.set_byte(i, self.read_mem(bus, addr.wrapping_add(i as u64), 0, acc)? as u8);
+        }
+        Ok(loaded)
+    }
+
+    /// The store of an STR of a vector, a predicate or a ZA array vector:
+    /// `bytes` to `addr` up, as [`Cpu::fill_bytes`] loads them.
+    pub(crate) fn spill_bytes<B: PhysBus>(&mut self, bus: &mut B, addr: u64, aligned: bool, bytes: &[u8]) -> Result<(), Fault> {
+        let acc = self.transfer_access(addr, aligned, true)?;
+        for (i, &byte) in (0u64..).zip(bytes) {
+            self.write_mem(bus, addr.wrapping_add(i), 0, u64::from(byte), acc)?;
+        }
+        Ok(())
     }
 
     /// PRFB, PRFH, PRFW, PRFD (`prfb_i_p_bi` to `prfd_i_p_br`): a prefetch

@@ -3,34 +3,39 @@
 makes legal in Streaming SVE mode, with QEMU's user-mode emulator.
 
 Each vector is gen_qemu.py's, run in Streaming SVE mode at a 512-bit
-vector length: a word from a template family, a seed that both this
-script and the Rust test (tests/unit/difftest.rs, `replay_sve`) turn into
-the same initial state, and what one step changed. The state is
-gen_unicorn.py's (`initial_state`), with Z0-Z31 and P0-P15 in place of the
-SIMD&FP registers (`sve_state`). The program, qemu_sve_harness.c with
-qemu_sve_trampoline.S, runs each word under `qemu-aarch64 -cpu
-max,sme_fa64=off,sme-default-vector-length=64`: Streaming SVE mode
-without FEAT_SME_FA64, as this core implements it, so a word illegal in
-it raises a signal there too. A word the program could not run is dropped,
-and so is one QEMU itself aborts on; the harness restarts after it.
+vector length with ZA storage enabled: a word from a template family, a
+seed that both this script and the Rust test (tests/unit/difftest.rs,
+`replay_sve`) turn into the same initial state, and what one step
+changed. The state is gen_unicorn.py's (`initial_state`), with Z0-Z31 and
+P0-P15 in place of the SIMD&FP registers (`sve_state`), and ZA, zero but
+for the ZA instructions' kinds (`za_state`). The program,
+qemu_sve_harness.c with qemu_sve_trampoline.S, runs each word under
+`qemu-aarch64 -cpu max,sme_fa64=off,sme-default-vector-length=64`:
+Streaming SVE mode without FEAT_SME_FA64, as this core implements it, so
+a word illegal in it raises a signal there too. A word the program could
+not run is dropped, and so is one QEMU itself aborts on; the harness
+restarts after it.
 
-A family is an Arm encoding class of the A64 `sve` group, its word the
+A family is an Arm encoding class of the A64 `sve` group, or of the `sme`
+group for the ZA instructions (the kinds beginning with Z), its word the
 class's fixed bits with the rest random (unallocated words are dropped).
 Families are appended, never reordered.
 
 A vector line is gen_unicorn.py's with `z=` and `p=` (the registers that
 changed, each as one big-endian hex number, 128 and 16 digits wide) in
-place of `v=`:
+place of `v=`, and for the Z kinds `za=` (ZA's horizontal vectors that
+changed, by number, 128 digits wide):
 
-    family kind word seed pc nzcv r=... z=... p=... m=... f=fpsr
+    family kind word seed pc nzcv r=... z=... p=... m=... f=fpsr [za=...]
 
 Needs an AArch64 Linux C compiler that links statically (CC, default
 aarch64-linux-gnu-gcc) and QEMU's user-mode emulator (QEMU, default
 qemu-aarch64). The vectors in the tree were made with QEMU 11.1.2 with
 docs/qemu-afp-vector-fabs-fneg.patch applied, which changes nothing in
-Streaming SVE mode, and docs/qemu-sve-fcmla-indexed-ah.patch and
-docs/qemu-sve-fmad-size00.patch, which bring FCMLA (indexed) and FMAD to
-the Arm ARM (docs/qemu-upstream-bugs.md, entries 13 and 14). QEMU is a
+Streaming SVE mode, and docs/qemu-sve-fcmla-indexed-ah.patch,
+docs/qemu-sve-fmad-size00.patch and docs/qemu-sme-ld1-vertical-tail.patch,
+which bring FCMLA (indexed), FMAD and the SME LD1 to a vertical tile slice
+to the Arm ARM (docs/qemu-upstream-bugs.md, entries 13 to 15). QEMU is a
 second implementation, not the reference: where it and this core differ,
 the Arm ARM's pseudocode decides.
 
@@ -66,8 +71,8 @@ VLB = 64
 PLB = VLB // 8
 # A record as qemu_sve_harness.c lays it out: a 16-byte header (the word or
 # the status, then padding), X0-X30, SP, NZCV, FPCR, FPSR, padding, Z0-Z31,
-# P0-P15.
-RECORD = struct.Struct(f"<I12x31Q5Q{32 * VLB}s{16 * PLB}s")
+# P0-P15, ZA's horizontal vectors.
+RECORD = struct.Struct(f"<I12x31Q5Q{32 * VLB}s{16 * PLB}s{VLB * VLB}s")
 
 # 64-bit lanes a Z register may be filled with: zeros, ones, the sign bits
 # and the extremes of each element size.
@@ -173,13 +178,14 @@ def sve_state(seed, kind, insn):
     if kind == "SA":
         # FPCR.AH, which FABS and FNEG read.
         fpcr = (r.next() & 1) << 1
-    if kind == "SF":
+    if kind in ("SF", "ZF"):
         # Floating-point inputs: per register, the state above, or lanes of
         # floating-point values, half of the registers in the format the
-        # word's `size` field names and the rest in half, single or double
-        # precision; then a random FPCR (RMode, FZ, DN, AHP, FZ16, and
-        # FEAT_AFP's FIZ, AH and NEP).
-        own = (insn >> 22) & 3
+        # word names and the rest in half, single or double precision; then
+        # a random FPCR (RMode, FZ, DN, AHP, FZ16, and FEAT_AFP's FIZ, AH
+        # and NEP). The format is the one the `size` field names, or for an
+        # outer product (ZF) its sources' (`za_fp_format`).
+        own = (insn >> 22) & 3 if kind == "SF" else za_fp_format(insn)
         for i in range(32):
             sel = r.next() & 7
             if sel != 0:
@@ -200,6 +206,35 @@ def sve_state(seed, kind, insn):
             elif sel == 3:
                 z[i] = int_register(r, max(own - 1, 0), True)
     return z, p, fpcr
+
+
+def za_fp_format(insn):
+    """The `FP_FORMATS` index of a floating-point outer product's source
+    elements: single precision (bit 24 clear), BFloat16 (bit 24 set, bit
+    21 clear) or half precision."""
+    if not (insn >> 24) & 1:
+        return 2
+    return 1 if (insn >> 21) & 1 else 0
+
+
+def za_state(seed, kind):
+    """ZA's horizontal vectors (as integers, little-endian over their bytes):
+    zero but for the Z kinds, whose each is zero, lanes of single-precision
+    values (the floating-point outer products' accumulators), lanes of
+    `Z_SPECIAL` or random. Must match `difftest::za_state` in Rust."""
+    za = [0] * VLB
+    if not kind.startswith("Z"):
+        return za
+    r = SplitMix64(seed ^ 0x5A41_5F53_5441_5445)
+    for i in range(VLB):
+        sel = r.next() & 3
+        if sel == 1:
+            za[i] = fp_register(r, 2)
+        elif sel == 2:
+            za[i] = sum(Z_SPECIAL[r.next() % len(Z_SPECIAL)] << (64 * k) for k in range(VLB // 8))
+        elif sel == 3:
+            za[i] = sum(r.next() << (64 * k) for k in range(VLB // 8))
+    return za
 
 
 def movprfx_unpredicated(w):
@@ -303,8 +338,11 @@ def not_pmull128(w):
 # and `001`, then the loads, stores and prefetches (`op0 = 100`, `101` and
 # `111`, kind M, or R for scalar plus scalar), then the floating-point
 # instructions (`op0 = 011`, kind SF), then SVE2's integer instructions
-# (`op0 = 010`, kind SI), `op1<7> = 0` first, their fixed bits from
-# AARCHMRS 2026-09.
+# (`op0 = 010`, kind SI), `op1<7> = 0` first, then the ZA instructions of
+# the A64 `sme` group (kind Z, ZF for the floating-point outer products,
+# ZR and ZM for the loads and stores as R and M), their fixed bits from
+# AARCHMRS 2026-09. A word of a class that is unallocated (MOVA's `Q = 1`
+# with a `size` other than 11) raises a signal and is dropped.
 FAMILIES = [
     ("sve_int_bin_pred_arit_0", "S", 0x04000000, 0x00C71FFF, None),
     ("sve_int_bin_pred_arit_1", "S", 0x04080000, 0x00C71FFF, None),
@@ -490,6 +528,19 @@ FAMILIES = [
     ("sve_intx_shift_narrow", "SI", 0x45200000, 0x005F3FFF, None),
     ("sve_intx_extract_narrow", "SI", 0x45204000, 0x00581FFF, None),
     ("sve_intx_arith_narrow", "SI", 0x45206000, 0x00DF1FFF, None),
+    ("mortlach_f32f32_prod", "ZF", 0x80800000, 0x001FFFF3, None),
+    ("mortlach_b16f32_prod", "ZF", 0x81800000, 0x001FFFF3, None),
+    ("mortlach_f16f32_prod", "ZF", 0x81A00000, 0x001FFFF3, None),
+    ("mortlach_i8i32_prod", "Z", 0xA0800000, 0x013FFFF3, None),
+    ("mortlach_insert_pred", "Z", 0xC0000000, 0x00C1FFEF, None),
+    ("mortlach_extract_pred", "Z", 0xC0020000, 0x00C1FDFF, None),
+    ("mortlach_zero", "Z", 0xC0080000, 0x000000FF, None),
+    ("mortlach_addhv", "Z", 0xC0900000, 0x0001FFE3, None),
+    ("mortlach_contig_load", "ZR", 0xE0000000, 0x00DFFFEF, None),
+    ("mortlach_contig_store", "ZR", 0xE0200000, 0x00DFFFEF, None),
+    ("mortlach_ctxt_ldst", "ZM", 0xE1000000, 0x002063EF, None),
+    ("mortlach_contig_qload", "ZR", 0xE1C00000, 0x001FFFEF, None),
+    ("mortlach_contig_qstore", "ZR", 0xE1E00000, 0x001FFFEF, None),
 ]
 
 
@@ -536,10 +587,10 @@ class Harness:
             self.command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
         )
 
-    def run(self, insn, x, sp, nzcv, fpcr, z, p, data):
+    def run(self, insn, x, sp, nzcv, fpcr, z, p, za, data):
         """Run `insn` from the state; `None` if it raised a signal, else the
-        state after it as `(x, sp, nzcv, fpsr, z, p, data)`."""
-        request = RECORD.pack(insn, *x, sp, nzcv, fpcr, 0, 0, to_bytes(z, VLB), to_bytes(p, PLB))
+        state after it as `(x, sp, nzcv, fpsr, z, p, za, data)`."""
+        request = RECORD.pack(insn, *x, sp, nzcv, fpcr, 0, 0, to_bytes(z, VLB), to_bytes(p, PLB), to_bytes(za, VLB))
         self.proc.stdin.write(request + bytes(data))
         self.proc.stdin.flush()
         reply = self.read(RECORD.size)
@@ -550,7 +601,8 @@ class Harness:
             return None
         xs = list(regs[:31])
         out_sp, out_nzcv, _fpcr, fpsr, _pad = regs[31:36]
-        return xs, out_sp, out_nzcv, fpsr, from_bytes(regs[36], VLB, 32), from_bytes(regs[37], PLB, 16), out_data
+        zs, ps, zas = from_bytes(regs[36], VLB, 32), from_bytes(regs[37], PLB, 16), from_bytes(regs[38], VLB, VLB)
+        return xs, out_sp, out_nzcv, fpsr, zs, ps, zas, out_data
 
     def read(self, n):
         got = self.proc.stdout.read(n)
@@ -571,9 +623,9 @@ class Harness:
 
 def vector_line(kind, insn, seed, out_nzcv, fpsr, before, after):
     """A vector's fields after its family name, from `before` and `after`,
-    each `(x, sp, z, p, data)`."""
-    x, sp, z, p, data = before
-    xs, out_sp, zs, ps, out_data = after
+    each `(x, sp, z, p, za, data)`."""
+    x, sp, z, p, za, data = before
+    xs, out_sp, zs, ps, zas, out_data = after
     regs = [f"{i}:{xs[i]:x}" for i in range(31) if xs[i] != x[i]]
     if out_sp != sp:
         regs.append(f"31:{out_sp:x}")
@@ -584,26 +636,32 @@ def vector_line(kind, insn, seed, out_nzcv, fpsr, before, after):
     mem = []
     if out_data != data:
         mem = [f"{i:x}:{out_data[i]:x}" for i in range(DATA_SIZE) if out_data[i] != data[i]]
-    return (
+    line = (
         f"{kind} {insn:08x} {seed:x} {CODE + 4:x} {out_nzcv:x} "
         f"r={','.join(regs) or '-'} z={','.join(zregs) or '-'} p={','.join(pregs) or '-'} "
         f"m={','.join(mem) or '-'} f={fpsr:x}"
     )
+    if kind.startswith("Z"):
+        rows = [f"{i}:{zas[i]:0{2 * VLB}x}" for i in range(VLB) if zas[i] != za[i]]
+        line += f" za={','.join(rows) or '-'}"
+    return line
 
 
 def run_case(harness, insn, seed, kind):
     x, sp, nzcv, _v, data, base_fpcr = initial_state(seed, kind, insn)
     z, p, fpcr = sve_state(seed, kind, insn)
+    za = za_state(seed, kind)
     fpcr |= base_fpcr
     try:
-        result = harness.run(insn, x, sp & MASK64, nzcv, fpcr, z, p, data)
+        result = harness.run(insn, x, sp & MASK64, nzcv, fpcr, z, p, za, data)
     except EmulatorAborted as aborted:
         print(f"{insn:08x}: {aborted}; dropped", file=sys.stderr)
         return None
     if result is None:
         return None
-    xs, out_sp, out_nzcv, fpsr, zs, ps, out_data = result
-    return vector_line(kind, insn, seed, out_nzcv, fpsr, (x, sp, z, p, data), (xs, out_sp, zs, ps, out_data))
+    xs, out_sp, out_nzcv, fpsr, zs, ps, zas, out_data = result
+    before = (x, sp, z, p, za, data)
+    return vector_line(kind, insn, seed, out_nzcv, fpsr, before, (xs, out_sp, zs, ps, zas, out_data))
 
 
 def main():

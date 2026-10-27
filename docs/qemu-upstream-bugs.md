@@ -25,7 +25,7 @@ Reproducers:
   header gives the commands and the expected and observed output.
 - `docs/qemu-aarch64-probe-user.c`: a static Linux program for
   `qemu-aarch64 -cpu max`, one case per argument, for the entries fixed
-  upstream and for entries 12 to 14.
+  upstream and for entries 12 to 15.
 
 What `rusty_box_aarch64` does about each entry is in its README, "Where the
 references differ".
@@ -515,6 +515,43 @@ and `sve_fsubr_size00`.
 names and refuse `esz = MO_8` for them. Built and tested on `v11.1.2`:
 `sve_fmad_size00` raises SIGILL, and `rusty_box_aarch64`'s SVE vectors
 were generated with it.
+
+### 15. SME LD1 to a vertical tile slice leaves the inactive elements after the last active one
+
+**Impact**: moderate. The SME LD1B, LD1H, LD1W, LD1D and LD1Q to a
+vertical tile slice zero the inactive elements up to the last active one
+and leave the ones after it as they were, where the architecture zeroes
+them all. Code that loads a partial column of a tile, the last iteration
+of a loop under a WHILELO predicate among it, reads stale elements back
+from ZA. Horizontal slices are right, and so is a load with no element
+active, which clears the whole slice.
+
+**Location**: `target/arm/tcg/sme_helper.c`, `sme_ld1()`. On its fast
+path (every page RAM), a horizontal slice is cleared whole with `memset`
+before the active elements are loaded; for a vertical one it clears the
+elements before the first active one (`clr_fn(za, 0, reg_off)`), and the
+loop over the elements clears each inactive one it meets, but the loop
+runs from the first active element to the last (`info.reg_off_last`), so
+the inactive elements after the last are never cleared. The same holds on
+the second page of a load that crosses one. The slow path, for MMIO,
+loads into a zeroed scratch vector and copies it all, and is right.
+
+**What the Arm ARM says**: LD1W (scalar plus scalar, tile slice)
+(`ld1w_za_p_rrr_`) computes `result[e*:esize] = Zeros{esize}` for every
+inactive element `e` from 0 to `dim - 1`, then writes the whole slice,
+`ZAslice{VL}(t, esize, vertical, slice) = result`; LD1B, LD1H, LD1D and
+LD1Q are the same.
+
+**Reproduce**: `docs/qemu-aarch64-probe-user.c`, case
+`sme_ld1_vertical_tail`.
+
+    Arm:          ld1w {za0v.s[w12, 0]}, p0/z with element 0 alone active: element 1 = 0
+    QEMU 11.1.2:  element 1 = 0xffffffff, its value before the load
+
+**Fix**: `docs/qemu-sme-ld1-vertical-tail.patch`: clear the whole slice
+before loading, vertical or horizontal, which makes the per-element
+clears redundant. Built and tested on `v11.1.2`: the probe agrees, and
+`rusty_box_aarch64`'s ZA vectors were generated with it.
 
 ---
 
