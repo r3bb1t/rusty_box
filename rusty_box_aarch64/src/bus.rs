@@ -115,21 +115,42 @@ impl AccessWidth {
 pub(crate) fn le_value(bytes: &[u8]) -> u64 {
     match bytes.len() {
         1 => u64::from(bytes[0]),
-        2 => bytes.try_into().map_or(0, |b| u64::from(u16::from_le_bytes(b))),
-        4 => bytes.try_into().map_or(0, |b| u64::from(u32::from_le_bytes(b))),
+        2 => bytes
+            .try_into()
+            .map_or(0, |b| u64::from(u16::from_le_bytes(b))),
+        4 => bytes
+            .try_into()
+            .map_or(0, |b| u64::from(u32::from_le_bytes(b))),
         _ => bytes.try_into().map_or(0, u64::from_le_bytes),
     }
 }
 
-/// Store `value` little-endian into a 1-, 2-, 4- or 8-byte slice.
+/// Store the low `width` bytes of `value` little-endian at `offset` in
+/// `bytes`, each width a fixed-size store. `None`, with nothing written,
+/// when they do not all lie in `bytes`.
 #[inline(always)]
-pub(crate) fn store_le(bytes: &mut [u8], value: u64) {
-    match bytes.len() {
-        1 => bytes[0] = value as u8,
-        2 => bytes.copy_from_slice(&(value as u16).to_le_bytes()),
-        4 => bytes.copy_from_slice(&(value as u32).to_le_bytes()),
-        _ => bytes.copy_from_slice(&value.to_le_bytes()),
+pub(crate) fn store_le(
+    bytes: &mut [u8],
+    offset: usize,
+    width: AccessWidth,
+    value: u64,
+) -> Option<()> {
+    match width {
+        AccessWidth::Byte => store_array(bytes, offset, (value as u8).to_le_bytes()),
+        AccessWidth::Half => store_array(bytes, offset, (value as u16).to_le_bytes()),
+        AccessWidth::Word => store_array(bytes, offset, (value as u32).to_le_bytes()),
+        AccessWidth::Dword => store_array(bytes, offset, value.to_le_bytes()),
     }
+}
+
+/// Store `value` at `offset` in `bytes`, or `None`, with nothing written,
+/// when it does not lie entirely in `bytes`.
+#[inline(always)]
+fn store_array<const N: usize>(bytes: &mut [u8], offset: usize, value: [u8; N]) -> Option<()> {
+    let end = offset.checked_add(N)?;
+    let to: &mut [u8; N] = bytes.get_mut(offset..end)?.try_into().ok()?;
+    *to = value;
+    Some(())
 }
 
 /// Why the bus could not complete an access.
@@ -142,6 +163,133 @@ pub enum BusFault {
     /// external abort for an access to unassigned memory
     /// (`arm_cpu_do_transaction_failed`); so does this board.
     Unmapped,
+}
+
+/// Guest-physical bytes `start..end`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PhysSpan {
+    pub(crate) start: PhysAddr,
+    pub(crate) end: PhysAddr,
+}
+
+impl PhysSpan {
+    /// The `len` bytes at `start`; `None` for none, or for a span past the
+    /// end of the address space.
+    #[inline]
+    pub(crate) fn new(start: PhysAddr, len: u64) -> Option<Self> {
+        let end = start
+            .get()
+            .checked_add(len)
+            .filter(|&end| end > start.get())?;
+        Some(Self {
+            start,
+            end: PhysAddr::new(end),
+        })
+    }
+
+    /// Its length in bytes.
+    #[inline]
+    pub(crate) const fn len(self) -> u64 {
+        self.end.get() - self.start.get()
+    }
+}
+
+/// How many spans [`Writes`] keeps apart.
+const WRITE_SPANS: usize = 4;
+
+/// Memory something other than the processor wrote — a device, by DMA —
+/// for the processor to forget the code it decoded there
+/// (`Cpu::forget_code`). Spans beyond what it keeps apart merge into their
+/// hull, which only ever covers more.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Writes {
+    spans: [PhysSpan; WRITE_SPANS],
+    len: usize,
+}
+
+impl Writes {
+    pub(crate) const NONE: Self = Self {
+        spans: [PhysSpan {
+            start: PhysAddr::new(0),
+            end: PhysAddr::new(0),
+        }; WRITE_SPANS],
+        len: 0,
+    };
+
+    /// Note `len` bytes written at `start`.
+    pub(crate) fn add(&mut self, start: PhysAddr, len: u64) {
+        if let Some(written) = PhysSpan::new(start, len) {
+            self.add_span(written);
+        }
+    }
+
+    fn add_span(&mut self, written: PhysSpan) {
+        for span in self.spans[..self.len].iter_mut() {
+            if written.start <= span.end && span.start <= written.end {
+                span.start = span.start.min(written.start);
+                span.end = span.end.max(written.end);
+                return;
+            }
+        }
+        if self.len < WRITE_SPANS {
+            self.spans[self.len] = written;
+            self.len += 1;
+        } else {
+            let last = &mut self.spans[WRITE_SPANS - 1];
+            last.start = last.start.min(written.start);
+            last.end = last.end.max(written.end);
+        }
+    }
+
+    /// Note everything `other` noted.
+    pub(crate) fn merge(&mut self, other: &Self) {
+        for &span in other.spans() {
+            self.add_span(span);
+        }
+    }
+
+    pub(crate) fn spans(&self) -> &[PhysSpan] {
+        &self.spans[..self.len]
+    }
+
+    /// The spans noted, leaving none.
+    pub(crate) fn take(&mut self) -> Self {
+        core::mem::replace(self, Self::NONE)
+    }
+}
+
+/// A count of the changes to what fetches from some memory read, other than
+/// the writes a processor sees as stores: a processor keeps what it decoded
+/// from that memory only while its epoch stays the same. 64 bits, so that a
+/// count never comes round again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CodeEpoch(u64);
+
+impl CodeEpoch {
+    #[inline]
+    pub const fn new(count: u64) -> Self {
+        Self(count)
+    }
+
+    #[inline]
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+/// Whether a processor may keep the instructions it decoded from an
+/// address, or must fetch them again each time it executes them.
+///
+/// Closed (R5): a processor either caches or it does not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FetchSource {
+    /// A fetch has no side effect, and the word it reads changes only by a
+    /// store the processor makes itself, by a write its owner reports to it
+    /// (a device's DMA, a host's), or with the epoch: RAM, and ROM in its
+    /// read mode.
+    Stable(CodeEpoch),
+    /// Anything else: a fetch is a device access like any other.
+    Volatile,
 }
 
 /// The guest-physical address space as the processor sees it.
@@ -157,7 +305,8 @@ pub enum BusFault {
 /// accesses only) overrides them.
 pub trait PhysBus {
     /// Read `width` bytes at `addr`, little-endian, zero-extended to 64 bits.
-    fn read(&mut self, addr: PhysAddr, width: AccessWidth, clock: VmClock) -> Result<u64, BusFault>;
+    fn read(&mut self, addr: PhysAddr, width: AccessWidth, clock: VmClock)
+        -> Result<u64, BusFault>;
 
     /// Write the low `width` bytes of `value` at `addr`, little-endian.
     fn write(
@@ -171,7 +320,8 @@ pub trait PhysBus {
     /// Fetch the instruction word at `addr`.
     #[inline]
     fn fetch(&mut self, addr: PhysAddr, clock: VmClock) -> Result<u32, BusFault> {
-        self.read(addr, AccessWidth::Word, clock).map(|word| word as u32)
+        self.read(addr, AccessWidth::Word, clock)
+            .map(|word| word as u32)
     }
 
     /// Read the translation table descriptor at `addr`.
@@ -179,4 +329,26 @@ pub trait PhysBus {
     fn read_descriptor(&mut self, addr: PhysAddr, clock: VmClock) -> Result<u64, BusFault> {
         self.read(addr, AccessWidth::Dword, clock)
     }
+
+    /// Whether the instructions fetched from an address may be kept. The
+    /// default, [`FetchSource::Volatile`], has every instruction fetched as
+    /// it executes.
+    #[inline]
+    fn fetch_source(&self, _addr: PhysAddr) -> FetchSource {
+        FetchSource::Volatile
+    }
+
+    /// Whether an access since its owner last cleared the mark reached
+    /// something other than memory, and so may have changed what the
+    /// processor looks at between instructions: its interrupt inputs, the
+    /// next timed event, what fetches read. The default, `true`, has the
+    /// processor look after every instruction.
+    #[inline]
+    fn devices_touched(&self) -> bool {
+        true
+    }
 }
+
+#[cfg(test)]
+#[path = "../tests/unit/bus.rs"]
+mod tests;

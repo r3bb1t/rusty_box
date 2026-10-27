@@ -46,23 +46,46 @@ const NTWE: u64 = 1 << 18;
 
 /// A trapped wait: EC 0x01, CV = 1 and COND = 0xE, then TI, and for the
 /// timed forms RV = 1 and RN = 1 (X1).
-const WFI_TRAP: Taken = Taken { ec: 0x01, iss: 0x01E0_0000 };
-const WFE_TRAP: Taken = Taken { ec: 0x01, iss: 0x01E0_0001 };
-const WFIT_TRAP: Taken = Taken { ec: 0x01, iss: 0x01E0_0026 };
-const WFET_TRAP: Taken = Taken { ec: 0x01, iss: 0x01E0_0027 };
+const WFI_TRAP: Taken = Taken {
+    ec: 0x01,
+    iss: 0x01E0_0000,
+};
+const WFE_TRAP: Taken = Taken {
+    ec: 0x01,
+    iss: 0x01E0_0001,
+};
+const WFIT_TRAP: Taken = Taken {
+    ec: 0x01,
+    iss: 0x01E0_0026,
+};
+const WFET_TRAP: Taken = Taken {
+    ec: 0x01,
+    iss: 0x01E0_0027,
+};
 
 /// The instruction at `CODE` over a RAM that holds `DATA` too.
 struct Ram(Vec<u8>);
 
 impl PhysBus for Ram {
-    fn read(&mut self, addr: PhysAddr, width: AccessWidth, _clock: VmClock) -> Result<u64, BusFault> {
+    fn read(
+        &mut self,
+        addr: PhysAddr,
+        width: AccessWidth,
+        _clock: VmClock,
+    ) -> Result<u64, BusFault> {
         let a = addr.get() as usize;
         let n = width.bytes() as usize;
         let bytes = self.0.get(a..a + n).ok_or(BusFault::Unmapped)?;
         Ok(bytes.iter().rev().fold(0, |v, &b| (v << 8) | u64::from(b)))
     }
 
-    fn write(&mut self, addr: PhysAddr, width: AccessWidth, value: u64, _clock: VmClock) -> Result<(), BusFault> {
+    fn write(
+        &mut self,
+        addr: PhysAddr,
+        width: AccessWidth,
+        value: u64,
+        _clock: VmClock,
+    ) -> Result<(), BusFault> {
         let a = addr.get() as usize;
         let n = width.bytes() as usize;
         let bytes = self.0.get_mut(a..a + n).ok_or(BusFault::Unmapped)?;
@@ -84,7 +107,11 @@ enum Outcome {
 /// Step `insn` at `CODE` on a running processor. A taken exception leaves
 /// EL1; the processor is put back at the level it executed at.
 fn run(cpu: &mut Cpu, insn: u32) -> Outcome {
-    assert_eq!(cpu.activity, Activity::Running, "a waiting processor executes nothing");
+    assert_eq!(
+        cpu.activity,
+        Activity::Running,
+        "a waiting processor executes nothing"
+    );
     let pstate = cpu.pstate;
     cpu.pc = CODE;
     cpu.sys.esr_el1 = 0x3F << 26;
@@ -100,7 +127,11 @@ fn run(cpu: &mut Cpu, insn: u32) -> Outcome {
         },
         Step::Retired if cpu.sys.esr_el1 >> 26 == 0x3F => Outcome::Retired,
         Step::Retired => {
-            assert_eq!(cpu.pc & !0x7FF, VBAR, "{insn:#010x} took an exception to the vector table");
+            assert_eq!(
+                cpu.pc & !0x7FF,
+                VBAR,
+                "{insn:#010x} took an exception to the vector table"
+            );
             cpu.pstate = pstate;
             let esr = cpu.sys.esr_el1;
             Outcome::Took(Taken {
@@ -150,7 +181,11 @@ fn wfe_consumes_the_event_that_sev_sevl_and_eret_send() {
     for send in [SEV, SEVL] {
         assert_eq!(run(&mut cpu, send), Outcome::Retired);
         assert_eq!(run(&mut cpu, WFE), Outcome::Retired, "{send:#010x}");
-        assert_eq!(run(&mut cpu, WFE), Outcome::Waiting(Wait::Event), "{send:#010x}: consumed");
+        assert_eq!(
+            run(&mut cpu, WFE),
+            Outcome::Waiting(Wait::Event),
+            "{send:#010x}: consumed"
+        );
         wake_by_interrupt(&mut cpu);
     }
     // ERET to EL1h, interrupts masked.
@@ -158,7 +193,11 @@ fn wfe_consumes_the_event_that_sev_sevl_and_eret_send() {
     cpu.sys.elr_el1 = CODE + 0x100;
     assert_eq!(run(&mut cpu, ERET), Outcome::Retired);
     assert_eq!(cpu.pc, CODE + 0x100);
-    assert_eq!(run(&mut cpu, WFE), Outcome::Retired, "an exception return sends an event");
+    assert_eq!(
+        run(&mut cpu, WFE),
+        Outcome::Retired,
+        "an exception return sends an event"
+    );
     // An illegal return sends one too (`SendEventLocal` follows
     // `SetPSTATEFromPSR` whatever the return).
     cpu.sys.spsr_el1 = 0x3C8; // EL2h: not implemented
@@ -178,8 +217,16 @@ fn el0_wfe_traps_only_when_it_would_wait() {
     at_el0(&mut cpu);
     assert_eq!(run(&mut cpu, WFE), Outcome::Took(WFE_TRAP));
     assert_eq!(run(&mut cpu, SEVL), Outcome::Retired);
-    assert_eq!(run(&mut cpu, WFE), Outcome::Retired, "the event completes it before the trap check");
-    assert_eq!(run(&mut cpu, WFE), Outcome::Took(WFE_TRAP), "and was consumed");
+    assert_eq!(
+        run(&mut cpu, WFE),
+        Outcome::Retired,
+        "the event completes it before the trap check"
+    );
+    assert_eq!(
+        run(&mut cpu, WFE),
+        Outcome::Took(WFE_TRAP),
+        "and was consumed"
+    );
     cpu.sys.sctlr_el1 |= NTWE;
     assert_eq!(run(&mut cpu, WFE), Outcome::Waiting(Wait::Event));
 }
@@ -190,11 +237,22 @@ fn el0_wfe_traps_only_when_it_would_wait() {
 #[test]
 fn wfi_with_an_interrupt_pending_completes_before_the_trap_check() {
     let mut cpu = cpu(Implementation::CORTEX_A57);
-    assert!(cpu.pstate.i && cpu.pstate.f, "interrupts are masked at reset");
+    assert!(
+        cpu.pstate.i && cpu.pstate.f,
+        "interrupts are masked at reset"
+    );
     cpu.set_interrupt_lines(true, false);
-    assert_eq!(run(&mut cpu, WFI), Outcome::Retired, "a masked IRQ is pending");
+    assert_eq!(
+        run(&mut cpu, WFI),
+        Outcome::Retired,
+        "a masked IRQ is pending"
+    );
     cpu.set_interrupt_lines(false, true);
-    assert_eq!(run(&mut cpu, WFI), Outcome::Retired, "a masked FIQ is pending");
+    assert_eq!(
+        run(&mut cpu, WFI),
+        Outcome::Retired,
+        "a masked FIQ is pending"
+    );
     cpu.set_interrupt_lines(false, false);
     assert_eq!(run(&mut cpu, WFI), Outcome::Waiting(Wait::Interrupt));
     wake_by_interrupt(&mut cpu);
@@ -202,7 +260,11 @@ fn wfi_with_an_interrupt_pending_completes_before_the_trap_check() {
     cpu.sys.sctlr_el1 &= !NTWI;
     at_el0(&mut cpu);
     cpu.set_interrupt_lines(true, false);
-    assert_eq!(run(&mut cpu, WFI), Outcome::Retired, "no trap: the interrupt completes it");
+    assert_eq!(
+        run(&mut cpu, WFI),
+        Outcome::Retired,
+        "no trap: the interrupt completes it"
+    );
     cpu.set_interrupt_lines(false, false);
     assert_eq!(run(&mut cpu, WFI), Outcome::Took(WFI_TRAP));
 }
@@ -218,7 +280,10 @@ fn wfit_and_wfet_wait_until_their_timeout() {
     cpu.wait_until(tick(1000));
 
     cpu.x[1] = 1100;
-    assert_eq!(run(&mut cpu, WFIT_X1), Outcome::Waiting(Wait::InterruptUntil(tick(1100))));
+    assert_eq!(
+        run(&mut cpu, WFIT_X1),
+        Outcome::Waiting(Wait::InterruptUntil(tick(1100)))
+    );
     assert_eq!(cpu.wake_deadline(), Some(tick(1100)));
     cpu.wait_until(tick(1099));
     assert!(!cpu.wake_if_pending(), "one tick short of the timeout");
@@ -226,23 +291,41 @@ fn wfit_and_wfet_wait_until_their_timeout() {
     assert!(cpu.wake_if_pending(), "CNTVCT_EL0 reached X1");
 
     cpu.x[1] = 5000;
-    assert_eq!(run(&mut cpu, WFIT_X1), Outcome::Waiting(Wait::InterruptUntil(tick(5000))));
+    assert_eq!(
+        run(&mut cpu, WFIT_X1),
+        Outcome::Waiting(Wait::InterruptUntil(tick(5000)))
+    );
     wake_by_interrupt(&mut cpu);
     cpu.set_interrupt_lines(true, false);
-    assert_eq!(run(&mut cpu, WFIT_X1), Outcome::Retired, "an interrupt is pending");
+    assert_eq!(
+        run(&mut cpu, WFIT_X1),
+        Outcome::Retired,
+        "an interrupt is pending"
+    );
     cpu.set_interrupt_lines(false, false);
     cpu.x[1] = cpu.counter().get();
-    assert_eq!(run(&mut cpu, WFIT_X1), Outcome::Retired, "the timeout has been reached");
+    assert_eq!(
+        run(&mut cpu, WFIT_X1),
+        Outcome::Retired,
+        "the timeout has been reached"
+    );
 
     cpu.x[1] = cpu.counter().get() + 50;
     let deadline = tick(cpu.x[1]);
-    assert_eq!(run(&mut cpu, WFET_X1), Outcome::Waiting(Wait::EventUntil(deadline)));
+    assert_eq!(
+        run(&mut cpu, WFET_X1),
+        Outcome::Waiting(Wait::EventUntil(deadline))
+    );
     assert_eq!(cpu.wake_deadline(), Some(deadline));
     cpu.wait_until(deadline);
     assert!(cpu.wake_if_pending());
     assert_eq!(run(&mut cpu, SEVL), Outcome::Retired);
     cpu.x[1] = u64::MAX;
-    assert_eq!(run(&mut cpu, WFET_X1), Outcome::Retired, "the event completes it");
+    assert_eq!(
+        run(&mut cpu, WFET_X1),
+        Outcome::Retired,
+        "the event completes it"
+    );
     assert_eq!(
         run(&mut cpu, WFET_X1),
         Outcome::Waiting(Wait::Event),
@@ -252,7 +335,11 @@ fn wfit_and_wfet_wait_until_their_timeout() {
     wake_by_interrupt(&mut cpu);
     assert_eq!(run(&mut cpu, WFIT_X1), Outcome::Waiting(Wait::Interrupt));
     wake_by_interrupt(&mut cpu);
-    assert_eq!(run(&mut cpu, WFET_XZR), Outcome::Retired, "XZR is a timeout of 0, long passed");
+    assert_eq!(
+        run(&mut cpu, WFET_XZR),
+        Outcome::Retired,
+        "XZR is a timeout of 0, long passed"
+    );
 
     cpu.sys.sctlr_el1 &= !(NTWE | NTWI);
     at_el0(&mut cpu);
@@ -260,12 +347,20 @@ fn wfit_and_wfet_wait_until_their_timeout() {
     assert_eq!(run(&mut cpu, WFIT_X1), Outcome::Took(WFIT_TRAP));
     assert_eq!(run(&mut cpu, WFET_X1), Outcome::Took(WFET_TRAP));
     cpu.x[1] = 0;
-    assert_eq!(run(&mut cpu, WFIT_X1), Outcome::Retired, "a passed timeout completes it before the trap check");
+    assert_eq!(
+        run(&mut cpu, WFIT_X1),
+        Outcome::Retired,
+        "a passed timeout completes it before the trap check"
+    );
     assert_eq!(run(&mut cpu, WFET_X1), Outcome::Retired);
 
     let mut v80 = self::cpu(Implementation::CORTEX_A57);
     for insn in [WFET_X1, WFIT_X1] {
-        assert_eq!(run(&mut v80, insn), Outcome::Took(UNDEFINED), "{insn:#010x} without FEAT_WFxT");
+        assert_eq!(
+            run(&mut v80, insn),
+            Outcome::Took(UNDEFINED),
+            "{insn:#010x} without FEAT_WFxT"
+        );
     }
 }
 
@@ -285,12 +380,23 @@ fn the_event_stream_sets_the_event_register_and_ends_a_wfe() {
         cpu.wait_until(tick(first - 1));
         assert!(!cpu.wake_if_pending());
         cpu.wait_until(tick(first));
-        assert!(cpu.wake_if_pending(), "EVNTDIR {evntdir}: the stream's event");
-        assert_eq!(run(&mut cpu, WFE), Outcome::Waiting(Wait::Event), "the wake consumed it");
+        assert!(
+            cpu.wake_if_pending(),
+            "EVNTDIR {evntdir}: the stream's event"
+        );
+        assert_eq!(
+            run(&mut cpu, WFE),
+            Outcome::Waiting(Wait::Event),
+            "the wake consumed it"
+        );
         assert_eq!(cpu.wake_deadline(), Some(tick(second)));
         wake_by_interrupt(&mut cpu);
         cpu.wait_until(tick(second));
-        assert_eq!(run(&mut cpu, WFE), Outcome::Retired, "an event while running");
+        assert_eq!(
+            run(&mut cpu, WFE),
+            Outcome::Retired,
+            "an event while running"
+        );
         assert_eq!(run(&mut cpu, WFE), Outcome::Waiting(Wait::Event));
     }
 }
@@ -315,7 +421,11 @@ fn cntkctl_writes_keep_past_events_and_make_none() {
     cpu.wait_until(tick(100));
     cpu.x[0] = EVNTEN | EVNTI_4;
     assert_eq!(run(&mut cpu, MSR_CNTKCTL), Outcome::Retired);
-    assert_eq!(run(&mut cpu, WFE), Outcome::Waiting(Wait::Event), "16 + 32n before 100 made no event");
+    assert_eq!(
+        run(&mut cpu, WFE),
+        Outcome::Waiting(Wait::Event),
+        "16 + 32n before 100 made no event"
+    );
     assert_eq!(cpu.wake_deadline(), Some(tick(112)));
 }
 
@@ -323,14 +433,22 @@ fn cntkctl_writes_keep_past_events_and_make_none() {
 /// `CNTKCTL_EL1` does not keep it.
 #[test]
 fn evntis_scales_the_stream_with_feat_ecv_only() {
-    for (imp, kept, first) in [(Implementation::EVERY_FEATURE, EVNTIS, 4096), (Implementation::CORTEX_A57, 0, 16)] {
+    for (imp, kept, first) in [
+        (Implementation::EVERY_FEATURE, EVNTIS, 4096),
+        (Implementation::CORTEX_A57, 0, 16),
+    ] {
         let mut cpu = cpu(imp);
         cpu.x[0] = EVNTEN | EVNTI_4 | EVNTIS;
         assert_eq!(run(&mut cpu, MSR_CNTKCTL), Outcome::Retired);
         assert_eq!(run(&mut cpu, MRS_CNTKCTL), Outcome::Retired);
         assert_eq!(cpu.x[0], EVNTEN | EVNTI_4 | kept);
         assert_eq!(run(&mut cpu, WFE), Outcome::Waiting(Wait::Event));
-        assert_eq!(cpu.wake_deadline(), Some(tick(first)), "FEAT_ECV {}", imp.has(Feature::Ecv));
+        assert_eq!(
+            cpu.wake_deadline(),
+            Some(tick(first)),
+            "FEAT_ECV {}",
+            imp.has(Feature::Ecv)
+        );
     }
 }
 
@@ -355,12 +473,18 @@ fn wfe_does_not_wait_while_the_exclusive_monitor_is_armed() {
 fn snapshots_keep_waits_and_the_event_register() {
     let mut cpu = cpu(Implementation::EVERY_FEATURE);
     cpu.x[1] = 777;
-    assert_eq!(run(&mut cpu, WFET_X1), Outcome::Waiting(Wait::EventUntil(tick(777))));
+    assert_eq!(
+        run(&mut cpu, WFET_X1),
+        Outcome::Waiting(Wait::EventUntil(tick(777)))
+    );
     let mut image = Vec::new();
     cpu.save(&mut image).expect("save");
     let mut restored = self::cpu(Implementation::EVERY_FEATURE);
     restored.restore(&mut image.as_slice()).expect("restore");
-    assert_eq!(restored.activity, Activity::Waiting(Wait::EventUntil(tick(777))));
+    assert_eq!(
+        restored.activity,
+        Activity::Waiting(Wait::EventUntil(tick(777)))
+    );
     assert_eq!(restored.wake_deadline(), Some(tick(777)));
 
     let mut cpu = self::cpu(Implementation::CORTEX_A57);
@@ -371,7 +495,11 @@ fn snapshots_keep_waits_and_the_event_register() {
     cpu.save(&mut image).expect("save");
     let mut restored = self::cpu(Implementation::CORTEX_A57);
     restored.restore(&mut image.as_slice()).expect("restore");
-    assert_eq!(run(&mut restored, WFE), Outcome::Retired, "the stream's event at 16 was saved");
+    assert_eq!(
+        run(&mut restored, WFE),
+        Outcome::Retired,
+        "the stream's event at 16 was saved"
+    );
     assert_eq!(run(&mut restored, WFE), Outcome::Waiting(Wait::Event));
 
     for activity in [
@@ -414,6 +542,9 @@ fn snapshots_keep_waits_and_the_event_register() {
         make(&mut cpu);
         let mut image = Vec::new();
         cpu.save(&mut image).expect("save");
-        assert_eq!(self::cpu(imp).restore(&mut image.as_slice()), Err(SnapError::Invalid(refusal)));
+        assert_eq!(
+            self::cpu(imp).restore(&mut image.as_slice()),
+            Err(SnapError::Invalid(refusal))
+        );
     }
 }

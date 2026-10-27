@@ -291,14 +291,30 @@ fn mortlach_multi_mem_ctg(word: u32) -> Option<Encoding> {
     let op1 = bits(word, 15, 15);
     let op2 = bits(word, 1, 1);
     match (op0, op1, op2) {
-        (0b000 | 0b001, 0b0, _) => mortlach_multi2_cld_cldnt_ss_ctg(word).map(Encoding::MortlachMulti2CldCldntSsCtg),
-        (0b000 | 0b001, 0b1, 0b0) => mortlach_multi4_cld_cldnt_ss_ctg(word).map(Encoding::MortlachMulti4CldCldntSsCtg),
-        (0b010 | 0b011, 0b0, _) => mortlach_multi2_cst_cstnt_ss_ctg(word).map(Encoding::MortlachMulti2CstCstntSsCtg),
-        (0b010 | 0b011, 0b1, 0b0) => mortlach_multi4_cst_cstnt_ss_ctg(word).map(Encoding::MortlachMulti4CstCstntSsCtg),
-        (0b100, 0b0, _) => mortlach_multi2_cld_cldnt_si_ctg(word).map(Encoding::MortlachMulti2CldCldntSiCtg),
-        (0b100, 0b1, 0b0) => mortlach_multi4_cld_cldnt_si_ctg(word).map(Encoding::MortlachMulti4CldCldntSiCtg),
-        (0b110, 0b0, _) => mortlach_multi2_cst_cstnt_si_ctg(word).map(Encoding::MortlachMulti2CstCstntSiCtg),
-        (0b110, 0b1, 0b0) => mortlach_multi4_cst_cstnt_si_ctg(word).map(Encoding::MortlachMulti4CstCstntSiCtg),
+        (0b000 | 0b001, 0b0, _) => {
+            mortlach_multi2_cld_cldnt_ss_ctg(word).map(Encoding::MortlachMulti2CldCldntSsCtg)
+        }
+        (0b000 | 0b001, 0b1, 0b0) => {
+            mortlach_multi4_cld_cldnt_ss_ctg(word).map(Encoding::MortlachMulti4CldCldntSsCtg)
+        }
+        (0b010 | 0b011, 0b0, _) => {
+            mortlach_multi2_cst_cstnt_ss_ctg(word).map(Encoding::MortlachMulti2CstCstntSsCtg)
+        }
+        (0b010 | 0b011, 0b1, 0b0) => {
+            mortlach_multi4_cst_cstnt_ss_ctg(word).map(Encoding::MortlachMulti4CstCstntSsCtg)
+        }
+        (0b100, 0b0, _) => {
+            mortlach_multi2_cld_cldnt_si_ctg(word).map(Encoding::MortlachMulti2CldCldntSiCtg)
+        }
+        (0b100, 0b1, 0b0) => {
+            mortlach_multi4_cld_cldnt_si_ctg(word).map(Encoding::MortlachMulti4CldCldntSiCtg)
+        }
+        (0b110, 0b0, _) => {
+            mortlach_multi2_cst_cstnt_si_ctg(word).map(Encoding::MortlachMulti2CstCstntSiCtg)
+        }
+        (0b110, 0b1, 0b0) => {
+            mortlach_multi4_cst_cstnt_si_ctg(word).map(Encoding::MortlachMulti4CstCstntSiCtg)
+        }
         _ => None,
     }
 }
@@ -311,14 +327,30 @@ fn mortlach_multi_mem_nctg(word: u32) -> Option<Encoding> {
     let op1 = bits(word, 15, 15);
     let op2 = bits(word, 2, 2);
     match (op0, op1, op2) {
-        (0b000 | 0b001, 0b0, _) => mortlach_multi2_cld_cldnt_ss_nctg(word).map(Encoding::MortlachMulti2CldCldntSsNctg),
-        (0b000 | 0b001, 0b1, 0b0) => mortlach_multi4_cld_cldnt_ss_nctg(word).map(Encoding::MortlachMulti4CldCldntSsNctg),
-        (0b010 | 0b011, 0b0, _) => mortlach_multi2_cst_cstnt_ss_nctg(word).map(Encoding::MortlachMulti2CstCstntSsNctg),
-        (0b010 | 0b011, 0b1, 0b0) => mortlach_multi4_cst_cstnt_ss_nctg(word).map(Encoding::MortlachMulti4CstCstntSsNctg),
-        (0b100, 0b0, _) => mortlach_multi2_cld_cldnt_si_nctg(word).map(Encoding::MortlachMulti2CldCldntSiNctg),
-        (0b100, 0b1, 0b0) => mortlach_multi4_cld_cldnt_si_nctg(word).map(Encoding::MortlachMulti4CldCldntSiNctg),
-        (0b110, 0b0, _) => mortlach_multi2_cst_cstnt_si_nctg(word).map(Encoding::MortlachMulti2CstCstntSiNctg),
-        (0b110, 0b1, 0b0) => mortlach_multi4_cst_cstnt_si_nctg(word).map(Encoding::MortlachMulti4CstCstntSiNctg),
+        (0b000 | 0b001, 0b0, _) => {
+            mortlach_multi2_cld_cldnt_ss_nctg(word).map(Encoding::MortlachMulti2CldCldntSsNctg)
+        }
+        (0b000 | 0b001, 0b1, 0b0) => {
+            mortlach_multi4_cld_cldnt_ss_nctg(word).map(Encoding::MortlachMulti4CldCldntSsNctg)
+        }
+        (0b010 | 0b011, 0b0, _) => {
+            mortlach_multi2_cst_cstnt_ss_nctg(word).map(Encoding::MortlachMulti2CstCstntSsNctg)
+        }
+        (0b010 | 0b011, 0b1, 0b0) => {
+            mortlach_multi4_cst_cstnt_ss_nctg(word).map(Encoding::MortlachMulti4CstCstntSsNctg)
+        }
+        (0b100, 0b0, _) => {
+            mortlach_multi2_cld_cldnt_si_nctg(word).map(Encoding::MortlachMulti2CldCldntSiNctg)
+        }
+        (0b100, 0b1, 0b0) => {
+            mortlach_multi4_cld_cldnt_si_nctg(word).map(Encoding::MortlachMulti4CldCldntSiNctg)
+        }
+        (0b110, 0b0, _) => {
+            mortlach_multi2_cst_cstnt_si_nctg(word).map(Encoding::MortlachMulti2CstCstntSiNctg)
+        }
+        (0b110, 0b1, 0b0) => {
+            mortlach_multi4_cst_cstnt_si_nctg(word).map(Encoding::MortlachMulti4CstCstntSiNctg)
+        }
         _ => None,
     }
 }
@@ -951,7 +983,9 @@ fn mortlach_ext(word: u32) -> Option<Encoding> {
     let op4 = bits(word, 9, 8);
     let op5 = bits(word, 1, 0);
     match (op0, op1, op2, op3, op4, op5) {
-        (_, 0b0, _, _, 0b00 | 0b01, _) => mortlach_extract_pred(word).map(Encoding::MortlachExtractPred),
+        (_, 0b0, _, _, 0b00 | 0b01, _) => {
+            mortlach_extract_pred(word).map(Encoding::MortlachExtractPred)
+        }
         (_, 0b1, 0b00 | 0b01, 0b000, 0b00, 0b00 | 0b10) => {
             mortlach_multi2_extract_ctg(word).map(Encoding::MortlachMulti2ExtractCtg)
         }
@@ -1101,7 +1135,9 @@ fn mortlach_zt_expand_ctg(word: u32) -> Option<Encoding> {
     let op3 = bits(word, 1, 0);
     match (op0, bits(word, 15, 14), op3) {
         (0b1, _, _) => mortlach_expand_1dst(word).map(Encoding::MortlachExpand1dst),
-        (0b0, 0b01 | 0b11, 0b00 | 0b10) => mortlach_expand_2dst_ctg(word).map(Encoding::MortlachExpand2dstCtg),
+        (0b0, 0b01 | 0b11, 0b00 | 0b10) => {
+            mortlach_expand_2dst_ctg(word).map(Encoding::MortlachExpand2dstCtg)
+        }
         (0b0, 0b10, 0b00) => mortlach_expand_4dst_ctg(word).map(Encoding::MortlachExpand4dstCtg),
         _ => None,
     }
@@ -1286,7 +1322,9 @@ fn mortlach_multi_sve_1(word: u32) -> Option<Encoding> {
         (0b00 | 0b10, 0b00 | 0b10, 0b00 | 0b10) => {
             mortlach_multi2_select_int(word).map(Encoding::MortlachMulti2SelectInt)
         }
-        (0b01, 0b00, 0b00) => mortlach_multi4_select_int(word).map(Encoding::MortlachMulti4SelectInt),
+        (0b01, 0b00, 0b00) => {
+            mortlach_multi4_select_int(word).map(Encoding::MortlachMulti4SelectInt)
+        }
         _ => None,
     }
 }
@@ -1299,11 +1337,17 @@ fn mortlach_multi_sve_2a(word: u32) -> Option<Encoding> {
     let op1 = bits(word, 9, 8);
     let op2 = bits(word, 7, 5);
     match (op0, op1, op2) {
-        (0b0, 0b00, 0b000 | 0b001) => mortlach_multi2_z_z_minmax_sm(word).map(Encoding::MortlachMulti2ZZMinmaxSm),
-        (0b0, 0b01, 0b000 | 0b001) => mortlach_multi2_z_z_fminmax_sm(word).map(Encoding::MortlachMulti2ZZFminmaxSm),
+        (0b0, 0b00, 0b000 | 0b001) => {
+            mortlach_multi2_z_z_minmax_sm(word).map(Encoding::MortlachMulti2ZZMinmaxSm)
+        }
+        (0b0, 0b01, 0b000 | 0b001) => {
+            mortlach_multi2_z_z_fminmax_sm(word).map(Encoding::MortlachMulti2ZZFminmaxSm)
+        }
         (0b0, 0b10, _) => mortlach_multi2_z_z_shift_sm(word).map(Encoding::MortlachMulti2ZZShiftSm),
         (0b0, 0b11, 0b000) => mortlach_multi2_z_z_add_sm(word).map(Encoding::MortlachMulti2ZZAddSm),
-        (0b1, 0b00, 0b000) => mortlach_multi2_z_z_sqdmulh_sm(word).map(Encoding::MortlachMulti2ZZSqdmulhSm),
+        (0b1, 0b00, 0b000) => {
+            mortlach_multi2_z_z_sqdmulh_sm(word).map(Encoding::MortlachMulti2ZZSqdmulhSm)
+        }
         _ => None,
     }
 }
@@ -1315,11 +1359,17 @@ fn mortlach_multi_sve_2b(word: u32) -> Option<Encoding> {
     let op1 = bits(word, 9, 8);
     let op2 = bits(word, 7, 5);
     match (op0, op1, op2) {
-        (0b0, 0b00, 0b000 | 0b001) => mortlach_multi4_z_z_minmax_sm(word).map(Encoding::MortlachMulti4ZZMinmaxSm),
-        (0b0, 0b01, 0b000 | 0b001) => mortlach_multi4_z_z_fminmax_sm(word).map(Encoding::MortlachMulti4ZZFminmaxSm),
+        (0b0, 0b00, 0b000 | 0b001) => {
+            mortlach_multi4_z_z_minmax_sm(word).map(Encoding::MortlachMulti4ZZMinmaxSm)
+        }
+        (0b0, 0b01, 0b000 | 0b001) => {
+            mortlach_multi4_z_z_fminmax_sm(word).map(Encoding::MortlachMulti4ZZFminmaxSm)
+        }
         (0b0, 0b10, _) => mortlach_multi4_z_z_shift_sm(word).map(Encoding::MortlachMulti4ZZShiftSm),
         (0b0, 0b11, 0b000) => mortlach_multi4_z_z_add_sm(word).map(Encoding::MortlachMulti4ZZAddSm),
-        (0b1, 0b00, 0b000) => mortlach_multi4_z_z_sqdmulh_sm(word).map(Encoding::MortlachMulti4ZZSqdmulhSm),
+        (0b1, 0b00, 0b000) => {
+            mortlach_multi4_z_z_sqdmulh_sm(word).map(Encoding::MortlachMulti4ZZSqdmulhSm)
+        }
         _ => None,
     }
 }
@@ -1382,7 +1432,9 @@ fn mortlach_multi_sve_3(word: u32) -> Option<Encoding> {
         (_, 0b010, 0b0) => mortlach_multi4_fclamp(word).map(Encoding::MortlachMulti4Fclamp),
         (_, 0b011, 0b0) => mortlach_multi4_clamp_int(word).map(Encoding::MortlachMulti4ClampInt),
         (_, 0b100, _) => mortlach_multi2_z_z_zip(word).map(Encoding::MortlachMulti2ZZZip),
-        (0b00, 0b101, _) => mortlach_multi2_z_z_long_zip(word).map(Encoding::MortlachMulti2ZZLongZip),
+        (0b00, 0b101, _) => {
+            mortlach_multi2_z_z_long_zip(word).map(Encoding::MortlachMulti2ZZLongZip)
+        }
         (0b11, 0b101, _) => mortlach_multi2_qrshr(word).map(Encoding::MortlachMulti2Qrshr),
         (_, 0b110 | 0b111, _) => mortlach_multi4_qrshr(word).map(Encoding::MortlachMulti4Qrshr),
         _ => None,
@@ -1403,21 +1455,45 @@ fn mortlach_multi_sve_4(word: u32) -> Option<Encoding> {
     let op3 = bits(word, 6, 5);
     let op4 = bits(word, 1, 0);
     match (op0, op1, op2, op3, op4) {
-        (0b00 | 0b01, 0b000, 0b00, _, _) => mortlach_multi2_narrow_fp_cvrt(word).map(Encoding::MortlachMulti2NarrowFpCvrt),
-        (0b00, 0b000, 0b01, _, 0b00 | 0b10) => mortlach_multi2_fpint_cvrt(word).map(Encoding::MortlachMulti2FpintCvrt),
-        (0b00, 0b000, 0b10, _, 0b00 | 0b10) => mortlach_multi2_intfp_cvrt(word).map(Encoding::MortlachMulti2IntfpCvrt),
+        (0b00 | 0b01, 0b000, 0b00, _, _) => {
+            mortlach_multi2_narrow_fp_cvrt(word).map(Encoding::MortlachMulti2NarrowFpCvrt)
+        }
+        (0b00, 0b000, 0b01, _, 0b00 | 0b10) => {
+            mortlach_multi2_fpint_cvrt(word).map(Encoding::MortlachMulti2FpintCvrt)
+        }
+        (0b00, 0b000, 0b10, _, 0b00 | 0b10) => {
+            mortlach_multi2_intfp_cvrt(word).map(Encoding::MortlachMulti2IntfpCvrt)
+        }
         (0b00 | 0b01, 0b000, 0b11, _, _) => {
             mortlach_multi2_narrow_int_cvrt(word).map(Encoding::MortlachMulti2NarrowIntCvrt)
         }
-        (_, 0b001, 0b01, _, _) => mortlach_multi2_wide_int(word).map(Encoding::MortlachMulti2WideInt),
-        (_, 0b010 | 0b011, _, 0b00 | 0b10, 0b00 | 0b10) => mortlach_multi2_frint(word).map(Encoding::MortlachMulti2Frint),
-        (0b00, 0b100, 0b01, 0b00 | 0b01, 0b00) => mortlach_multi4_fpint_cvrt(word).map(Encoding::MortlachMulti4FpintCvrt),
-        (0b00, 0b100, 0b10, 0b00 | 0b01, 0b00) => mortlach_multi4_intfp_cvrt(word).map(Encoding::MortlachMulti4IntfpCvrt),
-        (_, 0b100, 0b11, _, _) => mortlach_multi4_narrow_int_cvrt(word).map(Encoding::MortlachMulti4NarrowIntCvrt),
-        (_, 0b101, 0b01, 0b00 | 0b10, 0b00 | 0b01) => mortlach_multi4_wide_int(word).map(Encoding::MortlachMulti4WideInt),
-        (_, 0b101, 0b10, 0b00, 0b00 | 0b10) => mortlach_multi4_z_z_zip(word).map(Encoding::MortlachMulti4ZZZip),
-        (0b00, 0b101, 0b11, 0b00, 0b00 | 0b10) => mortlach_multi4_z_z_long_zip(word).map(Encoding::MortlachMulti4ZZLongZip),
-        (_, 0b110 | 0b111, _, 0b00, 0b00) => mortlach_multi4_frint(word).map(Encoding::MortlachMulti4Frint),
+        (_, 0b001, 0b01, _, _) => {
+            mortlach_multi2_wide_int(word).map(Encoding::MortlachMulti2WideInt)
+        }
+        (_, 0b010 | 0b011, _, 0b00 | 0b10, 0b00 | 0b10) => {
+            mortlach_multi2_frint(word).map(Encoding::MortlachMulti2Frint)
+        }
+        (0b00, 0b100, 0b01, 0b00 | 0b01, 0b00) => {
+            mortlach_multi4_fpint_cvrt(word).map(Encoding::MortlachMulti4FpintCvrt)
+        }
+        (0b00, 0b100, 0b10, 0b00 | 0b01, 0b00) => {
+            mortlach_multi4_intfp_cvrt(word).map(Encoding::MortlachMulti4IntfpCvrt)
+        }
+        (_, 0b100, 0b11, _, _) => {
+            mortlach_multi4_narrow_int_cvrt(word).map(Encoding::MortlachMulti4NarrowIntCvrt)
+        }
+        (_, 0b101, 0b01, 0b00 | 0b10, 0b00 | 0b01) => {
+            mortlach_multi4_wide_int(word).map(Encoding::MortlachMulti4WideInt)
+        }
+        (_, 0b101, 0b10, 0b00, 0b00 | 0b10) => {
+            mortlach_multi4_z_z_zip(word).map(Encoding::MortlachMulti4ZZZip)
+        }
+        (0b00, 0b101, 0b11, 0b00, 0b00 | 0b10) => {
+            mortlach_multi4_z_z_long_zip(word).map(Encoding::MortlachMulti4ZZLongZip)
+        }
+        (_, 0b110 | 0b111, _, 0b00, 0b00) => {
+            mortlach_multi4_frint(word).map(Encoding::MortlachMulti4Frint)
+        }
         _ => None,
     }
 }
@@ -2219,15 +2295,25 @@ fn mortlach_multi_array_1a(word: u32) -> Option<Encoding> {
     let op2 = bits(word, 4, 2);
     let op3 = bits(word, 1, 1);
     match (op0, op1, op2, op3) {
-        (_, 0b000, _, 0b0) => {
-            mortlach_multi2_zz_za_mla_long_long_sm(word).map(Encoding::MortlachMulti2ZzZaMlaLongLongSm)
+        (_, 0b000, _, 0b0) => mortlach_multi2_zz_za_mla_long_long_sm(word)
+            .map(Encoding::MortlachMulti2ZzZaMlaLongLongSm),
+        (_, 0b001, _, _) => mortlach_multi1_zz_za_mla_long_long_sm(word)
+            .map(Encoding::MortlachMulti1ZzZaMlaLongLongSm),
+        (0b0, 0b010, _, _) => {
+            mortlach_multi2_zz_za_fma_long_sm(word).map(Encoding::MortlachMulti2ZzZaFmaLongSm)
         }
-        (_, 0b001, _, _) => mortlach_multi1_zz_za_mla_long_long_sm(word).map(Encoding::MortlachMulti1ZzZaMlaLongLongSm),
-        (0b0, 0b010, _, _) => mortlach_multi2_zz_za_fma_long_sm(word).map(Encoding::MortlachMulti2ZzZaFmaLongSm),
-        (0b1, 0b010, _, _) => mortlach_multi2_zz_za_mla_long_sm(word).map(Encoding::MortlachMulti2ZzZaMlaLongSm),
-        (0b0, 0b011, _, _) => mortlach_multi1_zz_za_fma_long_sm(word).map(Encoding::MortlachMulti1ZzZaFmaLongSm),
-        (0b1, 0b011, _, _) => mortlach_multi1_zz_za_mla_long_sm(word).map(Encoding::MortlachMulti1ZzZaMlaLongSm),
-        (0b0, 0b100, _, _) => mortlach_multi2_z_za_fpdot_sm(word).map(Encoding::MortlachMulti2ZZaFpdotSm),
+        (0b1, 0b010, _, _) => {
+            mortlach_multi2_zz_za_mla_long_sm(word).map(Encoding::MortlachMulti2ZzZaMlaLongSm)
+        }
+        (0b0, 0b011, _, _) => {
+            mortlach_multi1_zz_za_fma_long_sm(word).map(Encoding::MortlachMulti1ZzZaFmaLongSm)
+        }
+        (0b1, 0b011, _, _) => {
+            mortlach_multi1_zz_za_mla_long_sm(word).map(Encoding::MortlachMulti1ZzZaMlaLongSm)
+        }
+        (0b0, 0b100, _, _) => {
+            mortlach_multi2_z_za_fpdot_sm(word).map(Encoding::MortlachMulti2ZZaFpdotSm)
+        }
         (_, 0b101, 0b000 | 0b001 | 0b100 | 0b101, _) => {
             mortlach_multi2_z_za_4way_dot_sm(word).map(Encoding::MortlachMulti2ZZa4wayDotSm)
         }
@@ -2237,8 +2323,12 @@ fn mortlach_multi_array_1a(word: u32) -> Option<Encoding> {
         (0b1, 0b101, 0b010 | 0b011 | 0b110 | 0b111, _) => {
             mortlach_multi2_z_za_2way_dot_sm(word).map(Encoding::MortlachMulti2ZZa2wayDotSm)
         }
-        (_, 0b110, 0b000..=0b011, _) => mortlach_multi2_zz_za_float_sm(word).map(Encoding::MortlachMulti2ZzZaFloatSm),
-        (_, 0b110, 0b100..=0b111, _) => mortlach_multi2_zz_za_int_sm(word).map(Encoding::MortlachMulti2ZzZaIntSm),
+        (_, 0b110, 0b000..=0b011, _) => {
+            mortlach_multi2_zz_za_float_sm(word).map(Encoding::MortlachMulti2ZzZaFloatSm)
+        }
+        (_, 0b110, 0b100..=0b111, _) => {
+            mortlach_multi2_zz_za_int_sm(word).map(Encoding::MortlachMulti2ZzZaIntSm)
+        }
         _ => None,
     }
 }
@@ -2253,12 +2343,17 @@ fn mortlach_multi_array_1b(word: u32) -> Option<Encoding> {
     let op2 = bits(word, 4, 2);
     let op3 = bits(word, 1, 1);
     match (op0, op1, op2, op3) {
-        (_, 0b000, _, 0b0) => {
-            mortlach_multi4_zz_za_mla_long_long_sm(word).map(Encoding::MortlachMulti4ZzZaMlaLongLongSm)
+        (_, 0b000, _, 0b0) => mortlach_multi4_zz_za_mla_long_long_sm(word)
+            .map(Encoding::MortlachMulti4ZzZaMlaLongLongSm),
+        (0b0, 0b010, _, _) => {
+            mortlach_multi4_zz_za_fma_long_sm(word).map(Encoding::MortlachMulti4ZzZaFmaLongSm)
         }
-        (0b0, 0b010, _, _) => mortlach_multi4_zz_za_fma_long_sm(word).map(Encoding::MortlachMulti4ZzZaFmaLongSm),
-        (0b1, 0b010, _, _) => mortlach_multi4_zz_za_mla_long_sm(word).map(Encoding::MortlachMulti4ZzZaMlaLongSm),
-        (0b0, 0b100, _, _) => mortlach_multi4_z_za_fpdot_sm(word).map(Encoding::MortlachMulti4ZZaFpdotSm),
+        (0b1, 0b010, _, _) => {
+            mortlach_multi4_zz_za_mla_long_sm(word).map(Encoding::MortlachMulti4ZzZaMlaLongSm)
+        }
+        (0b0, 0b100, _, _) => {
+            mortlach_multi4_z_za_fpdot_sm(word).map(Encoding::MortlachMulti4ZZaFpdotSm)
+        }
         (_, 0b101, 0b000 | 0b001 | 0b100 | 0b101, _) => {
             mortlach_multi4_z_za_4way_dot_sm(word).map(Encoding::MortlachMulti4ZZa4wayDotSm)
         }
@@ -2268,8 +2363,12 @@ fn mortlach_multi_array_1b(word: u32) -> Option<Encoding> {
         (0b1, 0b101, 0b010 | 0b011 | 0b110 | 0b111, _) => {
             mortlach_multi4_z_za_2way_dot_sm(word).map(Encoding::MortlachMulti4ZZa2wayDotSm)
         }
-        (_, 0b110, 0b000..=0b011, _) => mortlach_multi4_zz_za_float_sm(word).map(Encoding::MortlachMulti4ZzZaFloatSm),
-        (_, 0b110, 0b100..=0b111, _) => mortlach_multi4_zz_za_int_sm(word).map(Encoding::MortlachMulti4ZzZaIntSm),
+        (_, 0b110, 0b000..=0b011, _) => {
+            mortlach_multi4_zz_za_float_sm(word).map(Encoding::MortlachMulti4ZzZaFloatSm)
+        }
+        (_, 0b110, 0b100..=0b111, _) => {
+            mortlach_multi4_zz_za_int_sm(word).map(Encoding::MortlachMulti4ZzZaIntSm)
+        }
         _ => None,
     }
 }
@@ -2288,9 +2387,8 @@ fn mortlach_multi_array_2a(word: u32) -> Option<Encoding> {
     let op5 = bits(word, 4, 2);
     let op6 = bits(word, 1, 1);
     match (op0, op1, op2, op3, op4, op5, op6) {
-        (_, _, _, 0b000, 0b0, _, 0b0) => {
-            mortlach_multi2_zz_za_mla_long_long_mm(word).map(Encoding::MortlachMulti2ZzZaMlaLongLongMm)
-        }
+        (_, _, _, 0b000, 0b0, _, 0b0) => mortlach_multi2_zz_za_mla_long_long_mm(word)
+            .map(Encoding::MortlachMulti2ZzZaMlaLongLongMm),
         (0b0, _, _, 0b010, 0b0, 0b000 | 0b010 | 0b100 | 0b110, _) => {
             mortlach_multi2_zz_za_fma_long_mm(word).map(Encoding::MortlachMulti2ZzZaFmaLongMm)
         }
@@ -2312,7 +2410,9 @@ fn mortlach_multi_array_2a(word: u32) -> Option<Encoding> {
         (_, _, _, 0b110, 0b0, 0b000..=0b011, _) => {
             mortlach_multi2_zz_za_float_mm(word).map(Encoding::MortlachMulti2ZzZaFloatMm)
         }
-        (_, _, _, 0b110, 0b0, 0b100..=0b111, _) => mortlach_multi2_zz_za_int_mm(word).map(Encoding::MortlachMulti2ZzZaIntMm),
+        (_, _, _, 0b110, 0b0, 0b100..=0b111, _) => {
+            mortlach_multi2_zz_za_int_mm(word).map(Encoding::MortlachMulti2ZzZaIntMm)
+        }
         (_, 0b00, 0b00, 0b111, 0b0, 0b000..=0b011, _) => {
             mortlach_multi2_z_za_float_mm(word).map(Encoding::MortlachMulti2ZZaFloatMm)
         }
@@ -2335,9 +2435,8 @@ fn mortlach_multi_array_2b(word: u32) -> Option<Encoding> {
     let op5 = bits(word, 4, 2);
     let op6 = bits(word, 1, 1);
     match (op0, op1, op2, op3, op4, op5, op6) {
-        (_, _, 0b00 | 0b10, 0b000, 0b00, _, 0b0) => {
-            mortlach_multi4_zz_za_mla_long_long_mm(word).map(Encoding::MortlachMulti4ZzZaMlaLongLongMm)
-        }
+        (_, _, 0b00 | 0b10, 0b000, 0b00, _, 0b0) => mortlach_multi4_zz_za_mla_long_long_mm(word)
+            .map(Encoding::MortlachMulti4ZzZaMlaLongLongMm),
         (0b0, _, 0b00 | 0b10, 0b010, 0b00, 0b000 | 0b010 | 0b100 | 0b110, _) => {
             mortlach_multi4_zz_za_fma_long_mm(word).map(Encoding::MortlachMulti4ZzZaFmaLongMm)
         }
@@ -3273,7 +3372,9 @@ fn mortlach_multi_indexed_1(word: u32) -> Option<Encoding> {
     let op0 = bits(word, 23, 22);
     let op1 = bits(word, 12, 12);
     match (op0, op1) {
-        (0b00, _) => mortlach_multi1_mla_long_long_idx_s(word).map(Encoding::MortlachMulti1MlaLongLongIdxS),
+        (0b00, _) => {
+            mortlach_multi1_mla_long_long_idx_s(word).map(Encoding::MortlachMulti1MlaLongLongIdxS)
+        }
         (0b10, 0b1) => mortlach_multi1_fma_long_idx(word).map(Encoding::MortlachMulti1FmaLongIdx),
         (0b11, 0b1) => mortlach_multi1_mla_long_idx(word).map(Encoding::MortlachMulti1MlaLongIdx),
         _ => None,
@@ -3295,8 +3396,12 @@ fn mortlach_multi_indexed_2(word: u32) -> Option<Encoding> {
             mortlach_multi2_mla_long_long_idx_s(word).map(Encoding::MortlachMulti2MlaLongLongIdxS)
         }
         (0b01, _, _) => mortlach_multi2_zza_idx_s(word).map(Encoding::MortlachMulti2ZzaIdxS),
-        (0b10, 0b10 | 0b11, 0b0) => mortlach_multi2_fma_long_idx(word).map(Encoding::MortlachMulti2FmaLongIdx),
-        (0b11, 0b10 | 0b11, 0b0) => mortlach_multi2_mla_long_idx(word).map(Encoding::MortlachMulti2MlaLongIdx),
+        (0b10, 0b10 | 0b11, 0b0) => {
+            mortlach_multi2_fma_long_idx(word).map(Encoding::MortlachMulti2FmaLongIdx)
+        }
+        (0b11, 0b10 | 0b11, 0b0) => {
+            mortlach_multi2_mla_long_idx(word).map(Encoding::MortlachMulti2MlaLongIdx)
+        }
         _ => None,
     }
 }
@@ -3313,7 +3418,9 @@ fn mortlach_multi_indexed_3(word: u32) -> Option<Encoding> {
         (0b00, 0b00 | 0b01, 0b000..=0b011) => {
             mortlach_multi4_mla_long_long_idx_s(word).map(Encoding::MortlachMulti4MlaLongLongIdxS)
         }
-        (0b01, _, 0b000..=0b011) => mortlach_multi4_zza_idx_s(word).map(Encoding::MortlachMulti4ZzaIdxS),
+        (0b01, _, 0b000..=0b011) => {
+            mortlach_multi4_zza_idx_s(word).map(Encoding::MortlachMulti4ZzaIdxS)
+        }
         (0b10, 0b10 | 0b11, 0b000 | 0b001) => {
             mortlach_multi4_fma_long_idx(word).map(Encoding::MortlachMulti4FmaLongIdx)
         }

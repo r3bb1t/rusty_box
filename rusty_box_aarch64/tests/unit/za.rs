@@ -25,7 +25,9 @@ use std::vec::Vec;
 
 use super::super::features::{Feature, Features, Implementation, VecLen};
 use super::super::sctlr;
-use super::super::step::{exec, exec_in, processor, Taken, CPACR_ALL, DATA, FP_TRAP, SME_DISABLED, UNDEFINED};
+use super::super::step::{
+    exec, exec_in, processor, Taken, CPACR_ALL, DATA, FP_TRAP, SME_DISABLED, UNDEFINED,
+};
 use super::super::sve::{Pv, Zv};
 use super::super::Cpu;
 use crate::softfloat::FPCR_AH;
@@ -107,7 +109,10 @@ fn of_words(words: &[u32]) -> Zv {
 
 /// The words of `bytes`.
 fn words(bytes: &[u8]) -> Vec<u32> {
-    bytes.chunks_exact(4).map(|w| u32::from_le_bytes([w[0], w[1], w[2], w[3]])).collect()
+    bytes
+        .chunks_exact(4)
+        .map(|w| u32::from_le_bytes([w[0], w[1], w[2], w[3]]))
+        .collect()
 }
 
 /// The words of ZA vector `n` at the current length.
@@ -225,7 +230,11 @@ fn the_slice_index_is_ws_plus_the_offset_modulo_the_slices() {
 #[test]
 fn a_za_vector_write_zeroes_it_above_the_vector_length() {
     let mut cpu = with_za(0);
-    cpu.set_za_vector(9, VecLen::MAX, &Zv::from_bytes(&[0xFF; VecLen::MAX.bytes()]));
+    cpu.set_za_vector(
+        9,
+        VecLen::MAX,
+        &Zv::from_bytes(&[0xFF; VecLen::MAX.bytes()]),
+    );
     set_z_words(&mut cpu, 3, &[1, 2, 3, 4]);
     set_p_bits(&mut cpu, 0, u64::MAX);
     cpu.x[12] = 0;
@@ -276,7 +285,11 @@ fn zero_clears_the_listed_doubleword_tiles_alone() {
     // zero {za0.d, za3.d}.
     assert_eq!(exec(&mut cpu, 0xC008_0009), None);
     for n in 0..16 {
-        let want = if n % 8 == 0 || n % 8 == 3 { 0 } else { n as u32 + 1 };
+        let want = if n % 8 == 0 || n % 8 == 3 {
+            0
+        } else {
+            n as u32 + 1
+        };
         assert_eq!(za_words(&cpu, n), [want; 4], "ZA[{n}]");
     }
 }
@@ -325,7 +338,12 @@ fn the_integer_outer_products_take_each_operands_signedness_and_byte_predicates(
     set_p_bits(&mut cpu, 1, u64::MAX);
     // SMOPA: (-1)(-128) + 9; SUMOPA: (-1)(128) + 9; USMOPA: 255(-128) + 9;
     // UMOPA: 255(128) + 9.
-    for (insn, want) in [(SMOPA, 137), (0xA0A2_2020, -119), (0xA182_2020, -32631), (0xA1A2_2020, 32649)] {
+    for (insn, want) in [
+        (SMOPA, 137),
+        (0xA0A2_2020, -119),
+        (0xA182_2020, -32631),
+        (0xA1A2_2020, 32649),
+    ] {
         set_za_words(&mut cpu, 0, &[0; 4]);
         assert_eq!(exec(&mut cpu, insn), None);
         assert_eq!(za_words(&cpu, 0), [want as u32, 0, 0, 0], "{insn:#010x}");
@@ -490,7 +508,10 @@ fn a_fault_part_way_writes_no_slice_and_keeps_the_stores_before_it() {
     set_p_bits(&mut cpu, 0, u64::MAX);
     set_za_words(&mut cpu, 5, &[7; 4]);
     // ld1w {za1h.s[w12, 1]}, p0/z, [x0, x1, lsl #2]: ZA vector 5.
-    assert_eq!(exec_in(&mut cpu, &mut ram, 0xE081_0005), Some(data_abort(EXTERNAL, false)));
+    assert_eq!(
+        exec_in(&mut cpu, &mut ram, 0xE081_0005),
+        Some(data_abort(EXTERNAL, false))
+    );
     assert_eq!(cpu.sys.far_el1, DATA + 64);
     assert_eq!(za_words(&cpu, 5), [7; 4]);
     // st1d {za7h.d[w15, 1]}, p1, [x0, x1, lsl #3] with W15 = 0: ZA vector
@@ -499,7 +520,10 @@ fn a_fault_part_way_writes_no_slice_and_keeps_the_stores_before_it() {
     set_p_bits(&mut cpu, 1, u64::MAX);
     let svl = cpu.current_svl();
     cpu.set_za_vector(15, svl, &Zv::from_bytes(&[0xA5; 16]));
-    assert_eq!(exec_in(&mut cpu, &mut ram, 0xE0E1_640F), Some(data_abort(EXTERNAL, true)));
+    assert_eq!(
+        exec_in(&mut cpu, &mut ram, 0xE0E1_640F),
+        Some(data_abort(EXTERNAL, true))
+    );
     assert_eq!(cpu.sys.far_el1, DATA + 64);
     assert_eq!(ram[..56], counting(56)[..]);
     assert_eq!(ram[56..], [0xA5; 8]);
@@ -527,12 +551,18 @@ fn ldr_and_str_of_za_move_a_vector_at_the_offset_times_its_length() {
     assert_eq!(ram[..16], counting(64)[48..]);
     cpu.x[0] = DATA + 1;
     cpu.sys.sctlr_el1 |= sctlr::A;
-    assert_eq!(exec_in(&mut cpu, &mut ram, LDR_ZA), Some(data_abort(ALIGNMENT, false)));
+    assert_eq!(
+        exec_in(&mut cpu, &mut ram, LDR_ZA),
+        Some(data_abort(ALIGNMENT, false))
+    );
     assert_eq!(cpu.sys.far_el1, DATA + 49);
     // A base aligned to 8 bytes is misaligned (`IsAlignedSize(base, 16)`):
     // ldr za[w12, 0], [x0] faults at it.
     cpu.x[0] = DATA + 8;
-    assert_eq!(exec_in(&mut cpu, &mut ram, 0xE100_0000), Some(data_abort(ALIGNMENT, false)));
+    assert_eq!(
+        exec_in(&mut cpu, &mut ram, 0xE100_0000),
+        Some(data_abort(ALIGNMENT, false))
+    );
     assert_eq!(cpu.sys.far_el1, DATA + 8);
 }
 
@@ -561,7 +591,10 @@ fn bmopa_counts_the_bits_in_which_the_row_and_column_elements_agree() {
     set_p_bits(&mut cpu, 3, u64::MAX);
     set_za_words(&mut cpu, 3, &[10, 100, 0, 0]);
     assert_eq!(exec(&mut cpu, BMOPS), None);
-    assert_eq!(za_words(&cpu, 3), [-22i32 as u32, 68, -32i32 as u32, -32i32 as u32]);
+    assert_eq!(
+        za_words(&cpu, 3),
+        [-22i32 as u32, 68, -32i32 as u32, -32i32 as u32]
+    );
     assert_eq!(za_words(&cpu, 15), [-32i32 as u32; 4]);
 }
 
@@ -592,8 +625,24 @@ fn the_halfword_outer_products_multiply_halfwords_in_the_same_place() {
     // SMOPS and UMOPS from zero.
     assert_eq!(za_words(&cpu, 2), [-32783i32 as u32, 2, 0, 0]);
     assert_eq!(za_words(&cpu, 6), [-32763i32 as u32, -2i32 as u32, 0, 0]);
-    assert_eq!(za_words(&cpu, 3), [0x7FFF_800F_u32.wrapping_neg(), 0xFFFE_u32.wrapping_neg(), 0, 0]);
-    assert_eq!(za_words(&cpu, 7), [0x8004_7FFB_u32.wrapping_neg(), 0xFFFC_0002_u32.wrapping_neg(), 0, 0]);
+    assert_eq!(
+        za_words(&cpu, 3),
+        [
+            0x7FFF_800F_u32.wrapping_neg(),
+            0xFFFE_u32.wrapping_neg(),
+            0,
+            0
+        ]
+    );
+    assert_eq!(
+        za_words(&cpu, 7),
+        [
+            0x8004_7FFB_u32.wrapping_neg(),
+            0xFFFC_0002_u32.wrapping_neg(),
+            0,
+            0
+        ]
+    );
     // Row 0's halfword 1 and column 1's halfword 0 inactive: [0, 0] has
     // the first product alone, [0, 1] none, [1, 1] the second alone.
     set_p_bits(&mut cpu, 0, !(1 << 2));
@@ -634,11 +683,21 @@ fn mova_of_two_registers_moves_two_slices_from_an_even_index() {
     // {z6.h-z7.h} from za1v.h[w12, 6:7]: (14 + 6) MOD 8 is slice 4, so
     // halfwords 4 and 5 of tile 1's vectors 1, 3, ..., 15.
     for v in 0..8u32 {
-        set_za_words(&mut cpu, 2 * v as usize + 1, &[0, 0, (v + 1) << 16 | (0x10 + v), 0]);
+        set_za_words(
+            &mut cpu,
+            2 * v as usize + 1,
+            &[0, 0, (v + 1) << 16 | (0x10 + v), 0],
+        );
     }
     assert_eq!(exec(&mut cpu, MOVA_FROM_2_H), None);
-    assert_eq!(z_words(&cpu, 6), [0x0011_0010, 0x0013_0012, 0x0015_0014, 0x0017_0016]);
-    assert_eq!(z_words(&cpu, 7), [0x0002_0001, 0x0004_0003, 0x0006_0005, 0x0008_0007]);
+    assert_eq!(
+        z_words(&cpu, 6),
+        [0x0011_0010, 0x0013_0012, 0x0015_0014, 0x0017_0016]
+    );
+    assert_eq!(
+        z_words(&cpu, 7),
+        [0x0002_0001, 0x0004_0003, 0x0006_0005, 0x0008_0007]
+    );
 }
 
 /// MOVA of four registers moves four slices from a multiple of four: as
@@ -647,7 +706,11 @@ fn mova_of_two_registers_moves_two_slices_from_an_even_index() {
 fn mova_of_four_registers_moves_four_slices_from_a_multiple_of_four() {
     let mut cpu = with_za(0);
     for r in 0..4u32 {
-        set_z_words(&mut cpu, 8 + r, &[4 * r + 1, 4 * r + 2, 4 * r + 3, 4 * r + 4]);
+        set_z_words(
+            &mut cpu,
+            8 + r,
+            &[4 * r + 1, 4 * r + 2, 4 * r + 3, 4 * r + 4],
+        );
     }
     // za2v.s[w14, 0:3]: columns 0 to 3 of tile 2's vectors 2, 6, 10 and
     // 14, whatever W14.
@@ -668,7 +731,12 @@ fn mova_of_four_registers_moves_four_slices_from_a_multiple_of_four() {
     cpu.x[12] = 9;
     assert_eq!(exec(&mut cpu, MOVA_TO_4_B), None);
     for r in 0..4 {
-        assert_eq!(za_words(&cpu, 12 + r as usize), z_words(&cpu, 4 + r), "ZA[{}]", 12 + r);
+        assert_eq!(
+            za_words(&cpu, 12 + r as usize),
+            z_words(&cpu, 4 + r),
+            "ZA[{}]",
+            12 + r
+        );
     }
     cpu.x[13] = 6;
     assert_eq!(exec(&mut cpu, MOVA_FROM_4_B), None);
@@ -693,7 +761,10 @@ fn four_doubleword_slices_need_a_256_bit_vector_length() {
     // Their columns: Z(8 + c) is doubleword c of each.
     assert_eq!(exec(&mut cpu, MOVA_FROM_4_D), None);
     for c in 0..4u32 {
-        let want: Vec<u32> = vectors.iter().flat_map(|&v| [100 * v + 2 * c, 100 * v + 2 * c + 1]).collect();
+        let want: Vec<u32> = vectors
+            .iter()
+            .flat_map(|&v| [100 * v + 2 * c, 100 * v + 2 * c + 1])
+            .collect();
         assert_eq!(z_words(&cpu, 8 + c), want, "Z{}", 8 + c);
     }
     // As the rows of tile 5, vectors 5, 13, 21 and 29, from W12 = 7: (4 + 0)
@@ -743,7 +814,10 @@ fn the_sme2_tile_instructions_need_streaming_mode_za_and_sme2() {
     for insn in all {
         assert_eq!(exec(&mut cpu, insn), Some(INACTIVE_ZA), "{insn:#010x}");
     }
-    let features: Vec<Feature> = Feature::ALL.into_iter().filter(|&f| f != Feature::Sme2).collect();
+    let features: Vec<Feature> = Feature::ALL
+        .into_iter()
+        .filter(|&f| f != Feature::Sme2)
+        .collect();
     let mut cpu = processor(Implementation {
         features: Features::of(&features),
         max_svl: VecLen::MAX,
@@ -764,7 +838,14 @@ fn the_sme2_tile_instructions_need_streaming_mode_za_and_sme2() {
 #[test]
 fn the_encodings_of_other_features_are_undefined() {
     let mut cpu = processor(Implementation::EVERY_FEATURE);
-    for insn in [0xC001_0020, 0x80C0_0000, 0xA0C0_0000, 0xC0D0_0000, 0xC00C_0000, 0xC04F_03E0] {
+    for insn in [
+        0xC001_0020,
+        0x80C0_0000,
+        0xA0C0_0000,
+        0xC0D0_0000,
+        0xC00C_0000,
+        0xC04F_03E0,
+    ] {
         assert_eq!(exec(&mut cpu, insn), Some(UNDEFINED), "{insn:#010x}");
     }
 }

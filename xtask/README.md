@@ -6,7 +6,7 @@ Repository automation for Rusty Box. Run it through the Cargo alias in `.cargo/c
 cargo xtask ci                   # the local gate, run before every commit
 cargo xtask ci --skip-boot       # the same, without the DLX boot gate
 cargo xtask ci --full            # also the full rusty_box test suite and a GUI release build
-cargo xtask perf-baseline        # archive a release perfbench binary for A/B runs
+cargo xtask perf-baseline        # archive the release perfbench binaries for A/B runs
 cargo xtask android build        # Android APK, see "Android commands"
 cargo xtask --help               # usage for every subcommand
 ```
@@ -118,13 +118,22 @@ It passes only if the run exits successfully and its stdout contains `*** LOGIN 
 
 ## `cargo xtask perf-baseline`
 
-This command takes no options; anything written after it is ignored. It does three things:
+This command takes no options; anything written after it is ignored. For each of two benchmarks, in this order, it does three things:
 
-1. Builds the `perfbench` example: `cargo build --release -p rusty_box --example perfbench --features std`. The source is `rusty_box/examples/perfbench/perfbench.rs`.
+1. Builds the example with `cargo build --release -p <package> --example <example> --features std`.
 2. Copies the binary to `target/perf-baselines/<rev>/`, where `<rev>` is `git rev-parse --short=12 HEAD`. The directory is named after `HEAD`, so a build of an uncommitted tree is filed under the last commit's revision.
 3. Prints the archived path.
 
-Use it for interleaved A/B runs: alternate the baseline and candidate binaries for at least 10 pairs and compare the medians. `perfbench` runs a synthetic guest workload and needs no ROMs or disk images. The `PERFBENCH_MODE`, `PERFBENCH_INSN`, `PERFBENCH_CPUS` and `PERFBENCH_QUANTUM` environment variables select what it runs (see the environment-variable table in [`rusty_box/examples/README.md`](../rusty_box/examples/README.md)).
+The two benchmarks:
+
+| Package | Example | Source | What it runs |
+|---|---|---|---|
+| `rusty_box` | `perfbench` | `rusty_box/examples/perfbench/perfbench.rs` | A synthetic x86 guest workload; needs no ROMs or disk images. The `PERFBENCH_MODE`, `PERFBENCH_INSN`, `PERFBENCH_CPUS` and `PERFBENCH_QUANTUM` environment variables select what it runs (see the environment-variable table in [`rusty_box/examples/README.md`](../rusty_box/examples/README.md)). |
+| `rusty_box_aarch64` | `aarch64_perfbench` | `rusty_box_aarch64/examples/perfbench.rs` | The AArch64 interpreter's embedded loops (ALU, an `ldp`/`stp` copy, an FNV-1a hash, an FP chain), plain and with hooks, and two boots, EDK2 to `Shell>` and Linux to `login:`, from the images its `PERFBENCH_*` environment variables name; the table at the top of the source lists them. |
+
+The AArch64 example is named apart from `perfbench` because both would build to `target/release/examples/perfbench`.
+
+Use them for interleaved A/B runs: alternate the baseline and candidate binaries for at least 10 pairs and compare the medians.
 
 ## Android commands
 

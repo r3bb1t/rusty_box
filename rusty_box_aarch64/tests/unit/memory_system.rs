@@ -124,14 +124,25 @@ const CM: u64 = 1 << 8;
 struct Ram(Vec<u8>);
 
 impl PhysBus for Ram {
-    fn read(&mut self, addr: PhysAddr, width: AccessWidth, _clock: VmClock) -> Result<u64, BusFault> {
+    fn read(
+        &mut self,
+        addr: PhysAddr,
+        width: AccessWidth,
+        _clock: VmClock,
+    ) -> Result<u64, BusFault> {
         let a = addr.get() as usize;
         let n = width.bytes() as usize;
         let bytes = self.0.get(a..a + n).ok_or(BusFault::Unmapped)?;
         Ok(bytes.iter().rev().fold(0, |v, &b| (v << 8) | u64::from(b)))
     }
 
-    fn write(&mut self, addr: PhysAddr, width: AccessWidth, value: u64, _clock: VmClock) -> Result<(), BusFault> {
+    fn write(
+        &mut self,
+        addr: PhysAddr,
+        width: AccessWidth,
+        value: u64,
+        _clock: VmClock,
+    ) -> Result<(), BusFault> {
         let a = addr.get() as usize;
         let n = width.bytes() as usize;
         let bytes = self.0.get_mut(a..a + n).ok_or(BusFault::Unmapped)?;
@@ -161,8 +172,14 @@ impl Machine {
     fn new(imp: Implementation) -> Self {
         let ips = ClockHz::new(1_000_000).unwrap_or(ClockHz::BOCHS_DEFAULT);
         let mut cpu = Cpu::implementing(
-            CpuConfig { ips, reset_pc: CODE },
-            Implementation { counter_hz: ips, ..imp },
+            CpuConfig {
+                ips,
+                reset_pc: CODE,
+            },
+            Implementation {
+                counter_hz: ips,
+                ..imp
+            },
         );
         let mut ram = Ram(std::vec![0; RAM_BYTES]);
         const AF: u64 = 1 << 10;
@@ -204,7 +221,11 @@ impl Machine {
     /// at EL0: the exception it took, if it took one. After an exception
     /// the processor is put back at the exception level it executed at.
     fn run(&mut self, insn: u32) -> Option<Taken> {
-        let at = if self.cpu.pstate.el == El::El0 { EL0_CODE } else { CODE };
+        let at = if self.cpu.pstate.el == El::El0 {
+            EL0_CODE
+        } else {
+            CODE
+        };
         self.run_at(at, at, insn)
     }
 
@@ -216,12 +237,19 @@ impl Machine {
         self.ram.0[a..a + 4].copy_from_slice(&insn.to_le_bytes());
         self.cpu.pc = va;
         self.cpu.sys.esr_el1 = 0x3F << 26;
-        assert_eq!(self.cpu.step(&mut self.ram, &mut NoInstrumentation), Step::Retired);
+        assert_eq!(
+            self.cpu.step(&mut self.ram, &mut NoInstrumentation),
+            Step::Retired
+        );
         let esr = self.cpu.sys.esr_el1;
         if esr >> 26 == 0x3F {
             return None;
         }
-        assert_eq!(self.cpu.pc & !0x7FF, VBAR, "{insn:#010x} took an exception to the vector table");
+        assert_eq!(
+            self.cpu.pc & !0x7FF,
+            VBAR,
+            "{insn:#010x} took an exception to the vector table"
+        );
         self.cpu.pstate = pstate;
         Some(Taken {
             ec: esr >> 26,
@@ -263,7 +291,11 @@ fn a57_with(extra: &[Feature]) -> Implementation {
 
 /// A data abort taken from `el` with fault status `fsc` at `far`.
 fn data_abort(el: El, fsc: u64, far: u64) -> Option<Taken> {
-    let ec = if el == El::El0 { DATA_ABORT_LOWER_EL } else { DATA_ABORT_SAME_EL };
+    let ec = if el == El::El0 {
+        DATA_ABORT_LOWER_EL
+    } else {
+        DATA_ABORT_SAME_EL
+    };
     Some(Taken { ec, iss: fsc, far })
 }
 
@@ -289,7 +321,11 @@ fn hpd_turns_off_the_hierarchical_permissions_of_its_half() {
         m.at_el0();
         m.cpu.x[1] = half + HIER_EL0_RW;
         let refused = data_abort(El::El0, PERMISSION_L2, half + HIER_EL0_RW);
-        assert_eq!(m.run(LDR), refused, "{half:#x}: APTable takes EL0's access away");
+        assert_eq!(
+            m.run(LDR),
+            refused,
+            "{half:#x}: APTable takes EL0's access away"
+        );
         m.cpu.sys.tcr_el1 |= hpd ^ (HPD0 | HPD1);
         m.cpu.tlb.flush();
         assert_eq!(m.run(LDR), refused, "{half:#x}: the other half's HPD");
@@ -301,7 +337,11 @@ fn hpd_turns_off_the_hierarchical_permissions_of_its_half() {
         // HPD.
         m.cpu.pstate.el = El::El1;
         m.cpu.x[0] = 0;
-        assert_eq!(m.run_at(half + HIER_CODE, CODE, 0xD280_0020), None, "{half:#x}: mov x0, #1 under HPD");
+        assert_eq!(
+            m.run_at(half + HIER_CODE, CODE, 0xD280_0020),
+            None,
+            "{half:#x}: mov x0, #1 under HPD"
+        );
         assert_eq!(m.cpu.x[0], 1);
         m.cpu.sys.tcr_el1 &= !(HPD0 | HPD1);
         m.cpu.tlb.flush();
@@ -321,7 +361,11 @@ fn hpd_turns_off_the_hierarchical_permissions_of_its_half() {
     a57.cpu.sys.tcr_el1 |= HPD0 | HPD1;
     a57.at_el0();
     a57.cpu.x[1] = HIER_EL0_RW;
-    assert_eq!(a57.run(LDR), data_abort(El::El0, PERMISSION_L2, HIER_EL0_RW), "HPD0 is RES0 without FEAT_HPDS");
+    assert_eq!(
+        a57.run(LDR),
+        data_abort(El::El0, PERMISSION_L2, HIER_EL0_RW),
+        "HPD0 is RES0 without FEAT_HPDS"
+    );
 }
 
 /// FEAT_E0PD: with `TCR_EL1.E0PD0` or `E0PD1` set, every EL0 access to
@@ -339,17 +383,31 @@ fn e0pd_faults_el0_accesses_to_its_half() {
     for address in [UPPER + EL0_RW, UPPER + EL1_DATA] {
         m.cpu.pstate.el = El::El1;
         m.cpu.x[1] = address;
-        assert_eq!(m.run(LDR), None, "EL1 at {address:#x}, which caches EL1's own memory");
+        assert_eq!(
+            m.run(LDR),
+            None,
+            "EL1 at {address:#x}, which caches EL1's own memory"
+        );
         let refused = data_abort(El::El1, TRANSLATION_L0, address);
-        assert_eq!(m.run(LDTR), refused, "LDTR at EL1 is an EL0 access, at {address:#x}");
+        assert_eq!(
+            m.run(LDTR),
+            refused,
+            "LDTR at EL1 is an EL0 access, at {address:#x}"
+        );
         m.cpu.pstate.uao = true;
         let ldtr_el1 = m.run(LDTR);
-        assert_eq!(ldtr_el1, None, "LDTR under UAO is an EL1 access, at {address:#x}");
+        assert_eq!(
+            ldtr_el1, None,
+            "LDTR under UAO is an EL1 access, at {address:#x}"
+        );
         m.cpu.pstate.uao = false;
         m.at_el0();
         let refused = data_abort(El::El0, TRANSLATION_L0, address);
         assert_eq!(m.run(LDR), refused, "EL0 at {address:#x}");
-        let cm = refused.map(|t| Taken { iss: t.iss | CM | WNR, ..t });
+        let cm = refused.map(|t| Taken {
+            iss: t.iss | CM | WNR,
+            ..t
+        });
         for insn in [DC_CVAC, IC_IVAU] {
             assert_eq!(m.run(insn), cm, "{insn:#010x} at EL0 at {address:#x}");
         }
@@ -361,7 +419,11 @@ fn e0pd_faults_el0_accesses_to_its_half() {
     m.cpu.pstate.el = El::El1;
     m.cpu.pstate.pan = true;
     m.cpu.x[1] = UPPER + EL0_RW;
-    assert_eq!(m.run(LDR), data_abort(El::El1, PERMISSION_L2, UPPER + EL0_RW), "PAN");
+    assert_eq!(
+        m.run(LDR),
+        data_abort(El::El1, PERMISSION_L2, UPPER + EL0_RW),
+        "PAN"
+    );
     m.cpu.pstate.pan = false;
 
     // E0PD's fault comes ahead of Device memory's alignment fault, without
@@ -374,7 +436,11 @@ fn e0pd_faults_el0_accesses_to_its_half() {
     let refused = data_abort(El::El0, TRANSLATION_L0, misaligned);
     assert_eq!(m.run(LDR), refused, "Device memory, nothing in the TLB");
     m.cpu.pstate.el = El::El1;
-    assert_eq!(m.run(LDR), data_abort(El::El1, ALIGNMENT, misaligned), "EL1 fills the TLB");
+    assert_eq!(
+        m.run(LDR),
+        data_abort(El::El1, ALIGNMENT, misaligned),
+        "EL1 fills the TLB"
+    );
     m.at_el0();
     assert_eq!(m.run(LDR), refused, "Device memory, through the TLB");
     m.cpu.sys.mair_el1 = 0xFF;
@@ -396,9 +462,16 @@ fn e0pd_faults_el0_accesses_to_its_half() {
         "an EL0 fetch"
     );
     m.cpu.x[1] = EL0_RW;
-    assert_eq!(m.run_at(UPPER + EL0_CODE, EL0_CODE, LDR), data_abort(El::El0, TRANSLATION_L0, EL0_RW));
+    assert_eq!(
+        m.run_at(UPPER + EL0_CODE, EL0_CODE, LDR),
+        data_abort(El::El0, TRANSLATION_L0, EL0_RW)
+    );
     m.cpu.x[1] = UPPER + EL0_RW;
-    assert_eq!(m.run_at(UPPER + EL0_CODE, EL0_CODE, LDR), None, "the upper half under E0PD0");
+    assert_eq!(
+        m.run_at(UPPER + EL0_CODE, EL0_CODE, LDR),
+        None,
+        "the upper half under E0PD0"
+    );
 
     // AT S1E0R reports the fault in PAR_EL1; AT S1E1R translates.
     m.cpu.pstate.el = El::El1;
@@ -408,9 +481,17 @@ fn e0pd_faults_el0_accesses_to_its_half() {
         assert_eq!(m.run(MRS_PAR), None);
         let par = m.cpu.x[0];
         if faults {
-            assert_eq!(par & 0x7F, (TRANSLATION_L0 << 1) | 1, "{at:#010x}: F, and FST level 0 translation");
+            assert_eq!(
+                par & 0x7F,
+                (TRANSLATION_L0 << 1) | 1,
+                "{at:#010x}: F, and FST level 0 translation"
+            );
         } else {
-            assert_eq!((par & 1, par & 0x0000_FFFF_FFFF_F000), (0, EL0_RW & !0xFFF), "{at:#010x}");
+            assert_eq!(
+                (par & 1, par & 0x0000_FFFF_FFFF_F000),
+                (0, EL0_RW & !0xFFF),
+                "{at:#010x}"
+            );
         }
     }
 
@@ -431,13 +512,25 @@ fn a_snapshot_entry_e0pd_refuses_is_refused() {
     let mut image = Vec::new();
     assert!(m.cpu.tlb.save(&mut image).is_ok());
     let tcr = m.cpu.sys.tcr_el1;
-    let restored =
-        |features: Features, tcr: u64| Tlb::new().restore(&mut image.as_slice(), features, tcr).is_ok();
+    let restored = |features: Features, tcr: u64| {
+        Tlb::new()
+            .restore(&mut image.as_slice(), features, tcr)
+            .is_ok()
+    };
     let every = Implementation::EVERY_FEATURE.features;
     assert!(restored(every, tcr));
-    assert!(!restored(every, tcr | E0PD1), "E0PD1 refuses EL0 the upper half");
-    assert!(restored(every, tcr | E0PD0), "E0PD0 refuses EL0 the lower half alone");
-    assert!(restored(a57_with(&[]).features, tcr | E0PD1), "E0PD1 is RES0 without FEAT_E0PD");
+    assert!(
+        !restored(every, tcr | E0PD1),
+        "E0PD1 refuses EL0 the upper half"
+    );
+    assert!(
+        restored(every, tcr | E0PD0),
+        "E0PD0 refuses EL0 the lower half alone"
+    );
+    assert!(
+        restored(a57_with(&[]).features, tcr | E0PD1),
+        "E0PD1 is RES0 without FEAT_E0PD"
+    );
 }
 
 /// FEAT_TTCNP: `TTBRn_EL1.CnP`, bit 0, is kept as written and leaves the
@@ -464,28 +557,51 @@ fn cnp_is_kept_and_does_not_move_the_table() {
 fn cache_maintenance_by_address_translates_and_checks_its_own_permissions() {
     let cm = |el: El, fsc: u64, far: u64| data_abort(el, fsc | CM | WNR, far);
     let cleans = [DC_CVAC, DC_CVAU, DC_CVAP, DC_CVADP, DC_CIVAC];
-    for imp in [Implementation::EVERY_FEATURE, a57_with(&[Feature::Dpb, Feature::Dpb2])] {
+    for imp in [
+        Implementation::EVERY_FEATURE,
+        a57_with(&[Feature::Dpb, Feature::Dpb2]),
+    ] {
         let mut m = Machine::new(imp);
         m.cpu.pstate.pan = imp.has(Feature::Pan);
         for insn in cleans.into_iter().chain([IC_IVAU, DC_IVAC]) {
             m.cpu.x[1] = UNMAPPED + 0x123;
-            assert_eq!(m.run(insn), cm(El::El1, TRANSLATION_L1, UNMAPPED + 0x123), "{insn:#010x}: unmapped");
+            assert_eq!(
+                m.run(insn),
+                cm(El::El1, TRANSLATION_L1, UNMAPPED + 0x123),
+                "{insn:#010x}: unmapped"
+            );
             m.cpu.x[1] = READ_ONLY;
-            let want = if insn == DC_IVAC { cm(El::El1, PERMISSION_L2, READ_ONLY) } else { None };
+            let want = if insn == DC_IVAC {
+                cm(El::El1, PERMISSION_L2, READ_ONLY)
+            } else {
+                None
+            };
             assert_eq!(m.run(insn), want, "{insn:#010x}: read-only at EL1");
             m.cpu.x[1] = EL0_RW;
-            assert_eq!(m.run(insn), None, "{insn:#010x}: memory EL0 can reach, PAN or not");
+            assert_eq!(
+                m.run(insn),
+                None,
+                "{insn:#010x}: memory EL0 can reach, PAN or not"
+            );
         }
 
         m.at_el0();
         for insn in cleans.into_iter().chain([IC_IVAU]) {
             m.cpu.x[1] = EL1_DATA;
-            let want = if insn == IC_IVAU { None } else { cm(El::El0, PERMISSION_L2, EL1_DATA) };
+            let want = if insn == IC_IVAU {
+                None
+            } else {
+                cm(El::El0, PERMISSION_L2, EL1_DATA)
+            };
             assert_eq!(m.run(insn), want, "{insn:#010x}: EL1's data at EL0");
             m.cpu.x[1] = READ_ONLY;
             assert_eq!(m.run(insn), None, "{insn:#010x}: read-only at EL0");
             m.cpu.x[1] = UNMAPPED;
-            assert_eq!(m.run(insn), cm(El::El0, TRANSLATION_L1, UNMAPPED), "{insn:#010x}: unmapped at EL0");
+            assert_eq!(
+                m.run(insn),
+                cm(El::El0, TRANSLATION_L1, UNMAPPED),
+                "{insn:#010x}: unmapped at EL0"
+            );
         }
         assert_eq!(m.run(DC_IVAC), undefined(&m), "DC IVAC is EL1's");
 
@@ -514,12 +630,20 @@ fn cache_maintenance_by_address_translates_and_checks_its_own_permissions() {
     for insn in cleans.into_iter().chain([IC_IVAU, DC_IVAC]) {
         for (address, faults) in [(EL1_DATA, false), (1 << id::PA_BITS, true), (tagged, true)] {
             m.cpu.x[1] = address;
-            let want = if faults { cm(El::El1, ADDRESS_SIZE_L0, address) } else { None };
+            let want = if faults {
+                cm(El::El1, ADDRESS_SIZE_L0, address)
+            } else {
+                None
+            };
             assert_eq!(m.run(insn), want, "{insn:#010x} at {address:#x}, MMU off");
         }
         m.cpu.sys.tcr_el1 |= TBI0;
         m.cpu.x[1] = tagged;
-        assert_eq!(m.run(insn), None, "{insn:#010x} at {tagged:#x}, MMU off under TBI0");
+        assert_eq!(
+            m.run(insn),
+            None,
+            "{insn:#010x} at {tagged:#x}, MMU off under TBI0"
+        );
         m.cpu.sys.tcr_el1 &= !TBI0;
     }
 }
@@ -540,8 +664,16 @@ fn dc_cvap_and_cvadp_need_their_features() {
             assert_eq!(m.run(insn), want, "{insn:#010x} on {imp:?}");
             m.at_el0();
             m.cpu.sys.sctlr_el1 &= !UCI;
-            let want = if implemented { Some(SYS_TRAP) } else { Some(UNKNOWN) };
-            assert_eq!(m.run(insn).map(|t| t.ec), want, "{insn:#010x} at EL0 on {imp:?}");
+            let want = if implemented {
+                Some(SYS_TRAP)
+            } else {
+                Some(UNKNOWN)
+            };
+            assert_eq!(
+                m.run(insn).map(|t| t.ec),
+                want,
+                "{insn:#010x} at EL0 on {imp:?}"
+            );
             m.cpu.sys.sctlr_el1 |= UCI;
             m.cpu.pstate.el = El::El1;
         }
@@ -564,7 +696,10 @@ fn the_later_tlbi_forms_need_their_features_and_invalidate() {
         (TLBI_RVAE1OS, &[Feature::TlbiOs, Feature::TlbiRange]),
         (TLBI_VMALLE1NXS, &[Feature::Xs]),
         (TLBI_VAE1OSNXS, &[Feature::TlbiOs, Feature::Xs]),
-        (TLBI_RVAE1OSNXS, &[Feature::TlbiOs, Feature::TlbiRange, Feature::Xs]),
+        (
+            TLBI_RVAE1OSNXS,
+            &[Feature::TlbiOs, Feature::TlbiRange, Feature::Xs],
+        ),
     ];
     let offered: [&[Feature]; 5] = [
         &[],
@@ -593,7 +728,11 @@ fn the_later_tlbi_forms_need_their_features_and_invalidate() {
             m.cpu.x[1] = READ_ONLY >> 12;
             assert_eq!(m.run(insn), None, "{insn:#010x} with {extra:?}");
             m.cpu.x[1] = READ_ONLY;
-            assert_eq!(m.run(LDR), data_abort(El::El1, TRANSLATION_L2, READ_ONLY), "{insn:#010x} invalidated it");
+            assert_eq!(
+                m.run(LDR),
+                data_abort(El::El1, TRANSLATION_L2, READ_ONLY),
+                "{insn:#010x} invalidated it"
+            );
         }
     }
 }
@@ -643,12 +782,20 @@ fn ldlar_and_stllr_are_ordered_accesses() {
 
     m.cpu.pstate.pan = true;
     m.cpu.x[1] = EL0_RW;
-    assert_eq!(m.run(LDLAR), data_abort(El::El1, PERMISSION_L2, EL0_RW), "PAN applies");
+    assert_eq!(
+        m.run(LDLAR),
+        data_abort(El::El1, PERMISSION_L2, EL0_RW),
+        "PAN applies"
+    );
 
     let mut a57 = Machine::new(a57_with(&[]));
     a57.cpu.x[1] = EL1_DATA;
     for insn in [LDLAR, STLLR, LDLARB, STLLRH] {
-        assert_eq!(a57.run(insn), undefined(&a57), "{insn:#010x} without FEAT_LOR");
+        assert_eq!(
+            a57.run(insn),
+            undefined(&a57),
+            "{insn:#010x} without FEAT_LOR"
+        );
     }
 }
 
@@ -662,7 +809,12 @@ fn the_loregion_registers_hold_no_regions() {
     assert_eq!(m.run(MRS_LORID), None);
     assert_eq!(m.cpu.x[0], 0, "LR = LD = 0");
     assert_eq!(m.run(MSR_LORID), undefined(&m), "LORID_EL1 is read-only");
-    for (write, read) in [(MSR_LORSA, MRS_LORSA), (MSR_LOREA, MRS_LOREA), (MSR_LORN, MRS_LORN), (MSR_LORC, MRS_LORC)] {
+    for (write, read) in [
+        (MSR_LORSA, MRS_LORSA),
+        (MSR_LOREA, MRS_LOREA),
+        (MSR_LORN, MRS_LORN),
+        (MSR_LORC, MRS_LORC),
+    ] {
         m.cpu.x[0] = 0xFFFF_0001;
         assert_eq!(m.run(write), None, "{write:#010x}");
         assert_eq!(m.run(read), None, "{read:#010x}");
@@ -675,6 +827,10 @@ fn the_loregion_registers_hold_no_regions() {
 
     let mut a57 = Machine::new(a57_with(&[]));
     for insn in [MRS_LORID, MRS_LORC, MSR_LORC] {
-        assert_eq!(a57.run(insn), undefined(&a57), "{insn:#010x} without FEAT_LOR");
+        assert_eq!(
+            a57.run(insn),
+            undefined(&a57),
+            "{insn:#010x} without FEAT_LOR"
+        );
     }
 }

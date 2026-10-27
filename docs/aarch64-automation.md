@@ -55,7 +55,12 @@ assert_eq!(machine.ticks(), 0);
 A Linux kernel, loaded the way QEMU's `-kernel` loads one without firmware:
 the `Image` at its load offset, the initramfs above it, the device tree with
 `/chosen` filled in at the 2 MiB boundary after the initramfs, and the
-processor at the kernel's entry with `x0` pointing at the tree.
+processor at the kernel's entry with `x0` pointing at the tree. The UART is
+left as firmware leaves a console it has set up — 115200 baud, eight data
+bits, no parity, one stop bit, FIFOs on, transmitter and receiver enabled
+(`boot::DIRECT_BOOT_CONSOLE_BAUD`) — where QEMU leaves it at reset: a PL011
+sends nothing until it is enabled, and `earlycon=pl011` writes to it as it
+finds it.
 
 ```rust,no_run
 use rusty_box_aarch64::boot::{LinuxImage, SERIAL_CONSOLE_COMMAND_LINE};
@@ -113,9 +118,10 @@ assert_eq!(compatible, Some(&b"arm,armv8\0"[..]));
 **Owned or lent.** `build()` gives a machine that owns its memory
 (`VirtMachine<OwnedStorage>`, movable to another thread). `build_in` runs in
 memory the caller lends, and borrows the firmware and kernel images where
-they are (either way the machine itself, without its RAM, is about half a
-megabyte — mostly the processor's decode cache — and is built and returned
-by value, so build and run it on a thread with a few megabytes of stack
+they are (either way the machine itself, without its RAM, is built and
+returned by value: about 170 KiB with `alloc`, whose trace cache is on the
+heap, and about half a megabyte without, whose smaller trace cache is in
+place — so build and run it on a thread with a few megabytes of stack
 rather than on a 1 MiB Windows main thread; the examples use 16 MiB):
 
 ```rust
@@ -139,7 +145,11 @@ reads as erased flash. `BuildError` says what did not fit.
 ## 2. The serial console
 
 `virt`'s console is its PL011 UART, and `serial(0)` borrows it — the only
-port the board has, so `serial(1)` is `None`.
+port the board has, so `serial(1)` is `None`. The UART sends what the guest
+writes once the guest has enabled its transmitter (`UARTCR.UARTEN` and
+`TXE`), and takes input once it has enabled its receiver (`UARTEN` and
+`RXE`): firmware and Linux do, a directly booted kernel finds both on, and
+code on a bare machine has to switch them on itself.
 
 ```rust,no_run
 # use rusty_box_aarch64::{MachineBuilder, VirtConfig};
@@ -453,6 +463,16 @@ exception, IRQ and FIQ taken (with the vector, the syndrome and the fault
 address); `memory_access` for every data access that completes on the
 physical bus. Each defaults to nothing.
 
+An observer also says, by `Instrumentation::EXECUTION`, whether it must hear
+of every instruction. `Execution::Skippable` lets the machine fast-forward
+instructions whose only effect is the passage of time: the whole iterations of
+a loop that waits for the system counter to pass a value, as firmware delays
+do, which it jumps over exactly, leaving the state running them would leave.
+The observer is then not called for those instructions, and it is called as
+usual for every instruction the machine does run. The default is
+`Execution::Heard`, which keeps every hook call; `NoInstrumentation` is
+`Execution::Skippable`.
+
 ---
 
 ## 7. Save and restore
@@ -637,6 +657,40 @@ An AArch64 machine's runs always end with an outcome, so its `Error` is
 | Registers | `X86Reg`, MSRs by index | `Reg`, `VReg`, `SysReg` by encoding |
 | Observer | `Instrumentation` | `Instrumentation` (its own hooks) |
 | Snapshots | `std::io` streams | `SnapWrite` / `SnapRead` (no `std` needed) |
+
+## Keeping the interpreter's speed
+
+`cargo xtask ci` holds the trace loop's speed with its step "aarch64
+hot-loop host instructions", which runs after the AArch64 machine's tests.
+It builds `aarch64_perfbench` and runs its five loops (`alu`, `memcpy`,
+`fnv`, `fp`, and `mmio`, whose every instruction takes the
+per-instruction path), plain and hooked, under valgrind's callgrind,
+counting the host instructions executed inside `VirtMachine::run_until`.
+Each count is compared with the one committed in
+`xtask/aarch64_hot_loop_baseline.txt`, and a rise of more than 0.5% fails
+the step; a fall of more than 0.5% is reported, so that the baseline can
+be refreshed to keep the gain. The ten runs take about four minutes on
+four cores.
+
+The count is deterministic, which a timing on a shared host is not, but it
+belongs to one compiler and one host: the baseline names the `rustc`
+commit, the host target and whether the host has fused multiply-add (the
+`fp` loop calls glibc's `fma`, which picks its code by it). The step is
+skipped, with the reason printed, where valgrind does not run — it does
+not exist on Windows — and where the compiler or host differs from the
+baseline's. It counts instructions, not time: a change that keeps the
+count but runs slower (a cache miss, a mispredicted branch) passes it.
+
+To refresh the baseline — after a change that is meant to move the counts,
+or with a new compiler — run, on a Linux host with valgrind:
+
+```text
+cargo xtask hot-loop-baseline
+```
+
+It counts the ten runs, prints them against the old baseline when the
+toolchain matches, and rewrites the file; commit it with the change that
+moved the counts.
 
 ## Where to look next
 

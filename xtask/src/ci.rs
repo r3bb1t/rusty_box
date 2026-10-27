@@ -5,8 +5,9 @@
 //! rusty_box_devices (their no_std + no_alloc builds included) and bare-metal
 //! (`x86_64-unknown-none`) checks of both, devices with alloc; tests for
 //! rusty_box_aarch64 without features and with std, and its bare-metal check
-//! with alloc; tests for the
-//! three WHP crates, the engine's with every target, and a check of
+//! with alloc; the AArch64 trace loop's host instructions against a
+//! committed baseline (`hot_loop`, skipped where valgrind does not run);
+//! tests for the three WHP crates, the engine's with every target, and a check of
 //! rusty_box_whp's examples; tests for the decoder and the rusty_box library;
 //! checks of rusty_box as no_std with and without alloc, for
 //! `x86_64-unknown-none`, and for `wasm32-unknown-unknown` with alloc; the UEFI
@@ -24,9 +25,12 @@
 //! rusty_box for `x86_64-unknown-uefi`, and of the GUI without its default
 //! features.
 //!
-//! `cargo xtask perf-baseline` builds the release perfbench binary and archives it
-//! (with the git revision) under `target/perf-baselines/<rev>/` for interleaved
-//! A/B comparison against later phases.
+//! `cargo xtask perf-baseline` builds the release perfbench binaries — the x86
+//! machine's `perfbench` and the AArch64 interpreter's `aarch64_perfbench` — and
+//! archives them (with the git revision) under `target/perf-baselines/<rev>/` for
+//! interleaved A/B comparison against later phases. `cargo xtask
+//! hot-loop-baseline` counts the AArch64 trace loop's host instructions and
+//! rewrites the baseline the ci step holds them to.
 
 use std::{
     env,
@@ -651,7 +655,9 @@ struct Step {
     stdout_marker: Option<&'static str>,
 }
 
-const MATRIX: &[Step] = &[
+/// The crates the x86 machine does not depend on: rusty_box_core,
+/// rusty_box_devices and rusty_box_aarch64.
+const FOUNDATION_MATRIX: &[Step] = &[
     // The core crate is proven on its own, in every configuration it ships,
     // BEFORE anything that depends on it: a foundation that only compiles as
     // part of its consumer is not a foundation. Its default build is the
@@ -749,6 +755,12 @@ const MATRIX: &[Step] = &[
         envs: &[],
         stdout_marker: None,
     },
+];
+
+/// The steps after the AArch64 hot-loop count, which runs once the AArch64
+/// machine's tests have passed and before the steps that build only on
+/// Windows, so that a Linux host reaches it.
+const MATRIX: &[Step] = &[
     // The Windows Hypervisor Platform seam. Its tests need no hypervisor —
     // they cover the bitfield layouts transcribed from the SDK, which is
     // exactly the part a reader cannot check by eye — so this step runs
@@ -1099,6 +1111,12 @@ pub fn execute_ci(command: CiCommand) -> Result<(), String> {
     doctrine_ratchets(&root)?;
     ran += 1;
 
+    for step in FOUNDATION_MATRIX {
+        run_step(&root, step)?;
+        ran += 1;
+    }
+    run_hot_loop_step(&root)?;
+    ran += 1;
     for step in MATRIX {
         run_step(&root, step)?;
         ran += 1;
@@ -1121,6 +1139,29 @@ pub fn execute_ci(command: CiCommand) -> Result<(), String> {
     Ok(())
 }
 
+/// The name the AArch64 hot-loop count runs under, between the AArch64
+/// machine's steps and the WHP crates'.
+const HOT_LOOP_STEP: &str = "aarch64 hot-loop host instructions";
+
+/// The AArch64 trace loop's host instructions against the committed
+/// baseline (`hot_loop`): fails on a rise over the limit, passes with the
+/// reason printed where it cannot count.
+fn run_hot_loop_step(root: &std::path::Path) -> Result<(), String> {
+    let started = Instant::now();
+    println!("==> {HOT_LOOP_STEP}");
+    crate::hot_loop::check(root).map_err(|err| format!("{HOT_LOOP_STEP}: {err}"))?;
+    println!(
+        "<== {HOT_LOOP_STEP} ok ({:.1}s)",
+        started.elapsed().as_secs_f32()
+    );
+    Ok(())
+}
+
+/// `cargo xtask hot-loop-baseline`.
+pub fn execute_hot_loop_baseline() -> Result<(), String> {
+    crate::hot_loop::refresh(&repo_root()?)
+}
+
 pub fn execute_perf_baseline(_command: PerfBaselineCommand) -> Result<(), String> {
     let root = repo_root()?;
 
@@ -1136,42 +1177,70 @@ pub fn execute_perf_baseline(_command: PerfBaselineCommand) -> Result<(), String
         String::from_utf8_lossy(&output.stdout).trim().to_string()
     };
 
-    let status = Command::new("cargo")
-        .args([
-            "build", "--release", "-p", "rusty_box", "--example", "perfbench", "--features", "std",
-        ])
-        .current_dir(&root)
-        .status()
-        .map_err(|err| format!("failed to spawn cargo: {err}"))?;
-    if !status.success() {
-        return Err(format!("perfbench build exited with {status}"));
-    }
-
-    let exe = if cfg!(windows) {
-        "perfbench.exe"
-    } else {
-        "perfbench"
-    };
-    let built = root
-        .join("target")
-        .join("release")
-        .join("examples")
-        .join(exe);
-    if !built.exists() {
-        return Err(format!("built perfbench not found at {}", built.display()));
-    }
-
     let dest_dir = root.join("target").join("perf-baselines").join(&rev);
     std::fs::create_dir_all(&dest_dir)
         .map_err(|err| format!("failed to create {}: {err}", dest_dir.display()))?;
-    let dest = dest_dir.join(exe);
-    std::fs::copy(&built, &dest)
-        .map_err(|err| format!("failed to copy perfbench to {}: {err}", dest.display()))?;
+    for bench in PERF_BENCHES {
+        let status = Command::new("cargo")
+            .args([
+                "build",
+                "--release",
+                "-p",
+                bench.package,
+                "--example",
+                bench.example,
+                "--features",
+                "std",
+            ])
+            .current_dir(&root)
+            .status()
+            .map_err(|err| format!("failed to spawn cargo: {err}"))?;
+        if !status.success() {
+            return Err(format!("{} build exited with {status}", bench.example));
+        }
 
-    println!("perf baseline archived: {}", dest.display());
+        let exe = if cfg!(windows) {
+            format!("{}.exe", bench.example)
+        } else {
+            bench.example.to_string()
+        };
+        let built = root
+            .join("target")
+            .join("release")
+            .join("examples")
+            .join(&exe);
+        if !built.exists() {
+            return Err(format!("built {} not found at {}", bench.example, built.display()));
+        }
+        let dest = dest_dir.join(&exe);
+        std::fs::copy(&built, &dest).map_err(|err| {
+            format!("failed to copy {} to {}: {err}", bench.example, dest.display())
+        })?;
+        println!("perf baseline archived: {}", dest.display());
+    }
+
     println!("A/B usage: alternate baseline and candidate binaries >= 10 pairs, compare medians.");
     Ok(())
 }
+
+/// A benchmark example `perf-baseline` builds and archives.
+struct PerfBench {
+    package: &'static str,
+    example: &'static str,
+}
+
+/// The x86 machine's CPU-core benchmark, and the AArch64 interpreter's
+/// loops and boots (`rusty_box_aarch64/examples/perfbench.rs`).
+const PERF_BENCHES: &[PerfBench] = &[
+    PerfBench {
+        package: "rusty_box",
+        example: "perfbench",
+    },
+    PerfBench {
+        package: "rusty_box_aarch64",
+        example: "aarch64_perfbench",
+    },
+];
 
 pub fn parse_ci_args(args: &[String]) -> Result<CiCommand, String> {
     let mut command = CiCommand::default();

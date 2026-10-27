@@ -8,12 +8,7 @@ use super::softfloat_types::*;
 use super::specialize::*;
 
 /// Berkeley SoftFloat `softfloat_addMagsF64`.
-fn add_mags_f64(
-    ui_a: u64,
-    ui_b: u64,
-    sign_z: bool,
-    status: &mut SoftFloatStatus,
-) -> Float64 {
+fn add_mags_f64(ui_a: u64, ui_b: u64, sign_z: bool, status: &mut SoftFloatStatus) -> Float64 {
     let exp_a = exp_f64(ui_a);
     let mut sig_a = frac_f64(ui_a);
     let exp_b = exp_f64(ui_b);
@@ -107,12 +102,7 @@ fn add_mags_f64(
 }
 
 /// Berkeley SoftFloat `softfloat_subMagsF64`.
-fn sub_mags_f64(
-    ui_a: u64,
-    ui_b: u64,
-    mut sign_z: bool,
-    status: &mut SoftFloatStatus,
-) -> Float64 {
+fn sub_mags_f64(ui_a: u64, ui_b: u64, mut sign_z: bool, status: &mut SoftFloatStatus) -> Float64 {
     let mut exp_a = exp_f64(ui_a);
     let mut sig_a = frac_f64(ui_a);
     let exp_b = exp_f64(ui_b);
@@ -147,9 +137,13 @@ fn sub_mags_f64(
             shift_dist = exp_a;
             exp_z = 0;
         }
-        // An equal-exponent difference is exact: a subnormal result
-        // underflows only when FPCR.FZ flushes it.
-        if exp_z == 0 && softfloat_flush_underflow_to_zero(status) {
+        // An equal-exponent difference is exact: a subnormal result (no
+        // implicit bit after the shift; Bochs s_subMagsF64) underflows
+        // only when FPCR.FZ flushes it.
+        if exp_z == 0
+            && ((sig_diff << shift_dist) as u64) < 0x0010_0000_0000_0000
+            && softfloat_flush_underflow_to_zero(status)
+        {
             softfloat_raise_flags(status, flush_flags(status));
             return pack_to_f64(sign_z, 0, 0);
         }
@@ -315,7 +309,10 @@ mod tests {
     fn f64_add_sub_subnormals() {
         let tiny = f64::from_bits(1); // smallest subnormal
         assert_eq!(add(tiny, tiny).to_bits(), 2);
-        assert_eq!(sub(f64::MIN_POSITIVE, tiny).to_bits(), 0x000F_FFFF_FFFF_FFFF);
+        assert_eq!(
+            sub(f64::MIN_POSITIVE, tiny).to_bits(),
+            0x000F_FFFF_FFFF_FFFF
+        );
         assert_eq!(add(f64::MIN_POSITIVE, -f64::MIN_POSITIVE).to_bits(), 0);
     }
 }

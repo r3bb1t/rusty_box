@@ -179,7 +179,12 @@ pub(crate) fn f16_tiny_after_rounding(sign: bool, exp: i16, sig: u16, rounding_m
 /// conversions, whose Arm FPRoundCV forces FZ16 off, and by the
 /// half-precision arithmetic in `half`, which applies FPCR.FZ16 itself, so
 /// it never flushes.
-pub(crate) fn round_pack_to_f16(sign: bool, exp: i16, sig: u16, status: &mut SoftFloatStatus) -> Float16 {
+pub(crate) fn round_pack_to_f16(
+    sign: bool,
+    exp: i16,
+    sig: u16,
+    status: &mut SoftFloatStatus,
+) -> Float16 {
     let rounding_mode = softfloat_get_rounding_mode(status);
     let round_near_even = rounding_mode == ROUND_NEAR_EVEN;
     let round_increment = f16_round_increment(sign, rounding_mode);
@@ -189,8 +194,8 @@ pub(crate) fn round_pack_to_f16(sign: bool, exp: i16, sig: u16, status: &mut Sof
 
     if 0x1D <= (exp as u16) {
         if exp < 0 {
-            let is_tiny =
-                tininess_before_rounding(status) || f16_tiny_after_rounding(sign, exp, sig, rounding_mode);
+            let is_tiny = tininess_before_rounding(status)
+                || f16_tiny_after_rounding(sign, exp, sig, rounding_mode);
             sig = shift_right_jam32(sig as u32, (-(exp as i32)) as u16) as u16;
             exp = 0;
             round_bits = sig & 0xF;

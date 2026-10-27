@@ -38,13 +38,18 @@ pub(crate) fn shift_right_jam64(a: u64, dist: u32) -> u64 {
 
 // --- 128-bit shift operations ---
 
-/// Shifts the 128-bit value (a64, a0) left by 'dist' (1..63).
+/// Berkeley `softfloat_shortShiftLeft128`: shifts the 128-bit value
+/// (a64, a0) left by 'dist' (0..63); a distance of 0 is the identity.
+///
+/// Berkeley states the range 1 to 63 and computes the high word as
+/// `a64<<dist | a0>>(-dist & 63)`, which at 0 ORs `a0` into it.
+/// `softfloat_mulAddF64` shifts by 0 when its difference's top set bit is
+/// bit 62, and then `a0` is 0, so both forms give its result.
 #[inline]
 pub(crate) fn short_shift_left128(a64: u64, a0: u64, dist: u8) -> (u64, u64) {
-    debug_assert!((1..=63).contains(&dist));
-    let z64 = (a64 << dist) | (a0 >> (64 - dist));
-    let z0 = a0 << dist;
-    (z64, z0)
+    debug_assert!(dist <= 63);
+    let z = ((u128::from(a64) << 64) | u128::from(a0)) << (dist & 63);
+    ((z >> 64) as u64, z as u64)
 }
 
 /// Berkeley `softfloat_shortShiftRightJam128`: shifts the 128-bit value
@@ -173,11 +178,13 @@ pub(crate) fn approx_recip_sqrt32_1(odd_exp: u32, a: u32) -> u32 {
     }
     // C: sigma0 = ~(uint32_t)(((uint32_t) ESqrR0 * (uint64_t) a) >> 23)
     let sigma0: u32 = !(((e_sqr_r0 as u64).wrapping_mul(a as u64) >> 23) as u32);
-    let mut r: u32 = ((r0 as u32) << 16)
-        .wrapping_add(((r0 as u64).wrapping_mul(sigma0 as u64) >> 25) as u32);
+    let mut r: u32 =
+        ((r0 as u32) << 16).wrapping_add(((r0 as u64).wrapping_mul(sigma0 as u64) >> 25) as u32);
     let sqr_sigma0: u32 = ((sigma0 as u64).wrapping_mul(sigma0 as u64) >> 32) as u32;
     // C: r += ((uint32_t)((r>>1)+(r>>3)-((uint32_t)r0<<14)) * (uint64_t)sqrSigma0) >> 48
-    let inner: u32 = (r >> 1).wrapping_add(r >> 3).wrapping_sub((r0 as u32) << 14);
+    let inner: u32 = (r >> 1)
+        .wrapping_add(r >> 3)
+        .wrapping_sub((r0 as u32) << 14);
     r = r.wrapping_add(((inner as u64).wrapping_mul(sqr_sigma0 as u64) >> 48) as u32);
     if r & 0x8000_0000 == 0 {
         r = 0x8000_0000;

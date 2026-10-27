@@ -68,7 +68,8 @@ const SBOX: [u8; 256] = {
     let mut i = 0;
     while i < 256 {
         let b = gf_inverse(i as u8);
-        table[i] = b ^ b.rotate_left(1) ^ b.rotate_left(2) ^ b.rotate_left(3) ^ b.rotate_left(4) ^ 0x63;
+        table[i] =
+            b ^ b.rotate_left(1) ^ b.rotate_left(2) ^ b.rotate_left(3) ^ b.rotate_left(4) ^ 0x63;
         i += 1;
     }
     table
@@ -139,7 +140,12 @@ fn aes_mix_columns(state: u128) -> u128 {
     let input = state.to_le_bytes();
     let mut output = [0u8; 16];
     for c in 0..4 {
-        let [a0, a1, a2, a3] = [input[4 * c], input[4 * c + 1], input[4 * c + 2], input[4 * c + 3]];
+        let [a0, a1, a2, a3] = [
+            input[4 * c],
+            input[4 * c + 1],
+            input[4 * c + 2],
+            input[4 * c + 3],
+        ];
         let mul = |table: &[u8; 256], a: u8| table[usize::from(a)];
         output[4 * c] = mul(&FF_MUL_02, a0) ^ mul(&FF_MUL_03, a1) ^ a2 ^ a3;
         output[4 * c + 1] = a0 ^ mul(&FF_MUL_02, a1) ^ mul(&FF_MUL_03, a2) ^ a3;
@@ -154,12 +160,21 @@ fn aes_inv_mix_columns(state: u128) -> u128 {
     let input = state.to_le_bytes();
     let mut output = [0u8; 16];
     for c in 0..4 {
-        let [a0, a1, a2, a3] = [input[4 * c], input[4 * c + 1], input[4 * c + 2], input[4 * c + 3]];
+        let [a0, a1, a2, a3] = [
+            input[4 * c],
+            input[4 * c + 1],
+            input[4 * c + 2],
+            input[4 * c + 3],
+        ];
         let mul = |table: &[u8; 256], a: u8| table[usize::from(a)];
-        output[4 * c] = mul(&FF_MUL_0E, a0) ^ mul(&FF_MUL_0B, a1) ^ mul(&FF_MUL_0D, a2) ^ mul(&FF_MUL_09, a3);
-        output[4 * c + 1] = mul(&FF_MUL_09, a0) ^ mul(&FF_MUL_0E, a1) ^ mul(&FF_MUL_0B, a2) ^ mul(&FF_MUL_0D, a3);
-        output[4 * c + 2] = mul(&FF_MUL_0D, a0) ^ mul(&FF_MUL_09, a1) ^ mul(&FF_MUL_0E, a2) ^ mul(&FF_MUL_0B, a3);
-        output[4 * c + 3] = mul(&FF_MUL_0B, a0) ^ mul(&FF_MUL_0D, a1) ^ mul(&FF_MUL_09, a2) ^ mul(&FF_MUL_0E, a3);
+        output[4 * c] =
+            mul(&FF_MUL_0E, a0) ^ mul(&FF_MUL_0B, a1) ^ mul(&FF_MUL_0D, a2) ^ mul(&FF_MUL_09, a3);
+        output[4 * c + 1] =
+            mul(&FF_MUL_09, a0) ^ mul(&FF_MUL_0E, a1) ^ mul(&FF_MUL_0B, a2) ^ mul(&FF_MUL_0D, a3);
+        output[4 * c + 2] =
+            mul(&FF_MUL_0D, a0) ^ mul(&FF_MUL_09, a1) ^ mul(&FF_MUL_0E, a2) ^ mul(&FF_MUL_0B, a3);
+        output[4 * c + 3] =
+            mul(&FF_MUL_0B, a0) ^ mul(&FF_MUL_0D, a1) ^ mul(&FF_MUL_09, a2) ^ mul(&FF_MUL_0E, a3);
     }
     u128::from_le_bytes(output)
 }
@@ -205,7 +220,9 @@ fn word(v: u128, e: u32) -> u32 {
 /// Four 32-bit elements, element 0 first.
 #[inline]
 fn words(w: [u32; 4]) -> u128 {
-    w.iter().rev().fold(0u128, |acc, &x| (acc << 32) | u128::from(x))
+    w.iter()
+        .rev()
+        .fold(0u128, |acc, &x| (acc << 32) | u128::from(x))
 }
 
 /// SHA1C, SHA1P and SHA1M: four rounds of the round function `f` over the
@@ -251,7 +268,9 @@ fn sha256_hash(mut x: u128, mut y: u128, w: u128, part1: bool) -> u128 {
         // X<127:96> and then Y<127:96>; the latter reads X<31:0>, which the
         // former leaves alone.
         let x3 = t.wrapping_add(word(x, 3));
-        let y3 = t.wrapping_add(sha_hash_sigma0(word(x, 0))).wrapping_add(maj);
+        let y3 = t
+            .wrapping_add(sha_hash_sigma0(word(x, 0)))
+            .wrapping_add(maj);
         set_elem(&mut x, 3, 32, u64::from(x3));
         set_elem(&mut y, 3, 32, u64::from(y3));
         // <Y, X> = ROL(Y : X, 32).
@@ -274,7 +293,12 @@ fn sha256_schedule_update0(d: u128, n: u128) -> u128 {
     for e in 0..4 {
         let elt = word(t, e);
         let sigma = elt.rotate_right(7) ^ elt.rotate_right(18) ^ (elt >> 3);
-        set_elem(&mut result, e, 32, u64::from(sigma.wrapping_add(word(d, e))));
+        set_elem(
+            &mut result,
+            e,
+            32,
+            u64::from(sigma.wrapping_add(word(d, e))),
+        );
     }
     result
 }
@@ -287,8 +311,14 @@ fn sha256_schedule_update1(d: u128, n: u128, m: u128) -> u128 {
     let sigma1 = |x: u32| x.rotate_right(17) ^ x.rotate_right(19) ^ (x >> 10);
     let mut result = 0u128;
     for e in 0..4 {
-        let source = if e < 2 { word(m, e + 2) } else { word(result, e - 2) };
-        let elt = sigma1(source).wrapping_add(word(d, e)).wrapping_add(word(t0, e));
+        let source = if e < 2 {
+            word(m, e + 2)
+        } else {
+            word(result, e - 2)
+        };
+        let elt = sigma1(source)
+            .wrapping_add(word(d, e))
+            .wrapping_add(word(t0, e));
         set_elem(&mut result, e, 32, u64::from(elt));
     }
     result
@@ -328,7 +358,11 @@ const fn reflected_table(poly: u32) -> [u32; 256] {
         let mut crc = i as u32;
         let mut shifts = 0;
         while shifts < 8 {
-            crc = if crc & 1 != 0 { (crc >> 1) ^ reflected } else { crc >> 1 };
+            crc = if crc & 1 != 0 {
+                (crc >> 1) ^ reflected
+            } else {
+                crc >> 1
+            };
             shifts += 1;
         }
         table[i] = crc;
@@ -426,7 +460,11 @@ impl Cpu {
     /// instructions: `CPACR_EL1.FPEN` does not trap them.
     pub(crate) fn exec_crc32(&mut self, insn: u32) -> ExecResult {
         let bytes = 1 << bits(insn, 11, 10);
-        let table = if bit(insn, 12) { &CRC32C_TABLE } else { &CRC32_TABLE };
+        let table = if bit(insn, 12) {
+            &CRC32C_TABLE
+        } else {
+            &CRC32_TABLE
+        };
         let acc = self.x_or_zr(bits(insn, 9, 5)) as u32;
         let value = self.x_or_zr(bits(insn, 20, 16));
         let crc = crc32_update(acc, value, bytes, table);

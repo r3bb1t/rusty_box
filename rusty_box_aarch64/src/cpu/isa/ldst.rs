@@ -2,8 +2,8 @@
 //! `op1 = x1x0`.
 
 use super::atomic;
-use super::Feature;
 use super::Encoding;
+use super::Feature;
 use crate::cpu::exec::bits;
 
 /// Arm group `asisdlse`: Advanced SIMD load/store multiple structures.
@@ -1182,7 +1182,9 @@ impl LdstnapairOffs {
     pub(crate) const fn feature(self) -> Feature {
         match self {
             Self::Stnp32 | Self::Ldnp32 | Self::Stnp64 | Self::Ldnp64 => Feature::Base,
-            Self::StnpS | Self::LdnpS | Self::StnpD | Self::LdnpD | Self::StnpQ | Self::LdnpQ => Feature::Fp,
+            Self::StnpS | Self::LdnpS | Self::StnpD | Self::LdnpD | Self::StnpQ | Self::LdnpQ => {
+                Feature::Fp
+            }
         }
     }
 }
@@ -1191,7 +1193,9 @@ impl LdstpairPost {
     pub(crate) const fn feature(self) -> Feature {
         match self {
             Self::Stp32 | Self::Ldp32 | Self::Ldpsw64 | Self::Stp64 | Self::Ldp64 => Feature::Base,
-            Self::StpS | Self::LdpS | Self::StpD | Self::LdpD | Self::StpQ | Self::LdpQ => Feature::Fp,
+            Self::StpS | Self::LdpS | Self::StpD | Self::LdpD | Self::StpQ | Self::LdpQ => {
+                Feature::Fp
+            }
         }
     }
 }
@@ -1200,7 +1204,9 @@ impl LdstpairOff {
     pub(crate) const fn feature(self) -> Feature {
         match self {
             Self::Stp32 | Self::Ldp32 | Self::Ldpsw64 | Self::Stp64 | Self::Ldp64 => Feature::Base,
-            Self::StpS | Self::LdpS | Self::StpD | Self::LdpD | Self::StpQ | Self::LdpQ => Feature::Fp,
+            Self::StpS | Self::LdpS | Self::StpD | Self::LdpD | Self::StpQ | Self::LdpQ => {
+                Feature::Fp
+            }
         }
     }
 }
@@ -1209,7 +1215,9 @@ impl LdstpairPre {
     pub(crate) const fn feature(self) -> Feature {
         match self {
             Self::Stp32 | Self::Ldp32 | Self::Ldpsw64 | Self::Stp64 | Self::Ldp64 => Feature::Base,
-            Self::StpS | Self::LdpS | Self::StpD | Self::LdpD | Self::StpQ | Self::LdpQ => Feature::Fp,
+            Self::StpS | Self::LdpS | Self::StpD | Self::LdpD | Self::StpQ | Self::LdpQ => {
+                Feature::Fp
+            }
         }
     }
 }

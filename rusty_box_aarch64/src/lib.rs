@@ -26,10 +26,16 @@
 //! the features those values advertise is UNDEFINED, as the architecture
 //! requires.
 //!
-//! Provenance (rusty_box R7): no Bochs upstream exists for any of this. The
-//! instruction semantics follow the Arm Architecture Reference Manual for
-//! A-profile (DDI 0487) pseudocode; the board and its devices follow QEMU's
-//! `hw/arm/virt.c` and the device models it instantiates, cited per file.
+//! Provenance (rusty_box R7): no Bochs upstream exists for any of this.
+//! Arm's documents decide wherever they speak: the instruction semantics
+//! follow the Arm Architecture Reference Manual for A-profile (DDI 0487)
+//! pseudocode, the GIC IHI 0048B, the PL011 DDI 0183F, and the firmware
+//! calls PSCI (DEN 0022D) and the SMC Calling Convention (DEN 0028B). QEMU's
+//! `hw/arm/virt.c` and the device models it instantiates decide what those
+//! documents do not — the memory map, the interrupt wiring, the device
+//! tree, the choices Arm leaves to an implementation, and the devices Arm
+//! does not document — cited per file. README's "Where the references
+//! differ" lists every departure from QEMU.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -51,25 +57,29 @@ pub mod machine;
 mod softfloat;
 pub mod storage;
 
+pub use board::{Plugged, VirtioDevices};
 pub use bus::{AccessWidth, BusFault, PhysAddr, PhysBus};
 pub use cpu::{
-    Btype, Cpu, CpuConfig, CpuModel, CpuState, El, Pstate, Reg, SysReg, SysRegRefusal, UnknownCpuModel, VReg,
+    Btype, Cpu, CpuConfig, CpuModel, CpuState, El, Pstate, Reg, SysReg, SysRegRefusal,
+    UnknownCpuModel, VReg,
 };
-pub use instrumentation::{Instrumentation, NoInstrumentation};
+#[cfg(feature = "alloc")]
+pub use disk::{Access, Disk};
+pub use instrumentation::{Execution, Instrumentation, NoInstrumentation};
+#[cfg(feature = "alloc")]
+pub use machine::Display;
 #[cfg(feature = "alloc")]
 pub use machine::StopHandle;
 pub use machine::{
-    BatchOutcome, BuildError, MachineBuilder, MemoryError, MemoryLoan, OnResetRequest, PowerState, RamSize,
-    StopReason, VirtConfig, VirtMachine,
+    BatchOutcome, BuildError, MachineBuilder, MemoryError, MemoryLoan, OnResetRequest, PowerState,
+    RamSize, StopReason, VirtConfig, VirtMachine,
 };
-pub use board::{Plugged, VirtioDevices};
-#[cfg(feature = "alloc")]
-pub use disk::{Access, Disk};
-#[cfg(feature = "alloc")]
-pub use machine::Display;
 pub use machine::{Keyboard, Pointer};
 pub use rusty_box_core::input::pointer::{PointerButton, PointerInput, PointerPos, WheelSteps};
 pub use rusty_box_core::input::{Key, KeyAction, KeyboardInput, Typed};
+/// The verbs every rusty_box machine shares, whatever it emulates.
+pub use rusty_box_core::machine::{Machine, RunOutcome, SerialPort};
+pub use rusty_box_core::{ClockHz, Progress, RunBudget};
 /// What the display shows through: the size of a picture and the sink a
 /// host implements to receive its frames, with every type its methods take,
 /// shared with the x86 machine.
@@ -78,9 +88,6 @@ pub use rusty_box_devices::display::sink::{
 };
 pub use rusty_box_devices::display::vga::VgaTextModeInfo;
 pub use rusty_box_devices::display::Resolution;
-/// The verbs every rusty_box machine shares, whatever it emulates.
-pub use rusty_box_core::machine::{Machine, RunOutcome, SerialPort};
-pub use rusty_box_core::{ClockHz, Progress, RunBudget};
 #[cfg(feature = "alloc")]
 pub use storage::OwnedStorage;
 pub use storage::{GuestStorage, LentStorage};

@@ -1,7 +1,7 @@
 //! QEMU firmware configuration interface, memory-mapped form.
 //!
 //! Provenance (R7): QEMU `hw/nvram/fw_cfg.c` (`fw_cfg_data_read`,
-//! `fw_cfg_select`, `fw_cfg_init_mem_wide`) and the items `hw/arm/virt.c`
+//! `fw_cfg_select`, `fw_cfg_init_mem_dma`) and the items `hw/arm/virt.c`
 //! installs. Layout at the device's base: data at +0 (1 to 8 bytes), the
 //! 16-bit big-endian selector at +8, the DMA address at +16.
 //!
@@ -118,7 +118,9 @@ impl FwCfg {
         self.selector = r.read_u16()?;
         let offset = r.read_u32()? as usize;
         if offset > MAX_ITEM {
-            return Err(SnapError::Invalid("fw_cfg read offset is past the longest item"));
+            return Err(SnapError::Invalid(
+                "fw_cfg read offset is past the longest item",
+            ));
         }
         self.offset = offset;
         Ok(())
@@ -134,9 +136,20 @@ mod tests {
     #[test]
     fn the_signature_reads_in_memory_order() {
         let mut f = FwCfg::new();
-        f.write(RegOffset::new(8), AccessWidth::Half, u64::from(FW_CFG_SIGNATURE.swap_bytes()));
-        assert_eq!(f.read(RegOffset::new(0), AccessWidth::Word), u64::from(u32::from_le_bytes(*b"QEMU")));
-        f.write(RegOffset::new(8), AccessWidth::Half, u64::from(FW_CFG_ID.swap_bytes()));
+        f.write(
+            RegOffset::new(8),
+            AccessWidth::Half,
+            u64::from(FW_CFG_SIGNATURE.swap_bytes()),
+        );
+        assert_eq!(
+            f.read(RegOffset::new(0), AccessWidth::Word),
+            u64::from(u32::from_le_bytes(*b"QEMU"))
+        );
+        f.write(
+            RegOffset::new(8),
+            AccessWidth::Half,
+            u64::from(FW_CFG_ID.swap_bytes()),
+        );
         assert_eq!(f.read(RegOffset::new(0), AccessWidth::Dword), 1);
     }
 }

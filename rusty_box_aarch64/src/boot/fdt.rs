@@ -145,7 +145,10 @@ const fn align4(n: usize) -> usize {
 /// The NUL-terminated name at `at` in a block.
 fn name_at(block: &[u8], at: usize) -> Result<&[u8], DeviceTreeError> {
     let rest = block.get(at..).ok_or(DeviceTreeError::Malformed)?;
-    let len = rest.iter().position(|&b| b == 0).ok_or(DeviceTreeError::Malformed)?;
+    let len = rest
+        .iter()
+        .position(|&b| b == 0)
+        .ok_or(DeviceTreeError::Malformed)?;
     Ok(&rest[..len])
 }
 
@@ -168,9 +171,15 @@ struct Out<'a> {
 
 impl Out<'_> {
     fn put(&mut self, bytes: &[u8]) -> Result<(), DeviceTreeError> {
-        let end = self.pos.checked_add(bytes.len()).ok_or(DeviceTreeError::TooLarge)?;
+        let end = self
+            .pos
+            .checked_add(bytes.len())
+            .ok_or(DeviceTreeError::TooLarge)?;
         if !self.measuring {
-            self.buf.get_mut(self.pos..end).ok_or(DeviceTreeError::TooLarge)?.copy_from_slice(bytes);
+            self.buf
+                .get_mut(self.pos..end)
+                .ok_or(DeviceTreeError::TooLarge)?
+                .copy_from_slice(bytes);
         }
         self.pos = end;
         Ok(())
@@ -206,9 +215,9 @@ impl Names<'_, '_> {
     fn appends(&self, i: usize) -> bool {
         let name = self.edits[i].property;
         find_string(self.source, name).is_none()
-            && !self.edits[..i]
-                .iter()
-                .any(|e| e.property.ends_with(name) && find_string(self.source, e.property).is_none())
+            && !self.edits[..i].iter().any(|e| {
+                e.property.ends_with(name) && find_string(self.source, e.property).is_none()
+            })
     }
 
     /// The offset of `name`, which an edit sets, in the rebuilt block: the
@@ -243,7 +252,12 @@ impl Names<'_, '_> {
 /// Write a property holding `edit`'s value, its name at `name_off` in the
 /// strings block, followed by `padding` when that is as long as the padding
 /// the value needs and by zeros otherwise.
-fn put_prop(out: &mut Out<'_>, name_off: usize, edit: &Edit<'_>, padding: &[u8]) -> Result<(), DeviceTreeError> {
+fn put_prop(
+    out: &mut Out<'_>,
+    name_off: usize,
+    edit: &Edit<'_>,
+    padding: &[u8],
+) -> Result<(), DeviceTreeError> {
     let len = edit.value.len();
     out.put_u32(FDT_PROP)?;
     out.put_u32(u32::try_from(len).map_err(|_| DeviceTreeError::TooLarge)?)?;
@@ -278,7 +292,11 @@ impl<'c, 'n> Chain<'c, 'n> {
         if depth > MAX_DEPTH {
             return Err(DeviceTreeError::TooDeep);
         }
-        Ok(Self { name, parent, depth })
+        Ok(Self {
+            name,
+            parent,
+            depth,
+        })
     }
 
     /// What is left of `path` below this node, if `path` runs through it:
@@ -309,7 +327,12 @@ impl<'c, 'n> Chain<'c, 'n> {
 
 /// Write the structure block with the edits applied: its one root node,
 /// then `FDT_END`.
-fn structure(source: &[u8], strings: &[u8], names: &Names<'_, '_>, out: &mut Out<'_>) -> Result<(), DeviceTreeError> {
+fn structure(
+    source: &[u8],
+    strings: &[u8],
+    names: &Names<'_, '_>,
+    out: &mut Out<'_>,
+) -> Result<(), DeviceTreeError> {
     let root = skip_nops(source, 0)?;
     if be32(source, root)? != FDT_BEGIN_NODE {
         return Err(DeviceTreeError::Malformed);
@@ -390,7 +413,9 @@ fn node(
                 };
                 match setting {
                     Some(edit) if edit.value.len() == len => {
-                        let padding = source.get(at + 12 + len..end).ok_or(DeviceTreeError::Malformed)?;
+                        let padding = source
+                            .get(at + 12 + len..end)
+                            .ok_or(DeviceTreeError::Malformed)?;
                         put_prop(out, name_off, edit, padding)?;
                     }
                     Some(edit) => put_prop(out, name_off, edit, &[])?,
@@ -413,8 +438,15 @@ fn node(
 
 /// The last edit that sets `property` of `here`: the value the property
 /// ends with.
-fn last_setting<'e, 'a>(here: &Chain<'_, '_>, property: &[u8], edits: &'e [Edit<'a>]) -> Option<&'e Edit<'a>> {
-    edits.iter().rev().find(|e| e.property.as_bytes() == property && here.is(e.node))
+fn last_setting<'e, 'a>(
+    here: &Chain<'_, '_>,
+    property: &[u8],
+    edits: &'e [Edit<'a>],
+) -> Option<&'e Edit<'a>> {
+    edits
+        .iter()
+        .rev()
+        .find(|e| e.property.as_bytes() == property && here.is(e.node))
 }
 
 /// Write the properties edits give `here` that its source node, `contents`,
@@ -429,7 +461,9 @@ fn added_properties(
 ) -> Result<(), DeviceTreeError> {
     let edits = names.edits;
     for (i, e) in edits.iter().enumerate().rev() {
-        let first = !edits[..i].iter().any(|o| o.property == e.property && here.is(o.node));
+        let first = !edits[..i]
+            .iter()
+            .any(|o| o.property == e.property && here.is(o.node));
         if !here.is(e.node) || !first {
             continue;
         }
@@ -461,7 +495,10 @@ fn created_children(
         let Some(child) = here.child_toward(e.node) else {
             continue;
         };
-        if edits[..i].iter().any(|o| here.child_toward(o.node) == Some(child)) {
+        if edits[..i]
+            .iter()
+            .any(|o| here.child_toward(o.node) == Some(child))
+        {
             continue;
         }
         let exists = match contents {
@@ -477,7 +514,12 @@ fn created_children(
 
 /// Write the node `name`, which the source lacks, in `parent`: the
 /// properties edits give it and the nodes they create in it.
-fn create(name: &str, parent: &Chain<'_, '_>, names: &Names<'_, '_>, out: &mut Out<'_>) -> Result<(), DeviceTreeError> {
+fn create(
+    name: &str,
+    parent: &Chain<'_, '_>,
+    names: &Names<'_, '_>,
+    out: &mut Out<'_>,
+) -> Result<(), DeviceTreeError> {
     let here = Chain::inside(Some(parent), name.as_bytes())?;
     out.put_u32(FDT_BEGIN_NODE)?;
     out.put(name.as_bytes())?;
@@ -496,7 +538,8 @@ fn has_property(node: SourceNode<'_>, name: &str) -> Result<bool, DeviceTreeErro
         match be32(node.structure, at)? {
             FDT_PROP => {
                 let len = be32(node.structure, at + 4)? as usize;
-                if name_at(node.strings, be32(node.structure, at + 8)? as usize)? == name.as_bytes() {
+                if name_at(node.strings, be32(node.structure, at + 8)? as usize)? == name.as_bytes()
+                {
                     return Ok(true);
                 }
                 at += 12 + align4(len);
@@ -542,7 +585,11 @@ fn has_child(source: &[u8], body: usize, name: &str) -> Result<bool, DeviceTreeE
 /// tree's length. The result is compact: no slack after the strings block.
 /// A tree, or an edit's path, with a node deeper than [`MAX_DEPTH`] is
 /// refused with [`DeviceTreeError::TooDeep`].
-pub(crate) fn rebuild(source: &[u8], edits: &[Edit<'_>], dst: &mut [u8]) -> Result<usize, DeviceTreeError> {
+pub(crate) fn rebuild(
+    source: &[u8],
+    edits: &[Edit<'_>],
+    dst: &mut [u8],
+) -> Result<usize, DeviceTreeError> {
     if be32(source, 0).ok() != Some(FDT_MAGIC) {
         return Err(DeviceTreeError::NotADeviceTree);
     }
@@ -553,15 +600,27 @@ pub(crate) fn rebuild(source: &[u8], edits: &[Edit<'_>], dst: &mut [u8]) -> Resu
     let size_strings = be32(source, 32)? as usize;
     let size_struct = be32(source, 36)? as usize;
     let structure_src = source
-        .get(off_struct..off_struct.checked_add(size_struct).ok_or(DeviceTreeError::Malformed)?)
+        .get(
+            off_struct
+                ..off_struct
+                    .checked_add(size_struct)
+                    .ok_or(DeviceTreeError::Malformed)?,
+        )
         .ok_or(DeviceTreeError::Malformed)?;
     let strings = source
-        .get(off_strings..off_strings.checked_add(size_strings).ok_or(DeviceTreeError::Malformed)?)
+        .get(
+            off_strings
+                ..off_strings
+                    .checked_add(size_strings)
+                    .ok_or(DeviceTreeError::Malformed)?,
+        )
         .ok_or(DeviceTreeError::Malformed)?;
     // The reservation block runs to its all-zero terminating entry.
     let mut rsv_end = off_rsvmap;
     loop {
-        let entry = source.get(rsv_end..rsv_end + 16).ok_or(DeviceTreeError::Malformed)?;
+        let entry = source
+            .get(rsv_end..rsv_end + 16)
+            .ok_or(DeviceTreeError::Malformed)?;
         rsv_end += 16;
         if entry.iter().all(|&b| b == 0) {
             break;
@@ -630,14 +689,22 @@ pub(crate) fn rebuild(source: &[u8], edits: &[Edit<'_>], dst: &mut [u8]) -> Resu
 /// # Errors
 ///
 /// [`DeviceTreeError`] when `tree` is not a well-formed device tree.
-pub fn property<'t>(tree: &'t [u8], path: &str, property: &str) -> Result<Option<&'t [u8]>, DeviceTreeError> {
+pub fn property<'t>(
+    tree: &'t [u8],
+    path: &str,
+    property: &str,
+) -> Result<Option<&'t [u8]>, DeviceTreeError> {
     if be32(tree, 0).ok() != Some(FDT_MAGIC) {
         return Err(DeviceTreeError::NotADeviceTree);
     }
     let off_struct = be32(tree, 8)? as usize;
     let off_strings = be32(tree, 12)? as usize;
     let strings = tree.get(off_strings..).ok_or(DeviceTreeError::Malformed)?;
-    let want = if path.is_empty() { 0 } else { path.split('/').count() };
+    let want = if path.is_empty() {
+        0
+    } else {
+        path.split('/').count()
+    };
     // The root is at depth 1; the node at depth `d` matches `path`'s
     // component `d - 2`. `matched` counts the open nodes that match, which
     // are always the outermost ones below the root.
@@ -651,7 +718,12 @@ pub fn property<'t>(tree: &'t [u8], path: &str, property: &str) -> Result<Option
                 depth += 1;
                 if depth >= 2
                     && matched == depth - 2
-                    && path.split('/').nth(matched).filter(|_| matched < want).map(str::as_bytes) == Some(name)
+                    && path
+                        .split('/')
+                        .nth(matched)
+                        .filter(|_| matched < want)
+                        .map(str::as_bytes)
+                        == Some(name)
                 {
                     matched += 1;
                 }
@@ -668,7 +740,10 @@ pub fn property<'t>(tree: &'t [u8], path: &str, property: &str) -> Result<Option
                 let len = be32(tree, at + 4)? as usize;
                 let name = name_at(strings, be32(tree, at + 8)? as usize)?;
                 if matched == want && depth == want + 1 && name == property.as_bytes() {
-                    return Ok(Some(tree.get(at + 12..at + 12 + len).ok_or(DeviceTreeError::Malformed)?));
+                    return Ok(Some(
+                        tree.get(at + 12..at + 12 + len)
+                            .ok_or(DeviceTreeError::Malformed)?,
+                    ));
                 }
                 at += 12 + align4(len);
             }
@@ -712,25 +787,43 @@ mod tests {
         let len = rebuild(QEMU_DTB, &edits, &mut dst).expect("rebuild");
         let tree = &dst[..len];
         assert_eq!(property(tree, "memory@40000000", "reg"), Ok(Some(&reg[..])));
-        assert_eq!(property(tree, "chosen", "bootargs"), Ok(Some(&b"console=ttyAMA0\0"[..])));
-        assert_eq!(property(tree, "rusty-box-test", "made-here"), Ok(Some(&[0u8, 0, 0, 1][..])));
+        assert_eq!(
+            property(tree, "chosen", "bootargs"),
+            Ok(Some(&b"console=ttyAMA0\0"[..]))
+        );
+        assert_eq!(
+            property(tree, "rusty-box-test", "made-here"),
+            Ok(Some(&[0u8, 0, 0, 1][..]))
+        );
         // Untouched: the UART's compatible string and chosen's stdout-path.
         assert_eq!(
             property(tree, "pl011@9000000", "compatible"),
             property(QEMU_DTB, "pl011@9000000", "compatible")
         );
-        assert_eq!(property(tree, "chosen", "stdout-path"), property(QEMU_DTB, "chosen", "stdout-path"));
+        assert_eq!(
+            property(tree, "chosen", "stdout-path"),
+            property(QEMU_DTB, "chosen", "stdout-path")
+        );
         assert!(len < 16 * 1024, "the rebuild is compact: {len} bytes");
     }
 
     #[test]
     fn a_property_is_found_by_its_node_path() {
-        assert_eq!(property(QEMU_DTB, "", "compatible"), Ok(Some(&b"linux,dummy-virt\0"[..])));
+        assert_eq!(
+            property(QEMU_DTB, "", "compatible"),
+            Ok(Some(&b"linux,dummy-virt\0"[..]))
+        );
         assert_eq!(property(QEMU_DTB, "", "dma-coherent"), Ok(Some(&[][..])));
         // `cpu@0` follows its sibling `cpu-map`, whose nested subtree matches
         // no further than `cpus`.
-        assert_eq!(property(QEMU_DTB, "cpus/cpu@0", "compatible"), Ok(Some(&b"arm,cortex-a57\0"[..])));
-        assert_eq!(property(QEMU_DTB, "aliases", "serial0"), Ok(Some(&b"/pl011@9000000\0"[..])));
+        assert_eq!(
+            property(QEMU_DTB, "cpus/cpu@0", "compatible"),
+            Ok(Some(&b"arm,cortex-a57\0"[..]))
+        );
+        assert_eq!(
+            property(QEMU_DTB, "aliases", "serial0"),
+            Ok(Some(&b"/pl011@9000000\0"[..]))
+        );
         assert_eq!(
             property(QEMU_DTB, "cpus/cpu-map/socket0/cluster0/core0", "cpu"),
             Ok(Some(&0x8001u32.to_be_bytes()[..]))
@@ -738,7 +831,10 @@ mod tests {
         // A path names nodes from the root down, and only the node at its end.
         assert_eq!(property(QEMU_DTB, "cpu@0", "compatible"), Ok(None));
         assert_eq!(property(QEMU_DTB, "cpus", "compatible"), Ok(None));
-        assert_eq!(property(QEMU_DTB, "cpus/cpu@0/l2-cache", "compatible"), Ok(None));
+        assert_eq!(
+            property(QEMU_DTB, "cpus/cpu@0/l2-cache", "compatible"),
+            Ok(None)
+        );
         assert_eq!(property(QEMU_DTB, "cpus/core0", "cpu"), Ok(None));
         assert_eq!(property(QEMU_DTB, "chosen", "compatible"), Ok(None));
     }
@@ -779,21 +875,49 @@ mod tests {
         ];
         let len = rebuild(QEMU_DTB, &edits, &mut dst).expect("rebuild");
         let tree = &dst[..len];
-        assert_eq!(property(tree, "cpus/cpu@0", "compatible"), Ok(Some(&b"arm,armv8\0"[..])));
+        assert_eq!(
+            property(tree, "cpus/cpu@0", "compatible"),
+            Ok(Some(&b"arm,armv8\0"[..]))
+        );
         for kept in ["reg", "device_type", "phandle", "d-cache-size"] {
-            assert_eq!(property(tree, "cpus/cpu@0", kept), property(QEMU_DTB, "cpus/cpu@0", kept), "{kept}");
-            assert!(property(tree, "cpus/cpu@0", kept).is_ok_and(|v| v.is_some()), "{kept}");
+            assert_eq!(
+                property(tree, "cpus/cpu@0", kept),
+                property(QEMU_DTB, "cpus/cpu@0", kept),
+                "{kept}"
+            );
+            assert!(
+                property(tree, "cpus/cpu@0", kept).is_ok_and(|v| v.is_some()),
+                "{kept}"
+            );
         }
         assert_eq!(
             property(tree, "cpus/cpu-map/socket0/cluster0/core0", "cpu"),
             property(QEMU_DTB, "cpus/cpu-map/socket0/cluster0/core0", "cpu")
         );
-        assert_eq!(property(tree, "cpus", "#address-cells"), property(QEMU_DTB, "cpus", "#address-cells"));
-        assert_eq!(property(tree, "cpus/cpu@1", "reg"), Ok(Some(&[0u8, 0, 0, 1][..])));
-        assert_eq!(property(tree, "rusty/box/a", "made-here"), Ok(Some(&[0u8, 0, 0, 2][..])));
-        assert_eq!(property(tree, "rusty/box/b", "made-here"), Ok(Some(&[0u8, 0, 0, 3][..])));
-        assert_eq!(property(tree, "", "model"), Ok(Some(&b"rusty_box virt\0"[..])));
-        assert_eq!(property(tree, "", "compatible"), property(QEMU_DTB, "", "compatible"));
+        assert_eq!(
+            property(tree, "cpus", "#address-cells"),
+            property(QEMU_DTB, "cpus", "#address-cells")
+        );
+        assert_eq!(
+            property(tree, "cpus/cpu@1", "reg"),
+            Ok(Some(&[0u8, 0, 0, 1][..]))
+        );
+        assert_eq!(
+            property(tree, "rusty/box/a", "made-here"),
+            Ok(Some(&[0u8, 0, 0, 2][..]))
+        );
+        assert_eq!(
+            property(tree, "rusty/box/b", "made-here"),
+            Ok(Some(&[0u8, 0, 0, 3][..]))
+        );
+        assert_eq!(
+            property(tree, "", "model"),
+            Ok(Some(&b"rusty_box virt\0"[..]))
+        );
+        assert_eq!(
+            property(tree, "", "compatible"),
+            property(QEMU_DTB, "", "compatible")
+        );
         // `rusty` and `box` are each created once: one FDT_BEGIN_NODE apiece.
         let begins = |name: &[u8]| {
             let mut token = [0u8; 12];
@@ -802,21 +926,32 @@ mod tests {
             let token = &token[..4 + align4(name.len() + 1)];
             tree.windows(token.len()).filter(|w| *w == token).count()
         };
-        assert_eq!((begins(b"rusty"), begins(b"box"), begins(b"cpus")), (1, 1, 1));
+        assert_eq!(
+            (begins(b"rusty"), begins(b"box"), begins(b"cpus")),
+            (1, 1, 1)
+        );
     }
 
     /// The names of the properties of the node at `path` (as [`property`]
     /// reads one), in order, then of its children.
-    fn layout(tree: &[u8], path: &str) -> (std::vec::Vec<std::string::String>, std::vec::Vec<std::string::String>) {
+    fn layout(
+        tree: &[u8],
+        path: &str,
+    ) -> (
+        std::vec::Vec<std::string::String>,
+        std::vec::Vec<std::string::String>,
+    ) {
         use std::string::String;
         use std::vec::Vec;
-        let word = |at: usize| u32::from_be_bytes([tree[at], tree[at + 1], tree[at + 2], tree[at + 3]]);
+        let word =
+            |at: usize| u32::from_be_bytes([tree[at], tree[at + 1], tree[at + 2], tree[at + 3]]);
         let text = |at: usize| {
             let end = at + tree[at..].iter().position(|&b| b == 0).expect("a NUL");
             String::from_utf8(tree[at..end].to_vec()).expect("UTF-8")
         };
         let (structure, strings) = (word(8) as usize, word(12) as usize);
-        let (mut open, mut properties, mut children) = (Vec::<String>::new(), Vec::new(), Vec::new());
+        let (mut open, mut properties, mut children) =
+            (Vec::<String>::new(), Vec::new(), Vec::new());
         let mut at = structure;
         loop {
             let here = open.get(1..).map(|o| o.join("/")).unwrap_or_default();
@@ -907,9 +1042,18 @@ mod tests {
         let mut want = std::vec!["linux,initrd-end", "linux,initrd-start", "bootargs"];
         want.extend(source_chosen.iter().map(|p| p.as_str()));
         assert_eq!(chosen, want);
-        assert_eq!(property(tree, "chosen", "bootargs"), Ok(Some(&b"console=ttyAMA0\0"[..])));
-        assert_eq!(layout(tree, "memory@40000000"), layout(QEMU_DTB, "memory@40000000"));
-        assert_eq!(layout(QEMU_DTB, "memory@40000000").0, ["reg", "device_type"]);
+        assert_eq!(
+            property(tree, "chosen", "bootargs"),
+            Ok(Some(&b"console=ttyAMA0\0"[..]))
+        );
+        assert_eq!(
+            layout(tree, "memory@40000000"),
+            layout(QEMU_DTB, "memory@40000000")
+        );
+        assert_eq!(
+            layout(QEMU_DTB, "memory@40000000").0,
+            ["reg", "device_type"]
+        );
         assert_eq!(property(tree, "memory@40000000", "reg"), Ok(Some(&reg[..])));
         // `made` is the root's first child, its children last made first.
         let (_, root_children) = layout(tree, "");
@@ -946,11 +1090,34 @@ mod tests {
         let header_len = HEADER_LEN + 16;
         let mut structure = std::vec::Vec::new();
         let p_is_1 = u32::from_be_bytes([1, 0, 0, 0]);
-        for token in [FDT_BEGIN_NODE, 0, FDT_BEGIN_NODE, u32::from_be_bytes(*b"n\0\0\0"), FDT_END_NODE, FDT_PROP, 1, 0, p_is_1, FDT_END_NODE, FDT_END] {
+        for token in [
+            FDT_BEGIN_NODE,
+            0,
+            FDT_BEGIN_NODE,
+            u32::from_be_bytes(*b"n\0\0\0"),
+            FDT_END_NODE,
+            FDT_PROP,
+            1,
+            0,
+            p_is_1,
+            FDT_END_NODE,
+            FDT_END,
+        ] {
             structure.extend(token.to_be_bytes());
         }
         let strings_at = header_len + structure.len();
-        for field in [FDT_MAGIC, strings_at as u32 + 2, header_len as u32, strings_at as u32, HEADER_LEN as u32, 17, 16, 0, 2, structure.len() as u32] {
+        for field in [
+            FDT_MAGIC,
+            strings_at as u32 + 2,
+            header_len as u32,
+            strings_at as u32,
+            HEADER_LEN as u32,
+            17,
+            16,
+            0,
+            2,
+            structure.len() as u32,
+        ] {
             tree.extend(field.to_be_bytes());
         }
         tree.extend([0u8; 16]);
@@ -965,14 +1132,23 @@ mod tests {
             value: Value::Bytes(&[2]),
         };
         let len = rebuild(&tree, &[edit], &mut dst).expect("rebuild");
-        assert_eq!(layout(&dst[..len], ""), (std::vec!["p".into(), "p".into()], std::vec!["n".into()]));
-        assert_eq!(property(&dst[..len], "", "p"), Ok(Some(&[2u8][..])), "the one set comes first");
+        assert_eq!(
+            layout(&dst[..len], ""),
+            (std::vec!["p".into(), "p".into()], std::vec!["n".into()])
+        );
+        assert_eq!(
+            property(&dst[..len], "", "p"),
+            Ok(Some(&[2u8][..])),
+            "the one set comes first"
+        );
         // The one after the child still holds 1.
         let mut trailing = std::vec::Vec::new();
         for token in [FDT_END_NODE, FDT_PROP, 1, 0, p_is_1, FDT_END_NODE] {
             trailing.extend(token.to_be_bytes());
         }
-        assert!(dst[..len].windows(trailing.len()).any(|w| w == &trailing[..]));
+        assert!(dst[..len]
+            .windows(trailing.len())
+            .any(|w| w == &trailing[..]));
     }
 
     /// A path names no node through an empty component; the root is the
@@ -1021,7 +1197,11 @@ mod tests {
         let tree = &dst[..len];
         let source_strings = be32(QEMU_DTB, 32).expect("a header") as usize;
         let appended = "compat".len() + 1 + "rusty,box".len() + 1;
-        assert_eq!(be32(tree, 32), Ok((source_strings + appended) as u32), "two names appended");
+        assert_eq!(
+            be32(tree, 32),
+            Ok((source_strings + appended) as u32),
+            "two names appended"
+        );
         assert_eq!(property(tree, "chosen", "compat"), Ok(Some(&[4u8][..])));
         assert_eq!(property(tree, "chosen", "compatible"), Ok(None));
         assert_eq!(property(tree, "chosen", "rusty,box"), Ok(Some(&[1u8][..])));
@@ -1091,19 +1271,38 @@ mod tests {
         let len = rebuild(QEMU_DTB, &[edit(&deepest)], &mut dst).expect("62 levels");
         assert_eq!(property(&dst[..len], &deepest, "deep"), Ok(Some(&[][..])));
         let too_deep = path(deepest_read + 1);
-        assert_eq!(rebuild(QEMU_DTB, &[edit(&too_deep)], &mut dst), Err(DeviceTreeError::TooDeep));
+        assert_eq!(
+            rebuild(QEMU_DTB, &[edit(&too_deep)], &mut dst),
+            Err(DeviceTreeError::TooDeep)
+        );
 
         let tree = nested(deepest_read);
         assert_eq!(rebuild(&tree, &[], &mut dst), Ok(tree.len()));
-        assert_eq!(&dst[..tree.len()], &tree[..], "an unedited tree is copied as it is");
-        assert_eq!(rebuild(&tree, &[edit(&too_deep)], &mut dst), Err(DeviceTreeError::TooDeep));
-        assert_eq!(rebuild(&nested(deepest_read + 1), &[], &mut dst), Err(DeviceTreeError::TooDeep));
+        assert_eq!(
+            &dst[..tree.len()],
+            &tree[..],
+            "an unedited tree is copied as it is"
+        );
+        assert_eq!(
+            rebuild(&tree, &[edit(&too_deep)], &mut dst),
+            Err(DeviceTreeError::TooDeep)
+        );
+        assert_eq!(
+            rebuild(&nested(deepest_read + 1), &[], &mut dst),
+            Err(DeviceTreeError::TooDeep)
+        );
     }
 
     #[test]
     fn a_tree_that_does_not_fit_is_refused_whole() {
         let mut dst = [0u8; 256];
-        assert_eq!(rebuild(QEMU_DTB, &[], &mut dst), Err(DeviceTreeError::TooLarge));
-        assert_eq!(rebuild(b"not a tree at all, honestly....", &[], &mut dst), Err(DeviceTreeError::NotADeviceTree));
+        assert_eq!(
+            rebuild(QEMU_DTB, &[], &mut dst),
+            Err(DeviceTreeError::TooLarge)
+        );
+        assert_eq!(
+            rebuild(b"not a tree at all, honestly....", &[], &mut dst),
+            Err(DeviceTreeError::NotADeviceTree)
+        );
     }
 }

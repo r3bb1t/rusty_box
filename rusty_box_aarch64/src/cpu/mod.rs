@@ -30,16 +30,19 @@ mod fp_estimate;
 #[cfg(test)]
 #[path = "../../tests/unit/fp_extensions.rs"]
 mod fp_extensions;
+mod history;
 mod isa;
 mod ldst;
 #[cfg(test)]
 #[path = "../../tests/unit/memory_system.rs"]
 mod memory_system;
 mod mmu;
+mod op;
 mod pauth;
 #[cfg(test)]
 #[path = "../../tests/unit/pointer_auth.rs"]
 mod pointer_auth;
+mod poll;
 #[cfg(test)]
 #[path = "../../tests/unit/pstate_features.rs"]
 mod pstate_features;
@@ -58,20 +61,24 @@ mod sve;
 mod sysreg;
 mod system;
 mod timer;
+mod trace;
 mod wait;
 mod za;
 mod za_array;
 mod zt0;
 
-use rusty_box_core::{ClockHz, RingBuffer, VmClock, VmInstant};
+use rusty_box_core::{ClockHz, VmClock, VmInstant};
 
 pub use exception::ExceptionClass;
 pub use exec::{DebugStops, Step, StopCause, UndefinedInsn};
 pub use features::{CpuModel, UnknownCpuModel, ARMV8P6_COUNTER_HZ, QEMU_BACKCOMPAT_COUNTER_HZ};
+pub use history::RecentPcs;
 pub use mmu::{Tlb, TranslationFault};
 pub use regs::{CpuState, Reg, SysReg, SysRegRefusal, VReg};
 pub use timer::TimerLines;
 pub use wait::Wait;
+
+use exec::Nzcv;
 
 /// An exception level this processor implements.
 ///
@@ -277,9 +284,23 @@ impl Pstate {
     /// `NZCV` in its register layout (bits 31:28).
     #[inline]
     pub const fn nzcv(self) -> u64 {
-        ((self.n as u64) << 31) | ((self.z as u64) << 30) | ((self.c as u64) << 29) | ((self.v as u64) << 28)
+        ((self.n as u64) << 31)
+            | ((self.z as u64) << 30)
+            | ((self.c as u64) << 29)
+            | ((self.v as u64) << 28)
     }
 
+    /// Set N, Z, C and V to `flags`.
+    #[inline]
+    pub(crate) fn set_flags(&mut self, flags: Nzcv) {
+        self.n = flags.n;
+        self.z = flags.z;
+        self.c = flags.c;
+        self.v = flags.v;
+    }
+
+    /// Set N, Z, C and V from `NZCV` in its register layout (bits 31:28),
+    /// as an `MSR NZCV` does; every other bit of `bits` is ignored.
     #[inline]
     pub fn set_nzcv(&mut self, bits: u64) {
         self.n = bits & (1 << 31) != 0;
@@ -291,9 +312,14 @@ impl Pstate {
     /// `DAIF` in its register layout (bits 9:6).
     #[inline]
     pub const fn daif(self) -> u64 {
-        ((self.d as u64) << 9) | ((self.a as u64) << 8) | ((self.i as u64) << 7) | ((self.f as u64) << 6)
+        ((self.d as u64) << 9)
+            | ((self.a as u64) << 8)
+            | ((self.i as u64) << 7)
+            | ((self.f as u64) << 6)
     }
 
+    /// Set D, A, I and F from `DAIF` in its register layout (bits 9:6), as
+    /// an `MSR DAIF` does; every other bit of `bits` is ignored.
     #[inline]
     pub fn set_daif(&mut self, bits: u64) {
         self.d = bits & (1 << 9) != 0;
@@ -328,8 +354,22 @@ pub enum Activity {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ExclusiveMonitor {
     pub(crate) armed: bool,
+    /// The physical address of the monitored granule.
     pub(crate) addr: u64,
+    /// The virtual address the load-exclusive used, which a store-exclusive
+    /// compares first (Arm ARM `AArch64.IsExclusiveVA`).
+    pub(crate) va: u64,
     pub(crate) bytes: u64,
+}
+
+impl ExclusiveMonitor {
+    /// Open Access: no granule monitored.
+    pub(crate) const CLEAR: Self = Self {
+        armed: false,
+        addr: 0,
+        va: 0,
+        bytes: 0,
+    };
 }
 
 /// System registers that are plain storage, plus the ones whose effects the
@@ -378,6 +418,10 @@ pub(crate) struct SysRegs {
     pub(crate) dbgbcr: [u64; 2],
     pub(crate) dbgwvr: [u64; 2],
     pub(crate) dbgwcr: [u64; 2],
+    /// The Debug Communications Channel's data registers, DTRRX and DTRTX,
+    /// 32 bits each; their flags, RXfull and TXfull, are in `mdscr_el1`.
+    pub(crate) dtrrx: u32,
+    pub(crate) dtrtx: u32,
     /// `DISR_EL1` (FEAT_RAS): with no source of SError interrupts, only an
     /// `MSR` writes it.
     pub(crate) disr_el1: u64,
@@ -426,6 +470,8 @@ impl SysRegs {
             dbgbcr: [0; 2],
             dbgwvr: [0; 2],
             dbgwcr: [0; 2],
+            dtrrx: 0,
+            dtrtx: 0,
             disr_el1: 0,
         }
     }
@@ -461,7 +507,19 @@ pub struct Cpu {
     pub(crate) monitor: ExclusiveMonitor,
     pub(crate) event: wait::EventRegister,
     pub(crate) tlb: Tlb,
-    pub(crate) decode_cache: decode::DecodeCache,
+    pub(crate) traces: trace::TraceCache,
+    /// Set by anything that may change how the next instruction is fetched
+    /// or found — a TLB fill or flush, a write over cached code, a cache
+    /// invalidation — so that the running trace stops after the current
+    /// instruction. Cleared when a trace starts.
+    pub(crate) trace_break: bool,
+    /// Arm `InGuardedPage` (FEAT_BTI) of the instruction executing: whether
+    /// the page its fetch translated is guarded, as that translation found
+    /// it (`Cpu::fetch_translate`). Every fetch translates before its
+    /// instruction runs, but those of a trace's later instructions, which
+    /// are on its first one's page; so it is not saved, and the first fetch
+    /// after a restore sets it.
+    pub(crate) in_guarded_page: bool,
     pub(crate) activity: Activity,
     /// Ticks since the machine was built: one per retired (or faulting)
     /// instruction, plus the span skipped while waiting.
@@ -478,7 +536,9 @@ pub struct Cpu {
     pub(crate) irq_line: bool,
     pub(crate) fiq_line: bool,
     pub(crate) debug_stops: DebugStops,
-    pub(crate) pc_history: RingBuffer<u64, PC_HISTORY>,
+    /// Where the last [`PC_HISTORY`] instructions ran. Every write of `pc`
+    /// other than the step to the next sequential instruction tells it.
+    pub(crate) history: history::PcHistory,
 }
 
 impl Cpu {
@@ -503,14 +563,12 @@ impl Cpu {
             pac_keys: pauth::PacKeys::ZERO,
             imp,
             sys: SysRegs::reset(imp.counter_hz),
-            monitor: ExclusiveMonitor {
-                armed: false,
-                addr: 0,
-                bytes: 0,
-            },
+            monitor: ExclusiveMonitor::CLEAR,
             event: wait::EventRegister::at(false, timer::Count::new(0)),
             tlb: Tlb::new(),
-            decode_cache: decode::DecodeCache::new(imp.features),
+            traces: trace::TraceCache::new(),
+            trace_break: false,
+            in_guarded_page: false,
             activity: Activity::Running,
             icount: 0,
             retired: 0,
@@ -522,7 +580,7 @@ impl Cpu {
                 on_undefined: false,
                 on_bus_fault: false,
             },
-            pc_history: RingBuffer::new(),
+            history: history::PcHistory::new(config.reset_pc, 0),
         }
     }
 
@@ -618,9 +676,11 @@ impl Cpu {
         self.ips
     }
 
-    /// Recently executed instruction addresses, oldest first.
-    pub fn recent_pcs(&self) -> rusty_box_core::ring_buffer::Iter<'_, u64, PC_HISTORY> {
-        self.pc_history.iter()
+    /// Recently executed instruction addresses, oldest first: the last
+    /// [`PC_HISTORY`] instructions that retired or took an exception in
+    /// their place.
+    pub fn recent_pcs(&self) -> RecentPcs {
+        self.history.recent(self.retired)
     }
 
     // ----- register file -----

@@ -95,7 +95,10 @@ pub(crate) const SMIDR_EL1: u64 = 0;
 /// one before), BRPs = 1 and WRPs = 1 (two of each, the architectural
 /// minimum), CTX_CMPs = 0, PMUVer = 0 (no PMU).
 pub(crate) const fn id_aa64dfr0(features: Features) -> u64 {
-    let debug = chain_level(features, &[Feature::Debugv8p1, Feature::Debugv8p2, Feature::Debugv8p4]);
+    let debug = chain_level(
+        features,
+        &[Feature::Debugv8p1, Feature::Debugv8p2, Feature::Debugv8p4],
+    );
     0x0000_0000_0010_1000 | (6 + debug)
 }
 
@@ -290,7 +293,8 @@ pub const CLIDR_EL1: u64 = 0x0A20_0023;
 /// data (32 KiB, 2-way, 64-byte lines), L1 instruction (48 KiB, 3-way), L2
 /// unified (2 MiB, 16-way). The L1 geometry is the TRM's (DDI 0488C, 6.1);
 /// QEMU 9.2 and later report a 4-way L1 data cache (README, "Where the
-/// references differ"). Any other selection reads as zero.
+/// references differ"), and the board's device tree carries the TRM's 256
+/// sets to match these values. Any other selection reads as zero.
 pub const CCSIDR_L1D: u64 = 0x701F_E00A;
 pub const CCSIDR_L1I: u64 = 0x201F_E012;
 pub const CCSIDR_L2: u64 = 0x70FF_E07A;

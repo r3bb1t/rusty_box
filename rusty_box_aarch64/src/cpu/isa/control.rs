@@ -464,7 +464,9 @@ impl BranchReg {
 
     pub(crate) const fn feature(self) -> Feature {
         match self {
-            Self::Br64 | Self::Blr64 | Self::Ret64r | Self::Eret64e | Self::Drps64e => Feature::Base,
+            Self::Br64 | Self::Blr64 | Self::Ret64r | Self::Eret64e | Self::Drps64e => {
+                Feature::Base
+            }
             Self::Braaz64
             | Self::Brabz64
             | Self::Blraaz64

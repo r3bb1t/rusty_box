@@ -11,7 +11,7 @@
 //! next tick a line can rise, which this module computes exactly: the first
 //! tick whose count reaches `CVAL`.
 
-use rusty_box_core::VmInstant;
+use rusty_box_core::{Cycles, VmInstant};
 
 use super::Cpu;
 
@@ -47,10 +47,11 @@ const CTL_IMASK: u64 = 1 << 1;
 const CTL_ISTATUS: u64 = 1 << 2;
 
 impl Cpu {
-    /// The system counter at the tick `icount`.
+    /// The system counter at the tick `icount`: non-decreasing in `icount`.
     #[inline]
-    fn counter_at(&self, icount: u64) -> Count {
-        let value = u128::from(icount) * u128::from(self.imp.counter_hz.get()) / u128::from(self.ips.get());
+    pub(crate) fn counter_at(&self, icount: u64) -> Count {
+        let value =
+            u128::from(icount) * u128::from(self.imp.counter_hz.get()) / u128::from(self.ips.get());
         Count(u64::try_from(value).unwrap_or(u64::MAX))
     }
 
@@ -60,13 +61,18 @@ impl Cpu {
         self.counter_at(self.icount)
     }
 
-    /// The first tick at which the counter reaches `count`. `None` when that
-    /// is the last tick the count of ticks holds or past it: the machine
-    /// reads `u64::MAX` as "never", and a deadline is never there.
+    /// The first tick at which the counter reaches `count`: the ticks that
+    /// span `count` counter cycles, rounded up, which is exactly where
+    /// [`Cpu::counter_at`]'s floor first reaches it. `None` when that is the
+    /// last tick the count of ticks holds or past it (the span saturates
+    /// there): the machine reads `u64::MAX` as "never", and a deadline is
+    /// never there.
     pub(super) fn tick_reaching(&self, count: Count) -> Option<VmInstant> {
-        let needed = u128::from(count.0) * u128::from(self.ips.get());
-        let ticks = needed.div_ceil(u128::from(self.imp.counter_hz.get()));
-        u64::try_from(ticks).ok().filter(|&t| t != u64::MAX).map(VmInstant::from_ticks)
+        let ticks = self
+            .ips
+            .ticks_from_cycles_ceil(Cycles::new(count.0), self.imp.counter_hz)
+            .ticks();
+        (ticks != u64::MAX).then(|| VmInstant::from_ticks(ticks))
     }
 
     #[inline]
@@ -77,7 +83,11 @@ impl Cpu {
     /// `CNTx_CTL_EL0` as read: `ISTATUS` reports the condition, whatever
     /// `IMASK` says.
     pub(crate) fn timer_ctl_read(&self, ctl: u64, cval: u64) -> u64 {
-        let status = if self.condition_met(ctl, cval) { CTL_ISTATUS } else { 0 };
+        let status = if self.condition_met(ctl, cval) {
+            CTL_ISTATUS
+        } else {
+            0
+        };
         (ctl & (CTL_ENABLE | CTL_IMASK)) | status
     }
 
@@ -90,7 +100,9 @@ impl Cpu {
     /// The `CVAL` a write of `value` to `CNTx_TVAL_EL0` sets: the count plus
     /// the low word of `value`, sign-extended.
     pub(crate) fn timer_cval_from_tval(&self, value: u64) -> u64 {
-        self.counter().0.wrapping_add(value as u32 as i32 as i64 as u64)
+        self.counter()
+            .0
+            .wrapping_add(value as u32 as i32 as i64 as u64)
     }
 
     /// Both timer outputs now.
@@ -168,7 +180,10 @@ mod tests {
         c.sys.cntv_cval_el0 = 5;
         assert_eq!(c.next_timer_deadline(), None);
         c.icount = 5;
-        assert_eq!(c.timer_ctl_read(c.sys.cntv_ctl_el0, 5) & CTL_ISTATUS, CTL_ISTATUS);
+        assert_eq!(
+            c.timer_ctl_read(c.sys.cntv_ctl_el0, 5) & CTL_ISTATUS,
+            CTL_ISTATUS
+        );
         assert!(!c.timer_lines().virtual_);
     }
 

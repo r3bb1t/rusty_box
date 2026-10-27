@@ -59,7 +59,10 @@ pub(crate) struct Svcr {
 
 impl Svcr {
     /// The state out of reset: neither.
-    pub(crate) const RESET: Self = Self { sm: false, za: false };
+    pub(crate) const RESET: Self = Self {
+        sm: false,
+        za: false,
+    };
 
     /// The register's value: SM in bit 0, ZA in bit 1.
     pub(crate) const fn bits(self) -> u64 {
@@ -384,7 +387,11 @@ impl Cpu {
         if self.pstate.el != El::El0 || !self.sve_enabled_at(El::El1) || !self.fp_enabled() {
             return;
         }
-        let vl = if self.sve_enabled_at(El::El0) { self.current_svl() } else { VecLen::MIN };
+        let vl = if self.sve_enabled_at(El::El0) {
+            self.current_svl()
+        } else {
+            VecLen::MIN
+        };
         let svl = self.current_svl().bytes();
         let all = self.imp.max_svl.bytes();
         let s = &mut self.scalable;
@@ -494,7 +501,9 @@ impl Cpu {
         }
         let svcr = r.read_u8()?;
         if svcr > 0b11 {
-            return Err(SnapError::Invalid("SVCR in the snapshot sets a reserved bit"));
+            return Err(SnapError::Invalid(
+                "SVCR in the snapshot sets a reserved bit",
+            ));
         }
         self.svcr = Svcr {
             sm: svcr & 1 != 0,

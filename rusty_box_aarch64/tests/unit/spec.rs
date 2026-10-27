@@ -63,7 +63,9 @@ use super::{decode, Encoding, Feature};
 const SPEC_DIR_VAR: &str = "RUSTY_BOX_AARCHMRS";
 
 /// Arm's top-level A64 groups the decoder has a function for: all of them.
-const TOP_GROUPS: [&str; 8] = ["reserved", "dpimm", "control", "ldst", "dpreg", "simd_dp", "sve", "sme"];
+const TOP_GROUPS: [&str; 8] = [
+    "reserved", "dpimm", "control", "ldst", "dpreg", "simd_dp", "sve", "sme",
+];
 
 /// The encodings whose Arm condition the decoder does not follow: the
 /// encoding, the condition as Arm writes it, and why.
@@ -151,7 +153,10 @@ fn camel(snake: &str) -> String {
         .map(|part| {
             let mut chars = part.chars();
             let first = chars.next().map(|c| c.to_ascii_uppercase());
-            first.into_iter().chain(chars.map(|c| c.to_ascii_lowercase())).collect::<String>()
+            first
+                .into_iter()
+                .chain(chars.map(|c| c.to_ascii_lowercase()))
+                .collect::<String>()
         })
         .collect()
 }
@@ -164,7 +169,8 @@ fn camel(snake: &str) -> String {
 fn variant_name(encoding: &str, class: &str) -> Option<String> {
     let parts: Vec<&str> = encoding.split('_').collect();
     let class_parts: Vec<&str> = class.split('_').collect();
-    let found = (0..=parts.len().checked_sub(class_parts.len())?).find(|&i| parts[i..i + class_parts.len()] == class_parts[..]);
+    let found = (0..=parts.len().checked_sub(class_parts.len())?)
+        .find(|&i| parts[i..i + class_parts.len()] == class_parts[..]);
     let Some(at) = found else {
         return Some(camel(encoding));
     };
@@ -189,20 +195,29 @@ fn last_ident(path: &syn::Path) -> Option<String> {
 
 fn int(expr: &Expr) -> Option<u32> {
     match expr {
-        Expr::Lit(syn::ExprLit { lit: syn::Lit::Int(i), .. }) => i.base10_parse::<u32>().ok(),
+        Expr::Lit(syn::ExprLit {
+            lit: syn::Lit::Int(i),
+            ..
+        }) => i.base10_parse::<u32>().ok(),
         _ => None,
     }
 }
 
 /// `Option<T>` as `T`.
 fn option_of(output: &ReturnType) -> Option<String> {
-    let ReturnType::Type(_, ty) = output else { return None };
-    let Type::Path(p) = ty.as_ref() else { return None };
+    let ReturnType::Type(_, ty) = output else {
+        return None;
+    };
+    let Type::Path(p) = ty.as_ref() else {
+        return None;
+    };
     let seg = p.path.segments.last()?;
     if seg.ident != "Option" {
         return None;
     }
-    let syn::PathArguments::AngleBracketed(args) = &seg.arguments else { return None };
+    let syn::PathArguments::AngleBracketed(args) = &seg.arguments else {
+        return None;
+    };
     match args.args.first()? {
         syn::GenericArgument::Type(Type::Path(inner)) => last_ident(&inner.path),
         _ => None,
@@ -252,7 +267,10 @@ impl Reader<'_> {
             && matches!(item.sig.inputs.first(), Some(syn::FnArg::Typed(t))
                 if matches!(t.pat.as_ref(), Pat::Ident(i) if i.ident == "word" || i.ident == "_word"));
         if !takes_word {
-            self.error(name, "a decoder function takes exactly `word: u32`".to_string());
+            self.error(
+                name,
+                "a decoder function takes exactly `word: u32`".to_string(),
+            );
         }
         let mut cx = Context {
             function: name.to_string(),
@@ -263,11 +281,17 @@ impl Reader<'_> {
         let stmts = &item.block.stmts;
         for stmt in stmts.iter().take(stmts.len().saturating_sub(1)) {
             let Stmt::Local(local) = stmt else {
-                self.error(name, "a statement other than `let field = bits(word, hi, lo);`".to_string());
+                self.error(
+                    name,
+                    "a statement other than `let field = bits(word, hi, lo);`".to_string(),
+                );
                 continue;
             };
             let (Pat::Ident(ident), Some(init)) = (&local.pat, &local.init) else {
-                self.error(name, "a `let` that is not `let field = bits(...)`".to_string());
+                self.error(
+                    name,
+                    "a `let` that is not `let field = bits(...)`".to_string(),
+                );
                 continue;
             };
             match self.bits_call(&init.expr) {
@@ -284,7 +308,10 @@ impl Reader<'_> {
                         });
                     }
                 }
-                None => self.error(name, format!("`let {}` is not `bits(word, hi, lo)`", ident.ident)),
+                None => self.error(
+                    name,
+                    format!("`let {}` is not `bits(word, hi, lo)`", ident.ident),
+                ),
             }
         }
         match stmts.last() {
@@ -296,7 +323,9 @@ impl Reader<'_> {
     /// `bits(word, hi, lo)`.
     fn bits_call(&self, expr: &Expr) -> Option<(u32, u32)> {
         let Expr::Call(call) = expr else { return None };
-        let Expr::Path(func) = call.func.as_ref() else { return None };
+        let Expr::Path(func) = call.func.as_ref() else {
+            return None;
+        };
         if last_ident(&func.path)? != "bits" || call.args.len() != 3 {
             return None;
         }
@@ -315,14 +344,20 @@ impl Reader<'_> {
             if let Some(ident) = p.path.get_ident() {
                 let found = cx.fields.get(&ident.to_string()).copied();
                 if found.is_none() {
-                    self.error(&cx.function, format!("`{ident}` is not a field bound in this function"));
+                    self.error(
+                        &cx.function,
+                        format!("`{ident}` is not a field bound in this function"),
+                    );
                 }
                 return found;
             }
         }
         let found = self.bits_call(expr);
         if found.is_none() {
-            self.error(&cx.function, "a scrutinee that is neither a bound field nor `bits(word, hi, lo)`".to_string());
+            self.error(
+                &cx.function,
+                "a scrutinee that is neither a bound field nor `bits(word, hi, lo)`".to_string(),
+            );
         }
         found
     }
@@ -361,7 +396,10 @@ impl Reader<'_> {
             }
             Pat::Paren(p) => self.element(&p.pat, cx),
             _ => {
-                self.error(&cx.function, "a pattern other than a literal, a range, `|` or `_`".to_string());
+                self.error(
+                    &cx.function,
+                    "a pattern other than a literal, a range, `|` or `_`".to_string(),
+                );
                 None
             }
         }
@@ -395,9 +433,17 @@ impl Reader<'_> {
                 }
                 Some(all)
             }
-            _ if arity == 1 => Some(self.element(pat, cx)?.into_iter().map(|v| vec![v]).collect()),
+            _ if arity == 1 => Some(
+                self.element(pat, cx)?
+                    .into_iter()
+                    .map(|v| vec![v])
+                    .collect(),
+            ),
             _ => {
-                self.error(&cx.function, "a pattern that does not match the scrutinee's shape".to_string());
+                self.error(
+                    &cx.function,
+                    "a pattern that does not match the scrutinee's shape".to_string(),
+                );
                 None
             }
         }
@@ -556,6 +602,12 @@ fn arm_tag(body: &Expr) -> Option<Tag> {
             Some(Tag::Fixed(p.path.segments[1].ident.to_string()))
         }
         Expr::MethodCall(mc) if mc.method == "feature" => Some(Tag::PerVariant),
+        // `=> { Feature::Fp }`, as rustfmt writes an arm too long for one
+        // line: the block's one expression is the arm's value.
+        Expr::Block(b) if b.label.is_none() => match b.block.stmts.as_slice() {
+            [Stmt::Expr(inner, None)] => arm_tag(inner),
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -566,8 +618,13 @@ fn feature_arms(imp: &syn::ItemImpl) -> Option<Vec<(Vec<String>, Tag)>> {
         ImplItem::Fn(f) if f.sig.ident == "feature" => f.block.stmts.last(),
         _ => None,
     })?;
-    let Stmt::Expr(Expr::Match(m), None) = body else { return None };
-    m.arms.iter().map(|arm| Some((arm_variants(&arm.pat), arm_tag(&arm.body)?))).collect()
+    let Stmt::Expr(Expr::Match(m), None) = body else {
+        return None;
+    };
+    m.arms
+        .iter()
+        .map(|arm| Some((arm_variants(&arm.pat), arm_tag(&arm.body)?)))
+        .collect()
 }
 
 /// The decoder's source as [`read_source`] reads it, read once per test
@@ -580,7 +637,10 @@ pub(crate) fn source() -> &'static Source {
 /// Read the decoder's source: every `.rs` file of `src/cpu/isa`, and
 /// `src/cpu/features.rs`.
 fn read_source() -> Source {
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src").join("cpu").join("isa");
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("src")
+        .join("cpu")
+        .join("isa");
     let mut errors = Vec::new();
     let mut paths: Vec<PathBuf> = Vec::new();
     match std::fs::read_dir(&dir) {
@@ -602,7 +662,10 @@ fn read_source() -> Source {
         if path.extension().is_none_or(|e| e != "rs") {
             continue;
         }
-        match std::fs::read_to_string(&path).map_err(|e| e.to_string()).and_then(|text| syn::parse_file(&text).map_err(|e| e.to_string())) {
+        match std::fs::read_to_string(&path)
+            .map_err(|e| e.to_string())
+            .and_then(|text| syn::parse_file(&text).map_err(|e| e.to_string()))
+        {
             Ok(file) => files.push(file),
             Err(e) => errors.push(format!("{}: {e}", path.display())),
         }
@@ -621,7 +684,10 @@ fn read_source() -> Source {
                 fns.insert(f.sig.ident.to_string(), f);
             }
             Item::Enum(e) => {
-                enums.insert(e.ident.to_string(), e.variants.iter().map(|v| v.ident.to_string()).collect());
+                enums.insert(
+                    e.ident.to_string(),
+                    e.variants.iter().map(|v| v.ident.to_string()).collect(),
+                );
             }
             Item::Impl(i) => impls.push(i),
             _ => {}
@@ -637,9 +703,16 @@ fn read_source() -> Source {
         errors,
     };
     reader.enter("decode", vec!["A64".to_string()], None, &[]);
-    let unreached: Vec<String> = reader.arms.values().filter(|(_, reached)| !reached).map(|(f, _)| f.clone()).collect();
+    let unreached: Vec<String> = reader
+        .arms
+        .values()
+        .filter(|(_, reached)| !reached)
+        .map(|(f, _)| f.clone())
+        .collect();
     for function in unreached {
-        reader.errors.push(format!("{function}: an arm no word reaches: it contradicts the arms enclosing it"));
+        reader.errors.push(format!(
+            "{function}: an arm no word reaches: it contradicts the arms enclosing it"
+        ));
     }
 
     let mut classes = BTreeMap::new();
@@ -648,7 +721,9 @@ fn read_source() -> Source {
             Some(variants) => {
                 classes.insert(class, variants.clone());
             }
-            None => reader.errors.push(format!("Encoding::{class} carries no enum named {class}")),
+            None => reader
+                .errors
+                .push(format!("Encoding::{class} carries no enum named {class}")),
         }
     }
 
@@ -674,7 +749,9 @@ fn read_source() -> Source {
                         }
                         Tag::PerVariant => {
                             let Some(inner) = per_class.get(class) else {
-                                reader.errors.push(format!("{class} has no `feature` method"));
+                                reader
+                                    .errors
+                                    .push(format!("{class} has no `feature` method"));
                                 continue;
                             };
                             for (vs, tag) in inner {
@@ -683,7 +760,9 @@ fn read_source() -> Source {
                                         Tag::Fixed(f) => {
                                             features.insert((class.clone(), v.clone()), f.clone());
                                         }
-                                        Tag::PerVariant => reader.errors.push(format!("{class}::{v}: a feature that is not `Feature::X`")),
+                                        Tag::PerVariant => reader.errors.push(format!(
+                                            "{class}::{v}: a feature that is not `Feature::X`"
+                                        )),
                                     }
                                 }
                             }
@@ -692,7 +771,9 @@ fn read_source() -> Source {
                 }
             }
         }
-        None => reader.errors.push("Encoding has no `feature` method".to_string()),
+        None => reader
+            .errors
+            .push("Encoding has no `feature` method".to_string()),
     }
 
     Source {
@@ -713,14 +794,22 @@ fn the_decoder_source_has_the_shape_the_spec_test_reads() {
     for (class, variants) in &src.classes {
         for variant in variants {
             assert!(
-                src.occurrences.iter().any(|o| &o.class == class && &o.variant == variant),
+                src.occurrences
+                    .iter()
+                    .any(|o| &o.class == class && &o.variant == variant),
                 "{class}::{variant} is never returned"
             );
-            assert!(src.features.contains_key(&(class.clone(), variant.clone())), "{class}::{variant} has no feature");
+            assert!(
+                src.features.contains_key(&(class.clone(), variant.clone())),
+                "{class}::{variant} has no feature"
+            );
         }
     }
     let all: Vec<String> = Feature::ALL.iter().map(|f| format!("{f:?}")).collect();
-    assert_eq!(all, src.feature_variants, "Feature::ALL lists every feature, in order");
+    assert_eq!(
+        all, src.feature_variants,
+        "Feature::ALL lists every feature, in order"
+    );
     // What reading the source finds, the compiled decoder does.
     let mut state = 0x5EED_u64;
     for o in &src.occurrences {
@@ -736,9 +825,16 @@ fn the_decoder_source_has_the_shape_the_spec_test_reads() {
                     let others: Vec<&Occurrence> = src
                         .occurrences
                         .iter()
-                        .filter(|p| p.class == o.class && p.cube.contains(word) && p.cube.mask.count_ones() > o.cube.mask.count_ones())
+                        .filter(|p| {
+                            p.class == o.class
+                                && p.cube.contains(word)
+                                && p.cube.mask.count_ones() > o.cube.mask.count_ones()
+                        })
                         .collect();
-                    assert!(!others.is_empty(), "{word:#010x}: the source reads {want}, the decoder says {name}");
+                    assert!(
+                        !others.is_empty(),
+                        "{word:#010x}: the source reads {want}, the decoder says {name}"
+                    );
                 }
             }
         }
@@ -796,7 +892,10 @@ enum Cond {
     And(Box<Cond>, Box<Cond>),
     Or(Box<Cond>, Box<Cond>),
     /// The word matches a field pattern: `word & mask == value`.
-    Matches { mask: u32, value: u32 },
+    Matches {
+        mask: u32,
+        value: u32,
+    },
 }
 
 impl Cond {
@@ -857,16 +956,45 @@ struct Arm {
 fn render(ast: &Value) -> String {
     let s = |key: &str| ast.get(key).map(render).unwrap_or_default();
     match ast.get("_type").and_then(Value::as_str).unwrap_or_default() {
-        "AST.Bool" => ast.get("value").and_then(Value::as_bool).unwrap_or_default().to_string(),
-        "AST.BinaryOp" => format!("({} {} {})", s("left"), ast.get("op").and_then(Value::as_str).unwrap_or_default(), s("right")),
-        "AST.UnaryOp" => format!("{}({})", ast.get("op").and_then(Value::as_str).unwrap_or_default(), s("expr")),
+        "AST.Bool" => ast
+            .get("value")
+            .and_then(Value::as_bool)
+            .unwrap_or_default()
+            .to_string(),
+        "AST.BinaryOp" => format!(
+            "({} {} {})",
+            s("left"),
+            ast.get("op").and_then(Value::as_str).unwrap_or_default(),
+            s("right")
+        ),
+        "AST.UnaryOp" => format!(
+            "{}({})",
+            ast.get("op").and_then(Value::as_str).unwrap_or_default(),
+            s("expr")
+        ),
         "AST.Function" => {
-            let args: Vec<String> = ast.get("arguments").and_then(Value::as_array).map(|a| a.iter().map(render).collect()).unwrap_or_default();
-            format!("{}({})", ast.get("name").and_then(Value::as_str).unwrap_or_default(), args.join(", "))
+            let args: Vec<String> = ast
+                .get("arguments")
+                .and_then(Value::as_array)
+                .map(|a| a.iter().map(render).collect())
+                .unwrap_or_default();
+            format!(
+                "{}({})",
+                ast.get("name").and_then(Value::as_str).unwrap_or_default(),
+                args.join(", ")
+            )
         }
-        "AST.Identifier" | "Values.Value" => ast.get("value").and_then(Value::as_str).unwrap_or_default().to_string(),
+        "AST.Identifier" | "Values.Value" => ast
+            .get("value")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
         "AST.Set" => {
-            let values: Vec<String> = ast.get("values").and_then(Value::as_array).map(|a| a.iter().map(render).collect()).unwrap_or_default();
+            let values: Vec<String> = ast
+                .get("values")
+                .and_then(Value::as_array)
+                .map(|a| a.iter().map(render).collect())
+                .unwrap_or_default();
             format!("{{{}}}", values.join(", "))
         }
         other => format!("<{other}>"),
@@ -877,7 +1005,11 @@ fn render(ast: &Value) -> String {
 fn field_pattern(field: (u32, u32), pattern: &str) -> Cond {
     let (start, width) = field;
     let pattern = pattern.trim_matches('\'');
-    assert_eq!(pattern.len() as u32, width, "pattern {pattern} for a {width}-bit field");
+    assert_eq!(
+        pattern.len() as u32,
+        width,
+        "pattern {pattern} for a {width}-bit field"
+    );
     let (mut mask, mut value) = (0u32, 0u32);
     for (i, ch) in pattern.chars().enumerate() {
         let bit = start + width - 1 - i as u32;
@@ -899,23 +1031,42 @@ type Fields = BTreeMap<String, (u32, u32)>;
 
 fn compile(ast: &Value, fields: &Fields, features: &mut BTreeSet<String>) -> Cond {
     let get = |key: &str| ast.get(key).unwrap_or(&Value::Null);
-    let text = |v: &Value| v.get("value").and_then(Value::as_str).unwrap_or_default().to_string();
+    let text = |v: &Value| {
+        v.get("value")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
     let field = |v: &Value| {
         let name = text(v);
-        *fields.get(&name).unwrap_or_else(|| panic!("condition names field {name}, which no encoding on its path has"))
+        *fields.get(&name).unwrap_or_else(|| {
+            panic!("condition names field {name}, which no encoding on its path has")
+        })
     };
     match get("_type").as_str().unwrap_or_default() {
         "AST.Bool" => Cond::Const(get("value").as_bool().unwrap_or_default()),
-        "AST.UnaryOp" if get("op") == "!" => Cond::Not(Box::new(compile(get("expr"), fields, features))),
+        "AST.UnaryOp" if get("op") == "!" => {
+            Cond::Not(Box::new(compile(get("expr"), fields, features)))
+        }
         "AST.BinaryOp" => {
             let (left, right) = (get("left"), get("right"));
             match get("op").as_str().unwrap_or_default() {
-                "&&" => Cond::And(Box::new(compile(left, fields, features)), Box::new(compile(right, fields, features))),
-                "||" => Cond::Or(Box::new(compile(left, fields, features)), Box::new(compile(right, fields, features))),
+                "&&" => Cond::And(
+                    Box::new(compile(left, fields, features)),
+                    Box::new(compile(right, fields, features)),
+                ),
+                "||" => Cond::Or(
+                    Box::new(compile(left, fields, features)),
+                    Box::new(compile(right, fields, features)),
+                ),
                 "==" => field_pattern(field(left), &text(right)),
                 "!=" => Cond::Not(Box::new(field_pattern(field(left), &text(right)))),
                 "IN" => {
-                    let values = right.get("values").and_then(Value::as_array).cloned().unwrap_or_default();
+                    let values = right
+                        .get("values")
+                        .and_then(Value::as_array)
+                        .cloned()
+                        .unwrap_or_default();
                     values
                         .iter()
                         .map(|v| field_pattern(field(left), &text(v)))
@@ -937,14 +1088,33 @@ fn compile(ast: &Value, fields: &Fields, features: &mut BTreeSet<String>) -> Con
 
 fn encodeset(node: &Value, fields: &mut Fields) -> Cube {
     let mut cube = Cube { opcode: 0, mask: 0 };
-    let values = node.get("encoding").and_then(|e| e.get("values")).and_then(Value::as_array).cloned().unwrap_or_default();
+    let values = node
+        .get("encoding")
+        .and_then(|e| e.get("values"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
     for v in values {
-        let start = v.get("range").and_then(|r| r.get("start")).and_then(Value::as_u64).unwrap_or_default() as u32;
-        let width = v.get("range").and_then(|r| r.get("width")).and_then(Value::as_u64).unwrap_or_default() as u32;
+        let start = v
+            .get("range")
+            .and_then(|r| r.get("start"))
+            .and_then(Value::as_u64)
+            .unwrap_or_default() as u32;
+        let width = v
+            .get("range")
+            .and_then(|r| r.get("width"))
+            .and_then(Value::as_u64)
+            .unwrap_or_default() as u32;
         if let Some(name) = v.get("name").and_then(Value::as_str) {
             fields.insert(name.to_string(), (start, width));
         }
-        if let Cond::Matches { mask, value } = field_pattern((start, width), v.get("value").and_then(|x| x.get("value")).and_then(Value::as_str).unwrap_or_default()) {
+        if let Cond::Matches { mask, value } = field_pattern(
+            (start, width),
+            v.get("value")
+                .and_then(|x| x.get("value"))
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+        ) {
             cube.mask |= mask;
             cube.opcode |= value;
         }
@@ -954,16 +1124,27 @@ fn encodeset(node: &Value, fields: &mut Fields) -> Cube {
 
 impl Arm {
     fn load() -> Arm {
-        let dir = std::env::var_os(SPEC_DIR_VAR)
-            .unwrap_or_else(|| panic!("set {SPEC_DIR_VAR} to the unpacked AARCHMRS directory (holding Instructions.json)"));
+        let dir = std::env::var_os(SPEC_DIR_VAR).unwrap_or_else(|| {
+            panic!(
+                "set {SPEC_DIR_VAR} to the unpacked AARCHMRS directory (holding Instructions.json)"
+            )
+        });
         let path = PathBuf::from(dir).join("Instructions.json");
         let text = std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-        let root: Value = serde_json::from_slice(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-        let release = root.pointer("/_meta/version/ref").and_then(Value::as_str).unwrap_or("?").to_string();
+        let root: Value =
+            serde_json::from_slice(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        let release = root
+            .pointer("/_meta/version/ref")
+            .and_then(Value::as_str)
+            .unwrap_or("?")
+            .to_string();
         let a64 = root
             .get("instructions")
             .and_then(Value::as_array)
-            .and_then(|sets| sets.iter().find(|s| s.get("name").and_then(Value::as_str) == Some("A64")))
+            .and_then(|sets| {
+                sets.iter()
+                    .find(|s| s.get("name").and_then(Value::as_str) == Some("A64"))
+            })
             .unwrap_or_else(|| panic!("no A64 instruction set in {}", path.display()));
         let mut arm = Arm {
             release,
@@ -973,8 +1154,19 @@ impl Arm {
         };
         let mut root_fields = BTreeMap::new();
         encodeset(a64, &mut root_fields);
-        arm.fields.insert("A64".to_string(), root_fields.iter().map(|(k, &(s, w))| (k.to_lowercase(), (s + w - 1, s))).collect());
-        for child in a64.get("children").and_then(Value::as_array).cloned().unwrap_or_default() {
+        arm.fields.insert(
+            "A64".to_string(),
+            root_fields
+                .iter()
+                .map(|(k, &(s, w))| (k.to_lowercase(), (s + w - 1, s)))
+                .collect(),
+        );
+        for child in a64
+            .get("children")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+        {
             if let Some(name) = child.get("name").and_then(Value::as_str) {
                 arm.tops.push(name.to_string());
             }
@@ -983,12 +1175,25 @@ impl Arm {
         arm
     }
 
-    fn walk(&mut self, node: &Value, path: &[String], fields: &Fields, conditions: &[(Value, Fields)]) {
-        let kind = node.get("_type").and_then(Value::as_str).unwrap_or_default();
+    fn walk(
+        &mut self,
+        node: &Value,
+        path: &[String],
+        fields: &Fields,
+        conditions: &[(Value, Fields)],
+    ) {
+        let kind = node
+            .get("_type")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
         if kind == "Instruction.InstructionAlias" {
             return;
         }
-        let name = node.get("name").and_then(Value::as_str).unwrap_or_default().to_string();
+        let name = node
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
         let mut own = BTreeMap::new();
         let cube = encodeset(node, &mut own);
         let mut fields = fields.clone();
@@ -999,10 +1204,20 @@ impl Arm {
         }
         match kind {
             "Instruction.InstructionGroup" => {
-                self.fields.insert(name.clone(), own.iter().map(|(k, &(s, w))| (k.to_lowercase(), (s + w - 1, s))).collect());
+                self.fields.insert(
+                    name.clone(),
+                    own.iter()
+                        .map(|(k, &(s, w))| (k.to_lowercase(), (s + w - 1, s)))
+                        .collect(),
+                );
                 let mut below = path.to_vec();
                 below.push(name);
-                for child in node.get("children").and_then(Value::as_array).cloned().unwrap_or_default() {
+                for child in node
+                    .get("children")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default()
+                {
                     self.walk(&child, &below, &fields, &conditions);
                 }
             }
@@ -1010,14 +1225,28 @@ impl Arm {
                 let mut features = BTreeSet::new();
                 let mut condition = Cond::Const(true);
                 for (ast, at) in &conditions {
-                    let departed = DEPARTURES.iter().find(|d| d.0 == name && d.1 == render(ast));
-                    let c = if departed.is_some() { Cond::Const(true) } else { compile(ast, at, &mut features) };
+                    let departed = DEPARTURES
+                        .iter()
+                        .find(|d| d.0 == name && d.1 == render(ast));
+                    let c = if departed.is_some() {
+                        Cond::Const(true)
+                    } else {
+                        compile(ast, at, &mut features)
+                    };
                     condition = Cond::And(Box::new(condition), Box::new(c));
                 }
                 let free = condition.referenced() & !cube.mask;
-                assert!(free.count_ones() <= 20, "{name}: its condition reads {} free bits", free.count_ones());
-                let instance = subsets(free).map(|bits| cube.opcode | bits).find(|&w| condition.eval(w, View::Every));
-                let required = subsets(free).map(|bits| cube.opcode | bits).any(|w| condition.eval(w, View::Complete));
+                assert!(
+                    free.count_ones() <= 20,
+                    "{name}: its condition reads {} free bits",
+                    free.count_ones()
+                );
+                let instance = subsets(free)
+                    .map(|bits| cube.opcode | bits)
+                    .find(|&w| condition.eval(w, View::Every));
+                let required = subsets(free)
+                    .map(|bits| cube.opcode | bits)
+                    .any(|w| condition.eval(w, View::Complete));
                 self.leaves.push(Leaf {
                     name,
                     path: path.to_vec(),
@@ -1044,7 +1273,11 @@ fn subsets(mask: u32) -> impl Iterator<Item = u32> {
     let mut next = Some(0u32);
     core::iter::from_fn(move || {
         let current = next?;
-        next = if current == mask { None } else { Some((current.wrapping_sub(mask)) & mask) };
+        next = if current == mask {
+            None
+        } else {
+            Some((current.wrapping_sub(mask)) & mask)
+        };
         Some(current)
     })
 }
@@ -1060,26 +1293,44 @@ fn rust_names(leaf: &Leaf) -> Option<(String, String)> {
 }
 
 #[test]
-#[cfg_attr(not(aarchmrs), ignore = "reads Arm's AARCHMRS from the directory RUSTY_BOX_AARCHMRS names")]
+#[cfg_attr(
+    not(aarchmrs),
+    ignore = "reads Arm's AARCHMRS from the directory RUSTY_BOX_AARCHMRS names"
+)]
 fn the_decoder_is_arms_encoding_tree_for_the_implemented_features() {
     let arm = Arm::load();
     let (_, implications) = feature_implications();
     let src = source();
     assert!(src.errors.is_empty(), "{:#?}", src.errors);
     let mut problems: Vec<String> = Vec::new();
-    std::eprintln!("AARCHMRS {}: {} A64 encodings, {} of the implemented features", arm.release, arm.leaves.len(), arm.implemented().count());
+    std::eprintln!(
+        "AARCHMRS {}: {} A64 encodings, {} of the implemented features",
+        arm.release,
+        arm.leaves.len(),
+        arm.implemented().count()
+    );
 
     // The top-level groups: a function for each that holds an encoding of
     // a complete feature, and none for a group without an encoding of an
     // implemented one.
-    let required_tops: BTreeSet<&str> = arm.leaves.iter().filter(|l| l.required).filter_map(|l| l.path.first().map(String::as_str)).collect();
-    let permitted_tops: BTreeSet<&str> = arm.implemented().filter_map(|l| l.path.first().map(String::as_str)).collect();
+    let required_tops: BTreeSet<&str> = arm
+        .leaves
+        .iter()
+        .filter(|l| l.required)
+        .filter_map(|l| l.path.first().map(String::as_str))
+        .collect();
+    let permitted_tops: BTreeSet<&str> = arm
+        .implemented()
+        .filter_map(|l| l.path.first().map(String::as_str))
+        .collect();
     let ours: BTreeSet<&str> = TOP_GROUPS.iter().copied().collect();
     for top in required_tops.difference(&ours) {
         problems.push(format!("Arm's top-level group {top} has encodings of complete features, and the decoder no function for it"));
     }
     for top in ours.difference(&permitted_tops) {
-        problems.push(format!("the decoder's top-level group {top} holds no encoding of an implemented feature"));
+        problems.push(format!(
+            "the decoder's top-level group {top} holds no encoding of an implemented feature"
+        ));
     }
 
     // Names: the classes and their encodings, both ways. Every encoding of
@@ -1089,16 +1340,29 @@ fn the_decoder_is_arms_encoding_tree_for_the_implemented_features() {
     let mut leaf_of: BTreeMap<(String, String), &Leaf> = BTreeMap::new();
     for leaf in arm.implemented() {
         let Some((class, variant)) = rust_names(leaf) else {
-            problems.push(format!("{}: no Rust name (class {:?})", leaf.name, leaf.path));
+            problems.push(format!(
+                "{}: no Rust name (class {:?})",
+                leaf.name, leaf.path
+            ));
             continue;
         };
-        if leaf_of.insert((class.clone(), variant.clone()), leaf).is_some() {
-            problems.push(format!("{}: {class}::{variant} names two encodings", leaf.name));
+        if leaf_of
+            .insert((class.clone(), variant.clone()), leaf)
+            .is_some()
+        {
+            problems.push(format!(
+                "{}: {class}::{variant} names two encodings",
+                leaf.name
+            ));
         }
         wanted.entry(class).or_default().insert(variant);
     }
     for (class, variants) in &wanted {
-        let have: BTreeSet<String> = src.classes.get(class).map(|v| v.iter().cloned().collect()).unwrap_or_default();
+        let have: BTreeSet<String> = src
+            .classes
+            .get(class)
+            .map(|v| v.iter().cloned().collect())
+            .unwrap_or_default();
         for missing in variants.difference(&have) {
             let leaf = leaf_of[&(class.clone(), missing.clone())];
             if leaf.required {
@@ -1106,18 +1370,26 @@ fn the_decoder_is_arms_encoding_tree_for_the_implemented_features() {
             }
         }
         for extra in have.difference(variants) {
-            problems.push(format!("{class}::{extra} is no encoding of an implemented feature in class {class}"));
+            problems.push(format!(
+                "{class}::{extra} is no encoding of an implemented feature in class {class}"
+            ));
         }
     }
     for class in src.classes.keys() {
         if !wanted.contains_key(class) {
-            problems.push(format!("{class} is no class with an encoding of an implemented feature"));
+            problems.push(format!(
+                "{class} is no class with an encoding of an implemented feature"
+            ));
         }
     }
 
     // Structure, fixed bits and features, of every encoding named.
     for ((class, variant), leaf) in &leaf_of {
-        let occurrences: Vec<&Occurrence> = src.occurrences.iter().filter(|o| &o.class == class && &o.variant == variant).collect();
+        let occurrences: Vec<&Occurrence> = src
+            .occurrences
+            .iter()
+            .filter(|o| &o.class == class && &o.variant == variant)
+            .collect();
         if occurrences.is_empty() {
             continue;
         }
@@ -1128,9 +1400,16 @@ fn the_decoder_is_arms_encoding_tree_for_the_implemented_features() {
         path.dedup();
         let mut covered: u64 = 0;
         for (i, o) in occurrences.iter().enumerate() {
-            let groups: Vec<&String> = o.chain.iter().filter(|f| f.as_str() != "A64" && arm.fields.contains_key(f.as_str())).collect();
+            let groups: Vec<&String> = o
+                .chain
+                .iter()
+                .filter(|f| f.as_str() != "A64" && arm.fields.contains_key(f.as_str()))
+                .collect();
             if groups != path {
-                problems.push(format!("{class}::{variant} is decoded through {:?}, Arm puts {} in {:?}", o.chain, leaf.name, leaf.path));
+                problems.push(format!(
+                    "{class}::{variant} is decoded through {:?}, Arm puts {} in {:?}",
+                    o.chain, leaf.name, leaf.path
+                ));
             }
             if !o.cube.within(leaf.cube) {
                 problems.push(format!(
@@ -1164,8 +1443,17 @@ fn the_decoder_is_arms_encoding_tree_for_the_implemented_features() {
         // every [`Feature`], so it is no encoding of an implemented feature,
         // and the class check above already refuses a decoder that names
         // it.
-        let tag = src.features.get(&(class.clone(), variant.clone())).cloned().unwrap_or_default();
-        let named: BTreeSet<String> = leaf.features.iter().filter(|f| Status::of(f) != Status::Absent).cloned().collect();
+        let tag = src
+            .features
+            .get(&(class.clone(), variant.clone()))
+            .cloned()
+            .unwrap_or_default();
+        let named: BTreeSet<String> = leaf
+            .features
+            .iter()
+            .filter(|f| Status::of(f) != Status::Absent)
+            .cloned()
+            .collect();
         let tagged: BTreeSet<String> = Feature::ALL
             .iter()
             .filter(|f| format!("{f:?}") == tag)
@@ -1178,22 +1466,42 @@ fn the_decoder_is_arms_encoding_tree_for_the_implemented_features() {
             .filter_map(|f| f.arm_name().map(str::to_string))
             .collect();
         if !tagged.is_subset(&named) || !named.is_subset(&implied) {
-            problems.push(format!("{class}::{variant} is tagged {tag}; Arm's condition for {} names {:?}", leaf.name, leaf.features));
+            problems.push(format!(
+                "{class}::{variant} is tagged {tag}; Arm's condition for {} names {:?}",
+                leaf.name, leaf.features
+            ));
         }
     }
 
     // Field names and positions, each as the innermost Arm group on the
     // way to its function names it.
     for b in &src.bindings {
-        let node = b.chain.iter().rev().find(|f| arm.fields.contains_key(f.as_str())).cloned().unwrap_or_default();
+        let node = b
+            .chain
+            .iter()
+            .rev()
+            .find(|f| arm.fields.contains_key(f.as_str()))
+            .cloned()
+            .unwrap_or_default();
         match arm.fields.get(&node).and_then(|f| f.get(&b.name)) {
             Some(&(hi, lo)) if (hi, lo) == (b.hi, b.lo) => {}
-            Some(&(hi, lo)) => problems.push(format!("{}: `{}` is bits {}:{}, Arm's {node} field {} is {hi}:{lo}", b.function, b.name, b.hi, b.lo, b.name)),
-            None => problems.push(format!("{}: `{}` is no field of Arm's {node}", b.function, b.name)),
+            Some(&(hi, lo)) => problems.push(format!(
+                "{}: `{}` is bits {}:{}, Arm's {node} field {} is {hi}:{lo}",
+                b.function, b.name, b.hi, b.lo, b.name
+            )),
+            None => problems.push(format!(
+                "{}: `{}` is no field of Arm's {node}",
+                b.function, b.name
+            )),
         }
     }
 
-    assert!(problems.is_empty(), "{} problems:\n{}", problems.len(), problems.join("\n"));
+    assert!(
+        problems.is_empty(),
+        "{} problems:\n{}",
+        problems.len(),
+        problems.join("\n")
+    );
 }
 
 /// Arm's allocation of words among the implemented encodings, indexed by
@@ -1235,16 +1543,17 @@ impl<'a> Allocation<'a> {
         let mut expected = Vec::new();
         for (i, leaf) in allocation.leaves.iter().enumerate() {
             let names = rust_names(leaf);
-            let named = names.as_ref().is_some_and(|(c, v)| src.classes.get(c).is_some_and(|vs| vs.contains(v)));
+            let named = names
+                .as_ref()
+                .is_some_and(|(c, v)| src.classes.get(c).is_some_and(|vs| vs.contains(v)));
             if !leaf.required && !named {
                 expected.push(None);
                 continue;
             }
             let want = names.map(|(c, v)| format!("{c}({v})")).unwrap_or_default();
-            let mut candidates = leaf
-                .instance
-                .into_iter()
-                .chain((0..4096).map(|_| leaf.cube.opcode | (splitmix(&mut state) & !leaf.cube.mask)));
+            let mut candidates = leaf.instance.into_iter().chain(
+                (0..4096).map(|_| leaf.cube.opcode | (splitmix(&mut state) & !leaf.cube.mask)),
+            );
             let Some(word) = candidates.find(|&w| allocation.leaf(w) == Ok(Some(i))) else {
                 problems.push(format!("{}: no word is allocated to it", leaf.name));
                 expected.push(None);
@@ -1253,7 +1562,10 @@ impl<'a> Allocation<'a> {
             match decode(word) {
                 Some(e) if format!("{e:?}") == want => expected.push(Some(e)),
                 other => {
-                    problems.push(format!("{} {word:#010x}: decoded as {other:?}, not {want}", leaf.name));
+                    problems.push(format!(
+                        "{} {word:#010x}: decoded as {other:?}, not {want}",
+                        leaf.name
+                    ));
                     expected.push(None);
                 }
             }
@@ -1270,8 +1582,13 @@ impl<'a> Allocation<'a> {
             let leaf = self.leaves[i as usize];
             if leaf.cube.contains(word) && leaf.condition.eval(word, View::Every) {
                 match best {
-                    Some(b) if self.leaves[b].cube.mask.count_ones() > leaf.cube.mask.count_ones() => {}
-                    Some(b) if self.leaves[b].cube.mask.count_ones() == leaf.cube.mask.count_ones() => tied = true,
+                    Some(b)
+                        if self.leaves[b].cube.mask.count_ones() > leaf.cube.mask.count_ones() => {}
+                    Some(b)
+                        if self.leaves[b].cube.mask.count_ones() == leaf.cube.mask.count_ones() =>
+                    {
+                        tied = true
+                    }
                     _ => {
                         best = Some(i as usize);
                         tied = false;
@@ -1280,7 +1597,9 @@ impl<'a> Allocation<'a> {
             }
         }
         if tied {
-            return Err(format!("{word:#010x}: two encodings of equal specificity match"));
+            return Err(format!(
+                "{word:#010x}: two encodings of equal specificity match"
+            ));
         }
         Ok(best)
     }
@@ -1291,13 +1610,19 @@ impl<'a> Allocation<'a> {
         match (leaf, ours) {
             (None, None) => Ok(()),
             (Some(i), ours) if self.expected[i] == ours => Ok(()),
-            (leaf, ours) => Err(format!("{word:#010x}: Arm {:?}, decoder {ours:?}", leaf.map(|i| &self.leaves[i].name))),
+            (leaf, ours) => Err(format!(
+                "{word:#010x}: Arm {:?}, decoder {ours:?}",
+                leaf.map(|i| &self.leaves[i].name)
+            )),
         }
     }
 }
 
 #[test]
-#[cfg_attr(not(aarchmrs), ignore = "reads Arm's AARCHMRS from the directory RUSTY_BOX_AARCHMRS names")]
+#[cfg_attr(
+    not(aarchmrs),
+    ignore = "reads Arm's AARCHMRS from the directory RUSTY_BOX_AARCHMRS names"
+)]
 fn the_decoder_allocates_as_arm_does_on_sampled_words() {
     let arm = Arm::load();
     let (allocation, mut problems) = Allocation::new(&arm);
@@ -1316,7 +1641,12 @@ fn the_decoder_allocates_as_arm_does_on_sampled_words() {
             }
         }
     }
-    assert!(problems.is_empty(), "AARCHMRS {}:\n{}", arm.release, problems.join("\n"));
+    assert!(
+        problems.is_empty(),
+        "AARCHMRS {}:\n{}",
+        arm.release,
+        problems.join("\n")
+    );
 }
 
 #[test]
@@ -1370,18 +1700,26 @@ fn the_decoder_allocates_as_arm_does_on_every_word() {
 /// `v9Ap1 ==> (v9Ap0 && v8Ap6)` and `v8Ap6 ==> FEAT_I8MM` make FEAT_SME
 /// imply FEAT_I8MM.
 fn feature_implications() -> (String, Vec<(Feature, Feature)>) {
-    let dir = std::env::var_os(SPEC_DIR_VAR)
-        .unwrap_or_else(|| panic!("set {SPEC_DIR_VAR} to the unpacked AARCHMRS directory (holding Features.json)"));
+    let dir = std::env::var_os(SPEC_DIR_VAR).unwrap_or_else(|| {
+        panic!("set {SPEC_DIR_VAR} to the unpacked AARCHMRS directory (holding Features.json)")
+    });
     let path = PathBuf::from(dir).join("Features.json");
     let text = std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-    let root: Value = serde_json::from_slice(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-    let release = root.pointer("/_meta/version/ref").and_then(Value::as_str).unwrap_or("?").to_string();
+    let root: Value =
+        serde_json::from_slice(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let release = root
+        .pointer("/_meta/version/ref")
+        .and_then(Value::as_str)
+        .unwrap_or("?")
+        .to_string();
     let identifier = |side: Option<&Value>| {
         let side = side?;
         if side.get("_type").and_then(Value::as_str) != Some("AST.Identifier") {
             return None;
         }
-        side.get("value").and_then(Value::as_str).map(str::to_string)
+        side.get("value")
+            .and_then(Value::as_str)
+            .map(str::to_string)
     };
     // The identifiers a conjunction names (`FEAT_SME ==> (FEAT_FCMA &&
     // FEAT_FP16 && FEAT_BF16 && FEAT_FHM)`), each implied on its own;
@@ -1389,7 +1727,9 @@ fn feature_implications() -> (String, Vec<(Feature, Feature)>) {
     fn conjuncts(side: Option<&Value>, out: &mut Vec<String>) -> Option<()> {
         let side = side?;
         match side.get("_type").and_then(Value::as_str) {
-            Some("AST.Identifier") => out.push(side.get("value").and_then(Value::as_str)?.to_string()),
+            Some("AST.Identifier") => {
+                out.push(side.get("value").and_then(Value::as_str)?.to_string())
+            }
             Some("AST.BinaryOp") if side.get("op").and_then(Value::as_str) == Some("&&") => {
                 conjuncts(side.get("left"), out)?;
                 conjuncts(side.get("right"), out)?;
@@ -1405,7 +1745,11 @@ fn feature_implications() -> (String, Vec<(Feature, Feature)>) {
         .flatten()
         .filter_map(|p| p.get("constraints").and_then(Value::as_array))
         .flatten();
-    let global_constraints = root.get("constraints").and_then(Value::as_array).into_iter().flatten();
+    let global_constraints = root
+        .get("constraints")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten();
     let mut edges: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for c in parameter_constraints.chain(global_constraints) {
         let is_implication = c.get("_type").and_then(Value::as_str) == Some("AST.BinaryOp")
@@ -1437,7 +1781,10 @@ fn feature_implications() -> (String, Vec<(Feature, Feature)>) {
             }
             i += 1;
         }
-        for b in Feature::ALL.into_iter().filter(|b| *b != a && b.arm_name().is_some_and(|n| reached.contains(&n))) {
+        for b in Feature::ALL
+            .into_iter()
+            .filter(|b| *b != a && b.arm_name().is_some_and(|n| reached.contains(&n)))
+        {
             implications.push((a, b));
         }
     }
@@ -1464,17 +1811,29 @@ fn implied_by(feature: Feature, implications: &[(Feature, Feature)]) -> Vec<Feat
 /// imply, among the features the decoder knows: a set Arm does not permit
 /// would advertise an ID register field no processor reports.
 #[test]
-#[cfg_attr(not(aarchmrs), ignore = "reads Arm's AARCHMRS from the directory RUSTY_BOX_AARCHMRS names")]
+#[cfg_attr(
+    not(aarchmrs),
+    ignore = "reads Arm's AARCHMRS from the directory RUSTY_BOX_AARCHMRS names"
+)]
 fn every_implementation_has_what_its_features_imply() {
     use crate::cpu::features::Implementation;
 
     let (release, implications) = feature_implications();
-    std::eprintln!("AARCHMRS {release}: {} implications between known features", implications.len());
-    assert!(implications.contains(&(Feature::Lrcpc2, Feature::Lrcpc)), "{implications:?}");
+    std::eprintln!(
+        "AARCHMRS {release}: {} implications between known features",
+        implications.len()
+    );
+    assert!(
+        implications.contains(&(Feature::Lrcpc2, Feature::Lrcpc)),
+        "{implications:?}"
+    );
     let models = crate::cpu::CpuModel::ALL.map(crate::cpu::CpuModel::implementation);
     for imp in models.into_iter().chain([Implementation::EVERY_FEATURE]) {
         for &(a, b) in &implications {
-            assert!(!imp.has(a) || imp.has(b), "{imp:?} has {a:?}, which implies {b:?}");
+            assert!(
+                !imp.has(a) || imp.has(b),
+                "{imp:?} has {a:?}, which implies {b:?}"
+            );
         }
     }
 }
@@ -1484,10 +1843,15 @@ fn every_implementation_has_what_its_features_imply() {
 /// decide it: `None` when the value turns on a leaf that is not an
 /// identifier (an ID register field, a comparison).
 fn constraint_value(ast: &Value, holding: &BTreeSet<&str>) -> Option<bool> {
-    let operand = |key: &str| ast.get(key).and_then(|side| constraint_value(side, holding));
+    let operand = |key: &str| {
+        ast.get(key)
+            .and_then(|side| constraint_value(side, holding))
+    };
     match ast.get("_type").and_then(Value::as_str)? {
         "AST.Identifier" => Some(holding.contains(ast.get("value").and_then(Value::as_str)?)),
-        "AST.UnaryOp" if ast.get("op").and_then(Value::as_str) == Some("!") => operand("expr").map(|v| !v),
+        "AST.UnaryOp" if ast.get("op").and_then(Value::as_str) == Some("!") => {
+            operand("expr").map(|v| !v)
+        }
         "AST.BinaryOp" => {
             let (left, right) = (operand("left"), operand("right"));
             match ast.get("op").and_then(Value::as_str)? {
@@ -1516,15 +1880,20 @@ fn constraint_value(ast: &Value, holding: &BTreeSet<&str>) -> Option<bool> {
 /// aliases (`FEAT_ASMv8p2`, BFC and the 64-bit REV64) — and every other
 /// identifier is false: no FEAT_SVE, no EL2, no AArch32, no PMU.
 #[test]
-#[cfg_attr(not(aarchmrs), ignore = "reads Arm's AARCHMRS from the directory RUSTY_BOX_AARCHMRS names")]
+#[cfg_attr(
+    not(aarchmrs),
+    ignore = "reads Arm's AARCHMRS from the directory RUSTY_BOX_AARCHMRS names"
+)]
 fn each_model_is_a_processor_arms_feature_model_permits() {
     use crate::cpu::CpuModel;
 
-    let dir = std::env::var_os(SPEC_DIR_VAR)
-        .unwrap_or_else(|| panic!("set {SPEC_DIR_VAR} to the unpacked AARCHMRS directory (holding Features.json)"));
+    let dir = std::env::var_os(SPEC_DIR_VAR).unwrap_or_else(|| {
+        panic!("set {SPEC_DIR_VAR} to the unpacked AARCHMRS directory (holding Features.json)")
+    });
     let path = PathBuf::from(dir).join("Features.json");
     let text = std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-    let root: Value = serde_json::from_slice(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let root: Value =
+        serde_json::from_slice(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
     let parameter_constraints = root
         .get("parameters")
         .and_then(Value::as_array)
@@ -1532,11 +1901,16 @@ fn each_model_is_a_processor_arms_feature_model_permits() {
         .flatten()
         .filter_map(|p| p.get("constraints").and_then(Value::as_array))
         .flatten();
-    let global_constraints = root.get("constraints").and_then(Value::as_array).into_iter().flatten();
+    let global_constraints = root
+        .get("constraints")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten();
     let constraints: Vec<&Value> = parameter_constraints.chain(global_constraints).collect();
 
     const VERSIONS: [&str; 11] = [
-        "v8Ap0", "v8Ap1", "v8Ap2", "v8Ap3", "v8Ap4", "v8Ap5", "v8Ap6", "v8Ap7", "v9Ap0", "v9Ap1", "v9Ap2",
+        "v8Ap0", "v8Ap1", "v8Ap2", "v8Ap3", "v8Ap4", "v8Ap5", "v8Ap6", "v8Ap7", "v9Ap0", "v9Ap1",
+        "v9Ap2",
     ];
     for model in CpuModel::ALL {
         let versions = match model {
@@ -1549,7 +1923,15 @@ fn each_model_is_a_processor_arms_feature_model_permits() {
             .filter(|&f| imp.has(f))
             .filter_map(Feature::arm_name)
             .chain(versions.iter().copied())
-            .chain(["FEAT_AA64", "FEAT_EL0", "FEAT_EL1", "FEAT_AA64EL0", "FEAT_AA64EL1", "FEAT_IVIPT", "FEAT_Crypto"])
+            .chain([
+                "FEAT_AA64",
+                "FEAT_EL0",
+                "FEAT_EL1",
+                "FEAT_AA64EL0",
+                "FEAT_AA64EL1",
+                "FEAT_IVIPT",
+                "FEAT_Crypto",
+            ])
             .collect();
         if versions.contains(&"v8Ap2") {
             holding.insert("FEAT_ASMv8p2");
@@ -1562,8 +1944,14 @@ fn each_model_is_a_processor_arms_feature_model_permits() {
                 None => {}
             }
         }
-        std::eprintln!("{model:?}: {decided} of {} constraints decided by identifiers, all hold", constraints.len());
+        std::eprintln!(
+            "{model:?}: {decided} of {} constraints decided by identifiers, all hold",
+            constraints.len()
+        );
         assert!(broken.is_empty(), "{model:?} breaks {broken:#?}");
-        assert!(decided > constraints.len() / 2, "{model:?}: {decided} decided");
+        assert!(
+            decided > constraints.len() / 2,
+            "{model:?}: {decided} decided"
+        );
     }
 }

@@ -90,7 +90,12 @@ struct RunnerBus {
 }
 
 impl PhysBus for RunnerBus {
-    fn read(&mut self, addr: PhysAddr, width: AccessWidth, _clock: VmClock) -> Result<u64, BusFault> {
+    fn read(
+        &mut self,
+        addr: PhysAddr,
+        width: AccessWidth,
+        _clock: VmClock,
+    ) -> Result<u64, BusFault> {
         let a = addr.get();
         let n = width.bytes();
         if a >= TEST_PC && a + n <= TEST_PC + 4 {
@@ -102,7 +107,13 @@ impl PhysBus for RunnerBus {
         Err(BusFault::Unmapped)
     }
 
-    fn write(&mut self, _addr: PhysAddr, _width: AccessWidth, _value: u64, _clock: VmClock) -> Result<(), BusFault> {
+    fn write(
+        &mut self,
+        _addr: PhysAddr,
+        _width: AccessWidth,
+        _value: u64,
+        _clock: VmClock,
+    ) -> Result<(), BusFault> {
         Err(BusFault::Unmapped)
     }
 }
@@ -161,7 +172,10 @@ fn every_qemu_pauth_vector_matches_after_one_step() {
         let seeded = Seeded::new(hex(fields[2]));
 
         let mut cpu = Cpu::implementing(
-            CpuConfig { ips, reset_pc: TEST_PC },
+            CpuConfig {
+                ips,
+                reset_pc: TEST_PC,
+            },
             Implementation {
                 counter_hz: ips,
                 ..Implementation::EVERY_FEATURE
@@ -197,7 +211,10 @@ fn every_qemu_pauth_vector_matches_after_one_step() {
             _ => (SYNC_CURRENT_SPX, Some(hex(field(&fields, "c=")))),
         };
         if cpu.pc != want_pc {
-            diffs.push(format!("pc {:#x} want {want_pc:#x} (esr {:#x})", cpu.pc, cpu.sys.esr_el1));
+            diffs.push(format!(
+                "pc {:#x} want {want_pc:#x} (esr {:#x})",
+                cpu.pc, cpu.sys.esr_el1
+            ));
         }
         match want_esr {
             Some(esr) => {
@@ -235,7 +252,12 @@ fn every_qemu_pauth_vector_matches_after_one_step() {
         failures.is_empty(),
         "{} of {count} vectors differ:\n{}",
         failures.len(),
-        failures.iter().take(40).cloned().collect::<Vec<_>>().join("\n")
+        failures
+            .iter()
+            .take(40)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n")
     );
 }
 
@@ -322,7 +344,9 @@ fn keyed(features: &[Feature]) -> Cpu {
         ..Implementation::CORTEX_A57
     });
     cpu.pac_keys = PacKeys::from_halves(core::array::from_fn(|i| {
-        0x0123_4567_89AB_CDEF_u64.wrapping_mul(2 * i as u64 + 1).rotate_left(i as u32 * 7)
+        0x0123_4567_89AB_CDEF_u64
+            .wrapping_mul(2 * i as u64 + 1)
+            .rotate_left(i as u32 * 7)
     }));
     cpu.sys.sctlr_el1 |= EN_IA | EN_IB | EN_DA | EN_DB;
     cpu.sys.tcr_el1 = TXSZ;
@@ -330,10 +354,27 @@ fn keyed(features: &[Feature]) -> Cpu {
 }
 
 const PAUTH: [Feature; 3] = [Feature::Base, Feature::PAuth, Feature::PacQarma5];
-const PAUTH2: [Feature; 4] = [Feature::Base, Feature::PAuth, Feature::PAuth2, Feature::PacQarma5];
-const FPAC: [Feature; 5] = [Feature::Base, Feature::PAuth, Feature::PAuth2, Feature::Fpac, Feature::PacQarma5];
-const FPACCOMBINE: [Feature; 6] =
-    [Feature::Base, Feature::PAuth, Feature::PAuth2, Feature::Fpac, Feature::FpacCombine, Feature::PacQarma5];
+const PAUTH2: [Feature; 4] = [
+    Feature::Base,
+    Feature::PAuth,
+    Feature::PAuth2,
+    Feature::PacQarma5,
+];
+const FPAC: [Feature; 5] = [
+    Feature::Base,
+    Feature::PAuth,
+    Feature::PAuth2,
+    Feature::Fpac,
+    Feature::PacQarma5,
+];
+const FPACCOMBINE: [Feature; 6] = [
+    Feature::Base,
+    Feature::PAuth,
+    Feature::PAuth2,
+    Feature::Fpac,
+    Feature::FpacCombine,
+    Feature::PacQarma5,
+];
 
 /// X0 after `insn` with X0 = `ptr` and X1 = `modifier`, which must take no
 /// exception.
@@ -360,7 +401,11 @@ fn a_pointer_whose_bits_55_and_63_differ_is_signed_for_insertpacs_half() {
         cpu.sys.tcr_el1 = tcr;
         let twin = apply(&mut cpu, insn, lower, 0x55);
         let signed = apply(&mut cpu, insn, awkward, 0x55);
-        assert_eq!(signed, twin ^ ((awkward ^ lower) & LOWER_CODE), "{insn:#010x} TCR {tcr:#x}");
+        assert_eq!(
+            signed,
+            twin ^ ((awkward ^ lower) & LOWER_CODE),
+            "{insn:#010x} TCR {tcr:#x}"
+        );
         assert_eq!(signed & (1 << 55), 0, "bit 55 names the lower half");
     }
     // TBI0 makes a data pointer's half bit 55's, though the upper half
@@ -370,7 +415,10 @@ fn a_pointer_whose_bits_55_and_63_differ_is_signed_for_insertpacs_half() {
     let upper = 0xFFFF_F000_0000_1000;
     let upper_code = mask(63, 56) | mask(54, 44);
     let twin = apply(&mut cpu, PACDA, upper, 0x55);
-    assert_eq!(apply(&mut cpu, PACDA, awkward, 0x55), twin ^ ((awkward ^ upper) & upper_code));
+    assert_eq!(
+        apply(&mut cpu, PACDA, awkward, 0x55),
+        twin ^ ((awkward ^ upper) & upper_code)
+    );
 }
 
 /// Without FEAT_PAuth2 the code replaces the pointer's bits rather than
@@ -382,10 +430,22 @@ fn without_pauth2_the_code_replaces_the_pointers_bits() {
     let mut pauth = keyed(&PAUTH);
     let mut pauth2 = keyed(&PAUTH2);
     let upper_code = mask(63, 56) | mask(54, 44);
-    for (ptr, code) in [(0x0000_0012_3456_7000, 0), (0xFFFF_F012_3456_7000, upper_code)] {
-        for (sign, auth) in [(PACIA, AUTIA), (PACIB, AUTIB), (PACDA, AUTDA), (PACDB, AUTDB)] {
+    for (ptr, code) in [
+        (0x0000_0012_3456_7000, 0),
+        (0xFFFF_F012_3456_7000, upper_code),
+    ] {
+        for (sign, auth) in [
+            (PACIA, AUTIA),
+            (PACIB, AUTIB),
+            (PACDA, AUTDA),
+            (PACDB, AUTDB),
+        ] {
             let replaced = apply(&mut pauth, sign, ptr, 0x77);
-            assert_eq!(replaced, apply(&mut pauth2, sign, ptr, 0x77) ^ code, "{sign:#010x} of {ptr:#x}");
+            assert_eq!(
+                replaced,
+                apply(&mut pauth2, sign, ptr, 0x77) ^ code,
+                "{sign:#010x} of {ptr:#x}"
+            );
             assert_eq!(apply(&mut pauth, auth, replaced, 0x77), ptr, "{auth:#010x}");
         }
     }
@@ -399,10 +459,16 @@ fn without_pauth2_a_noncanonical_pointer_gets_a_corrupted_code() {
     let mut cpu = keyed(&PAUTH);
     let noncanonical = 0x0000_4000_0000_1000;
     let canonical = 0x1000;
-    assert_eq!(apply(&mut cpu, PACIA, noncanonical, 9), apply(&mut cpu, PACIA, canonical, 9) ^ (1 << 62));
+    assert_eq!(
+        apply(&mut cpu, PACIA, noncanonical, 9),
+        apply(&mut cpu, PACIA, canonical, 9) ^ (1 << 62)
+    );
     cpu.sys.tcr_el1 = TXSZ | TBI0;
     let (tagged, tagged_canonical) = (0x5A00_4000_0000_1000, 0x5A00_0000_0000_1000);
-    assert_eq!(apply(&mut cpu, PACDA, tagged, 9), apply(&mut cpu, PACDA, tagged_canonical, 9) ^ (1 << 54));
+    assert_eq!(
+        apply(&mut cpu, PACDA, tagged, 9),
+        apply(&mut cpu, PACDA, tagged_canonical, 9) ^ (1 << 54)
+    );
 }
 
 /// Without FEAT_PAuth2 a failed authentication restores the extension and
@@ -411,9 +477,17 @@ fn without_pauth2_a_noncanonical_pointer_gets_a_corrupted_code() {
 #[test]
 fn without_pauth2_a_failed_authentication_writes_the_error_code() {
     let mut cpu = keyed(&PAUTH);
-    for (sign, auth, error) in [(PACIA, AUTIA, 1 << 61), (PACIB, AUTIB, 1 << 62), (PACDB, AUTDB, 1 << 62)] {
+    for (sign, auth, error) in [
+        (PACIA, AUTIA, 1 << 61),
+        (PACIB, AUTIB, 1 << 62),
+        (PACDB, AUTDB, 1 << 62),
+    ] {
         let broken = apply(&mut cpu, sign, 0x1000, 3) ^ (1 << 50);
-        assert_eq!(apply(&mut cpu, auth, broken, 3), 0x1000 | error, "{auth:#010x}");
+        assert_eq!(
+            apply(&mut cpu, auth, broken, 3),
+            0x1000 | error,
+            "{auth:#010x}"
+        );
     }
     cpu.sys.tcr_el1 = TXSZ | TBI0;
     let broken = apply(&mut cpu, PACDA, 0x5A00_0000_0000_1000, 3) ^ (1 << 50);
@@ -428,8 +502,12 @@ fn without_pauth2_a_failed_authentication_writes_the_error_code() {
 #[test]
 fn fpac_faults_a_failed_authentication_and_fpaccombine_a_combined_one_too() {
     let mut fpac = keyed(&FPAC);
-    for (auth, data, key_b) in [(AUTIA, false, false), (AUTIB, false, true), (AUTDA, true, false), (AUTDB, true, true)]
-    {
+    for (auth, data, key_b) in [
+        (AUTIA, false, false),
+        (AUTIB, false, true),
+        (AUTDA, true, false),
+        (AUTDB, true, true),
+    ] {
         fpac.x[0] = 0x1000;
         assert_eq!(exec(&mut fpac, auth), pac_fail(data, key_b), "{auth:#010x}");
         assert_eq!(fpac.x[0], 0x1000, "an exception writes no register");
@@ -473,7 +551,11 @@ fn a_disabled_key_leaves_the_pointer_alone() {
     assert_eq!(ga & 0xFFFF_FFFF, 0, "the code in the top 32 bits");
     cpu.sys.sctlr_el1 &= !(EN_IA | EN_IB | EN_DA | EN_DB);
     for insn in [PACIA, PACIB, PACDA, PACDB, AUTIA, AUTIB, AUTDA, AUTDB] {
-        assert_eq!(apply(&mut cpu, insn, 0x00AB_0000_0000_1000, 3), 0x00AB_0000_0000_1000, "{insn:#010x}");
+        assert_eq!(
+            apply(&mut cpu, insn, 0x00AB_0000_0000_1000, 3),
+            0x00AB_0000_0000_1000,
+            "{insn:#010x}"
+        );
     }
     cpu.x[0] = 0x2000;
     assert_eq!(exec(&mut cpu, BRAA), None);
@@ -497,8 +579,21 @@ fn without_pauth_the_hints_are_nops_and_the_rest_undefined() {
         assert_eq!(cpu.pc, CODE + 4);
         assert_eq!((cpu.x[17], cpu.x[30]), (0x1717, 0x3030), "{hint:#010x}");
     }
-    for insn in [PACIA, AUTDB, PACIZA, XPACI, PACGA, BRAA, BLRAA, BRAAZ, RETAA, ERETAA, LDRAA, MRS_APIAKEYLO, MSR_APIAKEYLO]
-    {
+    for insn in [
+        PACIA,
+        AUTDB,
+        PACIZA,
+        XPACI,
+        PACGA,
+        BRAA,
+        BLRAA,
+        BRAAZ,
+        RETAA,
+        ERETAA,
+        LDRAA,
+        MRS_APIAKEYLO,
+        MSR_APIAKEYLO,
+    ] {
         assert_eq!(exec(&mut cpu, insn), Some(UNDEFINED), "{insn:#010x}");
     }
 }
@@ -573,11 +668,18 @@ fn ldraa_authenticates_before_it_checks_sp_alignment() {
 
     cpu.sys.sctlr_el1 &= !EN_DA;
     cpu.sp_el1 = ONE_WORD_DATA + 8;
-    assert_eq!(exec(&mut cpu, LDRAA_SP), Some(Taken { ec: 0x26, iss: 0 }), "a disabled key, then the check");
+    assert_eq!(
+        exec(&mut cpu, LDRAA_SP),
+        Some(Taken { ec: 0x26, iss: 0 }),
+        "a disabled key, then the check"
+    );
 
     cpu.x[1] = apply(&mut cpu, PACDZB, ONE_WORD_DATA + 16, 0);
     assert_eq!(exec(&mut cpu, LDRAB_PRE), None);
-    assert_eq!((cpu.x[0], cpu.x[1]), (0x5A5A_5A5A_5A5A_5A5A, ONE_WORD_DATA + 8));
+    assert_eq!(
+        (cpu.x[0], cpu.x[1]),
+        (0x5A5A_5A5A_5A5A_5A5A, ONE_WORD_DATA + 8)
+    );
 }
 
 /// A snapshot carries the keys of a processor implementing FEAT_PAuth.
@@ -650,14 +752,25 @@ impl Ram {
 }
 
 impl PhysBus for Ram {
-    fn read(&mut self, addr: PhysAddr, width: AccessWidth, _clock: VmClock) -> Result<u64, BusFault> {
+    fn read(
+        &mut self,
+        addr: PhysAddr,
+        width: AccessWidth,
+        _clock: VmClock,
+    ) -> Result<u64, BusFault> {
         let a = addr.get() as usize;
         let n = width.bytes() as usize;
         let bytes = self.0.get(a..a + n).ok_or(BusFault::Unmapped)?;
         Ok(bytes.iter().rev().fold(0, |v, &b| (v << 8) | u64::from(b)))
     }
 
-    fn write(&mut self, _addr: PhysAddr, _width: AccessWidth, _value: u64, _clock: VmClock) -> Result<(), BusFault> {
+    fn write(
+        &mut self,
+        _addr: PhysAddr,
+        _width: AccessWidth,
+        _value: u64,
+        _clock: VmClock,
+    ) -> Result<(), BusFault> {
         Err(BusFault::Unmapped)
     }
 }
@@ -692,7 +805,15 @@ fn a_tag_tbid_keeps_faults_the_fetch() {
             let fetch = ram.step(&mut cpu);
             if tbid {
                 let fsc = if mmu { 0b00_0100 } else { 0 };
-                assert_eq!(fetch, Some(Abort { ec: 0x21, fsc, far: tagged }), "MMU on: {mmu}");
+                assert_eq!(
+                    fetch,
+                    Some(Abort {
+                        ec: 0x21,
+                        fsc,
+                        far: tagged
+                    }),
+                    "MMU on: {mmu}"
+                );
             } else {
                 assert_eq!(fetch, None, "MMU on: {mmu}");
                 assert_eq!(cpu.pc, TARGET + 4);

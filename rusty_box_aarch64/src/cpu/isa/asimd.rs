@@ -123,7 +123,9 @@ pub(crate) enum Asimdmisc {
 impl Asimdmisc {
     pub(crate) const fn feature(self) -> Feature {
         match self {
-            Self::Frint32zR | Self::Frint64zR | Self::Frint32xR | Self::Frint64xR => Feature::Frintts,
+            Self::Frint32zR | Self::Frint64zR | Self::Frint32xR | Self::Frint64xR => {
+                Feature::Frintts
+            }
             Self::Bfcvtn4s => Feature::Bf16,
             Self::Rev64R
             | Self::Rev16R
@@ -659,8 +661,12 @@ impl Asimdelem {
             | Self::FmlsRhH
             | Self::FmulRhH
             | Self::FmulxRhH => Class::SimdIndexedElement,
-            Self::SdotD | Self::UdotD | Self::SudotD | Self::UsdotD => Class::SimdDotProductIndexedElement,
-            Self::FmlalLh | Self::FmlslLh | Self::Fmlal2Lh | Self::Fmlsl2Lh => Class::SimdFpMulAddLongIndexedElement,
+            Self::SdotD | Self::UdotD | Self::SudotD | Self::UsdotD => {
+                Class::SimdDotProductIndexedElement
+            }
+            Self::FmlalLh | Self::FmlslLh | Self::Fmlal2Lh | Self::Fmlsl2Lh => {
+                Class::SimdFpMulAddLongIndexedElement
+            }
             Self::FcmlaAdvsimdElt => Class::SimdComplexMultiplyAccumulateIndexedElement,
             Self::BfdotE => Class::SimdBfDotProductIndexedElement,
             Self::BfmlalF => Class::SimdBfMulAddLongIndexedElement,

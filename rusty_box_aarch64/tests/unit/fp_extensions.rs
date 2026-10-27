@@ -196,16 +196,36 @@ fn fjcvtzs_follows_fptofixedjs() {
     assert_eq!(jscvt(0x3FF0_0000_0000_0000, 0), (1, Z, 0), "1.0");
     assert_eq!(jscvt(0x0000_0000_0000_0000, 0), (0, Z, 0), "+0.0");
     assert_eq!(jscvt(0x8000_0000_0000_0000, 0), (0, 0, 0), "-0.0");
-    assert_eq!(jscvt(0xC00E_0000_0000_0000, 0), (0xFFFF_FFFD, 0, IXC), "-3.75");
-    assert_eq!(jscvt(0xC1E0_0000_0000_0000, 0), (0x8000_0000, Z, 0), "-2^31");
-    assert_eq!(jscvt(0x41E0_0000_0000_0000, 0), (0x8000_0000, 0, IOC), "2^31");
+    assert_eq!(
+        jscvt(0xC00E_0000_0000_0000, 0),
+        (0xFFFF_FFFD, 0, IXC),
+        "-3.75"
+    );
+    assert_eq!(
+        jscvt(0xC1E0_0000_0000_0000, 0),
+        (0x8000_0000, Z, 0),
+        "-2^31"
+    );
+    assert_eq!(
+        jscvt(0x41E0_0000_0000_0000, 0),
+        (0x8000_0000, 0, IOC),
+        "2^31"
+    );
     assert_eq!(jscvt(0x41F0_0000_0050_0000, 0), (5, 0, IOC), "2^32 + 5");
     assert_eq!(jscvt(0x44F0_0000_0000_0000, 0), (0, 0, IOC), "2^80");
     assert_eq!(jscvt(0x7FF8_0000_0000_0000, 0), (0, 0, IOC), "NaN");
     assert_eq!(jscvt(0xFFF0_0000_0000_0000, 0), (0, 0, IOC), "-infinity");
     assert_eq!(jscvt(0x0000_0000_0000_0001, 0), (0, 0, IXC), "a denormal");
-    assert_eq!(jscvt(0x0000_0000_0000_0001, FZ), (0, 0, IDC), "a denormal, flushed");
-    assert_eq!(jscvt(0x800F_FFFF_FFFF_FFFF, FZ), (0, 0, IDC), "a negative denormal, flushed");
+    assert_eq!(
+        jscvt(0x0000_0000_0000_0001, FZ),
+        (0, 0, IDC),
+        "a denormal, flushed"
+    );
+    assert_eq!(
+        jscvt(0x800F_FFFF_FFFF_FFFF, FZ),
+        (0, 0, IDC),
+        "a negative denormal, flushed"
+    );
 }
 
 /// `insn` on S1 or D1 (`value`) under `fpcr`: V0 and FPSR.
@@ -224,20 +244,66 @@ fn scalar(insn: u32, value: u64, fpcr: u64) -> (u128, u64) {
 /// alone.
 #[test]
 fn frint32_and_frint64_saturate_to_the_most_negative_integer() {
-    assert_eq!(scalar(FRINT32Z_S, 0x4EFF_FFFF, 0), (0x4EFF_FFFF, 0), "2^31 - 128");
-    assert_eq!(scalar(FRINT32Z_S, 0x4F00_0000, 0), (0xCF00_0000, IOC), "2^31");
-    assert_eq!(scalar(FRINT32Z_S, 0xCF00_0000, 0), (0xCF00_0000, 0), "-2^31");
-    assert_eq!(scalar(FRINT32Z_S, 0x7FC0_0000, 0), (0xCF00_0000, IOC), "NaN");
-    assert_eq!(scalar(FRINT32Z_S, 0xFF80_0000, 0), (0xCF00_0000, IOC), "-infinity");
-    assert_eq!(scalar(FRINT32Z_S, 0xBF40_0000, 0), (0x8000_0000, IXC), "-0.75 is -0.0");
-    assert_eq!(scalar(FRINT32Z_S, 0x8000_0001, FZ), (0x8000_0000, IDC), "a flushed denormal");
-    assert_eq!(scalar(FRINT64Z_S, 0x5F00_0000, 0), (0xDF00_0000, IOC), "2^63");
+    assert_eq!(
+        scalar(FRINT32Z_S, 0x4EFF_FFFF, 0),
+        (0x4EFF_FFFF, 0),
+        "2^31 - 128"
+    );
+    assert_eq!(
+        scalar(FRINT32Z_S, 0x4F00_0000, 0),
+        (0xCF00_0000, IOC),
+        "2^31"
+    );
+    assert_eq!(
+        scalar(FRINT32Z_S, 0xCF00_0000, 0),
+        (0xCF00_0000, 0),
+        "-2^31"
+    );
+    assert_eq!(
+        scalar(FRINT32Z_S, 0x7FC0_0000, 0),
+        (0xCF00_0000, IOC),
+        "NaN"
+    );
+    assert_eq!(
+        scalar(FRINT32Z_S, 0xFF80_0000, 0),
+        (0xCF00_0000, IOC),
+        "-infinity"
+    );
+    assert_eq!(
+        scalar(FRINT32Z_S, 0xBF40_0000, 0),
+        (0x8000_0000, IXC),
+        "-0.75 is -0.0"
+    );
+    assert_eq!(
+        scalar(FRINT32Z_S, 0x8000_0001, FZ),
+        (0x8000_0000, IDC),
+        "a flushed denormal"
+    );
+    assert_eq!(
+        scalar(FRINT64Z_S, 0x5F00_0000, 0),
+        (0xDF00_0000, IOC),
+        "2^63"
+    );
     assert_eq!(scalar(FRINT64Z_S, 0x5E80_0000, 0), (0x5E80_0000, 0), "2^62");
     // 2^31 - 0.5 rounds to 2^31 to nearest: out of range, without inexact.
-    assert_eq!(scalar(FRINT32X_D, 0x41DF_FFFF_FFE0_0000, 0), (0xC1E0_0000_0000_0000, IOC));
-    assert_eq!(scalar(FRINT32X_D, 0x41DF_FFFF_FFE0_0000, RZ), (0x41DF_FFFF_FFC0_0000, IXC));
-    assert_eq!(scalar(FRINT64X_D, 0x3FF4_0000_0000_0000, RP), (0x4000_0000_0000_0000, IXC), "1.25 up");
-    assert_eq!(scalar(FRINT64X_D, 0xC3E0_0000_0000_0000, 0), (0xC3E0_0000_0000_0000, 0), "-2^63");
+    assert_eq!(
+        scalar(FRINT32X_D, 0x41DF_FFFF_FFE0_0000, 0),
+        (0xC1E0_0000_0000_0000, IOC)
+    );
+    assert_eq!(
+        scalar(FRINT32X_D, 0x41DF_FFFF_FFE0_0000, RZ),
+        (0x41DF_FFFF_FFC0_0000, IXC)
+    );
+    assert_eq!(
+        scalar(FRINT64X_D, 0x3FF4_0000_0000_0000, RP),
+        (0x4000_0000_0000_0000, IXC),
+        "1.25 up"
+    );
+    assert_eq!(
+        scalar(FRINT64X_D, 0xC3E0_0000_0000_0000, 0),
+        (0xC3E0_0000_0000_0000, 0),
+        "-2^63"
+    );
 }
 
 /// FPConvertBF: FPCR's rounding, with ties to even, and FPRoundBase's
@@ -245,21 +311,65 @@ fn frint32_and_frint64_saturate_to_the_most_negative_integer() {
 #[test]
 fn bfcvt_rounds_by_fpcr() {
     assert_eq!(scalar(BFCVT, 0x3F80_0000, 0), (0x3F80, 0), "1.0");
-    assert_eq!(scalar(BFCVT, 0x3F80_8000, 0), (0x3F80, IXC), "a tie, to even");
-    assert_eq!(scalar(BFCVT, 0x3F81_8000, 0), (0x3F82, IXC), "a tie, to even");
+    assert_eq!(
+        scalar(BFCVT, 0x3F80_8000, 0),
+        (0x3F80, IXC),
+        "a tie, to even"
+    );
+    assert_eq!(
+        scalar(BFCVT, 0x3F81_8000, 0),
+        (0x3F82, IXC),
+        "a tie, to even"
+    );
     assert_eq!(scalar(BFCVT, 0x3F81_FFFF, RZ), (0x3F81, IXC));
     assert_eq!(scalar(BFCVT, 0x3F80_0001, RP), (0x3F81, IXC));
     assert_eq!(scalar(BFCVT, 0xBF80_0001, RP), (0xBF80, IXC));
     assert_eq!(scalar(BFCVT, 0xBF80_0001, RM), (0xBF81, IXC));
-    assert_eq!(scalar(BFCVT, 0x7F7F_FFFF, 0), (0x7F80, OFC | IXC), "to infinity");
-    assert_eq!(scalar(BFCVT, 0x7F7F_FFFF, RZ), (0x7F7F, IXC), "to the largest normal");
-    assert_eq!(scalar(BFCVT, 0x0000_0001, 0), (0x0000, UFC | IXC), "tiny and inexact");
-    assert_eq!(scalar(BFCVT, 0x0001_8000, 0), (0x0002, UFC | IXC), "a denormal tie");
-    assert_eq!(scalar(BFCVT, 0x0001_0000, 0), (0x0001, 0), "an exact denormal");
-    assert_eq!(scalar(BFCVT, 0x807F_FFFF, FZ), (0x8000, IDC), "a flushed denormal");
-    assert_eq!(scalar(BFCVT, 0x7F80_0001, 0), (0x7FC0, IOC), "a signalling NaN, quieted");
-    assert_eq!(scalar(BFCVT, 0xFFA0_0000, DN), (0x7FC0, IOC), "the default NaN");
-    assert_eq!(scalar(BFCVT, 0xFFC1_2345, 0), (0xFFC1, 0), "a quiet NaN's payload, truncated");
+    assert_eq!(
+        scalar(BFCVT, 0x7F7F_FFFF, 0),
+        (0x7F80, OFC | IXC),
+        "to infinity"
+    );
+    assert_eq!(
+        scalar(BFCVT, 0x7F7F_FFFF, RZ),
+        (0x7F7F, IXC),
+        "to the largest normal"
+    );
+    assert_eq!(
+        scalar(BFCVT, 0x0000_0001, 0),
+        (0x0000, UFC | IXC),
+        "tiny and inexact"
+    );
+    assert_eq!(
+        scalar(BFCVT, 0x0001_8000, 0),
+        (0x0002, UFC | IXC),
+        "a denormal tie"
+    );
+    assert_eq!(
+        scalar(BFCVT, 0x0001_0000, 0),
+        (0x0001, 0),
+        "an exact denormal"
+    );
+    assert_eq!(
+        scalar(BFCVT, 0x807F_FFFF, FZ),
+        (0x8000, IDC),
+        "a flushed denormal"
+    );
+    assert_eq!(
+        scalar(BFCVT, 0x7F80_0001, 0),
+        (0x7FC0, IOC),
+        "a signalling NaN, quieted"
+    );
+    assert_eq!(
+        scalar(BFCVT, 0xFFA0_0000, DN),
+        (0x7FC0, IOC),
+        "the default NaN"
+    );
+    assert_eq!(
+        scalar(BFCVT, 0xFFC1_2345, 0),
+        (0xFFC1, 0),
+        "a quiet NaN's payload, truncated"
+    );
 }
 
 /// BFCVTN writes the low half of Vd and zeroes the rest, BFCVTN2 the high
@@ -301,10 +411,16 @@ fn bfdot_follows_bfloat16_behaviours_not_fpcr() {
         d as u32
     };
     // 1 + 1×3 + 2×4.
-    assert_eq!(lane0([0x3F80, 0x4000], [0x4040, 0x4080], 0x3F80_0000, 0), 0x4140_0000);
+    assert_eq!(
+        lane0([0x3F80, 0x4000], [0x4040, 0x4080], 0x3F80_0000, 0),
+        0x4140_0000
+    );
     // 1 + 2^-12 × 2^-12 rounds to odd, whatever FPCR.RMode.
     for fpcr in [0, RP, RM, RZ] {
-        assert_eq!(lane0([0x3980, 0], [0x3980, 0], 0x3F80_0000, fpcr), 0x3F80_0001);
+        assert_eq!(
+            lane0([0x3980, 0], [0x3980, 0], 0x3F80_0000, fpcr),
+            0x3F80_0001
+        );
     }
     // A signalling NaN gives the default NaN, FPCR.DN or not.
     assert_eq!(lane0([0x7F81, 0], [0x3F80, 0], 0x3F80_0000, 0), 0x7FC0_0000);
@@ -335,16 +451,30 @@ fn bfmlal_multiplies_the_bottom_or_top_elements_under_fpcr() {
     // n = (1, 2) and m = (3, 4) in every pair.
     let n = 0x4000_3F80_4000_3F80_4000_3F80_4000_3F80u128;
     let m = 0x4080_4040_4080_4040_4080_4040_4080_4040u128;
-    assert_eq!(vector(BFMLALB, 0, n, m, 0), (0x4040_0000_4040_0000_4040_0000_4040_0000, 0), "1×3");
-    assert_eq!(vector(BFMLALT, 0, n, m, 0), (0x4100_0000_4100_0000_4100_0000_4100_0000, 0), "2×4");
+    assert_eq!(
+        vector(BFMLALB, 0, n, m, 0),
+        (0x4040_0000_4040_0000_4040_0000_4040_0000, 0),
+        "1×3"
+    );
+    assert_eq!(
+        vector(BFMLALT, 0, n, m, 0),
+        (0x4100_0000_4100_0000_4100_0000_4100_0000, 0),
+        "2×4"
+    );
     // By element: the element `H:L:M` = 7 of V2.
     let m7 = 0x4080u128 << 112;
-    assert_eq!(vector(BFMLALT_ELEM, 0, n, m7, 0).0, 0x4100_0000_4100_0000_4100_0000_4100_0000);
+    assert_eq!(
+        vector(BFMLALT_ELEM, 0, n, m7, 0).0,
+        0x4100_0000_4100_0000_4100_0000_4100_0000
+    );
     // The smallest BFloat16 denormal, a single-precision denormal: kept
     // without FPCR.FZ, flushed with input denormal under it.
     let tiny = 0x0001_0001_0001_0001_0001_0001_0001_0001u128;
     let one = 0x3F80_3F80_3F80_3F80_3F80_3F80_3F80_3F80u128;
-    assert_eq!(vector(BFMLALB, 0, tiny, one, 0), (0x0001_0000_0001_0000_0001_0000_0001_0000, 0));
+    assert_eq!(
+        vector(BFMLALB, 0, tiny, one, 0),
+        (0x0001_0000_0001_0000_0001_0000_0001_0000, 0)
+    );
     assert_eq!(vector(BFMLALB, 0, tiny, one, FZ), (0, IDC));
 }
 
@@ -357,7 +487,10 @@ fn bfmmla_multiplies_two_by_four_matrices() {
     let n = 0x4000_4000_4000_4000_3F80_3F80_3F80_3F80u128;
     let m = 0x3F00_3F00_3F00_3F00_3F80_3F80_3F80_3F80u128;
     // (4, 2; 8, 4), row by row.
-    assert_eq!(vector(BFMMLA, 0, n, m, 0), (0x4080_0000_4100_0000_4000_0000_4080_0000, 0));
+    assert_eq!(
+        vector(BFMMLA, 0, n, m, 0),
+        (0x4080_0000_4100_0000_4000_0000_4080_0000, 0)
+    );
 }
 
 /// `AArch64_CheckFPEnabled` and `AArch64_CheckFPAdvSIMDEnabled` run after
@@ -378,6 +511,10 @@ fn the_fp_checks_follow_decode() {
         assert_eq!(exec(&mut cpu, insn), None, "{insn:#010x}");
     }
     for insn in ADVSIMD {
-        assert_eq!(exec(&mut cpu, insn), Some(ILLEGAL_WHEN_STREAMING), "{insn:#010x}");
+        assert_eq!(
+            exec(&mut cpu, insn),
+            Some(ILLEGAL_WHEN_STREAMING),
+            "{insn:#010x}"
+        );
     }
 }

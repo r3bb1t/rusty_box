@@ -3,10 +3,11 @@
 //! table-free integer algorithms in the Arm ARM (`RecipEstimate`,
 //! `RecipSqrtEstimate`, `FPRecipEstimate`, `FPRSqrtEstimate`, `FPRecpX`,
 //! `UnsignedRecipEstimate`, `UnsignedRSqrtEstimate`); this follows them, in
-//! the integer form QEMU uses (`target/arm/tcg/vfp_helper.c`:
+//! the integer form QEMU 11.1.2 uses (`target/arm/tcg/vfp_helper.c`:
 //! `recip_estimate`, `do_recip_sqrt_estimate`, `call_recip_estimate`,
 //! `recip_sqrt_estimate`, `HELPER(recpe_f32/f64)`, `HELPER(rsqrte_f32/f64)`,
-//! `HELPER(recpe_u32)`, `HELPER(rsqrte_u32)`, `HELPER(frecpx_f32/f64)`).
+//! `HELPER(recpe_u32)`, `HELPER(rsqrte_u32)`; `target/arm/tcg/helper-a64.c`:
+//! `HELPER(frecpx_f32/f64)`).
 //!
 //! Under FPCR.AH = 1 (FEAT_AFP) the floating-point estimates raise no
 //! exception, flush every single- and double-precision denormal, operand
@@ -80,7 +81,11 @@ impl EstimateControl {
             },
             flush_half: (fpcr >> 19) & 1 == 1,
             default_nan: (fpcr >> 25) & 1 == 1,
-            handling: if alternate { Handling::Alternate } else { Handling::Standard },
+            handling: if alternate {
+                Handling::Alternate
+            } else {
+                Handling::Standard
+            },
             precision,
         }
     }
@@ -186,7 +191,10 @@ impl Format {
         self.signed(negative, self.exp_max() << self.frac_bits)
     }
     const fn max_normal(self, negative: bool) -> u64 {
-        self.signed(negative, ((self.exp_max() - 1) << self.frac_bits) | self.frac_mask())
+        self.signed(
+            negative,
+            ((self.exp_max() - 1) << self.frac_bits) | self.frac_mask(),
+        )
     }
     const fn zero(self, negative: bool) -> u64 {
         self.signed(negative, 0)
@@ -194,7 +202,10 @@ impl Format {
     /// Arm FPDefaultNaN: the top fraction bit set, the sign FPCR.AH.
     const fn default_nan(self, handling: Handling) -> u64 {
         let negative = matches!(handling, Handling::Alternate);
-        self.signed(negative, (self.exp_max() << self.frac_bits) | (1 << (self.frac_bits - 1)))
+        self.signed(
+            negative,
+            (self.exp_max() << self.frac_bits) | (1 << (self.frac_bits - 1)),
+        )
     }
     const fn signed(self, negative: bool, magnitude: u64) -> u64 {
         if negative {
@@ -208,10 +219,18 @@ impl Format {
 /// Arm ARM `FPProcessNaN`: quieten a signalling NaN (raising Invalid
 /// Operation), or produce the default NaN under `FPCR.DN`.
 fn process_nan(f: Format, bits: u64, ctl: EstimateControl) -> Estimate {
-    let fpsr = if f.is_signalling_nan(bits) { fpsr::IOC } else { 0 };
+    let fpsr = if f.is_signalling_nan(bits) {
+        fpsr::IOC
+    } else {
+        0
+    };
     let quiet = bits | (1 << (f.frac_bits - 1));
     Estimate {
-        bits: if ctl.default_nan { f.default_nan(ctl.handling) } else { quiet },
+        bits: if ctl.default_nan {
+            f.default_nan(ctl.handling)
+        } else {
+            quiet
+        },
         fpsr: ctl.reported(fpsr),
     }
 }
@@ -248,7 +267,11 @@ fn flush_input(f: Format, bits: u64, ctl: EstimateControl, raised: &mut u64) -> 
 /// result, 1.0 <= r < 2.0, is in 256..512 or 4096..8192.
 const fn recip_estimate(input: u64, increased: bool) -> u64 {
     let a = input * 2 + 1;
-    let b = if increased { (1 << 26) / a } else { (1 << 19) / a };
+    let b = if increased {
+        (1 << 26) / a
+    } else {
+        (1 << 19) / a
+    };
     (b + 1) >> 1
 }
 
@@ -257,8 +280,11 @@ const fn recip_estimate(input: u64, increased: bool) -> u64 {
 /// result is in 256..512 or 4096..8192.
 const fn recip_sqrt_estimate(input: u64, increased: bool) -> u64 {
     // `a` in units of 2^-9 (2^-13 with increased precision), rounded.
-    let (half_point, first_b, limit): (u64, u64, u64) =
-        if increased { (2048, 8192, 1 << 39) } else { (256, 512, 1 << 28) };
+    let (half_point, first_b, limit): (u64, u64, u64) = if increased {
+        (2048, 8192, 1 << 39)
+    } else {
+        (256, 512, 1 << 28)
+    };
     let a = if input < half_point {
         input * 2 + 1
     } else {
@@ -270,7 +296,11 @@ const fn recip_sqrt_estimate(input: u64, increased: bool) -> u64 {
     // `ceil(limit / a)`.
     let least = limit.div_ceil(a);
     let root = (least - 1).isqrt() + 1;
-    let b = if root > first_b + 1 { root - 1 } else { first_b };
+    let b = if root > first_b + 1 {
+        root - 1
+    } else {
+        first_b
+    };
     b.div_ceil(2)
 }
 
@@ -436,8 +466,16 @@ mod tests {
 
     /// `RecipSqrtEstimate` as the pseudocode writes it, counting `b` up.
     fn recip_sqrt_estimate_by_counting(input: u64, increased: bool) -> u64 {
-        let (half_point, mut b, limit) = if increased { (2048, 8192, 1u64 << 39) } else { (256, 512, 1u64 << 28) };
-        let a = if input < half_point { input * 2 + 1 } else { ((input >> 1) << 1) * 2 + 2 };
+        let (half_point, mut b, limit) = if increased {
+            (2048, 8192, 1u64 << 39)
+        } else {
+            (256, 512, 1u64 << 28)
+        };
+        let a = if input < half_point {
+            input * 2 + 1
+        } else {
+            ((input >> 1) << 1) * 2 + 2
+        };
         while a * (b + 1) * (b + 1) < limit {
             b += 1;
         }
@@ -448,10 +486,18 @@ mod tests {
     #[test]
     fn the_square_root_estimate_is_the_pseudocode_s_on_every_input() {
         for input in 128..512 {
-            assert_eq!(recip_sqrt_estimate(input, false), recip_sqrt_estimate_by_counting(input, false), "{input}");
+            assert_eq!(
+                recip_sqrt_estimate(input, false),
+                recip_sqrt_estimate_by_counting(input, false),
+                "{input}"
+            );
         }
         for input in 1024..4096 {
-            assert_eq!(recip_sqrt_estimate(input, true), recip_sqrt_estimate_by_counting(input, true), "{input}");
+            assert_eq!(
+                recip_sqrt_estimate(input, true),
+                recip_sqrt_estimate_by_counting(input, true),
+                "{input}"
+            );
         }
     }
 
@@ -463,21 +509,61 @@ mod tests {
         // The smallest half-precision denormal (FPCR.FZ16 clear) is below
         // 2^-16, so its reciprocal overflows: to infinity, as FPCR.RMode is
         // taken as nearest, with no OFC or IXC.
-        assert_eq!(frecpe(HALF, 0x0001, ah), Estimate { bits: 0x7C00, fpsr: 0 });
+        assert_eq!(
+            frecpe(HALF, 0x0001, ah),
+            Estimate {
+                bits: 0x7C00,
+                fpsr: 0
+            }
+        );
         // A denormal is a zero (FIZ) without IDC, and its reciprocal an
         // infinity without DZC.
-        assert_eq!(frecpe(SINGLE, 1, ah), Estimate { bits: 0x7F80_0000, fpsr: 0 });
+        assert_eq!(
+            frecpe(SINGLE, 1, ah),
+            Estimate {
+                bits: 0x7F80_0000,
+                fpsr: 0
+            }
+        );
         // The reciprocal of 2^127 flushes (FZ) without UFC.
-        assert_eq!(frecpe(SINGLE, 0x7F00_0000, ah), Estimate { bits: 0, fpsr: 0 });
+        assert_eq!(
+            frecpe(SINGLE, 0x7F00_0000, ah),
+            Estimate { bits: 0, fpsr: 0 }
+        );
         // A signalling NaN is quietened without IOC; under DN it is the
         // negative default NaN.
-        assert_eq!(frecpe(SINGLE, 0x7F80_0001, ah), Estimate { bits: 0x7FC0_0001, fpsr: 0 });
+        assert_eq!(
+            frecpe(SINGLE, 0x7F80_0001, ah),
+            Estimate {
+                bits: 0x7FC0_0001,
+                fpsr: 0
+            }
+        );
         let ah_dn = EstimateControl::from_fpcr(AH | (1 << 25), EstimatePrecision::Base);
-        assert_eq!(frecpe(DOUBLE, 0x7FF0_0000_0000_0001, ah_dn).bits, 0xFFF8_0000_0000_0000);
-        assert_eq!(frsqrte(SINGLE, 0xC080_0000, ah), Estimate { bits: 0xFFC0_0000, fpsr: 0 });
-        assert_eq!(frecpx(SINGLE, 0x7F80_0001, ah), Estimate { bits: 0x7FC0_0001, fpsr: 0 });
+        assert_eq!(
+            frecpe(DOUBLE, 0x7FF0_0000_0000_0001, ah_dn).bits,
+            0xFFF8_0000_0000_0000
+        );
+        assert_eq!(
+            frsqrte(SINGLE, 0xC080_0000, ah),
+            Estimate {
+                bits: 0xFFC0_0000,
+                fpsr: 0
+            }
+        );
+        assert_eq!(
+            frecpx(SINGLE, 0x7F80_0001, ah),
+            Estimate {
+                bits: 0x7FC0_0001,
+                fpsr: 0
+            }
+        );
         // Half precision keeps FPCR.FZ16 alone: an unflushed denormal.
-        assert_eq!(frecpe(HALF, 0x0200, ah).bits, 0x77FC, "1/2^-15: 2^15 less an 8-bit step");
+        assert_eq!(
+            frecpe(HALF, 0x0200, ah).bits,
+            0x77FC,
+            "1/2^-15: 2^15 less an 8-bit step"
+        );
     }
 
     /// FEAT_RPRES: under FPCR.AH = 1 the single-precision estimates have
@@ -490,7 +576,10 @@ mod tests {
         // RecipSqrtEstimate(2048, TRUE) of 4.0's fraction: the same 0.5
         // less a 12-bit step.
         assert_eq!(frsqrte(SINGLE, 0x4080_0000, rpres).bits, 0x3EFF_F000);
-        assert_eq!(frecpe(DOUBLE, 0x4000_0000_0000_0000, rpres).bits, 0x3FDF_F000_0000_0000);
+        assert_eq!(
+            frecpe(DOUBLE, 0x4000_0000_0000_0000, rpres).bits,
+            0x3FDF_F000_0000_0000
+        );
         assert_eq!(frecpe(HALF, 0x4000, rpres).bits, 0x37FC);
         let without_ah = EstimateControl::from_fpcr(0, EstimatePrecision::Increased);
         assert_eq!(frecpe(SINGLE, 0x4000_0000, without_ah).bits, 0x3EFF_8000);
@@ -518,21 +607,51 @@ mod tests {
 
     #[test]
     fn special_inputs_follow_the_pseudocode() {
-        assert_eq!(frecpe(SINGLE, 0x8000_0000, NEAREST), Estimate { bits: 0xFF80_0000, fpsr: fpsr::DZC });
+        assert_eq!(
+            frecpe(SINGLE, 0x8000_0000, NEAREST),
+            Estimate {
+                bits: 0xFF80_0000,
+                fpsr: fpsr::DZC
+            }
+        );
         assert_eq!(frecpe(SINGLE, 0x7F80_0000, NEAREST).bits, 0);
         // The smallest denormal overflows: infinity when rounding to
         // nearest, the largest normal when rounding toward zero.
-        assert_eq!(frecpe(SINGLE, 1, NEAREST), Estimate { bits: 0x7F80_0000, fpsr: fpsr::OFC | fpsr::IXC });
+        assert_eq!(
+            frecpe(SINGLE, 1, NEAREST),
+            Estimate {
+                bits: 0x7F80_0000,
+                fpsr: fpsr::OFC | fpsr::IXC
+            }
+        );
         let rz = EstimateControl::from_fpcr(3 << 22, EstimatePrecision::Base);
         assert_eq!(frecpe(SINGLE, 1, rz).bits, 0x7F7F_FFFF);
         // Under FZ the denormal is a zero first.
         let fz = EstimateControl::from_fpcr(1 << 24, EstimatePrecision::Base);
-        assert_eq!(frecpe(SINGLE, 1, fz), Estimate { bits: 0x7F80_0000, fpsr: fpsr::IDC | fpsr::DZC });
+        assert_eq!(
+            frecpe(SINGLE, 1, fz),
+            Estimate {
+                bits: 0x7F80_0000,
+                fpsr: fpsr::IDC | fpsr::DZC
+            }
+        );
         // Under FIZ (FEAT_AFP) it is one too, without IDC.
         let fiz = EstimateControl::from_fpcr(1, EstimatePrecision::Base);
-        assert_eq!(frecpe(SINGLE, 1, fiz), Estimate { bits: 0x7F80_0000, fpsr: fpsr::DZC });
+        assert_eq!(
+            frecpe(SINGLE, 1, fiz),
+            Estimate {
+                bits: 0x7F80_0000,
+                fpsr: fpsr::DZC
+            }
+        );
         // A signalling NaN is quietened, or replaced under DN.
-        assert_eq!(frecpe(SINGLE, 0x7F80_0001, NEAREST), Estimate { bits: 0x7FC0_0001, fpsr: fpsr::IOC });
+        assert_eq!(
+            frecpe(SINGLE, 0x7F80_0001, NEAREST),
+            Estimate {
+                bits: 0x7FC0_0001,
+                fpsr: fpsr::IOC
+            }
+        );
         let dn = EstimateControl::from_fpcr(1 << 25, EstimatePrecision::Base);
         assert_eq!(frecpe(SINGLE, 0x7F80_0001, dn).bits, 0x7FC0_0000);
     }

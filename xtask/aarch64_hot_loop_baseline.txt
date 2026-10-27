@@ -1,0 +1,17 @@
+# Host instructions inside VirtMachine::run_until for the aarch64_perfbench
+# loops (callgrind, --toggle-collect=*run_until*), held by `cargo xtask ci`'s
+# "aarch64 hot-loop host instructions" step. `cargo xtask hot-loop-baseline`
+# rewrites this file: see docs/aarch64-automation.md.
+rustc 2d8144b7880597b6e6d3dfd63a9a9efae3f533d3
+host x86_64-unknown-linux-gnu
+fma yes
+alu plain 8700242554
+alu hooked 9700242479
+memcpy plain 16943901040
+memcpy hooked 18746540902
+fnv plain 8257849013
+fnv hooked 9191750685
+fp plain 14440177427
+fp hooked 15140177310
+mmio plain 593117460
+mmio hooked 602218147

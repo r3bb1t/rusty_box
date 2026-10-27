@@ -38,7 +38,11 @@ enum AtomicOp {
 /// choice `Unpredictable_WRITEFAILEDCAS` leaves open). The operand is the
 /// low `bits` of the register it came from (`X[s, datasize]`).
 fn atomic_result(op: AtomicOp, old: u128, operand: u128, bits: u32) -> Option<u128> {
-    let mask = if bits == 128 { u128::MAX } else { (1u128 << bits) - 1 };
+    let mask = if bits == 128 {
+        u128::MAX
+    } else {
+        (1u128 << bits) - 1
+    };
     let (old, operand) = (old & mask, operand & mask);
     let signed = |v: u128| ((v << (128 - bits)) as i128) >> (128 - bits);
     let result = match op {
@@ -79,8 +83,21 @@ impl Cpu {
     /// is the atomic one, and the access reads and writes
     /// (`CreateAccDescAtomicOp`): a fault reports WnR set only when it is
     /// the write that the page refuses.
-    fn atomic_rmw<B: PhysBus>(&mut self, bus: &mut B, va: u64, log2: u32, op: AtomicOp, operand: u128) -> Result<u128, super::exec::Fault> {
-        let pa = self.translate_for(bus, va, 1 << log2, DataDirection::ReadWrite, DataAccess::ATOMIC)?;
+    fn atomic_rmw<B: PhysBus>(
+        &mut self,
+        bus: &mut B,
+        va: u64,
+        log2: u32,
+        op: AtomicOp,
+        operand: u128,
+    ) -> Result<u128, super::exec::Fault> {
+        let pa = self.translate_for(
+            bus,
+            va,
+            1 << log2,
+            DataDirection::ReadWrite,
+            DataAccess::ATOMIC,
+        )?;
         let old = self.read_translated(bus, va, pa, log2)?;
         if let Some(new) = atomic_result(op, old, operand, 8 << log2) {
             self.write_translated(bus, va, pa, log2, new)?;
@@ -158,7 +175,10 @@ impl Cpu {
         }
         let half_bits = 8 << half_log2;
         let half = (1u128 << half_bits) - 1;
-        let pair = |cpu: &Cpu, r: u32| (u128::from(cpu.x_or_zr(r)) & half) | ((u128::from(cpu.x_or_zr(r + 1)) & half) << half_bits);
+        let pair = |cpu: &Cpu, r: u32| {
+            (u128::from(cpu.x_or_zr(r)) & half)
+                | ((u128::from(cpu.x_or_zr(r + 1)) & half) << half_bits)
+        };
         let compare = pair(self, rs);
         let new = pair(self, rt);
         let address = self.base_register(rn)?;
@@ -172,7 +192,11 @@ impl Cpu {
     /// `size 011001 opc 0 imm9 00 Rn Rt`, at `Rn|SP` plus the signed
     /// unscaled `imm9`. `opc` = 00 stores, 01 loads zero-extended, 10 loads
     /// sign-extended to 64 bits and 11 to 32.
-    pub(crate) fn exec_ldapstl_unscaled<B: PhysBus>(&mut self, bus: &mut B, insn: u32) -> ExecResult {
+    pub(crate) fn exec_ldapstl_unscaled<B: PhysBus>(
+        &mut self,
+        bus: &mut B,
+        insn: u32,
+    ) -> ExecResult {
         let size = bits(insn, 31, 30);
         let opc = bits(insn, 23, 22);
         let rn = bits(insn, 9, 5);

@@ -82,12 +82,32 @@ const ALLOCATED: [u32; 21] = [
 #[test]
 fn the_encoders_match_the_assembler() {
     // aarch64-linux-gnu-as -march=armv8.6-a+i8mm, objdump -d.
-    assert_eq!(rdm_vector(1, false), 0x6E42_8420, "sqrdmlah v0.8h, v1.8h, v2.8h");
+    assert_eq!(
+        rdm_vector(1, false),
+        0x6E42_8420,
+        "sqrdmlah v0.8h, v1.8h, v2.8h"
+    );
     assert_eq!(rdm_scalar(1, false), 0x7E42_8420, "sqrdmlah h0, h1, h2");
-    assert_eq!(rdm_elem(1, false), 0x6F42_D020, "sqrdmlah v0.8h, v1.8h, v2.h[0]");
-    assert_eq!(rdm_scalar_elem(2, false), 0x7F82_D020, "sqrdmlah s0, s1, v2.s[0]");
-    assert_eq!(dot_vector(2, false), 0x4E82_9420, "sdot v0.4s, v1.16b, v2.16b");
-    assert_eq!(dot_elem(2, false), 0x4F82_E020, "sdot v0.4s, v1.16b, v2.4b[0]");
+    assert_eq!(
+        rdm_elem(1, false),
+        0x6F42_D020,
+        "sqrdmlah v0.8h, v1.8h, v2.h[0]"
+    );
+    assert_eq!(
+        rdm_scalar_elem(2, false),
+        0x7F82_D020,
+        "sqrdmlah s0, s1, v2.s[0]"
+    );
+    assert_eq!(
+        dot_vector(2, false),
+        0x4E82_9420,
+        "sdot v0.4s, v1.16b, v2.16b"
+    );
+    assert_eq!(
+        dot_elem(2, false),
+        0x4F82_E020,
+        "sdot v0.4s, v1.16b, v2.4b[0]"
+    );
     assert_eq!(USDOT, 0x4E82_9C20, "usdot v0.4s, v1.16b, v2.16b");
     assert_eq!(SUDOT_ELEM, 0x4F02_F020, "sudot v0.4s, v1.16b, v2.4b[0]");
     assert_eq!(USDOT_ELEM, 0x4F82_F020, "usdot v0.4s, v1.16b, v2.4b[0]");
@@ -157,6 +177,10 @@ fn the_simd_checks_follow_decode() {
     // smstart sm
     assert_eq!(exec(&mut cpu, 0xD503_437F), None);
     for insn in ALLOCATED {
-        assert_eq!(exec(&mut cpu, insn), Some(ILLEGAL_WHEN_STREAMING), "{insn:#010x}");
+        assert_eq!(
+            exec(&mut cpu, insn),
+            Some(ILLEGAL_WHEN_STREAMING),
+            "{insn:#010x}"
+        );
     }
 }

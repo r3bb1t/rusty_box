@@ -11,7 +11,8 @@
 
 use rusty_box_aarch64::board::RAM_BASE;
 use rusty_box_aarch64::{
-    LentStorage, MachineBuilder, MemoryLoan, RamSize, Reg, StopReason, SysReg, VReg, VirtConfig, VirtMachine,
+    LentStorage, MachineBuilder, MemoryLoan, RamSize, Reg, StopReason, SysReg, VReg, VirtConfig,
+    VirtMachine,
 };
 
 // ----- encoders (Arm ARM C6.2 and C7.2, the instruction encodings) -----
@@ -140,7 +141,11 @@ fn the_encoders_are_what_gnu_as_assembles() {
         (aesd(3, 17), 0x4E28_5A23, "aesd v3.16b, v17.16b"),
         (aesmc(3, 17), 0x4E28_6A23, "aesmc v3.16b, v17.16b"),
         (aesimc(3, 17), 0x4E28_7A23, "aesimc v3.16b, v17.16b"),
-        (eor_16b(3, 5, 17), 0x6E31_1CA3, "eor v3.16b, v5.16b, v17.16b"),
+        (
+            eor_16b(3, 5, 17),
+            0x6E31_1CA3,
+            "eor v3.16b, v5.16b, v17.16b",
+        ),
         (mov_16b(3, 17), 0x4EB1_1E23, "mov v3.16b, v17.16b"),
         (SPIN, 0x1400_0000, "b ."),
         (ld1_2x4s(3, 5), 0x4C40_A8A3, "ld1 {v3.4s, v4.4s}, [x5]"),
@@ -153,11 +158,19 @@ fn the_encoders_are_what_gnu_as_assembles() {
         (sha256h(3, 5, 17), 0x5E11_40A3, "sha256h q3, q5, v17.4s"),
         (sha256h2(3, 5, 17), 0x5E11_50A3, "sha256h2 q3, q5, v17.4s"),
         (sha256su0(3, 17), 0x5E28_2A23, "sha256su0 v3.4s, v17.4s"),
-        (sha256su1(3, 5, 17), 0x5E11_60A3, "sha256su1 v3.4s, v5.4s, v17.4s"),
+        (
+            sha256su1(3, 5, 17),
+            0x5E11_60A3,
+            "sha256su1 v3.4s, v5.4s, v17.4s",
+        ),
         (sha1_hash(0, 3, 5, 17), 0x5E11_00A3, "sha1c q3, s5, v17.4s"),
         (sha1_hash(1, 3, 5, 17), 0x5E11_10A3, "sha1p q3, s5, v17.4s"),
         (sha1_hash(2, 3, 5, 17), 0x5E11_20A3, "sha1m q3, s5, v17.4s"),
-        (sha1su0(3, 5, 17), 0x5E11_30A3, "sha1su0 v3.4s, v5.4s, v17.4s"),
+        (
+            sha1su0(3, 5, 17),
+            0x5E11_30A3,
+            "sha1su0 v3.4s, v5.4s, v17.4s",
+        ),
         (sha1h(3, 17), 0x5E28_0A23, "sha1h s3, s17"),
         (sha1su1(3, 17), 0x5E28_1A23, "sha1su1 v3.4s, v17.4s"),
         (ldr_q(3, 5), 0x3DC0_00A3, "ldr q3, [x5]"),
@@ -173,8 +186,16 @@ fn the_encoders_are_what_gnu_as_assembles() {
         (crc32(true, 1, 3, 5, 17), 0x1AD1_54A3, "crc32ch w3, w5, w17"),
         (crc32(true, 2, 3, 5, 17), 0x1AD1_58A3, "crc32cw w3, w5, w17"),
         (crc32(true, 3, 3, 5, 17), 0x9AD1_5CA3, "crc32cx w3, w5, x17"),
-        (pmull_1q(false, 3, 5, 17), 0x0EF1_E0A3, "pmull v3.1q, v5.1d, v17.1d"),
-        (pmull_1q(true, 3, 5, 17), 0x4EF1_E0A3, "pmull2 v3.1q, v5.2d, v17.2d"),
+        (
+            pmull_1q(false, 3, 5, 17),
+            0x0EF1_E0A3,
+            "pmull v3.1q, v5.1d, v17.1d",
+        ),
+        (
+            pmull_1q(true, 3, 5, 17),
+            0x4EF1_E0A3,
+            "pmull2 v3.1q, v5.2d, v17.2d",
+        ),
     ];
     for (built, assembled, text) in pairs {
         assert_eq!(built, assembled, "{text}");
@@ -193,18 +214,24 @@ fn machine(ram: &mut [u8]) -> VirtMachine<LentStorage<'_>> {
         .bare()
         .build_in(MemoryLoan { ram, vars: &mut [] })
         .expect("a bare machine builds");
-    m.sysreg_write(SysReg::CPACR_EL1, 3 << 20).expect("CPACR_EL1 is writable");
+    m.sysreg_write(SysReg::CPACR_EL1, 3 << 20)
+        .expect("CPACR_EL1 is writable");
     m
 }
 
 /// Run `program` from the base of RAM up to its final `B .`.
 fn run(m: &mut VirtMachine<LentStorage<'_>>, program: &[u32]) {
     for (i, word) in program.iter().enumerate() {
-        m.mem_write(RAM_BASE + 4 * i as u64, &word.to_le_bytes()).expect("code is in RAM");
+        m.mem_write(RAM_BASE + 4 * i as u64, &word.to_le_bytes())
+            .expect("code is in RAM");
     }
     let end = RAM_BASE + 4 * (program.len() as u64 - 1);
     let outcome = m.emu_start(RAM_BASE, Some(end), Some(10_000));
-    assert_eq!(outcome.stop, StopReason::ExitReached, "the program runs to its end");
+    assert_eq!(
+        outcome.stop,
+        StopReason::ExitReached,
+        "the program runs to its end"
+    );
 }
 
 fn v(n: u8) -> VReg {
@@ -269,8 +296,16 @@ fn aes128_encrypts_and_decrypts_the_fips_197_example() {
         m.vreg_write(v(16 + r as u8), bytes128(key));
     }
     run(&mut m, &aes128_program());
-    assert_eq!(m.vreg_read(v(0)), bytes128("69c4e0d86a7b0430d8cdb78070b4c55a"), "the FIPS-197 ciphertext");
-    assert_eq!(m.vreg_read(v(1)), plaintext, "decryption gives the plaintext back");
+    assert_eq!(
+        m.vreg_read(v(0)),
+        bytes128("69c4e0d86a7b0430d8cdb78070b4c55a"),
+        "the FIPS-197 ciphertext"
+    );
+    assert_eq!(
+        m.vreg_read(v(1)),
+        plaintext,
+        "decryption gives the plaintext back"
+    );
 }
 
 // ----- SHA -----
@@ -286,14 +321,70 @@ fn abc_block() -> [u8; 64] {
 
 /// FIPS 180-4 4.2.2: the SHA-256 constants.
 const SHA256_K: [u32; 64] = [
-    0x428A_2F98, 0x7137_4491, 0xB5C0_FBCF, 0xE9B5_DBA5, 0x3956_C25B, 0x59F1_11F1, 0x923F_82A4, 0xAB1C_5ED5,
-    0xD807_AA98, 0x1283_5B01, 0x2431_85BE, 0x550C_7DC3, 0x72BE_5D74, 0x80DE_B1FE, 0x9BDC_06A7, 0xC19B_F174,
-    0xE49B_69C1, 0xEFBE_4786, 0x0FC1_9DC6, 0x240C_A1CC, 0x2DE9_2C6F, 0x4A74_84AA, 0x5CB0_A9DC, 0x76F9_88DA,
-    0x983E_5152, 0xA831_C66D, 0xB003_27C8, 0xBF59_7FC7, 0xC6E0_0BF3, 0xD5A7_9147, 0x06CA_6351, 0x1429_2967,
-    0x27B7_0A85, 0x2E1B_2138, 0x4D2C_6DFC, 0x5338_0D13, 0x650A_7354, 0x766A_0ABB, 0x81C2_C92E, 0x9272_2C85,
-    0xA2BF_E8A1, 0xA81A_664B, 0xC24B_8B70, 0xC76C_51A3, 0xD192_E819, 0xD699_0624, 0xF40E_3585, 0x106A_A070,
-    0x19A4_C116, 0x1E37_6C08, 0x2748_774C, 0x34B0_BCB5, 0x391C_0CB3, 0x4ED8_AA4A, 0x5B9C_CA4F, 0x682E_6FF3,
-    0x748F_82EE, 0x78A5_636F, 0x84C8_7814, 0x8CC7_0208, 0x90BE_FFFA, 0xA450_6CEB, 0xBEF9_A3F7, 0xC671_78F2,
+    0x428A_2F98,
+    0x7137_4491,
+    0xB5C0_FBCF,
+    0xE9B5_DBA5,
+    0x3956_C25B,
+    0x59F1_11F1,
+    0x923F_82A4,
+    0xAB1C_5ED5,
+    0xD807_AA98,
+    0x1283_5B01,
+    0x2431_85BE,
+    0x550C_7DC3,
+    0x72BE_5D74,
+    0x80DE_B1FE,
+    0x9BDC_06A7,
+    0xC19B_F174,
+    0xE49B_69C1,
+    0xEFBE_4786,
+    0x0FC1_9DC6,
+    0x240C_A1CC,
+    0x2DE9_2C6F,
+    0x4A74_84AA,
+    0x5CB0_A9DC,
+    0x76F9_88DA,
+    0x983E_5152,
+    0xA831_C66D,
+    0xB003_27C8,
+    0xBF59_7FC7,
+    0xC6E0_0BF3,
+    0xD5A7_9147,
+    0x06CA_6351,
+    0x1429_2967,
+    0x27B7_0A85,
+    0x2E1B_2138,
+    0x4D2C_6DFC,
+    0x5338_0D13,
+    0x650A_7354,
+    0x766A_0ABB,
+    0x81C2_C92E,
+    0x9272_2C85,
+    0xA2BF_E8A1,
+    0xA81A_664B,
+    0xC24B_8B70,
+    0xC76C_51A3,
+    0xD192_E819,
+    0xD699_0624,
+    0xF40E_3585,
+    0x106A_A070,
+    0x19A4_C116,
+    0x1E37_6C08,
+    0x2748_774C,
+    0x34B0_BCB5,
+    0x391C_0CB3,
+    0x4ED8_AA4A,
+    0x5B9C_CA4F,
+    0x682E_6FF3,
+    0x748F_82EE,
+    0x78A5_636F,
+    0x84C8_7814,
+    0x8CC7_0208,
+    0x90BE_FFFA,
+    0xA450_6CEB,
+    0xBEF9_A3F7,
+    0xC671_78F2,
 ];
 
 /// One SHA-256 block: x0 points at the block, x1 at the constants, x2 at
@@ -312,7 +403,10 @@ fn sha256_block_program() -> Vec<u32> {
             sha256h2(1, 2, 22),
         ]);
         if i < 12 {
-            p.extend([sha256su0(w, 16 + (i + 1) % 4), sha256su1(w, 16 + (i + 2) % 4, 16 + (i + 3) % 4)]);
+            p.extend([
+                sha256su0(w, 16 + (i + 1) % 4),
+                sha256su1(w, 16 + (i + 2) % 4, 16 + (i + 3) % 4),
+            ]);
         }
     }
     p.extend([add_4s(0, 0, 20), add_4s(1, 1, 21), st1_2x4s(0, 2), SPIN]);
@@ -328,7 +422,14 @@ fn sha256_of_abc_is_the_fips_180_4_digest() {
     let k_bytes: Vec<u8> = SHA256_K.iter().flat_map(|w| w.to_le_bytes()).collect();
     m.mem_write(k, &k_bytes).expect("in RAM");
     let initial: [u32; 8] = [
-        0x6A09_E667, 0xBB67_AE85, 0x3C6E_F372, 0xA54F_F53A, 0x510E_527F, 0x9B05_688C, 0x1F83_D9AB, 0x5BE0_CD19,
+        0x6A09_E667,
+        0xBB67_AE85,
+        0x3C6E_F372,
+        0xA54F_F53A,
+        0x510E_527F,
+        0x9B05_688C,
+        0x1F83_D9AB,
+        0x5BE0_CD19,
     ];
     let h_bytes: Vec<u8> = initial.iter().flat_map(|w| w.to_le_bytes()).collect();
     m.mem_write(state, &h_bytes).expect("in RAM");
@@ -338,10 +439,22 @@ fn sha256_of_abc_is_the_fips_180_4_digest() {
     run(&mut m, &sha256_block_program());
     let mut out = [0u8; 32];
     m.mem_read(state, &mut out).expect("in RAM");
-    let digest: Vec<u32> = out.chunks(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+    let digest: Vec<u32> = out
+        .chunks(4)
+        .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect();
     assert_eq!(
         digest,
-        [0xBA78_16BF, 0x8F01_CFEA, 0x4141_40DE, 0x5DAE_2223, 0xB003_61A3, 0x9617_7A9C, 0xB410_FF61, 0xF200_15AD]
+        [
+            0xBA78_16BF,
+            0x8F01_CFEA,
+            0x4141_40DE,
+            0x5DAE_2223,
+            0xB003_61A3,
+            0x9617_7A9C,
+            0xB410_FF61,
+            0xF200_15AD
+        ]
     );
 }
 
@@ -362,10 +475,19 @@ fn sha1_block_program() -> Vec<u32> {
             mov_16b(16, 13),
         ]);
         if i < 16 {
-            p.extend([sha1su0(w, 8 + (i + 1) % 4, 8 + (i + 2) % 4), sha1su1(w, 8 + (i + 3) % 4)]);
+            p.extend([
+                sha1su0(w, 8 + (i + 1) % 4, 8 + (i + 2) % 4),
+                sha1su1(w, 8 + (i + 3) % 4),
+            ]);
         }
     }
-    p.extend([add_4s(0, 0, 20), add_2s(16, 16, 21), str_q(0, 2), str_s_16(16, 2), SPIN]);
+    p.extend([
+        add_4s(0, 0, 20),
+        add_2s(16, 16, 21),
+        str_q(0, 2),
+        str_s_16(16, 2),
+        SPIN,
+    ]);
     p
 }
 
@@ -380,7 +502,13 @@ fn sha1_of_abc_is_the_fips_180_4_digest() {
         .flat_map(|w| w.to_le_bytes())
         .collect();
     m.mem_write(k, &k_bytes).expect("in RAM");
-    let initial: [u32; 5] = [0x6745_2301, 0xEFCD_AB89, 0x98BA_DCFE, 0x1032_5476, 0xC3D2_E1F0];
+    let initial: [u32; 5] = [
+        0x6745_2301,
+        0xEFCD_AB89,
+        0x98BA_DCFE,
+        0x1032_5476,
+        0xC3D2_E1F0,
+    ];
     let h_bytes: Vec<u8> = initial.iter().flat_map(|w| w.to_le_bytes()).collect();
     m.mem_write(state, &h_bytes).expect("in RAM");
     m.reg_write(Reg::X0, block);
@@ -389,8 +517,20 @@ fn sha1_of_abc_is_the_fips_180_4_digest() {
     run(&mut m, &sha1_block_program());
     let mut out = [0u8; 20];
     m.mem_read(state, &mut out).expect("in RAM");
-    let digest: Vec<u32> = out.chunks(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
-    assert_eq!(digest, [0xA999_3E36, 0x4706_816A, 0xBA3E_2571, 0x7850_C26C, 0x9CD0_D89D]);
+    let digest: Vec<u32> = out
+        .chunks(4)
+        .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect();
+    assert_eq!(
+        digest,
+        [
+            0xA999_3E36,
+            0x4706_816A,
+            0xBA3E_2571,
+            0x7850_C26C,
+            0x9CD0_D89D
+        ]
+    );
 }
 
 // ----- CRC32 -----
@@ -404,7 +544,9 @@ fn crc32_and_crc32c_give_the_catalogue_check_values() {
     let mut ram = vec![0u8; RAM_LEN];
     let mut m = machine(&mut ram);
     let text = b"123456789";
-    let eight = u64::from_le_bytes([text[0], text[1], text[2], text[3], text[4], text[5], text[6], text[7]]);
+    let eight = u64::from_le_bytes([
+        text[0], text[1], text[2], text[3], text[4], text[5], text[6], text[7],
+    ]);
     // x10: bytes 0-7; x11: byte 8 with junk above it; x12: bytes 0-3 with
     // junk above; x13, x14: bytes 4-5 and 6-7 with junk above.
     m.reg_write(Reg::X10, eight);
@@ -433,10 +575,26 @@ fn crc32_and_crc32c_give_the_catalogue_check_values() {
     ];
     run(&mut m, &program);
     // The result is W[d], zero-extended.
-    assert_eq!(m.reg_read(Reg::X2), u64::from(!0xCBF4_3926u32), "CRC-32 by X and B");
-    assert_eq!(m.reg_read(Reg::X4), u64::from(!0xCBF4_3926u32), "CRC-32 by W, H and B");
-    assert_eq!(m.reg_read(Reg::X3), u64::from(!0xE306_9283u32), "CRC-32C by X and B");
-    assert_eq!(m.reg_read(Reg::X5), u64::from(!0xE306_9283u32), "CRC-32C by W, H and B");
+    assert_eq!(
+        m.reg_read(Reg::X2),
+        u64::from(!0xCBF4_3926u32),
+        "CRC-32 by X and B"
+    );
+    assert_eq!(
+        m.reg_read(Reg::X4),
+        u64::from(!0xCBF4_3926u32),
+        "CRC-32 by W, H and B"
+    );
+    assert_eq!(
+        m.reg_read(Reg::X3),
+        u64::from(!0xE306_9283u32),
+        "CRC-32C by X and B"
+    );
+    assert_eq!(
+        m.reg_read(Reg::X5),
+        u64::from(!0xE306_9283u32),
+        "CRC-32C by W, H and B"
+    );
 }
 
 // ----- PMULL -----
@@ -451,7 +609,10 @@ fn pmull_multiplies_64_bit_polynomials() {
     let high = 0xC000_0000_0000_0000u128;
     m.vreg_write(v(1), (high << 64) | 0x8000_0000_0000_0001);
     m.vreg_write(v(2), (high << 64) | 0b11);
-    run(&mut m, &[pmull_1q(false, 0, 1, 2), pmull_1q(true, 3, 1, 1), SPIN]);
+    run(
+        &mut m,
+        &[pmull_1q(false, 0, 1, 2), pmull_1q(true, 3, 1, 1), SPIN],
+    );
     assert_eq!(m.vreg_read(v(0)), (1u128 << 64) | (1 << 63) | 0b11);
     assert_eq!(m.vreg_read(v(3)), (1u128 << 126) | (1 << 124));
 }
@@ -475,14 +636,24 @@ fn cpacr_traps_the_crypto_instructions_but_not_crc32() {
     ] {
         let mut ram = vec![0u8; RAM_LEN];
         let mut m = machine(&mut ram);
-        m.sysreg_write(SysReg::CPACR_EL1, 0).expect("CPACR_EL1 is writable");
-        m.mem_write(RAM_BASE, &word.to_le_bytes()).expect("code is in RAM");
+        m.sysreg_write(SysReg::CPACR_EL1, 0)
+            .expect("CPACR_EL1 is writable");
+        m.mem_write(RAM_BASE, &word.to_le_bytes())
+            .expect("code is in RAM");
         let outcome = m.emu_start(RAM_BASE, None, Some(1));
-        assert_eq!(outcome.stop, StopReason::BudgetExhausted, "{word:#010x} retires");
+        assert_eq!(
+            outcome.stop,
+            StopReason::BudgetExhausted,
+            "{word:#010x} retires"
+        );
         let esr = m.sysreg_read(SysReg::ESR_EL1).expect("ESR_EL1 reads");
         if traps {
             assert_eq!(esr >> 26, 0x07, "{word:#010x}: the SIMD&FP access trap");
-            assert_ne!(m.reg_read(Reg::Pc), RAM_BASE + 4, "{word:#010x} went to the vector");
+            assert_ne!(
+                m.reg_read(Reg::Pc),
+                RAM_BASE + 4,
+                "{word:#010x} went to the vector"
+            );
         } else {
             assert_eq!(m.reg_read(Reg::Pc), RAM_BASE + 4, "{word:#010x} executed");
         }

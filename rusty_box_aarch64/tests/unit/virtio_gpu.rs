@@ -71,7 +71,13 @@ fn cmd(kind: u32, args: &[u32]) -> Vec<u8> {
 fn command(d: &mut Driver, request: &[u8], room: u32) -> Vec<u8> {
     let req = d.alloc_with(request);
     let resp = d.alloc(u64::from(room));
-    d.offer(0, &[Buf::readable(req, request.len() as u32), Buf::writable(resp, room)]);
+    d.offer(
+        0,
+        &[
+            Buf::readable(req, request.len() as u32),
+            Buf::writable(resp, room),
+        ],
+    );
     d.notify(0);
     let used = d.used(0);
     assert_eq!(used.len(), 1, "one command, one answer");
@@ -108,7 +114,12 @@ struct Screen {
 impl Screen {
     fn pixel(&self, x: u32, y: u32) -> [u8; 4] {
         let at = ((y * self.width + x) * 4) as usize;
-        [self.rgba[at], self.rgba[at + 1], self.rgba[at + 2], self.rgba[at + 3]]
+        [
+            self.rgba[at],
+            self.rgba[at + 1],
+            self.rgba[at + 2],
+            self.rgba[at + 3],
+        ]
     }
 }
 
@@ -120,7 +131,13 @@ impl DisplaySink for Screen {
         self.resized += 1;
     }
 
-    fn text_update(&mut self, _previous: &[u8], _current: &[u8], _cursor: Option<rusty_box_devices::display::sink::CursorPos>, _info: &VgaTextModeInfo) {
+    fn text_update(
+        &mut self,
+        _previous: &[u8],
+        _current: &[u8],
+        _cursor: Option<rusty_box_devices::display::sink::CursorPos>,
+        _info: &VgaTextModeInfo,
+    ) {
         panic!("a virtio-gpu has no text mode");
     }
 
@@ -162,26 +179,50 @@ fn bgrx(x: u32, y: u32) -> [u8; 4] {
 }
 
 fn picture(width: u32, height: u32) -> Vec<u8> {
-    (0..height).flat_map(|y| (0..width).flat_map(move |x| bgrx(x, y))).collect()
+    (0..height)
+        .flat_map(|y| (0..width).flat_map(move |x| bgrx(x, y)))
+        .collect()
 }
 
 /// A `width` by `height` B8G8R8X8 resource 1 with the test picture as its
 /// backing, shown whole on the scanout.
 fn show_picture(d: &mut Driver, width: u32, height: u32) {
-    assert_eq!(status(d, &cmd(RESOURCE_CREATE_2D, &[1, B8G8R8X8, width, height])), OK_NODATA);
+    assert_eq!(
+        status(d, &cmd(RESOURCE_CREATE_2D, &[1, B8G8R8X8, width, height])),
+        OK_NODATA
+    );
     attach(d, 1, &picture(width, height));
-    assert_eq!(status(d, &cmd(SET_SCANOUT, &[0, 0, width, height, 0, 1])), OK_NODATA);
-    assert_eq!(status(d, &cmd(TRANSFER_TO_HOST_2D, &[0, 0, width, height, 0, 0, 1, 0])), OK_NODATA);
-    assert_eq!(status(d, &cmd(RESOURCE_FLUSH, &[0, 0, width, height, 1, 0])), OK_NODATA);
+    assert_eq!(
+        status(d, &cmd(SET_SCANOUT, &[0, 0, width, height, 0, 1])),
+        OK_NODATA
+    );
+    assert_eq!(
+        status(
+            d,
+            &cmd(TRANSFER_TO_HOST_2D, &[0, 0, width, height, 0, 0, 1, 0])
+        ),
+        OK_NODATA
+    );
+    assert_eq!(
+        status(d, &cmd(RESOURCE_FLUSH, &[0, 0, width, height, 1, 0])),
+        OK_NODATA
+    );
 }
 
 #[test]
 fn the_device_offers_edid_and_one_scanout() {
     let mut d = gpu(1024, 768);
-    assert_eq!(d.device_features(), F_INDIRECT_DESC | F_EVENT_IDX | F_VERSION_1 | (1 << 40) | (1 << 1));
-    let config: Vec<u32> = (0..4).map(|i| d.read(CONFIG + 4 * i)).collect();
-    assert_eq!(config, [0, 0, 1, 0], "events_read, events_clear, num_scanouts, num_capsets");
-    assert_eq!(d.read_width(CONFIG + 16, AccessWidth::Byte), 0xFF);
+    assert_eq!(
+        d.device_features(),
+        F_INDIRECT_DESC | F_EVENT_IDX | F_VERSION_1 | (1 << 40) | (1 << 1)
+    );
+    let config: Vec<u32> = (0..5).map(|i| d.read(CONFIG + 4 * i)).collect();
+    assert_eq!(
+        config,
+        [0, 0, 1, 0, 0],
+        "events_read, events_clear, num_scanouts, num_capsets, blob_alignment"
+    );
+    assert_eq!(d.read_width(CONFIG + 20, AccessWidth::Byte), 0xFF);
     d.write(QUEUE_SEL, 0);
     assert_eq!(d.read(QUEUE_NUM_MAX), 64);
     d.write(QUEUE_SEL, 1);
@@ -195,8 +236,15 @@ fn display_info_reports_the_requested_size() {
     assert_eq!(resp.len(), 408);
     assert_eq!(le32(&resp, 0), OK_DISPLAY_INFO);
     let pmode0: Vec<u32> = (0..6).map(|i| le32(&resp, 24 + 4 * i)).collect();
-    assert_eq!(pmode0, [0, 0, 1024, 768, 1, 0], "x, y, width, height, enabled, flags");
-    assert!(resp[48..].iter().all(|&b| b == 0), "the other fifteen scanouts are off");
+    assert_eq!(
+        pmode0,
+        [0, 0, 1024, 768, 1, 0],
+        "x, y, width, height, enabled, flags"
+    );
+    assert!(
+        resp[48..].iter().all(|&b| b == 0),
+        "the other fifteen scanouts are off"
+    );
 }
 
 /// `tests/vectors/qemu_edid.txt`: QEMU's own EDID for each display size.
@@ -205,13 +253,21 @@ fn qemu_edid_vectors() -> Vec<(u32, u32, Vec<u8>)> {
         .lines()
         .filter(|l| !l.starts_with('#') && !l.is_empty())
         .map(|line| {
-            let (size, hex) = line.split_once(' ').unwrap_or_else(|| panic!("malformed line {line}"));
-            let (w, h) = size.split_once('x').unwrap_or_else(|| panic!("malformed size {size}"));
+            let (size, hex) = line
+                .split_once(' ')
+                .unwrap_or_else(|| panic!("malformed line {line}"));
+            let (w, h) = size
+                .split_once('x')
+                .unwrap_or_else(|| panic!("malformed size {size}"));
             let bytes = (0..hex.len())
                 .step_by(2)
                 .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap_or_else(|e| panic!("{e}")))
                 .collect();
-            (w.parse().unwrap_or_else(|e| panic!("{e}")), h.parse().unwrap_or_else(|e| panic!("{e}")), bytes)
+            (
+                w.parse().unwrap_or_else(|e| panic!("{e}")),
+                h.parse().unwrap_or_else(|e| panic!("{e}")),
+                bytes,
+            )
         })
         .collect()
 }
@@ -235,7 +291,11 @@ fn the_edid_describes_the_requested_mode() {
     assert_eq!(u32::from(e[56]) | (u32::from(e[58] & 0xF0) << 4), 1024);
     assert_eq!(u32::from(e[59]) | (u32::from(e[61] & 0xF0) << 4), 768);
     for block in [&e[..128], &e[128..256]] {
-        assert_eq!(block.iter().fold(0u8, |s, &b| s.wrapping_add(b)), 0, "checksum");
+        assert_eq!(
+            block.iter().fold(0u8, |s, &b| s.wrapping_add(b)),
+            0,
+            "checksum"
+        );
     }
     // A screen too large for a detailed timing gets a DisplayID block.
     assert_eq!(edid::generate(3840, 2160)[126], 2);
@@ -249,13 +309,21 @@ fn get_edid_answers_with_the_displays_edid() {
     assert_eq!(le32(&resp, 0), OK_EDID);
     assert_eq!(le32(&resp, 24), 1024, "size");
     assert_eq!(resp[32..].to_vec(), edid::generate(1280, 800).to_vec());
-    assert_eq!(status(&mut d, &cmd(GET_EDID, &[1, 0])), ERR_INVALID_PARAMETER, "no scanout 1");
+    assert_eq!(
+        status(&mut d, &cmd(GET_EDID, &[1, 0])),
+        ERR_INVALID_PARAMETER,
+        "no scanout 1"
+    );
 }
 
 #[test]
 fn a_short_command_is_an_invalid_parameter() {
     let mut d = gpu(640, 480);
-    assert_eq!(status(&mut d, &[0u8; 10]), ERR_INVALID_PARAMETER, "a short header");
+    assert_eq!(
+        status(&mut d, &[0u8; 10]),
+        ERR_INVALID_PARAMETER,
+        "a short header"
+    );
     let mut short_create = cmd(RESOURCE_CREATE_2D, &[1, B8G8R8X8]);
     short_create[4] = 1;
     short_create[8] = 0x42;
@@ -264,15 +332,24 @@ fn a_short_command_is_an_invalid_parameter() {
     assert_eq!(le32(&resp, 4), 1, "the fence is echoed");
     assert_eq!(resp[8], 0x42);
     // Nothing was created: the id is still free.
-    assert_eq!(status(&mut d, &cmd(RESOURCE_CREATE_2D, &[1, B8G8R8X8, 64, 64])), OK_NODATA);
+    assert_eq!(
+        status(&mut d, &cmd(RESOURCE_CREATE_2D, &[1, B8G8R8X8, 64, 64])),
+        OK_NODATA
+    );
 }
 
 #[test]
 fn unknown_and_blob_commands_are_refused() {
     let mut d = gpu(640, 480);
     assert_eq!(status(&mut d, &cmd(CTX_CREATE, &[0; 24])), ERR_UNSPEC);
-    assert_eq!(status(&mut d, &cmd(RESOURCE_CREATE_BLOB, &[0; 8])), ERR_INVALID_PARAMETER);
-    assert_eq!(status(&mut d, &cmd(SET_SCANOUT_BLOB, &[0; 20])), ERR_INVALID_PARAMETER);
+    assert_eq!(
+        status(&mut d, &cmd(RESOURCE_CREATE_BLOB, &[0; 8])),
+        ERR_INVALID_PARAMETER
+    );
+    assert_eq!(
+        status(&mut d, &cmd(SET_SCANOUT_BLOB, &[0; 20])),
+        ERR_INVALID_PARAMETER
+    );
 }
 
 #[test]
@@ -293,22 +370,47 @@ fn fences_are_echoed_without_the_ring_index() {
 #[test]
 fn resource_creation_checks_in_qemus_order() {
     let mut d = gpu(640, 480);
-    assert_eq!(status(&mut d, &cmd(RESOURCE_CREATE_2D, &[0, B8G8R8X8, 64, 64])), ERR_INVALID_RESOURCE_ID);
-    assert_eq!(status(&mut d, &cmd(RESOURCE_CREATE_2D, &[1, 99, 64, 64])), ERR_INVALID_PARAMETER);
-    assert_eq!(status(&mut d, &cmd(RESOURCE_CREATE_2D, &[1, B8G8R8X8, 0, 64])), ERR_OUT_OF_MEMORY);
+    assert_eq!(
+        status(&mut d, &cmd(RESOURCE_CREATE_2D, &[0, B8G8R8X8, 64, 64])),
+        ERR_INVALID_RESOURCE_ID
+    );
+    assert_eq!(
+        status(&mut d, &cmd(RESOURCE_CREATE_2D, &[1, 99, 64, 64])),
+        ERR_INVALID_PARAMETER
+    );
+    assert_eq!(
+        status(&mut d, &cmd(RESOURCE_CREATE_2D, &[1, B8G8R8X8, 0, 64])),
+        ERR_OUT_OF_MEMORY
+    );
     // Exactly max_hostmem is too much: QEMU wants the total below it.
-    assert_eq!(status(&mut d, &cmd(RESOURCE_CREATE_2D, &[1, B8G8R8X8, 8192, 8192])), ERR_OUT_OF_MEMORY);
-    assert_eq!(status(&mut d, &cmd(RESOURCE_CREATE_2D, &[1, B8G8R8X8, 64, 64])), OK_NODATA);
-    assert_eq!(status(&mut d, &cmd(RESOURCE_CREATE_2D, &[1, B8G8R8A8, 64, 64])), ERR_INVALID_RESOURCE_ID);
+    assert_eq!(
+        status(&mut d, &cmd(RESOURCE_CREATE_2D, &[1, B8G8R8X8, 8192, 8192])),
+        ERR_OUT_OF_MEMORY
+    );
+    assert_eq!(
+        status(&mut d, &cmd(RESOURCE_CREATE_2D, &[1, B8G8R8X8, 64, 64])),
+        OK_NODATA
+    );
+    assert_eq!(
+        status(&mut d, &cmd(RESOURCE_CREATE_2D, &[1, B8G8R8A8, 64, 64])),
+        ERR_INVALID_RESOURCE_ID
+    );
     assert_eq!(status(&mut d, &cmd(RESOURCE_UNREF, &[1, 0])), OK_NODATA);
-    assert_eq!(status(&mut d, &cmd(RESOURCE_UNREF, &[1, 0])), ERR_INVALID_RESOURCE_ID);
+    assert_eq!(
+        status(&mut d, &cmd(RESOURCE_UNREF, &[1, 0])),
+        ERR_INVALID_RESOURCE_ID
+    );
 }
 
 #[test]
 fn a_frame_reaches_the_host() {
     let mut d = gpu(640, 480);
     let mut screen = Screen::default();
-    assert_eq!(refresh(&mut d, &mut screen), Refreshed::Frame, "a blank display at the requested size");
+    assert_eq!(
+        refresh(&mut d, &mut screen),
+        Refreshed::Frame,
+        "a blank display at the requested size"
+    );
     assert_eq!((screen.width, screen.height), (640, 480));
 
     show_picture(&mut d, 32, 16);
@@ -319,22 +421,40 @@ fn a_frame_reaches_the_host() {
         assert_eq!(screen.pixel(x, y), [p[2], p[1], p[0], 0xFF], "({x}, {y})");
     }
     assert_eq!(refresh(&mut d, &mut screen), Refreshed::Unchanged);
-    assert_eq!(d.host(|device, _| match device {
-        Device::Gpu(g) => g.resolution(),
-        Device::Input(_) | Device::Block(_) => None,
-    }), Some(Resolution::new(32, 16)));
+    assert_eq!(
+        d.host(|device, _| match device {
+            Device::Gpu(g) => g.resolution(),
+            Device::Input(_) | Device::Block(_) => None,
+        }),
+        Some(Resolution::new(32, 16))
+    );
 }
 
 #[test]
 fn a_partial_transfer_updates_only_its_rectangle() {
     let mut d = gpu(640, 480);
-    assert_eq!(status(&mut d, &cmd(RESOURCE_CREATE_2D, &[1, B8G8R8X8, 32, 16])), OK_NODATA);
+    assert_eq!(
+        status(&mut d, &cmd(RESOURCE_CREATE_2D, &[1, B8G8R8X8, 32, 16])),
+        OK_NODATA
+    );
     attach(&mut d, 1, &picture(32, 16));
-    assert_eq!(status(&mut d, &cmd(SET_SCANOUT, &[0, 0, 32, 16, 0, 1])), OK_NODATA);
+    assert_eq!(
+        status(&mut d, &cmd(SET_SCANOUT, &[0, 0, 32, 16, 0, 1])),
+        OK_NODATA
+    );
     // x = 4, y = 2, 8 by 4, from the same place in the backing.
     let offset = 2 * 32 * 4 + 4 * 4;
-    assert_eq!(status(&mut d, &cmd(TRANSFER_TO_HOST_2D, &[4, 2, 8, 4, offset, 0, 1, 0])), OK_NODATA);
-    assert_eq!(status(&mut d, &cmd(RESOURCE_FLUSH, &[0, 0, 32, 16, 1, 0])), OK_NODATA);
+    assert_eq!(
+        status(
+            &mut d,
+            &cmd(TRANSFER_TO_HOST_2D, &[4, 2, 8, 4, offset, 0, 1, 0])
+        ),
+        OK_NODATA
+    );
+    assert_eq!(
+        status(&mut d, &cmd(RESOURCE_FLUSH, &[0, 0, 32, 16, 1, 0])),
+        OK_NODATA
+    );
     let mut screen = Screen::default();
     refresh(&mut d, &mut screen);
     let p = bgrx(4, 2);
@@ -348,45 +468,121 @@ fn a_partial_transfer_updates_only_its_rectangle() {
 #[test]
 fn backing_is_checked_as_qemu_maps_it() {
     let mut d = gpu(640, 480);
-    assert_eq!(status(&mut d, &cmd(RESOURCE_CREATE_2D, &[1, B8G8R8X8, 16, 16])), OK_NODATA);
+    assert_eq!(
+        status(&mut d, &cmd(RESOURCE_CREATE_2D, &[1, B8G8R8X8, 16, 16])),
+        OK_NODATA
+    );
     let transfer = cmd(TRANSFER_TO_HOST_2D, &[0, 0, 16, 16, 0, 0, 1, 0]);
-    assert_eq!(status(&mut d, &transfer), ERR_INVALID_RESOURCE_ID, "no backing");
+    // virtio_gpu_find_check_resource with require_backing.
+    assert_eq!(status(&mut d, &transfer), ERR_UNSPEC, "no backing");
+    assert_eq!(
+        status(&mut d, &cmd(RESOURCE_DETACH_BACKING, &[1, 0])),
+        ERR_UNSPEC,
+        "nothing to detach"
+    );
     // An attachment of no entries is no backing at all.
-    assert_eq!(status(&mut d, &cmd(RESOURCE_ATTACH_BACKING, &[1, 0])), OK_NODATA);
-    assert_eq!(status(&mut d, &transfer), ERR_INVALID_RESOURCE_ID);
-    for (addr, len) in [(0x1000u64, 64u32), (0x4010_0000, 0)] {
+    assert_eq!(
+        status(&mut d, &cmd(RESOURCE_ATTACH_BACKING, &[1, 0])),
+        OK_NODATA
+    );
+    assert_eq!(status(&mut d, &transfer), ERR_UNSPEC);
+    for (addr, len) in [(UNASSIGNED, 64u32), (0x4010_0000, 0)] {
         let mut req = cmd(RESOURCE_ATTACH_BACKING, &[1, 1]);
         req.extend_from_slice(&addr.to_le_bytes());
         req.extend_from_slice(&len.to_le_bytes());
         req.extend_from_slice(&0u32.to_le_bytes());
         assert_eq!(status(&mut d, &req), ERR_UNSPEC, "entry {addr:#x}+{len}");
     }
-    assert_eq!(status(&mut d, &cmd(RESOURCE_ATTACH_BACKING, &[1, 2])), ERR_UNSPEC, "entries missing");
+    assert_eq!(
+        status(&mut d, &cmd(RESOURCE_ATTACH_BACKING, &[1, 2])),
+        ERR_UNSPEC,
+        "entries missing"
+    );
     attach(&mut d, 1, &picture(16, 16));
-    assert_eq!(status(&mut d, &cmd(RESOURCE_ATTACH_BACKING, &[1, 0])), ERR_UNSPEC, "already attached");
+    assert_eq!(
+        status(&mut d, &cmd(RESOURCE_ATTACH_BACKING, &[1, 0])),
+        ERR_UNSPEC,
+        "already attached"
+    );
     assert_eq!(status(&mut d, &transfer), OK_NODATA);
-    assert_eq!(status(&mut d, &cmd(RESOURCE_DETACH_BACKING, &[1, 0])), OK_NODATA);
-    assert_eq!(status(&mut d, &transfer), ERR_INVALID_RESOURCE_ID);
-    assert_eq!(status(&mut d, &cmd(RESOURCE_DETACH_BACKING, &[2, 0])), ERR_INVALID_RESOURCE_ID);
+    assert_eq!(
+        status(&mut d, &cmd(RESOURCE_DETACH_BACKING, &[1, 0])),
+        OK_NODATA
+    );
+    assert_eq!(status(&mut d, &transfer), ERR_UNSPEC);
+    assert_eq!(
+        status(&mut d, &cmd(RESOURCE_DETACH_BACKING, &[1, 0])),
+        ERR_UNSPEC
+    );
+    assert_eq!(status(&mut d, &transfer), ERR_UNSPEC);
+    assert_eq!(
+        status(&mut d, &cmd(RESOURCE_DETACH_BACKING, &[2, 0])),
+        ERR_INVALID_RESOURCE_ID
+    );
+    assert_eq!(
+        status(
+            &mut d,
+            &cmd(TRANSFER_TO_HOST_2D, &[0, 0, 16, 16, 0, 0, 2, 0])
+        ),
+        ERR_INVALID_RESOURCE_ID
+    );
 }
 
 #[test]
 fn the_scanout_and_flush_are_checked() {
     let mut d = gpu(640, 480);
-    assert_eq!(status(&mut d, &cmd(RESOURCE_CREATE_2D, &[1, B8G8R8X8, 32, 32])), OK_NODATA);
-    assert_eq!(status(&mut d, &cmd(SET_SCANOUT, &[0, 0, 32, 32, 1, 1])), ERR_INVALID_SCANOUT_ID);
-    assert_eq!(status(&mut d, &cmd(SET_SCANOUT, &[0, 0, 32, 32, 0, 2])), ERR_INVALID_RESOURCE_ID);
-    assert_eq!(status(&mut d, &cmd(SET_SCANOUT, &[0, 0, 15, 32, 0, 1])), ERR_INVALID_PARAMETER, "narrower than 16");
-    assert_eq!(status(&mut d, &cmd(SET_SCANOUT, &[17, 0, 16, 16, 0, 1])), ERR_INVALID_PARAMETER, "past the resource");
-    assert_eq!(status(&mut d, &cmd(SET_SCANOUT, &[16, 16, 16, 16, 0, 1])), OK_NODATA);
-    assert_eq!(status(&mut d, &cmd(RESOURCE_FLUSH, &[0, 0, 33, 1, 1, 0])), ERR_INVALID_PARAMETER);
-    assert_eq!(status(&mut d, &cmd(RESOURCE_FLUSH, &[0, 0, 1, 1, 2, 0])), ERR_INVALID_RESOURCE_ID);
+    assert_eq!(
+        status(&mut d, &cmd(RESOURCE_CREATE_2D, &[1, B8G8R8X8, 32, 32])),
+        OK_NODATA
+    );
+    assert_eq!(
+        status(&mut d, &cmd(SET_SCANOUT, &[0, 0, 32, 32, 1, 1])),
+        ERR_INVALID_SCANOUT_ID
+    );
+    assert_eq!(
+        status(&mut d, &cmd(SET_SCANOUT, &[0, 0, 32, 32, 0, 2])),
+        ERR_INVALID_RESOURCE_ID
+    );
+    // A scanout needs backing, checked before the rectangle.
+    assert_eq!(
+        status(&mut d, &cmd(SET_SCANOUT, &[0, 0, 15, 32, 0, 1])),
+        ERR_UNSPEC
+    );
+    attach(&mut d, 1, &picture(32, 32));
+    assert_eq!(
+        status(&mut d, &cmd(SET_SCANOUT, &[0, 0, 15, 32, 0, 1])),
+        ERR_INVALID_PARAMETER,
+        "narrower than 16"
+    );
+    assert_eq!(
+        status(&mut d, &cmd(SET_SCANOUT, &[17, 0, 16, 16, 0, 1])),
+        ERR_INVALID_PARAMETER,
+        "past the resource"
+    );
+    assert_eq!(
+        status(&mut d, &cmd(SET_SCANOUT, &[16, 16, 16, 16, 0, 1])),
+        OK_NODATA
+    );
+    assert_eq!(
+        status(&mut d, &cmd(RESOURCE_FLUSH, &[0, 0, 33, 1, 1, 0])),
+        ERR_INVALID_PARAMETER
+    );
+    assert_eq!(
+        status(&mut d, &cmd(RESOURCE_FLUSH, &[0, 0, 1, 1, 2, 0])),
+        ERR_INVALID_RESOURCE_ID
+    );
     // Resource 0 turns the scanout off.
-    assert_eq!(status(&mut d, &cmd(SET_SCANOUT, &[0, 0, 0, 0, 0, 0])), OK_NODATA);
-    assert_eq!(d.host(|device, _| match device {
-        Device::Gpu(g) => g.resolution(),
-        Device::Input(_) | Device::Block(_) => None,
-    }), None);
+    assert_eq!(
+        status(&mut d, &cmd(SET_SCANOUT, &[0, 0, 0, 0, 0, 0])),
+        OK_NODATA
+    );
+    assert_eq!(
+        d.host(|device, _| match device {
+            Device::Gpu(g) => g.resolution(),
+            Device::Input(_) | Device::Block(_) => None,
+        }),
+        None
+    );
 }
 
 #[test]
@@ -421,7 +617,10 @@ fn a_display_of_no_pixels_turns_the_output_off() {
     });
     assert!(off, "a display event");
     let resp = command(&mut d, &cmd(GET_DISPLAY_INFO, &[]), 408);
-    assert!(resp[24..].iter().all(|&b| b == 0), "scanout 0 disabled, as QEMU's enabled_output_bitmask says");
+    assert!(
+        resp[24..].iter().all(|&b| b == 0),
+        "scanout 0 disabled, as QEMU's enabled_output_bitmask says"
+    );
     // QEMU's EDID for no size is its default 1280 by 800.
     let resp = command(&mut d, &cmd(GET_EDID, &[0, 0]), 1056);
     assert_eq!(resp[32..].to_vec(), edid::generate(1280, 800).to_vec());
@@ -429,7 +628,10 @@ fn a_display_of_no_pixels_turns_the_output_off() {
         Device::Gpu(g) => g.ui_info(Resolution::new(1024, 768)),
         Device::Input(_) | Device::Block(_) => false,
     });
-    assert!(on, "the same size again is a change once the output was off");
+    assert!(
+        on,
+        "the same size again is a change once the output was off"
+    );
     let resp = command(&mut d, &cmd(GET_DISPLAY_INFO, &[]), 408);
     assert_eq!(le32(&resp, 40), 1, "enabled");
 }
@@ -446,10 +648,17 @@ fn a_reset_drops_resources_and_keeps_the_display() {
     assert_eq!(d.read(CONFIG), 1, "the pending display event stays");
     let resp = command(&mut d, &cmd(GET_DISPLAY_INFO, &[]), 408);
     assert_eq!((le32(&resp, 32), le32(&resp, 36)), (800, 600));
-    assert_eq!(status(&mut d, &cmd(RESOURCE_FLUSH, &[0, 0, 1, 1, 1, 0])), ERR_INVALID_RESOURCE_ID);
+    assert_eq!(
+        status(&mut d, &cmd(RESOURCE_FLUSH, &[0, 0, 1, 1, 1, 0])),
+        ERR_INVALID_RESOURCE_ID
+    );
     let mut screen = Screen::default();
     refresh(&mut d, &mut screen);
-    assert_eq!((screen.width, screen.height), (800, 600), "a blank display at the requested size");
+    assert_eq!(
+        (screen.width, screen.height),
+        (800, 600),
+        "a blank display at the requested size"
+    );
 }
 
 /// Send a cursor command on the cursor queue.
@@ -465,11 +674,20 @@ fn the_cursor_is_drawn_where_the_guest_puts_it() {
     let mut d = gpu(640, 480);
     show_picture(&mut d, 32, 16);
     // A 64 by 64 cursor, opaque white at its hot spot, clear elsewhere.
-    assert_eq!(status(&mut d, &cmd(RESOURCE_CREATE_2D, &[2, B8G8R8A8, 64, 64])), OK_NODATA);
+    assert_eq!(
+        status(&mut d, &cmd(RESOURCE_CREATE_2D, &[2, B8G8R8A8, 64, 64])),
+        OK_NODATA
+    );
     let mut image = vec![0u8; 64 * 64 * 4];
     image[..4].copy_from_slice(&[0xFF; 4]);
     attach(&mut d, 2, &image);
-    assert_eq!(status(&mut d, &cmd(TRANSFER_TO_HOST_2D, &[0, 0, 64, 64, 0, 0, 2, 0])), OK_NODATA);
+    assert_eq!(
+        status(
+            &mut d,
+            &cmd(TRANSFER_TO_HOST_2D, &[0, 0, 64, 64, 0, 0, 2, 0])
+        ),
+        OK_NODATA
+    );
     let mut screen = Screen::default();
     refresh(&mut d, &mut screen);
 
@@ -477,13 +695,21 @@ fn the_cursor_is_drawn_where_the_guest_puts_it() {
     refresh(&mut d, &mut screen);
     assert_eq!(screen.pixel(5, 6), [0xFF, 0xFF, 0xFF, 0xFF]);
     let p = bgrx(6, 6);
-    assert_eq!(screen.pixel(6, 6), [p[2], p[1], p[0], 0xFF], "a clear cursor pixel shows the picture");
+    assert_eq!(
+        screen.pixel(6, 6),
+        [p[2], p[1], p[0], 0xFF],
+        "a clear cursor pixel shows the picture"
+    );
 
     cursor(&mut d, MOVE_CURSOR, 7, 6, 2);
     refresh(&mut d, &mut screen);
     assert_eq!(screen.pixel(7, 6), [0xFF, 0xFF, 0xFF, 0xFF]);
     let p = bgrx(5, 6);
-    assert_eq!(screen.pixel(5, 6), [p[2], p[1], p[0], 0xFF], "where it was is redrawn");
+    assert_eq!(
+        screen.pixel(5, 6),
+        [p[2], p[1], p[0], 0xFF],
+        "where it was is redrawn"
+    );
 
     // A command naming no resource hides it.
     cursor(&mut d, MOVE_CURSOR, 7, 6, 0);
@@ -500,12 +726,21 @@ fn a_cursor_near_the_corner_keeps_its_hot_spot_on_the_pointer() {
     let mut d = gpu(640, 480);
     show_picture(&mut d, 32, 16);
     // Opaque white only at (4, 4), the hot spot.
-    assert_eq!(status(&mut d, &cmd(RESOURCE_CREATE_2D, &[2, B8G8R8A8, 64, 64])), OK_NODATA);
+    assert_eq!(
+        status(&mut d, &cmd(RESOURCE_CREATE_2D, &[2, B8G8R8A8, 64, 64])),
+        OK_NODATA
+    );
     let mut image = vec![0u8; 64 * 64 * 4];
     let hot = (4 * 64 + 4) * 4;
     image[hot..hot + 4].copy_from_slice(&[0xFF; 4]);
     attach(&mut d, 2, &image);
-    assert_eq!(status(&mut d, &cmd(TRANSFER_TO_HOST_2D, &[0, 0, 64, 64, 0, 0, 2, 0])), OK_NODATA);
+    assert_eq!(
+        status(
+            &mut d,
+            &cmd(TRANSFER_TO_HOST_2D, &[0, 0, 64, 64, 0, 0, 2, 0])
+        ),
+        OK_NODATA
+    );
     let mut screen = Screen::default();
     refresh(&mut d, &mut screen);
 
@@ -516,7 +751,11 @@ fn a_cursor_near_the_corner_keeps_its_hot_spot_on_the_pointer() {
     refresh(&mut d, &mut screen);
     assert_eq!(screen.pixel(1, 2), [0xFF, 0xFF, 0xFF, 0xFF]);
     let p = bgrx(4, 4);
-    assert_eq!(screen.pixel(4, 4), [p[2], p[1], p[0], 0xFF], "the image is not pushed inside the screen");
+    assert_eq!(
+        screen.pixel(4, 4),
+        [p[2], p[1], p[0], 0xFF],
+        "the image is not pushed inside the screen"
+    );
 }
 
 /// A display asking for no size (QEMU's `xres=0,yres=0`, whose EDID falls
@@ -542,5 +781,8 @@ fn a_snapshot_shows_the_same_picture() {
     assert_eq!((b.width, b.height), (32, 16));
     assert!(a.rgba == b.rgba);
     // The resumed device goes on with its resources.
-    assert_eq!(status(&mut resumed, &cmd(RESOURCE_FLUSH, &[0, 0, 32, 16, 1, 0])), OK_NODATA);
+    assert_eq!(
+        status(&mut resumed, &cmd(RESOURCE_FLUSH, &[0, 0, 32, 16, 1, 0])),
+        OK_NODATA
+    );
 }
