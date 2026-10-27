@@ -202,7 +202,7 @@ same state on d21b7e9 and now. For the boots, the state hashes at 10M,
 | Processor | Cortex-A57-shaped ARMv8.0: EL0/EL1 AArch64 only, the whole ARMv8.0 FP and Advanced SIMD instruction set (integer and floating point, vector and scalar, saturation setting FPSR.QC), the Cortex-A57's optional Cryptographic Extension (AES, 64-bit PMULL, SHA-1, SHA-256) and CRC32, as QEMU's `cortex-a57` has them, 4 KiB-granule stage-1 MMU with TLB, exclusives, PSCI 1.1 (DEN 0022D) over `HVC`, the conduit QEMU's `virt` provides (see "Where the references differ") |
 | Interrupts | GICv2 without the Security Extensions, for one processor, as IHI 0048B specifies it, in QEMU's structure: both interrupt groups, with Group 0 on FIQ under `FIQEn`, the Group 1 aliases (`GICC_AIAR`, `GICC_AEOIR`, `GICC_AHPPIR`, `GICC_ABPR`), preemption by group priority, the running priority and active priority registers, and 4 KiB distributor and 8 KiB CPU interface regions; + GICv2m frame |
 | Timers | EL1 physical and virtual generic timers |
-| Devices | PL011 UART (`UARTPeriphID2` revision 1, QEMU's ID, as DDI 0183F describes the revisions up to r1p4: a 16-entry receive FIFO with overrun and break status, receive interrupts at the `UARTIFLS` level, modem-status interrupts on line changes, loopback, a receiver gated by `UARTEN` and `RXE`, a transmitter gated by `UARTEN` and `TXE` whose 16-entry transmit FIFO holds what is written meanwhile, and the receive timeout counted in bit periods of the programmed baud rate on the machine's clock, while characters themselves cross the line in no time; see "Where the references differ"), PL031 RTC, PL061 GPIO with QEMU's `gpio-key` power button on line 3, CFI flash ×2 (QEMU `pflash_cfi01` semantics, whole 64 MiB banks decoded), `fw_cfg` (traditional interface, no files), 32 virtio-mmio transports (QEMU's legacy layout while empty; non-legacy, as QEMU's `force-legacy=false`, once the host plugs in QEMU's 2D `virtio-gpu-device` with its EDID, `virtio-keyboard-device`, `virtio-tablet-device` or `virtio-blk-device` over a raw image in memory or a host file, which take the highest free ones), an empty PCIe ECAM/windows |
+| Devices | PL011 UART (`UARTPeriphID2` revision 1, QEMU's ID, as DDI 0183F describes the revisions up to r1p4: a 16-entry receive FIFO with overrun and break status, receive interrupts at the `UARTIFLS` level, modem-status interrupts on line changes, loopback, a receiver gated by `UARTEN` and `RXE`, a transmitter gated by `UARTEN` and `TXE` whose 16-entry transmit FIFO holds what is written meanwhile, transmit interrupts as the transmit FIFO drains through the `UARTIFLS` level, and the receive timeout counted in bit periods of the programmed baud rate on the machine's clock, while characters themselves cross the line in no time; see "Where the references differ"), PL031 RTC, PL061 GPIO with QEMU's `gpio-key` power button on line 3, CFI flash ×2 (QEMU `pflash_cfi01` semantics, whole 64 MiB banks decoded), `fw_cfg` (traditional interface, no files), 32 virtio-mmio transports (QEMU's legacy layout while empty; non-legacy, as QEMU's `force-legacy=false`, once the host plugs in QEMU's 2D `virtio-gpu-device` with its EDID, `virtio-keyboard-device`, `virtio-tablet-device` or `virtio-blk-device` over a raw image in memory or a host file, which take the highest free ones), an empty PCIe ECAM/windows |
 | Board | QEMU `virt` memory map and IRQ wiring; QEMU 11.1.2's device tree in `assets/` (two values pinned; see below), its memory node and `/chosen` set per machine |
 | Boot | UEFI firmware from flash; or a Linux `Image`, initramfs and device tree placed as QEMU's `hw/arm/boot.c` places them, entered with the register state its boot stub leaves, and the UART's console set up at 115200 baud, 8N1, as firmware leaves it (see "Where the references differ") |
 
@@ -701,9 +701,7 @@ choice is listed here with its evidence.
   write and transmits the character anyway, in loopback to the receiver
   too. This model follows the TRM. The TRM does not say what a write to a
   full transmit FIFO does; here the character is lost and the FIFO keeps
-  what it holds. `TXRIS` is raised as QEMU raises it, for each character
-  transmitted, not when the FIFO's fill level passes the `UARTIFLS`
-  transmit trigger level as §3.4.3 describes.
+  what it holds.
 
   Reset leaves `UARTEN` clear (Table 3-1), and QEMU's direct kernel boot
   (`hw/arm/boot.c`) leaves the UART at reset, relying on its transmitting
@@ -723,6 +721,31 @@ choice is listed here with its evidence.
   (`pl011_console_get_options`). Firmware booted from flash sets the UART
   up itself, as EDK2 does, and finds it at reset; so does code on a bare
   machine.
+- **The PL011 transmit interrupt marks the FIFO draining through the
+  `UARTIFLS` level.** DDI 0183F §3.3.9: the FIFO interrupts "are generated
+  based on a transition through a level rather than being based on the
+  level"; §3.4.3: with the FIFO enabled, `TXRIS` is set when the transmit
+  FIFO reaches the `TXIFLSEL` level ("becomes <= 1/8 full" … "<= 7/8
+  full": 2, 4, 8, 12 or 14 of 16 entries, 8 at reset) and cleared by
+  writes that take it above, or by `UARTICR`; with the FIFO disabled, set
+  when the holding register empties and cleared by a write; and enabling
+  the UART and the interrupt before anything is written sets nothing.
+  QEMU 11.1.2 (`pl011_write_txdata`) sets `TXRIS` after every write. This
+  model follows the TRM, with characters leaving in no time: while
+  transmission is enabled each character leaves as it is written, so with
+  the FIFO enabled the level never rises above one entry and writes never
+  set `TXRIS`; with the FIFO disabled every write fills and empties the
+  holding register and sets it; and characters held back while
+  transmission is off set it when enabling transmission sends more than
+  the trigger level of them. Where the TRM is silent: the reserved
+  `TXIFLSEL` encodings 0b101–0b111 select the half-full level, as for
+  `RXIFLSEL`; a change of `TXIFLSEL` alone moves no fill level, so changes
+  nothing; and the flush a change of `FEN` makes is a fall of the level
+  like any other, judged against the level of the FIFO it empties. Linux's
+  `pl011_tx_chars` writes until `TXFF` or until it has nothing left, and
+  unmasks `TXIM` only for characters left behind a full FIFO; here the
+  FIFO is never full while transmission is enabled, so its transmit path
+  never waits for the interrupt.
 
 ## Not implemented
 

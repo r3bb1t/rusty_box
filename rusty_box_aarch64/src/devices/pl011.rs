@@ -60,14 +60,24 @@
 //!   "regardless of whether the UART is enabled or not", `TXFE` clear, and
 //!   `TXFF` once it is full (Table 3-4). Enabling transmission sends what
 //!   waits; a change of `FEN` flushes it (§3.3.8, Note).
+//! - `TXRIS` (§3.4.3, §3.3.9): marks a transition of the transmit FIFO's
+//!   fill level through the trigger level, not the level itself. With the
+//!   FIFO enabled it is set when the level falls from above the
+//!   `UARTIFLS.TXIFLSEL` level (2, 4, 8, 12 or 14 of 16; 8 at reset) to it
+//!   or below, and cleared when writes take it above; with the FIFO
+//!   disabled, set when the holding register empties and cleared by a
+//!   write that fills it. `UARTICR` clears it either way. Enabling the UART
+//!   and the interrupt with nothing written sets nothing (§3.4.3, Note).
 //!
 //! Time on the line: characters take no time to cross it, whatever the
 //! divisor, `UARTIBRD` 0 (no baud clock) included. A character goes
-//! out the moment transmission is enabled to send it (the transmit FIFO
-//! empties at once, and `TXRIS` is raised for what it sends, as QEMU raises
-//! it after every write), and the host line delivers its bytes the moment
-//! the receiver has room, as a QEMU character backend does. The receive
-//! timeout is the one interval the UART times, as above.
+//! out the moment transmission is enabled to send it: the transmit FIFO
+//! empties at once, so while transmission is enabled a write never takes
+//! the FIFO above one character, and only the holding register (FIFO
+//! disabled) or characters held back while transmission was off can take
+//! the level through the trigger level. The host line delivers its bytes
+//! the moment the receiver has room, as a QEMU character backend does. The
+//! receive timeout is the one interval the UART times, as above.
 //!
 //! From QEMU 11.1.2 where DDI 0183F leaves the choice to the system: the
 //! flag register QEMU keeps as state, `UARTDR` reads of an empty FIFO
@@ -78,8 +88,9 @@
 //! each setting of `UARTLCR_H.BRK` (`pl011_loopback_break`), and a host
 //! line that sends nothing in loopback (`pl011_receive`). The host side of
 //! a break has no backend here: the line neither sends nor delivers one.
-//! QEMU transmits whatever `UARTEN` and `TXE` say (`pl011_write_txdata`);
-//! README's "Where the references differ" has this model's difference, and
+//! QEMU transmits whatever `UARTEN` and `TXE` say, and raises `TXRIS` after
+//! every write (`pl011_write_txdata`); README's "Where the references
+//! differ" has this model's differences, and
 //! the direct-boot set-up ([`Pl011::set_up_console`]) that goes with it.
 //!
 //! The region takes 4-byte accesses (`pl011_ops`' `impl.min_access_size` and
@@ -431,6 +442,45 @@ impl Pl011 {
         RX_FIFO_DEPTH as u32 * eighths / 8
     }
 
+    /// The fill level `TXRIS` marks (DDI 0183F §3.4.3, Table 3-13): with
+    /// the FIFO enabled, the eighths `UARTIFLS.TXIFLSEL` selects ("Transmit
+    /// FIFO becomes <= 1/8 full" ... "<= 7/8 full"); the reserved encodings
+    /// 0b101–0b111 select the half-full level, as reset does. With the FIFO
+    /// disabled, zero: the holding register empty.
+    fn tx_trigger(&self) -> u32 {
+        if self.lcr & LCR_FEN == 0 {
+            return 0;
+        }
+        let eighths = match self.ifl & 7 {
+            0 => 1,
+            1 => 2,
+            3 => 6,
+            4 => 7,
+            _ => 4,
+        };
+        TX_FIFO_DEPTH as u32 * eighths / 8
+    }
+
+    /// The transmit FIFO's fill level has moved from `before` to what it
+    /// holds now. `TXRIS` marks a transition through the trigger level, not
+    /// the level itself (DDI 0183F §3.3.9, and §3.4.3's Note: enabling the
+    /// UART and the interrupt before anything is written sets nothing): it
+    /// is set when the level falls from above the trigger level to it or
+    /// below, and cleared when writes take it from there to above (§3.4.3:
+    /// "cleared by writing data to the transmit FIFO until it becomes
+    /// greater than the trigger level"), or by `UARTICR`. With the FIFO
+    /// disabled the trigger level is zero, so the holding register emptying
+    /// sets it and a write filling it clears it (§3.4.3, second case).
+    fn tx_level_moved(&mut self, before: u32) {
+        let level = self.tx_trigger();
+        let after = u32::from(self.tx_count);
+        if before > level && after <= level {
+            self.int_level |= INT_TX;
+        } else if before <= level && after > level {
+            self.int_level &= !INT_TX;
+        }
+    }
+
     fn loopback(&self) -> bool {
         self.cr & CR_LBE != 0
     }
@@ -455,27 +505,35 @@ impl Pl011 {
         if u32::from(self.tx_count) == self.fifo_depth() {
             return;
         }
+        let before = u32::from(self.tx_count);
         self.tx_fifo[usize::from(self.tx_count)] = byte;
         self.tx_count += 1;
+        self.tx_level_moved(before);
         self.transmit(clocks);
     }
 
     /// Send what the transmit FIFO holds, if transmission is enabled. With
     /// a zero bit period the whole FIFO goes at once, each character to the
     /// host and, in loopback, to the receiver (QEMU `pl011_write_txdata`,
-    /// `pl011_loopback_tx`), and `TXRIS` is raised as QEMU raises it for
-    /// each character sent. `UARTFR` reports the FIFO (Table 3-4): `TXFE`
-    /// while it is empty, `TXFF` while it is full, and `BUSY` while it holds
-    /// anything, whether or not the UART is enabled.
+    /// `pl011_loopback_tx`), and the fill level falls to zero at once:
+    /// `TXRIS` is set if that takes it through the trigger level
+    /// ([`Pl011::tx_level_moved`]). While transmission is enabled every
+    /// write leaves at once, so with the FIFO enabled the level never rises
+    /// above one character and `TXRIS` stays as it was; with it disabled
+    /// each write fills and empties the holding register and sets `TXRIS`.
+    /// `UARTFR` reports the FIFO (Table 3-4): `TXFE` while it is empty,
+    /// `TXFF` while it is full, and `BUSY` while it holds anything, whether
+    /// or not the UART is enabled.
     fn transmit(&mut self, clocks: UartClocks) {
         if self.transmitting() && self.tx_count > 0 {
+            let before = u32::from(self.tx_count);
             for i in 0..usize::from(self.tx_count) {
                 let byte = self.tx_fifo[i];
                 self.tx.push_back(byte);
                 self.loopback_tx(u32::from(byte), clocks);
             }
             self.tx_count = 0;
-            self.int_level |= INT_TX;
+            self.tx_level_moved(before);
         }
         self.flags &= !(FLAG_TXFE | FLAG_TXFF | FLAG_BUSY);
         self.flags |= self.tx_flags();
@@ -654,11 +712,16 @@ impl Pl011 {
     /// the fill level is below the trigger level (or the holding register is
     /// empty); QEMU leaves both as they were. Characters waiting to be
     /// transmitted are flushed (§3.3.8, Note: "Flush the transmit FIFO by
-    /// disabling bit 4 (FEN)").
+    /// disabling bit 4 (FEN)"); DDI 0183F does not say what that does to
+    /// `TXRIS`, and here it is a fall of the fill level like any other,
+    /// judged against the trigger level of the FIFO being flushed
+    /// ([`Pl011::tx_level_moved`]).
     fn reset_fifos(&mut self) {
         self.read_count = 0;
         self.read_pos = 0;
+        let before = u32::from(self.tx_count);
         self.tx_count = 0;
+        self.tx_level_moved(before);
         self.flags &= !(FLAG_RXFF | FLAG_TXFF | FLAG_BUSY);
         self.flags |= FLAG_RXFE | FLAG_TXFE;
         self.int_level &= !(INT_RT | INT_RX);
@@ -1037,6 +1100,119 @@ mod tests {
             write(&mut uart, DR, u32::from(b'z'));
             assert_eq!(sent(&mut uart), b"z", "enabled, a character goes at once");
         }
+    }
+
+    /// DDI 0183F §3.4.3 and §3.3.9: with the FIFO enabled, `TXRIS` is set
+    /// when the fill level falls through the `TXIFLSEL` level ("Transmit
+    /// FIFO becomes <= n/8 full"), not by a level already at or below it.
+    #[test]
+    fn the_transmit_interrupt_marks_the_fifo_draining_through_the_trigger_level() {
+        // TXIFLSEL: 1/8, 1/4, 1/2, 3/4 and 7/8 of 16; reserved encodings
+        // take the half-full level.
+        for (txiflsel, level) in [(0, 2), (1, 4), (2, 8), (3, 12), (4, 14), (5, 8), (6, 8), (7, 8)] {
+            for queued in [level, level + 1] {
+                let mut uart = Pl011::new();
+                write(&mut uart, LCR_H, LCR_FEN);
+                write(&mut uart, IFLS, txiflsel);
+                write(&mut uart, IMSC, INT_TX);
+                for i in 0..queued {
+                    write(&mut uart, DR, u32::from(b'a') + i);
+                }
+                assert_eq!(read(&mut uart, RIS) & INT_TX, 0, "TXIFLSEL {txiflsel}: nothing has left");
+                write(&mut uart, CR, ENABLED);
+                assert_eq!(sent(&mut uart).len(), queued as usize);
+                let crossed = if queued > level { INT_TX } else { 0 };
+                assert_eq!(read(&mut uart, RIS) & INT_TX, crossed, "TXIFLSEL {txiflsel}, {queued} queued");
+                assert_eq!(uart.irq(), crossed != 0);
+            }
+        }
+    }
+
+    #[test]
+    fn filling_the_transmit_fifo_above_the_trigger_level_clears_the_transmit_interrupt() {
+        let mut uart = Pl011::new();
+        write(&mut uart, LCR_H, LCR_FEN);
+        write(&mut uart, IFLS, 0); // 1/8: two entries
+        for byte in *b"abc" {
+            write(&mut uart, DR, u32::from(byte));
+        }
+        write(&mut uart, CR, ENABLED);
+        assert_eq!(read(&mut uart, RIS) & INT_TX, INT_TX);
+        write(&mut uart, CR, 0x300);
+        write(&mut uart, DR, u32::from(b'd'));
+        write(&mut uart, DR, u32::from(b'e'));
+        assert_eq!(read(&mut uart, RIS) & INT_TX, INT_TX, "at the level: still set");
+        write(&mut uart, DR, u32::from(b'f'));
+        assert_eq!(read(&mut uart, RIS) & INT_TX, 0, "above the level: cleared");
+        write(&mut uart, CR, ENABLED);
+        assert_eq!(read(&mut uart, RIS) & INT_TX, INT_TX, "draining through it again");
+        write(&mut uart, ICR, INT_TX);
+        assert_eq!(read(&mut uart, RIS) & INT_TX, 0, "UARTICR clears it");
+    }
+
+    /// While transmission is enabled each character leaves as it is
+    /// written, so the FIFO never rises above one entry: no transition
+    /// through any trigger level, and `TXRIS` stays as it was. Enabling the
+    /// UART and the interrupt with nothing written sets nothing (§3.4.3,
+    /// Note).
+    #[test]
+    fn writes_through_an_enabled_fifo_cross_no_trigger_level() {
+        for txiflsel in 0..8 {
+            let mut uart = Pl011::new();
+            write(&mut uart, LCR_H, LCR_FEN);
+            write(&mut uart, IFLS, txiflsel);
+            write(&mut uart, IMSC, INT_TX);
+            write(&mut uart, CR, ENABLED);
+            assert_eq!(read(&mut uart, RIS) & INT_TX, 0, "enabled with nothing written");
+            for byte in *b"hello, world" {
+                write(&mut uart, DR, u32::from(byte));
+                assert_eq!(read(&mut uart, RIS) & INT_TX, 0, "TXIFLSEL {txiflsel}");
+                assert_eq!(read(&mut uart, FR) & (FLAG_TXFE | FLAG_TXFF | FLAG_BUSY), FLAG_TXFE, "it left at once");
+            }
+            assert_eq!(sent(&mut uart), b"hello, world");
+        }
+    }
+
+    /// DDI 0183F §3.4.3, FIFO disabled: `TXRIS` is set when the holding
+    /// register's character leaves it empty and cleared by a write that
+    /// fills it.
+    #[test]
+    fn with_the_fifo_disabled_the_transmit_interrupt_marks_the_holding_register_emptying() {
+        let mut uart = Pl011::new();
+        write(&mut uart, IMSC, INT_TX);
+        write(&mut uart, CR, ENABLED);
+        assert_eq!(read(&mut uart, RIS) & INT_TX, 0, "enabled with nothing written");
+        write(&mut uart, DR, u32::from(b'1'));
+        assert_eq!(read(&mut uart, RIS) & INT_TX, INT_TX, "it filled and emptied");
+        assert!(uart.irq());
+        write(&mut uart, ICR, INT_TX);
+        write(&mut uart, DR, u32::from(b'2'));
+        assert_eq!(read(&mut uart, RIS) & INT_TX, INT_TX, "each character");
+        write(&mut uart, CR, 0x300);
+        write(&mut uart, DR, u32::from(b'3'));
+        assert_eq!(read(&mut uart, RIS) & INT_TX, 0, "the write that fills it clears it");
+        write(&mut uart, CR, ENABLED);
+        assert_eq!(read(&mut uart, RIS) & INT_TX, INT_TX, "sent once enabled");
+        assert_eq!(sent(&mut uart), b"123");
+    }
+
+    /// DDI 0183F does not say what flushing the transmit FIFO does to
+    /// `TXRIS`; here the flush is a fall of the fill level like any other.
+    #[test]
+    fn flushing_the_transmit_fifo_is_a_fall_of_its_level() {
+        for (queued, crossed) in [(8, 0), (9, INT_TX)] {
+            let mut uart = Pl011::new();
+            write(&mut uart, LCR_H, LCR_FEN);
+            for i in 0..queued {
+                write(&mut uart, DR, i);
+            }
+            write(&mut uart, LCR_H, 0);
+            assert_eq!(read(&mut uart, RIS) & INT_TX, crossed, "{queued} flushed past the half-full level");
+        }
+        let mut uart = Pl011::new();
+        write(&mut uart, DR, u32::from(b'x'));
+        write(&mut uart, LCR_H, LCR_FEN);
+        assert_eq!(read(&mut uart, RIS) & INT_TX, INT_TX, "the holding register emptied");
     }
 
     #[test]
