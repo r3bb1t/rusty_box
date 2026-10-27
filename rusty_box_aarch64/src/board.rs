@@ -306,7 +306,8 @@ impl<S: GuestStorage> VirtBoard<S> {
     /// and keeps its alarm (QEMU's `pl031_class_init` installs no reset
     /// handler). The UART empties its receive FIFO, as `pl011_reset` does;
     /// what the guest transmitted stays for the host to drain, and host bytes
-    /// still waiting for the FIFO stay queued and refill it. Memory is
+    /// still waiting for the FIFO stay queued for it, which takes them once
+    /// the guest switches the receiver back on. Memory is
     /// untouched.
     pub(crate) fn reset_devices(&mut self) {
         self.flash0.reset();
@@ -377,8 +378,9 @@ impl<S: GuestStorage> VirtBoard<S> {
     /// Hand the UART as many waiting host bytes as its receive FIFO has room
     /// for — what a QEMU character backend does whenever `pl011_can_receive`
     /// says there is room. Run after every UART access and on reset; a host
-    /// send fills the FIFO itself before it queues anything. Either way the
-    /// FIFO is full or the host buffer empty whenever the guest looks. In
+    /// send fills the FIFO itself before it queues anything. Either way,
+    /// whenever the guest looks, the FIFO is full, the host buffer empty, or
+    /// the receiver off (`UARTCR.UARTEN` or `RXE` clear). In
     /// loopback the UART consumes and drops what it is handed, as QEMU's
     /// `pl011_receive` does.
     pub(crate) fn pump_serial_input(&mut self) {

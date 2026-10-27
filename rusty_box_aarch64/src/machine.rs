@@ -1823,7 +1823,8 @@ impl<S: GuestStorage> Serial<'_, S> {
 
     /// Send bytes for the guest to receive, returning how many the machine
     /// took. They wait where a QEMU character backend's input would and
-    /// reach the UART's receive FIFO as it has room, so a whole command line
+    /// reach the UART's receive FIFO as it has room while the guest has the
+    /// receiver enabled (`UARTCR.UARTEN` and `RXE`), so a whole command line
     /// goes in at once and the guest reads it at its own pace. A short count
     /// means the guest has stopped reading; send the rest later.
     #[must_use = "a short count means the rest never reached the guest"]

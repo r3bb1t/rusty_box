@@ -183,9 +183,51 @@ fn a_store_across_a_page_reports_the_page_that_faulted() {
     assert_eq!(m.mem_read(0x10, &mut stored), Err(MemoryError::NotRam { addr: 0x10 }));
 }
 
-/// Poll the UART and copy every byte received to the buffer at x3:
+/// Switch the UART on (`UARTCR` = UARTEN | TXE | RXE), then poll it and
+/// copy every byte received to the buffer at x3:
+/// `mov w1, #0x301; str w1, [x0, #0x30];`
 /// `f: ldr w1, [x0, #0x18]; tbnz w1, #4, f; ldr w2, [x0]; strb w2, [x3], #1; b f`
-const ECHO: [u32; 5] = [0xB940_1801, 0x3727_FFE1, 0xB940_0002, 0x3800_1462, 0x17FF_FFFC];
+const ECHO: [u32; 7] = [
+    0x5280_6021,
+    0xB900_3001,
+    0xB940_1801,
+    0x3727_FFE1,
+    0xB940_0002,
+    0x3800_1462,
+    0x17FF_FFFC,
+];
+/// Where [`ECHO`]'s polling loop starts, past the write that switches the
+/// UART on.
+const ECHO_POLL: u64 = 8;
+
+#[test]
+fn a_guest_receives_nothing_until_it_switches_the_receiver_on() {
+    let mut ram = vec![0u8; RAM_LEN];
+    let mut m = bare(&mut ram, rusty_box_aarch64::NoInstrumentation);
+    load(&mut m, RAM_BASE, &ECHO);
+    let buffer = RAM_BASE + 0x1000;
+    m.reg_write(Reg::X0, UART0_BASE);
+    m.reg_write(Reg::X3, buffer);
+    let capacity = rusty_box_aarch64::board::SERIAL_INPUT_CAPACITY;
+    // At reset UARTCR.UARTEN is clear (DDI 0183F Table 3-1): the bytes wait.
+    assert_eq!(m.serial(0).expect("UART0").input_room(), capacity);
+    assert_eq!(m.serial(0).expect("UART0").send(b"ok"), 2);
+    assert_eq!(m.serial(0).expect("UART0").input_room(), capacity - 2);
+    m.reg_write(Reg::Pc, RAM_BASE + ECHO_POLL);
+    let out = m.step(RunBudget::Instructions(200));
+    assert_eq!(out.stop, StopReason::BudgetExhausted);
+    let mut got = [0u8; 2];
+    m.mem_read(buffer, &mut got).expect("RAM");
+    assert_eq!(got, [0, 0], "the polling loop saw RXFE throughout");
+    // Switched on, the receiver takes them.
+    m.reg_write(Reg::Pc, RAM_BASE);
+    let out = m.step(RunBudget::Instructions(200));
+    assert_eq!(out.stop, StopReason::BudgetExhausted);
+    m.mem_read(buffer, &mut got).expect("RAM");
+    assert_eq!(&got, b"ok");
+    // The buffer, and the holding register (UARTLCR_H.FEN is clear).
+    assert_eq!(m.serial(0).expect("UART0").input_room(), capacity + 1);
+}
 
 #[test]
 fn the_terminal_keyboard_types_what_an_xterm_sends() {
