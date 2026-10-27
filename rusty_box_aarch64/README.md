@@ -475,13 +475,26 @@ choice is listed here with its evidence.
   reads as 1023 and an end of interrupt naming one is ignored.
 - **A disabled GIC group takes no part.** IHI 0048B §4.3.1 (`GICD_CTLR`)
   forwards a group's interrupts to the CPU interface only while
-  `EnableGrpN` is set, and §4.4.1 (`GICC_CTLR`) signals them only while
-  the interface's `EnableGrpN` is set. QEMU 11.1.2 (`gic_update_internal`)
+  `EnableGrpN` is set, so an interrupt the distributor does not forward is
+  no candidate at the CPU interface. §4.4.1 (`GICC_CTLR`) makes the
+  interface's `EnableGrpN` the enable for signalling the group's
+  interrupts, and §4.4.4 has `GICC_IAR` return 1023 while signalling is
+  disabled. QEMU 11.1.2 (`gic_update_internal`, `gic_acknowledge_irq`)
   chooses the highest-priority interrupt across both groups and only then
   checks its group, so a higher-priority interrupt of a disabled group
   blocks the enabled group's, and `GICC_IAR`/`GICC_HPPIR` return it. This
   model chooses among the groups both enables allow, so a disabled group's
-  interrupt is neither signalled nor read and hides nothing.
+  interrupt is neither signalled nor read and hides nothing. For the
+  distributor's enable and for `GICC_IAR` that is IHI 0048B's rule. For the
+  CPU interface's enable, whether a group it does not signal still hides
+  the other group's is this model's reading where IHI 0048B is silent:
+  neither §4.4.1 nor §4.4.4 says, and an architecture in which the
+  distributor picks the highest-priority interrupt and the CPU interface
+  then decides whether to signal it could be read QEMU's way. The reading
+  taken is the rule the GICv3 architecture (IHI 0069) states, where
+  `ICC_HPPIR0_EL1`/`ICC_HPPIR1_EL1` and `ICC_IAR0_EL1`/`ICC_IAR1_EL1`
+  consider only interrupts of a group enabled by
+  `ICC_IGRPEN0_EL1`/`ICC_IGRPEN1_EL1`.
 - **GIC preemption compares group priorities.** IHI 0048B §3.3
   ("Preemption", "Priority grouping") signals a pending interrupt only if its
   group priority, under its own group's binary point (`GICC_BPR`, or

@@ -24,6 +24,9 @@
 //!         mov x4, #1000            ; msr cntv_tval_el0, x4
 //!         str w5, [x3, #0x10]      ; eret              // GICC_EOIR
 //! ```
+//!
+//! A second guest, [`ROUTING`], shows which of the processor's two interrupt
+//! inputs the GIC signals an interrupt on.
 
 use rusty_box_aarch64::board::RAM_BASE;
 use rusty_box_aarch64::{MachineBuilder, MemoryLoan, RamSize, Reg, RunBudget, StopReason, VirtConfig};
@@ -201,4 +204,115 @@ fn slicing_the_run_changes_nothing_the_guest_can_see() {
         assert_eq!(cut.ticks, whole.ticks, "slice {slice}");
         assert_eq!(cut.interrupts_counted, whole.interrupts_counted, "slice {slice}");
     }
+}
+
+/// The guest enables both groups at the distributor (`x6`), sets
+/// `GICD_IGROUPR0` (`x7`) and `GICC_CTLR` (`x8`), sends itself an SGI through
+/// `GICD_SGIR` (`x9`), reads `ISR_EL1` with `DAIF` still masked from reset,
+/// then unmasks IRQ and FIQ; the vector it enters records its offset and
+/// acknowledges through `GICC_IAR`:
+///
+/// ```text
+/// _start: ldr x0, =0x40001000      ; msr vbar_el1, x0
+///         ldr x1, =0x08000000      ; ldr x3, =0x08010000
+///         str w6, [x1]             ; str w7, [x1, #0x80]   // GICD_CTLR, GICD_IGROUPR0
+///         str w8, [x3]                                     // GICC_CTLR
+///         mov w2, #0xff            ; str w2, [x3, #4]      // GICC_PMR
+///         str w9, [x1, #0xf00]                             // GICD_SGIR
+///         mrs x10, isr_el1         ; msr daifclr, #3
+///         nop
+/// 1:      b 1b
+///         .org 0x1280              // IRQ, current EL with SP_ELx
+///         mov x11, #0x280          ; ldr w12, [x3, #0xc]   // GICC_IAR
+/// 2:      b 2b
+///         .org 0x1300              // FIQ, current EL with SP_ELx
+///         mov x11, #0x300          ; ldr w12, [x3, #0xc]   // GICC_IAR
+/// 3:      b 3b
+/// ```
+const ROUTING: &[(usize, u32)] = &[
+    (0x00, 0x5800_01C0),
+    (0x04, 0xD518_C000),
+    (0x08, 0x5800_01C1),
+    (0x0C, 0x5800_01E3),
+    (0x10, 0xB900_0026),
+    (0x14, 0xB900_8027),
+    (0x18, 0xB900_0068),
+    (0x1C, 0x5280_1FE2),
+    (0x20, 0xB900_0462),
+    (0x24, 0xB90F_0029),
+    (0x28, 0xD538_C10A),
+    (0x2C, 0xD503_43FF),
+    (0x30, 0xD503_201F),
+    (0x34, 0x1400_0000),
+    (0x38, 0x4000_1000),
+    (0x3C, 0x0000_0000),
+    (0x40, 0x0800_0000),
+    (0x44, 0x0000_0000),
+    (0x48, 0x0801_0000),
+    (0x4C, 0x0000_0000),
+    (0x1280, 0xD280_500B),
+    (0x1284, 0xB940_0C6C),
+    (0x1288, 0x1400_0000),
+    (0x1300, 0xD280_600B),
+    (0x1304, 0xB940_0C6C),
+    (0x1308, 0x1400_0000),
+];
+
+/// `ISR_EL1.F` and `ISR_EL1.I`.
+const ISR_F: u64 = 1 << 6;
+const ISR_I: u64 = 1 << 7;
+/// `GICC_CTLR`: EnableGrp0, EnableGrp1, AckCtl (so `GICC_IAR` takes Group 1
+/// too) and FIQEn.
+const GICC_CTLR_BOTH_GROUPS_ACKCTL: u64 = 0b0111;
+const GICC_CTLR_FIQ_EN: u64 = 1 << 3;
+/// `GICD_SGIR`: SGI 1, target filter "this processor only".
+const SGI_1_TO_SELF: u64 = (2 << 24) | 1;
+
+/// What the [`ROUTING`] guest saw.
+#[derive(Debug, PartialEq, Eq)]
+struct Routed {
+    /// `ISR_EL1` before the interrupt was unmasked.
+    isr: u64,
+    /// The vector offset the processor entered.
+    vector: u64,
+    /// What `GICC_IAR` returned there.
+    acknowledged: u64,
+}
+
+fn route(group1_sgis: u64, cpu_ctlr: u64) -> Routed {
+    let mut ram = vec![0u8; RAM_LEN];
+    let mut machine = MachineBuilder::new(VirtConfig::DEFAULT)
+        .ram(RamSize::bytes(RAM_LEN as u64).expect("a valid size"))
+        .bare()
+        .build_in(MemoryLoan {
+            ram: &mut ram,
+            vars: &mut [],
+        })
+        .expect("the test board builds");
+    for (offset, word) in ROUTING {
+        machine.mem_write(RAM_BASE + *offset as u64, &word.to_le_bytes()).expect("the program is in RAM");
+    }
+    machine.reg_write(Reg::X6, 0b11);
+    machine.reg_write(Reg::X7, group1_sgis);
+    machine.reg_write(Reg::X8, cpu_ctlr);
+    machine.reg_write(Reg::X9, SGI_1_TO_SELF);
+    assert_eq!(machine.step(RunBudget::Instructions(40)).stop, StopReason::BudgetExhausted);
+    Routed {
+        isr: machine.reg_read(Reg::X10),
+        vector: machine.reg_read(Reg::X11),
+        acknowledged: machine.reg_read(Reg::X12),
+    }
+}
+
+/// IHI 0048B §4.4.1 GICC_CTLR.FIQEn: while it is set the CPU interface
+/// signals a Group 0 interrupt as FIQ and a Group 1 interrupt as IRQ; while
+/// it is clear both are IRQ. The guest sees which input is asserted in
+/// `ISR_EL1` and enters the FIQ or the IRQ vector.
+#[test]
+fn fiqen_signals_group_0_as_fiq_and_group_1_as_irq() {
+    let fiq = Routed { isr: ISR_F, vector: 0x300, acknowledged: 1 };
+    let irq = Routed { isr: ISR_I, vector: 0x280, acknowledged: 1 };
+    assert_eq!(route(0, GICC_CTLR_BOTH_GROUPS_ACKCTL | GICC_CTLR_FIQ_EN), fiq, "Group 0 with FIQEn");
+    assert_eq!(route(1 << 1, GICC_CTLR_BOTH_GROUPS_ACKCTL | GICC_CTLR_FIQ_EN), irq, "Group 1 with FIQEn");
+    assert_eq!(route(0, GICC_CTLR_BOTH_GROUPS_ACKCTL), irq, "Group 0 without FIQEn");
 }

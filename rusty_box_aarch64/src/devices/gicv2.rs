@@ -18,10 +18,12 @@
 //!
 //! Where IHI 0048B and QEMU differ, this model follows IHI 0048B:
 //! - A group the distributor does not forward (§4.3.1 GICD_CTLR.EnableGrpN)
-//!   or the CPU interface does not signal (§4.4.1 GICC_CTLR.EnableGrpN) takes
-//!   no part in choosing the highest-priority pending interrupt, so its
+//!   takes no part in choosing the highest-priority pending interrupt, so its
 //!   interrupts are neither signalled nor returned by an acknowledge or
 //!   highest-pending read, and do not hide the other group's.
+//! - An interrupt of a group the CPU interface does not signal (§4.4.1
+//!   GICC_CTLR.EnableGrpN) is never acknowledged: GICC_IAR returns 1023
+//!   while signalling is disabled (§4.4.4).
 //! - A pending interrupt preempts when its group priority, under the binary
 //!   point of its own group, is higher than the running priority (§3.3
 //!   "Interrupt prioritization": "Preemption", and "Priority grouping" with
@@ -36,6 +38,23 @@
 //!   SGI and source processor combination, a write of 0 having no effect),
 //!   and GICC_IAR.CPUID is RAZ (§4.4.4: it identifies an SGI's source only
 //!   in a multiprocessor implementation).
+//!
+//! Where IHI 0048B is silent, this model reads it as follows. Whether a
+//! group the CPU interface does not signal still takes part in choosing the
+//! highest-priority pending interrupt, and so can hide the other group's, the
+//! specification does not say: §4.4.1 makes GICC_CTLR.EnableGrpN the enable
+//! for the signalling of Group N interrupts, and §4.4.4 has GICC_IAR return
+//! 1023 while signalling is disabled, and nothing more. This model leaves
+//! such a group out of the choice, as it does a group the distributor does
+//! not forward, so its interrupts hide nothing. That is the rule the GICv3
+//! architecture (IHI 0069) states: ICC_HPPIR0_EL1/ICC_HPPIR1_EL1 and
+//! ICC_IAR0_EL1/ICC_IAR1_EL1 consider only interrupts of a group enabled by
+//! ICC_IGRPEN0_EL1/ICC_IGRPEN1_EL1. QEMU 11.1.2 (`gic_update_internal`,
+//! `gic_acknowledge_irq`) reads it the other way: it chooses the
+//! highest-priority interrupt across both groups and only then checks the
+//! CPU interface's enables, so a higher-priority interrupt of a group the
+//! CPU interface does not signal blocks the enabled group's, and GICC_IAR
+//! and GICC_HPPIR return it.
 //!
 //! With one processor every per-CPU mask QEMU keeps reduces to its bit 0,
 //! and every interrupt targets that processor, so each per-interrupt state
@@ -241,6 +260,10 @@ impl GicV2 {
             }
         }
         w.write_bytes(&self.priority)?;
+        // The per-SGI source bytes repeat what `pending` holds (processor
+        // 0's bit while the SGI is pending). They are written so the image
+        // keeps the layout the machine's `SNAPSHOT_VERSION` 5 names, and
+        // `restore` refuses bytes that disagree with `pending`.
         let sources: [u8; NR_SGIS] = core::array::from_fn(|sgi| self.sgi_sources(sgi));
         w.write_bytes(&sources)
     }
@@ -251,22 +274,16 @@ impl GicV2 {
         if self.pending.get(sgi) { SGI_SOURCE_CPU0 } else { 0 }
     }
 
-    /// Refuses binary points the registers cannot hold, a running priority
-    /// above idle, and SGI sources other than processor 0 or that disagree
-    /// with the SGI's pending state.
+    /// Reads the GIC's whole section of the image, refuses it if
+    /// [`GicV2::check_restored`] does, and only then replaces this GIC's
+    /// state: a refused or truncated section changes nothing here.
     pub(crate) fn restore<R: SnapRead>(&mut self, r: &mut R) -> SnapResult {
         let dist_ctlr = r.read_u32()?;
         let cpu_ctlr = r.read_u32()?;
         let mut points = [0u8; 3];
         r.read_bytes(&mut points)?;
         let [pmr, bpr, abpr] = points;
-        if bpr > 7 || !(MIN_ABPR..=7).contains(&abpr) {
-            return Err(SnapError::Invalid("GIC binary point outside its register's range"));
-        }
         let running_priority = r.read_u16()?;
-        if running_priority > IDLE_PRIORITY {
-            return Err(SnapError::Invalid("GIC running priority above idle"));
-        }
         let mut apr = [0u32; NR_APRS];
         let mut nsapr = [0u32; NR_APRS];
         for word in apr.iter_mut().chain(nsapr.iter_mut()) {
@@ -283,15 +300,7 @@ impl GicV2 {
         r.read_bytes(&mut priority)?;
         let mut sgi_sources = [0u8; NR_SGIS];
         r.read_bytes(&mut sgi_sources)?;
-        for (sgi, sources) in sgi_sources.iter().enumerate() {
-            if sources & !SGI_SOURCE_CPU0 != 0 {
-                return Err(SnapError::Invalid("GIC SGI pending from a processor that does not exist"));
-            }
-            if (*sources != 0) != pending.get(sgi) {
-                return Err(SnapError::Invalid("GIC SGI source disagrees with its pending state"));
-            }
-        }
-        *self = Self {
+        let restored = Self {
             dist_ctlr,
             enabled,
             pending,
@@ -311,7 +320,32 @@ impl GicV2 {
             irq_out: false,
             fiq_out: false,
         };
+        restored.check_restored(&sgi_sources)?;
+        *self = restored;
         self.update();
+        Ok(())
+    }
+
+    /// The one check of a restored image, made before it replaces anything:
+    /// refuses binary points the registers cannot hold, a running priority
+    /// above idle, an SGI source bit of a processor other than processor 0,
+    /// and SGI source bytes that disagree with the SGI's pending state (a
+    /// source with the SGI not pending, or the SGI pending with no source).
+    fn check_restored(&self, sgi_sources: &[u8; NR_SGIS]) -> SnapResult {
+        if self.bpr > 7 || !(MIN_ABPR..=7).contains(&self.abpr) {
+            return Err(SnapError::Invalid("GIC binary point outside its register's range"));
+        }
+        if self.running_priority > IDLE_PRIORITY {
+            return Err(SnapError::Invalid("GIC running priority above idle"));
+        }
+        for (sgi, sources) in sgi_sources.iter().enumerate() {
+            if sources & !SGI_SOURCE_CPU0 != 0 {
+                return Err(SnapError::Invalid("GIC SGI pending from a processor that does not exist"));
+            }
+            if *sources != self.sgi_sources(sgi) {
+                return Err(SnapError::Invalid("GIC SGI source disagrees with its pending state"));
+            }
+        }
         Ok(())
     }
 
@@ -363,7 +397,11 @@ impl GicV2 {
 
     /// The groups the CPU interface considers: those the distributor forwards
     /// (IHI 0048B §4.3.1 GICD_CTLR.EnableGrp0/EnableGrp1) and the CPU
-    /// interface signals (§4.4.1 GICC_CTLR.EnableGrp0/EnableGrp1).
+    /// interface signals (§4.4.1 GICC_CTLR.EnableGrp0/EnableGrp1). Leaving
+    /// out a group the CPU interface does not signal is this model's reading
+    /// where IHI 0048B is silent, the rule GICv3 states (IHI 0069
+    /// ICC_HPPIR0_EL1/ICC_HPPIR1_EL1, ICC_IAR0_EL1/ICC_IAR1_EL1); QEMU 11.1.2
+    /// lets such a group's interrupt block the other's (module docs).
     #[inline]
     fn signalled_groups(&self) -> u32 {
         self.dist_ctlr & self.cpu_ctlr & (GICD_CTLR_EN_GRP0 | GICD_CTLR_EN_GRP1)
@@ -1114,7 +1152,11 @@ mod tests {
     }
 
     /// IHI 0048B §4.4.1: GICC_CTLR.EnableGrp0 clear stops the CPU interface
-    /// signalling Group 0; its interrupt does not hide the Group 1 one.
+    /// signalling Group 0, and §4.4.4: GICC_IAR then returns 1023 rather than
+    /// a Group 0 interrupt. That the Group 0 interrupt does not hide the
+    /// Group 1 one is this model's reading where IHI 0048B is silent, the
+    /// rule GICv3 states (IHI 0069 ICC_HPPIR1_EL1, ICC_IAR1_EL1); QEMU 11.1.2
+    /// lets it block the Group 1 interrupt.
     #[test]
     fn a_group_the_cpu_interface_does_not_signal_hides_nothing() {
         let mut g = enabled();
@@ -1244,13 +1286,73 @@ mod tests {
         cpu(&mut restored, EOIR, 3);
         assert_eq!(cpu_get(&mut restored, IAR), 40);
         assert_eq!(cpu_get(&mut restored, RPR), 0x44);
-        // The image ends with the SGIs' source bytes; only processor 0 exists.
-        let sgi_3 = image.len() - NR_SGIS + 3;
-        image[sgi_3] = 0x08;
+    }
+
+    /// An image whose SGI source bytes are not the ones this GIC writes is
+    /// refused, and the refused restore leaves the GIC as it was: the same
+    /// saved state, the same highest pending interrupt, the same output.
+    #[test]
+    fn a_snapshot_with_sgi_sources_that_disagree_is_refused_and_changes_nothing() {
+        let mut g = enabled();
+        dist(&mut g, 0xF00, (2 << 24) | 3);
+        let mut image = std::vec::Vec::new();
+        g.save(&mut image).expect("save");
+        // The image ends with the SGIs' source bytes; SGI 3 is pending.
+        let source_byte = |sgi: usize| image.len() - NR_SGIS + sgi;
+        let refused = [
+            (source_byte(3), 0x08, "SGI 3 from processor 3"),
+            (source_byte(3), 0x09, "SGI 3 from processors 0 and 3"),
+            (source_byte(3), 0x00, "SGI 3 pending with no source"),
+            (source_byte(4), 0x01, "SGI 4 sourced but not pending"),
+        ];
+
+        let mut target = enabled();
+        raise(&mut target, 50, 0x30);
+        let mut before = std::vec::Vec::new();
+        target.save(&mut before).expect("save");
+        for (at, byte, why) in refused {
+            let mut bad = image.clone();
+            bad[at] = byte;
+            let mut source: &[u8] = &bad;
+            assert!(target.restore(&mut source).is_err(), "{why}");
+            let mut after = std::vec::Vec::new();
+            target.save(&mut after).expect("save");
+            assert!(after == before, "{why}: the refused image changed the GIC");
+            assert!(target.irq_out(), "{why}");
+            assert_eq!(cpu_get(&mut target, HPPIR), 50, "{why}");
+        }
         let mut source: &[u8] = &image;
-        assert!(GicV2::new().restore(&mut source).is_err(), "SGI 3 from processor 3");
-        image[sgi_3] = 0x01;
-        let mut source: &[u8] = &image;
-        assert!(GicV2::new().restore(&mut source).is_err(), "SGI 3 sourced but not pending");
+        target.restore(&mut source).expect("the image as saved restores");
+        assert_eq!(cpu_get(&mut target, HPPIR), 3);
+    }
+
+    /// IHI 0048B Table 4-2 and §4.4.1 AckCtl: AckCtl widens only the primary
+    /// registers to Group 1. The aliases stay Group 1 only: a Group 0
+    /// interrupt reads as 1023 through GICC_AHPPIR and GICC_AIAR, is not
+    /// acknowledged and is not completed through GICC_AEOIR, while a Group 1
+    /// interrupt is still taken through them.
+    #[test]
+    fn the_aliased_registers_stay_group_1_with_ackctl() {
+        let mut g = enabled();
+        cpu(&mut g, CTLR, 3 | GICC_CTLR_ACK_CTL);
+        dist(&mut g, 0x084, 1 << 8);
+        raise(&mut g, 40, 0x20);
+        raise(&mut g, 41, 0x10);
+        assert_eq!(cpu_get(&mut g, AHPPIR), 1023, "the highest pending is Group 0");
+        assert_eq!(cpu_get(&mut g, AIAR), 1023);
+        assert_eq!(dist_get(&mut g, 0x304), 0, "nothing acknowledged");
+        assert_eq!(cpu_get(&mut g, HPPIR), 41);
+        assert_eq!(cpu_get(&mut g, IAR), 41);
+        cpu(&mut g, AEOIR, 41);
+        assert_eq!(cpu_get(&mut g, RPR), 0x10, "GICC_AEOIR ignores a Group 0 interrupt");
+        assert_eq!(dist_get(&mut g, 0x304), 1 << 9);
+        g.set_line(41, false);
+        cpu(&mut g, EOIR, 41);
+        assert_eq!(cpu_get(&mut g, AHPPIR), 40);
+        assert_eq!(cpu_get(&mut g, AIAR), 40, "the alias still takes Group 1");
+        assert_eq!(cpu_get(&mut g, RPR), 0x20);
+        cpu(&mut g, AEOIR, 40);
+        assert_eq!(cpu_get(&mut g, RPR), 0xFF);
+        assert_eq!(dist_get(&mut g, 0x304), 0, "GICC_AEOIR completes it");
     }
 }
