@@ -156,6 +156,24 @@ impl ClockHz {
             ticks: saturate(nanos as u128 * self.get() as u128 / NANOS_PER_SECOND),
         }
     }
+
+    /// Ticks spanning `cycles` cycles of a clock running at `cycle_rate`,
+    /// rounded **up**, saturating: the first tick by which that many cycles
+    /// have passed. Zero cycles are zero ticks.
+    ///
+    /// No Bochs site: Bochs's devices time themselves in microseconds and
+    /// nanoseconds. The AArch64 board times two clocks of its own against
+    /// the tick count this way — the generic timer's system counter (the
+    /// tick at which the count reaches `CVAL`) and the PL011's `UARTCLK`
+    /// (its receive timeout's 32 bit periods) — and rounds up so that a
+    /// deadline is never a tick before the cycles it waits for have passed.
+    #[inline]
+    pub const fn ticks_from_cycles_ceil(self, cycles: u64, cycle_rate: ClockHz) -> VmDuration {
+        let exact = cycles as u128 * self.get() as u128;
+        VmDuration {
+            ticks: saturate(exact.div_ceil(cycle_rate.get() as u128)),
+        }
+    }
 }
 
 /// A point on an emulated clock, counted in ticks from machine start.
@@ -629,6 +647,23 @@ mod tests {
         let now = VmInstant::from_ticks(100);
         assert_eq!(now.since(VmInstant::from_ticks(40)).ticks(), 60);
         assert_eq!(now.since(VmInstant::from_ticks(140)).ticks(), 0);
+    }
+
+    /// Another clock's cycles become the first tick by which they have all
+    /// passed: whole when the rates divide, the next tick when they do not,
+    /// and the top of the range when the span does not fit.
+    #[test]
+    fn cycles_of_another_clock_round_up_to_a_tick() {
+        let machine = hz(50_000_000);
+        // 32 bit periods at 115200 baud from a 24 MHz UARTCLK: 6664 cycles,
+        // 13883.3 ticks.
+        assert_eq!(machine.ticks_from_cycles_ceil(6664, hz(24_000_000)).ticks(), 13_884);
+        // A 62.5 MHz counter: 5 counts are exactly 4 ticks, 6 are 4.8.
+        assert_eq!(machine.ticks_from_cycles_ceil(5, hz(62_500_000)).ticks(), 4);
+        assert_eq!(machine.ticks_from_cycles_ceil(6, hz(62_500_000)).ticks(), 5);
+        assert_eq!(machine.ticks_from_cycles_ceil(0, hz(62_500_000)).ticks(), 0);
+        assert_eq!(hz(u64::MAX).ticks_from_cycles_ceil(u64::MAX, hz(1)).ticks(), u64::MAX);
+        assert_eq!(hz(1).ticks_from_cycles_ceil(u64::MAX, hz(u64::MAX)).ticks(), 1);
     }
 
     #[test]

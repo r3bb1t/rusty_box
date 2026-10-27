@@ -118,11 +118,11 @@ impl Cpu {
         self.counter_at(self.icount)
     }
 
-    /// The first tick at which the counter reaches `cval`.
+    /// The first tick at which the counter reaches `cval`: the ticks that
+    /// span `cval` counter cycles, rounded up, which is exactly where
+    /// [`Cpu::counter_at`]'s floor first reaches it.
     fn tick_reaching(&self, cval: u64) -> u64 {
-        let needed = u128::from(cval) * u128::from(self.ips.get());
-        let ticks = needed.div_ceil(u128::from(self.counter_hz.get()));
-        u64::try_from(ticks).unwrap_or(u64::MAX)
+        self.ips.ticks_from_cycles_ceil(cval, self.counter_hz).ticks()
     }
 
     #[inline]

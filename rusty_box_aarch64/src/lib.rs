@@ -26,10 +26,16 @@
 //! the features those values advertise is UNDEFINED, as the architecture
 //! requires.
 //!
-//! Provenance (rusty_box R7): no Bochs upstream exists for any of this. The
-//! instruction semantics follow the Arm Architecture Reference Manual for
-//! A-profile (DDI 0487) pseudocode; the board and its devices follow QEMU's
-//! `hw/arm/virt.c` and the device models it instantiates, cited per file.
+//! Provenance (rusty_box R7): no Bochs upstream exists for any of this.
+//! Arm's documents decide wherever they speak: the instruction semantics
+//! follow the Arm Architecture Reference Manual for A-profile (DDI 0487)
+//! pseudocode, the GIC IHI 0048B, the PL011 DDI 0183F, and the firmware
+//! calls PSCI (DEN 0022D) and the SMC Calling Convention (DEN 0028B). QEMU's
+//! `hw/arm/virt.c` and the device models it instantiates decide what those
+//! documents do not — the memory map, the interrupt wiring, the device
+//! tree, the choices Arm leaves to an implementation, and the devices Arm
+//! does not document — cited per file. README's "Where the references
+//! differ" lists every departure from QEMU.
 
 #![no_std]
 #![forbid(unsafe_code)]

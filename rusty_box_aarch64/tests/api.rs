@@ -948,7 +948,11 @@ fn the_receive_timeout_counts_from_the_write_that_sets_rtim() {
         m.ticks() - set
     };
     let whole = elapsed(1 << 20);
-    assert!((13_884..=13_885 + 2).contains(&whole), "{whole}");
+    // The count starts at the store that sets RTIM, the instruction before
+    // the poll, so it is due 13884 ticks from that store, 13883 from the
+    // poll's first load. The poll's loads run at even ticks from there, so
+    // the one at 13884 sees RTRIS, and the exit is two ticks later.
+    assert_eq!(whole, 13_884 + 2);
     for slice in [1, 7, 1000] {
         assert_eq!(elapsed(slice), whole, "slices of {slice} ticks");
     }

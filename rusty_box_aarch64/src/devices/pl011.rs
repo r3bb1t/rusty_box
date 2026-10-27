@@ -32,16 +32,14 @@
 //! - `RXRIS` (§3.4.2, §3.3.9): with the FIFO enabled, set when the fill
 //!   level rises to the `UARTIFLS.RXIFLSEL` level and cleared once reads
 //!   take it below; with the FIFO disabled, set when the holding register
-//!   fills and cleared by a read. `UARTICR` clears it either way, and so
-//!   does emptying the FIFO by changing `FEN`, which leaves the fill level
-//!   below every trigger level.
+//!   fills and cleared by a read. `UARTICR` clears it either way.
 //! - `RTRIS` (§3.4.4, Table 3-15 note a): set when the FIFO is not empty
 //!   and nothing has arrived for 32 bit periods, and only while `RTIM` is
-//!   set; cleared when reads empty the FIFO, or by `UARTICR`, and absent
-//!   once a change of `FEN` has emptied it. The count runs on the
-//!   machine's clock: 32 bit periods are 512 × (`UARTIBRD` + `UARTFBRD` /
-//!   64) cycles of `UARTCLK` (§2.2.3, §2.4.3), at the divisor the last
-//!   `UARTLCR_H` write latched (§3.3.7), and `RTRIS` is set at the first
+//!   set; cleared when reads empty the FIFO, or by `UARTICR`. The count
+//!   runs on the machine's clock: 32 bit periods are 512 × (`UARTIBRD` +
+//!   `UARTFBRD` / 64) cycles of `UARTCLK` (§2.2.3, §2.4.3), at the
+//!   divisor the last `UARTLCR_H` write latched (§3.3.7), and `RTRIS` is
+//!   set at the first
 //!   tick by which they have passed since the last character arrived, or
 //!   since `RTIM` was set with characters waiting. It fires once; the next
 //!   character, or setting `RTIM` again, starts another count. Without a
@@ -59,7 +57,8 @@
 //!   register with the FIFO disabled), and `UARTFR` reports it: `BUSY` set
 //!   "regardless of whether the UART is enabled or not", `TXFE` clear, and
 //!   `TXFF` once it is full (Table 3-4). Enabling transmission sends what
-//!   waits; a change of `FEN` flushes it (§3.3.8, Note).
+//!   waits; clearing `FEN` flushes it (§3.3.8, Note: "Flush the transmit
+//!   FIFO by disabling bit 4 (FEN)").
 //! - `TXRIS` (§3.4.3, §3.3.9): marks a transition of the transmit FIFO's
 //!   fill level through the trigger level, not the level itself. With the
 //!   FIFO enabled it is set when the level falls from above the
@@ -81,8 +80,10 @@
 //!
 //! From QEMU 11.1.2 where DDI 0183F leaves the choice to the system: the
 //! flag register QEMU keeps as state, `UARTDR` reads of an empty FIFO
-//! (`pl011_read_rxdata`: the slot at the read position), the FIFO emptied
-//! whenever `FEN` changes (`pl011_write`), loopback driving the modem
+//! (`pl011_read_rxdata`: the slot at the read position), both FIFOs
+//! emptied whenever `FEN` changes, set or cleared (`pl011_write`; DDI
+//! 0183F names only the transmit FIFO's flush, on clearing), loopback
+//! driving the modem
 //! status inputs from the modem control outputs and leaving them where they
 //! were when loopback ends (`pl011_loopback_mdmctrl`), a loopback break on
 //! each setting of `UARTLCR_H.BRK` (`pl011_loopback_break`), and a host
@@ -93,6 +94,13 @@
 //! differ" has this model's differences, and
 //! the direct-boot set-up ([`Pl011::set_up_console`]) that goes with it.
 //!
+//! Where DDI 0183F is silent and this model does not follow QEMU, its
+//! reading: emptying the receive FIFO
+//! through `FEN` clears `RXRIS` and `RTRIS`, since an empty FIFO is below
+//! every trigger level and §3.4.4 asserts `RTRIS` only while the FIFO is
+//! not empty (DDI 0183F names reads and `UARTICR` as what clears them;
+//! QEMU leaves both as they were).
+//!
 //! The region takes 4-byte accesses (`pl011_ops`' `impl.min_access_size` and
 //! `impl.max_access_size`): QEMU's `access_with_adjusted_size` hands a
 //! narrower access to the register at `offset >> 2` with the value
@@ -102,7 +110,7 @@
 use core::num::NonZeroU32;
 
 use rusty_box_core::snap::{SnapRead, SnapResult, SnapWrite};
-use rusty_box_core::{ClockHz, RingBuffer, SnapError, VmClock, VmDuration, VmInstant};
+use rusty_box_core::{ClockHz, RingBuffer, SnapError, VmClock, VmInstant};
 
 use crate::bus::{AccessWidth, RegOffset};
 
@@ -293,19 +301,14 @@ impl BaudDivisor {
     }
 }
 
-/// On an x86-64 host the size of `Pl011` is 8 modulo 16 bytes (65,704), and
-/// the assertion below keeps it so there: the UART is part of the machine
-/// whose `run_until` hot loop dispatches every guest instruction, and that
-/// loop's register allocation depends on the layout around it. (Other
-/// hosts lay the struct out with their own pointer width and were not
-/// measured, so the assertion does not hold them.) Measured with callgrind
-/// (host instructions inside `run_until`, perfbench loops that never touch
-/// the UART): 8 bytes more, a size of 0 modulo 16, adds one spill to the
-/// dispatch of every guest instruction, +3.9% on `alu`, +3.1% on `fnv`,
-/// +1.7% on `memcpy`; 16 bytes more costs nothing. That is why `tx_count`
-/// and `read_pos` are `u8`. A field added here grows the struct by a
-/// multiple of 16 bytes, or comes with the loops' host instruction counts
-/// measured again.
+/// The UART is part of the machine whose `run_until` loop dispatches every
+/// guest instruction, and that loop's code generation depends on the
+/// layout around it. On an x86-64 host the assertion below holds the size
+/// of `Pl011` at 8 modulo 16 bytes, the size the loop was measured at,
+/// which is why `tx_count` and `read_pos` are `u8`; it holds no other host
+/// architecture. A field added here grows the struct by a multiple of 16
+/// bytes, or comes with the loops' host instruction counts measured again.
+/// README's "Speed" section has the measurement.
 pub struct Pl011 {
     /// Bytes transmitted, for the host.
     tx: RingBuffer<u8, TX_CAPACITY>,
@@ -589,9 +592,7 @@ impl Pl011 {
     /// passed, and not at all without a baud clock.
     fn start_rx_timeout(&mut self, clocks: UartClocks) {
         self.rx_timeout = self.timeout_cycles().map(|cycles| {
-            let rate = u128::from(clocks.machine.rate().get());
-            let ticks = (u128::from(cycles) * rate).div_ceil(u128::from(clocks.uartclk.get()));
-            clocks.machine.after(VmDuration::from_ticks(u64::try_from(ticks).unwrap_or(u64::MAX)))
+            clocks.machine.after(clocks.machine.rate().ticks_from_cycles_ceil(cycles, clocks.uartclk))
         });
     }
 
@@ -706,14 +707,16 @@ impl Pl011 {
         c
     }
 
-    /// QEMU `pl011_reset_rx_fifo` and `pl011_reset_tx_fifo`. The emptied
-    /// receive FIFO holds no `RTRIS`, which DDI 0183F §3.4.4 asserts only
-    /// while the FIFO is not empty, and no `RXRIS`, which §3.4.2 clears once
-    /// the fill level is below the trigger level (or the holding register is
-    /// empty); QEMU leaves both as they were. Characters waiting to be
-    /// transmitted are flushed (§3.3.8, Note: "Flush the transmit FIFO by
-    /// disabling bit 4 (FEN)"); DDI 0183F does not say what that does to
-    /// `TXRIS`, and here it is a fall of the fill level like any other,
+    /// QEMU `pl011_reset_rx_fifo` and `pl011_reset_tx_fifo`, on every
+    /// change of `FEN`. DDI 0183F flushes the transmit FIFO when `FEN` is
+    /// cleared (§3.3.8, Note: "Flush the transmit FIFO by disabling bit 4
+    /// (FEN)") and is silent on the receive FIFO and on setting `FEN`;
+    /// emptying both either way is QEMU's choice. DDI 0183F gives no flush
+    /// rule for the receive interrupts either (§3.4.2 and §3.4.4 name reads
+    /// and `UARTICR`); this model's reading is that the emptied FIFO, below
+    /// every trigger level and empty, holds no `RXRIS` and no `RTRIS`,
+    /// where QEMU leaves both as they were. Nor does it say what a flush
+    /// does to `TXRIS`; here it is a fall of the fill level like any other,
     /// judged against the trigger level of the FIFO being flushed
     /// ([`Pl011::tx_level_moved`]).
     fn reset_fifos(&mut self) {

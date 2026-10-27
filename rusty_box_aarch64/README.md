@@ -185,6 +185,17 @@ with branch placement alone: one change measured `alu` at 0.87× and
 `-C llvm-args=-x86-branches-within-32B-boundaries`, from the same source.
 Read a single row's ratio to about that precision.
 
+The run loop's register allocation depends on the layout of the machine
+around it, including the size of devices it never touches in a loop. On
+x86-64, measured with callgrind as host instructions inside `run_until`
+for the perfbench loops, which never reach the UART, with `Pl011` at
+65,704 bytes (8 modulo 16): 8 bytes more, a size of 0 modulo 16, adds
+one spill to the dispatch of every guest instruction, +3.9% on `alu`,
++3.1% on `fnv` and +1.7% on `memcpy`; 16 bytes more costs nothing. A
+const assertion in `src/devices/pl011.rs` holds the size at 8
+modulo 16 on x86-64 hosts. Other host architectures lay the machine out
+differently, were not measured, and are held by nothing.
+
 The boots' state hashes at 10M, 100M and 400M instructions on this tree,
 which a change meant to leave the guest's behaviour alone (as speed work
 is) must reproduce, are:
@@ -205,9 +216,19 @@ is) must reproduce, are:
 | Board | QEMU `virt` memory map and IRQ wiring; QEMU 11.1.2's device tree in `assets/` (two values pinned; see below), its memory node and `/chosen` set per machine |
 | Boot | UEFI firmware from flash; or a Linux `Image`, initramfs and device tree placed as QEMU's `hw/arm/boot.c` places them, entered with the register state its boot stub leaves, and the UART's console set up at 115200 baud, 8N1, as firmware leaves it (see "Where the references differ") |
 
-Provenance: instruction semantics follow the Arm ARM pseudocode; every device
-cites the QEMU source file and symbols it was ported from. The QEMU
-reference is release 11.1.2 and its newest `virt` machine, `virt-11.1`.
+Provenance: Arm's documents decide wherever they speak — the Arm ARM (DDI
+0487) and its machine-readable data (AARCHMRS) for the processor, IHI 0048B
+for the GIC, DDI 0183F for the PL011, DEN 0022D for PSCI and DEN 0028B for
+the SMC Calling Convention. QEMU's `virt` board decides what those documents
+do not: the memory map, the interrupt wiring, the device tree, the choices
+Arm leaves to an implementation, and the devices Arm does not document
+(virtio, `fw_cfg`, the CFI flash, `gpio-key`). Each device cites its Arm
+document where there is one, then the QEMU source file and symbols it was
+ported from, and every departure from QEMU is listed under "Where the
+references differ". The PL031 RTC and the PL061 GPIO cite QEMU alone: they
+have Arm TRMs of their own (DDI 0224, DDI 0190), which these models have
+not been checked against. The QEMU reference is release 11.1.2 and its
+newest `virt` machine, `virt-11.1`.
 
 ## Verification
 
@@ -302,9 +323,37 @@ integration tests of the public API.
   a login prompt with no warnings in its log, logs in, and runs commands whose
   output matches the host (`seq 1 20000 | sha256sum`); `reboot` comes back to
   the login prompt and `poweroff` stops the machine.
-- `tests/timer_interrupts.rs`: a hand-written guest drives GIC + timer + `WFI`
-  + IRQ entry/`ERET` + PSCI; its outcome is identical for every budget
-  slicing, and a snapshot taken mid-wait restores the same future.
+- `tests/timer_interrupts.rs`: hand-written guests drive the interrupt path
+  end to end. One runs GIC + timer + `WFI` + IRQ entry/`ERET` + PSCI; its
+  outcome is identical for every budget slicing, and a snapshot taken
+  mid-wait restores the same future. One sends itself an SGI and enters
+  the FIQ vector for Group 0 under `GICC_CTLR.FIQEn`, and the IRQ vector
+  for Group 1, or for Group 0 without it, as `ISR_EL1` shows beforehand. One sets the GIC and the PL011 up as Linux's console does —
+  SPI 33 enabled, the receive interrupt at half full, `RTIM` unmasked —
+  and waits in `WFI`; five characters typed at it, fewer than the level,
+  wake it through the receive timeout: it takes the IRQ, acknowledges
+  INTID 33, finds `RTMIS` and reads the five characters, at the tick the
+  32 bit periods end, whatever the slicing (mutation-checked: the UART's
+  deadline left out of the machine's next event, or its line out of the
+  GIC, and the guest never wakes).
+- `src/devices/gicv2.rs` and `src/devices/pl011.rs` test the device models
+  against IHI 0048B and DDI 0183F register by register. The GIC: both
+  groups and the Group 1 aliases, with `AckCtl` set and clear; a group the
+  distributor or the CPU interface leaves disabled hiding nothing;
+  preemption by group priority under each group's binary point; SGIs on a
+  uniprocessor; and snapshots whose SGI state disagrees, refused with
+  nothing changed. The PL011: the receiver and transmitter gated by
+  `UARTEN`, `RXE` and `TXE`; both FIFO interrupts as transitions through
+  the `UARTIFLS` levels, with the FIFO enabled and disabled; the receive
+  timeout's 32 bit periods at the latched divisor, whether `RTIM` or the
+  receiver is on; the `FEN` flush; overruns, breaks, modem status
+  interrupts and reserved bits; and snapshots, with the states they must
+  refuse.
+- `tests/unit/softfloat.rs`: the softfloat surface against the host's IEEE
+  arithmetic in round-to-nearest, and Arm's rules — default NaN, NaN
+  propagation order, FPCR.DN and FZ, tininess before rounding, saturating
+  conversions — including a fused multiply-add whose addend cancels the
+  product's high word exactly.
 - The virtio devices are driven register by register and ring by ring, as a
   driver drives them, by a test driver laid out like Linux's
   (`tests/unit/virtio_driver.rs`): the transport's registers, feature
@@ -412,10 +461,14 @@ integration tests of the public API.
 
 ## Where the references differ
 
-The Arm ARM and Arm's machine-readable data (AARCHMRS) decide what an
-instruction does; QEMU's `virt` board and `cortex-a57` decide the rest.
-Where those references disagree, or leave the choice open, this model's
-choice is listed here with its evidence.
+Arm's documents decide wherever they speak: the Arm ARM and AARCHMRS what
+an instruction does, IHI 0048B the GIC, DDI 0183F the PL011, DEN 0022D and
+DEN 0028B the firmware calls. QEMU 11.1.2's `virt` board and `cortex-a57`
+decide what they do not: the board's layout, wiring and device tree, the
+devices Arm does not document, and the choices Arm leaves to an
+implementation. Every place this model departs from QEMU is
+listed here with its evidence, as are the choices it makes where the
+references leave one open.
 
 - **Should-be fields are UNDEFINED when set otherwise.** Arm's encodings of
   34 ARMv8.0 instructions have should-be bits (`(0)` and `(1)` in the Arm
@@ -530,6 +583,37 @@ choice is listed here with its evidence.
   the traditional interface only (`FW_CFG_ID` = 1) and an empty directory, a
   configuration the interface defines, so firmware describes the machine
   from the device tree (`src/devices/fw_cfg.rs`).
+- **The PCIe bus is empty.** QEMU's `virt` puts its host bridge's own
+  function at 00:00.0; this board has no function there, so configuration
+  reads find nothing and the I/O and memory windows answer like an empty
+  bus, all ones, with writes ignored (`src/board.rs`).
+- **A flash bank holds an image of any length.** QEMU insists on a drive
+  of exactly the bank's 64 MiB. Each bank here decodes its whole window,
+  as QEMU maps it (`virt_flash_map`), and reads the part an image does not
+  cover as erased flash, so a firmware image needs no padding and a
+  directly booted kernel no flash images at all (`src/board.rs`).
+- **The PL031 counts from a fixed epoch.** QEMU starts the RTC's counter
+  from the host's wall clock; this one starts from a configured epoch
+  (`VirtConfig::rtc_epoch_seconds`) and counts emulated seconds,
+  so the guest sees the same date on every run (`src/devices/pl031.rs`).
+- **virtio-blk completes a request before its notification returns.**
+  QEMU hands reads, writes and flushes to its block layer, which completes
+  them later, in an order and at a time the host decides; here each
+  completes at the notification, with the same results, always at the
+  same instruction. A host error is reported to the guest as
+  `VIRTIO_BLK_S_IOERR`, QEMU's default except for a write that finds the
+  host's disk full, where QEMU stops the machine until the user resumes
+  it (`werror=enospc`) (`src/devices/virtio/block.rs`).
+- **A virtqueue chain is read from guest memory at each use.** QEMU maps a
+  chain's buffers once when it takes it; this device walks the chain again
+  each time it reads or writes it. The two agree for every driver that
+  keeps virtio 1.2's rule of not changing descriptors it has made
+  available until the device has used them (`src/devices/virtio/queue.rs`).
+- **virtio-input takes a host batch whole or waits.** When the driver has
+  not queued buffers enough for a whole batch of events, QEMU's device
+  drops what does not fit; this one takes none of the batch and the host
+  offers it again later. The guest sees each batch whole or not at all
+  either way (`src/devices/virtio/input.rs`).
 - **The GICv2's Group 1 aliases exist.** IHI 0048B's CPU interface map
   (Table 4-2) has `GICC_AIAR`, `GICC_AEOIR` and `GICC_AHPPIR` in every
   GICv2, and with `GICC_CTLR.AckCtl` clear, the setting Arm recommends
@@ -638,13 +722,18 @@ choice is listed here with its evidence.
   follows the TRM; the reserved encodings 0b101–0b111 select the half-full
   level. Linux waits for the receive timeout (below) for anything
   shorter than the level, as on hardware.
-- **Emptying the PL011 FIFO through `FEN` clears its receive interrupts.**
-  A change of `UARTLCR_H.FEN` empties the receive FIFO (QEMU 11.1.2
-  `pl011_write`, `pl011_reset_rx_fifo`). An empty FIFO is below every
-  trigger level, where DDI 0183F §3.4.2 has `RXRIS` cleared, and §3.4.4
-  asserts `RTRIS` only while the FIFO is not empty. QEMU 11.1.2 leaves its
-  interrupt state as it was, so `RXRIS` stays set with nothing to read.
-  This model clears `RXRIS` and `RTRIS` with the FIFO.
+- **Emptying the PL011 FIFOs through `FEN` clears the receive interrupts.**
+  DDI 0183F §3.3.8 (Note to Table 3-12) flushes the transmit FIFO by
+  clearing `UARTLCR_H.FEN`; it says nothing of the receive FIFO, or of
+  setting `FEN`. QEMU 11.1.2 (`pl011_write`, `pl011_reset_rx_fifo`,
+  `pl011_reset_tx_fifo`) empties both FIFOs on every change of `FEN`, and
+  so does this model. DDI 0183F gives no rule for the receive interrupts
+  across such a flush either: §3.4.2 clears `RXRIS` by reads and by
+  `UARTICR`, and §3.4.4 asserts `RTRIS` only while the FIFO is not empty.
+  This model's reading is that an empty FIFO is below every trigger
+  level, so it clears `RXRIS` and `RTRIS` with the FIFO. QEMU 11.1.2
+  leaves its interrupt state as it was, so `RXRIS` stays set with nothing
+  to read.
 - **The PL011 raises the receive timeout interrupt, 32 bit periods after
   the last character.** DDI 0183F §3.4.4: `RTRIS` is set when the FIFO is
   not empty and nothing has arrived for 32 bit periods, only while `RTIM`
@@ -669,10 +758,8 @@ choice is listed here with its evidence.
   §3.3.6) no count starts; and a count running when a new divisor is
   latched keeps the deadline it started with, whatever that divisor, one
   without a baud clock included. That last state is saved and restored
-  like any other. Characters themselves cross the line in no time,
-  whatever the divisor, `UARTIBRD` 0 included: the transmitter sends the
-  moment it is enabled, and the host's bytes arrive the moment the
-  receiver has room, as with a QEMU character backend.
+  like any other. The receive timeout is the one interval the UART times;
+  characters themselves cross the line in no time (the last PL011 entry).
 - **PL011 modem status interrupts mark changes.** DDI 0183F §3.4.1 raises
   `RIRMIS`, `CTSRMIS`, `DCDRMIS` and `DSRRMIS` when their modem status line
   changes, and only `UARTICR` clears them. QEMU 11.1.2
@@ -695,8 +782,10 @@ choice is listed here with its evidence.
   one-byte holding register while `UARTLCR_H.FEN` is clear), `UARTFR.BUSY`
   is set while the FIFO holds anything, "regardless of whether the UART is
   enabled or not", with `TXFE` clear and `TXFF` set once it is full (Table
-  3-4); enabling transmission sends what waits, and a change of `FEN`
-  flushes it (§3.3.8). QEMU 11.1.2 (`pl011_write_txdata`) logs such a
+  3-4); enabling transmission sends what waits, and clearing `FEN` flushes
+  it (§3.3.8, Note). Setting `FEN` flushes it too, as QEMU's `pl011_write`
+  does; DDI 0183F is silent there, and that is this model's reading (the
+  `FEN` entry above). QEMU 11.1.2 (`pl011_write_txdata`) logs such a
   write and transmits the character anyway, in loopback to the receiver
   too. This model follows the TRM. The TRM does not say what a write to a
   full transmit FIFO does; here the character is lost and the FIFO keeps
@@ -730,21 +819,51 @@ choice is listed here with its evidence.
   when the holding register empties and cleared by a write; and enabling
   the UART and the interrupt before anything is written sets nothing.
   QEMU 11.1.2 (`pl011_write_txdata`) sets `TXRIS` after every write. This
-  model follows the TRM, with characters leaving in no time: while
-  transmission is enabled each character leaves as it is written, so with
-  the FIFO enabled the level never rises above one entry and writes never
-  set `TXRIS`; with the FIFO disabled every write fills and empties the
-  holding register and sets it; and characters held back while
-  transmission is off set it when enabling transmission sends more than
-  the trigger level of them. Where the TRM is silent: the reserved
+  model follows the TRM, with characters leaving in no time (below):
+  while transmission is enabled each character leaves as it is written,
+  so with the FIFO enabled the level never rises above one entry and
+  writes never set `TXRIS`; with the FIFO disabled every write fills and
+  empties the holding register and sets it; and characters held back
+  while transmission is off set it when enabling transmission sends more
+  than the trigger level of them. Where the TRM is silent: the reserved
   `TXIFLSEL` encodings 0b101–0b111 select the half-full level, as for
   `RXIFLSEL`; a change of `TXIFLSEL` alone moves no fill level, so changes
   nothing; and the flush a change of `FEN` makes is a fall of the level
-  like any other, judged against the level of the FIFO it empties. Linux's
-  `pl011_tx_chars` writes until `TXFF` or until it has nothing left, and
-  unmasks `TXIM` only for characters left behind a full FIFO; here the
-  FIFO is never full while transmission is enabled, so its transmit path
-  never waits for the interrupt.
+  like any other, judged against the level of the FIFO it empties.
+- **PL011 characters cross the line in no time.** DDI 0183F sends a
+  character as a frame of a start bit, five to eight data bits, a parity
+  bit if enabled and one or two stop bits (§2.2.6, §2.4.5), each bit one
+  period of the baud rate the divisor sets (§2.4.3), and receives one the
+  same way (§2.2.7). This model times no frame, whatever the divisor,
+  `UARTIBRD` 0 included: the transmitter sends a character the moment it
+  is written with transmission enabled, or the moment transmission is
+  enabled, and the host's bytes arrive the moment the receiver has room,
+  as with a QEMU character backend; each crosses as the byte written or
+  sent, whatever word length, parity and stop bits `UARTLCR_H` selects.
+  The receive timeout (above) is the one interval the UART times.
+
+  A driver can see the difference in one way. While transmission is
+  enabled, a write never takes the transmit FIFO above one character, so
+  with the FIFO enabled no write clears `TXRIS` and no drain sets it.
+  `TXRIS` is then clear only after a reset or after `UARTICR` clears it,
+  and once set it stays set until one of those clears it. A driver stalls
+  only if, with the FIFO enabled and `TXRIS` clear in that way, it writes
+  a burst larger than the trigger level without stopping at `TXFF` and
+  then waits for `TXRIS`: on hardware the burst fills the FIFO above the
+  level and its drain through the level sets `TXRIS`; here neither
+  happens, and the driver waits for good. A driver that waits with
+  `TXRIS` still set finds it set at once, where hardware would set it
+  again once the burst had drained; and one that waits for the interrupt
+  only with characters left behind a full FIFO never waits, since the
+  FIFO is never full while transmission is enabled. Linux 6.18's
+  `pl011_tx_chars` is of that kind: it writes until `TXFF` or until it
+  has nothing left, and unmasks `TXIM` only for characters a full FIFO
+  left behind. Timed transmission — characters leaving at the
+  programmed baud rate on the machine's clock, `UARTFR.BUSY` set until
+  the last stop bit — would remove this difference. It would also make a
+  driver that waits for `BUSY` after every character, as Linux's
+  `pl011_putc` does, spin for each frame's time, and a guest that
+  programs no divisor unable to transmit, as on hardware.
 
 ## Not implemented
 
@@ -761,6 +880,17 @@ choice is listed here with its evidence.
 - No data cache model, and no instruction cache a guest can see: the
   decoded traces are kept coherent with every write, so neither `IC` nor
   data cache maintenance has anything to act on.
+- PL011 features (DDI 0183F §1.1.1) beyond its FIFOs, interrupts,
+  loopback and receive timeout: DMA (§2.7; `UARTDMACR` keeps what is
+  written and requests nothing); the IrDA SIR ENDEC (§2.3; `UARTCR.SIREN`
+  and `SIRLP` and `UARTILPR` are kept and change nothing); hardware flow
+  control (§2.6; `UARTCR.RTSEn` and `CTSEn` likewise); errors on the host
+  line — it carries bytes, not frames, so no framing or parity error,
+  break or false start bit ever arrives from it, and a break reaches the
+  receiver only in loopback; modem status inputs outside loopback, which
+  no host line drives; and the integration test registers `UARTITCR`,
+  `UARTITIP`, `UARTITOP` and `UARTTDR` (chapter 4), which read as zero and
+  ignore writes.
 - No network device, and nothing on the PCIe bus: storage is the initramfs
   or the opt-in virtio-blk disk, and the display and input devices are the
   opt-in virtio ones.
