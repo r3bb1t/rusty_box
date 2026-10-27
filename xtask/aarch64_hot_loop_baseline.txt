@@ -5,11 +5,11 @@
 rustc 2d8144b7880597b6e6d3dfd63a9a9efae3f533d3
 host x86_64-unknown-linux-gnu
 fma yes
-alu plain 8470198632
-alu hooked 9480199778
-memcpy plain 16255753002
-memcpy hooked 18336922130
-fnv plain 8470802929
-fnv hooked 9437473857
-fp plain 12450148962
-fp hooked 13160149762
+alu plain 8180217561
+alu hooked 9180217487
+memcpy plain 15911673159
+memcpy hooked 17812617038
+fnv plain 8093985132
+fnv hooked 9011503309
+fp plain 12190159021
+fp hooked 12890158905

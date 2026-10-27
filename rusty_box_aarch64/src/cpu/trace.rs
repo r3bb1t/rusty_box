@@ -50,6 +50,16 @@
 //! that may begin a poll is marked when it is built ([`POLL`]), so that
 //! its lookup misses and the decision is made on the miss path: any other
 //! trace costs nothing more to find or run.
+//!
+//! Traces are linked (Bochs cpu.cc `linkTrace`, cpu.h `BX_LINK_TRACE`): a
+//! trace that ends in a taken direct branch to its own page goes on into
+//! the cached trace there without returning to the run loop, when nothing
+//! the loop checks between traces can stop it — the run has instructions
+//! left, no interrupt is deliverable, and the run watches no exit address.
+//! Bochs remembers the next trace in the branch, valid while a timestamp
+//! that every invalidation moves is unchanged; here the next trace is the
+//! cache's own entry for the target, found by its address, epoch and
+//! generation, which is what any invalidation changes (`Cpu::linked_trace`).
 
 use super::decode::classify;
 use super::exec::{Done, Fault, Observed, Step};
@@ -557,6 +567,12 @@ impl Cpu {
     /// comes back to its read by a taken branch, which starts a trace
     /// there, so the check is made once per trace, on the miss path a
     /// poll's trace takes ([`POLL`]).
+    ///
+    /// With no `exits`, `limit` is all that is left of that run, and a
+    /// trace that ends in a direct branch goes on into the trace the branch
+    /// leads to, where the caller would have run it next with nothing else
+    /// done in between ([`Cpu::linked_trace`]): the instructions run, and
+    /// what the observer hears of them, are the same either way.
     #[inline(always)]
     pub(crate) fn run_trace<B: PhysBus, I: Instrumentation>(
         &mut self,
@@ -569,27 +585,32 @@ impl Cpu {
             limit <= self.run_left(),
             "a trace's limit passes the end of its run"
         );
+        debug_assert!(
+            !exits.is_empty() || limit == self.run_left(),
+            "with no exits, a trace's limit is the rest of its run"
+        );
         let pc = self.pc;
         let mut observed = Observed { bus, observer };
         let pa = match self.fetch_address(&mut observed, pc) {
             Ok(pa) => pa,
             Err(fault) => return self.take_fault(pc, fault, observed.observer),
         };
-        let trace = match observed.fetch_source(PhysAddr::new(pa)) {
+        let (trace, epoch) = match observed.fetch_source(PhysAddr::new(pa)) {
             FetchSource::Stable(epoch) => match self.traces.lookup(pa, epoch) {
-                Some(trace) => Some(trace),
-                None => self.trace_miss(&mut observed, pa, epoch, exits),
+                Some(trace) => (Some(trace), epoch),
+                None => (self.trace_miss(&mut observed, pa, epoch, exits), epoch),
             },
-            FetchSource::Volatile => None,
+            FetchSource::Volatile => (None, CodeEpoch::new(0)),
         };
         let Some(trace) = trace else {
             return self.step_uncached(&mut observed, pc, pa);
         };
         self.trace_break = false;
-        let count = (trace.len as u64).min(limit) as usize;
+        let mut i = trace.start;
+        let mut end = trace.start + (trace.len as u64).min(limit) as usize;
         let mut pc = pc;
         let mut raised = None;
-        for i in trace.start..trace.start + count {
+        while i < end {
             let word = self.traces.pool.word(i);
             observed.observer.before_execution(pc, word);
             let flow = match self.exec_op(&mut observed, pc, PoolSlot(i), &mut raised) {
@@ -598,14 +619,81 @@ impl Cpu {
             };
             match self.retire(pc, Some(word), flow, observed.observer) {
                 Done::Next => {}
+                Done::Elsewhere if exits.is_empty() => {
+                    debug_assert!(!self.trace_break && !self.timer_dirty && !observed.devices_touched());
+                    match self.linked_trace(i, pc, pa, epoch) {
+                        Some(next) => {
+                            i = next.start;
+                            end = next.start + next.len;
+                            pc = self.pc;
+                            continue;
+                        }
+                        None => return Step::Retired,
+                    }
+                }
                 done => return done.step(),
             }
             if self.trace_break || self.timer_dirty || observed.devices_touched() {
                 break;
             }
             pc = pc.wrapping_add(4);
+            i += 1;
         }
         Step::Retired
+    }
+
+    /// The trace that the taken branch in pool slot `slot`, at `branch_pc`,
+    /// which has just ended a trace read from physical address `pa`'s page
+    /// of memory of `epoch`, leads to, when it is entered here rather than
+    /// by the caller (Bochs cpu.cc `linkTrace`, cpu.h `BX_LINK_TRACE`),
+    /// bounded by what is left of the run. `None` returns to the caller,
+    /// which finds the same trace, or none, its own way.
+    ///
+    /// Only a direct branch links (B, BL, B.cond, CBZ/CBNZ, TBZ/TBNZ, as
+    /// Bochs links only its direct jumps' traces): it changes neither the
+    /// exception level nor `PSTATE.IL`, and its target is aligned. Only a
+    /// target in the branch's own 4 KiB page links: the trace's first
+    /// fetch translated that page and checked its execute permission, and
+    /// nothing in the trace changed them (a TLB fill, flush or maintenance
+    /// instruction ends a trace), so the caller's fetch would find the same
+    /// physical page; and its memory's source and epoch are the trace's:
+    /// RAM's never change, and only a write to a flash bank, a device
+    /// access that ends a trace, takes the bank out of read-array mode or
+    /// moves its epoch. The
+    /// trace is the cache's entry for that address and epoch in this
+    /// generation, as the caller's lookup finds it — after a flush, a write
+    /// over its code or another trace taking its slot it is not there, and
+    /// a trace marked [`POLL`] is never found, so the poll's decision is
+    /// made on the caller's miss path. Of the checks the caller makes
+    /// between traces: the run's end and a deliverable interrupt are
+    /// checked here (an interrupt returns to the caller, to be taken); a
+    /// trace ends after any instruction that reaches a device or writes a
+    /// timer register, so the next event and the interrupt lines are as the
+    /// caller left them; and a run with exit addresses never links. Bochs
+    /// keeps the link as a pointer in the trace, valid while its timestamp
+    /// is; here the direct-mapped cache is the pointer, and its generation
+    /// and epochs the timestamp.
+    ///
+    /// Out of line, and cold although a loop takes it once a trace, so that
+    /// the trace loop's register allocation does not depend on it.
+    #[cold]
+    #[inline(never)]
+    fn linked_trace(&mut self, slot: usize, branch_pc: u64, pa: u64, epoch: CodeEpoch) -> Option<Trace> {
+        let target = self.pc;
+        if !matches!(
+            self.traces.pool.op(slot),
+            Op::B { .. } | Op::Bl { .. } | Op::BCond { .. } | Op::Cbz { .. } | Op::Tbz { .. }
+        ) || (target ^ branch_pc) >> 12 != 0
+            || self.run_left() == 0
+            || self.interrupt_deliverable()
+        {
+            return None;
+        }
+        let trace = self.traces.lookup((pa & !0xFFF) | (target & 0xFFF), epoch)?;
+        Some(Trace {
+            start: trace.start,
+            len: (trace.len as u64).min(self.run_left()) as usize,
+        })
     }
 
     /// Account for the instruction at `pc` having raised `fault`, in its

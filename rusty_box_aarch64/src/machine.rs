@@ -1130,8 +1130,11 @@ impl<S: GuestStorage, I: Instrumentation> VirtMachine<S, I> {
     /// slice end and the instruction budget, or an instruction moves the
     /// next event or puts the processor to sleep, which ends the burst.
     ///
-    /// Within a burst the processor runs traces. Interrupt delivery and the
-    /// exit check happen before each; within one, neither can change: the
+    /// Within a burst the processor runs traces, some of them linked: run
+    /// on from the trace before without coming back here, with the checks
+    /// made here between them made there (`Cpu::linked_trace`). Interrupt
+    /// delivery and the exit check happen before each; within one, neither
+    /// can change: the
     /// interrupt lines are re-driven only after an instruction that reached
     /// a device or wrote a timer register, which ends the trace, and the
     /// masks change only by instructions that end a trace. A trace runs no

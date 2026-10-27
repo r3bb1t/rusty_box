@@ -115,6 +115,26 @@ vocabulary are `rusty_box_core`'s, shared with the x86 machine.
   observer does not hear of every instruction, whole iterations of a poll
   may be skipped, unfetched and unreported, leaving exactly the state
   running them would leave.
+- **Traces are linked.** As Bochs links the trace a direct jump leads to
+  (`cpu/cpu.cc` `linkTrace`, `cpu/cpu.h` `BX_LINK_TRACE`), a trace that
+  ends in a taken direct branch (`B`, `BL`, `B.cond`, `CBZ`/`CBNZ`,
+  `TBZ`/`TBNZ`) to its own page goes on into the cached trace there without
+  going back to the run loop, which saves the loop's checks, the fetch's
+  translation and the memory's source for one trace in every one linked
+  (`Cpu::linked_trace`). The translation and the source are the trace's:
+  nothing in a trace changes them, or it ends. The link is taken only where
+  the loop would have run that trace next with nothing done in between: the
+  burst has instructions left (the next trace is cut to them), no
+  interrupt is deliverable, and the run watches no exit address. Where Bochs
+  keeps the next trace's pointer in the branch, valid while a timestamp
+  every invalidation moves is unchanged, the link here looks the trace up in
+  the direct-mapped cache by address, epoch and generation, which is what a
+  flush, a write over the code or a flash write changes; a trace marked as a
+  poll's is never found that way, so the poll's decision stays on the run
+  loop's miss path. `tests/trace_linking.rs` runs linked loops, one rewritten
+  by a store and one taking timer interrupts, against a machine stepping one
+  instruction at a time, which never links, comparing whole snapshots and
+  everything an observer hears after every step.
 - **Counter polls fast-forward exactly.** When nobody watches every
   instruction, a loop that reads the system counter, compares it once with a
   value it does not change and branches on an ordering of the two jumps over
