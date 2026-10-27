@@ -188,16 +188,36 @@ with branch placement alone: one change measured `alu` at 0.87× and
 `-C llvm-args=-x86-branches-within-32B-boundaries`, from the same source.
 Read a single row's ratio to about that precision.
 
-The run loop's register allocation depends on the layout of the machine
-around it, including the size of devices it never touches in a loop. On
-x86-64, measured with callgrind as host instructions inside `run_until`
-for the perfbench loops, which never reach the UART, with `Pl011` at
-65,704 bytes (8 modulo 16): 8 bytes more, a size of 0 modulo 16, adds
-one spill to the dispatch of every guest instruction, +3.9% on `alu`,
-+3.1% on `fnv` and +1.7% on `memcpy`; 16 bytes more costs nothing. A
-const assertion in `src/devices/pl011.rs` holds the size at 8
-modulo 16 on x86-64 hosts. Other host architectures lay the machine out
-differently, were not measured, and are held by nothing.
+The run loop's register allocation follows the layout of the machine it
+runs in. rustc orders a plain (`repr(Rust)`) struct's fields by
+alignment, counting a field's size towards it. Laid out that way, 8 more
+bytes in the PL011, which no loop reaches, make the board's size a
+multiple of 16 and move the board ahead of the CPU, to the machine's own
+address. The board's pointer, which the loop passes as the bus, is then
+the machine's, and LLVM allocates the loop's registers differently: the
+base of the general registers is no longer held in a register but
+recomputed before every access, and two more values spill to the stack on
+every guest instruction. Measured with callgrind as host instructions
+inside `run_until`, that costs +4.0% on `alu`, +3.7% on `fnv`, +0.8% on
+`memcpy` and +0.7% on `fp`.
+
+`VirtMachine` and `VirtBoard` are therefore `#[repr(C)]`, laid out for the
+loop. The board is the machine's last field, so no device's size moves
+another field. Only fixed-size records come before the CPU, and neither
+the CPU nor the board is at offset 0, where a field shares the machine's
+address. In the board the devices come first and the fields the loop
+reads (the RAM, `deadline_moved`, `touched`, `flash_epoch` and the
+devices' RAM writes) after them: a device's size moves those fields, but
+every access to them keeps a 32-bit displacement, so the loop's
+instructions keep their lengths and its alignment padding. Placed ahead of
+the devices instead, the same fields are reached with shorter
+displacements, which moves the padding and costs 0.1–0.2% host
+instructions on the plain loops. With the PL011 padded by 0, 8, 16, 24 or
+40 bytes the loop's code is the same instruction for instruction, and so
+are the host instruction counts. A change to the loop or to the layout is
+held by `cargo xtask ci`, which fails on a rise of more than 0.5% in those
+counts (["Keeping the interpreter's
+speed"](../docs/aarch64-automation.md#keeping-the-interpreters-speed)).
 
 The fifth loop, `mmio`, runs `alu`'s chain from the GIC distributor's
 priority bytes, whose fetches cannot be cached, so every instruction takes

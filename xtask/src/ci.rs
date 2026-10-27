@@ -5,8 +5,9 @@
 //! rusty_box_devices (their no_std + no_alloc builds included) and bare-metal
 //! (`x86_64-unknown-none`) checks of both, devices with alloc; tests for
 //! rusty_box_aarch64 without features and with std, and its bare-metal check
-//! with alloc; tests for the
-//! three WHP crates, the engine's with every target, and a check of
+//! with alloc; the AArch64 trace loop's host instructions against a
+//! committed baseline (`hot_loop`, skipped where valgrind does not run);
+//! tests for the three WHP crates, the engine's with every target, and a check of
 //! rusty_box_whp's examples; tests for the decoder and the rusty_box library;
 //! checks of rusty_box as no_std with and without alloc, for
 //! `x86_64-unknown-none`, and for `wasm32-unknown-unknown` with alloc; the UEFI
@@ -27,7 +28,9 @@
 //! `cargo xtask perf-baseline` builds the release perfbench binaries — the x86
 //! machine's `perfbench` and the AArch64 interpreter's `aarch64_perfbench` — and
 //! archives them (with the git revision) under `target/perf-baselines/<rev>/` for
-//! interleaved A/B comparison against later phases.
+//! interleaved A/B comparison against later phases. `cargo xtask
+//! hot-loop-baseline` counts the AArch64 trace loop's host instructions and
+//! rewrites the baseline the ci step holds them to.
 
 use std::{
     env,
@@ -650,7 +653,9 @@ struct Step {
     stdout_marker: Option<&'static str>,
 }
 
-const MATRIX: &[Step] = &[
+/// The crates the x86 machine does not depend on: rusty_box_core,
+/// rusty_box_devices and rusty_box_aarch64.
+const FOUNDATION_MATRIX: &[Step] = &[
     // The core crate is proven on its own, in every configuration it ships,
     // BEFORE anything that depends on it: a foundation that only compiles as
     // part of its consumer is not a foundation. Its default build is the
@@ -748,6 +753,12 @@ const MATRIX: &[Step] = &[
         envs: &[],
         stdout_marker: None,
     },
+];
+
+/// The steps after the AArch64 hot-loop count, which runs once the AArch64
+/// machine's tests have passed and before the steps that build only on
+/// Windows, so that a Linux host reaches it.
+const MATRIX: &[Step] = &[
     // The Windows Hypervisor Platform seam. Its tests need no hypervisor —
     // they cover the bitfield layouts transcribed from the SDK, which is
     // exactly the part a reader cannot check by eye — so this step runs
@@ -1098,6 +1109,12 @@ pub fn execute_ci(command: CiCommand) -> Result<(), String> {
     doctrine_ratchets(&root)?;
     ran += 1;
 
+    for step in FOUNDATION_MATRIX {
+        run_step(&root, step)?;
+        ran += 1;
+    }
+    run_hot_loop_step(&root)?;
+    ran += 1;
     for step in MATRIX {
         run_step(&root, step)?;
         ran += 1;
@@ -1118,6 +1135,29 @@ pub fn execute_ci(command: CiCommand) -> Result<(), String> {
         started.elapsed().as_secs_f32()
     );
     Ok(())
+}
+
+/// The name the AArch64 hot-loop count runs under, between the AArch64
+/// machine's steps and the WHP crates'.
+const HOT_LOOP_STEP: &str = "aarch64 hot-loop host instructions";
+
+/// The AArch64 trace loop's host instructions against the committed
+/// baseline (`hot_loop`): fails on a rise over the limit, passes with the
+/// reason printed where it cannot count.
+fn run_hot_loop_step(root: &std::path::Path) -> Result<(), String> {
+    let started = Instant::now();
+    println!("==> {HOT_LOOP_STEP}");
+    crate::hot_loop::check(root).map_err(|err| format!("{HOT_LOOP_STEP}: {err}"))?;
+    println!(
+        "<== {HOT_LOOP_STEP} ok ({:.1}s)",
+        started.elapsed().as_secs_f32()
+    );
+    Ok(())
+}
+
+/// `cargo xtask hot-loop-baseline`.
+pub fn execute_hot_loop_baseline() -> Result<(), String> {
+    crate::hot_loop::refresh(&repo_root()?)
 }
 
 pub fn execute_perf_baseline(_command: PerfBaselineCommand) -> Result<(), String> {

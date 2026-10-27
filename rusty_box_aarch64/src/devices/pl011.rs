@@ -314,14 +314,7 @@ impl BaudDivisor {
     }
 }
 
-/// The UART is part of the machine whose `run_until` loop dispatches every
-/// guest instruction, and that loop's code generation depends on the
-/// layout around it. On an x86-64 host the assertion below holds the size
-/// of `Pl011` at 8 modulo 16 bytes, the size the loop was measured at,
-/// which is why `tx_count` and `read_pos` are `u8`; it holds no other host
-/// architecture. A field added here grows the struct by a multiple of 16
-/// bytes, or comes with the loops' host instruction counts measured again.
-/// README's "Speed" section has the measurement.
+/// The UART: its registers, both FIFOs and the bytes transmitted.
 pub struct Pl011 {
     /// Bytes transmitted, for the host.
     tx: RingBuffer<u8, TX_CAPACITY>,
@@ -361,12 +354,6 @@ pub struct Pl011 {
     int_level: u32,
     dmacr: u32,
 }
-
-#[cfg(target_arch = "x86_64")]
-const _: () = assert!(
-    core::mem::size_of::<Pl011>() % 16 == 8,
-    "the hot loop's code generation depends on this size: see the comment on Pl011"
-);
 
 impl Default for Pl011 {
     fn default() -> Self {

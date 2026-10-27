@@ -899,21 +899,29 @@ fn wake_tick(next_event: u64, now: u64, slice_end: u64) -> u64 {
 /// [`LentStorage`]); `I`
 /// watches it run ([`NoInstrumentation`] unless the builder was given an
 /// observer).
+//
+// The declared order is the layout (`repr(C)`), chosen for `run_until`,
+// whose register allocation follows it (README "Speed"). The board is
+// last, so that no device's size moves another field. Only fixed-size
+// records come before the CPU, and neither the CPU nor the board is at
+// offset 0: a field there shares the machine's address, and the loop's
+// registers are allocated differently.
+#[repr(C)]
 pub struct VirtMachine<S, I = NoInstrumentation> {
-    cpu: Cpu,
-    board: VirtBoard<S>,
-    observer: I,
-    config: VirtConfig,
+    stop: StopSource,
     boot: BootRecord,
+    cpu: Cpu,
     /// The virtio devices it was built with.
     devices: VirtioDevices,
+    config: VirtConfig,
+    exits: Exits,
+    terminal: TerminalKeyboard,
     device_tree: DeviceTree,
     /// The next tick at which a timer or device output changes by itself.
     next_event: u64,
     power: PowerState,
-    terminal: TerminalKeyboard,
-    exits: Exits,
-    stop: StopSource,
+    observer: I,
+    board: VirtBoard<S>,
 }
 
 /// Copy `src` into `ram` at `offset`. The builder checked every placement

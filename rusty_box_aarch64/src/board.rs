@@ -162,8 +162,15 @@ impl VirtioDevices {
 }
 
 /// Everything on the board's bus.
+//
+// The declared order is the layout (`repr(C)`), chosen for the run loop
+// (README "Speed"). The devices come first and what the loop reads on
+// every access, trace or instruction (`storage` to `dma`) after them, so a
+// device's size moves those fields but never changes how the loop reaches
+// them: each access keeps a 32-bit displacement from the board, the
+// instruction lengths and the loop's alignment padding stay as they are.
+#[repr(C)]
 pub struct VirtBoard<S> {
-    pub(crate) storage: S,
     pub(crate) flash0: CfiFlash,
     pub(crate) flash1: CfiFlash,
     pub(crate) gic: GicV2,
@@ -175,6 +182,11 @@ pub struct VirtBoard<S> {
     pub(crate) serial_input: RingBuffer<u8, SERIAL_INPUT_CAPACITY>,
     /// When the pressed power button is released, if it is held.
     pub(crate) power_button_release: Option<VmInstant>,
+    /// The virtio devices, each behind its transport.
+    pub(crate) virtio: [Option<Transport>; MAX_DEVICES],
+    /// The register layout of every transport, plugged or empty.
+    pub(crate) mmio_layout: Layout,
+    pub(crate) storage: S,
     /// A guest access moved a device's next deadline (the RTC's alarm was
     /// re-armed), so the machine's next event has to be worked out again.
     pub(crate) deadline_moved: bool,
@@ -192,10 +204,6 @@ pub struct VirtBoard<S> {
     pub(crate) flash_epoch: u64,
     /// The RAM the devices wrote since the machine last looked.
     pub(crate) dma: Writes,
-    /// The virtio devices, each behind its transport.
-    pub(crate) virtio: [Option<Transport>; MAX_DEVICES],
-    /// The register layout of every transport, plugged or empty.
-    pub(crate) mmio_layout: Layout,
 }
 
 impl<S: GuestStorage> VirtBoard<S> {
