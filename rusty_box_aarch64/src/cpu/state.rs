@@ -328,8 +328,9 @@ impl Cpu {
         let sp_el0 = r.read_u64()?;
         let sp_el1 = r.read_u64()?;
         let pc = r.read_u64()?;
-        let pstate = Pstate::from_spsr(r.read_u64()?)
-            .ok_or(SnapError::Invalid("processor state names an exception level or mode this core lacks"))?;
+        let pstate = Pstate::from_spsr(r.read_u64()?).ok_or(SnapError::Invalid(
+            "processor state names an exception level or mode this core lacks",
+        ))?;
         let mut v = [0u128; 32];
         for reg in v.iter_mut() {
             let lo = r.read_u64()?;
@@ -361,21 +362,28 @@ impl Cpu {
         let icount = r.read_u64()?;
         let retired = r.read_u64()?;
         if retired > icount {
-            return Err(SnapError::Invalid("processor retired more instructions than ticks passed"));
+            return Err(SnapError::Invalid(
+                "processor retired more instructions than ticks passed",
+            ));
         }
         self.tlb.restore(r)?;
         let history_len = usize::from(r.read_u8()?);
         if history_len > PC_HISTORY {
-            return Err(SnapError::Invalid("processor PC history is longer than it holds"));
+            return Err(SnapError::Invalid(
+                "processor PC history is longer than it holds",
+            ));
         }
         if history_len as u64 > retired {
-            return Err(SnapError::Invalid("processor PC history is longer than the instructions it retired"));
+            return Err(SnapError::Invalid(
+                "processor PC history is longer than the instructions it retired",
+            ));
         }
         let mut recent = [0u64; PC_HISTORY];
         for slot in recent.iter_mut().take(history_len) {
             *slot = r.read_u64()?;
         }
-        self.history = super::history::PcHistory::from_addresses(&recent[..history_len], retired, pc);
+        self.history =
+            super::history::PcHistory::from_addresses(&recent[..history_len], retired, pc);
         self.x = x;
         self.sp_el0 = sp_el0;
         self.sp_el1 = sp_el1;
@@ -457,7 +465,10 @@ mod tests {
         c.set_interrupt_lines(true, true);
         c.reset_keeping_time(0x2000);
         // The Event Register is clear, with the event stream counted from now.
-        assert_eq!(c.event, crate::cpu::timer::EventRegister::clear_at(c.counter()));
+        assert_eq!(
+            c.event,
+            crate::cpu::timer::EventRegister::clear_at(c.counter())
+        );
         assert_eq!((c.icount, c.retired), (500, 400));
         assert_eq!(c.reg(Reg::Pc), 0x2000);
         // Everything else is as a processor built to start there has it.
@@ -471,7 +482,10 @@ mod tests {
         assert_eq!(c.state(), fresh.state());
         assert_eq!(c.sys.to_array(), fresh.sys.to_array());
         assert_eq!(c.monitor, fresh.monitor);
-        assert_eq!((c.irq_line, c.fiq_line, c.timer_dirty), (fresh.irq_line, fresh.fiq_line, fresh.timer_dirty));
+        assert_eq!(
+            (c.irq_line, c.fiq_line, c.timer_dirty),
+            (fresh.irq_line, fresh.fiq_line, fresh.timer_dirty)
+        );
         assert_eq!(c.sys.sctlr_el1, super::super::id::SCTLR_EL1_RESET);
     }
 
@@ -479,7 +493,10 @@ mod tests {
     fn a_processor_snapshot_restores_the_same_state() {
         let mut c = cpu();
         c.set_reg(Reg::X3, 33);
-        c.set_v(VReg::new(5).expect("V5 exists"), 0x1234_5678_9ABC_DEF0_1111_2222_3333_4444);
+        c.set_v(
+            VReg::new(5).expect("V5 exists"),
+            0x1234_5678_9ABC_DEF0_1111_2222_3333_4444,
+        );
         c.sys.vbar_el1 = 0x8000;
         c.icount = 99;
         c.retired = 90;

@@ -54,7 +54,12 @@ struct TestBus {
 }
 
 impl PhysBus for TestBus {
-    fn read(&mut self, addr: PhysAddr, width: AccessWidth, _clock: VmClock) -> Result<u64, BusFault> {
+    fn read(
+        &mut self,
+        addr: PhysAddr,
+        width: AccessWidth,
+        _clock: VmClock,
+    ) -> Result<u64, BusFault> {
         let a = addr.get();
         let n = width.bytes();
         if a >= RAM && a + n <= RAM + RAM_LEN as u64 {
@@ -74,7 +79,13 @@ impl PhysBus for TestBus {
         Err(BusFault::Unmapped)
     }
 
-    fn write(&mut self, addr: PhysAddr, width: AccessWidth, value: u64, _clock: VmClock) -> Result<(), BusFault> {
+    fn write(
+        &mut self,
+        addr: PhysAddr,
+        width: AccessWidth,
+        value: u64,
+        _clock: VmClock,
+    ) -> Result<(), BusFault> {
         let a = addr.get();
         let n = width.bytes();
         if a >= RAM && a + n <= RAM + RAM_LEN as u64 {
@@ -115,7 +126,16 @@ fn fp_register(rng: &mut SplitMix64) -> u128 {
         0x0000_0000_0000_0001,
         0x7FEF_FFFF_FFFF_FFFF,
     ];
-    const SINGLE_SPECIALS: [u32; 8] = [0, 1 << 31, 0x7F80_0000, 0xFF80_0000, 0x7FC0_0001, 0x7F80_0001, 1, 0x7F7F_FFFF];
+    const SINGLE_SPECIALS: [u32; 8] = [
+        0,
+        1 << 31,
+        0x7F80_0000,
+        0xFF80_0000,
+        0x7FC0_0001,
+        0x7F80_0001,
+        1,
+        0x7F7F_FFFF,
+    ];
     let r = rng.next();
     let bits = rng.next();
     let upper = u128::from(rng.next()) << 64;
@@ -125,7 +145,10 @@ fn fp_register(rng: &mut SplitMix64) -> u128 {
         (0, true) => u64::from(SINGLE_SPECIALS[(bits % 8) as usize]) | (rng.next() << 32),
         (1, _) => bits,
         (_, false) => (bits & 0x800F_FFFF_FFFF_FFFF) | ((1023 - 40 + (r >> 8) % 80) << 52),
-        (_, true) => u64::from((bits as u32 & 0x807F_FFFF) | ((127 - 20 + ((r >> 8) % 40) as u32) << 23)) | (bits & !0xFFFF_FFFF),
+        (_, true) => {
+            u64::from((bits as u32 & 0x807F_FFFF) | ((127 - 20 + ((r >> 8) % 40) as u32) << 23))
+                | (bits & !0xFFFF_FFFF)
+        }
     };
     upper | u128::from(low)
 }
@@ -146,7 +169,11 @@ fn set_up(cpu: &mut Cpu, bus: &mut TestBus, seed: u64) {
     let rmode = if fp & 1 == 0 { 0 } else { (fp >> 1) & 3 };
     cpu.fpcr = (rmode << 22) | (((fp >> 3) & 0b111) << 24);
     cpu.fpsr = (fp >> 8) & 0b1001_1111;
-    cpu.sys.cpacr_el1 = if fp & (3 << 16) == 0 { ((fp >> 18) & 3) << 20 } else { 3 << 20 };
+    cpu.sys.cpacr_el1 = if fp & (3 << 16) == 0 {
+        ((fp >> 18) & 3) << 20
+    } else {
+        3 << 20
+    };
     cpu.sp_el0 = register(&mut rng);
     cpu.sp_el1 = register(&mut rng);
     let flags = rng.next();
@@ -205,12 +232,28 @@ const TEMPLATES: [(u32, u32, &str); 22] = [
     (0xFF9F_FC1F, 0xD61F_0000, "unconditional branch (register)"),
     (0xFFFF_F01F, 0xD503_201F, "hints"),
     (0x3B00_0000, 0x3900_0000, "load/store (unsigned immediate)"),
-    (0x3B20_0000, 0x3800_0000, "load/store (immediate, unscaled and indexed)"),
+    (
+        0x3B20_0000,
+        0x3800_0000,
+        "load/store (immediate, unscaled and indexed)",
+    ),
     (0x3B20_0C00, 0x3820_0800, "load/store (register offset)"),
     (0x3800_0000, 0x2800_0000, "load/store pair"),
-    (0x1F20_0C00, 0x1E20_0800, "floating-point data processing (2 source)"),
-    (0x1F00_0000, 0x1F00_0000, "floating-point data processing (3 source)"),
-    (0xFFFF_FF00, 0xD53B_E000, "MRS of a generic timer counter register"),
+    (
+        0x1F20_0C00,
+        0x1E20_0800,
+        "floating-point data processing (2 source)",
+    ),
+    (
+        0x1F00_0000,
+        0x1F00_0000,
+        "floating-point data processing (3 source)",
+    ),
+    (
+        0xFFFF_FF00,
+        0xD53B_E000,
+        "MRS of a generic timer counter register",
+    ),
 ];
 
 #[test]
@@ -223,9 +266,18 @@ fn every_pre_decoded_op_executes_as_its_class_handler_does() {
     let mut by_class = Cpu::new(config);
     let mut by_op = Cpu::new(config);
     let mut by_pool = Cpu::new(config);
-    let mut bus_class = TestBus { ram: std::vec![0; RAM_LEN], block: 0 };
-    let mut bus_op = TestBus { ram: std::vec![0; RAM_LEN], block: 0 };
-    let mut bus_pool = TestBus { ram: std::vec![0; RAM_LEN], block: 0 };
+    let mut bus_class = TestBus {
+        ram: std::vec![0; RAM_LEN],
+        block: 0,
+    };
+    let mut bus_op = TestBus {
+        ram: std::vec![0; RAM_LEN],
+        block: 0,
+    };
+    let mut bus_pool = TestBus {
+        ram: std::vec![0; RAM_LEN],
+        block: 0,
+    };
     let mut rng = SplitMix64(0x0DDB_A11C_0FFE_E000);
     let mut hits: BTreeMap<&'static str, u32> = BTreeMap::new();
     for i in 0..400_000u32 {
@@ -250,15 +302,34 @@ fn every_pre_decoded_op_executes_as_its_class_handler_does() {
         // The op as the per-instruction path holds it, and where a trace's
         // op lies.
         let mut raised = None;
-        let got = by_op.exec_op(&mut bus_op, pc, op, &mut raised).map_err(|fault| *fault);
+        let got = by_op
+            .exec_op(&mut bus_op, pc, op, &mut raised)
+            .map_err(|fault| *fault);
         let mut raised = None;
-        let pooled = by_pool.exec_pooled(&mut bus_pool, pc, op, word, &mut raised).map_err(|fault| *fault);
+        let pooled = by_pool
+            .exec_pooled(&mut bus_pool, pc, op, word, &mut raised)
+            .map_err(|fault| *fault);
         assert_eq!(got, want, "{word:#010x} ({name}) seed {seed:#x}: result");
-        assert_eq!(pooled, want, "{word:#010x} ({name}) seed {seed:#x}: result from the pool");
-        assert!(snapshot(&by_op) == snapshot(&by_class), "{word:#010x} ({name}) seed {seed:#x}: processor state");
-        assert!(snapshot(&by_pool) == snapshot(&by_class), "{word:#010x} ({name}) seed {seed:#x}: processor state from the pool");
-        assert!(bus_op.ram == bus_class.ram, "{word:#010x} ({name}) seed {seed:#x}: memory");
-        assert!(bus_pool.ram == bus_class.ram, "{word:#010x} ({name}) seed {seed:#x}: memory from the pool");
+        assert_eq!(
+            pooled, want,
+            "{word:#010x} ({name}) seed {seed:#x}: result from the pool"
+        );
+        assert!(
+            snapshot(&by_op) == snapshot(&by_class),
+            "{word:#010x} ({name}) seed {seed:#x}: processor state"
+        );
+        assert!(
+            snapshot(&by_pool) == snapshot(&by_class),
+            "{word:#010x} ({name}) seed {seed:#x}: processor state from the pool"
+        );
+        assert!(
+            bus_op.ram == bus_class.ram,
+            "{word:#010x} ({name}) seed {seed:#x}: memory"
+        );
+        assert!(
+            bus_pool.ram == bus_class.ram,
+            "{word:#010x} ({name}) seed {seed:#x}: memory from the pool"
+        );
     }
     // Every specialised form ran many times.
     for name in VARIANTS {
@@ -316,9 +387,37 @@ fn a_condition_holds_on_a_flag_value_as_it_does_on_pstate() {
 
 /// The name of every `Op` variant but `Class`.
 const VARIANTS: [&str; 31] = [
-    "AddImm", "AddsImm", "AddSubShift", "LogImm", "LogShift", "MovImm", "Movk", "Adr", "Adrp", "Ubfm", "Sbfm", "Bfm",
-    "CondSel", "Madd", "BCond", "Cbz", "Tbz", "B", "Bl", "Br", "Blr", "Nop", "LoadImm", "StoreImm", "LoadReg",
-    "StoreReg", "LoadPair", "StorePair", "FpDp2", "FpDp3", "ReadCounter",
+    "AddImm",
+    "AddsImm",
+    "AddSubShift",
+    "LogImm",
+    "LogShift",
+    "MovImm",
+    "Movk",
+    "Adr",
+    "Adrp",
+    "Ubfm",
+    "Sbfm",
+    "Bfm",
+    "CondSel",
+    "Madd",
+    "BCond",
+    "Cbz",
+    "Tbz",
+    "B",
+    "Bl",
+    "Br",
+    "Blr",
+    "Nop",
+    "LoadImm",
+    "StoreImm",
+    "LoadReg",
+    "StoreReg",
+    "LoadPair",
+    "StorePair",
+    "FpDp2",
+    "FpDp3",
+    "ReadCounter",
 ];
 
 fn variant(op: Op) -> &'static str {

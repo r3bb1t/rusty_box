@@ -56,16 +56,28 @@ pub(crate) mod spec;
 
 use crate::cpu::exec::bits;
 
-use asimd::{Asimdall, Asimddiff, Asimdelem, Asimdext, Asimdimm, Asimdins, Asimdmisc, Asimdperm, Asimdsame, Asimdshf, Asimdtbl};
+use asimd::{
+    Asimdall, Asimddiff, Asimdelem, Asimdext, Asimdimm, Asimdins, Asimdmisc, Asimdperm, Asimdsame,
+    Asimdshf, Asimdtbl,
+};
 use asisd::{Asisddiff, Asisdelem, Asisdmisc, Asisdone, Asisdpair, Asisdsame, Asisdshf};
-use control::{Barriers, BranchImm, BranchReg, Compbranch, Condbranch, Exception, Hints, Pstate, Systeminstrs, Systemmove, Testbranch};
+use control::{
+    Barriers, BranchImm, BranchReg, Compbranch, Condbranch, Exception, Hints, Pstate, Systeminstrs,
+    Systemmove, Testbranch,
+};
 use crypto::{Cryptoaes, Cryptosha2, Cryptosha3};
 use dpimm::{AddsubImm, Bitfield, Extract, LogImm, Movewide, Pcreladdr};
-use dpreg::{AddsubCarry, AddsubExt, AddsubShift, CondcmpImm, CondcmpReg, Condsel, Dp1src, Dp2src, Dp3src, LogShift};
-use float::{Float2fix, Float2int, Floatccmp, Floatcmp, Floatdp1, Floatdp2, Floatdp3, Floatimm, Floatsel};
+use dpreg::{
+    AddsubCarry, AddsubExt, AddsubShift, CondcmpImm, CondcmpReg, Condsel, Dp1src, Dp2src, Dp3src,
+    LogShift,
+};
+use float::{
+    Float2fix, Float2int, Floatccmp, Floatcmp, Floatdp1, Floatdp2, Floatdp3, Floatimm, Floatsel,
+};
 use ldst::{
-    Asisdlse, Asisdlsep, Asisdlso, Asisdlsop, LdstImmpost, LdstImmpre, LdstPos, LdstRegoff, LdstUnpriv, LdstUnscaled,
-    Ldstexclp, Ldstexclr, LdstnapairOffs, LdstpairOff, LdstpairPost, LdstpairPre, Ldstord, Loadlit,
+    Asisdlse, Asisdlsep, Asisdlso, Asisdlsop, LdstImmpost, LdstImmpre, LdstPos, LdstRegoff,
+    LdstUnpriv, LdstUnscaled, Ldstexclp, Ldstexclr, LdstnapairOffs, Ldstord, LdstpairOff,
+    LdstpairPost, LdstpairPre, Loadlit,
 };
 use reserved::PermUndef;
 
@@ -190,7 +202,9 @@ impl Encoding {
             Self::Condbranch(_) => Class::ConditionalBranch,
             Self::Exception(_) => Class::ExceptionGeneration,
             Self::Hints(_) => Class::Hint,
-            Self::Barriers(_) | Self::Pstate(_) | Self::Systeminstrs(_) | Self::Systemmove(_) => Class::System,
+            Self::Barriers(_) | Self::Pstate(_) | Self::Systeminstrs(_) | Self::Systemmove(_) => {
+                Class::System
+            }
             Self::BranchReg(_) => Class::BranchRegister,
             Self::BranchImm(_) => Class::BranchImmediate,
             Self::Compbranch(_) => Class::CompareAndBranch,
@@ -534,7 +548,11 @@ mod tests {
         }
         // Half precision would be FP = AdvSIMD = 1; every other
         // instruction-set feature is a nonzero field of these registers.
-        assert_eq!((field(pfr0, 16), field(pfr0, 20)), (0, 0), "FP and AdvSIMD, without half precision");
+        assert_eq!(
+            (field(pfr0, 16), field(pfr0, 20)),
+            (0, 0),
+            "FP and AdvSIMD, without half precision"
+        );
         // ID_AA64ISAR0_EL1: AES = 2 (AES and the 64-bit PMULL), SHA1 = 1,
         // SHA2 = 1 (SHA-256, not SHA-512), CRC32 = 1; nothing else.
         assert_eq!(isar0, 0x0000_0000_0001_1120);

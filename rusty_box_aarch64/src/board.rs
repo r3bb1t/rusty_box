@@ -22,7 +22,10 @@
 use rusty_box_core::{ClockHz, RingBuffer, VmClock, VmInstant};
 use rusty_box_devices::display::Resolution;
 
-use crate::bus::{le_value, store_le, AccessWidth, BusFault, CodeEpoch, FetchSource, PhysAddr, PhysBus, RegOffset, Writes};
+use crate::bus::{
+    le_value, store_le, AccessWidth, BusFault, CodeEpoch, FetchSource, PhysAddr, PhysBus,
+    RegOffset, Writes,
+};
 use crate::devices::cfi_flash::{CfiFlash, FlashArray};
 use crate::devices::fw_cfg::FwCfg;
 use crate::devices::gicv2::GicV2;
@@ -31,14 +34,14 @@ use crate::devices::pl031::Pl031;
 use crate::devices::pl061::{Pl061, POWER_BUTTON_LINE};
 #[cfg(feature = "alloc")]
 use crate::devices::virtio::block::Block;
-use crate::devices::virtio::input::{Input, InputKind};
-use crate::devices::virtio::queue::GuestRam;
 #[cfg(feature = "alloc")]
 use crate::devices::virtio::gpu::Gpu;
-#[cfg(feature = "alloc")]
-use crate::disk::Disk;
+use crate::devices::virtio::input::{Input, InputKind};
+use crate::devices::virtio::queue::GuestRam;
 use crate::devices::virtio::{Device, Transport, Vdev, MAX_DEVICES};
 use crate::devices::virtio_mmio::{self, Layout};
+#[cfg(feature = "alloc")]
+use crate::disk::Disk;
 use crate::storage::GuestStorage;
 
 pub const FLASH0_BASE: u64 = 0x0000_0000;
@@ -161,7 +164,9 @@ impl VirtioDevices {
     /// A bit per device, for a snapshot's record of how a machine was
     /// built.
     pub(crate) fn mask(&self) -> u8 {
-        u8::from(self.display.is_some()) | (u8::from(self.keyboard == Plugged::Yes) << 1) | (u8::from(self.tablet == Plugged::Yes) << 2)
+        u8::from(self.display.is_some())
+            | (u8::from(self.keyboard == Plugged::Yes) << 1)
+            | (u8::from(self.tablet == Plugged::Yes) << 2)
     }
 }
 
@@ -268,18 +273,33 @@ impl<S: GuestStorage> VirtBoard<S> {
 
     /// The transport at `slot`, if a device is plugged into it.
     fn transport_mut(&mut self, slot: u64) -> Option<&mut Transport> {
-        self.virtio.iter_mut().flatten().find(|t| u64::from(t.slot()) == slot)
+        self.virtio
+            .iter_mut()
+            .flatten()
+            .find(|t| u64::from(t.slot()) == slot)
     }
 
     /// The virtio input device of `kind`, if one is plugged in.
     pub(crate) fn has_input(&self, kind: InputKind) -> bool {
-        self.virtio.iter().flatten().any(|t| t.input_kind() == Some(kind))
+        self.virtio
+            .iter()
+            .flatten()
+            .any(|t| t.input_kind() == Some(kind))
     }
 
     /// Have the virtio input device of `kind` send the guest what `send`
     /// sends. `false` when there is no such device or it delivered nothing.
-    pub(crate) fn input_event<F: FnOnce(&mut Input, &mut Vdev<'_, '_>) -> bool>(&mut self, kind: InputKind, send: F) -> bool {
-        let Some(transport) = self.virtio.iter_mut().flatten().find(|t| t.input_kind() == Some(kind)) else {
+    pub(crate) fn input_event<F: FnOnce(&mut Input, &mut Vdev<'_, '_>) -> bool>(
+        &mut self,
+        kind: InputKind,
+        send: F,
+    ) -> bool {
+        let Some(transport) = self
+            .virtio
+            .iter_mut()
+            .flatten()
+            .find(|t| t.input_kind() == Some(kind))
+        else {
             return false;
         };
         let mut ram = GuestRam::new(self.storage.ram_mut());
@@ -296,10 +316,13 @@ impl<S: GuestStorage> VirtBoard<S> {
     /// The virtio-gpu, if one is plugged in.
     #[cfg(feature = "alloc")]
     pub(crate) fn gpu(&mut self) -> Option<&mut Gpu> {
-        self.virtio.iter_mut().flatten().find_map(|t| match &mut t.device {
-            Device::Gpu(gpu) => Some(gpu),
-            Device::Input(_) | Device::Block(_) => None,
-        })
+        self.virtio
+            .iter_mut()
+            .flatten()
+            .find_map(|t| match &mut t.device {
+                Device::Gpu(gpu) => Some(gpu),
+                Device::Input(_) | Device::Block(_) => None,
+            })
     }
 
     /// The virtio-blk, if one is plugged in.
@@ -313,10 +336,13 @@ impl<S: GuestStorage> VirtBoard<S> {
 
     #[cfg(feature = "alloc")]
     pub(crate) fn block_mut(&mut self) -> Option<&mut Block> {
-        self.virtio.iter_mut().flatten().find_map(|t| match &mut t.device {
-            Device::Block(block) => Some(block),
-            Device::Input(_) | Device::Gpu(_) => None,
-        })
+        self.virtio
+            .iter_mut()
+            .flatten()
+            .find_map(|t| match &mut t.device {
+                Device::Block(block) => Some(block),
+                Device::Input(_) | Device::Gpu(_) => None,
+            })
     }
 
     /// Ask the guest for a display of `size`, as a QEMU window being resized
@@ -376,7 +402,10 @@ impl<S: GuestStorage> VirtBoard<S> {
         self.gic.set_line(IRQ_RTC, rtc);
         self.gic.set_line(IRQ_GPIO, gpio);
         for transport in self.virtio.iter().flatten() {
-            self.gic.set_line(IRQ_VIRTIO_BASE + u32::from(transport.slot()), transport.irq());
+            self.gic.set_line(
+                IRQ_VIRTIO_BASE + u32::from(transport.slot()),
+                transport.irq(),
+            );
         }
     }
 
@@ -528,7 +557,9 @@ impl<S: GuestStorage> VirtBoard<S> {
     #[inline(always)]
     fn ram_bytes(&self, addr: u64, width: AccessWidth) -> Option<&[u8]> {
         let off = addr.checked_sub(RAM_BASE)? as usize;
-        self.storage.ram().get(off..off.checked_add(width.bytes() as usize)?)
+        self.storage
+            .ram()
+            .get(off..off.checked_add(width.bytes() as usize)?)
     }
 
     /// Store an access to RAM; `None`, with nothing written, unless it lies
@@ -551,7 +582,12 @@ fn in_pci_window(a: u64) -> bool {
 
 impl<S: GuestStorage> PhysBus for VirtBoard<S> {
     #[inline]
-    fn read(&mut self, addr: PhysAddr, width: AccessWidth, clock: VmClock) -> Result<u64, BusFault> {
+    fn read(
+        &mut self,
+        addr: PhysAddr,
+        width: AccessWidth,
+        clock: VmClock,
+    ) -> Result<u64, BusFault> {
         let a = addr.get();
         if let Some(bytes) = self.ram_bytes(a, width) {
             return Ok(le_value(bytes));
@@ -560,7 +596,13 @@ impl<S: GuestStorage> PhysBus for VirtBoard<S> {
     }
 
     #[inline]
-    fn write(&mut self, addr: PhysAddr, width: AccessWidth, value: u64, clock: VmClock) -> Result<(), BusFault> {
+    fn write(
+        &mut self,
+        addr: PhysAddr,
+        width: AccessWidth,
+        value: u64,
+        clock: VmClock,
+    ) -> Result<(), BusFault> {
         if self.store_ram(addr.get(), width, value).is_some() {
             return Ok(());
         }
@@ -600,7 +642,12 @@ impl<S: GuestStorage> PhysBus for VirtBoard<S> {
 
 impl<S: GuestStorage> VirtBoard<S> {
     #[inline(never)]
-    fn read_outside_ram(&mut self, addr: PhysAddr, width: AccessWidth, clock: VmClock) -> Result<u64, BusFault> {
+    fn read_outside_ram(
+        &mut self,
+        addr: PhysAddr,
+        width: AccessWidth,
+        clock: VmClock,
+    ) -> Result<u64, BusFault> {
         let a = addr.get();
         // A flash read changes at most the bank's own mode, back to read
         // array — which a fetch from the bank was not reading, or it would
@@ -643,10 +690,12 @@ impl<S: GuestStorage> VirtBoard<S> {
         ) {
             let reg = RegOffset::new(off.get() % virtio_mmio::TRANSPORT_SIZE);
             let layout = self.mmio_layout;
-            return Ok(match self.transport_mut(off.get() / virtio_mmio::TRANSPORT_SIZE) {
-                Some(transport) => transport.read(reg, width),
-                None => virtio_mmio::read_empty_transport(reg, width, layout),
-            });
+            return Ok(
+                match self.transport_mut(off.get() / virtio_mmio::TRANSPORT_SIZE) {
+                    Some(transport) => transport.read(reg, width),
+                    None => virtio_mmio::read_empty_transport(reg, width, layout),
+                },
+            );
         }
         if in_pci_window(a) {
             return Ok(width.value_mask());
@@ -655,16 +704,28 @@ impl<S: GuestStorage> VirtBoard<S> {
     }
 
     #[inline(never)]
-    fn write_outside_ram(&mut self, addr: PhysAddr, width: AccessWidth, value: u64, clock: VmClock) -> Result<(), BusFault> {
+    fn write_outside_ram(
+        &mut self,
+        addr: PhysAddr,
+        width: AccessWidth,
+        value: u64,
+        clock: VmClock,
+    ) -> Result<(), BusFault> {
         self.touched = true;
         let a = addr.get();
         if let Some(off) = addr.offset_in(FLASH0_BASE, FLASH_BANK_SIZE) {
-            self.flash0.write(FlashArray::ReadOnly(self.storage.code()), off, width, value);
+            self.flash0
+                .write(FlashArray::ReadOnly(self.storage.code()), off, width, value);
             self.flash_epoch += 1;
             return Ok(());
         }
         if let Some(off) = addr.offset_in(FLASH1_BASE, FLASH_BANK_SIZE) {
-            self.flash1.write(FlashArray::Writable(self.storage.vars_mut()), off, width, value);
+            self.flash1.write(
+                FlashArray::Writable(self.storage.vars_mut()),
+                off,
+                width,
+                value,
+            );
             self.flash_epoch += 1;
             return Ok(());
         }
@@ -703,10 +764,18 @@ impl<S: GuestStorage> VirtBoard<S> {
             self.sync_device_lines();
             return Ok(());
         }
-        if let Some(off) = addr.offset_in(VIRTIO_MMIO_BASE, virtio_mmio::TRANSPORT_SIZE * virtio_mmio::TRANSPORT_COUNT) {
+        if let Some(off) = addr.offset_in(
+            VIRTIO_MMIO_BASE,
+            virtio_mmio::TRANSPORT_SIZE * virtio_mmio::TRANSPORT_COUNT,
+        ) {
             let slot = off.get() / virtio_mmio::TRANSPORT_SIZE;
             let reg = RegOffset::new(off.get() % virtio_mmio::TRANSPORT_SIZE);
-            if let Some(transport) = self.virtio.iter_mut().flatten().find(|t| u64::from(t.slot()) == slot) {
+            if let Some(transport) = self
+                .virtio
+                .iter_mut()
+                .flatten()
+                .find(|t| u64::from(t.slot()) == slot)
+            {
                 let mut ram = GuestRam::new(self.storage.ram_mut());
                 transport.write(&mut ram, reg, width, value);
                 self.dma.merge(&ram.written());

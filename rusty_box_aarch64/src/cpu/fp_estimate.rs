@@ -110,7 +110,10 @@ impl Format {
         self.signed(negative, self.exp_max() << self.frac_bits)
     }
     const fn max_normal(self, negative: bool) -> u64 {
-        self.signed(negative, ((self.exp_max() - 1) << self.frac_bits) | self.frac_mask())
+        self.signed(
+            negative,
+            ((self.exp_max() - 1) << self.frac_bits) | self.frac_mask(),
+        )
     }
     const fn zero(self, negative: bool) -> u64 {
         self.signed(negative, 0)
@@ -130,10 +133,18 @@ impl Format {
 /// Arm ARM `FPProcessNaN`: quieten a signalling NaN (raising Invalid
 /// Operation), or produce the default NaN under `FPCR.DN`.
 fn process_nan(f: Format, bits: u64, ctl: EstimateControl) -> Estimate {
-    let fpsr = if f.is_signalling_nan(bits) { fpsr::IOC } else { 0 };
+    let fpsr = if f.is_signalling_nan(bits) {
+        fpsr::IOC
+    } else {
+        0
+    };
     let quiet = bits | (1 << (f.frac_bits - 1));
     Estimate {
-        bits: if ctl.default_nan { f.default_nan() } else { quiet },
+        bits: if ctl.default_nan {
+            f.default_nan()
+        } else {
+            quiet
+        },
         fpsr,
     }
 }
@@ -336,18 +347,42 @@ mod tests {
 
     #[test]
     fn special_inputs_follow_the_pseudocode() {
-        assert_eq!(frecpe(SINGLE, 0x8000_0000, NEAREST), Estimate { bits: 0xFF80_0000, fpsr: fpsr::DZC });
+        assert_eq!(
+            frecpe(SINGLE, 0x8000_0000, NEAREST),
+            Estimate {
+                bits: 0xFF80_0000,
+                fpsr: fpsr::DZC
+            }
+        );
         assert_eq!(frecpe(SINGLE, 0x7F80_0000, NEAREST).bits, 0);
         // The smallest denormal overflows: infinity when rounding to
         // nearest, the largest normal when rounding toward zero.
-        assert_eq!(frecpe(SINGLE, 1, NEAREST), Estimate { bits: 0x7F80_0000, fpsr: fpsr::OFC | fpsr::IXC });
+        assert_eq!(
+            frecpe(SINGLE, 1, NEAREST),
+            Estimate {
+                bits: 0x7F80_0000,
+                fpsr: fpsr::OFC | fpsr::IXC
+            }
+        );
         let rz = EstimateControl::from_fpcr(3 << 22);
         assert_eq!(frecpe(SINGLE, 1, rz).bits, 0x7F7F_FFFF);
         // Under FZ the denormal is a zero first.
         let fz = EstimateControl::from_fpcr(1 << 24);
-        assert_eq!(frecpe(SINGLE, 1, fz), Estimate { bits: 0x7F80_0000, fpsr: fpsr::IDC | fpsr::DZC });
+        assert_eq!(
+            frecpe(SINGLE, 1, fz),
+            Estimate {
+                bits: 0x7F80_0000,
+                fpsr: fpsr::IDC | fpsr::DZC
+            }
+        );
         // A signalling NaN is quietened, or replaced under DN.
-        assert_eq!(frecpe(SINGLE, 0x7F80_0001, NEAREST), Estimate { bits: 0x7FC0_0001, fpsr: fpsr::IOC });
+        assert_eq!(
+            frecpe(SINGLE, 0x7F80_0001, NEAREST),
+            Estimate {
+                bits: 0x7FC0_0001,
+                fpsr: fpsr::IOC
+            }
+        );
         let dn = EstimateControl::from_fpcr(1 << 25);
         assert_eq!(frecpe(SINGLE, 0x7F80_0001, dn).bits, 0x7FC0_0000);
     }

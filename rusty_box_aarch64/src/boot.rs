@@ -44,7 +44,10 @@ pub const DEVICE_TREE_CAPACITY: usize = 64 * 1024;
 /// A command line that sends the kernel's console, and its earliest
 /// messages, to the board's UART.
 pub const SERIAL_CONSOLE_COMMAND_LINE: &str = "console=ttyAMA0 earlycon=pl011,0x9000000";
-const _: () = assert!(UART0_BASE == 0x0900_0000, "the earlycon address names the UART");
+const _: () = assert!(
+    UART0_BASE == 0x0900_0000,
+    "the earlycon address names the UART"
+);
 
 /// The rate at which a directly booted kernel finds the UART's console set
 /// up, eight data bits, no parity, one stop bit, FIFOs enabled: the state
@@ -84,7 +87,9 @@ pub enum ImageError {
 impl core::fmt::Display for ImageError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str(match self {
-            Self::NotArm64Image => "not an arm64 Image (no \"ARM\\x64\" magic; decompress vmlinuz first)",
+            Self::NotArm64Image => {
+                "not an arm64 Image (no \"ARM\\x64\" magic; decompress vmlinuz first)"
+            }
             Self::Truncated => "shorter than an arm64 Image header",
         })
     }
@@ -198,7 +203,9 @@ impl core::fmt::Display for PlacementError {
         f.write_str(match self {
             Self::KernelDoesNotFit => "the kernel does not fit in RAM",
             Self::InitrdDoesNotFit => "the initrd does not fit in RAM",
-            Self::DeviceTreeDoesNotFit => "no room is left in RAM for the device tree after the initrd",
+            Self::DeviceTreeDoesNotFit => {
+                "no room is left in RAM for the device tree after the initrd"
+            }
         })
     }
 }
@@ -210,17 +217,31 @@ impl core::error::Error for PlacementError {}
 /// footprint if that is higher, page-aligned; the device tree at the first
 /// 2 MiB boundary after the initrd, or after where it would start when there
 /// is none.
-pub(crate) fn layout(ram_len: u64, image: &LinuxImage<'_>, initrd_len: u64) -> Result<KernelLayout, PlacementError> {
-    let kernel_end = image.load_offset.checked_add(image.footprint).ok_or(PlacementError::KernelDoesNotFit)?;
+pub(crate) fn layout(
+    ram_len: u64,
+    image: &LinuxImage<'_>,
+    initrd_len: u64,
+) -> Result<KernelLayout, PlacementError> {
+    let kernel_end = image
+        .load_offset
+        .checked_add(image.footprint)
+        .ok_or(PlacementError::KernelDoesNotFit)?;
     if kernel_end > ram_len {
         return Err(PlacementError::KernelDoesNotFit);
     }
-    let initrd_at = (ram_len / 2).min(128 * MIB).max(kernel_end).next_multiple_of(PAGE);
-    let initrd_end = initrd_at.checked_add(initrd_len).ok_or(PlacementError::InitrdDoesNotFit)?;
+    let initrd_at = (ram_len / 2)
+        .min(128 * MIB)
+        .max(kernel_end)
+        .next_multiple_of(PAGE);
+    let initrd_end = initrd_at
+        .checked_add(initrd_len)
+        .ok_or(PlacementError::InitrdDoesNotFit)?;
     if initrd_len != 0 && initrd_end > ram_len {
         return Err(PlacementError::InitrdDoesNotFit);
     }
-    let device_tree_offset = initrd_end.checked_next_multiple_of(2 * MIB).ok_or(PlacementError::DeviceTreeDoesNotFit)?;
+    let device_tree_offset = initrd_end
+        .checked_next_multiple_of(2 * MIB)
+        .ok_or(PlacementError::DeviceTreeDoesNotFit)?;
     if device_tree_offset >= ram_len {
         return Err(PlacementError::DeviceTreeDoesNotFit);
     }
@@ -250,14 +271,32 @@ mod tests {
         assert_eq!(image.load_offset(), 2 * MIB);
         assert_eq!(image.footprint(), 0x0200_0000);
         let old = header(0x8_0000, 0);
-        assert_eq!(LinuxImage::parse(&old).expect("an Image").load_offset(), LEGACY_LOAD_OFFSET);
+        assert_eq!(
+            LinuxImage::parse(&old).expect("an Image").load_offset(),
+            LEGACY_LOAD_OFFSET
+        );
         let high = header(0x10_0000, 0x1000);
-        assert_eq!(LinuxImage::parse(&high).expect("an Image").load_offset(), 0x10_0000);
-        assert_eq!(LinuxImage::parse(&[0u8; 64]).err(), Some(ImageError::NotArm64Image));
-        assert_eq!(LinuxImage::parse(&[0u8; 20]).err(), Some(ImageError::Truncated));
+        assert_eq!(
+            LinuxImage::parse(&high).expect("an Image").load_offset(),
+            0x10_0000
+        );
+        assert_eq!(
+            LinuxImage::parse(&[0u8; 64]).err(),
+            Some(ImageError::NotArm64Image)
+        );
+        assert_eq!(
+            LinuxImage::parse(&[0u8; 20]).err(),
+            Some(ImageError::Truncated)
+        );
         // A header cut short before its magic is short, not foreign.
-        assert_eq!(LinuxImage::parse(&modern[..40]).err(), Some(ImageError::Truncated));
-        assert_eq!(LinuxImage::parse(&modern[..60]).err(), Some(ImageError::Truncated));
+        assert_eq!(
+            LinuxImage::parse(&modern[..40]).err(),
+            Some(ImageError::Truncated)
+        );
+        assert_eq!(
+            LinuxImage::parse(&modern[..60]).err(),
+            Some(ImageError::Truncated)
+        );
     }
 
     #[test]
@@ -269,9 +308,19 @@ mod tests {
         let big = layout(1024 * MIB, &image, 0x10_0000).expect("fits");
         assert_eq!(big.initrd_offset, Some(128 * MIB));
         let tight = layout(64 * MIB, &image, 0x10_0000).expect("fits");
-        assert_eq!(tight.initrd_offset, Some(2 * MIB + 0x0300_0000), "above the kernel's footprint");
-        assert_eq!(layout(32 * MIB, &image, 0), Err(PlacementError::KernelDoesNotFit));
-        assert_eq!(layout(54 * MIB, &image, 8 * MIB), Err(PlacementError::InitrdDoesNotFit));
+        assert_eq!(
+            tight.initrd_offset,
+            Some(2 * MIB + 0x0300_0000),
+            "above the kernel's footprint"
+        );
+        assert_eq!(
+            layout(32 * MIB, &image, 0),
+            Err(PlacementError::KernelDoesNotFit)
+        );
+        assert_eq!(
+            layout(54 * MIB, &image, 8 * MIB),
+            Err(PlacementError::InitrdDoesNotFit)
+        );
     }
 
     /// The device tree follows the initrd at a 2 MiB boundary, or the place
@@ -299,7 +348,11 @@ mod tests {
 
         let low = header(0x1000, 0x1000);
         let low = LinuxImage::parse(&low).expect("an Image");
-        assert_eq!(low.load_offset(), 0x1000, "a kernel may ask to load just above the stub");
+        assert_eq!(
+            low.load_offset(),
+            0x1000,
+            "a kernel may ask to load just above the stub"
+        );
         let placed = layout(128 * MIB, &low, 0).expect("fits");
         assert!(placed.device_tree_offset >= placed.kernel_offset + low.footprint());
     }

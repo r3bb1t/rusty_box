@@ -13,8 +13,8 @@
 
 use rusty_box_aarch64::board::{GIC_CPU_BASE, GIC_DIST_BASE, RAM_BASE};
 use rusty_box_aarch64::{
-    GuestStorage, Instrumentation, LentStorage, MachineBuilder, MemoryLoan, RamSize, Reg, RunBudget, StopReason,
-    SysReg, VirtConfig, VirtMachine,
+    GuestStorage, Instrumentation, LentStorage, MachineBuilder, MemoryLoan, RamSize, Reg,
+    RunBudget, StopReason, SysReg, VirtConfig, VirtMachine,
 };
 
 const RAM_LEN: usize = 4 << 20;
@@ -37,9 +37,14 @@ fn bare(ram: &mut [u8]) -> VirtMachine<LentStorage<'_>> {
 }
 
 /// Run one access of `code` at `address` with the MMU off.
-fn access<S: GuestStorage, I: Instrumentation>(m: &mut VirtMachine<S, I>, code: &[u32], address: u64) {
+fn access<S: GuestStorage, I: Instrumentation>(
+    m: &mut VirtMachine<S, I>,
+    code: &[u32],
+    address: u64,
+) {
     for (i, word) in code.iter().enumerate() {
-        m.mem_write(RAM_BASE + 4 * i as u64, &word.to_le_bytes()).expect("code is in RAM");
+        m.mem_write(RAM_BASE + 4 * i as u64, &word.to_le_bytes())
+            .expect("code is in RAM");
     }
     m.reg_write(Reg::X1, address);
     m.reg_write(Reg::X2, 0);
@@ -47,7 +52,11 @@ fn access<S: GuestStorage, I: Instrumentation>(m: &mut VirtMachine<S, I>, code: 
     assert_eq!(out.stop, StopReason::BudgetExhausted);
 }
 
-fn assert_external_abort<S: GuestStorage, I: Instrumentation>(m: &VirtMachine<S, I>, address: u64, write: bool) {
+fn assert_external_abort<S: GuestStorage, I: Instrumentation>(
+    m: &VirtMachine<S, I>,
+    address: u64,
+    write: bool,
+) {
     let esr = m.sysreg_read(SysReg::ESR_EL1).expect("ESR_EL1");
     assert_eq!(esr >> 26, EC_DATA_ABORT_SAME_EL, "ESR {esr:#x}");
     assert_eq!(esr & 0x3F, DFSC_SYNC_EXTERNAL, "ESR {esr:#x}");

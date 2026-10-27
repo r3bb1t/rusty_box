@@ -27,27 +27,31 @@ use rusty_box_core::machine::{Machine, RunOutcome, SerialPort};
 use rusty_box_core::snap::{SnapRead, SnapResult, SnapWrite};
 use rusty_box_core::{ClockHz, Progress, RunBudget, SnapError, VmClock, VmInstant};
 
-use crate::board::{Plugged, Plugs, VirtBoard, VirtioDevices, FLASH0_BASE, FLASH_BANK_SIZE, RAM_BASE, RAM_LIMIT};
+use crate::board::{
+    Plugged, Plugs, VirtBoard, VirtioDevices, FLASH0_BASE, FLASH_BANK_SIZE, RAM_BASE, RAM_LIMIT,
+};
+use crate::boot::fdt::{self, Edit, Value};
+use crate::boot::{
+    self, DeviceTreeError, KernelLayout, LinuxImage, PlacementError, DEVICE_TREE_CAPACITY,
+};
+use crate::bus::{le_value, AccessWidth, BusFault, PhysAddr, PhysBus, PhysSpan};
+use crate::cpu::{
+    Activity, Cpu, CpuConfig, CpuState, DebugStops, Pstate, Reg, Step, StopCause, SysReg,
+    SysRegRefusal, TranslationFault, UndefinedInsn, VReg,
+};
+use crate::devices::pl011::TX_CAPACITY;
+use crate::devices::virtio::input::InputKind;
 #[cfg(feature = "alloc")]
 use crate::disk::Disk;
-use crate::devices::virtio::input::InputKind;
+use crate::instrumentation::{Instrumentation, NoInstrumentation};
+#[cfg(feature = "alloc")]
+use crate::storage::OwnedStorage;
+use crate::storage::{GuestStorage, LentStorage};
 use rusty_box_core::input::pointer::{PointerButton, PointerInput, PointerPos, WheelSteps};
 #[cfg(feature = "alloc")]
 use rusty_box_devices::display::sink::{DisplaySink, Refreshed};
 #[cfg(feature = "alloc")]
 use rusty_box_devices::display::Resolution;
-use crate::boot::fdt::{self, Edit, Value};
-use crate::boot::{self, DeviceTreeError, KernelLayout, LinuxImage, PlacementError, DEVICE_TREE_CAPACITY};
-use crate::bus::{le_value, AccessWidth, BusFault, PhysAddr, PhysBus, PhysSpan};
-use crate::cpu::{
-    Activity, Cpu, CpuConfig, CpuState, DebugStops, Pstate, Reg, Step, StopCause, SysReg, SysRegRefusal,
-    TranslationFault, UndefinedInsn, VReg,
-};
-use crate::devices::pl011::TX_CAPACITY;
-use crate::instrumentation::{Instrumentation, NoInstrumentation};
-#[cfg(feature = "alloc")]
-use crate::storage::OwnedStorage;
-use crate::storage::{GuestStorage, LentStorage};
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -162,10 +166,17 @@ pub enum BuildError {
 impl core::fmt::Display for BuildError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::FirmwareTooLarge => f.write_str("the firmware is larger than a 64 MiB flash bank"),
-            Self::VariablesTooLarge => f.write_str("the variable store is larger than its flash bank"),
+            Self::FirmwareTooLarge => {
+                f.write_str("the firmware is larger than a 64 MiB flash bank")
+            }
+            Self::VariablesTooLarge => {
+                f.write_str("the variable store is larger than its flash bank")
+            }
             Self::LentRamSize { lent, configured } => {
-                write!(f, "{lent} bytes of RAM were lent for a machine configured with {configured}")
+                write!(
+                    f,
+                    "{lent} bytes of RAM were lent for a machine configured with {configured}"
+                )
             }
             Self::DeviceTree(e) => write!(f, "device tree: {e}"),
             Self::Placement(e) => write!(f, "{e}"),
@@ -334,7 +345,10 @@ impl<'i, I> MachineBuilder<'i, NoBoot, I> {
     /// Start from UEFI firmware built for QEMU's `virt` (EDK2
     /// `ArmVirtQemu`). The image goes in flash bank 0 unpadded.
     pub fn firmware(self, code: &'i [u8]) -> MachineBuilder<'i, Firmware<'i>, I> {
-        self.with_boot(Firmware { code, variables: None })
+        self.with_boot(Firmware {
+            code,
+            variables: None,
+        })
     }
 
     /// Start a Linux kernel directly.
@@ -445,7 +459,13 @@ macro_rules! build_methods {
                 let choice = ($choice)(self.boot);
                 let plan = plan(self.device_tree, choice, self.ram)?;
                 let storage = owned_storage(self.ram, choice)?;
-                Ok(assemble(self.config, plan, storage, self.observer, self.plugs))
+                Ok(assemble(
+                    self.config,
+                    plan,
+                    storage,
+                    self.observer,
+                    self.plugs,
+                ))
             }
         }
 
@@ -457,14 +477,23 @@ macro_rules! build_methods {
             ///
             /// [`BuildError`] when the loan is not the configured size or an
             /// image does not fit where it has to go; the loan is untouched.
-            pub fn build_in<'m>(self, loan: MemoryLoan<'m>) -> Result<VirtMachine<LentStorage<'m>, I>, BuildError>
+            pub fn build_in<'m>(
+                self,
+                loan: MemoryLoan<'m>,
+            ) -> Result<VirtMachine<LentStorage<'m>, I>, BuildError>
             where
                 'i: 'm,
             {
                 let choice = ($choice)(self.boot);
                 let plan = plan(self.device_tree, choice, self.ram)?;
                 let storage = lent_storage(self.ram, choice, loan)?;
-                Ok(assemble(self.config, plan, storage, self.observer, self.plugs))
+                Ok(assemble(
+                    self.config,
+                    plan,
+                    storage,
+                    self.observer,
+                    self.plugs,
+                ))
             }
         }
     };
@@ -491,7 +520,9 @@ fn owned_storage(ram: RamSize, choice: BootChoice<'_>) -> Result<OwnedStorage, B
             }
             let mut vars = vec![0xFFu8; FLASH_BANK_SIZE as usize].into_boxed_slice();
             if let Some(image) = fw.variables {
-                vars.get_mut(..image.len()).ok_or(BuildError::VariablesTooLarge)?.copy_from_slice(image);
+                vars.get_mut(..image.len())
+                    .ok_or(BuildError::VariablesTooLarge)?
+                    .copy_from_slice(image);
             }
             (Box::from(fw.code), vars)
         }
@@ -507,7 +538,11 @@ fn owned_storage(ram: RamSize, choice: BootChoice<'_>) -> Result<OwnedStorage, B
     })
 }
 
-fn lent_storage<'m>(ram: RamSize, choice: BootChoice<'m>, loan: MemoryLoan<'m>) -> Result<LentStorage<'m>, BuildError> {
+fn lent_storage<'m>(
+    ram: RamSize,
+    choice: BootChoice<'m>,
+    loan: MemoryLoan<'m>,
+) -> Result<LentStorage<'m>, BuildError> {
     if loan.ram.len() as u64 != ram.get() {
         return Err(BuildError::LentRamSize {
             lent: loan.ram.len() as u64,
@@ -528,7 +563,10 @@ fn lent_storage<'m>(ram: RamSize, choice: BootChoice<'m>, loan: MemoryLoan<'m>) 
         }
         BootChoice::Kernel(_) | BootChoice::Bare => (&[], &[]),
     };
-    let initial_vars = loan.vars.get_mut(..variables.len()).ok_or(BuildError::VariablesTooLarge)?;
+    let initial_vars = loan
+        .vars
+        .get_mut(..variables.len())
+        .ok_or(BuildError::VariablesTooLarge)?;
     // Every check has passed: only now is the loan written.
     initial_vars.copy_from_slice(variables);
     loan.ram.fill(0);
@@ -561,14 +599,23 @@ impl DeviceTree {
 
 /// Edit `source` to describe a machine with `ram_len` bytes of RAM booting
 /// `choice`, into `out`.
-fn describe(source: &[u8], ram_len: u64, choice: BootChoice<'_>, layout: Option<KernelLayout>, out: &mut DeviceTree) -> Result<(), DeviceTreeError> {
+fn describe(
+    source: &[u8],
+    ram_len: u64,
+    choice: BootChoice<'_>,
+    layout: Option<KernelLayout>,
+    out: &mut DeviceTree,
+) -> Result<(), DeviceTreeError> {
     let mut reg = [0u8; 16];
     reg[..8].copy_from_slice(&RAM_BASE.to_be_bytes());
     reg[8..].copy_from_slice(&ram_len.to_be_bytes());
     let initrd = match (choice, layout.and_then(|l| l.initrd_offset)) {
         (BootChoice::Kernel(k), Some(offset)) => {
             let start = RAM_BASE + offset;
-            Some((start.to_be_bytes(), (start + k.initrd.len() as u64).to_be_bytes()))
+            Some((
+                start.to_be_bytes(),
+                (start + k.initrd.len() as u64).to_be_bytes(),
+            ))
         }
         (BootChoice::Kernel(_), None) | (BootChoice::Firmware(_) | BootChoice::Bare, _) => None,
     };
@@ -639,7 +686,9 @@ fn plan(source_tree: &[u8], choice: BootChoice<'_>, ram: RamSize) -> Result<Plan
         let tree_len = device_tree.len as u64;
         match layout {
             Some(layout) => layout.fit_device_tree(ram_len, tree_len)?,
-            None if tree_len > ram_len => return Err(BuildError::DeviceTree(DeviceTreeError::TooLarge)),
+            None if tree_len > ram_len => {
+                return Err(BuildError::DeviceTree(DeviceTreeError::TooLarge))
+            }
             None => {}
         }
     }
@@ -647,7 +696,13 @@ fn plan(source_tree: &[u8], choice: BootChoice<'_>, ram: RamSize) -> Result<Plan
 }
 
 /// The machine `plan` describes, in `storage`, started.
-fn assemble<S: GuestStorage, I: Instrumentation>(config: VirtConfig, plan: Plan, storage: S, observer: I, plugs: Plugs) -> VirtMachine<S, I> {
+fn assemble<S: GuestStorage, I: Instrumentation>(
+    config: VirtConfig,
+    plan: Plan,
+    storage: S,
+    observer: I,
+    plugs: Plugs,
+) -> VirtMachine<S, I> {
     let Plan { boot, device_tree } = plan;
     let mut cpu = Cpu::new(CpuConfig {
         ips: config.ips,
@@ -779,7 +834,11 @@ pub struct TooManyExits {
 
 impl core::fmt::Display for TooManyExits {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{} exit addresses requested; a machine watches at most {MAX_EXITS}", self.requested)
+        write!(
+            f,
+            "{} exit addresses requested; a machine watches at most {MAX_EXITS}",
+            self.requested
+        )
     }
 }
 
@@ -918,7 +977,10 @@ pub struct VirtMachine<S, I = NoInstrumentation> {
 /// to, nothing is written.
 fn place(ram: &mut [u8], offset: u64, src: &[u8]) {
     let start = offset as usize;
-    if let Some(dst) = start.checked_add(src.len()).and_then(|end| ram.get_mut(start..end)) {
+    if let Some(dst) = start
+        .checked_add(src.len())
+        .and_then(|end| ram.get_mut(start..end))
+    {
         dst.copy_from_slice(src);
     }
 }
@@ -929,13 +991,26 @@ fn place(ram: &mut [u8], offset: u64, src: &[u8]) {
 struct RamView<'a>(&'a [u8]);
 
 impl PhysBus for RamView<'_> {
-    fn read(&mut self, addr: PhysAddr, width: AccessWidth, _clock: rusty_box_core::VmClock) -> Result<u64, BusFault> {
+    fn read(
+        &mut self,
+        addr: PhysAddr,
+        width: AccessWidth,
+        _clock: rusty_box_core::VmClock,
+    ) -> Result<u64, BusFault> {
         let off = addr.get().checked_sub(RAM_BASE).ok_or(BusFault::Unmapped)? as usize;
-        let end = off.checked_add(width.bytes() as usize).ok_or(BusFault::Unmapped)?;
+        let end = off
+            .checked_add(width.bytes() as usize)
+            .ok_or(BusFault::Unmapped)?;
         self.0.get(off..end).map(le_value).ok_or(BusFault::Unmapped)
     }
 
-    fn write(&mut self, _addr: PhysAddr, _width: AccessWidth, _value: u64, _clock: rusty_box_core::VmClock) -> Result<(), BusFault> {
+    fn write(
+        &mut self,
+        _addr: PhysAddr,
+        _width: AccessWidth,
+        _value: u64,
+        _clock: rusty_box_core::VmClock,
+    ) -> Result<(), BusFault> {
         Err(BusFault::Unmapped)
     }
 }
@@ -987,17 +1062,23 @@ impl<S: GuestStorage, I: Instrumentation> VirtMachine<S, I> {
             // Firmware finds the tree at the base of RAM, as on QEMU.
             BootRecord::Firmware => place(parts.ram, 0, self.device_tree.as_slice()),
             BootRecord::Kernel { layout } => {
-                place(parts.ram, layout.device_tree_offset, self.device_tree.as_slice());
+                place(
+                    parts.ram,
+                    layout.device_tree_offset,
+                    self.device_tree.as_slice(),
+                );
                 place(parts.ram, layout.kernel_offset, parts.kernel);
                 if let Some(offset) = layout.initrd_offset {
                     place(parts.ram, offset, parts.initrd);
                 }
                 // What QEMU's bootloader_aarch64 leaves: x0 the device tree,
                 // x4 the entry it branched through, x1-x3 zero from reset.
-                self.cpu.set_reg(Reg::X0, RAM_BASE + layout.device_tree_offset);
+                self.cpu
+                    .set_reg(Reg::X0, RAM_BASE + layout.device_tree_offset);
                 self.cpu.set_reg(Reg::X4, reset_pc);
                 // And the console set up, as firmware would leave it.
-                self.board.set_up_console(boot::DIRECT_BOOT_CONSOLE_BAUD, self.cpu.clock());
+                self.board
+                    .set_up_console(boot::DIRECT_BOOT_CONSOLE_BAUD, self.cpu.clock());
             }
             BootRecord::Bare => {}
         }
@@ -1012,14 +1093,18 @@ impl<S: GuestStorage, I: Instrumentation> VirtMachine<S, I> {
         self.cpu.take_timer_dirty();
         let lines = self.cpu.timer_lines();
         self.board.set_timer_lines(lines.physical, lines.virtual_);
-        let device_deadline = self.board.advance_devices(self.cpu.clock()).map(|t| t.ticks());
+        let device_deadline = self
+            .board
+            .advance_devices(self.cpu.clock())
+            .map(|t| t.ticks());
         let timer_deadline = self.cpu.next_timer_deadline();
         self.next_event = match (timer_deadline, device_deadline) {
             (Some(a), Some(b)) => a.min(b),
             (Some(a), None) | (None, Some(a)) => a,
             (None, None) => u64::MAX,
         };
-        self.cpu.set_interrupt_lines(self.board.gic.irq_out(), self.board.gic.fiq_out());
+        self.cpu
+            .set_interrupt_lines(self.board.gic.irq_out(), self.board.gic.fiq_out());
     }
 
     /// Run until `budget` is spent or something stops the machine.
@@ -1036,7 +1121,12 @@ impl<S: GuestStorage, I: Instrumentation> VirtMachine<S, I> {
     /// reaches `until` or an exit address, or `count` instructions retire.
     /// `None` leaves that bound off. A processor waiting for an interrupt is
     /// woken to run from `begin`.
-    pub fn emu_start(&mut self, begin: u64, until: Option<u64>, count: Option<u64>) -> BatchOutcome {
+    pub fn emu_start(
+        &mut self,
+        begin: u64,
+        until: Option<u64>,
+        count: Option<u64>,
+    ) -> BatchOutcome {
         self.cpu.set_reg(Reg::Pc, begin);
         self.cpu.activity = Activity::Running;
         let configured = self.exits;
@@ -1057,7 +1147,9 @@ impl<S: GuestStorage, I: Instrumentation> VirtMachine<S, I> {
     /// [`TooManyExits`] past [`MAX_EXITS`] addresses; the list is unchanged.
     pub fn set_exits(&mut self, exits: &[u64]) -> Result<(), TooManyExits> {
         if exits.len() > MAX_EXITS {
-            return Err(TooManyExits { requested: exits.len() });
+            return Err(TooManyExits {
+                requested: exits.len(),
+            });
         }
         self.exits.addrs[..exits.len()].copy_from_slice(exits);
         self.exits.len = exits.len();
@@ -1133,7 +1225,12 @@ impl<S: GuestStorage, I: Instrumentation> VirtMachine<S, I> {
     /// holds, runs a block of exactly that many (accel/tcg/cpu-exec.c
     /// `cpu_loop_exec_tb`, with `CF_COUNT_MASK`).
     #[inline(always)]
-    fn run_slice<const WATCH: bool>(&mut self, slice_end: u64, tick_end: u64, instruction_end: u64) -> Slice {
+    fn run_slice<const WATCH: bool>(
+        &mut self,
+        slice_end: u64,
+        tick_end: u64,
+        instruction_end: u64,
+    ) -> Slice {
         'slice: loop {
             if self.cpu.icount >= self.next_event {
                 self.sync_events();
@@ -1210,7 +1307,9 @@ impl<S: GuestStorage, I: Instrumentation> VirtMachine<S, I> {
                 left -= self.cpu.retired - retired;
                 // A burst was counted to the next event: one worked out
                 // again ends it.
-                if (self.cpu.timer_dirty || self.board.touched) && self.after_device_access() == NextEvent::WorkedOutAgain {
+                if (self.cpu.timer_dirty || self.board.touched)
+                    && self.after_device_access() == NextEvent::WorkedOutAgain
+                {
                     continue 'slice;
                 }
             }
@@ -1231,7 +1330,8 @@ impl<S: GuestStorage, I: Instrumentation> VirtMachine<S, I> {
             self.sync_events();
             NextEvent::WorkedOutAgain
         } else {
-            self.cpu.set_interrupt_lines(self.board.gic.irq_out(), self.board.gic.fiq_out());
+            self.cpu
+                .set_interrupt_lines(self.board.gic.irq_out(), self.board.gic.fiq_out());
             NextEvent::Unchanged
         }
     }
@@ -1396,7 +1496,9 @@ impl<S: GuestStorage, I: Instrumentation> VirtMachine<S, I> {
     /// The virtio tablet, if the machine was built with one.
     pub fn pointer(&mut self) -> Option<Pointer<'_, S>> {
         if self.board.has_input(InputKind::Tablet) {
-            Some(Pointer { board: &mut self.board })
+            Some(Pointer {
+                board: &mut self.board,
+            })
         } else {
             None
         }
@@ -1406,7 +1508,9 @@ impl<S: GuestStorage, I: Instrumentation> VirtMachine<S, I> {
     #[cfg(feature = "alloc")]
     pub fn display(&mut self) -> Option<Display<'_, S>> {
         if self.devices.display.is_some() {
-            Some(Display { board: &mut self.board })
+            Some(Display {
+                board: &mut self.board,
+            })
         } else {
             None
         }
@@ -1465,7 +1569,8 @@ impl<S: GuestStorage, I: Instrumentation> VirtMachine<S, I> {
     ///
     /// [`TranslationFault`] when it has no translation.
     pub fn virt_to_phys(&self, va: u64) -> Result<u64, TranslationFault> {
-        self.cpu.debug_translate(&mut RamView(self.board.storage.ram()), va)
+        self.cpu
+            .debug_translate(&mut RamView(self.board.storage.ram()), va)
     }
 
     /// Read memory through the guest's page tables, one page at a time.
@@ -1479,7 +1584,9 @@ impl<S: GuestStorage, I: Instrumentation> VirtMachine<S, I> {
         while done < buf.len() {
             let at = va.wrapping_add(done as u64);
             let chunk = page_chunk(at, buf.len() - done);
-            let pa = self.virt_to_phys(at).map_err(|fault| MemoryError::Translation { va: at, fault })?;
+            let pa = self
+                .virt_to_phys(at)
+                .map_err(|fault| MemoryError::Translation { va: at, fault })?;
             self.mem_read(pa, &mut buf[done..done + chunk])?;
             done += chunk;
         }
@@ -1499,7 +1606,9 @@ impl<S: GuestStorage, I: Instrumentation> VirtMachine<S, I> {
         while done < data.len() {
             let at = va.wrapping_add(done as u64);
             let chunk = page_chunk(at, data.len() - done);
-            let pa = self.virt_to_phys(at).map_err(|fault| MemoryError::Translation { va: at, fault })?;
+            let pa = self
+                .virt_to_phys(at)
+                .map_err(|fault| MemoryError::Translation { va: at, fault })?;
             self.mem_write(pa, &data[done..done + chunk])?;
             done += chunk;
         }
@@ -1617,7 +1726,10 @@ impl<S: GuestStorage, I: Instrumentation> VirtMachine<S, I> {
         let storage = &self.board.storage;
         let images = storage.boot_images();
         let (kernel_offset, initrd_offset) = match self.boot {
-            BootRecord::Kernel { layout } => (layout.kernel_offset, layout.initrd_offset.unwrap_or(u64::MAX)),
+            BootRecord::Kernel { layout } => (
+                layout.kernel_offset,
+                layout.initrd_offset.unwrap_or(u64::MAX),
+            ),
             BootRecord::Firmware | BootRecord::Bare => (0, 0),
         };
         Shape {
@@ -1702,13 +1814,19 @@ impl<S: GuestStorage, I: Instrumentation> VirtMachine<S, I> {
         let mut magic = [0u8; 8];
         r.read_bytes(&mut magic)?;
         if magic != SNAPSHOT_MAGIC {
-            return Err(SnapError::Invalid("not a rusty_box AArch64 machine snapshot"));
+            return Err(SnapError::Invalid(
+                "not a rusty_box AArch64 machine snapshot",
+            ));
         }
         if r.read_u32()? != SNAPSHOT_VERSION {
-            return Err(SnapError::Invalid("snapshot written by another version of this machine"));
+            return Err(SnapError::Invalid(
+                "snapshot written by another version of this machine",
+            ));
         }
         if Shape::restore(r)? != self.shape() {
-            return Err(SnapError::Invalid("snapshot is of a machine built differently"));
+            return Err(SnapError::Invalid(
+                "snapshot is of a machine built differently",
+            ));
         }
         match self.restore_body(r) {
             Ok(()) => Ok(()),
@@ -1724,7 +1842,11 @@ impl<S: GuestStorage, I: Instrumentation> VirtMachine<S, I> {
             0 => PowerState::Running,
             1 => PowerState::PoweredOff,
             2 => PowerState::ProcessorOff,
-            _ => return Err(SnapError::Invalid("snapshot power state is not one a machine has")),
+            _ => {
+                return Err(SnapError::Invalid(
+                    "snapshot power state is not one a machine has",
+                ))
+            }
         };
         let tree_len = r.read_len(DEVICE_TREE_CAPACITY)?;
         r.read_bytes(&mut self.device_tree.bytes[..tree_len])?;
@@ -1806,7 +1928,8 @@ impl Shape {
         for value in v.iter_mut() {
             *value = r.read_u64()?;
         }
-        let [ram_len, vars_len, code_hash, kernel_hash, initrd_hash, ips, counter_hz, kernel_offset, initrd_offset] = v;
+        let [ram_len, vars_len, code_hash, kernel_hash, initrd_hash, ips, counter_hz, kernel_offset, initrd_offset] =
+            v;
         Ok(Self {
             ram_len,
             vars_len,
@@ -1957,7 +2080,9 @@ impl<S: GuestStorage> Keyboard<'_, S> {
             *slot = event;
             count += 1;
         }
-        self.board.input_event(InputKind::Keyboard, |input, vdev| input.keys(vdev, &batch[..count]))
+        self.board.input_event(InputKind::Keyboard, |input, vdev| {
+            input.keys(vdev, &batch[..count])
+        })
     }
 
     fn send_to_terminal<E: Iterator<Item = (Key, KeyAction)>>(&mut self, events: E) -> bool {
@@ -2016,15 +2141,19 @@ pub struct Pointer<'m, S> {
 
 impl<S: GuestStorage> PointerInput for Pointer<'_, S> {
     fn move_to(&mut self, pos: PointerPos) -> bool {
-        self.board.input_event(InputKind::Tablet, |input, vdev| input.move_to(vdev, pos))
+        self.board
+            .input_event(InputKind::Tablet, |input, vdev| input.move_to(vdev, pos))
     }
 
     fn button(&mut self, button: PointerButton, action: KeyAction) -> bool {
-        self.board.input_event(InputKind::Tablet, |input, vdev| input.button(vdev, button, action))
+        self.board.input_event(InputKind::Tablet, |input, vdev| {
+            input.button(vdev, button, action)
+        })
     }
 
     fn wheel(&mut self, steps: WheelSteps) -> bool {
-        self.board.input_event(InputKind::Tablet, |input, vdev| input.wheel(vdev, steps))
+        self.board
+            .input_event(InputKind::Tablet, |input, vdev| input.wheel(vdev, steps))
     }
 }
 

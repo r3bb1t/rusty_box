@@ -30,7 +30,13 @@ pub(crate) struct SysRegKey(u32);
 
 impl SysRegKey {
     pub(crate) const fn new(op0: u32, op1: u32, crn: u32, crm: u32, op2: u32) -> Self {
-        Self(((op0 & 3) << 14) | ((op1 & 7) << 11) | ((crn & 15) << 7) | ((crm & 15) << 3) | (op2 & 7))
+        Self(
+            ((op0 & 3) << 14)
+                | ((op1 & 7) << 11)
+                | ((crn & 15) << 7)
+                | ((crm & 15) << 3)
+                | (op2 & 7),
+        )
     }
 
     /// From an `MRS`/`MSR`/`SYS` instruction word.
@@ -212,7 +218,8 @@ pub(super) const MDSCR_FIELDS: u64 = MDSCR_SAVE_RESTORE | 1 | MDSCR_TDCC | (1 <<
 const OSLSR_OSLK: u64 = 1 << 1;
 
 /// `SCTLR_EL1` FEAT_MTE fields: ITFSB, TCF0, TCF, ATA0, ATA, TCSO0, TCSO.
-const SCTLR_MTE: u64 = (1 << 37) | (3 << 38) | (3 << 40) | (1 << 42) | (1 << 43) | (1 << 58) | (1 << 59);
+const SCTLR_MTE: u64 =
+    (1 << 37) | (3 << 38) | (3 << 40) | (1 << 42) | (1 << 43) | (1 << 58) | (1 << 59);
 /// `SCTLR_EL1` EL0 controls.
 const SCTLR_UMA: u64 = 1 << 9;
 const SCTLR_DZE: u64 = 1 << 14;
@@ -446,7 +453,11 @@ impl Cpu {
             _ => {
                 if let Some(v) = self.debug_breakpoint_read(key) {
                     v
-                } else if key.op0() == 3 && key.op1() == 0 && key.crn() == 0 && (1..=7).contains(&key.crm()) {
+                } else if key.op0() == 3
+                    && key.op1() == 0
+                    && key.crn() == 0
+                    && (1..=7).contains(&key.crm())
+                {
                     0
                 } else {
                     return Err(SysRegError::Undefined);
@@ -490,12 +501,21 @@ impl Cpu {
 
     /// `MSR`: write `value` to the register `key` names at the current EL.
     #[inline]
-    pub(crate) fn sysreg_write(&mut self, key: SysRegKey, value: u64) -> Result<WriteEffect, SysRegError> {
+    pub(crate) fn sysreg_write(
+        &mut self,
+        key: SysRegKey,
+        value: u64,
+    ) -> Result<WriteEffect, SysRegError> {
         self.sysreg_write_as(key, value, Accessor::Guest)
     }
 
     /// Write `value` to the register `key` names, as `accessor` writes it.
-    fn sysreg_write_as(&mut self, key: SysRegKey, value: u64, accessor: Accessor) -> Result<WriteEffect, SysRegError> {
+    fn sysreg_write_as(
+        &mut self,
+        key: SysRegKey,
+        value: u64,
+        accessor: Accessor,
+    ) -> Result<WriteEffect, SysRegError> {
         let el = self.access_level(accessor);
         let el0 = el == El::El0;
         let k = key.0;
@@ -774,14 +794,20 @@ impl Cpu {
             Err(_) if key.0 == OSLAR_EL1 => Err(SysRegRefusal::WriteOnly),
             // A host reads at EL1 past the FP enable and the EL0 controls,
             // so only UNDEFINED is left to come back.
-            Err(SysRegError::Undefined | SysRegError::TrapToEl1 | SysRegError::FpTrap) => Err(SysRegRefusal::Absent),
+            Err(SysRegError::Undefined | SysRegError::TrapToEl1 | SysRegError::FpTrap) => {
+                Err(SysRegRefusal::Absent)
+            }
         }
     }
 
     /// A host's write of `reg`, with the effect an EL1 `MSR` has: a write to
     /// a register the table walk reads flushes the TLB, and a timer write is
     /// reported for the machine to re-evaluate its lines.
-    pub(crate) fn host_sysreg_write(&mut self, reg: SysReg, value: u64) -> Result<WriteEffect, SysRegRefusal> {
+    pub(crate) fn host_sysreg_write(
+        &mut self,
+        reg: SysReg,
+        value: u64,
+    ) -> Result<WriteEffect, SysRegRefusal> {
         let key = SysRegKey::from_sysreg(reg);
         match self.sysreg_write_as(key, value, Accessor::Host) {
             Ok(WriteEffect::FlushTlb) => {

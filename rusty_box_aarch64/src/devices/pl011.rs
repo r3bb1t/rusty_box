@@ -212,7 +212,10 @@ const DMACR_MASK: u32 = 0x7;
 
 /// The receive FIFO's depth (DDI 0183F §2.2.5; QEMU `PL011_FIFO_DEPTH`).
 pub const RX_FIFO_DEPTH: usize = 16;
-const _: () = assert!(RX_FIFO_DEPTH.is_power_of_two(), "slots are found by masking");
+const _: () = assert!(
+    RX_FIFO_DEPTH.is_power_of_two(),
+    "slots are found by masking"
+);
 
 /// The transmit FIFO's depth (DDI 0183F §2.2.4): 16 bytes, one (the
 /// transmit holding register) while `UARTLCR_H.FEN` is clear.
@@ -955,17 +958,29 @@ impl Pl011 {
             None
         };
         if usize::from(read_pos) >= RX_FIFO_DEPTH {
-            return Err(SnapError::Invalid("PL011 read position outside the receive FIFO"));
+            return Err(SnapError::Invalid(
+                "PL011 read position outside the receive FIFO",
+            ));
         }
-        let depth = if lcr & LCR_FEN != 0 { RX_FIFO_DEPTH as u32 } else { 1 };
+        let depth = if lcr & LCR_FEN != 0 {
+            RX_FIFO_DEPTH as u32
+        } else {
+            1
+        };
         if depth == 1 && read_pos != 0 {
-            return Err(SnapError::Invalid("PL011 read position past the one-entry receive holding register"));
+            return Err(SnapError::Invalid(
+                "PL011 read position past the one-entry receive holding register",
+            ));
         }
         if read_count > depth {
-            return Err(SnapError::Invalid("PL011 receive count beyond the receive FIFO's depth"));
+            return Err(SnapError::Invalid(
+                "PL011 receive count beyond the receive FIFO's depth",
+            ));
         }
         if u32::from(tx_count) > depth {
-            return Err(SnapError::Invalid("PL011 transmit count beyond the transmit FIFO's depth"));
+            return Err(SnapError::Invalid(
+                "PL011 transmit count beyond the transmit FIFO's depth",
+            ));
         }
         let cr = cr & CR_MASK;
         if tx_count > 0 && cr & (CR_UARTEN | CR_TXE) == CR_UARTEN | CR_TXE {
@@ -1798,7 +1813,11 @@ mod tests {
         write(&mut uart, LCR_H, LCR_FEN);
         write(&mut uart, CR, ENABLED | CR_LBE);
         write(&mut uart, DR, u32::from(b'L'));
-        assert_eq!(uart.drain_tx().collect::<std::vec::Vec<u8>>(), b"L", "the byte still leaves");
+        assert_eq!(
+            uart.drain_tx().collect::<std::vec::Vec<u8>>(),
+            b"L",
+            "the byte still leaves"
+        );
         assert!(rx(&mut uart, b'h'), "host input is consumed");
         assert_eq!(read(&mut uart, DR), u32::from(b'L'));
         assert_eq!(read(&mut uart, FR) & FLAG_RXFE, FLAG_RXFE, "and dropped");
@@ -1904,7 +1923,11 @@ mod tests {
         assert!(!uart.irq(), "UARTICR clears what the level would not");
         write(&mut uart, CR, 0x300 | CR_LBE | CR_RTS);
         write(&mut uart, CR, 0x300);
-        assert_eq!(read(&mut uart, FR) & modem, FLAG_CTS, "leaving loopback keeps the status");
+        assert_eq!(
+            read(&mut uart, FR) & modem,
+            FLAG_CTS,
+            "leaving loopback keeps the status"
+        );
     }
 
     #[test]
@@ -1916,10 +1939,18 @@ mod tests {
         assert_eq!(read(&mut uart, RIS) & INT_BE, INT_BE);
         assert!(uart.irq());
         assert_eq!(read(&mut uart, DR), DR_BE);
-        assert_eq!(read(&mut uart, RSR), DR_BE >> 8, "the break error lands in UARTRSR");
+        assert_eq!(
+            read(&mut uart, RSR),
+            DR_BE >> 8,
+            "the break error lands in UARTRSR"
+        );
         write(&mut uart, ICR, INT_BE);
         write(&mut uart, LCR_H, LCR_BRK);
-        assert_eq!(read(&mut uart, FR) & FLAG_RXFE, FLAG_RXFE, "only setting BRK sends a break");
+        assert_eq!(
+            read(&mut uart, FR) & FLAG_RXFE,
+            FLAG_RXFE,
+            "only setting BRK sends a break"
+        );
         assert_eq!(read(&mut uart, RIS) & INT_BE, 0);
         write(&mut uart, CR, 0x300 | CR_LBE);
         write(&mut uart, LCR_H, 0);
@@ -2116,7 +2147,10 @@ mod tests {
         let mut restored = Pl011::new();
         let mut source: &[u8] = &image;
         restored.restore(&mut source).expect("restore");
-        assert!(source.is_empty(), "the restore consumed exactly what the save wrote");
+        assert!(
+            source.is_empty(),
+            "the restore consumed exactly what the save wrote"
+        );
         assert_eq!(read(&mut restored, FR) & FLAG_CTS, FLAG_CTS);
         assert_eq!(read(&mut restored, DR), u32::from(b'x'));
         assert_eq!(read(&mut restored, DR), u32::from(b'y'));
@@ -2335,7 +2369,10 @@ mod tests {
         let pos = 11 * 4 + RX_FIFO_DEPTH * 4;
         image[pos] = 1;
         let mut source: &[u8] = &image;
-        assert!(uart.restore(&mut source).is_err(), "FEN is clear, so only slot 0 exists");
+        assert!(
+            uart.restore(&mut source).is_err(),
+            "FEN is clear, so only slot 0 exists"
+        );
         image[pos] = RX_FIFO_DEPTH as u8;
         let mut source: &[u8] = &image;
         assert!(uart.restore(&mut source).is_err());

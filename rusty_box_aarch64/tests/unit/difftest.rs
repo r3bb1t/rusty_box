@@ -58,11 +58,40 @@ struct State {
 
 /// Mirrors `F32_SPECIAL` in gen_unicorn.py.
 const F32_SPECIAL: [u64; 34] = [
-    0x0000_0000, 0x8000_0000, 0x7F80_0000, 0xFF80_0000, 0x7FC0_0000, 0xFFC1_2345, 0x7F80_0001, 0xFFA0_0000,
-    0x0000_0001, 0x807F_FFFF, 0x0080_0000, 0x8080_0000, 0x7F7F_FFFF, 0xFF7F_FFFF, 0x3F80_0000, 0xBF80_0000,
-    0x3F00_0000, 0xBF00_0000, 0x3FC0_0000, 0x4020_0000, 0xC020_0000, 0x4060_0000, 0x4B00_0000, 0x4B7F_FFFF,
-    0x4F00_0000, 0xCF00_0000, 0x4F80_0000, 0x5F00_0000, 0xDF00_0000, 0x5F80_0000, 0x4EFF_FFFF, 0x477F_E000,
-    0x3380_0000, 0x387F_C000,
+    0x0000_0000,
+    0x8000_0000,
+    0x7F80_0000,
+    0xFF80_0000,
+    0x7FC0_0000,
+    0xFFC1_2345,
+    0x7F80_0001,
+    0xFFA0_0000,
+    0x0000_0001,
+    0x807F_FFFF,
+    0x0080_0000,
+    0x8080_0000,
+    0x7F7F_FFFF,
+    0xFF7F_FFFF,
+    0x3F80_0000,
+    0xBF80_0000,
+    0x3F00_0000,
+    0xBF00_0000,
+    0x3FC0_0000,
+    0x4020_0000,
+    0xC020_0000,
+    0x4060_0000,
+    0x4B00_0000,
+    0x4B7F_FFFF,
+    0x4F00_0000,
+    0xCF00_0000,
+    0x4F80_0000,
+    0x5F00_0000,
+    0xDF00_0000,
+    0x5F80_0000,
+    0x4EFF_FFFF,
+    0x477F_E000,
+    0x3380_0000,
+    0x387F_C000,
 ];
 
 /// Mirrors `F64_SPECIAL` in gen_unicorn.py.
@@ -215,7 +244,12 @@ struct TestBus {
 }
 
 impl PhysBus for TestBus {
-    fn read(&mut self, addr: PhysAddr, width: AccessWidth, _clock: VmClock) -> Result<u64, BusFault> {
+    fn read(
+        &mut self,
+        addr: PhysAddr,
+        width: AccessWidth,
+        _clock: VmClock,
+    ) -> Result<u64, BusFault> {
         let a = addr.get();
         let n = width.bytes();
         if a >= CODE && a + n <= CODE + 4 {
@@ -235,7 +269,13 @@ impl PhysBus for TestBus {
         Err(BusFault::Unmapped)
     }
 
-    fn write(&mut self, addr: PhysAddr, width: AccessWidth, value: u64, _clock: VmClock) -> Result<(), BusFault> {
+    fn write(
+        &mut self,
+        addr: PhysAddr,
+        width: AccessWidth,
+        value: u64,
+        _clock: VmClock,
+    ) -> Result<(), BusFault> {
         let a = addr.get();
         let n = width.bytes();
         if a >= DATA && a + n <= DATA + DATA_SIZE as u64 {
@@ -259,7 +299,10 @@ fn parse_pairs(field: &str, prefix: &str, key_radix: u32) -> Vec<(usize, u128)> 
     body.split(',')
         .filter_map(|p| {
             let (k, v) = p.split_once(':')?;
-            Some((usize::from_str_radix(k, key_radix).ok()?, u128::from_str_radix(v, 16).ok()?))
+            Some((
+                usize::from_str_radix(k, key_radix).ok()?,
+                u128::from_str_radix(v, 16).ok()?,
+            ))
         })
         .collect()
 }
@@ -287,7 +330,11 @@ fn reserved_simd_and_fp_encodings_are_undefined_before_the_fp_trap() {
         (0x4F3F_E420, "scvtf v0.4s, v1.4s, #1", 0x07),
         (0x5F3F_E420, "scvtf s0, s1, #1", 0x07),
         (0x5F7F_FC20, "fcvtzs d0, d1, #1", 0x07),
-        (0x4F1F_E420, "scvtf v0.8h, v1.8h, #1 (half precision, FEAT_FP16)", 0x00),
+        (
+            0x4F1F_E420,
+            "scvtf v0.8h, v1.8h, #1 (half precision, FEAT_FP16)",
+            0x00,
+        ),
         (0x1E20_2820, "fadd s0, s1, s0", 0x07),
     ];
     for (insn, text, want_ec) in cases {
@@ -312,7 +359,13 @@ fn reserved_simd_and_fp_encodings_are_undefined_before_the_fp_trap() {
 #[test]
 fn udf_takes_the_undefined_instruction_exception_whatever_its_immediate() {
     let ips = ClockHz::new(1_000_000).unwrap_or(ClockHz::BOCHS_DEFAULT);
-    for insn in [0x0000_0000, 0x0000_0001, 0x0000_0002, 0x0000_0003, 0x0000_ABCD] {
+    for insn in [
+        0x0000_0000,
+        0x0000_0001,
+        0x0000_0002,
+        0x0000_0003,
+        0x0000_ABCD,
+    ] {
         let mut cpu = Cpu::new(CpuConfig {
             ips,
             counter_hz: ips,
@@ -323,7 +376,11 @@ fn udf_takes_the_undefined_instruction_exception_whatever_its_immediate() {
             insn,
             data: std::vec![0; DATA_SIZE],
         };
-        assert_eq!(cpu.step(&mut bus, &mut NoInstrumentation), Step::Retired, "{insn:#010x}");
+        assert_eq!(
+            cpu.step(&mut bus, &mut NoInstrumentation),
+            Step::Retired,
+            "{insn:#010x}"
+        );
         assert_eq!(cpu.sys.esr_el1 >> 26, 0x00, "{insn:#010x}");
     }
 }
@@ -355,7 +412,11 @@ fn add_and_sub_immediate_with_shift_1x_are_undefined() {
             insn,
             data: std::vec![0; DATA_SIZE],
         };
-        assert_eq!(cpu.step(&mut bus, &mut NoInstrumentation), Step::Retired, "{text}");
+        assert_eq!(
+            cpu.step(&mut bus, &mut NoInstrumentation),
+            Step::Retired,
+            "{text}"
+        );
         assert_eq!(cpu.sys.esr_el1 >> 26, 0x00, "{text}: UNDEFINED");
         assert_eq!(cpu.x[0], 0, "{text}: nothing written");
     }
@@ -400,7 +461,11 @@ impl Stepper {
             insn,
             data: std::vec![0; DATA_SIZE],
         };
-        assert_eq!(self.cpu.step(&mut bus, &mut NoInstrumentation), Step::Retired, "{insn:#010x}");
+        assert_eq!(
+            self.cpu.step(&mut bus, &mut NoInstrumentation),
+            Step::Retired,
+            "{insn:#010x}"
+        );
         Some(self.cpu.sys.esr_el1 >> 26).filter(|&ec| ec != 0x3F)
     }
 }
@@ -424,7 +489,11 @@ fn barriers_need_op1_011() {
         assert_eq!(step_exception_class(insn), None, "{text} executes");
         for op1 in [0b000, 0b001, 0b010, 0b100, 0b111] {
             let other = (insn & !(0b111 << 16)) | (op1 << 16);
-            assert_eq!(step_exception_class(other), Some(0x00), "{text} with op1 = {op1:03b}: UNDEFINED");
+            assert_eq!(
+                step_exception_class(other),
+                Some(0x00),
+                "{text} with op1 = {op1:03b}: UNDEFINED"
+            );
         }
     }
 }
@@ -441,7 +510,11 @@ fn tlb_maintenance_is_the_armv8_0_set() {
             let insn = 0xD508_8000 | (crm << 8) | (op2 << 5);
             let allocated = matches!(crm, 3 | 7) && matches!(op2, 0 | 1 | 2 | 3 | 5 | 7);
             let expected = if allocated { None } else { Some(0x00) };
-            assert_eq!(step_exception_class(insn), expected, "sys #0, c8, c{crm}, #{op2}, x0");
+            assert_eq!(
+                step_exception_class(insn),
+                expected,
+                "sys #0, c8, c{crm}, #{op2}, x0"
+            );
         }
     }
 }
@@ -458,7 +531,11 @@ fn compares_with_zero_need_rm_zero() {
         (0x1E60_2038, "fcmpe d1, #0.0"),
     ] {
         assert_eq!(step_exception_class(insn), None, "{text} executes");
-        assert_eq!(step_exception_class(insn | (0b00011 << 16)), Some(0x00), "{text} with Rm = 3: UNDEFINED");
+        assert_eq!(
+            step_exception_class(insn | (0b00011 << 16)),
+            Some(0x00),
+            "{text} with Rm = 3: UNDEFINED"
+        );
     }
 }
 
@@ -514,7 +591,11 @@ mod against_disarm64 {
     fn executes(word: u32) -> Executes {
         let op = disarm64::decoder::decode(word);
         let Some(d) = op.as_ref().map(|op| op.definition()) else {
-            return if word & 0xFFFF_F01F == 0xD503_201F { Executes::HintSpace } else { Executes::No };
+            return if word & 0xFFFF_F01F == 0xD503_201F {
+                Executes::HintSpace
+            } else {
+                Executes::No
+            };
         };
         if implemented(d.feature_set) {
             return Executes::Allocated;
@@ -622,7 +703,12 @@ mod against_disarm64 {
         assert!(source.errors.is_empty(), "{:?}", source.errors);
         for o in source.occurrences.iter() {
             for _ in 0..64 {
-                check(&mut stepper, o.cube.opcode | (next() & !o.cube.mask), &mut tally, &first);
+                check(
+                    &mut stepper,
+                    o.cube.opcode | (next() & !o.cube.mask),
+                    &mut tally,
+                    &first,
+                );
             }
         }
         for _ in 0..1_000_000 {
@@ -657,7 +743,10 @@ mod against_disarm64 {
                 });
             }
         });
-        std::eprintln!("{threads} threads, {:.1} s", started.elapsed().as_secs_f64());
+        std::eprintln!(
+            "{threads} threads, {:.1} s",
+            started.elapsed().as_secs_f64()
+        );
         let tally = total.into_inner().unwrap_or_default();
         report(&tally, &first);
         assert_eq!(tally.words, 1 << 32, "every word checked once");
@@ -674,7 +763,9 @@ struct Tally {
 
 /// disarm64's disassembly of `insn`, for a failure message.
 fn disassemble(insn: u32) -> String {
-    disarm64::decoder::decode(insn).map(|op| format!("{op}")).unwrap_or_default()
+    disarm64::decoder::decode(insn)
+        .map(|op| format!("{op}"))
+        .unwrap_or_default()
 }
 
 /// Whether `insn` sets a should-be field otherwise, the one reason a word
@@ -746,7 +837,10 @@ fn every_unicorn_vector_matches_after_one_step() {
                 tally.skipped += 1;
             } else {
                 tally.mismatched += 1;
-                failures.push(format!("{name} {insn:08x} `{}`: UNDEFINED here, executed by Unicorn", disassemble(insn)));
+                failures.push(format!(
+                    "{name} {insn:08x} `{}`: UNDEFINED here, executed by Unicorn",
+                    disassemble(insn)
+                ));
             }
             continue;
         }
@@ -777,7 +871,11 @@ fn every_unicorn_vector_matches_after_one_step() {
             ));
         }
         if cpu.pstate.nzcv() != want_nzcv {
-            diffs.push(format!("nzcv {:#x} want {:#x}", cpu.pstate.nzcv(), want_nzcv));
+            diffs.push(format!(
+                "nzcv {:#x} want {:#x}",
+                cpu.pstate.nzcv(),
+                want_nzcv
+            ));
         }
         if cpu.fpsr != want_fpsr {
             diffs.push(format!("fpsr {:#x} want {:#x}", cpu.fpsr, want_fpsr));
@@ -796,7 +894,12 @@ fn every_unicorn_vector_matches_after_one_step() {
             }
         }
         if bus.data != want_data {
-            let first = bus.data.iter().zip(&want_data).position(|(a, b)| a != b).unwrap_or(0);
+            let first = bus
+                .data
+                .iter()
+                .zip(&want_data)
+                .position(|(a, b)| a != b)
+                .unwrap_or(0);
             diffs.push(format!(
                 "data[{first:#x}] {:#x} want {:#x}",
                 bus.data[first], want_data[first]
@@ -806,16 +909,29 @@ fn every_unicorn_vector_matches_after_one_step() {
             tally.passed += 1;
         } else {
             tally.mismatched += 1;
-            failures.push(format!("{name} {insn:08x} `{}`: {}", disassemble(insn), diffs.join("; ")));
+            failures.push(format!(
+                "{name} {insn:08x} `{}`: {}",
+                disassemble(insn),
+                diffs.join("; ")
+            ));
         }
     }
 
     std::eprintln!("family                 pass   skip  MISMATCH");
     for (name, t) in &tallies {
-        std::eprintln!("{name:<22} {:>5} {:>6} {:>9}", t.passed, t.skipped, t.mismatched);
+        std::eprintln!(
+            "{name:<22} {:>5} {:>6} {:>9}",
+            t.passed,
+            t.skipped,
+            t.mismatched
+        );
     }
     for f in failures.iter().take(60) {
         std::eprintln!("MISMATCH {f}");
     }
-    assert!(failures.is_empty(), "{} vectors disagree with Unicorn", failures.len());
+    assert!(
+        failures.is_empty(),
+        "{} vectors disagree with Unicorn",
+        failures.len()
+    );
 }

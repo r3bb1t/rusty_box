@@ -10,8 +10,8 @@
 
 use super::exec::{bit, bits, ExecResult, Flow};
 use super::fp::{
-    fp_binary, fp_compare, fp_compare_holds, fp_convert, fp_convert_round_odd, fp_mul_add, fp_to_int, fp_unary,
-    int_to_fp, FpBinary, FpCompare, FpConversion, FpType, FpUnary,
+    fp_binary, fp_compare, fp_compare_holds, fp_convert, fp_convert_round_odd, fp_mul_add,
+    fp_to_int, fp_unary, int_to_fp, FpBinary, FpCompare, FpConversion, FpType, FpUnary,
 };
 use super::fp_estimate::{urecpe, ursqrte};
 use super::simd::{elem, set_elem};
@@ -84,8 +84,9 @@ impl Cpu {
         };
         let has_scalar_form = matches!(
             op,
-            Op::Binary(FpBinary::MulX | FpBinary::RecipStep | FpBinary::RSqrtStep | FpBinary::AbsDiff)
-                | Op::Compare(_)
+            Op::Binary(
+                FpBinary::MulX | FpBinary::RecipStep | FpBinary::RSqrtStep | FpBinary::AbsDiff
+            ) | Op::Compare(_)
         );
         if (scalar && !has_scalar_form) || (!scalar && ty == FpType::Double && !q) {
             return self.undefined(pc, insn);
@@ -162,7 +163,12 @@ impl Cpu {
             /// FCVTL: double each element's precision.
             Long,
         }
-        let round = |rounding| Op::Each(Each::Unary(FpUnary::RoundInt(rounding, InexactReport::Suppress)));
+        let round = |rounding| {
+            Op::Each(Each::Unary(FpUnary::RoundInt(
+                rounding,
+                InexactReport::Suppress,
+            )))
+        };
         let op = match (u, a, opcode) {
             (false, false, 0b10110) => Op::Narrow,
             (false, false, 0b10111) => Op::Long,
@@ -185,7 +191,10 @@ impl Cpu {
             (false, true, 0b11111) => Op::Each(Each::Unary(FpUnary::RecpX)),
             (true, false, 0b10110) => Op::NarrowOdd,
             (true, false, 0b11000) => round(FpRounding::TieAway),
-            (true, false, 0b11001) => Op::Each(Each::Unary(FpUnary::RoundInt(env.rounding(), InexactReport::Raise))),
+            (true, false, 0b11001) => Op::Each(Each::Unary(FpUnary::RoundInt(
+                env.rounding(),
+                InexactReport::Raise,
+            ))),
             (true, false, 0b11010) => Op::Each(Each::ToInt(FpRounding::TieEven, false)),
             (true, false, 0b11011) => Op::Each(Each::ToInt(FpRounding::NegInf, false)),
             (true, false, 0b11100) => Op::Each(Each::ToInt(FpRounding::TieAway, false)),
@@ -193,9 +202,10 @@ impl Cpu {
             (true, true, 0b01100) => Op::Each(Each::Zero(ZeroCompare::Ge)),
             (true, true, 0b01101) => Op::Each(Each::Zero(ZeroCompare::Le)),
             (true, true, 0b01111) => Op::Each(Each::Unary(FpUnary::Neg)),
-            (true, true, 0b11001) => {
-                Op::Each(Each::Unary(FpUnary::RoundInt(env.rounding(), InexactReport::Suppress)))
-            }
+            (true, true, 0b11001) => Op::Each(Each::Unary(FpUnary::RoundInt(
+                env.rounding(),
+                InexactReport::Suppress,
+            ))),
             (true, true, 0b11010) => Op::Each(Each::ToInt(FpRounding::PosInf, false)),
             (true, true, 0b11011) => Op::Each(Each::ToInt(FpRounding::Zero, false)),
             (true, true, 0b11100) => Op::Each(Each::URSqrtEstimate),
@@ -247,7 +257,11 @@ impl Cpu {
                     };
                     set_elem(&mut part, e, esize, v);
                 }
-                r = if scalar { part } else { narrow_into(d, part, q) };
+                r = if scalar {
+                    part
+                } else {
+                    narrow_into(d, part, q)
+                };
             }
             Op::Long => {
                 let (esize, conversion) = if sz {
@@ -278,9 +292,13 @@ impl Cpu {
                             let ordering = fp_compare(ty, x, FpType::ZERO, signal, &mut env);
                             let holds = match cmp {
                                 ZeroCompare::Gt => ordering == FpOrdering::Greater,
-                                ZeroCompare::Ge => matches!(ordering, FpOrdering::Greater | FpOrdering::Equal),
+                                ZeroCompare::Ge => {
+                                    matches!(ordering, FpOrdering::Greater | FpOrdering::Equal)
+                                }
                                 ZeroCompare::Eq => ordering == FpOrdering::Equal,
-                                ZeroCompare::Le => matches!(ordering, FpOrdering::Less | FpOrdering::Equal),
+                                ZeroCompare::Le => {
+                                    matches!(ordering, FpOrdering::Less | FpOrdering::Equal)
+                                }
                                 ZeroCompare::Lt => ordering == FpOrdering::Less,
                             };
                             if holds {
@@ -289,7 +307,9 @@ impl Cpu {
                                 0
                             }
                         }
-                        Each::ToInt(rounding, signed) => fp_to_int(ty, x, 0, rounding, signed, wide, &mut env),
+                        Each::ToInt(rounding, signed) => {
+                            fp_to_int(ty, x, 0, rounding, signed, wide, &mut env)
+                        }
                         Each::FromInt(signed) => int_to_fp(ty, x, 0, signed, wide, &mut env),
                         Each::URecipEstimate => u64::from(urecpe(x as u32)),
                         Each::URSqrtEstimate => u64::from(ursqrte(x as u32)),

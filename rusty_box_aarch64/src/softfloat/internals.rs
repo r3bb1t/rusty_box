@@ -140,7 +140,12 @@ pub(crate) fn norm_subnormal_f64_sig(sig: u64) -> ExpSig64 {
 
 /// Berkeley `softfloat_roundPackToF16`. Half precision is reached only by
 /// conversions, whose Arm FPRoundCV forces FZ16 off, so it never flushes.
-pub(crate) fn round_pack_to_f16(sign: bool, exp: i16, sig: u16, status: &mut SoftFloatStatus) -> Float16 {
+pub(crate) fn round_pack_to_f16(
+    sign: bool,
+    exp: i16,
+    sig: u16,
+    status: &mut SoftFloatStatus,
+) -> Float16 {
     let rounding_mode = softfloat_get_rounding_mode(status);
     let round_near_even = rounding_mode == ROUND_NEAR_EVEN;
     let mut round_increment: u16 = 0x8;

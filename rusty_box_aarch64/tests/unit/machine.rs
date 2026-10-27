@@ -18,7 +18,8 @@ use rusty_box_core::VmInstant;
 use super::VirtMachine;
 use crate::board::{GIC_CPU_BASE, GIC_DIST_BASE, RAM_BASE};
 use crate::{
-    LentStorage, MachineBuilder, MemoryLoan, Progress, RamSize, Reg, RunBudget, StopReason, SysReg, VirtConfig,
+    LentStorage, MachineBuilder, MemoryLoan, Progress, RamSize, Reg, RunBudget, StopReason, SysReg,
+    VirtConfig,
 };
 
 const RAM_LEN: usize = 1 << 20;
@@ -67,7 +68,9 @@ enum Double {
 enum Run {
     Step(RunBudget),
     /// `emu_start` from RAM's base with no count.
-    EmuStart { until: Option<u64> },
+    EmuStart {
+        until: Option<u64>,
+    },
 }
 
 /// What a run ended with, and the guest time after it.
@@ -100,10 +103,13 @@ fn nothing(_: &mut Machine<'_>) {}
 /// GIC's registers where `TIMER_WFI` expects them.
 fn timer_set(m: &mut Machine<'_>) {
     let config = VirtConfig::DEFAULT;
-    let cval = u128::from(TIMER_TICKS) * u128::from(config.counter_hz.get()) / u128::from(config.ips.get());
+    let cval = u128::from(TIMER_TICKS) * u128::from(config.counter_hz.get())
+        / u128::from(config.ips.get());
     let cval = u64::try_from(cval).expect("the deadline fits the counter");
-    m.sysreg_write(SysReg::CNTV_CVAL_EL0, cval).expect("CNTV_CVAL_EL0");
-    m.sysreg_write(SysReg::CNTV_CTL_EL0, 1).expect("CNTV_CTL_EL0");
+    m.sysreg_write(SysReg::CNTV_CVAL_EL0, cval)
+        .expect("CNTV_CVAL_EL0");
+    m.sysreg_write(SysReg::CNTV_CTL_EL0, 1)
+        .expect("CNTV_CTL_EL0");
     m.reg_write(Reg::X1, GIC_DIST_BASE);
     m.reg_write(Reg::X3, GIC_CPU_BASE);
 }
@@ -144,9 +150,7 @@ fn ran(code: &'static [u32], setup: fn(&mut Machine<'_>), double: Double, run: R
             .send(result)
             .expect("the test waits for the answer until it has failed");
     });
-    answered
-        .recv_timeout(ANSWER_WITHIN)
-        .expect("the run ends")
+    answered.recv_timeout(ANSWER_WITHIN).expect("the run ends")
 }
 
 const HOST_RUNS: [Run; 3] = [
@@ -228,10 +232,7 @@ fn a_waiting_processor_sleeps_past_a_stuck_deadline_to_another_devices() {
             },
             "it sleeps to the release, after which nothing will wake it"
         );
-        assert_eq!(
-            ran(&WFI, button_pressed, Double::StuckAt(0), run),
-            healthy
-        );
+        assert_eq!(ran(&WFI, button_pressed, Double::StuckAt(0), run), healthy);
     }
 }
 

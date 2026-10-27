@@ -141,7 +141,10 @@ pub struct GuestRam<'a> {
 
 impl<'a> GuestRam<'a> {
     pub fn new(ram: &'a mut [u8]) -> Self {
-        Self { ram, written: Writes::NONE }
+        Self {
+            ram,
+            written: Writes::NONE,
+        }
     }
 
     /// The memory the device wrote, or took to write in place.
@@ -232,7 +235,9 @@ impl Descriptor {
         let mut raw = [0u8; DESC_SIZE as usize];
         ram.read(table.checked_add(DESC_SIZE * u64::from(index))?, &mut raw)?;
         Some(Self {
-            addr: u64::from_le_bytes([raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], raw[6], raw[7]]),
+            addr: u64::from_le_bytes([
+                raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], raw[6], raw[7],
+            ]),
             len: u32::from_le_bytes([raw[8], raw[9], raw[10], raw[11]]),
             flags: u16::from_le_bytes([raw[12], raw[13]]),
             next: u16::from_le_bytes([raw[14], raw[15]]),
@@ -338,7 +343,8 @@ impl Chain {
         }
         walk.steps += 1;
         let desc = Descriptor::read(ram, self.table, index)?;
-        walk.next = (desc.flags & VRING_DESC_F_NEXT != 0 && u32::from(desc.next) < self.table_len).then_some(u32::from(desc.next));
+        walk.next = (desc.flags & VRING_DESC_F_NEXT != 0 && u32::from(desc.next) < self.table_len)
+            .then_some(u32::from(desc.next));
         Some(desc)
     }
 
@@ -492,7 +498,14 @@ impl Queue {
     }
 
     /// QEMU `virtio_queue_set_rings`.
-    pub fn set_rings(&mut self, ram: &GuestRam<'_>, desc: u64, avail: u64, used: u64, features: RingFeatures) -> Result<(), QueueFault> {
+    pub fn set_rings(
+        &mut self,
+        ram: &GuestRam<'_>,
+        desc: u64,
+        avail: u64,
+        used: u64,
+        features: RingFeatures,
+    ) -> Result<(), QueueFault> {
         if self.num == 0 {
             return Ok(());
         }
@@ -504,7 +517,11 @@ impl Queue {
 
     /// QEMU `virtio_init_region_cache`: map the rings at their current size,
     /// or none while there is no descriptor table.
-    pub fn map_rings(&mut self, ram: &GuestRam<'_>, features: RingFeatures) -> Result<(), QueueFault> {
+    pub fn map_rings(
+        &mut self,
+        ram: &GuestRam<'_>,
+        features: RingFeatures,
+    ) -> Result<(), QueueFault> {
         self.mapped = false;
         if self.desc == 0 {
             return Ok(());
@@ -573,7 +590,11 @@ impl Queue {
     /// QEMU `virtqueue_split_pop`: take the next chain the driver made
     /// available, after checking every descriptor of it. The caller has
     /// checked that the device is not disabled.
-    pub fn pop(&mut self, ram: &mut GuestRam<'_>, features: RingFeatures) -> Result<Option<Chain>, QueueFault> {
+    pub fn pop(
+        &mut self,
+        ram: &mut GuestRam<'_>,
+        features: RingFeatures,
+    ) -> Result<Option<Chain>, QueueFault> {
         if self.num == 0 || self.is_empty(ram, false) {
             return Ok(None);
         }
@@ -665,7 +686,12 @@ impl Queue {
     /// indices, publish the available index just read (once notifications
     /// are on again); without, set or clear `VRING_USED_F_NO_NOTIFY`.
     #[cfg(feature = "alloc")]
-    pub fn set_notification(&mut self, ram: &mut GuestRam<'_>, features: RingFeatures, enable: bool) {
+    pub fn set_notification(
+        &mut self,
+        ram: &mut GuestRam<'_>,
+        features: RingFeatures,
+        enable: bool,
+    ) {
         self.notification = enable;
         if self.desc == 0 {
             return;
@@ -693,7 +719,12 @@ impl Queue {
 
     /// QEMU `virtqueue_map_desc` for one buffer, `mapped` buffers already
     /// mapped of at most `limit`.
-    fn map_buffer(ram: &GuestRam<'_>, desc: &Descriptor, mapped: u32, limit: u32) -> Result<(), QueueFault> {
+    fn map_buffer(
+        ram: &GuestRam<'_>,
+        desc: &Descriptor,
+        mapped: u32,
+        limit: u32,
+    ) -> Result<(), QueueFault> {
         if desc.len == 0 {
             return Err(QueueFault::ZeroSized);
         }
@@ -736,14 +767,21 @@ impl Queue {
         self.set_used_u16(ram, 2, new);
         self.used_idx = new;
         self.inuse = self.inuse.wrapping_sub(1);
-        if i32::from(new.wrapping_sub(self.signalled_used) as i16) < i32::from(new.wrapping_sub(old)) {
+        if i32::from(new.wrapping_sub(self.signalled_used) as i16)
+            < i32::from(new.wrapping_sub(old))
+        {
             self.signalled_used_valid = false;
         }
     }
 
     /// QEMU `virtio_split_should_notify`: whether the driver wants an
     /// interrupt for what the device has used.
-    pub fn should_notify(&mut self, ram: &GuestRam<'_>, features: RingFeatures, disabled: bool) -> bool {
+    pub fn should_notify(
+        &mut self,
+        ram: &GuestRam<'_>,
+        features: RingFeatures,
+        disabled: bool,
+    ) -> bool {
         if features.notify_on_empty && self.inuse == 0 && self.is_empty(ram, disabled) {
             return true;
         }
@@ -783,7 +821,9 @@ impl Queue {
         // A queue the device has is never sized to nothing, and one it does
         // not have never to anything else.
         if (num == 0) != (self.num_default == 0) || num > self.num_default {
-            return Err(SnapError::Invalid("virtqueue size the device does not allow"));
+            return Err(SnapError::Invalid(
+                "virtqueue size the device does not allow",
+            ));
         }
         self.num = num;
         self.desc = r.read_u64()?;
@@ -796,7 +836,9 @@ impl Queue {
         self.signalled_used = r.read_u16()?;
         self.inuse = r.read_u16()?;
         if self.inuse > self.num {
-            return Err(SnapError::Invalid("virtqueue with more chains in use than it holds"));
+            return Err(SnapError::Invalid(
+                "virtqueue with more chains in use than it holds",
+            ));
         }
         self.signalled_used_valid = r.read_bool()?;
         Ok(())

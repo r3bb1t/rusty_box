@@ -29,8 +29,8 @@
 
 use rusty_box_aarch64::board::RAM_BASE;
 use rusty_box_aarch64::{
-    GuestStorage, Instrumentation, LentStorage, MachineBuilder, MemoryLoan, RamSize, Reg, RunBudget, StopReason,
-    SysReg, VirtConfig, VirtMachine,
+    GuestStorage, Instrumentation, LentStorage, MachineBuilder, MemoryLoan, RamSize, Reg,
+    RunBudget, StopReason, SysReg, VirtConfig, VirtMachine,
 };
 
 const RAM_LEN: usize = 4 << 20;
@@ -65,21 +65,29 @@ fn bare(ram: &mut [u8]) -> VirtMachine<LentStorage<'_>> {
 
 fn load<S: GuestStorage, I: Instrumentation>(m: &mut VirtMachine<S, I>, words: &[u32]) {
     for (i, word) in words.iter().enumerate() {
-        m.mem_write(RAM_BASE + 4 * i as u64, &word.to_le_bytes()).expect("code is in RAM");
+        m.mem_write(RAM_BASE + 4 * i as u64, &word.to_le_bytes())
+            .expect("code is in RAM");
     }
 }
 
 fn write_desc<S: GuestStorage, I: Instrumentation>(m: &mut VirtMachine<S, I>, at: u64, desc: u64) {
-    m.mem_write(at, &desc.to_le_bytes()).expect("tables are in RAM");
+    m.mem_write(at, &desc.to_le_bytes())
+        .expect("tables are in RAM");
 }
 
 /// The MMU on, with TTBR0 mapping RAM identically at VA 0x4000_0000 (so the
 /// code runs) and TTBR1, T1SZ and IPS as each test needs them.
-fn mmu_on<S: GuestStorage, I: Instrumentation>(m: &mut VirtMachine<S, I>, t1sz: u64, ips: u64, ttbr1: u64) {
+fn mmu_on<S: GuestStorage, I: Instrumentation>(
+    m: &mut VirtMachine<S, I>,
+    t1sz: u64,
+    ips: u64,
+    ttbr1: u64,
+) {
     let l1 = RAM_BASE + 0x1_0000;
     write_desc(m, l1 + 8, RAM_BASE | AF | BLOCK);
     m.sysreg_write(SysReg::MAIR_EL1, 0xFF).expect("MAIR");
-    m.sysreg_write(SysReg::TCR_EL1, 25 | (t1sz << 16) | (ips << 32)).expect("TCR");
+    m.sysreg_write(SysReg::TCR_EL1, 25 | (t1sz << 16) | (ips << 32))
+        .expect("TCR");
     m.sysreg_write(SysReg::TTBR0_EL1, l1).expect("TTBR0");
     m.sysreg_write(SysReg::TTBR1_EL1, ttbr1).expect("TTBR1");
     let sctlr = m.sysreg_read(SysReg::SCTLR_EL1).expect("SCTLR");
@@ -164,8 +172,16 @@ fn an_external_abort_on_the_walk_of_an_at_is_a_data_abort() {
     step1(&mut m);
     let esr = m.sysreg_read(SysReg::ESR_EL1).expect("ESR_EL1");
     assert_eq!(esr >> 26, EC_DATA_ABORT_SAME_EL, "ESR {esr:#x}");
-    assert_eq!(esr & 0x3F, 0x15, "synchronous external abort on the walk, level 1");
-    assert_eq!(esr & (1 << 8), 1 << 8, "CM: an address translation instruction");
+    assert_eq!(
+        esr & 0x3F,
+        0x15,
+        "synchronous external abort on the walk, level 1"
+    );
+    assert_eq!(
+        esr & (1 << 8),
+        1 << 8,
+        "CM: an address translation instruction"
+    );
     assert_eq!(esr & (1 << 6), 1 << 6, "WnR");
     assert_eq!(m.sysreg_read(SysReg::FAR_EL1), Ok(UPPER_VA));
     assert_eq!(par(&m), par_before, "PAR_EL1 is not written");
@@ -305,7 +321,8 @@ fn a_store_exclusive_after_its_load_exclusive_succeeds() {
     let mut ram = vec![0u8; RAM_LEN];
     let mut m = bare(&mut ram);
     load(&mut m, &LDXR_STXR);
-    m.mem_write(RAM_BASE + 0x1000, &0x1234u64.to_le_bytes()).expect("in RAM");
+    m.mem_write(RAM_BASE + 0x1000, &0x1234u64.to_le_bytes())
+        .expect("in RAM");
     m.reg_write(Reg::X1, RAM_BASE + 0x1000);
     m.reg_write(Reg::X3, 7);
     let out = m.step(RunBudget::Instructions(2));

@@ -22,7 +22,11 @@ fn every_page_of_ram_has_a_stamp_of_its_own() {
         let pages = (bytes / 4096).min(stamps as u64);
         let first = cache.stamp_index(RAM_BASE);
         let last = cache.stamp_index(RAM_BASE + 4096 * (pages - 1));
-        assert_eq!(last, (first + pages as usize - 1) % stamps, "{bytes:#x} bytes: pages numbered apart");
+        assert_eq!(
+            last,
+            (first + pages as usize - 1) % stamps,
+            "{bytes:#x} bytes: pages numbered apart"
+        );
         // A page as far past the first as the table is long shares its stamp.
         assert_eq!(cache.stamp_index(RAM_BASE + 4096 * stamps as u64), first);
     }

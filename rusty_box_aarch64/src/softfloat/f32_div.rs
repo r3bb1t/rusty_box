@@ -93,9 +93,26 @@ mod tests {
     #[test]
     fn f32_div_matches_native_rne() {
         let vals: [f32; 20] = [
-            0.0, -0.0, 1.0, -1.0, 2.0, 0.5, core::f32::consts::PI, -core::f32::consts::E, 1e18, 1e-18,
-            f32::MIN_POSITIVE, 123_456.79, 0.1, 0.3, 7.0, 65504.0, 1.0000001,
-            9.0, 3.0, 1.5,
+            0.0,
+            -0.0,
+            1.0,
+            -1.0,
+            2.0,
+            0.5,
+            core::f32::consts::PI,
+            -core::f32::consts::E,
+            1e18,
+            1e-18,
+            f32::MIN_POSITIVE,
+            123_456.79,
+            0.1,
+            0.3,
+            7.0,
+            65504.0,
+            1.0000001,
+            9.0,
+            3.0,
+            1.5,
         ];
         for &a in &vals {
             for &b in &vals {
