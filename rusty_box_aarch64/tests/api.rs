@@ -534,6 +534,29 @@ fn spsel_written_at_el0_keeps_sp_el0() {
     assert_eq!((m.pstate().el, m.power().state()), (El::El0, PowerState::Running));
 }
 
+/// An image another version of the machine wrote — here, the version before
+/// this one, whose layout differs — is refused before anything changes: the
+/// machine keeps its state and keeps running.
+#[test]
+fn a_snapshot_of_an_earlier_version_is_refused_and_changes_nothing() {
+    let mut ram = vec![0u8; RAM_LEN];
+    let mut m = bare(&mut ram, rusty_box_aarch64::NoInstrumentation);
+    load(&mut m, RAM_BASE, &ADD);
+    let mut image = Vec::new();
+    m.save_snapshot(&mut image).expect("a snapshot saves");
+    // The image starts with its 8-byte magic and then its version.
+    let version = u32::from_le_bytes(image[8..12].try_into().expect("four bytes"));
+    image[8..12].copy_from_slice(&(version - 1).to_le_bytes());
+    assert_eq!(m.step(RunBudget::Instructions(2)).stop, StopReason::BudgetExhausted);
+    let before = (m.cpu_snapshot(), m.ram().to_vec());
+    assert!(m.restore_snapshot(&mut image.as_slice()).is_err());
+    assert_eq!((m.cpu_snapshot(), m.ram().to_vec()), before, "a refused image changes nothing");
+    assert_eq!(m.power().state(), PowerState::Running);
+    image[8..12].copy_from_slice(&version.to_le_bytes());
+    assert_eq!(m.restore_snapshot(&mut image.as_slice()), Ok(()), "the same image at this version restores");
+    assert_eq!(m.reg_read(Reg::Pc), RAM_BASE);
+}
+
 /// `wfi; b .`
 const WFI: [u32; 2] = [0xD503_207F, SPIN];
 

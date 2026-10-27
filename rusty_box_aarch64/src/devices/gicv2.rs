@@ -261,9 +261,9 @@ impl GicV2 {
         }
         w.write_bytes(&self.priority)?;
         // The per-SGI source bytes repeat what `pending` holds (processor
-        // 0's bit while the SGI is pending). They are written so the image
-        // keeps the layout the machine's `SNAPSHOT_VERSION` 5 names, and
-        // `restore` refuses bytes that disagree with `pending`.
+        // 0's bit while the SGI is pending). They are part of the GIC's
+        // section of the image, and `restore` refuses bytes that disagree
+        // with `pending`.
         let sources: [u8; NR_SGIS] = core::array::from_fn(|sgi| self.sgi_sources(sgi));
         w.write_bytes(&sources)
     }

@@ -18,7 +18,7 @@ pub(crate) const FPSR_MASK: u64 =
 
 /// How many system register values a snapshot carries, in
 /// [`SysRegs::to_array`] order.
-const SYSREG_COUNT: usize = 42;
+const SYSREG_COUNT: usize = 44;
 
 impl SysRegs {
     fn to_array(&self) -> [u64; SYSREG_COUNT] {
@@ -65,12 +65,21 @@ impl SysRegs {
             self.dbgwvr[1],
             self.dbgwcr[0],
             self.dbgwcr[1],
+            u64::from(self.dtrrx),
+            u64::from(self.dtrtx),
         ]
     }
 
-    fn from_array(a: [u64; SYSREG_COUNT]) -> Self {
-        let [sctlr_el1, actlr_el1, cpacr_el1, ttbr0_el1, ttbr1_el1, tcr_el1, spsr_el1, elr_el1, esr_el1, far_el1, afsr0_el1, afsr1_el1, par_el1, mair_el1, amair_el1, vbar_el1, contextidr_el1, tpidr_el0, tpidrro_el0, tpidr_el1, csselr_el1, cntkctl_el1, cntfrq_el0, cntp_ctl_el0, cntp_cval_el0, cntv_ctl_el0, cntv_cval_el0, mdscr_el1, mdccint_el1, oslsr_el1, osdlr_el1, oseccr_el1, dbgprcr_el1, dbgclaim, bvr0, bvr1, bcr0, bcr1, wvr0, wvr1, wcr0, wcr1] = a;
-        Self {
+    /// The inverse of [`SysRegs::to_array`]. Refuses a Debug Communications
+    /// Channel data register wider than its 32 bits.
+    fn from_array(a: [u64; SYSREG_COUNT]) -> SnapResult<Self> {
+        let [sctlr_el1, actlr_el1, cpacr_el1, ttbr0_el1, ttbr1_el1, tcr_el1, spsr_el1, elr_el1, esr_el1, far_el1, afsr0_el1, afsr1_el1, par_el1, mair_el1, amair_el1, vbar_el1, contextidr_el1, tpidr_el0, tpidrro_el0, tpidr_el1, csselr_el1, cntkctl_el1, cntfrq_el0, cntp_ctl_el0, cntp_cval_el0, cntv_ctl_el0, cntv_cval_el0, mdscr_el1, mdccint_el1, oslsr_el1, osdlr_el1, oseccr_el1, dbgprcr_el1, dbgclaim, bvr0, bvr1, bcr0, bcr1, wvr0, wvr1, wcr0, wcr1, dtrrx, dtrtx] = a;
+        let data_register = |value: u64| {
+            u32::try_from(value).map_err(|_| SnapError::Invalid("debug channel data register wider than 32 bits"))
+        };
+        let dtrrx = data_register(dtrrx)?;
+        let dtrtx = data_register(dtrtx)?;
+        Ok(Self {
             sctlr_el1,
             actlr_el1,
             cpacr_el1,
@@ -109,7 +118,9 @@ impl SysRegs {
             dbgbcr: [bcr0, bcr1],
             dbgwvr: [wvr0, wvr1],
             dbgwcr: [wcr0, wcr1],
-        }
+            dtrrx,
+            dtrtx,
+        })
     }
 }
 
@@ -324,6 +335,7 @@ impl Cpu {
         for value in sys.iter_mut() {
             *value = r.read_u64()?;
         }
+        let sys = SysRegs::from_array(sys)?;
         let monitor = ExclusiveMonitor {
             armed: r.read_bool()?,
             addr: r.read_u64()?,
@@ -365,7 +377,7 @@ impl Cpu {
         self.v = v;
         self.fpcr = fpcr;
         self.fpsr = fpsr;
-        self.sys = SysRegs::from_array(sys);
+        self.sys = sys;
         self.monitor = monitor;
         self.event = event;
         self.activity = activity;
@@ -473,5 +485,28 @@ mod tests {
         assert!(source.is_empty());
         assert_eq!(restored.state(), c.state());
         assert_eq!(restored.recent_pcs().collect::<std::vec::Vec<_>>(), [0x40]);
+    }
+
+    #[test]
+    fn a_processor_snapshot_with_a_debug_data_register_wider_than_32_bits_is_refused() {
+        let mut c = cpu();
+        c.sys.dtrrx = 0x1234_5678;
+        c.sys.dtrtx = 0x9ABC_DEF0;
+        let mut image = std::vec::Vec::new();
+        c.save(&mut image).expect("save");
+        // X0-X30, SP_EL0, SP_EL1, PC, PSTATE, V0-V31, FPCR, FPSR, then the
+        // system registers, of which DTRRX and DTRTX are the last two.
+        let dtrrx = (31 + 4) * 8 + 32 * 16 + 2 * 8 + (SYSREG_COUNT - 2) * 8;
+        assert_eq!(&image[dtrrx..dtrrx + 16], &[0x78, 0x56, 0x34, 0x12, 0, 0, 0, 0, 0xF0, 0xDE, 0xBC, 0x9A, 0, 0, 0, 0]);
+        for slot in [dtrrx, dtrrx + 8] {
+            let mut wide = image.clone();
+            wide[slot + 4] = 1;
+            let mut restored = cpu();
+            assert!(restored.restore(&mut wide.as_slice()).is_err(), "bit 32 set at byte {slot}");
+            assert_eq!(restored.sys.to_array(), cpu().sys.to_array(), "a refused image changes nothing");
+        }
+        let mut restored = cpu();
+        restored.restore(&mut image.as_slice()).expect("restore");
+        assert_eq!((restored.sys.dtrrx, restored.sys.dtrtx), (0x1234_5678, 0x9ABC_DEF0));
     }
 }

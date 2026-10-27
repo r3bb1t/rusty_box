@@ -386,12 +386,15 @@ integration tests of the public API.
   wait — WFI not when an interrupt is pending, masked or not; WFE not when
   the Event Register, set by `SEV`, `SEVL`, an exception return or the
   virtual event stream, is set — and the Debug Communications Channel
-  behaves as one with no debugger attached: a write sets TXfull for good,
-  so a probe shaped like Linux's `hvc_dcc_check` gives up; a read of the
-  receive register clears RXfull; `MDSCR_EL1` shows both flags, and its
-  save/restore fields, the flags among them, take a write only while the OS
-  Lock is locked; and EL0's accesses trap under
-  `MDSCR_EL1.TDCC` before they take effect.
+  behaves as one with no debugger attached: a write fills DTRTX and sets
+  TXfull for good, so a probe shaped like Linux's `hvc_dcc_check` gives up;
+  a read of the receive register returns DTRRX while RXfull is set and
+  clears RXfull, and `DBGDTR_EL0` reads and writes both data registers;
+  `OSDTRRX_EL1` and `OSDTRTX_EL1` read and write them without touching the
+  flags, with the OS Lock locked or not, and a snapshot carries them;
+  `MDSCR_EL1` shows both flags, and its save/restore fields, the flags
+  among them, take a write only while the OS Lock is locked; and EL0's
+  accesses trap under `MDSCR_EL1.TDCC` before they take effect.
 - `tests/translation_and_firmware.rs`: an out-of-range T1SZ, a table base or
   block beyond the output size `TCR_EL1.IPS` selects, `AT` meeting an
   external abort on its walk, PSCI's target, entry-point and
@@ -575,19 +578,25 @@ choice is listed here with its evidence.
   `DBGDTRRX_EL0`, `MDCCSR_EL0`, `MDSCR_EL1` and `EDSCR` descriptions) sets
   TXfull on every write to `DBGDTRTX_EL0` or `DBGDTR_EL0`, and only an
   external debugger's read of DTRTX clears it; a read of `DBGDTRRX_EL0` or
-  `DBGDTR_EL0` clears RXfull; `MDSCR_EL1`'s save/restore fields — TXfull
-  and RXfull, which restore the flags, and RXO, TXU, INTdis, TDA, HDE and
-  ERR — are read-only while the OS Lock is unlocked and written while it is
-  locked (`__set_MDSCR_EL1` in Arm's ASL). QEMU 11.1.2 (`debug_cp_reginfo`
-  in `target/arm/debug_helper.c`) reads `MDCCSR_EL0` as zero, so a channel
-  that nothing drains looks drained at once, and keeps every `MDSCR_EL1`
+  `DBGDTR_EL0` returns DTRRX (and DTRTX in `DBGDTR_EL0`'s bits [63:32])
+  and clears RXfull; `OSDTRRX_EL1` and `OSDTRTX_EL1` read and write DTRRX
+  and DTRTX and leave the flags alone (their use while the OS Lock is
+  unlocked is deprecated, not prevented); `MDSCR_EL1`'s save/restore
+  fields — TXfull and RXfull, which restore the flags, and RXO, TXU,
+  INTdis, TDA, HDE and ERR — are read-only while the OS Lock is unlocked
+  and written while it is locked (`__set_MDSCR_EL1` in Arm's ASL). QEMU
+  11.1.2 (`debug_cp_reginfo` in `target/arm/debug_helper.c`) reads
+  `MDCCSR_EL0` and the four data register encodings as zero and ignores
+  their writes, so a channel that nothing drains looks drained at once and
+  a saved DTRRX or DTRTX restores as zero, and keeps every `MDSCR_EL1`
   field as written whatever the OS Lock. This model has no debugger either,
   and follows the Arm ARM: after the first write TXfull stays set, so
   Linux's `hvc_dcc_check` (with `CONFIG_HVC_DCC`) concludes that no channel
-  is attached instead of registering a console whose output goes nowhere,
-  and an unlocked write leaves the save/restore fields as they are. Two
-  UNKNOWN cases have fixed answers: a read with RXfull clear returns zero,
-  and a write while TXfull is set leaves TXfull set and drops the value.
+  is attached instead of registering a console whose output goes nowhere;
+  the data registers keep what is written to them; and an unlocked write
+  leaves the save/restore fields as they are. Two UNKNOWN cases have fixed
+  answers: a read with RXfull clear returns zero, and a write while TXfull
+  is set leaves TXfull set and both data registers as they were.
 - **The PL011 receives only while `UARTEN` and `RXE` are set.** The
   PrimeCell UART (PL011) TRM, ARM DDI 0183F §3.3.8 (Note to Table 3-12),
   enables reception with both bits; the reset value of `UARTCR` (0x300) has
@@ -681,16 +690,7 @@ choice is listed here with its evidence.
 - Floating-point exception traps: FPCR's trap-enable bits read as zero, as on
   a Cortex-A57, so exceptions only accumulate in FPSR.
 - Debug: breakpoint and watchpoint registers exist (two of each, as
-  advertised) but never fire; no Debug state, no PMU. The Debug
-  Communications Channel keeps its two flags but not the contents of its
-  data registers, DTRTX and DTRRX: `DBGDTRRX_EL0`, `DBGDTR_EL0`,
-  `OSDTRRX_EL1` and `OSDTRTX_EL1` read as zero. That differs from the Arm
-  ARM wherever the data would show: a `DBGDTRRX_EL0` or `DBGDTR_EL0` read
-  while RXfull is 1, after an OS-Lock restore of RXfull through
-  `MDSCR_EL1`, returns zero, not DTRRX (such as the high word an earlier
-  `DBGDTR_EL0` write put there); every `DBGDTR_EL0` read returns zero in
-  bits [63:32], not DTRTX; and `OSDTRRX_EL1` and `OSDTRTX_EL1` read zero,
-  not what was written to DTRRX or DTRTX.
+  advertised) but never fire; no Debug state, no PMU.
 - No data cache model, and no instruction cache a guest can see: the
   decoded traces are kept coherent with every write, so neither `IC` nor
   data cache maintenance has anything to act on.

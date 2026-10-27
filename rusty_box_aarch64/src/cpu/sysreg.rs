@@ -348,14 +348,19 @@ impl Cpu {
                 self.dcc_check(el)?;
                 return Ok(self.sys.mdscr_el1 & DCC_FLAGS);
             }
-            // `DBGDTRRX_EL0` (`DBGDTRTX_EL0`'s encoding, read) returns DTRRX,
-            // and `DBGDTR_EL0` returns DTRTX in bits [63:32] and DTRRX in
-            // [31:0]; DTRRX is UNKNOWN while RXfull is clear. This model does
-            // not keep the data registers' contents, and both read zero.
+            // `DBGDTRRX_EL0` (`DBGDTRTX_EL0`'s encoding, read) returns DTRRX
+            // in bits [31:0], and `DBGDTR_EL0` returns DTRTX in bits [63:32]
+            // and DTRRX in [31:0] (the `DBGDTRRX_EL0` and `DBGDTR_EL0`
+            // descriptions; Arm's ASL `DBGDTR_EL0_read`). While RXfull is
+            // clear the whole value is UNKNOWN; this model reads zero.
             // Emptying DTRRX is `sysreg_mrs`'s side effect.
             DBGDTR_EL0 | DBGDTRTX_EL0 => {
                 self.dcc_check(el)?;
-                return Ok(0);
+                if self.sys.mdscr_el1 & DCC_RXFULL == 0 {
+                    return Ok(0);
+                }
+                let rx = u64::from(self.sys.dtrrx);
+                return Ok(if k == DBGDTR_EL0 { (u64::from(self.sys.dtrtx) << 32) | rx } else { rx });
             }
             _ => {}
         }
@@ -365,7 +370,14 @@ impl Cpu {
         }
 
         let value = match k {
-            OSDTRRX_EL1 | OSDTRTX_EL1 => 0,
+            // The save/restore views of DTRRX and DTRTX: a read returns the
+            // data register and leaves RXfull and TXfull as they are, at
+            // either state of the OS Lock (Arm ARM, DDI 0487, the
+            // `OSDTRRX_EL1` and `OSDTRTX_EL1` descriptions, which deprecate
+            // their use while the OS Lock is unlocked). Bits [63:32] are
+            // RES0.
+            OSDTRRX_EL1 => u64::from(self.sys.dtrrx),
+            OSDTRTX_EL1 => u64::from(self.sys.dtrtx),
             MIDR_EL1 => id::MIDR_EL1,
             MPIDR_EL1 => id::MPIDR_EL1,
             REVIDR_EL1 => id::REVIDR_EL1,
@@ -525,15 +537,22 @@ impl Cpu {
                 }
                 return Ok(WriteEffect::Timer);
             }
-            // A write fills DTRTX: TXfull is set to 1 after the write (Arm
-            // ARM, DDI 0487, the `DBGDTRTX_EL0` and `DBGDTR_EL0` register
-            // descriptions), and only an external debugger's read of DTRTX
-            // clears it again. `DBGDTR_EL0`'s high word goes to DTRRX and
-            // leaves RXfull as it is. A write while TXfull is already set
-            // leaves DTRTX UNKNOWN; this model keeps neither data register's
-            // contents, so the written value is dropped either way.
+            // A write fills DTRTX with bits [31:0]: TXfull is set to 1 after
+            // the write (Arm ARM, DDI 0487, the `DBGDTRTX_EL0` and
+            // `DBGDTR_EL0` register descriptions; Arm's ASL
+            // `DBGDTR_EL0_set`), and only an external debugger's read of
+            // DTRTX clears it again. `DBGDTR_EL0`'s bits [63:32] go to DTRRX
+            // and leave RXfull as it is. A write while TXfull is already set
+            // writes UNKNOWN values; this model leaves both data registers
+            // as they were.
             DBGDTR_EL0 | DBGDTRTX_EL0 => {
                 self.dcc_check(el)?;
+                if self.sys.mdscr_el1 & DCC_TXFULL == 0 {
+                    self.sys.dtrtx = value as u32;
+                    if k == DBGDTR_EL0 {
+                        self.sys.dtrrx = (value >> 32) as u32;
+                    }
+                }
                 self.sys.mdscr_el1 |= DCC_TXFULL;
                 return Ok(WriteEffect::None);
             }
@@ -545,7 +564,17 @@ impl Cpu {
         }
 
         let effect = match k {
-            OSDTRRX_EL1 | OSDTRTX_EL1 => WriteEffect::None,
+            // A write to a save/restore view sets the data register from bits
+            // [31:0] and leaves its flag as it is, at either state of the OS
+            // Lock (the `OSDTRRX_EL1` and `OSDTRTX_EL1` descriptions).
+            OSDTRRX_EL1 => {
+                self.sys.dtrrx = value as u32;
+                WriteEffect::None
+            }
+            OSDTRTX_EL1 => {
+                self.sys.dtrtx = value as u32;
+                WriteEffect::None
+            }
             CSSELR_EL1 => {
                 self.sys.csselr_el1 = value & 0xF;
                 WriteEffect::None

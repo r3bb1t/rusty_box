@@ -282,6 +282,10 @@ pub(crate) struct SysRegs {
     pub(crate) dbgbcr: [u64; 2],
     pub(crate) dbgwvr: [u64; 2],
     pub(crate) dbgwcr: [u64; 2],
+    /// The Debug Communications Channel's data registers, DTRRX and DTRTX,
+    /// 32 bits each; their flags, RXfull and TXfull, are in `mdscr_el1`.
+    pub(crate) dtrrx: u32,
+    pub(crate) dtrtx: u32,
 }
 
 impl SysRegs {
@@ -325,6 +329,8 @@ impl SysRegs {
             dbgbcr: [0; 2],
             dbgwvr: [0; 2],
             dbgwcr: [0; 2],
+            dtrrx: 0,
+            dtrtx: 0,
         }
     }
 }
