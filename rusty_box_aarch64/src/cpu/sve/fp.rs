@@ -25,7 +25,7 @@ use crate::cpu::Cpu;
 use crate::softfloat::{self as sf, FpOrdering, FpRounding, FusedMulAdd, InexactReport, NanSignal};
 
 /// The floating-point element of `size`: `None` for `00`.
-const fn fp_type(size: u32) -> Option<FpType> {
+pub(super) const fn fp_type(size: u32) -> Option<FpType> {
     match size & 3 {
         0b01 => Some(FpType::Half),
         0b10 => Some(FpType::Single),
@@ -35,7 +35,7 @@ const fn fp_type(size: u32) -> Option<FpType> {
 }
 
 /// The element size of a floating-point type.
-const fn esize(ty: FpType) -> Esize {
+pub(super) const fn esize(ty: FpType) -> Esize {
     match ty {
         FpType::Half => Esize::H,
         FpType::Single => Esize::S,

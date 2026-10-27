@@ -3,14 +3,13 @@
 //! the instructions with an immediate. Each handler names the Arm pages it
 //! is.
 
-use super::{decode_pred_count, int, mul_high, sat_add_scalar, sat_q, Esize, Zv};
+use super::{decode_pred_count, int, mul_high, sat_add_scalar, sat_doubling_mul_high, sat_q, Esize, Zv};
 use crate::cpu::features::VecLen;
 use crate::cpu::crypto::polynomial_mult;
 use crate::cpu::dp::{decode_bit_masks, ror};
 use crate::cpu::exec::{bit, bits, sext, ExecResult, Flow};
 use crate::cpu::fp::FpType;
 use crate::cpu::simd::vfp_expand_imm;
-use crate::cpu::simd_arith::doubling_mul_high;
 use crate::cpu::Cpu;
 
 /// The shifts the SVE instructions apply to an element: Arm `ASR`, `LSR`
@@ -686,9 +685,7 @@ impl Cpu {
                 MulUnpredicated::Mul => a.wrapping_mul(b),
                 MulUnpredicated::Pmul => polynomial_mult(a, b, 8) as u64,
                 MulUnpredicated::MulHigh { unsigned } => mul_high(a, b, es, unsigned),
-                MulUnpredicated::DoublingHigh { rounding } => {
-                    sat_q(doubling_mul_high(int(a, es, false), int(b, es, false), es.bits(), rounding), es, false)
-                }
+                MulUnpredicated::DoublingHigh { rounding } => sat_doubling_mul_high(a, b, es, rounding),
             };
             result.set(e, es, r);
         }

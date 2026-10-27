@@ -25,12 +25,12 @@
 //! `UnsignedRSqrtEstimate`).
 
 use super::int::{shift_amounts, BinOp};
-use super::{int, sat_q, segment_base, Esize, Zv};
+use super::{clamp, int, sat_doubling_mul_high, sat_q, segment_base, shift_by_element, Esize, Zv};
 use crate::cpu::crypto::polynomial_mult;
 use crate::cpu::dp::add_with_carry;
 use crate::cpu::exec::{bit, bits, ExecResult, Flow};
 use crate::cpu::fp_estimate::{urecpe, ursqrte};
-use crate::cpu::simd_arith::{doubling_mul_high, rounding_doubling_mul_add, shift_signed};
+use crate::cpu::simd_arith::{rounding_doubling_mul_add, shift_signed};
 use crate::cpu::Cpu;
 
 /// Arm's `rot` of CMLA, SQRDCMLAH and CDOT (bits 11:10).
@@ -247,9 +247,7 @@ impl BinaryOp {
     fn apply(self, a: u64, b: u64, es: Esize) -> u64 {
         match self {
             Self::Shift { saturating, rounding, unsigned } => {
-                let n = i64::from(es.bits());
-                let shift = es.signed(b).clamp(-(n + 1), n + 1) as i32;
-                let res = shift_signed(int(a, es, unsigned), shift, es.bits(), rounding);
+                let res = shift_by_element(a, b, es, unsigned, rounding);
                 if saturating {
                     sat_q(res, es, unsigned)
                 } else {
@@ -518,9 +516,7 @@ impl Cpu {
                     );
                     sat_q(value, es, false)
                 }
-                MulOp::DoublingHigh { rounding } => {
-                    sat_q(doubling_mul_high(int(a, es, false), int(b, es, false), es.bits(), rounding), es, false)
-                }
+                MulOp::DoublingHigh { rounding } => sat_doubling_mul_high(a, b, es, rounding),
             };
             result.set(e, es, r);
         }
@@ -644,9 +640,7 @@ impl Cpu {
         let high = self.z(m, vl);
         let mut result = self.z(d, vl);
         for e in 0..es.elements(vl) {
-            let value = int(result.get(e, es), es, unsigned);
-            let clamped = value.max(int(low.get(e, es), es, unsigned)).min(int(high.get(e, es), es, unsigned));
-            result.set(e, es, clamped as u64);
+            result.set(e, es, clamp(result.get(e, es), low.get(e, es), high.get(e, es), es, unsigned));
         }
         self.set_z(d, vl, &result);
         Ok(Flow::Next)

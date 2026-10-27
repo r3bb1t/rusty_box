@@ -11,9 +11,10 @@
 //! instructions), `perm`
 //! (permutes, copies and selects), `pred` (compares, predicate operations,
 //! `WHILE` and predicate counts), `counter` (FEAT_SME2's
-//! predicate-as-counter), `fp` (floating point) and `mem` (contiguous
+//! predicate-as-counter), `fp` (floating point), `mem` (contiguous
 //! loads, stores and prefetches, FEAT_SME2's of two or four vectors among
-//! them).
+//! them) and `multi` (FEAT_SME2's operations on groups of two or four
+//! vectors).
 //!
 //! Provenance (R7): the Arm A64 ISA XML, release 2026-09 (Arm ARM M.d), the
 //! instruction pages each handler names and the shared pseudocode in
@@ -26,6 +27,7 @@ mod fp;
 mod int;
 mod intx;
 mod mem;
+mod multi;
 mod perm;
 mod pred;
 #[cfg(test)]
@@ -34,7 +36,7 @@ mod tests;
 
 use super::exec::{sext, Fault};
 use super::features::VecLen;
-use super::simd_arith::{int as simd_int, sat};
+use super::simd_arith::{doubling_mul_high, int as simd_int, sat, shift_signed};
 use super::Cpu;
 
 /// `MAX_VL` in bytes.
@@ -364,6 +366,28 @@ pub(crate) fn mul_high(a: u64, b: u64, es: Esize, unsigned: bool) -> u64 {
         ((i128::from(es.signed(a)) * i128::from(es.signed(b))) >> es.bits()) as u64
     };
     high & es.mask()
+}
+
+/// SQDMULH and SQRDMULH on one element: `SignedSat((2 * SInt(a) *
+/// SInt(b) (+ 2^(esize-1))) >> esize)`, rounding with `rounding`.
+pub(crate) fn sat_doubling_mul_high(a: u64, b: u64, es: Esize, rounding: bool) -> u64 {
+    sat_q(doubling_mul_high(int(a, es, false), int(b, es, false), es.bits(), rounding), es, false)
+}
+
+/// SCLAMP and UCLAMP on one element: `Min(Max(low, value), high)`, each
+/// element `Int`'d by `unsigned`.
+pub(crate) fn clamp(value: u64, low: u64, high: u64, es: Esize, unsigned: bool) -> u64 {
+    int(low, es, unsigned).max(int(value, es, unsigned)).min(int(high, es, unsigned)) as u64
+}
+
+/// The shift by element of SRSHL to UQRSHL, exact: `Int(a, unsigned)`
+/// shifted by `ShiftSat(SInt(b), esize)`, left where it is positive, else
+/// right, adding half of the last bit shifted out with `rounding`. The
+/// caller truncates or saturates it to `esize` bits.
+pub(crate) fn shift_by_element(a: u64, b: u64, es: Esize, unsigned: bool, rounding: bool) -> i128 {
+    let n = i64::from(es.bits());
+    let shift = es.signed(b).clamp(-(n + 1), n + 1) as i32;
+    shift_signed(int(a, es, unsigned), shift, es.bits(), rounding)
 }
 
 /// The saturating increment or decrement of a general register by

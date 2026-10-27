@@ -11,10 +11,14 @@
 //! ST1B to ST1Q) and LDR and STR of a ZA array vector. FEAT_SME2's so far
 //! are the contiguous loads and stores of two or four vectors (LD1B to
 //! LD1D, LDNT1B to LDNT1D, ST1B to ST1D, STNT1B to STNT1D), ZERO {ZT0},
-//! LDR and STR of ZT0, and MOVT between ZT0 and a general register. The
-//! rest of FEAT_SME2's instructions, and the optional 64-bit forms of
-//! FEAT_SME_F64F64 and FEAT_SME_I16I64, are not here, which this decoder
-//! does not know.
+//! LDR and STR of ZT0, MOVT between ZT0 and a general register, and the
+//! SVE operations on groups of two or four vectors (`mortlach_multi_sve_1`
+//! to `_4`: SEL, the integer and floating-point maxima, minima, shifts,
+//! additions, multiplications and clamps, ZIP and UZP, the narrowing
+//! shifts and conversions, the conversions between words and single
+//! precision, FRINT and the unpacks). The rest of FEAT_SME2's
+//! instructions, and the optional 64-bit forms of FEAT_SME_F64F64 and
+//! FEAT_SME_I16I64, are not here, which this decoder does not know.
 //!
 //! The variants are Arm's encoding ids, whole (the module documentation of
 //! `isa` gives the naming, which `tests/unit/spec.rs` checks); the ids of
@@ -62,7 +66,8 @@ fn multi_mem_and_int_outer_products(word: u32) -> Option<Encoding> {
 }
 
 /// `op0 = 10`: the instructions on ZA's tiles and vectors, by bits 21:19
-/// with bit 24 clear. Bit 24 set holds FEAT_SME2's multi-vector groups,
+/// with bit 24 clear, and FEAT_SME2's multi-vector SVE groups, bits 24,
+/// 21 and 15 set. Bit 24 set holds FEAT_SME2's other multi-vector groups,
 /// and bits 21:19 = 011 and 110 its lookup table expansions and
 /// FEAT_SME_F16F8F16's scaled products.
 fn array_and_vectors(word: u32) -> Option<Encoding> {
@@ -86,6 +91,10 @@ fn array_and_vectors(word: u32) -> Option<Encoding> {
         },
         (0b0, 0b010) => match bits(word, 3, 3) {
             0b0 => mortlach_hvadd(word),
+            _ => None,
+        },
+        (0b1, 0b100..=0b111) => match bits(word, 15, 15) {
+            0b1 => multi_vector_sve(word),
             _ => None,
         },
         _ => None,
@@ -902,6 +911,965 @@ fn mortlach_addhv(word: u32) -> Option<MortlachAddhv> {
     match (op, v, bits(word, 2, 2)) {
         (0b0, 0b0, 0b0) => Some(MortlachAddhv::AddhaZaPpZ32),
         (0b0, 0b1, 0b0) => Some(MortlachAddhv::AddvaZaPpZ32),
+        _ => None,
+    }
+}
+
+/// Bits 24, 21 and 15 set: FEAT_SME2's multi-vector SVE groups, by bits
+/// 15:13 and 12:10, and the bits each group fixes beyond them. Bits 15:10
+/// = 111001 and 111010 are mortlach_multi_sve_5a and _5b, 1111xx
+/// mortlach_multi_sve_6.
+fn multi_vector_sve(word: u32) -> Option<Encoding> {
+    match (bits(word, 15, 13), bits(word, 12, 10)) {
+        (0b100, _) => mortlach_multi_sve_1(word),
+        // Bit 20 clear, and for four vectors bit 1.
+        (0b101, 0b000 | 0b001) => match bits(word, 20, 20) {
+            0b0 => mortlach_multi_sve_2a(word),
+            _ => None,
+        },
+        (0b101, 0b010 | 0b011) => match (bits(word, 20, 20), bits(word, 1, 1)) {
+            (0b0, 0b0) => mortlach_multi_sve_2b(word),
+            _ => None,
+        },
+        // Bit 16 clear, and for four vectors bits 17:16 and 1.
+        (0b101, 0b100) => match bits(word, 16, 16) {
+            0b0 => mortlach_multi_sve_2c0(word),
+            _ => None,
+        },
+        (0b101, 0b101) => match bits(word, 16, 16) {
+            0b0 => mortlach_multi_sve_2c1(word),
+            _ => None,
+        },
+        (0b101, 0b110) => match (bits(word, 17, 16), bits(word, 1, 1)) {
+            (0b00, 0b0) => mortlach_multi_sve_2d0(word),
+            _ => None,
+        },
+        (0b101, 0b111) => match (bits(word, 17, 16), bits(word, 1, 1)) {
+            (0b00, 0b0) => mortlach_multi_sve_2d1(word),
+            _ => None,
+        },
+        (0b110, _) => mortlach_multi_sve_3(word),
+        (0b111, 0b000) => mortlach_multi_sve_4(word),
+        _ => None,
+    }
+}
+
+/// Arm group `mortlach_multi_sve_1`: SME2 multi-vector select, of two
+/// vectors or four.
+fn mortlach_multi_sve_1(word: u32) -> Option<Encoding> {
+    let op0 = bits(word, 17, 16);
+    let op1 = bits(word, 6, 5);
+    let op2 = bits(word, 1, 0);
+    match (op0, op1, op2) {
+        (0b00 | 0b10, 0b00 | 0b10, 0b00 | 0b10) => {
+            mortlach_multi2_select_int(word).map(Encoding::MortlachMulti2SelectInt)
+        }
+        (0b01, 0b00, 0b00) => mortlach_multi4_select_int(word).map(Encoding::MortlachMulti4SelectInt),
+        _ => None,
+    }
+}
+
+/// Arm group `mortlach_multi_sve_2a`: SME2 operations on two vectors and
+/// one. `op1 = 01, op2 = 100` is mortlach_multi2_z_z_fscale_sm (FEAT_FP8,
+/// FEAT_SVE_BFSCALE).
+fn mortlach_multi_sve_2a(word: u32) -> Option<Encoding> {
+    let op0 = bits(word, 10, 10);
+    let op1 = bits(word, 9, 8);
+    let op2 = bits(word, 7, 5);
+    match (op0, op1, op2) {
+        (0b0, 0b00, 0b000 | 0b001) => mortlach_multi2_z_z_minmax_sm(word).map(Encoding::MortlachMulti2ZZMinmaxSm),
+        (0b0, 0b01, 0b000 | 0b001) => mortlach_multi2_z_z_fminmax_sm(word).map(Encoding::MortlachMulti2ZZFminmaxSm),
+        (0b0, 0b10, _) => mortlach_multi2_z_z_shift_sm(word).map(Encoding::MortlachMulti2ZZShiftSm),
+        (0b0, 0b11, 0b000) => mortlach_multi2_z_z_add_sm(word).map(Encoding::MortlachMulti2ZZAddSm),
+        (0b1, 0b00, 0b000) => mortlach_multi2_z_z_sqdmulh_sm(word).map(Encoding::MortlachMulti2ZZSqdmulhSm),
+        _ => None,
+    }
+}
+
+/// Arm group `mortlach_multi_sve_2b`: SME2 operations on four vectors and
+/// one, as `mortlach_multi_sve_2a`.
+fn mortlach_multi_sve_2b(word: u32) -> Option<Encoding> {
+    let op0 = bits(word, 10, 10);
+    let op1 = bits(word, 9, 8);
+    let op2 = bits(word, 7, 5);
+    match (op0, op1, op2) {
+        (0b0, 0b00, 0b000 | 0b001) => mortlach_multi4_z_z_minmax_sm(word).map(Encoding::MortlachMulti4ZZMinmaxSm),
+        (0b0, 0b01, 0b000 | 0b001) => mortlach_multi4_z_z_fminmax_sm(word).map(Encoding::MortlachMulti4ZZFminmaxSm),
+        (0b0, 0b10, _) => mortlach_multi4_z_z_shift_sm(word).map(Encoding::MortlachMulti4ZZShiftSm),
+        (0b0, 0b11, 0b000) => mortlach_multi4_z_z_add_sm(word).map(Encoding::MortlachMulti4ZZAddSm),
+        (0b1, 0b00, 0b000) => mortlach_multi4_z_z_sqdmulh_sm(word).map(Encoding::MortlachMulti4ZZSqdmulhSm),
+        _ => None,
+    }
+}
+
+/// Arm group `mortlach_multi_sve_2c0`: SME2 operations on two vectors and
+/// two. `op0 = 011` is mortlach_multi2_z_z_fscale_mm (FEAT_FP8,
+/// FEAT_SVE_BFSCALE).
+fn mortlach_multi_sve_2c0(word: u32) -> Option<Encoding> {
+    let op0 = bits(word, 9, 7);
+    match op0 {
+        0b000 => mortlach_multi2_z_z_minmax_mm(word).map(Encoding::MortlachMulti2ZZMinmaxMm),
+        0b010 => mortlach_multi2_z_z_fminmax_mm(word).map(Encoding::MortlachMulti2ZZFminmaxMm),
+        0b100 | 0b101 => mortlach_multi2_z_z_shift_mm(word).map(Encoding::MortlachMulti2ZZShiftMm),
+        _ => None,
+    }
+}
+
+/// Arm group `mortlach_multi_sve_2c1`: SME2 saturating doubling multiply
+/// high of two vectors by two.
+fn mortlach_multi_sve_2c1(word: u32) -> Option<Encoding> {
+    let op0 = bits(word, 9, 5);
+    match op0 {
+        0b00000 => mortlach_multi2_z_z_sqdmulh_mm(word).map(Encoding::MortlachMulti2ZZSqdmulhMm),
+        _ => None,
+    }
+}
+
+/// Arm group `mortlach_multi_sve_2d0`: SME2 operations on four vectors and
+/// four, as `mortlach_multi_sve_2c0`.
+fn mortlach_multi_sve_2d0(word: u32) -> Option<Encoding> {
+    let op0 = bits(word, 9, 7);
+    match op0 {
+        0b000 => mortlach_multi4_z_z_minmax_mm(word).map(Encoding::MortlachMulti4ZZMinmaxMm),
+        0b010 => mortlach_multi4_z_z_fminmax_mm(word).map(Encoding::MortlachMulti4ZZFminmaxMm),
+        0b100 | 0b101 => mortlach_multi4_z_z_shift_mm(word).map(Encoding::MortlachMulti4ZZShiftMm),
+        _ => None,
+    }
+}
+
+/// Arm group `mortlach_multi_sve_2d1`: SME2 saturating doubling multiply
+/// high of four vectors by four.
+fn mortlach_multi_sve_2d1(word: u32) -> Option<Encoding> {
+    let op0 = bits(word, 9, 5);
+    match op0 {
+        0b00000 => mortlach_multi4_z_z_sqdmulh_mm(word).map(Encoding::MortlachMulti4ZZSqdmulhMm),
+        _ => None,
+    }
+}
+
+/// Arm group `mortlach_multi_sve_3`: SME2 clamps, two-vector permutes and
+/// rounding shifts right and narrow, by op1 (bits 12:10), with op0 (the
+/// element size) and op2 (bit 1, fixed by the four-vector forms).
+fn mortlach_multi_sve_3(word: u32) -> Option<Encoding> {
+    let op0 = bits(word, 23, 22);
+    let op1 = bits(word, 12, 10);
+    let op2 = bits(word, 1, 1);
+    match (op0, op1, op2) {
+        (_, 0b000, _) => mortlach_multi2_fclamp(word).map(Encoding::MortlachMulti2Fclamp),
+        (_, 0b001, _) => mortlach_multi2_clamp_int(word).map(Encoding::MortlachMulti2ClampInt),
+        (_, 0b010, 0b0) => mortlach_multi4_fclamp(word).map(Encoding::MortlachMulti4Fclamp),
+        (_, 0b011, 0b0) => mortlach_multi4_clamp_int(word).map(Encoding::MortlachMulti4ClampInt),
+        (_, 0b100, _) => mortlach_multi2_z_z_zip(word).map(Encoding::MortlachMulti2ZZZip),
+        (0b00, 0b101, _) => mortlach_multi2_z_z_long_zip(word).map(Encoding::MortlachMulti2ZZLongZip),
+        (0b11, 0b101, _) => mortlach_multi2_qrshr(word).map(Encoding::MortlachMulti2Qrshr),
+        (_, 0b110 | 0b111, _) => mortlach_multi4_qrshr(word).map(Encoding::MortlachMulti4Qrshr),
+        _ => None,
+    }
+}
+
+/// Arm group `mortlach_multi_sve_4`: SME2 conversions, roundings, unpacks
+/// and four-vector permutes, by op1 (bits 20:18) and op2 (bits 17:16),
+/// with op0 (bits 23:22) and the bits op3 (6:5) and op4 (1:0) the
+/// register groups fix. `op1 = 001` with `op2 = 00` and `10` are
+/// mortlach_multi2_narrow_fp8_cvrt and _wide_fp8_cvrt, and `op1 = 101,
+/// op2 = 00` mortlach_multi4_narrow_fp8_cvrt (FEAT_FP8); `op0 = 10, op1 =
+/// 000, op2 = 00` is mortlach_multi2_wide_fp_cvrt (FEAT_SME_F16F16).
+fn mortlach_multi_sve_4(word: u32) -> Option<Encoding> {
+    let op0 = bits(word, 23, 22);
+    let op1 = bits(word, 20, 18);
+    let op2 = bits(word, 17, 16);
+    let op3 = bits(word, 6, 5);
+    let op4 = bits(word, 1, 0);
+    match (op0, op1, op2, op3, op4) {
+        (0b00 | 0b01, 0b000, 0b00, _, _) => mortlach_multi2_narrow_fp_cvrt(word).map(Encoding::MortlachMulti2NarrowFpCvrt),
+        (0b00, 0b000, 0b01, _, 0b00 | 0b10) => mortlach_multi2_fpint_cvrt(word).map(Encoding::MortlachMulti2FpintCvrt),
+        (0b00, 0b000, 0b10, _, 0b00 | 0b10) => mortlach_multi2_intfp_cvrt(word).map(Encoding::MortlachMulti2IntfpCvrt),
+        (0b00 | 0b01, 0b000, 0b11, _, _) => {
+            mortlach_multi2_narrow_int_cvrt(word).map(Encoding::MortlachMulti2NarrowIntCvrt)
+        }
+        (_, 0b001, 0b01, _, _) => mortlach_multi2_wide_int(word).map(Encoding::MortlachMulti2WideInt),
+        (_, 0b010 | 0b011, _, 0b00 | 0b10, 0b00 | 0b10) => mortlach_multi2_frint(word).map(Encoding::MortlachMulti2Frint),
+        (0b00, 0b100, 0b01, 0b00 | 0b01, 0b00) => mortlach_multi4_fpint_cvrt(word).map(Encoding::MortlachMulti4FpintCvrt),
+        (0b00, 0b100, 0b10, 0b00 | 0b01, 0b00) => mortlach_multi4_intfp_cvrt(word).map(Encoding::MortlachMulti4IntfpCvrt),
+        (_, 0b100, 0b11, _, _) => mortlach_multi4_narrow_int_cvrt(word).map(Encoding::MortlachMulti4NarrowIntCvrt),
+        (_, 0b101, 0b01, 0b00 | 0b10, 0b00 | 0b01) => mortlach_multi4_wide_int(word).map(Encoding::MortlachMulti4WideInt),
+        (_, 0b101, 0b10, 0b00, 0b00 | 0b10) => mortlach_multi4_z_z_zip(word).map(Encoding::MortlachMulti4ZZZip),
+        (0b00, 0b101, 0b11, 0b00, 0b00 | 0b10) => mortlach_multi4_z_z_long_zip(word).map(Encoding::MortlachMulti4ZZLongZip),
+        (_, 0b110 | 0b111, _, 0b00, 0b00) => mortlach_multi4_frint(word).map(Encoding::MortlachMulti4Frint),
+        _ => None,
+    }
+}
+
+/// Arm class `mortlach_multi2_select_int`: select two vectors' elements by
+/// a predicate-as-counter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum MortlachMulti2SelectInt {
+    SelMzPZz2,
+}
+
+fn mortlach_multi2_select_int(_word: u32) -> Option<MortlachMulti2SelectInt> {
+    Some(MortlachMulti2SelectInt::SelMzPZz2)
+}
+
+/// Arm class `mortlach_multi4_select_int`: select four vectors' elements by
+/// a predicate-as-counter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum MortlachMulti4SelectInt {
+    SelMzPZz4,
+}
+
+fn mortlach_multi4_select_int(_word: u32) -> Option<MortlachMulti4SelectInt> {
+    Some(MortlachMulti4SelectInt::SelMzPZz4)
+}
+
+/// Arm class `mortlach_multi2_z_z_minmax_sm`: signed or unsigned (`U`)
+/// maximum or minimum (`op`) of two vectors and one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum MortlachMulti2ZZMinmaxSm {
+    SmaxMzZzv2x1,
+    SminMzZzv2x1,
+    UmaxMzZzv2x1,
+    UminMzZzv2x1,
+}
+
+fn mortlach_multi2_z_z_minmax_sm(word: u32) -> Option<MortlachMulti2ZZMinmaxSm> {
+    let op = bits(word, 5, 5);
+    let u = bits(word, 0, 0);
+    match (op, u) {
+        (0b0, 0b0) => Some(MortlachMulti2ZZMinmaxSm::SmaxMzZzv2x1),
+        (0b1, 0b0) => Some(MortlachMulti2ZZMinmaxSm::SminMzZzv2x1),
+        (0b0, 0b1) => Some(MortlachMulti2ZZMinmaxSm::UmaxMzZzv2x1),
+        (0b1, 0b1) => Some(MortlachMulti2ZZMinmaxSm::UminMzZzv2x1),
+        _ => None,
+    }
+}
+
+/// Arm class `mortlach_multi2_z_z_fminmax_sm`: floating-point maximum or
+/// minimum (`o2`), number or not (`op`), of two vectors and one. `size =
+/// 00` is the BFloat16 forms (FEAT_SVE_B16B16).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum MortlachMulti2ZZFminmaxSm {
+    FmaxMzZzv2x1,
+    FminMzZzv2x1,
+    FmaxnmMzZzv2x1,
+    FminnmMzZzv2x1,
+}
+
+fn mortlach_multi2_z_z_fminmax_sm(word: u32) -> Option<MortlachMulti2ZZFminmaxSm> {
+    let size = bits(word, 23, 22);
+    let op = bits(word, 5, 5);
+    let o2 = bits(word, 0, 0);
+    match (size, op, o2) {
+        (0b00, _, _) => None,
+        (_, 0b0, 0b0) => Some(MortlachMulti2ZZFminmaxSm::FmaxMzZzv2x1),
+        (_, 0b0, 0b1) => Some(MortlachMulti2ZZFminmaxSm::FminMzZzv2x1),
+        (_, 0b1, 0b0) => Some(MortlachMulti2ZZFminmaxSm::FmaxnmMzZzv2x1),
+        (_, 0b1, 0b1) => Some(MortlachMulti2ZZFminmaxSm::FminnmMzZzv2x1),
+        _ => None,
+    }
+}
+
+/// Arm class `mortlach_multi2_z_z_shift_sm`: signed or unsigned (`U`)
+/// rounding shift left of two vectors by one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum MortlachMulti2ZZShiftSm {
+    SrshlMzZzv2x1,
+    UrshlMzZzv2x1,
+}
+
+fn mortlach_multi2_z_z_shift_sm(word: u32) -> Option<MortlachMulti2ZZShiftSm> {
+    let opc = bits(word, 7, 5);
+    let u = bits(word, 0, 0);
+    match (opc, u) {
+        (0b001, 0b0) => Some(MortlachMulti2ZZShiftSm::SrshlMzZzv2x1),
+        (0b001, 0b1) => Some(MortlachMulti2ZZShiftSm::UrshlMzZzv2x1),
+        _ => None,
+    }
+}
+
+/// Arm class `mortlach_multi2_z_z_add_sm`: add one vector to two.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum MortlachMulti2ZZAddSm {
+    AddMzZzv2x1,
+}
+
+fn mortlach_multi2_z_z_add_sm(word: u32) -> Option<MortlachMulti2ZZAddSm> {
+    let op = bits(word, 0, 0);
+    match op {
+        0b0 => Some(MortlachMulti2ZZAddSm::AddMzZzv2x1),
+        _ => None,
+    }
+}
+
+/// Arm class `mortlach_multi2_z_z_sqdmulh_sm`: saturating doubling multiply
+/// high of two vectors by one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum MortlachMulti2ZZSqdmulhSm {
+    SqdmulhMzZzv2x1,
+}
+
+fn mortlach_multi2_z_z_sqdmulh_sm(word: u32) -> Option<MortlachMulti2ZZSqdmulhSm> {
+    let op = bits(word, 0, 0);
+    match op {
+        0b0 => Some(MortlachMulti2ZZSqdmulhSm::SqdmulhMzZzv2x1),
+        _ => None,
+    }
+}
+
+/// Arm class `mortlach_multi4_z_z_minmax_sm`: signed or unsigned (`U`)
+/// maximum or minimum (`op`) of four vectors and one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum MortlachMulti4ZZMinmaxSm {
+    SmaxMzZzv4x1,
+    SminMzZzv4x1,
+    UmaxMzZzv4x1,
+    UminMzZzv4x1,
+}
+
+fn mortlach_multi4_z_z_minmax_sm(word: u32) -> Option<MortlachMulti4ZZMinmaxSm> {
+    let op = bits(word, 5, 5);
+    let u = bits(word, 0, 0);
+    match (op, u) {
+        (0b0, 0b0) => Some(MortlachMulti4ZZMinmaxSm::SmaxMzZzv4x1),
+        (0b1, 0b0) => Some(MortlachMulti4ZZMinmaxSm::SminMzZzv4x1),
+        (0b0, 0b1) => Some(MortlachMulti4ZZMinmaxSm::UmaxMzZzv4x1),
+        (0b1, 0b1) => Some(MortlachMulti4ZZMinmaxSm::UminMzZzv4x1),
+        _ => None,
+    }
+}
+
+/// Arm class `mortlach_multi4_z_z_fminmax_sm`: floating-point maximum or
+/// minimum (`o2`), number or not (`op`), of four vectors and one. `size =
+/// 00` is the BFloat16 forms (FEAT_SVE_B16B16).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum MortlachMulti4ZZFminmaxSm {
+    FmaxMzZzv4x1,
+    FminMzZzv4x1,
+    FmaxnmMzZzv4x1,
+    FminnmMzZzv4x1,
+}
+
+fn mortlach_multi4_z_z_fminmax_sm(word: u32) -> Option<MortlachMulti4ZZFminmaxSm> {
+    let size = bits(word, 23, 22);
+    let op = bits(word, 5, 5);
+    let o2 = bits(word, 0, 0);
+    match (size, op, o2) {
+        (0b00, _, _) => None,
+        (_, 0b0, 0b0) => Some(MortlachMulti4ZZFminmaxSm::FmaxMzZzv4x1),
+        (_, 0b0, 0b1) => Some(MortlachMulti4ZZFminmaxSm::FminMzZzv4x1),
+        (_, 0b1, 0b0) => Some(MortlachMulti4ZZFminmaxSm::FmaxnmMzZzv4x1),
+        (_, 0b1, 0b1) => Some(MortlachMulti4ZZFminmaxSm::FminnmMzZzv4x1),
+        _ => None,
+    }
+}
+
+/// Arm class `mortlach_multi4_z_z_shift_sm`: signed or unsigned (`U`)
+/// rounding shift left of four vectors by one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum MortlachMulti4ZZShiftSm {
+    SrshlMzZzv4x1,
+    UrshlMzZzv4x1,
+}
+
+fn mortlach_multi4_z_z_shift_sm(word: u32) -> Option<MortlachMulti4ZZShiftSm> {
+    let opc = bits(word, 7, 5);
+    let u = bits(word, 0, 0);
+    match (opc, u) {
+        (0b001, 0b0) => Some(MortlachMulti4ZZShiftSm::SrshlMzZzv4x1),
+        (0b001, 0b1) => Some(MortlachMulti4ZZShiftSm::UrshlMzZzv4x1),
+        _ => None,
+    }
+}
+
+/// Arm class `mortlach_multi4_z_z_add_sm`: add one vector to four.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum MortlachMulti4ZZAddSm {
+    AddMzZzv4x1,
+}
+
+fn mortlach_multi4_z_z_add_sm(word: u32) -> Option<MortlachMulti4ZZAddSm> {
+    let op = bits(word, 0, 0);
+    match op {
+        0b0 => Some(MortlachMulti4ZZAddSm::AddMzZzv4x1),
+        _ => None,
+    }
+}
+
+/// Arm class `mortlach_multi4_z_z_sqdmulh_sm`: saturating doubling multiply
+/// high of four vectors by one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum MortlachMulti4ZZSqdmulhSm {
+    SqdmulhMzZzv4x1,
+}
+
+fn mortlach_multi4_z_z_sqdmulh_sm(word: u32) -> Option<MortlachMulti4ZZSqdmulhSm> {
+    let op = bits(word, 0, 0);
+    match op {
+        0b0 => Some(MortlachMulti4ZZSqdmulhSm::SqdmulhMzZzv4x1),
+        _ => None,
+    }
+}
+
+/// Arm class `mortlach_multi2_z_z_minmax_mm`: signed or unsigned (`U`)
+/// maximum or minimum (`opc`) of two vectors and two.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum MortlachMulti2ZZMinmaxMm {
+    SmaxMzZzw2x2,
+    SminMzZzw2x2,
+    UmaxMzZzw2x2,
+    UminMzZzw2x2,
+}
+
+fn mortlach_multi2_z_z_minmax_mm(word: u32) -> Option<MortlachMulti2ZZMinmaxMm> {
+    let opc = bits(word, 6, 5);
+    let u = bits(word, 0, 0);
+    match (opc, u) {
+        (0b00, 0b0) => Some(MortlachMulti2ZZMinmaxMm::SmaxMzZzw2x2),
+        (0b01, 0b0) => Some(MortlachMulti2ZZMinmaxMm::SminMzZzw2x2),
+        (0b00, 0b1) => Some(MortlachMulti2ZZMinmaxMm::UmaxMzZzw2x2),
+        (0b01, 0b1) => Some(MortlachMulti2ZZMinmaxMm::UminMzZzw2x2),
+        _ => None,
+    }
+}
+
+/// Arm class `mortlach_multi2_z_z_fminmax_mm`: floating-point maximum or
+/// minimum (`o2`), number or not (`opc`), of two vectors and two. `size =
+/// 00` is the BFloat16 forms (FEAT_SVE_B16B16), `opc = 10` FAMAX and FAMIN
+/// (FEAT_FAMINMAX).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum MortlachMulti2ZZFminmaxMm {
+    FmaxMzZzw2x2,
+    FminMzZzw2x2,
+    FmaxnmMzZzw2x2,
+    FminnmMzZzw2x2,
+}
+
+fn mortlach_multi2_z_z_fminmax_mm(word: u32) -> Option<MortlachMulti2ZZFminmaxMm> {
+    let size = bits(word, 23, 22);
+    let opc = bits(word, 6, 5);
+    let o2 = bits(word, 0, 0);
+    match (size, opc, o2) {
+        (0b00, _, _) => None,
+        (_, 0b00, 0b0) => Some(MortlachMulti2ZZFminmaxMm::FmaxMzZzw2x2),
+        (_, 0b00, 0b1) => Some(MortlachMulti2ZZFminmaxMm::FminMzZzw2x2),
+        (_, 0b01, 0b0) => Some(MortlachMulti2ZZFminmaxMm::FmaxnmMzZzw2x2),
+        (_, 0b01, 0b1) => Some(MortlachMulti2ZZFminmaxMm::FminnmMzZzw2x2),
+        _ => None,
+    }
+}
+
+/// Arm class `mortlach_multi2_z_z_shift_mm`: signed or unsigned (`U`)
+/// rounding shift left of two vectors by two.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum MortlachMulti2ZZShiftMm {
+    SrshlMzZzw2x2,
+    UrshlMzZzw2x2,
+}
+
+fn mortlach_multi2_z_z_shift_mm(word: u32) -> Option<MortlachMulti2ZZShiftMm> {
+    let opc = bits(word, 7, 5);
+    let u = bits(word, 0, 0);
+    match (opc, u) {
+        (0b001, 0b0) => Some(MortlachMulti2ZZShiftMm::SrshlMzZzw2x2),
+        (0b001, 0b1) => Some(MortlachMulti2ZZShiftMm::UrshlMzZzw2x2),
+        _ => None,
+    }
+}
+
+/// Arm class `mortlach_multi2_z_z_sqdmulh_mm`: saturating doubling multiply
+/// high of two vectors by two.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum MortlachMulti2ZZSqdmulhMm {
+    SqdmulhMzZzw2x2,
+}
+
+fn mortlach_multi2_z_z_sqdmulh_mm(word: u32) -> Option<MortlachMulti2ZZSqdmulhMm> {
+    let op = bits(word, 0, 0);
+    match op {
+        0b0 => Some(MortlachMulti2ZZSqdmulhMm::SqdmulhMzZzw2x2),
+        _ => None,
+    }
+}
+
+/// Arm class `mortlach_multi4_z_z_minmax_mm`: signed or unsigned (`U`)
+/// maximum or minimum (`opc`) of four vectors and four.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum MortlachMulti4ZZMinmaxMm {
+    SmaxMzZzw4x4,
+    SminMzZzw4x4,
+    UmaxMzZzw4x4,
+    UminMzZzw4x4,
+}
+
+fn mortlach_multi4_z_z_minmax_mm(word: u32) -> Option<MortlachMulti4ZZMinmaxMm> {
+    let opc = bits(word, 6, 5);
+    let u = bits(word, 0, 0);
+    match (opc, u) {
+        (0b00, 0b0) => Some(MortlachMulti4ZZMinmaxMm::SmaxMzZzw4x4),
+        (0b01, 0b0) => Some(MortlachMulti4ZZMinmaxMm::SminMzZzw4x4),
+        (0b00, 0b1) => Some(MortlachMulti4ZZMinmaxMm::UmaxMzZzw4x4),
+        (0b01, 0b1) => Some(MortlachMulti4ZZMinmaxMm::UminMzZzw4x4),
+        _ => None,
+    }
+}
+
+/// Arm class `mortlach_multi4_z_z_fminmax_mm`: floating-point maximum or
+/// minimum (`o2`), number or not (`opc`), of four vectors and four. `size
+/// = 00` is the BFloat16 forms (FEAT_SVE_B16B16), `opc = 10` FAMAX and
+/// FAMIN (FEAT_FAMINMAX).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum MortlachMulti4ZZFminmaxMm {
+    FmaxMzZzw4x4,
+    FminMzZzw4x4,
+    FmaxnmMzZzw4x4,
+    FminnmMzZzw4x4,
+}
+
+fn mortlach_multi4_z_z_fminmax_mm(word: u32) -> Option<MortlachMulti4ZZFminmaxMm> {
+    let size = bits(word, 23, 22);
+    let opc = bits(word, 6, 5);
+    let o2 = bits(word, 0, 0);
+    match (size, opc, o2) {
+        (0b00, _, _) => None,
+        (_, 0b00, 0b0) => Some(MortlachMulti4ZZFminmaxMm::FmaxMzZzw4x4),
+        (_, 0b00, 0b1) => Some(MortlachMulti4ZZFminmaxMm::FminMzZzw4x4),
+        (_, 0b01, 0b0) => Some(MortlachMulti4ZZFminmaxMm::FmaxnmMzZzw4x4),
+        (_, 0b01, 0b1) => Some(MortlachMulti4ZZFminmaxMm::FminnmMzZzw4x4),
+        _ => None,
+    }
+}
+
+/// Arm class `mortlach_multi4_z_z_shift_mm`: signed or unsigned (`U`)
+/// rounding shift left of four vectors by four.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum MortlachMulti4ZZShiftMm {
+    SrshlMzZzw4x4,
+    UrshlMzZzw4x4,
+}
+
+fn mortlach_multi4_z_z_shift_mm(word: u32) -> Option<MortlachMulti4ZZShiftMm> {
+    let opc = bits(word, 7, 5);
+    let u = bits(word, 0, 0);
+    match (opc, u) {
+        (0b001, 0b0) => Some(MortlachMulti4ZZShiftMm::SrshlMzZzw4x4),
+        (0b001, 0b1) => Some(MortlachMulti4ZZShiftMm::UrshlMzZzw4x4),
+        _ => None,
+    }
+}
+
+/// Arm class `mortlach_multi4_z_z_sqdmulh_mm`: saturating doubling multiply
+/// high of four vectors by four.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum MortlachMulti4ZZSqdmulhMm {
+    SqdmulhMzZzw4x4,
+}
+
+fn mortlach_multi4_z_z_sqdmulh_mm(word: u32) -> Option<MortlachMulti4ZZSqdmulhMm> {
+    let op = bits(word, 0, 0);
+    match op {
+        0b0 => Some(MortlachMulti4ZZSqdmulhMm::SqdmulhMzZzw4x4),
+        _ => None,
+    }
+}
+
+/// Arm class `mortlach_multi2_fclamp`: floating-point clamp of two
+/// vectors. `size = 00` is BFCLAMP (FEAT_SVE_B16B16).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum MortlachMulti2Fclamp {
+    FclampMzZz2,
+}
+
+fn mortlach_multi2_fclamp(word: u32) -> Option<MortlachMulti2Fclamp> {
+    let size = bits(word, 23, 22);
+    let op = bits(word, 0, 0);
+    match (size, op) {
+        (0b00, _) => None,
+        (_, 0b0) => Some(MortlachMulti2Fclamp::FclampMzZz2),
+        _ => None,
+    }
+}
+
+/// Arm class `mortlach_multi2_clamp_int`: signed or unsigned (`U`) clamp of
+/// two vectors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum MortlachMulti2ClampInt {
+    SclampMzZz2,
+    UclampMzZz2,
+}
+
+fn mortlach_multi2_clamp_int(word: u32) -> Option<MortlachMulti2ClampInt> {
+    let u = bits(word, 0, 0);
+    match u {
+        0b0 => Some(MortlachMulti2ClampInt::SclampMzZz2),
+        0b1 => Some(MortlachMulti2ClampInt::UclampMzZz2),
+        _ => None,
+    }
+}
+
+/// Arm class `mortlach_multi4_fclamp`: floating-point clamp of four
+/// vectors. `size = 00` is BFCLAMP (FEAT_SVE_B16B16).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum MortlachMulti4Fclamp {
+    FclampMzZz4,
+}
+
+fn mortlach_multi4_fclamp(word: u32) -> Option<MortlachMulti4Fclamp> {
+    let size = bits(word, 23, 22);
+    let op = bits(word, 0, 0);
+    match (size, op) {
+        (0b00, _) => None,
+        (_, 0b0) => Some(MortlachMulti4Fclamp::FclampMzZz4),
+        _ => None,
+    }
+}
+
+/// Arm class `mortlach_multi4_clamp_int`: signed or unsigned (`U`) clamp of
+/// four vectors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum MortlachMulti4ClampInt {
+    SclampMzZz4,
+    UclampMzZz4,
+}
+
+fn mortlach_multi4_clamp_int(word: u32) -> Option<MortlachMulti4ClampInt> {
+    let u = bits(word, 0, 0);
+    match u {
+        0b0 => Some(MortlachMulti4ClampInt::SclampMzZz4),
+        0b1 => Some(MortlachMulti4ClampInt::UclampMzZz4),
+        _ => None,
+    }
+}
+
+/// Arm class `mortlach_multi2_z_z_zip`: interleave or concatenate (`op`)
+/// the elements of two vectors into two.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum MortlachMulti2ZZZip {
+    ZipMzZz2,
+    UzpMzZz2,
+}
+
+fn mortlach_multi2_z_z_zip(word: u32) -> Option<MortlachMulti2ZZZip> {
+    let op = bits(word, 0, 0);
+    match op {
+        0b0 => Some(MortlachMulti2ZZZip::ZipMzZz2),
+        0b1 => Some(MortlachMulti2ZZZip::UzpMzZz2),
+        _ => None,
+    }
+}
+
+/// Arm class `mortlach_multi2_z_z_long_zip`: interleave or concatenate
+/// (`op`) the quadwords of two vectors into two.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum MortlachMulti2ZZLongZip {
+    ZipMzZz2q,
+    UzpMzZz2q,
+}
+
+fn mortlach_multi2_z_z_long_zip(word: u32) -> Option<MortlachMulti2ZZLongZip> {
+    let op = bits(word, 0, 0);
+    match op {
+        0b0 => Some(MortlachMulti2ZZLongZip::ZipMzZz2q),
+        0b1 => Some(MortlachMulti2ZZLongZip::UzpMzZz2q),
+        _ => None,
+    }
+}
+
+/// Arm class `mortlach_multi2_qrshr`: saturating rounding shift right and
+/// narrow two vectors to one, signed or unsigned (`U`, `op` to an unsigned
+/// result).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum MortlachMulti2Qrshr {
+    SqrshrZMz2,
+    SqrshruZMz2,
+    UqrshrZMz2,
+}
+
+fn mortlach_multi2_qrshr(word: u32) -> Option<MortlachMulti2Qrshr> {
+    let op = bits(word, 20, 20);
+    let u = bits(word, 5, 5);
+    match (op, u) {
+        (0b0, 0b0) => Some(MortlachMulti2Qrshr::SqrshrZMz2),
+        (0b1, 0b0) => Some(MortlachMulti2Qrshr::SqrshruZMz2),
+        (0b0, 0b1) => Some(MortlachMulti2Qrshr::UqrshrZMz2),
+        _ => None,
+    }
+}
+
+/// Arm class `mortlach_multi4_qrshr`: saturating rounding shift right and
+/// narrow four vectors to one, signed or unsigned (`U`, `op` to an
+/// unsigned result), concatenated or interleaved (`N`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum MortlachMulti4Qrshr {
+    SqrshrZMz4,
+    SqrshruZMz4,
+    SqrshrnZMz4,
+    SqrshrunZMz4,
+    UqrshrZMz4,
+    UqrshrnZMz4,
+}
+
+fn mortlach_multi4_qrshr(word: u32) -> Option<MortlachMulti4Qrshr> {
+    let n = bits(word, 10, 10);
+    let op = bits(word, 6, 6);
+    let u = bits(word, 5, 5);
+    match (n, op, u) {
+        (0b0, 0b0, 0b0) => Some(MortlachMulti4Qrshr::SqrshrZMz4),
+        (0b0, 0b1, 0b0) => Some(MortlachMulti4Qrshr::SqrshruZMz4),
+        (0b1, 0b0, 0b0) => Some(MortlachMulti4Qrshr::SqrshrnZMz4),
+        (0b1, 0b1, 0b0) => Some(MortlachMulti4Qrshr::SqrshrunZMz4),
+        (0b0, 0b0, 0b1) => Some(MortlachMulti4Qrshr::UqrshrZMz4),
+        (0b1, 0b0, 0b1) => Some(MortlachMulti4Qrshr::UqrshrnZMz4),
+        _ => None,
+    }
+}
+
+/// Arm class `mortlach_multi2_narrow_fp_cvrt`: convert two vectors of
+/// single precision to one of half precision or BFloat16 (`op`),
+/// concatenated or interleaved (`N`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum MortlachMulti2NarrowFpCvrt {
+    BfcvtZMz2,
+    FcvtZMz2,
+    BfcvtnZMz2,
+    FcvtnZMz2,
+}
+
+fn mortlach_multi2_narrow_fp_cvrt(word: u32) -> Option<MortlachMulti2NarrowFpCvrt> {
+    let op = bits(word, 22, 22);
+    let n = bits(word, 5, 5);
+    match (op, n) {
+        (0b1, 0b0) => Some(MortlachMulti2NarrowFpCvrt::BfcvtZMz2),
+        (0b0, 0b0) => Some(MortlachMulti2NarrowFpCvrt::FcvtZMz2),
+        (0b1, 0b1) => Some(MortlachMulti2NarrowFpCvrt::BfcvtnZMz2),
+        (0b0, 0b1) => Some(MortlachMulti2NarrowFpCvrt::FcvtnZMz2),
+        _ => None,
+    }
+}
+
+/// Arm class `mortlach_multi2_fpint_cvrt`: convert two vectors of single
+/// precision to signed or unsigned (`U`) words.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum MortlachMulti2FpintCvrt {
+    FcvtzsMzZ2,
+    FcvtzuMzZ2,
+}
+
+fn mortlach_multi2_fpint_cvrt(word: u32) -> Option<MortlachMulti2FpintCvrt> {
+    let u = bits(word, 5, 5);
+    match u {
+        0b0 => Some(MortlachMulti2FpintCvrt::FcvtzsMzZ2),
+        0b1 => Some(MortlachMulti2FpintCvrt::FcvtzuMzZ2),
+        _ => None,
+    }
+}
+
+/// Arm class `mortlach_multi2_intfp_cvrt`: convert two vectors of signed or
+/// unsigned (`U`) words to single precision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum MortlachMulti2IntfpCvrt {
+    ScvtfMzZ2,
+    UcvtfMzZ2,
+}
+
+fn mortlach_multi2_intfp_cvrt(word: u32) -> Option<MortlachMulti2IntfpCvrt> {
+    let u = bits(word, 5, 5);
+    match u {
+        0b0 => Some(MortlachMulti2IntfpCvrt::ScvtfMzZ2),
+        0b1 => Some(MortlachMulti2IntfpCvrt::UcvtfMzZ2),
+        _ => None,
+    }
+}
+
+/// Arm class `mortlach_multi2_narrow_int_cvrt`: saturating narrow of two
+/// vectors to one, signed or unsigned (`U`, `op` to an unsigned result).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum MortlachMulti2NarrowIntCvrt {
+    SqcvtZMz2,
+    SqcvtuZMz2,
+    UqcvtZMz2,
+}
+
+fn mortlach_multi2_narrow_int_cvrt(word: u32) -> Option<MortlachMulti2NarrowIntCvrt> {
+    let op = bits(word, 22, 22);
+    let u = bits(word, 5, 5);
+    match (op, u) {
+        (0b0, 0b0) => Some(MortlachMulti2NarrowIntCvrt::SqcvtZMz2),
+        (0b1, 0b0) => Some(MortlachMulti2NarrowIntCvrt::SqcvtuZMz2),
+        (0b0, 0b1) => Some(MortlachMulti2NarrowIntCvrt::UqcvtZMz2),
+        _ => None,
+    }
+}
+
+/// Arm class `mortlach_multi2_wide_int`: unpack one vector's elements to two
+/// vectors of twice their size, signed or unsigned (`U`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum MortlachMulti2WideInt {
+    SunpkMzZ2,
+    UunpkMzZ2,
+}
+
+fn mortlach_multi2_wide_int(word: u32) -> Option<MortlachMulti2WideInt> {
+    let u = bits(word, 0, 0);
+    match u {
+        0b0 => Some(MortlachMulti2WideInt::SunpkMzZ2),
+        0b1 => Some(MortlachMulti2WideInt::UunpkMzZ2),
+        _ => None,
+    }
+}
+
+/// Arm class `mortlach_multi2_frint`: round two vectors of single precision
+/// to integral values, by the rounding `opc` names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum MortlachMulti2Frint {
+    FrintnMzZ2,
+    FrintpMzZ2,
+    FrintmMzZ2,
+    FrintaMzZ2,
+}
+
+fn mortlach_multi2_frint(word: u32) -> Option<MortlachMulti2Frint> {
+    let size = bits(word, 23, 22);
+    let opc = bits(word, 18, 16);
+    match (size, opc) {
+        (0b10, 0b000) => Some(MortlachMulti2Frint::FrintnMzZ2),
+        (0b10, 0b001) => Some(MortlachMulti2Frint::FrintpMzZ2),
+        (0b10, 0b010) => Some(MortlachMulti2Frint::FrintmMzZ2),
+        (0b10, 0b100) => Some(MortlachMulti2Frint::FrintaMzZ2),
+        _ => None,
+    }
+}
+
+/// Arm class `mortlach_multi4_fpint_cvrt`: convert four vectors of single
+/// precision to signed or unsigned (`U`) words.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum MortlachMulti4FpintCvrt {
+    FcvtzsMzZ4,
+    FcvtzuMzZ4,
+}
+
+fn mortlach_multi4_fpint_cvrt(word: u32) -> Option<MortlachMulti4FpintCvrt> {
+    let u = bits(word, 5, 5);
+    match u {
+        0b0 => Some(MortlachMulti4FpintCvrt::FcvtzsMzZ4),
+        0b1 => Some(MortlachMulti4FpintCvrt::FcvtzuMzZ4),
+        _ => None,
+    }
+}
+
+/// Arm class `mortlach_multi4_intfp_cvrt`: convert four vectors of signed or
+/// unsigned (`U`) words to single precision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum MortlachMulti4IntfpCvrt {
+    ScvtfMzZ4,
+    UcvtfMzZ4,
+}
+
+fn mortlach_multi4_intfp_cvrt(word: u32) -> Option<MortlachMulti4IntfpCvrt> {
+    let u = bits(word, 5, 5);
+    match u {
+        0b0 => Some(MortlachMulti4IntfpCvrt::ScvtfMzZ4),
+        0b1 => Some(MortlachMulti4IntfpCvrt::UcvtfMzZ4),
+        _ => None,
+    }
+}
+
+/// Arm class `mortlach_multi4_narrow_int_cvrt`: saturating narrow of four
+/// vectors to one, signed or unsigned (`U`, `op` to an unsigned result),
+/// concatenated or interleaved (`N`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum MortlachMulti4NarrowIntCvrt {
+    SqcvtZMz4,
+    SqcvtuZMz4,
+    SqcvtnZMz4,
+    SqcvtunZMz4,
+    UqcvtZMz4,
+    UqcvtnZMz4,
+}
+
+fn mortlach_multi4_narrow_int_cvrt(word: u32) -> Option<MortlachMulti4NarrowIntCvrt> {
+    let op = bits(word, 22, 22);
+    let n = bits(word, 6, 6);
+    let u = bits(word, 5, 5);
+    match (op, n, u) {
+        (0b0, 0b0, 0b0) => Some(MortlachMulti4NarrowIntCvrt::SqcvtZMz4),
+        (0b1, 0b0, 0b0) => Some(MortlachMulti4NarrowIntCvrt::SqcvtuZMz4),
+        (0b0, 0b1, 0b0) => Some(MortlachMulti4NarrowIntCvrt::SqcvtnZMz4),
+        (0b1, 0b1, 0b0) => Some(MortlachMulti4NarrowIntCvrt::SqcvtunZMz4),
+        (0b0, 0b0, 0b1) => Some(MortlachMulti4NarrowIntCvrt::UqcvtZMz4),
+        (0b0, 0b1, 0b1) => Some(MortlachMulti4NarrowIntCvrt::UqcvtnZMz4),
+        _ => None,
+    }
+}
+
+/// Arm class `mortlach_multi4_wide_int`: unpack two vectors' elements to
+/// four vectors of twice their size, signed or unsigned (`U`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum MortlachMulti4WideInt {
+    SunpkMzZ4,
+    UunpkMzZ4,
+}
+
+fn mortlach_multi4_wide_int(word: u32) -> Option<MortlachMulti4WideInt> {
+    let u = bits(word, 0, 0);
+    match u {
+        0b0 => Some(MortlachMulti4WideInt::SunpkMzZ4),
+        0b1 => Some(MortlachMulti4WideInt::UunpkMzZ4),
+        _ => None,
+    }
+}
+
+/// Arm class `mortlach_multi4_z_z_zip`: interleave or concatenate (`op`)
+/// the elements of four vectors into four.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum MortlachMulti4ZZZip {
+    ZipMzZ4,
+    UzpMzZ4,
+}
+
+fn mortlach_multi4_z_z_zip(word: u32) -> Option<MortlachMulti4ZZZip> {
+    let op = bits(word, 1, 1);
+    match op {
+        0b0 => Some(MortlachMulti4ZZZip::ZipMzZ4),
+        0b1 => Some(MortlachMulti4ZZZip::UzpMzZ4),
+        _ => None,
+    }
+}
+
+/// Arm class `mortlach_multi4_z_z_long_zip`: interleave or concatenate
+/// (`op`) the quadwords of four vectors into four.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum MortlachMulti4ZZLongZip {
+    ZipMzZ4q,
+    UzpMzZ4q,
+}
+
+fn mortlach_multi4_z_z_long_zip(word: u32) -> Option<MortlachMulti4ZZLongZip> {
+    let op = bits(word, 1, 1);
+    match op {
+        0b0 => Some(MortlachMulti4ZZLongZip::ZipMzZ4q),
+        0b1 => Some(MortlachMulti4ZZLongZip::UzpMzZ4q),
+        _ => None,
+    }
+}
+
+/// Arm class `mortlach_multi4_frint`: round four vectors of single
+/// precision to integral values, by the rounding `opc` names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum MortlachMulti4Frint {
+    FrintnMzZ4,
+    FrintpMzZ4,
+    FrintmMzZ4,
+    FrintaMzZ4,
+}
+
+fn mortlach_multi4_frint(word: u32) -> Option<MortlachMulti4Frint> {
+    let size = bits(word, 23, 22);
+    let opc = bits(word, 18, 16);
+    match (size, opc) {
+        (0b10, 0b000) => Some(MortlachMulti4Frint::FrintnMzZ4),
+        (0b10, 0b001) => Some(MortlachMulti4Frint::FrintpMzZ4),
+        (0b10, 0b010) => Some(MortlachMulti4Frint::FrintmMzZ4),
+        (0b10, 0b100) => Some(MortlachMulti4Frint::FrintaMzZ4),
         _ => None,
     }
 }

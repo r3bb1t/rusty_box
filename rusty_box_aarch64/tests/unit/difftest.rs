@@ -405,8 +405,12 @@ fn sve_state(seed: u64, kind: &str, insn: u32) -> SveState {
         reg.copy_from_slice(&value.to_le_bytes());
     }
     let mut fpcr = if kind == "SA" { (r.next() & 1) << 1 } else { 0 };
-    if kind == "SF" || kind == "ZF" {
-        let own = if kind == "SF" { ((insn >> 22) & 3) as usize } else { za_fp_format(insn) };
+    if matches!(kind, "SF" | "SS" | "ZF") {
+        let own = match kind {
+            "SF" => ((insn >> 22) & 3) as usize,
+            "SS" => 2,
+            _ => za_fp_format(insn),
+        };
         for reg in z.iter_mut() {
             let sel = (r.next() & 7) as usize;
             if sel != 0 {
@@ -423,6 +427,16 @@ fn sve_state(seed: u64, kind: &str, insn: u32) -> SveState {
                 1 => *reg = int_register(&mut r, own, false),
                 2 => *reg = int_register(&mut r, own, true),
                 _ => *reg = int_register(&mut r, own.saturating_sub(1), true),
+            }
+        }
+    }
+    if kind == "SN" {
+        for reg in z.iter_mut() {
+            match r.next() & 3 {
+                0 => {}
+                1 => *reg = int_register(&mut r, 2, true),
+                2 => *reg = int_register(&mut r, 3, true),
+                _ => *reg = int_register(&mut r, 2, false),
             }
         }
     }

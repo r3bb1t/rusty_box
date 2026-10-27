@@ -91,13 +91,23 @@ use reserved::PermUndef;
 use sme::{
     MortlachAddhv, MortlachB16f32Prod, MortlachContigLoad, MortlachContigQload, MortlachContigQstore,
     MortlachContigStore, MortlachCtxtLdst, MortlachExtractPred, MortlachExtractZt, MortlachF16f32Prod,
-    MortlachF32f32Prod, MortlachI8i32Prod, MortlachInsertPred, MortlachInsertZt, MortlachMulti2CldCldntSiCtg,
-    MortlachMulti2CldCldntSiNctg, MortlachMulti2CldCldntSsCtg, MortlachMulti2CldCldntSsNctg,
-    MortlachMulti2CstCstntSiCtg, MortlachMulti2CstCstntSiNctg, MortlachMulti2CstCstntSsCtg,
-    MortlachMulti2CstCstntSsNctg, MortlachMulti4CldCldntSiCtg, MortlachMulti4CldCldntSiNctg,
-    MortlachMulti4CldCldntSsCtg, MortlachMulti4CldCldntSsNctg, MortlachMulti4CstCstntSiCtg,
-    MortlachMulti4CstCstntSiNctg, MortlachMulti4CstCstntSsCtg, MortlachMulti4CstCstntSsNctg, MortlachZero,
-    MortlachZeroZt, MortlachZtLdst,
+    MortlachF32f32Prod, MortlachI8i32Prod, MortlachInsertPred, MortlachInsertZt, MortlachMulti2ClampInt,
+    MortlachMulti2CldCldntSiCtg, MortlachMulti2CldCldntSiNctg, MortlachMulti2CldCldntSsCtg,
+    MortlachMulti2CldCldntSsNctg, MortlachMulti2CstCstntSiCtg, MortlachMulti2CstCstntSiNctg,
+    MortlachMulti2CstCstntSsCtg, MortlachMulti2CstCstntSsNctg, MortlachMulti2Fclamp, MortlachMulti2FpintCvrt,
+    MortlachMulti2Frint, MortlachMulti2IntfpCvrt, MortlachMulti2NarrowFpCvrt, MortlachMulti2NarrowIntCvrt,
+    MortlachMulti2Qrshr, MortlachMulti2SelectInt, MortlachMulti2WideInt, MortlachMulti2ZZAddSm,
+    MortlachMulti2ZZFminmaxMm, MortlachMulti2ZZFminmaxSm, MortlachMulti2ZZLongZip, MortlachMulti2ZZMinmaxMm,
+    MortlachMulti2ZZMinmaxSm, MortlachMulti2ZZShiftMm, MortlachMulti2ZZShiftSm, MortlachMulti2ZZSqdmulhMm,
+    MortlachMulti2ZZSqdmulhSm, MortlachMulti2ZZZip, MortlachMulti4ClampInt, MortlachMulti4CldCldntSiCtg,
+    MortlachMulti4CldCldntSiNctg, MortlachMulti4CldCldntSsCtg, MortlachMulti4CldCldntSsNctg,
+    MortlachMulti4CstCstntSiCtg, MortlachMulti4CstCstntSiNctg, MortlachMulti4CstCstntSsCtg,
+    MortlachMulti4CstCstntSsNctg, MortlachMulti4Fclamp, MortlachMulti4FpintCvrt, MortlachMulti4Frint,
+    MortlachMulti4IntfpCvrt, MortlachMulti4NarrowIntCvrt, MortlachMulti4Qrshr, MortlachMulti4SelectInt,
+    MortlachMulti4WideInt, MortlachMulti4ZZAddSm, MortlachMulti4ZZFminmaxMm, MortlachMulti4ZZFminmaxSm,
+    MortlachMulti4ZZLongZip, MortlachMulti4ZZMinmaxMm, MortlachMulti4ZZMinmaxSm, MortlachMulti4ZZShiftMm,
+    MortlachMulti4ZZShiftSm, MortlachMulti4ZZSqdmulhMm, MortlachMulti4ZZSqdmulhSm, MortlachMulti4ZZZip,
+    MortlachZero, MortlachZeroZt, MortlachZtLdst,
 };
 use sve::{
     SveFp2opIPZds, SveFp2opPPd, SveFp2opPZdA, SveFp2opPZdB0, SveFp2opPZdB1, SveFp2opPZdC, SveFp2opPZdD, SveFp2opPZds,
@@ -458,6 +468,47 @@ pub(crate) enum Encoding {
     MortlachExtractZt(MortlachExtractZt),
     MortlachInsertZt(MortlachInsertZt),
     MortlachZtLdst(MortlachZtLdst),
+    MortlachMulti2SelectInt(MortlachMulti2SelectInt),
+    MortlachMulti4SelectInt(MortlachMulti4SelectInt),
+    MortlachMulti2ZZMinmaxSm(MortlachMulti2ZZMinmaxSm),
+    MortlachMulti2ZZFminmaxSm(MortlachMulti2ZZFminmaxSm),
+    MortlachMulti2ZZShiftSm(MortlachMulti2ZZShiftSm),
+    MortlachMulti2ZZAddSm(MortlachMulti2ZZAddSm),
+    MortlachMulti2ZZSqdmulhSm(MortlachMulti2ZZSqdmulhSm),
+    MortlachMulti4ZZMinmaxSm(MortlachMulti4ZZMinmaxSm),
+    MortlachMulti4ZZFminmaxSm(MortlachMulti4ZZFminmaxSm),
+    MortlachMulti4ZZShiftSm(MortlachMulti4ZZShiftSm),
+    MortlachMulti4ZZAddSm(MortlachMulti4ZZAddSm),
+    MortlachMulti4ZZSqdmulhSm(MortlachMulti4ZZSqdmulhSm),
+    MortlachMulti2ZZMinmaxMm(MortlachMulti2ZZMinmaxMm),
+    MortlachMulti2ZZFminmaxMm(MortlachMulti2ZZFminmaxMm),
+    MortlachMulti2ZZShiftMm(MortlachMulti2ZZShiftMm),
+    MortlachMulti2ZZSqdmulhMm(MortlachMulti2ZZSqdmulhMm),
+    MortlachMulti4ZZMinmaxMm(MortlachMulti4ZZMinmaxMm),
+    MortlachMulti4ZZFminmaxMm(MortlachMulti4ZZFminmaxMm),
+    MortlachMulti4ZZShiftMm(MortlachMulti4ZZShiftMm),
+    MortlachMulti4ZZSqdmulhMm(MortlachMulti4ZZSqdmulhMm),
+    MortlachMulti2Fclamp(MortlachMulti2Fclamp),
+    MortlachMulti2ClampInt(MortlachMulti2ClampInt),
+    MortlachMulti4Fclamp(MortlachMulti4Fclamp),
+    MortlachMulti4ClampInt(MortlachMulti4ClampInt),
+    MortlachMulti2ZZZip(MortlachMulti2ZZZip),
+    MortlachMulti2ZZLongZip(MortlachMulti2ZZLongZip),
+    MortlachMulti2Qrshr(MortlachMulti2Qrshr),
+    MortlachMulti4Qrshr(MortlachMulti4Qrshr),
+    MortlachMulti2NarrowFpCvrt(MortlachMulti2NarrowFpCvrt),
+    MortlachMulti2FpintCvrt(MortlachMulti2FpintCvrt),
+    MortlachMulti2IntfpCvrt(MortlachMulti2IntfpCvrt),
+    MortlachMulti2NarrowIntCvrt(MortlachMulti2NarrowIntCvrt),
+    MortlachMulti2WideInt(MortlachMulti2WideInt),
+    MortlachMulti2Frint(MortlachMulti2Frint),
+    MortlachMulti4FpintCvrt(MortlachMulti4FpintCvrt),
+    MortlachMulti4IntfpCvrt(MortlachMulti4IntfpCvrt),
+    MortlachMulti4NarrowIntCvrt(MortlachMulti4NarrowIntCvrt),
+    MortlachMulti4WideInt(MortlachMulti4WideInt),
+    MortlachMulti4ZZZip(MortlachMulti4ZZZip),
+    MortlachMulti4ZZLongZip(MortlachMulti4ZZLongZip),
+    MortlachMulti4Frint(MortlachMulti4Frint),
 }
 
 /// The encoding `word` is, if it is one of a feature the decoder knows.
@@ -757,6 +808,43 @@ impl Encoding {
             // never enters.
             Self::MortlachExtractZt(_) | Self::MortlachInsertZt(_) => Class::Undefined,
             Self::MortlachZtLdst(_) => Class::SmeFillSpillZt0,
+            Self::MortlachMulti2SelectInt(_) | Self::MortlachMulti4SelectInt(_) => Class::SveMultiSelect,
+            Self::MortlachMulti2ZZMinmaxSm(_)
+            | Self::MortlachMulti2ZZShiftSm(_)
+            | Self::MortlachMulti2ZZAddSm(_)
+            | Self::MortlachMulti2ZZSqdmulhSm(_)
+            | Self::MortlachMulti4ZZMinmaxSm(_)
+            | Self::MortlachMulti4ZZShiftSm(_)
+            | Self::MortlachMulti4ZZAddSm(_)
+            | Self::MortlachMulti4ZZSqdmulhSm(_)
+            | Self::MortlachMulti2ZZMinmaxMm(_)
+            | Self::MortlachMulti2ZZShiftMm(_)
+            | Self::MortlachMulti2ZZSqdmulhMm(_)
+            | Self::MortlachMulti4ZZMinmaxMm(_)
+            | Self::MortlachMulti4ZZShiftMm(_)
+            | Self::MortlachMulti4ZZSqdmulhMm(_) => Class::SveMultiIntBinary,
+            Self::MortlachMulti2ZZFminmaxSm(_)
+            | Self::MortlachMulti4ZZFminmaxSm(_)
+            | Self::MortlachMulti2ZZFminmaxMm(_)
+            | Self::MortlachMulti4ZZFminmaxMm(_) => Class::SveMultiFpBinary,
+            Self::MortlachMulti2Fclamp(_)
+            | Self::MortlachMulti2ClampInt(_)
+            | Self::MortlachMulti4Fclamp(_)
+            | Self::MortlachMulti4ClampInt(_) => Class::SveMultiClamp,
+            Self::MortlachMulti2ZZZip(_)
+            | Self::MortlachMulti2ZZLongZip(_)
+            | Self::MortlachMulti4ZZZip(_)
+            | Self::MortlachMulti4ZZLongZip(_) => Class::SveMultiZip,
+            Self::MortlachMulti2Qrshr(_) | Self::MortlachMulti4Qrshr(_) => Class::SveMultiNarrowShift,
+            Self::MortlachMulti2NarrowIntCvrt(_) | Self::MortlachMulti4NarrowIntCvrt(_) => Class::SveMultiNarrowInt,
+            Self::MortlachMulti2NarrowFpCvrt(_) => Class::SveMultiNarrowFp,
+            Self::MortlachMulti2FpintCvrt(_)
+            | Self::MortlachMulti2IntfpCvrt(_)
+            | Self::MortlachMulti2Frint(_)
+            | Self::MortlachMulti4FpintCvrt(_)
+            | Self::MortlachMulti4IntfpCvrt(_)
+            | Self::MortlachMulti4Frint(_) => Class::SveMultiFpUnary,
+            Self::MortlachMulti2WideInt(_) | Self::MortlachMulti4WideInt(_) => Class::SveMultiUnpack,
         }
     }
 }
@@ -1114,6 +1202,33 @@ pub(crate) enum Class {
     /// ST1B to ST1D and STNT1B to STNT1D of two or four vectors, as
     /// [`Class::SveLoadMulti`].
     SveStoreMulti,
+    /// SEL of two or four vectors under a predicate-as-counter.
+    SveMultiSelect,
+    /// SMAX, SMIN, UMAX, UMIN, SRSHL, URSHL, ADD and SQDMULH of two or
+    /// four vectors by one or by as many: the handler reads the operation
+    /// and the registers from the word.
+    SveMultiIntBinary,
+    /// FMAX, FMIN, FMAXNM and FMINNM of two or four vectors by one or by as
+    /// many.
+    SveMultiFpBinary,
+    /// SCLAMP, UCLAMP and FCLAMP of two or four vectors.
+    SveMultiClamp,
+    /// ZIP and UZP of elements or quadwords, two vectors into two and four
+    /// into four.
+    SveMultiZip,
+    /// SQRSHR, SQRSHRU, UQRSHR of two or four vectors, and SQRSHRN,
+    /// SQRSHRUN, UQRSHRN of four.
+    SveMultiNarrowShift,
+    /// SQCVT, SQCVTU, UQCVT of two or four vectors, and SQCVTN, SQCVTUN,
+    /// UQCVTN of four.
+    SveMultiNarrowInt,
+    /// BFCVT, FCVT, BFCVTN and FCVTN of two vectors.
+    SveMultiNarrowFp,
+    /// FCVTZS, FCVTZU, SCVTF, UCVTF, FRINTN, FRINTP, FRINTM and FRINTA of
+    /// two or four vectors of words.
+    SveMultiFpUnary,
+    /// SUNPK and UUNPK of one vector to two and of two to four.
+    SveMultiUnpack,
     /// FMOPA and FMOPS of single-precision and of half-precision values,
     /// BFMOPA and BFMOPS, into 32-bit tiles: the handler reads which from
     /// bits 24, 21 and 4.
@@ -1498,7 +1613,48 @@ impl Encoding {
             | Self::MortlachZeroZt(_)
             | Self::MortlachExtractZt(_)
             | Self::MortlachInsertZt(_)
-            | Self::MortlachZtLdst(_) => Feature::Sme2,
+            | Self::MortlachZtLdst(_)
+            | Self::MortlachMulti2SelectInt(_)
+            | Self::MortlachMulti4SelectInt(_)
+            | Self::MortlachMulti2ZZMinmaxSm(_)
+            | Self::MortlachMulti2ZZFminmaxSm(_)
+            | Self::MortlachMulti2ZZShiftSm(_)
+            | Self::MortlachMulti2ZZAddSm(_)
+            | Self::MortlachMulti2ZZSqdmulhSm(_)
+            | Self::MortlachMulti4ZZMinmaxSm(_)
+            | Self::MortlachMulti4ZZFminmaxSm(_)
+            | Self::MortlachMulti4ZZShiftSm(_)
+            | Self::MortlachMulti4ZZAddSm(_)
+            | Self::MortlachMulti4ZZSqdmulhSm(_)
+            | Self::MortlachMulti2ZZMinmaxMm(_)
+            | Self::MortlachMulti2ZZFminmaxMm(_)
+            | Self::MortlachMulti2ZZShiftMm(_)
+            | Self::MortlachMulti2ZZSqdmulhMm(_)
+            | Self::MortlachMulti4ZZMinmaxMm(_)
+            | Self::MortlachMulti4ZZFminmaxMm(_)
+            | Self::MortlachMulti4ZZShiftMm(_)
+            | Self::MortlachMulti4ZZSqdmulhMm(_)
+            | Self::MortlachMulti2Fclamp(_)
+            | Self::MortlachMulti2ClampInt(_)
+            | Self::MortlachMulti4Fclamp(_)
+            | Self::MortlachMulti4ClampInt(_)
+            | Self::MortlachMulti2ZZZip(_)
+            | Self::MortlachMulti2ZZLongZip(_)
+            | Self::MortlachMulti2Qrshr(_)
+            | Self::MortlachMulti4Qrshr(_)
+            | Self::MortlachMulti2NarrowFpCvrt(_)
+            | Self::MortlachMulti2FpintCvrt(_)
+            | Self::MortlachMulti2IntfpCvrt(_)
+            | Self::MortlachMulti2NarrowIntCvrt(_)
+            | Self::MortlachMulti2WideInt(_)
+            | Self::MortlachMulti2Frint(_)
+            | Self::MortlachMulti4FpintCvrt(_)
+            | Self::MortlachMulti4IntfpCvrt(_)
+            | Self::MortlachMulti4NarrowIntCvrt(_)
+            | Self::MortlachMulti4WideInt(_)
+            | Self::MortlachMulti4ZZZip(_)
+            | Self::MortlachMulti4ZZLongZip(_)
+            | Self::MortlachMulti4Frint(_) => Feature::Sme2,
         }
     }
 }

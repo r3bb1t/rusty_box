@@ -185,14 +185,15 @@ def sve_state(seed, kind, insn):
     if kind == "SA":
         # FPCR.AH, which FABS and FNEG read.
         fpcr = (r.next() & 1) << 1
-    if kind in ("SF", "ZF"):
+    if kind in ("SF", "SS", "ZF"):
         # Floating-point inputs: per register, the state above, or lanes of
         # floating-point values, half of the registers in the format the
         # word names and the rest in half, single or double precision; then
         # a random FPCR (RMode, FZ, DN, AHP, FZ16, and FEAT_AFP's FIZ, AH
-        # and NEP). The format is the one the `size` field names, or for an
-        # outer product (ZF) its sources' (`za_fp_format`).
-        own = (insn >> 22) & 3 if kind == "SF" else za_fp_format(insn)
+        # and NEP). The format is the one the `size` field names, single
+        # precision for the conversions of words (SS), or for an outer
+        # product (ZF) its sources' (`za_fp_format`).
+        own = (insn >> 22) & 3 if kind == "SF" else 2 if kind == "SS" else za_fp_format(insn)
         for i in range(32):
             sel = r.next() & 7
             if sel != 0:
@@ -212,6 +213,18 @@ def sve_state(seed, kind, insn):
                 z[i] = int_register(r, own, True)
             elif sel == 3:
                 z[i] = int_register(r, max(own - 1, 0), True)
+    if kind == "SN":
+        # A narrow's sources, words or doublewords: per register, the state
+        # above, or extremes of words or of doublewords, or words each a
+        # shift amount in range.
+        for i in range(32):
+            sel = r.next() & 3
+            if sel == 1:
+                z[i] = int_register(r, 2, True)
+            elif sel == 2:
+                z[i] = int_register(r, 3, True)
+            elif sel == 3:
+                z[i] = int_register(r, 2, False)
     return z, p, fpcr
 
 
@@ -342,6 +355,12 @@ def not_subp(w):
     return w | 0x00010000 if (w >> 17) & 3 == 0 else w
 
 
+def fp_minmax_groups(w):
+    """FMAX to FMINNM of a group by a group, `fp_size`'s: and `opc = 1x`,
+    FAMAX and FAMIN (FEAT_FAMINMAX) or unallocated, as `opc = 0x`."""
+    return fp_size(w) & ~0x00000040
+
+
 def not_pmull128(w):
     """PMULLB, PMULLT (`op = 0`, `U = 1`): `size = 00` is FEAT_SVE_PMULL128's
     128-bit form, so `size = 01` in its place."""
@@ -358,11 +377,17 @@ def not_pmull128(w):
 # the A64 `sme` group (kind Z, ZF for the floating-point outer products,
 # ZR and ZM for the loads and stores as R and M), then FEAT_SME2's: the
 # predicate-as-counter classes of the `sve` group (kind S), the
-# multi-vector loads and stores of the `sme` group (R and M), and ZERO,
-# LDR and STR of ZT0 (Z and ZM); their fixed bits from AARCHMRS 2026-09. A
-# word of a class that is unallocated (MOVA's `Q = 1` with a `size` other
-# than 11, PEXT's `opc = 11x`) raises a signal and is dropped. MOVT between
-# ZT0 and a general register, which is defined only in Debug state, has no
+# multi-vector loads and stores of the `sme` group (R and M), ZERO, LDR
+# and STR of ZT0 (Z and ZM), and the multi-vector SVE operations of the
+# `sme` group (S for SEL and the permutes, SI for the integer operations,
+# SN for the narrows, SF for the floating-point operations and SS for the
+# conversions of words); their fixed bits from AARCHMRS 2026-09.
+# FMAX to FCLAMP's words whose encodings this processor does not
+# implement, the BFloat16 forms and FAMAX and FAMIN, are moved to
+# implemented ones as the SVE floating-point classes' are. A word of a
+# class that is unallocated (MOVA's `Q = 1` with a `size` other than 11,
+# PEXT's `opc = 11x`) raises a signal and is dropped. MOVT between ZT0
+# and a general register, which is defined only in Debug state, has no
 # family.
 FAMILIES = [
     ("sve_int_bin_pred_arit_0", "S", 0x04000000, 0x00C71FFF, None),
@@ -585,6 +610,47 @@ FAMILIES = [
     ("mortlach_multi4_cst_cstnt_si_nctg", "M", 0xA1608000, 0x000F7FFB, None),
     ("mortlach_zero_zt", "Z", 0xC0480001, 0x00000000, None),
     ("mortlach_zt_ldst", "ZM", 0xE11F8000, 0x002003E0, None),
+    ("mortlach_multi2_select_int", "S", 0xC1208000, 0x00DE1FDE, None),
+    ("mortlach_multi4_select_int", "S", 0xC1218000, 0x00DC1F9C, None),
+    ("mortlach_multi2_z_z_minmax_sm", "SI", 0xC120A000, 0x00CF003F, None),
+    ("mortlach_multi2_z_z_fminmax_sm", "SF", 0xC120A100, 0x00CF003F, fp_size),
+    ("mortlach_multi2_z_z_shift_sm", "SI", 0xC120A200, 0x00CF00FF, None),
+    ("mortlach_multi2_z_z_add_sm", "SI", 0xC120A300, 0x00CF001F, None),
+    ("mortlach_multi2_z_z_sqdmulh_sm", "SI", 0xC120A400, 0x00CF001F, None),
+    ("mortlach_multi4_z_z_minmax_sm", "SI", 0xC120A800, 0x00CF003D, None),
+    ("mortlach_multi4_z_z_fminmax_sm", "SF", 0xC120A900, 0x00CF003D, fp_size),
+    ("mortlach_multi4_z_z_shift_sm", "SI", 0xC120AA00, 0x00CF00FD, None),
+    ("mortlach_multi4_z_z_add_sm", "SI", 0xC120AB00, 0x00CF001D, None),
+    ("mortlach_multi4_z_z_sqdmulh_sm", "SI", 0xC120AC00, 0x00CF001D, None),
+    ("mortlach_multi2_z_z_minmax_mm", "SI", 0xC120B000, 0x00DE007F, None),
+    ("mortlach_multi2_z_z_fminmax_mm", "SF", 0xC120B100, 0x00DE007F, fp_minmax_groups),
+    ("mortlach_multi2_z_z_shift_mm", "SI", 0xC120B200, 0x00DE00FF, None),
+    ("mortlach_multi2_z_z_sqdmulh_mm", "SI", 0xC120B400, 0x00DE001F, None),
+    ("mortlach_multi4_z_z_minmax_mm", "SI", 0xC120B800, 0x00DC007D, None),
+    ("mortlach_multi4_z_z_fminmax_mm", "SF", 0xC120B900, 0x00DC007D, fp_minmax_groups),
+    ("mortlach_multi4_z_z_shift_mm", "SI", 0xC120BA00, 0x00DC00FD, None),
+    ("mortlach_multi4_z_z_sqdmulh_mm", "SI", 0xC120BC00, 0x00DC001D, None),
+    ("mortlach_multi2_fclamp", "SF", 0xC120C000, 0x00DF03FF, fp_size),
+    ("mortlach_multi2_clamp_int", "SI", 0xC120C400, 0x00DF03FF, None),
+    ("mortlach_multi4_fclamp", "SF", 0xC120C800, 0x00DF03FD, fp_size),
+    ("mortlach_multi4_clamp_int", "SI", 0xC120CC00, 0x00DF03FD, None),
+    ("mortlach_multi2_z_z_zip", "S", 0xC120D000, 0x00DF03FF, None),
+    ("mortlach_multi2_z_z_long_zip", "S", 0xC120D400, 0x001F03FF, None),
+    ("mortlach_multi2_qrshr", "SN", 0xC1E0D400, 0x001F03FF, None),
+    ("mortlach_multi4_qrshr", "SN", 0xC120D800, 0x00DF07FF, None),
+    ("mortlach_multi2_narrow_fp_cvrt", "SS", 0xC120E000, 0x004003FF, None),
+    ("mortlach_multi2_fpint_cvrt", "SS", 0xC121E000, 0x000003FE, None),
+    ("mortlach_multi2_intfp_cvrt", "SS", 0xC122E000, 0x000003FE, None),
+    ("mortlach_multi2_narrow_int_cvrt", "SN", 0xC123E000, 0x004003FF, None),
+    ("mortlach_multi2_wide_int", "SI", 0xC125E000, 0x00C003FF, None),
+    ("mortlach_multi2_frint", "SF", 0xC128E000, 0x00C703DE, None),
+    ("mortlach_multi4_fpint_cvrt", "SS", 0xC131E000, 0x000003BC, None),
+    ("mortlach_multi4_intfp_cvrt", "SS", 0xC132E000, 0x000003BC, None),
+    ("mortlach_multi4_narrow_int_cvrt", "SN", 0xC133E000, 0x00C003FF, None),
+    ("mortlach_multi4_wide_int", "SI", 0xC135E000, 0x00C003DD, None),
+    ("mortlach_multi4_z_z_zip", "S", 0xC136E000, 0x00C0039E, None),
+    ("mortlach_multi4_z_z_long_zip", "S", 0xC137E000, 0x0000039E, None),
+    ("mortlach_multi4_frint", "SF", 0xC138E000, 0x00C7039C, None),
 ]
 
 
