@@ -129,7 +129,14 @@ const DEVICE_CODE: u64 = GIC_DIST_BASE + 0x420;
 /// `mov x2, #13; 1: ldr w3, [x11], #4; str w3, [x12], #4; subs x2, x2, #1;
 /// b.ne 1b; br x13` — copy the 13 words after it (the `alu` chain and the
 /// power-off) from `x11` to `x12`, then run them at `x13`.
-const COPY_TO_DEVICE: &[u32] = &[0xD280_01A2, 0xB840_4563, 0xB800_4583, 0xF100_0442, 0x54FF_FFA1, 0xD61F_01A0];
+const COPY_TO_DEVICE: &[u32] = &[
+    0xD280_01A2,
+    0xB840_4563,
+    0xB800_4583,
+    0xF100_0442,
+    0x54FF_FFA1,
+    0xD61F_01A0,
+];
 
 /// What a run measured.
 struct Measured {
@@ -345,7 +352,9 @@ fn loop_machine<I: Instrumentation>(work: &Workload, observer: I, scale: u64) ->
     if work.maps_devices {
         // The same for the first GiB, the devices', at VA 0.
         let devices = (1 << 10) | (3 << 8) | 0b01u64;
-        machine.mem_write(TABLES, &devices.to_le_bytes()).map_err(|e| format!("tables: {e}"))?;
+        machine
+            .mem_write(TABLES, &devices.to_le_bytes())
+            .map_err(|e| format!("tables: {e}"))?;
     }
     // T0SZ 25 (a 39-bit space from level 1), walks cacheable and inner
     // shareable, the 4 KiB granule; EPD1 keeps TTBR1 out of it.

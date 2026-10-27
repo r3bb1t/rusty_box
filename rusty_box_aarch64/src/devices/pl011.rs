@@ -600,7 +600,12 @@ impl Pl011 {
     /// passed, and not at all without a baud clock.
     fn start_rx_timeout(&mut self, clocks: UartClocks) {
         self.rx_timeout = self.timeout_cycles().map(|cycles| {
-            clocks.machine.after(clocks.machine.rate().ticks_from_cycles_ceil(cycles, clocks.uartclk))
+            clocks.machine.after(
+                clocks
+                    .machine
+                    .rate()
+                    .ticks_from_cycles_ceil(cycles, clocks.uartclk),
+            )
         });
     }
 
@@ -682,7 +687,11 @@ impl Pl011 {
             self.int_level |= INT_OE;
             return;
         }
-        let entry = if self.take_overrun() { value | DR_OE } else { value };
+        let entry = if self.take_overrun() {
+            value | DR_OE
+        } else {
+            value
+        };
         let slot = (u32::from(self.read_pos) + self.read_count) & (depth - 1);
         self.read_fifo[slot as usize] = entry;
         self.read_count += 1;
@@ -807,7 +816,9 @@ impl Pl011 {
                 let high = self.read_register(RegOffset::new(offset.get() + 4));
                 u64::from(low) | (u64::from(high) << 32)
             }
-            AccessWidth::Byte | AccessWidth::Half | AccessWidth::Word => u64::from(self.read_register(offset)),
+            AccessWidth::Byte | AccessWidth::Half | AccessWidth::Word => {
+                u64::from(self.read_register(offset))
+            }
         }
     }
 
@@ -839,7 +850,11 @@ impl Pl011 {
         match width {
             AccessWidth::Dword => {
                 self.write_register(offset, value as u32, clocks);
-                self.write_register(RegOffset::new(offset.get() + 4), (value >> 32) as u32, clocks);
+                self.write_register(
+                    RegOffset::new(offset.get() + 4),
+                    (value >> 32) as u32,
+                    clocks,
+                );
             }
             AccessWidth::Byte | AccessWidth::Half | AccessWidth::Word => {
                 self.write_register(offset, value as u32, clocks);
@@ -967,15 +982,21 @@ impl Pl011 {
         }
         let cr = cr & CR_MASK;
         if tx_count > 0 && cr & (CR_UARTEN | CR_TXE) == CR_UARTEN | CR_TXE {
-            return Err(SnapError::Invalid("PL011 characters waiting to be transmitted while transmission is enabled"));
+            return Err(SnapError::Invalid(
+                "PL011 characters waiting to be transmitted while transmission is enabled",
+            ));
         }
         if divisor > BaudDivisor::MAX {
-            return Err(SnapError::Invalid("PL011 baud rate divisor wider than UARTIBRD and UARTFBRD"));
+            return Err(SnapError::Invalid(
+                "PL011 baud rate divisor wider than UARTIBRD and UARTFBRD",
+            ));
         }
         let divisor = BaudDivisor(divisor);
         let int_enabled = int_enabled & IMSC_MASK;
         if rx_timeout.is_some() && (read_count == 0 || int_enabled & INT_RT == 0) {
-            return Err(SnapError::Invalid("PL011 receive timeout running with nothing to time"));
+            return Err(SnapError::Invalid(
+                "PL011 receive timeout running with nothing to time",
+            ));
         }
         let mut restored = Self {
             tx: RingBuffer::new(),
@@ -1084,14 +1105,22 @@ mod tests {
         let mut uart = Pl011::new();
         write(&mut uart, CR, 0x300 | CR_LBE);
         write(&mut uart, DR, u32::from(b'x'));
-        assert_eq!(read(&mut uart, FR) & FLAG_RXFE, FLAG_RXFE, "UARTEN is clear");
+        assert_eq!(
+            read(&mut uart, FR) & FLAG_RXFE,
+            FLAG_RXFE,
+            "UARTEN is clear"
+        );
         write(&mut uart, CR, CR_UARTEN | 0x100 | CR_LBE);
         write(&mut uart, DR, u32::from(b'y'));
         assert_eq!(read(&mut uart, FR) & FLAG_RXFE, FLAG_RXFE, "RXE is clear");
         write(&mut uart, CR, ENABLED | CR_LBE);
         write(&mut uart, DR, u32::from(b'z'));
         assert_eq!(read(&mut uart, DR), u32::from(b'z'));
-        assert_eq!(uart.drain_tx().collect::<std::vec::Vec<u8>>(), b"xyz", "each byte still left");
+        assert_eq!(
+            uart.drain_tx().collect::<std::vec::Vec<u8>>(),
+            b"xyz",
+            "each byte still left"
+        );
     }
 
     fn sent(uart: &mut Pl011) -> std::vec::Vec<u8> {
@@ -1105,18 +1134,37 @@ mod tests {
             write(&mut uart, LCR_H, LCR_FEN);
             write(&mut uart, CR, off);
             write(&mut uart, IMSC, INT_TX);
-            assert_eq!(read(&mut uart, FR) & (FLAG_TXFE | FLAG_TXFF | FLAG_BUSY), FLAG_TXFE);
+            assert_eq!(
+                read(&mut uart, FR) & (FLAG_TXFE | FLAG_TXFF | FLAG_BUSY),
+                FLAG_TXFE
+            );
             for i in 0..TX_FIFO_DEPTH as u32 {
                 write(&mut uart, DR, u32::from(b'a') + i);
-                let full = if i + 1 == TX_FIFO_DEPTH as u32 { FLAG_TXFF } else { 0 };
-                assert_eq!(read(&mut uart, FR) & (FLAG_TXFE | FLAG_TXFF | FLAG_BUSY), FLAG_BUSY | full, "UARTCR {off:#x}, {} queued", i + 1);
+                let full = if i + 1 == TX_FIFO_DEPTH as u32 {
+                    FLAG_TXFF
+                } else {
+                    0
+                };
+                assert_eq!(
+                    read(&mut uart, FR) & (FLAG_TXFE | FLAG_TXFF | FLAG_BUSY),
+                    FLAG_BUSY | full,
+                    "UARTCR {off:#x}, {} queued",
+                    i + 1
+                );
             }
             write(&mut uart, DR, u32::from(b'!'));
             assert_eq!(sent(&mut uart), b"", "UARTCR {off:#x}: nothing leaves");
             assert_eq!(read(&mut uart, RIS) & INT_TX, 0, "nothing was transmitted");
             write(&mut uart, CR, ENABLED);
-            assert_eq!(sent(&mut uart), b"abcdefghijklmnop", "UARTCR {off:#x}: all sixteen, in order; the write to the full FIFO was lost");
-            assert_eq!(read(&mut uart, FR) & (FLAG_TXFE | FLAG_TXFF | FLAG_BUSY), FLAG_TXFE);
+            assert_eq!(
+                sent(&mut uart),
+                b"abcdefghijklmnop",
+                "UARTCR {off:#x}: all sixteen, in order; the write to the full FIFO was lost"
+            );
+            assert_eq!(
+                read(&mut uart, FR) & (FLAG_TXFE | FLAG_TXFF | FLAG_BUSY),
+                FLAG_TXFE
+            );
             assert_eq!(read(&mut uart, RIS) & INT_TX, INT_TX);
             assert!(uart.irq());
             write(&mut uart, DR, u32::from(b'z'));
@@ -1131,7 +1179,16 @@ mod tests {
     fn the_transmit_interrupt_marks_the_fifo_draining_through_the_trigger_level() {
         // TXIFLSEL: 1/8, 1/4, 1/2, 3/4 and 7/8 of 16; reserved encodings
         // take the half-full level.
-        for (txiflsel, level) in [(0, 2), (1, 4), (2, 8), (3, 12), (4, 14), (5, 8), (6, 8), (7, 8)] {
+        for (txiflsel, level) in [
+            (0, 2),
+            (1, 4),
+            (2, 8),
+            (3, 12),
+            (4, 14),
+            (5, 8),
+            (6, 8),
+            (7, 8),
+        ] {
             for queued in [level, level + 1] {
                 let mut uart = Pl011::new();
                 write(&mut uart, LCR_H, LCR_FEN);
@@ -1140,11 +1197,19 @@ mod tests {
                 for i in 0..queued {
                     write(&mut uart, DR, u32::from(b'a') + i);
                 }
-                assert_eq!(read(&mut uart, RIS) & INT_TX, 0, "TXIFLSEL {txiflsel}: nothing has left");
+                assert_eq!(
+                    read(&mut uart, RIS) & INT_TX,
+                    0,
+                    "TXIFLSEL {txiflsel}: nothing has left"
+                );
                 write(&mut uart, CR, ENABLED);
                 assert_eq!(sent(&mut uart).len(), queued as usize);
                 let crossed = if queued > level { INT_TX } else { 0 };
-                assert_eq!(read(&mut uart, RIS) & INT_TX, crossed, "TXIFLSEL {txiflsel}, {queued} queued");
+                assert_eq!(
+                    read(&mut uart, RIS) & INT_TX,
+                    crossed,
+                    "TXIFLSEL {txiflsel}, {queued} queued"
+                );
                 assert_eq!(uart.irq(), crossed != 0);
             }
         }
@@ -1163,11 +1228,19 @@ mod tests {
         write(&mut uart, CR, 0x300);
         write(&mut uart, DR, u32::from(b'd'));
         write(&mut uart, DR, u32::from(b'e'));
-        assert_eq!(read(&mut uart, RIS) & INT_TX, INT_TX, "at the level: still set");
+        assert_eq!(
+            read(&mut uart, RIS) & INT_TX,
+            INT_TX,
+            "at the level: still set"
+        );
         write(&mut uart, DR, u32::from(b'f'));
         assert_eq!(read(&mut uart, RIS) & INT_TX, 0, "above the level: cleared");
         write(&mut uart, CR, ENABLED);
-        assert_eq!(read(&mut uart, RIS) & INT_TX, INT_TX, "draining through it again");
+        assert_eq!(
+            read(&mut uart, RIS) & INT_TX,
+            INT_TX,
+            "draining through it again"
+        );
         write(&mut uart, ICR, INT_TX);
         assert_eq!(read(&mut uart, RIS) & INT_TX, 0, "UARTICR clears it");
     }
@@ -1185,11 +1258,19 @@ mod tests {
             write(&mut uart, IFLS, txiflsel);
             write(&mut uart, IMSC, INT_TX);
             write(&mut uart, CR, ENABLED);
-            assert_eq!(read(&mut uart, RIS) & INT_TX, 0, "enabled with nothing written");
+            assert_eq!(
+                read(&mut uart, RIS) & INT_TX,
+                0,
+                "enabled with nothing written"
+            );
             for byte in *b"hello, world" {
                 write(&mut uart, DR, u32::from(byte));
                 assert_eq!(read(&mut uart, RIS) & INT_TX, 0, "TXIFLSEL {txiflsel}");
-                assert_eq!(read(&mut uart, FR) & (FLAG_TXFE | FLAG_TXFF | FLAG_BUSY), FLAG_TXFE, "it left at once");
+                assert_eq!(
+                    read(&mut uart, FR) & (FLAG_TXFE | FLAG_TXFF | FLAG_BUSY),
+                    FLAG_TXFE,
+                    "it left at once"
+                );
             }
             assert_eq!(sent(&mut uart), b"hello, world");
         }
@@ -1203,16 +1284,28 @@ mod tests {
         let mut uart = Pl011::new();
         write(&mut uart, IMSC, INT_TX);
         write(&mut uart, CR, ENABLED);
-        assert_eq!(read(&mut uart, RIS) & INT_TX, 0, "enabled with nothing written");
+        assert_eq!(
+            read(&mut uart, RIS) & INT_TX,
+            0,
+            "enabled with nothing written"
+        );
         write(&mut uart, DR, u32::from(b'1'));
-        assert_eq!(read(&mut uart, RIS) & INT_TX, INT_TX, "it filled and emptied");
+        assert_eq!(
+            read(&mut uart, RIS) & INT_TX,
+            INT_TX,
+            "it filled and emptied"
+        );
         assert!(uart.irq());
         write(&mut uart, ICR, INT_TX);
         write(&mut uart, DR, u32::from(b'2'));
         assert_eq!(read(&mut uart, RIS) & INT_TX, INT_TX, "each character");
         write(&mut uart, CR, 0x300);
         write(&mut uart, DR, u32::from(b'3'));
-        assert_eq!(read(&mut uart, RIS) & INT_TX, 0, "the write that fills it clears it");
+        assert_eq!(
+            read(&mut uart, RIS) & INT_TX,
+            0,
+            "the write that fills it clears it"
+        );
         write(&mut uart, CR, ENABLED);
         assert_eq!(read(&mut uart, RIS) & INT_TX, INT_TX, "sent once enabled");
         assert_eq!(sent(&mut uart), b"123");
@@ -1229,23 +1322,37 @@ mod tests {
                 write(&mut uart, DR, i);
             }
             write(&mut uart, LCR_H, 0);
-            assert_eq!(read(&mut uart, RIS) & INT_TX, crossed, "{queued} flushed past the half-full level");
+            assert_eq!(
+                read(&mut uart, RIS) & INT_TX,
+                crossed,
+                "{queued} flushed past the half-full level"
+            );
         }
         let mut uart = Pl011::new();
         write(&mut uart, DR, u32::from(b'x'));
         write(&mut uart, LCR_H, LCR_FEN);
-        assert_eq!(read(&mut uart, RIS) & INT_TX, INT_TX, "the holding register emptied");
+        assert_eq!(
+            read(&mut uart, RIS) & INT_TX,
+            INT_TX,
+            "the holding register emptied"
+        );
     }
 
     #[test]
     fn with_the_fifo_disabled_the_transmit_holding_register_holds_one_character() {
         let mut uart = Pl011::new();
         write(&mut uart, DR, u32::from(b'1'));
-        assert_eq!(read(&mut uart, FR) & (FLAG_TXFE | FLAG_TXFF | FLAG_BUSY), FLAG_TXFF | FLAG_BUSY);
+        assert_eq!(
+            read(&mut uart, FR) & (FLAG_TXFE | FLAG_TXFF | FLAG_BUSY),
+            FLAG_TXFF | FLAG_BUSY
+        );
         write(&mut uart, DR, u32::from(b'2'));
         write(&mut uart, CR, ENABLED);
         assert_eq!(sent(&mut uart), b"1");
-        assert_eq!(read(&mut uart, FR) & (FLAG_TXFE | FLAG_TXFF | FLAG_BUSY), FLAG_TXFE);
+        assert_eq!(
+            read(&mut uart, FR) & (FLAG_TXFE | FLAG_TXFF | FLAG_BUSY),
+            FLAG_TXFE
+        );
     }
 
     #[test]
@@ -1255,7 +1362,10 @@ mod tests {
         write(&mut uart, DR, u32::from(b'x'));
         write(&mut uart, DR, u32::from(b'y'));
         write(&mut uart, LCR_H, 0);
-        assert_eq!(read(&mut uart, FR) & (FLAG_TXFE | FLAG_TXFF | FLAG_BUSY), FLAG_TXFE);
+        assert_eq!(
+            read(&mut uart, FR) & (FLAG_TXFE | FLAG_TXFF | FLAG_BUSY),
+            FLAG_TXFE
+        );
         write(&mut uart, CR, ENABLED);
         assert_eq!(sent(&mut uart), b"", "flushed characters never leave");
         write(&mut uart, CR, 0x300);
@@ -1270,7 +1380,11 @@ mod tests {
         let mut uart = Pl011::new();
         write(&mut uart, CR, CR_UARTEN | CR_RXE | CR_LBE);
         write(&mut uart, DR, u32::from(b'q'));
-        assert_eq!(read(&mut uart, FR) & FLAG_RXFE, FLAG_RXFE, "TXE is clear: nothing on the line");
+        assert_eq!(
+            read(&mut uart, FR) & FLAG_RXFE,
+            FLAG_RXFE,
+            "TXE is clear: nothing on the line"
+        );
         assert_eq!(sent(&mut uart), b"");
         write(&mut uart, CR, ENABLED | CR_LBE);
         assert_eq!(read(&mut uart, DR), u32::from(b'q'), "sent once TXE is set");
@@ -1283,10 +1397,17 @@ mod tests {
         let baud = |rate| BaudRate::new(rate).expect("a rate");
         uart.set_up_console(baud(115_200), at(0));
         // 24 MHz × 4 / 115200 = 833 64ths: 13 + 1/64.
-        assert_eq!([9, 10, LCR_H, CR].map(|n| read(&mut uart, n)), [13, 1, 0x70, 0x301]);
+        assert_eq!(
+            [9, 10, LCR_H, CR].map(|n| read(&mut uart, n)),
+            [13, 1, 0x70, 0x301]
+        );
         let mut slow = Pl011::new();
         slow.set_up_console(baud(1), at(0));
-        assert_eq!([9, 10].map(|n| read(&mut slow, n)), [0xFFFF, 0], "too slow for 16 bits: the slowest baud clock");
+        assert_eq!(
+            [9, 10].map(|n| read(&mut slow, n)),
+            [0xFFFF, 0],
+            "too slow for 16 bits: the slowest baud clock"
+        );
         write(&mut uart, DR, u32::from(b'k'));
         assert_eq!(sent(&mut uart), b"k");
         assert!(rx(&mut uart, b'r'));
@@ -1316,12 +1437,24 @@ mod tests {
             for i in 0..level - 1 {
                 assert!(rx(&mut uart, i as u8));
             }
-            assert_eq!(read(&mut uart, RIS) & INT_RX, 0, "RXIFLSEL {rxiflsel}: below the level");
+            assert_eq!(
+                read(&mut uart, RIS) & INT_RX,
+                0,
+                "RXIFLSEL {rxiflsel}: below the level"
+            );
             assert!(rx(&mut uart, 0xAA));
-            assert_eq!(read(&mut uart, RIS) & INT_RX, INT_RX, "RXIFLSEL {rxiflsel}: at the level");
+            assert_eq!(
+                read(&mut uart, RIS) & INT_RX,
+                INT_RX,
+                "RXIFLSEL {rxiflsel}: at the level"
+            );
             assert!(uart.irq());
             assert_eq!(read(&mut uart, DR), 0);
-            assert_eq!(read(&mut uart, RIS) & INT_RX, 0, "RXIFLSEL {rxiflsel}: a read takes it below");
+            assert_eq!(
+                read(&mut uart, RIS) & INT_RX,
+                0,
+                "RXIFLSEL {rxiflsel}: a read takes it below"
+            );
             assert!(!uart.irq());
         }
     }
@@ -1337,7 +1470,11 @@ mod tests {
         assert_eq!(read(&mut uart, RIS) & INT_RX, INT_RX);
         write(&mut uart, ICR, INT_RX);
         assert!(rx(&mut uart, 3));
-        assert_eq!(read(&mut uart, RIS) & INT_RX, 0, "filling further crosses nothing");
+        assert_eq!(
+            read(&mut uart, RIS) & INT_RX,
+            0,
+            "filling further crosses nothing"
+        );
         // Back below the level, then up through it again.
         assert_eq!(read(&mut uart, DR), 1);
         assert_eq!(read(&mut uart, DR), 2);
@@ -1385,22 +1522,45 @@ mod tests {
         let mut uart = timed();
         write(&mut uart, IMSC, INT_RT);
         assert!(rx_at(&mut uart, b'a', 100));
-        assert_eq!(uart.next_deadline(), Some(VmInstant::from_ticks(100 + TIMEOUT_13_1)));
+        assert_eq!(
+            uart.next_deadline(),
+            Some(VmInstant::from_ticks(100 + TIMEOUT_13_1))
+        );
         update(&mut uart, 100 + TIMEOUT_13_1 - 1);
         assert_eq!(read(&mut uart, RIS) & INT_RT, 0, "one tick short");
         assert!(rx_at(&mut uart, b'b', 1000));
-        assert_eq!(uart.next_deadline(), Some(VmInstant::from_ticks(1000 + TIMEOUT_13_1)), "an arrival restarts it");
+        assert_eq!(
+            uart.next_deadline(),
+            Some(VmInstant::from_ticks(1000 + TIMEOUT_13_1)),
+            "an arrival restarts it"
+        );
         update(&mut uart, 100 + TIMEOUT_13_1);
-        assert_eq!(read(&mut uart, RIS) & INT_RT, 0, "the first arrival's deadline is gone");
+        assert_eq!(
+            read(&mut uart, RIS) & INT_RT,
+            0,
+            "the first arrival's deadline is gone"
+        );
         update(&mut uart, 1000 + TIMEOUT_13_1);
-        assert_eq!(read(&mut uart, RIS) & INT_RT, INT_RT, "32 bit periods without a character");
+        assert_eq!(
+            read(&mut uart, RIS) & INT_RT,
+            INT_RT,
+            "32 bit periods without a character"
+        );
         assert_eq!(read(&mut uart, MIS), INT_RT);
         assert!(uart.irq());
         assert_eq!(uart.next_deadline(), None, "it fires once");
         assert_eq!(read(&mut uart, DR), u32::from(b'a'));
-        assert_eq!(read(&mut uart, RIS) & INT_RT, INT_RT, "the FIFO still holds a byte");
+        assert_eq!(
+            read(&mut uart, RIS) & INT_RT,
+            INT_RT,
+            "the FIFO still holds a byte"
+        );
         assert_eq!(read(&mut uart, DR), u32::from(b'b'));
-        assert_eq!(read(&mut uart, RIS) & INT_RT, 0, "reading it empty clears it");
+        assert_eq!(
+            read(&mut uart, RIS) & INT_RT,
+            0,
+            "reading it empty clears it"
+        );
     }
 
     #[test]
@@ -1409,14 +1569,26 @@ mod tests {
         assert!(rx_at(&mut uart, b'a', 0));
         assert_eq!(uart.next_deadline(), None, "RTIM clear: no count");
         update(&mut uart, 100_000);
-        assert_eq!(read(&mut uart, RIS) & (INT_RT | INT_RX), 0, "RTIM clear: RTRIS cannot be set");
+        assert_eq!(
+            read(&mut uart, RIS) & (INT_RT | INT_RX),
+            0,
+            "RTIM clear: RTRIS cannot be set"
+        );
         write_at(&mut uart, IMSC, INT_RT, 5000);
-        assert_eq!(uart.next_deadline(), Some(VmInstant::from_ticks(5000 + TIMEOUT_13_1)), "setting RTIM starts it");
+        assert_eq!(
+            uart.next_deadline(),
+            Some(VmInstant::from_ticks(5000 + TIMEOUT_13_1)),
+            "setting RTIM starts it"
+        );
         update(&mut uart, 5000 + TIMEOUT_13_1);
         assert_eq!(read(&mut uart, RIS) & INT_RT, INT_RT);
         write(&mut uart, ICR, INT_RT);
         write_at(&mut uart, IMSC, INT_RT, 20_000);
-        assert_eq!(uart.next_deadline(), None, "RTIM was set already: nothing starts");
+        assert_eq!(
+            uart.next_deadline(),
+            None,
+            "RTIM was set already: nothing starts"
+        );
         update(&mut uart, 50_000);
         assert_eq!(read(&mut uart, RIS) & INT_RT, 0, "nothing new arrived");
         assert!(rx_at(&mut uart, b'b', 60_000));
@@ -1425,7 +1597,10 @@ mod tests {
         update(&mut uart, 70_000);
         assert_eq!(read(&mut uart, RIS) & INT_RT, 0);
         write_at(&mut uart, IMSC, INT_RT, 70_000);
-        assert_eq!(uart.next_deadline(), Some(VmInstant::from_ticks(70_000 + TIMEOUT_13_1)));
+        assert_eq!(
+            uart.next_deadline(),
+            Some(VmInstant::from_ticks(70_000 + TIMEOUT_13_1))
+        );
         update(&mut uart, 70_000 + TIMEOUT_13_1);
         write(&mut uart, IMSC, 0);
         assert_eq!(read(&mut uart, RIS) & INT_RT, 0, "clearing RTIM clears it");
@@ -1442,16 +1617,28 @@ mod tests {
             write(&mut uart, IMSC, INT_RT);
             assert!(rx_at(&mut uart, b'a', 100));
             write_at(&mut uart, CR, off, 200);
-            assert_eq!(uart.next_deadline(), Some(VmInstant::from_ticks(100 + TIMEOUT_13_1)), "UARTCR {off:#x}");
+            assert_eq!(
+                uart.next_deadline(),
+                Some(VmInstant::from_ticks(100 + TIMEOUT_13_1)),
+                "UARTCR {off:#x}"
+            );
             update(&mut uart, 100 + TIMEOUT_13_1);
-            assert_eq!(read(&mut uart, RIS) & INT_RT, INT_RT, "UARTCR {off:#x}: the FIFO still holds a character");
+            assert_eq!(
+                read(&mut uart, RIS) & INT_RT,
+                INT_RT,
+                "UARTCR {off:#x}: the FIFO still holds a character"
+            );
         }
     }
 
     #[test]
     fn the_bit_period_is_the_divisor_the_last_lcr_h_write_latched() {
         let deadline = |uart: &mut Pl011| {
-            assert_eq!(read(uart, DR) & 0xFF, u32::from(b'x'), "the FIFO is emptied for the next count");
+            assert_eq!(
+                read(uart, DR) & 0xFF,
+                u32::from(b'x'),
+                "the FIFO is emptied for the next count"
+            );
             assert!(rx_at(uart, b'x', 0));
             uart.next_deadline().map(VmInstant::ticks)
         };
@@ -1459,11 +1646,23 @@ mod tests {
         write(&mut uart, IMSC, INT_RT);
         assert!(rx_at(&mut uart, b'x', 0));
         write(&mut uart, 9, 26);
-        assert_eq!(deadline(&mut uart), Some(TIMEOUT_13_1), "UARTIBRD alone changes nothing (§3.3.7)");
+        assert_eq!(
+            deadline(&mut uart),
+            Some(TIMEOUT_13_1),
+            "UARTIBRD alone changes nothing (§3.3.7)"
+        );
         write(&mut uart, LCR_H, LCR_FEN);
-        assert_eq!(deadline(&mut uart), Some(512 * 26 + 8), "the UARTLCR_H write latches 26 + 1/64");
+        assert_eq!(
+            deadline(&mut uart),
+            Some(512 * 26 + 8),
+            "the UARTLCR_H write latches 26 + 1/64"
+        );
         write(&mut uart, LCR_H, LCR_FEN | LCR_WLEN_8 | (1 << 3) | (1 << 1));
-        assert_eq!(deadline(&mut uart), Some(512 * 26 + 8), "word length, stop bits and parity leave the bit period");
+        assert_eq!(
+            deadline(&mut uart),
+            Some(512 * 26 + 8),
+            "word length, stop bits and parity leave the bit period"
+        );
         write(&mut uart, 10, 0);
         write(&mut uart, LCR_H, LCR_FEN);
         assert_eq!(deadline(&mut uart), Some(512 * 26));
@@ -1473,7 +1672,11 @@ mod tests {
         write(&mut uart, 9, 0xFFFF);
         write(&mut uart, 10, 1);
         write(&mut uart, LCR_H, LCR_FEN);
-        assert_eq!(deadline(&mut uart), None, "0xFFFF with a fraction aborts reception");
+        assert_eq!(
+            deadline(&mut uart),
+            None,
+            "0xFFFF with a fraction aborts reception"
+        );
         write(&mut uart, 10, 0);
         write(&mut uart, LCR_H, LCR_FEN);
         assert_eq!(deadline(&mut uart), Some(512 * 0xFFFF));
@@ -1491,7 +1694,10 @@ mod tests {
             uartclk: UARTCLK,
         };
         assert_eq!(uart.receive(b'a', clocks), Received::Taken);
-        assert_eq!(uart.next_deadline(), Some(VmInstant::from_ticks(7 + 13_884)));
+        assert_eq!(
+            uart.next_deadline(),
+            Some(VmInstant::from_ticks(7 + 13_884))
+        );
         uart.update(VmClock::new(VmInstant::from_ticks(7 + 13_883), rate));
         assert_eq!(read(&mut uart, RIS) & INT_RT, 0);
         uart.update(VmClock::new(VmInstant::from_ticks(7 + 13_884), rate));
@@ -1520,8 +1726,16 @@ mod tests {
         assert_eq!(read(&mut uart, RIS) & (INT_RT | INT_RX), INT_RT | INT_RX);
         write(&mut uart, LCR_H, 0);
         assert_eq!(read(&mut uart, FR) & FLAG_RXFE, FLAG_RXFE);
-        assert_eq!(read(&mut uart, RIS) & INT_RT, 0, "an empty FIFO has no receive timeout");
-        assert_eq!(read(&mut uart, RIS) & INT_RX, 0, "an empty FIFO is below the trigger level");
+        assert_eq!(
+            read(&mut uart, RIS) & INT_RT,
+            0,
+            "an empty FIFO has no receive timeout"
+        );
+        assert_eq!(
+            read(&mut uart, RIS) & INT_RX,
+            0,
+            "an empty FIFO is below the trigger level"
+        );
         assert!(!uart.irq());
         // FIFO disabled, then enabled: the holding register.
         assert!(rx_at(&mut uart, 3, 10_000));
@@ -1529,7 +1743,10 @@ mod tests {
         assert_eq!(read(&mut uart, RIS) & (INT_RT | INT_RX), INT_RT | INT_RX);
         write_at(&mut uart, IMSC, INT_RX, 20_000);
         write_at(&mut uart, IMSC, INT_RT | INT_RX, 20_000);
-        assert!(uart.next_deadline().is_some(), "RTIM set again with the holding register full");
+        assert!(
+            uart.next_deadline().is_some(),
+            "RTIM set again with the holding register full"
+        );
         write(&mut uart, LCR_H, LCR_FEN);
         assert_eq!(read(&mut uart, FR) & FLAG_RXFE, FLAG_RXFE);
         assert_eq!(read(&mut uart, RIS) & (INT_RT | INT_RX), 0);
@@ -1557,14 +1774,14 @@ mod tests {
         let mut uart = Pl011::new();
         // The bits DDI 0183F defines in each read/write register.
         for (n, defined) in [
-            (8, 0xFF),     // UARTILPR: 8 bits (Table 3-1), ILPDVSR [7:0] (Table 3-5)
-            (9, 0xFFFF),   // UARTIBRD: 16 bits (Table 3-1), BAUD DIVINT [15:0] (Table 3-6)
-            (10, 0x3F),    // UARTFBRD: 6 bits (Table 3-1), BAUD DIVFRAC [5:0] (Table 3-7)
-            (11, 0xFF),    // UARTLCR_H: [15:8] reserved (Table 3-10)
-            (12, 0xFF87),  // UARTCR: [6:3] reserved (Table 3-12)
-            (13, 0x3F),    // UARTIFLS: [15:6] reserved (Table 3-13)
-            (14, 0x7FF),   // UARTIMSC: [15:11] reserved (Table 3-14)
-            (18, 0x7),     // UARTDMACR: [15:3] reserved (Table 3-18)
+            (8, 0xFF),    // UARTILPR: 8 bits (Table 3-1), ILPDVSR [7:0] (Table 3-5)
+            (9, 0xFFFF),  // UARTIBRD: 16 bits (Table 3-1), BAUD DIVINT [15:0] (Table 3-6)
+            (10, 0x3F),   // UARTFBRD: 6 bits (Table 3-1), BAUD DIVFRAC [5:0] (Table 3-7)
+            (11, 0xFF),   // UARTLCR_H: [15:8] reserved (Table 3-10)
+            (12, 0xFF87), // UARTCR: [6:3] reserved (Table 3-12)
+            (13, 0x3F),   // UARTIFLS: [15:6] reserved (Table 3-13)
+            (14, 0x7FF),  // UARTIMSC: [15:11] reserved (Table 3-14)
+            (18, 0x7),    // UARTDMACR: [15:3] reserved (Table 3-18)
         ] {
             write(&mut uart, n, 0xFFFF_FFFF);
             assert_eq!(read(&mut uart, n), defined, "register {:#x}", n * 4);
@@ -1581,7 +1798,11 @@ mod tests {
         assert_eq!(read(&mut uart, RIS) & !0x7FF, 0);
         write(&mut uart, FR, 0);
         // UARTFR: [15:9] reserved (Table 3-4).
-        assert_eq!(read(&mut uart, FR) & !0x1FF, 0, "the flag register ignores writes");
+        assert_eq!(
+            read(&mut uart, FR) & !0x1FF,
+            0,
+            "the flag register ignores writes"
+        );
     }
 
     #[test]
@@ -1620,8 +1841,16 @@ mod tests {
         for i in 1..RX_FIFO_DEPTH as u32 {
             assert_eq!(read(&mut uart, DR), i, "entry {i} kept");
         }
-        assert_eq!(read(&mut uart, DR), DR_OE | 0x41, "the next character carries the overrun");
-        assert_eq!(read(&mut uart, FR) & FLAG_RXFE, FLAG_RXFE, "the lost character never arrives");
+        assert_eq!(
+            read(&mut uart, DR),
+            DR_OE | 0x41,
+            "the next character carries the overrun"
+        );
+        assert_eq!(
+            read(&mut uart, FR) & FLAG_RXFE,
+            FLAG_RXFE,
+            "the lost character never arrives"
+        );
         write(&mut uart, DR, 0x42);
         assert_eq!(read(&mut uart, DR), 0x42, "and only that one");
         write(&mut uart, RSR, 0);
@@ -1638,7 +1867,11 @@ mod tests {
         write(&mut uart, DR, u32::from(b'2'));
         assert!(!uart.can_receive());
         assert_eq!(read(&mut uart, RIS) & INT_OE, INT_OE);
-        assert_eq!(read(&mut uart, DR), u32::from(b'1'), "the unread byte survived");
+        assert_eq!(
+            read(&mut uart, DR),
+            u32::from(b'1'),
+            "the unread byte survived"
+        );
         assert_eq!(read(&mut uart, FR) & (FLAG_RXFE | FLAG_RXFF), FLAG_RXFE);
         write(&mut uart, DR, u32::from(b'3'));
         assert_eq!(read(&mut uart, DR), DR_OE | u32::from(b'3'));
@@ -1655,7 +1888,11 @@ mod tests {
         assert_eq!(read(&mut uart, RIS) & ints, 0);
         write(&mut uart, CR, 0x300 | outputs | CR_LBE);
         assert_eq!(read(&mut uart, FR) & modem, modem);
-        assert_eq!(read(&mut uart, RIS) & ints, ints, "entering loopback changed every line");
+        assert_eq!(
+            read(&mut uart, RIS) & ints,
+            ints,
+            "entering loopback changed every line"
+        );
         write(&mut uart, ICR, ints);
         write(&mut uart, CR, 0x300 | outputs | CR_LBE);
         assert_eq!(read(&mut uart, RIS) & ints, 0, "a rewrite changes no line");
@@ -1700,7 +1937,11 @@ mod tests {
         write(&mut uart, CR, 0x300 | CR_LBE);
         write(&mut uart, LCR_H, 0);
         write(&mut uart, LCR_H, LCR_BRK);
-        assert_eq!(read(&mut uart, RIS) & INT_BE, 0, "a receiver that is off hears no break");
+        assert_eq!(
+            read(&mut uart, RIS) & INT_BE,
+            0,
+            "a receiver that is off hears no break"
+        );
     }
 
     /// DDI 0183F §3.4.5: the error interrupts are asserted when the error
@@ -1716,12 +1957,28 @@ mod tests {
         write(&mut uart, LCR_H, LCR_BRK);
         assert_eq!(read(&mut uart, RIS) & (INT_BE | INT_OE), INT_BE | INT_OE);
         assert!(uart.irq());
-        assert_eq!(read(&mut uart, DR), u32::from(b'x'), "the unread character stays, with no break");
-        assert_eq!(read(&mut uart, RSR), RSR_OE, "UARTRSR has the overrun, and no break error");
-        assert_eq!(read(&mut uart, FR) & FLAG_RXFE, FLAG_RXFE, "the break character never arrives");
+        assert_eq!(
+            read(&mut uart, DR),
+            u32::from(b'x'),
+            "the unread character stays, with no break"
+        );
+        assert_eq!(
+            read(&mut uart, RSR),
+            RSR_OE,
+            "UARTRSR has the overrun, and no break error"
+        );
+        assert_eq!(
+            read(&mut uart, FR) & FLAG_RXFE,
+            FLAG_RXFE,
+            "the break character never arrives"
+        );
         write(&mut uart, LCR_H, 0);
         write(&mut uart, DR, u32::from(b'y'));
-        assert_eq!(read(&mut uart, DR), DR_OE | u32::from(b'y'), "the next character carries the overrun");
+        assert_eq!(
+            read(&mut uart, DR),
+            DR_OE | u32::from(b'y'),
+            "the next character carries the overrun"
+        );
     }
 
     /// DDI 0183F §3.4.4: with the FIFO disabled, the receive timeout counts
@@ -1733,12 +1990,23 @@ mod tests {
         write(&mut uart, LCR_H, 0);
         write(&mut uart, IMSC, INT_RT);
         assert!(rx_at(&mut uart, b'a', 100));
-        assert!(!uart.can_receive(), "one character fills the holding register");
+        assert!(
+            !uart.can_receive(),
+            "one character fills the holding register"
+        );
         update(&mut uart, 100 + TIMEOUT_13_1);
-        assert_eq!(read(&mut uart, RIS) & INT_RT, INT_RT, "32 bit periods without a character");
+        assert_eq!(
+            read(&mut uart, RIS) & INT_RT,
+            INT_RT,
+            "32 bit periods without a character"
+        );
         assert!(uart.irq());
         assert_eq!(read(&mut uart, DR), u32::from(b'a'));
-        assert_eq!(read(&mut uart, RIS) & INT_RT, 0, "reading the holding register clears it");
+        assert_eq!(
+            read(&mut uart, RIS) & INT_RT,
+            0,
+            "reading the holding register clears it"
+        );
         assert!(!uart.irq());
     }
 
@@ -1767,10 +2035,18 @@ mod tests {
                 }
                 let ris = read(&mut uart, RIS);
                 let irq = uart.irq();
-                assert_eq!(ris & INT_TX != 0, drained && held <= 2, "{held} held, drained {drained}");
+                assert_eq!(
+                    ris & INT_TX != 0,
+                    drained && held <= 2,
+                    "{held} held, drained {drained}"
+                );
                 for txiflsel in [4, 0, 2, 7, 1, 3] {
                     write(&mut uart, IFLS, txiflsel);
-                    assert_eq!(read(&mut uart, RIS), ris, "TXIFLSEL {txiflsel}, {held} held, drained {drained}");
+                    assert_eq!(
+                        read(&mut uart, RIS),
+                        ris,
+                        "TXIFLSEL {txiflsel}, {held} held, drained {drained}"
+                    );
                     assert_eq!(uart.irq(), irq);
                 }
             }
@@ -1793,7 +2069,10 @@ mod tests {
             write(&mut uart, DR, u32::from(byte));
         }
         assert_eq!(sent(&mut uart), burst);
-        assert_eq!(read(&mut uart, FR) & (FLAG_TXFE | FLAG_TXFF | FLAG_BUSY), FLAG_TXFE);
+        assert_eq!(
+            read(&mut uart, FR) & (FLAG_TXFE | FLAG_TXFF | FLAG_BUSY),
+            FLAG_TXFE
+        );
     }
 
     #[test]
@@ -1812,12 +2091,27 @@ mod tests {
     #[test]
     fn a_narrower_access_reaches_the_register_that_holds_it() {
         let mut uart = Pl011::new();
-        uart.write(RegOffset::new(0x31), AccessWidth::Byte, u64::from(ENABLED), at(0));
-        assert_eq!(uart.read(RegOffset::new(0x32), AccessWidth::Half), u64::from(ENABLED), "UARTCR");
+        uart.write(
+            RegOffset::new(0x31),
+            AccessWidth::Byte,
+            u64::from(ENABLED),
+            at(0),
+        );
+        assert_eq!(
+            uart.read(RegOffset::new(0x32), AccessWidth::Half),
+            u64::from(ENABLED),
+            "UARTCR"
+        );
         // UARTPeriphID0..3 and UARTPCellID0..3, 0xFE0 to 0xFFC.
-        let id: std::vec::Vec<u64> = (0..8).map(|i| uart.read(RegOffset::new(0xFE0 + 4 * i + 3), AccessWidth::Byte)).collect();
+        let id: std::vec::Vec<u64> = (0..8)
+            .map(|i| uart.read(RegOffset::new(0xFE0 + 4 * i + 3), AccessWidth::Byte))
+            .collect();
         assert_eq!(id, [0x11, 0x10, 0x14, 0x00, 0x0D, 0xF0, 0x05, 0xB1]);
-        assert_eq!(uart.read(RegOffset::new(0xFDC), AccessWidth::Word), 0, "below the identification registers");
+        assert_eq!(
+            uart.read(RegOffset::new(0xFDC), AccessWidth::Word),
+            0,
+            "below the identification registers"
+        );
     }
 
     #[test]
@@ -1856,13 +2150,21 @@ mod tests {
         let mut restored = Pl011::new();
         let mut source: &[u8] = &image;
         restored.restore(&mut source).expect("restore");
-        assert_eq!(read(&mut restored, FR) & !FR_MASK, 0, "the state is not a flag");
+        assert_eq!(
+            read(&mut restored, FR) & !FR_MASK,
+            0,
+            "the state is not a flag"
+        );
         assert_eq!(read(&mut restored, DR), u32::from(b'1'));
         write(&mut restored, DR, u32::from(b'3'));
         assert_eq!(read(&mut restored, DR), DR_OE | u32::from(b'3'));
         let mut quiet = std::vec::Vec::new();
         Pl011::new().save(&mut quiet).expect("save");
-        assert_eq!(&quiet[..4], &(FLAG_RXFE | FLAG_TXFE).to_le_bytes(), "no overrun, no extra bit");
+        assert_eq!(
+            &quiet[..4],
+            &(FLAG_RXFE | FLAG_TXFE).to_le_bytes(),
+            "no overrun, no extra bit"
+        );
     }
 
     #[test]
@@ -1877,8 +2179,14 @@ mod tests {
         let mut restored = Pl011::new();
         let mut source: &[u8] = &image;
         restored.restore(&mut source).expect("restore");
-        assert!(source.is_empty(), "the restore consumed exactly what the save wrote");
-        assert_eq!(read(&mut restored, FR) & (FLAG_TXFE | FLAG_TXFF | FLAG_BUSY), FLAG_BUSY);
+        assert!(
+            source.is_empty(),
+            "the restore consumed exactly what the save wrote"
+        );
+        assert_eq!(
+            read(&mut restored, FR) & (FLAG_TXFE | FLAG_TXFF | FLAG_BUSY),
+            FLAG_BUSY
+        );
         write(&mut restored, CR, ENABLED);
         assert_eq!(sent(&mut restored), b"abc");
     }
@@ -1894,12 +2202,18 @@ mod tests {
         assert_eq!(image[count], 1);
         image[count] = 2;
         let mut source: &[u8] = &image;
-        assert!(Pl011::new().restore(&mut source).is_err(), "FEN is clear: one character at most");
+        assert!(
+            Pl011::new().restore(&mut source).is_err(),
+            "FEN is clear: one character at most"
+        );
         image[count] = 1;
         let cr = 6 * 4;
         image[cr..cr + 4].copy_from_slice(&ENABLED.to_le_bytes());
         let mut source: &[u8] = &image;
-        assert!(Pl011::new().restore(&mut source).is_err(), "transmission enabled would have sent it");
+        assert!(
+            Pl011::new().restore(&mut source).is_err(),
+            "transmission enabled would have sent it"
+        );
         image[cr..cr + 4].copy_from_slice(&0x300u32.to_le_bytes());
         let mut source: &[u8] = &image;
         assert!(Pl011::new().restore(&mut source).is_ok());
@@ -1916,11 +2230,21 @@ mod tests {
         let mut restored = Pl011::new();
         let mut source: &[u8] = &image;
         restored.restore(&mut source).expect("restore");
-        assert!(source.is_empty(), "the restore consumed exactly what the save wrote");
-        assert_eq!(restored.next_deadline(), Some(VmInstant::from_ticks(500 + TIMEOUT_13_1)));
+        assert!(
+            source.is_empty(),
+            "the restore consumed exactly what the save wrote"
+        );
+        assert_eq!(
+            restored.next_deadline(),
+            Some(VmInstant::from_ticks(500 + TIMEOUT_13_1))
+        );
         assert_eq!(read(&mut restored, DR), u32::from(b'a'));
         assert!(rx_at(&mut restored, b'b', 0));
-        assert_eq!(restored.next_deadline(), Some(VmInstant::from_ticks(TIMEOUT_13_1)), "13 + 1/64 still, not 99");
+        assert_eq!(
+            restored.next_deadline(),
+            Some(VmInstant::from_ticks(TIMEOUT_13_1)),
+            "13 + 1/64 still, not 99"
+        );
     }
 
     #[test]
@@ -1969,24 +2293,45 @@ mod tests {
             write(&mut uart, 9, ibrd);
             write(&mut uart, 10, fbrd);
             write_at(&mut uart, LCR_H, LCR_FEN, 200);
-            assert_eq!(uart.timeout_cycles(), None, "UARTIBRD {ibrd:#x}, UARTFBRD {fbrd}: no baud clock");
-            assert_eq!(uart.next_deadline(), Some(VmInstant::from_ticks(100 + TIMEOUT_13_1)), "the count keeps its deadline");
+            assert_eq!(
+                uart.timeout_cycles(),
+                None,
+                "UARTIBRD {ibrd:#x}, UARTFBRD {fbrd}: no baud clock"
+            );
+            assert_eq!(
+                uart.next_deadline(),
+                Some(VmInstant::from_ticks(100 + TIMEOUT_13_1)),
+                "the count keeps its deadline"
+            );
             let mut image = std::vec::Vec::new();
             uart.save(&mut image).expect("save");
             let mut restored = Pl011::new();
             let mut source: &[u8] = &image;
-            restored.restore(&mut source).expect("a state the UART reaches restores");
+            restored
+                .restore(&mut source)
+                .expect("a state the UART reaches restores");
             let mut again = std::vec::Vec::new();
             restored.save(&mut again).expect("save");
-            assert_eq!(again, image, "UARTIBRD {ibrd:#x}, UARTFBRD {fbrd}: the same UART");
+            assert_eq!(
+                again, image,
+                "UARTIBRD {ibrd:#x}, UARTFBRD {fbrd}: the same UART"
+            );
             for u in [&mut uart, &mut restored] {
                 update(u, 100 + TIMEOUT_13_1 - 1);
                 assert_eq!(read(u, RIS) & INT_RT, 0);
                 update(u, 100 + TIMEOUT_13_1);
-                assert_eq!(read(u, RIS) & INT_RT, INT_RT, "UARTIBRD {ibrd:#x}, UARTFBRD {fbrd}: RTRIS on time");
+                assert_eq!(
+                    read(u, RIS) & INT_RT,
+                    INT_RT,
+                    "UARTIBRD {ibrd:#x}, UARTFBRD {fbrd}: RTRIS on time"
+                );
                 assert_eq!(read(u, DR), u32::from(b'a'));
                 assert!(rx_at(u, b'b', 20_000));
-                assert_eq!(u.next_deadline(), None, "the next character starts no count without a baud clock");
+                assert_eq!(
+                    u.next_deadline(),
+                    None,
+                    "the next character starts no count without a baud clock"
+                );
             }
             let (mut a, mut b) = (std::vec::Vec::new(), std::vec::Vec::new());
             uart.save(&mut a).expect("save");
@@ -2017,7 +2362,10 @@ mod tests {
         let count = 11 * 4 + RX_FIFO_DEPTH * 4 + 1;
         image[count] = 2;
         let mut source: &[u8] = &image;
-        assert!(uart.restore(&mut source).is_err(), "FEN is clear: one entry at most");
+        assert!(
+            uart.restore(&mut source).is_err(),
+            "FEN is clear: one entry at most"
+        );
         image[count] = 1;
         let mut source: &[u8] = &image;
         assert!(uart.restore(&mut source).is_ok());

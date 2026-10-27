@@ -124,7 +124,9 @@ impl Cpu {
     /// span `cval` counter cycles, rounded up, which is exactly where
     /// [`Cpu::counter_at`]'s floor first reaches it.
     fn tick_reaching(&self, cval: u64) -> u64 {
-        self.ips.ticks_from_cycles_ceil(Cycles::new(cval), self.counter_hz).ticks()
+        self.ips
+            .ticks_from_cycles_ceil(Cycles::new(cval), self.counter_hz)
+            .ticks()
     }
 
     #[inline]

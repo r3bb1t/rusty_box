@@ -23,7 +23,11 @@ fn an_event_already_due_wakes_it_at_the_next_tick() {
         now = wake_tick(40, now, 1000);
         sleeps += 1;
     }
-    assert_eq!((now, sleeps), (1000, 900), "the slice ends, a tick at a time");
+    assert_eq!(
+        (now, sleeps),
+        (1000, 900),
+        "the slice ends, a tick at a time"
+    );
     // At the slice's end, the slice's end.
     assert_eq!(wake_tick(40, 1000, 1000), 1000);
     assert_eq!(wake_tick(40, u64::MAX, u64::MAX), u64::MAX);

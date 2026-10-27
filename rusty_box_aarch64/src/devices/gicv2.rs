@@ -273,7 +273,11 @@ impl GicV2 {
     /// SGI `sgi`'s `GICD_CPENDSGIRn`/`GICD_SPENDSGIRn` byte: the source bit
     /// of processor 0 while the SGI is pending.
     fn sgi_sources(&self, sgi: usize) -> u8 {
-        if self.pending.get(sgi) { SGI_SOURCE_CPU0 } else { 0 }
+        if self.pending.get(sgi) {
+            SGI_SOURCE_CPU0
+        } else {
+            0
+        }
     }
 
     /// Reads the GIC's whole section of the image, refuses it if
@@ -335,17 +339,23 @@ impl GicV2 {
     /// source with the SGI not pending, or the SGI pending with no source).
     fn check_restored(&self, sgi_sources: &[u8; NR_SGIS]) -> SnapResult {
         if self.bpr > 7 || !(MIN_ABPR..=7).contains(&self.abpr) {
-            return Err(SnapError::Invalid("GIC binary point outside its register's range"));
+            return Err(SnapError::Invalid(
+                "GIC binary point outside its register's range",
+            ));
         }
         if self.running_priority > IDLE_PRIORITY {
             return Err(SnapError::Invalid("GIC running priority above idle"));
         }
         for (sgi, sources) in sgi_sources.iter().enumerate() {
             if sources & !SGI_SOURCE_CPU0 != 0 {
-                return Err(SnapError::Invalid("GIC SGI pending from a processor that does not exist"));
+                return Err(SnapError::Invalid(
+                    "GIC SGI pending from a processor that does not exist",
+                ));
             }
             if *sources != self.sgi_sources(sgi) {
-                return Err(SnapError::Invalid("GIC SGI source disagrees with its pending state"));
+                return Err(SnapError::Invalid(
+                    "GIC SGI source disagrees with its pending state",
+                ));
             }
         }
         Ok(())
@@ -376,8 +386,16 @@ impl GicV2 {
     /// the interrupts of `groups` (`GICD_CTLR_EN_GRP0`/`GICD_CTLR_EN_GRP1`
     /// bits) only.
     fn best_irq(&self, groups: u32) -> Option<usize> {
-        let group0 = if groups & GICD_CTLR_EN_GRP0 != 0 { u32::MAX } else { 0 };
-        let group1 = if groups & GICD_CTLR_EN_GRP1 != 0 { u32::MAX } else { 0 };
+        let group0 = if groups & GICD_CTLR_EN_GRP0 != 0 {
+            u32::MAX
+        } else {
+            0
+        };
+        let group1 = if groups & GICD_CTLR_EN_GRP1 != 0 {
+            u32::MAX
+        } else {
+            0
+        };
         let mut best: Option<usize> = None;
         let mut best_prio = IDLE_PRIORITY;
         for w in 0..WORDS {
@@ -626,8 +644,12 @@ impl GicV2 {
             // GICD_CPENDSGIRn and GICD_SPENDSGIRn (IHI 0048B): a 1 removes or
             // adds the SGI's pending state from that source processor, a 0
             // has no effect; only processor 0's bit exists.
-            0xF10..=0xF1F if v & SGI_SOURCE_CPU0 != 0 => self.pending.set((off - 0xF10) as usize, false),
-            0xF20..=0xF2F if v & SGI_SOURCE_CPU0 != 0 => self.pending.set((off - 0xF20) as usize, true),
+            0xF10..=0xF1F if v & SGI_SOURCE_CPU0 != 0 => {
+                self.pending.set((off - 0xF10) as usize, false)
+            }
+            0xF20..=0xF2F if v & SGI_SOURCE_CPU0 != 0 => {
+                self.pending.set((off - 0xF20) as usize, true)
+            }
             // GICD_CTLR's upper bytes, GICD_ITARGETSR (RAZ/WI on a
             // uniprocessor GIC), the SGI bits of processors that do not
             // exist, and the rest: ignored.
@@ -1008,12 +1030,20 @@ mod tests {
         assert_eq!(cpu_get(&mut g, HPPIR), 7);
         assert_eq!(cpu_get(&mut g, IAR), 7, "CPUID is RAZ");
         cpu(&mut g, EOIR, 7);
-        assert_eq!(cpu_get(&mut g, IAR), 1023, "acknowledged once: no other source");
+        assert_eq!(
+            cpu_get(&mut g, IAR),
+            1023,
+            "acknowledged once: no other source"
+        );
         assert_eq!(dist_get(&mut g, 0xF24), 0);
         // GICD_CPENDSGIRn clears it only through processor 0's bit.
         g.dist_write(RegOffset::new(0xF20 + 2), AccessWidth::Byte, 1);
         g.dist_write(RegOffset::new(0xF10 + 2), AccessWidth::Byte, 0xFE);
-        assert_eq!(cpu_get(&mut g, HPPIR), 2, "other processors' bits clear nothing");
+        assert_eq!(
+            cpu_get(&mut g, HPPIR),
+            2,
+            "other processors' bits clear nothing"
+        );
         g.dist_write(RegOffset::new(0xF10 + 2), AccessWidth::Byte, 1);
         assert_eq!(cpu_get(&mut g, HPPIR), 1023);
     }
@@ -1031,7 +1061,11 @@ mod tests {
         assert_eq!(dist_get(&mut g, 0xF20), 1);
         assert_eq!(cpu_get(&mut g, IAR), 0);
         cpu(&mut g, EOIR, 0);
-        assert_eq!(cpu_get(&mut g, IAR), 1023, "SGIs 1 to 3 were not made pending");
+        assert_eq!(
+            cpu_get(&mut g, IAR),
+            1023,
+            "SGIs 1 to 3 were not made pending"
+        );
     }
 
     #[test]
@@ -1084,9 +1118,15 @@ mod tests {
         assert_eq!(cpu_get(&mut g, AIAR), 40);
         assert_eq!(cpu_get(&mut g, RPR), 0x42, "ABPR 1: Group 1 bits [7:1]");
         raise(&mut g, 42, 0x48);
-        assert!(!g.irq_out(), "0x48 at BPR 2 is group priority 0x48, not higher than 0x42");
+        assert!(
+            !g.irq_out(),
+            "0x48 at BPR 2 is group priority 0x48, not higher than 0x42"
+        );
         raise(&mut g, 41, 0x43);
-        assert!(g.irq_out(), "0x43 at BPR 2 is group priority 0x40, higher than 0x42");
+        assert!(
+            g.irq_out(),
+            "0x43 at BPR 2 is group priority 0x40, higher than 0x42"
+        );
         assert_eq!(cpu_get(&mut g, HPPIR), 41);
         assert_eq!(cpu_get(&mut g, IAR), 41);
         assert_eq!(cpu_get(&mut g, RPR), 0x40);
@@ -1140,16 +1180,32 @@ mod tests {
         raise(&mut g, 41, 0x20);
         assert!(g.irq_out(), "the Group 0 interrupt is signalled");
         assert_eq!(cpu_get(&mut g, HPPIR), 41);
-        assert_eq!(cpu_get(&mut g, AHPPIR), 1023, "no Group 1 interrupt is forwarded");
+        assert_eq!(
+            cpu_get(&mut g, AHPPIR),
+            1023,
+            "no Group 1 interrupt is forwarded"
+        );
         assert_eq!(cpu_get(&mut g, AIAR), 1023);
         assert_eq!(cpu_get(&mut g, IAR), 41);
         cpu(&mut g, EOIR, 41);
         g.set_line(41, false);
         assert!(!g.irq_out());
-        assert_eq!(cpu_get(&mut g, IAR), 1023, "AckCtl does not reach an unforwarded group");
-        assert_eq!(dist_get(&mut g, 0x304), 0, "interrupt 40 never became active");
+        assert_eq!(
+            cpu_get(&mut g, IAR),
+            1023,
+            "AckCtl does not reach an unforwarded group"
+        );
+        assert_eq!(
+            dist_get(&mut g, 0x304),
+            0,
+            "interrupt 40 never became active"
+        );
         dist(&mut g, 0x000, 3);
-        assert_eq!(cpu_get(&mut g, IAR), 40, "forwarded once its group is enabled");
+        assert_eq!(
+            cpu_get(&mut g, IAR),
+            40,
+            "forwarded once its group is enabled"
+        );
     }
 
     /// IHI 0048B §4.4.1: GICC_CTLR.EnableGrp0 clear stops the CPU interface
@@ -1172,7 +1228,11 @@ mod tests {
         cpu(&mut g, AEOIR, 41);
         g.set_line(41, false);
         assert!(!g.irq_out());
-        assert_eq!(cpu_get(&mut g, IAR), 1023, "Group 0 is not signalled, so not acknowledged");
+        assert_eq!(
+            cpu_get(&mut g, IAR),
+            1023,
+            "Group 0 is not signalled, so not acknowledged"
+        );
         assert_eq!(dist_get(&mut g, 0x304), 0);
     }
 
@@ -1224,7 +1284,11 @@ mod tests {
         assert_eq!(cpu_get(&mut g, AIAR), 40);
         assert_eq!(dist_get(&mut g, 0x304), 1 << 8, "active");
         assert_eq!(cpu_get(&mut g, RPR), 0x10);
-        assert_eq!(cpu_get(&mut g, NSAPR0), 1 << 8, "Group 1 preemption level 8");
+        assert_eq!(
+            cpu_get(&mut g, NSAPR0),
+            1 << 8,
+            "Group 1 preemption level 8"
+        );
         assert_eq!(cpu_get(&mut g, AHPPIR), 1023, "nothing else pending");
         g.set_line(40, false);
         cpu(&mut g, AEOIR, 40);
@@ -1237,7 +1301,11 @@ mod tests {
         assert_eq!(dist_get(&mut g, 0x304), 0, "not acknowledged");
         assert_eq!(cpu_get(&mut g, IAR), 41);
         cpu(&mut g, AEOIR, 41);
-        assert_eq!(cpu_get(&mut g, RPR), 0x20, "GICC_AEOIR ignores a Group 0 interrupt");
+        assert_eq!(
+            cpu_get(&mut g, RPR),
+            0x20,
+            "GICC_AEOIR ignores a Group 0 interrupt"
+        );
         cpu(&mut g, EOIR, 41);
         assert_eq!(cpu_get(&mut g, RPR), 0xFF);
     }
@@ -1323,7 +1391,9 @@ mod tests {
             assert_eq!(cpu_get(&mut target, HPPIR), 50, "{why}");
         }
         let mut source: &[u8] = &image;
-        target.restore(&mut source).expect("the image as saved restores");
+        target
+            .restore(&mut source)
+            .expect("the image as saved restores");
         assert_eq!(cpu_get(&mut target, HPPIR), 3);
     }
 
@@ -1339,13 +1409,21 @@ mod tests {
         dist(&mut g, 0x084, 1 << 8);
         raise(&mut g, 40, 0x20);
         raise(&mut g, 41, 0x10);
-        assert_eq!(cpu_get(&mut g, AHPPIR), 1023, "the highest pending is Group 0");
+        assert_eq!(
+            cpu_get(&mut g, AHPPIR),
+            1023,
+            "the highest pending is Group 0"
+        );
         assert_eq!(cpu_get(&mut g, AIAR), 1023);
         assert_eq!(dist_get(&mut g, 0x304), 0, "nothing acknowledged");
         assert_eq!(cpu_get(&mut g, HPPIR), 41);
         assert_eq!(cpu_get(&mut g, IAR), 41);
         cpu(&mut g, AEOIR, 41);
-        assert_eq!(cpu_get(&mut g, RPR), 0x10, "GICC_AEOIR ignores a Group 0 interrupt");
+        assert_eq!(
+            cpu_get(&mut g, RPR),
+            0x10,
+            "GICC_AEOIR ignores a Group 0 interrupt"
+        );
         assert_eq!(dist_get(&mut g, 0x304), 1 << 9);
         g.set_line(41, false);
         cpu(&mut g, EOIR, 41);

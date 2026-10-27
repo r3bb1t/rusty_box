@@ -280,7 +280,10 @@ mod fused {
             [number(y, en), number(z, sum - en)]
         };
         let [n, m] = match r % 8 {
-            0..=3 => [number(y, 1 + (r >> 8) % 2046), number(z, 1 + (r >> 20) % 2046)],
+            0..=3 => [
+                number(y, 1 + (r >> 8) % 2046),
+                number(z, 1 + (r >> 20) % 2046),
+            ],
             4 | 5 => multiplicands(1072 + (r >> 32) % 8),
             _ => {
                 let [n, m] = multiplicands(969 + (r >> 32) % 8);
@@ -323,7 +326,10 @@ mod fused {
             [number(y, en), number(z, sum - en)]
         };
         let [n, m] = match r % 8 {
-            0..=3 => [number(y, 1 + (r >> 8) % 254), number(z, 1 + (r >> 20) % 254)],
+            0..=3 => [
+                number(y, 1 + (r >> 8) % 254),
+                number(z, 1 + (r >> 20) % 254),
+            ],
             4 | 5 => multiplicands(147 + (r >> 32) % 8),
             _ => {
                 let [n, m] = multiplicands(102 + (r >> 32) % 8);
@@ -360,7 +366,10 @@ mod fused {
             let draw = rng.next();
             let statuses = [
                 ArmFpStatus::with_fpsr(fpcr(draw & 0b1100), FPSR_IXC),
-                ArmFpStatus::with_fpsr(fpcr(draw >> 4), if draw & (1 << 8) != 0 { FPSR_IXC } else { 0 }),
+                ArmFpStatus::with_fpsr(
+                    fpcr(draw >> 4),
+                    if draw & (1 << 8) != 0 { FPSR_IXC } else { 0 },
+                ),
             ];
 
             let [addend, n, m] = triple64(&mut rng, cancel);
@@ -369,8 +378,14 @@ mod fused {
                 let want = f64_mul_add::f64_mul_add(n, m, addend, &mut soft.status);
                 match f64_fused(addend, n, m, fp) {
                     Some(got) => {
-                        assert_eq!(got, want, "f64 {addend:#018x} + {n:#018x} * {m:#018x} under {fp:?}");
-                        assert_eq!(soft, *fp, "f64 {addend:#018x} + {n:#018x} * {m:#018x}: SoftFloat raised more");
+                        assert_eq!(
+                            got, want,
+                            "f64 {addend:#018x} + {n:#018x} * {m:#018x} under {fp:?}"
+                        );
+                        assert_eq!(
+                            soft, *fp,
+                            "f64 {addend:#018x} + {n:#018x} * {m:#018x}: SoftFloat raised more"
+                        );
                         reach64.accepted += 1;
                         if want & !(1 << 63) < 2 * f64::MIN_POSITIVE.to_bits() {
                             reach64.near_smallest_normal += 1;
@@ -392,8 +407,14 @@ mod fused {
                 let want = f32_mul_add::f32_mul_add(n, m, addend, &mut soft.status);
                 match f32_fused(addend, n, m, fp) {
                     Some(got) => {
-                        assert_eq!(got, want, "f32 {addend:#010x} + {n:#010x} * {m:#010x} under {fp:?}");
-                        assert_eq!(soft, *fp, "f32 {addend:#010x} + {n:#010x} * {m:#010x}: SoftFloat raised more");
+                        assert_eq!(
+                            got, want,
+                            "f32 {addend:#010x} + {n:#010x} * {m:#010x} under {fp:?}"
+                        );
+                        assert_eq!(
+                            soft, *fp,
+                            "f32 {addend:#010x} + {n:#010x} * {m:#010x}: SoftFloat raised more"
+                        );
                         reach32.accepted += 1;
                         if want & !(1 << 31) < 2 * f32::MIN_POSITIVE.to_bits() {
                             reach32.near_smallest_normal += 1;
@@ -440,24 +461,48 @@ mod fused {
         for (form, negate_addend, negate_n) in FORMS {
             // 1.5 + 0.1 * 0.3, with the form's signs.
             let [addend, n, m] = [1.5f64.to_bits(), 0.1f64.to_bits(), 0.3f64.to_bits()];
-            let a = if negate_addend { addend ^ (1 << 63) } else { addend };
+            let a = if negate_addend {
+                addend ^ (1 << 63)
+            } else {
+                addend
+            };
             let x = if negate_n { n ^ (1 << 63) } else { n };
             let mut soft = fp;
             let want = f64_mul_add::f64_mul_add(x, m, a, &mut soft.status);
             let mut surface = fp;
-            assert_eq!(f64_mul_add(form, addend, n, m, &mut surface), want, "f64 {form:?}");
+            assert_eq!(
+                f64_mul_add(form, addend, n, m, &mut surface),
+                want,
+                "f64 {form:?}"
+            );
             assert_eq!(surface, soft, "f64 {form:?}");
-            assert_eq!(f64_fused(a, x, m, &fp).is_some(), HOST_FUSES_ONCE, "f64 {form:?}");
+            assert_eq!(
+                f64_fused(a, x, m, &fp).is_some(),
+                HOST_FUSES_ONCE,
+                "f64 {form:?}"
+            );
 
             let [addend, n, m] = [1.5f32.to_bits(), 0.1f32.to_bits(), 0.3f32.to_bits()];
-            let a = if negate_addend { addend ^ (1 << 31) } else { addend };
+            let a = if negate_addend {
+                addend ^ (1 << 31)
+            } else {
+                addend
+            };
             let x = if negate_n { n ^ (1 << 31) } else { n };
             let mut soft = fp;
             let want = f32_mul_add::f32_mul_add(x, m, a, &mut soft.status);
             let mut surface = fp;
-            assert_eq!(f32_mul_add(form, addend, n, m, &mut surface), want, "f32 {form:?}");
+            assert_eq!(
+                f32_mul_add(form, addend, n, m, &mut surface),
+                want,
+                "f32 {form:?}"
+            );
             assert_eq!(surface, soft, "f32 {form:?}");
-            assert_eq!(f32_fused(a, x, m, &fp).is_some(), HOST_FUSES_ONCE, "f32 {form:?}");
+            assert_eq!(
+                f32_fused(a, x, m, &fp).is_some(),
+                HOST_FUSES_ONCE,
+                "f32 {form:?}"
+            );
         }
     }
 }

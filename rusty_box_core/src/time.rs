@@ -676,13 +676,43 @@ mod tests {
         let machine = hz(50_000_000);
         // 32 bit periods at 115200 baud from a 24 MHz UARTCLK: 6664 cycles,
         // 13883.3 ticks.
-        assert_eq!(machine.ticks_from_cycles_ceil(Cycles::new(6664), hz(24_000_000)).ticks(), 13_884);
+        assert_eq!(
+            machine
+                .ticks_from_cycles_ceil(Cycles::new(6664), hz(24_000_000))
+                .ticks(),
+            13_884
+        );
         // A 62.5 MHz counter: 5 counts are exactly 4 ticks, 6 are 4.8.
-        assert_eq!(machine.ticks_from_cycles_ceil(Cycles::new(5), hz(62_500_000)).ticks(), 4);
-        assert_eq!(machine.ticks_from_cycles_ceil(Cycles::new(6), hz(62_500_000)).ticks(), 5);
-        assert_eq!(machine.ticks_from_cycles_ceil(Cycles::new(0), hz(62_500_000)).ticks(), 0);
-        assert_eq!(hz(u64::MAX).ticks_from_cycles_ceil(Cycles::new(u64::MAX), hz(1)).ticks(), u64::MAX);
-        assert_eq!(hz(1).ticks_from_cycles_ceil(Cycles::new(u64::MAX), hz(u64::MAX)).ticks(), 1);
+        assert_eq!(
+            machine
+                .ticks_from_cycles_ceil(Cycles::new(5), hz(62_500_000))
+                .ticks(),
+            4
+        );
+        assert_eq!(
+            machine
+                .ticks_from_cycles_ceil(Cycles::new(6), hz(62_500_000))
+                .ticks(),
+            5
+        );
+        assert_eq!(
+            machine
+                .ticks_from_cycles_ceil(Cycles::new(0), hz(62_500_000))
+                .ticks(),
+            0
+        );
+        assert_eq!(
+            hz(u64::MAX)
+                .ticks_from_cycles_ceil(Cycles::new(u64::MAX), hz(1))
+                .ticks(),
+            u64::MAX
+        );
+        assert_eq!(
+            hz(1)
+                .ticks_from_cycles_ceil(Cycles::new(u64::MAX), hz(u64::MAX))
+                .ticks(),
+            1
+        );
     }
 
     #[test]

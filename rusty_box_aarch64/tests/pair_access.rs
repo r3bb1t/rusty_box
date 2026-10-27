@@ -19,8 +19,8 @@
 use rusty_box_aarch64::board::{FW_CFG_BASE, RAM_BASE};
 use rusty_box_aarch64::instrumentation::{Direction, MemoryAccess};
 use rusty_box_aarch64::{
-    AccessWidth, Instrumentation, LentStorage, MachineBuilder, MemoryLoan, PhysAddr, RamSize, Reg, RunBudget,
-    StopReason, SysReg, VirtConfig, VirtMachine,
+    AccessWidth, Instrumentation, LentStorage, MachineBuilder, MemoryLoan, PhysAddr, RamSize, Reg,
+    RunBudget, StopReason, SysReg, VirtConfig, VirtMachine,
 };
 
 const RAM_LEN: usize = 4 << 20;
@@ -42,16 +42,30 @@ fn observed<I: Instrumentation>(ram: &mut [u8], observer: I) -> VirtMachine<Lent
         .expect("a bare machine builds")
 }
 
-fn load<S: rusty_box_aarch64::GuestStorage, I: Instrumentation>(machine: &mut VirtMachine<S, I>, at: u64, words: &[u32]) {
+fn load<S: rusty_box_aarch64::GuestStorage, I: Instrumentation>(
+    machine: &mut VirtMachine<S, I>,
+    at: u64,
+    words: &[u32],
+) {
     for (i, word) in words.iter().enumerate() {
-        machine.mem_write(at + 4 * i as u64, &word.to_le_bytes()).expect("code is in RAM");
+        machine
+            .mem_write(at + 4 * i as u64, &word.to_le_bytes())
+            .expect("code is in RAM");
     }
 }
 
 /// `adr x1, 3f; ldr w2, 3f; ldr w3, 5f; 3: stp w2, w3, [x1]; mov x0, #1;
 /// b .; 5: mov x0, #2` — the pair's second word rewrites the instruction
 /// after the store, which is in the store's own trace.
-const PAIR_REWRITES_NEXT: [u32; 7] = [0x1000_0061, 0x1800_0042, 0x1800_0083, 0x2900_0C22, 0xD280_0020, 0x1400_0000, 0xD280_0040];
+const PAIR_REWRITES_NEXT: [u32; 7] = [
+    0x1000_0061,
+    0x1800_0042,
+    0x1800_0083,
+    0x2900_0C22,
+    0xD280_0020,
+    0x1400_0000,
+    0xD280_0040,
+];
 
 #[test]
 fn a_store_pair_whose_second_word_rewrites_the_next_instruction_runs_it_rewritten() {
@@ -100,7 +114,8 @@ fn a_q_register_store_whose_high_half_alone_overlaps_the_monitored_doubleword_cl
     let mut ram = vec![0u8; RAM_LEN];
     let mut m = bare(&mut ram);
     load(&mut m, RAM_BASE, &Q_STORE_UNDER_MONITOR);
-    m.sysreg_write(SysReg::CPACR_EL1, 3 << 20).expect("CPACR_EL1 is writable");
+    m.sysreg_write(SysReg::CPACR_EL1, 3 << 20)
+        .expect("CPACR_EL1 is writable");
     let data = RAM_BASE + 0x1000;
     m.reg_write(Reg::X1, data);
     m.reg_write(Reg::X2, data + 8);
@@ -125,12 +140,24 @@ fn a_load_pair_running_off_the_end_of_ram_faults_on_its_second_word() {
     m.reg_write(Reg::X4, 0x5555);
     let out = m.step(RunBudget::Instructions(1));
     assert_eq!(out.stop, StopReason::BudgetExhausted);
-    assert_eq!(m.sysreg_read(SysReg::FAR_EL1).expect("FAR"), end, "the second word faulted");
+    assert_eq!(
+        m.sysreg_read(SysReg::FAR_EL1).expect("FAR"),
+        end,
+        "the second word faulted"
+    );
     let esr = m.sysreg_read(SysReg::ESR_EL1).expect("ESR");
     assert_eq!(esr >> 26, 0x25, "a data abort taken from the same EL");
     assert_eq!(esr & 0x3F, 0x10, "a synchronous external abort");
-    assert_eq!(m.reg_read(Reg::X3), 0x5555, "the first register is not written");
-    assert_eq!(m.reg_read(Reg::X4), 0x5555, "the second register is not written");
+    assert_eq!(
+        m.reg_read(Reg::X3),
+        0x5555,
+        "the first register is not written"
+    );
+    assert_eq!(
+        m.reg_read(Reg::X4),
+        0x5555,
+        "the second register is not written"
+    );
 }
 
 #[test]
@@ -141,8 +168,10 @@ fn a_load_pair_within_a_page_reads_both_words() {
     let mut m = bare(&mut ram);
     load(&mut m, RAM_BASE, &LOAD_PAIR);
     let data = RAM_BASE + 0x1000;
-    m.mem_write(data, &FIRST.to_le_bytes()).expect("data is in RAM");
-    m.mem_write(data + 8, &SECOND.to_le_bytes()).expect("data is in RAM");
+    m.mem_write(data, &FIRST.to_le_bytes())
+        .expect("data is in RAM");
+    m.mem_write(data + 8, &SECOND.to_le_bytes())
+        .expect("data is in RAM");
     m.reg_write(Reg::X1, data);
     let out = m.step(RunBudget::Instructions(1));
     assert_eq!(out.stop, StopReason::BudgetExhausted);
@@ -169,16 +198,31 @@ const WNR: u64 = 1 << 6;
 /// Run the pair at `RAM_BASE` with `x1 = FW_CFG_BASE` and check the Data
 /// Abort it must take: the second element's synchronous external abort,
 /// with the pair's own address to return to and its base not written back.
-fn second_element_aborts<S: rusty_box_aarch64::GuestStorage, I: Instrumentation>(m: &mut VirtMachine<S, I>, write: bool) {
+fn second_element_aborts<S: rusty_box_aarch64::GuestStorage, I: Instrumentation>(
+    m: &mut VirtMachine<S, I>,
+    write: bool,
+) {
     let out = m.step(RunBudget::Instructions(1));
     assert_eq!(out.stop, StopReason::BudgetExhausted);
     let esr = m.sysreg_read(SysReg::ESR_EL1).expect("ESR_EL1");
     assert_eq!(esr >> 26, EC_DATA_ABORT_SAME_EL, "ESR {esr:#x}");
     assert_eq!(esr & 0x3F, DFSC_SYNC_EXTERNAL, "ESR {esr:#x}");
     assert_eq!(esr & WNR != 0, write, "ESR {esr:#x}");
-    assert_eq!(m.sysreg_read(SysReg::FAR_EL1), Ok(FW_CFG_BASE + 0x18), "the second element's address");
-    assert_eq!(m.sysreg_read(SysReg::ELR_EL1), Ok(RAM_BASE), "the pair is where it returns to");
-    assert_eq!(m.reg_read(Reg::X1), FW_CFG_BASE, "the base is not written back");
+    assert_eq!(
+        m.sysreg_read(SysReg::FAR_EL1),
+        Ok(FW_CFG_BASE + 0x18),
+        "the second element's address"
+    );
+    assert_eq!(
+        m.sysreg_read(SysReg::ELR_EL1),
+        Ok(RAM_BASE),
+        "the pair is where it returns to"
+    );
+    assert_eq!(
+        m.reg_read(Reg::X1),
+        FW_CFG_BASE,
+        "the base is not written back"
+    );
 }
 
 #[test]
@@ -190,8 +234,16 @@ fn a_load_pair_within_a_page_whose_second_word_alone_reaches_a_hole_loads_neithe
     m.reg_write(Reg::X3, 0x5555);
     m.reg_write(Reg::X4, 0x5555);
     second_element_aborts(&mut m, false);
-    assert_eq!(m.reg_read(Reg::X3), 0x5555, "the first register is not written");
-    assert_eq!(m.reg_read(Reg::X4), 0x5555, "the second register is not written");
+    assert_eq!(
+        m.reg_read(Reg::X3),
+        0x5555,
+        "the first register is not written"
+    );
+    assert_eq!(
+        m.reg_read(Reg::X4),
+        0x5555,
+        "the second register is not written"
+    );
 }
 
 /// Every data access that reaches the bus, in order.
@@ -223,5 +275,9 @@ fn a_store_pair_within_a_page_whose_second_word_alone_reaches_a_hole_writes_its_
         direction: Direction::Write,
         value: u64::from(FIRST),
     };
-    assert_eq!(m.instrumentation().0, [first_store], "the first word is written, the second is not");
+    assert_eq!(
+        m.instrumentation().0,
+        [first_store],
+        "the first word is written, the second is not"
+    );
 }

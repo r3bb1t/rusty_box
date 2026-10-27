@@ -21,7 +21,12 @@ impl AddResult {
     /// The flags the result would set.
     #[inline(always)]
     pub(crate) const fn nzcv(&self) -> Nzcv {
-        Nzcv { n: self.n, z: self.z, c: self.c, v: self.v }
+        Nzcv {
+            n: self.n,
+            z: self.z,
+            c: self.c,
+            v: self.v,
+        }
     }
 }
 

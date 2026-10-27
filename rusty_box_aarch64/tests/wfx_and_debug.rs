@@ -253,14 +253,20 @@ fn run(ram: &mut [u8], setup: Setup, instructions: u64) -> VirtMachine<LentStora
 
 /// The program run at EL1 from `code`, as reset leaves the processor (the
 /// OS Lock locked), with `regs` set first.
-fn run_el1<'a>(ram: &'a mut [u8], code: u64, regs: &[(Reg, u64)], instructions: u64) -> VirtMachine<LentStorage<'a>> {
+fn run_el1<'a>(
+    ram: &'a mut [u8],
+    code: u64,
+    regs: &[(Reg, u64)],
+    instructions: u64,
+) -> VirtMachine<LentStorage<'a>> {
     let mut m = MachineBuilder::new(VirtConfig::DEFAULT)
         .ram(RamSize::bytes(RAM_LEN as u64).expect("a valid size"))
         .bare()
         .build_in(MemoryLoan { ram, vars: &mut [] })
         .expect("a bare machine builds");
     for (offset, word) in PROGRAM {
-        m.mem_write(RAM_BASE + offset, &word.to_le_bytes()).expect("the program is in RAM");
+        m.mem_write(RAM_BASE + offset, &word.to_le_bytes())
+            .expect("the program is in RAM");
     }
     m.reg_write(Reg::Pc, RAM_BASE + code);
     for &(reg, value) in regs {
@@ -348,8 +354,16 @@ fn with_no_debugger_the_channel_receives_nothing_and_its_transmit_stays_full() {
     let mut ram = vec![0u8; RAM_LEN];
     let m = run_el1(&mut ram, DCC_EL1, &[(Reg::X2, 9), (Reg::X3, 9)], 20);
     assert_eq!(m.reg_read(Reg::X5), 1, "every access completed");
-    assert_eq!(m.reg_read(Reg::X1), 0, "DBGDTRRX_EL0 with RXfull clear (UNKNOWN; this model reads zero)");
-    assert_eq!(m.reg_read(Reg::X2), TXFULL, "MDCCSR_EL0 after a write: TXfull, and RXfull clear");
+    assert_eq!(
+        m.reg_read(Reg::X1),
+        0,
+        "DBGDTRRX_EL0 with RXfull clear (UNKNOWN; this model reads zero)"
+    );
+    assert_eq!(
+        m.reg_read(Reg::X2),
+        TXFULL,
+        "MDCCSR_EL0 after a write: TXfull, and RXfull clear"
+    );
     assert_eq!(m.reg_read(Reg::X3), 0, "OSDTRRX_EL1");
 }
 
@@ -360,12 +374,29 @@ fn with_no_debugger_the_channel_receives_nothing_and_its_transmit_stays_full() {
 fn a_probe_from_el0_finds_its_character_never_read() {
     let mut ram = vec![0u8; RAM_LEN];
     let m = run(&mut ram, el0(DCC_PROBE), 5_000);
-    assert_eq!(m.reg_read(Reg::X5), 1, "the probe timed out, PC {:#x}", m.reg_read(Reg::Pc));
-    assert_eq!(m.reg_read(Reg::X1), 0, "MDCCSR_EL0 before any write: both flags clear");
+    assert_eq!(
+        m.reg_read(Reg::X5),
+        1,
+        "the probe timed out, PC {:#x}",
+        m.reg_read(Reg::Pc)
+    );
+    assert_eq!(
+        m.reg_read(Reg::X1),
+        0,
+        "MDCCSR_EL0 before any write: both flags clear"
+    );
     assert_eq!(m.reg_read(Reg::X2), TXFULL, "MDCCSR_EL0 on the last poll");
-    assert_eq!(m.reg_read(Reg::X3), TXFULL, "a write while TXfull is set leaves it set");
+    assert_eq!(
+        m.reg_read(Reg::X3),
+        TXFULL,
+        "a write while TXfull is set leaves it set"
+    );
     assert_eq!(m.reg_read(Reg::X4), 0, "DBGDTRRX_EL0 with RXfull clear");
-    assert_eq!(m.reg_read(Reg::X6), TXFULL, "reading DTRRX leaves TXfull alone");
+    assert_eq!(
+        m.reg_read(Reg::X6),
+        TXFULL,
+        "reading DTRRX leaves TXfull alone"
+    );
 }
 
 #[test]
@@ -377,13 +408,38 @@ fn mdscr_el1_views_the_flags_and_restores_them_only_under_the_os_lock() {
         (Reg::X12, RXFULL | TXFULL | MDSCR_TDCC),
     ];
     let m = run_el1(&mut ram, DCC_VIEW, &regs, 40);
-    assert_eq!(m.reg_read(Reg::X5), 1, "every access completed, PC {:#x}", m.reg_read(Reg::Pc));
-    assert_eq!(m.reg_read(Reg::X1), TXFULL, "MDSCR_EL1 after a DBGDTR_EL0 write");
-    assert_eq!(m.reg_read(Reg::X2), TXFULL, "with the OS Lock unlocked, writing zero leaves TXfull");
+    assert_eq!(
+        m.reg_read(Reg::X5),
+        1,
+        "every access completed, PC {:#x}",
+        m.reg_read(Reg::Pc)
+    );
+    assert_eq!(
+        m.reg_read(Reg::X1),
+        TXFULL,
+        "MDSCR_EL1 after a DBGDTR_EL0 write"
+    );
+    assert_eq!(
+        m.reg_read(Reg::X2),
+        TXFULL,
+        "with the OS Lock unlocked, writing zero leaves TXfull"
+    );
     assert_eq!(m.reg_read(Reg::X3), TXFULL, "MDCCSR_EL0 agrees");
-    assert_eq!(m.reg_read(Reg::X6), RXFULL, "with the OS Lock locked, MDSCR_EL1 restores both flags");
-    assert_eq!(m.reg_read(Reg::X7), 0x0123_4567, "DBGDTRRX_EL0 with RXfull set: the DTRRX DBGDTR_EL0's high word filled");
-    assert_eq!(m.reg_read(Reg::X8), 0, "reading DBGDTRRX_EL0 cleared RXfull");
+    assert_eq!(
+        m.reg_read(Reg::X6),
+        RXFULL,
+        "with the OS Lock locked, MDSCR_EL1 restores both flags"
+    );
+    assert_eq!(
+        m.reg_read(Reg::X7),
+        0x0123_4567,
+        "DBGDTRRX_EL0 with RXfull set: the DTRRX DBGDTR_EL0's high word filled"
+    );
+    assert_eq!(
+        m.reg_read(Reg::X8),
+        0,
+        "reading DBGDTRRX_EL0 cleared RXfull"
+    );
     assert_eq!(
         m.reg_read(Reg::X10),
         0x89AB_CDEF_0123_4567,
@@ -417,14 +473,47 @@ fn the_os_save_restore_registers_reach_the_channel_data_registers() {
             (Reg::X8, 0x7777_8888_9999_AAAA),
         ];
         let m = run_el1(&mut ram, DCC_DATA, &regs, 30);
-        assert_eq!(m.reg_read(Reg::X5), 1, "OSLK {oslk}: every access completed, PC {:#x}", m.reg_read(Reg::Pc));
-        assert_eq!(m.reg_read(Reg::X2), 0, "OSLK {oslk}: writing the OSDTR registers sets no flag");
-        assert_eq!(m.reg_read(Reg::X3), 0x1111_2222, "OSLK {oslk}: OSDTRRX_EL1 reads DTRRX back");
-        assert_eq!(m.reg_read(Reg::X4), 0x3333_4444, "OSLK {oslk}: OSDTRTX_EL1 reads DTRTX back");
-        assert_eq!(m.reg_read(Reg::X7), 0x5555_6666, "OSLK {oslk}: DBGDTRTX_EL0 filled DTRTX");
-        assert_eq!(m.reg_read(Reg::X11), 0x1111_2222, "OSLK {oslk}: and left DTRRX alone");
-        assert_eq!(m.reg_read(Reg::X9), 0x5555_6666, "OSLK {oslk}: a write with TXfull set left DTRTX as it was");
-        assert_eq!(m.reg_read(Reg::X12), 0x1111_2222, "OSLK {oslk}: a write with TXfull set left DTRRX as it was");
+        assert_eq!(
+            m.reg_read(Reg::X5),
+            1,
+            "OSLK {oslk}: every access completed, PC {:#x}",
+            m.reg_read(Reg::Pc)
+        );
+        assert_eq!(
+            m.reg_read(Reg::X2),
+            0,
+            "OSLK {oslk}: writing the OSDTR registers sets no flag"
+        );
+        assert_eq!(
+            m.reg_read(Reg::X3),
+            0x1111_2222,
+            "OSLK {oslk}: OSDTRRX_EL1 reads DTRRX back"
+        );
+        assert_eq!(
+            m.reg_read(Reg::X4),
+            0x3333_4444,
+            "OSLK {oslk}: OSDTRTX_EL1 reads DTRTX back"
+        );
+        assert_eq!(
+            m.reg_read(Reg::X7),
+            0x5555_6666,
+            "OSLK {oslk}: DBGDTRTX_EL0 filled DTRTX"
+        );
+        assert_eq!(
+            m.reg_read(Reg::X11),
+            0x1111_2222,
+            "OSLK {oslk}: and left DTRRX alone"
+        );
+        assert_eq!(
+            m.reg_read(Reg::X9),
+            0x5555_6666,
+            "OSLK {oslk}: a write with TXfull set left DTRTX as it was"
+        );
+        assert_eq!(
+            m.reg_read(Reg::X12),
+            0x1111_2222,
+            "OSLK {oslk}: a write with TXfull set left DTRRX as it was"
+        );
         assert_eq!(m.reg_read(Reg::X13), TXFULL, "OSLK {oslk}: MDCCSR_EL0");
 
         let mut image = Vec::new();
@@ -439,9 +528,19 @@ fn the_os_save_restore_registers_reach_the_channel_data_registers() {
                 vars: &mut [],
             })
             .expect("a bare machine builds");
-        fresh.restore_snapshot(&mut image.as_slice()).expect("the image restores");
-        assert_eq!(fresh.sysreg_read(osdtrrx), Ok(0x1111_2222), "OSLK {oslk}: DTRRX restored");
-        assert_eq!(fresh.sysreg_read(osdtrtx), Ok(0x5555_6666), "OSLK {oslk}: DTRTX restored");
+        fresh
+            .restore_snapshot(&mut image.as_slice())
+            .expect("the image restores");
+        assert_eq!(
+            fresh.sysreg_read(osdtrrx),
+            Ok(0x1111_2222),
+            "OSLK {oslk}: DTRRX restored"
+        );
+        assert_eq!(
+            fresh.sysreg_read(osdtrtx),
+            Ok(0x5555_6666),
+            "OSLK {oslk}: DTRTX restored"
+        );
         assert_eq!(fresh.sysreg_read(mdccsr), Ok(TXFULL));
     }
 }
@@ -452,15 +551,38 @@ fn the_os_save_restore_registers_reach_the_channel_data_registers() {
 /// 0; the other fields take every write.
 #[test]
 fn mdscr_el1_save_restore_fields_are_written_only_under_the_os_lock() {
-    const SAVE_RESTORE: u64 = RXFULL | TXFULL | (1 << 27) | (1 << 26) | (0b11 << 22) | (1 << 21) | (1 << 14) | (1 << 6);
+    const SAVE_RESTORE: u64 =
+        RXFULL | TXFULL | (1 << 27) | (1 << 26) | (0b11 << 22) | (1 << 21) | (1 << 14) | (1 << 6);
     /// MDE, KDE and TDCC.
     const OTHERS: u64 = (1 << 15) | (1 << 13) | MDSCR_TDCC;
     let mut ram = vec![0u8; RAM_LEN];
-    let m = run_el1(&mut ram, MDSCR_LOCK, &[(Reg::X9, SAVE_RESTORE | OTHERS)], 20);
-    assert_eq!(m.reg_read(Reg::X5), 1, "every access completed, PC {:#x}", m.reg_read(Reg::Pc));
-    assert_eq!(m.reg_read(Reg::X1), OTHERS, "unlocked: the save/restore fields keep their reset value");
-    assert_eq!(m.reg_read(Reg::X2), SAVE_RESTORE | OTHERS, "locked: every field takes the write");
-    assert_eq!(m.reg_read(Reg::X3), SAVE_RESTORE, "unlocked: writing zero clears only the other fields");
+    let m = run_el1(
+        &mut ram,
+        MDSCR_LOCK,
+        &[(Reg::X9, SAVE_RESTORE | OTHERS)],
+        20,
+    );
+    assert_eq!(
+        m.reg_read(Reg::X5),
+        1,
+        "every access completed, PC {:#x}",
+        m.reg_read(Reg::Pc)
+    );
+    assert_eq!(
+        m.reg_read(Reg::X1),
+        OTHERS,
+        "unlocked: the save/restore fields keep their reset value"
+    );
+    assert_eq!(
+        m.reg_read(Reg::X2),
+        SAVE_RESTORE | OTHERS,
+        "locked: every field takes the write"
+    );
+    assert_eq!(
+        m.reg_read(Reg::X3),
+        SAVE_RESTORE,
+        "unlocked: writing zero clears only the other fields"
+    );
 }
 
 /// Arm ARM `MDSCR_EL1` for ARMv8.0: the bits that are not one of its fields
@@ -468,14 +590,28 @@ fn mdscr_el1_save_restore_fields_are_written_only_under_the_os_lock() {
 /// zero whatever is written to them, locked or not.
 #[test]
 fn mdscr_el1_res0_bits_read_as_zero() {
-    const SAVE_RESTORE: u64 = RXFULL | TXFULL | (1 << 27) | (1 << 26) | (0b11 << 22) | (1 << 21) | (1 << 14) | (1 << 6);
+    const SAVE_RESTORE: u64 =
+        RXFULL | TXFULL | (1 << 27) | (1 << 26) | (0b11 << 22) | (1 << 21) | (1 << 14) | (1 << 6);
     /// SS, MDE, KDE and TDCC.
     const OTHERS: u64 = 1 | (1 << 15) | (1 << 13) | MDSCR_TDCC;
     let mut ram = vec![0u8; RAM_LEN];
     let m = run_el1(&mut ram, MDSCR_LOCK, &[(Reg::X9, u64::MAX)], 20);
-    assert_eq!(m.reg_read(Reg::X5), 1, "every access completed, PC {:#x}", m.reg_read(Reg::Pc));
-    assert_eq!(m.reg_read(Reg::X1), OTHERS, "unlocked: the other fields, and no RES0 bit");
-    assert_eq!(m.reg_read(Reg::X2), SAVE_RESTORE | OTHERS, "locked: every field, and no RES0 bit");
+    assert_eq!(
+        m.reg_read(Reg::X5),
+        1,
+        "every access completed, PC {:#x}",
+        m.reg_read(Reg::Pc)
+    );
+    assert_eq!(
+        m.reg_read(Reg::X1),
+        OTHERS,
+        "unlocked: the other fields, and no RES0 bit"
+    );
+    assert_eq!(
+        m.reg_read(Reg::X2),
+        SAVE_RESTORE | OTHERS,
+        "locked: every field, and no RES0 bit"
+    );
 }
 
 #[test]

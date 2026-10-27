@@ -387,10 +387,14 @@ impl<S: GuestStorage> VirtBoard<S> {
     /// The next instant a time-driven device changes an output on its own,
     /// without letting any of them catch up first.
     pub(crate) fn next_deadline(&self) -> Option<VmInstant> {
-        [self.rtc.next_deadline(), self.power_button_release, self.uart.next_deadline()]
-            .into_iter()
-            .flatten()
-            .min()
+        [
+            self.rtc.next_deadline(),
+            self.power_button_release,
+            self.uart.next_deadline(),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
     }
 
     /// QEMU `gpio_key_set_irq`: press the power button now; it releases on

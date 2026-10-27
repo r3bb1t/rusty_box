@@ -1190,7 +1190,10 @@ impl<S: GuestStorage, I: Instrumentation> VirtMachine<S, I> {
                 // A counter poll may be fast-forwarded through the rest of
                 // the burst, but past no exit address.
                 let exits = if WATCH { self.exits.addresses() } else { &[] };
-                match self.cpu.run_trace(&mut self.board, &mut self.observer, limit, exits) {
+                match self
+                    .cpu
+                    .run_trace(&mut self.board, &mut self.observer, limit, exits)
+                {
                     Step::Retired => {}
                     Step::Waiting => {
                         // The slice starts again either way, and a waiting
@@ -2126,4 +2129,3 @@ impl<S: GuestStorage, I: Instrumentation> Power<'_, S, I> {
 #[cfg(test)]
 #[path = "../tests/unit/machine.rs"]
 mod tests;
-

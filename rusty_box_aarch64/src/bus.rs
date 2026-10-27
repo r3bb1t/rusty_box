@@ -125,7 +125,12 @@ pub(crate) fn le_value(bytes: &[u8]) -> u64 {
 /// `bytes`, each width a fixed-size store. `None`, with nothing written,
 /// when they do not all lie in `bytes`.
 #[inline(always)]
-pub(crate) fn store_le(bytes: &mut [u8], offset: usize, width: AccessWidth, value: u64) -> Option<()> {
+pub(crate) fn store_le(
+    bytes: &mut [u8],
+    offset: usize,
+    width: AccessWidth,
+    value: u64,
+) -> Option<()> {
     match width {
         AccessWidth::Byte => store_array(bytes, offset, (value as u8).to_le_bytes()),
         AccessWidth::Half => store_array(bytes, offset, (value as u16).to_le_bytes()),

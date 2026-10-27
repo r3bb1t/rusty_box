@@ -413,7 +413,9 @@ impl Cpu {
                     psci::ALREADY_ON
                 }
             }
-            psci::AFFINITY_INFO_32 | psci::AFFINITY_INFO_64 => psci::affinity_info(arg1, arg2 as u32),
+            psci::AFFINITY_INFO_32 | psci::AFFINITY_INFO_64 => {
+                psci::affinity_info(arg1, arg2 as u32)
+            }
             psci::MIGRATE_INFO_TYPE => psci::MIGRATE_NOT_REQUIRED,
             psci::SYSTEM_OFF => return Err(Fault::Stop(StopCause::PowerOff)),
             psci::SYSTEM_RESET => return Err(Fault::Stop(StopCause::Reset)),

@@ -303,7 +303,13 @@ impl Cpu {
 
     /// [`Cpu::finish`] for an instruction that completed, leaving by `flow`.
     #[inline(always)]
-    pub(crate) fn retire<I: Instrumentation>(&mut self, pc: u64, fetched: Option<u32>, flow: Flow, observer: &mut I) -> Done {
+    pub(crate) fn retire<I: Instrumentation>(
+        &mut self,
+        pc: u64,
+        fetched: Option<u32>,
+        flow: Flow,
+        observer: &mut I,
+    ) -> Done {
         self.icount += 1;
         self.retired += 1;
         if let Some(insn) = fetched {

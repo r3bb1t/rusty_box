@@ -21,8 +21,8 @@
 
 use rusty_box_aarch64::board::RAM_BASE;
 use rusty_box_aarch64::{
-    Execution, Instrumentation, LentStorage, MachineBuilder, MemoryLoan, RamSize, Reg, RunBudget, StopReason,
-    SysReg, VirtConfig, VirtMachine,
+    Execution, Instrumentation, LentStorage, MachineBuilder, MemoryLoan, RamSize, Reg, RunBudget,
+    StopReason, SysReg, VirtConfig, VirtMachine,
 };
 
 /// Lets the machine fast-forward; counts the branches it hears of.
@@ -480,7 +480,8 @@ const EL0VCTEN: u64 = 1 << 1;
 /// `CNTVCT_EL0` access pseudocode: `AArch64.SystemAccessTrap(EL1, 0x18)`):
 /// EC 0x18, IL, and the ISS of a read (direction 1) of op0 3, op2 2,
 /// op1 3, CRn 14, CRm 0 into `x0`.
-const ESR_CNTVCT_TRAP: u64 = (0x18 << 26) | (1 << 25) | (3 << 20) | (2 << 17) | (3 << 14) | (14 << 10) | 1;
+const ESR_CNTVCT_TRAP: u64 =
+    (0x18 << 26) | (1 << 25) | (3 << 20) | (2 << 17) | (3 << 14) | (14 << 10) | 1;
 
 /// A bare machine watched by `observer`, with `program`'s words at their
 /// offsets from the base of RAM and `regs` set.
@@ -497,7 +498,8 @@ fn machine<'r, I: Instrumentation>(
         .build_in(MemoryLoan { ram, vars: &mut [] })
         .expect("a bare machine builds");
     for &(offset, word) in program {
-        m.mem_write(RAM_BASE + offset, &word.to_le_bytes()).expect("the program is in RAM");
+        m.mem_write(RAM_BASE + offset, &word.to_le_bytes())
+            .expect("the program is in RAM");
     }
     for &(reg, value) in regs {
         m.reg_write(reg, value);
@@ -548,7 +550,11 @@ fn run_both(program: &[(u64, u32)], regs: &[(Reg, u64)], slice: u64, done: Optio
         let watched = b.step(RunBudget::Instructions(slice));
         assert_eq!(skipped, watched, "slice {slice}, tick {}", b.ticks());
         assert_eq!(a.ticks(), b.ticks(), "slice {slice}");
-        assert!(snapshot(&a) == snapshot(&b), "slice {slice}: the machines differ at tick {}", b.ticks());
+        assert!(
+            snapshot(&a) == snapshot(&b),
+            "slice {slice}: the machines differ at tick {}",
+            b.ticks()
+        );
         if watched.stop == StopReason::ExitReached {
             let exit = done.map(|offset| RAM_BASE + offset);
             assert_eq!(Some(b.reg_read(Reg::Pc)), exit, "slice {slice}");
@@ -615,11 +621,32 @@ fn polls_outside_the_rule_run_every_instruction() {
         done: u64,
     }
     let cases = [
-        Case { name: "eq", program: EQUAL, regs: &[], done: 0x18 },
-        Case { name: "narrow", program: NARROW, regs: &[], done: 0x18 },
-        Case { name: "store", program: STORE, regs: &[(Reg::X20, RAM_BASE + 0x8000)], done: 0x1C },
+        Case {
+            name: "eq",
+            program: EQUAL,
+            regs: &[],
+            done: 0x18,
+        },
+        Case {
+            name: "narrow",
+            program: NARROW,
+            regs: &[],
+            done: 0x18,
+        },
+        Case {
+            name: "store",
+            program: STORE,
+            regs: &[(Reg::X20, RAM_BASE + 0x8000)],
+            done: 0x1C,
+        },
     ];
-    for Case { name, program, regs, done } in cases {
+    for Case {
+        name,
+        program,
+        regs,
+        done,
+    } in cases
+    {
         let both = run_both(program, regs, 1 << 24, Some(done));
         assert_eq!(both.skipping.branches, both.watching.branches, "{name}");
         if name != "eq" {
@@ -636,7 +663,11 @@ fn timer_interrupts_during_a_poll_arrive_at_the_same_instruction() {
         assert!(both.finished, "slice {slice}");
         assert_eq!(both.stop, StopReason::PoweredOff, "slice {slice}");
         assert_eq!(both.skipping_x20, both.watching_x20, "slice {slice}");
-        assert!(both.watching_x20 >= 10, "slice {slice}: {} interrupts", both.watching_x20);
+        assert!(
+            both.watching_x20 >= 10,
+            "slice {slice}: {} interrupts",
+            both.watching_x20
+        );
         if slice == 1 << 24 {
             assert!(
                 both.skipping.branches < both.watching.branches,
@@ -654,7 +685,10 @@ fn watched_runs_hear_of_every_instruction() {
     let mut m = machine(&mut ram, Watching::default(), DIRECT, &[]);
     while m.reg_read(Reg::Pc) != RAM_BASE + 0x18 {
         assert!(m.ticks() < GIVE_UP_AFTER, "the poll never ended");
-        assert_eq!(m.step(RunBudget::Instructions(1000)).stop, StopReason::BudgetExhausted);
+        assert_eq!(
+            m.step(RunBudget::Instructions(1000)).stop,
+            StopReason::BudgetExhausted
+        );
     }
     assert_eq!(m.instrumentation().executed, m.instructions());
 }
@@ -710,17 +744,50 @@ fn polls_of_every_shape_the_rule_covers_are_fast_forwarded() {
         done: u64,
     }
     let cases = [
-        Case { name: "immediate, b.lt", program: IMMEDIATE_SIGNED, done: 0x10 },
-        Case { name: "counter first, b.lo", program: COUNTER_FIRST, done: 0x18 },
-        Case { name: "b.ge forward, b back", program: FORWARD_SIGNED, done: 0x1C },
-        Case { name: "blr, br", program: THROUGH_REGISTERS, done: 0x2C },
-        Case { name: "nop", program: WITH_NOP, done: 0x1C },
-        Case { name: "cntpct_el0", program: PHYSICAL, done: 0x18 },
-        Case { name: "translated", program: TRANSLATED, done: ALIAS - RAM_BASE + 0x50 },
+        Case {
+            name: "immediate, b.lt",
+            program: IMMEDIATE_SIGNED,
+            done: 0x10,
+        },
+        Case {
+            name: "counter first, b.lo",
+            program: COUNTER_FIRST,
+            done: 0x18,
+        },
+        Case {
+            name: "b.ge forward, b back",
+            program: FORWARD_SIGNED,
+            done: 0x1C,
+        },
+        Case {
+            name: "blr, br",
+            program: THROUGH_REGISTERS,
+            done: 0x2C,
+        },
+        Case {
+            name: "nop",
+            program: WITH_NOP,
+            done: 0x1C,
+        },
+        Case {
+            name: "cntpct_el0",
+            program: PHYSICAL,
+            done: 0x18,
+        },
+        Case {
+            name: "translated",
+            program: TRANSLATED,
+            done: ALIAS - RAM_BASE + 0x50,
+        },
     ];
     // Where a step ends inside a skip is the direct poll's subject; these
     // need one step that ends inside a poll and one that runs it whole.
-    for Case { name, program, done } in cases {
+    for Case {
+        name,
+        program,
+        done,
+    } in cases
+    {
         for slice in [1000, 1 << 24] {
             let both = run_both(program, &[], slice, Some(done));
             assert!(both.finished, "{name}, slice {slice}");
@@ -744,10 +811,20 @@ fn a_poll_at_el0_traps_where_el0_may_not_read_the_counter_and_is_fast_forwarded_
         for slice in [1, 1 << 24] {
             let both = run_both(AT_EL0, &[(Reg::X11, cntkctl)], slice, Some(0xC00));
             assert!(both.finished, "CNTKCTL_EL1 {cntkctl:#x}, slice {slice}");
-            assert_eq!(both.stop, StopReason::ExitReached, "CNTKCTL_EL1 {cntkctl:#x}, slice {slice}");
-            assert_eq!(both.esr, ESR_CNTVCT_TRAP, "CNTKCTL_EL1 {cntkctl:#x}, slice {slice}");
+            assert_eq!(
+                both.stop,
+                StopReason::ExitReached,
+                "CNTKCTL_EL1 {cntkctl:#x}, slice {slice}"
+            );
+            assert_eq!(
+                both.esr, ESR_CNTVCT_TRAP,
+                "CNTKCTL_EL1 {cntkctl:#x}, slice {slice}"
+            );
             assert_eq!(both.x2, 0, "CNTKCTL_EL1 {cntkctl:#x}, slice {slice}");
-            assert_eq!(both.skipping.branches, both.watching.branches, "CNTKCTL_EL1 {cntkctl:#x}");
+            assert_eq!(
+                both.skipping.branches, both.watching.branches,
+                "CNTKCTL_EL1 {cntkctl:#x}"
+            );
         }
     }
     for slice in [1000, 1 << 24] {

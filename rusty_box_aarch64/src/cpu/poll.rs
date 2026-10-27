@@ -122,7 +122,10 @@ struct PollCycle {
 impl PollCycle {
     /// Whether `other` took the same path.
     const fn same_path(&self, other: &Self) -> bool {
-        self.len == other.len && self.jumps == other.jumps && self.conds == other.conds && self.outcomes == other.outcomes
+        self.len == other.len
+            && self.jumps == other.jumps
+            && self.conds == other.conds
+            && self.outcomes == other.outcomes
     }
 }
 
@@ -147,17 +150,34 @@ const MIN_MARGIN: u64 = margin(MAX_POLL_LEN - 1);
 enum PollOp {
     Nop,
     /// `CMP Xn, Xm`: 64-bit `SUBS XZR` of two registers, unshifted.
-    CompareRegisters { rn: u8, rm: u8 },
+    CompareRegisters {
+        rn: u8,
+        rm: u8,
+    },
     /// `CMP Xn, #imm`: 64-bit `SUBS XZR` of a register and an immediate,
     /// `y` the immediate inverted, as [`Op::AddsImm`] holds it.
-    CompareImmediate { rn: u8, y: u64 },
+    CompareImmediate {
+        rn: u8,
+        y: u64,
+    },
     /// `B.cond` on an [`ordering`].
-    BranchOrdered { cond: u8, offset: u64 },
-    B { offset: u64 },
-    Bl { offset: u64 },
+    BranchOrdered {
+        cond: u8,
+        offset: u64,
+    },
+    B {
+        offset: u64,
+    },
+    Bl {
+        offset: u64,
+    },
     /// `BR`, `RET` included.
-    Br { rn: u8 },
-    Blr { rn: u8 },
+    Br {
+        rn: u8,
+    },
+    Blr {
+        rn: u8,
+    },
 }
 
 impl PollOp {
@@ -165,11 +185,26 @@ impl PollOp {
     const fn of(op: Op) -> Option<Self> {
         match op {
             Op::Nop => Some(Self::Nop),
-            Op::AddSubShift { sf: true, sub: true, flags: true, rd: 31, rn, rm, amount: 0, .. } => {
-                Some(Self::CompareRegisters { rn, rm })
+            Op::AddSubShift {
+                sf: true,
+                sub: true,
+                flags: true,
+                rd: 31,
+                rn,
+                rm,
+                amount: 0,
+                ..
+            } => Some(Self::CompareRegisters { rn, rm }),
+            Op::AddsImm {
+                sf: true,
+                rd: 31,
+                rn,
+                carry: true,
+                y,
+            } => Some(Self::CompareImmediate { rn, y }),
+            Op::BCond { cond, offset } if ordering(cond) => {
+                Some(Self::BranchOrdered { cond, offset })
             }
-            Op::AddsImm { sf: true, rd: 31, rn, carry: true, y } => Some(Self::CompareImmediate { rn, y }),
-            Op::BCond { cond, offset } if ordering(cond) => Some(Self::BranchOrdered { cond, offset }),
             Op::B { offset } => Some(Self::B { offset }),
             Op::Bl { offset } => Some(Self::Bl { offset }),
             Op::Br { rn } => Some(Self::Br { rn }),
@@ -223,9 +258,15 @@ impl PollStep {
     pub(super) const fn of(op: Op) -> Self {
         match PollOp::of(op) {
             None => Self::Rejected,
-            Some(PollOp::Nop | PollOp::CompareRegisters { .. } | PollOp::CompareImmediate { .. }) => Self::Straight,
             Some(
-                PollOp::BranchOrdered { .. } | PollOp::B { .. } | PollOp::Bl { .. } | PollOp::Br { .. } | PollOp::Blr { .. },
+                PollOp::Nop | PollOp::CompareRegisters { .. } | PollOp::CompareImmediate { .. },
+            ) => Self::Straight,
+            Some(
+                PollOp::BranchOrdered { .. }
+                | PollOp::B { .. }
+                | PollOp::Bl { .. }
+                | PollOp::Br { .. }
+                | PollOp::Blr { .. },
             ) => Self::Branch,
         }
     }
@@ -368,7 +409,13 @@ impl Cpu {
 
     /// Iteration `i` from now of `poll`, iterations being `len`
     /// instructions long: the walk with the counter it reads.
-    fn poll_iteration<B: PhysBus>(&self, bus: &mut B, poll: Poll<'_>, len: u64, i: u64) -> Option<PollCycle> {
+    fn poll_iteration<B: PhysBus>(
+        &self,
+        bus: &mut B,
+        poll: Poll<'_>,
+        len: u64,
+        i: u64,
+    ) -> Option<PollCycle> {
         self.walk_poll(bus, poll, self.counter_at(self.icount + i * len))
     }
 
@@ -382,7 +429,13 @@ impl Cpu {
     /// depends on it.
     #[cold]
     #[inline(never)]
-    pub(super) fn fast_forward_poll<B: PhysBus>(&mut self, bus: &mut B, pc: u64, word: u32, bound: PollBound<'_>) {
+    pub(super) fn fast_forward_poll<B: PhysBus>(
+        &mut self,
+        bus: &mut B,
+        pc: u64,
+        word: u32,
+        bound: PollBound<'_>,
+    ) {
         // Every iteration is at least two instructions, the read and a
         // branch back, so a run with room for no more than [`MIN_MARGIN`]
         // of them has room for no skip, whatever the walk would find.
@@ -396,7 +449,10 @@ impl Cpu {
             return;
         }
         // The read must not trap: CNTPCT_EL0 (op2 1) or CNTVCT_EL0 (op2 2).
-        if self.sysreg_read(SysRegKey::new(3, 3, 14, 0, bits(word, 7, 5))).is_err() {
+        if self
+            .sysreg_read(SysRegKey::new(3, 3, 14, 0, bits(word, 7, 5)))
+            .is_err()
+        {
             return;
         }
         let poll = Poll {
@@ -420,7 +476,8 @@ impl Cpu {
             Some(_) | None => return,
         }
         let same = |cpu: &Self, bus: &mut B, i: u64| {
-            cpu.poll_iteration(bus, poll, len, i).is_some_and(|c| c.same_path(&cycle))
+            cpu.poll_iteration(bus, poll, len, i)
+                .is_some_and(|c| c.same_path(&cycle))
         };
         // The first iteration in 1..=fit that goes another way, or `fit`.
         let first_other = if same(self, bus, fit) {

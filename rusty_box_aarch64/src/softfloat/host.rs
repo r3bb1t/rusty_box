@@ -80,8 +80,15 @@ const HOST_ROUNDS_ONCE: bool = !cfg!(all(target_arch = "x86", not(target_feature
 #[cfg(feature = "std")]
 const HOST_FUSES_ONCE: bool = cfg!(any(
     target_arch = "aarch64",
-    all(any(target_arch = "x86", target_arch = "x86_64"), target_feature = "fma"),
-    all(target_arch = "x86_64", target_os = "linux", target_env = "gnu"),
+    all(
+        any(target_arch = "x86", target_arch = "x86_64"),
+        target_feature = "fma"
+    ),
+    all(
+        target_arch = "x86_64",
+        target_os = "linux",
+        target_env = "gnu"
+    ),
 ));
 
 /// The operations the host computes.
@@ -171,10 +178,19 @@ pub(super) fn f32_arith(op: Arith, a: u32, b: u32, fp: &ArmFpStatus) -> Option<u
 #[cfg(feature = "std")]
 #[inline(always)]
 pub(super) fn f64_fused(addend: u64, n: u64, m: u64, fp: &ArmFpStatus) -> Option<u64> {
-    if !(HOST_FUSES_ONCE && host_may_round(fp) && f64_normal(addend) && f64_normal(n) && f64_normal(m)) {
+    if !(HOST_FUSES_ONCE
+        && host_may_round(fp)
+        && f64_normal(addend)
+        && f64_normal(n)
+        && f64_normal(m))
+    {
         return None;
     }
-    f64_bounded(f64::from_bits(n).mul_add(f64::from_bits(m), f64::from_bits(addend)).to_bits())
+    f64_bounded(
+        f64::from_bits(n)
+            .mul_add(f64::from_bits(m), f64::from_bits(addend))
+            .to_bits(),
+    )
 }
 
 /// Without `std` the host has no fused multiply-add: SoftFloat computes
@@ -190,10 +206,19 @@ pub(super) fn f64_fused(_addend: u64, _n: u64, _m: u64, _fp: &ArmFpStatus) -> Op
 #[cfg(feature = "std")]
 #[inline(always)]
 pub(super) fn f32_fused(addend: u32, n: u32, m: u32, fp: &ArmFpStatus) -> Option<u32> {
-    if !(HOST_FUSES_ONCE && host_may_round(fp) && f32_normal(addend) && f32_normal(n) && f32_normal(m)) {
+    if !(HOST_FUSES_ONCE
+        && host_may_round(fp)
+        && f32_normal(addend)
+        && f32_normal(n)
+        && f32_normal(m))
+    {
         return None;
     }
-    f32_bounded(f32::from_bits(n).mul_add(f32::from_bits(m), f32::from_bits(addend)).to_bits())
+    f32_bounded(
+        f32::from_bits(n)
+            .mul_add(f32::from_bits(m), f32::from_bits(addend))
+            .to_bits(),
+    )
 }
 
 /// Without `std` the host has no fused multiply-add: SoftFloat computes

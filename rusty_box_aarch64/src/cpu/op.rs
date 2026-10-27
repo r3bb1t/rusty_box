@@ -624,7 +624,9 @@ impl Cpu {
         }
         match *source.op(self) {
             Op::Class { class, word } => Ok(completed!(self.exec_class(bus, pc, class, word))),
-            Op::ReadCounter { word } => Ok(completed!(self.exec_class(bus, pc, Class::System, word))),
+            Op::ReadCounter { word } => {
+                Ok(completed!(self.exec_class(bus, pc, Class::System, word)))
+            }
             Op::AddImm { sf, rd, rn, imm } => {
                 let value = self.x_or_sp(u32::from(rn)).wrapping_add(imm);
                 self.set_x_or_sp_sized(u32::from(rd), value, sf);
@@ -820,8 +822,10 @@ impl Cpu {
                 let (address, writeback) = indexed(base, imm, index);
                 let scale = u32::from(size);
                 let fit = Fit::of(address, 1 << scale);
-                let ElementPair { first: a, second: b } =
-                    completed!(self.read_pair(bus, address, scale, fit, DataAccess::NORMAL));
+                let ElementPair {
+                    first: a,
+                    second: b,
+                } = completed!(self.read_pair(bus, address, scale, fit, DataAccess::NORMAL));
                 // The order `exec_ldst_pair` writes them in, which decides
                 // the CONSTRAINED UNPREDICTABLE Rt == Rt2 case.
                 if scale == 2 {

@@ -270,11 +270,18 @@ fn every_pre_decoded_op_executes_as_its_class_handler_does() {
 #[test]
 fn counter_reads_predecode_to_their_own_op() {
     for word in [0xD53B_E040, 0xD53B_E05F, 0xD53B_E020] {
-        assert_eq!(predecode(classify(word), word), Op::ReadCounter { word }, "{word:#010x}");
+        assert_eq!(
+            predecode(classify(word), word),
+            Op::ReadCounter { word },
+            "{word:#010x}"
+        );
     }
     // MRS CNTFRQ_EL0 and MSR CNTV_TVAL_EL0 stay with their class.
     for word in [0xD53B_E000, 0xD51B_E304] {
-        assert!(matches!(predecode(classify(word), word), Op::Class { .. }), "{word:#010x}");
+        assert!(
+            matches!(predecode(classify(word), word), Op::Class { .. }),
+            "{word:#010x}"
+        );
     }
 }
 
@@ -286,11 +293,23 @@ fn a_condition_holds_on_a_flag_value_as_it_does_on_pstate() {
         reset_pc: RAM,
     });
     for bits in 0..16u32 {
-        let flags = Nzcv { n: bits & 8 != 0, z: bits & 4 != 0, c: bits & 2 != 0, v: bits & 1 != 0 };
+        let flags = Nzcv {
+            n: bits & 8 != 0,
+            z: bits & 4 != 0,
+            c: bits & 2 != 0,
+            v: bits & 1 != 0,
+        };
         cpu.pstate.set_flags(flags);
-        assert_eq!((cpu.pstate.n, cpu.pstate.z, cpu.pstate.c, cpu.pstate.v), (flags.n, flags.z, flags.c, flags.v));
+        assert_eq!(
+            (cpu.pstate.n, cpu.pstate.z, cpu.pstate.c, cpu.pstate.v),
+            (flags.n, flags.z, flags.c, flags.v)
+        );
         for cond in 0..16 {
-            assert_eq!(cond_holds(flags, cond), cpu.condition_holds(cond), "flags {bits:#06b} cond {cond:#06b}");
+            assert_eq!(
+                cond_holds(flags, cond),
+                cpu.condition_holds(cond),
+                "flags {bits:#06b} cond {cond:#06b}"
+            );
         }
     }
 }

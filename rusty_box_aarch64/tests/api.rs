@@ -547,13 +547,24 @@ fn a_snapshot_of_an_earlier_version_is_refused_and_changes_nothing() {
     // The image starts with its 8-byte magic and then its version.
     let version = u32::from_le_bytes(image[8..12].try_into().expect("four bytes"));
     image[8..12].copy_from_slice(&(version - 1).to_le_bytes());
-    assert_eq!(m.step(RunBudget::Instructions(2)).stop, StopReason::BudgetExhausted);
+    assert_eq!(
+        m.step(RunBudget::Instructions(2)).stop,
+        StopReason::BudgetExhausted
+    );
     let before = (m.cpu_snapshot(), m.ram().to_vec());
     assert!(m.restore_snapshot(&mut image.as_slice()).is_err());
-    assert_eq!((m.cpu_snapshot(), m.ram().to_vec()), before, "a refused image changes nothing");
+    assert_eq!(
+        (m.cpu_snapshot(), m.ram().to_vec()),
+        before,
+        "a refused image changes nothing"
+    );
     assert_eq!(m.power().state(), PowerState::Running);
     image[8..12].copy_from_slice(&version.to_le_bytes());
-    assert_eq!(m.restore_snapshot(&mut image.as_slice()), Ok(()), "the same image at this version restores");
+    assert_eq!(
+        m.restore_snapshot(&mut image.as_slice()),
+        Ok(()),
+        "the same image at this version restores"
+    );
     assert_eq!(m.reg_read(Reg::Pc), RAM_BASE);
 }
 
@@ -794,17 +805,35 @@ fn a_directly_booted_kernel_is_entered_as_qemu_enters_it() {
 #[test]
 fn a_bare_guest_transmits_nothing_until_it_enables_the_uart() {
     const PROBE: [u32; 8] = [
-        0xD2A1_2000, 0x5280_0965, 0xB900_0005, 0xB940_1806, 0x5280_6021, 0xB900_3001, 0xB940_1807, SPIN,
+        0xD2A1_2000,
+        0x5280_0965,
+        0xB900_0005,
+        0xB940_1806,
+        0x5280_6021,
+        0xB900_3001,
+        0xB940_1807,
+        SPIN,
     ];
     let mut ram = vec![0u8; RAM_LEN];
     let mut m = bare(&mut ram, rusty_box_aarch64::NoInstrumentation);
     load(&mut m, RAM_BASE, &PROBE);
-    assert_eq!(m.step(RunBudget::Instructions(4)).stop, StopReason::BudgetExhausted);
-    let output = |m: &mut VirtMachine<LentStorage<'_>>| m.serial(0).expect("UART0").take_output().collect::<Vec<u8>>();
+    assert_eq!(
+        m.step(RunBudget::Instructions(4)).stop,
+        StopReason::BudgetExhausted
+    );
+    let output = |m: &mut VirtMachine<LentStorage<'_>>| {
+        m.serial(0)
+            .expect("UART0")
+            .take_output()
+            .collect::<Vec<u8>>()
+    };
     assert_eq!(output(&mut m), b"", "UARTEN is clear: nothing leaves");
     // RXFE, TXFF and BUSY: the holding register (FEN is clear) is full.
     assert_eq!(m.reg_read(Reg::X6), 0x10 | 0x20 | 0x08);
-    assert_eq!(m.step(RunBudget::Instructions(4)).stop, StopReason::BudgetExhausted);
+    assert_eq!(
+        m.step(RunBudget::Instructions(4)).stop,
+        StopReason::BudgetExhausted
+    );
     assert_eq!(output(&mut m), b"K", "enabling the UART sent it");
     assert_eq!(m.reg_read(Reg::X7), 0x10 | 0x80, "RXFE and TXFE");
 }
@@ -825,7 +854,15 @@ fn a_bare_guest_transmits_nothing_until_it_enables_the_uart() {
 fn a_directly_booted_kernel_finds_the_console_set_up() {
     const MIB: u64 = 1 << 20;
     const PROBE: [u32; 9] = [
-        0xD2A1_2000, 0xB940_3001, 0xB940_2402, 0xB940_2803, 0xB940_2C04, 0x5280_0965, 0xB900_0005, 0xB940_1806, SPIN,
+        0xD2A1_2000,
+        0xB940_3001,
+        0xB940_2402,
+        0xB940_2803,
+        0xB940_2C04,
+        0x5280_0965,
+        0xB900_0005,
+        0xB940_1806,
+        SPIN,
     ];
     let mut kernel = fake_kernel(0x10_0000);
     // `b 0x40`, over the header.
@@ -839,13 +876,33 @@ fn a_directly_booted_kernel_finds_the_console_set_up() {
     let mut m = MachineBuilder::new(VirtConfig::DEFAULT)
         .ram(RamSize::bytes(8 * MIB).expect("a valid size"))
         .linux(image)
-        .build_in(MemoryLoan { ram: &mut ram, vars: &mut [] })
+        .build_in(MemoryLoan {
+            ram: &mut ram,
+            vars: &mut [],
+        })
         .expect("builds");
-    assert_eq!(m.step(RunBudget::Instructions(10)).stop, StopReason::BudgetExhausted);
+    assert_eq!(
+        m.step(RunBudget::Instructions(10)).stop,
+        StopReason::BudgetExhausted
+    );
     let regs = [Reg::X1, Reg::X2, Reg::X3, Reg::X4].map(|r| m.reg_read(r));
-    assert_eq!(regs, [0x301, 13, 1, 0x70], "UARTCR, UARTIBRD, UARTFBRD, UARTLCR_H");
-    assert_eq!(m.serial(0).expect("UART0").take_output().collect::<Vec<u8>>(), b"K");
-    assert_eq!(m.reg_read(Reg::X6), 0x10 | 0x80, "RXFE and TXFE: nothing waits");
+    assert_eq!(
+        regs,
+        [0x301, 13, 1, 0x70],
+        "UARTCR, UARTIBRD, UARTFBRD, UARTLCR_H"
+    );
+    assert_eq!(
+        m.serial(0)
+            .expect("UART0")
+            .take_output()
+            .collect::<Vec<u8>>(),
+        b"K"
+    );
+    assert_eq!(
+        m.reg_read(Reg::X6),
+        0x10 | 0x80,
+        "RXFE and TXFE: nothing waits"
+    );
     // The device tree's UART clock is the one the divisor was worked out for.
     let tree = m.device_tree().to_vec();
     let clock = fdt::property(&tree, "apb-pclk", "clock-frequency").expect("well formed");
@@ -853,8 +910,17 @@ fn a_directly_booted_kernel_finds_the_console_set_up() {
     assert_eq!(clock, Some(&declared.to_be_bytes()[..]));
     // A reset sets it up again.
     m.power().reset();
-    assert_eq!(m.step(RunBudget::Instructions(10)).stop, StopReason::BudgetExhausted);
-    assert_eq!(m.serial(0).expect("UART0").take_output().collect::<Vec<u8>>(), b"K");
+    assert_eq!(
+        m.step(RunBudget::Instructions(10)).stop,
+        StopReason::BudgetExhausted
+    );
+    assert_eq!(
+        m.serial(0)
+            .expect("UART0")
+            .take_output()
+            .collect::<Vec<u8>>(),
+        b"K"
+    );
 }
 
 /// DDI 0183F §3.4.4: the receive timeout interrupt is raised when the
@@ -875,8 +941,20 @@ fn a_directly_booted_kernel_finds_the_console_set_up() {
 #[test]
 fn the_receive_timeout_comes_32_bit_periods_after_the_last_character() {
     const PROBE: [u32; 14] = [
-        0xD2A1_2000, 0x5280_01A1, 0xB900_2401, 0x5280_0021, 0xB900_2801, 0x5280_0E01, 0xB900_2C01, 0x5280_0801,
-        0xB900_3801, 0x5280_6021, 0xB900_3001, 0xB940_3C02, 0x3637_FFE2, SPIN,
+        0xD2A1_2000,
+        0x5280_01A1,
+        0xB900_2401,
+        0x5280_0021,
+        0xB900_2801,
+        0x5280_0E01,
+        0xB900_2C01,
+        0x5280_0801,
+        0xB900_3801,
+        0x5280_6021,
+        0xB900_3001,
+        0xB940_3C02,
+        0x3637_FFE2,
+        SPIN,
     ];
     const DONE: u64 = RAM_BASE + 0x34;
     let elapsed = |slice: u64| {
@@ -884,14 +962,23 @@ fn the_receive_timeout_comes_32_bit_periods_after_the_last_character() {
         let mut m = bare(&mut ram, rusty_box_aarch64::NoInstrumentation);
         load(&mut m, RAM_BASE, &PROBE);
         m.set_exits(&[DONE]).expect("one exit");
-        assert_eq!(m.step(RunBudget::Instructions(100)).stop, StopReason::BudgetExhausted);
+        assert_eq!(
+            m.step(RunBudget::Instructions(100)).stop,
+            StopReason::BudgetExhausted
+        );
         assert_eq!(m.serial(0).expect("UART0").send(b"a"), 1);
         let arrived = m.ticks();
-        assert_eq!(m.step(RunBudget::Ticks(13_000)).stop, StopReason::BudgetExhausted, "not yet");
+        assert_eq!(
+            m.step(RunBudget::Ticks(13_000)).stop,
+            StopReason::BudgetExhausted,
+            "not yet"
+        );
         loop {
             match m.step(RunBudget::Ticks(slice)).stop {
                 StopReason::ExitReached => break,
-                StopReason::BudgetExhausted => assert!(m.ticks() - arrived < 20_000, "the timeout never came"),
+                StopReason::BudgetExhausted => {
+                    assert!(m.ticks() - arrived < 20_000, "the timeout never came")
+                }
                 other => panic!("{other:?}"),
             }
         }
@@ -923,8 +1010,22 @@ fn the_receive_timeout_comes_32_bit_periods_after_the_last_character() {
 #[test]
 fn the_receive_timeout_counts_from_the_write_that_sets_rtim() {
     const PROBE: [u32; 16] = [
-        0xD2A1_2000, 0x5280_01A1, 0xB900_2401, 0x5280_0021, 0xB900_2801, 0x5280_0E01, 0xB900_2C01, 0x5280_6021,
-        0xB900_3001, 0xB940_1802, 0x3727_FFE2, 0x5280_0801, 0xB900_3801, 0xB940_3C02, 0x3637_FFE2, SPIN,
+        0xD2A1_2000,
+        0x5280_01A1,
+        0xB900_2401,
+        0x5280_0021,
+        0xB900_2801,
+        0x5280_0E01,
+        0xB900_2C01,
+        0x5280_6021,
+        0xB900_3001,
+        0xB940_1802,
+        0x3727_FFE2,
+        0x5280_0801,
+        0xB900_3801,
+        0xB940_3C02,
+        0x3637_FFE2,
+        SPIN,
     ];
     const POLL: u64 = RAM_BASE + 0x34;
     const DONE: u64 = RAM_BASE + 0x3C;
@@ -932,16 +1033,25 @@ fn the_receive_timeout_counts_from_the_write_that_sets_rtim() {
         let mut ram = vec![0u8; RAM_LEN];
         let mut m = bare(&mut ram, rusty_box_aarch64::NoInstrumentation);
         load(&mut m, RAM_BASE, &PROBE);
-        assert_eq!(m.step(RunBudget::Instructions(100)).stop, StopReason::BudgetExhausted);
+        assert_eq!(
+            m.step(RunBudget::Instructions(100)).stop,
+            StopReason::BudgetExhausted
+        );
         assert_eq!(m.serial(0).expect("UART0").send(b"a"), 1);
         m.set_exits(&[POLL]).expect("one exit");
-        assert_eq!(m.step(RunBudget::Instructions(100)).stop, StopReason::ExitReached, "RTIM set");
+        assert_eq!(
+            m.step(RunBudget::Instructions(100)).stop,
+            StopReason::ExitReached,
+            "RTIM set"
+        );
         let set = m.ticks();
         m.set_exits(&[DONE]).expect("one exit");
         loop {
             match m.step(RunBudget::Ticks(slice)).stop {
                 StopReason::ExitReached => break,
-                StopReason::BudgetExhausted => assert!(m.ticks() - set < 20_000, "the timeout never came"),
+                StopReason::BudgetExhausted => {
+                    assert!(m.ticks() - set < 20_000, "the timeout never came")
+                }
                 other => panic!("{other:?}"),
             }
         }
@@ -977,15 +1087,36 @@ fn the_receive_timeout_counts_from_the_write_that_sets_rtim() {
 #[test]
 fn a_receive_timeout_left_without_a_baud_clock_survives_a_snapshot() {
     const PROBE: [u32; 20] = [
-        0xD2A1_2000, 0x5280_01A1, 0xB900_2401, 0x5280_0021, 0xB900_2801, 0x5280_0E01, 0xB900_2C01, 0x5280_0801,
-        0xB900_3801, 0x5280_6021, 0xB900_3001, 0xB940_1802, 0x3727_FFE2, 0xB900_2403, 0xB900_2804, 0x5280_0E01,
-        0xB900_2C01, 0xB940_3C02, 0x3637_FFE2, SPIN,
+        0xD2A1_2000,
+        0x5280_01A1,
+        0xB900_2401,
+        0x5280_0021,
+        0xB900_2801,
+        0x5280_0E01,
+        0xB900_2C01,
+        0x5280_0801,
+        0xB900_3801,
+        0x5280_6021,
+        0xB900_3001,
+        0xB940_1802,
+        0x3727_FFE2,
+        0xB900_2403,
+        0xB900_2804,
+        0x5280_0E01,
+        0xB900_2C01,
+        0xB940_3C02,
+        0x3637_FFE2,
+        SPIN,
     ];
     const POLL: u64 = RAM_BASE + 0x44;
     const DONE: u64 = RAM_BASE + 0x4C;
     let run_to_done = |m: &mut VirtMachine<LentStorage<'_>>| {
         m.set_exits(&[DONE]).expect("one exit");
-        assert_eq!(m.step(RunBudget::Ticks(20_000)).stop, StopReason::ExitReached, "RTRIS came");
+        assert_eq!(
+            m.step(RunBudget::Ticks(20_000)).stop,
+            StopReason::ExitReached,
+            "RTRIS came"
+        );
         let mut image = Vec::new();
         m.save_snapshot(&mut image).expect("a snapshot saves");
         (m.ticks(), registers_and_ram(m), image)
@@ -996,26 +1127,48 @@ fn a_receive_timeout_left_without_a_baud_clock_survives_a_snapshot() {
         load(&mut m, RAM_BASE, &PROBE);
         m.reg_write(Reg::X3, ibrd);
         m.reg_write(Reg::X4, fbrd);
-        assert_eq!(m.step(RunBudget::Instructions(100)).stop, StopReason::BudgetExhausted);
+        assert_eq!(
+            m.step(RunBudget::Instructions(100)).stop,
+            StopReason::BudgetExhausted
+        );
         assert_eq!(m.serial(0).expect("UART0").send(b"a"), 1);
         let arrived = m.ticks();
-        assert_eq!(m.step(RunBudget::Instructions(20)).stop, StopReason::BudgetExhausted);
-        assert!((POLL..DONE).contains(&m.reg_read(Reg::Pc)), "UARTIBRD {ibrd:#x}: latched, polling");
+        assert_eq!(
+            m.step(RunBudget::Instructions(20)).stop,
+            StopReason::BudgetExhausted
+        );
+        assert!(
+            (POLL..DONE).contains(&m.reg_read(Reg::Pc)),
+            "UARTIBRD {ibrd:#x}: latched, polling"
+        );
         let mut image = Vec::new();
         m.save_snapshot(&mut image).expect("a snapshot saves");
 
         let mut fresh_ram = vec![0u8; RAM_LEN];
         let mut fresh = bare(&mut fresh_ram, rusty_box_aarch64::NoInstrumentation);
-        assert_eq!(fresh.restore_snapshot(&mut image.as_slice()), Ok(()), "UARTIBRD {ibrd:#x}: the image restores");
+        assert_eq!(
+            fresh.restore_snapshot(&mut image.as_slice()),
+            Ok(()),
+            "UARTIBRD {ibrd:#x}: the image restores"
+        );
         let mut again = Vec::new();
         fresh.save_snapshot(&mut again).expect("a snapshot saves");
-        assert!(again == image, "UARTIBRD {ibrd:#x}: the restored machine is the one saved");
+        assert!(
+            again == image,
+            "UARTIBRD {ibrd:#x}: the restored machine is the one saved"
+        );
 
         let unsaved = run_to_done(&mut m);
         let restored = run_to_done(&mut fresh);
         let elapsed = unsaved.0 - arrived;
-        assert!((13_884 + 2..=13_885 + 2).contains(&elapsed), "UARTIBRD {ibrd:#x}: the count kept its deadline: {elapsed}");
-        assert!(restored == unsaved, "UARTIBRD {ibrd:#x}: both ran to the same state");
+        assert!(
+            (13_884 + 2..=13_885 + 2).contains(&elapsed),
+            "UARTIBRD {ibrd:#x}: the count kept its deadline: {elapsed}"
+        );
+        assert!(
+            restored == unsaved,
+            "UARTIBRD {ibrd:#x}: both ran to the same state"
+        );
     }
 }
 

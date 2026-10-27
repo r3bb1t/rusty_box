@@ -198,7 +198,8 @@ const DCC_FLAGS: u64 = DCC_TXFULL | DCC_RXFULL;
 /// it, `__set_MDSCR_EL1`). That ASL gates TFO (31) and SC2 (19) the same way;
 /// they belong to FEAT_TRF and FEAT_PCSRv8p2 and are RES0 in this ARMv8.0
 /// processor.
-const MDSCR_SAVE_RESTORE: u64 = DCC_FLAGS | (1 << 27) | (1 << 26) | (0b11 << 22) | (1 << 21) | (1 << 14) | (1 << 6);
+const MDSCR_SAVE_RESTORE: u64 =
+    DCC_FLAGS | (1 << 27) | (1 << 26) | (0b11 << 22) | (1 << 21) | (1 << 14) | (1 << 6);
 
 /// The `MDSCR_EL1` fields an ARMv8.0 processor has: the save/restore
 /// fields, SS (0), TDCC (12), KDE (13) and MDE (15). Every other bit is
@@ -367,7 +368,11 @@ impl Cpu {
                     return Ok(0);
                 }
                 let rx = u64::from(self.sys.dtrrx);
-                return Ok(if k == DBGDTR_EL0 { (u64::from(self.sys.dtrtx) << 32) | rx } else { rx });
+                return Ok(if k == DBGDTR_EL0 {
+                    (u64::from(self.sys.dtrtx) << 32) | rx
+                } else {
+                    rx
+                });
             }
             _ => {}
         }
@@ -709,7 +714,11 @@ impl Cpu {
             // this model's reads return what they hold at every OS Lock
             // state. A RES0 bit is not stored.
             MDSCR_EL1 => {
-                let kept = if self.sys.oslsr_el1 & OSLSR_OSLK != 0 { 0 } else { MDSCR_SAVE_RESTORE };
+                let kept = if self.sys.oslsr_el1 & OSLSR_OSLK != 0 {
+                    0
+                } else {
+                    MDSCR_SAVE_RESTORE
+                };
                 self.sys.mdscr_el1 = (value & MDSCR_FIELDS & !kept) | (self.sys.mdscr_el1 & kept);
                 WriteEffect::None
             }

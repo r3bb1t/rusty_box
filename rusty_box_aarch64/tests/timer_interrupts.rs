@@ -292,13 +292,18 @@ fn route(group1_sgis: u64, cpu_ctlr: u64) -> Routed {
         })
         .expect("the test board builds");
     for (offset, word) in ROUTING {
-        machine.mem_write(RAM_BASE + *offset as u64, &word.to_le_bytes()).expect("the program is in RAM");
+        machine
+            .mem_write(RAM_BASE + *offset as u64, &word.to_le_bytes())
+            .expect("the program is in RAM");
     }
     machine.reg_write(Reg::X6, 0b11);
     machine.reg_write(Reg::X7, group1_sgis);
     machine.reg_write(Reg::X8, cpu_ctlr);
     machine.reg_write(Reg::X9, SGI_1_TO_SELF);
-    assert_eq!(machine.step(RunBudget::Instructions(40)).stop, StopReason::BudgetExhausted);
+    assert_eq!(
+        machine.step(RunBudget::Instructions(40)).stop,
+        StopReason::BudgetExhausted
+    );
     Routed {
         isr: machine.reg_read(Reg::X10),
         vector: machine.reg_read(Reg::X11),
@@ -312,11 +317,31 @@ fn route(group1_sgis: u64, cpu_ctlr: u64) -> Routed {
 /// `ISR_EL1` and enters the FIQ or the IRQ vector.
 #[test]
 fn fiqen_signals_group_0_as_fiq_and_group_1_as_irq() {
-    let fiq = Routed { isr: ISR_F, vector: 0x300, acknowledged: 1 };
-    let irq = Routed { isr: ISR_I, vector: 0x280, acknowledged: 1 };
-    assert_eq!(route(0, GICC_CTLR_BOTH_GROUPS_ACKCTL | GICC_CTLR_FIQ_EN), fiq, "Group 0 with FIQEn");
-    assert_eq!(route(1 << 1, GICC_CTLR_BOTH_GROUPS_ACKCTL | GICC_CTLR_FIQ_EN), irq, "Group 1 with FIQEn");
-    assert_eq!(route(0, GICC_CTLR_BOTH_GROUPS_ACKCTL), irq, "Group 0 without FIQEn");
+    let fiq = Routed {
+        isr: ISR_F,
+        vector: 0x300,
+        acknowledged: 1,
+    };
+    let irq = Routed {
+        isr: ISR_I,
+        vector: 0x280,
+        acknowledged: 1,
+    };
+    assert_eq!(
+        route(0, GICC_CTLR_BOTH_GROUPS_ACKCTL | GICC_CTLR_FIQ_EN),
+        fiq,
+        "Group 0 with FIQEn"
+    );
+    assert_eq!(
+        route(1 << 1, GICC_CTLR_BOTH_GROUPS_ACKCTL | GICC_CTLR_FIQ_EN),
+        irq,
+        "Group 1 with FIQEn"
+    );
+    assert_eq!(
+        route(0, GICC_CTLR_BOTH_GROUPS_ACKCTL),
+        irq,
+        "Group 0 without FIQEn"
+    );
 }
 
 /// The guest sets up the GIC for the UART's SPI (INTID 33) and the PL011
@@ -468,11 +493,21 @@ fn type_at_a_waiting_guest(slice: u64) -> TypedInput {
         })
         .expect("the test board builds");
     for (offset, word) in UART_INPUT {
-        machine.mem_write(RAM_BASE + *offset as u64, &word.to_le_bytes()).expect("the program is in RAM");
+        machine
+            .mem_write(RAM_BASE + *offset as u64, &word.to_le_bytes())
+            .expect("the program is in RAM");
     }
-    assert_eq!(machine.step(RunBudget::Instructions(100)).stop, StopReason::Halted, "the guest waits in WFI");
+    assert_eq!(
+        machine.step(RunBudget::Instructions(100)).stop,
+        StopReason::Halted,
+        "the guest waits in WFI"
+    );
     let arrived = machine.ticks();
-    assert_eq!(machine.serial(0).expect("UART0").send(TYPED), TYPED.len(), "the FIFO takes the line");
+    assert_eq!(
+        machine.serial(0).expect("UART0").send(TYPED),
+        TYPED.len(),
+        "the FIFO takes the line"
+    );
     // Bounded in calls as well as in ticks: a machine whose time stands
     // still must fail the test, not hang it.
     let mut run_to = |exit: u64| {
@@ -481,17 +516,25 @@ fn type_at_a_waiting_guest(slice: u64) -> TypedInput {
             match machine.step(RunBudget::Ticks(slice)).stop {
                 StopReason::ExitReached => return machine.ticks() - arrived,
                 StopReason::BudgetExhausted | StopReason::Halted => {
-                    assert!(machine.ticks() - arrived < GIVE_UP_AFTER, "slice {slice}: {exit:#x} never reached")
+                    assert!(
+                        machine.ticks() - arrived < GIVE_UP_AFTER,
+                        "slice {slice}: {exit:#x} never reached"
+                    )
                 }
                 other => panic!("slice {slice}: {other:?}"),
             }
         }
-        panic!("slice {slice}: {exit:#x} never reached at tick {}", machine.ticks());
+        panic!(
+            "slice {slice}: {exit:#x} never reached at tick {}",
+            machine.ticks()
+        );
     };
     let taken_after = run_to(UART_IRQ_VECTOR);
     run_to(UART_DONE);
     let mut received = vec![0u8; TYPED.len() + 1];
-    machine.mem_read(UART_BUFFER, &mut received).expect("the buffer is in RAM");
+    machine
+        .mem_read(UART_BUFFER, &mut received)
+        .expect("the buffer is in RAM");
     let stored = (machine.reg_read(Reg::X24) - UART_BUFFER) as usize;
     received.truncate(stored);
     TypedInput {
@@ -523,6 +566,10 @@ fn typed_input_shorter_than_the_trigger_level_wakes_wfi_through_the_receive_time
         received: TYPED.to_vec(),
     };
     for slice in [1, 7, 1000, 1 << 24] {
-        assert_eq!(type_at_a_waiting_guest(slice), expected, "slices of {slice} ticks");
+        assert_eq!(
+            type_at_a_waiting_guest(slice),
+            expected,
+            "slices of {slice} ticks"
+        );
     }
 }

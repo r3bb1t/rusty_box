@@ -212,7 +212,11 @@ fn psci_cpu_on_checks_the_target_then_the_entry_point() {
         (0x8000_0000, RAM_BASE, psci::INVALID_PARAMETERS),
         (1, RAM_BASE, psci::INVALID_PARAMETERS),
     ] {
-        assert_eq!(psci_call(psci::CPU_ON_64, x1, x2), expected, "x1 {x1:#x}, x2 {x2:#x}");
+        assert_eq!(
+            psci_call(psci::CPU_ON_64, x1, x2),
+            expected,
+            "x1 {x1:#x}, x2 {x2:#x}"
+        );
     }
 }
 
@@ -236,7 +240,11 @@ fn psci_affinity_info_names_an_instance_at_its_level() {
         (0x1_0000_0000, 3, psci::INVALID_PARAMETERS),
         (0, 4, psci::INVALID_PARAMETERS),
     ] {
-        assert_eq!(psci_call(psci::AFFINITY_INFO_64, x1, level), expected, "x1 {x1:#x}, level {level}");
+        assert_eq!(
+            psci_call(psci::AFFINITY_INFO_64, x1, level),
+            expected,
+            "x1 {x1:#x}, level {level}"
+        );
     }
 }
 
@@ -258,7 +266,11 @@ fn psci_reads_w_registers_where_the_calling_convention_passes_them() {
         (psci::AFFINITY_INFO_64, 0, HIGH, psci::ON),
         (psci::AFFINITY_INFO_64, 1, HIGH | 1, psci::ON),
     ] {
-        assert_eq!(psci_call(x0, x1, x2), expected, "x0 {x0:#x}, x1 {x1:#x}, x2 {x2:#x}");
+        assert_eq!(
+            psci_call(x0, x1, x2),
+            expected,
+            "x0 {x0:#x}, x1 {x1:#x}, x2 {x2:#x}"
+        );
     }
 }
 

@@ -458,7 +458,8 @@ impl TraceCache {
     #[inline]
     fn lookup_poll(&self, pa: u64, epoch: CodeEpoch) -> Option<Trace> {
         let e = self.entries[slot(pa)];
-        (e.pa == pa | POLL && e.generation == self.generation && e.epoch == epoch).then_some(e.trace())
+        (e.pa == pa | POLL && e.generation == self.generation && e.epoch == epoch)
+            .then_some(e.trace())
     }
 
     /// Whether the entry for `pa` is the trace starting there marked
@@ -525,7 +526,11 @@ impl TraceCache {
             }
             for k in 0..32 {
                 let e = &mut self.entries[(window + line * 32 + k) & (ENTRIES - 1)];
-                if e.pa != INVALID && e.generation == self.generation && stamp_index(e.address(), count) == index && e.lines() & mask != 0 {
+                if e.pa != INVALID
+                    && e.generation == self.generation
+                    && stamp_index(e.address(), count) == index
+                    && e.lines() & mask != 0
+                {
                     e.pa = INVALID;
                 }
             }
@@ -560,7 +565,10 @@ impl Cpu {
         limit: u64,
         exits: &[u64],
     ) -> Step {
-        debug_assert!(limit <= self.run_left(), "a trace's limit passes the end of its run");
+        debug_assert!(
+            limit <= self.run_left(),
+            "a trace's limit passes the end of its run"
+        );
         let pc = self.pc;
         let mut observed = Observed { bus, observer };
         let pa = match self.fetch_address(&mut observed, pc) {
@@ -617,7 +625,12 @@ impl Cpu {
     /// of the decoder and of `exec_op`.
     #[cold]
     #[inline(never)]
-    fn step_uncached<B: PhysBus, I: Instrumentation>(&mut self, observed: &mut Observed<'_, B, I>, pc: u64, pa: u64) -> Step {
+    fn step_uncached<B: PhysBus, I: Instrumentation>(
+        &mut self,
+        observed: &mut Observed<'_, B, I>,
+        pc: u64,
+        pa: u64,
+    ) -> Step {
         let mut fetched = None;
         let result = self.execute_at(observed, pc, pa, &mut fetched);
         self.finish(pc, fetched, result, observed.observer).step()
@@ -707,7 +720,11 @@ impl Cpu {
         if len == 0 {
             return None;
         }
-        let mark = if self.traces.may_poll(start, len) { POLL } else { 0 };
+        let mark = if self.traces.may_poll(start, len) {
+            POLL
+        } else {
+            0
+        };
         let entry = Entry {
             pa: pa | mark,
             epoch,

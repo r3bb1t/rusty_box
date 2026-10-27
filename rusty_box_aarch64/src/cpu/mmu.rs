@@ -720,7 +720,8 @@ impl Cpu {
             let address = self.untagged(pc);
             return (address >> id::PA_BITS == 0).then_some(address);
         }
-        self.permitted_hit(pc, AccessKind::Fetch, self.pstate.el).map(|t| t.pa)
+        self.permitted_hit(pc, AccessKind::Fetch, self.pstate.el)
+            .map(|t| t.pa)
     }
 
     /// [`Cpu::fetch_translate`] with every check made: stage 1 disabled, a
@@ -857,7 +858,13 @@ impl Cpu {
     /// Read `width` at `pa`, which `va` translated to, zero-extended; an
     /// address nothing answers is the external abort of `va`.
     #[inline(always)]
-    fn read_translated<B: PhysBus>(&mut self, bus: &mut B, va: u64, pa: u64, width: AccessWidth) -> Result<u64, Fault> {
+    fn read_translated<B: PhysBus>(
+        &mut self,
+        bus: &mut B,
+        va: u64,
+        pa: u64,
+        width: AccessWidth,
+    ) -> Result<u64, Fault> {
         match bus.read(PhysAddr::new(pa), width, self.clock()) {
             Ok(v) => Ok(v & width.value_mask()),
             Err(BusFault::Unmapped) => Err(self.external_abort(va, pa, AccessKind::Read)),
@@ -989,7 +996,12 @@ impl Cpu {
         value: u64,
     ) -> Result<(), Fault> {
         self.note_store(pa, width.bytes());
-        match bus.write(PhysAddr::new(pa), width, value & width.value_mask(), self.clock()) {
+        match bus.write(
+            PhysAddr::new(pa),
+            width,
+            value & width.value_mask(),
+            self.clock(),
+        ) {
             Ok(()) => Ok(()),
             Err(BusFault::Unmapped) => Err(self.external_abort(va, pa, AccessKind::Write)),
         }
@@ -1038,7 +1050,14 @@ impl Cpu {
         acc: DataAccess,
     ) -> Result<(), Fault> {
         self.write_part(bus, va, log2, value.first, fit, acc)?;
-        self.write_part(bus, va.wrapping_add(1 << log2), log2, value.second, fit, acc)
+        self.write_part(
+            bus,
+            va.wrapping_add(1 << log2),
+            log2,
+            value.second,
+            fit,
+            acc,
+        )
     }
 
     /// A write of the low `bytes` bytes of `value` at `va` that crosses a

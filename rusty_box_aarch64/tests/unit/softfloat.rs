@@ -320,12 +320,26 @@ fn fused_multiply_add_cancelling_the_high_product_word_is_exact() {
     // [n, m, a, n*m + a]; the sums are the exact rationals
     // 1734089336883 * 2^-102 and 111467904765 * 2^-99.
     let cases: [[u64; 4]; 2] = [
-        [0x3FFE_E6F8_F0B8_0AC5, 0x3FFC_95EC_6976_DA5C, 0xC00B_9AE1_9706_7916, 0x3C19_3BFC_7683_3000],
-        [0x3FF0_2040_ABA1_8322, 0x3FF7_3F7C_DCF7_0AD0, 0xBFF7_6E59_CE05_A09D, 0x3C09_F401_3EFD_0000],
+        [
+            0x3FFE_E6F8_F0B8_0AC5,
+            0x3FFC_95EC_6976_DA5C,
+            0xC00B_9AE1_9706_7916,
+            0x3C19_3BFC_7683_3000,
+        ],
+        [
+            0x3FF0_2040_ABA1_8322,
+            0x3FF7_3F7C_DCF7_0AD0,
+            0xBFF7_6E59_CE05_A09D,
+            0x3C09_F401_3EFD_0000,
+        ],
     ];
     for [n, m, a, sum] in cases {
         let host = f64::from_bits(n).mul_add(f64::from_bits(m), f64::from_bits(a));
-        assert_eq!(host.to_bits(), sum, "host {n:#018x} * {m:#018x} + {a:#018x}");
+        assert_eq!(
+            host.to_bits(),
+            sum,
+            "host {n:#018x} * {m:#018x} + {a:#018x}"
+        );
         // Each form computes n*m + a or its negation.
         for (form, addend, want) in [
             (FusedMulAdd::Fmadd, a, sum),
@@ -336,7 +350,10 @@ fn fused_multiply_add_cancelling_the_high_product_word_is_exact() {
             for rmode in 0..4u64 {
                 let mut fp = status_with(rmode << 22);
                 let got = f64_mul_add(form, addend, n, m, &mut fp);
-                assert_eq!(got, want, "{form:?} RMode {rmode}: {addend:#018x} with {n:#018x} * {m:#018x}");
+                assert_eq!(
+                    got, want,
+                    "{form:?} RMode {rmode}: {addend:#018x} with {n:#018x} * {m:#018x}"
+                );
                 assert_eq!(fp.cumulative_fpsr(), 0, "{form:?} RMode {rmode}");
             }
         }
@@ -354,7 +371,11 @@ fn a_128_bit_left_shift_by_0_to_63_is_the_shift_of_the_whole_value() {
             let (a64, a0) = (rng.next(), rng.next());
             let whole = ((u128::from(a64) << 64) | u128::from(a0)) << dist;
             let want = ((whole >> 64) as u64, whole as u64);
-            assert_eq!(short_shift_left128(a64, a0, dist), want, "{a64:#018x}_{a0:016x} << {dist}");
+            assert_eq!(
+                short_shift_left128(a64, a0, dist),
+                want,
+                "{a64:#018x}_{a0:016x} << {dist}"
+            );
         }
     }
 }

@@ -127,10 +127,16 @@ fn fault<S: GuestStorage, I: Instrumentation>(m: &mut VirtMachine<S, I>) -> (u64
 /// tests that use it access VA 0x8000_1000 or 0x8000_2000, never
 /// 0x8000_0000, whose entry in this core's direct-mapped TLB is the code
 /// page's: the fetch between the two accesses would evict it.
-fn fault_on_a_warm_tlb<S: GuestStorage, I: Instrumentation>(m: &mut VirtMachine<S, I>) -> (u64, u64) {
+fn fault_on_a_warm_tlb<S: GuestStorage, I: Instrumentation>(
+    m: &mut VirtMachine<S, I>,
+) -> (u64, u64) {
     let out = m.step(RunBudget::Instructions(1));
     assert_eq!(out.stop, StopReason::BudgetExhausted);
-    assert_eq!(m.reg_read(Reg::Pc), RAM_BASE + 4, "the warming load completes");
+    assert_eq!(
+        m.reg_read(Reg::Pc),
+        RAM_BASE + 4,
+        "the warming load completes"
+    );
     fault(m)
 }
 
@@ -281,7 +287,11 @@ fn a_misaligned_load_from_a_device_page_already_in_the_tlb_is_an_alignment_fault
     assert_eq!(esr & 0x3F, DFSC_ALIGNMENT, "ESR {esr:#x}");
     assert_eq!(esr & WNR, 0);
     assert_eq!(far, 0x8000_2001);
-    assert_eq!(m.reg_read(Reg::X3), ALIGNED_WORD, "only the warming load loaded");
+    assert_eq!(
+        m.reg_read(Reg::X3),
+        ALIGNED_WORD,
+        "only the warming load loaded"
+    );
 }
 
 #[test]
@@ -294,7 +304,11 @@ fn a_misaligned_store_to_a_read_only_device_page_already_in_the_tlb_is_an_alignm
     m.reg_write(Reg::X1, 0x8000_2000);
     m.reg_write(Reg::X2, u64::MAX);
     let (esr, far) = fault_on_a_warm_tlb(&mut m);
-    assert_eq!(esr & 0x3F, DFSC_ALIGNMENT, "alignment before permission, ESR {esr:#x}");
+    assert_eq!(
+        esr & 0x3F,
+        DFSC_ALIGNMENT,
+        "alignment before permission, ESR {esr:#x}"
+    );
     assert_eq!(esr & WNR, WNR);
     assert_eq!(far, 0x8000_2001);
     assert_eq!(bytes_at(&m, RAM_BASE + 0x4000), FILL, "nothing is written");
@@ -337,14 +351,19 @@ fn with_sctlr_a_set_a_misaligned_load_from_normal_memory_already_in_the_tlb_faul
     load(&mut m, &WARM_THEN_MISALIGNED_LOAD);
     map_test_pages(&mut m);
     let sctlr = m.sysreg_read(SysReg::SCTLR_EL1).expect("SCTLR");
-    m.sysreg_write(SysReg::SCTLR_EL1, sctlr | SCTLR_A).expect("SCTLR");
+    m.sysreg_write(SysReg::SCTLR_EL1, sctlr | SCTLR_A)
+        .expect("SCTLR");
     m.mem_write(RAM_BASE + 0x5000, &PAGE_BYTES).expect("in RAM");
     m.reg_write(Reg::X1, 0x8000_1000);
     let (esr, far) = fault_on_a_warm_tlb(&mut m);
     assert_eq!(esr & 0x3F, DFSC_ALIGNMENT, "ESR {esr:#x}");
     assert_eq!(esr & WNR, 0);
     assert_eq!(far, 0x8000_1001);
-    assert_eq!(m.reg_read(Reg::X3), ALIGNED_WORD, "only the warming load loaded");
+    assert_eq!(
+        m.reg_read(Reg::X3),
+        ALIGNED_WORD,
+        "only the warming load loaded"
+    );
 }
 
 #[test]
@@ -360,7 +379,11 @@ fn a_misaligned_load_acquire_from_normal_memory_already_in_the_tlb_faults() {
     assert_eq!(esr & 0x3F, DFSC_ALIGNMENT, "ESR {esr:#x}");
     assert_eq!(esr & WNR, 0);
     assert_eq!(far, 0x8000_1001);
-    assert_eq!(m.reg_read(Reg::X3), ALIGNED_WORD, "only the warming load loaded");
+    assert_eq!(
+        m.reg_read(Reg::X3),
+        ALIGNED_WORD,
+        "only the warming load loaded"
+    );
 }
 
 #[test]
@@ -449,17 +472,20 @@ fn completes<S: GuestStorage, I: Instrumentation>(m: &mut VirtMachine<S, I>) {
 fn map_test_pages_strictly<S: GuestStorage, I: Instrumentation>(m: &mut VirtMachine<S, I>) {
     map_test_pages(m);
     let sctlr = m.sysreg_read(SysReg::SCTLR_EL1).expect("SCTLR");
-    m.sysreg_write(SysReg::SCTLR_EL1, sctlr | SCTLR_A).expect("SCTLR");
+    m.sysreg_write(SysReg::SCTLR_EL1, sctlr | SCTLR_A)
+        .expect("SCTLR");
 }
 
 fn put_words<S: GuestStorage, I: Instrumentation>(m: &mut VirtMachine<S, I>, pa: u64) {
     m.mem_write(pa, &FIRST_WORD.to_le_bytes()).expect("in RAM");
-    m.mem_write(pa + 4, &SECOND_WORD.to_le_bytes()).expect("in RAM");
+    m.mem_write(pa + 4, &SECOND_WORD.to_le_bytes())
+        .expect("in RAM");
 }
 
 fn put_dwords<S: GuestStorage, I: Instrumentation>(m: &mut VirtMachine<S, I>, pa: u64) {
     m.mem_write(pa, &FIRST_DWORD.to_le_bytes()).expect("in RAM");
-    m.mem_write(pa + 8, &SECOND_DWORD.to_le_bytes()).expect("in RAM");
+    m.mem_write(pa + 8, &SECOND_DWORD.to_le_bytes())
+        .expect("in RAM");
 }
 
 /// The 16 bytes from 4 below a stored word pair: the fill on either side.
@@ -524,8 +550,16 @@ fn a_single_precision_pair_load_from_device_memory_needs_word_alignment_only() {
     m.vreg_write(v(1), Q_VALUE);
     m.reg_write(Reg::X1, DEVICE_WORDS);
     completes(&mut m);
-    assert_eq!(m.vreg_read(v(0)), u128::from(FIRST_WORD), "the rest of V0 is cleared");
-    assert_eq!(m.vreg_read(v(1)), u128::from(SECOND_WORD), "the rest of V1 is cleared");
+    assert_eq!(
+        m.vreg_read(v(0)),
+        u128::from(FIRST_WORD),
+        "the rest of V0 is cleared"
+    );
+    assert_eq!(
+        m.vreg_read(v(1)),
+        u128::from(SECOND_WORD),
+        "the rest of V1 is cleared"
+    );
 }
 
 #[test]
@@ -537,7 +571,11 @@ fn a_double_precision_pair_store_to_device_memory_needs_doubleword_alignment_onl
     m.vreg_write(v(1), (Q_VALUE << 64) | u128::from(SECOND_DWORD));
     m.reg_write(Reg::X1, DEVICE_DWORDS);
     completes(&mut m);
-    assert_eq!(bytes_at(&m, DEVICE_DWORDS), dwords_stored(), "the low doubleword of each");
+    assert_eq!(
+        bytes_at(&m, DEVICE_DWORDS),
+        dwords_stored(),
+        "the low doubleword of each"
+    );
 }
 
 #[test]
@@ -607,11 +645,16 @@ fn with_sctlr_a_set_a_single_precision_pair_store_to_normal_memory_needs_word_al
     m.vreg_write(v(1), (Q_VALUE << 32) | u128::from(SECOND_WORD));
     m.reg_write(Reg::X1, NORMAL_WORDS);
     completes(&mut m);
-    assert_eq!(bytes_at(&m, NORMAL_WORDS_PA - 4), words_stored(), "the low word of each");
+    assert_eq!(
+        bytes_at(&m, NORMAL_WORDS_PA - 4),
+        words_stored(),
+        "the low word of each"
+    );
 }
 
 #[test]
-fn with_sctlr_a_set_a_double_precision_pair_load_from_normal_memory_needs_doubleword_alignment_only() {
+fn with_sctlr_a_set_a_double_precision_pair_load_from_normal_memory_needs_doubleword_alignment_only(
+) {
     let mut ram = vec![0u8; RAM_LEN];
     let mut m = bare(&mut ram);
     load(&mut m, &LOAD_PAIR_D);
