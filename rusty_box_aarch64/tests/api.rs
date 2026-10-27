@@ -714,6 +714,36 @@ fn an_exit_inside_straight_line_code_stops_right_before_it() {
     assert_eq!((out.stop, out.progress), (StopReason::BudgetExhausted, Progress::Instructions(25)));
 }
 
+/// `msr cntkctl_el1, x0; wfe; b .`
+const STREAM_WFE: [u32; 3] = [0xD518_E100, 0xD503_205F, SPIN];
+
+/// A guest that turns on the timer's event stream and sleeps in `WFE` is
+/// woken by the stream's next event, which the machine schedules: with
+/// `CNTKCTL_EL1.EVNTEN` and `EVNTI` = 4, bit 4 of the count first rises at
+/// count 16, the first tick at which the 62.5 MHz count reaches it at 50 M
+/// ticks/s being 13. Without the stream nothing can end the wait.
+#[test]
+fn the_event_stream_ends_a_wfe() {
+    let mut ram = vec![0u8; RAM_LEN];
+    let mut m = bare(&mut ram, rusty_box_aarch64::NoInstrumentation);
+    load(&mut m, RAM_BASE, &STREAM_WFE);
+    m.reg_write(Reg::X0, (1 << 2) | (4 << 4));
+    let out = m.step(RunBudget::Ticks(2));
+    assert_eq!((out.stop, out.progress), (StopReason::BudgetExhausted, Progress::Instructions(2)));
+    assert_eq!(m.ticks_to_next_timer_deadline(), Some(13 - 2), "the stream's event at tick 13");
+    let out = m.step(RunBudget::Ticks(10));
+    assert_eq!((out.stop, out.progress), (StopReason::BudgetExhausted, Progress::Instructions(0)), "still waiting");
+    let out = m.step(RunBudget::Ticks(1 + 100));
+    assert_eq!(out.progress, Progress::Instructions(100), "woken at tick 13, it spins");
+
+    let mut ram = vec![0u8; RAM_LEN];
+    let mut m = bare(&mut ram, rusty_box_aarch64::NoInstrumentation);
+    load(&mut m, RAM_BASE, &STREAM_WFE);
+    m.reg_write(Reg::X0, 0);
+    let out = m.step(RunBudget::Ticks(5000));
+    assert_eq!((out.stop, out.progress), (StopReason::Halted, Progress::Instructions(2)));
+}
+
 /// A 64-byte arm64 `Image` header (text_offset 0, so it loads 2 MiB up),
 /// followed by `b .` as the kernel.
 fn fake_kernel(image_size: u64) -> Vec<u8> {
@@ -1235,6 +1265,64 @@ fn a_machine_can_move_to_another_thread() {
     moves::<VirtMachine<LentStorage<'static>>>();
     #[cfg(feature = "alloc")]
     moves::<VirtMachine<rusty_box_aarch64::OwnedStorage>>();
+}
+
+/// The processor is the model the configuration names: its ID registers
+/// (FEAT_SME2 is `ID_AA64PFR1_EL1.SME` = 2), its `MIDR_EL1`, the system
+/// counter's frequency, which `CNTPCT_EL0` counts at, and the device tree's
+/// processor node, whose other properties are QEMU's.
+#[cfg(feature = "alloc")]
+#[test]
+fn the_processor_is_the_model_the_configuration_names() {
+    use rusty_box_aarch64::boot::QEMU_VIRT_DEVICE_TREE;
+    use rusty_box_aarch64::CpuModel;
+
+    let cases: [(CpuModel, u64, u64, u64, &[u8]); 2] = [
+        (CpuModel::CortexA57, 0x411F_D070, 62_500_000, 0, b"arm,cortex-a57\0"),
+        (CpuModel::Armv9p2, 0x000F_0520, 1_000_000_000, 2, b"arm,armv8\0"),
+    ];
+    for (model, midr, counter_hz, sme, compatible) in cases {
+        let config = VirtConfig {
+            cpu: model,
+            ..VirtConfig::DEFAULT
+        };
+        let mut m = MachineBuilder::new(config)
+            .ram(ram_size())
+            .firmware(&SPIN.to_le_bytes())
+            .build()
+            .expect("the machine builds");
+        let pfr1 = SysReg::new(3, 0, 0, 4, 1).expect("ID_AA64PFR1_EL1");
+        assert_eq!(m.sysreg_read(SysReg::MIDR_EL1), Ok(midr), "{model:?}");
+        assert_eq!(m.sysreg_read(SysReg::CNTFRQ_EL0), Ok(counter_hz), "{model:?}");
+        assert_eq!(m.sysreg_read(pfr1).map(|v| (v >> 24) & 0xF), Ok(sme), "{model:?}: SME");
+
+        let ticks = 1_000;
+        assert_eq!(m.step(RunBudget::Ticks(ticks)).stop, StopReason::BudgetExhausted);
+        let ips = VirtConfig::DEFAULT.ips.get();
+        assert_eq!(m.sysreg_read(SysReg::CNTPCT_EL0), Ok(ticks * counter_hz / ips), "{model:?}");
+
+        let cpu_node = |tree, property| fdt::property(tree, "cpus/cpu@0", property);
+        assert_eq!(cpu_node(m.device_tree(), "compatible"), Ok(Some(compatible)), "{model:?}");
+        for kept in ["reg", "device_type", "d-cache-size", "phandle"] {
+            let qemu = cpu_node(QEMU_VIRT_DEVICE_TREE, kept);
+            assert!(qemu.is_ok_and(|value| value.is_some()), "{kept}");
+            assert_eq!(cpu_node(m.device_tree(), kept), qemu, "{model:?}: {kept}");
+        }
+
+        // A host's tree describes the processor as the host wrote it, as
+        // QEMU takes a `-dtb` tree.
+        let hosted = MachineBuilder::new(config)
+            .ram(ram_size())
+            .device_tree(QEMU_VIRT_DEVICE_TREE)
+            .firmware(&SPIN.to_le_bytes())
+            .build()
+            .expect("the machine builds");
+        assert_eq!(
+            cpu_node(hosted.device_tree(), "compatible"),
+            cpu_node(QEMU_VIRT_DEVICE_TREE, "compatible"),
+            "{model:?}"
+        );
+    }
 }
 
 /// The guest finds the disk where QEMU's `virt` puts the device given last:

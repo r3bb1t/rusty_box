@@ -4,6 +4,7 @@
 //! `B.cond` tests an ordering, the conditions `poll.rs`'s walk accepts.
 
 use super::{classify, predecode, Slot, TraceCache, MAX_STAMPS, MIN_STAMPS};
+use crate::cpu::features::Features;
 
 const RAM_BASE: u64 = 0x4000_0000;
 
@@ -36,7 +37,7 @@ fn only_a_poll_branching_on_an_ordering_is_marked() {
         let mut cache = TraceCache::new();
         for word in words {
             cache.pool.push(Slot {
-                op: predecode(classify(word), word),
+                op: predecode(classify(word, Features::CORTEX_A57), word),
                 word,
             });
         }

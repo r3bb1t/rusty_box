@@ -1,7 +1,7 @@
 //! Arm group `ldst` (Arm ARM C4.1, "Loads and Stores"): the A64 space with
 //! `op1 = x1x0`.
 
-#[cfg(test)]
+use super::atomic;
 use super::Feature;
 use super::Encoding;
 use crate::cpu::exec::bits;
@@ -215,14 +215,45 @@ pub(crate) enum Ldstexclr {
 /// Arm group `ldstord`: Load/store ordered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum Ldstord {
+    StllrbSl32,
     StlrbSl32,
+    LdlarbLr32,
     LdarbLr32,
+    StllrhSl32,
     StlrhSl32,
+    LdlarhLr32,
     LdarhLr32,
+    StllrSl32,
     StlrSl32,
+    LdlarLr32,
     LdarLr32,
+    StllrSl64,
     StlrSl64,
+    LdlarLr64,
     LdarLr64,
+}
+
+impl Ldstord {
+    pub(crate) const fn feature(self) -> Feature {
+        match self {
+            Self::StlrbSl32
+            | Self::LdarbLr32
+            | Self::StlrhSl32
+            | Self::LdarhLr32
+            | Self::StlrSl32
+            | Self::LdarLr32
+            | Self::StlrSl64
+            | Self::LdarLr64 => Feature::Base,
+            Self::StllrbSl32
+            | Self::LdlarbLr32
+            | Self::StllrhSl32
+            | Self::LdlarhLr32
+            | Self::StllrSl32
+            | Self::LdlarLr32
+            | Self::StllrSl64
+            | Self::LdlarLr64 => Feature::Lor,
+        }
+    }
 }
 
 /// Arm group `loadlit`: Load register (literal).
@@ -467,6 +498,15 @@ pub(crate) enum LdstPos {
     LdrD,
 }
 
+/// Arm group `ldst_pac`: Load/store register (pac).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum LdstPac {
+    Ldraa64,
+    Ldraa64w,
+    Ldrab64,
+    Ldrab64w,
+}
+
 pub(super) fn ldst(word: u32) -> Option<Encoding> {
     let op1 = bits(word, 26, 26);
     // op0<1:0>, then op2<14:13>.
@@ -488,26 +528,31 @@ pub(super) fn ldst(word: u32) -> Option<Encoding> {
                 0b0 => asisdlsop(word).map(Encoding::Asisdlsop),
                 _ => None,
             },
-            // op2<11> = 1 with op0<3> = 0 is comswappr (FEAT_LSE).
             (0b0, 0b00) => match (bits(word, 31, 31), bits(word, 21, 21)) {
                 (_, 0b0) => ldstexclr(word).map(Encoding::Ldstexclr),
+                (0b0, 0b1) => atomic::comswappr(word).map(Encoding::Comswappr),
                 (0b1, 0b1) => ldstexclp(word).map(Encoding::Ldstexclp),
                 _ => None,
             },
-            // comswap (FEAT_LSE) at op2<11> = 1.
             (0b0, 0b01) => match bits(word, 21, 21) {
                 0b0 => ldstord(word).map(Encoding::Ldstord),
+                0b1 => atomic::comswap(word).map(Encoding::Comswap),
                 _ => None,
             },
             // The unprivileged exclusive and compare-and-swap forms
             // (FEAT_LSUI).
             _ => None,
         },
-        // op2<14> = 1 holds the load/store groups of later features
-        // (FEAT_MOPS, FEAT_LRCPC2, FEAT_LRCPC3, FEAT_LSE128, FEAT_THE,
-        // FEAT_LSUI, FEAT_MTE, FEAT_GCS).
+        // op2<14> = 1 holds ldapstl_unscaled (op1 = 0, op2<11> = 0, op2<1:0>
+        // = 00) and the load/store groups of later features (FEAT_MOPS,
+        // FEAT_LRCPC3, FEAT_LSE128, FEAT_THE, FEAT_LSUI, FEAT_MTE,
+        // FEAT_GCS).
         0b01 => match bits(word, 24, 24) {
             0b0 => loadlit(word).map(Encoding::Loadlit),
+            0b1 => match (op1, bits(word, 21, 21), bits(word, 11, 10)) {
+                (0b0, 0b0, 0b00) => atomic::ldapstl_unscaled(word).map(Encoding::LdapstlUnscaled),
+                _ => None,
+            },
             _ => None,
         },
         0b10 => match bits(word, 24, 23) {
@@ -518,14 +563,15 @@ pub(super) fn ldst(word: u32) -> Option<Encoding> {
             _ => None,
         },
         0b11 => match bits(word, 24, 24) {
-            // op2<11>, then op2<1:0>. op2<11> = 1 with op2<1:0> = 00 is
-            // memop (FEAT_LSE), and with op2<0> = 1 ldst_pac (FEAT_PAuth).
+            // op2<11>, then op2<1:0>.
             0b0 => match (bits(word, 21, 21), bits(word, 11, 10)) {
                 (0b0, 0b00) => ldst_unscaled(word).map(Encoding::LdstUnscaled),
                 (0b0, 0b01) => ldst_immpost(word).map(Encoding::LdstImmpost),
                 (0b0, 0b10) => ldst_unpriv(word).map(Encoding::LdstUnpriv),
                 (0b0, 0b11) => ldst_immpre(word).map(Encoding::LdstImmpre),
+                (0b1, 0b00) => atomic::memop(word).map(Encoding::Memop),
                 (0b1, 0b10) => ldst_regoff(word).map(Encoding::LdstRegoff),
+                (0b1, 0b01 | 0b11) => ldst_pac(word).map(Encoding::LdstPac),
                 _ => None,
             },
             0b1 => ldst_pos(word).map(Encoding::LdstPos),
@@ -787,16 +833,23 @@ fn ldstord(word: u32) -> Option<Ldstord> {
     let rs = bits(word, 20, 16);
     let o0 = bits(word, 15, 15);
     let rt2 = bits(word, 14, 10);
-    // o0 = 0 is LDLAR and STLLR (FEAT_LOR). Rs and Rt2 are should-be-one:
-    // fixed here.
+    // Rs and Rt2 are should-be-one: fixed here.
     match (size, l, rs, o0, rt2) {
+        (0b00, 0b0, 0b11111, 0b0, 0b11111) => Some(Ldstord::StllrbSl32),
         (0b00, 0b0, 0b11111, 0b1, 0b11111) => Some(Ldstord::StlrbSl32),
+        (0b00, 0b1, 0b11111, 0b0, 0b11111) => Some(Ldstord::LdlarbLr32),
         (0b00, 0b1, 0b11111, 0b1, 0b11111) => Some(Ldstord::LdarbLr32),
+        (0b01, 0b0, 0b11111, 0b0, 0b11111) => Some(Ldstord::StllrhSl32),
         (0b01, 0b0, 0b11111, 0b1, 0b11111) => Some(Ldstord::StlrhSl32),
+        (0b01, 0b1, 0b11111, 0b0, 0b11111) => Some(Ldstord::LdlarhLr32),
         (0b01, 0b1, 0b11111, 0b1, 0b11111) => Some(Ldstord::LdarhLr32),
+        (0b10, 0b0, 0b11111, 0b0, 0b11111) => Some(Ldstord::StllrSl32),
         (0b10, 0b0, 0b11111, 0b1, 0b11111) => Some(Ldstord::StlrSl32),
+        (0b10, 0b1, 0b11111, 0b0, 0b11111) => Some(Ldstord::LdlarLr32),
         (0b10, 0b1, 0b11111, 0b1, 0b11111) => Some(Ldstord::LdarLr32),
+        (0b11, 0b0, 0b11111, 0b0, 0b11111) => Some(Ldstord::StllrSl64),
         (0b11, 0b0, 0b11111, 0b1, 0b11111) => Some(Ldstord::StlrSl64),
+        (0b11, 0b1, 0b11111, 0b0, 0b11111) => Some(Ldstord::LdlarLr64),
         (0b11, 0b1, 0b11111, 0b1, 0b11111) => Some(Ldstord::LdarLr64),
         _ => None,
     }
@@ -1099,10 +1152,23 @@ fn ldst_pos(word: u32) -> Option<LdstPos> {
     }
 }
 
+fn ldst_pac(word: u32) -> Option<LdstPac> {
+    let size = bits(word, 31, 30);
+    let vr = bits(word, 26, 26);
+    let m = bits(word, 23, 23);
+    let w = bits(word, 11, 11);
+    match (size, vr, m, w) {
+        (0b11, 0b0, 0b0, 0b0) => Some(LdstPac::Ldraa64),
+        (0b11, 0b0, 0b0, 0b1) => Some(LdstPac::Ldraa64w),
+        (0b11, 0b0, 0b1, 0b0) => Some(LdstPac::Ldrab64),
+        (0b11, 0b0, 0b1, 0b1) => Some(LdstPac::Ldrab64w),
+        _ => None,
+    }
+}
+
 // The classes that hold both general-purpose and SIMD&FP register forms:
 // the latter are FEAT_FP.
 
-#[cfg(test)]
 impl Loadlit {
     pub(crate) const fn feature(self) -> Feature {
         match self {
@@ -1112,7 +1178,6 @@ impl Loadlit {
     }
 }
 
-#[cfg(test)]
 impl LdstnapairOffs {
     pub(crate) const fn feature(self) -> Feature {
         match self {
@@ -1122,7 +1187,6 @@ impl LdstnapairOffs {
     }
 }
 
-#[cfg(test)]
 impl LdstpairPost {
     pub(crate) const fn feature(self) -> Feature {
         match self {
@@ -1132,7 +1196,6 @@ impl LdstpairPost {
     }
 }
 
-#[cfg(test)]
 impl LdstpairOff {
     pub(crate) const fn feature(self) -> Feature {
         match self {
@@ -1142,7 +1205,6 @@ impl LdstpairOff {
     }
 }
 
-#[cfg(test)]
 impl LdstpairPre {
     pub(crate) const fn feature(self) -> Feature {
         match self {
@@ -1152,7 +1214,6 @@ impl LdstpairPre {
     }
 }
 
-#[cfg(test)]
 impl LdstUnscaled {
     pub(crate) const fn feature(self) -> Feature {
         match self {
@@ -1184,7 +1245,6 @@ impl LdstUnscaled {
     }
 }
 
-#[cfg(test)]
 impl LdstImmpost {
     pub(crate) const fn feature(self) -> Feature {
         match self {
@@ -1215,7 +1275,6 @@ impl LdstImmpost {
     }
 }
 
-#[cfg(test)]
 impl LdstImmpre {
     pub(crate) const fn feature(self) -> Feature {
         match self {
@@ -1246,7 +1305,6 @@ impl LdstImmpre {
     }
 }
 
-#[cfg(test)]
 impl LdstRegoff {
     pub(crate) const fn feature(self) -> Feature {
         match self {
@@ -1284,7 +1342,6 @@ impl LdstRegoff {
     }
 }
 
-#[cfg(test)]
 impl LdstPos {
     pub(crate) const fn feature(self) -> Feature {
         match self {
@@ -1312,6 +1369,14 @@ impl LdstPos {
             | Self::LdrS
             | Self::StrD
             | Self::LdrD => Feature::Fp,
+        }
+    }
+}
+
+impl LdstPac {
+    pub(crate) const fn feature(self) -> Feature {
+        match self {
+            Self::Ldraa64 | Self::Ldraa64w | Self::Ldrab64 | Self::Ldrab64w => Feature::PAuth,
         }
     }
 }

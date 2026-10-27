@@ -10,7 +10,7 @@
 
 use super::dp::extend_reg;
 use super::exec::{bit, bits, sext, ExecResult, Flow};
-use super::mmu::{DataAccess, ElementPair, Fit};
+use super::mmu::{DataAccess, DataDirection, ElementPair};
 use super::{Cpu, ExclusiveMonitor};
 use crate::bus::PhysBus;
 
@@ -57,8 +57,8 @@ impl Cpu {
         if vector && scale > 4 {
             return self.undefined(pc, insn);
         }
-        if vector && !self.fp_enabled() {
-            return Err(self.fp_trap());
+        if vector {
+            self.fp_check()?;
         }
 
         let mut acc = DataAccess::NORMAL;
@@ -122,14 +122,14 @@ impl Cpu {
             if scale == 4 {
                 if load {
                     let v = self.read_mem_u128(bus, addressing.address, acc)?;
-                    self.v[rt as usize] = v;
+                    self.write_v(rt as usize, v);
                 } else {
                     let v = self.v[rt as usize];
                     self.write_mem_u128(bus, addressing.address, v, acc)?;
                 }
             } else if load {
                 let v = self.read_mem(bus, addressing.address, scale, acc)?;
-                self.v[rt as usize] = u128::from(v);
+                self.write_v(rt as usize, u128::from(v));
             } else {
                 let v = self.v[rt as usize] as u64;
                 self.write_mem(bus, addressing.address, scale, v, acc)?;
@@ -187,14 +187,13 @@ impl Cpu {
             if opc == 3 {
                 return self.undefined(pc, insn);
             }
-            if !self.fp_enabled() {
-                return Err(self.fp_trap());
-            }
-            self.v[rt as usize] = match opc {
+            self.fp_check()?;
+            let value = match opc {
                 0 => u128::from(self.read_mem(bus, address, 2, DataAccess::NORMAL)?),
                 1 => u128::from(self.read_mem(bus, address, 3, DataAccess::NORMAL)?),
                 _ => self.read_mem_u128(bus, address, DataAccess::NORMAL)?,
             };
+            self.write_v(rt as usize, value);
             return Ok(Flow::Next);
         }
         match opc {
@@ -236,8 +235,8 @@ impl Cpu {
             (true, 2) => (4, false),
             _ => return self.undefined(pc, insn),
         };
-        if vector && !self.fp_enabled() {
-            return Err(self.fp_trap());
+        if vector {
+            self.fp_check()?;
         }
         let offset = sext(u64::from(bits(insn, 21, 15)), 7) << scale;
         let base = self.base_register(rn)?;
@@ -251,7 +250,6 @@ impl Cpu {
         };
         let step = 1u64 << scale;
         let acc = DataAccess::NORMAL;
-        let fit = Fit::of(address, step);
 
         if vector {
             if load {
@@ -261,11 +259,11 @@ impl Cpu {
                         self.read_mem_u128(bus, address.wrapping_add(step), acc)?,
                     )
                 } else {
-                    let pair = self.read_pair(bus, address, scale, fit, acc)?;
+                    let pair = self.read_pair(bus, address, scale, acc)?;
                     (u128::from(pair.first), u128::from(pair.second))
                 };
-                self.v[rt as usize] = a;
-                self.v[rt2 as usize] = b;
+                self.write_v(rt as usize, a);
+                self.write_v(rt2 as usize, b);
             } else {
                 let (a, b) = (self.v[rt as usize], self.v[rt2 as usize]);
                 if scale == 4 {
@@ -276,11 +274,11 @@ impl Cpu {
                         first: a as u64,
                         second: b as u64,
                     };
-                    self.write_pair(bus, address, scale, value, fit, acc)?;
+                    self.write_pair(bus, address, scale, value, acc)?;
                 }
             }
         } else if load {
-            let ElementPair { first: a, second: b } = self.read_pair(bus, address, scale, fit, acc)?;
+            let ElementPair { first: a, second: b } = self.read_pair(bus, address, scale, acc)?;
             let (a, b) = if signed { (sext(a, 32), sext(b, 32)) } else { (a, b) };
             // With Rt == Rt2 the result is CONSTRAINED UNPREDICTABLE. QEMU
             // (translate-a64.c `trans_LDP`) loads a 32-bit pair as one
@@ -298,7 +296,7 @@ impl Cpu {
                 first: self.x_or_zr(rt),
                 second: self.x_or_zr(rt2),
             };
-            self.write_pair(bus, address, scale, value, fit, acc)?;
+            self.write_pair(bus, address, scale, value, acc)?;
         }
 
         if let Some(wb) = writeback {
@@ -308,22 +306,27 @@ impl Cpu {
     }
 
     /// Exclusive and acquire/release accesses:
-    /// `size 001000 o2 L o1 Rs o0 Rt2 Rn Rt` (ARMv8.0 forms only; CAS and
-    /// the LORegion forms belong to feature sets this core lacks).
+    /// `size 001000 o2 L o1 Rs o0 Rt2 Rn Rt` (Arm groups `ldstexclr`,
+    /// `ldstexclp` and `ldstord`). CAS and CASP share the space and are
+    /// `exec_cas` and `exec_casp`.
     pub(crate) fn exec_ldst_exclusive<B: PhysBus>(&mut self, bus: &mut B, pc: u64, insn: u32) -> ExecResult {
         let size = bits(insn, 31, 30);
         let o2 = bit(insn, 23);
         let load = bit(insn, 22);
         let pair = bit(insn, 21);
         let rs = bits(insn, 20, 16);
-        let o0 = bit(insn, 15);
         let rt2 = bits(insn, 14, 10);
         let rn = bits(insn, 9, 5);
         let rt = bits(insn, 4, 0);
 
         if o2 {
-            // LDAR/STLR (o0 = 1). o0 = 0 is LDLAR/STLLR (LOR, absent).
-            if pair || !o0 {
+            // LDAR/STLR (o0 = 1), and LDLAR/STLLR (o0 = 0, FEAT_LOR, which
+            // the decoder admits only on a processor implementing it). The
+            // LORegion forms are acquire and release accesses as LDAR and
+            // STLR are (Arm `CreateAccDescLOR`: `acqsc`, `relsc`), ordered
+            // only within a LORegion; with one processor retiring each
+            // access before the next, both order nothing further.
+            if pair {
                 return self.undefined(pc, insn);
             }
             let address = self.base_register(rn)?;
@@ -346,20 +349,20 @@ impl Cpu {
         let total = 1u64 << total_log2;
 
         if load {
-            let pa = self.translate_for(bus, address, total, false, DataAccess::ORDERED)?;
+            let pa = self.translate_for(bus, address, total, DataDirection::Read, DataAccess::ATOMIC)?;
             if pair {
                 let elem = 1u64 << size;
-                let a = self.read_mem(bus, address, size, DataAccess::ORDERED)?;
-                let b = self.read_mem(bus, address.wrapping_add(elem), size, DataAccess::ORDERED)?;
+                let a = self.read_mem(bus, address, size, DataAccess::ATOMIC)?;
+                let b = self.read_mem(bus, address.wrapping_add(elem), size, DataAccess::ATOMIC)?;
                 self.set_x_or_zr(rt, a);
                 self.set_x_or_zr(rt2, b);
             } else {
-                let v = self.read_mem(bus, address, size, DataAccess::ORDERED)?;
+                let v = self.read_mem(bus, address, size, DataAccess::ATOMIC)?;
                 self.set_x_or_zr(rt, v);
             }
             self.monitor = ExclusiveMonitor {
                 armed: true,
-                addr: pa,
+                addr: pa.get(),
                 va: address,
                 bytes: total,
             };
@@ -367,7 +370,8 @@ impl Cpu {
         }
 
         // Store-exclusive (Arm ARM `AArch64.ExclusiveMonitorsPass`): a
-        // misaligned address faults first (`AArch64.CheckAlignment`). A store
+        // misaligned address an exclusive access may not use faults first
+        // (`AArch64_UnalignedAccessFaults`, with FEAT_LSE2's rule). A store
         // to a virtual address other than the one the monitor holds then
         // fails without being translated: `AArch64.IsExclusiveVA`, which is
         // IMPLEMENTATION DEFINED, is permitted to return FALSE for it, and
@@ -376,11 +380,11 @@ impl Cpu {
         // `gen_store_exclusive`). Otherwise its translation and permission
         // faults are reported, and the physical address it reaches must be
         // the monitored one (`IsExclusiveLocal`).
+        self.check_alignment(address, total, DataAccess::ATOMIC, true)?;
         let m = self.monitor;
-        let same_va = m.armed && m.va == address && m.bytes == total;
-        let pass = if same_va || address & (total - 1) != 0 {
-            let pa = self.translate_for(bus, address, total, true, DataAccess::ORDERED)?;
-            same_va && m.addr == pa
+        let pass = if m.armed && m.va == address && m.bytes == total {
+            let pa = self.translate_for(bus, address, total, DataDirection::Write, DataAccess::ATOMIC)?;
+            m.addr == pa.get()
         } else {
             false
         };
@@ -389,11 +393,11 @@ impl Cpu {
             if pair {
                 let elem = 1u64 << size;
                 let (a, b) = (self.x_or_zr(rt), self.x_or_zr(rt2));
-                self.write_mem(bus, address, size, a, DataAccess::ORDERED)?;
-                self.write_mem(bus, address.wrapping_add(elem), size, b, DataAccess::ORDERED)?;
+                self.write_mem(bus, address, size, a, DataAccess::ATOMIC)?;
+                self.write_mem(bus, address.wrapping_add(elem), size, b, DataAccess::ATOMIC)?;
             } else {
                 let v = self.x_or_zr(rt);
-                self.write_mem(bus, address, size, v, DataAccess::ORDERED)?;
+                self.write_mem(bus, address, size, v, DataAccess::ATOMIC)?;
             }
         }
         self.set_x_or_zr(rs, u64::from(!pass));
@@ -427,9 +431,7 @@ impl Cpu {
         if size == 3 && !q && selem != 1 {
             return self.undefined(pc, insn);
         }
-        if !self.fp_enabled() {
-            return Err(self.fp_trap());
-        }
+        self.simd_check()?;
         let ebytes = 1u64 << size;
         let datasize_bytes = if q { 16 } else { 8 };
         let elements = datasize_bytes / ebytes;
@@ -463,7 +465,7 @@ impl Cpu {
             // a 64-bit form clears the upper half.
             for r in 0..(rpt * selem) {
                 let t = ((rt + r) % 32) as usize;
-                self.v[t] = if q { regs[t] } else { regs[t] & u128::from(u64::MAX) };
+                self.write_v(t, if q { regs[t] } else { regs[t] & u128::from(u64::MAX) });
             }
         }
         if post {
@@ -485,7 +487,8 @@ impl Cpu {
         let s = bit(insn, 12);
         let size = bits(insn, 11, 10);
         let rn = bits(insn, 9, 5);
-        let mut t = bits(insn, 4, 0);
+        let rt = bits(insn, 4, 0);
+        let mut t = rt;
         if !post && rm != 0 {
             return self.undefined(pc, insn);
         }
@@ -519,9 +522,7 @@ impl Cpu {
                 (size, 0, true)
             }
         };
-        if !self.fp_enabled() {
-            return Err(self.fp_trap());
-        }
+        self.simd_check()?;
         let ebytes = 1u64 << scale;
         let address = self.base_register(rn)?;
         let mut regs = self.v;
@@ -552,7 +553,10 @@ impl Cpu {
             t = (t + 1) % 32;
         }
         if load {
-            self.v = regs;
+            for r in 0..selem {
+                let t = ((rt + r) % 32) as usize;
+                self.write_v(t, regs[t]);
+            }
         }
         if post {
             let step = if rm == 31 { offs } else { self.x_or_zr(rm) };

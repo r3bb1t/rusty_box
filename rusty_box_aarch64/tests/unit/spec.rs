@@ -19,19 +19,31 @@
 //! data:
 //!
 //! - [`the_decoder_is_arms_encoding_tree_for_the_implemented_features`]:
-//!   the functions are Arm's groups and classes, called from Arm's parents;
-//!   every field is read under the name and at the bits Arm gives it; each
-//!   class enum names exactly the encodings of that class whose condition
-//!   holds for the features this processor implements ([`Feature`]); each
-//!   encoding's arms fix exactly Arm's fixed bits; each encoding carries
-//!   Arm's feature.
+//!   the functions are Arm's groups and classes, called from Arm's parents
+//!   (with helpers between them free to split a group's space); every
+//!   field is read under the name and at the bits Arm gives it; each class
+//!   enum names only encodings of that class whose condition holds for the
+//!   features the decoder knows ([`Feature`]), and every one of them whose
+//!   condition holds for the complete features alone
+//!   ([`Feature::complete`]); each encoding's arms fix exactly Arm's fixed
+//!   bits; each encoding carries Arm's feature (where Arm's condition names
+//!   several the decoder knows, the one that implies the others in Arm's
+//!   feature model).
 //! - [`the_decoder_allocates_as_arm_does_on_sampled_words`] and
 //!   [`the_decoder_allocates_as_arm_does_on_every_word`]: on every word,
 //!   [`decode`] names the encoding Arm's data allocates the word to among
-//!   the implemented features — the most specific match, which only the
-//!   HINT space needs, where `HINT_HM_hints` spans the named hints — and
-//!   nothing where Arm allocates it to none; with the one departure
-//!   [`DEPARTURES`] lists.
+//!   the features the decoder knows — the most specific match, which only
+//!   the HINT space needs, where `HINT_HM_hints` spans the named hints —
+//!   and nothing where Arm allocates it to none, or to an encoding of a
+//!   feature still being built that the decoder does not name yet; with
+//!   the one departure [`DEPARTURES`] lists.
+//! - [`every_implementation_has_what_its_features_imply`]: each feature
+//!   set a processor implements holds what Arm's `Features.json` makes its
+//!   features imply, among the features the decoder knows.
+//! - In [`each_model_is_a_processor_arms_feature_model_permits`], every
+//!   constraint of `Features.json` that is built from identifiers alone
+//!   holds for each processor model, its architecture version and the
+//!   structural features every processor here has.
 
 use std::boxed::Box;
 use std::collections::{BTreeMap, BTreeSet};
@@ -50,9 +62,8 @@ use super::{decode, Encoding, Feature};
 /// The environment variable naming the unpacked AARCHMRS directory.
 const SPEC_DIR_VAR: &str = "RUSTY_BOX_AARCHMRS";
 
-/// Arm's top-level A64 groups the decoder has a function for: all but
-/// `sve` and `sme`.
-const TOP_GROUPS: [&str; 6] = ["reserved", "dpimm", "control", "ldst", "dpreg", "simd_dp"];
+/// Arm's top-level A64 groups the decoder has a function for: all of them.
+const TOP_GROUPS: [&str; 8] = ["reserved", "dpimm", "control", "ldst", "dpreg", "simd_dp", "sve", "sme"];
 
 /// The encodings whose Arm condition the decoder does not follow: the
 /// encoding, the condition as Arm writes it, and why.
@@ -97,19 +108,22 @@ impl Cube {
 pub(crate) struct Occurrence {
     pub(crate) class: String,
     pub(crate) variant: String,
-    /// The class function it is returned from.
-    pub(crate) class_fn: String,
-    /// The top-level group function on the way.
-    pub(crate) top_fn: String,
+    /// The functions on the way, `A64` (for [`decode`]) first and the class
+    /// function it is returned from last: Arm's groups among them are the
+    /// encoding's path.
+    chain: Vec<String>,
     pub(crate) cube: Cube,
 }
 
 /// A field read under a name: `let name = bits(word, hi, lo)` in `function`,
-/// which decodes Arm node `node`.
+/// the last of `chain`, the functions on the way to it as in
+/// [`Occurrence::chain`]. The field is one of the innermost Arm group on
+/// the chain: a function that is not one of Arm's groups (a helper that
+/// splits a group's space) reads its group's fields.
 #[derive(Debug, Clone)]
 struct Binding {
     function: String,
-    node: String,
+    chain: Vec<String>,
     name: String,
     hi: u32,
     lo: u32,
@@ -144,11 +158,16 @@ fn camel(snake: &str) -> String {
 
 /// The variant name of Arm encoding `encoding` of class `class`: the
 /// encoding id without the class name and without `only` (Arm's mark for
-/// the one encoding of an instruction in its class), in UpperCamelCase.
+/// the one encoding of an instruction in its class), in UpperCamelCase;
+/// the whole id when it does not hold the class name (`FCMLA_advsimd_elt`
+/// in `asimdelem`).
 fn variant_name(encoding: &str, class: &str) -> Option<String> {
     let parts: Vec<&str> = encoding.split('_').collect();
     let class_parts: Vec<&str> = class.split('_').collect();
-    let at = (0..=parts.len().checked_sub(class_parts.len())?).find(|&i| parts[i..i + class_parts.len()] == class_parts[..])?;
+    let found = (0..=parts.len().checked_sub(class_parts.len())?).find(|&i| parts[i..i + class_parts.len()] == class_parts[..]);
+    let Some(at) = found else {
+        return Some(camel(encoding));
+    };
     let rest: Vec<&str> = parts[..at]
         .iter()
         .chain(parts[at + class_parts.len()..].iter())
@@ -156,6 +175,12 @@ fn variant_name(encoding: &str, class: &str) -> Option<String> {
         .filter(|&part| part != "only")
         .collect();
     Some(camel(&rest.join("_")))
+}
+
+/// The variant name of an SVE or SME encoding, whose ids (`rdsvl_r_i_`)
+/// never hold their class name: the whole id in UpperCamelCase.
+fn scalable_variant_name(encoding: &str) -> String {
+    camel(encoding)
 }
 
 fn last_ident(path: &syn::Path) -> Option<String> {
@@ -194,8 +219,8 @@ struct Pin {
 #[derive(Debug, Clone)]
 struct Context {
     function: String,
-    node: String,
-    top: Option<String>,
+    /// The functions on the way here, this one last ([`Occurrence::chain`]).
+    chain: Vec<String>,
     class: Option<String>,
     fields: BTreeMap<String, (u32, u32)>,
 }
@@ -216,8 +241,9 @@ impl Reader<'_> {
         self.errors.push(format!("{function}: {what}"));
     }
 
-    /// Follow `name(word)`, reached with `pins` fixed.
-    fn enter(&mut self, name: &str, node: String, top: Option<String>, class: Option<String>, pins: &[Pin]) {
+    /// Follow `name(word)`, reached through `chain` (which ends in `name`)
+    /// with `pins` fixed.
+    fn enter(&mut self, name: &str, chain: Vec<String>, class: Option<String>, pins: &[Pin]) {
         let Some(&item) = self.fns.get(name) else {
             self.error(name, "no such decoder function".to_string());
             return;
@@ -230,8 +256,7 @@ impl Reader<'_> {
         }
         let mut cx = Context {
             function: name.to_string(),
-            node,
-            top,
+            chain,
             class,
             fields: BTreeMap::new(),
         };
@@ -252,7 +277,7 @@ impl Reader<'_> {
                     if self.bound.insert(format!("{name}/{field}")) {
                         self.bindings.push(Binding {
                             function: name.to_string(),
-                            node: cx.node.clone(),
+                            chain: cx.chain.clone(),
                             name: field,
                             hi,
                             lo,
@@ -449,8 +474,7 @@ impl Reader<'_> {
                     self.occurrences.push(Occurrence {
                         class,
                         variant,
-                        class_fn: cx.function.clone(),
-                        top_fn: cx.top.clone().unwrap_or_default(),
+                        chain: cx.chain.clone(),
                         cube,
                     });
                 } else {
@@ -463,10 +487,9 @@ impl Reader<'_> {
                         self.error(&cx.function, format!("`{callee}(word)` must return Option<Encoding>, or be mapped into it"));
                         return;
                     }
-                    let is_top = TOP_GROUPS.contains(&callee.as_str());
-                    let node = if is_top { callee.clone() } else { cx.node.clone() };
-                    let top = if is_top { Some(callee.clone()) } else { cx.top.clone() };
-                    self.enter(&callee, node, top, None, pins);
+                    let mut chain = cx.chain.clone();
+                    chain.push(callee.clone());
+                    self.enter(&callee, chain, None, pins);
                 }
             }
             Expr::MethodCall(mc) if mc.method == "map" && mc.args.len() == 1 => {
@@ -495,7 +518,9 @@ impl Reader<'_> {
                     );
                     return;
                 }
-                self.enter(&target, target.clone(), cx.top.clone(), Some(wrapper), pins);
+                let mut chain = cx.chain.clone();
+                chain.push(target.clone());
+                self.enter(&target, chain, Some(wrapper), pins);
             }
             Expr::Path(p) if p.path.is_ident("None") => {}
             Expr::Block(b) if b.block.stmts.len() == 1 => match &b.block.stmts[0] {
@@ -552,7 +577,8 @@ pub(crate) fn source() -> &'static Source {
     SOURCE.get_or_init(read_source)
 }
 
-/// Read the decoder's source: every `.rs` file of `src/cpu/isa`.
+/// Read the decoder's source: every `.rs` file of `src/cpu/isa`, and
+/// `src/cpu/features.rs`.
 fn read_source() -> Source {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src").join("cpu").join("isa");
     let mut errors = Vec::new();
@@ -569,6 +595,8 @@ fn read_source() -> Source {
         Err(e) => errors.push(format!("{}: {e}", dir.display())),
     }
     paths.sort();
+    // The `Feature` enum the encodings are tagged with.
+    paths.push(dir.with_file_name("features.rs"));
     let mut files = Vec::new();
     for path in paths {
         if path.extension().is_none_or(|e| e != "rs") {
@@ -608,7 +636,7 @@ fn read_source() -> Source {
         arms: BTreeMap::new(),
         errors,
     };
-    reader.enter("decode", "A64".to_string(), None, None, &[]);
+    reader.enter("decode", vec!["A64".to_string()], None, &[]);
     let unreached: Vec<String> = reader.arms.values().filter(|(_, reached)| !reached).map(|(f, _)| f.clone()).collect();
     for function in unreached {
         reader.errors.push(format!("{function}: an arm no word reaches: it contradicts the arms enclosing it"));
@@ -727,10 +755,43 @@ fn splitmix(state: &mut u64) -> u32 {
 
 // ----- Arm's data -----
 
+/// How far the decoder has a feature an `IsFeatureImplemented` names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Status {
+    /// No [`Feature`] is it.
+    Absent,
+    /// A [`Feature`] the decoder names every encoding of.
+    Complete,
+    /// A [`Feature`] still being built ([`Feature::complete`]): the
+    /// encodings the decoder names are Arm's, and others may be missing.
+    Building,
+}
+
+impl Status {
+    fn of(feature: &str) -> Status {
+        match Feature::ALL.iter().find(|f| f.arm_name() == Some(feature)) {
+            None => Status::Absent,
+            Some(f) if f.complete() => Status::Complete,
+            Some(_) => Status::Building,
+        }
+    }
+}
+
+/// Which features a condition counts as implemented.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum View {
+    /// Every [`Feature`]: what the decoder may name.
+    Every,
+    /// The complete ones: what the decoder must name.
+    Complete,
+}
+
 /// A condition with the features folded in.
 #[derive(Debug, Clone)]
 enum Cond {
     Const(bool),
+    /// `IsFeatureImplemented` of a feature with this status.
+    Feature(Status),
     Not(Box<Cond>),
     And(Box<Cond>, Box<Cond>),
     Or(Box<Cond>, Box<Cond>),
@@ -739,19 +800,25 @@ enum Cond {
 }
 
 impl Cond {
-    fn eval(&self, word: u32) -> bool {
+    fn eval(&self, word: u32, view: View) -> bool {
         match self {
             Cond::Const(b) => *b,
-            Cond::Not(c) => !c.eval(word),
-            Cond::And(a, b) => a.eval(word) && b.eval(word),
-            Cond::Or(a, b) => a.eval(word) || b.eval(word),
+            Cond::Feature(status) => match (status, view) {
+                (Status::Absent, _) => false,
+                (Status::Complete, _) => true,
+                (Status::Building, View::Every) => true,
+                (Status::Building, View::Complete) => false,
+            },
+            Cond::Not(c) => !c.eval(word, view),
+            Cond::And(a, b) => a.eval(word, view) && b.eval(word, view),
+            Cond::Or(a, b) => a.eval(word, view) || b.eval(word, view),
             Cond::Matches { mask, value } => word & mask == *value,
         }
     }
 
     fn referenced(&self) -> u32 {
         match self {
-            Cond::Const(_) => 0,
+            Cond::Const(_) | Cond::Feature(_) => 0,
             Cond::Not(c) => c.referenced(),
             Cond::And(a, b) | Cond::Or(a, b) => a.referenced() | b.referenced(),
             Cond::Matches { mask, .. } => *mask,
@@ -769,9 +836,13 @@ struct Leaf {
     condition: Cond,
     /// The features its condition names.
     features: BTreeSet<String>,
-    /// A word of it its condition holds for, if any does: the encoding is
-    /// one of an implemented feature.
+    /// A word of it its condition holds for with every [`Feature`], if any
+    /// does: the encoding is one of an implemented feature, which the
+    /// decoder may name.
     instance: Option<u32>,
+    /// Whether its condition holds for a word with the complete features
+    /// alone: the decoder must name it.
+    required: bool,
 }
 
 struct Arm {
@@ -781,10 +852,6 @@ struct Arm {
     fields: BTreeMap<String, BTreeMap<String, (u32, u32)>>,
     /// The groups directly under the A64 root.
     tops: Vec<String>,
-}
-
-fn is_implemented(feature: &str) -> bool {
-    Feature::ALL.iter().any(|f| f.arm_name() == Some(feature))
 }
 
 fn render(ast: &Value) -> String {
@@ -860,9 +927,9 @@ fn compile(ast: &Value, fields: &Fields, features: &mut BTreeSet<String>) -> Con
         }
         "AST.Function" if get("name") == "IsFeatureImplemented" => {
             let feature = get("arguments").get(0).map(text).unwrap_or_default();
-            let holds = is_implemented(&feature);
+            let status = Status::of(&feature);
             features.insert(feature);
-            Cond::Const(holds)
+            Cond::Feature(status)
         }
         other => panic!("{other} in a condition: {}", render(ast)),
     }
@@ -949,7 +1016,8 @@ impl Arm {
                 }
                 let free = condition.referenced() & !cube.mask;
                 assert!(free.count_ones() <= 20, "{name}: its condition reads {} free bits", free.count_ones());
-                let instance = subsets(free).map(|bits| cube.opcode | bits).find(|&w| condition.eval(w));
+                let instance = subsets(free).map(|bits| cube.opcode | bits).find(|&w| condition.eval(w, View::Every));
+                let required = subsets(free).map(|bits| cube.opcode | bits).any(|w| condition.eval(w, View::Complete));
                 self.leaves.push(Leaf {
                     name,
                     path: path.to_vec(),
@@ -957,13 +1025,15 @@ impl Arm {
                     condition,
                     features,
                     instance,
+                    required,
                 });
             }
             other => panic!("{other} node {name} in the A64 tree"),
         }
     }
 
-    /// The leaves of the implemented features.
+    /// The leaves of the implemented features, complete or still being
+    /// built: those the decoder may name.
     fn implemented(&self) -> impl Iterator<Item = &Leaf> + '_ {
         self.leaves.iter().filter(|l| l.instance.is_some())
     }
@@ -982,32 +1052,39 @@ fn subsets(mask: u32) -> impl Iterator<Item = u32> {
 /// The class enum name and variant name a leaf has in the decoder.
 fn rust_names(leaf: &Leaf) -> Option<(String, String)> {
     let class = leaf.path.last()?;
-    Some((camel(class), variant_name(&leaf.name, class)?))
+    let variant = match leaf.path.first().map(String::as_str) {
+        Some("sve" | "sme") => scalable_variant_name(&leaf.name),
+        _ => variant_name(&leaf.name, class)?,
+    };
+    Some((camel(class), variant))
 }
 
 #[test]
 #[cfg_attr(not(aarchmrs), ignore = "reads Arm's AARCHMRS from the directory RUSTY_BOX_AARCHMRS names")]
 fn the_decoder_is_arms_encoding_tree_for_the_implemented_features() {
     let arm = Arm::load();
+    let (_, implications) = feature_implications();
     let src = source();
     assert!(src.errors.is_empty(), "{:#?}", src.errors);
     let mut problems: Vec<String> = Vec::new();
     std::eprintln!("AARCHMRS {}: {} A64 encodings, {} of the implemented features", arm.release, arm.leaves.len(), arm.implemented().count());
 
-    // The top-level groups.
-    let mut tops: Vec<&str> = arm.tops.iter().map(String::as_str).filter(|t| !matches!(*t, "sve" | "sme")).collect();
-    tops.sort_unstable();
-    let mut ours = TOP_GROUPS.to_vec();
-    ours.sort_unstable();
-    if tops != ours {
-        problems.push(format!("Arm's top-level groups are {tops:?}, the decoder's {ours:?}"));
+    // The top-level groups: a function for each that holds an encoding of
+    // a complete feature, and none for a group without an encoding of an
+    // implemented one.
+    let required_tops: BTreeSet<&str> = arm.leaves.iter().filter(|l| l.required).filter_map(|l| l.path.first().map(String::as_str)).collect();
+    let permitted_tops: BTreeSet<&str> = arm.implemented().filter_map(|l| l.path.first().map(String::as_str)).collect();
+    let ours: BTreeSet<&str> = TOP_GROUPS.iter().copied().collect();
+    for top in required_tops.difference(&ours) {
+        problems.push(format!("Arm's top-level group {top} has encodings of complete features, and the decoder no function for it"));
     }
-    let implemented_tops: BTreeSet<&str> = arm.implemented().filter_map(|l| l.path.first().map(String::as_str)).collect();
-    if implemented_tops.iter().any(|t| matches!(*t, "sve" | "sme")) {
-        problems.push("an SVE or SME encoding belongs to an implemented feature".to_string());
+    for top in ours.difference(&permitted_tops) {
+        problems.push(format!("the decoder's top-level group {top} holds no encoding of an implemented feature"));
     }
 
-    // Names: the classes and their encodings, both ways.
+    // Names: the classes and their encodings, both ways. Every encoding of
+    // a complete feature is named; an encoding of a feature still being
+    // built may be missing.
     let mut wanted: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     let mut leaf_of: BTreeMap<(String, String), &Leaf> = BTreeMap::new();
     for leaf in arm.implemented() {
@@ -1023,7 +1100,10 @@ fn the_decoder_is_arms_encoding_tree_for_the_implemented_features() {
     for (class, variants) in &wanted {
         let have: BTreeSet<String> = src.classes.get(class).map(|v| v.iter().cloned().collect()).unwrap_or_default();
         for missing in variants.difference(&have) {
-            problems.push(format!("{class}::{missing} ({}) is missing", leaf_of[&(class.clone(), missing.clone())].name));
+            let leaf = leaf_of[&(class.clone(), missing.clone())];
+            if leaf.required {
+                problems.push(format!("{class}::{missing} ({}) is missing", leaf.name));
+            }
         }
         for extra in have.difference(variants) {
             problems.push(format!("{class}::{extra} is no encoding of an implemented feature in class {class}"));
@@ -1035,13 +1115,22 @@ fn the_decoder_is_arms_encoding_tree_for_the_implemented_features() {
         }
     }
 
-    // Structure, fixed bits and features.
+    // Structure, fixed bits and features, of every encoding named.
     for ((class, variant), leaf) in &leaf_of {
         let occurrences: Vec<&Occurrence> = src.occurrences.iter().filter(|o| &o.class == class && &o.variant == variant).collect();
+        if occurrences.is_empty() {
+            continue;
+        }
+        // A group whose one class bears its own name (`sve_fp_fcmla` holds
+        // the class `sve_fp_fcmla`) is one function, the class's: the
+        // path names it once.
+        let mut path: Vec<&String> = leaf.path.iter().collect();
+        path.dedup();
         let mut covered: u64 = 0;
         for (i, o) in occurrences.iter().enumerate() {
-            if leaf.path.first() != Some(&o.top_fn) || leaf.path.last() != Some(&o.class_fn) {
-                problems.push(format!("{class}::{variant} is decoded in {}/{}, Arm puts {} in {:?}", o.top_fn, o.class_fn, leaf.name, leaf.path));
+            let groups: Vec<&String> = o.chain.iter().filter(|f| f.as_str() != "A64" && arm.fields.contains_key(f.as_str())).collect();
+            if groups != path {
+                problems.push(format!("{class}::{variant} is decoded through {:?}, Arm puts {} in {:?}", o.chain, leaf.name, leaf.path));
             }
             if !o.cube.within(leaf.cube) {
                 problems.push(format!(
@@ -1063,23 +1152,44 @@ fn the_decoder_is_arms_encoding_tree_for_the_implemented_features() {
                 1u64 << leaf.cube.free_bits()
             ));
         }
+        // The tag is the condition's feature, or, where the condition
+        // names several, the one Arm's feature model makes imply the others
+        // (FEAT_FP16 for `FEAT_AdvSIMD && FEAT_FP16`): gating on it is
+        // gating on the whole condition for every feature set Arm permits,
+        // and every implementation is one
+        // ([`every_implementation_has_what_its_features_imply`]). A feature
+        // the decoder does not know drops out: in `FEAT_SVE || FEAT_SME` it
+        // is false on every processor this crate builds. An encoding whose
+        // condition needs one (`FEAT_SVE && FEAT_X`) holds for no word with
+        // every [`Feature`], so it is no encoding of an implemented feature,
+        // and the class check above already refuses a decoder that names
+        // it.
         let tag = src.features.get(&(class.clone(), variant.clone())).cloned().unwrap_or_default();
+        let named: BTreeSet<String> = leaf.features.iter().filter(|f| Status::of(f) != Status::Absent).cloned().collect();
         let tagged: BTreeSet<String> = Feature::ALL
             .iter()
             .filter(|f| format!("{f:?}") == tag)
             .filter_map(|f| f.arm_name().map(str::to_string))
             .collect();
-        if tagged != leaf.features {
+        let implied: BTreeSet<String> = Feature::ALL
+            .iter()
+            .filter(|f| format!("{f:?}") == tag)
+            .flat_map(|&f| implied_by(f, &implications))
+            .filter_map(|f| f.arm_name().map(str::to_string))
+            .collect();
+        if !tagged.is_subset(&named) || !named.is_subset(&implied) {
             problems.push(format!("{class}::{variant} is tagged {tag}; Arm's condition for {} names {:?}", leaf.name, leaf.features));
         }
     }
 
-    // Field names and positions.
+    // Field names and positions, each as the innermost Arm group on the
+    // way to its function names it.
     for b in &src.bindings {
-        match arm.fields.get(&b.node).and_then(|f| f.get(&b.name)) {
+        let node = b.chain.iter().rev().find(|f| arm.fields.contains_key(f.as_str())).cloned().unwrap_or_default();
+        match arm.fields.get(&node).and_then(|f| f.get(&b.name)) {
             Some(&(hi, lo)) if (hi, lo) == (b.hi, b.lo) => {}
-            Some(&(hi, lo)) => problems.push(format!("{}: `{}` is bits {}:{}, Arm's {} field {} is {hi}:{lo}", b.function, b.name, b.hi, b.lo, b.node, b.name)),
-            None => problems.push(format!("{}: `{}` is no field of Arm's {}", b.function, b.name, b.node)),
+            Some(&(hi, lo)) => problems.push(format!("{}: `{}` is bits {}:{}, Arm's {node} field {} is {hi}:{lo}", b.function, b.name, b.hi, b.lo, b.name)),
+            None => problems.push(format!("{}: `{}` is no field of Arm's {node}", b.function, b.name)),
         }
     }
 
@@ -1090,8 +1200,9 @@ fn the_decoder_is_arms_encoding_tree_for_the_implemented_features() {
 /// bits 31:21 and 15:10.
 struct Allocation<'a> {
     leaves: Vec<&'a Leaf>,
-    /// What [`decode`] must return for each leaf.
-    expected: Vec<Encoding>,
+    /// What [`decode`] must return for each leaf: nothing for an encoding
+    /// of a feature still being built that the decoder does not name yet.
+    expected: Vec<Option<Encoding>>,
     buckets: Vec<Vec<u16>>,
 }
 
@@ -1119,24 +1230,31 @@ impl<'a> Allocation<'a> {
         };
         // What the decoder returns for each leaf, read off a word Arm
         // allocates to it (not a more specific one).
+        let src = source();
         let mut state = 0x5EED_u64;
         let mut expected = Vec::new();
         for (i, leaf) in allocation.leaves.iter().enumerate() {
-            let want = rust_names(leaf).map(|(c, v)| format!("{c}({v})")).unwrap_or_default();
+            let names = rust_names(leaf);
+            let named = names.as_ref().is_some_and(|(c, v)| src.classes.get(c).is_some_and(|vs| vs.contains(v)));
+            if !leaf.required && !named {
+                expected.push(None);
+                continue;
+            }
+            let want = names.map(|(c, v)| format!("{c}({v})")).unwrap_or_default();
             let mut candidates = leaf
                 .instance
                 .into_iter()
                 .chain((0..4096).map(|_| leaf.cube.opcode | (splitmix(&mut state) & !leaf.cube.mask)));
             let Some(word) = candidates.find(|&w| allocation.leaf(w) == Ok(Some(i))) else {
                 problems.push(format!("{}: no word is allocated to it", leaf.name));
-                expected.push(Encoding::PermUndef(super::PermUndef::Udf));
+                expected.push(None);
                 continue;
             };
             match decode(word) {
-                Some(e) if format!("{e:?}") == want => expected.push(e),
+                Some(e) if format!("{e:?}") == want => expected.push(Some(e)),
                 other => {
                     problems.push(format!("{} {word:#010x}: decoded as {other:?}, not {want}", leaf.name));
-                    expected.push(Encoding::PermUndef(super::PermUndef::Udf));
+                    expected.push(None);
                 }
             }
         }
@@ -1150,7 +1268,7 @@ impl<'a> Allocation<'a> {
         let mut tied = false;
         for &i in &self.buckets[index(word)] {
             let leaf = self.leaves[i as usize];
-            if leaf.cube.contains(word) && leaf.condition.eval(word) {
+            if leaf.cube.contains(word) && leaf.condition.eval(word, View::Every) {
                 match best {
                     Some(b) if self.leaves[b].cube.mask.count_ones() > leaf.cube.mask.count_ones() => {}
                     Some(b) if self.leaves[b].cube.mask.count_ones() == leaf.cube.mask.count_ones() => tied = true,
@@ -1172,7 +1290,7 @@ impl<'a> Allocation<'a> {
         let ours = decode(word);
         match (leaf, ours) {
             (None, None) => Ok(()),
-            (Some(i), Some(e)) if self.expected[i] == e => Ok(()),
+            (Some(i), ours) if self.expected[i] == ours => Ok(()),
             (leaf, ours) => Err(format!("{word:#010x}: Arm {:?}, decoder {ours:?}", leaf.map(|i| &self.leaves[i].name))),
         }
     }
@@ -1241,4 +1359,211 @@ fn the_decoder_allocates_as_arm_does_on_every_word() {
         started.elapsed().as_secs_f64()
     );
     assert_eq!(total, 0, "{:#?}", first.into_inner().unwrap_or_default());
+}
+
+// ----- the feature sets -----
+
+/// Every pair of [`Feature`]s `(A, B)` that Arm's `Features.json` makes
+/// `FEAT_A` imply `FEAT_B`, directly or through other identifiers, with the
+/// release it was read from. An architecture version carries an
+/// implication on: `FEAT_SME ==> v9Ap2`, `v9Ap2 ==> (v9Ap1 && v8Ap7)`,
+/// `v9Ap1 ==> (v9Ap0 && v8Ap6)` and `v8Ap6 ==> FEAT_I8MM` make FEAT_SME
+/// imply FEAT_I8MM.
+fn feature_implications() -> (String, Vec<(Feature, Feature)>) {
+    let dir = std::env::var_os(SPEC_DIR_VAR)
+        .unwrap_or_else(|| panic!("set {SPEC_DIR_VAR} to the unpacked AARCHMRS directory (holding Features.json)"));
+    let path = PathBuf::from(dir).join("Features.json");
+    let text = std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let root: Value = serde_json::from_slice(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let release = root.pointer("/_meta/version/ref").and_then(Value::as_str).unwrap_or("?").to_string();
+    let identifier = |side: Option<&Value>| {
+        let side = side?;
+        if side.get("_type").and_then(Value::as_str) != Some("AST.Identifier") {
+            return None;
+        }
+        side.get("value").and_then(Value::as_str).map(str::to_string)
+    };
+    // The identifiers a conjunction names (`FEAT_SME ==> (FEAT_FCMA &&
+    // FEAT_FP16 && FEAT_BF16 && FEAT_FHM)`), each implied on its own;
+    // `None` for any other shape, which implies no one identifier.
+    fn conjuncts(side: Option<&Value>, out: &mut Vec<String>) -> Option<()> {
+        let side = side?;
+        match side.get("_type").and_then(Value::as_str) {
+            Some("AST.Identifier") => out.push(side.get("value").and_then(Value::as_str)?.to_string()),
+            Some("AST.BinaryOp") if side.get("op").and_then(Value::as_str) == Some("&&") => {
+                conjuncts(side.get("left"), out)?;
+                conjuncts(side.get("right"), out)?;
+            }
+            _ => return None,
+        }
+        Some(())
+    }
+    let parameter_constraints = root
+        .get("parameters")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|p| p.get("constraints").and_then(Value::as_array))
+        .flatten();
+    let global_constraints = root.get("constraints").and_then(Value::as_array).into_iter().flatten();
+    let mut edges: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for c in parameter_constraints.chain(global_constraints) {
+        let is_implication = c.get("_type").and_then(Value::as_str) == Some("AST.BinaryOp")
+            && c.get("op").and_then(Value::as_str) == Some("==>");
+        if !is_implication {
+            continue;
+        }
+        let Some(a) = identifier(c.get("left")) else {
+            continue;
+        };
+        let mut right = Vec::new();
+        if conjuncts(c.get("right"), &mut right).is_none() {
+            continue;
+        }
+        edges.entry(a).or_default().extend(right);
+    }
+    let mut implications = Vec::new();
+    for a in Feature::ALL {
+        let Some(name) = a.arm_name() else {
+            continue;
+        };
+        let mut reached: Vec<&str> = vec![name];
+        let mut i = 0;
+        while i < reached.len() {
+            for next in edges.get(reached[i]).into_iter().flatten() {
+                if !reached.contains(&next.as_str()) {
+                    reached.push(next);
+                }
+            }
+            i += 1;
+        }
+        for b in Feature::ALL.into_iter().filter(|b| *b != a && b.arm_name().is_some_and(|n| reached.contains(&n))) {
+            implications.push((a, b));
+        }
+    }
+    (release, implications)
+}
+
+/// `feature` and every known feature Arm's implications lead to from it.
+fn implied_by(feature: Feature, implications: &[(Feature, Feature)]) -> Vec<Feature> {
+    let mut found = vec![feature];
+    let mut i = 0;
+    while i < found.len() {
+        for &(a, b) in implications {
+            if a == found[i] && !found.contains(&b) {
+                found.push(b);
+            }
+        }
+        i += 1;
+    }
+    found
+}
+
+/// Each processor this crate builds, and the test-only one with every
+/// feature, implements what Arm's feature model makes each of its features
+/// imply, among the features the decoder knows: a set Arm does not permit
+/// would advertise an ID register field no processor reports.
+#[test]
+#[cfg_attr(not(aarchmrs), ignore = "reads Arm's AARCHMRS from the directory RUSTY_BOX_AARCHMRS names")]
+fn every_implementation_has_what_its_features_imply() {
+    use crate::cpu::features::Implementation;
+
+    let (release, implications) = feature_implications();
+    std::eprintln!("AARCHMRS {release}: {} implications between known features", implications.len());
+    assert!(implications.contains(&(Feature::Lrcpc2, Feature::Lrcpc)), "{implications:?}");
+    let models = crate::cpu::CpuModel::ALL.map(crate::cpu::CpuModel::implementation);
+    for imp in models.into_iter().chain([Implementation::EVERY_FEATURE]) {
+        for &(a, b) in &implications {
+            assert!(!imp.has(a) || imp.has(b), "{imp:?} has {a:?}, which implies {b:?}");
+        }
+    }
+}
+
+/// The value of the `Features.json` constraint `ast` when the identifiers
+/// in `holding` hold and every other is false, as far as its identifiers
+/// decide it: `None` when the value turns on a leaf that is not an
+/// identifier (an ID register field, a comparison).
+fn constraint_value(ast: &Value, holding: &BTreeSet<&str>) -> Option<bool> {
+    let operand = |key: &str| ast.get(key).and_then(|side| constraint_value(side, holding));
+    match ast.get("_type").and_then(Value::as_str)? {
+        "AST.Identifier" => Some(holding.contains(ast.get("value").and_then(Value::as_str)?)),
+        "AST.UnaryOp" if ast.get("op").and_then(Value::as_str) == Some("!") => operand("expr").map(|v| !v),
+        "AST.BinaryOp" => {
+            let (left, right) = (operand("left"), operand("right"));
+            match ast.get("op").and_then(Value::as_str)? {
+                "&&" if left == Some(false) || right == Some(false) => Some(false),
+                "&&" => Some(left? && right?),
+                "||" if left == Some(true) || right == Some(true) => Some(true),
+                "||" => Some(left? || right?),
+                "==>" if left == Some(false) || right == Some(true) => Some(true),
+                "==>" => Some(!left? || right?),
+                "<=>" => Some(left? == right?),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Each processor model is one Arm's feature model permits: every
+/// constraint of `Features.json`, global and per parameter, that its
+/// identifiers decide holds when the model's features hold, its
+/// architecture version and those it includes hold, and the structural
+/// features of every processor here hold — AArch64 (`FEAT_AA64`) at EL0 and
+/// EL1 (`FEAT_EL0`, `FEAT_EL1`, `FEAT_AA64EL0`, `FEAT_AA64EL1`), a PIPT
+/// instruction cache (`FEAT_IVIPT`: `CTR_EL0.L1Ip` is 0b11), the
+/// Cryptographic Extension (`FEAT_Crypto`), and from Armv8.2 its assembler
+/// aliases (`FEAT_ASMv8p2`, BFC and the 64-bit REV64) — and every other
+/// identifier is false: no FEAT_SVE, no EL2, no AArch32, no PMU.
+#[test]
+#[cfg_attr(not(aarchmrs), ignore = "reads Arm's AARCHMRS from the directory RUSTY_BOX_AARCHMRS names")]
+fn each_model_is_a_processor_arms_feature_model_permits() {
+    use crate::cpu::CpuModel;
+
+    let dir = std::env::var_os(SPEC_DIR_VAR)
+        .unwrap_or_else(|| panic!("set {SPEC_DIR_VAR} to the unpacked AARCHMRS directory (holding Features.json)"));
+    let path = PathBuf::from(dir).join("Features.json");
+    let text = std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let root: Value = serde_json::from_slice(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let parameter_constraints = root
+        .get("parameters")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|p| p.get("constraints").and_then(Value::as_array))
+        .flatten();
+    let global_constraints = root.get("constraints").and_then(Value::as_array).into_iter().flatten();
+    let constraints: Vec<&Value> = parameter_constraints.chain(global_constraints).collect();
+
+    const VERSIONS: [&str; 11] = [
+        "v8Ap0", "v8Ap1", "v8Ap2", "v8Ap3", "v8Ap4", "v8Ap5", "v8Ap6", "v8Ap7", "v9Ap0", "v9Ap1", "v9Ap2",
+    ];
+    for model in CpuModel::ALL {
+        let versions = match model {
+            CpuModel::CortexA57 => &VERSIONS[..1],
+            CpuModel::Armv9p2 => &VERSIONS[..],
+        };
+        let imp = model.implementation();
+        let mut holding: BTreeSet<&str> = Feature::ALL
+            .into_iter()
+            .filter(|&f| imp.has(f))
+            .filter_map(Feature::arm_name)
+            .chain(versions.iter().copied())
+            .chain(["FEAT_AA64", "FEAT_EL0", "FEAT_EL1", "FEAT_AA64EL0", "FEAT_AA64EL1", "FEAT_IVIPT", "FEAT_Crypto"])
+            .collect();
+        if versions.contains(&"v8Ap2") {
+            holding.insert("FEAT_ASMv8p2");
+        }
+        let (mut decided, mut broken) = (0, Vec::new());
+        for c in &constraints {
+            match constraint_value(c, &holding) {
+                Some(true) => decided += 1,
+                Some(false) => broken.push(render(c)),
+                None => {}
+            }
+        }
+        std::eprintln!("{model:?}: {decided} of {} constraints decided by identifiers, all hold", constraints.len());
+        assert!(broken.is_empty(), "{model:?} breaks {broken:#?}");
+        assert!(decided > constraints.len() / 2, "{model:?}: {decided} decided");
+    }
 }

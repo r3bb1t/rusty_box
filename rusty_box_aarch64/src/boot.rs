@@ -25,17 +25,15 @@ use crate::devices::pl011::BaudRate;
 pub use fdt::DeviceTreeError;
 
 /// The device tree QEMU 11.1.2 generates for `-M virt -cpu cortex-a57 -m 256`
-/// (`-machine dumpdtb=`), which describes exactly this board. A machine
-/// patches its memory node to the RAM it was built with, so the 256 MiB it
-/// was dumped with is only a default.
-///
-/// Two values differ from that dump, in place and at the same width. The
-/// `/chosen` `rng-seed` and `kaslr-seed` are fixed: QEMU draws fresh ones on
-/// every run, and a fixed pair keeps runs deterministic. The cpu node's
-/// `d-cache-sets` is `0x100` (2-way): QEMU 11's `cortex-a57` gives the L1
-/// D-cache a 4-way CCSIDR that the Cortex-A57 MPCore TRM contradicts; this
-/// board's CCSIDR is the TRM's ([`crate::cpu::id::CCSIDR_L1D`]), and the
-/// tree agrees with it.
+/// (`-machine dumpdtb=`), which describes exactly this board, as generated
+/// with two upstream bugs fixed (docs/qemu-upstream-bugs.md): the CPU node's
+/// L1 data cache is the Cortex-A57's 2-way one, as the TRM gives it and
+/// this board's CCSIDR reports it ([`crate::cpu::id::CCSIDR_L1D`]), and it
+/// names no `next-level-cache` (QEMU names phandle 0 when it makes no L2
+/// node). Its `/chosen` `rng-seed` and `kaslr-seed` are those of the dump,
+/// fixed: QEMU draws fresh ones on every run, and a fixed pair keeps runs
+/// deterministic. A machine patches its memory node to the RAM it was built
+/// with, so the 256 MiB it was dumped with is only a default.
 pub const QEMU_VIRT_DEVICE_TREE: &[u8] = include_bytes!("../assets/qemu-virt-a57-256m.dtb");
 
 /// The largest edited device tree a machine keeps (QEMU's is under 8 KiB).
@@ -302,5 +300,35 @@ mod tests {
         assert_eq!(low.load_offset(), 0x1000, "a kernel may ask to load just above the stub");
         let placed = layout(128 * MIB, &low, 0).expect("fits");
         assert!(placed.device_tree_offset >= placed.kernel_offset + low.footprint());
+    }
+
+    /// The CPU node's L1 cache properties (Devicetree Specification v0.4,
+    /// 3.7.3) describe the caches `CCSIDR_EL1` reports, which are the
+    /// Cortex-A57's (TRM DDI 0488C, 6.1: a 32 KiB 2-way data cache and a
+    /// 48 KiB 3-way instruction cache, 64-byte lines); no cache node exists
+    /// for a `next-level-cache` to name.
+    #[test]
+    fn the_device_tree_describes_the_l1_caches_ccsidr_reports() {
+        use crate::cpu::id::{CCSIDR_L1D, CCSIDR_L1I};
+        let cell = |name: &str| -> u64 {
+            let bytes = fdt::property(QEMU_VIRT_DEVICE_TREE, "cpus/cpu@0", name).expect("well formed").expect(name);
+            u64::from(u32::from_be_bytes(bytes.try_into().expect("one cell")))
+        };
+        // CCSIDR_EL1 without FEAT_CCIDX: LineSize [2:0] is log2(bytes) - 4,
+        // Associativity [12:3] ways - 1, NumSets [27:13] sets - 1.
+        let caches = [
+            (CCSIDR_L1D, 2, 32 * 1024, ["d-cache-block-size", "d-cache-sets", "d-cache-size"]),
+            (CCSIDR_L1I, 3, 48 * 1024, ["i-cache-block-size", "i-cache-sets", "i-cache-size"]),
+        ];
+        for (ccsidr, ways, size, [block_size, set_count, total]) in caches {
+            let line = 1u64 << ((ccsidr & 7) + 4);
+            let associativity = ((ccsidr >> 3) & 0x3FF) + 1;
+            let sets = ((ccsidr >> 13) & 0x7FFF) + 1;
+            assert_eq!((line, associativity, line * associativity * sets), (64, ways, size), "{total}");
+            assert_eq!(cell(block_size), line);
+            assert_eq!(cell(set_count), sets);
+            assert_eq!(cell(total), size);
+        }
+        assert_eq!(fdt::property(QEMU_VIRT_DEVICE_TREE, "cpus/cpu@0", "next-level-cache"), Ok(None));
     }
 }

@@ -40,11 +40,14 @@ fn vector(word: u32) -> Option<Encoding> {
             0b1 => match bits(word, 11, 10) {
                 0b01 | 0b11 => asimd::asimdsame(word).map(Encoding::Asimdsame),
                 0b00 => asimd::asimddiff(word).map(Encoding::Asimddiff),
-                // op2<1:0> and op3<8:7>. op2 = 1111 is asimdmiscfp16
-                // (FEAT_FP16).
+                // op2<1:0> and op3<8:7>; op2 = 1111 is asimdmiscfp16.
                 0b10 => match (bits(word, 20, 19), bits(word, 18, 17)) {
                     (0b00, 0b00) => asimd::asimdmisc(word).map(Encoding::Asimdmisc),
                     (0b10, 0b00) => asimd::asimdall(word).map(Encoding::Asimdall),
+                    (0b11, 0b00) => match bits(word, 22, 22) {
+                        0b1 => asimd::asimdmiscfp16(word).map(Encoding::Asimdmiscfp16),
+                        _ => None,
+                    },
                     (0b01, 0b00) => match op0 {
                         0b0100 => crypto::cryptoaes(word).map(Encoding::Cryptoaes),
                         _ => None,
@@ -53,12 +56,16 @@ fn vector(word: u32) -> Option<Encoding> {
                 },
                 _ => None,
             },
-            // op3<0> and op3<5>. op3<5> = 1 with op3<0> = 1 is asimdsame2
-            // (FEAT_RDM, FEAT_DotProd and later), and op2 = 10xx with
-            // op3<0> = 1 asimdsamefp16 (FEAT_FP16).
+            // op3<0> and op3<5>; op2 = 10xx with op3<0> = 1 and op3<5> = 0
+            // is asimdsamefp16.
             0b0 => match (bits(word, 10, 10), bits(word, 15, 15)) {
+                (0b1, 0b1) => asimd::asimdsame2(word).map(Encoding::Asimdsame2),
                 (0b1, 0b0) => match (op1, bits(word, 22, 22)) {
                     (0b00, 0b0) => asimd::asimdins(word).map(Encoding::Asimdins),
+                    (_, 0b1) => match bits(word, 14, 14) {
+                        0b0 => asimd::asimdsamefp16(word).map(Encoding::Asimdsamefp16),
+                        _ => None,
+                    },
                     _ => None,
                 },
                 // op0<1>, then op3<1>.
@@ -93,11 +100,14 @@ fn scalar(word: u32) -> Option<Encoding> {
             0b1 => match bits(word, 11, 10) {
                 0b01 | 0b11 => asisd::asisdsame(word).map(Encoding::Asisdsame),
                 0b00 => asisd::asisddiff(word).map(Encoding::Asisddiff),
-                // op2<1:0> and op3<8:7>. op2 = 1111 is asisdmiscfp16
-                // (FEAT_FP16).
+                // op2<1:0> and op3<8:7>; op2 = 1111 is asisdmiscfp16.
                 0b10 => match (bits(word, 20, 19), bits(word, 18, 17)) {
                     (0b00, 0b00) => asisd::asisdmisc(word).map(Encoding::Asisdmisc),
                     (0b10, 0b00) => asisd::asisdpair(word).map(Encoding::Asisdpair),
+                    (0b11, 0b00) => match bits(word, 22, 22) {
+                        0b1 => asisd::asisdmiscfp16(word).map(Encoding::Asisdmiscfp16),
+                        _ => None,
+                    },
                     (0b01, 0b00) => match op0 {
                         0b0101 => crypto::cryptosha2(word).map(Encoding::Cryptosha2),
                         _ => None,
@@ -106,12 +116,16 @@ fn scalar(word: u32) -> Option<Encoding> {
                 },
                 _ => None,
             },
-            // op3<0> and op3<5>. op3<5> = 1 with op3<0> = 1 is asisdsame2
-            // (FEAT_RDM), and op2 = 10xx with op3<0> = 1 asisdsamefp16
-            // (FEAT_FP16).
+            // op3<0> and op3<5>; op2 = 10xx with op3<0> = 1 and op3<5> = 0
+            // is asisdsamefp16.
             0b0 => match (bits(word, 10, 10), bits(word, 15, 15)) {
+                (0b1, 0b1) => asisd::asisdsame2(word).map(Encoding::Asisdsame2),
                 (0b1, 0b0) => match (op1, bits(word, 22, 22)) {
                     (0b00, 0b0) => asisd::asisdone(word).map(Encoding::Asisdone),
+                    (_, 0b1) => match bits(word, 14, 14) {
+                        0b0 => asisd::asisdsamefp16(word).map(Encoding::Asisdsamefp16),
+                        _ => None,
+                    },
                     _ => None,
                 },
                 // op0, then op3<1>.

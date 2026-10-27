@@ -30,7 +30,7 @@ fn add_mags_f64(
             if (sig_a | sig_b) != 0 {
                 softfloat_raise_flags(status, FLAG_DENORMAL);
                 if exp_f64(ui_z) == 0 && softfloat_flush_underflow_to_zero(status) {
-                    softfloat_raise_flags(status, FLAG_UNDERFLOW);
+                    softfloat_raise_flags(status, flush_flags(status));
                     return pack_to_f64(sign_z, 0, 0);
                 }
             }
@@ -125,7 +125,7 @@ fn sub_mags_f64(
                 return softfloat_propagate_nan_f64(ui_a, ui_b, status);
             }
             softfloat_raise_flags(status, FLAG_INVALID);
-            return FLOAT64_DEFAULT_NAN;
+            return float64_default_nan(status);
         }
         if exp_a == 0 && (sig_a | sig_b) != 0 {
             softfloat_raise_flags(status, FLAG_DENORMAL);
@@ -151,7 +151,7 @@ fn sub_mags_f64(
         // implicit bit after the shift; Bochs s_subMagsF64) underflows
         // only when FPCR.FZ flushes it.
         if exp_z == 0 && ((sig_diff << shift_dist) as u64) < 0x0010_0000_0000_0000 && softfloat_flush_underflow_to_zero(status) {
-            softfloat_raise_flags(status, FLAG_UNDERFLOW);
+            softfloat_raise_flags(status, flush_flags(status));
             return pack_to_f64(sign_z, 0, 0);
         }
         pack_to_f64(sign_z, exp_z, (sig_diff << shift_dist) as u64)

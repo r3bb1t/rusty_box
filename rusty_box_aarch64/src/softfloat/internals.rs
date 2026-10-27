@@ -134,32 +134,63 @@ pub(crate) fn norm_subnormal_f64_sig(sig: u64) -> ExpSig64 {
 //
 // `exp` < 0 with the significand normalized (leading bit at the top of the
 // field) is exactly "below the minimum normal before rounding", which is
-// Arm's tininess rule and its FPCR.FZ flush condition alike (FPRoundBase,
-// FPCR.AH = 0). A flushed result is a zero of the result's sign and raises
-// underflow without inexact.
+// Arm's tininess rule and its FPCR.FZ flush condition alike under FPCR.AH =
+// 0 (FPRoundBase); a result flushed then is a zero of the result's sign and
+// raises underflow without inexact. Under FPCR.AH = 1 both are decided
+// after rounding with an unbounded exponent (Berkeley's
+// `softfloat_tininess_afterRounding` test), and a flushed result raises
+// underflow and inexact.
+
+/// The flags a result flushed to zero under FPCR.FZ (or FPCR.FZ16) raises:
+/// Underflow alone under FPCR.AH = 0, which flushes before rounding;
+/// Underflow and Inexact under FPCR.AH = 1, which flushes after (Arm
+/// FPRoundBase).
+#[inline]
+pub(crate) fn flush_flags(status: &SoftFloatStatus) -> i32 {
+    match status.handling {
+        Handling::Standard => FLAG_UNDERFLOW,
+        Handling::Alternate => FLAG_UNDERFLOW | FLAG_INEXACT,
+    }
+}
+
+/// What `softfloat_roundPackToF16` adds below the half-precision fraction
+/// before truncating, for a value of sign `sign` rounded by `rounding_mode`.
+#[inline]
+fn f16_round_increment(sign: bool, rounding_mode: u8) -> u16 {
+    if rounding_mode == ROUND_NEAR_EVEN || rounding_mode == ROUND_NEAR_MAXMAG {
+        0x8
+    } else if rounding_mode == (if sign { ROUND_MIN } else { ROUND_MAX }) {
+        0xF
+    } else {
+        0
+    }
+}
+
+/// Berkeley's `softfloat_tininess_afterRounding` test for half precision:
+/// whether `sig` × 2^`exp`, as [`round_pack_to_f16`] takes them with `exp`
+/// below zero, rounds by `rounding_mode` with an unbounded exponent to a
+/// magnitude below the smallest normal (Arm FPRoundBase under FPCR.AH = 1).
+#[inline]
+pub(crate) fn f16_tiny_after_rounding(sign: bool, exp: i16, sig: u16, rounding_mode: u8) -> bool {
+    exp < -1 || u32::from(sig) + u32::from(f16_round_increment(sign, rounding_mode)) < 0x8000
+}
 
 /// Berkeley `softfloat_roundPackToF16`. Half precision is reached only by
-/// conversions, whose Arm FPRoundCV forces FZ16 off, so it never flushes.
+/// conversions, whose Arm FPRoundCV forces FZ16 off, and by the
+/// half-precision arithmetic in `half`, which applies FPCR.FZ16 itself, so
+/// it never flushes.
 pub(crate) fn round_pack_to_f16(sign: bool, exp: i16, sig: u16, status: &mut SoftFloatStatus) -> Float16 {
     let rounding_mode = softfloat_get_rounding_mode(status);
     let round_near_even = rounding_mode == ROUND_NEAR_EVEN;
-    let mut round_increment: u16 = 0x8;
-    if !round_near_even && rounding_mode != ROUND_NEAR_MAXMAG {
-        round_increment = if rounding_mode == (if sign { ROUND_MIN } else { ROUND_MAX }) {
-            0xF
-        } else {
-            0
-        };
-    }
+    let round_increment = f16_round_increment(sign, rounding_mode);
     let mut round_bits = sig & 0xF;
     let mut exp = exp;
     let mut sig = sig;
 
     if 0x1D <= (exp as u16) {
         if exp < 0 {
-            let is_tiny = TININESS_BEFORE_ROUNDING
-                || (exp < -1)
-                || ((sig as u32).wrapping_add(round_increment as u32) < 0x8000);
+            let is_tiny =
+                tininess_before_rounding(status) || f16_tiny_after_rounding(sign, exp, sig, rounding_mode);
             sig = shift_right_jam32(sig as u32, (-(exp as i32)) as u16) as u16;
             exp = 0;
             round_bits = sig & 0xF;
@@ -203,11 +234,11 @@ pub(crate) fn round_pack_to_f32(
 
     if 0xFD <= (exp as u16) {
         if exp < 0 {
-            let is_tiny = TININESS_BEFORE_ROUNDING
+            let is_tiny = tininess_before_rounding(status)
                 || (exp < -1)
                 || (sig.wrapping_add(round_increment) < 0x8000_0000);
-            if softfloat_flush_underflow_to_zero(status) {
-                softfloat_raise_flags(status, FLAG_UNDERFLOW);
+            if is_tiny && softfloat_flush_underflow_to_zero(status) {
+                softfloat_raise_flags(status, flush_flags(status));
                 return pack_to_f32(sign, 0, 0);
             }
             sig = shift_right_jam32(sig, (-exp) as u16);
@@ -267,11 +298,11 @@ pub(crate) fn round_pack_to_f64(
 
     if 0x7FD <= (exp as u16) {
         if exp < 0 {
-            let is_tiny = TININESS_BEFORE_ROUNDING
+            let is_tiny = tininess_before_rounding(status)
                 || (exp < -1)
                 || (sig.wrapping_add(round_increment) < 0x8000_0000_0000_0000);
-            if softfloat_flush_underflow_to_zero(status) {
-                softfloat_raise_flags(status, FLAG_UNDERFLOW);
+            if is_tiny && softfloat_flush_underflow_to_zero(status) {
+                softfloat_raise_flags(status, flush_flags(status));
                 return pack_to_f64(sign, 0, 0);
             }
             sig = shift_right_jam64(sig, (-exp) as u32);

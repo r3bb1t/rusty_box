@@ -22,12 +22,13 @@ base register into the data region and keep every access aligned, because
 with the MMU off data accesses are Device memory, where an unaligned access
 is an alignment fault on this core (Unicorn's older QEMU does not check).
 
+gen_qemu.py builds the vectors of later features with QEMU's user-mode
+emulator from the same initial states and writes them in the same format;
+it imports this module for both, so Unicorn is imported only to run it.
+
 Usage: python3 -I gen_unicorn.py OUT_FILE [CASES_PER_FAMILY]
 """
 import sys
-
-from unicorn import Uc, UcError, UC_ARCH_ARM64, UC_MODE_ARM
-from unicorn import arm64_const as A
 
 MASK64 = (1 << 64) - 1
 CODE = 0x10000
@@ -90,7 +91,7 @@ def initial_state(seed, kind, insn):
             if sel == 1:
                 v[i] = (v[i] & LOW_NIBBLES) | ((signs & ONE_PER_BYTE) * 0xF0)
     fpcr = 0
-    if kind == "F":
+    if kind in ("F", "FA"):
         # Floating-point inputs: per register, random bits, or lanes of
         # special and ordinary single or double values; then a random FPCR
         # (RMode, FZ, DN, AHP).
@@ -112,18 +113,68 @@ def initial_state(seed, kind, insn):
                 width = 32 if single else 64
                 v[i] = sum(lane << (width * k) for k, lane in enumerate(lanes))
         fpcr = (r.next() & 0x1F) << 22
+    if kind in ("H", "HA"):
+        # Half-precision inputs (FEAT_FP16, FEAT_FHM): per register, random
+        # bits, lanes of special and ordinary half values, or of single
+        # values (FMLAL's accumulators); then a random FPCR (RMode, FZ, DN,
+        # AHP) and FZ16.
+        for i in range(32):
+            sel = r.next() & 7
+            if sel >= 2:
+                half = sel <= 5
+                mixed = sel in (2, 3, 6)
+                lanes = []
+                for _ in range(8 if half else 4):
+                    w = r.next()
+                    if mixed and w & 1:
+                        table = F16_SPECIAL if half else F32_SPECIAL
+                        lanes.append(table[(w >> 1) % len(table)])
+                    elif half:
+                        lanes.append(ordinary_f16(w))
+                    else:
+                        lanes.append(ordinary_f32(w))
+                width = 16 if half else 32
+                v[i] = sum(lane << (width * k) for k, lane in enumerate(lanes))
+        fpcr = ((r.next() & 0x1F) << 22) | ((r.next() & 1) << 19)
+    if kind in ("B", "BA"):
+        # BFloat16 inputs (FEAT_BF16): per register, random bits, lanes of
+        # special and ordinary BFloat16 values, or of single values (the
+        # accumulators); then a random FPCR (RMode, FZ, DN, AHP).
+        for i in range(32):
+            sel = r.next() & 7
+            if sel >= 2:
+                bf16 = sel <= 5
+                mixed = sel in (2, 3, 6)
+                lanes = []
+                for _ in range(8 if bf16 else 4):
+                    w = r.next()
+                    if mixed and w & 1:
+                        table = BF16_SPECIAL if bf16 else F32_SPECIAL
+                        lanes.append(table[(w >> 1) % len(table)])
+                    elif bf16:
+                        lanes.append(ordinary_bf16(w))
+                    else:
+                        lanes.append(ordinary_f32(w))
+                width = 16 if bf16 else 32
+                v[i] = sum(lane << (width * k) for k, lane in enumerate(lanes))
+        fpcr = (r.next() & 0x1F) << 22
+    if kind in ("FA", "HA", "BA"):
+        # The same inputs with FEAT_AFP's FPCR.FIZ, AH and NEP at random.
+        fpcr |= r.next() & 0x7
     if kind == "T":
         rn = (insn >> 5) & 31
         if rn != 31:
             x[rn] = CODE + ((r.next() & 0x3FFF) << 2)
-    if kind in ("M", "R"):
+    if kind in ("M", "R", "ZM", "ZR"):
+        # A base in the data region; with R, an offset register too. ZM and
+        # ZR are the same for gen_qemu_sve.py's ZA loads and stores.
         rn = (insn >> 5) & 31
         base = DATA + 0x4000 + (r.next() & 0x3F0)
         if rn == 31:
             sp = base
         else:
             x[rn] = base
-        if kind == "R":
+        if kind in ("R", "ZR"):
             rm = (insn >> 16) & 31
             off = (r.next() & 0xF) << 4
             if rm != 31 and rm != rn:
@@ -155,6 +206,34 @@ F64_SPECIAL = [
     0x43F0000000000000, 0x47EFFFFFE0000000, 0x36A0000000000000,
     0x3810000000000000, 0x380FFFFFFFFFFFFF,
 ]
+
+
+F16_SPECIAL = [
+    0x0000, 0x8000, 0x7C00, 0xFC00, 0x7E00, 0xFE12, 0x7C01, 0xFD00,
+    0x0001, 0x83FF, 0x0400, 0x8400, 0x7BFF, 0xFBFF, 0x3C00, 0xBC00,
+    0x3800, 0xB800, 0x3E00, 0x4100, 0xC100, 0x4300, 0x6400, 0x67FF,
+    0x7800, 0xF800, 0x7BFE, 0x0200, 0x3BFF, 0x3C01, 0x0401, 0x03FF,
+]
+
+
+def ordinary_f16(w):
+    """A finite half value of moderate size: exponent 9..21 (2^-6..2^6)."""
+    return ((w >> 63) << 15) | ((9 + ((w >> 32) % 13)) << 10) | (w & 0x3FF)
+
+
+# BFloat16's zeros, infinities, quiet and signalling NaNs, denormals, the
+# extreme normals, ones, halves, and magnitudes whose products overflow or
+# underflow single precision.
+BF16_SPECIAL = [
+    0x0000, 0x8000, 0x7F80, 0xFF80, 0x7FC0, 0xFFC1, 0x7F81, 0xFFA0,
+    0x0001, 0x807F, 0x0080, 0x8080, 0x7F7F, 0xFF7F, 0x3F80, 0xBF80,
+    0x3F00, 0x3FC0, 0x5F80, 0x1F80, 0x7F00, 0x0100, 0x3F81, 0xC040,
+]
+
+
+def ordinary_bf16(w):
+    """A normal BFloat16 value with exponent within 2^±10, as ordinary_f32."""
+    return ((w >> 63) << 15) | ((117 + ((w >> 32) % 21)) << 7) | (w & 0x7F)
 
 
 def ordinary_f32(w):
@@ -291,6 +370,9 @@ FAMILIES = [
 
 
 def run_case(insn, seed, kind):
+    from unicorn import Uc, UcError, UC_ARCH_ARM64, UC_MODE_ARM
+    from unicorn import arm64_const as A
+
     x, sp, nzcv, v, data, fpcr = initial_state(seed, kind, insn)
     uc = Uc(UC_ARCH_ARM64, UC_MODE_ARM)
     uc.ctl_set_cpu_model(A.UC_CPU_ARM64_A57)
@@ -321,7 +403,18 @@ def run_case(insn, seed, kind):
     vs = [uc.reg_read(A.UC_ARM64_REG_Q0 + i) for i in range(32)]
     out_data = uc.mem_read(DATA, DATA_SIZE)
     fpsr = uc.reg_read(A.UC_ARM64_REG_FPSR)
-    regs =[f"{i}:{xs[i]:x}" for i in range(31) if xs[i] != x[i]]
+    before = (x, sp, v, data)
+    after = (xs, out_sp, vs, out_data)
+    return vector_line(kind, insn, seed, pc, out_nzcv, fpsr, before, after)
+
+
+def vector_line(kind, insn, seed, pc, out_nzcv, fpsr, before, after):
+    """A vector's fields after its family name: the PC, NZCV and FPSR after
+    the step and what changed of the registers, SP and data bytes, from
+    `before` and `after`, each `(x, sp, v, data)`."""
+    x, sp, v, data = before
+    xs, out_sp, vs, out_data = after
+    regs = [f"{i}:{xs[i]:x}" for i in range(31) if xs[i] != x[i]]
     if out_sp != sp:
         regs.append(f"31:{out_sp:x}")
     vregs = [f"{i}:{vs[i]:x}" for i in range(32) if vs[i] != v[i]]

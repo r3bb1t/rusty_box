@@ -13,10 +13,14 @@
 //! clamps.
 //!
 //! The floating-point opcodes of these classes are handed to `simd_fp`.
+//! The later integer extensions are here too: SQRDMLAH and SQRDMLSH
+//! (FEAT_RDM), the dot products (FEAT_DotProd, FEAT_I8MM) and the 8-bit
+//! matrix multiplies (FEAT_I8MM), from the Arm A64 ISA XML pages of each.
 
 use super::crypto::polynomial_mult;
 use super::dp::ones;
 use super::exec::{bit, bits, sext, ExecResult, Flow};
+use super::fp::FpType;
 use super::simd::{at_datasize, elem, set_elem};
 use super::Cpu;
 
@@ -45,9 +49,10 @@ fn uint(v: u64) -> i128 {
     i128::from(v)
 }
 
-/// Arm ARM `Int(x, unsigned)`.
+/// Arm ARM `Int(x, unsigned)`, of an element already masked to `esize`
+/// bits.
 #[inline]
-fn int(v: u64, esize: u32, unsigned: bool) -> i128 {
+pub(crate) fn int(v: u64, esize: u32, unsigned: bool) -> i128 {
     if unsigned {
         uint(v)
     } else {
@@ -62,7 +67,7 @@ fn low(value: i128, esize: u32) -> u64 {
 }
 
 /// Arm ARM `SatQ(value, esize, unsigned)`; records a clamp in `qc`.
-fn sat(value: i128, esize: u32, unsigned: bool, qc: &mut bool) -> u64 {
+pub(crate) fn sat(value: i128, esize: u32, unsigned: bool, qc: &mut bool) -> u64 {
     let (min, max) = if unsigned {
         (0, (1i128 << esize) - 1)
     } else {
@@ -89,22 +94,58 @@ const fn all_if(condition: bool) -> u64 {
     }
 }
 
-/// The shift of SSHL/USHL/SRSHL/URSHL/SQSHL/UQSHL/SQRSHL/UQRSHL (register):
-/// `element` shifted by the signed low byte of `amount` — left when
-/// positive, right (an arithmetic shift of the exact value) when negative —
-/// with `rounding` adding half of the last bit shifted out, then truncated,
-/// or saturated when `saturate` gives the result's signedness.
-fn shift_by_register(
-    element: i128,
-    amount: u64,
-    esize: u32,
-    rounding: bool,
-    saturate: Option<bool>,
-    qc: &mut bool,
-) -> u64 {
-    let shift = i32::from(amount as u8 as i8);
+/// SQDMULH and SQRDMULH before their saturation: `(2 * a * b + rounding)
+/// >> esize`, the rounding `2^(esize-1)` with `rounding`. Computed as `(a
+/// * b + rounding / 2) >> (esize - 1)`, the same integer, which stays in
+/// `i128` for the 64-bit elements of SVE, where `2 * a * b` need not.
+pub(crate) fn doubling_mul_high(a: i128, b: i128, esize: u32, rounding: bool) -> i128 {
+    let half_rounding = if rounding { 1i128 << (esize - 2) } else { 0 };
+    (a * b + half_rounding) >> (esize - 1)
+}
+
+/// SQRDMLAH, SQRDMLSH (`subtract`) and SQRDCMLAH before their
+/// saturation: `((acc << esize) +/- 2 * a * b + 2^(esize-1)) >> esize`.
+/// Computed as `acc + ((+/-a * b + 2^(esize-2)) >> (esize - 1))`, the same
+/// integer, which stays in `i128` for the 64-bit elements of SVE.
+pub(crate) fn rounding_doubling_mul_add(acc: i128, a: i128, b: i128, esize: u32, subtract: bool) -> i128 {
+    let product = if subtract { -(a * b) } else { a * b };
+    acc + ((product + (1i128 << (esize - 2))) >> (esize - 1))
+}
+
+/// SQRDMLAH and SQRDMLSH on one lane (FEAT_RDM): `element3 << esize`
+/// plus, or with `subtract` minus, twice the product, shifted right by
+/// `esize` with rounding (Arm `RShr`) and saturated (`SignedSatQ`).
+fn rdm_lane(a: u64, b: u64, d: u64, esize: u32, subtract: bool, qc: &mut bool) -> u64 {
+    let value = rounding_doubling_mul_add(sint(d, esize), sint(a, esize), sint(b, esize), esize, subtract);
+    sat(value, esize, false, qc)
+}
+
+/// A register's bytes as one operand of a dot product or an 8-bit matrix
+/// multiply, each read signed or, with `unsigned`, unsigned.
+#[derive(Clone, Copy)]
+struct Bytes {
+    v: u128,
+    unsigned: bool,
+}
+
+/// The sum of the `count` products of the bytes of `a` from byte `a_first`
+/// with those of `b` from byte `b_first`, each byte Arm's `Int(byte,
+/// unsigned)`: the inner loop of the dot products and of `MatMulAdd`.
+fn byte_products(a: Bytes, a_first: u32, b: Bytes, b_first: u32, count: u32) -> i128 {
+    (0..count)
+        .map(|k| int(elem(a.v, a_first + k, 8), 8, a.unsigned) * int(elem(b.v, b_first + k, 8), 8, b.unsigned))
+        .sum()
+}
+
+/// The shift of a shift by register: `element`, an `esize`-bit value,
+/// shifted left by `shift` when it is positive, right (an arithmetic shift
+/// of the exact value) when negative, with `rounding` adding half of the
+/// last bit shifted out. Exact, but for a left shift by `esize` or more,
+/// which gives a value whose low `esize` bits are zero and which saturates
+/// as the exact one does.
+pub(crate) fn shift_signed(element: i128, shift: i32, esize: u32, rounding: bool) -> i128 {
     let n = shift.unsigned_abs();
-    let value = if shift >= 0 {
+    if shift >= 0 {
         if n >= esize {
             // Every bit leaves the element: the low bits are zero, and a
             // saturating shift clamps toward the element's sign.
@@ -123,7 +164,22 @@ fn shift_by_register(
     } else {
         let round = if rounding { 1i128 << (n - 1) } else { 0 };
         (element + round) >> n
-    };
+    }
+}
+
+/// The shift of SSHL/USHL/SRSHL/URSHL/SQSHL/UQSHL/SQRSHL/UQRSHL (register):
+/// `element` shifted by the signed low byte of `amount` ([`shift_signed`]),
+/// then truncated, or saturated when `saturate` gives the result's
+/// signedness.
+fn shift_by_register(
+    element: i128,
+    amount: u64,
+    esize: u32,
+    rounding: bool,
+    saturate: Option<bool>,
+    qc: &mut bool,
+) -> u64 {
+    let value = shift_signed(element, i32::from(amount as u8 as i8), esize, rounding);
     match saturate {
         Some(unsigned) => sat(value, esize, unsigned, qc),
         None => low(value, esize),
@@ -220,7 +276,7 @@ impl Cpu {
         let d = self.v[rd];
 
         if opcode >= 0b11000 {
-            return self.exec_simd_same_fp(pc, insn, scalar);
+            return self.exec_simd_same_fp(pc, insn, scalar, FpType::from_sz(bit(insn, 22)));
         }
         if opcode == 0b00011 {
             // AND, BIC, ORR, ORN, EOR, BSL, BIT, BIF.
@@ -238,7 +294,7 @@ impl Cpu {
                 (true, 2) => (d & !m) | (n & m),
                 (true, _) => (d & m) | (n & !m),
             };
-            self.v[rd] = at_datasize(r, q);
+            self.write_v(rd, at_datasize(r, q));
             return Ok(Flow::Next);
         }
 
@@ -311,10 +367,8 @@ impl Cpu {
             (0b10011, false) => |a, b, _, _, _| a.wrapping_mul(b),
             (0b10011, true) => |a, b, _, _, _| polynomial_mult(a, b, 8) as u64,
             // SQDMULH, SQRDMULH
-            (0b10110, false) => |a, b, _, e, qc| sat((2 * sint(a, e) * sint(b, e)) >> e, e, false, qc),
-            (0b10110, true) => {
-                |a, b, _, e, qc| sat((2 * sint(a, e) * sint(b, e) + (1i128 << (e - 1))) >> e, e, false, qc)
-            }
+            (0b10110, false) => |a, b, _, e, qc| sat(doubling_mul_high(sint(a, e), sint(b, e), e, false), e, false, qc),
+            (0b10110, true) => |a, b, _, e, qc| sat(doubling_mul_high(sint(a, e), sint(b, e), e, true), e, false, qc),
             // ADDP
             (0b10111, false) => |a, b, _, _, _| a.wrapping_add(b),
             // Every other opcode below 11000 except 00011 is listed above
@@ -344,7 +398,7 @@ impl Cpu {
             set_elem(&mut r, e, esize, op(a, b, elem(d, e, esize), esize, &mut qc));
         }
         self.note_saturation(qc);
-        self.v[rd] = r;
+        self.write_v(rd, r);
         Ok(Flow::Next)
     }
 
@@ -362,7 +416,7 @@ impl Cpu {
         let lanes = if scalar { 1 } else { datasize(q) / esize };
 
         if opcode >= 0b10110 || ((0b01100..=0b01111).contains(&opcode) && size >= 2) {
-            return self.exec_simd_misc_fp(pc, insn, scalar);
+            return self.exec_simd_misc_fp(pc, insn, scalar, FpType::from_sz(bit(insn, 22)));
         }
 
         let mut qc = false;
@@ -518,7 +572,7 @@ impl Cpu {
             _ => return self.undefined(pc, insn),
         }
         self.note_saturation(qc);
-        self.v[rd] = r;
+        self.write_v(rd, r);
         Ok(Flow::Next)
     }
 
@@ -652,7 +706,7 @@ impl Cpu {
             }
         }
         self.note_saturation(qc);
-        self.v[rd] = r;
+        self.write_v(rd, r);
         Ok(Flow::Next)
     }
 
@@ -685,7 +739,7 @@ impl Cpu {
         if pmull_64 {
             self.simd_check()?;
             let half = u32::from(q);
-            self.v[rd] = polynomial_mult(elem(n, half, 64), elem(m, half, 64), 64);
+            self.write_v(rd, polynomial_mult(elem(n, half, 64), elem(m, half, 64), 64));
             return Ok(Flow::Next);
         }
         // ADDHN, RADDHN, SUBHN, RSUBHN narrow; everything else widens.
@@ -723,7 +777,7 @@ impl Cpu {
                 let value = if matches!(op, LongOp::Add) { a + b } else { a - b };
                 set_elem(&mut part, e, esize, low((value + round) >> esize, esize));
             }
-            self.v[rd] = narrow_into(d, part, upper);
+            self.write_v(rd, narrow_into(d, part, upper));
             return Ok(Flow::Next);
         }
 
@@ -743,7 +797,7 @@ impl Cpu {
             set_elem(&mut r, e, wide, long_lane(op, x, y, elem(d, e, wide), wide, &mut qc));
         }
         self.note_saturation(qc);
-        self.v[rd] = r;
+        self.write_v(rd, r);
         Ok(Flow::Next)
     }
 
@@ -777,10 +831,14 @@ impl Cpu {
             (0b0000, true) if !scalar => Kind::Same(|a, b, d, _, _| d.wrapping_add(a.wrapping_mul(b))),
             (0b0100, true) if !scalar => Kind::Same(|a, b, d, _, _| d.wrapping_sub(a.wrapping_mul(b))),
             (0b1000, false) if !scalar => Kind::Same(|a, b, _, _, _| a.wrapping_mul(b)),
-            (0b1100, false) => Kind::Same(|a, b, _, e, qc| sat((2 * sint(a, e) * sint(b, e)) >> e, e, false, qc)),
-            (0b1101, false) => Kind::Same(|a, b, _, e, qc| {
-                sat((2 * sint(a, e) * sint(b, e) + (1i128 << (e - 1))) >> e, e, false, qc)
-            }),
+            (0b1100, false) => {
+                Kind::Same(|a, b, _, e, qc| sat(doubling_mul_high(sint(a, e), sint(b, e), e, false), e, false, qc))
+            }
+            (0b1101, false) => {
+                Kind::Same(|a, b, _, e, qc| sat(doubling_mul_high(sint(a, e), sint(b, e), e, true), e, false, qc))
+            }
+            (0b1101, true) => Kind::Same(|a, b, d, e, qc| rdm_lane(a, b, d, e, false, qc)),
+            (0b1111, true) => Kind::Same(|a, b, d, e, qc| rdm_lane(a, b, d, e, true, qc)),
             (0b0010, _) if !scalar => Kind::Long(LongOp::MulAcc),
             (0b0110, _) if !scalar => Kind::Long(LongOp::MulSub),
             (0b1010, _) if !scalar => Kind::Long(LongOp::Mul),
@@ -811,7 +869,7 @@ impl Cpu {
             }
         }
         self.note_saturation(qc);
-        self.v[rd] = r;
+        self.write_v(rd, r);
         Ok(Flow::Next)
     }
 
@@ -864,7 +922,114 @@ impl Cpu {
             Across::Max => low(max, esize),
             Across::Min => low(min, esize),
         };
-        self.v[bits(insn, 4, 0) as usize] = u128::from(value);
+        self.write_v(bits(insn, 4, 0) as usize, u128::from(value));
+        Ok(Flow::Next)
+    }
+
+    /// SQRDMLAH and SQRDMLSH (FEAT_RDM), vector (`0 Q 1 01110 size 0 Rm 1
+    /// 000 S 1 Rn Rd`) and scalar (`01 1 11110 size 0 Rm 1 000 S 1 Rn Rd`):
+    /// 16- and 32-bit elements only.
+    pub(crate) fn exec_simd_rdm(&mut self, pc: u64, insn: u32, scalar: bool) -> ExecResult {
+        let q = bit(insn, 30);
+        let size = bits(insn, 23, 22);
+        if size == 0b00 || size == 0b11 {
+            return self.undefined(pc, insn);
+        }
+        let subtract = bit(insn, 11);
+        self.simd_check()?;
+        let esize = 8u32 << size;
+        let n = self.v[bits(insn, 9, 5) as usize];
+        let m = self.v[bits(insn, 20, 16) as usize];
+        let rd = bits(insn, 4, 0) as usize;
+        let d = self.v[rd];
+        let lanes = if scalar { 1 } else { datasize(q) / esize };
+        let mut qc = false;
+        let mut r = 0u128;
+        for e in 0..lanes {
+            let lane = rdm_lane(elem(n, e, esize), elem(m, e, esize), elem(d, e, esize), esize, subtract, &mut qc);
+            set_elem(&mut r, e, esize, lane);
+        }
+        self.note_saturation(qc);
+        self.write_v(rd, r);
+        Ok(Flow::Next)
+    }
+
+    /// The dot products: SDOT, UDOT (FEAT_DotProd) and USDOT, SUDOT
+    /// (FEAT_I8MM), vector (`0 Q U 01110 size 0 Rm 1 001 x 1 Rn Rd`) and by
+    /// element (`0 Q U 01111 size L M Rm 111 x H 0 Rn Rd`, `size` being
+    /// `US 0` for SUDOT and USDOT). Each 32-bit lane of Vd adds, wrapping,
+    /// the four products of the bytes of its lane of Vn with those of the
+    /// same lane of Vm, or of lane `H:L` of Vm by element.
+    pub(crate) fn exec_simd_dot(&mut self, pc: u64, insn: u32, by_element: bool) -> ExecResult {
+        let q = bit(insn, 30);
+        let u = bit(insn, 29);
+        let mixed = if by_element { bit(insn, 12) } else { bit(insn, 11) };
+        // Whether Vn's bytes and Vm's are unsigned. USDOT is unsigned by
+        // signed, SUDOT signed by unsigned (by element, `US` says which).
+        let (n_unsigned, m_unsigned) = if mixed {
+            let us = !by_element || bit(insn, 23);
+            (us, !us)
+        } else {
+            if bits(insn, 23, 22) != 0b10 {
+                return self.undefined(pc, insn);
+            }
+            (u, u)
+        };
+        self.simd_check()?;
+        let n = Bytes {
+            v: self.v[bits(insn, 9, 5) as usize],
+            unsigned: n_unsigned,
+        };
+        let m = Bytes {
+            v: self.v[bits(insn, 20, 16) as usize],
+            unsigned: m_unsigned,
+        };
+        // By element, every lane takes lane H:L of Vm.
+        let index = by_element.then(|| (bits(insn, 11, 11) << 1) | bits(insn, 21, 21));
+        let rd = bits(insn, 4, 0) as usize;
+        let d = self.v[rd];
+        let mut r = 0u128;
+        for e in 0..datasize(q) / 32 {
+            let m_lane = index.unwrap_or(e);
+            let sum = uint(elem(d, e, 32)) + byte_products(n, 4 * e, m, 4 * m_lane, 4);
+            set_elem(&mut r, e, 32, low(sum, 32));
+        }
+        self.write_v(rd, r);
+        Ok(Flow::Next)
+    }
+
+    /// SMMLA, USMMLA, UMMLA (FEAT_I8MM): `0 1 U 01110 10 0 Rm 1 010 B 1 Rn
+    /// Rd`, Arm `MatMulAdd`. Vn holds a 2x8 matrix of bytes by rows, Vm a
+    /// 2x8 one whose rows are the columns of the 8x2 matrix it stands for,
+    /// and Vd a 2x2 matrix of 32-bit words by rows, which the product is
+    /// added to, wrapping. USMMLA's Vn is unsigned and its Vm signed.
+    pub(crate) fn exec_simd_mmla(&mut self, pc: u64, insn: u32) -> ExecResult {
+        let (n_unsigned, m_unsigned) = match (bit(insn, 29), bit(insn, 11)) {
+            (false, false) => (false, false),
+            (false, true) => (true, false),
+            (true, false) => (true, true),
+            // The decoder allocates no such word to this class.
+            (true, true) => return self.undefined(pc, insn),
+        };
+        self.simd_check()?;
+        let n = Bytes {
+            v: self.v[bits(insn, 9, 5) as usize],
+            unsigned: n_unsigned,
+        };
+        let m = Bytes {
+            v: self.v[bits(insn, 20, 16) as usize],
+            unsigned: m_unsigned,
+        };
+        let rd = bits(insn, 4, 0) as usize;
+        let d = self.v[rd];
+        let mut r = 0u128;
+        for i in 0..2 {
+            for j in 0..2 {
+                let sum = uint(elem(d, 2 * i + j, 32)) + byte_products(n, 8 * i, m, 8 * j, 8);
+                set_elem(&mut r, 2 * i + j, 32, low(sum, 32));
+            }
+        }
+        self.write_v(rd, r);
         Ok(Flow::Next)
     }
 
@@ -872,18 +1037,27 @@ impl Cpu {
     /// (scalar).
     pub(crate) fn exec_simd_scalar_pair(&mut self, pc: u64, insn: u32) -> ExecResult {
         if bit(insn, 29) {
-            return self.exec_simd_pair_fp(pc, insn);
+            return self.exec_simd_pair_fp(pc, insn, FpType::from_sz(bit(insn, 22)));
         }
-        if bits(insn, 16, 12) != 0b11011 || bits(insn, 23, 22) != 3 {
+        // With U = 0 every opcode but ADDP's is half precision (FEAT_FP16,
+        // which the decoder checks).
+        if bits(insn, 16, 12) != 0b11011 {
+            return self.exec_simd_pair_fp(pc, insn, FpType::Half);
+        }
+        if bits(insn, 23, 22) != 3 {
             return self.undefined(pc, insn);
         }
         self.simd_check()?;
         let n = self.v[bits(insn, 9, 5) as usize];
         let sum = (n as u64).wrapping_add((n >> 64) as u64);
-        self.v[bits(insn, 4, 0) as usize] = u128::from(sum);
+        self.write_v(bits(insn, 4, 0) as usize, u128::from(sum));
         Ok(Flow::Next)
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/unit/simd_extensions.rs"]
+mod extension_tests;
 
 #[cfg(test)]
 mod tests {

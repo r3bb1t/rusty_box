@@ -405,10 +405,12 @@ fn production_panics(text: &str) -> usize {
     for line in text.lines() {
         let trimmed = line.trim_start();
         let is_doc_or_comment = trimmed.starts_with("//");
+        // Literals blanked first, so a `//` inside a string ("a//b",
+        // "http://…") does not cut the line's code short.
         let code = if is_doc_or_comment {
             String::new()
         } else {
-            without_literals(line.split("//").next().unwrap_or(""))
+            without_literals(line).split("//").next().unwrap_or("").to_owned()
         };
         let opens = code.matches('{').count() as i32;
         let closes = code.matches('}').count() as i32;
@@ -1341,5 +1343,34 @@ mod tests {
 }
 "##;
         assert_eq!(production_panics(source), 2);
+    }
+
+    /// A `//` inside a string is not a comment: the code after it on the
+    /// line is counted, and the braces on it are too, so a test module
+    /// holding one stays test code to its end.
+    #[test]
+    fn a_double_slash_in_a_string_is_not_a_comment() {
+        let production = r##"
+fn production(url: Option<&str>) -> usize {
+    "http://example".len() + url.unwrap().len()
+}
+"##;
+        assert_eq!(production_panics(production), 1);
+
+        let tests = r##"
+#[cfg(test)]
+mod tests {
+    fn paths() {
+        for refused in ["/", "a//b"] {
+            assert!(!refused.is_empty());
+        }
+    }
+
+    fn after() {
+        Some(1).expect("not counted");
+    }
+}
+"##;
+        assert_eq!(production_panics(tests), 0);
     }
 }

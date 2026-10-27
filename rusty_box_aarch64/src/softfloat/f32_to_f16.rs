@@ -24,7 +24,7 @@ pub(crate) fn f32_to_f16(a: Float32, status: &mut SoftFloatStatus) -> Float16 {
                 softfloat_raise_flags(status, FLAG_INVALID);
             }
             if softfloat_default_nan_mode(status) {
-                return FLOAT16_DEFAULT_NAN;
+                return float16_default_nan(status);
             }
             return ((sign as u16) << 15) | 0x7E00 | ((frac >> 13) as u16);
         }

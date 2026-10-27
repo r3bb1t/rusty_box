@@ -19,8 +19,9 @@
 //! memory whose fetches are stable ([`FetchSource::Stable`]), and must be
 //! one of: a NOP; one 64-bit compare (`SUBS XZR` of `Xt` and a register, in
 //! either order, or of `Xt` and an immediate); after the compare, a `B.cond`
-//! on an ordering (HS, LO, HI, LS, GE, LT, GT, LE); `B`, `BL`; `BR`, `BLR`
-//! (`RET` included) through a register other than `Xt`. The iteration must
+//! on an ordering (HS, LO, HI, LS, GE, LT, GT, LE); `B`, `BL`; `RET`, and
+//! without FEAT_BTI `BR` and `BLR`, through a register other than `Xt`.
+//! The iteration must
 //! come back to the read within [`MAX_POLL_LEN`] instructions, the read
 //! included, with the compare run and `x30` holding what it held before,
 //! and run no instruction at an exit address of the caller's.
@@ -87,6 +88,7 @@
 use super::decode::classify;
 use super::dp::add_with_carry;
 use super::exec::{bits, cond_holds, Nzcv};
+use super::features::Feature;
 use super::op::{predecode, Op};
 use super::sysreg::SysRegKey;
 use super::trace::PollBound;
@@ -171,10 +173,14 @@ enum PollOp {
     Bl {
         offset: u64,
     },
-    /// `BR`, `RET` included.
+    /// `BR`, which sets PSTATE.BTYPE with FEAT_BTI.
     Br {
         rn: u8,
     },
+    Ret {
+        rn: u8,
+    },
+    /// `BLR`, which sets PSTATE.BTYPE with FEAT_BTI.
     Blr {
         rn: u8,
     },
@@ -208,6 +214,7 @@ impl PollOp {
             Op::B { offset } => Some(Self::B { offset }),
             Op::Bl { offset } => Some(Self::Bl { offset }),
             Op::Br { rn } => Some(Self::Br { rn }),
+            Op::Ret { rn } => Some(Self::Ret { rn }),
             Op::Blr { rn } => Some(Self::Blr { rn }),
             Op::Class { .. }
             | Op::BCond { .. }
@@ -266,6 +273,7 @@ impl PollStep {
                 | PollOp::B { .. }
                 | PollOp::Bl { .. }
                 | PollOp::Br { .. }
+                | PollOp::Ret { .. }
                 | PollOp::Blr { .. },
             ) => Self::Branch,
         }
@@ -297,7 +305,7 @@ impl Cpu {
             FetchSource::Volatile => return None,
         }
         let word = bus.fetch(pa, self.clock()).ok()?;
-        Some(predecode(classify(word), word))
+        Some(predecode(classify(word, self.imp.features), word))
     }
 
     /// General register `n` (31 reading as zero) as an iteration of a poll
@@ -375,8 +383,19 @@ impl Cpu {
                     jumps += 1;
                     self.branch_addr(pc.wrapping_add(offset))
                 }
+                // A branch that sets PSTATE.BTYPE (FEAT_BTI) makes the
+                // instruction it reaches check it, and that check may fault,
+                // which the walk does not follow: with FEAT_BTI, no `BR` or
+                // `BLR` is accepted.
                 PollOp::Br { rn } => {
                     // Through a register other than the counter's.
+                    if u32::from(rn) == rt || self.implements(Feature::Bti) {
+                        return None;
+                    }
+                    jumps += 1;
+                    self.branch_addr(self.poll_reg(rn, rt, value, x30))
+                }
+                PollOp::Ret { rn } => {
                     if u32::from(rn) == rt {
                         return None;
                     }
@@ -384,7 +403,7 @@ impl Cpu {
                     self.branch_addr(self.poll_reg(rn, rt, value, x30))
                 }
                 PollOp::Blr { rn } => {
-                    if u32::from(rn) == rt {
+                    if u32::from(rn) == rt || self.implements(Feature::Bti) {
                         return None;
                     }
                     let target = self.poll_reg(rn, rt, value, x30);
@@ -416,7 +435,7 @@ impl Cpu {
         len: u64,
         i: u64,
     ) -> Option<PollCycle> {
-        self.walk_poll(bus, poll, self.counter_at(self.icount + i * len))
+        self.walk_poll(bus, poll, self.counter_at(self.icount + i * len).get())
     }
 
     /// Before the counter read `word` at `pc` executes: if it is the read
@@ -460,7 +479,7 @@ impl Cpu {
             rt,
             exits: bound.exits,
         };
-        let Some(cycle) = self.walk_poll(bus, poll, self.counter()) else {
+        let Some(cycle) = self.walk_poll(bus, poll, self.counter().get()) else {
             return;
         };
         let len = cycle.len;
@@ -472,7 +491,7 @@ impl Cpu {
         }
         // Below 2^62 the signed orderings of the counter are monotone too.
         match self.icount.checked_add(fit * len) {
-            Some(end) if self.counter_at(end) < 1 << 62 => {}
+            Some(end) if self.counter_at(end).get() < 1 << 62 => {}
             Some(_) | None => return,
         }
         let same = |cpu: &Self, bus: &mut B, i: u64| {
@@ -502,7 +521,7 @@ impl Cpu {
         let Some(last) = self.poll_iteration(bus, poll, len, skip - 1) else {
             return;
         };
-        self.x[rt as usize] = self.counter_at(self.icount + (skip - 1) * len);
+        self.x[rt as usize] = self.counter_at(self.icount + (skip - 1) * len).get();
         self.pstate.set_flags(last.flags);
         self.icount += skip * len;
         self.retired += skip * len;

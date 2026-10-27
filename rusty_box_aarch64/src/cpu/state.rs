@@ -2,15 +2,34 @@
 //! state at one moment, reset, and saving and restoring the whole processor.
 
 use rusty_box_core::snap::{SnapRead, SnapResult, SnapWrite};
-use rusty_box_core::SnapError;
+use rusty_box_core::{SnapError, VmInstant};
 
+use super::features::{Feature, Implementation};
 use super::regs::{CpuState, Reg, RegClass, VReg};
 use super::sysreg::MDSCR_FIELDS;
-use super::{Activity, Cpu, El, ExclusiveMonitor, Pstate, SysRegs, PC_HISTORY};
+use super::wait::{EventRegister, Wait};
+use super::{pauth, sme, Activity, Btype, Cpu, El, ExclusiveMonitor, Pstate, SysRegs, PC_HISTORY};
 
-/// `FPCR` bits this core keeps: AHP, DN, FZ and RMode. The trap enables read
-/// as zero on a core without trapped floating-point exceptions.
-pub(crate) const FPCR_MASK: u64 = 0x07C0_0000;
+/// How a snapshot names the processor's activity.
+mod activity_tag {
+    pub(super) const RUNNING: u8 = 0;
+    pub(super) const INTERRUPT: u8 = 1;
+    pub(super) const INTERRUPT_UNTIL: u8 = 2;
+    pub(super) const EVENT: u8 = 3;
+    pub(super) const EVENT_UNTIL: u8 = 4;
+}
+
+/// `FPCR` bits a processor implementing `imp` keeps: AHP, DN, FZ and RMode,
+/// FZ16 with FEAT_FP16, and FIZ, AH and NEP with FEAT_AFP (RES0 without
+/// them). The trap enables read as zero on a core without trapped
+/// floating-point exceptions.
+pub(crate) const fn fpcr_mask(imp: Implementation) -> u64 {
+    use crate::softfloat::{FPCR_AH, FPCR_FIZ, FPCR_FZ16, FPCR_NEP};
+    const BASE: u64 = 0x07C0_0000;
+    let fp16 = if imp.has(Feature::Fp16) { FPCR_FZ16 } else { 0 };
+    let afp = if imp.has(Feature::Afp) { FPCR_FIZ | FPCR_AH | FPCR_NEP } else { 0 };
+    BASE | fp16 | afp
+}
 
 /// `FPSR` bits this core keeps: N, Z, C, V, QC and the cumulative exception
 /// flags.
@@ -19,7 +38,7 @@ pub(crate) const FPSR_MASK: u64 =
 
 /// How many system register values a snapshot carries, in
 /// [`SysRegs::to_array`] order.
-const SYSREG_COUNT: usize = 44;
+const SYSREG_COUNT: usize = 47;
 
 impl SysRegs {
     fn to_array(&self) -> [u64; SYSREG_COUNT] {
@@ -44,6 +63,8 @@ impl SysRegs {
             self.tpidr_el0,
             self.tpidrro_el0,
             self.tpidr_el1,
+            self.tpidr2_el0,
+            self.smcr_el1,
             self.csselr_el1,
             self.cntkctl_el1,
             self.cntfrq_el0,
@@ -66,6 +87,7 @@ impl SysRegs {
             self.dbgwvr[1],
             self.dbgwcr[0],
             self.dbgwcr[1],
+            self.disr_el1,
             u64::from(self.dtrrx),
             u64::from(self.dtrtx),
         ]
@@ -75,7 +97,7 @@ impl SysRegs {
     /// Channel data register wider than its 32 bits, and an `MDSCR_EL1`
     /// with a RES0 bit set, which no write stores.
     fn from_array(a: [u64; SYSREG_COUNT]) -> SnapResult<Self> {
-        let [sctlr_el1, actlr_el1, cpacr_el1, ttbr0_el1, ttbr1_el1, tcr_el1, spsr_el1, elr_el1, esr_el1, far_el1, afsr0_el1, afsr1_el1, par_el1, mair_el1, amair_el1, vbar_el1, contextidr_el1, tpidr_el0, tpidrro_el0, tpidr_el1, csselr_el1, cntkctl_el1, cntfrq_el0, cntp_ctl_el0, cntp_cval_el0, cntv_ctl_el0, cntv_cval_el0, mdscr_el1, mdccint_el1, oslsr_el1, osdlr_el1, oseccr_el1, dbgprcr_el1, dbgclaim, bvr0, bvr1, bcr0, bcr1, wvr0, wvr1, wcr0, wcr1, dtrrx, dtrtx] =
+        let [sctlr_el1, actlr_el1, cpacr_el1, ttbr0_el1, ttbr1_el1, tcr_el1, spsr_el1, elr_el1, esr_el1, far_el1, afsr0_el1, afsr1_el1, par_el1, mair_el1, amair_el1, vbar_el1, contextidr_el1, tpidr_el0, tpidrro_el0, tpidr_el1, tpidr2_el0, smcr_el1, csselr_el1, cntkctl_el1, cntfrq_el0, cntp_ctl_el0, cntp_cval_el0, cntv_ctl_el0, cntv_cval_el0, mdscr_el1, mdccint_el1, oslsr_el1, osdlr_el1, oseccr_el1, dbgprcr_el1, dbgclaim, bvr0, bvr1, bcr0, bcr1, wvr0, wvr1, wcr0, wcr1, disr_el1, dtrrx, dtrtx] =
             a;
         let data_register = |value: u64| {
             u32::try_from(value)
@@ -107,6 +129,8 @@ impl SysRegs {
             tpidr_el0,
             tpidrro_el0,
             tpidr_el1,
+            tpidr2_el0,
+            smcr_el1,
             csselr_el1,
             cntkctl_el1,
             cntfrq_el0,
@@ -127,6 +151,7 @@ impl SysRegs {
             dbgwcr: [wcr0, wcr1],
             dtrrx,
             dtrtx,
+            disr_el1,
         })
     }
 }
@@ -161,17 +186,21 @@ impl Cpu {
             v,
             fpcr,
             fpsr,
+            svcr,
+            scalable,
+            pac_keys,
+            imp,
             sys,
             monitor,
             event,
             tlb,
             traces,
             trace_break,
+            in_guarded_page,
             activity,
             icount: _,
             retired,
             ips: _,
-            counter_hz,
             timer_dirty,
             irq_line,
             fiq_line,
@@ -186,12 +215,16 @@ impl Cpu {
         *v = [0; 32];
         *fpcr = 0;
         *fpsr = 0;
-        *sys = SysRegs::reset(*counter_hz);
+        *svcr = sme::Svcr::RESET;
+        *scalable = sme::ScalableRegs::ZERO;
+        *pac_keys = pauth::PacKeys::ZERO;
+        *sys = SysRegs::reset(imp.counter_hz);
         *monitor = ExclusiveMonitor::CLEAR;
-        *event = super::timer::EventRegister::clear_at(count);
+        *event = EventRegister::at(false, count);
         tlb.flush();
         traces.flush();
         *trace_break = true;
+        *in_guarded_page = false;
         *activity = Activity::Running;
         *timer_dirty = true;
         *irq_line = false;
@@ -215,8 +248,9 @@ impl Cpu {
     }
 
     /// Set `reg`. `Nzcv`, `Daif`, `Fpcr` and `Fpsr` keep only the bits an
-    /// `MSR` would. Writing `Pc` moves execution; a processor waiting for an
-    /// interrupt keeps waiting.
+    /// `MSR` would. Writing `Pc` moves execution, by no branch: PSTATE.BTYPE
+    /// becomes 00, so no branch check applies at the new PC. A waiting
+    /// processor keeps waiting.
     pub(crate) fn set_reg(&mut self, reg: Reg, value: u64) {
         match reg.class() {
             RegClass::General(n) => self.x[n] = value,
@@ -225,11 +259,12 @@ impl Cpu {
             RegClass::SpEl1 => self.sp_el1 = value,
             RegClass::Pc => {
                 self.pc = value;
+                self.pstate.btype = Btype::None;
                 self.history.jump(value, self.retired);
             }
             RegClass::Nzcv => self.pstate.set_nzcv(value),
             RegClass::Daif => self.pstate.set_daif(value),
-            RegClass::Fpcr => self.fpcr = value & FPCR_MASK,
+            RegClass::Fpcr => self.fpcr = value & fpcr_mask(self.imp),
             RegClass::Fpsr => self.fpsr = value & FPSR_MASK,
         }
     }
@@ -240,14 +275,43 @@ impl Cpu {
     }
 
     pub(crate) fn set_v(&mut self, reg: VReg, value: u128) {
-        self.v[usize::from(reg.index())] = value;
+        self.write_v(usize::from(reg.index()), value);
     }
 
-    /// Replace `PSTATE`. At EL0 the only stack pointer is `SP_EL0`, so
-    /// `sp_sel` is cleared there.
+    /// Replace `PSTATE` with what of `pstate` this processor can hold.
     pub(crate) fn set_pstate(&mut self, pstate: Pstate) {
-        let sp_sel = pstate.sp_sel && pstate.el == El::El1;
-        self.pstate = Pstate { sp_sel, ..pstate };
+        self.pstate = self.held(pstate);
+    }
+
+    /// `pstate` as this processor holds it: at EL0 the only stack pointer
+    /// is `SP_EL0`, so `sp_sel` is cleared there, and a field of a feature
+    /// the processor lacks is clear (`btype` 00).
+    pub(crate) fn held(&self, pstate: Pstate) -> Pstate {
+        let has = |feature| self.implements(feature);
+        Pstate {
+            sp_sel: pstate.sp_sel && pstate.el == El::El1,
+            btype: if has(Feature::Bti) { pstate.btype } else { Btype::None },
+            pan: pstate.pan && has(Feature::Pan),
+            uao: pstate.uao && has(Feature::Uao),
+            dit: pstate.dit && has(Feature::Dit),
+            ssbs: pstate.ssbs && has(Feature::Ssbs),
+            ..pstate
+        }
+    }
+
+    /// The `SPSR_EL1` bits that hold a field of this processor's `PSTATE`:
+    /// [`Pstate::BASE`], and those of the fields [`Cpu::held`] keeps. The
+    /// rest are RES0.
+    pub(crate) fn spsr_mask(&self) -> u64 {
+        let every = Pstate {
+            btype: Btype::Jump,
+            pan: true,
+            uao: true,
+            dit: true,
+            ssbs: true,
+            ..Pstate::RESET
+        };
+        Pstate::BASE | self.held(every).to_spsr()
     }
 
     /// A copy of the architectural state now.
@@ -284,6 +348,10 @@ impl Cpu {
     /// with memory, so it cannot change an outcome, and a restore empties
     /// it.
     pub(crate) fn save<W: SnapWrite>(&self, w: &mut W) -> SnapResult {
+        w.write_u64(self.imp.features.bits())?;
+        w.write_u32(self.imp.max_svl.bits())?;
+        w.write_u64(self.imp.midr)?;
+        w.write_u64(self.imp.counter_hz.get())?;
         for x in self.x {
             w.write_u64(x)?;
         }
@@ -304,9 +372,18 @@ impl Cpu {
         w.write_u64(self.monitor.addr)?;
         w.write_u64(self.monitor.va)?;
         w.write_u64(self.monitor.bytes)?;
-        w.write_bool(self.event.set)?;
-        w.write_u64(self.event.stream_from)?;
-        w.write_bool(self.activity == Activity::WaitingForInterrupt)?;
+        let (tag, timeout) = match self.activity {
+            Activity::Running => (activity_tag::RUNNING, None),
+            Activity::Waiting(Wait::Interrupt) => (activity_tag::INTERRUPT, None),
+            Activity::Waiting(Wait::InterruptUntil(t)) => (activity_tag::INTERRUPT_UNTIL, Some(t)),
+            Activity::Waiting(Wait::Event) => (activity_tag::EVENT, None),
+            Activity::Waiting(Wait::EventUntil(t)) => (activity_tag::EVENT_UNTIL, Some(t)),
+        };
+        w.write_u8(tag)?;
+        if let Some(t) = timeout {
+            w.write_u64(t.ticks())?;
+        }
+        w.write_bool(self.event_register())?;
         w.write_u64(self.icount)?;
         w.write_u64(self.retired)?;
         self.tlb.save(w)?;
@@ -315,12 +392,26 @@ impl Cpu {
         for pc in recent {
             w.write_u64(pc)?;
         }
-        Ok(())
+        self.save_sme(w)?;
+        self.save_pauth(w)
     }
 
     /// The inverse of [`Cpu::save`]. The interrupt inputs are not part of
     /// the image: the machine drives them from its interrupt controller.
+    /// An image of another implementation — other features, another
+    /// streaming vector length, another `MIDR_EL1` or another system
+    /// counter — is refused before anything changes.
     pub(crate) fn restore<R: SnapRead>(&mut self, r: &mut R) -> SnapResult {
+        let features = r.read_u64()?;
+        let max_svl = r.read_u32()?;
+        let midr = r.read_u64()?;
+        let counter_hz = r.read_u64()?;
+        if features != self.imp.features.bits() || max_svl != self.imp.max_svl.bits() {
+            return Err(SnapError::Invalid("snapshot of a processor implementing other features"));
+        }
+        if midr != self.imp.midr || counter_hz != self.imp.counter_hz.get() {
+            return Err(SnapError::Invalid("snapshot of another processor"));
+        }
         let mut x = [0u64; 31];
         for reg in x.iter_mut() {
             *reg = r.read_u64()?;
@@ -330,40 +421,63 @@ impl Cpu {
         let pc = r.read_u64()?;
         let pstate = Pstate::from_spsr(r.read_u64()?)
             .ok_or(SnapError::Invalid("processor state names an exception level or mode this core lacks"))?;
+        if self.held(pstate) != pstate {
+            return Err(SnapError::Invalid("processor state holds a field of a feature this processor lacks"));
+        }
         let mut v = [0u128; 32];
         for reg in v.iter_mut() {
             let lo = r.read_u64()?;
             let hi = r.read_u64()?;
             *reg = u128::from(lo) | (u128::from(hi) << 64);
         }
-        let fpcr = r.read_u64()? & FPCR_MASK;
+        let fpcr = r.read_u64()? & fpcr_mask(self.imp);
         let fpsr = r.read_u64()? & FPSR_MASK;
         let mut sys = [0u64; SYSREG_COUNT];
         for value in sys.iter_mut() {
             *value = r.read_u64()?;
         }
         let sys = SysRegs::from_array(sys)?;
+        if !self.sme_registers_restorable(&sys) {
+            return Err(SnapError::Invalid("snapshot holds SME register bits this processor cannot set"));
+        }
+        if sys.spsr_el1 & !self.spsr_mask() != 0 {
+            return Err(SnapError::Invalid("snapshot's SPSR_EL1 holds bits this processor cannot set"));
+        }
+        if sys.cntkctl_el1 & !self.cntkctl_mask() != 0 {
+            return Err(SnapError::Invalid("snapshot's CNTKCTL_EL1 holds bits this processor cannot set"));
+        }
+        if sys.disr_el1 & !self.disr_mask() != 0 {
+            return Err(SnapError::Invalid("snapshot's DISR_EL1 holds bits this processor cannot set"));
+        }
         let monitor = ExclusiveMonitor {
             armed: r.read_bool()?,
             addr: r.read_u64()?,
             va: r.read_u64()?,
             bytes: r.read_u64()?,
         };
-        let event = super::timer::EventRegister {
-            set: r.read_bool()?,
-            stream_from: r.read_u64()?,
+        let activity = match r.read_u8()? {
+            activity_tag::RUNNING => Activity::Running,
+            activity_tag::INTERRUPT => Activity::Waiting(Wait::Interrupt),
+            activity_tag::INTERRUPT_UNTIL => Activity::Waiting(Wait::InterruptUntil(VmInstant::from_ticks(r.read_u64()?))),
+            activity_tag::EVENT => Activity::Waiting(Wait::Event),
+            activity_tag::EVENT_UNTIL => Activity::Waiting(Wait::EventUntil(VmInstant::from_ticks(r.read_u64()?))),
+            _ => return Err(SnapError::Invalid("processor activity names a wait this core lacks")),
         };
-        let activity = if r.read_bool()? {
-            Activity::WaitingForInterrupt
-        } else {
-            Activity::Running
-        };
+        if let Activity::Waiting(Wait::InterruptUntil(deadline) | Wait::EventUntil(deadline)) = activity {
+            if !self.implements(Feature::WfxT) {
+                return Err(SnapError::Invalid("processor waits with a timeout on a processor without FEAT_WFxT"));
+            }
+            if deadline.ticks() == u64::MAX {
+                return Err(SnapError::Invalid("processor's timed wait ends at no tick the count reaches"));
+            }
+        }
+        let event = r.read_bool()?;
         let icount = r.read_u64()?;
         let retired = r.read_u64()?;
         if retired > icount {
             return Err(SnapError::Invalid("processor retired more instructions than ticks passed"));
         }
-        self.tlb.restore(r)?;
+        self.tlb.restore(r, self.imp.features, sys.tcr_el1)?;
         let history_len = usize::from(r.read_u8()?);
         if history_len > PC_HISTORY {
             return Err(SnapError::Invalid("processor PC history is longer than it holds"));
@@ -386,14 +500,15 @@ impl Cpu {
         self.fpsr = fpsr;
         self.sys = sys;
         self.monitor = monitor;
-        self.event = event;
         self.activity = activity;
         self.icount = icount;
         self.retired = retired;
+        self.event = EventRegister::at(event, self.counter());
         self.timer_dirty = true;
         // The image's memory replaces the memory the traces were read from.
         self.flush_traces();
-        Ok(())
+        self.restore_sme(r)?;
+        self.restore_pauth(r)
     }
 }
 
@@ -404,11 +519,16 @@ mod tests {
     use rusty_box_core::ClockHz;
 
     fn cpu() -> Cpu {
-        Cpu::new(CpuConfig {
-            ips: ClockHz::BOCHS_DEFAULT,
-            counter_hz: ClockHz::BOCHS_DEFAULT,
-            reset_pc: 0x1000,
-        })
+        Cpu::implementing(
+            CpuConfig {
+                ips: ClockHz::BOCHS_DEFAULT,
+                reset_pc: 0x1000,
+            },
+            Implementation {
+                counter_hz: ClockHz::BOCHS_DEFAULT,
+                ..Implementation::CORTEX_A57
+            },
+        )
     }
 
     #[test]
@@ -450,22 +570,24 @@ mod tests {
         c.sys.sctlr_el1 = 1;
         c.sys.vbar_el1 = 0x4000;
         c.sys.cntv_cval_el0 = 99;
-        c.fpcr = FPCR_MASK;
+        c.fpcr = fpcr_mask(c.imp);
         c.monitor.armed = true;
-        c.send_event_local();
-        c.activity = Activity::WaitingForInterrupt;
+        c.send_event();
+        c.activity = Activity::Waiting(Wait::Interrupt);
         c.set_interrupt_lines(true, true);
         c.reset_keeping_time(0x2000);
         // The Event Register is clear, with the event stream counted from now.
-        assert_eq!(c.event, crate::cpu::timer::EventRegister::clear_at(c.counter()));
+        assert_eq!(c.event, EventRegister::at(false, c.counter()));
         assert_eq!((c.icount, c.retired), (500, 400));
         assert_eq!(c.reg(Reg::Pc), 0x2000);
         // Everything else is as a processor built to start there has it.
-        let mut fresh = Cpu::new(CpuConfig {
-            ips: ClockHz::BOCHS_DEFAULT,
-            counter_hz: ClockHz::BOCHS_DEFAULT,
-            reset_pc: 0x2000,
-        });
+        let mut fresh = Cpu::implementing(
+            CpuConfig {
+                ips: ClockHz::BOCHS_DEFAULT,
+                reset_pc: 0x2000,
+            },
+            c.imp,
+        );
         fresh.icount = 500;
         fresh.retired = 400;
         assert_eq!(c.state(), fresh.state());
@@ -494,6 +616,12 @@ mod tests {
         assert_eq!(restored.recent_pcs().collect::<std::vec::Vec<_>>(), [0x40]);
     }
 
+    /// Where an image's system registers start: after the implementation's
+    /// identity (its features, streaming vector length, `MIDR_EL1` and
+    /// counter frequency), X0-X30, SP_EL0, SP_EL1, PC, PSTATE, V0-V31,
+    /// FPCR and FPSR.
+    const SYSREGS_AT: usize = 8 + 4 + 8 + 8 + (31 + 4) * 8 + 32 * 16 + 2 * 8;
+
     #[test]
     fn a_processor_snapshot_with_a_debug_data_register_wider_than_32_bits_is_refused() {
         let mut c = cpu();
@@ -501,9 +629,8 @@ mod tests {
         c.sys.dtrtx = 0x9ABC_DEF0;
         let mut image = std::vec::Vec::new();
         c.save(&mut image).expect("save");
-        // X0-X30, SP_EL0, SP_EL1, PC, PSTATE, V0-V31, FPCR, FPSR, then the
-        // system registers, of which DTRRX and DTRTX are the last two.
-        let dtrrx = (31 + 4) * 8 + 32 * 16 + 2 * 8 + (SYSREG_COUNT - 2) * 8;
+        // DTRRX and DTRTX are the last two system registers.
+        let dtrrx = SYSREGS_AT + (SYSREG_COUNT - 2) * 8;
         assert_eq!(
             &image[dtrrx..dtrrx + 16],
             &[0x78, 0x56, 0x34, 0x12, 0, 0, 0, 0, 0xF0, 0xDE, 0xBC, 0x9A, 0, 0, 0, 0]
@@ -536,8 +663,8 @@ mod tests {
         c.sys.mdscr_el1 = MDSCR_FIELDS;
         let mut image = std::vec::Vec::new();
         c.save(&mut image).expect("save");
-        // MDSCR_EL1 is the 28th system register.
-        let mdscr = (31 + 4) * 8 + 32 * 16 + 2 * 8 + 27 * 8;
+        // MDSCR_EL1 is the 30th system register.
+        let mdscr = SYSREGS_AT + 29 * 8;
         assert_eq!(&image[mdscr..mdscr + 8], &MDSCR_FIELDS.to_le_bytes());
         for bit in (0..64).filter(|bit| MDSCR_FIELDS & (1 << bit) == 0) {
             let mut res0 = image.clone();
@@ -556,5 +683,38 @@ mod tests {
         let mut restored = cpu();
         restored.restore(&mut image.as_slice()).expect("restore");
         assert_eq!(restored.sys.mdscr_el1, MDSCR_FIELDS);
+    }
+
+    /// An image is refused by a processor of another identity or another
+    /// system counter, with the same features, before anything changes.
+    #[test]
+    fn an_image_of_another_processor_is_refused() {
+        let mut c = cpu();
+        c.set_reg(Reg::X3, 33);
+        let mut image = std::vec::Vec::new();
+        c.save(&mut image).expect("save");
+        let others = [
+            Implementation {
+                midr: super::super::id::MIDR_SOFTWARE_MODEL,
+                ..c.imp
+            },
+            Implementation {
+                counter_hz: super::super::ARMV8P6_COUNTER_HZ,
+                ..c.imp
+            },
+        ];
+        for imp in others {
+            let mut other = Cpu::implementing(
+                CpuConfig {
+                    ips: ClockHz::BOCHS_DEFAULT,
+                    reset_pc: 0x1000,
+                },
+                imp,
+            );
+            let before = other.state();
+            let mut source: &[u8] = &image;
+            assert_eq!(other.restore(&mut source), Err(SnapError::Invalid("snapshot of another processor")));
+            assert_eq!(other.state(), before);
+        }
     }
 }

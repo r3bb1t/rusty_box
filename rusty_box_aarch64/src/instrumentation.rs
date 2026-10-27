@@ -11,7 +11,7 @@
 //!
 //! - **execution** — [`Instrumentation::before_execution`],
 //!   [`Instrumentation::after_execution`], [`Instrumentation::branch`],
-//!   [`Instrumentation::wait_for_interrupt`];
+//!   [`Instrumentation::wait`];
 //! - **exceptions** — [`Instrumentation::exception`], for every synchronous
 //!   exception, IRQ and FIQ the processor takes;
 //! - **memory** — [`Instrumentation::memory_access`], for every data access
@@ -23,7 +23,7 @@
 //! that only waits for the system counter.
 
 use crate::bus::{AccessWidth, PhysAddr};
-use crate::cpu::{El, ExceptionClass};
+use crate::cpu::{El, ExceptionClass, Wait};
 
 /// Which way a data access went.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -126,10 +126,10 @@ pub trait Instrumentation {
     #[inline(always)]
     fn memory_access(&mut self, access: MemoryAccess) {}
 
-    /// The instruction at `pc` (`WFI`, or a PSCI `CPU_SUSPEND`) put the
-    /// processor to sleep until an interrupt.
+    /// The instruction at `pc` (`WFI`, `WFE`, `WFIT`, `WFET`, or a PSCI
+    /// `CPU_SUSPEND`) put the processor to sleep until what `wait` names.
     #[inline(always)]
-    fn wait_for_interrupt(&mut self, pc: u64) {}
+    fn wait(&mut self, pc: u64, wait: Wait) {}
 }
 
 /// The observer of a machine nobody is watching: every hook is the default,

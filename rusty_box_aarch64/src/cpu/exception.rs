@@ -4,7 +4,8 @@
 //! Every exception targets EL1: this core implements neither EL2 nor EL3, so
 //! there is no routing to decide.
 
-use super::{Activity, Cpu, El, Pstate};
+use super::features::Feature;
+use super::{sctlr, Activity, Btype, Cpu, El, Pstate};
 use crate::instrumentation::{ExceptionKind, ExceptionTaken};
 
 /// `ESR_ELx.EC`, the exception classes this core can raise.
@@ -21,12 +22,22 @@ pub enum ExceptionClass {
     WfxTrap,
     /// EC 0x07: SIMD&FP access trapped by `CPACR_EL1.FPEN`.
     FpAccess,
+    /// EC 0x0D: an indirect branch to an instruction in a guarded page
+    /// that does not accept it (FEAT_BTI); `ISS[1:0]` is `PSTATE.BTYPE`.
+    BranchTarget,
     /// EC 0x0E: execution with `PSTATE.IL` set.
     IllegalState,
     /// EC 0x15.
     Svc,
     /// EC 0x18: `MSR`/`MRS`/`SYS` trapped from EL0.
     SysRegTrap,
+    /// EC 0x1C: a pointer authentication that failed, with FEAT_FPAC;
+    /// `ISS[1:0]` says whether the key was a data key and which.
+    PacFail,
+    /// EC 0x1D: an SME instruction or register trapped by
+    /// `CPACR_EL1.SMEN`, or an instruction illegal in the current streaming
+    /// mode; `ISS.SMTC` says which.
+    SmeAccess,
     /// EC 0x20 / 0x21.
     InstructionAbort,
     /// EC 0x22.
@@ -47,9 +58,12 @@ impl ExceptionClass {
             Self::Unknown => 0x00,
             Self::WfxTrap => 0x01,
             Self::FpAccess => 0x07,
+            Self::BranchTarget => 0x0D,
             Self::IllegalState => 0x0E,
             Self::Svc => 0x15,
             Self::SysRegTrap => 0x18,
+            Self::PacFail => 0x1C,
+            Self::SmeAccess => 0x1D,
             Self::InstructionAbort => {
                 if lower {
                     0x20
@@ -67,6 +81,25 @@ impl ExceptionClass {
             }
             Self::SpAlignment => 0x26,
             Self::Brk => 0x3C,
+        }
+    }
+
+    /// Whether the exception keeps `PSTATE.BTYPE` in `SPSR_EL1.BTYPE`
+    /// (Arm `AArch64_TakeException`): the classes whose return can resume
+    /// the branch target check, IRQ and FIQ too. Every other one saves 00,
+    /// the choice `ConstrainUnpredictable(Unpredictable_ZEROBTYPE)` makes.
+    const fn preserves_btype(self) -> bool {
+        match self {
+            Self::BranchTarget | Self::IllegalState | Self::InstructionAbort | Self::PcAlignment | Self::Brk => true,
+            Self::Unknown
+            | Self::WfxTrap
+            | Self::FpAccess
+            | Self::Svc
+            | Self::SysRegTrap
+            | Self::PacFail
+            | Self::SmeAccess
+            | Self::DataAbort
+            | Self::SpAlignment => false,
         }
     }
 
@@ -136,7 +169,15 @@ impl Cpu {
         if let Some(far) = e.far {
             self.sys.far_el1 = far;
         }
-        let vector = self.enter_el1(VectorKind::Synchronous, return_addr);
+        let saved = if e.class.preserves_btype() {
+            self.pstate
+        } else {
+            Pstate {
+                btype: Btype::None,
+                ..self.pstate
+            }
+        };
+        let vector = self.enter_el1(VectorKind::Synchronous, return_addr, saved.to_spsr());
         ExceptionTaken {
             kind: ExceptionKind::Synchronous(e.class),
             from,
@@ -160,7 +201,7 @@ impl Cpu {
     fn take_interrupt(&mut self, vector_kind: VectorKind, kind: ExceptionKind) -> ExceptionTaken {
         let from = self.pstate.el;
         let pc = self.pc;
-        let vector = self.enter_el1(vector_kind, pc);
+        let vector = self.enter_el1(vector_kind, pc, self.pstate.to_spsr());
         ExceptionTaken {
             kind,
             from,
@@ -171,15 +212,22 @@ impl Cpu {
         }
     }
 
-    /// `AArch64.TakeException` to EL1. Returns the vector now executing.
-    fn enter_el1(&mut self, kind: VectorKind, return_addr: u64) -> u64 {
+    /// `AArch64.TakeException` to EL1, saving `spsr`, the image of `PSTATE`
+    /// the exception keeps. Returns the vector now executing. `PSTATE.SM`
+    /// and `PSTATE.ZA` are not part of that image and carry over unchanged.
+    fn enter_el1(&mut self, kind: VectorKind, return_addr: u64, spsr: u64) -> u64 {
+        self.maybe_zero_sve_uppers();
         let quadrant = match (self.pstate.el, self.pstate.sp_sel) {
             (El::El0, _) => 0x400,
             (El::El1, false) => 0x000,
             (El::El1, true) => 0x200,
         };
-        self.sys.spsr_el1 = self.pstate.to_spsr();
+        self.sys.spsr_el1 = spsr;
         self.sys.elr_el1 = return_addr;
+        // With FEAT_PAN, PAN is set when SCTLR_EL1.SPAN is 0 and otherwise
+        // kept; UAO is cleared; SSBS becomes SCTLR_EL1.DSSBS; DIT is kept.
+        let pan = self.pstate.pan || (self.implements(Feature::Pan) && self.sys.sctlr_el1 & sctlr::SPAN == 0);
+        let ssbs = self.implements(Feature::Ssbs) && self.sys.sctlr_el1 & sctlr::DSSBS != 0;
         self.pstate = Pstate {
             n: self.pstate.n,
             z: self.pstate.z,
@@ -193,6 +241,11 @@ impl Cpu {
             sp_sel: true,
             ss: false,
             il: false,
+            btype: Btype::None,
+            pan,
+            uao: false,
+            dit: self.pstate.dit,
+            ssbs,
         };
         self.pc = self.branch_addr((self.sys.vbar_el1 & !0x7FF).wrapping_add(quadrant + kind.offset()));
         self.history.jump(self.pc, self.retired);
@@ -201,14 +254,14 @@ impl Cpu {
         self.pc
     }
 
-    /// `ERET`: `AArch64.ExceptionReturn(ELR_EL1, SPSR_EL1)`. Returns the new PC.
-    /// Every return, legal or not, clears the local exclusive monitor and
-    /// sets the Event Register (`ClearExclusiveLocal`, `SendEventLocal`).
-    pub(crate) fn exception_return(&mut self) -> u64 {
+    /// `AArch64.ExceptionReturn(target, SPSR_EL1)`: what `ERET` does with
+    /// `ELR_EL1` and `ERETAA`/`ERETAB` with `ELR_EL1` authenticated. Returns
+    /// the new PC. Every return, legal or not, clears the local exclusive
+    /// monitor and sets the Event Register (`ClearExclusiveLocal`,
+    /// `SendEventLocal`).
+    pub(crate) fn exception_return(&mut self, target: u64) -> u64 {
         let spsr = self.sys.spsr_el1;
-        let target = self.sys.elr_el1;
         self.monitor.armed = false;
-        self.send_event_local();
 
         // M[4] = 1 names AArch32, M[3:2] an EL; this core has neither AArch32
         // nor EL2/EL3, and EL0 has only SP_EL0 (M[0] must be 0 there).
@@ -226,6 +279,9 @@ impl Cpu {
                 None => false,
             };
 
+        // SPSR_EL1 holds no bit of a feature this processor lacks: an MSR
+        // writes only `spsr_mask`'s bits, and a snapshot that holds others
+        // is refused.
         let p = &mut self.pstate;
         p.n = spsr & (1 << 31) != 0;
         p.z = spsr & (1 << 30) != 0;
@@ -236,19 +292,32 @@ impl Cpu {
         p.a = spsr & (1 << 8) != 0;
         p.i = spsr & (1 << 7) != 0;
         p.f = spsr & (1 << 6) != 0;
+        // Arm `SetPSTATEFromPSR` restores NZCV, SS, DAIF and PAN whether or
+        // not the return is legal.
+        p.pan = spsr & Pstate::PAN != 0;
         match (legal, target_el) {
             (true, Some(el)) => {
                 p.el = el;
                 p.sp_sel = m & 1 != 0;
                 p.il = spsr & (1 << 20) != 0;
+                p.btype = Btype::from_bits(spsr >> 10);
+                p.ssbs = spsr & Pstate::SSBS != 0;
+                p.uao = spsr & Pstate::UAO != 0;
+                p.dit = spsr & Pstate::DIT != 0;
             }
             // Illegal exception return (Arm ARM D1.11.4): EL and SP are
             // unchanged, PSTATE.IL is set, and the next instruction raises
-            // an Illegal Execution State exception.
+            // an Illegal Execution State exception. PSTATE.BTYPE, SSBS, UAO
+            // and DIT are UNKNOWN (Arm `SetPSTATEFromPSR`); this model's
+            // choice is BTYPE 00 and the other three unchanged.
             _ => {
                 p.il = true;
+                p.btype = Btype::None;
             }
         }
+        // Arm `AArch64.ExceptionReturn`: `SendEventLocal` after
+        // `SetPSTATEFromPSR`, legal return or not.
+        self.send_event();
         target
     }
 }

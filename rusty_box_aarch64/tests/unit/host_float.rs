@@ -1,7 +1,8 @@
 //! Wherever the host is allowed to compute, it computes exactly what
 //! SoftFloat computes. For every operand pair it accepts, under every
-//! FPCR.RMode, FZ and DN, with inexact already raised or not, the bits are
-//! SoftFloat's and SoftFloat raises nothing new.
+//! FPCR.RMode, FZ and DN, and FEAT_AFP's FIZ, AH and NEP, with inexact
+//! already raised or not, the bits are SoftFloat's and SoftFloat raises
+//! nothing new.
 //!
 //! The operands are random, biased to the boundaries the rule guards:
 //!
@@ -36,10 +37,14 @@ impl SplitMix64 {
 const OPS: [Arith; 4] = [Arith::Add, Arith::Sub, Arith::Mul, Arith::Div];
 const FPSR_IXC: u64 = 1 << 4;
 
-/// FPCR with RMode, FZ and DN from the low four bits of `r`.
+/// FPCR with RMode, FZ and DN from the low four bits of `r`, and FEAT_AFP's
+/// FIZ, AH and NEP from its bits 12 to 14.
 fn fpcr(r: u64) -> u64 {
-    ((r & 3) << 22) | (((r >> 2) & 3) << 24)
+    ((r & 3) << 22) | (((r >> 2) & 3) << 24) | ((r >> 12) & 0b111)
 }
+
+/// The bits of a draw that [`fpcr`] takes FIZ, AH and NEP from.
+const AFP_DRAW: u64 = 0b111 << 12;
 
 fn soft64(op: Arith, a: u64, b: u64, s: &mut SoftFloatStatus) -> u64 {
     match op {
@@ -186,7 +191,7 @@ fn the_host_computes_what_softfloat_computes_wherever_it_answers() {
         // The host's own conditions (to nearest, inexact raised), and a
         // random FPCR and FPSR.IXC.
         let statuses = [
-            ArmFpStatus::with_fpsr(fpcr(draw & 0b1100), FPSR_IXC),
+            ArmFpStatus::with_fpsr(fpcr(draw & (0b1100 | AFP_DRAW)), FPSR_IXC),
             ArmFpStatus::with_fpsr(fpcr(draw >> 4), if draw & (1 << 8) != 0 { FPSR_IXC } else { 0 }),
         ];
 
@@ -249,7 +254,7 @@ fn the_host_computes_what_softfloat_computes_wherever_it_answers() {
 mod fused {
     use super::super::super::{f32_mul_add, f64_mul_add, ArmFpStatus, FusedMulAdd};
     use super::super::{f32_fused, f64_fused, HOST_FUSES_ONCE};
-    use super::{fpcr, Reach, SplitMix64, FPSR_IXC};
+    use super::{fpcr, Reach, SplitMix64, AFP_DRAW, FPSR_IXC};
 
     /// A binary64 multiply-add `[addend, n, m]`.
     ///
@@ -365,7 +370,7 @@ mod fused {
             let cancel = i % 2 == 1;
             let draw = rng.next();
             let statuses = [
-                ArmFpStatus::with_fpsr(fpcr(draw & 0b1100), FPSR_IXC),
+                ArmFpStatus::with_fpsr(fpcr(draw & (0b1100 | AFP_DRAW)), FPSR_IXC),
                 ArmFpStatus::with_fpsr(
                     fpcr(draw >> 4),
                     if draw & (1 << 8) != 0 { FPSR_IXC } else { 0 },
@@ -503,6 +508,27 @@ mod fused {
                 HOST_FUSES_ONCE,
                 "f32 {form:?}"
             );
+        }
+    }
+
+    /// The host takes no NaN, and what the forms do to one is FPNeg's:
+    /// under FPCR.AH (FEAT_AFP) it leaves a NaN as it is, so FNMADD and
+    /// FNMSUB return a quiet NaN addend with its sign; with FPCR.AH clear
+    /// they flip it.
+    #[test]
+    fn a_nan_addend_is_negated_as_fpneg_says() {
+        use super::super::super::FPCR_AH;
+        let nan64 = 0x7FF8_0000_0000_1234u64;
+        let nan32 = 0x7FC0_1234u32;
+        let [n64, m64] = [1.5f64.to_bits(), 0.25f64.to_bits()];
+        let [n32, m32] = [1.5f32.to_bits(), 0.25f32.to_bits()];
+        for form in [FusedMulAdd::Fnmadd, FusedMulAdd::Fnmsub] {
+            for (ah, sign64, sign32) in [(true, 0, 0), (false, 1 << 63, 1 << 31)] {
+                let mut fp = ArmFpStatus::with_fpsr(fpcr(0) | if ah { FPCR_AH } else { 0 }, FPSR_IXC);
+                assert_eq!(f64_mul_add(form, nan64, n64, m64, &mut fp), nan64 | sign64, "f64 {form:?}, AH {ah}");
+                let mut fp = ArmFpStatus::with_fpsr(fpcr(0) | if ah { FPCR_AH } else { 0 }, FPSR_IXC);
+                assert_eq!(f32_mul_add(form, nan32, n32, m32, &mut fp), nan32 | sign32, "f32 {form:?}, AH {ah}");
+            }
         }
     }
 }

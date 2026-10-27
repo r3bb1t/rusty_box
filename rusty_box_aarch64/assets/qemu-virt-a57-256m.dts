@@ -360,7 +360,6 @@
 		};
 
 		cpu@0 {
-			next-level-cache = <0x00>;
 			i-cache-sets = <0x100>;
 			i-cache-size = <0xc000>;
 			i-cache-block-size = <0x40>;
@@ -394,7 +393,7 @@
 
 	chosen {
 		stdout-path = "/pl011@9000000";
-		rng-seed = <0x32955362 0x88955b32 0xbe205e89 0x4f2d9057 0x32de38d9 0xacc25ba7 0xcabd42da 0xc5bf6075>;
-		kaslr-seed = <0x16800fb0 0x2f26ba9f>;
+		rng-seed = <0xd5a2efed 0x33f50a7f 0x2443d019 0x5af6b01f 0xae1f97e2 0xd1c84ec9 0xdfc3031b 0x104c15e1>;
+		kaslr-seed = <0xb979386d 0x1ea0b859>;
 	};
 };

@@ -26,7 +26,9 @@ use super::{predecode, Op};
 use crate::bus::{AccessWidth, BusFault, PhysAddr, PhysBus};
 use crate::cpu::decode::classify;
 use crate::cpu::exec::{cond_holds, Nzcv};
-use crate::cpu::{Cpu, CpuConfig, El, Pstate};
+use crate::cpu::features::{Feature, Features};
+use crate::cpu::state::fpcr_mask;
+use crate::cpu::{Cpu, CpuConfig, CpuModel, El, Pstate};
 
 /// The RAM: one page at the base of the 1 GiB the identity map covers.
 const RAM: u64 = 0x4000_0000;
@@ -139,27 +141,32 @@ fn set_up(cpu: &mut Cpu, bus: &mut TestBus, seed: u64) {
     for v in cpu.v.iter_mut() {
         *v = fp_register(&mut rng);
     }
-    // FPCR.RMode, FZ, DN and AHP, to nearest half the time; FPSR's
-    // cumulative bits, IXC set half the time; the SIMD&FP enable, mostly
-    // on.
+    // FPCR.RMode, FZ, DN and AHP, to nearest half the time, and FIZ, AH
+    // and NEP where the processor keeps them (FEAT_AFP); FPSR's cumulative
+    // bits, IXC set half the time; the SIMD&FP enable, mostly on.
     let fp = rng.next();
     let rmode = if fp & 1 == 0 { 0 } else { (fp >> 1) & 3 };
-    cpu.fpcr = (rmode << 22) | (((fp >> 3) & 0b111) << 24);
+    let afp = (fp >> 20) & 0b111;
+    cpu.fpcr = ((rmode << 22) | (((fp >> 3) & 0b111) << 24) | afp) & fpcr_mask(cpu.imp);
     cpu.fpsr = (fp >> 8) & 0b1001_1111;
     cpu.sys.cpacr_el1 = if fp & (3 << 16) == 0 { ((fp >> 18) & 3) << 20 } else { 3 << 20 };
     cpu.sp_el0 = register(&mut rng);
     cpu.sp_el1 = register(&mut rng);
     let flags = rng.next();
     let el = if flags & 1 == 0 { El::El1 } else { El::El0 };
-    cpu.pstate = Pstate {
+    // PSTATE.PAN where the processor has it (FEAT_PAN), and whether the
+    // instruction's page is guarded (FEAT_BTI), as its fetch would find.
+    cpu.pstate = cpu.held(Pstate {
         n: flags & 2 != 0,
         z: flags & 4 != 0,
         c: flags & 8 != 0,
         v: flags & 16 != 0,
         el,
         sp_sel: el == El::El1 && flags & 32 != 0,
+        pan: flags & (1 << 14) != 0,
         ..Pstate::RESET
-    };
+    });
+    cpu.in_guarded_page = flags & (1 << 15) != 0 && cpu.implements(Feature::Bti);
     cpu.pc = RAM + ((rng.next() % RAM_LEN as u64) & !3);
     // SCTLR_EL1.M, .A, .SA and .SA0 from the seed; the rest at reset.
     let mmu = flags & 64 != 0;
@@ -214,15 +221,29 @@ const TEMPLATES: [(u32, u32, &str); 22] = [
 ];
 
 #[test]
-fn every_pre_decoded_op_executes_as_its_class_handler_does() {
+fn every_pre_decoded_op_executes_as_its_class_handler_does_on_a_cortex_a57() {
+    pre_decoded_ops_execute_as_their_class_handlers_do(CpuModel::CortexA57);
+}
+
+/// The Armv9.2 model's handlers differ for some of the forms an op covers:
+/// its `BR` and `BLR` set PSTATE.BTYPE (FEAT_BTI), and its scalar
+/// floating-point results merge under FPCR.NEP (FEAT_AFP).
+#[test]
+fn every_pre_decoded_op_executes_as_its_class_handler_does_on_an_armv9p2() {
+    pre_decoded_ops_execute_as_their_class_handlers_do(CpuModel::Armv9p2);
+}
+
+/// Every op `model`'s decoder pre-decodes executes as its class handler
+/// does: the same result, processor state and memory, from an op of its
+/// own and from the pool.
+fn pre_decoded_ops_execute_as_their_class_handlers_do(model: CpuModel) {
     let config = CpuConfig {
         ips: ClockHz::BOCHS_DEFAULT,
-        counter_hz: ClockHz::BOCHS_DEFAULT,
         reset_pc: RAM,
     };
-    let mut by_class = Cpu::new(config);
-    let mut by_op = Cpu::new(config);
-    let mut by_pool = Cpu::new(config);
+    let mut by_class = Cpu::new(model, config);
+    let mut by_op = Cpu::new(model, config);
+    let mut by_pool = Cpu::new(model, config);
     let mut bus_class = TestBus { ram: std::vec![0; RAM_LEN], block: 0 };
     let mut bus_op = TestBus { ram: std::vec![0; RAM_LEN], block: 0 };
     let mut bus_pool = TestBus { ram: std::vec![0; RAM_LEN], block: 0 };
@@ -234,7 +255,7 @@ fn every_pre_decoded_op_executes_as_its_class_handler_does() {
             Some(&(mask, value, _)) => (random as u32 & !mask) | value,
             None => random as u32,
         };
-        let class = classify(word);
+        let class = classify(word, by_class.imp.features);
         let op = predecode(class, word);
         let name = variant(op);
         *hits.entry(name).or_insert(0) += 1;
@@ -269,6 +290,7 @@ fn every_pre_decoded_op_executes_as_its_class_handler_does() {
 
 #[test]
 fn counter_reads_predecode_to_their_own_op() {
+    let classify = |word| classify(word, Features::CORTEX_A57);
     for word in [0xD53B_E040, 0xD53B_E05F, 0xD53B_E020] {
         assert_eq!(
             predecode(classify(word), word),
@@ -287,11 +309,13 @@ fn counter_reads_predecode_to_their_own_op() {
 
 #[test]
 fn a_condition_holds_on_a_flag_value_as_it_does_on_pstate() {
-    let mut cpu = Cpu::new(CpuConfig {
-        ips: ClockHz::BOCHS_DEFAULT,
-        counter_hz: ClockHz::BOCHS_DEFAULT,
-        reset_pc: RAM,
-    });
+    let mut cpu = Cpu::new(
+        CpuModel::CortexA57,
+        CpuConfig {
+            ips: ClockHz::BOCHS_DEFAULT,
+            reset_pc: RAM,
+        },
+    );
     for bits in 0..16u32 {
         let flags = Nzcv {
             n: bits & 8 != 0,
@@ -315,9 +339,9 @@ fn a_condition_holds_on_a_flag_value_as_it_does_on_pstate() {
 }
 
 /// The name of every `Op` variant but `Class`.
-const VARIANTS: [&str; 31] = [
+const VARIANTS: [&str; 32] = [
     "AddImm", "AddsImm", "AddSubShift", "LogImm", "LogShift", "MovImm", "Movk", "Adr", "Adrp", "Ubfm", "Sbfm", "Bfm",
-    "CondSel", "Madd", "BCond", "Cbz", "Tbz", "B", "Bl", "Br", "Blr", "Nop", "LoadImm", "StoreImm", "LoadReg",
+    "CondSel", "Madd", "BCond", "Cbz", "Tbz", "B", "Bl", "Br", "Ret", "Blr", "Nop", "LoadImm", "StoreImm", "LoadReg",
     "StoreReg", "LoadPair", "StorePair", "FpDp2", "FpDp3", "ReadCounter",
 ];
 
@@ -344,6 +368,7 @@ fn variant(op: Op) -> &'static str {
         Op::B { .. } => "B",
         Op::Bl { .. } => "Bl",
         Op::Br { .. } => "Br",
+        Op::Ret { .. } => "Ret",
         Op::Blr { .. } => "Blr",
         Op::Nop => "Nop",
         Op::LoadImm { .. } => "LoadImm",

@@ -263,8 +263,8 @@ impl Args {
     /// The flags this command line sets that only a PC has, as spelled on it.
     /// An Arm `virt` machine refuses each rather than dropping it. The flags
     /// every machine reads are `--config`, `--no-config`, `--display`,
-    /// `--log-level`, `--memory-mib` and `--ips`. The destructuring is
-    /// exhaustive, so a new flag must be sorted here too.
+    /// `--log-level`, `--memory-mib`, `--ips` and `--disk`. The destructuring
+    /// is exhaustive, so a new flag must be sorted here too.
     pub fn pc_flags(&self) -> Vec<&'static str> {
         let Args {
             config: _,
@@ -275,7 +275,7 @@ impl Args {
             engine,
             cpu_capabilities,
             boot,
-            disk,
+            disk: _,
             disk_chs,
             create_disk,
             create_disk_size,
@@ -306,7 +306,6 @@ impl Args {
             ("--engine", engine.is_some()),
             ("--cpu-capabilities", cpu_capabilities.is_some()),
             ("--boot", !boot.is_empty()),
-            ("--disk", disk.is_some()),
             ("--disk-chs", disk_chs.is_some()),
             ("--create-disk", create_disk.is_some()),
             ("--create-disk-size", create_disk_size.is_some()),

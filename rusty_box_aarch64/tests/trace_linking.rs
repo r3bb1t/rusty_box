@@ -15,6 +15,7 @@
 //! where a bare machine starts; each list's source is beside its words.
 
 use rusty_box_aarch64::board::RAM_BASE;
+use rusty_box_aarch64::cpu::Wait;
 use rusty_box_aarch64::instrumentation::ExceptionTaken;
 use rusty_box_aarch64::{
     Execution, Instrumentation, LentStorage, MachineBuilder, MemoryLoan, RamSize, Reg, RunBudget, StopReason,
@@ -69,8 +70,11 @@ impl Instrumentation for Heard {
         text.extend(format!("{taken:?}").bytes().map(u64::from));
         self.mix(3, &text);
     }
-    fn wait_for_interrupt(&mut self, pc: u64) {
-        self.mix(4, &[pc]);
+    fn wait(&mut self, pc: u64, wait: Wait) {
+        let mut text = Vec::new();
+        text.extend(format!("{wait:?}").bytes().map(u64::from));
+        text.push(pc);
+        self.mix(4, &text);
     }
 }
 

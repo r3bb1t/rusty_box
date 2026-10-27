@@ -22,7 +22,7 @@ pub(crate) fn f64_to_f16(a: Float64, status: &mut SoftFloatStatus) -> Float16 {
                 softfloat_raise_flags(status, FLAG_INVALID);
             }
             if softfloat_default_nan_mode(status) {
-                return FLOAT16_DEFAULT_NAN;
+                return float16_default_nan(status);
             }
             return ((sign as u16) << 15) | 0x7E00 | ((frac >> 42) as u16);
         }
@@ -33,10 +33,30 @@ pub(crate) fn f64_to_f16(a: Float64, status: &mut SoftFloatStatus) -> Float16 {
         softfloat_raise_flags(status, FLAG_DENORMAL);
     }
 
-    let frac16 = short_shift_right_jam64(frac, 38) as u16;
-    if (exp as u16 | frac16) == 0 {
+    let unrounded = unrounded_f16(a);
+    if exp == 0 && unrounded.sig == 0x4000 {
+        // A zero, or a double denormal whose bits all fell below the jam.
         return pack_to_f16(sign, 0, 0);
     }
 
-    round_pack_to_f16(sign, exp - 0x3F1, frac16 | 0x4000, status)
+    round_pack_to_f16(unrounded.sign, unrounded.exp, unrounded.sig, status)
+}
+
+/// A finite double as [`round_pack_to_f16`] takes it: its sign, its
+/// exponent rebiased for half precision less one, and its significand
+/// with the leading bit at 14 and the bits below half precision's
+/// rounding bits jammed.
+pub(crate) struct UnroundedF16 {
+    pub(crate) sign: bool,
+    pub(crate) exp: i16,
+    pub(crate) sig: u16,
+}
+
+/// `a`, finite, as [`f64_to_f16`] hands it to [`round_pack_to_f16`].
+pub(crate) fn unrounded_f16(a: Float64) -> UnroundedF16 {
+    UnroundedF16 {
+        sign: sign_f64(a),
+        exp: exp_f64(a) - 0x3F1,
+        sig: short_shift_right_jam64(frac_f64(a), 38) as u16 | 0x4000,
+    }
 }

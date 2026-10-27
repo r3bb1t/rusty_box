@@ -3,6 +3,7 @@
 //!
 //! - the fixed-point conversions (Arm `FixedToFP` and `FPToFixed` with
 //!   fraction bits: SCVTF, UCVTF, FCVTZS, FCVTZU with `#fbits`);
+//! - FJCVTZS's JavaScript conversion (`FPToFixedJS`);
 //! - FCVTXN's round-to-odd narrowing (`FPRounding_ODD`);
 //! - the alternative half-precision format selected by FPCR.AHP, which has
 //!   no infinities or NaNs (`FPConvert`, `FPRoundBase` with `fpcr.AHP`);
@@ -26,10 +27,16 @@ use super::f64_to_int::{f64_to_i32 as sf_f64_to_i32, f64_to_i64 as sf_f64_to_i64
 use super::internals::*;
 use super::primitives::*;
 use super::softfloat::*;
-use super::specialize::{f32_flush_input, f64_flush_input};
+use super::specialize::{
+    f32_flush_input, f32_report_denormals, f64_flush_input, f64_report_denormals, softfloat_propagate_nan_f32,
+    softfloat_propagate_nan_f64, tininess_before_rounding,
+};
 use super::uint64_convert::f64_to_ui64 as sf_f64_to_ui64;
 use super::uint_convert::f64_to_ui32 as sf_f64_to_ui32;
-use super::{with_rounding, ArmFpStatus, FpRounding};
+use super::{
+    f32_neg, f32_report_denormals_unless_nan, f64_neg, f64_report_denormals_unless_nan, with_rounding, ArmFpStatus,
+    FpRounding,
+};
 
 const F32_SIGN: u32 = 0x8000_0000;
 const F64_SIGN: u64 = 0x8000_0000_0000_0000;
@@ -218,12 +225,69 @@ pub(crate) fn f64_to_u64_fixed(a: u64, fbits: u32, rounding: FpRounding, fp: &mu
 }
 
 // ============================================================
+// JavaScript conversion (FJCVTZS, Arm FPToFixedJS)
+// ============================================================
+
+/// What FJCVTZS makes of a double: the 32 bits it writes, and `Z`, whether
+/// they are the value exactly.
+pub(crate) struct JsConversion {
+    pub(crate) value: u32,
+    pub(crate) exact: bool,
+}
+
+/// FJCVTZS: Arm FPToFixedJS, `op` rounded toward zero to an integer and
+/// wrapped to its low 32 bits (JavaScript's ToInt32). A NaN, an infinity or
+/// an integer outside the 32-bit signed range raises invalid, and gives 0
+/// for the first two; a rounded value raises inexact; `exact` holds when
+/// neither did and the value is not -0.0 or a denormal FPCR.FZ flushed.
+pub(crate) fn f64_to_i32_js(op: u64, fp: &mut ArmFpStatus) -> JsConversion {
+    const FRAC: u64 = (1 << 52) - 1;
+    let s = &mut fp.status;
+    let a = f64_flush_input(op, s);
+    let negative = op >> 63 == 1;
+    let exp = ((a >> 52) & 0x7FF) as i32;
+    let frac = a & FRAC;
+    if exp == 0x7FF {
+        softfloat_raise_flags(s, FLAG_INVALID);
+        return JsConversion { value: 0, exact: false };
+    }
+    if exp == 0 && frac == 0 {
+        return JsConversion { value: 0, exact: !negative && op & FRAC == 0 };
+    }
+    // The value is `sig` × 2^`shift`.
+    let (sig, shift) = if exp == 0 { (frac, -1074) } else { (frac | (1 << 52), exp - 1075) };
+    let (low, in_range, rounded) = if shift >= 0 {
+        // At least 2^52 in magnitude: beyond the range, the low bits zero
+        // from 2^32 up.
+        let low = if shift >= 32 { 0 } else { (sig << shift) as u32 };
+        (low, false, false)
+    } else {
+        let (magnitude, rounded) = if shift <= -64 {
+            (0, true)
+        } else {
+            (sig >> -shift, sig & ((1 << -shift) - 1) != 0)
+        };
+        let limit = if negative { 1 << 31 } else { (1 << 31) - 1 };
+        (magnitude as u32, magnitude <= limit, rounded)
+    };
+    let value = if negative { low.wrapping_neg() } else { low };
+    if !in_range {
+        softfloat_raise_flags(s, FLAG_INVALID);
+    } else if rounded {
+        softfloat_raise_flags(s, FLAG_INEXACT);
+    }
+    JsConversion { value, exact: in_range && !rounded }
+}
+
+// ============================================================
 // Round to odd (FCVTXN)
 // ============================================================
 
 /// FCVTXN: Arm FPConvert to single precision with `FPRounding_ODD` — round
 /// toward zero, then set the lowest bit if that lost anything. Overflow
-/// gives the largest normal (OFC, IXC); FPCR.FZ still flushes tiny results.
+/// gives the largest normal (OFC, IXC); FPCR.FZ still flushes tiny results,
+/// and FPRoundBase returns a flushed zero before rounding to odd, so its
+/// lowest bit stays clear (under FPCR.AH = 1 the flush raises Inexact too).
 pub(crate) fn f64_to_f32_round_odd(a: u64, fp: &mut ArmFpStatus) -> u32 {
     let mut local = SoftFloatStatus {
         softfloat_rounding_mode: ROUND_MINMAG,
@@ -231,9 +295,13 @@ pub(crate) fn f64_to_f32_round_odd(a: u64, fp: &mut ArmFpStatus) -> u32 {
         ..fp.status
     };
     let a = f64_flush_input(a, &mut local);
+    f64_report_denormals(&[a], &mut local);
     let result = sf_f64_to_f32(a, &mut local);
     fp.status.softfloat_exception_flags |= local.softfloat_exception_flags;
-    if local.softfloat_exception_flags & FLAG_INEXACT != 0 {
+    // Toward zero, a nonzero operand gives a zero only when it is below the
+    // smallest denormal, which FPCR.FZ flushes.
+    let flushed = local.flush_to_zero && result & !F32_SIGN == 0 && a & !F64_SIGN != 0;
+    if local.softfloat_exception_flags & FLAG_INEXACT != 0 && !flushed {
         result | 1
     } else {
         result
@@ -286,7 +354,8 @@ pub(crate) fn f16_ahp_to_f64(a: u16) -> u64 {
 /// (`FPRoundBase` with `fpcr.AHP`): exponent 31 holds ordinary values, and a
 /// result whose rounded exponent would exceed it saturates to the largest
 /// magnitude, raising Invalid Operation and nothing else. The subnormal
-/// range and tininess are those of IEEE half precision; it never flushes.
+/// range is that of IEEE half precision, tininess is decided as FPCR.AH
+/// says, and it never flushes.
 fn round_pack_to_f16_ahp(sign: bool, exp: i16, sig: u16, status: &mut SoftFloatStatus) -> u16 {
     let rounding_mode = softfloat_get_rounding_mode(status);
     let round_near_even = rounding_mode == ROUND_NEAR_EVEN;
@@ -304,11 +373,12 @@ fn round_pack_to_f16_ahp(sign: bool, exp: i16, sig: u16, status: &mut SoftFloatS
 
     if 0x1E <= (exp as u16) {
         if exp < 0 {
+            let is_tiny =
+                tininess_before_rounding(status) || f16_tiny_after_rounding(sign, exp, sig, rounding_mode);
             sig = shift_right_jam32(u32::from(sig), (-(exp as i32)) as u16) as u16;
             exp = 0;
             round_bits = sig & 0xF;
-            // Tininess is detected before rounding.
-            if round_bits != 0 {
+            if is_tiny && round_bits != 0 {
                 softfloat_raise_flags(status, FLAG_UNDERFLOW);
             }
         } else if 0x1E < exp || 0x8000 <= u32::from(sig) + u32::from(round_increment) {
@@ -331,10 +401,12 @@ fn round_pack_to_f16_ahp(sign: bool, exp: i16, sig: u16, status: &mut SoftFloatS
 
 /// FCVT Hd, Sn under FPCR.AHP: a NaN becomes a zero of its sign and an
 /// infinity the largest magnitude, both raising Invalid Operation (Arm
-/// FPConvert); other values round as [`round_pack_to_f16_ahp`] does.
+/// FPConvert); other values round as [`round_pack_to_f16_ahp`] does, a
+/// denormal one reported under FPCR.AH = 1 (FPProcessDenorm).
 pub(crate) fn f32_to_f16_ahp(a: u32, fp: &mut ArmFpStatus) -> u16 {
     let s = &mut fp.status;
     let a = f32_flush_input(a, s);
+    f32_report_denormals(&[a], s);
     let sign = sign_f32(a);
     let exp = exp_f32(a);
     let frac = frac_f32(a);
@@ -354,6 +426,7 @@ pub(crate) fn f32_to_f16_ahp(a: u32, fp: &mut ArmFpStatus) -> u16 {
 pub(crate) fn f64_to_f16_ahp(a: u64, fp: &mut ArmFpStatus) -> u16 {
     let s = &mut fp.status;
     let a = f64_flush_input(a, s);
+    f64_report_denormals(&[a], s);
     let sign = sign_f64(a);
     let exp = exp_f64(a);
     let frac = frac_f64(a);
@@ -378,6 +451,7 @@ pub(crate) fn f32_mulx(a: u32, b: u32, fp: &mut ArmFpStatus) -> u32 {
     let s = &mut fp.status;
     let a = f32_flush_input(a, s);
     let b = f32_flush_input(b, s);
+    f32_report_denormals_unless_nan(&[a, b], s);
     if (f32_is_inf(a) && f32_is_zero(b)) || (f32_is_zero(a) && f32_is_inf(b)) {
         return F32_TWO | ((a ^ b) & F32_SIGN);
     }
@@ -389,34 +463,43 @@ pub(crate) fn f64_mulx(a: u64, b: u64, fp: &mut ArmFpStatus) -> u64 {
     let s = &mut fp.status;
     let a = f64_flush_input(a, s);
     let b = f64_flush_input(b, s);
+    f64_report_denormals_unless_nan(&[a, b], s);
     if (f64_is_inf(a) && f64_is_zero(b)) || (f64_is_zero(a) && f64_is_inf(b)) {
         return F64_TWO | ((a ^ b) & F64_SIGN);
     }
     sf_f64_mul(a, b, s)
 }
 
+/// Runs a Newton-Raphson step as its pseudocode asks
+/// ([`ArmFpStatus::with_altfp_overrides`]).
+fn step<T>(fp: &mut ArmFpStatus, op: impl FnOnce(&mut SoftFloatStatus) -> T) -> T {
+    fp.with_altfp_overrides(|fp| op(&mut fp.status))
+}
+
 /// FRECPS (single): Arm FPRecipStepFused — `2.0 - a*b` with one rounding;
-/// infinity times zero gives 2.0. `a` is negated (FPNeg, sign of a NaN
-/// included) before NaN selection, which takes `a` then `b`.
+/// infinity times zero gives 2.0. `a` is negated (FPNeg) before NaN
+/// selection, which takes `a` then `b`.
 pub(crate) fn f32_recip_step(a: u32, b: u32, fp: &mut ArmFpStatus) -> u32 {
-    let s = &mut fp.status;
-    let a = f32_flush_input(a ^ F32_SIGN, s);
-    let b = f32_flush_input(b, s);
-    if (f32_is_inf(a) && f32_is_zero(b)) || (f32_is_zero(a) && f32_is_inf(b)) {
-        return F32_TWO;
-    }
-    sf_f32_mul_add(a, b, F32_TWO, s)
+    step(fp, |s| {
+        let a = f32_flush_input(f32_neg(a, s), s);
+        let b = f32_flush_input(b, s);
+        if (f32_is_inf(a) && f32_is_zero(b)) || (f32_is_zero(a) && f32_is_inf(b)) {
+            return F32_TWO;
+        }
+        sf_f32_mul_add(a, b, F32_TWO, s)
+    })
 }
 
 /// FRECPS (double).
 pub(crate) fn f64_recip_step(a: u64, b: u64, fp: &mut ArmFpStatus) -> u64 {
-    let s = &mut fp.status;
-    let a = f64_flush_input(a ^ F64_SIGN, s);
-    let b = f64_flush_input(b, s);
-    if (f64_is_inf(a) && f64_is_zero(b)) || (f64_is_zero(a) && f64_is_inf(b)) {
-        return F64_TWO;
-    }
-    sf_f64_mul_add(a, b, F64_TWO, s)
+    step(fp, |s| {
+        let a = f64_flush_input(f64_neg(a, s), s);
+        let b = f64_flush_input(b, s);
+        if (f64_is_inf(a) && f64_is_zero(b)) || (f64_is_zero(a) && f64_is_inf(b)) {
+            return F64_TWO;
+        }
+        sf_f64_mul_add(a, b, F64_TWO, s)
+    })
 }
 
 /// FRSQRTS (single): Arm FPRSqrtStepFused — `(3.0 - a*b) / 2.0` with one
@@ -426,8 +509,12 @@ pub(crate) fn f64_recip_step(a: u64, b: u64, fp: &mut ArmFpStatus) -> u64 {
 /// decides the direction of the rounding away from 1.5 and need not be
 /// halved.
 pub(crate) fn f32_rsqrt_step(a: u32, b: u32, fp: &mut ArmFpStatus) -> u32 {
-    let s = &mut fp.status;
-    let a = f32_flush_input(a ^ F32_SIGN, s);
+    step(fp, |s| f32_rsqrt_step_under(a, b, s))
+}
+
+/// [`f32_rsqrt_step`] in the environment [`step`] chose.
+fn f32_rsqrt_step_under(a: u32, b: u32, s: &mut SoftFloatStatus) -> u32 {
+    let a = f32_flush_input(f32_neg(a, s), s);
     let b = f32_flush_input(b, s);
     if is_nan_f32(a) || is_nan_f32(b) {
         return sf_f32_mul_add(a, b, F32_ONE_POINT_FIVE, s);
@@ -451,8 +538,12 @@ pub(crate) fn f32_rsqrt_step(a: u32, b: u32, fp: &mut ArmFpStatus) -> u32 {
 /// FRSQRTS (double); see [`f32_rsqrt_step`] (the unhalved case has both
 /// operands below 2^-1021).
 pub(crate) fn f64_rsqrt_step(a: u64, b: u64, fp: &mut ArmFpStatus) -> u64 {
-    let s = &mut fp.status;
-    let a = f64_flush_input(a ^ F64_SIGN, s);
+    step(fp, |s| f64_rsqrt_step_under(a, b, s))
+}
+
+/// [`f64_rsqrt_step`] in the environment [`step`] chose.
+fn f64_rsqrt_step_under(a: u64, b: u64, s: &mut SoftFloatStatus) -> u64 {
+    let a = f64_flush_input(f64_neg(a, s), s);
     let b = f64_flush_input(b, s);
     if is_nan_f64(a) || is_nan_f64(b) {
         return sf_f64_mul_add(a, b, F64_ONE_POINT_FIVE, s);
@@ -471,6 +562,112 @@ pub(crate) fn f64_rsqrt_step(a: u64, b: u64, fp: &mut ArmFpStatus) -> u64 {
         (a, b)
     };
     sf_f64_mul_add(a, b, F64_ONE_POINT_FIVE, s)
+}
+
+// ============================================================
+// FSCALE, FLOGB (SVE)
+// ============================================================
+
+/// Arm FPClampScale: `scale` limited to the range over which the result
+/// of scaling an operand of biased exponent `exp`, in a format of
+/// `exp_bits` and `frac_bits`, can change; beyond it every result has
+/// overflowed or rounded to zero alike.
+pub(super) fn clamp_scale(scale: i64, exp: i64, exp_bits: u32, frac_bits: u32) -> i64 {
+    let emax = (1i64 << exp_bits) - 1;
+    let min_scale = -(i64::from(frac_bits) + 1);
+    let max_scale = emax + i64::from(frac_bits) + 1;
+    (min_scale - exp).max(scale.min(max_scale - exp))
+}
+
+/// FSCALE (single): Arm FPScale — `a` × 2^`scale` rounded once, the scale
+/// clamped first (FPClampScale). A NaN is processed (FPProcessNaN), and a
+/// zero or an infinity is its own result.
+pub(crate) fn f32_scale(a: u32, scale: i64, fp: &mut ArmFpStatus) -> u32 {
+    let s = &mut fp.status;
+    let a = f32_flush_input(a, s);
+    if is_nan_f32(a) {
+        return softfloat_propagate_nan_f32(a, a, s);
+    }
+    if f32_is_zero(a) || f32_is_inf(a) {
+        return a;
+    }
+    let exp = i64::from(exp_f32(a));
+    let scale = clamp_scale(scale, exp, 8, 23);
+    // A denormal is `frac` × 2^(1 - bias), without the hidden bit.
+    let (exp, sig) = if exp == 0 {
+        (1, frac_f32(a))
+    } else {
+        (exp, frac_f32(a) | 0x0080_0000)
+    };
+    let result = norm_round_pack_to_f32(sign_f32(a), (exp - 1 + scale) as i16, sig << 7, s);
+    f32_report_denormals(&[a], s);
+    result
+}
+
+/// FSCALE (double); see [`f32_scale`].
+pub(crate) fn f64_scale(a: u64, scale: i64, fp: &mut ArmFpStatus) -> u64 {
+    let s = &mut fp.status;
+    let a = f64_flush_input(a, s);
+    if is_nan_f64(a) {
+        return softfloat_propagate_nan_f64(a, a, s);
+    }
+    if f64_is_zero(a) || f64_is_inf(a) {
+        return a;
+    }
+    let exp = i64::from(exp_f64(a));
+    let scale = clamp_scale(scale, exp, 11, 52);
+    let (exp, sig) = if exp == 0 {
+        (1, frac_f64(a))
+    } else {
+        (exp, frac_f64(a) | 0x0010_0000_0000_0000)
+    };
+    let result = norm_round_pack_to_f64(sign_f64(a), (exp - 1 + scale) as i16, sig << 10, s);
+    f64_report_denormals(&[a], s);
+    result
+}
+
+/// FLOGB (single): Arm FPLogB — the base-2 exponent of `a`'s magnitude, a
+/// 32-bit integer: the most negative integer for a NaN or a zero, raising
+/// Invalid Operation, and the most positive for an infinity.
+pub(crate) fn f32_log_b(a: u32, fp: &mut ArmFpStatus) -> u32 {
+    let s = &mut fp.status;
+    let a = f32_flush_input(a, s);
+    if is_nan_f32(a) || f32_is_zero(a) {
+        softfloat_raise_flags(s, FLAG_INVALID);
+        return 0x8000_0000;
+    }
+    if f32_is_inf(a) {
+        return 0x7FFF_FFFF;
+    }
+    f32_report_denormals(&[a], s);
+    let exp = i32::from(exp_f32(a));
+    let log = if exp == 0 {
+        31 - frac_f32(a).leading_zeros() as i32 - 149
+    } else {
+        exp - 127
+    };
+    log as u32
+}
+
+/// FLOGB (double); see [`f32_log_b`].
+pub(crate) fn f64_log_b(a: u64, fp: &mut ArmFpStatus) -> u64 {
+    let s = &mut fp.status;
+    let a = f64_flush_input(a, s);
+    if is_nan_f64(a) || f64_is_zero(a) {
+        softfloat_raise_flags(s, FLAG_INVALID);
+        return 0x8000_0000_0000_0000;
+    }
+    if f64_is_inf(a) {
+        return 0x7FFF_FFFF_FFFF_FFFF;
+    }
+    f64_report_denormals(&[a], s);
+    let exp = i64::from(exp_f64(a));
+    let log = if exp == 0 {
+        63 - i64::from(frac_f64(a).leading_zeros()) - 1074
+    } else {
+        exp - 1023
+    };
+    log as u64
 }
 
 #[cfg(test)]

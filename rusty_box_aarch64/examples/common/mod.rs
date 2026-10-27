@@ -10,8 +10,8 @@ use std::time::Instant;
 
 use rusty_box_aarch64::cpu::DebugStops;
 use rusty_box_aarch64::{
-    CursorPos, Dimensions, Disk, DisplaySink, GuestStorage, KeyboardInput, MachineBuilder, Redraw, Reg, Refreshed,
-    Resolution, Rgb, RunBudget, StopReason, SysReg, TilePos, Typed, VgaTextModeInfo, VirtMachine,
+    CpuModel, CursorPos, Dimensions, Disk, DisplaySink, GuestStorage, KeyboardInput, MachineBuilder, Redraw, Reg,
+    Refreshed, Resolution, Rgb, RunBudget, StopReason, SysReg, TilePos, Typed, VgaTextModeInfo, VirtMachine,
 };
 use rusty_box_core::ClockHz;
 
@@ -20,8 +20,9 @@ use rusty_box_core::ClockHz;
 const SLICE_TICKS: u64 = 4_000_000;
 
 /// The stack the thread that builds and runs a machine is given. A
-/// `VirtMachine` is about 170 KiB (its trace cache is on the heap), and a
-/// build moves it by value a few times, which comes close to the 1 MiB a
+/// `VirtMachine` is about 245 KiB (its trace cache is on the heap; the
+/// processor's SME register file, 72 KiB, is the largest part of it), and
+/// a build moves it by value a few times, which comes close to the 1 MiB a
 /// Windows main thread has; tests take the same floor from
 /// `RUST_MIN_STACK` in `.cargo/config.toml`.
 const MACHINE_STACK_BYTES: usize = 16 * 1024 * 1024;
@@ -77,6 +78,8 @@ pub enum Parsed {
 /// The options every boot program takes.
 pub struct RunArgs {
     pub ips: u64,
+    /// The processor the machine is built with.
+    pub cpu: CpuModel,
     pub max_ticks: u64,
     pub slice_ticks: u64,
     pub script: Vec<Action>,
@@ -99,7 +102,7 @@ pub struct Outcome {
 }
 
 /// The usage text for the shared options.
-pub const RUN_USAGE: &str = "[--ips N] [--max-ticks N] [--slice-ticks N]\n\
+pub const RUN_USAGE: &str = "[--cpu cortex-a57|armv9.2] [--ips N] [--max-ticks N] [--slice-ticks N]\n\
      \x20      [--until <console text>]... [--type <keys>]... [--type-serial <keys>]...\n\
      \x20      [--stop-on-undefined] [--stop-on-bus-fault]\n\
      \x20      [--display WIDTHxHEIGHT] [--virtio-keyboard] [--virtio-tablet] [--disk <raw image>]\n\
@@ -230,6 +233,7 @@ impl RunArgs {
     pub fn new() -> Self {
         Self {
             ips: ClockHz::BOCHS_DEFAULT.get(),
+            cpu: CpuModel::default(),
             max_ticks: u64::MAX,
             slice_ticks: SLICE_TICKS,
             script: Vec::new(),
@@ -252,6 +256,10 @@ impl RunArgs {
         let number = |name: &str, text: String| text.parse::<u64>().map_err(|e| format!("{name}: {e}"));
         match flag {
             "--ips" => self.ips = number(flag, value(flag)?)?,
+            "--cpu" => {
+                let name = value(flag)?;
+                self.cpu = name.parse().map_err(|e| format!("--cpu {name}: {e}"))?;
+            }
             "--max-ticks" => self.max_ticks = number(flag, value(flag)?)?,
             "--slice-ticks" => {
                 self.slice_ticks = number(flag, value(flag)?)?;

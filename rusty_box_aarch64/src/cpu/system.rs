@@ -7,16 +7,14 @@
 
 use super::exception::{Exception, ExceptionClass};
 use super::exec::{bit, bits, ExecResult, Fault, Flow, StopCause};
+use super::features::Feature;
+use super::mmu::{AtCheck, CacheMaintenance};
+use super::sme::SmeTrap;
 use super::sysreg::{SysRegError, SysRegKey, WriteEffect};
-use super::{Cpu, El};
+use super::wait::Wait;
+use super::{sctlr, Cpu, El};
 use crate::bus::PhysBus;
 
-/// `SCTLR_EL1` EL0 controls the instructions here consult.
-const SCTLR_UMA: u64 = 1 << 9;
-const SCTLR_DZE: u64 = 1 << 14;
-const SCTLR_NTWI: u64 = 1 << 16;
-const SCTLR_NTWE: u64 = 1 << 18;
-const SCTLR_UCI: u64 = 1 << 26;
 
 /// PSCI function identifiers and return codes (Arm DEN 0022D §5.1, Table 6).
 mod psci {
@@ -98,51 +96,60 @@ impl Cpu {
         Exception::new(ExceptionClass::FpAccess, (1 << 24) | (0xE << 20)).into()
     }
 
+    /// Arm `AArch64_CheckFPEnabled`: the check of the scalar floating-point
+    /// instructions and the SIMD&FP register loads and stores, made after
+    /// decode has found the encoding allocated. These are legal in
+    /// Streaming SVE mode.
+    #[inline]
+    pub(crate) fn fp_check(&self) -> Result<(), Fault> {
+        if self.fp_enabled() {
+            Ok(())
+        } else {
+            Err(self.fp_trap())
+        }
+    }
+
+    /// Arm `AArch64_CheckFPAdvSIMDEnabled`: the check of the Advanced SIMD
+    /// instructions, which is [`Cpu::fp_check`] and then, in Streaming SVE
+    /// mode, the SME trap for an instruction illegal there
+    /// (`IsFullA64Enabled` is FALSE without FEAT_SME_FA64).
+    #[inline]
+    pub(crate) fn simd_check(&self) -> Result<(), Fault> {
+        self.fp_check()?;
+        if self.svcr.sm {
+            return Err(self.sme_trap(SmeTrap::Streaming));
+        }
+        Ok(())
+    }
+
     fn sysreg_fault(&self, pc: u64, insn: u32, err: SysRegError, key: SysRegKey, rt: u32, read: bool) -> ExecResult {
         match err {
             SysRegError::Undefined => self.undefined(pc, insn),
             SysRegError::TrapToEl1 => Err(Exception::new(ExceptionClass::SysRegTrap, key.trap_iss(rt, read)).into()),
             SysRegError::FpTrap => Err(self.fp_trap()),
+            SysRegError::SmeTrap => Err(self.sme_trap(SmeTrap::AccessTrap)),
         }
     }
 
-    /// The HINT space: NOP, YIELD, WFE, WFI, SEV, SEVL; every other hint
-    /// (including the pointer-authentication and BTI hints) is a NOP. A WFx
-    /// traps from EL0 only when it would wait (Arm ARM `Hint_WFE`,
-    /// `Hint_WFI`; QEMU target/arm/tcg/op_helper.c `HELPER(wfe)`,
-    /// `HELPER(wfi)`).
+    /// The HINT space: NOP, YIELD, WFE, WFI, SEV, SEVL, ESB; every other
+    /// hint is a NOP, the pointer authentication hints of a processor
+    /// without FEAT_PAuth and the BTI hint included (with FEAT_PAuth those
+    /// have a handler of their own, [`Cpu::exec_pauth_hint`]). A WFx traps
+    /// from EL0 only when it would wait (Arm ARM `Hint_WFE`, `Hint_WFI`).
     pub(crate) fn exec_hint(&mut self, insn: u32, _pc: u64) -> ExecResult {
         match bits(insn, 11, 5) {
-            // WFE: a set Event Register is consumed and the instruction
-            // completes. Otherwise it may wait; there is no other processor
-            // to send an event, and WFE may complete at any time, so it
-            // completes at once.
-            2 => {
-                if self.take_event() {
-                    return Ok(Flow::Next);
-                }
-                if self.pstate.el == El::El0 && self.sys.sctlr_el1 & SCTLR_NTWE == 0 {
-                    return Err(Exception::new(ExceptionClass::WfxTrap, (1 << 24) | (0xE << 20) | 1).into());
-                }
-                Ok(Flow::Next)
-            }
-            // WFI: a pending interrupt, masked or not (`InterruptPending`),
-            // ends it before it would wait.
-            3 => {
-                if self.irq_line || self.fiq_line {
-                    return Ok(Flow::Next);
-                }
-                if self.pstate.el == El::El0 && self.sys.sctlr_el1 & SCTLR_NTWI == 0 {
-                    return Err(Exception::new(ExceptionClass::WfxTrap, (1 << 24) | (0xE << 20)).into());
-                }
-                Ok(Flow::Wait)
-            }
-            // SEV signals every processor, and this is the only one; SEVL
-            // signals this one.
+            2 => self.exec_wfe(),
+            3 => self.exec_wfi(),
+            // SEV and SEVL: with one processor, `SendEvent` is
+            // `SendEventLocal`.
             4 | 5 => {
-                self.send_event_local();
+                self.send_event();
                 Ok(Flow::Next)
             }
+            // Every other hint, ESB (FEAT_RAS) included: its
+            // `AArch64_ESBOperation` defers a masked physical SError into
+            // DISR_EL1 and `TakeUnmaskedSErrorInterrupts` takes an unmasked
+            // one, and nothing on this machine raises an SError.
             _ => Ok(Flow::Next),
         }
     }
@@ -189,6 +196,8 @@ impl Cpu {
         if rt != 31 {
             return self.undefined(pc, insn);
         }
+        let el0 = self.pstate.el == El::El0;
+        let operand = crm & 1 != 0;
         match crn {
             3 => match op2 {
                 // CLREX
@@ -196,23 +205,49 @@ impl Cpu {
                     self.monitor.armed = false;
                     Ok(Flow::Next)
                 }
-                // DSB, DMB, ISB: an interpreter that retires each access in
-                // order before the next has nothing to wait for.
-                4..=6 => Ok(Flow::Next),
+                // DSB, DMB, ISB, SB (FEAT_SB, which the decoder admits with
+                // CRm = 0 alone) and DSB nXS (op2 = 1, FEAT_XS, which the
+                // decoder admits with CRm<1:0> = 10 alone): an interpreter
+                // that retires each access in order before the next, and
+                // never speculates, has nothing to wait for.
+                1 | 4..=7 => Ok(Flow::Next),
                 _ => self.undefined(pc, insn),
             },
+            // MSR (immediate): op1 = 000 needs EL1, op1 = 011 is open to
+            // EL0 but for the DAIF controls; a field of a feature this
+            // processor lacks is UNDEFINED.
             4 => match (op1, op2) {
+                // UAO (FEAT_UAO)
+                (0, 3) if self.implements(Feature::Uao) && !el0 => {
+                    self.pstate.uao = operand;
+                    Ok(Flow::Next)
+                }
+                // PAN (FEAT_PAN)
+                (0, 4) if self.implements(Feature::Pan) && !el0 => {
+                    self.pstate.pan = operand;
+                    Ok(Flow::Next)
+                }
                 // SPSel
                 (0, 5) => {
-                    if self.pstate.el == El::El0 {
+                    if el0 {
                         return self.undefined(pc, insn);
                     }
-                    self.pstate.sp_sel = crm & 1 != 0;
+                    self.pstate.sp_sel = operand;
+                    Ok(Flow::Next)
+                }
+                // SSBS (FEAT_SSBS)
+                (3, 1) if self.implements(Feature::Ssbs) => {
+                    self.pstate.ssbs = operand;
+                    Ok(Flow::Next)
+                }
+                // DIT (FEAT_DIT)
+                (3, 2) if self.implements(Feature::Dit) => {
+                    self.pstate.dit = operand;
                     Ok(Flow::Next)
                 }
                 // DAIFSet / DAIFClr
                 (3, 6) | (3, 7) => {
-                    if self.pstate.el == El::El0 && self.sys.sctlr_el1 & SCTLR_UMA == 0 {
+                    if self.pstate.el == El::El0 && self.sys.sctlr_el1 & sctlr::UMA == 0 {
                         let key = SysRegKey::from_insn(insn);
                         return Err(Exception::new(ExceptionClass::SysRegTrap, key.trap_iss(rt, false)).into());
                     }
@@ -221,11 +256,44 @@ impl Cpu {
                     self.pstate.set_daif(if op2 == 6 { daif | bits } else { daif & !bits });
                     Ok(Flow::Next)
                 }
-                // PAN, UAO, DIT, SSBS, TCO...: features this core lacks.
+                // SVCRSM, SVCRZA, SVCRSMZA (FEAT_SME): SMSTART, SMSTOP.
+                (3, 3) => self.exec_msr_svcr(pc, insn),
+                // ALLINT and PM (op1 001), TCO (3, 4): features this core
+                // lacks.
                 _ => self.undefined(pc, insn),
             },
             _ => self.undefined(pc, insn),
         }
+    }
+
+    /// CFINV (FEAT_FlagM), XAFLAG and AXFLAG (FEAT_FlagM2), by `op2`. XAFLAG
+    /// turns the flags a floating-point compare sets into the ones an
+    /// integer compare would for the same outcome, AXFLAG the reverse,
+    /// with an unordered result as Z and C both set.
+    pub(crate) fn exec_flag_manipulation(&mut self, pc: u64, insn: u32) -> ExecResult {
+        let p = &mut self.pstate;
+        let (z, c, v) = (p.z, p.c, p.v);
+        match bits(insn, 7, 5) {
+            // CFINV
+            0b000 => p.c = !c,
+            // XAFLAG
+            0b001 => {
+                p.n = !c && !z;
+                p.z = z && c;
+                p.c = c || z;
+                p.v = !c && z;
+            }
+            // AXFLAG
+            0b010 => {
+                p.n = false;
+                p.z = z || v;
+                p.c = c && !v;
+                p.v = false;
+            }
+            // MSR (immediate), which the decoder does not send here.
+            _ => return self.undefined(pc, insn),
+        }
+        Ok(Flow::Next)
     }
 
     /// `SYS`: cache maintenance, address translation and TLB maintenance.
@@ -237,72 +305,141 @@ impl Cpu {
             SysRegKey::from_insn(insn).trap_iss(rt, false),
         ));
         match (op1, crn, crm, op2) {
-            // IC IALLUIS, IC IALLU (and IC IVAU, below): the processor's
-            // decoded traces are its instruction cache, and they are never
-            // stale. Every write that can reach their memory forgets the
-            // traces it covers when it is made (`note_store`, the board's
-            // DMA log, `mem_write`), so there is nothing left to
-            // invalidate, as QEMU's system emulation, whose translation
-            // blocks are kept coherent the same way, makes them no-ops
-            // (target/arm/helper.c `v8_cp_reginfo`: IC_IALLUIS, IC_IALLU
-            // and, outside CONFIG_USER_ONLY, IC_IVAU are ARM_CP_NOP).
+            // IC IALLUIS, IC IALLU: the processor's decoded traces are its
+            // instruction cache, and they are never stale. Every write that
+            // can reach their memory forgets the traces it covers when it
+            // is made (`note_store`, the board's DMA log, `mem_write`), so
+            // there is nothing left to invalidate, as QEMU's system
+            // emulation, whose translation blocks are kept coherent the
+            // same way, makes them no-ops (target/arm/helper.c
+            // `v8_cp_reginfo`: IC_IALLUIS and IC_IALLU are ARM_CP_NOP).
+            // IC IVAU (below) invalidates nothing either, but translates
+            // the address it names, as Arm `AArch64_IC` does.
             (0, 7, 1, 0) | (0, 7, 5, 0) => {
                 if el0 {
                     return self.undefined(pc, insn);
                 }
                 Ok(Flow::Next)
             }
-            // IC IVAU, DC CVAC, DC CVAU, DC CIVAC: EL0 needs SCTLR_EL1.UCI.
-            // With no data cache model, cleaning has nothing to act on, and
-            // the instruction cache is never stale (above).
-            (3, 7, 5, 1) | (3, 7, 10, 1) | (3, 7, 11, 1) | (3, 7, 14, 1) => {
-                if el0 && self.sys.sctlr_el1 & SCTLR_UCI == 0 {
+            // IC IVAU, DC CVAC, DC CVAU, DC CIVAC, and DC CVAP (FEAT_DPB)
+            // and DC CVADP (FEAT_DPB2): EL0 needs SCTLR_EL1.UCI. CLIDR_EL1
+            // names caches to the PoU and the PoC and CTR_EL0.DIC is 0, so
+            // none is executed as a NOP (`AArch64_TreatDCAsNOP`,
+            // `AArch64_TreatICAsNOP`); a memory system with no PoP or PoDP
+            // cleans DC CVAP and DC CVADP to the PoC (`AArch64_DC`).
+            (3, 7, 5 | 10 | 11 | 12 | 13 | 14, 1) => {
+                let implemented = match crm {
+                    12 => self.implements(Feature::Dpb),
+                    13 => self.implements(Feature::Dpb2),
+                    _ => true,
+                };
+                if !implemented {
+                    return self.undefined(pc, insn);
+                }
+                if el0 && self.sys.sctlr_el1 & sctlr::UCI == 0 {
+                    return Err(trap);
+                }
+                let op = if crm == 5 {
+                    CacheMaintenance::InstructionInvalidate
+                } else {
+                    CacheMaintenance::Clean
+                };
+                let va = self.x_or_zr(rt);
+                self.cache_maintenance(bus, va, op)?;
+                Ok(Flow::Next)
+            }
+            // CFP, DVP and CPP RCTX (FEAT_SPECRES): EL0 needs
+            // SCTLR_EL1.EnRCTX. Each restricts predictions
+            // (`AArch64_RestrictPrediction`), which a processor that never
+            // speculates does not make.
+            (3, 7, 3, 4 | 5 | 7) => {
+                if !self.implements(Feature::SpecRes) {
+                    return self.undefined(pc, insn);
+                }
+                if el0 && self.sys.sctlr_el1 & sctlr::ENRCTX == 0 {
                     return Err(trap);
                 }
                 Ok(Flow::Next)
             }
             // DC ZVA: EL0 needs SCTLR_EL1.DZE.
             (3, 7, 4, 1) => {
-                if el0 && self.sys.sctlr_el1 & SCTLR_DZE == 0 {
+                if el0 && self.sys.sctlr_el1 & sctlr::DZE == 0 {
                     return Err(trap);
                 }
                 let va = self.x_or_zr(rt);
                 self.dc_zva(bus, va)?;
                 Ok(Flow::Next)
             }
-            // DC IVAC, DC ISW, DC CSW, DC CISW: EL1 only. With no data cache
-            // model, invalidation and cleaning have nothing to act on.
-            (0, 7, 6, 1) | (0, 7, 6, 2) | (0, 7, 10, 2) | (0, 7, 14, 2) => {
-                if el0 {
-                    return self.undefined(pc, insn);
-                }
-                Ok(Flow::Next)
-            }
-            // AT S1E1R, S1E1W, S1E0R, S1E0W.
-            (0, 7, 8, 0..=3) => {
+            // DC IVAC: EL1 only.
+            (0, 7, 6, 1) => {
                 if el0 {
                     return self.undefined(pc, insn);
                 }
                 let va = self.x_or_zr(rt);
-                let as_el = if op2 >= 2 { El::El0 } else { El::El1 };
-                self.address_translate(bus, va, op2 & 1 == 1, as_el)?;
+                self.cache_maintenance(bus, va, CacheMaintenance::Invalidate)?;
                 Ok(Flow::Next)
             }
-            // TLBI VMALLE1IS, VAE1IS, ASIDE1IS, VAAE1IS, VALE1IS, VAALE1IS
-            // (CRm 3) and VMALLE1, VAE1, ASIDE1, VAAE1, VALE1, VAALE1 (CRm 7),
-            // the ARMv8.0 EL1 TLB maintenance instructions (Arm ARM TLBI
-            // pages; QEMU target/arm/tcg/tlb-insns.c `tlbi_v8_cp_reginfo`).
-            // Each invalidates at least what it names, so flushing everything
-            // satisfies all of them. The rest of op1 0, CRn 8 belongs to
-            // FEAT_TLBIOS and FEAT_TLBIRANGE.
-            (0, 8, 3 | 7, 0 | 1 | 2 | 3 | 5 | 7) => {
+            // DC ISW, DC CSW, DC CISW: EL1 only. With no data cache model, a
+            // set and way names nothing to act on.
+            (0, 7, 6, 2) | (0, 7, 10, 2) | (0, 7, 14, 2) => {
                 if el0 {
+                    return self.undefined(pc, insn);
+                }
+                Ok(Flow::Next)
+            }
+            // AT S1E1R, S1E1W, S1E0R, S1E0W, and with FEAT_PAN2 AT S1E1RP
+            // and S1E1WP, which PSTATE.PAN takes part in.
+            (0, 7, 8, 0..=3) | (0, 7, 9, 0 | 1) => {
+                if el0 || (crm == 9 && !self.implements(Feature::Pan2)) {
+                    return self.undefined(pc, insn);
+                }
+                let va = self.x_or_zr(rt);
+                let checked = match (crm, op2 >> 1) {
+                    (9, _) => AtCheck::El1Pan,
+                    (_, 0) => AtCheck::El1,
+                    _ => AtCheck::El0,
+                };
+                self.address_translate(bus, va, op2 & 1 == 1, checked)?;
+                Ok(Flow::Next)
+            }
+            // The EL1 TLB maintenance instructions (CRn 8), and their nXS
+            // forms (CRn 9, FEAT_XS). Each invalidates at least what it
+            // names, whatever its TTL hint (FEAT_TTL) or range, so flushing
+            // everything satisfies all of them.
+            (0, 8 | 9, _, _) => {
+                if el0 || !self.implements_tlbi(crn, crm, op2) {
                     return self.undefined(pc, insn);
                 }
                 self.flush_tlb();
                 Ok(Flow::Next)
             }
             _ => self.undefined(pc, insn),
+        }
+    }
+
+    /// Whether this processor implements the EL1 TLB maintenance instruction
+    /// at `CRm` and `op2` of `op1 = 0`, `CRn` 8, or `CRn` 9 for its nXS form,
+    /// which FEAT_XS adds (Arm's `TLBI` pages, and QEMU
+    /// target/arm/tcg/tlb-insns.c `tlbi_v8_cp_reginfo`, `tlbios_reginfo`
+    /// and `tlbirange_reginfo`).
+    fn implements_tlbi(&self, crn: u32, crm: u32, op2: u32) -> bool {
+        if crn == 9 && !self.implements(Feature::Xs) {
+            return false;
+        }
+        let os = self.implements(Feature::TlbiOs);
+        let range = self.implements(Feature::TlbiRange);
+        match (crm, op2) {
+            // VMALLE1IS, VAE1IS, ASIDE1IS, VAAE1IS, VALE1IS, VAALE1IS, and
+            // VMALLE1, VAE1, ASIDE1, VAAE1, VALE1, VAALE1.
+            (3 | 7, 0 | 1 | 2 | 3 | 5 | 7) => true,
+            // VMALLE1OS, VAE1OS, ASIDE1OS, VAAE1OS, VALE1OS, VAALE1OS.
+            (1, 0 | 1 | 2 | 3 | 5 | 7) => os,
+            // RVAE1IS, RVAAE1IS, RVALE1IS, RVAALE1IS, and RVAE1, RVAAE1,
+            // RVALE1, RVAALE1.
+            (2 | 6, 1 | 3 | 5 | 7) => range,
+            // RVAE1OS, RVAAE1OS, RVALE1OS, RVAALE1OS.
+            (5, 1 | 3 | 5 | 7) => range && os,
+            _ => false,
         }
     }
 
@@ -386,7 +523,7 @@ impl Cpu {
                     // set) is downgraded to standby so, which §5.4.5
                     // permits; QEMU does the same.
                     self.x[0] = psci::SUCCESS;
-                    return Ok(Flow::Wait);
+                    return Ok(self.begin_wait(Wait::Interrupt));
                 }
             }
             psci::CPU_OFF => return Err(Fault::Stop(StopCause::CpuOff)),

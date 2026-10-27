@@ -19,7 +19,7 @@ pub(crate) fn f32_mul(a: Float32, b: Float32, status: &mut SoftFloatStatus) -> F
     let inf_arg = |sign_z: bool, mag_bits: u32, status: &mut SoftFloatStatus| -> Float32 {
         if mag_bits == 0 {
             softfloat_raise_flags(status, FLAG_INVALID);
-            FLOAT32_DEFAULT_NAN
+            float32_default_nan(status)
         } else {
             pack_to_f32(sign_z, 0xFF, 0)
         }

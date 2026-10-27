@@ -22,7 +22,7 @@ pub(crate) fn f16_to_f64(a: Float16, status: &mut SoftFloatStatus) -> Float64 {
                 softfloat_raise_flags(status, FLAG_INVALID);
             }
             if softfloat_default_nan_mode(status) {
-                return FLOAT64_DEFAULT_NAN;
+                return float64_default_nan(status);
             }
             return ((sign as u64) << 63) | 0x7FF8_0000_0000_0000 | ((frac as u64) << 42);
         }

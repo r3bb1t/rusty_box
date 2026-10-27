@@ -4,10 +4,18 @@
 //! [`PhysBus`](crate::bus::PhysBus) through `Cpu::step`, and keeps the
 //! machine's time: `icount` is the tick count every clock in the machine is
 //! derived from (one tick per instruction, time skipped forward only while the
-//! processor waits for an interrupt).
+//! processor waits).
 
 pub mod id;
 
+#[cfg(test)]
+#[path = "../../tests/unit/afp.rs"]
+mod afp;
+mod atomic;
+mod bti;
+#[cfg(test)]
+#[path = "../../tests/unit/bti.rs"]
+mod bti_tests;
 mod crypto;
 mod decode;
 #[cfg(test)]
@@ -16,32 +24,59 @@ mod difftest;
 mod dp;
 mod exception;
 mod exec;
+mod features;
 mod fp;
 mod fp_estimate;
+#[cfg(test)]
+#[path = "../../tests/unit/fp_extensions.rs"]
+mod fp_extensions;
 mod history;
 mod isa;
 mod ldst;
+#[cfg(test)]
+#[path = "../../tests/unit/memory_system.rs"]
+mod memory_system;
 mod mmu;
 mod op;
+mod pauth;
+#[cfg(test)]
+#[path = "../../tests/unit/pointer_auth.rs"]
+mod pointer_auth;
 mod poll;
+#[cfg(test)]
+#[path = "../../tests/unit/pstate_features.rs"]
+mod pstate_features;
 mod regs;
+mod sctlr;
 mod simd;
 mod simd_arith;
+mod simd_bf16;
 mod simd_fp;
+mod sme;
 mod state;
+#[cfg(test)]
+#[path = "../../tests/unit/step.rs"]
+mod step;
+mod sve;
 mod sysreg;
 mod system;
 mod timer;
 mod trace;
+mod wait;
+mod za;
+mod za_array;
+mod zt0;
 
 use rusty_box_core::{ClockHz, VmClock, VmInstant};
 
 pub use exception::ExceptionClass;
 pub use exec::{DebugStops, Step, StopCause, UndefinedInsn};
+pub use features::{CpuModel, UnknownCpuModel, ARMV8P6_COUNTER_HZ, QEMU_BACKCOMPAT_COUNTER_HZ};
 pub use history::RecentPcs;
 pub use mmu::{Tlb, TranslationFault};
 pub use regs::{CpuState, Reg, SysReg, SysRegRefusal, VReg};
 pub use timer::TimerLines;
+pub use wait::Wait;
 
 use exec::Nzcv;
 
@@ -65,6 +100,49 @@ impl El {
     }
 }
 
+/// `PSTATE.BTYPE` (FEAT_BTI): the kind of indirect branch that led to the
+/// instruction about to execute, which that instruction must accept when
+/// it is in a guarded page (Arm `BranchTargetCheck`). Each variant is named
+/// by the BTI that accepts it.
+///
+/// Closed (R5): the field's four values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Btype {
+    /// 00: no indirect branch; every instruction but BR, BLR and their
+    /// authenticating forms leaves this, and no check is made.
+    None,
+    /// 01: BR from X16 or X17, or from a page that is not guarded: a
+    /// `BTI c`, `BTI j` or `BTI jc` accepts it.
+    JumpOrCall,
+    /// 10: BLR: a `BTI c` or `BTI jc` accepts it.
+    Call,
+    /// 11: BR from any other register in a guarded page: a `BTI j` or
+    /// `BTI jc` accepts it.
+    Jump,
+}
+
+impl Btype {
+    /// The field's encoding.
+    pub const fn bits(self) -> u64 {
+        match self {
+            Self::None => 0b00,
+            Self::JumpOrCall => 0b01,
+            Self::Call => 0b10,
+            Self::Jump => 0b11,
+        }
+    }
+
+    /// The value the low two bits of `bits` encode.
+    pub const fn from_bits(bits: u64) -> Self {
+        match bits & 0b11 {
+            0b00 => Self::None,
+            0b01 => Self::JumpOrCall,
+            0b10 => Self::Call,
+            _ => Self::Jump,
+        }
+    }
+}
+
 /// `PSTATE`, held as separate fields; [`Pstate::to_spsr`] and
 /// [`Pstate::from_spsr`] are the only conversions to and from the packed
 /// `SPSR` layout.
@@ -83,10 +161,29 @@ pub struct Pstate {
     pub sp_sel: bool,
     pub ss: bool,
     pub il: bool,
+    /// [`Btype::None`] on a processor without FEAT_BTI.
+    pub btype: Btype,
+    /// `PSTATE.PAN` (FEAT_PAN): EL1 data accesses to memory EL0 can reach
+    /// fault. False on a processor without the feature.
+    pub pan: bool,
+    /// `PSTATE.UAO` (FEAT_UAO): LDTR and STTR at EL1 are checked against
+    /// EL1's permissions. False on a processor without the feature.
+    pub uao: bool,
+    /// `PSTATE.DIT` (FEAT_DIT): data-independent timing, which an
+    /// interpreter's timing has whatever the bit says. False on a processor
+    /// without the feature.
+    pub dit: bool,
+    /// `PSTATE.SSBS` (FEAT_SSBS): whether speculative loads may bypass
+    /// stores, which an interpreter never speculates. False on a processor
+    /// without the feature.
+    pub ssbs: bool,
 }
 
 impl Pstate {
-    /// The state out of reset: EL1 with `SP_EL1`, every interrupt masked.
+    /// The state out of reset (Arm `AArch64_TakeReset`): EL1 with `SP_EL1`,
+    /// every interrupt masked, DIT clear. PAN and UAO, which reset leaves
+    /// UNKNOWN, and SSBS, which it sets to an IMPLEMENTATION DEFINED value,
+    /// are clear, as QEMU's `arm_cpu_reset_hold` leaves them.
     pub const RESET: Self = Self {
         n: false,
         z: false,
@@ -100,7 +197,24 @@ impl Pstate {
         sp_sel: true,
         ss: false,
         il: false,
+        btype: Btype::None,
+        pan: false,
+        uao: false,
+        dit: false,
+        ssbs: false,
     };
+
+    /// `SPSR_ELx.SSBS`, and the bit the `SSBS` register reads it at.
+    pub(crate) const SSBS: u64 = 1 << 12;
+    /// `SPSR_ELx.PAN`, and the bit the `PAN` register reads it at.
+    pub(crate) const PAN: u64 = 1 << 22;
+    /// `SPSR_ELx.UAO`, and the bit the `UAO` register reads it at.
+    pub(crate) const UAO: u64 = 1 << 23;
+    /// `SPSR_ELx.DIT`, and the bit the `DIT` register reads it at.
+    pub(crate) const DIT: u64 = 1 << 24;
+    /// The `SPSR_ELx` bits of the fields every processor has: NZCV, SS, IL,
+    /// DAIF and M.
+    pub(crate) const BASE: u64 = 0xF030_03DF;
 
     /// The `SPSR_ELx` encoding of this state (AArch64 form, `M[4]` = 0).
     pub const fn to_spsr(self) -> u64 {
@@ -109,8 +223,21 @@ impl Pstate {
         v |= (self.z as u64) << 30;
         v |= (self.c as u64) << 29;
         v |= (self.v as u64) << 28;
+        if self.dit {
+            v |= Self::DIT;
+        }
+        if self.uao {
+            v |= Self::UAO;
+        }
+        if self.pan {
+            v |= Self::PAN;
+        }
         v |= (self.ss as u64) << 21;
         v |= (self.il as u64) << 20;
+        if self.ssbs {
+            v |= Self::SSBS;
+        }
+        v |= self.btype.bits() << 10;
         v |= (self.d as u64) << 9;
         v |= (self.a as u64) << 8;
         v |= (self.i as u64) << 7;
@@ -146,6 +273,11 @@ impl Pstate {
             sp_sel: m & 1 != 0,
             ss: spsr & (1 << 21) != 0,
             il: spsr & (1 << 20) != 0,
+            btype: Btype::from_bits(spsr >> 10),
+            pan: spsr & Self::PAN != 0,
+            uao: spsr & Self::UAO != 0,
+            dit: spsr & Self::DIT != 0,
+            ssbs: spsr & Self::SSBS != 0,
         })
     }
 
@@ -191,35 +323,24 @@ impl Pstate {
     }
 }
 
-/// Construction parameters for a processor.
+/// Construction parameters for a processor, beyond its model, which sets
+/// the system counter's frequency ([`CpuModel::counter_hz`]).
 #[derive(Debug, Clone, Copy)]
 pub struct CpuConfig {
     /// Emulated instructions per second: the rate of the tick count, and so
     /// of every clock derived from it (Bochs `cpu: ips`).
     pub ips: ClockHz,
-    /// The system counter's frequency, which is what `CNTPCT_EL0` counts at
-    /// and what `CNTFRQ_EL0` reads at reset. QEMU's `virt` (machine types
-    /// before 9.0) runs it at 62.5 MHz.
-    pub counter_hz: ClockHz,
     /// The address execution starts at.
     pub reset_pc: u64,
-}
-
-impl CpuConfig {
-    /// QEMU's `virt` system counter frequency (`GTIMER_SCALE` 16 ns).
-    pub const QEMU_VIRT_COUNTER_HZ: ClockHz = match ClockHz::new(62_500_000) {
-        Some(hz) => hz,
-        None => unreachable!(),
-    };
 }
 
 /// What the processor is doing between instructions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Activity {
     Running,
-    /// Executed `WFI` (or a PSCI `CPU_SUSPEND`) and waits for a wake-up event:
-    /// any pending physical interrupt, masked or not.
-    WaitingForInterrupt,
+    /// Executed `WFI`, `WFE`, `WFIT`, `WFET` or a PSCI `CPU_SUSPEND`, and
+    /// sleeps until what it waits for.
+    Waiting(Wait),
 }
 
 /// The local exclusive monitor (`LDXR`/`STXR`), tracking one physical
@@ -269,6 +390,10 @@ pub(crate) struct SysRegs {
     pub(crate) tpidr_el0: u64,
     pub(crate) tpidrro_el0: u64,
     pub(crate) tpidr_el1: u64,
+    /// `TPIDR2_EL0` (FEAT_SME).
+    pub(crate) tpidr2_el0: u64,
+    /// `SMCR_EL1` (FEAT_SME): the `LEN` field this core keeps.
+    pub(crate) smcr_el1: u64,
     pub(crate) csselr_el1: u64,
     pub(crate) cntkctl_el1: u64,
     pub(crate) cntfrq_el0: u64,
@@ -291,6 +416,9 @@ pub(crate) struct SysRegs {
     /// 32 bits each; their flags, RXfull and TXfull, are in `mdscr_el1`.
     pub(crate) dtrrx: u32,
     pub(crate) dtrtx: u32,
+    /// `DISR_EL1` (FEAT_RAS): with no source of SError interrupts, only an
+    /// `MSR` writes it.
+    pub(crate) disr_el1: u64,
 }
 
 impl SysRegs {
@@ -316,6 +444,8 @@ impl SysRegs {
             tpidr_el0: 0,
             tpidrro_el0: 0,
             tpidr_el1: 0,
+            tpidr2_el0: 0,
+            smcr_el1: 0,
             csselr_el1: 0,
             cntkctl_el1: 0,
             cntfrq_el0: counter_hz.get(),
@@ -336,6 +466,7 @@ impl SysRegs {
             dbgwcr: [0; 2],
             dtrrx: 0,
             dtrtx: 0,
+            disr_el1: 0,
         }
     }
 }
@@ -351,13 +482,24 @@ pub struct Cpu {
     pub(crate) sp_el1: u64,
     pub(crate) pc: u64,
     pub(crate) pstate: Pstate,
-    /// SIMD&FP registers V0..V31, little-endian lanes in a `u128`.
+    /// SIMD&FP registers V0..V31, little-endian lanes in a `u128`: the low
+    /// 128 bits of Z0..Z31. Every write goes through `write_v`.
     pub(crate) v: [u128; 32],
     pub(crate) fpcr: u64,
     pub(crate) fpsr: u64,
+    /// `PSTATE.SM` and `PSTATE.ZA` (FEAT_SME).
+    pub(crate) svcr: sme::Svcr,
+    /// Z above V, the predicates and ZA (FEAT_SME).
+    pub(crate) scalable: sme::ScalableRegs,
+    /// The pointer authentication keys (FEAT_PAuth), zero at reset as QEMU
+    /// sets them, where the architecture leaves them UNKNOWN.
+    pub(crate) pac_keys: pauth::PacKeys,
+    /// What this processor implements: the decoder, the ID registers and
+    /// every feature's own checks read it.
+    pub(crate) imp: features::Implementation,
     pub(crate) sys: SysRegs,
     pub(crate) monitor: ExclusiveMonitor,
-    pub(crate) event: timer::EventRegister,
+    pub(crate) event: wait::EventRegister,
     pub(crate) tlb: Tlb,
     pub(crate) traces: trace::TraceCache,
     /// Set by anything that may change how the next instruction is fetched
@@ -365,15 +507,21 @@ pub struct Cpu {
     /// invalidation — so that the running trace stops after the current
     /// instruction. Cleared when a trace starts.
     pub(crate) trace_break: bool,
+    /// Arm `InGuardedPage` (FEAT_BTI) of the instruction executing: whether
+    /// the page its fetch translated is guarded, as that translation found
+    /// it (`Cpu::fetch_translate`). Every fetch translates before its
+    /// instruction runs, but those of a trace's later instructions, which
+    /// are on its first one's page; so it is not saved, and the first fetch
+    /// after a restore sets it.
+    pub(crate) in_guarded_page: bool,
     pub(crate) activity: Activity,
     /// Ticks since the machine was built: one per retired (or faulting)
-    /// instruction, plus the span skipped while waiting for an interrupt.
+    /// instruction, plus the span skipped while waiting.
     pub(crate) icount: u64,
     /// Instructions retired (or that took an exception in their place) since
     /// the machine was built — `icount` without the waiting.
     pub(crate) retired: u64,
     pub(crate) ips: ClockHz,
-    pub(crate) counter_hz: ClockHz,
     /// Set when a register write may have changed a timer's output line or
     /// next deadline; the machine re-evaluates and clears it.
     pub(crate) timer_dirty: bool,
@@ -388,8 +536,13 @@ pub struct Cpu {
 }
 
 impl Cpu {
-    /// A processor in its reset state.
-    pub fn new(config: CpuConfig) -> Self {
+    /// A processor of `model` in its reset state.
+    pub fn new(model: CpuModel, config: CpuConfig) -> Self {
+        Self::implementing(config, model.implementation())
+    }
+
+    /// A processor implementing `imp`, in its reset state.
+    pub(crate) fn implementing(config: CpuConfig, imp: features::Implementation) -> Self {
         Self {
             x: [0; 31],
             sp_el0: 0,
@@ -399,17 +552,21 @@ impl Cpu {
             v: [0; 32],
             fpcr: 0,
             fpsr: 0,
-            sys: SysRegs::reset(config.counter_hz),
+            svcr: sme::Svcr::RESET,
+            scalable: sme::ScalableRegs::ZERO,
+            pac_keys: pauth::PacKeys::ZERO,
+            imp,
+            sys: SysRegs::reset(imp.counter_hz),
             monitor: ExclusiveMonitor::CLEAR,
-            event: timer::EventRegister::clear_at(0),
+            event: wait::EventRegister::at(false, timer::Count::new(0)),
             tlb: Tlb::new(),
             traces: trace::TraceCache::new(),
             trace_break: false,
+            in_guarded_page: false,
             activity: Activity::Running,
             icount: 0,
             retired: 0,
             ips: config.ips,
-            counter_hz: config.counter_hz,
             timer_dirty: true,
             irq_line: false,
             fiq_line: false,
@@ -446,16 +603,6 @@ impl Cpu {
         } else {
             None
         }
-    }
-
-    /// Leave the wait state if a wake-up event is pending: any asserted
-    /// physical interrupt, masked by `PSTATE` or not (Arm ARM D1.16.2).
-    /// Returns whether the processor is now running.
-    pub fn wake_if_pending(&mut self) -> bool {
-        if self.activity == Activity::WaitingForInterrupt && (self.irq_line || self.fiq_line) {
-            self.activity = Activity::Running;
-        }
-        self.activity == Activity::Running
     }
 
     /// Advance time while waiting, to `until` (never backwards).

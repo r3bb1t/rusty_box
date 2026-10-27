@@ -24,6 +24,15 @@
 //! inexact, which is already set. Every other case is `None`, and SoftFloat
 //! computes it.
 //!
+//! FEAT_AFP's controls change none of this. FPCR.FIZ, and FPCR.FZ under
+//! FPCR.AH, flush denormal operands only (Arm `FPUnpackBase`); FPCR.AH
+//! moves the flush of a result to after rounding, which a result above the
+//! smallest normal never meets (`FPRoundBase`), and changes how a NaN is
+//! negated and chosen (`FPNeg`, `FPProcessNaNs`), none of which a normal
+//! operand or a finite result is; FPCR.NEP decides only the bits above a
+//! scalar result, which the caller merges ([`crate::cpu`]'s
+//! `fp_set_merging`).
+//!
 //! A fused multiply-add follows the same rule, with all three operands
 //! normal. The Arm ARM's FPMulAdd rounds the exact `addend + n*m` once
 //! (FPRound), as SoftFloat's `f64_mulAdd`/`f32_mulAdd` and IEEE 754-2019

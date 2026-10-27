@@ -463,26 +463,32 @@ impl Cpu {
         Ok(Flow::Jump(pc.wrapping_add(sext(u64::from(bits(insn, 25, 0)) << 2, 28))))
     }
 
-    /// BR/BLR/RET/ERET/DRPS: `1101011 opc op2 op3 Rn op4`. The pointer
-    /// authentication forms are a separate feature set and never reach here.
-    pub(crate) fn exec_branch_reg(&mut self, pc: u64, insn: u32) -> ExecResult {
+    /// BR/BLR/RET/ERET/DRPS: `1101011 opc op2 op3 Rn op4`, fetched from a
+    /// guarded page or not (FEAT_BTI). The pointer authentication forms
+    /// have a handler of their own ([`Cpu::exec_branch_auth`]).
+    pub(crate) fn exec_branch_reg(&mut self, pc: u64, insn: u32, in_guarded_page: bool) -> ExecResult {
         let opc = bits(insn, 24, 21);
         let rn = bits(insn, 9, 5);
         if bits(insn, 20, 16) != 0x1F || bits(insn, 15, 10) != 0 || bits(insn, 4, 0) != 0 {
             return self.undefined(pc, insn);
         }
         match opc {
-            0 | 2 => Ok(Flow::Jump(self.x_or_zr(rn))),
+            0 => {
+                self.set_btype_jump(in_guarded_page, rn);
+                Ok(Flow::Jump(self.x_or_zr(rn)))
+            }
             1 => {
                 let target = self.x_or_zr(rn);
                 self.x[30] = pc.wrapping_add(4);
+                self.set_btype_call();
                 Ok(Flow::Jump(target))
             }
+            2 => Ok(Flow::Jump(self.x_or_zr(rn))),
             4 if rn == 0x1F => {
                 if self.pstate.el == super::El::El0 {
                     return self.undefined(pc, insn);
                 }
-                Ok(Flow::Jump(self.exception_return()))
+                Ok(Flow::Jump(self.exception_return(self.sys.elr_el1)))
             }
             // DRPS is UNDEFINED outside Debug state; nothing else is defined.
             _ => self.undefined(pc, insn),
@@ -636,6 +642,32 @@ impl Cpu {
             _ => return self.undefined(pc, insn),
         };
         self.set_x_or_zr_sized(bits(insn, 4, 0), value, sf);
+        Ok(Flow::Next)
+    }
+
+    /// RMIF (FEAT_FlagM): `1 0 1 11010000 imm6 00001 Rn 0 mask`. The four
+    /// bits of `Xn` from bit `imm6` up, wrapping past bit 63 (`(reg ::
+    /// reg)[imm+3:imm]`), go into the flags `mask` selects, N to V from
+    /// bit 3 to bit 0.
+    pub(crate) fn exec_rmif(&mut self, insn: u32) -> ExecResult {
+        let flags = self.x_or_zr(bits(insn, 9, 5)).rotate_right(bits(insn, 20, 15)) & 0xF;
+        let mask = u64::from(bits(insn, 3, 0));
+        let nzcv = self.pstate.nzcv();
+        self.pstate.set_nzcv((nzcv & !(mask << 28)) | ((flags & mask) << 28));
+        Ok(Flow::Next)
+    }
+
+    /// SETF8, SETF16 (FEAT_FlagM): `0 0 1 11010000 000000 sz 0010 Rn 0
+    /// 1101`. For the low `8 << sz` bits of `Wn` as a signed value, N is
+    /// its sign, Z whether it is zero, V whether bit `8 << sz` differs from
+    /// the sign (the value does not fit); C is unchanged.
+    pub(crate) fn exec_setf(&mut self, insn: u32) -> ExecResult {
+        let size = 8u32 << bits(insn, 14, 14);
+        let reg = self.x_or_zr(bits(insn, 9, 5)) as u32;
+        let sign = (reg >> (size - 1)) & 1;
+        self.pstate.n = sign == 1;
+        self.pstate.z = reg & ((1 << size) - 1) == 0;
+        self.pstate.v = (reg >> size) & 1 != sign;
         Ok(Flow::Next)
     }
 }

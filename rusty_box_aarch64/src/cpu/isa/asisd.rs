@@ -2,6 +2,7 @@
 //! "Data Processing -- Scalar Floating-Point and Advanced SIMD", the rows
 //! with `op0 = 01x1`).
 
+use super::Feature;
 use crate::cpu::exec::bits;
 
 /// Arm group `asisdone`: Advanced SIMD scalar copy.
@@ -59,6 +60,25 @@ pub(crate) enum Asisdpair {
     FmaxpSd,
     FminnmpSd,
     FminpSd,
+    FmaxnmpH,
+    FaddpH,
+    FmaxpH,
+    FminnmpH,
+    FminpH,
+}
+
+impl Asisdpair {
+    pub(crate) const fn feature(self) -> Feature {
+        match self {
+            Self::Addp
+            | Self::FmaxnmpSd
+            | Self::FaddpSd
+            | Self::FmaxpSd
+            | Self::FminnmpSd
+            | Self::FminpSd => Feature::AdvSimd,
+            Self::FmaxnmpH | Self::FaddpH | Self::FmaxpH | Self::FminnmpH | Self::FminpH => Feature::Fp16,
+        }
+    }
 }
 
 /// Arm group `asisddiff`: Advanced SIMD scalar three different.
@@ -146,6 +166,45 @@ pub(crate) enum Asisdelem {
     FmlsRSd,
     FmulRSd,
     FmulxRSd,
+    SqrdmlahR,
+    SqrdmlshR,
+    FmlaRhH,
+    FmlsRhH,
+    FmulRhH,
+    FmulxRhH,
+}
+
+impl Asisdelem {
+    pub(crate) const fn feature(self) -> Feature {
+        match self {
+            Self::SqdmlalL
+            | Self::SqdmlslL
+            | Self::SqdmullL
+            | Self::SqdmulhR
+            | Self::SqrdmulhR
+            | Self::FmlaRSd
+            | Self::FmlsRSd
+            | Self::FmulRSd
+            | Self::FmulxRSd => Feature::AdvSimd,
+            Self::SqrdmlahR | Self::SqrdmlshR => Feature::Rdm,
+            Self::FmlaRhH | Self::FmlsRhH | Self::FmulRhH | Self::FmulxRhH => Feature::Fp16,
+        }
+    }
+}
+
+/// Arm group `asisdsame2`: Advanced SIMD scalar three same extra.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum Asisdsame2 {
+    Sqrdmlah,
+    Sqrdmlsh,
+}
+
+impl Asisdsame2 {
+    pub(crate) const fn feature(self) -> Feature {
+        match self {
+            Self::Sqrdmlah | Self::Sqrdmlsh => Feature::Rdm,
+        }
+    }
 }
 
 pub(super) fn asisdone(word: u32) -> Option<Asisdone> {
@@ -205,7 +264,6 @@ pub(super) fn asisdpair(word: u32) -> Option<Asisdpair> {
     let u = bits(word, 29, 29);
     let size = bits(word, 23, 22);
     let opcode = bits(word, 16, 12);
-    // U = 0 with a floating-point opcode is half precision (FEAT_FP16).
     match (u, size, opcode) {
         (0b0, 0b11, 0b11011) => Some(Asisdpair::Addp),
         (0b1, 0b00 | 0b01, 0b01100) => Some(Asisdpair::FmaxnmpSd),
@@ -213,6 +271,11 @@ pub(super) fn asisdpair(word: u32) -> Option<Asisdpair> {
         (0b1, 0b00 | 0b01, 0b01111) => Some(Asisdpair::FmaxpSd),
         (0b1, 0b10 | 0b11, 0b01100) => Some(Asisdpair::FminnmpSd),
         (0b1, 0b10 | 0b11, 0b01111) => Some(Asisdpair::FminpSd),
+        (0b0, 0b00, 0b01100) => Some(Asisdpair::FmaxnmpH),
+        (0b0, 0b00, 0b01101) => Some(Asisdpair::FaddpH),
+        (0b0, 0b00, 0b01111) => Some(Asisdpair::FmaxpH),
+        (0b0, 0b10, 0b01100) => Some(Asisdpair::FminnmpH),
+        (0b0, 0b10, 0b01111) => Some(Asisdpair::FminpH),
         _ => None,
     }
 }
@@ -308,8 +371,6 @@ pub(super) fn asisdelem(word: u32) -> Option<Asisdelem> {
     let u = bits(word, 29, 29);
     let size = bits(word, 23, 22);
     let opcode = bits(word, 15, 12);
-    // size = 00 with a floating-point opcode is half precision
-    // (FEAT_FP16); SQRDMLAH and SQRDMLSH are FEAT_RDM.
     match (u, size, opcode) {
         (0b0, _, 0b0011) => Some(Asisdelem::SqdmlalL),
         (0b0, _, 0b0111) => Some(Asisdelem::SqdmlslL),
@@ -320,6 +381,152 @@ pub(super) fn asisdelem(word: u32) -> Option<Asisdelem> {
         (0b0, 0b10 | 0b11, 0b0101) => Some(Asisdelem::FmlsRSd),
         (0b0, 0b10 | 0b11, 0b1001) => Some(Asisdelem::FmulRSd),
         (0b1, 0b10 | 0b11, 0b1001) => Some(Asisdelem::FmulxRSd),
+        (0b1, _, 0b1101) => Some(Asisdelem::SqrdmlahR),
+        (0b1, _, 0b1111) => Some(Asisdelem::SqrdmlshR),
+        (0b0, 0b00, 0b0001) => Some(Asisdelem::FmlaRhH),
+        (0b0, 0b00, 0b0101) => Some(Asisdelem::FmlsRhH),
+        (0b0, 0b00, 0b1001) => Some(Asisdelem::FmulRhH),
+        (0b1, 0b00, 0b1001) => Some(Asisdelem::FmulxRhH),
         _ => None,
+    }
+}
+
+pub(super) fn asisdsame2(word: u32) -> Option<Asisdsame2> {
+    let u = bits(word, 29, 29);
+    let opcode = bits(word, 14, 11);
+    // The other opcodes are unallocated.
+    match (u, opcode) {
+        (0b1, 0b0000) => Some(Asisdsame2::Sqrdmlah),
+        (0b1, 0b0001) => Some(Asisdsame2::Sqrdmlsh),
+        _ => None,
+    }
+}
+
+/// Arm group `asisdsamefp16`: Advanced SIMD scalar three same FP16.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum Asisdsamefp16 {
+    Fmulx,
+    Fcmeq,
+    Frecps,
+    Frsqrts,
+    Fcmge,
+    Facge,
+    Fabd,
+    Fcmgt,
+    Facgt,
+}
+
+pub(super) fn asisdsamefp16(word: u32) -> Option<Asisdsamefp16> {
+    let u = bits(word, 29, 29);
+    let a = bits(word, 23, 23);
+    let opcode = bits(word, 13, 11);
+    match (u, a, opcode) {
+        (0b0, 0b0, 0b011) => Some(Asisdsamefp16::Fmulx),
+        (0b0, 0b0, 0b100) => Some(Asisdsamefp16::Fcmeq),
+        (0b0, 0b0, 0b111) => Some(Asisdsamefp16::Frecps),
+        (0b0, 0b1, 0b111) => Some(Asisdsamefp16::Frsqrts),
+        (0b1, 0b0, 0b100) => Some(Asisdsamefp16::Fcmge),
+        (0b1, 0b0, 0b101) => Some(Asisdsamefp16::Facge),
+        (0b1, 0b1, 0b010) => Some(Asisdsamefp16::Fabd),
+        (0b1, 0b1, 0b100) => Some(Asisdsamefp16::Fcmgt),
+        (0b1, 0b1, 0b101) => Some(Asisdsamefp16::Facgt),
+        _ => None,
+    }
+}
+
+impl Asisdsamefp16 {
+    pub(crate) const fn feature(self) -> Feature {
+        match self {
+            Self::Fmulx
+            | Self::Fcmeq
+            | Self::Frecps
+            | Self::Frsqrts
+            | Self::Fcmge
+            | Self::Facge
+            | Self::Fabd
+            | Self::Fcmgt
+            | Self::Facgt => Feature::Fp16,
+        }
+    }
+}
+
+/// Arm group `asisdmiscfp16`: Advanced SIMD scalar two-register miscellaneous FP16.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum Asisdmiscfp16 {
+    FcvtnsR,
+    FcvtmsR,
+    FcvtasR,
+    ScvtfR,
+    FcmgtFz,
+    FcmeqFz,
+    FcmltFz,
+    FcvtpsR,
+    FcvtzsR,
+    FrecpeR,
+    FrecpxR,
+    FcvtnuR,
+    FcvtmuR,
+    FcvtauR,
+    UcvtfR,
+    FcmgeFz,
+    FcmleFz,
+    FcvtpuR,
+    FcvtzuR,
+    FrsqrteR,
+}
+
+pub(super) fn asisdmiscfp16(word: u32) -> Option<Asisdmiscfp16> {
+    let u = bits(word, 29, 29);
+    let a = bits(word, 23, 23);
+    let opcode = bits(word, 16, 12);
+    match (u, a, opcode) {
+        (0b0, 0b0, 0b11010) => Some(Asisdmiscfp16::FcvtnsR),
+        (0b0, 0b0, 0b11011) => Some(Asisdmiscfp16::FcvtmsR),
+        (0b0, 0b0, 0b11100) => Some(Asisdmiscfp16::FcvtasR),
+        (0b0, 0b0, 0b11101) => Some(Asisdmiscfp16::ScvtfR),
+        (0b0, 0b1, 0b01100) => Some(Asisdmiscfp16::FcmgtFz),
+        (0b0, 0b1, 0b01101) => Some(Asisdmiscfp16::FcmeqFz),
+        (0b0, 0b1, 0b01110) => Some(Asisdmiscfp16::FcmltFz),
+        (0b0, 0b1, 0b11010) => Some(Asisdmiscfp16::FcvtpsR),
+        (0b0, 0b1, 0b11011) => Some(Asisdmiscfp16::FcvtzsR),
+        (0b0, 0b1, 0b11101) => Some(Asisdmiscfp16::FrecpeR),
+        (0b0, 0b1, 0b11111) => Some(Asisdmiscfp16::FrecpxR),
+        (0b1, 0b0, 0b11010) => Some(Asisdmiscfp16::FcvtnuR),
+        (0b1, 0b0, 0b11011) => Some(Asisdmiscfp16::FcvtmuR),
+        (0b1, 0b0, 0b11100) => Some(Asisdmiscfp16::FcvtauR),
+        (0b1, 0b0, 0b11101) => Some(Asisdmiscfp16::UcvtfR),
+        (0b1, 0b1, 0b01100) => Some(Asisdmiscfp16::FcmgeFz),
+        (0b1, 0b1, 0b01101) => Some(Asisdmiscfp16::FcmleFz),
+        (0b1, 0b1, 0b11010) => Some(Asisdmiscfp16::FcvtpuR),
+        (0b1, 0b1, 0b11011) => Some(Asisdmiscfp16::FcvtzuR),
+        (0b1, 0b1, 0b11101) => Some(Asisdmiscfp16::FrsqrteR),
+        _ => None,
+    }
+}
+
+impl Asisdmiscfp16 {
+    pub(crate) const fn feature(self) -> Feature {
+        match self {
+            Self::FcvtnsR
+            | Self::FcvtmsR
+            | Self::FcvtasR
+            | Self::ScvtfR
+            | Self::FcmgtFz
+            | Self::FcmeqFz
+            | Self::FcmltFz
+            | Self::FcvtpsR
+            | Self::FcvtzsR
+            | Self::FrecpeR
+            | Self::FrecpxR
+            | Self::FcvtnuR
+            | Self::FcvtmuR
+            | Self::FcvtauR
+            | Self::UcvtfR
+            | Self::FcmgeFz
+            | Self::FcmleFz
+            | Self::FcvtpuR
+            | Self::FcvtzuR
+            | Self::FrsqrteR => Feature::Fp16,
+        }
     }
 }

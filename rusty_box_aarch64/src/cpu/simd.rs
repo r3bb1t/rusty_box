@@ -7,7 +7,8 @@
 //! pseudocode's `V[d] = result` at datasize 64 does.
 
 use super::dp::{ones, replicate};
-use super::exec::{bit, bits, sext, ExecResult, Fault, Flow};
+use super::exec::{bit, bits, sext, ExecResult, Flow};
+use super::fp::FpType;
 use super::Cpu;
 
 /// Element `index` of `esize` bits.
@@ -42,20 +43,22 @@ const fn datasize(q: bool) -> u32 {
     }
 }
 
-/// Arm ARM `VFPExpandImm` for single precision.
-pub(crate) fn vfp_expand_imm32(imm8: u64) -> u64 {
+/// Arm ARM `VFPExpandImm(imm8, N)` at `ty`'s width: sign `imm8<7>`, an
+/// `E`-bit exponent `NOT(imm8<6>):Replicate(imm8<6>, E-3):imm8<5:4>`, and
+/// the fraction `imm8<3:0>` followed by zeros.
+pub(crate) fn vfp_expand_imm(imm8: u64, ty: FpType) -> u64 {
+    let n = ty.esize();
+    let e = match ty {
+        FpType::Half => 5,
+        FpType::Single => 8,
+        FpType::Double => 11,
+    };
+    let f = n - e - 1;
     let sign = (imm8 >> 7) & 1;
     let b6 = (imm8 >> 6) & 1;
-    let exp = ((b6 ^ 1) << 7) | (if b6 == 1 { 0b11111 } else { 0 } << 2) | ((imm8 >> 4) & 3);
-    (sign << 31) | (exp << 23) | ((imm8 & 0xF) << 19)
-}
-
-/// Arm ARM `VFPExpandImm` for double precision.
-pub(crate) fn vfp_expand_imm64(imm8: u64) -> u64 {
-    let sign = (imm8 >> 7) & 1;
-    let b6 = (imm8 >> 6) & 1;
-    let exp = ((b6 ^ 1) << 10) | (if b6 == 1 { 0xFF } else { 0 } << 2) | ((imm8 >> 4) & 3);
-    (sign << 63) | (exp << 52) | ((imm8 & 0xF) << 48)
+    let replicated = if b6 == 1 { ones(e - 3) } else { 0 };
+    let exp = ((b6 ^ 1) << (e - 1)) | (replicated << 2) | ((imm8 >> 4) & 3);
+    (sign << (n - 1)) | (exp << f) | ((imm8 & 0xF) << (f - 4))
 }
 
 /// Arm ARM `AdvSIMDExpandImm(op, cmode, imm8)`.
@@ -85,38 +88,36 @@ fn adv_simd_expand_imm(op: bool, cmode: u32, imm8: u64) -> u64 {
                 }
                 v
             }
-            (_, false) => replicate(vfp_expand_imm32(imm8), 32, 64),
-            (_, true) => vfp_expand_imm64(imm8),
+            (_, false) => replicate(vfp_expand_imm(imm8, FpType::Single), 32, 64),
+            (_, true) => vfp_expand_imm(imm8, FpType::Double),
         },
     }
 }
 
 impl Cpu {
-    /// The FP enable check every Advanced SIMD handler performs before it
-    /// touches a register.
-    #[inline]
-    pub(super) fn simd_check(&self) -> Result<(), Fault> {
-        if self.fp_enabled() {
-            Ok(())
-        } else {
-            Err(self.fp_trap())
-        }
-    }
-
     /// MOVI/MVNI/ORR/BIC (vector, immediate) and FMOV (vector, immediate):
     /// `0 Q op 0111100000 abc cmode o2 1 defgh Rd`.
     pub(crate) fn exec_simd_imm(&mut self, pc: u64, insn: u32) -> ExecResult {
         let q = bit(insn, 30);
         let op = bit(insn, 29);
         let cmode = bits(insn, 15, 12);
+        let imm8 = (u64::from(bits(insn, 18, 16)) << 5) | u64::from(bits(insn, 9, 5));
         if bit(insn, 11) {
-            return self.undefined(pc, insn);
+            // o2 = 1: FMOV (vector, immediate) of half precision (FEAT_FP16,
+            // which the decoder checks), `op = 0` and `cmode = 1111`.
+            if op || cmode != 0b1111 {
+                return self.undefined(pc, insn);
+            }
+            self.simd_check()?;
+            let imm64 = replicate(vfp_expand_imm(imm8, FpType::Half), 16, 64);
+            let imm = at_datasize(u128::from(imm64) | (u128::from(imm64) << 64), q);
+            self.write_v(bits(insn, 4, 0) as usize, imm);
+            return Ok(Flow::Next);
         }
         if cmode == 0b1111 && op && !q {
             return self.undefined(pc, insn);
         }
         self.simd_check()?;
-        let imm8 = (u64::from(bits(insn, 18, 16)) << 5) | u64::from(bits(insn, 9, 5));
         let imm64 = adv_simd_expand_imm(op, cmode, imm8);
         let imm = at_datasize(u128::from(imm64) | (u128::from(imm64) << 64), q);
         let rd = bits(insn, 4, 0) as usize;
@@ -144,15 +145,13 @@ impl Cpu {
             }
         };
         let current = self.v[rd];
-        self.v[rd] = at_datasize(
-            match kind {
-                Kind::Movi => imm,
-                Kind::Mvni => !imm,
-                Kind::Orr => current | imm,
-                Kind::Bic => current & !imm,
-            },
-            q,
-        );
+        let result = match kind {
+            Kind::Movi => imm,
+            Kind::Mvni => !imm,
+            Kind::Orr => current | imm,
+            Kind::Bic => current & !imm,
+        };
+        self.write_v(rd, at_datasize(result, q));
         Ok(Flow::Next)
     }
 
@@ -192,17 +191,24 @@ impl Cpu {
             (true, _) if q => Kind::InsElement,
             _ => return self.undefined(pc, insn),
         };
-        self.simd_check()?;
+        // SMOV and UMOV of element 0 are legal in Streaming SVE mode (Arm
+        // ARM SMOV, UMOV: `if index == 0 then AArch64_CheckFPEnabled()`).
+        if matches!(kind, Kind::Smov | Kind::Umov) && index == 0 {
+            self.fp_check()?;
+        } else {
+            self.simd_check()?;
+        }
         let duplicated = |element: u64| {
             let r = replicate(element, esize, 64);
             at_datasize(u128::from(r) | (u128::from(r) << 64), q)
         };
+        let d = rd as usize;
         match kind {
             Kind::DupElement => {
-                self.v[rd as usize] = duplicated(elem(self.v[rn as usize], index, esize));
+                self.write_v(d, duplicated(elem(self.v[rn as usize], index, esize)));
             }
             Kind::DupGeneral => {
-                self.v[rd as usize] = duplicated(self.x_or_zr(rn) & ones(esize));
+                self.write_v(d, duplicated(self.x_or_zr(rn) & ones(esize)));
             }
             Kind::Smov => {
                 let v = sext(elem(self.v[rn as usize], index, esize), esize);
@@ -213,13 +219,15 @@ impl Cpu {
                 self.set_x_or_zr(rd, v);
             }
             Kind::InsGeneral => {
-                let v = self.x_or_zr(rn);
-                set_elem(&mut self.v[rd as usize], index, esize, v);
+                let mut r = self.v[d];
+                set_elem(&mut r, index, esize, self.x_or_zr(rn));
+                self.write_v(d, r);
             }
             Kind::InsElement => {
                 let src = imm4 >> size;
-                let v = elem(self.v[rn as usize], src, esize);
-                set_elem(&mut self.v[rd as usize], index, esize, v);
+                let mut r = self.v[d];
+                set_elem(&mut r, index, esize, elem(self.v[rn as usize], src, esize));
+                self.write_v(d, r);
             }
         }
         Ok(Flow::Next)
@@ -236,7 +244,7 @@ impl Cpu {
         self.simd_check()?;
         let esize = 8 << size;
         let value = elem(self.v[bits(insn, 9, 5) as usize], imm5 >> (size + 1), esize);
-        self.v[bits(insn, 4, 0) as usize] = u128::from(value);
+        self.write_v(bits(insn, 4, 0) as usize, u128::from(value));
         Ok(Flow::Next)
     }
 
@@ -257,7 +265,7 @@ impl Cpu {
         } else {
             (n >> pos) | (m << (width - pos))
         };
-        self.v[bits(insn, 4, 0) as usize] = at_datasize(r, q);
+        self.write_v(bits(insn, 4, 0) as usize, at_datasize(r, q));
         Ok(Flow::Next)
     }
 
@@ -299,7 +307,7 @@ impl Cpu {
             }
             _ => return self.undefined(pc, insn),
         }
-        self.v[bits(insn, 4, 0) as usize] = at_datasize(r, q);
+        self.write_v(bits(insn, 4, 0) as usize, at_datasize(r, q));
         Ok(Flow::Next)
     }
 
@@ -325,7 +333,7 @@ impl Cpu {
                 set_elem(&mut r, i, 8, 0);
             }
         }
-        self.v[rd] = at_datasize(r, q);
+        self.write_v(rd, at_datasize(r, q));
         Ok(Flow::Next)
     }
 }
@@ -337,9 +345,15 @@ mod tests {
     #[test]
     fn fmov_immediates_expand_to_their_float_values() {
         // fmov s0, #1.0 -> imm8 0x70; fmov d0, #-2.0 -> imm8 0x80
-        assert_eq!(f32::from_bits(vfp_expand_imm32(0x70) as u32), 1.0);
-        assert_eq!(f64::from_bits(vfp_expand_imm64(0x80)), -2.0);
-        assert_eq!(f64::from_bits(vfp_expand_imm64(0x70)), 1.0);
+        assert_eq!(f32::from_bits(vfp_expand_imm(0x70, FpType::Single) as u32), 1.0);
+        assert_eq!(f64::from_bits(vfp_expand_imm(0x80, FpType::Double)), -2.0);
+        assert_eq!(f64::from_bits(vfp_expand_imm(0x70, FpType::Double)), 1.0);
+        // fmov h0, #1.0 and #-31.0 (imm8 0x70 and 0xBF), GNU as.
+        assert_eq!(vfp_expand_imm(0x70, FpType::Half), 0x3C00);
+        assert_eq!(vfp_expand_imm(0xBF, FpType::Half), 0xCFC0);
+        // The largest and smallest single-precision magnitudes, 31.0 and 0.125.
+        assert_eq!(f32::from_bits(vfp_expand_imm(0x3F, FpType::Single) as u32), 31.0);
+        assert_eq!(f32::from_bits(vfp_expand_imm(0x40, FpType::Single) as u32), 0.125);
     }
 
     #[test]

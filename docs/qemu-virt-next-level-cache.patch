@@ -1,0 +1,19 @@
+--- a/hw/arm/virt.c
++++ b/hw/arm/virt.c
+@@ -862,8 +862,14 @@
+         }
+ 
+         next_level = core_offset;
+-        qemu_fdt_setprop_cell(ms->fdt, nodename, "next-level-cache",
+-                              next_level);
++        /*
++         * core_offset stays 0 when no cache node was created for a level
++         * above L1, and 0 is not a valid phandle.
++         */
++        if (next_level) {
++            qemu_fdt_setprop_cell(ms->fdt, nodename, "next-level-cache",
++                                  next_level);
++        }
+ 
+         g_free(nodename);
+     }

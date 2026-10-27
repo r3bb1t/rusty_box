@@ -100,7 +100,7 @@ fn nothing(_: &mut Machine<'_>) {}
 /// GIC's registers where `TIMER_WFI` expects them.
 fn timer_set(m: &mut Machine<'_>) {
     let config = VirtConfig::DEFAULT;
-    let cval = u128::from(TIMER_TICKS) * u128::from(config.counter_hz.get()) / u128::from(config.ips.get());
+    let cval = u128::from(TIMER_TICKS) * u128::from(config.cpu.counter_hz().get()) / u128::from(config.ips.get());
     let cval = u64::try_from(cval).expect("the deadline fits the counter");
     m.sysreg_write(SysReg::CNTV_CVAL_EL0, cval).expect("CNTV_CVAL_EL0");
     m.sysreg_write(SysReg::CNTV_CTL_EL0, 1).expect("CNTV_CTL_EL0");

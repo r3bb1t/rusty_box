@@ -150,14 +150,11 @@ const MAINTAINED: [u32; 22] = [
 ];
 const MAINTAINED_FUNC: u64 = 0x48;
 
-/// An upper-half address whose translation tables would be read from the
-/// GIC distributor's window: `IC IVAU` of it reads no table, as QEMU's
-/// does not.
-const UPPER_HALF: u64 = 0xFFFF_FF80_0000_0000;
-
-/// With the MMU off; with the MMU on and the line's address in the TLB, or
-/// not, through the identity mapping or the alias; and naming an address
-/// whose tables are in a device's window.
+/// With the MMU off; and with the MMU on and the line's address in the
+/// TLB, or not, through the identity mapping or the alias. (`IC IVAU`
+/// translates the address it names, as Arm `AArch64_IC` does, and takes a
+/// Data Abort where it has no translation: `memory_system`'s tests cover
+/// that.)
 #[test]
 fn code_made_visible_by_cache_maintenance_runs() {
     for (mmu, store_at, ivau_at) in [
@@ -165,16 +162,12 @@ fn code_made_visible_by_cache_maintenance_runs() {
         (true, RAM_BASE + MAINTAINED_FUNC, RAM_BASE + MAINTAINED_FUNC),
         (true, 0x8000_0000 + MAINTAINED_FUNC, 0x8000_0000 + MAINTAINED_FUNC),
         (true, RAM_BASE + MAINTAINED_FUNC, 0x8000_0000 + MAINTAINED_FUNC),
-        (true, RAM_BASE + MAINTAINED_FUNC, UPPER_HALF + MAINTAINED_FUNC),
     ] {
         let mut ram = vec![0u8; RAM_LEN];
         let mut m = bare(&mut ram);
         load(&mut m, RAM_BASE, &MAINTAINED);
         if mmu {
             map_code_twice(&mut m);
-            // TTBR1 walks on (EPD1 clear, T1SZ 25), from the distributor.
-            m.sysreg_write(SysReg::TCR_EL1, 25 | (25 << 16)).expect("TCR");
-            m.sysreg_write(SysReg::TTBR1_EL1, rusty_box_aarch64::board::GIC_DIST_BASE).expect("TTBR1");
         }
         m.reg_write(Reg::X3, store_at);
         m.reg_write(Reg::X1, ivau_at);

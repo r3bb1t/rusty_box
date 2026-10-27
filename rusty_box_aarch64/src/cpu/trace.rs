@@ -66,7 +66,7 @@ use super::exec::{Done, Fault, Observed, Step};
 use super::id::PA_BITS;
 use super::op::{predecode, Op, OpSource};
 use super::poll::PollStep;
-use super::Cpu;
+use super::{Btype, Cpu};
 use crate::bus::{CodeEpoch, FetchSource, PhysAddr, PhysBus, PhysSpan};
 use crate::instrumentation::{Execution, Instrumentation};
 
@@ -556,6 +556,12 @@ impl Cpu {
     /// per-instruction path where no trace can be used. Returns what the
     /// last instruction run did.
     ///
+    /// A trace runs only with PSTATE.BTYPE clear. Of its instructions only
+    /// a branch through a register sets BTYPE (FEAT_BTI), and such a branch
+    /// ends the trace, so its later instructions start with BTYPE clear,
+    /// as Arm `BranchTargetCheck` would leave it. With BTYPE set, the one
+    /// instruction runs by [`Cpu::step`], which makes that check.
+    ///
     /// When `observer` does not hear of every instruction, a counter poll
     /// whose read starts the trace may first be fast-forwarded (`poll.rs`):
     /// whole iterations of it are skipped before the trace runs, so one
@@ -589,6 +595,9 @@ impl Cpu {
             !exits.is_empty() || limit == self.run_left(),
             "with no exits, a trace's limit is the rest of its run"
         );
+        if self.pstate.btype != Btype::None {
+            return self.step_branch_target(bus, observer);
+        }
         let pc = self.pc;
         let mut observed = Observed { bus, observer };
         let pa = match self.fetch_address(&mut observed, pc) {
@@ -606,40 +615,40 @@ impl Cpu {
             return self.step_uncached(&mut observed, pc, pa);
         };
         self.trace_break = false;
-        let mut i = trace.start;
-        let mut end = trace.start + (trace.len as u64).min(limit) as usize;
+        let mut slots = trace.start..trace.start + (trace.len as u64).min(limit) as usize;
         let mut pc = pc;
         let mut raised = None;
-        while i < end {
-            let word = self.traces.pool.word(i);
-            observed.observer.before_execution(pc, word);
-            let flow = match self.exec_op(&mut observed, pc, PoolSlot(i), &mut raised) {
-                Ok(flow) => flow,
-                Err(fault) => return self.take_fault(pc, *fault, observed.observer),
-            };
-            match self.retire(pc, Some(word), flow, observed.observer) {
-                Done::Next => {}
-                Done::Elsewhere if exits.is_empty() => {
-                    debug_assert!(!self.trace_break && !self.timer_dirty && !observed.devices_touched());
-                    match self.linked_trace(i, pc, pa, epoch) {
-                        Some(next) => {
-                            i = next.start;
-                            end = next.start + next.len;
-                            pc = self.pc;
-                            continue;
+        // One trace's instructions, then the trace each links to.
+        'linked: loop {
+            for i in slots {
+                let word = self.traces.pool.word(i);
+                observed.observer.before_execution(pc, word);
+                let flow = match self.exec_op(&mut observed, pc, PoolSlot(i), &mut raised) {
+                    Ok(flow) => flow,
+                    Err(fault) => return self.take_fault(pc, *fault, observed.observer),
+                };
+                match self.retire(pc, Some(word), flow, observed.observer) {
+                    Done::Next => {}
+                    Done::Elsewhere if exits.is_empty() => {
+                        debug_assert!(!self.trace_break && !self.timer_dirty && !observed.devices_touched());
+                        match self.linked_trace(i, pc, pa, epoch) {
+                            Some(next) => {
+                                slots = next.start..next.start + next.len;
+                                pc = self.pc;
+                                continue 'linked;
+                            }
+                            None => return Step::Retired,
                         }
-                        None => return Step::Retired,
                     }
+                    done => return done.step(),
                 }
-                done => return done.step(),
+                if self.trace_break || self.timer_dirty || observed.devices_touched() {
+                    return Step::Retired;
+                }
+                pc = pc.wrapping_add(4);
             }
-            if self.trace_break || self.timer_dirty || observed.devices_touched() {
-                break;
-            }
-            pc = pc.wrapping_add(4);
-            i += 1;
+            return Step::Retired;
         }
-        Step::Retired
     }
 
     /// The trace that the taken branch in pool slot `slot`, at `branch_pc`,
@@ -651,12 +660,14 @@ impl Cpu {
     ///
     /// Only a direct branch links (B, BL, B.cond, CBZ/CBNZ, TBZ/TBNZ, as
     /// Bochs links only its direct jumps' traces): it changes neither the
-    /// exception level nor `PSTATE.IL`, and its target is aligned. Only a
+    /// exception level, `PSTATE.IL` nor `PSTATE.BTYPE` (which stays clear,
+    /// as a trace needs), and its target is aligned. Only a
     /// target in the branch's own 4 KiB page links: the trace's first
     /// fetch translated that page and checked its execute permission, and
     /// nothing in the trace changed them (a TLB fill, flush or maintenance
     /// instruction ends a trace), so the caller's fetch would find the same
-    /// physical page; and its memory's source and epoch are the trace's:
+    /// physical page, guarded or not as [`Cpu::in_guarded_page`] already
+    /// says; and its memory's source and epoch are the trace's:
     /// RAM's never change, and only a write to a flash bank, a device
     /// access that ends a trace, takes the bank out of read-array mode or
     /// moves its epoch. The
@@ -704,6 +715,16 @@ impl Cpu {
     #[inline(never)]
     fn take_fault<I: Instrumentation>(&mut self, pc: u64, fault: Fault, observer: &mut I) -> Step {
         self.finish(pc, None, Err(fault), observer).step()
+    }
+
+    /// Run the instruction at the PC by [`Cpu::step`], with PSTATE.BTYPE
+    /// set: a branch through a register led to it, and its branch target
+    /// check is due. Out of line, and cold, so that the trace loop's
+    /// register allocation does not depend on it.
+    #[cold]
+    #[inline(never)]
+    fn step_branch_target<B: PhysBus, I: Instrumentation>(&mut self, bus: &mut B, observer: &mut I) -> Step {
+        self.step(bus, observer)
     }
 
     /// Run the instruction at `pc`, at physical address `pa`, by the
@@ -802,7 +823,7 @@ impl Cpu {
             let Ok(word) = bus.fetch(PhysAddr::new(addr), clock) else {
                 break;
             };
-            let op = predecode(classify(word), word);
+            let op = predecode(classify(word, self.imp.features), word);
             self.traces.pool.push(Slot { op, word });
             len += 1;
             if op.ends_trace() {

@@ -15,11 +15,13 @@
 use rusty_box_core::VmClock;
 
 use super::exception::{Exception, ExceptionClass};
+use super::fp::FpType;
 use super::isa::Class;
 use super::ldst::SingleForm;
 use super::decode::classify;
 use super::op::predecode;
-use super::{Activity, Cpu};
+use super::za::ZaMove;
+use super::{Activity, Btype, Cpu};
 use crate::bus::{AccessWidth, BusFault, FetchSource, PhysAddr, PhysBus};
 use crate::instrumentation::{Direction, Instrumentation, MemoryAccess};
 
@@ -83,8 +85,9 @@ impl<B: PhysBus, I: Instrumentation> PhysBus for Observed<'_, B, I> {
 pub enum Step {
     /// An instruction retired, or an exception was taken in its place.
     Retired,
-    /// `WFI` (or PSCI `CPU_SUSPEND`) retired and the processor now waits for
-    /// an interrupt; [`Cpu::activity`] says so until one arrives.
+    /// A wait (`WFI`, `WFE`, `WFIT`, `WFET`, or a PSCI `CPU_SUSPEND`)
+    /// retired and the processor now sleeps; [`Cpu::activity`] says what for
+    /// until its wait ends.
     Waiting,
     /// The machine must stop before this instruction; the processor state is
     /// exactly as it was before it.
@@ -152,7 +155,10 @@ pub(crate) enum Flow {
     Next,
     /// Continue at this address (a taken branch, an exception return).
     Jump(u64),
-    /// The instruction retired and the processor waits for an interrupt.
+    /// The instruction retired and the processor waits: its activity, which
+    /// [`Cpu::begin_wait`] alone sets, names what for. The wait is not
+    /// carried here, so that every instruction's result stays as small as a
+    /// branch's.
     Wait,
 }
 
@@ -235,12 +241,18 @@ impl Cpu {
     /// one instruction, so it fast-forwards nothing.
     pub fn step<B: PhysBus, I: Instrumentation>(&mut self, bus: &mut B, observer: &mut I) -> Step {
         let pc = self.pc;
+        let btype = self.pstate.btype;
         let mut observed = Observed { bus, observer };
         let mut fetched = None;
         let result = match self.fetch_address(&mut observed, pc) {
             Ok(pa) => self.execute_at(&mut observed, pc, pa, &mut fetched),
             Err(fault) => Err(fault),
         };
+        if result.is_err() {
+            // An instruction that faults or stops completes nothing:
+            // PSTATE.BTYPE stays what the branch to it left.
+            self.pstate.btype = btype;
+        }
         self.finish(pc, fetched, result, observed.observer).step()
     }
 
@@ -261,7 +273,9 @@ impl Cpu {
     }
 
     /// Fetch the instruction at `pc` from physical address `pa`, decode it
-    /// and execute it.
+    /// and execute it: with PSTATE.BTYPE set, after the branch target check
+    /// (FEAT_BTI, Arm `BranchTargetCheck`) of the page the fetch's
+    /// translation found ([`Cpu::in_guarded_page`]).
     #[inline(always)]
     pub(crate) fn execute_at<B: PhysBus, I: Instrumentation>(
         &mut self,
@@ -273,8 +287,11 @@ impl Cpu {
         let insn = self.fetch_word(bus, pc, pa)?;
         *fetched_word = Some(insn);
         bus.observer.before_execution(pc, insn);
+        if self.pstate.btype != Btype::None {
+            self.branch_target_check(self.in_guarded_page, insn)?;
+        }
         let mut raised = None;
-        self.exec_op(bus, pc, predecode(classify(insn), insn), &mut raised)
+        self.exec_op(bus, pc, predecode(classify(insn, self.imp.features), insn), &mut raised)
             .map_err(|fault| *fault)
     }
 
@@ -331,22 +348,32 @@ impl Cpu {
             }
             Flow::Wait => {
                 self.pc = pc.wrapping_add(4);
-                self.activity = Activity::WaitingForInterrupt;
-                observer.wait_for_interrupt(pc);
+                if let Activity::Waiting(wait) = self.activity {
+                    observer.wait(pc, wait);
+                }
                 Done::Waiting
             }
         }
     }
 
     /// Execute an instruction its class handler executes from the word.
+    /// A branch through a register reads whether its own page is guarded
+    /// (FEAT_BTI) from [`Cpu::in_guarded_page`], which the translation of
+    /// the fetch that brought it set: every instruction a trace runs is on
+    /// the page its first fetch translated.
     pub(crate) fn exec_class<B: PhysBus>(&mut self, bus: &mut B, pc: u64, class: Class, insn: u32) -> ExecResult {
         match class {
             Class::Undefined => self.undefined(pc, insn),
             Class::Hint => self.exec_hint(insn, pc),
+            Class::WaitWithTimeout => self.exec_wfxt(insn),
+            Class::PointerAuthHint => self.exec_pauth_hint(insn),
             Class::AddSubImmediate => self.exec_addsub_imm(pc, insn),
             Class::AddSubShiftedRegister => self.exec_addsub_shift(pc, insn),
             Class::AddSubExtendedRegister => self.exec_addsub_ext(pc, insn),
             Class::AddSubWithCarry => self.exec_addsub_carry(pc, insn),
+            Class::RotateMaskInsertFlags => self.exec_rmif(insn),
+            Class::EvaluateIntoFlags => self.exec_setf(insn),
+            Class::FlagManipulation => self.exec_flag_manipulation(pc, insn),
             Class::LogicalImmediate => self.exec_logic_imm(pc, insn),
             Class::LogicalShiftedRegister => self.exec_logic_shift(pc, insn),
             Class::MoveWide => self.exec_movewide(pc, insn),
@@ -357,11 +384,14 @@ impl Cpu {
             Class::CompareAndBranch => self.exec_compbranch(pc, insn),
             Class::TestAndBranch => self.exec_testbranch(pc, insn),
             Class::BranchImmediate => self.exec_branch_imm(pc, insn),
-            Class::BranchRegister => self.exec_branch_reg(pc, insn),
+            Class::BranchRegister => self.exec_branch_reg(pc, insn, self.in_guarded_page),
+            Class::AuthenticatedBranch => self.exec_branch_auth(pc, insn, self.in_guarded_page),
             Class::ConditionalCompareImmediate | Class::ConditionalCompareRegister => self.exec_condcmp(pc, insn),
             Class::ConditionalSelect => self.exec_condsel(pc, insn),
             Class::DataProcessing1Source => self.exec_dp1(pc, insn),
             Class::DataProcessing2Source => self.exec_dp2(pc, insn),
+            Class::PointerAuth => self.exec_pauth(insn),
+            Class::PointerAuthGeneric => self.exec_pacga(insn),
             Class::DataProcessing3Source => self.exec_dp3(pc, insn),
             Class::ExceptionGeneration => self.exec_exception_gen(pc, insn),
             Class::System => self.exec_system(bus, pc, insn),
@@ -372,11 +402,16 @@ impl Cpu {
                 self.exec_ldst_single(bus, pc, insn, SingleForm::Immediate9)
             }
             Class::LoadStoreRegisterOffset => self.exec_ldst_single(bus, pc, insn, SingleForm::RegisterOffset),
+            Class::LoadAuthenticated => self.exec_load_auth(bus, insn),
             Class::LoadLiteral => self.exec_load_literal(bus, pc, insn),
             Class::LoadStorePairOffset | Class::LoadStorePairIndexed | Class::LoadStoreNoAllocatePair => {
                 self.exec_ldst_pair(bus, pc, insn)
             }
             Class::LoadStoreExclusive => self.exec_ldst_exclusive(bus, pc, insn),
+            Class::AtomicMemoryOperation => self.exec_memop(bus, pc, insn),
+            Class::CompareAndSwap => self.exec_cas(bus, insn),
+            Class::CompareAndSwapPair => self.exec_casp(bus, pc, insn),
+            Class::LoadStoreOrderedUnscaled => self.exec_ldapstl_unscaled(bus, insn),
             Class::SimdLoadStoreMultiple | Class::SimdLoadStoreMultiplePostIndexed => {
                 self.exec_ldst_multiple(bus, pc, insn)
             }
@@ -394,6 +429,27 @@ impl Cpu {
             Class::SimdThreeDifferent => self.exec_simd_diff(pc, insn, false),
             Class::SimdScalarThreeDifferent => self.exec_simd_diff(pc, insn, true),
             Class::SimdIndexedElement => self.exec_simd_elem(pc, insn, false),
+            Class::SimdRoundingDoublingMultiplyAccumulate => self.exec_simd_rdm(pc, insn, false),
+            Class::SimdScalarRoundingDoublingMultiplyAccumulate => self.exec_simd_rdm(pc, insn, true),
+            Class::SimdDotProduct => self.exec_simd_dot(pc, insn, false),
+            Class::SimdDotProductIndexedElement => self.exec_simd_dot(pc, insn, true),
+            Class::SimdMatrixMultiply => self.exec_simd_mmla(pc, insn),
+            Class::SimdThreeSameHalf => self.exec_simd_same_fp(pc, insn, false, FpType::Half),
+            Class::SimdScalarThreeSameHalf => self.exec_simd_same_fp(pc, insn, true, FpType::Half),
+            Class::SimdTwoRegisterMiscHalf => self.exec_simd_misc_fp(pc, insn, false, FpType::Half),
+            Class::SimdScalarTwoRegisterMiscHalf => {
+                self.exec_simd_misc_fp(pc, insn, true, FpType::Half)
+            }
+            Class::SimdFpMulAddLong => self.exec_simd_fmlal(insn, false),
+            Class::SimdFpMulAddLongIndexedElement => self.exec_simd_fmlal(insn, true),
+            Class::SimdComplexMultiplyAccumulate => self.exec_simd_fcmla(pc, insn, false),
+            Class::SimdComplexMultiplyAccumulateIndexedElement => self.exec_simd_fcmla(pc, insn, true),
+            Class::SimdComplexAdd => self.exec_simd_fcadd(pc, insn),
+            Class::SimdBfDotProduct => self.exec_simd_bfdot(insn, false),
+            Class::SimdBfDotProductIndexedElement => self.exec_simd_bfdot(insn, true),
+            Class::SimdBfMulAddLong => self.exec_simd_bfmlal(insn, false),
+            Class::SimdBfMulAddLongIndexedElement => self.exec_simd_bfmlal(insn, true),
+            Class::SimdBfMatrixMultiply => self.exec_simd_bfmmla(insn),
             Class::SimdScalarIndexedElement => self.exec_simd_elem(pc, insn, true),
             Class::SimdAcrossLanes => self.exec_simd_across(pc, insn),
             Class::SimdScalarPairwise => self.exec_simd_scalar_pair(pc, insn),
@@ -414,6 +470,121 @@ impl Cpu {
             Class::CryptoShaThreeRegister => self.exec_sha_three(pc, insn),
             Class::CryptoShaTwoRegister => self.exec_sha_two(pc, insn),
             Class::Crc32 => self.exec_crc32(insn),
+            Class::AddStreamingVectorLength => self.exec_addsvl(insn),
+            Class::ReadStreamingVectorLength => self.exec_rdsvl(insn),
+            Class::AddVectorLength => self.exec_addvl(insn),
+            Class::ReadVectorLength => self.exec_rdvl(insn),
+            Class::SveIntBinaryPredicated => self.exec_sve_int_bin_pred(pc, insn),
+            Class::SveIntReduction => self.exec_sve_int_reduce(pc, insn),
+            Class::SveMovprfx => self.exec_sve_movprfx(insn),
+            Class::SveShiftPredicated => self.exec_sve_shift_pred(pc, insn),
+            Class::SveIntUnaryPredicated => self.exec_sve_int_unary(pc, insn),
+            Class::SveIntMulAddPredicated => self.exec_sve_mul_add(insn),
+            Class::SveIntAddSubUnpredicated => self.exec_sve_add_sub(pc, insn),
+            Class::SveBitwiseUnpredicated => self.exec_sve_bitwise(pc, insn),
+            Class::SveShiftUnpredicated => self.exec_sve_shift_unpred(pc, insn),
+            Class::SveIndex => self.exec_sve_index(insn),
+            Class::SveIntMulUnpredicated => self.exec_sve_mul_unpred(pc, insn),
+            Class::SveElementCount => self.exec_sve_element_count(pc, insn),
+            Class::SveBitmaskImmediate => self.exec_sve_bitmask_imm(pc, insn),
+            Class::SveCopyImmediate => self.exec_sve_copy_imm(pc, insn),
+            Class::SveExtract => self.exec_sve_ext(insn),
+            Class::SvePermuteUnpredicated => self.exec_sve_perm_unpred(pc, insn),
+            Class::SvePermutePredicate => self.exec_sve_perm_predicate(pc, insn),
+            Class::SvePermuteElements => self.exec_sve_perm_elements(pc, insn),
+            Class::SvePermutePredicated => self.exec_sve_perm_predicated(pc, insn),
+            Class::SveSelect => self.exec_sve_sel(insn),
+            Class::SveIntCompare => self.exec_sve_compare(pc, insn),
+            Class::SvePredicateLogical => self.exec_sve_pred_logical(insn),
+            Class::SveBreak => self.exec_sve_break(insn),
+            Class::SvePredicateMisc => self.exec_sve_pred_misc(pc, insn),
+            Class::SveWhile => self.exec_sve_while(insn),
+            Class::SveWhileCounter => self.exec_sve_while_counter(insn),
+            Class::SveWhilePair => self.exec_sve_while_pair(insn),
+            Class::SvePext => self.exec_sve_pext(insn),
+            Class::SvePtrueCounter => self.exec_sve_ptrue_counter(insn),
+            Class::SveCntpCounter => self.exec_sve_cntp_counter(insn),
+            Class::SveConditionallyTerminate => self.exec_sve_cterm(insn),
+            Class::SvePredicateCount => self.exec_sve_pred_count(pc, insn),
+            Class::SveWideImmediate => self.exec_sve_wide_imm(pc, insn),
+            Class::SveIntxDot => self.exec_sve_intx_dot(pc, insn),
+            Class::SveIntxComplex => self.exec_sve_intx_complex(pc, insn),
+            Class::SveIntxMulLong => self.exec_sve_intx_mul_long(pc, insn),
+            Class::SveIntxMul => self.exec_sve_intx_mul(pc, insn),
+            Class::SveIntxBinaryPredicated => self.exec_sve_intx_binary_pred(pc, insn),
+            Class::SveIntxUnaryPredicated => self.exec_sve_intx_unary_pred(pc, insn),
+            Class::SveIntxClamp => self.exec_sve_intx_clamp(insn),
+            Class::SveIntxLongArithmetic => self.exec_sve_intx_long_arith(pc, insn),
+            Class::SveIntxEorInterleaved => self.exec_sve_intx_eor_interleaved(insn),
+            Class::SveIntxShiftLong => self.exec_sve_intx_shift_long(pc, insn),
+            Class::SveIntxAbsDiffAccumulate => self.exec_sve_intx_abs_diff_acc(pc, insn),
+            Class::SveIntxCarryLong => self.exec_sve_intx_carry_long(insn),
+            Class::SveIntxComplexAdd => self.exec_sve_intx_complex_add(insn),
+            Class::SveIntxShiftAccumulate => self.exec_sve_intx_shift_acc(pc, insn),
+            Class::SveIntxNarrow => self.exec_sve_intx_narrow(pc, insn),
+            Class::SveIntxNarrowPair => self.exec_sve_narrow_pair(insn),
+            Class::SveFpArithmeticPredicated => self.exec_sve_fp_arith_pred(pc, insn),
+            Class::SveFpArithmeticUnpredicated => self.exec_sve_fp_arith_unpred(pc, insn),
+            Class::SveFpReduction => self.exec_sve_fp_reduce(pc, insn),
+            Class::SveFpCompare => self.exec_sve_fp_compare(pc, insn),
+            Class::SveFpUnaryPredicated => self.exec_sve_fp_unary_pred(pc, insn),
+            Class::SveFpEstimate => self.exec_sve_fp_estimate(pc, insn),
+            Class::SveFpMulAdd => self.exec_sve_fp_mul_add(pc, insn),
+            Class::SveFpIndexed => self.exec_sve_fp_indexed(insn),
+            Class::SveFpClamp => self.exec_sve_fp_clamp(pc, insn),
+            Class::SveFpComplex => self.exec_sve_fp_complex(pc, insn),
+            Class::SveFpPairwise => self.exec_sve_fp_pairwise(pc, insn),
+            Class::SveFpConvertOdd => self.exec_sve_fp_convert_odd(pc, insn),
+            Class::SveFpWidening => self.exec_sve_fp_widening(insn),
+            Class::SveFillSpill => self.exec_sve_fill_spill(bus, insn),
+            Class::SvePrefetch => self.exec_sve_prefetch(),
+            Class::SveLoadBroadcast => self.exec_sve_load_broadcast(bus, insn),
+            Class::SveLoadBroadcastQuadword => self.exec_sve_load_broadcast_quadword(bus, insn),
+            Class::SveLoadContiguous => self.exec_sve_load_contiguous(bus, insn),
+            Class::SveLoadStructures => self.exec_sve_load_structures(bus, insn),
+            Class::SveStoreContiguous => self.exec_sve_store_contiguous(bus, pc, insn),
+            Class::SveStoreStructures => self.exec_sve_store_structures(bus, insn),
+            Class::SveLoadMulti => self.exec_sve_load_multi(bus, insn),
+            Class::SveStoreMulti => self.exec_sve_store_multi(bus, insn),
+            Class::SveMultiSelect => self.exec_sve_multi_sel(insn),
+            Class::SveMultiIntBinary => self.exec_sve_multi_int_binary(pc, insn),
+            Class::SveMultiFpBinary => self.exec_sve_multi_fp_binary(pc, insn),
+            Class::SveMultiClamp => self.exec_sve_multi_clamp(pc, insn),
+            Class::SveMultiZip => self.exec_sve_multi_zip(pc, insn),
+            Class::SveMultiNarrowShift => self.exec_sve_multi_narrow_shift(pc, insn),
+            Class::SveMultiNarrowInt => self.exec_sve_multi_narrow_int(insn),
+            Class::SveMultiNarrowFp => self.exec_sve_multi_narrow_fp(insn),
+            Class::SveMultiFpUnary => self.exec_sve_multi_fp_unary(pc, insn),
+            Class::SveMultiUnpack => self.exec_sve_multi_unpack(pc, insn),
+            Class::SmeArrayIntLongLong => self.exec_sme_array_int_long_long(pc, insn),
+            Class::SmeArrayIntLong => self.exec_sme_array_int_long(insn),
+            Class::SmeArrayFpLong => self.exec_sme_array_fp_long(insn),
+            Class::SmeArrayFpDot => self.exec_sme_array_fp_dot(insn),
+            Class::SmeArrayIntDot => self.exec_sme_array_int_dot(pc, insn),
+            Class::SmeArrayFpMulAdd => self.exec_sme_array_fp_mul_add(pc, insn),
+            Class::SmeArrayAddVectors => self.exec_sme_array_add_vectors(pc, insn),
+            Class::SmeArrayAccumulate => self.exec_sme_array_accumulate(pc, insn),
+            Class::SmeIndexedIntDot => self.exec_sme_indexed_int_dot(insn),
+            Class::SmeIndexedFpMulAdd => self.exec_sme_indexed_fp_mul_add(insn),
+            Class::SmeIndexedVerticalDot => self.exec_sme_indexed_vertical_dot(insn),
+            Class::SmeFpOuterProduct => self.exec_sme_fp_outer_product(insn),
+            Class::SmeIntOuterProduct => self.exec_sme_int_outer_product(insn),
+            Class::SmeIntOuterProductHalfwords => self.exec_sme_int_outer_product_halfwords(insn),
+            Class::SmeBinaryOuterProduct => self.exec_sme_binary_outer_product(insn),
+            Class::SmeMoveToSlice => self.exec_sme_move_to_slice(insn),
+            Class::SmeMoveFromSlice => self.exec_sme_move_from_slice(insn),
+            Class::SmeMoveGroupToSlices => self.exec_sme_move_group_slices(pc, insn, ZaMove::Insert),
+            Class::SmeMoveGroupFromSlices => self.exec_sme_move_group_slices(pc, insn, ZaMove::Extract),
+            Class::SmeMoveGroupToArray => self.exec_sme_move_group_array(insn, ZaMove::Insert),
+            Class::SmeMoveGroupFromArray => self.exec_sme_move_group_array(insn, ZaMove::Extract),
+            Class::SmeZero => self.exec_sme_zero(insn),
+            Class::SmeAddVector => self.exec_sme_add_vector(insn),
+            Class::SmeLoadSlice => self.exec_sme_load_slice(bus, insn),
+            Class::SmeStoreSlice => self.exec_sme_store_slice(bus, insn),
+            Class::SmeFillSpill => self.exec_sme_fill_spill(bus, insn),
+            Class::SmeZeroZt0 => self.exec_sme_zero_zt0(),
+            Class::SmeFillSpillZt0 => self.exec_sme_fill_spill_zt0(bus, insn),
+            Class::SmeLookupTable => self.exec_sme_lookup_table(pc, insn),
         }
     }
 

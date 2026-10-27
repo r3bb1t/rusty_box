@@ -28,7 +28,7 @@ use super::dp::{add_with_carry, datasize, decode_bit_masks, ones, ror, shift_reg
 use super::exec::{bit, bits, keep_fault, sext, Fault, Flow, OpResult};
 use super::fp::{dp2_operation, dp3_form, scalar_type, FpBinary, FpDp3Regs, FpType};
 use super::isa::Class;
-use super::mmu::{DataAccess, ElementPair, Fit};
+use super::mmu::{DataAccess, ElementPair};
 use super::Cpu;
 use crate::bus::PhysBus;
 use crate::softfloat::FusedMulAdd;
@@ -109,9 +109,11 @@ pub(crate) enum Op {
     B { offset: u64 },
     /// BL.
     Bl { offset: u64 },
-    /// BR and RET.
+    /// BR, which sets PSTATE.BTYPE (FEAT_BTI).
     Br { rn: u8 },
-    /// BLR.
+    /// RET, which leaves PSTATE.BTYPE clear.
+    Ret { rn: u8 },
+    /// BLR, which sets PSTATE.BTYPE (FEAT_BTI).
     Blr { rn: u8 },
     /// Every hint this core executes as a NOP.
     Nop,
@@ -302,8 +304,9 @@ pub(crate) fn predecode(class: Class, word: u32) -> Op {
                 return generic;
             }
             match bits(word, 24, 21) {
-                0 | 2 => Op::Br { rn },
+                0 => Op::Br { rn },
                 1 => Op::Blr { rn },
+                2 => Op::Ret { rn },
                 _ => generic,
             }
         }
@@ -431,7 +434,154 @@ pub(crate) fn predecode(class: Class, word: u32) -> Op {
         | Class::CryptoAes
         | Class::CryptoShaThreeRegister
         | Class::CryptoShaTwoRegister
-        | Class::Crc32 => generic,
+        | Class::Crc32
+        | Class::PointerAuthHint
+        | Class::WaitWithTimeout
+        | Class::FlagManipulation
+        | Class::AuthenticatedBranch
+        | Class::LoadAuthenticated
+        | Class::PointerAuth
+        | Class::PointerAuthGeneric
+        | Class::RotateMaskInsertFlags
+        | Class::EvaluateIntoFlags
+        | Class::SimdRoundingDoublingMultiplyAccumulate
+        | Class::SimdScalarRoundingDoublingMultiplyAccumulate
+        | Class::SimdDotProduct
+        | Class::SimdDotProductIndexedElement
+        | Class::SimdMatrixMultiply
+        | Class::SimdThreeSameHalf
+        | Class::SimdScalarThreeSameHalf
+        | Class::SimdTwoRegisterMiscHalf
+        | Class::SimdScalarTwoRegisterMiscHalf
+        | Class::SimdFpMulAddLong
+        | Class::SimdFpMulAddLongIndexedElement
+        | Class::SimdComplexMultiplyAccumulate
+        | Class::SimdComplexMultiplyAccumulateIndexedElement
+        | Class::SimdComplexAdd
+        | Class::SimdBfDotProduct
+        | Class::SimdBfDotProductIndexedElement
+        | Class::SimdBfMulAddLong
+        | Class::SimdBfMulAddLongIndexedElement
+        | Class::SimdBfMatrixMultiply
+        | Class::AtomicMemoryOperation
+        | Class::CompareAndSwap
+        | Class::CompareAndSwapPair
+        | Class::LoadStoreOrderedUnscaled
+        | Class::AddStreamingVectorLength
+        | Class::ReadStreamingVectorLength
+        | Class::AddVectorLength
+        | Class::ReadVectorLength
+        | Class::SveIntBinaryPredicated
+        | Class::SveIntReduction
+        | Class::SveMovprfx
+        | Class::SveShiftPredicated
+        | Class::SveIntUnaryPredicated
+        | Class::SveIntMulAddPredicated
+        | Class::SveIntAddSubUnpredicated
+        | Class::SveBitwiseUnpredicated
+        | Class::SveShiftUnpredicated
+        | Class::SveIndex
+        | Class::SveIntMulUnpredicated
+        | Class::SveElementCount
+        | Class::SveBitmaskImmediate
+        | Class::SveCopyImmediate
+        | Class::SveExtract
+        | Class::SvePermuteUnpredicated
+        | Class::SvePermutePredicate
+        | Class::SvePermuteElements
+        | Class::SvePermutePredicated
+        | Class::SveSelect
+        | Class::SveIntCompare
+        | Class::SvePredicateLogical
+        | Class::SveBreak
+        | Class::SvePredicateMisc
+        | Class::SveWhile
+        | Class::SveWhileCounter
+        | Class::SveWhilePair
+        | Class::SvePext
+        | Class::SvePtrueCounter
+        | Class::SveCntpCounter
+        | Class::SveConditionallyTerminate
+        | Class::SvePredicateCount
+        | Class::SveWideImmediate
+        | Class::SveIntxDot
+        | Class::SveIntxComplex
+        | Class::SveIntxMulLong
+        | Class::SveIntxLongArithmetic
+        | Class::SveIntxEorInterleaved
+        | Class::SveIntxShiftLong
+        | Class::SveIntxAbsDiffAccumulate
+        | Class::SveIntxCarryLong
+        | Class::SveIntxComplexAdd
+        | Class::SveIntxShiftAccumulate
+        | Class::SveIntxNarrow
+        | Class::SveIntxNarrowPair
+        | Class::SveIntxMul
+        | Class::SveIntxBinaryPredicated
+        | Class::SveIntxUnaryPredicated
+        | Class::SveIntxClamp
+        | Class::SveFpArithmeticPredicated
+        | Class::SveFpArithmeticUnpredicated
+        | Class::SveFpReduction
+        | Class::SveFpCompare
+        | Class::SveFpUnaryPredicated
+        | Class::SveFpEstimate
+        | Class::SveFpMulAdd
+        | Class::SveFpIndexed
+        | Class::SveFpClamp
+        | Class::SveFpComplex
+        | Class::SveFpPairwise
+        | Class::SveFpConvertOdd
+        | Class::SveFpWidening
+        | Class::SveFillSpill
+        | Class::SvePrefetch
+        | Class::SveLoadBroadcast
+        | Class::SveLoadBroadcastQuadword
+        | Class::SveLoadContiguous
+        | Class::SveLoadStructures
+        | Class::SveStoreContiguous
+        | Class::SveStoreStructures
+        | Class::SveLoadMulti
+        | Class::SveStoreMulti
+        | Class::SveMultiSelect
+        | Class::SveMultiIntBinary
+        | Class::SveMultiFpBinary
+        | Class::SveMultiClamp
+        | Class::SveMultiZip
+        | Class::SveMultiNarrowShift
+        | Class::SveMultiNarrowInt
+        | Class::SveMultiNarrowFp
+        | Class::SveMultiFpUnary
+        | Class::SveMultiUnpack
+        | Class::SmeArrayIntLongLong
+        | Class::SmeArrayIntLong
+        | Class::SmeArrayFpLong
+        | Class::SmeArrayFpDot
+        | Class::SmeArrayIntDot
+        | Class::SmeArrayFpMulAdd
+        | Class::SmeArrayAddVectors
+        | Class::SmeArrayAccumulate
+        | Class::SmeIndexedIntDot
+        | Class::SmeIndexedFpMulAdd
+        | Class::SmeIndexedVerticalDot
+        | Class::SmeBinaryOuterProduct
+        | Class::SmeIntOuterProductHalfwords
+        | Class::SmeMoveGroupToSlices
+        | Class::SmeMoveGroupFromSlices
+        | Class::SmeMoveGroupToArray
+        | Class::SmeMoveGroupFromArray
+        | Class::SmeLookupTable
+        | Class::SmeFpOuterProduct
+        | Class::SmeIntOuterProduct
+        | Class::SmeMoveToSlice
+        | Class::SmeMoveFromSlice
+        | Class::SmeZero
+        | Class::SmeAddVector
+        | Class::SmeLoadSlice
+        | Class::SmeStoreSlice
+        | Class::SmeFillSpill
+        | Class::SmeZeroZt0
+        | Class::SmeFillSpillZt0 => generic,
     }
 }
 
@@ -460,7 +610,7 @@ impl Op {
     /// trace when it executes).
     pub(crate) const fn ends_trace(self) -> bool {
         match self {
-            Self::B { .. } | Self::Bl { .. } | Self::Br { .. } | Self::Blr { .. } => true,
+            Self::B { .. } | Self::Bl { .. } | Self::Br { .. } | Self::Ret { .. } | Self::Blr { .. } => true,
             Self::Class { class, word } => class_ends_trace(class, word),
             Self::AddImm { .. }
             | Self::AddsImm { .. }
@@ -499,8 +649,12 @@ const fn class_ends_trace(class: Class, word: u32) -> bool {
         // UNDEFINED, SVC/HVC/BRK, and BR/BLR/RET/ERET forms with any field
         // the handler rejects: control leaves, or the instruction faults.
         Class::Undefined | Class::ExceptionGeneration | Class::BranchImmediate | Class::BranchRegister => true,
-        // WFE, WFI, SEV and SEVL.
-        Class::Hint => true,
+        // BRAA, BLRAA, RETAA, ERETAA and their other forms (FEAT_PAuth):
+        // control leaves, or the instruction faults.
+        Class::AuthenticatedBranch => true,
+        // WFE, WFI, SEV and SEVL; and WFET and WFIT (FEAT_WFxT), which may
+        // wait.
+        Class::Hint | Class::WaitWithTimeout => true,
         Class::System => {
             let read = bit(word, 21);
             let op0 = bits(word, 20, 19);
@@ -578,7 +732,160 @@ const fn class_ends_trace(class: Class, word: u32) -> bool {
         | Class::CryptoAes
         | Class::CryptoShaThreeRegister
         | Class::CryptoShaTwoRegister
-        | Class::Crc32 => false,
+        | Class::Crc32
+        // The pointer authentication hints and data-processing forms: they
+        // write registers, and a failed authentication with FEAT_FPAC
+        // faults as any instruction may.
+        | Class::PointerAuthHint
+        | Class::PointerAuth
+        | Class::PointerAuthGeneric
+        | Class::LoadAuthenticated
+        // NZCV only.
+        | Class::FlagManipulation
+        | Class::RotateMaskInsertFlags
+        | Class::EvaluateIntoFlags
+        | Class::SimdRoundingDoublingMultiplyAccumulate
+        | Class::SimdScalarRoundingDoublingMultiplyAccumulate
+        | Class::SimdDotProduct
+        | Class::SimdDotProductIndexedElement
+        | Class::SimdMatrixMultiply
+        | Class::SimdThreeSameHalf
+        | Class::SimdScalarThreeSameHalf
+        | Class::SimdTwoRegisterMiscHalf
+        | Class::SimdScalarTwoRegisterMiscHalf
+        | Class::SimdFpMulAddLong
+        | Class::SimdFpMulAddLongIndexedElement
+        | Class::SimdComplexMultiplyAccumulate
+        | Class::SimdComplexMultiplyAccumulateIndexedElement
+        | Class::SimdComplexAdd
+        | Class::SimdBfDotProduct
+        | Class::SimdBfDotProductIndexedElement
+        | Class::SimdBfMulAddLong
+        | Class::SimdBfMulAddLongIndexedElement
+        | Class::SimdBfMatrixMultiply
+        | Class::AtomicMemoryOperation
+        | Class::CompareAndSwap
+        | Class::CompareAndSwapPair
+        | Class::LoadStoreOrderedUnscaled
+        // The SVE and SME data-processing, load and store instructions:
+        // what they may execute depends on PSTATE.SM and PSTATE.ZA, which
+        // only an MSR changes (SMSTART, SMSTOP, MSR SVCR*), and an MSR ends
+        // the trace.
+        | Class::AddStreamingVectorLength
+        | Class::ReadStreamingVectorLength
+        | Class::AddVectorLength
+        | Class::ReadVectorLength
+        | Class::SveIntBinaryPredicated
+        | Class::SveIntReduction
+        | Class::SveMovprfx
+        | Class::SveShiftPredicated
+        | Class::SveIntUnaryPredicated
+        | Class::SveIntMulAddPredicated
+        | Class::SveIntAddSubUnpredicated
+        | Class::SveBitwiseUnpredicated
+        | Class::SveShiftUnpredicated
+        | Class::SveIndex
+        | Class::SveIntMulUnpredicated
+        | Class::SveElementCount
+        | Class::SveBitmaskImmediate
+        | Class::SveCopyImmediate
+        | Class::SveExtract
+        | Class::SvePermuteUnpredicated
+        | Class::SvePermutePredicate
+        | Class::SvePermuteElements
+        | Class::SvePermutePredicated
+        | Class::SveSelect
+        | Class::SveIntCompare
+        | Class::SvePredicateLogical
+        | Class::SveBreak
+        | Class::SvePredicateMisc
+        | Class::SveWhile
+        | Class::SveWhileCounter
+        | Class::SveWhilePair
+        | Class::SvePext
+        | Class::SvePtrueCounter
+        | Class::SveCntpCounter
+        | Class::SveConditionallyTerminate
+        | Class::SvePredicateCount
+        | Class::SveWideImmediate
+        | Class::SveIntxDot
+        | Class::SveIntxComplex
+        | Class::SveIntxMulLong
+        | Class::SveIntxLongArithmetic
+        | Class::SveIntxEorInterleaved
+        | Class::SveIntxShiftLong
+        | Class::SveIntxAbsDiffAccumulate
+        | Class::SveIntxCarryLong
+        | Class::SveIntxComplexAdd
+        | Class::SveIntxShiftAccumulate
+        | Class::SveIntxNarrow
+        | Class::SveIntxNarrowPair
+        | Class::SveIntxMul
+        | Class::SveIntxBinaryPredicated
+        | Class::SveIntxUnaryPredicated
+        | Class::SveIntxClamp
+        | Class::SveFpArithmeticPredicated
+        | Class::SveFpArithmeticUnpredicated
+        | Class::SveFpReduction
+        | Class::SveFpCompare
+        | Class::SveFpUnaryPredicated
+        | Class::SveFpEstimate
+        | Class::SveFpMulAdd
+        | Class::SveFpIndexed
+        | Class::SveFpClamp
+        | Class::SveFpComplex
+        | Class::SveFpPairwise
+        | Class::SveFpConvertOdd
+        | Class::SveFpWidening
+        | Class::SveFillSpill
+        | Class::SvePrefetch
+        | Class::SveLoadBroadcast
+        | Class::SveLoadBroadcastQuadword
+        | Class::SveLoadContiguous
+        | Class::SveLoadStructures
+        | Class::SveStoreContiguous
+        | Class::SveStoreStructures
+        | Class::SveLoadMulti
+        | Class::SveStoreMulti
+        | Class::SveMultiSelect
+        | Class::SveMultiIntBinary
+        | Class::SveMultiFpBinary
+        | Class::SveMultiClamp
+        | Class::SveMultiZip
+        | Class::SveMultiNarrowShift
+        | Class::SveMultiNarrowInt
+        | Class::SveMultiNarrowFp
+        | Class::SveMultiFpUnary
+        | Class::SveMultiUnpack
+        | Class::SmeArrayIntLongLong
+        | Class::SmeArrayIntLong
+        | Class::SmeArrayFpLong
+        | Class::SmeArrayFpDot
+        | Class::SmeArrayIntDot
+        | Class::SmeArrayFpMulAdd
+        | Class::SmeArrayAddVectors
+        | Class::SmeArrayAccumulate
+        | Class::SmeIndexedIntDot
+        | Class::SmeIndexedFpMulAdd
+        | Class::SmeIndexedVerticalDot
+        | Class::SmeBinaryOuterProduct
+        | Class::SmeIntOuterProductHalfwords
+        | Class::SmeMoveGroupToSlices
+        | Class::SmeMoveGroupFromSlices
+        | Class::SmeMoveGroupToArray
+        | Class::SmeMoveGroupFromArray
+        | Class::SmeLookupTable
+        | Class::SmeFpOuterProduct
+        | Class::SmeIntOuterProduct
+        | Class::SmeMoveToSlice
+        | Class::SmeMoveFromSlice
+        | Class::SmeZero
+        | Class::SmeAddVector
+        | Class::SmeLoadSlice
+        | Class::SmeStoreSlice
+        | Class::SmeFillSpill
+        | Class::SmeZeroZt0
+        | Class::SmeFillSpillZt0 => false,
     }
 }
 
@@ -776,10 +1083,15 @@ impl Cpu {
                 self.x[30] = pc.wrapping_add(4);
                 Ok(Flow::Jump(pc.wrapping_add(offset)))
             }
-            Op::Br { rn } => Ok(Flow::Jump(self.x_or_zr(u32::from(rn)))),
+            Op::Br { rn } => {
+                self.set_btype_jump(self.in_guarded_page, u32::from(rn));
+                Ok(Flow::Jump(self.x_or_zr(u32::from(rn))))
+            }
+            Op::Ret { rn } => Ok(Flow::Jump(self.x_or_zr(u32::from(rn)))),
             Op::Blr { rn } => {
                 let target = self.x_or_zr(u32::from(rn));
                 self.x[30] = pc.wrapping_add(4);
+                self.set_btype_call();
                 Ok(Flow::Jump(target))
             }
             Op::Nop => Ok(Flow::Next),
@@ -821,11 +1133,10 @@ impl Cpu {
                 let base = completed!(self.base_register(u32::from(rn)));
                 let (address, writeback) = indexed(base, imm, index);
                 let scale = u32::from(size);
-                let fit = Fit::of(address, 1 << scale);
                 let ElementPair {
                     first: a,
                     second: b,
-                } = completed!(self.read_pair(bus, address, scale, fit, DataAccess::NORMAL));
+                } = completed!(self.read_pair(bus, address, scale, DataAccess::NORMAL));
                 // The order `exec_ldst_pair` writes them in, which decides
                 // the CONSTRAINED UNPREDICTABLE Rt == Rt2 case.
                 if scale == 2 {
@@ -848,8 +1159,7 @@ impl Cpu {
                     first: self.x_or_zr(u32::from(rt)),
                     second: self.x_or_zr(u32::from(rt2)),
                 };
-                let fit = Fit::of(address, 1 << scale);
-                completed!(self.write_pair(bus, address, scale, value, fit, DataAccess::NORMAL));
+                completed!(self.write_pair(bus, address, scale, value, DataAccess::NORMAL));
                 if let Some(wb) = writeback {
                     self.set_x_or_sp(u32::from(rn), wb);
                 }
