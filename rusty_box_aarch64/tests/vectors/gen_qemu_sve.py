@@ -323,20 +323,21 @@ def fp_indexed(w):
 
 
 def bfdot_indexed(w):
-    """BFDOT (indexed): `op = 1`, `opc2 = 00`; FDOT (`op = 0`) is FEAT_SME2's
-    and the rest FP8's."""
+    """BFDOT (indexed): `op = 1`, `opc2 = 00`; FDOT (`op = 0`), FEAT_SME2's,
+    has a family of its own, and the rest is FP8's."""
     return (w | 0x00400000) & ~0x00000C00
 
 
 def bfdot(w):
-    """BFDOT (vectors): `op = 1`, `o2 = 0`; FDOT (`op = 0`) is FEAT_SME2's
-    and `o2 = 1` FP8's."""
+    """BFDOT (vectors): `op = 1`, `o2 = 0`; FDOT (`op = 0`), FEAT_SME2's,
+    has a family of its own, and `o2 = 1` is FP8's."""
     return (w | 0x00400000) & ~0x00000400
 
 
 def not_bfmlsl(w):
-    """FMLALB to BFMLALT: `o2 = 1` with `op = 1`, BFMLSLB and BFMLSLT, is
-    FEAT_SME2's, so BFMLALB and BFMLALT in its place."""
+    """FMLALB to BFMLALT: `o2 = 1` with `op = 1`, BFMLSLB and BFMLSLT,
+    FEAT_SME2's, have a family of their own, so BFMLALB and BFMLALT in
+    their place."""
     return w & ~0x00002000 if (w >> 22) & 1 and (w >> 13) & 1 else w
 
 
@@ -427,8 +428,12 @@ def not_fp8_dot_groups(w):
 # SN for the narrows, SF for the floating-point operations and SS for the
 # conversions of words), its multi-vector instructions on ZA array vectors
 # (Z, ZF for the floating-point ones), and BMOPA and BMOPS, the outer
-# products of halfwords, MOVA of a group and LUTI2 and LUTI4 (Z); their
-# fixed bits from AARCHMRS 2026-09. FMAX to FCLAMP's words whose encodings this processor
+# products of halfwords, MOVA of a group and LUTI2 and LUTI4 (Z); then the
+# SVE2.1 instructions FEAT_SME2 makes legal: the two-way dot products
+# (SI), the narrows of two vectors (SN) and FCLAMP (SF), each a class, and
+# FDOT and BFMLSLB and BFMLSLT (SF), named for their first encoding, each
+# its class's fixed bits and its own, as their classes' families move
+# them to BFDOT and BFMLALB; their fixed bits from AARCHMRS 2026-09. FMAX to FCLAMP's words whose encodings this processor
 # does not implement, the BFloat16 forms and FAMAX and FAMIN, are moved to
 # implemented ones as the SVE floating-point classes' are, and so are the
 # ZA array vector instructions' 64-bit forms and forms of FP8 values. A
@@ -765,6 +770,15 @@ FAMILIES = [
     ("mortlach_expand_1dst", "Z", 0xC0C80000, 0x0007FFFF, None),
     ("mortlach_expand_2dst_ctg", "Z", 0xC0884000, 0x0007BFFE, None),
     ("mortlach_expand_4dst_ctg", "Z", 0xC0888000, 0x00073FFC, None),
+    ("sve_intx_dot2", "SI", 0x4400C800, 0x001F07FF, None),
+    ("sve_intx_dot2_by_indexed_elem", "SI", 0x4480C800, 0x001F07FF, None),
+    ("sve_intx_multi_shift_narrow", "SN", 0x45A00000, 0x005F3BDF, None),
+    ("sve_intx_multi_extract_narrow", "SN", 0x45214000, 0x00581BDF, None),
+    ("sve_fp_clamp", "SF", 0x64202400, 0x00DF03FF, fp_size),
+    ("fdot_z_zzz_", "SF", 0x64208000, 0x001F03FF, None),
+    ("fdot_z_zzzi_", "SF", 0x64204000, 0x001F03FF, None),
+    ("bfmlslb_z_zzz_", "SF", 0x64E0A000, 0x001F07FF, None),
+    ("bfmlslb_z_zzzi_", "SF", 0x64E06000, 0x001F0FFF, None),
 ]
 
 

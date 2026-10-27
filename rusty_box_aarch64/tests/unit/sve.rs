@@ -24,11 +24,14 @@
 //! rotations, the indexed source elements, the clamp's order, the
 //! elements of the long, wide and interleaved forms, PMULL, the carry
 //! chain, the shift accumulates and inserts at the element size, the
-//! narrowing halves, and the reserved sizes and `tsize` values.
+//! narrowing halves, and the reserved sizes and `tsize` values. Of the
+//! SVE2.1 instructions FEAT_SME2 makes legal: the two-way dot products'
+//! pairs and wrap, FDOT's two roundings and the exceptions it raises,
+//! BFMLSL's negation and its NaN under FPCR.AH, and FEAT_SME2 itself.
 
 use std::vec::Vec;
 
-use super::super::features::{Implementation, VecLen};
+use super::super::features::{Feature, Features, Implementation, VecLen};
 use super::super::fp_estimate::fpsr::{DZC, IDC, IOC, IXC, OFC, UFC};
 use super::super::sctlr;
 use crate::softfloat::FPCR_AH;
@@ -1203,6 +1206,120 @@ fn the_dot_products_wrap_and_take_each_operands_signedness() {
     // udot z0.d, z1.h, z2.h.
     assert_eq!(exec(&mut cpu, 0x44C2_0420), None);
     assert_eq!(elements(&cpu, 0, Esize::D), [0x3_FFF8_0003; 2]);
+}
+
+/// SVE2.1's two-way SDOT and UDOT accumulate into each word the two
+/// products of its halfwords, wrapping: 0x8000_0001 plus twice (-32768)^2
+/// is 1, and 1 plus twice 65535^2 is 0xFFFC_0003 modulo 2^32. By element,
+/// the word `i2` of each 128-bit segment of Zm.
+#[test]
+fn the_two_way_dot_products_sum_pairs_of_halfwords() {
+    let mut cpu = fp_streaming(0, 0);
+    set_elements(&mut cpu, 0, Esize::S, &[0x8000_0001]);
+    set_elements(&mut cpu, 1, Esize::H, &[0x8000]);
+    set_elements(&mut cpu, 2, Esize::H, &[0x8000]);
+    // sdot z0.s, z1.h, z2.h.
+    assert_eq!(exec(&mut cpu, 0x4402_C820), None);
+    assert_eq!(elements(&cpu, 0, Esize::S), [1; 4]);
+    set_elements(&mut cpu, 1, Esize::H, &[0xFFFF]);
+    set_elements(&mut cpu, 2, Esize::H, &[0xFFFF]);
+    // udot z0.s, z1.h, z2.h.
+    assert_eq!(exec(&mut cpu, 0x4402_CC20), None);
+    assert_eq!(elements(&cpu, 0, Esize::S), [0xFFFC_0003; 4]);
+
+    // sdot z0.s, z1.h, z2.h[1] at 256 bits: word 1 of each segment, (2, 3)
+    // then (4, 5), by (1, 1).
+    let mut cpu = fp_streaming(1, 0);
+    set_elements(&mut cpu, 1, Esize::H, &[1]);
+    let m = [0x0001_0001, 0x0003_0002, 0x0001_0001, 0x0001_0001, 0x0001_0001, 0x0005_0004, 0x0001_0001, 0x0001_0001];
+    set_elements(&mut cpu, 2, Esize::S, &m);
+    assert_eq!(exec(&mut cpu, 0x448A_C820), None);
+    assert_eq!(elements(&cpu, 0, Esize::S), [5, 5, 5, 5, 9, 9, 9, 9]);
+    // udot z0.s, z1.h, z7.h[3]: word 3, both halfwords 0xFFFF, unsigned.
+    let mut cpu = fp_streaming(0, 0);
+    set_elements(&mut cpu, 1, Esize::H, &[0xFFFF]);
+    set_elements(&mut cpu, 7, Esize::S, &[1, 1, 1, 0xFFFF_FFFF]);
+    assert_eq!(exec(&mut cpu, 0x449F_CC20), None);
+    assert_eq!(elements(&cpu, 0, Esize::S), [0xFFFC_0002; 4]);
+}
+
+/// SVE2.1's FDOT of half-precision pairs is `FPDotAdd`: the products
+/// summed with one rounding, then added with a second, so `1 + 2^-28` is 1
+/// before -1 is added, and the Inexact reaches FPSR, as it does not from
+/// FEAT_SME2's FDOT into ZA. By element, the pair `i2` of each 128-bit
+/// segment of Zm.
+#[test]
+fn fdot_rounds_the_pair_then_the_sum_and_raises_its_exceptions() {
+    let mut cpu = fp_streaming(0, 0);
+    set_elements(&mut cpu, 0, Esize::S, &[0xBF80_0000]);
+    set_elements(&mut cpu, 1, Esize::H, &[0x3C00, 0x0400]);
+    set_elements(&mut cpu, 2, Esize::H, &[0x3C00, 0x0400]);
+    // fdot z0.s, z1.h, z2.h.
+    assert_eq!(exec(&mut cpu, 0x6422_8020), None);
+    assert_eq!(elements(&cpu, 0, Esize::S), [0; 4]);
+    assert_eq!(cpu.fpsr, IXC);
+
+    // fdot z0.s, z1.h, z2.h[3]: 0.5 + 1.0 x 1.0 + 1.0 x 2.0.
+    let mut cpu = fp_streaming(0, 0);
+    set_elements(&mut cpu, 0, Esize::S, &[0x3F00_0000]);
+    set_elements(&mut cpu, 1, Esize::H, &[0x3C00]);
+    set_elements(&mut cpu, 2, Esize::S, &[0, 0, 0, 0x4000_3C00]);
+    assert_eq!(exec(&mut cpu, 0x643A_4020), None);
+    assert_eq!(elements(&cpu, 0, Esize::S), [0x4060_0000; 4]);
+    assert_eq!(cpu.fpsr, 0);
+}
+
+/// SVE2.1's BFMLSLB and BFMLSLT negate Zn's even or odd element (BFNeg)
+/// before BFMulAddH: 0 - 1.0 x 3.0 and 0 - 2.0 x 4.0, and by element Zm's
+/// halfword `i3h:i3l` of the segment, 0 - 1.0 x 5.0. Under FPCR.AH = 1
+/// BFNeg leaves a NaN's sign alone, so the NaN the product propagates is
+/// positive; under AH = 0 it is negated.
+#[test]
+fn bfmlsl_negates_zns_element_but_not_a_nan_under_ah() {
+    let mut cpu = fp_streaming(0, 0);
+    set_elements(&mut cpu, 1, Esize::H, &[0x3F80, 0x4000]);
+    set_elements(&mut cpu, 2, Esize::H, &[0x4040, 0x4080]);
+    // bfmlslb, bfmlslt z0.s, z1.h, z2.h.
+    for (insn, want) in [(0x64E2_A020, 0xC040_0000), (0x64E2_A420, 0xC100_0000)] {
+        set_elements(&mut cpu, 0, Esize::S, &[0]);
+        assert_eq!(exec(&mut cpu, insn), None);
+        assert_eq!(elements(&cpu, 0, Esize::S), [want; 4], "{insn:#010x}");
+    }
+    // bfmlslb z0.s, z1.h, z2.h[7].
+    set_elements(&mut cpu, 2, Esize::H, &[0, 0, 0, 0, 0, 0, 0, 0x40A0]);
+    set_elements(&mut cpu, 0, Esize::S, &[0]);
+    assert_eq!(exec(&mut cpu, 0x64FA_6820), None);
+    assert_eq!(elements(&cpu, 0, Esize::S), [0xC0A0_0000; 4]);
+
+    // bfmlslt z0.s, z1.h, z2.h of a quiet NaN.
+    for (fpcr, want) in [(FPCR_AH, 0x7FC1_0000), (0, 0xFFC1_0000)] {
+        let mut cpu = fp_streaming(0, fpcr);
+        set_elements(&mut cpu, 1, Esize::H, &[0x3F80, 0x7FC1]);
+        set_elements(&mut cpu, 2, Esize::H, &[0x3F80]);
+        assert_eq!(exec(&mut cpu, 0x64E2_A420), None);
+        assert_eq!(elements(&cpu, 0, Esize::S), [want; 4], "FPCR {fpcr:#x}");
+    }
+}
+
+/// The SVE2.1 instructions FEAT_SME2 makes legal take the SME trap outside
+/// Streaming SVE mode, and are UNDEFINED without FEAT_SME2: two-way SDOT
+/// and UDOT, by vector and by element, FDOT and BFMLSLB and BFMLSLT.
+#[test]
+fn the_sve2p1_instructions_need_streaming_mode_and_sme2() {
+    let all = [0x4402_C820, 0x449F_CC20, 0x6422_8020, 0x643A_4020, 0x64E2_A020, 0x64FA_6820];
+    let mut cpu = processor(Implementation::EVERY_FEATURE);
+    for insn in all {
+        assert_eq!(exec(&mut cpu, insn), Some(NOT_STREAMING), "{insn:#010x}");
+    }
+    let features: Vec<Feature> = Feature::ALL.into_iter().filter(|&f| f != Feature::Sme2).collect();
+    let mut cpu = processor(Implementation {
+        features: Features::of(&features),
+        max_svl: VecLen::MAX,
+    });
+    cpu.set_pstate_sm(true);
+    for insn in all {
+        assert_eq!(exec(&mut cpu, insn), Some(UNDEFINED), "{insn:#010x}");
+    }
 }
 
 /// CDOT rotates Zm's pairs by `rot`: of (1 + 2i) and (3 + 4i), twice in

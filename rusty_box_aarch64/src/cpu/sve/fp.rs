@@ -18,9 +18,10 @@
 use super::{segment_base, Esize, Pv, Zv};
 use crate::cpu::exec::{bit, bits, sext, ExecResult, Flow};
 use crate::cpu::fp::{
-    bf16_mul_add_long, fp_binary, fp_compare, fp_compare_holds, fp_convert, fp_convert_round_odd, fp_log_b, fp_mul_add,
+    bf16_mul_add_long, bf16_neg, fp_binary, fp_compare, fp_compare_holds, fp_convert, fp_convert_round_odd, fp_log_b, fp_mul_add,
     fp_scale, fp_to_int, fp_unary, int_to_fp, FpBinary, FpCompare, FpConversion, FpEnv, FpType, FpUnary, IntWidth,
 };
+use crate::cpu::za::PairFormat;
 use crate::cpu::Cpu;
 use crate::softfloat::{self as sf, FpOrdering, FpRounding, FusedMulAdd, InexactReport, NanSignal};
 
@@ -807,15 +808,17 @@ impl Cpu {
     }
 
     /// The widening multiply-adds and dot products, unpredicated: FMLALB,
-    /// FMLALT, FMLSLB, FMLSLT and BFMLALB, BFMLALT (`01100100 1 o2 1 Zm 10
-    /// op 00 T Zn Zda`; indexed `01100100 1 o2 1 i3h Zm 01 op 0 i3l T Zn
-    /// Zda`), and BFDOT (`01100100 0 1 1 Zm 100000 Zn Zda`; indexed
-    /// `01100100 0 1 1 i2 Zm 010000 Zn Zda`). Each 32-bit element of Zda
-    /// accumulates: for the long forms, the product of the even (`B`) or
-    /// odd (`T`) 16-bit element of its pair in Zn with the same of Zm, or
-    /// by index the 16-bit element `i3h:i3l` of the segment (Arm
-    /// FPMulAddH, BFMulAddH); for BFDOT, the dot product of its pair with
-    /// Zm's, or by index the pair `i2` of the segment (BFDotAdd).
+    /// FMLALT, FMLSLB, FMLSLT and BFMLALB, BFMLALT, BFMLSLB, BFMLSLT
+    /// (`01100100 1 o2 1 Zm 10 op 00 T Zn Zda`; indexed `01100100 1 o2 1
+    /// i3h Zm 01 op 0 i3l T Zn Zda`), and FDOT and BFDOT (`01100100 0 op 1
+    /// Zm 100000 Zn Zda`; indexed `01100100 0 op 1 i2 Zm 010000 Zn Zda`).
+    /// Each 32-bit element of Zda accumulates: for the long forms, the
+    /// product of the even (`B`) or odd (`T`) 16-bit element of its pair in
+    /// Zn, negated by `op` (FPNeg, BFNeg), with the same of Zm, or by index
+    /// the 16-bit element `i3h:i3l` of the segment (Arm FPMulAddH,
+    /// BFMulAddH); for the dot products, the dot product of its pair with
+    /// Zm's, or by index the pair `i2` of the segment, of half-precision
+    /// values in two roundings (FPDotAdd) or of BFloat16 ones (BFDotAdd).
     pub(crate) fn exec_sve_fp_widening(&mut self, insn: u32) -> ExecResult {
         let indexed = !bit(insn, 15);
         let dot = !bit(insn, 23);
@@ -840,19 +843,19 @@ impl Cpu {
             let base = segment_base(e, 4);
             let sum = if dot {
                 let pair = if indexed { base + index } else { e };
-                sf::bf16_dot_add(
-                    acc,
-                    op1.get(2 * e, Esize::H) as u16,
-                    op1.get(2 * e + 1, Esize::H) as u16,
-                    op2.get(2 * pair, Esize::H) as u16,
-                    op2.get(2 * pair + 1, Esize::H) as u16,
-                    env.handling(),
-                )
+                let row = [0, 1].map(|k| op1.get(2 * e + k, Esize::H) as u16);
+                let col = [0, 1].map(|k| op2.get(2 * pair + k, Esize::H) as u16);
+                if bf16 {
+                    sf::bf16_dot_add(acc, row[0], row[1], col[0], col[1], env.handling())
+                } else {
+                    PairFormat::Half.dot(acc, row, col, &mut env)
+                }
             } else {
                 let element1 = op1.get(2 * e + top, Esize::H) as u16;
                 let s = if indexed { 2 * base + index } else { 2 * e + top };
                 let element2 = op2.get(s, Esize::H) as u16;
                 if bf16 {
+                    let element1 = if subtract { bf16_neg(element1, &env) } else { element1 };
                     bf16_mul_add_long(acc, element1, element2, &mut env)
                 } else {
                     let form = mul_add_form(subtract, false);

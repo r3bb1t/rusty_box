@@ -152,7 +152,8 @@ enum FpProduct {
 }
 
 /// The 16-bit elements a widening outer product, or FEAT_SME2's FDOT,
-/// BFDOT, FMLAL and BFMLAL into ZA array vectors, multiplies.
+/// BFDOT, FMLAL and BFMLAL into ZA array vectors, multiplies; and SVE2.1's
+/// FDOT.
 ///
 /// Closed (R5): the two formats of FEAT_SME's widening outer products.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -165,8 +166,11 @@ pub(super) enum PairFormat {
 
 impl PairFormat {
     /// The negation FMOPS, BFMOPS, FMLSL and BFMLSL apply to an element:
-    /// BFNeg without alternate handling, or FPNeg, under which a NaN keeps
-    /// its sign while FPCR.AH = 1.
+    /// BFNeg without alternate handling (BFMOPS's `honor_altfp = FALSE`),
+    /// or FPNeg, under which a NaN keeps its sign while FPCR.AH = 1.
+    /// BFMLSL into ZA calls BFNeg with alternate handling, which differs
+    /// from this only in a NaN's sign, and `FPMulAdd_ZA` makes the result
+    /// of any NaN the default NaN.
     pub(super) fn negate(self, x: u16, env: &FpEnv) -> u16 {
         match self {
             Self::BFloat16 => x ^ 0x8000,
@@ -174,8 +178,10 @@ impl PairFormat {
         }
     }
 
-    /// `sum` plus `row[0] * col[0] + row[1] * col[1]`: `BFDotAdd`, or
-    /// `FPDotAdd_ZA` under `env`, which has FPCR.DN set.
+    /// `sum` plus `row[0] * col[0] + row[1] * col[1]`: `BFDotAdd`; or
+    /// `FPDot` then `FPAdd`, which under an `env` with FPCR.DN set, whose
+    /// exceptions go nowhere, is `FPDotAdd_ZA` and under FPCR as it is
+    /// `FPDotAdd` (SVE2.1's FDOT).
     pub(super) fn dot(self, sum: u32, row: [u16; 2], col: [u16; 2], env: &mut FpEnv) -> u32 {
         let ([r0, r1], [c0, c1]) = (row, col);
         match self {

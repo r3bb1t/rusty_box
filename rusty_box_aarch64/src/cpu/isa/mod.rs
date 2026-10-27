@@ -33,7 +33,7 @@
 //! knows ([`Feature`]) is here, under its own name and class, with exactly
 //! Arm's fixed bits, and nothing else is — but for the encodings of a
 //! feature still being built (`Feature::complete`), of which only some
-//! are here yet.
+//! would be here; no feature the decoder knows is being built.
 //!
 //! What is not here is UNDEFINED: unallocated encodings, and encodings of
 //! the features the decoder does not know, every later architecture
@@ -156,7 +156,8 @@ use sve::{
     SveIntxQrdcmlaByIndexedElem, SveIntxQrdmlah, SveIntxQrdmlahByIndexedElem, SveIntxShiftInsert,
     SveIntxShiftLong, SveIntxShiftNarrow, SveIntxSra, SveMem32bFill, SveMem32bPfill, SveMemCldSi, SveMemCldSs, SveMemCldntSi, SveMemCldntSs, SveMemCstSi, SveMemCstSs,
     SveMemCstntSi, SveMemCstntSs, SveMemEldSi, SveMemEldSs, SveMemEstSi, SveMemEstSs, SveMemLdDup, SveMemLdqrSi,
-    SveMemLdqrSs, SveMemPrfmSi, SveMemPrfmSs, SveMemPspill, SveMemSpill,
+    SveMemLdqrSs, SveMemPrfmSi, SveMemPrfmSs, SveMemPspill, SveMemSpill, SveFpClamp, SveIntxDot2,
+    SveIntxDot2ByIndexedElem, SveIntxMultiExtractNarrow, SveIntxMultiShiftNarrow,
 };
 
 /// An A64 encoding this processor implements, by its Arm class and Arm
@@ -377,6 +378,8 @@ pub(crate) enum Encoding {
     SveIntxArithBinaryPairs(SveIntxArithBinaryPairs),
     SveIntxPredArithBinarySat(SveIntxPredArithBinarySat),
     SveIntxClamp(SveIntxClamp),
+    SveIntxDot2(SveIntxDot2),
+    SveIntxDot2ByIndexedElem(SveIntxDot2ByIndexedElem),
     SveIntxDotByIndexedElem(SveIntxDotByIndexedElem),
     SveIntxMlaByIndexedElem(SveIntxMlaByIndexedElem),
     SveIntxQrdmlahByIndexedElem(SveIntxQrdmlahByIndexedElem),
@@ -404,6 +407,8 @@ pub(crate) enum Encoding {
     SveIntxAba(SveIntxAba),
     SveIntxShiftNarrow(SveIntxShiftNarrow),
     SveIntxExtractNarrow(SveIntxExtractNarrow),
+    SveIntxMultiShiftNarrow(SveIntxMultiShiftNarrow),
+    SveIntxMultiExtractNarrow(SveIntxMultiExtractNarrow),
     SveIntxArithNarrow(SveIntxArithNarrow),
     SveFpFcmla(SveFpFcmla),
     SveFpFcadd(SveFpFcadd),
@@ -412,6 +417,7 @@ pub(crate) enum Encoding {
     SveFpFmaByIndexedElem(SveFpFmaByIndexedElem),
     SveFpFcmlaByIndexedElem(SveFpFcmlaByIndexedElem),
     SveFpFmulByIndexedElem(SveFpFmulByIndexedElem),
+    SveFpClamp(SveFpClamp),
     SveFpFdotByIndexedElem(SveFpFdotByIndexedElem),
     SveFpFmaLongByIndexedElem(SveFpFmaLongByIndexedElem),
     SveFpFdot(SveFpFdot),
@@ -815,6 +821,7 @@ impl Encoding {
             Self::SveIntxShiftNarrow(_) | Self::SveIntxExtractNarrow(_) | Self::SveIntxArithNarrow(_) => {
                 Class::SveIntxNarrow
             }
+            Self::SveIntxMultiShiftNarrow(_) | Self::SveIntxMultiExtractNarrow(_) => Class::SveIntxNarrowPair,
             Self::SveIntxQrdmlah(_)
             | Self::SveIntxMlaByIndexedElem(_)
             | Self::SveIntxQrdmlahByIndexedElem(_)
@@ -826,6 +833,7 @@ impl Encoding {
             | Self::SveIntxPredArithBinarySat(_) => Class::SveIntxBinaryPredicated,
             Self::SveIntxPredArithUnary(_) | Self::SveIntxAccumulateLongPairs(_) => Class::SveIntxUnaryPredicated,
             Self::SveIntxClamp(_) => Class::SveIntxClamp,
+            Self::SveIntxDot2(_) | Self::SveIntxDot2ByIndexedElem(_) => Class::SveIntxDot,
             Self::SveFp2opPZds(_) | Self::SveFp2opIPZds(_) => Class::SveFpArithmeticPredicated,
             Self::SveFp3opUZd(_) => Class::SveFpArithmeticUnpredicated,
             Self::SveFpFastRed(_) => Class::SveFpReduction,
@@ -838,6 +846,7 @@ impl Encoding {
             Self::SveFp2opUZd(_) => Class::SveFpEstimate,
             Self::SveFp3opPZdsA(_) | Self::SveFp3opPZdsB(_) => Class::SveFpMulAdd,
             Self::SveFpFmaByIndexedElem(_) | Self::SveFpFmulByIndexedElem(_) => Class::SveFpIndexed,
+            Self::SveFpClamp(_) => Class::SveFpClamp,
             Self::SveFpFcmla(_) | Self::SveFpFcadd(_) | Self::SveFpFcmlaByIndexedElem(_) => Class::SveFpComplex,
             Self::SveFpPairwise(_) => Class::SveFpPairwise,
             Self::SveFpFcvt2(_) => Class::SveFpConvertOdd,
@@ -1280,7 +1289,8 @@ pub(crate) enum Class {
     /// immediates, DUP (immediate), FDUP.
     SveWideImmediate,
     /// SDOT, UDOT, USDOT, by vector and indexed (bit 21), and SUDOT
-    /// (indexed).
+    /// (indexed); and SDOT and UDOT of halfword pairs, by vector and
+    /// indexed (bit 23).
     SveIntxDot,
     /// CDOT, CMLA and SQRDCMLAH, by vector and indexed (bit 21).
     SveIntxComplex,
@@ -1310,6 +1320,8 @@ pub(crate) enum Class {
     /// (SQXTNB to UQXTNT) and the high halves of sums and differences
     /// (ADDHNB to RSUBHNT).
     SveIntxNarrow,
+    /// SQRSHRN, SQRSHRUN, UQRSHRN, SQCVTN, SQCVTUN, UQCVTN of two vectors.
+    SveIntxNarrowPair,
     /// SQRDMLAH and SQRDMLSH by vector and indexed (bit 21); MLA, MLS,
     /// MUL, SQDMULH and SQRDMULH indexed.
     SveIntxMul,
@@ -1342,14 +1354,16 @@ pub(crate) enum Class {
     SveFpMulAdd,
     /// FMLA, FMLS and FMUL (bit 13), indexed.
     SveFpIndexed,
+    /// FCLAMP.
+    SveFpClamp,
     /// FCMLA, predicated and indexed (bit 21), and FCADD.
     SveFpComplex,
     /// FADDP, FMAXNMP, FMINNMP, FMAXP, FMINP.
     SveFpPairwise,
     /// FCVTNT, FCVTXNT, BFCVTNT, FCVTLT.
     SveFpConvertOdd,
-    /// FMLALB, FMLALT, FMLSLB, FMLSLT, BFMLALB, BFMLALT and BFDOT, by
-    /// vector and indexed.
+    /// FMLALB, FMLALT, FMLSLB, FMLSLT, BFMLALB, BFMLALT, BFMLSLB, BFMLSLT,
+    /// FDOT and BFDOT, by vector and indexed.
     SveFpWidening,
     /// LDR and STR of a vector or a predicate register: the handler reads
     /// the direction from bit 30 and the register file from bit 14.
@@ -1761,10 +1775,6 @@ impl Encoding {
             | Self::SveFpFmaByIndexedElem(_)
             | Self::SveFpFcmlaByIndexedElem(_)
             | Self::SveFpFmulByIndexedElem(_)
-            | Self::SveFpFdotByIndexedElem(_)
-            | Self::SveFpFmaLongByIndexedElem(_)
-            | Self::SveFpFdot(_)
-            | Self::SveFpFmaLong(_)
             | Self::SveFp3opUZd(_)
             | Self::SveFpFastRed(_)
             | Self::SveFp3opPPd(_)
@@ -1948,7 +1958,16 @@ impl Encoding {
             | Self::MortlachMulti4ZaExtractCtg(_)
             | Self::MortlachExpand1dst(_)
             | Self::MortlachExpand2dstCtg(_)
-            | Self::MortlachExpand4dstCtg(_) => Feature::Sme2,
+            | Self::MortlachExpand4dstCtg(_)
+            | Self::SveIntxDot2(_)
+            | Self::SveIntxDot2ByIndexedElem(_)
+            | Self::SveIntxMultiShiftNarrow(_)
+            | Self::SveIntxMultiExtractNarrow(_)
+            | Self::SveFpClamp(_) => Feature::Sme2,
+            Self::SveFpFdotByIndexedElem(e) => e.feature(),
+            Self::SveFpFmaLongByIndexedElem(e) => e.feature(),
+            Self::SveFpFdot(e) => e.feature(),
+            Self::SveFpFmaLong(e) => e.feature(),
         }
     }
 }

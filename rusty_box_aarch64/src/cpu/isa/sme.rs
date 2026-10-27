@@ -2,8 +2,8 @@
 //! `op0 = 1, op1 = 0000`. Like `sve` it puts a level of groups between the
 //! top and the classes; Arm names SME's groups and classes `mortlach_*`.
 //!
-//! The encodings here are those of FEAT_SME and FEAT_SME2, which are still
-//! being built (`Feature::complete`). FEAT_SME's are the instructions on
+//! The encodings here are all of FEAT_SME's and FEAT_SME2's in this group
+//! (`Feature::complete`). FEAT_SME's are the instructions on
 //! the ZA array: the outer products into 32-bit tiles (FMOPA and FMOPS of
 //! single-precision and of half-precision values, BFMOPA and BFMOPS, and
 //! SMOPA to UMOPS of bytes), MOVA between a tile slice and a vector, ZERO,

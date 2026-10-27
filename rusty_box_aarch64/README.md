@@ -158,7 +158,7 @@ floating-point behaviours in every scalar, Advanced SIMD and BFloat16
 instruction, and FPCR.NEP's merging of scalar results into the source
 register each instruction names) and FEAT_RPRES (12-bit single-precision
 FRECPE and FRSQRTE under FPCR.AH);
-and, being built, FEAT_SME and FEAT_SME2 (FEAT_SME's state, registers, SMSTART
+and FEAT_SME and FEAT_SME2 (FEAT_SME's state, registers, SMSTART
 and SMSTOP, RDSVL, ADDSVL and ADDSPL, and the SVE and SVE2 integer,
 element count, immediate, permute, compare, predicate and WHILE
 instructions, the integer dot products (SVE's SDOT and UDOT, FEAT_I8MM's
@@ -194,8 +194,11 @@ and their forms by an indexed element with the vertical dot products
 FVDOT, BFVDOT, SVDOT, UVDOT, USVDOT and SUVDOT, 70 encodings, and BMOPA
 and BMOPS, SMOPA to UMOPS of halfwords into 32-bit tiles, MOVA between
 two or four registers and as many tile slices or ZA array vectors, and
-LUTI2 and LUTI4 of ZT0 to one, two or four registers, 32 encodings; the
-SVE2.1 forms it makes legal are still to come).
+LUTI2 and LUTI4 of ZT0 to one, two or four registers, 32 encodings, and
+the SVE2.1 instructions it makes legal (SDOT and UDOT of halfword pairs,
+SQRSHRN, SQRSHRUN, UQRSHRN, SQCVTN, SQCVTUN and UQCVTN of two vectors,
+FCLAMP, FDOT of half-precision pairs, and BFMLSLB and BFMLSLT), 17
+encodings).
 No processor a machine runs has them
 yet: the tests run them on a test-only processor with every feature, whose
 ID registers advertise each one.
@@ -388,17 +391,20 @@ integration tests of the public API.
   instructions, which are Advanced SIMD, but not CRC32, which is not.
 - `tests/unit/difftest.rs` also replays `tests/vectors/qemu_sve.txt`, in
   Streaming SVE mode at a 512-bit vector length with ZA enabled and ZT0
-  accessible: 13,120 vectors, 40 for each of the 238 encoding classes of
+  accessible: 40 vectors for each of the 238 encoding classes of
   SVE integer arithmetic, element counts, immediates, permutes, compares,
   predicate operations, WHILE, contiguous loads, stores and prefetches,
   floating point, and SVE2's integer instructions that FEAT_SME makes
   legal there, of the 13 classes of its ZA instructions, and of FEAT_SME2's
-  131 so far (the 5 predicate-as-counter classes, the 16 of the
-  multi-vector loads and stores, ZERO and LDR and STR of ZT0, the 41 of
-  the multi-vector SVE operations, the 43 of the instructions on ZA array
-  vectors, the 11 of their indexed forms, and the 13 of BMOPA, the
-  halfword outer products, MOVA of groups and LUTI2 and LUTI4), each the
-  class's fixed bits with the rest random. The
+  136 (the 5 predicate-as-counter classes, the 16 of the multi-vector
+  loads and stores, ZERO and LDR and STR of ZT0, the 41 of the
+  multi-vector SVE operations, the 43 of the instructions on ZA array
+  vectors, the 11 of their indexed forms, the 13 of BMOPA, the halfword
+  outer products, MOVA of groups and LUTI2 and LUTI4, and the 5 of the
+  SVE2.1 instructions it makes legal), each the class's fixed bits with
+  the rest random, and of FDOT, BFMLSLB and BFMLSLT by vector and by
+  element, whose classes' samples go to BFDOT and BFMLALB, each the
+  encoding's fixed bits: 13,480 in all. The
   initial state is `qemu_max.txt`'s with Z0-Z31 and P0-P15 in place of the
   SIMD&FP registers (random bits, small elements, element extremes;
   random, all-true and per-size canonical predicates), ZA and ZT0 zero but
@@ -408,8 +414,8 @@ integration tests of the public API.
   classes, half the Z registers hold special and ordinary values of the
   word's own precision (single precision for FEAT_SME2's conversions of
   words) and the rest of half, single or double precision, under a
-  random FPCR (RMode, FZ, DN, AHP, FZ16, FIZ, AH, NEP), and 1,080 of
-  their 1,520 vectors raise an exception (every kind does), and the
+  random FPCR (RMode, FZ, DN, AHP, FZ16, FIZ, AH, NEP), and 1,227 of
+  their 1,720 vectors raise an exception (every kind does), and the
   floating-point ZA instructions' sources are of their own precision,
   their 920 vectors leaving FPSR alone as their pseudocode does; for
   SVE2's integer classes, three in four Z registers hold elements of the
@@ -468,7 +474,10 @@ integration tests of the public API.
   concatenation and interleaving and the reserved `tsize`, the
   saturating narrows, BFCVT, and FCVT in IEEE half precision under
   FPCR.AHP, the word conversions' saturation and rounding, FRINT's own
-  rounding with no Inexact, the unpacks and their reserved size.
+  rounding with no Inexact, the unpacks and their reserved size; and of
+  the SVE2.1 instructions FEAT_SME2 makes legal, the narrows of two
+  vectors interleaving, rounding and saturating, and FCLAMP of one vector
+  at each size, BFCLAMP's UNDEFINED.
   `tests/unit/za_array.rs` checks the instructions on ZA array vectors:
   the vector `(Wv + offset) MOD vstride` in each register's stride, the
   stride by the vector length and the register count, the long forms'
@@ -514,7 +523,11 @@ integration tests of the public API.
   CADD's rotations and SQCADD's saturation, URSRA, SRI and SLI at the
   element size, the narrowing instructions' halves, rounding and
   saturation, and the reserved sizes and `tsize` values UNDEFINED before
-  the SME trap; no SVE saturation sets FPSR.QC.
+  the SME trap; no SVE saturation sets FPSR.QC. Of the SVE2.1
+  instructions FEAT_SME2 makes legal: the two-way SDOT's and UDOT's pairs
+  and wrap, by vector and by each segment's word, FDOT's two roundings and
+  the Inexact it raises, BFMLSLB's and BFMLSLT's negation, and a NaN's
+  sign that BFNeg keeps under FPCR.AH, and their traps and FEAT_SME2.
 - The decoder is checked against Arm's machine-readable specification
   (`tests/unit/spec.rs`). `syn` reads the decoder's source and follows
   `decode` through every `match` to every encoding it returns. Against
@@ -522,10 +535,9 @@ integration tests of the public API.
   called from Arm's parents; every field is read under Arm's name and at
   Arm's bits; each class names exactly the encodings of that class whose
   condition holds for the features the decoder knows (the base set and
-  every feature "What is modelled" lists; of FEAT_SME and FEAT_SME2, still
-  being built, the ones it has); each encoding's arms fix exactly Arm's fixed bits,
-  should-be bits
-  included; each carries Arm's feature. And on all 2^32 words, the decoder
+  every feature "What is modelled" lists); each encoding's arms fix
+  exactly Arm's fixed bits, should-be bits included; each carries Arm's
+  feature. And on all 2^32 words, the decoder
   names the encoding Arm's data allocates the word to, and nothing where it
   allocates none: 0 disagreements, about 15 s on four threads. The one
   departure is PRFM (register) with `Rt = 11xxx`, which Arm's data gives to

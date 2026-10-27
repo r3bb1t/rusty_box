@@ -6,9 +6,14 @@
 //! FCLAMP; ZIP and UZP of elements and of quadwords; SQRSHR, SQRSHRU,
 //! UQRSHR and their interleaving forms, SQCVT, SQCVTU, UQCVT and theirs;
 //! BFCVT, FCVT, BFCVTN and FCVTN; FCVTZS, FCVTZU, SCVTF, UCVTF, FRINTN,
-//! FRINTP, FRINTM and FRINTA of words; SUNPK and UUNPK.
+//! FRINTP, FRINTM and FRINTA of words; SUNPK and UUNPK. And the SVE2.1
+//! instructions FEAT_SME2 makes legal that share their operations: the
+//! interleaving SQRSHRN, SQRSHRUN, UQRSHRN, SQCVTN, SQCVTUN and UQCVTN of
+//! two vectors (`sve_intx_multi_shift_narrow`,
+//! `sve_intx_multi_extract_narrow`) and FCLAMP of one (`sve_fp_clamp`).
 //!
-//! Each executes in Streaming SVE mode alone (`CheckStreamingSVEEnabled`)
+//! Each executes in Streaming SVE mode alone (`CheckStreamingSVEEnabled`,
+//! which on this processor `CheckSVEEnabled` is, `Cpu::sve_check`)
 //! and reads every source register before it writes a destination, as the
 //! pseudocode's `results` arrays do, so a destination group that overlaps a
 //! source reads the source as it was. The floating-point operations compute
@@ -275,14 +280,7 @@ impl Cpu {
         let es = Esize::from_size(size);
         match kind {
             Clamp::Int { unsigned } => self.multi_clamp(regs, es, vl, |x, low, high| clamp(x, low, high, es, unsigned)),
-            Clamp::Float(ty) => {
-                let mut env = self.fp_env();
-                self.multi_clamp(regs, es, vl, |x, low, high| {
-                    let max = fp_binary(FpBinary::MaxNum, ty, low, x, &mut env);
-                    fp_binary(FpBinary::MinNum, ty, max, high, &mut env)
-                });
-                self.fp_commit(&env);
-            }
+            Clamp::Float(ty) => self.fp_clamp(regs, ty, es, vl),
         }
         Ok(Flow::Next)
     }
@@ -461,6 +459,68 @@ impl Cpu {
         let vl = self.check_streaming_sve_enabled()?;
         self.multi_narrow(narrow, vl);
         Ok(Flow::Next)
+    }
+
+    /// SVE2.1's SQRSHRN, SQRSHRUN and UQRSHRN (`sqrshrn_z_mz2_` to
+    /// `uqrshrn_z_mz2_`: `01000101 101 1 imm4 00 op1 U 1 0 Zn 0 Zd`, a shift
+    /// of `16 - imm4`) and SQCVTN, SQCVTUN and UQCVTN (`sqcvtn_z_mz2_` to
+    /// `uqcvtn_z_mz2_`: `01000101 001 10 001 010 opc 0 Zn 0 Zd`), by bit
+    /// 23: the two vectors of words from `Zn:'0'` to halfwords, interleaved,
+    /// each element rounded and shifted right or not, then saturated. The
+    /// source is unsigned by `U` (bit 12) or `opc<0>` (bit 11), and a signed
+    /// source saturates to an unsigned result by `op1 = 0` or `opc<1>`.
+    pub(crate) fn exec_sve_narrow_pair(&mut self, insn: u32) -> ExecResult {
+        let (unsigned_source, unsigned_result, shift) = if bit(insn, 23) {
+            let unsigned = bit(insn, 12);
+            (unsigned, unsigned || !bit(insn, 13), 16 - bits(insn, 19, 16))
+        } else {
+            let unsigned = bit(insn, 11);
+            (unsigned, unsigned || bit(insn, 12), 0)
+        };
+        let narrow = Narrow {
+            n: group(insn, 9, 2),
+            d: bits(insn, 4, 0),
+            nreg: 2,
+            es: Esize::H,
+            unsigned_source,
+            unsigned_result,
+            shift,
+            interleave: true,
+        };
+        let vl = self.sve_check()?;
+        self.multi_narrow(narrow, vl);
+        Ok(Flow::Next)
+    }
+
+    /// SVE2.1's FCLAMP of one vector (`fclamp_z_zz_`: `01100100 size 1 Zm
+    /// 001001 Zn Zd`): each element of `Zd` clamped between `Zn`'s below
+    /// and `Zm`'s above, `FPMinNum(FPMaxNum(Zn, Zd), Zm)` under FPCR, as of
+    /// a group. `size = 00`, BFCLAMP, the decoder names no encoding of.
+    pub(crate) fn exec_sve_fp_clamp(&mut self, pc: u64, insn: u32) -> ExecResult {
+        let size = bits(insn, 23, 22);
+        let Some(ty) = fp_type(size) else {
+            return self.undefined(pc, insn);
+        };
+        let regs = ClampRegs {
+            d: bits(insn, 4, 0),
+            nreg: 1,
+            n: bits(insn, 9, 5),
+            m: bits(insn, 20, 16),
+        };
+        let vl = self.sve_check()?;
+        self.fp_clamp(regs, ty, Esize::from_size(size), vl);
+        Ok(Flow::Next)
+    }
+
+    /// FCLAMP of the vectors `regs` names, `FPMinNum(FPMaxNum(Zn, Zd), Zm)`
+    /// of `ty`, its exceptions accumulating in FPSR.
+    fn fp_clamp(&mut self, regs: ClampRegs, ty: FpType, es: Esize, vl: VecLen) {
+        let mut env = self.fp_env();
+        self.multi_clamp(regs, es, vl, |x, low, high| {
+            let max = fp_binary(FpBinary::MaxNum, ty, low, x, &mut env);
+            fp_binary(FpBinary::MinNum, ty, max, high, &mut env)
+        });
+        self.fp_commit(&env);
     }
 
     /// BFCVT, FCVT, BFCVTN, FCVTN of two vectors (`bfcvt_z_mz2_` to

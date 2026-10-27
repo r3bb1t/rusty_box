@@ -371,9 +371,10 @@ impl Feature {
 
     /// Whether the decoder names every encoding of the feature: a feature
     /// still being built has some of its encodings, each of them Arm's, and
-    /// no processor this crate builds implements it yet.
+    /// no processor this crate builds implements it yet. No feature the
+    /// decoder knows is being built.
     pub(crate) const fn complete(self) -> bool {
-        !matches!(self, Self::Sme | Self::Sme2)
+        true
     }
 }
 

@@ -678,6 +678,13 @@ pub(crate) fn bf16_mul_add_long(addend: u32, n: u16, m: u16, env: &mut FpEnv) ->
     env.status.with_altfp_overrides(|fp| sf::f32_mul_add(FusedMulAdd::Fmadd, addend, n, m, fp))
 }
 
+/// Arm BFNeg: the BFloat16 value `a` with its sign inverted — except,
+/// under FPCR.AH = 1, a NaN. A BFloat16 value is the high half of a
+/// single-precision one, so FPNeg of that is BFNeg of this.
+pub(crate) fn bf16_neg(a: u16, env: &FpEnv) -> u16 {
+    (env.neg(FpType::Single, u64::from(a) << 16) >> 16) as u16
+}
+
 /// Arm FPScale: `a` × 2^`scale`, rounded once.
 pub(crate) fn fp_scale(ty: FpType, a: u64, scale: i64, env: &mut FpEnv) -> u64 {
     let fp = &mut env.status;

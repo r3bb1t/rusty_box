@@ -14,8 +14,11 @@
 //! and the reserved `tsize`; the saturating narrows; BFCVT and FCVT, the
 //! latter in IEEE half precision under FPCR.AHP; the word conversions'
 //! saturation and rounding; FRINT's own rounding with no inexact; the
-//! unpacks and their reserved size. The checks: Streaming SVE mode, and
-//! UNDEFINED without FEAT_SME2.
+//! unpacks and their reserved size. Of the SVE2.1 instructions FEAT_SME2
+//! makes legal: the narrows of two vectors' interleaving, rounding and
+//! saturation, and FCLAMP of one vector at each size, with BFCLAMP's size
+//! UNDEFINED. The checks: Streaming SVE mode, and UNDEFINED without
+//! FEAT_SME2.
 
 use std::vec;
 use std::vec::Vec;
@@ -68,6 +71,20 @@ const FMIN_4X4_D: u32 = 0xC1E4_B901;
 const FMINNM_4X1_H: u32 = 0xC164_A921;
 /// `fclamp {z0.s-z1.s}, z2.s, z3.s`.
 const FCLAMP_2_S: u32 = 0xC1A3_C040;
+/// SVE2.1's `fclamp z0.h, z1.h, z2.h`, `.s` and `.d`, and the word with
+/// `size = 00`, BFCLAMP (FEAT_SVE_B16B16).
+const FCLAMP_H: u32 = 0x6462_2420;
+const FCLAMP_S: u32 = 0x64A2_2420;
+const FCLAMP_D: u32 = 0x64E2_2420;
+const BFCLAMP: u32 = 0x6422_2420;
+/// SVE2.1's `sqrshrn z0.h, {z2.s-z3.s}, #16`, `sqrshrun ..., #1`,
+/// `uqrshrn ..., #8`, `sqcvtn z0.h, {z2.s-z3.s}`, `sqcvtun` and `uqcvtn`.
+const SQRSHRN_PAIR: u32 = 0x45B0_2840;
+const SQRSHRUN_PAIR: u32 = 0x45BF_0840;
+const UQRSHRN_PAIR: u32 = 0x45B8_3840;
+const SQCVTN_PAIR: u32 = 0x4531_4040;
+const SQCVTUN_PAIR: u32 = 0x4531_5040;
+const UQCVTN_PAIR: u32 = 0x4531_4840;
 /// `sclamp {z0.b-z3.b}, z4.b, z5.b` and `uclamp {z0.b-z3.b}, z4.b, z5.b`.
 const SCLAMP_4_B: u32 = 0xC125_CC80;
 const UCLAMP_4_B: u32 = 0xC125_CC81;
@@ -823,6 +840,61 @@ fn the_unpacks_extend_each_half_to_its_own_register() {
     assert_eq!(exec(&mut cpu, UNPK_SIZE_00), Some(UNDEFINED));
 }
 
+/// SVE2.1's narrows of two vectors interleave: halfword `2 * e + i` from
+/// word `e` of `Zn + i`, rounded and shifted right by `16 - imm4` or not,
+/// then saturated, signed or unsigned, from a signed or an unsigned source;
+/// no saturation sets FPSR.QC.
+#[test]
+fn the_sve2p1_narrows_of_two_vectors_interleave() {
+    let cases = [
+        (SQRSHRN_PAIR, [0x7FFF, 0xFFFF, 2, 2, 0x8000, 0x7FFF, 0, 0]),
+        (SQRSHRUN_PAIR, [0xFFFF, 0, 0xC000, 0xFFFF, 0, 0xFFFF, 0x091A, 0]),
+        (UQRSHRN_PAIR, [0xFFFF, 0xFFFF, 0x0180, 0x0200, 0xFFFF, 0xFFFF, 0x0012, 0xFFFF]),
+        (SQCVTN_PAIR, [0x7FFF, 0x8000, 0x7FFF, 0x7FFF, 0x8000, 0x7FFF, 0x1234, 0x8000]),
+        (SQCVTUN_PAIR, [0xFFFF, 0, 0xFFFF, 0xFFFF, 0, 0xFFFF, 0x1234, 0]),
+        (UQCVTN_PAIR, [0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0x1234, 0xFFFF]),
+    ];
+    for (insn, want) in cases {
+        let mut cpu = streaming(0, 0);
+        set_z(&mut cpu, 2, Esize::S, &[0x7FFF_8000, 0x0001_8000, 0x8000_0000, 0x0000_1234]);
+        set_z(&mut cpu, 3, Esize::S, &[0xFFFF_7FFF, 0x0002_0000, 0x7FFF_7FFF, 0xFFFF_8000]);
+        assert_eq!(exec(&mut cpu, insn), None, "{insn:#010x}");
+        assert_eq!(z(&cpu, 0, Esize::H), want.to_vec(), "{insn:#010x}");
+        assert_eq!(cpu.fpsr, 0, "{insn:#010x}");
+    }
+}
+
+/// SVE2.1's FCLAMP of one vector is the groups' `FPMinNum(FPMaxNum(Zn,
+/// Zd), Zm)` at each element size. A signalling NaN in Zd raises Invalid
+/// Operation in FPMaxNum, whose quieted NaN then loses to Zm in FPMinNum.
+/// `size = 00`, BFCLAMP, is UNDEFINED.
+#[test]
+fn fclamp_of_one_vector_clamps_at_each_element_size() {
+    let mut cpu = streaming(0, 0);
+    set_z(&mut cpu, 0, Esize::S, &[FIVE, HALF, QNAN, SNAN]);
+    set_z(&mut cpu, 1, Esize::S, &[ONE]);
+    set_z(&mut cpu, 2, Esize::S, &[TWO]);
+    assert_eq!(exec(&mut cpu, FCLAMP_S), None);
+    assert_eq!(z(&cpu, 0, Esize::S), vec![TWO, ONE, ONE, TWO]);
+    assert_eq!(cpu.fpsr, IOC);
+
+    // 5.0 between 1.0 and 2.0, in half and double precision.
+    let mut cpu = streaming(0, 0);
+    set_z(&mut cpu, 0, Esize::H, &[0x4500]);
+    set_z(&mut cpu, 1, Esize::H, &[0x3C00]);
+    set_z(&mut cpu, 2, Esize::H, &[0x4000]);
+    assert_eq!(exec(&mut cpu, FCLAMP_H), None);
+    assert_eq!(z(&cpu, 0, Esize::H), vec![0x4000; 8]);
+    set_z(&mut cpu, 0, Esize::D, &[0x4014_0000_0000_0000]);
+    set_z(&mut cpu, 1, Esize::D, &[0x3FF0_0000_0000_0000]);
+    set_z(&mut cpu, 2, Esize::D, &[0x4000_0000_0000_0000]);
+    assert_eq!(exec(&mut cpu, FCLAMP_D), None);
+    assert_eq!(z(&cpu, 0, Esize::D), vec![0x4000_0000_0000_0000; 2]);
+    assert_eq!(cpu.fpsr, 0);
+
+    assert_eq!(exec(&mut cpu, BFCLAMP), Some(UNDEFINED));
+}
+
 /// Every one of them takes the SME trap outside Streaming SVE mode, and is
 /// UNDEFINED without FEAT_SME2.
 #[test]
@@ -850,6 +922,10 @@ fn they_need_streaming_mode_and_sme2() {
         FRINTA_4,
         SUNPK_2_H,
         UUNPK_4_D,
+        FCLAMP_H,
+        SQRSHRN_PAIR,
+        UQRSHRN_PAIR,
+        SQCVTUN_PAIR,
     ];
     let mut cpu = processor(Implementation::EVERY_FEATURE);
     for insn in all {

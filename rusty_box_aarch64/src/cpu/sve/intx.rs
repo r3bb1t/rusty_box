@@ -1,6 +1,7 @@
 //! SVE2's integer instructions FEAT_SME makes legal in Streaming SVE mode
-//! (Arm's `sve_intx` groups of `op0 = 010`), with SVE's SDOT and UDOT and
-//! FEAT_I8MM's USDOT and SUDOT among them: the dot products, the complex
+//! (Arm's `sve_intx` groups of `op0 = 010`), with SVE's SDOT and UDOT,
+//! FEAT_I8MM's USDOT and SUDOT and SVE2.1's two-way SDOT and UDOT, which
+//! FEAT_SME2 makes legal, among them: the dot products, the complex
 //! integer multiply-adds, CDOT and CADD, the long multiply-adds and
 //! multiplies with PMULL, the rounding doubling multiplies, the multiplies
 //! by element, the predicated saturating, rounding, halving and pairwise
@@ -359,20 +360,30 @@ impl Cpu {
     /// elements of Zn with the same of Zm, or by index with those of the
     /// element `index` of its 128-bit segment of Zm. The decode takes
     /// `size = 1x` alone: words of bytes, or (`size<0>`) doublewords of
-    /// halfwords.
+    /// halfwords. FEAT_SME2's two-way SDOT and UDOT (vectors: `01000100 000
+    /// Zm 11001 U Zn Zda`; indexed: `01000100 100 i2 Zm 11001 U Zn Zda`)
+    /// accumulate into each word the two products of its halfwords, by
+    /// index with those of the word `i2` of its segment of Zm.
     pub(crate) fn exec_sve_intx_dot(&mut self, pc: u64, insn: u32) -> ExecResult {
-        let indexed = bit(insn, 21);
+        let two_way = bits(insn, 15, 11) == 0b11001;
+        let indexed = if two_way { bit(insn, 23) } else { bit(insn, 21) };
         let u = bit(insn, 10);
         let signs = match (indexed, bits(insn, 15, 10)) {
-            // SDOT, UDOT.
-            (_, 0b000000 | 0b000001) => DotSigns { n_unsigned: u, m_unsigned: u },
+            // SDOT, UDOT, four-way and two-way.
+            (_, 0b000000 | 0b000001 | 0b110010 | 0b110011) => DotSigns { n_unsigned: u, m_unsigned: u },
             // USDOT.
             (false, 0b011110) | (true, 0b000110) => DotSigns { n_unsigned: true, m_unsigned: false },
             // SUDOT (by element).
             (true, 0b000111) => DotSigns { n_unsigned: false, m_unsigned: true },
             _ => return self.undefined(pc, insn),
         };
-        let (es, q) = if bit(insn, 22) { (Esize::D, Esize::H) } else { (Esize::S, Esize::B) };
+        let (es, q) = match (two_way, bit(insn, 22)) {
+            (true, _) => (Esize::S, Esize::H),
+            (false, true) => (Esize::D, Esize::H),
+            (false, false) => (Esize::S, Esize::B),
+        };
+        // The products each element sums: four, or two.
+        let ways = es.bytes() / q.bytes();
         let form = if indexed { Some(Indexed::pair(insn)) } else { None };
         let m = form.map_or(bits(insn, 20, 16), |f| f.m);
         let (n, da) = (bits(insn, 9, 5), bits(insn, 4, 0));
@@ -384,9 +395,9 @@ impl Cpu {
         for e in 0..es.elements(vl) {
             let s = form.map_or(e, |f| segment_base(e, 16 / es.bytes()) + f.index);
             let mut sum = i128::from(op3.get(e, es));
-            for i in 0..4 {
-                let a = int(op1.get(4 * e + i, q), q, signs.n_unsigned);
-                let b = int(op2.get(4 * s + i, q), q, signs.m_unsigned);
+            for i in 0..ways {
+                let a = int(op1.get(ways * e + i, q), q, signs.n_unsigned);
+                let b = int(op2.get(ways * s + i, q), q, signs.m_unsigned);
                 sum += a * b;
             }
             result.set(e, es, sum as u64);
