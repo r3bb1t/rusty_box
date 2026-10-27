@@ -371,6 +371,7 @@ fn they_need_streaming_mode_and_sme2() {
     let mut cpu = processor(Implementation {
         features: Features::of(&features),
         max_svl: VecLen::MAX,
+        ..Implementation::EVERY_FEATURE
     });
     cpu.set_pstate_sm(true);
     for insn in [PTRUE_PN8_B, WHILELT_PN8_B, WHILELT_PAIR_B, PEXT_P0_B, CNTP_B, LD1B_2, ST1H_2X8] {

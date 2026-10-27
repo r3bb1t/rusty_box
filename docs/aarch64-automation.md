@@ -1,7 +1,8 @@
 # Driving an AArch64 guest from Rust
 
 `rusty_box_aarch64` runs QEMU's `virt` board — a Cortex-A57-shaped ARMv8.0
-processor, a GICv2, a PL011 UART, flash, an RTC and a power button, and,
+processor or an Armv9.2 one with SME2, a GICv2, a PL011 UART, flash, an RTC
+and a power button, and,
 when asked, QEMU's virtio display, keyboard and tablet — without a human at
 the console. A program builds a machine, boots UEFI firmware or a Linux
 kernel on it, reads the serial console or the screen, types at it, points
@@ -73,10 +74,41 @@ let mut machine = MachineBuilder::new(VirtConfig::default())
 Or nothing at all: a bare machine starts at the base of RAM, for a host that
 writes its own code there (section 5).
 
-The device tree is QEMU's own for this board unless `device_tree(..)` gives
-another; either way its memory node is set to the RAM the machine has, and
-`machine.device_tree()` returns what the guest was given.
-`boot::fdt::property` reads a property back out of it.
+The device tree is QEMU's own for this board, its processor node made the
+processor's, unless `device_tree(..)` gives another, which keeps its own
+processor node, as QEMU's `-dtb` does. Either way its memory node is set to
+the RAM the machine has, and `machine.device_tree()` returns what the guest
+was given. `boot::fdt::property` reads a property back out of it.
+
+**The processor.** `VirtConfig::cpu` picks it: `CpuModel::CortexA57`, the
+default, QEMU's `cortex-a57` cut down to EL0 and EL1; or
+`CpuModel::Armv9p2`, an Armv9.2 processor with SME and SME2 (and no SVE)
+that reports itself as a software model. The model decides what the ID
+registers advertise, `MIDR_EL1`, the system counter's frequency (62.5 MHz,
+as QEMU runs the Cortex-A57's, or 1 GHz, as Armv8.6 and later require) and
+the device tree's `compatible` for the processor. `CpuModel::name` spells
+a model for a command line or a file (`"cortex-a57"`, `"armv9.2"`), and
+`str::parse` reads one back, or an `UnknownCpuModel` that names the models
+there are.
+
+```rust
+use rusty_box_aarch64::boot::fdt;
+use rusty_box_aarch64::{CpuModel, MachineBuilder, RamSize, SysReg, VirtConfig};
+
+let config = VirtConfig {
+    cpu: CpuModel::Armv9p2,
+    ..VirtConfig::default()
+};
+let machine = MachineBuilder::new(config)
+    .ram(RamSize::mib(16).expect("a size the board maps"))
+    .firmware(&[0; 4])
+    .build()?;
+assert_eq!(machine.sysreg_read(SysReg::MIDR_EL1), Ok(0x000F_0520));
+assert_eq!(machine.sysreg_read(SysReg::CNTFRQ_EL0), Ok(1_000_000_000));
+let compatible = fdt::property(machine.device_tree(), "cpus/cpu@0", "compatible")?;
+assert_eq!(compatible, Some(&b"arm,armv8\0"[..]));
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
 
 **Owned or lent.** `build()` gives a machine that owns its memory
 (`VirtMachine<OwnedStorage>`, movable to another thread). `build_in` runs in

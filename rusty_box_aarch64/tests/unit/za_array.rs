@@ -963,6 +963,7 @@ fn they_need_streaming_mode_za_and_sme2() {
     let mut cpu = processor(Implementation {
         features: Features::of(&features),
         max_svl: VecLen::MAX,
+        ..Implementation::EVERY_FEATURE
     });
     cpu.set_pstate_sm(true);
     cpu.set_pstate_za(true);

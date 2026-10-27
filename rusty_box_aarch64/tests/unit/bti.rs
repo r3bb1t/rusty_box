@@ -111,10 +111,9 @@ impl Machine {
         let mut cpu = Cpu::implementing(
             CpuConfig {
                 ips,
-                counter_hz: ips,
                 reset_pc: UNGUARDED,
             },
-            imp,
+            Implementation { counter_hz: ips, ..imp },
         );
         let mut ram = Ram(std::vec![0; RAM_BYTES]);
         const AF: u64 = 1 << 10;

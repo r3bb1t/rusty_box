@@ -65,14 +65,7 @@ impl PhysBus for OneWord<'_> {
 /// there is one.
 pub(crate) fn processor(imp: Implementation) -> Cpu {
     let ips = ClockHz::new(1_000_000).unwrap_or(ClockHz::BOCHS_DEFAULT);
-    let mut cpu = Cpu::implementing(
-        CpuConfig {
-            ips,
-            counter_hz: ips,
-            reset_pc: CODE,
-        },
-        imp,
-    );
+    let mut cpu = Cpu::implementing(CpuConfig { ips, reset_pc: CODE }, Implementation { counter_hz: ips, ..imp });
     cpu.sys.cpacr_el1 = if imp.has(Feature::Sme) { CPACR_ALL } else { 3 << 20 };
     cpu.sys.vbar_el1 = VBAR;
     cpu

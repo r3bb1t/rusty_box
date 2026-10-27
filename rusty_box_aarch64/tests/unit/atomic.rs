@@ -109,12 +109,8 @@ impl Machine {
     fn new(imp: Implementation) -> Self {
         let ips = ClockHz::new(1_000_000).unwrap_or(ClockHz::BOCHS_DEFAULT);
         let mut cpu = Cpu::implementing(
-            CpuConfig {
-                ips,
-                counter_hz: ips,
-                reset_pc: CODE,
-            },
-            imp,
+            CpuConfig { ips, reset_pc: CODE },
+            Implementation { counter_hz: ips, ..imp },
         );
         let mut ram = Ram {
             bytes: std::vec![0; RAM_BYTES],

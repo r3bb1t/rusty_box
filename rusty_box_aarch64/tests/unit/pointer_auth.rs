@@ -25,7 +25,7 @@ use std::vec::Vec;
 
 use rusty_box_core::{ClockHz, VmClock};
 
-use super::features::{Feature, Features, Implementation, VecLen};
+use super::features::{Feature, Features, Implementation};
 use super::pauth::PacKeys;
 use super::step::{exec, processor, Taken, CODE, UNDEFINED};
 use super::{id, Cpu, CpuConfig, El, Step};
@@ -161,12 +161,11 @@ fn every_qemu_pauth_vector_matches_after_one_step() {
         let seeded = Seeded::new(hex(fields[2]));
 
         let mut cpu = Cpu::implementing(
-            CpuConfig {
-                ips,
+            CpuConfig { ips, reset_pc: TEST_PC },
+            Implementation {
                 counter_hz: ips,
-                reset_pc: TEST_PC,
+                ..Implementation::EVERY_FEATURE
             },
-            Implementation::EVERY_FEATURE,
         );
         cpu.pac_keys = PacKeys::from_halves(seeded.keys);
         cpu.sys.sctlr_el1 = hex(field(&fields, "s="));
@@ -320,7 +319,7 @@ const LOWER_CODE: u64 = mask(63, 56) | mask(54, 39);
 fn keyed(features: &[Feature]) -> Cpu {
     let mut cpu = processor(Implementation {
         features: Features::of(features),
-        max_svl: VecLen::MIN,
+        ..Implementation::CORTEX_A57
     });
     cpu.pac_keys = PacKeys::from_halves(core::array::from_fn(|i| {
         0x0123_4567_89AB_CDEF_u64.wrapping_mul(2 * i as u64 + 1).rotate_left(i as u32 * 7)
@@ -589,7 +588,7 @@ fn a_snapshot_carries_the_keys() {
     assert!(cpu.save(&mut image).is_ok());
     let mut restored = processor(Implementation {
         features: Features::of(&FPACCOMBINE),
-        max_svl: VecLen::MIN,
+        ..Implementation::CORTEX_A57
     });
     let mut source: &[u8] = &image;
     assert!(restored.restore(&mut source).is_ok());

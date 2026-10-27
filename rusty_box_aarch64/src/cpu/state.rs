@@ -151,14 +151,7 @@ impl Cpu {
     /// tick and instruction counts carry on, as QEMU's virtual clock does
     /// across a system reset.
     pub(crate) fn reset_keeping_time(&mut self, reset_pc: u64) {
-        let fresh = Cpu::implementing(
-            CpuConfig {
-                ips: self.ips,
-                counter_hz: self.counter_hz,
-                reset_pc,
-            },
-            self.imp,
-        );
+        let fresh = Cpu::implementing(CpuConfig { ips: self.ips, reset_pc }, self.imp);
         let pc_history = core::mem::take(&mut self.pc_history);
         *self = Cpu {
             event: EventRegister::at(false, self.counter()),
@@ -286,6 +279,8 @@ impl Cpu {
     pub(crate) fn save<W: SnapWrite>(&self, w: &mut W) -> SnapResult {
         w.write_u64(self.imp.features.bits())?;
         w.write_u32(self.imp.max_svl.bits())?;
+        w.write_u64(self.imp.midr)?;
+        w.write_u64(self.imp.counter_hz.get())?;
         for x in self.x {
             w.write_u64(x)?;
         }
@@ -330,13 +325,19 @@ impl Cpu {
 
     /// The inverse of [`Cpu::save`]. The interrupt inputs are not part of
     /// the image: the machine drives them from its interrupt controller.
-    /// An image of a processor implementing other features, or another
-    /// streaming vector length, is refused before anything changes.
+    /// An image of another implementation — other features, another
+    /// streaming vector length, another `MIDR_EL1` or another system
+    /// counter — is refused before anything changes.
     pub(crate) fn restore<R: SnapRead>(&mut self, r: &mut R) -> SnapResult {
         let features = r.read_u64()?;
         let max_svl = r.read_u32()?;
+        let midr = r.read_u64()?;
+        let counter_hz = r.read_u64()?;
         if features != self.imp.features.bits() || max_svl != self.imp.max_svl.bits() {
             return Err(SnapError::Invalid("snapshot of a processor implementing other features"));
+        }
+        if midr != self.imp.midr || counter_hz != self.imp.counter_hz.get() {
+            return Err(SnapError::Invalid("snapshot of another processor"));
         }
         let mut x = [0u64; 31];
         for reg in x.iter_mut() {
@@ -437,11 +438,16 @@ mod tests {
     use rusty_box_core::ClockHz;
 
     fn cpu() -> Cpu {
-        Cpu::new(CpuConfig {
-            ips: ClockHz::BOCHS_DEFAULT,
-            counter_hz: ClockHz::BOCHS_DEFAULT,
-            reset_pc: 0x1000,
-        })
+        Cpu::implementing(
+            CpuConfig {
+                ips: ClockHz::BOCHS_DEFAULT,
+                reset_pc: 0x1000,
+            },
+            Implementation {
+                counter_hz: ClockHz::BOCHS_DEFAULT,
+                ..Implementation::CORTEX_A57
+            },
+        )
     }
 
     #[test]
@@ -503,5 +509,38 @@ mod tests {
         assert!(source.is_empty());
         assert_eq!(restored.state(), c.state());
         assert_eq!(restored.recent_pcs().collect::<std::vec::Vec<_>>(), [0x40]);
+    }
+
+    /// An image is refused by a processor of another identity or another
+    /// system counter, with the same features, before anything changes.
+    #[test]
+    fn an_image_of_another_processor_is_refused() {
+        let mut c = cpu();
+        c.set_reg(Reg::X3, 33);
+        let mut image = std::vec::Vec::new();
+        c.save(&mut image).expect("save");
+        let others = [
+            Implementation {
+                midr: super::super::id::MIDR_SOFTWARE_MODEL,
+                ..c.imp
+            },
+            Implementation {
+                counter_hz: super::super::ARMV8P6_COUNTER_HZ,
+                ..c.imp
+            },
+        ];
+        for imp in others {
+            let mut other = Cpu::implementing(
+                CpuConfig {
+                    ips: ClockHz::BOCHS_DEFAULT,
+                    reset_pc: 0x1000,
+                },
+                imp,
+            );
+            let before = other.state();
+            let mut source: &[u8] = &image;
+            assert_eq!(other.restore(&mut source), Err(SnapError::Invalid("snapshot of another processor")));
+            assert_eq!(other.state(), before);
+        }
     }
 }

@@ -181,6 +181,27 @@ fn a_snapshot_restores_the_same_future() {
     assert_eq!(other.cpu_snapshot(), before, "a refused image changes nothing");
     assert_eq!(other.power().state(), rusty_box_aarch64::PowerState::Running);
 
+    // So is another processor.
+    let mut armv9_ram = vec![0u8; RAM_LEN];
+    let armv9 = VirtConfig {
+        cpu: rusty_box_aarch64::CpuModel::Armv9p2,
+        ..VirtConfig::DEFAULT
+    };
+    let mut armv9 = MachineBuilder::new(armv9)
+        .ram(RamSize::bytes(RAM_LEN as u64).expect("a valid size"))
+        .bare()
+        .build_in(MemoryLoan {
+            ram: &mut armv9_ram,
+            vars: &mut [],
+        })
+        .expect("builds");
+    let before = armv9.cpu_snapshot();
+    assert_eq!(
+        armv9.restore_snapshot(&mut image.as_slice()),
+        Err(rusty_box_core::snap::SnapError::Invalid("snapshot is of a machine built differently"))
+    );
+    assert_eq!(armv9.cpu_snapshot(), before, "a refused image changes nothing");
+
     // A truncated one leaves the machine off until it is reset.
     let truncated = &image[..image.len() / 2];
     assert!(machine.restore_snapshot(&mut &truncated[..]).is_err());

@@ -174,6 +174,7 @@ const ERASED_FLASH: u8 = 0xFF;
 fn build(config: &ArmVirtConfig, files: &BootFiles) -> Result<Virt, RunError> {
     let virt_config = VirtConfig {
         ips: ClockHz::new(u64::from(config.ips)).ok_or(RunError::ZeroValue { field: "virt.ips" })?,
+        cpu: config.cpu,
         rtc_epoch_seconds: host_epoch_seconds(),
         ..VirtConfig::DEFAULT
     };
@@ -1024,6 +1025,28 @@ mod tests {
     fn a_slice_is_ten_milliseconds_of_guest_time_and_never_none() {
         assert_eq!(slice_ticks(50_000_000), 500_000);
         assert_eq!(slice_ticks(1), 1);
+    }
+
+    /// The board is built with the processor the VM names: its `MIDR_EL1`,
+    /// and the counter frequency it reads at reset.
+    #[test]
+    fn the_board_runs_the_processor_the_vm_names() {
+        let kernel = ScratchFile::new("Image", &test_images::power_off_kernel());
+        for model in rusty_box_aarch64::CpuModel::ALL {
+            let config = ArmVirtConfig {
+                cpu: model,
+                ..kernel_board(&kernel)
+            };
+            let files = BootFiles::read(&config).expect("the kernel");
+            let machine = build(&config, &files).expect("the machine");
+            let midr = machine.sysreg_read(rusty_box_aarch64::SysReg::MIDR_EL1);
+            let cntfrq = machine.sysreg_read(rusty_box_aarch64::SysReg::CNTFRQ_EL0);
+            let want = match model {
+                rusty_box_aarch64::CpuModel::CortexA57 => (0x411F_D070, 62_500_000),
+                rusty_box_aarch64::CpuModel::Armv9p2 => (0x000F_0520, 1_000_000_000),
+            };
+            assert_eq!((midr, cntfrq), (Ok(want.0), Ok(want.1)), "{model:?}");
+        }
     }
 
     /// A built machine whose serial console takes the terminal's keys.

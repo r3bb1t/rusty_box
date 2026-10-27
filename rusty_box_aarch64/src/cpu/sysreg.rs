@@ -471,7 +471,7 @@ impl Cpu {
         let pauth = self.implements(Feature::PAuth);
         let keys = &self.pac_keys;
         let value = match k {
-            MIDR_EL1 => id::MIDR_EL1,
+            MIDR_EL1 => self.imp.midr,
             MPIDR_EL1 => id::MPIDR_EL1,
             REVIDR_EL1 => id::REVIDR_EL1,
             ID_AA64PFR0_EL1 => id::id_aa64pfr0(self.imp.features),

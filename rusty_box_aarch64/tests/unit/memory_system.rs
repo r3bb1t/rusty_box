@@ -16,7 +16,7 @@ use std::vec::Vec;
 
 use rusty_box_core::{ClockHz, VmClock};
 
-use super::features::{Feature, Features, Implementation, VecLen};
+use super::features::{Feature, Features, Implementation};
 use super::{id, Cpu, CpuConfig, El, Step, Tlb};
 use crate::bus::{AccessWidth, BusFault, PhysAddr, PhysBus};
 use crate::instrumentation::NoInstrumentation;
@@ -161,12 +161,8 @@ impl Machine {
     fn new(imp: Implementation) -> Self {
         let ips = ClockHz::new(1_000_000).unwrap_or(ClockHz::BOCHS_DEFAULT);
         let mut cpu = Cpu::implementing(
-            CpuConfig {
-                ips,
-                counter_hz: ips,
-                reset_pc: CODE,
-            },
-            imp,
+            CpuConfig { ips, reset_pc: CODE },
+            Implementation { counter_hz: ips, ..imp },
         );
         let mut ram = Ram(std::vec![0; RAM_BYTES]);
         const AF: u64 = 1 << 10;
@@ -261,7 +257,7 @@ fn a57_with(extra: &[Feature]) -> Implementation {
     features.extend_from_slice(extra);
     Implementation {
         features: Features::of(&features),
-        max_svl: VecLen::MIN,
+        ..Implementation::CORTEX_A57
     }
 }
 

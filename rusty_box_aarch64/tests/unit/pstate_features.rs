@@ -18,7 +18,7 @@ use std::vec::Vec;
 
 use rusty_box_core::{ClockHz, VmClock};
 
-use super::features::{Feature, Features, Implementation, VecLen};
+use super::features::{Feature, Features, Implementation};
 use super::{id, Cpu, CpuConfig, El, Pstate, Step};
 use crate::bus::{AccessWidth, BusFault, PhysAddr, PhysBus};
 use crate::instrumentation::NoInstrumentation;
@@ -139,12 +139,8 @@ impl Machine {
     fn new(imp: Implementation) -> Self {
         let ips = ClockHz::new(1_000_000).unwrap_or(ClockHz::BOCHS_DEFAULT);
         let mut cpu = Cpu::implementing(
-            CpuConfig {
-                ips,
-                counter_hz: ips,
-                reset_pc: CODE,
-            },
-            imp,
+            CpuConfig { ips, reset_pc: CODE },
+            Implementation { counter_hz: ips, ..imp },
         );
         let mut ram = Ram(std::vec![0; RAM_BYTES]);
         const AF: u64 = 1 << 10;
@@ -227,7 +223,7 @@ fn a57_with(extra: &[Feature]) -> Implementation {
     features.extend_from_slice(extra);
     Implementation {
         features: Features::of(&features),
-        max_svl: VecLen::MIN,
+        ..Implementation::CORTEX_A57
     }
 }
 
@@ -476,14 +472,15 @@ fn spsr_holds_the_fields_only_with_their_features() {
     }
 
     // The Cortex-A57's own image, with the fields set in SPSR_EL1: after
-    // the feature set (8 bytes), the streaming vector length (4), X0-X30,
-    // SP_EL0, SP_EL1, the PC and PSTATE (8 each), V0-V31 (16 each), FPCR
-    // and FPSR (8 each), the seventh system register.
+    // the feature set (8 bytes), the streaming vector length (4), MIDR_EL1
+    // and the counter frequency (8 each), X0-X30, SP_EL0, SP_EL1, the PC
+    // and PSTATE (8 each), V0-V31 (16 each), FPCR and FPSR (8 each), the
+    // seventh system register.
     let mut a57 = Machine::new(Implementation::CORTEX_A57);
     a57.cpu.sys.spsr_el1 = 0x3C5;
     let mut image = Vec::new();
     assert!(a57.cpu.save(&mut image).is_ok());
-    let at = 8 + 4 + 35 * 8 + 32 * 16 + 2 * 8 + 6 * 8;
+    let at = 8 + 4 + 2 * 8 + 35 * 8 + 32 * 16 + 2 * 8 + 6 * 8;
     let mut spsr = [0u8; 8];
     spsr.copy_from_slice(&image[at..at + 8]);
     assert_eq!(u64::from_le_bytes(spsr), 0x3C5, "the layout this test assumes");
@@ -524,11 +521,12 @@ fn a_snapshot_carries_the_fields() {
 
     // The Cortex-A57's own image, with SPSR's PAN bit set in its PSTATE:
     // after the feature set (8 bytes), the streaming vector length (4),
-    // X0-X30, SP_EL0, SP_EL1 and the PC (8 each).
+    // MIDR_EL1 and the counter frequency (8 each), X0-X30, SP_EL0, SP_EL1
+    // and the PC (8 each).
     let a57 = Machine::new(Implementation::CORTEX_A57);
     let mut image = Vec::new();
     assert!(a57.cpu.save(&mut image).is_ok());
-    let at = 8 + 4 + 34 * 8;
+    let at = 8 + 4 + 2 * 8 + 34 * 8;
     let mut spsr = [0u8; 8];
     spsr.copy_from_slice(&image[at..at + 8]);
     assert_eq!(u64::from_le_bytes(spsr), a57.cpu.pstate.to_spsr(), "the layout this test assumes");

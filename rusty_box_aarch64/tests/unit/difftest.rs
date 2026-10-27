@@ -38,7 +38,7 @@ use super::features::Implementation;
 use super::sme::ZT0_BYTES;
 use super::sve::{Pv, Zv};
 use super::sysreg::SMCR_EZT0;
-use super::{Cpu, CpuConfig, Step};
+use super::{Cpu, CpuConfig, CpuModel, Step};
 use crate::bus::{AccessWidth, BusFault, PhysAddr, PhysBus};
 use crate::instrumentation::NoInstrumentation;
 
@@ -603,12 +603,11 @@ fn replay_sve(vectors: &str) {
         let za = za_state(seed, kind);
         let zt0 = zt0_state(seed, kind);
         let mut cpu = Cpu::implementing(
-            CpuConfig {
-                ips,
+            CpuConfig { ips, reset_pc: CODE },
+            Implementation {
                 counter_hz: ips,
-                reset_pc: CODE,
+                ..Implementation::EVERY_FEATURE
             },
-            Implementation::EVERY_FEATURE,
         );
         cpu.x = st.x;
         cpu.sp_el1 = st.sp;
@@ -829,11 +828,7 @@ fn reserved_simd_and_fp_encodings_are_undefined_before_the_fp_trap() {
         (0x1E20_2820, "fadd s0, s1, s0", 0x07),
     ];
     for (insn, text, want_ec) in cases {
-        let mut cpu = Cpu::new(CpuConfig {
-            ips,
-            counter_hz: ips,
-            reset_pc: CODE,
-        });
+        let mut cpu = Cpu::new(CpuModel::CortexA57, CpuConfig { ips, reset_pc: CODE });
         let mut bus = TestBus {
             insn,
             data: std::vec![0; DATA_SIZE],
@@ -851,11 +846,7 @@ fn reserved_simd_and_fp_encodings_are_undefined_before_the_fp_trap() {
 fn udf_takes_the_undefined_instruction_exception_whatever_its_immediate() {
     let ips = ClockHz::new(1_000_000).unwrap_or(ClockHz::BOCHS_DEFAULT);
     for insn in [0x0000_0000, 0x0000_0001, 0x0000_0002, 0x0000_0003, 0x0000_ABCD] {
-        let mut cpu = Cpu::new(CpuConfig {
-            ips,
-            counter_hz: ips,
-            reset_pc: CODE,
-        });
+        let mut cpu = Cpu::new(CpuModel::CortexA57, CpuConfig { ips, reset_pc: CODE });
         cpu.x[0] = 0x8400_0008; // PSCI SYSTEM_OFF, had `udf #2` reached the PSCI conduit
         let mut bus = TestBus {
             insn,
@@ -883,11 +874,7 @@ fn add_and_sub_immediate_with_shift_1x_are_undefined() {
         (0xF1C0_0420, "subs x0, x1, #1 with shift 11"),
     ];
     for (insn, text) in cases {
-        let mut cpu = Cpu::new(CpuConfig {
-            ips,
-            counter_hz: ips,
-            reset_pc: CODE,
-        });
+        let mut cpu = Cpu::new(CpuModel::CortexA57, CpuConfig { ips, reset_pc: CODE });
         cpu.x[1] = 41;
         let mut bus = TestBus {
             insn,
@@ -912,11 +899,7 @@ struct Stepper {
 impl Stepper {
     fn new() -> Self {
         let ips = ClockHz::new(1_000_000).unwrap_or(ClockHz::BOCHS_DEFAULT);
-        let mut cpu = Cpu::new(CpuConfig {
-            ips,
-            counter_hz: ips,
-            reset_pc: CODE,
-        });
+        let mut cpu = Cpu::new(CpuModel::CortexA57, CpuConfig { ips, reset_pc: CODE });
         cpu.sys.cpacr_el1 = 3 << 20;
         let mut reset = Vec::new();
         if let Err(e) = cpu.save(&mut reset) {
@@ -1266,14 +1249,7 @@ fn replay(vectors: &str, imp: Implementation) {
         let tally = tallies.entry(String::from(name)).or_default();
 
         let st = initial_state(seed, kind, insn);
-        let mut cpu = Cpu::implementing(
-            CpuConfig {
-                ips,
-                counter_hz: ips,
-                reset_pc: CODE,
-            },
-            imp,
-        );
+        let mut cpu = Cpu::implementing(CpuConfig { ips, reset_pc: CODE }, Implementation { counter_hz: ips, ..imp });
         cpu.x = st.x;
         cpu.sp_el1 = st.sp;
         cpu.pstate.set_nzcv(st.nzcv);

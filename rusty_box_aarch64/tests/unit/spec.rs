@@ -40,6 +40,10 @@
 //! - [`every_implementation_has_what_its_features_imply`]: each feature
 //!   set a processor implements holds what Arm's `Features.json` makes its
 //!   features imply, among the features the decoder knows.
+//! - In [`each_model_is_a_processor_arms_feature_model_permits`], every
+//!   constraint of `Features.json` that is built from identifiers alone
+//!   holds for each processor model, its architecture version and the
+//!   structural features every processor here has.
 
 use std::boxed::Box;
 use std::collections::{BTreeMap, BTreeSet};
@@ -1467,9 +1471,99 @@ fn every_implementation_has_what_its_features_imply() {
     let (release, implications) = feature_implications();
     std::eprintln!("AARCHMRS {release}: {} implications between known features", implications.len());
     assert!(implications.contains(&(Feature::Lrcpc2, Feature::Lrcpc)), "{implications:?}");
-    for imp in [Implementation::CORTEX_A57, Implementation::EVERY_FEATURE] {
+    let models = crate::cpu::CpuModel::ALL.map(crate::cpu::CpuModel::implementation);
+    for imp in models.into_iter().chain([Implementation::EVERY_FEATURE]) {
         for &(a, b) in &implications {
             assert!(!imp.has(a) || imp.has(b), "{imp:?} has {a:?}, which implies {b:?}");
         }
+    }
+}
+
+/// The value of the `Features.json` constraint `ast` when the identifiers
+/// in `holding` hold and every other is false, as far as its identifiers
+/// decide it: `None` when the value turns on a leaf that is not an
+/// identifier (an ID register field, a comparison).
+fn constraint_value(ast: &Value, holding: &BTreeSet<&str>) -> Option<bool> {
+    let operand = |key: &str| ast.get(key).and_then(|side| constraint_value(side, holding));
+    match ast.get("_type").and_then(Value::as_str)? {
+        "AST.Identifier" => Some(holding.contains(ast.get("value").and_then(Value::as_str)?)),
+        "AST.UnaryOp" if ast.get("op").and_then(Value::as_str) == Some("!") => operand("expr").map(|v| !v),
+        "AST.BinaryOp" => {
+            let (left, right) = (operand("left"), operand("right"));
+            match ast.get("op").and_then(Value::as_str)? {
+                "&&" if left == Some(false) || right == Some(false) => Some(false),
+                "&&" => Some(left? && right?),
+                "||" if left == Some(true) || right == Some(true) => Some(true),
+                "||" => Some(left? || right?),
+                "==>" if left == Some(false) || right == Some(true) => Some(true),
+                "==>" => Some(!left? || right?),
+                "<=>" => Some(left? == right?),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Each processor model is one Arm's feature model permits: every
+/// constraint of `Features.json`, global and per parameter, that its
+/// identifiers decide holds when the model's features hold, its
+/// architecture version and those it includes hold, and the structural
+/// features of every processor here hold — AArch64 (`FEAT_AA64`) at EL0 and
+/// EL1 (`FEAT_EL0`, `FEAT_EL1`, `FEAT_AA64EL0`, `FEAT_AA64EL1`), a PIPT
+/// instruction cache (`FEAT_IVIPT`: `CTR_EL0.L1Ip` is 0b11), the
+/// Cryptographic Extension (`FEAT_Crypto`), and from Armv8.2 its assembler
+/// aliases (`FEAT_ASMv8p2`, BFC and the 64-bit REV64) — and every other
+/// identifier is false: no FEAT_SVE, no EL2, no AArch32, no PMU.
+#[test]
+#[cfg_attr(not(aarchmrs), ignore = "reads Arm's AARCHMRS from the directory RUSTY_BOX_AARCHMRS names")]
+fn each_model_is_a_processor_arms_feature_model_permits() {
+    use crate::cpu::CpuModel;
+
+    let dir = std::env::var_os(SPEC_DIR_VAR)
+        .unwrap_or_else(|| panic!("set {SPEC_DIR_VAR} to the unpacked AARCHMRS directory (holding Features.json)"));
+    let path = PathBuf::from(dir).join("Features.json");
+    let text = std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let root: Value = serde_json::from_slice(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let parameter_constraints = root
+        .get("parameters")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|p| p.get("constraints").and_then(Value::as_array))
+        .flatten();
+    let global_constraints = root.get("constraints").and_then(Value::as_array).into_iter().flatten();
+    let constraints: Vec<&Value> = parameter_constraints.chain(global_constraints).collect();
+
+    const VERSIONS: [&str; 11] = [
+        "v8Ap0", "v8Ap1", "v8Ap2", "v8Ap3", "v8Ap4", "v8Ap5", "v8Ap6", "v8Ap7", "v9Ap0", "v9Ap1", "v9Ap2",
+    ];
+    for model in CpuModel::ALL {
+        let versions = match model {
+            CpuModel::CortexA57 => &VERSIONS[..1],
+            CpuModel::Armv9p2 => &VERSIONS[..],
+        };
+        let imp = model.implementation();
+        let mut holding: BTreeSet<&str> = Feature::ALL
+            .into_iter()
+            .filter(|&f| imp.has(f))
+            .filter_map(Feature::arm_name)
+            .chain(versions.iter().copied())
+            .chain(["FEAT_AA64", "FEAT_EL0", "FEAT_EL1", "FEAT_AA64EL0", "FEAT_AA64EL1", "FEAT_IVIPT", "FEAT_Crypto"])
+            .collect();
+        if versions.contains(&"v8Ap2") {
+            holding.insert("FEAT_ASMv8p2");
+        }
+        let (mut decided, mut broken) = (0, Vec::new());
+        for c in &constraints {
+            match constraint_value(c, &holding) {
+                Some(true) => decided += 1,
+                Some(false) => broken.push(render(c)),
+                None => {}
+            }
+        }
+        std::eprintln!("{model:?}: {decided} of {} constraints decided by identifiers, all hold", constraints.len());
+        assert!(broken.is_empty(), "{model:?} breaks {broken:#?}");
+        assert!(decided > constraints.len() / 2, "{model:?}: {decided} decided");
     }
 }

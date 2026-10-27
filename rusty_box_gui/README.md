@@ -85,7 +85,7 @@ A confirmation dialog is dismissed by `Cancel`, Escape or a click outside it. Th
 
 ### Arm VMs
 
-A VM is a PC or an Arm `virt` board, QEMU's `virt` machine with one Cortex-A57 (the `rusty_box_aarch64` crate). The **Machine** choice at the top of the Hardware page switches between them while the VM is off; switching back within an edit restores what the other machine held. An Arm VM differs from a PC in the shell as follows:
+A VM is a PC or an Arm `virt` board, QEMU's `virt` machine with one processor, a Cortex-A57 or an Armv9.2 one with SME2 (the `rusty_box_aarch64` crate). The **Machine** choice at the top of the Hardware page switches between them while the VM is off; switching back within an edit restores what the other machine held. An Arm VM differs from a PC in the shell as follows:
 
 - **Colour.** The shell's accent is the shown VM's machine's: cyan, with the instruction rate in blue, for a PC; red for an Arm board. It marks the primary verb (`▶ Power on` and the like), the page and Hardware pane the shell is on, a running VM's badge, the instruction rate, and the text cursor and selection. Each running VM's dot in the sidebar is in its own machine's accent, whichever VM is shown. Info, warning, error and `Paused` keep their own colours.
 
@@ -96,7 +96,7 @@ A VM is a PC or an Arm `virt` board, QEMU's `virt` machine with one Cortex-A57 (
   | Pane | Settings |
   | --- | --- |
   | Memory | Guest memory, from 1 MB up to what the board maps below its high PCIe window |
-  | Processors | The IPS target guest time counts instructions at |
+  | Processors | The model (`Cortex-A57 (Armv8.0)` or `Armv9.2 with SME2`) and the IPS target guest time counts instructions at |
   | Boot | `Nothing yet`, `UEFI firmware` (firmware and variable-store paths) or `Linux kernel` (an arm64 `Image`, an initrd, a device tree and the command line) |
   | Display | `virtio-gpu`, and the size it asks the guest for: a preset from 800 × 600 to 1920 × 1080, or any width and height; the log level |
   | Input | A virtio `Keyboard` and a virtio `Tablet (absolute pointer)` |
@@ -394,6 +394,7 @@ height = 768
 | `vm.machine` | `"pc"` or `"arm-virt"` | `"pc"` | none |
 | `virt.memory_mib` | Guest memory, MiB | `256` (QEMU's) | `--memory-mib` |
 | `virt.ips` | The rate guest time counts instructions at | `50000000` | `--ips` |
+| `virt.cpu` | The processor: `"cortex-a57"`, QEMU's Cortex-A57 cut down to EL0 and EL1, or `"armv9.2"`, an Armv9.2 processor with SME and SME2 (no SVE) and a 1 GHz system counter; any other name is refused | `"cortex-a57"` | none |
 | `virt.firmware` | UEFI firmware for flash bank 0, as QEMU's `-bios` (EDK2 `ArmVirtQemu`); not with `virt.kernel` | none | none |
 | `virt.firmware_vars` | Its variable store, flash bank 1; written back when the firmware changes it | none | none |
 | `virt.kernel` | An arm64 Linux `Image`, entered directly as QEMU's `-kernel` does; not with `virt.firmware` | none | none |

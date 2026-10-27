@@ -1,22 +1,33 @@
 //! Identification values a guest can read, and the feature set they promise.
 //!
-//! The processor is shaped like a Cortex-A57 r1p0 (the value QEMU's
-//! `cortex-a57` model reports in `MIDR_EL1`), cut down to what this
-//! interpreter implements: AArch64 at EL0 and EL1 only, FP and Advanced SIMD,
-//! the Cryptographic Extension's AES, PMULL, SHA-1 and SHA-256 and CRC32 (the
+//! Each processor model ([`CpuModel`](super::CpuModel)) is cut down to what
+//! this interpreter implements: AArch64 at EL0 and EL1 only, the 4 KiB
+//! translation granule, no PMU. The Cortex-A57 r1p0 (the value QEMU's
+//! `cortex-a57` model reports in `MIDR_EL1`) has FP and Advanced SIMD, the
+//! Cryptographic Extension's AES, PMULL, SHA-1 and SHA-256 and CRC32 (the
 //! Cortex-A57's optional extensions, all of them, as QEMU's `cortex-a57`
-//! has them), the 4 KiB translation granule, no PMU. Every value here
-//! is consistent with that cut — an ID register that advertised a feature the
-//! executor rejects would make the feature unreachable (or worse, reachable
-//! and wrong), so the two change together. The registers that report
-//! instruction-set features are functions of the processor's feature set,
-//! which the decoder reads too.
+//! has them); the Armv9.2 model has those and the rest of its feature set
+//! (`Features::ARMV9P2`), and reports itself as a software model. Both
+//! describe the Cortex-A57's caches. Every value here is consistent with
+//! that cut — an ID register that advertised a feature the executor rejects
+//! would make the feature unreachable (or worse, reachable and wrong), so
+//! the two change together. The registers that report instruction-set
+//! features are functions of the processor's feature set, which the
+//! decoder reads too.
 
 use super::features::{Feature, Features};
 
-/// `MIDR_EL1`: Arm Ltd, variant 1, architecture 0xF, part 0xD07 (Cortex-A57),
-/// revision 0. QEMU `aarch64_a57_initfn` sets the same.
-pub const MIDR_EL1: u64 = 0x411F_D070;
+/// The Cortex-A57's `MIDR_EL1`: Arm Ltd, variant 1, architecture 0xF, part
+/// 0xD07 (Cortex-A57), revision 0. QEMU `aarch64_a57_initfn` sets the same.
+pub const MIDR_CORTEX_A57: u64 = 0x411F_D070;
+
+/// A software model's `MIDR_EL1`: implementer 0 (reserved for software
+/// use), variant 0, architecture 0xF (the ID registers identify each
+/// feature), part 0x052 (`'R'`, telling this model apart from QEMU's `max`,
+/// which is part `'Q'`), revision 0. QEMU `aarch64_max_tcg_initfn` builds
+/// its own the same way, so that no guest takes the processor for an Arm
+/// part and applies that part's errata workarounds.
+pub const MIDR_SOFTWARE_MODEL: u64 = 0x000F_0520;
 
 /// `MPIDR_EL1`: bit 31 RES1, uniprocessor bit clear, affinity 0.0.0.0.
 pub const MPIDR_EL1: u64 = 0x8000_0000;

@@ -712,8 +712,8 @@ fn four_doubleword_slices_need_a_256_bit_vector_length() {
         assert_eq!(exec(&mut cpu, insn), Some(UNDEFINED), "{insn:#010x}");
     }
     let mut cpu = processor(Implementation {
-        features: Implementation::EVERY_FEATURE.features,
         max_svl: VecLen::MIN,
+        ..Implementation::EVERY_FEATURE
     });
     for insn in [MOVA_TO_4_D, MOVA_FROM_4_D] {
         assert_eq!(exec(&mut cpu, insn), Some(UNDEFINED), "{insn:#010x}");
@@ -747,6 +747,7 @@ fn the_sme2_tile_instructions_need_streaming_mode_za_and_sme2() {
     let mut cpu = processor(Implementation {
         features: Features::of(&features),
         max_svl: VecLen::MAX,
+        ..Implementation::EVERY_FEATURE
     });
     cpu.set_pstate_sm(true);
     cpu.set_pstate_za(true);

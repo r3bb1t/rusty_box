@@ -565,6 +565,15 @@ fn virt_boot_label(boot: &crate::config::ArmBoot) -> &'static str {
     }
 }
 
+/// An Arm `virt` VM's processor, as the Processor page names it.
+#[cfg(not(target_arch = "wasm32"))]
+fn cpu_model_label(model: rusty_box_aarch64::CpuModel) -> &'static str {
+    match model {
+        rusty_box_aarch64::CpuModel::CortexA57 => "Cortex-A57 (Armv8.0)",
+        rusty_box_aarch64::CpuModel::Armv9p2 => "Armv9.2 with SME2",
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct NativeVmSettings {
@@ -621,6 +630,7 @@ struct NativeVmSettings {
 struct VirtSettings {
     memory_mib: u32,
     ips: u32,
+    cpu: rusty_box_aarch64::CpuModel,
     boot: VirtBootChoice,
     firmware_path: String,
     vars_path: String,
@@ -665,6 +675,7 @@ impl VirtSettings {
         let mut settings = Self {
             memory_mib: config.memory_mib,
             ips: config.ips,
+            cpu: config.cpu,
             boot: VirtBootChoice::Nothing,
             firmware_path: String::new(),
             vars_path: String::new(),
@@ -739,6 +750,7 @@ impl VirtSettings {
         Ok(crate::config::ArmVirtConfig {
             memory_mib: self.memory_mib,
             ips: self.ips.max(1),
+            cpu: self.cpu,
             boot,
             display,
             keyboard: self.keyboard,
@@ -2896,11 +2908,23 @@ impl NativeShellApp {
                 page_header(
                     ui,
                     "Processor",
-                    "One Cortex-A57. Guest time keeps to the host clock, as QEMU's does; the IPS \
-                     target is the rate guest time counts instructions at.",
+                    "One processor: a Cortex-A57 (Armv8.0), or an Armv9.2 processor with SME2. \
+                     Guest time keeps to the host clock, as QEMU's does; the IPS target is the \
+                     rate guest time counts instructions at.",
                 );
                 detail_row(ui, "Virtual processors", "1");
                 ui.add_enabled_ui(editable, |ui| {
+                    field_row(ui, "Model", |ui| {
+                        egui::ComboBox::from_id_salt("virt processor model")
+                            .selected_text(cpu_model_label(virt.cpu))
+                            .show_ui(ui, |ui| {
+                                for model in rusty_box_aarch64::CpuModel::ALL {
+                                    changed |= ui
+                                        .selectable_value(&mut virt.cpu, model, cpu_model_label(model))
+                                        .changed();
+                                }
+                            });
+                    });
                     changed |= field_row(ui, "IPS target", |ui| {
                         draw_u32_field(
                             ui,
@@ -7098,6 +7122,7 @@ mod tests {
             machine: crate::config::MachineConfig::ArmVirt(crate::config::ArmVirtConfig {
                 memory_mib: 512,
                 ips: 50_000_000,
+                cpu: rusty_box_aarch64::CpuModel::Armv9p2,
                 boot: crate::config::ArmBoot::Linux {
                     kernel: std::path::PathBuf::from("Image"),
                     initrd: Some(std::path::PathBuf::from("initramfs.cpio.gz")),

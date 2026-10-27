@@ -98,6 +98,7 @@ impl std::fmt::Display for MachineKind {
 
 /// The `[virt]` table: the Arm `virt` board's hardware.
 ///
+/// `cpu` names its processor (`"cortex-a57"`, the default, or `"armv9.2"`).
 /// It boots UEFI firmware from flash (`firmware`, with `firmware_vars` for its
 /// variable store) or a Linux kernel directly (`kernel`, with `initrd`,
 /// `command_line` and `device_tree`), never both. `display` plugs in a
@@ -110,6 +111,7 @@ impl std::fmt::Display for MachineKind {
 pub struct VirtToml {
     pub memory_mib: Option<u32>,
     pub ips: Option<u32>,
+    pub cpu: Option<VirtCpuToml>,
     pub firmware: Option<PathBuf>,
     pub firmware_vars: Option<PathBuf>,
     pub kernel: Option<PathBuf>,
@@ -119,6 +121,27 @@ pub struct VirtToml {
     pub keyboard: Option<bool>,
     pub tablet: Option<bool>,
     pub display: Option<VirtDisplayToml>,
+}
+
+/// `virt.cpu`: a processor model, by the name
+/// [`rusty_box_aarch64::CpuModel::name`] gives it. A name no model has is
+/// refused when the file is read, with the names there are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct VirtCpuToml(pub rusty_box_aarch64::CpuModel);
+
+impl TryFrom<String> for VirtCpuToml {
+    type Error = String;
+
+    fn try_from(name: String) -> Result<Self, String> {
+        name.parse().map(Self).map_err(|e| format!("\"{name}\": {e}"))
+    }
+}
+
+impl From<VirtCpuToml> for String {
+    fn from(cpu: VirtCpuToml) -> Self {
+        cpu.0.name().to_owned()
+    }
 }
 
 /// `[virt.display]`: the size a virtio-gpu asks the guest for.
@@ -441,6 +464,8 @@ pub struct ArmVirtConfig {
     pub memory_mib: u32,
     /// The guest's instruction rate, which its timers count against.
     pub ips: u32,
+    /// The processor.
+    pub cpu: rusty_box_aarch64::CpuModel,
     pub boot: ArmBoot,
     /// The virtio-gpu, by the size it asks the guest for; `None` for none.
     pub display: Option<VirtioDisplaySize>,
@@ -586,6 +611,7 @@ impl ArmVirtConfig {
         Self {
             memory_mib: DEFAULT_VIRT_MEMORY_MIB,
             ips: DEFAULT_VIRT_IPS,
+            cpu: rusty_box_aarch64::CpuModel::default(),
             boot: ArmBoot::Unset,
             display: None,
             keyboard: false,
@@ -739,6 +765,7 @@ fn resolve_arm_virt(file: &FileConfig, args: &Args, config_dir: Option<&Path>) -
     Ok(ArmVirtConfig {
         memory_mib,
         ips,
+        cpu: virt.cpu.map_or_else(rusty_box_aarch64::CpuModel::default, |cpu| cpu.0),
         boot,
         display,
         keyboard: virt.keyboard.unwrap_or(false),
@@ -1028,6 +1055,7 @@ impl ArmVirtConfig {
         let mut virt = VirtToml {
             memory_mib: Some(self.memory_mib),
             ips: Some(self.ips),
+            cpu: Some(VirtCpuToml(self.cpu)),
             keyboard: Some(self.keyboard),
             tablet: Some(self.tablet),
             display: self.display.map(|size| VirtDisplayToml {
@@ -2597,7 +2625,7 @@ overwrite = false
     }
 
     /// An Arm board read back from what the library writes for it is the
-    /// board it wrote, for each way it boots.
+    /// board it wrote, for each way it boots and each processor.
     #[test]
     fn an_arm_virt_vm_round_trips_through_its_file() {
         let boots = [
@@ -2613,11 +2641,13 @@ overwrite = false
                 device_tree: Some(PathBuf::from("virt.dtb")),
             },
         ];
-        for boot in boots {
+        let processors = rusty_box_aarch64::CpuModel::ALL.into_iter().cycle();
+        for (boot, cpu) in boots.into_iter().zip(processors) {
             let resolved = ResolvedConfig {
                 machine: MachineConfig::ArmVirt(ArmVirtConfig {
                     memory_mib: 1024,
                     ips: 75_000_000,
+                    cpu,
                     boot,
                     display: Some(VirtioDisplaySize {
                         width: 1024,
@@ -2648,6 +2678,26 @@ overwrite = false
 
         assert_eq!(resolved.arm_virt(), Some(&ArmVirtConfig::blank()));
         assert_eq!(ArmVirtConfig::blank().memory_mib, 256, "QEMU virt's default RAM");
+        assert_eq!(ArmVirtConfig::blank().cpu, rusty_box_aarch64::CpuModel::CortexA57);
+    }
+
+    /// `virt.cpu` names the processor by its model's name; a name no model
+    /// has is refused when the file is read, naming the ones there are.
+    #[test]
+    fn the_virt_processor_is_named_by_its_model() {
+        let board = |cpu: &str| format!("[vm]\nmachine = \"arm-virt\"\n[virt]\ncpu = \"{cpu}\"\n");
+        for model in rusty_box_aarch64::CpuModel::ALL {
+            let file: FileConfig = toml::from_str(&board(model.name())).unwrap();
+            let resolved = resolve_config(file, &args(["rusty_box_gui"])).unwrap();
+            assert_eq!(resolved.arm_virt().map(|virt| virt.cpu), Some(model));
+        }
+        let refused = toml::from_str::<FileConfig>(&board("cortex-a53")).unwrap_err().to_string();
+        assert!(
+            refused.contains("\"cortex-a53\": no processor model has that name")
+                && refused.contains("\"cortex-a57\"")
+                && refused.contains("\"armv9.2\""),
+            "{refused}"
+        );
     }
 
     #[test]

@@ -50,7 +50,7 @@ impl Cpu {
     /// The system counter at the tick `icount`.
     #[inline]
     fn counter_at(&self, icount: u64) -> Count {
-        let value = u128::from(icount) * u128::from(self.counter_hz.get()) / u128::from(self.ips.get());
+        let value = u128::from(icount) * u128::from(self.imp.counter_hz.get()) / u128::from(self.ips.get());
         Count(u64::try_from(value).unwrap_or(u64::MAX))
     }
 
@@ -65,7 +65,7 @@ impl Cpu {
     /// reads `u64::MAX` as "never", and a deadline is never there.
     pub(super) fn tick_reaching(&self, count: Count) -> Option<VmInstant> {
         let needed = u128::from(count.0) * u128::from(self.ips.get());
-        let ticks = needed.div_ceil(u128::from(self.counter_hz.get()));
+        let ticks = needed.div_ceil(u128::from(self.imp.counter_hz.get()));
         u64::try_from(ticks).ok().filter(|&t| t != u64::MAX).map(VmInstant::from_ticks)
     }
 
@@ -127,15 +127,21 @@ impl Cpu {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cpu::features::Implementation;
     use crate::cpu::CpuConfig;
     use rusty_box_core::ClockHz;
 
     fn cpu(ips: u64, counter_hz: u64) -> Cpu {
-        Cpu::new(CpuConfig {
-            ips: ClockHz::new(ips).unwrap_or(ClockHz::BOCHS_DEFAULT),
-            counter_hz: ClockHz::new(counter_hz).unwrap_or(ClockHz::BOCHS_DEFAULT),
-            reset_pc: 0,
-        })
+        Cpu::implementing(
+            CpuConfig {
+                ips: ClockHz::new(ips).unwrap_or(ClockHz::BOCHS_DEFAULT),
+                reset_pc: 0,
+            },
+            Implementation {
+                counter_hz: ClockHz::new(counter_hz).unwrap_or(ClockHz::BOCHS_DEFAULT),
+                ..Implementation::CORTEX_A57
+            },
+        )
     }
 
     /// The deadline is the first tick at which the guest would read a count

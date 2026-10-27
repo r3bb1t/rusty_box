@@ -146,6 +146,7 @@ fn the_half_precision_complex_forms_need_fp16() {
     let imp = Implementation {
         features: Features::of(&[Feature::Base, Feature::Fp, Feature::AdvSimd, Feature::Fcma]),
         max_svl: VecLen::MIN,
+        ..Implementation::CORTEX_A57
     };
     let mut cpu = processor(imp);
     for insn in [FCMLA_4H, FCADD_8H, FCMLA_ELEM_4H, FCMLA_ELEM_8H] {

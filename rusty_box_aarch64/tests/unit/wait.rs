@@ -135,7 +135,7 @@ fn tick(t: u64) -> VmInstant {
 /// runs both at 1 MHz), so a count is its tick.
 fn cpu(imp: Implementation) -> Cpu {
     let cpu = processor(imp);
-    assert_eq!(cpu.ips, cpu.counter_hz);
+    assert_eq!(cpu.ips, cpu.imp.counter_hz);
     cpu
 }
 

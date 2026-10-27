@@ -546,8 +546,8 @@ fn the_permutes_need_a_vector_that_holds_their_elements() {
 fn the_decode_needs_a_longest_vector_that_holds_the_elements() {
     let short = |max_svl: VecLen| {
         processor(Implementation {
-            features: Features::of(&Feature::ALL),
             max_svl,
+            ..Implementation::EVERY_FEATURE
         })
     };
     let mut cpu = short(VecLen::MIN);
@@ -935,6 +935,7 @@ fn they_need_streaming_mode_and_sme2() {
     let mut cpu = processor(Implementation {
         features: Features::of(&features),
         max_svl: VecLen::MAX,
+        ..Implementation::EVERY_FEATURE
     });
     cpu.set_pstate_sm(true);
     for insn in all {

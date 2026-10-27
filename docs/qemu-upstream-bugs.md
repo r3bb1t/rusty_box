@@ -590,6 +590,44 @@ the other cases print what they did before.
 
 ---
 
+### 17. `-cpu max` calls itself a Cortex-A57 in the device tree
+
+**Impact**: harmless. The processor's device tree node says
+`compatible = "arm,cortex-a57"` while its `MIDR_EL1` says it is no Arm
+part. Linux's arm64 code identifies a processor by `MIDR_EL1`, not by the
+node's `compatible`, so no guest known to us acts on it; a guest or tool
+that reads the device tree to identify the processor is told it runs on a
+Cortex-A57 with none of the features `max` has.
+
+**Location**: `target/arm/tcg/cpu64.c`, `aarch64_max_tcg_initfn()`, which
+starts from `aarch64_a57_initfn()` (`target/arm/cpu64.c`, which sets
+`cpu->dtb_compatible = "arm,cortex-a57"`), resets `MIDR_EL1` and never
+resets the compatible; `hw/arm/virt.c`, `fdt_add_cpu_nodes()`, writes it.
+
+**What the references say**: QEMU's own comment on `max`'s MIDR: "Reset
+MIDR so the guest doesn't mistake our 'max' CPU type for a real one",
+with implementer 0, which the Arm ARM's `MIDR_EL1.Implementer` reserves
+for software use. Linux's binding,
+`Documentation/devicetree/bindings/arm/cpus.yaml`, lists
+`arm,armv8 # Only for s/w models` among the `compatible` values.
+
+**Reproduce**: `qemu-system-aarch64 -M virt,dumpdtb=max.dtb -cpu max -m
+256M -nographic`, then `dtc -I dtb max.dtb`: `compatible =
+"arm,cortex-a57";` in `/cpus/cpu@0`.
+
+QEMU master as of 2026-10-27 has the same: `aarch64_max_v8_tcg_initfn()`
+(`target/arm/tcg/cpu64.c`) starts from `aarch64_aa32_a57_init()`
+(`target/arm/cpu-max.c`), which sets `arm,cortex-a57`, and resets only
+the MIDR.
+
+**Fix**: `docs/qemu-max-dtb-compatible.patch` sets `arm,armv8` after the
+MIDR (in master, the same line in `aarch64_max_v8_tcg_initfn()`). Built
+and tested on `v11.1.2`: the dump has `compatible = "arm,armv8";`, and an
+Alpine 3.23 kernel (Linux 6.18) boots to `login:` on `-cpu max` as
+before.
+
+---
+
 ## Deliberate QEMU omissions
 
 Not bugs: QEMU's comments say these are chosen. Each is a possible

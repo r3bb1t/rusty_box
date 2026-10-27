@@ -133,6 +133,7 @@ fn sme_alone() -> Cpu {
     processor(Implementation {
         features: Features::of(&features),
         max_svl: VecLen::MAX,
+        ..Implementation::EVERY_FEATURE
     })
 }
 

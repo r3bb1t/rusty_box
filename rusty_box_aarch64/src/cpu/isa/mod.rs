@@ -2000,11 +2000,10 @@ mod tests {
             assert_eq!(carried.contains(&feature), feature.encodes(), "{feature:?}");
         }
 
-        for imp in [Implementation::CORTEX_A57, Implementation::EVERY_FEATURE] {
+        for imp in [Implementation::CORTEX_A57, Implementation::ARMV9P2, Implementation::EVERY_FEATURE] {
             let cpu = Cpu::implementing(
                 CpuConfig {
                     ips: rusty_box_core::ClockHz::BOCHS_DEFAULT,
-                    counter_hz: CpuConfig::QEMU_VIRT_COUNTER_HZ,
                     reset_pc: 0,
                 },
                 imp,
@@ -2020,6 +2019,7 @@ mod tests {
             let (isar0, isar1, isar2, isar3) = (read(6, 0), read(6, 1), read(6, 2), read(6, 3));
             let (mmfr0, mmfr1, mmfr2) = (read(7, 0), read(7, 1), read(7, 2));
             let dfr0 = read(5, 0);
+            assert_eq!(read(0, 0), imp.midr, "MIDR_EL1 is the implementation's");
             for feature in Feature::ALL {
                 let advertised = match feature {
                     Feature::Base => true,

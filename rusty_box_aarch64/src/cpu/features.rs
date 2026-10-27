@@ -14,6 +14,13 @@
 //! ID register field of each feature beyond them is read from the set
 //! (`sysreg.rs`); `isa::tests` checks, for every implementation built, that
 //! the ID registers and the set agree.
+//!
+//! A machine's processor is one of the [`CpuModel`]s, each an
+//! [`Implementation`]: a feature set, the processor's identity, and the
+//! IMPLEMENTATION DEFINED choices its features leave open.
+
+use super::id;
+use rusty_box_core::ClockHz;
 
 /// An architectural feature, by the Arm ARM's `FEAT_` name; the instruction
 /// set features are what an encoding belongs to.
@@ -402,6 +409,89 @@ impl Features {
         Feature::Crc32,
     ]);
 
+    /// What the Armv9.2 processor model implements: every feature Arm's
+    /// `Features.json` requires of an Armv9.2 processor that has FP and
+    /// Advanced SIMD and AArch64 at EL0 and EL1 alone (`v9Ap2 ==> (v9Ap1 &&
+    /// v8Ap7)` down the versions, with what a version requires of a
+    /// processor with FP or Advanced SIMD, such as `(v8Ap6 && FEAT_FP) ==>
+    /// FEAT_BF16`, and what those features imply); FEAT_SME and FEAT_SME2;
+    /// and these options: the Cryptographic Extension's AES, PMULL, SHA-1
+    /// and SHA-256, QARMA5 as the pointer authentication algorithm,
+    /// FEAT_FPAC and FEAT_FPACCOMBINE, FEAT_SSBS and FEAT_SSBS2, and
+    /// FEAT_RPRES. Not FEAT_SVE: Streaming SVE mode is its only SVE.
+    pub(crate) const ARMV9P2: Self = Self::of(&[
+        Feature::Base,
+        Feature::Fp,
+        Feature::AdvSimd,
+        // Required from Armv8.1
+        Feature::Crc32,
+        Feature::Lse,
+        Feature::Rdm,
+        Feature::Pan,
+        Feature::Lor,
+        Feature::Hpds,
+        Feature::Debugv8p1,
+        // Required from Armv8.2
+        Feature::Fp16,
+        Feature::Pan2,
+        Feature::Uao,
+        Feature::Dpb,
+        Feature::Ttcnp,
+        Feature::Ras,
+        Feature::Debugv8p2,
+        // Required from Armv8.3
+        Feature::Lrcpc,
+        Feature::Fcma,
+        Feature::Jscvt,
+        Feature::PAuth,
+        // Required from Armv8.4
+        Feature::Lse2,
+        Feature::Lrcpc2,
+        Feature::DotProd,
+        Feature::Fhm,
+        Feature::FlagM,
+        Feature::Dit,
+        Feature::Idst,
+        Feature::TlbiOs,
+        Feature::TlbiRange,
+        Feature::Ttl,
+        Feature::Debugv8p4,
+        Feature::RasV1p1,
+        Feature::RasSaV1p1,
+        // Required from Armv8.5
+        Feature::FlagM2,
+        Feature::Frintts,
+        Feature::Sb,
+        Feature::SpecRes,
+        Feature::Bti,
+        Feature::E0pd,
+        Feature::Csv2,
+        Feature::Csv3,
+        Feature::Dpb2,
+        // Required from Armv8.6
+        Feature::I8mm,
+        Feature::Bf16,
+        Feature::Ecv,
+        Feature::PAuth2,
+        // Required from Armv8.7
+        Feature::Pan3,
+        Feature::WfxT,
+        Feature::Xs,
+        Feature::Afp,
+        // Options
+        Feature::Sme,
+        Feature::Sme2,
+        Feature::Aes,
+        Feature::Sha1,
+        Feature::Sha256,
+        Feature::PacQarma5,
+        Feature::Fpac,
+        Feature::FpacCombine,
+        Feature::Ssbs,
+        Feature::Ssbs2,
+        Feature::Rpres,
+    ]);
+
     /// The set of `features`.
     pub(crate) const fn of(features: &[Feature]) -> Self {
         let mut bits = 0;
@@ -469,22 +559,42 @@ impl VecLen {
     }
 }
 
-/// What one processor implements, and the IMPLEMENTATION DEFINED choices
-/// the features it implements leave open.
+/// What one processor implements, what it calls itself, the IMPLEMENTATION
+/// DEFINED choices the features it implements leave open, and the system
+/// counter it runs with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Implementation {
     pub(crate) features: Features,
+    /// `MIDR_EL1`: who made the processor and which part it is.
+    pub(crate) midr: u64,
     /// `MaxImplementedSVL()`: the longest Streaming SVE vector length, which
     /// [`Feature::Sme`] reads and nothing else does.
     pub(crate) max_svl: VecLen,
+    /// The system counter's frequency: what `CNTPCT_EL0` counts at and
+    /// `CNTFRQ_EL0` reads at reset. The system's choice before Armv8.6,
+    /// [`ARMV8P6_COUNTER_HZ`] from it.
+    pub(crate) counter_hz: ClockHz,
 }
 
 impl Implementation {
-    /// The Cortex-A57 shape: [`Features::CORTEX_A57`], with no streaming
-    /// vector length to choose.
+    /// The Cortex-A57 shape: [`Features::CORTEX_A57`] and the Cortex-A57's
+    /// `MIDR_EL1`, with no streaming vector length to choose, and QEMU's
+    /// counter for it.
     pub(crate) const CORTEX_A57: Self = Self {
         features: Features::CORTEX_A57,
+        midr: id::MIDR_CORTEX_A57,
         max_svl: VecLen::MIN,
+        counter_hz: QEMU_BACKCOMPAT_COUNTER_HZ,
+    };
+
+    /// The Armv9.2 processor model: [`Features::ARMV9P2`], a software
+    /// model's `MIDR_EL1`, Streaming SVE vectors of up to 512 bits, and the
+    /// counter Armv8.6 and later require.
+    pub(crate) const ARMV9P2: Self = Self {
+        features: Features::ARMV9P2,
+        midr: id::MIDR_SOFTWARE_MODEL,
+        max_svl: VecLen(512),
+        counter_hz: ARMV8P6_COUNTER_HZ,
     };
 
     #[inline(always)]
@@ -493,34 +603,156 @@ impl Implementation {
     }
 }
 
-/// What the tests of a feature run on while no processor model implements
-/// it.
+/// What the tests of a feature run on, whichever processor models
+/// implement it.
 #[cfg(test)]
 impl Implementation {
-    /// Every feature, with Streaming SVE vectors of up to 512 bits. It is
-    /// no processor Arm permits while the rest of Armv9.2, which FEAT_SME
-    /// requires (`Features.json`: FEAT_SME implies Armv9.2), is still being
-    /// added; each feature's tests exercise that feature's own rules.
+    /// The Armv9.2 model with every feature the decoder knows, which is
+    /// today the model's own set: a feature's tests run on it before any
+    /// model implements the feature, and each exercises that feature's own
+    /// rules.
     pub(crate) const EVERY_FEATURE: Self = Self {
         features: Features::of(&Feature::ALL),
-        max_svl: VecLen(512),
+        ..Self::ARMV9P2
     };
 }
+
+/// The system counter frequency QEMU gives the processor types it had
+/// before it standardized on 1 GHz, the Cortex-A57 among them
+/// (`GTIMER_BACKCOMPAT_HZ`, a 16 ns tick).
+pub const QEMU_BACKCOMPAT_COUNTER_HZ: ClockHz = match ClockHz::new(62_500_000) {
+    Some(hz) => hz,
+    None => panic!("62.5 MHz is a rate"),
+};
+
+/// The system counter frequency of Armv8.6 and later, which fix it at 1 GHz
+/// (Arm ARM, "The system counter"; QEMU `GTIMER_DEFAULT_HZ`).
+pub const ARMV8P6_COUNTER_HZ: ClockHz = match ClockHz::new(1_000_000_000) {
+    Some(hz) => hz,
+    None => panic!("1 GHz is a rate"),
+};
+
+/// A processor a machine can be built with.
+///
+/// Closed (R5): each variant is one processor, its features, identity and
+/// IMPLEMENTATION DEFINED choices, and the system counter a board pairs it
+/// with. The discriminant is the model's number in a snapshot, so a model
+/// is only ever added last.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[repr(u8)]
+pub enum CpuModel {
+    /// A Cortex-A57 r1p0 as QEMU's `cortex-a57` is one: Armv8.0 with FP,
+    /// Advanced SIMD, the Cryptographic Extension and CRC32, cut down to
+    /// AArch64 at EL0 and EL1, with a 62.5 MHz system counter.
+    #[default]
+    CortexA57,
+    /// An Armv9.2 processor with FEAT_SME and FEAT_SME2 and no FEAT_SVE:
+    /// AArch64 at EL0 and EL1, every feature Armv9.2 requires of it, the
+    /// options listed for its feature set, and Streaming SVE vectors of up
+    /// to 512 bits. It reports itself as a software model (`MIDR_EL1`
+    /// implementer 0), as no Arm part has its features, and runs with a
+    /// 1 GHz system counter, as Armv8.6 and later require.
+    Armv9p2,
+}
+
+impl CpuModel {
+    /// Every model, each at the index of its discriminant (checked below,
+    /// and in `each_model_is_named_and_identified`, whose exhaustive match
+    /// does not compile once the enum gains a model until it is listed).
+    pub const ALL: [CpuModel; 2] = [Self::CortexA57, Self::Armv9p2];
+
+    /// The model's name for a command line or a configuration file, which
+    /// [`str::parse`] reads back.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::CortexA57 => "cortex-a57",
+            Self::Armv9p2 => "armv9.2",
+        }
+    }
+
+    /// The frequency of the system counter a board pairs with this
+    /// processor: what `CNTPCT_EL0` counts at and `CNTFRQ_EL0` reads at
+    /// reset. QEMU runs the Cortex-A57's at [`QEMU_BACKCOMPAT_COUNTER_HZ`]
+    /// (`ARM_FEATURE_BACKCOMPAT_CNTFRQ`); the Armv9.2 model's is
+    /// [`ARMV8P6_COUNTER_HZ`].
+    pub const fn counter_hz(self) -> ClockHz {
+        self.implementation().counter_hz
+    }
+
+    /// The number a snapshot records the model by: its discriminant.
+    pub(crate) const fn tag(self) -> u8 {
+        self as u8
+    }
+
+    pub(crate) const fn implementation(self) -> Implementation {
+        match self {
+            Self::CortexA57 => Implementation::CORTEX_A57,
+            Self::Armv9p2 => Implementation::ARMV9P2,
+        }
+    }
+
+    /// The `compatible` of the processor's device tree node (Linux
+    /// `Documentation/devicetree/bindings/arm/cpus.yaml`): the part's own,
+    /// or `arm,armv8`, which the binding gives software models.
+    pub(crate) const fn compatible(self) -> &'static str {
+        match self {
+            Self::CortexA57 => "arm,cortex-a57",
+            Self::Armv9p2 => "arm,armv8",
+        }
+    }
+}
+
+const _: () = {
+    let mut i = 0;
+    while i < CpuModel::ALL.len() {
+        assert!(CpuModel::ALL[i] as usize == i, "CpuModel::ALL lists each model at its discriminant");
+        i += 1;
+    }
+};
+
+impl core::str::FromStr for CpuModel {
+    type Err = UnknownCpuModel;
+
+    /// The model whose [`CpuModel::name`] is `name`.
+    fn from_str(name: &str) -> Result<Self, UnknownCpuModel> {
+        Self::ALL.into_iter().find(|model| model.name() == name).ok_or(UnknownCpuModel)
+    }
+}
+
+/// A name no [`CpuModel`] has. It prints the names there are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct UnknownCpuModel;
+
+impl core::fmt::Display for UnknownCpuModel {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("no processor model has that name; the models are")?;
+        for (i, model) in CpuModel::ALL.iter().enumerate() {
+            let separator = if i == 0 { " " } else { ", " };
+            write!(f, "{separator}\"{}\"", model.name())?;
+        }
+        Ok(())
+    }
+}
+
+impl core::error::Error for UnknownCpuModel {}
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// A feature still being built is in no processor this crate builds:
-    /// only the tests' own implementation has it. Every implementation has
-    /// the Cortex-A57's features, which `id`'s constants report.
+    /// A feature still being built is in no processor model: only the
+    /// tests' own implementation has it. Every implementation has the
+    /// Cortex-A57's features, which `id`'s constants report.
     #[test]
     fn the_processors_built_implement_only_complete_features() {
         for feature in Feature::ALL {
-            assert!(
-                feature.complete() || !Implementation::CORTEX_A57.has(feature),
-                "{feature:?} is incomplete"
-            );
+            for model in CpuModel::ALL {
+                let imp = model.implementation();
+                assert!(feature.complete() || !imp.has(feature), "{model:?}: {feature:?} is incomplete");
+                if Implementation::CORTEX_A57.has(feature) {
+                    assert!(imp.has(feature), "{model:?}: {feature:?}");
+                }
+            }
             if Implementation::CORTEX_A57.has(feature) {
                 assert!(Implementation::EVERY_FEATURE.has(feature), "{feature:?}");
             }
@@ -534,9 +766,51 @@ mod tests {
     /// `FEAT_PACIMP` advertises no pointer authentication).
     #[test]
     fn a_processor_with_pauth_computes_with_qarma5() {
-        for imp in [Implementation::CORTEX_A57, Implementation::EVERY_FEATURE] {
+        let models = CpuModel::ALL.map(CpuModel::implementation);
+        for imp in models.into_iter().chain([Implementation::EVERY_FEATURE]) {
             assert!(!imp.has(Feature::PAuth) || imp.has(Feature::PacQarma5), "{imp:?}");
         }
+    }
+
+    /// Each model has a name of its own, which names it back; its
+    /// identity, counter and device tree `compatible` are its part's, or a
+    /// software model's: the Cortex-A57 is Arm's part 0xD07 with QEMU's
+    /// 62.5 MHz counter, the Armv9.2 model implementer 0 with Armv8.6's
+    /// 1 GHz.
+    #[test]
+    fn each_model_is_named_and_identified() {
+        let mut listed = 0;
+        for model in CpuModel::ALL {
+            // Exhaustive: a model the enum gains fails to compile here
+            // until `ALL` lists it and this counts it.
+            listed += match model {
+                CpuModel::CortexA57 | CpuModel::Armv9p2 => 1,
+            };
+            assert_eq!(model.name().parse::<CpuModel>(), Ok(model));
+            assert_eq!(CpuModel::ALL.iter().filter(|m| m.tag() == model.tag()).count(), 1, "{model:?}");
+        }
+        assert_eq!(listed, 2);
+        assert_eq!("cortex-a53".parse::<CpuModel>(), Err(UnknownCpuModel));
+        assert_eq!(
+            std::format!("{UnknownCpuModel}"),
+            "no processor model has that name; the models are \"cortex-a57\", \"armv9.2\""
+        );
+        assert_eq!(CpuModel::default(), CpuModel::CortexA57);
+
+        let a57 = CpuModel::CortexA57;
+        assert_eq!(a57.implementation(), Implementation::CORTEX_A57);
+        assert_eq!((a57.implementation().midr >> 24, (a57.implementation().midr >> 4) & 0xFFF), (0x41, 0xD07));
+        assert_eq!(a57.counter_hz().get(), 62_500_000);
+        assert_eq!(a57.compatible(), "arm,cortex-a57");
+
+        let v92 = CpuModel::Armv9p2;
+        assert_eq!(v92.implementation(), Implementation::ARMV9P2);
+        let midr = v92.implementation().midr;
+        assert_eq!((midr >> 24, (midr >> 16) & 0xF), (0, 0xF), "software use, features in the ID registers");
+        assert_ne!((midr >> 4) & 0xFFF, u64::from(b'Q'), "not QEMU's `max`");
+        assert_eq!(v92.counter_hz().get(), 1_000_000_000);
+        assert_eq!(v92.compatible(), "arm,armv8");
+        assert!(v92.implementation().has(Feature::Sme2) && v92.implementation().max_svl == VecLen(512));
     }
 
     /// `ImplementedSMEVectorLength`: `LEN` asks for `(LEN + 1) * 128`

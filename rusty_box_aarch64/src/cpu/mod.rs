@@ -67,6 +67,7 @@ use rusty_box_core::{ClockHz, RingBuffer, VmClock, VmInstant};
 
 pub use exception::ExceptionClass;
 pub use exec::{DebugStops, Step, StopCause, UndefinedInsn};
+pub use features::{CpuModel, UnknownCpuModel, ARMV8P6_COUNTER_HZ, QEMU_BACKCOMPAT_COUNTER_HZ};
 pub use mmu::{Tlb, TranslationFault};
 pub use regs::{CpuState, Reg, SysReg, SysRegRefusal, VReg};
 pub use timer::TimerLines;
@@ -302,26 +303,15 @@ impl Pstate {
     }
 }
 
-/// Construction parameters for a processor.
+/// Construction parameters for a processor, beyond its model, which sets
+/// the system counter's frequency ([`CpuModel::counter_hz`]).
 #[derive(Debug, Clone, Copy)]
 pub struct CpuConfig {
     /// Emulated instructions per second: the rate of the tick count, and so
     /// of every clock derived from it (Bochs `cpu: ips`).
     pub ips: ClockHz,
-    /// The system counter's frequency, which is what `CNTPCT_EL0` counts at
-    /// and what `CNTFRQ_EL0` reads at reset. QEMU's `virt` (machine types
-    /// before 9.0) runs it at 62.5 MHz.
-    pub counter_hz: ClockHz,
     /// The address execution starts at.
     pub reset_pc: u64,
-}
-
-impl CpuConfig {
-    /// QEMU's `virt` system counter frequency (`GTIMER_SCALE` 16 ns).
-    pub const QEMU_VIRT_COUNTER_HZ: ClockHz = match ClockHz::new(62_500_000) {
-        Some(hz) => hz,
-        None => ClockHz::BOCHS_DEFAULT,
-    };
 }
 
 /// What the processor is doing between instructions.
@@ -480,7 +470,6 @@ pub struct Cpu {
     /// the machine was built — `icount` without the waiting.
     pub(crate) retired: u64,
     pub(crate) ips: ClockHz,
-    pub(crate) counter_hz: ClockHz,
     /// Set when a register write may have changed a timer's output line or
     /// next deadline; the machine re-evaluates and clears it.
     pub(crate) timer_dirty: bool,
@@ -493,10 +482,9 @@ pub struct Cpu {
 }
 
 impl Cpu {
-    /// A processor in its reset state, shaped like the Cortex-A57
-    /// ([`id`]).
-    pub fn new(config: CpuConfig) -> Self {
-        Self::implementing(config, features::Implementation::CORTEX_A57)
+    /// A processor of `model` in its reset state.
+    pub fn new(model: CpuModel, config: CpuConfig) -> Self {
+        Self::implementing(config, model.implementation())
     }
 
     /// A processor implementing `imp`, in its reset state.
@@ -514,7 +502,7 @@ impl Cpu {
             scalable: sme::ScalableRegs::ZERO,
             pac_keys: pauth::PacKeys::ZERO,
             imp,
-            sys: SysRegs::reset(config.counter_hz),
+            sys: SysRegs::reset(imp.counter_hz),
             monitor: ExclusiveMonitor {
                 armed: false,
                 addr: 0,
@@ -527,7 +515,6 @@ impl Cpu {
             icount: 0,
             retired: 0,
             ips: config.ips,
-            counter_hz: config.counter_hz,
             timer_dirty: true,
             irq_line: false,
             fiq_line: false,

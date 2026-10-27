@@ -1315,6 +1315,7 @@ fn the_sve2p1_instructions_need_streaming_mode_and_sme2() {
     let mut cpu = processor(Implementation {
         features: Features::of(&features),
         max_svl: VecLen::MAX,
+        ..Implementation::EVERY_FEATURE
     });
     cpu.set_pstate_sm(true);
     for insn in all {

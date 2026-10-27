@@ -24,7 +24,8 @@ cargo run --release -p rusty_box_aarch64 --example linux_virt --features std -- 
     --type 'uname -a\r' --until '# '
 ```
 
-(`apt install qemu-efi-aarch64` provides the firmware.)
+(`apt install qemu-efi-aarch64` provides the firmware.) Both run a
+Cortex-A57 unless `--cpu armv9.2` asks for the Armv9.2 processor with SME2.
 
 ## Driving it from Rust
 
@@ -107,18 +108,18 @@ vocabulary are `rusty_box_core`'s, shared with the x86 machine.
 
 | Part | Model |
 |---|---|
-| Processor | Cortex-A57-shaped ARMv8.0: EL0/EL1 AArch64 only, the whole ARMv8.0 FP and Advanced SIMD instruction set (integer and floating point, vector and scalar, saturation setting FPSR.QC), the Cortex-A57's optional Cryptographic Extension (AES, 64-bit PMULL, SHA-1, SHA-256) and CRC32, as QEMU's `cortex-a57` has them, 4 KiB-granule stage-1 MMU with TLB, exclusives, PSCI over `HVC` as QEMU provides it |
+| Processor | One of two models (`VirtConfig::cpu`, `CpuModel`). `cortex-a57`, the default: Cortex-A57-shaped ARMv8.0, the whole ARMv8.0 FP and Advanced SIMD instruction set (integer and floating point, vector and scalar, saturation setting FPSR.QC), the Cortex-A57's optional Cryptographic Extension (AES, 64-bit PMULL, SHA-1, SHA-256) and CRC32, as QEMU's `cortex-a57` has them, with QEMU's 62.5 MHz system counter. `armv9.2`: an Armv9.2 processor with SME and SME2 and no SVE (the features below), Streaming SVE vectors of 128 to 512 bits, `MIDR_EL1` 0x000F_0520 (implementer 0, a software model) and the 1 GHz counter Armv8.6 and later require. Both: EL0/EL1 AArch64 only, the Cortex-A57's caches as `CTR_EL0`, `CLIDR_EL1` and `CCSIDR_EL1` report them, 4 KiB-granule stage-1 MMU with TLB, exclusives, PSCI over `HVC` as QEMU provides it |
 | Interrupts | GICv2 (no Security Extensions) + GICv2m frame |
 | Timers | EL1 physical and virtual generic timers |
 | Devices | PL011 UART (QEMU's 16-entry receive FIFO and loopback), PL031 RTC, PL061 GPIO with QEMU's `gpio-key` power button on line 3, CFI flash ×2 (QEMU `pflash_cfi01` semantics, whole 64 MiB banks decoded), `fw_cfg` (traditional interface, no files), 32 virtio-mmio transports (QEMU's legacy layout while empty; non-legacy, as QEMU's `force-legacy=false`, once the host plugs in QEMU's 2D `virtio-gpu-device` with its EDID, `virtio-keyboard-device`, `virtio-tablet-device` or `virtio-blk-device` over a raw image in memory or a host file, which take the highest free ones), an empty PCIe ECAM/windows |
-| Board | QEMU `virt` memory map and IRQ wiring; QEMU 11.1.2's device tree in `assets/` (two QEMU bugs fixed, see "Where the references differ"), its memory node and `/chosen` set per machine |
+| Board | QEMU `virt` memory map and IRQ wiring; QEMU 11.1.2's device tree in `assets/` (two QEMU bugs fixed, see "Where the references differ"), its memory node and `/chosen` set per machine, and its processor's `compatible` to the model's, where libfdt's `fdt_setprop` puts them, so a kernel boot's tree is QEMU's property for property; a host's own tree gets the memory node and `/chosen`, as QEMU's `-dtb` does |
 | Boot | UEFI firmware from flash; or a Linux `Image`, initramfs and device tree placed as QEMU's `hw/arm/boot.c` places them, entered with the register state its boot stub leaves |
 
 Provenance: instruction semantics follow the Arm ARM pseudocode; every device
 cites the QEMU source file and symbols it was ported from.
 
-Beyond the Cortex-A57, the core implements the features of an Armv9.2
-processor as they are built: FEAT_LSE (the atomic memory operations, SWP,
+Beyond the Cortex-A57, the Armv9.2 model implements the features of an
+Armv9.2 processor: FEAT_LSE (the atomic memory operations, SWP,
 CAS, CASP), FEAT_LSE2's alignment rules, FEAT_LRCPC (LDAPR) and FEAT_LRCPC2
 (LDAPUR, STLUR), FEAT_RDM (SQRDMLAH, SQRDMLSH), FEAT_DotProd (SDOT, UDOT)
 and FEAT_I8MM (USDOT, SUDOT, SMMLA, USMMLA, UMMLA), each in its Advanced
@@ -199,9 +200,14 @@ the SVE2.1 instructions it makes legal (SDOT and UDOT of halfword pairs,
 SQRSHRN, SQRSHRUN, UQRSHRN, SQCVTN, SQCVTUN and UQCVTN of two vectors,
 FCLAMP, FDOT of half-precision pairs, and BFMLSLB and BFMLSLT), 17
 encodings).
-No processor a machine runs has them
-yet: the tests run them on a test-only processor with every feature, whose
-ID registers advertise each one.
+Its feature set is one Arm permits: every feature Arm's `Features.json`
+requires of an Armv9.2 processor with FP and Advanced SIMD and AArch64 at
+EL0 and EL1 alone, with SME, SME2 and the options listed above, and
+`tests/unit/spec.rs` holds it to every constraint of `Features.json` that
+its identifiers decide (1,306 of 1,694), as it holds the Cortex-A57's
+(1,337). Linux 6.18 finds every one of these features in its ID registers,
+its SME vector lengths from 16 to 64 bytes, and the 1 GHz counter, and
+boots Alpine to a shell on it.
 
 ## Verification
 
@@ -542,7 +548,13 @@ integration tests of the public API.
   allocates none: 0 disagreements, about 15 s on four threads. The one
   departure is PRFM (register) with `Rt = 11xxx`, which Arm's data gives to
   RPRFM (FEAT_RPRFM) and which on a core without the feature is a PRFM with
-  a reserved prfop. AARCHMRS is Arm's, under the BSD 3-clause licence, and
+  a reserved prfop. Against `Features.json`, each processor model's
+  feature set holds what Arm makes each of its features imply, and every
+  constraint whose identifiers decide it holds when the model's features,
+  its architecture version and those it includes, and the structural
+  features every processor here has (AArch64 at EL0 and EL1, a PIPT
+  instruction cache, the Cryptographic Extension) hold and nothing else
+  does. AARCHMRS is Arm's, under the BSD 3-clause licence, and
   is not in this repository: set `RUSTY_BOX_AARCHMRS` to the unpacked
   package when building the tests (`build.rs` then enables them; without it
   they are ignored), and `cargo test --release -p rusty_box_aarch64 --lib --
@@ -692,6 +704,22 @@ choice is listed here with its evidence.
   writes phandle 0 when it makes no L2 node): [docs/qemu-upstream-bugs.md](../docs/qemu-upstream-bugs.md)
   has both patches. `src/boot.rs` checks the device tree against
   `CCSIDR_EL1`.
+- **The Armv9.2 model is a software model in its device tree too.** Its
+  `MIDR_EL1` names implementer 0, reserved for software use, as QEMU's
+  `max` does (`aarch64_max_tcg_initfn`), with part 0x052 where QEMU's is
+  `'Q'`; and its processor node's `compatible` is `arm,armv8`, which Linux's
+  binding (`Documentation/devicetree/bindings/arm/cpus.yaml`) gives software
+  models. QEMU's `max` keeps the `arm,cortex-a57` of the Cortex-A57 it is
+  built from in its device tree ([docs/qemu-upstream-bugs.md](../docs/qemu-upstream-bugs.md)
+  entry 17). The model is not QEMU's `max`: that one is every feature QEMU
+  has, SVE and Armv9.6's among them, and changes with each release.
+- **A device tree nested deeper than a guest reads is refused.** The
+  editor that sets the memory node and `/chosen` walks the tree with a
+  stack frame per level, so it refuses a tree with a node more than 62
+  levels below the root (`DeviceTreeError::TooDeep`), where QEMU would hand
+  it to the guest. Linux's `unflatten_dt_nodes` skips every such node
+  (`FDT_MAX_DEPTH`), so no guest reads one; QEMU's own tree goes five
+  levels down (`cpus/cpu-map/socket0/cluster0/core0`).
 - **A PL011 in loopback overruns as the PL011 does.** With `UARTCR.LBE`
   set, a character written while the receive FIFO is full is lost, the
   FIFO keeps what it holds, and the overrun is flagged (`UARTRSR.OE`,
@@ -828,11 +856,14 @@ choice is listed here with its evidence.
 ## Not implemented
 
 - EL2, EL3, AArch32, and on the Cortex-A57 every post-v8.0 feature (LSE
-  atomics, PAuth, SVE, …): absent from its ID registers, so UNDEFINED, as
+  atomics, PAuth, SME, …): absent from its ID registers, so UNDEFINED, as
   on a real ARMv8.0 core (the PAuth hints, NOPs). With no EL2 or EL3,
   nothing traps a key or a pointer authentication instruction, and the
-  keys reset to zero, as QEMU's do, where Arm leaves them UNKNOWN. The later features the core implements (see
-  "What is modelled") are in no processor a machine runs yet.
+  keys reset to zero, as QEMU's do, where Arm leaves them UNKNOWN.
+- FEAT_SVE, and the SVE2.1 and later features (FEAT_SVE2p1, FEAT_SME2p1,
+  FEAT_SME_FA64, …), on the Armv9.2 model: none is an Armv9.2
+  requirement, and the SVE instructions it has are the ones FEAT_SME makes
+  legal in Streaming SVE mode.
 - SHA-512, SHA-3, SM3 and SM4 (Armv8.2 options) on any processor: every
   QEMU CPU model that has them also has features the core does not
   implement yet (SVE), so no model to take their ID values from matches

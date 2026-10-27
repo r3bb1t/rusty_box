@@ -37,11 +37,11 @@ use rusty_box_core::input::pointer::{PointerButton, PointerInput, PointerPos, Wh
 use rusty_box_devices::display::sink::{DisplaySink, Refreshed};
 #[cfg(feature = "alloc")]
 use rusty_box_devices::display::Resolution;
-use crate::boot::fdt::{self, Edit, Value};
+use crate::boot::fdt::{self, Edit, NodePath, Value};
 use crate::boot::{self, DeviceTreeError, KernelLayout, LinuxImage, PlacementError, DEVICE_TREE_CAPACITY};
 use crate::bus::{le_value, AccessWidth, BusFault, PhysAddr, PhysBus};
 use crate::cpu::{
-    Activity, Cpu, CpuConfig, CpuState, DebugStops, Pstate, Reg, Step, StopCause, SysReg, SysRegRefusal,
+    Activity, Cpu, CpuConfig, CpuModel, CpuState, DebugStops, Pstate, Reg, Step, StopCause, SysReg, SysRegRefusal,
     TranslationFault, UndefinedInsn, VReg,
 };
 use crate::devices::pl011::TX_CAPACITY;
@@ -71,8 +71,9 @@ pub struct VirtConfig {
     /// Emulated instructions per second: the rate of the tick count, and so
     /// of every clock the guest can read.
     pub ips: ClockHz,
-    /// The generic timer's system counter frequency.
-    pub counter_hz: ClockHz,
+    /// The processor, which sets the system counter's frequency too
+    /// ([`CpuModel::counter_hz`]).
+    pub cpu: CpuModel,
     /// What the RTC reads at emulated time zero, in seconds since the Unix
     /// epoch.
     pub rtc_epoch_seconds: u64,
@@ -87,7 +88,7 @@ impl VirtConfig {
 
     pub const DEFAULT: Self = Self {
         ips: ClockHz::BOCHS_DEFAULT,
-        counter_hz: CpuConfig::QEMU_VIRT_COUNTER_HZ,
+        cpu: CpuModel::CortexA57,
         rtc_epoch_seconds: Self::DEFAULT_RTC_EPOCH,
         debug_stops: DebugStops {
             on_undefined: false,
@@ -241,10 +242,24 @@ pub struct Bare;
 pub struct MachineBuilder<'i, B = NoBoot, I = NoInstrumentation> {
     config: VirtConfig,
     ram: RamSize,
-    device_tree: &'i [u8],
+    device_tree: TreeSource<'i>,
     boot: B,
     observer: I,
     plugs: Plugs,
+}
+
+/// Where a machine's device tree comes from.
+///
+/// Closed (R5): the board's own, or one the host gives.
+#[derive(Debug, Clone, Copy)]
+enum TreeSource<'i> {
+    /// QEMU's for this board ([`boot::QEMU_VIRT_DEVICE_TREE`]), its
+    /// processor node made the processor's, as QEMU's `virt` writes the node
+    /// from the processor it is given (`fdt_add_cpu_nodes`).
+    Board,
+    /// The host's, which describes the processor as the host wrote it, as
+    /// QEMU takes a `-dtb` tree.
+    Host(&'i [u8]),
 }
 
 impl<'i> MachineBuilder<'i, NoBoot, NoInstrumentation> {
@@ -254,7 +269,7 @@ impl<'i> MachineBuilder<'i, NoBoot, NoInstrumentation> {
         Self {
             config,
             ram: RamSize::DEFAULT,
-            device_tree: boot::QEMU_VIRT_DEVICE_TREE,
+            device_tree: TreeSource::Board,
             boot: NoBoot,
             observer: NoInstrumentation,
             plugs: Plugs::NONE,
@@ -272,9 +287,10 @@ impl<'i, B, I> MachineBuilder<'i, B, I> {
 
     /// Describe the board with this device tree instead of QEMU's. Its
     /// memory node, and for a kernel its `/chosen` node, are set as the
-    /// machine requires.
+    /// machine requires, as QEMU sets them in a `-dtb` tree
+    /// (`arm_load_dtb`); its processor node stays as given.
     pub fn device_tree(mut self, tree: &'i [u8]) -> Self {
-        self.device_tree = tree;
+        self.device_tree = TreeSource::Host(tree);
         self
     }
 
@@ -441,7 +457,7 @@ macro_rules! build_methods {
             /// [`BuildError`] when an image does not fit where it has to go.
             pub fn build(self) -> Result<VirtMachine<OwnedStorage, I>, BuildError> {
                 let choice = ($choice)(self.boot);
-                let plan = plan(self.device_tree, choice, self.ram)?;
+                let plan = plan(self.device_tree, choice, self.ram, self.config.cpu)?;
                 let storage = owned_storage(self.ram, choice)?;
                 Ok(assemble(self.config, plan, storage, self.observer, self.plugs))
             }
@@ -460,7 +476,7 @@ macro_rules! build_methods {
                 'i: 'm,
             {
                 let choice = ($choice)(self.boot);
-                let plan = plan(self.device_tree, choice, self.ram)?;
+                let plan = plan(self.device_tree, choice, self.ram, self.config.cpu)?;
                 let storage = lent_storage(self.ram, choice, loan)?;
                 Ok(assemble(self.config, plan, storage, self.observer, self.plugs))
             }
@@ -557,9 +573,24 @@ impl DeviceTree {
     }
 }
 
-/// Edit `source` to describe a machine with `ram_len` bytes of RAM booting
-/// `choice`, into `out`.
-fn describe(source: &[u8], ram_len: u64, choice: BootChoice<'_>, layout: Option<KernelLayout>, out: &mut DeviceTree) -> Result<(), DeviceTreeError> {
+/// Edit the tree `source` names to describe a machine with `ram_len` bytes
+/// of RAM and a `cpu` processor, booting `choice`, into `out`, in the
+/// order QEMU sets each (`arm_load_dtb`): the memory node, then
+/// `/chosen`'s command line and initrd. The board's own tree gets the
+/// processor's `compatible` first, as QEMU's `virt` writes the processor
+/// node from the processor it is given (`fdt_add_cpu_nodes`), which in QEMU's
+/// tree for the Cortex-A57 is the value it has.
+fn describe(
+    source: TreeSource<'_>,
+    ram_len: u64,
+    cpu: CpuModel,
+    choice: BootChoice<'_>,
+    layout: Option<KernelLayout>,
+    out: &mut DeviceTree,
+) -> Result<(), DeviceTreeError> {
+    const PROCESSOR: NodePath<'static> = NodePath::of("cpus/cpu@0");
+    const MEMORY: NodePath<'static> = NodePath::of("memory@40000000");
+    const CHOSEN: NodePath<'static> = NodePath::of("chosen");
     let mut reg = [0u8; 16];
     reg[..8].copy_from_slice(&RAM_BASE.to_be_bytes());
     reg[8..].copy_from_slice(&ram_len.to_be_bytes());
@@ -571,20 +602,29 @@ fn describe(source: &[u8], ram_len: u64, choice: BootChoice<'_>, layout: Option<
         (BootChoice::Kernel(_), None) | (BootChoice::Firmware(_) | BootChoice::Bare, _) => None,
     };
     let mut edits = [Edit {
-        node: "memory@40000000",
+        node: PROCESSOR,
+        property: "compatible",
+        value: Value::String(cpu.compatible()),
+    }; 6];
+    let (tree, mut count) = match source {
+        TreeSource::Board => (boot::QEMU_VIRT_DEVICE_TREE, 1),
+        TreeSource::Host(tree) => (tree, 0),
+    };
+    edits[count] = Edit {
+        node: MEMORY,
         property: "device_type",
         value: Value::String("memory"),
-    }; 5];
-    edits[1] = Edit {
-        node: "memory@40000000",
+    };
+    edits[count + 1] = Edit {
+        node: MEMORY,
         property: "reg",
         value: Value::Bytes(&reg),
     };
-    let mut count = 2;
+    count += 2;
     if let BootChoice::Kernel(k) = choice {
         if !k.command_line.is_empty() {
             edits[count] = Edit {
-                node: "chosen",
+                node: CHOSEN,
                 property: "bootargs",
                 value: Value::String(k.command_line),
             };
@@ -593,18 +633,18 @@ fn describe(source: &[u8], ram_len: u64, choice: BootChoice<'_>, layout: Option<
     }
     if let Some((start, end)) = &initrd {
         edits[count] = Edit {
-            node: "chosen",
+            node: CHOSEN,
             property: "linux,initrd-start",
             value: Value::Bytes(start),
         };
         edits[count + 1] = Edit {
-            node: "chosen",
+            node: CHOSEN,
             property: "linux,initrd-end",
             value: Value::Bytes(end),
         };
         count += 2;
     }
-    out.len = fdt::rebuild(source, &edits[..count], &mut out.bytes)?;
+    out.len = fdt::rebuild(tree, &edits[..count], &mut out.bytes)?;
     Ok(())
 }
 
@@ -618,7 +658,7 @@ struct Plan {
 /// Place the boot's images in `ram` and describe the machine, refusing what
 /// does not fit. Nothing is allocated or written yet, so a refusal leaves a
 /// caller's loan untouched.
-fn plan(source_tree: &[u8], choice: BootChoice<'_>, ram: RamSize) -> Result<Plan, BuildError> {
+fn plan(source_tree: TreeSource<'_>, choice: BootChoice<'_>, ram: RamSize, cpu: CpuModel) -> Result<Plan, BuildError> {
     let ram_len = ram.get();
     let boot = match choice {
         BootChoice::Firmware(_) => BootRecord::Firmware,
@@ -633,7 +673,7 @@ fn plan(source_tree: &[u8], choice: BootChoice<'_>, ram: RamSize) -> Result<Plan
         BootRecord::Firmware | BootRecord::Bare => None,
     };
     if !matches!(boot, BootRecord::Bare) {
-        describe(source_tree, ram_len, choice, layout, &mut device_tree)?;
+        describe(source_tree, ram_len, cpu, choice, layout, &mut device_tree)?;
         let tree_len = device_tree.len as u64;
         match layout {
             Some(layout) => layout.fit_device_tree(ram_len, tree_len)?,
@@ -647,11 +687,13 @@ fn plan(source_tree: &[u8], choice: BootChoice<'_>, ram: RamSize) -> Result<Plan
 /// The machine `plan` describes, in `storage`, started.
 fn assemble<S: GuestStorage, I: Instrumentation>(config: VirtConfig, plan: Plan, storage: S, observer: I, plugs: Plugs) -> VirtMachine<S, I> {
     let Plan { boot, device_tree } = plan;
-    let mut cpu = Cpu::new(CpuConfig {
-        ips: config.ips,
-        counter_hz: config.counter_hz,
-        reset_pc: FLASH0_BASE,
-    });
+    let mut cpu = Cpu::new(
+        config.cpu,
+        CpuConfig {
+            ips: config.ips,
+            reset_pc: FLASH0_BASE,
+        },
+    );
     cpu.set_debug_stops(config.debug_stops);
     let devices = plugs.devices;
     let mut machine = VirtMachine {
@@ -1459,7 +1501,7 @@ impl<S: GuestStorage, I: Instrumentation> VirtMachine<S, I> {
             kernel_hash: fnv1a(images.kernel),
             initrd_hash: fnv1a(images.initrd),
             ips: self.config.ips.get(),
-            counter_hz: self.config.counter_hz.get(),
+            cpu: self.config.cpu.tag(),
             boot: self.boot.tag(),
             kernel_offset,
             initrd_offset,
@@ -1590,7 +1632,7 @@ impl<S: GuestStorage, I: Instrumentation> VirtMachine<S, I> {
 }
 
 const SNAPSHOT_MAGIC: [u8; 8] = *b"RBA64SNP";
-const SNAPSHOT_VERSION: u32 = 7;
+const SNAPSHOT_VERSION: u32 = 8;
 
 /// Everything about how a machine was built that a snapshot depends on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1601,7 +1643,9 @@ struct Shape {
     kernel_hash: u64,
     initrd_hash: u64,
     ips: u64,
-    counter_hz: u64,
+    /// The processor model ([`CpuModel::tag`]), which sets the system
+    /// counter's frequency too.
+    cpu: u8,
     boot: u8,
     kernel_offset: u64,
     initrd_offset: u64,
@@ -1621,12 +1665,12 @@ impl Shape {
             self.kernel_hash,
             self.initrd_hash,
             self.ips,
-            self.counter_hz,
             self.kernel_offset,
             self.initrd_offset,
         ] {
             w.write_u64(v)?;
         }
+        w.write_u8(self.cpu)?;
         w.write_u8(self.boot)?;
         w.write_u8(self.devices)?;
         w.write_bool(self.disk.is_some())?;
@@ -1634,11 +1678,11 @@ impl Shape {
     }
 
     fn restore<R: SnapRead>(r: &mut R) -> SnapResult<Self> {
-        let mut v = [0u64; 9];
+        let mut v = [0u64; 8];
         for value in v.iter_mut() {
             *value = r.read_u64()?;
         }
-        let [ram_len, vars_len, code_hash, kernel_hash, initrd_hash, ips, counter_hz, kernel_offset, initrd_offset] = v;
+        let [ram_len, vars_len, code_hash, kernel_hash, initrd_hash, ips, kernel_offset, initrd_offset] = v;
         Ok(Self {
             ram_len,
             vars_len,
@@ -1646,7 +1690,7 @@ impl Shape {
             kernel_hash,
             initrd_hash,
             ips,
-            counter_hz,
+            cpu: r.read_u8()?,
             boot: r.read_u8()?,
             kernel_offset,
             initrd_offset,

@@ -116,6 +116,7 @@ fn boot() -> ExitCode {
     };
     let config = VirtConfig {
         ips,
+        cpu: args.run.cpu,
         debug_stops: args.run.debug_stops(),
         ..VirtConfig::DEFAULT
     };
