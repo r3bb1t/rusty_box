@@ -197,6 +197,9 @@ pub(crate) enum Feature {
     /// FEAT_AA64EL2: EL2 in AArch64 state, the only state this processor
     /// has. No encoding of its own.
     Aa64El2,
+    /// FEAT_SME2: the ZT0 register, predicate-as-counter, and the
+    /// multi-vector instructions.
+    Sme2,
 }
 
 // `Feature::ALL` lists every feature in declaration order, and each has a
@@ -208,7 +211,7 @@ const _: () = {
         assert!(Feature::ALL[i] as usize == i, "Feature::ALL is out of declaration order");
         i += 1;
     }
-    assert!(Feature::ALL.len() <= u64::BITS as usize, "more features than a Features set has bits");
+    assert!(Feature::ALL.len() <= u128::BITS as usize, "more features than a Features set has bits");
 };
 
 /// What the conformance tests read of a feature: `tests/unit/spec.rs`
@@ -216,7 +219,7 @@ const _: () = {
 #[cfg(test)]
 impl Feature {
     /// Every feature, in declaration order.
-    pub(crate) const ALL: [Feature; 63] = [
+    pub(crate) const ALL: [Feature; 64] = [
         Feature::Base,
         Feature::Fp,
         Feature::AdvSimd,
@@ -280,6 +283,7 @@ impl Feature {
         Feature::Rpres,
         Feature::El2,
         Feature::Aa64El2,
+        Feature::Sme2,
     ];
 
     /// The name Arm's data gives the feature, `None` for the base set.
@@ -348,6 +352,7 @@ impl Feature {
             Self::Rpres => Some("FEAT_RPRES"),
             Self::El2 => Some("FEAT_EL2"),
             Self::Aa64El2 => Some("FEAT_AA64EL2"),
+            Self::Sme2 => Some("FEAT_SME2"),
         }
     }
 
@@ -395,23 +400,24 @@ impl Feature {
 
     /// Whether the decoder names every encoding of the feature: a feature
     /// still being built has some of its encodings, each of them Arm's, and
-    /// no processor this crate builds implements it yet.
+    /// no processor this crate builds implements it yet. No feature the
+    /// decoder knows is being built.
     pub(crate) const fn complete(self) -> bool {
-        !matches!(self, Self::Sme)
+        true
     }
 }
 
 impl Feature {
-    /// The feature's bit of a [`Features`] set, whose 64 bits hold every
+    /// The feature's bit of a [`Features`] set, whose 128 bits hold every
     /// feature (checked where [`Feature::ALL`] is built).
-    const fn bit(self) -> u64 {
+    const fn bit(self) -> u128 {
         1 << self as u32
     }
 }
 
 /// A set of [`Feature`]s: what one processor implements, a bit each.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) struct Features(u64);
+pub(crate) struct Features(u128);
 
 impl Features {
     /// What the Cortex-A57 this crate's processor is shaped like implements,
@@ -449,7 +455,7 @@ impl Features {
 
     /// The set as a bit per [`Feature`], in declaration order: what a
     /// snapshot records of the processor it was taken from.
-    pub(crate) const fn bits(self) -> u64 {
+    pub(crate) const fn bits(self) -> u128 {
         self.0
     }
 }

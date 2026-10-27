@@ -307,7 +307,9 @@ impl<L: Levels> Cpu<L> {
     /// entry either way. The decode cache is not saved — it is keyed by the
     /// instruction word and cannot change an outcome.
     pub(crate) fn save<W: SnapWrite>(&self, w: &mut W) -> SnapResult {
-        w.write_u64(self.imp.features.bits())?;
+        let features = self.imp.features.bits();
+        w.write_u64(features as u64)?;
+        w.write_u64((features >> 64) as u64)?;
         w.write_u32(self.imp.max_svl.bits())?;
         for x in self.x {
             w.write_u64(x)?;
@@ -357,7 +359,7 @@ impl<L: Levels> Cpu<L> {
     /// An image of a processor implementing other features, or another
     /// streaming vector length, is refused before anything changes.
     pub(crate) fn restore<R: SnapRead>(&mut self, r: &mut R) -> SnapResult {
-        let features = r.read_u64()?;
+        let features = u128::from(r.read_u64()?) | (u128::from(r.read_u64()?) << 64);
         let max_svl = r.read_u32()?;
         if features != self.imp.features.bits() || max_svl != self.imp.max_svl.bits() {
             return Err(SnapError::Invalid("snapshot of a processor implementing other features"));

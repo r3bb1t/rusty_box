@@ -5,9 +5,10 @@
 //! `max` processor, on a processor with every feature this core
 //! implements. The two files share one format and one initial state.
 //! `tests/vectors/qemu_sve.txt`, from `tests/vectors/gen_qemu_sve.py`, holds
-//! the SVE instructions FEAT_SME makes legal, run in Streaming SVE mode at
-//! a 512-bit vector length: the same initial state with Z0-Z31 and P0-P15
-//! in place of the SIMD&FP registers, and Z and P changes in place of V
+//! the SVE instructions FEAT_SME makes legal and its ZA instructions, run
+//! in Streaming SVE mode at a 512-bit vector length with ZA enabled: the
+//! same initial state with Z0-Z31 and P0-P15 in place of the SIMD&FP
+//! registers and ZA's vectors added, and Z, P and ZA changes in place of V
 //! ones ([`replay_sve`]).
 //!
 //! Each vector is an instruction word and a seed. The seed rebuilds the exact
@@ -34,7 +35,9 @@ use std::vec::Vec;
 use rusty_box_core::{ClockHz, VmClock};
 
 use super::features::Implementation;
+use super::sme::ZT0_BYTES;
 use super::sve::{Pv, Zv};
+use super::sysreg::SMCR_EZT0;
 use super::{Cpu, CpuConfig, El, Levels, NoEl2, Step, WithEl2};
 use crate::bus::{AccessWidth, BusFault, PhysAddr, PhysBus};
 use crate::instrumentation::NoInstrumentation;
@@ -273,14 +276,15 @@ fn initial_state(seed: u64, kind: &str, insn: u32) -> State {
     if kind == "T" && rn != 31 {
         x[rn] = CODE + ((r.next() & 0x3FFF) << 2);
     }
-    if kind == "M" || kind == "R" {
+    // ZM and ZR are M and R for gen_qemu_sve.py's ZA loads and stores.
+    if matches!(kind, "M" | "R" | "ZM" | "ZR") {
         let base = DATA + 0x4000 + (r.next() & 0x3F0);
         if rn == 31 {
             sp = base;
         } else {
             x[rn] = base;
         }
-        if kind == "R" {
+        if matches!(kind, "R" | "ZR") {
             let rm = ((insn >> 16) & 31) as usize;
             let off = (r.next() & 0xF) << 4;
             if rm != 31 && rm != rn {
@@ -401,8 +405,12 @@ fn sve_state(seed: u64, kind: &str, insn: u32) -> SveState {
         reg.copy_from_slice(&value.to_le_bytes());
     }
     let mut fpcr = if kind == "SA" { (r.next() & 1) << 1 } else { 0 };
-    if kind == "SF" {
-        let own = ((insn >> 22) & 3) as usize;
+    if matches!(kind, "SF" | "SS" | "ZF") {
+        let own = match kind {
+            "SF" => ((insn >> 22) & 3) as usize,
+            "SS" => 2,
+            _ => za_fp_format(insn),
+        };
         for reg in z.iter_mut() {
             let sel = (r.next() & 7) as usize;
             if sel != 0 {
@@ -411,7 +419,115 @@ fn sve_state(seed: u64, kind: &str, insn: u32) -> SveState {
         }
         fpcr = ((r.next() & 0x1F) << 22) | ((r.next() & 1) << 19) | (r.next() & 7);
     }
+    if kind == "SI" {
+        let own = ((insn >> 22) & 3) as usize;
+        for reg in z.iter_mut() {
+            match r.next() & 3 {
+                0 => {}
+                1 => *reg = int_register(&mut r, own, false),
+                2 => *reg = int_register(&mut r, own, true),
+                _ => *reg = int_register(&mut r, own.saturating_sub(1), true),
+            }
+        }
+    }
+    if kind == "SN" {
+        for reg in z.iter_mut() {
+            match r.next() & 3 {
+                0 => {}
+                1 => *reg = int_register(&mut r, 2, true),
+                2 => *reg = int_register(&mut r, 3, true),
+                _ => *reg = int_register(&mut r, 2, false),
+            }
+        }
+    }
     SveState { z, p, fpcr }
+}
+
+/// The [`FP_FORMATS`] index of a floating-point ZA instruction's source
+/// elements. An outer product's (bit 30 clear): single precision (bit 24
+/// clear), BFloat16 (bit 24 set, bit 21 clear) or half precision. A
+/// multi-vector instruction's on ZA array vectors (bit 30 set): single
+/// precision for FMLA, FMLS, FADD and FSUB (bits 12:11 = 11 by vectors,
+/// bit 21 set; bits 23:22 = 01 with bits 12, 5 and 3 clear by an indexed
+/// element), else BFloat16 (bit 4 set) or half precision. Mirrors
+/// `za_fp_format` in gen_qemu_sve.py.
+fn za_fp_format(insn: u32) -> usize {
+    let single = matches!(
+        ((insn >> 21) & 1, (insn >> 11) & 3, (insn >> 22) & 3, insn & 0x1028),
+        (1, 3, _, _) | (0, _, 1, 0)
+    );
+    match ((insn >> 30) & 1, single, (insn >> 4) & 1, (insn >> 24) & 1, (insn >> 21) & 1) {
+        (1, true, _, _, _) => 2,
+        (1, false, 1, _, _) => 0,
+        (1, false, _, _, _) => 1,
+        (_, _, _, 0, _) => 2,
+        (_, _, _, _, 0) => 0,
+        _ => 1,
+    }
+}
+
+/// ZA's horizontal vectors, zero but for the Z kinds, whose each is zero,
+/// lanes of single-precision values (the floating-point outer products'
+/// accumulators), lanes of [`Z_SPECIAL`] or random. Must match `za_state`
+/// in gen_qemu_sve.py exactly.
+fn za_state(seed: u64, kind: &str) -> [[u8; SVE_VLB]; SVE_VLB] {
+    let mut za = [[0u8; SVE_VLB]; SVE_VLB];
+    if !kind.starts_with('Z') {
+        return za;
+    }
+    let mut r = SplitMix64(seed ^ 0x5A41_5F53_5441_5445);
+    for row in za.iter_mut() {
+        match r.next() & 3 {
+            0 => {}
+            1 => *row = fp_register(&mut r, 2),
+            2 => {
+                for lane in row.chunks_exact_mut(8) {
+                    let special = Z_SPECIAL[(r.next() % Z_SPECIAL.len() as u64) as usize];
+                    lane.copy_from_slice(&special.to_le_bytes());
+                }
+            }
+            _ => {
+                for lane in row.chunks_exact_mut(8) {
+                    lane.copy_from_slice(&r.next().to_le_bytes());
+                }
+            }
+        }
+    }
+    za
+}
+
+/// ZT0, zero but for the Z kinds, whose ZT0 is random. Must match
+/// `zt0_state` in gen_qemu_sve.py exactly.
+fn zt0_state(seed: u64, kind: &str) -> [u8; ZT0_BYTES] {
+    let mut zt0 = [0u8; ZT0_BYTES];
+    if kind.starts_with('Z') {
+        let mut r = SplitMix64(seed ^ 0x5A54_305F_5354_4154);
+        for lane in zt0.chunks_exact_mut(8) {
+            lane.copy_from_slice(&r.next().to_le_bytes());
+        }
+    }
+    zt0
+}
+
+/// A Z register of elements of `size` (`8 << size` bits): with `extreme`
+/// each zero, one, minus one, the largest or the smallest value, or one
+/// above the smallest; else each a shift amount from -(esize+2) to
+/// esize+2. Must match `int_register` in gen_qemu_sve.py.
+fn int_register(r: &mut SplitMix64, size: usize, extreme: bool) -> [u8; SVE_VLB] {
+    let bytes = 1usize << size;
+    let n = 8 * bytes as u64;
+    let mask = u64::MAX >> (64 - n);
+    let mut reg = [0u8; SVE_VLB];
+    for lane in reg.chunks_exact_mut(bytes) {
+        let w = r.next();
+        let value = if extreme {
+            [0, 1, mask, mask >> 1, (mask >> 1) + 1, (mask >> 1) + 2][(w % 6) as usize]
+        } else {
+            (w % (2 * n + 5)).wrapping_sub(n + 2) & mask
+        };
+        lane.copy_from_slice(&value.to_le_bytes()[..bytes]);
+    }
+    reg
 }
 
 /// `key:value` pairs of an SVE vector's `z=` or `p=` field: the register
@@ -447,9 +563,10 @@ fn parse_registers(field: &str, prefix: &str, len: usize) -> Vec<(usize, Vec<u8>
 
 /// Step each SVE vector once at EL1 on a processor implementing every
 /// feature and the levels `L`, in Streaming SVE mode at a 512-bit vector
-/// length (`SMCR_EL1.LEN = 3`), and fail unless every one ends in the state
-/// the reference left: PC, NZCV, FPSR, the general registers, SP, Z0-Z31,
-/// P0-P15 and the data region.
+/// length (`SMCR_EL1.LEN = 3`) with ZA enabled and ZT0 accessible
+/// (`SMCR_EL1.EZT0`, as Linux leaves it), and fail unless every one ends in
+/// the state the reference left: PC, NZCV, FPSR, the general registers, SP,
+/// Z0-Z31, P0-P15, ZA, ZT0 and the data region.
 fn replay_sve<L: Levels>(vectors: &str) {
     let ips = ClockHz::new(1_000_000).unwrap_or(ClockHz::BOCHS_DEFAULT);
     let mut tallies: BTreeMap<String, Tally> = BTreeMap::new();
@@ -471,10 +588,20 @@ fn replay_sve<L: Levels>(vectors: &str) {
             .and_then(|field| field.strip_prefix("f="))
             .and_then(|hex| u64::from_str_radix(hex, 16).ok())
             .unwrap_or(0);
+        let za_changes = match f.get(11) {
+            Some(field) => parse_registers(field, "za=", SVE_VLB),
+            None => Vec::new(),
+        };
+        let zt0_changes = match f.get(12) {
+            Some(field) => parse_registers(field, "zt=", ZT0_BYTES),
+            None => Vec::new(),
+        };
         let tally = tallies.entry(String::from(name)).or_default();
 
         let st = initial_state(seed, kind, insn);
         let sve = sve_state(seed, kind, insn);
+        let za = za_state(seed, kind);
+        let zt0 = zt0_state(seed, kind);
         let mut cpu = Cpu::<L>::implementing(
             CpuConfig {
                 ips,
@@ -488,13 +615,16 @@ fn replay_sve<L: Levels>(vectors: &str) {
         cpu.sp_el1 = st.sp;
         cpu.pstate.set_nzcv(st.nzcv);
         cpu.sys.cpacr_el1 = (3 << 24) | (3 << 20);
-        cpu.sys.smcr_el1 = 3;
+        cpu.sys.smcr_el1 = SMCR_EZT0 | 3;
         // With EL2, `SMCR_EL2.LEN` caps the length EL1 runs at (Arm
-        // `CurrentSVL`): a hypervisor grants its guest the same.
+        // `CurrentSVL`) and `SMCR_EL2.EZT0` gates ZT0 below EL2 (Arm
+        // `CheckSMEZT0Enabled`): a hypervisor grants its guest the same.
         if let Some(el2) = cpu.el2_mut() {
-            el2.smcr = 3;
+            el2.smcr = SMCR_EZT0 | 3;
         }
         cpu.set_pstate_sm(true);
+        cpu.set_pstate_za(true);
+        cpu.set_zt0(&zt0);
         cpu.fpcr = st.fpcr | sve.fpcr;
         cpu.fpsr = 0;
         let vl = cpu.current_svl();
@@ -503,6 +633,9 @@ fn replay_sve<L: Levels>(vectors: &str) {
         }
         for (n, bytes) in sve.p.iter().enumerate() {
             cpu.set_p(n as u32, vl, &Pv::from_bytes(bytes));
+        }
+        for (n, bytes) in za.iter().enumerate() {
+            cpu.set_za_vector(n, vl, &Zv::from_bytes(bytes));
         }
         cpu.sys.esr_el1 = 0x3F << 26;
         let mut bus = TestBus {
@@ -541,6 +674,14 @@ fn replay_sve<L: Levels>(vectors: &str) {
         for (i, bytes) in &p_changes {
             want_p[*i] = bytes.clone();
         }
+        let mut want_za: Vec<Vec<u8>> = za.iter().map(|b| b.to_vec()).collect();
+        for (i, bytes) in &za_changes {
+            want_za[*i] = bytes.clone();
+        }
+        let mut want_zt0 = zt0.to_vec();
+        for (_, bytes) in &zt0_changes {
+            want_zt0 = bytes.clone();
+        }
         let mut want_data = st.data.clone();
         for (off, b) in &mem_changes {
             want_data[*off] = *b as u8;
@@ -578,6 +719,18 @@ fn replay_sve<L: Levels>(vectors: &str) {
             if &got != want {
                 diffs.push(format!("p{i} {got:02x?} want {want:02x?}"));
             }
+        }
+        for (i, want) in want_za.iter().enumerate() {
+            let got = cpu.za_row(i, vl);
+            if got != want.as_slice() {
+                let at = got.iter().zip(want).position(|(a, b)| a != b).unwrap_or(0);
+                diffs.push(format!("za{i} byte {at} {:#x} want {:#x}", got[at], want[at]));
+            }
+        }
+        let got_zt0 = cpu.zt0();
+        if got_zt0[..] != want_zt0[..] {
+            let at = got_zt0.iter().zip(&want_zt0).position(|(a, b)| a != b).unwrap_or(0);
+            diffs.push(format!("zt0 byte {at} {:#x} want {:#x}", got_zt0[at], want_zt0[at]));
         }
         if bus.data != want_data {
             let first = bus.data.iter().zip(&want_data).position(|(a, b)| a != b).unwrap_or(0);
@@ -1097,8 +1250,9 @@ fn every_qemu_sve_vector_matches_after_one_step_in_streaming_mode() {
 
 /// At EL1 on a processor with EL2, whose controls out of reset trap nothing
 /// EL1 executes and route nothing it raises to EL2, every vector ends as it
-/// does without EL2 (the SVE ones with `SMCR_EL2.LEN` granting EL1 the
-/// length they run at).
+/// does without EL2. The SVE ones also need `SMCR_EL2` to grant EL1 what
+/// `SMCR_EL1` does, which out of reset it does not: `LEN` the length they
+/// run at, and `EZT0` access to ZT0 (`replay_sve`).
 #[test]
 fn every_vector_matches_at_el1_under_el2_out_of_reset() {
     replay::<WithEl2>(VECTORS, Implementation::CORTEX_A57);

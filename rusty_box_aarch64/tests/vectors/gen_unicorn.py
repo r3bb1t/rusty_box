@@ -165,14 +165,16 @@ def initial_state(seed, kind, insn):
         rn = (insn >> 5) & 31
         if rn != 31:
             x[rn] = CODE + ((r.next() & 0x3FFF) << 2)
-    if kind in ("M", "R"):
+    if kind in ("M", "R", "ZM", "ZR"):
+        # A base in the data region; with R, an offset register too. ZM and
+        # ZR are the same for gen_qemu_sve.py's ZA loads and stores.
         rn = (insn >> 5) & 31
         base = DATA + 0x4000 + (r.next() & 0x3F0)
         if rn == 31:
             sp = base
         else:
             x[rn] = base
-        if kind == "R":
+        if kind in ("R", "ZR"):
             rm = (insn >> 16) & 31
             off = (r.next() & 0xF) << 4
             if rm != 31 and rm != rn:

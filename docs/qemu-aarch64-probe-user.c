@@ -17,7 +17,10 @@
 // docs/qemu-sve-fcmla-indexed-ah.patch; sve_fmad_size00 and
 // sve_fsubr_size00 (entry 14), which execute on 11.1.2 where Arm raises
 // SIGILL, the first until docs/qemu-sve-fmad-size00.patch, the second
-// until master's f2bfb1cf.
+// until master's f2bfb1cf; sme_ld1_vertical_tail (entry 15), which prints
+// DIFFERS on 11.1.2 and agrees with docs/qemu-sme-ld1-vertical-tail.patch;
+// sme2_movt (entry 16), which executes on 11.1.2 and master where Arm
+// raises SIGILL.
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -159,6 +162,45 @@ static void sve_fsubr_size00(void) {
     printf("0x65038020 (fsubr, size = 00) executed (Arm: UNDEFINED)\n");
 }
 
+// SME LD1W to a vertical tile slice under a predicate whose last active
+// element is the first: Arm writes Zeros to every inactive element of the
+// slice, the ones after the last active element included. SMSTART and
+// SMSTOP zero every Z, P and FFR register, so all of them are clobbered.
+static void sme_ld1_vertical_tail(void) {
+    static uint32_t words[4] = { 0x11111111, 0x22222222, 0x33333333, 0x44444444 };
+    static uint32_t out[64];
+    __asm__ volatile("mov x0, %0\n mov x1, %1\n mov x2, #1\n mov w12, #0\n"
+                     ".inst 0xd503477f\n"   /* smstart */
+                     ".inst 0x2598e3e1\n"   /* ptrue p1.s */
+                     ".inst 0x25b8dfe1\n"   /* mov z1.s, #-1 */
+                     ".inst 0x25a21fe0\n"   /* whilelo p0.s, xzr, x2: element 0 alone */
+                     ".inst 0xc0808420\n"   /* mova za0v.s[w12, 0], p1/m, z1.s */
+                     ".inst 0xe09f8000\n"   /* ld1w {za0v.s[w12, 0]}, p0/z, [x0] */
+                     ".inst 0xc0828402\n"   /* mova z2.s, p1/m, za0v.s[w12, 0] */
+                     ".inst 0xe5804022\n"   /* str z2, [x1] */
+                     ".inst 0xd503467f"     /* smstop */
+                     : : "r"(words), "r"(out)
+                     : "x0", "x1", "x2", "x12", "memory",
+                       "v0", "v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8", "v9", "v10", "v11", "v12", "v13",
+                       "v14", "v15", "v16", "v17", "v18", "v19", "v20", "v21", "v22", "v23", "v24", "v25", "v26",
+                       "v27", "v28", "v29", "v30", "v31", "p0", "p1", "p2", "p3", "p4", "p5", "p6", "p7", "p8",
+                       "p9", "p10", "p11", "p12", "p13", "p14", "p15", "ffr");
+    printf("ld1w {za0v.s[w12, 0]}, p0/z with element 0 alone active: element 1 = %#x: %s (Arm: 0)\n", out[1],
+           out[1] == 0 ? "agrees" : "DIFFERS");
+}
+
+// MOVT from ZT0 to a general register: defined only in Debug state
+// (`movt_r_zt_`'s decode, `!Halted()`), so UNDEFINED in a program. ZA
+// storage is enabled first, which SMSTART ZA does and ZT0's check needs.
+static void sme2_movt(void) {
+    signal(SIGILL, on_sigill);
+    __asm__ volatile(".inst 0xd503457f\n"   /* smstart za */
+                     ".inst 0xc04c03e0\n"   /* movt x0, zt0[0] */
+                     ".inst 0xd503447f"     /* smstop za */
+                     ::: "x0");
+    printf("0xc04c03e0 (movt x0, zt0[0]) executed (Arm: UNDEFINED outside Debug state)\n");
+}
+
 int main(int argc, char **argv) {
     const char *c = argc > 1 ? argv[1] : "";
     if (!strcmp(c, "ldapur")) ldapur();
@@ -171,9 +213,12 @@ int main(int argc, char **argv) {
     else if (!strcmp(c, "sve_fcmla_idx_ah")) sve_fcmla_idx_ah();
     else if (!strcmp(c, "sve_fmad_size00")) sve_fmad_size00();
     else if (!strcmp(c, "sve_fsubr_size00")) sve_fsubr_size00();
+    else if (!strcmp(c, "sme_ld1_vertical_tail")) sme_ld1_vertical_tail();
+    else if (!strcmp(c, "sme2_movt")) sme2_movt();
     else {
         fprintf(stderr, "cases: ldapur fcvtzs_half fcmla_elem_q0 fjcvtzs_fz fabs_scalar_half misc_fp16_abort"
-                        " fneg_vector_ah sve_fcmla_idx_ah sve_fmad_size00 sve_fsubr_size00\n");
+                        " fneg_vector_ah sve_fcmla_idx_ah sve_fmad_size00 sve_fsubr_size00"
+                        " sme_ld1_vertical_tail sme2_movt\n");
         return 2;
     }
     return 0;

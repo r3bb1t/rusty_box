@@ -22,7 +22,7 @@ use rusty_box_core::snap::{SnapRead, SnapResult, SnapWrite};
 use rusty_box_core::SnapError;
 
 use super::features::{Feature, Features};
-use super::sysreg::{DISR_MASK, SMCR_LEN};
+use super::sysreg::{smcr_mask, DISR_MASK};
 use super::{id, Cpu, El};
 
 // ----- The levels a processor implements -----
@@ -591,7 +591,7 @@ el2_registers! {
     Tpidr => tpidr,
     Vpidr => vpidr,
     Vmpidr => vmpidr,
-    /// `SMCR_EL2` (FEAT_SME): the `LEN` field this core keeps.
+    /// `SMCR_EL2` (FEAT_SME): the `LEN` field, and `EZT0` with FEAT_SME2.
     Smcr => smcr,
     /// `CNTHCTL_EL2`: EL0's and EL1's access to the counters and timers,
     /// and the EL2 event stream.
@@ -636,7 +636,7 @@ impl El2Reg {
             Self::Vmpidr => (value & VMPIDR_MASK) | VMPIDR_RES1,
             Self::Smcr => {
                 if features.has(Feature::Sme) {
-                    value & SMCR_LEN
+                    value & smcr_mask(features)
                 } else {
                     0
                 }

@@ -94,13 +94,30 @@ const fn all_if(condition: bool) -> u64 {
     }
 }
 
+/// SQDMULH and SQRDMULH before their saturation: `(2 * a * b + rounding)
+/// >> esize`, the rounding `2^(esize-1)` with `rounding`. Computed as `(a
+/// * b + rounding / 2) >> (esize - 1)`, the same integer, which stays in
+/// `i128` for the 64-bit elements of SVE, where `2 * a * b` need not.
+pub(crate) fn doubling_mul_high(a: i128, b: i128, esize: u32, rounding: bool) -> i128 {
+    let half_rounding = if rounding { 1i128 << (esize - 2) } else { 0 };
+    (a * b + half_rounding) >> (esize - 1)
+}
+
+/// SQRDMLAH, SQRDMLSH (`subtract`) and SQRDCMLAH before their
+/// saturation: `((acc << esize) +/- 2 * a * b + 2^(esize-1)) >> esize`.
+/// Computed as `acc + ((+/-a * b + 2^(esize-2)) >> (esize - 1))`, the same
+/// integer, which stays in `i128` for the 64-bit elements of SVE.
+pub(crate) fn rounding_doubling_mul_add(acc: i128, a: i128, b: i128, esize: u32, subtract: bool) -> i128 {
+    let product = if subtract { -(a * b) } else { a * b };
+    acc + ((product + (1i128 << (esize - 2))) >> (esize - 1))
+}
+
 /// SQRDMLAH and SQRDMLSH on one lane (FEAT_RDM): `element3 << esize`
 /// plus, or with `subtract` minus, twice the product, shifted right by
 /// `esize` with rounding (Arm `RShr`) and saturated (`SignedSatQ`).
 fn rdm_lane(a: u64, b: u64, d: u64, esize: u32, subtract: bool, qc: &mut bool) -> u64 {
-    let product = 2 * sint(a, esize) * sint(b, esize);
-    let accum = (sint(d, esize) << esize) + if subtract { -product } else { product };
-    sat((accum + (1i128 << (esize - 1))) >> esize, esize, false, qc)
+    let value = rounding_doubling_mul_add(sint(d, esize), sint(a, esize), sint(b, esize), esize, subtract);
+    sat(value, esize, false, qc)
 }
 
 /// A register's bytes as one operand of a dot product or an 8-bit matrix
@@ -120,22 +137,15 @@ fn byte_products(a: Bytes, a_first: u32, b: Bytes, b_first: u32, count: u32) -> 
         .sum()
 }
 
-/// The shift of SSHL/USHL/SRSHL/URSHL/SQSHL/UQSHL/SQRSHL/UQRSHL (register):
-/// `element` shifted by the signed low byte of `amount` — left when
-/// positive, right (an arithmetic shift of the exact value) when negative —
-/// with `rounding` adding half of the last bit shifted out, then truncated,
-/// or saturated when `saturate` gives the result's signedness.
-fn shift_by_register(
-    element: i128,
-    amount: u64,
-    esize: u32,
-    rounding: bool,
-    saturate: Option<bool>,
-    qc: &mut bool,
-) -> u64 {
-    let shift = i32::from(amount as u8 as i8);
+/// The shift of a shift by register: `element`, an `esize`-bit value,
+/// shifted left by `shift` when it is positive, right (an arithmetic shift
+/// of the exact value) when negative, with `rounding` adding half of the
+/// last bit shifted out. Exact, but for a left shift by `esize` or more,
+/// which gives a value whose low `esize` bits are zero and which saturates
+/// as the exact one does.
+pub(crate) fn shift_signed(element: i128, shift: i32, esize: u32, rounding: bool) -> i128 {
     let n = shift.unsigned_abs();
-    let value = if shift >= 0 {
+    if shift >= 0 {
         if n >= esize {
             // Every bit leaves the element: the low bits are zero, and a
             // saturating shift clamps toward the element's sign.
@@ -154,7 +164,22 @@ fn shift_by_register(
     } else {
         let round = if rounding { 1i128 << (n - 1) } else { 0 };
         (element + round) >> n
-    };
+    }
+}
+
+/// The shift of SSHL/USHL/SRSHL/URSHL/SQSHL/UQSHL/SQRSHL/UQRSHL (register):
+/// `element` shifted by the signed low byte of `amount` ([`shift_signed`]),
+/// then truncated, or saturated when `saturate` gives the result's
+/// signedness.
+fn shift_by_register(
+    element: i128,
+    amount: u64,
+    esize: u32,
+    rounding: bool,
+    saturate: Option<bool>,
+    qc: &mut bool,
+) -> u64 {
+    let value = shift_signed(element, i32::from(amount as u8 as i8), esize, rounding);
     match saturate {
         Some(unsigned) => sat(value, esize, unsigned, qc),
         None => low(value, esize),
@@ -342,10 +367,8 @@ impl<L: Levels> Cpu<L> {
             (0b10011, false) => |a, b, _, _, _| a.wrapping_mul(b),
             (0b10011, true) => |a, b, _, _, _| polynomial_mult(a, b, 8) as u64,
             // SQDMULH, SQRDMULH
-            (0b10110, false) => |a, b, _, e, qc| sat((2 * sint(a, e) * sint(b, e)) >> e, e, false, qc),
-            (0b10110, true) => {
-                |a, b, _, e, qc| sat((2 * sint(a, e) * sint(b, e) + (1i128 << (e - 1))) >> e, e, false, qc)
-            }
+            (0b10110, false) => |a, b, _, e, qc| sat(doubling_mul_high(sint(a, e), sint(b, e), e, false), e, false, qc),
+            (0b10110, true) => |a, b, _, e, qc| sat(doubling_mul_high(sint(a, e), sint(b, e), e, true), e, false, qc),
             // ADDP
             (0b10111, false) => |a, b, _, _, _| a.wrapping_add(b),
             // Every other opcode below 11000 except 00011 is listed above
@@ -808,10 +831,12 @@ impl<L: Levels> Cpu<L> {
             (0b0000, true) if !scalar => Kind::Same(|a, b, d, _, _| d.wrapping_add(a.wrapping_mul(b))),
             (0b0100, true) if !scalar => Kind::Same(|a, b, d, _, _| d.wrapping_sub(a.wrapping_mul(b))),
             (0b1000, false) if !scalar => Kind::Same(|a, b, _, _, _| a.wrapping_mul(b)),
-            (0b1100, false) => Kind::Same(|a, b, _, e, qc| sat((2 * sint(a, e) * sint(b, e)) >> e, e, false, qc)),
-            (0b1101, false) => Kind::Same(|a, b, _, e, qc| {
-                sat((2 * sint(a, e) * sint(b, e) + (1i128 << (e - 1))) >> e, e, false, qc)
-            }),
+            (0b1100, false) => {
+                Kind::Same(|a, b, _, e, qc| sat(doubling_mul_high(sint(a, e), sint(b, e), e, false), e, false, qc))
+            }
+            (0b1101, false) => {
+                Kind::Same(|a, b, _, e, qc| sat(doubling_mul_high(sint(a, e), sint(b, e), e, true), e, false, qc))
+            }
             (0b1101, true) => Kind::Same(|a, b, d, e, qc| rdm_lane(a, b, d, e, false, qc)),
             (0b1111, true) => Kind::Same(|a, b, d, e, qc| rdm_lane(a, b, d, e, true, qc)),
             (0b0010, _) if !scalar => Kind::Long(LongOp::MulAcc),

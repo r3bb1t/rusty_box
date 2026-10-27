@@ -692,3 +692,41 @@ fn half_precision_conversions_round_and_overflow() {
     assert_eq!(f32_to_f16(65536.0f32.to_bits(), &mut fp), 0x7BFF);
     assert_eq!(fp.cumulative_fpsr(), OFC | IXC);
 }
+
+/// Arm FPDot of half-precision pairs: the exact `a1*a2 + b1*b2` rounded
+/// once to single precision; NaNs chosen as FPProcessNaNs4 does and
+/// converted; the infinities, invalid operations and signed zeros of its
+/// pseudocode; operands flushed by FPCR.FZ16 alone.
+#[test]
+fn fpdot_of_halves_rounds_the_exact_sum_once() {
+    const H_ONE: u16 = 0x3C00;
+    const H_MINUS_ONE: u16 = 0xBC00;
+    const H_INF: u16 = 0x7C00;
+    let dot = |a1: u16, b1: u16, a2: u16, b2: u16, fpcr: u64| {
+        let mut fp = status_with(fpcr);
+        let r = f16_dot(a1, b1, a2, b2, &mut fp);
+        (r, fp.cumulative_fpsr())
+    };
+    // A signalling NaN first, whatever its place, quieted and widened; then
+    // the first quiet NaN in operand order.
+    assert_eq!(dot(0x7E01, 0x7C02, H_ONE, H_ONE, 0), (0x7FC0_4000, IOC));
+    assert_eq!(dot(H_ONE, 0x7E01, 0x7E05, H_ONE, 0), (0x7FC0_2000, 0));
+    assert_eq!(dot(H_ONE, 0x7E01, H_ONE, H_ONE, DN), (0x7FC0_0000, 0));
+    // An infinity times a zero, and infinite products of opposite signs.
+    assert_eq!(dot(H_INF, H_ONE, 0, H_ONE, 0), (0x7FC0_0000, IOC));
+    assert_eq!(dot(H_INF, H_INF, H_ONE, H_MINUS_ONE, 0), (0x7FC0_0000, IOC));
+    assert_eq!(dot(H_INF, H_ONE, H_ONE, H_ONE, 0), (0x7F80_0000, 0));
+    // Zeros of one sign keep it; an exact zero sum is +0, -0 rounding down.
+    assert_eq!(dot(0x8000, 0, H_ONE, H_MINUS_ONE, 0), (0x8000_0000, 0));
+    assert_eq!(dot(H_ONE, H_MINUS_ONE, H_ONE, H_ONE, 0), (0, 0));
+    assert_eq!(dot(H_ONE, H_MINUS_ONE, H_ONE, H_ONE, 2 << 22), (0x8000_0000, 0));
+    // 1.5 * 2 + 0.25 * 0.5 is exact; 1 + 2^-24 is a tie, to even, or up
+    // rounding to plus infinity.
+    assert_eq!(dot(0x3E00, 0x3400, 0x4000, 0x3800, 0), (0x4048_0000, 0));
+    assert_eq!(dot(H_ONE, 0x0C00, H_ONE, 0x0C00, 0), (0x3F80_0000, IXC));
+    assert_eq!(dot(H_ONE, 0x0C00, H_ONE, 0x0C00, 1 << 22), (0x3F80_0001, IXC));
+    // The least denormal times 1 is 2^-24, or flushed under FPCR.FZ16
+    // without IDC.
+    assert_eq!(dot(0x0001, 0, H_ONE, 0, 0), (0x3380_0000, 0));
+    assert_eq!(dot(0x0001, 0, H_ONE, 0, FPCR_FZ16), (0, 0));
+}

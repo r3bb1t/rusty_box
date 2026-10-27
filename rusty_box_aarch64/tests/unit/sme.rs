@@ -10,8 +10,9 @@
 
 use std::vec::Vec;
 
-use super::super::features::{Implementation, VecLen};
+use super::super::features::{Feature, Features, Implementation, VecLen};
 use super::super::step::{exec, processor, Taken, CPACR_ALL, DATA, FP_TRAP, ILLEGAL_WHEN_STREAMING, SME_DISABLED, UNDEFINED};
+use super::super::sysreg::SMCR_EZT0;
 use super::super::{Cpu, El, NoEl2, Pstate};
 use super::Svcr;
 
@@ -170,7 +171,8 @@ fn enabling_za_zeroes_it_and_leaves_the_vectors() {
 
 /// `SVCR` reads `PSTATE.SM` and `PSTATE.ZA`, and a write is
 /// `SetPSTATE_SM(value<0>)` then `SetPSTATE_ZA(value<1>)`. At EL0 it needs
-/// `SMEN` = 11; `SMCR_EL1` is EL1's, and keeps only `LEN`.
+/// `SMEN` = 11; `SMCR_EL1` is EL1's, and keeps only `LEN` and, with
+/// FEAT_SME2, `EZT0`.
 #[test]
 fn svcr_and_smcr_el1_are_reached_through_cpacr_smen() {
     let mut cpu = sme();
@@ -192,7 +194,7 @@ fn svcr_and_smcr_el1_are_reached_through_cpacr_smen() {
 
     cpu.x[0] = u64::MAX;
     assert_eq!(exec(&mut cpu, MSR_SMCR), None);
-    assert_eq!(cpu.sys.smcr_el1, 0xF, "LEN only: EZT0 and FA64 are RES0 here, bits 8:4 RAZ/WI");
+    assert_eq!(cpu.sys.smcr_el1, (1 << 30) | 0xF, "LEN and EZT0: FA64 is RES0 here, bits 8:4 RAZ/WI");
     cpu.sys.cpacr_el1 = 3 << 20;
     assert_eq!(exec(&mut cpu, MRS_SMCR), Some(SME_DISABLED), "SMEN x0 at EL1");
     assert_eq!(exec(&mut cpu, MSR_SVCR), Some(SME_DISABLED));
@@ -370,6 +372,7 @@ fn a_snapshot_carries_the_sme_state() {
     cpu.scalable.p[15][3] = 0x0F;
     cpu.scalable.ffr[0] = 1;
     cpu.scalable.za[5][9] = 0x59;
+    cpu.scalable.zt0[63] = 0x3F;
     let mut image = Vec::new();
     cpu.save(&mut image).expect("save");
 
@@ -383,14 +386,15 @@ fn a_snapshot_carries_the_sme_state() {
     assert_eq!(restored.scalable.p, cpu.scalable.p);
     assert_eq!(restored.scalable.ffr, cpu.scalable.ffr);
     assert_eq!(restored.scalable.za[5][9], 0x59);
+    assert_eq!(restored.scalable.zt0, cpu.scalable.zt0);
 
     let mut a57 = processor(Implementation::CORTEX_A57);
     assert!(a57.restore(&mut image.as_slice()).is_err(), "an SME image on a Cortex-A57");
 }
 
 /// An image whose SME registers hold bits no `MSR` can leave there is
-/// refused: `SMCR_EL1` outside `LEN`, and any SME register on a processor
-/// without FEAT_SME.
+/// refused: `SMCR_EL1` outside `LEN` and, with FEAT_SME2, `EZT0`, and any
+/// SME register on a processor without FEAT_SME.
 #[test]
 fn a_snapshot_with_sme_bits_no_msr_can_set_is_refused() {
     let refused = |cpu: &Cpu<NoEl2>, imp: Implementation| {
@@ -400,8 +404,19 @@ fn a_snapshot_with_sme_bits_no_msr_can_set_is_refused() {
     };
     let mut cpu = sme();
     assert!(!refused(&cpu, Implementation::EVERY_FEATURE));
+    cpu.sys.smcr_el1 = SMCR_EZT0 | 3;
+    assert!(!refused(&cpu, Implementation::EVERY_FEATURE), "SMCR_EL1.EZT0 with FEAT_SME2");
     cpu.sys.smcr_el1 = 0x10;
     assert!(refused(&cpu, Implementation::EVERY_FEATURE), "SMCR_EL1 bit 4");
+    let without_sme2: Vec<Feature> = Feature::ALL.into_iter().filter(|&f| f != Feature::Sme2).collect();
+    let sme_alone = Implementation {
+        features: Features::of(&without_sme2),
+        max_svl: Implementation::EVERY_FEATURE.max_svl,
+    };
+    let mut cpu = processor(sme_alone);
+    assert!(!refused(&cpu, sme_alone));
+    cpu.sys.smcr_el1 = SMCR_EZT0;
+    assert!(refused(&cpu, sme_alone), "SMCR_EL1.EZT0 without FEAT_SME2");
 
     let a57 = processor(Implementation::CORTEX_A57);
     assert!(!refused(&a57, Implementation::CORTEX_A57));

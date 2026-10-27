@@ -1689,7 +1689,7 @@ impl<S: GuestStorage, I: Instrumentation> VirtMachine<S, WithEl2, I> {
 }
 
 const SNAPSHOT_MAGIC: [u8; 8] = *b"RBA64SNP";
-const SNAPSHOT_VERSION: u32 = 8;
+const SNAPSHOT_VERSION: u32 = 9;
 
 /// Everything about how a machine was built that a snapshot depends on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

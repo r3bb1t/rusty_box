@@ -6,7 +6,7 @@
 //! it, `Instructions.json`, which is the A64 encoding index of the Arm ARM
 //! (DDI 0487, chapter C4) in data form. The tree has three levels: the
 //! top-level groups (`dpimm`, `control`, `ldst`, `dpreg`, `simd_dp`,
-//! `reserved`, `sve`), each split into the encoding classes of C4
+//! `reserved`, `sve`, `sme`), each split into the encoding classes of C4
 //! (`addsub_imm`, `asimdsame`, ...), each holding encodings
 //! (`ADD_32_addsub_imm`, ...); `sve` and `sme` put a level of groups
 //! (`sve_alloca`, ...) between the top and the classes. An encoding is the
@@ -33,7 +33,7 @@
 //! knows ([`Feature`]) is here, under its own name and class, with exactly
 //! Arm's fixed bits, and nothing else is — but for the encodings of a
 //! feature still being built (`Feature::complete`), of which only some
-//! are here yet.
+//! would be here; no feature the decoder knows is being built.
 //!
 //! What is not here is UNDEFINED: unallocated encodings, and encodings of
 //! the features the decoder does not know, every later architecture
@@ -58,6 +58,7 @@ mod float;
 mod ldst;
 mod reserved;
 mod simd_dp;
+mod sme;
 mod sve;
 #[cfg(test)]
 #[path = "../../../tests/unit/spec.rs"]
@@ -87,6 +88,44 @@ use ldst::{
     LdstUnscaled, Ldstexclp, Ldstexclr, LdstnapairOffs, LdstpairOff, LdstpairPost, LdstpairPre, Ldstord, Loadlit,
 };
 use reserved::PermUndef;
+use sme::{
+    MortlachAddhv, MortlachB16f32Prod, MortlachContigLoad, MortlachContigQload, MortlachContigQstore,
+    MortlachContigStore, MortlachCtxtLdst, MortlachExtractPred, MortlachExtractZt, MortlachF16f32Prod,
+    MortlachF32f32Prod, MortlachI8i32Prod, MortlachInsertPred, MortlachInsertZt, MortlachMulti2ClampInt,
+    MortlachMulti2CldCldntSiCtg, MortlachMulti2CldCldntSiNctg, MortlachMulti2CldCldntSsCtg,
+    MortlachMulti2CldCldntSsNctg, MortlachMulti2CstCstntSiCtg, MortlachMulti2CstCstntSiNctg,
+    MortlachMulti2CstCstntSsCtg, MortlachMulti2CstCstntSsNctg, MortlachMulti2Fclamp, MortlachMulti2FpintCvrt,
+    MortlachMulti2Frint, MortlachMulti2IntfpCvrt, MortlachMulti2NarrowFpCvrt, MortlachMulti2NarrowIntCvrt,
+    MortlachMulti2Qrshr, MortlachMulti2SelectInt, MortlachMulti2WideInt, MortlachMulti2ZZAddSm,
+    MortlachMulti2ZZFminmaxMm, MortlachMulti2ZZFminmaxSm, MortlachMulti2ZZLongZip, MortlachMulti2ZZMinmaxMm,
+    MortlachMulti2ZZMinmaxSm, MortlachMulti2ZZShiftMm, MortlachMulti2ZZShiftSm, MortlachMulti2ZZSqdmulhMm,
+    MortlachMulti2ZZSqdmulhSm, MortlachMulti2ZZZip, MortlachMulti4ClampInt, MortlachMulti4CldCldntSiCtg,
+    MortlachMulti4CldCldntSiNctg, MortlachMulti4CldCldntSsCtg, MortlachMulti4CldCldntSsNctg,
+    MortlachMulti4CstCstntSiCtg, MortlachMulti4CstCstntSiNctg, MortlachMulti4CstCstntSsCtg,
+    MortlachMulti4CstCstntSsNctg, MortlachMulti4Fclamp, MortlachMulti4FpintCvrt, MortlachMulti4Frint,
+    MortlachMulti4IntfpCvrt, MortlachMulti4NarrowIntCvrt, MortlachMulti4Qrshr, MortlachMulti4SelectInt,
+    MortlachMulti4WideInt, MortlachMulti4ZZAddSm, MortlachMulti4ZZFminmaxMm, MortlachMulti4ZZFminmaxSm,
+    MortlachMulti4ZZLongZip, MortlachMulti4ZZMinmaxMm, MortlachMulti4ZZMinmaxSm, MortlachMulti4ZZShiftMm,
+    MortlachMulti4ZZShiftSm, MortlachMulti4ZZSqdmulhMm, MortlachMulti4ZZSqdmulhSm, MortlachMulti4ZZZip,
+    MortlachMulti1ZzZaFmaLongSm, MortlachMulti1ZzZaMlaLongLongSm, MortlachMulti1ZzZaMlaLongSm,
+    MortlachMulti2ZZa2wayDotMm, MortlachMulti2ZZa2wayDotSm, MortlachMulti2ZZa4wayDotMm, MortlachMulti2ZZa4wayDotSm,
+    MortlachMulti2ZZaFloatMm, MortlachMulti2ZZaFpdotMm, MortlachMulti2ZZaFpdotSm, MortlachMulti2ZZaIntMm,
+    MortlachMulti2ZZaMixedDotMm, MortlachMulti2ZZaMixedDotSm, MortlachMulti2ZzZaFloatMm, MortlachMulti2ZzZaFloatSm,
+    MortlachMulti2ZzZaFmaLongMm, MortlachMulti2ZzZaFmaLongSm, MortlachMulti2ZzZaIntMm, MortlachMulti2ZzZaIntSm,
+    MortlachMulti2ZzZaMlaLongLongMm, MortlachMulti2ZzZaMlaLongLongSm, MortlachMulti2ZzZaMlaLongMm,
+    MortlachMulti2ZzZaMlaLongSm, MortlachMulti4ZZa2wayDotMm, MortlachMulti4ZZa2wayDotSm, MortlachMulti4ZZa4wayDotMm,
+    MortlachMulti4ZZa4wayDotSm, MortlachMulti4ZZaFloatMm, MortlachMulti4ZZaFpdotMm, MortlachMulti4ZZaFpdotSm,
+    MortlachMulti4ZZaIntMm, MortlachMulti4ZZaMixedDotMm, MortlachMulti4ZZaMixedDotSm, MortlachMulti4ZzZaFloatMm,
+    MortlachMulti4ZzZaFloatSm, MortlachMulti4ZzZaFmaLongMm, MortlachMulti4ZzZaFmaLongSm, MortlachMulti4ZzZaIntMm,
+    MortlachMulti4ZzZaIntSm, MortlachMulti4ZzZaMlaLongLongMm, MortlachMulti4ZzZaMlaLongLongSm,
+    MortlachMulti4ZzZaMlaLongMm, MortlachMulti4ZzZaMlaLongSm, MortlachZero, MortlachZeroZt, MortlachZtLdst,
+    MortlachMulti1FmaLongIdx, MortlachMulti1MlaLongIdx, MortlachMulti1MlaLongLongIdxS, MortlachMulti2FmaLongIdx,
+    MortlachMulti2MlaLongIdx, MortlachMulti2MlaLongLongIdxS, MortlachMulti2ZzaIdxS, MortlachMulti4FmaLongIdx,
+    MortlachMulti4MlaLongIdx, MortlachMulti4MlaLongLongIdxS, MortlachMulti4ZzaIdxS, MortlachBini32Prod,
+    MortlachExpand1dst, MortlachExpand2dstCtg, MortlachExpand4dstCtg, MortlachI16i32Prod, MortlachMulti2ExtractCtg,
+    MortlachMulti2InsertCtg, MortlachMulti2ZaExtractCtg, MortlachMulti2ZaInsertCtg, MortlachMulti4ExtractCtg,
+    MortlachMulti4InsertCtg, MortlachMulti4ZaExtractCtg, MortlachMulti4ZaInsertCtg,
+};
 use sve::{
     SveFp2opIPZds, SveFp2opPPd, SveFp2opPZdA, SveFp2opPZdB0, SveFp2opPZdB1, SveFp2opPZdC, SveFp2opPZdD, SveFp2opPZds,
     SveFp2opUZd, SveFp3opPPd, SveFp3opPZdsA, SveFp3opPZdsB, SveFp3opUZd, SveFpFastRed, SveFpFcadd, SveFpFcmla,
@@ -98,17 +137,27 @@ use sve::{
     SveIntCountRSat, SveIntCountV, SveIntCountVSat, SveIntCountvlv0, SveIntCountvlv1, SveIntCterm, SveIntDupFpimm,
     SveIntDupFpimmPred, SveIntDupImm, SveIntDupImmPred, SveIntDupMaskImm, SveIntIndexIi, SveIntIndexIr, SveIntIndexRi,
     SveIntIndexRr, SveIntLogImm, SveIntMladdsubVvvPred, SveIntMlasVvvPred, SveIntMovprfxPred, SveIntMulB,
-    SveIntPcountPred, SveIntPermBinPermPp, SveIntPermBinPermZz, SveIntPermClastRz, SveIntPermClastVz,
+    SveIntCtrToMask, SveIntPcountPn, SveIntPcountPred, SveIntPnPtrue, SveIntWhileRrPair, SveIntWhileRrPn, SveIntPermBinPermPp, SveIntPermBinPermZz, SveIntPermClastRz, SveIntPermClastVz,
     SveIntPermClastZz, SveIntPermCpyR, SveIntPermCpyV, SveIntPermDupI, SveIntPermDupR, SveIntPermExtractI,
     SveIntPermInsrs, SveIntPermInsrv, SveIntPermLastR, SveIntPermLastV, SveIntPermPunpk, SveIntPermRev,
     SveIntPermRevd, SveIntPermReverseP, SveIntPermReverseZ, SveIntPermSplice, SveIntPermTbl, SveIntPermTbl3src,
     SveIntPermUnpk, SveIntPfalse, SveIntPfirst, SveIntPnext, SveIntPredDup, SveIntPredLog, SveIntPredPatternA,
     SveIntPredPatternB, SveIntPtest, SveIntPtrue, SveIntReadSvlA, SveIntReadVlA, SveIntReduce0, SveIntReduce1,
     SveIntReduce2, SveIntRotateImm, SveIntScmpVi, SveIntSelVvv, SveIntSqdmulh, SveIntTernLog, SveIntUcmpVi,
-    SveIntUnPredArit0, SveIntUnPredArit1, SveIntWhileRr, SveIntWhilenc, SveIntxPermExtractI, SveIntxPermSplice,
-    SveMem32bFill, SveMem32bPfill, SveMemCldSi, SveMemCldSs, SveMemCldntSi, SveMemCldntSs, SveMemCstSi, SveMemCstSs,
+    SveIntUnPredArit0, SveIntUnPredArit1, SveIntWhileRr, SveIntWhilenc, SveIntxAba, SveIntxAbaLong,
+    SveIntxAccumulateLongPairs, SveIntxAdcLong, SveIntxArithBinaryPairs, SveIntxArithNarrow,
+    SveIntxBinPredShiftSatRound, SveIntxCadd, SveIntxCdot, SveIntxCdotByIndexedElem, SveIntxClamp, SveIntxClong,
+    SveIntxCmla, SveIntxCmlaByIndexedElem, SveIntxConsArithLong, SveIntxConsArithWide, SveIntxConsMulLong,
+    SveIntxDot, SveIntxDotByIndexedElem, SveIntxEorx, SveIntxExtractNarrow, SveIntxMixedDot,
+    SveIntxMixedDotByIndexedElem, SveIntxMlaByIndexedElem, SveIntxMlaLongByIndexedElem, SveIntxMlalLong,
+    SveIntxMulByIndexedElem, SveIntxMulLongByIndexedElem, SveIntxPermExtractI, SveIntxPermSplice,
+    SveIntxPredArithBinary, SveIntxPredArithBinarySat, SveIntxPredArithUnary, SveIntxQdmlaLongByIndexedElem,
+    SveIntxQdmlalLong, SveIntxQdmlalbt, SveIntxQdmulLongByIndexedElem, SveIntxQdmulhByIndexedElem,
+    SveIntxQrdcmlaByIndexedElem, SveIntxQrdmlah, SveIntxQrdmlahByIndexedElem, SveIntxShiftInsert,
+    SveIntxShiftLong, SveIntxShiftNarrow, SveIntxSra, SveMem32bFill, SveMem32bPfill, SveMemCldSi, SveMemCldSs, SveMemCldntSi, SveMemCldntSs, SveMemCstSi, SveMemCstSs,
     SveMemCstntSi, SveMemCstntSs, SveMemEldSi, SveMemEldSs, SveMemEstSi, SveMemEstSs, SveMemLdDup, SveMemLdqrSi,
-    SveMemLdqrSs, SveMemPrfmSi, SveMemPrfmSs, SveMemPspill, SveMemSpill,
+    SveMemLdqrSs, SveMemPrfmSi, SveMemPrfmSs, SveMemPspill, SveMemSpill, SveFpClamp, SveIntxDot2,
+    SveIntxDot2ByIndexedElem, SveIntxMultiExtractNarrow, SveIntxMultiShiftNarrow,
 };
 
 /// An A64 encoding this processor implements, by its Arm class and Arm
@@ -299,7 +348,12 @@ pub(crate) enum Encoding {
     SveIntWhileRr(SveIntWhileRr),
     SveIntCterm(SveIntCterm),
     SveIntWhilenc(SveIntWhilenc),
+    SveIntWhileRrPn(SveIntWhileRrPn),
+    SveIntWhileRrPair(SveIntWhileRrPair),
+    SveIntCtrToMask(SveIntCtrToMask),
+    SveIntPnPtrue(SveIntPnPtrue),
     SveIntPcountPred(SveIntPcountPred),
+    SveIntPcountPn(SveIntPcountPn),
     SveIntCountVSat(SveIntCountVSat),
     SveIntCountV(SveIntCountV),
     SveIntCountRSat(SveIntCountRSat),
@@ -309,6 +363,53 @@ pub(crate) enum Encoding {
     SveIntArithImm2(SveIntArithImm2),
     SveIntDupImm(SveIntDupImm),
     SveIntDupFpimm(SveIntDupFpimm),
+    SveIntxDot(SveIntxDot),
+    SveIntxQdmlalbt(SveIntxQdmlalbt),
+    SveIntxCdot(SveIntxCdot),
+    SveIntxCmla(SveIntxCmla),
+    SveIntxMlalLong(SveIntxMlalLong),
+    SveIntxQdmlalLong(SveIntxQdmlalLong),
+    SveIntxQrdmlah(SveIntxQrdmlah),
+    SveIntxMixedDot(SveIntxMixedDot),
+    SveIntxBinPredShiftSatRound(SveIntxBinPredShiftSatRound),
+    SveIntxPredArithUnary(SveIntxPredArithUnary),
+    SveIntxAccumulateLongPairs(SveIntxAccumulateLongPairs),
+    SveIntxPredArithBinary(SveIntxPredArithBinary),
+    SveIntxArithBinaryPairs(SveIntxArithBinaryPairs),
+    SveIntxPredArithBinarySat(SveIntxPredArithBinarySat),
+    SveIntxClamp(SveIntxClamp),
+    SveIntxDot2(SveIntxDot2),
+    SveIntxDot2ByIndexedElem(SveIntxDot2ByIndexedElem),
+    SveIntxDotByIndexedElem(SveIntxDotByIndexedElem),
+    SveIntxMlaByIndexedElem(SveIntxMlaByIndexedElem),
+    SveIntxQrdmlahByIndexedElem(SveIntxQrdmlahByIndexedElem),
+    SveIntxMixedDotByIndexedElem(SveIntxMixedDotByIndexedElem),
+    SveIntxQdmlaLongByIndexedElem(SveIntxQdmlaLongByIndexedElem),
+    SveIntxCdotByIndexedElem(SveIntxCdotByIndexedElem),
+    SveIntxCmlaByIndexedElem(SveIntxCmlaByIndexedElem),
+    SveIntxQrdcmlaByIndexedElem(SveIntxQrdcmlaByIndexedElem),
+    SveIntxMlaLongByIndexedElem(SveIntxMlaLongByIndexedElem),
+    SveIntxMulLongByIndexedElem(SveIntxMulLongByIndexedElem),
+    SveIntxQdmulLongByIndexedElem(SveIntxQdmulLongByIndexedElem),
+    SveIntxQdmulhByIndexedElem(SveIntxQdmulhByIndexedElem),
+    SveIntxMulByIndexedElem(SveIntxMulByIndexedElem),
+    SveIntxConsArithLong(SveIntxConsArithLong),
+    SveIntxConsArithWide(SveIntxConsArithWide),
+    SveIntxConsMulLong(SveIntxConsMulLong),
+    SveIntxClong(SveIntxClong),
+    SveIntxEorx(SveIntxEorx),
+    SveIntxShiftLong(SveIntxShiftLong),
+    SveIntxAbaLong(SveIntxAbaLong),
+    SveIntxAdcLong(SveIntxAdcLong),
+    SveIntxCadd(SveIntxCadd),
+    SveIntxSra(SveIntxSra),
+    SveIntxShiftInsert(SveIntxShiftInsert),
+    SveIntxAba(SveIntxAba),
+    SveIntxShiftNarrow(SveIntxShiftNarrow),
+    SveIntxExtractNarrow(SveIntxExtractNarrow),
+    SveIntxMultiShiftNarrow(SveIntxMultiShiftNarrow),
+    SveIntxMultiExtractNarrow(SveIntxMultiExtractNarrow),
+    SveIntxArithNarrow(SveIntxArithNarrow),
     SveFpFcmla(SveFpFcmla),
     SveFpFcadd(SveFpFcadd),
     SveFpFcvt2(SveFpFcvt2),
@@ -316,6 +417,7 @@ pub(crate) enum Encoding {
     SveFpFmaByIndexedElem(SveFpFmaByIndexedElem),
     SveFpFcmlaByIndexedElem(SveFpFcmlaByIndexedElem),
     SveFpFmulByIndexedElem(SveFpFmulByIndexedElem),
+    SveFpClamp(SveFpClamp),
     SveFpFdotByIndexedElem(SveFpFdotByIndexedElem),
     SveFpFmaLongByIndexedElem(SveFpFmaLongByIndexedElem),
     SveFpFdot(SveFpFdot),
@@ -355,6 +457,148 @@ pub(crate) enum Encoding {
     SveMemCstSi(SveMemCstSi),
     SveMemCstntSi(SveMemCstntSi),
     SveMemEstSi(SveMemEstSi),
+    // sme
+    MortlachF32f32Prod(MortlachF32f32Prod),
+    MortlachB16f32Prod(MortlachB16f32Prod),
+    MortlachF16f32Prod(MortlachF16f32Prod),
+    MortlachI8i32Prod(MortlachI8i32Prod),
+    MortlachInsertPred(MortlachInsertPred),
+    MortlachExtractPred(MortlachExtractPred),
+    MortlachZero(MortlachZero),
+    MortlachAddhv(MortlachAddhv),
+    MortlachContigLoad(MortlachContigLoad),
+    MortlachContigStore(MortlachContigStore),
+    MortlachCtxtLdst(MortlachCtxtLdst),
+    MortlachContigQload(MortlachContigQload),
+    MortlachContigQstore(MortlachContigQstore),
+    MortlachMulti2CldCldntSsCtg(MortlachMulti2CldCldntSsCtg),
+    MortlachMulti4CldCldntSsCtg(MortlachMulti4CldCldntSsCtg),
+    MortlachMulti2CstCstntSsCtg(MortlachMulti2CstCstntSsCtg),
+    MortlachMulti4CstCstntSsCtg(MortlachMulti4CstCstntSsCtg),
+    MortlachMulti2CldCldntSiCtg(MortlachMulti2CldCldntSiCtg),
+    MortlachMulti4CldCldntSiCtg(MortlachMulti4CldCldntSiCtg),
+    MortlachMulti2CstCstntSiCtg(MortlachMulti2CstCstntSiCtg),
+    MortlachMulti4CstCstntSiCtg(MortlachMulti4CstCstntSiCtg),
+    MortlachMulti2CldCldntSsNctg(MortlachMulti2CldCldntSsNctg),
+    MortlachMulti4CldCldntSsNctg(MortlachMulti4CldCldntSsNctg),
+    MortlachMulti2CstCstntSsNctg(MortlachMulti2CstCstntSsNctg),
+    MortlachMulti4CstCstntSsNctg(MortlachMulti4CstCstntSsNctg),
+    MortlachMulti2CldCldntSiNctg(MortlachMulti2CldCldntSiNctg),
+    MortlachMulti4CldCldntSiNctg(MortlachMulti4CldCldntSiNctg),
+    MortlachMulti2CstCstntSiNctg(MortlachMulti2CstCstntSiNctg),
+    MortlachMulti4CstCstntSiNctg(MortlachMulti4CstCstntSiNctg),
+    MortlachZeroZt(MortlachZeroZt),
+    MortlachExtractZt(MortlachExtractZt),
+    MortlachInsertZt(MortlachInsertZt),
+    MortlachZtLdst(MortlachZtLdst),
+    MortlachMulti2SelectInt(MortlachMulti2SelectInt),
+    MortlachMulti4SelectInt(MortlachMulti4SelectInt),
+    MortlachMulti2ZZMinmaxSm(MortlachMulti2ZZMinmaxSm),
+    MortlachMulti2ZZFminmaxSm(MortlachMulti2ZZFminmaxSm),
+    MortlachMulti2ZZShiftSm(MortlachMulti2ZZShiftSm),
+    MortlachMulti2ZZAddSm(MortlachMulti2ZZAddSm),
+    MortlachMulti2ZZSqdmulhSm(MortlachMulti2ZZSqdmulhSm),
+    MortlachMulti4ZZMinmaxSm(MortlachMulti4ZZMinmaxSm),
+    MortlachMulti4ZZFminmaxSm(MortlachMulti4ZZFminmaxSm),
+    MortlachMulti4ZZShiftSm(MortlachMulti4ZZShiftSm),
+    MortlachMulti4ZZAddSm(MortlachMulti4ZZAddSm),
+    MortlachMulti4ZZSqdmulhSm(MortlachMulti4ZZSqdmulhSm),
+    MortlachMulti2ZZMinmaxMm(MortlachMulti2ZZMinmaxMm),
+    MortlachMulti2ZZFminmaxMm(MortlachMulti2ZZFminmaxMm),
+    MortlachMulti2ZZShiftMm(MortlachMulti2ZZShiftMm),
+    MortlachMulti2ZZSqdmulhMm(MortlachMulti2ZZSqdmulhMm),
+    MortlachMulti4ZZMinmaxMm(MortlachMulti4ZZMinmaxMm),
+    MortlachMulti4ZZFminmaxMm(MortlachMulti4ZZFminmaxMm),
+    MortlachMulti4ZZShiftMm(MortlachMulti4ZZShiftMm),
+    MortlachMulti4ZZSqdmulhMm(MortlachMulti4ZZSqdmulhMm),
+    MortlachMulti2Fclamp(MortlachMulti2Fclamp),
+    MortlachMulti2ClampInt(MortlachMulti2ClampInt),
+    MortlachMulti4Fclamp(MortlachMulti4Fclamp),
+    MortlachMulti4ClampInt(MortlachMulti4ClampInt),
+    MortlachMulti2ZZZip(MortlachMulti2ZZZip),
+    MortlachMulti2ZZLongZip(MortlachMulti2ZZLongZip),
+    MortlachMulti2Qrshr(MortlachMulti2Qrshr),
+    MortlachMulti4Qrshr(MortlachMulti4Qrshr),
+    MortlachMulti2NarrowFpCvrt(MortlachMulti2NarrowFpCvrt),
+    MortlachMulti2FpintCvrt(MortlachMulti2FpintCvrt),
+    MortlachMulti2IntfpCvrt(MortlachMulti2IntfpCvrt),
+    MortlachMulti2NarrowIntCvrt(MortlachMulti2NarrowIntCvrt),
+    MortlachMulti2WideInt(MortlachMulti2WideInt),
+    MortlachMulti2Frint(MortlachMulti2Frint),
+    MortlachMulti4FpintCvrt(MortlachMulti4FpintCvrt),
+    MortlachMulti4IntfpCvrt(MortlachMulti4IntfpCvrt),
+    MortlachMulti4NarrowIntCvrt(MortlachMulti4NarrowIntCvrt),
+    MortlachMulti4WideInt(MortlachMulti4WideInt),
+    MortlachMulti4ZZZip(MortlachMulti4ZZZip),
+    MortlachMulti4ZZLongZip(MortlachMulti4ZZLongZip),
+    MortlachMulti4Frint(MortlachMulti4Frint),
+    MortlachMulti2ZzZaMlaLongLongSm(MortlachMulti2ZzZaMlaLongLongSm),
+    MortlachMulti1ZzZaMlaLongLongSm(MortlachMulti1ZzZaMlaLongLongSm),
+    MortlachMulti2ZzZaFmaLongSm(MortlachMulti2ZzZaFmaLongSm),
+    MortlachMulti2ZzZaMlaLongSm(MortlachMulti2ZzZaMlaLongSm),
+    MortlachMulti1ZzZaFmaLongSm(MortlachMulti1ZzZaFmaLongSm),
+    MortlachMulti1ZzZaMlaLongSm(MortlachMulti1ZzZaMlaLongSm),
+    MortlachMulti2ZZaFpdotSm(MortlachMulti2ZZaFpdotSm),
+    MortlachMulti2ZZa4wayDotSm(MortlachMulti2ZZa4wayDotSm),
+    MortlachMulti2ZZaMixedDotSm(MortlachMulti2ZZaMixedDotSm),
+    MortlachMulti2ZZa2wayDotSm(MortlachMulti2ZZa2wayDotSm),
+    MortlachMulti2ZzZaFloatSm(MortlachMulti2ZzZaFloatSm),
+    MortlachMulti2ZzZaIntSm(MortlachMulti2ZzZaIntSm),
+    MortlachMulti4ZzZaMlaLongLongSm(MortlachMulti4ZzZaMlaLongLongSm),
+    MortlachMulti4ZzZaFmaLongSm(MortlachMulti4ZzZaFmaLongSm),
+    MortlachMulti4ZzZaMlaLongSm(MortlachMulti4ZzZaMlaLongSm),
+    MortlachMulti4ZZaFpdotSm(MortlachMulti4ZZaFpdotSm),
+    MortlachMulti4ZZa4wayDotSm(MortlachMulti4ZZa4wayDotSm),
+    MortlachMulti4ZZaMixedDotSm(MortlachMulti4ZZaMixedDotSm),
+    MortlachMulti4ZZa2wayDotSm(MortlachMulti4ZZa2wayDotSm),
+    MortlachMulti4ZzZaFloatSm(MortlachMulti4ZzZaFloatSm),
+    MortlachMulti4ZzZaIntSm(MortlachMulti4ZzZaIntSm),
+    MortlachMulti2ZzZaMlaLongLongMm(MortlachMulti2ZzZaMlaLongLongMm),
+    MortlachMulti2ZzZaFmaLongMm(MortlachMulti2ZzZaFmaLongMm),
+    MortlachMulti2ZzZaMlaLongMm(MortlachMulti2ZzZaMlaLongMm),
+    MortlachMulti2ZZaFpdotMm(MortlachMulti2ZZaFpdotMm),
+    MortlachMulti2ZZa4wayDotMm(MortlachMulti2ZZa4wayDotMm),
+    MortlachMulti2ZZaMixedDotMm(MortlachMulti2ZZaMixedDotMm),
+    MortlachMulti2ZZa2wayDotMm(MortlachMulti2ZZa2wayDotMm),
+    MortlachMulti2ZzZaFloatMm(MortlachMulti2ZzZaFloatMm),
+    MortlachMulti2ZzZaIntMm(MortlachMulti2ZzZaIntMm),
+    MortlachMulti2ZZaFloatMm(MortlachMulti2ZZaFloatMm),
+    MortlachMulti2ZZaIntMm(MortlachMulti2ZZaIntMm),
+    MortlachMulti4ZzZaMlaLongLongMm(MortlachMulti4ZzZaMlaLongLongMm),
+    MortlachMulti4ZzZaFmaLongMm(MortlachMulti4ZzZaFmaLongMm),
+    MortlachMulti4ZzZaMlaLongMm(MortlachMulti4ZzZaMlaLongMm),
+    MortlachMulti4ZZaFpdotMm(MortlachMulti4ZZaFpdotMm),
+    MortlachMulti4ZZa4wayDotMm(MortlachMulti4ZZa4wayDotMm),
+    MortlachMulti4ZZaMixedDotMm(MortlachMulti4ZZaMixedDotMm),
+    MortlachMulti4ZZa2wayDotMm(MortlachMulti4ZZa2wayDotMm),
+    MortlachMulti4ZzZaFloatMm(MortlachMulti4ZzZaFloatMm),
+    MortlachMulti4ZzZaIntMm(MortlachMulti4ZzZaIntMm),
+    MortlachMulti4ZZaFloatMm(MortlachMulti4ZZaFloatMm),
+    MortlachMulti4ZZaIntMm(MortlachMulti4ZZaIntMm),
+    MortlachMulti1MlaLongLongIdxS(MortlachMulti1MlaLongLongIdxS),
+    MortlachMulti1FmaLongIdx(MortlachMulti1FmaLongIdx),
+    MortlachMulti1MlaLongIdx(MortlachMulti1MlaLongIdx),
+    MortlachMulti2MlaLongLongIdxS(MortlachMulti2MlaLongLongIdxS),
+    MortlachMulti2ZzaIdxS(MortlachMulti2ZzaIdxS),
+    MortlachMulti2FmaLongIdx(MortlachMulti2FmaLongIdx),
+    MortlachMulti2MlaLongIdx(MortlachMulti2MlaLongIdx),
+    MortlachMulti4MlaLongLongIdxS(MortlachMulti4MlaLongLongIdxS),
+    MortlachMulti4ZzaIdxS(MortlachMulti4ZzaIdxS),
+    MortlachMulti4FmaLongIdx(MortlachMulti4FmaLongIdx),
+    MortlachMulti4MlaLongIdx(MortlachMulti4MlaLongIdx),
+    MortlachBini32Prod(MortlachBini32Prod),
+    MortlachI16i32Prod(MortlachI16i32Prod),
+    MortlachMulti2InsertCtg(MortlachMulti2InsertCtg),
+    MortlachMulti4InsertCtg(MortlachMulti4InsertCtg),
+    MortlachMulti2ZaInsertCtg(MortlachMulti2ZaInsertCtg),
+    MortlachMulti4ZaInsertCtg(MortlachMulti4ZaInsertCtg),
+    MortlachMulti2ExtractCtg(MortlachMulti2ExtractCtg),
+    MortlachMulti4ExtractCtg(MortlachMulti4ExtractCtg),
+    MortlachMulti2ZaExtractCtg(MortlachMulti2ZaExtractCtg),
+    MortlachMulti4ZaExtractCtg(MortlachMulti4ZaExtractCtg),
+    MortlachExpand1dst(MortlachExpand1dst),
+    MortlachExpand2dstCtg(MortlachExpand2dstCtg),
+    MortlachExpand4dstCtg(MortlachExpand4dstCtg),
 }
 
 /// The encoding `word` is, if it is one of a feature the decoder knows.
@@ -365,8 +609,8 @@ pub(crate) fn decode(word: u32) -> Option<Encoding> {
     let op1 = bits(word, 28, 25);
     match (op0, op1) {
         (0b0, 0b0000) => reserved::reserved(word),
-        // op0 = 1, op1 = 0000 is sme (FEAT_SME); op1 = 0001 and 0011 are
-        // unallocated.
+        (0b1, 0b0000) => sme::sme(word),
+        // op1 = 0001 and 0011 are unallocated.
         (_, 0b0010) => sve::sve(word),
         (_, 0b1000 | 0b1001) => dpimm::dpimm(word),
         (_, 0b1010 | 0b1011) => control::control(word),
@@ -532,6 +776,11 @@ impl Encoding {
             | Self::SveIntPfalse(_)
             | Self::SveIntPredDup(_) => Class::SvePredicateMisc,
             Self::SveIntWhileRr(_) | Self::SveIntWhilenc(_) => Class::SveWhile,
+            Self::SveIntWhileRrPn(_) => Class::SveWhileCounter,
+            Self::SveIntWhileRrPair(_) => Class::SveWhilePair,
+            Self::SveIntCtrToMask(_) => Class::SvePext,
+            Self::SveIntPnPtrue(_) => Class::SvePtrueCounter,
+            Self::SveIntPcountPn(_) => Class::SveCntpCounter,
             Self::SveIntCterm(_) => Class::SveConditionallyTerminate,
             Self::SveIntPcountPred(_)
             | Self::SveIntCountVSat(_)
@@ -543,6 +792,48 @@ impl Encoding {
             | Self::SveIntArithImm2(_)
             | Self::SveIntDupImm(_)
             | Self::SveIntDupFpimm(_) => Class::SveWideImmediate,
+            Self::SveIntxDot(_)
+            | Self::SveIntxMixedDot(_)
+            | Self::SveIntxDotByIndexedElem(_)
+            | Self::SveIntxMixedDotByIndexedElem(_) => Class::SveIntxDot,
+            Self::SveIntxCdot(_)
+            | Self::SveIntxCmla(_)
+            | Self::SveIntxCdotByIndexedElem(_)
+            | Self::SveIntxCmlaByIndexedElem(_)
+            | Self::SveIntxQrdcmlaByIndexedElem(_) => Class::SveIntxComplex,
+            Self::SveIntxQdmlalbt(_)
+            | Self::SveIntxMlalLong(_)
+            | Self::SveIntxQdmlalLong(_)
+            | Self::SveIntxMlaLongByIndexedElem(_)
+            | Self::SveIntxQdmlaLongByIndexedElem(_)
+            | Self::SveIntxMulLongByIndexedElem(_)
+            | Self::SveIntxQdmulLongByIndexedElem(_)
+            | Self::SveIntxConsMulLong(_) => Class::SveIntxMulLong,
+            Self::SveIntxConsArithLong(_) | Self::SveIntxConsArithWide(_) | Self::SveIntxClong(_) => {
+                Class::SveIntxLongArithmetic
+            }
+            Self::SveIntxEorx(_) => Class::SveIntxEorInterleaved,
+            Self::SveIntxShiftLong(_) => Class::SveIntxShiftLong,
+            Self::SveIntxAbaLong(_) | Self::SveIntxAba(_) => Class::SveIntxAbsDiffAccumulate,
+            Self::SveIntxAdcLong(_) => Class::SveIntxCarryLong,
+            Self::SveIntxCadd(_) => Class::SveIntxComplexAdd,
+            Self::SveIntxSra(_) | Self::SveIntxShiftInsert(_) => Class::SveIntxShiftAccumulate,
+            Self::SveIntxShiftNarrow(_) | Self::SveIntxExtractNarrow(_) | Self::SveIntxArithNarrow(_) => {
+                Class::SveIntxNarrow
+            }
+            Self::SveIntxMultiShiftNarrow(_) | Self::SveIntxMultiExtractNarrow(_) => Class::SveIntxNarrowPair,
+            Self::SveIntxQrdmlah(_)
+            | Self::SveIntxMlaByIndexedElem(_)
+            | Self::SveIntxQrdmlahByIndexedElem(_)
+            | Self::SveIntxQdmulhByIndexedElem(_)
+            | Self::SveIntxMulByIndexedElem(_) => Class::SveIntxMul,
+            Self::SveIntxBinPredShiftSatRound(_)
+            | Self::SveIntxPredArithBinary(_)
+            | Self::SveIntxArithBinaryPairs(_)
+            | Self::SveIntxPredArithBinarySat(_) => Class::SveIntxBinaryPredicated,
+            Self::SveIntxPredArithUnary(_) | Self::SveIntxAccumulateLongPairs(_) => Class::SveIntxUnaryPredicated,
+            Self::SveIntxClamp(_) => Class::SveIntxClamp,
+            Self::SveIntxDot2(_) | Self::SveIntxDot2ByIndexedElem(_) => Class::SveIntxDot,
             Self::SveFp2opPZds(_) | Self::SveFp2opIPZds(_) => Class::SveFpArithmeticPredicated,
             Self::SveFp3opUZd(_) => Class::SveFpArithmeticUnpredicated,
             Self::SveFpFastRed(_) => Class::SveFpReduction,
@@ -555,6 +846,7 @@ impl Encoding {
             Self::SveFp2opUZd(_) => Class::SveFpEstimate,
             Self::SveFp3opPZdsA(_) | Self::SveFp3opPZdsB(_) => Class::SveFpMulAdd,
             Self::SveFpFmaByIndexedElem(_) | Self::SveFpFmulByIndexedElem(_) => Class::SveFpIndexed,
+            Self::SveFpClamp(_) => Class::SveFpClamp,
             Self::SveFpFcmla(_) | Self::SveFpFcadd(_) | Self::SveFpFcmlaByIndexedElem(_) => Class::SveFpComplex,
             Self::SveFpPairwise(_) => Class::SveFpPairwise,
             Self::SveFpFcvt2(_) => Class::SveFpConvertOdd,
@@ -576,6 +868,169 @@ impl Encoding {
             Self::SveMemCstntSs(_) | Self::SveMemEstSs(_) | Self::SveMemCstntSi(_) | Self::SveMemEstSi(_) => {
                 Class::SveStoreStructures
             }
+            Self::MortlachF32f32Prod(_) | Self::MortlachB16f32Prod(_) | Self::MortlachF16f32Prod(_) => {
+                Class::SmeFpOuterProduct
+            }
+            Self::MortlachI8i32Prod(_) => Class::SmeIntOuterProduct,
+            Self::MortlachInsertPred(_) => Class::SmeMoveToSlice,
+            Self::MortlachExtractPred(_) => Class::SmeMoveFromSlice,
+            Self::MortlachZero(_) => Class::SmeZero,
+            Self::MortlachAddhv(_) => Class::SmeAddVector,
+            Self::MortlachContigLoad(_) | Self::MortlachContigQload(_) => Class::SmeLoadSlice,
+            Self::MortlachContigStore(_) | Self::MortlachContigQstore(_) => Class::SmeStoreSlice,
+            Self::MortlachCtxtLdst(_) => Class::SmeFillSpill,
+            Self::MortlachMulti2CldCldntSsCtg(_)
+            | Self::MortlachMulti4CldCldntSsCtg(_)
+            | Self::MortlachMulti2CldCldntSiCtg(_)
+            | Self::MortlachMulti4CldCldntSiCtg(_)
+            | Self::MortlachMulti2CldCldntSsNctg(_)
+            | Self::MortlachMulti4CldCldntSsNctg(_)
+            | Self::MortlachMulti2CldCldntSiNctg(_)
+            | Self::MortlachMulti4CldCldntSiNctg(_) => Class::SveLoadMulti,
+            Self::MortlachMulti2CstCstntSsCtg(_)
+            | Self::MortlachMulti4CstCstntSsCtg(_)
+            | Self::MortlachMulti2CstCstntSiCtg(_)
+            | Self::MortlachMulti4CstCstntSiCtg(_)
+            | Self::MortlachMulti2CstCstntSsNctg(_)
+            | Self::MortlachMulti4CstCstntSsNctg(_)
+            | Self::MortlachMulti2CstCstntSiNctg(_)
+            | Self::MortlachMulti4CstCstntSiNctg(_) => Class::SveStoreMulti,
+            Self::MortlachZeroZt(_) => Class::SmeZeroZt0,
+            // MOVT between ZT0 and a general register is defined only in
+            // Debug state (its decode's `!Halted()`), which this processor
+            // never enters.
+            Self::MortlachExtractZt(_) | Self::MortlachInsertZt(_) => Class::Undefined,
+            Self::MortlachZtLdst(_) => Class::SmeFillSpillZt0,
+            Self::MortlachMulti2SelectInt(_) | Self::MortlachMulti4SelectInt(_) => Class::SveMultiSelect,
+            Self::MortlachMulti2ZZMinmaxSm(_)
+            | Self::MortlachMulti2ZZShiftSm(_)
+            | Self::MortlachMulti2ZZAddSm(_)
+            | Self::MortlachMulti2ZZSqdmulhSm(_)
+            | Self::MortlachMulti4ZZMinmaxSm(_)
+            | Self::MortlachMulti4ZZShiftSm(_)
+            | Self::MortlachMulti4ZZAddSm(_)
+            | Self::MortlachMulti4ZZSqdmulhSm(_)
+            | Self::MortlachMulti2ZZMinmaxMm(_)
+            | Self::MortlachMulti2ZZShiftMm(_)
+            | Self::MortlachMulti2ZZSqdmulhMm(_)
+            | Self::MortlachMulti4ZZMinmaxMm(_)
+            | Self::MortlachMulti4ZZShiftMm(_)
+            | Self::MortlachMulti4ZZSqdmulhMm(_) => Class::SveMultiIntBinary,
+            Self::MortlachMulti2ZZFminmaxSm(_)
+            | Self::MortlachMulti4ZZFminmaxSm(_)
+            | Self::MortlachMulti2ZZFminmaxMm(_)
+            | Self::MortlachMulti4ZZFminmaxMm(_) => Class::SveMultiFpBinary,
+            Self::MortlachMulti2Fclamp(_)
+            | Self::MortlachMulti2ClampInt(_)
+            | Self::MortlachMulti4Fclamp(_)
+            | Self::MortlachMulti4ClampInt(_) => Class::SveMultiClamp,
+            Self::MortlachMulti2ZZZip(_)
+            | Self::MortlachMulti2ZZLongZip(_)
+            | Self::MortlachMulti4ZZZip(_)
+            | Self::MortlachMulti4ZZLongZip(_) => Class::SveMultiZip,
+            Self::MortlachMulti2Qrshr(_) | Self::MortlachMulti4Qrshr(_) => Class::SveMultiNarrowShift,
+            Self::MortlachMulti2NarrowIntCvrt(_) | Self::MortlachMulti4NarrowIntCvrt(_) => Class::SveMultiNarrowInt,
+            Self::MortlachMulti2NarrowFpCvrt(_) => Class::SveMultiNarrowFp,
+            Self::MortlachMulti2FpintCvrt(_)
+            | Self::MortlachMulti2IntfpCvrt(_)
+            | Self::MortlachMulti2Frint(_)
+            | Self::MortlachMulti4FpintCvrt(_)
+            | Self::MortlachMulti4IntfpCvrt(_)
+            | Self::MortlachMulti4Frint(_) => Class::SveMultiFpUnary,
+            Self::MortlachMulti2WideInt(_) | Self::MortlachMulti4WideInt(_) => Class::SveMultiUnpack,
+            Self::MortlachMulti2ZzZaMlaLongLongSm(_)
+            | Self::MortlachMulti1ZzZaMlaLongLongSm(_)
+            | Self::MortlachMulti4ZzZaMlaLongLongSm(_)
+            | Self::MortlachMulti2ZzZaMlaLongLongMm(_)
+            | Self::MortlachMulti4ZzZaMlaLongLongMm(_)
+            | Self::MortlachMulti1MlaLongLongIdxS(_)
+            | Self::MortlachMulti2MlaLongLongIdxS(_)
+            | Self::MortlachMulti4MlaLongLongIdxS(_) => Class::SmeArrayIntLongLong,
+            Self::MortlachMulti2ZzZaMlaLongSm(_)
+            | Self::MortlachMulti1ZzZaMlaLongSm(_)
+            | Self::MortlachMulti4ZzZaMlaLongSm(_)
+            | Self::MortlachMulti2ZzZaMlaLongMm(_)
+            | Self::MortlachMulti4ZzZaMlaLongMm(_) => Class::SmeArrayIntLong,
+            Self::MortlachMulti2ZzZaFmaLongSm(_)
+            | Self::MortlachMulti1ZzZaFmaLongSm(_)
+            | Self::MortlachMulti4ZzZaFmaLongSm(_)
+            | Self::MortlachMulti2ZzZaFmaLongMm(_)
+            | Self::MortlachMulti4ZzZaFmaLongMm(_) => Class::SmeArrayFpLong,
+            Self::MortlachMulti2ZZaFpdotSm(_)
+            | Self::MortlachMulti4ZZaFpdotSm(_)
+            | Self::MortlachMulti2ZZaFpdotMm(_)
+            | Self::MortlachMulti4ZZaFpdotMm(_) => Class::SmeArrayFpDot,
+            Self::MortlachMulti2ZZa4wayDotSm(_)
+            | Self::MortlachMulti2ZZaMixedDotSm(_)
+            | Self::MortlachMulti2ZZa2wayDotSm(_)
+            | Self::MortlachMulti4ZZa4wayDotSm(_)
+            | Self::MortlachMulti4ZZaMixedDotSm(_)
+            | Self::MortlachMulti4ZZa2wayDotSm(_)
+            | Self::MortlachMulti2ZZa4wayDotMm(_)
+            | Self::MortlachMulti2ZZaMixedDotMm(_)
+            | Self::MortlachMulti2ZZa2wayDotMm(_)
+            | Self::MortlachMulti4ZZa4wayDotMm(_)
+            | Self::MortlachMulti4ZZaMixedDotMm(_)
+            | Self::MortlachMulti4ZZa2wayDotMm(_) => Class::SmeArrayIntDot,
+            Self::MortlachMulti2ZzZaFloatSm(_)
+            | Self::MortlachMulti4ZzZaFloatSm(_)
+            | Self::MortlachMulti2ZzZaFloatMm(_)
+            | Self::MortlachMulti4ZzZaFloatMm(_) => Class::SmeArrayFpMulAdd,
+            Self::MortlachMulti2ZzZaIntSm(_)
+            | Self::MortlachMulti4ZzZaIntSm(_)
+            | Self::MortlachMulti2ZzZaIntMm(_)
+            | Self::MortlachMulti4ZzZaIntMm(_) => Class::SmeArrayAddVectors,
+            Self::MortlachMulti2ZZaFloatMm(_)
+            | Self::MortlachMulti4ZZaFloatMm(_)
+            | Self::MortlachMulti2ZZaIntMm(_)
+            | Self::MortlachMulti4ZZaIntMm(_) => Class::SmeArrayAccumulate,
+            Self::MortlachMulti1MlaLongIdx(_) | Self::MortlachMulti2MlaLongIdx(_) | Self::MortlachMulti4MlaLongIdx(_) => {
+                Class::SmeArrayIntLong
+            }
+            Self::MortlachMulti1FmaLongIdx(_) | Self::MortlachMulti2FmaLongIdx(_) | Self::MortlachMulti4FmaLongIdx(_) => {
+                Class::SmeArrayFpLong
+            }
+            Self::MortlachMulti2ZzaIdxS(encoding) => match encoding {
+                MortlachMulti2ZzaIdxS::FmlaZaZziS2xi | MortlachMulti2ZzaIdxS::FmlsZaZziS2xi => {
+                    Class::SmeIndexedFpMulAdd
+                }
+                MortlachMulti2ZzaIdxS::FdotZaZzi2xi | MortlachMulti2ZzaIdxS::BfdotZaZzi2xi => Class::SmeArrayFpDot,
+                MortlachMulti2ZzaIdxS::SdotZa32Zzi2xi
+                | MortlachMulti2ZzaIdxS::UdotZa32Zzi2xi
+                | MortlachMulti2ZzaIdxS::SdotZaZziS2xi
+                | MortlachMulti2ZzaIdxS::UdotZaZziS2xi
+                | MortlachMulti2ZzaIdxS::UsdotZaZziS2xi
+                | MortlachMulti2ZzaIdxS::SudotZaZziS2xi => Class::SmeIndexedIntDot,
+                MortlachMulti2ZzaIdxS::FvdotZaZzi2xi
+                | MortlachMulti2ZzaIdxS::BfvdotZaZzi2xi
+                | MortlachMulti2ZzaIdxS::SvdotZa32Zzi2xi
+                | MortlachMulti2ZzaIdxS::UvdotZa32Zzi2xi => Class::SmeIndexedVerticalDot,
+            },
+            Self::MortlachMulti4ZzaIdxS(encoding) => match encoding {
+                MortlachMulti4ZzaIdxS::FmlaZaZziS4xi | MortlachMulti4ZzaIdxS::FmlsZaZziS4xi => {
+                    Class::SmeIndexedFpMulAdd
+                }
+                MortlachMulti4ZzaIdxS::FdotZaZzi4xi | MortlachMulti4ZzaIdxS::BfdotZaZzi4xi => Class::SmeArrayFpDot,
+                MortlachMulti4ZzaIdxS::SdotZa32Zzi4xi
+                | MortlachMulti4ZzaIdxS::UdotZa32Zzi4xi
+                | MortlachMulti4ZzaIdxS::SdotZaZziS4xi
+                | MortlachMulti4ZzaIdxS::UdotZaZziS4xi
+                | MortlachMulti4ZzaIdxS::UsdotZaZziS4xi
+                | MortlachMulti4ZzaIdxS::SudotZaZziS4xi => Class::SmeIndexedIntDot,
+                MortlachMulti4ZzaIdxS::SvdotZaZziS4xi
+                | MortlachMulti4ZzaIdxS::UvdotZaZziS4xi
+                | MortlachMulti4ZzaIdxS::UsvdotZaZziS4xi
+                | MortlachMulti4ZzaIdxS::SuvdotZaZziS4xi => Class::SmeIndexedVerticalDot,
+            },
+            Self::MortlachBini32Prod(_) => Class::SmeBinaryOuterProduct,
+            Self::MortlachI16i32Prod(_) => Class::SmeIntOuterProductHalfwords,
+            Self::MortlachMulti2InsertCtg(_) | Self::MortlachMulti4InsertCtg(_) => Class::SmeMoveGroupToSlices,
+            Self::MortlachMulti2ExtractCtg(_) | Self::MortlachMulti4ExtractCtg(_) => Class::SmeMoveGroupFromSlices,
+            Self::MortlachMulti2ZaInsertCtg(_) | Self::MortlachMulti4ZaInsertCtg(_) => Class::SmeMoveGroupToArray,
+            Self::MortlachMulti2ZaExtractCtg(_) | Self::MortlachMulti4ZaExtractCtg(_) => Class::SmeMoveGroupFromArray,
+            Self::MortlachExpand1dst(_) | Self::MortlachExpand2dstCtg(_) | Self::MortlachExpand4dstCtg(_) => {
+                Class::SmeLookupTable
+            }
         }
     }
 }
@@ -587,7 +1042,9 @@ impl Encoding {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum Class {
     /// The Undefined Instruction exception: UDF, which is permanently
-    /// undefined, and every word [`decode`] finds no encoding for.
+    /// undefined, every word [`decode`] finds no encoding for, and the
+    /// encodings defined only in Debug state, which this processor never
+    /// enters.
     Undefined,
     PcRelAddressing,
     AddSubImmediate,
@@ -814,6 +1271,16 @@ pub(crate) enum Class {
     SvePredicateMisc,
     /// WHILE<cc>, WHILEWR, WHILERW.
     SveWhile,
+    /// WHILE<cc> (predicate-as-counter).
+    SveWhileCounter,
+    /// WHILE<cc> (pair of predicates).
+    SveWhilePair,
+    /// PEXT of one predicate and of a pair.
+    SvePext,
+    /// PTRUE (predicate-as-counter).
+    SvePtrueCounter,
+    /// CNTP (predicate-as-counter).
+    SveCntpCounter,
     /// CTERMEQ, CTERMNE.
     SveConditionallyTerminate,
     /// CNTP, INCP, DECP and their saturating forms.
@@ -821,6 +1288,51 @@ pub(crate) enum Class {
     /// `sve_wideimm_unpred`: the add/subtract, min/max and multiply
     /// immediates, DUP (immediate), FDUP.
     SveWideImmediate,
+    /// SDOT, UDOT, USDOT, by vector and indexed (bit 21), and SUDOT
+    /// (indexed); and SDOT and UDOT of halfword pairs, by vector and
+    /// indexed (bit 23).
+    SveIntxDot,
+    /// CDOT, CMLA and SQRDCMLAH, by vector and indexed (bit 21).
+    SveIntxComplex,
+    /// The long multiplies and multiply-adds: SMLALB to UMLSLT, SQDMLALB to
+    /// SQDMLSLT, SQDMLALBT and SQDMLSLBT by vector; SMLALB to UMLSLT,
+    /// SQDMLALB to SQDMLSLT, SMULLB to UMULLT, SQDMULLB and SQDMULLT
+    /// indexed (bit 21); SMULLB to UMULLT, SQDMULLB, SQDMULLT, PMULLB and
+    /// PMULLT by vector (bit 24).
+    SveIntxMulLong,
+    /// SADDLB to UABDLT, SADDWB to USUBWT, SADDLBT, SSUBLBT, SSUBLTB: the
+    /// sums, differences and absolute differences of half-size elements,
+    /// or of a wide element and a half-size one.
+    SveIntxLongArithmetic,
+    /// EORBT, EORTB.
+    SveIntxEorInterleaved,
+    /// SSHLLB, SSHLLT, USHLLB, USHLLT.
+    SveIntxShiftLong,
+    /// SABA, UABA and SABALB to UABALT.
+    SveIntxAbsDiffAccumulate,
+    /// ADCLB, ADCLT, SBCLB, SBCLT.
+    SveIntxCarryLong,
+    /// CADD, SQCADD.
+    SveIntxComplexAdd,
+    /// SSRA, SRSRA, USRA, URSRA, SRI, SLI.
+    SveIntxShiftAccumulate,
+    /// The narrowing shifts (SHRNB to UQRSHRNT), the saturating extracts
+    /// (SQXTNB to UQXTNT) and the high halves of sums and differences
+    /// (ADDHNB to RSUBHNT).
+    SveIntxNarrow,
+    /// SQRSHRN, SQRSHRUN, UQRSHRN, SQCVTN, SQCVTUN, UQCVTN of two vectors.
+    SveIntxNarrowPair,
+    /// SQRDMLAH and SQRDMLSH by vector and indexed (bit 21); MLA, MLS,
+    /// MUL, SQDMULH and SQRDMULH indexed.
+    SveIntxMul,
+    /// `sve_intx_predicated`'s binary operations: the saturating and
+    /// rounding shifts, the halving adds and subtracts, the pairwise
+    /// operations and the saturating adds and subtracts.
+    SveIntxBinaryPredicated,
+    /// URECPE, URSQRTE, SQABS, SQNEG, SADALP, UADALP.
+    SveIntxUnaryPredicated,
+    /// SCLAMP, UCLAMP.
+    SveIntxClamp,
     /// `sve_fp_pred`: FADD, FSUB, FMUL, FSUBR, FMAXNM, FMINNM, FMAX, FMIN
     /// of vectors and of an immediate (bit 20), and FABD, FSCALE, FMULX,
     /// FDIVR, FDIV, predicated.
@@ -842,14 +1354,16 @@ pub(crate) enum Class {
     SveFpMulAdd,
     /// FMLA, FMLS and FMUL (bit 13), indexed.
     SveFpIndexed,
+    /// FCLAMP.
+    SveFpClamp,
     /// FCMLA, predicated and indexed (bit 21), and FCADD.
     SveFpComplex,
     /// FADDP, FMAXNMP, FMINNMP, FMAXP, FMINP.
     SveFpPairwise,
     /// FCVTNT, FCVTXNT, BFCVTNT, FCVTLT.
     SveFpConvertOdd,
-    /// FMLALB, FMLALT, FMLSLB, FMLSLT, BFMLALB, BFMLALT and BFDOT, by
-    /// vector and indexed.
+    /// FMLALB, FMLALT, FMLSLB, FMLSLT, BFMLALB, BFMLALT, BFMLSLB, BFMLSLT,
+    /// FDOT and BFDOT, by vector and indexed.
     SveFpWidening,
     /// LDR and STR of a vector or a predicate register: the handler reads
     /// the direction from bit 30 and the register file from bit 14.
@@ -872,6 +1386,116 @@ pub(crate) enum Class {
     SveStoreContiguous,
     /// STNT1 and ST2, ST3, ST4, as [`Class::SveLoadStructures`].
     SveStoreStructures,
+    /// LD1B to LD1D and LDNT1B to LDNT1D of two or four vectors under a
+    /// predicate-as-counter: the handler reads the registers, the
+    /// addressing form and the element size from the word.
+    SveLoadMulti,
+    /// ST1B to ST1D and STNT1B to STNT1D of two or four vectors, as
+    /// [`Class::SveLoadMulti`].
+    SveStoreMulti,
+    /// SEL of two or four vectors under a predicate-as-counter.
+    SveMultiSelect,
+    /// SMAX, SMIN, UMAX, UMIN, SRSHL, URSHL, ADD and SQDMULH of two or
+    /// four vectors by one or by as many: the handler reads the operation
+    /// and the registers from the word.
+    SveMultiIntBinary,
+    /// FMAX, FMIN, FMAXNM and FMINNM of two or four vectors by one or by as
+    /// many.
+    SveMultiFpBinary,
+    /// SCLAMP, UCLAMP and FCLAMP of two or four vectors.
+    SveMultiClamp,
+    /// ZIP and UZP of elements or quadwords, two vectors into two and four
+    /// into four.
+    SveMultiZip,
+    /// SQRSHR, SQRSHRU, UQRSHR of two or four vectors, and SQRSHRN,
+    /// SQRSHRUN, UQRSHRN of four.
+    SveMultiNarrowShift,
+    /// SQCVT, SQCVTU, UQCVT of two or four vectors, and SQCVTN, SQCVTUN,
+    /// UQCVTN of four.
+    SveMultiNarrowInt,
+    /// BFCVT, FCVT, BFCVTN and FCVTN of two vectors.
+    SveMultiNarrowFp,
+    /// FCVTZS, FCVTZU, SCVTF, UCVTF, FRINTN, FRINTP, FRINTM and FRINTA of
+    /// two or four vectors of words.
+    SveMultiFpUnary,
+    /// SUNPK and UUNPK of one vector to two and of two to four.
+    SveMultiUnpack,
+    /// SMLALL, SMLSLL, UMLALL, UMLSLL, USMLALL and SUMLALL of bytes into
+    /// ZA array vectors of words: one, two or four vectors by one, by as
+    /// many or by an indexed byte.
+    SmeArrayIntLongLong,
+    /// SMLAL, SMLSL, UMLAL and UMLSL of halfwords into ZA array vectors of
+    /// words, by vectors or by an indexed halfword.
+    SmeArrayIntLong,
+    /// FMLAL, FMLSL, BFMLAL and BFMLSL of half-precision and BFloat16
+    /// values into ZA array vectors of single-precision values, by vectors
+    /// or by an indexed element.
+    SmeArrayFpLong,
+    /// FDOT and BFDOT of pairs into ZA array vectors of single-precision
+    /// values, by vectors or by an indexed pair.
+    SmeArrayFpDot,
+    /// SDOT, UDOT, USDOT and SUDOT of bytes, and SDOT and UDOT of
+    /// halfwords, into ZA array vectors of words.
+    SmeArrayIntDot,
+    /// FMLA and FMLS of single-precision values into ZA array vectors.
+    SmeArrayFpMulAdd,
+    /// ADD and SUB of vectors into ZA array vectors of words: the sum or
+    /// difference replaces them.
+    SmeArrayAddVectors,
+    /// FADD, FSUB, ADD and SUB of vectors to ZA array vectors of
+    /// single-precision values or words.
+    SmeArrayAccumulate,
+    /// SDOT, UDOT, USDOT and SUDOT of bytes, and SDOT and UDOT of
+    /// halfwords, by an indexed group into ZA array vectors of words.
+    SmeIndexedIntDot,
+    /// FMLA and FMLS of single-precision values by an indexed element into
+    /// ZA array vectors.
+    SmeIndexedFpMulAdd,
+    /// FVDOT, BFVDOT, SVDOT, UVDOT, USVDOT and SUVDOT: the dot products of
+    /// the elements in the same place of each register of the group, by an
+    /// indexed group, into ZA array vectors.
+    SmeIndexedVerticalDot,
+    /// BMOPA and BMOPS: the population counts of the XNORs of words, into
+    /// 32-bit tiles.
+    SmeBinaryOuterProduct,
+    /// SMOPA, UMOPA, SMOPS and UMOPS of halfwords into 32-bit tiles.
+    SmeIntOuterProductHalfwords,
+    /// MOVA of two or four vectors to consecutive tile slices.
+    SmeMoveGroupToSlices,
+    /// MOVA of two or four consecutive tile slices to vectors.
+    SmeMoveGroupFromSlices,
+    /// MOVA of two or four vectors to ZA array vectors.
+    SmeMoveGroupToArray,
+    /// MOVA of ZA array vectors to two or four vectors.
+    SmeMoveGroupFromArray,
+    /// LUTI2 and LUTI4 from ZT0 into one, two or four vectors.
+    SmeLookupTable,
+    /// FMOPA and FMOPS of single-precision and of half-precision values,
+    /// BFMOPA and BFMOPS, into 32-bit tiles: the handler reads which from
+    /// bits 24, 21 and 4.
+    SmeFpOuterProduct,
+    /// SMOPA, SUMOPA, USMOPA, UMOPA, SMOPS, SUMOPS, USMOPS, UMOPS of bytes
+    /// into 32-bit tiles.
+    SmeIntOuterProduct,
+    /// MOVA from a vector to a tile slice.
+    SmeMoveToSlice,
+    /// MOVA from a tile slice to a vector.
+    SmeMoveFromSlice,
+    /// ZERO of a list of 64-bit tiles.
+    SmeZero,
+    /// ADDHA and ADDVA of words.
+    SmeAddVector,
+    /// LD1B, LD1H, LD1W, LD1D and LD1Q to a tile slice.
+    SmeLoadSlice,
+    /// ST1B, ST1H, ST1W, ST1D and ST1Q from a tile slice.
+    SmeStoreSlice,
+    /// LDR and STR of a ZA array vector: the handler reads the direction
+    /// from bit 21.
+    SmeFillSpill,
+    /// ZERO {ZT0}.
+    SmeZeroZt0,
+    /// LDR and STR of ZT0: the handler reads the direction from bit 21.
+    SmeFillSpillZt0,
 }
 
 /// What an encoding's decode does about the branch that led to it into a
@@ -1101,6 +1725,49 @@ impl Encoding {
             | Self::SveIntArithImm2(_)
             | Self::SveIntDupImm(_)
             | Self::SveIntDupFpimm(_)
+            | Self::SveIntxDot(_)
+            | Self::SveIntxQdmlalbt(_)
+            | Self::SveIntxCdot(_)
+            | Self::SveIntxCmla(_)
+            | Self::SveIntxMlalLong(_)
+            | Self::SveIntxQdmlalLong(_)
+            | Self::SveIntxQrdmlah(_)
+            | Self::SveIntxMixedDot(_)
+            | Self::SveIntxBinPredShiftSatRound(_)
+            | Self::SveIntxPredArithUnary(_)
+            | Self::SveIntxAccumulateLongPairs(_)
+            | Self::SveIntxPredArithBinary(_)
+            | Self::SveIntxArithBinaryPairs(_)
+            | Self::SveIntxPredArithBinarySat(_)
+            | Self::SveIntxClamp(_)
+            | Self::SveIntxDotByIndexedElem(_)
+            | Self::SveIntxMlaByIndexedElem(_)
+            | Self::SveIntxQrdmlahByIndexedElem(_)
+            | Self::SveIntxMixedDotByIndexedElem(_)
+            | Self::SveIntxQdmlaLongByIndexedElem(_)
+            | Self::SveIntxCdotByIndexedElem(_)
+            | Self::SveIntxCmlaByIndexedElem(_)
+            | Self::SveIntxQrdcmlaByIndexedElem(_)
+            | Self::SveIntxMlaLongByIndexedElem(_)
+            | Self::SveIntxMulLongByIndexedElem(_)
+            | Self::SveIntxQdmulLongByIndexedElem(_)
+            | Self::SveIntxQdmulhByIndexedElem(_)
+            | Self::SveIntxMulByIndexedElem(_)
+            | Self::SveIntxConsArithLong(_)
+            | Self::SveIntxConsArithWide(_)
+            | Self::SveIntxConsMulLong(_)
+            | Self::SveIntxClong(_)
+            | Self::SveIntxEorx(_)
+            | Self::SveIntxShiftLong(_)
+            | Self::SveIntxAbaLong(_)
+            | Self::SveIntxAdcLong(_)
+            | Self::SveIntxCadd(_)
+            | Self::SveIntxSra(_)
+            | Self::SveIntxShiftInsert(_)
+            | Self::SveIntxAba(_)
+            | Self::SveIntxShiftNarrow(_)
+            | Self::SveIntxExtractNarrow(_)
+            | Self::SveIntxArithNarrow(_)
             | Self::SveFpFcmla(_)
             | Self::SveFpFcadd(_)
             | Self::SveFpFcvt2(_)
@@ -1108,10 +1775,6 @@ impl Encoding {
             | Self::SveFpFmaByIndexedElem(_)
             | Self::SveFpFcmlaByIndexedElem(_)
             | Self::SveFpFmulByIndexedElem(_)
-            | Self::SveFpFdotByIndexedElem(_)
-            | Self::SveFpFmaLongByIndexedElem(_)
-            | Self::SveFpFdot(_)
-            | Self::SveFpFmaLong(_)
             | Self::SveFp3opUZd(_)
             | Self::SveFpFastRed(_)
             | Self::SveFp3opPPd(_)
@@ -1146,7 +1809,165 @@ impl Encoding {
             | Self::SveMemEstSs(_)
             | Self::SveMemCstSi(_)
             | Self::SveMemCstntSi(_)
-            | Self::SveMemEstSi(_) => Feature::Sme,
+            | Self::SveMemEstSi(_)
+            | Self::MortlachF32f32Prod(_)
+            | Self::MortlachB16f32Prod(_)
+            | Self::MortlachF16f32Prod(_)
+            | Self::MortlachI8i32Prod(_)
+            | Self::MortlachInsertPred(_)
+            | Self::MortlachExtractPred(_)
+            | Self::MortlachZero(_)
+            | Self::MortlachAddhv(_)
+            | Self::MortlachContigLoad(_)
+            | Self::MortlachContigStore(_)
+            | Self::MortlachCtxtLdst(_)
+            | Self::MortlachContigQload(_)
+            | Self::MortlachContigQstore(_) => Feature::Sme,
+            // FEAT_SVE2p1 has the predicate-as-counter instructions and the
+            // consecutive multi-vector loads and stores as well, which this
+            // decoder does not separate, implementing FEAT_SME2 alone.
+            Self::SveIntWhileRrPn(_)
+            | Self::SveIntWhileRrPair(_)
+            | Self::SveIntCtrToMask(_)
+            | Self::SveIntPnPtrue(_)
+            | Self::SveIntPcountPn(_)
+            | Self::MortlachMulti2CldCldntSsCtg(_)
+            | Self::MortlachMulti4CldCldntSsCtg(_)
+            | Self::MortlachMulti2CstCstntSsCtg(_)
+            | Self::MortlachMulti4CstCstntSsCtg(_)
+            | Self::MortlachMulti2CldCldntSiCtg(_)
+            | Self::MortlachMulti4CldCldntSiCtg(_)
+            | Self::MortlachMulti2CstCstntSiCtg(_)
+            | Self::MortlachMulti4CstCstntSiCtg(_)
+            | Self::MortlachMulti2CldCldntSsNctg(_)
+            | Self::MortlachMulti4CldCldntSsNctg(_)
+            | Self::MortlachMulti2CstCstntSsNctg(_)
+            | Self::MortlachMulti4CstCstntSsNctg(_)
+            | Self::MortlachMulti2CldCldntSiNctg(_)
+            | Self::MortlachMulti4CldCldntSiNctg(_)
+            | Self::MortlachMulti2CstCstntSiNctg(_)
+            | Self::MortlachMulti4CstCstntSiNctg(_)
+            | Self::MortlachZeroZt(_)
+            | Self::MortlachExtractZt(_)
+            | Self::MortlachInsertZt(_)
+            | Self::MortlachZtLdst(_)
+            | Self::MortlachMulti2SelectInt(_)
+            | Self::MortlachMulti4SelectInt(_)
+            | Self::MortlachMulti2ZZMinmaxSm(_)
+            | Self::MortlachMulti2ZZFminmaxSm(_)
+            | Self::MortlachMulti2ZZShiftSm(_)
+            | Self::MortlachMulti2ZZAddSm(_)
+            | Self::MortlachMulti2ZZSqdmulhSm(_)
+            | Self::MortlachMulti4ZZMinmaxSm(_)
+            | Self::MortlachMulti4ZZFminmaxSm(_)
+            | Self::MortlachMulti4ZZShiftSm(_)
+            | Self::MortlachMulti4ZZAddSm(_)
+            | Self::MortlachMulti4ZZSqdmulhSm(_)
+            | Self::MortlachMulti2ZZMinmaxMm(_)
+            | Self::MortlachMulti2ZZFminmaxMm(_)
+            | Self::MortlachMulti2ZZShiftMm(_)
+            | Self::MortlachMulti2ZZSqdmulhMm(_)
+            | Self::MortlachMulti4ZZMinmaxMm(_)
+            | Self::MortlachMulti4ZZFminmaxMm(_)
+            | Self::MortlachMulti4ZZShiftMm(_)
+            | Self::MortlachMulti4ZZSqdmulhMm(_)
+            | Self::MortlachMulti2Fclamp(_)
+            | Self::MortlachMulti2ClampInt(_)
+            | Self::MortlachMulti4Fclamp(_)
+            | Self::MortlachMulti4ClampInt(_)
+            | Self::MortlachMulti2ZZZip(_)
+            | Self::MortlachMulti2ZZLongZip(_)
+            | Self::MortlachMulti2Qrshr(_)
+            | Self::MortlachMulti4Qrshr(_)
+            | Self::MortlachMulti2NarrowFpCvrt(_)
+            | Self::MortlachMulti2FpintCvrt(_)
+            | Self::MortlachMulti2IntfpCvrt(_)
+            | Self::MortlachMulti2NarrowIntCvrt(_)
+            | Self::MortlachMulti2WideInt(_)
+            | Self::MortlachMulti2Frint(_)
+            | Self::MortlachMulti4FpintCvrt(_)
+            | Self::MortlachMulti4IntfpCvrt(_)
+            | Self::MortlachMulti4NarrowIntCvrt(_)
+            | Self::MortlachMulti4WideInt(_)
+            | Self::MortlachMulti4ZZZip(_)
+            | Self::MortlachMulti4ZZLongZip(_)
+            | Self::MortlachMulti4Frint(_)
+            | Self::MortlachMulti2ZzZaMlaLongLongSm(_)
+            | Self::MortlachMulti1ZzZaMlaLongLongSm(_)
+            | Self::MortlachMulti2ZzZaFmaLongSm(_)
+            | Self::MortlachMulti2ZzZaMlaLongSm(_)
+            | Self::MortlachMulti1ZzZaFmaLongSm(_)
+            | Self::MortlachMulti1ZzZaMlaLongSm(_)
+            | Self::MortlachMulti2ZZaFpdotSm(_)
+            | Self::MortlachMulti2ZZa4wayDotSm(_)
+            | Self::MortlachMulti2ZZaMixedDotSm(_)
+            | Self::MortlachMulti2ZZa2wayDotSm(_)
+            | Self::MortlachMulti2ZzZaFloatSm(_)
+            | Self::MortlachMulti2ZzZaIntSm(_)
+            | Self::MortlachMulti4ZzZaMlaLongLongSm(_)
+            | Self::MortlachMulti4ZzZaFmaLongSm(_)
+            | Self::MortlachMulti4ZzZaMlaLongSm(_)
+            | Self::MortlachMulti4ZZaFpdotSm(_)
+            | Self::MortlachMulti4ZZa4wayDotSm(_)
+            | Self::MortlachMulti4ZZaMixedDotSm(_)
+            | Self::MortlachMulti4ZZa2wayDotSm(_)
+            | Self::MortlachMulti4ZzZaFloatSm(_)
+            | Self::MortlachMulti4ZzZaIntSm(_)
+            | Self::MortlachMulti2ZzZaMlaLongLongMm(_)
+            | Self::MortlachMulti2ZzZaFmaLongMm(_)
+            | Self::MortlachMulti2ZzZaMlaLongMm(_)
+            | Self::MortlachMulti2ZZaFpdotMm(_)
+            | Self::MortlachMulti2ZZa4wayDotMm(_)
+            | Self::MortlachMulti2ZZaMixedDotMm(_)
+            | Self::MortlachMulti2ZZa2wayDotMm(_)
+            | Self::MortlachMulti2ZzZaFloatMm(_)
+            | Self::MortlachMulti2ZzZaIntMm(_)
+            | Self::MortlachMulti2ZZaFloatMm(_)
+            | Self::MortlachMulti2ZZaIntMm(_)
+            | Self::MortlachMulti4ZzZaMlaLongLongMm(_)
+            | Self::MortlachMulti4ZzZaFmaLongMm(_)
+            | Self::MortlachMulti4ZzZaMlaLongMm(_)
+            | Self::MortlachMulti4ZZaFpdotMm(_)
+            | Self::MortlachMulti4ZZa4wayDotMm(_)
+            | Self::MortlachMulti4ZZaMixedDotMm(_)
+            | Self::MortlachMulti4ZZa2wayDotMm(_)
+            | Self::MortlachMulti4ZzZaFloatMm(_)
+            | Self::MortlachMulti4ZzZaIntMm(_)
+            | Self::MortlachMulti4ZZaFloatMm(_)
+            | Self::MortlachMulti4ZZaIntMm(_)
+            | Self::MortlachMulti1MlaLongLongIdxS(_)
+            | Self::MortlachMulti1FmaLongIdx(_)
+            | Self::MortlachMulti1MlaLongIdx(_)
+            | Self::MortlachMulti2MlaLongLongIdxS(_)
+            | Self::MortlachMulti2ZzaIdxS(_)
+            | Self::MortlachMulti2FmaLongIdx(_)
+            | Self::MortlachMulti2MlaLongIdx(_)
+            | Self::MortlachMulti4MlaLongLongIdxS(_)
+            | Self::MortlachMulti4ZzaIdxS(_)
+            | Self::MortlachMulti4FmaLongIdx(_)
+            | Self::MortlachMulti4MlaLongIdx(_)
+            | Self::MortlachBini32Prod(_)
+            | Self::MortlachI16i32Prod(_)
+            | Self::MortlachMulti2InsertCtg(_)
+            | Self::MortlachMulti4InsertCtg(_)
+            | Self::MortlachMulti2ZaInsertCtg(_)
+            | Self::MortlachMulti4ZaInsertCtg(_)
+            | Self::MortlachMulti2ExtractCtg(_)
+            | Self::MortlachMulti4ExtractCtg(_)
+            | Self::MortlachMulti2ZaExtractCtg(_)
+            | Self::MortlachMulti4ZaExtractCtg(_)
+            | Self::MortlachExpand1dst(_)
+            | Self::MortlachExpand2dstCtg(_)
+            | Self::MortlachExpand4dstCtg(_)
+            | Self::SveIntxDot2(_)
+            | Self::SveIntxDot2ByIndexedElem(_)
+            | Self::SveIntxMultiShiftNarrow(_)
+            | Self::SveIntxMultiExtractNarrow(_)
+            | Self::SveFpClamp(_) => Feature::Sme2,
+            Self::SveFpFdotByIndexedElem(e) => e.feature(),
+            Self::SveFpFmaLongByIndexedElem(e) => e.feature(),
+            Self::SveFpFdot(e) => e.feature(),
+            Self::SveFpFmaLong(e) => e.feature(),
         }
     }
 }
@@ -1225,7 +2046,8 @@ mod tests {
                     Feature::Sha1 => field(isar0, 8) != 0,
                     Feature::Sha256 => field(isar0, 12) != 0,
                     Feature::Crc32 => field(isar0, 16) != 0,
-                    Feature::Sme => field(pfr1, 24) != 0,
+                    Feature::Sme => field(pfr1, 24) >= 1,
+                    Feature::Sme2 => field(pfr1, 24) >= 2,
                     Feature::Lse => field(isar0, 20) != 0,
                     Feature::Lse2 => field(mmfr2, 32) != 0,
                     Feature::Lrcpc => field(isar1, 20) >= 1,
@@ -1351,11 +2173,19 @@ mod tests {
             // PFR1: BT = 1 (FEAT_BTI, not FEAT_BTIE), SSBS and SME alone.
             assert_eq!(pfr1 & !((0xF << 24) | (0xF << 4) | 0xF), 0);
             assert!(field(pfr1, 0) <= 1, "BT = 1: FEAT_BTI, not FEAT_BTIE");
-            if imp.has(Feature::Sme) {
-                assert_eq!(field(pfr1, 24), 1, "SME = 1: FEAT_SME, not FEAT_SME2");
-                assert_eq!(smfr0, 0x0000_00FD_0000_0000, "F32F32, B16F32, F16F32, I8I32; SMEver 0");
-            } else {
-                assert_eq!((field(pfr1, 24), smfr0), (0, 0));
+            match (imp.has(Feature::Sme), imp.has(Feature::Sme2)) {
+                (true, false) => {
+                    assert_eq!(field(pfr1, 24), 1, "SME = 1: FEAT_SME, not FEAT_SME2");
+                    assert_eq!(smfr0, 0x0000_00FD_0000_0000, "F32F32, B16F32, F16F32, I8I32; SMEver 0");
+                }
+                (true, true) => {
+                    assert_eq!(field(pfr1, 24), 2, "SME = 2: FEAT_SME2");
+                    assert_eq!(
+                        smfr0, 0x0100_50FF_0000_0000,
+                        "F32F32, BI32I32, B16F32, F16F32, I8I32, I16I32 = 0b0101; SMEver 1"
+                    );
+                }
+                (false, _) => assert_eq!((field(pfr1, 24), smfr0), (0, 0)),
             }
         }
     }

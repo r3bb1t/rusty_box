@@ -1310,7 +1310,8 @@ fn configs<L: Levels>(imp: Implementation) -> Vec<Config> {
             out.push(c);
         }
     }
-    let mut seed = 0x5EED_0000_0000_0000 ^ imp.features.bits();
+    let features = imp.features.bits();
+    let mut seed = 0x5EED_0000_0000_0000 ^ features as u64 ^ (features >> 64) as u64;
     for i in 0..12 {
         let writes = variable.iter().map(|&(name, mask)| (name, splitmix(&mut seed) & mask)).collect();
         let r = splitmix(&mut seed);

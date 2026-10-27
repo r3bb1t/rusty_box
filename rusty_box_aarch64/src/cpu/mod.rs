@@ -70,6 +70,9 @@ mod sysreg_spec;
 mod system;
 mod timer;
 mod wait;
+mod za;
+mod za_array;
+mod zt0;
 
 use rusty_box_core::{ClockHz, RingBuffer, VmClock, VmInstant};
 
@@ -412,7 +415,7 @@ pub(crate) struct SysRegs {
     pub(crate) tpidr_el1: u64,
     /// `TPIDR2_EL0` (FEAT_SME).
     pub(crate) tpidr2_el0: u64,
-    /// `SMCR_EL1` (FEAT_SME): the `LEN` field this core keeps.
+    /// `SMCR_EL1` (FEAT_SME): the `LEN` field, and `EZT0` with FEAT_SME2.
     pub(crate) smcr_el1: u64,
     pub(crate) csselr_el1: u64,
     pub(crate) cntkctl_el1: u64,

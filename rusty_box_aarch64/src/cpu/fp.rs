@@ -312,6 +312,13 @@ impl FpEnv {
         self
     }
 
+    /// The environment the SME instructions that accumulate into ZA
+    /// compute in (Arm `FPMulAdd_ZA`, `FPDotAdd_ZA`): FPCR.DN read as 1.
+    pub(crate) fn with_default_nan(mut self) -> Self {
+        self.status = self.status.with_default_nan();
+        self
+    }
+
     /// FPCR.RMode, for the operations that round by it.
     pub(crate) fn rounding(&self) -> FpRounding {
         self.status.rounding()
@@ -669,6 +676,13 @@ pub(crate) fn fp_convert_round_odd(a: u64, env: &mut FpEnv) -> u64 {
 pub(crate) fn bf16_mul_add_long(addend: u32, n: u16, m: u16, env: &mut FpEnv) -> u32 {
     let (n, m) = (u32::from(n) << 16, u32::from(m) << 16);
     env.status.with_altfp_overrides(|fp| sf::f32_mul_add(FusedMulAdd::Fmadd, addend, n, m, fp))
+}
+
+/// Arm BFNeg: the BFloat16 value `a` with its sign inverted — except,
+/// under FPCR.AH = 1, a NaN. A BFloat16 value is the high half of a
+/// single-precision one, so FPNeg of that is BFNeg of this.
+pub(crate) fn bf16_neg(a: u16, env: &FpEnv) -> u16 {
+    (env.neg(FpType::Single, u64::from(a) << 16) >> 16) as u16
 }
 
 /// Arm FPScale: `a` × 2^`scale`, rounded once.

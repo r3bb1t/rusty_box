@@ -7,10 +7,14 @@
 //! instruction executes only in Streaming SVE mode, at the Streaming SVE
 //! vector length; outside it, `CheckSVEEnabled` takes the SME trap
 //! (`CheckStreamingSVEEnabled`). The instructions are in `int` (integer
-//! arithmetic, element counts and immediates), `perm` (permutes, copies and
-//! selects), `pred` (compares, predicate operations, `WHILE` and predicate
-//! counts), `fp` (floating point) and `mem` (contiguous loads, stores and
-//! prefetches).
+//! arithmetic, element counts and immediates), `intx` (SVE2's integer
+//! instructions), `perm`
+//! (permutes, copies and selects), `pred` (compares, predicate operations,
+//! `WHILE` and predicate counts), `counter` (FEAT_SME2's
+//! predicate-as-counter), `fp` (floating point), `mem` (contiguous
+//! loads, stores and prefetches, FEAT_SME2's of two or four vectors among
+//! them) and `multi` (FEAT_SME2's operations on groups of two or four
+//! vectors).
 //!
 //! Provenance (R7): the Arm A64 ISA XML, release 2026-09 (Arm ARM M.d), the
 //! instruction pages each handler names and the shared pseudocode in
@@ -18,20 +22,21 @@
 //! operation; where a page raises UNDEFINED in its decode, the handler
 //! does so before the enable check, as the pseudocode orders it.
 
+mod counter;
 mod fp;
 mod int;
+mod intx;
 mod mem;
+mod multi;
 mod perm;
 mod pred;
 #[cfg(test)]
 #[path = "../../../tests/unit/sve.rs"]
 mod tests;
 
-use super::exception::Route;
-use super::exec::{sext, Fault};
+use super::exec::{bits, sext, Fault};
 use super::features::VecLen;
-use super::simd_arith::{int as simd_int, sat};
-use super::sme::SmeTrap;
+use super::simd_arith::{doubling_mul_high, int as simd_int, sat, shift_signed};
 use super::{Cpu, Levels};
 
 /// `MAX_VL` in bytes.
@@ -329,6 +334,14 @@ pub(crate) fn sat_q(value: i128, es: Esize, unsigned: bool) -> u64 {
     sat_q_bits(value, es.bits(), unsigned)
 }
 
+/// The first of the units of element `e`'s 128-bit segment, of which a
+/// segment holds `per_segment`: `e - e MOD eltspersegment`, the
+/// `segmentbase` an indexed operation adds its index to.
+#[inline]
+pub(crate) const fn segment_base(e: usize, per_segment: usize) -> usize {
+    e - e % per_segment
+}
+
 /// [`sat_q`] for an `n`-bit result, `n` at most 64: the scalar forms
 /// saturate to 32 or 64 bits.
 pub(crate) fn sat_q_bits(value: i128, n: u32, unsigned: bool) -> u64 {
@@ -355,6 +368,36 @@ pub(crate) fn mul_high(a: u64, b: u64, es: Esize, unsigned: bool) -> u64 {
     high & es.mask()
 }
 
+/// The first register of a group of `nreg` consecutive vectors, two or
+/// four, that the field ending at bit `hi` names: `field:'0'` (four bits)
+/// or `field:'00'` (three).
+pub(crate) fn group(insn: u32, hi: u32, nreg: usize) -> u32 {
+    let k = nreg.trailing_zeros();
+    bits(insn, hi, hi + k - 4) << k
+}
+
+/// SQDMULH and SQRDMULH on one element: `SignedSat((2 * SInt(a) *
+/// SInt(b) (+ 2^(esize-1))) >> esize)`, rounding with `rounding`.
+pub(crate) fn sat_doubling_mul_high(a: u64, b: u64, es: Esize, rounding: bool) -> u64 {
+    sat_q(doubling_mul_high(int(a, es, false), int(b, es, false), es.bits(), rounding), es, false)
+}
+
+/// SCLAMP and UCLAMP on one element: `Min(Max(low, value), high)`, each
+/// element `Int`'d by `unsigned`.
+pub(crate) fn clamp(value: u64, low: u64, high: u64, es: Esize, unsigned: bool) -> u64 {
+    int(low, es, unsigned).max(int(value, es, unsigned)).min(int(high, es, unsigned)) as u64
+}
+
+/// The shift by element of SRSHL to UQRSHL, exact: `Int(a, unsigned)`
+/// shifted by `ShiftSat(SInt(b), esize)`, left where it is positive, else
+/// right, adding half of the last bit shifted out with `rounding`. The
+/// caller truncates or saturates it to `esize` bits.
+pub(crate) fn shift_by_element(a: u64, b: u64, es: Esize, unsigned: bool, rounding: bool) -> i128 {
+    let n = i64::from(es.bits());
+    let shift = es.signed(b).clamp(-(n + 1), n + 1) as i32;
+    shift_signed(int(a, es, unsigned), shift, es.bits(), rounding)
+}
+
 /// The saturating increment or decrement of a general register by
 /// `delta` (SQINCx, UQINCx, SQDECx, UQDECx and their predicate-count
 /// forms): of the whole 64-bit register with `wide`, else of `Wdn`, the
@@ -378,14 +421,10 @@ impl<L: Levels> Cpu<L> {
     /// Arm `CheckSVEEnabled` on this processor, which implements FEAT_SME
     /// and not FEAT_SVE, and `CurrentVL` after it. In Streaming SVE mode
     /// that is `CheckSMEEnabled`; outside it, `CheckStreamingSVEEnabled`,
-    /// which takes the same checks and then the SME trap: an SVE
-    /// instruction executes only in Streaming SVE mode, at the Streaming
-    /// SVE vector length.
+    /// which takes the same checks and then the SME trap: on such a
+    /// processor the two are one, and an SVE instruction executes only in
+    /// Streaming SVE mode, at the Streaming SVE vector length.
     pub(crate) fn sve_check(&self) -> Result<VecLen, Fault> {
-        self.check_sme_enabled()?;
-        if !self.svcr.sm {
-            return Err(self.sme_trap(SmeTrap::NotStreaming, Route::Class));
-        }
-        Ok(self.current_svl())
+        self.check_streaming_sve_enabled()
     }
 }

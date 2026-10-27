@@ -70,7 +70,7 @@ pub(crate) use self::arm_ops::{
 };
 pub(crate) use self::bfloat::{bf16_dot_add, f32_to_bf16};
 pub(crate) use self::half::{
-    f16_add, f16_compare, f16_div, f16_log_b, f16_max, f16_maxnum, f16_min, f16_minnum, f16_mul, f16_mul_add,
+    f16_add, f16_compare, f16_div, f16_dot, f16_log_b, f16_max, f16_maxnum, f16_min, f16_minnum, f16_mul, f16_mul_add,
     f16_mul_add_long, f16_mulx, f16_recip_step, f16_round_to_int, f16_rsqrt_step, f16_scale, f16_sqrt, f16_sub,
     f16_to_signed, f16_to_unsigned, int_to_f16,
 };
@@ -245,6 +245,13 @@ impl ArmFpStatus {
     #[inline]
     pub(crate) fn handling(&self) -> Handling {
         self.status.handling
+    }
+
+    /// These controls with FPCR.DN set (Arm `fpcr.DN = '1'`): every NaN
+    /// result the default NaN.
+    pub(crate) fn with_default_nan(mut self) -> Self {
+        self.status.default_nan_mode = true;
+        self
     }
 
     /// Arm FPDefaultNaN{16} under these controls: negative under FPCR.AH.

@@ -1,9 +1,9 @@
 //! The Scalable Matrix Extension's architectural state and the rules that
 //! guard it (FEAT_SME): Streaming SVE mode and the ZA array (`PSTATE.SM` and
 //! `PSTATE.ZA`, which `SVCR` reads and writes), the scalable vector,
-//! predicate and ZA storage they make reachable, the Streaming SVE vector
-//! length, and the enable checks and traps every SME instruction and
-//! register goes through.
+//! predicate and ZA storage they make reachable, FEAT_SME2's ZT0, the
+//! Streaming SVE vector length, and the enable checks and traps every SME
+//! instruction and register goes through.
 //!
 //! Provenance (R7): the Arm A64 ISA XML, release 2026-09 (Arm ARM M.d), its
 //! shared pseudocode (`aarch64/functions/sve`, `aarch64/functions/sme`,
@@ -28,7 +28,7 @@ use super::exec::{bits, ExecResult, Fault, Flow};
 use super::features::{Feature, VecLen};
 use super::state::FPSR_MASK;
 use super::sve::{Pv, Zv};
-use super::sysreg::CPACR_SMEN;
+use super::sysreg::{CPACR_SMEN, SMCR_EZT0, SMCR_LEN};
 use super::{Cpu, El, Levels};
 
 /// `MAX_VL` in bytes: the storage behind every Z register and every
@@ -83,7 +83,12 @@ pub(crate) struct ScalableRegs {
     ffr: [u8; MAX_PL_BYTES],
     /// `_ZA`: horizontal vector n of the array is `za[n]`.
     za: [[u8; MAX_VL_BYTES]; MAX_VL_BYTES],
+    /// `_ZT0` (FEAT_SME2), little-endian.
+    zt0: [u8; ZT0_BYTES],
 }
+
+/// `ZT0_LEN` in bytes: the 512-bit lookup table register of FEAT_SME2.
+pub(crate) const ZT0_BYTES: usize = 64;
 
 impl ScalableRegs {
     /// Every bit zero.
@@ -93,6 +98,7 @@ impl ScalableRegs {
         p: [[0; MAX_PL_BYTES]; 16],
         ffr: [0; MAX_PL_BYTES],
         za: [[0; MAX_VL_BYTES]; MAX_VL_BYTES],
+        zt0: [0; ZT0_BYTES],
     };
 }
 
@@ -111,6 +117,12 @@ pub(crate) enum SmeTrap {
     /// mode, which every SVE instruction is on a processor without
     /// FEAT_SVE.
     NotStreaming,
+    /// SMTC 0b011: an instruction that accesses ZA while `PSTATE.ZA` is
+    /// 0.
+    InactiveZa,
+    /// SMTC 0b100: an instruction that accesses ZT0 while `SMCR_EL1.EZT0`
+    /// or `SMCR_EL2.EZT0` disables it.
+    InaccessibleZt0,
 }
 
 impl SmeTrap {
@@ -119,6 +131,8 @@ impl SmeTrap {
             Self::AccessTrap => 0b000,
             Self::Streaming => 0b001,
             Self::NotStreaming => 0b010,
+            Self::InactiveZa => 0b011,
+            Self::InaccessibleZt0 => 0b100,
         }
     }
 }
@@ -263,15 +277,109 @@ impl<L: Levels> Cpu<L> {
         Ok(())
     }
 
+    /// Arm `CheckSMEAndZAEnabled`, and `CurrentSVL` after it: SME's enable
+    /// checks, then the SME trap to the current level (EL2 from EL0 under
+    /// `HCR_EL2.TGE`) when ZA storage is disabled. ZERO, LDR and STR of ZA
+    /// take it, in or out of Streaming SVE mode.
+    pub(crate) fn check_sme_and_za_enabled(&self) -> Result<VecLen, Fault> {
+        self.check_sme_enabled()?;
+        if !self.svcr.za {
+            return Err(self.sme_trap(SmeTrap::InactiveZa, Route::Class));
+        }
+        Ok(self.current_svl())
+    }
+
+    /// Arm `CheckStreamingSVEEnabled`, and `CurrentVL` after it, which in
+    /// Streaming SVE mode is the Streaming SVE vector length: SME's enable
+    /// checks, then the SME trap to the current level (EL2 from EL0 under
+    /// `HCR_EL2.TGE`) outside Streaming SVE mode.
+    pub(crate) fn check_streaming_sve_enabled(&self) -> Result<VecLen, Fault> {
+        self.check_sme_enabled()?;
+        if !self.svcr.sm {
+            return Err(self.sme_trap(SmeTrap::NotStreaming, Route::Class));
+        }
+        Ok(self.current_svl())
+    }
+
+    /// Arm `CheckStreamingSVEAndZAEnabled`, and `CurrentVL` after it:
+    /// [`Cpu::check_streaming_sve_enabled`], then the SME trap to the
+    /// current level when ZA storage is disabled. The instructions on ZA
+    /// other than ZERO, LDR and STR take it: they execute only in Streaming
+    /// SVE mode.
+    pub(crate) fn check_streaming_sve_and_za_enabled(&self) -> Result<VecLen, Fault> {
+        let vl = self.check_streaming_sve_enabled()?;
+        if !self.svcr.za {
+            return Err(self.sme_trap(SmeTrap::InactiveZa, Route::Class));
+        }
+        Ok(vl)
+    }
+
+    /// Arm `CheckSMEZT0Enabled` on this processor, which has no EL3: the SME
+    /// trap to the current level when ZA storage is disabled; then at EL0
+    /// and EL1, `SMCR_EL1.EZT0`, trapping to EL1 (EL2 from EL0 under
+    /// `HCR_EL2.TGE`); then at EL0, EL1 and EL2 with EL2 enabled,
+    /// `SMCR_EL2.EZT0`, trapping to EL2. The instructions on ZT0 take it
+    /// after `CheckSMEEnabled`.
+    pub(crate) fn check_sme_zt0_enabled(&self) -> Result<(), Fault> {
+        if !self.svcr.za {
+            return Err(self.sme_trap(SmeTrap::InactiveZa, Route::Class));
+        }
+        if self.pstate.el != El::El2 && self.sys.smcr_el1 & SMCR_EZT0 == 0 {
+            return Err(self.sme_trap(SmeTrap::InaccessibleZt0, Route::Class));
+        }
+        if self.el2_enabled() && self.el2().smcr & SMCR_EZT0 == 0 {
+            return Err(self.sme_trap(SmeTrap::InaccessibleZt0, Route::El2));
+        }
+        Ok(())
+    }
+
+    /// Arm `ZT0{512}()`.
+    pub(crate) fn zt0(&self) -> [u8; ZT0_BYTES] {
+        self.scalable.zt0
+    }
+
+    /// Arm `ZT0{512}() = value`.
+    pub(crate) fn set_zt0(&mut self, value: &[u8; ZT0_BYTES]) {
+        self.scalable.zt0 = *value;
+    }
+
+    /// Arm `ZAvector{SVL}(index)`, as its bytes: horizontal vector `index`
+    /// of the ZA array, at the Streaming SVE vector length `svl`.
+    pub(crate) fn za_row(&self, index: usize, svl: VecLen) -> &[u8] {
+        &self.scalable.za[index][..svl.bytes()]
+    }
+
+    /// Arm `ZAvector{SVL}(index)`.
+    pub(crate) fn za_vector(&self, index: usize, svl: VecLen) -> Zv {
+        Zv::from_bytes(self.za_row(index, svl))
+    }
+
+    /// Arm `ZAvector{SVL}(index) = value`: the bits above `svl` zeroed
+    /// (`Unpredictable_SMEZEROUPPER` taken as TRUE).
+    pub(crate) fn set_za_vector(&mut self, index: usize, svl: VecLen, value: &Zv) {
+        let len = svl.bytes();
+        self.set_za_bytes(index, svl, 0, &value.as_bytes()[..len]);
+    }
+
+    /// Arm `ZAvector{SVL}(index) = value` of the vector with its bytes from
+    /// `at` replaced by `bytes`: the bits above `svl` zeroed, as
+    /// [`Cpu::set_za_vector`] leaves them.
+    pub(crate) fn set_za_bytes(&mut self, index: usize, svl: VecLen, at: usize, bytes: &[u8]) {
+        let row = &mut self.scalable.za[index];
+        row[at..at + bytes.len()].copy_from_slice(bytes);
+        row[svl.bytes()..].fill(0);
+    }
+
     /// Arm `CurrentSVL`: the `LEN` of `SMCR_EL1` at EL0 and EL1, held to the
     /// `LEN` of `SMCR_EL2` with EL2 enabled, and the `LEN` of `SMCR_EL2` at
-    /// EL2, reduced to a supported length. Each register holds its `LEN`
-    /// alone, the only field an `MSR` keeps.
+    /// EL2, reduced to a supported length.
     pub(crate) fn current_svl(&self) -> VecLen {
+        let el1 = self.sys.smcr_el1 & SMCR_LEN;
+        let el2 = self.el2().smcr & SMCR_LEN;
         let len = match self.pstate.el {
-            El::El2 => self.el2().smcr,
-            El::El0 | El::El1 if self.el2_enabled() => self.sys.smcr_el1.min(self.el2().smcr),
-            El::El0 | El::El1 => self.sys.smcr_el1,
+            El::El2 => el2,
+            El::El0 | El::El1 if self.el2_enabled() => el1.min(el2),
+            El::El0 | El::El1 => el1,
         };
         VecLen::from_len_field(len, self.imp.max_svl)
     }
@@ -304,14 +412,17 @@ impl<L: Levels> Cpu<L> {
         self.fpsr = FPSR_AFTER_SVE_RESET & FPSR_MASK;
     }
 
-    /// Arm `ResetSMEState`: ZA zeroed, on enabling as the pseudocode
-    /// requires and on disabling, where it leaves ZA ARBITRARY. Only the
-    /// `MaxImplementedSVL` square of the storage is ever written.
+    /// Arm `ResetSMEState`: ZA and, with FEAT_SME2, ZT0 zeroed, on enabling
+    /// as the pseudocode requires and on disabling, where it leaves them
+    /// ARBITRARY. Only the `MaxImplementedSVL` square of the ZA storage is
+    /// ever written; ZT0 is zero on a processor without FEAT_SME2, which
+    /// never writes it.
     fn reset_sme_state(&mut self) {
         let n = self.imp.max_svl.bytes();
         for row in self.scalable.za[..n].iter_mut() {
             row[..n].fill(0);
         }
+        self.scalable.zt0 = [0; ZT0_BYTES];
     }
 
     /// Arm `MaybeZeroSVEUppers(target_el)`, which `AArch64_TakeException`
@@ -407,7 +518,7 @@ impl<L: Levels> Cpu<L> {
 
     /// The SME state a snapshot carries, for a processor implementing
     /// FEAT_SME: `SVCR`, then Z (above V), P, FFR and ZA at
-    /// `MaxImplementedSVL`.
+    /// `MaxImplementedSVL`, then ZT0 with FEAT_SME2.
     pub(crate) fn save_sme<W: SnapWrite>(&self, w: &mut W) -> SnapResult {
         if !self.implements(Feature::Sme) {
             return Ok(());
@@ -428,6 +539,9 @@ impl<L: Levels> Cpu<L> {
         w.write_bytes(&s.ffr[..vl.predicate_bytes()])?;
         for row in s.za[..vl.bytes()].iter() {
             w.write_bytes(&row[..vl.bytes()])?;
+        }
+        if self.implements(Feature::Sme2) {
+            w.write_bytes(&s.zt0)?;
         }
         Ok(())
     }
@@ -462,6 +576,9 @@ impl<L: Levels> Cpu<L> {
         r.read_bytes(&mut s.ffr[..vl.predicate_bytes()])?;
         for row in s.za[..vl.bytes()].iter_mut() {
             r.read_bytes(&mut row[..vl.bytes()])?;
+        }
+        if self.imp.has(Feature::Sme2) {
+            r.read_bytes(&mut self.scalable.zt0)?;
         }
         Ok(())
     }

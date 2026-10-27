@@ -2,9 +2,11 @@
 //! the trapped secure monitor call, exception routing to EL2
 //! (`HCR_EL2.TGE`, `IMO`, `FMO`, `TEA`), exception entry to EL2 and return
 //! from it, illegal returns included, EL2's own stage 1 translation regime
-//! with its TLB entries kept apart from EL1&0's, and the identity EL1 reads
-//! through `VPIDR_EL2` and `VMPIDR_EL2`. Which register accesses trap where
-//! is `sysreg_spec.rs`'s, against Arm's accessors.
+//! with its TLB entries kept apart from EL1&0's, the identity EL1 reads
+//! through `VPIDR_EL2` and `VMPIDR_EL2`, and the SME instructions' EL2
+//! enables (`CPTR_EL2.TSM` and `TFP`, `SMCR_EL2.EZT0` and `LEN`). Which
+//! register accesses trap where is `sysreg_spec.rs`'s, against Arm's
+//! accessors.
 //!
 //! The rules are the Arm ARM's pseudocode: `AArch64_TakeReset`,
 //! `AArch64_CallHypervisor`, `AArch64_CheckForSMCUndefOrTrap`,
@@ -12,18 +14,22 @@
 //! sibling, `AArch64_ExceptionReturn` with `IllegalExceptionReturn`,
 //! `AArch64_Undefined`, `AArch64_CallSupervisor`, `AArch64_DataAbort`,
 //! `AArch64_S1Translate` with `AArch64_S1DirectBasePermissions` for a regime
-//! of one privilege level, and `AArch64_AT`.
+//! of one privilege level, `AArch64_AT`, `CheckSMEEnabled`,
+//! `CheckSMEZT0Enabled`, `SMEAccessTrap` and `CurrentSVL`.
 //!
-//! The words are GNU as's (`-march=armv8.2-a`, objdump -d).
+//! The words are GNU as's (2.42, `-march=armv8.2-a`, objdump -d), the SME
+//! ones with `-march=armv9.4-a+sme2`.
 
 use std::vec::Vec;
 
 use rusty_box_core::{ClockHz, SnapError, VmClock};
 
 use super::el2::{
-    HCR_AMO, HCR_DC, HCR_FMO, HCR_HCD, HCR_IMO, HCR_TEA, HCR_TGE, HCR_TSC, HCR_VF, HCR_VI, HCR_VSE, MDCR_TDE,
+    CPTR_TFP, CPTR_TSM, HCR_AMO, HCR_DC, HCR_FMO, HCR_HCD, HCR_IMO, HCR_TEA, HCR_TGE, HCR_TSC, HCR_VF, HCR_VI, HCR_VSE,
+    MDCR_TDE,
 };
-use super::features::{Features, Implementation};
+use super::features::{Feature, Features, Implementation};
+use super::sysreg::{CPACR_FPEN, CPACR_SMEN, SMCR_EZT0};
 use super::{id, Cpu, CpuConfig, El, Levels, NoEl2, Pstate, Step, Tlb, WithEl2};
 use crate::bus::{AccessWidth, BusFault, PhysAddr, PhysBus};
 use crate::instrumentation::{ExceptionKind, NoInstrumentation};
@@ -667,6 +673,159 @@ fn el1_reads_the_identity_el2_gives_it() {
     m.at(El::El2);
     assert_eq!((m.run(MRS_MIDR), m.cpu.x[0]), (None, id::MIDR_EL1));
     assert_eq!((m.run(MRS_MPIDR), m.cpu.x[0]), (None, id::MPIDR_EL1));
+}
+
+// ----- SME under EL2 -----
+
+/// `zero {zt0}`, which takes `CheckSMEEnabled` and then
+/// `CheckSMEZT0Enabled`.
+const ZERO_ZT0: u32 = 0xC048_0001;
+/// `rdsvl x0, #1`: the Streaming SVE vector length in bytes, in or out of
+/// Streaming SVE mode.
+const RDSVL_X0: u32 = 0x04BF_5820;
+/// `cntb x0`: the bytes of a vector at the current length, which in
+/// Streaming SVE mode is the Streaming SVE vector length.
+const CNTB_X0: u32 = 0x0420_E3E0;
+const MSR_SMCR_EL1_X1: u32 = 0xD518_12C1; // msr smcr_el1, x1
+const MSR_SMCR_EL2_X1: u32 = 0xD51C_12C1; // msr smcr_el2, x1
+const EC_FP_ACCESS: u64 = 0x07;
+const EC_SME: u64 = 0x1D;
+/// The SIMD&FP access trap's ISS: `CV` set, `COND` 0b1110.
+const FP_ACCESS_ISS: u64 = 0x01E0_0000;
+/// `ESR_ELx.ISS.SMTC` of the SME traps: disabled, ZA storage inactive, ZT0
+/// inaccessible.
+const SMTC_DISABLED: u64 = 0;
+const SMTC_INACTIVE_ZA: u64 = 3;
+const SMTC_INACCESSIBLE_ZT0: u64 = 4;
+
+/// A processor with EL2 and every feature, FEAT_SME2 among them, with
+/// `CPACR_EL1` enabling SME and SIMD&FP, `CPTR_EL2` trapping neither, and
+/// ZA storage enabled.
+fn sme_under_el2() -> Machine<WithEl2> {
+    let mut m = Machine::<WithEl2>::new(Implementation::EVERY_FEATURE);
+    m.cpu.sys.cpacr_el1 = CPACR_SMEN | CPACR_FPEN;
+    m.cpu.set_pstate_za(true);
+    m
+}
+
+/// Arm `CheckSMEZT0Enabled`: with ZA storage enabled, `SMCR_EL1.EZT0` at
+/// EL0 and EL1 traps to EL1 (to EL2 from EL0 under `HCR_EL2.TGE`), then
+/// `SMCR_EL2.EZT0` at EL0, EL1 and EL2 traps to EL2; with ZA storage
+/// disabled, the inactive-ZA trap to the current level comes first.
+#[test]
+fn zt0_is_trapped_by_each_levels_ezt0() {
+    let mut m = sme_under_el2();
+    let zt0 = |m: &mut Machine<WithEl2>, el: El, el1: bool, el2: bool| {
+        m.cpu.sys.smcr_el1 = if el1 { SMCR_EZT0 } else { 0 };
+        m.cpu.el2_state.regs.smcr = if el2 { SMCR_EZT0 } else { 0 };
+        m.at(el);
+        m.run(ZERO_ZT0)
+    };
+    assert_eq!(zt0(&mut m, El::El1, true, true), None);
+    assert_eq!(zt0(&mut m, El::El1, true, false), sync(El::El2, LOWER_A64, EC_SME, SMTC_INACCESSIBLE_ZT0));
+    assert_eq!(zt0(&mut m, El::El1, false, true), sync(El::El1, CURRENT_SPX, EC_SME, SMTC_INACCESSIBLE_ZT0));
+    assert_eq!(zt0(&mut m, El::El1, false, false), sync(El::El1, CURRENT_SPX, EC_SME, SMTC_INACCESSIBLE_ZT0));
+    // At EL2 `SMCR_EL1` does not apply.
+    assert_eq!(zt0(&mut m, El::El2, false, true), None);
+    assert_eq!(zt0(&mut m, El::El2, true, false), sync(El::El2, CURRENT_SPX, EC_SME, SMTC_INACCESSIBLE_ZT0));
+    // `HCR_EL2.TGE` takes EL0's trap to EL1 to EL2.
+    m.hcr(HCR_TGE);
+    assert_eq!(zt0(&mut m, El::El0, false, true), sync(El::El2, LOWER_A64, EC_SME, SMTC_INACCESSIBLE_ZT0));
+    m.cpu.set_pstate_za(false);
+    assert_eq!(zt0(&mut m, El::El0, false, false), sync(El::El2, LOWER_A64, EC_SME, SMTC_INACTIVE_ZA));
+    m.cpu.el2_state.regs.hcr &= !HCR_TGE;
+    assert_eq!(zt0(&mut m, El::El1, false, false), sync(El::El1, CURRENT_SPX, EC_SME, SMTC_INACTIVE_ZA));
+    assert_eq!(zt0(&mut m, El::El2, false, false), sync(El::El2, CURRENT_SPX, EC_SME, SMTC_INACTIVE_ZA));
+}
+
+/// Arm `CheckSMEEnabled` on an SME instruction: `CPACR_EL1.SMEN`, then
+/// `CPACR_EL1.FPEN`, each to EL1; then `CPTR_EL2.TSM`, then `CPTR_EL2.TFP`,
+/// each to EL2, which they trap at EL2 too.
+#[test]
+fn an_sme_instruction_takes_cptr_el2s_traps_after_cpacr_el1s() {
+    let mut m = sme_under_el2();
+    m.cpu.sys.smcr_el1 = SMCR_EZT0;
+    m.cpu.el2_state.regs.smcr = SMCR_EZT0;
+    let run = |m: &mut Machine<WithEl2>, el: El, cpacr: u64, cptr: u64| {
+        m.cpu.sys.cpacr_el1 = cpacr;
+        m.cpu.el2_state.regs.cptr = cptr;
+        m.at(el);
+        m.run(ZERO_ZT0)
+    };
+    let enabled = CPACR_SMEN | CPACR_FPEN;
+    assert_eq!(run(&mut m, El::El1, enabled, CPTR_TSM), sync(El::El2, LOWER_A64, EC_SME, SMTC_DISABLED));
+    assert_eq!(run(&mut m, El::El1, enabled, CPTR_TFP), sync(El::El2, LOWER_A64, EC_FP_ACCESS, FP_ACCESS_ISS));
+    assert_eq!(run(&mut m, El::El1, enabled, CPTR_TSM | CPTR_TFP), sync(El::El2, LOWER_A64, EC_SME, SMTC_DISABLED));
+    assert_eq!(run(&mut m, El::El1, CPACR_FPEN, CPTR_TSM), sync(El::El1, CURRENT_SPX, EC_SME, SMTC_DISABLED));
+    assert_eq!(run(&mut m, El::El1, CPACR_SMEN, CPTR_TSM), sync(El::El1, CURRENT_SPX, EC_FP_ACCESS, FP_ACCESS_ISS));
+    assert_eq!(run(&mut m, El::El2, 0, CPTR_TSM), sync(El::El2, CURRENT_SPX, EC_SME, SMTC_DISABLED));
+    assert_eq!(run(&mut m, El::El2, 0, CPTR_TFP), sync(El::El2, CURRENT_SPX, EC_FP_ACCESS, FP_ACCESS_ISS));
+    assert_eq!(run(&mut m, El::El2, 0, 0), None);
+    // Under `HCR_EL2.TGE`, `CPACR_EL1`'s traps of EL0 go to EL2: SME's as
+    // itself (`SMEAccessTrap`), SIMD&FP's as an uncategorized exception
+    // (`AArch64_AdvSIMDFPAccessTrap`).
+    m.hcr(HCR_TGE);
+    assert_eq!(run(&mut m, El::El0, CPACR_FPEN, 0), sync(El::El2, LOWER_A64, EC_SME, SMTC_DISABLED));
+    assert_eq!(run(&mut m, El::El0, CPACR_SMEN, 0), sync(El::El2, LOWER_A64, EC_UNKNOWN, 0));
+    assert_eq!(run(&mut m, El::El0, enabled, CPTR_TSM), sync(El::El2, LOWER_A64, EC_SME, SMTC_DISABLED));
+    assert_eq!(run(&mut m, El::El0, enabled, 0), None);
+}
+
+/// Arm `CurrentSVL`, as RDSVL and, in Streaming SVE mode, CNTB read it: at
+/// EL1 the shorter of the lengths the `LEN` fields of `SMCR_EL1` and
+/// `SMCR_EL2` ask for, at EL2 the one `SMCR_EL2.LEN` asks for, whatever
+/// `EZT0` beside either holds.
+#[test]
+fn the_streaming_vector_length_is_each_registers_len_field() {
+    let mut m = sme_under_el2();
+    m.cpu.set_pstate_sm(true);
+    let msr = |m: &mut Machine<WithEl2>, insn: u32, value: u64| {
+        m.at(El::El2);
+        m.cpu.x[1] = value;
+        assert_eq!(m.run(insn), None, "{insn:#010x} {value:#x}");
+    };
+    // The bytes of the length RDSVL and CNTB report at `el`.
+    let length = |m: &mut Machine<WithEl2>, el: El| {
+        m.at(el);
+        assert_eq!(m.run(RDSVL_X0), None);
+        let rdsvl = m.cpu.x[0];
+        m.at(el);
+        assert_eq!(m.run(CNTB_X0), None);
+        assert_eq!(m.cpu.x[0], rdsvl, "CNTB in Streaming SVE mode at {el:?}");
+        rdsvl
+    };
+    msr(&mut m, MSR_SMCR_EL1_X1, 3);
+    msr(&mut m, MSR_SMCR_EL2_X1, SMCR_EZT0 | 1);
+    assert_eq!((length(&mut m, El::El1), length(&mut m, El::El2)), (32, 32));
+    msr(&mut m, MSR_SMCR_EL1_X1, SMCR_EZT0 | 1);
+    msr(&mut m, MSR_SMCR_EL2_X1, 3);
+    assert_eq!((length(&mut m, El::El1), length(&mut m, El::El2)), (32, 64));
+    msr(&mut m, MSR_SMCR_EL1_X1, SMCR_EZT0 | 3);
+    assert_eq!((length(&mut m, El::El1), length(&mut m, El::El2)), (64, 64));
+    msr(&mut m, MSR_SMCR_EL2_X1, SMCR_EZT0);
+    assert_eq!((length(&mut m, El::El1), length(&mut m, El::El2)), (16, 16));
+}
+
+/// An image whose `SMCR_EL2` holds a bit no `MSR` leaves there is refused:
+/// `EZT0` is kept with FEAT_SME2 alone, and bits 8:4 never.
+#[test]
+fn a_snapshot_whose_smcr_el2_holds_a_bit_no_msr_keeps_is_refused() {
+    let refused = |imp: Implementation, smcr: u64| {
+        let mut saved = Machine::<WithEl2>::new(imp);
+        saved.cpu.el2_state.regs.smcr = smcr;
+        let mut image = Vec::new();
+        saved.cpu.save(&mut image).expect("save");
+        Machine::<WithEl2>::new(imp).cpu.restore(&mut image.as_slice()).is_err()
+    };
+    let without_sme2: Vec<Feature> = Feature::ALL.into_iter().filter(|&f| f != Feature::Sme2).collect();
+    let sme_alone = Implementation {
+        features: Features::of(&without_sme2),
+        max_svl: Implementation::EVERY_FEATURE.max_svl,
+    };
+    assert!(!refused(Implementation::EVERY_FEATURE, SMCR_EZT0 | 3));
+    assert!(refused(Implementation::EVERY_FEATURE, 0x10), "SMCR_EL2 bit 4");
+    assert!(!refused(sme_alone, 3));
+    assert!(refused(sme_alone, SMCR_EZT0), "SMCR_EL2.EZT0 without FEAT_SME2");
 }
 
 // ----- the EL2 translation regime -----

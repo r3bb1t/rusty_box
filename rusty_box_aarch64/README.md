@@ -158,15 +158,49 @@ floating-point behaviours in every scalar, Advanced SIMD and BFloat16
 instruction, and FPCR.NEP's merging of scalar results into the source
 register each instruction names) and FEAT_RPRES (12-bit single-precision
 FRECPE and FRSQRTE under FPCR.AH);
-and, being built, FEAT_SME (its state, registers, SMSTART
+and FEAT_SME and FEAT_SME2 (FEAT_SME's state, registers, SMSTART
 and SMSTOP, RDSVL, ADDSVL and ADDSPL, and the SVE and SVE2 integer,
 element count, immediate, permute, compare, predicate and WHILE
-instructions, the contiguous loads, stores and prefetches, and the SVE
-and SVE2 floating-point and BFloat16 instructions it makes legal in
-Streaming SVE mode, 606 encodings, which outside that mode take the SME
-trap, this processor having no FEAT_SVE; the rest of SVE2's integer
-instructions, USDOT and SUDOT among them, and the ZA instructions are
-still to come). No processor a machine runs has them
+instructions, the integer dot products (SVE's SDOT and UDOT, FEAT_I8MM's
+USDOT and SUDOT) and SVE2's complex, long and saturating multiply-adds,
+multiplies by element and predicated shifts, halving, pairwise and
+saturating operations, SCLAMP and UCLAMP (FEAT_SME's), its widening,
+narrowing and accumulating integer instructions, the contiguous loads,
+stores and prefetches, and the SVE and SVE2 floating-point and BFloat16
+instructions it makes legal in Streaming SVE mode, 823 encodings, which
+outside that mode take the SME trap, this processor having no FEAT_SVE;
+and the instructions on the ZA array: the outer products into 32-bit
+tiles of single-precision values, of half-precision and BFloat16 pairs
+and of bytes, MOVA to and from a tile slice, ZERO, ADDHA and ADDVA, the
+tile slice loads and stores LD1B to LD1Q and ST1B to ST1Q, and LDR and
+STR of an array vector, 39 encodings; and of FEAT_SME2, ZT0 with ZERO,
+LDR and STR of it and the traps of `SMCR_EL1.EZT0` (to EL1) and, with
+EL2, `SMCR_EL2.EZT0` (to EL2), MOVT between it and a
+general register UNDEFINED as outside Debug state, the
+predicate-as-counter with WHILE to a counter or to a pair of predicates,
+PTRUE, PEXT and CNTP of one, the contiguous loads and stores of two or
+four vectors, consecutive or strided, under one, and the SVE operations
+on groups of two or four vectors (SEL under a counter; the integer and
+floating-point maxima and minima, rounding shifts, additions, doubling
+multiplies and clamps; ZIP and UZP of elements and of quadwords; the
+rounding and saturating narrows; BFCVT and FCVT; the conversions between
+words and single precision, FRINT and the unpacks), 257 encodings, and
+the instructions on groups of ZA array vectors (the four-way and two-way
+long integer products, the long products of half-precision and BFloat16
+values, the dot products of bytes, of halfwords and of half-precision
+and BFloat16 pairs, FMLA and FMLS of single-precision values, ADD and
+SUB of vectors to them, and ADD, SUB, FADD and FSUB of vectors into
+them, of one, two or four vectors by one or by as many), 121 encodings,
+and their forms by an indexed element with the vertical dot products
+FVDOT, BFVDOT, SVDOT, UVDOT, USVDOT and SUVDOT, 70 encodings, and BMOPA
+and BMOPS, SMOPA to UMOPS of halfwords into 32-bit tiles, MOVA between
+two or four registers and as many tile slices or ZA array vectors, and
+LUTI2 and LUTI4 of ZT0 to one, two or four registers, 32 encodings, and
+the SVE2.1 instructions it makes legal (SDOT and UDOT of halfword pairs,
+SQRSHRN, SQRSHRUN, UQRSHRN, SQCVTN, SQCVTUN and UQCVTN of two vectors,
+FCLAMP, FDOT of half-precision pairs, and BFMLSLB and BFMLSLT), 17
+encodings).
+No processor a machine runs has them
 yet: the tests run them on a test-only processor with every feature, whose
 ID registers advertise each one.
 
@@ -178,7 +212,10 @@ SP_EL2 and the EL2 system registers, each keeping only the bits Arm's data
 gives it; exceptions are taken to EL2 as `HCR_EL2.TGE`, IMO, FMO, AMO and
 TEA route them, and every trap `HCR_EL2`, `CPTR_EL2`, `MDCR_EL2`,
 `HSTR_EL2` and `CNTHCTL_EL2` define for the features a processor has
-reaches EL2 with Arm's syndrome; HVC calls the hypervisor
+reaches EL2 with Arm's syndrome (with FEAT_SME, `CPTR_EL2.TSM` and `TFP`
+trap the SME instructions after `CPACR_EL1`'s enables, `SMCR_EL2.EZT0`
+traps ZT0 at EL0, EL1 and EL2, and `SMCR_EL2.LEN` caps the Streaming SVE
+vector length below EL2 and sets it at EL2); HVC calls the hypervisor
 (`AArch64_CallHypervisor`, UNDEFINED under `HCR_EL2.HCD`) and SMC is
 trapped by `HCR_EL2.TSC`; ERET from EL2 returns to EL2, EL1 or EL0, with
 the illegal returns `AArch64_ExceptionReturn` defines; EL2's own stage-1
@@ -390,24 +427,111 @@ integration tests of the public API.
   GNU as assembles; and `CPACR_EL1.FPEN` traps the cryptographic
   instructions, which are Advanced SIMD, but not CRC32, which is not.
 - `tests/unit/difftest.rs` also replays `tests/vectors/qemu_sve.txt`, in
-  Streaming SVE mode at a 512-bit vector length: 5,640 vectors, 40 for each
-  of the 141 encoding classes of SVE integer arithmetic, element counts,
-  immediates, permutes, compares, predicate operations, WHILE, contiguous
-  loads, stores and prefetches, and floating point that FEAT_SME makes
-  legal there, each the class's fixed bits with the rest random. The
+  Streaming SVE mode at a 512-bit vector length with ZA enabled and ZT0
+  accessible: 40 vectors for each of the 238 encoding classes of
+  SVE integer arithmetic, element counts, immediates, permutes, compares,
+  predicate operations, WHILE, contiguous loads, stores and prefetches,
+  floating point, and SVE2's integer instructions that FEAT_SME makes
+  legal there, of the 13 classes of its ZA instructions, and of FEAT_SME2's
+  136 (the 5 predicate-as-counter classes, the 16 of the multi-vector
+  loads and stores, ZERO and LDR and STR of ZT0, the 41 of the
+  multi-vector SVE operations, the 43 of the instructions on ZA array
+  vectors, the 11 of their indexed forms, the 13 of BMOPA, the halfword
+  outer products, MOVA of groups and LUTI2 and LUTI4, and the 5 of the
+  SVE2.1 instructions it makes legal), each the class's fixed bits with
+  the rest random, and of FDOT, BFMLSLB and BFMLSLT by vector and by
+  element, whose classes' samples go to BFDOT and BFMLALB, each the
+  encoding's fixed bits: 13,480 in all. The
   initial state is `qemu_max.txt`'s with Z0-Z31 and P0-P15 in place of the
   SIMD&FP registers (random bits, small elements, element extremes;
-  random, all-true and per-size canonical predicates), a load's or
+  random, all-true and per-size canonical predicates), ZA and ZT0 zero but
+  for the classes on them, whose ZA vectors are zero, single-precision
+  lanes, element extremes or random bits and ZT0 random, a load's or
   store's base register in its data region; for the floating-point
   classes, half the Z registers hold special and ordinary values of the
-  word's own precision and the rest of half, single or double precision,
-  under a random FPCR (RMode, FZ, DN, AHP, FZ16, FIZ, AH, NEP), and 629
-  of their 1,000 vectors raise an exception (every kind does). The vectors
+  word's own precision (single precision for FEAT_SME2's conversions of
+  words) and the rest of half, single or double precision, under a
+  random FPCR (RMode, FZ, DN, AHP, FZ16, FIZ, AH, NEP), and 1,227 of
+  their 1,720 vectors raise an exception (every kind does), and the
+  floating-point ZA instructions' sources are of their own precision,
+  their 920 vectors leaving FPSR alone as their pseudocode does; for
+  SVE2's integer classes, three in four Z registers hold elements of the
+  word's own size, each a shift amount in range or an extreme, or
+  extremes of half that size, a long operation's sources; for FEAT_SME2's
+  narrows, three in four hold extremes of words or of doublewords, or
+  words each a shift amount in range. The vectors
   were generated by `tests/vectors/gen_qemu_sve.py` with the same QEMU's
   `max` processor without FEAT_SME_FA64 (`qemu_sve_harness.c`,
   `qemu_sve_trampoline.S`), with the fixes for its two SVE
-  floating-point bugs applied (below, "Where the references differ"),
-  and all agree. `tests/unit/sve.rs` checks what random operands rarely
+  floating-point bugs, its SME tile load bug and its MOVT applied (below,
+  "Where the references differ"), and all agree. `tests/unit/za.rs` checks the
+  ZA instructions against the pseudocode: the order of their enable
+  checks and which execute outside Streaming SVE mode, the tile slices'
+  vectors and columns, the slice index modulo the slices, a ZA vector
+  zeroed above the vector length, MOVA's predication and the quadword's
+  one predicate bit, ZERO's tiles, ADDHA's and ADDVA's sources, the
+  integer products' signedness, byte predicates, wrap and subtraction,
+  FMOPA's one rounding, default NaN and FPSR left alone, the widening
+  products' two roundings and their inactive elements not negated, the
+  tile loads' inactive elements zeroed and their faults part-way, LDR and
+  STR of ZA and their alignment, and the 64-bit, FEAT_SME2p1 and
+  FEAT_SME_LUTv2 encodings UNDEFINED; and of FEAT_SME2's on tiles,
+  BMOPA's count of agreeing bits, the halfword products' pairs and their
+  predicates, MOVA of a group's slices from an index aligned to the group,
+  as rows and as columns, four doubleword slices UNDEFINED below 256 bits
+  (in the decode for a processor whose longest vector length is), and the
+  instructions without FEAT_SME2 UNDEFINED; `tests/unit/softfloat.rs` checks
+  FPDot of half-precision pairs, NaNs, infinities, signed zeros and
+  rounding. `tests/unit/zt0.rs` checks ZT0's: the order of its enable
+  checks (SME's, ZA storage, `SMCR_EL1.EZT0`) in or out of Streaming SVE
+  mode, ZERO, LDR and STR of its 64 bytes from a register or SP, their
+  alignment and a fault part-way, MOVT UNDEFINED, ZT0 zeroed by enabling
+  ZA, EZT0 RES0 and the instructions UNDEFINED without FEAT_SME2, and ZT0
+  in a snapshot; and LUTI2's and LUTI4's indexes from the segment the
+  immediate selects modulo the segments, for one, two and four
+  registers, read before a register of the group is written, their enable
+  checks with Streaming SVE mode first, and their UNDEFINED sizes.
+  `tests/unit/pred_counter.rs` checks the
+  predicate-as-counter: its encoding, a full count held as an inverted
+  zero, the counter's element size read at another, a zero low nibble;
+  WHILE counting up and down, signed and unsigned, with its flags, and of
+  a pair; PEXT's parts and its pair wrapping from P15 to P0; CNTP's
+  width; and the multi-vector loads and stores' registers, consecutive and
+  strided, their layout in memory, the counter's elements across the
+  registers, the inactive elements, the immediate offset in whole
+  transfers, and a fault part-way. `tests/unit/multi.rs` checks the
+  multi-vector SVE operations: SEL's elements by the counter across the
+  registers, every source read before a destination is written,
+  SQDMULH's saturation and exact 64-bit product, the rounding shifts'
+  clamped shift and wrapped result, the maxima and minima signed and
+  unsigned by one vector and by a group, the floating-point ones on NaNs
+  and zeros, the clamps' order, ZIP and UZP of two and four vectors and
+  of quadwords and the vector lengths they need in the decode and after
+  the enable check, the narrowing shifts' rounding, saturation,
+  concatenation and interleaving and the reserved `tsize`, the
+  saturating narrows, BFCVT, and FCVT in IEEE half precision under
+  FPCR.AHP, the word conversions' saturation and rounding, FRINT's own
+  rounding with no Inexact, the unpacks and their reserved size; and of
+  the SVE2.1 instructions FEAT_SME2 makes legal, the narrows of two
+  vectors interleaving, rounding and saturating, and FCLAMP of one vector
+  at each size, BFCLAMP's UNDEFINED.
+  `tests/unit/za_array.rs` checks the instructions on ZA array vectors:
+  the vector `(Wv + offset) MOD vstride` in each register's stride, the
+  stride by the vector length and the register count, the long forms'
+  vectors from a multiple of two or four and their elements, a register
+  group wrapping from Z31 to Z0 and a second group stepping with the
+  first; the integer products' signs, mixed signs, subtraction and wrap;
+  the dot products of bytes and halfwords; FMLA's one rounding, default
+  NaN (negative under FPCR.AH) and FPSR left alone; FDOT's rounding of
+  the pair before the sum; FMLSL's and BFMLSL's negation; ADD and SUB
+  replacing the vectors and the accumulating forms adding to them; MOVA
+  between a group and the vectors, its offset unscaled; by an
+  indexed element, the element or group of each result's own 128-bit
+  segment, every class's index fields and a group's mixed-sign bit, and
+  the vertical dot products' elements across the registers; the enable
+  checks, and the 64-bit, FP8 and half-precision forms and the
+  instructions without FEAT_SME2 UNDEFINED.
+  `tests/unit/sve.rs` checks what random operands rarely
   reach, against the pseudocode: the SME trap outside Streaming SVE mode
   and the order of the enable checks, the vector length (and the bits
   above it zeroed), `DecodePredCount`, WHILE through the wrap of its
@@ -422,7 +546,25 @@ integration tests of the public API.
   values and denormals, FCVTZS's sign extension and saturation,
   the multiply-add negations, FCMLA's rotations and indexed segments,
   BFCVT's zeroed upper half, the exceptions of the active elements alone,
-  FPCR.AHP ignored, and `size = 00` UNDEFINED before the SME trap.
+  FPCR.AHP ignored, and `size = 00` UNDEFINED before the SME trap; and of
+  SVE2's integer instructions, SQRDMLAH, SQDMULH and SQRDMULH of
+  doublewords at their extremes, the shifts by the whole element (not its
+  low byte) with their rounding and saturation, the reversed and pairwise
+  operands, SUQADD's and USQADD's mixed signedness and the halving
+  operations' range, SQDMLALB's saturation of the product before the
+  accumulate, the dot products' wrap and USDOT's and SUDOT's signedness,
+  CDOT's and CMLA's rotations, SQRDCMLAH's rounding, the source element of
+  the long forms by element, SCLAMP's order, the elements the long and
+  wide arithmetic, SSHLLT, EORBT and SABALB take, PMULL's polynomial
+  products and SQDMULLB's saturation, the carry chain of ADCLB and SBCLB,
+  CADD's rotations and SQCADD's saturation, URSRA, SRI and SLI at the
+  element size, the narrowing instructions' halves, rounding and
+  saturation, and the reserved sizes and `tsize` values UNDEFINED before
+  the SME trap; no SVE saturation sets FPSR.QC. Of the SVE2.1
+  instructions FEAT_SME2 makes legal: the two-way SDOT's and UDOT's pairs
+  and wrap, by vector and by each segment's word, FDOT's two roundings and
+  the Inexact it raises, BFMLSLB's and BFMLSLT's negation, and a NaN's
+  sign that BFNeg keeps under FPCR.AH, and their traps and FEAT_SME2.
 - The decoder is checked against Arm's machine-readable specification
   (`tests/unit/spec.rs`). `syn` reads the decoder's source and follows
   `decode` through every `match` to every encoding it returns. Against
@@ -430,10 +572,9 @@ integration tests of the public API.
   called from Arm's parents; every field is read under Arm's name and at
   Arm's bits; each class names exactly the encodings of that class whose
   condition holds for the features the decoder knows (the base set and
-  every feature "What is modelled" lists; of FEAT_SME, still being built,
-  the ones it has); each encoding's arms fix exactly Arm's fixed bits,
-  should-be bits
-  included; each carries Arm's feature. And on all 2^32 words, the decoder
+  every feature "What is modelled" lists); each encoding's arms fix
+  exactly Arm's fixed bits, should-be bits included; each carries Arm's
+  feature. And on all 2^32 words, the decoder
   names the encoding Arm's data allocates the word to, and nothing where it
   allocates none: 0 disagreements, about 15 s on four threads. The one
   departure is PRFM (register) with `Rt = 11xxx`, which Arm's data gives to
@@ -481,7 +622,12 @@ integration tests of the public API.
   EL2 or under `TGE`, their priority, the SError's `VSESR_EL2` syndrome,
   `WFI` not waiting), `ISR_EL1` showing them, ESB deferring a masked
   virtual SError into `VDISR_EL2`, `VPIDR_EL2` and `VMPIDR_EL2` standing in
-  for EL1's identity, and the EL2 translation regime: its own tables and
+  for EL1's identity, SME under EL2 (`CheckSMEEnabled`'s order of
+  `CPACR_EL1.SMEN`, `FPEN`, `CPTR_EL2.TSM` and `TFP` at EL0 under `TGE`,
+  EL1 and EL2; `CheckSMEZT0Enabled`'s inactive-ZA trap, then
+  `SMCR_EL1.EZT0` below EL2, then `SMCR_EL2.EZT0`; and RDSVL and CNTB
+  reading the Streaming SVE vector length `SMCR_EL2.LEN` caps below EL2
+  and sets at EL2, whatever `EZT0` holds), and the EL2 translation regime: its own tables and
   TLB entries apart from EL1&0's, `TLBI ALLE2`, one privilege level's
   permissions (AP[1] and bit 53 ignored, XN), one address range with its
   own TBI, `AT S1E2R` and `S1E2W`, and `AT S12E*` from EL2 through the
@@ -760,6 +906,20 @@ choice is listed here with its evidence.
   encodings there), and `tests/unit/sve.rs` checks the UNDEFINED
   ([docs/qemu-upstream-bugs.md](../docs/qemu-upstream-bugs.md) entry 14,
   `docs/qemu-sve-fmad-size00.patch`).
+- **An SME load to a vertical tile slice zeroes every inactive element.**
+  LD1B to LD1Q write Zeros to each inactive element of the slice. QEMU
+  (to master at least) zeroes a vertical slice's inactive elements up to
+  its last active one and leaves those after it: 8 of the 80 tile load
+  vectors differed on it. The vectors were generated with its fix
+  applied, and `tests/unit/za.rs` checks the elements after the last
+  active one ([docs/qemu-upstream-bugs.md](../docs/qemu-upstream-bugs.md)
+  entry 15, `docs/qemu-sme-ld1-vertical-tail.patch`).
+- **MOVT between ZT0 and a general register is UNDEFINED.** Arm defines
+  it only in Debug state, which this core never enters. QEMU (to master
+  at least) executes it in any state. No vector covers it, and
+  `tests/unit/zt0.rs` checks the UNDEFINED
+  ([docs/qemu-upstream-bugs.md](../docs/qemu-upstream-bugs.md) entry 16,
+  `docs/qemu-sme2-movt-debug-state.patch`).
 - **PSCI is answered at the call, by firmware the processor cannot see.**
   The board has no EL3, and Arm makes `HVC` UNDEFINED on a processor
   without EL2 and `SMC` UNDEFINED on one without EL3 (outside the
@@ -777,7 +937,7 @@ choice is listed here with its evidence.
   processor, `MDCR_EL2.TDOSA` and `TDE` trapping EL1's accesses to EL2;
   here it keeps CORENPDRQ. QEMU (11.1.2) has no DBGPRCR_EL1, so an access
   is UNDEFINED at EL1 even where EL2 asked for the trap
-  ([docs/qemu-upstream-bugs.md](../docs/qemu-upstream-bugs.md) entry 15);
+  ([docs/qemu-upstream-bugs.md](../docs/qemu-upstream-bugs.md) entry 17);
   the EL2 vectors leave it out.
 - **RMR_EL1 and RMR_EL2 keep RR.** The highest level's RMR (RMR_EL1
   without EL2, RMR_EL2 with it) holds RR, an ordinary read/write field in

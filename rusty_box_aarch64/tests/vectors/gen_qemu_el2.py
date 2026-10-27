@@ -39,7 +39,7 @@ IMPLEMENTATION DEFINED or breakpoint-beyond-the-second register, no read
 whose value depends on time or on an earlier case, and no value of a bit
 the two may legitimately hold differently (a stateful RES0 or RES1 bit,
 an AArch32 trap). DBGPRCR_EL1 is left out: QEMU does not have it
-(docs/qemu-upstream-bugs.md, entry 15).
+(docs/qemu-upstream-bugs.md, entry 17).
 
 Needs an AArch64 bare-metal toolchain (CC, default aarch64-linux-gnu-gcc)
 and QEMU's system emulator (QEMU, default qemu-system-aarch64). The vectors

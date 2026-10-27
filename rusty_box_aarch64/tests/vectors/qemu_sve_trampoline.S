@@ -4,15 +4,15 @@
 // int run_one(const struct state *in, struct state *out)
 //
 // Saves what the C caller expects preserved, enters Streaming SVE mode
-// (SMSTART SM, which zeroes Z0-Z31, P0-P15 and FFR and sets FPSR), loads
-// X0-X30, SP, NZCV, FPCR, FPSR, Z0-Z31 and P0-P15 from `in`, executes the
-// word, stores the same registers into `out` and returns 0. A word that
-// raises a signal resumes at `fault_return` (the signal handler moves the
-// PC there), which returns 1 with `out` untouched. Both leave Streaming SVE
-// mode (SMSTOP SM) before restoring D8-D15, which it zeroes. TPIDR_EL0
-// holds X0 for the two instructions after the word, the one register left
-// free to find `out` with. SMSTART SM and SMSTOP SM are written as words
-// (MSR SVCRSM, #1 and #0), which the assembler needs no SME support for.
+// with ZA storage enabled (SMSTART, which zeroes Z0-Z31, P0-P15, FFR, ZA
+// and ZT0 and sets FPSR), loads X0-X30, SP, NZCV, FPCR, FPSR, Z0-Z31,
+// P0-P15, ZA's horizontal vectors and ZT0 from `in`, executes the word,
+// stores the same state into `out` and returns 0. A word that raises a signal resumes
+// at `fault_return` (the signal handler moves the PC there), which returns
+// 1 with `out` untouched. Both leave Streaming SVE mode and disable ZA
+// (SMSTOP) before restoring D8-D15, which it zeroes. TPIDR_EL0 holds X0
+// for the two instructions after the word, the one register left free to
+// find `out` with.
 
 #define OFF_SP   248
 #define OFF_NZCV 256
@@ -20,8 +20,12 @@
 #define OFF_FPSR 272
 #define OFF_Z    288
 #define OFF_P    2336
+#define OFF_ZA   2464
+// The Streaming SVE vector length in bytes: ZA's vectors, and their bytes.
+#define VLB      64
+// ZT0 follows ZA, at OFF_ZA + VLB * VLB.
 
-    .arch armv8.2-a+sve
+    .arch armv9-a+sme2
 
     .bss
     .balign 16
@@ -53,7 +57,16 @@ run_one:
     stp     d12, d13, [x9, #160]
     stp     d14, d15, [x9, #176]
 
-    .inst   0xd503437f          // SMSTART SM
+    smstart
+    add     x10, x0, #OFF_ZA
+    mov     w12, #0
+1:
+    ldr     za[w12, 0], [x10]
+    add     x10, x10, #VLB
+    add     w12, w12, #1
+    cmp     w12, #VLB
+    b.ne    1b
+    ldr     zt0, [x10]
     ldr     x10, [x0, #OFF_NZCV]
     msr     nzcv, x10
     ldr     x10, [x0, #OFF_FPCR]
@@ -210,12 +223,21 @@ insn_slot:
     str     p13, [x1, #13, mul vl]
     str     p14, [x1, #14, mul vl]
     str     p15, [x1, #15, mul vl]
+    add     x1, x0, #OFF_ZA
+    mov     w12, #0
+2:
+    str     za[w12, 0], [x1]
+    add     x1, x1, #VLB
+    add     w12, w12, #1
+    cmp     w12, #VLB
+    b.ne    2b
+    str     zt0, [x1]
     mov     w0, #0
     b       restore
 fault_return:
     mov     w0, #1
 restore:
-    .inst   0xd503427f          // SMSTOP SM
+    smstop
     adrp    x9, host
     add     x9, x9, :lo12:host
     ldp     x10, x11, [x9, #112]

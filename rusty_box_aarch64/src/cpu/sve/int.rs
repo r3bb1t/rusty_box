@@ -3,7 +3,7 @@
 //! the instructions with an immediate. Each handler names the Arm pages it
 //! is.
 
-use super::{decode_pred_count, int, mul_high, sat_add_scalar, sat_q, Esize, Zv};
+use super::{decode_pred_count, int, mul_high, sat_add_scalar, sat_doubling_mul_high, sat_q, Esize, Zv};
 use crate::cpu::features::VecLen;
 use crate::cpu::crypto::polynomial_mult;
 use crate::cpu::dp::{decode_bit_masks, ror};
@@ -39,9 +39,9 @@ impl Shift {
 }
 
 /// The two-operand operations of `sve_int_pred_bin`, by `op0:opc`
-/// (bits 20:16).
+/// (bits 20:16); ADD, MAX and MIN are also SVE2's pairwise operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BinOp {
+pub(super) enum BinOp {
     Add,
     Sub,
     SubReversed,
@@ -86,7 +86,7 @@ impl BinOp {
     }
 
     /// The operation on elements `a` and `b` of `es`.
-    fn apply(self, a: u64, b: u64, es: Esize) -> u64 {
+    pub(super) fn apply(self, a: u64, b: u64, es: Esize) -> u64 {
         let m = es.mask();
         match self {
             Self::Add => a.wrapping_add(b) & m,
@@ -191,13 +191,22 @@ enum ElementCount {
     SaturatingScalar { wide: bool },
 }
 
-/// The element shift by immediate's amount, from `tsize:imm3`: right
-/// shifts take `2 * esize - UInt(tsize:imm3)`, left shifts
-/// `UInt(tsize:imm3) - esize`.
-fn shift_amounts(tsize_imm3: u32, es: Esize) -> (u64, u64) {
+/// The amounts an element shift by immediate takes from `tsize:imm3`.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct ShiftAmounts {
+    /// A right shift's `2 * esize - UInt(tsize:imm3)`, 1 to `esize`.
+    pub(super) right: u64,
+    /// A left shift's `UInt(tsize:imm3) - esize`, 0 to `esize - 1`.
+    pub(super) left: u64,
+}
+
+/// The shift amounts of `tsize:imm3` for elements of `es`, the size
+/// `tsize`'s highest set bit gives (the source elements' of the long and
+/// narrowing shifts).
+pub(super) fn shift_amounts(tsize_imm3: u32, es: Esize) -> ShiftAmounts {
     let encoded = u64::from(tsize_imm3);
     let width = u64::from(es.bits());
-    (2 * width - encoded, encoded - width)
+    ShiftAmounts { right: 2 * width - encoded, left: encoded - width }
 }
 
 impl<L: Levels> Cpu<L> {
@@ -311,7 +320,7 @@ impl<L: Levels> Cpu<L> {
                     return self.undefined(pc, insn);
                 }
                 let es = Esize::from_tsize(tsize);
-                let (right, left) = shift_amounts((tsize << 3) | bits(insn, 7, 5), es);
+                let ShiftAmounts { right, left } = shift_amounts((tsize << 3) | bits(insn, 7, 5), es);
                 let op = match bits(insn, 19, 16) {
                     0b0000 => ShiftImmediate::Asr,
                     0b0001 => ShiftImmediate::Lsr,
@@ -546,7 +555,7 @@ impl<L: Levels> Cpu<L> {
                     return self.undefined(pc, insn);
                 }
                 let es = Esize::from_tsize(tsize);
-                let (rotate, _) = shift_amounts((tsize << 3) | bits(insn, 18, 16), es);
+                let rotate = shift_amounts((tsize << 3) | bits(insn, 18, 16), es).right;
                 let (m, dn) = (bits(insn, 9, 5), bits(insn, 4, 0));
                 let vl = self.sve_check()?;
                 let operand1 = self.z(dn, vl);
@@ -604,7 +613,7 @@ impl<L: Levels> Cpu<L> {
                 return self.undefined(pc, insn);
             }
             let es = Esize::from_tsize(tsize);
-            let (right, left) = shift_amounts((tsize << 3) | bits(insn, 18, 16), es);
+            let ShiftAmounts { right, left } = shift_amounts((tsize << 3) | bits(insn, 18, 16), es);
             let amount = if shift == Shift::Lsl { left } else { right };
             let vl = self.sve_check()?;
             let operand1 = self.z(n, vl);
@@ -676,14 +685,7 @@ impl<L: Levels> Cpu<L> {
                 MulUnpredicated::Mul => a.wrapping_mul(b),
                 MulUnpredicated::Pmul => polynomial_mult(a, b, 8) as u64,
                 MulUnpredicated::MulHigh { unsigned } => mul_high(a, b, es, unsigned),
-                // SQDMULH, SQRDMULH: `(2 * a * b + rounding) >> esize`,
-                // saturated, computed as `(a * b + rounding / 2) >> (esize
-                // - 1)` so that it is exact for 64-bit elements.
-                MulUnpredicated::DoublingHigh { rounding } => {
-                    let product = int(a, es, false) * int(b, es, false);
-                    let half_rounding = if rounding { 1i128 << (es.bits() - 2) } else { 0 };
-                    sat_q((product + half_rounding) >> (es.bits() - 1), es, false)
-                }
+                MulUnpredicated::DoublingHigh { rounding } => sat_doubling_mul_high(a, b, es, rounding),
             };
             result.set(e, es, r);
         }

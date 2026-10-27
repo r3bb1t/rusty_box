@@ -2,15 +2,21 @@
 //! `op1 = 0010`. Its groups nest one level deeper than the other top-level
 //! groups': `sve` holds groups (`sve_alloca`, ...), which hold the classes.
 //!
-//! The encodings here are those of FEAT_SME, which is still being built
-//! (`Feature::complete`): the streaming vector length instructions, the
-//! SVE integer, permute and predicate instructions FEAT_SME makes legal in
-//! Streaming SVE mode (`op0 = 000` and `001`), its floating-point
+//! The encodings here are all of FEAT_SME's and FEAT_SME2's in this group
+//! (`Feature::complete`): the streaming vector length
+//! instructions, the SVE integer, permute and predicate instructions
+//! FEAT_SME makes legal in Streaming SVE mode (`op0 = 000` and `001`),
+//! SVE2's integer instructions (`op0 = 010`), its floating-point
 //! instructions (`op0 = 011`), and its contiguous loads, stores and
-//! prefetches (`op0 = 100`, `101` and `111`). The rest of SVE2 FEAT_SME
-//! allows (`op0 = 010`) is not here yet; neither is anything only FEAT_SVE
-//! allows (the gathers, scatters, first-fault and non-fault loads, FADDA,
-//! FTMAD, FTSMUL among it), which this decoder does not know.
+//! prefetches (`op0 = 100`, `101` and `111`); and FEAT_SME2's
+//! predicate-as-counter instructions (`sve_while_pn`, `sve_int_pcount_pn`)
+//! and the SVE2.1 instructions it makes legal: SDOT and UDOT of halfword
+//! pairs, the saturating narrows of two vectors, FCLAMP, FDOT of
+//! half-precision pairs, and BFMLSLB and BFMLSLT.
+//! Nothing only FEAT_SVE allows (the gathers, scatters,
+//! first-fault and non-fault loads, FADDA, FTMAD, FTSMUL, SVE2's MATCH,
+//! HISTCNT and the SVE AES instructions among it) is here, which this
+//! decoder does not know.
 //!
 //! The variants are Arm's encoding ids, whole (the module documentation of
 //! `isa` gives the naming, which `tests/unit/spec.rs` checks), and the ids
@@ -19,6 +25,7 @@
 //! postfix does not apply here.
 #![allow(clippy::enum_variant_names)]
 
+use super::Feature;
 use super::Encoding;
 use crate::cpu::exec::bits;
 
@@ -27,6 +34,7 @@ pub(super) fn sve(word: u32) -> Option<Encoding> {
     match op0 {
         0b000 => integer_and_permute(word),
         0b001 => compare_and_predicate(word),
+        0b010 => integer_sve2_groups(word),
         0b011 => floating_point_groups(word),
         0b100 => sve_mem32(word),
         0b101 => sve_memcld(word),
@@ -118,13 +126,13 @@ fn compare_and_predicate(word: u32) -> Option<Encoding> {
             (0b11, 0b1) => sve_pred_gen_d(word),
             _ => None,
         },
-        // op2<5:4>; op3 = 1 under 01 is sve_while_pn (FEAT_SVE2p1 and
-        // FEAT_SME2), and op2 = 1001xx under 10 is sve_pred_wrffr
-        // (FEAT_SVE alone).
+        // op2<5:4>, then op3 under 01; op2 = 1001xx under 10 is
+        // sve_pred_wrffr (FEAT_SVE alone).
         (0b1, 0b1) => match bits(word, 15, 14) {
             0b00 => sve_cmpgpr(word),
             0b01 => match op3 {
                 0b0 => sve_pred_dup(word),
+                0b1 => sve_while_pn(word),
                 _ => None,
             },
             // op1<3:2>, then op2<3:2>.
@@ -2066,6 +2074,116 @@ fn sve_int_pred_dup(word: u32) -> Option<SveIntPredDup> {
     }
 }
 
+/// Arm group `sve_while_pn`: SVE2.1 and SME2 predicate-as-counter and
+/// pair-of-predicates generation, by op0 (bits 20:16) and op1 (bits
+/// 13:11), PTRUE's by op2 (bits 10:5) and op3 (bit 3) as well.
+fn sve_while_pn(word: u32) -> Option<Encoding> {
+    let op0 = bits(word, 20, 16);
+    let op1 = bits(word, 13, 11);
+    let op2 = bits(word, 10, 5);
+    let op3 = bits(word, 3, 3);
+    match (op0, op1) {
+        (_, 0b000 | 0b001 | 0b100 | 0b101) => sve_int_while_rr_pn(word).map(Encoding::SveIntWhileRrPn),
+        (_, 0b010 | 0b011) => sve_int_while_rr_pair(word).map(Encoding::SveIntWhileRrPair),
+        (0b00000, 0b110) => sve_int_ctr_to_mask(word).map(Encoding::SveIntCtrToMask),
+        (0b00000, 0b111) => match (op2, op3) {
+            (0b000000, 0b0) => sve_int_pn_ptrue(word).map(Encoding::SveIntPnPtrue),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Arm class `sve_int_while_rr_pn`: SVE integer compare scalar count and
+/// limit, to a predicate-as-counter of `2 << vl` vectors' elements.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SveIntWhileRrPn {
+    WhilegePnRr,
+    WhilehsPnRr,
+    WhilegtPnRr,
+    WhilehiPnRr,
+    WhileltPnRr,
+    WhileloPnRr,
+    WhilelePnRr,
+    WhilelsPnRr,
+}
+
+fn sve_int_while_rr_pn(word: u32) -> Option<SveIntWhileRrPn> {
+    let u = bits(word, 11, 11);
+    let lt = bits(word, 10, 10);
+    let eq = bits(word, 3, 3);
+    match (u, lt, eq) {
+        (0b0, 0b0, 0b0) => Some(SveIntWhileRrPn::WhilegePnRr),
+        (0b1, 0b0, 0b0) => Some(SveIntWhileRrPn::WhilehsPnRr),
+        (0b0, 0b0, 0b1) => Some(SveIntWhileRrPn::WhilegtPnRr),
+        (0b1, 0b0, 0b1) => Some(SveIntWhileRrPn::WhilehiPnRr),
+        (0b0, 0b1, 0b0) => Some(SveIntWhileRrPn::WhileltPnRr),
+        (0b1, 0b1, 0b0) => Some(SveIntWhileRrPn::WhileloPnRr),
+        (0b0, 0b1, 0b1) => Some(SveIntWhileRrPn::WhilelePnRr),
+        (0b1, 0b1, 0b1) => Some(SveIntWhileRrPn::WhilelsPnRr),
+        _ => None,
+    }
+}
+
+/// Arm class `sve_int_while_rr_pair`: SVE integer compare scalar count and
+/// limit, to a pair of predicates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SveIntWhileRrPair {
+    WhilegePpRr,
+    WhilehsPpRr,
+    WhilegtPpRr,
+    WhilehiPpRr,
+    WhileltPpRr,
+    WhileloPpRr,
+    WhilelePpRr,
+    WhilelsPpRr,
+}
+
+fn sve_int_while_rr_pair(word: u32) -> Option<SveIntWhileRrPair> {
+    let u = bits(word, 11, 11);
+    let lt = bits(word, 10, 10);
+    let eq = bits(word, 0, 0);
+    match (u, lt, eq) {
+        (0b0, 0b0, 0b0) => Some(SveIntWhileRrPair::WhilegePpRr),
+        (0b1, 0b0, 0b0) => Some(SveIntWhileRrPair::WhilehsPpRr),
+        (0b0, 0b0, 0b1) => Some(SveIntWhileRrPair::WhilegtPpRr),
+        (0b1, 0b0, 0b1) => Some(SveIntWhileRrPair::WhilehiPpRr),
+        (0b0, 0b1, 0b0) => Some(SveIntWhileRrPair::WhileltPpRr),
+        (0b1, 0b1, 0b0) => Some(SveIntWhileRrPair::WhileloPpRr),
+        (0b0, 0b1, 0b1) => Some(SveIntWhileRrPair::WhilelePpRr),
+        (0b1, 0b1, 0b1) => Some(SveIntWhileRrPair::WhilelsPpRr),
+        _ => None,
+    }
+}
+
+/// Arm class `sve_int_ctr_to_mask`: predicate-as-counter to predicate, one
+/// vector's or (`opc<2>`) a pair's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SveIntCtrToMask {
+    PextPnRr,
+    PextPpRr,
+}
+
+fn sve_int_ctr_to_mask(word: u32) -> Option<SveIntCtrToMask> {
+    let opc = bits(word, 10, 8);
+    match opc {
+        0b000..=0b011 => Some(SveIntCtrToMask::PextPnRr),
+        0b100 | 0b101 => Some(SveIntCtrToMask::PextPpRr),
+        _ => None,
+    }
+}
+
+/// Arm class `sve_int_pn_ptrue`: initialise a predicate-as-counter to all
+/// active.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SveIntPnPtrue {
+    PtruePnI,
+}
+
+fn sve_int_pn_ptrue(_word: u32) -> Option<SveIntPnPtrue> {
+    Some(SveIntPnPtrue::PtruePnI)
+}
+
 /// Arm group `sve_cmpgpr`: SVE integer compare scalar count and limit.
 fn sve_cmpgpr(word: u32) -> Option<Encoding> {
     let op0 = bits(word, 13, 12);
@@ -2146,12 +2264,30 @@ fn sve_int_whilenc(word: u32) -> Option<SveIntWhilenc> {
     }
 }
 
-/// Arm group `sve_pred_count_a`: SVE predicate count. `op1 = 1` is
-/// FEAT_SVE2p1's and FEAT_SME2's predicate-as-counter form.
+/// Arm group `sve_pred_count_a`: SVE predicate count, of a predicate by
+/// `op1` (bit 9) = 0, else of a predicate-as-counter, which fixes op0
+/// (bits 13:11).
 fn sve_pred_count_a(word: u32) -> Option<Encoding> {
+    let op0 = bits(word, 13, 11);
     let op1 = bits(word, 9, 9);
-    match op1 {
-        0b0 => sve_int_pcount_pred(word).map(Encoding::SveIntPcountPred),
+    match (op0, op1) {
+        (_, 0b0) => sve_int_pcount_pred(word).map(Encoding::SveIntPcountPred),
+        (0b000, 0b1) => sve_int_pcount_pn(word).map(Encoding::SveIntPcountPn),
+        _ => None,
+    }
+}
+
+/// Arm class `sve_int_pcount_pn`: SVE predicate count of a
+/// predicate-as-counter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SveIntPcountPn {
+    CntpRPn,
+}
+
+fn sve_int_pcount_pn(word: u32) -> Option<SveIntPcountPn> {
+    let opc = bits(word, 18, 16);
+    match opc {
+        0b000 => Some(SveIntPcountPn::CntpRPn),
         _ => None,
     }
 }
@@ -2385,6 +2521,1260 @@ fn sve_int_dup_fpimm(word: u32) -> Option<SveIntDupFpimm> {
     }
 }
 
+// ----- op0 = 010: SVE2 integer -----
+
+/// `op0 = 010`: SVE2's integer instructions, by op1<7> (bit 24), op1<6:5>
+/// (bits 23:22), op1<4> (bit 21) and op2 (bits 15:10). With `op2 =
+/// 11001x`, `op1<7:4> = 0000` is `sve_intx_dot2` and `0100`
+/// `sve_intx_dot2_by_indexed_elem`, both FEAT_SME2's and FEAT_SVE2p1's;
+/// `sve_intx_string`, `sve_intx_histseg_lut`, `sve_intx_histcnt` and
+/// `sve_intx_crypto` (`op1<7> = 1`, `op1<4> = 1`, `op2 = 1xxxxx`) are
+/// FEAT_SVE2's alone and later features'.
+fn integer_sve2_groups(word: u32) -> Option<Encoding> {
+    match (bits(word, 24, 24), bits(word, 23, 22), bits(word, 21, 21), bits(word, 15, 10)) {
+        (0b0, _, 0b0, 0b000000..=0b011111) => sve_intx_muladd_unpred(word),
+        (0b0, _, 0b0, 0b100000..=0b101111) => sve_intx_predicated(word),
+        (0b0, _, 0b0, 0b110000 | 0b110001) => sve_intx_clamp(word).map(Encoding::SveIntxClamp),
+        (0b0, 0b00, 0b0, 0b110010 | 0b110011) => sve_intx_dot2(word).map(Encoding::SveIntxDot2),
+        (0b0, 0b10, 0b0, 0b110010 | 0b110011) => {
+            sve_intx_dot2_by_indexed_elem(word).map(Encoding::SveIntxDot2ByIndexedElem)
+        }
+        (0b0, _, 0b1, _) => sve_intx_by_indexed_elem(word),
+        (0b1, _, 0b0, 0b000000..=0b011111) => sve_intx_cons_widening(word),
+        (0b1, _, 0b0, 0b100000..=0b101111) => sve_intx_constructive(word),
+        (0b1, _, 0b0, 0b110000..=0b111111) => sve_intx_acc(word),
+        (0b1, _, 0b1, 0b000000..=0b011111) => sve_intx_narrowing(word),
+        _ => None,
+    }
+}
+
+/// Arm group `sve_intx_muladd_unpred`: SVE2 integer multiply-add
+/// (unpredicated). By op0.
+fn sve_intx_muladd_unpred(word: u32) -> Option<Encoding> {
+    let op0 = bits(word, 14, 10);
+    match op0 {
+        0b00000 | 0b00001 => sve_intx_dot(word).map(Encoding::SveIntxDot),
+        0b00010 | 0b00011 => sve_intx_qdmlalbt(word).map(Encoding::SveIntxQdmlalbt),
+        0b00100..=0b00111 => sve_intx_cdot(word).map(Encoding::SveIntxCdot),
+        0b01000..=0b01111 => sve_intx_cmla(word).map(Encoding::SveIntxCmla),
+        0b10000..=0b10111 => sve_intx_mlal_long(word).map(Encoding::SveIntxMlalLong),
+        0b11000..=0b11011 => sve_intx_qdmlal_long(word).map(Encoding::SveIntxQdmlalLong),
+        0b11100 | 0b11101 => sve_intx_qrdmlah(word).map(Encoding::SveIntxQrdmlah),
+        0b11110 => sve_intx_mixed_dot(word).map(Encoding::SveIntxMixedDot),
+        _ => None,
+    }
+}
+
+/// Arm group `sve_intx_dot`: SVE integer dot product (unpredicated).
+/// `size = 01` is the halfword-to-word forms of FEAT_SVE2p3 and
+/// FEAT_SME2p3.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SveIntxDot {
+    SdotZZzz,
+    UdotZZzz,
+}
+
+fn sve_intx_dot(word: u32) -> Option<SveIntxDot> {
+    let size = bits(word, 23, 22);
+    let u = bits(word, 10, 10);
+    match (size, u) {
+        (0b10 | 0b11, 0b0) => Some(SveIntxDot::SdotZZzz),
+        (0b10 | 0b11, 0b1) => Some(SveIntxDot::UdotZZzz),
+        _ => None,
+    }
+}
+
+/// Arm group `sve_intx_qdmlalbt`: SVE2 saturating multiply-add interleaved
+/// long.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SveIntxQdmlalbt {
+    SqdmlalbtZZzz,
+    SqdmlslbtZZzz,
+}
+
+fn sve_intx_qdmlalbt(word: u32) -> Option<SveIntxQdmlalbt> {
+    let s = bits(word, 10, 10);
+    match s {
+        0b0 => Some(SveIntxQdmlalbt::SqdmlalbtZZzz),
+        0b1 => Some(SveIntxQdmlalbt::SqdmlslbtZZzz),
+        _ => None,
+    }
+}
+
+/// Arm group `sve_intx_cdot`: SVE2 complex integer dot product.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SveIntxCdot {
+    CdotZZzz,
+}
+
+fn sve_intx_cdot(_word: u32) -> Option<SveIntxCdot> {
+    Some(SveIntxCdot::CdotZZzz)
+}
+
+/// Arm group `sve_intx_cmla`: SVE2 complex integer multiply-add.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SveIntxCmla {
+    CmlaZZzz,
+    SqrdcmlahZZzz,
+}
+
+fn sve_intx_cmla(word: u32) -> Option<SveIntxCmla> {
+    let op = bits(word, 12, 12);
+    match op {
+        0b0 => Some(SveIntxCmla::CmlaZZzz),
+        0b1 => Some(SveIntxCmla::SqrdcmlahZZzz),
+        _ => None,
+    }
+}
+
+/// Arm group `sve_intx_mlal_long`: SVE2 integer multiply-add long.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SveIntxMlalLong {
+    SmlalbZZzz,
+    SmlslbZZzz,
+    SmlaltZZzz,
+    SmlsltZZzz,
+    UmlalbZZzz,
+    UmlslbZZzz,
+    UmlaltZZzz,
+    UmlsltZZzz,
+}
+
+fn sve_intx_mlal_long(word: u32) -> Option<SveIntxMlalLong> {
+    let s = bits(word, 12, 12);
+    let u = bits(word, 11, 11);
+    let t = bits(word, 10, 10);
+    match (s, u, t) {
+        (0b0, 0b0, 0b0) => Some(SveIntxMlalLong::SmlalbZZzz),
+        (0b1, 0b0, 0b0) => Some(SveIntxMlalLong::SmlslbZZzz),
+        (0b0, 0b0, 0b1) => Some(SveIntxMlalLong::SmlaltZZzz),
+        (0b1, 0b0, 0b1) => Some(SveIntxMlalLong::SmlsltZZzz),
+        (0b0, 0b1, 0b0) => Some(SveIntxMlalLong::UmlalbZZzz),
+        (0b1, 0b1, 0b0) => Some(SveIntxMlalLong::UmlslbZZzz),
+        (0b0, 0b1, 0b1) => Some(SveIntxMlalLong::UmlaltZZzz),
+        (0b1, 0b1, 0b1) => Some(SveIntxMlalLong::UmlsltZZzz),
+        _ => None,
+    }
+}
+
+/// Arm group `sve_intx_qdmlal_long`: SVE2 saturating multiply-add long.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SveIntxQdmlalLong {
+    SqdmlalbZZzz,
+    SqdmlslbZZzz,
+    SqdmlaltZZzz,
+    SqdmlsltZZzz,
+}
+
+fn sve_intx_qdmlal_long(word: u32) -> Option<SveIntxQdmlalLong> {
+    let s = bits(word, 11, 11);
+    let t = bits(word, 10, 10);
+    match (s, t) {
+        (0b0, 0b0) => Some(SveIntxQdmlalLong::SqdmlalbZZzz),
+        (0b1, 0b0) => Some(SveIntxQdmlalLong::SqdmlslbZZzz),
+        (0b0, 0b1) => Some(SveIntxQdmlalLong::SqdmlaltZZzz),
+        (0b1, 0b1) => Some(SveIntxQdmlalLong::SqdmlsltZZzz),
+        _ => None,
+    }
+}
+
+/// Arm group `sve_intx_qrdmlah`: SVE2 saturating multiply-add high.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SveIntxQrdmlah {
+    SqrdmlahZZzz,
+    SqrdmlshZZzz,
+}
+
+fn sve_intx_qrdmlah(word: u32) -> Option<SveIntxQrdmlah> {
+    let s = bits(word, 10, 10);
+    match s {
+        0b0 => Some(SveIntxQrdmlah::SqrdmlahZZzz),
+        0b1 => Some(SveIntxQrdmlah::SqrdmlshZZzz),
+        _ => None,
+    }
+}
+
+/// Arm group `sve_intx_mixed_dot`: SVE mixed sign dot product.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SveIntxMixedDot {
+    UsdotZZzzS,
+}
+
+fn sve_intx_mixed_dot(word: u32) -> Option<SveIntxMixedDot> {
+    let size = bits(word, 23, 22);
+    match size {
+        0b10 => Some(SveIntxMixedDot::UsdotZZzzS),
+        _ => None,
+    }
+}
+
+/// Arm group `sve_intx_predicated`: SVE2 integer predicated. By op0 and
+/// op1.
+fn sve_intx_predicated(word: u32) -> Option<Encoding> {
+    let op0 = bits(word, 20, 17);
+    let op1 = bits(word, 13, 13);
+    match (op0, op1) {
+        (0b0000..=0b0111, 0b0) => sve_intx_bin_pred_shift_sat_round(word).map(Encoding::SveIntxBinPredShiftSatRound),
+        (0b0000 | 0b0001 | 0b0100 | 0b0101, 0b1) => sve_intx_pred_arith_unary(word).map(Encoding::SveIntxPredArithUnary),
+        (0b0010, 0b1) => sve_intx_accumulate_long_pairs(word).map(Encoding::SveIntxAccumulateLongPairs),
+        (0b1000..=0b1011, 0b0) => sve_intx_pred_arith_binary(word).map(Encoding::SveIntxPredArithBinary),
+        (0b1000..=0b1011, 0b1) => sve_intx_arith_binary_pairs(word).map(Encoding::SveIntxArithBinaryPairs),
+        (0b1100..=0b1111, 0b0) => sve_intx_pred_arith_binary_sat(word).map(Encoding::SveIntxPredArithBinarySat),
+        _ => None,
+    }
+}
+
+/// Arm group `sve_intx_bin_pred_shift_sat_round`: SVE2
+/// saturating/rounding bitwise shift left (predicated).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SveIntxBinPredShiftSatRound {
+    SrshlZPZz,
+    SrshlrZPZz,
+    SqshlZPZz,
+    SqrshlZPZz,
+    SqshlrZPZz,
+    SqrshlrZPZz,
+    UrshlZPZz,
+    UrshlrZPZz,
+    UqshlZPZz,
+    UqrshlZPZz,
+    UqshlrZPZz,
+    UqrshlrZPZz,
+}
+
+fn sve_intx_bin_pred_shift_sat_round(word: u32) -> Option<SveIntxBinPredShiftSatRound> {
+    let q = bits(word, 19, 19);
+    let r = bits(word, 18, 18);
+    let n = bits(word, 17, 17);
+    let u = bits(word, 16, 16);
+    match (q, r, n, u) {
+        (0b0, 0b0, 0b1, 0b0) => Some(SveIntxBinPredShiftSatRound::SrshlZPZz),
+        (0b0, 0b1, 0b1, 0b0) => Some(SveIntxBinPredShiftSatRound::SrshlrZPZz),
+        (0b1, 0b0, 0b0, 0b0) => Some(SveIntxBinPredShiftSatRound::SqshlZPZz),
+        (0b1, 0b0, 0b1, 0b0) => Some(SveIntxBinPredShiftSatRound::SqrshlZPZz),
+        (0b1, 0b1, 0b0, 0b0) => Some(SveIntxBinPredShiftSatRound::SqshlrZPZz),
+        (0b1, 0b1, 0b1, 0b0) => Some(SveIntxBinPredShiftSatRound::SqrshlrZPZz),
+        (0b0, 0b0, 0b1, 0b1) => Some(SveIntxBinPredShiftSatRound::UrshlZPZz),
+        (0b0, 0b1, 0b1, 0b1) => Some(SveIntxBinPredShiftSatRound::UrshlrZPZz),
+        (0b1, 0b0, 0b0, 0b1) => Some(SveIntxBinPredShiftSatRound::UqshlZPZz),
+        (0b1, 0b0, 0b1, 0b1) => Some(SveIntxBinPredShiftSatRound::UqrshlZPZz),
+        (0b1, 0b1, 0b0, 0b1) => Some(SveIntxBinPredShiftSatRound::UqshlrZPZz),
+        (0b1, 0b1, 0b1, 0b1) => Some(SveIntxBinPredShiftSatRound::UqrshlrZPZz),
+        _ => None,
+    }
+}
+
+/// Arm group `sve_intx_pred_arith_unary`: SVE2 integer unary operations
+/// (predicated). `Z = 1` is the zeroing forms of FEAT_SVE2p2 and
+/// FEAT_SME2p2.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SveIntxPredArithUnary {
+    UrecpeZPZM,
+    UrsqrteZPZM,
+    SqabsZPZM,
+    SqnegZPZM,
+}
+
+fn sve_intx_pred_arith_unary(word: u32) -> Option<SveIntxPredArithUnary> {
+    let q = bits(word, 19, 19);
+    let z = bits(word, 17, 17);
+    let op = bits(word, 16, 16);
+    match (q, z, op) {
+        (0b0, 0b0, 0b0) => Some(SveIntxPredArithUnary::UrecpeZPZM),
+        (0b0, 0b0, 0b1) => Some(SveIntxPredArithUnary::UrsqrteZPZM),
+        (0b1, 0b0, 0b0) => Some(SveIntxPredArithUnary::SqabsZPZM),
+        (0b1, 0b0, 0b1) => Some(SveIntxPredArithUnary::SqnegZPZM),
+        _ => None,
+    }
+}
+
+/// Arm group `sve_intx_accumulate_long_pairs`: SVE2 integer pairwise add
+/// and accumulate long.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SveIntxAccumulateLongPairs {
+    SadalpZPZ,
+    UadalpZPZ,
+}
+
+fn sve_intx_accumulate_long_pairs(word: u32) -> Option<SveIntxAccumulateLongPairs> {
+    let u = bits(word, 16, 16);
+    match u {
+        0b0 => Some(SveIntxAccumulateLongPairs::SadalpZPZ),
+        0b1 => Some(SveIntxAccumulateLongPairs::UadalpZPZ),
+        _ => None,
+    }
+}
+
+/// Arm group `sve_intx_pred_arith_binary`: SVE2 integer halving
+/// add/subtract (predicated).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SveIntxPredArithBinary {
+    ShaddZPZz,
+    ShsubZPZz,
+    SrhaddZPZz,
+    ShsubrZPZz,
+    UhaddZPZz,
+    UhsubZPZz,
+    UrhaddZPZz,
+    UhsubrZPZz,
+}
+
+fn sve_intx_pred_arith_binary(word: u32) -> Option<SveIntxPredArithBinary> {
+    let r = bits(word, 18, 18);
+    let s = bits(word, 17, 17);
+    let u = bits(word, 16, 16);
+    match (r, s, u) {
+        (0b0, 0b0, 0b0) => Some(SveIntxPredArithBinary::ShaddZPZz),
+        (0b0, 0b1, 0b0) => Some(SveIntxPredArithBinary::ShsubZPZz),
+        (0b1, 0b0, 0b0) => Some(SveIntxPredArithBinary::SrhaddZPZz),
+        (0b1, 0b1, 0b0) => Some(SveIntxPredArithBinary::ShsubrZPZz),
+        (0b0, 0b0, 0b1) => Some(SveIntxPredArithBinary::UhaddZPZz),
+        (0b0, 0b1, 0b1) => Some(SveIntxPredArithBinary::UhsubZPZz),
+        (0b1, 0b0, 0b1) => Some(SveIntxPredArithBinary::UrhaddZPZz),
+        (0b1, 0b1, 0b1) => Some(SveIntxPredArithBinary::UhsubrZPZz),
+        _ => None,
+    }
+}
+
+/// Arm group `sve_intx_arith_binary_pairs`: SVE2 integer pairwise
+/// arithmetic. `opc = 00` with `U = 0` is SUBP, FEAT_SVE2p3's and
+/// FEAT_SME2p3's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SveIntxArithBinaryPairs {
+    AddpZPZz,
+    SmaxpZPZz,
+    SminpZPZz,
+    UmaxpZPZz,
+    UminpZPZz,
+}
+
+fn sve_intx_arith_binary_pairs(word: u32) -> Option<SveIntxArithBinaryPairs> {
+    let opc = bits(word, 18, 17);
+    let u = bits(word, 16, 16);
+    match (opc, u) {
+        (0b00, 0b1) => Some(SveIntxArithBinaryPairs::AddpZPZz),
+        (0b10, 0b0) => Some(SveIntxArithBinaryPairs::SmaxpZPZz),
+        (0b11, 0b0) => Some(SveIntxArithBinaryPairs::SminpZPZz),
+        (0b10, 0b1) => Some(SveIntxArithBinaryPairs::UmaxpZPZz),
+        (0b11, 0b1) => Some(SveIntxArithBinaryPairs::UminpZPZz),
+        _ => None,
+    }
+}
+
+/// Arm group `sve_intx_pred_arith_binary_sat`: SVE2 saturating
+/// add/subtract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SveIntxPredArithBinarySat {
+    SqaddZPZz,
+    SqsubZPZz,
+    SuqaddZPZz,
+    UsqaddZPZz,
+    SqsubrZPZz,
+    UqaddZPZz,
+    UqsubZPZz,
+    UqsubrZPZz,
+}
+
+fn sve_intx_pred_arith_binary_sat(word: u32) -> Option<SveIntxPredArithBinarySat> {
+    let op = bits(word, 18, 18);
+    let s = bits(word, 17, 17);
+    let u = bits(word, 16, 16);
+    match (op, s, u) {
+        (0b0, 0b0, 0b0) => Some(SveIntxPredArithBinarySat::SqaddZPZz),
+        (0b0, 0b1, 0b0) => Some(SveIntxPredArithBinarySat::SqsubZPZz),
+        (0b1, 0b0, 0b0) => Some(SveIntxPredArithBinarySat::SuqaddZPZz),
+        (0b1, 0b0, 0b1) => Some(SveIntxPredArithBinarySat::UsqaddZPZz),
+        (0b1, 0b1, 0b0) => Some(SveIntxPredArithBinarySat::SqsubrZPZz),
+        (0b0, 0b0, 0b1) => Some(SveIntxPredArithBinarySat::UqaddZPZz),
+        (0b0, 0b1, 0b1) => Some(SveIntxPredArithBinarySat::UqsubZPZz),
+        (0b1, 0b1, 0b1) => Some(SveIntxPredArithBinarySat::UqsubrZPZz),
+        _ => None,
+    }
+}
+
+/// Arm group `sve_intx_clamp`: SVE integer clamp.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SveIntxClamp {
+    SclampZZz,
+    UclampZZz,
+}
+
+fn sve_intx_clamp(word: u32) -> Option<SveIntxClamp> {
+    let u = bits(word, 10, 10);
+    match u {
+        0b0 => Some(SveIntxClamp::SclampZZz),
+        0b1 => Some(SveIntxClamp::UclampZZz),
+        _ => None,
+    }
+}
+
+/// Arm group `sve_intx_dot2`: SVE two-way dot product, words of pairs of
+/// halfwords, signed or unsigned (`U`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SveIntxDot2 {
+    SdotZ32Zzz,
+    UdotZ32Zzz,
+}
+
+fn sve_intx_dot2(word: u32) -> Option<SveIntxDot2> {
+    let u = bits(word, 10, 10);
+    match u {
+        0b0 => Some(SveIntxDot2::SdotZ32Zzz),
+        0b1 => Some(SveIntxDot2::UdotZ32Zzz),
+        _ => None,
+    }
+}
+
+/// Arm group `sve_intx_dot2_by_indexed_elem`: SVE two-way dot product by
+/// an indexed pair of halfwords, signed or unsigned (`U`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SveIntxDot2ByIndexedElem {
+    SdotZ32Zzzi,
+    UdotZ32Zzzi,
+}
+
+fn sve_intx_dot2_by_indexed_elem(word: u32) -> Option<SveIntxDot2ByIndexedElem> {
+    let u = bits(word, 10, 10);
+    match u {
+        0b0 => Some(SveIntxDot2ByIndexedElem::SdotZ32Zzzi),
+        0b1 => Some(SveIntxDot2ByIndexedElem::UdotZ32Zzzi),
+        _ => None,
+    }
+}
+
+/// Arm group `sve_intx_by_indexed_elem`: SVE2 multiply-add and multiply
+/// (indexed). By op0.
+fn sve_intx_by_indexed_elem(word: u32) -> Option<Encoding> {
+    let op0 = bits(word, 15, 10);
+    match op0 {
+        0b000000 | 0b000001 => sve_intx_dot_by_indexed_elem(word).map(Encoding::SveIntxDotByIndexedElem),
+        0b000010 | 0b000011 => sve_intx_mla_by_indexed_elem(word).map(Encoding::SveIntxMlaByIndexedElem),
+        0b000100 | 0b000101 => sve_intx_qrdmlah_by_indexed_elem(word).map(Encoding::SveIntxQrdmlahByIndexedElem),
+        0b000110 | 0b000111 => sve_intx_mixed_dot_by_indexed_elem(word).map(Encoding::SveIntxMixedDotByIndexedElem),
+        0b001000..=0b001111 => sve_intx_qdmla_long_by_indexed_elem(word).map(Encoding::SveIntxQdmlaLongByIndexedElem),
+        0b010000..=0b010011 => sve_intx_cdot_by_indexed_elem(word).map(Encoding::SveIntxCdotByIndexedElem),
+        0b011000..=0b011011 => sve_intx_cmla_by_indexed_elem(word).map(Encoding::SveIntxCmlaByIndexedElem),
+        0b011100..=0b011111 => sve_intx_qrdcmla_by_indexed_elem(word).map(Encoding::SveIntxQrdcmlaByIndexedElem),
+        0b100000..=0b101111 => sve_intx_mla_long_by_indexed_elem(word).map(Encoding::SveIntxMlaLongByIndexedElem),
+        0b110000..=0b110111 => sve_intx_mul_long_by_indexed_elem(word).map(Encoding::SveIntxMulLongByIndexedElem),
+        0b111000..=0b111011 => sve_intx_qdmul_long_by_indexed_elem(word).map(Encoding::SveIntxQdmulLongByIndexedElem),
+        0b111100 | 0b111101 => sve_intx_qdmulh_by_indexed_elem(word).map(Encoding::SveIntxQdmulhByIndexedElem),
+        0b111110 => sve_intx_mul_by_indexed_elem(word).map(Encoding::SveIntxMulByIndexedElem),
+        _ => None,
+    }
+}
+
+/// Arm group `sve_intx_dot_by_indexed_elem`: SVE integer dot product
+/// (indexed). `size<1> = 0` is the halfword-to-word forms of FEAT_SVE2p3
+/// and FEAT_SME2p3.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SveIntxDotByIndexedElem {
+    SdotZZzziS,
+    SdotZZzziD,
+    UdotZZzziS,
+    UdotZZzziD,
+}
+
+fn sve_intx_dot_by_indexed_elem(word: u32) -> Option<SveIntxDotByIndexedElem> {
+    let size = bits(word, 23, 22);
+    let u = bits(word, 10, 10);
+    match (size, u) {
+        (0b10, 0b0) => Some(SveIntxDotByIndexedElem::SdotZZzziS),
+        (0b11, 0b0) => Some(SveIntxDotByIndexedElem::SdotZZzziD),
+        (0b10, 0b1) => Some(SveIntxDotByIndexedElem::UdotZZzziS),
+        (0b11, 0b1) => Some(SveIntxDotByIndexedElem::UdotZZzziD),
+        _ => None,
+    }
+}
+
+/// Arm group `sve_intx_mla_by_indexed_elem`: SVE2 integer multiply-add
+/// (indexed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SveIntxMlaByIndexedElem {
+    MlaZZzziH,
+    MlaZZzziS,
+    MlaZZzziD,
+    MlsZZzziH,
+    MlsZZzziS,
+    MlsZZzziD,
+}
+
+fn sve_intx_mla_by_indexed_elem(word: u32) -> Option<SveIntxMlaByIndexedElem> {
+    let size = bits(word, 23, 22);
+    let s = bits(word, 10, 10);
+    match (size, s) {
+        (0b00 | 0b01, 0b0) => Some(SveIntxMlaByIndexedElem::MlaZZzziH),
+        (0b10, 0b0) => Some(SveIntxMlaByIndexedElem::MlaZZzziS),
+        (0b11, 0b0) => Some(SveIntxMlaByIndexedElem::MlaZZzziD),
+        (0b00 | 0b01, 0b1) => Some(SveIntxMlaByIndexedElem::MlsZZzziH),
+        (0b10, 0b1) => Some(SveIntxMlaByIndexedElem::MlsZZzziS),
+        (0b11, 0b1) => Some(SveIntxMlaByIndexedElem::MlsZZzziD),
+        _ => None,
+    }
+}
+
+/// Arm group `sve_intx_qrdmlah_by_indexed_elem`: SVE2 saturating
+/// multiply-add high (indexed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SveIntxQrdmlahByIndexedElem {
+    SqrdmlahZZzziH,
+    SqrdmlahZZzziS,
+    SqrdmlahZZzziD,
+    SqrdmlshZZzziH,
+    SqrdmlshZZzziS,
+    SqrdmlshZZzziD,
+}
+
+fn sve_intx_qrdmlah_by_indexed_elem(word: u32) -> Option<SveIntxQrdmlahByIndexedElem> {
+    let size = bits(word, 23, 22);
+    let s = bits(word, 10, 10);
+    match (size, s) {
+        (0b00 | 0b01, 0b0) => Some(SveIntxQrdmlahByIndexedElem::SqrdmlahZZzziH),
+        (0b10, 0b0) => Some(SveIntxQrdmlahByIndexedElem::SqrdmlahZZzziS),
+        (0b11, 0b0) => Some(SveIntxQrdmlahByIndexedElem::SqrdmlahZZzziD),
+        (0b00 | 0b01, 0b1) => Some(SveIntxQrdmlahByIndexedElem::SqrdmlshZZzziH),
+        (0b10, 0b1) => Some(SveIntxQrdmlahByIndexedElem::SqrdmlshZZzziS),
+        (0b11, 0b1) => Some(SveIntxQrdmlahByIndexedElem::SqrdmlshZZzziD),
+        _ => None,
+    }
+}
+
+/// Arm group `sve_intx_mixed_dot_by_indexed_elem`: SVE mixed sign dot
+/// product (indexed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SveIntxMixedDotByIndexedElem {
+    UsdotZZzziS,
+    SudotZZzziS,
+}
+
+fn sve_intx_mixed_dot_by_indexed_elem(word: u32) -> Option<SveIntxMixedDotByIndexedElem> {
+    let size = bits(word, 23, 22);
+    let u = bits(word, 10, 10);
+    match (size, u) {
+        (0b10, 0b0) => Some(SveIntxMixedDotByIndexedElem::UsdotZZzziS),
+        (0b10, 0b1) => Some(SveIntxMixedDotByIndexedElem::SudotZZzziS),
+        _ => None,
+    }
+}
+
+/// Arm group `sve_intx_qdmla_long_by_indexed_elem`: SVE2 saturating
+/// multiply-add (indexed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SveIntxQdmlaLongByIndexedElem {
+    SqdmlalbZZzziS,
+    SqdmlalbZZzziD,
+    SqdmlslbZZzziS,
+    SqdmlslbZZzziD,
+    SqdmlaltZZzziS,
+    SqdmlaltZZzziD,
+    SqdmlsltZZzziS,
+    SqdmlsltZZzziD,
+}
+
+fn sve_intx_qdmla_long_by_indexed_elem(word: u32) -> Option<SveIntxQdmlaLongByIndexedElem> {
+    let size = bits(word, 23, 22);
+    let s = bits(word, 12, 12);
+    let t = bits(word, 10, 10);
+    match (size, s, t) {
+        (0b10, 0b0, 0b0) => Some(SveIntxQdmlaLongByIndexedElem::SqdmlalbZZzziS),
+        (0b11, 0b0, 0b0) => Some(SveIntxQdmlaLongByIndexedElem::SqdmlalbZZzziD),
+        (0b10, 0b1, 0b0) => Some(SveIntxQdmlaLongByIndexedElem::SqdmlslbZZzziS),
+        (0b11, 0b1, 0b0) => Some(SveIntxQdmlaLongByIndexedElem::SqdmlslbZZzziD),
+        (0b10, 0b0, 0b1) => Some(SveIntxQdmlaLongByIndexedElem::SqdmlaltZZzziS),
+        (0b11, 0b0, 0b1) => Some(SveIntxQdmlaLongByIndexedElem::SqdmlaltZZzziD),
+        (0b10, 0b1, 0b1) => Some(SveIntxQdmlaLongByIndexedElem::SqdmlsltZZzziS),
+        (0b11, 0b1, 0b1) => Some(SveIntxQdmlaLongByIndexedElem::SqdmlsltZZzziD),
+        _ => None,
+    }
+}
+
+/// Arm group `sve_intx_cdot_by_indexed_elem`: SVE2 complex integer dot
+/// product (indexed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SveIntxCdotByIndexedElem {
+    CdotZZzziS,
+    CdotZZzziD,
+}
+
+fn sve_intx_cdot_by_indexed_elem(word: u32) -> Option<SveIntxCdotByIndexedElem> {
+    let size = bits(word, 23, 22);
+    match size {
+        0b10 => Some(SveIntxCdotByIndexedElem::CdotZZzziS),
+        0b11 => Some(SveIntxCdotByIndexedElem::CdotZZzziD),
+        _ => None,
+    }
+}
+
+/// Arm group `sve_intx_cmla_by_indexed_elem`: SVE2 complex integer
+/// multiply-add (indexed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SveIntxCmlaByIndexedElem {
+    CmlaZZzziH,
+    CmlaZZzziS,
+}
+
+fn sve_intx_cmla_by_indexed_elem(word: u32) -> Option<SveIntxCmlaByIndexedElem> {
+    let size = bits(word, 23, 22);
+    match size {
+        0b10 => Some(SveIntxCmlaByIndexedElem::CmlaZZzziH),
+        0b11 => Some(SveIntxCmlaByIndexedElem::CmlaZZzziS),
+        _ => None,
+    }
+}
+
+/// Arm group `sve_intx_qrdcmla_by_indexed_elem`: SVE2 complex saturating
+/// multiply-add (indexed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SveIntxQrdcmlaByIndexedElem {
+    SqrdcmlahZZzziH,
+    SqrdcmlahZZzziS,
+}
+
+fn sve_intx_qrdcmla_by_indexed_elem(word: u32) -> Option<SveIntxQrdcmlaByIndexedElem> {
+    let size = bits(word, 23, 22);
+    match size {
+        0b10 => Some(SveIntxQrdcmlaByIndexedElem::SqrdcmlahZZzziH),
+        0b11 => Some(SveIntxQrdcmlaByIndexedElem::SqrdcmlahZZzziS),
+        _ => None,
+    }
+}
+
+/// Arm group `sve_intx_mla_long_by_indexed_elem`: SVE2 integer multiply-add
+/// long (indexed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SveIntxMlaLongByIndexedElem {
+    SmlalbZZzziS,
+    SmlalbZZzziD,
+    SmlslbZZzziS,
+    SmlslbZZzziD,
+    SmlaltZZzziS,
+    SmlaltZZzziD,
+    SmlsltZZzziS,
+    SmlsltZZzziD,
+    UmlalbZZzziS,
+    UmlalbZZzziD,
+    UmlslbZZzziS,
+    UmlslbZZzziD,
+    UmlaltZZzziS,
+    UmlaltZZzziD,
+    UmlsltZZzziS,
+    UmlsltZZzziD,
+}
+
+fn sve_intx_mla_long_by_indexed_elem(word: u32) -> Option<SveIntxMlaLongByIndexedElem> {
+    let size = bits(word, 23, 22);
+    let s = bits(word, 13, 13);
+    let u = bits(word, 12, 12);
+    let t = bits(word, 10, 10);
+    match (size, s, u, t) {
+        (0b10, 0b0, 0b0, 0b0) => Some(SveIntxMlaLongByIndexedElem::SmlalbZZzziS),
+        (0b11, 0b0, 0b0, 0b0) => Some(SveIntxMlaLongByIndexedElem::SmlalbZZzziD),
+        (0b10, 0b1, 0b0, 0b0) => Some(SveIntxMlaLongByIndexedElem::SmlslbZZzziS),
+        (0b11, 0b1, 0b0, 0b0) => Some(SveIntxMlaLongByIndexedElem::SmlslbZZzziD),
+        (0b10, 0b0, 0b0, 0b1) => Some(SveIntxMlaLongByIndexedElem::SmlaltZZzziS),
+        (0b11, 0b0, 0b0, 0b1) => Some(SveIntxMlaLongByIndexedElem::SmlaltZZzziD),
+        (0b10, 0b1, 0b0, 0b1) => Some(SveIntxMlaLongByIndexedElem::SmlsltZZzziS),
+        (0b11, 0b1, 0b0, 0b1) => Some(SveIntxMlaLongByIndexedElem::SmlsltZZzziD),
+        (0b10, 0b0, 0b1, 0b0) => Some(SveIntxMlaLongByIndexedElem::UmlalbZZzziS),
+        (0b11, 0b0, 0b1, 0b0) => Some(SveIntxMlaLongByIndexedElem::UmlalbZZzziD),
+        (0b10, 0b1, 0b1, 0b0) => Some(SveIntxMlaLongByIndexedElem::UmlslbZZzziS),
+        (0b11, 0b1, 0b1, 0b0) => Some(SveIntxMlaLongByIndexedElem::UmlslbZZzziD),
+        (0b10, 0b0, 0b1, 0b1) => Some(SveIntxMlaLongByIndexedElem::UmlaltZZzziS),
+        (0b11, 0b0, 0b1, 0b1) => Some(SveIntxMlaLongByIndexedElem::UmlaltZZzziD),
+        (0b10, 0b1, 0b1, 0b1) => Some(SveIntxMlaLongByIndexedElem::UmlsltZZzziS),
+        (0b11, 0b1, 0b1, 0b1) => Some(SveIntxMlaLongByIndexedElem::UmlsltZZzziD),
+        _ => None,
+    }
+}
+
+/// Arm group `sve_intx_mul_long_by_indexed_elem`: SVE2 integer multiply
+/// long (indexed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SveIntxMulLongByIndexedElem {
+    SmullbZZziS,
+    SmullbZZziD,
+    SmulltZZziS,
+    SmulltZZziD,
+    UmullbZZziS,
+    UmullbZZziD,
+    UmulltZZziS,
+    UmulltZZziD,
+}
+
+fn sve_intx_mul_long_by_indexed_elem(word: u32) -> Option<SveIntxMulLongByIndexedElem> {
+    let size = bits(word, 23, 22);
+    let u = bits(word, 12, 12);
+    let t = bits(word, 10, 10);
+    match (size, u, t) {
+        (0b10, 0b0, 0b0) => Some(SveIntxMulLongByIndexedElem::SmullbZZziS),
+        (0b11, 0b0, 0b0) => Some(SveIntxMulLongByIndexedElem::SmullbZZziD),
+        (0b10, 0b0, 0b1) => Some(SveIntxMulLongByIndexedElem::SmulltZZziS),
+        (0b11, 0b0, 0b1) => Some(SveIntxMulLongByIndexedElem::SmulltZZziD),
+        (0b10, 0b1, 0b0) => Some(SveIntxMulLongByIndexedElem::UmullbZZziS),
+        (0b11, 0b1, 0b0) => Some(SveIntxMulLongByIndexedElem::UmullbZZziD),
+        (0b10, 0b1, 0b1) => Some(SveIntxMulLongByIndexedElem::UmulltZZziS),
+        (0b11, 0b1, 0b1) => Some(SveIntxMulLongByIndexedElem::UmulltZZziD),
+        _ => None,
+    }
+}
+
+/// Arm group `sve_intx_qdmul_long_by_indexed_elem`: SVE2 saturating
+/// multiply (indexed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SveIntxQdmulLongByIndexedElem {
+    SqdmullbZZziS,
+    SqdmullbZZziD,
+    SqdmulltZZziS,
+    SqdmulltZZziD,
+}
+
+fn sve_intx_qdmul_long_by_indexed_elem(word: u32) -> Option<SveIntxQdmulLongByIndexedElem> {
+    let size = bits(word, 23, 22);
+    let t = bits(word, 10, 10);
+    match (size, t) {
+        (0b10, 0b0) => Some(SveIntxQdmulLongByIndexedElem::SqdmullbZZziS),
+        (0b11, 0b0) => Some(SveIntxQdmulLongByIndexedElem::SqdmullbZZziD),
+        (0b10, 0b1) => Some(SveIntxQdmulLongByIndexedElem::SqdmulltZZziS),
+        (0b11, 0b1) => Some(SveIntxQdmulLongByIndexedElem::SqdmulltZZziD),
+        _ => None,
+    }
+}
+
+/// Arm group `sve_intx_qdmulh_by_indexed_elem`: SVE2 saturating multiply
+/// high (indexed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SveIntxQdmulhByIndexedElem {
+    SqdmulhZZziH,
+    SqdmulhZZziS,
+    SqdmulhZZziD,
+    SqrdmulhZZziH,
+    SqrdmulhZZziS,
+    SqrdmulhZZziD,
+}
+
+fn sve_intx_qdmulh_by_indexed_elem(word: u32) -> Option<SveIntxQdmulhByIndexedElem> {
+    let size = bits(word, 23, 22);
+    let r = bits(word, 10, 10);
+    match (size, r) {
+        (0b00 | 0b01, 0b0) => Some(SveIntxQdmulhByIndexedElem::SqdmulhZZziH),
+        (0b10, 0b0) => Some(SveIntxQdmulhByIndexedElem::SqdmulhZZziS),
+        (0b11, 0b0) => Some(SveIntxQdmulhByIndexedElem::SqdmulhZZziD),
+        (0b00 | 0b01, 0b1) => Some(SveIntxQdmulhByIndexedElem::SqrdmulhZZziH),
+        (0b10, 0b1) => Some(SveIntxQdmulhByIndexedElem::SqrdmulhZZziS),
+        (0b11, 0b1) => Some(SveIntxQdmulhByIndexedElem::SqrdmulhZZziD),
+        _ => None,
+    }
+}
+
+/// Arm group `sve_intx_mul_by_indexed_elem`: SVE2 integer multiply
+/// (indexed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SveIntxMulByIndexedElem {
+    MulZZziH,
+    MulZZziS,
+    MulZZziD,
+}
+
+fn sve_intx_mul_by_indexed_elem(word: u32) -> Option<SveIntxMulByIndexedElem> {
+    let size = bits(word, 23, 22);
+    match size {
+        0b00 | 0b01 => Some(SveIntxMulByIndexedElem::MulZZziH),
+        0b10 => Some(SveIntxMulByIndexedElem::MulZZziS),
+        0b11 => Some(SveIntxMulByIndexedElem::MulZZziD),
+        _ => None,
+    }
+}
+
+/// Arm group `sve_intx_cons_widening`: SVE2 integer add/subtract long,
+/// wide and multiply long. By op0.
+fn sve_intx_cons_widening(word: u32) -> Option<Encoding> {
+    let op0 = bits(word, 14, 13);
+    match op0 {
+        0b00 | 0b01 => sve_intx_cons_arith_long(word).map(Encoding::SveIntxConsArithLong),
+        0b10 => sve_intx_cons_arith_wide(word).map(Encoding::SveIntxConsArithWide),
+        0b11 => sve_intx_cons_mul_long(word).map(Encoding::SveIntxConsMulLong),
+        _ => None,
+    }
+}
+
+/// Arm group `sve_intx_cons_arith_long`: SVE2 integer add/subtract long.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SveIntxConsArithLong {
+    SaddlbZZz,
+    SsublbZZz,
+    SabdlbZZz,
+    SaddltZZz,
+    SsubltZZz,
+    SabdltZZz,
+    UaddlbZZz,
+    UsublbZZz,
+    UabdlbZZz,
+    UaddltZZz,
+    UsubltZZz,
+    UabdltZZz,
+}
+
+fn sve_intx_cons_arith_long(word: u32) -> Option<SveIntxConsArithLong> {
+    let op = bits(word, 13, 13);
+    let s = bits(word, 12, 12);
+    let u = bits(word, 11, 11);
+    let t = bits(word, 10, 10);
+    match (op, s, u, t) {
+        (0b0, 0b0, 0b0, 0b0) => Some(SveIntxConsArithLong::SaddlbZZz),
+        (0b0, 0b1, 0b0, 0b0) => Some(SveIntxConsArithLong::SsublbZZz),
+        (0b1, 0b1, 0b0, 0b0) => Some(SveIntxConsArithLong::SabdlbZZz),
+        (0b0, 0b0, 0b0, 0b1) => Some(SveIntxConsArithLong::SaddltZZz),
+        (0b0, 0b1, 0b0, 0b1) => Some(SveIntxConsArithLong::SsubltZZz),
+        (0b1, 0b1, 0b0, 0b1) => Some(SveIntxConsArithLong::SabdltZZz),
+        (0b0, 0b0, 0b1, 0b0) => Some(SveIntxConsArithLong::UaddlbZZz),
+        (0b0, 0b1, 0b1, 0b0) => Some(SveIntxConsArithLong::UsublbZZz),
+        (0b1, 0b1, 0b1, 0b0) => Some(SveIntxConsArithLong::UabdlbZZz),
+        (0b0, 0b0, 0b1, 0b1) => Some(SveIntxConsArithLong::UaddltZZz),
+        (0b0, 0b1, 0b1, 0b1) => Some(SveIntxConsArithLong::UsubltZZz),
+        (0b1, 0b1, 0b1, 0b1) => Some(SveIntxConsArithLong::UabdltZZz),
+        _ => None,
+    }
+}
+
+/// Arm group `sve_intx_cons_arith_wide`: SVE2 integer add/subtract wide.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SveIntxConsArithWide {
+    SaddwbZZz,
+    SsubwbZZz,
+    SaddwtZZz,
+    SsubwtZZz,
+    UaddwbZZz,
+    UsubwbZZz,
+    UaddwtZZz,
+    UsubwtZZz,
+}
+
+fn sve_intx_cons_arith_wide(word: u32) -> Option<SveIntxConsArithWide> {
+    let s = bits(word, 12, 12);
+    let u = bits(word, 11, 11);
+    let t = bits(word, 10, 10);
+    match (s, u, t) {
+        (0b0, 0b0, 0b0) => Some(SveIntxConsArithWide::SaddwbZZz),
+        (0b1, 0b0, 0b0) => Some(SveIntxConsArithWide::SsubwbZZz),
+        (0b0, 0b0, 0b1) => Some(SveIntxConsArithWide::SaddwtZZz),
+        (0b1, 0b0, 0b1) => Some(SveIntxConsArithWide::SsubwtZZz),
+        (0b0, 0b1, 0b0) => Some(SveIntxConsArithWide::UaddwbZZz),
+        (0b1, 0b1, 0b0) => Some(SveIntxConsArithWide::UsubwbZZz),
+        (0b0, 0b1, 0b1) => Some(SveIntxConsArithWide::UaddwtZZz),
+        (0b1, 0b1, 0b1) => Some(SveIntxConsArithWide::UsubwtZZz),
+        _ => None,
+    }
+}
+
+/// Arm group `sve_intx_cons_mul_long`: SVE2 integer multiply long.
+/// PMULLB and PMULLT with `size = 00` are FEAT_SVE_PMULL128's 128-bit
+/// forms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SveIntxConsMulLong {
+    SqdmullbZZz,
+    PmullbZZz,
+    SmullbZZz,
+    SqdmulltZZz,
+    PmulltZZz,
+    SmulltZZz,
+    UmullbZZz,
+    UmulltZZz,
+}
+
+fn sve_intx_cons_mul_long(word: u32) -> Option<SveIntxConsMulLong> {
+    let size = bits(word, 23, 22);
+    let op = bits(word, 12, 12);
+    let u = bits(word, 11, 11);
+    let t = bits(word, 10, 10);
+    match (size, op, u, t) {
+        (0b00, 0b0, 0b1, _) => None,
+        (_, 0b0, 0b0, 0b0) => Some(SveIntxConsMulLong::SqdmullbZZz),
+        (_, 0b0, 0b1, 0b0) => Some(SveIntxConsMulLong::PmullbZZz),
+        (_, 0b1, 0b0, 0b0) => Some(SveIntxConsMulLong::SmullbZZz),
+        (_, 0b0, 0b0, 0b1) => Some(SveIntxConsMulLong::SqdmulltZZz),
+        (_, 0b0, 0b1, 0b1) => Some(SveIntxConsMulLong::PmulltZZz),
+        (_, 0b1, 0b0, 0b1) => Some(SveIntxConsMulLong::SmulltZZz),
+        (_, 0b1, 0b1, 0b0) => Some(SveIntxConsMulLong::UmullbZZz),
+        (_, 0b1, 0b1, 0b1) => Some(SveIntxConsMulLong::UmulltZZz),
+        _ => None,
+    }
+}
+
+/// Arm group `sve_intx_constructive`: SVE2 integer constructive and
+/// interleaved operations. By op0 and op1. `op1 = 0110` is
+/// `sve_intx_mmla` (FEAT_I8MM with FEAT_SVE alone) and `op1 = 11xx`
+/// `sve_intx_perm_bit` (FEAT_SVE_BitPerm).
+fn sve_intx_constructive(word: u32) -> Option<Encoding> {
+    let op0 = bits(word, 23, 23);
+    let op1 = bits(word, 13, 10);
+    match (op0, op1) {
+        (_, 0b0000..=0b0011) => sve_intx_clong(word).map(Encoding::SveIntxClong),
+        (_, 0b0100 | 0b0101) => sve_intx_eorx(word).map(Encoding::SveIntxEorx),
+        (0b0, 0b1000..=0b1011) => sve_intx_shift_long(word).map(Encoding::SveIntxShiftLong),
+        _ => None,
+    }
+}
+
+/// Arm group `sve_intx_clong`: SVE2 integer add/subtract interleaved long.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SveIntxClong {
+    SaddlbtZZz,
+    SsublbtZZz,
+    SsubltbZZz,
+}
+
+fn sve_intx_clong(word: u32) -> Option<SveIntxClong> {
+    let s = bits(word, 11, 11);
+    let tb = bits(word, 10, 10);
+    match (s, tb) {
+        (0b0, 0b0) => Some(SveIntxClong::SaddlbtZZz),
+        (0b1, 0b0) => Some(SveIntxClong::SsublbtZZz),
+        (0b1, 0b1) => Some(SveIntxClong::SsubltbZZz),
+        _ => None,
+    }
+}
+
+/// Arm group `sve_intx_eorx`: SVE2 bitwise exclusive-OR interleaved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SveIntxEorx {
+    EorbtZZz,
+    EortbZZz,
+}
+
+fn sve_intx_eorx(word: u32) -> Option<SveIntxEorx> {
+    let tb = bits(word, 10, 10);
+    match tb {
+        0b0 => Some(SveIntxEorx::EorbtZZz),
+        0b1 => Some(SveIntxEorx::EortbZZz),
+        _ => None,
+    }
+}
+
+/// Arm group `sve_intx_shift_long`: SVE2 bitwise shift left long.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SveIntxShiftLong {
+    SshllbZZi,
+    SshlltZZi,
+    UshllbZZi,
+    UshlltZZi,
+}
+
+fn sve_intx_shift_long(word: u32) -> Option<SveIntxShiftLong> {
+    let u = bits(word, 11, 11);
+    let t = bits(word, 10, 10);
+    match (u, t) {
+        (0b0, 0b0) => Some(SveIntxShiftLong::SshllbZZi),
+        (0b0, 0b1) => Some(SveIntxShiftLong::SshlltZZi),
+        (0b1, 0b0) => Some(SveIntxShiftLong::UshllbZZi),
+        (0b1, 0b1) => Some(SveIntxShiftLong::UshlltZZi),
+        _ => None,
+    }
+}
+
+/// Arm group `sve_intx_acc`: SVE2 accumulate. By op0 and op1.
+fn sve_intx_acc(word: u32) -> Option<Encoding> {
+    let op0 = bits(word, 20, 17);
+    let op1 = bits(word, 13, 11);
+    match (op0, op1) {
+        (_, 0b000 | 0b001) => sve_intx_aba_long(word).map(Encoding::SveIntxAbaLong),
+        (_, 0b010) => sve_intx_adc_long(word).map(Encoding::SveIntxAdcLong),
+        (0b0000, 0b011) => sve_intx_cadd(word).map(Encoding::SveIntxCadd),
+        (_, 0b100 | 0b101) => sve_intx_sra(word).map(Encoding::SveIntxSra),
+        (_, 0b110) => sve_intx_shift_insert(word).map(Encoding::SveIntxShiftInsert),
+        (_, 0b111) => sve_intx_aba(word).map(Encoding::SveIntxAba),
+        _ => None,
+    }
+}
+
+/// Arm group `sve_intx_aba_long`: SVE2 integer absolute difference and
+/// accumulate long.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SveIntxAbaLong {
+    SabalbZZzz,
+    SabaltZZzz,
+    UabalbZZzz,
+    UabaltZZzz,
+}
+
+fn sve_intx_aba_long(word: u32) -> Option<SveIntxAbaLong> {
+    let u = bits(word, 11, 11);
+    let t = bits(word, 10, 10);
+    match (u, t) {
+        (0b0, 0b0) => Some(SveIntxAbaLong::SabalbZZzz),
+        (0b0, 0b1) => Some(SveIntxAbaLong::SabaltZZzz),
+        (0b1, 0b0) => Some(SveIntxAbaLong::UabalbZZzz),
+        (0b1, 0b1) => Some(SveIntxAbaLong::UabaltZZzz),
+        _ => None,
+    }
+}
+
+/// Arm group `sve_intx_adc_long`: SVE2 integer add/subtract long with
+/// carry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SveIntxAdcLong {
+    AdclbZZzz,
+    SbclbZZzz,
+    AdcltZZzz,
+    SbcltZZzz,
+}
+
+fn sve_intx_adc_long(word: u32) -> Option<SveIntxAdcLong> {
+    let size = bits(word, 23, 22);
+    let t = bits(word, 10, 10);
+    match (size, t) {
+        (0b00 | 0b01, 0b0) => Some(SveIntxAdcLong::AdclbZZzz),
+        (0b10 | 0b11, 0b0) => Some(SveIntxAdcLong::SbclbZZzz),
+        (0b00 | 0b01, 0b1) => Some(SveIntxAdcLong::AdcltZZzz),
+        (0b10 | 0b11, 0b1) => Some(SveIntxAdcLong::SbcltZZzz),
+        _ => None,
+    }
+}
+
+/// Arm group `sve_intx_cadd`: SVE2 complex integer add.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SveIntxCadd {
+    CaddZZz,
+    SqcaddZZz,
+}
+
+fn sve_intx_cadd(word: u32) -> Option<SveIntxCadd> {
+    let op = bits(word, 16, 16);
+    match op {
+        0b0 => Some(SveIntxCadd::CaddZZz),
+        0b1 => Some(SveIntxCadd::SqcaddZZz),
+        _ => None,
+    }
+}
+
+/// Arm group `sve_intx_sra`: SVE2 bitwise shift right and accumulate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SveIntxSra {
+    SsraZZi,
+    SrsraZZi,
+    UsraZZi,
+    UrsraZZi,
+}
+
+fn sve_intx_sra(word: u32) -> Option<SveIntxSra> {
+    let r = bits(word, 11, 11);
+    let u = bits(word, 10, 10);
+    match (r, u) {
+        (0b0, 0b0) => Some(SveIntxSra::SsraZZi),
+        (0b1, 0b0) => Some(SveIntxSra::SrsraZZi),
+        (0b0, 0b1) => Some(SveIntxSra::UsraZZi),
+        (0b1, 0b1) => Some(SveIntxSra::UrsraZZi),
+        _ => None,
+    }
+}
+
+/// Arm group `sve_intx_shift_insert`: SVE2 bitwise shift and insert.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SveIntxShiftInsert {
+    SriZZzi,
+    SliZZzi,
+}
+
+fn sve_intx_shift_insert(word: u32) -> Option<SveIntxShiftInsert> {
+    let op = bits(word, 10, 10);
+    match op {
+        0b0 => Some(SveIntxShiftInsert::SriZZzi),
+        0b1 => Some(SveIntxShiftInsert::SliZZzi),
+        _ => None,
+    }
+}
+
+/// Arm group `sve_intx_aba`: SVE2 integer absolute difference and
+/// accumulate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SveIntxAba {
+    SabaZZzz,
+    UabaZZzz,
+}
+
+fn sve_intx_aba(word: u32) -> Option<SveIntxAba> {
+    let u = bits(word, 10, 10);
+    match u {
+        0b0 => Some(SveIntxAba::SabaZZzz),
+        0b1 => Some(SveIntxAba::UabaZZzz),
+        _ => None,
+    }
+}
+
+/// Arm group `sve_intx_narrowing`: SVE2 narrowing. By op0 to op5. Of
+/// `sve_intx_multi_shift_narrow` (`op0 = 1`, `op3 = 0x`) and
+/// `sve_intx_multi_extract_narrow` (`op2 = 1`), the narrows of two
+/// registers, the ones by a shift of FEAT_SVE2p3 and FEAT_SME2p3 are not
+/// named.
+fn sve_intx_narrowing(word: u32) -> Option<Encoding> {
+    let op0 = bits(word, 23, 23);
+    let op1 = bits(word, 18, 17);
+    let op2 = bits(word, 16, 16);
+    let op3 = bits(word, 14, 13);
+    let op4 = bits(word, 10, 10);
+    let op5 = bits(word, 5, 5);
+    match (op0, op1, op2, op3, op4, op5) {
+        (0b0, _, _, 0b00 | 0b01, _, _) => sve_intx_shift_narrow(word).map(Encoding::SveIntxShiftNarrow),
+        (0b1, _, _, 0b00 | 0b01, 0b0, 0b0) => {
+            sve_intx_multi_shift_narrow(word).map(Encoding::SveIntxMultiShiftNarrow)
+        }
+        (0b0, 0b00, 0b0, 0b10, _, _) => sve_intx_extract_narrow(word).map(Encoding::SveIntxExtractNarrow),
+        (0b0, 0b00, 0b1, 0b10, 0b0, 0b0) => {
+            sve_intx_multi_extract_narrow(word).map(Encoding::SveIntxMultiExtractNarrow)
+        }
+        (_, _, _, 0b11, _, _) => sve_intx_arith_narrow(word).map(Encoding::SveIntxArithNarrow),
+        _ => None,
+    }
+}
+
+/// Arm group `sve_intx_shift_narrow`: SVE2 bitwise shift right narrow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SveIntxShiftNarrow {
+    SqshrunbZZi,
+    SqrshrunbZZi,
+    ShrnbZZi,
+    RshrnbZZi,
+    SqshrnbZZi,
+    SqrshrnbZZi,
+    SqshruntZZi,
+    SqrshruntZZi,
+    ShrntZZi,
+    RshrntZZi,
+    SqshrntZZi,
+    SqrshrntZZi,
+    UqshrnbZZi,
+    UqrshrnbZZi,
+    UqshrntZZi,
+    UqrshrntZZi,
+}
+
+fn sve_intx_shift_narrow(word: u32) -> Option<SveIntxShiftNarrow> {
+    let op = bits(word, 13, 13);
+    let u = bits(word, 12, 12);
+    let r = bits(word, 11, 11);
+    let t = bits(word, 10, 10);
+    match (op, u, r, t) {
+        (0b0, 0b0, 0b0, 0b0) => Some(SveIntxShiftNarrow::SqshrunbZZi),
+        (0b0, 0b0, 0b1, 0b0) => Some(SveIntxShiftNarrow::SqrshrunbZZi),
+        (0b0, 0b1, 0b0, 0b0) => Some(SveIntxShiftNarrow::ShrnbZZi),
+        (0b0, 0b1, 0b1, 0b0) => Some(SveIntxShiftNarrow::RshrnbZZi),
+        (0b1, 0b0, 0b0, 0b0) => Some(SveIntxShiftNarrow::SqshrnbZZi),
+        (0b1, 0b0, 0b1, 0b0) => Some(SveIntxShiftNarrow::SqrshrnbZZi),
+        (0b0, 0b0, 0b0, 0b1) => Some(SveIntxShiftNarrow::SqshruntZZi),
+        (0b0, 0b0, 0b1, 0b1) => Some(SveIntxShiftNarrow::SqrshruntZZi),
+        (0b0, 0b1, 0b0, 0b1) => Some(SveIntxShiftNarrow::ShrntZZi),
+        (0b0, 0b1, 0b1, 0b1) => Some(SveIntxShiftNarrow::RshrntZZi),
+        (0b1, 0b0, 0b0, 0b1) => Some(SveIntxShiftNarrow::SqshrntZZi),
+        (0b1, 0b0, 0b1, 0b1) => Some(SveIntxShiftNarrow::SqrshrntZZi),
+        (0b1, 0b1, 0b0, 0b0) => Some(SveIntxShiftNarrow::UqshrnbZZi),
+        (0b1, 0b1, 0b1, 0b0) => Some(SveIntxShiftNarrow::UqrshrnbZZi),
+        (0b1, 0b1, 0b0, 0b1) => Some(SveIntxShiftNarrow::UqshrntZZi),
+        (0b1, 0b1, 0b1, 0b1) => Some(SveIntxShiftNarrow::UqrshrntZZi),
+        _ => None,
+    }
+}
+
+/// Arm group `sve_intx_extract_narrow`: SVE2 saturating extract narrow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SveIntxExtractNarrow {
+    SqxtnbZZz,
+    SqxtunbZZz,
+    SqxtntZZz,
+    SqxtuntZZz,
+    UqxtnbZZz,
+    UqxtntZZz,
+}
+
+fn sve_intx_extract_narrow(word: u32) -> Option<SveIntxExtractNarrow> {
+    let opc = bits(word, 12, 11);
+    let t = bits(word, 10, 10);
+    match (opc, t) {
+        (0b00, 0b0) => Some(SveIntxExtractNarrow::SqxtnbZZz),
+        (0b10, 0b0) => Some(SveIntxExtractNarrow::SqxtunbZZz),
+        (0b00, 0b1) => Some(SveIntxExtractNarrow::SqxtntZZz),
+        (0b10, 0b1) => Some(SveIntxExtractNarrow::SqxtuntZZz),
+        (0b01, 0b0) => Some(SveIntxExtractNarrow::UqxtnbZZz),
+        (0b01, 0b1) => Some(SveIntxExtractNarrow::UqxtntZZz),
+        _ => None,
+    }
+}
+
+/// Arm group `sve_intx_multi_shift_narrow`: SVE2 multi-vector rounding
+/// shift right narrow, of two vectors of words to interleaved halfwords
+/// (`opc<4> = 1`). `opc = 01xxx`, to bytes, and the forms without rounding
+/// (`R = 0`) are FEAT_SVE2p3's and FEAT_SME2p3's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SveIntxMultiShiftNarrow {
+    SqrshrnZMz2,
+    SqrshrunZMz2,
+    UqrshrnZMz2,
+}
+
+fn sve_intx_multi_shift_narrow(word: u32) -> Option<SveIntxMultiShiftNarrow> {
+    let op0 = bits(word, 22, 22);
+    let opc = bits(word, 20, 16);
+    let op1 = bits(word, 13, 13);
+    let u = bits(word, 12, 12);
+    let r = bits(word, 11, 11);
+    match (op0, opc, op1, u, r) {
+        (0b0, 0b10000..=0b11111, 0b1, 0b0, 0b1) => Some(SveIntxMultiShiftNarrow::SqrshrnZMz2),
+        (0b0, 0b10000..=0b11111, 0b0, 0b0, 0b1) => Some(SveIntxMultiShiftNarrow::SqrshrunZMz2),
+        (0b0, 0b10000..=0b11111, 0b1, 0b1, 0b1) => Some(SveIntxMultiShiftNarrow::UqrshrnZMz2),
+        _ => None,
+    }
+}
+
+/// Arm group `sve_intx_multi_extract_narrow`: SVE2 multi-vector saturating
+/// extract narrow, of two vectors of words to interleaved halfwords.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SveIntxMultiExtractNarrow {
+    SqcvtnZMz2,
+    SqcvtunZMz2,
+    UqcvtnZMz2,
+}
+
+fn sve_intx_multi_extract_narrow(word: u32) -> Option<SveIntxMultiExtractNarrow> {
+    let tszh = bits(word, 22, 22);
+    let tszl = bits(word, 20, 19);
+    let opc = bits(word, 12, 11);
+    match (tszh, tszl, opc) {
+        (0b0, 0b10, 0b00) => Some(SveIntxMultiExtractNarrow::SqcvtnZMz2),
+        (0b0, 0b10, 0b10) => Some(SveIntxMultiExtractNarrow::SqcvtunZMz2),
+        (0b0, 0b10, 0b01) => Some(SveIntxMultiExtractNarrow::UqcvtnZMz2),
+        _ => None,
+    }
+}
+
+/// Arm group `sve_intx_arith_narrow`: SVE2 integer add/subtract narrow
+/// high part.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SveIntxArithNarrow {
+    AddhnbZZz,
+    RaddhnbZZz,
+    SubhnbZZz,
+    RsubhnbZZz,
+    AddhntZZz,
+    RaddhntZZz,
+    SubhntZZz,
+    RsubhntZZz,
+}
+
+fn sve_intx_arith_narrow(word: u32) -> Option<SveIntxArithNarrow> {
+    let s = bits(word, 12, 12);
+    let r = bits(word, 11, 11);
+    let t = bits(word, 10, 10);
+    match (s, r, t) {
+        (0b0, 0b0, 0b0) => Some(SveIntxArithNarrow::AddhnbZZz),
+        (0b0, 0b1, 0b0) => Some(SveIntxArithNarrow::RaddhnbZZz),
+        (0b1, 0b0, 0b0) => Some(SveIntxArithNarrow::SubhnbZZz),
+        (0b1, 0b1, 0b0) => Some(SveIntxArithNarrow::RsubhnbZZz),
+        (0b0, 0b0, 0b1) => Some(SveIntxArithNarrow::AddhntZZz),
+        (0b0, 0b1, 0b1) => Some(SveIntxArithNarrow::RaddhntZZz),
+        (0b1, 0b0, 0b1) => Some(SveIntxArithNarrow::SubhntZZz),
+        (0b1, 0b1, 0b1) => Some(SveIntxArithNarrow::RsubhntZZz),
+        _ => None,
+    }
+}
+
 // ----- op0 = 011: floating point -----
 //
 // A class whose encodings carry Arm's condition `size != '00'` opens with
@@ -2418,14 +3808,15 @@ fn fp_complex_and_pairwise(word: u32) -> Option<Encoding> {
     }
 }
 
-/// `op1 = 0xx1xxxx`: the indexed and the widening multiply-adds, by op2.
-/// `sve_fp_clamp`, the FP8 groups and the matrix multiplies are FEAT_SVE's
-/// alone or later features'.
+/// `op1 = 0xx1xxxx`: the indexed and the widening multiply-adds and FCLAMP,
+/// by op2. The FP8 groups and the matrix multiplies are FEAT_SVE's alone
+/// or later features'.
 fn fp_indexed_and_widening(word: u32) -> Option<Encoding> {
     match bits(word, 15, 10) {
         0b000000..=0b000011 => sve_fp_fma_by_indexed_elem(word).map(Encoding::SveFpFmaByIndexedElem),
         0b000100..=0b000111 => sve_fp_fcmla_by_indexed_elem(word).map(Encoding::SveFpFcmlaByIndexedElem),
         0b001000 | 0b001010 => sve_fp_fmul_by_indexed_elem(word).map(Encoding::SveFpFmulByIndexedElem),
+        0b001001 => sve_fp_clamp(word).map(Encoding::SveFpClamp),
         0b010000..=0b010011 | 0b011000..=0b011011 => sve_fp_fma_w_by_indexed_elem(word),
         0b100000 | 0b100001 | 0b101000 | 0b101001 => sve_fp_fma_w(word),
         _ => None,
@@ -2681,17 +4072,45 @@ fn sve_fp_fmul_by_indexed_elem(word: u32) -> Option<SveFpFmulByIndexedElem> {
     }
 }
 
-/// Arm group `sve_fp_fdot_by_indexed_elem`: SVE BFloat16 floating-point
-/// dot product (indexed). `op = 0` is SME2's half-precision FDOT.
+/// Arm group `sve_fp_clamp`: SVE floating-point clamp. `size = 00` is
+/// BFCLAMP, FEAT_SVE_B16B16's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SveFpClamp {
+    FclampZZz,
+}
+
+fn sve_fp_clamp(word: u32) -> Option<SveFpClamp> {
+    let size = bits(word, 23, 22);
+    match size {
+        0b00 => None,
+        _ => Some(SveFpClamp::FclampZZz),
+    }
+}
+
+/// Arm group `sve_fp_fdot_by_indexed_elem`: SVE floating-point dot product
+/// (indexed), FEAT_SME2's of half-precision and FEAT_SME's of BFloat16
+/// pairs (`op`). `opc2 = x1`, of FP8 values, is FEAT_FP8DOT2's and
+/// FEAT_FP8DOT4's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum SveFpFdotByIndexedElem {
+    FdotZZzzi,
     BfdotZZzzi,
+}
+
+impl SveFpFdotByIndexedElem {
+    pub(crate) const fn feature(self) -> Feature {
+        match self {
+            Self::FdotZZzzi => Feature::Sme2,
+            Self::BfdotZZzzi => Feature::Sme,
+        }
+    }
 }
 
 fn sve_fp_fdot_by_indexed_elem(word: u32) -> Option<SveFpFdotByIndexedElem> {
     let op = bits(word, 22, 22);
     let opc2 = bits(word, 11, 10);
     match (op, opc2) {
+        (0b0, 0b00) => Some(SveFpFdotByIndexedElem::FdotZZzzi),
         (0b1, 0b00) => Some(SveFpFdotByIndexedElem::BfdotZZzzi),
         _ => None,
     }
@@ -2699,15 +4118,31 @@ fn sve_fp_fdot_by_indexed_elem(word: u32) -> Option<SveFpFdotByIndexedElem> {
 
 /// Arm group `sve_fp_fma_long_by_indexed_elem`: SVE floating-point
 /// multiply-add long (indexed). BFMLSLB and BFMLSLT (`o2 = 1`, `op = 1`)
-/// are SME2's.
+/// are FEAT_SME2's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum SveFpFmaLongByIndexedElem {
     FmlalbZZzziS,
     BfmlalbZZzzi,
     FmlslbZZzziS,
+    BfmlslbZZzzi,
     FmlaltZZzziS,
     BfmlaltZZzzi,
     FmlsltZZzziS,
+    BfmlsltZZzzi,
+}
+
+impl SveFpFmaLongByIndexedElem {
+    pub(crate) const fn feature(self) -> Feature {
+        match self {
+            Self::BfmlslbZZzzi | Self::BfmlsltZZzzi => Feature::Sme2,
+            Self::FmlalbZZzziS
+            | Self::BfmlalbZZzzi
+            | Self::FmlslbZZzziS
+            | Self::FmlaltZZzziS
+            | Self::BfmlaltZZzzi
+            | Self::FmlsltZZzziS => Feature::Sme,
+        }
+    }
 }
 
 fn sve_fp_fma_long_by_indexed_elem(word: u32) -> Option<SveFpFmaLongByIndexedElem> {
@@ -2718,39 +4153,69 @@ fn sve_fp_fma_long_by_indexed_elem(word: u32) -> Option<SveFpFmaLongByIndexedEle
         (0b0, 0b0, 0b0) => Some(SveFpFmaLongByIndexedElem::FmlalbZZzziS),
         (0b1, 0b0, 0b0) => Some(SveFpFmaLongByIndexedElem::BfmlalbZZzzi),
         (0b0, 0b1, 0b0) => Some(SveFpFmaLongByIndexedElem::FmlslbZZzziS),
+        (0b1, 0b1, 0b0) => Some(SveFpFmaLongByIndexedElem::BfmlslbZZzzi),
         (0b0, 0b0, 0b1) => Some(SveFpFmaLongByIndexedElem::FmlaltZZzziS),
         (0b1, 0b0, 0b1) => Some(SveFpFmaLongByIndexedElem::BfmlaltZZzzi),
         (0b0, 0b1, 0b1) => Some(SveFpFmaLongByIndexedElem::FmlsltZZzziS),
+        (0b1, 0b1, 0b1) => Some(SveFpFmaLongByIndexedElem::BfmlsltZZzzi),
         _ => None,
     }
 }
 
-/// Arm group `sve_fp_fdot`: SVE BFloat16 floating-point dot product. `op =
-/// 0` is SME2's half-precision FDOT.
+/// Arm group `sve_fp_fdot`: SVE floating-point dot product, FEAT_SME2's of
+/// half-precision and FEAT_SME's of BFloat16 pairs (`op`). `o2 = 1`, of
+/// FP8 values, is FEAT_FP8DOT2's and FEAT_FP8DOT4's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum SveFpFdot {
+    FdotZZzz,
     BfdotZZzz,
+}
+
+impl SveFpFdot {
+    pub(crate) const fn feature(self) -> Feature {
+        match self {
+            Self::FdotZZzz => Feature::Sme2,
+            Self::BfdotZZzz => Feature::Sme,
+        }
+    }
 }
 
 fn sve_fp_fdot(word: u32) -> Option<SveFpFdot> {
     let op = bits(word, 22, 22);
     let o2 = bits(word, 10, 10);
     match (op, o2) {
+        (0b0, 0b0) => Some(SveFpFdot::FdotZZzz),
         (0b1, 0b0) => Some(SveFpFdot::BfdotZZzz),
         _ => None,
     }
 }
 
 /// Arm group `sve_fp_fma_long`: SVE floating-point multiply-add long.
-/// BFMLSLB and BFMLSLT (`o2 = 1`, `op = 1`) are SME2's.
+/// BFMLSLB and BFMLSLT (`o2 = 1`, `op = 1`) are FEAT_SME2's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum SveFpFmaLong {
     FmlalbZZzz,
     BfmlalbZZzz,
     FmlslbZZzz,
+    BfmlslbZZzz,
     FmlaltZZzz,
     BfmlaltZZzz,
     FmlsltZZzz,
+    BfmlsltZZzz,
+}
+
+impl SveFpFmaLong {
+    pub(crate) const fn feature(self) -> Feature {
+        match self {
+            Self::BfmlslbZZzz | Self::BfmlsltZZzz => Feature::Sme2,
+            Self::FmlalbZZzz
+            | Self::BfmlalbZZzz
+            | Self::FmlslbZZzz
+            | Self::FmlaltZZzz
+            | Self::BfmlaltZZzz
+            | Self::FmlsltZZzz => Feature::Sme,
+        }
+    }
 }
 
 fn sve_fp_fma_long(word: u32) -> Option<SveFpFmaLong> {
@@ -2761,9 +4226,11 @@ fn sve_fp_fma_long(word: u32) -> Option<SveFpFmaLong> {
         (0b0, 0b0, 0b0) => Some(SveFpFmaLong::FmlalbZZzz),
         (0b1, 0b0, 0b0) => Some(SveFpFmaLong::BfmlalbZZzz),
         (0b0, 0b1, 0b0) => Some(SveFpFmaLong::FmlslbZZzz),
+        (0b1, 0b1, 0b0) => Some(SveFpFmaLong::BfmlslbZZzz),
         (0b0, 0b0, 0b1) => Some(SveFpFmaLong::FmlaltZZzz),
         (0b1, 0b0, 0b1) => Some(SveFpFmaLong::BfmlaltZZzz),
         (0b0, 0b1, 0b1) => Some(SveFpFmaLong::FmlsltZZzz),
+        (0b1, 0b1, 0b1) => Some(SveFpFmaLong::BfmlsltZZzz),
         _ => None,
     }
 }

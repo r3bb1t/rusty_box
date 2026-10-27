@@ -1,0 +1,37 @@
+--- a/target/arm/tcg/sme_helper.c
++++ b/target/arm/tcg/sme_helper.c
+@@ -575,11 +575,11 @@
+     reg_last = info.reg_off_last[0];
+     host = info.page[0].host;
+
+-    if (!vertical) {
+-        memset(za, 0, reg_max);
+-    } else if (reg_off) {
+-        clr_fn(za, 0, reg_off);
+-    }
++    /*
++     * Every inactive element is zeroed, those after the last active one
++     * included: clear the whole slice, then load the active elements.
++     */
++    clr_fn(za, 0, reg_max);
+
+     set_helper_retaddr(ra);
+
+@@ -588,8 +588,6 @@
+         do {
+             if ((pg >> (reg_off & 63)) & 1) {
+                 host_fn(za, reg_off, host + reg_off);
+-            } else if (vertical) {
+-                clr_fn(za, reg_off, esize);
+             }
+             reg_off += esize;
+         } while (reg_off <= reg_last && (reg_off & 63));
+@@ -618,8 +616,6 @@
+             do {
+                 if ((pg >> (reg_off & 63)) & 1) {
+                     host_fn(za, reg_off, host + reg_off);
+-                } else if (vertical) {
+-                    clr_fn(za, reg_off, esize);
+                 }
+                 reg_off += esize;
+             } while (reg_off & 63);

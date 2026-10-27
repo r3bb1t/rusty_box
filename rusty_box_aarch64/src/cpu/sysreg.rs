@@ -25,7 +25,7 @@ use super::el2::{
     HCR_TRVM, HCR_TVM, MDCR_TDA, MDCR_TDE, MDCR_TDOSA, MDCR_TDRA,
 };
 use super::exception::Route;
-use super::features::Feature;
+use super::features::{Feature, Features};
 use super::id;
 use super::pauth::KeyHalf;
 use super::regs::{SysReg, SysRegRefusal};
@@ -426,10 +426,22 @@ pub(crate) const CPACR_FPEN: u64 = 3 << 20;
 /// `CPACR_EL1.SMEN` (FEAT_SME).
 pub(crate) const CPACR_SMEN: u64 = 3 << 24;
 
-/// `SMCR_EL1.LEN`, and `SMCR_EL2.LEN`: the only field this core keeps of
-/// either. Bits 8:4 are RAZ/WI, and `EZT0` and `FA64` RES0 without
-/// FEAT_SME2 and FEAT_SME_FA64.
+/// `SMCR_EL1.LEN`, and `SMCR_EL2.LEN`. Bits 8:4 are RAZ/WI, and `FA64`
+/// RES0 without FEAT_SME_FA64, which this core lacks.
 pub(crate) const SMCR_LEN: u64 = 0xF;
+/// `SMCR_EL1.EZT0` and `SMCR_EL2.EZT0` (FEAT_SME2): ZT0 is accessible at
+/// EL0 and EL1, and at EL0, EL1 and EL2; RES0 without FEAT_SME2.
+pub(crate) const SMCR_EZT0: u64 = 1 << 30;
+
+/// The `SMCR_EL1` and `SMCR_EL2` bits a processor implementing `features`
+/// (with FEAT_SME) keeps: `LEN`, and `EZT0` with FEAT_SME2.
+pub(crate) const fn smcr_mask(features: Features) -> u64 {
+    if features.has(Feature::Sme2) {
+        SMCR_LEN | SMCR_EZT0
+    } else {
+        SMCR_LEN
+    }
+}
 
 /// `DCZID_EL0.DZP`: `DC ZVA` and its kind are prohibited.
 const DCZID_DZP: u64 = 1 << 4;
@@ -459,11 +471,11 @@ impl<L: Levels> Cpu<L> {
     /// Whether `sys`, read from a snapshot, holds SME register values an
     /// `MSR` on this processor can leave: `CPACR_EL1.SMEN`, `SMCR_EL1` and
     /// `TPIDR2_EL0` only with FEAT_SME, and `SMCR_EL1` with nothing outside
-    /// `LEN`.
+    /// the bits it keeps.
     pub(crate) fn sme_registers_restorable(&self, sys: &SysRegs) -> bool {
         let sme = self.implements(Feature::Sme);
         sys.cpacr_el1 & !self.cpacr_mask() == 0
-            && sys.smcr_el1 & !SMCR_LEN == 0
+            && sys.smcr_el1 & !smcr_mask(self.imp.features) == 0
             && (sme || (sys.smcr_el1 == 0 && sys.tpidr2_el0 == 0))
     }
 
@@ -1204,7 +1216,7 @@ impl<L: Levels> Cpu<L> {
             }
             SMCR_EL1 if self.implements(Feature::Sme) => {
                 self.sme_register_check(accessor)?;
-                self.sys.smcr_el1 = value & SMCR_LEN;
+                self.sys.smcr_el1 = value & smcr_mask(self.imp.features);
                 WriteEffect::None
             }
             SMPRI_EL1 if self.implements(Feature::Sme) => WriteEffect::None,
