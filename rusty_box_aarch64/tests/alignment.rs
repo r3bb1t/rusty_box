@@ -640,3 +640,37 @@ fn with_sctlr_a_set_a_word_pair_load_at_a_halfword_boundary_faults() {
     assert_eq!(m.reg_read(Reg::X3), UNTOUCHED, "W3 is not loaded");
     assert_eq!(m.reg_read(Reg::X4), UNTOUCHED, "W4 is not loaded");
 }
+
+#[test]
+fn with_sctlr_a_set_a_doubleword_pair_load_at_a_word_boundary_faults() {
+    let mut ram = vec![0u8; RAM_LEN];
+    let mut m = bare(&mut ram);
+    load(&mut m, &LOAD_PAIR_X);
+    map_test_pages_strictly(&mut m);
+    m.reg_write(Reg::X1, NORMAL_WORDS);
+    m.reg_write(Reg::X3, UNTOUCHED);
+    m.reg_write(Reg::X4, UNTOUCHED);
+    let (esr, far) = fault(&mut m);
+    assert_eq!(esr & 0x3F, DFSC_ALIGNMENT, "ESR {esr:#x}");
+    assert_eq!(esr & WNR, 0);
+    assert_eq!(far, NORMAL_WORDS, "the first element's address");
+    assert_eq!(m.reg_read(Reg::X3), UNTOUCHED, "X3 is not loaded");
+    assert_eq!(m.reg_read(Reg::X4), UNTOUCHED, "X4 is not loaded");
+}
+
+#[test]
+fn with_sctlr_a_set_a_double_precision_pair_store_at_a_word_boundary_faults() {
+    let mut ram = vec![0u8; RAM_LEN];
+    let mut m = bare(&mut ram);
+    load(&mut m, &STORE_PAIR_D);
+    map_test_pages_strictly(&mut m);
+    m.mem_write(NORMAL_WORDS_PA - 4, &FILL).expect("in RAM");
+    m.vreg_write(v(0), u128::from(FIRST_DWORD));
+    m.vreg_write(v(1), u128::from(SECOND_DWORD));
+    m.reg_write(Reg::X1, NORMAL_WORDS);
+    let (esr, far) = fault(&mut m);
+    assert_eq!(esr & 0x3F, DFSC_ALIGNMENT, "ESR {esr:#x}");
+    assert_eq!(esr & WNR, WNR);
+    assert_eq!(far, NORMAL_WORDS, "the first element's address");
+    assert_eq!(bytes_at(&m, NORMAL_WORDS_PA - 4), FILL, "nothing is stored");
+}

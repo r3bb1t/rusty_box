@@ -5,6 +5,7 @@ use rusty_box_core::snap::{SnapRead, SnapResult, SnapWrite};
 use rusty_box_core::SnapError;
 
 use super::regs::{CpuState, Reg, RegClass, VReg};
+use super::sysreg::MDSCR_FIELDS;
 use super::{Activity, Cpu, El, ExclusiveMonitor, Pstate, SysRegs, PC_HISTORY};
 
 /// `FPCR` bits this core keeps: AHP, DN, FZ and RMode. The trap enables read
@@ -71,7 +72,8 @@ impl SysRegs {
     }
 
     /// The inverse of [`SysRegs::to_array`]. Refuses a Debug Communications
-    /// Channel data register wider than its 32 bits.
+    /// Channel data register wider than its 32 bits, and an `MDSCR_EL1`
+    /// with a RES0 bit set, which no write stores.
     fn from_array(a: [u64; SYSREG_COUNT]) -> SnapResult<Self> {
         let [sctlr_el1, actlr_el1, cpacr_el1, ttbr0_el1, ttbr1_el1, tcr_el1, spsr_el1, elr_el1, esr_el1, far_el1, afsr0_el1, afsr1_el1, par_el1, mair_el1, amair_el1, vbar_el1, contextidr_el1, tpidr_el0, tpidrro_el0, tpidr_el1, csselr_el1, cntkctl_el1, cntfrq_el0, cntp_ctl_el0, cntp_cval_el0, cntv_ctl_el0, cntv_cval_el0, mdscr_el1, mdccint_el1, oslsr_el1, osdlr_el1, oseccr_el1, dbgprcr_el1, dbgclaim, bvr0, bvr1, bcr0, bcr1, wvr0, wvr1, wcr0, wcr1, dtrrx, dtrtx] = a;
         let data_register = |value: u64| {
@@ -79,6 +81,9 @@ impl SysRegs {
         };
         let dtrrx = data_register(dtrrx)?;
         let dtrtx = data_register(dtrtx)?;
+        if mdscr_el1 & !MDSCR_FIELDS != 0 {
+            return Err(SnapError::Invalid("MDSCR_EL1 with a RES0 bit set"));
+        }
         Ok(Self {
             sctlr_el1,
             actlr_el1,
@@ -508,5 +513,26 @@ mod tests {
         let mut restored = cpu();
         restored.restore(&mut image.as_slice()).expect("restore");
         assert_eq!((restored.sys.dtrrx, restored.sys.dtrtx), (0x1234_5678, 0x9ABC_DEF0));
+    }
+
+    #[test]
+    fn a_processor_snapshot_with_an_mdscr_el1_res0_bit_set_is_refused() {
+        let mut c = cpu();
+        c.sys.mdscr_el1 = MDSCR_FIELDS;
+        let mut image = std::vec::Vec::new();
+        c.save(&mut image).expect("save");
+        // MDSCR_EL1 is the 28th system register.
+        let mdscr = (31 + 4) * 8 + 32 * 16 + 2 * 8 + 27 * 8;
+        assert_eq!(&image[mdscr..mdscr + 8], &MDSCR_FIELDS.to_le_bytes());
+        for bit in (0..64).filter(|bit| MDSCR_FIELDS & (1 << bit) == 0) {
+            let mut res0 = image.clone();
+            res0[mdscr..mdscr + 8].copy_from_slice(&(MDSCR_FIELDS | 1 << bit).to_le_bytes());
+            let mut restored = cpu();
+            assert!(restored.restore(&mut res0.as_slice()).is_err(), "RES0 bit {bit} set");
+            assert_eq!(restored.sys.to_array(), cpu().sys.to_array(), "a refused image changes nothing");
+        }
+        let mut restored = cpu();
+        restored.restore(&mut image.as_slice()).expect("restore");
+        assert_eq!(restored.sys.mdscr_el1, MDSCR_FIELDS);
     }
 }

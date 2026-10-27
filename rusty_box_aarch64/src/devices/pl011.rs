@@ -39,16 +39,16 @@
 //!   runs on the machine's clock: 32 bit periods are 512 × (`UARTIBRD` +
 //!   `UARTFBRD` / 64) cycles of `UARTCLK` (§2.2.3, §2.4.3), at the
 //!   divisor the last `UARTLCR_H` write latched (§3.3.7), and `RTRIS` is
-//!   set at the first
-//!   tick by which they have passed since the last character arrived, or
-//!   since `RTIM` was set with characters waiting. It fires once; the next
-//!   character, or setting `RTIM` again, starts another count. Without a
-//!   baud clock (`UARTIBRD` 0, or 0xFFFF with `UARTFBRD` above 0, §3.3.6)
-//!   no count starts. Where DDI 0183F is silent: a count running when a
-//!   new divisor is latched keeps the deadline it started with, whatever
-//!   that divisor, one without a baud clock included; and a count runs
-//!   whether or not the receiver is enabled (`UARTEN`, `RXE`), since the
-//!   FIFO still holds what it received and nothing more arrives.
+//!   set at the first tick by which they have passed since the last
+//!   character arrived, or since `RTIM` was set with characters waiting.
+//!   It fires once; the next character, or setting `RTIM` again, starts
+//!   another count. Without a baud clock (`UARTIBRD` 0, or 0xFFFF with
+//!   `UARTFBRD` above 0, §3.3.6) no count starts. Where DDI 0183F is
+//!   silent: a count running when a new divisor is latched keeps the
+//!   deadline it started with, whatever that divisor, one without a baud
+//!   clock included; and a count runs whether or not the receiver is
+//!   enabled (`UARTEN`, `RXE`), since the FIFO still holds what it
+//!   received and nothing more arrives.
 //! - The modem status interrupts (§3.4.1) are set by a change of their
 //!   line and cleared only by `UARTICR`.
 //! - Transmission needs `UARTCR.UARTEN` and `UARTCR.TXE` (§3.3.8, Note).
@@ -83,23 +83,22 @@
 //! (`pl011_read_rxdata`: the slot at the read position), both FIFOs
 //! emptied whenever `FEN` changes, set or cleared (`pl011_write`; DDI
 //! 0183F names only the transmit FIFO's flush, on clearing), loopback
-//! driving the modem
-//! status inputs from the modem control outputs and leaving them where they
-//! were when loopback ends (`pl011_loopback_mdmctrl`), a loopback break on
-//! each setting of `UARTLCR_H.BRK` (`pl011_loopback_break`), and a host
-//! line that sends nothing in loopback (`pl011_receive`). The host side of
-//! a break has no backend here: the line neither sends nor delivers one.
-//! QEMU transmits whatever `UARTEN` and `TXE` say, and raises `TXRIS` after
-//! every write (`pl011_write_txdata`); README's "Where the references
-//! differ" has this model's differences, and
-//! the direct-boot set-up ([`Pl011::set_up_console`]) that goes with it.
+//! driving the modem status inputs from the modem control outputs and
+//! leaving them where they were when loopback ends
+//! (`pl011_loopback_mdmctrl`), a loopback break on each setting of
+//! `UARTLCR_H.BRK` (`pl011_loopback_break`), and a host line that sends
+//! nothing in loopback (`pl011_receive`). The host side of a break has no
+//! backend here: the line neither sends nor delivers one. QEMU transmits
+//! whatever `UARTEN` and `TXE` say, and raises `TXRIS` after every write
+//! (`pl011_write_txdata`); README's "Where the references differ" has
+//! this model's differences, and the direct-boot set-up
+//! ([`Pl011::set_up_console`]) that goes with it.
 //!
 //! Where DDI 0183F is silent and this model does not follow QEMU, its
-//! reading: emptying the receive FIFO
-//! through `FEN` clears `RXRIS` and `RTRIS`, since an empty FIFO is below
-//! every trigger level and §3.4.4 asserts `RTRIS` only while the FIFO is
-//! not empty (DDI 0183F names reads and `UARTICR` as what clears them;
-//! QEMU leaves both as they were).
+//! reading: emptying the receive FIFO through `FEN` clears `RXRIS` and
+//! `RTRIS`, since an empty FIFO is below every trigger level and §3.4.4
+//! asserts `RTRIS` only while the FIFO is not empty (DDI 0183F names reads
+//! and `UARTICR` as what clears them; QEMU leaves both as they were).
 //!
 //! The region takes 4-byte accesses (`pl011_ops`' `impl.min_access_size` and
 //! `impl.max_access_size`): QEMU's `access_with_adjusted_size` hands a
@@ -110,7 +109,7 @@
 use core::num::NonZeroU32;
 
 use rusty_box_core::snap::{SnapRead, SnapResult, SnapWrite};
-use rusty_box_core::{ClockHz, RingBuffer, SnapError, VmClock, VmInstant};
+use rusty_box_core::{ClockHz, Cycles, RingBuffer, SnapError, VmClock, VmInstant};
 
 use crate::bus::{AccessWidth, RegOffset};
 
@@ -223,7 +222,9 @@ pub const TX_FIFO_DEPTH: usize = 16;
 /// lost to a full FIFO, and none has been written to it since. It is kept
 /// in bit 31 of the flag register's word, which `UARTFR` does not have (a
 /// read returns its nine bits), so a snapshot carries it in the word it
-/// always wrote, zero for a UART that never overran.
+/// always wrote, zero for a UART that never overran. Only
+/// [`Pl011::note_overrun`] and [`Pl011::take_overrun`] change it, and a
+/// restore keeps it.
 const OVERRUN_PENDING: u32 = 1 << 31;
 
 /// Bytes the guest has transmitted and the host has not yet drained. A host
@@ -237,6 +238,18 @@ pub const TX_CAPACITY: usize = 64 * 1024;
 pub struct UartClocks {
     pub machine: VmClock,
     pub uartclk: ClockHz,
+}
+
+/// What [`Pl011::receive`] did with a host byte.
+///
+/// Closed (R5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Received {
+    /// The receive side took it: into the FIFO, or, while loopback
+    /// disconnects the host line, consumed and dropped.
+    Taken,
+    /// There was no room; nothing changed.
+    NoRoom,
 }
 
 /// A line rate, in bits per second.
@@ -408,11 +421,6 @@ impl Pl011 {
         self.int_level & self.int_enabled != 0
     }
 
-    /// Transmitted bytes waiting for the host.
-    pub fn tx_len(&self) -> usize {
-        self.tx.len()
-    }
-
     /// Take the transmitted bytes, oldest first.
     pub fn drain_tx(&mut self) -> rusty_box_core::ring_buffer::Drain<'_, u8, TX_CAPACITY> {
         self.tx.drain()
@@ -578,12 +586,12 @@ impl Pl011 {
     /// 64ths. `None` while the divisor makes no baud clock: `UARTIBRD` 0 is
     /// invalid, and `UARTIBRD` 0xFFFF with `UARTFBRD` above 0 aborts
     /// reception (§3.3.6).
-    fn timeout_cycles(&self) -> Option<u64> {
+    fn timeout_cycles(&self) -> Option<Cycles> {
         let ibrd = self.divisor.integer();
         if ibrd == 0 || (ibrd == IBRD_MASK && self.divisor.fraction() != 0) {
             None
         } else {
-            Some(8 * u64::from(self.divisor.sixty_fourths()))
+            Some(Cycles::new(8 * u64::from(self.divisor.sixty_fourths())))
         }
     }
 
@@ -630,16 +638,28 @@ impl Pl011 {
 
     /// QEMU `pl011_receive` for one host byte [`Pl011::can_receive`] said
     /// there was room for: received, or consumed and dropped while loopback
-    /// disconnects the receive input. Returns false, taking nothing, when
-    /// there is no room.
-    pub fn receive(&mut self, byte: u8, clocks: UartClocks) -> bool {
+    /// disconnects the receive input.
+    pub fn receive(&mut self, byte: u8, clocks: UartClocks) -> Received {
         if !self.can_receive() {
-            return false;
+            return Received::NoRoom;
         }
         if !self.loopback() {
             self.receive_character(u32::from(byte), clocks);
         }
-        true
+        Received::Taken
+    }
+
+    /// Enter the overrun state: a character was lost to a full FIFO.
+    fn note_overrun(&mut self) {
+        self.flags |= OVERRUN_PENDING;
+    }
+
+    /// Leave the overrun state, as the next character written to the FIFO
+    /// does; whether it was in it, so that the character carries `OE`.
+    fn take_overrun(&mut self) -> bool {
+        let pending = self.flags & OVERRUN_PENDING != 0;
+        self.flags &= !OVERRUN_PENDING;
+        pending
     }
 
     /// The receive logic taking one character off the line, the receiver
@@ -657,13 +677,12 @@ impl Pl011 {
         }
         let depth = self.fifo_depth();
         if self.read_count == depth {
-            self.flags |= OVERRUN_PENDING;
+            self.note_overrun();
             self.rsr |= RSR_OE;
             self.int_level |= INT_OE;
             return;
         }
-        let entry = if self.flags & OVERRUN_PENDING != 0 { value | DR_OE } else { value };
-        self.flags &= !OVERRUN_PENDING;
+        let entry = if self.take_overrun() { value | DR_OE } else { value };
         let slot = (u32::from(self.read_pos) + self.read_count) & (depth - 1);
         self.read_fifo[slot as usize] = entry;
         self.read_count += 1;
@@ -1017,9 +1036,9 @@ mod tests {
         uart.write(reg(n), AccessWidth::Word, u64::from(value), at(ticks));
     }
 
-    /// A host byte arriving at tick 0.
+    /// A host byte arriving at tick 0: whether the UART took it.
     fn rx(uart: &mut Pl011, byte: u8) -> bool {
-        Pl011::receive(uart, byte, at(0))
+        Pl011::receive(uart, byte, at(0)) == Received::Taken
     }
 
     const DR: u64 = 0;
@@ -1352,8 +1371,9 @@ mod tests {
     /// cycles of `UARTCLK`, which [`at`] makes ticks.
     const TIMEOUT_13_1: u64 = 512 * 13 + 512 / 64;
 
+    /// A host byte arriving at `ticks`: whether the UART took it.
     fn rx_at(uart: &mut Pl011, byte: u8, ticks: u64) -> bool {
-        uart.receive(byte, at(ticks))
+        uart.receive(byte, at(ticks)) == Received::Taken
     }
 
     fn update(uart: &mut Pl011, ticks: u64) {
@@ -1470,7 +1490,7 @@ mod tests {
             machine: VmClock::new(VmInstant::from_ticks(7), rate),
             uartclk: UARTCLK,
         };
-        assert!(uart.receive(b'a', clocks));
+        assert_eq!(uart.receive(b'a', clocks), Received::Taken);
         assert_eq!(uart.next_deadline(), Some(VmInstant::from_ticks(7 + 13_884)));
         uart.update(VmClock::new(VmInstant::from_ticks(7 + 13_883), rate));
         assert_eq!(read(&mut uart, RIS) & INT_RT, 0);
@@ -1681,6 +1701,99 @@ mod tests {
         write(&mut uart, LCR_H, 0);
         write(&mut uart, LCR_H, LCR_BRK);
         assert_eq!(read(&mut uart, RIS) & INT_BE, 0, "a receiver that is off hears no break");
+    }
+
+    /// DDI 0183F §3.4.5: the error interrupts are asserted when the error
+    /// occurs in the reception. A break that arrives at a full holding
+    /// register is detected, so `BERIS` rises, and its character is lost to
+    /// the overrun, so `OERIS` rises and the unread character stays.
+    #[test]
+    fn a_break_lost_to_an_overrun_raises_beris_and_oeris() {
+        let mut uart = enabled();
+        write(&mut uart, CR, ENABLED | CR_LBE);
+        write(&mut uart, DR, u32::from(b'x'));
+        write(&mut uart, IMSC, INT_BE | INT_OE);
+        write(&mut uart, LCR_H, LCR_BRK);
+        assert_eq!(read(&mut uart, RIS) & (INT_BE | INT_OE), INT_BE | INT_OE);
+        assert!(uart.irq());
+        assert_eq!(read(&mut uart, DR), u32::from(b'x'), "the unread character stays, with no break");
+        assert_eq!(read(&mut uart, RSR), RSR_OE, "UARTRSR has the overrun, and no break error");
+        assert_eq!(read(&mut uart, FR) & FLAG_RXFE, FLAG_RXFE, "the break character never arrives");
+        write(&mut uart, LCR_H, 0);
+        write(&mut uart, DR, u32::from(b'y'));
+        assert_eq!(read(&mut uart, DR), DR_OE | u32::from(b'y'), "the next character carries the overrun");
+    }
+
+    /// DDI 0183F §3.4.4: with the FIFO disabled, the receive timeout counts
+    /// for the character in the holding register, and reading it clears
+    /// `RTRIS` ("by reading the holding register").
+    #[test]
+    fn with_the_fifo_disabled_the_receive_timeout_is_cleared_by_reading_the_holding_register() {
+        let mut uart = timed();
+        write(&mut uart, LCR_H, 0);
+        write(&mut uart, IMSC, INT_RT);
+        assert!(rx_at(&mut uart, b'a', 100));
+        assert!(!uart.can_receive(), "one character fills the holding register");
+        update(&mut uart, 100 + TIMEOUT_13_1);
+        assert_eq!(read(&mut uart, RIS) & INT_RT, INT_RT, "32 bit periods without a character");
+        assert!(uart.irq());
+        assert_eq!(read(&mut uart, DR), u32::from(b'a'));
+        assert_eq!(read(&mut uart, RIS) & INT_RT, 0, "reading the holding register clears it");
+        assert!(!uart.irq());
+    }
+
+    /// `TXRIS` marks a transition of the transmit FIFO's level through the
+    /// trigger level (DDI 0183F §3.4.3, §3.3.9), so a write of
+    /// `UARTIFLS.TXIFLSEL` alone, which moves the level and not the FIFO,
+    /// changes nothing: not `TXRIS` set, not `TXRIS` clear, not the line.
+    #[test]
+    fn a_txiflsel_write_alone_changes_nothing() {
+        for drained in [false, true] {
+            for held in [1, 5, 15] {
+                let mut uart = Pl011::new();
+                write(&mut uart, LCR_H, LCR_FEN);
+                write(&mut uart, IFLS, 0); // 1/8: two entries
+                write(&mut uart, IMSC, INT_TX);
+                if drained {
+                    // Three entries drain through the two-entry level.
+                    for byte in *b"abc" {
+                        write(&mut uart, DR, u32::from(byte));
+                    }
+                    write(&mut uart, CR, ENABLED);
+                    write(&mut uart, CR, 0x300);
+                }
+                for i in 0..held {
+                    write(&mut uart, DR, u32::from(b'0') + i);
+                }
+                let ris = read(&mut uart, RIS);
+                let irq = uart.irq();
+                assert_eq!(ris & INT_TX != 0, drained && held <= 2, "{held} held, drained {drained}");
+                for txiflsel in [4, 0, 2, 7, 1, 3] {
+                    write(&mut uart, IFLS, txiflsel);
+                    assert_eq!(read(&mut uart, RIS), ris, "TXIFLSEL {txiflsel}, {held} held, drained {drained}");
+                    assert_eq!(uart.irq(), irq);
+                }
+            }
+        }
+    }
+
+    /// Linux's `pl011_tx_chars` writes a burst through an enabled FIFO,
+    /// stopping only when `UARTFR.TXFF` is set: with characters leaving as
+    /// they are written, a burst longer than the FIFO goes out whole and
+    /// in order, and `TXFF` is never seen.
+    #[test]
+    fn a_burst_longer_than_the_fifo_goes_out_whole() {
+        let mut uart = Pl011::new();
+        write(&mut uart, LCR_H, LCR_WLEN_8 | LCR_FEN);
+        write(&mut uart, IMSC, INT_TX);
+        write(&mut uart, CR, ENABLED);
+        let burst: std::vec::Vec<u8> = (0..64).map(|i| b'A' + i % 26).collect();
+        for &byte in &burst {
+            assert_eq!(read(&mut uart, FR) & FLAG_TXFF, 0, "the FIFO is never full");
+            write(&mut uart, DR, u32::from(byte));
+        }
+        assert_eq!(sent(&mut uart), burst);
+        assert_eq!(read(&mut uart, FR) & (FLAG_TXFE | FLAG_TXFF | FLAG_BUSY), FLAG_TXFE);
     }
 
     #[test]

@@ -463,6 +463,21 @@ fn mdscr_el1_save_restore_fields_are_written_only_under_the_os_lock() {
     assert_eq!(m.reg_read(Reg::X3), SAVE_RESTORE, "unlocked: writing zero clears only the other fields");
 }
 
+/// Arm ARM `MDSCR_EL1` for ARMv8.0: the bits that are not one of its fields
+/// — the save/restore fields, SS, TDCC, KDE and MDE — are RES0, and read as
+/// zero whatever is written to them, locked or not.
+#[test]
+fn mdscr_el1_res0_bits_read_as_zero() {
+    const SAVE_RESTORE: u64 = RXFULL | TXFULL | (1 << 27) | (1 << 26) | (0b11 << 22) | (1 << 21) | (1 << 14) | (1 << 6);
+    /// SS, MDE, KDE and TDCC.
+    const OTHERS: u64 = 1 | (1 << 15) | (1 << 13) | MDSCR_TDCC;
+    let mut ram = vec![0u8; RAM_LEN];
+    let m = run_el1(&mut ram, MDSCR_LOCK, &[(Reg::X9, u64::MAX)], 20);
+    assert_eq!(m.reg_read(Reg::X5), 1, "every access completed, PC {:#x}", m.reg_read(Reg::Pc));
+    assert_eq!(m.reg_read(Reg::X1), OTHERS, "unlocked: the other fields, and no RES0 bit");
+    assert_eq!(m.reg_read(Reg::X2), SAVE_RESTORE | OTHERS, "locked: every field, and no RES0 bit");
+}
+
 #[test]
 fn the_debug_communications_channel_is_reachable_from_el0_unless_mdscr_tdcc_traps_it() {
     let mdccsr = SysReg::new(2, 3, 0, 1, 0).expect("MDCCSR_EL0");

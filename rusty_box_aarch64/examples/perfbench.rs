@@ -1,15 +1,19 @@
 //! The interpreter's speed, measured on fixed work.
 //!
-//! Four guest loops run on a bare machine with the MMU on (an identity map
-//! of RAM as Normal memory), their code embedded below as encoded words so
-//! that nothing is assembled at run time:
+//! Five guest loops run on a bare machine with the MMU on (an identity map
+//! of RAM as Normal memory, and for `mmio` of the devices too), their code
+//! embedded below as encoded words so that nothing is assembled at run
+//! time:
 //!
 //! - `alu`: an integer chain — shifted-register ALU operations, a logical
 //!   immediate, a multiply-add, a 32-bit add and the loop's `subs`/`b.ne`;
 //! - `memcpy`: 64 KiB copied with post-indexed `ldp`/`stp`, 32 bytes an
 //!   iteration;
 //! - `fnv`: FNV-1a over 64 KiB, a byte (`ldrb`, `eor`, `mul`) at a time;
-//! - `fp`: a double-precision `fmadd`/`fmul`/`fadd`/`fsub` chain.
+//! - `fp`: a double-precision `fmadd`/`fmul`/`fadd`/`fsub` chain;
+//! - `mmio`: the `alu` chain run from a device's registers (the GIC
+//!   distributor's priority bytes), whose fetches cannot be cached: every
+//!   instruction by the per-instruction path.
 //!
 //! Each ends with PSCI `SYSTEM_OFF`, and each runs twice: as is, and with an
 //! observer that hooks every instruction and every data access, as a
@@ -23,7 +27,7 @@
 //! |---|---|
 //! | `PERFBENCH_EDK2_CODE`, `PERFBENCH_EDK2_VARS` | `AAVMF_CODE.no-secboot.fd`, `AAVMF_VARS.fd` |
 //! | `PERFBENCH_KERNEL`, `PERFBENCH_INITRD` | an arm64 `Image` and its initramfs |
-//! | `PERFBENCH_WORKLOADS` | a comma-separated subset of `alu,memcpy,fnv,fp,edk2,alpine` |
+//! | `PERFBENCH_WORKLOADS` | a comma-separated subset of `alu,memcpy,fnv,fp,mmio,edk2,alpine` |
 //! | `PERFBENCH_HOOKS` | `plain`, `hooked` or `both` (the default) for the loops |
 //! | `PERFBENCH_SCALE` | a multiplier on every loop's iteration count (default 1) |
 //! | `PERFBENCH_HASH_AT` | instruction counts, comma-separated: instead of timing, print the state hashes at each |
@@ -51,7 +55,7 @@
 use std::process::ExitCode;
 use std::time::Instant;
 
-use rusty_box_aarch64::board::RAM_BASE;
+use rusty_box_aarch64::board::{GIC_DIST_BASE, RAM_BASE};
 use rusty_box_aarch64::boot::{LinuxImage, SERIAL_CONSOLE_COMMAND_LINE};
 use rusty_box_aarch64::instrumentation::MemoryAccess;
 use rusty_box_aarch64::{
@@ -116,6 +120,16 @@ const FNV: &[u32] = &[
 /// fmadd d5, d0, d3, d5; fsub d6, d6, d1; subs x9, x9, #1; b.ne loop` —
 /// seven instructions an iteration, `x9` iterations.
 const FP: &[u32] = &[0x1F42_0020, 0x1E63_0821, 0x1E64_2842, 0x1F43_1405, 0x1E61_38C6, 0xF100_0529, 0x54FF_FF41];
+
+/// Where `mmio` runs the `alu` chain: the GIC distributor's priority bytes
+/// of interrupts 32 onwards (`GICD_IPRIORITYR8`), which read back what is
+/// written to them and change nothing else.
+const DEVICE_CODE: u64 = GIC_DIST_BASE + 0x420;
+
+/// `mov x2, #13; 1: ldr w3, [x11], #4; str w3, [x12], #4; subs x2, x2, #1;
+/// b.ne 1b; br x13` — copy the 13 words after it (the `alu` chain and the
+/// power-off) from `x11` to `x12`, then run them at `x13`.
+const COPY_TO_DEVICE: &[u32] = &[0xD280_01A2, 0xB840_4563, 0xB800_4583, 0xF100_0442, 0x54FF_FFA1, 0xD61F_01A0];
 
 /// What a run measured.
 struct Measured {
@@ -211,10 +225,19 @@ fn snapshot_hash<S: GuestStorage, I: Instrumentation>(machine: &VirtMachine<S, I
     Ok(h.0)
 }
 
+/// The words [`COPY_TO_DEVICE`] copies.
+const _: () = assert!(ALU.len() + POWER_OFF.len() == 13);
+
 /// A loop: its code, the registers it starts with, and the data it reads.
 struct Workload {
     name: &'static str,
+    /// Code that runs before the loop's, at [`CODE`].
+    prologue: &'static [u32],
     code: &'static [u32],
+    /// Whether the first GiB of the address space, the board's devices,
+    /// is mapped too (as Normal memory, so that code can run from a
+    /// device's registers).
+    maps_devices: bool,
     /// The registers it starts with, for a given scale.
     start: fn(u64) -> Start,
 }
@@ -225,11 +248,13 @@ struct Start {
     d: Vec<(u8, f64)>,
 }
 
-fn workloads() -> [Workload; 4] {
+fn workloads() -> [Workload; 5] {
     [
         Workload {
             name: "alu",
+            prologue: &[],
             code: ALU,
+            maps_devices: false,
             start: |scale| Start {
                 x: vec![(Reg::X0, 0x0123_4567_89AB_CDEF), (Reg::X1, 0x0F1E_2D3C_4B5A_6978), (Reg::X9, 10_000_000 * scale)],
                 d: vec![],
@@ -237,7 +262,9 @@ fn workloads() -> [Workload; 4] {
         },
         Workload {
             name: "memcpy",
+            prologue: &[],
             code: MEMCPY,
+            maps_devices: false,
             start: |scale| Start {
                 x: vec![(Reg::X10, 8_000 * scale), (Reg::X11, SOURCE), (Reg::X12, DESTINATION)],
                 d: vec![],
@@ -245,7 +272,9 @@ fn workloads() -> [Workload; 4] {
         },
         Workload {
             name: "fnv",
+            prologue: &[],
             code: FNV,
+            maps_devices: false,
             start: |scale| Start {
                 x: vec![(Reg::X10, 250 * scale), (Reg::X11, SOURCE), (Reg::X12, RESULT)],
                 d: vec![],
@@ -253,10 +282,29 @@ fn workloads() -> [Workload; 4] {
         },
         Workload {
             name: "fp",
+            prologue: &[],
             code: FP,
+            maps_devices: false,
             start: |scale| Start {
                 x: vec![(Reg::X9, 10_000_000 * scale)],
                 d: vec![(1, 1.5), (2, 0.25), (3, 1.000_000_1), (4, 1e-6)],
+            },
+        },
+        Workload {
+            name: "mmio",
+            prologue: COPY_TO_DEVICE,
+            code: ALU,
+            maps_devices: true,
+            start: |scale| Start {
+                x: vec![
+                    (Reg::X0, 0x0123_4567_89AB_CDEF),
+                    (Reg::X1, 0x0F1E_2D3C_4B5A_6978),
+                    (Reg::X9, 100_000 * scale),
+                    (Reg::X11, CODE + 4 * COPY_TO_DEVICE.len() as u64),
+                    (Reg::X12, DEVICE_CODE),
+                    (Reg::X13, DEVICE_CODE),
+                ],
+                d: vec![],
             },
         },
     ]
@@ -274,7 +322,7 @@ fn loop_machine<I: Instrumentation>(work: &Workload, observer: I, scale: u64) ->
         .build()
         .map_err(|e| format!("build: {e}"))?;
     let mut code: Vec<u8> = Vec::new();
-    for word in work.code.iter().chain(POWER_OFF.iter()) {
+    for word in work.prologue.iter().chain(work.code).chain(POWER_OFF.iter()) {
         code.extend_from_slice(&word.to_le_bytes());
     }
     machine.mem_write(CODE, &code).map_err(|e| format!("code: {e}"))?;
@@ -294,6 +342,11 @@ fn loop_machine<I: Instrumentation>(work: &Workload, observer: I, scale: u64) ->
     machine
         .mem_write(TABLES + 8 * (RAM_BASE >> 30), &block.to_le_bytes())
         .map_err(|e| format!("tables: {e}"))?;
+    if work.maps_devices {
+        // The same for the first GiB, the devices', at VA 0.
+        let devices = (1 << 10) | (3 << 8) | 0b01u64;
+        machine.mem_write(TABLES, &devices.to_le_bytes()).map_err(|e| format!("tables: {e}"))?;
+    }
     // T0SZ 25 (a 39-bit space from level 1), walks cacheable and inner
     // shareable, the 4 KiB granule; EPD1 keeps TTBR1 out of it.
     let tcr = 25 | (1 << 8) | (1 << 10) | (3 << 12) | (1 << 23);

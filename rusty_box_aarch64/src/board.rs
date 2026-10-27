@@ -26,7 +26,7 @@ use crate::bus::{le_value, store_le, AccessWidth, BusFault, CodeEpoch, FetchSour
 use crate::devices::cfi_flash::{CfiFlash, FlashArray};
 use crate::devices::fw_cfg::FwCfg;
 use crate::devices::gicv2::GicV2;
-use crate::devices::pl011::{BaudRate, Pl011, UartClocks};
+use crate::devices::pl011::{BaudRate, Pl011, Received, UartClocks};
 use crate::devices::pl031::Pl031;
 use crate::devices::pl061::{Pl061, POWER_BUTTON_LINE};
 #[cfg(feature = "alloc")]
@@ -92,7 +92,7 @@ pub const PPI_PHYSICAL_TIMER: u32 = 16 + 14;
 /// (QEMU `hw/arm/virt.c` `create_fdt`).
 pub const UART_CLOCK: ClockHz = match ClockHz::new(24_000_000) {
     Some(hz) => hz,
-    None => ClockHz::BOCHS_DEFAULT,
+    None => unreachable!(),
 };
 
 /// The UART's clocks at `clock`: the machine's, and [`UART_CLOCK`].
@@ -423,8 +423,9 @@ impl<S: GuestStorage> VirtBoard<S> {
             let Some(byte) = self.serial_input.pop_front() else {
                 break;
             };
-            if !self.uart.receive(byte, uart_clocks(clock)) {
-                break;
+            match self.uart.receive(byte, uart_clocks(clock)) {
+                Received::Taken => {}
+                Received::NoRoom => break,
             }
         }
         self.note_uart_deadline(before);
@@ -445,16 +446,17 @@ impl<S: GuestStorage> VirtBoard<S> {
         let deadline = self.uart.next_deadline();
         let mut taken = 0;
         for &byte in bytes {
-            let accepted = if self.serial_input.is_empty() && self.uart.can_receive() {
+            let received = if self.serial_input.is_empty() && self.uart.can_receive() {
                 self.uart.receive(byte, uart_clocks(clock))
             } else if self.serial_input.len() < SERIAL_INPUT_CAPACITY {
                 self.serial_input.push_back(byte);
-                true
+                Received::Taken
             } else {
-                false
+                Received::NoRoom
             };
-            if !accepted {
-                break;
+            match received {
+                Received::Taken => {}
+                Received::NoRoom => break,
             }
             taken += 1;
         }
@@ -491,10 +493,12 @@ impl<S: GuestStorage> VirtBoard<S> {
         self.storage.ram().get(off..off.checked_add(width.bytes() as usize)?)
     }
 
+    /// Store an access to RAM; `None`, with nothing written, unless it lies
+    /// entirely in RAM.
     #[inline(always)]
-    fn ram_bytes_mut(&mut self, addr: u64, width: AccessWidth) -> Option<&mut [u8]> {
+    fn store_ram(&mut self, addr: u64, width: AccessWidth, value: u64) -> Option<()> {
         let off = addr.checked_sub(RAM_BASE)? as usize;
-        self.storage.ram_mut().get_mut(off..off.checked_add(width.bytes() as usize)?)
+        store_le(self.storage.ram_mut(), off, width, value)
     }
 }
 
@@ -519,8 +523,7 @@ impl<S: GuestStorage> PhysBus for VirtBoard<S> {
 
     #[inline]
     fn write(&mut self, addr: PhysAddr, width: AccessWidth, value: u64, clock: VmClock) -> Result<(), BusFault> {
-        if let Some(bytes) = self.ram_bytes_mut(addr.get(), width) {
-            store_le(bytes, value);
+        if self.store_ram(addr.get(), width, value).is_some() {
             return Ok(());
         }
         self.write_outside_ram(addr, width, value, clock)

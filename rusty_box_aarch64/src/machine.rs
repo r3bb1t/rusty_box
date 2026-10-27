@@ -882,6 +882,17 @@ enum Slice {
     Stopped(StopReason),
 }
 
+/// The tick a processor waiting for an interrupt at tick `now` sleeps to:
+/// the next event, or `slice_end` if that comes first. Time always moves:
+/// a next event at or before `now` — a deadline a device reported that
+/// working the events out again (`VirtMachine::sync_events`) did not
+/// consume — wakes it at the next tick, so the slice still reaches its end
+/// and no later event is passed over.
+#[inline]
+fn wake_tick(next_event: u64, now: u64, slice_end: u64) -> u64 {
+    next_event.max(now.saturating_add(1)).min(slice_end)
+}
+
 /// A Cortex-A57-shaped processor on QEMU's `virt` board.
 ///
 /// `S` is where its memory lives (`OwnedStorage`, with `alloc`, or
@@ -1136,7 +1147,7 @@ impl<S: GuestStorage, I: Instrumentation> VirtMachine<S, I> {
                     }
                     return Slice::Stopped(StopReason::Halted);
                 }
-                let until = self.next_event.min(slice_end);
+                let until = wake_tick(self.next_event, self.cpu.icount, slice_end);
                 self.cpu.wait_until(VmInstant::from_ticks(until));
                 if until == slice_end {
                     return Slice::Done;
@@ -2111,4 +2122,8 @@ impl<S: GuestStorage, I: Instrumentation> Power<'_, S, I> {
         self.machine.sync_events();
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/unit/machine.rs"]
+mod tests;
 

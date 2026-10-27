@@ -345,7 +345,10 @@ impl Cpu {
     /// The SMC Calling Convention passes the function identifier in W0 in
     /// both conventions, and an SMC32/HVC32 call's arguments in W1-W3 (Arm
     /// DEN 0028B §2.6, §2.7, and §3.1 Table 3-1, whose "Wn" is a register's
-    /// low 32 bits, the upper ones ignored; DEN 0022D §5.2.1), so the upper
+    /// low 32 bits, the upper ones ignored — §3.1 prints "Implementations
+    /// must ignore the least significant bits" after "The least significant
+    /// 32-bits are used, and the most significant 32-bits are zero", a slip
+    /// for the most significant; DEN 0022D §5.2.1), so the upper
     /// halves of those X registers take no part, as in TF-A's
     /// `psci_smc_handler`. A parameter DEN 0022D declares `uint32`
     /// (`power_state`, `lowest_affinity_level`, `psci_func_id`) is its

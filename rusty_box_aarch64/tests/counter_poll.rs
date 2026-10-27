@@ -21,8 +21,8 @@
 
 use rusty_box_aarch64::board::RAM_BASE;
 use rusty_box_aarch64::{
-    Instrumentation, LentStorage, MachineBuilder, MemoryLoan, RamSize, Reg, RunBudget, StopReason, SysReg,
-    VirtConfig, VirtMachine,
+    Execution, Instrumentation, LentStorage, MachineBuilder, MemoryLoan, RamSize, Reg, RunBudget, StopReason,
+    SysReg, VirtConfig, VirtMachine,
 };
 
 /// Lets the machine fast-forward; counts the branches it hears of.
@@ -32,7 +32,7 @@ struct Skipping {
 }
 
 impl Instrumentation for Skipping {
-    const SEES_EXECUTION: bool = false;
+    const EXECUTION: Execution = Execution::Skippable;
     fn branch(&mut self, _from: u64, _to: u64) {
         self.branches += 1;
     }

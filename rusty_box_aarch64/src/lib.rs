@@ -59,7 +59,7 @@ pub mod storage;
 
 pub use bus::{AccessWidth, BusFault, PhysAddr, PhysBus};
 pub use cpu::{Cpu, CpuConfig, CpuState, El, Pstate, Reg, SysReg, SysRegRefusal, VReg};
-pub use instrumentation::{Instrumentation, NoInstrumentation};
+pub use instrumentation::{Execution, Instrumentation, NoInstrumentation};
 #[cfg(feature = "alloc")]
 pub use machine::StopHandle;
 pub use machine::{

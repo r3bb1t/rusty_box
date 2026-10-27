@@ -155,6 +155,7 @@ impl Pstate {
         ((self.n as u64) << 31) | ((self.z as u64) << 30) | ((self.c as u64) << 29) | ((self.v as u64) << 28)
     }
 
+    /// Set N, Z, C and V to `flags`.
     #[inline]
     pub(crate) fn set_flags(&mut self, flags: Nzcv) {
         self.n = flags.n;
@@ -163,6 +164,8 @@ impl Pstate {
         self.v = flags.v;
     }
 
+    /// Set N, Z, C and V from `NZCV` in its register layout (bits 31:28),
+    /// as an `MSR NZCV` does; every other bit of `bits` is ignored.
     #[inline]
     pub fn set_nzcv(&mut self, bits: u64) {
         self.n = bits & (1 << 31) != 0;
@@ -177,6 +180,8 @@ impl Pstate {
         ((self.d as u64) << 9) | ((self.a as u64) << 8) | ((self.i as u64) << 7) | ((self.f as u64) << 6)
     }
 
+    /// Set D, A, I and F from `DAIF` in its register layout (bits 9:6), as
+    /// an `MSR DAIF` does; every other bit of `bits` is ignored.
     #[inline]
     pub fn set_daif(&mut self, bits: u64) {
         self.d = bits & (1 << 9) != 0;
@@ -204,7 +209,7 @@ impl CpuConfig {
     /// QEMU's `virt` system counter frequency (`GTIMER_SCALE` 16 ns).
     pub const QEMU_VIRT_COUNTER_HZ: ClockHz = match ClockHz::new(62_500_000) {
         Some(hz) => hz,
-        None => ClockHz::BOCHS_DEFAULT,
+        None => unreachable!(),
     };
 }
 

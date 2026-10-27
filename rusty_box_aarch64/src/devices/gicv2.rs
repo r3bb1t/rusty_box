@@ -45,16 +45,18 @@
 //! specification does not say: §4.4.1 makes GICC_CTLR.EnableGrpN the enable
 //! for the signalling of Group N interrupts, and §4.4.4 has GICC_IAR return
 //! 1023 while signalling is disabled, and nothing more. This model leaves
-//! such a group out of the choice, as it does a group the distributor does
-//! not forward, so its interrupts hide nothing. That is the rule the GICv3
-//! architecture (IHI 0069) states: ICC_HPPIR0_EL1/ICC_HPPIR1_EL1 and
-//! ICC_IAR0_EL1/ICC_IAR1_EL1 consider only interrupts of a group enabled by
-//! ICC_IGRPEN0_EL1/ICC_IGRPEN1_EL1. QEMU 11.1.2 (`gic_update_internal`,
-//! `gic_acknowledge_irq`) reads it the other way: it chooses the
-//! highest-priority interrupt across both groups and only then checks the
-//! CPU interface's enables, so a higher-priority interrupt of a group the
-//! CPU interface does not signal blocks the enabled group's, and GICC_IAR
-//! and GICC_HPPIR return it.
+//! such a group out of the choice, as §4.3.1 leaves out a group the
+//! distributor does not forward, so its interrupts hide nothing. That the
+//! GICv3 architecture (IHI 0069) states this rule for ICC_HPPIR0_EL1/
+//! ICC_HPPIR1_EL1 and ICC_IAR0_EL1/ICC_IAR1_EL1 under ICC_IGRPEN0_EL1/
+//! ICC_IGRPEN1_EL1 is cited from memory, not from IHI 0069's text, and
+//! QEMU 11.1.2's GICv3 CPU interface (`hw/intc/arm_gicv3_cpuif.c`,
+//! `icc_no_enabled_hppi`) does not follow it. QEMU 11.1.2's GICv2
+//! (`gic_update_internal`, `gic_acknowledge_irq`) reads IHI 0048B the
+//! other way: it chooses the highest-priority interrupt across both groups
+//! and only then checks the CPU interface's enables, so a higher-priority
+//! interrupt of a group the CPU interface does not signal blocks the
+//! enabled group's, and GICC_IAR and GICC_HPPIR return it.
 //!
 //! With one processor every per-CPU mask QEMU keeps reduces to its bit 0,
 //! and every interrupt targets that processor, so each per-interrupt state
@@ -399,9 +401,8 @@ impl GicV2 {
     /// (IHI 0048B §4.3.1 GICD_CTLR.EnableGrp0/EnableGrp1) and the CPU
     /// interface signals (§4.4.1 GICC_CTLR.EnableGrp0/EnableGrp1). Leaving
     /// out a group the CPU interface does not signal is this model's reading
-    /// where IHI 0048B is silent, the rule GICv3 states (IHI 0069
-    /// ICC_HPPIR0_EL1/ICC_HPPIR1_EL1, ICC_IAR0_EL1/ICC_IAR1_EL1); QEMU 11.1.2
-    /// lets such a group's interrupt block the other's (module docs).
+    /// where IHI 0048B is silent; QEMU 11.1.2 lets such a group's interrupt
+    /// block the other's (module docs, with the evidence for the reading).
     #[inline]
     fn signalled_groups(&self) -> u32 {
         self.dist_ctlr & self.cpu_ctlr & (GICD_CTLR_EN_GRP0 | GICD_CTLR_EN_GRP1)
@@ -1154,9 +1155,9 @@ mod tests {
     /// IHI 0048B §4.4.1: GICC_CTLR.EnableGrp0 clear stops the CPU interface
     /// signalling Group 0, and §4.4.4: GICC_IAR then returns 1023 rather than
     /// a Group 0 interrupt. That the Group 0 interrupt does not hide the
-    /// Group 1 one is this model's reading where IHI 0048B is silent, the
-    /// rule GICv3 states (IHI 0069 ICC_HPPIR1_EL1, ICC_IAR1_EL1); QEMU 11.1.2
-    /// lets it block the Group 1 interrupt.
+    /// Group 1 one is this model's reading where IHI 0048B is silent (the
+    /// module docs give its evidence); QEMU 11.1.2 lets it block the Group 1
+    /// interrupt.
     #[test]
     fn a_group_the_cpu_interface_does_not_signal_hides_nothing() {
         let mut g = enabled();

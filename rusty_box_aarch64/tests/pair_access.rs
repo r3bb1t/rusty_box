@@ -150,8 +150,8 @@ fn a_load_pair_within_a_page_reads_both_words() {
     assert_eq!(m.reg_read(Reg::X4), SECOND);
 }
 
-// The one hole inside a page of the board's address map: fw_cfg decodes
-// 0x18 bytes (QEMU 11.1.2 hw/arm/virt.c `base_memmap`, `VIRT_FW_CFG`), the
+// A hole inside a page of the board's address map: fw_cfg decodes 0x18
+// bytes (QEMU 11.1.2 hw/arm/virt.c `base_memmap`, `VIRT_FW_CFG`), the
 // last of them the low word of its DMA address register, and the rest of
 // its page is unassigned. A word pair at FW_CFG_BASE + 0x14, which is on
 // Device memory with stage 1 disabled and aligned there, reaches the

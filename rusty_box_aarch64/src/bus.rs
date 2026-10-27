@@ -121,33 +121,27 @@ pub(crate) fn le_value(bytes: &[u8]) -> u64 {
     }
 }
 
-/// Store `value` little-endian into a 1-, 2-, 4- or 8-byte slice. Each width
-/// is a fixed-size store; a slice of any other length is left untouched.
+/// Store the low `width` bytes of `value` little-endian at `offset` in
+/// `bytes`, each width a fixed-size store. `None`, with nothing written,
+/// when they do not all lie in `bytes`.
 #[inline(always)]
-pub(crate) fn store_le(bytes: &mut [u8], value: u64) {
-    match bytes.len() {
-        1 => {
-            if let Some(chunk) = bytes.first_chunk_mut::<1>() {
-                *chunk = (value as u8).to_le_bytes();
-            }
-        }
-        2 => {
-            if let Some(chunk) = bytes.first_chunk_mut::<2>() {
-                *chunk = (value as u16).to_le_bytes();
-            }
-        }
-        4 => {
-            if let Some(chunk) = bytes.first_chunk_mut::<4>() {
-                *chunk = (value as u32).to_le_bytes();
-            }
-        }
-        8 => {
-            if let Some(chunk) = bytes.first_chunk_mut::<8>() {
-                *chunk = value.to_le_bytes();
-            }
-        }
-        _ => {}
+pub(crate) fn store_le(bytes: &mut [u8], offset: usize, width: AccessWidth, value: u64) -> Option<()> {
+    match width {
+        AccessWidth::Byte => store_array(bytes, offset, (value as u8).to_le_bytes()),
+        AccessWidth::Half => store_array(bytes, offset, (value as u16).to_le_bytes()),
+        AccessWidth::Word => store_array(bytes, offset, (value as u32).to_le_bytes()),
+        AccessWidth::Dword => store_array(bytes, offset, value.to_le_bytes()),
     }
+}
+
+/// Store `value` at `offset` in `bytes`, or `None`, with nothing written,
+/// when it does not lie entirely in `bytes`.
+#[inline(always)]
+fn store_array<const N: usize>(bytes: &mut [u8], offset: usize, value: [u8; N]) -> Option<()> {
+    let end = offset.checked_add(N)?;
+    let to: &mut [u8; N] = bytes.get_mut(offset..end)?.try_into().ok()?;
+    *to = value;
+    Some(())
 }
 
 /// Why the bus could not complete an access.

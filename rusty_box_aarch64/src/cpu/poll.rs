@@ -58,13 +58,14 @@
 //! # Its bounds
 //!
 //! A skip happens only when the observer does not hear of every
-//! instruction (`Instrumentation::SEES_EXECUTION` is `false`), and only at
-//! a read that starts a trace, on the miss path `Cpu::run_trace` takes
-//! for such a trace. It is bounded by a [`PollBound`]. Its `left` is what
-//! is left of the run the machine set with `Cpu::bound_run`: a burst,
-//! which the machine counts to the nearest of the instruction budget, the
-//! slice end and the next event — the earliest tick at which a timer output
-//! rises (`Cpu::next_timer_deadline`) or a device changes by itself
+//! instruction (`Instrumentation::EXECUTION` is `Execution::Skippable`),
+//! and only at a read that starts a trace, on the miss path
+//! `Cpu::run_trace` takes for such a trace. It is bounded by a
+//! [`PollBound`]. Its `left` is what is left of the run the machine set
+//! with `Cpu::bound_run`: a burst, which the machine counts to the nearest
+//! of the instruction budget, the slice end and the next event — the
+//! earliest tick at which a timer output rises
+//! (`Cpu::next_timer_deadline`) or a device changes by itself
 //! (`VirtMachine::sync_events`). Nothing outside the processor can change
 //! before it, so an interrupt is taken at the same instruction either way.
 //! Its `exits` are the addresses the machine stops at: an iteration that
@@ -125,31 +126,54 @@ impl PollCycle {
     }
 }
 
-/// What an op is to [`Cpu::walk_poll`], by its shape alone: the walk
-/// accepts no op of a shape [`PollStep::Rejected`] names, whatever the
-/// registers hold. A `B.cond` on a condition other than an ordering is
-/// one: both this and the walk ask [`ordering`].
+/// The iterations a skip leaves to run as usual at its end, for an
+/// iteration of `jumps` taken branches: enough to refill the PC history
+/// (the module doc's "Its bounds").
+const fn margin(jumps: u64) -> u64 {
+    (PC_HISTORY as u64 + 2).div_ceil(jumps) + 1
+}
+
+/// The smallest [`margin`] of any iteration: an iteration is at most
+/// [`MAX_POLL_LEN`] instructions, the read and at most `MAX_POLL_LEN - 1`
+/// taken branches.
+const MIN_MARGIN: u64 = margin(MAX_POLL_LEN - 1);
+
+/// An op the walk of a poll may accept, by its shape: the walk accepts no
+/// op of any other shape, whatever the registers hold. The one
+/// classification [`PollStep::of`] and [`Cpu::walk_poll`] both take.
 ///
 /// Closed (R5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum PollStep {
-    /// The walk never accepts it.
-    Rejected,
-    /// The walk may accept it, and then goes on to the next op.
-    Straight,
-    /// The walk may accept it, and it may branch.
-    Branch,
+enum PollOp {
+    Nop,
+    /// `CMP Xn, Xm`: 64-bit `SUBS XZR` of two registers, unshifted.
+    CompareRegisters { rn: u8, rm: u8 },
+    /// `CMP Xn, #imm`: 64-bit `SUBS XZR` of a register and an immediate,
+    /// `y` the immediate inverted, as [`Op::AddsImm`] holds it.
+    CompareImmediate { rn: u8, y: u64 },
+    /// `B.cond` on an [`ordering`].
+    BranchOrdered { cond: u8, offset: u64 },
+    B { offset: u64 },
+    Bl { offset: u64 },
+    /// `BR`, `RET` included.
+    Br { rn: u8 },
+    Blr { rn: u8 },
 }
 
-impl PollStep {
-    /// What `op` is to the walk.
-    pub(super) const fn of(op: Op) -> Self {
+impl PollOp {
+    /// The shape `op` has to the walk, if it is one the walk may accept.
+    const fn of(op: Op) -> Option<Self> {
         match op {
-            Op::Nop
-            | Op::AddSubShift { sf: true, sub: true, flags: true, rd: 31, amount: 0, .. }
-            | Op::AddsImm { sf: true, rd: 31, carry: true, .. } => Self::Straight,
-            Op::BCond { cond, .. } if ordering(cond) => Self::Branch,
-            Op::B { .. } | Op::Bl { .. } | Op::Br { .. } | Op::Blr { .. } => Self::Branch,
+            Op::Nop => Some(Self::Nop),
+            Op::AddSubShift { sf: true, sub: true, flags: true, rd: 31, rn, rm, amount: 0, .. } => {
+                Some(Self::CompareRegisters { rn, rm })
+            }
+            Op::AddsImm { sf: true, rd: 31, rn, carry: true, y } => Some(Self::CompareImmediate { rn, y }),
+            Op::BCond { cond, offset } if ordering(cond) => Some(Self::BranchOrdered { cond, offset }),
+            Op::B { offset } => Some(Self::B { offset }),
+            Op::Bl { offset } => Some(Self::Bl { offset }),
+            Op::Br { rn } => Some(Self::Br { rn }),
+            Op::Blr { rn } => Some(Self::Blr { rn }),
             Op::Class { .. }
             | Op::BCond { .. }
             | Op::AddImm { .. }
@@ -176,7 +200,33 @@ impl PollStep {
             | Op::StorePair { .. }
             | Op::FpDp2 { .. }
             | Op::FpDp3 { .. }
-            | Op::ReadCounter { .. } => Self::Rejected,
+            | Op::ReadCounter { .. } => None,
+        }
+    }
+}
+
+/// What an op is to [`Cpu::walk_poll`], by its shape alone ([`PollOp`]).
+///
+/// Closed (R5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PollStep {
+    /// The walk never accepts it.
+    Rejected,
+    /// The walk may accept it, and then goes on to the next op.
+    Straight,
+    /// The walk may accept it, and it may branch.
+    Branch,
+}
+
+impl PollStep {
+    /// What `op` is to the walk.
+    pub(super) const fn of(op: Op) -> Self {
+        match PollOp::of(op) {
+            None => Self::Rejected,
+            Some(PollOp::Nop | PollOp::CompareRegisters { .. } | PollOp::CompareImmediate { .. }) => Self::Straight,
+            Some(
+                PollOp::BranchOrdered { .. } | PollOp::B { .. } | PollOp::Bl { .. } | PollOp::Br { .. } | PollOp::Blr { .. },
+            ) => Self::Branch,
         }
     }
 }
@@ -242,23 +292,29 @@ impl Cpu {
             if len == MAX_POLL_LEN {
                 return None;
             }
-            let op = self.poll_op(bus, pc, exits)?;
+            let op = PollOp::of(self.poll_op(bus, pc, exits)?)?;
             len += 1;
             let next = match op {
-                Op::Nop => pc.wrapping_add(4),
-                Op::AddSubShift { sf: true, sub: true, flags: true, rd: 31, rn, rm, amount: 0, .. }
-                    if compared.is_none() && (u32::from(rn) == rt) != (u32::from(rm) == rt) =>
-                {
+                PollOp::Nop => pc.wrapping_add(4),
+                PollOp::CompareRegisters { rn, rm } => {
+                    // The one compare, of the counter register and another.
+                    if compared.is_some() || (u32::from(rn) == rt) == (u32::from(rm) == rt) {
+                        return None;
+                    }
                     let a = self.poll_reg(rn, rt, value, x30);
                     let b = self.poll_reg(rm, rt, value, x30);
                     compared = Some(add_with_carry(a, !b, true, true).nzcv());
                     pc.wrapping_add(4)
                 }
-                Op::AddsImm { sf: true, rd: 31, rn, carry: true, y } if compared.is_none() && u32::from(rn) == rt => {
+                PollOp::CompareImmediate { rn, y } => {
+                    // The one compare, of the counter register.
+                    if compared.is_some() || u32::from(rn) != rt {
+                        return None;
+                    }
                     compared = Some(add_with_carry(value, y, true, true).nzcv());
                     pc.wrapping_add(4)
                 }
-                Op::BCond { cond, offset } if ordering(cond) => {
+                PollOp::BranchOrdered { cond, offset } => {
                     let taken = cond_holds(compared?, u32::from(cond));
                     outcomes |= u32::from(taken) << conds;
                     conds += 1;
@@ -269,54 +325,32 @@ impl Cpu {
                         pc.wrapping_add(4)
                     }
                 }
-                Op::B { offset } => {
+                PollOp::B { offset } => {
                     jumps += 1;
                     self.branch_addr(pc.wrapping_add(offset))
                 }
-                Op::Bl { offset } => {
+                PollOp::Bl { offset } => {
                     x30 = pc.wrapping_add(4);
                     jumps += 1;
                     self.branch_addr(pc.wrapping_add(offset))
                 }
-                Op::Br { rn } if u32::from(rn) != rt => {
+                PollOp::Br { rn } => {
+                    // Through a register other than the counter's.
+                    if u32::from(rn) == rt {
+                        return None;
+                    }
                     jumps += 1;
                     self.branch_addr(self.poll_reg(rn, rt, value, x30))
                 }
-                Op::Blr { rn } if u32::from(rn) != rt => {
+                PollOp::Blr { rn } => {
+                    if u32::from(rn) == rt {
+                        return None;
+                    }
                     let target = self.poll_reg(rn, rt, value, x30);
                     x30 = pc.wrapping_add(4);
                     jumps += 1;
                     self.branch_addr(target)
                 }
-                Op::Class { .. }
-                | Op::AddImm { .. }
-                | Op::AddsImm { .. }
-                | Op::AddSubShift { .. }
-                | Op::LogImm { .. }
-                | Op::LogShift { .. }
-                | Op::MovImm { .. }
-                | Op::Movk { .. }
-                | Op::Adr { .. }
-                | Op::Adrp { .. }
-                | Op::Ubfm { .. }
-                | Op::Sbfm { .. }
-                | Op::Bfm { .. }
-                | Op::CondSel { .. }
-                | Op::Madd { .. }
-                | Op::BCond { .. }
-                | Op::Cbz { .. }
-                | Op::Tbz { .. }
-                | Op::Br { .. }
-                | Op::Blr { .. }
-                | Op::LoadImm { .. }
-                | Op::StoreImm { .. }
-                | Op::LoadReg { .. }
-                | Op::StoreReg { .. }
-                | Op::LoadPair { .. }
-                | Op::StorePair { .. }
-                | Op::FpDp2 { .. }
-                | Op::FpDp3 { .. }
-                | Op::ReadCounter { .. } => return None,
             };
             if next == start {
                 let flags = compared?;
@@ -349,6 +383,12 @@ impl Cpu {
     #[cold]
     #[inline(never)]
     pub(super) fn fast_forward_poll<B: PhysBus>(&mut self, bus: &mut B, pc: u64, word: u32, bound: PollBound<'_>) {
+        // Every iteration is at least two instructions, the read and a
+        // branch back, so a run with room for no more than [`MIN_MARGIN`]
+        // of them has room for no skip, whatever the walk would find.
+        if bound.left / 2 <= MIN_MARGIN {
+            return;
+        }
         // XZR discards the value; x30 is the register a call writes, which
         // the walk keeps apart from the counter register.
         let rt = bits(word, 4, 0);
@@ -369,7 +409,7 @@ impl Cpu {
         };
         let len = cycle.len;
         // Iterations run as usual at the end, to refill the PC history.
-        let margin = (PC_HISTORY as u64 + 2).div_ceil(cycle.jumps) + 1;
+        let margin = margin(cycle.jumps);
         let fit = bound.left / len;
         if fit <= margin {
             return;

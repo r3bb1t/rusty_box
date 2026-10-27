@@ -200,6 +200,13 @@ const DCC_FLAGS: u64 = DCC_TXFULL | DCC_RXFULL;
 /// processor.
 const MDSCR_SAVE_RESTORE: u64 = DCC_FLAGS | (1 << 27) | (1 << 26) | (0b11 << 22) | (1 << 21) | (1 << 14) | (1 << 6);
 
+/// The `MDSCR_EL1` fields an ARMv8.0 processor has: the save/restore
+/// fields, SS (0), TDCC (12), KDE (13) and MDE (15). Every other bit is
+/// RES0 here (the bits later features define among them: TFO, SC2, EMBWE,
+/// TTA, EnSPM, EHBWE), and reads as zero (Arm ARM, DDI 0487, the
+/// `MDSCR_EL1` description).
+pub(super) const MDSCR_FIELDS: u64 = MDSCR_SAVE_RESTORE | 1 | MDSCR_TDCC | (1 << 13) | (1 << 15);
+
 /// `OSLSR_EL1.OSLK`: the OS Lock is locked.
 const OSLSR_OSLK: u64 = 1 << 1;
 
@@ -700,10 +707,10 @@ impl Cpu {
             // through to `EDSCR` while it is locked (Arm ARM, DDI 0487,
             // `MDSCR_EL1` and `EDSCR`). Unlocked, a read of them is UNKNOWN;
             // this model's reads return what they hold at every OS Lock
-            // state.
+            // state. A RES0 bit is not stored.
             MDSCR_EL1 => {
                 let kept = if self.sys.oslsr_el1 & OSLSR_OSLK != 0 { 0 } else { MDSCR_SAVE_RESTORE };
-                self.sys.mdscr_el1 = (value & !kept) | (self.sys.mdscr_el1 & kept);
+                self.sys.mdscr_el1 = (value & MDSCR_FIELDS & !kept) | (self.sys.mdscr_el1 & kept);
                 WriteEffect::None
             }
             OSECCR_EL1 => {

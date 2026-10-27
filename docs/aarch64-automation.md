@@ -431,14 +431,15 @@ exception, IRQ and FIQ taken (with the vector, the syndrome and the fault
 address); `memory_access` for every data access that completes on the
 physical bus. Each defaults to nothing.
 
-An observer also says, by `Instrumentation::SEES_EXECUTION`, whether it must
-hear of every instruction. `false` lets the machine fast-forward instructions
-whose only effect is the passage of time: the whole iterations of a loop that
-waits for the system counter to pass a value, as firmware delays do, which it
-jumps over exactly, leaving the state running them would leave. The observer
-is then not called for those instructions, and it is called as usual for every
-instruction the machine does run. The default is `true`, which keeps every
-hook call; `NoInstrumentation` is `false`.
+An observer also says, by `Instrumentation::EXECUTION`, whether it must hear
+of every instruction. `Execution::Skippable` lets the machine fast-forward
+instructions whose only effect is the passage of time: the whole iterations of
+a loop that waits for the system counter to pass a value, as firmware delays
+do, which it jumps over exactly, leaving the state running them would leave.
+The observer is then not called for those instructions, and it is called as
+usual for every instruction the machine does run. The default is
+`Execution::Heard`, which keeps every hook call; `NoInstrumentation` is
+`Execution::Skippable`.
 
 ---
 

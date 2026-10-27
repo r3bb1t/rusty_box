@@ -50,7 +50,8 @@
 //!   the CPU has it, and otherwise `fma_round`, a port of musl's `fma.c`,
 //!   which rounds once for every input, and `fma_wide_round`, a port of
 //!   musl's `fmaf.c`, which rounds once wherever the result is normal.
-//!   glibc's own `fma`/`fmaf` round once for every input too: on x86_64
+//!   glibc's own `fma`/`fmaf` round once wherever the result is normal
+//!   too, the only results the bound accepts: on x86_64
 //!   (`sysdeps/x86_64/fpu/multiarch/s_fma.c`, `s_fmaf.c`) they run
 //!   VFMADD213SD/SS, or FMA4's VFMADDSD/SS, where the CPU has it, and
 //!   otherwise `sysdeps/ieee754/dbl-64/s_fma.c`, which forms the exact

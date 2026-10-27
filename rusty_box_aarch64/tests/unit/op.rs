@@ -222,8 +222,10 @@ fn every_pre_decoded_op_executes_as_its_class_handler_does() {
     };
     let mut by_class = Cpu::new(config);
     let mut by_op = Cpu::new(config);
+    let mut by_pool = Cpu::new(config);
     let mut bus_class = TestBus { ram: std::vec![0; RAM_LEN], block: 0 };
     let mut bus_op = TestBus { ram: std::vec![0; RAM_LEN], block: 0 };
+    let mut bus_pool = TestBus { ram: std::vec![0; RAM_LEN], block: 0 };
     let mut rng = SplitMix64(0x0DDB_A11C_0FFE_E000);
     let mut hits: BTreeMap<&'static str, u32> = BTreeMap::new();
     for i in 0..400_000u32 {
@@ -242,13 +244,21 @@ fn every_pre_decoded_op_executes_as_its_class_handler_does() {
         let seed = rng.next();
         set_up(&mut by_class, &mut bus_class, seed);
         set_up(&mut by_op, &mut bus_op, seed);
+        set_up(&mut by_pool, &mut bus_pool, seed);
         let pc = by_class.pc;
         let want = by_class.exec_class(&mut bus_class, pc, class, word);
+        // The op as the per-instruction path holds it, and where a trace's
+        // op lies.
         let mut raised = None;
         let got = by_op.exec_op(&mut bus_op, pc, op, &mut raised).map_err(|fault| *fault);
+        let mut raised = None;
+        let pooled = by_pool.exec_pooled(&mut bus_pool, pc, op, word, &mut raised).map_err(|fault| *fault);
         assert_eq!(got, want, "{word:#010x} ({name}) seed {seed:#x}: result");
+        assert_eq!(pooled, want, "{word:#010x} ({name}) seed {seed:#x}: result from the pool");
         assert!(snapshot(&by_op) == snapshot(&by_class), "{word:#010x} ({name}) seed {seed:#x}: processor state");
+        assert!(snapshot(&by_pool) == snapshot(&by_class), "{word:#010x} ({name}) seed {seed:#x}: processor state from the pool");
         assert!(bus_op.ram == bus_class.ram, "{word:#010x} ({name}) seed {seed:#x}: memory");
+        assert!(bus_pool.ram == bus_class.ram, "{word:#010x} ({name}) seed {seed:#x}: memory from the pool");
     }
     // Every specialised form ran many times.
     for name in VARIANTS {

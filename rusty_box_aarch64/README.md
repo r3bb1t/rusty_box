@@ -89,10 +89,10 @@ vocabulary are `rusty_box_core`'s, shared with the x86 machine.
   rusty_box's x86 interpreter ports it. [`src/cpu/op.rs`](src/cpu/op.rs)
   turns a word into an `Op`: for the integer, branch, general-register
   load/store and scalar FP arithmetic forms that dominate guest code, the
-  operand fields extracted
-  once, with what depends on the word alone worked out ahead (a logical
-  immediate's mask, a branch offset); every other word stays on its class
-  handler. [`src/cpu/trace.rs`](src/cpu/trace.rs) keeps straight-line runs
+  operand fields extracted once, with what depends on the word alone
+  worked out ahead (a logical immediate's mask, a branch offset); every
+  other word stays on its class handler.
+  [`src/cpu/trace.rs`](src/cpu/trace.rs) keeps straight-line runs
   of ops, at most 32 and never across a page, keyed by the physical address
   of their first: the PC is translated, with the fetch permission check,
   once per trace, and a trace ends after a branch that always leaves, an
@@ -111,10 +111,10 @@ vocabulary are `rusty_box_core`'s, shared with the x86 machine.
   change it). Every instruction a trace runs is fetched, checked, executed
   and reported to an observer exactly as one at a time would be, so a run
   ends in the same state either way (the speed section lists the boots'
-  state hashes). The one exception is the counter
-  poll, below: when the observer does not hear of every instruction, whole
-  iterations of a poll may be skipped, unfetched and unreported, leaving
-  exactly the state running them would leave.
+  state hashes). The one exception is the counter poll, below: when the
+  observer does not hear of every instruction, whole iterations of a poll
+  may be skipped, unfetched and unreported, leaving exactly the state
+  running them would leave.
 - **Counter polls fast-forward exactly.** When nobody watches every
   instruction, a loop that reads the system counter, compares it once with a
   value it does not change and branches on an ordering of the two jumps over
@@ -130,9 +130,9 @@ vocabulary are `rusty_box_core`'s, shared with the x86 machine.
   own port of Berkeley SoftFloat 3e (via Bochs softfloat3e), restricted to
   half, single and double precision and given an Arm specialization: Arm's
   default NaN and NaN-propagation order (including fused multiply-add),
-  FPCR.DN, FPCR.FZ
-  input and output flushing, tininess before rounding, and saturating
-  float-to-integer conversions. On top of it `softfloat/arm_ops.rs` adds what
+  FPCR.DN, FPCR.FZ input and output flushing, tininess before rounding,
+  and saturating float-to-integer conversions. On top of it
+  `softfloat/arm_ops.rs` adds what
   Berkeley has no counterpart for — fixed-point conversions, FCVTXN's
   round-to-odd, the FPCR.AHP alternative half-precision format, FMULX,
   FRECPS and FRSQRTS — and `cpu/fp_estimate.rs` the bit-exact
@@ -141,17 +141,20 @@ vocabulary are `rusty_box_core`'s, shared with the x86 machine.
   definition: [`src/softfloat/host.rs`](src/softfloat/host.rs) lets the host
   compute a single- or double-precision add, subtract, multiply, divide or,
   with `std` on a host whose `fma` is known to round once, fused
-  multiply-add only where IEEE 754 makes the host's answer
-  SoftFloat's (QEMU's "hardfloat" rule, narrowed). Rounding must be to
-  nearest even with inexact already raised, every operand normal, and the
-  result normal, finite and above the smallest normal.
-  `tests/unit/host_float.rs` checks the host
-  against SoftFloat at those boundaries under every FPCR, mutation-checked.
+  multiply-add only where IEEE 754 makes the host's answer SoftFloat's
+  (QEMU's "hardfloat" rule, narrowed). Rounding must be to nearest even
+  with inexact already raised, every operand normal, and the result
+  normal, finite and above the smallest normal.
+  `tests/unit/host_float.rs` checks the host against SoftFloat at those
+  boundaries under every FPCR; on x86-64 Linux it passes both with and
+  without the processor's FMA, the second under `qemu-x86_64 -cpu
+  Nehalem`, where `fma` and `fmaf` run compiler-builtins' software
+  fallbacks.
 
 ## Speed
 
 `aarch64_perfbench` ([`examples/perfbench.rs`](examples/perfbench.rs))
-measures the interpreter on four embedded loops and two boots; `cargo xtask
+measures the interpreter on five embedded loops and two boots; `cargo xtask
 perf-baseline` archives it for A/B runs. Host: Intel Xeon @ 2.1 GHz, a
 4-core VM, 2026-10-26. Each figure is the median of 10 interleaved rounds,
 in millions of instructions a second; "hooked" runs under an observer with
@@ -196,6 +199,13 @@ const assertion in `src/devices/pl011.rs` holds the size at 8
 modulo 16 on x86-64 hosts. Other host architectures lay the machine out
 differently, were not measured, and are held by nothing.
 
+The fifth loop, `mmio`, runs `alu`'s chain from the GIC distributor's
+priority bytes, whose fetches cannot be cached, so every instruction takes
+the per-instruction path, at about 570 host instructions each. That path
+is kept out of line and marked cold for the trace loop's sake: without the
+mark, `mmio` takes 3.5% fewer host instructions, and `alu` and `fnv` 4.5%
+more.
+
 The boots' state hashes at 10M, 100M and 400M instructions on this tree,
 which a change meant to leave the guest's behaviour alone (as speed work
 is) must reproduce, are:
@@ -232,16 +242,18 @@ newest `virt` machine, `virt-11.1`.
 
 ## Verification
 
-The unit tests that need the library's private items live next to `src`,
-in `tests/unit/`, and are compiled into the library under `#[cfg(test)]`
-through `#[path]` module declarations; the files directly in `tests/` are
-integration tests of the public API.
+The unit tests that need the library's private items are compiled into the
+library under `#[cfg(test)]`: most live next to `src`, in `tests/unit/`,
+through `#[path]` module declarations, and some sit in a `tests` module at
+the end of the file they test (the device models, the boot code, and
+parts of the processor and of SoftFloat). The
+files directly in `tests/` are integration tests of the public API.
 
 - `tests/unit/difftest.rs` replays `tests/vectors/unicorn.txt`: 24,778
   single-instruction vectors over 78 encoding families (13,791 of them
   floating point, 1,000 of them AES, SHA, PMULL and CRC32), generated by
-  `tests/vectors/gen_unicorn.py` with Unicorn
-  (QEMU's TCG). Each vector stores only a seed and Unicorn's results — PC,
+  `tests/vectors/gen_unicorn.py` with Unicorn (QEMU's TCG). Each vector
+  stores only a seed and Unicorn's results — PC,
   NZCV, FPSR and every changed register and data byte — so the test needs no
   Unicorn. Floating-point inputs mix special values (zeros, infinities,
   quiet and signalling NaNs, denormals, range and tie boundaries) with
@@ -270,8 +282,8 @@ integration tests of the public API.
   Arm's bits; each class names exactly the encodings of that class whose
   condition holds for the implemented features (1,061: base, FP, Advanced
   SIMD, AES, SHA-1, SHA-256, CRC32); each encoding's arms fix exactly Arm's
-  fixed bits, should-be bits
-  included; each carries Arm's feature. And on all 2^32 words, the decoder
+  fixed bits, should-be bits included; each carries Arm's feature. And on
+  all 2^32 words, the decoder
   names the encoding Arm's data allocates the word to, and nothing where it
   allocates none: 0 disagreements, about 15 s on four threads. The one
   departure is PRFM (register) with `Rt = 11xxx`, which Arm's data gives to
@@ -328,14 +340,15 @@ integration tests of the public API.
   outcome is identical for every budget slicing, and a snapshot taken
   mid-wait restores the same future. One sends itself an SGI and enters
   the FIQ vector for Group 0 under `GICC_CTLR.FIQEn`, and the IRQ vector
-  for Group 1, or for Group 0 without it, as `ISR_EL1` shows beforehand. One sets the GIC and the PL011 up as Linux's console does —
-  SPI 33 enabled, the receive interrupt at half full, `RTIM` unmasked —
-  and waits in `WFI`; five characters typed at it, fewer than the level,
-  wake it through the receive timeout: it takes the IRQ, acknowledges
-  INTID 33, finds `RTMIS` and reads the five characters, at the tick the
-  32 bit periods end, whatever the slicing (mutation-checked: the UART's
-  deadline left out of the machine's next event, or its line out of the
-  GIC, and the guest never wakes).
+  for Group 1, or for Group 0 without it, as `ISR_EL1` shows beforehand.
+  One sets the GIC and the PL011 up as Linux's console does — SPI 33
+  enabled, the receive interrupt at half full, `RTIM` unmasked — and
+  waits in `WFI`; five characters typed at it, fewer than the level, wake
+  it through the receive timeout: it takes the IRQ, acknowledges INTID
+  33, finds `RTMIS` and reads the five characters, at the tick the 32 bit
+  periods end, whatever the slicing. It needs every link on the way: the
+  UART's deadline in the machine's next event, the deadline's expiry
+  setting `RTRIS`, and the UART's line into the GIC.
 - `src/devices/gicv2.rs` and `src/devices/pl011.rs` test the device models
   against IHI 0048B and DDI 0183F register by register. The GIC: both
   groups and the Group 1 aliases, with `AckCtl` set and clear; a group the
@@ -344,11 +357,14 @@ integration tests of the public API.
   uniprocessor; and snapshots whose SGI state disagrees, refused with
   nothing changed. The PL011: the receiver and transmitter gated by
   `UARTEN`, `RXE` and `TXE`; both FIFO interrupts as transitions through
-  the `UARTIFLS` levels, with the FIFO enabled and disabled; the receive
-  timeout's 32 bit periods at the latched divisor, whether `RTIM` or the
-  receiver is on; the `FEN` flush; overruns, breaks, modem status
-  interrupts and reserved bits; and snapshots, with the states they must
-  refuse.
+  the `UARTIFLS` levels, with the FIFO enabled and disabled, and a
+  `TXIFLSEL` write alone changing nothing; a burst longer than the FIFO,
+  written as Linux writes one, going out whole; the receive timeout's 32
+  bit periods at the latched divisor, whether `RTIM` or the receiver is
+  on, cleared by reading the holding register with the FIFO disabled; the
+  `FEN` flush; overruns, breaks (one lost to an overrun included), modem
+  status interrupts and reserved bits; and snapshots, with the states
+  they must refuse.
 - `tests/unit/softfloat.rs`: the softfloat surface against the host's IEEE
   arithmetic in round-to-nearest, and Arm's rules — default NaN, NaN
   propagation order, FPCR.DN and FZ, tininess before rounding, saturating
@@ -363,10 +379,13 @@ integration tests of the public API.
   configuration byte for byte and the events each host action becomes
   (`tests/unit/virtio_input.rs`); every 2D GPU command and its errors in
   QEMU's order, frames and the cursor as the host receives them
-  (`tests/unit/virtio_gpu.rs`). The EDID matches QEMU's own generator byte
-  for byte at nine sizes (`tests/vectors/qemu_edid.txt`, from
-  `tests/vectors/gen_qemu_edid.sh`, which builds `edid-generate.c` from a
-  QEMU checkout). Alpine with the three devices binds `virtio_gpu` (`+edid`),
+  (`tests/unit/virtio_gpu.rs`); the block device's configuration and
+  geometry, every request type and its errors, the cache mode, read-only
+  and file-backed disks and snapshots (`tests/unit/virtio_block.rs`). The
+  EDID matches QEMU's own generator byte for byte at nine sizes
+  (`tests/vectors/qemu_edid.txt`, from `tests/vectors/gen_qemu_edid.sh`,
+  which builds `edid-generate.c` from a QEMU checkout). Alpine with the
+  three devices binds `virtio_gpu` (`+edid`),
   shows its console in the framebuffer at the requested size, and receives a
   key typed on the virtio keyboard in its evdev; a snapshot taken after the
   drivers bound, restored in place or into a fresh machine, gives the same
@@ -381,10 +400,9 @@ integration tests of the public API.
   32 bit periods after a character, or after it sets `RTIM` with one
   waiting, at the same tick however the run is sliced, and at the same
   tick after a snapshot taken once it has latched a divisor without a baud
-  clock, refused builds, a snapshot of an earlier
-  version refused with nothing changed; and that a run cut into instruction
-  budgets of
-  any size, or stopped by an exit at any instruction of straight-line code,
+  clock, refused builds, a snapshot of an earlier version refused with
+  nothing changed; and that a run cut into instruction budgets of any
+  size, or stopped by an exit at any instruction of straight-line code,
   ends exactly where one instruction at a time would.
 - The pre-decoded ops are checked against the class handlers they stand in
   for (`tests/unit/op.rs`): 400,000 words drawn from the templates of the
@@ -392,7 +410,18 @@ integration tests of the public API.
   ways from the same random state — registers pointing into RAM or not, the
   exception level, the alignment checks, the MMU off or on over a mapping of
   random permissions — must end in the same result, processor snapshot (TLB
-  included) and memory. Every specialised form runs hundreds of times.
+  included) and memory, with the op held by the instruction-at-a-time path
+  and with it read where a trace's op lies, in the trace pool. Every
+  specialised form runs hundreds of times.
+- Smaller unit tests pin single mechanisms: a RAM store writes exactly its
+  width, little-endian, or nothing when it does not fit
+  (`tests/unit/bus.rs`); every page of RAM has a write stamp of its own,
+  and only a trace whose `B.cond` tests an ordering is marked as one that
+  may begin a counter poll (`tests/unit/trace.rs`); a processor waiting for
+  an interrupt always moves time on, so a run ends even past a device
+  deadline nothing consumes (`tests/unit/machine.rs`); and the AES S-boxes
+  and `MixColumns`, carry-less multiplication and the CRC32 table match the
+  definitions they are computed from (`tests/unit/crypto.rs`).
 - `tests/self_modifying.rs`: code changed after it ran runs as changed —
   rewritten just ahead of the store that rewrites it, in the same trace;
   rewritten through a second virtual mapping of its page; read over by a
@@ -447,9 +476,10 @@ integration tests of the public API.
   clears RXfull, and `DBGDTR_EL0` reads and writes both data registers;
   `OSDTRRX_EL1` and `OSDTRTX_EL1` read and write them without touching the
   flags, with the OS Lock locked or not, and a snapshot carries them;
-  `MDSCR_EL1` shows both flags, and its save/restore fields, the flags
-  among them, take a write only while the OS Lock is locked; and EL0's
-  accesses trap under `MDSCR_EL1.TDCC` before they take effect.
+  `MDSCR_EL1` shows both flags, its save/restore fields, the flags among
+  them, take a write only while the OS Lock is locked, and its RES0 bits
+  read as zero; and EL0's accesses trap under `MDSCR_EL1.TDCC` before they
+  take effect.
 - `tests/translation_and_firmware.rs`: an out-of-range T1SZ, a table base or
   block beyond the output size `TCR_EL1.IPS` selects, `AT` meeting an
   external abort on its walk, PSCI's target, entry-point and
@@ -466,9 +496,9 @@ an instruction does, IHI 0048B the GIC, DDI 0183F the PL011, DEN 0022D and
 DEN 0028B the firmware calls. QEMU 11.1.2's `virt` board and `cortex-a57`
 decide what they do not: the board's layout, wiring and device tree, the
 devices Arm does not document, and the choices Arm leaves to an
-implementation. Every place this model departs from QEMU is
-listed here with its evidence, as are the choices it makes where the
-references leave one open.
+implementation. Every place this model departs from QEMU is listed here
+with its evidence, as are the choices it makes where the references leave
+one open.
 
 - **Should-be fields are UNDEFINED when set otherwise.** Arm's encodings of
   34 ARMv8.0 instructions have should-be bits (`(0)` and `(1)` in the Arm
@@ -530,7 +560,10 @@ references leave one open.
   - The function identifier is W0 in both conventions, and an SMC32
     call's arguments are W1 to W3 (DEN 0028B §2.6 and §2.7, and §3.1
     Table 3-1, whose `Wn` is a register's low 32 bits with the upper ones
-    ignored; DEN 0022D §5.2.1), as are the parameters DEN 0022D declares
+    ignored — §3.1 says "The least significant 32-bits are used, and the
+    most significant 32-bits are zero. Implementations must ignore the
+    least significant bits", the last word a slip for "most"; DEN 0022D
+    §5.2.1), as are the parameters DEN 0022D declares
     `uint32` in an SMC64 call (`lowest_affinity_level`); the upper halves
     of those X registers take no part, as in TF-A (`psci_smc_handler`).
     QEMU compares the whole of X0 and uses the whole of X1 to X3.
@@ -574,10 +607,10 @@ references leave one open.
 - **virtio DMA reaches RAM only.** QEMU's `dma_memory_map` maps a ring or
   buffer wherever the address space has a region (`address_space_map`):
   RAM and, for reading, a flash bank in read-array mode directly, anything
-  else through its bounce buffer. This
-  board's virtio devices reach guest RAM only, so a ring or buffer anywhere
-  else breaks the device, as one in an unassigned hole does in QEMU. Linux
-  and EDK2 place their rings and buffers in RAM.
+  else through its bounce buffer. This board's virtio devices reach guest
+  RAM only, so a ring or buffer anywhere else breaks the device, as one in
+  an unassigned hole does in QEMU. Linux and EDK2 place their rings and
+  buffers in RAM.
 - **`fw_cfg` without DMA or files.** QEMU's `virt` offers the DMA interface
   and a file directory (ACPI tables, SMBIOS, boot order); this board reports
   the traditional interface only (`FW_CFG_ID` = 1) and an empty directory, a
@@ -640,10 +673,13 @@ references leave one open.
   neither §4.4.1 nor §4.4.4 says, and an architecture in which the
   distributor picks the highest-priority interrupt and the CPU interface
   then decides whether to signal it could be read QEMU's way. The reading
-  taken is the rule the GICv3 architecture (IHI 0069) states, where
-  `ICC_HPPIR0_EL1`/`ICC_HPPIR1_EL1` and `ICC_IAR0_EL1`/`ICC_IAR1_EL1`
-  consider only interrupts of a group enabled by
-  `ICC_IGRPEN0_EL1`/`ICC_IGRPEN1_EL1`.
+  taken treats the CPU interface's enable as §4.3.1 treats the
+  distributor's. It is also the rule the GICv3 architecture (IHI 0069) is
+  cited for, where `ICC_HPPIR0_EL1`/`ICC_HPPIR1_EL1` and
+  `ICC_IAR0_EL1`/`ICC_IAR1_EL1` consider only interrupts of a group
+  enabled by `ICC_IGRPEN0_EL1`/`ICC_IGRPEN1_EL1`; that citation is from
+  memory, not from IHI 0069's text, and QEMU 11.1.2's GICv3 CPU interface
+  (`icc_no_enabled_hppi`) does not follow it.
 - **GIC preemption compares group priorities.** IHI 0048B §3.3
   ("Preemption", "Priority grouping") signals a pending interrupt only if its
   group priority, under its own group's binary point (`GICC_BPR`, or
@@ -683,10 +719,12 @@ references leave one open.
   and follows the Arm ARM: after the first write TXfull stays set, so
   Linux's `hvc_dcc_check` (with `CONFIG_HVC_DCC`) concludes that no channel
   is attached instead of registering a console whose output goes nowhere;
-  the data registers keep what is written to them; and an unlocked write
-  leaves the save/restore fields as they are. Two UNKNOWN cases have fixed
-  answers: a read with RXfull clear returns zero, and a write while TXfull
-  is set leaves TXfull set and both data registers as they were.
+  the data registers keep what is written to them; an unlocked write
+  leaves the save/restore fields as they are; and `MDSCR_EL1` keeps only
+  the fields an ARMv8.0 processor has, its RES0 bits reading as zero.
+  Two UNKNOWN cases have fixed answers: a read with RXfull clear returns
+  zero, and a write while TXfull is set leaves TXfull set and both data
+  registers as they were.
 - **The PL011 receives only while `UARTEN` and `RXE` are set.** The
   PrimeCell UART (PL011) TRM, ARM DDI 0183F §3.3.8 (Note to Table 3-12),
   enables reception with both bits; the reset value of `UARTCR` (0x300) has
@@ -845,8 +883,11 @@ references leave one open.
   A driver can see the difference in one way. While transmission is
   enabled, a write never takes the transmit FIFO above one character, so
   with the FIFO enabled no write clears `TXRIS` and no drain sets it.
-  `TXRIS` is then clear only after a reset or after `UARTICR` clears it,
-  and once set it stays set until one of those clears it. A driver stalls
+  With transmission enabled, `TXRIS` is then clear only after a reset or
+  after `UARTICR` clears it, and once set it stays set until one of those
+  clears it. (Writes made while transmission is off can take the FIFO
+  above the level and clear it too, but enabling transmission drains the
+  FIFO through the level and sets it again.) A driver stalls
   only if, with the FIFO enabled and `TXRIS` clear in that way, it writes
   a burst larger than the trigger level without stopping at `TXFF` and
   then waits for `TXRIS`: on hardware the burst fills the FIFO above the
@@ -876,7 +917,11 @@ references leave one open.
 - Floating-point exception traps: FPCR's trap-enable bits read as zero, as on
   a Cortex-A57, so exceptions only accumulate in FPSR.
 - Debug: breakpoint and watchpoint registers exist (two of each, as
-  advertised) but never fire; no Debug state, no PMU.
+  advertised) but never fire; no Debug state, no PMU. The Debug
+  Communications Channel's interrupt requests (COMMRX and COMMTX, which
+  `MDCCINT_EL1` enables) reach no interrupt controller: where they connect
+  is the system's choice, and QEMU's `virt` connects them nowhere, so
+  `MDCCINT_EL1` keeps what is written and raises nothing.
 - No data cache model, and no instruction cache a guest can see: the
   decoded traces are kept coherent with every write, so neither `IC` nor
   data cache maintenance has anything to act on.

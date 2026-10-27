@@ -176,6 +176,7 @@ pub(crate) fn decode_bit_masks(n: bool, imms: u32, immr: u32, immediate: bool, s
 }
 
 impl Cpu {
+    /// Set NZCV to the flags of an `AddWithCarry` result.
     #[inline]
     pub(super) fn set_flags(&mut self, r: AddResult) {
         self.pstate.set_flags(r.nzcv());

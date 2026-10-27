@@ -11,6 +11,8 @@
 //! next tick a line can rise, which this module computes exactly: the first
 //! tick whose count reaches `CVAL`.
 
+use rusty_box_core::Cycles;
+
 use super::Cpu;
 
 /// The timer outputs, as levels on their PPIs.
@@ -122,7 +124,7 @@ impl Cpu {
     /// span `cval` counter cycles, rounded up, which is exactly where
     /// [`Cpu::counter_at`]'s floor first reaches it.
     fn tick_reaching(&self, cval: u64) -> u64 {
-        self.ips.ticks_from_cycles_ceil(cval, self.counter_hz).ticks()
+        self.ips.ticks_from_cycles_ceil(Cycles::new(cval), self.counter_hz).ticks()
     }
 
     #[inline]

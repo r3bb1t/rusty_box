@@ -601,11 +601,9 @@ impl Cpu {
     /// raises is kept in `raised`, which the result's `Err` refers to (see
     /// [`OpResult`]).
     ///
-    /// The match reads the op where it lies, not a copy: the dispatch loads
-    /// only the variant, and each arm loads its own fields as it binds them.
-    /// A copy of the op would be split into one register per field before
-    /// the dispatch, every field of every variant at once, and the trace
-    /// loop's register allocation would then depend on every arm's fields.
+    /// The match reads the op where it lies: the dispatch loads only the
+    /// variant, and each arm loads its own fields as it binds them, so the
+    /// trace loop's register allocation holds no field of any other arm.
     #[inline(always)]
     pub(crate) fn exec_op<'f, B: PhysBus, S: OpSource>(
         &mut self,

@@ -246,6 +246,15 @@ struct TlbEntry {
     level: u8,
 }
 
+impl TlbEntry {
+    /// Whether this entry, the one in `va`'s slot ([`Tlb::entry_for`]),
+    /// translates `va`'s page.
+    #[inline(always)]
+    const fn translates(&self, va: u64) -> bool {
+        self.tag == va >> 12
+    }
+}
+
 const EMPTY_ENTRY: TlbEntry = TlbEntry {
     tag: INVALID_TAG,
     pa_page: 0,
@@ -273,6 +282,14 @@ impl Tlb {
     #[inline]
     fn slot(va: u64) -> usize {
         ((va >> 12) as usize) & (TLB_ENTRIES - 1)
+    }
+
+    /// The entry in `va`'s slot, the one that translates `va` if any does
+    /// ([`TlbEntry::translates`]): the lookup every translation from the
+    /// TLB makes.
+    #[inline(always)]
+    fn entry_for(&self, va: u64) -> TlbEntry {
+        self.entries[Self::slot(va)]
     }
 
     /// The valid entries, for a snapshot.
@@ -362,8 +379,8 @@ impl Cpu {
         if !self.mmu_enabled() {
             return None;
         }
-        let entry = self.tlb.entries[Tlb::slot(va)];
-        if entry.tag != va >> 12 || !permitted(entry.perms, kind, el) {
+        let entry = self.tlb.entry_for(va);
+        if !entry.translates(va) || !permitted(entry.perms, kind, el) {
             return None;
         }
         Some(Translated {
@@ -395,8 +412,8 @@ impl Cpu {
             });
         }
 
-        let entry = self.tlb.entries[Tlb::slot(va)];
-        if entry.tag == va >> 12 {
+        let entry = self.tlb.entry_for(va);
+        if entry.translates(va) {
             return Ok(Resolved {
                 pa: entry.pa_page | (va & 0xFFF),
                 perms: entry.perms,
@@ -762,7 +779,10 @@ impl Cpu {
         self.translate_data_checked(bus, va, fit, kind, acc)
     }
 
-    /// [`Cpu::translate_data`] with every check made, in order.
+    /// [`Cpu::translate_data`] with every check made, in order: stage 1
+    /// disabled, a TLB miss (which walks and fills), a page that does not
+    /// permit the access, or a misaligned access the fast path cannot
+    /// answer.
     #[cold]
     #[inline(never)]
     fn translate_data_checked<B: PhysBus>(

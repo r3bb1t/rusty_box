@@ -58,7 +58,7 @@ use super::op::{predecode, Op, OpSource};
 use super::poll::PollStep;
 use super::Cpu;
 use crate::bus::{CodeEpoch, FetchSource, PhysAddr, PhysBus, PhysSpan};
-use crate::instrumentation::Instrumentation;
+use crate::instrumentation::{Execution, Instrumentation};
 
 #[cfg(all(test, feature = "alloc"))]
 #[path = "../../tests/unit/trace.rs"]
@@ -297,9 +297,28 @@ impl OpSource for PoolSlot {
     }
 }
 
+#[cfg(test)]
+impl Cpu {
+    /// [`Cpu::exec_op`] reading `op` where a trace's op lies, in slot 0 of
+    /// the pool ([`PoolSlot`]), as [`Cpu::run_trace`] does. Every trace is
+    /// forgotten first, so the pool holds `op` alone.
+    pub(super) fn exec_pooled<'f, B: PhysBus>(
+        &mut self,
+        bus: &mut B,
+        pc: u64,
+        op: Op,
+        word: u32,
+        raised: &'f mut Option<Fault>,
+    ) -> super::exec::OpResult<'f> {
+        self.traces.flush();
+        self.traces.pool.push(Slot { op, word });
+        self.exec_op(bus, pc, PoolSlot(0), raised)
+    }
+}
+
 /// How far a counter poll whose read starts a trace may be fast-forwarded
 /// (`poll.rs`), when the observer does not hear of every instruction
-/// ([`Instrumentation::SEES_EXECUTION`]).
+/// ([`Execution::Skippable`]).
 #[derive(Debug, Clone, Copy)]
 pub(super) struct PollBound<'x> {
     /// The instructions, the read included, that [`Cpu::run_trace`]'s
@@ -321,12 +340,11 @@ pub(crate) struct TraceCache {
     /// the processor make before it next looks outside it, as a tick
     /// modulo 2^32 ([`Cpu::bound_run`]): a run is shorter than 2^32
     /// instructions, each of which retires in one tick. Only the miss path
-    /// of a trace marked [`POLL`] reads it. It is a `u32`: with
-    /// `generation`, the only other field narrower than 8 bytes, it fills
-    /// one 8-byte slot that `generation` would otherwise pad out (asserted
-    /// below the struct), so it adds nothing to the cache's size, and the
+    /// of a trace marked [`POLL`] reads it. It is a `u32`, and shares one
+    /// 8-byte slot with `generation`, the only other field narrower than 8
+    /// bytes (asserted below the struct), so the cache's size, and the
     /// processor's layout, on which the trace loop's register allocation
-    /// depends, takes no room for it.
+    /// depends, hold no room of their own for it.
     run_end: u32,
     /// Bochs `pageWriteStampTable::fineGranularityMapping`: per page (by
     /// [`TraceCache::stamp_index`]), a bit per 128-byte line holding a
@@ -441,6 +459,14 @@ impl TraceCache {
     fn lookup_poll(&self, pa: u64, epoch: CodeEpoch) -> Option<Trace> {
         let e = self.entries[slot(pa)];
         (e.pa == pa | POLL && e.generation == self.generation && e.epoch == epoch).then_some(e.trace())
+    }
+
+    /// Whether the entry for `pa` is the trace starting there marked
+    /// [`POLL`]: every trace [`Self::lookup_poll`] gives, and a trace
+    /// [`Cpu::build_trace`] has just built and marked.
+    #[inline]
+    fn marked_poll(&self, pa: u64) -> bool {
+        self.entries[slot(pa)].pa == pa | POLL
     }
 
     /// Whether the trace of the `len` ops at `start` in the pool may begin
@@ -640,7 +666,7 @@ impl Cpu {
             Some(trace) => trace,
             None => self.build_trace(observed, pa, epoch)?,
         };
-        if !I::SEES_EXECUTION && self.traces.may_poll(trace.start, trace.len) {
+        if matches!(I::EXECUTION, Execution::Skippable) && self.traces.marked_poll(pa) {
             if let Op::ReadCounter { word } = *self.traces.pool.op(trace.start) {
                 let bound = PollBound {
                     left: self.run_left(),
