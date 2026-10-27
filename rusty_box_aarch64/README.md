@@ -726,8 +726,9 @@ choice is listed here with its evidence.
   `UARTDR.OE`, the overrun interrupt), as the PL011 TRM (ARM DDI 0183)
   describes. QEMU 11.1.2's `pl011_loopback_tx` puts it in anyway: it
   overwrites the oldest character and the FIFO's count runs past its depth,
-  so 17 characters written come back as `qbcdefghijklmnopq`.
-  `src/devices/pl011.rs` checks the overrun.
+  so 17 characters written come back as `qbcdefghijklmnopq`
+  ([docs/qemu-upstream-bugs.md](../docs/qemu-upstream-bugs.md) entry 6
+  and its patch). `src/devices/pl011.rs` checks the overrun.
 - **Without FEAT_LSE2, a misaligned load-acquire or store-release faults.**
   The current `AArch64_UnalignedAccessFaults` faults an ordered access only
   when it leaves its 16-byte granule with `SCTLR_ELx.nAA` = 0, testing no
@@ -749,7 +750,8 @@ choice is listed here with its evidence.
   DC CVAP and DC CVADP as a load (`dccvap_writefn`): no CM, no WnR, FAR
   rounded down to the line, and an EL1 permission fault under PAN.
   [docs/qemu-upstream-bugs.md](../docs/qemu-upstream-bugs.md) has the
-  probe's cases; `tests/unit/memory_system.rs` checks Arm's rules.
+  probe's cases and a patch for DC CVAP and DC CVADP;
+  `tests/unit/memory_system.rs` checks Arm's rules.
 - **No LORegions.** With FEAT_LOR, `LORID_EL1` reports no LORegions and no
   LORegion descriptors, and `LORSA_EL1`, `LOREA_EL1`, `LORN_EL1` and
   `LORC_EL1` hold nothing, as QEMU's `lor_reginfo` has them; Arm's data
@@ -766,7 +768,7 @@ choice is listed here with its evidence.
   after an ERET, or after a stream event while running, waits instead of
   completing, and at EL0 with SCTLR_EL1.nTWE clear traps.
   [docs/qemu-upstream-bugs.md](../docs/qemu-upstream-bugs.md) has probe
-  cases J and K and the ERET patch.
+  cases J and K and a patch for each.
 - **WFET traps before it looks at interrupts.** Arm's `Hint_WFET` completes
   ahead of the trap check only for a set Event Register or a passed
   timeout; `Hint_WFI` and `Hint_WFIT` complete on a pending interrupt
@@ -806,7 +808,7 @@ choice is listed here with its evidence.
   both signals are low here: 0x0A, or 0x0E with FEAT_Debugv8p4. QEMU (to
   master at least) has no DBGAUTHSTATUS_EL1, so reading it is UNDEFINED
   ([docs/qemu-upstream-bugs.md](../docs/qemu-upstream-bugs.md), probe case
-  M).
+  M and its patch).
 - **Vector FABS and FNEG leave a NaN alone under FPCR.AH.** Arm's FABS and
   FNEG (vector) apply FPAbs and FPNeg to each element, which return a NaN
   unchanged under FPCR.AH = 1, as the scalar forms do here and in QEMU.

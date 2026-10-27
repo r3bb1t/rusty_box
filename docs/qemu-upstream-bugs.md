@@ -16,12 +16,13 @@ Arm, `qemu-arm@nongnu.org`), with the maintainers
 `scripts/get_maintainer.pl` names in copy, each patch carrying a
 `Signed-off-by:` line (see QEMU's `docs/devel/submitting-a-patch.rst`). It
 does not take GitHub or GitLab pull requests. The patches here apply to
-`v11.1.2` and were built and tested there; they are diffs, to be committed
-with a message and sign-off of the submitter's own.
+`v11.1.2`, each on its own and all of them together, and were built and
+tested there; they are diffs, to be committed with a message and sign-off
+of the submitter's own.
 
 Reproducers:
 - `docs/qemu-aarch64-probe.S`: a bare-metal EL1 program for
-  `qemu-system-aarch64 -M virt`, one line of output per case (A to M). Its
+  `qemu-system-aarch64 -M virt`, one line of output per case (A to O). Its
   header gives the commands and the expected and observed output.
 - `docs/qemu-aarch64-probe-user.c`: a static Linux program for
   `qemu-aarch64 -cpu max`, one case per argument, for the entries fixed
@@ -233,9 +234,23 @@ UARTDR read until UARTFR.RXFE.
     PL011:        D abcdefghijklmnop
     QEMU 11.1.2:  D qbcdefghijklmnopq
 
-**Fix**: in `pl011_loopback_tx()`, drop the character when `read_count`
-has reached `pl011_get_fifo_depth()` (and flag the overrun, which QEMU's
-PL011 does not model on its chardev path either).
+**Fix**: `docs/qemu-pl011-loopback-overrun.patch`: `pl011_fifo_rx_put()`
+drops a character that finds `read_count` at the FIFO's depth and flags
+the overrun in UARTRSR.OE and the overrun interrupt (INT_OE); a read of
+UARTDR keeps UARTRSR.OE, which only a write of UARTECR clears. Loopback
+and a break from the chardev (`pl011_event()`, which puts it in the FIFO
+without asking `pl011_can_receive()`) can overrun; the chardev's
+characters cannot, since `pl011_can_receive()` holds them back. UARTDR.OE,
+which the TRM reports from an overrun until a character next enters the
+FIFO, is not modelled. Tested: case D prints the PL011's line.
+
+**Before sending**: QEMU's Rust PL011, which a build with Rust uses for
+`virt` in place of the C one (`hw/char/Kconfig`), has the same unchecked
+write in `PL011Registers::fifo_rx_put()`
+(`rust/hw/char/pl011/src/device.rs`), and upstream will want both models
+changed together. The patch covers the C model only: building QEMU's Rust
+needs `bindgen-cli`, which this environment could not install, so a Rust
+change could not be built or tested here.
 
 **To check against the TRM before sending**: `pl011_loopback_mdmctrl()`
 sets a modem status interrupt (UARTRIS.RIRMIS, DCDRMIS, CTSRMIS, DSRRMIS)
@@ -279,13 +294,30 @@ fault, `AArch64_DC()` sets `fault.vaddress` to the register's value, and
     Arm:          G none
     QEMU 11.1.2:  G 000000009600000d 00000000c0000100
 
-**Fix**: no patch yet. The probe needs a translation with an
-`AccessType_DC`-like access type, which QEMU's `MMUAccessType` lacks:
-one that skips the PAN index and the EL1 permission check, keeps EL0's
-read check, and makes `arm_deliver_fault()` set CM and WnR and report the
-unrounded address. `arm_deliver_fault()` (`target/arm/tcg/tlb_helper.c`)
-passes `cm = 0` to the syndrome builders on every path today; only the AT
-instructions' faults on a stage 2 walk set CM (`target/arm/tcg/cpregs-at.c`).
+**Fix**: `docs/qemu-dc-cvap-fault.patch`. `dccvap_writefn()` probes the
+line with the current regime's index without PAN (`dc_mmu_idx()`) and
+without faulting (`probe_access_flags()` with `nonfault`). On a miss,
+`dc_clean_fault()` translates the register's value with `get_phys_addr()`,
+completes on a Permission fault above EL0 (but not on one of the stage 1
+walk's own stage 2 translation, which is the walk's and taken at any
+EL), and otherwise takes the fault
+through `arm_deliver_fault()` (no longer static) as a write at the
+register's value, with a new `ARMMMUFaultInfo.cm` that
+`arm_deliver_fault()` passes to the syndrome builders for ISS.CM. The
+template syndrome it merges into is cleared first: `GETPC()` in a
+`writefn` is not always a return address into translated code (it is only
+when `HELPER(set_cp_reg64)` tail-calls the `writefn`), so
+`cpu_restore_state()` may leave a stale template whose ISV or VNCR bit
+would otherwise reach the abort; a cache maintenance instruction's
+template is empty, since only a load or store of one register sets ISV.
+The probe no longer checks watchpoints, which `AArch64_DC()` gives a clean
+none (it passes `AArch64_TranslateAddress()` a watchpoint size only for
+an invalidate). In `qemu-aarch64` an
+unreadable line raises SIGSEGV as before, now at the register's value.
+Tested: cases F and G print Arm's lines; in `qemu-aarch64 -cpu max`, a
+DC CVAP of a readable line completes and one of a `PROT_NONE` page at
+offset 0x123 raises SIGSEGV with `si_addr` at 0x123 (0x120 before); an
+Alpine 3.23 kernel boots to `login:`.
 
 ### 8. An exception return does not send an event
 
@@ -341,13 +373,27 @@ a delay with CNTKCTL_EL1.EVNTEN set and EVNTI = 0, then WFE.
     Arm:          K 0000000056000000 ...
     QEMU 11.1.2:  K 0000000007e00001 ...   (the WFE trapped)
 
-**Fix**: no patch yet. WFE and WFET would need to know whether the stream
-has passed a selected transition since the Event Register was last
-cleared: the count at that moment kept in `CPUARMState` and compared at
-the next WFE or WFET (the same bit test `gt_recalc_one_evt()` makes), and
-brought up to date when CNTKCTL_EL1 or CNTHCTL_EL2 is written, so each
-stretch of the count is judged by the controls that held then.
-`rusty_box_aarch64` does exactly this (`cpu/wait.rs`).
+**Fix**: `docs/qemu-event-stream-fold.patch`. A new
+`gt_fold_event_stream()` sets the Event Register when a stream has made a
+selected transition (`gt_evt_between()`) between the system counter value
+it was last brought up to, a new `CPUARMState.evt_folded_to`, and now,
+and then moves that value to now. The streams are Arm's: CNTHCTL_EL2's on
+the physical count (`TestEventCNTP()`), and CNTKCTL_EL1's on the physical
+count less CNTVOFF_EL2 unless the effective E2H and TGE are both 1
+(`TestEventCNTV()`), whatever the current EL. WFE and WFET fold before
+they read the register while either stream is on (with both off there is
+nothing to fold, and the write that turns one on folds first). Writes of
+CNTKCTL_EL1, CNTHCTL_EL2 and CNTVOFF_EL2 fold first, as do a write of
+HCR_EL2 that changes E2H or TGE and a write of SCR_EL3 that changes NS or
+EEL2 (which decide whether EL2 is enabled, and with it the effective
+TGE), so each stretch of the count is judged by the controls that held
+then. CNTKCTL_EL1 keeps EVNTIS only with FEAT_ECV: without it the bit is
+RES0, and `TestEventCNTV()` reads it only with FEAT_ECV. A reset and an
+incoming migration start at the current value. The timer that wakes a
+waiting WFE is left alone (entries 18 and 19 fix it).
+`rusty_box_aarch64` does the same (`cpu/wait.rs`). Tested: case K prints
+the SVC's syndrome, and an Alpine 3.23 kernel boots to `login:` on
+`-cpu max` with one, two and four CPUs and on `-cpu cortex-a57`.
 
 ### 10. WFET does not trap when an interrupt is pending
 
@@ -403,15 +449,22 @@ is TRUE with FEAT_Debugv8p4), and SID and SNID 0b00; with Secure state,
 SID and SNID report `ExternalSecureInvasiveDebugEnabled()` and
 `ExternalSecureNoninvasiveDebugEnabled()` likewise.
 
-**Reproduce**: probe case M, an `MRS` of DBGAUTHSTATUS_EL1 at EL1.
+**Reproduce**: probe case M, an `MRS` of DBGAUTHSTATUS_EL1 at EL1 that
+prints the register's value: NSID 0b10 and, with FEAT_Debugv8p4, NSNID
+0b11 when no external debugger drives DBGEN.
 
-    Arm:          M none
+    Arm:          M 000000000000000e
     QEMU 11.1.2:  M 0000000002000000 ...   (UNDEFINED)
 
-**Fix**: no patch yet: a read-only `debug_cp_reginfo` entry (op0 2, op1 0,
-CRn 7, CRm 14, op2 6; cp14 for AArch32) whose read function follows
-`UpdateDbgAuthStatus()` with the authentication signals QEMU's model
-chooses, and with Secure state when the CPU has EL3.
+**Fix**: `docs/qemu-dbgauthstatus.patch` adds DBGAUTHSTATUS_EL1 to
+`debug_cp_reginfo` (op0 2, op1 0, CRn 7, CRm 14, op2 6; for AArch32,
+DBGAUTHSTATUS on cp14): read-only from EL1, trapped by MDCR_EL2.TDA and
+MDCR_EL3.TDA (`access_tda()`) and by HDFGRTR_EL2.DBGAUTHSTATUS_EL1, whose
+`DO_BIT` entry it adds. QEMU has no external debugger, so DBGEN, NIDEN,
+SPIDEN and SPNIDEN are LOW: NSID 0b10; NSNID 0b11 with FEAT_Debugv8p4,
+else 0b10; SID and SNID 0b10 when the CPU has EL3, else 0b00; RLID,
+RLNID, RTID and RTNID 0b10 with FEAT_RME, else 0b00. Tested: case M
+prints Arm's line.
 
 ### 12. FABS and FNEG (vector) change a NaN's sign under FPCR.AH = 1
 
@@ -625,6 +678,103 @@ MIDR (in master, the same line in `aarch64_max_v8_tcg_initfn()`). Built
 and tested on `v11.1.2`: the dump has `compatible = "arm,armv8";`, and an
 Alpine 3.23 kernel (Linux 6.18) boots to `login:` on `-cpu max` as
 before.
+
+### 18. A WFE never waits for the event stream
+
+**Impact**: harmless to the guest, costly to the host. Arm's
+`WaitForEvent()` lets a PE resume whenever "the implementation chooses to
+resume execution", so a WFE that does not wait breaks no rule of Arm's.
+But QEMU means a WFE to sleep until the stream's next event, and with the
+stream on it does not sleep at all. The timer that should wake it is set
+for a count already past, so it fires at once and sets the Event
+Register, and the WFE after that completes at once too. A guest that
+waits with WFE spins instead. Linux's `__delay()`
+(`arch/arm64/lib/delay.c`, 6.18) waits that way on a processor without
+FEAT_WFxT when the event stream is on, which Linux sets to 10 kHz;
+`-cpu cortex-a57` is one such processor. For EVNTI 0 or 1 with EVNTIS 0,
+the code also shifts a 64-bit value by 65 or 64 places, which is
+undefined behaviour in C.
+
+**Location**: `target/arm/tcg/op_helper.c`, `gt_recalc_one_evt()`. It
+works out how many ticks remain until the selected bit's next selected
+transition, then returns that distance plus the timer's offset as the
+system counter value to wake at. The value to wake at is the counter's
+current value plus the distance. Its mask of the bits below the selected
+one, `MAKE_64BIT_MASK(0, bit - 1)`, is one bit short.
+`gt_calc_next_event_stream()` takes each stream's offset from
+`gt_direct_access_timer_offset()`, the offset of a counter read at the
+current EL.
+
+**What the Arm ARM says**: `GenericCounterTick()` runs `TestEventCNTP()`
+and `TestEventCNTV()` on every tick of the system counter.
+`TestEventCNTP()` watches bit EVNTI (plus 8 with EVNTIS) of the physical
+count itself. `TestEventCNTV()` watches the same bit of the physical
+count less CNTVOFF_EL2 when EL2 is implemented, at every EL.
+
+**Reproduce**: probe case N: eight rounds of SEVL, WFE and WFE at EL1
+with the stream on bit 23 of the count. It prints how many rounds took
+at least half a stream period. A WFE that waits for the stream's next
+event gives 8.
+
+    Waiting:      N 0000000000000008
+    QEMU 11.1.2:  N 0000000000000000
+
+QEMU master as of 2026-10-27 has the same `gt_recalc_one_evt()`.
+
+**Fix**: `docs/qemu-event-stream-wake-timer.patch`. The wake-up count
+is the system counter's current value plus the distance, and the mask is
+the bits below the selected one, `target_bit - 1`. The physical stream is
+judged on the physical count, and the virtual stream on the count less
+CNTVOFF_EL2. With a counter that does not run at 1 GHz the WFE still
+wakes early until entry 19 is fixed too. Built and tested on `v11.1.2`:
+case N prints 8 on `-M virt`, and with entry 19's patch on `-M virt-9.0`.
+An Alpine 3.23 kernel boots to `login:` on `-cpu max` with one, two and
+four CPUs and on `-cpu cortex-a57`.
+
+### 19. WFIT and WFET time out early when the counter does not run at 1 GHz
+
+**Impact**: harmless to the guest, costly to the host. Arm's
+`WaitForInterrupt()` and `WaitForEvent()` let a PE resume whenever the
+implementation chooses, so a short wait breaks no rule of Arm's. But QEMU
+means a WFIT or WFET to sleep until its timeout. With the system counter
+at 62.5 MHz it sleeps for about a sixteenth of the timeout. QEMU gives
+that frequency to `-M virt-9.0` and older machine types, and to the
+processor types older than its 1 GHz default
+(`ARM_FEATURE_BACKCOMPAT_CNTFRQ`), `-cpu cortex-a57` among them. A WFE
+waiting for the event stream wakes early in the same way once entry 18 is
+fixed.
+Linux's `__delay()` on a processor with FEAT_WFxT loops on WFET until
+the delay has passed, so it spins.
+
+**Location**: `target/arm/cpu.c`, `arm_cpu_realizefn()`, creates
+`cpu->wfxt_timer` with `timer_new_ns()`, a timer in nanoseconds. But
+`HELPER(wfit)`, `HELPER(wfet)` and `HELPER(wfe)`
+(`target/arm/tcg/op_helper.c`) set it with `timer_mod()` to a system
+counter value. They also check that value against
+`INT64_MAX / gt_cntfrq_period_ns()`, as if the timer counted in ticks of
+the counter's period, which is how the generic timers (`cpu->gt_timer[]`)
+are created.
+
+**What the Arm ARM says**: `LocalTimeoutEvent()` is TRUE once
+`VirtualCounterTimer()` (CNTVCT_EL0) equals or exceeds the timeout, a
+count of the virtual counter, whatever its frequency.
+
+**Reproduce**: probe case O: WFIT at EL1 with a timeout 2^24 counts
+ahead. It prints how many whole timeouts the count moved by.
+
+    Waiting:                    O 0000000000000001
+    QEMU 11.1.2, -M virt:       O 0000000000000001
+    QEMU 11.1.2, -M virt-9.0:   O 0000000000000000
+
+QEMU master as of 2026-10-27 creates the timer the same way.
+
+**Fix**: `docs/qemu-wfxt-timer-scale.patch` creates the timer with
+`timer_new(QEMU_CLOCK_VIRTUAL, gt_cntfrq_period_ns(cpu), ...)`, as the
+generic timers are. Built and tested on `v11.1.2`: on `-M virt-9.0`,
+case O prints 1, a WFIT with a timeout 2^24 counts ahead waits
+0x1009f3b counts (0xd47f4 before), and with entry 18's patch case N
+prints 8. An Alpine 3.23 kernel boots to `login:` on `-M virt-9.0
+-cpu max` and on `-cpu cortex-a57`.
 
 ---
 
