@@ -199,7 +199,7 @@ same state on d21b7e9 and now. For the boots, the state hashes at 10M,
 
 | Part | Model |
 |---|---|
-| Processor | Cortex-A57-shaped ARMv8.0: EL0/EL1 AArch64 only, the whole ARMv8.0 FP and Advanced SIMD instruction set (integer and floating point, vector and scalar, saturation setting FPSR.QC), the Cortex-A57's optional Cryptographic Extension (AES, 64-bit PMULL, SHA-1, SHA-256) and CRC32, as QEMU's `cortex-a57` has them, 4 KiB-granule stage-1 MMU with TLB, exclusives, PSCI over `HVC` as QEMU provides it |
+| Processor | Cortex-A57-shaped ARMv8.0: EL0/EL1 AArch64 only, the whole ARMv8.0 FP and Advanced SIMD instruction set (integer and floating point, vector and scalar, saturation setting FPSR.QC), the Cortex-A57's optional Cryptographic Extension (AES, 64-bit PMULL, SHA-1, SHA-256) and CRC32, as QEMU's `cortex-a57` has them, 4 KiB-granule stage-1 MMU with TLB, exclusives, PSCI 1.1 (DEN 0022D) over `HVC`, the conduit QEMU's `virt` provides (see "Where the references differ") |
 | Interrupts | GICv2 without the Security Extensions, for one processor, as IHI 0048B specifies it, in QEMU's structure: both interrupt groups, with Group 0 on FIQ under `FIQEn`, the Group 1 aliases (`GICC_AIAR`, `GICC_AEOIR`, `GICC_AHPPIR`, `GICC_ABPR`), preemption by group priority, the running priority and active priority registers, and 4 KiB distributor and 8 KiB CPU interface regions; + GICv2m frame |
 | Timers | EL1 physical and virtual generic timers |
 | Devices | PL011 UART (`UARTPeriphID2` revision 1, QEMU's ID, as DDI 0183F describes the revisions up to r1p4: a 16-entry receive FIFO with overrun and break status, receive and receive-timeout interrupts at the `UARTIFLS` level, modem-status interrupts on line changes, loopback, a receiver gated by `UARTEN` and `RXE`; a zero bit period, so transmission completes at once; see "Where the references differ"), PL031 RTC, PL061 GPIO with QEMU's `gpio-key` power button on line 3, CFI flash ×2 (QEMU `pflash_cfi01` semantics, whole 64 MiB banks decoded), `fw_cfg` (traditional interface, no files), 32 virtio-mmio transports (QEMU's legacy layout while empty; non-legacy, as QEMU's `force-legacy=false`, once the host plugs in QEMU's 2D `virtio-gpu-device` with its EDID, `virtio-keyboard-device`, `virtio-tablet-device` or `virtio-blk-device` over a raw image in memory or a host file, which take the highest free ones), an empty PCIe ECAM/windows |
@@ -394,7 +394,8 @@ integration tests of the public API.
   `MDSCR_EL1.TDCC` before they take effect.
 - `tests/translation_and_firmware.rs`: an out-of-range T1SZ, a table base or
   block beyond the output size `TCR_EL1.IPS` selects, `AT` meeting an
-  external abort on its walk, PSCI's affinity and entry-point checks, and a
+  external abort on its walk, PSCI's target, entry-point and
+  affinity-level checks and the W registers of its 32-bit calls, and a
   store-exclusive to an unmonitored address failing without a fault.
 - `tests/device_regions.rs`: the GIC distributor and CPU interface answer
   in their 4 KiB and 8 KiB regions, and an access to the rest of their 64
@@ -447,6 +448,44 @@ choice is listed here with its evidence.
   the pseudocode's two accesses. A single 16-byte `STR Q` across a page, like
   a scalar store across one, translates both pages before writing anything,
   as QEMU does.
+- **`HVC` is the firmware's conduit although EL2 is absent.** The Arm ARM
+  makes `HVC` UNDEFINED when EL2 is not implemented (the `HVC` pseudocode:
+  `if !HaveEL(EL2) || PSTATE.EL == EL0 ... UNDEFINED`), and
+  `ID_AA64PFR0_EL1.EL2` reads 0 here. QEMU 11.1.2's `virt` acts as the
+  firmware a hypervisor would be: its device tree's `/psci` node says
+  `method = "hvc"`, and every `HVC` from EL1 is a PSCI call
+  (target/arm/tcg/psci.c `arm_is_psci_call`, `arm_handle_psci_call`),
+  whatever its immediate. Linux and EDK2 call PSCI so, as the device tree
+  tells them, so this model does the same: at EL1 `HVC` is a PSCI call,
+  and at EL0 it is UNDEFINED. The SMC Calling Convention (DEN 0028B §2.9)
+  leaves nonzero `HVC` immediates to the hypervisor, and they are
+  answered like `#0`.
+- **PSCI as DEN 0022D specifies it.** The firmware reports PSCI 1.1, as
+  QEMU 11.1.2 does, and answers four cases as the specification says
+  where QEMU (target/arm/tcg/psci.c `arm_handle_psci_call`,
+  target/arm/arm-powerctl.c `arm_set_cpu_on`) answers otherwise:
+  - The function identifier is W0, and an SMC32 call's arguments are W1
+    to W3 (DEN 0028B §2.6 and §2.7; DEN 0022D §5.2.1), as are the
+    parameters DEN 0022D declares `uint32` in an SMC64 call
+    (`lowest_affinity_level`); the upper halves of those X registers take
+    no part, as in TF-A (`psci_smc_handler`). QEMU compares the whole of
+    X0 and uses the whole of X1 to X3.
+  - `CPU_ON` with an entry point that is not 4-byte aligned, which no
+    AArch64 processor can start at, returns INVALID_ADDRESS, the code
+    DEN 0022D §5.6.2 gives an entry point the implementation knows to be
+    invalid (INVALID_PARAMETERS is the code before PSCI 1.0). QEMU returns
+    INVALID_PARAMETERS.
+  - `CPU_ON` checks its target first, so an invalid target is
+    INVALID_PARAMETERS whatever the entry point; then the entry point,
+    then whether the processor is on (ALREADY_ON). DEN 0022D gives no
+    order; this is TF-A's (`psci_cpu_on_by_core_pos`). QEMU checks the
+    entry point's alignment first.
+  - `AFFINITY_INFO` above level 0 names an affinity instance, ignoring the
+    fields below the level (DEN 0022D §5.1.5): one that holds this
+    processor is ON, and one that does not, or a level above 3, is not
+    present in the platform and gets INVALID_PARAMETERS (§5.7.2). §5.7.1
+    lets PSCI 1.0 and later answer levels above 0 so or refuse them. QEMU
+    answers ON for every level above 0, whatever the affinity.
 - **The device tree's seeds and L1 data cache.** The tree in `assets/` is
   QEMU 11.1.2's `dumpdtb` output with two values replaced in place. QEMU
   draws a fresh `/chosen` `rng-seed` and `kaslr-seed` on every run; this

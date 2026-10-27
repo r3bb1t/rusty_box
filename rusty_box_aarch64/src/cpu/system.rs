@@ -1,7 +1,9 @@
 //! System instructions (Arm ARM C5): hints, barriers, PSTATE access, cache
 //! and TLB maintenance, address translation, `MRS`/`MSR`, and the
-//! exception-generating instructions — including the PSCI calls QEMU's
-//! `virt` answers on `HVC` (its device tree says `method = "hvc"`).
+//! exception-generating instructions — including the PSCI calls (Arm DEN
+//! 0022D, over the SMC Calling Convention, DEN 0028B) that the board's
+//! firmware answers on `HVC`, as QEMU's `virt` does (its device tree says
+//! `method = "hvc"`).
 
 use super::exception::{Exception, ExceptionClass};
 use super::exec::{bit, bits, ExecResult, Fault, Flow, StopCause};
@@ -16,36 +18,66 @@ const SCTLR_NTWI: u64 = 1 << 16;
 const SCTLR_NTWE: u64 = 1 << 18;
 const SCTLR_UCI: u64 = 1 << 26;
 
-/// PSCI function identifiers (Arm DEN 0022) and return codes.
+/// PSCI function identifiers and return codes (Arm DEN 0022D §5.1, Table 6).
 mod psci {
-    pub(super) const VERSION: u64 = 0x8400_0000;
-    pub(super) const CPU_SUSPEND_32: u64 = 0x8400_0001;
-    pub(super) const CPU_SUSPEND_64: u64 = 0xC400_0001;
-    pub(super) const CPU_OFF: u64 = 0x8400_0002;
-    pub(super) const CPU_ON_32: u64 = 0x8400_0003;
-    pub(super) const CPU_ON_64: u64 = 0xC400_0003;
-    pub(super) const AFFINITY_INFO_32: u64 = 0x8400_0004;
-    pub(super) const AFFINITY_INFO_64: u64 = 0xC400_0004;
-    pub(super) const MIGRATE_INFO_TYPE: u64 = 0x8400_0006;
-    pub(super) const SYSTEM_OFF: u64 = 0x8400_0008;
-    pub(super) const SYSTEM_RESET: u64 = 0x8400_0009;
-    pub(super) const FEATURES: u64 = 0x8400_000A;
+    pub(super) const VERSION: u32 = 0x8400_0000;
+    pub(super) const CPU_SUSPEND_32: u32 = 0x8400_0001;
+    pub(super) const CPU_SUSPEND_64: u32 = 0xC400_0001;
+    pub(super) const CPU_OFF: u32 = 0x8400_0002;
+    pub(super) const CPU_ON_32: u32 = 0x8400_0003;
+    pub(super) const CPU_ON_64: u32 = 0xC400_0003;
+    pub(super) const AFFINITY_INFO_32: u32 = 0x8400_0004;
+    pub(super) const AFFINITY_INFO_64: u32 = 0xC400_0004;
+    pub(super) const MIGRATE_INFO_TYPE: u32 = 0x8400_0006;
+    pub(super) const SYSTEM_OFF: u32 = 0x8400_0008;
+    pub(super) const SYSTEM_RESET: u32 = 0x8400_0009;
+    pub(super) const FEATURES: u32 = 0x8400_000A;
+
+    /// Function identifier bit 30: the SMC64/HVC64 calling convention, whose
+    /// arguments are X registers; clear, SMC32/HVC32, whose arguments are W
+    /// registers (Arm DEN 0028B Table 2-1, §2.6, §2.7).
+    pub(super) const SMC64: u32 = 1 << 30;
 
     pub(super) const SUCCESS: u64 = 0;
     pub(super) const NOT_SUPPORTED: u64 = (-1i64) as u64;
     pub(super) const INVALID_PARAMETERS: u64 = (-2i64) as u64;
     pub(super) const ALREADY_ON: u64 = (-4i64) as u64;
+    pub(super) const INVALID_ADDRESS: u64 = (-9i64) as u64;
+    /// `AFFINITY_INFO`: at least one core of the instance is on.
+    pub(super) const ON: u64 = 0;
 
     /// PSCI 1.1, the version QEMU's `virt` implements for current machine
-    /// types (`target/arm/psci.c`, `QEMU_PSCI_VERSION_1_1`).
+    /// types (target/arm/tcg/psci.c, `QEMU_PSCI_VERSION_1_1`).
     pub(super) const IMPLEMENTED_VERSION: u64 = 0x0001_0001;
     /// "Trusted OS is not present or does not require migration".
     pub(super) const MIGRATE_NOT_REQUIRED: u64 = 2;
 
-    /// The processor's affinity value, the form a PSCI call names it in:
-    /// `MPIDR_EL1`'s Aff3 (bits 39:32) and Aff2..Aff0 (bits 23:0), as QEMU's
-    /// `arm_cpu_mp_affinity` gives it.
+    /// The processor's affinity value, the form a PSCI call names it in
+    /// (DEN 0022D §5.1.4 `target_cpu`): `MPIDR_EL1`'s Aff3 (bits 39:32) and
+    /// Aff2..Aff0 (bits 23:0), every other bit zero.
     pub(super) const AFFINITY: u64 = crate::cpu::id::MPIDR_EL1 & 0xFF_00FF_FFFF;
+
+    /// `AFFINITY_INFO` for the instance `target_affinity` names at
+    /// `lowest_affinity_level` (DEN 0022D §5.1.5, §5.7). Level `n` ignores
+    /// the fields Aff0 to Aff(`n`-1); a level above 3, or an instance this
+    /// processor is not in, is not present in the platform and gets
+    /// INVALID_PARAMETERS (§5.7.2). The one processor is on, so every
+    /// present instance is ON: §5.7.1 lets PSCI 1.0 and later either answer
+    /// a level above 0 so or refuse it, and this answers it.
+    pub(super) fn affinity_info(target_affinity: u64, lowest_affinity_level: u32) -> u64 {
+        let ignored: u64 = match lowest_affinity_level {
+            0 => 0,
+            1 => 0xFF,
+            2 => 0xFFFF,
+            3 => 0xFF_FFFF,
+            _ => return INVALID_PARAMETERS,
+        };
+        if target_affinity & !ignored == AFFINITY & !ignored {
+            ON
+        } else {
+            INVALID_PARAMETERS
+        }
+    }
 }
 
 impl Cpu {
@@ -284,11 +316,14 @@ impl Cpu {
         match (opc, bits(insn, 1, 0)) {
             (0, 1) => Err(Exception::new(ExceptionClass::Svc, imm16).into()),
             (0, 2) => {
-                // HVC is UNDEFINED at EL0. At EL1, with no EL2 to take it,
-                // QEMU's `virt` (PSCI conduit "hvc") services every HVC as a
-                // firmware call whatever its immediate and function ID
-                // (target/arm/tcg/psci.c `arm_is_psci_call`), answering the
-                // IDs it does not know with NOT_SUPPORTED.
+                // Arm ARM `HVC` is UNDEFINED at EL0 and wherever EL2 is not
+                // implemented, as here. At EL1 this board's firmware stands
+                // where EL2 would, as QEMU's `virt` does (PSCI conduit
+                // "hvc"; target/arm/tcg/psci.c `arm_is_psci_call`): every
+                // HVC is a firmware call, whatever its immediate (DEN 0028B
+                // §2.9 leaves nonzero HVC immediates to the hypervisor) and
+                // function ID, and an unknown ID gets NOT_SUPPORTED. README
+                // "Where the references differ" registers the departure.
                 if self.pstate.el == El::El1 {
                     return self.psci_call();
                 }
@@ -303,21 +338,37 @@ impl Cpu {
         }
     }
 
-    /// The PSCI firmware interface QEMU's `virt` provides for a single
-    /// processor (QEMU `target/arm/psci.c` `arm_handle_psci_call`).
+    /// The PSCI 1.1 firmware interface (Arm DEN 0022D) for a single
+    /// processor, with the functions QEMU's `virt` provides
+    /// (target/arm/tcg/psci.c `arm_handle_psci_call`).
+    ///
+    /// The SMC Calling Convention passes the function identifier in W0, and
+    /// an SMC32/HVC32 call's arguments in W1-W3 (Arm DEN 0028B §2.6, §2.7;
+    /// DEN 0022D §5.2.1), so the upper halves of those X registers take no
+    /// part, as in TF-A's `psci_smc_handler`. A parameter DEN 0022D declares
+    /// `uint32` (`power_state`, `lowest_affinity_level`, `psci_func_id`) is
+    /// its register's low 32 bits in either convention.
     fn psci_call(&mut self) -> ExecResult {
-        let function = self.x[0];
+        let function = self.x[0] as u32;
+        let (arg1, arg2) = if function & psci::SMC64 != 0 {
+            (self.x[1], self.x[2])
+        } else {
+            (u64::from(self.x[1] as u32), u64::from(self.x[2] as u32))
+        };
         let result = match function {
             psci::VERSION => psci::IMPLEMENTED_VERSION,
             psci::FEATURES => {
-                if psci_supported(self.x[1]) {
+                if psci_supported(arg1 as u32) {
                     psci::SUCCESS
                 } else {
                     psci::NOT_SUPPORTED
                 }
             }
             psci::CPU_SUSPEND_32 | psci::CPU_SUSPEND_64 => {
-                if self.x[1] & 0xFFFE_0000 != 0 {
+                // A power state with any of bits 31:17 set — the original
+                // format's PowerLevel (25:24) and reserved bits, DEN 0022D
+                // §5.4.2.1 — is refused, as QEMU refuses it.
+                if arg1 as u32 & 0xFFFE_0000 != 0 {
                     psci::INVALID_PARAMETERS
                 } else {
                     // A standby request: wait for an interrupt, then return
@@ -327,26 +378,26 @@ impl Cpu {
                 }
             }
             psci::CPU_OFF => return Err(Fault::Stop(StopCause::CpuOff)),
-            // A misaligned entry point is refused before the target is
-            // looked up, and the target is the processor whose affinity
-            // value equals the argument exactly (QEMU target/arm/arm-powerctl.c
-            // `arm_set_cpu_on`, `arm_get_cpu_by_id`). The only processor is on.
+            // DEN 0022D §5.6.2: a `target_cpu` that is no processor's
+            // affinity value is INVALID_PARAMETERS, an entry point the
+            // implementation knows to be invalid is INVALID_ADDRESS, and a
+            // processor already on is ALREADY_ON. The order is TF-A's
+            // `psci_cpu_on_by_core_pos` (target, then entry point, then
+            // state); the specification gives none. An entry point that is
+            // not 4-byte aligned can never be executed in AArch64, the only
+            // state here, so it is the invalid one, as in QEMU
+            // (target/arm/arm-powerctl.c `arm_set_cpu_on`, which refuses it
+            // first, with INVALID_PARAMETERS). The only processor is on.
             psci::CPU_ON_32 | psci::CPU_ON_64 => {
-                if self.x[2] & 3 != 0 || self.x[1] != psci::AFFINITY {
+                if arg1 != psci::AFFINITY {
                     psci::INVALID_PARAMETERS
+                } else if arg2 & 3 != 0 {
+                    psci::INVALID_ADDRESS
                 } else {
                     psci::ALREADY_ON
                 }
             }
-            psci::AFFINITY_INFO_32 | psci::AFFINITY_INFO_64 => {
-                // Levels above 0 are always on; at level 0 only this
-                // processor's affinity exists.
-                if self.x[2] != 0 || self.x[1] == psci::AFFINITY {
-                    0 // ON
-                } else {
-                    psci::INVALID_PARAMETERS
-                }
-            }
+            psci::AFFINITY_INFO_32 | psci::AFFINITY_INFO_64 => psci::affinity_info(arg1, arg2 as u32),
             psci::MIGRATE_INFO_TYPE => psci::MIGRATE_NOT_REQUIRED,
             psci::SYSTEM_OFF => return Err(Fault::Stop(StopCause::PowerOff)),
             psci::SYSTEM_RESET => return Err(Fault::Stop(StopCause::Reset)),
@@ -358,7 +409,7 @@ impl Cpu {
 }
 
 /// The PSCI functions `psci_call` implements, for `PSCI_FEATURES`.
-fn psci_supported(id: u64) -> bool {
+fn psci_supported(id: u32) -> bool {
     matches!(
         id,
         psci::VERSION

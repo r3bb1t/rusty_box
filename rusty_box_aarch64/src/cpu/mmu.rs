@@ -470,11 +470,14 @@ impl Cpu {
         } else {
             (tcr & 0x3F, (tcr >> 7) & 1 == 1, self.sys.ttbr0_el1)
         };
-        // T0SZ/T1SZ outside 16..=39, the sizes the 4 KiB granule supports
-        // without FEAT_LVA, are CONSTRAINED UNPREDICTABLE: treated as the
-        // nearest supported value, or a level 0 Translation fault. QEMU
-        // takes the fault (target/arm/ptw.c `get_phys_addr_lpae`,
-        // `param.tsz_oob`), and so does this.
+        // T0SZ/T1SZ outside 16..=39 (`AArch64.S1MinTxSZ` and
+        // `AArch64.MaxTxSZ` for the 4 KiB granule without FEAT_LVA or
+        // FEAT_TTST): whether such a value is treated as the nearest one in
+        // range or takes a level 0 Translation fault is IMPLEMENTATION
+        // DEFINED (Arm ARM `AArch64.GetS1TTWParams`, the ImpDef booleans
+        // "Fault on TxSZ value above maximum" and "... below minimum";
+        // `AArch64.S1InvalidTxSZ`). This takes the fault, as QEMU does
+        // (target/arm/ptw.c `get_phys_addr_lpae`, `param.tsz_oob`).
         if !(16..=39).contains(&txsz) {
             return Err(TranslationFault::Translation { level: 0 });
         }

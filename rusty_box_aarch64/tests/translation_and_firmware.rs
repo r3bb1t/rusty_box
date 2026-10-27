@@ -2,19 +2,22 @@
 //! arguments and store-exclusive ordering, as the guest sees them (R9: each
 //! test asserts a register, a syndrome or `PAR_EL1`).
 //!
-//! The references are the Arm ARM pseudocode and QEMU 11.1.2:
+//! The references are the Arm documents first and QEMU 11.1.2 second:
 //!
 //! - an out-of-range T0SZ/T1SZ takes a level 0 Translation fault, and the
 //!   walk's output addresses must fit the size `TCR_EL1.IPS` selects,
 //!   bounded by PARange (target/arm/ptw.c `get_phys_addr_lpae`);
 //! - `AT` takes a synchronous external abort on its walk as a Data Abort
 //!   (Arm ARM `AArch64.AT`; target/arm/tcg/cpregs-at.c `do_ats_write`);
-//! - PSCI `CPU_ON` refuses a misaligned entry point, and both it and
-//!   `AFFINITY_INFO` name a processor by its exact affinity value
-//!   (target/arm/arm-powerctl.c `arm_set_cpu_on`, `arm_get_cpu_by_id`);
+//! - PSCI `CPU_ON` checks its target, then its entry point, and
+//!   `AFFINITY_INFO` names an instance at its affinity level (Arm DEN 0022D
+//!   §5.6, §5.7), with the function identifier and an SMC32 call's
+//!   arguments in W registers (SMC Calling Convention, Arm DEN 0028B §2.6);
 //! - a store-exclusive to an address the monitor does not hold fails
-//!   without translating it (Arm ARM `AArch64.ExclusiveMonitorsPass`;
-//!   target/arm/tcg/translate-a64.c `gen_store_exclusive`).
+//!   without translating it (Arm ARM `AArch64.ExclusiveMonitorsPass`, which
+//!   returns FALSE on `AArch64.IsExclusiveVA` before
+//!   `AArch64.TranslateAddress`; target/arm/tcg/translate-a64.c
+//!   `gen_store_exclusive`).
 //!
 //! Guest code is hand-assembled (GNU as for aarch64); each word's source is
 //! beside it.
@@ -163,32 +166,91 @@ fn an_external_abort_on_the_walk_of_an_at_is_a_data_abort() {
     assert_eq!(par(&m), par_before, "PAR_EL1 is not written");
 }
 
-/// PSCI `CPU_ON` and `AFFINITY_INFO` against this processor, whose
-/// affinity value is 0: `(x1, x2) -> x0`.
+/// PSCI function identifiers and return codes (DEN 0022D §5.1, Table 6).
+mod psci {
+    pub const VERSION: u64 = 0x8400_0000;
+    pub const FEATURES: u64 = 0x8400_000A;
+    pub const CPU_ON_32: u64 = 0x8400_0003;
+    pub const CPU_ON_64: u64 = 0xC400_0003;
+    pub const AFFINITY_INFO_32: u64 = 0x8400_0004;
+    pub const AFFINITY_INFO_64: u64 = 0xC400_0004;
+    pub const SUCCESS: u64 = 0;
+    pub const INVALID_PARAMETERS: u64 = (-2i64) as u64;
+    pub const ALREADY_ON: u64 = (-4i64) as u64;
+    pub const INVALID_ADDRESS: u64 = (-9i64) as u64;
+    pub const ON: u64 = 0;
+    pub const VERSION_1_1: u64 = 0x0001_0001;
+}
+
+/// X0 after the guest issues `hvc #0` with X0, X1 and X2 as given.
+fn psci_call(x0: u64, x1: u64, x2: u64) -> u64 {
+    let mut ram = vec![0u8; RAM_LEN];
+    let mut m = bare(&mut ram);
+    load(&mut m, &HVC);
+    m.reg_write(Reg::X0, x0);
+    m.reg_write(Reg::X1, x1);
+    m.reg_write(Reg::X2, x2);
+    step1(&mut m);
+    m.reg_read(Reg::X0)
+}
+
+/// `CPU_ON` against this processor, whose affinity value is 0
+/// (DEN 0022D §5.6.2): an invalid target is INVALID_PARAMETERS, then an
+/// entry point that cannot be executed is INVALID_ADDRESS, and the valid
+/// call finds the processor ALREADY_ON.
 #[test]
-fn psci_names_a_processor_by_its_exact_affinity_and_refuses_a_misaligned_entry() {
-    const CPU_ON: u64 = 0xC400_0003;
-    const AFFINITY_INFO: u64 = 0xC400_0004;
-    const INVALID_PARAMETERS: u64 = (-2i64) as u64;
-    const ALREADY_ON: u64 = (-4i64) as u64;
-    const ON: u64 = 0;
-    for (function, x1, x2, expected) in [
-        (CPU_ON, 0, RAM_BASE, ALREADY_ON),
-        (CPU_ON, 0, RAM_BASE + 2, INVALID_PARAMETERS),
-        (CPU_ON, 0x8000_0000, RAM_BASE, INVALID_PARAMETERS),
-        (CPU_ON, 1, RAM_BASE, INVALID_PARAMETERS),
-        (AFFINITY_INFO, 0, 0, ON),
-        (AFFINITY_INFO, 0x8000_0000, 0, INVALID_PARAMETERS),
-        (AFFINITY_INFO, 0x8000_0000, 1, ON),
+fn psci_cpu_on_checks_the_target_then_the_entry_point() {
+    for (x1, x2, expected) in [
+        (0, RAM_BASE, psci::ALREADY_ON),
+        (0, RAM_BASE + 2, psci::INVALID_ADDRESS),
+        (1, RAM_BASE + 2, psci::INVALID_PARAMETERS),
+        (0x8000_0000, RAM_BASE, psci::INVALID_PARAMETERS),
+        (1, RAM_BASE, psci::INVALID_PARAMETERS),
     ] {
-        let mut ram = vec![0u8; RAM_LEN];
-        let mut m = bare(&mut ram);
-        load(&mut m, &HVC);
-        m.reg_write(Reg::X0, function);
-        m.reg_write(Reg::X1, x1);
-        m.reg_write(Reg::X2, x2);
-        step1(&mut m);
-        assert_eq!(m.reg_read(Reg::X0), expected, "function {function:#x}, x1 {x1:#x}, x2 {x2:#x}");
+        assert_eq!(psci_call(psci::CPU_ON_64, x1, x2), expected, "x1 {x1:#x}, x2 {x2:#x}");
+    }
+}
+
+/// `AFFINITY_INFO` (DEN 0022D §5.1.5, §5.7): level `n` ignores Aff0 to
+/// Aff(`n`-1), an instance this processor is in is ON, and any other
+/// instance, or a level above 3, is not present: INVALID_PARAMETERS.
+#[test]
+fn psci_affinity_info_names_an_instance_at_its_level() {
+    for (x1, level, expected) in [
+        (0, 0, psci::ON),
+        (1, 0, psci::INVALID_PARAMETERS),
+        (0x8000_0000, 0, psci::INVALID_PARAMETERS),
+        (0x8000_0000, 1, psci::INVALID_PARAMETERS),
+        (0xFF, 1, psci::ON),
+        (0x100, 1, psci::INVALID_PARAMETERS),
+        (0xFFFF, 2, psci::ON),
+        (0x1_0000, 2, psci::INVALID_PARAMETERS),
+        (0xFF_FFFF, 3, psci::ON),
+        (0x1_0000_0000, 3, psci::INVALID_PARAMETERS),
+        (0, 4, psci::INVALID_PARAMETERS),
+    ] {
+        assert_eq!(psci_call(psci::AFFINITY_INFO_64, x1, level), expected, "x1 {x1:#x}, level {level}");
+    }
+}
+
+/// The SMC Calling Convention's registers (DEN 0028B §2.6, §2.7): the
+/// function identifier is W0 and an SMC32 call's arguments are W1-W3, so
+/// the upper halves of X0-X2 take no part; an SMC64 call's arguments are
+/// whole X registers, except a parameter DEN 0022D declares `uint32`.
+#[test]
+fn psci_reads_w_registers_where_the_calling_convention_passes_them() {
+    const HIGH: u64 = 0xDEAD_BEEF_0000_0000;
+    for (x0, x1, x2, expected) in [
+        (HIGH | psci::VERSION, 0, 0, psci::VERSION_1_1),
+        (psci::FEATURES, HIGH | psci::CPU_ON_64, 0, psci::SUCCESS),
+        (psci::CPU_ON_32, HIGH, RAM_BASE, psci::ALREADY_ON),
+        (psci::CPU_ON_64, HIGH, RAM_BASE, psci::INVALID_PARAMETERS),
+        (psci::AFFINITY_INFO_32, HIGH, HIGH, psci::ON),
+        (psci::AFFINITY_INFO_64, HIGH, 0, psci::INVALID_PARAMETERS),
+        (psci::AFFINITY_INFO_64, 0, HIGH, psci::ON),
+        (psci::AFFINITY_INFO_64, 1, HIGH | 1, psci::ON),
+    ] {
+        assert_eq!(psci_call(x0, x1, x2), expected, "x0 {x0:#x}, x1 {x1:#x}, x2 {x2:#x}");
     }
 }
 
