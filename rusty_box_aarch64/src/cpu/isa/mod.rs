@@ -1155,8 +1155,32 @@ impl Encoding {
 mod tests {
     use super::*;
     use crate::cpu::features::Implementation;
-    use crate::cpu::{Cpu, CpuConfig, SysReg};
+    use crate::cpu::{Cpu, CpuConfig, Levels, NoEl2, SysReg, WithEl2};
     use std::vec::Vec;
+
+    /// A processor of the levels `L` implementing `imp`, as built (EL2 its
+    /// levels' to decide), and its ID register space as a host reads it:
+    /// `op0` 3, `op1` 0, `CRn` 0, indexed by `CRm` and `op2`, `u64::MAX`
+    /// where a read is refused.
+    fn id_registers<L: Levels>(imp: Implementation) -> (Implementation, [[u64; 8]; 8]) {
+        let cpu = Cpu::<L>::implementing(
+            CpuConfig {
+                ips: rusty_box_core::ClockHz::BOCHS_DEFAULT,
+                counter_hz: CpuConfig::QEMU_VIRT_COUNTER_HZ,
+                reset_pc: 0,
+            },
+            imp,
+        );
+        let mut ids = [[u64::MAX; 8]; 8];
+        for (crm, row) in (0u8..).zip(ids.iter_mut()) {
+            for (op2, id) in (0u8..).zip(row.iter_mut()) {
+                if let Some(reg) = SysReg::new(3, 0, 0, crm, op2) {
+                    *id = cpu.sysreg(reg).unwrap_or(u64::MAX);
+                }
+            }
+        }
+        (cpu.imp, ids)
+    }
 
     /// The ID registers, read the way an EL1 guest reads them, advertise
     /// exactly the features the processor implements, each of them one an
@@ -1179,20 +1203,13 @@ mod tests {
             assert_eq!(carried.contains(&feature), feature.encodes(), "{feature:?}");
         }
 
-        for imp in [Implementation::CORTEX_A57, Implementation::EVERY_FEATURE] {
-            let cpu = Cpu::implementing(
-                CpuConfig {
-                    ips: rusty_box_core::ClockHz::BOCHS_DEFAULT,
-                    counter_hz: CpuConfig::QEMU_VIRT_COUNTER_HZ,
-                    reset_pc: 0,
-                },
-                imp,
-            );
-            let read = |crm: u8, op2: u8| {
-                SysReg::new(3, 0, 0, crm, op2)
-                    .map(|reg| cpu.sysreg(reg).unwrap_or(u64::MAX))
-                    .unwrap_or(u64::MAX)
-            };
+        for (imp, ids) in [
+            id_registers::<NoEl2>(Implementation::CORTEX_A57),
+            id_registers::<WithEl2>(Implementation::CORTEX_A57),
+            id_registers::<NoEl2>(Implementation::EVERY_FEATURE),
+            id_registers::<WithEl2>(Implementation::EVERY_FEATURE),
+        ] {
+            let read = |crm: u8, op2: u8| ids[usize::from(crm)][usize::from(op2)];
             let field = |value: u64, lsb: u32| (value >> lsb) & 0xF;
             let (pfr0, pfr1) = (read(4, 0), read(4, 1));
             let (zfr0, smfr0) = (read(4, 4), read(4, 5));
@@ -1264,6 +1281,9 @@ mod tests {
                     Feature::Debugv8p4 => field(dfr0, 0) >= 9,
                     Feature::Afp => field(mmfr1, 44) >= 1,
                     Feature::Rpres => field(isar2, 4) >= 1,
+                    // `Features.json`: `FEAT_EL2 <=> EL2 >= 1`, and
+                    // `FEAT_AA64EL2` the same field's AArch64 support.
+                    Feature::El2 | Feature::Aa64El2 => field(pfr0, 8) >= 1,
                 };
                 assert_eq!(advertised, imp.has(feature), "{feature:?} on {imp:?}");
             }
@@ -1271,9 +1291,15 @@ mod tests {
             // instruction-set feature is a nonzero field of these registers.
             let fp16 = u64::from(imp.has(Feature::Fp16));
             assert_eq!((field(pfr0, 16), field(pfr0, 20)), (fp16, fp16), "FP and AdvSIMD");
-            // PFR0: EL0 and EL1 (AArch64 only), FP, AdvSIMD, RAS, DIT, CSV2 =
-            // 1 (no FEAT_CSV2_2) and CSV3; nothing else.
-            assert_eq!(pfr0 & !((0xFF << 16) | (0xF << 28) | (0xF << 48) | (0xF << 56) | (0xF << 60)), 0x11);
+            // PFR0: EL0 and EL1 (AArch64 only), EL2 (AArch64 only) with
+            // FEAT_EL2, FP, AdvSIMD, RAS, DIT, CSV2 = 1 (no FEAT_CSV2_2) and
+            // CSV3; nothing else.
+            let el2 = u64::from(imp.has(Feature::El2));
+            assert_eq!(field(pfr0, 8), el2, "EL2: AArch64 only, or absent");
+            assert_eq!(
+                pfr0 & !((0xF << 8) | (0xFF << 16) | (0xF << 28) | (0xF << 48) | (0xF << 56) | (0xF << 60)),
+                0x11
+            );
             // DFR0: DebugVer, two breakpoints and two watchpoints, no PMU.
             assert_eq!(dfr0 & !0xF, 0x0010_1000);
             assert!((6..=9).contains(&field(dfr0, 0)), "DebugVer: Armv8.0 to FEAT_Debugv8p4");
@@ -1285,8 +1311,9 @@ mod tests {
             // SPECRES = 1 (no FEAT_SPECRES2), BF16 = 1 (no FEAT_EBF16), I8MM
             // and XS alone (no API or GPI: no IMPLEMENTATION DEFINED
             // algorithm, and APA is never 2, FEAT_EPAC), ISAR2 WFxT = 2
-            // alone, MMFR0 the 4 KiB granule's fields and ECV = 1 (no
-            // FEAT_ECV_POFF), MMFR1 HPDS = 1 (no FEAT_HPDS2), LO and PAN
+            // alone, MMFR0 the 4 KiB granule's fields (with EL2, TGranX_2 =
+            // 1: none at stage 2) and ECV = 1 (no FEAT_ECV_POFF), MMFR1
+            // HPDS = 1 (no FEAT_HPDS2), LO and PAN
             // alone, MMFR2 CnP, UAO, AT, IDS, TTL and E0PD alone. MMFR1
             // AFP and ISAR2 RPRES are each 1 or 0.
             let at = |feature: Feature, lsb: u32, value: u64| if imp.has(feature) { value << lsb } else { 0 };
@@ -1299,7 +1326,19 @@ mod tests {
             assert_ne!(field(isar1, 4), 2, "APA = 2 is FEAT_EPAC, which FEAT_PAuth2 excludes");
             assert!(field(isar1, 40) <= 1, "SPECRES = 1: FEAT_SPECRES, not FEAT_SPECRES2");
             assert!(field(isar1, 44) <= 1, "BF16 = 1: FEAT_BF16, not FEAT_EBF16");
-            assert_eq!(mmfr0 & !(0xF << 60), 0x0F00_0024, "PARange 44 bits, 16-bit ASIDs, the 4 KiB granule alone");
+            let no_stage_2_granule = at(Feature::El2, 40, 1) | at(Feature::El2, 36, 1) | at(Feature::El2, 32, 1);
+            assert_eq!(
+                mmfr0 & !(0xF << 60),
+                0x0F00_0024 | no_stage_2_granule,
+                "PARange 44 bits, 16-bit ASIDs, the 4 KiB granule alone, at stage 1 alone"
+            );
+            // `Features.json`: FEAT_GTG holds exactly when each of TGran4_2,
+            // TGran16_2 and TGran64_2 is non-zero, so they are all or none.
+            let stage_2_fields = [field(mmfr0, 40), field(mmfr0, 32), field(mmfr0, 36)];
+            assert!(
+                stage_2_fields.iter().all(|&f| f >= 1) || stage_2_fields.iter().all(|&f| f == 0),
+                "{stage_2_fields:?}"
+            );
             assert!(field(mmfr0, 60) <= 1, "ECV = 1: FEAT_ECV, not FEAT_ECV_POFF");
             assert!(field(mmfr1, 12) <= 1, "HPDS = 1: FEAT_HPDS, not FEAT_HPDS2");
             assert_eq!(mmfr1 & !((0xF << 12) | (0xF << 16) | (0xF << 20)), at(Feature::Afp, 44, 1));

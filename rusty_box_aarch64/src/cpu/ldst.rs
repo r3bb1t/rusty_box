@@ -11,7 +11,7 @@
 use super::dp::extend_reg;
 use super::exec::{bit, bits, sext, ExecResult, Flow};
 use super::mmu::{DataAccess, DataDirection};
-use super::Cpu;
+use super::{Cpu, Levels};
 use crate::bus::PhysBus;
 
 /// How a single-register load/store forms its address: the three offset
@@ -34,9 +34,10 @@ struct Addressing {
     writeback: Option<u64>,
 }
 
-impl Cpu {
+impl<L: Levels> Cpu<L> {
     /// The base register value for an access, with the SP alignment check
     /// applied when the base is SP.
+    #[inline]
     pub(super) fn base_register(&self, rn: u32) -> Result<u64, super::exec::Fault> {
         let base = self.x_or_sp(rn);
         self.check_sp_alignment(rn == 31, base)?;

@@ -20,7 +20,7 @@ use super::exec::{bit, bits, sext, ExecResult, Flow};
 use super::features::Feature;
 use super::fp_estimate::{self, EstimateControl, EstimatePrecision, DOUBLE, HALF, SINGLE};
 use super::simd::vfp_expand_imm;
-use super::Cpu;
+use super::{Cpu, Levels};
 use crate::softfloat::{
     self as sf, ArmFpStatus, FpOrdering, FpRounding, FusedMulAdd, Handling, InexactReport, NanSignal,
 };
@@ -709,7 +709,7 @@ pub(crate) const fn rounding_from_rmode(rmode: u32) -> FpRounding {
     }
 }
 
-impl Cpu {
+impl<L: Levels> Cpu<L> {
     /// The floating-point environment for an instruction about to execute.
     #[inline]
     pub(crate) fn fp_env(&self) -> FpEnv {

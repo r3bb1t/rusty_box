@@ -6,7 +6,7 @@
 use super::{decode_pred_count, int, pred_test, sat_add_scalar, sat_q, Esize, Pv, Zv};
 use crate::cpu::exec::{bit, bits, sext, ExecResult, Flow};
 use crate::cpu::features::VecLen;
-use crate::cpu::Cpu;
+use crate::cpu::{Cpu, Levels};
 
 /// Arm `CmpOp`: the comparison of an integer compare or `WHILE`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,7 +48,7 @@ fn count_active(mask: &Pv, operand: &Pv, es: Esize, vl: VecLen) -> usize {
     (0..es.elements(vl)).filter(|&e| mask.active(e, es) && operand.active(e, es)).count()
 }
 
-impl Cpu {
+impl<L: Levels> Cpu<L> {
     /// The integer compares: CMP<cc> (vectors, `00100100 size 0 Zm op 0 o2
     /// Pg Zn ne Pd`), CMP<cc> (wide elements, `... size 0 Zm U 1 lt Pg Zn ne
     /// Pd`, 8- to 32-bit elements), CMPHS, CMPHI, CMPLO, CMPLS (unsigned

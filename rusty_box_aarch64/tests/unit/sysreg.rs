@@ -6,7 +6,7 @@ use rusty_box_core::SnapError;
 
 use super::super::features::{Feature, Implementation};
 use super::super::step::{exec, processor, Taken, UNDEFINED};
-use super::super::{Cpu, El, Pstate};
+use super::super::{Cpu, El, NoEl2, Pstate};
 
 /// The words are GNU as's (`-march=armv9.2-a+predres`, objdump -d).
 const MRS_MIDR: u32 = 0xD538_0000; // mrs x0, midr_el1
@@ -33,6 +33,8 @@ const MRS_ERXSTATUS: u32 = 0xD538_5440;
 const MSR_ERXSTATUS: u32 = 0xD518_5440;
 const MRS_ERXMISC2: u32 = 0xD538_5540;
 const MRS_ERXPFGF: u32 = 0xD538_5480;
+const MSR_ERXPFGF: u32 = 0xD518_5480;
+const MSR_ERXFR: u32 = 0xD518_5400;
 const MRS_DISR: u32 = 0xD538_C120; // mrs x0, disr_el1
 const MSR_DISR: u32 = 0xD518_C120;
 const MRS_DBGAUTHSTATUS: u32 = 0xD530_7EC0; // mrs x0, dbgauthstatus_el1
@@ -60,7 +62,7 @@ const MSR_DBGDTRTX: u32 = 0xD513_0500;
 /// The `MSR` form of `MDCCSR_EL0`'s encoding, which is read-only.
 const MSR_MDCCSR: u32 = 0xD513_0100;
 
-fn at_el0(cpu: &mut Cpu) {
+fn at_el0(cpu: &mut Cpu<NoEl2>) {
     cpu.pstate = Pstate {
         el: El::El0,
         sp_sel: false,
@@ -196,10 +198,11 @@ fn the_self_synchronized_counter_views_need_feat_ecv() {
 
 /// FEAT_RAS on a processor with no error records and no source of SError
 /// interrupts: ESB completes with nothing to defer; `ERRIDR_EL1` reports no
-/// records (NUM = 0) and cannot be written, and with none `ERRSELR_EL1`
-/// and the `ERX*` registers are UNDEFINED (QEMU's `minimal_ras_reginfo`);
-/// `DISR_EL1` keeps A, IDS and bits 23:0. EL0 reaches none of them, and a
-/// processor without FEAT_RAS has none, ESB being a NOP there.
+/// records (NUM = 0) and cannot be written; with no record to select,
+/// `ERRSELR_EL1` and the `ERX*` registers read as zero and ignore writes,
+/// `ERXFR_EL1` and `ERXPFGF_EL1` being read-only; `DISR_EL1` keeps A, IDS
+/// and bits 23:0. EL0 reaches none of them, and a processor without
+/// FEAT_RAS has none, ESB being a NOP there.
 #[test]
 fn ras_has_no_error_records_and_a_deferred_error_register() {
     for imp in [Implementation::EVERY_FEATURE, Implementation::CORTEX_A57] {
@@ -215,8 +218,19 @@ fn ras_has_no_error_records_and_a_deferred_error_register() {
         if ras {
             assert_eq!(cpu.x[0], 0, "ERRIDR_EL1.NUM = 0");
         }
-        for insn in [MSR_ERRIDR, MRS_ERRSELR, MSR_ERRSELR, MRS_ERXSTATUS, MSR_ERXSTATUS, MRS_ERXMISC2, MRS_ERXPFGF] {
+        for insn in [MSR_ERRIDR, MSR_ERXFR, MSR_ERXPFGF] {
             assert_eq!(exec(&mut cpu, insn), Some(UNDEFINED), "{insn:#010x}, RAS {ras}");
+        }
+        for insn in [MSR_ERRSELR, MSR_ERXSTATUS] {
+            cpu.x[0] = u64::MAX;
+            assert_eq!(exec(&mut cpu, insn), if ras { None } else { Some(UNDEFINED) }, "{insn:#010x}");
+        }
+        for insn in [MRS_ERRSELR, MRS_ERXSTATUS, MRS_ERXMISC2, MRS_ERXPFGF] {
+            cpu.x[0] = 0xDEAD;
+            assert_eq!(exec(&mut cpu, insn), if ras { None } else { Some(UNDEFINED) }, "{insn:#010x}");
+            if ras {
+                assert_eq!(cpu.x[0], 0, "{insn:#010x} with no error record");
+            }
         }
 
         cpu.x[0] = u64::MAX;
@@ -239,7 +253,7 @@ fn ras_has_no_error_records_and_a_deferred_error_register() {
 
         at_el0(&mut cpu);
         assert_eq!(exec(&mut cpu, ESB), None, "ESB at EL0");
-        for insn in [MRS_ERRIDR, MRS_DISR, MSR_DISR] {
+        for insn in [MRS_ERRIDR, MRS_DISR, MSR_DISR, MRS_ERRSELR, MSR_ERXSTATUS] {
             assert_eq!(exec(&mut cpu, insn), Some(UNDEFINED), "{insn:#010x} at EL0, RAS {ras}");
         }
     }

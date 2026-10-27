@@ -17,6 +17,12 @@
 //! adds the whole rusty_box test suite and the GUI release build, and the DLX
 //! Linux headless boot gate runs last unless `--skip-boot` is given.
 //!
+//! The aarch64 test steps also check its decoder and system registers
+//! against Arm's machine-readable specification (AARCHMRS), which is not in
+//! this repository: `RUSTY_BOX_AARCHMRS` must name the unpacked package,
+//! which every step inherits, unless `--skip-aarchmrs` is given, which
+//! withholds the variable from every step so those tests are ignored.
+//!
 //! It is not a copy of `.github/workflows/ci.yml`. That workflow runs debug
 //! builds, and among its steps are several no step here runs: the tests of
 //! rusty_box_bximage and rusty_box_gui, the egui serial-path tests, and checks
@@ -42,6 +48,10 @@ pub struct CiCommand {
     pub full: bool,
     /// Skip the DLX boot gate (needs the DLX disk image and several minutes).
     pub skip_boot: bool,
+    /// Run without Arm's AARCHMRS: the aarch64 tests that check the decoder
+    /// and the system registers against it are then ignored. Without this,
+    /// `RUSTY_BOX_AARCHMRS` must name the unpacked AARCHMRS directory.
+    pub skip_aarchmrs: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -53,6 +63,15 @@ const DLX_LOGIN_MARKER: &str = "*** LOGIN DETECTED ***";
 /// Instruction budget that reliably reaches the DLX login prompt headlessly
 /// (LILO Enter injected ~130M, `dlx login:` appears ~364M, margin on top).
 const DLX_BOOT_BUDGET: &str = "450000000";
+
+/// The environment variable naming the unpacked AARCHMRS directory (Arm's
+/// A-profile machine-readable specification, which is not in this
+/// repository). `rusty_box_aarch64`'s build script turns it into
+/// `cfg(aarchmrs)`, without which its conformance tests are ignored.
+const AARCHMRS_VAR: &str = "RUSTY_BOX_AARCHMRS";
+/// The AARCHMRS files the aarch64 conformance tests read
+/// (`tests/unit/spec.rs`, `tests/unit/sysreg_spec.rs`).
+const AARCHMRS_FILES: [&str; 3] = ["Features.json", "Instructions.json", "Registers.json"];
 
 /// Doctrine R1/R6 ratchet baselines (docs/safety-doctrine.md). Counts may only
 /// DECREASE; a commit that removes unsafe tightens the matching constant in the
@@ -1038,12 +1057,28 @@ const DLX_BOOT_GATE: Step = Step {
     stdout_marker: Some(DLX_LOGIN_MARKER),
 };
 
-fn run_step(root: &PathBuf, step: &Step) -> Result<(), String> {
+/// What every step's environment holds of Arm's AARCHMRS.
+enum Aarchmrs {
+    /// `RUSTY_BOX_AARCHMRS` names this directory, absolute
+    /// ([`locate_aarchmrs`]), so that each step's tests find it whatever
+    /// their working directory.
+    At(PathBuf),
+    /// `RUSTY_BOX_AARCHMRS` is withheld (`--skip-aarchmrs`).
+    Withheld,
+}
+
+/// Run `step`, its child inheriting this process's environment but for
+/// `RUSTY_BOX_AARCHMRS`, which `aarchmrs` decides.
+fn run_step(root: &PathBuf, step: &Step, aarchmrs: &Aarchmrs) -> Result<(), String> {
     let started = Instant::now();
     println!("==> {}", step.name);
 
     let mut command = Command::new("cargo");
     command.args(step.args).current_dir(root);
+    match aarchmrs {
+        Aarchmrs::At(dir) => command.env(AARCHMRS_VAR, dir),
+        Aarchmrs::Withheld => command.env_remove(AARCHMRS_VAR),
+    };
     for (key, value) in step.envs {
         command.env(key, value);
     }
@@ -1089,31 +1124,70 @@ fn run_step(root: &PathBuf, step: &Step) -> Result<(), String> {
     Ok(())
 }
 
+/// The directory `RUSTY_BOX_AARCHMRS` names, once it is seen to hold the
+/// AARCHMRS files the aarch64 conformance tests read. An absolute path is
+/// kept as written, so that the steps see the value a shell's own cargo
+/// runs see and the build script that reads it reruns for neither; a
+/// relative one is this process's working directory's. The steps are given
+/// it, so the aarch64 test steps build and run those tests.
+fn locate_aarchmrs() -> Result<PathBuf, String> {
+    let named = env::var_os(AARCHMRS_VAR).map(PathBuf::from).ok_or_else(|| {
+        format!(
+            "{AARCHMRS_VAR} is not set: set it to the unpacked AARCHMRS directory (Arm's \
+             A-profile machine-readable specification, release 2026-09) so the aarch64 \
+             conformance tests run, or pass --skip-aarchmrs"
+        )
+    })?;
+    let dir = if named.is_absolute() {
+        named
+    } else {
+        env::current_dir()
+            .map_err(|err| format!("{AARCHMRS_VAR} names a relative path, and the working directory is unknown: {err}"))?
+            .join(named)
+    };
+    for file in AARCHMRS_FILES {
+        if !dir.join(file).is_file() {
+            return Err(format!("{AARCHMRS_VAR} names {}, which holds no {file}", dir.display()));
+        }
+    }
+    Ok(dir)
+}
+
 pub fn execute_ci(command: CiCommand) -> Result<(), String> {
     let root = repo_root()?;
     let started = Instant::now();
     let mut ran = 0usize;
 
+    let aarchmrs = if command.skip_aarchmrs {
+        Aarchmrs::Withheld
+    } else {
+        Aarchmrs::At(locate_aarchmrs()?)
+    };
+
     doctrine_ratchets(&root)?;
     ran += 1;
 
     for step in MATRIX {
-        run_step(&root, step)?;
+        run_step(&root, step, &aarchmrs)?;
         ran += 1;
     }
     if command.full {
         for step in FULL_MATRIX {
-            run_step(&root, step)?;
+            run_step(&root, step, &aarchmrs)?;
             ran += 1;
         }
     }
     if !command.skip_boot {
-        run_step(&root, &DLX_BOOT_GATE)?;
+        run_step(&root, &DLX_BOOT_GATE, &aarchmrs)?;
         ran += 1;
     }
 
+    let skipped = match aarchmrs {
+        Aarchmrs::At(_) => "",
+        Aarchmrs::Withheld => " (the aarch64 AARCHMRS conformance tests skipped)",
+    };
     println!(
-        "ci: {ran} steps passed in {:.1}s",
+        "ci: {ran} steps passed in {:.1}s{skipped}",
         started.elapsed().as_secs_f32()
     );
     Ok(())
@@ -1177,6 +1251,7 @@ pub fn parse_ci_args(args: &[String]) -> Result<CiCommand, String> {
         match arg.as_str() {
             "--full" => command.full = true,
             "--skip-boot" => command.skip_boot = true,
+            "--skip-aarchmrs" => command.skip_aarchmrs = true,
             "--help" | "-h" => return Err(ci_usage()),
             other => return Err(format!("unknown ci option {other:?}\n{}", ci_usage())),
         }
@@ -1186,9 +1261,11 @@ pub fn parse_ci_args(args: &[String]) -> Result<CiCommand, String> {
 
 pub fn ci_usage() -> String {
     [
-        "usage: cargo xtask ci [--full] [--skip-boot]",
-        "  --full       also run the full integration test suite and GUI release build",
-        "  --skip-boot  skip the DLX Linux headless boot gate",
+        "usage: cargo xtask ci [--full] [--skip-boot] [--skip-aarchmrs]",
+        "  --full           also run the full integration test suite and GUI release build",
+        "  --skip-boot      skip the DLX Linux headless boot gate",
+        "  --skip-aarchmrs  run without Arm's AARCHMRS, so the aarch64 conformance tests",
+        "                   are ignored (otherwise RUSTY_BOX_AARCHMRS must name it)",
     ]
     .join("\n")
 }
@@ -1210,6 +1287,16 @@ mod tests {
             CiCommand {
                 full: true,
                 skip_boot: true,
+                skip_aarchmrs: false,
+            }
+        );
+        let parsed = parse_ci_args(&["--skip-aarchmrs".into()]).unwrap();
+        assert_eq!(
+            parsed,
+            CiCommand {
+                full: false,
+                skip_boot: false,
+                skip_aarchmrs: true,
             }
         );
     }

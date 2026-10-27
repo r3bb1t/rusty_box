@@ -1,16 +1,18 @@
 //! System instructions (Arm ARM C5): hints, barriers, PSTATE access, cache
 //! and TLB maintenance, address translation, `MRS`/`MSR`, and the
 //! exception-generating instructions — including the PSCI calls QEMU's
-//! `virt` answers on `HVC` (its device tree says `method = "hvc"`).
+//! `virt` answers on `HVC` without EL2 and on `SMC` with it (its device
+//! tree's `method`).
 
-use super::exception::{Exception, ExceptionClass};
+use super::el2::{CPTR_TFP, HCR_HCD, HCR_TDZ, HCR_TPCP, HCR_TPU, HCR_TSC, HCR_TSW, HCR_TTLB};
+use super::exception::{Exception, ExceptionClass, Route};
 use super::exec::{bit, bits, ExecResult, Fault, Flow, StopCause};
 use super::features::Feature;
 use super::mmu::{AtCheck, CacheMaintenance};
 use super::sme::SmeTrap;
-use super::sysreg::{SysRegError, SysRegKey, WriteEffect};
+use super::sysreg::{SysRegError, SysRegKey, CPACR_FPEN};
 use super::wait::Wait;
-use super::{sctlr, Cpu, El};
+use super::{sctlr, Cpu, El, Levels};
 use crate::bus::PhysBus;
 
 
@@ -41,34 +43,85 @@ mod psci {
     pub(super) const MIGRATE_NOT_REQUIRED: u64 = 2;
 }
 
-impl Cpu {
-    /// SIMD&FP access enabled at the current EL by `CPACR_EL1.FPEN`.
+impl<L: Levels> Cpu<L> {
+    /// Whether the two-bit `CPACR_EL1` enable `field` ([`CPACR_FPEN`],
+    /// [`CPACR_SMEN`](super::sysreg::CPACR_SMEN)) allows its instructions
+    /// at `el`: `11` at EL0 and EL1, `01` at EL1 alone, `x0` at neither;
+    /// EL2 is not subject to it.
     #[inline]
-    pub(crate) fn fp_enabled(&self) -> bool {
-        match (self.sys.cpacr_el1 >> 20) & 3 {
-            0b11 => true,
-            0b01 => self.pstate.el == El::El1,
-            _ => false,
+    pub(crate) fn cpacr_enabled_at(&self, field: u64, el: El) -> bool {
+        match el {
+            El::El2 => true,
+            El::El0 | El::El1 => match (self.sys.cpacr_el1 & field) >> field.trailing_zeros() {
+                0b11 => true,
+                0b01 => el == El::El1,
+                _ => false,
+            },
         }
     }
 
-    /// The trap a disabled SIMD&FP access raises: EC 0x07, with `CV` set and
-    /// `COND` 0b1110 as for every AArch64 instruction.
+    /// Whether `CPACR_EL1.FPEN` allows SIMD&FP at `el`.
     #[inline]
-    pub(crate) fn fp_trap(&self) -> Fault {
-        Exception::new(ExceptionClass::FpAccess, (1 << 24) | (0xE << 20)).into()
+    pub(crate) fn cpacr_fp_enabled_at(&self, el: El) -> bool {
+        self.cpacr_enabled_at(CPACR_FPEN, el)
+    }
+
+    /// Whether `CPTR_EL2.TFP` (with `HCR_EL2.E2H` 0, the only layout here)
+    /// disables SIMD&FP at EL0, EL1 and EL2.
+    #[inline]
+    pub(crate) fn cptr_el2_traps_fp(&self) -> bool {
+        self.cptr_any(CPTR_TFP)
+    }
+
+    /// Arm `AArch64_IsFPEnabled(el)`: `CPACR_EL1.FPEN` at EL0 and EL1, then
+    /// `CPTR_EL2.TFP` at EL0, EL1 and EL2.
+    #[inline]
+    pub(crate) fn fp_enabled_at(&self, el: El) -> bool {
+        self.cpacr_fp_enabled_at(el) && !self.cptr_el2_traps_fp()
+    }
+
+    /// The trap a disabled SIMD&FP access raises (Arm
+    /// `AArch64_AdvSIMDFPAccessTrap`): EC 0x07, with `CV` set and `COND`
+    /// 0b1110 as for every AArch64 instruction, to EL1 for `CPACR_EL1`'s
+    /// ([`Route::Class`]) and to EL2 for `CPTR_EL2`'s ([`Route::El2`]).
+    /// `HCR_EL2.TGE` takes the one to EL1 to EL2 as an uncategorized
+    /// exception.
+    #[inline]
+    pub(crate) fn fp_trap(&self, route: Route) -> Fault {
+        match route {
+            Route::Class if self.tge() => Exception::to_el2(ExceptionClass::Unknown, 0).into(),
+            Route::Class | Route::El2 => {
+                Exception::routed(ExceptionClass::FpAccess, (1 << 24) | (0xE << 20), route).into()
+            }
+        }
+    }
+
+    /// Where the SIMD&FP enables trap an access at the current level, if
+    /// they do, in the order Arm's checks make them: `CPACR_EL1.FPEN` at EL0
+    /// and EL1 to EL1 ([`Route::Class`]), then `CPTR_EL2.TFP` to EL2
+    /// ([`Route::El2`]). The SIMD&FP instructions and the `FPCR` and `FPSR`
+    /// accessors alike check it.
+    #[inline]
+    pub(crate) fn fp_access_trap_route(&self) -> Option<Route> {
+        if !self.cpacr_fp_enabled_at(self.pstate.el) {
+            Some(Route::Class)
+        } else if self.cptr_el2_traps_fp() {
+            Some(Route::El2)
+        } else {
+            None
+        }
     }
 
     /// Arm `AArch64_CheckFPEnabled`: the check of the scalar floating-point
     /// instructions and the SIMD&FP register loads and stores, made after
-    /// decode has found the encoding allocated. These are legal in
-    /// Streaming SVE mode.
+    /// decode has found the encoding allocated
+    /// ([`Cpu::fp_access_trap_route`], `AArch64_CheckFPAdvSIMDTrap`). These
+    /// are legal in Streaming SVE mode.
     #[inline]
     pub(crate) fn fp_check(&self) -> Result<(), Fault> {
-        if self.fp_enabled() {
-            Ok(())
-        } else {
-            Err(self.fp_trap())
+        match self.fp_access_trap_route() {
+            Some(route) => Err(self.fp_trap(route)),
+            None => Ok(()),
         }
     }
 
@@ -80,17 +133,27 @@ impl Cpu {
     pub(crate) fn simd_check(&self) -> Result<(), Fault> {
         self.fp_check()?;
         if self.svcr.sm {
-            return Err(self.sme_trap(SmeTrap::Streaming));
+            return Err(self.sme_trap(SmeTrap::Streaming, Route::Class));
         }
         Ok(())
     }
 
+    /// The trap, routed as `route` says, of the System instruction `insn`
+    /// (`SYS`, which reports no read): the path an `MRS` or `MSR` trap takes.
+    fn sys_trap(&self, pc: u64, insn: u32, rt: u32, route: Route) -> ExecResult {
+        self.sysreg_fault(pc, insn, SysRegError::Trap(route), SysRegKey::from_insn(insn), rt, false)
+    }
+
+    /// The exception an `MRS`, `MSR`, `SYS` or `SYSL` that `err` refuses
+    /// takes, its syndrome from `key`, `rt` and the direction.
     fn sysreg_fault(&self, pc: u64, insn: u32, err: SysRegError, key: SysRegKey, rt: u32, read: bool) -> ExecResult {
         match err {
             SysRegError::Undefined => self.undefined(pc, insn),
-            SysRegError::TrapToEl1 => Err(Exception::new(ExceptionClass::SysRegTrap, key.trap_iss(rt, read)).into()),
-            SysRegError::FpTrap => Err(self.fp_trap()),
-            SysRegError::SmeTrap => Err(self.sme_trap(SmeTrap::AccessTrap)),
+            SysRegError::Trap(route) => {
+                Err(Exception::routed(ExceptionClass::SysRegTrap, key.trap_iss(rt, read), route).into())
+            }
+            SysRegError::FpTrap(route) => Err(self.fp_trap(route)),
+            SysRegError::SmeTrap(route) => Err(self.sme_trap(SmeTrap::AccessTrap, route)),
         }
     }
 
@@ -108,10 +171,15 @@ impl Cpu {
                 self.send_event();
                 Ok(Flow::Next)
             }
-            // Every other hint, ESB (FEAT_RAS) included: its
-            // `AArch64_ESBOperation` defers a masked physical SError into
-            // DISR_EL1 and `TakeUnmaskedSErrorInterrupts` takes an unmasked
-            // one, and nothing on this machine raises an SError.
+            // ESB (FEAT_RAS): its `AArch64_ESBOperation` defers a masked
+            // physical SError into DISR_EL1, and nothing on this machine
+            // raises one; at EL0 and EL1 with EL2 enabled,
+            // `AArch64_vESBOperation` defers a masked virtual one.
+            16 if self.implements(Feature::Ras) => {
+                self.virtual_esb();
+                Ok(Flow::Next)
+            }
+            // Every other hint.
             _ => Ok(Flow::Next),
         }
     }
@@ -128,14 +196,13 @@ impl Cpu {
         match (l, op0) {
             (false, 0) => self.exec_pstate_or_barrier(pc, insn, op1, crn, crm, op2, rt),
             (false, 1) => self.exec_sys(bus, pc, insn, op1, crn, crm, op2, rt),
-            (true, 0) | (true, 1) => self.undefined(pc, insn),
+            (true, 1) => self.exec_sysl(pc, insn, rt),
+            (true, 0) => self.undefined(pc, insn),
             (false, _) => {
                 let key = SysRegKey::from_insn(insn);
                 let value = self.x_or_zr(rt);
                 match self.sysreg_write(key, value) {
-                    Ok(WriteEffect::None) => {}
-                    Ok(WriteEffect::FlushTlb) => self.tlb.flush(),
-                    Ok(WriteEffect::Timer) => self.timer_dirty = true,
+                    Ok(effect) => self.apply_write_effect(effect),
                     Err(e) => return self.sysreg_fault(pc, insn, e, key, rt, false),
                 }
                 Ok(Flow::Next)
@@ -210,8 +277,7 @@ impl Cpu {
                 // DAIFSet / DAIFClr
                 (3, 6) | (3, 7) => {
                     if self.pstate.el == El::El0 && self.sys.sctlr_el1 & sctlr::UMA == 0 {
-                        let key = SysRegKey::from_insn(insn);
-                        return Err(Exception::new(ExceptionClass::SysRegTrap, key.trap_iss(rt, false)).into());
+                        return self.sys_trap(pc, insn, rt, Route::Class);
                     }
                     let bits = u64::from(crm) << 6;
                     let daif = self.pstate.daif();
@@ -258,19 +324,40 @@ impl Cpu {
         Ok(Flow::Next)
     }
 
-    /// `SYS`: cache maintenance, address translation and TLB maintenance.
+    /// `SYSL`: no System instruction with a result exists here, so an
+    /// encoding in the IMPLEMENTATION DEFINED space does what
+    /// [`Cpu::impdef_space_access`] says and every other is UNDEFINED.
+    fn exec_sysl(&mut self, pc: u64, insn: u32, rt: u32) -> ExecResult {
+        let key = SysRegKey::from_insn(insn);
+        if key.in_impdef_space() {
+            return self.sysreg_fault(pc, insn, self.impdef_space_access(self.pstate.el), key, rt, true);
+        }
+        self.undefined(pc, insn)
+    }
+
+    /// `SYS`: cache maintenance, address translation and TLB maintenance,
+    /// with each instruction's EL0 control (a trap to EL1, which
+    /// `HCR_EL2.TGE` takes to EL2) checked before its `HCR_EL2` trap to EL2,
+    /// as its accessor in Arm's `Registers.json` orders them.
     #[allow(clippy::too_many_arguments)]
     fn exec_sys<B: PhysBus>(&mut self, bus: &mut B, pc: u64, insn: u32, op1: u32, crn: u32, crm: u32, op2: u32, rt: u32) -> ExecResult {
-        let el0 = self.pstate.el == El::El0;
-        let trap = Fault::from(Exception::new(
-            ExceptionClass::SysRegTrap,
-            SysRegKey::from_insn(insn).trap_iss(rt, false),
-        ));
+        let el = self.pstate.el;
+        let el0 = el == El::El0;
+        let el1 = el == El::El1;
+        let below_el2 = el != El::El2;
+        let key = SysRegKey::from_insn(insn);
+        if key.in_impdef_space() {
+            return self.sysreg_fault(pc, insn, self.impdef_space_access(el), key, rt, false);
+        }
         match (op1, crn, crm, op2) {
-            // IC IALLUIS, IC IALLU: there is no instruction cache to invalidate.
+            // IC IALLUIS, IC IALLU: there is no instruction cache to
+            // invalidate. `HCR_EL2.TPU` traps EL1's.
             (0, 7, 1, 0) | (0, 7, 5, 0) => {
                 if el0 {
                     return self.undefined(pc, insn);
+                }
+                if el1 && self.hcr_any(HCR_TPU) {
+                    return self.sys_trap(pc, insn, rt, Route::El2);
                 }
                 Ok(Flow::Next)
             }
@@ -290,7 +377,13 @@ impl Cpu {
                     return self.undefined(pc, insn);
                 }
                 if el0 && self.sys.sctlr_el1 & sctlr::UCI == 0 {
-                    return Err(trap);
+                    return self.sys_trap(pc, insn, rt, Route::Class);
+                }
+                // To the PoU (`IC IVAU`, `DC CVAU`) `HCR_EL2.TPU`, the others
+                // `TPCP`, trap EL0's and EL1's.
+                let el2_control = if crm == 5 || crm == 11 { HCR_TPU } else { HCR_TPCP };
+                if below_el2 && self.hcr_any(el2_control) {
+                    return self.sys_trap(pc, insn, rt, Route::El2);
                 }
                 let op = if crm == 5 {
                     CacheMaintenance::InstructionInvalidate
@@ -310,38 +403,54 @@ impl Cpu {
                     return self.undefined(pc, insn);
                 }
                 if el0 && self.sys.sctlr_el1 & sctlr::ENRCTX == 0 {
-                    return Err(trap);
+                    return self.sys_trap(pc, insn, rt, Route::Class);
                 }
                 Ok(Flow::Next)
             }
-            // DC ZVA: EL0 needs SCTLR_EL1.DZE.
+            // DC ZVA: EL0 needs SCTLR_EL1.DZE; `HCR_EL2.TDZ` traps EL0's and
+            // EL1's.
             (3, 7, 4, 1) => {
                 if el0 && self.sys.sctlr_el1 & sctlr::DZE == 0 {
-                    return Err(trap);
+                    return self.sys_trap(pc, insn, rt, Route::Class);
+                }
+                if below_el2 && self.hcr_any(HCR_TDZ) {
+                    return self.sys_trap(pc, insn, rt, Route::El2);
                 }
                 let va = self.x_or_zr(rt);
                 self.dc_zva(bus, va)?;
                 Ok(Flow::Next)
             }
-            // DC IVAC: EL1 only.
+            // DC IVAC: EL1 and EL2; `HCR_EL2.TPCP` traps EL1's. Its
+            // translation is an invalidate's, needing write permission where
+            // stage 1 checks one: `AArch64_DC` translates before it makes
+            // EL1's a clean and invalidate under `HCR_EL2.DC` or `VM`, which
+            // with no data cache is the same operation.
             (0, 7, 6, 1) => {
                 if el0 {
                     return self.undefined(pc, insn);
+                }
+                if el1 && self.hcr_any(HCR_TPCP) {
+                    return self.sys_trap(pc, insn, rt, Route::El2);
                 }
                 let va = self.x_or_zr(rt);
                 self.cache_maintenance(bus, va, CacheMaintenance::Invalidate)?;
                 Ok(Flow::Next)
             }
-            // DC ISW, DC CSW, DC CISW: EL1 only. With no data cache model, a
-            // set and way names nothing to act on.
+            // DC ISW, DC CSW, DC CISW: EL1 and EL2; `HCR_EL2.TSW` traps
+            // EL1's. With no data cache model, a set and way names nothing
+            // to act on.
             (0, 7, 6, 2) | (0, 7, 10, 2) | (0, 7, 14, 2) => {
                 if el0 {
                     return self.undefined(pc, insn);
                 }
+                if el1 && self.hcr_any(HCR_TSW) {
+                    return self.sys_trap(pc, insn, rt, Route::El2);
+                }
                 Ok(Flow::Next)
             }
             // AT S1E1R, S1E1W, S1E0R, S1E0W, and with FEAT_PAN2 AT S1E1RP
-            // and S1E1WP, which PSTATE.PAN takes part in.
+            // and S1E1WP, which PSTATE.PAN takes part in: the EL1&0 regime,
+            // from EL1 or EL2.
             (0, 7, 8, 0..=3) | (0, 7, 9, 0 | 1) => {
                 if el0 || (crm == 9 && !self.implements(Feature::Pan2)) {
                     return self.undefined(pc, insn);
@@ -352,21 +461,87 @@ impl Cpu {
                     (_, 0) => AtCheck::El1,
                     _ => AtCheck::El0,
                 };
-                self.address_translate(bus, va, op2 & 1 == 1, checked);
+                self.address_translate(bus, va, op2 & 1 == 1, checked)?;
+                Ok(Flow::Next)
+            }
+            // AT S1E2R, S1E2W: the EL2 regime, at EL2 only.
+            (4, 7, 8, 0 | 1) => {
+                if el != El::El2 {
+                    return self.undefined(pc, insn);
+                }
+                let va = self.x_or_zr(rt);
+                self.address_translate(bus, va, op2 & 1 == 1, AtCheck::El2)?;
+                Ok(Flow::Next)
+            }
+            // AT S12E1R, S12E1W, S12E0R, S12E0W: the EL1&0 regime, at EL2
+            // only (EL1's are UNDEFINED without FEAT_NV). Arm's accessor
+            // translates stage 1 alone while `HCR_EL2.{DC,VM}` is {0,0} and
+            // stages 1 and 2 otherwise; this processor applies no stage 2
+            // translation to any access, so each is its stage 1 translation.
+            (4, 7, 8, 4..=7) => {
+                if el != El::El2 {
+                    return self.undefined(pc, insn);
+                }
+                let va = self.x_or_zr(rt);
+                let checked = if op2 < 6 { AtCheck::El1 } else { AtCheck::El0 };
+                self.address_translate(bus, va, op2 & 1 == 1, checked)?;
                 Ok(Flow::Next)
             }
             // The EL1 TLB maintenance instructions (CRn 8), and their nXS
-            // forms (CRn 9, FEAT_XS). Each invalidates at least what it
-            // names, whatever its TTL hint (FEAT_TTL) or range, so flushing
-            // everything satisfies all of them.
+            // forms (CRn 9, FEAT_XS), at EL1 and EL2; `HCR_EL2.TTLB` traps
+            // EL1's. Each invalidates at least what it names, whatever its
+            // TTL hint (FEAT_TTL) or range, so flushing everything satisfies
+            // all of them.
             (0, 8 | 9, _, _) => {
                 if el0 || !self.implements_tlbi(crn, crm, op2) {
+                    return self.undefined(pc, insn);
+                }
+                if el1 && self.hcr_any(HCR_TTLB) {
+                    return self.sys_trap(pc, insn, rt, Route::El2);
+                }
+                self.tlb.flush();
+                Ok(Flow::Next)
+            }
+            // The EL2 TLB maintenance instructions, at EL2 only: of the EL2
+            // regime, of the whole EL1&0 regime, and of stage 2 by IPA. Each
+            // invalidates at least what it names, so flushing everything
+            // satisfies all of them.
+            (4, 8 | 9, _, _) => {
+                if el != El::El2 || !self.implements_tlbi_el2(crn, crm, op2) {
                     return self.undefined(pc, insn);
                 }
                 self.tlb.flush();
                 Ok(Flow::Next)
             }
             _ => self.undefined(pc, insn),
+        }
+    }
+
+    /// Whether this processor implements the EL2 TLB maintenance
+    /// instruction at `CRm` and `op2` of `op1 = 4`, `CRn` 8, or `CRn` 9 for
+    /// its nXS form (FEAT_XS): Arm's `TLBI` pages for FEAT_EL2, with
+    /// FEAT_TLBIOS's Outer Shareable forms and FEAT_TLBIRANGE's range forms.
+    fn implements_tlbi_el2(&self, crn: u32, crm: u32, op2: u32) -> bool {
+        if !self.have_el2() || (crn == 9 && !self.implements(Feature::Xs)) {
+            return false;
+        }
+        let os = self.implements(Feature::TlbiOs);
+        let range = self.implements(Feature::TlbiRange);
+        match (crm, op2) {
+            // IPAS2E1IS, IPAS2LE1IS; IPAS2E1, IPAS2LE1.
+            (0 | 4, 1 | 5) => true,
+            // ALLE2IS, VAE2IS, ALLE1IS, VALE2IS, VMALLS12E1IS, and ALLE2,
+            // VAE2, ALLE1, VALE2, VMALLS12E1.
+            (3 | 7, 0 | 1 | 4 | 5 | 6) => true,
+            // ALLE2OS, VAE2OS, ALLE1OS, VALE2OS, VMALLS12E1OS; IPAS2E1OS,
+            // IPAS2LE1OS.
+            (1, 0 | 1 | 4 | 5 | 6) | (4, 0 | 4) => os,
+            // RIPAS2E1IS, RIPAS2LE1IS; RIPAS2E1, RIPAS2LE1; RVAE2IS,
+            // RVALE2IS; RVAE2, RVALE2.
+            (0 | 4, 2 | 6) | (2 | 6, 1 | 5) => range,
+            // RIPAS2E1OS, RIPAS2LE1OS; RVAE2OS, RVALE2OS.
+            (4, 3 | 7) | (5, 1 | 5) => range && os,
+            _ => false,
         }
     }
 
@@ -405,23 +580,57 @@ impl Cpu {
         }
         match (opc, bits(insn, 1, 0)) {
             (0, 1) => Err(Exception::new(ExceptionClass::Svc, imm16).into()),
-            (0, 2) => {
-                // HVC is UNDEFINED at EL0. At EL1, with no EL2 to take it,
-                // QEMU's `virt` (PSCI conduit "hvc") services every HVC as a
-                // firmware call whatever its immediate and function ID
-                // (target/arm/tcg/psci.c `arm_is_psci_call`), answering the
-                // IDs it does not know with NOT_SUPPORTED.
-                if self.pstate.el == El::El1 {
-                    return self.psci_call();
-                }
-                self.undefined(pc, insn)
-            }
-            // SMC: EL3 is not implemented.
-            (0, 3) => self.undefined(pc, insn),
+            (0, 2) => self.exec_hvc(pc, insn, imm16),
+            (0, 3) => self.exec_smc(pc, insn, imm16),
             (1, 0) => Err(Exception::new(ExceptionClass::Brk, imm16).into()),
             // HLT with halting debug disabled, and DCPS outside Debug state,
             // are UNDEFINED.
             _ => self.undefined(pc, insn),
+        }
+    }
+
+    /// The conduit the board's PSCI firmware answers this processor on
+    /// ([`PsciConduit::of`]).
+    fn psci_conduit(&self) -> PsciConduit {
+        PsciConduit::of::<L>()
+    }
+
+    /// `HVC #imm16`: UNDEFINED at EL0; on a processor without EL2 a
+    /// firmware call ([`Cpu::psci_conduit`]) whatever its immediate and
+    /// function ID, the IDs the firmware does not know answered with
+    /// NOT_SUPPORTED; with EL2, Arm's `HVC` (`AArch64_CallHypervisor`): an
+    /// exception to EL2 from EL1 or EL2, returning to the next instruction,
+    /// unless `HCR_EL2.HCD` makes it UNDEFINED.
+    fn exec_hvc(&mut self, pc: u64, insn: u32, imm16: u32) -> ExecResult {
+        if self.pstate.el == El::El0 {
+            return self.undefined(pc, insn);
+        }
+        match self.psci_conduit() {
+            PsciConduit::Hvc => self.psci_call(),
+            PsciConduit::Smc => {
+                if self.hcr_any(HCR_HCD) {
+                    return self.undefined(pc, insn);
+                }
+                Err(Exception::to_el2(ExceptionClass::Hvc, imm16).into())
+            }
+        }
+    }
+
+    /// `SMC #imm16`: UNDEFINED at EL0; at EL1 under `HCR_EL2.TSC` trapped to
+    /// EL2, returning to the `SMC` itself (`AArch64_CheckForSMCUndefOrTrap`
+    /// with no EL3, whose IMPLEMENTATION DEFINED "Trap SMC execution at EL1
+    /// to EL2" is TRUE here); otherwise a firmware call where the firmware's
+    /// conduit is `SMC`, as for `HVC`, and UNDEFINED where it is not.
+    fn exec_smc(&mut self, pc: u64, insn: u32, imm16: u32) -> ExecResult {
+        if self.pstate.el == El::El0 {
+            return self.undefined(pc, insn);
+        }
+        if self.pstate.el == El::El1 && self.hcr_any(HCR_TSC) {
+            return Err(Exception::to_el2(ExceptionClass::Smc, imm16).into());
+        }
+        match self.psci_conduit() {
+            PsciConduit::Smc => self.psci_call(),
+            PsciConduit::Hvc => self.undefined(pc, insn),
         }
     }
 
@@ -472,6 +681,42 @@ impl Cpu {
         };
         self.x[0] = result;
         Ok(Flow::Next)
+    }
+}
+
+/// The instruction the board's PSCI firmware answers.
+///
+/// Closed (R5): the two conduits PSCI (Arm DEN 0022) defines.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PsciConduit {
+    Hvc,
+    Smc,
+}
+
+impl PsciConduit {
+    /// The conduit the board's firmware answers a processor of the level
+    /// set `L` on, the one decision both the processor and the device
+    /// tree's `/psci` `method` follow (QEMU `virt`, `hw/arm/virt.c`
+    /// `psci_conduit`): `HVC` on a processor without EL2, where nothing else
+    /// takes an `HVC` from EL1, and `SMC` on one with EL2, whose `HVC` is the
+    /// hypervisor's. The firmware stands in for the EL3 this processor does
+    /// not implement, so where Arm makes the instruction UNDEFINED for want
+    /// of EL2 or EL3 it is a firmware call instead.
+    pub(crate) const fn of<L: Levels>() -> Self {
+        if L::EL2 {
+            Self::Smc
+        } else {
+            Self::Hvc
+        }
+    }
+
+    /// The device tree's `/psci` `method` naming it (QEMU
+    /// `fdt_add_psci_node`).
+    pub(crate) const fn method(self) -> &'static str {
+        match self {
+            Self::Hvc => "hvc",
+            Self::Smc => "smc",
+        }
     }
 }
 

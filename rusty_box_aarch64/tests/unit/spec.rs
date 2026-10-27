@@ -1446,11 +1446,18 @@ fn implied_by(feature: Feature, implications: &[(Feature, Feature)]) -> Vec<Feat
 #[cfg_attr(not(aarchmrs), ignore = "reads Arm's AARCHMRS from the directory RUSTY_BOX_AARCHMRS names")]
 fn every_implementation_has_what_its_features_imply() {
     use crate::cpu::features::Implementation;
+    use crate::cpu::{NoEl2, WithEl2};
 
     let (release, implications) = feature_implications();
     std::eprintln!("AARCHMRS {release}: {} implications between known features", implications.len());
     assert!(implications.contains(&(Feature::Lrcpc2, Feature::Lrcpc)), "{implications:?}");
-    for imp in [Implementation::CORTEX_A57, Implementation::EVERY_FEATURE] {
+    assert!(implications.contains(&(Feature::Aa64El2, Feature::El2)), "{implications:?}");
+    for imp in [
+        Implementation::CORTEX_A57.with_levels::<NoEl2>(),
+        Implementation::CORTEX_A57.with_levels::<WithEl2>(),
+        Implementation::EVERY_FEATURE.with_levels::<NoEl2>(),
+        Implementation::EVERY_FEATURE.with_levels::<WithEl2>(),
+    ] {
         for &(a, b) in &implications {
             assert!(!imp.has(a) || imp.has(b), "{imp:?} has {a:?}, which implies {b:?}");
         }

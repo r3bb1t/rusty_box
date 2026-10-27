@@ -6,18 +6,21 @@
 //! cell, tweak and substitution functions, `InsertPAC`, `Authenticate`,
 //! `Strip`, `AddPACGA`, `IsAPIAKeyEnabled` and its siblings,
 //! `AArch64_PACFailException`), `EffectiveTBI` and
-//! `CalculateBottomPACBit`. This core has neither EL2 nor EL3, so no key
-//! use traps, and only the EL1&0 translation regime, whose pointers have
-//! upper and lower address ranges; it has neither FEAT_MTE nor FEAT_LVA3,
-//! nor FEAT_CONSTPACFIELD or FEAT_PAuth_LR.
+//! `CalculateBottomPACBit`. This core has no EL3, so only `HCR_EL2.API`
+//! and `APK` trap a key use, on a processor with EL2 (`TrapPACUse`); its
+//! translation regimes are EL1&0, whose pointers have upper and lower
+//! address ranges, and with EL2, EL2's, whose pointers have one (there is
+//! no FEAT_VHE); it has neither FEAT_MTE nor FEAT_LVA3, nor
+//! FEAT_CONSTPACFIELD or FEAT_PAuth_LR.
 
 use rusty_box_core::snap::{SnapRead, SnapResult, SnapWrite};
 
+use super::el2::HCR_API;
 use super::exception::{Exception, ExceptionClass};
 use super::exec::{bit, bits, sext, ExecResult, Flow};
 use super::features::Feature;
 use super::mmu::DataAccess;
-use super::{Cpu, El};
+use super::{Cpu, El, Levels};
 use crate::bus::PhysBus;
 
 /// One 128-bit pointer authentication key, `APxxKeyHi_EL1:APxxKeyLo_EL1`.
@@ -69,6 +72,54 @@ impl PacKeys {
             ga: Key { lo: h[8], hi: h[9] },
         }
     }
+
+    /// The key register `half` names.
+    pub(crate) const fn half(&self, half: KeyHalf) -> u64 {
+        match half {
+            KeyHalf::IaLo => self.ia.lo,
+            KeyHalf::IaHi => self.ia.hi,
+            KeyHalf::IbLo => self.ib.lo,
+            KeyHalf::IbHi => self.ib.hi,
+            KeyHalf::DaLo => self.da.lo,
+            KeyHalf::DaHi => self.da.hi,
+            KeyHalf::DbLo => self.db.lo,
+            KeyHalf::DbHi => self.db.hi,
+            KeyHalf::GaLo => self.ga.lo,
+            KeyHalf::GaHi => self.ga.hi,
+        }
+    }
+
+    /// The key register `half` names, to write.
+    pub(crate) fn half_mut(&mut self, half: KeyHalf) -> &mut u64 {
+        match half {
+            KeyHalf::IaLo => &mut self.ia.lo,
+            KeyHalf::IaHi => &mut self.ia.hi,
+            KeyHalf::IbLo => &mut self.ib.lo,
+            KeyHalf::IbHi => &mut self.ib.hi,
+            KeyHalf::DaLo => &mut self.da.lo,
+            KeyHalf::DaHi => &mut self.da.hi,
+            KeyHalf::DbLo => &mut self.db.lo,
+            KeyHalf::DbHi => &mut self.db.hi,
+            KeyHalf::GaLo => &mut self.ga.lo,
+            KeyHalf::GaHi => &mut self.ga.hi,
+        }
+    }
+}
+
+/// A key register, `APIAKeyLo_EL1` to `APGAKeyHi_EL1`: one half of a key,
+/// each read and written whole.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum KeyHalf {
+    IaLo,
+    IaHi,
+    IbLo,
+    IbHi,
+    DaLo,
+    DaHi,
+    DbLo,
+    DbHi,
+    GaLo,
+    GaHi,
 }
 
 /// The key an address-authenticating instruction uses.
@@ -302,18 +353,35 @@ const fn with_extension(ptr: u64, ext: bool, bottom: u32, tbi: bool) -> u64 {
     (ptr & !extension) | (replicate(ext) & extension)
 }
 
-impl Cpu {
-    /// Arm CalculateBottomPACBit: `64 - TxSZ` of the half of the address
-    /// space `top_bit` selects, as the walk holds TxSZ.
+impl<L: Levels> Cpu<L> {
+    /// Arm CalculateBottomPACBit: `64 - TxSZ` of the current regime's range
+    /// `top_bit` selects (EL2's one range whatever it is), as the walk holds
+    /// TxSZ.
     fn bottom_pac_bit(&self, top_bit: bool) -> u32 {
-        64 - self.effective_txsz(top_bit)
+        64 - self.regime_txsz(self.regime(), top_bit)
     }
 
     /// Whether `key` is enabled (Arm IsAPIAKeyEnabled and its siblings):
-    /// the `SCTLR_EL1` bit at EL1 and at EL0 alike, the EL1&0 regime being
-    /// the only one.
-    fn pac_key_enabled(&self, key: PacKey) -> bool {
-        (self.sys.sctlr_el1 >> key.enable_bit()) & 1 == 1
+    /// the bit of `SCTLR_EL1` at EL0 and EL1, of `SCTLR_EL2` at EL2. An
+    /// enabled key used at EL0 or EL1 while `HCR_EL2.API` is clear traps to
+    /// EL2 instead ([`Cpu::pac_trap_to_el2`]); a disabled one never does.
+    fn pac_key_enabled(&self, key: PacKey) -> Result<bool, Exception> {
+        if (self.regime_sctlr(self.regime()) >> key.enable_bit()) & 1 == 0 {
+            return Ok(false);
+        }
+        self.pac_trap_to_el2()?;
+        Ok(true)
+    }
+
+    /// Arm `TrapPACUse(EL2)`, raised where `TrapEL2` holds: at EL0 or EL1
+    /// with EL2 enabled and `HCR_EL2.API` clear. EC 0x09, ISS 0, the
+    /// instruction's own address the preferred return.
+    fn pac_trap_to_el2(&self) -> Result<(), Exception> {
+        if self.pstate.el != El::El2 && self.hcr_lacks(HCR_API) {
+            Err(Exception::to_el2(ExceptionClass::PacTrap, 0))
+        } else {
+            Ok(())
+        }
     }
 
     fn pac_key(&self, key: PacKey) -> Key {
@@ -327,18 +395,20 @@ impl Cpu {
 
     /// Arm AddPACIA, AddPACIB, AddPACDA, AddPACDB: `ptr` with a pointer
     /// authentication code for `modifier` inserted (InsertPAC), or `ptr`
-    /// itself when `key` is disabled.
-    pub(crate) fn add_pac(&self, ptr: u64, modifier: u64, key: PacKey) -> u64 {
-        if !self.pac_key_enabled(key) {
-            return ptr;
+    /// itself when `key` is disabled; the trap to EL2 where `HCR_EL2.API`
+    /// takes the key's use away.
+    pub(crate) fn add_pac(&self, ptr: u64, modifier: u64, key: PacKey) -> Result<u64, Exception> {
+        if !self.pac_key_enabled(key)? {
+            return Ok(ptr);
         }
         let k = self.pac_key(key);
         let data = key.data();
         let tbi = self.effective_tbi(ptr, !data);
-        // The half of the address space the pointer is in: bit 55 where a
-        // top-byte-ignore of either half applies to the access, bit 63
-        // otherwise (`selbit`).
-        let selbit = if self.tbi_applies(true, !data) || self.tbi_applies(false, !data) {
+        // The range the pointer is in: bit 55 where a top-byte-ignore of
+        // either range applies to the access, bit 63 otherwise (`selbit`;
+        // EL2's one range has the same rule with its one TBI).
+        let regime = self.regime();
+        let selbit = if self.regime_tbi(regime, true, !data) || self.regime_tbi(regime, false, !data) {
             (ptr >> 55) & 1 == 1
         } else {
             ptr >> 63 == 1
@@ -347,7 +417,7 @@ impl Cpu {
         let low = field(bottom - 1, 0);
         let mut pac = compute_pac(with_extension(ptr, selbit, bottom, tbi), modifier, k.hi, k.lo);
         let bit55 = if selbit { 1 << 55 } else { 0 };
-        if !self.implements(Feature::PAuth2) {
+        Ok(if !self.implements(Feature::PAuth2) {
             // A pointer without a canonical extension gets a corrupted
             // code.
             let top = if tbi { 55 } else { 63 };
@@ -360,23 +430,26 @@ impl Cpu {
         } else {
             let upper = if tbi { ptr & field(63, 56) } else { (ptr ^ pac) & field(63, 56) };
             upper | bit55 | ((ptr ^ pac) & field(54, bottom)) | (ptr & low)
-        }
+        })
     }
 
     /// Arm AddPACGA: the top 32 bits of the code for `x` under modifier `y`
-    /// and the generic key, the low 32 zero. No enable bit governs it.
-    pub(crate) fn add_pac_ga(&self, x: u64, y: u64) -> u64 {
+    /// and the generic key, the low 32 zero. No enable bit governs it, but
+    /// `HCR_EL2.API` clear traps its use at EL0 and EL1 to EL2.
+    pub(crate) fn add_pac_ga(&self, x: u64, y: u64) -> Result<u64, Exception> {
+        self.pac_trap_to_el2()?;
         let k = self.pac_keys.ga;
-        compute_pac(x, y, k.hi, k.lo) & field(63, 32)
+        Ok(compute_pac(x, y, k.hi, k.lo) & field(63, 32))
     }
 
     /// Arm AuthIA, AuthIB, AuthDA, AuthDB: `ptr` with its code checked
     /// (Authenticate) and replaced by the address's extension, or `ptr`
     /// itself when `key` is disabled. A failed check corrupts the pointer;
     /// with FEAT_FPACCOMBINE, or FEAT_FPAC for an authentication alone, it
-    /// raises the PAC Fail exception instead.
+    /// raises the PAC Fail exception instead. An enabled key whose use
+    /// `HCR_EL2.API` takes away traps to EL2 first.
     pub(crate) fn auth(&self, ptr: u64, modifier: u64, key: PacKey, used: AuthUse) -> Result<u64, Exception> {
-        if !self.pac_key_enabled(key) {
+        if !self.pac_key_enabled(key)? {
             return Ok(ptr);
         }
         let k = self.pac_key(key);
@@ -443,7 +516,7 @@ impl Cpu {
 }
 
 /// The instructions.
-impl Cpu {
+impl<L: Levels> Cpu<L> {
     /// PACIA, PACIZA, AUTIA, AUTIZA and the B and data key forms, XPACI
     /// and XPACD: `1 1 0 11010110 00001 opcode Rn Rd`. `opcode` is `00 Z
     /// AUT D B` (`D` for a data key, `B` for key B), with `Z` taking the
@@ -461,7 +534,7 @@ impl Cpu {
             if bit(insn, 12) {
                 self.auth(x, modifier, key, AuthUse::Alone)?
             } else {
-                self.add_pac(x, modifier, key)
+                self.add_pac(x, modifier, key)?
             }
         };
         self.set_x_or_zr(rd, value);
@@ -472,7 +545,7 @@ impl Cpu {
     pub(crate) fn exec_pacga(&mut self, insn: u32) -> ExecResult {
         let x = self.x_or_zr(bits(insn, 9, 5));
         let modifier = self.x_or_sp(bits(insn, 20, 16));
-        let value = self.add_pac_ga(x, modifier);
+        let value = self.add_pac_ga(x, modifier)?;
         self.set_x_or_zr(bits(insn, 4, 0), value);
         Ok(Flow::Next)
     }
@@ -498,7 +571,7 @@ impl Cpu {
         self.x[d] = if op2 & 0b100 != 0 {
             self.auth(x, modifier, key, AuthUse::Alone)?
         } else {
-            self.add_pac(x, modifier, key)
+            self.add_pac(x, modifier, key)?
         };
         Ok(Flow::Next)
     }
@@ -524,7 +597,7 @@ impl Cpu {
                     return self.undefined(pc, insn);
                 }
                 let sp = self.x_or_sp(31);
-                let target = self.auth(self.sys.elr_el1, sp, key, AuthUse::Combined)?;
+                let target = self.auth(self.elr_current(), sp, key, AuthUse::Combined)?;
                 Ok(Flow::Jump(self.exception_return(target)))
             }
             // BRAAZ, BLRAAZ (opc 000x) and BRAA, BLRAA (opc 100x): opc<0>

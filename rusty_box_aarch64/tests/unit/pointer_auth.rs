@@ -28,7 +28,7 @@ use rusty_box_core::{ClockHz, VmClock};
 use super::features::{Feature, Features, Implementation, VecLen};
 use super::pauth::PacKeys;
 use super::step::{exec, processor, Taken, CODE, UNDEFINED};
-use super::{id, Cpu, CpuConfig, El, Step};
+use super::{id, Cpu, CpuConfig, El, NoEl2, Step};
 use crate::bus::{AccessWidth, BusFault, PhysAddr, PhysBus};
 use crate::instrumentation::NoInstrumentation;
 
@@ -141,7 +141,7 @@ fn reg_values(text: &str) -> Vec<RegValue> {
 }
 
 /// X0-X30, SP (31) and ELR_EL1 (32) of `cpu`.
-fn registers(cpu: &Cpu) -> [u64; 33] {
+fn registers(cpu: &Cpu<NoEl2>) -> [u64; 33] {
     core::array::from_fn(|i| match i {
         0..=30 => cpu.x[i],
         31 => cpu.sp_el1,
@@ -317,7 +317,7 @@ const LOWER_CODE: u64 = mask(63, 56) | mask(54, 39);
 
 /// A processor implementing `features`, the keys set to distinct values,
 /// every key enabled, TCR_EL1 = [`TXSZ`].
-fn keyed(features: &[Feature]) -> Cpu {
+fn keyed(features: &[Feature]) -> Cpu<NoEl2> {
     let mut cpu = processor(Implementation {
         features: Features::of(features),
         max_svl: VecLen::MIN,
@@ -338,7 +338,7 @@ const FPACCOMBINE: [Feature; 6] =
 
 /// X0 after `insn` with X0 = `ptr` and X1 = `modifier`, which must take no
 /// exception.
-fn apply(cpu: &mut Cpu, insn: u32, ptr: u64, modifier: u64) -> u64 {
+fn apply(cpu: &mut Cpu<NoEl2>, insn: u32, ptr: u64, modifier: u64) -> u64 {
     cpu.x[0] = ptr;
     cpu.x[1] = modifier;
     assert_eq!(exec(cpu, insn), None, "{insn:#010x} of {ptr:#x}");
@@ -637,7 +637,7 @@ impl Ram {
 
     /// Step the word at the processor's PC: the instruction abort its fetch
     /// took, if it took one.
-    fn step(&mut self, cpu: &mut Cpu) -> Option<Abort> {
+    fn step(&mut self, cpu: &mut Cpu<NoEl2>) -> Option<Abort> {
         cpu.sys.vbar_el1 = RAM_VBAR;
         cpu.sys.esr_el1 = 0x3F << 26;
         assert_eq!(cpu.step(self, &mut NoInstrumentation), Step::Retired);

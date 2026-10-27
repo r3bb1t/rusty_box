@@ -10,9 +10,9 @@ use rusty_box_aarch64::cpu::{ExceptionClass, TranslationFault};
 use rusty_box_aarch64::instrumentation::{Direction, ExceptionKind, ExceptionTaken, MemoryAccess};
 use rusty_box_aarch64::machine::{BuildError, MemoryError, OnResetRequest};
 use rusty_box_aarch64::{
-    El, Instrumentation, Key, KeyAction, KeyboardInput, LentStorage, Machine, MachineBuilder, MemoryLoan, PowerState,
-    Progress, Pstate, RamSize, Reg, RunBudget, RunOutcome, SerialPort, StopReason, SysReg, SysRegRefusal, Typed, VReg,
-    VirtConfig, VirtMachine,
+    El, Instrumentation, Key, KeyAction, KeyboardInput, LentStorage, Machine, MachineBuilder, MemoryLoan, NoEl2,
+    PowerState, Progress, Pstate, RamSize, Reg, RunBudget, RunOutcome, SerialPort, StopReason, SysReg, SysRegRefusal,
+    Typed, VReg, VirtConfig, VirtMachine, WithEl2,
 };
 
 const RAM_LEN: usize = 4 << 20;
@@ -23,7 +23,7 @@ fn ram_size() -> RamSize {
     RamSize::bytes(RAM_LEN as u64).expect("a valid size")
 }
 
-fn bare<'m, I: Instrumentation>(ram: &'m mut [u8], observer: I) -> VirtMachine<LentStorage<'m>, I> {
+fn bare<'m, I: Instrumentation>(ram: &'m mut [u8], observer: I) -> VirtMachine<LentStorage<'m>, NoEl2, I> {
     MachineBuilder::new(VirtConfig::DEFAULT)
         .ram(ram_size())
         .bare()
@@ -32,7 +32,7 @@ fn bare<'m, I: Instrumentation>(ram: &'m mut [u8], observer: I) -> VirtMachine<L
         .expect("a bare machine builds")
 }
 
-fn load<I: Instrumentation>(machine: &mut VirtMachine<LentStorage<'_>, I>, at: u64, words: &[u32]) {
+fn load<I: Instrumentation>(machine: &mut VirtMachine<LentStorage<'_>, NoEl2, I>, at: u64, words: &[u32]) {
     for (i, word) in words.iter().enumerate() {
         machine.mem_write(at + 4 * i as u64, &word.to_le_bytes()).expect("code is in RAM");
     }
@@ -100,7 +100,7 @@ fn registers_and_system_registers_by_name() {
     let mut p = m.pstate();
     p.el = rusty_box_aarch64::El::El0;
     p.sp_sel = true;
-    m.set_pstate(p);
+    assert_eq!(m.set_pstate(p), Ok(()));
     assert!(!m.pstate().sp_sel, "EL0 has only SP_EL0");
     assert_eq!(m.cpu_snapshot().x[5], 0x1234);
 }
@@ -108,13 +108,13 @@ fn registers_and_system_registers_by_name() {
 /// Page tables a host writes: VA 0x4000_0000 maps 1 GiB of RAM identically
 /// (code, tables and vectors live there); VA 0x8000_0000 maps one page to
 /// RAM + 0x20000 and the page after it is unmapped.
-fn map_test_pages<I: Instrumentation>(m: &mut VirtMachine<LentStorage<'_>, I>) {
+fn map_test_pages<I: Instrumentation>(m: &mut VirtMachine<LentStorage<'_>, NoEl2, I>) {
     const AF: u64 = 1 << 10;
     const INNER_SHAREABLE: u64 = 3 << 8;
     let l1 = RAM_BASE + 0x1_0000;
     let l2 = RAM_BASE + 0x1_1000;
     let l3 = RAM_BASE + 0x1_2000;
-    let entry = |m: &mut VirtMachine<LentStorage<'_>, I>, table: u64, index: u64, desc: u64| {
+    let entry = |m: &mut VirtMachine<LentStorage<'_>, NoEl2, I>, table: u64, index: u64, desc: u64| {
         m.mem_write(table + 8 * index, &desc.to_le_bytes()).expect("tables are in RAM");
     };
     entry(m, l1, 1, RAM_BASE | AF | INNER_SHAREABLE | 0b01);
@@ -479,11 +479,12 @@ fn a_branch_drops_the_tag_under_top_byte_ignore() {
 fn spsel_written_at_el0_keeps_sp_el0() {
     let mut ram = vec![0u8; RAM_LEN];
     let mut m = bare(&mut ram, rusty_box_aarch64::NoInstrumentation);
-    m.set_pstate(Pstate {
+    let at_el0 = Pstate {
         el: El::El0,
         sp_sel: false,
         ..m.pstate()
-    });
+    };
+    assert_eq!(m.set_pstate(at_el0), Ok(()));
     assert_eq!(m.sysreg_write(SysReg::SPSEL, 1), Ok(()));
     assert!(!m.pstate().sp_sel);
     let mut image = Vec::new();
@@ -678,9 +679,12 @@ fn a_machine_that_cannot_be_built_says_why() {
 #[test]
 fn a_machine_can_move_to_another_thread() {
     fn moves<T: Send>() {}
-    moves::<VirtMachine<LentStorage<'static>>>();
+    moves::<VirtMachine<LentStorage<'static>, NoEl2>>();
+    moves::<VirtMachine<LentStorage<'static>, WithEl2>>();
     #[cfg(feature = "alloc")]
-    moves::<VirtMachine<rusty_box_aarch64::OwnedStorage>>();
+    moves::<VirtMachine<rusty_box_aarch64::OwnedStorage, NoEl2>>();
+    #[cfg(feature = "alloc")]
+    moves::<VirtMachine<rusty_box_aarch64::OwnedStorage, WithEl2>>();
 }
 
 /// The guest finds the disk where QEMU's `virt` puts the device given last:
@@ -695,7 +699,7 @@ fn a_disk_is_a_virtio_blk_the_guest_finds_and_the_machine_keeps() {
 
     /// The virtio device ID the guest reads at transport `slot`: `ldr w0,
     /// [x1]; b .` with x1 at its `DeviceID` register.
-    fn device_id(m: &mut VirtMachine<OwnedStorage>, slot: u64) -> u64 {
+    fn device_id(m: &mut VirtMachine<OwnedStorage, NoEl2>, slot: u64) -> u64 {
         m.mem_write(RAM_BASE, &0xB940_0020u32.to_le_bytes()).expect("code is in RAM");
         m.mem_write(RAM_BASE + 4, &SPIN.to_le_bytes()).expect("code is in RAM");
         m.reg_write(Reg::Pc, RAM_BASE);

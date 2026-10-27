@@ -12,7 +12,7 @@ use std::vec::Vec;
 
 use super::super::features::{Implementation, VecLen};
 use super::super::step::{exec, processor, Taken, CPACR_ALL, DATA, FP_TRAP, ILLEGAL_WHEN_STREAMING, SME_DISABLED, UNDEFINED};
-use super::super::{Cpu, El, Pstate};
+use super::super::{Cpu, El, NoEl2, Pstate};
 use super::Svcr;
 
 const SMSTART: u32 = 0xD503_477F;
@@ -44,11 +44,11 @@ const fn addsvl(rd: u32, rn: u32, imm: i32, predicate: bool) -> u32 {
     0x0420_5800 | ((predicate as u32) << 22) | (rn << 16) | (((imm as u32) & 0x3F) << 5) | rd
 }
 
-fn sme() -> Cpu {
+fn sme() -> Cpu<NoEl2> {
     processor(Implementation::EVERY_FEATURE)
 }
 
-fn at_el0(cpu: &mut Cpu) {
+fn at_el0(cpu: &mut Cpu<NoEl2>) {
     cpu.pstate = Pstate {
         el: El::El0,
         sp_sel: false,
@@ -58,7 +58,7 @@ fn at_el0(cpu: &mut Cpu) {
 
 /// The bytes of Z<n> above V<n> up to `MaxImplementedSVL`, the most any
 /// write reaches, as the register file holds them.
-fn z_upper(cpu: &Cpu, n: usize) -> Vec<u8> {
+fn z_upper(cpu: &Cpu<NoEl2>, n: usize) -> Vec<u8> {
     let len = cpu.imp.max_svl.bytes() - 16;
     if cpu.scalable.z_upper_live & (1 << n) == 0 {
         std::vec![0; len]
@@ -68,7 +68,7 @@ fn z_upper(cpu: &Cpu, n: usize) -> Vec<u8> {
 }
 
 /// Fill Z<n> above V<n> with `byte`, up to `MaxImplementedSVL`.
-fn set_z_upper(cpu: &mut Cpu, n: usize, byte: u8) {
+fn set_z_upper(cpu: &mut Cpu<NoEl2>, n: usize, byte: u8) {
     let len = cpu.imp.max_svl.bytes() - 16;
     cpu.scalable.z_upper[n][..len].fill(byte);
     cpu.scalable.z_upper_live |= 1 << n;
@@ -120,7 +120,7 @@ fn smstart_and_smstop_trap_until_cpacr_smen_enables_them() {
 #[test]
 fn entering_or_leaving_streaming_mode_resets_the_sve_state() {
     let mut cpu = sme();
-    let fill = |cpu: &mut Cpu| {
+    let fill = |cpu: &mut Cpu<NoEl2>| {
         for n in 0..32 {
             cpu.v[n] = 0x1111_2222_3333_4444_5555_6666_7777_8888 + n as u128;
             set_z_upper(cpu, n, 0xEE);
@@ -319,7 +319,7 @@ fn a_simd_and_fp_write_zeroes_the_rest_of_the_z_register() {
 #[test]
 fn an_exception_from_el0_zeroes_what_lies_beyond_the_vector_length() {
     let svl = VecLen::from_len_field(1, VecLen::MAX).bytes(); // 32 bytes
-    let prepare = |cpu: &mut Cpu| {
+    let prepare = |cpu: &mut Cpu<NoEl2>| {
         set_z_upper(cpu, 7, 0xAA);
         cpu.scalable.p[2].fill(0xFF);
         cpu.scalable.ffr.fill(0xFF);
@@ -393,7 +393,7 @@ fn a_snapshot_carries_the_sme_state() {
 /// without FEAT_SME.
 #[test]
 fn a_snapshot_with_sme_bits_no_msr_can_set_is_refused() {
-    let refused = |cpu: &Cpu, imp: Implementation| {
+    let refused = |cpu: &Cpu<NoEl2>, imp: Implementation| {
         let mut image = Vec::new();
         cpu.save(&mut image).expect("save");
         processor(imp).restore(&mut image.as_slice()).is_err()

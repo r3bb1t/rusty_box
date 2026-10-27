@@ -6,7 +6,7 @@
 use super::{Esize, Pv, Zv};
 use crate::cpu::exec::{bit, bits, sext, ExecResult, Flow};
 use crate::cpu::features::VecLen;
-use crate::cpu::Cpu;
+use crate::cpu::{Cpu, Levels};
 
 /// ZIP, UZP and TRN, of vectors and of predicates, by `opc<2:1>`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -120,7 +120,7 @@ fn copy_bytes(to: &mut Zv, to_byte: usize, from: &Zv, from_byte: usize, len: usi
     }
 }
 
-impl Cpu {
+impl<L: Levels> Cpu<L> {
     /// EXT: `00000101 0 op0 1 imm8h 000 imm8l Zm|Zn Zdn|Zd` — the bytes from
     /// `imm8` on of `Z<s2>:Z<s1>`, `s1 = Zdn, s2 = Zm` (destructive, `op0 =
     /// 0`) or `s1 = Zn, s2 = Zn + 1` (constructive, SVE2); an offset beyond

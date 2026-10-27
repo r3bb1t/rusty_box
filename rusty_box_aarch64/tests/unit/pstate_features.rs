@@ -19,7 +19,7 @@ use std::vec::Vec;
 use rusty_box_core::{ClockHz, VmClock};
 
 use super::features::{Feature, Features, Implementation, VecLen};
-use super::{id, Cpu, CpuConfig, El, Pstate, Step};
+use super::{id, Cpu, CpuConfig, El, NoEl2, Pstate, Step};
 use crate::bus::{AccessWidth, BusFault, PhysAddr, PhysBus};
 use crate::instrumentation::NoInstrumentation;
 
@@ -129,7 +129,7 @@ const fn permission_fault(write: bool) -> Option<Taken> {
 const UNDEFINED: Option<Taken> = Some(Taken { ec: UNKNOWN, iss: 0 });
 
 struct Machine {
-    cpu: Cpu,
+    cpu: Cpu<NoEl2>,
     ram: Ram,
 }
 
@@ -138,7 +138,7 @@ impl Machine {
     /// tables above.
     fn new(imp: Implementation) -> Self {
         let ips = ClockHz::new(1_000_000).unwrap_or(ClockHz::BOCHS_DEFAULT);
-        let mut cpu = Cpu::implementing(
+        let mut cpu = Cpu::<NoEl2>::implementing(
             CpuConfig {
                 ips,
                 counter_hz: ips,
@@ -425,13 +425,13 @@ fn taking_an_exception_sets_pan_and_ssbs_and_clears_uao() {
     // With SPAN set, PAN stays as the interrupted code had it.
     let mut m = Machine::new(Implementation::EVERY_FEATURE);
     m.cpu.pstate.pan = true;
-    m.cpu.take_irq();
+    m.cpu.take_irq().expect("taken at EL1");
     assert!(m.cpu.pstate.pan);
     assert_ne!(m.cpu.sys.spsr_el1 & (1 << 22), 0);
 
     let mut a57 = Machine::new(Implementation::CORTEX_A57);
     a57.cpu.sys.sctlr_el1 = (a57.cpu.sys.sctlr_el1 & !SPAN) | DSSBS;
-    a57.cpu.take_irq();
+    a57.cpu.take_irq().expect("taken at EL1");
     let p = a57.cpu.pstate;
     assert_eq!((p.pan, p.uao, p.dit, p.ssbs), (false, false, false, false));
 }

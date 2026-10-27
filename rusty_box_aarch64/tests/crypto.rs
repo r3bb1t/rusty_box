@@ -11,7 +11,7 @@
 
 use rusty_box_aarch64::board::RAM_BASE;
 use rusty_box_aarch64::{
-    LentStorage, MachineBuilder, MemoryLoan, RamSize, Reg, StopReason, SysReg, VReg, VirtConfig, VirtMachine,
+    LentStorage, MachineBuilder, MemoryLoan, NoEl2, RamSize, Reg, StopReason, SysReg, VReg, VirtConfig, VirtMachine,
 };
 
 // ----- encoders (Arm ARM C6.2 and C7.2, the instruction encodings) -----
@@ -187,7 +187,7 @@ const RAM_LEN: usize = 1 << 20;
 /// Where the data a program reads and writes lives.
 const DATA: u64 = RAM_BASE + 0x8_0000;
 
-fn machine(ram: &mut [u8]) -> VirtMachine<LentStorage<'_>> {
+fn machine(ram: &mut [u8]) -> VirtMachine<LentStorage<'_>, NoEl2> {
     let mut m = MachineBuilder::new(VirtConfig::DEFAULT)
         .ram(RamSize::bytes(RAM_LEN as u64).expect("a valid size"))
         .bare()
@@ -198,7 +198,7 @@ fn machine(ram: &mut [u8]) -> VirtMachine<LentStorage<'_>> {
 }
 
 /// Run `program` from the base of RAM up to its final `B .`.
-fn run(m: &mut VirtMachine<LentStorage<'_>>, program: &[u32]) {
+fn run(m: &mut VirtMachine<LentStorage<'_>, NoEl2>, program: &[u32]) {
     for (i, word) in program.iter().enumerate() {
         m.mem_write(RAM_BASE + 4 * i as u64, &word.to_le_bytes()).expect("code is in RAM");
     }

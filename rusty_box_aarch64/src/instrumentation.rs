@@ -1,8 +1,8 @@
 //! Watching what the guest does.
 //!
 //! An observer is a type, not a callback list: it rides along in the
-//! machine's own type (`VirtMachine<S, I>`), every hook has a do-nothing
-//! default, and dispatch is static (R8). A machine built with
+//! machine's own type (`I` in `VirtMachine<S, L, I>`), every hook has a
+//! do-nothing default, and dispatch is static (R8). A machine built with
 //! [`NoInstrumentation`] — the default — compiles every hook away, so
 //! observing nothing costs nothing; an observer pays only for the hooks it
 //! overrides.
@@ -57,23 +57,38 @@ pub enum ExceptionKind {
     /// The interrupt controller's FIQ output, taken at an instruction
     /// boundary.
     Fiq,
+    /// A virtual IRQ (`HCR_EL2.VI`, FEAT_EL2), taken at EL1 at an
+    /// instruction boundary.
+    VirtualIrq,
+    /// A virtual FIQ (`HCR_EL2.VF`), taken at EL1 at an instruction
+    /// boundary.
+    VirtualFiq,
+    /// A virtual SError (`HCR_EL2.VSE`), taken at EL1 at an instruction
+    /// boundary.
+    VirtualSError,
 }
 
-/// An exception the processor has just taken to EL1.
+/// An exception the processor has just taken.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ExceptionTaken {
     pub kind: ExceptionKind,
     /// The exception level it was taken from.
     pub from: El,
-    /// What `ELR_EL1` now holds: where an `ERET` returns to.
+    /// The exception level it was taken to: EL1, or EL2 on a processor
+    /// with FEAT_EL2.
+    pub to: El,
+    /// What `ELR_ELx` of the level it was taken to now holds: where an
+    /// `ERET` returns to.
     pub return_address: u64,
     /// The vector the processor now executes from.
     pub vector: u64,
-    /// What `ESR_EL1` now holds for a synchronous exception; zero for an
-    /// interrupt, which leaves it unchanged.
+    /// What `ESR_ELx` of the level it was taken to now holds, for a
+    /// synchronous exception or a virtual SError; zero for an IRQ or FIQ,
+    /// physical or virtual, which leaves it unchanged.
     pub syndrome: u64,
-    /// The address `FAR_EL1` now holds, for an exception that reports one:
-    /// an instruction or data abort, or a PC alignment fault.
+    /// The address `FAR_ELx` of the level it was taken to now holds, for an
+    /// exception that reports one: an instruction or data abort, or a PC
+    /// alignment fault.
     pub fault_address: Option<u64>,
 }
 

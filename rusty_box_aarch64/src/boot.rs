@@ -7,9 +7,11 @@
 //! the device tree go), `arm_load_dtb` (the `/chosen` properties), and
 //! `bootloader_aarch64`, whose effect this reproduces directly: the processor
 //! starts at the kernel's entry with `x0` holding the device tree's address,
-//! `x1`–`x3` zero and `x4` the entry, at EL1 with the MMU off and interrupts
-//! masked — the register state Linux's `Documentation/arch/arm64/booting.rst`
-//! asks for and QEMU's six-instruction stub leaves.
+//! `x1`–`x3` zero and `x4` the entry, at the processor's reset level (EL2
+//! with FEAT_EL2, as on QEMU with no EL3; EL1 without) with the MMU off and
+//! interrupts masked — the register state Linux's
+//! `Documentation/arch/arm64/booting.rst` asks for and QEMU's
+//! six-instruction stub leaves.
 //!
 //! Firmware finds the device tree at the base of RAM, where QEMU's `virt`
 //! puts it for `-bios` and `-pflash`. A directly booted kernel finds it where

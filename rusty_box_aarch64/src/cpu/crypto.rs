@@ -26,7 +26,7 @@
 use super::dp::ones;
 use super::exec::{bit, bits, ExecResult, Flow};
 use super::simd::{elem, set_elem};
-use super::Cpu;
+use super::{Cpu, Levels};
 
 // ----- AES -----
 
@@ -356,7 +356,7 @@ fn crc32_update(mut acc: u32, value: u64, bytes: u32, table: &[u32; 256]) -> u32
 
 // ----- the instructions -----
 
-impl Cpu {
+impl<L: Levels> Cpu<L> {
     /// AESE, AESD, AESMC, AESIMC (Arm class `cryptoaes`):
     /// `01001110 00 10100 001 M D 10 Rn Rd`, where bit 13 (`M`) selects the
     /// MixColumns forms and bit 12 (`D`, as Arm names it) the decryption

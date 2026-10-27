@@ -9,7 +9,7 @@
 use super::dp::{ones, replicate};
 use super::exec::{bit, bits, sext, ExecResult, Flow};
 use super::fp::FpType;
-use super::Cpu;
+use super::{Cpu, Levels};
 
 /// Element `index` of `esize` bits.
 #[inline]
@@ -94,7 +94,7 @@ fn adv_simd_expand_imm(op: bool, cmode: u32, imm8: u64) -> u64 {
     }
 }
 
-impl Cpu {
+impl<L: Levels> Cpu<L> {
     /// MOVI/MVNI/ORR/BIC (vector, immediate) and FMOV (vector, immediate):
     /// `0 Q op 0111100000 abc cmode o2 1 defgh Rd`.
     pub(crate) fn exec_simd_imm(&mut self, pc: u64, insn: u32) -> ExecResult {

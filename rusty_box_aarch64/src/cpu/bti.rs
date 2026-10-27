@@ -12,9 +12,9 @@ use super::exception::{Exception, ExceptionClass};
 use super::exec::bits;
 use super::features::Feature;
 use super::isa::{self, BranchTarget};
-use super::{Btype, Cpu, El};
+use super::{Btype, Cpu, El, Levels};
 
-impl Cpu {
+impl<L: Levels> Cpu<L> {
     /// Arm `BranchTargetCheck`, as `EndOfDecode` makes it for the
     /// instruction `insn` while PSTATE.BTYPE is not 00: in a guarded page
     /// (`in_guarded_page`, from the instruction's fetch) the instruction must
@@ -47,12 +47,15 @@ impl Cpu {
                 0b10 => btype != Btype::Call,
                 _ => true,
             },
+            // `BTypeCompatible_PACIXSP`: `SCTLR_ELx()[35]` (`BT0`) at EL0,
+            // bit 36 (`BT1` of `SCTLR_EL1`, `BT` of `SCTLR_EL2`) otherwise,
+            // of the current regime's register.
             BranchTarget::PacSp => {
                 let bt = match self.pstate.el {
                     El::El0 => 35,
-                    El::El1 => 36,
+                    El::El1 | El::El2 => 36,
                 };
-                btype != Btype::Jump || (self.sys.sctlr_el1 >> bt) & 1 == 0
+                btype != Btype::Jump || (self.regime_sctlr(self.regime()) >> bt) & 1 == 0
             }
             BranchTarget::Any => true,
             BranchTarget::Refused => false,

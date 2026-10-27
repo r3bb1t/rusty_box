@@ -7,7 +7,7 @@
 use rusty_box_core::{ClockHz, VmClock};
 
 use super::features::{Feature, Implementation};
-use super::{Cpu, CpuConfig, Step};
+use super::{Cpu, CpuConfig, Levels, NoEl2, Step};
 use crate::bus::{AccessWidth, BusFault, PhysAddr, PhysBus};
 use crate::instrumentation::NoInstrumentation;
 
@@ -61,11 +61,16 @@ impl PhysBus for OneWord<'_> {
     }
 }
 
-/// A processor implementing `imp`, with SIMD&FP enabled, and SME where
-/// there is one.
-pub(crate) fn processor(imp: Implementation) -> Cpu {
+/// A processor implementing `imp` without EL2, with SIMD&FP enabled, and
+/// SME where there is one.
+pub(crate) fn processor(imp: Implementation) -> Cpu<NoEl2> {
+    processor_with(imp)
+}
+
+/// [`processor`] implementing the exception levels `L`.
+pub(crate) fn processor_with<L: Levels>(imp: Implementation) -> Cpu<L> {
     let ips = ClockHz::new(1_000_000).unwrap_or(ClockHz::BOCHS_DEFAULT);
-    let mut cpu = Cpu::implementing(
+    let mut cpu = Cpu::<L>::implementing(
         CpuConfig {
             ips,
             counter_hz: ips,
@@ -97,7 +102,7 @@ pub(crate) const ILLEGAL_WHEN_STREAMING: Taken = Taken { ec: 0x1D, iss: 1 };
 /// the test moved it), returning the exception it took, if any. A taken
 /// exception leaves EL1; the processor is put back at the exception level
 /// it executed at, so that tests can carry on from there.
-pub(crate) fn exec(cpu: &mut Cpu, insn: u32) -> Option<Taken> {
+pub(crate) fn exec<L: Levels>(cpu: &mut Cpu<L>, insn: u32) -> Option<Taken> {
     let mut data = [0x5A; 64];
     let mut bus = OneWord {
         insn,
@@ -109,7 +114,7 @@ pub(crate) fn exec(cpu: &mut Cpu, insn: u32) -> Option<Taken> {
 
 /// [`exec`] with `ram` as the data region at [`DATA`], which the word reads
 /// and writes.
-pub(crate) fn exec_in(cpu: &mut Cpu, ram: &mut [u8], insn: u32) -> Option<Taken> {
+pub(crate) fn exec_in<L: Levels>(cpu: &mut Cpu<L>, ram: &mut [u8], insn: u32) -> Option<Taken> {
     let mut bus = OneWord {
         insn,
         data: ram,
@@ -118,7 +123,7 @@ pub(crate) fn exec_in(cpu: &mut Cpu, ram: &mut [u8], insn: u32) -> Option<Taken>
     step_on(cpu, &mut bus)
 }
 
-fn step_on(cpu: &mut Cpu, bus: &mut OneWord<'_>) -> Option<Taken> {
+fn step_on<L: Levels>(cpu: &mut Cpu<L>, bus: &mut OneWord<'_>) -> Option<Taken> {
     let insn = bus.insn;
     let pstate = cpu.pstate;
     cpu.pc = CODE;

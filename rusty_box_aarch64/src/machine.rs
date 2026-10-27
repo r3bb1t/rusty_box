@@ -20,6 +20,7 @@
 
 #[cfg(feature = "alloc")]
 use alloc::{boxed::Box, sync::Arc, vec};
+use core::marker::PhantomData;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use rusty_box_core::input::terminal::TerminalKeyboard;
@@ -41,8 +42,8 @@ use crate::boot::fdt::{self, Edit, Value};
 use crate::boot::{self, DeviceTreeError, KernelLayout, LinuxImage, PlacementError, DEVICE_TREE_CAPACITY};
 use crate::bus::{le_value, AccessWidth, BusFault, PhysAddr, PhysBus};
 use crate::cpu::{
-    Activity, Cpu, CpuConfig, CpuState, DebugStops, Pstate, Reg, Step, StopCause, SysReg, SysRegRefusal,
-    TranslationFault, UndefinedInsn, VReg,
+    Activity, Cpu, CpuConfig, CpuState, DebugStops, Implementation, Levels, NoEl2, Pstate, PsciConduit, PstateRefusal,
+    Reg, Step, StopCause, SysReg, SysRegRefusal, TranslationFault, UndefinedInsn, VReg, WithEl2,
 };
 use crate::devices::pl011::TX_CAPACITY;
 use crate::instrumentation::{Instrumentation, NoInstrumentation};
@@ -224,7 +225,9 @@ pub struct Bare;
 /// Assembles a machine. The `B` parameter records how the guest starts;
 /// only a builder that knows ([`Firmware`], [`DirectKernel`], [`Bare`]) has
 /// `build` (with `alloc`: the machine owns its memory) and `build_in` (the
-/// caller lends it).
+/// caller lends it). The `L` parameter is the exception levels its
+/// processor implements: [`NoEl2`] unless [`MachineBuilder::with_el2`]
+/// gave it EL2.
 ///
 /// ```
 /// use rusty_box_aarch64::machine::{MachineBuilder, MemoryLoan, RamSize, VirtConfig};
@@ -238,31 +241,52 @@ pub struct Bare;
 /// # Ok::<(), rusty_box_aarch64::machine::BuildError>(())
 /// ```
 #[must_use = "a builder does nothing until it builds"]
-pub struct MachineBuilder<'i, B = NoBoot, I = NoInstrumentation> {
+pub struct MachineBuilder<'i, B = NoBoot, L: Levels = NoEl2, I = NoInstrumentation> {
     config: VirtConfig,
     ram: RamSize,
     device_tree: &'i [u8],
     boot: B,
+    levels: PhantomData<L>,
     observer: I,
     plugs: Plugs,
 }
 
-impl<'i> MachineBuilder<'i, NoBoot, NoInstrumentation> {
-    /// A builder with [`RamSize::DEFAULT`] of RAM and the device tree QEMU
-    /// generates for this board.
+impl<'i> MachineBuilder<'i, NoBoot, NoEl2, NoInstrumentation> {
+    /// A builder with [`RamSize::DEFAULT`] of RAM, the device tree QEMU
+    /// generates for this board, and a processor without EL2.
     pub fn new(config: VirtConfig) -> Self {
         Self {
             config,
             ram: RamSize::DEFAULT,
             device_tree: boot::QEMU_VIRT_DEVICE_TREE,
             boot: NoBoot,
+            levels: PhantomData,
             observer: NoInstrumentation,
             plugs: Plugs::NONE,
         }
     }
 }
 
-impl<'i, B, I> MachineBuilder<'i, B, I> {
+impl<'i, B, I> MachineBuilder<'i, B, NoEl2, I> {
+    /// Give the processor EL2, the exception level a hypervisor runs at
+    /// (QEMU `-M virt,virtualization=on`): it starts there (Arm
+    /// `AArch64_TakeReset` starts at the highest implemented level, and there
+    /// is no EL3), `HVC` belongs to the guest's hypervisor, and PSCI is
+    /// called with `SMC`, as the device tree's `/psci` `method` says.
+    pub fn with_el2(self) -> MachineBuilder<'i, B, WithEl2, I> {
+        MachineBuilder {
+            config: self.config,
+            ram: self.ram,
+            device_tree: self.device_tree,
+            boot: self.boot,
+            levels: PhantomData,
+            observer: self.observer,
+            plugs: self.plugs,
+        }
+    }
+}
+
+impl<'i, B, L: Levels, I> MachineBuilder<'i, B, L, I> {
     /// How much RAM the machine has. The device tree's memory node is set to
     /// match.
     pub fn ram(mut self, size: RamSize) -> Self {
@@ -271,20 +295,22 @@ impl<'i, B, I> MachineBuilder<'i, B, I> {
     }
 
     /// Describe the board with this device tree instead of QEMU's. Its
-    /// memory node, and for a kernel its `/chosen` node, are set as the
-    /// machine requires.
+    /// memory node, for a kernel its `/chosen` node, and the `method` of its
+    /// `/psci` node, if it has one, are set as the machine requires (the
+    /// method names the conduit the levels `L` give PSCI).
     pub fn device_tree(mut self, tree: &'i [u8]) -> Self {
         self.device_tree = tree;
         self
     }
 
     /// Watch the guest with `observer`.
-    pub fn instrumentation<J: Instrumentation>(self, observer: J) -> MachineBuilder<'i, B, J> {
+    pub fn instrumentation<J: Instrumentation>(self, observer: J) -> MachineBuilder<'i, B, L, J> {
         MachineBuilder {
             config: self.config,
             ram: self.ram,
             device_tree: self.device_tree,
             boot: self.boot,
+            levels: PhantomData,
             observer,
             plugs: self.plugs,
         }
@@ -328,15 +354,15 @@ impl<'i, B, I> MachineBuilder<'i, B, I> {
     }
 }
 
-impl<'i, I> MachineBuilder<'i, NoBoot, I> {
+impl<'i, L: Levels, I> MachineBuilder<'i, NoBoot, L, I> {
     /// Start from UEFI firmware built for QEMU's `virt` (EDK2
     /// `ArmVirtQemu`). The image goes in flash bank 0 unpadded.
-    pub fn firmware(self, code: &'i [u8]) -> MachineBuilder<'i, Firmware<'i>, I> {
+    pub fn firmware(self, code: &'i [u8]) -> MachineBuilder<'i, Firmware<'i>, L, I> {
         self.with_boot(Firmware { code, variables: None })
     }
 
     /// Start a Linux kernel directly.
-    pub fn linux(self, kernel: LinuxImage<'i>) -> MachineBuilder<'i, DirectKernel<'i>, I> {
+    pub fn linux(self, kernel: LinuxImage<'i>) -> MachineBuilder<'i, DirectKernel<'i>, L, I> {
         self.with_boot(DirectKernel {
             image: kernel,
             initrd: &[],
@@ -345,23 +371,24 @@ impl<'i, I> MachineBuilder<'i, NoBoot, I> {
     }
 
     /// Start nothing.
-    pub fn bare(self) -> MachineBuilder<'i, Bare, I> {
+    pub fn bare(self) -> MachineBuilder<'i, Bare, L, I> {
         self.with_boot(Bare)
     }
 
-    fn with_boot<B>(self, boot: B) -> MachineBuilder<'i, B, I> {
+    fn with_boot<B>(self, boot: B) -> MachineBuilder<'i, B, L, I> {
         MachineBuilder {
             config: self.config,
             ram: self.ram,
             device_tree: self.device_tree,
             boot,
+            levels: PhantomData,
             observer: self.observer,
             plugs: self.plugs,
         }
     }
 }
 
-impl<'i, I> MachineBuilder<'i, Firmware<'i>, I> {
+impl<'i, L: Levels, I> MachineBuilder<'i, Firmware<'i>, L, I> {
     /// The variable store's initial contents (an EDK2 `VARS.fd`). `build`
     /// puts it at the front of an otherwise erased bank, and without one the
     /// store starts erased; `build_in` copies it over the front of the lent
@@ -372,7 +399,7 @@ impl<'i, I> MachineBuilder<'i, Firmware<'i>, I> {
     }
 }
 
-impl<'i, I> MachineBuilder<'i, DirectKernel<'i>, I> {
+impl<'i, L: Levels, I> MachineBuilder<'i, DirectKernel<'i>, L, I> {
     /// An initial RAM filesystem.
     pub fn initrd(mut self, initrd: &'i [u8]) -> Self {
         self.boot.initrd = initrd;
@@ -433,21 +460,21 @@ impl BootRecord {
 macro_rules! build_methods {
     ($boot:ty, $choice:expr) => {
         #[cfg(feature = "alloc")]
-        impl<'i, I: Instrumentation> MachineBuilder<'i, $boot, I> {
+        impl<'i, L: Levels, I: Instrumentation> MachineBuilder<'i, $boot, L, I> {
             /// Build a machine that owns its memory.
             ///
             /// # Errors
             ///
             /// [`BuildError`] when an image does not fit where it has to go.
-            pub fn build(self) -> Result<VirtMachine<OwnedStorage, I>, BuildError> {
+            pub fn build(self) -> Result<VirtMachine<OwnedStorage, L, I>, BuildError> {
                 let choice = ($choice)(self.boot);
-                let plan = plan(self.device_tree, choice, self.ram)?;
+                let plan = plan(self.device_tree, choice, self.ram, PsciConduit::of::<L>())?;
                 let storage = owned_storage(self.ram, choice)?;
                 Ok(assemble(self.config, plan, storage, self.observer, self.plugs))
             }
         }
 
-        impl<'i, I: Instrumentation> MachineBuilder<'i, $boot, I> {
+        impl<'i, L: Levels, I: Instrumentation> MachineBuilder<'i, $boot, L, I> {
             /// Build a machine that runs in memory the caller lends it,
             /// borrowing the firmware and kernel images where they are.
             ///
@@ -455,12 +482,12 @@ macro_rules! build_methods {
             ///
             /// [`BuildError`] when the loan is not the configured size or an
             /// image does not fit where it has to go; the loan is untouched.
-            pub fn build_in<'m>(self, loan: MemoryLoan<'m>) -> Result<VirtMachine<LentStorage<'m>, I>, BuildError>
+            pub fn build_in<'m>(self, loan: MemoryLoan<'m>) -> Result<VirtMachine<LentStorage<'m>, L, I>, BuildError>
             where
                 'i: 'm,
             {
                 let choice = ($choice)(self.boot);
-                let plan = plan(self.device_tree, choice, self.ram)?;
+                let plan = plan(self.device_tree, choice, self.ram, PsciConduit::of::<L>())?;
                 let storage = lent_storage(self.ram, choice, loan)?;
                 Ok(assemble(self.config, plan, storage, self.observer, self.plugs))
             }
@@ -557,9 +584,30 @@ impl DeviceTree {
     }
 }
 
-/// Edit `source` to describe a machine with `ram_len` bytes of RAM booting
-/// `choice`, into `out`.
-fn describe(source: &[u8], ram_len: u64, choice: BootChoice<'_>, layout: Option<KernelLayout>, out: &mut DeviceTree) -> Result<(), DeviceTreeError> {
+/// What `describe` needs to know about the machine besides its boot.
+#[derive(Clone, Copy)]
+struct Description<'i> {
+    ram_len: u64,
+    choice: BootChoice<'i>,
+    layout: Option<KernelLayout>,
+    /// The conduit the processor's firmware answers on.
+    psci: PsciConduit,
+}
+
+/// Edit `source` to describe the machine `machine` names, into `out`.
+///
+/// The `/psci` node's `method`, where the tree has one, names the conduit
+/// the processor's firmware answers on ([`PsciConduit::of`]). A method
+/// that already names it is left as it is, so QEMU's tree for this board,
+/// the default source, which names `"hvc"`, the conduit without EL2, is
+/// edited there only with EL2.
+fn describe(source: &[u8], machine: Description<'_>, out: &mut DeviceTree) -> Result<(), DeviceTreeError> {
+    let Description {
+        ram_len,
+        choice,
+        layout,
+        psci,
+    } = machine;
     let mut reg = [0u8; 16];
     reg[..8].copy_from_slice(&RAM_BASE.to_be_bytes());
     reg[8..].copy_from_slice(&ram_len.to_be_bytes());
@@ -574,13 +622,25 @@ fn describe(source: &[u8], ram_len: u64, choice: BootChoice<'_>, layout: Option<
         node: "memory@40000000",
         property: "device_type",
         value: Value::String("memory"),
-    }; 5];
+    }; 6];
     edits[1] = Edit {
         node: "memory@40000000",
         property: "reg",
         value: Value::Bytes(&reg),
     };
     let mut count = 2;
+    // Only a `/psci` node that names a method has one to change: a tree
+    // without one describes no PSCI firmware, and gains none. The method
+    // is one string, its bytes NUL-terminated.
+    let names_conduit = |method: &[u8]| method.strip_suffix(&[0]) == Some(psci.method().as_bytes());
+    if fdt::property(source, "psci", "method")?.is_some_and(|method| !names_conduit(method)) {
+        edits[count] = Edit {
+            node: "psci",
+            property: "method",
+            value: Value::String(psci.method()),
+        };
+        count += 1;
+    }
     if let BootChoice::Kernel(k) = choice {
         if !k.command_line.is_empty() {
             edits[count] = Edit {
@@ -615,10 +675,10 @@ struct Plan {
     device_tree: DeviceTree,
 }
 
-/// Place the boot's images in `ram` and describe the machine, refusing what
-/// does not fit. Nothing is allocated or written yet, so a refusal leaves a
-/// caller's loan untouched.
-fn plan(source_tree: &[u8], choice: BootChoice<'_>, ram: RamSize) -> Result<Plan, BuildError> {
+/// Place the boot's images in `ram` and describe the machine, whose firmware
+/// answers PSCI on `psci`, refusing what does not fit. Nothing is allocated
+/// or written yet, so a refusal leaves a caller's loan untouched.
+fn plan(source_tree: &[u8], choice: BootChoice<'_>, ram: RamSize, psci: PsciConduit) -> Result<Plan, BuildError> {
     let ram_len = ram.get();
     let boot = match choice {
         BootChoice::Firmware(_) => BootRecord::Firmware,
@@ -633,7 +693,13 @@ fn plan(source_tree: &[u8], choice: BootChoice<'_>, ram: RamSize) -> Result<Plan
         BootRecord::Firmware | BootRecord::Bare => None,
     };
     if !matches!(boot, BootRecord::Bare) {
-        describe(source_tree, ram_len, choice, layout, &mut device_tree)?;
+        let machine = Description {
+            ram_len,
+            choice,
+            layout,
+            psci,
+        };
+        describe(source_tree, machine, &mut device_tree)?;
         let tree_len = device_tree.len as u64;
         match layout {
             Some(layout) => layout.fit_device_tree(ram_len, tree_len)?,
@@ -645,13 +711,22 @@ fn plan(source_tree: &[u8], choice: BootChoice<'_>, ram: RamSize) -> Result<Plan
 }
 
 /// The machine `plan` describes, in `storage`, started.
-fn assemble<S: GuestStorage, I: Instrumentation>(config: VirtConfig, plan: Plan, storage: S, observer: I, plugs: Plugs) -> VirtMachine<S, I> {
+fn assemble<S: GuestStorage, L: Levels, I: Instrumentation>(
+    config: VirtConfig,
+    plan: Plan,
+    storage: S,
+    observer: I,
+    plugs: Plugs,
+) -> VirtMachine<S, L, I> {
     let Plan { boot, device_tree } = plan;
-    let mut cpu = Cpu::new(CpuConfig {
-        ips: config.ips,
-        counter_hz: config.counter_hz,
-        reset_pc: FLASH0_BASE,
-    });
+    let mut cpu = Cpu::implementing(
+        CpuConfig {
+            ips: config.ips,
+            counter_hz: config.counter_hz,
+            reset_pc: FLASH0_BASE,
+        },
+        Implementation::CORTEX_A57,
+    );
     cpu.set_debug_stops(config.debug_stops);
     let devices = plugs.devices;
     let mut machine = VirtMachine {
@@ -851,11 +926,12 @@ enum Slice {
 /// A Cortex-A57-shaped processor on QEMU's `virt` board.
 ///
 /// `S` is where its memory lives (`OwnedStorage`, with `alloc`, or
-/// [`LentStorage`]); `I`
+/// [`LentStorage`]); `L` is the exception levels its processor implements
+/// ([`NoEl2`], or [`WithEl2`] from [`MachineBuilder::with_el2`]); `I`
 /// watches it run ([`NoInstrumentation`] unless the builder was given an
 /// observer).
-pub struct VirtMachine<S, I = NoInstrumentation> {
-    cpu: Cpu,
+pub struct VirtMachine<S, L: Levels, I = NoInstrumentation> {
+    cpu: Cpu<L>,
     board: VirtBoard<S>,
     observer: I,
     config: VirtConfig,
@@ -928,7 +1004,7 @@ impl core::error::Error for MemoryError {
     }
 }
 
-impl<S: GuestStorage, I: Instrumentation> VirtMachine<S, I> {
+impl<S: GuestStorage, L: Levels, I: Instrumentation> VirtMachine<S, L, I> {
     /// Put the guest at its first instruction: the boot images in RAM, the
     /// processor at its entry state, the devices reset. Memory a boot does
     /// not load is left as it is.
@@ -966,8 +1042,7 @@ impl<S: GuestStorage, I: Instrumentation> VirtMachine<S, I> {
     /// interrupt inputs, and the next tick at which any of them changes.
     fn sync_events(&mut self) {
         self.cpu.take_timer_dirty();
-        let lines = self.cpu.timer_lines();
-        self.board.set_timer_lines(lines.physical, lines.virtual_);
+        self.board.set_timer_lines(self.cpu.timer_lines());
         let device_deadline = self.board.advance_devices(self.cpu.clock());
         let timer_deadline = self.cpu.next_timer_deadline();
         self.next_event = timer_deadline.into_iter().chain(device_deadline).min().map_or(u64::MAX, VmInstant::ticks);
@@ -1092,10 +1167,8 @@ impl<S: GuestStorage, I: Instrumentation> VirtMachine<S, I> {
             if self.cpu.retired >= instruction_end {
                 return Slice::Stopped(StopReason::BudgetExhausted);
             }
-            if self.cpu.interrupt_deliverable() {
-                if let Some(taken) = self.cpu.deliver_interrupt() {
-                    self.observer.exception(taken);
-                }
+            if let Some(taken) = self.cpu.deliver_interrupt() {
+                self.observer.exception(taken);
             }
             if WATCH && self.exits.contains(self.cpu.pc()) {
                 return Slice::Stopped(StopReason::ExitReached);
@@ -1248,7 +1321,7 @@ impl<S: GuestStorage, I: Instrumentation> VirtMachine<S, I> {
     }
 
     /// The power controls.
-    pub fn power(&mut self) -> Power<'_, S, I> {
+    pub fn power(&mut self) -> Power<'_, S, L, I> {
         Power { machine: self }
     }
 
@@ -1362,15 +1435,25 @@ impl<S: GuestStorage, I: Instrumentation> VirtMachine<S, I> {
         self.cpu.pstate()
     }
 
-    /// Replace `PSTATE`: the exception level, the stack pointer selection,
-    /// the masks and the flags. At EL0 `sp_sel` is cleared, since EL0 has
-    /// only `SP_EL0`.
-    pub fn set_pstate(&mut self, pstate: Pstate) {
-        self.cpu.set_pstate(pstate);
+    /// Replace `PSTATE` (the exception level, the stack pointer selection,
+    /// the masks and the flags) with what of `pstate` this processor can
+    /// hold: at EL0 `sp_sel` is cleared, since EL0 has only `SP_EL0`, and
+    /// the field of a feature the processor lacks is clear. [`Self::pstate`]
+    /// reads back what was held.
+    ///
+    /// # Errors
+    ///
+    /// [`PstateRefusal::AbsentLevel`] for EL2 on a machine built without it
+    /// ([`MachineBuilder::with_el2`]); `PSTATE` is left as it was.
+    pub fn set_pstate(&mut self, pstate: Pstate) -> Result<(), PstateRefusal> {
+        self.cpu.set_pstate(pstate)
     }
 
-    /// Read a system register with EL1's privilege and none of the controls
-    /// that trap a guest.
+    /// Read a system register with the privilege of the highest implemented
+    /// level (EL2 with FEAT_EL2, EL1 without) and none of the controls that
+    /// trap a guest. At EL2 an EL1 identification register reads the
+    /// processor's own value (`MIDR_EL1`, `MPIDR_EL1`), not the one
+    /// `VPIDR_EL2` or `VMPIDR_EL2` gives EL1.
     ///
     /// # Errors
     ///
@@ -1380,9 +1463,11 @@ impl<S: GuestStorage, I: Instrumentation> VirtMachine<S, I> {
         self.cpu.sysreg(reg)
     }
 
-    /// Write a system register as an EL1 `MSR` would, effects included: a
-    /// translation register flushes the TLB, a timer register re-evaluates
-    /// the timer lines before the next instruction.
+    /// Write a system register as an `MSR` at the highest implemented level
+    /// (EL2 with FEAT_EL2, EL1 without) would, with none of the controls
+    /// that trap a guest and the effects included: a translation register
+    /// flushes the TLB, a timer register re-evaluates the timer lines before
+    /// the next instruction.
     ///
     /// # Errors
     ///
@@ -1465,6 +1550,7 @@ impl<S: GuestStorage, I: Instrumentation> VirtMachine<S, I> {
             initrd_offset,
             devices: self.devices.mask(),
             disk: self.disk_sectors(),
+            virtualization: u8::from(L::EL2),
         }
     }
 
@@ -1589,8 +1675,21 @@ impl<S: GuestStorage, I: Instrumentation> VirtMachine<S, I> {
     }
 }
 
+/// The registers only a machine with EL2 has.
+impl<S: GuestStorage, I: Instrumentation> VirtMachine<S, WithEl2, I> {
+    /// `SP_EL2`, the stack pointer EL2 runs on with `PSTATE.SP` set.
+    pub fn sp_el2(&self) -> u64 {
+        self.cpu.sp_el2()
+    }
+
+    /// Write `SP_EL2`.
+    pub fn set_sp_el2(&mut self, value: u64) {
+        self.cpu.set_sp_el2(value);
+    }
+}
+
 const SNAPSHOT_MAGIC: [u8; 8] = *b"RBA64SNP";
-const SNAPSHOT_VERSION: u32 = 7;
+const SNAPSHOT_VERSION: u32 = 8;
 
 /// Everything about how a machine was built that a snapshot depends on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1610,6 +1709,8 @@ struct Shape {
     devices: u8,
     /// The disk's size in sectors, if there is a disk.
     disk: Option<u64>,
+    /// Whether the processor has EL2 ([`Levels::EL2`]): 1 with, 0 without.
+    virtualization: u8,
 }
 
 impl Shape {
@@ -1630,7 +1731,8 @@ impl Shape {
         w.write_u8(self.boot)?;
         w.write_u8(self.devices)?;
         w.write_bool(self.disk.is_some())?;
-        w.write_u64(self.disk.unwrap_or(0))
+        w.write_u64(self.disk.unwrap_or(0))?;
+        w.write_u8(self.virtualization)
     }
 
     fn restore<R: SnapRead>(r: &mut R) -> SnapResult<Self> {
@@ -1656,6 +1758,7 @@ impl Shape {
                 let sectors = r.read_u64()?;
                 present.then_some(sectors)
             },
+            virtualization: r.read_u8()?,
         })
     }
 }
@@ -1926,7 +2029,7 @@ impl<S: GuestStorage> SerialPort for Serial<'_, S> {
 
 /// A run of this machine always ends with an outcome, so its error is
 /// [`Infallible`](core::convert::Infallible).
-impl<S: GuestStorage, I: Instrumentation> Machine for VirtMachine<S, I> {
+impl<S: GuestStorage, L: Levels, I: Instrumentation> Machine for VirtMachine<S, L, I> {
     type Outcome = BatchOutcome;
     type Error = core::convert::Infallible;
     type Serial<'a>
@@ -1956,11 +2059,11 @@ impl<S: GuestStorage, I: Instrumentation> Machine for VirtMachine<S, I> {
 }
 
 /// The machine's power and reset controls.
-pub struct Power<'m, S, I> {
-    machine: &'m mut VirtMachine<S, I>,
+pub struct Power<'m, S, L: Levels, I> {
+    machine: &'m mut VirtMachine<S, L, I>,
 }
 
-impl<S: GuestStorage, I: Instrumentation> Power<'_, S, I> {
+impl<S: GuestStorage, L: Levels, I: Instrumentation> Power<'_, S, L, I> {
     pub fn state(&self) -> PowerState {
         self.machine.power
     }

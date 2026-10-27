@@ -49,9 +49,10 @@ impl<T: Instrumentation, E: SliceEngine<T>> RamImage for Emulator<T, E> {
 }
 
 /// An Arm board's image is its one run of RAM, from the RAM's base.
-impl<S, I> RamImage for rusty_box_aarch64::VirtMachine<S, I>
+impl<S, L, I> RamImage for rusty_box_aarch64::VirtMachine<S, L, I>
 where
     S: rusty_box_aarch64::GuestStorage,
+    L: rusty_box_aarch64::Levels,
     I: rusty_box_aarch64::Instrumentation,
 {
     type Error = VirtRamOutOfRange;

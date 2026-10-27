@@ -21,7 +21,7 @@ use rusty_box_aarch64::boot::LinuxImage;
 #[cfg(feature = "gui-egui")]
 use rusty_box_aarch64::{Key, KeyAction, PointerInput, Refreshed};
 use rusty_box_aarch64::{
-    BatchOutcome, ClockHz, KeyboardInput, MachineBuilder, OwnedStorage, RamSize, Resolution, RunBudget,
+    BatchOutcome, ClockHz, KeyboardInput, MachineBuilder, NoEl2, OwnedStorage, RamSize, Resolution, RunBudget,
     StopReason, VirtConfig, VirtMachine,
 };
 #[cfg(feature = "gui-egui")]
@@ -38,8 +38,9 @@ use crate::debugger::{
 use crate::error::RunError;
 use crate::runner::{read_required_file, Console, RunSummary};
 
-/// The machine every run here builds.
-type Virt = VirtMachine<OwnedStorage>;
+/// The machine every run here builds: without EL2, as QEMU's `virt` is
+/// without `virtualization=on`.
+type Virt = VirtMachine<OwnedStorage, NoEl2>;
 
 /// How much guest time one slice covers.
 ///

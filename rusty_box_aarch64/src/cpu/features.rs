@@ -15,6 +15,8 @@
 //! (`sysreg.rs`); `isa::tests` checks, for every implementation built, that
 //! the ID registers and the set agree.
 
+use super::el2::Levels;
+
 /// An architectural feature, by the Arm ARM's `FEAT_` name; the instruction
 /// set features are what an encoding belongs to.
 ///
@@ -186,14 +188,35 @@ pub(crate) enum Feature {
     /// FEAT_RPRES: 12-bit single-precision FRECPE and FRSQRTE estimates
     /// under FPCR.AH = 1. No encoding of its own.
     Rpres,
+    /// FEAT_EL2: Exception level 2, the hypervisor's, with its registers,
+    /// its translation regime and the traps and routing controls it holds
+    /// over EL1 and EL0. No encoding of its own: `HVC`, `ERET` and the
+    /// `SYS` forms that name EL2 are base encodings whose decode or
+    /// execution checks `HaveEL(EL2)`.
+    El2,
+    /// FEAT_AA64EL2: EL2 in AArch64 state, the only state this processor
+    /// has. No encoding of its own.
+    Aa64El2,
 }
+
+// `Feature::ALL` lists every feature in declaration order, and each has a
+// bit of a `Features` set.
+#[cfg(test)]
+const _: () = {
+    let mut i = 0;
+    while i < Feature::ALL.len() {
+        assert!(Feature::ALL[i] as usize == i, "Feature::ALL is out of declaration order");
+        i += 1;
+    }
+    assert!(Feature::ALL.len() <= u64::BITS as usize, "more features than a Features set has bits");
+};
 
 /// What the conformance tests read of a feature: `tests/unit/spec.rs`
 /// checks the decoder against Arm's data feature by feature.
 #[cfg(test)]
 impl Feature {
     /// Every feature, in declaration order.
-    pub(crate) const ALL: [Feature; 61] = [
+    pub(crate) const ALL: [Feature; 63] = [
         Feature::Base,
         Feature::Fp,
         Feature::AdvSimd,
@@ -255,6 +278,8 @@ impl Feature {
         Feature::Debugv8p4,
         Feature::Afp,
         Feature::Rpres,
+        Feature::El2,
+        Feature::Aa64El2,
     ];
 
     /// The name Arm's data gives the feature, `None` for the base set.
@@ -321,6 +346,8 @@ impl Feature {
             Self::Debugv8p4 => Some("FEAT_Debugv8p4"),
             Self::Afp => Some("FEAT_AFP"),
             Self::Rpres => Some("FEAT_RPRES"),
+            Self::El2 => Some("FEAT_EL2"),
+            Self::Aa64El2 => Some("FEAT_AA64EL2"),
         }
     }
 
@@ -361,6 +388,8 @@ impl Feature {
                 | Self::Debugv8p4
                 | Self::Afp
                 | Self::Rpres
+                | Self::El2
+                | Self::Aa64El2
         )
     }
 
@@ -373,12 +402,14 @@ impl Feature {
 }
 
 impl Feature {
+    /// The feature's bit of a [`Features`] set, whose 64 bits hold every
+    /// feature (checked where [`Feature::ALL`] is built).
     const fn bit(self) -> u64 {
         1 << self as u32
     }
 }
 
-/// A set of [`Feature`]s: what one processor implements.
+/// A set of [`Feature`]s: what one processor implements, a bit each.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct Features(u64);
 
@@ -395,6 +426,10 @@ impl Features {
         Feature::Sha256,
         Feature::Crc32,
     ]);
+
+    /// FEAT_EL2 in AArch64 state only (FEAT_AA64EL2 without FEAT_AA32EL2):
+    /// what a processor of the level set [`WithEl2`](super::WithEl2) adds.
+    const EL2: Self = Self(Feature::El2.bit() | Feature::Aa64El2.bit());
 
     /// The set of `features`.
     pub(crate) const fn of(features: &[Feature]) -> Self {
@@ -481,6 +516,17 @@ impl Implementation {
         max_svl: VecLen::MIN,
     };
 
+    /// This implementation with FEAT_EL2 and FEAT_AA64EL2 exactly when the
+    /// level set `L` has EL2: the processor's type is what decides them
+    /// ([`Cpu::implementing`](super::Cpu::implementing)).
+    pub(crate) const fn with_levels<L: Levels>(self) -> Self {
+        let without = self.features.0 & !Features::EL2.0;
+        Self {
+            features: Features(if L::EL2 { without | Features::EL2.0 } else { without }),
+            max_svl: self.max_svl,
+        }
+    }
+
     #[inline(always)]
     pub(crate) const fn has(self, feature: Feature) -> bool {
         self.features.has(feature)
@@ -491,10 +537,17 @@ impl Implementation {
 /// it.
 #[cfg(test)]
 impl Implementation {
-    /// Every feature, with Streaming SVE vectors of up to 512 bits. It is
-    /// no processor Arm permits while the rest of Armv9.2, which FEAT_SME
-    /// requires (`Features.json`: FEAT_SME implies Armv9.2), is still being
-    /// added; each feature's tests exercise that feature's own rules.
+    /// Every feature, with Streaming SVE vectors of up to 512 bits; EL2
+    /// comes with the processor's level set, as it does for every
+    /// implementation. It is no processor Arm permits while the rest of
+    /// Armv9.2, which FEAT_SME requires (`Features.json`: FEAT_SME implies
+    /// Armv9.2), is still being added; each feature's tests exercise that
+    /// feature's own rules. On [`NoEl2`](super::NoEl2) it starts at EL1,
+    /// which the instruction tests and the QEMU `max` vectors (taken on
+    /// `virt` without virtualization) run at; on [`WithEl2`](super::WithEl2)
+    /// it covers the rules where EL2 meets another feature (`CPTR_EL2`'s
+    /// traps of SIMD&FP and SME, `SMCR_EL2`, `HCR_EL2.API` and `APK`, the
+    /// EL2 regime's TBI, PAN and BTI).
     pub(crate) const EVERY_FEATURE: Self = Self {
         features: Features::of(&Feature::ALL),
         max_svl: VecLen(512),
@@ -503,6 +556,7 @@ impl Implementation {
 
 #[cfg(test)]
 mod tests {
+    use super::super::{NoEl2, WithEl2};
     use super::*;
 
     /// A feature still being built is in no processor this crate builds:
@@ -510,15 +564,23 @@ mod tests {
     /// the Cortex-A57's features, which `id`'s constants report.
     #[test]
     fn the_processors_built_implement_only_complete_features() {
-        for feature in Feature::ALL {
-            assert!(
-                feature.complete() || !Implementation::CORTEX_A57.has(feature),
-                "{feature:?} is incomplete"
-            );
-            if Implementation::CORTEX_A57.has(feature) {
-                assert!(Implementation::EVERY_FEATURE.has(feature), "{feature:?}");
+        let without = Implementation::CORTEX_A57.with_levels::<NoEl2>();
+        let with = Implementation::CORTEX_A57.with_levels::<WithEl2>();
+        for imp in [without, with] {
+            for feature in Feature::ALL {
+                assert!(feature.complete() || !imp.has(feature), "{feature:?} is incomplete");
+                if imp.has(feature) {
+                    assert!(Implementation::EVERY_FEATURE.with_levels::<WithEl2>().has(feature), "{feature:?}");
+                }
             }
         }
+        // EL2 is all the level set adds, and it decides EL2 alone.
+        for feature in Feature::ALL {
+            let el2 = matches!(feature, Feature::El2 | Feature::Aa64El2);
+            assert_eq!(with.has(feature), without.has(feature) || el2, "{feature:?}");
+            assert!(!el2 || !without.has(feature), "{feature:?}");
+        }
+        assert_eq!(with.with_levels::<NoEl2>(), without);
     }
 
     /// QARMA5 is the one algorithm the pointer authentication instructions

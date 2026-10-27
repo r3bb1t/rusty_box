@@ -18,8 +18,9 @@
 //! snapshots, and an observer type parameter — and the guide in
 //! `docs/aarch64-automation.md` walks through it.
 //!
-//! The processor model is a Cortex-A57-shaped ARMv8.0 core with EL0 and EL1
-//! only (no EL2, no EL3, no AArch32), FP and Advanced SIMD, the
+//! The processor model is a Cortex-A57-shaped ARMv8.0 core with EL0 and EL1,
+//! and EL2 on a machine built with `MachineBuilder::with_el2` (no EL3, no
+//! AArch32), FP and Advanced SIMD, the
 //! Cryptographic Extension (AES, 64-bit PMULL, SHA-1, SHA-256) and CRC32, a
 //! 4 KiB-granule stage-1 MMU and a GICv2. `cpu::id` records every
 //! identification value the guest can read, and every instruction outside
@@ -52,7 +53,10 @@ mod softfloat;
 pub mod storage;
 
 pub use bus::{AccessWidth, BusFault, PhysAddr, PhysBus};
-pub use cpu::{Btype, Cpu, CpuConfig, CpuState, El, Pstate, Reg, SysReg, SysRegRefusal, VReg};
+pub use cpu::{
+    Btype, Cpu, CpuConfig, CpuState, CpuStateEl2, El, Levels, NoEl2, Pstate, PstateRefusal, Reg, SysReg, SysRegRefusal,
+    VReg, WithEl2,
+};
 pub use instrumentation::{Instrumentation, NoInstrumentation};
 #[cfg(feature = "alloc")]
 pub use machine::StopHandle;

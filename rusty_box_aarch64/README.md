@@ -107,9 +107,9 @@ vocabulary are `rusty_box_core`'s, shared with the x86 machine.
 
 | Part | Model |
 |---|---|
-| Processor | Cortex-A57-shaped ARMv8.0: EL0/EL1 AArch64 only, the whole ARMv8.0 FP and Advanced SIMD instruction set (integer and floating point, vector and scalar, saturation setting FPSR.QC), the Cortex-A57's optional Cryptographic Extension (AES, 64-bit PMULL, SHA-1, SHA-256) and CRC32, as QEMU's `cortex-a57` has them, 4 KiB-granule stage-1 MMU with TLB, exclusives, PSCI over `HVC` as QEMU provides it |
+| Processor | Cortex-A57-shaped ARMv8.0: EL0 and EL1, and EL2 with `MachineBuilder::with_el2` (see below), AArch64 only, the whole ARMv8.0 FP and Advanced SIMD instruction set (integer and floating point, vector and scalar, saturation setting FPSR.QC), the Cortex-A57's optional Cryptographic Extension (AES, 64-bit PMULL, SHA-1, SHA-256) and CRC32, as QEMU's `cortex-a57` has them, 4 KiB-granule stage-1 MMU with TLB, exclusives, PSCI over `HVC` as QEMU provides it, or over `SMC` with EL2 |
 | Interrupts | GICv2 (no Security Extensions) + GICv2m frame |
-| Timers | EL1 physical and virtual generic timers |
+| Timers | EL1 physical and virtual generic timers; with EL2, the EL2 physical timer (`CNTHP_*`, PPI 10), `CNTVOFF_EL2` and `CNTHCTL_EL2`'s traps and event stream |
 | Devices | PL011 UART (QEMU's 16-entry receive FIFO and loopback), PL031 RTC, PL061 GPIO with QEMU's `gpio-key` power button on line 3, CFI flash ×2 (QEMU `pflash_cfi01` semantics, whole 64 MiB banks decoded), `fw_cfg` (traditional interface, no files), 32 virtio-mmio transports (QEMU's legacy layout while empty; non-legacy, as QEMU's `force-legacy=false`, once the host plugs in QEMU's 2D `virtio-gpu-device` with its EDID, `virtio-keyboard-device`, `virtio-tablet-device` or `virtio-blk-device` over a raw image in memory or a host file, which take the highest free ones), an empty PCIe ECAM/windows |
 | Board | QEMU `virt` memory map and IRQ wiring; QEMU 11.1.2's device tree in `assets/` (two QEMU bugs fixed, see "Where the references differ"), its memory node and `/chosen` set per machine |
 | Boot | UEFI firmware from flash; or a Linux `Image`, initramfs and device tree placed as QEMU's `hw/arm/boot.c` places them, entered with the register state its boot stub leaves |
@@ -152,7 +152,7 @@ synchronous external abort reports), and FEAT_Debugv8p1, FEAT_Debugv8p2
 and FEAT_Debugv8p4 (`DebugVer`, and DBGAUTHSTATUS_EL1's always-enabled
 non-invasive debug; what else they change is how breakpoints and
 watchpoints match, which never fire on any processor here (see "Not
-implemented"), and halting and external debug, the PMU and EL2, which this
+implemented"), and halting and external debug and the PMU, which this
 model does not have); FEAT_AFP (FPCR.FIZ, FPCR.AH's alternate
 floating-point behaviours in every scalar, Advanced SIMD and BFloat16
 instruction, and FPCR.NEP's merging of scalar results into the source
@@ -169,6 +169,38 @@ instructions, USDOT and SUDOT among them, and the ZA instructions are
 still to come). No processor a machine runs has them
 yet: the tests run them on a test-only processor with every feature, whose
 ID registers advertise each one.
+
+Built with `MachineBuilder::with_el2` (QEMU's
+`-M virt,virtualization=on`), the Cortex-A57 has FEAT_EL2, as QEMU's does,
+and the core runs a hypervisor's EL2 as Arm's pseudocode defines it: the
+processor resets at EL2h (`AArch64_TakeReset`, there being no EL3), with
+SP_EL2 and the EL2 system registers, each keeping only the bits Arm's data
+gives it; exceptions are taken to EL2 as `HCR_EL2.TGE`, IMO, FMO, AMO and
+TEA route them, and every trap `HCR_EL2`, `CPTR_EL2`, `MDCR_EL2`,
+`HSTR_EL2` and `CNTHCTL_EL2` define for the features a processor has
+reaches EL2 with Arm's syndrome; HVC calls the hypervisor
+(`AArch64_CallHypervisor`, UNDEFINED under `HCR_EL2.HCD`) and SMC is
+trapped by `HCR_EL2.TSC`; ERET from EL2 returns to EL2, EL1 or EL0, with
+the illegal returns `AArch64_ExceptionReturn` defines; EL2's own stage-1
+translation regime has its own TLB entries, which the `TLBI …E2` forms and
+`AT S1E2R` and `AT S1E2W` reach; and the EL2 physical timer interrupts on
+PPI 10, the virtual counter reads `CNTVOFF_EL2` back from the physical one,
+and `CNTHCTL_EL2` traps EL1's and EL0's timer accesses and drives the event
+stream EL2 sees. `HCR_EL2.VI`, `VF` and `VSE` raise a virtual IRQ, FIQ
+and SError for EL1 and EL0 where `IMO`, `FMO` and `AMO` route the physical
+kind to EL2: `ISR_EL1` shows them, each is taken to EL1 when its `PSTATE`
+mask is clear (after a deliverable physical interrupt, IRQ before FIQ
+before SError: Arm leaves the order IMPLEMENTATION DEFINED), a pending one
+ends `WFI` and `WFE`, a virtual SError reports `VSESR_EL2` (FEAT_RAS), and
+ESB defers a masked one into `VDISR_EL2`. The machine's PSCI firmware then
+answers `SMC`, as QEMU's does (see "Where the references differ"), and the
+device tree says so. Without it, the default, the processor has no EL2: it
+resets at EL1, `HVC` is the PSCI call, and the EL2 registers and
+instructions are UNDEFINED. The level set is a type parameter of the
+machine and its processor (`NoEl2` or `WithEl2`), so a processor without
+EL2 holds no EL2 state and every EL2 rule, testing a constant, compiles
+away from it. Stage 2 translation and the GIC's
+virtualization extensions are not built yet (see "Not implemented").
 
 ## Verification
 
@@ -345,7 +377,8 @@ integration tests of the public API.
   a machine whose WFE the event stream ends. Turning off any of 20
   of these rules on purpose fails a test.
 - `tests/unit/sysreg.rs` also checks FEAT_RAS (ESB, ERRIDR_EL1, the error
-  record registers UNDEFINED, DISR_EL1's bits and its snapshot, EL0 kept
+  record registers reading as zero and ignoring writes, `ERXFR_EL1` and
+  `ERXPFGF_EL1` read-only, DISR_EL1's bits and its snapshot, EL0 kept
   out, a synchronous external abort's syndrome the same with the feature
   as without) and DBGAUTHSTATUS_EL1 with and without FEAT_Debugv8p4;
   `isa::tests` the RAS and DebugVer fields of the ID registers.
@@ -408,9 +441,66 @@ integration tests of the public API.
   a reserved prfop. AARCHMRS is Arm's, under the BSD 3-clause licence, and
   is not in this repository: set `RUSTY_BOX_AARCHMRS` to the unpacked
   package when building the tests (`build.rs` then enables them; without it
-  they are ignored), and `cargo test --release -p rusty_box_aarch64 --lib --
+  they are ignored, and `cargo xtask ci` refuses to run unless given
+  `--skip-aarchmrs`), and `cargo test --release -p rusty_box_aarch64 --lib --
   --ignored the_decoder_allocates_as_arm_does_on_every_word` runs the
   exhaustive one. The source reading itself runs with every test run.
+- System register and System instruction accesses are checked against the
+  same package's `Registers.json` (`tests/unit/sysreg_spec.rs`): an
+  interpreter of each accessor's pseudocode decides what each `MRS`, `MSR`
+  and System instruction encoding an accessor names (17,967 of them, an
+  index or a generic encoding's fields expanded) does, on the Cortex-A57
+  with and without EL2 and the test-only processors with every feature
+  with and without it, at EL0, EL1 and EL2, in 154 to 225 states (per
+  processor) of the registers that control access (everything clear; SIMD&FP,
+  SVE and SME enabled; that with each bit `HCR_EL2`, `CPTR_EL2`,
+  `MDCR_EL2`, `HSTR_EL2`, `CNTHCTL_EL2`, `SCTLR_EL2`, `CPACR_EL1`,
+  `SCTLR_EL1`, `CNTKCTL_EL1` or `MDSCR_EL1` keeps set alone; the OS lock;
+  `SP_EL0` selected; random states): the access, an UNDEFINED exception
+  or a trap to a level with a class. The processor must take the same
+  exception with the syndrome `AArch64_SystemAccessTrapSyndrome` gives, or
+  none, and an encoding no accessor names (87,010 of them) must be
+  UNDEFINED but where the Arm ARM's prose on the ID register space says
+  otherwise: 9.8 million steps, 0 disagreements, about 8 s. Its table of
+  IMPLEMENTATION DEFINED choices is this model's, each with its reason.
+  The same file checks every EL2 register's
+  fieldset: written at EL2 with all ones and all zeros, each field bit
+  reads back as written, each RES0 bit as 0, each RES1 bit as 1 (75
+  registers on the two processors with EL2), the three rules the data
+  does not carry (CNTHP_CTL_EL2.ISTATUS read-only, TCR_EL2.DS RES0 without
+  FEAT_LPA2, SMPRIMAP_EL2 RES0 when `SMIDR_EL1.SMPS` is 0) named with their
+  source.
+- `tests/unit/el2.rs` checks FEAT_EL2 against Arm's pseudocode where the
+  accessors do not reach: reset at EL2, `HVC` and `HCR_EL2.HCD`, `SMC`
+  under `HCR_EL2.TSC` and as the PSCI call, `ERET` from EL2 to each level
+  and its illegal returns, `HCR_EL2.TGE` taking EL0's exceptions to EL2,
+  `HCR_EL2.TEA` taking EL1's external aborts there (and `TGE` only EL0's,
+  `SyncExternalAbortTarget`), physical IRQs and FIQs routed by `IMO` and
+  `FMO` (and masked or not by PSTATE accordingly), the virtual IRQ, FIQ
+  and SError `HCR_EL2.VI`, `VF` and `VSE` raise (taken at EL1, never at
+  EL2 or under `TGE`, their priority, the SError's `VSESR_EL2` syndrome,
+  `WFI` not waiting), `ISR_EL1` showing them, ESB deferring a masked
+  virtual SError into `VDISR_EL2`, `VPIDR_EL2` and `VMPIDR_EL2` standing in
+  for EL1's identity, and the EL2 translation regime: its own tables and
+  TLB entries apart from EL1&0's, `TLBI ALLE2`, one privilege level's
+  permissions (AP[1] and bit 53 ignored, XN), one address range with its
+  own TBI, `AT S1E2R` and `S1E2W`, and `AT S12E*` from EL2 through the
+  EL1&0 regime. `tests/unit/el2_vectors.rs` replays `tests/vectors/qemu_el2.txt`:
+  2,400 cases, generated by `tests/vectors/gen_qemu_el2.py` with a
+  bare-metal EL2 program (`qemu_el2_runner.S`, `qemu_el2.ld`) on QEMU
+  11.1.2's `-M virt,virtualization=on -cpu cortex-a57`, each writing
+  random EL2 and EL1 controls and running a System register access, a
+  hypervisor, secure monitor or supervisor call, a trapped WFI or WFE,
+  cache, TLB or address translation maintenance, a SIMD&FP access or an
+  exception return at EL0, EL1 or EL2, and reporting the exception it
+  took with its level, ESR, ELR, SPSR and FAR, or X0 after it. All of them
+  agree; the generator leaves out what QEMU's Cortex-A57 has and this core
+  does not (AArch32, the PMU, its IMPLEMENTATION DEFINED registers) and
+  DBGPRCR_EL1, which QEMU lacks. `tests/virtualization.rs` runs the board
+  with virtualization: firmware entered at EL2, the device tree's PSCI
+  method, a hypervisor taking the EL2 timer's PPI 10 and powering off with
+  `SMC`, and a snapshot holding the EL2 state that a machine built without
+  virtualization refuses before changing anything.
 - A second, independent check needs no Arm data: on all 2^32 words, every
   word the decoder hands to a handler that
   [`disarm64`](https://crates.io/crates/disarm64) 0.2 (generated from
@@ -619,14 +709,16 @@ choice is listed here with its evidence.
   monitor is armed, as QEMU's `HELPER(wfe)` chooses: the global monitor's
   clearing by another observer's store, a wake-up event, is not watched,
   and a device's DMA is such a store.
-- **No RAS error records.** With FEAT_RAS, `ERRIDR_EL1.NUM` is 0, and
-  `ERRSELR_EL1` and the `ERX*` registers (those of FEAT_RASv1p1 too) are
-  UNDEFINED, as QEMU's `minimal_ras_reginfo` has them; its comment states
-  that with no error records they may be. Arm's register data gives these
-  registers to every processor with FEAT_RAS, reading the record
-  `ERRSELR_EL1.SEL` selects; the Arm ARM's rule for a processor with no
-  record to select is in its prose, which this model was not checked
-  against. Nothing on this machine raises an SError, so ESB has nothing to
+- **No RAS error records.** With FEAT_RAS, `ERRIDR_EL1.NUM` is 0. Arm's
+  register data gives `ERRSELR_EL1` and the `ERX*` registers (those of
+  FEAT_RASv1p1 too) to every processor with FEAT_RAS, each `ERX*` register
+  reading the record `ERRSELR_EL1.SEL` selects, and their accessors trap
+  EL1 to EL2 under `HCR_EL2.TERR` (the fault injection registers under
+  `HCR_EL2.FIEN` clear); here they have those accessors, and with no
+  record to select they read as zero and ignore writes, as Linux's KVM
+  presents them to a guest with no error records. QEMU's
+  `minimal_ras_reginfo` makes them UNDEFINED, its comment stating that with
+  no error records they may be. Nothing on this machine raises an SError, so ESB has nothing to
   defer into `DISR_EL1` and only an `MSR` writes that register; it keeps
   A, IDS and bits 23:0 (which IDS makes a syndrome or RES0) and reads the
   bits RES0 whatever IDS holds as zero, where QEMU's `disr_write` keeps all
@@ -668,6 +760,33 @@ choice is listed here with its evidence.
   encodings there), and `tests/unit/sve.rs` checks the UNDEFINED
   ([docs/qemu-upstream-bugs.md](../docs/qemu-upstream-bugs.md) entry 14,
   `docs/qemu-sve-fmad-size00.patch`).
+- **PSCI is answered at the call, by firmware the processor cannot see.**
+  The board has no EL3, and Arm makes `HVC` UNDEFINED on a processor
+  without EL2 and `SMC` UNDEFINED on one without EL3 (outside the
+  `HCR_EL2.TSC` trap, `AArch64_CheckForSMCUndefOrTrap`). QEMU's `virt`
+  answers PSCI at the instruction instead, as firmware at a higher
+  exception level would (`arm_handle_psci_call`), over `HVC` without EL2
+  and over `SMC` with it (`virt.c`, `psci_conduit`), and writes that
+  conduit in the device tree's `/psci` `method`. This model does the same:
+  without EL2, `HVC` at EL1 is the PSCI call whatever its immediate, and
+  `SMC` is UNDEFINED; with EL2, `HVC` is Arm's, and `SMC` at EL2, or at
+  EL1 when `HCR_EL2.TSC` does not trap it, is the PSCI call. The call
+  returns to the next instruction with its result in X0, as an SMC or HVC
+  handled at a higher exception level does.
+- **DBGPRCR_EL1 exists.** Arm's register data gives it to every AArch64
+  processor, `MDCR_EL2.TDOSA` and `TDE` trapping EL1's accesses to EL2;
+  here it keeps CORENPDRQ. QEMU (11.1.2) has no DBGPRCR_EL1, so an access
+  is UNDEFINED at EL1 even where EL2 asked for the trap
+  ([docs/qemu-upstream-bugs.md](../docs/qemu-upstream-bugs.md) entry 15);
+  the EL2 vectors leave it out.
+- **RMR_EL1 and RMR_EL2 keep RR.** The highest level's RMR (RMR_EL1
+  without EL2, RMR_EL2 with it) holds RR, an ordinary read/write field in
+  Arm's register data, so a read after setting it returns 1; the warm
+  reset it requests is the system's to act on, and this board acts on
+  none, as QEMU does. QEMU makes both registers constants that ignore
+  writes ("the bit is strictly a request"), so RR reads 0 there
+  ([docs/qemu-upstream-bugs.md](../docs/qemu-upstream-bugs.md), "Deliberate
+  QEMU omissions"); the EL2 vectors leave them out.
 - **RPRFM is a prefetch.** Arm's data allocates PRFM (register) with
   `Rt = 11xxx` to RPRFM (FEAT_RPRFM, Armv8.8). On a core without the feature
   the word is a PRFM with a reserved `prfop`, which the Arm ARM executes as a
@@ -676,12 +795,27 @@ choice is listed here with its evidence.
 
 ## Not implemented
 
-- EL2, EL3, AArch32, and on the Cortex-A57 every post-v8.0 feature (LSE
-  atomics, PAuth, SVE, …): absent from its ID registers, so UNDEFINED, as
-  on a real ARMv8.0 core (the PAuth hints, NOPs). With no EL2 or EL3,
-  nothing traps a key or a pointer authentication instruction, and the
-  keys reset to zero, as QEMU's do, where Arm leaves them UNKNOWN. The later features the core implements (see
-  "What is modelled") are in no processor a machine runs yet.
+- EL3, AArch32, EL2 unless the machine asks for it, and on the Cortex-A57
+  every post-v8.0 feature (LSE atomics, PAuth, SVE, …): absent from its ID
+  registers, so UNDEFINED, as on a real ARMv8.0 core (the PAuth hints,
+  NOPs). With no EL3, nothing but `HCR_EL2.API` and `APK` traps a key or a
+  pointer authentication instruction, and the keys reset to zero, as
+  QEMU's do, where Arm leaves them UNKNOWN. The later features the core
+  implements (see "What is modelled") are in no processor a machine runs
+  yet.
+- Of EL2: stage-2 translation (`HCR_EL2.VM`, `DC`'s stage-2 half,
+  `VTCR_EL2` and `VTTBR_EL2` hold their bits and translate nothing, so
+  `AT S12E*` give the stage 1 result whatever they say; and
+  `ID_AA64MMFR0_EL1`'s `TGran4_2`, `TGran16_2` and `TGran64_2` read 1,
+  offering no stage-2 granule (FEAT_GTG), where QEMU's Cortex-A57 reads 0,
+  each as its stage 1 field: Arm's data permits both before ARMv8.5, and a
+  hypervisor that reads them, Linux's KVM among them, declines stage 2)
+  and the GIC's
+  virtualization extensions (no virtual CPU interface raises a virtual
+  interrupt; only `HCR_EL2` does, and the device tree's GIC node has no
+  GICH and GICV frames or maintenance interrupt, which QEMU's
+  `virtualization=on` board gives it, so Linux's KVM finds no vGIC), so a
+  hypervisor's guest cannot run yet; FEAT_VHE and the later EL2 features.
 - SHA-512, SHA-3, SM3 and SM4 (Armv8.2 options) on any processor: every
   QEMU CPU model that has them also has features the core does not
   implement yet (SVE), so no model to take their ID values from matches

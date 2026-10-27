@@ -27,11 +27,12 @@ mod pred;
 #[path = "../../../tests/unit/sve.rs"]
 mod tests;
 
+use super::exception::Route;
 use super::exec::{sext, Fault};
 use super::features::VecLen;
 use super::simd_arith::{int as simd_int, sat};
 use super::sme::SmeTrap;
-use super::Cpu;
+use super::{Cpu, Levels};
 
 /// `MAX_VL` in bytes.
 const MAX_VL_BYTES: usize = VecLen::MAX.bytes();
@@ -373,7 +374,7 @@ pub(crate) fn sat_add_scalar(value: u64, delta: i128, wide: bool, unsigned: bool
     }
 }
 
-impl Cpu {
+impl<L: Levels> Cpu<L> {
     /// Arm `CheckSVEEnabled` on this processor, which implements FEAT_SME
     /// and not FEAT_SVE, and `CurrentVL` after it. In Streaming SVE mode
     /// that is `CheckSMEEnabled`; outside it, `CheckStreamingSVEEnabled`,
@@ -383,7 +384,7 @@ impl Cpu {
     pub(crate) fn sve_check(&self) -> Result<VecLen, Fault> {
         self.check_sme_enabled()?;
         if !self.svcr.sm {
-            return Err(self.sme_trap(SmeTrap::NotStreaming));
+            return Err(self.sme_trap(SmeTrap::NotStreaming, Route::Class));
         }
         Ok(self.current_svl())
     }

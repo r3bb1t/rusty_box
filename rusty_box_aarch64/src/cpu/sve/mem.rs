@@ -20,7 +20,7 @@ use crate::bus::PhysBus;
 use crate::cpu::exec::{bit, bits, sext, ExecResult, Fault, Flow};
 use crate::cpu::features::VecLen;
 use crate::cpu::mmu::{DataAccess, Part};
-use crate::cpu::Cpu;
+use crate::cpu::{Cpu, Levels};
 
 /// What a predicated access starts with, in its pseudocode's order: the
 /// enable check and `CurrentVL`, the governing predicate `Pg` (bits 12:10),
@@ -115,7 +115,7 @@ impl Offset {
     }
 }
 
-impl Cpu {
+impl<L: Levels> Cpu<L> {
     /// The [`Predicated`] start of the access `insn`.
     fn sve_predicated_access(&self, insn: u32) -> Result<Predicated, Fault> {
         let (g, n, t) = (bits(insn, 12, 10), bits(insn, 9, 5), bits(insn, 4, 0));

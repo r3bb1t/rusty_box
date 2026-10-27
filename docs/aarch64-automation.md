@@ -74,12 +74,34 @@ Or nothing at all: a bare machine starts at the base of RAM, for a host that
 writes its own code there (section 5).
 
 The device tree is QEMU's own for this board unless `device_tree(..)` gives
-another; either way its memory node is set to the RAM the machine has, and
-`machine.device_tree()` returns what the guest was given.
+another; either way its memory node is set to the RAM the machine has, its
+`/psci` node's `method` (where it has one) to the conduit the firmware
+answers on, and `machine.device_tree()` returns what the guest was given.
 `boot::fdt::property` reads a property back out of it.
 
+**Virtualization.** `with_el2()` gives the processor EL2, the level a
+hypervisor runs at (QEMU's `virtualization=on`): it resets there, and PSCI is
+called with `SMC`, `HVC` being the hypervisor's own. The level set is part of
+the machine's type, `VirtMachine<S, NoEl2>` or `VirtMachine<S, WithEl2>`: a
+machine without EL2 holds no EL2 state and runs no EL2 check. Only a
+`WithEl2` machine has `sp_el2()` and `set_sp_el2()`, and `set_pstate`
+refuses EL2 (`PstateRefusal::AbsentLevel`) on one without it.
+
+```rust
+use rusty_box_aarch64::{El, LentStorage, MachineBuilder, MemoryLoan, RamSize, VirtConfig, VirtMachine, WithEl2};
+
+let mut ram = vec![0u8; 16 << 20];
+let machine: VirtMachine<LentStorage<'_>, WithEl2> = MachineBuilder::new(VirtConfig::DEFAULT)
+    .ram(RamSize::mib(16).expect("a valid size"))
+    .bare()
+    .with_el2()
+    .build_in(MemoryLoan { ram: &mut ram, vars: &mut [] })?;
+assert_eq!(machine.pstate().el, El::El2);
+# Ok::<(), rusty_box_aarch64::BuildError>(())
+```
+
 **Owned or lent.** `build()` gives a machine that owns its memory
-(`VirtMachine<OwnedStorage>`, movable to another thread). `build_in` runs in
+(`VirtMachine<OwnedStorage, L>`, movable to another thread). `build_in` runs in
 memory the caller lends, and borrows the firmware and kernel images where
 they are (either way the machine itself, without its RAM, is about half a
 megabyte — mostly the processor's decode cache — and is built and returned
@@ -133,9 +155,9 @@ if let Some(mut console) = machine.serial(0) {
 Waiting for a prompt is a loop of "step a little, look":
 
 ```rust,no_run
-use rusty_box_aarch64::{GuestStorage, RunBudget, VirtMachine};
+use rusty_box_aarch64::{GuestStorage, Levels, RunBudget, VirtMachine};
 
-fn wait_for<S: GuestStorage>(machine: &mut VirtMachine<S>, needle: &str, rounds: usize) -> bool {
+fn wait_for<S: GuestStorage, L: Levels>(machine: &mut VirtMachine<S, L>, needle: &str, rounds: usize) -> bool {
     let mut seen = Vec::new();
     for _ in 0..rounds {
         let outcome = machine.step(RunBudget::Ticks(5_000_000));
@@ -341,9 +363,12 @@ assert_eq!(phys, RAM_BASE, "the MMU is off out of reset");
 
 Registers are named by `Reg`, SIMD&FP registers by `VReg`, and system
 registers by encoding (`SysReg`, with constants for the common ones). A host
-reads and writes with EL1's privilege and none of the controls that trap a
-guest; a write has the effect an `MSR` would (a translation register flushes
-the TLB):
+reads and writes with the privilege of the highest implemented exception
+level (EL2 with `with_el2()`, EL1 without) and none of the controls
+that trap a guest; a write has the effect an `MSR` at that level would (a
+translation register flushes the TLB). At EL2 an EL1 identification register
+reads the processor's own value (`MIDR_EL1`, `MPIDR_EL1`), not the one
+`VPIDR_EL2` or `VMPIDR_EL2` gives EL1:
 
 ```rust
 # use rusty_box_aarch64::{MachineBuilder, MemoryLoan, RamSize, VirtConfig};

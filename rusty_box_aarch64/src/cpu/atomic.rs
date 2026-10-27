@@ -10,7 +10,7 @@
 
 use super::exec::{bit, bits, sext, ExecResult, Flow};
 use super::mmu::{DataAccess, DataDirection};
-use super::Cpu;
+use super::{Cpu, Levels};
 use crate::bus::PhysBus;
 
 /// Arm `MemAtomicOp`: what an atomic read-modify-write computes.
@@ -73,7 +73,7 @@ fn atomic_result(op: AtomicOp, old: u128, operand: u128, bits: u32) -> Option<u1
     Some(result & mask)
 }
 
-impl Cpu {
+impl<L: Levels> Cpu<L> {
     /// Arm `MemAtomic`: an atomic read-modify-write of `1 << log2` bytes at
     /// `va` (`log2` in 0..=4), returning the value read. The alignment rule
     /// is the atomic one, and the access reads and writes
@@ -158,7 +158,7 @@ impl Cpu {
         }
         let half_bits = 8 << half_log2;
         let half = (1u128 << half_bits) - 1;
-        let pair = |cpu: &Cpu, r: u32| (u128::from(cpu.x_or_zr(r)) & half) | ((u128::from(cpu.x_or_zr(r + 1)) & half) << half_bits);
+        let pair = |cpu: &Self, r: u32| (u128::from(cpu.x_or_zr(r)) & half) | ((u128::from(cpu.x_or_zr(r + 1)) & half) << half_bits);
         let compare = pair(self, rs);
         let new = pair(self, rt);
         let address = self.base_register(rn)?;

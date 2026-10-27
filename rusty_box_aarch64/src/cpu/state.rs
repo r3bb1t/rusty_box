@@ -2,12 +2,14 @@
 //! state at one moment, reset, and saving and restoring the whole processor.
 
 use rusty_box_core::snap::{SnapRead, SnapResult, SnapWrite};
-use rusty_box_core::{SnapError, VmInstant};
+use rusty_box_core::SnapError;
 
+use super::el2::El2Storage;
 use super::features::{Feature, Implementation};
-use super::regs::{CpuState, Reg, RegClass, VReg};
+use super::regs::{CpuState, CpuStateEl2, PstateRefusal, Reg, RegClass, VReg};
+use super::timer::VirtualCount;
 use super::wait::{EventRegister, Wait};
-use super::{Activity, Btype, Cpu, CpuConfig, El, ExclusiveMonitor, Pstate, SysRegs, PC_HISTORY};
+use super::{Activity, Btype, Cpu, CpuConfig, El, ExclusiveMonitor, Levels, Pstate, SysRegs, PC_HISTORY, RMR_AA64, RMR_RR};
 
 /// How a snapshot names the processor's activity.
 mod activity_tag {
@@ -37,7 +39,7 @@ pub(crate) const FPSR_MASK: u64 =
 
 /// How many system register values a snapshot carries, in
 /// [`SysRegs::to_array`] order.
-const SYSREG_COUNT: usize = 45;
+const SYSREG_COUNT: usize = 46;
 
 impl SysRegs {
     fn to_array(&self) -> [u64; SYSREG_COUNT] {
@@ -87,11 +89,13 @@ impl SysRegs {
             self.dbgwcr[0],
             self.dbgwcr[1],
             self.disr_el1,
+            self.rmr,
         ]
     }
 
+    /// The registers of [`SysRegs::to_array`]'s `a`.
     fn from_array(a: [u64; SYSREG_COUNT]) -> Self {
-        let [sctlr_el1, actlr_el1, cpacr_el1, ttbr0_el1, ttbr1_el1, tcr_el1, spsr_el1, elr_el1, esr_el1, far_el1, afsr0_el1, afsr1_el1, par_el1, mair_el1, amair_el1, vbar_el1, contextidr_el1, tpidr_el0, tpidrro_el0, tpidr_el1, tpidr2_el0, smcr_el1, csselr_el1, cntkctl_el1, cntfrq_el0, cntp_ctl_el0, cntp_cval_el0, cntv_ctl_el0, cntv_cval_el0, mdscr_el1, mdccint_el1, oslsr_el1, osdlr_el1, oseccr_el1, dbgprcr_el1, dbgclaim, bvr0, bvr1, bcr0, bcr1, wvr0, wvr1, wcr0, wcr1, disr_el1] = a;
+        let [sctlr_el1, actlr_el1, cpacr_el1, ttbr0_el1, ttbr1_el1, tcr_el1, spsr_el1, elr_el1, esr_el1, far_el1, afsr0_el1, afsr1_el1, par_el1, mair_el1, amair_el1, vbar_el1, contextidr_el1, tpidr_el0, tpidrro_el0, tpidr_el1, tpidr2_el0, smcr_el1, csselr_el1, cntkctl_el1, cntfrq_el0, cntp_ctl_el0, cntp_cval_el0, cntv_ctl_el0, cntv_cval_el0, mdscr_el1, mdccint_el1, oslsr_el1, osdlr_el1, oseccr_el1, dbgprcr_el1, dbgclaim, bvr0, bvr1, bcr0, bcr1, wvr0, wvr1, wcr0, wcr1, disr_el1, rmr] = a;
         Self {
             sctlr_el1,
             actlr_el1,
@@ -134,24 +138,25 @@ impl SysRegs {
             dbgwvr: [wvr0, wvr1],
             dbgwcr: [wcr0, wcr1],
             disr_el1,
+            rmr,
         }
     }
 }
 
-impl Cpu {
+impl<L: Levels> Cpu<L> {
     /// Instructions retired since the machine was built.
     #[inline]
     pub fn instructions(&self) -> u64 {
         self.retired
     }
 
-    /// QEMU's `arm_cpu_reset` for a core whose highest level is EL1: every
-    /// register to its reset value and execution at `reset_pc` in EL1h with
-    /// interrupts masked. Time is the machine's, not the processor's, so the
-    /// tick and instruction counts carry on, as QEMU's virtual clock does
-    /// across a system reset.
+    /// Arm `AArch64_TakeReset`: every register to its reset value and
+    /// execution at `reset_pc` at the highest implemented level, EL2h with
+    /// FEAT_EL2 and EL1h without, with interrupts masked. Time is the
+    /// machine's, not the processor's, so the tick and instruction counts
+    /// carry on across a system reset, as the board's counter does.
     pub(crate) fn reset_keeping_time(&mut self, reset_pc: u64) {
-        let fresh = Cpu::implementing(
+        let fresh = Self::implementing(
             CpuConfig {
                 ips: self.ips,
                 counter_hz: self.counter_hz,
@@ -160,7 +165,8 @@ impl Cpu {
             self.imp,
         );
         let pc_history = core::mem::take(&mut self.pc_history);
-        *self = Cpu {
+        *self = Self {
+            rvbar: self.rvbar,
             event: EventRegister::at(false, self.counter()),
             icount: self.icount,
             retired: self.retired,
@@ -215,18 +221,25 @@ impl Cpu {
         self.write_v(usize::from(reg.index()), value);
     }
 
-    /// Replace `PSTATE` with what of `pstate` this processor can hold.
-    pub(crate) fn set_pstate(&mut self, pstate: Pstate) {
+    /// Replace `PSTATE` with what of `pstate` this processor can hold, unless
+    /// it names a level the processor lacks: a field of a feature it lacks
+    /// is a bit it holds as zero, but no level stands in for an absent one.
+    pub(crate) fn set_pstate(&mut self, pstate: Pstate) -> Result<(), PstateRefusal> {
+        if pstate.el > self.highest_el() {
+            return Err(PstateRefusal::AbsentLevel);
+        }
         self.pstate = self.held(pstate);
+        Ok(())
     }
 
-    /// `pstate` as this processor holds it: at EL0 the only stack pointer
+    /// `pstate`, at a level this processor implements (its callers refuse
+    /// any other), as the processor holds it: at EL0 the only stack pointer
     /// is `SP_EL0`, so `sp_sel` is cleared there, and a field of a feature
     /// the processor lacks is clear (`btype` 00).
     pub(crate) fn held(&self, pstate: Pstate) -> Pstate {
         let has = |feature| self.implements(feature);
         Pstate {
-            sp_sel: pstate.sp_sel && pstate.el == El::El1,
+            sp_sel: pstate.sp_sel && pstate.el != El::El0,
             btype: if has(Feature::Bti) { pstate.btype } else { Btype::None },
             pan: pstate.pan && has(Feature::Pan),
             uao: pstate.uao && has(Feature::Uao),
@@ -272,6 +285,16 @@ impl Cpu {
             ttbr0_el1: self.sys.ttbr0_el1,
             ttbr1_el1: self.sys.ttbr1_el1,
             mair_el1: self.sys.mair_el1,
+            el2: self.el2_state.get().map(|state| CpuStateEl2 {
+                sp_el2: state.sp_el2,
+                elr_el2: state.regs.elr,
+                spsr_el2: state.regs.spsr,
+                esr_el2: state.regs.esr,
+                far_el2: state.regs.far,
+                vbar_el2: state.regs.vbar,
+                sctlr_el2: state.regs.sctlr,
+                hcr_el2: state.regs.hcr,
+            }),
             activity: self.activity,
             instructions: self.retired,
             ticks: self.icount,
@@ -302,6 +325,7 @@ impl Cpu {
         for value in self.sys.to_array() {
             w.write_u64(value)?;
         }
+        self.save_el2(w)?;
         w.write_bool(self.monitor.armed)?;
         w.write_u64(self.monitor.addr)?;
         w.write_u64(self.monitor.bytes)?;
@@ -314,7 +338,7 @@ impl Cpu {
         };
         w.write_u8(tag)?;
         if let Some(t) = timeout {
-            w.write_u64(t.ticks())?;
+            w.write_u64(t.get())?;
         }
         w.write_bool(self.event_register())?;
         w.write_u64(self.icount)?;
@@ -347,6 +371,9 @@ impl Cpu {
         let pc = r.read_u64()?;
         let pstate = Pstate::from_spsr(r.read_u64()?)
             .ok_or(SnapError::Invalid("processor state names an exception level or mode this core lacks"))?;
+        if pstate.el > self.highest_el() {
+            return Err(SnapError::Invalid("processor state names an exception level this processor lacks"));
+        }
         if self.held(pstate) != pstate {
             return Err(SnapError::Invalid("processor state holds a field of a feature this processor lacks"));
         }
@@ -362,6 +389,7 @@ impl Cpu {
         for value in sys.iter_mut() {
             *value = r.read_u64()?;
         }
+        let el2 = self.read_el2(r)?;
         let sys = SysRegs::from_array(sys);
         if !self.sme_registers_restorable(&sys) {
             return Err(SnapError::Invalid("snapshot holds SME register bits this processor cannot set"));
@@ -375,6 +403,9 @@ impl Cpu {
         if sys.disr_el1 & !self.disr_mask() != 0 {
             return Err(SnapError::Invalid("snapshot's DISR_EL1 holds bits this processor cannot set"));
         }
+        if sys.rmr & !RMR_RR != RMR_AA64 {
+            return Err(SnapError::Invalid("snapshot's RMR holds bits this processor cannot set"));
+        }
         let monitor = ExclusiveMonitor {
             armed: r.read_bool()?,
             addr: r.read_u64()?,
@@ -383,18 +414,14 @@ impl Cpu {
         let activity = match r.read_u8()? {
             activity_tag::RUNNING => Activity::Running,
             activity_tag::INTERRUPT => Activity::Waiting(Wait::Interrupt),
-            activity_tag::INTERRUPT_UNTIL => Activity::Waiting(Wait::InterruptUntil(VmInstant::from_ticks(r.read_u64()?))),
+            activity_tag::INTERRUPT_UNTIL => Activity::Waiting(Wait::InterruptUntil(VirtualCount::new(r.read_u64()?))),
             activity_tag::EVENT => Activity::Waiting(Wait::Event),
-            activity_tag::EVENT_UNTIL => Activity::Waiting(Wait::EventUntil(VmInstant::from_ticks(r.read_u64()?))),
+            activity_tag::EVENT_UNTIL => Activity::Waiting(Wait::EventUntil(VirtualCount::new(r.read_u64()?))),
             _ => return Err(SnapError::Invalid("processor activity names a wait this core lacks")),
         };
-        if let Activity::Waiting(Wait::InterruptUntil(deadline) | Wait::EventUntil(deadline)) = activity {
-            if !self.implements(Feature::WfxT) {
-                return Err(SnapError::Invalid("processor waits with a timeout on a processor without FEAT_WFxT"));
-            }
-            if deadline.ticks() == u64::MAX {
-                return Err(SnapError::Invalid("processor's timed wait ends at no tick the count reaches"));
-            }
+        let timed = matches!(activity, Activity::Waiting(Wait::InterruptUntil(_) | Wait::EventUntil(_)));
+        if timed && !self.implements(Feature::WfxT) {
+            return Err(SnapError::Invalid("processor waits with a timeout on a processor without FEAT_WFxT"));
         }
         let event = r.read_bool()?;
         let icount = r.read_u64()?;
@@ -414,6 +441,7 @@ impl Cpu {
         self.x = x;
         self.sp_el0 = sp_el0;
         self.sp_el1 = sp_el1;
+        self.el2_state = el2;
         self.pc = pc;
         self.pstate = pstate;
         self.v = v;
@@ -434,9 +462,10 @@ impl Cpu {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cpu::NoEl2;
     use rusty_box_core::ClockHz;
 
-    fn cpu() -> Cpu {
+    fn cpu() -> Cpu<NoEl2> {
         Cpu::new(CpuConfig {
             ips: ClockHz::BOCHS_DEFAULT,
             counter_hz: ClockHz::BOCHS_DEFAULT,
@@ -455,8 +484,16 @@ mod tests {
         };
         assert_eq!(Pstate::from_spsr(p.to_spsr()), Some(p));
         assert_eq!(Pstate::from_spsr(0x10), None, "AArch32");
-        assert_eq!(Pstate::from_spsr(0x09), None, "EL2h");
+        assert_eq!(Pstate::from_spsr(0x0D), None, "EL3h");
         assert_eq!(Pstate::from_spsr(0x01), None, "EL0 with SP_EL1 selected");
+        // EL2h is a state an SPSR encodes; a processor without EL2 refuses a
+        // host's write of it.
+        let el2h = Pstate::from_spsr(0x09).expect("EL2h");
+        assert_eq!((el2h.el, el2h.sp_sel), (El::El2, true));
+        let mut c = cpu();
+        let before = c.pstate;
+        assert_eq!(c.set_pstate(el2h), Err(PstateRefusal::AbsentLevel));
+        assert_eq!(c.pstate, before, "nothing changed");
     }
 
     #[test]

@@ -17,7 +17,7 @@ use rusty_box_core::{ClockHz, VmClock};
 
 use super::super::features::Implementation;
 use super::super::id;
-use super::super::{Cpu, CpuConfig, Step};
+use super::super::{Cpu, CpuConfig, NoEl2, Step};
 use super::{atomic_result, AtomicOp};
 use crate::bus::{AccessWidth, BusFault, PhysAddr, PhysBus};
 use crate::instrumentation::NoInstrumentation;
@@ -101,14 +101,14 @@ const PERMISSION_L2: u64 = 0b00_1110;
 /// Normal read/write, Normal read-only, Device, an invalid entry, and
 /// read-only Device.
 struct Machine {
-    cpu: Cpu,
+    cpu: Cpu<NoEl2>,
     ram: Ram,
 }
 
 impl Machine {
     fn new(imp: Implementation) -> Self {
         let ips = ClockHz::new(1_000_000).unwrap_or(ClockHz::BOCHS_DEFAULT);
-        let mut cpu = Cpu::implementing(
+        let mut cpu = Cpu::<NoEl2>::implementing(
             CpuConfig {
                 ips,
                 counter_hz: ips,

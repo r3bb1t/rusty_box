@@ -9,8 +9,10 @@ use super::{Activity, Pstate};
 ///
 /// Closed (R5). `Sp` is the stack pointer `PSTATE.SP` and the exception
 /// level currently select; `SpEl0` and `SpEl1` name the banked registers
-/// whichever is selected. `Nzcv` and `Daif` are the `PSTATE` fields in their
-/// `MRS` layout, and a write keeps only those bits, as `MSR` would.
+/// whichever is selected (`SP_EL2`, which only a machine with EL2 has, is
+/// its own: `VirtMachine::sp_el2`). `Nzcv` and `Daif` are the `PSTATE`
+/// fields in their `MRS` layout, and a write keeps only those bits, as
+/// `MSR` would.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Reg {
     X0,
@@ -237,6 +239,28 @@ sysregs! {
     /// Write-only: reading it is UNDEFINED.
     OSLAR_EL1 = (2, 0, 1, 0, 4);
     OSLSR_EL1 = (2, 0, 1, 1, 4);
+    // The EL2 registers (FEAT_EL2), absent without it.
+    SCTLR_EL2 = (3, 4, 1, 0, 0);
+    HCR_EL2 = (3, 4, 1, 1, 0);
+    MDCR_EL2 = (3, 4, 1, 1, 1);
+    CPTR_EL2 = (3, 4, 1, 1, 2);
+    TTBR0_EL2 = (3, 4, 2, 0, 0);
+    TCR_EL2 = (3, 4, 2, 0, 2);
+    VTTBR_EL2 = (3, 4, 2, 1, 0);
+    VTCR_EL2 = (3, 4, 2, 1, 2);
+    SPSR_EL2 = (3, 4, 4, 0, 0);
+    ELR_EL2 = (3, 4, 4, 0, 1);
+    SP_EL1 = (3, 4, 4, 1, 0);
+    ESR_EL2 = (3, 4, 5, 2, 0);
+    FAR_EL2 = (3, 4, 6, 0, 0);
+    HPFAR_EL2 = (3, 4, 6, 0, 4);
+    MAIR_EL2 = (3, 4, 10, 2, 0);
+    VBAR_EL2 = (3, 4, 12, 0, 0);
+    TPIDR_EL2 = (3, 4, 13, 0, 2);
+    CNTVOFF_EL2 = (3, 4, 14, 0, 3);
+    CNTHCTL_EL2 = (3, 4, 14, 1, 0);
+    CNTHP_CTL_EL2 = (3, 4, 14, 2, 1);
+    CNTHP_CVAL_EL2 = (3, 4, 14, 2, 2);
 }
 
 impl SysReg {
@@ -279,9 +303,10 @@ impl SysReg {
 
 /// Why a host's system register access was refused.
 ///
-/// A host accesses with EL1's privilege and without the controls that trap
-/// a guest (`CPACR_EL1.FPEN`, the EL0 enables), so what remains is what the
-/// register itself allows. Closed (R5).
+/// A host accesses with the highest implemented level's privilege (EL2
+/// with FEAT_EL2, EL1 without) and without the controls that trap a guest
+/// (`CPACR_EL1.FPEN`, `CPTR_EL2`, the EL0 enables), so what remains is what
+/// the register itself allows. Closed (R5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SysRegRefusal {
     /// This processor does not implement the register: a guest's access
@@ -305,6 +330,24 @@ impl core::fmt::Display for SysRegRefusal {
 }
 
 impl core::error::Error for SysRegRefusal {}
+
+/// Why a host's `PSTATE` write is refused. Closed (R5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PstateRefusal {
+    /// The state names an exception level this processor does not
+    /// implement: EL2 on one without FEAT_EL2.
+    AbsentLevel,
+}
+
+impl core::fmt::Display for PstateRefusal {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            Self::AbsentLevel => "this processor does not implement the exception level",
+        })
+    }
+}
+
+impl core::error::Error for PstateRefusal {}
 
 /// The processor's architectural state at one moment.
 ///
@@ -331,9 +374,26 @@ pub struct CpuState {
     pub ttbr0_el1: u64,
     pub ttbr1_el1: u64,
     pub mair_el1: u64,
+    /// The EL2 state, on a processor with EL2 ([`WithEl2`](super::WithEl2));
+    /// a processor without has none.
+    pub el2: Option<CpuStateEl2>,
     pub activity: Activity,
     /// Instructions retired since the machine was built.
     pub instructions: u64,
     /// Guest time since the machine was built, in ticks.
     pub ticks: u64,
+}
+
+/// The EL2 state of a processor with EL2 at one moment: `SP_EL2`, the
+/// registers an exception to EL2 and its return use, and EL2's controls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CpuStateEl2 {
+    pub sp_el2: u64,
+    pub elr_el2: u64,
+    pub spsr_el2: u64,
+    pub esr_el2: u64,
+    pub far_el2: u64,
+    pub vbar_el2: u64,
+    pub sctlr_el2: u64,
+    pub hcr_el2: u64,
 }

@@ -9,10 +9,10 @@
 use super::exec::{bit, bits, ExecResult, Flow};
 use super::fp::bf16_mul_add_long;
 use super::simd::{elem, set_elem};
-use super::Cpu;
+use super::{Cpu, Levels};
 use crate::softfloat as sf;
 
-impl Cpu {
+impl<L: Levels> Cpu<L> {
     /// BFDOT, vector (`0 Q 1 01110 01 0 Rm 1 1111 1 Rn Rd`) and by element
     /// (`0 Q 0 01111 01 L M Rm 1111 H 0 Rn Rd`). Each 32-bit lane of Vd
     /// accumulates the dot product of the matching pair of BFloat16

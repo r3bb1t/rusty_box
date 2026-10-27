@@ -22,6 +22,7 @@ use rusty_box_core::{RingBuffer, VmClock, VmInstant};
 use rusty_box_devices::display::Resolution;
 
 use crate::bus::{le_value, store_le, AccessWidth, BusFault, PhysAddr, PhysBus, RegOffset};
+use crate::cpu::TimerLines;
 use crate::devices::cfi_flash::{CfiFlash, FlashArray};
 use crate::devices::fw_cfg::FwCfg;
 use crate::devices::gicv2::GicV2;
@@ -80,6 +81,9 @@ pub const IRQ_GPIO: u32 = 32 + 7;
 pub const IRQ_VIRTIO_BASE: u32 = 32 + 16;
 pub const PPI_VIRTUAL_TIMER: u32 = 16 + 11;
 pub const PPI_PHYSICAL_TIMER: u32 = 16 + 14;
+/// The EL2 physical timer's PPI (QEMU `ARCH_TIMER_NS_EL2_IRQ`), which the
+/// device tree's `timer` node lists whether or not the processor has EL2.
+pub const PPI_HYPERVISOR_TIMER: u32 = 16 + 10;
 
 /// Bytes a host may have sent to the UART that its receive FIFO has not yet
 /// taken: the buffer a QEMU character backend holds between the host and
@@ -311,9 +315,10 @@ impl<S: GuestStorage> VirtBoard<S> {
     }
 
     /// Drive the timer PPIs.
-    pub(crate) fn set_timer_lines(&mut self, physical: bool, virtual_: bool) {
-        self.gic.set_line(PPI_PHYSICAL_TIMER, physical);
-        self.gic.set_line(PPI_VIRTUAL_TIMER, virtual_);
+    pub(crate) fn set_timer_lines(&mut self, lines: TimerLines) {
+        self.gic.set_line(PPI_PHYSICAL_TIMER, lines.physical);
+        self.gic.set_line(PPI_VIRTUAL_TIMER, lines.virtual_);
+        self.gic.set_line(PPI_HYPERVISOR_TIMER, lines.hypervisor);
     }
 
     /// Let time-driven devices catch up to `clock` and report the next

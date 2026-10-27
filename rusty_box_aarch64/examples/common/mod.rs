@@ -10,8 +10,8 @@ use std::time::Instant;
 
 use rusty_box_aarch64::cpu::DebugStops;
 use rusty_box_aarch64::{
-    CursorPos, Dimensions, Disk, DisplaySink, GuestStorage, KeyboardInput, MachineBuilder, Redraw, Reg, Refreshed,
-    Resolution, Rgb, RunBudget, StopReason, SysReg, TilePos, Typed, VgaTextModeInfo, VirtMachine,
+    CursorPos, Dimensions, Disk, DisplaySink, GuestStorage, KeyboardInput, Levels, MachineBuilder, Redraw, Reg,
+    Refreshed, Resolution, Rgb, RunBudget, StopReason, SysReg, TilePos, Typed, VgaTextModeInfo, VirtMachine,
 };
 use rusty_box_core::ClockHz;
 
@@ -68,6 +68,17 @@ pub enum Action {
     Type(Keys, String),
 }
 
+/// Whether the processor has EL2, as `--virtualization` asks (QEMU
+/// `virtualization=on`): the command line's choice between a machine of
+/// [`NoEl2`](rusty_box_aarch64::NoEl2) and one of
+/// [`WithEl2`](rusty_box_aarch64::WithEl2), two types a boot program builds
+/// apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Virtualization {
+    Off,
+    On,
+}
+
 /// Whether [`RunArgs::parse_flag`] consumed a flag.
 pub enum Parsed {
     Consumed,
@@ -90,6 +101,8 @@ pub struct RunArgs {
     pub disk: Option<String>,
     /// Where to write the display's last frame, as a binary PPM.
     pub screenshot: Option<String>,
+    /// Whether the processor has EL2 (QEMU `virtualization=on`).
+    pub virtualization: Virtualization,
 }
 
 /// How a run ended.
@@ -103,7 +116,7 @@ pub const RUN_USAGE: &str = "[--ips N] [--max-ticks N] [--slice-ticks N]\n\
      \x20      [--until <console text>]... [--type <keys>]... [--type-serial <keys>]...\n\
      \x20      [--stop-on-undefined] [--stop-on-bus-fault]\n\
      \x20      [--display WIDTHxHEIGHT] [--virtio-keyboard] [--virtio-tablet] [--disk <raw image>]\n\
-     \x20      [--screenshot <file.ppm>]";
+     \x20      [--screenshot <file.ppm>] [--virtualization]";
 
 /// The display's frames, kept as the host would show them.
 #[derive(Default)]
@@ -172,7 +185,10 @@ impl Screen {
 /// # Errors
 ///
 /// The disk image cannot be opened for reading and writing.
-pub fn plug_devices<'i, B, I>(mut builder: MachineBuilder<'i, B, I>, args: &RunArgs) -> Result<MachineBuilder<'i, B, I>, String> {
+pub fn plug_devices<'i, B, L: Levels, I>(
+    mut builder: MachineBuilder<'i, B, L, I>,
+    args: &RunArgs,
+) -> Result<MachineBuilder<'i, B, L, I>, String> {
     if let Some(size) = args.display {
         builder = builder.virtio_display(size);
     }
@@ -195,7 +211,7 @@ pub fn plug_devices<'i, B, I>(mut builder: MachineBuilder<'i, B, I>, args: &RunA
 /// # Errors
 ///
 /// The host's error syncing the disk.
-pub fn close_disk<S: GuestStorage>(machine: &mut VirtMachine<S>) -> Result<(), String> {
+pub fn close_disk<S: GuestStorage, L: Levels>(machine: &mut VirtMachine<S, L>) -> Result<(), String> {
     let Some(disk) = machine.disk_mut() else {
         return Ok(());
     };
@@ -240,6 +256,7 @@ impl RunArgs {
             virtio_tablet: false,
             disk: None,
             screenshot: None,
+            virtualization: Virtualization::Off,
         }
     }
 
@@ -275,6 +292,7 @@ impl RunArgs {
             "--virtio-tablet" => self.virtio_tablet = true,
             "--disk" => self.disk = Some(value(flag)?),
             "--screenshot" => self.screenshot = Some(value(flag)?),
+            "--virtualization" => self.virtualization = Virtualization::On,
             _ => return Ok(Parsed::NotMine),
         }
         Ok(Parsed::Consumed)
@@ -294,7 +312,7 @@ impl RunArgs {
 
 /// Type as much of `pending`, in order, as its keyboards take now, leaving
 /// the rest in it.
-fn type_pending<S: GuestStorage>(machine: &mut VirtMachine<S>, pending: &mut VecDeque<(Keys, String)>) {
+fn type_pending<S: GuestStorage, L: Levels>(machine: &mut VirtMachine<S, L>, pending: &mut VecDeque<(Keys, String)>) {
     while let Some((keys, text)) = pending.front_mut() {
         type_text(machine, *keys, text);
         if !text.is_empty() {
@@ -306,7 +324,7 @@ fn type_pending<S: GuestStorage>(machine: &mut VirtMachine<S>, pending: &mut Vec
 
 /// Type as much of `pending` as `keys` takes now, leaving the rest in it. A
 /// character with no key on a US layout goes in as its UTF-8 bytes.
-fn type_text<S: GuestStorage>(machine: &mut VirtMachine<S>, keys: Keys, pending: &mut String) {
+fn type_text<S: GuestStorage, L: Levels>(machine: &mut VirtMachine<S, L>, keys: Keys, pending: &mut String) {
     while !pending.is_empty() {
         let mut keyboard = match keys {
             Keys::Machine => machine.keyboard(),
@@ -335,7 +353,7 @@ fn type_text<S: GuestStorage>(machine: &mut VirtMachine<S>, keys: Keys, pending:
 /// stops, streaming the console to stdout, typing the script's keys as the
 /// guest takes them, and keeping the display's picture; then write the
 /// screenshot, if one was asked for.
-pub fn run<S: GuestStorage>(machine: &mut VirtMachine<S>, args: &RunArgs) -> Outcome {
+pub fn run<S: GuestStorage, L: Levels>(machine: &mut VirtMachine<S, L>, args: &RunArgs) -> Outcome {
     let mut screen = Screen::default();
     let outcome = run_with_screen(machine, args, &mut screen);
     if let Some(mut display) = machine.display() {
@@ -358,7 +376,7 @@ pub fn run<S: GuestStorage>(machine: &mut VirtMachine<S>, args: &RunArgs) -> Out
     outcome
 }
 
-fn run_with_screen<S: GuestStorage>(machine: &mut VirtMachine<S>, args: &RunArgs, screen: &mut Screen) -> Outcome {
+fn run_with_screen<S: GuestStorage, L: Levels>(machine: &mut VirtMachine<S, L>, args: &RunArgs, screen: &mut Screen) -> Outcome {
     let mut stdout = std::io::stdout().lock();
     let mut script = args.script.iter();
     let mut current = script.next();
@@ -426,7 +444,7 @@ fn run_with_screen<S: GuestStorage>(machine: &mut VirtMachine<S>, args: &RunArgs
 /// FNV-1a over the machine's guest-visible state: RAM, the variable store,
 /// and the processor registers. Equal hashes after equal tick counts are
 /// what determinism means here.
-pub fn state_hash<S: GuestStorage>(machine: &VirtMachine<S>) -> u64 {
+pub fn state_hash<S: GuestStorage, L: Levels>(machine: &VirtMachine<S, L>) -> u64 {
     let mut h: u64 = 0xCBF2_9CE4_8422_2325;
     let mut eat = |bytes: &[u8]| {
         for b in bytes {
@@ -452,7 +470,7 @@ pub fn state_hash<S: GuestStorage>(machine: &VirtMachine<S>) -> u64 {
 
 /// Print how the run ended, its speed and state hash, and — when it did not
 /// end as intended — the processor state a debugger would show first.
-pub fn report<S: GuestStorage>(machine: &VirtMachine<S>, args: &RunArgs, outcome: &Outcome, started: Instant) {
+pub fn report<S: GuestStorage, L: Levels>(machine: &VirtMachine<S, L>, args: &RunArgs, outcome: &Outcome, started: Instant) {
     let elapsed = started.elapsed().as_secs_f64();
     let ticks = machine.ticks();
     let cpu = machine.cpu_snapshot();
@@ -479,13 +497,26 @@ pub fn report<S: GuestStorage>(machine: &VirtMachine<S>, args: &RunArgs, outcome
             eprint!("x{r}={x:#x}{}", if r % 4 == 3 { "\n" } else { " " });
         }
         eprintln!();
-        for (name, reg) in [
+        let el1 = [
             ("ESR_EL1", SysReg::ESR_EL1),
             ("FAR_EL1", SysReg::FAR_EL1),
             ("ELR_EL1", SysReg::ELR_EL1),
             ("SCTLR_EL1", SysReg::SCTLR_EL1),
             ("VBAR_EL1", SysReg::VBAR_EL1),
-        ] {
+        ];
+        // With EL2, the hypervisor's own syndrome and controls as well.
+        let el2 = [
+            ("ESR_EL2", SysReg::ESR_EL2),
+            ("FAR_EL2", SysReg::FAR_EL2),
+            ("HPFAR_EL2", SysReg::HPFAR_EL2),
+            ("ELR_EL2", SysReg::ELR_EL2),
+            ("SPSR_EL2", SysReg::SPSR_EL2),
+            ("SCTLR_EL2", SysReg::SCTLR_EL2),
+            ("VBAR_EL2", SysReg::VBAR_EL2),
+            ("HCR_EL2", SysReg::HCR_EL2),
+        ];
+        let shown = if L::EL2 { &el2[..] } else { &el2[..0] };
+        for &(name, reg) in el1.iter().chain(shown) {
             match machine.sysreg_read(reg) {
                 Ok(v) => eprintln!("{name}={v:#x}"),
                 Err(refusal) => eprintln!("{name}: {refusal}"),

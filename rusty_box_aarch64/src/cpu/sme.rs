@@ -22,12 +22,14 @@ use rusty_box_core::SnapError;
 #[path = "../../tests/unit/sme.rs"]
 mod tests;
 
-use super::exception::{Exception, ExceptionClass};
+use super::el2::CPTR_TSM;
+use super::exception::{Exception, ExceptionClass, Route};
 use super::exec::{bits, ExecResult, Fault, Flow};
 use super::features::{Feature, VecLen};
 use super::state::FPSR_MASK;
 use super::sve::{Pv, Zv};
-use super::{Cpu, El};
+use super::sysreg::CPACR_SMEN;
+use super::{Cpu, El, Levels};
 
 /// `MAX_VL` in bytes: the storage behind every Z register and every
 /// horizontal vector of ZA, whatever this processor's lengths are.
@@ -101,7 +103,7 @@ impl ScalableRegs {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SmeTrap {
     /// SMTC 0b000: SME, or a register of it, is disabled by
-    /// `CPACR_EL1.SMEN`.
+    /// `CPACR_EL1.SMEN` or `CPTR_EL2.TSM`.
     AccessTrap,
     /// SMTC 0b001: an instruction that is illegal in Streaming SVE mode.
     Streaming,
@@ -130,7 +132,7 @@ enum SvcrField {
     SmZa,
 }
 
-impl Cpu {
+impl<L: Levels> Cpu<L> {
     /// Arm `V{128}(n) = value`: the SIMD&FP register is the low 128 bits of
     /// `Z<n>`, and a write of it zeroes the bits above
     /// (`Unpredictable_SVEZEROUPPER` taken as TRUE). Every write of a V
@@ -186,14 +188,21 @@ impl Cpu {
         self.imp.has(feature)
     }
 
-    /// Arm `IsSMEEnabled(el)` for EL0 and EL1, the only levels:
-    /// `CPACR_EL1.SMEN` allows SME there.
+    /// Whether `CPACR_EL1.SMEN` allows SME at `el`.
+    pub(crate) fn cpacr_sme_enabled_at(&self, el: El) -> bool {
+        self.cpacr_enabled_at(CPACR_SMEN, el)
+    }
+
+    /// Whether `CPTR_EL2.TSM` (with `HCR_EL2.E2H` 0, the only layout here)
+    /// disables SME at EL0, EL1 and EL2.
+    pub(crate) fn cptr_el2_traps_sme(&self) -> bool {
+        self.cptr_any(CPTR_TSM)
+    }
+
+    /// Arm `IsSMEEnabled(el)`: `CPACR_EL1.SMEN` at EL0 and EL1, then
+    /// `CPTR_EL2.TSM` at EL0, EL1 and EL2.
     pub(crate) fn sme_enabled_at(&self, el: El) -> bool {
-        match (self.sys.cpacr_el1 >> 24) & 3 {
-            0b11 => true,
-            0b01 => el == El::El1,
-            _ => false,
-        }
+        self.cpacr_sme_enabled_at(el) && !self.cptr_el2_traps_sme()
     }
 
     /// Arm `IsSVEEnabled(el)` on a processor without FEAT_SVE: SVE
@@ -203,33 +212,68 @@ impl Cpu {
         self.svcr.sm && self.sme_enabled_at(el)
     }
 
-    /// The SME trap of type `kind`: `SMEAccessTrap`, taken to EL1 from either
-    /// level, the instruction's own address the preferred return.
-    pub(crate) fn sme_trap(&self, kind: SmeTrap) -> Fault {
-        Exception::new(ExceptionClass::SmeAccess, kind.smtc()).into()
+    /// The SME trap of type `kind` (`SMEAccessTrap`), the instruction's own
+    /// address the preferred return: [`Route::Class`] for one whose target
+    /// is EL1 or the current level, which `HCR_EL2.TGE` takes from EL0 to
+    /// EL2, and [`Route::El2`] for `CPTR_EL2`'s.
+    pub(crate) fn sme_trap(&self, kind: SmeTrap, route: Route) -> Fault {
+        Exception::routed(ExceptionClass::SmeAccess, kind.smtc(), route).into()
     }
 
-    /// Arm `CheckSMEAccess`: the check on the SME System registers and on
-    /// `MSR SVCR*, #imm`. `SMEN` = `01` disables only EL0.
-    pub(crate) fn check_sme_access(&self) -> Result<(), Fault> {
-        if self.sme_enabled_at(self.pstate.el) {
-            Ok(())
+    /// Where Arm `CheckSMEAccess` traps an access at the current level, if
+    /// it does: `CPACR_EL1.SMEN` at EL0 and EL1 to EL1 ([`Route::Class`]),
+    /// then `CPTR_EL2.TSM` to EL2 ([`Route::El2`]). `MSR SVCR*, #imm` and the
+    /// SME System registers' accessors alike check it.
+    pub(crate) fn sme_access_trap_route(&self) -> Option<Route> {
+        if !self.cpacr_sme_enabled_at(self.pstate.el) {
+            Some(Route::Class)
+        } else if self.cptr_el2_traps_sme() {
+            Some(Route::El2)
         } else {
-            Err(self.sme_trap(SmeTrap::AccessTrap))
+            None
         }
     }
 
-    /// Arm `CheckSMEEnabled`: SME's enable first, then the SIMD&FP enable,
-    /// each with its own trap.
-    pub(crate) fn check_sme_enabled(&self) -> Result<(), Fault> {
-        self.check_sme_access()?;
-        self.fp_check()
+    /// Arm `CheckSMEAccess` for `MSR SVCR*, #imm`
+    /// ([`Cpu::sme_access_trap_route`]).
+    pub(crate) fn check_sme_access(&self) -> Result<(), Fault> {
+        match self.sme_access_trap_route() {
+            Some(route) => Err(self.sme_trap(SmeTrap::AccessTrap, route)),
+            None => Ok(()),
+        }
     }
 
-    /// Arm `CurrentSVL`: `SMCR_EL1.LEN` reduced to a supported length, at
-    /// EL0 and EL1 alike (there is no EL2 or EL3 to constrain it).
+    /// Arm `CheckSMEEnabled`, in its order: at EL0 and EL1
+    /// `CPACR_EL1.SMEN`, then `CPACR_EL1.FPEN`, each trapping to EL1; then
+    /// `CPTR_EL2.TSM`, then `CPTR_EL2.TFP`, each trapping to EL2.
+    pub(crate) fn check_sme_enabled(&self) -> Result<(), Fault> {
+        let el = self.pstate.el;
+        if !self.cpacr_sme_enabled_at(el) {
+            return Err(self.sme_trap(SmeTrap::AccessTrap, Route::Class));
+        }
+        if !self.cpacr_fp_enabled_at(el) {
+            return Err(self.fp_trap(Route::Class));
+        }
+        if self.cptr_el2_traps_sme() {
+            return Err(self.sme_trap(SmeTrap::AccessTrap, Route::El2));
+        }
+        if self.cptr_el2_traps_fp() {
+            return Err(self.fp_trap(Route::El2));
+        }
+        Ok(())
+    }
+
+    /// Arm `CurrentSVL`: the `LEN` of `SMCR_EL1` at EL0 and EL1, held to the
+    /// `LEN` of `SMCR_EL2` with EL2 enabled, and the `LEN` of `SMCR_EL2` at
+    /// EL2, reduced to a supported length. Each register holds its `LEN`
+    /// alone, the only field an `MSR` keeps.
     pub(crate) fn current_svl(&self) -> VecLen {
-        VecLen::from_len_field(self.sys.smcr_el1, self.imp.max_svl)
+        let len = match self.pstate.el {
+            El::El2 => self.el2().smcr,
+            El::El0 | El::El1 if self.el2_enabled() => self.sys.smcr_el1.min(self.el2().smcr),
+            El::El0 | El::El1 => self.sys.smcr_el1,
+        };
+        VecLen::from_len_field(len, self.imp.max_svl)
     }
 
     /// Arm `SetPSTATE_SM`: entering or leaving Streaming SVE mode resets the
@@ -270,18 +314,27 @@ impl Cpu {
         }
     }
 
-    /// Arm `MaybeZeroSVEUppers(EL1)`, which `AArch64_TakeException` does
-    /// before an exception from EL0 to EL1 changes `PSTATE`: when SVE is
-    /// enabled at EL1 and SIMD&FP at EL0, the bits of every Z, P and FFR
-    /// register above the length EL0 uses, and with ZA enabled the bits of
-    /// ZA outside the current SVL square, are zeroed
-    /// (`Unpredictable_SVEZEROUPPER` and `_SMEZEROUPPER` taken as TRUE).
-    pub(crate) fn maybe_zero_sve_uppers(&mut self) {
-        // PSTATE.EL is still EL0 here, so `fp_enabled` is IsFPEnabled(EL0).
-        if self.pstate.el != El::El0 || !self.sve_enabled_at(El::El1) || !self.fp_enabled() {
+    /// Arm `MaybeZeroSVEUppers(target_el)`, which `AArch64_TakeException`
+    /// does before an exception to `target_el` changes `PSTATE`: for an
+    /// exception to a higher level where SVE is enabled, when SIMD&FP is
+    /// enabled at the level below it (EL0 for EL1; for EL2, EL1, or EL0
+    /// under `HCR_EL2.TGE`), the bits of every Z, P and FFR register above
+    /// the length the current level uses, and with ZA enabled the bits of ZA
+    /// outside the current SVL square, are zeroed (`Unpredictable_SVEZEROUPPER`
+    /// and `_SMEZEROUPPER` taken as TRUE).
+    pub(crate) fn maybe_zero_sve_uppers(&mut self, target_el: El) {
+        if target_el.index() <= self.pstate.el.index() || !self.sve_enabled_at(target_el) {
             return;
         }
-        let vl = if self.sve_enabled_at(El::El0) { self.current_svl() } else { VecLen::MIN };
+        let lower = match target_el {
+            El::El2 if self.tge() => El::El0,
+            El::El2 => El::El1,
+            El::El0 | El::El1 => El::El0,
+        };
+        if !self.fp_enabled_at(lower) {
+            return;
+        }
+        let vl = if self.sve_enabled_at(self.pstate.el) { self.current_svl() } else { VecLen::MIN };
         let svl = self.current_svl().bytes();
         let all = self.imp.max_svl.bytes();
         let s = &mut self.scalable;

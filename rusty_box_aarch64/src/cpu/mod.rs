@@ -22,6 +22,13 @@ mod decode;
 #[path = "../../tests/unit/difftest.rs"]
 mod difftest;
 mod dp;
+mod el2;
+#[cfg(test)]
+#[path = "../../tests/unit/el2.rs"]
+mod el2_tests;
+#[cfg(test)]
+#[path = "../../tests/unit/el2_vectors.rs"]
+mod el2_vectors;
 mod exception;
 mod exec;
 mod features;
@@ -43,6 +50,7 @@ mod pointer_auth;
 #[cfg(test)]
 #[path = "../../tests/unit/pstate_features.rs"]
 mod pstate_features;
+mod regime;
 mod regs;
 mod sctlr;
 mod simd;
@@ -56,27 +64,41 @@ mod state;
 mod step;
 mod sve;
 mod sysreg;
+#[cfg(test)]
+#[path = "../../tests/unit/sysreg_spec.rs"]
+mod sysreg_spec;
 mod system;
 mod timer;
 mod wait;
 
 use rusty_box_core::{ClockHz, RingBuffer, VmClock, VmInstant};
 
+use el2::El2Storage;
+
 pub use exception::ExceptionClass;
 pub use exec::{DebugStops, Step, StopCause, UndefinedInsn};
+pub use el2::{Levels, NoEl2, WithEl2};
+pub(crate) use features::Implementation;
+pub(crate) use system::PsciConduit;
 pub use mmu::{Tlb, TranslationFault};
-pub use regs::{CpuState, Reg, SysReg, SysRegRefusal, VReg};
-pub use timer::TimerLines;
+pub use regs::{CpuState, CpuStateEl2, PstateRefusal, Reg, SysReg, SysRegRefusal, VReg};
+pub use timer::{TimerLines, VirtualCount};
 pub use wait::Wait;
 
-/// An exception level this processor implements.
+/// An exception level this architecture's AArch64 state names, short of
+/// EL3.
 ///
-/// Closed (R5): EL2 and EL3 do not exist on this core, and an `ERET` that
-/// names them is an illegal exception return, not a third variant.
+/// Closed (R5): EL3 does not exist on this core, and an `ERET` that names it
+/// is an illegal exception return, not a fourth variant. EL2 exists only on
+/// a processor implementing FEAT_EL2; on one without, nothing puts the
+/// processor at EL2: an `ERET` that names it is illegal, a snapshot that
+/// does is refused, and so is a host's
+/// [`VirtMachine::set_pstate`](crate::machine::VirtMachine::set_pstate).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum El {
     El0,
     El1,
+    El2,
 }
 
 impl El {
@@ -85,6 +107,18 @@ impl El {
         match self {
             Self::El0 => 0,
             Self::El1 => 1,
+            Self::El2 => 2,
+        }
+    }
+
+    /// The level `SPSR.M[3:2]` names, if it is one of these.
+    #[inline]
+    pub const fn from_index(index: u64) -> Option<Self> {
+        match index {
+            0 => Some(Self::El0),
+            1 => Some(Self::El1),
+            2 => Some(Self::El2),
+            _ => None,
         }
     }
 }
@@ -146,7 +180,8 @@ pub struct Pstate {
     pub i: bool,
     pub f: bool,
     pub el: El,
-    /// `PSTATE.SP`: true selects `SP_ELx` for the current EL, false `SP_EL0`.
+    /// `PSTATE.SP`: true selects `SP_ELx` for the current EL (`SP_EL1` at
+    /// EL1, `SP_EL2` at EL2), false `SP_EL0`.
     pub sp_sel: bool,
     pub ss: bool,
     pub il: bool,
@@ -169,10 +204,11 @@ pub struct Pstate {
 }
 
 impl Pstate {
-    /// The state out of reset (Arm `AArch64_TakeReset`): EL1 with `SP_EL1`,
-    /// every interrupt masked, DIT clear. PAN and UAO, which reset leaves
-    /// UNKNOWN, and SSBS, which it sets to an IMPLEMENTATION DEFINED value,
-    /// are clear, as QEMU's `arm_cpu_reset_hold` leaves them.
+    /// The state out of reset of a processor whose highest exception level
+    /// is EL1 (Arm `AArch64_TakeReset`): EL1 with `SP_EL1`, every interrupt
+    /// masked, DIT clear. PAN and UAO, which reset leaves UNKNOWN, and SSBS,
+    /// which it sets to an IMPLEMENTATION DEFINED value, are clear: this
+    /// processor's choice for each.
     pub const RESET: Self = Self {
         n: false,
         z: false,
@@ -192,6 +228,15 @@ impl Pstate {
         dit: false,
         ssbs: false,
     };
+
+    /// The state out of reset of a processor implementing the levels `L`:
+    /// Arm `AArch64_TakeReset` starts it at the highest implemented
+    /// exception level, which is EL2 with FEAT_EL2 (no EL3 here) and EL1
+    /// without, with that level's stack pointer (`PSTATE.SP` = 1).
+    pub(crate) const fn reset<L: Levels>() -> Self {
+        let el = if L::EL2 { El::El2 } else { El::El1 };
+        Self { el, ..Self::RESET }
+    }
 
     /// `SPSR_ELx.SSBS`, and the bit the `SSBS` register reads it at.
     pub(crate) const SSBS: u64 = 1 << 12;
@@ -236,15 +281,17 @@ impl Pstate {
         v
     }
 
-    /// The state an `SPSR_ELx` value describes, if it is one this processor
-    /// can be in: AArch64 (`M[4]` clear), EL0 or EL1, and at EL0 the only stack
-    /// pointer EL0 has.
+    /// The state an `SPSR_ELx` value describes, if it is one an AArch64
+    /// processor with no EL3 can be in: AArch64 (`M[4]` clear), EL0, EL1 or
+    /// EL2, and at EL0 the only stack pointer EL0 has. Whether a processor
+    /// has EL2 is the processor's question: on one without, an `ERET` to
+    /// EL2 is an illegal return and
+    /// [`VirtMachine::set_pstate`](crate::machine::VirtMachine::set_pstate)
+    /// refuses EL2.
     pub const fn from_spsr(spsr: u64) -> Option<Self> {
         let m = spsr & 0x1F;
-        let el = match (m >> 2) & 3 {
-            0 => El::El0,
-            1 => El::El1,
-            _ => return None,
+        let Some(el) = El::from_index((m >> 2) & 3) else {
+            return None;
         };
         if m & 0x10 != 0 || m & 0x2 != 0 || (matches!(el, El::El0) && m & 1 != 0) {
             return None;
@@ -388,7 +435,18 @@ pub(crate) struct SysRegs {
     /// `DISR_EL1` (FEAT_RAS): with no source of SError interrupts, only an
     /// `MSR` writes it.
     pub(crate) disr_el1: u64,
+    /// `RMR_EL1`, or with FEAT_EL2 `RMR_EL2`: the reset management register
+    /// of the highest implemented level. `AA64` (bit 0) reads as one, the
+    /// only state this processor resets into; `RR` (bit 1) holds a warm
+    /// reset request, which this board's reset controller does not act on
+    /// (Arm: "the bit is strictly a request").
+    pub(crate) rmr: u64,
 }
+
+/// `RMR_ELx.AA64`: RAO/WI, reset into AArch64 the only choice.
+pub(crate) const RMR_AA64: u64 = 1 << 0;
+/// `RMR_ELx.RR`: a warm reset request.
+pub(crate) const RMR_RR: u64 = 1 << 1;
 
 impl SysRegs {
     fn reset(counter_hz: ClockHz) -> Self {
@@ -434,6 +492,7 @@ impl SysRegs {
             dbgwvr: [0; 2],
             dbgwcr: [0; 2],
             disr_el1: 0,
+            rmr: RMR_AA64,
         }
     }
 }
@@ -442,13 +501,21 @@ impl SysRegs {
 /// post-mortem diagnostics.
 pub const PC_HISTORY: usize = 64;
 
-/// One AArch64 processing element.
-pub struct Cpu {
+/// One AArch64 processing element, implementing the exception levels `L`
+/// ([`NoEl2`] or [`WithEl2`]).
+pub struct Cpu<L: Levels> {
     pub(crate) x: [u64; 31],
     pub(crate) sp_el0: u64,
     pub(crate) sp_el1: u64,
+    /// `SP_EL2` and the EL2 registers, which only a processor with EL2
+    /// holds ([`Cpu::el2`], [`Cpu::el2_mut`], [`Cpu::sp_el2`]).
+    pub(crate) el2_state: L::State,
     pub(crate) pc: u64,
     pub(crate) pstate: Pstate,
+    /// The IMPLEMENTATION DEFINED reset address `RVBAR_EL1`, or with
+    /// FEAT_EL2 `RVBAR_EL2`, reports: the `reset_pc` the processor was built
+    /// with, whatever a boot path later starts it at.
+    pub(crate) rvbar: u64,
     /// SIMD&FP registers V0..V31, little-endian lanes in a `u128`: the low
     /// 128 bits of Z0..Z31. Every write goes through `write_v`.
     pub(crate) v: [u128; 32],
@@ -489,21 +556,26 @@ pub struct Cpu {
     pub(crate) pc_history: RingBuffer<u64, PC_HISTORY>,
 }
 
-impl Cpu {
+impl<L: Levels> Cpu<L> {
     /// A processor in its reset state, shaped like the Cortex-A57
     /// ([`id`]).
     pub fn new(config: CpuConfig) -> Self {
         Self::implementing(config, features::Implementation::CORTEX_A57)
     }
 
-    /// A processor implementing `imp`, in its reset state.
+    /// A processor implementing `imp` and the levels `L`, in its reset
+    /// state. `L` alone decides FEAT_EL2: whatever `imp` says of it is
+    /// replaced ([`Implementation::with_levels`]).
     pub(crate) fn implementing(config: CpuConfig, imp: features::Implementation) -> Self {
+        let imp = imp.with_levels::<L>();
         Self {
             x: [0; 31],
             sp_el0: 0,
             sp_el1: 0,
+            el2_state: L::State::keep(el2::El2State::reset(imp.features)),
             pc: config.reset_pc,
-            pstate: Pstate::RESET,
+            pstate: Pstate::reset::<L>(),
+            rvbar: config.reset_pc,
             v: [0; 32],
             fpcr: 0,
             fpsr: 0,
@@ -541,26 +613,6 @@ impl Cpu {
     pub fn set_interrupt_lines(&mut self, irq: bool, fiq: bool) {
         self.irq_line = irq;
         self.fiq_line = fiq;
-    }
-
-    /// Whether an interrupt input is asserted and unmasked, so that it would
-    /// be taken at the next instruction boundary.
-    #[inline]
-    pub fn interrupt_deliverable(&self) -> bool {
-        (self.irq_line && !self.pstate.i) || (self.fiq_line && !self.pstate.f)
-    }
-
-    /// Take the highest-priority deliverable interrupt, if any (FIQ before
-    /// IRQ); [`Cpu::interrupt_deliverable`] says beforehand whether one will
-    /// be taken.
-    pub fn deliver_interrupt(&mut self) -> Option<crate::instrumentation::ExceptionTaken> {
-        if self.fiq_line && !self.pstate.f {
-            Some(self.take_fiq())
-        } else if self.irq_line && !self.pstate.i {
-            Some(self.take_irq())
-        } else {
-            None
-        }
     }
 
     /// Advance time while waiting, to `until` (never backwards).
@@ -681,21 +733,26 @@ impl Cpu {
         self.set_x_or_sp(n, if sf { value } else { value & 0xFFFF_FFFF });
     }
 
+    /// The stack pointer `PSTATE.SP` and `PSTATE.EL` select (Arm `SP[]`):
+    /// `SP_EL0` with `PSTATE.SP` clear, and at EL0, which holds it clear. A
+    /// processor without EL2 is never at EL2, so for it the EL1 arm covers
+    /// both and the selection is the one test of a processor with EL1 alone.
     #[inline]
     pub(crate) fn sp_current(&self) -> u64 {
-        if self.pstate.sp_sel && self.pstate.el == El::El1 {
-            self.sp_el1
-        } else {
-            self.sp_el0
+        match (self.pstate.sp_sel, self.pstate.el) {
+            (true, El::El2) if L::EL2 => self.sp_el2(),
+            (true, El::El1 | El::El2) => self.sp_el1,
+            (false, _) | (true, El::El0) => self.sp_el0,
         }
     }
 
+    /// The write of [`Cpu::sp_current`].
     #[inline]
     pub(crate) fn set_sp_current(&mut self, value: u64) {
-        if self.pstate.sp_sel && self.pstate.el == El::El1 {
-            self.sp_el1 = value;
-        } else {
-            self.sp_el0 = value;
+        match (self.pstate.sp_sel, self.pstate.el) {
+            (true, El::El2) if L::EL2 => self.set_sp_el2(value),
+            (true, El::El1 | El::El2) => self.sp_el1 = value,
+            (false, _) | (true, El::El0) => self.sp_el0 = value,
         }
     }
 }

@@ -14,8 +14,9 @@ use std::vec::Vec;
 use rusty_box_core::{SnapError, VmClock, VmInstant};
 
 use super::super::features::{Feature, Implementation};
-use super::super::step::{processor, Taken, CODE, DATA, UNDEFINED, VBAR};
-use super::super::{Activity, Cpu, El, Pstate, Step, Wait};
+use super::super::step::{processor_with, Taken, CODE, DATA, UNDEFINED, VBAR};
+use super::super::sysreg::WriteEffect;
+use super::super::{Activity, Cpu, El, Levels, NoEl2, Pstate, Step, SysReg, VirtualCount, Wait, WithEl2};
 use crate::bus::{AccessWidth, BusFault, PhysAddr, PhysBus};
 use crate::instrumentation::NoInstrumentation;
 
@@ -83,7 +84,7 @@ enum Outcome {
 
 /// Step `insn` at `CODE` on a running processor. A taken exception leaves
 /// EL1; the processor is put back at the level it executed at.
-fn run(cpu: &mut Cpu, insn: u32) -> Outcome {
+fn run<L: Levels>(cpu: &mut Cpu<L>, insn: u32) -> Outcome {
     assert_eq!(cpu.activity, Activity::Running, "a waiting processor executes nothing");
     let pstate = cpu.pstate;
     cpu.pc = CODE;
@@ -113,13 +114,13 @@ fn run(cpu: &mut Cpu, insn: u32) -> Outcome {
 }
 
 /// End a wait the way an interrupt does: assert IRQ, wake, deassert.
-fn wake_by_interrupt(cpu: &mut Cpu) {
+fn wake_by_interrupt<L: Levels>(cpu: &mut Cpu<L>) {
     cpu.set_interrupt_lines(true, false);
     assert!(cpu.wake_if_pending(), "an interrupt ends every wait");
     cpu.set_interrupt_lines(false, false);
 }
 
-fn at_el0(cpu: &mut Cpu) {
+fn at_el0<L: Levels>(cpu: &mut Cpu<L>) {
     cpu.pstate = Pstate {
         el: El::El0,
         sp_sel: false,
@@ -131,10 +132,19 @@ fn tick(t: u64) -> VmInstant {
     VmInstant::from_ticks(t)
 }
 
+fn count(v: u64) -> VirtualCount {
+    VirtualCount::new(v)
+}
+
 /// The test processors count one tick per counter value (`step::processor`
 /// runs both at 1 MHz), so a count is its tick.
-fn cpu(imp: Implementation) -> Cpu {
-    let cpu = processor(imp);
+fn cpu(imp: Implementation) -> Cpu<NoEl2> {
+    cpu_with(imp)
+}
+
+/// [`cpu`] implementing the exception levels `L`.
+fn cpu_with<L: Levels>(imp: Implementation) -> Cpu<L> {
+    let cpu = processor_with::<L>(imp);
     assert_eq!(cpu.ips, cpu.counter_hz);
     cpu
 }
@@ -218,7 +228,7 @@ fn wfit_and_wfet_wait_until_their_timeout() {
     cpu.wait_until(tick(1000));
 
     cpu.x[1] = 1100;
-    assert_eq!(run(&mut cpu, WFIT_X1), Outcome::Waiting(Wait::InterruptUntil(tick(1100))));
+    assert_eq!(run(&mut cpu, WFIT_X1), Outcome::Waiting(Wait::InterruptUntil(count(1100))));
     assert_eq!(cpu.wake_deadline(), Some(tick(1100)));
     cpu.wait_until(tick(1099));
     assert!(!cpu.wake_if_pending(), "one tick short of the timeout");
@@ -226,7 +236,7 @@ fn wfit_and_wfet_wait_until_their_timeout() {
     assert!(cpu.wake_if_pending(), "CNTVCT_EL0 reached X1");
 
     cpu.x[1] = 5000;
-    assert_eq!(run(&mut cpu, WFIT_X1), Outcome::Waiting(Wait::InterruptUntil(tick(5000))));
+    assert_eq!(run(&mut cpu, WFIT_X1), Outcome::Waiting(Wait::InterruptUntil(count(5000))));
     wake_by_interrupt(&mut cpu);
     cpu.set_interrupt_lines(true, false);
     assert_eq!(run(&mut cpu, WFIT_X1), Outcome::Retired, "an interrupt is pending");
@@ -235,22 +245,19 @@ fn wfit_and_wfet_wait_until_their_timeout() {
     assert_eq!(run(&mut cpu, WFIT_X1), Outcome::Retired, "the timeout has been reached");
 
     cpu.x[1] = cpu.counter().get() + 50;
-    let deadline = tick(cpu.x[1]);
-    assert_eq!(run(&mut cpu, WFET_X1), Outcome::Waiting(Wait::EventUntil(deadline)));
-    assert_eq!(cpu.wake_deadline(), Some(deadline));
-    cpu.wait_until(deadline);
+    let timeout = cpu.x[1];
+    assert_eq!(run(&mut cpu, WFET_X1), Outcome::Waiting(Wait::EventUntil(count(timeout))));
+    assert_eq!(cpu.wake_deadline(), Some(tick(timeout)));
+    cpu.wait_until(tick(timeout));
     assert!(cpu.wake_if_pending());
     assert_eq!(run(&mut cpu, SEVL), Outcome::Retired);
     cpu.x[1] = u64::MAX;
     assert_eq!(run(&mut cpu, WFET_X1), Outcome::Retired, "the event completes it");
-    assert_eq!(
-        run(&mut cpu, WFET_X1),
-        Outcome::Waiting(Wait::Event),
-        "and was consumed; a timeout the tick count never reaches is none"
-    );
-    assert_eq!(cpu.wake_deadline(), None);
+    assert_eq!(run(&mut cpu, WFET_X1), Outcome::Waiting(Wait::EventUntil(count(u64::MAX))), "and was consumed");
+    assert_eq!(cpu.wake_deadline(), None, "a timeout past the last tick sets no deadline");
     wake_by_interrupt(&mut cpu);
-    assert_eq!(run(&mut cpu, WFIT_X1), Outcome::Waiting(Wait::Interrupt));
+    assert_eq!(run(&mut cpu, WFIT_X1), Outcome::Waiting(Wait::InterruptUntil(count(u64::MAX))));
+    assert_eq!(cpu.wake_deadline(), None);
     wake_by_interrupt(&mut cpu);
     assert_eq!(run(&mut cpu, WFET_XZR), Outcome::Retired, "XZR is a timeout of 0, long passed");
 
@@ -267,6 +274,44 @@ fn wfit_and_wfet_wait_until_their_timeout() {
     for insn in [WFET_X1, WFIT_X1] {
         assert_eq!(run(&mut v80, insn), Outcome::Took(UNDEFINED), "{insn:#010x} without FEAT_WFxT");
     }
+}
+
+/// The timeout of `WFIT` and `WFET` is a value of `CNTVCT_EL0`, which
+/// `CNTVOFF_EL2` sets back from the physical count: a wait lasts until the
+/// virtual count reaches it, and a timeout the virtual count has passed
+/// completes at once, while one the physical count has passed does not. A
+/// host's write of `CNTVOFF_EL2` during the wait moves its deadline.
+#[test]
+fn the_wfxt_timeout_is_a_virtual_count() {
+    let mut cpu = cpu_with::<WithEl2>(Implementation::EVERY_FEATURE);
+    cpu.pstate = Pstate {
+        el: El::El1,
+        sp_sel: true,
+        ..Pstate::RESET
+    };
+    cpu.wait_until(tick(5000));
+    cpu.el2_state.regs.cntvoff = 3000;
+    assert_eq!(cpu.virtual_count().get(), 2000);
+
+    cpu.x[1] = 2100;
+    assert_eq!(run(&mut cpu, WFIT_X1), Outcome::Waiting(Wait::InterruptUntil(count(2100))));
+    assert_eq!(cpu.wake_deadline(), Some(tick(5100)));
+    cpu.wait_until(tick(5099));
+    assert!(!cpu.wake_if_pending(), "CNTVCT_EL0 is one short of X1");
+    cpu.wait_until(tick(5100));
+    assert!(cpu.wake_if_pending(), "CNTVCT_EL0 reached X1");
+
+    cpu.x[1] = 2050;
+    assert_eq!(run(&mut cpu, WFIT_X1), Outcome::Retired, "CNTVCT_EL0 is past X1");
+    cpu.x[1] = 4000;
+    assert_eq!(run(&mut cpu, WFIT_X1), Outcome::Waiting(Wait::InterruptUntil(count(4000))), "CNTPCT_EL0 is past X1");
+    assert_eq!(cpu.wake_deadline(), Some(tick(7000)));
+    assert_eq!(cpu.host_sysreg_write(SysReg::CNTVOFF_EL2, 1500), Ok(WriteEffect::Timer));
+    assert_eq!(cpu.wake_deadline(), Some(tick(5500)), "CNTVCT_EL0 now reaches X1 sooner");
+    assert!(!cpu.wake_if_pending());
+    assert_eq!(cpu.host_sysreg_write(SysReg::CNTVOFF_EL2, 1000), Ok(WriteEffect::Timer));
+    assert!(cpu.wake_if_pending(), "CNTVCT_EL0 is now at X1");
+    assert_eq!(run(&mut cpu, WFET_X1), Outcome::Retired, "and past it");
 }
 
 /// The event stream sets the Event Register where the count's bit `EVNTI`
@@ -355,12 +400,12 @@ fn wfe_does_not_wait_while_the_exclusive_monitor_is_armed() {
 fn snapshots_keep_waits_and_the_event_register() {
     let mut cpu = cpu(Implementation::EVERY_FEATURE);
     cpu.x[1] = 777;
-    assert_eq!(run(&mut cpu, WFET_X1), Outcome::Waiting(Wait::EventUntil(tick(777))));
+    assert_eq!(run(&mut cpu, WFET_X1), Outcome::Waiting(Wait::EventUntil(count(777))));
     let mut image = Vec::new();
     cpu.save(&mut image).expect("save");
     let mut restored = self::cpu(Implementation::EVERY_FEATURE);
     restored.restore(&mut image.as_slice()).expect("restore");
-    assert_eq!(restored.activity, Activity::Waiting(Wait::EventUntil(tick(777))));
+    assert_eq!(restored.activity, Activity::Waiting(Wait::EventUntil(count(777))));
     assert_eq!(restored.wake_deadline(), Some(tick(777)));
 
     let mut cpu = self::cpu(Implementation::CORTEX_A57);
@@ -377,9 +422,10 @@ fn snapshots_keep_waits_and_the_event_register() {
     for activity in [
         Activity::Running,
         Activity::Waiting(Wait::Interrupt),
-        Activity::Waiting(Wait::InterruptUntil(tick(5))),
+        Activity::Waiting(Wait::InterruptUntil(count(5))),
         Activity::Waiting(Wait::Event),
-        Activity::Waiting(Wait::EventUntil(tick(6))),
+        Activity::Waiting(Wait::EventUntil(count(6))),
+        Activity::Waiting(Wait::EventUntil(count(u64::MAX))),
     ] {
         let mut cpu = self::cpu(Implementation::EVERY_FEATURE);
         cpu.activity = activity;
@@ -391,22 +437,17 @@ fn snapshots_keep_waits_and_the_event_register() {
     }
 
     /// A processor, a state it cannot reach, and why its restore refuses it.
-    type Unreachable = (Implementation, fn(&mut Cpu), &'static str);
-    let unreachable: [Unreachable; 3] = [
+    type Unreachable = (Implementation, fn(&mut Cpu<NoEl2>), &'static str);
+    let unreachable: [Unreachable; 2] = [
         (
             Implementation::CORTEX_A57,
-            |cpu| cpu.activity = Activity::Waiting(Wait::InterruptUntil(tick(9))),
+            |cpu| cpu.activity = Activity::Waiting(Wait::InterruptUntil(count(9))),
             "processor waits with a timeout on a processor without FEAT_WFxT",
         ),
         (
             Implementation::CORTEX_A57,
             |cpu| cpu.sys.cntkctl_el1 = EVNTIS,
             "snapshot's CNTKCTL_EL1 holds bits this processor cannot set",
-        ),
-        (
-            Implementation::EVERY_FEATURE,
-            |cpu| cpu.activity = Activity::Waiting(Wait::EventUntil(tick(u64::MAX))),
-            "processor's timed wait ends at no tick the count reaches",
         ),
     ];
     for (imp, make, refusal) in unreachable {

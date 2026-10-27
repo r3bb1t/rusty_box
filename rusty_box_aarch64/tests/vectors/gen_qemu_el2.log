@@ -1,0 +1,7 @@
+reset: MIDR 411fd070 PFR0 222 DFR0 10305106 HCR 0 SCTLR_EL2 0 CPTR 0 MDCR 6 CNTHCTL 3 SCTLR_EL1 c50838
+sysreg_el1: 285 completed, 35 took an exception to EL1, 80 to EL2
+sysreg_el0: 67 completed, 238 took an exception to EL1, 95 to EL2
+sysreg_el2: 388 completed, 0 took an exception to EL1, 12 to EL2
+insn: 186 completed, 120 took an exception to EL1, 94 to EL2
+fp: 195 completed, 112 took an exception to EL1, 93 to EL2
+eret: 49 completed, 342 took an exception to EL1, 9 to EL2

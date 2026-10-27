@@ -5,7 +5,7 @@
 //! it follows.
 
 use super::exec::{bit, bits, sext, ExecResult, Flow};
-use super::Cpu;
+use super::{Cpu, Levels};
 
 /// `AddWithCarry` result: the value and the flags it would set.
 #[derive(Debug, Clone, Copy)]
@@ -167,7 +167,7 @@ pub(crate) fn decode_bit_masks(n: bool, imms: u32, immr: u32, immediate: bool, s
     })
 }
 
-impl Cpu {
+impl<L: Levels> Cpu<L> {
     #[inline]
     fn set_flags(&mut self, r: AddResult) {
         self.pstate.n = r.n;
@@ -477,7 +477,7 @@ impl Cpu {
                 if self.pstate.el == super::El::El0 {
                     return self.undefined(pc, insn);
                 }
-                Ok(Flow::Jump(self.exception_return(self.sys.elr_el1)))
+                Ok(Flow::Jump(self.exception_return(self.elr_current())))
             }
             // DRPS is UNDEFINED outside Debug state; nothing else is defined.
             _ => self.undefined(pc, insn),

@@ -33,7 +33,8 @@ Rusty Box is a Rust port of the Bochs x86 emulator -- a complete CPU/system emul
 ## Build Commands
 
 ```bash
-cargo xtask ci                                # THE gate suite (every step in xtask/src/ci.rs + doctrine ratchets); run before every commit
+cargo xtask ci                                # THE gate suite (every step in xtask/src/ci.rs + doctrine ratchets); run before every commit.
+                                              # Needs RUSTY_BOX_AARCHMRS = the unpacked Arm AARCHMRS (aarch64 conformance tests), or --skip-aarchmrs
 cargo build --release --all-features          # Full build
 cargo test --release -p rusty_box --lib --features std   # lib tests (fast loop)
 cargo run --release --example dlxlinux --features std            # DLX headless

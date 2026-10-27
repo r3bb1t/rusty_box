@@ -25,7 +25,7 @@ use super::super::fp_estimate::fpsr::{DZC, IDC, IOC, IXC, OFC, UFC};
 use super::super::sctlr;
 use crate::softfloat::FPCR_AH;
 use super::super::step::{exec, exec_in, processor, Taken, CPACR_ALL, DATA, FP_TRAP, SME_DISABLED, UNDEFINED};
-use super::super::Cpu;
+use super::super::{Cpu, NoEl2};
 use super::{Esize, Pv, Zv};
 
 /// The SME trap with SMTC 2: an SVE instruction outside Streaming SVE mode
@@ -38,7 +38,7 @@ const CNTB_X0: u32 = 0x0420_E3E0;
 const INDEX_Z0_B: u32 = 0x0421_4000;
 
 /// A processor in Streaming SVE mode with `SMCR_EL1.LEN = len`.
-fn streaming(len: u64) -> Cpu {
+fn streaming(len: u64) -> Cpu<NoEl2> {
     let mut cpu = processor(Implementation::EVERY_FEATURE);
     cpu.sys.smcr_el1 = len;
     cpu.set_pstate_sm(true);
@@ -51,7 +51,7 @@ const fn ptrue(size: u32, pattern: u32, setflags: bool) -> u32 {
 }
 
 /// The elements of `es` of P0 that are active, at the current length.
-fn active(cpu: &Cpu, es: Esize) -> Vec<bool> {
+fn active(cpu: &Cpu<NoEl2>, es: Esize) -> Vec<bool> {
     let vl = cpu.current_svl();
     let p = cpu.p(0, vl);
     (0..es.elements(vl)).map(|e| p.active(e, es)).collect()
@@ -244,7 +244,7 @@ fn the_64_bit_multiplies_are_exact_at_their_extremes() {
     }
     cpu.set_z(1, vl, &a);
     cpu.set_z(2, vl, &b);
-    let d_lanes = |cpu: &Cpu| {
+    let d_lanes = |cpu: &Cpu<NoEl2>| {
         let z = cpu.z(0, vl);
         [z.get(0, Esize::D), z.get(1, Esize::D)]
     };
@@ -377,7 +377,7 @@ fn counting(size: usize) -> Vec<u8> {
 }
 
 /// The elements of `es` of `Z<n>` at the current length.
-fn elements(cpu: &Cpu, n: u32, es: Esize) -> Vec<u64> {
+fn elements(cpu: &Cpu<NoEl2>, n: u32, es: Esize) -> Vec<u64> {
     let vl = cpu.current_svl();
     let z = cpu.z(n, vl);
     (0..es.elements(vl)).map(|e| z.get(e, es)).collect()
@@ -630,7 +630,7 @@ const FPCR_AHP: u64 = 1 << 26;
 
 /// `Z<n>` at the current length: the elements of `es` from `values`,
 /// repeated.
-fn set_elements(cpu: &mut Cpu, n: u32, es: Esize, values: &[u64]) {
+fn set_elements(cpu: &mut Cpu<NoEl2>, n: u32, es: Esize, values: &[u64]) {
     let vl = cpu.current_svl();
     let mut z = Zv::ZERO;
     for e in 0..es.elements(vl) {
@@ -641,7 +641,7 @@ fn set_elements(cpu: &mut Cpu, n: u32, es: Esize, values: &[u64]) {
 
 /// A processor in Streaming SVE mode with `SMCR_EL1.LEN = len`, P0 all
 /// true, FPCR `fpcr` and FPSR clear.
-fn fp_streaming(len: u64, fpcr: u64) -> Cpu {
+fn fp_streaming(len: u64, fpcr: u64) -> Cpu<NoEl2> {
     let mut cpu = streaming(len);
     let vl = cpu.current_svl();
     cpu.set_p(0, vl, &Pv::ones(vl));

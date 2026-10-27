@@ -21,7 +21,7 @@ use crate::cpu::fp::{
     bf16_mul_add_long, fp_binary, fp_compare, fp_compare_holds, fp_convert, fp_convert_round_odd, fp_log_b, fp_mul_add,
     fp_scale, fp_to_int, fp_unary, int_to_fp, FpBinary, FpCompare, FpConversion, FpEnv, FpType, FpUnary, IntWidth,
 };
-use crate::cpu::Cpu;
+use crate::cpu::{Cpu, Levels};
 use crate::softfloat::{self as sf, FpOrdering, FpRounding, FusedMulAdd, InexactReport, NanSignal};
 
 /// The floating-point element of `size`: `None` for `00`.
@@ -242,7 +242,7 @@ impl UnaryOp {
     }
 }
 
-impl Cpu {
+impl<L: Levels> Cpu<L> {
     /// FADD, FSUB, FMUL, FSUBR, FMAXNM, FMINNM, FMAX, FMIN, FABD, FSCALE,
     /// FMULX, FDIVR, FDIV of vectors (`01100101 size 00 opc 100 Pg Zm
     /// Zdn`), and FADD to FMIN with an immediate (`01100101 size 011 opc
@@ -364,21 +364,29 @@ impl Cpu {
         let operand = self.z(n, vl);
         let mut env = self.fp_env();
         let identity = reduction.identity(ty, &env);
-        let mut lanes = [0u64; super::MAX_VL_BYTES / 2];
-        let mut count = es.elements(vl);
-        for (e, lane) in lanes.iter_mut().enumerate().take(count) {
-            *lane = if mask.active(e, es) { operand.get(e, es) } else { identity };
-        }
-        // The element count is a power of two (CurrentVL is), so pairing
-        // neighbours level by level is Arm's recursive halving.
-        while count > 1 {
-            for i in 0..count / 2 {
-                lanes[i] = fp_binary(reduction.op(), ty, lanes[2 * i], lanes[2 * i + 1], &mut env);
+        // Arm `Reduce` halves recursively: the lower half's result, then the
+        // upper half's. The element count being a power of two (CurrentVL
+        // is), that tree forms lane by lane on a stack of partial results,
+        // each over a run of lanes half as long as the one below it: two of
+        // one length combine, lower first, the moment the second is done.
+        // The most lanes, 16-bit elements at the longest vector, need one
+        // entry for each halving and one more.
+        const DEPTH: usize = (super::MAX_VL_BYTES / 2).ilog2() as usize + 1;
+        let mut partial = [(0u64, 0usize); DEPTH];
+        let mut depth = 0;
+        for e in 0..es.elements(vl) {
+            let mut value = if mask.active(e, es) { operand.get(e, es) } else { identity };
+            let mut run = 1;
+            while depth > 0 && partial[depth - 1].1 == run {
+                depth -= 1;
+                value = fp_binary(reduction.op(), ty, partial[depth].0, value, &mut env);
+                run *= 2;
             }
-            count /= 2;
+            partial[depth] = (value, run);
+            depth += 1;
         }
         self.fp_commit(&env);
-        self.write_v(d as usize, u128::from(lanes[0]));
+        self.write_v(d as usize, u128::from(partial[0].0));
         Ok(Flow::Next)
     }
 

@@ -55,8 +55,9 @@ The repository does not ship the BIOS ROMs or the DLX disk image. Both locations
 | System BIOS | `cpp_orig/bochs/bochs/bios/BIOS-bochs-latest` | a Bochs checkout: `git clone https://github.com/bochs-emu/Bochs cpp_orig/bochs` |
 | VGA BIOS | `cpp_orig/bochs/bochs/bios/VGABIOS-lgpl/VGABIOS-lgpl-latest.bin` | the same checkout |
 | DLX Linux disk | `dlxlinux/hd10meg.img` | [Bochs disk images](https://bochs.sourceforge.io/diskimages.html) |
+| Arm AARCHMRS (2026-09) | anywhere, named by `RUSTY_BOX_AARCHMRS` | Arm's A-profile Architecture Machine Readable Specification, unpacked (BSD 3-clause) |
 
-The Bochs checkout is also the C++ reference source that every port decision is checked against. The browser builds, the Android APK, the UEFI application and `cargo xtask ci` embed or read these files, so they fail without them. For Alpine, download the **Virtual** x86_64 ISO from [alpinelinux.org/downloads](https://alpinelinux.org/downloads/); this page and the harnesses use `alpine-virt-3.24.1-x86_64.iso`.
+The Bochs checkout is also the C++ reference source that every port decision is checked against. The browser builds, the Android APK, the UEFI application and `cargo xtask ci` embed or read these files, so they fail without them; the AArch64 conformance tests read the AARCHMRS, which `cargo xtask ci` requires unless given `--skip-aarchmrs`. For Alpine, download the **Virtual** x86_64 ISO from [alpinelinux.org/downloads](https://alpinelinux.org/downloads/); this page and the harnesses use `alpine-virt-3.24.1-x86_64.iso`.
 
 ## Where it runs
 
@@ -232,10 +233,12 @@ rusty_box/
 ## Testing
 
 ```bash
-# The full local gate; run it before every commit
+# The full local gate; run it before every commit. It needs RUSTY_BOX_AARCHMRS set
+# to an unpacked copy of Arm's AARCHMRS (an absolute path), or --skip-aarchmrs.
 cargo xtask ci
-cargo xtask ci --skip-boot   # without the DLX boot gate
-cargo xtask ci --full        # plus the integration tests and the GUI release build
+cargo xtask ci --skip-boot       # without the DLX boot gate
+cargo xtask ci --skip-aarchmrs   # without the AArch64 conformance tests against Arm's AARCHMRS
+cargo xtask ci --full            # plus the integration tests and the GUI release build
 
 # The fast loop
 cargo test --release -p rusty_box --lib --features std

@@ -155,7 +155,7 @@ fn a_snapshot_restores_the_same_future() {
     let midway = (machine.ticks(), machine.reg_read(Reg::X20));
     assert!(midway.1 > 0 && midway.1 < 10, "{midway:?}");
 
-    let finish = |m: &mut rusty_box_aarch64::VirtMachine<rusty_box_aarch64::LentStorage<'_>>| {
+    let finish = |m: &mut rusty_box_aarch64::VirtMachine<rusty_box_aarch64::LentStorage<'_>, rusty_box_aarch64::NoEl2>| {
         let out = m.step(RunBudget::Ticks(GIVE_UP_AFTER));
         (out.stop, m.ticks(), m.reg_read(Reg::X20))
     };

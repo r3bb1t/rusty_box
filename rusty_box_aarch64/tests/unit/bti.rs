@@ -17,7 +17,7 @@ use std::vec::Vec;
 use rusty_box_core::{ClockHz, VmClock};
 
 use super::features::Implementation;
-use super::{id, Btype, Cpu, CpuConfig, El, Pstate, Reg, Step, Tlb};
+use super::{id, Btype, Cpu, CpuConfig, El, NoEl2, Pstate, Reg, Step, Tlb};
 use crate::bus::{AccessWidth, BusFault, PhysAddr, PhysBus};
 use crate::instrumentation::NoInstrumentation;
 
@@ -99,7 +99,7 @@ struct Taken {
 }
 
 struct Machine {
-    cpu: Cpu,
+    cpu: Cpu<NoEl2>,
     ram: Ram,
 }
 
@@ -108,7 +108,7 @@ impl Machine {
     /// tables above.
     fn new(imp: Implementation) -> Self {
         let ips = ClockHz::new(1_000_000).unwrap_or(ClockHz::BOCHS_DEFAULT);
-        let mut cpu = Cpu::implementing(
+        let mut cpu = Cpu::<NoEl2>::implementing(
             CpuConfig {
                 ips,
                 counter_hz: ips,
@@ -325,7 +325,7 @@ fn spsr_keeps_btype_for_an_abort_an_interrupt_and_eret() {
     m.put(VBAR + 0x280, ERET);
     m.cpu.x[1] = TARGET;
     assert_eq!(m.step_at(GUARDED), None);
-    let irq = m.cpu.take_irq();
+    let irq = m.cpu.take_irq().expect("taken at EL1");
     assert_eq!((irq.return_address, irq.vector), (TARGET, VBAR + 0x280));
     assert_eq!(Btype::from_bits(m.cpu.sys.spsr_el1 >> 10), Btype::Jump, "the IRQ keeps BTYPE");
     assert_eq!(m.cpu.pstate.btype, Btype::None);

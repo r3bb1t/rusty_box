@@ -1,6 +1,9 @@
 //! Sets `cfg(aarchmrs)` when `RUSTY_BOX_AARCHMRS` names Arm's machine-readable
-//! specification, so that the tests reading it (tests/unit/spec.rs) run
-//! instead of being ignored. The library itself does not depend on it.
+//! specification, so that the tests reading it run instead of being ignored:
+//! the decoder's against `Instructions.json` and `Features.json`
+//! (tests/unit/spec.rs), and the System registers' against `Registers.json`
+//! (tests/unit/sysreg_spec.rs). `cargo xtask ci` requires it unless given
+//! `--skip-aarchmrs`. The library itself does not depend on it.
 
 fn main() {
     println!("cargo::rustc-check-cfg=cfg(aarchmrs)");

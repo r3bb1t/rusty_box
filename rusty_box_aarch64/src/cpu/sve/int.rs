@@ -10,7 +10,7 @@ use crate::cpu::dp::{decode_bit_masks, ror};
 use crate::cpu::exec::{bit, bits, sext, ExecResult, Flow};
 use crate::cpu::fp::FpType;
 use crate::cpu::simd::vfp_expand_imm;
-use crate::cpu::Cpu;
+use crate::cpu::{Cpu, Levels};
 
 /// The shifts the SVE instructions apply to an element: Arm `ASR`, `LSR`
 /// and `LSL`, whose amount may be the whole element or more.
@@ -200,7 +200,7 @@ fn shift_amounts(tsize_imm3: u32, es: Esize) -> (u64, u64) {
     (2 * width - encoded, encoded - width)
 }
 
-impl Cpu {
+impl<L: Levels> Cpu<L> {
     /// ADD, SUB, SUBR, SMAX, UMAX, SMIN, UMIN, SABD, UABD, MUL, SMULH,
     /// UMULH, SDIV, UDIV, SDIVR, UDIVR, ORR, EOR, AND, BIC (vectors,
     /// predicated): `00000100 size 0 op0:opc 000 Pg Zm Zdn`. The divides

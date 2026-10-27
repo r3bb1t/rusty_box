@@ -23,9 +23,10 @@ mod common;
 use std::process::ExitCode;
 use std::time::Instant;
 
-use common::{Parsed, RunArgs, RUN_USAGE};
+use common::{Parsed, RunArgs, Virtualization, RUN_USAGE};
 use rusty_box_aarch64::boot::{LinuxImage, SERIAL_CONSOLE_COMMAND_LINE};
-use rusty_box_aarch64::{MachineBuilder, RamSize, VirtConfig};
+use rusty_box_aarch64::machine::DirectKernel;
+use rusty_box_aarch64::{Levels, MachineBuilder, RamSize, VirtConfig};
 
 struct Args {
     kernel: String,
@@ -119,18 +120,38 @@ fn boot() -> ExitCode {
         debug_stops: args.run.debug_stops(),
         ..VirtConfig::DEFAULT
     };
-    let plugged = common::plug_devices(MachineBuilder::new(config).ram(ram).linux(image).command_line(&args.append), &args.run);
-    let mut builder = match plugged {
+    let builder = MachineBuilder::new(config).ram(ram).linux(image).command_line(&args.append);
+    let images = Images {
+        initrd: initrd.as_deref(),
+        dtb: dtb.as_deref(),
+    };
+    match args.run.virtualization {
+        Virtualization::Off => run_kernel(builder, images, &args),
+        Virtualization::On => run_kernel(builder.with_el2(), images, &args),
+    }
+}
+
+/// The images beside the kernel a run may be given.
+#[derive(Clone, Copy)]
+struct Images<'a> {
+    initrd: Option<&'a [u8]>,
+    dtb: Option<&'a [u8]>,
+}
+
+/// Build the machine `builder` describes, with `images`, and run it as
+/// `args` asks.
+fn run_kernel<L: Levels>(builder: MachineBuilder<'_, DirectKernel<'_>, L>, images: Images<'_>, args: &Args) -> ExitCode {
+    let mut builder = match common::plug_devices(builder, &args.run) {
         Ok(builder) => builder,
         Err(e) => {
             eprintln!("{e}");
             return ExitCode::from(2);
         }
     };
-    if let Some(initrd) = &initrd {
+    if let Some(initrd) = images.initrd {
         builder = builder.initrd(initrd);
     }
-    if let Some(dtb) = &dtb {
+    if let Some(dtb) = images.dtb {
         builder = builder.device_tree(dtb);
     }
     let mut machine = match builder.build() {

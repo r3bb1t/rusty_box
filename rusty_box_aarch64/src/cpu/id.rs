@@ -2,7 +2,8 @@
 //!
 //! The processor is shaped like a Cortex-A57 r1p0 (the value QEMU's
 //! `cortex-a57` model reports in `MIDR_EL1`), cut down to what this
-//! interpreter implements: AArch64 at EL0 and EL1 only, FP and Advanced SIMD,
+//! interpreter implements: AArch64 at EL0 and EL1, and at EL2 where the
+//! machine asks for it (FEAT_EL2), FP and Advanced SIMD,
 //! the Cryptographic Extension's AES, PMULL, SHA-1 and SHA-256 and CRC32 (the
 //! Cortex-A57's optional extensions, all of them, as QEMU's `cortex-a57`
 //! has them), the 4 KiB translation granule, no PMU. Every value here
@@ -25,7 +26,8 @@ pub const MPIDR_EL1: u64 = 0x8000_0000;
 pub const REVIDR_EL1: u64 = 0;
 
 /// `ID_AA64PFR0_EL1` of a processor implementing `features`: EL0 = 1 and
-/// EL1 = 1 (AArch64 only), EL2 = EL3 = 0 (not implemented), FP (19:16) and
+/// EL1 = 1 (AArch64 only), EL2 (11:8) = 1 with FEAT_EL2 (AArch64 only) and
+/// 0 without, EL3 = 0 (not implemented), FP (19:16) and
 /// AdvSIMD (23:20) 1 with FEAT_FP16 (half-precision arithmetic) and 0
 /// without, GIC = 0 (no system-register interface: the GIC is a
 /// memory-mapped v2), RAS (31:28) = 1 with FEAT_RAS and 2 with FEAT_RASv1p1
@@ -35,7 +37,8 @@ pub const REVIDR_EL1: u64 = 0;
 /// `SCXTNUM_ELx` registers), CSV3 (63:60) = 1 with FEAT_CSV3.
 pub(crate) const fn id_aa64pfr0(features: Features) -> u64 {
     let ras = chain_level(features, &[Feature::Ras, Feature::RasV1p1]);
-    0x11 | field(features, Feature::Fp16, 16, 1)
+    0x11 | field(features, Feature::El2, 8, 1)
+        | field(features, Feature::Fp16, 16, 1)
         | field(features, Feature::Fp16, 20, 1)
         | (ras << 28)
         | field(features, Feature::Dit, 48, 1)
@@ -247,10 +250,17 @@ const fn field(features: Features, feature: Feature, lsb: u32, value: u64) -> u6
 /// (44-bit physical addresses, as the Cortex-A57), ASIDBits = 2 (16-bit
 /// ASIDs), mixed endianness not supported, TGran16 = 0 (not supported),
 /// TGran64 = 0xF (not supported), TGran4 = 0 (supported): only the 4 KiB
-/// granule is implemented, so only it is offered. ECV (63:60) = 1 with
+/// granule is implemented, so only it is offered. With FEAT_EL2, TGran4_2
+/// (43:40), TGran16_2 (35:32) and TGran64_2 (39:36) = 1: no stage 2
+/// translation is built, so no granule is offered at stage 2. That is
+/// FEAT_GTG, which `Features.json` makes hold exactly when all three
+/// fields are non-zero, and which, like a 4 KiB stage 1 granule without a
+/// stage 2 one, it permits a processor before ARMv8.5. ECV (63:60) = 1 with
 /// FEAT_ECV (2 would be FEAT_ECV_POFF, which needs EL2).
 pub(crate) const fn id_aa64mmfr0(features: Features) -> u64 {
-    0x0F00_0024 | field(features, Feature::Ecv, 60, 1)
+    const NO_STAGE_2_GRANULE: u64 = (1 << 40) | (1 << 36) | (1 << 32);
+    let stage_2 = if features.has(Feature::El2) { NO_STAGE_2_GRANULE } else { 0 };
+    0x0F00_0024 | stage_2 | field(features, Feature::Ecv, 60, 1)
 }
 
 /// Physical address width implied by `ID_AA64MMFR0_EL1.PARange`.

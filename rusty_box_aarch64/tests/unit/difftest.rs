@@ -35,7 +35,7 @@ use rusty_box_core::{ClockHz, VmClock};
 
 use super::features::Implementation;
 use super::sve::{Pv, Zv};
-use super::{Cpu, CpuConfig, Step};
+use super::{Cpu, CpuConfig, El, Levels, NoEl2, Step, WithEl2};
 use crate::bus::{AccessWidth, BusFault, PhysAddr, PhysBus};
 use crate::instrumentation::NoInstrumentation;
 
@@ -445,11 +445,12 @@ fn parse_registers(field: &str, prefix: &str, len: usize) -> Vec<(usize, Vec<u8>
         .collect()
 }
 
-/// Step each SVE vector once on a processor implementing every feature, in
-/// Streaming SVE mode at a 512-bit vector length (`SMCR_EL1.LEN = 3`), and
-/// fail unless every one ends in the state the reference left: PC, NZCV,
-/// FPSR, the general registers, SP, Z0-Z31, P0-P15 and the data region.
-fn replay_sve(vectors: &str) {
+/// Step each SVE vector once at EL1 on a processor implementing every
+/// feature and the levels `L`, in Streaming SVE mode at a 512-bit vector
+/// length (`SMCR_EL1.LEN = 3`), and fail unless every one ends in the state
+/// the reference left: PC, NZCV, FPSR, the general registers, SP, Z0-Z31,
+/// P0-P15 and the data region.
+fn replay_sve<L: Levels>(vectors: &str) {
     let ips = ClockHz::new(1_000_000).unwrap_or(ClockHz::BOCHS_DEFAULT);
     let mut tallies: BTreeMap<String, Tally> = BTreeMap::new();
     let mut failures: Vec<String> = Vec::new();
@@ -474,7 +475,7 @@ fn replay_sve(vectors: &str) {
 
         let st = initial_state(seed, kind, insn);
         let sve = sve_state(seed, kind, insn);
-        let mut cpu = Cpu::implementing(
+        let mut cpu = Cpu::<L>::implementing(
             CpuConfig {
                 ips,
                 counter_hz: ips,
@@ -482,11 +483,17 @@ fn replay_sve(vectors: &str) {
             },
             Implementation::EVERY_FEATURE,
         );
+        enter_el1(&mut cpu);
         cpu.x = st.x;
         cpu.sp_el1 = st.sp;
         cpu.pstate.set_nzcv(st.nzcv);
         cpu.sys.cpacr_el1 = (3 << 24) | (3 << 20);
         cpu.sys.smcr_el1 = 3;
+        // With EL2, `SMCR_EL2.LEN` caps the length EL1 runs at (Arm
+        // `CurrentSVL`): a hypervisor grants its guest the same.
+        if let Some(el2) = cpu.el2_mut() {
+            el2.smcr = 3;
+        }
         cpu.set_pstate_sm(true);
         cpu.fpcr = st.fpcr | sve.fpcr;
         cpu.fpsr = 0;
@@ -676,7 +683,7 @@ fn reserved_simd_and_fp_encodings_are_undefined_before_the_fp_trap() {
         (0x1E20_2820, "fadd s0, s1, s0", 0x07),
     ];
     for (insn, text, want_ec) in cases {
-        let mut cpu = Cpu::new(CpuConfig {
+        let mut cpu = Cpu::<NoEl2>::new(CpuConfig {
             ips,
             counter_hz: ips,
             reset_pc: CODE,
@@ -698,7 +705,7 @@ fn reserved_simd_and_fp_encodings_are_undefined_before_the_fp_trap() {
 fn udf_takes_the_undefined_instruction_exception_whatever_its_immediate() {
     let ips = ClockHz::new(1_000_000).unwrap_or(ClockHz::BOCHS_DEFAULT);
     for insn in [0x0000_0000, 0x0000_0001, 0x0000_0002, 0x0000_0003, 0x0000_ABCD] {
-        let mut cpu = Cpu::new(CpuConfig {
+        let mut cpu = Cpu::<NoEl2>::new(CpuConfig {
             ips,
             counter_hz: ips,
             reset_pc: CODE,
@@ -730,7 +737,7 @@ fn add_and_sub_immediate_with_shift_1x_are_undefined() {
         (0xF1C0_0420, "subs x0, x1, #1 with shift 11"),
     ];
     for (insn, text) in cases {
-        let mut cpu = Cpu::new(CpuConfig {
+        let mut cpu = Cpu::<NoEl2>::new(CpuConfig {
             ips,
             counter_hz: ips,
             reset_pc: CODE,
@@ -752,14 +759,14 @@ fn add_and_sub_immediate_with_shift_1x_are_undefined() {
 /// decode cache alone is 320 KiB), and the decode cache, keyed by the word,
 /// needs no reset.
 struct Stepper {
-    cpu: Cpu,
+    cpu: Cpu<NoEl2>,
     reset: Vec<u8>,
 }
 
 impl Stepper {
     fn new() -> Self {
         let ips = ClockHz::new(1_000_000).unwrap_or(ClockHz::BOCHS_DEFAULT);
-        let mut cpu = Cpu::new(CpuConfig {
+        let mut cpu = Cpu::<NoEl2>::new(CpuConfig {
             ips,
             counter_hz: ips,
             reset_pc: CODE,
@@ -1075,22 +1082,41 @@ fn should_be_field_set(insn: u32) -> bool {
 
 #[test]
 fn every_unicorn_vector_matches_after_one_step() {
-    replay(VECTORS, Implementation::CORTEX_A57);
+    replay::<NoEl2>(VECTORS, Implementation::CORTEX_A57);
 }
 
 #[test]
 fn every_qemu_max_vector_matches_after_one_step_with_every_feature() {
-    replay(MAX_VECTORS, Implementation::EVERY_FEATURE);
+    replay::<NoEl2>(MAX_VECTORS, Implementation::EVERY_FEATURE);
 }
 
 #[test]
 fn every_qemu_sve_vector_matches_after_one_step_in_streaming_mode() {
-    replay_sve(SVE_VECTORS);
+    replay_sve::<NoEl2>(SVE_VECTORS);
 }
 
-/// Step each vector of `vectors` once on a processor implementing `imp`,
-/// and fail unless every one ends in the state the reference left.
-fn replay(vectors: &str, imp: Implementation) {
+/// At EL1 on a processor with EL2, whose controls out of reset trap nothing
+/// EL1 executes and route nothing it raises to EL2, every vector ends as it
+/// does without EL2 (the SVE ones with `SMCR_EL2.LEN` granting EL1 the
+/// length they run at).
+#[test]
+fn every_vector_matches_at_el1_under_el2_out_of_reset() {
+    replay::<WithEl2>(VECTORS, Implementation::CORTEX_A57);
+    replay::<WithEl2>(MAX_VECTORS, Implementation::EVERY_FEATURE);
+    replay_sve::<WithEl2>(SVE_VECTORS);
+}
+
+/// `cpu` at EL1 with `SP_EL1` selected, where every vector starts: a
+/// processor with EL2 comes out of reset at EL2, one without at EL1.
+fn enter_el1<L: Levels>(cpu: &mut Cpu<L>) {
+    cpu.pstate.el = El::El1;
+    cpu.pstate.sp_sel = true;
+}
+
+/// Step each vector of `vectors` once at EL1 on a processor implementing
+/// `imp` and the levels `L`, and fail unless every one ends in the state
+/// the reference left.
+fn replay<L: Levels>(vectors: &str, imp: Implementation) {
     let ips = ClockHz::new(1_000_000).unwrap_or(ClockHz::BOCHS_DEFAULT);
     let mut tallies: BTreeMap<String, Tally> = BTreeMap::new();
     let mut failures: Vec<String> = Vec::new();
@@ -1113,7 +1139,7 @@ fn replay(vectors: &str, imp: Implementation) {
         let tally = tallies.entry(String::from(name)).or_default();
 
         let st = initial_state(seed, kind, insn);
-        let mut cpu = Cpu::implementing(
+        let mut cpu = Cpu::<L>::implementing(
             CpuConfig {
                 ips,
                 counter_hz: ips,
@@ -1121,6 +1147,7 @@ fn replay(vectors: &str, imp: Implementation) {
             },
             imp,
         );
+        enter_el1(&mut cpu);
         cpu.x = st.x;
         cpu.sp_el1 = st.sp;
         cpu.pstate.set_nzcv(st.nzcv);

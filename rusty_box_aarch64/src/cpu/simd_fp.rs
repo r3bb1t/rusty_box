@@ -20,7 +20,7 @@ use super::fp::{
 use super::fp_estimate::{urecpe, ursqrte};
 use super::simd::{elem, set_elem};
 use super::simd_arith::narrow_into;
-use super::Cpu;
+use super::{Cpu, Levels};
 use crate::softfloat::{self as sf, FpOrdering, FpRounding, FusedMulAdd, InexactReport, NanSignal};
 
 #[inline]
@@ -42,7 +42,7 @@ enum ZeroCompare {
     Lt,
 }
 
-impl Cpu {
+impl<L: Levels> Cpu<L> {
     /// Three-same floating point of precision `ty`, vector (`0 Q U 01110 a
     /// sz 1 Rm 11 opc 1 Rn Rd`, and `0 Q U 01110 a 10 Rm 00 opc 1 Rn Rd` for
     /// half precision) and scalar (`01 U 11110 ...`, likewise).

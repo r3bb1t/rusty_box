@@ -22,7 +22,7 @@ use super::dp::ones;
 use super::exec::{bit, bits, sext, ExecResult, Flow};
 use super::fp::FpType;
 use super::simd::{at_datasize, elem, set_elem};
-use super::Cpu;
+use super::{Cpu, Levels};
 
 /// `FPSR.QC`: set by a saturating instruction whose result saturated.
 pub(crate) const FPSR_QC: u64 = 1 << 27;
@@ -230,7 +230,7 @@ fn long_lane(op: LongOp, x: i128, y: i128, acc: u64, wide: u32, qc: &mut bool) -
     }
 }
 
-impl Cpu {
+impl<L: Levels> Cpu<L> {
     #[inline]
     fn note_saturation(&mut self, saturated: bool) {
         if saturated {

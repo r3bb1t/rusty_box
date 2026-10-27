@@ -5,6 +5,7 @@ Repository automation for Rusty Box. Run it through the Cargo alias in `.cargo/c
 ```bash
 cargo xtask ci                   # the local gate, run before every commit
 cargo xtask ci --skip-boot       # the same, without the DLX boot gate
+cargo xtask ci --skip-aarchmrs   # the same, without Arm's AARCHMRS (its conformance tests ignored)
 cargo xtask ci --full            # also the full rusty_box test suite and a GUI release build
 cargo xtask perf-baseline        # archive a release perfbench binary for A/B runs
 cargo xtask android build        # Android APK, see "Android commands"
@@ -13,9 +14,9 @@ cargo xtask --help               # usage for every subcommand
 
 `cargo xtask` with no arguments, `--help` or `-h` prints the usage for every subcommand and exits with status 1. `cargo xtask ci --help` prints the `ci` options.
 
-## `cargo xtask ci [--full] [--skip-boot]`
+## `cargo xtask ci [--full] [--skip-boot] [--skip-aarchmrs]`
 
-This is the local gate suite, defined in `xtask/src/ci.rs`. It runs its steps in the order below and stops at the first failure, naming the failed step and its exit status. A clean run ends with `ci: N steps passed in <seconds>s`.
+This is the local gate suite, defined in `xtask/src/ci.rs`. It runs its steps in the order below and stops at the first failure, naming the failed step and its exit status. A clean run ends with `ci: N steps passed in <seconds>s`, followed by a note when `--skip-aarchmrs` left the AArch64 conformance tests out. `--skip-aarchmrs` changes no step count.
 
 | Invocation | Steps |
 | --- | --- |
@@ -33,6 +34,7 @@ This is the local gate suite, defined in `xtask/src/ci.rs`. It runs its steps in
 
   The boot gate also finds them there. The step "Download Bochs BIOS ROMs for wasm GUI" in `.github/workflows/ci.yml` shows one way to fetch them.
 - **The DLX Linux disk image `dlxlinux/hd10meg.img`**, also gitignored. The UEFI example build embeds it, so you need it even with `--skip-boot`. The boot gate boots it.
+- **Arm's AARCHMRS** (the A-profile Architecture Machine Readable Specification, release 2026-09, BSD 3-clause; not in the repository). Unpack it and set `RUSTY_BOX_AARCHMRS` to the directory holding its `Features.json`, `Instructions.json` and `Registers.json`. The gate hands every step the directory as an absolute path (a relative one is taken from where you run the gate; give an absolute one, or each switch between the gate and a plain `cargo test` rebuilds `rusty_box_aarch64`, whose build script reruns when the value changes), so the AArch64 test steps (9 and 10) build and run the conformance tests that read it (`rusty_box_aarch64/tests/unit/spec.rs` and `sysreg_spec.rs`). Without the variable the gate stops before its first step, unless `--skip-aarchmrs` is given: that withholds the variable from every step, so those tests are ignored. Withholding it is a change of value too: in a shell that sets the variable, each switch between `--skip-aarchmrs` and a plain `cargo` command or a full gate rebuilds `rusty_box_aarch64` and every crate that depends on it (`rusty_box_gui` among them). Unset the variable in that shell to skip without the rebuilds.
 
 ### Step 1: doctrine ratchets
 
@@ -84,7 +86,7 @@ Every step is `--release` except the debug-assertions check, which exists to com
 
 Notes on specific steps:
 
-- **AArch64 steps (9 to 11)** run the interpreter's unit tests (the Unicorn vector replay among them), its integration tests, and with `std` the Rust blocks of [`docs/aarch64-automation.md`](../docs/aarch64-automation.md), which `rusty_box_aarch64/src/lib.rs` includes behind `#[cfg(all(doctest, feature = "std"))]`. With `RUSTY_BOX_AARCHMRS` naming an unpacked copy of Arm's machine-readable specification (AARCHMRS), steps 9 and 10 also check the A64 decoder against it (`rusty_box_aarch64/tests/unit/spec.rs`); without it those tests are ignored.
+- **AArch64 steps (9 to 11)** run the interpreter's unit tests (the Unicorn vector replay among them), its integration tests, and with `std` the Rust blocks of [`docs/aarch64-automation.md`](../docs/aarch64-automation.md), which `rusty_box_aarch64/src/lib.rs` includes behind `#[cfg(all(doctest, feature = "std"))]`. With `RUSTY_BOX_AARCHMRS` naming an unpacked copy of Arm's machine-readable specification (AARCHMRS), steps 9 and 10 also check the A64 decoder (`rusty_box_aarch64/tests/unit/spec.rs`) and the System register accesses and fieldsets (`sysreg_spec.rs`) against it; with `--skip-aarchmrs` those tests are ignored.
 - **WHP steps (12 to 15)** need no hypervisor. The sys and wrapper tests cover layouts and arithmetic. Engine tests that need hardware skip themselves on a host without it. `--all-targets` on step 15 also compiles the engine's example harnesses.
 - **Doc examples (step 24)** compile the crate's doc comments and the Rust blocks of [`docs/automation.md`](../docs/automation.md), which `rusty_box/src/lib.rs` includes behind `#[cfg(doctest)]`. An example in that guide that names a signature the crate does not have fails here.
 - **Compile-fail fixtures (step 25)** are the doctrine's trybuild tests. Their goldens are rustc's rendered diagnostics, so they change when the quoted code or the toolchain changes. Once you have confirmed the rule still holds, regenerate them with `TRYBUILD=overwrite cargo test --release -p rusty_box --features std --test compile_fail`.

@@ -17,7 +17,7 @@ use std::vec::Vec;
 use rusty_box_core::{ClockHz, VmClock};
 
 use super::features::{Feature, Features, Implementation, VecLen};
-use super::{id, Cpu, CpuConfig, El, Step, Tlb};
+use super::{id, Cpu, CpuConfig, El, NoEl2, Step, Tlb};
 use crate::bus::{AccessWidth, BusFault, PhysAddr, PhysBus};
 use crate::instrumentation::NoInstrumentation;
 
@@ -151,7 +151,7 @@ struct Taken {
 }
 
 struct Machine {
-    cpu: Cpu,
+    cpu: Cpu<NoEl2>,
     ram: Ram,
 }
 
@@ -160,7 +160,7 @@ impl Machine {
     /// tables above, in both halves of the address space.
     fn new(imp: Implementation) -> Self {
         let ips = ClockHz::new(1_000_000).unwrap_or(ClockHz::BOCHS_DEFAULT);
-        let mut cpu = Cpu::implementing(
+        let mut cpu = Cpu::<NoEl2>::implementing(
             CpuConfig {
                 ips,
                 counter_hz: ips,

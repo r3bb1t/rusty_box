@@ -25,8 +25,9 @@ mod common;
 use std::process::ExitCode;
 use std::time::Instant;
 
-use common::{Parsed, RunArgs, RUN_USAGE};
-use rusty_box_aarch64::{MachineBuilder, RamSize, VirtConfig};
+use common::{Parsed, RunArgs, Virtualization, RUN_USAGE};
+use rusty_box_aarch64::machine::Firmware;
+use rusty_box_aarch64::{Levels, MachineBuilder, RamSize, VirtConfig};
 
 struct Args {
     code: String,
@@ -110,17 +111,38 @@ fn boot() -> ExitCode {
         debug_stops: args.run.debug_stops(),
         ..VirtConfig::DEFAULT
     };
-    let mut builder = match common::plug_devices(MachineBuilder::new(config).ram(ram).firmware(&code), &args.run) {
+    let builder = MachineBuilder::new(config).ram(ram).firmware(&code);
+    let images = Images {
+        vars: vars.as_deref(),
+        dtb: dtb.as_deref(),
+    };
+    match args.run.virtualization {
+        Virtualization::Off => run_firmware(builder, images, &args),
+        Virtualization::On => run_firmware(builder.with_el2(), images, &args),
+    }
+}
+
+/// The images beside the firmware a run may be given.
+#[derive(Clone, Copy)]
+struct Images<'a> {
+    vars: Option<&'a [u8]>,
+    dtb: Option<&'a [u8]>,
+}
+
+/// Build the machine `builder` describes, with `images`, and run it as
+/// `args` asks.
+fn run_firmware<L: Levels>(builder: MachineBuilder<'_, Firmware<'_>, L>, images: Images<'_>, args: &Args) -> ExitCode {
+    let mut builder = match common::plug_devices(builder, &args.run) {
         Ok(builder) => builder,
         Err(e) => {
             eprintln!("{e}");
             return ExitCode::from(2);
         }
     };
-    if let Some(vars) = &vars {
+    if let Some(vars) = images.vars {
         builder = builder.variables(vars);
     }
-    if let Some(dtb) = &dtb {
+    if let Some(dtb) = images.dtb {
         builder = builder.device_tree(dtb);
     }
     let mut machine = match builder.build() {

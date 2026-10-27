@@ -516,6 +516,35 @@ names and refuse `esz = MO_8` for them. Built and tested on `v11.1.2`:
 `sve_fmad_size00` raises SIGILL, and `rusty_box_aarch64`'s SVE vectors
 were generated with it.
 
+### 15. DBGPRCR_EL1 is missing
+
+**Impact**: small. An `MRS` or `MSR` of DBGPRCR_EL1 at EL1 or EL2 is
+UNDEFINED, where every AArch64 processor has the register, and with EL2
+an EL1 access that `MDCR_EL2.TDOSA` or `TDE` traps to EL2 is UNDEFINED at
+EL1 instead, so a hypervisor never sees the trap it asked for.
+
+**Location**: `target/arm/debug_helper.c`, `debug_cp_reginfo`, which
+defines OSLAR_EL1, OSLSR_EL1, OSDLR_EL1 and the other OS registers that
+`MDCR_EL2.TDOSA` traps, but not this one.
+
+**What the Arm ARM says**: Arm's register data gives DBGPRCR_EL1 to every
+processor with AArch64 (its condition is `FEAT_AA64`): bit 0, CORENPDRQ,
+and the rest RES0; its accessor traps an EL1 access to EL2 when
+`MDCR_EL2.TDE` or `MDCR_EL2.TDOSA` is set and otherwise reads or writes
+the register, at EL1 and EL2.
+
+**Reproduce**: `rusty_box_aarch64/tests/vectors/gen_qemu_el2.py` with
+DBGPRCR_EL1 in `EL1_REGISTERS`, under `qemu-system-aarch64 -M
+virt,virtualization=on -cpu cortex-a57`: an `MRS X0, DBGPRCR_EL1`
+(`0xd5301480`) at EL1.
+
+    Arm:          completes, X0 = 0 (MDCR_EL2.TDOSA and TDE clear); with TDOSA set, a trap to EL2, EC 0x18
+    QEMU 11.1.2:  an exception to EL1, ESR 0x02000000 (UNDEFINED), with TDOSA set or not
+
+**Fix**: no patch yet: a `debug_cp_reginfo` entry (op0 2, op1 0, CRn 1,
+CRm 4, op2 4; cp14 for AArch32) keeping CORENPDRQ, with the access check
+the OS registers use (`access_tdosa`).
+
 ---
 
 ## Deliberate QEMU omissions
@@ -542,6 +571,13 @@ feature patch.
   (IC IVAU) and I (DC IVAC of read-only memory) fault on Arm and print
   "none" on QEMU. A kernel's cache maintenance of a bad user address, which
   faults on hardware and goes to its exception fixup, completes on QEMU.
+- **RMR_ELx ignore writes.** `define_arm_cp_regs` in
+  `target/arm/helper.c` makes RMR_EL1 (with neither EL2 nor EL3), RMR_EL2
+  and RMR_EL3 `ARM_CP_CONST` ("the bit is strictly a request, so we are in
+  spec just ignoring writes"). Neither acts on the warm reset RR requests,
+  which the system may ignore, but Arm's register data makes RR an
+  ordinary read/write field: after `MSR RMR_EL2, X0` with X0 = 2, an
+  `MRS` reads 3 on Arm and 1 on QEMU.
 - **Should-be fields.** QEMU executes the exclusive loads and stores
   (`STXR`, `LDXR`, `STXP`, `LDXP`) with `Rs` or `Rt2` other than their
   should-be values, and FCMP/FCMPE with zero whatever `Rm` holds. Such a

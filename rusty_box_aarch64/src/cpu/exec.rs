@@ -15,7 +15,7 @@ use super::exception::{Exception, ExceptionClass};
 use super::fp::FpType;
 use super::isa::Class;
 use super::ldst::SingleForm;
-use super::{Activity, Btype, Cpu};
+use super::{Activity, Btype, Cpu, Levels};
 use crate::bus::{AccessWidth, BusFault, PhysAddr, PhysBus};
 use crate::instrumentation::{Direction, Instrumentation, MemoryAccess};
 
@@ -167,7 +167,7 @@ pub(crate) const fn sext(value: u64, width: u32) -> u64 {
     (((value << shift) as i64) >> shift) as u64
 }
 
-impl Cpu {
+impl<L: Levels> Cpu<L> {
     /// Configure which faults stop the machine instead of being delivered.
     pub fn set_debug_stops(&mut self, stops: DebugStops) {
         self.debug_stops = stops;
