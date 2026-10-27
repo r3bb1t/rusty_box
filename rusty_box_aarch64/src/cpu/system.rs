@@ -141,7 +141,7 @@ impl Cpu {
             }
             (true, _) => {
                 let key = SysRegKey::from_insn(insn);
-                match self.sysreg_read(key) {
+                match self.sysreg_mrs(key) {
                     Ok(v) => {
                         self.set_x_or_zr(rt, v);
                         Ok(Flow::Next)

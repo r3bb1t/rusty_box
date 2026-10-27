@@ -1,14 +1,22 @@
 //! WFI and WFE trap from EL0 only when they would wait, and the Debug
-//! Communications Channel registers a guest cannot probe for exist (R9: each
-//! test asserts what the guest computed or which exception it took).
+//! Communications Channel behaves as one with no external debugger attached
+//! (R9: each test asserts what the guest computed or which exception it
+//! took).
 //!
 //! Arm ARM `Hint_WFI`: a pending interrupt, masked or not, ends WFI before
 //! the trap check. `Hint_WFE`: a set Event Register is consumed before it,
 //! and `SEV`, `SEVL`, every exception return (`SendEventLocal`) and the
 //! virtual event stream (`TestEventCNTV`) set the register. QEMU 11.1.2
 //! (target/arm/tcg/op_helper.c `HELPER(wfi)`, `HELPER(wfe)`) checks the
-//! same way; the DCC registers are RAZ/WI, trapped from EL0 by
-//! `MDSCR_EL1.TDCC` (target/arm/debug_helper.c `debug_cp_reginfo`).
+//! same way.
+//!
+//! Arm ARM (DDI 0487) chapter H4 and the `DBGDTRTX_EL0`, `DBGDTRRX_EL0`,
+//! `DBGDTR_EL0`, `MDCCSR_EL0` and `MDSCR_EL1` descriptions: a write to the
+//! transmit register sets TXfull, which only a debugger's read clears; a
+//! read of the receive register clears RXfull; `MDSCR_EL1`'s TXfull and
+//! RXfull are read-only while the OS Lock is unlocked and restore the flags
+//! while it is locked; `MDSCR_EL1.TDCC` traps EL0's accesses. QEMU 11.1.2
+//! (target/arm/debug_helper.c `debug_cp_reginfo`) reads the status as zero.
 //!
 //! Guest code is hand-assembled (GNU as for aarch64). An EL1 prologue
 //! optionally raises the virtual timer's interrupt (`x10` non-zero), sets
@@ -33,6 +41,18 @@
 //! 0x240:  mov x1, #7 ; msr dbgdtrtx_el0, x0 ; mrs x1, dbgdtrrx_el0 ;
 //!         mrs x2, mdccsr_el0 ; msr osdtrtx_el1, x0 ;
 //!         mrs x3, osdtrrx_el1 ; mov x5, #1 ; b .                   // DCC_EL1
+//! 0x280:  mrs x1, mdccsr_el0 ; mov x0, #10 ; msr dbgdtrtx_el0, x0 ;
+//!         mov x7, #1000                                         // DCC_PROBE
+//! 1:      mrs x2, mdccsr_el0 ; tbz x2, #29, 2f ; subs x7, x7, #1 ; b.ne 1b
+//!         mov x5, #1 ; msr dbgdtrtx_el0, x0 ; mrs x3, mdccsr_el0 ;
+//!         mrs x4, dbgdtrrx_el0 ; mrs x6, mdccsr_el0 ; b .
+//! 2:      mov x5, #2 ; b .
+//! 0x300:  msr oslar_el1, xzr ; msr dbgdtr_el0, x0 ; mrs x1, mdscr_el1 ;
+//!         msr mdscr_el1, xzr ; mrs x2, mdscr_el1 ; mrs x3, mdccsr_el0 ;
+//!         mov x4, #1 ; msr oslar_el1, x4 ; msr mdscr_el1, x9 ;
+//!         mrs x6, mdccsr_el0 ; mrs x7, dbgdtrrx_el0 ; mrs x8, mdccsr_el0 ;
+//!         msr mdscr_el1, x9 ; mrs x10, dbgdtr_el0 ; mrs x11, mdscr_el1 ;
+//!         mov x5, #1 ; b .                                      // DCC_VIEW
 //! 0xc00:  b .                                   // VBAR + 0x400: a trap from EL0
 //! ```
 
@@ -99,6 +119,39 @@ const PROGRAM: &[(u64, u32)] = &[
     (0x254, 0xD530_0043),
     (0x258, 0xD280_0025),
     (0x25C, 0x1400_0000),
+    (0x280, 0xD533_0101),
+    (0x284, 0xD280_0140),
+    (0x288, 0xD513_0500),
+    (0x28C, 0xD280_7D07),
+    (0x290, 0xD533_0102),
+    (0x294, 0x36E8_0122),
+    (0x298, 0xF100_04E7),
+    (0x29C, 0x54FF_FFA1),
+    (0x2A0, 0xD280_0025),
+    (0x2A4, 0xD513_0500),
+    (0x2A8, 0xD533_0103),
+    (0x2AC, 0xD533_0504),
+    (0x2B0, 0xD533_0106),
+    (0x2B4, 0x1400_0000),
+    (0x2B8, 0xD280_0045),
+    (0x2BC, 0x1400_0000),
+    (0x300, 0xD510_109F),
+    (0x304, 0xD513_0400),
+    (0x308, 0xD530_0241),
+    (0x30C, 0xD510_025F),
+    (0x310, 0xD530_0242),
+    (0x314, 0xD533_0103),
+    (0x318, 0xD280_0024),
+    (0x31C, 0xD510_1084),
+    (0x320, 0xD510_0249),
+    (0x324, 0xD533_0106),
+    (0x328, 0xD533_0507),
+    (0x32C, 0xD533_0108),
+    (0x330, 0xD510_0249),
+    (0x334, 0xD533_040A),
+    (0x338, 0xD530_024B),
+    (0x33C, 0xD280_0025),
+    (0x340, 0x1400_0000),
     (0xC00, 0x1400_0000),
 ];
 
@@ -108,6 +161,8 @@ const SEVL_WFE: u64 = 0x180;
 const STREAM_WFE: u64 = 0x1C0;
 const DCC_EL0: u64 = 0x200;
 const DCC_EL1: u64 = 0x240;
+const DCC_PROBE: u64 = 0x280;
+const DCC_VIEW: u64 = 0x300;
 const VBAR: u64 = RAM_BASE + 0x800;
 /// Where a synchronous exception from EL0 lands, and stays.
 const TRAPPED: u64 = VBAR + 0x400;
@@ -118,6 +173,9 @@ const SCTLR_NTWE: u64 = 1 << 18;
 /// `CNTKCTL_EL1`: the virtual event stream on bit 10's rising edge.
 const EVENT_STREAM: u64 = (1 << 2) | (10 << 4);
 const MDSCR_TDCC: u64 = 1 << 12;
+/// `MDCCSR_EL0` and `MDSCR_EL1`: DTRTX full and DTRRX full.
+const TXFULL: u64 = 1 << 29;
+const RXFULL: u64 = 1 << 30;
 
 /// ESR_EL1 classes.
 const EC_WFX: u64 = 0x01;
@@ -146,6 +204,26 @@ fn run(ram: &mut [u8], setup: Setup, instructions: u64) -> VirtMachine<LentStora
     m.reg_write(Reg::X11, setup.cntkctl);
     m.reg_write(Reg::X12, setup.mdscr);
     m.reg_write(Reg::X13, RAM_BASE + setup.el0_code);
+    let out = m.step(RunBudget::Instructions(instructions));
+    assert_eq!(out.stop, StopReason::BudgetExhausted);
+    m
+}
+
+/// The program run at EL1 from `code`, as reset leaves the processor (the
+/// OS Lock locked), with `regs` set first.
+fn run_el1<'a>(ram: &'a mut [u8], code: u64, regs: &[(Reg, u64)], instructions: u64) -> VirtMachine<LentStorage<'a>> {
+    let mut m = MachineBuilder::new(VirtConfig::DEFAULT)
+        .ram(RamSize::bytes(RAM_LEN as u64).expect("a valid size"))
+        .bare()
+        .build_in(MemoryLoan { ram, vars: &mut [] })
+        .expect("a bare machine builds");
+    for (offset, word) in PROGRAM {
+        m.mem_write(RAM_BASE + offset, &word.to_le_bytes()).expect("the program is in RAM");
+    }
+    m.reg_write(Reg::Pc, RAM_BASE + code);
+    for &(reg, value) in regs {
+        m.reg_write(reg, value);
+    }
     let out = m.step(RunBudget::Instructions(instructions));
     assert_eq!(out.stop, StopReason::BudgetExhausted);
     m
@@ -224,30 +302,47 @@ fn the_event_stream_sets_the_event_register() {
 }
 
 #[test]
-fn the_debug_communications_channel_reads_as_zero_and_ignores_writes() {
+fn with_no_debugger_the_channel_receives_nothing_and_its_transmit_stays_full() {
     let mut ram = vec![0u8; RAM_LEN];
-    let mut m = MachineBuilder::new(VirtConfig::DEFAULT)
-        .ram(RamSize::bytes(RAM_LEN as u64).expect("a valid size"))
-        .bare()
-        .build_in(MemoryLoan {
-            ram: &mut ram,
-            vars: &mut [],
-        })
-        .expect("a bare machine builds");
-    for (offset, word) in PROGRAM {
-        m.mem_write(RAM_BASE + offset, &word.to_le_bytes()).expect("the program is in RAM");
-    }
-    m.reg_write(Reg::Pc, RAM_BASE + DCC_EL1);
-    m.reg_write(Reg::X2, 9);
-    m.reg_write(Reg::X3, 9);
-    let out = m.step(RunBudget::Instructions(20));
-    assert_eq!(out.stop, StopReason::BudgetExhausted);
+    let m = run_el1(&mut ram, DCC_EL1, &[(Reg::X2, 9), (Reg::X3, 9)], 20);
     assert_eq!(m.reg_read(Reg::X5), 1, "every access completed");
-    assert_eq!([m.reg_read(Reg::X1), m.reg_read(Reg::X2), m.reg_read(Reg::X3)], [0, 0, 0]);
+    assert_eq!(m.reg_read(Reg::X1), 0, "DBGDTRRX_EL0 with RXfull clear (UNKNOWN; this model reads zero)");
+    assert_eq!(m.reg_read(Reg::X2), TXFULL, "MDCCSR_EL0 after a write: TXfull, and RXfull clear");
+    assert_eq!(m.reg_read(Reg::X3), 0, "OSDTRRX_EL1");
+}
+
+/// Linux's `hvc_dcc_check` (drivers/tty/hvc/hvc_dcc.c): write a character,
+/// then poll `MDCCSR_EL0` for TXfull to clear. With no debugger to read it,
+/// it never does, so the probe gives up and concludes no channel is there.
+#[test]
+fn a_probe_from_el0_finds_its_character_never_read() {
+    let mut ram = vec![0u8; RAM_LEN];
+    let m = run(&mut ram, el0(DCC_PROBE), 5_000);
+    assert_eq!(m.reg_read(Reg::X5), 1, "the probe timed out, PC {:#x}", m.reg_read(Reg::Pc));
+    assert_eq!(m.reg_read(Reg::X1), 0, "MDCCSR_EL0 before any write: both flags clear");
+    assert_eq!(m.reg_read(Reg::X2), TXFULL, "MDCCSR_EL0 on the last poll");
+    assert_eq!(m.reg_read(Reg::X3), TXFULL, "a write while TXfull is set leaves it set");
+    assert_eq!(m.reg_read(Reg::X4), 0, "DBGDTRRX_EL0 with RXfull clear");
+    assert_eq!(m.reg_read(Reg::X6), TXFULL, "reading DTRRX leaves TXfull alone");
+}
+
+#[test]
+fn mdscr_el1_views_the_flags_and_restores_them_only_under_the_os_lock() {
+    let mut ram = vec![0u8; RAM_LEN];
+    let regs = [(Reg::X0, 0x0123_4567_89AB_CDEF), (Reg::X9, RXFULL | MDSCR_TDCC)];
+    let m = run_el1(&mut ram, DCC_VIEW, &regs, 40);
+    assert_eq!(m.reg_read(Reg::X5), 1, "every access completed, PC {:#x}", m.reg_read(Reg::Pc));
+    assert_eq!(m.reg_read(Reg::X1), TXFULL, "MDSCR_EL1 after a DBGDTR_EL0 write");
+    assert_eq!(m.reg_read(Reg::X2), TXFULL, "with the OS Lock unlocked, writing zero leaves TXfull");
+    assert_eq!(m.reg_read(Reg::X3), TXFULL, "MDCCSR_EL0 agrees");
+    assert_eq!(m.reg_read(Reg::X6), RXFULL, "with the OS Lock locked, MDSCR_EL1 restores both flags");
+    assert_eq!(m.reg_read(Reg::X8), 0, "reading DBGDTRRX_EL0 cleared RXfull");
+    assert_eq!(m.reg_read(Reg::X11), MDSCR_TDCC, "reading DBGDTR_EL0 cleared RXfull, and only RXfull");
 }
 
 #[test]
 fn the_debug_communications_channel_is_reachable_from_el0_unless_mdscr_tdcc_traps_it() {
+    let mdccsr = SysReg::new(2, 3, 0, 1, 0).expect("MDCCSR_EL0");
     for (mdscr, completes) in [(0, true), (MDSCR_TDCC, false)] {
         let mut ram = vec![0u8; RAM_LEN];
         let setup = Setup {
@@ -256,8 +351,12 @@ fn the_debug_communications_channel_is_reachable_from_el0_unless_mdscr_tdcc_trap
         };
         let m = run(&mut ram, setup, 60);
         assert_eq!(m.reg_read(Reg::X5), u64::from(completes), "MDSCR_EL1 {mdscr:#x}");
-        if !completes {
+        let status = m.sysreg_read(mdccsr).expect("MDCCSR_EL0");
+        if completes {
+            assert_eq!(status, TXFULL, "the write from EL0 filled DTRTX");
+        } else {
             assert_eq!(esr(&m) >> 26, EC_SYSREG);
+            assert_eq!(status, 0, "the trapped write had no effect");
         }
     }
 }

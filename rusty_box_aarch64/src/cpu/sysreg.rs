@@ -178,12 +178,24 @@ const EL0VCTEN: u64 = 1 << 1;
 const EL0VTEN: u64 = 1 << 8;
 const EL0PTEN: u64 = 1 << 9;
 
-/// `SCTLR_EL1` EL0 controls.
 /// `MDSCR_EL1.TDCC`: trap EL0 accesses to the Debug Communications Channel.
 const MDSCR_TDCC: u64 = 1 << 12;
 
+/// The Debug Communications Channel's flags, `EDSCR.TXfull` (DTRTX full)
+/// and `EDSCR.RXfull` (DTRRX full). They are kept at their places in
+/// `MDSCR_EL1`, bits 29 and 30, which views them as `MDCCSR_EL0` does at the
+/// same bits (Arm ARM, DDI 0487, the `MDSCR_EL1`, `MDCCSR_EL0` and `EDSCR`
+/// register descriptions).
+const DCC_TXFULL: u64 = 1 << 29;
+const DCC_RXFULL: u64 = 1 << 30;
+const DCC_FLAGS: u64 = DCC_TXFULL | DCC_RXFULL;
+
+/// `OSLSR_EL1.OSLK`: the OS Lock is locked.
+const OSLSR_OSLK: u64 = 1 << 1;
+
 /// `SCTLR_EL1` FEAT_MTE fields: ITFSB, TCF0, TCF, ATA0, ATA, TCSO0, TCSO.
 const SCTLR_MTE: u64 = (1 << 37) | (3 << 38) | (3 << 40) | (1 << 42) | (1 << 43) | (1 << 58) | (1 << 59);
+/// `SCTLR_EL1` EL0 controls.
 const SCTLR_UMA: u64 = 1 << 9;
 const SCTLR_DZE: u64 = 1 << 14;
 const SCTLR_UCT: u64 = 1 << 15;
@@ -200,7 +212,9 @@ impl Cpu {
     }
 
     /// The Debug Communications Channel registers EL0 may reach trap to EL1
-    /// when `MDSCR_EL1.TDCC` is set (QEMU target/arm/debug_helper.c
+    /// when `MDSCR_EL1.TDCC` is set, before the access has any effect (Arm
+    /// ARM, DDI 0487, the `MDCCSR_EL0`, `DBGDTR_EL0`, `DBGDTRRX_EL0` and
+    /// `DBGDTRTX_EL0` accessibility pseudocode; QEMU target/arm/debug_helper.c
     /// `access_tdcc`).
     fn dcc_check(&self, el: El) -> Result<(), SysRegError> {
         if el == El::El0 && self.sys.mdscr_el1 & MDSCR_TDCC != 0 {
@@ -218,10 +232,25 @@ impl Cpu {
         }
     }
 
-    /// `MRS`: the value of the register `key` names, read at the current EL.
+    /// The value an `MRS` at the current EL reads from the register `key`
+    /// names, without the read's side effect (see [`Cpu::sysreg_mrs`]).
     #[inline]
     pub(crate) fn sysreg_read(&self, key: SysRegKey) -> Result<u64, SysRegError> {
         self.sysreg_read_as(key, Accessor::Guest)
+    }
+
+    /// `MRS`: read the register `key` names at the current EL, with the
+    /// read's side effect. A read of `DBGDTRRX_EL0` or `DBGDTR_EL0` empties
+    /// DTRRX: RXfull is cleared to 0 after the read (Arm ARM, DDI 0487, the
+    /// `DBGDTRRX_EL0` and `DBGDTR_EL0` register descriptions). A read that
+    /// traps has no effect.
+    #[inline]
+    pub(crate) fn sysreg_mrs(&mut self, key: SysRegKey) -> Result<u64, SysRegError> {
+        let value = self.sysreg_read_as(key, Accessor::Guest)?;
+        if let DBGDTR_EL0 | DBGDTRTX_EL0 = key.0 {
+            self.sys.mdscr_el1 &= !DCC_RXFULL;
+        }
+        Ok(value)
     }
 
     /// The exception level an accessor reads and writes at.
@@ -298,12 +327,21 @@ impl Cpu {
                     _ => self.timer_tval_read(cval),
                 });
             }
-            // The Debug Communications Channel is not implemented: its
-            // status reads as zero (nothing to receive, room to transmit)
-            // and its data registers are RAZ/WI, so that a guest that writes
-            // them, having no way to probe for the channel, takes no
-            // exception (QEMU target/arm/debug_helper.c `debug_cp_reginfo`).
-            MDCCSR_EL0 | DBGDTR_EL0 | DBGDTRTX_EL0 => {
+            // The Debug Communications Channel with no external debugger on
+            // its far end (Arm ARM, DDI 0487, chapter H4, "The Debug
+            // Communication Channel and Instruction Transfer Register").
+            // `MDCCSR_EL0` reports the two flags; nothing ever empties DTRTX
+            // or fills DTRRX, so TXfull stays set from the first write on
+            // and RXfull is set only by a restore through `MDSCR_EL1`.
+            MDCCSR_EL0 => {
+                self.dcc_check(el)?;
+                return Ok(self.sys.mdscr_el1 & DCC_FLAGS);
+            }
+            // `DBGDTRRX_EL0` (`DBGDTRTX_EL0`'s encoding, read) and
+            // `DBGDTR_EL0` return DTRRX, an UNKNOWN value while RXfull is
+            // clear; this model does not keep the data registers' contents,
+            // and reads zero. Emptying DTRRX is `sysreg_mrs`'s side effect.
+            DBGDTR_EL0 | DBGDTRTX_EL0 => {
                 self.dcc_check(el)?;
                 return Ok(0);
             }
@@ -475,9 +513,16 @@ impl Cpu {
                 }
                 return Ok(WriteEffect::Timer);
             }
-            // RAZ/WI, as for reads.
+            // A write fills DTRTX: TXfull is set to 1 after the write (Arm
+            // ARM, DDI 0487, the `DBGDTRTX_EL0` and `DBGDTR_EL0` register
+            // descriptions), and only an external debugger's read of DTRTX
+            // clears it again. `DBGDTR_EL0`'s high word goes to DTRRX and
+            // leaves RXfull as it is. A write while TXfull is already set
+            // leaves DTRTX UNKNOWN; this model keeps neither data register's
+            // contents, so the written value is dropped either way.
             DBGDTR_EL0 | DBGDTRTX_EL0 => {
                 self.dcc_check(el)?;
+                self.sys.mdscr_el1 |= DCC_TXFULL;
                 return Ok(WriteEffect::None);
             }
             _ => {}
@@ -609,8 +654,15 @@ impl Cpu {
                 self.sys.mdccint_el1 = value;
                 WriteEffect::None
             }
+            // TXfull and RXfull are the save/restore view of the channel's
+            // flags: read-only while the OS Lock is unlocked, and written
+            // through to `EDSCR` while it is locked (Arm ARM, DDI 0487,
+            // `MDSCR_EL1` and `EDSCR` TXfull/RXfull). Unlocked, a read of
+            // them is UNKNOWN; this model's reads return the flags at every
+            // OS Lock state.
             MDSCR_EL1 => {
-                self.sys.mdscr_el1 = value;
+                let kept = if self.sys.oslsr_el1 & OSLSR_OSLK != 0 { 0 } else { DCC_FLAGS };
+                self.sys.mdscr_el1 = (value & !kept) | (self.sys.mdscr_el1 & kept);
                 WriteEffect::None
             }
             OSECCR_EL1 => {

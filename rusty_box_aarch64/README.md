@@ -385,8 +385,11 @@ integration tests of the public API.
   wait — WFI not when an interrupt is pending, masked or not; WFE not when
   the Event Register, set by `SEV`, `SEVL`, an exception return or the
   virtual event stream, is set — and the Debug Communications Channel
-  registers read as zero, ignore writes and trap from EL0 under
-  `MDSCR_EL1.TDCC`.
+  behaves as one with no debugger attached: a write sets TXfull for good,
+  so a probe shaped like Linux's `hvc_dcc_check` gives up; a read of the
+  receive register clears RXfull; `MDSCR_EL1` shows both flags and restores
+  them only while the OS Lock is locked; and EL0's accesses trap under
+  `MDSCR_EL1.TDCC` before they take effect.
 - `tests/translation_and_firmware.rs`: an out-of-range T1SZ, a table base or
   block beyond the output size `TCR_EL1.IPS` selects, `AT` meeting an
   external abort on its walk, PSCI's affinity and entry-point checks, and a
@@ -498,6 +501,22 @@ choice is listed here with its evidence.
   exist, and reports them in `GICC_IAR.CPUID`. This model keeps processor
   0's bit only: other bits read as zero and are ignored, and `CPUID` reads
   as zero.
+- **The Debug Communications Channel's transmit register stays full.** The
+  Arm ARM (DDI 0487, chapter H4, and the `DBGDTRTX_EL0`, `DBGDTR_EL0`,
+  `DBGDTRRX_EL0`, `MDCCSR_EL0`, `MDSCR_EL1` and `EDSCR` descriptions) sets
+  TXfull on every write to `DBGDTRTX_EL0` or `DBGDTR_EL0`, and only an
+  external debugger's read of DTRTX clears it; a read of `DBGDTRRX_EL0` or
+  `DBGDTR_EL0` clears RXfull; `MDSCR_EL1`'s TXfull and RXfull are read-only
+  while the OS Lock is unlocked and restore the flags while it is locked.
+  QEMU 11.1.2 (`debug_cp_reginfo` in `target/arm/debug_helper.c`) reads
+  `MDCCSR_EL0` as zero, so a channel that nothing drains looks drained at
+  once, and keeps `MDSCR_EL1` bits 29 and 30 as written. This model has no
+  debugger either, and follows the Arm ARM: after the first write TXfull
+  stays set, so Linux's `hvc_dcc_check` (with `CONFIG_HVC_DCC`) concludes
+  that no channel is attached instead of registering a console whose
+  output goes nowhere. Two UNKNOWN cases have fixed answers: a read with
+  RXfull clear returns zero, and a write while TXfull is set leaves TXfull
+  set and drops the value.
 - **Where QEMU has no defined behaviour.** The PL011's receive count, which
   loopback can push past the FIFO depth, is a signed `int` in QEMU whose
   overflow is undefined; this model's saturates.
@@ -513,7 +532,12 @@ choice is listed here with its evidence.
 - Floating-point exception traps: FPCR's trap-enable bits read as zero, as on
   a Cortex-A57, so exceptions only accumulate in FPSR.
 - Debug: breakpoint and watchpoint registers exist (two of each, as
-  advertised) but never fire; no Debug state, no PMU.
+  advertised) but never fire; no Debug state, no PMU. The Debug
+  Communications Channel keeps its two flags but not the contents of its
+  data registers, DTRTX and DTRRX: `DBGDTRRX_EL0`, `DBGDTR_EL0`,
+  `OSDTRRX_EL1` and `OSDTRTX_EL1` read as zero, which differs from the Arm
+  ARM only after an OS-Lock restore of a non-zero DTRRX or once a value has
+  been written to DTRTX and is read back through `OSDTRTX_EL1`.
 - No data cache model, and no instruction cache a guest can see: the
   decoded traces are kept coherent with every write, so neither `IC` nor
   data cache maintenance has anything to act on.
