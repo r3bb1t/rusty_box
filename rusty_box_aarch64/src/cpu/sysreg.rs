@@ -190,6 +190,16 @@ const DCC_TXFULL: u64 = 1 << 29;
 const DCC_RXFULL: u64 = 1 << 30;
 const DCC_FLAGS: u64 = DCC_TXFULL | DCC_RXFULL;
 
+/// The `MDSCR_EL1` fields that are the OS Lock save/restore view of `EDSCR`:
+/// RXfull (30), TXfull (29), RXO (27), TXU (26), INTdis (23:22), TDA (21),
+/// HDE (14) and ERR (6). An `MSR` writes them only while `OSLSR_EL1.OSLK` is
+/// 1, and leaves them as they are while it is 0 (Arm ARM, DDI 0487, the
+/// `MDSCR_EL1` description; Arm's ASL as the Sail arm-v9.3-a model carries
+/// it, `__set_MDSCR_EL1`). That ASL gates TFO (31) and SC2 (19) the same way;
+/// they belong to FEAT_TRF and FEAT_PCSRv8p2 and are RES0 in this ARMv8.0
+/// processor.
+const MDSCR_SAVE_RESTORE: u64 = DCC_FLAGS | (1 << 27) | (1 << 26) | (0b11 << 22) | (1 << 21) | (1 << 14) | (1 << 6);
+
 /// `OSLSR_EL1.OSLK`: the OS Lock is locked.
 const OSLSR_OSLK: u64 = 1 << 1;
 
@@ -261,8 +271,9 @@ impl Cpu {
         }
     }
 
-    /// The value of the register `key` names, as `accessor` reads it.
-    /// Reading has no side effects on this core.
+    /// The value of the register `key` names, as `accessor` reads it. This
+    /// read has no side effect; an `MRS`'s side effect is
+    /// [`Cpu::sysreg_mrs`]'s.
     fn sysreg_read_as(&self, key: SysRegKey, accessor: Accessor) -> Result<u64, SysRegError> {
         let el = self.access_level(accessor);
         let el0 = el == El::El0;
@@ -337,10 +348,11 @@ impl Cpu {
                 self.dcc_check(el)?;
                 return Ok(self.sys.mdscr_el1 & DCC_FLAGS);
             }
-            // `DBGDTRRX_EL0` (`DBGDTRTX_EL0`'s encoding, read) and
-            // `DBGDTR_EL0` return DTRRX, an UNKNOWN value while RXfull is
-            // clear; this model does not keep the data registers' contents,
-            // and reads zero. Emptying DTRRX is `sysreg_mrs`'s side effect.
+            // `DBGDTRRX_EL0` (`DBGDTRTX_EL0`'s encoding, read) returns DTRRX,
+            // and `DBGDTR_EL0` returns DTRTX in bits [63:32] and DTRRX in
+            // [31:0]; DTRRX is UNKNOWN while RXfull is clear. This model does
+            // not keep the data registers' contents, and both read zero.
+            // Emptying DTRRX is `sysreg_mrs`'s side effect.
             DBGDTR_EL0 | DBGDTRTX_EL0 => {
                 self.dcc_check(el)?;
                 return Ok(0);
@@ -654,14 +666,14 @@ impl Cpu {
                 self.sys.mdccint_el1 = value;
                 WriteEffect::None
             }
-            // TXfull and RXfull are the save/restore view of the channel's
-            // flags: read-only while the OS Lock is unlocked, and written
+            // The save/restore fields, the channel's TXfull and RXfull among
+            // them, are read-only while the OS Lock is unlocked and written
             // through to `EDSCR` while it is locked (Arm ARM, DDI 0487,
-            // `MDSCR_EL1` and `EDSCR` TXfull/RXfull). Unlocked, a read of
-            // them is UNKNOWN; this model's reads return the flags at every
-            // OS Lock state.
+            // `MDSCR_EL1` and `EDSCR`). Unlocked, a read of them is UNKNOWN;
+            // this model's reads return what they hold at every OS Lock
+            // state.
             MDSCR_EL1 => {
-                let kept = if self.sys.oslsr_el1 & OSLSR_OSLK != 0 { 0 } else { DCC_FLAGS };
+                let kept = if self.sys.oslsr_el1 & OSLSR_OSLK != 0 { 0 } else { MDSCR_SAVE_RESTORE };
                 self.sys.mdscr_el1 = (value & !kept) | (self.sys.mdscr_el1 & kept);
                 WriteEffect::None
             }

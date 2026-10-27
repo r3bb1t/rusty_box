@@ -14,8 +14,9 @@
 //! `DBGDTR_EL0`, `MDCCSR_EL0` and `MDSCR_EL1` descriptions: a write to the
 //! transmit register sets TXfull, which only a debugger's read clears; a
 //! read of the receive register clears RXfull; `MDSCR_EL1`'s TXfull and
-//! RXfull are read-only while the OS Lock is unlocked and restore the flags
-//! while it is locked; `MDSCR_EL1.TDCC` traps EL0's accesses. QEMU 11.1.2
+//! RXfull, like its other save/restore fields, are read-only while the OS
+//! Lock is unlocked and restore the flags while it is locked;
+//! `MDSCR_EL1.TDCC` traps EL0's accesses. QEMU 11.1.2
 //! (target/arm/debug_helper.c `debug_cp_reginfo`) reads the status as zero.
 //!
 //! Guest code is hand-assembled (GNU as for aarch64). An EL1 prologue
@@ -51,8 +52,12 @@
 //!         msr mdscr_el1, xzr ; mrs x2, mdscr_el1 ; mrs x3, mdccsr_el0 ;
 //!         mov x4, #1 ; msr oslar_el1, x4 ; msr mdscr_el1, x9 ;
 //!         mrs x6, mdccsr_el0 ; mrs x7, dbgdtrrx_el0 ; mrs x8, mdccsr_el0 ;
-//!         msr mdscr_el1, x9 ; mrs x10, dbgdtr_el0 ; mrs x11, mdscr_el1 ;
+//!         msr mdscr_el1, x12 ; mrs x10, dbgdtr_el0 ; mrs x11, mdscr_el1 ;
 //!         mov x5, #1 ; b .                                      // DCC_VIEW
+//! 0x380:  msr oslar_el1, xzr ; msr mdscr_el1, x9 ; mrs x1, mdscr_el1 ;
+//!         mov x4, #1 ; msr oslar_el1, x4 ; msr mdscr_el1, x9 ;
+//!         mrs x2, mdscr_el1 ; msr oslar_el1, xzr ; msr mdscr_el1, xzr ;
+//!         mrs x3, mdscr_el1 ; mov x5, #1 ; b .                  // MDSCR_LOCK
 //! 0xc00:  b .                                   // VBAR + 0x400: a trap from EL0
 //! ```
 
@@ -147,11 +152,23 @@ const PROGRAM: &[(u64, u32)] = &[
     (0x324, 0xD533_0106),
     (0x328, 0xD533_0507),
     (0x32C, 0xD533_0108),
-    (0x330, 0xD510_0249),
+    (0x330, 0xD510_024C),
     (0x334, 0xD533_040A),
     (0x338, 0xD530_024B),
     (0x33C, 0xD280_0025),
     (0x340, 0x1400_0000),
+    (0x380, 0xD510_109F),
+    (0x384, 0xD510_0249),
+    (0x388, 0xD530_0241),
+    (0x38C, 0xD280_0024),
+    (0x390, 0xD510_1084),
+    (0x394, 0xD510_0249),
+    (0x398, 0xD530_0242),
+    (0x39C, 0xD510_109F),
+    (0x3A0, 0xD510_025F),
+    (0x3A4, 0xD530_0243),
+    (0x3A8, 0xD280_0025),
+    (0x3AC, 0x1400_0000),
     (0xC00, 0x1400_0000),
 ];
 
@@ -163,6 +180,7 @@ const DCC_EL0: u64 = 0x200;
 const DCC_EL1: u64 = 0x240;
 const DCC_PROBE: u64 = 0x280;
 const DCC_VIEW: u64 = 0x300;
+const MDSCR_LOCK: u64 = 0x380;
 const VBAR: u64 = RAM_BASE + 0x800;
 /// Where a synchronous exception from EL0 lands, and stays.
 const TRAPPED: u64 = VBAR + 0x400;
@@ -329,7 +347,11 @@ fn a_probe_from_el0_finds_its_character_never_read() {
 #[test]
 fn mdscr_el1_views_the_flags_and_restores_them_only_under_the_os_lock() {
     let mut ram = vec![0u8; RAM_LEN];
-    let regs = [(Reg::X0, 0x0123_4567_89AB_CDEF), (Reg::X9, RXFULL | MDSCR_TDCC)];
+    let regs = [
+        (Reg::X0, 0x0123_4567_89AB_CDEF),
+        (Reg::X9, RXFULL | MDSCR_TDCC),
+        (Reg::X12, RXFULL | TXFULL | MDSCR_TDCC),
+    ];
     let m = run_el1(&mut ram, DCC_VIEW, &regs, 40);
     assert_eq!(m.reg_read(Reg::X5), 1, "every access completed, PC {:#x}", m.reg_read(Reg::Pc));
     assert_eq!(m.reg_read(Reg::X1), TXFULL, "MDSCR_EL1 after a DBGDTR_EL0 write");
@@ -337,7 +359,28 @@ fn mdscr_el1_views_the_flags_and_restores_them_only_under_the_os_lock() {
     assert_eq!(m.reg_read(Reg::X3), TXFULL, "MDCCSR_EL0 agrees");
     assert_eq!(m.reg_read(Reg::X6), RXFULL, "with the OS Lock locked, MDSCR_EL1 restores both flags");
     assert_eq!(m.reg_read(Reg::X8), 0, "reading DBGDTRRX_EL0 cleared RXfull");
-    assert_eq!(m.reg_read(Reg::X11), MDSCR_TDCC, "reading DBGDTR_EL0 cleared RXfull, and only RXfull");
+    assert_eq!(
+        m.reg_read(Reg::X11),
+        TXFULL | MDSCR_TDCC,
+        "with both flags restored, reading DBGDTR_EL0 cleared RXfull, and only RXfull"
+    );
+}
+
+/// Arm ARM `MDSCR_EL1` and Arm's ASL `__set_MDSCR_EL1`: the save/restore
+/// fields — RXfull, TXfull, RXO, TXU, INTdis, TDA, HDE and ERR — take an
+/// `MSR` only while `OSLSR_EL1.OSLK` is 1, and keep their value while it is
+/// 0; the other fields take every write.
+#[test]
+fn mdscr_el1_save_restore_fields_are_written_only_under_the_os_lock() {
+    const SAVE_RESTORE: u64 = RXFULL | TXFULL | (1 << 27) | (1 << 26) | (0b11 << 22) | (1 << 21) | (1 << 14) | (1 << 6);
+    /// MDE, KDE and TDCC.
+    const OTHERS: u64 = (1 << 15) | (1 << 13) | MDSCR_TDCC;
+    let mut ram = vec![0u8; RAM_LEN];
+    let m = run_el1(&mut ram, MDSCR_LOCK, &[(Reg::X9, SAVE_RESTORE | OTHERS)], 20);
+    assert_eq!(m.reg_read(Reg::X5), 1, "every access completed, PC {:#x}", m.reg_read(Reg::Pc));
+    assert_eq!(m.reg_read(Reg::X1), OTHERS, "unlocked: the save/restore fields keep their reset value");
+    assert_eq!(m.reg_read(Reg::X2), SAVE_RESTORE | OTHERS, "locked: every field takes the write");
+    assert_eq!(m.reg_read(Reg::X3), SAVE_RESTORE, "unlocked: writing zero clears only the other fields");
 }
 
 #[test]

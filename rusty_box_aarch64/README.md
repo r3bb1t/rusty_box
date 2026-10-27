@@ -387,8 +387,9 @@ integration tests of the public API.
   virtual event stream, is set — and the Debug Communications Channel
   behaves as one with no debugger attached: a write sets TXfull for good,
   so a probe shaped like Linux's `hvc_dcc_check` gives up; a read of the
-  receive register clears RXfull; `MDSCR_EL1` shows both flags and restores
-  them only while the OS Lock is locked; and EL0's accesses trap under
+  receive register clears RXfull; `MDSCR_EL1` shows both flags, and its
+  save/restore fields, the flags among them, take a write only while the OS
+  Lock is locked; and EL0's accesses trap under
   `MDSCR_EL1.TDCC` before they take effect.
 - `tests/translation_and_firmware.rs`: an out-of-range T1SZ, a table base or
   block beyond the output size `TCR_EL1.IPS` selects, `AT` meeting an
@@ -519,17 +520,19 @@ choice is listed here with its evidence.
   `DBGDTRRX_EL0`, `MDCCSR_EL0`, `MDSCR_EL1` and `EDSCR` descriptions) sets
   TXfull on every write to `DBGDTRTX_EL0` or `DBGDTR_EL0`, and only an
   external debugger's read of DTRTX clears it; a read of `DBGDTRRX_EL0` or
-  `DBGDTR_EL0` clears RXfull; `MDSCR_EL1`'s TXfull and RXfull are read-only
-  while the OS Lock is unlocked and restore the flags while it is locked.
-  QEMU 11.1.2 (`debug_cp_reginfo` in `target/arm/debug_helper.c`) reads
-  `MDCCSR_EL0` as zero, so a channel that nothing drains looks drained at
-  once, and keeps `MDSCR_EL1` bits 29 and 30 as written. This model has no
-  debugger either, and follows the Arm ARM: after the first write TXfull
-  stays set, so Linux's `hvc_dcc_check` (with `CONFIG_HVC_DCC`) concludes
-  that no channel is attached instead of registering a console whose
-  output goes nowhere. Two UNKNOWN cases have fixed answers: a read with
-  RXfull clear returns zero, and a write while TXfull is set leaves TXfull
-  set and drops the value.
+  `DBGDTR_EL0` clears RXfull; `MDSCR_EL1`'s save/restore fields — TXfull
+  and RXfull, which restore the flags, and RXO, TXU, INTdis, TDA, HDE and
+  ERR — are read-only while the OS Lock is unlocked and written while it is
+  locked (`__set_MDSCR_EL1` in Arm's ASL). QEMU 11.1.2 (`debug_cp_reginfo`
+  in `target/arm/debug_helper.c`) reads `MDCCSR_EL0` as zero, so a channel
+  that nothing drains looks drained at once, and keeps every `MDSCR_EL1`
+  field as written whatever the OS Lock. This model has no debugger either,
+  and follows the Arm ARM: after the first write TXfull stays set, so
+  Linux's `hvc_dcc_check` (with `CONFIG_HVC_DCC`) concludes that no channel
+  is attached instead of registering a console whose output goes nowhere,
+  and an unlocked write leaves the save/restore fields as they are. Two
+  UNKNOWN cases have fixed answers: a read with RXfull clear returns zero,
+  and a write while TXfull is set leaves TXfull set and drops the value.
 - **Where QEMU has no defined behaviour.** The PL011's receive count, which
   loopback can push past the FIFO depth, is a signed `int` in QEMU whose
   overflow is undefined; this model's saturates.
@@ -548,9 +551,13 @@ choice is listed here with its evidence.
   advertised) but never fire; no Debug state, no PMU. The Debug
   Communications Channel keeps its two flags but not the contents of its
   data registers, DTRTX and DTRRX: `DBGDTRRX_EL0`, `DBGDTR_EL0`,
-  `OSDTRRX_EL1` and `OSDTRTX_EL1` read as zero, which differs from the Arm
-  ARM only after an OS-Lock restore of a non-zero DTRRX or once a value has
-  been written to DTRTX and is read back through `OSDTRTX_EL1`.
+  `OSDTRRX_EL1` and `OSDTRTX_EL1` read as zero. That differs from the Arm
+  ARM wherever the data would show: a `DBGDTRRX_EL0` or `DBGDTR_EL0` read
+  while RXfull is 1, after an OS-Lock restore of RXfull through
+  `MDSCR_EL1`, returns zero, not DTRRX (such as the high word an earlier
+  `DBGDTR_EL0` write put there); every `DBGDTR_EL0` read returns zero in
+  bits [63:32], not DTRTX; and `OSDTRRX_EL1` and `OSDTRTX_EL1` read zero,
+  not what was written to DTRRX or DTRTX.
 - No data cache model, and no instruction cache a guest can see: the
   decoded traces are kept coherent with every write, so neither `IC` nor
   data cache maintenance has anything to act on.
