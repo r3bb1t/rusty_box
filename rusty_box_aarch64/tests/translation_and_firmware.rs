@@ -4,20 +4,25 @@
 //!
 //! The references are the Arm documents first and QEMU 11.1.2 second:
 //!
-//! - an out-of-range T0SZ/T1SZ takes a level 0 Translation fault, and the
-//!   walk's output addresses must fit the size `TCR_EL1.IPS` selects,
-//!   bounded by PARange (target/arm/ptw.c `get_phys_addr_lpae`);
+//! - an out-of-range T0SZ/T1SZ takes a level 0 Translation fault, one of
+//!   the two outcomes the Arm ARM leaves IMPLEMENTATION DEFINED
+//!   (`AArch64.S1InvalidTxSZ`; `AArch64.GetS1TTWParams`, the ImpDef
+//!   booleans "Fault on TxSZ value above maximum" and "... below
+//!   minimum"), and the walk's output addresses must fit the size
+//!   `TCR_EL1.IPS` selects, bounded by PARange (both in target/arm/ptw.c
+//!   `get_phys_addr_lpae`);
 //! - `AT` takes a synchronous external abort on its walk as a Data Abort
 //!   (Arm ARM `AArch64.AT`; target/arm/tcg/cpregs-at.c `do_ats_write`);
 //! - PSCI `CPU_ON` checks its target, then its entry point, and
 //!   `AFFINITY_INFO` names an instance at its affinity level (Arm DEN 0022D
 //!   §5.6, §5.7), with the function identifier and an SMC32 call's
-//!   arguments in W registers (SMC Calling Convention, Arm DEN 0028B §2.6);
+//!   arguments in W registers (SMC Calling Convention, Arm DEN 0028B §2.6,
+//!   §2.7, §3.1 Table 3-1);
 //! - a store-exclusive to an address the monitor does not hold fails
-//!   without translating it (Arm ARM `AArch64.ExclusiveMonitorsPass`, which
-//!   returns FALSE on `AArch64.IsExclusiveVA` before
-//!   `AArch64.TranslateAddress`; target/arm/tcg/translate-a64.c
-//!   `gen_store_exclusive`).
+//!   without translating it (Arm ARM `AArch64.ExclusiveMonitorsPass`, whose
+//!   IMPLEMENTATION DEFINED `AArch64.IsExclusiveVA` is permitted to return
+//!   FALSE before `AArch64.TranslateAddress`, and here does;
+//!   target/arm/tcg/translate-a64.c `gen_store_exclusive`).
 //!
 //! Guest code is hand-assembled (GNU as for aarch64); each word's source is
 //! beside it.
@@ -213,7 +218,8 @@ fn psci_cpu_on_checks_the_target_then_the_entry_point() {
 
 /// `AFFINITY_INFO` (DEN 0022D §5.1.5, §5.7): level `n` ignores Aff0 to
 /// Aff(`n`-1), an instance this processor is in is ON, and any other
-/// instance, or a level above 3, is not present: INVALID_PARAMETERS.
+/// instance, or a level above 3, is not present: INVALID_PARAMETERS. The
+/// must-be-zero bits 31:24 (§5.1.4) count at every level.
 #[test]
 fn psci_affinity_info_names_an_instance_at_its_level() {
     for (x1, level, expected) in [
@@ -226,6 +232,7 @@ fn psci_affinity_info_names_an_instance_at_its_level() {
         (0xFFFF, 2, psci::ON),
         (0x1_0000, 2, psci::INVALID_PARAMETERS),
         (0xFF_FFFF, 3, psci::ON),
+        (0x0100_0000, 3, psci::INVALID_PARAMETERS),
         (0x1_0000_0000, 3, psci::INVALID_PARAMETERS),
         (0, 4, psci::INVALID_PARAMETERS),
     ] {
@@ -233,10 +240,11 @@ fn psci_affinity_info_names_an_instance_at_its_level() {
     }
 }
 
-/// The SMC Calling Convention's registers (DEN 0028B §2.6, §2.7): the
-/// function identifier is W0 and an SMC32 call's arguments are W1-W3, so
-/// the upper halves of X0-X2 take no part; an SMC64 call's arguments are
-/// whole X registers, except a parameter DEN 0022D declares `uint32`.
+/// The SMC Calling Convention's registers (DEN 0028B §2.6, §2.7, §3.1
+/// Table 3-1): the function identifier is W0 in both conventions and an
+/// SMC32 call's arguments are W1-W3, so the upper halves of X0-X2 take no
+/// part; an SMC64 call's arguments are whole X registers, except a
+/// parameter DEN 0022D declares `uint32`.
 #[test]
 fn psci_reads_w_registers_where_the_calling_convention_passes_them() {
     const HIGH: u64 = 0xDEAD_BEEF_0000_0000;

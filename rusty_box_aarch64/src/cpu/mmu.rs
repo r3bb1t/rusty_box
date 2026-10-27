@@ -471,13 +471,14 @@ impl Cpu {
             (tcr & 0x3F, (tcr >> 7) & 1 == 1, self.sys.ttbr0_el1)
         };
         // T0SZ/T1SZ outside 16..=39 (`AArch64.S1MinTxSZ` and
-        // `AArch64.MaxTxSZ` for the 4 KiB granule without FEAT_LVA or
-        // FEAT_TTST): whether such a value is treated as the nearest one in
-        // range or takes a level 0 Translation fault is IMPLEMENTATION
-        // DEFINED (Arm ARM `AArch64.GetS1TTWParams`, the ImpDef booleans
-        // "Fault on TxSZ value above maximum" and "... below minimum";
-        // `AArch64.S1InvalidTxSZ`). This takes the fault, as QEMU does
-        // (target/arm/ptw.c `get_phys_addr_lpae`, `param.tsz_oob`).
+        // `AArch64.MaxTxSZ` for the 4 KiB granule without FEAT_LPA2's
+        // `TCR_EL1.DS` or FEAT_TTST): whether such a value is treated as the
+        // nearest one in range or takes a level 0 Translation fault is
+        // IMPLEMENTATION DEFINED (Arm ARM `AArch64.GetS1TTWParams`, the
+        // ImpDef booleans "Fault on TxSZ value above maximum" and "...
+        // below minimum"; `AArch64.S1InvalidTxSZ`). This takes the fault, as
+        // QEMU does (target/arm/ptw.c `get_phys_addr_lpae`,
+        // `param.tsz_oob`).
         if !(16..=39).contains(&txsz) {
             return Err(TranslationFault::Translation { level: 0 });
         }

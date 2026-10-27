@@ -342,12 +342,14 @@ impl Cpu {
     /// processor, with the functions QEMU's `virt` provides
     /// (target/arm/tcg/psci.c `arm_handle_psci_call`).
     ///
-    /// The SMC Calling Convention passes the function identifier in W0, and
-    /// an SMC32/HVC32 call's arguments in W1-W3 (Arm DEN 0028B §2.6, §2.7;
-    /// DEN 0022D §5.2.1), so the upper halves of those X registers take no
-    /// part, as in TF-A's `psci_smc_handler`. A parameter DEN 0022D declares
-    /// `uint32` (`power_state`, `lowest_affinity_level`, `psci_func_id`) is
-    /// its register's low 32 bits in either convention.
+    /// The SMC Calling Convention passes the function identifier in W0 in
+    /// both conventions, and an SMC32/HVC32 call's arguments in W1-W3 (Arm
+    /// DEN 0028B §2.6, §2.7, and §3.1 Table 3-1, whose "Wn" is a register's
+    /// low 32 bits, the upper ones ignored; DEN 0022D §5.2.1), so the upper
+    /// halves of those X registers take no part, as in TF-A's
+    /// `psci_smc_handler`. A parameter DEN 0022D declares `uint32`
+    /// (`power_state`, `lowest_affinity_level`, `psci_func_id`) is its
+    /// register's low 32 bits in either convention.
     fn psci_call(&mut self) -> ExecResult {
         let function = self.x[0] as u32;
         let (arg1, arg2) = if function & psci::SMC64 != 0 {
@@ -365,14 +367,21 @@ impl Cpu {
                 }
             }
             psci::CPU_SUSPEND_32 | psci::CPU_SUSPEND_64 => {
-                // A power state with any of bits 31:17 set — the original
-                // format's PowerLevel (25:24) and reserved bits, DEN 0022D
-                // §5.4.2.1 — is refused, as QEMU refuses it.
+                // `power_state` is in the original format, as `PSCI_FEATURES`
+                // reports (DEN 0022D §5.15.2, Table 11). Any of bits 31:17
+                // set — its reserved bits, or a PowerLevel (25:24) above the
+                // core's, the only power level here (§5.4.2.1, Table 7) — is
+                // a power state this platform does not provide, which
+                // §5.4.5 answers with INVALID_PARAMETERS. QEMU refuses the
+                // same bits.
                 if arg1 as u32 & 0xFFFE_0000 != 0 {
                     psci::INVALID_PARAMETERS
                 } else {
-                    // A standby request: wait for an interrupt, then return
-                    // success, as QEMU does.
+                    // Every accepted request is entered as standby: wait for
+                    // an interrupt, then return SUCCESS at the next
+                    // instruction. A powerdown request (StateType, bit 16,
+                    // set) is downgraded to standby so, which §5.4.5
+                    // permits; QEMU does the same.
                     self.x[0] = psci::SUCCESS;
                     return Ok(Flow::Wait);
                 }
@@ -380,14 +389,18 @@ impl Cpu {
             psci::CPU_OFF => return Err(Fault::Stop(StopCause::CpuOff)),
             // DEN 0022D §5.6.2: a `target_cpu` that is no processor's
             // affinity value is INVALID_PARAMETERS, an entry point the
-            // implementation knows to be invalid is INVALID_ADDRESS, and a
-            // processor already on is ALREADY_ON. The order is TF-A's
+            // implementation knows to be invalid "because it is in a range
+            // that is known not to be available to the caller" is
+            // INVALID_ADDRESS, and a processor already on is ALREADY_ON. An
+            // entry point that is not 4-byte aligned can never be executed
+            // in AArch64, the only state here; it is not a range condition,
+            // and INVALID_ADDRESS, the code for an invalid entry point, is
+            // this implementation's choice for it. QEMU refuses it too
+            // (target/arm/arm-powerctl.c `arm_set_cpu_on`), first and with
+            // INVALID_PARAMETERS. The order is TF-A's
             // `psci_cpu_on_by_core_pos` (target, then entry point, then
-            // state); the specification gives none. An entry point that is
-            // not 4-byte aligned can never be executed in AArch64, the only
-            // state here, so it is the invalid one, as in QEMU
-            // (target/arm/arm-powerctl.c `arm_set_cpu_on`, which refuses it
-            // first, with INVALID_PARAMETERS). The only processor is on.
+            // state); the specification gives none. The only processor is
+            // on.
             psci::CPU_ON_32 | psci::CPU_ON_64 => {
                 if arg1 != psci::AFFINITY {
                     psci::INVALID_PARAMETERS

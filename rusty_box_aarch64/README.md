@@ -461,24 +461,29 @@ choice is listed here with its evidence.
   leaves nonzero `HVC` immediates to the hypervisor, and they are
   answered like `#0`.
 - **PSCI as DEN 0022D specifies it.** The firmware reports PSCI 1.1, as
-  QEMU 11.1.2 does, and answers four cases as the specification says
-  where QEMU (target/arm/tcg/psci.c `arm_handle_psci_call`,
-  target/arm/arm-powerctl.c `arm_set_cpu_on`) answers otherwise:
-  - The function identifier is W0, and an SMC32 call's arguments are W1
-    to W3 (DEN 0028B §2.6 and §2.7; DEN 0022D §5.2.1), as are the
-    parameters DEN 0022D declares `uint32` in an SMC64 call
-    (`lowest_affinity_level`); the upper halves of those X registers take
-    no part, as in TF-A (`psci_smc_handler`). QEMU compares the whole of
-    X0 and uses the whole of X1 to X3.
+  QEMU 11.1.2 does. In four cases QEMU (target/arm/tcg/psci.c
+  `arm_handle_psci_call`, target/arm/arm-powerctl.c `arm_set_cpu_on`)
+  answers otherwise; this model answers as the specification says, or,
+  where it leaves the choice open, as stated here:
+  - The function identifier is W0 in both conventions, and an SMC32
+    call's arguments are W1 to W3 (DEN 0028B §2.6 and §2.7, and §3.1
+    Table 3-1, whose `Wn` is a register's low 32 bits with the upper ones
+    ignored; DEN 0022D §5.2.1), as are the parameters DEN 0022D declares
+    `uint32` in an SMC64 call (`lowest_affinity_level`); the upper halves
+    of those X registers take no part, as in TF-A (`psci_smc_handler`).
+    QEMU compares the whole of X0 and uses the whole of X1 to X3.
   - `CPU_ON` with an entry point that is not 4-byte aligned, which no
-    AArch64 processor can start at, returns INVALID_ADDRESS, the code
-    DEN 0022D §5.6.2 gives an entry point the implementation knows to be
-    invalid (INVALID_PARAMETERS is the code before PSCI 1.0). QEMU returns
-    INVALID_PARAMETERS.
+    AArch64 processor can start at, returns INVALID_ADDRESS. DEN 0022D
+    §5.6.2 gives that code to an entry point the implementation knows to
+    be invalid "because it is in a range that is known not to be
+    available to the caller" (INVALID_PARAMETERS before PSCI 1.0).
+    Misalignment is not a range condition, so the specification names no
+    code for it; INVALID_ADDRESS, its code for an invalid entry point, is
+    this model's choice. QEMU returns INVALID_PARAMETERS.
   - `CPU_ON` checks its target first, so an invalid target is
     INVALID_PARAMETERS whatever the entry point; then the entry point,
     then whether the processor is on (ALREADY_ON). DEN 0022D gives no
-    order; this is TF-A's (`psci_cpu_on_by_core_pos`). QEMU checks the
+    order; this one is TF-A's (`psci_cpu_on_by_core_pos`). QEMU checks the
     entry point's alignment first.
   - `AFFINITY_INFO` above level 0 names an affinity instance, ignoring the
     fields below the level (DEN 0022D §5.1.5): one that holds this
@@ -486,6 +491,16 @@ choice is listed here with its evidence.
     present in the platform and gets INVALID_PARAMETERS (§5.7.2). §5.7.1
     lets PSCI 1.0 and later answer levels above 0 so or refuse them. QEMU
     answers ON for every level above 0, whatever the affinity.
+
+  `CPU_SUSPEND` makes two choices DEN 0022D leaves open, as QEMU makes
+  them. Its `power_state` is in the original format, as `PSCI_FEATURES`
+  reports (§5.15.2, Table 11), and one with any of bits 31:17 set, a
+  reserved bit or a PowerLevel above the core's (§5.4.2.1, Table 7), is a
+  power state this platform does not provide: INVALID_PARAMETERS
+  (§5.4.5). Every other request, powerdown (StateType 1) included, is
+  entered as standby and returns SUCCESS at the next instruction once an
+  interrupt is pending; §5.4.5 permits downgrading a powerdown request
+  so.
 - **The device tree's seeds and L1 data cache.** The tree in `assets/` is
   QEMU 11.1.2's `dumpdtb` output with two values replaced in place. QEMU
   draws a fresh `/chosen` `rng-seed` and `kaslr-seed` on every run; this

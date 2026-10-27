@@ -369,8 +369,9 @@ impl Cpu {
         // Store-exclusive (Arm ARM `AArch64.ExclusiveMonitorsPass`): a
         // misaligned address faults first (`AArch64.CheckAlignment`). A store
         // to a virtual address other than the one the monitor holds then
-        // fails without being translated: `AArch64.IsExclusiveVA` returns
-        // FALSE before `AArch64.TranslateAddress`, as QEMU compares the
+        // fails without being translated: `AArch64.IsExclusiveVA`, which is
+        // IMPLEMENTATION DEFINED, is permitted to return FALSE for it, and
+        // here does, before `AArch64.TranslateAddress`, as QEMU compares the
         // address before any access (target/arm/tcg/translate-a64.c
         // `gen_store_exclusive`). Otherwise its translation and permission
         // faults are reported, and the physical address it reaches must be
