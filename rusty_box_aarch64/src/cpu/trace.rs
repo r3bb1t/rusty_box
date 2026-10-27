@@ -767,7 +767,11 @@ impl Cpu {
             Some(trace) => trace,
             None => self.build_trace(observed, pa, epoch)?,
         };
-        if matches!(I::EXECUTION, Execution::Skippable) && self.traces.marked_poll(pa) {
+        let may_skip = match I::EXECUTION {
+            Execution::Heard => false,
+            Execution::Skippable => true,
+        };
+        if may_skip && self.traces.marked_poll(pa) {
             if let Op::ReadCounter { word } = *self.traces.pool.op(trace.start) {
                 let bound = PollBound {
                     left: self.run_left(),

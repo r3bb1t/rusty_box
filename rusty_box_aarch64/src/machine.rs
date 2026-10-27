@@ -882,17 +882,6 @@ enum Slice {
     Stopped(StopReason),
 }
 
-/// The tick a processor waiting for an interrupt at tick `now` sleeps to:
-/// the next event, or `slice_end` if that comes first. Time always moves:
-/// a next event at or before `now` — a deadline a device reported that
-/// working the events out again (`VirtMachine::sync_events`) did not
-/// consume — wakes it at the next tick, so the slice still reaches its end
-/// and no later event is passed over.
-#[inline]
-fn wake_tick(next_event: u64, now: u64, slice_end: u64) -> u64 {
-    next_event.max(now.saturating_add(1)).min(slice_end)
-}
-
 /// A Cortex-A57-shaped processor on QEMU's `virt` board.
 ///
 /// `S` is where its memory lives (`OwnedStorage`, with `alloc`, or
@@ -1150,15 +1139,15 @@ impl<S: GuestStorage, I: Instrumentation> VirtMachine<S, I> {
                 self.sync_events();
             }
             if self.cpu.activity == Activity::WaitingForInterrupt && !self.cpu.wake_if_pending() {
-                if self.next_event == u64::MAX {
+                let Some(wake) = self.wake_tick() else {
                     // Nothing will ever wake it but the host: let a tick
                     // budget's time pass at once, as it would idly.
                     if tick_end != u64::MAX {
                         self.cpu.wait_until(VmInstant::from_ticks(tick_end));
                     }
                     return Slice::Stopped(StopReason::Halted);
-                }
-                let until = wake_tick(self.next_event, self.cpu.icount, slice_end);
+                };
+                let until = wake.min(slice_end);
                 self.cpu.wait_until(VmInstant::from_ticks(until));
                 if until == slice_end {
                     return Slice::Done;
@@ -1252,6 +1241,41 @@ impl<S: GuestStorage, I: Instrumentation> VirtMachine<S, I> {
     #[inline(always)]
     fn events_moved(&self) -> bool {
         self.cpu.timer_dirty || self.board.deadline_moved
+    }
+
+    /// The tick a processor waiting for an interrupt sleeps to, once the
+    /// events are worked out for now: the first tick strictly after now at
+    /// which a timer or device output changes by itself, or `None` when
+    /// nothing will. That is the next event whenever it is in the future,
+    /// which working the events out makes it in every case but one: a
+    /// device that reports a deadline it has reached and does not clear.
+    /// Such a deadline changes nothing, so the processor sleeps past it.
+    #[inline]
+    fn wake_tick(&self) -> Option<u64> {
+        if self.next_event > self.cpu.icount {
+            (self.next_event != u64::MAX).then_some(self.next_event)
+        } else {
+            self.first_event_after_now()
+        }
+    }
+
+    /// The first tick strictly after now at which a timer or device output
+    /// changes by itself, if one will, passing over every deadline at or
+    /// before now.
+    #[cold]
+    #[inline(never)]
+    fn first_event_after_now(&self) -> Option<u64> {
+        let now = self.cpu.icount;
+        let timer = self.cpu.next_timer_deadline().filter(|&at| at > now);
+        let device = self
+            .board
+            .next_deadline_after(VmInstant::from_ticks(now))
+            .map(|at| at.ticks());
+        match (timer, device) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (Some(a), None) | (None, Some(a)) => Some(a),
+            (None, None) => None,
+        }
     }
 
     /// What the machine does about a step that stopped. `None` means it

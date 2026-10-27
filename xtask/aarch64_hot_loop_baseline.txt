@@ -13,3 +13,5 @@ fnv plain 8093985132
 fnv hooked 9011503309
 fp plain 12190159021
 fp hooked 12890158905
+mmio plain 570316758
+mmio hooked 578917434

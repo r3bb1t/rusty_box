@@ -630,13 +630,15 @@ An AArch64 machine's runs always end with an outcome, so its `Error` is
 
 `cargo xtask ci` holds the trace loop's speed with its step "aarch64
 hot-loop host instructions", which runs after the AArch64 machine's tests.
-It builds `aarch64_perfbench` and runs its four loops (`alu`, `memcpy`,
-`fnv`, `fp`), plain and hooked, under valgrind's callgrind, counting the
-host instructions executed inside `VirtMachine::run_until`. Each count is
-compared with the one committed in `xtask/aarch64_hot_loop_baseline.txt`,
-and a rise of more than 0.5% fails the step; a fall of more than 0.5% is
-reported, so that the baseline can be refreshed to keep the gain. The
-eight runs take about four minutes on four cores.
+It builds `aarch64_perfbench` and runs its five loops (`alu`, `memcpy`,
+`fnv`, `fp`, and `mmio`, whose every instruction takes the
+per-instruction path), plain and hooked, under valgrind's callgrind,
+counting the host instructions executed inside `VirtMachine::run_until`.
+Each count is compared with the one committed in
+`xtask/aarch64_hot_loop_baseline.txt`, and a rise of more than 0.5% fails
+the step; a fall of more than 0.5% is reported, so that the baseline can
+be refreshed to keep the gain. The ten runs take about four minutes on
+four cores.
 
 The count is deterministic, which a timing on a shared host is not, but it
 belongs to one compiler and one host: the baseline names the `rustc`
@@ -654,7 +656,7 @@ or with a new compiler — run, on a Linux host with valgrind:
 cargo xtask hot-loop-baseline
 ```
 
-It counts the eight runs, prints them against the old baseline when the
+It counts the ten runs, prints them against the old baseline when the
 toolchain matches, and rewrites the file; commit it with the change that
 moved the counts.
 

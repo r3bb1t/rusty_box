@@ -111,6 +111,10 @@ pub const SERIAL_INPUT_CAPACITY: usize = 4096;
 /// How long QEMU's `gpio-key` holds the power button down.
 const POWER_BUTTON_HOLD_MICROS: u64 = 100_000;
 
+/// The time-driven devices: the RTC, the power button and the UART, and in
+/// the run loop's tests a device double whose deadline is never cleared.
+const DEADLINE_SOURCES: usize = if cfg!(test) { 4 } else { 3 };
+
 /// The display and input devices plugged into the board, in the order QEMU
 /// would be given them as `-device` options: the display, the keyboard, the
 /// tablet. Each takes the highest transport the ones before it left free.
@@ -204,6 +208,10 @@ pub struct VirtBoard<S> {
     pub(crate) flash_epoch: u64,
     /// The RAM the devices wrote since the machine last looked.
     pub(crate) dma: Writes,
+    /// A device double for the run loop's tests: a deadline it reports and
+    /// never clears, however far the devices catch up.
+    #[cfg(test)]
+    pub(crate) stuck_deadline: Option<VmInstant>,
 }
 
 impl<S: GuestStorage> VirtBoard<S> {
@@ -253,6 +261,8 @@ impl<S: GuestStorage> VirtBoard<S> {
             dma: Writes::NONE,
             virtio,
             mmio_layout,
+            #[cfg(test)]
+            stuck_deadline: None,
         }
     }
 
@@ -395,14 +405,30 @@ impl<S: GuestStorage> VirtBoard<S> {
     /// The next instant a time-driven device changes an output on its own,
     /// without letting any of them catch up first.
     pub(crate) fn next_deadline(&self) -> Option<VmInstant> {
+        self.deadlines().into_iter().flatten().min()
+    }
+
+    /// The first instant strictly after `now` at which a time-driven device
+    /// changes an output on its own. A deadline at or before `now` that the
+    /// devices' catching up did not clear changes nothing by itself, so it
+    /// is passed over.
+    pub(crate) fn next_deadline_after(&self, now: VmInstant) -> Option<VmInstant> {
+        self.deadlines()
+            .into_iter()
+            .flatten()
+            .filter(|&at| at > now)
+            .min()
+    }
+
+    /// Every time-driven device's next deadline, if it has one.
+    fn deadlines(&self) -> [Option<VmInstant>; DEADLINE_SOURCES] {
         [
             self.rtc.next_deadline(),
             self.power_button_release,
             self.uart.next_deadline(),
+            #[cfg(test)]
+            self.stuck_deadline,
         ]
-        .into_iter()
-        .flatten()
-        .min()
     }
 
     /// QEMU `gpio_key_set_irq`: press the power button now; it releases on

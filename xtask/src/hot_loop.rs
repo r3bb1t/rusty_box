@@ -9,8 +9,9 @@
 //! (`--toggle-collect=*run_until*`). The count is deterministic: the same
 //! binary on the same work counts the same on every run.
 //!
-//! The four `aarch64_perfbench` loops (`alu`, `memcpy`, `fnv`, `fp`) run
-//! plain and hooked, eight counts. A count more than [`RISE_LIMIT_PERCENT`]
+//! The five `aarch64_perfbench` loops (`alu`, `memcpy`, `fnv`, `fp`, and
+//! `mmio`, whose every instruction takes the per-instruction path) run
+//! plain and hooked, ten counts. A count more than [`RISE_LIMIT_PERCENT`]
 //! above its baseline fails the step; one that falls by more says so, and
 //! the baseline is refreshed to keep the gain.
 //!
@@ -38,7 +39,7 @@ const BASELINE: &str = "xtask/aarch64_hot_loop_baseline.txt";
 /// The largest rise over the baseline a count may show, in percent.
 const RISE_LIMIT_PERCENT: f64 = 0.5;
 /// The loops measured, as `PERFBENCH_WORKLOADS` names them.
-const LOOPS: [&str; 4] = ["alu", "memcpy", "fnv", "fp"];
+const LOOPS: [&str; 5] = ["alu", "memcpy", "fnv", "fp", "mmio"];
 /// The observers they run with, as `PERFBENCH_HOOKS` names them.
 const HOOKS: [&str; 2] = ["plain", "hooked"];
 
@@ -323,7 +324,7 @@ fn count_one(binary: &Path, out_dir: &Path, workload: &'static str, hooks: &'sta
     })
 }
 
-/// Build the perfbench and count the eight cells, as many at once as the
+/// Build the perfbench and count the ten cells, as many at once as the
 /// host has threads.
 fn measure(root: &Path, toolchain: Toolchain) -> Result<Counts, String> {
     let binary = build_perfbench(root)?;
