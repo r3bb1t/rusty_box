@@ -28,7 +28,7 @@
 //! | `PERFBENCH_EDK2_CODE`, `PERFBENCH_EDK2_VARS` | `AAVMF_CODE.no-secboot.fd`, `AAVMF_VARS.fd` |
 //! | `PERFBENCH_KERNEL`, `PERFBENCH_INITRD` | an arm64 `Image` and its initramfs |
 //! | `PERFBENCH_WORKLOADS` | a comma-separated subset of `alu,memcpy,fnv,fp,mmio,edk2,alpine` |
-//! | `PERFBENCH_HOOKS` | `plain`, `hooked` or `both` (the default) for the loops |
+//! | `PERFBENCH_HOOKS` | `plain`, `hooked` or `both` (the default), for the loops and the boots alike |
 //! | `PERFBENCH_SCALE` | a multiplier on every loop's iteration count (default 1) |
 //! | `PERFBENCH_HASH_AT` | instruction counts, comma-separated: instead of timing, print the state hashes at each |
 //!
@@ -496,8 +496,11 @@ impl Boot {
         }
     }
 
-    fn machine(&self) -> Result<VirtMachine<rusty_box_aarch64::OwnedStorage>, String> {
-        let builder = MachineBuilder::new(VirtConfig::default());
+    fn machine<I: Instrumentation>(
+        &self,
+        observer: I,
+    ) -> Result<VirtMachine<rusty_box_aarch64::OwnedStorage, I>, String> {
+        let builder = MachineBuilder::new(VirtConfig::default()).instrumentation(observer);
         match self {
             Self::Edk2 { code, vars } => {
                 let mut b = builder.firmware(code);
@@ -547,8 +550,8 @@ fn boots() -> Result<Vec<Boot>, String> {
 }
 
 /// Boot until the prompt, the console scanned after every slice.
-fn run_boot(boot: &Boot) -> Result<Measured, String> {
-    let mut machine = boot.machine()?;
+fn run_boot<I: Instrumentation>(boot: &Boot, observer: I) -> Result<Measured, String> {
+    let mut machine = boot.machine(observer)?;
     let prompt = boot.prompt();
     let mut window: Vec<u8> = Vec::new();
     let started = Instant::now();
@@ -585,7 +588,7 @@ fn run_boot(boot: &Boot) -> Result<Measured, String> {
 
 /// The state hashes after each of `counts` instructions of a boot.
 fn hash_boot(boot: &Boot, counts: &[u64]) -> Result<(), String> {
-    let mut machine = boot.machine()?;
+    let mut machine = boot.machine(NoInstrumentation)?;
     for &count in counts {
         while machine.instructions() < count {
             let outcome = machine.step(RunBudget::Instructions(count - machine.instructions()));
@@ -683,8 +686,14 @@ fn bench() -> Result<(), String> {
         }
     }
     for boot in boots()?.iter().filter(|b| wants(b.name())) {
-        let m = run_boot(boot)?;
-        print(boot.name(), "plain", &m);
+        if plain {
+            let m = run_boot(boot, NoInstrumentation)?;
+            print(boot.name(), "plain", &m);
+        }
+        if hooked {
+            let m = run_boot(boot, Hooks::default())?;
+            print(boot.name(), "hooked", &m);
+        }
     }
     Ok(())
 }
