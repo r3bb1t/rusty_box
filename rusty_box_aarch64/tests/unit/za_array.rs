@@ -13,9 +13,14 @@
 //! negative under FPCR.AH, and silent exceptions; FDOT's rounding of the
 //! pair before the sum; the long products' element pairs and FMLSL's and
 //! BFMLSL's negation; ADD and SUB replacing the vectors, and FADD, FSUB,
-//! ADD and SUB accumulating into them. The checks: Streaming SVE mode, ZA
-//! storage, FEAT_SME2, and the 64-bit forms UNDEFINED.
+//! ADD and SUB accumulating into them. By an indexed element: the element,
+//! or group, of the segment holding each result element at 256 bits, each
+//! class's index fields, a group's mixed-sign bit, and the vertical dot
+//! products' elements across the registers. The checks: Streaming SVE
+//! mode, ZA storage, FEAT_SME2, and the 64-bit, FP8 and half-precision
+//! forms UNDEFINED.
 
+use std::vec;
 use std::vec::Vec;
 
 use super::super::features::{Feature, Features, Implementation, VecLen};
@@ -85,6 +90,57 @@ const ADD_D: u32 = 0xC162_1813;
 const FADD_D: u32 = 0xC1E0_1C43;
 const SDOT_D: u32 = 0xC162_1400;
 
+/// By an indexed element: `smlall za.s[w8, 4:7], z0.b, z1.b[13]`, `usmlall
+/// za.s[w8, 0:3, vgx2], {z2.b-z3.b}, z1.b[6]` and `sumlall za.s[w8, 0:3,
+/// vgx4], {z4.b-z7.b}, z1.b[9]`.
+const SMLALL_IDX_1: u32 = 0xC101_9401;
+const USMLALL_IDX_2: u32 = 0xC111_0464;
+const SUMLALL_IDX_4: u32 = 0xC111_88B2;
+/// `smlal za.s[w9, 2:3], z0.h, z1.h[5]` and `umlsl za.s[w9, 0:1, vgx4],
+/// {z4.h-z7.h}, z1.h[3]`.
+const SMLAL_IDX_1: u32 = 0xC1C1_B401;
+const UMLSL_IDX_4: u32 = 0xC1D1_B49C;
+/// `fmlal za.s[w10, 0:1], z0.h, z1.h[7]` and `bfmlsl za.s[w10, 0:1,
+/// vgx2], {z2.h-z3.h}, z1.h[2]`.
+const FMLAL_IDX_1: u32 = 0xC181_DC00;
+const BFMLSL_IDX_2: u32 = 0xC191_5458;
+/// `fmla za.s[w11, 1, vgx2], {z2.s-z3.s}, z1.s[3]` and `fmls za.s[w11, 1,
+/// vgx4], {z4.s-z7.s}, z1.s[1]`.
+const FMLA_IDX_2: u32 = 0xC151_6C41;
+const FMLS_IDX_4: u32 = 0xC151_E491;
+/// `sdot za.s[w8, 0, vgx2], {z2.b-z3.b}, z1.b[2]`, `usdot za.s[w8, 0,
+/// vgx4], {z4.b-z7.b}, z1.b[1]` and `udot za.s[w8, 0, vgx2], {z2.h-z3.h},
+/// z1.h[3]`.
+const SDOT_IDX_2: u32 = 0xC151_1860;
+const USDOT_IDX_4: u32 = 0xC151_94A8;
+const UDOT_IDX_2_H: u32 = 0xC151_1C50;
+/// `fdot za.s[w8, 0, vgx2], {z2.h-z3.h}, z1.h[1]`.
+const FDOT_IDX_2: u32 = 0xC151_1448;
+/// `fvdot za.s[w8, 0, vgx2], {z2.h-z3.h}, z1.h[1]` and `bfvdot ...,
+/// z1.h[3]`.
+const FVDOT_2: u32 = 0xC151_0448;
+const BFVDOT_2: u32 = 0xC151_0C58;
+/// `svdot za.s[w8, 0, vgx2], {z2.h-z3.h}, z1.h[2]` and `uvdot ..., z1.h[0]`.
+const SVDOT_2_H: u32 = 0xC151_0860;
+const UVDOT_2_H: u32 = 0xC151_0070;
+/// `svdot za.s[w8, 0, vgx4], {z4.b-z7.b}, z1.b[1]`, `usvdot ..., z1.b[3]`,
+/// `uvdot ..., z1.b[0]` and `suvdot ..., z1.b[2]`.
+const SVDOT_4: u32 = 0xC151_84A0;
+const USVDOT_4: u32 = 0xC151_8CA8;
+const UVDOT_4: u32 = 0xC151_80B0;
+const SUVDOT_4: u32 = 0xC151_88B8;
+/// The indexed forms of other features: `smlall za.d[w8, 0:3], z0.h,
+/// z1.h[1]` and `sdot za.d[w8, 0, vgx2], {z2.h-z3.h}, z1.h[1]`
+/// (FEAT_SME_I16I64), `fmla za.d[w8, 0, vgx2], {z2.d-z3.d}, z1.d[1]`
+/// (FEAT_SME_F64F64), `fdot za.s[w8, 0, vgx2], {z2.b-z3.b}, z1.b[1]`
+/// (FEAT_SME_F8F32) and `fmla za.h[w8, 0, vgx2], {z2.h-z3.h}, z1.h[1]`
+/// (FEAT_SME_F16F16).
+const SMLALL_IDX_D: u32 = 0xC181_0400;
+const SDOT_IDX_D: u32 = 0xC1D1_0448;
+const FMLA_IDX_D: u32 = 0xC1D1_0440;
+const FDOT_IDX_FP8: u32 = 0xC151_0478;
+const FMLA_IDX_H: u32 = 0xC111_1048;
+
 /// Single-precision values.
 const ZERO: u64 = 0;
 const MINUS_ZERO: u64 = 0x8000_0000;
@@ -99,7 +155,12 @@ const MINUS_THREE: u64 = 0xC040_0000;
 const THREE_AND_A_HALF: u64 = 0x4060_0000;
 const FOUR: u64 = 0x4080_0000;
 const FOUR_AND_A_HALF: u64 = 0x4090_0000;
+const MINUS_FIVE: u64 = 0xC0A0_0000;
 const SIX_AND_A_HALF: u64 = 0x40D0_0000;
+const SEVEN: u64 = 0x40E0_0000;
+const MINUS_SEVEN: u64 = 0xC0E0_0000;
+const NINE: u64 = 0x4110_0000;
+const INF: u64 = 0x7F80_0000;
 const SEVEN_AND_A_HALF: u64 = 0x40F0_0000;
 const EIGHT_AND_A_HALF: u64 = 0x4108_0000;
 const ELEVEN_AND_A_HALF: u64 = 0x4138_0000;
@@ -134,6 +195,16 @@ fn vector(cpu: &Cpu, es: Esize, values: &[u64]) -> Zv {
 fn set_z(cpu: &mut Cpu, n: u32, es: Esize, values: &[u64]) {
     let z = vector(cpu, es, values);
     let svl = cpu.current_svl();
+    cpu.set_z(n, svl, &z);
+}
+
+/// Z register `n` with element `i` of `es` being `f(i)`.
+fn set_z_with<F: Fn(usize) -> u64>(cpu: &mut Cpu, n: u32, es: Esize, f: F) {
+    let svl = cpu.current_svl();
+    let mut z = Zv::ZERO;
+    for i in 0..es.elements(svl) {
+        z.set(i, es, f(i));
+    }
     cpu.set_z(n, svl, &z);
 }
 
@@ -481,12 +552,309 @@ fn the_group_accumulates_into_the_za_vectors() {
     }
 }
 
-/// The 64-bit forms of FEAT_SME_I16I64 and FEAT_SME_F64F64 are UNDEFINED in
-/// the decode, before the enable checks.
+/// SMLALL, SMLAL, FMLAL and FMLA by an indexed element take element
+/// `index` of the 128-bit segment holding each result word: at 256 bits
+/// the first four words from the first segment's, the last four from the
+/// second's. SMLALL by byte 13 (`i4h:i4l`, bits 15 and 12:10) at offset
+/// `off2 * 4`, of bytes 1 to 4 by 3 and -2 into vectors 4 to 7; SMLAL by
+/// halfword 5 (`i3h:i3l`, bits 15 and 11:10) at offset `off3 * 2`; FMLAL
+/// by element 7 into vectors 0 and 1; FMLA of two registers by word 3
+/// (`i2`, bits 11:10) into vectors 1 and 17.
 #[test]
-fn the_64_bit_forms_are_undefined() {
+fn the_indexed_element_comes_from_each_result_s_own_segment() {
+    let mut cpu = with_za(1);
+    cpu.x[8] = 0;
+    set_z(&mut cpu, 0, Esize::B, &[1, 2, 3, 4]);
+    set_z_with(&mut cpu, 1, Esize::B, |b| match b {
+        13 => 3,
+        29 => 0xFE,
+        _ => 0x7F,
+    });
+    fill_za(&mut cpu, 0);
+    assert_eq!(exec(&mut cpu, SMLALL_IDX_1), None);
+    assert_eq!(changed(&cpu, 0), [4, 5, 6, 7]);
+    for i in 0..4 {
+        let byte = i as i64 + 1;
+        let (first, second) = ((3 * byte) as u64, (-2 * byte) as u32 as u64);
+        assert_eq!(za_words(&cpu, 4 + i), [vec![first; 4], vec![second; 4]].concat(), "vector {}", 4 + i);
+    }
+
+    cpu.x[9] = 0;
+    set_z(&mut cpu, 0, Esize::H, &[1, 2]);
+    set_z_with(&mut cpu, 1, Esize::H, |h| match h {
+        5 => 7,
+        13 => 0xFFFF,
+        _ => 0x7FFF,
+    });
+    fill_za(&mut cpu, 0);
+    assert_eq!(exec(&mut cpu, SMLAL_IDX_1), None);
+    assert_eq!(changed(&cpu, 0), [2, 3]);
+    assert_eq!(za_words(&cpu, 2), [vec![7; 4], vec![0xFFFF_FFFF; 4]].concat());
+    assert_eq!(za_words(&cpu, 3), [vec![14; 4], vec![0xFFFF_FFFE; 4]].concat());
+
+    // 1.0 and 2.0 by 3.0 and by 0.5, added to 1.0.
+    cpu.x[10] = 0;
+    set_z(&mut cpu, 0, Esize::H, &[0x3C00, 0x4000]);
+    set_z_with(&mut cpu, 1, Esize::H, |h| match h {
+        7 => 0x4200,
+        15 => 0x3800,
+        _ => 0x7C00,
+    });
+    fill_za(&mut cpu, ONE);
+    assert_eq!(exec(&mut cpu, FMLAL_IDX_1), None);
+    assert_eq!(changed(&cpu, ONE), [0, 1]);
+    assert_eq!(za_words(&cpu, 0), [vec![FOUR; 4], vec![ONE_AND_A_HALF; 4]].concat());
+    assert_eq!(za_words(&cpu, 1), [vec![SEVEN; 4], vec![TWO; 4]].concat());
+
+    // 1.0 and 2.0 by 3.0 and by 0.5, added to 0.5; `vstride` 16.
+    cpu.x[11] = 0;
+    set_z(&mut cpu, 2, Esize::S, &[ONE]);
+    set_z(&mut cpu, 3, Esize::S, &[TWO]);
+    set_z_with(&mut cpu, 1, Esize::S, |s| match s {
+        3 => THREE,
+        7 => HALF,
+        _ => INF,
+    });
+    fill_za(&mut cpu, HALF);
+    assert_eq!(exec(&mut cpu, FMLA_IDX_2), None);
+    assert_eq!(changed(&cpu, HALF), [1, 17]);
+    assert_eq!(za_words(&cpu, 1), [vec![THREE_AND_A_HALF; 4], vec![ONE; 4]].concat());
+    assert_eq!(za_words(&cpu, 17), [vec![SIX_AND_A_HALF; 4], vec![ONE_AND_A_HALF; 4]].concat());
+}
+
+/// Of a group by an indexed element, the four-way products' mixed signs
+/// are `op` (bit 5) and the index `i4h:i4l` bits 11:10 and 2:1: USMLALL of
+/// 255 and 2 by byte 6, -128, into vectors 0 to 3 and 8 to 11; SUMLALL of
+/// -1, 1, -128 and 127 by byte 9, 255, into all sixteen. The two-way ones'
+/// index is `i3h:i3l`, bits 11:10 and 2: UMLSL of four registers by
+/// halfword 3, 65535. BFMLSL of two by element 2 and FMLS of four by word
+/// 1 subtract their products.
+#[test]
+fn the_indexed_products_of_groups() {
+    let mut cpu = with_za(0);
+    cpu.x[8] = 0;
+    set_z(&mut cpu, 2, Esize::B, &[0xFF]);
+    set_z(&mut cpu, 3, Esize::B, &[0x02]);
+    set_z_with(&mut cpu, 1, Esize::B, |b| if b == 6 { 0x80 } else { 1 });
+    fill_za(&mut cpu, 0);
+    assert_eq!(exec(&mut cpu, USMLALL_IDX_2), None);
+    assert_eq!(changed(&cpu, 0), [0, 1, 2, 3, 8, 9, 10, 11]);
+    for i in 0..4 {
+        assert_eq!(za_words(&cpu, i), [0xFFFF_8080; 4]);
+        assert_eq!(za_words(&cpu, 8 + i), [0xFFFF_FF00; 4]);
+    }
+
+    for (r, value) in [0xFF, 0x01, 0x80, 0x7F].into_iter().enumerate() {
+        set_z(&mut cpu, 4 + r as u32, Esize::B, &[value]);
+    }
+    set_z_with(&mut cpu, 1, Esize::B, |b| if b == 9 { 0xFF } else { 0 });
+    fill_za(&mut cpu, 0);
+    assert_eq!(exec(&mut cpu, SUMLALL_IDX_4), None);
+    for (r, want) in [0xFFFF_FF01, 0xFF, 0xFFFF_8080, 0x7E81].into_iter().enumerate() {
+        for i in 0..4 {
+            assert_eq!(za_words(&cpu, 4 * r + i), [want; 4], "register {r}");
+        }
+    }
+
+    cpu.x[9] = 0;
+    for r in 0..4 {
+        set_z(&mut cpu, 4 + r, Esize::H, &[u64::from(r) + 1]);
+    }
+    set_z_with(&mut cpu, 1, Esize::H, |h| if h == 3 { 0xFFFF } else { 0 });
+    fill_za(&mut cpu, 0);
+    assert_eq!(exec(&mut cpu, UMLSL_IDX_4), None);
+    assert_eq!(changed(&cpu, 0), [0, 1, 4, 5, 8, 9, 12, 13]);
+    for (r, want) in [0xFFFF_0001, 0xFFFE_0002, 0xFFFD_0003, 0xFFFC_0004].into_iter().enumerate() {
+        assert_eq!(za_words(&cpu, 4 * r), [want; 4], "register {r}");
+        assert_eq!(za_words(&cpu, 4 * r + 1), [want; 4], "register {r}");
+    }
+
+    // 1.0 - 1.0 * 0.5 and 1.0 - 2.0 * 0.5, in BFloat16.
+    cpu.x[10] = 0;
+    set_z(&mut cpu, 2, Esize::H, &[0x3F80]);
+    set_z(&mut cpu, 3, Esize::H, &[0x4000]);
+    set_z_with(&mut cpu, 1, Esize::H, |h| if h == 2 { 0x3F00 } else { 0x7F80 });
+    fill_za(&mut cpu, ONE);
+    assert_eq!(exec(&mut cpu, BFMLSL_IDX_2), None);
+    assert_eq!(changed(&cpu, ONE), [0, 1, 8, 9]);
+    for n in [0, 1] {
+        assert_eq!(za_words(&cpu, n), [HALF; 4]);
+        assert_eq!(za_words(&cpu, 8 + n), [ZERO; 4]);
+    }
+
+    // 1.0 - (r + 1) * 2.0 into vectors 1, 5, 9 and 13.
+    cpu.x[11] = 0;
+    for (r, value) in [ONE, TWO, THREE, FOUR].into_iter().enumerate() {
+        set_z(&mut cpu, 4 + r as u32, Esize::S, &[value]);
+    }
+    set_z_with(&mut cpu, 1, Esize::S, |s| if s == 1 { TWO } else { INF });
+    fill_za(&mut cpu, ONE);
+    assert_eq!(exec(&mut cpu, FMLS_IDX_4), None);
+    assert_eq!(changed(&cpu, ONE), [1, 5, 9, 13]);
+    for (n, want) in [(1, MINUS_ONE), (5, MINUS_THREE), (9, MINUS_FIVE), (13, MINUS_SEVEN)] {
+        assert_eq!(za_words(&cpu, n), [want; 4], "vector {n}");
+    }
+}
+
+/// The indexed dot products take group `index` of the segment, element
+/// `k` of it with element `k` of each word's group: at 256 bits SDOT by
+/// group 2 counts its first byte, 1, in the first segment and its last,
+/// -128, in the second; USDOT of four registers by group 1; UDOT of
+/// halfwords by group 3; FDOT by pair 1.
+#[test]
+fn the_indexed_dot_products_take_a_group_of_the_segment() {
+    let mut cpu = with_za(1);
+    cpu.x[8] = 0;
+    set_z(&mut cpu, 2, Esize::B, &[1, 2, 3, 4]);
+    set_z(&mut cpu, 3, Esize::B, &[0xFF]);
+    set_z_with(&mut cpu, 1, Esize::B, |b| match b {
+        8 => 1,
+        9..=11 | 24..=26 => 0,
+        27 => 0x80,
+        _ => 0x7F,
+    });
+    fill_za(&mut cpu, 0);
+    assert_eq!(exec(&mut cpu, SDOT_IDX_2), None);
+    assert_eq!(changed(&cpu, 0), [0, 16]);
+    assert_eq!(za_words(&cpu, 0), [vec![1; 4], vec![0xFFFF_FE00; 4]].concat());
+    assert_eq!(za_words(&cpu, 16), [vec![0xFFFF_FFFF; 4], vec![128; 4]].concat());
+
+    let mut cpu = with_za(0);
+    cpu.x[8] = 0;
+    for (r, value) in [0xFF, 0x01, 0x80, 0x02].into_iter().enumerate() {
+        set_z(&mut cpu, 4 + r as u32, Esize::B, &[value]);
+    }
+    set_z_with(&mut cpu, 1, Esize::B, |b| if b / 4 == 1 { 0x80 } else { 0x7F });
+    fill_za(&mut cpu, 0);
+    assert_eq!(exec(&mut cpu, USDOT_IDX_4), None);
+    assert_eq!(changed(&cpu, 0), [0, 4, 8, 12]);
+    for (r, want) in [0xFFFE_0200, 0xFFFF_FE00, 0xFFFF_0000, 0xFFFF_FC00].into_iter().enumerate() {
+        assert_eq!(za_words(&cpu, 4 * r), [want; 4], "register {r}");
+    }
+
+    set_z(&mut cpu, 2, Esize::H, &[0xFFFF]);
+    set_z(&mut cpu, 3, Esize::H, &[1, 2]);
+    set_z_with(&mut cpu, 1, Esize::H, |h| match h {
+        6 => 2,
+        7 => 3,
+        _ => 0x7FFF,
+    });
+    fill_za(&mut cpu, 0);
+    assert_eq!(exec(&mut cpu, UDOT_IDX_2_H), None);
+    assert_eq!(changed(&cpu, 0), [0, 8]);
+    assert_eq!(za_words(&cpu, 0), [0x4_FFFB; 4]);
+    assert_eq!(za_words(&cpu, 8), [8; 4]);
+
+    // 0.5 + 1.0 * 3.0 + 2.0 * 4.0, and 0.5 + 0.5 * 3.0 + 0.5 * 4.0.
+    set_z(&mut cpu, 2, Esize::H, &[0x3C00, 0x4000]);
+    set_z(&mut cpu, 3, Esize::H, &[0x3800]);
+    set_z_with(&mut cpu, 1, Esize::H, |h| match h {
+        2 => 0x4200,
+        3 => 0x4400,
+        _ => 0x7C00,
+    });
+    fill_za(&mut cpu, HALF);
+    assert_eq!(exec(&mut cpu, FDOT_IDX_2), None);
+    assert_eq!(changed(&cpu, HALF), [0, 8]);
+    assert_eq!(za_words(&cpu, 0), [ELEVEN_AND_A_HALF; 4]);
+    assert_eq!(za_words(&cpu, 8), [FOUR; 4]);
+}
+
+/// The vertical dot products sum, for register `r`'s word `e`, element
+/// `nreg * e + r` of each register `k` of the group times element `k` of
+/// the indexed group: FVDOT and BFVDOT of 1.0 and 3.0 (`r = 0`) and of 2.0
+/// and 4.0 (`r = 1`) by 0.5 and 2.0; SVDOT and UVDOT of two registers of
+/// halfwords; SVDOT, USVDOT, UVDOT and SUVDOT of four of bytes, register
+/// `k`'s byte `4 * e + r` being `r + 1`, `-(r + 1)`, 2 and -128 in turn,
+/// by 1, 2, 3 and -1.
+#[test]
+fn the_vertical_dot_products_sum_across_the_registers() {
+    let mut cpu = with_za(0);
+    cpu.x[8] = 0;
+    for (insn, z2, z3, pair, inf) in [
+        (FVDOT_2, [0x3C00, 0x4000], [0x4200, 0x4400], [(2, 0x3800), (3, 0x4000)], 0x7C00),
+        (BFVDOT_2, [0x3F80, 0x4000], [0x4040, 0x4080], [(6, 0x3F00), (7, 0x4000)], 0x7F80),
+    ] {
+        set_z(&mut cpu, 2, Esize::H, &z2);
+        set_z(&mut cpu, 3, Esize::H, &z3);
+        set_z_with(&mut cpu, 1, Esize::H, |h| pair.iter().find(|p| p.0 == h).map_or(inf, |p| p.1));
+        fill_za(&mut cpu, ZERO);
+        assert_eq!(exec(&mut cpu, insn), None);
+        assert_eq!(changed(&cpu, ZERO), [0, 8], "{insn:#010x}");
+        assert_eq!(za_words(&cpu, 0), [SIX_AND_A_HALF; 4], "{insn:#010x}");
+        assert_eq!(za_words(&cpu, 8), [NINE; 4], "{insn:#010x}");
+    }
+
+    // FVDOT's sum is FPDotAdd_ZA's: a signalling NaN in `r = 0`'s pair gives
+    // the default NaN whatever FPCR.DN, and no exception reaches FPSR.
+    set_z(&mut cpu, 2, Esize::H, &[0x7C01, 0x4000]);
+    set_z(&mut cpu, 3, Esize::H, &[0x4200, 0x4400]);
+    set_z_with(&mut cpu, 1, Esize::H, |h| match h {
+        2 => 0x3800,
+        3 => 0x4000,
+        _ => 0x7C00,
+    });
+    fill_za(&mut cpu, ZERO);
+    assert_eq!(exec(&mut cpu, FVDOT_2), None);
+    assert_eq!(za_words(&cpu, 0), [DEFAULT_NAN; 4]);
+    assert_eq!(za_words(&cpu, 8), [NINE; 4]);
+    assert_eq!(cpu.fpsr, 0);
+
+    // -32768 and 2 (`r = 0`), 1 and -1 (`r = 1`), by 3 and -2.
+    set_z(&mut cpu, 2, Esize::H, &[0x8000, 1]);
+    set_z(&mut cpu, 3, Esize::H, &[2, 0xFFFF]);
+    for (insn, first, want) in [(SVDOT_2_H, 4, [0xFFFE_7FFC, 5]), (UVDOT_2_H, 0, [0x3_7FFC, 0xFFFD_0005])] {
+        set_z_with(&mut cpu, 1, Esize::H, |h| match h - first {
+            0 => 3,
+            1 => 0xFFFE,
+            _ => 0x7FFF,
+        });
+        fill_za(&mut cpu, 0);
+        assert_eq!(exec(&mut cpu, insn), None);
+        assert_eq!(changed(&cpu, 0), [0, 8], "{insn:#010x}");
+        assert_eq!(za_words(&cpu, 0), [want[0]; 4], "{insn:#010x}");
+        assert_eq!(za_words(&cpu, 8), [want[1]; 4], "{insn:#010x}");
+    }
+
+    set_z_with(&mut cpu, 4, Esize::B, |b| (b % 4) as u64 + 1);
+    set_z_with(&mut cpu, 5, Esize::B, |b| (-((b % 4) as i64 + 1)) as u8 as u64);
+    set_z(&mut cpu, 6, Esize::B, &[2]);
+    set_z(&mut cpu, 7, Esize::B, &[0x80]);
+    for (insn, group, want) in [
+        (SVDOT_4, 1, [133, 132, 131, 130]),
+        (USVDOT_4, 3, [389, 388, 387, 386]),
+        (UVDOT_4, 0, [33157, 33156, 33155, 33154]),
+        (SUVDOT_4, 2, [0xFFFF_8085, 0xFFFF_8084, 0xFFFF_8083, 0xFFFF_8082]),
+    ] {
+        set_z_with(&mut cpu, 1, Esize::B, |b| if b / 4 == group { [1, 2, 3, 0xFF][b % 4] } else { 0x7F });
+        fill_za(&mut cpu, 0);
+        assert_eq!(exec(&mut cpu, insn), None);
+        assert_eq!(changed(&cpu, 0), [0, 4, 8, 12], "{insn:#010x}");
+        for (r, want) in want.into_iter().enumerate() {
+            assert_eq!(za_words(&cpu, 4 * r), [want; 4], "{insn:#010x} register {r}");
+        }
+    }
+}
+
+/// The 64-bit forms of FEAT_SME_I16I64 and FEAT_SME_F64F64, by vectors and
+/// by an indexed element, and the indexed forms of FP8 (FEAT_SME_F8F32) and
+/// of half-precision values (FEAT_SME_F16F16), are UNDEFINED in the decode,
+/// before the enable checks.
+#[test]
+fn the_forms_of_other_features_are_undefined() {
     let mut cpu = processor(Implementation::EVERY_FEATURE);
-    for insn in [SMLALL_D, FMLA_D, ADD_D, FADD_D, SDOT_D] {
+    for insn in [
+        SMLALL_D,
+        FMLA_D,
+        ADD_D,
+        FADD_D,
+        SDOT_D,
+        SMLALL_IDX_D,
+        SDOT_IDX_D,
+        FMLA_IDX_D,
+        FDOT_IDX_FP8,
+        FMLA_IDX_H,
+    ] {
         assert_eq!(exec(&mut cpu, insn), Some(UNDEFINED), "{insn:#010x}");
     }
 }
@@ -511,6 +879,15 @@ fn they_need_streaming_mode_za_and_sme2() {
         SUB_ZZW_4X4,
         ADD_ZW_2X2,
         FSUB_ZW_4X4,
+        SMLALL_IDX_1,
+        USMLALL_IDX_2,
+        UMLSL_IDX_4,
+        FMLAL_IDX_1,
+        FMLA_IDX_2,
+        SDOT_IDX_2,
+        FDOT_IDX_2,
+        FVDOT_2,
+        SVDOT_4,
     ];
     let mut cpu = processor(Implementation::EVERY_FEATURE);
     for insn in all {

@@ -19,7 +19,9 @@
 //! precision, FRINT and the unpacks), and the instructions on groups of ZA
 //! array vectors (`mortlach_multi_array_1a` to `_2b`: the long integer and
 //! floating-point products, the dot products, FMLA and FMLS, and ADD, SUB,
-//! FADD and FSUB). The rest of FEAT_SME2's instructions, and the optional
+//! FADD and FSUB) and by an indexed element (`mortlach_multi_indexed_1` to
+//! `_3`, with the vertical dot products FVDOT, BFVDOT, SVDOT, UVDOT, USVDOT
+//! and SUVDOT). The rest of FEAT_SME2's instructions, and the optional
 //! 64-bit forms of FEAT_SME_F64F64 and FEAT_SME_I16I64, are not here, which
 //! this decoder does not know.
 //!
@@ -69,11 +71,13 @@ fn multi_mem_and_int_outer_products(word: u32) -> Option<Encoding> {
 }
 
 /// `op0 = 10`: the instructions on ZA's tiles and vectors, by bits 21:19
-/// with bit 24 clear, and FEAT_SME2's multi-vector groups, bits 24 and 21
-/// set: on ZA array vectors with bit 15 clear, the SVE ones with it set.
-/// Bit 24 set holds FEAT_SME2's other multi-vector groups, and bits 21:19
-/// = 011 and 110 its lookup table expansions and FEAT_SME_F16F8F16's
-/// scaled products.
+/// with bit 24 clear, and with bit 24 set FEAT_SME2's multi-vector groups:
+/// by an indexed element with bit 21 clear (one vector for bit 20 clear,
+/// else two or four by bit 15), on ZA array vectors with bit 21 set and
+/// bit 15 clear, and the SVE operations with both set. With bit 24 clear,
+/// bits 23:19 = 1x001 and 10011 are FEAT_SME2's lookup table expansions
+/// (`mortlach_zt_expand_ctg`, `_nctg`), and bits 22:20 = 110
+/// FEAT_SME_F16F8F16's scaled products (`mortlach_multivec_scaled_idx`).
 fn array_and_vectors(word: u32) -> Option<Encoding> {
     match (bits(word, 24, 24), bits(word, 21, 19)) {
         // Bit 17.
@@ -95,6 +99,12 @@ fn array_and_vectors(word: u32) -> Option<Encoding> {
         },
         (0b0, 0b010) => match bits(word, 3, 3) {
             0b0 => mortlach_hvadd(word),
+            _ => None,
+        },
+        (0b1, 0b000 | 0b001) => mortlach_multi_indexed_1(word),
+        (0b1, 0b010 | 0b011) => match bits(word, 15, 15) {
+            0b0 => mortlach_multi_indexed_2(word),
+            0b1 => mortlach_multi_indexed_3(word),
             _ => None,
         },
         (0b1, 0b100..=0b111) => match bits(word, 15, 15) {
@@ -2944,6 +2954,375 @@ fn mortlach_multi4_z_za_int_mm(word: u32) -> Option<MortlachMulti4ZZaIntMm> {
         (0b1, _) => None,
         (_, 0b0) => Some(MortlachMulti4ZZaIntMm::AddZaZw4x4),
         (_, 0b1) => Some(MortlachMulti4ZZaIntMm::SubZaZw4x4),
+        _ => None,
+    }
+}
+
+/// Arm group `mortlach_multi_indexed_1`: SME2 multi-vector operations of
+/// one vector by an indexed element into ZA array vectors. `op0 = 01` and
+/// `op0 = 11, op1 = 0` are the FP8 products of FEAT_SME_F8F32 and
+/// FEAT_SME_F8F16, `op0 = 10, op1 = 0` FEAT_SME_I16I64's.
+fn mortlach_multi_indexed_1(word: u32) -> Option<Encoding> {
+    let op0 = bits(word, 23, 22);
+    let op1 = bits(word, 12, 12);
+    match (op0, op1) {
+        (0b00, _) => mortlach_multi1_mla_long_long_idx_s(word).map(Encoding::MortlachMulti1MlaLongLongIdxS),
+        (0b10, 0b1) => mortlach_multi1_fma_long_idx(word).map(Encoding::MortlachMulti1FmaLongIdx),
+        (0b11, 0b1) => mortlach_multi1_mla_long_idx(word).map(Encoding::MortlachMulti1MlaLongIdx),
+        _ => None,
+    }
+}
+
+/// Arm group `mortlach_multi_indexed_2`: SME2 multi-vector operations of
+/// two vectors by an indexed element into ZA array vectors. `op0 = 00, op1
+/// = 1x` is mortlach_multi2_zza_idx_h, whose encodings are FEAT_SME_F16F16's,
+/// FEAT_SME_B16B16's and FEAT_SME_F8F16's; `op2 = 1` holds the FP8
+/// products, and `op0 = 1x, op1 = 0x` with `op2 = 0` FEAT_SME_I16I64's,
+/// FEAT_SME_F64F64's and FEAT_SME_F8F32's.
+fn mortlach_multi_indexed_2(word: u32) -> Option<Encoding> {
+    let op0 = bits(word, 23, 22);
+    let op1 = bits(word, 12, 11);
+    let op2 = bits(word, 5, 5);
+    match (op0, op1, op2) {
+        (0b00, 0b00 | 0b01, _) => {
+            mortlach_multi2_mla_long_long_idx_s(word).map(Encoding::MortlachMulti2MlaLongLongIdxS)
+        }
+        (0b01, _, _) => mortlach_multi2_zza_idx_s(word).map(Encoding::MortlachMulti2ZzaIdxS),
+        (0b10, 0b10 | 0b11, 0b0) => mortlach_multi2_fma_long_idx(word).map(Encoding::MortlachMulti2FmaLongIdx),
+        (0b11, 0b10 | 0b11, 0b0) => mortlach_multi2_mla_long_idx(word).map(Encoding::MortlachMulti2MlaLongIdx),
+        _ => None,
+    }
+}
+
+/// Arm group `mortlach_multi_indexed_3`: SME2 multi-vector operations of
+/// four vectors by an indexed element into ZA array vectors, as
+/// `mortlach_multi_indexed_2` with `op2 = 1xx` and `op2 = 01x` holding the
+/// FP8 products.
+fn mortlach_multi_indexed_3(word: u32) -> Option<Encoding> {
+    let op0 = bits(word, 23, 22);
+    let op1 = bits(word, 12, 11);
+    let op2 = bits(word, 6, 4);
+    match (op0, op1, op2) {
+        (0b00, 0b00 | 0b01, 0b000..=0b011) => {
+            mortlach_multi4_mla_long_long_idx_s(word).map(Encoding::MortlachMulti4MlaLongLongIdxS)
+        }
+        (0b01, _, 0b000..=0b011) => mortlach_multi4_zza_idx_s(word).map(Encoding::MortlachMulti4ZzaIdxS),
+        (0b10, 0b10 | 0b11, 0b000 | 0b001) => {
+            mortlach_multi4_fma_long_idx(word).map(Encoding::MortlachMulti4FmaLongIdx)
+        }
+        (0b11, 0b10 | 0b11, 0b000 | 0b001) => {
+            mortlach_multi4_mla_long_idx(word).map(Encoding::MortlachMulti4MlaLongIdx)
+        }
+        _ => None,
+    }
+}
+
+/// Arm class `mortlach_multi1_mla_long_long_idx_s`: signed, unsigned or
+/// mixed-sign (`U`, `op`) four-way multiply-add or subtract (`S`) long of
+/// one vector by an indexed byte into ZA.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum MortlachMulti1MlaLongLongIdxS {
+    SmlallZaZziS,
+    UsmlallZaZziS,
+    SmlsllZaZziS,
+    UmlallZaZziS,
+    SumlallZaZziS,
+    UmlsllZaZziS,
+}
+
+fn mortlach_multi1_mla_long_long_idx_s(word: u32) -> Option<MortlachMulti1MlaLongLongIdxS> {
+    let u = bits(word, 4, 4);
+    let s = bits(word, 3, 3);
+    let op = bits(word, 2, 2);
+    match (u, s, op) {
+        (0b0, 0b0, 0b0) => Some(MortlachMulti1MlaLongLongIdxS::SmlallZaZziS),
+        (0b0, 0b0, 0b1) => Some(MortlachMulti1MlaLongLongIdxS::UsmlallZaZziS),
+        (0b0, 0b1, 0b0) => Some(MortlachMulti1MlaLongLongIdxS::SmlsllZaZziS),
+        (0b1, 0b0, 0b0) => Some(MortlachMulti1MlaLongLongIdxS::UmlallZaZziS),
+        (0b1, 0b0, 0b1) => Some(MortlachMulti1MlaLongLongIdxS::SumlallZaZziS),
+        (0b1, 0b1, 0b0) => Some(MortlachMulti1MlaLongLongIdxS::UmlsllZaZziS),
+        _ => None,
+    }
+}
+
+/// Arm class `mortlach_multi1_fma_long_idx`: half-precision or BFloat16
+/// (`op`) multiply-add or subtract (`S`) long of one vector by an indexed
+/// element into ZA.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum MortlachMulti1FmaLongIdx {
+    BfmlalZaZzi1,
+    FmlalZaZzi1,
+    BfmlslZaZzi1,
+    FmlslZaZzi1,
+}
+
+fn mortlach_multi1_fma_long_idx(word: u32) -> Option<MortlachMulti1FmaLongIdx> {
+    let op = bits(word, 4, 4);
+    let s = bits(word, 3, 3);
+    match (op, s) {
+        (0b1, 0b0) => Some(MortlachMulti1FmaLongIdx::BfmlalZaZzi1),
+        (0b0, 0b0) => Some(MortlachMulti1FmaLongIdx::FmlalZaZzi1),
+        (0b1, 0b1) => Some(MortlachMulti1FmaLongIdx::BfmlslZaZzi1),
+        (0b0, 0b1) => Some(MortlachMulti1FmaLongIdx::FmlslZaZzi1),
+        _ => None,
+    }
+}
+
+/// Arm class `mortlach_multi1_mla_long_idx`: signed or unsigned (`U`)
+/// two-way multiply-add or subtract (`S`) long of one vector by an indexed
+/// halfword into ZA.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum MortlachMulti1MlaLongIdx {
+    SmlalZaZzi1,
+    SmlslZaZzi1,
+    UmlalZaZzi1,
+    UmlslZaZzi1,
+}
+
+fn mortlach_multi1_mla_long_idx(word: u32) -> Option<MortlachMulti1MlaLongIdx> {
+    let u = bits(word, 4, 4);
+    let s = bits(word, 3, 3);
+    match (u, s) {
+        (0b0, 0b0) => Some(MortlachMulti1MlaLongIdx::SmlalZaZzi1),
+        (0b0, 0b1) => Some(MortlachMulti1MlaLongIdx::SmlslZaZzi1),
+        (0b1, 0b0) => Some(MortlachMulti1MlaLongIdx::UmlalZaZzi1),
+        (0b1, 0b1) => Some(MortlachMulti1MlaLongIdx::UmlslZaZzi1),
+        _ => None,
+    }
+}
+
+/// Arm class `mortlach_multi2_mla_long_long_idx_s`: signed, unsigned or
+/// mixed-sign (`U`, `op`) four-way multiply-add or subtract (`S`) long of
+/// two vectors by an indexed byte into ZA.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum MortlachMulti2MlaLongLongIdxS {
+    SmlallZaZziS2xi,
+    UsmlallZaZziS2xi,
+    SmlsllZaZziS2xi,
+    UmlallZaZziS2xi,
+    SumlallZaZziS2xi,
+    UmlsllZaZziS2xi,
+}
+
+fn mortlach_multi2_mla_long_long_idx_s(word: u32) -> Option<MortlachMulti2MlaLongLongIdxS> {
+    let op = bits(word, 5, 5);
+    let u = bits(word, 4, 4);
+    let s = bits(word, 3, 3);
+    match (op, u, s) {
+        (0b0, 0b0, 0b0) => Some(MortlachMulti2MlaLongLongIdxS::SmlallZaZziS2xi),
+        (0b1, 0b0, 0b0) => Some(MortlachMulti2MlaLongLongIdxS::UsmlallZaZziS2xi),
+        (0b0, 0b0, 0b1) => Some(MortlachMulti2MlaLongLongIdxS::SmlsllZaZziS2xi),
+        (0b0, 0b1, 0b0) => Some(MortlachMulti2MlaLongLongIdxS::UmlallZaZziS2xi),
+        (0b1, 0b1, 0b0) => Some(MortlachMulti2MlaLongLongIdxS::SumlallZaZziS2xi),
+        (0b0, 0b1, 0b1) => Some(MortlachMulti2MlaLongLongIdxS::UmlsllZaZziS2xi),
+        _ => None,
+    }
+}
+
+/// Arm class `mortlach_multi2_zza_idx_s`: FMLA and FMLS of single-precision
+/// values, the vertical dot products FVDOT, BFVDOT, SVDOT and UVDOT (`op =
+/// 0`), and the dot products SDOT, UDOT, USDOT, SUDOT, FDOT and BFDOT (`op
+/// = 1`), of two vectors by an indexed element or group (`opc2`) into ZA.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum MortlachMulti2ZzaIdxS {
+    FmlaZaZziS2xi,
+    FvdotZaZzi2xi,
+    BfvdotZaZzi2xi,
+    SvdotZa32Zzi2xi,
+    SdotZa32Zzi2xi,
+    FdotZaZzi2xi,
+    BfdotZaZzi2xi,
+    SdotZaZziS2xi,
+    UsdotZaZziS2xi,
+    FmlsZaZziS2xi,
+    UvdotZa32Zzi2xi,
+    UdotZa32Zzi2xi,
+    UdotZaZziS2xi,
+    SudotZaZziS2xi,
+}
+
+fn mortlach_multi2_zza_idx_s(word: u32) -> Option<MortlachMulti2ZzaIdxS> {
+    let op = bits(word, 12, 12);
+    let opc2 = bits(word, 5, 3);
+    match (op, opc2) {
+        (0b0, 0b000) => Some(MortlachMulti2ZzaIdxS::FmlaZaZziS2xi),
+        (0b0, 0b001) => Some(MortlachMulti2ZzaIdxS::FvdotZaZzi2xi),
+        (0b0, 0b011) => Some(MortlachMulti2ZzaIdxS::BfvdotZaZzi2xi),
+        (0b0, 0b100) => Some(MortlachMulti2ZzaIdxS::SvdotZa32Zzi2xi),
+        (0b1, 0b000) => Some(MortlachMulti2ZzaIdxS::SdotZa32Zzi2xi),
+        (0b1, 0b001) => Some(MortlachMulti2ZzaIdxS::FdotZaZzi2xi),
+        (0b1, 0b011) => Some(MortlachMulti2ZzaIdxS::BfdotZaZzi2xi),
+        (0b1, 0b100) => Some(MortlachMulti2ZzaIdxS::SdotZaZziS2xi),
+        (0b1, 0b101) => Some(MortlachMulti2ZzaIdxS::UsdotZaZziS2xi),
+        (0b0, 0b010) => Some(MortlachMulti2ZzaIdxS::FmlsZaZziS2xi),
+        (0b0, 0b110) => Some(MortlachMulti2ZzaIdxS::UvdotZa32Zzi2xi),
+        (0b1, 0b010) => Some(MortlachMulti2ZzaIdxS::UdotZa32Zzi2xi),
+        (0b1, 0b110) => Some(MortlachMulti2ZzaIdxS::UdotZaZziS2xi),
+        (0b1, 0b111) => Some(MortlachMulti2ZzaIdxS::SudotZaZziS2xi),
+        _ => None,
+    }
+}
+
+/// Arm class `mortlach_multi2_fma_long_idx`: half-precision or BFloat16
+/// (`op`) multiply-add or subtract (`S`) long of two vectors by an indexed
+/// element into ZA.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum MortlachMulti2FmaLongIdx {
+    BfmlalZaZzi2xi,
+    FmlalZaZzi2xi,
+    BfmlslZaZzi2xi,
+    FmlslZaZzi2xi,
+}
+
+fn mortlach_multi2_fma_long_idx(word: u32) -> Option<MortlachMulti2FmaLongIdx> {
+    let op = bits(word, 4, 4);
+    let s = bits(word, 3, 3);
+    match (op, s) {
+        (0b1, 0b0) => Some(MortlachMulti2FmaLongIdx::BfmlalZaZzi2xi),
+        (0b0, 0b0) => Some(MortlachMulti2FmaLongIdx::FmlalZaZzi2xi),
+        (0b1, 0b1) => Some(MortlachMulti2FmaLongIdx::BfmlslZaZzi2xi),
+        (0b0, 0b1) => Some(MortlachMulti2FmaLongIdx::FmlslZaZzi2xi),
+        _ => None,
+    }
+}
+
+/// Arm class `mortlach_multi2_mla_long_idx`: signed or unsigned (`U`)
+/// two-way multiply-add or subtract (`S`) long of two vectors by an indexed
+/// halfword into ZA.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum MortlachMulti2MlaLongIdx {
+    SmlalZaZzi2xi,
+    SmlslZaZzi2xi,
+    UmlalZaZzi2xi,
+    UmlslZaZzi2xi,
+}
+
+fn mortlach_multi2_mla_long_idx(word: u32) -> Option<MortlachMulti2MlaLongIdx> {
+    let u = bits(word, 4, 4);
+    let s = bits(word, 3, 3);
+    match (u, s) {
+        (0b0, 0b0) => Some(MortlachMulti2MlaLongIdx::SmlalZaZzi2xi),
+        (0b0, 0b1) => Some(MortlachMulti2MlaLongIdx::SmlslZaZzi2xi),
+        (0b1, 0b0) => Some(MortlachMulti2MlaLongIdx::UmlalZaZzi2xi),
+        (0b1, 0b1) => Some(MortlachMulti2MlaLongIdx::UmlslZaZzi2xi),
+        _ => None,
+    }
+}
+
+/// Arm class `mortlach_multi4_mla_long_long_idx_s`: signed, unsigned or
+/// mixed-sign (`U`, `op`) four-way multiply-add or subtract (`S`) long of
+/// four vectors by an indexed byte into ZA.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum MortlachMulti4MlaLongLongIdxS {
+    SmlallZaZziS4xi,
+    UsmlallZaZziS4xi,
+    SmlsllZaZziS4xi,
+    UmlallZaZziS4xi,
+    SumlallZaZziS4xi,
+    UmlsllZaZziS4xi,
+}
+
+fn mortlach_multi4_mla_long_long_idx_s(word: u32) -> Option<MortlachMulti4MlaLongLongIdxS> {
+    let op = bits(word, 5, 5);
+    let u = bits(word, 4, 4);
+    let s = bits(word, 3, 3);
+    match (op, u, s) {
+        (0b0, 0b0, 0b0) => Some(MortlachMulti4MlaLongLongIdxS::SmlallZaZziS4xi),
+        (0b1, 0b0, 0b0) => Some(MortlachMulti4MlaLongLongIdxS::UsmlallZaZziS4xi),
+        (0b0, 0b0, 0b1) => Some(MortlachMulti4MlaLongLongIdxS::SmlsllZaZziS4xi),
+        (0b0, 0b1, 0b0) => Some(MortlachMulti4MlaLongLongIdxS::UmlallZaZziS4xi),
+        (0b1, 0b1, 0b0) => Some(MortlachMulti4MlaLongLongIdxS::SumlallZaZziS4xi),
+        (0b0, 0b1, 0b1) => Some(MortlachMulti4MlaLongLongIdxS::UmlsllZaZziS4xi),
+        _ => None,
+    }
+}
+
+/// Arm class `mortlach_multi4_zza_idx_s`: FMLA and FMLS of single-precision
+/// values, the vertical dot products SVDOT, UVDOT, USVDOT and SUVDOT (`op =
+/// 0`), and the dot products SDOT, UDOT, USDOT, SUDOT, FDOT and BFDOT (`op
+/// = 1`), of four vectors by an indexed element or group (`opc2`) into ZA.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum MortlachMulti4ZzaIdxS {
+    FmlaZaZziS4xi,
+    SvdotZaZziS4xi,
+    UsvdotZaZziS4xi,
+    SdotZa32Zzi4xi,
+    FdotZaZzi4xi,
+    BfdotZaZzi4xi,
+    SdotZaZziS4xi,
+    UsdotZaZziS4xi,
+    FmlsZaZziS4xi,
+    UvdotZaZziS4xi,
+    SuvdotZaZziS4xi,
+    UdotZa32Zzi4xi,
+    UdotZaZziS4xi,
+    SudotZaZziS4xi,
+}
+
+fn mortlach_multi4_zza_idx_s(word: u32) -> Option<MortlachMulti4ZzaIdxS> {
+    let op = bits(word, 12, 12);
+    let opc2 = bits(word, 5, 3);
+    match (op, opc2) {
+        (0b0, 0b000) => Some(MortlachMulti4ZzaIdxS::FmlaZaZziS4xi),
+        (0b0, 0b100) => Some(MortlachMulti4ZzaIdxS::SvdotZaZziS4xi),
+        (0b0, 0b101) => Some(MortlachMulti4ZzaIdxS::UsvdotZaZziS4xi),
+        (0b1, 0b000) => Some(MortlachMulti4ZzaIdxS::SdotZa32Zzi4xi),
+        (0b1, 0b001) => Some(MortlachMulti4ZzaIdxS::FdotZaZzi4xi),
+        (0b1, 0b011) => Some(MortlachMulti4ZzaIdxS::BfdotZaZzi4xi),
+        (0b1, 0b100) => Some(MortlachMulti4ZzaIdxS::SdotZaZziS4xi),
+        (0b1, 0b101) => Some(MortlachMulti4ZzaIdxS::UsdotZaZziS4xi),
+        (0b0, 0b010) => Some(MortlachMulti4ZzaIdxS::FmlsZaZziS4xi),
+        (0b0, 0b110) => Some(MortlachMulti4ZzaIdxS::UvdotZaZziS4xi),
+        (0b0, 0b111) => Some(MortlachMulti4ZzaIdxS::SuvdotZaZziS4xi),
+        (0b1, 0b010) => Some(MortlachMulti4ZzaIdxS::UdotZa32Zzi4xi),
+        (0b1, 0b110) => Some(MortlachMulti4ZzaIdxS::UdotZaZziS4xi),
+        (0b1, 0b111) => Some(MortlachMulti4ZzaIdxS::SudotZaZziS4xi),
+        _ => None,
+    }
+}
+
+/// Arm class `mortlach_multi4_fma_long_idx`: half-precision or BFloat16
+/// (`op`) multiply-add or subtract (`S`) long of four vectors by an indexed
+/// element into ZA.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum MortlachMulti4FmaLongIdx {
+    BfmlalZaZzi4xi,
+    FmlalZaZzi4xi,
+    BfmlslZaZzi4xi,
+    FmlslZaZzi4xi,
+}
+
+fn mortlach_multi4_fma_long_idx(word: u32) -> Option<MortlachMulti4FmaLongIdx> {
+    let op = bits(word, 4, 4);
+    let s = bits(word, 3, 3);
+    match (op, s) {
+        (0b1, 0b0) => Some(MortlachMulti4FmaLongIdx::BfmlalZaZzi4xi),
+        (0b0, 0b0) => Some(MortlachMulti4FmaLongIdx::FmlalZaZzi4xi),
+        (0b1, 0b1) => Some(MortlachMulti4FmaLongIdx::BfmlslZaZzi4xi),
+        (0b0, 0b1) => Some(MortlachMulti4FmaLongIdx::FmlslZaZzi4xi),
+        _ => None,
+    }
+}
+
+/// Arm class `mortlach_multi4_mla_long_idx`: signed or unsigned (`U`)
+/// two-way multiply-add or subtract (`S`) long of four vectors by an indexed
+/// halfword into ZA.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum MortlachMulti4MlaLongIdx {
+    SmlalZaZzi4xi,
+    SmlslZaZzi4xi,
+    UmlalZaZzi4xi,
+    UmlslZaZzi4xi,
+}
+
+fn mortlach_multi4_mla_long_idx(word: u32) -> Option<MortlachMulti4MlaLongIdx> {
+    let u = bits(word, 4, 4);
+    let s = bits(word, 3, 3);
+    match (u, s) {
+        (0b0, 0b0) => Some(MortlachMulti4MlaLongIdx::SmlalZaZzi4xi),
+        (0b0, 0b1) => Some(MortlachMulti4MlaLongIdx::SmlslZaZzi4xi),
+        (0b1, 0b0) => Some(MortlachMulti4MlaLongIdx::UmlalZaZzi4xi),
+        (0b1, 0b1) => Some(MortlachMulti4MlaLongIdx::UmlslZaZzi4xi),
         _ => None,
     }
 }

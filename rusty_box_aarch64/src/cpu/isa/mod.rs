@@ -119,6 +119,9 @@ use sme::{
     MortlachMulti4ZzZaFloatSm, MortlachMulti4ZzZaFmaLongMm, MortlachMulti4ZzZaFmaLongSm, MortlachMulti4ZzZaIntMm,
     MortlachMulti4ZzZaIntSm, MortlachMulti4ZzZaMlaLongLongMm, MortlachMulti4ZzZaMlaLongLongSm,
     MortlachMulti4ZzZaMlaLongMm, MortlachMulti4ZzZaMlaLongSm, MortlachZero, MortlachZeroZt, MortlachZtLdst,
+    MortlachMulti1FmaLongIdx, MortlachMulti1MlaLongIdx, MortlachMulti1MlaLongLongIdxS, MortlachMulti2FmaLongIdx,
+    MortlachMulti2MlaLongIdx, MortlachMulti2MlaLongLongIdxS, MortlachMulti2ZzaIdxS, MortlachMulti4FmaLongIdx,
+    MortlachMulti4MlaLongIdx, MortlachMulti4MlaLongLongIdxS, MortlachMulti4ZzaIdxS,
 };
 use sve::{
     SveFp2opIPZds, SveFp2opPPd, SveFp2opPZdA, SveFp2opPZdB0, SveFp2opPZdB1, SveFp2opPZdC, SveFp2opPZdD, SveFp2opPZds,
@@ -563,6 +566,17 @@ pub(crate) enum Encoding {
     MortlachMulti4ZzZaIntMm(MortlachMulti4ZzZaIntMm),
     MortlachMulti4ZZaFloatMm(MortlachMulti4ZZaFloatMm),
     MortlachMulti4ZZaIntMm(MortlachMulti4ZZaIntMm),
+    MortlachMulti1MlaLongLongIdxS(MortlachMulti1MlaLongLongIdxS),
+    MortlachMulti1FmaLongIdx(MortlachMulti1FmaLongIdx),
+    MortlachMulti1MlaLongIdx(MortlachMulti1MlaLongIdx),
+    MortlachMulti2MlaLongLongIdxS(MortlachMulti2MlaLongLongIdxS),
+    MortlachMulti2ZzaIdxS(MortlachMulti2ZzaIdxS),
+    MortlachMulti2FmaLongIdx(MortlachMulti2FmaLongIdx),
+    MortlachMulti2MlaLongIdx(MortlachMulti2MlaLongIdx),
+    MortlachMulti4MlaLongLongIdxS(MortlachMulti4MlaLongLongIdxS),
+    MortlachMulti4ZzaIdxS(MortlachMulti4ZzaIdxS),
+    MortlachMulti4FmaLongIdx(MortlachMulti4FmaLongIdx),
+    MortlachMulti4MlaLongIdx(MortlachMulti4MlaLongIdx),
 }
 
 /// The encoding `word` is, if it is one of a feature the decoder knows.
@@ -903,7 +917,10 @@ impl Encoding {
             | Self::MortlachMulti1ZzZaMlaLongLongSm(_)
             | Self::MortlachMulti4ZzZaMlaLongLongSm(_)
             | Self::MortlachMulti2ZzZaMlaLongLongMm(_)
-            | Self::MortlachMulti4ZzZaMlaLongLongMm(_) => Class::SmeArrayIntLongLong,
+            | Self::MortlachMulti4ZzZaMlaLongLongMm(_)
+            | Self::MortlachMulti1MlaLongLongIdxS(_)
+            | Self::MortlachMulti2MlaLongLongIdxS(_)
+            | Self::MortlachMulti4MlaLongLongIdxS(_) => Class::SmeArrayIntLongLong,
             Self::MortlachMulti2ZzZaMlaLongSm(_)
             | Self::MortlachMulti1ZzZaMlaLongSm(_)
             | Self::MortlachMulti4ZzZaMlaLongSm(_)
@@ -942,6 +959,44 @@ impl Encoding {
             | Self::MortlachMulti4ZZaFloatMm(_)
             | Self::MortlachMulti2ZZaIntMm(_)
             | Self::MortlachMulti4ZZaIntMm(_) => Class::SmeArrayAccumulate,
+            Self::MortlachMulti1MlaLongIdx(_) | Self::MortlachMulti2MlaLongIdx(_) | Self::MortlachMulti4MlaLongIdx(_) => {
+                Class::SmeArrayIntLong
+            }
+            Self::MortlachMulti1FmaLongIdx(_) | Self::MortlachMulti2FmaLongIdx(_) | Self::MortlachMulti4FmaLongIdx(_) => {
+                Class::SmeArrayFpLong
+            }
+            Self::MortlachMulti2ZzaIdxS(encoding) => match encoding {
+                MortlachMulti2ZzaIdxS::FmlaZaZziS2xi | MortlachMulti2ZzaIdxS::FmlsZaZziS2xi => {
+                    Class::SmeIndexedFpMulAdd
+                }
+                MortlachMulti2ZzaIdxS::FdotZaZzi2xi | MortlachMulti2ZzaIdxS::BfdotZaZzi2xi => Class::SmeArrayFpDot,
+                MortlachMulti2ZzaIdxS::SdotZa32Zzi2xi
+                | MortlachMulti2ZzaIdxS::UdotZa32Zzi2xi
+                | MortlachMulti2ZzaIdxS::SdotZaZziS2xi
+                | MortlachMulti2ZzaIdxS::UdotZaZziS2xi
+                | MortlachMulti2ZzaIdxS::UsdotZaZziS2xi
+                | MortlachMulti2ZzaIdxS::SudotZaZziS2xi => Class::SmeIndexedIntDot,
+                MortlachMulti2ZzaIdxS::FvdotZaZzi2xi
+                | MortlachMulti2ZzaIdxS::BfvdotZaZzi2xi
+                | MortlachMulti2ZzaIdxS::SvdotZa32Zzi2xi
+                | MortlachMulti2ZzaIdxS::UvdotZa32Zzi2xi => Class::SmeIndexedVerticalDot,
+            },
+            Self::MortlachMulti4ZzaIdxS(encoding) => match encoding {
+                MortlachMulti4ZzaIdxS::FmlaZaZziS4xi | MortlachMulti4ZzaIdxS::FmlsZaZziS4xi => {
+                    Class::SmeIndexedFpMulAdd
+                }
+                MortlachMulti4ZzaIdxS::FdotZaZzi4xi | MortlachMulti4ZzaIdxS::BfdotZaZzi4xi => Class::SmeArrayFpDot,
+                MortlachMulti4ZzaIdxS::SdotZa32Zzi4xi
+                | MortlachMulti4ZzaIdxS::UdotZa32Zzi4xi
+                | MortlachMulti4ZzaIdxS::SdotZaZziS4xi
+                | MortlachMulti4ZzaIdxS::UdotZaZziS4xi
+                | MortlachMulti4ZzaIdxS::UsdotZaZziS4xi
+                | MortlachMulti4ZzaIdxS::SudotZaZziS4xi => Class::SmeIndexedIntDot,
+                MortlachMulti4ZzaIdxS::SvdotZaZziS4xi
+                | MortlachMulti4ZzaIdxS::UvdotZaZziS4xi
+                | MortlachMulti4ZzaIdxS::UsvdotZaZziS4xi
+                | MortlachMulti4ZzaIdxS::SuvdotZaZziS4xi => Class::SmeIndexedVerticalDot,
+            },
         }
     }
 }
@@ -1328,16 +1383,17 @@ pub(crate) enum Class {
     SveMultiUnpack,
     /// SMLALL, SMLSLL, UMLALL, UMLSLL, USMLALL and SUMLALL of bytes into
     /// ZA array vectors of words: one, two or four vectors by one, by as
-    /// many.
+    /// many or by an indexed byte.
     SmeArrayIntLongLong,
     /// SMLAL, SMLSL, UMLAL and UMLSL of halfwords into ZA array vectors of
-    /// words.
+    /// words, by vectors or by an indexed halfword.
     SmeArrayIntLong,
     /// FMLAL, FMLSL, BFMLAL and BFMLSL of half-precision and BFloat16
-    /// values into ZA array vectors of single-precision values.
+    /// values into ZA array vectors of single-precision values, by vectors
+    /// or by an indexed element.
     SmeArrayFpLong,
     /// FDOT and BFDOT of pairs into ZA array vectors of single-precision
-    /// values.
+    /// values, by vectors or by an indexed pair.
     SmeArrayFpDot,
     /// SDOT, UDOT, USDOT and SUDOT of bytes, and SDOT and UDOT of
     /// halfwords, into ZA array vectors of words.
@@ -1350,6 +1406,16 @@ pub(crate) enum Class {
     /// FADD, FSUB, ADD and SUB of vectors to ZA array vectors of
     /// single-precision values or words.
     SmeArrayAccumulate,
+    /// SDOT, UDOT, USDOT and SUDOT of bytes, and SDOT and UDOT of
+    /// halfwords, by an indexed group into ZA array vectors of words.
+    SmeIndexedIntDot,
+    /// FMLA and FMLS of single-precision values by an indexed element into
+    /// ZA array vectors.
+    SmeIndexedFpMulAdd,
+    /// FVDOT, BFVDOT, SVDOT, UVDOT, USVDOT and SUVDOT: the dot products of
+    /// the elements in the same place of each register of the group, by an
+    /// indexed group, into ZA array vectors.
+    SmeIndexedVerticalDot,
     /// FMOPA and FMOPS of single-precision and of half-precision values,
     /// BFMOPA and BFMOPS, into 32-bit tiles: the handler reads which from
     /// bits 24, 21 and 4.
@@ -1818,7 +1884,18 @@ impl Encoding {
             | Self::MortlachMulti4ZzZaFloatMm(_)
             | Self::MortlachMulti4ZzZaIntMm(_)
             | Self::MortlachMulti4ZZaFloatMm(_)
-            | Self::MortlachMulti4ZZaIntMm(_) => Feature::Sme2,
+            | Self::MortlachMulti4ZZaIntMm(_)
+            | Self::MortlachMulti1MlaLongLongIdxS(_)
+            | Self::MortlachMulti1FmaLongIdx(_)
+            | Self::MortlachMulti1MlaLongIdx(_)
+            | Self::MortlachMulti2MlaLongLongIdxS(_)
+            | Self::MortlachMulti2ZzaIdxS(_)
+            | Self::MortlachMulti2FmaLongIdx(_)
+            | Self::MortlachMulti2MlaLongIdx(_)
+            | Self::MortlachMulti4MlaLongLongIdxS(_)
+            | Self::MortlachMulti4ZzaIdxS(_)
+            | Self::MortlachMulti4FmaLongIdx(_)
+            | Self::MortlachMulti4MlaLongIdx(_) => Feature::Sme2,
         }
     }
 }

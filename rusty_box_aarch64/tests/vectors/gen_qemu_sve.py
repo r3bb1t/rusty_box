@@ -233,10 +233,12 @@ def za_fp_format(insn):
     elements. An outer product's (bit 30 clear): single precision (bit 24
     clear), BFloat16 (bit 24 set, bit 21 clear) or half precision. A
     multi-vector instruction's on ZA array vectors (bit 30 set): single
-    precision for FMLA, FMLS, FADD and FSUB (bits 12:11 = 11), else
-    BFloat16 (bit 4 set) or half precision."""
+    precision for FMLA, FMLS, FADD and FSUB (bits 12:11 = 11 by vectors, bit
+    21 set; bits 23:22 = 01 with bits 12, 5 and 3 clear by an indexed
+    element), else BFloat16 (bit 4 set) or half precision."""
     if (insn >> 30) & 1:
-        if (insn >> 11) & 3 == 3:
+        by_vectors = (insn >> 21) & 1
+        if (by_vectors and (insn >> 11) & 3 == 3) or (not by_vectors and (insn >> 22) & 3 == 1 and insn & 0x1028 == 0):
             return 2
         return 0 if (insn >> 4) & 1 else 1
     if not (insn >> 24) & 1:
@@ -391,6 +393,17 @@ def not_fp8_dot(w):
     """FDOT and BFDOT of a group by one vector, `opc = x1` FEAT_SME_F8F16's
     and FEAT_SME_F8F32's forms of FP8 values, as `opc = x0`."""
     return w & ~0x00000008
+
+
+def not_fp8_indexed_dot(w):
+    """FDOT of FP8 values by an indexed group, FEAT_SME_F8F32's `op = 0,
+    opc2 = 111` of two vectors and `opc2 = 001` of four, as `opc2 = 100`
+    and `010`: SVDOT and FMLS, which the classes' samples reach least."""
+    if (w >> 12) & 1:
+        return w
+    if (w >> 15) & 1:
+        return (w & ~0x00000008) | 0x00000010 if (w >> 3) & 7 == 0b001 else w
+    return w & ~0x00000018 if (w >> 3) & 7 == 0b111 else w
 
 
 def not_fp8_dot_groups(w):
@@ -727,6 +740,17 @@ FAMILIES = [
     ("mortlach_multi4_zz_za_int_mm", "Z", 0xC1A11810, 0x005C638F, not_64bit),
     ("mortlach_multi4_z_za_float_mm", "ZF", 0xC1A11C00, 0x0040638F, not_64bit),
     ("mortlach_multi4_z_za_int_mm", "Z", 0xC1A11C10, 0x0040638F, not_64bit),
+    ("mortlach_multi1_mla_long_long_idx_s", "Z", 0xC1000000, 0x000FFFFF, None),
+    ("mortlach_multi1_fma_long_idx", "ZF", 0xC1801000, 0x000FEFFF, None),
+    ("mortlach_multi1_mla_long_idx", "Z", 0xC1C01000, 0x000FEFFF, None),
+    ("mortlach_multi2_mla_long_long_idx_s", "Z", 0xC1100000, 0x000F6FFF, None),
+    ("mortlach_multi2_zza_idx_s", "ZF", 0xC1500000, 0x000F7FFF, not_fp8_indexed_dot),
+    ("mortlach_multi2_fma_long_idx", "ZF", 0xC1901000, 0x000F6FDF, None),
+    ("mortlach_multi2_mla_long_idx", "Z", 0xC1D01000, 0x000F6FDF, None),
+    ("mortlach_multi4_mla_long_long_idx_s", "Z", 0xC1108000, 0x000F6FBF, None),
+    ("mortlach_multi4_zza_idx_s", "ZF", 0xC1508000, 0x000F7FBF, not_fp8_indexed_dot),
+    ("mortlach_multi4_fma_long_idx", "ZF", 0xC1909000, 0x000F6F9F, None),
+    ("mortlach_multi4_mla_long_idx", "Z", 0xC1D09000, 0x000F6F9F, None),
 ]
 
 

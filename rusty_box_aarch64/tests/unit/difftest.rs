@@ -447,14 +447,19 @@ fn sve_state(seed: u64, kind: &str, insn: u32) -> SveState {
 /// elements. An outer product's (bit 30 clear): single precision (bit 24
 /// clear), BFloat16 (bit 24 set, bit 21 clear) or half precision. A
 /// multi-vector instruction's on ZA array vectors (bit 30 set): single
-/// precision for FMLA, FMLS, FADD and FSUB (bits 12:11 = 11), else
-/// BFloat16 (bit 4 set) or half precision. Mirrors `za_fp_format` in
-/// gen_qemu_sve.py.
+/// precision for FMLA, FMLS, FADD and FSUB (bits 12:11 = 11 by vectors,
+/// bit 21 set; bits 23:22 = 01 with bits 12, 5 and 3 clear by an indexed
+/// element), else BFloat16 (bit 4 set) or half precision. Mirrors
+/// `za_fp_format` in gen_qemu_sve.py.
 fn za_fp_format(insn: u32) -> usize {
-    match ((insn >> 30) & 1, (insn >> 11) & 3, (insn >> 4) & 1, (insn >> 24) & 1, (insn >> 21) & 1) {
-        (1, 3, _, _, _) => 2,
-        (1, _, 1, _, _) => 0,
-        (1, _, _, _, _) => 1,
+    let single = matches!(
+        ((insn >> 21) & 1, (insn >> 11) & 3, (insn >> 22) & 3, insn & 0x1028),
+        (1, 3, _, _) | (0, _, 1, 0)
+    );
+    match ((insn >> 30) & 1, single, (insn >> 4) & 1, (insn >> 24) & 1, (insn >> 21) & 1) {
+        (1, true, _, _, _) => 2,
+        (1, false, 1, _, _) => 0,
+        (1, false, _, _, _) => 1,
         (_, _, _, 0, _) => 2,
         (_, _, _, _, 0) => 0,
         _ => 1,
