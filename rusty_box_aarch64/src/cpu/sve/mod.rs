@@ -34,7 +34,7 @@ mod pred;
 #[path = "../../../tests/unit/sve.rs"]
 mod tests;
 
-use super::exec::{sext, Fault};
+use super::exec::{bits, sext, Fault};
 use super::features::VecLen;
 use super::simd_arith::{doubling_mul_high, int as simd_int, sat, shift_signed};
 use super::Cpu;
@@ -366,6 +366,14 @@ pub(crate) fn mul_high(a: u64, b: u64, es: Esize, unsigned: bool) -> u64 {
         ((i128::from(es.signed(a)) * i128::from(es.signed(b))) >> es.bits()) as u64
     };
     high & es.mask()
+}
+
+/// The first register of a group of `nreg` consecutive vectors, two or
+/// four, that the field ending at bit `hi` names: `field:'0'` (four bits)
+/// or `field:'00'` (three).
+pub(crate) fn group(insn: u32, hi: u32, nreg: usize) -> u32 {
+    let k = nreg.trailing_zeros();
+    bits(insn, hi, hi + k - 4) << k
 }
 
 /// SQDMULH and SQRDMULH on one element: `SignedSat((2 * SInt(a) *

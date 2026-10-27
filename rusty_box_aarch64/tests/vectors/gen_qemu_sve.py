@@ -229,9 +229,16 @@ def sve_state(seed, kind, insn):
 
 
 def za_fp_format(insn):
-    """The `FP_FORMATS` index of a floating-point outer product's source
-    elements: single precision (bit 24 clear), BFloat16 (bit 24 set, bit
-    21 clear) or half precision."""
+    """The `FP_FORMATS` index of a floating-point ZA instruction's source
+    elements. An outer product's (bit 30 clear): single precision (bit 24
+    clear), BFloat16 (bit 24 set, bit 21 clear) or half precision. A
+    multi-vector instruction's on ZA array vectors (bit 30 set): single
+    precision for FMLA, FMLS, FADD and FSUB (bits 12:11 = 11), else
+    BFloat16 (bit 4 set) or half precision."""
+    if (insn >> 30) & 1:
+        if (insn >> 11) & 3 == 3:
+            return 2
+        return 0 if (insn >> 4) & 1 else 1
     if not (insn >> 24) & 1:
         return 2
     return 1 if (insn >> 21) & 1 else 0
@@ -368,6 +375,30 @@ def not_pmull128(w):
     return w | 0x00400000 if pmull and (w >> 22) & 3 == 0 else w
 
 
+def not_64bit(w):
+    """`sz = 1`, FEAT_SME_I16I64's or FEAT_SME_F64F64's 64-bit form of an
+    instruction on ZA array vectors: `sz = 0` in its place."""
+    return w & ~0x00400000
+
+
+def not_fp8_long(w):
+    """FMLAL of a group by one vector with `o2 = 1`, FEAT_SME_F8F16's form
+    of FP8 values or unallocated, as `o2 = 0`."""
+    return w & ~0x00000004
+
+
+def not_fp8_dot(w):
+    """FDOT and BFDOT of a group by one vector, `opc = x1` FEAT_SME_F8F16's
+    and FEAT_SME_F8F32's forms of FP8 values, as `opc = x0`."""
+    return w & ~0x00000008
+
+
+def not_fp8_dot_groups(w):
+    """FDOT and BFDOT of a group by a group, `opc = 1x` FEAT_SME_F8F16's and
+    FEAT_SME_F8F32's forms of FP8 values, as `opc = 0x`."""
+    return w & ~0x00000020
+
+
 # (name, kind, fixed bits, free bits, fixup): Arm's encoding classes of the
 # A64 `sve` group whose encodings FEAT_SME makes legal, with `op0 = 000`
 # and `001`, then the loads, stores and prefetches (`op0 = 100`, `101` and
@@ -381,14 +412,16 @@ def not_pmull128(w):
 # and STR of ZT0 (Z and ZM), and the multi-vector SVE operations of the
 # `sme` group (S for SEL and the permutes, SI for the integer operations,
 # SN for the narrows, SF for the floating-point operations and SS for the
-# conversions of words); their fixed bits from AARCHMRS 2026-09.
-# FMAX to FCLAMP's words whose encodings this processor does not
-# implement, the BFloat16 forms and FAMAX and FAMIN, are moved to
-# implemented ones as the SVE floating-point classes' are. A word of a
-# class that is unallocated (MOVA's `Q = 1` with a `size` other than 11,
-# PEXT's `opc = 11x`) raises a signal and is dropped. MOVT between ZT0
-# and a general register, which is defined only in Debug state, has no
-# family.
+# conversions of words), and its multi-vector instructions on ZA array
+# vectors (Z, ZF for the floating-point ones); their fixed bits from
+# AARCHMRS 2026-09. FMAX to FCLAMP's words whose encodings this processor
+# does not implement, the BFloat16 forms and FAMAX and FAMIN, are moved to
+# implemented ones as the SVE floating-point classes' are, and so are the
+# ZA array vector instructions' 64-bit forms and forms of FP8 values. A
+# word of a class that is unallocated (MOVA's `Q = 1` with a `size` other
+# than 11, PEXT's `opc = 11x`) raises a signal and is dropped. MOVT
+# between ZT0 and a general register, which is defined only in Debug
+# state, has no family.
 FAMILIES = [
     ("sve_int_bin_pred_arit_0", "S", 0x04000000, 0x00C71FFF, None),
     ("sve_int_bin_pred_arit_1", "S", 0x04080000, 0x00C71FFF, None),
@@ -651,6 +684,49 @@ FAMILIES = [
     ("mortlach_multi4_z_z_zip", "S", 0xC136E000, 0x00C0039E, None),
     ("mortlach_multi4_z_z_long_zip", "S", 0xC137E000, 0x0000039E, None),
     ("mortlach_multi4_frint", "SF", 0xC138E000, 0x00C7039C, None),
+    ("mortlach_multi2_zz_za_mla_long_long_sm", "Z", 0xC1200000, 0x004F63FD, not_64bit),
+    ("mortlach_multi1_zz_za_mla_long_long_sm", "Z", 0xC1200400, 0x004F63FF, not_64bit),
+    ("mortlach_multi2_zz_za_fma_long_sm", "ZF", 0xC1200800, 0x000F63FF, not_fp8_long),
+    ("mortlach_multi2_zz_za_mla_long_sm", "Z", 0xC1600800, 0x000F63FF, None),
+    ("mortlach_multi1_zz_za_fma_long_sm", "ZF", 0xC1200C00, 0x000F63FF, None),
+    ("mortlach_multi1_zz_za_mla_long_sm", "Z", 0xC1600C00, 0x000F63FF, None),
+    ("mortlach_multi2_z_za_fpdot_sm", "ZF", 0xC1201000, 0x000F63FF, not_fp8_dot),
+    ("mortlach_multi2_z_za_4way_dot_sm", "Z", 0xC1201400, 0x004F63F7, not_64bit),
+    ("mortlach_multi2_z_za_mixed_dot_sm", "Z", 0xC1201408, 0x000F63F7, None),
+    ("mortlach_multi2_z_za_2way_dot_sm", "Z", 0xC1601408, 0x000F63F7, None),
+    ("mortlach_multi2_zz_za_float_sm", "ZF", 0xC1201800, 0x004F63EF, not_64bit),
+    ("mortlach_multi2_zz_za_int_sm", "Z", 0xC1201810, 0x004F63EF, not_64bit),
+    ("mortlach_multi4_zz_za_mla_long_long_sm", "Z", 0xC1300000, 0x004F63FD, not_64bit),
+    ("mortlach_multi4_zz_za_fma_long_sm", "ZF", 0xC1300800, 0x000F63FF, not_fp8_long),
+    ("mortlach_multi4_zz_za_mla_long_sm", "Z", 0xC1700800, 0x000F63FF, None),
+    ("mortlach_multi4_z_za_fpdot_sm", "ZF", 0xC1301000, 0x000F63FF, not_fp8_dot),
+    ("mortlach_multi4_z_za_4way_dot_sm", "Z", 0xC1301400, 0x004F63F7, not_64bit),
+    ("mortlach_multi4_z_za_mixed_dot_sm", "Z", 0xC1301408, 0x000F63F7, None),
+    ("mortlach_multi4_z_za_2way_dot_sm", "Z", 0xC1701408, 0x000F63F7, None),
+    ("mortlach_multi4_zz_za_float_sm", "ZF", 0xC1301800, 0x004F63EF, not_64bit),
+    ("mortlach_multi4_zz_za_int_sm", "Z", 0xC1301810, 0x004F63EF, not_64bit),
+    ("mortlach_multi2_zz_za_mla_long_long_mm", "Z", 0xC1A00000, 0x005E63DD, not_64bit),
+    ("mortlach_multi2_zz_za_fma_long_mm", "ZF", 0xC1A00800, 0x001E63DB, None),
+    ("mortlach_multi2_zz_za_mla_long_mm", "Z", 0xC1E00800, 0x001E63DB, None),
+    ("mortlach_multi2_z_za_fpdot_mm", "ZF", 0xC1A01000, 0x001E63F7, not_fp8_dot_groups),
+    ("mortlach_multi2_z_za_4way_dot_mm", "Z", 0xC1A01400, 0x005E63D7, not_64bit),
+    ("mortlach_multi2_z_za_mixed_dot_mm", "Z", 0xC1A01408, 0x001E63C7, None),
+    ("mortlach_multi2_z_za_2way_dot_mm", "Z", 0xC1E01408, 0x001E63D7, None),
+    ("mortlach_multi2_zz_za_float_mm", "ZF", 0xC1A01800, 0x005E63CF, not_64bit),
+    ("mortlach_multi2_zz_za_int_mm", "Z", 0xC1A01810, 0x005E63CF, not_64bit),
+    ("mortlach_multi2_z_za_float_mm", "ZF", 0xC1A01C00, 0x004063CF, not_64bit),
+    ("mortlach_multi2_z_za_int_mm", "Z", 0xC1A01C10, 0x004063CF, not_64bit),
+    ("mortlach_multi4_zz_za_mla_long_long_mm", "Z", 0xC1A10000, 0x005C639D, not_64bit),
+    ("mortlach_multi4_zz_za_fma_long_mm", "ZF", 0xC1A10800, 0x001C639B, None),
+    ("mortlach_multi4_zz_za_mla_long_mm", "Z", 0xC1E10800, 0x001C639B, None),
+    ("mortlach_multi4_z_za_fpdot_mm", "ZF", 0xC1A11000, 0x001C63B7, not_fp8_dot_groups),
+    ("mortlach_multi4_z_za_4way_dot_mm", "Z", 0xC1A11400, 0x005C6397, not_64bit),
+    ("mortlach_multi4_z_za_mixed_dot_mm", "Z", 0xC1A11408, 0x001C6387, None),
+    ("mortlach_multi4_z_za_2way_dot_mm", "Z", 0xC1E11408, 0x001C6397, None),
+    ("mortlach_multi4_zz_za_float_mm", "ZF", 0xC1A11800, 0x005C638F, not_64bit),
+    ("mortlach_multi4_zz_za_int_mm", "Z", 0xC1A11810, 0x005C638F, not_64bit),
+    ("mortlach_multi4_z_za_float_mm", "ZF", 0xC1A11C00, 0x0040638F, not_64bit),
+    ("mortlach_multi4_z_za_int_mm", "Z", 0xC1A11C10, 0x0040638F, not_64bit),
 ]
 
 

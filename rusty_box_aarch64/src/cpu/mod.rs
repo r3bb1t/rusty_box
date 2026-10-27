@@ -60,6 +60,7 @@ mod system;
 mod timer;
 mod wait;
 mod za;
+mod za_array;
 mod zt0;
 
 use rusty_box_core::{ClockHz, RingBuffer, VmClock, VmInstant};

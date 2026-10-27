@@ -183,9 +183,14 @@ on groups of two or four vectors (SEL under a counter; the integer and
 floating-point maxima and minima, rounding shifts, additions, doubling
 multiplies and clamps; ZIP and UZP of elements and of quadwords; the
 rounding and saturating narrows; BFCVT and FCVT; the conversions between
-words and single precision, FRINT and the unpacks), 257 encodings; its
-instructions on ZA array vectors, its indexed forms and its lookup
-tables are still to come).
+words and single precision, FRINT and the unpacks), 257 encodings, and
+the instructions on groups of ZA array vectors (the four-way and two-way
+long integer products, the long products of half-precision and BFloat16
+values, the dot products of bytes, of halfwords and of half-precision
+and BFloat16 pairs, FMLA and FMLS of single-precision values, ADD and
+SUB of vectors to them, and ADD, SUB, FADD and FSUB of vectors into
+them, of one, two or four vectors by one or by as many), 121 encodings;
+its indexed forms and its lookup tables are still to come).
 No processor a machine runs has them
 yet: the tests run them on a test-only processor with every feature, whose
 ID registers advertise each one.
@@ -378,15 +383,15 @@ integration tests of the public API.
   instructions, which are Advanced SIMD, but not CRC32, which is not.
 - `tests/unit/difftest.rs` also replays `tests/vectors/qemu_sve.txt`, in
   Streaming SVE mode at a 512-bit vector length with ZA enabled and ZT0
-  accessible: 10,440 vectors, 40 for each of the 184 encoding classes of
+  accessible: 12,160 vectors, 40 for each of the 227 encoding classes of
   SVE integer arithmetic, element counts, immediates, permutes, compares,
   predicate operations, WHILE, contiguous loads, stores and prefetches,
   floating point, and SVE2's integer instructions that FEAT_SME makes
   legal there, of the 13 classes of its ZA instructions, and of FEAT_SME2's
-  64 so far (the 5 predicate-as-counter classes, the 16 of the
-  multi-vector loads and stores, ZERO and LDR and STR of ZT0, and the 41
-  of the multi-vector SVE operations), each the class's fixed bits with
-  the rest random. The
+  107 so far (the 5 predicate-as-counter classes, the 16 of the
+  multi-vector loads and stores, ZERO and LDR and STR of ZT0, the 41 of
+  the multi-vector SVE operations, and the 43 of the instructions on ZA
+  array vectors), each the class's fixed bits with the rest random. The
   initial state is `qemu_max.txt`'s with Z0-Z31 and P0-P15 in place of the
   SIMD&FP registers (random bits, small elements, element extremes;
   random, all-true and per-size canonical predicates), ZA and ZT0 zero but
@@ -398,7 +403,8 @@ integration tests of the public API.
   words) and the rest of half, single or double precision, under a
   random FPCR (RMode, FZ, DN, AHP, FZ16, FIZ, AH, NEP), and 1,080 of
   their 1,520 vectors raise an exception (every kind does), and the
-  floating-point outer products' sources are of their own precision; for
+  floating-point ZA instructions' sources are of their own precision,
+  their 720 vectors leaving FPSR alone as their pseudocode does; for
   SVE2's integer classes, three in four Z registers hold elements of the
   word's own size, each a shift amount in range or an extreme, or
   extremes of half that size, a long operation's sources; for FEAT_SME2's
@@ -447,6 +453,18 @@ integration tests of the public API.
   saturating narrows, BFCVT, and FCVT in IEEE half precision under
   FPCR.AHP, the word conversions' saturation and rounding, FRINT's own
   rounding with no Inexact, the unpacks and their reserved size.
+  `tests/unit/za_array.rs` checks the instructions on ZA array vectors:
+  the vector `(Wv + offset) MOD vstride` in each register's stride, the
+  stride by the vector length and the register count, the long forms'
+  vectors from a multiple of two or four and their elements, a register
+  group wrapping from Z31 to Z0 and a second group stepping with the
+  first; the integer products' signs, mixed signs, subtraction and wrap;
+  the dot products of bytes and halfwords; FMLA's one rounding, default
+  NaN (negative under FPCR.AH) and FPSR left alone; FDOT's rounding of
+  the pair before the sum; FMLSL's and BFMLSL's negation; ADD and SUB
+  replacing the vectors and the accumulating forms adding to them; the
+  enable checks, and the 64-bit forms and the instructions without
+  FEAT_SME2 UNDEFINED.
   `tests/unit/sve.rs` checks what random operands rarely
   reach, against the pseudocode: the SME trap outside Streaming SVE mode
   and the order of the enable checks, the vector length (and the bits

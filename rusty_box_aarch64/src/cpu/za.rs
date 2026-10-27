@@ -118,11 +118,12 @@ enum FpProduct {
     Pairs(PairFormat),
 }
 
-/// The 16-bit elements a widening outer product multiplies in pairs.
+/// The 16-bit elements a widening outer product, or FEAT_SME2's FDOT,
+/// BFDOT, FMLAL and BFMLAL into ZA array vectors, multiplies.
 ///
 /// Closed (R5): the two formats of FEAT_SME's widening outer products.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PairFormat {
+pub(super) enum PairFormat {
     /// BFMOPA, BFMOPS (`BFDotAdd`).
     BFloat16,
     /// FMOPA, FMOPS (`FPDotAdd_ZA`).
@@ -130,27 +131,39 @@ enum PairFormat {
 }
 
 impl PairFormat {
-    /// The negation FMOPS and BFMOPS apply to an active row element:
+    /// The negation FMOPS, BFMOPS, FMLSL and BFMLSL apply to an element:
     /// BFNeg without alternate handling, or FPNeg, under which a NaN keeps
     /// its sign while FPCR.AH = 1.
-    fn negate(self, x: u16, env: &FpEnv) -> u16 {
+    pub(super) fn negate(self, x: u16, env: &FpEnv) -> u16 {
         match self {
             Self::BFloat16 => x ^ 0x8000,
             Self::Half => env.neg(FpType::Half, u64::from(x)) as u16,
         }
     }
 
-    /// `sum` plus the sum of the products of the row pair's elements and
-    /// the column pair's: `BFDotAdd`, or `FPDotAdd_ZA` under `env`, which
-    /// has FPCR.DN set.
-    fn dot_add(self, sum: u32, row: &Pair, col: &Pair, env: &mut FpEnv) -> u32 {
-        let ([r0, r1], [c0, c1]) = (row.elements, col.elements);
+    /// `sum` plus `row[0] * col[0] + row[1] * col[1]`: `BFDotAdd`, or
+    /// `FPDotAdd_ZA` under `env`, which has FPCR.DN set.
+    pub(super) fn dot(self, sum: u32, row: [u16; 2], col: [u16; 2], env: &mut FpEnv) -> u32 {
+        let ([r0, r1], [c0, c1]) = (row, col);
         match self {
             Self::BFloat16 => sf::bf16_dot_add(sum, r0, r1, c0, c1, env.handling()),
             Self::Half => {
                 let dot = sf::f16_dot(r0, r1, c0, c1, &mut env.status);
                 sf::f32_add(sum, dot, &mut env.status)
             }
+        }
+    }
+
+    /// `sum` plus `n * m`, each widened to single precision, in one
+    /// rounding: `BFMulAddH_ZA`, or `FPMulAddH_ZA`, under `env`, which has
+    /// FPCR.DN set.
+    pub(super) fn mul_add(self, sum: u32, n: u16, m: u16, env: &mut FpEnv) -> u32 {
+        match self {
+            Self::BFloat16 => {
+                let (n, m) = (u64::from(n) << 16, u64::from(m) << 16);
+                fp_mul_add(FusedMulAdd::Fmadd, FpType::Single, u64::from(sum), n, m, env) as u32
+            }
+            Self::Half => sf::f16_mul_add_long(FusedMulAdd::Fmadd, sum, n, m, &mut env.status),
         }
     }
 }
@@ -183,15 +196,16 @@ impl Pair {
     }
 }
 
-/// The integer element of an outer product as `UInt` or `SInt`.
+/// The integer element of an outer product, or of FEAT_SME2's products
+/// into ZA array vectors, as `UInt` or `SInt`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Signedness {
+pub(super) enum Signedness {
     Signed,
     Unsigned,
 }
 
 impl Signedness {
-    const fn of(unsigned: bool) -> Self {
+    pub(super) const fn of(unsigned: bool) -> Self {
         if unsigned {
             Self::Unsigned
         } else {
@@ -199,8 +213,9 @@ impl Signedness {
         }
     }
 
-    fn int(self, byte: u64) -> i128 {
-        int(byte, Esize::B, self == Self::Unsigned)
+    /// The low `es` bits of `value` as an integer.
+    pub(super) fn int(self, value: u64, es: Esize) -> i128 {
+        int(value, es, self == Self::Unsigned)
     }
 }
 
@@ -309,7 +324,8 @@ impl Cpu {
                         let col_pair = Pair::of(&zm, &op.cols, col);
                         if pair.meets(&col_pair) {
                             let sum = acc.get(col, Esize::S) as u32;
-                            acc.set(col, Esize::S, u64::from(format.dot_add(sum, &pair, &col_pair, &mut env)));
+                            let dot = format.dot(sum, pair.elements, col_pair.elements, &mut env);
+                            acc.set(col, Esize::S, u64::from(dot));
                         }
                     }
                 }
@@ -338,14 +354,14 @@ impl Cpu {
             // The row's four bytes, `None` where `Pn` makes one inactive.
             let row_bytes: [Option<i128>; 4] = core::array::from_fn(|k| {
                 let a = 4 * row + k;
-                op.rows.active(a, Esize::B).then(|| n_sign.int(op.zn.get(a, Esize::B)))
+                op.rows.active(a, Esize::B).then(|| n_sign.int(op.zn.get(a, Esize::B), Esize::B))
             });
             for col in 0..dim {
                 let mut sum = acc.get(col, Esize::S) as u32;
                 for (k, element) in row_bytes.iter().enumerate() {
                     let b = 4 * col + k;
                     if let (Some(element), true) = (element, op.cols.active(b, Esize::B)) {
-                        let product = (element * m_sign.int(zm.get(b, Esize::B))) as u32;
+                        let product = (element * m_sign.int(zm.get(b, Esize::B), Esize::B)) as u32;
                         sum = if subtract {
                             sum.wrapping_sub(product)
                         } else {

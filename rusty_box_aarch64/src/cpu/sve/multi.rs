@@ -26,20 +26,12 @@ mod tests;
 use super::counter::PredCounter;
 use super::fp::{esize, fp_type};
 use super::int::BinOp;
-use super::{clamp, int, sat_doubling_mul_high, sat_q, shift_by_element, Esize, Zv};
+use super::{clamp, group, int, sat_doubling_mul_high, sat_q, shift_by_element, Esize, Zv};
 use crate::cpu::exec::{bit, bits, ExecResult, Flow};
 use crate::cpu::features::VecLen;
 use crate::cpu::fp::{fp_binary, fp_convert, fp_to_int, fp_unary, int_to_fp, FpBinary, FpConversion, FpType, FpUnary, IntWidth};
 use crate::cpu::Cpu;
 use crate::softfloat::{self as sf, FpRounding, InexactReport};
-
-/// The first register of a group of `nreg` consecutive vectors, two or
-/// four, that the field ending at bit `hi` names: `field:'0'` (four bits)
-/// or `field:'00'` (three).
-fn group(insn: u32, hi: u32, nreg: usize) -> u32 {
-    let k = nreg.trailing_zeros();
-    bits(insn, hi, hi + k - 4) << k
-}
 
 /// The registers of a multi-vector binary operation (`mortlach_multi_sve_2a`
 /// to `_2d1`): `nreg` vectors from `dn`, which the result overwrites, by

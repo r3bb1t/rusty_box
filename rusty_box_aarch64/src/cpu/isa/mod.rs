@@ -107,7 +107,18 @@ use sme::{
     MortlachMulti4WideInt, MortlachMulti4ZZAddSm, MortlachMulti4ZZFminmaxMm, MortlachMulti4ZZFminmaxSm,
     MortlachMulti4ZZLongZip, MortlachMulti4ZZMinmaxMm, MortlachMulti4ZZMinmaxSm, MortlachMulti4ZZShiftMm,
     MortlachMulti4ZZShiftSm, MortlachMulti4ZZSqdmulhMm, MortlachMulti4ZZSqdmulhSm, MortlachMulti4ZZZip,
-    MortlachZero, MortlachZeroZt, MortlachZtLdst,
+    MortlachMulti1ZzZaFmaLongSm, MortlachMulti1ZzZaMlaLongLongSm, MortlachMulti1ZzZaMlaLongSm,
+    MortlachMulti2ZZa2wayDotMm, MortlachMulti2ZZa2wayDotSm, MortlachMulti2ZZa4wayDotMm, MortlachMulti2ZZa4wayDotSm,
+    MortlachMulti2ZZaFloatMm, MortlachMulti2ZZaFpdotMm, MortlachMulti2ZZaFpdotSm, MortlachMulti2ZZaIntMm,
+    MortlachMulti2ZZaMixedDotMm, MortlachMulti2ZZaMixedDotSm, MortlachMulti2ZzZaFloatMm, MortlachMulti2ZzZaFloatSm,
+    MortlachMulti2ZzZaFmaLongMm, MortlachMulti2ZzZaFmaLongSm, MortlachMulti2ZzZaIntMm, MortlachMulti2ZzZaIntSm,
+    MortlachMulti2ZzZaMlaLongLongMm, MortlachMulti2ZzZaMlaLongLongSm, MortlachMulti2ZzZaMlaLongMm,
+    MortlachMulti2ZzZaMlaLongSm, MortlachMulti4ZZa2wayDotMm, MortlachMulti4ZZa2wayDotSm, MortlachMulti4ZZa4wayDotMm,
+    MortlachMulti4ZZa4wayDotSm, MortlachMulti4ZZaFloatMm, MortlachMulti4ZZaFpdotMm, MortlachMulti4ZZaFpdotSm,
+    MortlachMulti4ZZaIntMm, MortlachMulti4ZZaMixedDotMm, MortlachMulti4ZZaMixedDotSm, MortlachMulti4ZzZaFloatMm,
+    MortlachMulti4ZzZaFloatSm, MortlachMulti4ZzZaFmaLongMm, MortlachMulti4ZzZaFmaLongSm, MortlachMulti4ZzZaIntMm,
+    MortlachMulti4ZzZaIntSm, MortlachMulti4ZzZaMlaLongLongMm, MortlachMulti4ZzZaMlaLongLongSm,
+    MortlachMulti4ZzZaMlaLongMm, MortlachMulti4ZzZaMlaLongSm, MortlachZero, MortlachZeroZt, MortlachZtLdst,
 };
 use sve::{
     SveFp2opIPZds, SveFp2opPPd, SveFp2opPZdA, SveFp2opPZdB0, SveFp2opPZdB1, SveFp2opPZdC, SveFp2opPZdD, SveFp2opPZds,
@@ -509,6 +520,49 @@ pub(crate) enum Encoding {
     MortlachMulti4ZZZip(MortlachMulti4ZZZip),
     MortlachMulti4ZZLongZip(MortlachMulti4ZZLongZip),
     MortlachMulti4Frint(MortlachMulti4Frint),
+    MortlachMulti2ZzZaMlaLongLongSm(MortlachMulti2ZzZaMlaLongLongSm),
+    MortlachMulti1ZzZaMlaLongLongSm(MortlachMulti1ZzZaMlaLongLongSm),
+    MortlachMulti2ZzZaFmaLongSm(MortlachMulti2ZzZaFmaLongSm),
+    MortlachMulti2ZzZaMlaLongSm(MortlachMulti2ZzZaMlaLongSm),
+    MortlachMulti1ZzZaFmaLongSm(MortlachMulti1ZzZaFmaLongSm),
+    MortlachMulti1ZzZaMlaLongSm(MortlachMulti1ZzZaMlaLongSm),
+    MortlachMulti2ZZaFpdotSm(MortlachMulti2ZZaFpdotSm),
+    MortlachMulti2ZZa4wayDotSm(MortlachMulti2ZZa4wayDotSm),
+    MortlachMulti2ZZaMixedDotSm(MortlachMulti2ZZaMixedDotSm),
+    MortlachMulti2ZZa2wayDotSm(MortlachMulti2ZZa2wayDotSm),
+    MortlachMulti2ZzZaFloatSm(MortlachMulti2ZzZaFloatSm),
+    MortlachMulti2ZzZaIntSm(MortlachMulti2ZzZaIntSm),
+    MortlachMulti4ZzZaMlaLongLongSm(MortlachMulti4ZzZaMlaLongLongSm),
+    MortlachMulti4ZzZaFmaLongSm(MortlachMulti4ZzZaFmaLongSm),
+    MortlachMulti4ZzZaMlaLongSm(MortlachMulti4ZzZaMlaLongSm),
+    MortlachMulti4ZZaFpdotSm(MortlachMulti4ZZaFpdotSm),
+    MortlachMulti4ZZa4wayDotSm(MortlachMulti4ZZa4wayDotSm),
+    MortlachMulti4ZZaMixedDotSm(MortlachMulti4ZZaMixedDotSm),
+    MortlachMulti4ZZa2wayDotSm(MortlachMulti4ZZa2wayDotSm),
+    MortlachMulti4ZzZaFloatSm(MortlachMulti4ZzZaFloatSm),
+    MortlachMulti4ZzZaIntSm(MortlachMulti4ZzZaIntSm),
+    MortlachMulti2ZzZaMlaLongLongMm(MortlachMulti2ZzZaMlaLongLongMm),
+    MortlachMulti2ZzZaFmaLongMm(MortlachMulti2ZzZaFmaLongMm),
+    MortlachMulti2ZzZaMlaLongMm(MortlachMulti2ZzZaMlaLongMm),
+    MortlachMulti2ZZaFpdotMm(MortlachMulti2ZZaFpdotMm),
+    MortlachMulti2ZZa4wayDotMm(MortlachMulti2ZZa4wayDotMm),
+    MortlachMulti2ZZaMixedDotMm(MortlachMulti2ZZaMixedDotMm),
+    MortlachMulti2ZZa2wayDotMm(MortlachMulti2ZZa2wayDotMm),
+    MortlachMulti2ZzZaFloatMm(MortlachMulti2ZzZaFloatMm),
+    MortlachMulti2ZzZaIntMm(MortlachMulti2ZzZaIntMm),
+    MortlachMulti2ZZaFloatMm(MortlachMulti2ZZaFloatMm),
+    MortlachMulti2ZZaIntMm(MortlachMulti2ZZaIntMm),
+    MortlachMulti4ZzZaMlaLongLongMm(MortlachMulti4ZzZaMlaLongLongMm),
+    MortlachMulti4ZzZaFmaLongMm(MortlachMulti4ZzZaFmaLongMm),
+    MortlachMulti4ZzZaMlaLongMm(MortlachMulti4ZzZaMlaLongMm),
+    MortlachMulti4ZZaFpdotMm(MortlachMulti4ZZaFpdotMm),
+    MortlachMulti4ZZa4wayDotMm(MortlachMulti4ZZa4wayDotMm),
+    MortlachMulti4ZZaMixedDotMm(MortlachMulti4ZZaMixedDotMm),
+    MortlachMulti4ZZa2wayDotMm(MortlachMulti4ZZa2wayDotMm),
+    MortlachMulti4ZzZaFloatMm(MortlachMulti4ZzZaFloatMm),
+    MortlachMulti4ZzZaIntMm(MortlachMulti4ZzZaIntMm),
+    MortlachMulti4ZZaFloatMm(MortlachMulti4ZZaFloatMm),
+    MortlachMulti4ZZaIntMm(MortlachMulti4ZZaIntMm),
 }
 
 /// The encoding `word` is, if it is one of a feature the decoder knows.
@@ -845,6 +899,49 @@ impl Encoding {
             | Self::MortlachMulti4IntfpCvrt(_)
             | Self::MortlachMulti4Frint(_) => Class::SveMultiFpUnary,
             Self::MortlachMulti2WideInt(_) | Self::MortlachMulti4WideInt(_) => Class::SveMultiUnpack,
+            Self::MortlachMulti2ZzZaMlaLongLongSm(_)
+            | Self::MortlachMulti1ZzZaMlaLongLongSm(_)
+            | Self::MortlachMulti4ZzZaMlaLongLongSm(_)
+            | Self::MortlachMulti2ZzZaMlaLongLongMm(_)
+            | Self::MortlachMulti4ZzZaMlaLongLongMm(_) => Class::SmeArrayIntLongLong,
+            Self::MortlachMulti2ZzZaMlaLongSm(_)
+            | Self::MortlachMulti1ZzZaMlaLongSm(_)
+            | Self::MortlachMulti4ZzZaMlaLongSm(_)
+            | Self::MortlachMulti2ZzZaMlaLongMm(_)
+            | Self::MortlachMulti4ZzZaMlaLongMm(_) => Class::SmeArrayIntLong,
+            Self::MortlachMulti2ZzZaFmaLongSm(_)
+            | Self::MortlachMulti1ZzZaFmaLongSm(_)
+            | Self::MortlachMulti4ZzZaFmaLongSm(_)
+            | Self::MortlachMulti2ZzZaFmaLongMm(_)
+            | Self::MortlachMulti4ZzZaFmaLongMm(_) => Class::SmeArrayFpLong,
+            Self::MortlachMulti2ZZaFpdotSm(_)
+            | Self::MortlachMulti4ZZaFpdotSm(_)
+            | Self::MortlachMulti2ZZaFpdotMm(_)
+            | Self::MortlachMulti4ZZaFpdotMm(_) => Class::SmeArrayFpDot,
+            Self::MortlachMulti2ZZa4wayDotSm(_)
+            | Self::MortlachMulti2ZZaMixedDotSm(_)
+            | Self::MortlachMulti2ZZa2wayDotSm(_)
+            | Self::MortlachMulti4ZZa4wayDotSm(_)
+            | Self::MortlachMulti4ZZaMixedDotSm(_)
+            | Self::MortlachMulti4ZZa2wayDotSm(_)
+            | Self::MortlachMulti2ZZa4wayDotMm(_)
+            | Self::MortlachMulti2ZZaMixedDotMm(_)
+            | Self::MortlachMulti2ZZa2wayDotMm(_)
+            | Self::MortlachMulti4ZZa4wayDotMm(_)
+            | Self::MortlachMulti4ZZaMixedDotMm(_)
+            | Self::MortlachMulti4ZZa2wayDotMm(_) => Class::SmeArrayIntDot,
+            Self::MortlachMulti2ZzZaFloatSm(_)
+            | Self::MortlachMulti4ZzZaFloatSm(_)
+            | Self::MortlachMulti2ZzZaFloatMm(_)
+            | Self::MortlachMulti4ZzZaFloatMm(_) => Class::SmeArrayFpMulAdd,
+            Self::MortlachMulti2ZzZaIntSm(_)
+            | Self::MortlachMulti4ZzZaIntSm(_)
+            | Self::MortlachMulti2ZzZaIntMm(_)
+            | Self::MortlachMulti4ZzZaIntMm(_) => Class::SmeArrayAddVectors,
+            Self::MortlachMulti2ZZaFloatMm(_)
+            | Self::MortlachMulti4ZZaFloatMm(_)
+            | Self::MortlachMulti2ZZaIntMm(_)
+            | Self::MortlachMulti4ZZaIntMm(_) => Class::SmeArrayAccumulate,
         }
     }
 }
@@ -1229,6 +1326,30 @@ pub(crate) enum Class {
     SveMultiFpUnary,
     /// SUNPK and UUNPK of one vector to two and of two to four.
     SveMultiUnpack,
+    /// SMLALL, SMLSLL, UMLALL, UMLSLL, USMLALL and SUMLALL of bytes into
+    /// ZA array vectors of words: one, two or four vectors by one, by as
+    /// many.
+    SmeArrayIntLongLong,
+    /// SMLAL, SMLSL, UMLAL and UMLSL of halfwords into ZA array vectors of
+    /// words.
+    SmeArrayIntLong,
+    /// FMLAL, FMLSL, BFMLAL and BFMLSL of half-precision and BFloat16
+    /// values into ZA array vectors of single-precision values.
+    SmeArrayFpLong,
+    /// FDOT and BFDOT of pairs into ZA array vectors of single-precision
+    /// values.
+    SmeArrayFpDot,
+    /// SDOT, UDOT, USDOT and SUDOT of bytes, and SDOT and UDOT of
+    /// halfwords, into ZA array vectors of words.
+    SmeArrayIntDot,
+    /// FMLA and FMLS of single-precision values into ZA array vectors.
+    SmeArrayFpMulAdd,
+    /// ADD and SUB of vectors into ZA array vectors of words: the sum or
+    /// difference replaces them.
+    SmeArrayAddVectors,
+    /// FADD, FSUB, ADD and SUB of vectors to ZA array vectors of
+    /// single-precision values or words.
+    SmeArrayAccumulate,
     /// FMOPA and FMOPS of single-precision and of half-precision values,
     /// BFMOPA and BFMOPS, into 32-bit tiles: the handler reads which from
     /// bits 24, 21 and 4.
@@ -1654,7 +1775,50 @@ impl Encoding {
             | Self::MortlachMulti4WideInt(_)
             | Self::MortlachMulti4ZZZip(_)
             | Self::MortlachMulti4ZZLongZip(_)
-            | Self::MortlachMulti4Frint(_) => Feature::Sme2,
+            | Self::MortlachMulti4Frint(_)
+            | Self::MortlachMulti2ZzZaMlaLongLongSm(_)
+            | Self::MortlachMulti1ZzZaMlaLongLongSm(_)
+            | Self::MortlachMulti2ZzZaFmaLongSm(_)
+            | Self::MortlachMulti2ZzZaMlaLongSm(_)
+            | Self::MortlachMulti1ZzZaFmaLongSm(_)
+            | Self::MortlachMulti1ZzZaMlaLongSm(_)
+            | Self::MortlachMulti2ZZaFpdotSm(_)
+            | Self::MortlachMulti2ZZa4wayDotSm(_)
+            | Self::MortlachMulti2ZZaMixedDotSm(_)
+            | Self::MortlachMulti2ZZa2wayDotSm(_)
+            | Self::MortlachMulti2ZzZaFloatSm(_)
+            | Self::MortlachMulti2ZzZaIntSm(_)
+            | Self::MortlachMulti4ZzZaMlaLongLongSm(_)
+            | Self::MortlachMulti4ZzZaFmaLongSm(_)
+            | Self::MortlachMulti4ZzZaMlaLongSm(_)
+            | Self::MortlachMulti4ZZaFpdotSm(_)
+            | Self::MortlachMulti4ZZa4wayDotSm(_)
+            | Self::MortlachMulti4ZZaMixedDotSm(_)
+            | Self::MortlachMulti4ZZa2wayDotSm(_)
+            | Self::MortlachMulti4ZzZaFloatSm(_)
+            | Self::MortlachMulti4ZzZaIntSm(_)
+            | Self::MortlachMulti2ZzZaMlaLongLongMm(_)
+            | Self::MortlachMulti2ZzZaFmaLongMm(_)
+            | Self::MortlachMulti2ZzZaMlaLongMm(_)
+            | Self::MortlachMulti2ZZaFpdotMm(_)
+            | Self::MortlachMulti2ZZa4wayDotMm(_)
+            | Self::MortlachMulti2ZZaMixedDotMm(_)
+            | Self::MortlachMulti2ZZa2wayDotMm(_)
+            | Self::MortlachMulti2ZzZaFloatMm(_)
+            | Self::MortlachMulti2ZzZaIntMm(_)
+            | Self::MortlachMulti2ZZaFloatMm(_)
+            | Self::MortlachMulti2ZZaIntMm(_)
+            | Self::MortlachMulti4ZzZaMlaLongLongMm(_)
+            | Self::MortlachMulti4ZzZaFmaLongMm(_)
+            | Self::MortlachMulti4ZzZaMlaLongMm(_)
+            | Self::MortlachMulti4ZZaFpdotMm(_)
+            | Self::MortlachMulti4ZZa4wayDotMm(_)
+            | Self::MortlachMulti4ZZaMixedDotMm(_)
+            | Self::MortlachMulti4ZZa2wayDotMm(_)
+            | Self::MortlachMulti4ZzZaFloatMm(_)
+            | Self::MortlachMulti4ZzZaIntMm(_)
+            | Self::MortlachMulti4ZZaFloatMm(_)
+            | Self::MortlachMulti4ZZaIntMm(_) => Feature::Sme2,
         }
     }
 }
