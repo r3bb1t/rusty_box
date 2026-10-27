@@ -9,8 +9,10 @@
 //! From DDI 0183F:
 //!
 //! - Register widths and reset values (Table 3-1). A reserved bit reads as
-//!   zero (Tables 3-4, 3-5, 3-10, 3-12, 3-13, 3-14, 3-18); `UARTRSR` bits
-//!   [7:4], unpredictable, read as zero too.
+//!   zero (Tables 3-4, 3-10, 3-12, 3-13, 3-14, 3-18). `UARTILPR` is 8 bits
+//!   wide (Table 3-1); Table 3-5 defines its bits [7:0] and says nothing of
+//!   the rest, which read as zero here. `UARTRSR` bits [7:4],
+//!   unpredictable, read as zero too.
 //! - Reception needs `UARTCR.UARTEN` and `UARTCR.RXE` (§3.3.8, Note). The
 //!   host line is flow-controlled, as a QEMU character backend is: while
 //!   the receiver is off, or its FIFO full, the host's bytes wait for it
@@ -30,10 +32,13 @@
 //! - `RXRIS` (§3.4.2, §3.3.9): with the FIFO enabled, set when the fill
 //!   level rises to the `UARTIFLS.RXIFLSEL` level and cleared once reads
 //!   take it below; with the FIFO disabled, set when the holding register
-//!   fills and cleared by a read. `UARTICR` clears it either way.
+//!   fills and cleared by a read. `UARTICR` clears it either way, and so
+//!   does emptying the FIFO by changing `FEN`, which leaves the fill level
+//!   below every trigger level.
 //! - `RTRIS` (§3.4.4, Table 3-15 note a): set when the FIFO is not empty
 //!   and nothing has arrived for 32 bit periods, and only while `RTIM` is
-//!   set; cleared when reads empty the FIFO, or by `UARTICR`.
+//!   set; cleared when reads empty the FIFO, or by `UARTICR`, and absent
+//!   once a change of `FEN` has emptied it.
 //! - The modem status interrupts (§3.4.1) are set by a change of their
 //!   line and cleared only by `UARTICR`.
 //!
@@ -357,12 +362,17 @@ impl Pl011 {
         c
     }
 
-    /// QEMU `pl011_reset_rx_fifo` and `pl011_reset_tx_fifo`.
+    /// QEMU `pl011_reset_rx_fifo` and `pl011_reset_tx_fifo`. The emptied
+    /// receive FIFO holds no `RTRIS`, which DDI 0183F §3.4.4 asserts only
+    /// while the FIFO is not empty, and no `RXRIS`, which §3.4.2 clears once
+    /// the fill level is below the trigger level (or the holding register is
+    /// empty); QEMU leaves both as they were.
     fn reset_fifos(&mut self) {
         self.read_count = 0;
         self.read_pos = 0;
         self.flags &= !(FLAG_RXFF | FLAG_TXFF);
         self.flags |= FLAG_RXFE | FLAG_TXFE;
+        self.int_level &= !(INT_RT | INT_RX);
     }
 
     /// QEMU `pl011_loopback_mdmctrl`: in loopback the modem control outputs
@@ -737,6 +747,30 @@ mod tests {
     }
 
     #[test]
+    fn emptying_the_fifo_through_fen_clears_the_receive_interrupts() {
+        // FIFO enabled, then disabled: two entries at the 1/8 level.
+        let mut uart = enabled();
+        write(&mut uart, LCR_H, LCR_FEN);
+        write(&mut uart, IFLS, 0);
+        write(&mut uart, IMSC, INT_RT | INT_RX);
+        assert!(uart.receive(1));
+        assert!(uart.receive(2));
+        assert_eq!(read(&mut uart, RIS) & (INT_RT | INT_RX), INT_RT | INT_RX);
+        write(&mut uart, LCR_H, 0);
+        assert_eq!(read(&mut uart, FR) & FLAG_RXFE, FLAG_RXFE);
+        assert_eq!(read(&mut uart, RIS) & INT_RT, 0, "an empty FIFO has no receive timeout");
+        assert_eq!(read(&mut uart, RIS) & INT_RX, 0, "an empty FIFO is below the trigger level");
+        assert!(!uart.irq());
+        // FIFO disabled, then enabled: the holding register.
+        assert!(uart.receive(3));
+        assert_eq!(read(&mut uart, RIS) & (INT_RT | INT_RX), INT_RT | INT_RX);
+        write(&mut uart, LCR_H, LCR_FEN);
+        assert_eq!(read(&mut uart, FR) & FLAG_RXFE, FLAG_RXFE);
+        assert_eq!(read(&mut uart, RIS) & (INT_RT | INT_RX), 0);
+        assert!(!uart.irq());
+    }
+
+    #[test]
     fn an_empty_fifo_reads_the_slot_at_the_read_position() {
         let mut uart = enabled();
         write(&mut uart, LCR_H, LCR_FEN);
@@ -754,28 +788,33 @@ mod tests {
     #[test]
     fn reserved_register_bits_read_as_zero() {
         let mut uart = Pl011::new();
-        for (n, width) in [
-            (8, ILPR_MASK),
-            (9, IBRD_MASK),
-            (10, FBRD_MASK),
-            (11, LCR_MASK),
-            (12, CR_MASK),
-            (13, IFLS_MASK),
-            (14, IMSC_MASK),
-            (18, DMACR_MASK),
+        // The bits DDI 0183F defines in each read/write register.
+        for (n, defined) in [
+            (8, 0xFF),     // UARTILPR: 8 bits (Table 3-1), ILPDVSR [7:0] (Table 3-5)
+            (9, 0xFFFF),   // UARTIBRD: 16 bits (Table 3-1), BAUD DIVINT [15:0] (Table 3-6)
+            (10, 0x3F),    // UARTFBRD: 6 bits (Table 3-1), BAUD DIVFRAC [5:0] (Table 3-7)
+            (11, 0xFF),    // UARTLCR_H: [15:8] reserved (Table 3-10)
+            (12, 0xFF87),  // UARTCR: [6:3] reserved (Table 3-12)
+            (13, 0x3F),    // UARTIFLS: [15:6] reserved (Table 3-13)
+            (14, 0x7FF),   // UARTIMSC: [15:11] reserved (Table 3-14)
+            (18, 0x7),     // UARTDMACR: [15:3] reserved (Table 3-18)
         ] {
             write(&mut uart, n, 0xFFFF_FFFF);
-            assert_eq!(read(&mut uart, n), width, "register {:#x}", n * 4);
+            assert_eq!(read(&mut uart, n), defined, "register {:#x}", n * 4);
         }
-        assert_eq!(CR_MASK, 0xFF87, "UARTCR bits [6:3] are reserved");
         write(&mut uart, ICR, 0xFFFF_FFFF);
         write(&mut uart, LCR_H, 0);
         write(&mut uart, LCR_H, LCR_BRK);
-        assert_eq!(read(&mut uart, DR), DR_BE);
-        assert_eq!(read(&mut uart, RSR), DR_BE >> 8, "UARTRSR keeps four bits");
-        assert_eq!(read(&mut uart, RIS) & !IMSC_MASK, 0);
+        // A break: data 0 with BE, bit 10 (Table 3-2); UARTRSR.BE is bit 2
+        // (Table 3-3), whose bits [7:4], unpredictable when read, read as
+        // zero here.
+        assert_eq!(read(&mut uart, DR), 0x400);
+        assert_eq!(read(&mut uart, RSR), 0x4, "UARTRSR keeps four bits");
+        // UARTRIS: [15:11] reserved (Table 3-15).
+        assert_eq!(read(&mut uart, RIS) & !0x7FF, 0);
         write(&mut uart, FR, 0);
-        assert_eq!(read(&mut uart, FR) & !FR_MASK, 0, "the flag register ignores writes");
+        // UARTFR: [15:9] reserved (Table 3-4).
+        assert_eq!(read(&mut uart, FR) & !0x1FF, 0, "the flag register ignores writes");
     }
 
     #[test]

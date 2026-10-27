@@ -608,6 +608,13 @@ choice is listed here with its evidence.
   follows the TRM; the reserved encodings 0b101–0b111 select the half-full
   level. Linux waits for the receive timeout (next entry) for anything
   shorter than the level, as on hardware.
+- **Emptying the PL011 FIFO through `FEN` clears its receive interrupts.**
+  A change of `UARTLCR_H.FEN` empties the receive FIFO (QEMU 11.1.2
+  `pl011_write`, `pl011_reset_rx_fifo`). An empty FIFO is below every
+  trigger level, where DDI 0183F §3.4.2 has `RXRIS` cleared, and §3.4.4
+  asserts `RTRIS` only while the FIFO is not empty. QEMU 11.1.2 leaves its
+  interrupt state as it was, so `RXRIS` stays set with nothing to read.
+  This model clears `RXRIS` and `RTRIS` with the FIFO.
 - **The PL011 raises the receive timeout interrupt.** DDI 0183F §3.4.4:
   `RTRIS` is set when the FIFO is not empty and nothing has arrived for 32
   bit periods, only while `RTIM` is set (note a to Table 3-15), and cleared
@@ -628,20 +635,25 @@ choice is listed here with its evidence.
   clears it while deasserted, on every `UARTCR` write in loopback. This
   model raises each on a change, in either direction, and leaves clearing
   to `UARTICR`.
-- **PL011 reserved bits read as zero.** DDI 0183F gives `UARTILPR`,
-  `UARTLCR_H`, `UARTIFLS`, `UARTIMSC` and `UARTDMACR` 8, 8, 6, 11 and 3 bits
-  (Table 3-1) and makes `UARTCR` bits [6:3] reserved (Table 3-12), each
-  "read as zero"; QEMU 11.1.2 stores what the guest wrote. This model keeps
-  the defined bits only.
+- **PL011 reserved bits read as zero.** DDI 0183F gives `UARTLCR_H`,
+  `UARTIFLS`, `UARTIMSC` and `UARTDMACR` 8, 6, 11 and 3 bits (Table 3-1)
+  and calls the bits above them reserved, "read as zero" (Tables 3-10,
+  3-13, 3-14 and 3-18), as it does `UARTCR` bits [6:3] (Table 3-12).
+  `UARTILPR` is 8 bits wide (Table 3-1), and Table 3-5 defines only its
+  bits [7:0], `ILPDVSR`, saying nothing of the rest. QEMU 11.1.2 stores
+  what the guest wrote. This model keeps the defined bits only, so the
+  rest of `UARTILPR` reads as zero too.
 - **PL011 transmission does not wait for `UARTEN` and `TXE`.** DDI 0183F
   §3.3.8 needs both to transmit; a character written while either is clear
   waits in the transmit FIFO, with `UARTFR.BUSY` set (Table 3-4). Like QEMU
   11.1.2 (`pl011_write_txdata`, which only logs it), this model transmits
-  it at once. Holding it would need the transmit FIFO in the snapshot, and
-  a kernel booted directly would then hang: Linux's `earlycon=pl011`
-  expects the firmware to have set the UART up, and its `pl011_putc` waits
-  for `BUSY` to clear after every character, which QEMU's direct boot,
-  copied here, leaves to no one.
+  it at once; in loopback that includes the receiver, so a character
+  written with `TXE` clear, while `UARTEN` and `RXE` are set, is received,
+  where hardware would send nothing. Holding it would need the transmit
+  FIFO in the snapshot, and a kernel booted directly would then hang:
+  Linux's `earlycon=pl011` expects the firmware to have set the UART up,
+  and its `pl011_putc` waits for `BUSY` to clear after every character,
+  which QEMU's direct boot, copied here, leaves to no one.
 
 ## Not implemented
 
