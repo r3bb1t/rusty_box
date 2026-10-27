@@ -41,11 +41,20 @@ impl Interleave {
         let pairs = elements / 2;
         match self {
             // result[2p+0] = op1[base+p], result[2p+1] = op2[base+p].
-            Self::Zip => Source { second: i % 2 == 1, index: part * pairs + i / 2 },
+            Self::Zip => Source {
+                second: i % 2 == 1,
+                index: part * pairs + i / 2,
+            },
             // result[p] = op1[2p+part], result[pairs+p] = op2[2p+part].
-            Self::Uzp => Source { second: i >= pairs, index: 2 * (i % pairs) + part },
+            Self::Uzp => Source {
+                second: i >= pairs,
+                index: 2 * (i % pairs) + part,
+            },
             // result[2p+0] = op1[2p+part], result[2p+1] = op2[2p+part].
-            Self::Trn => Source { second: i % 2 == 1, index: 2 * (i / 2) + part },
+            Self::Trn => Source {
+                second: i % 2 == 1,
+                index: 2 * (i / 2) + part,
+            },
         }
     }
 }
@@ -108,7 +117,13 @@ fn last_index(mask: &Pv, es: Esize, vl: VecLen, after: bool) -> usize {
 /// The element CLASTA (`after`) or CLASTB extracts, if any element is
 /// active.
 fn conditional_last_index(mask: &Pv, es: Esize, vl: VecLen, after: bool) -> Option<usize> {
-    last_active(mask, es, vl).map(|last| if after { (last + 1) % es.elements(vl) } else { last })
+    last_active(mask, es, vl).map(|last| {
+        if after {
+            (last + 1) % es.elements(vl)
+        } else {
+            last
+        }
+    })
 }
 
 /// The bytes of `es`-sized elements `e`, within a vector: `operand[e*:esize]`
@@ -144,7 +159,14 @@ impl Cpu {
             let mut result = Zv::ZERO;
             for i in 0..len {
                 let j = position + i;
-                result.set_byte(i, if j < len { operand1.byte(j) } else { operand2.byte(j - len) });
+                result.set_byte(
+                    i,
+                    if j < len {
+                        operand1.byte(j)
+                    } else {
+                        operand2.byte(j - len)
+                    },
+                );
             }
             result
         };
@@ -201,7 +223,11 @@ impl Cpu {
                     let idx = indexes.get(e, es);
                     if idx < table_elems as u64 {
                         let idx = idx as usize;
-                        let value = if idx < elements { bottom.get(idx, es) } else { top.get(idx - elements, es) };
+                        let value = if idx < elements {
+                            bottom.get(idx, es)
+                        } else {
+                            top.get(idx - elements, es)
+                        };
                         result.set(e, es, value);
                     } else if !extend {
                         result.set(e, es, 0);
@@ -217,7 +243,11 @@ impl Cpu {
                 }
                 (0b00 | 0b10, 0b100) => {
                     let from_v = bit(insn, 20);
-                    let src = if from_v { self.v[n as usize] as u64 } else { self.x_or_zr(n) };
+                    let src = if from_v {
+                        self.v[n as usize] as u64
+                    } else {
+                        self.x_or_zr(n)
+                    };
                     let vl = self.sve_check()?;
                     let dest = self.z(d, vl);
                     let mut result = Zv::ZERO;
@@ -275,7 +305,9 @@ impl Cpu {
         let es = Esize::from_size(bits(insn, 23, 22));
         let (n, d) = (bits(insn, 8, 5), bits(insn, 3, 0));
         let op = match bits(insn, 20, 16) {
-            0b10000 | 0b10001 => PredicatePermute::Unpack { high: bit(insn, 16) },
+            0b10000 | 0b10001 => PredicatePermute::Unpack {
+                high: bit(insn, 16),
+            },
             0b10100 => PredicatePermute::Reverse,
             0b00000..=0b01111 => match Interleave::from_opc(bits(insn, 12, 11)) {
                 Some(kind) => PredicatePermute::Interleave(kind),
@@ -321,7 +353,9 @@ impl Cpu {
         let es = Esize::from_size(bits(insn, 23, 22));
         let (m, n, d) = (bits(insn, 20, 16), bits(insn, 9, 5), bits(insn, 4, 0));
         let opc = bits(insn, 12, 10);
-        let Some(kind) = Interleave::from_opc(opc >> 1) else { return self.undefined(pc, insn) };
+        let Some(kind) = Interleave::from_opc(opc >> 1) else {
+            return self.undefined(pc, insn);
+        };
         let part = (opc & 1) as usize;
         let vl = self.sve_check()?;
         let operand1 = self.z(n, vl);
@@ -363,7 +397,9 @@ impl Cpu {
             (0b0100, false) => PredicatedPermute::ClastZ,
             (0b0101, false) => PredicatedPermute::ClastV,
             (0b1000, true) => PredicatedPermute::ClastR,
-            (0b0110, false) => PredicatedPermute::Splice { constructive: bit(insn, 16) },
+            (0b0110, false) => PredicatedPermute::Splice {
+                constructive: bit(insn, 16),
+            },
             (0b0111, false) if size == 0b00 && !bit(insn, 16) => PredicatedPermute::Revd,
             _ => return self.undefined(pc, insn),
         };
@@ -371,7 +407,11 @@ impl Cpu {
         let mask = self.p(g, vl);
         match op {
             PredicatedPermute::CopyV | PredicatedPermute::CopyR => {
-                let value = if op == PredicatedPermute::CopyR { self.x_or_sp(n) } else { self.v[n as usize] as u64 };
+                let value = if op == PredicatedPermute::CopyR {
+                    self.x_or_sp(n)
+                } else {
+                    self.v[n as usize] as u64
+                };
                 let mut result = self.z(d, vl);
                 for e in 0..es.elements(vl) {
                     if mask.active(e, es) {
@@ -443,7 +483,11 @@ impl Cpu {
             // last active element, then the second source's elements from
             // its lowest.
             PredicatedPermute::Splice { constructive } => {
-                let (s1, s2) = if constructive { (n, (n + 1) % 32) } else { (d, n) };
+                let (s1, s2) = if constructive {
+                    (n, (n + 1) % 32)
+                } else {
+                    (d, n)
+                };
                 let operand1 = self.z(s1, vl);
                 let operand2 = self.z(s2, vl);
                 let elements = es.elements(vl);
@@ -481,7 +525,12 @@ impl Cpu {
     /// of `Z<n>`, the rest of `Z<m>`.
     pub(crate) fn exec_sve_sel(&mut self, insn: u32) -> ExecResult {
         let es = Esize::from_size(bits(insn, 23, 22));
-        let (m, v, n, d) = (bits(insn, 20, 16), bits(insn, 13, 10), bits(insn, 9, 5), bits(insn, 4, 0));
+        let (m, v, n, d) = (
+            bits(insn, 20, 16),
+            bits(insn, 13, 10),
+            bits(insn, 9, 5),
+            bits(insn, 4, 0),
+        );
         let vl = self.sve_check()?;
         let mask = self.p(v, vl);
         let operand1 = self.z(n, vl);

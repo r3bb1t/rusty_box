@@ -95,7 +95,10 @@ pub(crate) const SMIDR_EL1: u64 = 0;
 /// one before), BRPs = 1 and WRPs = 1 (two of each, the architectural
 /// minimum), CTX_CMPs = 0, PMUVer = 0 (no PMU).
 pub(crate) const fn id_aa64dfr0(features: Features) -> u64 {
-    let debug = chain_level(features, &[Feature::Debugv8p1, Feature::Debugv8p2, Feature::Debugv8p4]);
+    let debug = chain_level(
+        features,
+        &[Feature::Debugv8p1, Feature::Debugv8p2, Feature::Debugv8p4],
+    );
     0x0000_0000_0010_1000 | (6 + debug)
 }
 

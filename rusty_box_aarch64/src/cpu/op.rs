@@ -71,15 +71,45 @@ pub(crate) enum Op {
     AddImm { sf: bool, rd: u8, rn: u8, imm: u64 },
     /// ADDS/SUBS (immediate): `AddWithCarry(Rn|SP, y, carry)`, with `y` the
     /// immediate (ADDS) or its complement (SUBS, carry in set).
-    AddsImm { sf: bool, rd: u8, rn: u8, carry: bool, y: u64 },
+    AddsImm {
+        sf: bool,
+        rd: u8,
+        rn: u8,
+        carry: bool,
+        y: u64,
+    },
     /// ADD/ADDS/SUB/SUBS (shifted register).
-    AddSubShift { sf: bool, sub: bool, flags: bool, rd: u8, rn: u8, rm: u8, shift: u8, amount: u8 },
+    AddSubShift {
+        sf: bool,
+        sub: bool,
+        flags: bool,
+        rd: u8,
+        rn: u8,
+        rm: u8,
+        shift: u8,
+        amount: u8,
+    },
     /// AND/ORR/EOR/ANDS (immediate), `opc` as encoded, with the
     /// `DecodeBitMasks` immediate.
-    LogImm { sf: bool, opc: u8, rd: u8, rn: u8, imm: u64 },
+    LogImm {
+        sf: bool,
+        opc: u8,
+        rd: u8,
+        rn: u8,
+        imm: u64,
+    },
     /// AND/BIC/ORR/ORN/EOR/EON/ANDS/BICS (shifted register), `opc` as
     /// encoded, `invert` its N bit.
-    LogShift { sf: bool, opc: u8, invert: bool, rd: u8, rn: u8, rm: u8, shift: u8, amount: u8 },
+    LogShift {
+        sf: bool,
+        opc: u8,
+        invert: bool,
+        rd: u8,
+        rn: u8,
+        rm: u8,
+        shift: u8,
+        amount: u8,
+    },
     /// MOVZ/MOVN: `Rd = value`, already sized.
     MovImm { rd: u8, value: u64 },
     /// MOVK: the 16 bits at `pos` replaced by `imm` (already shifted).
@@ -89,22 +119,68 @@ pub(crate) enum Op {
     /// ADRP: `Rd = (PC with bits 11:0 clear) + offset`.
     Adrp { rd: u8, offset: u64 },
     /// UBFM: `Rd = ROR(Rn, immr) & mask`, `mask` being `wmask & tmask`.
-    Ubfm { sf: bool, rd: u8, rn: u8, immr: u8, mask: u64 },
+    Ubfm {
+        sf: bool,
+        rd: u8,
+        rn: u8,
+        immr: u8,
+        mask: u64,
+    },
     /// SBFM: the UBFM bits, with the bits above `tmask` copies of bit
     /// `imms` of Rn; `tmask` is `Ones(tmask_bits)`.
-    Sbfm { sf: bool, rd: u8, rn: u8, immr: u8, imms: u8, tmask_bits: u8, wmask: u64 },
+    Sbfm {
+        sf: bool,
+        rd: u8,
+        rn: u8,
+        immr: u8,
+        imms: u8,
+        tmask_bits: u8,
+        wmask: u64,
+    },
     /// BFM: the UBFM bits inserted into Rd.
-    Bfm { sf: bool, rd: u8, rn: u8, immr: u8, tmask_bits: u8, wmask: u64 },
+    Bfm {
+        sf: bool,
+        rd: u8,
+        rn: u8,
+        immr: u8,
+        tmask_bits: u8,
+        wmask: u64,
+    },
     /// CSEL/CSINC/CSINV/CSNEG: `invert` is bit 30, `increment` bit 10.
-    CondSel { sf: bool, invert: bool, increment: bool, cond: u8, rd: u8, rn: u8, rm: u8 },
+    CondSel {
+        sf: bool,
+        invert: bool,
+        increment: bool,
+        cond: u8,
+        rd: u8,
+        rn: u8,
+        rm: u8,
+    },
     /// MADD/MSUB.
-    Madd { sf: bool, sub: bool, rd: u8, rn: u8, rm: u8, ra: u8 },
+    Madd {
+        sf: bool,
+        sub: bool,
+        rd: u8,
+        rn: u8,
+        rm: u8,
+        ra: u8,
+    },
     /// B.cond.
     BCond { cond: u8, offset: u64 },
     /// CBZ/CBNZ.
-    Cbz { sf: bool, nonzero: bool, rt: u8, offset: u64 },
+    Cbz {
+        sf: bool,
+        nonzero: bool,
+        rt: u8,
+        offset: u64,
+    },
     /// TBZ/TBNZ on bit `pos`.
-    Tbz { nonzero: bool, rt: u8, pos: u8, offset: u64 },
+    Tbz {
+        nonzero: bool,
+        rt: u8,
+        pos: u8,
+        offset: u64,
+    },
     /// B.
     B { offset: u64 },
     /// BL.
@@ -119,23 +195,78 @@ pub(crate) enum Op {
     Nop,
     /// LDR/LDRB/LDRH/LDRSB/LDRSH/LDRSW (immediate, any index) of a general
     /// register, `size` the log2 of the access.
-    LoadImm { size: u8, extend: Extend, index: Index, rt: u8, rn: u8, imm: u64 },
+    LoadImm {
+        size: u8,
+        extend: Extend,
+        index: Index,
+        rt: u8,
+        rn: u8,
+        imm: u64,
+    },
     /// STR/STRB/STRH (immediate, any index) of a general register.
-    StoreImm { size: u8, index: Index, rt: u8, rn: u8, imm: u64 },
+    StoreImm {
+        size: u8,
+        index: Index,
+        rt: u8,
+        rn: u8,
+        imm: u64,
+    },
     /// LDR... (register offset): the offset is `ExtendReg(Rm, option,
     /// shift)`.
-    LoadReg { size: u8, extend: Extend, option: u8, shift: u8, rt: u8, rn: u8, rm: u8 },
+    LoadReg {
+        size: u8,
+        extend: Extend,
+        option: u8,
+        shift: u8,
+        rt: u8,
+        rn: u8,
+        rm: u8,
+    },
     /// STR... (register offset).
-    StoreReg { size: u8, option: u8, shift: u8, rt: u8, rn: u8, rm: u8 },
+    StoreReg {
+        size: u8,
+        option: u8,
+        shift: u8,
+        rt: u8,
+        rn: u8,
+        rm: u8,
+    },
     /// LDP/LDNP of 32- or 64-bit general registers (`size` 2 or 3).
-    LoadPair { size: u8, index: Index, rt: u8, rt2: u8, rn: u8, imm: u64 },
+    LoadPair {
+        size: u8,
+        index: Index,
+        rt: u8,
+        rt2: u8,
+        rn: u8,
+        imm: u64,
+    },
     /// STP/STNP of 32- or 64-bit general registers.
-    StorePair { size: u8, index: Index, rt: u8, rt2: u8, rn: u8, imm: u64 },
+    StorePair {
+        size: u8,
+        index: Index,
+        rt: u8,
+        rt2: u8,
+        rn: u8,
+        imm: u64,
+    },
     /// FMUL/FDIV/FADD/FSUB/FMAX/FMIN/FMAXNM/FMINNM/FNMUL (scalar), of
     /// SIMD&FP registers.
-    FpDp2 { op: FpBinary, ty: FpType, rd: u8, rn: u8, rm: u8 },
+    FpDp2 {
+        op: FpBinary,
+        ty: FpType,
+        rd: u8,
+        rn: u8,
+        rm: u8,
+    },
     /// FMADD/FMSUB/FNMADD/FNMSUB, of SIMD&FP registers.
-    FpDp3 { form: FusedMulAdd, ty: FpType, rd: u8, rn: u8, rm: u8, ra: u8 },
+    FpDp3 {
+        form: FusedMulAdd,
+        ty: FpType,
+        rd: u8,
+        rn: u8,
+        rm: u8,
+        ra: u8,
+    },
     /// MRS Xt, CNTPCT_EL0 and MRS Xt, CNTVCT_EL0: the system counter read,
     /// executed by the System class handler from `word`.
     ReadCounter { word: u32 },
@@ -161,9 +292,20 @@ pub(crate) fn predecode(class: Class, word: u32) -> Op {
             let imm = u64::from(bits(word, 21, 10)) << if bit(word, 22) { 12 } else { 0 };
             let sub = bit(word, 30);
             if bit(word, 29) {
-                Op::AddsImm { sf, rd, rn, carry: sub, y: if sub { !imm } else { imm } }
+                Op::AddsImm {
+                    sf,
+                    rd,
+                    rn,
+                    carry: sub,
+                    y: if sub { !imm } else { imm },
+                }
             } else {
-                Op::AddImm { sf, rd, rn, imm: if sub { imm.wrapping_neg() } else { imm } }
+                Op::AddImm {
+                    sf,
+                    rd,
+                    rn,
+                    imm: if sub { imm.wrapping_neg() } else { imm },
+                }
             }
         }
         Class::AddSubShiftedRegister => {
@@ -188,8 +330,20 @@ pub(crate) fn predecode(class: Class, word: u32) -> Op {
             if !sf && n {
                 return generic;
             }
-            match decode_bit_masks(n, bits(word, 15, 10), bits(word, 21, 16), true, datasize(sf)) {
-                Some(masks) => Op::LogImm { sf, opc: bits(word, 30, 29) as u8, rd, rn, imm: masks.wmask },
+            match decode_bit_masks(
+                n,
+                bits(word, 15, 10),
+                bits(word, 21, 16),
+                true,
+                datasize(sf),
+            ) {
+                Some(masks) => Op::LogImm {
+                    sf,
+                    opc: bits(word, 30, 29) as u8,
+                    rd,
+                    rn,
+                    imm: masks.wmask,
+                },
                 None => generic,
             }
         }
@@ -218,17 +372,31 @@ pub(crate) fn predecode(class: Class, word: u32) -> Op {
             let pos = hw * 16;
             let imm = u64::from(bits(word, 20, 5)) << pos;
             match opc {
-                0 => Op::MovImm { rd, value: !imm & ones(datasize(sf)) },
+                0 => Op::MovImm {
+                    rd,
+                    value: !imm & ones(datasize(sf)),
+                },
                 2 => Op::MovImm { rd, value: imm },
-                _ => Op::Movk { sf, rd, pos: pos as u8, imm },
+                _ => Op::Movk {
+                    sf,
+                    rd,
+                    pos: pos as u8,
+                    imm,
+                },
             }
         }
         Class::PcRelAddressing => {
             let imm = (u64::from(bits(word, 23, 5)) << 2) | u64::from(bits(word, 30, 29));
             if bit(word, 31) {
-                Op::Adrp { rd, offset: sext(imm << 12, 33) }
+                Op::Adrp {
+                    rd,
+                    offset: sext(imm << 12, 33),
+                }
             } else {
-                Op::Adr { rd, offset: sext(imm, 21) }
+                Op::Adr {
+                    rd,
+                    offset: sext(imm, 21),
+                }
             }
         }
         Class::Bitfield => {
@@ -248,9 +416,30 @@ pub(crate) fn predecode(class: Class, word: u32) -> Op {
             // is Ones(((imms - immr) mod size) + 1).
             let tmask_bits = ((imms.wrapping_sub(immr) & (size - 1)) + 1) as u8;
             match opc {
-                0 => Op::Sbfm { sf, rd, rn, immr: immr as u8, imms: imms as u8, tmask_bits, wmask: masks.wmask },
-                1 => Op::Bfm { sf, rd, rn, immr: immr as u8, tmask_bits, wmask: masks.wmask },
-                _ => Op::Ubfm { sf, rd, rn, immr: immr as u8, mask: masks.wmask & masks.tmask },
+                0 => Op::Sbfm {
+                    sf,
+                    rd,
+                    rn,
+                    immr: immr as u8,
+                    imms: imms as u8,
+                    tmask_bits,
+                    wmask: masks.wmask,
+                },
+                1 => Op::Bfm {
+                    sf,
+                    rd,
+                    rn,
+                    immr: immr as u8,
+                    tmask_bits,
+                    wmask: masks.wmask,
+                },
+                _ => Op::Ubfm {
+                    sf,
+                    rd,
+                    rn,
+                    immr: immr as u8,
+                    mask: masks.wmask & masks.tmask,
+                },
             }
         }
         Class::ConditionalSelect => {
@@ -271,13 +460,23 @@ pub(crate) fn predecode(class: Class, word: u32) -> Op {
             if bits(word, 30, 29) != 0 || bits(word, 23, 21) != 0 {
                 return generic;
             }
-            Op::Madd { sf, sub: bit(word, 15), rd, rn, rm, ra: reg(word, 10) }
+            Op::Madd {
+                sf,
+                sub: bit(word, 15),
+                rd,
+                rn,
+                rm,
+                ra: reg(word, 10),
+            }
         }
         Class::ConditionalBranch => {
             if bit(word, 4) {
                 return generic;
             }
-            Op::BCond { cond: bits(word, 3, 0) as u8, offset: sext(u64::from(bits(word, 23, 5)) << 2, 21) }
+            Op::BCond {
+                cond: bits(word, 3, 0) as u8,
+                offset: sext(u64::from(bits(word, 23, 5)) << 2, 21),
+            }
         }
         Class::CompareAndBranch => Op::Cbz {
             sf,
@@ -320,7 +519,13 @@ pub(crate) fn predecode(class: Class, word: u32) -> Op {
             if bit(word, 26) {
                 return generic;
             }
-            single_immediate(word, size, Index::Offset, u64::from(bits(word, 21, 10)) << size).unwrap_or(generic)
+            single_immediate(
+                word,
+                size,
+                Index::Offset,
+                u64::from(bits(word, 21, 10)) << size,
+            )
+            .unwrap_or(generic)
         }
         Class::LoadStoreUnscaled | Class::LoadStoreIndexed => {
             let size = bits(word, 31, 30);
@@ -334,7 +539,8 @@ pub(crate) fn predecode(class: Class, word: u32) -> Op {
                 // LDTR/STTR: EL0 permissions.
                 _ => return generic,
             };
-            single_immediate(word, size, index, sext(u64::from(bits(word, 20, 12)), 9)).unwrap_or(generic)
+            single_immediate(word, size, index, sext(u64::from(bits(word, 20, 12)), 9))
+                .unwrap_or(generic)
         }
         Class::LoadStoreRegisterOffset => {
             let size = bits(word, 31, 30);
@@ -345,15 +551,48 @@ pub(crate) fn predecode(class: Class, word: u32) -> Op {
             let shift = if bit(word, 12) { size } else { 0 } as u8;
             let (rt, option) = (rd, option as u8);
             match bits(word, 23, 22) {
-                0 => Op::StoreReg { size: size as u8, option, shift, rt, rn, rm },
-                1 => Op::LoadReg { size: size as u8, extend: Extend::Zero, option, shift, rt, rn, rm },
-                2 if size < 3 => Op::LoadReg { size: size as u8, extend: Extend::Signed64, option, shift, rt, rn, rm },
-                3 if size < 2 => Op::LoadReg { size: size as u8, extend: Extend::Signed32, option, shift, rt, rn, rm },
+                0 => Op::StoreReg {
+                    size: size as u8,
+                    option,
+                    shift,
+                    rt,
+                    rn,
+                    rm,
+                },
+                1 => Op::LoadReg {
+                    size: size as u8,
+                    extend: Extend::Zero,
+                    option,
+                    shift,
+                    rt,
+                    rn,
+                    rm,
+                },
+                2 if size < 3 => Op::LoadReg {
+                    size: size as u8,
+                    extend: Extend::Signed64,
+                    option,
+                    shift,
+                    rt,
+                    rn,
+                    rm,
+                },
+                3 if size < 2 => Op::LoadReg {
+                    size: size as u8,
+                    extend: Extend::Signed32,
+                    option,
+                    shift,
+                    rt,
+                    rn,
+                    rm,
+                },
                 // PRFM, and LDRS* with no 32-bit form.
                 _ => generic,
             }
         }
-        Class::LoadStorePairOffset | Class::LoadStorePairIndexed | Class::LoadStoreNoAllocatePair => {
+        Class::LoadStorePairOffset
+        | Class::LoadStorePairIndexed
+        | Class::LoadStoreNoAllocatePair => {
             let size = match (bit(word, 26), bits(word, 31, 30)) {
                 (false, 0) => 2,
                 (false, 2) => 3,
@@ -368,9 +607,23 @@ pub(crate) fn predecode(class: Class, word: u32) -> Op {
             let imm = sext(u64::from(bits(word, 21, 15)), 7) << size;
             let (rt, rt2) = (rd, reg(word, 10));
             if bit(word, 22) {
-                Op::LoadPair { size, index, rt, rt2, rn, imm }
+                Op::LoadPair {
+                    size,
+                    index,
+                    rt,
+                    rt2,
+                    rn,
+                    imm,
+                }
             } else {
-                Op::StorePair { size, index, rt, rt2, rn, imm }
+                Op::StorePair {
+                    size,
+                    index,
+                    rt,
+                    rt2,
+                    rn,
+                    imm,
+                }
             }
         }
         Class::FpDataProcessing2Source => match (scalar_type(word), dp2_operation(word)) {
@@ -378,7 +631,14 @@ pub(crate) fn predecode(class: Class, word: u32) -> Op {
             _ => generic,
         },
         Class::FpDataProcessing3Source => match scalar_type(word) {
-            Some(ty) => Op::FpDp3 { form: dp3_form(word), ty, rd, rn, rm, ra: reg(word, 10) },
+            Some(ty) => Op::FpDp3 {
+                form: dp3_form(word),
+                ty,
+                rd,
+                rn,
+                rm,
+                ra: reg(word, 10),
+            },
             None => generic,
         },
         Class::System => {
@@ -591,10 +851,37 @@ pub(crate) fn predecode(class: Class, word: u32) -> Op {
 fn single_immediate(word: u32, size: u32, index: Index, imm: u64) -> Option<Op> {
     let (rt, rn, size8) = (reg(word, 0), reg(word, 5), size as u8);
     match bits(word, 23, 22) {
-        0 => Some(Op::StoreImm { size: size8, index, rt, rn, imm }),
-        1 => Some(Op::LoadImm { size: size8, extend: Extend::Zero, index, rt, rn, imm }),
-        2 if size < 3 => Some(Op::LoadImm { size: size8, extend: Extend::Signed64, index, rt, rn, imm }),
-        3 if size < 2 => Some(Op::LoadImm { size: size8, extend: Extend::Signed32, index, rt, rn, imm }),
+        0 => Some(Op::StoreImm {
+            size: size8,
+            index,
+            rt,
+            rn,
+            imm,
+        }),
+        1 => Some(Op::LoadImm {
+            size: size8,
+            extend: Extend::Zero,
+            index,
+            rt,
+            rn,
+            imm,
+        }),
+        2 if size < 3 => Some(Op::LoadImm {
+            size: size8,
+            extend: Extend::Signed64,
+            index,
+            rt,
+            rn,
+            imm,
+        }),
+        3 if size < 2 => Some(Op::LoadImm {
+            size: size8,
+            extend: Extend::Signed32,
+            index,
+            rt,
+            rn,
+            imm,
+        }),
         _ => None,
     }
 }
@@ -610,7 +897,11 @@ impl Op {
     /// trace when it executes).
     pub(crate) const fn ends_trace(self) -> bool {
         match self {
-            Self::B { .. } | Self::Bl { .. } | Self::Br { .. } | Self::Ret { .. } | Self::Blr { .. } => true,
+            Self::B { .. }
+            | Self::Bl { .. }
+            | Self::Br { .. }
+            | Self::Ret { .. }
+            | Self::Blr { .. } => true,
             Self::Class { class, word } => class_ends_trace(class, word),
             Self::AddImm { .. }
             | Self::AddsImm { .. }
@@ -939,14 +1230,34 @@ impl Cpu {
                 self.set_x_or_sp_sized(u32::from(rd), value, sf);
                 Ok(Flow::Next)
             }
-            Op::AddsImm { sf, rd, rn, carry, y } => {
+            Op::AddsImm {
+                sf,
+                rd,
+                rn,
+                carry,
+                y,
+            } => {
                 let r = add_with_carry(self.x_or_sp(u32::from(rn)), y, carry, sf);
                 self.set_flags(r);
                 self.set_x_or_zr_sized(u32::from(rd), r.value, sf);
                 Ok(Flow::Next)
             }
-            Op::AddSubShift { sf, sub, flags, rd, rn, rm, shift, amount } => {
-                let op2 = shift_reg(self.x_or_zr(u32::from(rm)), u32::from(shift), u32::from(amount), datasize(sf));
+            Op::AddSubShift {
+                sf,
+                sub,
+                flags,
+                rd,
+                rn,
+                rm,
+                shift,
+                amount,
+            } => {
+                let op2 = shift_reg(
+                    self.x_or_zr(u32::from(rm)),
+                    u32::from(shift),
+                    u32::from(amount),
+                    datasize(sf),
+                );
                 let op1 = self.x_or_zr(u32::from(rn));
                 let r = if sub {
                     add_with_carry(op1, !op2, true, sf)
@@ -959,7 +1270,13 @@ impl Cpu {
                 self.set_x_or_zr_sized(u32::from(rd), r.value, sf);
                 Ok(Flow::Next)
             }
-            Op::LogImm { sf, opc, rd, rn, imm } => {
+            Op::LogImm {
+                sf,
+                opc,
+                rd,
+                rn,
+                imm,
+            } => {
                 let op1 = self.x_or_zr(u32::from(rn));
                 let value = match opc {
                     0 | 3 => op1 & imm,
@@ -974,9 +1291,23 @@ impl Cpu {
                 }
                 Ok(Flow::Next)
             }
-            Op::LogShift { sf, opc, invert, rd, rn, rm, shift, amount } => {
+            Op::LogShift {
+                sf,
+                opc,
+                invert,
+                rd,
+                rn,
+                rm,
+                shift,
+                amount,
+            } => {
                 let size = datasize(sf);
-                let mut op2 = shift_reg(self.x_or_zr(u32::from(rm)), u32::from(shift), u32::from(amount), size);
+                let mut op2 = shift_reg(
+                    self.x_or_zr(u32::from(rm)),
+                    u32::from(shift),
+                    u32::from(amount),
+                    size,
+                );
                 if invert {
                     op2 = !op2 & ones(size);
                 }
@@ -1009,22 +1340,47 @@ impl Cpu {
                 self.set_x_or_zr(u32::from(rd), (pc & !0xFFF).wrapping_add(offset));
                 Ok(Flow::Next)
             }
-            Op::Ubfm { sf, rd, rn, immr, mask } => {
+            Op::Ubfm {
+                sf,
+                rd,
+                rn,
+                immr,
+                mask,
+            } => {
                 let size = datasize(sf);
                 let src = self.x_or_zr(u32::from(rn)) & ones(size);
                 self.set_x_or_zr(u32::from(rd), ror(src, u32::from(immr), size) & mask);
                 Ok(Flow::Next)
             }
-            Op::Sbfm { sf, rd, rn, immr, imms, tmask_bits, wmask } => {
+            Op::Sbfm {
+                sf,
+                rd,
+                rn,
+                immr,
+                imms,
+                tmask_bits,
+                wmask,
+            } => {
                 let size = datasize(sf);
                 let src = self.x_or_zr(u32::from(rn)) & ones(size);
                 let tmask = ones(u32::from(tmask_bits));
                 let bot = ror(src, u32::from(immr), size) & wmask;
-                let top = if (src >> imms) & 1 != 0 { ones(size) } else { 0 };
+                let top = if (src >> imms) & 1 != 0 {
+                    ones(size)
+                } else {
+                    0
+                };
                 self.set_x_or_zr(u32::from(rd), ((top & !tmask) | (bot & tmask)) & ones(size));
                 Ok(Flow::Next)
             }
-            Op::Bfm { sf, rd, rn, immr, tmask_bits, wmask } => {
+            Op::Bfm {
+                sf,
+                rd,
+                rn,
+                immr,
+                tmask_bits,
+                wmask,
+            } => {
                 let size = datasize(sf);
                 let src = self.x_or_zr(u32::from(rn)) & ones(size);
                 let dst = self.x_or_zr(u32::from(rd)) & ones(size);
@@ -1033,7 +1389,15 @@ impl Cpu {
                 self.set_x_or_zr(u32::from(rd), ((dst & !tmask) | (bot & tmask)) & ones(size));
                 Ok(Flow::Next)
             }
-            Op::CondSel { sf, invert, increment, cond, rd, rn, rm } => {
+            Op::CondSel {
+                sf,
+                invert,
+                increment,
+                cond,
+                rd,
+                rn,
+                rm,
+            } => {
                 let value = if self.condition_holds(u32::from(cond)) {
                     self.x_or_zr(u32::from(rn))
                 } else {
@@ -1048,10 +1412,23 @@ impl Cpu {
                 self.set_x_or_zr_sized(u32::from(rd), value, sf);
                 Ok(Flow::Next)
             }
-            Op::Madd { sf, sub, rd, rn, rm, ra } => {
-                let product = self.x_or_zr(u32::from(rn)).wrapping_mul(self.x_or_zr(u32::from(rm)));
+            Op::Madd {
+                sf,
+                sub,
+                rd,
+                rn,
+                rm,
+                ra,
+            } => {
+                let product = self
+                    .x_or_zr(u32::from(rn))
+                    .wrapping_mul(self.x_or_zr(u32::from(rm)));
                 let a = self.x_or_zr(u32::from(ra));
-                let value = if sub { a.wrapping_sub(product) } else { a.wrapping_add(product) };
+                let value = if sub {
+                    a.wrapping_sub(product)
+                } else {
+                    a.wrapping_add(product)
+                };
                 self.set_x_or_zr_sized(u32::from(rd), value, sf);
                 Ok(Flow::Next)
             }
@@ -1062,7 +1439,12 @@ impl Cpu {
                     Ok(Flow::Next)
                 }
             }
-            Op::Cbz { sf, nonzero, rt, offset } => {
+            Op::Cbz {
+                sf,
+                nonzero,
+                rt,
+                offset,
+            } => {
                 let value = self.x_or_zr(u32::from(rt)) & ones(datasize(sf));
                 if (value == 0) != nonzero {
                     Ok(Flow::Jump(pc.wrapping_add(offset)))
@@ -1070,7 +1452,12 @@ impl Cpu {
                     Ok(Flow::Next)
                 }
             }
-            Op::Tbz { nonzero, rt, pos, offset } => {
+            Op::Tbz {
+                nonzero,
+                rt,
+                pos,
+                offset,
+            } => {
                 let set = (self.x_or_zr(u32::from(rt)) >> pos) & 1 != 0;
                 if set == nonzero {
                     Ok(Flow::Jump(pc.wrapping_add(offset)))
@@ -1095,17 +1482,31 @@ impl Cpu {
                 Ok(Flow::Jump(target))
             }
             Op::Nop => Ok(Flow::Next),
-            Op::LoadImm { size, extend, index, rt, rn, imm } => {
+            Op::LoadImm {
+                size,
+                extend,
+                index,
+                rt,
+                rn,
+                imm,
+            } => {
                 let base = completed!(self.base_register(u32::from(rn)));
                 let (address, writeback) = indexed(base, imm, index);
-                let v = completed!(self.read_mem(bus, address, u32::from(size), DataAccess::NORMAL));
+                let v =
+                    completed!(self.read_mem(bus, address, u32::from(size), DataAccess::NORMAL));
                 self.set_x_or_zr(u32::from(rt), extended(v, size, extend));
                 if let Some(wb) = writeback {
                     self.set_x_or_sp(u32::from(rn), wb);
                 }
                 Ok(Flow::Next)
             }
-            Op::StoreImm { size, index, rt, rn, imm } => {
+            Op::StoreImm {
+                size,
+                index,
+                rt,
+                rn,
+                imm,
+            } => {
                 let base = completed!(self.base_register(u32::from(rn)));
                 let (address, writeback) = indexed(base, imm, index);
                 let v = self.x_or_zr(u32::from(rt));
@@ -1115,21 +1516,54 @@ impl Cpu {
                 }
                 Ok(Flow::Next)
             }
-            Op::LoadReg { size, extend, option, shift, rt, rn, rm } => {
-                let offset = super::dp::extend_reg(self.x_or_zr(u32::from(rm)), u32::from(option), u32::from(shift), 64);
+            Op::LoadReg {
+                size,
+                extend,
+                option,
+                shift,
+                rt,
+                rn,
+                rm,
+            } => {
+                let offset = super::dp::extend_reg(
+                    self.x_or_zr(u32::from(rm)),
+                    u32::from(option),
+                    u32::from(shift),
+                    64,
+                );
                 let address = completed!(self.base_register(u32::from(rn))).wrapping_add(offset);
-                let v = completed!(self.read_mem(bus, address, u32::from(size), DataAccess::NORMAL));
+                let v =
+                    completed!(self.read_mem(bus, address, u32::from(size), DataAccess::NORMAL));
                 self.set_x_or_zr(u32::from(rt), extended(v, size, extend));
                 Ok(Flow::Next)
             }
-            Op::StoreReg { size, option, shift, rt, rn, rm } => {
-                let offset = super::dp::extend_reg(self.x_or_zr(u32::from(rm)), u32::from(option), u32::from(shift), 64);
+            Op::StoreReg {
+                size,
+                option,
+                shift,
+                rt,
+                rn,
+                rm,
+            } => {
+                let offset = super::dp::extend_reg(
+                    self.x_or_zr(u32::from(rm)),
+                    u32::from(option),
+                    u32::from(shift),
+                    64,
+                );
                 let address = completed!(self.base_register(u32::from(rn))).wrapping_add(offset);
                 let v = self.x_or_zr(u32::from(rt));
                 completed!(self.write_mem(bus, address, u32::from(size), v, DataAccess::NORMAL));
                 Ok(Flow::Next)
             }
-            Op::LoadPair { size, index, rt, rt2, rn, imm } => {
+            Op::LoadPair {
+                size,
+                index,
+                rt,
+                rt2,
+                rn,
+                imm,
+            } => {
                 let base = completed!(self.base_register(u32::from(rn)));
                 let (address, writeback) = indexed(base, imm, index);
                 let scale = u32::from(size);
@@ -1151,7 +1585,14 @@ impl Cpu {
                 }
                 Ok(Flow::Next)
             }
-            Op::StorePair { size, index, rt, rt2, rn, imm } => {
+            Op::StorePair {
+                size,
+                index,
+                rt,
+                rt2,
+                rn,
+                imm,
+            } => {
                 let base = completed!(self.base_register(u32::from(rn)));
                 let (address, writeback) = indexed(base, imm, index);
                 let scale = u32::from(size);
@@ -1165,10 +1606,21 @@ impl Cpu {
                 }
                 Ok(Flow::Next)
             }
-            Op::FpDp2 { op, ty, rd, rn, rm } => {
-                Ok(completed!(self.fp_dp2(op, ty, u32::from(rd), u32::from(rn), u32::from(rm))))
-            }
-            Op::FpDp3 { form, ty, rd, rn, rm, ra } => {
+            Op::FpDp2 { op, ty, rd, rn, rm } => Ok(completed!(self.fp_dp2(
+                op,
+                ty,
+                u32::from(rd),
+                u32::from(rn),
+                u32::from(rm)
+            ))),
+            Op::FpDp3 {
+                form,
+                ty,
+                rd,
+                rn,
+                rm,
+                ra,
+            } => {
                 let regs = FpDp3Regs {
                     d: u32::from(rd),
                     n: u32::from(rn),

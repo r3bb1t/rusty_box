@@ -120,7 +120,9 @@ enum CpuView {
 }
 
 /// QEMU `gic_id_gicv2`, for offsets 0xFD0..=0xFFC.
-const PERIPHERAL_ID: [u8; 12] = [0x04, 0x00, 0x00, 0x00, 0x90, 0xB4, 0x2B, 0x00, 0x0D, 0xF0, 0x05, 0xB1];
+const PERIPHERAL_ID: [u8; 12] = [
+    0x04, 0x00, 0x00, 0x00, 0x90, 0xB4, 0x2B, 0x00, 0x0D, 0xF0, 0x05, 0xB1,
+];
 
 /// The GICv2m frame QEMU's `virt` places at 0x08020000: 64 SPIs from 80.
 pub const V2M_BASE_SPI: u32 = 80;
@@ -256,7 +258,14 @@ impl GicV2 {
         for word in self.apr.iter().chain(self.nsapr.iter()) {
             w.write_u32(*word)?;
         }
-        for bits in [&self.enabled, &self.pending, &self.active, &self.group1, &self.level, &self.edge] {
+        for bits in [
+            &self.enabled,
+            &self.pending,
+            &self.active,
+            &self.group1,
+            &self.level,
+            &self.edge,
+        ] {
             for word in bits.0 {
                 w.write_u32(word)?;
             }
@@ -471,9 +480,13 @@ impl GicV2 {
         let off = offset.get();
         match width {
             AccessWidth::Byte => u64::from(self.dist_readb(off)),
-            AccessWidth::Half => u64::from(self.dist_readb(off)) | u64::from(self.dist_readb(off + 1)) << 8,
+            AccessWidth::Half => {
+                u64::from(self.dist_readb(off)) | u64::from(self.dist_readb(off + 1)) << 8
+            }
             AccessWidth::Word => u64::from(self.dist_readl(off)),
-            AccessWidth::Dword => u64::from(self.dist_readl(off)) | u64::from(self.dist_readl(off + 4)) << 32,
+            AccessWidth::Dword => {
+                u64::from(self.dist_readl(off)) | u64::from(self.dist_readl(off + 4)) << 32
+            }
         }
     }
 
@@ -512,7 +525,11 @@ impl GicV2 {
             }
             0x300..=0x37F => Self::bank_irq(off, 0x300).map_or(0, |irq| self.active.byte(irq)),
             0x380..=0x3FF => Self::bank_irq(off, 0x380).map_or(0, |irq| self.active.byte(irq)),
-            0x400..=0x7FF => self.priority.get((off - 0x400) as usize).copied().unwrap_or(0),
+            0x400..=0x7FF => self
+                .priority
+                .get((off - 0x400) as usize)
+                .copied()
+                .unwrap_or(0),
             // GICD_ITARGETSR: RAZ/WI on a uniprocessor GIC.
             0x800..=0xBFF => 0,
             0xC00..=0xEFF => {
@@ -709,7 +726,11 @@ impl GicV2 {
     fn activate(&mut self, irq: usize) {
         let prio = self.group_priority(irq);
         let level = usize::from(prio >> (MIN_BPR + 1));
-        let bank = if self.group1.get(irq) { &mut self.nsapr } else { &mut self.apr };
+        let bank = if self.group1.get(irq) {
+            &mut self.nsapr
+        } else {
+            &mut self.apr
+        };
         bank[level / 32] |= 1 << (level % 32);
         self.running_priority = u16::from(prio);
         self.active.set(irq, true);
@@ -730,7 +751,11 @@ impl GicV2 {
     /// priority registers, which the nesting of acknowledgements and EOIs
     /// makes the running interrupt's.
     fn drop_prio(&mut self, group1: bool) {
-        let bank = if group1 { &mut self.nsapr } else { &mut self.apr };
+        let bank = if group1 {
+            &mut self.nsapr
+        } else {
+            &mut self.apr
+        };
         if let Some(word) = bank.iter_mut().find(|w| **w != 0) {
             *word &= *word - 1;
         }
@@ -801,7 +826,9 @@ impl GicV2 {
                 let high = self.cpu_read_register(off + 4);
                 u64::from(low) | u64::from(high) << 32
             }
-            AccessWidth::Byte | AccessWidth::Half | AccessWidth::Word => u64::from(self.cpu_read_register(off)),
+            AccessWidth::Byte | AccessWidth::Half | AccessWidth::Word => {
+                u64::from(self.cpu_read_register(off))
+            }
         }
     }
 
@@ -833,7 +860,9 @@ impl GicV2 {
                 self.cpu_write_register(off, value as u32);
                 self.cpu_write_register(off + 4, (value >> 32) as u32);
             }
-            AccessWidth::Byte | AccessWidth::Half | AccessWidth::Word => self.cpu_write_register(off, value as u32),
+            AccessWidth::Byte | AccessWidth::Half | AccessWidth::Word => {
+                self.cpu_write_register(off, value as u32)
+            }
         }
         self.update();
     }
@@ -870,7 +899,9 @@ impl GicV2 {
         match width {
             AccessWidth::Byte | AccessWidth::Half => 0,
             AccessWidth::Word => u64::from(Self::v2m_register(off)),
-            AccessWidth::Dword => u64::from(Self::v2m_register(off)) | u64::from(Self::v2m_register(off + 4)) << 32,
+            AccessWidth::Dword => {
+                u64::from(Self::v2m_register(off)) | u64::from(Self::v2m_register(off + 4)) << 32
+            }
         }
     }
 
@@ -957,12 +988,20 @@ mod tests {
     /// Make interrupt `irq` edge-triggered (its `GICD_ICFGR` byte).
     fn edge_triggered(g: &mut GicV2, irq: u32) {
         let byte = 2u8 << (2 * (irq % 4));
-        g.dist_write(RegOffset::new(0xC00 + u64::from(irq / 4)), AccessWidth::Byte, u64::from(byte));
+        g.dist_write(
+            RegOffset::new(0xC00 + u64::from(irq / 4)),
+            AccessWidth::Byte,
+            u64::from(byte),
+        );
     }
 
     /// Enable SPI `irq` at `priority`, and raise its line.
     fn raise(g: &mut GicV2, irq: u32, priority: u8) {
-        g.dist_write(RegOffset::new(0x400 + u64::from(irq)), AccessWidth::Byte, u64::from(priority));
+        g.dist_write(
+            RegOffset::new(0x400 + u64::from(irq)),
+            AccessWidth::Byte,
+            u64::from(priority),
+        );
         dist(g, 0x100 + u64::from(irq / 32) * 4, 1 << (irq % 32));
         g.set_line(irq, true);
     }
@@ -1004,9 +1043,17 @@ mod tests {
         let mut g = GicV2::new();
         assert_eq!(dist_get(&mut g, 0x100) & 0xFFFF, 0xFFFF);
         dist(&mut g, 0x180, 0xFFFF_FFFF);
-        assert_eq!(dist_get(&mut g, 0x100), 0xFFFF, "ICENABLER cannot disable an SGI");
+        assert_eq!(
+            dist_get(&mut g, 0x100),
+            0xFFFF,
+            "ICENABLER cannot disable an SGI"
+        );
         dist(&mut g, 0xC00, 0);
-        assert_eq!(dist_get(&mut g, 0xC00), 0xAAAA_AAAA, "nor make one level-sensitive");
+        assert_eq!(
+            dist_get(&mut g, 0xC00),
+            0xAAAA_AAAA,
+            "nor make one level-sensitive"
+        );
     }
 
     /// IHI 0048B §4.4.4: GICC_IAR.CPUID names an SGI's source only in a
@@ -1076,9 +1123,17 @@ mod tests {
         dist(&mut g, 0xF00, 1 << 16 | 2);
         assert_eq!(cpu_get(&mut g, IAR), 2, "a target list naming processor 0");
         dist(&mut g, 0xF00, (3 << 24) | 3);
-        assert_eq!(cpu_get(&mut g, HPPIR), 3, "the reserved filter names every processor");
+        assert_eq!(
+            cpu_get(&mut g, HPPIR),
+            3,
+            "the reserved filter names every processor"
+        );
         g.dist_write(RegOffset::new(0xF00), AccessWidth::Byte, 4);
-        assert_eq!(dist_get(&mut g, 0x200) & (1 << 4), 0, "GICD_SGIR is written only whole");
+        assert_eq!(
+            dist_get(&mut g, 0x200) & (1 << 4),
+            0,
+            "GICD_SGIR is written only whole"
+        );
     }
 
     #[test]
@@ -1144,10 +1199,18 @@ mod tests {
         cpu(&mut g, ABPR, 4);
         raise(&mut g, 40, 0x5F);
         assert_eq!(cpu_get(&mut g, IAR), 40);
-        assert_eq!(cpu_get(&mut g, RPR), 0x50, "ABPR 4 means binary point 3: bits [7:4]");
+        assert_eq!(
+            cpu_get(&mut g, RPR),
+            0x50,
+            "ABPR 4 means binary point 3: bits [7:4]"
+        );
         // Preemption level 0x50 >> 1 = 40: bit 8 of the second register.
         assert_eq!(cpu_get(&mut g, NSAPR0 + 4), 1 << 8);
-        assert_eq!(cpu_get(&mut g, APR0 + 4), 0, "Group 1 levels are in GICC_NSAPRn");
+        assert_eq!(
+            cpu_get(&mut g, APR0 + 4),
+            0,
+            "Group 1 levels are in GICC_NSAPRn"
+        );
         cpu(&mut g, EOIR, 40);
         cpu(&mut g, CTLR, 3 | GICC_CTLR_ACK_CTL | GICC_CTLR_CBPR);
         g.set_line(40, false);
@@ -1241,7 +1304,11 @@ mod tests {
         let mut g = enabled();
         dist(&mut g, 0x304, 1 << 8);
         cpu(&mut g, EOIR, 40);
-        assert_eq!(dist_get(&mut g, 0x304), 1 << 8, "nothing was running, so EOI does nothing");
+        assert_eq!(
+            dist_get(&mut g, 0x304),
+            1 << 8,
+            "nothing was running, so EOI does nothing"
+        );
         cpu(&mut g, DIR, 40);
         assert_eq!(dist_get(&mut g, 0x304), 1 << 8, "DIR needs EOImode");
         cpu(&mut g, CTLR, 3 | GICC_CTLR_EOIMODE);
@@ -1318,9 +1385,19 @@ mod tests {
         assert_eq!(pair, 40 << 32, "GICC_BPR, then GICC_IAR acknowledges");
         g.cpu_write(RegOffset::new(EOIR), AccessWidth::Dword, 40);
         assert_eq!(cpu_get(&mut g, RPR), 0xFF);
-        g.dist_write(RegOffset::new(0x400 + 40), AccessWidth::Dword, 0x0000_0099_0000_0077);
-        assert_eq!(g.dist_read(RegOffset::new(0x400 + 40), AccessWidth::Byte), 0x77);
-        assert_eq!(g.dist_read(RegOffset::new(0x400 + 44), AccessWidth::Byte), 0x99);
+        g.dist_write(
+            RegOffset::new(0x400 + 40),
+            AccessWidth::Dword,
+            0x0000_0099_0000_0077,
+        );
+        assert_eq!(
+            g.dist_read(RegOffset::new(0x400 + 40), AccessWidth::Byte),
+            0x77
+        );
+        assert_eq!(
+            g.dist_read(RegOffset::new(0x400 + 44), AccessWidth::Byte),
+            0x99
+        );
     }
 
     #[test]
@@ -1334,8 +1411,14 @@ mod tests {
         assert!(!g.irq_out(), "a byte write is ignored");
         g.v2m_write(RegOffset::new(V2M_MSI_SETSPI_NS), AccessWidth::Half, 80);
         assert_eq!(cpu_get(&mut g, IAR), 80);
-        assert_eq!(g.v2m_read(RegOffset::new(V2M_MSI_TYPER), AccessWidth::Byte), 0);
-        assert_eq!(g.v2m_read(RegOffset::new(V2M_MSI_TYPER), AccessWidth::Word), u64::from((80u32 << 16) | 64));
+        assert_eq!(
+            g.v2m_read(RegOffset::new(V2M_MSI_TYPER), AccessWidth::Byte),
+            0
+        );
+        assert_eq!(
+            g.v2m_read(RegOffset::new(V2M_MSI_TYPER), AccessWidth::Word),
+            u64::from((80u32 << 16) | 64)
+        );
     }
 
     #[test]
@@ -1350,7 +1433,10 @@ mod tests {
         let mut restored = GicV2::new();
         let mut source: &[u8] = &image;
         restored.restore(&mut source).expect("restore");
-        assert!(source.is_empty(), "the restore consumed exactly what the save wrote");
+        assert!(
+            source.is_empty(),
+            "the restore consumed exactly what the save wrote"
+        );
         assert_eq!(cpu_get(&mut restored, RPR), 0);
         cpu(&mut restored, EOIR, 3);
         assert_eq!(cpu_get(&mut restored, IAR), 40);

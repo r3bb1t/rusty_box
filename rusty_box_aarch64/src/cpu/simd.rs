@@ -288,7 +288,11 @@ impl Cpu {
             1 => {
                 for e in 0..elements {
                     let i = 2 * e + part;
-                    let v = if i < elements { elem(n, i, esize) } else { elem(m, i - elements, esize) };
+                    let v = if i < elements {
+                        elem(n, i, esize)
+                    } else {
+                        elem(m, i - elements, esize)
+                    };
                     set_elem(&mut r, e, esize, v);
                 }
             }
@@ -345,19 +349,31 @@ mod tests {
     #[test]
     fn fmov_immediates_expand_to_their_float_values() {
         // fmov s0, #1.0 -> imm8 0x70; fmov d0, #-2.0 -> imm8 0x80
-        assert_eq!(f32::from_bits(vfp_expand_imm(0x70, FpType::Single) as u32), 1.0);
+        assert_eq!(
+            f32::from_bits(vfp_expand_imm(0x70, FpType::Single) as u32),
+            1.0
+        );
         assert_eq!(f64::from_bits(vfp_expand_imm(0x80, FpType::Double)), -2.0);
         assert_eq!(f64::from_bits(vfp_expand_imm(0x70, FpType::Double)), 1.0);
         // fmov h0, #1.0 and #-31.0 (imm8 0x70 and 0xBF), GNU as.
         assert_eq!(vfp_expand_imm(0x70, FpType::Half), 0x3C00);
         assert_eq!(vfp_expand_imm(0xBF, FpType::Half), 0xCFC0);
         // The largest and smallest single-precision magnitudes, 31.0 and 0.125.
-        assert_eq!(f32::from_bits(vfp_expand_imm(0x3F, FpType::Single) as u32), 31.0);
-        assert_eq!(f32::from_bits(vfp_expand_imm(0x40, FpType::Single) as u32), 0.125);
+        assert_eq!(
+            f32::from_bits(vfp_expand_imm(0x3F, FpType::Single) as u32),
+            31.0
+        );
+        assert_eq!(
+            f32::from_bits(vfp_expand_imm(0x40, FpType::Single) as u32),
+            0.125
+        );
     }
 
     #[test]
     fn movi_byte_mask_form_expands_each_bit_to_a_byte() {
-        assert_eq!(adv_simd_expand_imm(true, 0b1110, 0b1000_0001), 0xFF00_0000_0000_00FF);
+        assert_eq!(
+            adv_simd_expand_imm(true, 0b1110, 0b1000_0001),
+            0xFF00_0000_0000_00FF
+        );
     }
 }

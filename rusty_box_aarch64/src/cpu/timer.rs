@@ -50,7 +50,8 @@ impl Cpu {
     /// The system counter at the tick `icount`: non-decreasing in `icount`.
     #[inline]
     pub(crate) fn counter_at(&self, icount: u64) -> Count {
-        let value = u128::from(icount) * u128::from(self.imp.counter_hz.get()) / u128::from(self.ips.get());
+        let value =
+            u128::from(icount) * u128::from(self.imp.counter_hz.get()) / u128::from(self.ips.get());
         Count(u64::try_from(value).unwrap_or(u64::MAX))
     }
 
@@ -82,7 +83,11 @@ impl Cpu {
     /// `CNTx_CTL_EL0` as read: `ISTATUS` reports the condition, whatever
     /// `IMASK` says.
     pub(crate) fn timer_ctl_read(&self, ctl: u64, cval: u64) -> u64 {
-        let status = if self.condition_met(ctl, cval) { CTL_ISTATUS } else { 0 };
+        let status = if self.condition_met(ctl, cval) {
+            CTL_ISTATUS
+        } else {
+            0
+        };
         (ctl & (CTL_ENABLE | CTL_IMASK)) | status
     }
 
@@ -95,7 +100,9 @@ impl Cpu {
     /// The `CVAL` a write of `value` to `CNTx_TVAL_EL0` sets: the count plus
     /// the low word of `value`, sign-extended.
     pub(crate) fn timer_cval_from_tval(&self, value: u64) -> u64 {
-        self.counter().0.wrapping_add(value as u32 as i32 as i64 as u64)
+        self.counter()
+            .0
+            .wrapping_add(value as u32 as i32 as i64 as u64)
     }
 
     /// Both timer outputs now.
@@ -173,7 +180,10 @@ mod tests {
         c.sys.cntv_cval_el0 = 5;
         assert_eq!(c.next_timer_deadline(), None);
         c.icount = 5;
-        assert_eq!(c.timer_ctl_read(c.sys.cntv_ctl_el0, 5) & CTL_ISTATUS, CTL_ISTATUS);
+        assert_eq!(
+            c.timer_ctl_read(c.sys.cntv_ctl_el0, 5) & CTL_ISTATUS,
+            CTL_ISTATUS
+        );
         assert!(!c.timer_lines().virtual_);
     }
 

@@ -59,105 +59,129 @@ mod ldst;
 mod reserved;
 mod simd_dp;
 mod sme;
-mod sve;
 #[cfg(test)]
 #[path = "../../../tests/unit/spec.rs"]
 pub(crate) mod spec;
+mod sve;
 
 use crate::cpu::exec::bits;
 pub(crate) use crate::cpu::features::Feature;
 
 use asimd::{
-    Asimdall, Asimddiff, Asimdelem, Asimdext, Asimdimm, Asimdins, Asimdmisc, Asimdmiscfp16, Asimdperm, Asimdsame,
-    Asimdsame2, Asimdsamefp16, Asimdshf, Asimdtbl,
+    Asimdall, Asimddiff, Asimdelem, Asimdext, Asimdimm, Asimdins, Asimdmisc, Asimdmiscfp16,
+    Asimdperm, Asimdsame, Asimdsame2, Asimdsamefp16, Asimdshf, Asimdtbl,
 };
 use asisd::{
-    Asisddiff, Asisdelem, Asisdmisc, Asisdmiscfp16, Asisdone, Asisdpair, Asisdsame, Asisdsame2, Asisdsamefp16, Asisdshf,
+    Asisddiff, Asisdelem, Asisdmisc, Asisdmiscfp16, Asisdone, Asisdpair, Asisdsame, Asisdsame2,
+    Asisdsamefp16, Asisdshf,
 };
 use atomic::{Comswap, Comswappr, LdapstlUnscaled, Memop};
 use control::{
-    Barriers, BranchImm, BranchReg, Compbranch, Condbranch, Exception, Hints, Pstate, Systeminstrs, Systeminstrswithreg, Systemmove,
-    Testbranch,
+    Barriers, BranchImm, BranchReg, Compbranch, Condbranch, Exception, Hints, Pstate, Systeminstrs,
+    Systeminstrswithreg, Systemmove, Testbranch,
 };
 use crypto::{Cryptoaes, Cryptosha2, Cryptosha3};
 use dpimm::{AddsubImm, Bitfield, Extract, LogImm, Movewide, Pcreladdr};
-use dpreg::{AddsubCarry, AddsubExt, AddsubShift, CondcmpImm, CondcmpReg, Condsel, Dp1src, Dp2src, Dp3src, LogShift, Rmif, Setf};
-use float::{Float2fix, Float2int, Floatccmp, Floatcmp, Floatdp1, Floatdp2, Floatdp3, Floatimm, Floatsel};
+use dpreg::{
+    AddsubCarry, AddsubExt, AddsubShift, CondcmpImm, CondcmpReg, Condsel, Dp1src, Dp2src, Dp3src,
+    LogShift, Rmif, Setf,
+};
+use float::{
+    Float2fix, Float2int, Floatccmp, Floatcmp, Floatdp1, Floatdp2, Floatdp3, Floatimm, Floatsel,
+};
 use ldst::{
-    Asisdlse, Asisdlsep, Asisdlso, Asisdlsop, LdstImmpost, LdstImmpre, LdstPac, LdstPos, LdstRegoff, LdstUnpriv,
-    LdstUnscaled, Ldstexclp, Ldstexclr, LdstnapairOffs, LdstpairOff, LdstpairPost, LdstpairPre, Ldstord, Loadlit,
+    Asisdlse, Asisdlsep, Asisdlso, Asisdlsop, LdstImmpost, LdstImmpre, LdstPac, LdstPos,
+    LdstRegoff, LdstUnpriv, LdstUnscaled, Ldstexclp, Ldstexclr, LdstnapairOffs, Ldstord,
+    LdstpairOff, LdstpairPost, LdstpairPre, Loadlit,
 };
 use reserved::PermUndef;
 use sme::{
-    MortlachAddhv, MortlachB16f32Prod, MortlachContigLoad, MortlachContigQload, MortlachContigQstore,
-    MortlachContigStore, MortlachCtxtLdst, MortlachExtractPred, MortlachExtractZt, MortlachF16f32Prod,
-    MortlachF32f32Prod, MortlachI8i32Prod, MortlachInsertPred, MortlachInsertZt, MortlachMulti2ClampInt,
-    MortlachMulti2CldCldntSiCtg, MortlachMulti2CldCldntSiNctg, MortlachMulti2CldCldntSsCtg,
-    MortlachMulti2CldCldntSsNctg, MortlachMulti2CstCstntSiCtg, MortlachMulti2CstCstntSiNctg,
-    MortlachMulti2CstCstntSsCtg, MortlachMulti2CstCstntSsNctg, MortlachMulti2Fclamp, MortlachMulti2FpintCvrt,
-    MortlachMulti2Frint, MortlachMulti2IntfpCvrt, MortlachMulti2NarrowFpCvrt, MortlachMulti2NarrowIntCvrt,
+    MortlachAddhv, MortlachB16f32Prod, MortlachBini32Prod, MortlachContigLoad, MortlachContigQload,
+    MortlachContigQstore, MortlachContigStore, MortlachCtxtLdst, MortlachExpand1dst,
+    MortlachExpand2dstCtg, MortlachExpand4dstCtg, MortlachExtractPred, MortlachExtractZt,
+    MortlachF16f32Prod, MortlachF32f32Prod, MortlachI16i32Prod, MortlachI8i32Prod,
+    MortlachInsertPred, MortlachInsertZt, MortlachMulti1FmaLongIdx, MortlachMulti1MlaLongIdx,
+    MortlachMulti1MlaLongLongIdxS, MortlachMulti1ZzZaFmaLongSm, MortlachMulti1ZzZaMlaLongLongSm,
+    MortlachMulti1ZzZaMlaLongSm, MortlachMulti2ClampInt, MortlachMulti2CldCldntSiCtg,
+    MortlachMulti2CldCldntSiNctg, MortlachMulti2CldCldntSsCtg, MortlachMulti2CldCldntSsNctg,
+    MortlachMulti2CstCstntSiCtg, MortlachMulti2CstCstntSiNctg, MortlachMulti2CstCstntSsCtg,
+    MortlachMulti2CstCstntSsNctg, MortlachMulti2ExtractCtg, MortlachMulti2Fclamp,
+    MortlachMulti2FmaLongIdx, MortlachMulti2FpintCvrt, MortlachMulti2Frint,
+    MortlachMulti2InsertCtg, MortlachMulti2IntfpCvrt, MortlachMulti2MlaLongIdx,
+    MortlachMulti2MlaLongLongIdxS, MortlachMulti2NarrowFpCvrt, MortlachMulti2NarrowIntCvrt,
     MortlachMulti2Qrshr, MortlachMulti2SelectInt, MortlachMulti2WideInt, MortlachMulti2ZZAddSm,
-    MortlachMulti2ZZFminmaxMm, MortlachMulti2ZZFminmaxSm, MortlachMulti2ZZLongZip, MortlachMulti2ZZMinmaxMm,
-    MortlachMulti2ZZMinmaxSm, MortlachMulti2ZZShiftMm, MortlachMulti2ZZShiftSm, MortlachMulti2ZZSqdmulhMm,
-    MortlachMulti2ZZSqdmulhSm, MortlachMulti2ZZZip, MortlachMulti4ClampInt, MortlachMulti4CldCldntSiCtg,
-    MortlachMulti4CldCldntSiNctg, MortlachMulti4CldCldntSsCtg, MortlachMulti4CldCldntSsNctg,
-    MortlachMulti4CstCstntSiCtg, MortlachMulti4CstCstntSiNctg, MortlachMulti4CstCstntSsCtg,
-    MortlachMulti4CstCstntSsNctg, MortlachMulti4Fclamp, MortlachMulti4FpintCvrt, MortlachMulti4Frint,
-    MortlachMulti4IntfpCvrt, MortlachMulti4NarrowIntCvrt, MortlachMulti4Qrshr, MortlachMulti4SelectInt,
-    MortlachMulti4WideInt, MortlachMulti4ZZAddSm, MortlachMulti4ZZFminmaxMm, MortlachMulti4ZZFminmaxSm,
-    MortlachMulti4ZZLongZip, MortlachMulti4ZZMinmaxMm, MortlachMulti4ZZMinmaxSm, MortlachMulti4ZZShiftMm,
-    MortlachMulti4ZZShiftSm, MortlachMulti4ZZSqdmulhMm, MortlachMulti4ZZSqdmulhSm, MortlachMulti4ZZZip,
-    MortlachMulti1ZzZaFmaLongSm, MortlachMulti1ZzZaMlaLongLongSm, MortlachMulti1ZzZaMlaLongSm,
-    MortlachMulti2ZZa2wayDotMm, MortlachMulti2ZZa2wayDotSm, MortlachMulti2ZZa4wayDotMm, MortlachMulti2ZZa4wayDotSm,
-    MortlachMulti2ZZaFloatMm, MortlachMulti2ZZaFpdotMm, MortlachMulti2ZZaFpdotSm, MortlachMulti2ZZaIntMm,
-    MortlachMulti2ZZaMixedDotMm, MortlachMulti2ZZaMixedDotSm, MortlachMulti2ZzZaFloatMm, MortlachMulti2ZzZaFloatSm,
-    MortlachMulti2ZzZaFmaLongMm, MortlachMulti2ZzZaFmaLongSm, MortlachMulti2ZzZaIntMm, MortlachMulti2ZzZaIntSm,
-    MortlachMulti2ZzZaMlaLongLongMm, MortlachMulti2ZzZaMlaLongLongSm, MortlachMulti2ZzZaMlaLongMm,
-    MortlachMulti2ZzZaMlaLongSm, MortlachMulti4ZZa2wayDotMm, MortlachMulti4ZZa2wayDotSm, MortlachMulti4ZZa4wayDotMm,
-    MortlachMulti4ZZa4wayDotSm, MortlachMulti4ZZaFloatMm, MortlachMulti4ZZaFpdotMm, MortlachMulti4ZZaFpdotSm,
-    MortlachMulti4ZZaIntMm, MortlachMulti4ZZaMixedDotMm, MortlachMulti4ZZaMixedDotSm, MortlachMulti4ZzZaFloatMm,
-    MortlachMulti4ZzZaFloatSm, MortlachMulti4ZzZaFmaLongMm, MortlachMulti4ZzZaFmaLongSm, MortlachMulti4ZzZaIntMm,
+    MortlachMulti2ZZFminmaxMm, MortlachMulti2ZZFminmaxSm, MortlachMulti2ZZLongZip,
+    MortlachMulti2ZZMinmaxMm, MortlachMulti2ZZMinmaxSm, MortlachMulti2ZZShiftMm,
+    MortlachMulti2ZZShiftSm, MortlachMulti2ZZSqdmulhMm, MortlachMulti2ZZSqdmulhSm,
+    MortlachMulti2ZZZip, MortlachMulti2ZZa2wayDotMm, MortlachMulti2ZZa2wayDotSm,
+    MortlachMulti2ZZa4wayDotMm, MortlachMulti2ZZa4wayDotSm, MortlachMulti2ZZaFloatMm,
+    MortlachMulti2ZZaFpdotMm, MortlachMulti2ZZaFpdotSm, MortlachMulti2ZZaIntMm,
+    MortlachMulti2ZZaMixedDotMm, MortlachMulti2ZZaMixedDotSm, MortlachMulti2ZaExtractCtg,
+    MortlachMulti2ZaInsertCtg, MortlachMulti2ZzZaFloatMm, MortlachMulti2ZzZaFloatSm,
+    MortlachMulti2ZzZaFmaLongMm, MortlachMulti2ZzZaFmaLongSm, MortlachMulti2ZzZaIntMm,
+    MortlachMulti2ZzZaIntSm, MortlachMulti2ZzZaMlaLongLongMm, MortlachMulti2ZzZaMlaLongLongSm,
+    MortlachMulti2ZzZaMlaLongMm, MortlachMulti2ZzZaMlaLongSm, MortlachMulti2ZzaIdxS,
+    MortlachMulti4ClampInt, MortlachMulti4CldCldntSiCtg, MortlachMulti4CldCldntSiNctg,
+    MortlachMulti4CldCldntSsCtg, MortlachMulti4CldCldntSsNctg, MortlachMulti4CstCstntSiCtg,
+    MortlachMulti4CstCstntSiNctg, MortlachMulti4CstCstntSsCtg, MortlachMulti4CstCstntSsNctg,
+    MortlachMulti4ExtractCtg, MortlachMulti4Fclamp, MortlachMulti4FmaLongIdx,
+    MortlachMulti4FpintCvrt, MortlachMulti4Frint, MortlachMulti4InsertCtg, MortlachMulti4IntfpCvrt,
+    MortlachMulti4MlaLongIdx, MortlachMulti4MlaLongLongIdxS, MortlachMulti4NarrowIntCvrt,
+    MortlachMulti4Qrshr, MortlachMulti4SelectInt, MortlachMulti4WideInt, MortlachMulti4ZZAddSm,
+    MortlachMulti4ZZFminmaxMm, MortlachMulti4ZZFminmaxSm, MortlachMulti4ZZLongZip,
+    MortlachMulti4ZZMinmaxMm, MortlachMulti4ZZMinmaxSm, MortlachMulti4ZZShiftMm,
+    MortlachMulti4ZZShiftSm, MortlachMulti4ZZSqdmulhMm, MortlachMulti4ZZSqdmulhSm,
+    MortlachMulti4ZZZip, MortlachMulti4ZZa2wayDotMm, MortlachMulti4ZZa2wayDotSm,
+    MortlachMulti4ZZa4wayDotMm, MortlachMulti4ZZa4wayDotSm, MortlachMulti4ZZaFloatMm,
+    MortlachMulti4ZZaFpdotMm, MortlachMulti4ZZaFpdotSm, MortlachMulti4ZZaIntMm,
+    MortlachMulti4ZZaMixedDotMm, MortlachMulti4ZZaMixedDotSm, MortlachMulti4ZaExtractCtg,
+    MortlachMulti4ZaInsertCtg, MortlachMulti4ZzZaFloatMm, MortlachMulti4ZzZaFloatSm,
+    MortlachMulti4ZzZaFmaLongMm, MortlachMulti4ZzZaFmaLongSm, MortlachMulti4ZzZaIntMm,
     MortlachMulti4ZzZaIntSm, MortlachMulti4ZzZaMlaLongLongMm, MortlachMulti4ZzZaMlaLongLongSm,
-    MortlachMulti4ZzZaMlaLongMm, MortlachMulti4ZzZaMlaLongSm, MortlachZero, MortlachZeroZt, MortlachZtLdst,
-    MortlachMulti1FmaLongIdx, MortlachMulti1MlaLongIdx, MortlachMulti1MlaLongLongIdxS, MortlachMulti2FmaLongIdx,
-    MortlachMulti2MlaLongIdx, MortlachMulti2MlaLongLongIdxS, MortlachMulti2ZzaIdxS, MortlachMulti4FmaLongIdx,
-    MortlachMulti4MlaLongIdx, MortlachMulti4MlaLongLongIdxS, MortlachMulti4ZzaIdxS, MortlachBini32Prod,
-    MortlachExpand1dst, MortlachExpand2dstCtg, MortlachExpand4dstCtg, MortlachI16i32Prod, MortlachMulti2ExtractCtg,
-    MortlachMulti2InsertCtg, MortlachMulti2ZaExtractCtg, MortlachMulti2ZaInsertCtg, MortlachMulti4ExtractCtg,
-    MortlachMulti4InsertCtg, MortlachMulti4ZaExtractCtg, MortlachMulti4ZaInsertCtg,
+    MortlachMulti4ZzZaMlaLongMm, MortlachMulti4ZzZaMlaLongSm, MortlachMulti4ZzaIdxS, MortlachZero,
+    MortlachZeroZt, MortlachZtLdst,
 };
 use sve::{
-    SveFp2opIPZds, SveFp2opPPd, SveFp2opPZdA, SveFp2opPZdB0, SveFp2opPZdB1, SveFp2opPZdC, SveFp2opPZdD, SveFp2opPZds,
-    SveFp2opUZd, SveFp3opPPd, SveFp3opPZdsA, SveFp3opPZdsB, SveFp3opUZd, SveFpFastRed, SveFpFcadd, SveFpFcmla,
-    SveFpFcmlaByIndexedElem, SveFpFcvt2, SveFpFdot, SveFpFdotByIndexedElem, SveFpFmaByIndexedElem, SveFpFmaLong,
-    SveFpFmaLongByIndexedElem, SveFpFmulByIndexedElem, SveFpPairwise, SveIntArithImm0, SveIntArithImm1, SveIntArithImm2, SveIntArithSvl, SveIntArithVl, SveIntBinConsArit0, SveIntBinConsLog,
-    SveIntBinConsMisc0D, SveIntBinConsShiftA, SveIntBinConsShiftB, SveIntBinPredArit0, SveIntBinPredArit1,
-    SveIntBinPredArit2, SveIntBinPredDiv, SveIntBinPredLog, SveIntBinPredShift0, SveIntBinPredShift1,
-    SveIntBinPredShift2, SveIntBreak, SveIntBrkn, SveIntBrkp, SveIntCmp0, SveIntCmp1, SveIntCount, SveIntCountR,
-    SveIntCountRSat, SveIntCountV, SveIntCountVSat, SveIntCountvlv0, SveIntCountvlv1, SveIntCterm, SveIntDupFpimm,
-    SveIntDupFpimmPred, SveIntDupImm, SveIntDupImmPred, SveIntDupMaskImm, SveIntIndexIi, SveIntIndexIr, SveIntIndexRi,
-    SveIntIndexRr, SveIntLogImm, SveIntMladdsubVvvPred, SveIntMlasVvvPred, SveIntMovprfxPred, SveIntMulB,
-    SveIntCtrToMask, SveIntPcountPn, SveIntPcountPred, SveIntPnPtrue, SveIntWhileRrPair, SveIntWhileRrPn, SveIntPermBinPermPp, SveIntPermBinPermZz, SveIntPermClastRz, SveIntPermClastVz,
-    SveIntPermClastZz, SveIntPermCpyR, SveIntPermCpyV, SveIntPermDupI, SveIntPermDupR, SveIntPermExtractI,
-    SveIntPermInsrs, SveIntPermInsrv, SveIntPermLastR, SveIntPermLastV, SveIntPermPunpk, SveIntPermRev,
-    SveIntPermRevd, SveIntPermReverseP, SveIntPermReverseZ, SveIntPermSplice, SveIntPermTbl, SveIntPermTbl3src,
-    SveIntPermUnpk, SveIntPfalse, SveIntPfirst, SveIntPnext, SveIntPredDup, SveIntPredLog, SveIntPredPatternA,
-    SveIntPredPatternB, SveIntPtest, SveIntPtrue, SveIntReadSvlA, SveIntReadVlA, SveIntReduce0, SveIntReduce1,
-    SveIntReduce2, SveIntRotateImm, SveIntScmpVi, SveIntSelVvv, SveIntSqdmulh, SveIntTernLog, SveIntUcmpVi,
-    SveIntUnPredArit0, SveIntUnPredArit1, SveIntWhileRr, SveIntWhilenc, SveIntxAba, SveIntxAbaLong,
+    SveFp2opIPZds, SveFp2opPPd, SveFp2opPZdA, SveFp2opPZdB0, SveFp2opPZdB1, SveFp2opPZdC,
+    SveFp2opPZdD, SveFp2opPZds, SveFp2opUZd, SveFp3opPPd, SveFp3opPZdsA, SveFp3opPZdsB,
+    SveFp3opUZd, SveFpClamp, SveFpFastRed, SveFpFcadd, SveFpFcmla, SveFpFcmlaByIndexedElem,
+    SveFpFcvt2, SveFpFdot, SveFpFdotByIndexedElem, SveFpFmaByIndexedElem, SveFpFmaLong,
+    SveFpFmaLongByIndexedElem, SveFpFmulByIndexedElem, SveFpPairwise, SveIntArithImm0,
+    SveIntArithImm1, SveIntArithImm2, SveIntArithSvl, SveIntArithVl, SveIntBinConsArit0,
+    SveIntBinConsLog, SveIntBinConsMisc0D, SveIntBinConsShiftA, SveIntBinConsShiftB,
+    SveIntBinPredArit0, SveIntBinPredArit1, SveIntBinPredArit2, SveIntBinPredDiv, SveIntBinPredLog,
+    SveIntBinPredShift0, SveIntBinPredShift1, SveIntBinPredShift2, SveIntBreak, SveIntBrkn,
+    SveIntBrkp, SveIntCmp0, SveIntCmp1, SveIntCount, SveIntCountR, SveIntCountRSat, SveIntCountV,
+    SveIntCountVSat, SveIntCountvlv0, SveIntCountvlv1, SveIntCterm, SveIntCtrToMask,
+    SveIntDupFpimm, SveIntDupFpimmPred, SveIntDupImm, SveIntDupImmPred, SveIntDupMaskImm,
+    SveIntIndexIi, SveIntIndexIr, SveIntIndexRi, SveIntIndexRr, SveIntLogImm,
+    SveIntMladdsubVvvPred, SveIntMlasVvvPred, SveIntMovprfxPred, SveIntMulB, SveIntPcountPn,
+    SveIntPcountPred, SveIntPermBinPermPp, SveIntPermBinPermZz, SveIntPermClastRz,
+    SveIntPermClastVz, SveIntPermClastZz, SveIntPermCpyR, SveIntPermCpyV, SveIntPermDupI,
+    SveIntPermDupR, SveIntPermExtractI, SveIntPermInsrs, SveIntPermInsrv, SveIntPermLastR,
+    SveIntPermLastV, SveIntPermPunpk, SveIntPermRev, SveIntPermRevd, SveIntPermReverseP,
+    SveIntPermReverseZ, SveIntPermSplice, SveIntPermTbl, SveIntPermTbl3src, SveIntPermUnpk,
+    SveIntPfalse, SveIntPfirst, SveIntPnPtrue, SveIntPnext, SveIntPredDup, SveIntPredLog,
+    SveIntPredPatternA, SveIntPredPatternB, SveIntPtest, SveIntPtrue, SveIntReadSvlA,
+    SveIntReadVlA, SveIntReduce0, SveIntReduce1, SveIntReduce2, SveIntRotateImm, SveIntScmpVi,
+    SveIntSelVvv, SveIntSqdmulh, SveIntTernLog, SveIntUcmpVi, SveIntUnPredArit0, SveIntUnPredArit1,
+    SveIntWhileRr, SveIntWhileRrPair, SveIntWhileRrPn, SveIntWhilenc, SveIntxAba, SveIntxAbaLong,
     SveIntxAccumulateLongPairs, SveIntxAdcLong, SveIntxArithBinaryPairs, SveIntxArithNarrow,
-    SveIntxBinPredShiftSatRound, SveIntxCadd, SveIntxCdot, SveIntxCdotByIndexedElem, SveIntxClamp, SveIntxClong,
-    SveIntxCmla, SveIntxCmlaByIndexedElem, SveIntxConsArithLong, SveIntxConsArithWide, SveIntxConsMulLong,
-    SveIntxDot, SveIntxDotByIndexedElem, SveIntxEorx, SveIntxExtractNarrow, SveIntxMixedDot,
-    SveIntxMixedDotByIndexedElem, SveIntxMlaByIndexedElem, SveIntxMlaLongByIndexedElem, SveIntxMlalLong,
-    SveIntxMulByIndexedElem, SveIntxMulLongByIndexedElem, SveIntxPermExtractI, SveIntxPermSplice,
-    SveIntxPredArithBinary, SveIntxPredArithBinarySat, SveIntxPredArithUnary, SveIntxQdmlaLongByIndexedElem,
-    SveIntxQdmlalLong, SveIntxQdmlalbt, SveIntxQdmulLongByIndexedElem, SveIntxQdmulhByIndexedElem,
-    SveIntxQrdcmlaByIndexedElem, SveIntxQrdmlah, SveIntxQrdmlahByIndexedElem, SveIntxShiftInsert,
-    SveIntxShiftLong, SveIntxShiftNarrow, SveIntxSra, SveMem32bFill, SveMem32bPfill, SveMemCldSi, SveMemCldSs, SveMemCldntSi, SveMemCldntSs, SveMemCstSi, SveMemCstSs,
-    SveMemCstntSi, SveMemCstntSs, SveMemEldSi, SveMemEldSs, SveMemEstSi, SveMemEstSs, SveMemLdDup, SveMemLdqrSi,
-    SveMemLdqrSs, SveMemPrfmSi, SveMemPrfmSs, SveMemPspill, SveMemSpill, SveFpClamp, SveIntxDot2,
-    SveIntxDot2ByIndexedElem, SveIntxMultiExtractNarrow, SveIntxMultiShiftNarrow,
+    SveIntxBinPredShiftSatRound, SveIntxCadd, SveIntxCdot, SveIntxCdotByIndexedElem, SveIntxClamp,
+    SveIntxClong, SveIntxCmla, SveIntxCmlaByIndexedElem, SveIntxConsArithLong,
+    SveIntxConsArithWide, SveIntxConsMulLong, SveIntxDot, SveIntxDot2, SveIntxDot2ByIndexedElem,
+    SveIntxDotByIndexedElem, SveIntxEorx, SveIntxExtractNarrow, SveIntxMixedDot,
+    SveIntxMixedDotByIndexedElem, SveIntxMlaByIndexedElem, SveIntxMlaLongByIndexedElem,
+    SveIntxMlalLong, SveIntxMulByIndexedElem, SveIntxMulLongByIndexedElem,
+    SveIntxMultiExtractNarrow, SveIntxMultiShiftNarrow, SveIntxPermExtractI, SveIntxPermSplice,
+    SveIntxPredArithBinary, SveIntxPredArithBinarySat, SveIntxPredArithUnary,
+    SveIntxQdmlaLongByIndexedElem, SveIntxQdmlalLong, SveIntxQdmlalbt,
+    SveIntxQdmulLongByIndexedElem, SveIntxQdmulhByIndexedElem, SveIntxQrdcmlaByIndexedElem,
+    SveIntxQrdmlah, SveIntxQrdmlahByIndexedElem, SveIntxShiftInsert, SveIntxShiftLong,
+    SveIntxShiftNarrow, SveIntxSra, SveMem32bFill, SveMem32bPfill, SveMemCldSi, SveMemCldSs,
+    SveMemCldntSi, SveMemCldntSs, SveMemCstSi, SveMemCstSs, SveMemCstntSi, SveMemCstntSs,
+    SveMemEldSi, SveMemEldSs, SveMemEstSi, SveMemEstSs, SveMemLdDup, SveMemLdqrSi, SveMemLdqrSs,
+    SveMemPrfmSi, SveMemPrfmSs, SveMemPspill, SveMemSpill,
 };
 
 /// An A64 encoding this processor implements, by its Arm class and Arm
@@ -716,19 +740,28 @@ impl Encoding {
             | Self::SveIntBinPredArit2(_)
             | Self::SveIntBinPredDiv(_)
             | Self::SveIntBinPredLog(_) => Class::SveIntBinaryPredicated,
-            Self::SveIntReduce0(_) | Self::SveIntReduce1(_) | Self::SveIntReduce2(_) => Class::SveIntReduction,
+            Self::SveIntReduce0(_) | Self::SveIntReduce1(_) | Self::SveIntReduce2(_) => {
+                Class::SveIntReduction
+            }
             Self::SveIntMovprfxPred(_) | Self::SveIntBinConsMisc0D(_) => Class::SveMovprfx,
-            Self::SveIntBinPredShift0(_) | Self::SveIntBinPredShift1(_) | Self::SveIntBinPredShift2(_) => {
-                Class::SveShiftPredicated
-            }
+            Self::SveIntBinPredShift0(_)
+            | Self::SveIntBinPredShift1(_)
+            | Self::SveIntBinPredShift2(_) => Class::SveShiftPredicated,
             Self::SveIntUnPredArit0(_) | Self::SveIntUnPredArit1(_) => Class::SveIntUnaryPredicated,
-            Self::SveIntMlasVvvPred(_) | Self::SveIntMladdsubVvvPred(_) => Class::SveIntMulAddPredicated,
-            Self::SveIntBinConsArit0(_) => Class::SveIntAddSubUnpredicated,
-            Self::SveIntBinConsLog(_) | Self::SveIntRotateImm(_) | Self::SveIntTernLog(_) => Class::SveBitwiseUnpredicated,
-            Self::SveIntBinConsShiftA(_) | Self::SveIntBinConsShiftB(_) => Class::SveShiftUnpredicated,
-            Self::SveIntIndexIi(_) | Self::SveIntIndexRi(_) | Self::SveIntIndexIr(_) | Self::SveIntIndexRr(_) => {
-                Class::SveIndex
+            Self::SveIntMlasVvvPred(_) | Self::SveIntMladdsubVvvPred(_) => {
+                Class::SveIntMulAddPredicated
             }
+            Self::SveIntBinConsArit0(_) => Class::SveIntAddSubUnpredicated,
+            Self::SveIntBinConsLog(_) | Self::SveIntRotateImm(_) | Self::SveIntTernLog(_) => {
+                Class::SveBitwiseUnpredicated
+            }
+            Self::SveIntBinConsShiftA(_) | Self::SveIntBinConsShiftB(_) => {
+                Class::SveShiftUnpredicated
+            }
+            Self::SveIntIndexIi(_)
+            | Self::SveIntIndexRi(_)
+            | Self::SveIntIndexIr(_)
+            | Self::SveIntIndexRr(_) => Class::SveIndex,
             Self::SveIntArithVl(_) => Class::AddVectorLength,
             Self::SveIntReadVlA(_) => Class::ReadVectorLength,
             Self::SveIntMulB(_) | Self::SveIntSqdmulh(_) => Class::SveIntMulUnpredicated,
@@ -748,9 +781,9 @@ impl Encoding {
             | Self::SveIntPermUnpk(_)
             | Self::SveIntPermInsrv(_)
             | Self::SveIntPermReverseZ(_) => Class::SvePermuteUnpredicated,
-            Self::SveIntPermBinPermPp(_) | Self::SveIntPermPunpk(_) | Self::SveIntPermReverseP(_) => {
-                Class::SvePermutePredicate
-            }
+            Self::SveIntPermBinPermPp(_)
+            | Self::SveIntPermPunpk(_)
+            | Self::SveIntPermReverseP(_) => Class::SvePermutePredicate,
             Self::SveIntPermBinPermZz(_) => Class::SvePermuteElements,
             Self::SveIntPermCpyV(_)
             | Self::SveIntPermLastV(_)
@@ -764,9 +797,10 @@ impl Encoding {
             | Self::SveIntPermClastRz(_)
             | Self::SveIntPermRevd(_) => Class::SvePermutePredicated,
             Self::SveIntSelVvv(_) => Class::SveSelect,
-            Self::SveIntCmp0(_) | Self::SveIntCmp1(_) | Self::SveIntUcmpVi(_) | Self::SveIntScmpVi(_) => {
-                Class::SveIntCompare
-            }
+            Self::SveIntCmp0(_)
+            | Self::SveIntCmp1(_)
+            | Self::SveIntUcmpVi(_)
+            | Self::SveIntScmpVi(_) => Class::SveIntCompare,
             Self::SveIntPredLog(_) => Class::SvePredicateLogical,
             Self::SveIntBrkp(_) | Self::SveIntBreak(_) | Self::SveIntBrkn(_) => Class::SveBreak,
             Self::SveIntPtest(_)
@@ -809,19 +843,21 @@ impl Encoding {
             | Self::SveIntxMulLongByIndexedElem(_)
             | Self::SveIntxQdmulLongByIndexedElem(_)
             | Self::SveIntxConsMulLong(_) => Class::SveIntxMulLong,
-            Self::SveIntxConsArithLong(_) | Self::SveIntxConsArithWide(_) | Self::SveIntxClong(_) => {
-                Class::SveIntxLongArithmetic
-            }
+            Self::SveIntxConsArithLong(_)
+            | Self::SveIntxConsArithWide(_)
+            | Self::SveIntxClong(_) => Class::SveIntxLongArithmetic,
             Self::SveIntxEorx(_) => Class::SveIntxEorInterleaved,
             Self::SveIntxShiftLong(_) => Class::SveIntxShiftLong,
             Self::SveIntxAbaLong(_) | Self::SveIntxAba(_) => Class::SveIntxAbsDiffAccumulate,
             Self::SveIntxAdcLong(_) => Class::SveIntxCarryLong,
             Self::SveIntxCadd(_) => Class::SveIntxComplexAdd,
             Self::SveIntxSra(_) | Self::SveIntxShiftInsert(_) => Class::SveIntxShiftAccumulate,
-            Self::SveIntxShiftNarrow(_) | Self::SveIntxExtractNarrow(_) | Self::SveIntxArithNarrow(_) => {
-                Class::SveIntxNarrow
+            Self::SveIntxShiftNarrow(_)
+            | Self::SveIntxExtractNarrow(_)
+            | Self::SveIntxArithNarrow(_) => Class::SveIntxNarrow,
+            Self::SveIntxMultiShiftNarrow(_) | Self::SveIntxMultiExtractNarrow(_) => {
+                Class::SveIntxNarrowPair
             }
-            Self::SveIntxMultiShiftNarrow(_) | Self::SveIntxMultiExtractNarrow(_) => Class::SveIntxNarrowPair,
             Self::SveIntxQrdmlah(_)
             | Self::SveIntxMlaByIndexedElem(_)
             | Self::SveIntxQrdmlahByIndexedElem(_)
@@ -831,7 +867,9 @@ impl Encoding {
             | Self::SveIntxPredArithBinary(_)
             | Self::SveIntxArithBinaryPairs(_)
             | Self::SveIntxPredArithBinarySat(_) => Class::SveIntxBinaryPredicated,
-            Self::SveIntxPredArithUnary(_) | Self::SveIntxAccumulateLongPairs(_) => Class::SveIntxUnaryPredicated,
+            Self::SveIntxPredArithUnary(_) | Self::SveIntxAccumulateLongPairs(_) => {
+                Class::SveIntxUnaryPredicated
+            }
             Self::SveIntxClamp(_) => Class::SveIntxClamp,
             Self::SveIntxDot2(_) | Self::SveIntxDot2ByIndexedElem(_) => Class::SveIntxDot,
             Self::SveFp2opPZds(_) | Self::SveFp2opIPZds(_) => Class::SveFpArithmeticPredicated,
@@ -847,30 +885,35 @@ impl Encoding {
             Self::SveFp3opPZdsA(_) | Self::SveFp3opPZdsB(_) => Class::SveFpMulAdd,
             Self::SveFpFmaByIndexedElem(_) | Self::SveFpFmulByIndexedElem(_) => Class::SveFpIndexed,
             Self::SveFpClamp(_) => Class::SveFpClamp,
-            Self::SveFpFcmla(_) | Self::SveFpFcadd(_) | Self::SveFpFcmlaByIndexedElem(_) => Class::SveFpComplex,
+            Self::SveFpFcmla(_) | Self::SveFpFcadd(_) | Self::SveFpFcmlaByIndexedElem(_) => {
+                Class::SveFpComplex
+            }
             Self::SveFpPairwise(_) => Class::SveFpPairwise,
             Self::SveFpFcvt2(_) => Class::SveFpConvertOdd,
             Self::SveFpFdotByIndexedElem(_)
             | Self::SveFpFmaLongByIndexedElem(_)
             | Self::SveFpFdot(_)
             | Self::SveFpFmaLong(_) => Class::SveFpWidening,
-            Self::SveMem32bPfill(_) | Self::SveMem32bFill(_) | Self::SveMemPspill(_) | Self::SveMemSpill(_) => {
-                Class::SveFillSpill
-            }
+            Self::SveMem32bPfill(_)
+            | Self::SveMem32bFill(_)
+            | Self::SveMemPspill(_)
+            | Self::SveMemSpill(_) => Class::SveFillSpill,
             Self::SveMemPrfmSi(_) | Self::SveMemPrfmSs(_) => Class::SvePrefetch,
             Self::SveMemLdDup(_) => Class::SveLoadBroadcast,
             Self::SveMemLdqrSs(_) | Self::SveMemLdqrSi(_) => Class::SveLoadBroadcastQuadword,
             Self::SveMemCldSs(_) | Self::SveMemCldSi(_) => Class::SveLoadContiguous,
-            Self::SveMemCldntSs(_) | Self::SveMemEldSs(_) | Self::SveMemCldntSi(_) | Self::SveMemEldSi(_) => {
-                Class::SveLoadStructures
-            }
+            Self::SveMemCldntSs(_)
+            | Self::SveMemEldSs(_)
+            | Self::SveMemCldntSi(_)
+            | Self::SveMemEldSi(_) => Class::SveLoadStructures,
             Self::SveMemCstSs(_) | Self::SveMemCstSi(_) => Class::SveStoreContiguous,
-            Self::SveMemCstntSs(_) | Self::SveMemEstSs(_) | Self::SveMemCstntSi(_) | Self::SveMemEstSi(_) => {
-                Class::SveStoreStructures
-            }
-            Self::MortlachF32f32Prod(_) | Self::MortlachB16f32Prod(_) | Self::MortlachF16f32Prod(_) => {
-                Class::SmeFpOuterProduct
-            }
+            Self::SveMemCstntSs(_)
+            | Self::SveMemEstSs(_)
+            | Self::SveMemCstntSi(_)
+            | Self::SveMemEstSi(_) => Class::SveStoreStructures,
+            Self::MortlachF32f32Prod(_)
+            | Self::MortlachB16f32Prod(_)
+            | Self::MortlachF16f32Prod(_) => Class::SmeFpOuterProduct,
             Self::MortlachI8i32Prod(_) => Class::SmeIntOuterProduct,
             Self::MortlachInsertPred(_) => Class::SmeMoveToSlice,
             Self::MortlachExtractPred(_) => Class::SmeMoveFromSlice,
@@ -901,7 +944,9 @@ impl Encoding {
             // never enters.
             Self::MortlachExtractZt(_) | Self::MortlachInsertZt(_) => Class::Undefined,
             Self::MortlachZtLdst(_) => Class::SmeFillSpillZt0,
-            Self::MortlachMulti2SelectInt(_) | Self::MortlachMulti4SelectInt(_) => Class::SveMultiSelect,
+            Self::MortlachMulti2SelectInt(_) | Self::MortlachMulti4SelectInt(_) => {
+                Class::SveMultiSelect
+            }
             Self::MortlachMulti2ZZMinmaxSm(_)
             | Self::MortlachMulti2ZZShiftSm(_)
             | Self::MortlachMulti2ZZAddSm(_)
@@ -928,8 +973,12 @@ impl Encoding {
             | Self::MortlachMulti2ZZLongZip(_)
             | Self::MortlachMulti4ZZZip(_)
             | Self::MortlachMulti4ZZLongZip(_) => Class::SveMultiZip,
-            Self::MortlachMulti2Qrshr(_) | Self::MortlachMulti4Qrshr(_) => Class::SveMultiNarrowShift,
-            Self::MortlachMulti2NarrowIntCvrt(_) | Self::MortlachMulti4NarrowIntCvrt(_) => Class::SveMultiNarrowInt,
+            Self::MortlachMulti2Qrshr(_) | Self::MortlachMulti4Qrshr(_) => {
+                Class::SveMultiNarrowShift
+            }
+            Self::MortlachMulti2NarrowIntCvrt(_) | Self::MortlachMulti4NarrowIntCvrt(_) => {
+                Class::SveMultiNarrowInt
+            }
             Self::MortlachMulti2NarrowFpCvrt(_) => Class::SveMultiNarrowFp,
             Self::MortlachMulti2FpintCvrt(_)
             | Self::MortlachMulti2IntfpCvrt(_)
@@ -937,7 +986,9 @@ impl Encoding {
             | Self::MortlachMulti4FpintCvrt(_)
             | Self::MortlachMulti4IntfpCvrt(_)
             | Self::MortlachMulti4Frint(_) => Class::SveMultiFpUnary,
-            Self::MortlachMulti2WideInt(_) | Self::MortlachMulti4WideInt(_) => Class::SveMultiUnpack,
+            Self::MortlachMulti2WideInt(_) | Self::MortlachMulti4WideInt(_) => {
+                Class::SveMultiUnpack
+            }
             Self::MortlachMulti2ZzZaMlaLongLongSm(_)
             | Self::MortlachMulti1ZzZaMlaLongLongSm(_)
             | Self::MortlachMulti4ZzZaMlaLongLongSm(_)
@@ -984,17 +1035,19 @@ impl Encoding {
             | Self::MortlachMulti4ZZaFloatMm(_)
             | Self::MortlachMulti2ZZaIntMm(_)
             | Self::MortlachMulti4ZZaIntMm(_) => Class::SmeArrayAccumulate,
-            Self::MortlachMulti1MlaLongIdx(_) | Self::MortlachMulti2MlaLongIdx(_) | Self::MortlachMulti4MlaLongIdx(_) => {
-                Class::SmeArrayIntLong
-            }
-            Self::MortlachMulti1FmaLongIdx(_) | Self::MortlachMulti2FmaLongIdx(_) | Self::MortlachMulti4FmaLongIdx(_) => {
-                Class::SmeArrayFpLong
-            }
+            Self::MortlachMulti1MlaLongIdx(_)
+            | Self::MortlachMulti2MlaLongIdx(_)
+            | Self::MortlachMulti4MlaLongIdx(_) => Class::SmeArrayIntLong,
+            Self::MortlachMulti1FmaLongIdx(_)
+            | Self::MortlachMulti2FmaLongIdx(_)
+            | Self::MortlachMulti4FmaLongIdx(_) => Class::SmeArrayFpLong,
             Self::MortlachMulti2ZzaIdxS(encoding) => match encoding {
                 MortlachMulti2ZzaIdxS::FmlaZaZziS2xi | MortlachMulti2ZzaIdxS::FmlsZaZziS2xi => {
                     Class::SmeIndexedFpMulAdd
                 }
-                MortlachMulti2ZzaIdxS::FdotZaZzi2xi | MortlachMulti2ZzaIdxS::BfdotZaZzi2xi => Class::SmeArrayFpDot,
+                MortlachMulti2ZzaIdxS::FdotZaZzi2xi | MortlachMulti2ZzaIdxS::BfdotZaZzi2xi => {
+                    Class::SmeArrayFpDot
+                }
                 MortlachMulti2ZzaIdxS::SdotZa32Zzi2xi
                 | MortlachMulti2ZzaIdxS::UdotZa32Zzi2xi
                 | MortlachMulti2ZzaIdxS::SdotZaZziS2xi
@@ -1010,7 +1063,9 @@ impl Encoding {
                 MortlachMulti4ZzaIdxS::FmlaZaZziS4xi | MortlachMulti4ZzaIdxS::FmlsZaZziS4xi => {
                     Class::SmeIndexedFpMulAdd
                 }
-                MortlachMulti4ZzaIdxS::FdotZaZzi4xi | MortlachMulti4ZzaIdxS::BfdotZaZzi4xi => Class::SmeArrayFpDot,
+                MortlachMulti4ZzaIdxS::FdotZaZzi4xi | MortlachMulti4ZzaIdxS::BfdotZaZzi4xi => {
+                    Class::SmeArrayFpDot
+                }
                 MortlachMulti4ZzaIdxS::SdotZa32Zzi4xi
                 | MortlachMulti4ZzaIdxS::UdotZa32Zzi4xi
                 | MortlachMulti4ZzaIdxS::SdotZaZziS4xi
@@ -1024,13 +1079,21 @@ impl Encoding {
             },
             Self::MortlachBini32Prod(_) => Class::SmeBinaryOuterProduct,
             Self::MortlachI16i32Prod(_) => Class::SmeIntOuterProductHalfwords,
-            Self::MortlachMulti2InsertCtg(_) | Self::MortlachMulti4InsertCtg(_) => Class::SmeMoveGroupToSlices,
-            Self::MortlachMulti2ExtractCtg(_) | Self::MortlachMulti4ExtractCtg(_) => Class::SmeMoveGroupFromSlices,
-            Self::MortlachMulti2ZaInsertCtg(_) | Self::MortlachMulti4ZaInsertCtg(_) => Class::SmeMoveGroupToArray,
-            Self::MortlachMulti2ZaExtractCtg(_) | Self::MortlachMulti4ZaExtractCtg(_) => Class::SmeMoveGroupFromArray,
-            Self::MortlachExpand1dst(_) | Self::MortlachExpand2dstCtg(_) | Self::MortlachExpand4dstCtg(_) => {
-                Class::SmeLookupTable
+            Self::MortlachMulti2InsertCtg(_) | Self::MortlachMulti4InsertCtg(_) => {
+                Class::SmeMoveGroupToSlices
             }
+            Self::MortlachMulti2ExtractCtg(_) | Self::MortlachMulti4ExtractCtg(_) => {
+                Class::SmeMoveGroupFromSlices
+            }
+            Self::MortlachMulti2ZaInsertCtg(_) | Self::MortlachMulti4ZaInsertCtg(_) => {
+                Class::SmeMoveGroupToArray
+            }
+            Self::MortlachMulti2ZaExtractCtg(_) | Self::MortlachMulti4ZaExtractCtg(_) => {
+                Class::SmeMoveGroupFromArray
+            }
+            Self::MortlachExpand1dst(_)
+            | Self::MortlachExpand2dstCtg(_)
+            | Self::MortlachExpand4dstCtg(_) => Class::SmeLookupTable,
         }
     }
 }
@@ -2000,7 +2063,11 @@ mod tests {
             assert_eq!(carried.contains(&feature), feature.encodes(), "{feature:?}");
         }
 
-        for imp in [Implementation::CORTEX_A57, Implementation::ARMV9P2, Implementation::EVERY_FEATURE] {
+        for imp in [
+            Implementation::CORTEX_A57,
+            Implementation::ARMV9P2,
+            Implementation::EVERY_FEATURE,
+        ] {
             let cpu = Cpu::implementing(
                 CpuConfig {
                     ips: rusty_box_core::ClockHz::BOCHS_DEFAULT,
@@ -2080,7 +2147,9 @@ mod tests {
                     // `Features.json`: `FEAT_RASv1p1 <=> RAS >= 2 || (RAS == 1
                     // && RAS_frac >= 1)`, and FEAT_RASv1p1 implies
                     // FEAT_RASSAv1p1, which has no field of its own.
-                    Feature::RasV1p1 | Feature::RasSaV1p1 => field(pfr0, 28) >= 2 || (field(pfr0, 28) == 1 && field(pfr1, 12) >= 1),
+                    Feature::RasV1p1 | Feature::RasSaV1p1 => {
+                        field(pfr0, 28) >= 2 || (field(pfr0, 28) == 1 && field(pfr1, 12) >= 1)
+                    }
                     Feature::Debugv8p1 => field(dfr0, 0) >= 7,
                     Feature::Debugv8p2 => field(dfr0, 0) >= 8,
                     Feature::Debugv8p4 => field(dfr0, 0) >= 9,
@@ -2092,13 +2161,23 @@ mod tests {
             // FP = AdvSIMD = 1 with half precision, 0 without; every other
             // instruction-set feature is a nonzero field of these registers.
             let fp16 = u64::from(imp.has(Feature::Fp16));
-            assert_eq!((field(pfr0, 16), field(pfr0, 20)), (fp16, fp16), "FP and AdvSIMD");
+            assert_eq!(
+                (field(pfr0, 16), field(pfr0, 20)),
+                (fp16, fp16),
+                "FP and AdvSIMD"
+            );
             // PFR0: EL0 and EL1 (AArch64 only), FP, AdvSIMD, RAS, DIT, CSV2 =
             // 1 (no FEAT_CSV2_2) and CSV3; nothing else.
-            assert_eq!(pfr0 & !((0xFF << 16) | (0xF << 28) | (0xF << 48) | (0xF << 56) | (0xF << 60)), 0x11);
+            assert_eq!(
+                pfr0 & !((0xFF << 16) | (0xF << 28) | (0xF << 48) | (0xF << 56) | (0xF << 60)),
+                0x11
+            );
             // DFR0: DebugVer, two breakpoints and two watchpoints, no PMU.
             assert_eq!(dfr0 & !0xF, 0x0010_1000);
-            assert!((6..=9).contains(&field(dfr0, 0)), "DebugVer: Armv8.0 to FEAT_Debugv8p4");
+            assert!(
+                (6..=9).contains(&field(dfr0, 0)),
+                "DebugVer: Armv8.0 to FEAT_Debugv8p4"
+            );
             assert!(field(pfr0, 56) <= 1, "CSV2 = 1: FEAT_CSV2, not FEAT_CSV2_2");
             // ID_AA64ISAR0_EL1: AES = 2 (AES and the 64-bit PMULL), SHA1 =
             // 1, SHA2 = 1 (SHA-256, not SHA-512), CRC32 = 1, Atomic = 2 with
@@ -2111,25 +2190,64 @@ mod tests {
             // FEAT_ECV_POFF), MMFR1 HPDS = 1 (no FEAT_HPDS2), LO and PAN
             // alone, MMFR2 CnP, UAO, AT, IDS, TTL and E0PD alone. MMFR1
             // AFP and ISAR2 RPRES are each 1 or 0.
-            let at = |feature: Feature, lsb: u32, value: u64| if imp.has(feature) { value << lsb } else { 0 };
-            let isar0_later =
-                at(Feature::Lse, 20, 2) | at(Feature::Rdm, 28, 1) | at(Feature::DotProd, 44, 1) | at(Feature::Fhm, 48, 1);
-            assert_eq!(isar0 & !((0xF << 52) | (0xF << 56)), 0x0000_0000_0001_1120 | isar0_later);
-            let isar1_fields =
-                [0, 4, 12, 16, 20, 24, 32, 36, 40, 44, 52, 56].into_iter().fold(0, |acc, lsb| acc | (0xF << lsb));
+            let at = |feature: Feature, lsb: u32, value: u64| {
+                if imp.has(feature) {
+                    value << lsb
+                } else {
+                    0
+                }
+            };
+            let isar0_later = at(Feature::Lse, 20, 2)
+                | at(Feature::Rdm, 28, 1)
+                | at(Feature::DotProd, 44, 1)
+                | at(Feature::Fhm, 48, 1);
+            assert_eq!(
+                isar0 & !((0xF << 52) | (0xF << 56)),
+                0x0000_0000_0001_1120 | isar0_later
+            );
+            let isar1_fields = [0, 4, 12, 16, 20, 24, 32, 36, 40, 44, 52, 56]
+                .into_iter()
+                .fold(0, |acc, lsb| acc | (0xF << lsb));
             assert_eq!(isar1 & !isar1_fields, 0);
-            assert_ne!(field(isar1, 4), 2, "APA = 2 is FEAT_EPAC, which FEAT_PAuth2 excludes");
-            assert!(field(isar1, 40) <= 1, "SPECRES = 1: FEAT_SPECRES, not FEAT_SPECRES2");
+            assert_ne!(
+                field(isar1, 4),
+                2,
+                "APA = 2 is FEAT_EPAC, which FEAT_PAuth2 excludes"
+            );
+            assert!(
+                field(isar1, 40) <= 1,
+                "SPECRES = 1: FEAT_SPECRES, not FEAT_SPECRES2"
+            );
             assert!(field(isar1, 44) <= 1, "BF16 = 1: FEAT_BF16, not FEAT_EBF16");
-            assert_eq!(mmfr0 & !(0xF << 60), 0x0F00_0024, "PARange 44 bits, 16-bit ASIDs, the 4 KiB granule alone");
-            assert!(field(mmfr0, 60) <= 1, "ECV = 1: FEAT_ECV, not FEAT_ECV_POFF");
+            assert_eq!(
+                mmfr0 & !(0xF << 60),
+                0x0F00_0024,
+                "PARange 44 bits, 16-bit ASIDs, the 4 KiB granule alone"
+            );
+            assert!(
+                field(mmfr0, 60) <= 1,
+                "ECV = 1: FEAT_ECV, not FEAT_ECV_POFF"
+            );
             assert!(field(mmfr1, 12) <= 1, "HPDS = 1: FEAT_HPDS, not FEAT_HPDS2");
-            assert_eq!(mmfr1 & !((0xF << 12) | (0xF << 16) | (0xF << 20)), at(Feature::Afp, 44, 1));
-            assert_eq!(mmfr2 & !(0xF | (0xF << 4) | (0xF << 32) | (0xF << 36) | (0xF << 48) | (0xF << 60)), 0);
-            assert_eq!((isar2, isar3), (at(Feature::WfxT, 0, 2) | at(Feature::Rpres, 4, 1), 0));
+            assert_eq!(
+                mmfr1 & !((0xF << 12) | (0xF << 16) | (0xF << 20)),
+                at(Feature::Afp, 44, 1)
+            );
+            assert_eq!(
+                mmfr2 & !(0xF | (0xF << 4) | (0xF << 32) | (0xF << 36) | (0xF << 48) | (0xF << 60)),
+                0
+            );
+            assert_eq!(
+                (isar2, isar3),
+                (at(Feature::WfxT, 0, 2) | at(Feature::Rpres, 4, 1), 0)
+            );
             // No SVE2 (SVEver = 0, with FEAT_SME as without); with FEAT_SME,
             // BF16 and I8MM report FEAT_BF16 and FEAT_I8MM as ISAR1 does.
-            let zfr0_later = if imp.has(Feature::Sme) { (field(isar1, 44) << 20) | (field(isar1, 52) << 44) } else { 0 };
+            let zfr0_later = if imp.has(Feature::Sme) {
+                (field(isar1, 44) << 20) | (field(isar1, 52) << 44)
+            } else {
+                0
+            };
             assert_eq!(zfr0, zfr0_later);
             // PFR1: BT = 1 (FEAT_BTI, not FEAT_BTIE), SSBS and SME alone.
             assert_eq!(pfr1 & !((0xF << 24) | (0xF << 4) | 0xF), 0);
@@ -2137,7 +2255,10 @@ mod tests {
             match (imp.has(Feature::Sme), imp.has(Feature::Sme2)) {
                 (true, false) => {
                     assert_eq!(field(pfr1, 24), 1, "SME = 1: FEAT_SME, not FEAT_SME2");
-                    assert_eq!(smfr0, 0x0000_00FD_0000_0000, "F32F32, B16F32, F16F32, I8I32; SMEver 0");
+                    assert_eq!(
+                        smfr0, 0x0000_00FD_0000_0000,
+                        "F32F32, B16F32, F16F32, I8I32; SMEver 0"
+                    );
                 }
                 (true, true) => {
                     assert_eq!(field(pfr1, 24), 2, "SME = 2: FEAT_SME2");

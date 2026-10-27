@@ -278,7 +278,11 @@ pub(crate) fn f64_flush_input(a: Float64, status: &mut SoftFloatStatus) -> Float
 /// (for most, when no operand is a NaN).
 #[inline]
 pub(crate) fn f32_report_denormals(operands: &[Float32], status: &mut SoftFloatStatus) {
-    if status.handling == Handling::Alternate && operands.iter().any(|&x| exp_f32(x) == 0 && frac_f32(x) != 0) {
+    if status.handling == Handling::Alternate
+        && operands
+            .iter()
+            .any(|&x| exp_f32(x) == 0 && frac_f32(x) != 0)
+    {
         softfloat_raise_flags(status, FLAG_INPUT_DENORMAL);
     }
 }
@@ -287,7 +291,11 @@ pub(crate) fn f32_report_denormals(operands: &[Float32], status: &mut SoftFloatS
 /// [`f32_report_denormals`].
 #[inline]
 pub(crate) fn f64_report_denormals(operands: &[Float64], status: &mut SoftFloatStatus) {
-    if status.handling == Handling::Alternate && operands.iter().any(|&x| exp_f64(x) == 0 && frac_f64(x) != 0) {
+    if status.handling == Handling::Alternate
+        && operands
+            .iter()
+            .any(|&x| exp_f64(x) == 0 && frac_f64(x) != 0)
+    {
         softfloat_raise_flags(status, FLAG_INPUT_DENORMAL);
     }
 }

@@ -33,7 +33,13 @@ pub(crate) struct SysRegKey(u32);
 
 impl SysRegKey {
     pub(crate) const fn new(op0: u32, op1: u32, crn: u32, crm: u32, op2: u32) -> Self {
-        Self(((op0 & 3) << 14) | ((op1 & 7) << 11) | ((crn & 15) << 7) | ((crm & 15) << 3) | (op2 & 7))
+        Self(
+            ((op0 & 3) << 14)
+                | ((op1 & 7) << 11)
+                | ((crn & 15) << 7)
+                | ((crm & 15) << 3)
+                | (op2 & 7),
+        )
     }
 
     /// From an `MRS`/`MSR`/`SYS` instruction word.
@@ -276,7 +282,8 @@ const OSLSR_OSLK: u64 = 1 << 1;
 
 /// `SCTLR_EL1` FEAT_MTE fields: ITFSB, TCF0, TCF, ATA0, ATA, TCSO0, TCSO,
 /// RES0 as no processor model here implements FEAT_MTE.
-const SCTLR_MTE: u64 = (1 << 37) | (3 << 38) | (3 << 40) | (1 << 42) | (1 << 43) | (1 << 58) | (1 << 59);
+const SCTLR_MTE: u64 =
+    (1 << 37) | (3 << 38) | (3 << 40) | (1 << 42) | (1 << 43) | (1 << 58) | (1 << 59);
 
 /// `CPACR_EL1.FPEN`.
 const CPACR_FPEN: u64 = 3 << 20;
@@ -393,7 +400,9 @@ impl Cpu {
     #[inline]
     pub(crate) fn sysreg_read(&self, key: SysRegKey) -> Result<u64, SysRegError> {
         match self.sysreg_read_as(key, Accessor::Guest) {
-            Err(SysRegError::Undefined) if key.in_id_space() && self.implements(Feature::Idst) => Err(SysRegError::TrapToEl1),
+            Err(SysRegError::Undefined) if key.in_id_space() && self.implements(Feature::Idst) => {
+                Err(SysRegError::TrapToEl1)
+            }
             result => result,
         }
     }
@@ -455,8 +464,12 @@ impl Cpu {
             }
             TPIDR_EL0 => return Ok(self.sys.tpidr_el0),
             TPIDRRO_EL0 => return Ok(self.sys.tpidrro_el0),
-            DIT if self.implements(Feature::Dit) => return Ok(if self.pstate.dit { Pstate::DIT } else { 0 }),
-            SSBS if self.implements(Feature::Ssbs2) => return Ok(if self.pstate.ssbs { Pstate::SSBS } else { 0 }),
+            DIT if self.implements(Feature::Dit) => {
+                return Ok(if self.pstate.dit { Pstate::DIT } else { 0 })
+            }
+            SSBS if self.implements(Feature::Ssbs2) => {
+                return Ok(if self.pstate.ssbs { Pstate::SSBS } else { 0 })
+            }
             SVCR if self.implements(Feature::Sme) => {
                 self.sme_register_check(el, accessor)?;
                 return Ok(self.svcr.bits());
@@ -655,7 +668,11 @@ impl Cpu {
             _ => {
                 if let Some(v) = self.debug_breakpoint_read(key) {
                     v
-                } else if key.op0() == 3 && key.op1() == 0 && key.crn() == 0 && (1..=7).contains(&key.crm()) {
+                } else if key.op0() == 3
+                    && key.op1() == 0
+                    && key.crn() == 0
+                    && (1..=7).contains(&key.crm())
+                {
                     0
                 } else {
                     return Err(SysRegError::Undefined);
@@ -699,12 +716,21 @@ impl Cpu {
 
     /// `MSR`: write `value` to the register `key` names at the current EL.
     #[inline]
-    pub(crate) fn sysreg_write(&mut self, key: SysRegKey, value: u64) -> Result<WriteEffect, SysRegError> {
+    pub(crate) fn sysreg_write(
+        &mut self,
+        key: SysRegKey,
+        value: u64,
+    ) -> Result<WriteEffect, SysRegError> {
         self.sysreg_write_as(key, value, Accessor::Guest)
     }
 
     /// Write `value` to the register `key` names, as `accessor` writes it.
-    fn sysreg_write_as(&mut self, key: SysRegKey, value: u64, accessor: Accessor) -> Result<WriteEffect, SysRegError> {
+    fn sysreg_write_as(
+        &mut self,
+        key: SysRegKey,
+        value: u64,
+        accessor: Accessor,
+    ) -> Result<WriteEffect, SysRegError> {
         let el = self.access_level(accessor);
         let el0 = el == El::El0;
         let k = key.0;
@@ -930,7 +956,9 @@ impl Cpu {
                 self.sys.amair_el1 = value;
                 WriteEffect::None
             }
-            LORSA_EL1 | LOREA_EL1 | LORN_EL1 | LORC_EL1 if self.implements(Feature::Lor) => WriteEffect::None,
+            LORSA_EL1 | LOREA_EL1 | LORN_EL1 | LORC_EL1 if self.implements(Feature::Lor) => {
+                WriteEffect::None
+            }
             DISR_EL1 if self.implements(Feature::Ras) => {
                 self.sys.disr_el1 = value & self.disr_mask();
                 WriteEffect::None
@@ -1035,16 +1063,23 @@ impl Cpu {
             Err(_) if key.0 == OSLAR_EL1 => Err(SysRegRefusal::WriteOnly),
             // A host reads at EL1 past the FP and SME enables and the EL0
             // controls, so only UNDEFINED is left to come back.
-            Err(SysRegError::Undefined | SysRegError::TrapToEl1 | SysRegError::FpTrap | SysRegError::SmeTrap) => {
-                Err(SysRegRefusal::Absent)
-            }
+            Err(
+                SysRegError::Undefined
+                | SysRegError::TrapToEl1
+                | SysRegError::FpTrap
+                | SysRegError::SmeTrap,
+            ) => Err(SysRegRefusal::Absent),
         }
     }
 
     /// A host's write of `reg`, with the effect an EL1 `MSR` has: a write to
     /// a register the table walk reads flushes the TLB, and a timer write is
     /// reported for the machine to re-evaluate its lines.
-    pub(crate) fn host_sysreg_write(&mut self, reg: SysReg, value: u64) -> Result<WriteEffect, SysRegRefusal> {
+    pub(crate) fn host_sysreg_write(
+        &mut self,
+        reg: SysReg,
+        value: u64,
+    ) -> Result<WriteEffect, SysRegRefusal> {
         let key = SysRegKey::from_sysreg(reg);
         match self.sysreg_write_as(key, value, Accessor::Host) {
             Ok(WriteEffect::FlushTlb) => {
@@ -1058,7 +1093,12 @@ impl Cpu {
             Ok(WriteEffect::None) => Ok(WriteEffect::None),
             // As for reads, a host write can only be UNDEFINED: either the
             // register is read-only, or there is no such register.
-            Err(SysRegError::Undefined | SysRegError::TrapToEl1 | SysRegError::FpTrap | SysRegError::SmeTrap) => {
+            Err(
+                SysRegError::Undefined
+                | SysRegError::TrapToEl1
+                | SysRegError::FpTrap
+                | SysRegError::SmeTrap,
+            ) => {
                 if self.sysreg_read_as(key, Accessor::Host).is_ok() {
                     Err(SysRegRefusal::ReadOnly)
                 } else {

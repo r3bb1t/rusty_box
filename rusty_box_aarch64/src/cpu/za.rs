@@ -200,7 +200,14 @@ impl PairFormat {
         match self {
             Self::BFloat16 => {
                 let (n, m) = (u64::from(n) << 16, u64::from(m) << 16);
-                fp_mul_add(FusedMulAdd::Fmadd, FpType::Single, u64::from(sum), n, m, env) as u32
+                fp_mul_add(
+                    FusedMulAdd::Fmadd,
+                    FpType::Single,
+                    u64::from(sum),
+                    n,
+                    m,
+                    env,
+                ) as u32
             }
             Self::Half => sf::f16_mul_add_long(FusedMulAdd::Fmadd, sum, n, m, &mut env.status),
         }
@@ -219,8 +226,17 @@ struct Pair {
 
 impl Pair {
     fn of(z: &Zv, mask: &Pv, i: usize) -> Self {
-        let active = [mask.active(2 * i, Esize::H), mask.active(2 * i + 1, Esize::H)];
-        let element = |k: usize| if active[k] { z.get(2 * i + k, Esize::H) as u16 } else { 0 };
+        let active = [
+            mask.active(2 * i, Esize::H),
+            mask.active(2 * i + 1, Esize::H),
+        ];
+        let element = |k: usize| {
+            if active[k] {
+                z.get(2 * i + k, Esize::H) as u16
+            } else {
+                0
+            }
+        };
         Self {
             active,
             elements: [element(0), element(1)],
@@ -304,7 +320,12 @@ impl Cpu {
             return;
         }
         for e in 0..s.size.dim(svl) {
-            self.set_za_bytes(s.tile + e * b, svl, s.index * b, &value.as_bytes()[e * b..(e + 1) * b]);
+            self.set_za_bytes(
+                s.tile + e * b,
+                svl,
+                s.index * b,
+                &value.as_bytes()[e * b..(e + 1) * b],
+            );
         }
     }
 
@@ -342,7 +363,11 @@ impl Cpu {
         let zm = self.z(bits(insn, 20, 16), op.svl);
         let mut env = self.fp_env().with_default_nan();
         let dim = TileSize::S.dim(op.svl);
-        let form = if subtract { FusedMulAdd::Fmsub } else { FusedMulAdd::Fmadd };
+        let form = if subtract {
+            FusedMulAdd::Fmsub
+        } else {
+            FusedMulAdd::Fmadd
+        };
         for row in 0..dim {
             let index = op.tile + row * TileSize::S.bytes();
             let mut acc = self.za_vector(index, op.svl);
@@ -351,7 +376,14 @@ impl Cpu {
                     let element = op.zn.get(row, Esize::S);
                     for col in (0..dim).filter(|&col| op.cols.active(col, Esize::S)) {
                         let sum = acc.get(col, Esize::S);
-                        let result = fp_mul_add(form, FpType::Single, sum, element, zm.get(col, Esize::S), &mut env);
+                        let result = fp_mul_add(
+                            form,
+                            FpType::Single,
+                            sum,
+                            element,
+                            zm.get(col, Esize::S),
+                            &mut env,
+                        );
                         acc.set(col, Esize::S, result);
                     }
                 }
@@ -405,7 +437,13 @@ impl Cpu {
     /// element `row` of `Zn` (by `n_sign`) and part `k` of column element
     /// `col` of `Zm` (by `m_sign`), for each `k` whose two parts `Pn` and
     /// `Pm` both make active, modulo 2^32.
-    fn int_outer_product(&mut self, insn: u32, es: Esize, n_sign: Signedness, m_sign: Signedness) -> ExecResult {
+    fn int_outer_product(
+        &mut self,
+        insn: u32,
+        es: Esize,
+        n_sign: Signedness,
+        m_sign: Signedness,
+    ) -> ExecResult {
         let parts = Esize::S.bytes() / es.bytes();
         let subtract = bit(insn, 4);
         let op = self.tile_operands(insn)?;
@@ -458,7 +496,15 @@ impl Cpu {
                 for col in (0..dim).filter(|&col| op.cols.active(col, Esize::S)) {
                     let agree = u64::from((!(element ^ zm.get(col, Esize::S) as u32)).count_ones());
                     let sum = acc.get(col, Esize::S);
-                    acc.set(col, Esize::S, if subtract { sum.wrapping_sub(agree) } else { sum.wrapping_add(agree) });
+                    acc.set(
+                        col,
+                        Esize::S,
+                        if subtract {
+                            sum.wrapping_sub(agree)
+                        } else {
+                            sum.wrapping_add(agree)
+                        },
+                    );
                 }
             }
             self.set_za_vector(index, op.svl, &acc);
@@ -481,7 +527,12 @@ impl Cpu {
     /// r` of [`Cpu::tile_slice`]. Four doubleword slices are UNDEFINED where
     /// `MaxImplementedSVL()` is below 256 bits, in the decode, and where the
     /// current vector length is, after the enable check.
-    pub(crate) fn exec_sme_move_group_slices(&mut self, pc: u64, insn: u32, way: ZaMove) -> ExecResult {
+    pub(crate) fn exec_sme_move_group_slices(
+        &mut self,
+        pc: u64,
+        insn: u32,
+        way: ZaMove,
+    ) -> ExecResult {
         let size = TileSize::of(bits(insn, 23, 22), false);
         let nreg = if bit(insn, 10) { 4 } else { 2 };
         if !Self::group_slices_fit(nreg, size, self.imp.max_svl) {
@@ -588,9 +639,15 @@ impl Cpu {
     pub(crate) fn exec_sme_load_slice<B: PhysBus>(&mut self, bus: &mut B, insn: u32) -> ExecResult {
         let size = TileSize::of(bits(insn, 23, 22), bit(insn, 24));
         let svl = self.check_streaming_sve_and_za_enabled()?;
-        let (mask, slice) = (self.p(bits(insn, 12, 10), svl), self.tile_slice(insn, 0, size, 1, svl));
+        let (mask, slice) = (
+            self.p(bits(insn, 12, 10), svl),
+            self.tile_slice(insn, 0, size, 1, svl),
+        );
         let base = self.base_register(bits(insn, 9, 5))?;
-        let mut addr = base.wrapping_add(self.x_or_zr(bits(insn, 20, 16)).wrapping_mul(size.bytes() as u64));
+        let mut addr = base.wrapping_add(
+            self.x_or_zr(bits(insn, 20, 16))
+                .wrapping_mul(size.bytes() as u64),
+        );
         let b = size.bytes();
         let mut result = Zv::ZERO;
         for e in 0..size.dim(svl) {
@@ -611,12 +668,22 @@ impl Cpu {
     /// ST1Q (`st1q_za_p_rrr_`: `11100001 111 Rm V Rs Pg Rn 0 ZAt`): each
     /// element `Pg` makes active, to where [`Cpu::exec_sme_load_slice`]
     /// loads it from.
-    pub(crate) fn exec_sme_store_slice<B: PhysBus>(&mut self, bus: &mut B, insn: u32) -> ExecResult {
+    pub(crate) fn exec_sme_store_slice<B: PhysBus>(
+        &mut self,
+        bus: &mut B,
+        insn: u32,
+    ) -> ExecResult {
         let size = TileSize::of(bits(insn, 23, 22), bit(insn, 24));
         let svl = self.check_streaming_sve_and_za_enabled()?;
-        let (mask, slice) = (self.p(bits(insn, 12, 10), svl), self.tile_slice(insn, 0, size, 1, svl));
+        let (mask, slice) = (
+            self.p(bits(insn, 12, 10), svl),
+            self.tile_slice(insn, 0, size, 1, svl),
+        );
         let base = self.base_register(bits(insn, 9, 5))?;
-        let mut addr = base.wrapping_add(self.x_or_zr(bits(insn, 20, 16)).wrapping_mul(size.bytes() as u64));
+        let mut addr = base.wrapping_add(
+            self.x_or_zr(bits(insn, 20, 16))
+                .wrapping_mul(size.bytes() as u64),
+        );
         let source = self.za_slice(slice, svl);
         let b = size.bytes();
         for e in 0..size.dim(svl) {
@@ -632,18 +699,40 @@ impl Cpu {
 
     /// `Mem[addr, mbytes]` of one tile element: 16 bytes as a quadword
     /// access.
-    fn read_element<B: PhysBus>(&mut self, bus: &mut B, addr: u64, size: TileSize) -> Result<u128, Fault> {
+    fn read_element<B: PhysBus>(
+        &mut self,
+        bus: &mut B,
+        addr: u64,
+        size: TileSize,
+    ) -> Result<u128, Fault> {
         match size {
             TileSize::Q => self.read_mem_u128(bus, addr, DataAccess::NORMAL),
-            _ => Ok(u128::from(self.read_mem(bus, addr, size.log2_bytes(), DataAccess::NORMAL)?)),
+            _ => Ok(u128::from(self.read_mem(
+                bus,
+                addr,
+                size.log2_bytes(),
+                DataAccess::NORMAL,
+            )?)),
         }
     }
 
     /// `Mem[addr, mbytes] = value` of one tile element.
-    fn write_element<B: PhysBus>(&mut self, bus: &mut B, addr: u64, size: TileSize, value: u128) -> Result<(), Fault> {
+    fn write_element<B: PhysBus>(
+        &mut self,
+        bus: &mut B,
+        addr: u64,
+        size: TileSize,
+        value: u128,
+    ) -> Result<(), Fault> {
         match size {
             TileSize::Q => self.write_mem_u128(bus, addr, value, DataAccess::NORMAL),
-            _ => self.write_mem(bus, addr, size.log2_bytes(), value as u64, DataAccess::NORMAL),
+            _ => self.write_mem(
+                bus,
+                addr,
+                size.log2_bytes(),
+                value as u64,
+                DataAccess::NORMAL,
+            ),
         }
     }
 

@@ -75,13 +75,22 @@ fn pair64(rng: &mut SplitMix64, op: Arith) -> [u64; 2] {
     let nudge = |v: u64, by: u64| (v & !SIGN).wrapping_add(by % 7).wrapping_sub(3) | sign(v);
     match r % 6 {
         // Moderate magnitudes.
-        0 => [number(x, 1023 - 60 + (r >> 8) % 120), number(y, 1023 - 60 + (r >> 16) % 120)],
+        0 => [
+            number(x, 1023 - 60 + (r >> 8) % 120),
+            number(y, 1023 - 60 + (r >> 16) % 120),
+        ],
         // Near the largest number: sums and products that may overflow.
         1 => match op {
-            Arith::Add | Arith::Sub => [number(x, 2045 + (r >> 8) % 2), number(y, 2040 + (r >> 16) % 6)],
+            Arith::Add | Arith::Sub => [
+                number(x, 2045 + (r >> 8) % 2),
+                number(y, 2040 + (r >> 16) % 6),
+            ],
             Arith::Mul => {
                 let e = 1024 + (r >> 8) % 1021;
-                [number(x, e), number(y, (3069 - e).min(2046) - (r >> 24) % 3)]
+                [
+                    number(x, e),
+                    number(y, (3069 - e).min(2046) - (r >> 24) % 3),
+                ]
             }
             Arith::Div => [number(x, 2044 + (r >> 8) % 3), number(y, 1 + (r >> 16) % 4)],
         },
@@ -131,7 +140,10 @@ fn pair32(rng: &mut SplitMix64, op: Arith) -> [u32; 2] {
     let nudge = |v: u32, by: u32| (v & !SIGN).wrapping_add(by % 7).wrapping_sub(3) | sign(v);
     let k = |shift: u32, n: u64| ((r >> shift) % n) as u32;
     match r % 6 {
-        0 => [number(x, 127 - 30 + k(8, 60)), number(y, 127 - 30 + k(16, 60))],
+        0 => [
+            number(x, 127 - 30 + k(8, 60)),
+            number(y, 127 - 30 + k(16, 60)),
+        ],
         1 => match op {
             Arith::Add | Arith::Sub => [number(x, 253 + k(8, 2)), number(y, 248 + k(16, 6))],
             Arith::Mul => {
@@ -192,7 +204,10 @@ fn the_host_computes_what_softfloat_computes_wherever_it_answers() {
         // random FPCR and FPSR.IXC.
         let statuses = [
             ArmFpStatus::with_fpsr(fpcr(draw & (0b1100 | AFP_DRAW)), FPSR_IXC),
-            ArmFpStatus::with_fpsr(fpcr(draw >> 4), if draw & (1 << 8) != 0 { FPSR_IXC } else { 0 }),
+            ArmFpStatus::with_fpsr(
+                fpcr(draw >> 4),
+                if draw & (1 << 8) != 0 { FPSR_IXC } else { 0 },
+            ),
         ];
 
         let [a, b] = pair64(&mut rng, op);
@@ -202,7 +217,10 @@ fn the_host_computes_what_softfloat_computes_wherever_it_answers() {
             match f64_arith(op, a, b, fp) {
                 Some(got) => {
                     assert_eq!(got, want, "f64 {op:?} {a:#018x} {b:#018x} under {fp:?}");
-                    assert_eq!(soft, *fp, "f64 {op:?} {a:#018x} {b:#018x}: SoftFloat raised more");
+                    assert_eq!(
+                        soft, *fp,
+                        "f64 {op:?} {a:#018x} {b:#018x}: SoftFloat raised more"
+                    );
                     reach64.accepted += 1;
                     if want & !(1 << 63) < 2 * f64::MIN_POSITIVE.to_bits() {
                         reach64.near_smallest_normal += 1;
@@ -224,7 +242,10 @@ fn the_host_computes_what_softfloat_computes_wherever_it_answers() {
             match f32_arith(op, a, b, fp) {
                 Some(got) => {
                     assert_eq!(got, want, "f32 {op:?} {a:#010x} {b:#010x} under {fp:?}");
-                    assert_eq!(soft, *fp, "f32 {op:?} {a:#010x} {b:#010x}: SoftFloat raised more");
+                    assert_eq!(
+                        soft, *fp,
+                        "f32 {op:?} {a:#010x} {b:#010x}: SoftFloat raised more"
+                    );
                     reach32.accepted += 1;
                     if want & !(1 << 31) < 2 * f32::MIN_POSITIVE.to_bits() {
                         reach32.near_smallest_normal += 1;
@@ -524,10 +545,20 @@ mod fused {
         let [n32, m32] = [1.5f32.to_bits(), 0.25f32.to_bits()];
         for form in [FusedMulAdd::Fnmadd, FusedMulAdd::Fnmsub] {
             for (ah, sign64, sign32) in [(true, 0, 0), (false, 1 << 63, 1 << 31)] {
-                let mut fp = ArmFpStatus::with_fpsr(fpcr(0) | if ah { FPCR_AH } else { 0 }, FPSR_IXC);
-                assert_eq!(f64_mul_add(form, nan64, n64, m64, &mut fp), nan64 | sign64, "f64 {form:?}, AH {ah}");
-                let mut fp = ArmFpStatus::with_fpsr(fpcr(0) | if ah { FPCR_AH } else { 0 }, FPSR_IXC);
-                assert_eq!(f32_mul_add(form, nan32, n32, m32, &mut fp), nan32 | sign32, "f32 {form:?}, AH {ah}");
+                let mut fp =
+                    ArmFpStatus::with_fpsr(fpcr(0) | if ah { FPCR_AH } else { 0 }, FPSR_IXC);
+                assert_eq!(
+                    f64_mul_add(form, nan64, n64, m64, &mut fp),
+                    nan64 | sign64,
+                    "f64 {form:?}, AH {ah}"
+                );
+                let mut fp =
+                    ArmFpStatus::with_fpsr(fpcr(0) | if ah { FPCR_AH } else { 0 }, FPSR_IXC);
+                assert_eq!(
+                    f32_mul_add(form, nan32, n32, m32, &mut fp),
+                    nan32 | sign32,
+                    "f32 {form:?}, AH {ah}"
+                );
             }
         }
     }

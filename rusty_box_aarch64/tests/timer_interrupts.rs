@@ -31,7 +31,9 @@
 //! timeout and the GIC.
 
 use rusty_box_aarch64::board::{RAM_BASE, UART_CLOCK};
-use rusty_box_aarch64::{MachineBuilder, MemoryLoan, RamSize, Reg, RunBudget, StopReason, VirtConfig};
+use rusty_box_aarch64::{
+    MachineBuilder, MemoryLoan, RamSize, Reg, RunBudget, StopReason, VirtConfig,
+};
 
 const PROGRAM: &[(usize, u32)] = &[
     (0x00, 0x5800_0340),
@@ -102,7 +104,9 @@ fn run_sliced(slice: u64) -> Outcome {
         })
         .expect("the test board builds");
     for (offset, word) in PROGRAM {
-        machine.mem_write(RAM_BASE + *offset as u64, &word.to_le_bytes()).expect("the program is in RAM");
+        machine
+            .mem_write(RAM_BASE + *offset as u64, &word.to_le_bytes())
+            .expect("the program is in RAM");
     }
     loop {
         let outcome = machine.step(RunBudget::Ticks(slice));
@@ -151,10 +155,17 @@ fn a_snapshot_restores_the_same_future() {
         })
         .expect("the test board builds");
     for (offset, word) in PROGRAM {
-        machine.mem_write(RAM_BASE + *offset as u64, &word.to_le_bytes()).expect("the program is in RAM");
+        machine
+            .mem_write(RAM_BASE + *offset as u64, &word.to_le_bytes())
+            .expect("the program is in RAM");
     }
     // Five periods in: the guest has counted a few interrupts and waits.
-    assert_eq!(machine.step(RunBudget::Ticks(5 * TICKS_PER_PERIOD + 123)).stop, StopReason::BudgetExhausted);
+    assert_eq!(
+        machine
+            .step(RunBudget::Ticks(5 * TICKS_PER_PERIOD + 123))
+            .stop,
+        StopReason::BudgetExhausted
+    );
     let mut image = Vec::new();
     machine.save_snapshot(&mut image).expect("a snapshot saves");
     let midway = (machine.ticks(), machine.reg_read(Reg::X20));
@@ -167,7 +178,9 @@ fn a_snapshot_restores_the_same_future() {
     let kept_going = finish(&mut machine);
     assert_eq!(kept_going.0, StopReason::PoweredOff);
 
-    machine.restore_snapshot(&mut image.as_slice()).expect("the image restores");
+    machine
+        .restore_snapshot(&mut image.as_slice())
+        .expect("the image restores");
     assert_eq!((machine.ticks(), machine.reg_read(Reg::X20)), midway);
     assert_eq!(finish(&mut machine), kept_going);
 
@@ -183,8 +196,15 @@ fn a_snapshot_restores_the_same_future() {
         .expect("builds");
     let before = other.cpu_snapshot();
     assert!(other.restore_snapshot(&mut image.as_slice()).is_err());
-    assert_eq!(other.cpu_snapshot(), before, "a refused image changes nothing");
-    assert_eq!(other.power().state(), rusty_box_aarch64::PowerState::Running);
+    assert_eq!(
+        other.cpu_snapshot(),
+        before,
+        "a refused image changes nothing"
+    );
+    assert_eq!(
+        other.power().state(),
+        rusty_box_aarch64::PowerState::Running
+    );
 
     // So is another processor.
     let mut armv9_ram = vec![0u8; RAM_LEN];
@@ -203,16 +223,28 @@ fn a_snapshot_restores_the_same_future() {
     let before = armv9.cpu_snapshot();
     assert_eq!(
         armv9.restore_snapshot(&mut image.as_slice()),
-        Err(rusty_box_core::snap::SnapError::Invalid("snapshot is of a machine built differently"))
+        Err(rusty_box_core::snap::SnapError::Invalid(
+            "snapshot is of a machine built differently"
+        ))
     );
-    assert_eq!(armv9.cpu_snapshot(), before, "a refused image changes nothing");
+    assert_eq!(
+        armv9.cpu_snapshot(),
+        before,
+        "a refused image changes nothing"
+    );
 
     // A truncated one leaves the machine off until it is reset.
     let truncated = &image[..image.len() / 2];
     assert!(machine.restore_snapshot(&mut &truncated[..]).is_err());
-    assert_eq!(machine.power().state(), rusty_box_aarch64::PowerState::PoweredOff);
+    assert_eq!(
+        machine.power().state(),
+        rusty_box_aarch64::PowerState::PoweredOff
+    );
     machine.power().reset();
-    assert_eq!(machine.power().state(), rusty_box_aarch64::PowerState::Running);
+    assert_eq!(
+        machine.power().state(),
+        rusty_box_aarch64::PowerState::Running
+    );
 }
 
 /// Determinism across budgets: however the run is cut, it powers off at the
@@ -225,7 +257,10 @@ fn slicing_the_run_changes_nothing_the_guest_can_see() {
         let cut = run_sliced(slice);
         assert_eq!(cut.reason, whole.reason, "slice {slice}");
         assert_eq!(cut.ticks, whole.ticks, "slice {slice}");
-        assert_eq!(cut.interrupts_counted, whole.interrupts_counted, "slice {slice}");
+        assert_eq!(
+            cut.interrupts_counted, whole.interrupts_counted,
+            "slice {slice}"
+        );
     }
 }
 

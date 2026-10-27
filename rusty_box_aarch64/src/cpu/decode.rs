@@ -78,7 +78,10 @@ mod tests {
     #[test]
     fn udf_is_permanently_undefined_whatever_its_immediate() {
         for word in [0x0000_0000, 0x0000_0001, 0x0000_0002, 0x0000_FFFF] {
-            assert!(matches!(isa::decode(word), Some(Encoding::PermUndef(_))), "{word:#010x}");
+            assert!(
+                matches!(isa::decode(word), Some(Encoding::PermUndef(_))),
+                "{word:#010x}"
+            );
             assert_eq!(a57(word), Class::Undefined, "{word:#010x}");
         }
         assert_eq!(isa::decode(0x0001_0000), None, "outside UDF: unallocated");

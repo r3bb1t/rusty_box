@@ -234,19 +234,25 @@ fn fill_za(cpu: &mut Cpu, word: u64) {
 fn za_words(cpu: &Cpu, n: usize) -> Vec<u64> {
     let svl = cpu.current_svl();
     let v = cpu.za_vector(n, svl);
-    (0..Esize::S.elements(svl)).map(|e| v.get(e, Esize::S)).collect()
+    (0..Esize::S.elements(svl))
+        .map(|e| v.get(e, Esize::S))
+        .collect()
 }
 
 /// The words of Z register `n`.
 fn z_words(cpu: &Cpu, n: u32) -> Vec<u64> {
     let svl = cpu.current_svl();
     let z = cpu.z(n, svl);
-    (0..Esize::S.elements(svl)).map(|e| z.get(e, Esize::S)).collect()
+    (0..Esize::S.elements(svl))
+        .map(|e| z.get(e, Esize::S))
+        .collect()
 }
 
 /// The ZA vectors holding a word other than `word`.
 fn changed(cpu: &Cpu, word: u64) -> Vec<usize> {
-    (0..cpu.current_svl().bytes()).filter(|&n| za_words(cpu, n).iter().any(|&w| w != word)).collect()
+    (0..cpu.current_svl().bytes())
+        .filter(|&n| za_words(cpu, n).iter().any(|&w| w != word))
+        .collect()
 }
 
 /// Each register `r` writes vector `(Wv + offset) MOD vstride` of stride
@@ -276,7 +282,12 @@ fn each_register_writes_the_selected_vector_of_its_own_stride() {
     cpu.x[9] = 2;
     assert_eq!(exec(&mut cpu, FMLA_4X4), None);
     assert_eq!(changed(&cpu, HALF), [1, 9, 17, 25]);
-    for (n, want) in [(1, TWO_AND_A_HALF), (9, FOUR_AND_A_HALF), (17, SIX_AND_A_HALF), (25, EIGHT_AND_A_HALF)] {
+    for (n, want) in [
+        (1, TWO_AND_A_HALF),
+        (9, FOUR_AND_A_HALF),
+        (17, SIX_AND_A_HALF),
+        (25, EIGHT_AND_A_HALF),
+    ] {
         assert_eq!(za_words(&cpu, n), [want; 8], "vector {n}");
     }
 }
@@ -329,7 +340,12 @@ fn the_four_way_long_products_write_four_vectors_from_a_multiple_of_four() {
         assert_eq!(exec(&mut cpu, insn), None);
         assert_eq!(changed(&cpu, 0xFFFF_FFFF), [8, 9, 10, 11], "{insn:#010x}");
         for (i, want) in want.into_iter().enumerate() {
-            assert_eq!(za_words(&cpu, 8 + i), [want; 4], "{insn:#010x} vector {}", 8 + i);
+            assert_eq!(
+                za_words(&cpu, 8 + i),
+                [want; 4],
+                "{insn:#010x} vector {}",
+                8 + i
+            );
         }
     }
 }
@@ -345,10 +361,17 @@ fn the_mixed_sign_long_products_take_each_operand_s_own_sign() {
     set_z(&mut cpu, 0, Esize::B, &[0xFF]);
     set_z(&mut cpu, 1, Esize::B, &[0x02]);
     set_z(&mut cpu, 2, Esize::B, &[0x80]);
-    for (insn, first, second) in [(USMLALL_2X1, 0xFFFF_8080, 0xFFFF_FF00), (SUMLALL_2X1, 0xFFFF_FF80, 0x100)] {
+    for (insn, first, second) in [
+        (USMLALL_2X1, 0xFFFF_8080, 0xFFFF_FF00),
+        (SUMLALL_2X1, 0xFFFF_FF80, 0x100),
+    ] {
         fill_za(&mut cpu, 0);
         assert_eq!(exec(&mut cpu, insn), None);
-        assert_eq!(changed(&cpu, 0), [4, 5, 6, 7, 12, 13, 14, 15], "{insn:#010x}");
+        assert_eq!(
+            changed(&cpu, 0),
+            [4, 5, 6, 7, 12, 13, 14, 15],
+            "{insn:#010x}"
+        );
         for i in 0..4 {
             assert_eq!(za_words(&cpu, 4 + i), [first; 4], "{insn:#010x}");
             assert_eq!(za_words(&cpu, 12 + i), [second; 4], "{insn:#010x}");
@@ -480,9 +503,21 @@ fn the_widening_products_pair_their_elements_and_negate_for_subtraction() {
     cpu.x[11] = 0;
     for (insn, n, m, first, second) in [
         (FMLAL_1, [0x3C00, 0x0000], [0x4200, 0x3C00], THREE, ZERO),
-        (FMLSL_1, [0x3C00, 0x0000], [0x4200, 0x3C00], MINUS_THREE, MINUS_ZERO),
+        (
+            FMLSL_1,
+            [0x3C00, 0x0000],
+            [0x4200, 0x3C00],
+            MINUS_THREE,
+            MINUS_ZERO,
+        ),
         (BFMLAL_1, [0x3F80, 0x0000], [0x4040, 0x3F80], THREE, ZERO),
-        (BFMLSL_1, [0x3F80, 0x0000], [0x4040, 0x3F80], MINUS_THREE, MINUS_ZERO),
+        (
+            BFMLSL_1,
+            [0x3F80, 0x0000],
+            [0x4040, 0x3F80],
+            MINUS_THREE,
+            MINUS_ZERO,
+        ),
     ] {
         set_z(&mut cpu, 0, Esize::H, &n);
         set_z(&mut cpu, 1, Esize::H, &m);
@@ -490,7 +525,10 @@ fn the_widening_products_pair_their_elements_and_negate_for_subtraction() {
         assert_eq!(exec(&mut cpu, insn), None);
         assert_eq!(za_words(&cpu, 0), [first; 4], "{insn:#010x}");
         assert_eq!(za_words(&cpu, 1), [second; 4], "{insn:#010x}");
-        assert!(changed(&cpu, MINUS_ZERO).iter().all(|&v| v < 2), "{insn:#010x}");
+        assert!(
+            changed(&cpu, MINUS_ZERO).iter().all(|&v| v < 2),
+            "{insn:#010x}"
+        );
     }
 }
 
@@ -591,7 +629,12 @@ fn the_indexed_element_comes_from_each_result_s_own_segment() {
     for i in 0..4 {
         let byte = i as i64 + 1;
         let (first, second) = ((3 * byte) as u64, (-2 * byte) as u32 as u64);
-        assert_eq!(za_words(&cpu, 4 + i), [vec![first; 4], vec![second; 4]].concat(), "vector {}", 4 + i);
+        assert_eq!(
+            za_words(&cpu, 4 + i),
+            [vec![first; 4], vec![second; 4]].concat(),
+            "vector {}",
+            4 + i
+        );
     }
 
     cpu.x[9] = 0;
@@ -604,8 +647,14 @@ fn the_indexed_element_comes_from_each_result_s_own_segment() {
     fill_za(&mut cpu, 0);
     assert_eq!(exec(&mut cpu, SMLAL_IDX_1), None);
     assert_eq!(changed(&cpu, 0), [2, 3]);
-    assert_eq!(za_words(&cpu, 2), [vec![7; 4], vec![0xFFFF_FFFF; 4]].concat());
-    assert_eq!(za_words(&cpu, 3), [vec![14; 4], vec![0xFFFF_FFFE; 4]].concat());
+    assert_eq!(
+        za_words(&cpu, 2),
+        [vec![7; 4], vec![0xFFFF_FFFF; 4]].concat()
+    );
+    assert_eq!(
+        za_words(&cpu, 3),
+        [vec![14; 4], vec![0xFFFF_FFFE; 4]].concat()
+    );
 
     // 1.0 and 2.0 by 3.0 and by 0.5, added to 1.0.
     cpu.x[10] = 0;
@@ -618,7 +667,10 @@ fn the_indexed_element_comes_from_each_result_s_own_segment() {
     fill_za(&mut cpu, ONE);
     assert_eq!(exec(&mut cpu, FMLAL_IDX_1), None);
     assert_eq!(changed(&cpu, ONE), [0, 1]);
-    assert_eq!(za_words(&cpu, 0), [vec![FOUR; 4], vec![ONE_AND_A_HALF; 4]].concat());
+    assert_eq!(
+        za_words(&cpu, 0),
+        [vec![FOUR; 4], vec![ONE_AND_A_HALF; 4]].concat()
+    );
     assert_eq!(za_words(&cpu, 1), [vec![SEVEN; 4], vec![TWO; 4]].concat());
 
     // 1.0 and 2.0 by 3.0 and by 0.5, added to 0.5; `vstride` 16.
@@ -633,8 +685,14 @@ fn the_indexed_element_comes_from_each_result_s_own_segment() {
     fill_za(&mut cpu, HALF);
     assert_eq!(exec(&mut cpu, FMLA_IDX_2), None);
     assert_eq!(changed(&cpu, HALF), [1, 17]);
-    assert_eq!(za_words(&cpu, 1), [vec![THREE_AND_A_HALF; 4], vec![ONE; 4]].concat());
-    assert_eq!(za_words(&cpu, 17), [vec![SIX_AND_A_HALF; 4], vec![ONE_AND_A_HALF; 4]].concat());
+    assert_eq!(
+        za_words(&cpu, 1),
+        [vec![THREE_AND_A_HALF; 4], vec![ONE; 4]].concat()
+    );
+    assert_eq!(
+        za_words(&cpu, 17),
+        [vec![SIX_AND_A_HALF; 4], vec![ONE_AND_A_HALF; 4]].concat()
+    );
 }
 
 /// Of a group by an indexed element, the four-way products' mixed signs
@@ -665,7 +723,10 @@ fn the_indexed_products_of_groups() {
     set_z_with(&mut cpu, 1, Esize::B, |b| if b == 9 { 0xFF } else { 0 });
     fill_za(&mut cpu, 0);
     assert_eq!(exec(&mut cpu, SUMLALL_IDX_4), None);
-    for (r, want) in [0xFFFF_FF01, 0xFF, 0xFFFF_8080, 0x7E81].into_iter().enumerate() {
+    for (r, want) in [0xFFFF_FF01, 0xFF, 0xFFFF_8080, 0x7E81]
+        .into_iter()
+        .enumerate()
+    {
         for i in 0..4 {
             assert_eq!(za_words(&cpu, 4 * r + i), [want; 4], "register {r}");
         }
@@ -679,7 +740,10 @@ fn the_indexed_products_of_groups() {
     fill_za(&mut cpu, 0);
     assert_eq!(exec(&mut cpu, UMLSL_IDX_4), None);
     assert_eq!(changed(&cpu, 0), [0, 1, 4, 5, 8, 9, 12, 13]);
-    for (r, want) in [0xFFFF_0001, 0xFFFE_0002, 0xFFFD_0003, 0xFFFC_0004].into_iter().enumerate() {
+    for (r, want) in [0xFFFF_0001, 0xFFFE_0002, 0xFFFD_0003, 0xFFFC_0004]
+        .into_iter()
+        .enumerate()
+    {
         assert_eq!(za_words(&cpu, 4 * r), [want; 4], "register {r}");
         assert_eq!(za_words(&cpu, 4 * r + 1), [want; 4], "register {r}");
     }
@@ -688,7 +752,12 @@ fn the_indexed_products_of_groups() {
     cpu.x[10] = 0;
     set_z(&mut cpu, 2, Esize::H, &[0x3F80]);
     set_z(&mut cpu, 3, Esize::H, &[0x4000]);
-    set_z_with(&mut cpu, 1, Esize::H, |h| if h == 2 { 0x3F00 } else { 0x7F80 });
+    set_z_with(
+        &mut cpu,
+        1,
+        Esize::H,
+        |h| if h == 2 { 0x3F00 } else { 0x7F80 },
+    );
     fill_za(&mut cpu, ONE);
     assert_eq!(exec(&mut cpu, BFMLSL_IDX_2), None);
     assert_eq!(changed(&cpu, ONE), [0, 1, 8, 9]);
@@ -706,7 +775,12 @@ fn the_indexed_products_of_groups() {
     fill_za(&mut cpu, ONE);
     assert_eq!(exec(&mut cpu, FMLS_IDX_4), None);
     assert_eq!(changed(&cpu, ONE), [1, 5, 9, 13]);
-    for (n, want) in [(1, MINUS_ONE), (5, MINUS_THREE), (9, MINUS_FIVE), (13, MINUS_SEVEN)] {
+    for (n, want) in [
+        (1, MINUS_ONE),
+        (5, MINUS_THREE),
+        (9, MINUS_FIVE),
+        (13, MINUS_SEVEN),
+    ] {
         assert_eq!(za_words(&cpu, n), [want; 4], "vector {n}");
     }
 }
@@ -731,19 +805,33 @@ fn the_indexed_dot_products_take_a_group_of_the_segment() {
     fill_za(&mut cpu, 0);
     assert_eq!(exec(&mut cpu, SDOT_IDX_2), None);
     assert_eq!(changed(&cpu, 0), [0, 16]);
-    assert_eq!(za_words(&cpu, 0), [vec![1; 4], vec![0xFFFF_FE00; 4]].concat());
-    assert_eq!(za_words(&cpu, 16), [vec![0xFFFF_FFFF; 4], vec![128; 4]].concat());
+    assert_eq!(
+        za_words(&cpu, 0),
+        [vec![1; 4], vec![0xFFFF_FE00; 4]].concat()
+    );
+    assert_eq!(
+        za_words(&cpu, 16),
+        [vec![0xFFFF_FFFF; 4], vec![128; 4]].concat()
+    );
 
     let mut cpu = with_za(0);
     cpu.x[8] = 0;
     for (r, value) in [0xFF, 0x01, 0x80, 0x02].into_iter().enumerate() {
         set_z(&mut cpu, 4 + r as u32, Esize::B, &[value]);
     }
-    set_z_with(&mut cpu, 1, Esize::B, |b| if b / 4 == 1 { 0x80 } else { 0x7F });
+    set_z_with(
+        &mut cpu,
+        1,
+        Esize::B,
+        |b| if b / 4 == 1 { 0x80 } else { 0x7F },
+    );
     fill_za(&mut cpu, 0);
     assert_eq!(exec(&mut cpu, USDOT_IDX_4), None);
     assert_eq!(changed(&cpu, 0), [0, 4, 8, 12]);
-    for (r, want) in [0xFFFE_0200, 0xFFFF_FE00, 0xFFFF_0000, 0xFFFF_FC00].into_iter().enumerate() {
+    for (r, want) in [0xFFFE_0200, 0xFFFF_FE00, 0xFFFF_0000, 0xFFFF_FC00]
+        .into_iter()
+        .enumerate()
+    {
         assert_eq!(za_words(&cpu, 4 * r), [want; 4], "register {r}");
     }
 
@@ -787,12 +875,26 @@ fn the_vertical_dot_products_sum_across_the_registers() {
     let mut cpu = with_za(0);
     cpu.x[8] = 0;
     for (insn, z2, z3, pair, inf) in [
-        (FVDOT_2, [0x3C00, 0x4000], [0x4200, 0x4400], [(2, 0x3800), (3, 0x4000)], 0x7C00),
-        (BFVDOT_2, [0x3F80, 0x4000], [0x4040, 0x4080], [(6, 0x3F00), (7, 0x4000)], 0x7F80),
+        (
+            FVDOT_2,
+            [0x3C00, 0x4000],
+            [0x4200, 0x4400],
+            [(2, 0x3800), (3, 0x4000)],
+            0x7C00,
+        ),
+        (
+            BFVDOT_2,
+            [0x3F80, 0x4000],
+            [0x4040, 0x4080],
+            [(6, 0x3F00), (7, 0x4000)],
+            0x7F80,
+        ),
     ] {
         set_z(&mut cpu, 2, Esize::H, &z2);
         set_z(&mut cpu, 3, Esize::H, &z3);
-        set_z_with(&mut cpu, 1, Esize::H, |h| pair.iter().find(|p| p.0 == h).map_or(inf, |p| p.1));
+        set_z_with(&mut cpu, 1, Esize::H, |h| {
+            pair.iter().find(|p| p.0 == h).map_or(inf, |p| p.1)
+        });
         fill_za(&mut cpu, ZERO);
         assert_eq!(exec(&mut cpu, insn), None);
         assert_eq!(changed(&cpu, ZERO), [0, 8], "{insn:#010x}");
@@ -818,7 +920,10 @@ fn the_vertical_dot_products_sum_across_the_registers() {
     // -32768 and 2 (`r = 0`), 1 and -1 (`r = 1`), by 3 and -2.
     set_z(&mut cpu, 2, Esize::H, &[0x8000, 1]);
     set_z(&mut cpu, 3, Esize::H, &[2, 0xFFFF]);
-    for (insn, first, want) in [(SVDOT_2_H, 4, [0xFFFE_7FFC, 5]), (UVDOT_2_H, 0, [0x3_7FFC, 0xFFFD_0005])] {
+    for (insn, first, want) in [
+        (SVDOT_2_H, 4, [0xFFFE_7FFC, 5]),
+        (UVDOT_2_H, 0, [0x3_7FFC, 0xFFFD_0005]),
+    ] {
         set_z_with(&mut cpu, 1, Esize::H, |h| match h.checked_sub(first) {
             Some(0) => 3,
             Some(1) => 0xFFFE,
@@ -832,21 +937,37 @@ fn the_vertical_dot_products_sum_across_the_registers() {
     }
 
     set_z_with(&mut cpu, 4, Esize::B, |b| (b % 4) as u64 + 1);
-    set_z_with(&mut cpu, 5, Esize::B, |b| (-((b % 4) as i64 + 1)) as u8 as u64);
+    set_z_with(&mut cpu, 5, Esize::B, |b| {
+        (-((b % 4) as i64 + 1)) as u8 as u64
+    });
     set_z(&mut cpu, 6, Esize::B, &[2]);
     set_z(&mut cpu, 7, Esize::B, &[0x80]);
     for (insn, group, want) in [
         (SVDOT_4, 1, [133, 132, 131, 130]),
         (USVDOT_4, 3, [389, 388, 387, 386]),
         (UVDOT_4, 0, [33157, 33156, 33155, 33154]),
-        (SUVDOT_4, 2, [0xFFFF_8085, 0xFFFF_8084, 0xFFFF_8083, 0xFFFF_8082]),
+        (
+            SUVDOT_4,
+            2,
+            [0xFFFF_8085, 0xFFFF_8084, 0xFFFF_8083, 0xFFFF_8082],
+        ),
     ] {
-        set_z_with(&mut cpu, 1, Esize::B, |b| if b / 4 == group { [1, 2, 3, 0xFF][b % 4] } else { 0x7F });
+        set_z_with(&mut cpu, 1, Esize::B, |b| {
+            if b / 4 == group {
+                [1, 2, 3, 0xFF][b % 4]
+            } else {
+                0x7F
+            }
+        });
         fill_za(&mut cpu, 0);
         assert_eq!(exec(&mut cpu, insn), None);
         assert_eq!(changed(&cpu, 0), [0, 4, 8, 12], "{insn:#010x}");
         for (r, want) in want.into_iter().enumerate() {
-            assert_eq!(za_words(&cpu, 4 * r), [want; 4], "{insn:#010x} register {r}");
+            assert_eq!(
+                za_words(&cpu, 4 * r),
+                [want; 4],
+                "{insn:#010x} register {r}"
+            );
         }
     }
 }
@@ -959,7 +1080,10 @@ fn they_need_streaming_mode_za_and_sme2() {
     for insn in all {
         assert_eq!(exec(&mut cpu, insn), Some(INACTIVE_ZA), "{insn:#010x}");
     }
-    let features: Vec<Feature> = Feature::ALL.into_iter().filter(|&f| f != Feature::Sme2).collect();
+    let features: Vec<Feature> = Feature::ALL
+        .into_iter()
+        .filter(|&f| f != Feature::Sme2)
+        .collect();
     let mut cpu = processor(Implementation {
         features: Features::of(&features),
         max_svl: VecLen::MAX,

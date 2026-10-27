@@ -27,7 +27,11 @@ pub(crate) const fn fpcr_mask(imp: Implementation) -> u64 {
     use crate::softfloat::{FPCR_AH, FPCR_FIZ, FPCR_FZ16, FPCR_NEP};
     const BASE: u64 = 0x07C0_0000;
     let fp16 = if imp.has(Feature::Fp16) { FPCR_FZ16 } else { 0 };
-    let afp = if imp.has(Feature::Afp) { FPCR_FIZ | FPCR_AH | FPCR_NEP } else { 0 };
+    let afp = if imp.has(Feature::Afp) {
+        FPCR_FIZ | FPCR_AH | FPCR_NEP
+    } else {
+        0
+    };
     BASE | fp16 | afp
 }
 
@@ -290,7 +294,11 @@ impl Cpu {
         let has = |feature| self.implements(feature);
         Pstate {
             sp_sel: pstate.sp_sel && pstate.el == El::El1,
-            btype: if has(Feature::Bti) { pstate.btype } else { Btype::None },
+            btype: if has(Feature::Bti) {
+                pstate.btype
+            } else {
+                Btype::None
+            },
             pan: pstate.pan && has(Feature::Pan),
             uao: pstate.uao && has(Feature::Uao),
             dit: pstate.dit && has(Feature::Dit),
@@ -407,7 +415,9 @@ impl Cpu {
         let midr = r.read_u64()?;
         let counter_hz = r.read_u64()?;
         if features != self.imp.features.bits() || max_svl != self.imp.max_svl.bits() {
-            return Err(SnapError::Invalid("snapshot of a processor implementing other features"));
+            return Err(SnapError::Invalid(
+                "snapshot of a processor implementing other features",
+            ));
         }
         if midr != self.imp.midr || counter_hz != self.imp.counter_hz.get() {
             return Err(SnapError::Invalid("snapshot of another processor"));
@@ -419,10 +429,13 @@ impl Cpu {
         let sp_el0 = r.read_u64()?;
         let sp_el1 = r.read_u64()?;
         let pc = r.read_u64()?;
-        let pstate = Pstate::from_spsr(r.read_u64()?)
-            .ok_or(SnapError::Invalid("processor state names an exception level or mode this core lacks"))?;
+        let pstate = Pstate::from_spsr(r.read_u64()?).ok_or(SnapError::Invalid(
+            "processor state names an exception level or mode this core lacks",
+        ))?;
         if self.held(pstate) != pstate {
-            return Err(SnapError::Invalid("processor state holds a field of a feature this processor lacks"));
+            return Err(SnapError::Invalid(
+                "processor state holds a field of a feature this processor lacks",
+            ));
         }
         let mut v = [0u128; 32];
         for reg in v.iter_mut() {
@@ -438,16 +451,24 @@ impl Cpu {
         }
         let sys = SysRegs::from_array(sys)?;
         if !self.sme_registers_restorable(&sys) {
-            return Err(SnapError::Invalid("snapshot holds SME register bits this processor cannot set"));
+            return Err(SnapError::Invalid(
+                "snapshot holds SME register bits this processor cannot set",
+            ));
         }
         if sys.spsr_el1 & !self.spsr_mask() != 0 {
-            return Err(SnapError::Invalid("snapshot's SPSR_EL1 holds bits this processor cannot set"));
+            return Err(SnapError::Invalid(
+                "snapshot's SPSR_EL1 holds bits this processor cannot set",
+            ));
         }
         if sys.cntkctl_el1 & !self.cntkctl_mask() != 0 {
-            return Err(SnapError::Invalid("snapshot's CNTKCTL_EL1 holds bits this processor cannot set"));
+            return Err(SnapError::Invalid(
+                "snapshot's CNTKCTL_EL1 holds bits this processor cannot set",
+            ));
         }
         if sys.disr_el1 & !self.disr_mask() != 0 {
-            return Err(SnapError::Invalid("snapshot's DISR_EL1 holds bits this processor cannot set"));
+            return Err(SnapError::Invalid(
+                "snapshot's DISR_EL1 holds bits this processor cannot set",
+            ));
         }
         let monitor = ExclusiveMonitor {
             armed: r.read_bool()?,
@@ -458,38 +479,59 @@ impl Cpu {
         let activity = match r.read_u8()? {
             activity_tag::RUNNING => Activity::Running,
             activity_tag::INTERRUPT => Activity::Waiting(Wait::Interrupt),
-            activity_tag::INTERRUPT_UNTIL => Activity::Waiting(Wait::InterruptUntil(VmInstant::from_ticks(r.read_u64()?))),
+            activity_tag::INTERRUPT_UNTIL => {
+                Activity::Waiting(Wait::InterruptUntil(VmInstant::from_ticks(r.read_u64()?)))
+            }
             activity_tag::EVENT => Activity::Waiting(Wait::Event),
-            activity_tag::EVENT_UNTIL => Activity::Waiting(Wait::EventUntil(VmInstant::from_ticks(r.read_u64()?))),
-            _ => return Err(SnapError::Invalid("processor activity names a wait this core lacks")),
+            activity_tag::EVENT_UNTIL => {
+                Activity::Waiting(Wait::EventUntil(VmInstant::from_ticks(r.read_u64()?)))
+            }
+            _ => {
+                return Err(SnapError::Invalid(
+                    "processor activity names a wait this core lacks",
+                ))
+            }
         };
-        if let Activity::Waiting(Wait::InterruptUntil(deadline) | Wait::EventUntil(deadline)) = activity {
+        if let Activity::Waiting(Wait::InterruptUntil(deadline) | Wait::EventUntil(deadline)) =
+            activity
+        {
             if !self.implements(Feature::WfxT) {
-                return Err(SnapError::Invalid("processor waits with a timeout on a processor without FEAT_WFxT"));
+                return Err(SnapError::Invalid(
+                    "processor waits with a timeout on a processor without FEAT_WFxT",
+                ));
             }
             if deadline.ticks() == u64::MAX {
-                return Err(SnapError::Invalid("processor's timed wait ends at no tick the count reaches"));
+                return Err(SnapError::Invalid(
+                    "processor's timed wait ends at no tick the count reaches",
+                ));
             }
         }
         let event = r.read_bool()?;
         let icount = r.read_u64()?;
         let retired = r.read_u64()?;
         if retired > icount {
-            return Err(SnapError::Invalid("processor retired more instructions than ticks passed"));
+            return Err(SnapError::Invalid(
+                "processor retired more instructions than ticks passed",
+            ));
         }
         self.tlb.restore(r, self.imp.features, sys.tcr_el1)?;
         let history_len = usize::from(r.read_u8()?);
         if history_len > PC_HISTORY {
-            return Err(SnapError::Invalid("processor PC history is longer than it holds"));
+            return Err(SnapError::Invalid(
+                "processor PC history is longer than it holds",
+            ));
         }
         if history_len as u64 > retired {
-            return Err(SnapError::Invalid("processor PC history is longer than the instructions it retired"));
+            return Err(SnapError::Invalid(
+                "processor PC history is longer than the instructions it retired",
+            ));
         }
         let mut recent = [0u64; PC_HISTORY];
         for slot in recent.iter_mut().take(history_len) {
             *slot = r.read_u64()?;
         }
-        self.history = super::history::PcHistory::from_addresses(&recent[..history_len], retired, pc);
+        self.history =
+            super::history::PcHistory::from_addresses(&recent[..history_len], retired, pc);
         self.x = x;
         self.sp_el0 = sp_el0;
         self.sp_el1 = sp_el1;
@@ -593,7 +635,10 @@ mod tests {
         assert_eq!(c.state(), fresh.state());
         assert_eq!(c.sys.to_array(), fresh.sys.to_array());
         assert_eq!(c.monitor, fresh.monitor);
-        assert_eq!((c.irq_line, c.fiq_line, c.timer_dirty), (fresh.irq_line, fresh.fiq_line, fresh.timer_dirty));
+        assert_eq!(
+            (c.irq_line, c.fiq_line, c.timer_dirty),
+            (fresh.irq_line, fresh.fiq_line, fresh.timer_dirty)
+        );
         assert_eq!(c.sys.sctlr_el1, super::super::id::SCTLR_EL1_RESET);
     }
 
@@ -601,7 +646,10 @@ mod tests {
     fn a_processor_snapshot_restores_the_same_state() {
         let mut c = cpu();
         c.set_reg(Reg::X3, 33);
-        c.set_v(VReg::new(5).expect("V5 exists"), 0x1234_5678_9ABC_DEF0_1111_2222_3333_4444);
+        c.set_v(
+            VReg::new(5).expect("V5 exists"),
+            0x1234_5678_9ABC_DEF0_1111_2222_3333_4444,
+        );
         c.sys.vbar_el1 = 0x8000;
         c.icount = 99;
         c.retired = 90;
@@ -713,7 +761,10 @@ mod tests {
             );
             let before = other.state();
             let mut source: &[u8] = &image;
-            assert_eq!(other.restore(&mut source), Err(SnapError::Invalid("snapshot of another processor")));
+            assert_eq!(
+                other.restore(&mut source),
+                Err(SnapError::Invalid("snapshot of another processor"))
+            );
             assert_eq!(other.state(), before);
         }
     }

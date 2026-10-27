@@ -11,7 +11,9 @@ use rusty_box_core::snap::{SnapRead, SnapResult, SnapWrite};
 
 use crate::bus::{AccessWidth, RegOffset};
 
-const PL061_ID: [u8; 12] = [0x00, 0x00, 0x00, 0x00, 0x61, 0x10, 0x04, 0x00, 0x0D, 0xF0, 0x05, 0xB1];
+const PL061_ID: [u8; 12] = [
+    0x00, 0x00, 0x00, 0x00, 0x61, 0x10, 0x04, 0x00, 0x0D, 0xF0, 0x05, 0xB1,
+];
 
 /// The GPIO line QEMU's `virt` wires its power button to.
 pub const POWER_BUTTON_LINE: u8 = 3;
@@ -168,7 +170,10 @@ mod tests {
         assert!(!gpio.irq());
         gpio.set_input(POWER_BUTTON_LINE, true);
         assert!(gpio.irq(), "the press is an edge");
-        assert_eq!(gpio.read(RegOffset::new(0x3FC), AccessWidth::Word) as u8 & line, line);
+        assert_eq!(
+            gpio.read(RegOffset::new(0x3FC), AccessWidth::Word) as u8 & line,
+            line
+        );
         write(&mut gpio, GPIOIC, line);
         assert!(!gpio.irq());
         gpio.set_input(POWER_BUTTON_LINE, false);

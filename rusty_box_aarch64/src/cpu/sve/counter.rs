@@ -112,13 +112,20 @@ impl Cpu {
     pub(crate) fn exec_sve_while_counter(&mut self, insn: u32) -> ExecResult {
         let es = Esize::from_size(bits(insn, 23, 22));
         let width = 2 << bits(insn, 13, 13);
-        let compare = WhileCompare::of(insn, bit(insn, 3), Esize::D, self.x_or_zr(bits(insn, 9, 5)), self.x_or_zr(bits(insn, 20, 16)));
+        let compare = WhileCompare::of(
+            insn,
+            bit(insn, 3),
+            Esize::D,
+            self.x_or_zr(bits(insn, 9, 5)),
+            self.x_or_zr(bits(insn, 20, 16)),
+        );
         let d = 8 + bits(insn, 2, 0);
         let vl = self.sve_check()?;
         let elements = width * es.elements(vl);
         let count = compare.count(elements);
         let invert = !compare.up;
-        self.pstate.set_nzcv(pred_count_test(elements, count, invert));
+        self.pstate
+            .set_nzcv(pred_count_test(elements, count, invert));
         self.set_p(d, vl, &encode_pred_count(es, elements, count, invert));
         Ok(Flow::Next)
     }
@@ -133,7 +140,13 @@ impl Cpu {
     /// counter.
     pub(crate) fn exec_sve_while_pair(&mut self, insn: u32) -> ExecResult {
         let es = Esize::from_size(bits(insn, 23, 22));
-        let compare = WhileCompare::of(insn, bit(insn, 0), Esize::D, self.x_or_zr(bits(insn, 9, 5)), self.x_or_zr(bits(insn, 20, 16)));
+        let compare = WhileCompare::of(
+            insn,
+            bit(insn, 0),
+            Esize::D,
+            self.x_or_zr(bits(insn, 9, 5)),
+            self.x_or_zr(bits(insn, 20, 16)),
+        );
         let d = bits(insn, 3, 1) << 1;
         let vl = self.sve_check()?;
         let elements = es.elements(vl);
@@ -144,7 +157,8 @@ impl Cpu {
                 half.set_element(e, es, compare.active(r * elements + e, 2 * elements, count));
             }
         }
-        self.pstate.set_nzcv(pred_count_test(2 * elements, count, !compare.up));
+        self.pstate
+            .set_nzcv(pred_count_test(2 * elements, count, !compare.up));
         self.set_p(d, vl, &halves[0]);
         self.set_p(d + 1, vl, &halves[1]);
         Ok(Flow::Next)
@@ -171,7 +185,11 @@ impl Cpu {
         let es = Esize::from_size(bits(insn, 23, 22));
         let (n, d) = (8 + bits(insn, 7, 5), bits(insn, 3, 0));
         // The vectors extracted: from `first`, `count` of them.
-        let (first, count) = if bit(insn, 10) { (2 * bits(insn, 8, 8) as usize, 2) } else { (bits(insn, 9, 8) as usize, 1) };
+        let (first, count) = if bit(insn, 10) {
+            (2 * bits(insn, 8, 8) as usize, 2)
+        } else {
+            (bits(insn, 9, 8) as usize, 1)
+        };
         let vl = self.sve_check()?;
         let counter = PredCounter::of(&self.p(n, vl), vl);
         let elements = es.elements(vl);
@@ -194,7 +212,9 @@ impl Cpu {
         let (n, d) = (bits(insn, 8, 5), bits(insn, 4, 0));
         let vl = self.sve_check()?;
         let counter = PredCounter::of(&self.p(n, vl), vl);
-        let count = (0..width * es.elements(vl)).filter(|&e| counter.active(e, es)).count();
+        let count = (0..width * es.elements(vl))
+            .filter(|&e| counter.active(e, es))
+            .count();
         self.set_x_or_zr(d, count as u64);
         Ok(Flow::Next)
     }

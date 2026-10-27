@@ -90,7 +90,11 @@ impl ExceptionClass {
     /// the choice `ConstrainUnpredictable(Unpredictable_ZEROBTYPE)` makes.
     const fn preserves_btype(self) -> bool {
         match self {
-            Self::BranchTarget | Self::IllegalState | Self::InstructionAbort | Self::PcAlignment | Self::Brk => true,
+            Self::BranchTarget
+            | Self::IllegalState
+            | Self::InstructionAbort
+            | Self::PcAlignment
+            | Self::Brk => true,
             Self::Unknown
             | Self::WfxTrap
             | Self::FpAccess
@@ -226,7 +230,8 @@ impl Cpu {
         self.sys.elr_el1 = return_addr;
         // With FEAT_PAN, PAN is set when SCTLR_EL1.SPAN is 0 and otherwise
         // kept; UAO is cleared; SSBS becomes SCTLR_EL1.DSSBS; DIT is kept.
-        let pan = self.pstate.pan || (self.implements(Feature::Pan) && self.sys.sctlr_el1 & sctlr::SPAN == 0);
+        let pan = self.pstate.pan
+            || (self.implements(Feature::Pan) && self.sys.sctlr_el1 & sctlr::SPAN == 0);
         let ssbs = self.implements(Feature::Ssbs) && self.sys.sctlr_el1 & sctlr::DSSBS != 0;
         self.pstate = Pstate {
             n: self.pstate.n,
@@ -247,7 +252,8 @@ impl Cpu {
             dit: self.pstate.dit,
             ssbs,
         };
-        self.pc = self.branch_addr((self.sys.vbar_el1 & !0x7FF).wrapping_add(quadrant + kind.offset()));
+        self.pc =
+            self.branch_addr((self.sys.vbar_el1 & !0x7FF).wrapping_add(quadrant + kind.offset()));
         self.history.jump(self.pc, self.retired);
         self.monitor.armed = false;
         self.activity = Activity::Running;

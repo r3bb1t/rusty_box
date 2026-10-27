@@ -554,7 +554,11 @@ impl VecLen {
     /// max)`.
     pub(crate) const fn from_len_field(len: u64, max: Self) -> Self {
         let requested = ((len & 0xF) as u32 + 1) * 128;
-        let capped = if requested < max.0 as u32 { requested } else { max.0 as u32 };
+        let capped = if requested < max.0 as u32 {
+            requested
+        } else {
+            max.0 as u32
+        };
         Self((1u32 << (31 - capped.leading_zeros())) as u16)
     }
 }
@@ -705,7 +709,10 @@ impl CpuModel {
 const _: () = {
     let mut i = 0;
     while i < CpuModel::ALL.len() {
-        assert!(CpuModel::ALL[i] as usize == i, "CpuModel::ALL lists each model at its discriminant");
+        assert!(
+            CpuModel::ALL[i] as usize == i,
+            "CpuModel::ALL lists each model at its discriminant"
+        );
         i += 1;
     }
 };
@@ -715,7 +722,10 @@ impl core::str::FromStr for CpuModel {
 
     /// The model whose [`CpuModel::name`] is `name`.
     fn from_str(name: &str) -> Result<Self, UnknownCpuModel> {
-        Self::ALL.into_iter().find(|model| model.name() == name).ok_or(UnknownCpuModel)
+        Self::ALL
+            .into_iter()
+            .find(|model| model.name() == name)
+            .ok_or(UnknownCpuModel)
     }
 }
 
@@ -748,7 +758,10 @@ mod tests {
         for feature in Feature::ALL {
             for model in CpuModel::ALL {
                 let imp = model.implementation();
-                assert!(feature.complete() || !imp.has(feature), "{model:?}: {feature:?} is incomplete");
+                assert!(
+                    feature.complete() || !imp.has(feature),
+                    "{model:?}: {feature:?} is incomplete"
+                );
                 if Implementation::CORTEX_A57.has(feature) {
                     assert!(imp.has(feature), "{model:?}: {feature:?}");
                 }
@@ -768,7 +781,10 @@ mod tests {
     fn a_processor_with_pauth_computes_with_qarma5() {
         let models = CpuModel::ALL.map(CpuModel::implementation);
         for imp in models.into_iter().chain([Implementation::EVERY_FEATURE]) {
-            assert!(!imp.has(Feature::PAuth) || imp.has(Feature::PacQarma5), "{imp:?}");
+            assert!(
+                !imp.has(Feature::PAuth) || imp.has(Feature::PacQarma5),
+                "{imp:?}"
+            );
         }
     }
 
@@ -787,7 +803,14 @@ mod tests {
                 CpuModel::CortexA57 | CpuModel::Armv9p2 => 1,
             };
             assert_eq!(model.name().parse::<CpuModel>(), Ok(model));
-            assert_eq!(CpuModel::ALL.iter().filter(|m| m.tag() == model.tag()).count(), 1, "{model:?}");
+            assert_eq!(
+                CpuModel::ALL
+                    .iter()
+                    .filter(|m| m.tag() == model.tag())
+                    .count(),
+                1,
+                "{model:?}"
+            );
         }
         assert_eq!(listed, 2);
         assert_eq!("cortex-a53".parse::<CpuModel>(), Err(UnknownCpuModel));
@@ -799,18 +822,30 @@ mod tests {
 
         let a57 = CpuModel::CortexA57;
         assert_eq!(a57.implementation(), Implementation::CORTEX_A57);
-        assert_eq!((a57.implementation().midr >> 24, (a57.implementation().midr >> 4) & 0xFFF), (0x41, 0xD07));
+        assert_eq!(
+            (
+                a57.implementation().midr >> 24,
+                (a57.implementation().midr >> 4) & 0xFFF
+            ),
+            (0x41, 0xD07)
+        );
         assert_eq!(a57.counter_hz().get(), 62_500_000);
         assert_eq!(a57.compatible(), "arm,cortex-a57");
 
         let v92 = CpuModel::Armv9p2;
         assert_eq!(v92.implementation(), Implementation::ARMV9P2);
         let midr = v92.implementation().midr;
-        assert_eq!((midr >> 24, (midr >> 16) & 0xF), (0, 0xF), "software use, features in the ID registers");
+        assert_eq!(
+            (midr >> 24, (midr >> 16) & 0xF),
+            (0, 0xF),
+            "software use, features in the ID registers"
+        );
         assert_ne!((midr >> 4) & 0xFFF, u64::from(b'Q'), "not QEMU's `max`");
         assert_eq!(v92.counter_hz().get(), 1_000_000_000);
         assert_eq!(v92.compatible(), "arm,armv8");
-        assert!(v92.implementation().has(Feature::Sme2) && v92.implementation().max_svl == VecLen(512));
+        assert!(
+            v92.implementation().has(Feature::Sme2) && v92.implementation().max_svl == VecLen(512)
+        );
     }
 
     /// `ImplementedSMEVectorLength`: `LEN` asks for `(LEN + 1) * 128`
@@ -827,6 +862,10 @@ mod tests {
         assert_eq!(svl(7), 512, "1024 is above the maximum");
         assert_eq!(svl(15), 512);
         assert_eq!(VecLen::from_len_field(15, VecLen::MAX).bits(), 2048);
-        assert_eq!(VecLen::from_len_field(0x1F, VecLen::MAX).bits(), 2048, "LEN is four bits");
+        assert_eq!(
+            VecLen::from_len_field(0x1F, VecLen::MAX).bits(),
+            2048,
+            "LEN is four bits"
+        );
     }
 }

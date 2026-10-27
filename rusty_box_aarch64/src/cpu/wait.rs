@@ -62,7 +62,10 @@ impl EventRegister {
     /// The register as it holds at the count `count`: `set`, with the event
     /// stream's later events still to come.
     pub(crate) const fn at(set: bool, count: Count) -> Self {
-        Self { set, folded_to: count }
+        Self {
+            set,
+            folded_to: count,
+        }
     }
 }
 
@@ -93,14 +96,20 @@ impl Cpu {
     /// Arm `IsEventRegisterSet`, the event stream's events up to now
     /// included.
     pub(crate) fn event_register(&self) -> bool {
-        self.event.set || self.stream_event_after(self.event.folded_to).is_some_and(|count| count <= self.counter())
+        self.event.set
+            || self
+                .stream_event_after(self.event.folded_to)
+                .is_some_and(|count| count <= self.counter())
     }
 
     /// Bring the Event Register up to the count now: set it if the event
     /// stream has generated an event since it was last brought up to date.
     pub(crate) fn fold_event_stream(&mut self) {
         let now = self.counter();
-        if self.stream_event_after(self.event.folded_to).is_some_and(|count| count <= now) {
+        if self
+            .stream_event_after(self.event.folded_to)
+            .is_some_and(|count| count <= now)
+        {
             self.event.set = true;
         }
         self.event.folded_to = now;
@@ -137,7 +146,11 @@ impl Cpu {
         // period, stays below 2^64.
         let after = after.get();
         let candidate = after - after % period + edge;
-        let event = if candidate > after { Some(candidate) } else { candidate.checked_add(period) };
+        let event = if candidate > after {
+            Some(candidate)
+        } else {
+            candidate.checked_add(period)
+        };
         event.map(Count::new)
     }
 
@@ -178,7 +191,10 @@ impl Cpu {
         let Activity::Waiting(wait) = self.activity else {
             return None;
         };
-        let stream = || self.stream_event_after(self.event.folded_to).and_then(|count| self.tick_reaching(count));
+        let stream = || {
+            self.stream_event_after(self.event.folded_to)
+                .and_then(|count| self.tick_reaching(count))
+        };
         match wait {
             Wait::Interrupt => None,
             Wait::InterruptUntil(timeout) => Some(timeout),
@@ -267,7 +283,9 @@ impl Cpu {
             return Ok(Flow::Next);
         }
         self.wfx_trap_check(WfxType::Wfet { rd })?;
-        let wait = self.tick_reaching(timeout).map_or(Wait::Event, Wait::EventUntil);
+        let wait = self
+            .tick_reaching(timeout)
+            .map_or(Wait::Event, Wait::EventUntil);
         Ok(self.wait_for_event(wait))
     }
 
@@ -278,7 +296,9 @@ impl Cpu {
             return Ok(Flow::Next);
         }
         self.wfx_trap_check(WfxType::Wfit { rd })?;
-        let wait = self.tick_reaching(timeout).map_or(Wait::Interrupt, Wait::InterruptUntil);
+        let wait = self
+            .tick_reaching(timeout)
+            .map_or(Wait::Interrupt, Wait::InterruptUntil);
         Ok(self.begin_wait(wait))
     }
 }

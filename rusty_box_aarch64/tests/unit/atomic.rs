@@ -51,14 +51,25 @@ struct Ram {
 }
 
 impl PhysBus for Ram {
-    fn read(&mut self, addr: PhysAddr, width: AccessWidth, _clock: VmClock) -> Result<u64, BusFault> {
+    fn read(
+        &mut self,
+        addr: PhysAddr,
+        width: AccessWidth,
+        _clock: VmClock,
+    ) -> Result<u64, BusFault> {
         let a = addr.get() as usize;
         let n = width.bytes() as usize;
         let bytes = self.bytes.get(a..a + n).ok_or(BusFault::Unmapped)?;
         Ok(bytes.iter().rev().fold(0, |v, &b| (v << 8) | u64::from(b)))
     }
 
-    fn write(&mut self, addr: PhysAddr, width: AccessWidth, value: u64, _clock: VmClock) -> Result<(), BusFault> {
+    fn write(
+        &mut self,
+        addr: PhysAddr,
+        width: AccessWidth,
+        value: u64,
+        _clock: VmClock,
+    ) -> Result<(), BusFault> {
         let a = addr.get() as usize;
         let n = width.bytes() as usize;
         let bytes = self.bytes.get_mut(a..a + n).ok_or(BusFault::Unmapped)?;
@@ -78,8 +89,16 @@ struct Taken {
     far: u64,
 }
 
-const UNDEFINED: Taken = Taken { ec: 0x00, iss: 0, far: 0 };
-const SP_ALIGNMENT: Taken = Taken { ec: 0x26, iss: 0, far: 0 };
+const UNDEFINED: Taken = Taken {
+    ec: 0x00,
+    iss: 0,
+    far: 0,
+};
+const SP_ALIGNMENT: Taken = Taken {
+    ec: 0x26,
+    iss: 0,
+    far: 0,
+};
 
 /// A data abort taken from EL1: the fault status code and WnR.
 fn data_abort(far: u64, dfsc: u64, write: bool) -> Taken {
@@ -109,8 +128,14 @@ impl Machine {
     fn new(imp: Implementation) -> Self {
         let ips = ClockHz::new(1_000_000).unwrap_or(ClockHz::BOCHS_DEFAULT);
         let mut cpu = Cpu::implementing(
-            CpuConfig { ips, reset_pc: CODE },
-            Implementation { counter_hz: ips, ..imp },
+            CpuConfig {
+                ips,
+                reset_pc: CODE,
+            },
+            Implementation {
+                counter_hz: ips,
+                ..imp
+            },
         );
         let mut ram = Ram {
             bytes: std::vec![0; RAM_BYTES],
@@ -122,7 +147,10 @@ impl Machine {
         let descriptors = [
             (L1, L2 | 0b11),
             (L2, AF | INNER_SHAREABLE | BLOCK),
-            (L2 + 8, 0x20_0000 | AF | INNER_SHAREABLE | (0b10 << 6) | BLOCK),
+            (
+                L2 + 8,
+                0x20_0000 | AF | INNER_SHAREABLE | (0b10 << 6) | BLOCK,
+            ),
             (L2 + 16, 0x40_0000 | AF | (1 << 2) | BLOCK),
             (L2 + 32, 0x80_0000 | AF | (0b10 << 6) | (1 << 2) | BLOCK),
         ];
@@ -151,13 +179,21 @@ impl Machine {
         self.cpu.sys.esr_el1 = 0x3F << 26;
         self.cpu.sys.far_el1 = 0;
         self.ram.writes.clear();
-        assert_eq!(self.cpu.step(&mut self.ram, &mut NoInstrumentation), Step::Retired, "{insn:#010x}");
+        assert_eq!(
+            self.cpu.step(&mut self.ram, &mut NoInstrumentation),
+            Step::Retired,
+            "{insn:#010x}"
+        );
         let esr = self.cpu.sys.esr_el1;
         if esr >> 26 == 0x3F {
             assert_eq!(self.cpu.pc, CODE + 4, "{insn:#010x}");
             return None;
         }
-        assert_eq!(self.cpu.pc & !0x7FF, VBAR, "{insn:#010x} took an exception to the vector table");
+        assert_eq!(
+            self.cpu.pc & !0x7FF,
+            VBAR,
+            "{insn:#010x} took an exception to the vector table"
+        );
         self.cpu.pstate = pstate;
         Some(Taken {
             ec: esr >> 26,
@@ -173,7 +209,10 @@ impl Machine {
 
     fn peek(&self, at: u64, bytes: usize) -> u64 {
         let at = at as usize;
-        self.ram.bytes[at..at + bytes].iter().rev().fold(0, |v, &b| (v << 8) | u64::from(b))
+        self.ram.bytes[at..at + bytes]
+            .iter()
+            .rev()
+            .fold(0, |v, &b| (v << 8) | u64::from(b))
     }
 }
 
@@ -249,8 +288,16 @@ fn the_encoders_match_the_assembler() {
     assert_eq!(cas(3, 1, 3, 2), 0xC8A1_7C62, "cas x1, x2, [x3]");
     assert_eq!(casp(1, 0, 4, 2), 0x4820_7C82, "casp x0, x1, x2, x3, [x4]");
     assert_eq!(ldapr(3, 3, 1), 0xF8BF_C061, "ldapr x1, [x3]");
-    assert_eq!(ldapstl(3, 0b01, 8, 3, 1), 0xD940_8061, "ldapur x1, [x3, #8]");
-    assert_eq!(ldapstl(0, 0b10, -2, 3, 1), 0x199F_E061, "ldapursb x1, [x3, #-2]");
+    assert_eq!(
+        ldapstl(3, 0b01, 8, 3, 1),
+        0xD940_8061,
+        "ldapur x1, [x3, #8]"
+    );
+    assert_eq!(
+        ldapstl(0, 0b10, -2, 3, 1),
+        0x199F_E061,
+        "ldapursb x1, [x3, #-2]"
+    );
     assert_eq!(ldxr(2, 3, 1), 0x885F_7C61, "ldxr w1, [x3]");
     assert_eq!(ldar(3, 3, 1), 0xC8DF_FC61, "ldar x1, [x3]");
     assert_eq!(ldur(3, 12, 3, 1), 0xF840_C061, "ldur x1, [x3, #12]");
@@ -277,30 +324,54 @@ fn device_memory_refuses_misalignment_before_permission() {
     m.cpu.x[1] = 1;
     for (address, expected) in [
         (DEVICE_RO + 2, data_abort(DEVICE_RO + 2, ALIGNMENT, true)),
-        (DEVICE_RO + 0xFFC, data_abort(DEVICE_RO + 0xFFC, ALIGNMENT, true)),
+        (
+            DEVICE_RO + 0xFFC,
+            data_abort(DEVICE_RO + 0xFFC, ALIGNMENT, true),
+        ),
         (DEVICE_RO + 8, permission(DEVICE_RO + 8, true)),
     ] {
         m.cpu.x[3] = address;
-        assert_eq!(m.exec(str_imm(3, 3, 1)), Some(expected), "str x1 at {address:#x}");
+        assert_eq!(
+            m.exec(str_imm(3, 3, 1)),
+            Some(expected),
+            "str x1 at {address:#x}"
+        );
     }
     // LDTR reads with EL0's permissions, which the page refuses.
     for (address, expected) in [
         (DEVICE_RO + 3, data_abort(DEVICE_RO + 3, ALIGNMENT, false)),
-        (DEVICE_RO + 0xFFE, data_abort(DEVICE_RO + 0xFFE, ALIGNMENT, false)),
+        (
+            DEVICE_RO + 0xFFE,
+            data_abort(DEVICE_RO + 0xFFE, ALIGNMENT, false),
+        ),
         (DEVICE_RO + 4, permission(DEVICE_RO + 4, false)),
     ] {
         m.cpu.x[3] = address;
-        assert_eq!(m.exec(ldtr(2, 3, 2)), Some(expected), "ldtr w2 at {address:#x}");
+        assert_eq!(
+            m.exec(ldtr(2, 3, 2)),
+            Some(expected),
+            "ldtr w2 at {address:#x}"
+        );
     }
     // A read-modify-write's alignment fault reports WnR clear, its refused
     // write WnR set.
     m.cpu.x[3] = DEVICE_RO + 2;
-    assert_eq!(m.exec(ldadd(2, 1, 3, 2)), Some(data_abort(DEVICE_RO + 2, ALIGNMENT, false)));
+    assert_eq!(
+        m.exec(ldadd(2, 1, 3, 2)),
+        Some(data_abort(DEVICE_RO + 2, ALIGNMENT, false))
+    );
     m.cpu.x[3] = DEVICE_RO + 4;
-    assert_eq!(m.exec(ldadd(2, 1, 3, 2)), Some(permission(DEVICE_RO + 4, true)));
+    assert_eq!(
+        m.exec(ldadd(2, 1, 3, 2)),
+        Some(permission(DEVICE_RO + 4, true))
+    );
     for address in [DEVICE_RO + 0x40, DEVICE_RO + 0x48] {
         m.cpu.x[3] = address;
-        assert_eq!(m.exec(dc_zva(3)), Some(data_abort(address, ALIGNMENT, true)), "dc zva at {address:#x}");
+        assert_eq!(
+            m.exec(dc_zva(3)),
+            Some(data_abort(address, ALIGNMENT, true)),
+            "dc zva at {address:#x}"
+        );
     }
     assert!(m.ram.writes.is_empty());
     // Normal read-only memory refuses only the permission.
@@ -319,7 +390,11 @@ fn device_memory_judges_a_q_register_access_whole() {
     for (insn, write) in [(STR_Q1_X3, true), (LDR_Q1_X3, false)] {
         for base in [DEVICE, DEVICE_RO] {
             m.cpu.x[3] = base + 8;
-            assert_eq!(m.exec(insn), Some(data_abort(base + 8, ALIGNMENT, write)), "{insn:#010x} at {base:#x} + 8");
+            assert_eq!(
+                m.exec(insn),
+                Some(data_abort(base + 8, ALIGNMENT, write)),
+                "{insn:#010x} at {base:#x} + 8"
+            );
         }
         m.cpu.x[3] = DEVICE + 16;
         assert_eq!(m.exec(insn), None, "{insn:#010x}, aligned");
@@ -336,7 +411,10 @@ fn atomic_operations_follow_mem_atomic_int() {
     assert_eq!(atomic_result(AtomicOp::Umax, 0x80, 0x01, 8), Some(0x80));
     // The operand is compared at the width too: its upper bits are not
     // part of it.
-    assert_eq!(atomic_result(AtomicOp::Umax, 0xDD4C_C57B, 0xFFFF_FFFF_843D_4D4C, 32), Some(0xDD4C_C57B));
+    assert_eq!(
+        atomic_result(AtomicOp::Umax, 0xDD4C_C57B, 0xFFFF_FFFF_843D_4D4C, 32),
+        Some(0xDD4C_C57B)
+    );
     assert_eq!(atomic_result(AtomicOp::Smin, 0x7F, 0x0100, 8), Some(0x00));
     // ADD wraps at the width; LDCLR clears the operand's bits.
     assert_eq!(atomic_result(AtomicOp::Add, 0xFFFF, 1, 16), Some(0));
@@ -344,7 +422,10 @@ fn atomic_operations_follow_mem_atomic_int() {
     // A failed comparison writes nothing.
     assert_eq!(atomic_result(AtomicOp::Cas(5), 4, 9, 32), None);
     assert_eq!(atomic_result(AtomicOp::Cas(4), 4, 9, 32), Some(9));
-    assert_eq!(atomic_result(AtomicOp::Cas(u128::MAX), u128::MAX, 1, 128), Some(1));
+    assert_eq!(
+        atomic_result(AtomicOp::Cas(u128::MAX), u128::MAX, 1, 128),
+        Some(1)
+    );
 }
 
 #[test]
@@ -380,10 +461,23 @@ fn an_atomic_reports_a_refused_write_as_a_write() {
     m.cpu.x[1] = 1;
     m.cpu.x[2] = 0xAAAA;
     m.cpu.x[3] = RO;
-    for insn in [ldadd(3, 1, 3, 2), memop(2, 1, 0b000, 1, 3, 2), cas(3, 1, 3, 2), casp(1, 0, 3, 2)] {
-        assert_eq!(m.exec(insn), Some(data_abort(RO, PERMISSION_L2, true)), "{insn:#010x}");
+    for insn in [
+        ldadd(3, 1, 3, 2),
+        memop(2, 1, 0b000, 1, 3, 2),
+        cas(3, 1, 3, 2),
+        casp(1, 0, 3, 2),
+    ] {
+        assert_eq!(
+            m.exec(insn),
+            Some(data_abort(RO, PERMISSION_L2, true)),
+            "{insn:#010x}"
+        );
         assert!(m.ram.writes.is_empty(), "{insn:#010x}");
-        assert_eq!((m.cpu.x[1], m.cpu.x[2]), (1, 0xAAAA), "{insn:#010x} changed a register");
+        assert_eq!(
+            (m.cpu.x[1], m.cpu.x[2]),
+            (1, 0xAAAA),
+            "{insn:#010x} changed a register"
+        );
     }
     assert_eq!(m.exec(ldapr(3, 3, 2)), None);
     assert_eq!(m.cpu.x[2], 0x1234);
@@ -392,7 +486,11 @@ fn an_atomic_reports_a_refused_write_as_a_write() {
     const UNMAPPED: u64 = 0x60_0000;
     m.cpu.x[3] = UNMAPPED;
     for insn in [ldadd(3, 1, 3, 2), cas(3, 1, 3, 2), casp(1, 0, 3, 2)] {
-        assert_eq!(m.exec(insn), Some(data_abort(UNMAPPED, TRANSLATION_L2, false)), "{insn:#010x}");
+        assert_eq!(
+            m.exec(insn),
+            Some(data_abort(UNMAPPED, TRANSLATION_L2, false)),
+            "{insn:#010x}"
+        );
     }
 }
 
@@ -407,7 +505,11 @@ fn a_failed_compare_and_swap_writes_nothing() {
     m.cpu.x[1] = 0xFFFF_FFFF_0000_0004;
     m.cpu.x[2] = 9;
     assert_eq!(m.exec(cas(2, 1, 3, 2)), None);
-    assert!(m.ram.writes.is_empty(), "a failed CAS wrote {:x?}", m.ram.writes);
+    assert!(
+        m.ram.writes.is_empty(),
+        "a failed CAS wrote {:x?}",
+        m.ram.writes
+    );
     assert_eq!((m.peek(RW, 4), m.cpu.x[1]), (5, 5));
 
     assert_eq!(m.exec(cas(2, 1, 3, 2)), None);
@@ -459,24 +561,42 @@ fn with_lse2_an_atomic_may_be_misaligned_within_16_bytes() {
 
     for (size, address) in [(2, RW + 0xE), (3, RW + 0x9)] {
         m.cpu.x[3] = address;
-        assert_eq!(m.exec(ldadd(size, 1, 3, 2)), Some(data_abort(address, ALIGNMENT, false)));
+        assert_eq!(
+            m.exec(ldadd(size, 1, 3, 2)),
+            Some(data_abort(address, ALIGNMENT, false))
+        );
         assert!(m.ram.writes.is_empty());
     }
     m.cpu.x[4] = RW + 8;
-    assert_eq!(m.exec(casp(1, 0, 4, 2)), Some(data_abort(RW + 8, ALIGNMENT, false)));
+    assert_eq!(
+        m.exec(casp(1, 0, 4, 2)),
+        Some(data_abort(RW + 8, ALIGNMENT, false))
+    );
 
     m.cpu.x[3] = DEVICE + 1;
-    assert_eq!(m.exec(ldadd(1, 1, 3, 2)), Some(data_abort(DEVICE + 1, ALIGNMENT, false)));
+    assert_eq!(
+        m.exec(ldadd(1, 1, 3, 2)),
+        Some(data_abort(DEVICE + 1, ALIGNMENT, false))
+    );
 
     m.cpu.x[3] = RW + 0x2;
     assert_eq!(m.exec(ldxr(2, 3, 2)), None);
     m.cpu.sys.sctlr_el1 |= SCTLR_A;
-    assert_eq!(m.exec(ldadd(2, 1, 3, 2)), Some(data_abort(RW + 0x2, ALIGNMENT, false)));
-    assert_eq!(m.exec(ldxr(2, 3, 2)), Some(data_abort(RW + 0x2, ALIGNMENT, false)));
+    assert_eq!(
+        m.exec(ldadd(2, 1, 3, 2)),
+        Some(data_abort(RW + 0x2, ALIGNMENT, false))
+    );
+    assert_eq!(
+        m.exec(ldxr(2, 3, 2)),
+        Some(data_abort(RW + 0x2, ALIGNMENT, false))
+    );
 
     let mut a57 = Machine::new(Implementation::CORTEX_A57);
     a57.cpu.x[3] = RW + 0x2;
-    assert_eq!(a57.exec(ldxr(2, 3, 2)), Some(data_abort(RW + 0x2, ALIGNMENT, false)));
+    assert_eq!(
+        a57.exec(ldxr(2, 3, 2)),
+        Some(data_abort(RW + 0x2, ALIGNMENT, false))
+    );
 }
 
 /// `AArch64_UnalignedAccessFaults` for a load-acquire or store-release:
@@ -494,7 +614,11 @@ fn an_ordered_access_may_leave_its_granule_only_with_naa() {
 
     m.cpu.x[3] = RW + 0xC;
     for insn in [ldar(3, 3, 1), ldapr(3, 3, 1), ldapstl(3, 0b01, 0, 3, 1)] {
-        assert_eq!(m.exec(insn), Some(data_abort(RW + 0xC, ALIGNMENT, false)), "{insn:#010x}");
+        assert_eq!(
+            m.exec(insn),
+            Some(data_abort(RW + 0xC, ALIGNMENT, false)),
+            "{insn:#010x}"
+        );
     }
     assert_eq!(m.exec(ldur(3, 0, 3, 1)), None);
     m.cpu.sys.sctlr_el1 |= SCTLR_NAA;
@@ -507,7 +631,10 @@ fn an_ordered_access_may_leave_its_granule_only_with_naa() {
     let mut a57 = Machine::new(Implementation::CORTEX_A57);
     a57.cpu.sys.sctlr_el1 |= SCTLR_NAA;
     a57.cpu.x[3] = RW + 4;
-    assert_eq!(a57.exec(ldar(3, 3, 1)), Some(data_abort(RW + 4, ALIGNMENT, false)));
+    assert_eq!(
+        a57.exec(ldar(3, 3, 1)),
+        Some(data_abort(RW + 4, ALIGNMENT, false))
+    );
 }
 
 /// LDAPUR* and STLUR* take a signed offset (`SignExtend(imm9, 64)`);
@@ -545,7 +672,13 @@ fn ldapur_and_stlur_take_a_signed_offset() {
 fn an_sp_base_is_checked_for_alignment() {
     let mut m = Machine::new(Implementation::EVERY_FEATURE);
     m.cpu.sp_el1 = RW + 8;
-    for insn in [ldadd(3, 1, 31, 2), cas(3, 1, 31, 2), casp(1, 0, 31, 2), ldapr(3, 31, 1), ldapstl(3, 0b01, 8, 31, 1)] {
+    for insn in [
+        ldadd(3, 1, 31, 2),
+        cas(3, 1, 31, 2),
+        casp(1, 0, 31, 2),
+        ldapr(3, 31, 1),
+        ldapstl(3, 0b01, 8, 31, 1),
+    ] {
         assert_eq!(m.exec(insn), Some(SP_ALIGNMENT), "{insn:#010x}");
     }
 }

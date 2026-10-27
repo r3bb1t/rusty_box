@@ -18,10 +18,10 @@ use std::vec::Vec;
 
 use super::super::features::{Feature, Features, Implementation, VecLen};
 use super::super::sctlr;
+use super::super::sme::ZT0_BYTES;
 use super::super::step::{exec, exec_in, processor, Taken, DATA, FP_TRAP, SME_DISABLED, UNDEFINED};
 use super::super::sve::Zv;
 use super::super::Cpu;
-use super::super::sme::ZT0_BYTES;
 
 /// The SME trap with SMTC 2: outside Streaming SVE mode.
 const NOT_STREAMING: Taken = Taken { ec: 0x1D, iss: 2 };
@@ -105,7 +105,10 @@ fn with_table() -> Cpu {
 
 /// The low `bytes` bytes of each of [`with_table`]'s entries `indexes`.
 fn looked_up(bytes: usize, indexes: &[u32]) -> Vec<u8> {
-    indexes.iter().flat_map(|&i| (0x1111_1111 * i).to_le_bytes()[..bytes].to_vec()).collect()
+    indexes
+        .iter()
+        .flat_map(|&i| (0x1111_1111 * i).to_le_bytes()[..bytes].to_vec())
+        .collect()
 }
 
 /// Z register `n` of the 16 bytes `bytes`.
@@ -129,7 +132,10 @@ fn bytes_ending(fill: u8, tail: &[u8]) -> [u8; 16] {
 
 /// A processor with every feature but FEAT_SME2.
 fn sme_alone() -> Cpu {
-    let features: Vec<Feature> = Feature::ALL.into_iter().filter(|&f| f != Feature::Sme2).collect();
+    let features: Vec<Feature> = Feature::ALL
+        .into_iter()
+        .filter(|&f| f != Feature::Sme2)
+        .collect();
     processor(Implementation {
         features: Features::of(&features),
         max_svl: VecLen::MAX,
@@ -190,21 +196,33 @@ fn ldr_and_str_of_zt0_align_to_16_bytes_and_fault_part_way() {
     let mut ram = counting(0, 96);
     cpu.sys.sctlr_el1 |= sctlr::A;
     cpu.x[0] = DATA + 8;
-    assert_eq!(exec_in(&mut cpu, &mut ram, LDR_ZT0), Some(data_abort(ALIGNMENT, false)));
+    assert_eq!(
+        exec_in(&mut cpu, &mut ram, LDR_ZT0),
+        Some(data_abort(ALIGNMENT, false))
+    );
     assert_eq!(cpu.sys.far_el1, DATA + 8);
     cpu.x[1] = DATA + 8;
-    assert_eq!(exec_in(&mut cpu, &mut ram, STR_ZT0), Some(data_abort(ALIGNMENT, true)));
+    assert_eq!(
+        exec_in(&mut cpu, &mut ram, STR_ZT0),
+        Some(data_abort(ALIGNMENT, true))
+    );
     assert_eq!(ram, counting(0, 96));
     cpu.sys.sctlr_el1 &= !sctlr::A;
 
     // 64 bytes from 48 before the end of the RAM.
     cpu.set_zt0(&[0xA5; ZT0_BYTES]);
     cpu.x[0] = DATA + 48;
-    assert_eq!(exec_in(&mut cpu, &mut ram, LDR_ZT0), Some(data_abort(EXTERNAL, false)));
+    assert_eq!(
+        exec_in(&mut cpu, &mut ram, LDR_ZT0),
+        Some(data_abort(EXTERNAL, false))
+    );
     assert_eq!(cpu.sys.far_el1, DATA + 96);
     assert_eq!(cpu.zt0(), [0xA5; ZT0_BYTES]);
     cpu.x[1] = DATA + 48;
-    assert_eq!(exec_in(&mut cpu, &mut ram, STR_ZT0), Some(data_abort(EXTERNAL, true)));
+    assert_eq!(
+        exec_in(&mut cpu, &mut ram, STR_ZT0),
+        Some(data_abort(EXTERNAL, true))
+    );
     assert_eq!(cpu.sys.far_el1, DATA + 96);
     assert_eq!(ram[48..], [0xA5; 48]);
 }
@@ -309,7 +327,11 @@ fn luti_of_a_group_takes_consecutive_runs_of_indexes() {
     let mut cpu = with_table();
     // luti2 {z0.b-z1.b}, zt0, z2[7]: 7 MOD 2 is segment 1, so Z0 takes
     // bytes 8 to 11 and Z1 bytes 12 to 15.
-    set_z_bytes(&mut cpu, 2, bytes_ending(0xFF, &[0xE4, 0xE4, 0xE4, 0xE4, 0x1B, 0x1B, 0x1B, 0x1B]));
+    set_z_bytes(
+        &mut cpu,
+        2,
+        bytes_ending(0xFF, &[0xE4, 0xE4, 0xE4, 0xE4, 0x1B, 0x1B, 0x1B, 0x1B]),
+    );
     assert_eq!(exec(&mut cpu, LUTI2_2_B), None);
     assert_eq!(z_bytes(&cpu, 0), looked_up(1, &[0, 1, 2, 3].repeat(4)));
     assert_eq!(z_bytes(&cpu, 1), looked_up(1, &[3, 2, 1, 0].repeat(4)));
@@ -318,10 +340,17 @@ fn luti_of_a_group_takes_consecutive_runs_of_indexes() {
     set_z_bytes(&mut cpu, 2, bytes_ending(0xFF, &nibbles));
     assert_eq!(exec(&mut cpu, LUTI4_2_H), None);
     assert_eq!(z_bytes(&cpu, 0), looked_up(2, &[0, 1, 2, 3, 4, 5, 6, 7]));
-    assert_eq!(z_bytes(&cpu, 1), looked_up(2, &[8, 9, 10, 11, 12, 13, 14, 15]));
+    assert_eq!(
+        z_bytes(&cpu, 1),
+        looked_up(2, &[8, 9, 10, 11, 12, 13, 14, 15])
+    );
     // luti2 {z0.h-z3.h}, zt0, z4[3]: 3 MOD 2 is segment 1, two bytes to
     // each register.
-    set_z_bytes(&mut cpu, 4, bytes_ending(0xE4, &[0x00, 0x00, 0x55, 0x55, 0xAA, 0xAA, 0xFF, 0xFF]));
+    set_z_bytes(
+        &mut cpu,
+        4,
+        bytes_ending(0xE4, &[0x00, 0x00, 0x55, 0x55, 0xAA, 0xAA, 0xFF, 0xFF]),
+    );
     assert_eq!(exec(&mut cpu, LUTI2_4_H), None);
     for r in 0..4 {
         assert_eq!(z_bytes(&cpu, r), looked_up(2, &[r; 8]), "Z{r}");
@@ -331,7 +360,12 @@ fn luti_of_a_group_takes_consecutive_runs_of_indexes() {
     set_z_bytes(&mut cpu, 4, bytes_ending(0xFF, &nibbles));
     assert_eq!(exec(&mut cpu, LUTI4_4_S), None);
     for r in 0..4 {
-        assert_eq!(z_bytes(&cpu, 4 + r), looked_up(4, &[4 * r, 4 * r + 1, 4 * r + 2, 4 * r + 3]), "Z{}", 4 + r);
+        assert_eq!(
+            z_bytes(&cpu, 4 + r),
+            looked_up(4, &[4 * r, 4 * r + 1, 4 * r + 2, 4 * r + 3]),
+            "Z{}",
+            4 + r
+        );
     }
 }
 

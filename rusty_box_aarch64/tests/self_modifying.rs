@@ -14,8 +14,8 @@ use rusty_box_aarch64::board::RAM_BASE;
 use rusty_box_aarch64::cpu::ExceptionClass;
 use rusty_box_aarch64::instrumentation::{ExceptionKind, ExceptionTaken};
 use rusty_box_aarch64::{
-    Instrumentation, LentStorage, MachineBuilder, MemoryLoan, RamSize, Reg, RunBudget, StopReason, SysReg, VirtConfig,
-    VirtMachine,
+    Instrumentation, LentStorage, MachineBuilder, MemoryLoan, RamSize, Reg, RunBudget, StopReason,
+    SysReg, VirtConfig, VirtMachine,
 };
 
 const RAM_LEN: usize = 4 << 20;
@@ -28,16 +28,29 @@ fn bare(ram: &mut [u8]) -> VirtMachine<LentStorage<'_>> {
         .expect("a bare machine builds")
 }
 
-fn load<S: rusty_box_aarch64::GuestStorage, I: Instrumentation>(machine: &mut VirtMachine<S, I>, at: u64, words: &[u32]) {
+fn load<S: rusty_box_aarch64::GuestStorage, I: Instrumentation>(
+    machine: &mut VirtMachine<S, I>,
+    at: u64,
+    words: &[u32],
+) {
     for (i, word) in words.iter().enumerate() {
-        machine.mem_write(at + 4 * i as u64, &word.to_le_bytes()).expect("code is in RAM");
+        machine
+            .mem_write(at + 4 * i as u64, &word.to_le_bytes())
+            .expect("code is in RAM");
     }
 }
 
 /// `adr x1, target; ldr w2, newinsn; str w2, [x1];
 /// target: mov x0, #1; b .; newinsn: mov x0, #2` — the store rewrites the
 /// next instruction but one, which is in the same trace as the store.
-const REWRITE_AHEAD: [u32; 6] = [0x1000_0061, 0x1800_0082, 0xB900_0022, 0xD280_0020, 0x1400_0000, 0xD280_0040];
+const REWRITE_AHEAD: [u32; 6] = [
+    0x1000_0061,
+    0x1800_0082,
+    0xB900_0022,
+    0xD280_0020,
+    0x1400_0000,
+    0xD280_0040,
+];
 
 #[test]
 fn an_instruction_rewritten_just_ahead_runs_as_rewritten() {
@@ -54,7 +67,15 @@ fn an_instruction_rewritten_just_ahead_runs_as_rewritten() {
 /// func: mov x0, #1; ret; patch: mov x0, #7` — `func` runs, is rewritten
 /// through the address in `x3`, and runs again.
 const REWRITE_FUNCTION: [u32; 9] = [
-    0x9400_0006, 0xAA00_03F3, 0x1800_00C2, 0xB900_0062, 0x9400_0002, 0x1400_0000, 0xD280_0020, 0xD65F_03C0, 0xD280_00E0,
+    0x9400_0006,
+    0xAA00_03F3,
+    0x1800_00C2,
+    0xB900_0062,
+    0x9400_0002,
+    0x1400_0000,
+    0xD280_0020,
+    0xD65F_03C0,
+    0xD280_00E0,
 ];
 const FUNC_OFFSET: u64 = 0x18;
 
@@ -72,7 +93,9 @@ fn a_function_rewritten_after_it_ran_runs_its_new_body() {
 
 /// Page tables: VA 0x4000_0000 maps 1 GiB of RAM identically, and the page
 /// at VA 0x8000_0000 is a second mapping of the RAM's first page.
-fn map_code_twice<S: rusty_box_aarch64::GuestStorage, I: Instrumentation>(m: &mut VirtMachine<S, I>) {
+fn map_code_twice<S: rusty_box_aarch64::GuestStorage, I: Instrumentation>(
+    m: &mut VirtMachine<S, I>,
+) {
     const AF: u64 = 1 << 10;
     const INNER_SHAREABLE: u64 = 3 << 8;
     let l1 = RAM_BASE + 0x1_0000;
@@ -84,10 +107,12 @@ fn map_code_twice<S: rusty_box_aarch64::GuestStorage, I: Instrumentation>(m: &mu
         (l2, 0, l3 | 0b11),
         (l3, 0, RAM_BASE | AF | INNER_SHAREABLE | 0b11),
     ] {
-        m.mem_write(table + 8 * index, &desc.to_le_bytes()).expect("tables are in RAM");
+        m.mem_write(table + 8 * index, &desc.to_le_bytes())
+            .expect("tables are in RAM");
     }
     m.sysreg_write(SysReg::MAIR_EL1, 0xFF).expect("MAIR");
-    m.sysreg_write(SysReg::TCR_EL1, 25 | (1 << 23)).expect("TCR");
+    m.sysreg_write(SysReg::TCR_EL1, 25 | (1 << 23))
+        .expect("TCR");
     m.sysreg_write(SysReg::TTBR0_EL1, l1).expect("TTBR0");
     let sctlr = m.sysreg_read(SysReg::SCTLR_EL1).expect("SCTLR");
     m.sysreg_write(SysReg::SCTLR_EL1, sctlr | 1).expect("SCTLR");
@@ -104,7 +129,11 @@ fn a_store_through_a_second_mapping_of_the_code_is_seen() {
     let out = m.step(RunBudget::Instructions(50));
     assert_eq!(out.stop, StopReason::BudgetExhausted);
     assert_eq!(m.reg_read(Reg::X19), 1);
-    assert_eq!(m.reg_read(Reg::X0), 7, "the write through the alias changed the code");
+    assert_eq!(
+        m.reg_read(Reg::X0),
+        7,
+        "the write through the alias changed the code"
+    );
 }
 
 /// At VA 0x8000_0000: `str x2, [x1]; ldr x4, [x3]; mov x0, #1; b .` — the
@@ -127,14 +156,22 @@ fn code_whose_mapping_changed_runs_from_the_new_page_once_its_tlb_entry_is_gone(
     // VA 0x8040_0000, in the same slot of the direct-mapped TLB as VA
     // 0x8000_0000, maps 2 MiB of RAM.
     let l2 = RAM_BASE + 0x1_1000;
-    m.mem_write(l2 + 8 * 2, &(RAM_BASE | AF | INNER_SHAREABLE | 0b01).to_le_bytes()).expect("tables are in RAM");
+    m.mem_write(
+        l2 + 8 * 2,
+        &(RAM_BASE | AF | INNER_SHAREABLE | 0b01).to_le_bytes(),
+    )
+    .expect("tables are in RAM");
     m.reg_write(Reg::X1, RAM_BASE + 0x1_2000);
     m.reg_write(Reg::X2, (RAM_BASE + 0x2000) | AF | INNER_SHAREABLE | 0b11);
     m.reg_write(Reg::X3, 0x8040_0000);
     m.reg_write(Reg::Pc, 0x8000_0000);
     let out = m.step(RunBudget::Instructions(10));
     assert_eq!(out.stop, StopReason::BudgetExhausted);
-    assert_eq!(m.reg_read(Reg::X0), 2, "the instruction after the load came from the new page");
+    assert_eq!(
+        m.reg_read(Reg::X0),
+        2,
+        "the instruction after the load came from the new page"
+    );
 }
 
 /// `bl func; mov x19, x0; ldr w2, patch; str w2, [x3]; dc cvau, x1;
@@ -144,9 +181,28 @@ fn code_whose_mapping_changed_runs_from_the_new_page_once_its_tlb_entry_is_gone(
 /// code made visible the way the Arm ARM asks (B2.4.4), by line and then
 /// whole.
 const MAINTAINED: [u32; 22] = [
-    0x9400_0012, 0xAA00_03F3, 0x1800_0242, 0xB900_0062, 0xD50B_7B21, 0xD503_3B9F, 0xD50B_7521, 0xD503_3B9F,
-    0xD503_3FDF, 0x9400_0009, 0xAA00_03F4, 0x1800_0142, 0xB900_0062, 0xD508_751F, 0xD503_3B9F, 0xD503_3FDF,
-    0x9400_0002, 0x1400_0000, 0xD280_0020, 0xD65F_03C0, 0xD280_00E0, 0xD280_0120,
+    0x9400_0012,
+    0xAA00_03F3,
+    0x1800_0242,
+    0xB900_0062,
+    0xD50B_7B21,
+    0xD503_3B9F,
+    0xD50B_7521,
+    0xD503_3B9F,
+    0xD503_3FDF,
+    0x9400_0009,
+    0xAA00_03F4,
+    0x1800_0142,
+    0xB900_0062,
+    0xD508_751F,
+    0xD503_3B9F,
+    0xD503_3FDF,
+    0x9400_0002,
+    0x1400_0000,
+    0xD280_0020,
+    0xD65F_03C0,
+    0xD280_00E0,
+    0xD280_0120,
 ];
 const MAINTAINED_FUNC: u64 = 0x48;
 
@@ -158,10 +214,22 @@ const MAINTAINED_FUNC: u64 = 0x48;
 #[test]
 fn code_made_visible_by_cache_maintenance_runs() {
     for (mmu, store_at, ivau_at) in [
-        (false, RAM_BASE + MAINTAINED_FUNC, RAM_BASE + MAINTAINED_FUNC),
+        (
+            false,
+            RAM_BASE + MAINTAINED_FUNC,
+            RAM_BASE + MAINTAINED_FUNC,
+        ),
         (true, RAM_BASE + MAINTAINED_FUNC, RAM_BASE + MAINTAINED_FUNC),
-        (true, 0x8000_0000 + MAINTAINED_FUNC, 0x8000_0000 + MAINTAINED_FUNC),
-        (true, RAM_BASE + MAINTAINED_FUNC, 0x8000_0000 + MAINTAINED_FUNC),
+        (
+            true,
+            0x8000_0000 + MAINTAINED_FUNC,
+            0x8000_0000 + MAINTAINED_FUNC,
+        ),
+        (
+            true,
+            RAM_BASE + MAINTAINED_FUNC,
+            0x8000_0000 + MAINTAINED_FUNC,
+        ),
     ] {
         let mut ram = vec![0u8; RAM_LEN];
         let mut m = bare(&mut ram);
@@ -172,9 +240,21 @@ fn code_made_visible_by_cache_maintenance_runs() {
         m.reg_write(Reg::X3, store_at);
         m.reg_write(Reg::X1, ivau_at);
         let out = m.step(RunBudget::Instructions(60));
-        assert_eq!(out.stop, StopReason::BudgetExhausted, "mmu {mmu}, ivau at {ivau_at:#x}");
-        let got = [m.reg_read(Reg::X19), m.reg_read(Reg::X20), m.reg_read(Reg::X0)];
-        assert_eq!(got, [1, 7, 9], "mmu {mmu}, store at {store_at:#x}, ivau at {ivau_at:#x}");
+        assert_eq!(
+            out.stop,
+            StopReason::BudgetExhausted,
+            "mmu {mmu}, ivau at {ivau_at:#x}"
+        );
+        let got = [
+            m.reg_read(Reg::X19),
+            m.reg_read(Reg::X20),
+            m.reg_read(Reg::X0),
+        ];
+        assert_eq!(
+            got,
+            [1, 7, 9],
+            "mmu {mmu}, store at {store_at:#x}, ivau at {ivau_at:#x}"
+        );
     }
 }
 
@@ -186,7 +266,15 @@ fn code_made_visible_by_cache_maintenance_runs() {
 /// run `code` again.
 #[cfg(feature = "alloc")]
 const DISK_LOAD: [u32; 9] = [
-    0x9400_0080, 0xAA00_03F3, 0x28C1_1424, 0x3100_049F, 0x5400_0060, 0xB824_6865, 0x17FF_FFFC, 0x9400_0079, 0x1400_0000,
+    0x9400_0080,
+    0xAA00_03F3,
+    0x28C1_1424,
+    0x3100_049F,
+    0x5400_0060,
+    0xB824_6865,
+    0x17FF_FFFC,
+    0x9400_0079,
+    0x1400_0000,
 ];
 #[cfg(feature = "alloc")]
 const DISK_CODE: u64 = RAM_BASE + 0x200;
@@ -240,9 +328,12 @@ fn code_a_disk_read_puts_over_code_that_ran_runs_as_read() {
         d[14..].copy_from_slice(&next.to_le_bytes());
         d
     };
-    m.mem_write(DESC, &descriptor(HEADER, 16, NEXT, 1)).expect("RAM");
-    m.mem_write(DESC + 16, &descriptor(DISK_CODE, 512, WRITE | NEXT, 2)).expect("RAM");
-    m.mem_write(DESC + 32, &descriptor(STATUS_BYTE, 1, WRITE, 0)).expect("RAM");
+    m.mem_write(DESC, &descriptor(HEADER, 16, NEXT, 1))
+        .expect("RAM");
+    m.mem_write(DESC + 16, &descriptor(DISK_CODE, 512, WRITE | NEXT, 2))
+        .expect("RAM");
+    m.mem_write(DESC + 32, &descriptor(STATUS_BYTE, 1, WRITE, 0))
+        .expect("RAM");
     m.mem_write(HEADER, &[0u8; 16]).expect("RAM"); // VIRTIO_BLK_T_IN, sector 0
     m.mem_write(STATUS_BYTE, &[0xFF]).expect("RAM");
     m.mem_write(AVAIL, &[0, 0, 1, 0, 0, 0]).expect("RAM"); // flags 0, idx 1, ring[0] = 0
@@ -285,7 +376,11 @@ fn code_a_disk_read_puts_over_code_that_ran_runs_as_read() {
     m.mem_read(STATUS_BYTE, &mut status).expect("RAM");
     assert_eq!(status, [0], "the read completed (VIRTIO_BLK_S_OK)");
     assert_eq!(m.reg_read(Reg::X19), 1, "the old code ran first");
-    assert_eq!(m.reg_read(Reg::X0), 7, "the code the disk read in ran after");
+    assert_eq!(
+        m.reg_read(Reg::X0),
+        7,
+        "the code the disk read in ran after"
+    );
 }
 
 /// Flash bank 0's reset code: `ldr x0, =0x40001000; br x0`.
@@ -297,8 +392,22 @@ const TO_RAM: [u32; 4] = [0x5800_0040, 0xD61F_0000, 0x4000_1000, 0];
 /// written to another page of the block, back to read array, call it
 /// again.
 const ERASE_AND_CALL: [u32; 16] = [
-    0x5800_0185, 0xD63F_00A0, 0xAA00_03F3, 0x5800_0166, 0x5280_0401, 0xB900_00C1, 0x5280_1A01, 0xB900_00C1,
-    0x5280_1FE1, 0xB900_00C1, 0xD63F_00A0, 0x1400_0000, 0x0400_0000, 0, 0x0401_0000, 0,
+    0x5800_0185,
+    0xD63F_00A0,
+    0xAA00_03F3,
+    0x5800_0166,
+    0x5280_0401,
+    0xB900_00C1,
+    0x5280_1A01,
+    0xB900_00C1,
+    0x5280_1FE1,
+    0xB900_00C1,
+    0xD63F_00A0,
+    0x1400_0000,
+    0x0400_0000,
+    0,
+    0x0401_0000,
+    0,
 ];
 /// The synchronous exception handler: `mrs x21, esr_el1; mrs x22, elr_el1;
 /// b .`.
@@ -324,7 +433,10 @@ fn code_in_flash_erased_by_a_command_elsewhere_in_its_block_is_fetched_erased() 
         .firmware(&flash0)
         .variables(&vars)
         .instrumentation(Exceptions::default())
-        .build_in(MemoryLoan { ram: &mut ram, vars: &mut vars_bank })
+        .build_in(MemoryLoan {
+            ram: &mut ram,
+            vars: &mut vars_bank,
+        })
         .expect("a firmware machine builds");
     load(&mut m, RAM_BASE + 0x1000, &ERASE_AND_CALL);
     let vectors = RAM_BASE + 0x10_0000;
@@ -333,11 +445,22 @@ fn code_in_flash_erased_by_a_command_elsewhere_in_its_block_is_fetched_erased() 
 
     let out = m.step(RunBudget::Instructions(40));
     assert_eq!(out.stop, StopReason::BudgetExhausted);
-    assert_eq!(m.reg_read(Reg::X19), 1, "the code in flash ran before the erase");
+    assert_eq!(
+        m.reg_read(Reg::X19),
+        1,
+        "the code in flash ran before the erase"
+    );
     let taken = &m.instrumentation().0;
     assert_eq!(taken.len(), 1, "{taken:?}");
-    assert_eq!(taken[0].kind, ExceptionKind::Synchronous(ExceptionClass::Unknown));
-    assert_eq!(m.reg_read(Reg::X22), 0x0400_0000, "the erased word faulted where the code was");
+    assert_eq!(
+        taken[0].kind,
+        ExceptionKind::Synchronous(ExceptionClass::Unknown)
+    );
+    assert_eq!(
+        m.reg_read(Reg::X22),
+        0x0400_0000,
+        "the erased word faulted where the code was"
+    );
 }
 
 /// The exceptions an observer saw.
@@ -356,13 +479,27 @@ impl Instrumentation for Exceptions {
 /// read-array mode, and whose store of the CFI Read Status command leaves
 /// that mode under it.
 const FLASH_CODE: [u32; 9] = [
-    0x9400_0040, 0xAA00_03F3, 0xD280_0000, 0x5280_0E01, 0xD280_2002, 0xB900_0041, 0x9400_003A, 0xAA00_03F4, 0x1400_0000,
+    0x9400_0040,
+    0xAA00_03F3,
+    0xD280_0000,
+    0x5280_0E01,
+    0xD280_2002,
+    0xB900_0041,
+    0x9400_003A,
+    0xAA00_03F4,
+    0x1400_0000,
 ];
 const FLASH_FUNC: [u32; 2] = [0xD280_0020, 0xD65F_03C0];
 /// The synchronous exception handler, in RAM: `mov w1, #0xff;
 /// mov x2, #0x100; str w1, [x2]; mrs x21, esr_el1; eret` — back to
 /// read-array mode, and return to the instruction that faulted.
-const RESTORE_ARRAY: [u32; 5] = [0x5280_1FE1, 0xD280_2002, 0xB900_0041, 0xD538_5215, 0xD69F_03E0];
+const RESTORE_ARRAY: [u32; 5] = [
+    0x5280_1FE1,
+    0xD280_2002,
+    0xB900_0041,
+    0xD538_5215,
+    0xD69F_03E0,
+];
 
 #[test]
 fn code_in_flash_that_left_read_array_mode_is_fetched_as_flash_answers() {
@@ -378,7 +515,10 @@ fn code_in_flash_that_left_read_array_mode_is_fetched_as_flash_answers() {
         .ram(RamSize::bytes(RAM_LEN as u64).expect("a valid size"))
         .firmware(&flash)
         .instrumentation(Exceptions::default())
-        .build_in(MemoryLoan { ram: &mut ram, vars: &mut [] })
+        .build_in(MemoryLoan {
+            ram: &mut ram,
+            vars: &mut [],
+        })
         .expect("a firmware machine builds");
     let vectors = RAM_BASE + 0x10_0000;
     load(&mut m, vectors + 0x200, &RESTORE_ARRAY);
@@ -393,8 +533,18 @@ fn code_in_flash_that_left_read_array_mode_is_fetched_as_flash_answers() {
     // fetched as that.
     let taken = &m.instrumentation().0;
     assert_eq!(taken.len(), 1, "{taken:?}");
-    assert_eq!(taken[0].kind, ExceptionKind::Synchronous(ExceptionClass::Unknown));
-    assert_eq!(taken[0].return_address, 0x18, "the fetch after the store faulted");
+    assert_eq!(
+        taken[0].kind,
+        ExceptionKind::Synchronous(ExceptionClass::Unknown)
+    );
+    assert_eq!(
+        taken[0].return_address, 0x18,
+        "the fetch after the store faulted"
+    );
     assert_eq!(m.reg_read(Reg::X21) >> 26, 0, "ESR_EL1.EC: unknown reason");
-    assert_eq!(m.reg_read(Reg::X20), 1, "back in read-array mode, the code ran on and called func");
+    assert_eq!(
+        m.reg_read(Reg::X20),
+        1,
+        "back in read-array mode, the code ran on and called func"
+    );
 }

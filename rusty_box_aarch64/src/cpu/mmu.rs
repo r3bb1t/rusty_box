@@ -213,7 +213,9 @@ impl core::fmt::Display for TranslationFault {
             Self::AddressSize { level } => write!(f, "address size fault at level {level}"),
             Self::Translation { level } => write!(f, "translation fault at level {level}"),
             Self::AccessFlag { level } => write!(f, "access flag fault at level {level}"),
-            Self::ExternalAbortOnWalk { level } => write!(f, "external abort on the walk at level {level}"),
+            Self::ExternalAbortOnWalk { level } => {
+                write!(f, "external abort on the walk at level {level}")
+            }
         }
     }
 }
@@ -425,8 +427,18 @@ impl Tlb {
     /// The inverse of [`Tlb::save`], for a processor implementing
     /// `features` with `tcr` in TCR_EL1: an entry must be one its walk can
     /// produce and its TLB can hold (`Cpu::walk_and_cache`).
-    pub(crate) fn restore<R: SnapRead>(&mut self, r: &mut R, features: Features, tcr: u64) -> SnapResult {
-        let walked = PERMS | if features.has(Feature::Bti) { GUARDED } else { 0 };
+    pub(crate) fn restore<R: SnapRead>(
+        &mut self,
+        r: &mut R,
+        features: Features,
+        tcr: u64,
+    ) -> SnapResult {
+        let walked = PERMS
+            | if features.has(Feature::Bti) {
+                GUARDED
+            } else {
+                0
+            };
         let valid = r.read_count(TLB_ENTRIES)?;
         self.flush();
         for _ in 0..valid {
@@ -435,11 +447,20 @@ impl Tlb {
             let mut rest = [0u8; 3];
             r.read_bytes(&mut rest)?;
             let [perms, device, level] = rest;
-            if tag == INVALID_TAG || pa_page & 0xFFF != 0 || perms & !walked != 0 || device > 1 || level > 3 {
-                return Err(SnapError::Invalid("TLB entry is not one a walk can produce"));
+            if tag == INVALID_TAG
+                || pa_page & 0xFFF != 0
+                || perms & !walked != 0
+                || device > 1
+                || level > 3
+            {
+                return Err(SnapError::Invalid(
+                    "TLB entry is not one a walk can produce",
+                ));
             }
             if perms & PERMS_EL0 != 0 && e0pd_set(features, tcr, tag << 12) {
-                return Err(SnapError::Invalid("TLB entry gives EL0 a page FEAT_E0PD refuses it"));
+                return Err(SnapError::Invalid(
+                    "TLB entry gives EL0 a page FEAT_E0PD refuses it",
+                ));
             }
             let slot = &mut self.entries[Self::slot(tag << 12)];
             if slot.tag != INVALID_TAG {
@@ -489,7 +510,9 @@ impl Cpu {
         match acc.alignment {
             AlignmentRule::Any => false,
             AlignmentRule::Atomic => !(lse2 && in_granule),
-            AlignmentRule::Ordered => !lse2 || (self.sys.sctlr_el1 & sctlr::NAA == 0 && !in_granule),
+            AlignmentRule::Ordered => {
+                !lse2 || (self.sys.sctlr_el1 & sctlr::NAA == 0 && !in_granule)
+            }
         }
     }
 
@@ -506,7 +529,8 @@ impl Cpu {
         el: El,
         on_device: OnDevice,
     ) -> Result<Translated, Fsc> {
-        self.map(bus, va, kind, el, on_device).map(|m| Translated { pa: m.pa })
+        self.map(bus, va, kind, el, on_device)
+            .map(|m| Translated { pa: m.pa })
     }
 
     /// The TLB entry that translates `va` when stage 1 is enabled, if the
@@ -532,11 +556,20 @@ impl Cpu {
 
     /// [`Cpu::translate`], with the entry's flags.
     #[inline(always)]
-    fn map<B: PhysBus>(&mut self, bus: &mut B, va: u64, kind: AccessKind, el: El, on_device: OnDevice) -> Result<Mapping, Fsc> {
+    fn map<B: PhysBus>(
+        &mut self,
+        bus: &mut B,
+        va: u64,
+        kind: AccessKind,
+        el: El,
+        on_device: OnDevice,
+    ) -> Result<Mapping, Fsc> {
         if !self.mmu_enabled() {
             // Data accesses are Device-nGnRnE with stage 1 disabled, and
             // instruction fetches are Normal.
-            let address = self.s1_disabled_output(va, kind).ok_or(Fsc::AddressSize(0))?;
+            let address = self
+                .s1_disabled_output(va, kind)
+                .ok_or(Fsc::AddressSize(0))?;
             let device = kind != AccessKind::Fetch;
             if on_device == OnDevice::Refused && device {
                 return Err(Fsc::Alignment);
@@ -567,7 +600,14 @@ impl Cpu {
     /// A TLB miss: walk, cache what the walk found, check the memory type
     /// and the permissions.
     #[inline(never)]
-    fn translate_miss<B: PhysBus>(&mut self, bus: &mut B, va: u64, kind: AccessKind, el: El, on_device: OnDevice) -> Result<Mapping, Fsc> {
+    fn translate_miss<B: PhysBus>(
+        &mut self,
+        bus: &mut B,
+        va: u64,
+        kind: AccessKind,
+        el: El,
+        on_device: OnDevice,
+    ) -> Result<Mapping, Fsc> {
         let walked = self.walk_and_cache(bus, va, kind, el)?;
         if on_device == OnDevice::Refused && walked.device {
             return Err(Fsc::Alignment);
@@ -585,7 +625,13 @@ impl Cpu {
 
     /// The walk of a TLB miss for an access of `kind` at `va` checked
     /// against `el`'s permissions ([`Cpu::s1_walk`]), cached in the TLB.
-    fn walk_and_cache<B: PhysBus>(&mut self, bus: &mut B, va: u64, kind: AccessKind, el: El) -> Result<Walked, TranslationFault> {
+    fn walk_and_cache<B: PhysBus>(
+        &mut self,
+        bus: &mut B,
+        va: u64,
+        kind: AccessKind,
+        el: El,
+    ) -> Result<Walked, TranslationFault> {
         let walked = self.s1_walk(bus, va, kind, el)?;
         // A tagged address keeps its tag in the entry's tag, so it hits only
         // itself; a TCR_EL1 write, which can change what the walk ignores,
@@ -596,8 +642,10 @@ impl Cpu {
         // accesses walk each time, so an EL0 access never passes a hit's
         // permission check in a half E0PD refuses EL0, where the pages are
         // normally all EL1's and cached.
-        let fetch_faults = kind != AccessKind::Fetch && sext(va, 56) != va && !self.tbi(va, AccessKind::Fetch);
-        let e0pd_refuses_permitted = walked.perms & PERMS_EL0 != 0 && self.e0pd_refuses(va, El::El0);
+        let fetch_faults =
+            kind != AccessKind::Fetch && sext(va, 56) != va && !self.tbi(va, AccessKind::Fetch);
+        let e0pd_refuses_permitted =
+            walked.perms & PERMS_EL0 != 0 && self.e0pd_refuses(va, El::El0);
         if !fetch_faults && !e0pd_refuses_permitted {
             // The fill may evict the entry the running trace's fetches hit;
             // the next instruction's fetch translates again, as it would
@@ -630,7 +678,13 @@ impl Cpu {
     /// Arm `AArch64_S1Translate` with stage 1 enabled, as far as the walk:
     /// FEAT_E0PD's refusal of an access checked against `el`'s permissions,
     /// then the walk for an access of `kind` at `va`.
-    fn s1_walk<B: PhysBus>(&self, bus: &mut B, va: u64, kind: AccessKind, el: El) -> Result<Walked, TranslationFault> {
+    fn s1_walk<B: PhysBus>(
+        &self,
+        bus: &mut B,
+        va: u64,
+        kind: AccessKind,
+        el: El,
+    ) -> Result<Walked, TranslationFault> {
         if self.e0pd_refuses(va, el) {
             return Err(TranslationFault::Translation { level: 0 });
         }
@@ -719,13 +773,21 @@ impl Cpu {
     #[inline]
     fn txsz(&self, upper: bool) -> u32 {
         let tcr = self.sys.tcr_el1;
-        (if upper { (tcr >> 16) & 0x3F } else { tcr & 0x3F }) as u32
+        (if upper {
+            (tcr >> 16) & 0x3F
+        } else {
+            tcr & 0x3F
+        }) as u32
     }
 
     /// `va` with its tag cleared when top-byte-ignore covers it.
     #[inline]
     fn untagged(&self, va: u64, kind: AccessKind) -> u64 {
-        if self.tbi(va, kind) { va & 0x00FF_FFFF_FFFF_FFFF } else { va }
+        if self.tbi(va, kind) {
+            va & 0x00FF_FFFF_FFFF_FFFF
+        } else {
+            va
+        }
     }
 
     /// The output address of an access of `kind` at `va` with stage 1
@@ -748,7 +810,11 @@ impl Cpu {
     /// (helper-a64.c) for ERET.
     #[inline]
     pub(crate) fn branch_addr(&self, target: u64) -> u64 {
-        if self.tbi(target, AccessKind::Fetch) { sext(target, 56) } else { target }
+        if self.tbi(target, AccessKind::Fetch) {
+            sext(target, 56)
+        } else {
+            target
+        }
     }
 
     /// The translation table walk (Arm ARM `AArch64.TranslationTableWalk`)
@@ -758,7 +824,12 @@ impl Cpu {
     /// space being walked (`AArch64_S1NextWalkStateTable`). The base
     /// address leaves out `TTBRn_EL1.CnP` (FEAT_TTCNP), bit 0, which has no
     /// effect on one processor.
-    fn walk<B: PhysBus>(&self, bus: &mut B, va: u64, kind: AccessKind) -> Result<Walked, TranslationFault> {
+    fn walk<B: PhysBus>(
+        &self,
+        bus: &mut B,
+        va: u64,
+        kind: AccessKind,
+    ) -> Result<Walked, TranslationFault> {
         let tcr = self.sys.tcr_el1;
         let upper = (va >> 55) & 1 == 1;
         let (epd, ttbr) = if upper {
@@ -817,7 +888,9 @@ impl Cpu {
             let at_level = level as u8;
             let desc = match bus.read_descriptor(PhysAddr::new(table + index * 8), clock) {
                 Ok(d) => d,
-                Err(BusFault::Unmapped) => return Err(TranslationFault::ExternalAbortOnWalk { level: at_level }),
+                Err(BusFault::Unmapped) => {
+                    return Err(TranslationFault::ExternalAbortOnWalk { level: at_level })
+                }
             };
             if desc & 1 == 0 {
                 return Err(TranslationFault::Translation { level: at_level });
@@ -905,7 +978,11 @@ impl Cpu {
     /// data access would make, with no permission check, no TLB lookup or
     /// fill, and descriptors read through `bus` — which a caller makes a view
     /// that cannot disturb a device. Nothing in the processor changes.
-    pub(crate) fn debug_translate<B: PhysBus>(&self, bus: &mut B, va: u64) -> Result<u64, TranslationFault> {
+    pub(crate) fn debug_translate<B: PhysBus>(
+        &self,
+        bus: &mut B,
+        va: u64,
+    ) -> Result<u64, TranslationFault> {
         if !self.mmu_enabled() {
             return self
                 .s1_disabled_output(va, AccessKind::Read)
@@ -921,12 +998,22 @@ impl Cpu {
     /// Abort (Arm ARM `AArch64.AT`: `IsExternalAbort` of the fault), as QEMU
     /// takes it, with `CM` and `WnR` set, as for every address translation
     /// instruction (`ESR_ELx.ISS`).
-    pub(crate) fn address_translate<B: PhysBus>(&mut self, bus: &mut B, va: u64, write: bool, check: AtCheck) -> Result<(), Fault> {
+    pub(crate) fn address_translate<B: PhysBus>(
+        &mut self,
+        bus: &mut B,
+        va: u64,
+        write: bool,
+        check: AtCheck,
+    ) -> Result<(), Fault> {
         const RES1: u64 = 1 << 11;
         // This core runs in Non-secure state, as QEMU's `virt` does without
         // `secure=on`, so a successful translation reports NS = 1.
         const NS: u64 = 1 << 9;
-        let kind = if write { AccessKind::Write } else { AccessKind::Read };
+        let kind = if write {
+            AccessKind::Write
+        } else {
+            AccessKind::Read
+        };
         let el = match check {
             AtCheck::El0 => El::El0,
             AtCheck::El1 | AtCheck::El1Pan => El::El1,
@@ -943,7 +1030,9 @@ impl Cpu {
             }
         } else {
             // Device-nGnRnE (attribute 0x00) with stage 1 disabled.
-            self.s1_disabled_output(va, kind).map(|address| (address, 0, 0)).ok_or(Fsc::AddressSize(0))
+            self.s1_disabled_output(va, kind)
+                .map(|address| (address, 0, 0))
+                .ok_or(Fsc::AddressSize(0))
         };
         if let Err(fsc @ Fsc::SyncExternalOnWalk(_)) = result {
             return Err(Self::data_abort_iss(va, fsc.code() | ISS_CM | ISS_WNR));
@@ -953,8 +1042,16 @@ impl Cpu {
                 // Arm ARM `PAREncodeShareability`, as QEMU's
                 // `par_el1_shareability`: Device and Normal Non-cacheable
                 // memory report Outer Shareable.
-                let sh = if attr & 0xF0 == 0 || attr == 0x44 || attr == 0x40 { 2 } else { shareability };
-                (u64::from(attr) << 56) | (pa & 0x0000_FFFF_FFFF_F000) | NS | (u64::from(sh) << 7) | RES1
+                let sh = if attr & 0xF0 == 0 || attr == 0x44 || attr == 0x40 {
+                    2
+                } else {
+                    shareability
+                };
+                (u64::from(attr) << 56)
+                    | (pa & 0x0000_FFFF_FFFF_F000)
+                    | NS
+                    | (u64::from(sh) << 7)
+                    | RES1
             }
             // F = 1, FST, bit 11 RES1. PTW and S are 0: stage 1, not on a walk
             // of a stage-2 table.
@@ -977,7 +1074,9 @@ impl Cpu {
     }
 
     fn data_abort_iss(va: u64, iss: u32) -> Fault {
-        Exception::new(ExceptionClass::DataAbort, iss).with_far(va).into()
+        Exception::new(ExceptionClass::DataAbort, iss)
+            .with_far(va)
+            .into()
     }
 
     /// A synchronous external abort: the bus refused the access. With
@@ -990,12 +1089,17 @@ impl Cpu {
     #[inline(never)]
     fn external_abort(&self, va: u64, pa: u64, kind: AccessKind) -> Fault {
         if self.debug_stops.on_bus_fault {
-            return Fault::Stop(StopCause::BusFault { pc: self.pc, addr: pa });
+            return Fault::Stop(StopCause::BusFault {
+                pc: self.pc,
+                addr: pa,
+            });
         }
         match kind {
-            AccessKind::Fetch => Exception::new(ExceptionClass::InstructionAbort, Fsc::SyncExternal.code())
-                .with_far(va)
-                .into(),
+            AccessKind::Fetch => {
+                Exception::new(ExceptionClass::InstructionAbort, Fsc::SyncExternal.code())
+                    .with_far(va)
+                    .into()
+            }
             AccessKind::Read => Self::data_abort(va, Fsc::SyncExternal, false),
             AccessKind::Write => Self::data_abort(va, Fsc::SyncExternal, true),
         }
@@ -1006,7 +1110,11 @@ impl Cpu {
     /// whether the page is guarded (Arm `InGuardedPage`, FEAT_BTI) in
     /// [`Cpu::in_guarded_page`], for the instructions fetched from it.
     #[inline(always)]
-    pub(crate) fn fetch_translate<B: PhysBus>(&mut self, bus: &mut B, pc: u64) -> Result<u64, Fault> {
+    pub(crate) fn fetch_translate<B: PhysBus>(
+        &mut self,
+        bus: &mut B,
+        pc: u64,
+    ) -> Result<u64, Fault> {
         match self.permitted_hit(pc, AccessKind::Fetch, self.pstate.el) {
             Some(entry) => {
                 self.in_guarded_page = entry.perms & GUARDED != 0;
@@ -1041,14 +1149,21 @@ impl Cpu {
         let el = self.pstate.el;
         let m = self
             .map(bus, pc, AccessKind::Fetch, el, OnDevice::Permitted)
-            .map_err(|f| Fault::from(Exception::new(ExceptionClass::InstructionAbort, f.code()).with_far(pc)))?;
+            .map_err(|f| {
+                Fault::from(Exception::new(ExceptionClass::InstructionAbort, f.code()).with_far(pc))
+            })?;
         self.in_guarded_page = m.flags & GUARDED != 0;
         Ok(m.pa)
     }
 
     /// Read the instruction word at `pa`, which `pc` translated to.
     #[inline]
-    pub(crate) fn fetch_word<B: PhysBus>(&mut self, bus: &mut B, pc: u64, pa: u64) -> Result<u32, Fault> {
+    pub(crate) fn fetch_word<B: PhysBus>(
+        &mut self,
+        bus: &mut B,
+        pc: u64,
+        pa: u64,
+    ) -> Result<u32, Fault> {
         match bus.fetch(PhysAddr::new(pa), self.clock()) {
             Ok(word) => Ok(word),
             Err(BusFault::Unmapped) => Err(self.external_abort(pc, pa, AccessKind::Fetch)),
@@ -1097,7 +1212,11 @@ impl Cpu {
             // An ordinary access misaligned on Normal memory faults only
             // under SCTLR_EL1.A ([`Cpu::misaligned_faults`]).
             let aligned = va & (bytes - 1) == 0 && acc.part == Part::Whole;
-            if aligned || (!entry.device && acc.alignment == AlignmentRule::Any && !self.strict_alignment()) {
+            if aligned
+                || (!entry.device
+                    && acc.alignment == AlignmentRule::Any
+                    && !self.strict_alignment())
+            {
                 return Ok(Translated {
                     pa: entry.mapping(va).pa,
                 });
@@ -1122,7 +1241,11 @@ impl Cpu {
     ) -> Result<Translated, Fault> {
         let misaligned = va & (bytes - 1) != 0;
         if misaligned && self.misaligned_faults(va, bytes, acc) {
-            return Err(Self::data_abort(va, Fsc::Alignment, direction == DataDirection::Write));
+            return Err(Self::data_abort(
+                va,
+                Fsc::Alignment,
+                direction == DataDirection::Write,
+            ));
         }
         let on_device = if misaligned || acc.part == Part::OfMisaligned {
             OnDevice::Refused
@@ -1131,12 +1254,12 @@ impl Cpu {
         };
         let el = self.access_el(acc);
         match direction {
-            DataDirection::Read => {
-                self.translate(bus, va, AccessKind::Read, el, on_device).map_err(|f| Self::data_abort(va, f, false))
-            }
-            DataDirection::Write => {
-                self.translate(bus, va, AccessKind::Write, el, on_device).map_err(|f| Self::data_abort(va, f, true))
-            }
+            DataDirection::Read => self
+                .translate(bus, va, AccessKind::Read, el, on_device)
+                .map_err(|f| Self::data_abort(va, f, false)),
+            DataDirection::Write => self
+                .translate(bus, va, AccessKind::Write, el, on_device)
+                .map_err(|f| Self::data_abort(va, f, true)),
             DataDirection::ReadWrite => self.translate_rmw(bus, va, el, on_device),
         }
     }
@@ -1144,8 +1267,16 @@ impl Cpu {
     /// The translation of a read-modify-write at `va`: read permission,
     /// then write permission, checked against the flags of the one lookup.
     #[inline(never)]
-    fn translate_rmw<B: PhysBus>(&mut self, bus: &mut B, va: u64, el: El, on_device: OnDevice) -> Result<Translated, Fault> {
-        let m = self.map(bus, va, AccessKind::Read, el, on_device).map_err(|f| Self::data_abort(va, f, false))?;
+    fn translate_rmw<B: PhysBus>(
+        &mut self,
+        bus: &mut B,
+        va: u64,
+        el: El,
+        on_device: OnDevice,
+    ) -> Result<Translated, Fault> {
+        let m = self
+            .map(bus, va, AccessKind::Read, el, on_device)
+            .map_err(|f| Self::data_abort(va, f, false))?;
         if self.mmu_enabled() && !self.permits(m.flags, AccessKind::Write, el) {
             return Err(Self::data_abort(va, Fsc::Permission(m.level), true));
         }
@@ -1164,14 +1295,21 @@ impl Cpu {
         direction: DataDirection,
         acc: DataAccess,
     ) -> Result<PhysAddr, Fault> {
-        self.translate_data(bus, va, bytes, direction, acc).map(|t| PhysAddr::new(t.pa))
+        self.translate_data(bus, va, bytes, direction, acc)
+            .map(|t| PhysAddr::new(t.pa))
     }
 
     /// The bus half of every data read: `1 << log2` bytes (`log2` in 0..=3)
     /// at `pa`, which `va` translated to, in one bus access, zero-extended.
     /// A bus fault is a synchronous external abort reported at `va`.
     #[inline(always)]
-    fn bus_read<B: PhysBus>(&mut self, bus: &mut B, va: u64, pa: PhysAddr, log2: u32) -> Result<u64, Fault> {
+    fn bus_read<B: PhysBus>(
+        &mut self,
+        bus: &mut B,
+        va: u64,
+        pa: PhysAddr,
+        log2: u32,
+    ) -> Result<u64, Fault> {
         let width = AccessWidth::from_log2(log2).unwrap_or(AccessWidth::Dword);
         match bus.read(pa, width, self.clock()) {
             Ok(v) => Ok(v & width.value_mask()),
@@ -1184,7 +1322,14 @@ impl Cpu {
     /// [`Cpu::note_store`]. A bus fault is a synchronous external abort
     /// reported at `va`.
     #[inline(always)]
-    fn bus_write<B: PhysBus>(&mut self, bus: &mut B, va: u64, pa: PhysAddr, log2: u32, value: u64) -> Result<(), Fault> {
+    fn bus_write<B: PhysBus>(
+        &mut self,
+        bus: &mut B,
+        va: u64,
+        pa: PhysAddr,
+        log2: u32,
+        value: u64,
+    ) -> Result<(), Fault> {
         let width = AccessWidth::from_log2(log2).unwrap_or(AccessWidth::Dword);
         self.note_store(pa.get(), 1 << log2);
         match bus.write(pa, width, value & width.value_mask(), self.clock()) {
@@ -1197,7 +1342,13 @@ impl Cpu {
     /// access within one page is inlined into the instruction that makes
     /// it; one that crosses a page boundary is out of line.
     #[inline(always)]
-    pub(crate) fn read_mem<B: PhysBus>(&mut self, bus: &mut B, va: u64, log2: u32, acc: DataAccess) -> Result<u64, Fault> {
+    pub(crate) fn read_mem<B: PhysBus>(
+        &mut self,
+        bus: &mut B,
+        va: u64,
+        log2: u32,
+        acc: DataAccess,
+    ) -> Result<u64, Fault> {
         let bytes = 1u64 << log2;
         if (va & 0xFFF) + bytes <= 0x1000 {
             let t = self.translate_data(bus, va, bytes, DataDirection::Read, acc)?;
@@ -1218,7 +1369,13 @@ impl Cpu {
     /// fault before translation is the whole access's, and reports its
     /// address.
     #[inline(never)]
-    fn read_mem_across_pages<B: PhysBus>(&mut self, bus: &mut B, va: u64, bytes: u64, acc: DataAccess) -> Result<u64, Fault> {
+    fn read_mem_across_pages<B: PhysBus>(
+        &mut self,
+        bus: &mut B,
+        va: u64,
+        bytes: u64,
+        acc: DataAccess,
+    ) -> Result<u64, Fault> {
         if self.misaligned_faults(va, bytes, acc) {
             return Err(Self::data_abort(va, Fsc::Alignment, false));
         }
@@ -1260,7 +1417,14 @@ impl Cpu {
     /// access's own address in the first page, the start of the second page
     /// in the second.
     #[inline(never)]
-    fn write_mem_across_pages<B: PhysBus>(&mut self, bus: &mut B, va: u64, bytes: u64, value: u64, acc: DataAccess) -> Result<(), Fault> {
+    fn write_mem_across_pages<B: PhysBus>(
+        &mut self,
+        bus: &mut B,
+        va: u64,
+        bytes: u64,
+        value: u64,
+        acc: DataAccess,
+    ) -> Result<(), Fault> {
         if self.misaligned_faults(va, bytes, acc) {
             return Err(Self::data_abort(va, Fsc::Alignment, true));
         }
@@ -1281,7 +1445,13 @@ impl Cpu {
     /// boundary and the first byte on its second page, so that a fault on
     /// either is taken before anything is written, reported at the byte
     /// that faulted.
-    fn translate_write_pages<B: PhysBus>(&mut self, bus: &mut B, va: u64, bytes: u64, el: El) -> Result<(), Fault> {
+    fn translate_write_pages<B: PhysBus>(
+        &mut self,
+        bus: &mut B,
+        va: u64,
+        bytes: u64,
+        el: El,
+    ) -> Result<(), Fault> {
         let second_page = va.wrapping_add(bytes - 1) & !0xFFF;
         for probe in [va, second_page] {
             self.translate(bus, probe, AccessKind::Write, el, OnDevice::Refused)
@@ -1306,7 +1476,13 @@ impl Cpu {
     /// result stays usable until TLB maintenance, Arm ARM D8.13). Each
     /// element still takes its own external abort.
     #[inline(always)]
-    pub(crate) fn read_pair<B: PhysBus>(&mut self, bus: &mut B, va: u64, log2: u32, acc: DataAccess) -> Result<ElementPair, Fault> {
+    pub(crate) fn read_pair<B: PhysBus>(
+        &mut self,
+        bus: &mut B,
+        va: u64,
+        log2: u32,
+        acc: DataAccess,
+    ) -> Result<ElementPair, Fault> {
         let bytes = 1u64 << log2;
         if (va & 0xFFF) + 2 * bytes <= 0x1000 && acc.alignment == AlignmentRule::Any {
             let t = self.translate_data(bus, va, bytes, DataDirection::Read, acc)?;
@@ -1321,7 +1497,13 @@ impl Cpu {
     /// page boundary, or with an alignment rule that judges each element by
     /// where it lies.
     #[inline(never)]
-    fn read_pair_apart<B: PhysBus>(&mut self, bus: &mut B, va: u64, log2: u32, acc: DataAccess) -> Result<ElementPair, Fault> {
+    fn read_pair_apart<B: PhysBus>(
+        &mut self,
+        bus: &mut B,
+        va: u64,
+        log2: u32,
+        acc: DataAccess,
+    ) -> Result<ElementPair, Fault> {
         let first = self.read_mem(bus, va, log2, acc)?;
         let second = self.read_mem(bus, va.wrapping_add(1 << log2), log2, acc)?;
         Ok(ElementPair { first, second })
@@ -1350,7 +1532,13 @@ impl Cpu {
         if (va & 0xFFF) + 2 * bytes <= 0x1000 && acc.alignment == AlignmentRule::Any {
             let t = self.translate_data(bus, va, bytes, DataDirection::Write, acc)?;
             self.bus_write(bus, va, PhysAddr::new(t.pa), log2, value.first)?;
-            return self.bus_write(bus, va + bytes, PhysAddr::new(t.pa + bytes), log2, value.second);
+            return self.bus_write(
+                bus,
+                va + bytes,
+                PhysAddr::new(t.pa + bytes),
+                log2,
+                value.second,
+            );
         }
         self.write_pair_apart(bus, va, log2, value, acc)
     }
@@ -1358,7 +1546,14 @@ impl Cpu {
     /// A [`Cpu::write_pair`] whose elements are written on their own, as
     /// for [`Cpu::read_pair_apart`].
     #[inline(never)]
-    fn write_pair_apart<B: PhysBus>(&mut self, bus: &mut B, va: u64, log2: u32, value: ElementPair, acc: DataAccess) -> Result<(), Fault> {
+    fn write_pair_apart<B: PhysBus>(
+        &mut self,
+        bus: &mut B,
+        va: u64,
+        log2: u32,
+        value: ElementPair,
+        acc: DataAccess,
+    ) -> Result<(), Fault> {
         self.write_mem(bus, va, log2, value.first, acc)?;
         self.write_mem(bus, va.wrapping_add(1 << log2), log2, value.second, acc)
     }
@@ -1367,7 +1562,13 @@ impl Cpu {
     /// 0..=4) at `pa`, which [`Cpu::translate_for`] translated `va` to with
     /// every check, as [`Cpu::read_mem`] reads them; 16 bytes, which are
     /// aligned (no 16-byte atomic may be misaligned), are two 8-byte halves.
-    pub(crate) fn read_translated<B: PhysBus>(&mut self, bus: &mut B, va: u64, pa: PhysAddr, log2: u32) -> Result<u128, Fault> {
+    pub(crate) fn read_translated<B: PhysBus>(
+        &mut self,
+        bus: &mut B,
+        va: u64,
+        pa: PhysAddr,
+        log2: u32,
+    ) -> Result<u128, Fault> {
         if log2 == 4 {
             let lo = self.bus_read(bus, va, pa, 3)?;
             let hi = self.bus_read(bus, va.wrapping_add(8), PhysAddr::new(pa.get() + 8), 3)?;
@@ -1378,10 +1579,23 @@ impl Cpu {
 
     /// The write half of an atomic access: the low `1 << log2` bytes of
     /// `value` at `pa`, as [`Cpu::read_translated`] reads them.
-    pub(crate) fn write_translated<B: PhysBus>(&mut self, bus: &mut B, va: u64, pa: PhysAddr, log2: u32, value: u128) -> Result<(), Fault> {
+    pub(crate) fn write_translated<B: PhysBus>(
+        &mut self,
+        bus: &mut B,
+        va: u64,
+        pa: PhysAddr,
+        log2: u32,
+        value: u128,
+    ) -> Result<(), Fault> {
         if log2 == 4 {
             self.bus_write(bus, va, pa, 3, value as u64)?;
-            return self.bus_write(bus, va.wrapping_add(8), PhysAddr::new(pa.get() + 8), 3, (value >> 64) as u64);
+            return self.bus_write(
+                bus,
+                va.wrapping_add(8),
+                PhysAddr::new(pa.get() + 8),
+                3,
+                (value >> 64) as u64,
+            );
         }
         self.bus_write(bus, va, pa, log2, value as u64)
     }
@@ -1390,7 +1604,12 @@ impl Cpu {
     /// translated with the whole access's alignment (Arm `Mem[]`: a 16-byte
     /// SIMD&FP access is two single-copy atomic 8-byte accesses, each passed
     /// the access's own `aligned`).
-    pub(crate) fn read_mem_u128<B: PhysBus>(&mut self, bus: &mut B, va: u64, acc: DataAccess) -> Result<u128, Fault> {
+    pub(crate) fn read_mem_u128<B: PhysBus>(
+        &mut self,
+        bus: &mut B,
+        va: u64,
+        acc: DataAccess,
+    ) -> Result<u128, Fault> {
         if va & 15 != 0 && self.misaligned_faults(va, 16, acc) {
             return Err(Self::data_abort(va, Fsc::Alignment, false));
         }
@@ -1443,7 +1662,12 @@ impl Cpu {
     /// says. With no cache to clean or invalidate, the translation is all
     /// they do. A fault is a Data Abort at `va` with `CM` and `WnR` set
     /// (`AArch64_FaultSyndrome`); Device memory refuses none of them.
-    pub(crate) fn cache_maintenance<B: PhysBus>(&mut self, bus: &mut B, va: u64, op: CacheMaintenance) -> Result<(), Fault> {
+    pub(crate) fn cache_maintenance<B: PhysBus>(
+        &mut self,
+        bus: &mut B,
+        va: u64,
+        op: CacheMaintenance,
+    ) -> Result<(), Fault> {
         let abort = |fsc: Fsc| Self::cache_maintenance_abort(va, fsc);
         if !self.mmu_enabled() {
             return match self.s1_disabled_output(va, AccessKind::Read) {
@@ -1460,14 +1684,18 @@ impl Cpu {
         let (perms, level) = match self.tlb.hit(va) {
             Some(entry) => (entry.perms, entry.level),
             None => {
-                let walked = self.walk_and_cache(bus, va, AccessKind::Read, el).map_err(|f| abort(Fsc::from(f)))?;
+                let walked = self
+                    .walk_and_cache(bus, va, AccessKind::Read, el)
+                    .map_err(|f| abort(Fsc::from(f)))?;
                 (walked.perms, walked.level)
             }
         };
         let needed = match (op, el) {
             (CacheMaintenance::Invalidate, _) => Some(AccessKind::Write),
             (CacheMaintenance::Clean, El::El0) => Some(AccessKind::Read),
-            (CacheMaintenance::Clean, El::El1) | (CacheMaintenance::InstructionInvalidate, _) => None,
+            (CacheMaintenance::Clean, El::El1) | (CacheMaintenance::InstructionInvalidate, _) => {
+                None
+            }
         };
         match needed {
             Some(kind) if !permitted(perms, kind, el) => Err(abort(Fsc::Permission(level))),
@@ -1487,7 +1715,10 @@ impl Cpu {
         self.note_store(t.pa, id::DC_ZVA_BYTES);
         let clock = self.clock();
         for i in 0..id::DC_ZVA_BYTES / 8 {
-            if bus.write(PhysAddr::new(t.pa + i * 8), AccessWidth::Dword, 0, clock).is_err() {
+            if bus
+                .write(PhysAddr::new(t.pa + i * 8), AccessWidth::Dword, 0, clock)
+                .is_err()
+            {
                 return Err(self.external_abort(va, t.pa + i * 8, AccessKind::Write));
             }
         }
@@ -1519,7 +1750,13 @@ impl Cpu {
     /// `bytes` at `va` (Arm `AArch64_UnalignedAccessFaults`), on its own: a
     /// store-exclusive makes it before it compares its address with the
     /// monitor's (`AArch64.ExclusiveMonitorsPass`).
-    pub(crate) fn check_alignment(&self, va: u64, bytes: u64, acc: DataAccess, write: bool) -> Result<(), Fault> {
+    pub(crate) fn check_alignment(
+        &self,
+        va: u64,
+        bytes: u64,
+        acc: DataAccess,
+        write: bool,
+    ) -> Result<(), Fault> {
         if va & (bytes - 1) != 0 && self.misaligned_faults(va, bytes, acc) {
             return Err(Self::data_abort(va, Fsc::Alignment, write));
         }
@@ -1531,7 +1768,12 @@ impl Cpu {
     /// AlignmentFault(accdesc, addr))`, `aligned` being the base register's
     /// alignment to the transfer's natural size, and the fault reported at
     /// `va`, the first byte's address.
-    pub(crate) fn check_transfer_alignment(&self, aligned: bool, va: u64, write: bool) -> Result<(), Fault> {
+    pub(crate) fn check_transfer_alignment(
+        &self,
+        aligned: bool,
+        va: u64,
+        write: bool,
+    ) -> Result<(), Fault> {
         if !aligned && self.strict_alignment() {
             return Err(Self::data_abort(va, Fsc::Alignment, write));
         }

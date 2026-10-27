@@ -76,7 +76,9 @@ impl Asisdpair {
             | Self::FmaxpSd
             | Self::FminnmpSd
             | Self::FminpSd => Feature::AdvSimd,
-            Self::FmaxnmpH | Self::FaddpH | Self::FmaxpH | Self::FminnmpH | Self::FminpH => Feature::Fp16,
+            Self::FmaxnmpH | Self::FaddpH | Self::FmaxpH | Self::FminnmpH | Self::FminpH => {
+                Feature::Fp16
+            }
         }
     }
 }

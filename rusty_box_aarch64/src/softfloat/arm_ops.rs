@@ -28,14 +28,14 @@ use super::internals::*;
 use super::primitives::*;
 use super::softfloat::*;
 use super::specialize::{
-    f32_flush_input, f32_report_denormals, f64_flush_input, f64_report_denormals, softfloat_propagate_nan_f32,
-    softfloat_propagate_nan_f64, tininess_before_rounding,
+    f32_flush_input, f32_report_denormals, f64_flush_input, f64_report_denormals,
+    softfloat_propagate_nan_f32, softfloat_propagate_nan_f64, tininess_before_rounding,
 };
 use super::uint64_convert::f64_to_ui64 as sf_f64_to_ui64;
 use super::uint_convert::f64_to_ui32 as sf_f64_to_ui32;
 use super::{
-    f32_neg, f32_report_denormals_unless_nan, f64_neg, f64_report_denormals_unless_nan, with_rounding, ArmFpStatus,
-    FpRounding,
+    f32_neg, f32_report_denormals_unless_nan, f64_neg, f64_report_denormals_unless_nan,
+    with_rounding, ArmFpStatus, FpRounding,
 };
 
 const F32_SIGN: u32 = 0x8000_0000;
@@ -77,7 +77,12 @@ fn fixed_to_f32(negative: bool, magnitude: u64, fbits: u32, status: &mut SoftFlo
     let norm = magnitude << lz;
     // Leading bit at 30 with the dropped bits jammed, as round_pack wants.
     let sig = ((norm >> 33) as u32) | u32::from(norm & ((1 << 33) - 1) != 0);
-    round_pack_to_f32(negative, (0x9C + 33 - lz as i32 - fbits as i32) as i16, sig, status)
+    round_pack_to_f32(
+        negative,
+        (0x9C + 33 - lz as i32 - fbits as i32) as i16,
+        sig,
+        status,
+    )
 }
 
 /// As [`fixed_to_f32`], to double precision.
@@ -89,26 +94,55 @@ fn fixed_to_f64(negative: bool, magnitude: u64, fbits: u32, status: &mut SoftFlo
     let norm = magnitude << lz;
     // Leading bit at 62 with the dropped bit jammed.
     let sig = (norm >> 1) | (norm & 1);
-    round_pack_to_f64(negative, (0x43C + 1 - lz as i32 - fbits as i32) as i16, sig, status)
+    round_pack_to_f64(
+        negative,
+        (0x43C + 1 - lz as i32 - fbits as i32) as i16,
+        sig,
+        status,
+    )
 }
 
 /// SCVTF (fixed point) to single: a signed value with `fbits` fraction bits.
-pub(crate) fn i64_to_f32_fixed(a: i64, fbits: u32, rounding: FpRounding, fp: &mut ArmFpStatus) -> u32 {
-    with_rounding(fp, rounding, |s| fixed_to_f32(a < 0, a.unsigned_abs(), fbits, s))
+pub(crate) fn i64_to_f32_fixed(
+    a: i64,
+    fbits: u32,
+    rounding: FpRounding,
+    fp: &mut ArmFpStatus,
+) -> u32 {
+    with_rounding(fp, rounding, |s| {
+        fixed_to_f32(a < 0, a.unsigned_abs(), fbits, s)
+    })
 }
 
 /// UCVTF (fixed point) to single.
-pub(crate) fn u64_to_f32_fixed(a: u64, fbits: u32, rounding: FpRounding, fp: &mut ArmFpStatus) -> u32 {
+pub(crate) fn u64_to_f32_fixed(
+    a: u64,
+    fbits: u32,
+    rounding: FpRounding,
+    fp: &mut ArmFpStatus,
+) -> u32 {
     with_rounding(fp, rounding, |s| fixed_to_f32(false, a, fbits, s))
 }
 
 /// SCVTF (fixed point) to double.
-pub(crate) fn i64_to_f64_fixed(a: i64, fbits: u32, rounding: FpRounding, fp: &mut ArmFpStatus) -> u64 {
-    with_rounding(fp, rounding, |s| fixed_to_f64(a < 0, a.unsigned_abs(), fbits, s))
+pub(crate) fn i64_to_f64_fixed(
+    a: i64,
+    fbits: u32,
+    rounding: FpRounding,
+    fp: &mut ArmFpStatus,
+) -> u64 {
+    with_rounding(fp, rounding, |s| {
+        fixed_to_f64(a < 0, a.unsigned_abs(), fbits, s)
+    })
 }
 
 /// UCVTF (fixed point) to double.
-pub(crate) fn u64_to_f64_fixed(a: u64, fbits: u32, rounding: FpRounding, fp: &mut ArmFpStatus) -> u64 {
+pub(crate) fn u64_to_f64_fixed(
+    a: u64,
+    fbits: u32,
+    rounding: FpRounding,
+    fp: &mut ArmFpStatus,
+) -> u64 {
     with_rounding(fp, rounding, |s| fixed_to_f64(false, a, fbits, s))
 }
 
@@ -169,56 +203,116 @@ fn f64_scaled(a: u64, fbits: u32) -> u64 {
 
 /// FCVTZS (fixed point) from single to a 32-bit integer with `fbits`
 /// fraction bits.
-pub(crate) fn f32_to_i32_fixed(a: u32, fbits: u32, rounding: FpRounding, fp: &mut ArmFpStatus) -> i32 {
+pub(crate) fn f32_to_i32_fixed(
+    a: u32,
+    fbits: u32,
+    rounding: FpRounding,
+    fp: &mut ArmFpStatus,
+) -> i32 {
     let s = &mut fp.status;
     let a = f32_flush_input(a, s);
-    sf_f64_to_i32(f64_scaled(f32_widened(a), fbits), rounding.softfloat_mode(), true, s)
+    sf_f64_to_i32(
+        f64_scaled(f32_widened(a), fbits),
+        rounding.softfloat_mode(),
+        true,
+        s,
+    )
 }
 
 /// FCVTZS (fixed point) from single to a 64-bit integer.
-pub(crate) fn f32_to_i64_fixed(a: u32, fbits: u32, rounding: FpRounding, fp: &mut ArmFpStatus) -> i64 {
+pub(crate) fn f32_to_i64_fixed(
+    a: u32,
+    fbits: u32,
+    rounding: FpRounding,
+    fp: &mut ArmFpStatus,
+) -> i64 {
     let s = &mut fp.status;
     let a = f32_flush_input(a, s);
-    sf_f64_to_i64(f64_scaled(f32_widened(a), fbits), rounding.softfloat_mode(), true, s)
+    sf_f64_to_i64(
+        f64_scaled(f32_widened(a), fbits),
+        rounding.softfloat_mode(),
+        true,
+        s,
+    )
 }
 
 /// FCVTZU (fixed point) from single to a 32-bit integer.
-pub(crate) fn f32_to_u32_fixed(a: u32, fbits: u32, rounding: FpRounding, fp: &mut ArmFpStatus) -> u32 {
+pub(crate) fn f32_to_u32_fixed(
+    a: u32,
+    fbits: u32,
+    rounding: FpRounding,
+    fp: &mut ArmFpStatus,
+) -> u32 {
     let s = &mut fp.status;
     let a = f32_flush_input(a, s);
-    sf_f64_to_ui32(f64_scaled(f32_widened(a), fbits), rounding.softfloat_mode(), true, s)
+    sf_f64_to_ui32(
+        f64_scaled(f32_widened(a), fbits),
+        rounding.softfloat_mode(),
+        true,
+        s,
+    )
 }
 
 /// FCVTZU (fixed point) from single to a 64-bit integer.
-pub(crate) fn f32_to_u64_fixed(a: u32, fbits: u32, rounding: FpRounding, fp: &mut ArmFpStatus) -> u64 {
+pub(crate) fn f32_to_u64_fixed(
+    a: u32,
+    fbits: u32,
+    rounding: FpRounding,
+    fp: &mut ArmFpStatus,
+) -> u64 {
     let s = &mut fp.status;
     let a = f32_flush_input(a, s);
-    sf_f64_to_ui64(f64_scaled(f32_widened(a), fbits), rounding.softfloat_mode(), true, s)
+    sf_f64_to_ui64(
+        f64_scaled(f32_widened(a), fbits),
+        rounding.softfloat_mode(),
+        true,
+        s,
+    )
 }
 
 /// FCVTZS (fixed point) from double to a 32-bit integer.
-pub(crate) fn f64_to_i32_fixed(a: u64, fbits: u32, rounding: FpRounding, fp: &mut ArmFpStatus) -> i32 {
+pub(crate) fn f64_to_i32_fixed(
+    a: u64,
+    fbits: u32,
+    rounding: FpRounding,
+    fp: &mut ArmFpStatus,
+) -> i32 {
     let s = &mut fp.status;
     let a = f64_flush_input(a, s);
     sf_f64_to_i32(f64_scaled(a, fbits), rounding.softfloat_mode(), true, s)
 }
 
 /// FCVTZS (fixed point) from double to a 64-bit integer.
-pub(crate) fn f64_to_i64_fixed(a: u64, fbits: u32, rounding: FpRounding, fp: &mut ArmFpStatus) -> i64 {
+pub(crate) fn f64_to_i64_fixed(
+    a: u64,
+    fbits: u32,
+    rounding: FpRounding,
+    fp: &mut ArmFpStatus,
+) -> i64 {
     let s = &mut fp.status;
     let a = f64_flush_input(a, s);
     sf_f64_to_i64(f64_scaled(a, fbits), rounding.softfloat_mode(), true, s)
 }
 
 /// FCVTZU (fixed point) from double to a 32-bit integer.
-pub(crate) fn f64_to_u32_fixed(a: u64, fbits: u32, rounding: FpRounding, fp: &mut ArmFpStatus) -> u32 {
+pub(crate) fn f64_to_u32_fixed(
+    a: u64,
+    fbits: u32,
+    rounding: FpRounding,
+    fp: &mut ArmFpStatus,
+) -> u32 {
     let s = &mut fp.status;
     let a = f64_flush_input(a, s);
     sf_f64_to_ui32(f64_scaled(a, fbits), rounding.softfloat_mode(), true, s)
 }
 
 /// FCVTZU (fixed point) from double to a 64-bit integer.
-pub(crate) fn f64_to_u64_fixed(a: u64, fbits: u32, rounding: FpRounding, fp: &mut ArmFpStatus) -> u64 {
+pub(crate) fn f64_to_u64_fixed(
+    a: u64,
+    fbits: u32,
+    rounding: FpRounding,
+    fp: &mut ArmFpStatus,
+) -> u64 {
     let s = &mut fp.status;
     let a = f64_flush_input(a, s);
     sf_f64_to_ui64(f64_scaled(a, fbits), rounding.softfloat_mode(), true, s)
@@ -249,17 +343,31 @@ pub(crate) fn f64_to_i32_js(op: u64, fp: &mut ArmFpStatus) -> JsConversion {
     let frac = a & FRAC;
     if exp == 0x7FF {
         softfloat_raise_flags(s, FLAG_INVALID);
-        return JsConversion { value: 0, exact: false };
+        return JsConversion {
+            value: 0,
+            exact: false,
+        };
     }
     if exp == 0 && frac == 0 {
-        return JsConversion { value: 0, exact: !negative && op & FRAC == 0 };
+        return JsConversion {
+            value: 0,
+            exact: !negative && op & FRAC == 0,
+        };
     }
     // The value is `sig` × 2^`shift`.
-    let (sig, shift) = if exp == 0 { (frac, -1074) } else { (frac | (1 << 52), exp - 1075) };
+    let (sig, shift) = if exp == 0 {
+        (frac, -1074)
+    } else {
+        (frac | (1 << 52), exp - 1075)
+    };
     let (low, in_range, rounded) = if shift >= 0 {
         // At least 2^52 in magnitude: beyond the range, the low bits zero
         // from 2^32 up.
-        let low = if shift >= 32 { 0 } else { (sig << shift) as u32 };
+        let low = if shift >= 32 {
+            0
+        } else {
+            (sig << shift) as u32
+        };
         (low, false, false)
     } else {
         let (magnitude, rounded) = if shift <= -64 {
@@ -276,7 +384,10 @@ pub(crate) fn f64_to_i32_js(op: u64, fp: &mut ArmFpStatus) -> JsConversion {
     } else if rounded {
         softfloat_raise_flags(s, FLAG_INEXACT);
     }
-    JsConversion { value, exact: in_range && !rounded }
+    JsConversion {
+        value,
+        exact: in_range && !rounded,
+    }
 }
 
 // ============================================================
@@ -373,8 +484,8 @@ fn round_pack_to_f16_ahp(sign: bool, exp: i16, sig: u16, status: &mut SoftFloatS
 
     if 0x1E <= (exp as u16) {
         if exp < 0 {
-            let is_tiny =
-                tininess_before_rounding(status) || f16_tiny_after_rounding(sign, exp, sig, rounding_mode);
+            let is_tiny = tininess_before_rounding(status)
+                || f16_tiny_after_rounding(sign, exp, sig, rounding_mode);
             sig = shift_right_jam32(u32::from(sig), (-(exp as i32)) as u16) as u16;
             exp = 0;
             round_bits = sig & 0xF;
@@ -412,7 +523,11 @@ pub(crate) fn f32_to_f16_ahp(a: u32, fp: &mut ArmFpStatus) -> u16 {
     let frac = frac_f32(a);
     if exp == 0xFF {
         softfloat_raise_flags(s, FLAG_INVALID);
-        return if frac != 0 { pack_to_f16(sign, 0, 0) } else { ahp_max(sign) };
+        return if frac != 0 {
+            pack_to_f16(sign, 0, 0)
+        } else {
+            ahp_max(sign)
+        };
     }
     // Sticky-collapse the 9 bits that do not survive the narrowing.
     let frac16 = ((frac >> 9) | u32::from(frac & 0x1FF != 0)) as u16;
@@ -432,7 +547,11 @@ pub(crate) fn f64_to_f16_ahp(a: u64, fp: &mut ArmFpStatus) -> u16 {
     let frac = frac_f64(a);
     if exp == 0x7FF {
         softfloat_raise_flags(s, FLAG_INVALID);
-        return if frac != 0 { pack_to_f16(sign, 0, 0) } else { ahp_max(sign) };
+        return if frac != 0 {
+            pack_to_f16(sign, 0, 0)
+        } else {
+            ahp_max(sign)
+        };
     }
     let frac16 = short_shift_right_jam64(frac, 38) as u16;
     if (exp as u16 | frac16) == 0 {
@@ -682,18 +801,33 @@ mod tests {
     fn fixed_point_conversions_scale_by_the_fraction_bits() {
         let mut fp = nearest();
         // 3 with one fraction bit is 1.5; -1 with 64 fraction bits is -2^-64.
-        assert_eq!(i64_to_f32_fixed(3, 1, FpRounding::TieEven, &mut fp), 0x3FC0_0000);
-        assert_eq!(i64_to_f64_fixed(-1, 64, FpRounding::TieEven, &mut fp), 0xBBF0_0000_0000_0000);
+        assert_eq!(
+            i64_to_f32_fixed(3, 1, FpRounding::TieEven, &mut fp),
+            0x3FC0_0000
+        );
+        assert_eq!(
+            i64_to_f64_fixed(-1, 64, FpRounding::TieEven, &mut fp),
+            0xBBF0_0000_0000_0000
+        );
         // 1.75 to fixed point with two fraction bits is 7.
-        assert_eq!(f32_to_i32_fixed(0x3FE0_0000, 2, FpRounding::Zero, &mut fp), 7);
+        assert_eq!(
+            f32_to_i32_fixed(0x3FE0_0000, 2, FpRounding::Zero, &mut fp),
+            7
+        );
         assert_eq!(fp.cumulative_fpsr(), 0, "all of these are exact");
         // 2^64 - 1 needs 64 significant bits: it rounds to 2^64.
-        assert_eq!(u64_to_f32_fixed(u64::MAX, 0, FpRounding::TieEven, &mut fp), 0x5F80_0000);
+        assert_eq!(
+            u64_to_f32_fixed(u64::MAX, 0, FpRounding::TieEven, &mut fp),
+            0x5F80_0000
+        );
         assert_eq!(fp.cumulative_fpsr(), super::super::FPSR_IXC);
         // 2^31 with one fraction bit saturates a 32-bit integer, raising
         // Invalid Operation alone.
         let mut fp = nearest();
-        assert_eq!(f32_to_i32_fixed(0x4F00_0000, 1, FpRounding::Zero, &mut fp), i32::MAX);
+        assert_eq!(
+            f32_to_i32_fixed(0x4F00_0000, 1, FpRounding::Zero, &mut fp),
+            i32::MAX
+        );
         assert_eq!(fp.cumulative_fpsr(), super::super::FPSR_IOC);
     }
 
@@ -712,8 +846,14 @@ mod tests {
         let mut fp = nearest();
         // 1 + 2^-30 is between two singles: toward zero gives 1.0, and the
         // odd bit marks the loss.
-        assert_eq!(f64_to_f32_round_odd(0x3FF0_0000_0040_0000, &mut fp), 0x3F80_0001);
-        assert_eq!(f64_to_f32_round_odd(0x3FF0_0000_0000_0000, &mut fp), 0x3F80_0000);
+        assert_eq!(
+            f64_to_f32_round_odd(0x3FF0_0000_0040_0000, &mut fp),
+            0x3F80_0001
+        );
+        assert_eq!(
+            f64_to_f32_round_odd(0x3FF0_0000_0000_0000, &mut fp),
+            0x3F80_0000
+        );
     }
 
     #[test]
@@ -736,10 +876,19 @@ mod tests {
         assert_eq!(f32_rsqrt_step(0, 0xFF80_0000, &mut fp), F32_ONE_POINT_FIVE);
         assert_eq!(f32_mulx(0x8000_0000, 0x7F80_0000, &mut fp), 0xC000_0000);
         // FRECPS(2, 0.5) = 2 - 1 = 1; FRSQRTS(1, 1) = (3 - 1) / 2 = 1.
-        assert_eq!(f32_recip_step(0x4000_0000, 0x3F00_0000, &mut fp), 0x3F80_0000);
-        assert_eq!(f32_rsqrt_step(0x3F80_0000, 0x3F80_0000, &mut fp), 0x3F80_0000);
+        assert_eq!(
+            f32_recip_step(0x4000_0000, 0x3F00_0000, &mut fp),
+            0x3F80_0000
+        );
+        assert_eq!(
+            f32_rsqrt_step(0x3F80_0000, 0x3F80_0000, &mut fp),
+            0x3F80_0000
+        );
         // FRSQRTS(2, 1) = (3 - 2) / 2 = 0.5.
-        assert_eq!(f64_rsqrt_step(0x4000_0000_0000_0000, 0x3FF0_0000_0000_0000, &mut fp), 0x3FE0_0000_0000_0000);
+        assert_eq!(
+            f64_rsqrt_step(0x4000_0000_0000_0000, 0x3FF0_0000_0000_0000, &mut fp),
+            0x3FE0_0000_0000_0000
+        );
         assert_eq!(fp.cumulative_fpsr(), 0);
     }
 }

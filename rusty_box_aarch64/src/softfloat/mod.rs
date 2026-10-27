@@ -61,20 +61,22 @@ mod tests;
 use self::host::Arith;
 use self::min_max::{Extreme, MinMaxRules};
 use self::softfloat::*;
-use self::specialize::{f32_flush_input, f32_report_denormals, f64_flush_input, f64_report_denormals};
+use self::specialize::{
+    f32_flush_input, f32_report_denormals, f64_flush_input, f64_report_denormals,
+};
 
 pub(crate) use self::arm_ops::{
-    f16_ahp_to_f32, f16_ahp_to_f64, f32_log_b, f32_mulx, f32_recip_step, f32_rsqrt_step, f32_scale, f32_to_f16_ahp,
-    f32_to_i32_fixed, f32_to_i64_fixed, f32_to_u32_fixed, f32_to_u64_fixed, f64_log_b, f64_mulx, f64_recip_step,
-    f64_rsqrt_step, f64_scale, f64_to_f16_ahp, f64_to_f32_round_odd, f64_to_i32_fixed, f64_to_i32_js,
-    f64_to_i64_fixed, f64_to_u32_fixed, f64_to_u64_fixed, i64_to_f32_fixed, i64_to_f64_fixed, u64_to_f32_fixed,
-    u64_to_f64_fixed,
+    f16_ahp_to_f32, f16_ahp_to_f64, f32_log_b, f32_mulx, f32_recip_step, f32_rsqrt_step, f32_scale,
+    f32_to_f16_ahp, f32_to_i32_fixed, f32_to_i64_fixed, f32_to_u32_fixed, f32_to_u64_fixed,
+    f64_log_b, f64_mulx, f64_recip_step, f64_rsqrt_step, f64_scale, f64_to_f16_ahp,
+    f64_to_f32_round_odd, f64_to_i32_fixed, f64_to_i32_js, f64_to_i64_fixed, f64_to_u32_fixed,
+    f64_to_u64_fixed, i64_to_f32_fixed, i64_to_f64_fixed, u64_to_f32_fixed, u64_to_f64_fixed,
 };
 pub(crate) use self::bfloat::{bf16_dot_add, f32_to_bf16};
 pub(crate) use self::half::{
-    f16_add, f16_compare, f16_div, f16_dot, f16_log_b, f16_max, f16_maxnum, f16_min, f16_minnum, f16_mul, f16_mul_add,
-    f16_mul_add_long, f16_mulx, f16_recip_step, f16_round_to_int, f16_rsqrt_step, f16_scale, f16_sqrt, f16_sub,
-    f16_to_signed, f16_to_unsigned, int_to_f16,
+    f16_add, f16_compare, f16_div, f16_dot, f16_log_b, f16_max, f16_maxnum, f16_min, f16_minnum,
+    f16_mul, f16_mul_add, f16_mul_add_long, f16_mulx, f16_recip_step, f16_round_to_int,
+    f16_rsqrt_step, f16_scale, f16_sqrt, f16_sub, f16_to_signed, f16_to_unsigned, int_to_f16,
 };
 pub(crate) use self::softfloat::{FpOrdering, Handling, InputFlush};
 
@@ -243,7 +245,11 @@ impl ArmFpStatus {
         self.status.softfloat_rounding_mode = FpRounding::from_fpcr(fpcr).softfloat_mode();
         self.status.flush_to_zero = fpcr & FPCR_FZ != 0;
         self.status.default_nan_mode = fpcr & FPCR_DN != 0;
-        self.status.handling = if alternate { Handling::Alternate } else { Handling::Standard };
+        self.status.handling = if alternate {
+            Handling::Alternate
+        } else {
+            Handling::Standard
+        };
         // FPUnpackBase: `fz = FPCR.FZ && !altfp`, `fiz = FPCR.FIZ`; only
         // the first raises Input Denormal.
         self.status.input_flush = if fpcr & FPCR_FZ != 0 && !alternate {
@@ -484,17 +490,39 @@ pub(crate) fn f32_sqrt(a: u32, fp: &mut ArmFpStatus) -> u32 {
 /// FMADD/FMSUB/FNMADD/FNMSUB (single), `addend` being Ra. Arm FPMulAdd
 /// after the form's operand negations (FPNeg); a used denormal is reported
 /// unless a NaN or an invalid operation decided the result.
-pub(crate) fn f32_mul_add(form: FusedMulAdd, addend: u32, n: u32, m: u32, fp: &mut ArmFpStatus) -> u32 {
+pub(crate) fn f32_mul_add(
+    form: FusedMulAdd,
+    addend: u32,
+    n: u32,
+    m: u32,
+    fp: &mut ArmFpStatus,
+) -> u32 {
     // The host fuses normal operands only, which FPNeg negates by their
     // sign bit, FPCR.AH or not.
-    let host_addend = if form.negates_addend() { addend ^ 0x8000_0000 } else { addend };
-    let host_n = if form.negates_multiplicand() { n ^ 0x8000_0000 } else { n };
+    let host_addend = if form.negates_addend() {
+        addend ^ 0x8000_0000
+    } else {
+        addend
+    };
+    let host_n = if form.negates_multiplicand() {
+        n ^ 0x8000_0000
+    } else {
+        n
+    };
     if let Some(fused) = host::f32_fused(host_addend, host_n, m, fp) {
         return fused;
     }
     let s = &mut fp.status;
-    let addend = if form.negates_addend() { f32_neg(addend, s) } else { addend };
-    let n = if form.negates_multiplicand() { f32_neg(n, s) } else { n };
+    let addend = if form.negates_addend() {
+        f32_neg(addend, s)
+    } else {
+        addend
+    };
+    let n = if form.negates_multiplicand() {
+        f32_neg(n, s)
+    } else {
+        n
+    };
     let addend = f32_flush_input(addend, s);
     let n = f32_flush_input(n, s);
     let m = f32_flush_input(m, s);
@@ -547,10 +575,20 @@ pub(crate) fn f32_compare(a: u32, b: u32, signal: NanSignal, fp: &mut ArmFpStatu
 }
 
 /// FRINT* (single). Arm FPRoundInt.
-pub(crate) fn f32_round_to_int(a: u32, rounding: FpRounding, report: InexactReport, fp: &mut ArmFpStatus) -> u32 {
+pub(crate) fn f32_round_to_int(
+    a: u32,
+    rounding: FpRounding,
+    report: InexactReport,
+    fp: &mut ArmFpStatus,
+) -> u32 {
     let s = &mut fp.status;
     let a = f32_flush_input(a, s);
-    f32_round_to_int::f32_round_to_int(a, rounding.softfloat_mode(), report == InexactReport::Raise, s)
+    f32_round_to_int::f32_round_to_int(
+        a,
+        rounding.softfloat_mode(),
+        report == InexactReport::Raise,
+        s,
+    )
 }
 
 // ============================================================
@@ -581,7 +619,9 @@ fn f64_report_denormals_unless_nan(operands: &[u64], s: &mut SoftFloatStatus) {
 fn f64_mul_add_invalid(addend: u64, n: u64, m: u64) -> bool {
     let inf = |x: u64| x & !F64_SIGN == 0x7FF0_0000_0000_0000;
     let zero = |x: u64| x & !F64_SIGN == 0;
-    (inf(n) && zero(m)) || (zero(n) && inf(m)) || (inf(addend) && (inf(n) || inf(m)) && (addend ^ n ^ m) & F64_SIGN != 0)
+    (inf(n) && zero(m))
+        || (zero(n) && inf(m))
+        || (inf(addend) && (inf(n) || inf(m)) && (addend ^ n ^ m) & F64_SIGN != 0)
 }
 
 /// FADD (double). Arm FPAdd.
@@ -646,17 +686,39 @@ pub(crate) fn f64_sqrt(a: u64, fp: &mut ArmFpStatus) -> u64 {
 
 /// FMADD/FMSUB/FNMADD/FNMSUB (double), `addend` being Ra. Arm FPMulAdd
 /// after the form's operand negations; see [`f32_mul_add`].
-pub(crate) fn f64_mul_add(form: FusedMulAdd, addend: u64, n: u64, m: u64, fp: &mut ArmFpStatus) -> u64 {
+pub(crate) fn f64_mul_add(
+    form: FusedMulAdd,
+    addend: u64,
+    n: u64,
+    m: u64,
+    fp: &mut ArmFpStatus,
+) -> u64 {
     // The host fuses normal operands only, which FPNeg negates by their
     // sign bit, FPCR.AH or not.
-    let host_addend = if form.negates_addend() { addend ^ F64_SIGN } else { addend };
-    let host_n = if form.negates_multiplicand() { n ^ F64_SIGN } else { n };
+    let host_addend = if form.negates_addend() {
+        addend ^ F64_SIGN
+    } else {
+        addend
+    };
+    let host_n = if form.negates_multiplicand() {
+        n ^ F64_SIGN
+    } else {
+        n
+    };
     if let Some(fused) = host::f64_fused(host_addend, host_n, m, fp) {
         return fused;
     }
     let s = &mut fp.status;
-    let addend = if form.negates_addend() { f64_neg(addend, s) } else { addend };
-    let n = if form.negates_multiplicand() { f64_neg(n, s) } else { n };
+    let addend = if form.negates_addend() {
+        f64_neg(addend, s)
+    } else {
+        addend
+    };
+    let n = if form.negates_multiplicand() {
+        f64_neg(n, s)
+    } else {
+        n
+    };
     let addend = f64_flush_input(addend, s);
     let n = f64_flush_input(n, s);
     let m = f64_flush_input(m, s);
@@ -709,10 +771,20 @@ pub(crate) fn f64_compare(a: u64, b: u64, signal: NanSignal, fp: &mut ArmFpStatu
 }
 
 /// FRINT* (double). Arm FPRoundInt.
-pub(crate) fn f64_round_to_int(a: u64, rounding: FpRounding, report: InexactReport, fp: &mut ArmFpStatus) -> u64 {
+pub(crate) fn f64_round_to_int(
+    a: u64,
+    rounding: FpRounding,
+    report: InexactReport,
+    fp: &mut ArmFpStatus,
+) -> u64 {
     let s = &mut fp.status;
     let a = f64_flush_input(a, s);
-    f64_round_to_int::f64_round_to_int(a, rounding.softfloat_mode(), report == InexactReport::Raise, s)
+    f64_round_to_int::f64_round_to_int(
+        a,
+        rounding.softfloat_mode(),
+        report == InexactReport::Raise,
+        s,
+    )
 }
 
 // ============================================================

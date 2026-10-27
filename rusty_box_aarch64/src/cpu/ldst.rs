@@ -45,7 +45,13 @@ impl Cpu {
 
     /// LDR/STR and friends, every single-register form except the literal:
     /// `size 111 V 0x opc ...` with the offset form `form`.
-    pub(crate) fn exec_ldst_single<B: PhysBus>(&mut self, bus: &mut B, pc: u64, insn: u32, form: SingleForm) -> ExecResult {
+    pub(crate) fn exec_ldst_single<B: PhysBus>(
+        &mut self,
+        bus: &mut B,
+        pc: u64,
+        insn: u32,
+        form: SingleForm,
+    ) -> ExecResult {
         let size = bits(insn, 31, 30);
         let vector = bit(insn, 26);
         let opc = bits(insn, 23, 22);
@@ -53,7 +59,11 @@ impl Cpu {
         let rt = bits(insn, 4, 0);
 
         // Element size: for SIMD&FP registers opc<1> selects the 128-bit form.
-        let scale = if vector { ((opc >> 1) << 2) | size } else { size };
+        let scale = if vector {
+            ((opc >> 1) << 2) | size
+        } else {
+            size
+        };
         if vector && scale > 4 {
             return self.undefined(pc, insn);
         }
@@ -178,7 +188,12 @@ impl Cpu {
 
     /// LDR (literal), LDRSW (literal), PRFM (literal) and the SIMD&FP
     /// literal loads: `opc 011 V 00 imm19 Rt`.
-    pub(crate) fn exec_load_literal<B: PhysBus>(&mut self, bus: &mut B, pc: u64, insn: u32) -> ExecResult {
+    pub(crate) fn exec_load_literal<B: PhysBus>(
+        &mut self,
+        bus: &mut B,
+        pc: u64,
+        insn: u32,
+    ) -> ExecResult {
         let opc = bits(insn, 31, 30);
         let vector = bit(insn, 26);
         let rt = bits(insn, 4, 0);
@@ -216,7 +231,12 @@ impl Cpu {
 
     /// LDP/STP/LDPSW/LDNP/STNP, general and SIMD&FP:
     /// `opc 101 V 0 index L imm7 Rt2 Rn Rt`.
-    pub(crate) fn exec_ldst_pair<B: PhysBus>(&mut self, bus: &mut B, pc: u64, insn: u32) -> ExecResult {
+    pub(crate) fn exec_ldst_pair<B: PhysBus>(
+        &mut self,
+        bus: &mut B,
+        pc: u64,
+        insn: u32,
+    ) -> ExecResult {
         let opc = bits(insn, 31, 30);
         let vector = bit(insn, 26);
         let index = bits(insn, 24, 23);
@@ -278,8 +298,15 @@ impl Cpu {
                 }
             }
         } else if load {
-            let ElementPair { first: a, second: b } = self.read_pair(bus, address, scale, acc)?;
-            let (a, b) = if signed { (sext(a, 32), sext(b, 32)) } else { (a, b) };
+            let ElementPair {
+                first: a,
+                second: b,
+            } = self.read_pair(bus, address, scale, acc)?;
+            let (a, b) = if signed {
+                (sext(a, 32), sext(b, 32))
+            } else {
+                (a, b)
+            };
             // With Rt == Rt2 the result is CONSTRAINED UNPREDICTABLE. QEMU
             // (translate-a64.c `trans_LDP`) loads a 32-bit pair as one
             // 64-bit value and writes Rt2 then Rt, but splits a 64-bit pair
@@ -309,7 +336,12 @@ impl Cpu {
     /// `size 001000 o2 L o1 Rs o0 Rt2 Rn Rt` (Arm groups `ldstexclr`,
     /// `ldstexclp` and `ldstord`). CAS and CASP share the space and are
     /// `exec_cas` and `exec_casp`.
-    pub(crate) fn exec_ldst_exclusive<B: PhysBus>(&mut self, bus: &mut B, pc: u64, insn: u32) -> ExecResult {
+    pub(crate) fn exec_ldst_exclusive<B: PhysBus>(
+        &mut self,
+        bus: &mut B,
+        pc: u64,
+        insn: u32,
+    ) -> ExecResult {
         let size = bits(insn, 31, 30);
         let o2 = bit(insn, 23);
         let load = bit(insn, 22);
@@ -349,7 +381,8 @@ impl Cpu {
         let total = 1u64 << total_log2;
 
         if load {
-            let pa = self.translate_for(bus, address, total, DataDirection::Read, DataAccess::ATOMIC)?;
+            let pa =
+                self.translate_for(bus, address, total, DataDirection::Read, DataAccess::ATOMIC)?;
             if pair {
                 let elem = 1u64 << size;
                 let a = self.read_mem(bus, address, size, DataAccess::ATOMIC)?;
@@ -383,7 +416,13 @@ impl Cpu {
         self.check_alignment(address, total, DataAccess::ATOMIC, true)?;
         let m = self.monitor;
         let pass = if m.armed && m.va == address && m.bytes == total {
-            let pa = self.translate_for(bus, address, total, DataDirection::Write, DataAccess::ATOMIC)?;
+            let pa = self.translate_for(
+                bus,
+                address,
+                total,
+                DataDirection::Write,
+                DataAccess::ATOMIC,
+            )?;
             m.addr == pa.get()
         } else {
             false
@@ -406,7 +445,12 @@ impl Cpu {
 
     /// LD1-LD4/ST1-ST4 (multiple structures), with and without post-index:
     /// `0 Q 001100 post L 0 Rm opcode size Rn Rt`.
-    pub(crate) fn exec_ldst_multiple<B: PhysBus>(&mut self, bus: &mut B, pc: u64, insn: u32) -> ExecResult {
+    pub(crate) fn exec_ldst_multiple<B: PhysBus>(
+        &mut self,
+        bus: &mut B,
+        pc: u64,
+        insn: u32,
+    ) -> ExecResult {
         let q = bit(insn, 30);
         let post = bit(insn, 23);
         let load = bit(insn, 22);
@@ -465,7 +509,14 @@ impl Cpu {
             // a 64-bit form clears the upper half.
             for r in 0..(rpt * selem) {
                 let t = ((rt + r) % 32) as usize;
-                self.write_v(t, if q { regs[t] } else { regs[t] & u128::from(u64::MAX) });
+                self.write_v(
+                    t,
+                    if q {
+                        regs[t]
+                    } else {
+                        regs[t] & u128::from(u64::MAX)
+                    },
+                );
             }
         }
         if post {
@@ -477,7 +528,12 @@ impl Cpu {
 
     /// LD1-LD4/ST1-ST4 (single structure) and LD1R-LD4R:
     /// `0 Q 001101 post L R Rm opcode S size Rn Rt`.
-    pub(crate) fn exec_ldst_single_structure<B: PhysBus>(&mut self, bus: &mut B, pc: u64, insn: u32) -> ExecResult {
+    pub(crate) fn exec_ldst_single_structure<B: PhysBus>(
+        &mut self,
+        bus: &mut B,
+        pc: u64,
+        insn: u32,
+    ) -> ExecResult {
         let q = bit(insn, 30);
         let post = bit(insn, 23);
         let load = bit(insn, 22);

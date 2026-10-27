@@ -36,22 +36,39 @@ impl OneWord<'_> {
 }
 
 impl PhysBus for OneWord<'_> {
-    fn read(&mut self, addr: PhysAddr, width: AccessWidth, _clock: VmClock) -> Result<u64, BusFault> {
+    fn read(
+        &mut self,
+        addr: PhysAddr,
+        width: AccessWidth,
+        _clock: VmClock,
+    ) -> Result<u64, BusFault> {
         let a = addr.get();
         let n = width.bytes();
         if a >= CODE && a + n <= CODE + 4 {
             return Ok(u64::from(self.insn >> (8 * (a - CODE))) & width.value_mask());
         }
         match self.data_offset(a, n) {
-            Some(off) => Ok((0..n as usize).fold(0u64, |v, i| v | (u64::from(self.data[off + i]) << (8 * i)))),
+            Some(off) => {
+                Ok((0..n as usize)
+                    .fold(0u64, |v, i| v | (u64::from(self.data[off + i]) << (8 * i))))
+            }
             None => Err(BusFault::Unmapped),
         }
     }
 
-    fn write(&mut self, addr: PhysAddr, width: AccessWidth, value: u64, _clock: VmClock) -> Result<(), BusFault> {
+    fn write(
+        &mut self,
+        addr: PhysAddr,
+        width: AccessWidth,
+        value: u64,
+        _clock: VmClock,
+    ) -> Result<(), BusFault> {
         match self.data_offset(addr.get(), width.bytes()) {
             Some(off) if self.writable => {
-                for (i, byte) in self.data[off..off + width.bytes() as usize].iter_mut().enumerate() {
+                for (i, byte) in self.data[off..off + width.bytes() as usize]
+                    .iter_mut()
+                    .enumerate()
+                {
                     *byte = (value >> (8 * i)) as u8;
                 }
                 Ok(())
@@ -65,8 +82,21 @@ impl PhysBus for OneWord<'_> {
 /// there is one.
 pub(crate) fn processor(imp: Implementation) -> Cpu {
     let ips = ClockHz::new(1_000_000).unwrap_or(ClockHz::BOCHS_DEFAULT);
-    let mut cpu = Cpu::implementing(CpuConfig { ips, reset_pc: CODE }, Implementation { counter_hz: ips, ..imp });
-    cpu.sys.cpacr_el1 = if imp.has(Feature::Sme) { CPACR_ALL } else { 3 << 20 };
+    let mut cpu = Cpu::implementing(
+        CpuConfig {
+            ips,
+            reset_pc: CODE,
+        },
+        Implementation {
+            counter_hz: ips,
+            ..imp
+        },
+    );
+    cpu.sys.cpacr_el1 = if imp.has(Feature::Sme) {
+        CPACR_ALL
+    } else {
+        3 << 20
+    };
     cpu.sys.vbar_el1 = VBAR;
     cpu
 }
@@ -80,7 +110,10 @@ pub(crate) struct Taken {
 
 pub(crate) const UNDEFINED: Taken = Taken { ec: 0x00, iss: 0 };
 /// The SIMD&FP access trap (EC 0x07, COND 0xE).
-pub(crate) const FP_TRAP: Taken = Taken { ec: 0x07, iss: 0x01E0_0000 };
+pub(crate) const FP_TRAP: Taken = Taken {
+    ec: 0x07,
+    iss: 0x01E0_0000,
+};
 /// The SME trap with SMTC 0: SME disabled.
 pub(crate) const SME_DISABLED: Taken = Taken { ec: 0x1D, iss: 0 };
 /// The SME trap with SMTC 1: an instruction illegal in Streaming SVE mode.
@@ -116,12 +149,20 @@ fn step_on(cpu: &mut Cpu, bus: &mut OneWord<'_>) -> Option<Taken> {
     let pstate = cpu.pstate;
     cpu.pc = CODE;
     cpu.sys.esr_el1 = 0x3F << 26;
-    assert_eq!(cpu.step(bus, &mut NoInstrumentation), Step::Retired, "{insn:#010x}");
+    assert_eq!(
+        cpu.step(bus, &mut NoInstrumentation),
+        Step::Retired,
+        "{insn:#010x}"
+    );
     let esr = cpu.sys.esr_el1;
     if esr >> 26 == 0x3F {
         return None;
     }
-    assert_eq!(cpu.pc & !0x7FF, VBAR, "{insn:#010x} took an exception to the vector table");
+    assert_eq!(
+        cpu.pc & !0x7FF,
+        VBAR,
+        "{insn:#010x} took an exception to the vector table"
+    );
     cpu.pstate = pstate;
     Some(Taken {
         ec: esr >> 26,

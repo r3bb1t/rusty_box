@@ -14,8 +14,9 @@
 use super::exec::{bit, bits, ExecResult, Flow};
 use super::features::Feature;
 use super::fp::{
-    fp_binary, fp_compare, fp_compare_holds, fp_convert, fp_convert_round_odd, fp_mul_add, fp_to_int, fp_unary,
-    int_to_fp, round_int_n, FpBinary, FpCompare, FpConversion, FpType, FpUnary, FrintPrecision, IntSize, IntWidth,
+    fp_binary, fp_compare, fp_compare_holds, fp_convert, fp_convert_round_odd, fp_mul_add,
+    fp_to_int, fp_unary, int_to_fp, round_int_n, FpBinary, FpCompare, FpConversion, FpType,
+    FpUnary, FrintPrecision, IntSize, IntWidth,
 };
 use super::fp_estimate::{urecpe, ursqrte};
 use super::simd::{elem, set_elem};
@@ -94,8 +95,9 @@ impl Cpu {
         };
         let has_scalar_form = matches!(
             op,
-            Op::Binary(FpBinary::MulX | FpBinary::RecipStep | FpBinary::RSqrtStep | FpBinary::AbsDiff)
-                | Op::Compare(_)
+            Op::Binary(
+                FpBinary::MulX | FpBinary::RecipStep | FpBinary::RSqrtStep | FpBinary::AbsDiff
+            ) | Op::Compare(_)
         );
         if (scalar && !has_scalar_form) || (!scalar && ty == FpType::Double && !q) {
             return self.undefined(pc, insn);
@@ -103,7 +105,12 @@ impl Cpu {
         // Scalar FMULX, FRECPS and FRSQRTS are legal in Streaming SVE mode
         // (Arm ARM FMULX, FRECPS, FRSQRTS: `if elements == 1 then
         // AArch64_CheckFPEnabled()`).
-        if scalar && matches!(op, Op::Binary(FpBinary::MulX | FpBinary::RecipStep | FpBinary::RSqrtStep)) {
+        if scalar
+            && matches!(
+                op,
+                Op::Binary(FpBinary::MulX | FpBinary::RecipStep | FpBinary::RSqrtStep)
+            )
+        {
             self.fp_check()?;
         } else {
             self.simd_check()?;
@@ -201,7 +208,12 @@ impl Cpu {
             /// FCVTL: double each element's precision.
             Long,
         }
-        let round = |rounding| Op::Each(Each::Unary(FpUnary::RoundInt(rounding, InexactReport::Suppress)));
+        let round = |rounding| {
+            Op::Each(Each::Unary(FpUnary::RoundInt(
+                rounding,
+                InexactReport::Suppress,
+            )))
+        };
         let op = match (u, a, opcode) {
             (false, false, 0b10110) => Op::Narrow,
             (false, false, 0b10111) => Op::Long,
@@ -227,7 +239,10 @@ impl Cpu {
             (false, true, 0b11111) => Op::Each(Each::Unary(FpUnary::RecpX)),
             (true, false, 0b10110) => Op::NarrowOdd,
             (true, false, 0b11000) => round(FpRounding::TieAway),
-            (true, false, 0b11001) => Op::Each(Each::Unary(FpUnary::RoundInt(env.rounding(), InexactReport::Raise))),
+            (true, false, 0b11001) => Op::Each(Each::Unary(FpUnary::RoundInt(
+                env.rounding(),
+                InexactReport::Raise,
+            ))),
             (true, false, 0b11010) => Op::Each(Each::ToInt(FpRounding::TieEven, false)),
             (true, false, 0b11011) => Op::Each(Each::ToInt(FpRounding::NegInf, false)),
             (true, false, 0b11100) => Op::Each(Each::ToInt(FpRounding::TieAway, false)),
@@ -237,9 +252,10 @@ impl Cpu {
             (true, true, 0b01100) => Op::Each(Each::Zero(ZeroCompare::Ge)),
             (true, true, 0b01101) => Op::Each(Each::Zero(ZeroCompare::Le)),
             (true, true, 0b01111) => Op::Each(Each::Unary(FpUnary::Neg)),
-            (true, true, 0b11001) => {
-                Op::Each(Each::Unary(FpUnary::RoundInt(env.rounding(), InexactReport::Suppress)))
-            }
+            (true, true, 0b11001) => Op::Each(Each::Unary(FpUnary::RoundInt(
+                env.rounding(),
+                InexactReport::Suppress,
+            ))),
             (true, true, 0b11010) => Op::Each(Each::ToInt(FpRounding::PosInf, false)),
             (true, true, 0b11011) => Op::Each(Each::ToInt(FpRounding::Zero, false)),
             (true, true, 0b11100) => Op::Each(Each::URSqrtEstimate),
@@ -275,7 +291,14 @@ impl Cpu {
         // then AArch64_CheckFPEnabled()`; FRECPX: `AArch64_CheckFPEnabled()`).
         // The scalar conversions are legal there only with FEAT_FPRCVT,
         // which this core lacks.
-        if scalar && matches!(op, Op::Each(Each::Unary(FpUnary::RecipEstimate | FpUnary::RSqrtEstimate | FpUnary::RecpX))) {
+        if scalar
+            && matches!(
+                op,
+                Op::Each(Each::Unary(
+                    FpUnary::RecipEstimate | FpUnary::RSqrtEstimate | FpUnary::RecpX
+                ))
+            )
+        {
             self.fp_check()?;
         } else {
             self.simd_check()?;
@@ -305,7 +328,11 @@ impl Cpu {
                     };
                     set_elem(&mut part, e, esize, v);
                 }
-                r = if scalar { part } else { narrow_into(d, part, q) };
+                r = if scalar {
+                    part
+                } else {
+                    narrow_into(d, part, q)
+                };
             }
             Op::NarrowBf16 => {
                 // Arm FPConvertBF of each single of Vn into `Vpart(d, Q)`.
@@ -345,9 +372,13 @@ impl Cpu {
                             let ordering = fp_compare(ty, x, FpType::ZERO, signal, &mut env);
                             let holds = match cmp {
                                 ZeroCompare::Gt => ordering == FpOrdering::Greater,
-                                ZeroCompare::Ge => matches!(ordering, FpOrdering::Greater | FpOrdering::Equal),
+                                ZeroCompare::Ge => {
+                                    matches!(ordering, FpOrdering::Greater | FpOrdering::Equal)
+                                }
                                 ZeroCompare::Eq => ordering == FpOrdering::Equal,
-                                ZeroCompare::Le => matches!(ordering, FpOrdering::Less | FpOrdering::Equal),
+                                ZeroCompare::Le => {
+                                    matches!(ordering, FpOrdering::Less | FpOrdering::Equal)
+                                }
                                 ZeroCompare::Lt => ordering == FpOrdering::Less,
                             };
                             if holds {
@@ -359,9 +390,15 @@ impl Cpu {
                         Each::ToInt(rounding, signed) => {
                             fp_to_int(ty, x, 0, rounding, signed, IntWidth::OfElement, &mut env)
                         }
-                        Each::FromInt(signed) => int_to_fp(ty, x, 0, signed, IntWidth::OfElement, &mut env),
+                        Each::FromInt(signed) => {
+                            int_to_fp(ty, x, 0, signed, IntWidth::OfElement, &mut env)
+                        }
                         Each::RoundIntN(rounding, size) => {
-                            let precision = if sz { FrintPrecision::Double } else { FrintPrecision::Single };
+                            let precision = if sz {
+                                FrintPrecision::Double
+                            } else {
+                                FrintPrecision::Single
+                            };
                             round_int_n(precision, x, rounding, size, &mut env)
                         }
                         Each::URecipEstimate => u64::from(urecpe(x as u32)),
@@ -377,9 +414,13 @@ impl Cpu {
             // FPCR.NEP is; the estimates, FCVTXN and the conversions merge
             // into Vd (`elements == 1 && IsMerging(FPCR())`).
             Op::Each(Each::Zero(_)) => self.write_v(rd, r),
-            Op::NarrowOdd if scalar => self.fp_set_merging(rd as u32, rd as u32, 0xFFFF_FFFF, r as u64),
+            Op::NarrowOdd if scalar => {
+                self.fp_set_merging(rd as u32, rd as u32, 0xFFFF_FFFF, r as u64)
+            }
             Op::Each(_) if scalar => self.fp_set_merging(rd as u32, rd as u32, ty.mask(), r as u64),
-            Op::Each(_) | Op::Narrow | Op::NarrowOdd | Op::NarrowBf16 | Op::Long => self.write_v(rd, r),
+            Op::Each(_) | Op::Narrow | Op::NarrowOdd | Op::NarrowBf16 | Op::Long => {
+                self.write_v(rd, r)
+            }
         }
         Ok(Flow::Next)
     }
@@ -581,7 +622,11 @@ impl Cpu {
     pub(crate) fn exec_simd_fmlal(&mut self, insn: u32, by_element: bool) -> ExecResult {
         let q = bit(insn, 30);
         let upper = bit(insn, 29);
-        let subtract = if by_element { bit(insn, 14) } else { bit(insn, 23) };
+        let subtract = if by_element {
+            bit(insn, 14)
+        } else {
+            bit(insn, 23)
+        };
         self.simd_check()?;
         let datasize = datasize(q);
         let half = datasize / 2;
@@ -601,7 +646,11 @@ impl Cpu {
         let index = (bits(insn, 11, 11) << 2) | (bits(insn, 21, 21) << 1) | bits(insn, 20, 20);
         let rd = bits(insn, 4, 0) as usize;
         let d = self.v[rd];
-        let form = if subtract { FusedMulAdd::Fmsub } else { FusedMulAdd::Fmadd };
+        let form = if subtract {
+            FusedMulAdd::Fmsub
+        } else {
+            FusedMulAdd::Fmadd
+        };
         let mut env = self.fp_env();
         let mut r = 0u128;
         for e in 0..datasize / 32 {
@@ -679,8 +728,22 @@ impl Cpu {
                 0b10 => (neg(m_real), n_real, neg(m_imag), n_real),
                 _ => (m_imag, n_imag, neg(m_real), n_imag),
             };
-            let real = fp_mul_add(FusedMulAdd::Fmadd, ty, elem(d, 2 * e, esize), element2, element1, &mut env);
-            let imag = fp_mul_add(FusedMulAdd::Fmadd, ty, elem(d, 2 * e + 1, esize), element4, element3, &mut env);
+            let real = fp_mul_add(
+                FusedMulAdd::Fmadd,
+                ty,
+                elem(d, 2 * e, esize),
+                element2,
+                element1,
+                &mut env,
+            );
+            let imag = fp_mul_add(
+                FusedMulAdd::Fmadd,
+                ty,
+                elem(d, 2 * e + 1, esize),
+                element4,
+                element3,
+                &mut env,
+            );
             set_elem(&mut r, 2 * e, esize, real);
             set_elem(&mut r, 2 * e + 1, esize, imag);
         }
@@ -708,9 +771,19 @@ impl Cpu {
         for e in 0..datasize(q) / esize / 2 {
             let mut neg = |x: u64| fp_unary(FpUnary::Neg, ty, x, &mut env);
             let (m_real, m_imag) = (elem(m, 2 * e, esize), elem(m, 2 * e + 1, esize));
-            let (element1, element3) = if rot { (m_imag, neg(m_real)) } else { (neg(m_imag), m_real) };
+            let (element1, element3) = if rot {
+                (m_imag, neg(m_real))
+            } else {
+                (neg(m_imag), m_real)
+            };
             let real = fp_binary(FpBinary::Add, ty, elem(n, 2 * e, esize), element1, &mut env);
-            let imag = fp_binary(FpBinary::Add, ty, elem(n, 2 * e + 1, esize), element3, &mut env);
+            let imag = fp_binary(
+                FpBinary::Add,
+                ty,
+                elem(n, 2 * e + 1, esize),
+                element3,
+                &mut env,
+            );
             set_elem(&mut r, 2 * e, esize, real);
             set_elem(&mut r, 2 * e + 1, esize, imag);
         }

@@ -73,11 +73,40 @@ struct State {
 
 /// Mirrors `F32_SPECIAL` in gen_unicorn.py.
 const F32_SPECIAL: [u64; 34] = [
-    0x0000_0000, 0x8000_0000, 0x7F80_0000, 0xFF80_0000, 0x7FC0_0000, 0xFFC1_2345, 0x7F80_0001, 0xFFA0_0000,
-    0x0000_0001, 0x807F_FFFF, 0x0080_0000, 0x8080_0000, 0x7F7F_FFFF, 0xFF7F_FFFF, 0x3F80_0000, 0xBF80_0000,
-    0x3F00_0000, 0xBF00_0000, 0x3FC0_0000, 0x4020_0000, 0xC020_0000, 0x4060_0000, 0x4B00_0000, 0x4B7F_FFFF,
-    0x4F00_0000, 0xCF00_0000, 0x4F80_0000, 0x5F00_0000, 0xDF00_0000, 0x5F80_0000, 0x4EFF_FFFF, 0x477F_E000,
-    0x3380_0000, 0x387F_C000,
+    0x0000_0000,
+    0x8000_0000,
+    0x7F80_0000,
+    0xFF80_0000,
+    0x7FC0_0000,
+    0xFFC1_2345,
+    0x7F80_0001,
+    0xFFA0_0000,
+    0x0000_0001,
+    0x807F_FFFF,
+    0x0080_0000,
+    0x8080_0000,
+    0x7F7F_FFFF,
+    0xFF7F_FFFF,
+    0x3F80_0000,
+    0xBF80_0000,
+    0x3F00_0000,
+    0xBF00_0000,
+    0x3FC0_0000,
+    0x4020_0000,
+    0xC020_0000,
+    0x4060_0000,
+    0x4B00_0000,
+    0x4B7F_FFFF,
+    0x4F00_0000,
+    0xCF00_0000,
+    0x4F80_0000,
+    0x5F00_0000,
+    0xDF00_0000,
+    0x5F80_0000,
+    0x4EFF_FFFF,
+    0x477F_E000,
+    0x3380_0000,
+    0x387F_C000,
 ];
 
 /// Mirrors `F64_SPECIAL` in gen_unicorn.py.
@@ -133,8 +162,8 @@ fn ordinary_f16(w: u64) -> u64 {
 
 /// Mirrors `BF16_SPECIAL` in gen_unicorn.py.
 const BF16_SPECIAL: [u64; 24] = [
-    0x0000, 0x8000, 0x7F80, 0xFF80, 0x7FC0, 0xFFC1, 0x7F81, 0xFFA0, 0x0001, 0x807F, 0x0080, 0x8080, 0x7F7F,
-    0xFF7F, 0x3F80, 0xBF80, 0x3F00, 0x3FC0, 0x5F80, 0x1F80, 0x7F00, 0x0100, 0x3F81, 0xC040,
+    0x0000, 0x8000, 0x7F80, 0xFF80, 0x7FC0, 0xFFC1, 0x7F81, 0xFFA0, 0x0001, 0x807F, 0x0080, 0x8080,
+    0x7F7F, 0xFF7F, 0x3F80, 0xBF80, 0x3F00, 0x3FC0, 0x5F80, 0x1F80, 0x7F00, 0x0100, 0x3F81, 0xC040,
 ];
 
 /// Mirrors `ordinary_bf16` in gen_unicorn.py.
@@ -327,7 +356,12 @@ const Z_SPECIAL: [u64; 14] = [
 ];
 
 /// Mirrors `P_ELEMENTS` in gen_qemu_sve.py.
-const P_ELEMENTS: [u64; 4] = [0xFFFF_FFFF_FFFF_FFFF, 0x5555_5555_5555_5555, 0x1111_1111_1111_1111, 0x0101_0101_0101_0101];
+const P_ELEMENTS: [u64; 4] = [
+    0xFFFF_FFFF_FFFF_FFFF,
+    0x5555_5555_5555_5555,
+    0x1111_1111_1111_1111,
+    0x0101_0101_0101_0101,
+];
 
 /// A format a kind SF register's lanes may take.
 struct FpFormat {
@@ -340,10 +374,26 @@ struct FpFormat {
 /// The formats by the `size` field that names them (00 standing for
 /// BFloat16). Mirrors `FP_FORMATS` in gen_qemu_sve.py.
 const FP_FORMATS: [FpFormat; 4] = [
-    FpFormat { width: 2, special: &BF16_SPECIAL, ordinary: ordinary_bf16 },
-    FpFormat { width: 2, special: &F16_SPECIAL, ordinary: ordinary_f16 },
-    FpFormat { width: 4, special: &F32_SPECIAL, ordinary: ordinary_f32 },
-    FpFormat { width: 8, special: &F64_SPECIAL, ordinary: ordinary_f64 },
+    FpFormat {
+        width: 2,
+        special: &BF16_SPECIAL,
+        ordinary: ordinary_bf16,
+    },
+    FpFormat {
+        width: 2,
+        special: &F16_SPECIAL,
+        ordinary: ordinary_f16,
+    },
+    FpFormat {
+        width: 4,
+        special: &F32_SPECIAL,
+        ordinary: ordinary_f32,
+    },
+    FpFormat {
+        width: 8,
+        special: &F64_SPECIAL,
+        ordinary: ordinary_f64,
+    },
 ];
 
 /// Mirrors `fp_register` in gen_qemu_sve.py.
@@ -453,10 +503,21 @@ fn sve_state(seed: u64, kind: &str, insn: u32) -> SveState {
 /// `za_fp_format` in gen_qemu_sve.py.
 fn za_fp_format(insn: u32) -> usize {
     let single = matches!(
-        ((insn >> 21) & 1, (insn >> 11) & 3, (insn >> 22) & 3, insn & 0x1028),
+        (
+            (insn >> 21) & 1,
+            (insn >> 11) & 3,
+            (insn >> 22) & 3,
+            insn & 0x1028
+        ),
         (1, 3, _, _) | (0, _, 1, 0)
     );
-    match ((insn >> 30) & 1, single, (insn >> 4) & 1, (insn >> 24) & 1, (insn >> 21) & 1) {
+    match (
+        (insn >> 30) & 1,
+        single,
+        (insn >> 4) & 1,
+        (insn >> 24) & 1,
+        (insn >> 21) & 1,
+    ) {
         (1, true, _, _, _) => 2,
         (1, false, 1, _, _) => 0,
         (1, false, _, _, _) => 1,
@@ -536,14 +597,22 @@ fn int_register(r: &mut SplitMix64, size: usize, extreme: bool) -> [u8; SVE_VLB]
 /// the test: dropping it would leave the register's expected value its
 /// initial one.
 fn parse_registers(field: &str, prefix: &str, len: usize) -> Vec<(usize, Vec<u8>)> {
-    let Some(body) = field.strip_prefix(prefix) else { panic!("`{field}` is no `{prefix}` field") };
+    let Some(body) = field.strip_prefix(prefix) else {
+        panic!("`{field}` is no `{prefix}` field")
+    };
     if body == "-" {
         return Vec::new();
     }
     body.split(',')
         .map(|pair| {
-            let Some((k, hex)) = pair.split_once(':') else { panic!("`{pair}` in `{prefix}` is no `n:value` pair") };
-            assert_eq!(hex.len(), 2 * len, "`{pair}` in `{prefix}` is not {len} bytes");
+            let Some((k, hex)) = pair.split_once(':') else {
+                panic!("`{pair}` in `{prefix}` is no `n:value` pair")
+            };
+            assert_eq!(
+                hex.len(),
+                2 * len,
+                "`{pair}` in `{prefix}` is not {len} bytes"
+            );
             let bytes = (0..len)
                 .map(|i| {
                     let at = 2 * (len - 1 - i);
@@ -603,7 +672,10 @@ fn replay_sve(vectors: &str) {
         let za = za_state(seed, kind);
         let zt0 = zt0_state(seed, kind);
         let mut cpu = Cpu::implementing(
-            CpuConfig { ips, reset_pc: CODE },
+            CpuConfig {
+                ips,
+                reset_pc: CODE,
+            },
             Implementation {
                 counter_hz: ips,
                 ..Implementation::EVERY_FEATURE
@@ -621,7 +693,14 @@ fn replay_sve(vectors: &str) {
         cpu.fpsr = 0;
         let vl = cpu.current_svl();
         for (n, bytes) in sve.z.iter().enumerate() {
-            cpu.set_z(n as u32, vl, &Zv::from_parts(u128::from_le_bytes(bytes[..16].try_into().unwrap_or([0; 16])), &bytes[16..]));
+            cpu.set_z(
+                n as u32,
+                vl,
+                &Zv::from_parts(
+                    u128::from_le_bytes(bytes[..16].try_into().unwrap_or([0; 16])),
+                    &bytes[16..],
+                ),
+            );
         }
         for (n, bytes) in sve.p.iter().enumerate() {
             cpu.set_p(n as u32, vl, &Pv::from_bytes(bytes));
@@ -645,7 +724,10 @@ fn replay_sve(vectors: &str) {
         }
         if cpu.sys.esr_el1 >> 26 == 0x00 {
             tally.mismatched += 1;
-            failures.push(format!("{name} {insn:08x} `{}`: UNDEFINED here, executed by the reference", disassemble(insn)));
+            failures.push(format!(
+                "{name} {insn:08x} `{}`: UNDEFINED here, executed by the reference",
+                disassemble(insn)
+            ));
             continue;
         }
 
@@ -681,10 +763,17 @@ fn replay_sve(vectors: &str) {
 
         let mut diffs: Vec<String> = Vec::new();
         if cpu.pc != want_pc {
-            diffs.push(format!("pc {:#x} want {:#x} (esr {:#x})", cpu.pc, want_pc, cpu.sys.esr_el1));
+            diffs.push(format!(
+                "pc {:#x} want {:#x} (esr {:#x})",
+                cpu.pc, want_pc, cpu.sys.esr_el1
+            ));
         }
         if cpu.pstate.nzcv() != want_nzcv {
-            diffs.push(format!("nzcv {:#x} want {:#x}", cpu.pstate.nzcv(), want_nzcv));
+            diffs.push(format!(
+                "nzcv {:#x} want {:#x}",
+                cpu.pstate.nzcv(),
+                want_nzcv
+            ));
         }
         if cpu.fpsr != want_fpsr {
             diffs.push(format!("fpsr {:#x} want {:#x}", cpu.fpsr, want_fpsr));
@@ -702,7 +791,10 @@ fn replay_sve(vectors: &str) {
             let got: Vec<u8> = (0..SVE_VLB).map(|b| got.byte(b)).collect();
             if &got != want {
                 let at = got.iter().zip(want).position(|(a, b)| a != b).unwrap_or(0);
-                diffs.push(format!("z{i} byte {at} {:#x} want {:#x}", got[at], want[at]));
+                diffs.push(format!(
+                    "z{i} byte {at} {:#x} want {:#x}",
+                    got[at], want[at]
+                ));
             }
         }
         for (i, want) in want_p.iter().enumerate() {
@@ -716,23 +808,45 @@ fn replay_sve(vectors: &str) {
             let got = cpu.za_row(i, vl);
             if got != want.as_slice() {
                 let at = got.iter().zip(want).position(|(a, b)| a != b).unwrap_or(0);
-                diffs.push(format!("za{i} byte {at} {:#x} want {:#x}", got[at], want[at]));
+                diffs.push(format!(
+                    "za{i} byte {at} {:#x} want {:#x}",
+                    got[at], want[at]
+                ));
             }
         }
         let got_zt0 = cpu.zt0();
         if got_zt0[..] != want_zt0[..] {
-            let at = got_zt0.iter().zip(&want_zt0).position(|(a, b)| a != b).unwrap_or(0);
-            diffs.push(format!("zt0 byte {at} {:#x} want {:#x}", got_zt0[at], want_zt0[at]));
+            let at = got_zt0
+                .iter()
+                .zip(&want_zt0)
+                .position(|(a, b)| a != b)
+                .unwrap_or(0);
+            diffs.push(format!(
+                "zt0 byte {at} {:#x} want {:#x}",
+                got_zt0[at], want_zt0[at]
+            ));
         }
         if bus.data != want_data {
-            let first = bus.data.iter().zip(&want_data).position(|(a, b)| a != b).unwrap_or(0);
-            diffs.push(format!("data[{first:#x}] {:#x} want {:#x}", bus.data[first], want_data[first]));
+            let first = bus
+                .data
+                .iter()
+                .zip(&want_data)
+                .position(|(a, b)| a != b)
+                .unwrap_or(0);
+            diffs.push(format!(
+                "data[{first:#x}] {:#x} want {:#x}",
+                bus.data[first], want_data[first]
+            ));
         }
         if diffs.is_empty() {
             tally.passed += 1;
         } else {
             tally.mismatched += 1;
-            failures.push(format!("{name} {insn:08x} `{}`: {}", disassemble(insn), diffs.join("; ")));
+            failures.push(format!(
+                "{name} {insn:08x} `{}`: {}",
+                disassemble(insn),
+                diffs.join("; ")
+            ));
         }
     }
 
@@ -743,7 +857,11 @@ fn replay_sve(vectors: &str) {
     for f in failures.iter().take(60) {
         std::eprintln!("MISMATCH {f}");
     }
-    assert!(failures.is_empty(), "{} SVE vectors disagree with the reference", failures.len());
+    assert!(
+        failures.is_empty(),
+        "{} SVE vectors disagree with the reference",
+        failures.len()
+    );
 }
 
 struct TestBus {
@@ -752,7 +870,12 @@ struct TestBus {
 }
 
 impl PhysBus for TestBus {
-    fn read(&mut self, addr: PhysAddr, width: AccessWidth, _clock: VmClock) -> Result<u64, BusFault> {
+    fn read(
+        &mut self,
+        addr: PhysAddr,
+        width: AccessWidth,
+        _clock: VmClock,
+    ) -> Result<u64, BusFault> {
         let a = addr.get();
         let n = width.bytes();
         if a >= CODE && a + n <= CODE + 4 {
@@ -772,7 +895,13 @@ impl PhysBus for TestBus {
         Err(BusFault::Unmapped)
     }
 
-    fn write(&mut self, addr: PhysAddr, width: AccessWidth, value: u64, _clock: VmClock) -> Result<(), BusFault> {
+    fn write(
+        &mut self,
+        addr: PhysAddr,
+        width: AccessWidth,
+        value: u64,
+        _clock: VmClock,
+    ) -> Result<(), BusFault> {
         let a = addr.get();
         let n = width.bytes();
         if a >= DATA && a + n <= DATA + DATA_SIZE as u64 {
@@ -796,7 +925,10 @@ fn parse_pairs(field: &str, prefix: &str, key_radix: u32) -> Vec<(usize, u128)> 
     body.split(',')
         .filter_map(|p| {
             let (k, v) = p.split_once(':')?;
-            Some((usize::from_str_radix(k, key_radix).ok()?, u128::from_str_radix(v, 16).ok()?))
+            Some((
+                usize::from_str_radix(k, key_radix).ok()?,
+                u128::from_str_radix(v, 16).ok()?,
+            ))
         })
         .collect()
 }
@@ -824,11 +956,21 @@ fn reserved_simd_and_fp_encodings_are_undefined_before_the_fp_trap() {
         (0x4F3F_E420, "scvtf v0.4s, v1.4s, #1", 0x07),
         (0x5F3F_E420, "scvtf s0, s1, #1", 0x07),
         (0x5F7F_FC20, "fcvtzs d0, d1, #1", 0x07),
-        (0x4F1F_E420, "scvtf v0.8h, v1.8h, #1 (half precision, FEAT_FP16)", 0x00),
+        (
+            0x4F1F_E420,
+            "scvtf v0.8h, v1.8h, #1 (half precision, FEAT_FP16)",
+            0x00,
+        ),
         (0x1E20_2820, "fadd s0, s1, s0", 0x07),
     ];
     for (insn, text, want_ec) in cases {
-        let mut cpu = Cpu::new(CpuModel::CortexA57, CpuConfig { ips, reset_pc: CODE });
+        let mut cpu = Cpu::new(
+            CpuModel::CortexA57,
+            CpuConfig {
+                ips,
+                reset_pc: CODE,
+            },
+        );
         let mut bus = TestBus {
             insn,
             data: std::vec![0; DATA_SIZE],
@@ -845,14 +987,30 @@ fn reserved_simd_and_fp_encodings_are_undefined_before_the_fp_trap() {
 #[test]
 fn udf_takes_the_undefined_instruction_exception_whatever_its_immediate() {
     let ips = ClockHz::new(1_000_000).unwrap_or(ClockHz::BOCHS_DEFAULT);
-    for insn in [0x0000_0000, 0x0000_0001, 0x0000_0002, 0x0000_0003, 0x0000_ABCD] {
-        let mut cpu = Cpu::new(CpuModel::CortexA57, CpuConfig { ips, reset_pc: CODE });
+    for insn in [
+        0x0000_0000,
+        0x0000_0001,
+        0x0000_0002,
+        0x0000_0003,
+        0x0000_ABCD,
+    ] {
+        let mut cpu = Cpu::new(
+            CpuModel::CortexA57,
+            CpuConfig {
+                ips,
+                reset_pc: CODE,
+            },
+        );
         cpu.x[0] = 0x8400_0008; // PSCI SYSTEM_OFF, had `udf #2` reached the PSCI conduit
         let mut bus = TestBus {
             insn,
             data: std::vec![0; DATA_SIZE],
         };
-        assert_eq!(cpu.step(&mut bus, &mut NoInstrumentation), Step::Retired, "{insn:#010x}");
+        assert_eq!(
+            cpu.step(&mut bus, &mut NoInstrumentation),
+            Step::Retired,
+            "{insn:#010x}"
+        );
         assert_eq!(cpu.sys.esr_el1 >> 26, 0x00, "{insn:#010x}");
     }
 }
@@ -874,13 +1032,23 @@ fn add_and_sub_immediate_with_shift_1x_are_undefined() {
         (0xF1C0_0420, "subs x0, x1, #1 with shift 11"),
     ];
     for (insn, text) in cases {
-        let mut cpu = Cpu::new(CpuModel::CortexA57, CpuConfig { ips, reset_pc: CODE });
+        let mut cpu = Cpu::new(
+            CpuModel::CortexA57,
+            CpuConfig {
+                ips,
+                reset_pc: CODE,
+            },
+        );
         cpu.x[1] = 41;
         let mut bus = TestBus {
             insn,
             data: std::vec![0; DATA_SIZE],
         };
-        assert_eq!(cpu.step(&mut bus, &mut NoInstrumentation), Step::Retired, "{text}");
+        assert_eq!(
+            cpu.step(&mut bus, &mut NoInstrumentation),
+            Step::Retired,
+            "{text}"
+        );
         assert_eq!(cpu.sys.esr_el1 >> 26, 0x00, "{text}: UNDEFINED");
         assert_eq!(cpu.x[0], 0, "{text}: nothing written");
     }
@@ -901,7 +1069,13 @@ struct Stepper {
 impl Stepper {
     fn new() -> Self {
         let ips = ClockHz::new(1_000_000).unwrap_or(ClockHz::BOCHS_DEFAULT);
-        let mut cpu = Cpu::new(CpuModel::CortexA57, CpuConfig { ips, reset_pc: CODE });
+        let mut cpu = Cpu::new(
+            CpuModel::CortexA57,
+            CpuConfig {
+                ips,
+                reset_pc: CODE,
+            },
+        );
         cpu.sys.cpacr_el1 = 3 << 20;
         let mut reset = Vec::new();
         if let Err(e) = cpu.save(&mut reset) {
@@ -921,7 +1095,11 @@ impl Stepper {
             insn,
             data: std::vec![0; DATA_SIZE],
         };
-        assert_eq!(self.cpu.step(&mut bus, &mut NoInstrumentation), Step::Retired, "{insn:#010x}");
+        assert_eq!(
+            self.cpu.step(&mut bus, &mut NoInstrumentation),
+            Step::Retired,
+            "{insn:#010x}"
+        );
         Some(self.cpu.sys.esr_el1 >> 26).filter(|&ec| ec != 0x3F)
     }
 }
@@ -945,7 +1123,11 @@ fn barriers_need_op1_011() {
         assert_eq!(step_exception_class(insn), None, "{text} executes");
         for op1 in [0b000, 0b001, 0b010, 0b100, 0b111] {
             let other = (insn & !(0b111 << 16)) | (op1 << 16);
-            assert_eq!(step_exception_class(other), Some(0x00), "{text} with op1 = {op1:03b}: UNDEFINED");
+            assert_eq!(
+                step_exception_class(other),
+                Some(0x00),
+                "{text} with op1 = {op1:03b}: UNDEFINED"
+            );
         }
     }
 }
@@ -962,7 +1144,11 @@ fn tlb_maintenance_is_the_armv8_0_set() {
             let insn = 0xD508_8000 | (crm << 8) | (op2 << 5);
             let allocated = matches!(crm, 3 | 7) && matches!(op2, 0 | 1 | 2 | 3 | 5 | 7);
             let expected = if allocated { None } else { Some(0x00) };
-            assert_eq!(step_exception_class(insn), expected, "sys #0, c8, c{crm}, #{op2}, x0");
+            assert_eq!(
+                step_exception_class(insn),
+                expected,
+                "sys #0, c8, c{crm}, #{op2}, x0"
+            );
         }
     }
 }
@@ -979,7 +1165,11 @@ fn compares_with_zero_need_rm_zero() {
         (0x1E60_2038, "fcmpe d1, #0.0"),
     ] {
         assert_eq!(step_exception_class(insn), None, "{text} executes");
-        assert_eq!(step_exception_class(insn | (0b00011 << 16)), Some(0x00), "{text} with Rm = 3: UNDEFINED");
+        assert_eq!(
+            step_exception_class(insn | (0b00011 << 16)),
+            Some(0x00),
+            "{text} with Rm = 3: UNDEFINED"
+        );
     }
 }
 
@@ -1035,7 +1225,11 @@ mod against_disarm64 {
     fn executes(word: u32) -> Executes {
         let op = disarm64::decoder::decode(word);
         let Some(d) = op.as_ref().map(|op| op.definition()) else {
-            return if word & 0xFFFF_F01F == 0xD503_201F { Executes::HintSpace } else { Executes::No };
+            return if word & 0xFFFF_F01F == 0xD503_201F {
+                Executes::HintSpace
+            } else {
+                Executes::No
+            };
         };
         if implemented(d.feature_set) {
             return Executes::Allocated;
@@ -1143,7 +1337,12 @@ mod against_disarm64 {
         assert!(source.errors.is_empty(), "{:?}", source.errors);
         for o in source.occurrences.iter() {
             for _ in 0..64 {
-                check(&mut stepper, o.cube.opcode | (next() & !o.cube.mask), &mut tally, &first);
+                check(
+                    &mut stepper,
+                    o.cube.opcode | (next() & !o.cube.mask),
+                    &mut tally,
+                    &first,
+                );
             }
         }
         for _ in 0..1_000_000 {
@@ -1178,7 +1377,10 @@ mod against_disarm64 {
                 });
             }
         });
-        std::eprintln!("{threads} threads, {:.1} s", started.elapsed().as_secs_f64());
+        std::eprintln!(
+            "{threads} threads, {:.1} s",
+            started.elapsed().as_secs_f64()
+        );
         let tally = total.into_inner().unwrap_or_default();
         report(&tally, &first);
         assert_eq!(tally.words, 1 << 32, "every word checked once");
@@ -1195,7 +1397,9 @@ struct Tally {
 
 /// disarm64's disassembly of `insn`, for a failure message.
 fn disassemble(insn: u32) -> String {
-    disarm64::decoder::decode(insn).map(|op| format!("{op}")).unwrap_or_default()
+    disarm64::decoder::decode(insn)
+        .map(|op| format!("{op}"))
+        .unwrap_or_default()
 }
 
 /// Whether `insn` sets a should-be field otherwise, the one reason a word
@@ -1251,7 +1455,16 @@ fn replay(vectors: &str, imp: Implementation) {
         let tally = tallies.entry(String::from(name)).or_default();
 
         let st = initial_state(seed, kind, insn);
-        let mut cpu = Cpu::implementing(CpuConfig { ips, reset_pc: CODE }, Implementation { counter_hz: ips, ..imp });
+        let mut cpu = Cpu::implementing(
+            CpuConfig {
+                ips,
+                reset_pc: CODE,
+            },
+            Implementation {
+                counter_hz: ips,
+                ..imp
+            },
+        );
         cpu.x = st.x;
         cpu.sp_el1 = st.sp;
         cpu.pstate.set_nzcv(st.nzcv);
@@ -1279,7 +1492,10 @@ fn replay(vectors: &str, imp: Implementation) {
                 tally.skipped += 1;
             } else {
                 tally.mismatched += 1;
-                failures.push(format!("{name} {insn:08x} `{}`: UNDEFINED here, executed by the reference", disassemble(insn)));
+                failures.push(format!(
+                    "{name} {insn:08x} `{}`: UNDEFINED here, executed by the reference",
+                    disassemble(insn)
+                ));
             }
             continue;
         }
@@ -1310,7 +1526,11 @@ fn replay(vectors: &str, imp: Implementation) {
             ));
         }
         if cpu.pstate.nzcv() != want_nzcv {
-            diffs.push(format!("nzcv {:#x} want {:#x}", cpu.pstate.nzcv(), want_nzcv));
+            diffs.push(format!(
+                "nzcv {:#x} want {:#x}",
+                cpu.pstate.nzcv(),
+                want_nzcv
+            ));
         }
         if cpu.fpsr != want_fpsr {
             diffs.push(format!("fpsr {:#x} want {:#x}", cpu.fpsr, want_fpsr));
@@ -1329,7 +1549,12 @@ fn replay(vectors: &str, imp: Implementation) {
             }
         }
         if bus.data != want_data {
-            let first = bus.data.iter().zip(&want_data).position(|(a, b)| a != b).unwrap_or(0);
+            let first = bus
+                .data
+                .iter()
+                .zip(&want_data)
+                .position(|(a, b)| a != b)
+                .unwrap_or(0);
             diffs.push(format!(
                 "data[{first:#x}] {:#x} want {:#x}",
                 bus.data[first], want_data[first]
@@ -1339,16 +1564,29 @@ fn replay(vectors: &str, imp: Implementation) {
             tally.passed += 1;
         } else {
             tally.mismatched += 1;
-            failures.push(format!("{name} {insn:08x} `{}`: {}", disassemble(insn), diffs.join("; ")));
+            failures.push(format!(
+                "{name} {insn:08x} `{}`: {}",
+                disassemble(insn),
+                diffs.join("; ")
+            ));
         }
     }
 
     std::eprintln!("family                 pass   skip  MISMATCH");
     for (name, t) in &tallies {
-        std::eprintln!("{name:<22} {:>5} {:>6} {:>9}", t.passed, t.skipped, t.mismatched);
+        std::eprintln!(
+            "{name:<22} {:>5} {:>6} {:>9}",
+            t.passed,
+            t.skipped,
+            t.mismatched
+        );
     }
     for f in failures.iter().take(60) {
         std::eprintln!("MISMATCH {f}");
     }
-    assert!(failures.is_empty(), "{} vectors disagree with the reference", failures.len());
+    assert!(
+        failures.is_empty(),
+        "{} vectors disagree with the reference",
+        failures.len()
+    );
 }

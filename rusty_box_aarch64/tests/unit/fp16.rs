@@ -59,7 +59,14 @@ const FCVT_H_FROM_S: u32 = 0x1E23_C020;
 const MSR_FPCR: u32 = 0xD51B_4401;
 
 /// The scalar floating-point forms, which `AArch64_CheckFPEnabled` checks.
-const SCALAR_FP: [u32; 6] = [FADD_H, FMUL_H, FDIV_H, FMOV_H_IMM, FMOV_H_FROM_W, FMOV_W_FROM_H];
+const SCALAR_FP: [u32; 6] = [
+    FADD_H,
+    FMUL_H,
+    FDIV_H,
+    FMOV_H_IMM,
+    FMOV_H_FROM_W,
+    FMOV_W_FROM_H,
+];
 /// The Advanced SIMD forms, which `AArch64_CheckFPAdvSIMDEnabled` checks.
 const ADVSIMD: [u32; 13] = [
     FADD_8H,
@@ -148,7 +155,10 @@ fn fcvtzs_to_a_half_precision_fixed_point_zeroes_the_bits_above_it() {
 /// FPCR.FZ16 is FEAT_FP16's, RES0 without it.
 #[test]
 fn a_guest_sets_fz16_with_fp16_only() {
-    for (imp, kept) in [(Implementation::EVERY_FEATURE, FZ16 | FZ), (Implementation::CORTEX_A57, FZ)] {
+    for (imp, kept) in [
+        (Implementation::EVERY_FEATURE, FZ16 | FZ),
+        (Implementation::CORTEX_A57, FZ),
+    ] {
         let mut cpu = processor(imp);
         cpu.x[1] = FZ16 | FZ;
         assert_eq!(exec(&mut cpu, MSR_FPCR), None);
@@ -241,6 +251,10 @@ fn the_fp_checks_follow_decode() {
         assert_eq!(exec(&mut cpu, insn), None, "{insn:#010x}");
     }
     for insn in ADVSIMD {
-        assert_eq!(exec(&mut cpu, insn), Some(ILLEGAL_WHEN_STREAMING), "{insn:#010x}");
+        assert_eq!(
+            exec(&mut cpu, insn),
+            Some(ILLEGAL_WHEN_STREAMING),
+            "{insn:#010x}"
+        );
     }
 }

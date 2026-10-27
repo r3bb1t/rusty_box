@@ -107,7 +107,13 @@ pub(crate) fn doubling_mul_high(a: i128, b: i128, esize: u32, rounding: bool) ->
 /// saturation: `((acc << esize) +/- 2 * a * b + 2^(esize-1)) >> esize`.
 /// Computed as `acc + ((+/-a * b + 2^(esize-2)) >> (esize - 1))`, the same
 /// integer, which stays in `i128` for the 64-bit elements of SVE.
-pub(crate) fn rounding_doubling_mul_add(acc: i128, a: i128, b: i128, esize: u32, subtract: bool) -> i128 {
+pub(crate) fn rounding_doubling_mul_add(
+    acc: i128,
+    a: i128,
+    b: i128,
+    esize: u32,
+    subtract: bool,
+) -> i128 {
     let product = if subtract { -(a * b) } else { a * b };
     acc + ((product + (1i128 << (esize - 2))) >> (esize - 1))
 }
@@ -116,7 +122,13 @@ pub(crate) fn rounding_doubling_mul_add(acc: i128, a: i128, b: i128, esize: u32,
 /// plus, or with `subtract` minus, twice the product, shifted right by
 /// `esize` with rounding (Arm `RShr`) and saturated (`SignedSatQ`).
 fn rdm_lane(a: u64, b: u64, d: u64, esize: u32, subtract: bool, qc: &mut bool) -> u64 {
-    let value = rounding_doubling_mul_add(sint(d, esize), sint(a, esize), sint(b, esize), esize, subtract);
+    let value = rounding_doubling_mul_add(
+        sint(d, esize),
+        sint(a, esize),
+        sint(b, esize),
+        esize,
+        subtract,
+    );
     sat(value, esize, false, qc)
 }
 
@@ -133,7 +145,10 @@ struct Bytes {
 /// unsigned)`: the inner loop of the dot products and of `MatMulAdd`.
 fn byte_products(a: Bytes, a_first: u32, b: Bytes, b_first: u32, count: u32) -> i128 {
     (0..count)
-        .map(|k| int(elem(a.v, a_first + k, 8), 8, a.unsigned) * int(elem(b.v, b_first + k, 8), 8, b.unsigned))
+        .map(|k| {
+            int(elem(a.v, a_first + k, 8), 8, a.unsigned)
+                * int(elem(b.v, b_first + k, 8), 8, b.unsigned)
+        })
         .sum()
 }
 
@@ -309,7 +324,14 @@ impl Cpu {
             false
         } else {
             match opcode {
-                0b00001 | 0b00101 | 0b00110 | 0b00111 | 0b01000..=0b01011 | 0b10000 | 0b10001 | 0b10111 => true,
+                0b00001
+                | 0b00101
+                | 0b00110
+                | 0b00111
+                | 0b01000..=0b01011
+                | 0b10000
+                | 0b10001
+                | 0b10111 => true,
                 0b10011 if u => size == 0,
                 0b10110 => size == 1 || size == 2,
                 _ => size != 3,
@@ -338,23 +360,41 @@ impl Cpu {
             (0b00111, false) => |a, b, _, e, _| all_if(sint(a, e) >= sint(b, e)),
             (0b00111, true) => |a, b, _, _, _| all_if(a >= b),
             // SSHL, USHL, SQSHL, UQSHL, SRSHL, URSHL, SQRSHL, UQRSHL
-            (0b01000, false) => |a, b, _, e, qc| shift_by_register(sint(a, e), b, e, false, None, qc),
+            (0b01000, false) => {
+                |a, b, _, e, qc| shift_by_register(sint(a, e), b, e, false, None, qc)
+            }
             (0b01000, true) => |a, b, _, e, qc| shift_by_register(uint(a), b, e, false, None, qc),
-            (0b01001, false) => |a, b, _, e, qc| shift_by_register(sint(a, e), b, e, false, Some(false), qc),
-            (0b01001, true) => |a, b, _, e, qc| shift_by_register(uint(a), b, e, false, Some(true), qc),
-            (0b01010, false) => |a, b, _, e, qc| shift_by_register(sint(a, e), b, e, true, None, qc),
+            (0b01001, false) => {
+                |a, b, _, e, qc| shift_by_register(sint(a, e), b, e, false, Some(false), qc)
+            }
+            (0b01001, true) => {
+                |a, b, _, e, qc| shift_by_register(uint(a), b, e, false, Some(true), qc)
+            }
+            (0b01010, false) => {
+                |a, b, _, e, qc| shift_by_register(sint(a, e), b, e, true, None, qc)
+            }
             (0b01010, true) => |a, b, _, e, qc| shift_by_register(uint(a), b, e, true, None, qc),
-            (0b01011, false) => |a, b, _, e, qc| shift_by_register(sint(a, e), b, e, true, Some(false), qc),
-            (0b01011, true) => |a, b, _, e, qc| shift_by_register(uint(a), b, e, true, Some(true), qc),
+            (0b01011, false) => {
+                |a, b, _, e, qc| shift_by_register(sint(a, e), b, e, true, Some(false), qc)
+            }
+            (0b01011, true) => {
+                |a, b, _, e, qc| shift_by_register(uint(a), b, e, true, Some(true), qc)
+            }
             // SMAX, UMAX, SMIN, UMIN and their pairwise forms
-            (0b01100, false) | (0b10100, false) => |a, b, _, e, _| if sint(a, e) >= sint(b, e) { a } else { b },
+            (0b01100, false) | (0b10100, false) => {
+                |a, b, _, e, _| if sint(a, e) >= sint(b, e) { a } else { b }
+            }
             (0b01100, true) | (0b10100, true) => |a, b, _, _, _| a.max(b),
-            (0b01101, false) | (0b10101, false) => |a, b, _, e, _| if sint(a, e) <= sint(b, e) { a } else { b },
+            (0b01101, false) | (0b10101, false) => {
+                |a, b, _, e, _| if sint(a, e) <= sint(b, e) { a } else { b }
+            }
             (0b01101, true) | (0b10101, true) => |a, b, _, _, _| a.min(b),
             // SABD, UABD, SABA, UABA
             (0b01110, false) => |a, b, _, e, _| low((sint(a, e) - sint(b, e)).abs(), e),
             (0b01110, true) => |a, b, _, e, _| low((uint(a) - uint(b)).abs(), e),
-            (0b01111, false) => |a, b, d, e, _| d.wrapping_add(low((sint(a, e) - sint(b, e)).abs(), e)),
+            (0b01111, false) => {
+                |a, b, d, e, _| d.wrapping_add(low((sint(a, e) - sint(b, e)).abs(), e))
+            }
             (0b01111, true) => |a, b, d, e, _| d.wrapping_add(low((uint(a) - uint(b)).abs(), e)),
             // ADD, SUB, CMTST, CMEQ
             (0b10000, false) => |a, b, _, _, _| a.wrapping_add(b),
@@ -367,8 +407,22 @@ impl Cpu {
             (0b10011, false) => |a, b, _, _, _| a.wrapping_mul(b),
             (0b10011, true) => |a, b, _, _, _| polynomial_mult(a, b, 8) as u64,
             // SQDMULH, SQRDMULH
-            (0b10110, false) => |a, b, _, e, qc| sat(doubling_mul_high(sint(a, e), sint(b, e), e, false), e, false, qc),
-            (0b10110, true) => |a, b, _, e, qc| sat(doubling_mul_high(sint(a, e), sint(b, e), e, true), e, false, qc),
+            (0b10110, false) => |a, b, _, e, qc| {
+                sat(
+                    doubling_mul_high(sint(a, e), sint(b, e), e, false),
+                    e,
+                    false,
+                    qc,
+                )
+            },
+            (0b10110, true) => |a, b, _, e, qc| {
+                sat(
+                    doubling_mul_high(sint(a, e), sint(b, e), e, true),
+                    e,
+                    false,
+                    qc,
+                )
+            },
             // ADDP
             (0b10111, false) => |a, b, _, _, _| a.wrapping_add(b),
             // Every other opcode below 11000 except 00011 is listed above
@@ -395,7 +449,12 @@ impl Cpu {
             } else {
                 (elem(n, e, esize), elem(m, e, esize))
             };
-            set_elem(&mut r, e, esize, op(a, b, elem(d, e, esize), esize, &mut qc));
+            set_elem(
+                &mut r,
+                e,
+                esize,
+                op(a, b, elem(d, e, esize), esize, &mut qc),
+            );
         }
         self.note_saturation(qc);
         self.write_v(rd, r);
@@ -448,8 +507,13 @@ impl Cpu {
                 self.simd_check()?;
                 let wide = 2 * esize;
                 for e in 0..datasize(q) / wide {
-                    let sum = int(elem(n, 2 * e, esize), esize, u) + int(elem(n, 2 * e + 1, esize), esize, u);
-                    let acc = if opcode == 0b00110 { elem(d, e, wide) } else { 0 };
+                    let sum = int(elem(n, 2 * e, esize), esize, u)
+                        + int(elem(n, 2 * e + 1, esize), esize, u);
+                    let acc = if opcode == 0b00110 {
+                        elem(d, e, wide)
+                    } else {
+                        0
+                    };
                     set_elem(&mut r, e, wide, acc.wrapping_add(low(sum, wide)));
                 }
             }
@@ -501,7 +565,12 @@ impl Cpu {
             (0b00101, true) if !scalar && size == 1 => {
                 self.simd_check()?;
                 for e in 0..datasize(q) / 8 {
-                    set_elem(&mut r, e, 8, u64::from((elem(n, e, 8) as u8).reverse_bits()));
+                    set_elem(
+                        &mut r,
+                        e,
+                        8,
+                        u64::from((elem(n, e, 8) as u8).reverse_bits()),
+                    );
                 }
             }
             // SQABS, SQNEG
@@ -675,7 +744,11 @@ impl Cpu {
             self.simd_check()?;
             let lanes = if scalar { 1 } else { datasize(q) / esize };
             // The rounding forms are the ones with opcode<2> set.
-            let round = if opcode & 0b100 != 0 { 1i128 << (right - 1) } else { 0 };
+            let round = if opcode & 0b100 != 0 {
+                1i128 << (right - 1)
+            } else {
+                0
+            };
             for e in 0..lanes {
                 let a = elem(n, e, esize);
                 let acc = elem(d, e, esize);
@@ -699,7 +772,9 @@ impl Cpu {
                     Shift::Left => a << left,
                     // Keep the destination's low `left` bits.
                     Shift::InsertLeft => (a << left) | (acc & ones(left)),
-                    Shift::SaturateLeftUnsigned => sat(sint(a, esize) << left, esize, true, &mut qc),
+                    Shift::SaturateLeftUnsigned => {
+                        sat(sint(a, esize) << left, esize, true, &mut qc)
+                    }
                     Shift::SaturateLeft => sat(int(a, esize, u) << left, esize, u, &mut qc),
                 };
                 set_elem(&mut r, e, esize, v);
@@ -739,7 +814,10 @@ impl Cpu {
         if pmull_64 {
             self.simd_check()?;
             let half = u32::from(q);
-            self.write_v(rd, polynomial_mult(elem(n, half, 64), elem(m, half, 64), 64));
+            self.write_v(
+                rd,
+                polynomial_mult(elem(n, half, 64), elem(m, half, 64), 64),
+            );
             return Ok(Flow::Next);
         }
         // ADDHN, RADDHN, SUBHN, RSUBHN narrow; everything else widens.
@@ -774,7 +852,11 @@ impl Cpu {
             let mut part = 0u128;
             for e in 0..64 / esize {
                 let (a, b) = (uint(elem(n, e, wide)), uint(elem(m, e, wide)));
-                let value = if matches!(op, LongOp::Add) { a + b } else { a - b };
+                let value = if matches!(op, LongOp::Add) {
+                    a + b
+                } else {
+                    a - b
+                };
                 set_elem(&mut part, e, esize, low((value + round) >> esize, esize));
             }
             self.write_v(rd, narrow_into(d, part, upper));
@@ -794,7 +876,12 @@ impl Cpu {
                 int(elem(hn, e, esize), esize, u)
             };
             let y = int(elem(hm, e, esize), esize, u);
-            set_elem(&mut r, e, wide, long_lane(op, x, y, elem(d, e, wide), wide, &mut qc));
+            set_elem(
+                &mut r,
+                e,
+                wide,
+                long_lane(op, x, y, elem(d, e, wide), wide, &mut qc),
+            );
         }
         self.note_saturation(qc);
         self.write_v(rd, r);
@@ -828,15 +915,29 @@ impl Cpu {
             Long(LongOp),
         }
         let kind = match (opcode, u) {
-            (0b0000, true) if !scalar => Kind::Same(|a, b, d, _, _| d.wrapping_add(a.wrapping_mul(b))),
-            (0b0100, true) if !scalar => Kind::Same(|a, b, d, _, _| d.wrapping_sub(a.wrapping_mul(b))),
+            (0b0000, true) if !scalar => {
+                Kind::Same(|a, b, d, _, _| d.wrapping_add(a.wrapping_mul(b)))
+            }
+            (0b0100, true) if !scalar => {
+                Kind::Same(|a, b, d, _, _| d.wrapping_sub(a.wrapping_mul(b)))
+            }
             (0b1000, false) if !scalar => Kind::Same(|a, b, _, _, _| a.wrapping_mul(b)),
-            (0b1100, false) => {
-                Kind::Same(|a, b, _, e, qc| sat(doubling_mul_high(sint(a, e), sint(b, e), e, false), e, false, qc))
-            }
-            (0b1101, false) => {
-                Kind::Same(|a, b, _, e, qc| sat(doubling_mul_high(sint(a, e), sint(b, e), e, true), e, false, qc))
-            }
+            (0b1100, false) => Kind::Same(|a, b, _, e, qc| {
+                sat(
+                    doubling_mul_high(sint(a, e), sint(b, e), e, false),
+                    e,
+                    false,
+                    qc,
+                )
+            }),
+            (0b1101, false) => Kind::Same(|a, b, _, e, qc| {
+                sat(
+                    doubling_mul_high(sint(a, e), sint(b, e), e, true),
+                    e,
+                    false,
+                    qc,
+                )
+            }),
             (0b1101, true) => Kind::Same(|a, b, d, e, qc| rdm_lane(a, b, d, e, false, qc)),
             (0b1111, true) => Kind::Same(|a, b, d, e, qc| rdm_lane(a, b, d, e, true, qc)),
             (0b0010, _) if !scalar => Kind::Long(LongOp::MulAcc),
@@ -854,7 +955,18 @@ impl Cpu {
             Kind::Same(op) => {
                 let lanes = if scalar { 1 } else { datasize(q) / esize };
                 for e in 0..lanes {
-                    set_elem(&mut r, e, esize, op(elem(n, e, esize), element, elem(d, e, esize), esize, &mut qc));
+                    set_elem(
+                        &mut r,
+                        e,
+                        esize,
+                        op(
+                            elem(n, e, esize),
+                            element,
+                            elem(d, e, esize),
+                            esize,
+                            &mut qc,
+                        ),
+                    );
                 }
             }
             Kind::Long(op) => {
@@ -864,7 +976,12 @@ impl Cpu {
                 let y = int(element, esize, u);
                 for e in 0..count {
                     let x = int(elem(half, e, esize), esize, u);
-                    set_elem(&mut r, e, wide, long_lane(op, x, y, elem(d, e, wide), wide, &mut qc));
+                    set_elem(
+                        &mut r,
+                        e,
+                        wide,
+                        long_lane(op, x, y, elem(d, e, wide), wide, &mut qc),
+                    );
                 }
             }
         }
@@ -946,7 +1063,14 @@ impl Cpu {
         let mut qc = false;
         let mut r = 0u128;
         for e in 0..lanes {
-            let lane = rdm_lane(elem(n, e, esize), elem(m, e, esize), elem(d, e, esize), esize, subtract, &mut qc);
+            let lane = rdm_lane(
+                elem(n, e, esize),
+                elem(m, e, esize),
+                elem(d, e, esize),
+                esize,
+                subtract,
+                &mut qc,
+            );
             set_elem(&mut r, e, esize, lane);
         }
         self.note_saturation(qc);
@@ -963,7 +1087,11 @@ impl Cpu {
     pub(crate) fn exec_simd_dot(&mut self, pc: u64, insn: u32, by_element: bool) -> ExecResult {
         let q = bit(insn, 30);
         let u = bit(insn, 29);
-        let mixed = if by_element { bit(insn, 12) } else { bit(insn, 11) };
+        let mixed = if by_element {
+            bit(insn, 12)
+        } else {
+            bit(insn, 11)
+        };
         // Whether Vn's bytes and Vm's are unsigned. USDOT is unsigned by
         // signed, SUDOT signed by unsigned (by element, `US` says which).
         let (n_unsigned, m_unsigned) = if mixed {
@@ -1086,14 +1214,23 @@ mod tests {
         let mut qc = false;
         // Left by more than the element: zero, or saturated for SQSHL.
         assert_eq!(shift_by_register(1, 8, 8, false, None, &mut qc), 0);
-        assert_eq!(shift_by_register(1, 8, 8, false, Some(false), &mut qc), 0x7F);
+        assert_eq!(
+            shift_by_register(1, 8, 8, false, Some(false), &mut qc),
+            0x7F
+        );
         assert!(qc);
         let mut qc = false;
-        assert_eq!(shift_by_register(-1, 100, 64, false, Some(false), &mut qc), 1 << 63);
+        assert_eq!(
+            shift_by_register(-1, 100, 64, false, Some(false), &mut qc),
+            1 << 63
+        );
         assert!(qc);
         // Right by -128: all sign bits when truncating, zero when rounding.
         let mut qc = false;
-        assert_eq!(shift_by_register(-5, 0x80, 16, false, None, &mut qc), 0xFFFF);
+        assert_eq!(
+            shift_by_register(-5, 0x80, 16, false, None, &mut qc),
+            0xFFFF
+        );
         assert_eq!(shift_by_register(-5, 0x80, 16, true, None, &mut qc), 0);
         // Rounding right shift by one: 3 -> 2, -3 -> -1 (round half up).
         assert_eq!(shift_by_register(3, 0xFF, 8, true, None, &mut qc), 2);
@@ -1108,5 +1245,4 @@ mod tests {
             assert_eq!(clz((a >> 1) ^ (a & ones(7)), 7), want, "cls({a:#x})");
         }
     }
-
 }

@@ -25,8 +25,8 @@
 //! postfix does not apply here.
 #![allow(clippy::enum_variant_names)]
 
-use super::Feature;
 use super::Encoding;
+use super::Feature;
 use crate::cpu::exec::bits;
 
 pub(super) fn sve(word: u32) -> Option<Encoding> {
@@ -1974,7 +1974,9 @@ fn sve_pred_gen_d(word: u32) -> Option<Encoding> {
         (0b0000, _, 0b00 | 0b10, 0b0) => sve_int_ptest(word).map(Encoding::SveIntPtest),
         (0b1000, 0b000, 0b00, 0b0) => sve_int_pfirst(word).map(Encoding::SveIntPfirst),
         (0b1001, 0b000, 0b10, 0b0) => sve_int_pnext(word).map(Encoding::SveIntPnext),
-        (0b1000 | 0b1001, 0b100, 0b00 | 0b01, 0b0) => sve_int_ptrue(word).map(Encoding::SveIntPtrue),
+        (0b1000 | 0b1001, 0b100, 0b00 | 0b01, 0b0) => {
+            sve_int_ptrue(word).map(Encoding::SveIntPtrue)
+        }
         (0b1000, 0b100, 0b10, 0b0) => match op3 {
             0b0000 => sve_int_pfalse(word).map(Encoding::SveIntPfalse),
             _ => None,
@@ -2083,7 +2085,9 @@ fn sve_while_pn(word: u32) -> Option<Encoding> {
     let op2 = bits(word, 10, 5);
     let op3 = bits(word, 3, 3);
     match (op0, op1) {
-        (_, 0b000 | 0b001 | 0b100 | 0b101) => sve_int_while_rr_pn(word).map(Encoding::SveIntWhileRrPn),
+        (_, 0b000 | 0b001 | 0b100 | 0b101) => {
+            sve_int_while_rr_pn(word).map(Encoding::SveIntWhileRrPn)
+        }
         (_, 0b010 | 0b011) => sve_int_while_rr_pair(word).map(Encoding::SveIntWhileRrPair),
         (0b00000, 0b110) => sve_int_ctr_to_mask(word).map(Encoding::SveIntCtrToMask),
         (0b00000, 0b111) => match (op2, op3) {
@@ -2531,7 +2535,12 @@ fn sve_int_dup_fpimm(word: u32) -> Option<SveIntDupFpimm> {
 /// `sve_intx_crypto` (`op1<7> = 1`, `op1<4> = 1`, `op2 = 1xxxxx`) are
 /// FEAT_SVE2's alone and later features'.
 fn integer_sve2_groups(word: u32) -> Option<Encoding> {
-    match (bits(word, 24, 24), bits(word, 23, 22), bits(word, 21, 21), bits(word, 15, 10)) {
+    match (
+        bits(word, 24, 24),
+        bits(word, 23, 22),
+        bits(word, 21, 21),
+        bits(word, 15, 10),
+    ) {
         (0b0, _, 0b0, 0b000000..=0b011111) => sve_intx_muladd_unpred(word),
         (0b0, _, 0b0, 0b100000..=0b101111) => sve_intx_predicated(word),
         (0b0, _, 0b0, 0b110000 | 0b110001) => sve_intx_clamp(word).map(Encoding::SveIntxClamp),
@@ -2714,12 +2723,24 @@ fn sve_intx_predicated(word: u32) -> Option<Encoding> {
     let op0 = bits(word, 20, 17);
     let op1 = bits(word, 13, 13);
     match (op0, op1) {
-        (0b0000..=0b0111, 0b0) => sve_intx_bin_pred_shift_sat_round(word).map(Encoding::SveIntxBinPredShiftSatRound),
-        (0b0000 | 0b0001 | 0b0100 | 0b0101, 0b1) => sve_intx_pred_arith_unary(word).map(Encoding::SveIntxPredArithUnary),
-        (0b0010, 0b1) => sve_intx_accumulate_long_pairs(word).map(Encoding::SveIntxAccumulateLongPairs),
-        (0b1000..=0b1011, 0b0) => sve_intx_pred_arith_binary(word).map(Encoding::SveIntxPredArithBinary),
-        (0b1000..=0b1011, 0b1) => sve_intx_arith_binary_pairs(word).map(Encoding::SveIntxArithBinaryPairs),
-        (0b1100..=0b1111, 0b0) => sve_intx_pred_arith_binary_sat(word).map(Encoding::SveIntxPredArithBinarySat),
+        (0b0000..=0b0111, 0b0) => {
+            sve_intx_bin_pred_shift_sat_round(word).map(Encoding::SveIntxBinPredShiftSatRound)
+        }
+        (0b0000 | 0b0001 | 0b0100 | 0b0101, 0b1) => {
+            sve_intx_pred_arith_unary(word).map(Encoding::SveIntxPredArithUnary)
+        }
+        (0b0010, 0b1) => {
+            sve_intx_accumulate_long_pairs(word).map(Encoding::SveIntxAccumulateLongPairs)
+        }
+        (0b1000..=0b1011, 0b0) => {
+            sve_intx_pred_arith_binary(word).map(Encoding::SveIntxPredArithBinary)
+        }
+        (0b1000..=0b1011, 0b1) => {
+            sve_intx_arith_binary_pairs(word).map(Encoding::SveIntxArithBinaryPairs)
+        }
+        (0b1100..=0b1111, 0b0) => {
+            sve_intx_pred_arith_binary_sat(word).map(Encoding::SveIntxPredArithBinarySat)
+        }
         _ => None,
     }
 }
@@ -2947,18 +2968,42 @@ fn sve_intx_dot2_by_indexed_elem(word: u32) -> Option<SveIntxDot2ByIndexedElem> 
 fn sve_intx_by_indexed_elem(word: u32) -> Option<Encoding> {
     let op0 = bits(word, 15, 10);
     match op0 {
-        0b000000 | 0b000001 => sve_intx_dot_by_indexed_elem(word).map(Encoding::SveIntxDotByIndexedElem),
-        0b000010 | 0b000011 => sve_intx_mla_by_indexed_elem(word).map(Encoding::SveIntxMlaByIndexedElem),
-        0b000100 | 0b000101 => sve_intx_qrdmlah_by_indexed_elem(word).map(Encoding::SveIntxQrdmlahByIndexedElem),
-        0b000110 | 0b000111 => sve_intx_mixed_dot_by_indexed_elem(word).map(Encoding::SveIntxMixedDotByIndexedElem),
-        0b001000..=0b001111 => sve_intx_qdmla_long_by_indexed_elem(word).map(Encoding::SveIntxQdmlaLongByIndexedElem),
-        0b010000..=0b010011 => sve_intx_cdot_by_indexed_elem(word).map(Encoding::SveIntxCdotByIndexedElem),
-        0b011000..=0b011011 => sve_intx_cmla_by_indexed_elem(word).map(Encoding::SveIntxCmlaByIndexedElem),
-        0b011100..=0b011111 => sve_intx_qrdcmla_by_indexed_elem(word).map(Encoding::SveIntxQrdcmlaByIndexedElem),
-        0b100000..=0b101111 => sve_intx_mla_long_by_indexed_elem(word).map(Encoding::SveIntxMlaLongByIndexedElem),
-        0b110000..=0b110111 => sve_intx_mul_long_by_indexed_elem(word).map(Encoding::SveIntxMulLongByIndexedElem),
-        0b111000..=0b111011 => sve_intx_qdmul_long_by_indexed_elem(word).map(Encoding::SveIntxQdmulLongByIndexedElem),
-        0b111100 | 0b111101 => sve_intx_qdmulh_by_indexed_elem(word).map(Encoding::SveIntxQdmulhByIndexedElem),
+        0b000000 | 0b000001 => {
+            sve_intx_dot_by_indexed_elem(word).map(Encoding::SveIntxDotByIndexedElem)
+        }
+        0b000010 | 0b000011 => {
+            sve_intx_mla_by_indexed_elem(word).map(Encoding::SveIntxMlaByIndexedElem)
+        }
+        0b000100 | 0b000101 => {
+            sve_intx_qrdmlah_by_indexed_elem(word).map(Encoding::SveIntxQrdmlahByIndexedElem)
+        }
+        0b000110 | 0b000111 => {
+            sve_intx_mixed_dot_by_indexed_elem(word).map(Encoding::SveIntxMixedDotByIndexedElem)
+        }
+        0b001000..=0b001111 => {
+            sve_intx_qdmla_long_by_indexed_elem(word).map(Encoding::SveIntxQdmlaLongByIndexedElem)
+        }
+        0b010000..=0b010011 => {
+            sve_intx_cdot_by_indexed_elem(word).map(Encoding::SveIntxCdotByIndexedElem)
+        }
+        0b011000..=0b011011 => {
+            sve_intx_cmla_by_indexed_elem(word).map(Encoding::SveIntxCmlaByIndexedElem)
+        }
+        0b011100..=0b011111 => {
+            sve_intx_qrdcmla_by_indexed_elem(word).map(Encoding::SveIntxQrdcmlaByIndexedElem)
+        }
+        0b100000..=0b101111 => {
+            sve_intx_mla_long_by_indexed_elem(word).map(Encoding::SveIntxMlaLongByIndexedElem)
+        }
+        0b110000..=0b110111 => {
+            sve_intx_mul_long_by_indexed_elem(word).map(Encoding::SveIntxMulLongByIndexedElem)
+        }
+        0b111000..=0b111011 => {
+            sve_intx_qdmul_long_by_indexed_elem(word).map(Encoding::SveIntxQdmulLongByIndexedElem)
+        }
+        0b111100 | 0b111101 => {
+            sve_intx_qdmulh_by_indexed_elem(word).map(Encoding::SveIntxQdmulhByIndexedElem)
+        }
         0b111110 => sve_intx_mul_by_indexed_elem(word).map(Encoding::SveIntxMulByIndexedElem),
         _ => None,
     }
@@ -3613,11 +3658,15 @@ fn sve_intx_narrowing(word: u32) -> Option<Encoding> {
     let op4 = bits(word, 10, 10);
     let op5 = bits(word, 5, 5);
     match (op0, op1, op2, op3, op4, op5) {
-        (0b0, _, _, 0b00 | 0b01, _, _) => sve_intx_shift_narrow(word).map(Encoding::SveIntxShiftNarrow),
+        (0b0, _, _, 0b00 | 0b01, _, _) => {
+            sve_intx_shift_narrow(word).map(Encoding::SveIntxShiftNarrow)
+        }
         (0b1, _, _, 0b00 | 0b01, 0b0, 0b0) => {
             sve_intx_multi_shift_narrow(word).map(Encoding::SveIntxMultiShiftNarrow)
         }
-        (0b0, 0b00, 0b0, 0b10, _, _) => sve_intx_extract_narrow(word).map(Encoding::SveIntxExtractNarrow),
+        (0b0, 0b00, 0b0, 0b10, _, _) => {
+            sve_intx_extract_narrow(word).map(Encoding::SveIntxExtractNarrow)
+        }
         (0b0, 0b00, 0b1, 0b10, 0b0, 0b0) => {
             sve_intx_multi_extract_narrow(word).map(Encoding::SveIntxMultiExtractNarrow)
         }
@@ -3813,9 +3862,15 @@ fn fp_complex_and_pairwise(word: u32) -> Option<Encoding> {
 /// or later features'.
 fn fp_indexed_and_widening(word: u32) -> Option<Encoding> {
     match bits(word, 15, 10) {
-        0b000000..=0b000011 => sve_fp_fma_by_indexed_elem(word).map(Encoding::SveFpFmaByIndexedElem),
-        0b000100..=0b000111 => sve_fp_fcmla_by_indexed_elem(word).map(Encoding::SveFpFcmlaByIndexedElem),
-        0b001000 | 0b001010 => sve_fp_fmul_by_indexed_elem(word).map(Encoding::SveFpFmulByIndexedElem),
+        0b000000..=0b000011 => {
+            sve_fp_fma_by_indexed_elem(word).map(Encoding::SveFpFmaByIndexedElem)
+        }
+        0b000100..=0b000111 => {
+            sve_fp_fcmla_by_indexed_elem(word).map(Encoding::SveFpFcmlaByIndexedElem)
+        }
+        0b001000 | 0b001010 => {
+            sve_fp_fmul_by_indexed_elem(word).map(Encoding::SveFpFmulByIndexedElem)
+        }
         0b001001 => sve_fp_clamp(word).map(Encoding::SveFpClamp),
         0b010000..=0b010011 | 0b011000..=0b011011 => sve_fp_fma_w_by_indexed_elem(word),
         0b100000 | 0b100001 | 0b101000 | 0b101001 => sve_fp_fma_w(word),
@@ -4644,7 +4699,9 @@ fn sve_mem32(word: u32) -> Option<Encoding> {
     match (op0, op1, op2, op3) {
         (0b11, 0b00 | 0b01, 0b000, 0b0) => sve_mem_32b_pfill(word).map(Encoding::SveMem32bPfill),
         (0b11, 0b00 | 0b01, 0b010, _) => sve_mem_32b_fill(word).map(Encoding::SveMem32bFill),
-        (0b11, 0b10 | 0b11, 0b000..=0b011, 0b0) => sve_mem_prfm_si(word).map(Encoding::SveMemPrfmSi),
+        (0b11, 0b10 | 0b11, 0b000..=0b011, 0b0) => {
+            sve_mem_prfm_si(word).map(Encoding::SveMemPrfmSi)
+        }
         (_, 0b00, 0b110, 0b0) => sve_mem_prfm_ss(word).map(Encoding::SveMemPrfmSs),
         (_, 0b10 | 0b11, 0b100..=0b111, _) => sve_mem_ld_dup(word).map(Encoding::SveMemLdDup),
         _ => None,

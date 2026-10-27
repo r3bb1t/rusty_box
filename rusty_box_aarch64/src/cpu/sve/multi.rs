@@ -34,7 +34,10 @@ use super::int::BinOp;
 use super::{clamp, group, int, sat_doubling_mul_high, sat_q, shift_by_element, Esize, Zv};
 use crate::cpu::exec::{bit, bits, ExecResult, Flow};
 use crate::cpu::features::VecLen;
-use crate::cpu::fp::{fp_binary, fp_convert, fp_to_int, fp_unary, int_to_fp, FpBinary, FpConversion, FpType, FpUnary, IntWidth};
+use crate::cpu::fp::{
+    fp_binary, fp_convert, fp_to_int, fp_unary, int_to_fp, FpBinary, FpConversion, FpType, FpUnary,
+    IntWidth,
+};
 use crate::cpu::Cpu;
 use crate::softfloat::{self as sf, FpRounding, InexactReport};
 
@@ -55,7 +58,11 @@ impl BinaryRegs {
     /// many (`Zm:'0'`, `Zm:'00'`, bits 20:17 or 20:18).
     fn of(insn: u32) -> Self {
         let nreg = if bit(insn, 11) { 4 } else { 2 };
-        let (m, step) = if bit(insn, 12) { (group(insn, 20, nreg), 1) } else { (bits(insn, 19, 16), 0) };
+        let (m, step) = if bit(insn, 12) {
+            (group(insn, 20, nreg), 1)
+        } else {
+            (bits(insn, 19, 16), 0)
+        };
         Self {
             dn: group(insn, 4, nreg),
             nreg,
@@ -187,7 +194,13 @@ impl Cpu {
     /// The binary operation `op` on elements of `es` of the group `regs`
     /// names: element `e` of its register `r` with element `e` of `Zm` (or
     /// of `Zm + r`), each result to `Zdn + r`.
-    fn multi_binary<F: FnMut(u64, u64) -> u64>(&mut self, regs: BinaryRegs, es: Esize, vl: VecLen, mut op: F) {
+    fn multi_binary<F: FnMut(u64, u64) -> u64>(
+        &mut self,
+        regs: BinaryRegs,
+        es: Esize,
+        vl: VecLen,
+        mut op: F,
+    ) {
         let mut results = [Zv::ZERO; 4];
         for (r, result) in (0u32..).zip(results[..regs.nreg].iter_mut()) {
             let (a, b) = (self.z(regs.dn + r, vl), self.z(regs.m + r * regs.step, vl));
@@ -206,7 +219,11 @@ impl Cpu {
     pub(crate) fn exec_sve_multi_sel(&mut self, insn: u32) -> ExecResult {
         let es = Esize::from_size(bits(insn, 23, 22));
         let nreg = if bit(insn, 16) { 4 } else { 2 };
-        let (n, m, d) = (group(insn, 9, nreg), group(insn, 20, nreg), group(insn, 4, nreg));
+        let (n, m, d) = (
+            group(insn, 9, nreg),
+            group(insn, 20, nreg),
+            group(insn, 4, nreg),
+        );
         let v = 8 + bits(insn, 12, 10);
         let vl = self.check_streaming_sve_enabled()?;
         let counter = PredCounter::of(&self.p(v, vl), vl);
@@ -215,7 +232,11 @@ impl Cpu {
         for (r, result) in (0u32..).zip(results[..nreg].iter_mut()) {
             let (a, b) = (self.z(n + r, vl), self.z(m + r, vl));
             for e in 0..elements {
-                let source = if counter.active(r as usize * elements + e, es) { &a } else { &b };
+                let source = if counter.active(r as usize * elements + e, es) {
+                    &a
+                } else {
+                    &b
+                };
                 result.set(e, es, source.get(e, es));
             }
         }
@@ -255,7 +276,9 @@ impl Cpu {
         let regs = BinaryRegs::of(insn);
         let vl = self.check_streaming_sve_enabled()?;
         let mut env = self.fp_env();
-        self.multi_binary(regs, esize(ty), vl, |a, b| fp_binary(op, ty, a, b, &mut env));
+        self.multi_binary(regs, esize(ty), vl, |a, b| {
+            fp_binary(op, ty, a, b, &mut env)
+        });
         self.fp_commit(&env);
         Ok(Flow::Next)
     }
@@ -268,7 +291,9 @@ impl Cpu {
     pub(crate) fn exec_sve_multi_clamp(&mut self, pc: u64, insn: u32) -> ExecResult {
         let size = bits(insn, 23, 22);
         let kind = if bit(insn, 10) {
-            Clamp::Int { unsigned: bit(insn, 0) }
+            Clamp::Int {
+                unsigned: bit(insn, 0),
+            }
         } else {
             let Some(ty) = fp_type(size) else {
                 return self.undefined(pc, insn);
@@ -279,7 +304,9 @@ impl Cpu {
         let vl = self.check_streaming_sve_enabled()?;
         let es = Esize::from_size(size);
         match kind {
-            Clamp::Int { unsigned } => self.multi_clamp(regs, es, vl, |x, low, high| clamp(x, low, high, es, unsigned)),
+            Clamp::Int { unsigned } => self.multi_clamp(regs, es, vl, |x, low, high| {
+                clamp(x, low, high, es, unsigned)
+            }),
             Clamp::Float(ty) => self.fp_clamp(regs, ty, es, vl),
         }
         Ok(Flow::Next)
@@ -287,7 +314,13 @@ impl Cpu {
 
     /// The clamp `op` of each element of the group `regs` names, `op(x,
     /// low, high)` with `Zn`'s element below and `Zm`'s above.
-    fn multi_clamp<F: FnMut(u64, u64, u64) -> u64>(&mut self, regs: ClampRegs, es: Esize, vl: VecLen, mut op: F) {
+    fn multi_clamp<F: FnMut(u64, u64, u64) -> u64>(
+        &mut self,
+        regs: ClampRegs,
+        es: Esize,
+        vl: VecLen,
+        mut op: F,
+    ) {
         let (low, high) = (self.z(regs.n, vl), self.z(regs.m, vl));
         let mut results = [Zv::ZERO; 4];
         for (r, result) in (0u32..).zip(results[..regs.nreg].iter_mut()) {
@@ -317,7 +350,11 @@ impl Cpu {
             (bits(insn, 12, 10) == 0b101, bit(insn, 0))
         };
         // An element moves whole, a quadword as two doublewords.
-        let (es, parts) = if quadwords { (Esize::D, 2) } else { (Esize::from_size(bits(insn, 23, 22)), 1) };
+        let (es, parts) = if quadwords {
+            (Esize::D, 2)
+        } else {
+            (Esize::from_size(bits(insn, 23, 22)), 1)
+        };
         let bytes = es.bytes() * parts;
         let nreg = if four { 4 } else { 2 };
         // `MaxImplementedSVL() < 256` (`< 512` four quadwords, `size ==
@@ -363,7 +400,11 @@ impl Cpu {
                         (r, nreg * p + i, i, r * slice + p)
                     };
                     for k in 0..parts {
-                        results[to].set(to_element * parts + k, es, operands[from].get(from_element * parts + k, es));
+                        results[to].set(
+                            to_element * parts + k,
+                            es,
+                            operands[from].get(from_element * parts + k, es),
+                        );
                     }
                 }
             }
@@ -385,8 +426,16 @@ impl Cpu {
                     0 => value,
                     shift => (value + (1i128 << (shift - 1))) >> shift,
                 };
-                let index = if narrow.interleave { narrow.nreg * e + r } else { r * elements + e };
-                result.set(index, narrow.es, sat_q(value, narrow.es, narrow.unsigned_result));
+                let index = if narrow.interleave {
+                    narrow.nreg * e + r
+                } else {
+                    r * elements + e
+                };
+                result.set(
+                    index,
+                    narrow.es,
+                    sat_q(value, narrow.es, narrow.unsigned_result),
+                );
             }
         }
         self.set_z(narrow.d, vl, &result);
@@ -450,7 +499,11 @@ impl Cpu {
             d: bits(insn, 4, 0),
             nreg: if four { 4 } else { 2 },
             // Halfwords from words; from four vectors, `8 << UInt(sz)`.
-            es: if four && !bit(insn, 23) { Esize::B } else { Esize::H },
+            es: if four && !bit(insn, 23) {
+                Esize::B
+            } else {
+                Esize::H
+            },
             unsigned_source: unsigned,
             unsigned_result: unsigned || bit(insn, 22),
             shift: 0,
@@ -472,7 +525,11 @@ impl Cpu {
     pub(crate) fn exec_sve_narrow_pair(&mut self, insn: u32) -> ExecResult {
         let (unsigned_source, unsigned_result, shift) = if bit(insn, 23) {
             let unsigned = bit(insn, 12);
-            (unsigned, unsigned || !bit(insn, 13), 16 - bits(insn, 19, 16))
+            (
+                unsigned,
+                unsigned || !bit(insn, 13),
+                16 - bits(insn, 19, 16),
+            )
         } else {
             let unsigned = bit(insn, 11);
             (unsigned, unsigned || bit(insn, 12), 0)
@@ -546,8 +603,15 @@ impl Cpu {
                     fp_convert(FpConversion::SingleToHalf, a, &mut env)
                 }
             };
-            let (r1, r2) = (convert(first.get(e, Esize::S)), convert(second.get(e, Esize::S)));
-            let (i1, i2) = if interleave { (2 * e, 2 * e + 1) } else { (e, elements + e) };
+            let (r1, r2) = (
+                convert(first.get(e, Esize::S)),
+                convert(second.get(e, Esize::S)),
+            );
+            let (i1, i2) = if interleave {
+                (2 * e, 2 * e + 1)
+            } else {
+                (e, elements + e)
+            };
             result.set(i1, Esize::H, r1);
             result.set(i2, Esize::H, r2);
         }
@@ -582,10 +646,18 @@ impl Cpu {
             for e in 0..Esize::S.elements(vl) {
                 let a = operand.get(e, Esize::S);
                 let value = match op {
-                    WordOp::ToInt { signed } => {
-                        fp_to_int(FpType::Single, a, 0, FpRounding::Zero, signed, IntWidth::Bits32, &mut env)
+                    WordOp::ToInt { signed } => fp_to_int(
+                        FpType::Single,
+                        a,
+                        0,
+                        FpRounding::Zero,
+                        signed,
+                        IntWidth::Bits32,
+                        &mut env,
+                    ),
+                    WordOp::FromInt { signed } => {
+                        int_to_fp(FpType::Single, a, 0, signed, IntWidth::Bits32, &mut env)
                     }
-                    WordOp::FromInt { signed } => int_to_fp(FpType::Single, a, 0, signed, IntWidth::Bits32, &mut env),
                     WordOp::Round(rounding) => fp_unary(
                         FpUnary::RoundInt(rounding, InexactReport::Suppress),
                         FpType::Single,
@@ -627,7 +699,11 @@ impl Cpu {
             let operand = self.z(n + r as u32, vl);
             for (i, result) in results[2 * r..2 * r + 2].iter_mut().enumerate() {
                 for e in 0..elements {
-                    result.set(e, es, int(operand.get(i * elements + e, half), half, unsigned) as u64);
+                    result.set(
+                        e,
+                        es,
+                        int(operand.get(i * elements + e, half), half, unsigned) as u64,
+                    );
                 }
             }
         }

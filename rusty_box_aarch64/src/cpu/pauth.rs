@@ -54,8 +54,8 @@ impl PacKeys {
     /// `APIAKeyLo_EL1` to `APGAKeyHi_EL1`: what a snapshot holds.
     pub(crate) const fn halves(&self) -> [u64; 10] {
         [
-            self.ia.lo, self.ia.hi, self.ib.lo, self.ib.hi, self.da.lo, self.da.hi, self.db.lo, self.db.hi, self.ga.lo,
-            self.ga.hi,
+            self.ia.lo, self.ia.hi, self.ib.lo, self.ib.hi, self.da.lo, self.da.hi, self.db.lo,
+            self.db.hi, self.ga.lo, self.ga.hi,
         ]
     }
 
@@ -148,8 +148,12 @@ const RC: [u64; 5] = [
 
 /// PACSub and PACInvSub: the PRINCE-family 4-bit substitution and its
 /// inverse.
-const SUB: [u64; 16] = [0xB, 0x6, 0x8, 0xF, 0xC, 0x0, 0x9, 0xE, 0x3, 0x7, 0x4, 0x5, 0xD, 0x2, 0x1, 0xA];
-const INV_SUB: [u64; 16] = [0x5, 0xE, 0xD, 0x8, 0xA, 0xB, 0x1, 0x9, 0x2, 0x6, 0xF, 0x0, 0x4, 0xC, 0x7, 0x3];
+const SUB: [u64; 16] = [
+    0xB, 0x6, 0x8, 0xF, 0xC, 0x0, 0x9, 0xE, 0x3, 0x7, 0x4, 0x5, 0xD, 0x2, 0x1, 0xA,
+];
+const INV_SUB: [u64; 16] = [
+    0x5, 0xE, 0xD, 0x8, 0xA, 0xB, 0x1, 0x9, 0x2, 0x6, 0xF, 0x0, 0x4, 0xC, 0x7, 0x3,
+];
 
 /// PACCellShuffle and PACCellInvShuffle: output cell `k` is input cell
 /// `SHUFFLE[k]`.
@@ -240,7 +244,10 @@ fn mult(s: u64) -> u64 {
         let t1 = rol4(c12, 1) ^ rol4(c4, 1) ^ rol4(c0, 2);
         let t2 = rol4(c12, 2) ^ rol4(c8, 1) ^ rol4(c0, 1);
         let t3 = rol4(c12, 1) ^ rol4(c8, 2) ^ rol4(c4, 1);
-        out |= (t3 << (4 * i)) | (t2 << (4 * (i + 4))) | (t1 << (4 * (i + 8))) | (t0 << (4 * (i + 12)));
+        out |= (t3 << (4 * i))
+            | (t2 << (4 * (i + 4)))
+            | (t1 << (4 * (i + 8)))
+            | (t0 << (4 * (i + 12)));
     }
     out
 }
@@ -264,7 +271,10 @@ pub(crate) fn compute_pac(data: u64, modifier: u64, key0: u64, key1: u64) -> u64
     w = substitute(mult(shuffle(w, &SHUFFLE)), &SUB);
     w = mult(shuffle(w, &SHUFFLE));
     w ^= key1;
-    w = shuffle(mult(substitute(shuffle(w, &INV_SHUFFLE), &INV_SUB)), &INV_SHUFFLE);
+    w = shuffle(
+        mult(substitute(shuffle(w, &INV_SHUFFLE), &INV_SUB)),
+        &INV_SHUFFLE,
+    );
     w ^= key0 ^ running;
     for i in 0..=ITERATIONS {
         w = substitute(w, &INV_SUB);
@@ -345,7 +355,12 @@ impl Cpu {
         };
         let bottom = self.bottom_pac_bit(selbit);
         let low = field(bottom - 1, 0);
-        let mut pac = compute_pac(with_extension(ptr, selbit, bottom, tbi), modifier, k.hi, k.lo);
+        let mut pac = compute_pac(
+            with_extension(ptr, selbit, bottom, tbi),
+            modifier,
+            k.hi,
+            k.lo,
+        );
         let bit55 = if selbit { 1 << 55 } else { 0 };
         if !self.implements(Feature::PAuth2) {
             // A pointer without a canonical extension gets a corrupted
@@ -358,7 +373,11 @@ impl Cpu {
             let upper = if tbi { ptr } else { pac };
             (upper & field(63, 56)) | bit55 | (pac & field(54, bottom)) | (ptr & low)
         } else {
-            let upper = if tbi { ptr & field(63, 56) } else { (ptr ^ pac) & field(63, 56) };
+            let upper = if tbi {
+                ptr & field(63, 56)
+            } else {
+                (ptr ^ pac) & field(63, 56)
+            };
             upper | bit55 | ((ptr ^ pac) & field(54, bottom)) | (ptr & low)
         }
     }
@@ -375,7 +394,13 @@ impl Cpu {
     /// itself when `key` is disabled. A failed check corrupts the pointer;
     /// with FEAT_FPACCOMBINE, or FEAT_FPAC for an authentication alone, it
     /// raises the PAC Fail exception instead.
-    pub(crate) fn auth(&self, ptr: u64, modifier: u64, key: PacKey, used: AuthUse) -> Result<u64, Exception> {
+    pub(crate) fn auth(
+        &self,
+        ptr: u64,
+        modifier: u64,
+        key: PacKey,
+        used: AuthUse,
+    ) -> Result<u64, Exception> {
         if !self.pac_key_enabled(key) {
             return Ok(ptr);
         }
@@ -388,7 +413,11 @@ impl Cpu {
         let pac = compute_pac(original, modifier, k.hi, k.lo);
         // The bits that hold the code: 54..bottom, and 63..56 without
         // top-byte-ignore.
-        let code = if tbi { field(54, bottom) } else { field(63, 56) | field(54, bottom) };
+        let code = if tbi {
+            field(54, bottom)
+        } else {
+            field(63, 56) | field(54, bottom)
+        };
         if !self.implements(Feature::PAuth2) {
             if (pac ^ ptr) & code == 0 {
                 return Ok(original);
@@ -402,7 +431,11 @@ impl Cpu {
         let result = ptr ^ (pac & code);
         let faults = self.implements(Feature::FpacCombine)
             || (self.implements(Feature::Fpac) && used == AuthUse::Alone);
-        let checked = if tbi { field(54, bottom) } else { field(63, bottom) };
+        let checked = if tbi {
+            field(54, bottom)
+        } else {
+            field(63, bottom)
+        };
         if faults && result & checked != replicate((result >> 55) & 1 == 1) & checked {
             let syndrome = (u32::from(data) << 1) | key.number() as u32;
             return Err(Exception::new(ExceptionClass::PacFail, syndrome));
@@ -438,7 +471,12 @@ impl Cpu {
     /// Arm Strip: `a` with its code replaced by the address's extension.
     pub(crate) fn strip_pac(&self, a: u64, data: bool) -> u64 {
         let a55 = (a >> 55) & 1 == 1;
-        with_extension(a, a55, self.bottom_pac_bit(a55), self.effective_tbi(a, !data))
+        with_extension(
+            a,
+            a55,
+            self.bottom_pac_bit(a55),
+            self.effective_tbi(a, !data),
+        )
     }
 }
 
@@ -456,7 +494,11 @@ impl Cpu {
         let value = if bits(insn, 15, 11) == 0b01000 {
             self.strip_pac(x, bit(insn, 10))
         } else {
-            let key = if bit(insn, 11) { PacKey::data_key(bit(insn, 10)) } else { PacKey::instruction(bit(insn, 10)) };
+            let key = if bit(insn, 11) {
+                PacKey::data_key(bit(insn, 10))
+            } else {
+                PacKey::instruction(bit(insn, 10))
+            };
             let modifier = if bit(insn, 13) { 0 } else { self.x_or_sp(rn) };
             if bit(insn, 12) {
                 self.auth(x, modifier, key, AuthUse::Alone)?
@@ -510,14 +552,24 @@ impl Cpu {
     /// returns; a failure to authenticate faults with FEAT_FPACCOMBINE and
     /// otherwise leaves a target the fetch faults on. Whether the branch was
     /// fetched from a guarded page decides its BTYPE (FEAT_BTI).
-    pub(crate) fn exec_branch_auth(&mut self, pc: u64, insn: u32, in_guarded_page: bool) -> ExecResult {
+    pub(crate) fn exec_branch_auth(
+        &mut self,
+        pc: u64,
+        insn: u32,
+        in_guarded_page: bool,
+    ) -> ExecResult {
         let key = PacKey::instruction(bit(insn, 10));
         let rn = bits(insn, 9, 5);
         let rm = bits(insn, 4, 0);
         match bits(insn, 24, 21) {
             0b0010 => {
                 let sp = self.x_or_sp(31);
-                Ok(Flow::Jump(self.auth(self.x[30], sp, key, AuthUse::Combined)?))
+                Ok(Flow::Jump(self.auth(
+                    self.x[30],
+                    sp,
+                    key,
+                    AuthUse::Combined,
+                )?))
             }
             0b0100 => {
                 if self.pstate.el == El::El0 {
@@ -555,7 +607,10 @@ impl Cpu {
         let base = self.x_or_sp(rn);
         let authenticated = self.auth(base, 0, key, AuthUse::Combined)?;
         self.check_sp_alignment(rn == 31, base)?;
-        let offset = sext((u64::from(bit(insn, 22)) << 9) | u64::from(bits(insn, 20, 12)), 10) << 3;
+        let offset = sext(
+            (u64::from(bit(insn, 22)) << 9) | u64::from(bits(insn, 20, 12)),
+            10,
+        ) << 3;
         let address = authenticated.wrapping_add(offset);
         let value = self.read_mem(bus, address, 3, DataAccess::NORMAL)?;
         self.set_x_or_zr(rt, value);
