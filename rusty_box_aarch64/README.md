@@ -185,15 +185,14 @@ with branch placement alone: one change measured `alu` at 0.87× and
 `-C llvm-args=-x86-branches-within-32B-boundaries`, from the same source.
 Read a single row's ratio to about that precision.
 
-Fixes to the processor and the board since 5028db8 change where its runs
-end; the speed work since d21b7e9 changes none, and every run ends in the
-same state on d21b7e9 and now. For the boots, the state hashes at 10M,
-100M and 400M instructions are:
+The boots' state hashes at 10M, 100M and 400M instructions on this tree,
+which a change meant to leave the guest's behaviour alone (as speed work
+is) must reproduce, are:
 
 | | 10M | 100M | 400M |
 |---|---|---|---|
 | EDK2 | `3eddc8be457d3db9` | `0eb363d26f0e7495` | `a7ab2001870414d5` |
-| Linux | `200880268c21867e` | `55417910c35ae1c8` | `dc93af98dd7df3cb` |
+| Linux | `200880268c21867e` | `f88d120c5c976b9f` | `785f7412a7700778` |
 
 ## What is modelled
 
