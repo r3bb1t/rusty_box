@@ -21,6 +21,7 @@
 pub mod fdt;
 
 use crate::board::UART0_BASE;
+use crate::devices::pl011::BaudRate;
 pub use fdt::DeviceTreeError;
 
 /// The device tree QEMU 11.1.2 generates for `-M virt -cpu cortex-a57 -m 256`
@@ -52,7 +53,10 @@ const _: () = assert!(UART0_BASE == 0x0900_0000, "the earlycon address names the
 /// Linux's `earlycon=pl011` writes to as it finds it. QEMU's direct boot
 /// leaves the UART at reset, transmitting regardless, where the PL011 would
 /// transmit nothing (README, "Where the references differ").
-pub const DIRECT_BOOT_CONSOLE_BAUD: u32 = 115_200;
+pub const DIRECT_BOOT_CONSOLE_BAUD: BaudRate = match BaudRate::new(115_200) {
+    Some(rate) => rate,
+    None => unreachable!(),
+};
 
 const MIB: u64 = 1 << 20;
 /// QEMU `KERNEL64_LOAD_ADDR`: where a kernel too old to say goes.

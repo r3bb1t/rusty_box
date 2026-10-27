@@ -46,7 +46,11 @@
 //!   since `RTIM` was set with characters waiting. It fires once; the next
 //!   character, or setting `RTIM` again, starts another count. Without a
 //!   baud clock (`UARTIBRD` 0, or 0xFFFF with `UARTFBRD` above 0, §3.3.6)
-//!   nothing counts.
+//!   no count starts. Where DDI 0183F is silent: a count running when a
+//!   new divisor is latched keeps the deadline it started with, whatever
+//!   that divisor, one without a baud clock included; and a count runs
+//!   whether or not the receiver is enabled (`UARTEN`, `RXE`), since the
+//!   FIFO still holds what it received and nothing more arrives.
 //! - The modem status interrupts (§3.4.1) are set by a change of their
 //!   line and cleared only by `UARTICR`.
 //! - Transmission needs `UARTCR.UARTEN` and `UARTCR.TXE` (§3.3.8, Note).
@@ -57,7 +61,8 @@
 //!   `TXFF` once it is full (Table 3-4). Enabling transmission sends what
 //!   waits; a change of `FEN` flushes it (§3.3.8, Note).
 //!
-//! Time on the line: characters take no time to cross it. A character goes
+//! Time on the line: characters take no time to cross it, whatever the
+//! divisor, `UARTIBRD` 0 (no baud clock) included. A character goes
 //! out the moment transmission is enabled to send it (the transmit FIFO
 //! empties at once, and `TXRIS` is raised for what it sends, as QEMU raises
 //! it after every write), and the host line delivers its bytes the moment
@@ -83,10 +88,40 @@
 //! unshifted, and splits an 8-byte one into two, at `offset` and then
 //! `offset + 4`.
 
+use core::num::NonZeroU32;
+
 use rusty_box_core::snap::{SnapRead, SnapResult, SnapWrite};
 use rusty_box_core::{ClockHz, RingBuffer, SnapError, VmClock, VmDuration, VmInstant};
 
 use crate::bus::{AccessWidth, RegOffset};
+
+/// The registers' offsets in the region (DDI 0183F Table 3-1).
+const UARTDR: RegOffset = RegOffset::new(0x000);
+/// `UARTRSR` when read, `UARTECR` when written.
+const UARTRSR: RegOffset = RegOffset::new(0x004);
+const UARTFR: RegOffset = RegOffset::new(0x018);
+const UARTILPR: RegOffset = RegOffset::new(0x020);
+const UARTIBRD: RegOffset = RegOffset::new(0x024);
+const UARTFBRD: RegOffset = RegOffset::new(0x028);
+const UARTLCR_H: RegOffset = RegOffset::new(0x02C);
+const UARTCR: RegOffset = RegOffset::new(0x030);
+const UARTIFLS: RegOffset = RegOffset::new(0x034);
+const UARTIMSC: RegOffset = RegOffset::new(0x038);
+const UARTRIS: RegOffset = RegOffset::new(0x03C);
+const UARTMIS: RegOffset = RegOffset::new(0x040);
+const UARTICR: RegOffset = RegOffset::new(0x044);
+const UARTDMACR: RegOffset = RegOffset::new(0x048);
+/// `UARTPeriphID0` to `UARTPCellID3`: the eight identification registers
+/// that end the region, one byte of [`PL011_ID`] each.
+const UARTPERIPHID0: RegOffset = RegOffset::new(0xFE0);
+const UARTPCELLID3: RegOffset = RegOffset::new(0xFFC);
+
+/// The register an access at `offset` reaches: the region takes 4-byte
+/// accesses (QEMU `pl011_ops`, as the module documentation says), so a
+/// narrower one reaches the register that holds it.
+const fn register_at(offset: RegOffset) -> RegOffset {
+    RegOffset::new(offset.get() & !3)
+}
 
 const PL011_ID: [u8; 8] = [0x11, 0x10, 0x14, 0x00, 0x0D, 0xF0, 0x05, 0xB1];
 
@@ -185,6 +220,81 @@ pub struct UartClocks {
     pub uartclk: ClockHz,
 }
 
+/// A line rate, in bits per second.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BaudRate(NonZeroU32);
+
+impl BaudRate {
+    pub const fn new(bits_per_second: u32) -> Option<Self> {
+        match NonZeroU32::new(bits_per_second) {
+            Some(rate) => Some(Self(rate)),
+            None => None,
+        }
+    }
+
+    pub const fn get(self) -> u32 {
+        self.0.get()
+    }
+}
+
+/// The baud rate divisor, `UARTCLK` cycles per `Baud16` period in 64ths:
+/// `64 × UARTIBRD + UARTFBRD` (DDI 0183F §3.3.6, Figure 2-3), 22 bits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BaudDivisor(u32);
+
+impl BaudDivisor {
+    /// The widest divisor: `UARTIBRD`'s 16 bits and `UARTFBRD`'s 6.
+    const MAX: u32 = (IBRD_MASK << 6) | FBRD_MASK;
+    /// The slowest divisor that makes a baud clock (§3.3.6: `UARTIBRD`
+    /// 0xFFFF with a fraction aborts transmission and reception).
+    const SLOWEST: Self = Self(IBRD_MASK << 6);
+
+    /// The divisor `UARTIBRD` and `UARTFBRD` hold.
+    const fn of_registers(ibrd: u32, fbrd: u32) -> Self {
+        Self(((ibrd & IBRD_MASK) << 6) | (fbrd & FBRD_MASK))
+    }
+
+    /// The divisor TF-A's `console_pl011_core_init` and EDK2's
+    /// `PL011UartInitializePort` program for `baud` from `uartclk`:
+    /// `UARTCLK × 4 / baud` 64ths, rounded down. A rate too slow for
+    /// `UARTIBRD`'s 16 bits gets [`BaudDivisor::SLOWEST`].
+    fn for_rate(uartclk: ClockHz, baud: BaudRate) -> Self {
+        let sixty_fourths = uartclk.get() * 4 / u64::from(baud.get());
+        match u32::try_from(sixty_fourths) {
+            Ok(d) if d <= Self::SLOWEST.0 => Self(d),
+            _ => Self::SLOWEST,
+        }
+    }
+
+    /// `UARTIBRD`'s part.
+    const fn integer(self) -> u32 {
+        self.0 >> 6
+    }
+
+    /// `UARTFBRD`'s part.
+    const fn fraction(self) -> u32 {
+        self.0 & FBRD_MASK
+    }
+
+    /// The whole divisor, in 64ths.
+    const fn sixty_fourths(self) -> u32 {
+        self.0
+    }
+}
+
+/// On an x86-64 host the size of `Pl011` is 8 modulo 16 bytes (65,704), and
+/// the assertion below keeps it so there: the UART is part of the machine
+/// whose `run_until` hot loop dispatches every guest instruction, and that
+/// loop's register allocation depends on the layout around it. (Other
+/// hosts lay the struct out with their own pointer width and were not
+/// measured, so the assertion does not hold them.) Measured with callgrind
+/// (host instructions inside `run_until`, perfbench loops that never touch
+/// the UART): 8 bytes more, a size of 0 modulo 16, adds one spill to the
+/// dispatch of every guest instruction, +3.9% on `alu`, +3.1% on `fnv`,
+/// +1.7% on `memcpy`; 16 bytes more costs nothing. That is why `tx_count`
+/// and `read_pos` are `u8`. A field added here grows the struct by a
+/// multiple of 16 bytes, or comes with the loops' host instruction counts
+/// measured again.
 pub struct Pl011 {
     /// Bytes transmitted, for the host.
     tx: RingBuffer<u8, TX_CAPACITY>,
@@ -202,14 +312,14 @@ pub struct Pl011 {
     read_pos: u8,
     /// Entries queued: at most the FIFO's depth.
     read_count: u32,
-    /// The baud rate divisor in 64ths, `64 × UARTIBRD + UARTFBRD` (DDI 0183F
-    /// Figure 2-3), as the last `UARTLCR_H` write latched it: `UARTLCR_H`,
-    /// `UARTIBRD` and `UARTFBRD` form one register that only a `UARTLCR_H`
-    /// write updates (§3.3.7, Note).
-    divisor: u32,
+    /// The baud rate divisor as the last `UARTLCR_H` write latched it:
+    /// `UARTLCR_H`, `UARTIBRD` and `UARTFBRD` form one register that only a
+    /// `UARTLCR_H` write updates (DDI 0183F §3.3.7, Note).
+    divisor: BaudDivisor,
     /// The receive timeout's count, while one runs: the first instant at
     /// which 32 bit periods (§3.4.4) have passed since it started. It runs
-    /// only while the receive FIFO holds something and `RTIM` is set.
+    /// only while the receive FIFO holds something and `RTIM` is set, and
+    /// keeps that instant whatever divisor is latched after it started.
     rx_timeout: Option<VmInstant>,
     /// `UARTFR`, and [`OVERRUN_PENDING`].
     flags: u32,
@@ -224,6 +334,12 @@ pub struct Pl011 {
     int_level: u32,
     dmacr: u32,
 }
+
+#[cfg(target_arch = "x86_64")]
+const _: () = assert!(
+    core::mem::size_of::<Pl011>() % 16 == 8,
+    "the hot loop's code generation depends on this size: see the comment on Pl011"
+);
 
 impl Default for Pl011 {
     fn default() -> Self {
@@ -242,7 +358,7 @@ impl Pl011 {
             read_fifo: [0; RX_FIFO_DEPTH],
             read_pos: 0,
             read_count: 0,
-            divisor: 0,
+            divisor: BaudDivisor::of_registers(0, 0),
             rx_timeout: None,
             flags: FLAG_RXFE | FLAG_TXFE,
             rsr: 0,
@@ -386,27 +502,27 @@ impl Pl011 {
     /// the FIFOs enabled (TF-A's `PL011_LINE_CONTROL`, 0x70), then
     /// `UARTCR` with the UART, its transmitter and its receiver enabled
     /// (0x301, as both write it).
-    pub(crate) fn set_up_console(&mut self, baud: u32, clocks: UartClocks) {
-        let divisor = clocks.uartclk.get() * 4 / u64::from(baud);
-        self.write_register(0x24, (divisor >> 6) as u32, clocks); // UARTIBRD
-        self.write_register(0x28, (divisor & 0x3F) as u32, clocks); // UARTFBRD
-        self.write_register(0x2C, LCR_WLEN_8 | LCR_FEN, clocks); // UARTLCR_H
-        self.write_register(0x30, CR_UARTEN | CR_TXE | CR_RXE, clocks); // UARTCR
+    pub(crate) fn set_up_console(&mut self, baud: BaudRate, clocks: UartClocks) {
+        let divisor = BaudDivisor::for_rate(clocks.uartclk, baud);
+        self.write_register(UARTIBRD, divisor.integer(), clocks);
+        self.write_register(UARTFBRD, divisor.fraction(), clocks);
+        self.write_register(UARTLCR_H, LCR_WLEN_8 | LCR_FEN, clocks);
+        self.write_register(UARTCR, CR_UARTEN | CR_TXE | CR_RXE, clocks);
     }
 
     /// 32 bit periods (DDI 0183F §3.4.4) at the latched divisor, in
     /// `UARTCLK` cycles: a bit is 16 periods of `Baud16`, whose period is the
     /// divisor `UARTIBRD + UARTFBRD / 64` in `UARTCLK` cycles (§2.2.3,
-    /// §2.4.3, Figure 2-3), so 32 bits are 512 × that, 8 × [`Pl011::divisor`].
-    /// `None` while the divisor makes no baud clock: `UARTIBRD` 0 is invalid,
-    /// and `UARTIBRD` 0xFFFF with `UARTFBRD` above 0 aborts reception
-    /// (§3.3.6).
+    /// §2.4.3, Figure 2-3), so 32 bits are 512 × that, 8 × the divisor in
+    /// 64ths. `None` while the divisor makes no baud clock: `UARTIBRD` 0 is
+    /// invalid, and `UARTIBRD` 0xFFFF with `UARTFBRD` above 0 aborts
+    /// reception (§3.3.6).
     fn timeout_cycles(&self) -> Option<u64> {
-        let ibrd = self.divisor >> 6;
-        if ibrd == 0 || (ibrd == 0xFFFF && self.divisor & 0x3F != 0) {
+        let ibrd = self.divisor.integer();
+        if ibrd == 0 || (ibrd == IBRD_MASK && self.divisor.fraction() != 0) {
             None
         } else {
-            Some(8 * u64::from(self.divisor))
+            Some(8 * u64::from(self.divisor.sixty_fourths()))
         }
     }
 
@@ -602,31 +718,34 @@ impl Pl011 {
     pub fn read(&mut self, offset: RegOffset, width: AccessWidth) -> u64 {
         match width {
             AccessWidth::Dword => {
-                let low = self.read_register(offset.get());
-                let high = self.read_register(offset.get() + 4);
+                let low = self.read_register(offset);
+                let high = self.read_register(RegOffset::new(offset.get() + 4));
                 u64::from(low) | (u64::from(high) << 32)
             }
-            AccessWidth::Byte | AccessWidth::Half | AccessWidth::Word => u64::from(self.read_register(offset.get())),
+            AccessWidth::Byte | AccessWidth::Half | AccessWidth::Word => u64::from(self.read_register(offset)),
         }
     }
 
     /// QEMU `pl011_read`.
-    fn read_register(&mut self, off: u64) -> u32 {
-        match off >> 2 {
-            0 => self.read_rxdata(),
-            1 => self.rsr,
-            6 => self.flags & FR_MASK,
-            8 => self.ilpr,
-            9 => self.ibrd,
-            10 => self.fbrd,
-            11 => self.lcr,
-            12 => self.cr,
-            13 => self.ifl,
-            14 => self.int_enabled,
-            15 => self.int_level,
-            16 => self.int_level & self.int_enabled,
-            18 => self.dmacr,
-            0x3F8..=0x3FF => u32::from(PL011_ID[((off - 0xFE0) >> 2) as usize & 7]),
+    fn read_register(&mut self, offset: RegOffset) -> u32 {
+        let register = register_at(offset);
+        match register {
+            UARTDR => self.read_rxdata(),
+            UARTRSR => self.rsr,
+            UARTFR => self.flags & FR_MASK,
+            UARTILPR => self.ilpr,
+            UARTIBRD => self.ibrd,
+            UARTFBRD => self.fbrd,
+            UARTLCR_H => self.lcr,
+            UARTCR => self.cr,
+            UARTIFLS => self.ifl,
+            UARTIMSC => self.int_enabled,
+            UARTRIS => self.int_level,
+            UARTMIS => self.int_level & self.int_enabled,
+            UARTDMACR => self.dmacr,
+            _ if (UARTPERIPHID0..=UARTPCELLID3).contains(&register) => {
+                u32::from(PL011_ID[((register.get() - UARTPERIPHID0.get()) >> 2) as usize])
+            }
             _ => 0,
         }
     }
@@ -634,24 +753,24 @@ impl Pl011 {
     pub fn write(&mut self, offset: RegOffset, width: AccessWidth, value: u64, clocks: UartClocks) {
         match width {
             AccessWidth::Dword => {
-                self.write_register(offset.get(), value as u32, clocks);
-                self.write_register(offset.get() + 4, (value >> 32) as u32, clocks);
+                self.write_register(offset, value as u32, clocks);
+                self.write_register(RegOffset::new(offset.get() + 4), (value >> 32) as u32, clocks);
             }
             AccessWidth::Byte | AccessWidth::Half | AccessWidth::Word => {
-                self.write_register(offset.get(), value as u32, clocks);
+                self.write_register(offset, value as u32, clocks);
             }
         }
     }
 
     /// QEMU `pl011_write`.
-    fn write_register(&mut self, off: u64, v: u32, clocks: UartClocks) {
-        match off >> 2 {
-            0 => self.write_txdata(v as u8, clocks),
-            1 => self.rsr = 0,
-            8 => self.ilpr = v & ILPR_MASK,
-            9 => self.ibrd = v & IBRD_MASK,
-            10 => self.fbrd = v & FBRD_MASK,
-            11 => {
+    fn write_register(&mut self, offset: RegOffset, v: u32, clocks: UartClocks) {
+        match register_at(offset) {
+            UARTDR => self.write_txdata(v as u8, clocks),
+            UARTRSR => self.rsr = 0,
+            UARTILPR => self.ilpr = v & ILPR_MASK,
+            UARTIBRD => self.ibrd = v & IBRD_MASK,
+            UARTFBRD => self.fbrd = v & FBRD_MASK,
+            UARTLCR_H => {
                 let v = v & LCR_MASK;
                 if (self.lcr ^ v) & LCR_FEN != 0 {
                     self.reset_fifos();
@@ -664,19 +783,20 @@ impl Pl011 {
                 self.lcr = v;
                 // The write strobe that updates `UARTIBRD` and `UARTFBRD`
                 // (§3.3.7, Note). A count already running keeps the
-                // deadline its divisor gave it.
-                self.divisor = (self.ibrd << 6) | self.fbrd;
+                // deadline it started with, even where the new divisor
+                // makes no baud clock.
+                self.divisor = BaudDivisor::of_registers(self.ibrd, self.fbrd);
             }
-            12 => {
+            UARTCR => {
                 self.cr = v & CR_MASK;
                 self.loopback_mdmctrl();
                 // Enabling transmission sends what waits in the FIFO.
                 self.transmit(clocks);
             }
-            13 => self.ifl = v & IFLS_MASK,
-            14 => self.set_interrupt_mask(v, clocks),
-            17 => self.int_level &= !v,
-            18 => self.dmacr = v & DMACR_MASK,
+            UARTIFLS => self.ifl = v & IFLS_MASK,
+            UARTIMSC => self.set_interrupt_mask(v, clocks),
+            UARTICR => self.int_level &= !v,
+            UARTDMACR => self.dmacr = v & DMACR_MASK,
             _ => {}
         }
     }
@@ -706,7 +826,7 @@ impl Pl011 {
         w.write_u32(self.read_count)?;
         w.write_u8(self.tx_count)?;
         w.write_bytes(&self.tx_fifo)?;
-        w.write_u32(self.divisor)?;
+        w.write_u32(self.divisor.sixty_fourths())?;
         match self.rx_timeout {
             Some(at) => {
                 w.write_bool(true)?;
@@ -720,10 +840,12 @@ impl Pl011 {
     /// FIFO is disabled (QEMU `pl011_post_load`'s checks), more entries in
     /// either FIFO than it holds, characters waiting to be transmitted while
     /// transmission is enabled, a latched divisor wider than its 22 bits,
-    /// and a receive timeout running where none can: with the FIFO empty,
-    /// `RTIM` clear or no baud clock. Reserved register bits are dropped, as
-    /// a guest write drops them, and `UARTFR`'s transmit bits are those of
-    /// the transmit FIFO restored.
+    /// and a receive timeout running where none can: with the FIFO empty or
+    /// `RTIM` clear. A count running with a latched divisor that makes no
+    /// baud clock is a state the UART reaches (a count keeps its deadline
+    /// when a divisor is latched after it started), and restores. Reserved
+    /// register bits are dropped, as a guest write drops them, and
+    /// `UARTFR`'s transmit bits are those of the transmit FIFO restored.
     pub(crate) fn restore<R: SnapRead>(&mut self, r: &mut R) -> SnapResult {
         let mut regs = [0u32; 11];
         for reg in regs.iter_mut() {
@@ -762,10 +884,14 @@ impl Pl011 {
         if tx_count > 0 && cr & (CR_UARTEN | CR_TXE) == CR_UARTEN | CR_TXE {
             return Err(SnapError::Invalid("PL011 characters waiting to be transmitted while transmission is enabled"));
         }
-        if divisor > (IBRD_MASK << 6) | FBRD_MASK {
+        if divisor > BaudDivisor::MAX {
             return Err(SnapError::Invalid("PL011 baud rate divisor wider than UARTIBRD and UARTFBRD"));
         }
+        let divisor = BaudDivisor(divisor);
         let int_enabled = int_enabled & IMSC_MASK;
+        if rx_timeout.is_some() && (read_count == 0 || int_enabled & INT_RT == 0) {
+            return Err(SnapError::Invalid("PL011 receive timeout running with nothing to time"));
+        }
         let mut restored = Self {
             tx: RingBuffer::new(),
             tx_fifo,
@@ -787,9 +913,6 @@ impl Pl011 {
             int_level: int_level & IMSC_MASK,
             dmacr: dmacr & DMACR_MASK,
         };
-        if rx_timeout.is_some() && (read_count == 0 || int_enabled & INT_RT == 0 || restored.timeout_cycles().is_none()) {
-            return Err(SnapError::Invalid("PL011 receive timeout running with nothing to time"));
-        }
         restored.flags |= restored.tx_flags();
         restored.tx = core::mem::take(&mut self.tx);
         *self = restored;
@@ -959,9 +1082,13 @@ mod tests {
     #[test]
     fn a_console_set_up_runs_at_the_rate_asked_with_everything_enabled() {
         let mut uart = Pl011::new();
-        uart.set_up_console(115_200, at(0));
+        let baud = |rate| BaudRate::new(rate).expect("a rate");
+        uart.set_up_console(baud(115_200), at(0));
         // 24 MHz × 4 / 115200 = 833 64ths: 13 + 1/64.
         assert_eq!([9, 10, LCR_H, CR].map(|n| read(&mut uart, n)), [13, 1, 0x70, 0x301]);
+        let mut slow = Pl011::new();
+        slow.set_up_console(baud(1), at(0));
+        assert_eq!([9, 10].map(|n| read(&mut slow, n)), [0xFFFF, 0], "too slow for 16 bits: the slowest baud clock");
         write(&mut uart, DR, u32::from(b'k'));
         assert_eq!(sent(&mut uart), b"k");
         assert!(rx(&mut uart, b'r'));
@@ -1107,6 +1234,19 @@ mod tests {
         assert_eq!(read(&mut uart, DR), u32::from(b'a'));
         assert_eq!(read(&mut uart, DR), u32::from(b'b'));
         assert_eq!(uart.next_deadline(), None, "emptying the FIFO stops it");
+    }
+
+    #[test]
+    fn the_receive_timeout_runs_on_while_the_receiver_is_disabled() {
+        for off in [CR_UARTEN | CR_TXE, 0x300] {
+            let mut uart = timed();
+            write(&mut uart, IMSC, INT_RT);
+            assert!(rx_at(&mut uart, b'a', 100));
+            write_at(&mut uart, CR, off, 200);
+            assert_eq!(uart.next_deadline(), Some(VmInstant::from_ticks(100 + TIMEOUT_13_1)), "UARTCR {off:#x}");
+            update(&mut uart, 100 + TIMEOUT_13_1);
+            assert_eq!(read(&mut uart, RIS) & INT_RT, INT_RT, "UARTCR {off:#x}: the FIFO still holds a character");
+        }
     }
 
     #[test]
@@ -1378,6 +1518,17 @@ mod tests {
     }
 
     #[test]
+    fn a_narrower_access_reaches_the_register_that_holds_it() {
+        let mut uart = Pl011::new();
+        uart.write(RegOffset::new(0x31), AccessWidth::Byte, u64::from(ENABLED), at(0));
+        assert_eq!(uart.read(RegOffset::new(0x32), AccessWidth::Half), u64::from(ENABLED), "UARTCR");
+        // UARTPeriphID0..3 and UARTPCellID0..3, 0xFE0 to 0xFFC.
+        let id: std::vec::Vec<u64> = (0..8).map(|i| uart.read(RegOffset::new(0xFE0 + 4 * i + 3), AccessWidth::Byte)).collect();
+        assert_eq!(id, [0x11, 0x10, 0x14, 0x00, 0x0D, 0xF0, 0x05, 0xB1]);
+        assert_eq!(uart.read(RegOffset::new(0xFDC), AccessWidth::Word), 0, "below the identification registers");
+    }
+
+    #[test]
     fn a_snapshot_round_trips_registers_and_queued_entries() {
         let mut uart = enabled();
         write(&mut uart, LCR_H, LCR_FEN);
@@ -1508,13 +1659,48 @@ mod tests {
         let count = 11 * 4 + RX_FIFO_DEPTH * 4 + 1;
         empty[count] = 0;
         assert!(refused(&empty), "a count with nothing in the FIFO");
-        let mut unmasked = running.clone();
+        let mut unmasked = running;
         // UARTIMSC, the ninth register saved.
         unmasked[8 * 4..9 * 4].copy_from_slice(&0u32.to_le_bytes());
         assert!(refused(&unmasked), "a count with RTIM clear");
-        let mut no_clock = running;
-        no_clock[DIVISOR..DIVISOR + 4].copy_from_slice(&1u32.to_le_bytes());
-        assert!(refused(&no_clock), "a count with UARTIBRD 0 latched");
+    }
+
+    /// A count keeps its deadline when a divisor without a baud clock is
+    /// latched after it started; the snapshot of that UART restores to the
+    /// same UART, which raises `RTRIS` when the unsaved one does.
+    #[test]
+    fn a_count_running_when_a_divisor_without_a_baud_clock_is_latched_saves_and_restores() {
+        for (ibrd, fbrd) in [(0, 0), (0, 1), (0xFFFF, 1)] {
+            let mut uart = timed();
+            write(&mut uart, IMSC, INT_RT);
+            assert!(rx_at(&mut uart, b'a', 100));
+            write(&mut uart, 9, ibrd);
+            write(&mut uart, 10, fbrd);
+            write_at(&mut uart, LCR_H, LCR_FEN, 200);
+            assert_eq!(uart.timeout_cycles(), None, "UARTIBRD {ibrd:#x}, UARTFBRD {fbrd}: no baud clock");
+            assert_eq!(uart.next_deadline(), Some(VmInstant::from_ticks(100 + TIMEOUT_13_1)), "the count keeps its deadline");
+            let mut image = std::vec::Vec::new();
+            uart.save(&mut image).expect("save");
+            let mut restored = Pl011::new();
+            let mut source: &[u8] = &image;
+            restored.restore(&mut source).expect("a state the UART reaches restores");
+            let mut again = std::vec::Vec::new();
+            restored.save(&mut again).expect("save");
+            assert_eq!(again, image, "UARTIBRD {ibrd:#x}, UARTFBRD {fbrd}: the same UART");
+            for u in [&mut uart, &mut restored] {
+                update(u, 100 + TIMEOUT_13_1 - 1);
+                assert_eq!(read(u, RIS) & INT_RT, 0);
+                update(u, 100 + TIMEOUT_13_1);
+                assert_eq!(read(u, RIS) & INT_RT, INT_RT, "UARTIBRD {ibrd:#x}, UARTFBRD {fbrd}: RTRIS on time");
+                assert_eq!(read(u, DR), u32::from(b'a'));
+                assert!(rx_at(u, b'b', 20_000));
+                assert_eq!(u.next_deadline(), None, "the next character starts no count without a baud clock");
+            }
+            let (mut a, mut b) = (std::vec::Vec::new(), std::vec::Vec::new());
+            uart.save(&mut a).expect("save");
+            restored.save(&mut b).expect("save");
+            assert_eq!(a, b, "both ran to the same state");
+        }
     }
 
     #[test]

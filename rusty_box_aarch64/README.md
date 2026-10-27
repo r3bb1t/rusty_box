@@ -330,8 +330,10 @@ integration tests of the public API.
   it has enabled it, PSCI power-off and reset, the power button's 100 ms on
   GPIO line 3, an observer's view, direct kernel placement, its device tree
   and the console it finds set up, the receive timeout a polling guest sees
-  32 bit periods after a character, at the same tick however the run is
-  sliced, refused builds, a snapshot of an earlier
+  32 bit periods after a character, or after it sets `RTIM` with one
+  waiting, at the same tick however the run is sliced, and at the same
+  tick after a snapshot taken once it has latched a divisor without a baud
+  clock, refused builds, a snapshot of an earlier
   version refused with nothing changed; and that a run cut into instruction
   budgets of
   any size, or stopped by an exit at any instruction of straight-line code,
@@ -661,13 +663,17 @@ choice is listed here with its evidence.
   at, is part of a snapshot. Where the TRM leaves the details open: every
   character the receiver takes starts the count again, one lost to an
   overrun included; a count fires once, and the next character or `RTIM`
-  set again starts another; a count running when a new divisor is latched
-  keeps the deadline it started with; and without a baud clock (`UARTIBRD`
-  0, invalid, or 0xFFFF with `UARTFBRD` above 0, which aborts reception,
-  §3.3.6) nothing counts. Characters themselves cross the line in no time:
-  the transmitter sends the moment it is enabled, and the host's bytes
-  arrive the moment the receiver has room, as with a QEMU character
-  backend.
+  set again starts another; a count keeps running while the receiver is
+  disabled (`UARTEN` or `RXE` clear), since the FIFO still holds what it
+  received and nothing more arrives; without a baud clock (`UARTIBRD` 0,
+  invalid, or 0xFFFF with `UARTFBRD` above 0, which aborts reception,
+  §3.3.6) no count starts; and a count running when a new divisor is
+  latched keeps the deadline it started with, whatever that divisor, one
+  without a baud clock included. That last state is saved and restored
+  like any other. Characters themselves cross the line in no time,
+  whatever the divisor, `UARTIBRD` 0 included: the transmitter sends the
+  moment it is enabled, and the host's bytes arrive the moment the
+  receiver has room, as with a QEMU character backend.
 - **PL011 modem status interrupts mark changes.** DDI 0183F §3.4.1 raises
   `RIRMIS`, `CTSRMIS`, `DCDRMIS` and `DSRRMIS` when their modem status line
   changes, and only `UARTICR` clears them. QEMU 11.1.2

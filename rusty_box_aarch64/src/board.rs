@@ -26,7 +26,7 @@ use crate::bus::{le_value, store_le, AccessWidth, BusFault, CodeEpoch, FetchSour
 use crate::devices::cfi_flash::{CfiFlash, FlashArray};
 use crate::devices::fw_cfg::FwCfg;
 use crate::devices::gicv2::GicV2;
-use crate::devices::pl011::{Pl011, UartClocks};
+use crate::devices::pl011::{BaudRate, Pl011, UartClocks};
 use crate::devices::pl031::Pl031;
 use crate::devices::pl061::{Pl061, POWER_BUTTON_LINE};
 #[cfg(feature = "alloc")]
@@ -344,9 +344,10 @@ impl<S: GuestStorage> VirtBoard<S> {
     /// Leave the UART as boot firmware leaves a console it has set up, at
     /// `baud` ([`Pl011::set_up_console`]); host bytes waiting for its
     /// receiver go in, at `clock`.
-    pub(crate) fn set_up_console(&mut self, baud: u32, clock: VmClock) {
+    pub(crate) fn set_up_console(&mut self, baud: BaudRate, clock: VmClock) {
+        let deadline = self.uart.next_deadline();
         self.uart.set_up_console(baud, uart_clocks(clock));
-        self.pump_serial_input(clock);
+        self.pump_serial_input_since(deadline, clock);
         self.sync_device_lines();
     }
 
@@ -411,6 +412,13 @@ impl<S: GuestStorage> VirtBoard<S> {
     /// moves the UART's receive timeout moves the board's next deadline.
     pub(crate) fn pump_serial_input(&mut self, clock: VmClock) {
         let deadline = self.uart.next_deadline();
+        self.pump_serial_input_since(deadline, clock);
+    }
+
+    /// [`VirtBoard::pump_serial_input`] after a UART access: the board's
+    /// next deadline moves if the UART's receive timeout is no longer
+    /// `before`, what it was before the access.
+    fn pump_serial_input_since(&mut self, before: Option<VmInstant>, clock: VmClock) {
         while self.uart.can_receive() {
             let Some(byte) = self.serial_input.pop_front() else {
                 break;
@@ -419,7 +427,7 @@ impl<S: GuestStorage> VirtBoard<S> {
                 break;
             }
         }
-        self.note_uart_deadline(deadline);
+        self.note_uart_deadline(before);
     }
 
     /// Record that the next deadline has to be worked out again if the
@@ -575,8 +583,7 @@ impl<S: GuestStorage> VirtBoard<S> {
         if let Some(off) = addr.offset_in(UART0_BASE, PRIMECELL_SIZE) {
             let deadline = self.uart.next_deadline();
             let v = self.uart.read(off, width);
-            self.pump_serial_input(clock);
-            self.note_uart_deadline(deadline);
+            self.pump_serial_input_since(deadline, clock);
             self.sync_device_lines();
             return Ok(v);
         }
@@ -635,8 +642,7 @@ impl<S: GuestStorage> VirtBoard<S> {
         if let Some(off) = addr.offset_in(UART0_BASE, PRIMECELL_SIZE) {
             let deadline = self.uart.next_deadline();
             self.uart.write(off, width, value, uart_clocks(clock));
-            self.pump_serial_input(clock);
-            self.note_uart_deadline(deadline);
+            self.pump_serial_input_since(deadline, clock);
             self.sync_device_lines();
             return Ok(());
         }

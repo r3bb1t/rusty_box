@@ -423,8 +423,8 @@ fn the_os_save_restore_registers_reach_the_channel_data_registers() {
         assert_eq!(m.reg_read(Reg::X4), 0x3333_4444, "OSLK {oslk}: OSDTRTX_EL1 reads DTRTX back");
         assert_eq!(m.reg_read(Reg::X7), 0x5555_6666, "OSLK {oslk}: DBGDTRTX_EL0 filled DTRTX");
         assert_eq!(m.reg_read(Reg::X11), 0x1111_2222, "OSLK {oslk}: and left DTRRX alone");
-        assert_eq!(m.reg_read(Reg::X9), 0x5555_6666, "OSLK {oslk}: a write with TXfull set changed DTRTX");
-        assert_eq!(m.reg_read(Reg::X12), 0x1111_2222, "OSLK {oslk}: a write with TXfull set changed DTRRX");
+        assert_eq!(m.reg_read(Reg::X9), 0x5555_6666, "OSLK {oslk}: a write with TXfull set left DTRTX as it was");
+        assert_eq!(m.reg_read(Reg::X12), 0x1111_2222, "OSLK {oslk}: a write with TXfull set left DTRRX as it was");
         assert_eq!(m.reg_read(Reg::X13), TXFULL, "OSLK {oslk}: MDCCSR_EL0");
 
         let mut image = Vec::new();

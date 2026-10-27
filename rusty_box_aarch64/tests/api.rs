@@ -906,6 +906,115 @@ fn the_receive_timeout_comes_32_bit_periods_after_the_last_character() {
     }
 }
 
+/// Setting `RTIM` with a character waiting starts the count at the write
+/// (DDI 0183F Table 3-15, note a: the mask acts as an enable), and the
+/// guest polling `UARTRIS` sees `RTRIS` 32 bit periods later, at the same
+/// tick however the run is sliced. The guest sets the UART up with `RTIM`
+/// clear, waits for a character, then sets `RTIM` and polls:
+///
+/// ```text
+/// movz x0, #0x0900, lsl #16 ; mov w1, #13 ; str w1, [x0, #0x24]
+/// mov w1, #1 ; str w1, [x0, #0x28] ; mov w1, #0x70 ; str w1, [x0, #0x2c]
+/// mov w1, #0x301 ; str w1, [x0, #0x30]
+/// 1: ldr w2, [x0, #0x18] ; tbnz w2, #4, 1b
+/// mov w1, #0x40 ; str w1, [x0, #0x38]
+/// 2: ldr w2, [x0, #0x3c] ; tbz w2, #6, 2b ; b .
+/// ```
+#[test]
+fn the_receive_timeout_counts_from_the_write_that_sets_rtim() {
+    const PROBE: [u32; 16] = [
+        0xD2A1_2000, 0x5280_01A1, 0xB900_2401, 0x5280_0021, 0xB900_2801, 0x5280_0E01, 0xB900_2C01, 0x5280_6021,
+        0xB900_3001, 0xB940_1802, 0x3727_FFE2, 0x5280_0801, 0xB900_3801, 0xB940_3C02, 0x3637_FFE2, SPIN,
+    ];
+    const POLL: u64 = RAM_BASE + 0x34;
+    const DONE: u64 = RAM_BASE + 0x3C;
+    let elapsed = |slice: u64| {
+        let mut ram = vec![0u8; RAM_LEN];
+        let mut m = bare(&mut ram, rusty_box_aarch64::NoInstrumentation);
+        load(&mut m, RAM_BASE, &PROBE);
+        assert_eq!(m.step(RunBudget::Instructions(100)).stop, StopReason::BudgetExhausted);
+        assert_eq!(m.serial(0).expect("UART0").send(b"a"), 1);
+        m.set_exits(&[POLL]).expect("one exit");
+        assert_eq!(m.step(RunBudget::Instructions(100)).stop, StopReason::ExitReached, "RTIM set");
+        let set = m.ticks();
+        m.set_exits(&[DONE]).expect("one exit");
+        loop {
+            match m.step(RunBudget::Ticks(slice)).stop {
+                StopReason::ExitReached => break,
+                StopReason::BudgetExhausted => assert!(m.ticks() - set < 20_000, "the timeout never came"),
+                other => panic!("{other:?}"),
+            }
+        }
+        m.ticks() - set
+    };
+    let whole = elapsed(1 << 20);
+    assert!((13_884..=13_885 + 2).contains(&whole), "{whole}");
+    for slice in [1, 7, 1000] {
+        assert_eq!(elapsed(slice), whole, "slices of {slice} ticks");
+    }
+}
+
+/// A receive timeout counting when the guest latches a divisor without a
+/// baud clock (`UARTIBRD` 0, invalid, or 0xFFFF with a fraction, which
+/// aborts reception, DDI 0183F §3.3.6) keeps the deadline it started with.
+/// A snapshot taken then restores into a fresh machine identical to the
+/// one saved, and both run on to the same state, `RTRIS` seen at the same
+/// tick. The guest sets the UART up as above, waits for a character, then
+/// writes `UARTIBRD` and `UARTFBRD` from w3 and w4, latches them and polls:
+///
+/// ```text
+/// movz x0, #0x0900, lsl #16 ; mov w1, #13 ; str w1, [x0, #0x24]
+/// mov w1, #1 ; str w1, [x0, #0x28] ; mov w1, #0x70 ; str w1, [x0, #0x2c]
+/// mov w1, #0x40 ; str w1, [x0, #0x38] ; mov w1, #0x301 ; str w1, [x0, #0x30]
+/// 1: ldr w2, [x0, #0x18] ; tbnz w2, #4, 1b
+/// str w3, [x0, #0x24] ; str w4, [x0, #0x28] ; mov w1, #0x70 ; str w1, [x0, #0x2c]
+/// 2: ldr w2, [x0, #0x3c] ; tbz w2, #6, 2b ; b .
+/// ```
+#[test]
+fn a_receive_timeout_left_without_a_baud_clock_survives_a_snapshot() {
+    const PROBE: [u32; 20] = [
+        0xD2A1_2000, 0x5280_01A1, 0xB900_2401, 0x5280_0021, 0xB900_2801, 0x5280_0E01, 0xB900_2C01, 0x5280_0801,
+        0xB900_3801, 0x5280_6021, 0xB900_3001, 0xB940_1802, 0x3727_FFE2, 0xB900_2403, 0xB900_2804, 0x5280_0E01,
+        0xB900_2C01, 0xB940_3C02, 0x3637_FFE2, SPIN,
+    ];
+    const POLL: u64 = RAM_BASE + 0x44;
+    const DONE: u64 = RAM_BASE + 0x4C;
+    let run_to_done = |m: &mut VirtMachine<LentStorage<'_>>| {
+        m.set_exits(&[DONE]).expect("one exit");
+        assert_eq!(m.step(RunBudget::Ticks(20_000)).stop, StopReason::ExitReached, "RTRIS came");
+        let mut image = Vec::new();
+        m.save_snapshot(&mut image).expect("a snapshot saves");
+        (m.ticks(), registers_and_ram(m), image)
+    };
+    for (ibrd, fbrd) in [(0, 0), (0xFFFF, 1)] {
+        let mut ram = vec![0u8; RAM_LEN];
+        let mut m = bare(&mut ram, rusty_box_aarch64::NoInstrumentation);
+        load(&mut m, RAM_BASE, &PROBE);
+        m.reg_write(Reg::X3, ibrd);
+        m.reg_write(Reg::X4, fbrd);
+        assert_eq!(m.step(RunBudget::Instructions(100)).stop, StopReason::BudgetExhausted);
+        assert_eq!(m.serial(0).expect("UART0").send(b"a"), 1);
+        let arrived = m.ticks();
+        assert_eq!(m.step(RunBudget::Instructions(20)).stop, StopReason::BudgetExhausted);
+        assert!((POLL..DONE).contains(&m.reg_read(Reg::Pc)), "UARTIBRD {ibrd:#x}: latched, polling");
+        let mut image = Vec::new();
+        m.save_snapshot(&mut image).expect("a snapshot saves");
+
+        let mut fresh_ram = vec![0u8; RAM_LEN];
+        let mut fresh = bare(&mut fresh_ram, rusty_box_aarch64::NoInstrumentation);
+        assert_eq!(fresh.restore_snapshot(&mut image.as_slice()), Ok(()), "UARTIBRD {ibrd:#x}: the image restores");
+        let mut again = Vec::new();
+        fresh.save_snapshot(&mut again).expect("a snapshot saves");
+        assert!(again == image, "UARTIBRD {ibrd:#x}: the restored machine is the one saved");
+
+        let unsaved = run_to_done(&mut m);
+        let restored = run_to_done(&mut fresh);
+        let elapsed = unsaved.0 - arrived;
+        assert!((13_884 + 2..=13_885 + 2).contains(&elapsed), "UARTIBRD {ibrd:#x}: the count kept its deadline: {elapsed}");
+        assert!(restored == unsaved, "UARTIBRD {ibrd:#x}: both ran to the same state");
+    }
+}
+
 #[test]
 fn a_machine_that_cannot_be_built_says_why() {
     let mut ram = vec![0u8; RAM_LEN];
