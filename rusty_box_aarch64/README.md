@@ -200,7 +200,7 @@ same state on d21b7e9 and now. For the boots, the state hashes at 10M,
 | Part | Model |
 |---|---|
 | Processor | Cortex-A57-shaped ARMv8.0: EL0/EL1 AArch64 only, the whole ARMv8.0 FP and Advanced SIMD instruction set (integer and floating point, vector and scalar, saturation setting FPSR.QC), the Cortex-A57's optional Cryptographic Extension (AES, 64-bit PMULL, SHA-1, SHA-256) and CRC32, as QEMU's `cortex-a57` has them, 4 KiB-granule stage-1 MMU with TLB, exclusives, PSCI over `HVC` as QEMU provides it |
-| Interrupts | QEMU's GICv2 (no Security Extensions): its running priority and active priority registers, SGI source processors, and 4 KiB distributor and 8 KiB CPU interface regions; + GICv2m frame |
+| Interrupts | GICv2 without the Security Extensions, for one processor, as IHI 0048B specifies it, in QEMU's structure: both interrupt groups, with Group 0 on FIQ under `FIQEn`, the Group 1 aliases (`GICC_AIAR`, `GICC_AEOIR`, `GICC_AHPPIR`, `GICC_ABPR`), preemption by group priority, the running priority and active priority registers, and 4 KiB distributor and 8 KiB CPU interface regions; + GICv2m frame |
 | Timers | EL1 physical and virtual generic timers |
 | Devices | PL011 UART (QEMU's 16-entry receive FIFO and loopback), PL031 RTC, PL061 GPIO with QEMU's `gpio-key` power button on line 3, CFI flash ×2 (QEMU `pflash_cfi01` semantics, whole 64 MiB banks decoded), `fw_cfg` (traditional interface, no files), 32 virtio-mmio transports (QEMU's legacy layout while empty; non-legacy, as QEMU's `force-legacy=false`, once the host plugs in QEMU's 2D `virtio-gpu-device` with its EDID, `virtio-keyboard-device`, `virtio-tablet-device` or `virtio-blk-device` over a raw image in memory or a host file, which take the highest free ones), an empty PCIe ECAM/windows |
 | Board | QEMU `virt` memory map and IRQ wiring; QEMU 11.1.2's device tree in `assets/` (two values pinned; see below), its memory node and `/chosen` set per machine |
@@ -462,10 +462,43 @@ choice is listed here with its evidence.
   the traditional interface only (`FW_CFG_ID` = 1) and an empty directory, a
   configuration the interface defines, so firmware describes the machine
   from the device tree (`src/devices/fw_cfg.rs`).
-- **Where QEMU has no defined behaviour.** Acknowledging an SGI that is
-  pending from no processor, which only a `GICD_SPENDSGIR` write of zero
-  leaves, fails an assertion in QEMU (`gic_clear_pending_sgi`); this model
-  acknowledges it as from processor 0. The PL011's receive count, which
+- **The GICv2's Group 1 aliases exist.** IHI 0048B's CPU interface map
+  (Table 4-2) has `GICC_AIAR`, `GICC_AEOIR` and `GICC_AHPPIR` in every
+  GICv2, and with `GICC_CTLR.AckCtl` clear, the setting Arm recommends
+  (§4.4.1), they are how Group 1 interrupts are acknowledged, completed and
+  reported. QEMU 11.1.2 (`gic_cpu_read`, `gic_cpu_write`) reads them as zero
+  and ignores writes. This model implements them as QEMU's own Non-secure
+  view of `GICC_IAR`, `GICC_EOIR` and `GICC_HPPIR`: a Group 0 interrupt
+  reads as 1023 and an end of interrupt naming one is ignored.
+- **A disabled GIC group takes no part.** IHI 0048B §4.3.1 (`GICD_CTLR`)
+  forwards a group's interrupts to the CPU interface only while
+  `EnableGrpN` is set, and §4.4.1 (`GICC_CTLR`) signals them only while
+  the interface's `EnableGrpN` is set. QEMU 11.1.2 (`gic_update_internal`)
+  chooses the highest-priority interrupt across both groups and only then
+  checks its group, so a higher-priority interrupt of a disabled group
+  blocks the enabled group's, and `GICC_IAR`/`GICC_HPPIR` return it. This
+  model chooses among the groups both enables allow, so a disabled group's
+  interrupt is neither signalled nor read and hides nothing.
+- **GIC preemption compares group priorities.** IHI 0048B §3.3
+  ("Preemption", "Priority grouping") signals a pending interrupt only if its
+  group priority, under its own group's binary point (`GICC_BPR`, or
+  `GICC_ABPR` for Group 1 while `CBPR` is clear), is higher than the
+  running priority. QEMU 11.1.2 (`gic_update_internal`,
+  `gic_acknowledge_irq`) compares the whole priority, which differs only
+  when the two groups' binary points differ; this model compares group
+  priorities.
+- **SGIs on a uniprocessor GIC.** The GIC here has one CPU interface
+  (`GICD_TYPER.CPUNumber` = 0). IHI 0048B gives `GICD_CPENDSGIRn` and
+  `GICD_SPENDSGIRn` a bit per supported SGI and source processor, where a
+  0 has no effect, and makes `GICC_IAR.CPUID` RAZ except for an SGI in a
+  multiprocessor implementation (§4.4.4). QEMU 11.1.2 (`gic_dist_writeb`)
+  pends the SGI on any write to its `GICD_SPENDSGIRn` byte, a byte of zero
+  included (and then fails an assertion acknowledging it,
+  `gic_clear_pending_sgi`), records source processors 1–7, which do not
+  exist, and reports them in `GICC_IAR.CPUID`. This model keeps processor
+  0's bit only: other bits read as zero and are ignored, and `CPUID` reads
+  as zero.
+- **Where QEMU has no defined behaviour.** The PL011's receive count, which
   loopback can push past the FIFO depth, is a signed `int` in QEMU whose
   overflow is undefined; this model's saturates.
 

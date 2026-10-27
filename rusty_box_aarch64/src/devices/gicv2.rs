@@ -2,8 +2,10 @@
 //! Security Extensions (QEMU's `virt` without EL3), plus the GICv2m MSI
 //! frame.
 //!
-//! Provenance (R7): QEMU 11.1.2 `hw/intc/arm_gic.c` for a revision-2,
-//! single-CPU GIC with 288 interrupts and 8 priority bits —
+//! Provenance (R7): the ARM Generic Interrupt Controller Architecture
+//! Specification, GIC architecture version 2.0 (IHI 0048B.b), first; QEMU
+//! 11.1.2 `hw/intc/arm_gic.c` for a revision-2, single-CPU GIC with 288
+//! interrupts and 8 priority bits second, whose structure this model keeps —
 //! `gic_update_internal` and `gic_get_best_irq` (the signalled interrupt),
 //! `gic_get_current_pending_irq`, `gic_acknowledge_irq`, `gic_activate_irq`,
 //! `gic_get_group_priority`, `gic_drop_prio`, `gic_get_prio_from_apr_bits`,
@@ -14,10 +16,30 @@
 //! (`arm_gic_common_reset_hold`, the `gic_dist` and `gic_cpu` regions) and
 //! `hw/intc/arm_gicv2m.c` (`gicv2m_read`, `gicv2m_write`, `gicv2m_set_irq`).
 //!
+//! Where IHI 0048B and QEMU differ, this model follows IHI 0048B:
+//! - A group the distributor does not forward (§4.3.1 GICD_CTLR.EnableGrpN)
+//!   or the CPU interface does not signal (§4.4.1 GICC_CTLR.EnableGrpN) takes
+//!   no part in choosing the highest-priority pending interrupt, so its
+//!   interrupts are neither signalled nor returned by an acknowledge or
+//!   highest-pending read, and do not hide the other group's.
+//! - A pending interrupt preempts when its group priority, under the binary
+//!   point of its own group, is higher than the running priority (§3.3
+//!   "Interrupt prioritization": "Preemption", and "Priority grouping" with
+//!   Table 3-3).
+//! - The Group 1 aliases GICC_AIAR, GICC_AEOIR and GICC_AHPPIR (Table 4-2,
+//!   GICv2 only; §4.4.1 AckCtl) acknowledge, complete and report Group 1
+//!   interrupts, as QEMU's Non-secure accesses to GICC_IAR, GICC_EOIR and
+//!   GICC_HPPIR do.
+//! - This is a uniprocessor implementation (GICD_TYPER.CPUNumber = 0): an SGI
+//!   has one possible source, processor 0, so GICD_CPENDSGIRn and
+//!   GICD_SPENDSGIRn hold a bit for that source only (a bit per supported
+//!   SGI and source processor combination, a write of 0 having no effect),
+//!   and GICC_IAR.CPUID is RAZ (§4.4.4: it identifies an SGI's source only
+//!   in a multiprocessor implementation).
+//!
 //! With one processor every per-CPU mask QEMU keeps reduces to its bit 0,
 //! and every interrupt targets that processor, so each per-interrupt state
-//! is one bit. QEMU also records the SGIs `GICD_SGIR` makes pending on the
-//! seven processors that do not exist; nothing reads them back.
+//! is one bit, and an SGI's single source is its pending bit.
 //!
 //! The regions take any access size (`gic_ops` sets no `impl` limits): a
 //! distributor access is composed of byte accesses, a CPU-interface access
@@ -60,6 +82,21 @@ const GICC_CTLR_EOIMODE: u32 = 1 << 9;
 /// QEMU `GICC_CTLR_V2_MASK`: the bits a GICv2 without the Security
 /// Extensions keeps.
 const GICC_CTLR_V2_MASK: u32 = 0x21F;
+/// The SGI source bit of processor 0, the one processor there is, in a
+/// `GICD_CPENDSGIRn`/`GICD_SPENDSGIRn` byte.
+const SGI_SOURCE_CPU0: u8 = 1;
+
+/// The two register sets of the CPU interface (IHI 0048B §4.4.1 AckCtl,
+/// Table 4-2).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CpuView {
+    /// `GICC_IAR`, `GICC_EOIR` and `GICC_HPPIR`: Group 0, and Group 1 while
+    /// `AckCtl` is set — as a Secure access in QEMU.
+    Primary,
+    /// `GICC_AIAR`, `GICC_AEOIR` and `GICC_AHPPIR`: Group 1 only — as a
+    /// Non-secure access to the primary registers in QEMU.
+    Group1Alias,
+}
 
 /// QEMU `gic_id_gicv2`, for offsets 0xFD0..=0xFFC.
 const PERIPHERAL_ID: [u8; 12] = [0x04, 0x00, 0x00, 0x00, 0x90, 0xB4, 0x2B, 0x00, 0x0D, 0xF0, 0x05, 0xB1];
@@ -121,8 +158,6 @@ pub struct GicV2 {
     /// Edge-triggered (`GICD_ICFGR` bit 2n+1).
     edge: Bits,
     priority: [u8; NUM_IRQ],
-    /// QEMU `sgi_pending[irq][0]`: the processors each SGI is pending from.
-    sgi_sources: [u8; NR_SGIS],
     /// `GICC_CTLR`.
     cpu_ctlr: u32,
     pmr: u8,
@@ -167,7 +202,6 @@ impl GicV2 {
             level: Bits::new(),
             edge,
             priority: [0; NUM_IRQ],
-            sgi_sources: [0; NR_SGIS],
             cpu_ctlr: 0,
             pmr: 0,
             bpr: MIN_BPR,
@@ -207,11 +241,19 @@ impl GicV2 {
             }
         }
         w.write_bytes(&self.priority)?;
-        w.write_bytes(&self.sgi_sources)
+        let sources: [u8; NR_SGIS] = core::array::from_fn(|sgi| self.sgi_sources(sgi));
+        w.write_bytes(&sources)
     }
 
-    /// Refuses binary points the registers cannot hold and a running
-    /// priority above idle.
+    /// SGI `sgi`'s `GICD_CPENDSGIRn`/`GICD_SPENDSGIRn` byte: the source bit
+    /// of processor 0 while the SGI is pending.
+    fn sgi_sources(&self, sgi: usize) -> u8 {
+        if self.pending.get(sgi) { SGI_SOURCE_CPU0 } else { 0 }
+    }
+
+    /// Refuses binary points the registers cannot hold, a running priority
+    /// above idle, and SGI sources other than processor 0 or that disagree
+    /// with the SGI's pending state.
     pub(crate) fn restore<R: SnapRead>(&mut self, r: &mut R) -> SnapResult {
         let dist_ctlr = r.read_u32()?;
         let cpu_ctlr = r.read_u32()?;
@@ -241,6 +283,14 @@ impl GicV2 {
         r.read_bytes(&mut priority)?;
         let mut sgi_sources = [0u8; NR_SGIS];
         r.read_bytes(&mut sgi_sources)?;
+        for (sgi, sources) in sgi_sources.iter().enumerate() {
+            if sources & !SGI_SOURCE_CPU0 != 0 {
+                return Err(SnapError::Invalid("GIC SGI pending from a processor that does not exist"));
+            }
+            if (*sources != 0) != pending.get(sgi) {
+                return Err(SnapError::Invalid("GIC SGI source disagrees with its pending state"));
+            }
+        }
         *self = Self {
             dist_ctlr,
             enabled,
@@ -250,7 +300,6 @@ impl GicV2 {
             level,
             edge,
             priority,
-            sgi_sources,
             cpu_ctlr,
             pmr,
             bpr,
@@ -287,13 +336,18 @@ impl GicV2 {
     }
 
     /// QEMU `gic_get_best_irq`: the enabled, pending, inactive interrupt with
-    /// the numerically lowest priority, the lowest ID among equals.
-    fn best_irq(&self) -> Option<usize> {
+    /// the numerically lowest priority, the lowest ID among equals — among
+    /// the interrupts of `groups` (`GICD_CTLR_EN_GRP0`/`GICD_CTLR_EN_GRP1`
+    /// bits) only.
+    fn best_irq(&self, groups: u32) -> Option<usize> {
+        let group0 = if groups & GICD_CTLR_EN_GRP0 != 0 { u32::MAX } else { 0 };
+        let group1 = if groups & GICD_CTLR_EN_GRP1 != 0 { u32::MAX } else { 0 };
         let mut best: Option<usize> = None;
         let mut best_prio = IDLE_PRIORITY;
         for w in 0..WORDS {
             let pending = self.pending.0[w] | (self.level.0[w] & !self.edge.0[w]);
-            let mut candidates = self.enabled.0[w] & pending & !self.active.0[w];
+            let in_groups = (self.group1.0[w] & group1) | (!self.group1.0[w] & group0);
+            let mut candidates = self.enabled.0[w] & pending & !self.active.0[w] & in_groups;
             while candidates != 0 {
                 let i = w * 32 + candidates.trailing_zeros() as usize;
                 candidates &= candidates - 1;
@@ -307,34 +361,47 @@ impl GicV2 {
         best
     }
 
-    /// QEMU `gic_update_internal`. The best interrupt is chosen across both
-    /// groups; it is signalled only if it beats the priority mask and the
-    /// running priority and its own group is enabled, so a disabled group's
-    /// interrupt hides the enabled group's behind it.
+    /// The groups the CPU interface considers: those the distributor forwards
+    /// (IHI 0048B §4.3.1 GICD_CTLR.EnableGrp0/EnableGrp1) and the CPU
+    /// interface signals (§4.4.1 GICC_CTLR.EnableGrp0/EnableGrp1).
+    #[inline]
+    fn signalled_groups(&self) -> u32 {
+        self.dist_ctlr & self.cpu_ctlr & (GICD_CTLR_EN_GRP0 | GICD_CTLR_EN_GRP1)
+    }
+
+    /// IHI 0048B §3.3 "Preemption": a pending interrupt is signalled only if
+    /// its group priority — under its own group's binary point ("Priority
+    /// grouping", Table 3-3) — is higher than the running priority.
+    #[inline]
+    fn preempts(&self, irq: usize) -> bool {
+        u16::from(self.group_priority(irq)) < self.running_priority
+    }
+
+    /// QEMU `gic_update_internal`, with the highest-priority pending
+    /// interrupt chosen from the signalled groups only: it becomes the
+    /// current pending interrupt if it beats the priority mask (its whole
+    /// priority, IHI 0048B §3.3 "Priority masking"), and is signalled if it
+    /// also preempts the running priority — as FIQ if it is Group 0 and
+    /// `FIQEn` is set (§4.4.1 GICC_CTLR.FIQEn), as IRQ otherwise.
     fn update(&mut self) {
         self.current_pending = SPURIOUS;
         self.irq_out = false;
         self.fiq_out = false;
-        let groups = GICD_CTLR_EN_GRP0 | GICD_CTLR_EN_GRP1;
-        if self.dist_ctlr & groups == 0 || self.cpu_ctlr & groups == 0 {
+        let groups = self.signalled_groups();
+        if groups == 0 {
             return;
         }
-        let Some(best) = self.best_irq() else {
+        let Some(best) = self.best_irq(groups) else {
             return;
         };
-        let best_prio = u16::from(self.priority[best]);
-        if best_prio >= u16::from(self.pmr) {
+        if self.priority[best] >= self.pmr {
             return;
         }
         self.current_pending = best as u32;
-        if best_prio >= self.running_priority {
+        if !self.preempts(best) {
             return;
         }
-        let group_bit = if self.group1.get(best) { GICD_CTLR_EN_GRP1 } else { GICD_CTLR_EN_GRP0 };
-        if self.dist_ctlr & group_bit == 0 || self.cpu_ctlr & group_bit == 0 {
-            return;
-        }
-        if group_bit == GICD_CTLR_EN_GRP0 && self.cpu_ctlr & GICC_CTLR_FIQ_EN != 0 {
+        if !self.group1.get(best) && self.cpu_ctlr & GICC_CTLR_FIQ_EN != 0 {
             self.fiq_out = true;
         } else {
             self.irq_out = true;
@@ -403,8 +470,8 @@ impl GicV2 {
                 }
                 b
             }
-            0xF10..=0xF1F => self.sgi_sources[(off - 0xF10) as usize],
-            0xF20..=0xF2F => self.sgi_sources[(off - 0xF20) as usize],
+            0xF10..=0xF1F => self.sgi_sources((off - 0xF10) as usize),
+            0xF20..=0xF2F => self.sgi_sources((off - 0xF20) as usize),
             0xFD0..=0xFFF if off.is_multiple_of(4) => PERIPHERAL_ID[((off - 0xFD0) >> 2) as usize],
             _ => 0,
         }
@@ -517,20 +584,14 @@ impl GicV2 {
                     }
                 }
             }
-            0xF10..=0xF1F => {
-                let sgi = (off - 0xF10) as usize;
-                self.sgi_sources[sgi] &= !v;
-                if self.sgi_sources[sgi] == 0 {
-                    self.pending.set(sgi, false);
-                }
-            }
-            0xF20..=0xF2F => {
-                let sgi = (off - 0xF20) as usize;
-                self.pending.set(sgi, true);
-                self.sgi_sources[sgi] |= v;
-            }
+            // GICD_CPENDSGIRn and GICD_SPENDSGIRn (IHI 0048B): a 1 removes or
+            // adds the SGI's pending state from that source processor, a 0
+            // has no effect; only processor 0's bit exists.
+            0xF10..=0xF1F if v & SGI_SOURCE_CPU0 != 0 => self.pending.set((off - 0xF10) as usize, false),
+            0xF20..=0xF2F if v & SGI_SOURCE_CPU0 != 0 => self.pending.set((off - 0xF20) as usize, true),
             // GICD_CTLR's upper bytes, GICD_ITARGETSR (RAZ/WI on a
-            // uniprocessor GIC), and the rest: ignored.
+            // uniprocessor GIC), the SGI bits of processors that do not
+            // exist, and the rest: ignored.
             _ => {}
         }
     }
@@ -548,21 +609,27 @@ impl GicV2 {
         };
         if targets & 1 != 0 {
             self.pending.set(sgi, true);
-            self.sgi_sources[sgi] |= 1;
         }
     }
 
     // ----- CPU interface -----
 
-    /// QEMU `gic_get_current_pending_irq` for an access without the Security
-    /// Extensions, which behaves as a Secure one: a Group 1 interrupt reads
-    /// as 1022 unless `AckCtl` is set.
-    fn current_pending_irq(&self) -> u32 {
+    /// QEMU `gic_get_current_pending_irq`: the `GICC_HPPIR` or `GICC_AHPPIR`
+    /// value. Through the primary registers a Group 1 interrupt reads as
+    /// 1022 unless `AckCtl` is set (IHI 0048B §4.4.1 AckCtl); through the
+    /// Group 1 aliases a Group 0 interrupt reads as 1023, as for QEMU's
+    /// Non-secure access. Its CPUID field is RAZ, as on any uniprocessor.
+    fn current_pending_irq(&self, view: CpuView) -> u32 {
         let irq = self.current_pending;
-        if irq < MAXIRQ && self.group1.get(irq as usize) && self.cpu_ctlr & GICC_CTLR_ACK_CTL == 0 {
-            return SPURIOUS_GROUP1;
+        if irq >= MAXIRQ {
+            return irq;
         }
-        irq
+        let group1 = self.group1.get(irq as usize);
+        match view {
+            CpuView::Primary if group1 && self.cpu_ctlr & GICC_CTLR_ACK_CTL == 0 => SPURIOUS_GROUP1,
+            CpuView::Group1Alias if !group1 => SPURIOUS,
+            CpuView::Primary | CpuView::Group1Alias => irq,
+        }
     }
 
     /// QEMU `gic_get_group_priority`: the priority's bits above the binary
@@ -609,52 +676,47 @@ impl GicV2 {
         self.running_priority = self.prio_from_apr_bits();
     }
 
-    /// QEMU `gic_acknowledge_irq`: the `GICC_IAR` value. An SGI returns its
-    /// lowest-numbered source processor in bits [12:10].
-    fn acknowledge(&mut self) -> u32 {
-        let irq = self.current_pending_irq();
+    /// QEMU `gic_acknowledge_irq`: the `GICC_IAR` or `GICC_AIAR` value. An
+    /// interrupt that does not preempt the running priority reads as 1023
+    /// and stays pending (IHI 0048B §4.4.4). Acknowledging an SGI clears its
+    /// one source, processor 0 (QEMU `gic_clear_pending_sgi`), and its CPUID
+    /// field is RAZ (§4.4.4 GICC_IAR.CPUID: an SGI's source processor is
+    /// reported only in a multiprocessor implementation).
+    fn acknowledge(&mut self, view: CpuView) -> u32 {
+        let irq = self.current_pending_irq(view);
         if irq >= MAXIRQ {
             return irq;
         }
         let i = irq as usize;
-        if u16::from(self.priority[i]) >= self.running_priority {
+        if !self.preempts(i) {
             return SPURIOUS;
         }
         self.activate(i);
-        let value = if i < NR_SGIS { self.clear_pending_sgi(i) } else {
-            self.pending.set(i, false);
-            irq
-        };
+        self.pending.set(i, false);
         self.update();
-        value
-    }
-
-    /// QEMU `gic_clear_pending_sgi`. An SGI pending from no processor (only
-    /// a `GICD_SPENDSGIR` write of zero leaves one) fails an assertion in
-    /// QEMU; here it is acknowledged as from processor 0.
-    fn clear_pending_sgi(&mut self, sgi: usize) -> u32 {
-        let sources = self.sgi_sources[sgi];
-        let src = if sources == 0 { 0 } else { sources.trailing_zeros() };
-        self.sgi_sources[sgi] &= !(1u8 << src);
-        if self.sgi_sources[sgi] == 0 {
-            self.pending.set(sgi, false);
-        }
-        sgi as u32 | (src & 7) << 10
+        irq
     }
 
     fn eoi_split(&self) -> bool {
         self.cpu_ctlr & GICC_CTLR_EOIMODE != 0
     }
 
-    /// QEMU `gic_complete_irq` (`GICC_EOIR`): ignored for an interrupt that
-    /// does not exist and while nothing is active; otherwise the priority
-    /// drops and, unless `EOImode` splits the two, the interrupt deactivates.
-    fn complete(&mut self, irq: u32) {
+    /// QEMU `gic_complete_irq` (`GICC_EOIR`, `GICC_AEOIR`): ignored for an
+    /// interrupt that does not exist, while nothing is active, and for a
+    /// Group 0 interrupt through the Group 1 alias (QEMU's Non-secure EOI);
+    /// otherwise the priority drops and, unless `EOImode` splits the two, the
+    /// interrupt deactivates. A Group 1 interrupt through `GICC_EOIR` while
+    /// `AckCtl` is clear is UNPREDICTABLE, and completes as if it were set.
+    fn complete(&mut self, irq: u32, view: CpuView) {
         let i = irq as usize;
         if i >= NUM_IRQ || self.running_priority == IDLE_PRIORITY {
             return;
         }
-        self.drop_prio(self.group1.get(i));
+        let group1 = self.group1.get(i);
+        if view == CpuView::Group1Alias && !group1 {
+            return;
+        }
+        self.drop_prio(group1);
         if !self.eoi_split() {
             self.active.set(i, false);
         }
@@ -682,17 +744,20 @@ impl GicV2 {
         }
     }
 
-    /// QEMU `gic_cpu_read`. The aliased registers (`GICC_AIAR`, `GICC_AEOIR`,
-    /// `GICC_AHPPIR`) are not among QEMU's and read as zero.
+    /// QEMU `gic_cpu_read`, with the Group 1 aliases `GICC_AIAR` (0x20) and
+    /// `GICC_AHPPIR` (0x28) of IHI 0048B Table 4-2, which QEMU reads as zero.
+    /// `GICC_AEOIR` (0x24) is write-only.
     fn cpu_read_register(&mut self, off: u64) -> u32 {
         match off {
             0x00 => self.cpu_ctlr,
             0x04 => u32::from(self.pmr),
             0x08 => u32::from(self.bpr),
-            0x0C => self.acknowledge(),
+            0x0C => self.acknowledge(CpuView::Primary),
             0x14 => u32::from(self.running_priority.min(0xFF)),
-            0x18 => self.current_pending_irq(),
+            0x18 => self.current_pending_irq(CpuView::Primary),
             0x1C => u32::from(self.abpr),
+            0x20 => self.acknowledge(CpuView::Group1Alias),
+            0x28 => self.current_pending_irq(CpuView::Group1Alias),
             0xD0 | 0xD4 | 0xD8 | 0xDC => self.apr[((off - 0xD0) / 4) as usize],
             0xE0 | 0xE4 | 0xE8 | 0xEC => self.nsapr[((off - 0xE0) / 4) as usize],
             0xFC => (2 << 16) | 0x43B,
@@ -712,8 +777,8 @@ impl GicV2 {
         self.update();
     }
 
-    /// QEMU `gic_cpu_write`. The aliased registers are not among QEMU's and
-    /// ignore writes.
+    /// QEMU `gic_cpu_write`, with the Group 1 alias `GICC_AEOIR` (0x24) of
+    /// IHI 0048B Table 4-2, which QEMU ignores.
     fn cpu_write_register(&mut self, off: u64, v: u32) {
         match off {
             0x00 => self.cpu_ctlr = v & GICC_CTLR_V2_MASK,
@@ -721,8 +786,9 @@ impl GicV2 {
             // QEMU raises a written binary point to `GIC_MIN_BPR`, which is
             // 0, so every value stands.
             0x08 => self.bpr = v as u8 & 7,
-            0x10 => self.complete(v & 0x3FF),
+            0x10 => self.complete(v & 0x3FF, CpuView::Primary),
             0x1C => self.abpr = (v as u8 & 7).max(MIN_ABPR),
+            0x24 => self.complete(v & 0x3FF, CpuView::Group1Alias),
             0xD0 | 0xD4 | 0xD8 | 0xDC => {
                 self.apr[((off - 0xD0) / 4) as usize] = v;
                 self.running_priority = self.prio_from_apr_bits();
@@ -810,6 +876,9 @@ mod tests {
     const RPR: u64 = 0x14;
     const HPPIR: u64 = 0x18;
     const ABPR: u64 = 0x1C;
+    const AIAR: u64 = 0x20;
+    const AEOIR: u64 = 0x24;
+    const AHPPIR: u64 = 0x28;
     const APR0: u64 = 0xD0;
     const NSAPR0: u64 = 0xE0;
     const DIR: u64 = 0x1000;
@@ -879,19 +948,51 @@ mod tests {
         assert_eq!(dist_get(&mut g, 0xC00), 0xAAAA_AAAA, "nor make one level-sensitive");
     }
 
+    /// IHI 0048B §4.4.4: GICC_IAR.CPUID names an SGI's source only in a
+    /// multiprocessor implementation, so here it reads as zero; and the
+    /// SGI registers hold a source bit for processor 0 alone.
     #[test]
-    fn an_sgi_is_acknowledged_with_its_source_processor() {
+    fn an_sgi_on_a_uniprocessor_has_one_source_and_no_cpuid() {
         let mut g = enabled();
         dist(&mut g, 0xF00, (2 << 24) | 5);
         assert!(g.irq_out());
         assert_eq!(cpu_get(&mut g, IAR), 5, "from processor 0");
         cpu(&mut g, EOIR, 5);
-        // GICD_SPENDSGIR names the sources: here processors 3 and 6.
+        // Bits for processors 3 and 6, which do not exist, are RAZ/WI.
         g.dist_write(RegOffset::new(0xF20 + 7), AccessWidth::Byte, 0x48);
-        assert_eq!(g.dist_read(RegOffset::new(0xF10 + 7), AccessWidth::Byte), 0x48);
-        assert_eq!(cpu_get(&mut g, IAR), 7 | 3 << 10);
+        assert_eq!(g.dist_read(RegOffset::new(0xF20 + 7), AccessWidth::Byte), 0);
+        assert!(!g.irq_out(), "no SGI from a processor that does not exist");
+        assert_eq!(cpu_get(&mut g, HPPIR), 1023);
+        // With processor 0's bit too, the SGI is pending once, from it.
+        g.dist_write(RegOffset::new(0xF20 + 7), AccessWidth::Byte, 0x49);
+        assert_eq!(g.dist_read(RegOffset::new(0xF10 + 7), AccessWidth::Byte), 1);
+        assert_eq!(cpu_get(&mut g, HPPIR), 7);
+        assert_eq!(cpu_get(&mut g, IAR), 7, "CPUID is RAZ");
         cpu(&mut g, EOIR, 7);
-        assert_eq!(cpu_get(&mut g, IAR), 7 | 6 << 10, "still pending from the other source");
+        assert_eq!(cpu_get(&mut g, IAR), 1023, "acknowledged once: no other source");
+        assert_eq!(dist_get(&mut g, 0xF24), 0);
+        // GICD_CPENDSGIRn clears it only through processor 0's bit.
+        g.dist_write(RegOffset::new(0xF20 + 2), AccessWidth::Byte, 1);
+        g.dist_write(RegOffset::new(0xF10 + 2), AccessWidth::Byte, 0xFE);
+        assert_eq!(cpu_get(&mut g, HPPIR), 2, "other processors' bits clear nothing");
+        g.dist_write(RegOffset::new(0xF10 + 2), AccessWidth::Byte, 1);
+        assert_eq!(cpu_get(&mut g, HPPIR), 1023);
+    }
+
+    /// IHI 0048B GICD_SPENDSGIRn: a 0 bit has no effect, so a word write
+    /// pends only the SGIs whose byte sets a bit.
+    #[test]
+    fn a_zero_spendsgir_byte_pends_nothing() {
+        let mut g = enabled();
+        g.dist_write(RegOffset::new(0xF20 + 4), AccessWidth::Byte, 0);
+        assert!(!g.irq_out());
+        assert_eq!(cpu_get(&mut g, HPPIR), 1023);
+        dist(&mut g, 0xF20, 0x0000_0001);
+        assert_eq!(dist_get(&mut g, 0x200) & 0xF, 1, "SGI 0 only");
+        assert_eq!(dist_get(&mut g, 0xF20), 1);
+        assert_eq!(cpu_get(&mut g, IAR), 0);
+        cpu(&mut g, EOIR, 0);
+        assert_eq!(cpu_get(&mut g, IAR), 1023, "SGIs 1 to 3 were not made pending");
     }
 
     #[test]
@@ -918,7 +1019,7 @@ mod tests {
         // Preemption level 0x40 >> 1 = 32: bit 0 of the second register.
         assert_eq!(cpu_get(&mut g, APR0 + 4), 1);
         assert_eq!(cpu_get(&mut g, APR0), 0);
-        // Pending priority is compared whole against the group priority.
+        // Preemption compares group priorities: 0x41 is 0x40 at BPR 2.
         raise(&mut g, 41, 0x41);
         assert!(!g.irq_out(), "0x41 does not preempt 0x40");
         raise(&mut g, 42, 0x3F);
@@ -928,6 +1029,31 @@ mod tests {
         cpu(&mut g, EOIR, 42);
         assert_eq!(cpu_get(&mut g, RPR), 0x40);
         cpu(&mut g, EOIR, 40);
+        assert_eq!(cpu_get(&mut g, RPR), 0xFF);
+    }
+
+    /// IHI 0048B §3.3 "Preemption" and "Priority grouping": with CBPR clear
+    /// each group's binary point sets its own group priority, and a pending
+    /// interrupt preempts when that is higher than the running priority.
+    #[test]
+    fn preemption_compares_group_priorities_under_each_groups_binary_point() {
+        let mut g = enabled();
+        cpu(&mut g, BPR, 2);
+        cpu(&mut g, ABPR, 1);
+        dist(&mut g, 0x084, 1 << 8);
+        raise(&mut g, 40, 0x42);
+        assert_eq!(cpu_get(&mut g, AIAR), 40);
+        assert_eq!(cpu_get(&mut g, RPR), 0x42, "ABPR 1: Group 1 bits [7:1]");
+        raise(&mut g, 42, 0x48);
+        assert!(!g.irq_out(), "0x48 at BPR 2 is group priority 0x48, not higher than 0x42");
+        raise(&mut g, 41, 0x43);
+        assert!(g.irq_out(), "0x43 at BPR 2 is group priority 0x40, higher than 0x42");
+        assert_eq!(cpu_get(&mut g, HPPIR), 41);
+        assert_eq!(cpu_get(&mut g, IAR), 41);
+        assert_eq!(cpu_get(&mut g, RPR), 0x40);
+        cpu(&mut g, EOIR, 41);
+        assert_eq!(cpu_get(&mut g, RPR), 0x42);
+        cpu(&mut g, AEOIR, 40);
         assert_eq!(cpu_get(&mut g, RPR), 0xFF);
     }
 
@@ -962,15 +1088,49 @@ mod tests {
         assert!(g.irq_out(), "not acknowledged");
     }
 
+    /// IHI 0048B §4.3.1: GICD_CTLR.EnableGrp1 clear stops the distributor
+    /// forwarding Group 1, so its interrupt is neither signalled nor read, and
+    /// the Group 0 interrupt behind it is.
     #[test]
-    fn a_disabled_groups_interrupt_hides_the_one_behind_it() {
+    fn a_group_the_distributor_does_not_forward_hides_nothing() {
         let mut g = enabled();
+        cpu(&mut g, CTLR, 3 | GICC_CTLR_ACK_CTL);
         dist(&mut g, 0x000, 1);
         dist(&mut g, 0x084, 1 << 8);
         raise(&mut g, 40, 0x10);
         raise(&mut g, 41, 0x20);
-        assert!(!g.irq_out(), "the Group 1 interrupt is best but its group is off");
-        assert_eq!(cpu_get(&mut g, HPPIR), 1022);
+        assert!(g.irq_out(), "the Group 0 interrupt is signalled");
+        assert_eq!(cpu_get(&mut g, HPPIR), 41);
+        assert_eq!(cpu_get(&mut g, AHPPIR), 1023, "no Group 1 interrupt is forwarded");
+        assert_eq!(cpu_get(&mut g, AIAR), 1023);
+        assert_eq!(cpu_get(&mut g, IAR), 41);
+        cpu(&mut g, EOIR, 41);
+        g.set_line(41, false);
+        assert!(!g.irq_out());
+        assert_eq!(cpu_get(&mut g, IAR), 1023, "AckCtl does not reach an unforwarded group");
+        assert_eq!(dist_get(&mut g, 0x304), 0, "interrupt 40 never became active");
+        dist(&mut g, 0x000, 3);
+        assert_eq!(cpu_get(&mut g, IAR), 40, "forwarded once its group is enabled");
+    }
+
+    /// IHI 0048B §4.4.1: GICC_CTLR.EnableGrp0 clear stops the CPU interface
+    /// signalling Group 0; its interrupt does not hide the Group 1 one.
+    #[test]
+    fn a_group_the_cpu_interface_does_not_signal_hides_nothing() {
+        let mut g = enabled();
+        cpu(&mut g, CTLR, 2);
+        dist(&mut g, 0x084, 1 << 9);
+        raise(&mut g, 40, 0x10);
+        raise(&mut g, 41, 0x20);
+        assert!(g.irq_out(), "the Group 1 interrupt is signalled");
+        assert_eq!(cpu_get(&mut g, HPPIR), 1022, "Group 1, AckCtl clear");
+        assert_eq!(cpu_get(&mut g, AHPPIR), 41);
+        assert_eq!(cpu_get(&mut g, AIAR), 41);
+        cpu(&mut g, AEOIR, 41);
+        g.set_line(41, false);
+        assert!(!g.irq_out());
+        assert_eq!(cpu_get(&mut g, IAR), 1023, "Group 0 is not signalled, so not acknowledged");
+        assert_eq!(dist_get(&mut g, 0x304), 0);
     }
 
     #[test]
@@ -1001,18 +1161,42 @@ mod tests {
     }
 
     #[test]
-    fn the_aliased_registers_are_absent_and_ctlr_keeps_qemus_bits() {
+    fn ctlr_keeps_qemus_bits() {
         let mut g = enabled();
         cpu(&mut g, CTLR, 0xFFFF_FFFF);
         assert_eq!(cpu_get(&mut g, CTLR), GICC_CTLR_V2_MASK);
-        cpu(&mut g, CTLR, 3 | GICC_CTLR_ACK_CTL);
+    }
+
+    /// IHI 0048B Table 4-2 and §4.4.1 AckCtl: with AckCtl clear (Arm's
+    /// recommended setting) Group 1 is acknowledged, completed and reported
+    /// through GICC_AIAR, GICC_AEOIR and GICC_AHPPIR, which see no Group 0
+    /// interrupt.
+    #[test]
+    fn the_aliased_registers_handle_group_1() {
+        let mut g = enabled();
         dist(&mut g, 0x084, 1 << 8);
         raise(&mut g, 40, 0x10);
-        assert_eq!(cpu_get(&mut g, 0x20), 0, "GICC_AIAR");
-        assert_eq!(cpu_get(&mut g, 0x28), 0, "GICC_AHPPIR");
-        assert_eq!(cpu_get(&mut g, IAR), 40);
-        cpu(&mut g, 0x24, 40);
-        assert_eq!(cpu_get(&mut g, RPR), 0x10, "GICC_AEOIR does not complete");
+        assert_eq!(cpu_get(&mut g, IAR), 1022, "GICC_IAR does not take Group 1");
+        assert_eq!(cpu_get(&mut g, AHPPIR), 40);
+        assert_eq!(cpu_get(&mut g, AIAR), 40);
+        assert_eq!(dist_get(&mut g, 0x304), 1 << 8, "active");
+        assert_eq!(cpu_get(&mut g, RPR), 0x10);
+        assert_eq!(cpu_get(&mut g, NSAPR0), 1 << 8, "Group 1 preemption level 8");
+        assert_eq!(cpu_get(&mut g, AHPPIR), 1023, "nothing else pending");
+        g.set_line(40, false);
+        cpu(&mut g, AEOIR, 40);
+        assert_eq!(cpu_get(&mut g, RPR), 0xFF);
+        assert_eq!(dist_get(&mut g, 0x304), 0, "GICC_AEOIR completes it");
+        // A Group 0 interrupt is invisible to the aliases.
+        raise(&mut g, 41, 0x20);
+        assert_eq!(cpu_get(&mut g, AHPPIR), 1023);
+        assert_eq!(cpu_get(&mut g, AIAR), 1023);
+        assert_eq!(dist_get(&mut g, 0x304), 0, "not acknowledged");
+        assert_eq!(cpu_get(&mut g, IAR), 41);
+        cpu(&mut g, AEOIR, 41);
+        assert_eq!(cpu_get(&mut g, RPR), 0x20, "GICC_AEOIR ignores a Group 0 interrupt");
+        cpu(&mut g, EOIR, 41);
+        assert_eq!(cpu_get(&mut g, RPR), 0xFF);
     }
 
     #[test]
@@ -1060,5 +1244,13 @@ mod tests {
         cpu(&mut restored, EOIR, 3);
         assert_eq!(cpu_get(&mut restored, IAR), 40);
         assert_eq!(cpu_get(&mut restored, RPR), 0x44);
+        // The image ends with the SGIs' source bytes; only processor 0 exists.
+        let sgi_3 = image.len() - NR_SGIS + 3;
+        image[sgi_3] = 0x08;
+        let mut source: &[u8] = &image;
+        assert!(GicV2::new().restore(&mut source).is_err(), "SGI 3 from processor 3");
+        image[sgi_3] = 0x01;
+        let mut source: &[u8] = &image;
+        assert!(GicV2::new().restore(&mut source).is_err(), "SGI 3 sourced but not pending");
     }
 }
