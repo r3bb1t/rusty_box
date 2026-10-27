@@ -1,7 +1,9 @@
 //! The SME instructions on the ZA array (FEAT_SME): the outer products that
 //! accumulate into its tiles, MOVA between a tile slice and a vector, ZERO,
 //! ADDHA and ADDVA, the tile slice loads and stores, and LDR and STR of an
-//! array vector.
+//! array vector; and FEAT_SME2's on its tiles: BMOPA and BMOPS, SMOPA to
+//! UMOPS of halfwords, and MOVA between two or four consecutive tile
+//! slices and as many registers.
 //!
 //! ZA is `SVL DIV 8` horizontal vectors of SVL bits (`Cpu::za_vector`). A
 //! tile of `esize`-bit elements is every `esize DIV 8`th of them from its
@@ -34,7 +36,7 @@ use super::exec::{bit, bits, ExecResult, Fault, Flow};
 use super::features::VecLen;
 use super::fp::{fp_mul_add, FpEnv, FpType};
 use super::mmu::DataAccess;
-use super::sve::{int, Esize, Pv, Zv};
+use super::sve::{group, int, Esize, Pv, Zv};
 use super::Cpu;
 use crate::bus::PhysBus;
 use crate::softfloat::{self as sf, FusedMulAdd};
@@ -94,6 +96,37 @@ struct Slice {
     tile: usize,
     vertical: bool,
     index: usize,
+}
+
+/// Which way FEAT_SME2's MOVA between a group of registers and ZA goes.
+///
+/// Closed (R5): Arm's `*_insert_ctg` and `*_extract_ctg` classes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ZaMove {
+    /// Into ZA, from the group `Zn:'0'` or `Zn:'00'` (bits 9:6 or 9:7), the
+    /// ZA operand's field from bit 0.
+    Insert,
+    /// Out of ZA, to the group `Zd:'0'` or `Zd:'00'` (bits 4:1 or 4:2), the
+    /// ZA operand's field from bit 5.
+    Extract,
+}
+
+impl ZaMove {
+    /// The lowest bit of the field naming the slices or the vectors in ZA.
+    pub(super) const fn za_field(self) -> u32 {
+        match self {
+            Self::Insert => 0,
+            Self::Extract => 5,
+        }
+    }
+
+    /// The highest bit of the field naming the group of registers.
+    pub(super) const fn registers(self) -> u32 {
+        match self {
+            Self::Insert => 9,
+            Self::Extract => 4,
+        }
+    }
 }
 
 /// What an outer product and ADDHA or ADDVA read once the enable check has
@@ -220,20 +253,24 @@ impl Signedness {
 }
 
 impl Cpu {
-    /// The slice an instruction names: its tile and offset in the four bits
-    /// from `lo` up (`ZAd:off`, the tile in the high `log2(esize DIV 8)`),
-    /// vertical by `V` (bit 15), its index `(UInt(Ws) + offset) MOD dim`
-    /// with `Ws` one of W12 to W15 by `Rs` (bits 14:13).
-    fn tile_slice(&self, insn: u32, lo: u32, size: TileSize, svl: VecLen) -> Slice {
-        let field = bits(insn, lo + 3, lo);
-        let offset_bits = 4 - size.log2_bytes();
-        let offset = u64::from(field & ((1 << offset_bits) - 1));
-        let ws = self.x_or_zr(12 + bits(insn, 14, 13)) as u32;
+    /// The first of the `nreg` consecutive slices of `size` an instruction
+    /// names, one but for FEAT_SME2's MOVA of two or four: its tile and
+    /// offset in the bits from `lo` up (`ZAd:off`, the tile in the high
+    /// `log2(esize DIV 8)`, below it the offset, scaled by `nreg`, in what
+    /// is left of `4 - log2(nreg)` bits), vertical by `V` (bit 15), its
+    /// index `((UInt(Ws) - UInt(Ws) MOD nreg) + offset) MOD dim` with `Ws`
+    /// one of W12 to W15 by `Rs` (bits 14:13).
+    fn tile_slice(&self, insn: u32, lo: u32, size: TileSize, nreg: usize, svl: VecLen) -> Slice {
+        let tile_bits = size.log2_bytes();
+        let offset_bits = (4 - nreg.trailing_zeros()).saturating_sub(tile_bits);
+        let field = bits(insn, lo + tile_bits + offset_bits - 1, lo);
+        let offset = u64::from(field & ((1 << offset_bits) - 1)) * nreg as u64;
+        let ws = u64::from(self.x_or_zr(12 + bits(insn, 14, 13)) as u32);
         Slice {
             size,
             tile: (field >> offset_bits) as usize,
             vertical: bit(insn, 15),
-            index: ((u64::from(ws) + offset) % size.dim(svl) as u64) as usize,
+            index: ((ws - ws % nreg as u64 + offset) % size.dim(svl) as u64) as usize,
         }
     }
 
@@ -344,6 +381,26 @@ impl Cpu {
     /// modulo 2^32.
     pub(crate) fn exec_sme_int_outer_product(&mut self, insn: u32) -> ExecResult {
         let (n_sign, m_sign) = (Signedness::of(bit(insn, 24)), Signedness::of(bit(insn, 21)));
+        self.int_outer_product(insn, Esize::B, n_sign, m_sign)
+    }
+
+    /// SMOPA, UMOPA, SMOPS and UMOPS of halfwords (`smopa_za32_pp_zz_16` to
+    /// `umops_za32_pp_zz_16`: `1010000 u0 100 Zm Pm Pn Zn S 10 ZAda`): as
+    /// the products of bytes, of the two halfwords of each word, both
+    /// signed or both unsigned by `u0`.
+    pub(crate) fn exec_sme_int_outer_product_halfwords(&mut self, insn: u32) -> ExecResult {
+        let sign = Signedness::of(bit(insn, 24));
+        self.int_outer_product(insn, Esize::H, sign, sign)
+    }
+
+    /// The integer outer products into 32-bit tiles of words of `es` parts,
+    /// four bytes or two halfwords: element `[row, col]` of the tile `ZAda`
+    /// gains, or by `S` (bit 4) loses, the product of part `k` of row
+    /// element `row` of `Zn` (by `n_sign`) and part `k` of column element
+    /// `col` of `Zm` (by `m_sign`), for each `k` whose two parts `Pn` and
+    /// `Pm` both make active, modulo 2^32.
+    fn int_outer_product(&mut self, insn: u32, es: Esize, n_sign: Signedness, m_sign: Signedness) -> ExecResult {
+        let parts = Esize::S.bytes() / es.bytes();
         let subtract = bit(insn, 4);
         let op = self.tile_operands(insn)?;
         let zm = self.z(bits(insn, 20, 16), op.svl);
@@ -351,17 +408,17 @@ impl Cpu {
         for row in 0..dim {
             let index = op.tile + row * TileSize::S.bytes();
             let mut acc = self.za_vector(index, op.svl);
-            // The row's four bytes, `None` where `Pn` makes one inactive.
-            let row_bytes: [Option<i128>; 4] = core::array::from_fn(|k| {
-                let a = 4 * row + k;
-                op.rows.active(a, Esize::B).then(|| n_sign.int(op.zn.get(a, Esize::B), Esize::B))
+            // The row's parts, `None` where `Pn` makes one inactive.
+            let row_parts: [Option<i128>; 4] = core::array::from_fn(|k| {
+                let a = parts * row + k;
+                (k < parts && op.rows.active(a, es)).then(|| n_sign.int(op.zn.get(a, es), es))
             });
             for col in 0..dim {
                 let mut sum = acc.get(col, Esize::S) as u32;
-                for (k, element) in row_bytes.iter().enumerate() {
-                    let b = 4 * col + k;
-                    if let (Some(element), true) = (element, op.cols.active(b, Esize::B)) {
-                        let product = (element * m_sign.int(zm.get(b, Esize::B), Esize::B)) as u32;
+                for (k, element) in row_parts[..parts].iter().enumerate() {
+                    let b = parts * col + k;
+                    if let (Some(element), true) = (element, op.cols.active(b, es)) {
+                        let product = (element * m_sign.int(zm.get(b, es), es)) as u32;
                         sum = if subtract {
                             sum.wrapping_sub(product)
                         } else {
@@ -376,6 +433,79 @@ impl Cpu {
         Ok(Flow::Next)
     }
 
+    /// BMOPA and BMOPS (`bmopa_za_pp_zz_32`, `bmops_za_pp_zz_32`: `10000000
+    /// 100 Zm Pm Pn Zn S 10 ZAda`): element `[row, col]` of the 32-bit tile
+    /// `ZAda` gains, or by `S` loses, the number of bits in which row element
+    /// `row` of `Zn` and column element `col` of `Zm` agree (`BitCount(NOT(
+    /// element1 XOR element2))`) where `Pn` and `Pm` make both active,
+    /// modulo 2^32.
+    pub(crate) fn exec_sme_binary_outer_product(&mut self, insn: u32) -> ExecResult {
+        let subtract = bit(insn, 4);
+        let op = self.tile_operands(insn)?;
+        let zm = self.z(bits(insn, 20, 16), op.svl);
+        let dim = TileSize::S.dim(op.svl);
+        for row in 0..dim {
+            let index = op.tile + row * TileSize::S.bytes();
+            let mut acc = self.za_vector(index, op.svl);
+            if op.rows.active(row, Esize::S) {
+                let element = op.zn.get(row, Esize::S) as u32;
+                for col in (0..dim).filter(|&col| op.cols.active(col, Esize::S)) {
+                    let agree = u64::from((!(element ^ zm.get(col, Esize::S) as u32)).count_ones());
+                    let sum = acc.get(col, Esize::S);
+                    acc.set(col, Esize::S, if subtract { sum.wrapping_sub(agree) } else { sum.wrapping_add(agree) });
+                }
+            }
+            self.set_za_vector(index, op.svl, &acc);
+        }
+        Ok(Flow::Next)
+    }
+
+    /// Whether `nreg` consecutive slices of `size` fit a tile at `svl`. Of
+    /// two or four slices at 128 bits or more, only four doubleword ones
+    /// below 256 bits do not: Arm's `nreg == 4 && esize == 64 && VL < 256`.
+    fn group_slices_fit(nreg: usize, size: TileSize, svl: VecLen) -> bool {
+        size.dim(svl) >= nreg
+    }
+
+    /// MOVA between two or four registers and as many consecutive tile
+    /// slices (`mova_za2_z_b1` to `mova_za4_z_d1`: `11000000 size 000 1 00
+    /// V Rs 00 nreg Zn 0 ZAd:off`; `mova_mz2_za_b1` to `mova_mz4_za_d1`:
+    /// `11000000 size 000 1 10 V Rs 00 nreg 00 ZAn:off Zd`; four by bit 10):
+    /// register `r` of the group [`ZaMove`] names to or from slice `index +
+    /// r` of [`Cpu::tile_slice`]. Four doubleword slices are UNDEFINED where
+    /// `MaxImplementedSVL()` is below 256 bits, in the decode, and where the
+    /// current vector length is, after the enable check.
+    pub(crate) fn exec_sme_move_group_slices(&mut self, pc: u64, insn: u32, way: ZaMove) -> ExecResult {
+        let size = TileSize::of(bits(insn, 23, 22), false);
+        let nreg = if bit(insn, 10) { 4 } else { 2 };
+        if !Self::group_slices_fit(nreg, size, self.imp.max_svl) {
+            return self.undefined(pc, insn);
+        }
+        let svl = self.check_streaming_sve_and_za_enabled()?;
+        if !Self::group_slices_fit(nreg, size, svl) {
+            return self.undefined(pc, insn);
+        }
+        let first = self.tile_slice(insn, way.za_field(), size, nreg, svl);
+        let z = group(insn, way.registers(), nreg);
+        for r in 0..nreg {
+            let slice = Slice {
+                index: first.index + r,
+                ..first
+            };
+            match way {
+                ZaMove::Insert => {
+                    let value = self.z(z + r as u32, svl);
+                    self.set_za_slice(slice, svl, &value);
+                }
+                ZaMove::Extract => {
+                    let value = self.za_slice(slice, svl);
+                    self.set_z(z + r as u32, svl, &value);
+                }
+            }
+        }
+        Ok(Flow::Next)
+    }
+
     /// MOVA (vector to tile slice) (`mova_za_p_rz_b` to `mova_za_p_rz_q`:
     /// `11000000 size 000 0 0 Q V Rs Pg Zn 0 ZAd:off`): the elements of
     /// `Zn` that `Pg` makes active, into the tile slice.
@@ -384,7 +514,7 @@ impl Cpu {
         let svl = self.check_streaming_sve_and_za_enabled()?;
         let mask = self.p(bits(insn, 12, 10), svl);
         let operand = self.z(bits(insn, 9, 5), svl);
-        let slice = self.tile_slice(insn, 0, size, svl);
+        let slice = self.tile_slice(insn, 0, size, 1, svl);
         let mut result = self.za_slice(slice, svl);
         merge_active(&mut result, &operand, &mask, size, svl);
         self.set_za_slice(slice, svl, &result);
@@ -398,7 +528,7 @@ impl Cpu {
         let size = TileSize::of(bits(insn, 23, 22), bit(insn, 16));
         let svl = self.check_streaming_sve_and_za_enabled()?;
         let mask = self.p(bits(insn, 12, 10), svl);
-        let slice = self.tile_slice(insn, 5, size, svl);
+        let slice = self.tile_slice(insn, 5, size, 1, svl);
         let operand = self.za_slice(slice, svl);
         let d = bits(insn, 4, 0);
         let mut result = self.z(d, svl);
@@ -452,7 +582,7 @@ impl Cpu {
     pub(crate) fn exec_sme_load_slice<B: PhysBus>(&mut self, bus: &mut B, insn: u32) -> ExecResult {
         let size = TileSize::of(bits(insn, 23, 22), bit(insn, 24));
         let svl = self.check_streaming_sve_and_za_enabled()?;
-        let (mask, slice) = (self.p(bits(insn, 12, 10), svl), self.tile_slice(insn, 0, size, svl));
+        let (mask, slice) = (self.p(bits(insn, 12, 10), svl), self.tile_slice(insn, 0, size, 1, svl));
         let base = self.base_register(bits(insn, 9, 5))?;
         let mut addr = base.wrapping_add(self.x_or_zr(bits(insn, 20, 16)).wrapping_mul(size.bytes() as u64));
         let b = size.bytes();
@@ -478,7 +608,7 @@ impl Cpu {
     pub(crate) fn exec_sme_store_slice<B: PhysBus>(&mut self, bus: &mut B, insn: u32) -> ExecResult {
         let size = TileSize::of(bits(insn, 23, 22), bit(insn, 24));
         let svl = self.check_streaming_sve_and_za_enabled()?;
-        let (mask, slice) = (self.p(bits(insn, 12, 10), svl), self.tile_slice(insn, 0, size, svl));
+        let (mask, slice) = (self.p(bits(insn, 12, 10), svl), self.tile_slice(insn, 0, size, 1, svl));
         let base = self.base_register(bits(insn, 9, 5))?;
         let mut addr = base.wrapping_add(self.x_or_zr(bits(insn, 20, 16)).wrapping_mul(size.bytes() as u64));
         let source = self.za_slice(slice, svl);

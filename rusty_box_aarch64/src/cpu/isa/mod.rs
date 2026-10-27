@@ -121,7 +121,10 @@ use sme::{
     MortlachMulti4ZzZaMlaLongMm, MortlachMulti4ZzZaMlaLongSm, MortlachZero, MortlachZeroZt, MortlachZtLdst,
     MortlachMulti1FmaLongIdx, MortlachMulti1MlaLongIdx, MortlachMulti1MlaLongLongIdxS, MortlachMulti2FmaLongIdx,
     MortlachMulti2MlaLongIdx, MortlachMulti2MlaLongLongIdxS, MortlachMulti2ZzaIdxS, MortlachMulti4FmaLongIdx,
-    MortlachMulti4MlaLongIdx, MortlachMulti4MlaLongLongIdxS, MortlachMulti4ZzaIdxS,
+    MortlachMulti4MlaLongIdx, MortlachMulti4MlaLongLongIdxS, MortlachMulti4ZzaIdxS, MortlachBini32Prod,
+    MortlachExpand1dst, MortlachExpand2dstCtg, MortlachExpand4dstCtg, MortlachI16i32Prod, MortlachMulti2ExtractCtg,
+    MortlachMulti2InsertCtg, MortlachMulti2ZaExtractCtg, MortlachMulti2ZaInsertCtg, MortlachMulti4ExtractCtg,
+    MortlachMulti4InsertCtg, MortlachMulti4ZaExtractCtg, MortlachMulti4ZaInsertCtg,
 };
 use sve::{
     SveFp2opIPZds, SveFp2opPPd, SveFp2opPZdA, SveFp2opPZdB0, SveFp2opPZdB1, SveFp2opPZdC, SveFp2opPZdD, SveFp2opPZds,
@@ -577,6 +580,19 @@ pub(crate) enum Encoding {
     MortlachMulti4ZzaIdxS(MortlachMulti4ZzaIdxS),
     MortlachMulti4FmaLongIdx(MortlachMulti4FmaLongIdx),
     MortlachMulti4MlaLongIdx(MortlachMulti4MlaLongIdx),
+    MortlachBini32Prod(MortlachBini32Prod),
+    MortlachI16i32Prod(MortlachI16i32Prod),
+    MortlachMulti2InsertCtg(MortlachMulti2InsertCtg),
+    MortlachMulti4InsertCtg(MortlachMulti4InsertCtg),
+    MortlachMulti2ZaInsertCtg(MortlachMulti2ZaInsertCtg),
+    MortlachMulti4ZaInsertCtg(MortlachMulti4ZaInsertCtg),
+    MortlachMulti2ExtractCtg(MortlachMulti2ExtractCtg),
+    MortlachMulti4ExtractCtg(MortlachMulti4ExtractCtg),
+    MortlachMulti2ZaExtractCtg(MortlachMulti2ZaExtractCtg),
+    MortlachMulti4ZaExtractCtg(MortlachMulti4ZaExtractCtg),
+    MortlachExpand1dst(MortlachExpand1dst),
+    MortlachExpand2dstCtg(MortlachExpand2dstCtg),
+    MortlachExpand4dstCtg(MortlachExpand4dstCtg),
 }
 
 /// The encoding `word` is, if it is one of a feature the decoder knows.
@@ -997,6 +1013,15 @@ impl Encoding {
                 | MortlachMulti4ZzaIdxS::UsvdotZaZziS4xi
                 | MortlachMulti4ZzaIdxS::SuvdotZaZziS4xi => Class::SmeIndexedVerticalDot,
             },
+            Self::MortlachBini32Prod(_) => Class::SmeBinaryOuterProduct,
+            Self::MortlachI16i32Prod(_) => Class::SmeIntOuterProductHalfwords,
+            Self::MortlachMulti2InsertCtg(_) | Self::MortlachMulti4InsertCtg(_) => Class::SmeMoveGroupToSlices,
+            Self::MortlachMulti2ExtractCtg(_) | Self::MortlachMulti4ExtractCtg(_) => Class::SmeMoveGroupFromSlices,
+            Self::MortlachMulti2ZaInsertCtg(_) | Self::MortlachMulti4ZaInsertCtg(_) => Class::SmeMoveGroupToArray,
+            Self::MortlachMulti2ZaExtractCtg(_) | Self::MortlachMulti4ZaExtractCtg(_) => Class::SmeMoveGroupFromArray,
+            Self::MortlachExpand1dst(_) | Self::MortlachExpand2dstCtg(_) | Self::MortlachExpand4dstCtg(_) => {
+                Class::SmeLookupTable
+            }
         }
     }
 }
@@ -1416,6 +1441,21 @@ pub(crate) enum Class {
     /// the elements in the same place of each register of the group, by an
     /// indexed group, into ZA array vectors.
     SmeIndexedVerticalDot,
+    /// BMOPA and BMOPS: the population counts of the XNORs of words, into
+    /// 32-bit tiles.
+    SmeBinaryOuterProduct,
+    /// SMOPA, UMOPA, SMOPS and UMOPS of halfwords into 32-bit tiles.
+    SmeIntOuterProductHalfwords,
+    /// MOVA of two or four vectors to consecutive tile slices.
+    SmeMoveGroupToSlices,
+    /// MOVA of two or four consecutive tile slices to vectors.
+    SmeMoveGroupFromSlices,
+    /// MOVA of two or four vectors to ZA array vectors.
+    SmeMoveGroupToArray,
+    /// MOVA of ZA array vectors to two or four vectors.
+    SmeMoveGroupFromArray,
+    /// LUTI2 and LUTI4 from ZT0 into one, two or four vectors.
+    SmeLookupTable,
     /// FMOPA and FMOPS of single-precision and of half-precision values,
     /// BFMOPA and BFMOPS, into 32-bit tiles: the handler reads which from
     /// bits 24, 21 and 4.
@@ -1895,7 +1935,20 @@ impl Encoding {
             | Self::MortlachMulti4MlaLongLongIdxS(_)
             | Self::MortlachMulti4ZzaIdxS(_)
             | Self::MortlachMulti4FmaLongIdx(_)
-            | Self::MortlachMulti4MlaLongIdx(_) => Feature::Sme2,
+            | Self::MortlachMulti4MlaLongIdx(_)
+            | Self::MortlachBini32Prod(_)
+            | Self::MortlachI16i32Prod(_)
+            | Self::MortlachMulti2InsertCtg(_)
+            | Self::MortlachMulti4InsertCtg(_)
+            | Self::MortlachMulti2ZaInsertCtg(_)
+            | Self::MortlachMulti4ZaInsertCtg(_)
+            | Self::MortlachMulti2ExtractCtg(_)
+            | Self::MortlachMulti4ExtractCtg(_)
+            | Self::MortlachMulti2ZaExtractCtg(_)
+            | Self::MortlachMulti4ZaExtractCtg(_)
+            | Self::MortlachExpand1dst(_)
+            | Self::MortlachExpand2dstCtg(_)
+            | Self::MortlachExpand4dstCtg(_) => Feature::Sme2,
         }
     }
 }

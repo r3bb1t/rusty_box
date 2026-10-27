@@ -191,9 +191,11 @@ and BFloat16 pairs, FMLA and FMLS of single-precision values, ADD and
 SUB of vectors to them, and ADD, SUB, FADD and FSUB of vectors into
 them, of one, two or four vectors by one or by as many), 121 encodings,
 and their forms by an indexed element with the vertical dot products
-FVDOT, BFVDOT, SVDOT, UVDOT, USVDOT and SUVDOT, 70 encodings; MOVA of
-groups, its lookup tables and the SVE2.1 forms it makes legal are still
-to come).
+FVDOT, BFVDOT, SVDOT, UVDOT, USVDOT and SUVDOT, 70 encodings, and BMOPA
+and BMOPS, SMOPA to UMOPS of halfwords into 32-bit tiles, MOVA between
+two or four registers and as many tile slices or ZA array vectors, and
+LUTI2 and LUTI4 of ZT0 to one, two or four registers, 32 encodings; the
+SVE2.1 forms it makes legal are still to come).
 No processor a machine runs has them
 yet: the tests run them on a test-only processor with every feature, whose
 ID registers advertise each one.
@@ -386,16 +388,17 @@ integration tests of the public API.
   instructions, which are Advanced SIMD, but not CRC32, which is not.
 - `tests/unit/difftest.rs` also replays `tests/vectors/qemu_sve.txt`, in
   Streaming SVE mode at a 512-bit vector length with ZA enabled and ZT0
-  accessible: 12,600 vectors, 40 for each of the 238 encoding classes of
+  accessible: 13,120 vectors, 40 for each of the 238 encoding classes of
   SVE integer arithmetic, element counts, immediates, permutes, compares,
   predicate operations, WHILE, contiguous loads, stores and prefetches,
   floating point, and SVE2's integer instructions that FEAT_SME makes
   legal there, of the 13 classes of its ZA instructions, and of FEAT_SME2's
-  118 so far (the 5 predicate-as-counter classes, the 16 of the
+  131 so far (the 5 predicate-as-counter classes, the 16 of the
   multi-vector loads and stores, ZERO and LDR and STR of ZT0, the 41 of
   the multi-vector SVE operations, the 43 of the instructions on ZA array
-  vectors and the 11 of their indexed forms), each the class's fixed bits
-  with the rest random. The
+  vectors, the 11 of their indexed forms, and the 13 of BMOPA, the
+  halfword outer products, MOVA of groups and LUTI2 and LUTI4), each the
+  class's fixed bits with the rest random. The
   initial state is `qemu_max.txt`'s with Z0-Z31 and P0-P15 in place of the
   SIMD&FP registers (random bits, small elements, element extremes;
   random, all-true and per-size canonical predicates), ZA and ZT0 zero but
@@ -429,14 +432,23 @@ integration tests of the public API.
   products' two roundings and their inactive elements not negated, the
   tile loads' inactive elements zeroed and their faults part-way, LDR and
   STR of ZA and their alignment, and the 64-bit, FEAT_SME2p1 and
-  FEAT_SME_LUTv2 encodings UNDEFINED; `tests/unit/softfloat.rs` checks
+  FEAT_SME_LUTv2 encodings UNDEFINED; and of FEAT_SME2's on tiles,
+  BMOPA's count of agreeing bits, the halfword products' pairs and their
+  predicates, MOVA of a group's slices from an index aligned to the group,
+  as rows and as columns, four doubleword slices UNDEFINED below 256 bits
+  (in the decode for a processor whose longest vector length is), and the
+  instructions without FEAT_SME2 UNDEFINED; `tests/unit/softfloat.rs` checks
   FPDot of half-precision pairs, NaNs, infinities, signed zeros and
   rounding. `tests/unit/zt0.rs` checks ZT0's: the order of its enable
   checks (SME's, ZA storage, `SMCR_EL1.EZT0`) in or out of Streaming SVE
   mode, ZERO, LDR and STR of its 64 bytes from a register or SP, their
   alignment and a fault part-way, MOVT UNDEFINED, ZT0 zeroed by enabling
   ZA, EZT0 RES0 and the instructions UNDEFINED without FEAT_SME2, and ZT0
-  in a snapshot. `tests/unit/pred_counter.rs` checks the
+  in a snapshot; and LUTI2's and LUTI4's indexes from the segment the
+  immediate selects modulo the segments, for one, two and four
+  registers, read before a register of the group is written, their enable
+  checks with Streaming SVE mode first, and their UNDEFINED sizes.
+  `tests/unit/pred_counter.rs` checks the
   predicate-as-counter: its encoding, a full count held as an inverted
   zero, the counter's element size read at another, a zero low nibble;
   WHILE counting up and down, signed and unsigned, with its flags, and of
@@ -466,7 +478,8 @@ integration tests of the public API.
   the dot products of bytes and halfwords; FMLA's one rounding, default
   NaN (negative under FPCR.AH) and FPSR left alone; FDOT's rounding of
   the pair before the sum; FMLSL's and BFMLSL's negation; ADD and SUB
-  replacing the vectors and the accumulating forms adding to them; by an
+  replacing the vectors and the accumulating forms adding to them; MOVA
+  between a group and the vectors, its offset unscaled; by an
   indexed element, the element or group of each result's own 128-bit
   segment, every class's index fields and a group's mixed-sign bit, and
   the vertical dot products' elements across the registers; the enable

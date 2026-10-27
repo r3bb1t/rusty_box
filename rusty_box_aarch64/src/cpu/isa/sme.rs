@@ -8,22 +8,25 @@
 //! single-precision and of half-precision values, BFMOPA and BFMOPS, and
 //! SMOPA to UMOPS of bytes), MOVA between a tile slice and a vector, ZERO,
 //! ADDHA and ADDVA of words, the tile slice loads and stores (LD1B to LD1Q,
-//! ST1B to ST1Q) and LDR and STR of a ZA array vector. FEAT_SME2's so far
-//! are the contiguous loads and stores of two or four vectors (LD1B to
-//! LD1D, LDNT1B to LDNT1D, ST1B to ST1D, STNT1B to STNT1D), ZERO {ZT0},
-//! LDR and STR of ZT0, MOVT between ZT0 and a general register, and the
-//! SVE operations on groups of two or four vectors (`mortlach_multi_sve_1`
-//! to `_4`: SEL, the integer and floating-point maxima, minima, shifts,
-//! additions, multiplications and clamps, ZIP and UZP, the narrowing
-//! shifts and conversions, the conversions between words and single
-//! precision, FRINT and the unpacks), and the instructions on groups of ZA
-//! array vectors (`mortlach_multi_array_1a` to `_2b`: the long integer and
-//! floating-point products, the dot products, FMLA and FMLS, and ADD, SUB,
-//! FADD and FSUB) and by an indexed element (`mortlach_multi_indexed_1` to
-//! `_3`, with the vertical dot products FVDOT, BFVDOT, SVDOT, UVDOT, USVDOT
-//! and SUVDOT). The rest of FEAT_SME2's instructions, and the optional
-//! 64-bit forms of FEAT_SME_F64F64 and FEAT_SME_I16I64, are not here, which
-//! this decoder does not know.
+//! ST1B to ST1Q) and LDR and STR of a ZA array vector. FEAT_SME2's are the
+//! contiguous loads and stores of two or four vectors (LD1B to LD1D,
+//! LDNT1B to LDNT1D, ST1B to ST1D, STNT1B to STNT1D), ZERO {ZT0}, LDR and
+//! STR of ZT0, MOVT between ZT0 and a general register, LUTI2 and LUTI4 of
+//! ZT0 to one, two or four vectors, BMOPA and BMOPS, SMOPA to UMOPS of
+//! halfwords into 32-bit tiles, MOVA between a group of two or four
+//! vectors and as many tile slices or ZA array vectors, the SVE operations
+//! on groups of two or four vectors (`mortlach_multi_sve_1` to `_4`: SEL,
+//! the integer and floating-point maxima, minima, shifts, additions,
+//! multiplications and clamps, ZIP and UZP, the narrowing shifts and
+//! conversions, the conversions between words and single precision, FRINT
+//! and the unpacks), and the instructions on groups of ZA array vectors
+//! (`mortlach_multi_array_1a` to `_2b`: the long integer and floating-point
+//! products, the dot products, FMLA and FMLS, and ADD, SUB, FADD and FSUB)
+//! and by an indexed element (`mortlach_multi_indexed_1` to `_3`, with the
+//! vertical dot products FVDOT, BFVDOT, SVDOT, UVDOT, USVDOT and SUVDOT).
+//! The optional 64-bit forms of FEAT_SME_F64F64 and FEAT_SME_I16I64, and the
+//! encodings of the later SME extensions, are not here, which this decoder
+//! does not know.
 //!
 //! The variants are Arm's encoding ids, whole (the module documentation of
 //! `isa` gives the naming, which `tests/unit/spec.rs` checks); the ids of
@@ -45,14 +48,46 @@ pub(super) fn sme(word: u32) -> Option<Encoding> {
     }
 }
 
-/// `op0 = 00`: the floating-point outer products, by bits 23:22 and 3:2.
-/// Bits 23:22 = 10 with bits 3:2 = 10 is mortlach2_misc_prod (FEAT_SME2
-/// and its extensions); 00 is mortlach2_prod4 (FEAT_SME_MOP4), 01
-/// mortlach2_ss_prod (FEAT_SME_TMOP), 11 the 64-bit products
-/// (FEAT_SME_F64F64, FEAT_SME_I16I64).
+/// `op0 = 00`: the floating-point outer products, by bits 23:22 and 3:2,
+/// and with bits 23:22 = 10 and 3:2 = 10 mortlach2_misc_prod. Bits 23:22
+/// = 00 are mortlach2_prod4 (FEAT_SME_MOP4), 01 mortlach2_ss_prod
+/// (FEAT_SME_TMOP), 11 the 64-bit products (FEAT_SME_F64F64,
+/// FEAT_SME_I16I64).
 fn fp_outer_products(word: u32) -> Option<Encoding> {
     match (bits(word, 23, 22), bits(word, 3, 2)) {
         (0b10, 0b00) => mortlach_32bit_fp_prod(word),
+        (0b10, 0b10) => mortlach2_misc_prod(word),
+        _ => None,
+    }
+}
+
+/// Arm group `mortlach2_misc_prod`: SME2 binary and FP8 outer products,
+/// 32-bit and 16-bit tiles. `op0 = 0, op1 = 1` holds FEAT_SME_F8F16's
+/// mortlach_f8f16_prod and FEAT_SME_F16F8F16's mortlach_f16f8_prod; `op0 =
+/// 1` FEAT_SME_F16F16's mortlach_f16f16_prod (`op1 = 0`) and
+/// FEAT_SME_B16B16's mortlach_b16b16_prod (`op1 = 1`).
+fn mortlach2_misc_prod(word: u32) -> Option<Encoding> {
+    let op0 = bits(word, 24, 24);
+    let op1 = bits(word, 21, 21);
+    match (op0, op1) {
+        (0b0, 0b0) => mortlach_bini32_prod(word).map(Encoding::MortlachBini32Prod),
+        _ => None,
+    }
+}
+
+/// Arm class `mortlach_bini32_prod`: binary (XNOR and population count) sum
+/// of outer products and accumulate or subtract (`S`), into 32-bit tiles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum MortlachBini32Prod {
+    BmopaZaPpZz32,
+    BmopsZaPpZz32,
+}
+
+fn mortlach_bini32_prod(word: u32) -> Option<MortlachBini32Prod> {
+    let s = bits(word, 4, 4);
+    match s {
+        0b0 => Some(MortlachBini32Prod::BmopaZaPpZz32),
+        0b1 => Some(MortlachBini32Prod::BmopsZaPpZz32),
         _ => None,
     }
 }
@@ -89,12 +124,12 @@ fn array_and_vectors(word: u32) -> Option<Encoding> {
             0b1 => mortlach_ext(word),
             _ => None,
         },
-        // Bits 23:22 and 18: 00 and 1 is mortlach_multizero (FEAT_SME2p1),
-        // 1x mortlach_zt_expand_ctg (FEAT_SME2 and later).
+        // Bits 23:22 and 18: 00 and 1 is mortlach_multizero (FEAT_SME2p1).
         (0b0, 0b001) => match (bits(word, 23, 22), bits(word, 18, 18)) {
             (0b00, 0b0) => mortlach_zero(word).map(Encoding::MortlachZero),
             (0b01, 0b0) => mortlach_zero_zt(word).map(Encoding::MortlachZeroZt),
             (0b01, 0b1) => mortlach_mov_zt(word),
+            (0b10 | 0b11, _) => mortlach_zt_expand_ctg(word),
             _ => None,
         },
         (0b0, 0b010) => match bits(word, 3, 3) {
@@ -181,11 +216,36 @@ fn mortlach_f16f32_prod(word: u32) -> Option<MortlachF16f32Prod> {
 }
 
 /// Arm group `mortlach_32bit_int_prod`: SME integer outer product, 32-bit
-/// tiles. `op1 = 1` is mortlach_i16i32_prod (FEAT_SME2).
+/// tiles, of bytes (`op1 = 0`) or FEAT_SME2's of halfwords.
 fn mortlach_32bit_int_prod(word: u32) -> Option<Encoding> {
+    let op0 = bits(word, 21, 21);
     let op1 = bits(word, 3, 3);
-    match op1 {
-        0b0 => mortlach_i8i32_prod(word).map(Encoding::MortlachI8i32Prod),
+    match (op0, op1) {
+        (_, 0b0) => mortlach_i8i32_prod(word).map(Encoding::MortlachI8i32Prod),
+        (0b0, 0b1) => mortlach_i16i32_prod(word).map(Encoding::MortlachI16i32Prod),
+        _ => None,
+    }
+}
+
+/// Arm class `mortlach_i16i32_prod`: 16-bit integer sum of outer products
+/// and accumulate or subtract (`S`), into 32-bit tiles, of signed or
+/// unsigned (`u0`) halfwords.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum MortlachI16i32Prod {
+    SmopaZa32PpZz16,
+    UmopaZa32PpZz16,
+    SmopsZa32PpZz16,
+    UmopsZa32PpZz16,
+}
+
+fn mortlach_i16i32_prod(word: u32) -> Option<MortlachI16i32Prod> {
+    let u0 = bits(word, 24, 24);
+    let s = bits(word, 4, 4);
+    match (u0, s) {
+        (0b0, 0b0) => Some(MortlachI16i32Prod::SmopaZa32PpZz16),
+        (0b1, 0b0) => Some(MortlachI16i32Prod::UmopaZa32PpZz16),
+        (0b0, 0b1) => Some(MortlachI16i32Prod::SmopsZa32PpZz16),
+        (0b1, 0b1) => Some(MortlachI16i32Prod::UmopsZa32PpZz16),
         _ => None,
     }
 }
@@ -757,14 +817,99 @@ fn mortlach_multi4_cst_cstnt_si_nctg(word: u32) -> Option<MortlachMulti4CstCstnt
     }
 }
 
-/// Arm group `mortlach_ins`: SME move into ZA. `op1 = 1` is FEAT_SME2's
-/// multi-vector moves.
+/// Arm group `mortlach_ins`: SME move into ZA, of one vector predicated
+/// (`op1 = 0`) or FEAT_SME2's of two or four vectors to tile slices or ZA
+/// array vectors. Arm allocates nothing else in the group.
 fn mortlach_ins(word: u32) -> Option<Encoding> {
+    let op0 = bits(word, 23, 22);
     let op1 = bits(word, 18, 18);
-    match op1 {
-        0b0 => mortlach_insert_pred(word).map(Encoding::MortlachInsertPred),
+    let op2 = bits(word, 16, 15);
+    let op3 = bits(word, 12, 10);
+    let op4 = bits(word, 6, 5);
+    let op5 = bits(word, 3, 3);
+    match (op0, op1, op2, op3, op4, op5) {
+        (_, 0b0, _, _, _, _) => mortlach_insert_pred(word).map(Encoding::MortlachInsertPred),
+        (_, 0b1, 0b00 | 0b01, 0b000, 0b00 | 0b10, 0b0) => {
+            mortlach_multi2_insert_ctg(word).map(Encoding::MortlachMulti2InsertCtg)
+        }
+        (_, 0b1, 0b00 | 0b01, 0b001, 0b00, 0b0) => {
+            mortlach_multi4_insert_ctg(word).map(Encoding::MortlachMulti4InsertCtg)
+        }
+        (0b00, 0b1, 0b00, 0b010, 0b00 | 0b10, 0b0) => {
+            mortlach_multi2_za_insert_ctg(word).map(Encoding::MortlachMulti2ZaInsertCtg)
+        }
+        (0b00, 0b1, 0b00, 0b011, 0b00, 0b0) => {
+            mortlach_multi4_za_insert_ctg(word).map(Encoding::MortlachMulti4ZaInsertCtg)
+        }
         _ => None,
     }
+}
+
+/// Arm class `mortlach_multi2_insert_ctg`: move two vectors into two
+/// consecutive horizontal or vertical tile slices (`V`) of the element size
+/// `size`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum MortlachMulti2InsertCtg {
+    MovaZa2ZB1,
+    MovaZa2ZH1,
+    MovaZa2ZW1,
+    MovaZa2ZD1,
+}
+
+fn mortlach_multi2_insert_ctg(word: u32) -> Option<MortlachMulti2InsertCtg> {
+    let size = bits(word, 23, 22);
+    match size {
+        0b00 => Some(MortlachMulti2InsertCtg::MovaZa2ZB1),
+        0b01 => Some(MortlachMulti2InsertCtg::MovaZa2ZH1),
+        0b10 => Some(MortlachMulti2InsertCtg::MovaZa2ZW1),
+        0b11 => Some(MortlachMulti2InsertCtg::MovaZa2ZD1),
+        _ => None,
+    }
+}
+
+/// Arm class `mortlach_multi4_insert_ctg`: move four vectors into four
+/// consecutive horizontal or vertical tile slices (`V`) of the element size
+/// `size`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum MortlachMulti4InsertCtg {
+    MovaZa4ZB1,
+    MovaZa4ZH1,
+    MovaZa4ZW1,
+    MovaZa4ZD1,
+}
+
+fn mortlach_multi4_insert_ctg(word: u32) -> Option<MortlachMulti4InsertCtg> {
+    let size = bits(word, 23, 22);
+    let opc = bits(word, 2, 0);
+    match (size, opc) {
+        (0b00, 0b000..=0b011) => Some(MortlachMulti4InsertCtg::MovaZa4ZB1),
+        (0b01, 0b000..=0b011) => Some(MortlachMulti4InsertCtg::MovaZa4ZH1),
+        (0b10, 0b000..=0b011) => Some(MortlachMulti4InsertCtg::MovaZa4ZW1),
+        (0b11, _) => Some(MortlachMulti4InsertCtg::MovaZa4ZD1),
+        _ => None,
+    }
+}
+
+/// Arm class `mortlach_multi2_za_insert_ctg`: move two vectors into ZA
+/// array vectors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum MortlachMulti2ZaInsertCtg {
+    MovaZaMz21,
+}
+
+fn mortlach_multi2_za_insert_ctg(_word: u32) -> Option<MortlachMulti2ZaInsertCtg> {
+    Some(MortlachMulti2ZaInsertCtg::MovaZaMz21)
+}
+
+/// Arm class `mortlach_multi4_za_insert_ctg`: move four vectors into ZA
+/// array vectors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum MortlachMulti4ZaInsertCtg {
+    MovaZaMz41,
+}
+
+fn mortlach_multi4_za_insert_ctg(_word: u32) -> Option<MortlachMulti4ZaInsertCtg> {
+    Some(MortlachMulti4ZaInsertCtg::MovaZaMz41)
 }
 
 /// Arm class `mortlach_insert_pred`: move a vector into a horizontal or
@@ -792,14 +937,102 @@ fn mortlach_insert_pred(word: u32) -> Option<MortlachInsertPred> {
     }
 }
 
-/// Arm group `mortlach_ext`: SME move from ZA. `op1 = 1` is FEAT_SME2's
-/// multi-vector moves, and with `op1 = 0` bit 9 set FEAT_SME2p1's MOVAZ.
+/// Arm group `mortlach_ext`: SME move from ZA, of one vector predicated
+/// (`op1 = 0`) or FEAT_SME2's of two or four vectors from tile slices or
+/// ZA array vectors. FEAT_SME2p1's MOVAZ is `op4 = 1x` with `op1 = 0`
+/// (mortlach_extract_zero) and `op4 = 10` in the places of FEAT_SME2's
+/// classes of groups (the `*_extract_zero` ones); Arm allocates nothing
+/// else in the group.
 fn mortlach_ext(word: u32) -> Option<Encoding> {
+    let op0 = bits(word, 23, 22);
     let op1 = bits(word, 18, 18);
-    match (op1, bits(word, 9, 9)) {
-        (0b0, 0b0) => mortlach_extract_pred(word).map(Encoding::MortlachExtractPred),
+    let op2 = bits(word, 16, 15);
+    let op3 = bits(word, 12, 10);
+    let op4 = bits(word, 9, 8);
+    let op5 = bits(word, 1, 0);
+    match (op0, op1, op2, op3, op4, op5) {
+        (_, 0b0, _, _, 0b00 | 0b01, _) => mortlach_extract_pred(word).map(Encoding::MortlachExtractPred),
+        (_, 0b1, 0b00 | 0b01, 0b000, 0b00, 0b00 | 0b10) => {
+            mortlach_multi2_extract_ctg(word).map(Encoding::MortlachMulti2ExtractCtg)
+        }
+        (_, 0b1, 0b00 | 0b01, 0b001, 0b00, 0b00) => {
+            mortlach_multi4_extract_ctg(word).map(Encoding::MortlachMulti4ExtractCtg)
+        }
+        (0b00, 0b1, 0b00, 0b010, 0b00, 0b00 | 0b10) => {
+            mortlach_multi2_za_extract_ctg(word).map(Encoding::MortlachMulti2ZaExtractCtg)
+        }
+        (0b00, 0b1, 0b00, 0b011, 0b00, 0b00) => {
+            mortlach_multi4_za_extract_ctg(word).map(Encoding::MortlachMulti4ZaExtractCtg)
+        }
         _ => None,
     }
+}
+
+/// Arm class `mortlach_multi2_extract_ctg`: move two consecutive horizontal
+/// or vertical tile slices (`V`) of the element size `size` into two
+/// vectors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum MortlachMulti2ExtractCtg {
+    MovaMz2ZaB1,
+    MovaMz2ZaH1,
+    MovaMz2ZaW1,
+    MovaMz2ZaD1,
+}
+
+fn mortlach_multi2_extract_ctg(word: u32) -> Option<MortlachMulti2ExtractCtg> {
+    let size = bits(word, 23, 22);
+    match size {
+        0b00 => Some(MortlachMulti2ExtractCtg::MovaMz2ZaB1),
+        0b01 => Some(MortlachMulti2ExtractCtg::MovaMz2ZaH1),
+        0b10 => Some(MortlachMulti2ExtractCtg::MovaMz2ZaW1),
+        0b11 => Some(MortlachMulti2ExtractCtg::MovaMz2ZaD1),
+        _ => None,
+    }
+}
+
+/// Arm class `mortlach_multi4_extract_ctg`: move four consecutive
+/// horizontal or vertical tile slices (`V`) of the element size `size` into
+/// four vectors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum MortlachMulti4ExtractCtg {
+    MovaMz4ZaB1,
+    MovaMz4ZaH1,
+    MovaMz4ZaW1,
+    MovaMz4ZaD1,
+}
+
+fn mortlach_multi4_extract_ctg(word: u32) -> Option<MortlachMulti4ExtractCtg> {
+    let size = bits(word, 23, 22);
+    let opc = bits(word, 7, 5);
+    match (size, opc) {
+        (0b00, 0b000..=0b011) => Some(MortlachMulti4ExtractCtg::MovaMz4ZaB1),
+        (0b01, 0b000..=0b011) => Some(MortlachMulti4ExtractCtg::MovaMz4ZaH1),
+        (0b10, 0b000..=0b011) => Some(MortlachMulti4ExtractCtg::MovaMz4ZaW1),
+        (0b11, _) => Some(MortlachMulti4ExtractCtg::MovaMz4ZaD1),
+        _ => None,
+    }
+}
+
+/// Arm class `mortlach_multi2_za_extract_ctg`: move ZA array vectors into
+/// two vectors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum MortlachMulti2ZaExtractCtg {
+    MovaMzZa21,
+}
+
+fn mortlach_multi2_za_extract_ctg(_word: u32) -> Option<MortlachMulti2ZaExtractCtg> {
+    Some(MortlachMulti2ZaExtractCtg::MovaMzZa21)
+}
+
+/// Arm class `mortlach_multi4_za_extract_ctg`: move ZA array vectors into
+/// four vectors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum MortlachMulti4ZaExtractCtg {
+    MovaMzZa41,
+}
+
+fn mortlach_multi4_za_extract_ctg(_word: u32) -> Option<MortlachMulti4ZaExtractCtg> {
+    Some(MortlachMulti4ZaExtractCtg::MovaMzZa41)
 }
 
 /// Arm class `mortlach_extract_pred`: move a horizontal or vertical tile
@@ -852,6 +1085,80 @@ fn mortlach_zero_zt(word: u32) -> Option<MortlachZeroZt> {
     let opc = bits(word, 3, 0);
     match (op0, opc) {
         (0b00000000000000, 0b0001) => Some(MortlachZeroZt::ZeroZtI),
+        _ => None,
+    }
+}
+
+/// Arm group `mortlach_zt_expand_ctg`: SME2 lookup table expansions from
+/// ZT0 into one vector (`op0 = 1`) or consecutive vectors: two for `op1 =
+/// xxxx1` (bit 14), four for `xxx10` (bits 15:14). With `op0 = 0`, `op1 =
+/// 01100` and `op2 = 0` is FEAT_SME_LUTv2's mortlach_expand_4dst2src_ctg,
+/// and `op1 = 01000`, `op4 = 0` and `op2 = 0` FEAT_SME2p3's
+/// mortlach_expand_4dst3src_ctg (AARCHMRS: the A64 ISA XML of the same
+/// release has no FEAT_SME2p3 and leaves those words unallocated).
+fn mortlach_zt_expand_ctg(word: u32) -> Option<Encoding> {
+    let op0 = bits(word, 22, 22);
+    let op3 = bits(word, 1, 0);
+    match (op0, bits(word, 15, 14), op3) {
+        (0b1, _, _) => mortlach_expand_1dst(word).map(Encoding::MortlachExpand1dst),
+        (0b0, 0b01 | 0b11, 0b00 | 0b10) => mortlach_expand_2dst_ctg(word).map(Encoding::MortlachExpand2dstCtg),
+        (0b0, 0b10, 0b00) => mortlach_expand_4dst_ctg(word).map(Encoding::MortlachExpand4dstCtg),
+        _ => None,
+    }
+}
+
+/// Arm class `mortlach_expand_1dst`: LUTI2 and LUTI4 (`opc`): one vector of
+/// the elements of ZT0 its packed indexes name. `opc = 00001` with `size =
+/// 00` is FEAT_SME2p3's LUTI6 (in AARCHMRS, as the group's other
+/// FEAT_SME2p3 class).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum MortlachExpand1dst {
+    Luti2ZZtz,
+    Luti4ZZtz,
+}
+
+fn mortlach_expand_1dst(word: u32) -> Option<MortlachExpand1dst> {
+    let opc = bits(word, 18, 14);
+    let opc2 = bits(word, 11, 10);
+    match (opc, opc2) {
+        (0b10000..=0b11111, 0b00) => Some(MortlachExpand1dst::Luti2ZZtz),
+        (0b01000..=0b01111, 0b00) => Some(MortlachExpand1dst::Luti4ZZtz),
+        _ => None,
+    }
+}
+
+/// Arm class `mortlach_expand_2dst_ctg`: LUTI2 and LUTI4 (`opc`): two
+/// consecutive vectors of the elements of ZT0 their packed indexes name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum MortlachExpand2dstCtg {
+    Luti2Mz2Ztz1,
+    Luti4Mz2Ztz1,
+}
+
+fn mortlach_expand_2dst_ctg(word: u32) -> Option<MortlachExpand2dstCtg> {
+    let opc = bits(word, 18, 15);
+    let opc2 = bits(word, 11, 10);
+    match (opc, opc2) {
+        (0b1000..=0b1111, 0b00) => Some(MortlachExpand2dstCtg::Luti2Mz2Ztz1),
+        (0b0100..=0b0111, 0b00) => Some(MortlachExpand2dstCtg::Luti4Mz2Ztz1),
+        _ => None,
+    }
+}
+
+/// Arm class `mortlach_expand_4dst_ctg`: LUTI2 and LUTI4 (`opc`): four
+/// consecutive vectors of the elements of ZT0 their packed indexes name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum MortlachExpand4dstCtg {
+    Luti2Mz4Ztz1,
+    Luti4Mz4Ztz1,
+}
+
+fn mortlach_expand_4dst_ctg(word: u32) -> Option<MortlachExpand4dstCtg> {
+    let opc = bits(word, 18, 16);
+    let opc2 = bits(word, 11, 10);
+    match (opc, opc2) {
+        (0b100..=0b111, 0b00) => Some(MortlachExpand4dstCtg::Luti2Mz4Ztz1),
+        (0b010..=0b011, 0b00) => Some(MortlachExpand4dstCtg::Luti4Mz4Ztz1),
         _ => None,
     }
 }

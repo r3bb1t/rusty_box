@@ -1,5 +1,5 @@
-//! The SME instructions on the ZA array, on a processor that implements
-//! FEAT_SME ([`Implementation::EVERY_FEATURE`]).
+//! The SME instructions on the ZA array's tiles, on a processor that
+//! implements FEAT_SME and FEAT_SME2 ([`Implementation::EVERY_FEATURE`]).
 //!
 //! tests/vectors/qemu_sve.txt checks every class against QEMU at a 512-bit
 //! vector length with random operands (kinds Z, ZF, ZR and ZM). These are
@@ -15,12 +15,15 @@
 //! roundings and unnegated inactive elements, the tile loads' zeroed
 //! inactive elements and their faults part-way, LDR and STR of an array
 //! vector and their alignment, and the encodings of other features
-//! UNDEFINED.
+//! UNDEFINED. Of FEAT_SME2's: BMOPA's count of agreeing bits, the halfword
+//! products' pairs and their predicates, MOVA of a group's slices from an
+//! index aligned to the group, as rows and as columns, four doubleword
+//! slices UNDEFINED below 256 bits, and FEAT_SME2 itself.
 
 use std::vec;
 use std::vec::Vec;
 
-use super::super::features::{Implementation, VecLen};
+use super::super::features::{Feature, Features, Implementation, VecLen};
 use super::super::sctlr;
 use super::super::step::{exec, exec_in, processor, Taken, CPACR_ALL, DATA, FP_TRAP, SME_DISABLED, UNDEFINED};
 use super::super::sve::{Pv, Zv};
@@ -40,6 +43,34 @@ const ZERO_ALL: u32 = 0xC008_00FF;
 const SMOPA: u32 = 0xA082_2020;
 /// `ldr za[w12, 3], [x0, #3, mul vl]`.
 const LDR_ZA: u32 = 0xE100_0003;
+/// `bmopa za0.s, p0/m, p1/m, z1.s, z2.s` and `bmops za3.s, p2/m, p3/m,
+/// z4.s, z5.s`.
+const BMOPA: u32 = 0x8082_2028;
+const BMOPS: u32 = 0x8085_689B;
+/// `smopa za0.s, p0/m, p1/m, z1.h, z2.h`, and `umopa` into `za1.s`,
+/// `smops` into `za2.s` and `umops` into `za3.s` of the same operands.
+const SMOPA_H: u32 = 0xA082_2028;
+const UMOPA_H: u32 = 0xA182_2029;
+const SMOPS_H: u32 = 0xA082_203A;
+const UMOPS_H: u32 = 0xA182_203B;
+/// `mova za0h.b[w12, 2:3], {z4.b-z5.b}`, `mova za1v.s[w13, 2:3],
+/// {z4.s-z5.s}`, `mova za7h.d[w12, 0:1], {z4.d-z5.d}` and `mova {z6.h-z7.h},
+/// za1v.h[w12, 6:7]`.
+const MOVA_TO_2_B: u32 = 0xC004_0081;
+const MOVA_TO_2_S: u32 = 0xC084_A083;
+const MOVA_TO_2_D: u32 = 0xC0C4_0087;
+const MOVA_FROM_2_H: u32 = 0xC046_80E6;
+/// `mova za2v.s[w14, 0:3], {z8.s-z11.s}`, `mova {z4.s-z7.s}, za2v.s[w15,
+/// 0:3]`, `mova za0h.b[w12, 4:7], {z4.b-z7.b}` and `mova {z12.b-z15.b},
+/// za0h.b[w13, 8:11]`.
+const MOVA_TO_4_S: u32 = 0xC084_C502;
+const MOVA_FROM_4_S: u32 = 0xC086_E444;
+const MOVA_TO_4_B: u32 = 0xC004_0481;
+const MOVA_FROM_4_B: u32 = 0xC006_244C;
+/// `mova za5h.d[w12, 0:3], {z8.d-z11.d}` and `mova {z8.d-z11.d},
+/// za6v.d[w12, 0:3]`.
+const MOVA_TO_4_D: u32 = 0xC0C4_0505;
+const MOVA_FROM_4_D: u32 = 0xC0C6_84C8;
 
 /// A data abort from the current level, with its fault status code.
 const fn data_abort(dfsc: u64, write: bool) -> Taken {
@@ -503,6 +534,225 @@ fn ldr_and_str_of_za_move_a_vector_at_the_offset_times_its_length() {
     cpu.x[0] = DATA + 8;
     assert_eq!(exec_in(&mut cpu, &mut ram, 0xE100_0000), Some(data_abort(ALIGNMENT, false)));
     assert_eq!(cpu.sys.far_el1, DATA + 8);
+}
+
+/// BMOPA adds to element `[row, col]` the number of bits in which row
+/// element `row` and column element `col` agree, modulo 2^32, where both
+/// are active, and leaves the rest of the tile as it was; BMOPS subtracts
+/// it.
+#[test]
+fn bmopa_counts_the_bits_in_which_the_row_and_column_elements_agree() {
+    let mut cpu = with_za(0);
+    set_z_words(&mut cpu, 1, &[0xFFFF_0000, 0xAAAA_AAAA, 0, 0xFF]);
+    set_z_words(&mut cpu, 2, &[0xFFFF_0000, 0xFFFF_FFFF, 0, 0x5555_5555]);
+    // Rows 0, 2 and 3 active; columns 0, 1 and 2.
+    set_p_bits(&mut cpu, 0, 0x1101);
+    set_p_bits(&mut cpu, 1, 0x0111);
+    set_za_words(&mut cpu, 0, &[0xFFFF_FFF0, 0, 0, 7]);
+    set_za_words(&mut cpu, 4, &[9; 4]);
+    assert_eq!(exec(&mut cpu, BMOPA), None);
+    assert_eq!(za_words(&cpu, 0), [0x10, 16, 16, 7]);
+    assert_eq!(za_words(&cpu, 4), [9; 4]);
+    assert_eq!(za_words(&cpu, 8), [16, 0, 32, 0]);
+    assert_eq!(za_words(&cpu, 12), [8, 8, 24, 0]);
+    assert_eq!(za_words(&cpu, 1), [0; 4]);
+    // bmops za3.s of zeros: all 32 bits agree.
+    set_p_bits(&mut cpu, 2, u64::MAX);
+    set_p_bits(&mut cpu, 3, u64::MAX);
+    set_za_words(&mut cpu, 3, &[10, 100, 0, 0]);
+    assert_eq!(exec(&mut cpu, BMOPS), None);
+    assert_eq!(za_words(&cpu, 3), [-22i32 as u32, 68, -32i32 as u32, -32i32 as u32]);
+    assert_eq!(za_words(&cpu, 15), [-32i32 as u32; 4]);
+}
+
+/// SMOPA, UMOPA, SMOPS and UMOPS of halfwords sum the products of the two
+/// halfwords of a row element and of a column element in the same place,
+/// both signed or both unsigned, each product only where both halfwords
+/// are active, modulo 2^32.
+#[test]
+fn the_halfword_outer_products_multiply_halfwords_in_the_same_place() {
+    let mut cpu = with_za(0);
+    // Rows: halfwords 0xFFFF and 3, then 0xFFFF twice; columns: 0x8000
+    // and 5, then 0xFFFF twice.
+    set_z_words(&mut cpu, 1, &[0x0003_FFFF, 0xFFFF_FFFF, 0, 0]);
+    set_z_words(&mut cpu, 2, &[0x0005_8000, 0xFFFF_FFFF, 0, 0]);
+    set_p_bits(&mut cpu, 0, u64::MAX);
+    set_p_bits(&mut cpu, 1, u64::MAX);
+    for insn in [SMOPA_H, UMOPA_H, SMOPS_H, UMOPS_H] {
+        assert_eq!(exec(&mut cpu, insn), None, "{insn:#010x}");
+    }
+    // SMOPA: (-1)(-32768) + 3 * 5 and (-1)(-1) + 3(-1); (-1)(-32768) +
+    // (-1)5 and 2.
+    assert_eq!(za_words(&cpu, 0), [32783, -2i32 as u32, 0, 0]);
+    assert_eq!(za_words(&cpu, 4), [32763, 2, 0, 0]);
+    // UMOPA: 65535 * 32768 + 15 and 65535 * 65538, then 65535 * 32773 and
+    // 2 * 65535^2, modulo 2^32.
+    assert_eq!(za_words(&cpu, 1), [0x7FFF_800F, 0xFFFE, 0, 0]);
+    assert_eq!(za_words(&cpu, 5), [0x8004_7FFB, 0xFFFC_0002, 0, 0]);
+    // SMOPS and UMOPS from zero.
+    assert_eq!(za_words(&cpu, 2), [-32783i32 as u32, 2, 0, 0]);
+    assert_eq!(za_words(&cpu, 6), [-32763i32 as u32, -2i32 as u32, 0, 0]);
+    assert_eq!(za_words(&cpu, 3), [0x7FFF_800F_u32.wrapping_neg(), 0xFFFE_u32.wrapping_neg(), 0, 0]);
+    assert_eq!(za_words(&cpu, 7), [0x8004_7FFB_u32.wrapping_neg(), 0xFFFC_0002_u32.wrapping_neg(), 0, 0]);
+    // Row 0's halfword 1 and column 1's halfword 0 inactive: [0, 0] has
+    // the first product alone, [0, 1] none, [1, 1] the second alone.
+    set_p_bits(&mut cpu, 0, !(1 << 2));
+    set_p_bits(&mut cpu, 1, !(1 << 4));
+    set_za_words(&mut cpu, 0, &[0; 4]);
+    set_za_words(&mut cpu, 4, &[0; 4]);
+    assert_eq!(exec(&mut cpu, SMOPA_H), None);
+    assert_eq!(za_words(&cpu, 0), [32768, 0, 0, 0]);
+    assert_eq!(za_words(&cpu, 4), [32763, 1, 0, 0]);
+}
+
+/// MOVA of two registers moves register `r` to or from slice
+/// `((UInt(Ws) - UInt(Ws) MOD 2) + offset) MOD dim + r`, as a row or as a
+/// column; two doubleword slices fit 128 bits.
+#[test]
+fn mova_of_two_registers_moves_two_slices_from_an_even_index() {
+    let mut cpu = with_za(0);
+    set_z_words(&mut cpu, 4, &[1, 2, 3, 4]);
+    set_z_words(&mut cpu, 5, &[5, 6, 7, 8]);
+    // za0h.b[w12, 2:3] with W12 = 15: (14 + 2) MOD 16 is slice 0, so ZA
+    // vectors 0 and 1.
+    cpu.x[12] = 15;
+    assert_eq!(exec(&mut cpu, MOVA_TO_2_B), None);
+    assert_eq!(za_words(&cpu, 0), [1, 2, 3, 4]);
+    assert_eq!(za_words(&cpu, 1), [5, 6, 7, 8]);
+    // za7h.d[w12, 0:1]: 14 MOD 2 is slice 0, ZA vectors 7 and 15.
+    assert_eq!(exec(&mut cpu, MOVA_TO_2_D), None);
+    assert_eq!(za_words(&cpu, 7), [1, 2, 3, 4]);
+    assert_eq!(za_words(&cpu, 15), [5, 6, 7, 8]);
+    // za1v.s[w13, 2:3] with W13 = 1: (0 + 2) MOD 4, so columns 2 and 3 of
+    // tile 1's vectors 1, 5, 9 and 13.
+    cpu.x[13] = 1;
+    assert_eq!(exec(&mut cpu, MOVA_TO_2_S), None);
+    assert_eq!(za_words(&cpu, 1), [5, 6, 1, 5]);
+    assert_eq!(za_words(&cpu, 5), [0, 0, 2, 6]);
+    assert_eq!(za_words(&cpu, 9), [0, 0, 3, 7]);
+    assert_eq!(za_words(&cpu, 13), [0, 0, 4, 8]);
+    // {z6.h-z7.h} from za1v.h[w12, 6:7]: (14 + 6) MOD 8 is slice 4, so
+    // halfwords 4 and 5 of tile 1's vectors 1, 3, ..., 15.
+    for v in 0..8u32 {
+        set_za_words(&mut cpu, 2 * v as usize + 1, &[0, 0, (v + 1) << 16 | (0x10 + v), 0]);
+    }
+    assert_eq!(exec(&mut cpu, MOVA_FROM_2_H), None);
+    assert_eq!(z_words(&cpu, 6), [0x0011_0010, 0x0013_0012, 0x0015_0014, 0x0017_0016]);
+    assert_eq!(z_words(&cpu, 7), [0x0002_0001, 0x0004_0003, 0x0006_0005, 0x0008_0007]);
+}
+
+/// MOVA of four registers moves four slices from a multiple of four: as
+/// columns, the registers' transpose.
+#[test]
+fn mova_of_four_registers_moves_four_slices_from_a_multiple_of_four() {
+    let mut cpu = with_za(0);
+    for r in 0..4u32 {
+        set_z_words(&mut cpu, 8 + r, &[4 * r + 1, 4 * r + 2, 4 * r + 3, 4 * r + 4]);
+    }
+    // za2v.s[w14, 0:3]: columns 0 to 3 of tile 2's vectors 2, 6, 10 and
+    // 14, whatever W14.
+    cpu.x[14] = 0xFFFF_FFFF_0000_0003;
+    assert_eq!(exec(&mut cpu, MOVA_TO_4_S), None);
+    assert_eq!(za_words(&cpu, 2), [1, 5, 9, 13]);
+    assert_eq!(za_words(&cpu, 6), [2, 6, 10, 14]);
+    assert_eq!(za_words(&cpu, 10), [3, 7, 11, 15]);
+    assert_eq!(za_words(&cpu, 14), [4, 8, 12, 16]);
+    cpu.x[15] = 0xFFFF_FFFF;
+    assert_eq!(exec(&mut cpu, MOVA_FROM_4_S), None);
+    for r in 0..4 {
+        assert_eq!(z_words(&cpu, 4 + r), z_words(&cpu, 8 + r), "Z{}", 4 + r);
+    }
+    // za0h.b[w12, 4:7] with W12 = 9: (8 + 4) MOD 16 is slice 12, so ZA
+    // vectors 12 to 15; {z12.b-z15.b} from za0h.b[w13, 8:11] with W13 = 6:
+    // (4 + 8) MOD 16, the same.
+    cpu.x[12] = 9;
+    assert_eq!(exec(&mut cpu, MOVA_TO_4_B), None);
+    for r in 0..4 {
+        assert_eq!(za_words(&cpu, 12 + r as usize), z_words(&cpu, 4 + r), "ZA[{}]", 12 + r);
+    }
+    cpu.x[13] = 6;
+    assert_eq!(exec(&mut cpu, MOVA_FROM_4_B), None);
+    for r in 0..4 {
+        assert_eq!(z_words(&cpu, 12 + r), z_words(&cpu, 4 + r), "Z{}", 12 + r);
+    }
+}
+
+/// Four doubleword slices need a tile of 256 bits: there they move as the
+/// others do, below that vector length they are UNDEFINED after the enable
+/// checks, and on a processor whose longest vector length is below it,
+/// before them.
+#[test]
+fn four_doubleword_slices_need_a_256_bit_vector_length() {
+    let mut cpu = with_za(1);
+    // Tile 6's vectors 6, 14, 22 and 30: word k of vector v is 100v + k.
+    let vectors = [6u32, 14, 22, 30];
+    for v in vectors {
+        let words: Vec<u32> = (0..8).map(|k| 100 * v + k).collect();
+        set_za_words(&mut cpu, v as usize, &words);
+    }
+    // Their columns: Z(8 + c) is doubleword c of each.
+    assert_eq!(exec(&mut cpu, MOVA_FROM_4_D), None);
+    for c in 0..4u32 {
+        let want: Vec<u32> = vectors.iter().flat_map(|&v| [100 * v + 2 * c, 100 * v + 2 * c + 1]).collect();
+        assert_eq!(z_words(&cpu, 8 + c), want, "Z{}", 8 + c);
+    }
+    // As the rows of tile 5, vectors 5, 13, 21 and 29, from W12 = 7: (4 + 0)
+    // MOD 4 is slice 0.
+    cpu.x[12] = 7;
+    assert_eq!(exec(&mut cpu, MOVA_TO_4_D), None);
+    for (c, v) in [5, 13, 21, 29].into_iter().enumerate() {
+        assert_eq!(za_words(&cpu, v), z_words(&cpu, 8 + c as u32), "ZA[{v}]");
+    }
+
+    let mut cpu = processor(Implementation::EVERY_FEATURE);
+    assert_eq!(exec(&mut cpu, MOVA_TO_4_D), Some(NOT_STREAMING));
+    cpu.set_pstate_sm(true);
+    cpu.set_pstate_za(true);
+    for insn in [MOVA_TO_4_D, MOVA_FROM_4_D] {
+        assert_eq!(exec(&mut cpu, insn), Some(UNDEFINED), "{insn:#010x}");
+    }
+    let mut cpu = processor(Implementation {
+        features: Implementation::EVERY_FEATURE.features,
+        max_svl: VecLen::MIN,
+    });
+    for insn in [MOVA_TO_4_D, MOVA_FROM_4_D] {
+        assert_eq!(exec(&mut cpu, insn), Some(UNDEFINED), "{insn:#010x}");
+    }
+}
+
+/// FEAT_SME2's instructions on tiles take the SME trap outside Streaming
+/// SVE mode, then with ZA storage disabled, and are UNDEFINED without
+/// FEAT_SME2.
+#[test]
+fn the_sme2_tile_instructions_need_streaming_mode_za_and_sme2() {
+    let all = [
+        BMOPA,
+        BMOPS,
+        SMOPA_H,
+        UMOPS_H,
+        MOVA_TO_2_B,
+        MOVA_FROM_2_H,
+        MOVA_TO_4_S,
+        MOVA_FROM_4_B,
+    ];
+    let mut cpu = processor(Implementation::EVERY_FEATURE);
+    for insn in all {
+        assert_eq!(exec(&mut cpu, insn), Some(NOT_STREAMING), "{insn:#010x}");
+    }
+    cpu.set_pstate_sm(true);
+    for insn in all {
+        assert_eq!(exec(&mut cpu, insn), Some(INACTIVE_ZA), "{insn:#010x}");
+    }
+    let features: Vec<Feature> = Feature::ALL.into_iter().filter(|&f| f != Feature::Sme2).collect();
+    let mut cpu = processor(Implementation {
+        features: Features::of(&features),
+        max_svl: VecLen::MAX,
+    });
+    cpu.set_pstate_sm(true);
+    cpu.set_pstate_za(true);
+    for insn in all {
+        assert_eq!(exec(&mut cpu, insn), Some(UNDEFINED), "{insn:#010x}");
+    }
 }
 
 /// The encodings of other features in the SME space are UNDEFINED, before

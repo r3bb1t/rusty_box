@@ -15,6 +15,7 @@ use super::exception::{Exception, ExceptionClass};
 use super::fp::FpType;
 use super::isa::Class;
 use super::ldst::SingleForm;
+use super::za::ZaMove;
 use super::{Activity, Btype, Cpu};
 use crate::bus::{AccessWidth, BusFault, PhysAddr, PhysBus};
 use crate::instrumentation::{Direction, Instrumentation, MemoryAccess};
@@ -456,8 +457,14 @@ impl Cpu {
             Class::SmeIndexedVerticalDot => self.exec_sme_indexed_vertical_dot(insn),
             Class::SmeFpOuterProduct => self.exec_sme_fp_outer_product(insn),
             Class::SmeIntOuterProduct => self.exec_sme_int_outer_product(insn),
+            Class::SmeIntOuterProductHalfwords => self.exec_sme_int_outer_product_halfwords(insn),
+            Class::SmeBinaryOuterProduct => self.exec_sme_binary_outer_product(insn),
             Class::SmeMoveToSlice => self.exec_sme_move_to_slice(insn),
             Class::SmeMoveFromSlice => self.exec_sme_move_from_slice(insn),
+            Class::SmeMoveGroupToSlices => self.exec_sme_move_group_slices(pc, insn, ZaMove::Insert),
+            Class::SmeMoveGroupFromSlices => self.exec_sme_move_group_slices(pc, insn, ZaMove::Extract),
+            Class::SmeMoveGroupToArray => self.exec_sme_move_group_array(insn, ZaMove::Insert),
+            Class::SmeMoveGroupFromArray => self.exec_sme_move_group_array(insn, ZaMove::Extract),
             Class::SmeZero => self.exec_sme_zero(insn),
             Class::SmeAddVector => self.exec_sme_add_vector(insn),
             Class::SmeLoadSlice => self.exec_sme_load_slice(bus, insn),
@@ -465,6 +472,7 @@ impl Cpu {
             Class::SmeFillSpill => self.exec_sme_fill_spill(bus, insn),
             Class::SmeZeroZt0 => self.exec_sme_zero_zt0(),
             Class::SmeFillSpillZt0 => self.exec_sme_fill_spill_zt0(bus, insn),
+            Class::SmeLookupTable => self.exec_sme_lookup_table(pc, insn),
         }
     }
 

@@ -2,7 +2,9 @@
 //! (`mortlach_multi_array_1a` to `_2b`, and by an indexed element
 //! `mortlach_multi_indexed_1` to `_3`): the products, dot products and
 //! sums of one, two or four vectors with one vector, with as many, or with
-//! an indexed element, into groups of ZA's horizontal vectors.
+//! an indexed element, into groups of ZA's horizontal vectors; and MOVA
+//! between such a group and two or four registers
+//! (`mortlach_multi2_za_insert_ctg` to `mortlach_multi4_za_extract_ctg`).
 //!
 //! An instruction on `nreg` registers divides ZA's `SVL DIV 8` vectors into
 //! `nreg` strides of `vstride = SVL DIV 8 DIV nreg`; it selects vector
@@ -41,7 +43,7 @@ use super::exec::{bit, bits, ExecResult, Flow};
 use super::features::VecLen;
 use super::fp::{fp_binary, fp_mul_add, FpBinary, FpType};
 use super::sve::{group, Esize, Zv};
-use super::za::{PairFormat, Signedness};
+use super::za::{PairFormat, Signedness, ZaMove};
 use super::Cpu;
 use crate::softfloat::FusedMulAdd;
 
@@ -89,6 +91,19 @@ impl ArrayVectors {
             v: 8 + bits(insn, 14, 13),
             offset: bits(insn, hi, 0) << k,
             nreg,
+        }
+    }
+
+    /// The vectors a MOVA between ZA array vectors and a group of registers
+    /// selects (`mortlach_multi2_za_insert_ctg` to
+    /// `mortlach_multi4_za_extract_ctg`): two registers for bits 12:10 =
+    /// `010`, four for `011`, by bit 10; the offset `off3` the three bits
+    /// from `lo` up, unscaled.
+    fn of_move(insn: u32, lo: u32) -> Self {
+        Self {
+            v: 8 + bits(insn, 14, 13),
+            offset: bits(insn, lo + 2, lo),
+            nreg: if bit(insn, 10) { 4 } else { 2 },
         }
     }
 }
@@ -568,6 +583,33 @@ impl Cpu {
                 let op = if subtract { FpBinary::Sub } else { FpBinary::Add };
                 let mut env = self.fp_env().with_default_nan();
                 self.za_each_word(at, svl, |a, e, r| fp_binary(op, FpType::Single, a, zm[r].get(e, Esize::S), &mut env));
+            }
+        }
+        Ok(Flow::Next)
+    }
+
+    /// MOVA between two or four registers and ZA array vectors
+    /// (`mova_za_mz2_1`, `mova_za_mz4_1`: `11000000 00000 1 00 0 Rv 01 nreg
+    /// Zn 000 off3`; `mova_mz_za2_1`, `mova_mz_za4_1`: `11000000 00000 1 10
+    /// 0 Rv 01 nreg 00 off3 Zd`): register `r` of the group [`ZaMove`] names
+    /// to or from the vector [`ArrayVectors::of_move`] selects in stride
+    /// `r`.
+    pub(crate) fn exec_sme_move_group_array(&mut self, insn: u32, way: ZaMove) -> ExecResult {
+        let at = ArrayVectors::of_move(insn, way.za_field());
+        let svl = self.check_streaming_sve_and_za_enabled()?;
+        let span = self.array_span(at, 1, svl);
+        let z = group(insn, way.registers(), at.nreg);
+        for r in 0..at.nreg {
+            let index = span.first + r * span.vstride;
+            match way {
+                ZaMove::Insert => {
+                    let value = self.z(z + r as u32, svl);
+                    self.set_za_vector(index, svl, &value);
+                }
+                ZaMove::Extract => {
+                    let value = self.za_vector(index, svl);
+                    self.set_z(z + r as u32, svl, &value);
+                }
             }
         }
         Ok(Flow::Next)

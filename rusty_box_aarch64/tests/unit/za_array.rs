@@ -13,7 +13,8 @@
 //! negative under FPCR.AH, and silent exceptions; FDOT's rounding of the
 //! pair before the sum; the long products' element pairs and FMLSL's and
 //! BFMLSL's negation; ADD and SUB replacing the vectors, and FADD, FSUB,
-//! ADD and SUB accumulating into them. By an indexed element: the element,
+//! ADD and SUB accumulating into them; MOVA between a group and the
+//! vectors, its offset unscaled. By an indexed element: the element,
 //! or group, of the segment holding each result element at 256 bits, each
 //! class's index fields, a group's mixed-sign bit, and the vertical dot
 //! products' elements across the registers. The checks: Streaming SVE
@@ -140,6 +141,13 @@ const SDOT_IDX_D: u32 = 0xC1D1_0448;
 const FMLA_IDX_D: u32 = 0xC1D1_0440;
 const FDOT_IDX_FP8: u32 = 0xC151_0478;
 const FMLA_IDX_H: u32 = 0xC111_1048;
+/// `mova za.d[w8, 3, vgx2], {z4.d-z5.d}`, `mova za.d[w9, 7, vgx4],
+/// {z8.d-z11.d}`, `mova {z4.d-z5.d}, za.d[w10, 1, vgx2]` and `mova
+/// {z12.d-z15.d}, za.d[w11, 5, vgx4]`.
+const MOVA_TO_ARRAY_2: u32 = 0xC004_0883;
+const MOVA_TO_ARRAY_4: u32 = 0xC004_2D07;
+const MOVA_FROM_ARRAY_2: u32 = 0xC006_4824;
+const MOVA_FROM_ARRAY_4: u32 = 0xC006_6CAC;
 
 /// Single-precision values.
 const ZERO: u64 = 0;
@@ -227,6 +235,13 @@ fn za_words(cpu: &Cpu, n: usize) -> Vec<u64> {
     let svl = cpu.current_svl();
     let v = cpu.za_vector(n, svl);
     (0..Esize::S.elements(svl)).map(|e| v.get(e, Esize::S)).collect()
+}
+
+/// The words of Z register `n`.
+fn z_words(cpu: &Cpu, n: u32) -> Vec<u64> {
+    let svl = cpu.current_svl();
+    let z = cpu.z(n, svl);
+    (0..Esize::S.elements(svl)).map(|e| z.get(e, Esize::S)).collect()
 }
 
 /// The ZA vectors holding a word other than `word`.
@@ -859,6 +874,49 @@ fn the_forms_of_other_features_are_undefined() {
     }
 }
 
+/// MOVA between a group and ZA array vectors moves register `r` to or from
+/// vector `(UInt(Wv) + offset) MOD vstride` of stride `r`, its offset
+/// unscaled, and touches no other vector.
+#[test]
+fn mova_moves_a_group_to_and_from_the_selected_vector_of_each_stride() {
+    let mut cpu = with_za(0);
+    fill_za(&mut cpu, 0xEE);
+    set_z(&mut cpu, 4, Esize::S, &[1]);
+    set_z(&mut cpu, 5, Esize::S, &[2]);
+    // Two registers at 128 bits: strides of 8, and (6 + 3) MOD 8 is vector
+    // 1; back from (0 + 1) MOD 8.
+    cpu.x[8] = 6;
+    assert_eq!(exec(&mut cpu, MOVA_TO_ARRAY_2), None);
+    assert_eq!(changed(&cpu, 0xEE), [1, 9]);
+    assert_eq!(za_words(&cpu, 1), [1; 4]);
+    assert_eq!(za_words(&cpu, 9), [2; 4]);
+    set_z(&mut cpu, 4, Esize::S, &[0]);
+    set_z(&mut cpu, 5, Esize::S, &[0]);
+    assert_eq!(exec(&mut cpu, MOVA_FROM_ARRAY_2), None);
+    assert_eq!(z_words(&cpu, 4), [1; 4]);
+    assert_eq!(z_words(&cpu, 5), [2; 4]);
+
+    // Four registers at 256 bits: strides of 8, and (1 + 7) MOD 8 is
+    // vector 0 from the low word of X9; back from (4 + 5) MOD 8, vector 1.
+    let mut cpu = with_za(1);
+    fill_za(&mut cpu, 0xEE);
+    for r in 0..4 {
+        set_z(&mut cpu, 8 + r, Esize::S, &[10 + u64::from(r)]);
+    }
+    cpu.x[9] = 0xFFFF_FFFF_0000_0001;
+    assert_eq!(exec(&mut cpu, MOVA_TO_ARRAY_4), None);
+    assert_eq!(changed(&cpu, 0xEE), [0, 8, 16, 24]);
+    for r in 0..4 {
+        assert_eq!(za_words(&cpu, 8 * r), [10 + r as u64; 8], "ZA[{}]", 8 * r);
+        set_za(&mut cpu, 8 * r + 1, &[20 + r as u64]);
+    }
+    cpu.x[11] = 4;
+    assert_eq!(exec(&mut cpu, MOVA_FROM_ARRAY_4), None);
+    for r in 0..4 {
+        assert_eq!(z_words(&cpu, 12 + r), [20 + u64::from(r); 8], "Z{}", 12 + r);
+    }
+}
+
 /// Every one of them takes the SME trap outside Streaming SVE mode, then
 /// with ZA storage disabled, and is UNDEFINED without FEAT_SME2.
 #[test]
@@ -888,6 +946,10 @@ fn they_need_streaming_mode_za_and_sme2() {
         FDOT_IDX_2,
         FVDOT_2,
         SVDOT_4,
+        MOVA_TO_ARRAY_2,
+        MOVA_TO_ARRAY_4,
+        MOVA_FROM_ARRAY_2,
+        MOVA_FROM_ARRAY_4,
     ];
     let mut cpu = processor(Implementation::EVERY_FEATURE);
     for insn in all {

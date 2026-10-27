@@ -425,9 +425,10 @@ def not_fp8_dot_groups(w):
 # and STR of ZT0 (Z and ZM), and the multi-vector SVE operations of the
 # `sme` group (S for SEL and the permutes, SI for the integer operations,
 # SN for the narrows, SF for the floating-point operations and SS for the
-# conversions of words), and its multi-vector instructions on ZA array
-# vectors (Z, ZF for the floating-point ones); their fixed bits from
-# AARCHMRS 2026-09. FMAX to FCLAMP's words whose encodings this processor
+# conversions of words), its multi-vector instructions on ZA array vectors
+# (Z, ZF for the floating-point ones), and BMOPA and BMOPS, the outer
+# products of halfwords, MOVA of a group and LUTI2 and LUTI4 (Z); their
+# fixed bits from AARCHMRS 2026-09. FMAX to FCLAMP's words whose encodings this processor
 # does not implement, the BFloat16 forms and FAMAX and FAMIN, are moved to
 # implemented ones as the SVE floating-point classes' are, and so are the
 # ZA array vector instructions' 64-bit forms and forms of FP8 values. A
@@ -751,6 +752,19 @@ FAMILIES = [
     ("mortlach_multi4_zza_idx_s", "ZF", 0xC1508000, 0x000F7FBF, not_fp8_indexed_dot),
     ("mortlach_multi4_fma_long_idx", "ZF", 0xC1909000, 0x000F6F9F, None),
     ("mortlach_multi4_mla_long_idx", "Z", 0xC1D09000, 0x000F6F9F, None),
+    ("mortlach_bini32_prod", "Z", 0x80800008, 0x001FFFF3, None),
+    ("mortlach_i16i32_prod", "Z", 0xA0800008, 0x011FFFF3, None),
+    ("mortlach_multi2_insert_ctg", "Z", 0xC0040000, 0x00C0E3C7, None),
+    ("mortlach_multi4_insert_ctg", "Z", 0xC0040400, 0x00C0E387, None),
+    ("mortlach_multi2_extract_ctg", "Z", 0xC0060000, 0x00C0E0FE, None),
+    ("mortlach_multi4_extract_ctg", "Z", 0xC0060400, 0x00C0E0FC, None),
+    ("mortlach_multi2_za_insert_ctg", "Z", 0xC0040800, 0x000063C7, None),
+    ("mortlach_multi4_za_insert_ctg", "Z", 0xC0040C00, 0x00006387, None),
+    ("mortlach_multi2_za_extract_ctg", "Z", 0xC0060800, 0x000060FE, None),
+    ("mortlach_multi4_za_extract_ctg", "Z", 0xC0060C00, 0x000060FC, None),
+    ("mortlach_expand_1dst", "Z", 0xC0C80000, 0x0007FFFF, None),
+    ("mortlach_expand_2dst_ctg", "Z", 0xC0884000, 0x0007BFFE, None),
+    ("mortlach_expand_4dst_ctg", "Z", 0xC0888000, 0x00073FFC, None),
 ]
 
 
