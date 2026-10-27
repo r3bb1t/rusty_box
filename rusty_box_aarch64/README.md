@@ -202,9 +202,9 @@ same state on d21b7e9 and now. For the boots, the state hashes at 10M,
 | Processor | Cortex-A57-shaped ARMv8.0: EL0/EL1 AArch64 only, the whole ARMv8.0 FP and Advanced SIMD instruction set (integer and floating point, vector and scalar, saturation setting FPSR.QC), the Cortex-A57's optional Cryptographic Extension (AES, 64-bit PMULL, SHA-1, SHA-256) and CRC32, as QEMU's `cortex-a57` has them, 4 KiB-granule stage-1 MMU with TLB, exclusives, PSCI 1.1 (DEN 0022D) over `HVC`, the conduit QEMU's `virt` provides (see "Where the references differ") |
 | Interrupts | GICv2 without the Security Extensions, for one processor, as IHI 0048B specifies it, in QEMU's structure: both interrupt groups, with Group 0 on FIQ under `FIQEn`, the Group 1 aliases (`GICC_AIAR`, `GICC_AEOIR`, `GICC_AHPPIR`, `GICC_ABPR`), preemption by group priority, the running priority and active priority registers, and 4 KiB distributor and 8 KiB CPU interface regions; + GICv2m frame |
 | Timers | EL1 physical and virtual generic timers |
-| Devices | PL011 UART (`UARTPeriphID2` revision 1, QEMU's ID, as DDI 0183F describes the revisions up to r1p4: a 16-entry receive FIFO with overrun and break status, receive and receive-timeout interrupts at the `UARTIFLS` level, modem-status interrupts on line changes, loopback, a receiver gated by `UARTEN` and `RXE`; a zero bit period, so transmission completes at once; see "Where the references differ"), PL031 RTC, PL061 GPIO with QEMU's `gpio-key` power button on line 3, CFI flash ×2 (QEMU `pflash_cfi01` semantics, whole 64 MiB banks decoded), `fw_cfg` (traditional interface, no files), 32 virtio-mmio transports (QEMU's legacy layout while empty; non-legacy, as QEMU's `force-legacy=false`, once the host plugs in QEMU's 2D `virtio-gpu-device` with its EDID, `virtio-keyboard-device`, `virtio-tablet-device` or `virtio-blk-device` over a raw image in memory or a host file, which take the highest free ones), an empty PCIe ECAM/windows |
+| Devices | PL011 UART (`UARTPeriphID2` revision 1, QEMU's ID, as DDI 0183F describes the revisions up to r1p4: a 16-entry receive FIFO with overrun and break status, receive and receive-timeout interrupts at the `UARTIFLS` level, modem-status interrupts on line changes, loopback, a receiver gated by `UARTEN` and `RXE`, a transmitter gated by `UARTEN` and `TXE` whose 16-entry transmit FIFO holds what is written meanwhile; a zero bit period, so enabled transmission completes at once; see "Where the references differ"), PL031 RTC, PL061 GPIO with QEMU's `gpio-key` power button on line 3, CFI flash ×2 (QEMU `pflash_cfi01` semantics, whole 64 MiB banks decoded), `fw_cfg` (traditional interface, no files), 32 virtio-mmio transports (QEMU's legacy layout while empty; non-legacy, as QEMU's `force-legacy=false`, once the host plugs in QEMU's 2D `virtio-gpu-device` with its EDID, `virtio-keyboard-device`, `virtio-tablet-device` or `virtio-blk-device` over a raw image in memory or a host file, which take the highest free ones), an empty PCIe ECAM/windows |
 | Board | QEMU `virt` memory map and IRQ wiring; QEMU 11.1.2's device tree in `assets/` (two values pinned; see below), its memory node and `/chosen` set per machine |
-| Boot | UEFI firmware from flash; or a Linux `Image`, initramfs and device tree placed as QEMU's `hw/arm/boot.c` places them, entered with the register state its boot stub leaves |
+| Boot | UEFI firmware from flash; or a Linux `Image`, initramfs and device tree placed as QEMU's `hw/arm/boot.c` places them, entered with the register state its boot stub leaves, and the UART's console set up at 115200 baud, 8N1, as firmware leaves it (see "Where the references differ") |
 
 Provenance: instruction semantics follow the Arm ARM pseudocode; every device
 cites the QEMU source file and symbols it was ported from. The QEMU
@@ -326,9 +326,12 @@ integration tests of the public API.
 - `tests/api.rs`: the host API with guest-visible assertions — a page-crossing
   store's data abort reporting the page that faulted, the terminal keyboard's
   bytes reaching a polling guest once it has switched the UART's receiver on
-  (and waiting until then), PSCI power-off and reset, the power button's
-  100 ms on GPIO line 3, an observer's view, direct kernel placement and its
-  device tree, refused builds; and that a run cut into instruction budgets of
+  (and waiting until then), a guest's character leaving the UART only once
+  it has enabled it, PSCI power-off and reset, the power button's 100 ms on
+  GPIO line 3, an observer's view, direct kernel placement, its device tree
+  and the console it finds set up, refused builds, a snapshot of an earlier
+  version refused with nothing changed; and that a run cut into instruction
+  budgets of
   any size, or stopped by an exit at any instruction of straight-line code,
   ends exactly where one instruction at a time would.
 - The pre-decoded ops are checked against the class handlers they stand in
@@ -643,8 +646,9 @@ choice is listed here with its evidence.
   `RTRIS` is set when the FIFO is not empty and nothing has arrived for 32
   bit periods, only while `RTIM` is set (note a to Table 3-15), and cleared
   when reads empty the FIFO or by `UARTICR`. QEMU 11.1.2 never sets it.
-  This model's bit period is zero — a character written to `UARTDR` is
-  transmitted by the time the write completes, as in QEMU, and the host's
+  This model's bit period is zero — a character written to `UARTDR` while
+  transmission is enabled is transmitted by the time the write completes,
+  as in QEMU, and the host's
   bytes arrive the moment there is room — so the 32 quiet bit periods have
   passed as soon as a delivery ends: each arrival sets `RTRIS` while `RTIM`
   is set, and setting `RTIM` sets it while the FIFO holds anything. Real
@@ -667,17 +671,40 @@ choice is listed here with its evidence.
   bits [7:0], `ILPDVSR`, saying nothing of the rest. QEMU 11.1.2 stores
   what the guest wrote. This model keeps the defined bits only, so the
   rest of `UARTILPR` reads as zero too.
-- **PL011 transmission does not wait for `UARTEN` and `TXE`.** DDI 0183F
-  §3.3.8 needs both to transmit; a character written while either is clear
-  waits in the transmit FIFO, with `UARTFR.BUSY` set (Table 3-4). Like QEMU
-  11.1.2 (`pl011_write_txdata`, which only logs it), this model transmits
-  it at once; in loopback that includes the receiver, so a character
-  written with `TXE` clear, while `UARTEN` and `RXE` are set, is received,
-  where hardware would send nothing. Holding it would need the transmit
-  FIFO in the snapshot, and a kernel booted directly would then hang:
-  Linux's `earlycon=pl011` expects the firmware to have set the UART up,
-  and its `pl011_putc` waits for `BUSY` to clear after every character,
-  which QEMU's direct boot, copied here, leaves to no one.
+- **The PL011 transmits only while `UARTEN` and `TXE` are set, and a
+  kernel booted directly finds its console set up.** DDI 0183F §3.3.8
+  (Note to Table 3-12) needs both bits to transmit. A character written
+  while either is clear waits in the transmit FIFO (§2.2.4: 16 bytes; the
+  one-byte holding register while `UARTLCR_H.FEN` is clear), `UARTFR.BUSY`
+  is set while the FIFO holds anything, "regardless of whether the UART is
+  enabled or not", with `TXFE` clear and `TXFF` set once it is full (Table
+  3-4); enabling transmission sends what waits, and a change of `FEN`
+  flushes it (§3.3.8). QEMU 11.1.2 (`pl011_write_txdata`) logs such a
+  write and transmits the character anyway, in loopback to the receiver
+  too. This model follows the TRM. The TRM does not say what a write to a
+  full transmit FIFO does; here the character is lost and the FIFO keeps
+  what it holds. `TXRIS` is raised as QEMU raises it, for each character
+  transmitted, not when the FIFO's fill level passes the `UARTIFLS`
+  transmit trigger level as §3.4.3 describes.
+
+  Reset leaves `UARTEN` clear (Table 3-1), and QEMU's direct kernel boot
+  (`hw/arm/boot.c`) leaves the UART at reset, relying on its transmitting
+  regardless; Linux's `earlycon=pl011` writes to the port as it finds it,
+  and its `pl011_putc` waits for `BUSY` to clear after every character. So
+  this board's direct boot leaves the UART as boot firmware leaves a
+  console it has set up: `UARTIBRD` 13 and `UARTFBRD` 1, which are
+  115200 baud from the 24 MHz `UARTCLK` the device tree declares, worked
+  out as TF-A's `console_pl011_core_init` and EDK2's
+  `PL011UartInitializePort` work it out (`UARTCLK × 4 / baud`, in 64ths);
+  `UARTLCR_H` 0x70, eight data bits, no parity, one stop bit and the FIFOs
+  enabled (TF-A's `PL011_LINE_CONTROL`, and what EDK2 writes for 8N1 with
+  its FIFO); and `UARTCR` 0x301, the UART, its transmitter and its receiver
+  enabled, as both write it. 115200 is the rate TF-A's QEMU platforms set
+  (`PLAT_QEMU_CONSOLE_BAUDRATE`); EDK2's `ArmVirtQemu` sets 38400. Linux
+  finds `UARTEN` set and takes the console's rate from those registers
+  (`pl011_console_get_options`). Firmware booted from flash sets the UART
+  up itself, as EDK2 does, and finds it at reset; so does code on a bare
+  machine.
 
 ## Not implemented
 

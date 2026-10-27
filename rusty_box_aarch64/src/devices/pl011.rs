@@ -41,16 +41,23 @@
 //!   once a change of `FEN` has emptied it.
 //! - The modem status interrupts (§3.4.1) are set by a change of their
 //!   line and cleared only by `UARTICR`.
+//! - Transmission needs `UARTCR.UARTEN` and `UARTCR.TXE` (§3.3.8, Note).
+//!   While either is clear, a character written to `UARTDR` waits in the
+//!   transmit FIFO (§2.2.4, §3.3.1: 16 bytes, or the one-byte holding
+//!   register with the FIFO disabled), and `UARTFR` reports it: `BUSY` set
+//!   "regardless of whether the UART is enabled or not", `TXFE` clear, and
+//!   `TXFF` once it is full (Table 3-4). Enabling transmission sends what
+//!   waits; a change of `FEN` flushes it (§3.3.8, Note).
 //!
-//! Time: this model's bit period is zero. A character written to `UARTDR`
-//! has been transmitted by the time the write completes (the transmit FIFO
-//! always reads empty and `BUSY` clear, and `TXRIS` is raised after every
-//! write, as QEMU raises it), and the host line delivers its bytes the
-//! moment the receiver has room. So 32 bit periods without a character
-//! have passed as soon as a delivery ends: a character's arrival raises
-//! `RTRIS` while `RTIM` is set, and setting `RTIM` raises it while the FIFO
-//! holds anything. A timed line would need the instant of the last arrival
-//! as state.
+//! Time: this model's bit period is zero. A character goes out the moment
+//! transmission is enabled to send it (the transmit FIFO empties at once,
+//! and `TXRIS` is raised for what it sends, as QEMU raises it after every
+//! write), and the host line delivers its bytes the moment the
+//! receiver has room. So 32 bit periods without a character have passed as
+//! soon as a delivery ends: a character's arrival raises `RTRIS` while
+//! `RTIM` is set, and setting `RTIM` raises it while the FIFO holds
+//! anything. A timed line would need the instant of the last arrival as
+//! state.
 //!
 //! From QEMU 11.1.2 where DDI 0183F leaves the choice to the system: the
 //! flag register QEMU keeps as state, `UARTDR` reads of an empty FIFO
@@ -61,8 +68,9 @@
 //! each setting of `UARTLCR_H.BRK` (`pl011_loopback_break`), and a host
 //! line that sends nothing in loopback (`pl011_receive`). The host side of
 //! a break has no backend here: the line neither sends nor delivers one.
-//! Transmission does not wait for `UARTEN` and `TXE` (`pl011_write_txdata`);
-//! README's "Where the references differ" says why.
+//! QEMU transmits whatever `UARTEN` and `TXE` say (`pl011_write_txdata`);
+//! README's "Where the references differ" has this model's difference, and
+//! the direct-boot set-up ([`Pl011::set_up_console`]) that goes with it.
 //!
 //! The region takes 4-byte accesses (`pl011_ops`' `impl.min_access_size` and
 //! `impl.max_access_size`): QEMU's `access_with_adjusted_size` hands a
@@ -71,7 +79,7 @@
 //! `offset + 4`.
 
 use rusty_box_core::snap::{SnapRead, SnapResult, SnapWrite};
-use rusty_box_core::{RingBuffer, SnapError};
+use rusty_box_core::{ClockHz, RingBuffer, SnapError};
 
 use crate::bus::{AccessWidth, RegOffset};
 
@@ -82,6 +90,7 @@ const FLAG_TXFE: u32 = 0x80;
 const FLAG_RXFF: u32 = 0x40;
 const FLAG_TXFF: u32 = 0x20;
 const FLAG_RXFE: u32 = 0x10;
+const FLAG_BUSY: u32 = 0x08;
 const FLAG_DCD: u32 = 0x04;
 const FLAG_DSR: u32 = 0x02;
 const FLAG_CTS: u32 = 0x01;
@@ -112,6 +121,8 @@ const INT_DCD: u32 = 1 << 2;
 const INT_CTS: u32 = 1 << 1;
 const INT_RI: u32 = 1 << 0;
 
+/// `UARTLCR_H.WLEN` = 0b11: eight data bits.
+const LCR_WLEN_8: u32 = 0b11 << 5;
 /// `UARTLCR_H.FEN`: the FIFOs are enabled.
 const LCR_FEN: u32 = 1 << 4;
 /// `UARTLCR_H.BRK`: send a break.
@@ -123,6 +134,8 @@ const CR_RTS: u32 = 1 << 11;
 const CR_DTR: u32 = 1 << 10;
 /// `UARTCR.RXE`: the receive section is enabled.
 const CR_RXE: u32 = 1 << 9;
+/// `UARTCR.TXE`: the transmit section is enabled.
+const CR_TXE: u32 = 1 << 8;
 /// `UARTCR.LBE`: loopback.
 const CR_LBE: u32 = 1 << 7;
 /// `UARTCR.UARTEN`: the UART is enabled.
@@ -143,6 +156,10 @@ const DMACR_MASK: u32 = 0x7;
 pub const RX_FIFO_DEPTH: usize = 16;
 const _: () = assert!(RX_FIFO_DEPTH.is_power_of_two(), "slots are found by masking");
 
+/// The transmit FIFO's depth (DDI 0183F §2.2.4): 16 bytes, one (the
+/// transmit holding register) while `UARTLCR_H.FEN` is clear.
+pub const TX_FIFO_DEPTH: usize = 16;
+
 /// The overrun state (DDI 0183F §2.4.3, "Overrun bit"): a character was
 /// lost to a full FIFO, and none has been written to it since. It is kept
 /// in bit 31 of the flag register's word, which `UARTFR` does not have (a
@@ -155,12 +172,20 @@ const OVERRUN_PENDING: u32 = 1 << 31;
 pub const TX_CAPACITY: usize = 64 * 1024;
 
 pub struct Pl011 {
+    /// Bytes transmitted, for the host.
     tx: RingBuffer<u8, TX_CAPACITY>,
+    /// The transmit FIFO: characters written while transmission is off,
+    /// oldest first, in `tx_fifo[..tx_count]`. Transmission empties it
+    /// whole, so it never wraps.
+    tx_fifo: [u8; TX_FIFO_DEPTH],
+    /// Characters waiting: at most the FIFO's depth, and zero while
+    /// transmission is on.
+    tx_count: u32,
     /// QEMU `read_fifo`: each entry is a `UARTDR` value, a received byte or
     /// [`DR_BE`], with [`DR_OE`] when an overrun came before it.
     read_fifo: [u32; RX_FIFO_DEPTH],
     /// Below [`RX_FIFO_DEPTH`], and zero while the FIFO is disabled.
-    read_pos: usize,
+    read_pos: u32,
     /// Entries queued: at most the FIFO's depth.
     read_count: u32,
     /// `UARTFR`, and [`OVERRUN_PENDING`].
@@ -189,6 +214,8 @@ impl Pl011 {
     pub fn new() -> Self {
         Self {
             tx: RingBuffer::new(),
+            tx_fifo: [0; TX_FIFO_DEPTH],
+            tx_count: 0,
             read_fifo: [0; RX_FIFO_DEPTH],
             read_pos: 0,
             read_count: 0,
@@ -209,7 +236,8 @@ impl Pl011 {
     /// QEMU `pl011_reset`: the registers and the FIFO bookkeeping return to
     /// their reset state; the FIFO's slots keep what they held, as QEMU's
     /// `read_fifo` does. Bytes already transmitted stay for the host: they
-    /// left the device before the reset.
+    /// left the device before the reset. Characters waiting in the transmit
+    /// FIFO never left, and the reset empties it.
     pub fn reset(&mut self) {
         let tx = core::mem::take(&mut self.tx);
         let read_fifo = self.read_fifo;
@@ -271,6 +299,76 @@ impl Pl011 {
         self.cr & (CR_UARTEN | CR_RXE) == CR_UARTEN | CR_RXE
     }
 
+    /// DDI 0183F §3.3.8, Note: transmission needs `UARTEN` and `TXE`.
+    fn transmitting(&self) -> bool {
+        self.cr & (CR_UARTEN | CR_TXE) == CR_UARTEN | CR_TXE
+    }
+
+    /// A `UARTDR` write: the character goes into the transmit FIFO, or the
+    /// holding register with the FIFO disabled (DDI 0183F §3.3.1), and is
+    /// transmitted from there while transmission is enabled. DDI 0183F does
+    /// not say what a write to a full transmit FIFO does; here the
+    /// character is lost and the FIFO keeps what it holds, as the receive
+    /// FIFO does on an overrun.
+    fn write_txdata(&mut self, byte: u8) {
+        if self.tx_count == self.fifo_depth() {
+            return;
+        }
+        self.tx_fifo[self.tx_count as usize] = byte;
+        self.tx_count += 1;
+        self.transmit();
+    }
+
+    /// Send what the transmit FIFO holds, if transmission is enabled. With
+    /// a zero bit period the whole FIFO goes at once, each character to the
+    /// host and, in loopback, to the receiver (QEMU `pl011_write_txdata`,
+    /// `pl011_loopback_tx`), and `TXRIS` is raised as QEMU raises it for
+    /// each character sent. `UARTFR` reports the FIFO (Table 3-4): `TXFE`
+    /// while it is empty, `TXFF` while it is full, and `BUSY` while it holds
+    /// anything, whether or not the UART is enabled.
+    fn transmit(&mut self) {
+        if self.transmitting() && self.tx_count > 0 {
+            for i in 0..self.tx_count as usize {
+                let byte = self.tx_fifo[i];
+                self.tx.push_back(byte);
+                self.loopback_tx(u32::from(byte));
+            }
+            self.tx_count = 0;
+            self.int_level |= INT_TX;
+        }
+        self.flags &= !(FLAG_TXFE | FLAG_TXFF | FLAG_BUSY);
+        self.flags |= self.tx_flags();
+    }
+
+    /// `UARTFR`'s transmit bits for the transmit FIFO as it is.
+    fn tx_flags(&self) -> u32 {
+        if self.tx_count == 0 {
+            FLAG_TXFE
+        } else if self.tx_count == self.fifo_depth() {
+            FLAG_TXFF | FLAG_BUSY
+        } else {
+            FLAG_BUSY
+        }
+    }
+
+    /// Leave the UART as boot firmware leaves a console it has set up, the
+    /// state a kernel booted without firmware expects (Linux's
+    /// `earlycon=pl011` writes to the port as it finds it): `baud` from
+    /// `uart_clock` with the divisor TF-A's `console_pl011_core_init` and
+    /// EDK2's `PL011UartInitializePort` program, `UARTCLK × 4 / baud` in
+    /// 64ths (`UARTIBRD` its integer part, `UARTFBRD` its fraction), latched
+    /// by a `UARTLCR_H` write of eight data bits, no parity, one stop bit and
+    /// the FIFOs enabled (TF-A's `PL011_LINE_CONTROL`, 0x70), then
+    /// `UARTCR` with the UART, its transmitter and its receiver enabled
+    /// (0x301, as both write it).
+    pub(crate) fn set_up_console(&mut self, baud: u32, uart_clock: ClockHz) {
+        let divisor = uart_clock.get() * 4 / u64::from(baud);
+        self.write_register(0x24, (divisor >> 6) as u32); // UARTIBRD
+        self.write_register(0x28, (divisor & 0x3F) as u32); // UARTFBRD
+        self.write_register(0x2C, LCR_WLEN_8 | LCR_FEN); // UARTLCR_H
+        self.write_register(0x30, CR_UARTEN | CR_TXE | CR_RXE); // UARTCR
+    }
+
     /// Whether the receive side takes a host byte.
     pub fn can_receive(&self) -> bool {
         self.rx_room() > 0
@@ -318,7 +416,7 @@ impl Pl011 {
         }
         let entry = if self.flags & OVERRUN_PENDING != 0 { value | DR_OE } else { value };
         self.flags &= !OVERRUN_PENDING;
-        let slot = (self.read_pos as u32 + self.read_count) & (depth - 1);
+        let slot = (self.read_pos + self.read_count) & (depth - 1);
         self.read_fifo[slot as usize] = entry;
         self.read_count += 1;
         self.flags &= !FLAG_RXFE;
@@ -346,10 +444,10 @@ impl Pl011 {
     fn read_rxdata(&mut self) -> u32 {
         let depth = self.fifo_depth();
         self.flags &= !FLAG_RXFF;
-        let c = self.read_fifo[self.read_pos];
+        let c = self.read_fifo[self.read_pos as usize];
         if self.read_count > 0 {
             self.read_count -= 1;
-            self.read_pos = (self.read_pos + 1) & (depth as usize - 1);
+            self.read_pos = (self.read_pos + 1) & (depth - 1);
         }
         if self.read_count == 0 {
             self.flags |= FLAG_RXFE;
@@ -366,11 +464,14 @@ impl Pl011 {
     /// receive FIFO holds no `RTRIS`, which DDI 0183F §3.4.4 asserts only
     /// while the FIFO is not empty, and no `RXRIS`, which §3.4.2 clears once
     /// the fill level is below the trigger level (or the holding register is
-    /// empty); QEMU leaves both as they were.
+    /// empty); QEMU leaves both as they were. Characters waiting to be
+    /// transmitted are flushed (§3.3.8, Note: "Flush the transmit FIFO by
+    /// disabling bit 4 (FEN)").
     fn reset_fifos(&mut self) {
         self.read_count = 0;
         self.read_pos = 0;
-        self.flags &= !(FLAG_RXFF | FLAG_TXFF);
+        self.tx_count = 0;
+        self.flags &= !(FLAG_RXFF | FLAG_TXFF | FLAG_BUSY);
         self.flags |= FLAG_RXFE | FLAG_TXFE;
         self.int_level &= !(INT_RT | INT_RX);
     }
@@ -470,13 +571,7 @@ impl Pl011 {
     /// QEMU `pl011_write`.
     fn write_register(&mut self, off: u64, v: u32) {
         match off >> 2 {
-            0 => {
-                // QEMU `pl011_write_txdata`.
-                let byte = v as u8;
-                self.tx.push_back(byte);
-                self.loopback_tx(u32::from(byte));
-                self.int_level |= INT_TX;
-            }
+            0 => self.write_txdata(v as u8),
             1 => self.rsr = 0,
             8 => self.ilpr = v & ILPR_MASK,
             9 => self.ibrd = v & IBRD_MASK,
@@ -496,6 +591,8 @@ impl Pl011 {
             12 => {
                 self.cr = v & CR_MASK;
                 self.loopback_mdmctrl();
+                // Enabling transmission sends what waits in the FIFO.
+                self.transmit();
             }
             13 => self.ifl = v & IFLS_MASK,
             14 => self.set_interrupt_mask(v),
@@ -505,8 +602,8 @@ impl Pl011 {
         }
     }
 
-    /// The registers and the receive FIFO, for a snapshot. Bytes waiting in
-    /// the transmit buffer belong to the host and are not part of it.
+    /// The registers and both FIFOs, for a snapshot. Bytes already
+    /// transmitted belong to the host and are not part of it.
     pub(crate) fn save<W: SnapWrite>(&self, w: &mut W) -> SnapResult {
         for reg in [
             self.flags,
@@ -527,13 +624,17 @@ impl Pl011 {
             w.write_u32(entry)?;
         }
         w.write_u8(self.read_pos as u8)?;
-        w.write_u32(self.read_count)
+        w.write_u32(self.read_count)?;
+        w.write_u8(self.tx_count as u8)?;
+        w.write_bytes(&self.tx_fifo)
     }
 
     /// Refuses a read position outside the FIFO, and a nonzero one while the
-    /// FIFO is disabled (QEMU `pl011_post_load`'s checks), and more entries
-    /// than the FIFO holds. Reserved register bits are dropped, as a guest
-    /// write drops them.
+    /// FIFO is disabled (QEMU `pl011_post_load`'s checks), more entries in
+    /// either FIFO than it holds, and characters waiting to be transmitted
+    /// while transmission is enabled. Reserved register bits are dropped, as
+    /// a guest write drops them, and `UARTFR`'s transmit bits are those of
+    /// the transmit FIFO restored.
     pub(crate) fn restore<R: SnapRead>(&mut self, r: &mut R) -> SnapResult {
         let mut regs = [0u32; 11];
         for reg in regs.iter_mut() {
@@ -544,9 +645,12 @@ impl Pl011 {
         for entry in read_fifo.iter_mut() {
             *entry = r.read_u32()?;
         }
-        let read_pos = usize::from(r.read_u8()?);
+        let read_pos = u32::from(r.read_u8()?);
         let read_count = r.read_u32()?;
-        if read_pos >= RX_FIFO_DEPTH {
+        let tx_count = u32::from(r.read_u8()?);
+        let mut tx_fifo = [0u8; TX_FIFO_DEPTH];
+        r.read_bytes(&mut tx_fifo)?;
+        if read_pos >= RX_FIFO_DEPTH as u32 {
             return Err(SnapError::Invalid("PL011 read position outside the receive FIFO"));
         }
         let depth = if lcr & LCR_FEN != 0 { RX_FIFO_DEPTH as u32 } else { 1 };
@@ -556,24 +660,34 @@ impl Pl011 {
         if read_count > depth {
             return Err(SnapError::Invalid("PL011 receive count beyond the receive FIFO's depth"));
         }
+        if tx_count > depth {
+            return Err(SnapError::Invalid("PL011 transmit count beyond the transmit FIFO's depth"));
+        }
+        let cr = cr & CR_MASK;
+        if tx_count > 0 && cr & (CR_UARTEN | CR_TXE) == CR_UARTEN | CR_TXE {
+            return Err(SnapError::Invalid("PL011 characters waiting to be transmitted while transmission is enabled"));
+        }
         let tx = core::mem::take(&mut self.tx);
         *self = Self {
             tx,
+            tx_fifo,
+            tx_count,
             read_fifo,
             read_pos,
             read_count,
-            flags: flags & (FR_MASK | OVERRUN_PENDING),
+            flags: flags & (FR_MASK | OVERRUN_PENDING) & !(FLAG_TXFE | FLAG_TXFF | FLAG_BUSY),
             rsr: rsr & (RSR_OE | RSR_CHARACTER_ERRORS),
             ilpr: ilpr & ILPR_MASK,
             ibrd: ibrd & IBRD_MASK,
             fbrd: fbrd & FBRD_MASK,
             lcr: lcr & LCR_MASK,
-            cr: cr & CR_MASK,
+            cr,
             ifl: ifl & IFLS_MASK,
             int_enabled: int_enabled & IMSC_MASK,
             int_level: int_level & IMSC_MASK,
             dmacr: dmacr & DMACR_MASK,
         };
+        self.flags |= self.tx_flags();
         Ok(())
     }
 }
@@ -645,6 +759,89 @@ mod tests {
         write(&mut uart, DR, u32::from(b'z'));
         assert_eq!(read(&mut uart, DR), u32::from(b'z'));
         assert_eq!(uart.drain_tx().collect::<std::vec::Vec<u8>>(), b"xyz", "each byte still left");
+    }
+
+    fn sent(uart: &mut Pl011) -> std::vec::Vec<u8> {
+        uart.drain_tx().collect()
+    }
+
+    #[test]
+    fn the_transmit_fifo_holds_what_is_written_until_uarten_and_txe_are_set() {
+        for off in [0x300, CR_UARTEN | CR_RXE, CR_TXE | CR_RXE] {
+            let mut uart = Pl011::new();
+            write(&mut uart, LCR_H, LCR_FEN);
+            write(&mut uart, CR, off);
+            write(&mut uart, IMSC, INT_TX);
+            assert_eq!(read(&mut uart, FR) & (FLAG_TXFE | FLAG_TXFF | FLAG_BUSY), FLAG_TXFE);
+            for i in 0..TX_FIFO_DEPTH as u32 {
+                write(&mut uart, DR, u32::from(b'a') + i);
+                let full = if i + 1 == TX_FIFO_DEPTH as u32 { FLAG_TXFF } else { 0 };
+                assert_eq!(read(&mut uart, FR) & (FLAG_TXFE | FLAG_TXFF | FLAG_BUSY), FLAG_BUSY | full, "UARTCR {off:#x}, {} queued", i + 1);
+            }
+            write(&mut uart, DR, u32::from(b'!'));
+            assert_eq!(sent(&mut uart), b"", "UARTCR {off:#x}: nothing leaves");
+            assert_eq!(read(&mut uart, RIS) & INT_TX, 0, "nothing was transmitted");
+            write(&mut uart, CR, ENABLED);
+            assert_eq!(sent(&mut uart), b"abcdefghijklmnop", "UARTCR {off:#x}: all sixteen, in order; the write to the full FIFO was lost");
+            assert_eq!(read(&mut uart, FR) & (FLAG_TXFE | FLAG_TXFF | FLAG_BUSY), FLAG_TXFE);
+            assert_eq!(read(&mut uart, RIS) & INT_TX, INT_TX);
+            assert!(uart.irq());
+            write(&mut uart, DR, u32::from(b'z'));
+            assert_eq!(sent(&mut uart), b"z", "enabled, a character goes at once");
+        }
+    }
+
+    #[test]
+    fn with_the_fifo_disabled_the_transmit_holding_register_holds_one_character() {
+        let mut uart = Pl011::new();
+        write(&mut uart, DR, u32::from(b'1'));
+        assert_eq!(read(&mut uart, FR) & (FLAG_TXFE | FLAG_TXFF | FLAG_BUSY), FLAG_TXFF | FLAG_BUSY);
+        write(&mut uart, DR, u32::from(b'2'));
+        write(&mut uart, CR, ENABLED);
+        assert_eq!(sent(&mut uart), b"1");
+        assert_eq!(read(&mut uart, FR) & (FLAG_TXFE | FLAG_TXFF | FLAG_BUSY), FLAG_TXFE);
+    }
+
+    #[test]
+    fn changing_fen_flushes_the_transmit_fifo() {
+        let mut uart = Pl011::new();
+        write(&mut uart, LCR_H, LCR_FEN);
+        write(&mut uart, DR, u32::from(b'x'));
+        write(&mut uart, DR, u32::from(b'y'));
+        write(&mut uart, LCR_H, 0);
+        assert_eq!(read(&mut uart, FR) & (FLAG_TXFE | FLAG_TXFF | FLAG_BUSY), FLAG_TXFE);
+        write(&mut uart, CR, ENABLED);
+        assert_eq!(sent(&mut uart), b"", "flushed characters never leave");
+        write(&mut uart, CR, 0x300);
+        write(&mut uart, DR, u32::from(b'w'));
+        uart.reset();
+        write(&mut uart, CR, ENABLED);
+        assert_eq!(sent(&mut uart), b"", "a reset empties the transmit FIFO");
+    }
+
+    #[test]
+    fn a_loopback_transmitter_that_is_off_sends_its_receiver_nothing() {
+        let mut uart = Pl011::new();
+        write(&mut uart, CR, CR_UARTEN | CR_RXE | CR_LBE);
+        write(&mut uart, DR, u32::from(b'q'));
+        assert_eq!(read(&mut uart, FR) & FLAG_RXFE, FLAG_RXFE, "TXE is clear: nothing on the line");
+        assert_eq!(sent(&mut uart), b"");
+        write(&mut uart, CR, ENABLED | CR_LBE);
+        assert_eq!(read(&mut uart, DR), u32::from(b'q'), "sent once TXE is set");
+        assert_eq!(sent(&mut uart), b"q");
+    }
+
+    #[test]
+    fn a_console_set_up_runs_at_the_rate_asked_with_everything_enabled() {
+        let mut uart = Pl011::new();
+        let clock = ClockHz::new(24_000_000).expect("non-zero");
+        uart.set_up_console(115_200, clock);
+        // 24 MHz × 4 / 115200 = 833 64ths: 13 + 1/64.
+        assert_eq!([9, 10, LCR_H, CR].map(|n| read(&mut uart, n)), [13, 1, 0x70, 0x301]);
+        write(&mut uart, DR, u32::from(b'k'));
+        assert_eq!(sent(&mut uart), b"k");
+        assert!(uart.receive(b'r'));
+        assert_eq!(read(&mut uart, DR), u32::from(b'r'));
     }
 
     #[test]
@@ -992,6 +1189,46 @@ mod tests {
         let mut quiet = std::vec::Vec::new();
         Pl011::new().save(&mut quiet).expect("save");
         assert_eq!(&quiet[..4], &(FLAG_RXFE | FLAG_TXFE).to_le_bytes(), "no overrun, no extra bit");
+    }
+
+    #[test]
+    fn a_snapshot_keeps_the_characters_waiting_to_be_transmitted() {
+        let mut uart = Pl011::new();
+        write(&mut uart, LCR_H, LCR_FEN);
+        for byte in *b"abc" {
+            write(&mut uart, DR, u32::from(byte));
+        }
+        let mut image = std::vec::Vec::new();
+        uart.save(&mut image).expect("save");
+        let mut restored = Pl011::new();
+        let mut source: &[u8] = &image;
+        restored.restore(&mut source).expect("restore");
+        assert!(source.is_empty(), "the restore consumed exactly what the save wrote");
+        assert_eq!(read(&mut restored, FR) & (FLAG_TXFE | FLAG_TXFF | FLAG_BUSY), FLAG_BUSY);
+        write(&mut restored, CR, ENABLED);
+        assert_eq!(sent(&mut restored), b"abc");
+    }
+
+    #[test]
+    fn a_snapshot_with_an_impossible_transmit_fifo_is_refused() {
+        let mut uart = Pl011::new();
+        write(&mut uart, DR, u32::from(b'a'));
+        let mut image = std::vec::Vec::new();
+        uart.save(&mut image).expect("save");
+        // The registers, the receive FIFO, its read position and count.
+        let count = 11 * 4 + RX_FIFO_DEPTH * 4 + 1 + 4;
+        assert_eq!(image[count], 1);
+        image[count] = 2;
+        let mut source: &[u8] = &image;
+        assert!(Pl011::new().restore(&mut source).is_err(), "FEN is clear: one character at most");
+        image[count] = 1;
+        let cr = 6 * 4;
+        image[cr..cr + 4].copy_from_slice(&ENABLED.to_le_bytes());
+        let mut source: &[u8] = &image;
+        assert!(Pl011::new().restore(&mut source).is_err(), "transmission enabled would have sent it");
+        image[cr..cr + 4].copy_from_slice(&0x300u32.to_le_bytes());
+        let mut source: &[u8] = &image;
+        assert!(Pl011::new().restore(&mut source).is_ok());
     }
 
     #[test]

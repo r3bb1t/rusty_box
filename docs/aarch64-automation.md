@@ -54,7 +54,12 @@ assert_eq!(machine.ticks(), 0);
 A Linux kernel, loaded the way QEMU's `-kernel` loads one without firmware:
 the `Image` at its load offset, the initramfs above it, the device tree with
 `/chosen` filled in at the 2 MiB boundary after the initramfs, and the
-processor at the kernel's entry with `x0` pointing at the tree.
+processor at the kernel's entry with `x0` pointing at the tree. The UART is
+left as firmware leaves a console it has set up — 115200 baud, eight data
+bits, no parity, one stop bit, FIFOs on, transmitter and receiver enabled
+(`boot::DIRECT_BOOT_CONSOLE_BAUD`) — where QEMU leaves it at reset: a PL011
+sends nothing until it is enabled, and `earlycon=pl011` writes to it as it
+finds it.
 
 ```rust,no_run
 use rusty_box_aarch64::boot::{LinuxImage, SERIAL_CONSOLE_COMMAND_LINE};
@@ -108,7 +113,11 @@ reads as erased flash. `BuildError` says what did not fit.
 ## 2. The serial console
 
 `virt`'s console is its PL011 UART, and `serial(0)` borrows it — the only
-port the board has, so `serial(1)` is `None`.
+port the board has, so `serial(1)` is `None`. The UART sends what the guest
+writes once the guest has enabled its transmitter (`UARTCR.UARTEN` and
+`TXE`), and takes input once it has enabled its receiver (`UARTEN` and
+`RXE`): firmware and Linux do, a directly booted kernel finds both on, and
+code on a bare machine has to switch them on itself.
 
 ```rust,no_run
 # use rusty_box_aarch64::{MachineBuilder, VirtConfig};

@@ -781,6 +781,82 @@ fn a_directly_booted_kernel_is_entered_as_qemu_enters_it() {
     );
 }
 
+/// The PL011 transmits only while `UARTCR.UARTEN` and `TXE` are set (DDI
+/// 0183F §3.3.8, Note); reset leaves `UARTEN` clear (Table 3-1). A character
+/// written then waits in the transmit holding register with `UARTFR.BUSY`
+/// and `TXFF` set, and goes out when the guest enables the UART:
+///
+/// ```text
+/// movz x0, #0x0900, lsl #16 ; mov w5, #0x4b ; str w5, [x0]
+/// ldr w6, [x0, #0x18] ; mov w1, #0x301 ; str w1, [x0, #0x30]
+/// ldr w7, [x0, #0x18] ; b .
+/// ```
+#[test]
+fn a_bare_guest_transmits_nothing_until_it_enables_the_uart() {
+    const PROBE: [u32; 8] = [
+        0xD2A1_2000, 0x5280_0965, 0xB900_0005, 0xB940_1806, 0x5280_6021, 0xB900_3001, 0xB940_1807, SPIN,
+    ];
+    let mut ram = vec![0u8; RAM_LEN];
+    let mut m = bare(&mut ram, rusty_box_aarch64::NoInstrumentation);
+    load(&mut m, RAM_BASE, &PROBE);
+    assert_eq!(m.step(RunBudget::Instructions(4)).stop, StopReason::BudgetExhausted);
+    let output = |m: &mut VirtMachine<LentStorage<'_>>| m.serial(0).expect("UART0").take_output().collect::<Vec<u8>>();
+    assert_eq!(output(&mut m), b"", "UARTEN is clear: nothing leaves");
+    // RXFE, TXFF and BUSY: the holding register (FEN is clear) is full.
+    assert_eq!(m.reg_read(Reg::X6), 0x10 | 0x20 | 0x08);
+    assert_eq!(m.step(RunBudget::Instructions(4)).stop, StopReason::BudgetExhausted);
+    assert_eq!(output(&mut m), b"K", "enabling the UART sent it");
+    assert_eq!(m.reg_read(Reg::X7), 0x10 | 0x80, "RXFE and TXFE");
+}
+
+/// A kernel booted directly finds the UART as firmware leaves a console it
+/// has set up: 115200 baud from the 24 MHz `UARTCLK` the device tree
+/// declares (`UARTIBRD` 13, `UARTFBRD` 1), eight data bits with the FIFOs on
+/// (`UARTLCR_H` 0x70), and the UART, transmitter and receiver enabled
+/// (`UARTCR` 0x301); a character it writes goes out at once. The kernel
+/// branches over its `Image` header to:
+///
+/// ```text
+/// movz x0, #0x0900, lsl #16 ; ldr w1, [x0, #0x30] ; ldr w2, [x0, #0x24]
+/// ldr w3, [x0, #0x28] ; ldr w4, [x0, #0x2c] ; mov w5, #0x4b
+/// str w5, [x0] ; ldr w6, [x0, #0x18] ; b .
+/// ```
+#[test]
+fn a_directly_booted_kernel_finds_the_console_set_up() {
+    const MIB: u64 = 1 << 20;
+    const PROBE: [u32; 9] = [
+        0xD2A1_2000, 0xB940_3001, 0xB940_2402, 0xB940_2803, 0xB940_2C04, 0x5280_0965, 0xB900_0005, 0xB940_1806, SPIN,
+    ];
+    let mut kernel = fake_kernel(0x10_0000);
+    // `b 0x40`, over the header.
+    kernel[0..4].copy_from_slice(&0x1400_0010u32.to_le_bytes());
+    kernel.resize(0x40, 0);
+    for word in PROBE {
+        kernel.extend_from_slice(&word.to_le_bytes());
+    }
+    let image = LinuxImage::parse(&kernel).expect("an Image");
+    let mut ram = vec![0u8; (8 * MIB) as usize];
+    let mut m = MachineBuilder::new(VirtConfig::DEFAULT)
+        .ram(RamSize::bytes(8 * MIB).expect("a valid size"))
+        .linux(image)
+        .build_in(MemoryLoan { ram: &mut ram, vars: &mut [] })
+        .expect("builds");
+    assert_eq!(m.step(RunBudget::Instructions(10)).stop, StopReason::BudgetExhausted);
+    let regs = [Reg::X1, Reg::X2, Reg::X3, Reg::X4].map(|r| m.reg_read(r));
+    assert_eq!(regs, [0x301, 13, 1, 0x70], "UARTCR, UARTIBRD, UARTFBRD, UARTLCR_H");
+    assert_eq!(m.serial(0).expect("UART0").take_output().collect::<Vec<u8>>(), b"K");
+    assert_eq!(m.reg_read(Reg::X6), 0x10 | 0x80, "RXFE and TXFE: nothing waits");
+    // The device tree's UART clock is the one the divisor was worked out for.
+    let tree = m.device_tree().to_vec();
+    let clock = fdt::property(&tree, "apb-pclk", "clock-frequency").expect("well formed");
+    let declared = rusty_box_aarch64::board::UART_CLOCK.get() as u32;
+    assert_eq!(clock, Some(&declared.to_be_bytes()[..]));
+    // A reset sets it up again.
+    m.power().reset();
+    assert_eq!(m.step(RunBudget::Instructions(10)).stop, StopReason::BudgetExhausted);
+    assert_eq!(m.serial(0).expect("UART0").take_output().collect::<Vec<u8>>(), b"K");
+}
+
 #[test]
 fn a_machine_that_cannot_be_built_says_why() {
     let mut ram = vec![0u8; RAM_LEN];

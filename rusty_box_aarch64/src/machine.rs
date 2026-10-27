@@ -988,6 +988,8 @@ impl<S: GuestStorage, I: Instrumentation> VirtMachine<S, I> {
                 // x4 the entry it branched through, x1-x3 zero from reset.
                 self.cpu.set_reg(Reg::X0, RAM_BASE + layout.device_tree_offset);
                 self.cpu.set_reg(Reg::X4, reset_pc);
+                // And the console set up, as firmware would leave it.
+                self.board.set_up_console(boot::DIRECT_BOOT_CONSOLE_BAUD);
             }
             BootRecord::Bare => {}
         }
@@ -1702,7 +1704,7 @@ impl<S: GuestStorage, I: Instrumentation> VirtMachine<S, I> {
 }
 
 const SNAPSHOT_MAGIC: [u8; 8] = *b"RBA64SNP";
-const SNAPSHOT_VERSION: u32 = 6;
+const SNAPSHOT_VERSION: u32 = 7;
 
 /// Everything about how a machine was built that a snapshot depends on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

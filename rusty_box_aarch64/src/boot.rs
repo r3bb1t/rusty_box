@@ -45,6 +45,15 @@ pub const DEVICE_TREE_CAPACITY: usize = 64 * 1024;
 pub const SERIAL_CONSOLE_COMMAND_LINE: &str = "console=ttyAMA0 earlycon=pl011,0x9000000";
 const _: () = assert!(UART0_BASE == 0x0900_0000, "the earlycon address names the UART");
 
+/// The rate at which a directly booted kernel finds the UART's console set
+/// up, eight data bits, no parity, one stop bit, FIFOs enabled: the state
+/// boot firmware leaves a console it has initialised in (TF-A's QEMU
+/// platforms run theirs at 115200, `PLAT_QEMU_CONSOLE_BAUDRATE`), which
+/// Linux's `earlycon=pl011` writes to as it finds it. QEMU's direct boot
+/// leaves the UART at reset, transmitting regardless, where the PL011 would
+/// transmit nothing (README, "Where the references differ").
+pub const DIRECT_BOOT_CONSOLE_BAUD: u32 = 115_200;
+
 const MIB: u64 = 1 << 20;
 /// QEMU `KERNEL64_LOAD_ADDR`: where a kernel too old to say goes.
 const LEGACY_LOAD_OFFSET: u64 = 0x0008_0000;

@@ -19,7 +19,7 @@
 //! line high and a timer releases it 100 ms of guest time later
 //! (`hw/gpio/gpio_key.c`, `GPIO_KEY_LATENCY`).
 
-use rusty_box_core::{RingBuffer, VmClock, VmInstant};
+use rusty_box_core::{ClockHz, RingBuffer, VmClock, VmInstant};
 use rusty_box_devices::display::Resolution;
 
 use crate::bus::{le_value, store_le, AccessWidth, BusFault, CodeEpoch, FetchSource, PhysAddr, PhysBus, RegOffset, Writes};
@@ -86,6 +86,14 @@ pub const IRQ_GPIO: u32 = 32 + 7;
 pub const IRQ_VIRTIO_BASE: u32 = 32 + 16;
 pub const PPI_VIRTUAL_TIMER: u32 = 16 + 11;
 pub const PPI_PHYSICAL_TIMER: u32 = 16 + 14;
+
+/// The PL011's reference clock, `UARTCLK`: the device tree's `/apb-pclk`
+/// fixed clock, 24 MHz, which its `pl011@9000000` node names as `uartclk`
+/// (QEMU `hw/arm/virt.c` `create_fdt`).
+pub const UART_CLOCK: ClockHz = match ClockHz::new(24_000_000) {
+    Some(hz) => hz,
+    None => ClockHz::BOCHS_DEFAULT,
+};
 
 /// Bytes a host may have sent to the UART that its receive FIFO has not yet
 /// taken: the buffer a QEMU character backend holds between the host and
@@ -321,6 +329,15 @@ impl<S: GuestStorage> VirtBoard<S> {
         for transport in self.virtio.iter_mut().flatten() {
             transport.reset();
         }
+        self.pump_serial_input();
+        self.sync_device_lines();
+    }
+
+    /// Leave the UART as boot firmware leaves a console it has set up, at
+    /// `baud` ([`Pl011::set_up_console`]); host bytes waiting for its
+    /// receiver go in.
+    pub(crate) fn set_up_console(&mut self, baud: u32) {
+        self.uart.set_up_console(baud, UART_CLOCK);
         self.pump_serial_input();
         self.sync_device_lines();
     }
