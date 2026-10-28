@@ -69,7 +69,7 @@ uses the TxSZ of the half `selbit` names, and the extension field is
     Arm:          C 3106208000001000
     QEMU 11.1.2:  C 3106200000001000     bits 43:39 left zero (T1SZ's 54:44)
 
-**Fix**: `docs/qemu-insertpac-selbit.patch`: a `pauth_selbit()` helper
+**Fix**: `docs/patches/qemu/qemu-insertpac-selbit.patch`: a `pauth_selbit()` helper
 following `InsertPAC()`, and the bottom bit and extension from `selbit`'s
 half. `AuthPAC()` needs no change: it uses `ptr<55>`, which `InsertPAC()`
 has set to `selbit`. Tested: probe case C prints Arm's value, and
@@ -107,7 +107,7 @@ holds the PAN the return set.
     Arm:          A 000000003a000000 00000000005003c5
     QEMU 11.1.2:  A 000000003a000000 00000000001003c5     bit 22 clear
 
-**Fix**: `docs/qemu-illegal-return-pan.patch` restores PAN too when the
+**Fix**: `docs/patches/qemu/qemu-illegal-return-pan.patch` restores PAN too when the
 CPU has FEAT_PAN. Tested with probe case A. (QEMU implements none of
 FEAT_EBEP, FEAT_SPE_EXC and FEAT_TRBE_EXC, so PM needs nothing yet.)
 
@@ -186,7 +186,7 @@ raw value said 256 KiB and its comment 512 KiB.
 cortex-a57 -m 256M -nic none` writes `d-cache-sets = <0x80>` (4 ways); a
 guest reads the same from `CCSIDR_EL1` with `CSSELR_EL1` = 0.
 
-**Fix**: `docs/qemu-cortex-cache-geometry.patch` restores the values from
+**Fix**: `docs/patches/qemu/qemu-cortex-cache-geometry.patch` restores the values from
 before 9.2 (and the A72 comment). Tested: the `virt` device tree has
 `d-cache-sets = <0x100>` for `cortex-a57`.
 
@@ -209,7 +209,7 @@ level above L1 (no `-machine smp-cache` description, the default),
 cortex-a57 -m 256M -nic none`, then `dtc -I dtb virt.dtb`:
 `next-level-cache = <0x00>;` in `/cpus/cpu@0`.
 
-**Fix**: `docs/qemu-virt-next-level-cache.patch` writes the property only
+**Fix**: `docs/patches/qemu/qemu-virt-next-level-cache.patch` writes the property only
 when a next-level node exists. Tested with the same dump.
 
 ### 6. The PL011 in loopback writes past its receive FIFO
@@ -234,7 +234,7 @@ UARTDR read until UARTFR.RXFE.
     PL011:        D abcdefghijklmnop
     QEMU 11.1.2:  D qbcdefghijklmnopq
 
-**Fix**: `docs/qemu-pl011-loopback-overrun.patch`: `pl011_fifo_rx_put()`
+**Fix**: `docs/patches/qemu/qemu-pl011-loopback-overrun.patch`: `pl011_fifo_rx_put()`
 drops a character that finds `read_count` at the FIFO's depth and flags
 the overrun in UARTRSR.OE and the overrun interrupt (INT_OE); a read of
 UARTDR keeps UARTRSR.OE, which only a write of UARTECR clears. Loopback
@@ -294,7 +294,7 @@ fault, `AArch64_DC()` sets `fault.vaddress` to the register's value, and
     Arm:          G none
     QEMU 11.1.2:  G 000000009600000d 00000000c0000100
 
-**Fix**: `docs/qemu-dc-cvap-fault.patch`. `dccvap_writefn()` probes the
+**Fix**: `docs/patches/qemu/qemu-dc-cvap-fault.patch`. `dccvap_writefn()` probes the
 line with the current regime's index without PAN (`dc_mmu_idx()`) and
 without faulting (`probe_access_flags()` with `nonfault`). On a miss,
 `dc_clean_fault()` translates the register's value with `get_phys_addr()`,
@@ -344,7 +344,7 @@ ERET to EL0, with SCTLR_EL1.nTWE clear.
     Arm:          J 0000000056000000 ...   (the SVC after the WFE)
     QEMU 11.1.2:  J 0000000007e00001 ...   (the WFE trapped)
 
-**Fix**: `docs/qemu-eret-event.patch` sets the Event Register in
+**Fix**: `docs/patches/qemu/qemu-eret-event.patch` sets the Event Register in
 `HELPER(exception_return)`, ahead of the illegal-return branch so both
 paths send it. Tested: case J prints the SVC's syndrome; Alpine 3.23
 boots to its login prompt.
@@ -373,7 +373,7 @@ a delay with CNTKCTL_EL1.EVNTEN set and EVNTI = 0, then WFE.
     Arm:          K 0000000056000000 ...
     QEMU 11.1.2:  K 0000000007e00001 ...   (the WFE trapped)
 
-**Fix**: `docs/qemu-event-stream-fold.patch`. A new
+**Fix**: `docs/patches/qemu/qemu-event-stream-fold.patch`. A new
 `gt_fold_event_stream()` sets the Event Register when a stream has made a
 selected transition (`gt_evt_between()`) between the system counter value
 it was last brought up to, a new `CPUARMState.evt_folded_to`, and now,
@@ -419,7 +419,7 @@ timeout of all ones while the virtual timer's interrupt is pending
 With the timer's interrupt not pending, QEMU 11.1.2 traps as Arm does
 (`0000000007e00027`).
 
-**Fix**: `docs/qemu-wfet-trap-order.patch` moves the `cpu_has_work()`
+**Fix**: `docs/patches/qemu/qemu-wfet-trap-order.patch` moves the `cpu_has_work()`
 return after the trap check. Tested: case L prints the WFET's syndrome;
 Alpine 3.23 boots to its login prompt.
 
@@ -456,7 +456,7 @@ prints the register's value: NSID 0b10 and, with FEAT_Debugv8p4, NSNID
     Arm:          M 000000000000000e
     QEMU 11.1.2:  M 0000000002000000 ...   (UNDEFINED)
 
-**Fix**: `docs/qemu-dbgauthstatus.patch` adds DBGAUTHSTATUS_EL1 to
+**Fix**: `docs/patches/qemu/qemu-dbgauthstatus.patch` adds DBGAUTHSTATUS_EL1 to
 `debug_cp_reginfo` (op0 2, op1 0, CRn 7, CRm 14, op2 6; for AArch32,
 DBGAUTHSTATUS on cp14): read-only from EL1, trapped by MDCR_EL2.TDA and
 MDCR_EL3.TDA (`access_tda()`) and by HDFGRTR_EL2.DBGAUTHSTATUS_EL1, whose
@@ -492,7 +492,7 @@ each element, and both return the operand unchanged when it is a NaN and
     Arm:          fneg v2.4s of 0x7fc00001 = 0x7fc00001, fabs v5.4s of 0xffc00001 = 0xffc00001
     QEMU 11.1.2:  fneg v2.4s of 0x7fc00001 = 0xffc00001, fabs v5.4s of 0xffc00001 = 0x7fc00001
 
-**Fix**: `docs/qemu-afp-vector-fabs-fneg.patch`: under FPCR.AH, expand
+**Fix**: `docs/patches/qemu/qemu-afp-vector-fabs-fneg.patch`: under FPCR.AH, expand
 each element with the scalar forms' `gen_vfp_ah_abs*` and
 `gen_vfp_ah_neg*` (an element at a time; a gvec helper like SVE's would
 be faster). Built and tested on `v11.1.2`: the probe agrees, and
@@ -527,7 +527,7 @@ one (`trans_FCMLA_vi()` in `translate-a64.c`) passes `(s->fpcr_ah << 4) |
     Arm:          fcmla z0.h, z1.h, z2.h[0], #90 of 1.0 by NaN 0xffc1: z0.h[0] = 0xffc1
     QEMU 11.1.2:  z0.h[0] = 0x7fc1 (Advanced SIMD fcmla v3.8h: 0xffc1)
 
-**Fix**: `docs/qemu-sve-fcmla-indexed-ah.patch`: pass FPCR.AH in bit 4, as
+**Fix**: `docs/patches/qemu/qemu-sve-fcmla-indexed-ah.patch`: pass FPCR.AH in bit 4, as
 the Advanced SIMD form does. Built and tested on `v11.1.2`: the probe
 agrees, and `rusty_box_aarch64`'s SVE vectors were generated with it.
 
@@ -564,7 +564,7 @@ and `sve_fsubr_size00`.
     Arm:          SIGILL (UNDEFINED), both
     QEMU 11.1.2:  0x65228020 (fmad, size = 00) executed; 0x65038020 (fsubr, size = 00) executed
 
-**Fix**: `docs/qemu-sve-fmad-size00.patch`: decode the four as their own
+**Fix**: `docs/patches/qemu/qemu-sve-fmad-size00.patch`: decode the four as their own
 names and refuse `esz = MO_8` for them. Built and tested on `v11.1.2`:
 `sve_fmad_size00` raises SIGILL, and `rusty_box_aarch64`'s SVE vectors
 were generated with it.
@@ -601,7 +601,7 @@ LD1Q are the same.
     Arm:          ld1w {za0v.s[w12, 0]}, p0/z with element 0 alone active: element 1 = 0
     QEMU 11.1.2:  element 1 = 0xffffffff, its value before the load
 
-**Fix**: `docs/qemu-sme-ld1-vertical-tail.patch`: clear the whole slice
+**Fix**: `docs/patches/qemu/qemu-sme-ld1-vertical-tail.patch`: clear the whole slice
 before loading, vertical or horizontal, which makes the per-element
 clears redundant. Built and tested on `v11.1.2`: the probe agrees, and
 `rusty_box_aarch64`'s ZA vectors were generated with it.
@@ -636,7 +636,7 @@ state.
 
 QEMU master as of 2026-10-27 has the same `do_movt()`.
 
-**Fix**: `docs/qemu-sme2-movt-debug-state.patch`: the two encodings'
+**Fix**: `docs/patches/qemu/qemu-sme2-movt-debug-state.patch`: the two encodings'
 translators return false, which raises the Undefined Instruction
 exception. Built and tested on `v11.1.2`: the probe raises SIGILL, and
 the other cases print what they did before.
@@ -673,7 +673,7 @@ QEMU master as of 2026-10-27 has the same: `aarch64_max_v8_tcg_initfn()`
 (`target/arm/cpu-max.c`), which sets `arm,cortex-a57`, and resets only
 the MIDR.
 
-**Fix**: `docs/qemu-max-dtb-compatible.patch` sets `arm,armv8` after the
+**Fix**: `docs/patches/qemu/qemu-max-dtb-compatible.patch` sets `arm,armv8` after the
 MIDR (in master, the same line in `aarch64_max_v8_tcg_initfn()`). Built
 and tested on `v11.1.2`: the dump has `compatible = "arm,armv8";`, and an
 Alpine 3.23 kernel (Linux 6.18) boots to `login:` on `-cpu max` as
@@ -721,7 +721,7 @@ event gives 8.
 
 QEMU master as of 2026-10-27 has the same `gt_recalc_one_evt()`.
 
-**Fix**: `docs/qemu-event-stream-wake-timer.patch`. The wake-up count
+**Fix**: `docs/patches/qemu/qemu-event-stream-wake-timer.patch`. The wake-up count
 is the system counter's current value plus the distance, and the mask is
 the bits below the selected one, `target_bit - 1`. The physical stream is
 judged on the physical count, and the virtual stream on the count less
@@ -768,7 +768,7 @@ ahead. It prints how many whole timeouts the count moved by.
 
 QEMU master as of 2026-10-27 creates the timer the same way.
 
-**Fix**: `docs/qemu-wfxt-timer-scale.patch` creates the timer with
+**Fix**: `docs/patches/qemu/qemu-wfxt-timer-scale.patch` creates the timer with
 `timer_new(QEMU_CLOCK_VIRTUAL, gt_cntfrq_period_ns(cpu), ...)`, as the
 generic timers are. Built and tested on `v11.1.2`: on `-M virt-9.0`,
 case O prints 1, a WFIT with a timeout 2^24 counts ahead waits

@@ -656,7 +656,6 @@ struct VirtSettings {
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum VirtBootChoice {
-    Nothing,
     Firmware,
     Kernel,
 }
@@ -681,7 +680,7 @@ impl VirtSettings {
             memory_mib: config.memory_mib,
             ips: config.ips,
             cpu: config.cpu,
-            boot: VirtBootChoice::Nothing,
+            boot: VirtBootChoice::Firmware,
             firmware_path: String::new(),
             vars_path: String::new(),
             kernel_path: String::new(),
@@ -733,11 +732,13 @@ impl VirtSettings {
             .to_string());
         }
         let boot = match self.boot {
-            VirtBootChoice::Nothing => ArmBoot::Unset,
-            VirtBootChoice::Firmware => ArmBoot::Firmware {
-                code: trimmed_optional_path(&self.firmware_path)
-                    .ok_or_else(|| "Firmware path is required to boot firmware".to_owned())?,
-                vars: trimmed_optional_path(&self.vars_path),
+            // An empty firmware path boots the bundled EDK2 from the disk.
+            VirtBootChoice::Firmware => match trimmed_optional_path(&self.firmware_path) {
+                None => ArmBoot::Unset,
+                Some(code) => ArmBoot::Firmware {
+                    code,
+                    vars: trimmed_optional_path(&self.vars_path),
+                },
             },
             VirtBootChoice::Kernel => ArmBoot::Linux {
                 kernel: trimmed_optional_path(&self.kernel_path)
@@ -1191,6 +1192,7 @@ impl PowerOnGap {
             crate::config::MachineConfig::Pc(pc) => pc,
             crate::config::MachineConfig::ArmVirt(virt) => {
                 return match virt.boot {
+                    crate::config::ArmBoot::Unset if virt.disk.is_some() => None,
                     crate::config::ArmBoot::Unset => Some(Self::VirtBoot),
                     crate::config::ArmBoot::Firmware { .. } | crate::config::ArmBoot::Linux { .. } => None,
                 };
@@ -3053,7 +3055,6 @@ impl NativeShellApp {
                 ui.add_enabled_ui(editable, |ui| {
                     field_row(ui, "Boots", |ui| {
                         for (choice, label) in [
-                            (VirtBootChoice::Nothing, "Nothing yet"),
                             (VirtBootChoice::Firmware, "UEFI firmware"),
                             (VirtBootChoice::Kernel, "Linux kernel"),
                         ] {
@@ -3062,8 +3063,16 @@ impl NativeShellApp {
                     });
                     let mut path_row = |ui: &mut egui::Ui, label: &str, text: &mut String, target| {
                         field_row(ui, label, |ui| {
+                            let hint = match target {
+                                BrowseTarget::Firmware => "built-in EDK2 (boots the Hard Disk / ISO)",
+                                _ => "",
+                            };
                             changed |= ui
-                                .add(egui::TextEdit::singleline(text).desired_width(path_field_width(ui)))
+                                .add(
+                                    egui::TextEdit::singleline(text)
+                                        .hint_text(hint)
+                                        .desired_width(path_field_width(ui)),
+                                )
                                 .changed();
                             if ui.button(BROWSE).clicked() {
                                 browse = Some(target);
@@ -3071,7 +3080,6 @@ impl NativeShellApp {
                         });
                     };
                     match virt.boot {
-                        VirtBootChoice::Nothing => {}
                         VirtBootChoice::Firmware => {
                             path_row(ui, "Firmware", &mut virt.firmware_path, BrowseTarget::Firmware);
                             path_row(ui, "Variable store", &mut virt.vars_path, BrowseTarget::FirmwareVars);

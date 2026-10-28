@@ -97,7 +97,7 @@ A VM is a PC or an Arm `virt` board, QEMU's `virt` machine with one processor, a
   | --- | --- |
   | Memory | Guest memory, from 1 MB up to what the board maps below its high PCIe window |
   | Processors | The model (`Cortex-A57 (Armv8.0)` or `Armv9.2 with SME2`) and the IPS target guest time counts instructions at |
-  | Boot | `Nothing yet`, `UEFI firmware` (firmware and variable-store paths) or `Linux kernel` (an arm64 `Image`, an initrd, a device tree and the command line) |
+  | Boot | `UEFI firmware` (firmware and variable-store paths; an empty firmware path boots the bundled EDK2 from the Hard Disk / ISO) or `Linux kernel` (an arm64 `Image`, an initrd, a device tree and the command line) |
   | Hard Disk | As a PC's, with the new-disk sheet: the raw image behind a virtio-blk, which Linux sees as `/dev/vda` and EDK2 boots from. `Advanced` holds `Read-only` (the guest reads the disk and cannot write it, as QEMU's `readonly=on`), which the disk's card then shows as `· read-only`. A disk the sheet makes is one the guest writes; a file chosen with `Change` keeps the setting |
   | Display | `virtio-gpu`, and the size it asks the guest for: a preset from 800 × 600 to 1920 × 1080, or any width and height; the log level |
   | Input | A virtio `Keyboard` and a virtio `Tablet (absolute pointer)` |

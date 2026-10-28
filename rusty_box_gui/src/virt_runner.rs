@@ -58,11 +58,6 @@ const FRAME_INTERVAL: Duration = Duration::from_millis(40);
 #[cfg(feature = "gui-egui")]
 const IPS_INTERVAL: Duration = Duration::from_secs(1);
 
-/// How far guest time may fall behind the host's before the pacing stops
-/// owing it: past this the guest is measured from now, so a guest that was
-/// slower than real time for a while does not then race its timers to catch
-/// up.
-const MAX_LAG: Duration = Duration::from_millis(100);
 
 /// How long host input waits for a guest that takes none of it before it is
 /// dropped: a guest that reads no input for that long (its driver not loaded
@@ -82,6 +77,10 @@ const INPUT_BACKLOG: usize = 1 << 16;
 struct BootFiles {
     boot: BootImage,
 }
+
+/// EDK2 for QEMU's `virt` board (retrage/edk2-nightly RELEASEAARCH64_QEMU_EFI.fd),
+/// shipped in the binary so a VM needs only a disk to boot.
+const BUNDLED_EDK2: &[u8] = include_bytes!("../firmware/QEMU_EFI.fd");
 
 enum BootImage {
     Firmware {
@@ -108,6 +107,11 @@ struct VariableStore {
 impl BootFiles {
     fn read(config: &ArmVirtConfig) -> Result<Self, RunError> {
         let boot = match &config.boot {
+            // A disk alone (an ISO or a raw image) boots the bundled EDK2.
+            ArmBoot::Unset if config.disk.is_some() => BootImage::Firmware {
+                code: BUNDLED_EDK2.to_vec(),
+                vars: None,
+            },
             ArmBoot::Unset => return Err(RunError::MissingVirtBoot),
             ArmBoot::Firmware { code, vars } => BootImage::Firmware {
                 code: read_required_file("firmware", code)?,
@@ -316,43 +320,6 @@ fn settle(outcome: BatchOutcome) -> Result<Settled, RunError> {
     }
 }
 
-/// Keeps guest time from running ahead of the host's.
-struct Pacer {
-    since: Instant,
-    since_ticks: u64,
-    ips: u64,
-}
-
-impl Pacer {
-    fn new(machine: &Virt, ips: u32) -> Self {
-        Self {
-            since: Instant::now(),
-            since_ticks: machine.ticks(),
-            ips: u64::from(ips),
-        }
-    }
-
-    /// Measures from here: after a pause, the host time the machine stood
-    /// still is not owed to it.
-    fn restart(&mut self, machine: &Virt) {
-        self.since = Instant::now();
-        self.since_ticks = machine.ticks();
-    }
-
-    /// Sleeps off guest time that ran ahead of the host's; forgives a lag
-    /// past [`MAX_LAG`].
-    fn keep_pace(&mut self, machine: &Virt) {
-        let ticks = machine.ticks().saturating_sub(self.since_ticks);
-        let nanos = u128::from(ticks) * 1_000_000_000 / u128::from(self.ips);
-        let guest = Duration::from_nanos(u64::try_from(nanos).unwrap_or(u64::MAX));
-        let host = self.since.elapsed();
-        match guest.checked_sub(host) {
-            Some(ahead) => std::thread::sleep(ahead.min(SLICE)),
-            None if host - guest > MAX_LAG => self.restart(machine),
-            None => {}
-        }
-    }
-}
 
 /// The guest's serial output since the last call.
 fn take_serial_output(machine: &mut Virt) -> Vec<u8> {
@@ -396,8 +363,9 @@ fn drive_on_console(
     config: &ArmVirtConfig,
     mut terminal: Option<&mut RawTerminal>,
 ) -> Result<(), RunError> {
+    // Bochs `clock: sync=none`: the guest runs as fast as the host allows,
+    // its time counted in ticks at `ips`.
     let slice = slice_ticks(config.ips);
-    let mut pacer = Pacer::new(machine, config.ips);
     loop {
         let outcome = machine.step(RunBudget::Ticks(slice));
         report_disk_error(machine, config);
@@ -412,7 +380,7 @@ fn drive_on_console(
             }
         }
         match settle(outcome)? {
-            Settled::RunOn => pacer.keep_pace(machine),
+            Settled::RunOn => {}
             Settled::Over => return Ok(()),
         }
     }
@@ -653,8 +621,8 @@ fn drive_in_shell(
     window: &mut ShellWindow<'_>,
     control: &RunControl,
 ) -> Result<(), RunError> {
+    // Bochs `clock: sync=none`, as in the headless loop.
     let slice = slice_ticks(config.ips);
-    let mut pacer = Pacer::new(machine, config.ips);
     let stop_flag = Arc::clone(control.stop_flag());
     loop {
         if stop_flag.load(std::sync::atomic::Ordering::Relaxed) {
@@ -662,7 +630,6 @@ fn drive_in_shell(
                 AfterRun::End => return Ok(()),
                 AfterRun::Serve => match serve(machine, control, window)? {
                     Next::Resume => {
-                        pacer.restart(machine);
                         window.restart_rate(machine);
                         continue;
                     }
@@ -675,7 +642,7 @@ fn drive_in_shell(
         window.pump_input(machine);
         window.present(machine, Presenting::WhenDue);
         match settle(outcome)? {
-            Settled::RunOn => pacer.keep_pace(machine),
+            Settled::RunOn => {}
             Settled::Over => return Ok(()),
         }
     }
