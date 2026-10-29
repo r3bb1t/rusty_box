@@ -54,13 +54,27 @@ impl Ram {
 }
 
 impl PhysBus for Ram {
-    fn read(&mut self, addr: PhysAddr, width: AccessWidth, _clock: VmClock) -> Result<u64, BusFault> {
+    fn read(
+        &mut self,
+        addr: PhysAddr,
+        width: AccessWidth,
+        _clock: VmClock,
+    ) -> Result<u64, BusFault> {
         let n = width.bytes();
         let a = Self::offset(addr.get(), n).ok_or(BusFault::Unmapped)?;
-        Ok(self.0[a..a + n as usize].iter().rev().fold(0, |v, &b| (v << 8) | u64::from(b)))
+        Ok(self.0[a..a + n as usize]
+            .iter()
+            .rev()
+            .fold(0, |v, &b| (v << 8) | u64::from(b)))
     }
 
-    fn write(&mut self, addr: PhysAddr, width: AccessWidth, value: u64, _clock: VmClock) -> Result<(), BusFault> {
+    fn write(
+        &mut self,
+        addr: PhysAddr,
+        width: AccessWidth,
+        value: u64,
+        _clock: VmClock,
+    ) -> Result<(), BusFault> {
         let n = width.bytes();
         let a = Self::offset(addr.get(), n).ok_or(BusFault::Unmapped)?;
         for (i, b) in self.0[a..a + n as usize].iter_mut().enumerate() {
@@ -120,7 +134,8 @@ fn hex(s: &str) -> u64 {
 
 fn field<'a>(part: Option<&'a str>, key: &str) -> &'a str {
     let part = part.unwrap_or_else(|| panic!("no {key}="));
-    part.strip_prefix(key).unwrap_or_else(|| panic!("{part} is not {key}"))
+    part.strip_prefix(key)
+        .unwrap_or_else(|| panic!("{part} is not {key}"))
 }
 
 fn parse(line: &str) -> Vector<'_> {
@@ -170,10 +185,12 @@ fn replay(v: &Vector<'_>, ram: &mut Ram) -> Outcome {
     let mut cpu = Cpu::<WithEl2>::implementing(
         CpuConfig {
             ips: hz,
-            counter_hz: hz,
             reset_pc: RUNNER,
         },
-        Implementation::CORTEX_A57,
+        Implementation {
+            counter_hz: hz,
+            ..Implementation::CORTEX_A57
+        },
     );
     cpu.el2_state.regs.vbar = EL2_VECTORS;
     cpu.sys.vbar_el1 = EL1_VECTORS;
@@ -184,7 +201,14 @@ fn replay(v: &Vector<'_>, ram: &mut Ram) -> Outcome {
         }
     }
     ram.put32(SLOT, v.word);
-    ram.put32(SLOT + 4, if v.target == 0 { SVC_SENTINEL } else { HVC_SENTINEL });
+    ram.put32(
+        SLOT + 4,
+        if v.target == 0 {
+            SVC_SENTINEL
+        } else {
+            HVC_SENTINEL
+        },
+    );
     cpu.x[0] = v.x0;
     if v.target == 2 {
         // The runner branches to the slot after `cmp x3, #2` found the
@@ -201,7 +225,13 @@ fn replay(v: &Vector<'_>, ram: &mut Ram) -> Outcome {
         assert_eq!(cpu.pc, SLOT, "{}: the runner's ERET", v.family);
     }
     for _ in 0..4 {
-        assert_eq!(cpu.step(ram, &mut NoInstrumentation), Step::Retired, "{} {:#010x}", v.family, v.word);
+        assert_eq!(
+            cpu.step(ram, &mut NoInstrumentation),
+            Step::Retired,
+            "{} {:#010x}",
+            v.family,
+            v.word
+        );
         let at_vector = |base: u64| cpu.pc & !0x7FF == base;
         if at_vector(EL2_VECTORS) {
             assert_eq!(cpu.pstate.el, El::El2);
@@ -235,7 +265,10 @@ fn replay(v: &Vector<'_>, ram: &mut Ram) -> Outcome {
             };
         }
     }
-    panic!("{} {:#010x}: no exception after four steps, PC {:#x}", v.family, v.word, cpu.pc)
+    panic!(
+        "{} {:#010x}: no exception after four steps, PC {:#x}",
+        v.family, v.word, cpu.pc
+    )
 }
 
 fn completed(cpu: &Cpu<WithEl2>) -> Outcome {
@@ -282,5 +315,10 @@ fn the_el2_cases_end_as_on_qemu() {
     }
     assert!(count > 0);
     std::eprintln!("{count} EL2 vectors, {} disagreements", failures.len());
-    assert!(failures.is_empty(), "{} disagreements:\n{}", failures.len(), failures.join("\n"));
+    assert!(
+        failures.is_empty(),
+        "{} disagreements:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
 }

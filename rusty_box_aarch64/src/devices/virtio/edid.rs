@@ -89,7 +89,8 @@ fn generate_timings(refresh_rate: u32, xres: u32, yres: u32) -> Timings {
         yfront: yres * 5 / 1000,
         ysync: yres * 5 / 1000,
         yblank,
-        clock: u64::from(refresh_rate) * u64::from(xres + xblank) * u64::from(yres + yblank) / 10_000_000,
+        clock: u64::from(refresh_rate) * u64::from(xres + xblank) * u64::from(yres + yblank)
+            / 10_000_000,
     }
 }
 
@@ -155,7 +156,10 @@ fn fill_modes(edid: &mut [u8], xtra3: Option<usize>, dta: Option<usize>) {
 /// QEMU `edid_checksum`: make `len` bytes from `at` and the one after sum
 /// to 0 mod 256.
 fn checksum(edid: &mut [u8], at: usize, len: usize) {
-    let sum = edid[at..at + len].iter().fold(0u32, |s, &b| s + u32::from(b)) & 0xFF;
+    let sum = edid[at..at + len]
+        .iter()
+        .fold(0u32, |s, &b| s + u32::from(b))
+        & 0xFF;
     if sum != 0 {
         edid[at + len] = (0x100 - sum) as u8;
     }
@@ -200,7 +204,15 @@ fn desc_ranges(edid: &mut [u8], desc: usize) {
 }
 
 /// QEMU `edid_desc_timing`: the preferred mode's detailed timing.
-fn desc_timing(edid: &mut [u8], desc: usize, t: &Timings, xres: u32, yres: u32, xmm: u32, ymm: u32) {
+fn desc_timing(
+    edid: &mut [u8],
+    desc: usize,
+    t: &Timings,
+    xres: u32,
+    yres: u32,
+    xmm: u32,
+    ymm: u32,
+) {
     let d = &mut edid[desc..desc + 18];
     d[..2].copy_from_slice(&(t.clock as u16).to_le_bytes());
     d[2] = xres as u8;
@@ -212,7 +224,10 @@ fn desc_timing(edid: &mut [u8], desc: usize, t: &Timings, xres: u32, yres: u32, 
     d[8] = t.xfront as u8;
     d[9] = t.xsync as u8;
     d[10] = (((t.yfront & 0x00F) << 4) | (t.ysync & 0x00F)) as u8;
-    d[11] = (((t.xfront & 0x300) >> 2) | ((t.xsync & 0x300) >> 4) | ((t.yfront & 0x030) >> 2) | ((t.ysync & 0x030) >> 4)) as u8;
+    d[11] = (((t.xfront & 0x300) >> 2)
+        | ((t.xsync & 0x300) >> 4)
+        | ((t.yfront & 0x030) >> 2)
+        | ((t.ysync & 0x030) >> 4)) as u8;
     d[12] = xmm as u8;
     d[13] = ymm as u8;
     d[14] = (((xmm & 0xF00) >> 4) | ((ymm & 0xF00) >> 8)) as u8;
@@ -226,7 +241,10 @@ fn to_10bit(value: f32) -> u32 {
 
 /// QEMU `edid_colorspace` for the sRGB primaries and white point.
 fn colorspace(edid: &mut [u8]) {
-    let [rx, ry, gx, gy, bx, by, wx, wy] = [0.6400f32, 0.3300, 0.3000, 0.6000, 0.1500, 0.0600, 0.3127, 0.3290].map(to_10bit);
+    let [rx, ry, gx, gy, bx, by, wx, wy] = [
+        0.6400f32, 0.3300, 0.3000, 0.6000, 0.1500, 0.0600, 0.3127, 0.3290,
+    ]
+    .map(to_10bit);
     edid[25] = (((rx & 0x03) << 6) | ((ry & 0x03) << 4) | ((gx & 0x03) << 2) | (gy & 0x03)) as u8;
     edid[26] = (((bx & 0x03) << 6) | ((by & 0x03) << 4) | ((wx & 0x03) << 2) | (wy & 0x03)) as u8;
     for (i, v) in [rx, ry, gx, gy, bx, by, wx, wy].into_iter().enumerate() {
@@ -278,7 +296,10 @@ pub fn generate(prefx: u32, prefy: u32) -> [u8; EDID_LEN] {
     let mut edid = [0u8; EDID_LEN];
     let refresh_rate = 75_000;
     let dpi = 100;
-    let (prefx, prefy) = (if prefx == 0 { 1280 } else { prefx }, if prefy == 0 { 800 } else { prefy });
+    let (prefx, prefy) = (
+        if prefx == 0 { 1280 } else { prefx },
+        if prefy == 0 { 800 } else { prefy },
+    );
     let width_mm = dpi_to_mm(dpi, prefx);
     let height_mm = dpi_to_mm(dpi, prefy);
     let timings = generate_timings(refresh_rate, prefx, prefy);

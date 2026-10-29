@@ -18,8 +18,8 @@
 //! denormal flushed, rounding to nearest and no exception.
 
 use super::softfloat::{
-    softfloat_raise_flags, Handling, SoftFloatStatus, FLAG_INEXACT, FLAG_INVALID, FLAG_OVERFLOW, FLAG_UNDERFLOW,
-    ROUND_MINMAG,
+    softfloat_raise_flags, Handling, SoftFloatStatus, FLAG_INEXACT, FLAG_INVALID, FLAG_OVERFLOW,
+    FLAG_UNDERFLOW, ROUND_MINMAG,
 };
 use super::specialize::{f32_flush_input, float32_default_nan};
 use super::{f32_addsub, f32_mul, ArmFpStatus, FpRounding};
@@ -66,19 +66,36 @@ fn rounded_to_odd<F: FnOnce(&mut SoftFloatStatus) -> u32>(handling: Handling, op
 /// Arm BFMulH: the product of two BFloat16 values, in single precision.
 fn bf16_mul(a: u16, b: u16, handling: Handling) -> u32 {
     rounded_to_odd(handling, |s| {
-        f32_mul::f32_mul(unpacked(u32::from(a) << 16), unpacked(u32::from(b) << 16), s)
+        f32_mul::f32_mul(
+            unpacked(u32::from(a) << 16),
+            unpacked(u32::from(b) << 16),
+            s,
+        )
     })
 }
 
 /// Arm FPAdd_BF16: the sum of two single-precision values.
 fn bf16_add(a: u32, b: u32, handling: Handling) -> u32 {
-    rounded_to_odd(handling, |s| f32_addsub::f32_add(unpacked(a), unpacked(b), s))
+    rounded_to_odd(handling, |s| {
+        f32_addsub::f32_add(unpacked(a), unpacked(b), s)
+    })
 }
 
 /// BFDOT and BFMMLA on one element: Arm BFDotAdd without FEAT_EBF16,
 /// `addend + (op1_a*op2_a + op1_b*op2_b)`, under FPCR.AH (`handling`).
-pub(crate) fn bf16_dot_add(addend: u32, op1_a: u16, op1_b: u16, op2_a: u16, op2_b: u16, handling: Handling) -> u32 {
-    let product = bf16_add(bf16_mul(op1_a, op2_a, handling), bf16_mul(op1_b, op2_b, handling), handling);
+pub(crate) fn bf16_dot_add(
+    addend: u32,
+    op1_a: u16,
+    op1_b: u16,
+    op2_a: u16,
+    op2_b: u16,
+    handling: Handling,
+) -> u32 {
+    let product = bf16_add(
+        bf16_mul(op1_a, op2_a, handling),
+        bf16_mul(op1_b, op2_b, handling),
+        handling,
+    );
     bf16_add(addend, product, handling)
 }
 
@@ -108,7 +125,11 @@ fn to_bf16(a: u32, rounding: FpRounding, s: &mut SoftFloatStatus) -> u16 {
         if frac & 0x0040_0000 == 0 {
             softfloat_raise_flags(s, FLAG_INVALID);
         }
-        let nan = if s.default_nan_mode { float32_default_nan(s) } else { a | 0x0040_0000 };
+        let nan = if s.default_nan_mode {
+            float32_default_nan(s)
+        } else {
+            a | 0x0040_0000
+        };
         return (nan >> 16) as u16;
     }
     let truncated = a >> 16;

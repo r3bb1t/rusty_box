@@ -37,16 +37,22 @@ mod fp_estimate;
 #[cfg(test)]
 #[path = "../../tests/unit/fp_extensions.rs"]
 mod fp_extensions;
+mod history;
 mod isa;
 mod ldst;
+#[cfg(test)]
+#[path = "../../tests/unit/load_store.rs"]
+mod load_store;
 #[cfg(test)]
 #[path = "../../tests/unit/memory_system.rs"]
 mod memory_system;
 mod mmu;
+mod op;
 mod pauth;
 #[cfg(test)]
 #[path = "../../tests/unit/pointer_auth.rs"]
 mod pointer_auth;
+mod poll;
 #[cfg(test)]
 #[path = "../../tests/unit/pstate_features.rs"]
 mod pstate_features;
@@ -69,24 +75,30 @@ mod sysreg;
 mod sysreg_spec;
 mod system;
 mod timer;
+mod trace;
 mod wait;
 mod za;
 mod za_array;
 mod zt0;
 
-use rusty_box_core::{ClockHz, RingBuffer, VmClock, VmInstant};
+use rusty_box_core::{ClockHz, VmClock, VmInstant};
 
 use el2::El2Storage;
 
+pub use el2::{Levels, NoEl2, WithEl2};
 pub use exception::ExceptionClass;
 pub use exec::{DebugStops, Step, StopCause, UndefinedInsn};
-pub use el2::{Levels, NoEl2, WithEl2};
-pub(crate) use features::Implementation;
-pub(crate) use system::PsciConduit;
+pub use features::{
+    CpuModel, El2Unavailable, UnknownCpuModel, ARMV8P6_COUNTER_HZ, QEMU_BACKCOMPAT_COUNTER_HZ,
+};
+pub use history::RecentPcs;
 pub use mmu::{Tlb, TranslationFault};
 pub use regs::{CpuState, CpuStateEl2, PstateRefusal, Reg, SysReg, SysRegRefusal, VReg};
+pub(crate) use system::{PsciConduit, PsciNode};
 pub use timer::{TimerLines, VirtualCount};
 pub use wait::Wait;
+
+use exec::Nzcv;
 
 /// An exception level this architecture's AArch64 state names, short of
 /// EL3.
@@ -323,9 +335,23 @@ impl Pstate {
     /// `NZCV` in its register layout (bits 31:28).
     #[inline]
     pub const fn nzcv(self) -> u64 {
-        ((self.n as u64) << 31) | ((self.z as u64) << 30) | ((self.c as u64) << 29) | ((self.v as u64) << 28)
+        ((self.n as u64) << 31)
+            | ((self.z as u64) << 30)
+            | ((self.c as u64) << 29)
+            | ((self.v as u64) << 28)
     }
 
+    /// Set N, Z, C and V to `flags`.
+    #[inline]
+    pub(crate) fn set_flags(&mut self, flags: Nzcv) {
+        self.n = flags.n;
+        self.z = flags.z;
+        self.c = flags.c;
+        self.v = flags.v;
+    }
+
+    /// Set N, Z, C and V from `NZCV` in its register layout (bits 31:28),
+    /// as an `MSR NZCV` does; every other bit of `bits` is ignored.
     #[inline]
     pub fn set_nzcv(&mut self, bits: u64) {
         self.n = bits & (1 << 31) != 0;
@@ -337,9 +363,14 @@ impl Pstate {
     /// `DAIF` in its register layout (bits 9:6).
     #[inline]
     pub const fn daif(self) -> u64 {
-        ((self.d as u64) << 9) | ((self.a as u64) << 8) | ((self.i as u64) << 7) | ((self.f as u64) << 6)
+        ((self.d as u64) << 9)
+            | ((self.a as u64) << 8)
+            | ((self.i as u64) << 7)
+            | ((self.f as u64) << 6)
     }
 
+    /// Set D, A, I and F from `DAIF` in its register layout (bits 9:6), as
+    /// an `MSR DAIF` does; every other bit of `bits` is ignored.
     #[inline]
     pub fn set_daif(&mut self, bits: u64) {
         self.d = bits & (1 << 9) != 0;
@@ -349,26 +380,15 @@ impl Pstate {
     }
 }
 
-/// Construction parameters for a processor.
+/// Construction parameters for a processor, beyond its model, which sets
+/// the system counter's frequency ([`CpuModel::counter_hz`]).
 #[derive(Debug, Clone, Copy)]
 pub struct CpuConfig {
     /// Emulated instructions per second: the rate of the tick count, and so
     /// of every clock derived from it (Bochs `cpu: ips`).
     pub ips: ClockHz,
-    /// The system counter's frequency, which is what `CNTPCT_EL0` counts at
-    /// and what `CNTFRQ_EL0` reads at reset. QEMU's `virt` (machine types
-    /// before 9.0) runs it at 62.5 MHz.
-    pub counter_hz: ClockHz,
     /// The address execution starts at.
     pub reset_pc: u64,
-}
-
-impl CpuConfig {
-    /// QEMU's `virt` system counter frequency (`GTIMER_SCALE` 16 ns).
-    pub const QEMU_VIRT_COUNTER_HZ: ClockHz = match ClockHz::new(62_500_000) {
-        Some(hz) => hz,
-        None => ClockHz::BOCHS_DEFAULT,
-    };
 }
 
 /// What the processor is doing between instructions.
@@ -385,8 +405,22 @@ pub enum Activity {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ExclusiveMonitor {
     pub(crate) armed: bool,
+    /// The physical address of the monitored granule.
     pub(crate) addr: u64,
+    /// The virtual address the load-exclusive used, which a store-exclusive
+    /// compares first (Arm ARM `AArch64.IsExclusiveVA`).
+    pub(crate) va: u64,
     pub(crate) bytes: u64,
+}
+
+impl ExclusiveMonitor {
+    /// Open Access: no granule monitored.
+    pub(crate) const CLEAR: Self = Self {
+        armed: false,
+        addr: 0,
+        va: 0,
+        bytes: 0,
+    };
 }
 
 /// System registers that are plain storage, plus the ones whose effects the
@@ -435,24 +469,27 @@ pub(crate) struct SysRegs {
     pub(crate) dbgbcr: [u64; 2],
     pub(crate) dbgwvr: [u64; 2],
     pub(crate) dbgwcr: [u64; 2],
+    /// The Debug Communications Channel's data registers, DTRRX and DTRTX,
+    /// 32 bits each; their flags, RXfull and TXfull, are in `mdscr_el1`.
+    pub(crate) dtrrx: u32,
+    pub(crate) dtrtx: u32,
     /// `DISR_EL1` (FEAT_RAS): with no source of SError interrupts, only an
     /// `MSR` writes it.
     pub(crate) disr_el1: u64,
-    /// `RMR_EL1`, or with FEAT_EL2 `RMR_EL2`: the reset management register
-    /// of the highest implemented level. `AA64` (bit 0) reads as one, the
-    /// only state this processor resets into; `RR` (bit 1) holds a warm
-    /// reset request, which this board's reset controller does not act on
-    /// (Arm: "the bit is strictly a request").
+    /// `RVBAR_EL1`, or with FEAT_EL2 `RVBAR_EL2`: the reset vector base
+    /// address of the highest implemented level, the address execution
+    /// started from at the last reset (Arm `AArch64_TakeReset` branches to
+    /// it).
+    pub(crate) rvbar: u64,
+    /// `RMR_EL1`'s, or with FEAT_EL2 `RMR_EL2`'s, stored field: `RR` (bit
+    /// 1), a Warm reset request, which this board's reset controller does
+    /// not act on (Arm: "the bit is strictly a request"). `AA64` (bit 0)
+    /// reads as one, the only state this processor resets into.
     pub(crate) rmr: u64,
 }
 
-/// `RMR_ELx.AA64`: RAO/WI, reset into AArch64 the only choice.
-pub(crate) const RMR_AA64: u64 = 1 << 0;
-/// `RMR_ELx.RR`: a warm reset request.
-pub(crate) const RMR_RR: u64 = 1 << 1;
-
 impl SysRegs {
-    fn reset(counter_hz: ClockHz) -> Self {
+    fn reset(counter_hz: ClockHz, reset_pc: u64) -> Self {
         Self {
             sctlr_el1: id::SCTLR_EL1_RESET,
             actlr_el1: 0,
@@ -494,8 +531,11 @@ impl SysRegs {
             dbgbcr: [0; 2],
             dbgwvr: [0; 2],
             dbgwcr: [0; 2],
+            dtrrx: 0,
+            dtrtx: 0,
             disr_el1: 0,
-            rmr: RMR_AA64,
+            rvbar: reset_pc,
+            rmr: 0,
         }
     }
 }
@@ -515,10 +555,6 @@ pub struct Cpu<L: Levels> {
     pub(crate) el2_state: L::State,
     pub(crate) pc: u64,
     pub(crate) pstate: Pstate,
-    /// The IMPLEMENTATION DEFINED reset address `RVBAR_EL1`, or with
-    /// FEAT_EL2 `RVBAR_EL2`, reports: the `reset_pc` the processor was built
-    /// with, whatever a boot path later starts it at.
-    pub(crate) rvbar: u64,
     /// SIMD&FP registers V0..V31, little-endian lanes in a `u128`: the low
     /// 128 bits of Z0..Z31. Every write goes through `write_v`.
     pub(crate) v: [u128; 32],
@@ -538,7 +574,19 @@ pub struct Cpu<L: Levels> {
     pub(crate) monitor: ExclusiveMonitor,
     pub(crate) event: wait::EventRegister,
     pub(crate) tlb: Tlb,
-    pub(crate) decode_cache: decode::DecodeCache,
+    pub(crate) traces: trace::TraceCache,
+    /// Set by anything that may change how the next instruction is fetched
+    /// or found — a TLB fill or flush, a write over cached code, a cache
+    /// invalidation — so that the running trace stops after the current
+    /// instruction. Cleared when a trace starts.
+    pub(crate) trace_break: bool,
+    /// Arm `InGuardedPage` (FEAT_BTI) of the instruction executing: whether
+    /// the page its fetch translated is guarded, as that translation found
+    /// it (`Cpu::fetch_translate`). Every fetch translates before its
+    /// instruction runs, but those of a trace's later instructions, which
+    /// are on its first one's page; so it is not saved, and the first fetch
+    /// after a restore sets it.
+    pub(crate) in_guarded_page: bool,
     pub(crate) activity: Activity,
     /// Ticks since the machine was built: one per retired (or faulting)
     /// instruction, plus the span skipped while waiting.
@@ -547,7 +595,6 @@ pub struct Cpu<L: Levels> {
     /// the machine was built — `icount` without the waiting.
     pub(crate) retired: u64,
     pub(crate) ips: ClockHz,
-    pub(crate) counter_hz: ClockHz,
     /// Set when a register write may have changed a timer's output line or
     /// next deadline; the machine re-evaluates and clears it.
     pub(crate) timer_dirty: bool,
@@ -556,14 +603,18 @@ pub struct Cpu<L: Levels> {
     pub(crate) irq_line: bool,
     pub(crate) fiq_line: bool,
     pub(crate) debug_stops: DebugStops,
-    pub(crate) pc_history: RingBuffer<u64, PC_HISTORY>,
+    /// Where the last [`PC_HISTORY`] instructions ran. Every write of `pc`
+    /// other than the step to the next sequential instruction tells it.
+    pub(crate) history: history::PcHistory,
 }
 
 impl<L: Levels> Cpu<L> {
-    /// A processor in its reset state, shaped like the Cortex-A57
-    /// ([`id`]).
-    pub fn new(config: CpuConfig) -> Self {
-        Self::implementing(config, features::Implementation::CORTEX_A57)
+    /// A processor of `model` in its reset state, with EL2 where its level
+    /// set has it; refused for a model that cannot have EL2 when the level
+    /// set does ([`CpuModel::check_levels`]).
+    pub fn new(model: CpuModel, config: CpuConfig) -> Result<Self, El2Unavailable> {
+        model.check_levels::<L>()?;
+        Ok(Self::implementing(config, model.implementation()))
     }
 
     /// A processor implementing `imp` and the levels `L`, in its reset
@@ -575,10 +626,9 @@ impl<L: Levels> Cpu<L> {
             x: [0; 31],
             sp_el0: 0,
             sp_el1: 0,
-            el2_state: L::State::keep(el2::El2State::reset(imp.features)),
+            el2_state: L::State::keep(el2::El2State::reset(imp)),
             pc: config.reset_pc,
             pstate: Pstate::reset::<L>(),
-            rvbar: config.reset_pc,
             v: [0; 32],
             fpcr: 0,
             fpsr: 0,
@@ -586,20 +636,17 @@ impl<L: Levels> Cpu<L> {
             scalable: sme::ScalableRegs::ZERO,
             pac_keys: pauth::PacKeys::ZERO,
             imp,
-            sys: SysRegs::reset(config.counter_hz),
-            monitor: ExclusiveMonitor {
-                armed: false,
-                addr: 0,
-                bytes: 0,
-            },
+            sys: SysRegs::reset(imp.counter_hz, config.reset_pc),
+            monitor: ExclusiveMonitor::CLEAR,
             event: wait::EventRegister::at(false, timer::Count::new(0)),
             tlb: Tlb::new(),
-            decode_cache: decode::DecodeCache::new(imp.features),
+            traces: trace::TraceCache::new(),
+            trace_break: false,
+            in_guarded_page: false,
             activity: Activity::Running,
             icount: 0,
             retired: 0,
             ips: config.ips,
-            counter_hz: config.counter_hz,
             timer_dirty: true,
             irq_line: false,
             fiq_line: false,
@@ -607,7 +654,7 @@ impl<L: Levels> Cpu<L> {
                 on_undefined: false,
                 on_bus_fault: false,
             },
-            pc_history: RingBuffer::new(),
+            history: history::PcHistory::new(config.reset_pc, 0),
         }
     }
 
@@ -683,9 +730,11 @@ impl<L: Levels> Cpu<L> {
         self.ips
     }
 
-    /// Recently executed instruction addresses, oldest first.
-    pub fn recent_pcs(&self) -> rusty_box_core::ring_buffer::Iter<'_, u64, PC_HISTORY> {
-        self.pc_history.iter()
+    /// Recently executed instruction addresses, oldest first: the last
+    /// [`PC_HISTORY`] instructions that retired or took an exception in
+    /// their place.
+    pub fn recent_pcs(&self) -> RecentPcs {
+        self.history.recent(self.retired)
     }
 
     // ----- register file -----

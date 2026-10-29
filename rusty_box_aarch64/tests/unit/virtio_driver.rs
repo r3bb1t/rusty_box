@@ -63,6 +63,9 @@ pub const DESC_INDIRECT: u16 = 4;
 
 /// Guest RAM the tests give the device.
 const RAM_SIZE: usize = 4 << 20;
+/// An address in no memory region: past the end of RAM, which QEMU's
+/// `virt` leaves unassigned, so `dma_memory_map` cannot map it.
+pub const UNASSIGNED: u64 = RAM_BASE + RAM_SIZE as u64;
 /// Where the driver's buffers start, above the rings.
 const BUFFERS: u64 = RAM_BASE + 0x10_0000;
 
@@ -132,7 +135,8 @@ impl Driver {
 
     pub fn write_width(&mut self, off: u64, width: AccessWidth, value: u64) {
         let mut ram = GuestRam::new(&mut self.ram);
-        self.transport.write(&mut ram, RegOffset::new(off), width, value);
+        self.transport
+            .write(&mut ram, RegOffset::new(off), width, value);
     }
 
     pub fn write(&mut self, off: u64, value: u32) {
@@ -269,7 +273,8 @@ impl Driver {
         for (i, b) in buffers.iter().enumerate() {
             let index = (head + i as u16) % size;
             let last = i + 1 == buffers.len();
-            let flags = if last { 0 } else { DESC_NEXT } | if b.device_writes { DESC_WRITE } else { 0 };
+            let flags =
+                if last { 0 } else { DESC_NEXT } | if b.device_writes { DESC_WRITE } else { 0 };
             self.put_desc(q, index, b.addr, b.len, flags, (index + 1) % size);
         }
         self.queues[q].next_desc = (head + buffers.len() as u16) % size;
@@ -283,7 +288,8 @@ impl Driver {
         let table = self.alloc(16 * buffers.len() as u64);
         for (i, b) in buffers.iter().enumerate() {
             let last = i + 1 == buffers.len();
-            let flags = if last { 0 } else { DESC_NEXT } | if b.device_writes { DESC_WRITE } else { 0 };
+            let flags =
+                if last { 0 } else { DESC_NEXT } | if b.device_writes { DESC_WRITE } else { 0 };
             self.put_desc_at(table + 16 * i as u64, b.addr, b.len, flags, i as u16 + 1);
         }
         let size = self.queues[q].size;

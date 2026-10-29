@@ -4,7 +4,7 @@
 //! comment on each names the encodings it accepts and the pseudocode helper
 //! it follows.
 
-use super::exec::{bit, bits, sext, ExecResult, Flow};
+use super::exec::{bit, bits, sext, ExecResult, Flow, Nzcv};
 use super::{Cpu, Levels};
 
 /// `AddWithCarry` result: the value and the flags it would set.
@@ -15,6 +15,19 @@ pub(crate) struct AddResult {
     pub(crate) z: bool,
     pub(crate) c: bool,
     pub(crate) v: bool,
+}
+
+impl AddResult {
+    /// The flags the result would set.
+    #[inline(always)]
+    pub(crate) const fn nzcv(&self) -> Nzcv {
+        Nzcv {
+            n: self.n,
+            z: self.z,
+            c: self.c,
+            v: self.v,
+        }
+    }
 }
 
 /// Arm ARM `AddWithCarry(x, y, carry_in)` at 64 or 32 bits.
@@ -111,7 +124,11 @@ pub(crate) const fn shift_reg(value: u64, shift: u32, amount: u32, size: u32) ->
         }
         2 => {
             let signed = sext(value, size) as i64;
-            let shifted = if amount >= 64 { signed >> 63 } else { signed >> amount };
+            let shifted = if amount >= 64 {
+                signed >> 63
+            } else {
+                signed >> amount
+            };
             (shifted as u64) & ones(size)
         }
         _ => ror(value, amount % size, size),
@@ -139,7 +156,13 @@ pub(crate) struct BitMasks {
 
 /// Arm ARM `DecodeBitMasks(immN, imms, immr, immediate)` for a `size`-bit
 /// operation. `None` where the pseudocode says UNDEFINED.
-pub(crate) fn decode_bit_masks(n: bool, imms: u32, immr: u32, immediate: bool, size: u32) -> Option<BitMasks> {
+pub(crate) fn decode_bit_masks(
+    n: bool,
+    imms: u32,
+    immr: u32,
+    immediate: bool,
+    size: u32,
+) -> Option<BitMasks> {
     let combined = (u32::from(n) << 6) | (!imms & 0x3F);
     if combined == 0 {
         return None;
@@ -168,17 +191,15 @@ pub(crate) fn decode_bit_masks(n: bool, imms: u32, immr: u32, immediate: bool, s
 }
 
 impl<L: Levels> Cpu<L> {
+    /// Set NZCV to the flags of an `AddWithCarry` result.
     #[inline]
-    fn set_flags(&mut self, r: AddResult) {
-        self.pstate.n = r.n;
-        self.pstate.z = r.z;
-        self.pstate.c = r.c;
-        self.pstate.v = r.v;
+    pub(super) fn set_flags(&mut self, r: AddResult) {
+        self.pstate.set_flags(r.nzcv());
     }
 
     /// Flags of a logical result: N and Z from the value, C and V cleared.
     #[inline]
-    fn set_logic_flags(&mut self, value: u64, sf: bool) {
+    pub(super) fn set_logic_flags(&mut self, value: u64, sf: bool) {
         let top = datasize(sf) - 1;
         self.pstate.n = (value >> top) & 1 != 0;
         self.pstate.z = value & ones(datasize(sf)) == 0;
@@ -220,7 +241,12 @@ impl<L: Levels> Cpu<L> {
         if shift == 3 || (!sf && amount >= 32) {
             return self.undefined(pc, insn);
         }
-        let op2 = shift_reg(self.x_or_zr(bits(insn, 20, 16)), shift, amount, datasize(sf));
+        let op2 = shift_reg(
+            self.x_or_zr(bits(insn, 20, 16)),
+            shift,
+            amount,
+            datasize(sf),
+        );
         let op1 = self.x_or_zr(bits(insn, 9, 5));
         let r = if bit(insn, 30) {
             add_with_carry(op1, !op2, true, sf)
@@ -241,7 +267,12 @@ impl<L: Levels> Cpu<L> {
         if amount > 4 || bits(insn, 23, 22) != 0 {
             return self.undefined(pc, insn);
         }
-        let op2 = extend_reg(self.x_or_zr(bits(insn, 20, 16)), bits(insn, 15, 13), amount, datasize(sf));
+        let op2 = extend_reg(
+            self.x_or_zr(bits(insn, 20, 16)),
+            bits(insn, 15, 13),
+            amount,
+            datasize(sf),
+        );
         let op1 = self.x_or_sp(bits(insn, 9, 5));
         let r = if bit(insn, 30) {
             add_with_carry(op1, !op2, true, sf)
@@ -282,7 +313,13 @@ impl<L: Levels> Cpu<L> {
         if !sf && n {
             return self.undefined(pc, insn);
         }
-        let Some(masks) = decode_bit_masks(n, bits(insn, 15, 10), bits(insn, 21, 16), true, datasize(sf)) else {
+        let Some(masks) = decode_bit_masks(
+            n,
+            bits(insn, 15, 10),
+            bits(insn, 21, 16),
+            true,
+            datasize(sf),
+        ) else {
             return self.undefined(pc, insn);
         };
         let op1 = self.x_or_zr(bits(insn, 9, 5));
@@ -312,7 +349,12 @@ impl<L: Levels> Cpu<L> {
             return self.undefined(pc, insn);
         }
         let size = datasize(sf);
-        let mut op2 = shift_reg(self.x_or_zr(bits(insn, 20, 16)), bits(insn, 23, 22), amount, size);
+        let mut op2 = shift_reg(
+            self.x_or_zr(bits(insn, 20, 16)),
+            bits(insn, 23, 22),
+            amount,
+            size,
+        );
         if bit(insn, 21) {
             op2 = !op2 & ones(size);
         }
@@ -378,7 +420,11 @@ impl<L: Levels> Cpu<L> {
         };
         let rd = bits(insn, 4, 0);
         let src = self.x_or_zr(bits(insn, 9, 5)) & ones(size);
-        let dst = if opc == 1 { self.x_or_zr(rd) & ones(size) } else { 0 };
+        let dst = if opc == 1 {
+            self.x_or_zr(rd) & ones(size)
+        } else {
+            0
+        };
         let bot = (dst & !masks.wmask) | (ror(src, immr, size) & masks.wmask);
         let top = if opc == 0 {
             if (src >> imms) & 1 != 0 {
@@ -416,7 +462,9 @@ impl<L: Levels> Cpu<L> {
             return self.undefined(pc, insn);
         }
         if self.condition_holds(bits(insn, 3, 0)) {
-            Ok(Flow::Jump(pc.wrapping_add(sext(u64::from(bits(insn, 23, 5)) << 2, 21))))
+            Ok(Flow::Jump(
+                pc.wrapping_add(sext(u64::from(bits(insn, 23, 5)) << 2, 21)),
+            ))
         } else {
             Ok(Flow::Next)
         }
@@ -427,7 +475,9 @@ impl<L: Levels> Cpu<L> {
         let sf = bit(insn, 31);
         let value = self.x_or_zr(bits(insn, 4, 0)) & ones(datasize(sf));
         if (value == 0) != bit(insn, 24) {
-            Ok(Flow::Jump(pc.wrapping_add(sext(u64::from(bits(insn, 23, 5)) << 2, 21))))
+            Ok(Flow::Jump(
+                pc.wrapping_add(sext(u64::from(bits(insn, 23, 5)) << 2, 21)),
+            ))
         } else {
             Ok(Flow::Next)
         }
@@ -438,7 +488,9 @@ impl<L: Levels> Cpu<L> {
         let pos = (u32::from(bit(insn, 31)) << 5) | bits(insn, 23, 19);
         let set = (self.x_or_zr(bits(insn, 4, 0)) >> pos) & 1 != 0;
         if set == bit(insn, 24) {
-            Ok(Flow::Jump(pc.wrapping_add(sext(u64::from(bits(insn, 18, 5)) << 2, 16))))
+            Ok(Flow::Jump(
+                pc.wrapping_add(sext(u64::from(bits(insn, 18, 5)) << 2, 16)),
+            ))
         } else {
             Ok(Flow::Next)
         }
@@ -449,13 +501,20 @@ impl<L: Levels> Cpu<L> {
         if bit(insn, 31) {
             self.x[30] = pc.wrapping_add(4);
         }
-        Ok(Flow::Jump(pc.wrapping_add(sext(u64::from(bits(insn, 25, 0)) << 2, 28))))
+        Ok(Flow::Jump(
+            pc.wrapping_add(sext(u64::from(bits(insn, 25, 0)) << 2, 28)),
+        ))
     }
 
     /// BR/BLR/RET/ERET/DRPS: `1101011 opc op2 op3 Rn op4`, fetched from a
     /// guarded page or not (FEAT_BTI). The pointer authentication forms
     /// have a handler of their own ([`Cpu::exec_branch_auth`]).
-    pub(crate) fn exec_branch_reg(&mut self, pc: u64, insn: u32, in_guarded_page: bool) -> ExecResult {
+    pub(crate) fn exec_branch_reg(
+        &mut self,
+        pc: u64,
+        insn: u32,
+        in_guarded_page: bool,
+    ) -> ExecResult {
         let opc = bits(insn, 24, 21);
         let rn = bits(insn, 9, 5);
         if bits(insn, 20, 16) != 0x1F || bits(insn, 15, 10) != 0 || bits(insn, 4, 0) != 0 {
@@ -542,10 +601,14 @@ impl<L: Levels> Cpu<L> {
             (0, true) => x.reverse_bits(),
             (0, false) => u64::from((x as u32).reverse_bits()),
             (1, _) => {
-                let swapped = ((x & 0x00FF_00FF_00FF_00FF) << 8) | ((x >> 8) & 0x00FF_00FF_00FF_00FF);
+                let swapped =
+                    ((x & 0x00FF_00FF_00FF_00FF) << 8) | ((x >> 8) & 0x00FF_00FF_00FF_00FF);
                 swapped & ones(datasize(sf))
             }
-            (2, true) => u64::from((x as u32).swap_bytes()) | (u64::from(((x >> 32) as u32).swap_bytes()) << 32),
+            (2, true) => {
+                u64::from((x as u32).swap_bytes())
+                    | (u64::from(((x >> 32) as u32).swap_bytes()) << 32)
+            }
             (2, false) => u64::from((x as u32).swap_bytes()),
             (3, true) => x.swap_bytes(),
             (4, true) => u64::from(x.leading_zeros()),
@@ -639,10 +702,14 @@ impl<L: Levels> Cpu<L> {
     /// reg)[imm+3:imm]`), go into the flags `mask` selects, N to V from
     /// bit 3 to bit 0.
     pub(crate) fn exec_rmif(&mut self, insn: u32) -> ExecResult {
-        let flags = self.x_or_zr(bits(insn, 9, 5)).rotate_right(bits(insn, 20, 15)) & 0xF;
+        let flags = self
+            .x_or_zr(bits(insn, 9, 5))
+            .rotate_right(bits(insn, 20, 15))
+            & 0xF;
         let mask = u64::from(bits(insn, 3, 0));
         let nzcv = self.pstate.nzcv();
-        self.pstate.set_nzcv((nzcv & !(mask << 28)) | ((flags & mask) << 28));
+        self.pstate
+            .set_nzcv((nzcv & !(mask << 28)) | ((flags & mask) << 28));
         Ok(Flow::Next)
     }
 
@@ -670,9 +737,15 @@ mod tests {
     #[test]
     fn logical_immediates_decode_to_their_assembler_values() {
         // and x0, x1, #0xff  -> N=1 immr=0 imms=7
-        assert_eq!(decode_bit_masks(true, 7, 0, true, 64).map(|m| m.wmask), Some(0xFF));
+        assert_eq!(
+            decode_bit_masks(true, 7, 0, true, 64).map(|m| m.wmask),
+            Some(0xFF)
+        );
         // orr w0, w1, #0x80000000 -> N=0 immr=1 imms=0
-        assert_eq!(decode_bit_masks(false, 0, 1, true, 32).map(|m| m.wmask), Some(0x8000_0000));
+        assert_eq!(
+            decode_bit_masks(false, 0, 1, true, 32).map(|m| m.wmask),
+            Some(0x8000_0000)
+        );
         // and x0, x0, #0x5555555555555555 -> N=0 immr=0 imms=0b111100
         assert_eq!(
             decode_bit_masks(false, 0b111100, 0, true, 64).map(|m| m.wmask),
@@ -698,8 +771,14 @@ mod tests {
         assert_eq!(lsr, Some((u64::MAX, 0x0FFF_FFFF_FFFF_FFFF)));
         let src = 0x8000_0000_0000_0011u64;
         let ubfm = |m: BitMasks, r: u32| ror(src, r, 64) & m.wmask & m.tmask;
-        assert_eq!(decode_bit_masks(true, 62, 63, false, 64).map(|m| ubfm(m, 63)), Some(src << 1));
-        assert_eq!(decode_bit_masks(true, 63, 4, false, 64).map(|m| ubfm(m, 4)), Some(src >> 4));
+        assert_eq!(
+            decode_bit_masks(true, 62, 63, false, 64).map(|m| ubfm(m, 63)),
+            Some(src << 1)
+        );
+        assert_eq!(
+            decode_bit_masks(true, 63, 4, false, 64).map(|m| ubfm(m, 4)),
+            Some(src >> 4)
+        );
     }
 
     #[test]

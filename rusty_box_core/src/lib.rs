@@ -48,4 +48,7 @@ pub use run::{MixedProgress, Progress, RunBudget};
 pub use snap::{
     SnapError, SnapRead, SnapResult, SnapWrite, SnapshotSection, MAX_COUNT, MAX_SECTION_LEN,
 };
-pub use time::{ClockHz, HostClock, HostInstant, MicrosPhase, TimeOverflow, VmClock, VmDuration, VmInstant};
+pub use time::{
+    ClockHz, Cycles, HostClock, HostInstant, MicrosPhase, TimeOverflow, VmClock, VmDuration,
+    VmInstant,
+};

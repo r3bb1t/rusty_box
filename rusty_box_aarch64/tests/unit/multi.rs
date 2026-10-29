@@ -216,7 +216,11 @@ fn repeated(values: &[u64], count: usize) -> Vec<u64> {
 /// Predicate `n` holding `bits` in its low bits.
 fn set_p_bits(cpu: &mut Cpu<NoEl2>, n: u32, bits: u64) {
     let svl = cpu.current_svl();
-    cpu.set_p(n, svl, &Pv::from_bytes(&bits.to_le_bytes()[..svl.predicate_bytes()]));
+    cpu.set_p(
+        n,
+        svl,
+        &Pv::from_bytes(&bits.to_le_bytes()[..svl.predicate_bytes()]),
+    );
 }
 
 /// SEL takes element `e` of register `r` from the first group where the
@@ -234,7 +238,10 @@ fn sel_takes_each_element_from_the_first_group_where_the_counter_is_active() {
     set_p_bits(&mut cpu, 8, (20 << 1) | 1);
     assert_eq!(exec(&mut cpu, SEL_2_B), None);
     assert_eq!(z(&cpu, 0, Esize::B), vec![0x22; 16]);
-    assert_eq!(z(&cpu, 1, Esize::B), [vec![0x33; 4], vec![0x55; 12]].concat());
+    assert_eq!(
+        z(&cpu, 1, Esize::B),
+        [vec![0x33; 4], vec![0x55; 12]].concat()
+    );
 
     for r in 0..4 {
         set_z(&mut cpu, 8 + r, Esize::H, &[0x80 + u64::from(r)]);
@@ -243,7 +250,10 @@ fn sel_takes_each_element_from_the_first_group_where_the_counter_is_active() {
     // Halfwords (bits 1:0 = 10), a count of 3, inverted (bit 15).
     set_p_bits(&mut cpu, 9, 0x8000 | (3 << 2) | 0b10);
     assert_eq!(exec(&mut cpu, SEL_4_H), None);
-    assert_eq!(z(&cpu, 4, Esize::H), vec![0xC0, 0xC0, 0xC0, 0x80, 0x80, 0x80, 0x80, 0x80]);
+    assert_eq!(
+        z(&cpu, 4, Esize::H),
+        vec![0xC0, 0xC0, 0xC0, 0x80, 0x80, 0x80, 0x80, 0x80]
+    );
     for r in 1..4 {
         assert_eq!(z(&cpu, 4 + r, Esize::H), vec![0x80 + u64::from(r); 8]);
     }
@@ -301,17 +311,47 @@ fn sqdmulh_saturates_and_is_exact_for_doublewords() {
 #[test]
 fn the_rounding_shifts_clamp_the_shift_and_wrap_the_result() {
     let mut cpu = streaming(0, 0);
-    set_z(&mut cpu, 0, Esize::B, &[0x40, 0x03, 0x06, 0x01, 0x80, 0x7F, 0x01, 0xFD]);
+    set_z(
+        &mut cpu,
+        0,
+        Esize::B,
+        &[0x40, 0x03, 0x06, 0x01, 0x80, 0x7F, 0x01, 0xFD],
+    );
     set_z(&mut cpu, 1, Esize::B, &[0xFF]);
-    set_z(&mut cpu, 2, Esize::B, &[0x01, 0xFF, 0xFE, 0x08, 0xF7, 0x80, 0x09, 0xFF]);
+    set_z(
+        &mut cpu,
+        2,
+        Esize::B,
+        &[0x01, 0xFF, 0xFE, 0x08, 0xF7, 0x80, 0x09, 0xFF],
+    );
     assert_eq!(exec(&mut cpu, SRSHL_2X1_B), None);
-    assert_eq!(z(&cpu, 0, Esize::B), repeated(&[0x80, 0x02, 0x02, 0x00, 0x00, 0x00, 0x00, 0xFF], 16));
-    assert_eq!(z(&cpu, 1, Esize::B), repeated(&[0xFE, 0, 0, 0, 0, 0, 0, 0], 16));
+    assert_eq!(
+        z(&cpu, 0, Esize::B),
+        repeated(&[0x80, 0x02, 0x02, 0x00, 0x00, 0x00, 0x00, 0xFF], 16)
+    );
+    assert_eq!(
+        z(&cpu, 1, Esize::B),
+        repeated(&[0xFE, 0, 0, 0, 0, 0, 0, 0], 16)
+    );
 
     let mut cpu = streaming(0, 0);
-    set_z(&mut cpu, 0, Esize::H, &[0x7FFF, 0x0001, 0x8000, 0x0001, 0x0001, 0x8000, 0x8000, 0x4000]);
+    set_z(
+        &mut cpu,
+        0,
+        Esize::H,
+        &[
+            0x7FFF, 0x0001, 0x8000, 0x0001, 0x0001, 0x8000, 0x8000, 0x4000,
+        ],
+    );
     set_z(&mut cpu, 1, Esize::H, &[0xFFFF]);
-    set_z(&mut cpu, 2, Esize::H, &[0xFF00, 0x0100, 0xFFEF, 0x0011, 0x0010, 0xFFF0, 0xFFF1, 0x0001]);
+    set_z(
+        &mut cpu,
+        2,
+        Esize::H,
+        &[
+            0xFF00, 0x0100, 0xFFEF, 0x0011, 0x0010, 0xFFF0, 0xFFF1, 0x0001,
+        ],
+    );
     assert_eq!(exec(&mut cpu, SRSHL_2X1_H), None);
     assert_eq!(z(&cpu, 0, Esize::H), vec![0, 0, 0, 0, 0, 0, 0xFFFF, 0x8000]);
     assert_eq!(z(&cpu, 1, Esize::H), vec![0, 0, 0, 0, 0, 0, 0, 0xFFFE]);
@@ -330,7 +370,12 @@ fn the_rounding_shifts_clamp_the_shift_and_wrap_the_result() {
 /// register `r` against `Zm + r`, by one vector each against `Zm`.
 #[test]
 fn the_maxima_and_minima_are_signed_or_unsigned_by_one_vector_or_by_a_group() {
-    let operands = [(0xFFFF_FFFF, 1), (0x8000_0000, 0x7FFF_FFFF), (5, 3), (0xFFFF_FFFE, 0xFFFF_FFFF)];
+    let operands = [
+        (0xFFFF_FFFF, 1),
+        (0x8000_0000, 0x7FFF_FFFF),
+        (5, 3),
+        (0xFFFF_FFFE, 0xFFFF_FFFF),
+    ];
     let run = |insn: u32| {
         let mut cpu = streaming(0, 0);
         for (r, (a, b)) in (0..).zip(operands) {
@@ -338,7 +383,9 @@ fn the_maxima_and_minima_are_signed_or_unsigned_by_one_vector_or_by_a_group() {
             set_z(&mut cpu, 4 + r, Esize::S, &[b]);
         }
         assert_eq!(exec(&mut cpu, insn), None);
-        (0..4).map(|r| z(&cpu, r, Esize::S)[0]).collect::<Vec<u64>>()
+        (0..4)
+            .map(|r| z(&cpu, r, Esize::S)[0])
+            .collect::<Vec<u64>>()
     };
     assert_eq!(run(SMAX_4X4_S), vec![1, 0x7FFF_FFFF, 5, 0xFFFF_FFFF]);
     assert_eq!(run(UMIN_4X4_S), vec![1, 0x7FFF_FFFF, 3, 0xFFFF_FFFE]);
@@ -371,7 +418,10 @@ fn the_floating_point_maxima_and_minima_handle_nans_and_zeros() {
     set_z(&mut cpu, 1, Esize::S, &[MINUS_ONE, TWO, ZERO, QNAN]);
     set_z(&mut cpu, 2, Esize::S, &[TWO, THREE, ZERO, THREE]);
     assert_eq!(exec(&mut cpu, FMAX_2X1_S), None);
-    assert_eq!(z(&cpu, 0, Esize::S), vec![TWO, 0x7FC0_0001, ZERO, SNAN_QUIETED]);
+    assert_eq!(
+        z(&cpu, 0, Esize::S),
+        vec![TWO, 0x7FC0_0001, ZERO, SNAN_QUIETED]
+    );
     assert_eq!(z(&cpu, 1, Esize::S), vec![TWO, THREE, ZERO, QNAN]);
     assert_eq!(cpu.fpsr, IOC);
 
@@ -389,19 +439,37 @@ fn the_floating_point_maxima_and_minima_handle_nans_and_zeros() {
     let one = 0x3FF0_0000_0000_0000;
     let operands = [
         ([one, 0x8000_0000_0000_0000], [0xC000_0000_0000_0000, 0]),
-        ([0x7FF0_0000_0000_0000, 0xFFF0_0000_0000_0000], [0x4008_0000_0000_0000, 0]),
+        (
+            [0x7FF0_0000_0000_0000, 0xFFF0_0000_0000_0000],
+            [0x4008_0000_0000_0000, 0],
+        ),
         ([0x7FF8_0000_0000_0000, one], [one, 0x7FF8_0000_0000_0001]),
-        ([0x4014_0000_0000_0000, 0x401C_0000_0000_0000], [0x4018_0000_0000_0000, 0x4000_0000_0000_0000]),
+        (
+            [0x4014_0000_0000_0000, 0x401C_0000_0000_0000],
+            [0x4018_0000_0000_0000, 0x4000_0000_0000_0000],
+        ),
     ];
     for (r, (a, b)) in (0..).zip(operands) {
         set_z(&mut cpu, r, Esize::D, &a);
         set_z(&mut cpu, 4 + r, Esize::D, &b);
     }
     assert_eq!(exec(&mut cpu, FMIN_4X4_D), None);
-    assert_eq!(z(&cpu, 0, Esize::D), vec![0xC000_0000_0000_0000, 0x8000_0000_0000_0000]);
-    assert_eq!(z(&cpu, 1, Esize::D), vec![0x4008_0000_0000_0000, 0xFFF0_0000_0000_0000]);
-    assert_eq!(z(&cpu, 2, Esize::D), vec![0x7FF8_0000_0000_0000, 0x7FF8_0000_0000_0001]);
-    assert_eq!(z(&cpu, 3, Esize::D), vec![0x4014_0000_0000_0000, 0x4000_0000_0000_0000]);
+    assert_eq!(
+        z(&cpu, 0, Esize::D),
+        vec![0xC000_0000_0000_0000, 0x8000_0000_0000_0000]
+    );
+    assert_eq!(
+        z(&cpu, 1, Esize::D),
+        vec![0x4008_0000_0000_0000, 0xFFF0_0000_0000_0000]
+    );
+    assert_eq!(
+        z(&cpu, 2, Esize::D),
+        vec![0x7FF8_0000_0000_0000, 0x7FF8_0000_0000_0001]
+    );
+    assert_eq!(
+        z(&cpu, 3, Esize::D),
+        vec![0x4014_0000_0000_0000, 0x4000_0000_0000_0000]
+    );
     assert_eq!(cpu.fpsr, 0);
 
     let mut cpu = streaming(0, 0);
@@ -411,10 +479,19 @@ fn the_floating_point_maxima_and_minima_handle_nans_and_zeros() {
     set_z(&mut cpu, 3, Esize::H, &[0x3C00]);
     set_z(&mut cpu, 4, Esize::H, &[0x7E00, 0x3C00, 0x4000, 0x8000]);
     assert_eq!(exec(&mut cpu, FMINNM_4X1_H), None);
-    assert_eq!(z(&cpu, 0, Esize::H), repeated(&[0x4000, 0x3800, 0x4000, 0x8000], 8));
-    assert_eq!(z(&cpu, 1, Esize::H), repeated(&[0x7E01, 0xC000, 0x3C00, 0x8000], 8));
+    assert_eq!(
+        z(&cpu, 0, Esize::H),
+        repeated(&[0x4000, 0x3800, 0x4000, 0x8000], 8)
+    );
+    assert_eq!(
+        z(&cpu, 1, Esize::H),
+        repeated(&[0x7E01, 0xC000, 0x3C00, 0x8000], 8)
+    );
     for r in 2..4 {
-        assert_eq!(z(&cpu, r, Esize::H), repeated(&[0x3C00, 0x3C00, 0x3C00, 0x8000], 8));
+        assert_eq!(
+            z(&cpu, r, Esize::H),
+            repeated(&[0x3C00, 0x3C00, 0x3C00, 0x8000], 8)
+        );
     }
     assert_eq!(cpu.fpsr, 0);
 }
@@ -427,7 +504,12 @@ fn the_floating_point_maxima_and_minima_handle_nans_and_zeros() {
 fn fclamp_takes_the_maximum_with_zn_then_the_minimum_with_zm() {
     let mut cpu = streaming(0, 0);
     set_z(&mut cpu, 0, Esize::S, &[FIVE, TWO, QNAN, HALF]);
-    set_z(&mut cpu, 1, Esize::S, &[ONE_AND_A_HALF, ZERO, MINUS_INF, INF]);
+    set_z(
+        &mut cpu,
+        1,
+        Esize::S,
+        &[ONE_AND_A_HALF, ZERO, MINUS_INF, INF],
+    );
     set_z(&mut cpu, 2, Esize::S, &[ONE, THREE, ONE, ONE]);
     set_z(&mut cpu, 3, Esize::S, &[TWO, ONE, TWO, TWO]);
     assert_eq!(exec(&mut cpu, FCLAMP_2_S), None);
@@ -458,7 +540,9 @@ fn sclamp_and_uclamp_compare_signed_and_unsigned() {
         set_z(&mut cpu, 4, Esize::B, &[low]);
         set_z(&mut cpu, 5, Esize::B, &[high]);
         assert_eq!(exec(&mut cpu, insn), None);
-        (0..4).map(|r| z(&cpu, r, Esize::B)[0]).collect::<Vec<u64>>()
+        (0..4)
+            .map(|r| z(&cpu, r, Esize::B)[0])
+            .collect::<Vec<u64>>()
     };
     assert_eq!(run(SCLAMP_4_B, 0xF0, 0x10), vec![0xFF, 0xF0, 0x10, 0x05]);
     assert_eq!(run(UCLAMP_4_B, 0x10, 0xF0), vec![0xF0, 0x80, 0x7F, 0x10]);
@@ -475,11 +559,23 @@ fn zip_and_uzp_of_two_vectors() {
     set_z(&mut cpu, 2, Esize::B, &low);
     set_z(&mut cpu, 3, Esize::B, &high);
     assert_eq!(exec(&mut cpu, ZIP_2_B), None);
-    assert_eq!(z(&cpu, 0, Esize::B), vec![0, 16, 1, 17, 2, 18, 3, 19, 4, 20, 5, 21, 6, 22, 7, 23]);
-    assert_eq!(z(&cpu, 1, Esize::B), vec![8, 24, 9, 25, 10, 26, 11, 27, 12, 28, 13, 29, 14, 30, 15, 31]);
+    assert_eq!(
+        z(&cpu, 0, Esize::B),
+        vec![0, 16, 1, 17, 2, 18, 3, 19, 4, 20, 5, 21, 6, 22, 7, 23]
+    );
+    assert_eq!(
+        z(&cpu, 1, Esize::B),
+        vec![8, 24, 9, 25, 10, 26, 11, 27, 12, 28, 13, 29, 14, 30, 15, 31]
+    );
     assert_eq!(exec(&mut cpu, UZP_2_B), None);
-    assert_eq!(z(&cpu, 0, Esize::B), vec![0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30]);
-    assert_eq!(z(&cpu, 1, Esize::B), vec![1, 3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31]);
+    assert_eq!(
+        z(&cpu, 0, Esize::B),
+        vec![0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30]
+    );
+    assert_eq!(
+        z(&cpu, 1, Esize::B),
+        vec![1, 3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31]
+    );
 }
 
 /// ZIP of four vectors gives register `r` the `r`th quarter of each
@@ -491,18 +587,47 @@ fn zip_and_uzp_of_four_vectors_interleave_by_quarters() {
     let mut cpu = streaming(1, 0);
     for r in 0..4u32 {
         let base = 0x100 * u64::from(4 + r);
-        set_z(&mut cpu, 4 + r, Esize::S, &(base..base + 8).collect::<Vec<u64>>());
+        set_z(
+            &mut cpu,
+            4 + r,
+            Esize::S,
+            &(base..base + 8).collect::<Vec<u64>>(),
+        );
     }
     assert_eq!(exec(&mut cpu, ZIP_4_S), None);
-    assert_eq!(z(&cpu, 0, Esize::S), vec![0x400, 0x500, 0x600, 0x700, 0x401, 0x501, 0x601, 0x701]);
-    assert_eq!(z(&cpu, 1, Esize::S), vec![0x402, 0x502, 0x602, 0x702, 0x403, 0x503, 0x603, 0x703]);
-    assert_eq!(z(&cpu, 2, Esize::S), vec![0x404, 0x504, 0x604, 0x704, 0x405, 0x505, 0x605, 0x705]);
-    assert_eq!(z(&cpu, 3, Esize::S), vec![0x406, 0x506, 0x606, 0x706, 0x407, 0x507, 0x607, 0x707]);
+    assert_eq!(
+        z(&cpu, 0, Esize::S),
+        vec![0x400, 0x500, 0x600, 0x700, 0x401, 0x501, 0x601, 0x701]
+    );
+    assert_eq!(
+        z(&cpu, 1, Esize::S),
+        vec![0x402, 0x502, 0x602, 0x702, 0x403, 0x503, 0x603, 0x703]
+    );
+    assert_eq!(
+        z(&cpu, 2, Esize::S),
+        vec![0x404, 0x504, 0x604, 0x704, 0x405, 0x505, 0x605, 0x705]
+    );
+    assert_eq!(
+        z(&cpu, 3, Esize::S),
+        vec![0x406, 0x506, 0x606, 0x706, 0x407, 0x507, 0x607, 0x707]
+    );
     assert_eq!(exec(&mut cpu, UZP_4_S), None);
-    assert_eq!(z(&cpu, 0, Esize::S), vec![0x400, 0x404, 0x500, 0x504, 0x600, 0x604, 0x700, 0x704]);
-    assert_eq!(z(&cpu, 1, Esize::S), vec![0x401, 0x405, 0x501, 0x505, 0x601, 0x605, 0x701, 0x705]);
-    assert_eq!(z(&cpu, 2, Esize::S), vec![0x402, 0x406, 0x502, 0x506, 0x602, 0x606, 0x702, 0x706]);
-    assert_eq!(z(&cpu, 3, Esize::S), vec![0x403, 0x407, 0x503, 0x507, 0x603, 0x607, 0x703, 0x707]);
+    assert_eq!(
+        z(&cpu, 0, Esize::S),
+        vec![0x400, 0x404, 0x500, 0x504, 0x600, 0x604, 0x700, 0x704]
+    );
+    assert_eq!(
+        z(&cpu, 1, Esize::S),
+        vec![0x401, 0x405, 0x501, 0x505, 0x601, 0x605, 0x701, 0x705]
+    );
+    assert_eq!(
+        z(&cpu, 2, Esize::S),
+        vec![0x402, 0x406, 0x502, 0x506, 0x602, 0x606, 0x702, 0x706]
+    );
+    assert_eq!(
+        z(&cpu, 3, Esize::S),
+        vec![0x403, 0x407, 0x503, 0x507, 0x603, 0x607, 0x703, 0x707]
+    );
 }
 
 /// The permutes of quadwords move whole quadwords, and need the current
@@ -520,8 +645,14 @@ fn the_permutes_need_a_vector_that_holds_their_elements() {
     set_z(&mut cpu, 2, Esize::B, &(0x00..0x20).collect::<Vec<u64>>());
     set_z(&mut cpu, 3, Esize::B, &(0x20..0x40).collect::<Vec<u64>>());
     assert_eq!(exec(&mut cpu, ZIP_2_Q), None);
-    assert_eq!(z(&cpu, 0, Esize::B), [(0x00..0x10).collect::<Vec<u64>>(), (0x20..0x30).collect()].concat());
-    assert_eq!(z(&cpu, 1, Esize::B), [(0x10..0x20).collect::<Vec<u64>>(), (0x30..0x40).collect()].concat());
+    assert_eq!(
+        z(&cpu, 0, Esize::B),
+        [(0x00..0x10).collect::<Vec<u64>>(), (0x20..0x30).collect()].concat()
+    );
+    assert_eq!(
+        z(&cpu, 1, Esize::B),
+        [(0x10..0x20).collect::<Vec<u64>>(), (0x30..0x40).collect()].concat()
+    );
     assert_eq!(exec(&mut cpu, ZIP_4_D), None);
     assert_eq!(exec(&mut cpu, UZP_4_Q), Some(UNDEFINED));
 
@@ -546,8 +677,8 @@ fn the_permutes_need_a_vector_that_holds_their_elements() {
 fn the_decode_needs_a_longest_vector_that_holds_the_elements() {
     let short = |max_svl: VecLen| {
         processor(Implementation {
-            features: Features::of(&Feature::ALL),
             max_svl,
+            ..Implementation::EVERY_FEATURE
         })
     };
     let mut cpu = short(VecLen::MIN);
@@ -575,15 +706,27 @@ fn the_narrowing_shifts_of_two_vectors_round_and_saturate() {
         z(&cpu, 0, Esize::H)
     };
     assert_eq!(
-        run(SQRSHR_2_H, &[0x0001_8000, 0x7FFF_FFFF, 0x8000_0000, 0xFFFF_7FFF], &[0x7FFF, 0x8000, 0, 0x0123_0000]),
+        run(
+            SQRSHR_2_H,
+            &[0x0001_8000, 0x7FFF_FFFF, 0x8000_0000, 0xFFFF_7FFF],
+            &[0x7FFF, 0x8000, 0, 0x0123_0000]
+        ),
         vec![2, 0x7FFF, 0x8000, 0xFFFF, 0, 1, 0, 0x123]
     );
     assert_eq!(
-        run(SQRSHRU_2_H, &[5, 0xFFFF_FFFF, 0xFFFF_FFFD, 0x0002_0000], &[0x0001_FFFE, 1, 2, 3]),
+        run(
+            SQRSHRU_2_H,
+            &[5, 0xFFFF_FFFF, 0xFFFF_FFFD, 0x0002_0000],
+            &[0x0001_FFFE, 1, 2, 3]
+        ),
         vec![3, 0, 0, 0xFFFF, 0xFFFF, 1, 1, 2]
     );
     assert_eq!(
-        run(UQRSHR_2_H, &[0xFFFF_FFFF, 8, 7, 0x000F_FFF0], &[0x0010_0000, 0x18, 0x17, 0]),
+        run(
+            UQRSHR_2_H,
+            &[0xFFFF_FFFF, 8, 7, 0x000F_FFF0],
+            &[0x0010_0000, 0x18, 0x17, 0]
+        ),
         vec![0xFFFF, 1, 0, 0xFFFF, 0xFFFF, 2, 1, 0]
     );
 }
@@ -606,7 +749,12 @@ fn the_narrowing_shifts_of_four_vectors_concatenate_or_interleave() {
         run(
             SQRSHR_4_B,
             Esize::S,
-            [&[0x180, 0x7F80, 0xFFFF_8000, 0xFFFF_FF80], &[1, 0x80, 0x7F, 0xFFFF_FF7F], &[0x300], &[0xFFFF_FD00]],
+            [
+                &[0x180, 0x7F80, 0xFFFF_8000, 0xFFFF_FF80],
+                &[1, 0x80, 0x7F, 0xFFFF_FF7F],
+                &[0x300],
+                &[0xFFFF_FD00]
+            ],
             Esize::B
         ),
         vec![2, 0x7F, 0x80, 0, 0, 1, 0, 0xFF, 3, 3, 3, 3, 0xFD, 0xFD, 0xFD, 0xFD]
@@ -626,14 +774,29 @@ fn the_narrowing_shifts_of_four_vectors_concatenate_or_interleave() {
         vec![2, 0, 0x7FFF, 0xFFFF, 0x7FFF, 0x8000, 0x7FFF, 0]
     );
     assert_eq!(
-        run(UQRSHRN_4_B, Esize::S, [&[0xFFFF_FFFF, 1, 2, 3], &[0x1FE, 0x1FF, 0x1FD, 0], &[10], &[0x80]], Esize::B),
+        run(
+            UQRSHRN_4_B,
+            Esize::S,
+            [
+                &[0xFFFF_FFFF, 1, 2, 3],
+                &[0x1FE, 0x1FF, 0x1FD, 0],
+                &[10],
+                &[0x80]
+            ],
+            Esize::B
+        ),
         vec![0xFF, 0xFF, 5, 0x40, 1, 0xFF, 5, 0x40, 1, 0xFF, 5, 0x40, 2, 0, 5, 0x40]
     );
     assert_eq!(
         run(
             SQRSHRUN_4_H,
             Esize::D,
-            [&[u64::MAX, 0xFFFF_FFFF_FFFF_FFFD], &[0x1_FFFF, 0x1_FFFD], &[7, 6], &[i64::MAX as u64, i64::MIN as u64]],
+            [
+                &[u64::MAX, 0xFFFF_FFFF_FFFF_FFFD],
+                &[0x1_FFFF, 0x1_FFFD],
+                &[7, 6],
+                &[i64::MAX as u64, i64::MIN as u64]
+            ],
             Esize::H
         ),
         vec![0, 0xFFFF, 4, 0xFFFF, 0, 0xFFFF, 3, 0]
@@ -656,14 +819,30 @@ fn a_reserved_tsize_is_undefined_before_the_enable_check() {
 fn the_saturating_narrows_of_two_vectors() {
     let run = |insn: u32| {
         let mut cpu = streaming(0, 0);
-        set_z(&mut cpu, 2, Esize::S, &[0x0000_7FFF, 0x0000_8000, 0xFFFF_8000, 0xFFFF_7FFF]);
-        set_z(&mut cpu, 3, Esize::S, &[1, 0xFFFF_FFFF, 0x8000_0000, 0x7FFF_FFFF]);
+        set_z(
+            &mut cpu,
+            2,
+            Esize::S,
+            &[0x0000_7FFF, 0x0000_8000, 0xFFFF_8000, 0xFFFF_7FFF],
+        );
+        set_z(
+            &mut cpu,
+            3,
+            Esize::S,
+            &[1, 0xFFFF_FFFF, 0x8000_0000, 0x7FFF_FFFF],
+        );
         assert_eq!(exec(&mut cpu, insn), None);
         z(&cpu, 0, Esize::H)
     };
-    assert_eq!(run(SQCVT_2_H), vec![0x7FFF, 0x7FFF, 0x8000, 0x8000, 1, 0xFFFF, 0x8000, 0x7FFF]);
+    assert_eq!(
+        run(SQCVT_2_H),
+        vec![0x7FFF, 0x7FFF, 0x8000, 0x8000, 1, 0xFFFF, 0x8000, 0x7FFF]
+    );
     assert_eq!(run(SQCVTU_2_H), vec![0x7FFF, 0x8000, 0, 0, 1, 0, 0, 0xFFFF]);
-    assert_eq!(run(UQCVT_2_H), vec![0x7FFF, 0x8000, 0xFFFF, 0xFFFF, 1, 0xFFFF, 0xFFFF, 0xFFFF]);
+    assert_eq!(
+        run(UQCVT_2_H),
+        vec![0x7FFF, 0x8000, 0xFFFF, 0xFFFF, 1, 0xFFFF, 0xFFFF, 0xFFFF]
+    );
 }
 
 /// The saturating narrows of four vectors to a quarter of the element
@@ -679,7 +858,17 @@ fn the_saturating_narrows_of_four_vectors_concatenate_or_interleave() {
         z(&cpu, 0, result)
     };
     assert_eq!(
-        run(SQCVT_4_B, Esize::S, [&[0x7F, 0x80, 0xFFFF_FF80, 0xFFFF_FF7F], &[5], &[0xFFFF_FFFB], &[0x1234]], Esize::B),
+        run(
+            SQCVT_4_B,
+            Esize::S,
+            [
+                &[0x7F, 0x80, 0xFFFF_FF80, 0xFFFF_FF7F],
+                &[5],
+                &[0xFFFF_FFFB],
+                &[0x1234]
+            ],
+            Esize::B
+        ),
         vec![0x7F, 0x7F, 0x80, 0x80, 5, 5, 5, 5, 0xFB, 0xFB, 0xFB, 0xFB, 0x7F, 0x7F, 0x7F, 0x7F]
     );
     assert_eq!(
@@ -697,11 +886,26 @@ fn the_saturating_narrows_of_four_vectors_concatenate_or_interleave() {
         vec![0x7FFF, 0x8000, 0x7FFF, 1, 0x7FFF, 0x8000, 0x8000, 0xFFFF]
     );
     assert_eq!(
-        run(UQCVTN_4_B, Esize::S, [&[0xFF, 0x100, 0xFFFF_FFFF, 0], &[1], &[2], &[3]], Esize::B),
+        run(
+            UQCVTN_4_B,
+            Esize::S,
+            [&[0xFF, 0x100, 0xFFFF_FFFF, 0], &[1], &[2], &[3]],
+            Esize::B
+        ),
         vec![0xFF, 1, 2, 3, 0xFF, 1, 2, 3, 0xFF, 1, 2, 3, 0, 1, 2, 3]
     );
     assert_eq!(
-        run(SQCVTUN_4_H, Esize::D, [&[u64::MAX, 0xFFFF], &[0x1_0000, i64::MIN as u64], &[7, 8], &[0x8000, 0x7FFF]], Esize::H),
+        run(
+            SQCVTUN_4_H,
+            Esize::D,
+            [
+                &[u64::MAX, 0xFFFF],
+                &[0x1_0000, i64::MIN as u64],
+                &[7, 8],
+                &[0x8000, 0x7FFF]
+            ],
+            Esize::H
+        ),
         vec![0, 0xFFFF, 7, 0x8000, 0xFFFF, 0, 8, 0x7FFF]
     );
 }
@@ -715,25 +919,52 @@ fn the_saturating_narrows_of_four_vectors_concatenate_or_interleave() {
 fn bfcvt_and_fcvt_concatenate_or_interleave_and_fcvt_ignores_ahp() {
     let bf16 = |insn: u32| {
         let mut cpu = streaming(0, 0);
-        set_z(&mut cpu, 2, Esize::S, &[ONE, 0x3F80_8000, 0x3F81_8000, 0x3F80_8001]);
+        set_z(
+            &mut cpu,
+            2,
+            Esize::S,
+            &[ONE, 0x3F80_8000, 0x3F81_8000, 0x3F80_8001],
+        );
         set_z(&mut cpu, 3, Esize::S, &[SNAN, MINUS_INF, 0x7F7F_FFFF, ZERO]);
         assert_eq!(exec(&mut cpu, insn), None);
         assert_eq!(cpu.fpsr, IOC | OFC | IXC, "{insn:#010x}");
         z(&cpu, 0, Esize::H)
     };
-    assert_eq!(bf16(BFCVT_2), vec![0x3F80, 0x3F80, 0x3F82, 0x3F81, 0x7FC0, 0xFF80, 0x7F80, 0]);
-    assert_eq!(bf16(BFCVTN_2), vec![0x3F80, 0x7FC0, 0x3F80, 0xFF80, 0x3F82, 0x7F80, 0x3F81, 0]);
+    assert_eq!(
+        bf16(BFCVT_2),
+        vec![0x3F80, 0x3F80, 0x3F82, 0x3F81, 0x7FC0, 0xFF80, 0x7F80, 0]
+    );
+    assert_eq!(
+        bf16(BFCVTN_2),
+        vec![0x3F80, 0x7FC0, 0x3F80, 0xFF80, 0x3F82, 0x7F80, 0x3F81, 0]
+    );
 
     let half = |insn: u32| {
         let mut cpu = streaming(0, FPCR_AHP);
-        set_z(&mut cpu, 2, Esize::S, &[ONE, 0x477F_F000, QNAN, 0x3380_0000]);
-        set_z(&mut cpu, 3, Esize::S, &[MINUS_TWO, HALF, 0x477F_E000, MINUS_ZERO]);
+        set_z(
+            &mut cpu,
+            2,
+            Esize::S,
+            &[ONE, 0x477F_F000, QNAN, 0x3380_0000],
+        );
+        set_z(
+            &mut cpu,
+            3,
+            Esize::S,
+            &[MINUS_TWO, HALF, 0x477F_E000, MINUS_ZERO],
+        );
         assert_eq!(exec(&mut cpu, insn), None);
         assert_eq!(cpu.fpsr, OFC | IXC, "{insn:#010x}");
         z(&cpu, 0, Esize::H)
     };
-    assert_eq!(half(FCVT_2), vec![0x3C00, 0x7C00, 0x7E00, 0x0001, 0xC000, 0x3800, 0x7BFF, 0x8000]);
-    assert_eq!(half(FCVTN_2), vec![0x3C00, 0xC000, 0x7C00, 0x3800, 0x7E00, 0x7BFF, 0x0001, 0x8000]);
+    assert_eq!(
+        half(FCVT_2),
+        vec![0x3C00, 0x7C00, 0x7E00, 0x0001, 0xC000, 0x3800, 0x7BFF, 0x8000]
+    );
+    assert_eq!(
+        half(FCVTN_2),
+        vec![0x3C00, 0xC000, 0x7C00, 0x3800, 0x7E00, 0x7BFF, 0x0001, 0x8000]
+    );
 }
 
 /// FCVTZS and FCVTZU round toward zero whatever FPCR.RMode says,
@@ -742,8 +973,18 @@ fn bfcvt_and_fcvt_concatenate_or_interleave_and_fcvt_ignores_ahp() {
 #[test]
 fn the_word_conversions_saturate_and_round_toward_zero_or_by_fpcr() {
     let mut cpu = streaming(0, FPCR_RP);
-    set_z(&mut cpu, 2, Esize::S, &[0xBFC0_0000, 0x4F32_D05E, QNAN, MINUS_ZERO]);
-    set_z(&mut cpu, 3, Esize::S, &[0x4039_999A, 0xCF00_0000, 0xCF32_D05E, HALF]);
+    set_z(
+        &mut cpu,
+        2,
+        Esize::S,
+        &[0xBFC0_0000, 0x4F32_D05E, QNAN, MINUS_ZERO],
+    );
+    set_z(
+        &mut cpu,
+        3,
+        Esize::S,
+        &[0x4039_999A, 0xCF00_0000, 0xCF32_D05E, HALF],
+    );
     assert_eq!(exec(&mut cpu, FCVTZS_2), None);
     assert_eq!(z(&cpu, 0, Esize::S), vec![0xFFFF_FFFF, 0x7FFF_FFFF, 0, 0]);
     assert_eq!(z(&cpu, 1, Esize::S), vec![2, 0x8000_0000, 0x8000_0000, 0]);
@@ -763,7 +1004,10 @@ fn the_word_conversions_saturate_and_round_toward_zero_or_by_fpcr() {
     set_z(&mut cpu, 3, Esize::S, &[0x8000_0000, 0x0100_0001]);
     assert_eq!(exec(&mut cpu, SCVTF_2), None);
     assert_eq!(z(&cpu, 0, Esize::S), repeated(&[MINUS_ONE, 0x4F00_0000], 4));
-    assert_eq!(z(&cpu, 1, Esize::S), repeated(&[0xCF00_0000, 0x4B80_0000], 4));
+    assert_eq!(
+        z(&cpu, 1, Esize::S),
+        repeated(&[0xCF00_0000, 0x4B80_0000], 4)
+    );
     assert_eq!(cpu.fpsr, IXC);
 
     let mut cpu = streaming(0, FPCR_RZ);
@@ -783,11 +1027,30 @@ fn the_word_conversions_saturate_and_round_toward_zero_or_by_fpcr() {
 fn frint_rounds_by_its_own_mode_without_inexact() {
     let two = |insn: u32| {
         let mut cpu = streaming(0, FPCR_RZ);
-        set_z(&mut cpu, 2, Esize::S, &[TWO_AND_A_HALF, THREE_AND_A_HALF, MINUS_TWO_AND_A_HALF, POINT_FOUR]);
-        set_z(&mut cpu, 3, Esize::S, &[MINUS_POINT_FOUR, SNAN, INF, TEN_BILLION]);
+        set_z(
+            &mut cpu,
+            2,
+            Esize::S,
+            &[
+                TWO_AND_A_HALF,
+                THREE_AND_A_HALF,
+                MINUS_TWO_AND_A_HALF,
+                POINT_FOUR,
+            ],
+        );
+        set_z(
+            &mut cpu,
+            3,
+            Esize::S,
+            &[MINUS_POINT_FOUR, SNAN, INF, TEN_BILLION],
+        );
         assert_eq!(exec(&mut cpu, insn), None);
         assert_eq!(cpu.fpsr, IOC, "{insn:#010x}");
-        assert_eq!(z(&cpu, 1, Esize::S), vec![MINUS_ZERO, SNAN_QUIETED, INF, TEN_BILLION], "{insn:#010x}");
+        assert_eq!(
+            z(&cpu, 1, Esize::S),
+            vec![MINUS_ZERO, SNAN_QUIETED, INF, TEN_BILLION],
+            "{insn:#010x}"
+        );
         z(&cpu, 0, Esize::S)
     };
     assert_eq!(two(FRINTN_2), vec![TWO, FOUR, MINUS_TWO, ZERO]);
@@ -795,7 +1058,17 @@ fn frint_rounds_by_its_own_mode_without_inexact() {
 
     let four = |insn: u32| {
         let mut cpu = streaming(0, 0);
-        set_z(&mut cpu, 4, Esize::S, &[TWO_AND_A_HALF, THREE_AND_A_HALF, MINUS_TWO_AND_A_HALF, POINT_FOUR]);
+        set_z(
+            &mut cpu,
+            4,
+            Esize::S,
+            &[
+                TWO_AND_A_HALF,
+                THREE_AND_A_HALF,
+                MINUS_TWO_AND_A_HALF,
+                POINT_FOUR,
+            ],
+        );
         set_z(&mut cpu, 5, Esize::S, &[MINUS_POINT_FOUR]);
         set_z(&mut cpu, 6, Esize::S, &[ONE]);
         set_z(&mut cpu, 7, Esize::S, &[MINUS_ZERO]);
@@ -805,8 +1078,14 @@ fn frint_rounds_by_its_own_mode_without_inexact() {
         assert_eq!(z(&cpu, 3, Esize::S), vec![MINUS_ZERO; 4], "{insn:#010x}");
         (z(&cpu, 0, Esize::S), z(&cpu, 1, Esize::S)[0])
     };
-    assert_eq!(four(FRINTM_4), (vec![TWO, THREE, MINUS_THREE, ZERO], MINUS_ONE));
-    assert_eq!(four(FRINTA_4), (vec![THREE, FOUR, MINUS_THREE, ZERO], MINUS_ZERO));
+    assert_eq!(
+        four(FRINTM_4),
+        (vec![TWO, THREE, MINUS_THREE, ZERO], MINUS_ONE)
+    );
+    assert_eq!(
+        four(FRINTA_4),
+        (vec![THREE, FOUR, MINUS_THREE, ZERO], MINUS_ZERO)
+    );
 }
 
 /// SUNPK and UUNPK extend the low half of source `r` to destination `2 *
@@ -815,10 +1094,23 @@ fn frint_rounds_by_its_own_mode_without_inexact() {
 #[test]
 fn the_unpacks_extend_each_half_to_its_own_register() {
     let mut cpu = streaming(0, 0);
-    set_z(&mut cpu, 2, Esize::B, &[0x00, 0x7F, 0x80, 0xFF, 1, 2, 3, 4, 0x81, 0x82, 5, 6, 7, 8, 9, 0xF0]);
+    set_z(
+        &mut cpu,
+        2,
+        Esize::B,
+        &[
+            0x00, 0x7F, 0x80, 0xFF, 1, 2, 3, 4, 0x81, 0x82, 5, 6, 7, 8, 9, 0xF0,
+        ],
+    );
     assert_eq!(exec(&mut cpu, SUNPK_2_H), None);
-    assert_eq!(z(&cpu, 0, Esize::H), vec![0, 0x7F, 0xFF80, 0xFFFF, 1, 2, 3, 4]);
-    assert_eq!(z(&cpu, 1, Esize::H), vec![0xFF81, 0xFF82, 5, 6, 7, 8, 9, 0xFFF0]);
+    assert_eq!(
+        z(&cpu, 0, Esize::H),
+        vec![0, 0x7F, 0xFF80, 0xFFFF, 1, 2, 3, 4]
+    );
+    assert_eq!(
+        z(&cpu, 1, Esize::H),
+        vec![0xFF81, 0xFF82, 5, 6, 7, 8, 9, 0xFFF0]
+    );
 
     set_z(&mut cpu, 4, Esize::S, &[0xFFFF_FFFF, 1, 0x8000_0000, 2]);
     set_z(&mut cpu, 5, Esize::S, &[3, 4, 5, 6]);
@@ -829,7 +1121,12 @@ fn the_unpacks_extend_each_half_to_its_own_register() {
     assert_eq!(z(&cpu, 3, Esize::D), vec![5, 6]);
 
     set_z(&mut cpu, 4, Esize::H, &[0xFFFF, 1, 0x8000, 2, 3, 4, 5, 6]);
-    set_z(&mut cpu, 5, Esize::H, &[7, 8, 9, 10, 0x7FFF, 0x8001, 11, 12]);
+    set_z(
+        &mut cpu,
+        5,
+        Esize::H,
+        &[7, 8, 9, 10, 0x7FFF, 0x8001, 11, 12],
+    );
     assert_eq!(exec(&mut cpu, SUNPK_4_S), None);
     assert_eq!(z(&cpu, 0, Esize::S), vec![0xFFFF_FFFF, 1, 0xFFFF_8000, 2]);
     assert_eq!(z(&cpu, 1, Esize::S), vec![3, 4, 5, 6]);
@@ -848,16 +1145,47 @@ fn the_unpacks_extend_each_half_to_its_own_register() {
 fn the_sve2p1_narrows_of_two_vectors_interleave() {
     let cases = [
         (SQRSHRN_PAIR, [0x7FFF, 0xFFFF, 2, 2, 0x8000, 0x7FFF, 0, 0]),
-        (SQRSHRUN_PAIR, [0xFFFF, 0, 0xC000, 0xFFFF, 0, 0xFFFF, 0x091A, 0]),
-        (UQRSHRN_PAIR, [0xFFFF, 0xFFFF, 0x0180, 0x0200, 0xFFFF, 0xFFFF, 0x0012, 0xFFFF]),
-        (SQCVTN_PAIR, [0x7FFF, 0x8000, 0x7FFF, 0x7FFF, 0x8000, 0x7FFF, 0x1234, 0x8000]),
-        (SQCVTUN_PAIR, [0xFFFF, 0, 0xFFFF, 0xFFFF, 0, 0xFFFF, 0x1234, 0]),
-        (UQCVTN_PAIR, [0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0x1234, 0xFFFF]),
+        (
+            SQRSHRUN_PAIR,
+            [0xFFFF, 0, 0xC000, 0xFFFF, 0, 0xFFFF, 0x091A, 0],
+        ),
+        (
+            UQRSHRN_PAIR,
+            [
+                0xFFFF, 0xFFFF, 0x0180, 0x0200, 0xFFFF, 0xFFFF, 0x0012, 0xFFFF,
+            ],
+        ),
+        (
+            SQCVTN_PAIR,
+            [
+                0x7FFF, 0x8000, 0x7FFF, 0x7FFF, 0x8000, 0x7FFF, 0x1234, 0x8000,
+            ],
+        ),
+        (
+            SQCVTUN_PAIR,
+            [0xFFFF, 0, 0xFFFF, 0xFFFF, 0, 0xFFFF, 0x1234, 0],
+        ),
+        (
+            UQCVTN_PAIR,
+            [
+                0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0x1234, 0xFFFF,
+            ],
+        ),
     ];
     for (insn, want) in cases {
         let mut cpu = streaming(0, 0);
-        set_z(&mut cpu, 2, Esize::S, &[0x7FFF_8000, 0x0001_8000, 0x8000_0000, 0x0000_1234]);
-        set_z(&mut cpu, 3, Esize::S, &[0xFFFF_7FFF, 0x0002_0000, 0x7FFF_7FFF, 0xFFFF_8000]);
+        set_z(
+            &mut cpu,
+            2,
+            Esize::S,
+            &[0x7FFF_8000, 0x0001_8000, 0x8000_0000, 0x0000_1234],
+        );
+        set_z(
+            &mut cpu,
+            3,
+            Esize::S,
+            &[0xFFFF_7FFF, 0x0002_0000, 0x7FFF_7FFF, 0xFFFF_8000],
+        );
         assert_eq!(exec(&mut cpu, insn), None, "{insn:#010x}");
         assert_eq!(z(&cpu, 0, Esize::H), want.to_vec(), "{insn:#010x}");
         assert_eq!(cpu.fpsr, 0, "{insn:#010x}");
@@ -931,10 +1259,14 @@ fn they_need_streaming_mode_and_sme2() {
     for insn in all {
         assert_eq!(exec(&mut cpu, insn), Some(NOT_STREAMING), "{insn:#010x}");
     }
-    let features: Vec<Feature> = Feature::ALL.into_iter().filter(|&f| f != Feature::Sme2).collect();
+    let features: Vec<Feature> = Feature::ALL
+        .into_iter()
+        .filter(|&f| f != Feature::Sme2)
+        .collect();
     let mut cpu = processor(Implementation {
         features: Features::of(&features),
         max_svl: VecLen::MAX,
+        ..Implementation::EVERY_FEATURE
     });
     cpu.set_pstate_sm(true);
     for insn in all {

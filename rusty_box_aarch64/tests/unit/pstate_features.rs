@@ -18,7 +18,7 @@ use std::vec::Vec;
 
 use rusty_box_core::{ClockHz, VmClock};
 
-use super::features::{Feature, Features, Implementation, VecLen};
+use super::features::{Feature, Features, Implementation};
 use super::{id, Cpu, CpuConfig, El, NoEl2, Pstate, Step};
 use crate::bus::{AccessWidth, BusFault, PhysAddr, PhysBus};
 use crate::instrumentation::NoInstrumentation;
@@ -94,14 +94,25 @@ const WNR: u64 = 1 << 6;
 struct Ram(Vec<u8>);
 
 impl PhysBus for Ram {
-    fn read(&mut self, addr: PhysAddr, width: AccessWidth, _clock: VmClock) -> Result<u64, BusFault> {
+    fn read(
+        &mut self,
+        addr: PhysAddr,
+        width: AccessWidth,
+        _clock: VmClock,
+    ) -> Result<u64, BusFault> {
         let a = addr.get() as usize;
         let n = width.bytes() as usize;
         let bytes = self.0.get(a..a + n).ok_or(BusFault::Unmapped)?;
         Ok(bytes.iter().rev().fold(0, |v, &b| (v << 8) | u64::from(b)))
     }
 
-    fn write(&mut self, addr: PhysAddr, width: AccessWidth, value: u64, _clock: VmClock) -> Result<(), BusFault> {
+    fn write(
+        &mut self,
+        addr: PhysAddr,
+        width: AccessWidth,
+        value: u64,
+        _clock: VmClock,
+    ) -> Result<(), BusFault> {
         let a = addr.get() as usize;
         let n = width.bytes() as usize;
         let bytes = self.0.get_mut(a..a + n).ok_or(BusFault::Unmapped)?;
@@ -126,7 +137,10 @@ const fn permission_fault(write: bool) -> Option<Taken> {
     })
 }
 
-const UNDEFINED: Option<Taken> = Some(Taken { ec: UNKNOWN, iss: 0 });
+const UNDEFINED: Option<Taken> = Some(Taken {
+    ec: UNKNOWN,
+    iss: 0,
+});
 
 struct Machine {
     cpu: Cpu<NoEl2>,
@@ -141,10 +155,12 @@ impl Machine {
         let mut cpu = Cpu::<NoEl2>::implementing(
             CpuConfig {
                 ips,
-                counter_hz: ips,
                 reset_pc: CODE,
             },
-            imp,
+            Implementation {
+                counter_hz: ips,
+                ..imp
+            },
         );
         let mut ram = Ram(std::vec![0; RAM_BYTES]);
         const AF: u64 = 1 << 10;
@@ -194,12 +210,19 @@ impl Machine {
         self.ram.0[a..a + 4].copy_from_slice(&insn.to_le_bytes());
         self.cpu.pc = at;
         self.cpu.sys.esr_el1 = 0x3F << 26;
-        assert_eq!(self.cpu.step(&mut self.ram, &mut NoInstrumentation), Step::Retired);
+        assert_eq!(
+            self.cpu.step(&mut self.ram, &mut NoInstrumentation),
+            Step::Retired
+        );
         let esr = self.cpu.sys.esr_el1;
         if esr >> 26 == 0x3F {
             return None;
         }
-        assert_eq!(self.cpu.pc & !0x7FF, VBAR, "{insn:#010x} took an exception to the vector table");
+        assert_eq!(
+            self.cpu.pc & !0x7FF,
+            VBAR,
+            "{insn:#010x} took an exception to the vector table"
+        );
         Some(Taken {
             ec: esr >> 26,
             iss: esr & 0x01FF_FFFF,
@@ -227,7 +250,7 @@ fn a57_with(extra: &[Feature]) -> Implementation {
     features.extend_from_slice(extra);
     Implementation {
         features: Features::of(&features),
-        max_svl: VecLen::MIN,
+        ..Implementation::CORTEX_A57
     }
 }
 
@@ -240,11 +263,25 @@ fn a57_with(extra: &[Feature]) -> Implementation {
 fn pan_refuses_el1_data_accesses_to_memory_el0_can_reach() {
     let mut m = Machine::new(Implementation::EVERY_FEATURE);
     m.cpu.pstate.pan = true;
-    for (insn, write) in [(LDR, false), (STR, true), (LDADD, false), (LDXR, false), (DC_ZVA, true)] {
+    for (insn, write) in [
+        (LDR, false),
+        (STR, true),
+        (LDADD, false),
+        (LDXR, false),
+        (DC_ZVA, true),
+    ] {
         for (address, refused) in [(EL0_RW, true), (EL0_RO, true), (EL1_DATA, false)] {
             m.cpu.x[1] = address;
-            let want = if refused { permission_fault(write) } else { None };
-            assert_eq!(m.run(insn), want, "{insn:#010x} at {address:#x} with PAN set");
+            let want = if refused {
+                permission_fault(write)
+            } else {
+                None
+            };
+            assert_eq!(
+                m.run(insn),
+                want,
+                "{insn:#010x} at {address:#x} with PAN set"
+            );
         }
     }
     m.cpu.pstate.pan = false;
@@ -281,14 +318,26 @@ fn uao_gives_ldtr_and_sttr_el1_permissions() {
     for (insn, write) in [(LDTR, false), (STTR, true)] {
         m.cpu.pstate.uao = false;
         m.cpu.x[1] = EL1_DATA;
-        assert_eq!(m.run(insn), permission_fault(write), "{insn:#010x}: EL0 cannot reach EL1's data");
+        assert_eq!(
+            m.run(insn),
+            permission_fault(write),
+            "{insn:#010x}: EL0 cannot reach EL1's data"
+        );
         m.cpu.x[1] = EL0_RW;
         assert_eq!(m.run(insn), None, "{insn:#010x}: EL0 can reach its own");
         m.cpu.pstate.pan = true;
-        assert_eq!(m.run(insn), None, "{insn:#010x}: PAN takes no part in an EL0 check");
+        assert_eq!(
+            m.run(insn),
+            None,
+            "{insn:#010x}: PAN takes no part in an EL0 check"
+        );
 
         m.cpu.pstate.uao = true;
-        assert_eq!(m.run(insn), permission_fault(write), "{insn:#010x}: UAO, then PAN");
+        assert_eq!(
+            m.run(insn),
+            permission_fault(write),
+            "{insn:#010x}: UAO, then PAN"
+        );
         m.cpu.pstate.pan = false;
         assert_eq!(m.run(insn), None, "{insn:#010x}: UAO without PAN");
         m.cpu.x[1] = EL1_DATA;
@@ -313,16 +362,55 @@ fn msr_and_mrs_reach_the_pstate_fields() {
     }
     let mut m = Machine::new(Implementation::EVERY_FEATURE);
     let fields = [
-        Field { set: MSR_PAN_1, clear: MSR_PAN_0, read: MRS_PAN, write: MSR_PAN_X0, bit: 1 << 22, field: |p| p.pan },
-        Field { set: MSR_UAO_1, clear: MSR_UAO_0, read: MRS_UAO, write: MSR_UAO_X0, bit: 1 << 23, field: |p| p.uao },
-        Field { set: MSR_DIT_1, clear: MSR_DIT_0, read: MRS_DIT, write: MSR_DIT_X0, bit: 1 << 24, field: |p| p.dit },
-        Field { set: MSR_SSBS_1, clear: MSR_SSBS_0, read: MRS_SSBS, write: MSR_SSBS_X0, bit: 1 << 12, field: |p| p.ssbs },
+        Field {
+            set: MSR_PAN_1,
+            clear: MSR_PAN_0,
+            read: MRS_PAN,
+            write: MSR_PAN_X0,
+            bit: 1 << 22,
+            field: |p| p.pan,
+        },
+        Field {
+            set: MSR_UAO_1,
+            clear: MSR_UAO_0,
+            read: MRS_UAO,
+            write: MSR_UAO_X0,
+            bit: 1 << 23,
+            field: |p| p.uao,
+        },
+        Field {
+            set: MSR_DIT_1,
+            clear: MSR_DIT_0,
+            read: MRS_DIT,
+            write: MSR_DIT_X0,
+            bit: 1 << 24,
+            field: |p| p.dit,
+        },
+        Field {
+            set: MSR_SSBS_1,
+            clear: MSR_SSBS_0,
+            read: MRS_SSBS,
+            write: MSR_SSBS_X0,
+            bit: 1 << 12,
+            field: |p| p.ssbs,
+        },
     ];
-    for Field { set, clear, read, write, bit, field } in fields {
+    for Field {
+        set,
+        clear,
+        read,
+        write,
+        bit,
+        field,
+    } in fields
+    {
         assert_eq!(m.run(set), None, "{set:#010x}");
         assert!(field(&m.cpu.pstate), "{set:#010x}");
         assert_eq!(m.run(read), None);
-        assert_eq!(m.cpu.x[0], bit, "{read:#010x} reads the field alone, in its SPSR bit");
+        assert_eq!(
+            m.cpu.x[0], bit,
+            "{read:#010x} reads the field alone, in its SPSR bit"
+        );
         assert_eq!(m.run(clear), None);
         assert!(!field(&m.cpu.pstate), "{clear:#010x}");
         m.cpu.x[0] = u64::MAX;
@@ -330,12 +418,17 @@ fn msr_and_mrs_reach_the_pstate_fields() {
         assert!(field(&m.cpu.pstate), "{write:#010x}");
         m.cpu.x[0] = !bit;
         assert_eq!(m.run(write), None);
-        assert!(!field(&m.cpu.pstate), "{write:#010x} reads only the field's bit");
+        assert!(
+            !field(&m.cpu.pstate),
+            "{write:#010x} reads only the field's bit"
+        );
     }
 
     let mut el0 = Machine::new(Implementation::EVERY_FEATURE);
     el0.at_el0();
-    for insn in [MSR_PAN_1, MSR_UAO_1, MRS_PAN, MSR_PAN_X0, MRS_UAO, MSR_UAO_X0] {
+    for insn in [
+        MSR_PAN_1, MSR_UAO_1, MRS_PAN, MSR_PAN_X0, MRS_UAO, MSR_UAO_X0,
+    ] {
         assert_eq!(el0.run(insn), UNDEFINED, "{insn:#010x} at EL0");
     }
     assert_eq!(el0.run(MSR_DIT_1), None);
@@ -354,8 +447,26 @@ fn msr_and_mrs_reach_the_pstate_fields() {
 fn without_the_features_their_encodings_are_undefined() {
     let mut m = Machine::new(Implementation::CORTEX_A57);
     let words = [
-        CFINV, XAFLAG, AXFLAG, RMIF, SETF8, SETF16, SB, MSR_PAN_1, MSR_UAO_1, MSR_DIT_1, MSR_SSBS_1, MRS_PAN, MSR_PAN_X0,
-        MRS_UAO, MRS_DIT, MSR_DIT_X0, MRS_SSBS, MSR_SSBS_X0, AT_S1E1RP, AT_S1E1WP,
+        CFINV,
+        XAFLAG,
+        AXFLAG,
+        RMIF,
+        SETF8,
+        SETF16,
+        SB,
+        MSR_PAN_1,
+        MSR_UAO_1,
+        MSR_DIT_1,
+        MSR_SSBS_1,
+        MRS_PAN,
+        MSR_PAN_X0,
+        MRS_UAO,
+        MRS_DIT,
+        MSR_DIT_X0,
+        MRS_SSBS,
+        MSR_SSBS_X0,
+        AT_S1E1RP,
+        AT_S1E1WP,
     ];
     let before = m.cpu.pstate;
     for insn in words {
@@ -372,7 +483,11 @@ fn without_the_features_their_encodings_are_undefined() {
     let mut ssbs = Machine::new(a57_with(&[Feature::Ssbs]));
     assert_eq!(ssbs.run(MSR_SSBS_1), None);
     assert!(ssbs.cpu.pstate.ssbs);
-    assert_eq!(ssbs.run(MRS_SSBS), UNDEFINED, "the SSBS register is FEAT_SSBS2's");
+    assert_eq!(
+        ssbs.run(MRS_SSBS),
+        UNDEFINED,
+        "the SSBS register is FEAT_SSBS2's"
+    );
 
     let mut pan = Machine::new(a57_with(&[Feature::Pan]));
     assert_eq!(pan.run(MSR_PAN_1), None);
@@ -388,9 +503,19 @@ fn at_s1e1rp_and_s1e1wp_take_pan_into_account() {
     let mut m = Machine::new(Implementation::EVERY_FEATURE);
     m.cpu.x[0] = EL0_RW;
     m.cpu.pstate.pan = true;
-    for (insn, refused) in [(AT_S1E1R, false), (AT_S1E1W, false), (AT_S1E1RP, true), (AT_S1E1WP, true)] {
+    for (insn, refused) in [
+        (AT_S1E1R, false),
+        (AT_S1E1W, false),
+        (AT_S1E1RP, true),
+        (AT_S1E1WP, true),
+    ] {
         assert_eq!(m.run(insn), None);
-        assert_eq!(m.cpu.sys.par_el1 == fault, refused, "{insn:#010x} with PAN set: PAR_EL1 {:#x}", m.cpu.sys.par_el1);
+        assert_eq!(
+            m.cpu.sys.par_el1 == fault,
+            refused,
+            "{insn:#010x} with PAN set: PAR_EL1 {:#x}",
+            m.cpu.sys.par_el1
+        );
         if !refused {
             assert_eq!(m.cpu.sys.par_el1 & 1, 0, "{insn:#010x} translates");
             assert_eq!(m.cpu.sys.par_el1 & 0x0000_FFFF_FFFF_F000, EL0_RW & !0xFFF);
@@ -417,9 +542,17 @@ fn taking_an_exception_sets_pan_and_ssbs_and_clears_uao() {
         let taken = m.step_raw(CODE, SVC);
         assert_eq!(taken.map(|t| t.ec), Some(0x15));
         let p = m.cpu.pstate;
-        assert_eq!((p.pan, p.uao, p.dit, p.ssbs), (!span, false, true, dssbs), "SPAN {span}, DSSBS {dssbs}");
+        assert_eq!(
+            (p.pan, p.uao, p.dit, p.ssbs),
+            (!span, false, true, dssbs),
+            "SPAN {span}, DSSBS {dssbs}"
+        );
         let spsr = m.cpu.sys.spsr_el1;
-        assert_eq!(spsr & ((1 << 22) | (1 << 23) | (1 << 24) | (1 << 12)), (1 << 23) | (1 << 24), "the SPSR keeps UAO and DIT");
+        assert_eq!(
+            spsr & ((1 << 22) | (1 << 23) | (1 << 24) | (1 << 12)),
+            (1 << 23) | (1 << 24),
+            "the SPSR keeps UAO and DIT"
+        );
     }
 
     // With SPAN set, PAN stays as the interrupted code had it.
@@ -448,7 +581,10 @@ fn eret_restores_the_fields_and_an_illegal_return_restores_pan() {
     m.cpu.sys.elr_el1 = EL0_CODE;
     assert_eq!(m.step_raw(CODE, ERET), None);
     let p = m.cpu.pstate;
-    assert_eq!((p.el, p.pan, p.uao, p.dit, p.ssbs), (El::El0, true, true, true, true));
+    assert_eq!(
+        (p.el, p.pan, p.uao, p.dit, p.ssbs),
+        (El::El0, true, true, true, true)
+    );
 
     // SPSR M = EL2h, which this core lacks.
     let mut m = Machine::new(Implementation::EVERY_FEATURE);
@@ -458,7 +594,80 @@ fn eret_restores_the_fields_and_an_illegal_return_restores_pan() {
     m.cpu.sys.elr_el1 = CODE + 0x100;
     assert_eq!(m.step_raw(CODE, ERET), None);
     let p = m.cpu.pstate;
-    assert_eq!((p.el, p.il, p.pan, p.uao, p.dit, p.ssbs), (El::El1, true, true, true, true, false));
+    assert_eq!(
+        (p.el, p.il, p.pan, p.uao, p.dit, p.ssbs),
+        (El::El1, true, true, true, true, false)
+    );
+}
+
+/// After an illegal exception return, the instruction at ELR_EL1 raises
+/// the Illegal Execution state exception (EC 0x0E) once it is fetched: a
+/// misaligned PC takes the PC alignment fault (EC 0x22) first, and one the
+/// tables do not map the Instruction Abort (EC 0x21), as the Arm ARM
+/// prioritizes synchronous exceptions.
+#[test]
+fn an_illegal_return_raises_illegal_state_after_the_fetch_checks() {
+    // A misaligned ELR, one past the four mapped blocks, and a mapped one.
+    for (elr, ec) in [(CODE + 0x102, 0x22), (0x80_0000, 0x21), (CODE + 0x100, 0x0E)] {
+        let mut m = Machine::new(Implementation::CORTEX_A57);
+        // SPSR M = EL2h, which this core lacks.
+        m.cpu.sys.spsr_el1 = 0b1001;
+        m.cpu.sys.elr_el1 = elr;
+        assert_eq!(m.step_raw(CODE, ERET), None);
+        assert!(m.cpu.pstate.il);
+        assert_eq!(m.cpu.pc, elr);
+        m.cpu.sys.esr_el1 = 0x3F << 26;
+        assert_eq!(
+            m.cpu.step(&mut m.ram, &mut NoInstrumentation),
+            Step::Retired
+        );
+        assert_eq!(m.cpu.sys.esr_el1 >> 26, ec, "ELR {elr:#x}");
+    }
+}
+
+/// ERET sets PSTATE.SS from SPSR_EL1.SS only for a return, with
+/// `MDSCR_EL1.SS` set, from where debug exceptions are disabled to where
+/// they are enabled, the destination masking them by SPSR_EL1.D
+/// (`DebugExceptionReturnSS`, `AArch64_GenerateDebugExceptionsFrom`); to 0
+/// otherwise, and with the OS Lock locked debug exceptions are disabled
+/// everywhere.
+#[test]
+fn eret_restores_software_step_only_into_an_enabled_debug_target() {
+    const SPSR_SS: u64 = 1 << 21;
+    const SPSR_D: u64 = 1 << 9;
+    const EL0T: u64 = 0b0000;
+    const EL1H: u64 = 0b0101;
+    const MDSCR_SS: u64 = 1;
+    const MDSCR_KDE: u64 = 1 << 13;
+    // MDSCR_EL1, PSTATE.D, OS Lock locked, SPSR_EL1, then PSTATE.SS.
+    for (mdscr, d, locked, spsr, ss) in [
+        (0, true, false, EL0T | SPSR_SS, false),
+        (MDSCR_SS, true, false, EL0T | SPSR_SS, true),
+        (MDSCR_SS, true, false, EL0T, false),
+        (MDSCR_SS, true, true, EL0T | SPSR_SS, false),
+        (MDSCR_SS | MDSCR_KDE, false, false, EL0T | SPSR_SS, false),
+        (MDSCR_SS | MDSCR_KDE, true, false, EL1H | SPSR_SS, true),
+        (MDSCR_SS | MDSCR_KDE, true, false, EL1H | SPSR_SS | SPSR_D, false),
+        (MDSCR_SS, true, false, EL1H | SPSR_SS, false),
+    ] {
+        let mut m = Machine::new(Implementation::CORTEX_A57);
+        m.cpu.sys.mdscr_el1 = mdscr;
+        m.cpu.pstate.d = d;
+        if !locked {
+            m.cpu.sys.oslsr_el1 &= !0b10;
+        }
+        m.cpu.sys.spsr_el1 = spsr;
+        m.cpu.sys.elr_el1 = if spsr & 0b1100 == 0 {
+            EL0_CODE
+        } else {
+            CODE + 0x100
+        };
+        assert_eq!(m.step_raw(CODE, ERET), None);
+        assert_eq!(
+            m.cpu.pstate.ss, ss,
+            "MDSCR {mdscr:#x}, D {d}, locked {locked}, SPSR {spsr:#x}"
+        );
+    }
 }
 
 /// SPSR_EL1 keeps PAN, UAO, DIT and SSBS only on a processor with their
@@ -467,7 +676,10 @@ fn eret_restores_the_fields_and_an_illegal_return_restores_pan() {
 #[test]
 fn spsr_holds_the_fields_only_with_their_features() {
     let fields = (1 << 22) | (1 << 23) | (1 << 24) | (1 << 12);
-    for (imp, kept) in [(Implementation::EVERY_FEATURE, fields), (Implementation::CORTEX_A57, 0)] {
+    for (imp, kept) in [
+        (Implementation::EVERY_FEATURE, fields),
+        (Implementation::CORTEX_A57, 0),
+    ] {
         let mut m = Machine::new(imp);
         m.cpu.x[0] = 0x3C5 | fields;
         assert_eq!(m.run(MSR_SPSR), None);
@@ -476,17 +688,22 @@ fn spsr_holds_the_fields_only_with_their_features() {
     }
 
     // The Cortex-A57's own image, with the fields set in SPSR_EL1: after
-    // the feature set (16 bytes), the streaming vector length (4), X0-X30,
-    // SP_EL0, SP_EL1, the PC and PSTATE (8 each), V0-V31 (16 each), FPCR
-    // and FPSR (8 each), the seventh system register.
+    // the feature set (16 bytes), the streaming vector length (4), MIDR_EL1
+    // and the counter frequency (8 each), X0-X30, SP_EL0, SP_EL1, the PC
+    // and PSTATE (8 each), V0-V31 (16 each), FPCR and FPSR (8 each), the
+    // seventh system register.
     let mut a57 = Machine::new(Implementation::CORTEX_A57);
     a57.cpu.sys.spsr_el1 = 0x3C5;
     let mut image = Vec::new();
     assert!(a57.cpu.save(&mut image).is_ok());
-    let at = 16 + 4 + 35 * 8 + 32 * 16 + 2 * 8 + 6 * 8;
+    let at = 16 + 4 + 2 * 8 + 35 * 8 + 32 * 16 + 2 * 8 + 6 * 8;
     let mut spsr = [0u8; 8];
     spsr.copy_from_slice(&image[at..at + 8]);
-    assert_eq!(u64::from_le_bytes(spsr), 0x3C5, "the layout this test assumes");
+    assert_eq!(
+        u64::from_le_bytes(spsr),
+        0x3C5,
+        "the layout this test assumes"
+    );
     image[at..at + 8].copy_from_slice(&(0x3C5 | fields).to_le_bytes());
     let mut refusing = Machine::new(Implementation::CORTEX_A57);
     assert!(refusing.cpu.restore(&mut image.as_slice()).is_err());
@@ -498,7 +715,11 @@ fn spsr_holds_the_fields_only_with_their_features() {
 /// the same fields.
 #[test]
 fn the_held_fields_and_the_spsr_mask_agree() {
-    for imp in [Implementation::EVERY_FEATURE, Implementation::CORTEX_A57, a57_with(&[Feature::Pan, Feature::Dit])] {
+    for imp in [
+        Implementation::EVERY_FEATURE,
+        Implementation::CORTEX_A57,
+        a57_with(&[Feature::Pan, Feature::Dit]),
+    ] {
         let cpu = Machine::new(imp).cpu;
         // Every bit set, M = EL1h.
         let spsr = !0x1F | 0b0101;
@@ -524,14 +745,19 @@ fn a_snapshot_carries_the_fields() {
 
     // The Cortex-A57's own image, with SPSR's PAN bit set in its PSTATE:
     // after the feature set (16 bytes), the streaming vector length (4),
-    // X0-X30, SP_EL0, SP_EL1 and the PC (8 each).
+    // MIDR_EL1 and the counter frequency (8 each), X0-X30, SP_EL0, SP_EL1
+    // and the PC (8 each).
     let a57 = Machine::new(Implementation::CORTEX_A57);
     let mut image = Vec::new();
     assert!(a57.cpu.save(&mut image).is_ok());
-    let at = 16 + 4 + 34 * 8;
+    let at = 16 + 4 + 2 * 8 + 34 * 8;
     let mut spsr = [0u8; 8];
     spsr.copy_from_slice(&image[at..at + 8]);
-    assert_eq!(u64::from_le_bytes(spsr), a57.cpu.pstate.to_spsr(), "the layout this test assumes");
+    assert_eq!(
+        u64::from_le_bytes(spsr),
+        a57.cpu.pstate.to_spsr(),
+        "the layout this test assumes"
+    );
     image[at..at + 8].copy_from_slice(&(a57.cpu.pstate.to_spsr() | (1 << 22)).to_le_bytes());
     let mut refusing = Machine::new(Implementation::CORTEX_A57);
     assert!(refusing.cpu.restore(&mut image.as_slice()).is_err());

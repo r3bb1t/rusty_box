@@ -16,12 +16,15 @@ Arm, `qemu-arm@nongnu.org`), with the maintainers
 `scripts/get_maintainer.pl` names in copy, each patch carrying a
 `Signed-off-by:` line (see QEMU's `docs/devel/submitting-a-patch.rst`). It
 does not take GitHub or GitLab pull requests. The patches here apply to
-`v11.1.2` and were built and tested there; they are diffs, to be committed
-with a message and sign-off of the submitter's own.
+`v11.1.2`, each on its own and all of them together, and were built and
+tested there, but for those whose entry says otherwise (entries 22 and
+23: written against master as of 2026-10-28 and checked to apply there,
+not yet built or tested); they are diffs, to be committed with a message
+and sign-off of the submitter's own.
 
 Reproducers:
 - `docs/qemu-aarch64-probe.S`: a bare-metal EL1 program for
-  `qemu-system-aarch64 -M virt`, one line of output per case (A to M). Its
+  `qemu-system-aarch64 -M virt`, one line of output per case (A to O). Its
   header gives the commands and the expected and observed output.
 - `docs/qemu-aarch64-probe-user.c`: a static Linux program for
   `qemu-aarch64 -cpu max`, one case per argument, for the entries fixed
@@ -68,7 +71,7 @@ uses the TxSZ of the half `selbit` names, and the extension field is
     Arm:          C 3106208000001000
     QEMU 11.1.2:  C 3106200000001000     bits 43:39 left zero (T1SZ's 54:44)
 
-**Fix**: `docs/qemu-insertpac-selbit.patch`: a `pauth_selbit()` helper
+**Fix**: `docs/patches/qemu/qemu-insertpac-selbit.patch`: a `pauth_selbit()` helper
 following `InsertPAC()`, and the bottom bit and extension from `selbit`'s
 half. `AuthPAC()` needs no change: it uses `ptr<55>`, which `InsertPAC()`
 has set to `selbit`. Tested: probe case C prints Arm's value, and
@@ -106,7 +109,7 @@ holds the PAN the return set.
     Arm:          A 000000003a000000 00000000005003c5
     QEMU 11.1.2:  A 000000003a000000 00000000001003c5     bit 22 clear
 
-**Fix**: `docs/qemu-illegal-return-pan.patch` restores PAN too when the
+**Fix**: `docs/patches/qemu/qemu-illegal-return-pan.patch` restores PAN too when the
 CPU has FEAT_PAN. Tested with probe case A. (QEMU implements none of
 FEAT_EBEP, FEAT_SPE_EXC and FEAT_TRBE_EXC, so PM needs nothing yet.)
 
@@ -185,7 +188,7 @@ raw value said 256 KiB and its comment 512 KiB.
 cortex-a57 -m 256M -nic none` writes `d-cache-sets = <0x80>` (4 ways); a
 guest reads the same from `CCSIDR_EL1` with `CSSELR_EL1` = 0.
 
-**Fix**: `docs/qemu-cortex-cache-geometry.patch` restores the values from
+**Fix**: `docs/patches/qemu/qemu-cortex-cache-geometry.patch` restores the values from
 before 9.2 (and the A72 comment). Tested: the `virt` device tree has
 `d-cache-sets = <0x100>` for `cortex-a57`.
 
@@ -208,7 +211,7 @@ level above L1 (no `-machine smp-cache` description, the default),
 cortex-a57 -m 256M -nic none`, then `dtc -I dtb virt.dtb`:
 `next-level-cache = <0x00>;` in `/cpus/cpu@0`.
 
-**Fix**: `docs/qemu-virt-next-level-cache.patch` writes the property only
+**Fix**: `docs/patches/qemu/qemu-virt-next-level-cache.patch` writes the property only
 when a next-level node exists. Tested with the same dump.
 
 ### 6. The PL011 in loopback writes past its receive FIFO
@@ -233,9 +236,23 @@ UARTDR read until UARTFR.RXFE.
     PL011:        D abcdefghijklmnop
     QEMU 11.1.2:  D qbcdefghijklmnopq
 
-**Fix**: in `pl011_loopback_tx()`, drop the character when `read_count`
-has reached `pl011_get_fifo_depth()` (and flag the overrun, which QEMU's
-PL011 does not model on its chardev path either).
+**Fix**: `docs/patches/qemu/qemu-pl011-loopback-overrun.patch`: `pl011_fifo_rx_put()`
+drops a character that finds `read_count` at the FIFO's depth and flags
+the overrun in UARTRSR.OE and the overrun interrupt (INT_OE); a read of
+UARTDR keeps UARTRSR.OE, which only a write of UARTECR clears. Loopback
+and a break from the chardev (`pl011_event()`, which puts it in the FIFO
+without asking `pl011_can_receive()`) can overrun; the chardev's
+characters cannot, since `pl011_can_receive()` holds them back. UARTDR.OE,
+which the TRM reports from an overrun until a character next enters the
+FIFO, is not modelled. Tested: case D prints the PL011's line.
+
+**Before sending**: QEMU's Rust PL011, which a build with Rust uses for
+`virt` in place of the C one (`hw/char/Kconfig`), has the same unchecked
+write in `PL011Registers::fifo_rx_put()`
+(`rust/hw/char/pl011/src/device.rs`), and upstream will want both models
+changed together. The patch covers the C model only: building QEMU's Rust
+needs `bindgen-cli`, which this environment could not install, so a Rust
+change could not be built or tested here.
 
 **To check against the TRM before sending**: `pl011_loopback_mdmctrl()`
 sets a modem status interrupt (UARTRIS.RIRMIS, DCDRMIS, CTSRMIS, DSRRMIS)
@@ -279,13 +296,30 @@ fault, `AArch64_DC()` sets `fault.vaddress` to the register's value, and
     Arm:          G none
     QEMU 11.1.2:  G 000000009600000d 00000000c0000100
 
-**Fix**: no patch yet. The probe needs a translation with an
-`AccessType_DC`-like access type, which QEMU's `MMUAccessType` lacks:
-one that skips the PAN index and the EL1 permission check, keeps EL0's
-read check, and makes `arm_deliver_fault()` set CM and WnR and report the
-unrounded address. `arm_deliver_fault()` (`target/arm/tcg/tlb_helper.c`)
-passes `cm = 0` to the syndrome builders on every path today; only the AT
-instructions' faults on a stage 2 walk set CM (`target/arm/tcg/cpregs-at.c`).
+**Fix**: `docs/patches/qemu/qemu-dc-cvap-fault.patch`. `dccvap_writefn()` probes the
+line with the current regime's index without PAN (`dc_mmu_idx()`) and
+without faulting (`probe_access_flags()` with `nonfault`). On a miss,
+`dc_clean_fault()` translates the register's value with `get_phys_addr()`,
+completes on a Permission fault above EL0 (but not on one of the stage 1
+walk's own stage 2 translation, which is the walk's and taken at any
+EL), and otherwise takes the fault
+through `arm_deliver_fault()` (no longer static) as a write at the
+register's value, with a new `ARMMMUFaultInfo.cm` that
+`arm_deliver_fault()` passes to the syndrome builders for ISS.CM. The
+template syndrome it merges into is cleared first: `GETPC()` in a
+`writefn` is not always a return address into translated code (it is only
+when `HELPER(set_cp_reg64)` tail-calls the `writefn`), so
+`cpu_restore_state()` may leave a stale template whose ISV or VNCR bit
+would otherwise reach the abort; a cache maintenance instruction's
+template is empty, since only a load or store of one register sets ISV.
+The probe no longer checks watchpoints, which `AArch64_DC()` gives a clean
+none (it passes `AArch64_TranslateAddress()` a watchpoint size only for
+an invalidate). In `qemu-aarch64` an
+unreadable line raises SIGSEGV as before, now at the register's value.
+Tested: cases F and G print Arm's lines; in `qemu-aarch64 -cpu max`, a
+DC CVAP of a readable line completes and one of a `PROT_NONE` page at
+offset 0x123 raises SIGSEGV with `si_addr` at 0x123 (0x120 before); an
+Alpine 3.23 kernel boots to `login:`.
 
 ### 8. An exception return does not send an event
 
@@ -312,7 +346,7 @@ ERET to EL0, with SCTLR_EL1.nTWE clear.
     Arm:          J 0000000056000000 ...   (the SVC after the WFE)
     QEMU 11.1.2:  J 0000000007e00001 ...   (the WFE trapped)
 
-**Fix**: `docs/qemu-eret-event.patch` sets the Event Register in
+**Fix**: `docs/patches/qemu/qemu-eret-event.patch` sets the Event Register in
 `HELPER(exception_return)`, ahead of the illegal-return branch so both
 paths send it. Tested: case J prints the SVC's syndrome; Alpine 3.23
 boots to its login prompt.
@@ -341,13 +375,27 @@ a delay with CNTKCTL_EL1.EVNTEN set and EVNTI = 0, then WFE.
     Arm:          K 0000000056000000 ...
     QEMU 11.1.2:  K 0000000007e00001 ...   (the WFE trapped)
 
-**Fix**: no patch yet. WFE and WFET would need to know whether the stream
-has passed a selected transition since the Event Register was last
-cleared: the count at that moment kept in `CPUARMState` and compared at
-the next WFE or WFET (the same bit test `gt_recalc_one_evt()` makes), and
-brought up to date when CNTKCTL_EL1 or CNTHCTL_EL2 is written, so each
-stretch of the count is judged by the controls that held then.
-`rusty_box_aarch64` does exactly this (`cpu/wait.rs`).
+**Fix**: `docs/patches/qemu/qemu-event-stream-fold.patch`. A new
+`gt_fold_event_stream()` sets the Event Register when a stream has made a
+selected transition (`gt_evt_between()`) between the system counter value
+it was last brought up to, a new `CPUARMState.evt_folded_to`, and now,
+and then moves that value to now. The streams are Arm's: CNTHCTL_EL2's on
+the physical count (`TestEventCNTP()`), and CNTKCTL_EL1's on the physical
+count less CNTVOFF_EL2 unless the effective E2H and TGE are both 1
+(`TestEventCNTV()`), whatever the current EL. WFE and WFET fold before
+they read the register while either stream is on (with both off there is
+nothing to fold, and the write that turns one on folds first). Writes of
+CNTKCTL_EL1, CNTHCTL_EL2 and CNTVOFF_EL2 fold first, as do a write of
+HCR_EL2 that changes E2H or TGE and a write of SCR_EL3 that changes NS or
+EEL2 (which decide whether EL2 is enabled, and with it the effective
+TGE), so each stretch of the count is judged by the controls that held
+then. CNTKCTL_EL1 keeps EVNTIS only with FEAT_ECV: without it the bit is
+RES0, and `TestEventCNTV()` reads it only with FEAT_ECV. A reset and an
+incoming migration start at the current value. The timer that wakes a
+waiting WFE is left alone (entries 18 and 19 fix it).
+`rusty_box_aarch64` does the same (`cpu/wait.rs`). Tested: case K prints
+the SVC's syndrome, and an Alpine 3.23 kernel boots to `login:` on
+`-cpu max` with one, two and four CPUs and on `-cpu cortex-a57`.
 
 ### 10. WFET does not trap when an interrupt is pending
 
@@ -373,7 +421,7 @@ timeout of all ones while the virtual timer's interrupt is pending
 With the timer's interrupt not pending, QEMU 11.1.2 traps as Arm does
 (`0000000007e00027`).
 
-**Fix**: `docs/qemu-wfet-trap-order.patch` moves the `cpu_has_work()`
+**Fix**: `docs/patches/qemu/qemu-wfet-trap-order.patch` moves the `cpu_has_work()`
 return after the trap check. Tested: case L prints the WFET's syndrome;
 Alpine 3.23 boots to its login prompt.
 
@@ -403,15 +451,22 @@ is TRUE with FEAT_Debugv8p4), and SID and SNID 0b00; with Secure state,
 SID and SNID report `ExternalSecureInvasiveDebugEnabled()` and
 `ExternalSecureNoninvasiveDebugEnabled()` likewise.
 
-**Reproduce**: probe case M, an `MRS` of DBGAUTHSTATUS_EL1 at EL1.
+**Reproduce**: probe case M, an `MRS` of DBGAUTHSTATUS_EL1 at EL1 that
+prints the register's value: NSID 0b10 and, with FEAT_Debugv8p4, NSNID
+0b11 when no external debugger drives DBGEN.
 
-    Arm:          M none
+    Arm:          M 000000000000000e
     QEMU 11.1.2:  M 0000000002000000 ...   (UNDEFINED)
 
-**Fix**: no patch yet: a read-only `debug_cp_reginfo` entry (op0 2, op1 0,
-CRn 7, CRm 14, op2 6; cp14 for AArch32) whose read function follows
-`UpdateDbgAuthStatus()` with the authentication signals QEMU's model
-chooses, and with Secure state when the CPU has EL3.
+**Fix**: `docs/patches/qemu/qemu-dbgauthstatus.patch` adds DBGAUTHSTATUS_EL1 to
+`debug_cp_reginfo` (op0 2, op1 0, CRn 7, CRm 14, op2 6; for AArch32,
+DBGAUTHSTATUS on cp14): read-only from EL1, trapped by MDCR_EL2.TDA and
+MDCR_EL3.TDA (`access_tda()`) and by HDFGRTR_EL2.DBGAUTHSTATUS_EL1, whose
+`DO_BIT` entry it adds. QEMU has no external debugger, so DBGEN, NIDEN,
+SPIDEN and SPNIDEN are LOW: NSID 0b10; NSNID 0b11 with FEAT_Debugv8p4,
+else 0b10; SID and SNID 0b10 when the CPU has EL3, else 0b00; RLID,
+RLNID, RTID and RTNID 0b10 with FEAT_RME, else 0b00. Tested: case M
+prints Arm's line.
 
 ### 12. FABS and FNEG (vector) change a NaN's sign under FPCR.AH = 1
 
@@ -439,7 +494,7 @@ each element, and both return the operand unchanged when it is a NaN and
     Arm:          fneg v2.4s of 0x7fc00001 = 0x7fc00001, fabs v5.4s of 0xffc00001 = 0xffc00001
     QEMU 11.1.2:  fneg v2.4s of 0x7fc00001 = 0xffc00001, fabs v5.4s of 0xffc00001 = 0x7fc00001
 
-**Fix**: `docs/qemu-afp-vector-fabs-fneg.patch`: under FPCR.AH, expand
+**Fix**: `docs/patches/qemu/qemu-afp-vector-fabs-fneg.patch`: under FPCR.AH, expand
 each element with the scalar forms' `gen_vfp_ah_abs*` and
 `gen_vfp_ah_neg*` (an element at a time; a gvec helper like SVE's would
 be faster). Built and tested on `v11.1.2`: the probe agrees, and
@@ -474,7 +529,7 @@ one (`trans_FCMLA_vi()` in `translate-a64.c`) passes `(s->fpcr_ah << 4) |
     Arm:          fcmla z0.h, z1.h, z2.h[0], #90 of 1.0 by NaN 0xffc1: z0.h[0] = 0xffc1
     QEMU 11.1.2:  z0.h[0] = 0x7fc1 (Advanced SIMD fcmla v3.8h: 0xffc1)
 
-**Fix**: `docs/qemu-sve-fcmla-indexed-ah.patch`: pass FPCR.AH in bit 4, as
+**Fix**: `docs/patches/qemu/qemu-sve-fcmla-indexed-ah.patch`: pass FPCR.AH in bit 4, as
 the Advanced SIMD form does. Built and tested on `v11.1.2`: the probe
 agrees, and `rusty_box_aarch64`'s SVE vectors were generated with it.
 
@@ -511,7 +566,7 @@ and `sve_fsubr_size00`.
     Arm:          SIGILL (UNDEFINED), both
     QEMU 11.1.2:  0x65228020 (fmad, size = 00) executed; 0x65038020 (fsubr, size = 00) executed
 
-**Fix**: `docs/qemu-sve-fmad-size00.patch`: decode the four as their own
+**Fix**: `docs/patches/qemu/qemu-sve-fmad-size00.patch`: decode the four as their own
 names and refuse `esz = MO_8` for them. Built and tested on `v11.1.2`:
 `sve_fmad_size00` raises SIGILL, and `rusty_box_aarch64`'s SVE vectors
 were generated with it.
@@ -548,7 +603,7 @@ LD1Q are the same.
     Arm:          ld1w {za0v.s[w12, 0]}, p0/z with element 0 alone active: element 1 = 0
     QEMU 11.1.2:  element 1 = 0xffffffff, its value before the load
 
-**Fix**: `docs/qemu-sme-ld1-vertical-tail.patch`: clear the whole slice
+**Fix**: `docs/patches/qemu/qemu-sme-ld1-vertical-tail.patch`: clear the whole slice
 before loading, vertical or horizontal, which makes the per-element
 clears redundant. Built and tested on `v11.1.2`: the probe agrees, and
 `rusty_box_aarch64`'s ZA vectors were generated with it.
@@ -583,7 +638,7 @@ state.
 
 QEMU master as of 2026-10-27 has the same `do_movt()`.
 
-**Fix**: `docs/qemu-sme2-movt-debug-state.patch`: the two encodings'
+**Fix**: `docs/patches/qemu/qemu-sme2-movt-debug-state.patch`: the two encodings'
 translators return false, which raises the Undefined Instruction
 exception. Built and tested on `v11.1.2`: the probe raises SIGILL, and
 the other cases print what they did before.
@@ -616,6 +671,357 @@ virt,virtualization=on -cpu cortex-a57`: an `MRS X0, DBGPRCR_EL1`
 **Fix**: no patch yet: a `debug_cp_reginfo` entry (op0 2, op1 0, CRn 1,
 CRm 4, op2 4; cp14 for AArch32) keeping CORENPDRQ, with the access check
 the OS registers use (`access_tdosa`).
+
+---
+
+### 17. `-cpu max` calls itself a Cortex-A57 in the device tree
+
+**Impact**: harmless. The processor's device tree node says
+`compatible = "arm,cortex-a57"` while its `MIDR_EL1` says it is no Arm
+part. Linux's arm64 code identifies a processor by `MIDR_EL1`, not by the
+node's `compatible`, so no guest known to us acts on it; a guest or tool
+that reads the device tree to identify the processor is told it runs on a
+Cortex-A57 with none of the features `max` has.
+
+**Location**: `target/arm/tcg/cpu64.c`, `aarch64_max_tcg_initfn()`, which
+starts from `aarch64_a57_initfn()` (`target/arm/cpu64.c`, which sets
+`cpu->dtb_compatible = "arm,cortex-a57"`), resets `MIDR_EL1` and never
+resets the compatible; `hw/arm/virt.c`, `fdt_add_cpu_nodes()`, writes it.
+
+**What the references say**: QEMU's own comment on `max`'s MIDR: "Reset
+MIDR so the guest doesn't mistake our 'max' CPU type for a real one",
+with implementer 0, which the Arm ARM's `MIDR_EL1.Implementer` reserves
+for software use. Linux's binding,
+`Documentation/devicetree/bindings/arm/cpus.yaml`, lists
+`arm,armv8 # Only for s/w models` among the `compatible` values.
+
+**Reproduce**: `qemu-system-aarch64 -M virt,dumpdtb=max.dtb -cpu max -m
+256M -nographic`, then `dtc -I dtb max.dtb`: `compatible =
+"arm,cortex-a57";` in `/cpus/cpu@0`.
+
+QEMU master as of 2026-10-27 has the same: `aarch64_max_v8_tcg_initfn()`
+(`target/arm/tcg/cpu64.c`) starts from `aarch64_aa32_a57_init()`
+(`target/arm/cpu-max.c`), which sets `arm,cortex-a57`, and resets only
+the MIDR.
+
+**Fix**: `docs/patches/qemu/qemu-max-dtb-compatible.patch` sets `arm,armv8` after the
+MIDR (in master, the same line in `aarch64_max_v8_tcg_initfn()`). Built
+and tested on `v11.1.2`: the dump has `compatible = "arm,armv8";`, and an
+Alpine 3.23 kernel (Linux 6.18) boots to `login:` on `-cpu max` as
+before.
+
+### 18. A WFE never waits for the event stream
+
+**Impact**: harmless to the guest, costly to the host. Arm's
+`WaitForEvent()` lets a PE resume whenever "the implementation chooses to
+resume execution", so a WFE that does not wait breaks no rule of Arm's.
+But QEMU means a WFE to sleep until the stream's next event, and with the
+stream on it does not sleep at all. The timer that should wake it is set
+for a count already past, so it fires at once and sets the Event
+Register, and the WFE after that completes at once too. A guest that
+waits with WFE spins instead. Linux's `__delay()`
+(`arch/arm64/lib/delay.c`, 6.18) waits that way on a processor without
+FEAT_WFxT when the event stream is on, which Linux sets to 10 kHz;
+`-cpu cortex-a57` is one such processor. For EVNTI 0 or 1 with EVNTIS 0,
+the code also shifts a 64-bit value by 65 or 64 places, which is
+undefined behaviour in C.
+
+**Location**: `target/arm/tcg/op_helper.c`, `gt_recalc_one_evt()`. It
+works out how many ticks remain until the selected bit's next selected
+transition, then returns that distance plus the timer's offset as the
+system counter value to wake at. The value to wake at is the counter's
+current value plus the distance. Its mask of the bits below the selected
+one, `MAKE_64BIT_MASK(0, bit - 1)`, is one bit short.
+`gt_calc_next_event_stream()` takes each stream's offset from
+`gt_direct_access_timer_offset()`, the offset of a counter read at the
+current EL.
+
+**What the Arm ARM says**: `GenericCounterTick()` runs `TestEventCNTP()`
+and `TestEventCNTV()` on every tick of the system counter.
+`TestEventCNTP()` watches bit EVNTI (plus 8 with EVNTIS) of the physical
+count itself. `TestEventCNTV()` watches the same bit of the physical
+count less CNTVOFF_EL2 when EL2 is implemented, at every EL.
+
+**Reproduce**: probe case N: eight rounds of SEVL, WFE and WFE at EL1
+with the stream on bit 23 of the count. It prints how many rounds took
+at least half a stream period. A WFE that waits for the stream's next
+event gives 8.
+
+    Waiting:      N 0000000000000008
+    QEMU 11.1.2:  N 0000000000000000
+
+QEMU master as of 2026-10-27 has the same `gt_recalc_one_evt()`.
+
+**Fix**: `docs/patches/qemu/qemu-event-stream-wake-timer.patch`. The wake-up count
+is the system counter's current value plus the distance, and the mask is
+the bits below the selected one, `target_bit - 1`. The physical stream is
+judged on the physical count, and the virtual stream on the count less
+CNTVOFF_EL2. With a counter that does not run at 1 GHz the WFE still
+wakes early until entry 19 is fixed too. Built and tested on `v11.1.2`:
+case N prints 8 on `-M virt`, and with entry 19's patch on `-M virt-9.0`.
+An Alpine 3.23 kernel boots to `login:` on `-cpu max` with one, two and
+four CPUs and on `-cpu cortex-a57`.
+
+### 19. WFIT and WFET time out early when the counter does not run at 1 GHz
+
+**Impact**: harmless to the guest, costly to the host. Arm's
+`WaitForInterrupt()` and `WaitForEvent()` let a PE resume whenever the
+implementation chooses, so a short wait breaks no rule of Arm's. But QEMU
+means a WFIT or WFET to sleep until its timeout. With the system counter
+at 62.5 MHz it sleeps for about a sixteenth of the timeout. QEMU gives
+that frequency to `-M virt-9.0` and older machine types, and to the
+processor types older than its 1 GHz default
+(`ARM_FEATURE_BACKCOMPAT_CNTFRQ`), `-cpu cortex-a57` among them. A WFE
+waiting for the event stream wakes early in the same way once entry 18 is
+fixed.
+Linux's `__delay()` on a processor with FEAT_WFxT loops on WFET until
+the delay has passed, so it spins.
+
+**Location**: `target/arm/cpu.c`, `arm_cpu_realizefn()`, creates
+`cpu->wfxt_timer` with `timer_new_ns()`, a timer in nanoseconds. But
+`HELPER(wfit)`, `HELPER(wfet)` and `HELPER(wfe)`
+(`target/arm/tcg/op_helper.c`) set it with `timer_mod()` to a system
+counter value. They also check that value against
+`INT64_MAX / gt_cntfrq_period_ns()`, as if the timer counted in ticks of
+the counter's period, which is how the generic timers (`cpu->gt_timer[]`)
+are created.
+
+**What the Arm ARM says**: `LocalTimeoutEvent()` is TRUE once
+`VirtualCounterTimer()` (CNTVCT_EL0) equals or exceeds the timeout, a
+count of the virtual counter, whatever its frequency.
+
+**Reproduce**: probe case O: WFIT at EL1 with a timeout 2^24 counts
+ahead. It prints how many whole timeouts the count moved by.
+
+    Waiting:                    O 0000000000000001
+    QEMU 11.1.2, -M virt:       O 0000000000000001
+    QEMU 11.1.2, -M virt-9.0:   O 0000000000000000
+
+QEMU master as of 2026-10-27 creates the timer the same way.
+
+**Fix**: `docs/patches/qemu/qemu-wfxt-timer-scale.patch` creates the timer with
+`timer_new(QEMU_CLOCK_VIRTUAL, gt_cntfrq_period_ns(cpu), ...)`, as the
+generic timers are. Built and tested on `v11.1.2`: on `-M virt-9.0`,
+case O prints 1, a WFIT with a timeout 2^24 counts ahead waits
+0x1009f3b counts (0xd47f4 before), and with entry 18's patch case N
+prints 8. An Alpine 3.23 kernel boots to `login:` on `-M virt-9.0
+-cpu max` and on `-cpu cortex-a57`.
+
+### 20. The PL031's match interrupt is up to a second late
+
+**Impact**: low. A guest that sets an alarm and reads RTCDR and RTCRIS
+can find the RTC at the match value with no interrupt raised, for up to a
+second.
+
+**Location**: `hw/rtc/pl031.c`, `pl031_set_alarm()`, arms `s->timer` for
+`now + ticks * NANOSECONDS_PER_SECOND`, a whole number of seconds after
+the write. `pl031_get_count()` reads `tick_offset + now /
+NANOSECONDS_PER_SECOND`, which changes on the second boundaries of
+`rtc_clock`, so the count reaches the match value at the first boundary
+after the write, up to a second before the timer fires.
+
+**What the PL031 does**: DDI 0224C §2.1 and Figure 2-3: RTCINTR is
+asserted when the RTC value and the match value are equal, on the 1 Hz
+edge at which the count reaches it.
+
+**Reproduce**: found by reading the source against the TRM; not yet run
+on QEMU. A guest at 5.4 s that writes RTCMR = RTCDR + 5 sees RTCDR reach
+it at 10.0 s and RTCRIS rise at 10.4 s.
+
+**Fix**: not yet written. `pl031_set_alarm()` would arm the timer for the
+boundary, `(now / NANOSECONDS_PER_SECOND + ticks) * NANOSECONDS_PER_SECOND`.
+`rusty_box_aarch64` arms its alarm there (`src/devices/pl031.rs`).
+
+### 21. The PL061 latches level interrupts and does not see its outputs
+
+**Impact**: low on `virt`, whose only wired line is the power button, an
+input Linux sets to both edges. A guest using a level-sensitive line or
+an output's edge sees a different interrupt from the PL061's.
+
+**Location**: `hw/gpio/pl061.c`, `pl061_update()` and `pl061_write()`.
+- `s->istate |= ~(s->data ^ s->iev) & s->isense` ORs a level-sensitive
+  line's level into the raw status, where only GPIOIC clears it. The
+  raw status stays set after the level goes.
+- Edges are found in `(s->old_in_data ^ s->data) & ~s->dir`, inputs
+  only.
+- A GPIODATA write is masked with `s->dir`, so a write to an input line
+  is lost.
+- `pl061_set_irq()` drops the outside level of an output line. When the
+  line becomes an input it reads its last driven value until the outside
+  changes.
+
+**What the PL061 does**, according to DDI 0190B:
+- §2.3.4 and §3.3.9: a level interrupt is recognised while "the external
+  source holds the level constant", and GPIOIC clears only "the interrupt
+  edge detection logic register". A level-sensitive line's raw status is
+  its level.
+- §2.2.2, Figure 2-1 and Table 2-2: detection watches the pads (`GPIN`,
+  synchronised), which loop an output's level back.
+- §3.3.1: a write reaches the GPIODATA register, gated by `PADDR[9:2]`
+  alone, and an input reads `GPIN`.
+
+**Reproduce**: found by reading the source against the TRM; not yet run
+on QEMU.
+
+**Fix**: not yet written. `rusty_box_aarch64`'s `src/devices/pl061.rs`
+models the TRM's behaviour: latched edges and live levels kept apart,
+detection on the line levels, and the outside levels kept per line.
+
+### 22. SME2's multi-vector narrowing shifts execute outside Streaming SVE mode
+
+**Impact**: small. On a processor with FEAT_SVE as well as FEAT_SME2
+(`-cpu max`), SQRSHR, UQRSHR and SQRSHRU of two and four vectors and
+SQRSHRN, UQRSHRN and SQRSHRUN of four execute with PSTATE.SM = 0, at the
+non-streaming vector length, where the architecture takes the SME trap.
+Software that runs them in Streaming SVE mode, as it must, sees no
+difference; a test of the trap sees the instruction execute.
+
+**Location**: `target/arm/tcg/translate-sme.c`, `do_zz_rshr()`, which
+every one of them reaches through `TRANS_FEAT(..., aa64_sme2,
+do_zz_rshr, ...)`. It calls `sve_access_check()`, which with PSTATE.SM =
+0 on a CPU with SVE makes the plain SVE check (`goto continue_sve`). The
+file's other SME2 multi-vector helpers call `sme_sm_enabled_check()`.
+
+**What the Arm ARM says**: the Execute section of `sqrshr_z_mz2`,
+`sqrshr_z_mz4`, `sqrshrn_z_mz4` and the unsigned forms on those pages
+begins `CheckStreamingSVEEnabled()`, which with PSTATE.SM = 0 takes
+`SMEAccessTrap(SMEExceptionType_NotStreaming, ...)`: EC 0x1D, SMTC
+0b010. Their Decode requires FEAT_SME2 alone. The two-vector SQRSHRN,
+UQRSHRN and SQRSHRUN (`sqrshrn_z_mz2`), which FEAT_SVE2p1 shares, begin
+`CheckSVEEnabled()` and are legal outside Streaming SVE mode, as QEMU
+has them.
+
+**Reproduce**: found by reading the source against the pages; not yet run
+on QEMU.
+
+    Arm:     sqrshr z0.h, {z0.s-z1.s}, #16 (0xC1E0D400) at EL0, SME enabled,
+             PSTATE.SM = 0: SME trap, SMTC 0b010 (SIGILL under Linux)
+    QEMU:    executes, at the SVE vector length
+
+Found on QEMU 11.1.2, and in master as of 2026-10-28 (73294d0).
+
+**Fix**: `docs/patches/qemu/qemu-sme2-rshr-streaming-check.patch`: the
+SME2-only forms take `sme_sm_enabled_check()`, the three forms SVE2.1
+shares keep `sve_access_check()`. It applies to master as of 2026-10-28;
+not yet built or tested.
+
+### 23. SQCVT and SQRSHR of four vectors to bytes misplace them on a big-endian host
+
+**Impact**: small, big-endian hosts only. The SME2 SQCVT, UQCVT and
+SQCVTU and SQRSHR, UQRSHR and SQRSHRU of four words to bytes write the
+bytes of each destination doubleword in the wrong order on a big-endian
+host; a little-endian host is right.
+
+**Location**: `target/arm/tcg/sme_helper.c`, the instances
+`SQCVT4(sme2_sqcvt_sb, ...)`, `SQCVT4(sme2_uqcvt_sb, ...)`,
+`SQCVT4(sme2_sqcvtu_sb, ...)` and the same three of `SQRSHR4()`. Each
+indexes its `int8_t` or `uint8_t` destination with `H2`, the halfword
+index macro (`H2(x)` is `x ^ 3` on a big-endian host), where a byte
+element needs `H1` (`x ^ 7`), as the interleaving forms
+(`SQCVTN4(sme2_sqcvtn_sb, ...)`, `SQRSHRN4(sme2_sqrshrn_sb, ...)`) and
+every other byte helper have it.
+
+**What the Arm ARM says**: `sqcvt_z_mz4` and `sqrshr_z_mz4` write
+`Elem[result, r*elements + e, esize]` of each source `r` and element
+`e`: the bytes of a vector in element order.
+
+**Reproduce**: found by reading the source; not yet run (it needs a
+big-endian host).
+
+    Arm:     sqcvt z0.b, {z4.s-z7.s} with z4.s = {1, 2, 3, 4, ...}:
+             z0.b[0] = 1, z0.b[1] = 2
+    QEMU on a big-endian host: z0.b[0] = 2, z0.b[1] = 1
+
+Found on QEMU 11.1.2, and in master as of 2026-10-28.
+
+**Fix**: `docs/patches/qemu/qemu-sme2-narrow-bytes-host-order.patch`:
+`H1` for the six byte forms. It applies to master as of 2026-10-28; not
+yet built or tested.
+
+### 24. SVE contiguous loads and stores ignore SCTLR_ELx.A
+
+**Impact**: small. With strict alignment checking on (`SCTLR_EL1.A` = 1),
+an SVE contiguous load or store of halfwords or larger to a misaligned
+address on Normal memory completes, where the architecture takes an
+alignment fault. Only system-mode software that sets `SCTLR_EL1.A` and
+relies on the fault sees it; Linux leaves it clear.
+
+**Location**: `target/arm/tcg/translate-sve.c`, `do_mem_zpa()`, passes no
+alignment requirement to the helpers, and `target/arm/tcg/sve_helper.c`
+(`sve_ldN_r`, `sve_stN_r` and the first-fault and non-fault forms) access
+memory through host pointers or, from `target/arm/tcg/sve_ldst_internal.h`
+`DO_LD_TLB` and `DO_ST_TLB`, `cpu_ld*_data_ra` and `cpu_st*_data_ra`,
+which are `MO_UNALN`. QEMU enforces `SCTLR_ELx.A` at translation time
+(`align_mem`, `target/arm/tcg/hflags.c` `aprofile_require_alignment`),
+which these paths never consult; only Device memory's alignment
+(`TLB_CHECK_ALIGNED`, `target/arm/ptw.c`) reaches them. SVE `LDR` and
+`STR`, which do use `align_mem`, are right.
+
+**What the Arm ARM says**: each element's access is `Mem{msize}`, whose
+`aligned = IsAlignedSize(address, bytes)`, and a misaligned access faults
+when `AArch64_UnalignedAccessFaults` holds, which `AlignmentEnforced()`
+(`SCTLR_ELx.A` = 1) makes it.
+
+**Reproduce**: found by reading the source; not yet run on QEMU.
+
+    Arm:     EL1, SCTLR_EL1.A = 1, Streaming SVE or SVE enabled, X0 = 0x1001
+             on Normal memory, P0 all true for halfwords:
+             ld1h {z0.h}, p0/z, [x0] (0xA4A0A000) takes an alignment fault
+    QEMU:    loads the halfwords
+
+Found on QEMU 11.1.2, and in master as of 2026-10-28. The SME loads and
+stores of tile slices and of vector groups use the same helpers and are
+likely affected too; not checked.
+
+**Fix**: not yet written. The translator would pass `align_mem` in the
+helpers' descriptor, and the helpers would raise the alignment fault for
+the first active misaligned element before any access, as
+`arm_cpu_do_unaligned_access()` raises it for a scalar access.
+`rusty_box_aarch64` checks each element (`src/cpu/sve/mem.rs`, through
+`Cpu::read_mem`).
+
+### 25. LDP and STP of Q registers at 8 mod 16 alignment-fault on Device memory
+
+**Impact**: small. An LDP, STP, LDNP or STNP of two Q registers at an
+address 8-byte but not 16-byte aligned takes an alignment fault on Device
+memory, and with the MMU off on all memory, where the architecture makes
+the access. Firmware copying with Q-register pairs before the MMU is on
+sees the fault.
+
+**Location**: `target/arm/tcg/translate-a64.c`, `trans_LDP_v()` and
+`trans_STP_v()`, make two 16-byte accesses with
+`finalize_memop_asimd(s, MO_128)` (`target/arm/tcg/translate.h`), which
+adds `MO_ALIGN`: enforced at translation time when `align_mem` is set,
+which with the MMU off it always is (`aprofile_require_alignment`), and
+on a Device page through `memop_tlb_alignment_bits()` in
+`get_phys_addr_lpae()` (`target/arm/ptw.c`). Either way each Q register
+must be 16-byte aligned.
+
+**What the Arm ARM says**: `ldp_fpsimd.xml` and `stp_fpsimd.xml` make one
+`Mem{2*datasize}` access with `ispair`. For 32 bytes, `Mem` (release
+2026-09) first applies `AArch64_UnalignedAccessFaults` with `aligned`
+judged by the 16-byte element (so `SCTLR_ELx.A` = 1 still faults), then:
+"If a 32 byte LDP (SIMD&FP) access is not aligned to 32 bytes but aligned
+to 8 bytes, it is treated as four 8 byte single-copy atomic accesses",
+each passed `aligned = TRUE`, which
+`AArch64_S1HasAlignmentFaultDueToMemType` does not fault on Device
+memory.
+
+**Reproduce**: found by reading the source against the pseudocode; not
+yet run on QEMU.
+
+    Arm:     MMU off, SCTLR_EL1.A = 0, X0 = RAM base + 8:
+             ldp q0, q1, [x0] (0xAD400400) loads both registers
+    QEMU:    alignment fault, DFSC 0x21
+
+Found on QEMU 11.1.2, and in master as of 2026-10-28.
+
+**Fix**: not yet written. The pair needs `MO_ALIGN_8` with
+`MO_ALIGN_TLB_ONLY` when `SCTLR_ELx.A` is clear and `MO_ALIGN` (16)
+when it is set, which the translator cannot tell apart today: `align_mem`
+is set for either. A translation flag for `SCTLR_ELx.A` alone would.
+`rusty_box_aarch64` makes the four accesses (`src/cpu/mmu.rs`,
+`Cpu::read_mem_q_pair` and `Cpu::write_mem_q_pair`).
 
 ---
 
@@ -655,6 +1061,18 @@ feature patch.
   should-be values, and FCMP/FCMPE with zero whatever `Rm` holds. Such a
   word is CONSTRAINED UNPREDICTABLE, and executing it as if the field held
   its should-be value is among the permitted behaviours.
+- **The PL031 always counts.** In `hw/rtc/pl031.c`, `pl031_read()` returns
+  1 for RTCCR ("RTC is permanently enabled") and `pl031_write()` ignores a
+  write to it ("Written value is ignored"). The device has no reset.
+  DDI 0224C says the RTC counts only once a 1 is written to RTCCR, and
+  that a later write resets its value to zero (§2.2.4, Table 3-5, for
+  every revision per Table B-2). A system reset clears RTCCR (§2.3.1).
+
+  A patch has a Linux side. `pl031_probe()` in
+  `drivers/rtc/rtc-pl031.c` sets `RTC_CR_EN` with a write on every boot.
+  On a PL031 that behaves as DDI 0224C says, Linux therefore zeroes an RTC
+  that firmware has already started. EDK2's `InitializePL031()` writes
+  RTCCR only while it reads 0. Linux would do the same.
 
 ---
 

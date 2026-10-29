@@ -125,9 +125,13 @@ fn sub_mags_f32(ui_a: u32, ui_b: u32, status: &mut SoftFloatStatus) -> Float32 {
             shift_dist = exp_a;
             exp_z = 0;
         }
-        // An equal-exponent difference is exact: a subnormal result
-        // underflows only when FPCR.FZ flushes it.
-        if exp_z == 0 && softfloat_flush_underflow_to_zero(status) {
+        // An equal-exponent difference is exact: a subnormal result (no
+        // implicit bit after the shift; Bochs s_subMagsF32) underflows
+        // only when FPCR.FZ flushes it.
+        if exp_z == 0
+            && (sig_diff << shift_dist) < 0x0080_0000
+            && softfloat_flush_underflow_to_zero(status)
+        {
             softfloat_raise_flags(status, flush_flags(status));
             return pack_to_f32(sign_z, 0, 0);
         }
@@ -222,10 +226,32 @@ mod tests {
     #[test]
     fn f32_add_sub_match_native_rne() {
         let vals: [f32; 26] = [
-            0.0, -0.0, 1.0, -1.0, 2.0, -2.0, 0.5, core::f32::consts::PI, -core::f32::consts::E,
-            1e30, -1e30, 1e-30, f32::MIN_POSITIVE, f32::MIN_POSITIVE / 2.0,
-            123_456.79, 0.1, 0.2, 16_777_216.0, 16_777_217.0, 8_388_608.0,
-            8_388_609.0, f32::MAX, f32::MIN, 1.0000001, 0.9999999, 65504.0,
+            0.0,
+            -0.0,
+            1.0,
+            -1.0,
+            2.0,
+            -2.0,
+            0.5,
+            core::f32::consts::PI,
+            -core::f32::consts::E,
+            1e30,
+            -1e30,
+            1e-30,
+            f32::MIN_POSITIVE,
+            f32::MIN_POSITIVE / 2.0,
+            123_456.79,
+            0.1,
+            0.2,
+            16_777_216.0,
+            16_777_217.0,
+            8_388_608.0,
+            8_388_609.0,
+            f32::MAX,
+            f32::MIN,
+            1.0000001,
+            0.9999999,
+            65504.0,
         ];
         for &a in &vals {
             for &b in &vals {

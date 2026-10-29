@@ -16,7 +16,7 @@
 //! changes and at the next tick a line can rise, which this module computes
 //! exactly: the first tick whose count reaches `CVAL`.
 
-use rusty_box_core::VmInstant;
+use rusty_box_core::{Cycles, VmInstant};
 
 use super::{Cpu, Levels};
 
@@ -125,10 +125,11 @@ pub(crate) const CTL_IMASK: u64 = 1 << 1;
 const CTL_ISTATUS: u64 = 1 << 2;
 
 impl<L: Levels> Cpu<L> {
-    /// The system counter at the tick `icount`.
+    /// The system counter at the tick `icount`: non-decreasing in `icount`.
     #[inline]
-    fn counter_at(&self, icount: u64) -> Count {
-        let value = u128::from(icount) * u128::from(self.counter_hz.get()) / u128::from(self.ips.get());
+    pub(crate) fn counter_at(&self, icount: u64) -> Count {
+        let value =
+            u128::from(icount) * u128::from(self.imp.counter_hz.get()) / u128::from(self.ips.get());
         Count(u64::try_from(value).unwrap_or(u64::MAX))
     }
 
@@ -146,21 +147,37 @@ impl<L: Levels> Cpu<L> {
         self.el2().cntvoff
     }
 
-    /// `CNTVCT_EL0` now (Arm `VirtualCounterTimer`, at EL0, EL1 and EL2 of a
-    /// processor without FEAT_VHE): the physical count less `CNTVOFF_EL2`,
-    /// modulo 2^64.
+    /// `CNTVCT_EL0` at the tick `icount` (Arm `VirtualCounterTimer`, at
+    /// EL0, EL1 and EL2 of a processor without FEAT_VHE): the physical count
+    /// less `CNTVOFF_EL2`, modulo 2^64. Non-decreasing in `icount` but where
+    /// it wraps to 0.
     #[inline]
-    pub(crate) fn virtual_count(&self) -> VirtualCount {
-        VirtualCount(self.counter().0.wrapping_sub(self.virtual_offset()))
+    pub(crate) fn virtual_count_at(&self, icount: u64) -> VirtualCount {
+        VirtualCount(
+            self.counter_at(icount)
+                .0
+                .wrapping_sub(self.virtual_offset()),
+        )
     }
 
-    /// The first tick at which the counter reaches `count`. `None` when that
-    /// is the last tick the count of ticks holds or past it: the machine
-    /// reads `u64::MAX` as "never", and a deadline is never there.
+    /// `CNTVCT_EL0` now ([`Cpu::virtual_count_at`]).
+    #[inline]
+    pub(crate) fn virtual_count(&self) -> VirtualCount {
+        self.virtual_count_at(self.icount)
+    }
+
+    /// The first tick at which the counter reaches `count`: the ticks that
+    /// span `count` counter cycles, rounded up, which is exactly where
+    /// [`Cpu::counter_at`]'s floor first reaches it. `None` when that is the
+    /// last tick the count of ticks holds or past it (the span saturates
+    /// there): the machine reads `u64::MAX` as "never", and a deadline is
+    /// never there.
     pub(super) fn tick_reaching(&self, count: Count) -> Option<VmInstant> {
-        let needed = u128::from(count.0) * u128::from(self.ips.get());
-        let ticks = needed.div_ceil(u128::from(self.counter_hz.get()));
-        u64::try_from(ticks).ok().filter(|&t| t != u64::MAX).map(VmInstant::from_ticks)
+        let ticks = self
+            .ips
+            .ticks_from_cycles_ceil(Cycles::new(count.0), self.imp.counter_hz)
+            .ticks();
+        (ticks != u64::MAX).then(|| VmInstant::from_ticks(ticks))
     }
 
     /// The first tick at which the virtual count, below `target` now,
@@ -169,7 +186,10 @@ impl<L: Levels> Cpu<L> {
     /// when the virtual count is not below `target`, or the tick lies past
     /// [`Cpu::tick_reaching`]'s last.
     pub(super) fn tick_reaching_virtual(&self, target: VirtualCount) -> Option<VmInstant> {
-        let distance = target.0.checked_sub(self.virtual_count().0).filter(|&d| d != 0)?;
+        let distance = target
+            .0
+            .checked_sub(self.virtual_count().0)
+            .filter(|&d| d != 0)?;
         self.tick_reaching(Count(self.counter().0.checked_add(distance)?))
     }
 
@@ -213,7 +233,11 @@ impl<L: Levels> Cpu<L> {
     /// `CNTx_CTL` of `timer` as read: `ISTATUS` reports the condition,
     /// whatever `IMASK` says.
     pub(crate) fn timer_ctl_read(&self, timer: GenericTimer) -> u64 {
-        let status = if self.condition_met(timer) { CTL_ISTATUS } else { 0 };
+        let status = if self.condition_met(timer) {
+            CTL_ISTATUS
+        } else {
+            0
+        };
         (self.timer_regs(timer).ctl & (CTL_ENABLE | CTL_IMASK)) | status
     }
 
@@ -285,7 +309,10 @@ impl<L: Levels> Cpu<L> {
     /// The earliest future tick at which a timer output changes, if one
     /// will without further register writes.
     pub fn next_timer_deadline(&self) -> Option<VmInstant> {
-        GenericTimer::ALL.into_iter().filter_map(|timer| self.timer_change(timer)).min()
+        GenericTimer::ALL
+            .into_iter()
+            .filter_map(|timer| self.timer_change(timer))
+            .min()
     }
 
     /// Whether a timer register changed since the machine last sampled the
@@ -298,23 +325,31 @@ impl<L: Levels> Cpu<L> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cpu::{CpuConfig, NoEl2, SysReg, SysRegRefusal, WithEl2};
+    use crate::cpu::features::Implementation;
+    use crate::cpu::{CpuConfig, Levels, NoEl2, SysReg, SysRegRefusal, WithEl2};
     use rusty_box_core::ClockHz;
 
-    fn config(ips: u64, counter_hz: u64) -> CpuConfig {
-        CpuConfig {
-            ips: ClockHz::new(ips).unwrap_or(ClockHz::BOCHS_DEFAULT),
-            counter_hz: ClockHz::new(counter_hz).unwrap_or(ClockHz::BOCHS_DEFAULT),
-            reset_pc: 0,
-        }
+    /// A Cortex-A57 of the levels `L` running at `ips`, its counter at
+    /// `counter_hz`.
+    fn processor<L: Levels>(ips: u64, counter_hz: u64) -> Cpu<L> {
+        Cpu::implementing(
+            CpuConfig {
+                ips: ClockHz::new(ips).unwrap_or(ClockHz::BOCHS_DEFAULT),
+                reset_pc: 0,
+            },
+            Implementation {
+                counter_hz: ClockHz::new(counter_hz).unwrap_or(ClockHz::BOCHS_DEFAULT),
+                ..Implementation::CORTEX_A57
+            },
+        )
     }
 
     fn cpu(ips: u64, counter_hz: u64) -> Cpu<NoEl2> {
-        Cpu::new(config(ips, counter_hz))
+        processor(ips, counter_hz)
     }
 
     fn cpu_el2(ips: u64, counter_hz: u64) -> Cpu<WithEl2> {
-        Cpu::new(config(ips, counter_hz))
+        processor(ips, counter_hz)
     }
 
     /// The deadline is the first tick at which the guest would read a count
@@ -341,7 +376,10 @@ mod tests {
         c.sys.cntv_cval_el0 = 5;
         assert_eq!(c.next_timer_deadline(), None);
         c.icount = 5;
-        assert_eq!(c.timer_ctl_read(GenericTimer::Virtual) & CTL_ISTATUS, CTL_ISTATUS);
+        assert_eq!(
+            c.timer_ctl_read(GenericTimer::Virtual) & CTL_ISTATUS,
+            CTL_ISTATUS
+        );
         assert!(!c.timer_lines().virtual_);
     }
 
@@ -353,7 +391,10 @@ mod tests {
         let cval = c.timer_cval_from_tval(GenericTimer::Physical, u64::from((-10i32) as u32));
         assert_eq!(cval, 90);
         c.sys.cntp_cval_el0 = cval;
-        assert_eq!(c.timer_tval_read(GenericTimer::Physical), u64::from((-10i32) as u32));
+        assert_eq!(
+            c.timer_tval_read(GenericTimer::Physical),
+            u64::from((-10i32) as u32)
+        );
     }
 
     /// The virtual timer compares the physical count less `CNTVOFF_EL2`
@@ -373,7 +414,11 @@ mod tests {
         assert_eq!(c.next_timer_deadline().map(VmInstant::ticks), Some(50));
         c.icount = 50;
         assert!(c.timer_lines().virtual_);
-        assert_eq!(c.timer_cval_from_tval(GenericTimer::Virtual, 5), 25, "the virtual count 20 plus 5");
+        assert_eq!(
+            c.timer_cval_from_tval(GenericTimer::Virtual, 5),
+            25,
+            "the virtual count 20 plus 5"
+        );
     }
 
     /// An offset past the physical count makes the virtual count wrap:
@@ -423,8 +468,15 @@ mod tests {
             }
         );
         let mut plain = cpu(1_000, 1_000);
-        for (reg, value) in [(SysReg::CNTHP_CVAL_EL2, 7), (SysReg::CNTHP_CTL_EL2, CTL_ENABLE)] {
-            assert_eq!(plain.host_sysreg_write(reg, value), Err(SysRegRefusal::Absent), "{reg:?}");
+        for (reg, value) in [
+            (SysReg::CNTHP_CVAL_EL2, 7),
+            (SysReg::CNTHP_CTL_EL2, CTL_ENABLE),
+        ] {
+            assert_eq!(
+                plain.host_sysreg_write(reg, value),
+                Err(SysRegRefusal::Absent),
+                "{reg:?}"
+            );
         }
         plain.icount = 7;
         assert!(!plain.timer_lines().hypervisor);

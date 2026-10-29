@@ -109,7 +109,10 @@ fn check32(ours: u32, host: f32, what: &str, a: f32, b: f32) {
 
 fn check64(ours: u64, host: f64, what: &str, a: f64, b: f64) {
     if host.is_nan() {
-        assert_eq!(ours, 0x7FF8_0000_0000_0000, "{what}({a:e}, {b:e}) default NaN");
+        assert_eq!(
+            ours, 0x7FF8_0000_0000_0000,
+            "{what}({a:e}, {b:e}) default NaN"
+        );
     } else {
         assert_eq!(ours, host.to_bits(), "{what}({a:e}, {b:e})");
     }
@@ -134,7 +137,11 @@ fn f32_arithmetic_matches_the_host_in_round_to_nearest() {
             a,
             b,
         );
-        assert_eq!(f32_to_f64(ab, &mut fp), f64::from(a).to_bits(), "f32_to_f64({a:e})");
+        assert_eq!(
+            f32_to_f64(ab, &mut fp),
+            f64::from(a).to_bits(),
+            "f32_to_f64({a:e})"
+        );
     }
 }
 
@@ -157,7 +164,13 @@ fn f64_arithmetic_matches_the_host_in_round_to_nearest() {
             a,
             b,
         );
-        check32(f64_to_f32(ab, &mut fp), a as f32, "f64_to_f32", a as f32, a as f32);
+        check32(
+            f64_to_f32(ab, &mut fp),
+            a as f32,
+            "f64_to_f32",
+            a as f32,
+            a as f32,
+        );
     }
 }
 
@@ -171,7 +184,11 @@ fn integer_conversions_match_the_host() {
         let (a, d) = (rng.finite_f32(), rng.finite_f64());
         // Scale some inputs into the integer range so they do not all saturate.
         let a = if rng.next() & 1 == 0 { a } else { a * 1.0e9 };
-        let d = if rng.next() & 1 == 0 { d } else { (d % 1.0e20) * 1.0e9 };
+        let d = if rng.next() & 1 == 0 {
+            d
+        } else {
+            (d % 1.0e20) * 1.0e9
+        };
         let (ab, db) = (a.to_bits(), d.to_bits());
         let mut fp = status();
         let z = FpRounding::Zero;
@@ -188,14 +205,46 @@ fn integer_conversions_match_the_host() {
         let shift = (rng.next() % 64) as u32;
         let x = x >> shift;
         let te = FpRounding::TieEven;
-        assert_eq!(i32_to_f32(x as i32, te, &mut fp), (x as i32 as f32).to_bits(), "i32_to_f32({x})");
-        assert_eq!(i64_to_f32(x as i64, te, &mut fp), (x as i64 as f32).to_bits(), "i64_to_f32({x})");
-        assert_eq!(u32_to_f32(x as u32, te, &mut fp), (x as u32 as f32).to_bits(), "u32_to_f32({x})");
-        assert_eq!(u64_to_f32(x, te, &mut fp), (x as f32).to_bits(), "u64_to_f32({x})");
-        assert_eq!(i32_to_f64(x as i32), (x as i32 as f64).to_bits(), "i32_to_f64({x})");
-        assert_eq!(u32_to_f64(x as u32), (x as u32 as f64).to_bits(), "u32_to_f64({x})");
-        assert_eq!(i64_to_f64(x as i64, te, &mut fp), (x as i64 as f64).to_bits(), "i64_to_f64({x})");
-        assert_eq!(u64_to_f64(x, te, &mut fp), (x as f64).to_bits(), "u64_to_f64({x})");
+        assert_eq!(
+            i32_to_f32(x as i32, te, &mut fp),
+            (x as i32 as f32).to_bits(),
+            "i32_to_f32({x})"
+        );
+        assert_eq!(
+            i64_to_f32(x as i64, te, &mut fp),
+            (x as i64 as f32).to_bits(),
+            "i64_to_f32({x})"
+        );
+        assert_eq!(
+            u32_to_f32(x as u32, te, &mut fp),
+            (x as u32 as f32).to_bits(),
+            "u32_to_f32({x})"
+        );
+        assert_eq!(
+            u64_to_f32(x, te, &mut fp),
+            (x as f32).to_bits(),
+            "u64_to_f32({x})"
+        );
+        assert_eq!(
+            i32_to_f64(x as i32),
+            (x as i32 as f64).to_bits(),
+            "i32_to_f64({x})"
+        );
+        assert_eq!(
+            u32_to_f64(x as u32),
+            (x as u32 as f64).to_bits(),
+            "u32_to_f64({x})"
+        );
+        assert_eq!(
+            i64_to_f64(x as i64, te, &mut fp),
+            (x as i64 as f64).to_bits(),
+            "i64_to_f64({x})"
+        );
+        assert_eq!(
+            u64_to_f64(x, te, &mut fp),
+            (x as f64).to_bits(),
+            "u64_to_f64({x})"
+        );
     }
 }
 
@@ -284,9 +333,18 @@ fn fused_multiply_add_nan_propagation_follows_fpprocessnans3() {
 
     // FPNeg flips a NaN operand's sign before propagation.
     let mut fp = status();
-    assert_eq!(f32_mul_add(FusedMulAdd::Fmsub, ONE, Q1, ONE, &mut fp), Q1 | 0x8000_0000);
-    assert_eq!(f32_mul_add(FusedMulAdd::Fnmadd, Q1, ONE, ONE, &mut fp), Q1 | 0x8000_0000);
-    assert_eq!(f32_mul_add(FusedMulAdd::Fnmsub, Q1, ONE, ONE, &mut fp), Q1 | 0x8000_0000);
+    assert_eq!(
+        f32_mul_add(FusedMulAdd::Fmsub, ONE, Q1, ONE, &mut fp),
+        Q1 | 0x8000_0000
+    );
+    assert_eq!(
+        f32_mul_add(FusedMulAdd::Fnmadd, Q1, ONE, ONE, &mut fp),
+        Q1 | 0x8000_0000
+    );
+    assert_eq!(
+        f32_mul_add(FusedMulAdd::Fnmsub, Q1, ONE, ONE, &mut fp),
+        Q1 | 0x8000_0000
+    );
     assert_eq!(f32_mul_add(FusedMulAdd::Fnmsub, ONE, Q1, ONE, &mut fp), Q1);
 
     // The four forms on ordinary values: a = 1, n = 2, m = 3.
@@ -298,14 +356,96 @@ fn fused_multiply_add_nan_propagation_follows_fpprocessnans3() {
         (FusedMulAdd::Fnmadd, -7.0),
         (FusedMulAdd::Fnmsub, 5.0),
     ] {
-        assert_eq!(f64_mul_add(form, a, n, m, &mut fp), want.to_bits(), "{form:?}");
+        assert_eq!(
+            f64_mul_add(form, a, n, m, &mut fp),
+            want.to_bits(),
+            "{form:?}"
+        );
     }
     assert_eq!(fp.cumulative_fpsr(), 0);
 
     let mut fp = status();
-    assert_eq!(f64_mul_add(FusedMulAdd::Fmadd, DQ1, DPOS_INF, 0, &mut fp), 0x7FF8_0000_0000_0000);
-    assert_eq!(f64_mul_add(FusedMulAdd::Fmadd, DQ1, DS2, DQ2, &mut fp), DS2 | 0x0008_0000_0000_0000);
+    assert_eq!(
+        f64_mul_add(FusedMulAdd::Fmadd, DQ1, DPOS_INF, 0, &mut fp),
+        0x7FF8_0000_0000_0000
+    );
+    assert_eq!(
+        f64_mul_add(FusedMulAdd::Fmadd, DQ1, DS2, DQ2, &mut fp),
+        DS2 | 0x0008_0000_0000_0000
+    );
     assert_eq!(fp.cumulative_fpsr(), IOC);
+}
+
+/// A double fused multiply-add whose addend `a = -RN(n*m)` cancels the
+/// high word of the 128-bit product exactly, leaving a low word whose top
+/// set bit is bit 62: Berkeley `softfloat_mulAddF64` normalizes that
+/// remainder with a left shift of 0. Arm FPMulAdd's result is the exact
+/// sum `n*m + a`, the product's rounding error, which binary64 holds, so
+/// it is the same in every rounding mode and raises nothing.
+#[test]
+fn fused_multiply_add_cancelling_the_high_product_word_is_exact() {
+    const SIGN: u64 = 1 << 63;
+    // [n, m, a, n*m + a]; the sums are the exact rationals
+    // 1734089336883 * 2^-102 and 111467904765 * 2^-99.
+    let cases: [[u64; 4]; 2] = [
+        [
+            0x3FFE_E6F8_F0B8_0AC5,
+            0x3FFC_95EC_6976_DA5C,
+            0xC00B_9AE1_9706_7916,
+            0x3C19_3BFC_7683_3000,
+        ],
+        [
+            0x3FF0_2040_ABA1_8322,
+            0x3FF7_3F7C_DCF7_0AD0,
+            0xBFF7_6E59_CE05_A09D,
+            0x3C09_F401_3EFD_0000,
+        ],
+    ];
+    for [n, m, a, sum] in cases {
+        let host = f64::from_bits(n).mul_add(f64::from_bits(m), f64::from_bits(a));
+        assert_eq!(
+            host.to_bits(),
+            sum,
+            "host {n:#018x} * {m:#018x} + {a:#018x}"
+        );
+        // Each form computes n*m + a or its negation.
+        for (form, addend, want) in [
+            (FusedMulAdd::Fmadd, a, sum),
+            (FusedMulAdd::Fmsub, a ^ SIGN, sum ^ SIGN),
+            (FusedMulAdd::Fnmadd, a, sum ^ SIGN),
+            (FusedMulAdd::Fnmsub, a ^ SIGN, sum),
+        ] {
+            for rmode in 0..4u64 {
+                let mut fp = status_with(rmode << 22);
+                let got = f64_mul_add(form, addend, n, m, &mut fp);
+                assert_eq!(
+                    got, want,
+                    "{form:?} RMode {rmode}: {addend:#018x} with {n:#018x} * {m:#018x}"
+                );
+                assert_eq!(fp.cumulative_fpsr(), 0, "{form:?} RMode {rmode}");
+            }
+        }
+    }
+}
+
+/// Berkeley `softfloat_shortShiftLeft128` shifts a 128-bit value left; a
+/// distance of 0 leaves it unchanged.
+#[test]
+fn a_128_bit_left_shift_by_0_to_63_is_the_shift_of_the_whole_value() {
+    use super::primitives::short_shift_left128;
+    let mut rng = XorShift(0x5EED_0128_5A1F_0000);
+    for dist in 0..64u8 {
+        for _ in 0..64 {
+            let (a64, a0) = (rng.next(), rng.next());
+            let whole = ((u128::from(a64) << 64) | u128::from(a0)) << dist;
+            let want = ((whole >> 64) as u64, whole as u64);
+            assert_eq!(
+                short_shift_left128(a64, a0, dist),
+                want,
+                "{a64:#018x}_{a0:016x} << {dist}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -319,8 +459,14 @@ fn default_nan_mode_replaces_every_nan_result() {
     assert_eq!(f64_mul(DQ1, DQ2, &mut fp), 0x7FF8_0000_0000_0000);
     assert_eq!(f32_sqrt(0xFFC0_0007, &mut fp), 0x7FC0_0000);
     assert_eq!(f32_max(Q1, ONE, &mut fp), 0x7FC0_0000);
-    assert_eq!(f32_round_to_int(Q1, FpRounding::TieEven, InexactReport::Suppress, &mut fp), 0x7FC0_0000);
-    assert_eq!(f32_mul_add(FusedMulAdd::Fmadd, Q1, Q2, ONE, &mut fp), 0x7FC0_0000);
+    assert_eq!(
+        f32_round_to_int(Q1, FpRounding::TieEven, InexactReport::Suppress, &mut fp),
+        0x7FC0_0000
+    );
+    assert_eq!(
+        f32_mul_add(FusedMulAdd::Fmadd, Q1, Q2, ONE, &mut fp),
+        0x7FC0_0000
+    );
     assert_eq!(f32_to_f64(Q1, &mut fp), 0x7FF8_0000_0000_0000);
     assert_eq!(f64_to_f32(DQ1, &mut fp), 0x7FC0_0000);
     assert_eq!(f16_to_f32(0x7E01, &mut fp), 0x7FC0_0000);
@@ -333,7 +479,10 @@ fn nan_conversions_keep_sign_and_payload() {
     assert_eq!(f32_to_f16(0x7FC0_0000, &mut fp), 0x7E00);
     assert_eq!(f32_to_f16(0xFFC0_0000, &mut fp), 0xFE00);
     assert_eq!(f32_to_f64(0xFFC0_0001, &mut fp), 0xFFF8_0000_2000_0000);
-    assert_eq!(f64_to_f16(0x7FF8_0000_0000_0000 | (0x155 << 42), &mut fp), 0x7F55);
+    assert_eq!(
+        f64_to_f16(0x7FF8_0000_0000_0000 | (0x155 << 42), &mut fp),
+        0x7F55
+    );
     assert_eq!(f16_to_f64(0x7F55, &mut fp), 0x7FFD_5400_0000_0000);
     assert_eq!(fp.cumulative_fpsr(), 0);
     // A signaling NaN is quietened and raises invalid.
@@ -357,7 +506,10 @@ fn float_to_integer_conversions_saturate() {
 
     assert_eq!(conv32(i32_of, f32::from_bits(nan)), (0, IOC));
     assert_eq!(conv32(i32_of, f32::INFINITY), (i64::from(i32::MAX), IOC));
-    assert_eq!(conv32(i32_of, f32::NEG_INFINITY), (i64::from(i32::MIN), IOC));
+    assert_eq!(
+        conv32(i32_of, f32::NEG_INFINITY),
+        (i64::from(i32::MIN), IOC)
+    );
     assert_eq!(conv32(i32_of, 3.0e9), (i64::from(i32::MAX), IOC));
     assert_eq!(conv32(i32_of, -3.0e9), (i64::from(i32::MIN), IOC));
     assert_eq!(conv32(i32_of, -2_147_483_648.0), (i64::from(i32::MIN), 0));
@@ -373,17 +525,30 @@ fn float_to_integer_conversions_saturate() {
     assert_eq!(f64_to_u64(dnan, z, &mut fp), 0);
     assert_eq!(f64_to_u64((-1.0f64).to_bits(), z, &mut fp), 0);
     assert_eq!(f64_to_u64(f64::INFINITY.to_bits(), z, &mut fp), u64::MAX);
-    assert_eq!(f64_to_i64(f64::NEG_INFINITY.to_bits(), z, &mut fp), i64::MIN);
+    assert_eq!(
+        f64_to_i64(f64::NEG_INFINITY.to_bits(), z, &mut fp),
+        i64::MIN
+    );
     assert_eq!(f64_to_i32(dnan, z, &mut fp), 0);
     assert_eq!(f64_to_u32((-7.0f64).to_bits(), z, &mut fp), 0);
     assert_eq!(fp.cumulative_fpsr(), IOC);
 
     // Rounding past the range is invalid, not inexact.
     let mut fp = status();
-    assert_eq!(f64_to_i32(2_147_483_647.5f64.to_bits(), FpRounding::TieEven, &mut fp), i32::MAX);
+    assert_eq!(
+        f64_to_i32(2_147_483_647.5f64.to_bits(), FpRounding::TieEven, &mut fp),
+        i32::MAX
+    );
     assert_eq!(fp.cumulative_fpsr(), IOC);
     let mut fp = status();
-    assert_eq!(f64_to_i32((-2_147_483_648.5f64).to_bits(), FpRounding::TieEven, &mut fp), i32::MIN);
+    assert_eq!(
+        f64_to_i32(
+            (-2_147_483_648.5f64).to_bits(),
+            FpRounding::TieEven,
+            &mut fp
+        ),
+        i32::MIN
+    );
     assert_eq!(fp.cumulative_fpsr(), IXC);
 
     // Every rounding mode on the halfway cases.
@@ -401,22 +566,38 @@ fn float_to_integer_conversions_saturate() {
             (FpRounding::Zero, zero),
         ] {
             let mut fp = status();
-            assert_eq!(f64_to_i64(v.to_bits(), rounding, &mut fp), want, "{v} {rounding:?}");
+            assert_eq!(
+                f64_to_i64(v.to_bits(), rounding, &mut fp),
+                want,
+                "{v} {rounding:?}"
+            );
             assert_eq!(fp.cumulative_fpsr(), IXC, "{v} {rounding:?} flags");
             let mut fp = status();
-            assert_eq!(i64::from(f32_to_i32((v as f32).to_bits(), rounding, &mut fp)), want);
+            assert_eq!(
+                i64::from(f32_to_i32((v as f32).to_bits(), rounding, &mut fp)),
+                want
+            );
         }
     }
     // A negative value an unsigned conversion rounds to zero is exact zero
     // plus inexact; one it rounds below zero saturates.
     let mut fp = status();
-    assert_eq!(f64_to_u32((-0.5f64).to_bits(), FpRounding::TieEven, &mut fp), 0);
+    assert_eq!(
+        f64_to_u32((-0.5f64).to_bits(), FpRounding::TieEven, &mut fp),
+        0
+    );
     assert_eq!(fp.cumulative_fpsr(), IXC);
     let mut fp = status();
-    assert_eq!(f64_to_u32((-0.5f64).to_bits(), FpRounding::TieAway, &mut fp), 0);
+    assert_eq!(
+        f64_to_u32((-0.5f64).to_bits(), FpRounding::TieAway, &mut fp),
+        0
+    );
     assert_eq!(fp.cumulative_fpsr(), IOC);
     let mut fp = status();
-    assert_eq!(f32_to_u64((-0.25f32).to_bits(), FpRounding::NegInf, &mut fp), 0);
+    assert_eq!(
+        f32_to_u64((-0.25f32).to_bits(), FpRounding::NegInf, &mut fp),
+        0
+    );
     assert_eq!(fp.cumulative_fpsr(), IOC);
 }
 
@@ -451,7 +632,10 @@ fn tininess_is_detected_before_rounding() {
     // Fused multiply-add rounds the exact sum once: the same product plus a
     // zero addend is tiny before rounding too.
     let mut fp = status();
-    assert_eq!(f64_mul_add(FusedMulAdd::Fmadd, 0, a, b, &mut fp), 0x0010_0000_0000_0000);
+    assert_eq!(
+        f64_mul_add(FusedMulAdd::Fmadd, 0, a, b, &mut fp),
+        0x0010_0000_0000_0000
+    );
     assert_eq!(fp.cumulative_fpsr(), UFC | IXC);
 }
 
@@ -468,25 +652,59 @@ fn flush_to_zero_flushes_inputs_and_tiny_results() {
     assert_eq!(f32_mul(0x0080_0000, 0x3F00_0000, &mut fp), POS_ZERO);
     assert_eq!(fp.cumulative_fpsr(), UFC);
     let mut fp = status_with(FZ);
-    assert_eq!(f64_mul(0x8010_0000_0000_0000, 0.5f64.to_bits(), &mut fp), 0x8000_0000_0000_0000);
+    assert_eq!(
+        f64_mul(0x8010_0000_0000_0000, 0.5f64.to_bits(), &mut fp),
+        0x8000_0000_0000_0000
+    );
     assert_eq!(fp.cumulative_fpsr(), UFC);
     let mut fp = status_with(FZ);
     assert_eq!(f64_to_f32(1.0e-40f64.to_bits(), &mut fp), POS_ZERO);
     assert_eq!(fp.cumulative_fpsr(), UFC);
+    // The difference of two numbers of one exponent is exact: flushed when
+    // it is subnormal, kept when it is normal, the smallest normal included.
+    let mut fp = status_with(FZ);
+    assert_eq!(f32_sub(0x0120_0000, 0x0100_0000, &mut fp), POS_ZERO);
+    assert_eq!(
+        f64_sub(0x0024_0000_0000_0000, 0x0020_0000_0000_0000, &mut fp),
+        0
+    );
+    assert_eq!(fp.cumulative_fpsr(), UFC);
+    let mut fp = status_with(FZ);
+    assert_eq!(f32_sub(0x0178_0000, 0x0100_0000, &mut fp), 0x00F0_0000);
+    assert_eq!(f32_sub(0x01F0_4AC3, 0x01C3_8956, &mut fp), 0x00B3_05B4);
+    assert_eq!(f32_sub(0x0140_0000, 0x0100_0000, &mut fp), 0x0080_0000);
+    assert_eq!(
+        f64_sub(0x002F_0000_0000_0000, 0x0020_0000_0000_0000, &mut fp),
+        0x001E_0000_0000_0000
+    );
+    assert_eq!(
+        f64_add(0x8028_0000_0000_0000, 0x0020_0000_0000_0000, &mut fp),
+        0x8010_0000_0000_0000
+    );
+    assert_eq!(fp.cumulative_fpsr(), 0);
     // Comparisons and conversions see the flushed operand.
     let mut fp = status_with(FZ);
-    assert_eq!(f32_compare(0x0000_0001, POS_ZERO, NanSignal::Quiet, &mut fp), FpOrdering::Equal);
+    assert_eq!(
+        f32_compare(0x0000_0001, POS_ZERO, NanSignal::Quiet, &mut fp),
+        FpOrdering::Equal
+    );
     assert_eq!(f32_to_f64(0x8000_0001, &mut fp), 0x8000_0000_0000_0000);
     assert_eq!(f32_to_i32(0x0000_0001, FpRounding::PosInf, &mut fp), 0);
     assert_eq!(fp.cumulative_fpsr(), IDC);
     // A flushed operand is a zero for the inf*0 + qNaN rule.
     let mut fp = status_with(FZ);
-    assert_eq!(f32_mul_add(FusedMulAdd::Fmadd, Q1, POS_INF, 0x0000_0001, &mut fp), 0x7FC0_0000);
+    assert_eq!(
+        f32_mul_add(FusedMulAdd::Fmadd, Q1, POS_INF, 0x0000_0001, &mut fp),
+        0x7FC0_0000
+    );
     assert_eq!(fp.cumulative_fpsr(), IOC | IDC);
     // Half precision is never flushed.
     let mut fp = status_with(FZ);
     assert_eq!(f16_to_f32(0x0001, &mut fp), 0x3380_0000);
-    assert_eq!(f64_to_f16((5.960_464_477_539_063e-8f64).to_bits(), &mut fp), 0x0001);
+    assert_eq!(
+        f64_to_f16((5.960_464_477_539_063e-8f64).to_bits(), &mut fp),
+        0x0001
+    );
     assert_eq!(fp.cumulative_fpsr(), 0);
     // Without FZ, denormals are ordinary operands and exact results.
     let mut fp = status();
@@ -524,7 +742,10 @@ fn min_max_order_signed_zeros_and_handle_nans() {
     assert_eq!(f32_minnum(ONE, Q1, &mut fp), ONE);
     assert_eq!(f32_minnum(Q1, NEG_INF, &mut fp), NEG_INF);
     assert_eq!(f32_maxnum(Q1, NEG_INF, &mut fp), NEG_INF);
-    assert_eq!(f64_maxnum(DQ1, 0x3FF0_0000_0000_0000, &mut fp), 0x3FF0_0000_0000_0000);
+    assert_eq!(
+        f64_maxnum(DQ1, 0x3FF0_0000_0000_0000, &mut fp),
+        0x3FF0_0000_0000_0000
+    );
     assert_eq!(f32_maxnum(Q1, Q2, &mut fp), Q1);
     assert_eq!(fp.cumulative_fpsr(), 0);
     // FMAX/FMIN propagate the NaN.
@@ -548,18 +769,42 @@ fn min_max_order_signed_zeros_and_handle_nans() {
 #[test]
 fn compare_reports_ordering_and_signals_per_fcmp_or_fcmpe() {
     let mut fp = status();
-    assert_eq!(f32_compare(ONE, 0x4000_0000, NanSignal::Quiet, &mut fp), FpOrdering::Less);
-    assert_eq!(f32_compare(0x4000_0000, ONE, NanSignal::Quiet, &mut fp), FpOrdering::Greater);
-    assert_eq!(f32_compare(NEG_ZERO, POS_ZERO, NanSignal::Signaling, &mut fp), FpOrdering::Equal);
-    assert_eq!(f32_compare(NEG_INF, 0xFF7F_FFFF, NanSignal::Quiet, &mut fp), FpOrdering::Less);
-    assert_eq!(f64_compare(DPOS_INF, DPOS_INF, NanSignal::Quiet, &mut fp), FpOrdering::Equal);
+    assert_eq!(
+        f32_compare(ONE, 0x4000_0000, NanSignal::Quiet, &mut fp),
+        FpOrdering::Less
+    );
+    assert_eq!(
+        f32_compare(0x4000_0000, ONE, NanSignal::Quiet, &mut fp),
+        FpOrdering::Greater
+    );
+    assert_eq!(
+        f32_compare(NEG_ZERO, POS_ZERO, NanSignal::Signaling, &mut fp),
+        FpOrdering::Equal
+    );
+    assert_eq!(
+        f32_compare(NEG_INF, 0xFF7F_FFFF, NanSignal::Quiet, &mut fp),
+        FpOrdering::Less
+    );
+    assert_eq!(
+        f64_compare(DPOS_INF, DPOS_INF, NanSignal::Quiet, &mut fp),
+        FpOrdering::Equal
+    );
     assert_eq!(fp.cumulative_fpsr(), 0);
-    assert_eq!(f32_compare(Q1, ONE, NanSignal::Quiet, &mut fp), FpOrdering::Unordered);
+    assert_eq!(
+        f32_compare(Q1, ONE, NanSignal::Quiet, &mut fp),
+        FpOrdering::Unordered
+    );
     assert_eq!(fp.cumulative_fpsr(), 0);
-    assert_eq!(f32_compare(Q1, ONE, NanSignal::Signaling, &mut fp), FpOrdering::Unordered);
+    assert_eq!(
+        f32_compare(Q1, ONE, NanSignal::Signaling, &mut fp),
+        FpOrdering::Unordered
+    );
     assert_eq!(fp.cumulative_fpsr(), IOC);
     let mut fp = status();
-    assert_eq!(f64_compare(0x3FF0_0000_0000_0000, DS1, NanSignal::Quiet, &mut fp), FpOrdering::Unordered);
+    assert_eq!(
+        f64_compare(0x3FF0_0000_0000_0000, DS1, NanSignal::Quiet, &mut fp),
+        FpOrdering::Unordered
+    );
     assert_eq!(fp.cumulative_fpsr(), IOC);
     assert_eq!(FpOrdering::Less.nzcv(), 0b1000);
     assert_eq!(FpOrdering::Equal.nzcv(), 0b0110);
@@ -575,7 +820,11 @@ fn round_to_int_honours_every_arm_mode() {
         assert_eq!(fp.cumulative_fpsr(), 0, "FRINT {v} {r:?} raises nothing");
         let mut fp = status();
         let z32 = f32_round_to_int((v as f32).to_bits(), r, InexactReport::Suppress, &mut fp);
-        assert_eq!(z32, (f64::from_bits(z) as f32).to_bits(), "f32 FRINT {v} {r:?}");
+        assert_eq!(
+            z32,
+            (f64::from_bits(z) as f32).to_bits(),
+            "f32 FRINT {v} {r:?}"
+        );
         f64::from_bits(z)
     };
     for (v, n, a, p, m, z) in [
@@ -587,25 +836,75 @@ fn round_to_int_honours_every_arm_mode() {
         (0.3, 0.0, 0.0, 1.0, 0.0, 0.0),
         (-0.3, -0.0, -0.0, -0.0, -1.0, -0.0),
     ] {
-        assert_eq!(frint(v, FpRounding::TieEven).to_bits(), n.to_bits(), "FRINTN {v}");
-        assert_eq!(frint(v, FpRounding::TieAway).to_bits(), a.to_bits(), "FRINTA {v}");
-        assert_eq!(frint(v, FpRounding::PosInf).to_bits(), p.to_bits(), "FRINTP {v}");
-        assert_eq!(frint(v, FpRounding::NegInf).to_bits(), m.to_bits(), "FRINTM {v}");
-        assert_eq!(frint(v, FpRounding::Zero).to_bits(), z.to_bits(), "FRINTZ {v}");
+        assert_eq!(
+            frint(v, FpRounding::TieEven).to_bits(),
+            n.to_bits(),
+            "FRINTN {v}"
+        );
+        assert_eq!(
+            frint(v, FpRounding::TieAway).to_bits(),
+            a.to_bits(),
+            "FRINTA {v}"
+        );
+        assert_eq!(
+            frint(v, FpRounding::PosInf).to_bits(),
+            p.to_bits(),
+            "FRINTP {v}"
+        );
+        assert_eq!(
+            frint(v, FpRounding::NegInf).to_bits(),
+            m.to_bits(),
+            "FRINTM {v}"
+        );
+        assert_eq!(
+            frint(v, FpRounding::Zero).to_bits(),
+            z.to_bits(),
+            "FRINTZ {v}"
+        );
     }
     // FRINTX reports inexactness; an integral operand is exact.
     let mut fp = status();
-    assert_eq!(f32_round_to_int(0x4020_0000, FpRounding::TieEven, InexactReport::Raise, &mut fp), 0x4000_0000);
+    assert_eq!(
+        f32_round_to_int(
+            0x4020_0000,
+            FpRounding::TieEven,
+            InexactReport::Raise,
+            &mut fp
+        ),
+        0x4000_0000
+    );
     assert_eq!(fp.cumulative_fpsr(), IXC);
     let mut fp = status();
-    assert_eq!(f64_round_to_int(2.0f64.to_bits(), FpRounding::TieEven, InexactReport::Raise, &mut fp), 2.0f64.to_bits());
+    assert_eq!(
+        f64_round_to_int(
+            2.0f64.to_bits(),
+            FpRounding::TieEven,
+            InexactReport::Raise,
+            &mut fp
+        ),
+        2.0f64.to_bits()
+    );
     assert_eq!(fp.cumulative_fpsr(), 0);
     // Large values and infinities pass through; a signaling NaN is quietened.
     let mut fp = status();
-    assert_eq!(f64_round_to_int(1.0e300f64.to_bits(), FpRounding::PosInf, InexactReport::Raise, &mut fp), 1.0e300f64.to_bits());
-    assert_eq!(f32_round_to_int(NEG_INF, FpRounding::Zero, InexactReport::Raise, &mut fp), NEG_INF);
+    assert_eq!(
+        f64_round_to_int(
+            1.0e300f64.to_bits(),
+            FpRounding::PosInf,
+            InexactReport::Raise,
+            &mut fp
+        ),
+        1.0e300f64.to_bits()
+    );
+    assert_eq!(
+        f32_round_to_int(NEG_INF, FpRounding::Zero, InexactReport::Raise, &mut fp),
+        NEG_INF
+    );
     assert_eq!(fp.cumulative_fpsr(), 0);
-    assert_eq!(f32_round_to_int(S1, FpRounding::Zero, InexactReport::Raise, &mut fp), S1_QUIET);
+    assert_eq!(
+        f32_round_to_int(S1, FpRounding::Zero, InexactReport::Raise, &mut fp),
+        S1_QUIET
+    );
     assert_eq!(fp.cumulative_fpsr(), IOC);
 }
 
@@ -630,7 +929,11 @@ fn fpcr_controls_and_fpsr_bits_round_trip() {
     ] {
         let mut fp = status_with(rmode << 22);
         assert_eq!(f32_add(ONE, tiny, &mut fp), pos, "rmode {rmode}");
-        assert_eq!(f32_add(0xBF80_0000, tiny | 0x8000_0000, &mut fp), neg, "rmode {rmode}");
+        assert_eq!(
+            f32_add(0xBF80_0000, tiny | 0x8000_0000, &mut fp),
+            neg,
+            "rmode {rmode}"
+        );
     }
     // An exact zero difference is -0 only when rounding toward -infinity.
     let mut fp = status_with(2 << 22);
@@ -670,7 +973,10 @@ fn half_precision_conversions_round_and_overflow() {
     let mut fp = status();
     assert_eq!(f16_to_f32(0x3C00, &mut fp), ONE);
     assert_eq!(f16_to_f64(0xC000, &mut fp), (-2.0f64).to_bits());
-    assert_eq!(f16_to_f64(0x0001, &mut fp), (5.960_464_477_539_063e-8f64).to_bits());
+    assert_eq!(
+        f16_to_f64(0x0001, &mut fp),
+        (5.960_464_477_539_063e-8f64).to_bits()
+    );
     assert_eq!(f32_to_f16(65504.0f32.to_bits(), &mut fp), 0x7BFF);
     assert_eq!(f64_to_f16(0.5f64.to_bits(), &mut fp), 0x3800);
     assert_eq!(fp.cumulative_fpsr(), 0);
@@ -719,12 +1025,18 @@ fn fpdot_of_halves_rounds_the_exact_sum_once() {
     // Zeros of one sign keep it; an exact zero sum is +0, -0 rounding down.
     assert_eq!(dot(0x8000, 0, H_ONE, H_MINUS_ONE, 0), (0x8000_0000, 0));
     assert_eq!(dot(H_ONE, H_MINUS_ONE, H_ONE, H_ONE, 0), (0, 0));
-    assert_eq!(dot(H_ONE, H_MINUS_ONE, H_ONE, H_ONE, 2 << 22), (0x8000_0000, 0));
+    assert_eq!(
+        dot(H_ONE, H_MINUS_ONE, H_ONE, H_ONE, 2 << 22),
+        (0x8000_0000, 0)
+    );
     // 1.5 * 2 + 0.25 * 0.5 is exact; 1 + 2^-24 is a tie, to even, or up
     // rounding to plus infinity.
     assert_eq!(dot(0x3E00, 0x3400, 0x4000, 0x3800, 0), (0x4048_0000, 0));
     assert_eq!(dot(H_ONE, 0x0C00, H_ONE, 0x0C00, 0), (0x3F80_0000, IXC));
-    assert_eq!(dot(H_ONE, 0x0C00, H_ONE, 0x0C00, 1 << 22), (0x3F80_0001, IXC));
+    assert_eq!(
+        dot(H_ONE, 0x0C00, H_ONE, 0x0C00, 1 << 22),
+        (0x3F80_0001, IXC)
+    );
     // The least denormal times 1 is 2^-24, or flushed under FPCR.FZ16
     // without IDC.
     assert_eq!(dot(0x0001, 0, H_ONE, 0, 0), (0x3380_0000, 0));

@@ -44,6 +44,8 @@ pub fn read_empty_transport(offset: RegOffset, width: AccessWidth, layout: Layou
     };
     match width {
         AccessWidth::Dword => register(offset.get()) | (register(offset.get() + 4) << 32),
-        AccessWidth::Byte | AccessWidth::Half | AccessWidth::Word => register(offset.get()) & width.value_mask(),
+        AccessWidth::Byte | AccessWidth::Half | AccessWidth::Word => {
+            register(offset.get()) & width.value_mask()
+        }
     }
 }

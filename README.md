@@ -252,11 +252,12 @@ cd rusty_box_decoder && cargo +nightly fuzz run fuzz_fetchdecode64
 
 A bare `cargo test` tests only the default workspace member (`rusty_box`), in a debug build.
 
-`cargo xtask ci` runs 32 steps; [xtask/README.md](xtask/README.md) lists every one.
+`cargo xtask ci` runs 33 steps; [xtask/README.md](xtask/README.md) lists every one.
 
 1. The doctrine ratchets, over nine source trees, the GUI's and the AArch64 interpreter's included. They check the unsafe-token baselines, that there is no `unsafe impl Send/Sync`, the blanket `dead_code` allows, and that there is no production `unwrap`/`expect`.
-2. A 30-step matrix:
+2. A 31-step matrix:
    - It tests `rusty_box_core`, `rusty_box_devices`, `rusty_box_aarch64` (without features and with std), the three WHP crates, the decoder and `rusty_box`.
+   - It counts the host instructions the AArch64 interpreter's hot loop executes, under callgrind, against a committed baseline.
    - It checks `rusty_box_core`, `rusty_box_devices` and `rusty_box_aarch64` for bare metal, and builds the WHP probe examples.
    - It checks `rusty_box` without std (with and without alloc), for bare metal, for wasm, with all features, and with debug assertions.
    - It checks `rusty_box_gui` for the host, with its tests, for wasm, and with its `guest-trace` feature, whose tracer tests it runs.

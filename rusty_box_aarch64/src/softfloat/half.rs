@@ -40,8 +40,8 @@
 use super::arm_ops::clamp_scale;
 use super::f64_to_f16;
 use super::internals::{
-    exp_f16, exp_f64, f16_tiny_after_rounding, flush_flags, frac_f16, norm_round_pack_to_f32, round_pack_to_f16,
-    sign_f16, sign_f64,
+    exp_f16, exp_f64, f16_tiny_after_rounding, flush_flags, frac_f16, norm_round_pack_to_f32,
+    round_pack_to_f16, sign_f16, sign_f64,
 };
 use super::min_max::Extreme;
 use super::softfloat::{softfloat_raise_flags, Handling, FLAG_INVALID};
@@ -55,13 +55,22 @@ struct Wider {
     frac_bits: u32,
 }
 
-const DOUBLE: Wider = Wider { exp_bits: 11, frac_bits: 52 };
-const SINGLE: Wider = Wider { exp_bits: 8, frac_bits: 23 };
+const DOUBLE: Wider = Wider {
+    exp_bits: 11,
+    frac_bits: 52,
+};
+const SINGLE: Wider = Wider {
+    exp_bits: 8,
+    frac_bits: 23,
+};
 
 /// `a` in the wider `format`: exact, a denormal normalized, a NaN's payload
 /// and quiet bit kept in place.
 fn widen(a: u16, format: Wider) -> u64 {
-    let Wider { exp_bits, frac_bits } = format;
+    let Wider {
+        exp_bits,
+        frac_bits,
+    } = format;
     let bias = (1u64 << (exp_bits - 1)) - 1;
     let sign = u64::from(sign_f16(a)) << (exp_bits + frac_bits);
     let exp = exp_f16(a) as u64;
@@ -191,14 +200,26 @@ pub(crate) fn f16_log_b(a: u16, fp: &mut ArmFpStatus) -> u16 {
     if exp == 0x1F {
         return 0x7FFF;
     }
-    let log = if exp == 0 { 31 - frac.leading_zeros() as i32 - 24 } else { exp - 15 };
+    let log = if exp == 0 {
+        31 - frac.leading_zeros() as i32 - 24
+    } else {
+        exp - 15
+    };
     log as u16
 }
 
 /// FMADD/FMSUB/FNMADD/FNMSUB (half) and FMLA/FMLS, `addend` being Ra (or
 /// Vd). Arm FPMulAdd after the form's operand negations.
-pub(crate) fn f16_mul_add(form: FusedMulAdd, addend: u16, n: u16, m: u16, fp: &mut ArmFpStatus) -> u16 {
-    rounded(fp, |fp| super::f64_mul_add(form, unpack(addend, fp), unpack(n, fp), unpack(m, fp), fp))
+pub(crate) fn f16_mul_add(
+    form: FusedMulAdd,
+    addend: u16,
+    n: u16,
+    m: u16,
+    fp: &mut ArmFpStatus,
+) -> u16 {
+    rounded(fp, |fp| {
+        super::f64_mul_add(form, unpack(addend, fp), unpack(n, fp), unpack(m, fp), fp)
+    })
 }
 
 /// Arm FPMax / FPMin with `N == 16`. Under FPCR.AH = 1 a NaN operand, or
@@ -252,13 +273,21 @@ pub(crate) fn f16_mulx(a: u16, b: u16, fp: &mut ArmFpStatus) -> u16 {
 /// precision; under FPCR.AH = 1 rounding to nearest with no exception, and
 /// FPCR.FZ16 still applying ([`ArmFpStatus::with_altfp_overrides`]).
 pub(crate) fn f16_recip_step(a: u16, b: u16, fp: &mut ArmFpStatus) -> u16 {
-    fp.with_altfp_overrides(|fp| rounded(fp, |fp| super::f64_recip_step(unpack(a, fp), unpack(b, fp), fp)))
+    fp.with_altfp_overrides(|fp| {
+        rounded(fp, |fp| {
+            super::f64_recip_step(unpack(a, fp), unpack(b, fp), fp)
+        })
+    })
 }
 
 /// FRSQRTS (half). Arm FPRSqrtStepFused: `(3.0 - a*b) / 2.0` fused, exact
 /// in double precision; under FPCR.AH = 1 as [`f16_recip_step`].
 pub(crate) fn f16_rsqrt_step(a: u16, b: u16, fp: &mut ArmFpStatus) -> u16 {
-    fp.with_altfp_overrides(|fp| rounded(fp, |fp| super::f64_rsqrt_step(unpack(a, fp), unpack(b, fp), fp)))
+    fp.with_altfp_overrides(|fp| {
+        rounded(fp, |fp| {
+            super::f64_rsqrt_step(unpack(a, fp), unpack(b, fp), fp)
+        })
+    })
 }
 
 /// FCMP/FCMPE (half) and the ordering behind FCMEQ/FCMGE/FCMGT. Arm
@@ -268,15 +297,28 @@ pub(crate) fn f16_compare(a: u16, b: u16, signal: NanSignal, fp: &mut ArmFpStatu
 }
 
 /// FRINT* (half). Arm FPRoundInt.
-pub(crate) fn f16_round_to_int(a: u16, rounding: FpRounding, report: InexactReport, fp: &mut ArmFpStatus) -> u16 {
-    rounded(fp, |fp| super::f64_round_to_int(unpack(a, fp), rounding, report, fp))
+pub(crate) fn f16_round_to_int(
+    a: u16,
+    rounding: FpRounding,
+    report: InexactReport,
+    fp: &mut ArmFpStatus,
+) -> u16 {
+    rounded(fp, |fp| {
+        super::f64_round_to_int(unpack(a, fp), rounding, report, fp)
+    })
 }
 
 /// Half precision to a signed integer of 64 bits (`wide`) or 32, scaled by
 /// 2^`fbits` first. Arm FPToFixed: NaN gives 0, overflow saturates, both
 /// raise invalid; any other rounded result raises inexact. The result is
 /// the integer's bits, zero-extended.
-pub(crate) fn f16_to_signed(a: u16, fbits: u32, rounding: FpRounding, wide: bool, fp: &mut ArmFpStatus) -> u64 {
+pub(crate) fn f16_to_signed(
+    a: u16,
+    fbits: u32,
+    rounding: FpRounding,
+    wide: bool,
+    fp: &mut ArmFpStatus,
+) -> u64 {
     let a = unpack(a, fp);
     match (wide, fbits) {
         (false, 0) => u64::from(super::f64_to_i32(a, rounding, fp) as u32),
@@ -289,7 +331,13 @@ pub(crate) fn f16_to_signed(a: u16, fbits: u32, rounding: FpRounding, wide: bool
 /// Half precision to an unsigned integer of 64 bits (`wide`) or 32, scaled
 /// by 2^`fbits` first; as [`f16_to_signed`], negative results saturating to
 /// zero.
-pub(crate) fn f16_to_unsigned(a: u16, fbits: u32, rounding: FpRounding, wide: bool, fp: &mut ArmFpStatus) -> u64 {
+pub(crate) fn f16_to_unsigned(
+    a: u16,
+    fbits: u32,
+    rounding: FpRounding,
+    wide: bool,
+    fp: &mut ArmFpStatus,
+) -> u64 {
     let a = unpack(a, fp);
     match (wide, fbits) {
         (false, 0) => u64::from(super::f64_to_u32(a, rounding, fp)),
@@ -328,7 +376,9 @@ pub(crate) fn int_to_f16(
     let exp = exp as i16;
     let tiny = match fp.status.handling {
         Handling::Standard => exp < 0,
-        Handling::Alternate => exp < 0 && f16_tiny_after_rounding(negative, exp, sig, rounding.softfloat_mode()),
+        Handling::Alternate => {
+            exp < 0 && f16_tiny_after_rounding(negative, exp, sig, rounding.softfloat_mode())
+        }
     };
     if fp.flush_half && tiny {
         let flags = flush_flags(&fp.status);
@@ -345,7 +395,13 @@ pub(crate) fn int_to_f16(
 /// single precision; the addend is unpacked under FPCR.FZ and the result
 /// rounded as single precision. NaNs are chosen as `FPProcessNaNs3H` does,
 /// the addend first, a half-precision NaN converted (Arm FPConvertNaN).
-pub(crate) fn f16_mul_add_long(form: FusedMulAdd, addend: u32, n: u16, m: u16, fp: &mut ArmFpStatus) -> u32 {
+pub(crate) fn f16_mul_add_long(
+    form: FusedMulAdd,
+    addend: u32,
+    n: u16,
+    m: u16,
+    fp: &mut ArmFpStatus,
+) -> u32 {
     let n = widen(flushed(n, fp), SINGLE) as u32;
     let m = widen(flushed(m, fp), SINGLE) as u32;
     super::f32_mul_add(form, addend, n, m, fp)
@@ -371,7 +427,11 @@ fn sig_exp(a: u16) -> (u32, u32) {
 pub(crate) fn f16_dot(op1_a: u16, op1_b: u16, op2_a: u16, op2_b: u16, fp: &mut ArmFpStatus) -> u32 {
     let ops = [op1_a, op1_b, op2_a, op2_b].map(|x| flushed(x, fp));
     let signalling = |x: u16| is_nan_f16(x) && x & 0x0200 == 0;
-    if let Some(&nan) = ops.iter().find(|&&x| signalling(x)).or_else(|| ops.iter().find(|&&x| is_nan_f16(x))) {
+    if let Some(&nan) = ops
+        .iter()
+        .find(|&&x| signalling(x))
+        .or_else(|| ops.iter().find(|&&x| is_nan_f16(x)))
+    {
         if signalling(nan) {
             softfloat_raise_flags(&mut fp.status, FLAG_INVALID);
         }
@@ -418,7 +478,11 @@ pub(crate) fn f16_dot(op1_a: u16, op1_b: u16, op2_a: u16, op2_b: u16, fp: &mut A
     };
     let sum = product(a1, a2, sign_pa) + product(b1, b2, sign_pb);
     if sum == 0 {
-        return if fp.rounding() == FpRounding::NegInf { 0x8000_0000 } else { 0 };
+        return if fp.rounding() == FpRounding::NegInf {
+            0x8000_0000
+        } else {
+            0
+        };
     }
     // `norm_round_pack_to_f32` rounds `sig × 2^(exp - 156)`: the sum's top
     // 31 bits, the rest folded into the lowest.
@@ -427,7 +491,10 @@ pub(crate) fn f16_dot(op1_a: u16, op1_b: u16, op2_a: u16, op2_b: u16, fp: &mut A
     let (sig, exp) = match length.checked_sub(31) {
         Some(shift) if shift > 0 => {
             let lost = magnitude & ((1 << shift) - 1) != 0;
-            (((magnitude >> shift) as u32) | u32::from(lost), 108 + shift as i16)
+            (
+                ((magnitude >> shift) as u32) | u32::from(lost),
+                108 + shift as i16,
+            )
         }
         _ => (magnitude as u32, 108),
     };

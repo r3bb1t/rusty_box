@@ -11,7 +11,10 @@
 use std::vec::Vec;
 
 use super::super::features::{Feature, Features, Implementation, VecLen};
-use super::super::step::{exec, processor, Taken, CPACR_ALL, DATA, FP_TRAP, ILLEGAL_WHEN_STREAMING, SME_DISABLED, UNDEFINED};
+use super::super::step::{
+    exec, processor, Taken, CPACR_ALL, DATA, FP_TRAP, ILLEGAL_WHEN_STREAMING, SME_DISABLED,
+    UNDEFINED,
+};
 use super::super::sysreg::SMCR_EZT0;
 use super::super::{Cpu, El, NoEl2, Pstate};
 use super::Svcr;
@@ -78,7 +81,19 @@ fn set_z_upper(cpu: &mut Cpu<NoEl2>, n: usize, byte: u8) {
 #[test]
 fn without_sme_its_instructions_and_registers_are_undefined() {
     let mut cpu = processor(Implementation::CORTEX_A57);
-    for insn in [SMSTART, SMSTOP, SMSTART_SM, SMSTART_ZA, MRS_SVCR, MSR_SVCR, MRS_SMCR, MSR_SMCR, MRS_TPIDR2, rdsvl(1), addsvl(0, 1, 1, false)] {
+    for insn in [
+        SMSTART,
+        SMSTOP,
+        SMSTART_SM,
+        SMSTART_ZA,
+        MRS_SVCR,
+        MSR_SVCR,
+        MRS_SMCR,
+        MSR_SMCR,
+        MRS_TPIDR2,
+        rdsvl(1),
+        addsvl(0, 1, 1, false),
+    ] {
         assert_eq!(exec(&mut cpu, insn), Some(UNDEFINED), "{insn:#010x}");
     }
 }
@@ -99,7 +114,12 @@ fn an_svcr_immediate_with_no_field_is_undefined() {
 #[test]
 fn smstart_and_smstop_trap_until_cpacr_smen_enables_them() {
     let mut cpu = sme();
-    for (smen, el1, el0) in [(0b00, false, false), (0b10, false, false), (0b01, true, false), (0b11, true, true)] {
+    for (smen, el1, el0) in [
+        (0b00, false, false),
+        (0b10, false, false),
+        (0b01, true, false),
+        (0b11, true, true),
+    ] {
         cpu.sys.cpacr_el1 = (3 << 20) | (smen << 24);
         for (el, enabled) in [(El::El1, el1), (El::El0, el0)] {
             cpu.svcr = Svcr::RESET;
@@ -110,7 +130,11 @@ fn smstart_and_smstop_trap_until_cpacr_smen_enables_them() {
             }
             let want = if enabled { None } else { Some(SME_DISABLED) };
             assert_eq!(exec(&mut cpu, SMSTART), want, "SMEN {smen:#04b} at {el:?}");
-            assert_eq!(cpu.svcr == (Svcr { sm: true, za: true }), enabled, "SMEN {smen:#04b} at {el:?}");
+            assert_eq!(
+                cpu.svcr == (Svcr { sm: true, za: true }),
+                enabled,
+                "SMEN {smen:#04b} at {el:?}"
+            );
         }
     }
 }
@@ -132,15 +156,30 @@ fn entering_or_leaving_streaming_mode_resets_the_sve_state() {
     };
     fill(&mut cpu);
     assert_eq!(exec(&mut cpu, SMSTART_SM), None);
-    assert_eq!(cpu.svcr, Svcr { sm: true, za: false });
+    assert_eq!(
+        cpu.svcr,
+        Svcr {
+            sm: true,
+            za: false
+        }
+    );
     assert!(cpu.v.iter().all(|&v| v == 0), "V cleared");
-    assert!((0..32).all(|n| z_upper(&cpu, n).iter().all(|&b| b == 0)), "Z cleared");
-    assert!(cpu.scalable.p.iter().flatten().all(|&b| b == 0) && cpu.scalable.ffr.iter().all(|&b| b == 0));
+    assert!(
+        (0..32).all(|n| z_upper(&cpu, n).iter().all(|&b| b == 0)),
+        "Z cleared"
+    );
+    assert!(
+        cpu.scalable.p.iter().flatten().all(|&b| b == 0)
+            && cpu.scalable.ffr.iter().all(|&b| b == 0)
+    );
     assert_eq!(cpu.fpsr, 0x0800_009F);
 
     fill(&mut cpu);
     assert_eq!(exec(&mut cpu, SMSTART_SM), None);
-    assert_eq!(cpu.v[5], 0x1111_2222_3333_4444_5555_6666_7777_888D, "no change of SM, no reset");
+    assert_eq!(
+        cpu.v[5], 0x1111_2222_3333_4444_5555_6666_7777_888D,
+        "no change of SM, no reset"
+    );
     assert_eq!(cpu.fpsr, 0);
 
     assert_eq!(exec(&mut cpu, SMSTOP_SM), None);
@@ -157,7 +196,13 @@ fn enabling_za_zeroes_it_and_leaves_the_vectors() {
     cpu.scalable.za[63][63] = 0xCD;
     cpu.v[1] = 7;
     assert_eq!(exec(&mut cpu, SMSTART_ZA), None);
-    assert_eq!(cpu.svcr, Svcr { sm: false, za: true });
+    assert_eq!(
+        cpu.svcr,
+        Svcr {
+            sm: false,
+            za: true
+        }
+    );
     assert_eq!((cpu.scalable.za[0][0], cpu.scalable.za[63][63]), (0, 0));
     assert_eq!(cpu.v[1], 7, "ZA's enable is not streaming mode's");
     assert_eq!(exec(&mut cpu, SMSTOP_ZA), None);
@@ -187,16 +232,28 @@ fn svcr_and_smcr_el1_are_reached_through_cpacr_smen() {
 
     cpu.sys.cpacr_el1 = (3 << 20) | (0b01 << 24);
     at_el0(&mut cpu);
-    assert_eq!(exec(&mut cpu, MRS_SVCR), Some(SME_DISABLED), "SMEN 01 at EL0");
+    assert_eq!(
+        exec(&mut cpu, MRS_SVCR),
+        Some(SME_DISABLED),
+        "SMEN 01 at EL0"
+    );
     assert_eq!(exec(&mut cpu, MRS_SMCR), Some(UNDEFINED), "SMCR_EL1 at EL0");
     cpu.pstate = Pstate::RESET;
     assert_eq!(exec(&mut cpu, MRS_SVCR), None, "SMEN 01 at EL1");
 
     cpu.x[0] = u64::MAX;
     assert_eq!(exec(&mut cpu, MSR_SMCR), None);
-    assert_eq!(cpu.sys.smcr_el1, (1 << 30) | 0xF, "LEN and EZT0: FA64 is RES0 here, bits 8:4 RAZ/WI");
+    assert_eq!(
+        cpu.sys.smcr_el1,
+        (1 << 30) | 0xF,
+        "LEN and EZT0: FA64 is RES0 here, bits 8:4 RAZ/WI"
+    );
     cpu.sys.cpacr_el1 = 3 << 20;
-    assert_eq!(exec(&mut cpu, MRS_SMCR), Some(SME_DISABLED), "SMEN x0 at EL1");
+    assert_eq!(
+        exec(&mut cpu, MRS_SMCR),
+        Some(SME_DISABLED),
+        "SMEN x0 at EL1"
+    );
     assert_eq!(exec(&mut cpu, MSR_SVCR), Some(SME_DISABLED));
 }
 
@@ -208,7 +265,13 @@ fn tpidr2_el0_needs_sctlr_entp2_at_el0() {
     cpu.sys.tpidr2_el0 = 0x1234;
     at_el0(&mut cpu);
     // ISS: op0 3, op2 5, op1 3, CRn 13, Rt 0, CRm 0, a read.
-    assert_eq!(exec(&mut cpu, MRS_TPIDR2), Some(Taken { ec: 0x18, iss: 0x003A_F401 }));
+    assert_eq!(
+        exec(&mut cpu, MRS_TPIDR2),
+        Some(Taken {
+            ec: 0x18,
+            iss: 0x003A_F401
+        })
+    );
     cpu.sys.sctlr_el1 |= 1 << 60;
     assert_eq!(exec(&mut cpu, MRS_TPIDR2), None);
     assert_eq!(cpu.x[0], 0x1234);
@@ -293,10 +356,18 @@ fn advanced_simd_is_illegal_in_streaming_mode() {
         assert_eq!(exec(&mut cpu, insn), None, "{text}");
     }
     // A reserved encoding is UNDEFINED before any enable check.
-    assert_eq!(exec(&mut cpu, 0x0E08_0420), Some(UNDEFINED), "dup v0.1d, v1.d[0]");
+    assert_eq!(
+        exec(&mut cpu, 0x0E08_0420),
+        Some(UNDEFINED),
+        "dup v0.1d, v1.d[0]"
+    );
     // The SIMD&FP enable comes before the streaming check.
     cpu.sys.cpacr_el1 = 3 << 24;
-    assert_eq!(exec(&mut cpu, 0x4EA2_8420), Some(FP_TRAP), "add v0.4s with FPEN 00");
+    assert_eq!(
+        exec(&mut cpu, 0x4EA2_8420),
+        Some(FP_TRAP),
+        "add v0.4s with FPEN 00"
+    );
 }
 
 /// `V{128}(n) = value` zeroes Z<n> above bit 127, and leaves the other Z
@@ -338,13 +409,26 @@ fn an_exception_from_el0_zeroes_what_lies_beyond_the_vector_length() {
     let z = z_upper(&cpu, 7);
     assert!(z[..svl - 16].iter().all(|&b| b == 0xAA) && z[svl - 16..].iter().all(|&b| b == 0));
     let pl = svl / 8;
-    assert!(cpu.scalable.p[2][..pl].iter().all(|&b| b == 0xFF) && cpu.scalable.p[2][pl..].iter().all(|&b| b == 0));
-    assert!(cpu.scalable.ffr[..pl].iter().all(|&b| b == 0xFF) && cpu.scalable.ffr[pl..].iter().all(|&b| b == 0));
+    assert!(
+        cpu.scalable.p[2][..pl].iter().all(|&b| b == 0xFF)
+            && cpu.scalable.p[2][pl..].iter().all(|&b| b == 0)
+    );
+    assert!(
+        cpu.scalable.ffr[..pl].iter().all(|&b| b == 0xFF)
+            && cpu.scalable.ffr[pl..].iter().all(|&b| b == 0)
+    );
     for (n, row) in cpu.scalable.za[..64].iter().enumerate() {
         let kept = if n < svl { svl } else { 0 };
-        assert!(row[..kept].iter().all(|&b| b == 0xCC) && row[kept..].iter().all(|&b| b == 0), "ZA row {n}");
+        assert!(
+            row[..kept].iter().all(|&b| b == 0xCC) && row[kept..].iter().all(|&b| b == 0),
+            "ZA row {n}"
+        );
     }
-    assert_eq!(cpu.svcr, Svcr { sm: true, za: true }, "SM and ZA survive the exception");
+    assert_eq!(
+        cpu.svcr,
+        Svcr { sm: true, za: true },
+        "SM and ZA survive the exception"
+    );
 
     // From EL1, and outside streaming mode, the uppers stay.
     prepare(&mut cpu);
@@ -389,7 +473,10 @@ fn a_snapshot_carries_the_sme_state() {
     assert_eq!(restored.scalable.zt0, cpu.scalable.zt0);
 
     let mut a57 = processor(Implementation::CORTEX_A57);
-    assert!(a57.restore(&mut image.as_slice()).is_err(), "an SME image on a Cortex-A57");
+    assert!(
+        a57.restore(&mut image.as_slice()).is_err(),
+        "an SME image on a Cortex-A57"
+    );
 }
 
 /// An image whose SME registers hold bits no `MSR` can leave there is
@@ -405,13 +492,22 @@ fn a_snapshot_with_sme_bits_no_msr_can_set_is_refused() {
     let mut cpu = sme();
     assert!(!refused(&cpu, Implementation::EVERY_FEATURE));
     cpu.sys.smcr_el1 = SMCR_EZT0 | 3;
-    assert!(!refused(&cpu, Implementation::EVERY_FEATURE), "SMCR_EL1.EZT0 with FEAT_SME2");
+    assert!(
+        !refused(&cpu, Implementation::EVERY_FEATURE),
+        "SMCR_EL1.EZT0 with FEAT_SME2"
+    );
     cpu.sys.smcr_el1 = 0x10;
-    assert!(refused(&cpu, Implementation::EVERY_FEATURE), "SMCR_EL1 bit 4");
-    let without_sme2: Vec<Feature> = Feature::ALL.into_iter().filter(|&f| f != Feature::Sme2).collect();
+    assert!(
+        refused(&cpu, Implementation::EVERY_FEATURE),
+        "SMCR_EL1 bit 4"
+    );
+    let without_sme2: Vec<Feature> = Feature::ALL
+        .into_iter()
+        .filter(|&f| f != Feature::Sme2)
+        .collect();
     let sme_alone = Implementation {
         features: Features::of(&without_sme2),
-        max_svl: Implementation::EVERY_FEATURE.max_svl,
+        ..Implementation::EVERY_FEATURE
     };
     let mut cpu = processor(sme_alone);
     assert!(!refused(&cpu, sme_alone));
@@ -422,11 +518,20 @@ fn a_snapshot_with_sme_bits_no_msr_can_set_is_refused() {
     assert!(!refused(&a57, Implementation::CORTEX_A57));
     let mut a57 = processor(Implementation::CORTEX_A57);
     a57.sys.tpidr2_el0 = 1;
-    assert!(refused(&a57, Implementation::CORTEX_A57), "TPIDR2_EL0 without FEAT_SME");
+    assert!(
+        refused(&a57, Implementation::CORTEX_A57),
+        "TPIDR2_EL0 without FEAT_SME"
+    );
     let mut a57 = processor(Implementation::CORTEX_A57);
     a57.sys.smcr_el1 = 1;
-    assert!(refused(&a57, Implementation::CORTEX_A57), "SMCR_EL1 without FEAT_SME");
+    assert!(
+        refused(&a57, Implementation::CORTEX_A57),
+        "SMCR_EL1 without FEAT_SME"
+    );
     let mut a57 = processor(Implementation::CORTEX_A57);
     a57.sys.cpacr_el1 = CPACR_ALL;
-    assert!(refused(&a57, Implementation::CORTEX_A57), "CPACR_EL1.SMEN without FEAT_SME");
+    assert!(
+        refused(&a57, Implementation::CORTEX_A57),
+        "CPACR_EL1.SMEN without FEAT_SME"
+    );
 }

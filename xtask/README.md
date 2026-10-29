@@ -7,7 +7,7 @@ cargo xtask ci                   # the local gate, run before every commit
 cargo xtask ci --skip-boot       # the same, without the DLX boot gate
 cargo xtask ci --skip-aarchmrs   # the same, without Arm's AARCHMRS (its conformance tests ignored)
 cargo xtask ci --full            # also the full rusty_box test suite and a GUI release build
-cargo xtask perf-baseline        # archive a release perfbench binary for A/B runs
+cargo xtask perf-baseline        # archive the release perfbench binaries for A/B runs
 cargo xtask android build        # Android APK, see "Android commands"
 cargo xtask --help               # usage for every subcommand
 ```
@@ -20,10 +20,10 @@ This is the local gate suite, defined in `xtask/src/ci.rs`. It runs its steps in
 
 | Invocation | Steps |
 | --- | --- |
-| `cargo xtask ci` | 32 |
-| `cargo xtask ci --skip-boot` | 31 |
-| `cargo xtask ci --full` | 34 |
-| `cargo xtask ci --full --skip-boot` | 33 |
+| `cargo xtask ci` | 33 |
+| `cargo xtask ci --skip-boot` | 32 |
+| `cargo xtask ci --full` | 35 |
+| `cargo xtask ci --full --skip-boot` | 34 |
 
 ### Prerequisites
 
@@ -47,9 +47,9 @@ This step is an in-process text scan, not a cargo command. It enforces the Safet
 
 It is a line scan, not a parser. The baseline constants and the reason each one moved are in `xtask/src/ci.rs`.
 
-### Steps 2 to 31: the build and test matrix
+### Steps 2 to 32: the build and test matrix
 
-Every step is `--release` except the debug-assertions check, which exists to compile the `#[cfg(debug_assertions)]` code that release builds leave out.
+Every step is `--release` except the debug-assertions check, which exists to compile the `#[cfg(debug_assertions)]` code that release builds leave out. Every cargo command the gate runs, step 12's build included, inherits the environment `cargo xtask ci` runs in but for `RUSTY_BOX_AARCHMRS`, which the gate sets to the absolute directory or withholds (see the prerequisites).
 
 | # | Step | Command |
 | --- | --- | --- |
@@ -63,34 +63,36 @@ Every step is `--release` except the debug-assertions check, which exists to com
 | 9 | aarch64 tests (no_std + no_alloc) | `cargo test --release -p rusty_box_aarch64` |
 | 10 | aarch64 tests (std) | `cargo test --release -p rusty_box_aarch64 --features std` |
 | 11 | aarch64 bare-metal target check | `cargo check --release -p rusty_box_aarch64 --features alloc --target x86_64-unknown-none` |
-| 12 | WHP sys tests | `cargo test --release -p rusty_box_whp_sys` |
-| 13 | WHP leaf tests | `cargo test --release -p rusty_box_whp` |
-| 14 | WHP probe builds | `cargo check --release -p rusty_box_whp --examples` |
-| 15 | WHP engine tests | `cargo test --release -p rusty_box_whp_engine --all-targets` |
-| 16 | decoder tests | `cargo test --release -p rusty_box_decoder` |
-| 17 | lib tests (default features) | `cargo test --release -p rusty_box --lib` |
-| 18 | no_std + no_alloc check | `cargo check --release -p rusty_box --no-default-features` |
-| 19 | no_std + alloc check | `cargo check --release -p rusty_box --no-default-features --features alloc` |
-| 20 | bare-metal target check | `cargo check --release -p rusty_box --no-default-features --target x86_64-unknown-none` |
-| 21 | UEFI example build | `cargo build --release -p rusty_box_uefi --target x86_64-unknown-uefi` |
-| 22 | wasm target check (lib, alloc) | `cargo check --release -p rusty_box --no-default-features --features alloc --target wasm32-unknown-unknown` |
-| 23 | public API examples | `cargo test --release -p rusty_box --features std --test api_examples` |
-| 24 | doc examples | `cargo test --release -p rusty_box --doc` |
-| 25 | doctrine compile-fail fixtures | `cargo test --release -p rusty_box --features std --test compile_fail` |
-| 26 | GUI wasm target check | `cargo check --release -p rusty_box_gui --target wasm32-unknown-unknown` |
-| 27 | GUI host check, tests included | `cargo check --release -p rusty_box_gui --all-targets` |
-| 28 | GUI guest-trace check, tests included | `cargo check --release -p rusty_box_gui --features guest-trace --all-targets` |
-| 29 | GUI guest-trace tests | `cargo test --release -p rusty_box_gui --features guest-trace --lib guest_trace` |
-| 30 | all-features check | `cargo check --release -p rusty_box --all-features` |
-| 31 | debug-assertions check (all targets, all features) | `cargo check -p rusty_box --all-targets --all-features` |
+| 12 | aarch64 hot-loop host instructions | `cargo build --release -p rusty_box_aarch64 --features std --example aarch64_perfbench`, then callgrind over its ten loop cells (`xtask/src/hot_loop.rs`) |
+| 13 | WHP sys tests | `cargo test --release -p rusty_box_whp_sys` |
+| 14 | WHP leaf tests | `cargo test --release -p rusty_box_whp` |
+| 15 | WHP probe builds | `cargo check --release -p rusty_box_whp --examples` |
+| 16 | WHP engine tests | `cargo test --release -p rusty_box_whp_engine --all-targets` |
+| 17 | decoder tests | `cargo test --release -p rusty_box_decoder` |
+| 18 | lib tests (default features) | `cargo test --release -p rusty_box --lib` |
+| 19 | no_std + no_alloc check | `cargo check --release -p rusty_box --no-default-features` |
+| 20 | no_std + alloc check | `cargo check --release -p rusty_box --no-default-features --features alloc` |
+| 21 | bare-metal target check | `cargo check --release -p rusty_box --no-default-features --target x86_64-unknown-none` |
+| 22 | UEFI example build | `cargo build --release -p rusty_box_uefi --target x86_64-unknown-uefi` |
+| 23 | wasm target check (lib, alloc) | `cargo check --release -p rusty_box --no-default-features --features alloc --target wasm32-unknown-unknown` |
+| 24 | public API examples | `cargo test --release -p rusty_box --features std --test api_examples` |
+| 25 | doc examples | `cargo test --release -p rusty_box --doc` |
+| 26 | doctrine compile-fail fixtures | `cargo test --release -p rusty_box --features std --test compile_fail` |
+| 27 | GUI wasm target check | `cargo check --release -p rusty_box_gui --target wasm32-unknown-unknown` |
+| 28 | GUI host check, tests included | `cargo check --release -p rusty_box_gui --all-targets` |
+| 29 | GUI guest-trace check, tests included | `cargo check --release -p rusty_box_gui --features guest-trace --all-targets` |
+| 30 | GUI guest-trace tests | `cargo test --release -p rusty_box_gui --features guest-trace --lib guest_trace` |
+| 31 | all-features check | `cargo check --release -p rusty_box --all-features` |
+| 32 | debug-assertions check (all targets, all features) | `cargo check -p rusty_box --all-targets --all-features` |
 
 Notes on specific steps:
 
 - **AArch64 steps (9 to 11)** run the interpreter's unit tests (the Unicorn vector replay among them), its integration tests, and with `std` the Rust blocks of [`docs/aarch64-automation.md`](../docs/aarch64-automation.md), which `rusty_box_aarch64/src/lib.rs` includes behind `#[cfg(all(doctest, feature = "std"))]`. With `RUSTY_BOX_AARCHMRS` naming an unpacked copy of Arm's machine-readable specification (AARCHMRS), steps 9 and 10 also check the A64 decoder (`rusty_box_aarch64/tests/unit/spec.rs`) and the System register accesses and fieldsets (`sysreg_spec.rs`) against it; with `--skip-aarchmrs` those tests are ignored.
-- **WHP steps (12 to 15)** need no hypervisor. The sys and wrapper tests cover layouts and arithmetic. Engine tests that need hardware skip themselves on a host without it. `--all-targets` on step 15 also compiles the engine's example harnesses.
-- **Doc examples (step 24)** compile the crate's doc comments and the Rust blocks of [`docs/automation.md`](../docs/automation.md), which `rusty_box/src/lib.rs` includes behind `#[cfg(doctest)]`. An example in that guide that names a signature the crate does not have fails here.
-- **Compile-fail fixtures (step 25)** are the doctrine's trybuild tests. Their goldens are rustc's rendered diagnostics, so they change when the quoted code or the toolchain changes. Once you have confirmed the rule still holds, regenerate them with `TRYBUILD=overwrite cargo test --release -p rusty_box --features std --test compile_fail`.
-- **Guest-trace steps (28 and 29)** cover `rusty_box_gui/src/guest_trace.rs`, which only the `guest-trace` feature compiles. Step 29 passes only if its stdout shows `test guest_trace::tests::flight_dump_names_the_opcodes_it_recorded ... ok`, so a test filter that matches nothing fails it.
+- **The hot-loop step (12)** counts, under callgrind, the host instructions `VirtMachine::run_until` executes on the five `aarch64_perfbench` loops, plain and hooked, and fails when one rises more than 0.5% over `xtask/aarch64_hot_loop_baseline.txt`. The counts belong to one compiler and host, which the baseline names: on another, or without valgrind, the step passes saying why it measured nothing. `cargo xtask hot-loop-baseline` counts this host and rewrites the baseline.
+- **WHP steps (13 to 16)** need no hypervisor. The sys and wrapper tests cover layouts and arithmetic. Engine tests that need hardware skip themselves on a host without it. `--all-targets` on step 16 also compiles the engine's example harnesses.
+- **Doc examples (step 25)** compile the crate's doc comments and the Rust blocks of [`docs/automation.md`](../docs/automation.md), which `rusty_box/src/lib.rs` includes behind `#[cfg(doctest)]`. An example in that guide that names a signature the crate does not have fails here.
+- **Compile-fail fixtures (step 26)** are the doctrine's trybuild tests. Their goldens are rustc's rendered diagnostics, so they change when the quoted code or the toolchain changes. Once you have confirmed the rule still holds, regenerate them with `TRYBUILD=overwrite cargo test --release -p rusty_box --features std --test compile_fail`.
+- **Guest-trace steps (29 and 30)** cover `rusty_box_gui/src/guest_trace.rs`, which only the `guest-trace` feature compiles. Step 30 passes only if its stdout shows `test guest_trace::tests::flight_dump_names_the_opcodes_it_recorded ... ok`, so a test filter that matches nothing fails it.
 
 ### `--full`: two more steps
 
@@ -120,13 +122,22 @@ It passes only if the run exits successfully and its stdout contains `*** LOGIN 
 
 ## `cargo xtask perf-baseline`
 
-This command takes no options; anything written after it is ignored. It does three things:
+This command takes no options; anything written after it is ignored. For each of two benchmarks, in this order, it does three things:
 
-1. Builds the `perfbench` example: `cargo build --release -p rusty_box --example perfbench --features std`. The source is `rusty_box/examples/perfbench/perfbench.rs`.
+1. Builds the example with `cargo build --release -p <package> --example <example> --features std`.
 2. Copies the binary to `target/perf-baselines/<rev>/`, where `<rev>` is `git rev-parse --short=12 HEAD`. The directory is named after `HEAD`, so a build of an uncommitted tree is filed under the last commit's revision.
 3. Prints the archived path.
 
-Use it for interleaved A/B runs: alternate the baseline and candidate binaries for at least 10 pairs and compare the medians. `perfbench` runs a synthetic guest workload and needs no ROMs or disk images. The `PERFBENCH_MODE`, `PERFBENCH_INSN`, `PERFBENCH_CPUS` and `PERFBENCH_QUANTUM` environment variables select what it runs (see the environment-variable table in [`rusty_box/examples/README.md`](../rusty_box/examples/README.md)).
+The two benchmarks:
+
+| Package | Example | Source | What it runs |
+|---|---|---|---|
+| `rusty_box` | `perfbench` | `rusty_box/examples/perfbench/perfbench.rs` | A synthetic x86 guest workload; needs no ROMs or disk images. The `PERFBENCH_MODE`, `PERFBENCH_INSN`, `PERFBENCH_CPUS` and `PERFBENCH_QUANTUM` environment variables select what it runs (see the environment-variable table in [`rusty_box/examples/README.md`](../rusty_box/examples/README.md)). |
+| `rusty_box_aarch64` | `aarch64_perfbench` | `rusty_box_aarch64/examples/perfbench.rs` | The AArch64 interpreter's embedded loops (ALU, an `ldp`/`stp` copy, an FNV-1a hash, an FP chain), plain and with hooks, and two boots, EDK2 to `Shell>` and Linux to `login:`, from the images its `PERFBENCH_*` environment variables name; the table at the top of the source lists them. |
+
+The AArch64 example is named apart from `perfbench` because both would build to `target/release/examples/perfbench`.
+
+Use them for interleaved A/B runs: alternate the baseline and candidate binaries for at least 10 pairs and compare the medians.
 
 ## Android commands
 

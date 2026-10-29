@@ -71,14 +71,16 @@
 // it: the SVC (EC 0x15) when nothing trapped, the wait (EC 0x01) when it
 // did. Arm's Hint_WFE and Hint_WFET complete without the trap check when
 // the Event Register is set, and Hint_WFET when the timeout has passed;
-// nothing else does.
+// nothing else does. Of the three, the event stream is on for case K
+// alone, so that none of its events reaches J's or L's wait.
 // J  WFE first thing after the ERET to EL0: AArch64_ExceptionReturn calls
 //    SendEventLocal, so the Event Register is set.
 //      Arm:          J 0000000056000000 ...                   (the SVC)
 //      QEMU 11.1.2:  J 0000000007e00001 ...                   (WFE trapped)
 // K  SEVL and WFE (an event, consumed), a delay with the event stream on
-//    (CNTKCTL_EL1.EVNTEN, EVNTI = 0: every change of the count's bit 0),
-//    then WFE: TestEventCNTV set the Event Register during the delay.
+//    (CNTKCTL_EL1.EVNTEN, EVNTI = 0, EVNTDIR = 0: every rise of the count's
+//    bit 0), then WFE: TestEventCNTV set the Event Register during the
+//    delay.
 //      Arm:          K 0000000056000000 ...
 //      QEMU 11.1.2:  K 0000000007e00001 ...                   (WFE trapped)
 // L  SEVL and WFE, then WFET with a timeout far ahead while the virtual
@@ -88,9 +90,31 @@
 //      QEMU 11.1.2:  L 0000000056000000 ...                   (no trap)
 //
 // M  Back at EL1: MRS of DBGAUTHSTATUS_EL1, which Arm's data gives every
-//    AArch64 processor (its accessor reads it at EL1).
-//      Arm:          M none
+//    AArch64 processor (its accessor reads it at EL1). Prints its value,
+//    which UpdateDbgAuthStatus sets for -cpu max (FEAT_Debugv8p4, no EL3)
+//    with no external debugger to raise DBGEN: NSID 0b10, NSNID 0b11.
+//      Arm:          M 000000000000000e
 //      QEMU 11.1.2:  M 0000000002000000 ...                   (UNDEFINED)
+//
+// N and O run at EL1 with no interrupt pending and print what a wait that
+// lasts until its wake-up event gives, which is what QEMU's wake-up timer
+// means to give. Arm's WaitForEvent lets a PE resume whenever it chooses,
+// so a shorter wait breaks no rule of Arm's.
+// N  The event stream on bit 23 of the count (CNTKCTL_EL1.EVNTI = 15 with
+//    EVNTIS): a WFE that waits for the stream, then eight rounds of SEVL,
+//    WFE (an event, consumed) and WFE. Prints how many rounds took at
+//    least half a stream period (2^23 counts): each WFE that waits, waits
+//    for the stream's next event. QEMU's timer is set for a count already
+//    past, so no WFE waits.
+//      Waiting:      N 0000000000000008
+//      QEMU 11.1.2:  N 0000000000000000
+// O  WFIT with a timeout 2^24 counts ahead. Prints how many whole timeouts
+//    the count moved by. QEMU's timer counts in nanoseconds, so with a
+//    counter that does not run at 1 GHz (-M virt-9.0 and older run it at
+//    62.5 MHz) the wait ends early, and so do N's.
+//      Waiting:                    O 0000000000000001
+//      QEMU 11.1.2:                O 0000000000000001
+//      QEMU 11.1.2, -M virt-9.0:   O 0000000000000000
 
 #define UART 0x09000000
 
@@ -272,8 +296,8 @@ el0_setup:
     mrs x0, sctlr_el1
     bic x0, x0, #(1 << 18)            // nTWE: EL0's WFE and WFET trap
     msr sctlr_el1, x0
-    // The event stream on bit 0 of the count, and EL0 may read CNTVCT_EL0.
-    mov x0, #((1 << 2) | (1 << 1))
+    // EL0 may read CNTVCT_EL0; the event stream is off.
+    mov x0, #(1 << 1)
     msr cntkctl_el1, x0
     // The virtual timer's PPI (27) pending at the CPU interface: the GIC's
     // distributor and CPU interface on, the PPI enabled, and the timer
@@ -300,6 +324,9 @@ j_el0:
     svc #0
 
 case_k:
+    mov x0, #((1 << 2) | (1 << 1))    // the event stream on bit 0 of the count
+    msr cntkctl_el1, x0
+    isb
     adr x0, case_l
     adr x1, k_el0
     mov w2, #'K'
@@ -314,6 +341,8 @@ k_el0:
     svc #0
 
 case_l:
+    mov x0, #(1 << 1)                 // the event stream off
+    msr cntkctl_el1, x0
     msr cntv_cval_el0, xzr
     mov x0, #1
     msr cntv_ctl_el0, x0              // enabled, condition met: PPI 27 pending
@@ -330,14 +359,86 @@ l_el0:
     svc #0
 
 case_m:
-    adr x0, done
+    adr x0, case_n
     ldr x1, =resume
     str x0, [x1]
     mov w0, #'M'
     ldr x1, =which
     strb w0, [x1]
-    mrs x2, dbgauthstatus_el1
-    bl none
+    mrs x5, dbgauthstatus_el1
+    mov w0, #'M'
+    bl putc
+    mov w0, #' '
+    bl putc
+    mov x0, x5
+    bl puthex
+    mov w0, #'\n'
+    bl putc
+
+case_n:
+    adr x0, case_o
+    ldr x1, =resume
+    str x0, [x1]
+    mov w0, #'N'
+    ldr x1, =which
+    strb w0, [x1]
+    msr cntv_ctl_el0, xzr             // the timer's interrupt no longer pending
+    // The event stream on bit 23 of the count (EVNTI 15, EVNTIS), EL0 may
+    // read CNTVCT_EL0.
+    ldr x0, =((1 << 17) | (15 << 4) | (1 << 2) | (1 << 1))
+    msr cntkctl_el1, x0
+    isb
+    sevl
+    wfe
+    wfe                               // to the stream's next event
+    mov x6, #8                        // rounds
+    mov x7, #0                        // rounds that took half a period
+1:  isb
+    mrs x5, cntvct_el0
+    sevl
+    wfe
+    wfe
+    isb
+    mrs x0, cntvct_el0
+    sub x0, x0, x5
+    cmp x0, #(1 << 23)
+    cinc x7, x7, hs
+    subs x6, x6, #1
+    b.ne 1b
+    mov x0, #(1 << 1)                 // the event stream off
+    msr cntkctl_el1, x0
+    mov w0, #'N'
+    bl putc
+    mov w0, #' '
+    bl putc
+    mov x0, x7
+    bl puthex
+    mov w0, #'\n'
+    bl putc
+
+case_o:
+    adr x0, done
+    ldr x1, =resume
+    str x0, [x1]
+    mov w0, #'O'
+    ldr x1, =which
+    strb w0, [x1]
+    isb
+    mrs x5, cntvct_el0
+    mov x1, #(1 << 24)
+    add x1, x5, x1
+    wfit x1
+    isb
+    mrs x0, cntvct_el0
+    sub x5, x0, x5
+    mov w0, #'O'
+    bl putc
+    mov w0, #' '
+    bl putc
+    lsr x0, x5, #24                   // whole timeouts the count moved by
+    bl puthex
+    mov w0, #'\n'
+    bl putc
     b done
 
 // Resume at x0 after the case, then ERET to EL0 at x1 with every interrupt

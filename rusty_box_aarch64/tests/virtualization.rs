@@ -2,19 +2,22 @@
 //! (`MachineBuilder::with_el2`, QEMU `-M virt,virtualization=on`), as a
 //! guest and a host see it (R9): the processor starts at EL2, the device
 //! tree names `SMC` as the PSCI conduit, the EL2 physical timer interrupts
-//! on PPI 10, and a snapshot keeps the EL2 state and is refused by a machine
-//! built without the extensions.
+//! on PPI 10, a snapshot keeps the EL2 state and is refused by a machine
+//! built without the extensions, and a processor model that cannot have EL2
+//! yet is refused it.
 //!
 //! Guest code is GNU as's for aarch64 (`-march=armv8.2-a`), linked at the
 //! base of RAM; each snippet's source is beside its words.
 
 use rusty_box_aarch64::board::{FLASH0_BASE, RAM_BASE};
 use rusty_box_aarch64::boot::fdt;
+use rusty_box_aarch64::machine::BuildError;
 use rusty_box_aarch64::{
-    El, LentStorage, Levels, MachineBuilder, MemoryLoan, NoEl2, PowerState, Pstate, PstateRefusal, RamSize, Reg,
-    RunBudget, StopReason, SysReg, VirtConfig, VirtMachine, WithEl2,
+    Cpu, CpuConfig, CpuModel, El, El2Unavailable, LentStorage, Levels, MachineBuilder, MemoryLoan,
+    NoEl2, PowerState, Pstate, PstateRefusal, RamSize, Reg, RunBudget, StopReason, SysReg,
+    VirtConfig, VirtMachine, WithEl2,
 };
-use rusty_box_core::SnapError;
+use rusty_box_core::{ClockHz, SnapError};
 
 const RAM_LEN: usize = 4 << 20;
 /// `b .`
@@ -53,7 +56,9 @@ fn bare_without_el2(ram: &mut [u8]) -> VirtMachine<LentStorage<'_>, NoEl2> {
 
 fn load<L: Levels>(machine: &mut VirtMachine<LentStorage<'_>, L>, program: &[(u64, u32)]) {
     for &(offset, word) in program {
-        machine.mem_write(RAM_BASE + offset, &word.to_le_bytes()).expect("code is in RAM");
+        machine
+            .mem_write(RAM_BASE + offset, &word.to_le_bytes())
+            .expect("code is in RAM");
     }
 }
 
@@ -83,7 +88,10 @@ fn started(kind: Kind, source: Option<&[u8]>) -> Started {
         None => builder,
     };
     let builder = builder.firmware(&code);
-    let loan = MemoryLoan { ram: &mut ram, vars: &mut vars };
+    let loan = MemoryLoan {
+        ram: &mut ram,
+        vars: &mut vars,
+    };
     match kind {
         Kind::WithoutEl2 => observe(&builder.build_in(loan).expect("builds")),
         Kind::WithEl2 => observe(&builder.with_el2().build_in(loan).expect("builds")),
@@ -104,8 +112,16 @@ fn virtualization_starts_at_el2_and_calls_psci_with_smc() {
         (Kind::WithEl2, El::El2, &b"smc\0"[..]),
     ] {
         let Started { pstate, pc, tree } = started(kind, None);
-        assert_eq!((pstate.el, pstate.sp_sel, pc), (el, true, FLASH0_BASE), "{kind:?}");
-        assert_eq!(fdt::property(&tree, "psci", "method"), Ok(Some(method)), "{kind:?}");
+        assert_eq!(
+            (pstate.el, pstate.sp_sel, pc),
+            (el, true, FLASH0_BASE),
+            "{kind:?}"
+        );
+        assert_eq!(
+            fdt::property(&tree, "psci", "method"),
+            Ok(Some(method)),
+            "{kind:?}"
+        );
         assert_eq!(
             fdt::property(&tree, "psci", "compatible"),
             Ok(Some(&b"arm,psci-1.0\0arm,psci-0.2\0arm,psci\0"[..]))
@@ -113,24 +129,26 @@ fn virtualization_starts_at_el2_and_calls_psci_with_smc() {
         trees.push(tree);
     }
     // Without `/psci`'s method the trees name the same nodes in the same
-    // order, each with the same properties holding the same bytes (the
-    // Devicetree Specification gives the order of a node's properties no
-    // meaning, and the edit writes `method` at the head of its node).
+    // order, each with the same properties holding the same bytes.
     let without_method = |tree: &[u8]| {
         let mut contents = TreeContents::of(tree);
         let before = contents.properties.len();
-        contents.properties.retain(|(node, name, _)| (node.as_str(), name.as_str()) != ("/psci", "method"));
+        contents
+            .properties
+            .retain(|(node, name, _)| (node.as_str(), name.as_str()) != ("/psci", "method"));
         assert_eq!(contents.properties.len(), before - 1, "one method");
         contents
     };
     assert_eq!(without_method(&trees[0]), without_method(&trees[1]));
 }
 
-/// A host's own device tree with no `/psci` node describes no PSCI
-/// firmware: with virtualization it gains none, only the memory node every
-/// tree is given.
+/// A host's own device tree with no `/psci` node gains QEMU's, as QEMU's
+/// `fdt_add_psci_node` adds it to every tree it hands a guest, with the
+/// machine's method; and an empty `/chosen`, which `arm_load_dtb` adds
+/// where a tree has none, with the memory node every tree is given. The
+/// node added last comes first, as libfdt adds a node.
 #[test]
-fn a_tree_without_psci_gains_no_psci_node() {
+fn a_tree_without_psci_gains_qemu_s_psci_node() {
     // A flattened device tree holding an empty root node: the header, the
     // memory reservation block's terminator, the structure block, and no
     // strings.
@@ -142,10 +160,27 @@ fn a_tree_without_psci_gains_no_psci_node() {
     for word in [1u32, 0, 2, 9] {
         tree.extend_from_slice(&word.to_be_bytes());
     }
+    let qemu = started(Kind::WithEl2, None).tree;
     let built = started(Kind::WithEl2, Some(&tree)).tree;
-    assert_eq!(fdt::property(&built, "psci", "method"), Ok(None));
-    assert_eq!(fdt::property(&built, "memory@40000000", "device_type"), Ok(Some(&b"memory\0"[..])));
-    assert_eq!(TreeContents::of(&built).nodes, ["", "/memory@40000000"]);
+    assert_eq!(
+        fdt::property(&built, "psci", "method"),
+        Ok(Some(&b"smc\0"[..]))
+    );
+    let node_of = |tree: &[u8], node: &str| {
+        let mut properties = TreeContents::of(tree).properties;
+        properties.retain(|(path, _, _)| path == node);
+        properties
+    };
+    assert_eq!(node_of(&built, "/psci"), node_of(&qemu, "/psci"));
+    assert_eq!(
+        fdt::property(&built, "memory@40000000", "device_type"),
+        Ok(Some(&b"memory\0"[..]))
+    );
+    assert_eq!(node_of(&built, "/chosen"), []);
+    assert_eq!(
+        TreeContents::of(&built).nodes,
+        ["", "/psci", "/chosen", "/memory@40000000"]
+    );
 }
 
 /// A host's own device tree whose `/psci` method names the other conduit
@@ -163,7 +198,11 @@ fn a_host_tree_names_the_machine_s_psci_conduit() {
         (Kind::WithEl2, &with_el2, &b"smc\0"[..]),
     ] {
         let built = started(kind, Some(source)).tree;
-        assert_eq!(fdt::property(&built, "psci", "method"), Ok(Some(method)), "{kind:?}");
+        assert_eq!(
+            fdt::property(&built, "psci", "method"),
+            Ok(Some(method)),
+            "{kind:?}"
+        );
     }
 }
 
@@ -184,7 +223,10 @@ impl TreeContents {
         const FDT_END: u32 = 9;
         let be32 = |at: usize| u32::from_be_bytes(tree[at..at + 4].try_into().expect("four bytes"));
         let c_string = |at: usize| {
-            let len = tree[at..].iter().position(|&b| b == 0).expect("a terminated string");
+            let len = tree[at..]
+                .iter()
+                .position(|&b| b == 0)
+                .expect("a terminated string");
             String::from_utf8(tree[at..at + len].to_vec()).expect("an ASCII name")
         };
         let strings = be32(12) as usize;
@@ -316,9 +358,12 @@ fn a_snapshot_keeps_the_el2_state_and_needs_virtualization() {
     let mut ram = vec![0u8; RAM_LEN];
     let mut m = bare(&mut ram);
     load(&mut m, &[(0, HVC_1), (0x1200, SPIN)]);
-    m.sysreg_write(SysReg::VBAR_EL2, VBAR).expect("EL2 has VBAR_EL2");
-    m.sysreg_write(SysReg::HCR_EL2, 1 << 4).expect("and HCR_EL2");
-    m.sysreg_write(SysReg::TPIDR_EL2, 0x1234).expect("and TPIDR_EL2");
+    m.sysreg_write(SysReg::VBAR_EL2, VBAR)
+        .expect("EL2 has VBAR_EL2");
+    m.sysreg_write(SysReg::HCR_EL2, 1 << 4)
+        .expect("and HCR_EL2");
+    m.sysreg_write(SysReg::TPIDR_EL2, 0x1234)
+        .expect("and TPIDR_EL2");
     m.set_sp_el2(RAM_BASE + 0x8000);
     let out = m.step(RunBudget::Instructions(2));
     assert_eq!(out.stop, StopReason::BudgetExhausted);
@@ -335,7 +380,10 @@ fn a_snapshot_keeps_the_el2_state_and_needs_virtualization() {
         SysReg::SPSR_EL2,
     ];
     let values = |m: &VirtMachine<LentStorage<'_>, WithEl2>| {
-        let mut out: Vec<u64> = registers.iter().map(|&r| m.sysreg_read(r).expect("EL2 register")).collect();
+        let mut out: Vec<u64> = registers
+            .iter()
+            .map(|&r| m.sysreg_read(r).expect("EL2 register"))
+            .collect();
         out.extend([m.sp_el2(), m.reg_read(Reg::Pc)]);
         out
     };
@@ -345,7 +393,8 @@ fn a_snapshot_keeps_the_el2_state_and_needs_virtualization() {
 
     let mut again = vec![0u8; RAM_LEN];
     let mut same = bare(&mut again);
-    same.restore_snapshot(&mut image.as_slice()).expect("restores");
+    same.restore_snapshot(&mut image.as_slice())
+        .expect("restores");
     assert_eq!(values(&same), saved);
     assert_eq!(same.pstate(), m.pstate());
 
@@ -360,8 +409,67 @@ fn a_snapshot_keeps_the_el2_state_and_needs_virtualization() {
     let before = (without.cpu_snapshot(), without.ticks());
     assert_eq!(
         without.restore_snapshot(&mut image.as_slice()),
-        Err(SnapError::Invalid("snapshot is of a machine built differently"))
+        Err(SnapError::Invalid(
+            "snapshot is of a machine built differently"
+        ))
     );
-    assert_eq!((without.cpu_snapshot(), without.ticks()), before, "nothing changed");
+    assert_eq!(
+        (without.cpu_snapshot(), without.ticks()),
+        before,
+        "nothing changed"
+    );
     assert_eq!(without.pstate().el, El::El1);
+}
+
+/// A processor model that cannot have EL2 yet (`CpuModel::el2_available`:
+/// the Armv9.2 model, of which Arm requires features with EL2 this core
+/// lacks) is refused it, by a machine's build before the lent RAM is
+/// written and by `Cpu::new`; the Cortex-A57 builds with it and starts at
+/// EL2, and every model builds without it.
+#[test]
+fn a_model_that_cannot_have_el2_is_refused_it() {
+    assert!(CpuModel::CortexA57.el2_available());
+    assert!(!CpuModel::Armv9p2.el2_available());
+    let config = CpuConfig {
+        ips: ClockHz::BOCHS_DEFAULT,
+        reset_pc: RAM_BASE,
+    };
+    for model in CpuModel::ALL {
+        assert!(Cpu::<NoEl2>::new(model, config).is_ok(), "{model:?}");
+        match Cpu::<WithEl2>::new(model, config) {
+            Ok(cpu) => {
+                assert!(model.el2_available(), "{model:?}");
+                assert_eq!(cpu.el(), El::El2, "{model:?}");
+            }
+            Err(e) => assert_eq!(e, El2Unavailable { model }),
+        }
+    }
+    for model in CpuModel::ALL {
+        let mut ram = vec![0x5A_u8; RAM_LEN];
+        let built = MachineBuilder::new(VirtConfig {
+            cpu: model,
+            ..VirtConfig::DEFAULT
+        })
+        .ram(ram_size())
+        .bare()
+        .with_el2()
+        .build_in(MemoryLoan {
+            ram: &mut ram,
+            vars: &mut [],
+        });
+        match built {
+            Ok(m) => {
+                assert!(model.el2_available(), "{model:?}");
+                assert_eq!(m.pstate().el, El::El2, "{model:?}");
+            }
+            Err(e) => {
+                assert!(!model.el2_available(), "{model:?}");
+                assert_eq!(e, BuildError::El2Unavailable(El2Unavailable { model }));
+                assert!(
+                    ram.iter().all(|&b| b == 0x5A),
+                    "{model:?}: the loan is untouched"
+                );
+            }
+        }
+    }
 }

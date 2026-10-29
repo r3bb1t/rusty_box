@@ -71,14 +71,25 @@ const BRANCH_TARGET: u64 = 0x0D;
 struct Ram(Vec<u8>);
 
 impl PhysBus for Ram {
-    fn read(&mut self, addr: PhysAddr, width: AccessWidth, _clock: VmClock) -> Result<u64, BusFault> {
+    fn read(
+        &mut self,
+        addr: PhysAddr,
+        width: AccessWidth,
+        _clock: VmClock,
+    ) -> Result<u64, BusFault> {
         let a = addr.get() as usize;
         let n = width.bytes() as usize;
         let bytes = self.0.get(a..a + n).ok_or(BusFault::Unmapped)?;
         Ok(bytes.iter().rev().fold(0, |v, &b| (v << 8) | u64::from(b)))
     }
 
-    fn write(&mut self, addr: PhysAddr, width: AccessWidth, value: u64, _clock: VmClock) -> Result<(), BusFault> {
+    fn write(
+        &mut self,
+        addr: PhysAddr,
+        width: AccessWidth,
+        value: u64,
+        _clock: VmClock,
+    ) -> Result<(), BusFault> {
         let a = addr.get() as usize;
         let n = width.bytes() as usize;
         let bytes = self.0.get_mut(a..a + n).ok_or(BusFault::Unmapped)?;
@@ -111,10 +122,12 @@ impl Machine {
         let mut cpu = Cpu::<NoEl2>::implementing(
             CpuConfig {
                 ips,
-                counter_hz: ips,
                 reset_pc: UNGUARDED,
             },
-            imp,
+            Implementation {
+                counter_hz: ips,
+                ..imp
+            },
         );
         let mut ram = Ram(std::vec![0; RAM_BYTES]);
         const AF: u64 = 1 << 10;
@@ -126,7 +139,10 @@ impl Machine {
             (L1, L2 | 0b11),
             (L2, AF | INNER_SHAREABLE | BLOCK),
             (L2 + 8, GUARDED | AF | INNER_SHAREABLE | GP | BLOCK),
-            (L2 + 16, GUARDED_EL0 | AF | INNER_SHAREABLE | READ_ONLY_BOTH | GP | BLOCK),
+            (
+                L2 + 16,
+                GUARDED_EL0 | AF | INNER_SHAREABLE | READ_ONLY_BOTH | GP | BLOCK,
+            ),
         ];
         for (at, desc) in descriptors {
             let at = at as usize;
@@ -152,14 +168,28 @@ impl Machine {
         let pstate = self.cpu.pstate;
         self.cpu.pc = at;
         self.cpu.sys.esr_el1 = 0x3F << 26;
-        assert_eq!(self.cpu.step(&mut self.ram, &mut NoInstrumentation), Step::Retired);
+        assert_eq!(
+            self.cpu.step(&mut self.ram, &mut NoInstrumentation),
+            Step::Retired
+        );
         let esr = self.cpu.sys.esr_el1;
         if esr >> 26 == 0x3F {
             return None;
         }
-        assert_eq!(self.cpu.pc & !0x7FF, VBAR, "{at:#x} took an exception to the vector table");
-        assert_eq!(self.cpu.pstate.btype, Btype::None, "an exception leaves BTYPE 00");
-        self.cpu.pstate = Pstate { btype: Btype::None, ..pstate };
+        assert_eq!(
+            self.cpu.pc & !0x7FF,
+            VBAR,
+            "{at:#x} took an exception to the vector table"
+        );
+        assert_eq!(
+            self.cpu.pstate.btype,
+            Btype::None,
+            "an exception leaves BTYPE 00"
+        );
+        self.cpu.pstate = Pstate {
+            btype: Btype::None,
+            ..pstate
+        };
         Some(Taken {
             ec: esr >> 26,
             iss: esr & 0x01FF_FFFF,
@@ -170,7 +200,13 @@ impl Machine {
     /// Execute `branch` at `from` to `target`, which holds `landing`
     /// (X1 = X16 = X17 = `target`), and step the landing instruction: the
     /// BTYPE the branch left, and the exception the landing took.
-    fn branch(&mut self, from: u64, branch: u32, target: u64, landing: u32) -> (Btype, Option<Taken>) {
+    fn branch(
+        &mut self,
+        from: u64,
+        branch: u32,
+        target: u64,
+        landing: u32,
+    ) -> (Btype, Option<Taken>) {
         self.put(from, branch);
         self.put(target, landing);
         self.cpu.x[1] = target;
@@ -223,11 +259,21 @@ fn an_indirect_branch_into_a_guarded_page_needs_a_bti_that_accepts_it() {
                 _ => false,
             };
             let want = if accepted { None } else { branch_target(btype) };
-            assert_eq!(taken, want, "{branch:#010x} at {from:#x} to {landing:#010x}");
+            assert_eq!(
+                taken, want,
+                "{branch:#010x} at {from:#x} to {landing:#010x}"
+            );
             if accepted {
-                assert_eq!(m.cpu.pstate.btype, Btype::None, "the landing leaves BTYPE 00");
+                assert_eq!(
+                    m.cpu.pstate.btype,
+                    Btype::None,
+                    "the landing leaves BTYPE 00"
+                );
             } else {
-                assert_eq!(m.cpu.sys.elr_el1, TARGET, "the exception returns to the landing");
+                assert_eq!(
+                    m.cpu.sys.elr_el1, TARGET,
+                    "the exception returns to the landing"
+                );
             }
         }
     }
@@ -248,7 +294,11 @@ fn an_unguarded_target_ret_and_the_mmu_off_need_no_bti() {
     let mut off = Machine::new(Implementation::EVERY_FEATURE);
     off.cpu.sys.sctlr_el1 &= !1;
     let (btype, taken) = off.branch(GUARDED, BR_X1, TARGET, NOP);
-    assert_eq!((btype, taken), (Btype::JumpOrCall, None), "the MMU off: BR from a page not guarded");
+    assert_eq!(
+        (btype, taken),
+        (Btype::JumpOrCall, None),
+        "the MMU off: BR from a page not guarded"
+    );
 }
 
 /// PACIASP and PACIBSP accept a BLR, and a BR from X16 or X17, and a BR
@@ -257,9 +307,12 @@ fn an_unguarded_target_ret_and_the_mmu_off_need_no_bti() {
 #[test]
 fn paciasp_accepts_a_jump_unless_bt_is_set() {
     for landing in [PACIASP, PACIBSP] {
-        for (branch, bt1, accepted) in
-            [(BR_X1, false, true), (BR_X1, true, false), (BR_X16, true, true), (BLR_X1, true, true)]
-        {
+        for (branch, bt1, accepted) in [
+            (BR_X1, false, true),
+            (BR_X1, true, false),
+            (BR_X16, true, true),
+            (BLR_X1, true, true),
+        ] {
             let mut m = Machine::new(Implementation::EVERY_FEATURE);
             if bt1 {
                 m.cpu.sys.sctlr_el1 |= BT1;
@@ -314,11 +367,19 @@ fn spsr_keeps_btype_for_an_abort_an_interrupt_and_eret() {
     m.cpu.x[1] = UNMAPPED;
     assert_eq!(m.step_at(GUARDED), None);
     let taken = m.step_at(UNMAPPED);
-    assert_eq!(taken.map(|t| (t.ec, t.saved_btype)), Some((0x21, Btype::Jump)), "an instruction abort");
+    assert_eq!(
+        taken.map(|t| (t.ec, t.saved_btype)),
+        Some((0x21, Btype::Jump)),
+        "an instruction abort"
+    );
 
     let (btype, taken) = m.branch(GUARDED, BR_X1, UNGUARDED + 0x200, SVC);
     assert_eq!(btype, Btype::Jump);
-    assert_eq!(taken.map(|t| (t.ec, t.saved_btype)), Some((0x15, Btype::None)), "an SVC");
+    assert_eq!(
+        taken.map(|t| (t.ec, t.saved_btype)),
+        Some((0x15, Btype::None)),
+        "an SVC"
+    );
 
     m.put(GUARDED, BR_X1);
     m.put(TARGET, NOP);
@@ -327,7 +388,11 @@ fn spsr_keeps_btype_for_an_abort_an_interrupt_and_eret() {
     assert_eq!(m.step_at(GUARDED), None);
     let irq = m.cpu.take_irq().expect("taken at EL1");
     assert_eq!((irq.return_address, irq.vector), (TARGET, VBAR + 0x280));
-    assert_eq!(Btype::from_bits(m.cpu.sys.spsr_el1 >> 10), Btype::Jump, "the IRQ keeps BTYPE");
+    assert_eq!(
+        Btype::from_bits(m.cpu.sys.spsr_el1 >> 10),
+        Btype::Jump,
+        "the IRQ keeps BTYPE"
+    );
     assert_eq!(m.cpu.pstate.btype, Btype::None);
     assert_eq!(m.step_at(VBAR + 0x280), None, "ERET");
     assert_eq!((m.cpu.pc, m.cpu.pstate.btype), (TARGET, Btype::Jump));
@@ -338,7 +403,10 @@ fn spsr_keeps_btype_for_an_abort_an_interrupt_and_eret() {
 /// An ERET from an SPSR_EL1 with BTYPE set leaves it in PSTATE.
 #[test]
 fn spsr_btype_is_writable_only_with_bti() {
-    for (imp, kept) in [(Implementation::EVERY_FEATURE, 0b11 << 10), (Implementation::CORTEX_A57, 0)] {
+    for (imp, kept) in [
+        (Implementation::EVERY_FEATURE, 0b11 << 10),
+        (Implementation::CORTEX_A57, 0),
+    ] {
         let mut m = Machine::new(imp);
         m.put(UNGUARDED, MSR_SPSR);
         m.put(UNGUARDED + 4, MRS_SPSR);
@@ -384,7 +452,10 @@ fn a_host_pc_write_clears_btype() {
     assert_eq!(m.cpu.pstate.btype, Btype::Jump);
     m.cpu.set_reg(Reg::Pc, TARGET);
     assert_eq!(m.cpu.pstate.btype, Btype::None);
-    assert_eq!(m.cpu.step(&mut m.ram, &mut NoInstrumentation), Step::Retired);
+    assert_eq!(
+        m.cpu.step(&mut m.ram, &mut NoInstrumentation),
+        Step::Retired
+    );
     assert_eq!(m.cpu.pc, TARGET + 4);
 }
 
@@ -398,7 +469,11 @@ fn a_guarded_tlb_entry_needs_bti() {
     let mut image = Vec::new();
     assert!(m.cpu.tlb.save(&mut image).is_ok());
     let tcr = m.cpu.sys.tcr_el1;
-    let restored = |features| Tlb::new().restore(&mut image.as_slice(), features, tcr).is_ok();
+    let restored = |features| {
+        Tlb::new()
+            .restore(&mut image.as_slice(), features, tcr)
+            .is_ok()
+    };
     assert!(restored(Implementation::EVERY_FEATURE.features));
     assert!(!restored(Implementation::CORTEX_A57.features));
 }
@@ -421,7 +496,8 @@ fn a_snapshot_carries_btype_and_guarded_pages() {
     restored.put(landing, NOP);
     // No guarded block in the tables: that the page is guarded comes from
     // the restored TLB.
-    restored.ram.0[L2 as usize + 8..L2 as usize + 16].copy_from_slice(&(GUARDED | (1 << 10) | 1).to_le_bytes());
+    restored.ram.0[L2 as usize + 8..L2 as usize + 16]
+        .copy_from_slice(&(GUARDED | (1 << 10) | 1).to_le_bytes());
     assert!(restored.cpu.restore(&mut image.as_slice()).is_ok());
     assert_eq!(restored.cpu.pstate.btype, Btype::Jump);
     assert_eq!(restored.step_at(landing), branch_target(Btype::Jump));

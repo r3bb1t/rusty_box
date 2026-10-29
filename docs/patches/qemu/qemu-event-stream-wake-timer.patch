@@ -1,0 +1,59 @@
+--- a/target/arm/tcg/op_helper.c
++++ b/target/arm/tcg/op_helper.c
+@@ -505,13 +505,15 @@
+          * which transition counts.
+          *
+          * So we calculate 1 << bit - current lower bits and then add
+-         * 1 << bit if the bit needs to flip twice to meet evntdir
++         * 1 << bit if the bit needs to flip twice to meet evntdir. That
++         * many ticks after the system counter's current value comes the
++         * event.
+          */
+         int bit = evntis ? evnti + 8 : evnti;
+-        uint64_t count = gt_get_countervalue(env) - offset;
++        uint64_t now = gt_get_countervalue(env);
++        uint64_t count = now - offset;
+         uint64_t target_bit = BIT_ULL(bit);
+-        uint64_t lower_bits = MAKE_64BIT_MASK(0, bit - 1);
+-        uint64_t next_tick = target_bit - (count & lower_bits);
++        uint64_t next_tick = target_bit - (count & (target_bit - 1));
+         uint64_t abstick;
+ 
+         /* do we need to bit flip twice? */
+@@ -525,7 +527,7 @@
+          * set the timer for as far in the future as possible. When the
+          * timer expires we will reset the timer for any remaining period.
+          */
+-        if (uadd64_overflow(next_tick, offset, &abstick)) {
++        if (uadd64_overflow(now, next_tick, &abstick)) {
+             abstick = UINT64_MAX;
+         }
+         if (abstick > INT64_MAX / gt_cntfrq_period_ns(cpu)) {
+@@ -550,17 +552,22 @@
+     int64_t next_time = -1;
+     uint64_t offset;
+ 
+-    /* Unless we are missing EL2 this can generate events */
++    /*
++     * Unless we are missing EL2 this can generate events. Its stream runs
++     * on the physical count itself (TestEventCNTP()).
++     */
+     if (arm_feature(env, ARM_FEATURE_EL2)) {
+-        offset = gt_direct_access_timer_offset(env, GTIMER_PHYS);
+-        next_time = gt_recalc_one_evt(env, env->cp15.cnthctl_el2, offset);
++        next_time = gt_recalc_one_evt(env, env->cp15.cnthctl_el2, 0);
+     }
+ 
+-    /* Event stream events from virtual counter enabled? */
++    /*
++     * Event stream events from virtual counter enabled? CNTVOFF_EL2
++     * applies to it whatever the current EL (TestEventCNTV()).
++     */
+     if (!cpu_isar_feature(aa64_vh, cpu) ||
+         !((hcr & (HCR_E2H | HCR_TGE)) == (HCR_E2H | HCR_TGE))) {
+         int64_t next_virt_time;
+-        offset = gt_direct_access_timer_offset(env, GTIMER_VIRT);
++        offset = env->cp15.cntvoff_el2;
+         next_virt_time = gt_recalc_one_evt(env, env->cp15.c14_cntkctl, offset);
+ 
+         /* is this earlier than the next physical event? */

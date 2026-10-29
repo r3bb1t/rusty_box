@@ -1,0 +1,15 @@
+--- a/target/arm/tcg/cpu64.c
++++ b/target/arm/tcg/cpu64.c
+@@ -1204,6 +1204,12 @@
+     t = FIELD_DP64(t, MIDR_EL1, VARIANT, 0);
+     t = FIELD_DP64(t, MIDR_EL1, REVISION, 0);
+     cpu->midr = t;
++    /*
++     * We started from aarch64_a57_initfn(), whose device tree compatible
++     * names a Cortex-A57; 'max' is a software model, which the binding
++     * (Documentation/devicetree/bindings/arm/cpus.yaml) names arm,armv8.
++     */
++    cpu->dtb_compatible = "arm,armv8";
+ 
+     /*
+      * We're going to set FEAT_S2FWB, which mandates that CLIDR_EL1.{LoUU,LoUIS}

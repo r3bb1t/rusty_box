@@ -10,9 +10,11 @@
 //! `HCR_EL2.TEA` as the class's function reads them).
 
 use super::el2::{
-    El2Regs, El2Storage, HCR_AMO, HCR_FMO, HCR_IMO, HCR_TEA, HCR_TGE, HCR_VF, HCR_VI, HCR_VSE, MDCR_TDE, VSESR_MASK,
+    El2Regs, El2Storage, HCR_AMO, HCR_FMO, HCR_IMO, HCR_TEA, HCR_TGE, HCR_VF, HCR_VI, HCR_VSE,
+    MDCR_TDE, VSESR_MASK,
 };
 use super::features::Feature;
+use super::sysreg::{DBGPRCR_CORENPDRQ, MDSCR_KDE, MDSCR_SS, OSDLR_DLK, OSLSR_OSLK};
 use super::{sctlr, Activity, Btype, Cpu, El, Levels, Pstate, SysRegs};
 use crate::instrumentation::{ExceptionKind, ExceptionTaken};
 
@@ -114,7 +116,11 @@ impl ExceptionClass {
     /// the choice `ConstrainUnpredictable(Unpredictable_ZEROBTYPE)` makes.
     const fn preserves_btype(self) -> bool {
         match self {
-            Self::BranchTarget | Self::IllegalState | Self::InstructionAbort | Self::PcAlignment | Self::Brk => true,
+            Self::BranchTarget
+            | Self::IllegalState
+            | Self::InstructionAbort
+            | Self::PcAlignment
+            | Self::Brk => true,
             Self::Unknown
             | Self::WfxTrap
             | Self::FpAccess
@@ -130,11 +136,28 @@ impl ExceptionClass {
         }
     }
 
-    /// Whether the exception reports a virtual address in `FAR_ELx` (Arm
-    /// `AArch64_ReportException`). Every other class leaves `FAR_ELx`
-    /// ARBITRARY; here, unchanged.
-    const fn reports_address(self) -> bool {
-        matches!(self, Self::InstructionAbort | Self::PcAlignment | Self::DataAbort)
+}
+
+/// The exception classes that report a virtual address in `FAR_ELx` (Arm
+/// `AArch64_ReportException`). Every other class leaves `FAR_ELx`
+/// ARBITRARY; here, unchanged.
+///
+/// Closed (R5): only an exception of one of these carries an address
+/// ([`Exception::at_address`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AddressedClass {
+    InstructionAbort,
+    PcAlignment,
+    DataAbort,
+}
+
+impl AddressedClass {
+    const fn class(self) -> ExceptionClass {
+        match self {
+            Self::InstructionAbort => ExceptionClass::InstructionAbort,
+            Self::PcAlignment => ExceptionClass::PcAlignment,
+            Self::DataAbort => ExceptionClass::DataAbort,
+        }
     }
 }
 
@@ -161,7 +184,8 @@ pub(crate) enum Route {
 pub(crate) struct Exception {
     pub(crate) class: ExceptionClass,
     pub(crate) iss: u32,
-    /// The faulting virtual address, for the classes that report one.
+    /// The faulting virtual address, which only an exception of a class
+    /// that reports one holds ([`Exception::at_address`]).
     pub(crate) far: Option<u64>,
     pub(crate) route: Route,
 }
@@ -196,10 +220,16 @@ impl Exception {
         }
     }
 
+    /// An exception of `class`, which reports `far` in `FAR_ELx`, taken
+    /// where its class's function takes it.
     #[inline]
-    pub(crate) const fn with_far(mut self, far: u64) -> Self {
-        self.far = Some(far);
-        self
+    pub(crate) const fn at_address(class: AddressedClass, iss: u32, far: u64) -> Self {
+        Self {
+            class: class.class(),
+            iss,
+            far: Some(far),
+            route: Route::Class,
+        }
     }
 
     /// Whether the preferred return address is the next instruction rather
@@ -207,7 +237,10 @@ impl Exception {
     /// and `HVC` (`AArch64_CallHypervisor`), each `NextInstrAddr`. A trapped
     /// `SMC` returns to itself (`AArch64_CheckForSMCUndefOrTrap`).
     const fn returns_to_next(self) -> bool {
-        matches!((self.class, self.route), (ExceptionClass::Svc, Route::Class) | (ExceptionClass::Hvc, _))
+        matches!(
+            (self.class, self.route),
+            (ExceptionClass::Svc, Route::Class) | (ExceptionClass::Hvc, _)
+        )
     }
 }
 
@@ -449,7 +482,9 @@ impl<L: Levels> Cpu<L> {
             | ExceptionClass::PacFail
             | ExceptionClass::SmeAccess
             | ExceptionClass::SysRegTrap => from_el0 && tge,
-            ExceptionClass::PcAlignment | ExceptionClass::SpAlignment | ExceptionClass::WfxTrap => tge,
+            ExceptionClass::PcAlignment | ExceptionClass::SpAlignment | ExceptionClass::WfxTrap => {
+                tge
+            }
             ExceptionClass::FpAccess => false,
             ExceptionClass::Brk => tge || self.mdcr_any(MDCR_TDE),
             ExceptionClass::InstructionAbort | ExceptionClass::DataAbort => {
@@ -505,7 +540,7 @@ impl<L: Levels> Cpu<L> {
         } else {
             pc
         };
-        let far = e.far.filter(|_| class.reports_address());
+        let far = e.far;
         let saved = if class.preserves_btype() {
             self.pstate
         } else {
@@ -515,7 +550,13 @@ impl<L: Levels> Cpu<L> {
             }
         };
         let record = EntryRecord::Syndrome { esr, far };
-        let vector = self.take_exception(target, VectorKind::Synchronous, return_addr, saved.to_spsr(), record);
+        let vector = self.take_exception(
+            target,
+            VectorKind::Synchronous,
+            return_addr,
+            saved.to_spsr(),
+            record,
+        );
         ExceptionTaken {
             kind: ExceptionKind::Synchronous(class),
             from,
@@ -545,13 +586,16 @@ impl<L: Levels> Cpu<L> {
     /// masking table for a PE with EL2 and no EL3): one that targets EL1 is
     /// never taken at EL2, the level above it; one routed to EL2 is taken at
     /// EL0 and EL1 whatever `PSTATE` masks; and otherwise its `PSTATE` mask
-    /// (`I`, `F`) decides. The one reading of the table.
+    /// (`I`, `F`) decides. The one reading of the table. A processor
+    /// without EL2 is never at EL2 and routes nothing there, so for one
+    /// every case is `ByPstate` and the run loop's test before each
+    /// instruction reads no level.
     #[inline(always)]
     fn interrupt_masking(&self, interrupt: Interrupt) -> Masking {
         match (self.pstate.el, self.interrupt_routed_to_el2(interrupt)) {
-            (El::El2, false) => Masking::Never,
+            (El::El2, false) if L::EL2 => Masking::Never,
             (El::El0 | El::El1, true) => Masking::Unmasked,
-            (El::El2, true) | (El::El0 | El::El1, false) => Masking::ByPstate,
+            (El::El2, _) | (El::El0 | El::El1, false) => Masking::ByPstate,
         }
     }
 
@@ -588,7 +632,10 @@ impl<L: Levels> Cpu<L> {
     /// Whether any virtual interrupt is pending at the current level,
     /// masked by `PSTATE` or not.
     pub(crate) fn virtual_interrupt_pending(&self) -> bool {
-        self.virtual_raised() && VirtualInterrupt::ALL.into_iter().any(|interrupt| self.virtual_pending(interrupt))
+        self.virtual_raised()
+            && VirtualInterrupt::ALL
+                .into_iter()
+                .any(|interrupt| self.virtual_pending(interrupt))
     }
 
     /// `ISR_EL1` as read at `el`: the IRQ (I), FIQ (F) and SError (A)
@@ -715,7 +762,13 @@ impl<L: Levels> Cpu<L> {
         let target = self.interrupt_target(interrupt);
         let from = self.pstate.el;
         let pc = self.pc;
-        let vector = self.take_exception(target, vector_kind, pc, self.pstate.to_spsr(), EntryRecord::Nothing);
+        let vector = self.take_exception(
+            target,
+            vector_kind,
+            pc,
+            self.pstate.to_spsr(),
+            EntryRecord::Nothing,
+        );
         ExceptionTaken {
             kind,
             from,
@@ -736,8 +789,16 @@ impl<L: Levels> Cpu<L> {
     /// EL2 clears `VI` or `VF`.
     fn take_virtual_interrupt(&mut self, interrupt: VirtualInterrupt) -> ExceptionTaken {
         let (vector_kind, kind, record) = match interrupt {
-            VirtualInterrupt::Irq => (VectorKind::Irq, ExceptionKind::VirtualIrq, EntryRecord::Nothing),
-            VirtualInterrupt::Fiq => (VectorKind::Fiq, ExceptionKind::VirtualFiq, EntryRecord::Nothing),
+            VirtualInterrupt::Irq => (
+                VectorKind::Irq,
+                ExceptionKind::VirtualIrq,
+                EntryRecord::Nothing,
+            ),
+            VirtualInterrupt::Fiq => (
+                VectorKind::Fiq,
+                ExceptionKind::VirtualFiq,
+                EntryRecord::Nothing,
+            ),
             VirtualInterrupt::SError => {
                 let iss = if self.implements(Feature::Ras) {
                     self.el2().vsesr & VSESR_MASK
@@ -748,12 +809,17 @@ impl<L: Levels> Cpu<L> {
                     el2.hcr &= !HCR_VSE;
                 }
                 let esr = (EC_SERROR << 26) | (1 << 25) | iss;
-                (VectorKind::SError, ExceptionKind::VirtualSError, EntryRecord::Syndrome { esr, far: None })
+                (
+                    VectorKind::SError,
+                    ExceptionKind::VirtualSError,
+                    EntryRecord::Syndrome { esr, far: None },
+                )
             }
         };
         let from = self.pstate.el;
         let pc = self.pc;
-        let vector = self.take_exception(Target::El1, vector_kind, pc, self.pstate.to_spsr(), record);
+        let vector =
+            self.take_exception(Target::El1, vector_kind, pc, self.pstate.to_spsr(), record);
         ExceptionTaken {
             kind,
             from,
@@ -812,7 +878,8 @@ impl<L: Levels> Cpu<L> {
         // target's SPAN is 0 (to EL2 only in the EL2&0 regime, which needs
         // FEAT_VHE) and otherwise kept; UAO is cleared; SSBS becomes the
         // target's DSSBS; DIT is kept.
-        let pan = self.pstate.pan || (to == El::El1 && self.implements(Feature::Pan) && sctlr & sctlr::SPAN == 0);
+        let pan = self.pstate.pan
+            || (to == El::El1 && self.implements(Feature::Pan) && sctlr & sctlr::SPAN == 0);
         let ssbs = self.implements(Feature::Ssbs) && sctlr & sctlr::DSSBS != 0;
         self.pstate = Pstate {
             n: self.pstate.n,
@@ -834,9 +901,48 @@ impl<L: Levels> Cpu<L> {
             ssbs,
         };
         self.pc = self.branch_addr((vbar & !0x7FF).wrapping_add(quadrant + kind.offset()));
+        self.history.jump(self.pc, self.retired);
         self.monitor.armed = false;
         self.activity = Activity::Running;
         self.pc
+    }
+
+    /// Arm `DebugTargetFrom` on a processor with no EL3 and no Secure
+    /// state: EL2 where `HCR_EL2.TGE` or `MDCR_EL2.TDE` routes debug
+    /// exceptions there, EL1 otherwise.
+    fn debug_target(&self) -> El {
+        if self.tge() || self.mdcr_any(MDCR_TDE) {
+            El::El2
+        } else {
+            El::El1
+        }
+    }
+
+    /// Arm `AArch64_GenerateDebugExceptionsFrom(from_el, ss, mask)` on a
+    /// processor with no EL3 and no Secure state, which is never in Debug
+    /// state (so not `Halted()`): unless the OS Lock or the OS Double Lock
+    /// is locked, debug exceptions are enabled from below their target
+    /// ([`Cpu::debug_target`]) and, with `MDSCR_EL1.KDE` set and `mask`
+    /// (PSTATE.D) clear, from the target itself.
+    fn debug_exceptions_enabled_from(&self, from_el: El, mask: bool) -> bool {
+        if self.sys.oslsr_el1 & OSLSR_OSLK != 0 || self.double_lock_status() {
+            return false;
+        }
+        let target = self.debug_target();
+        if from_el == target {
+            self.sys.mdscr_el1 & MDSCR_KDE != 0 && !mask
+        } else {
+            target > from_el
+        }
+    }
+
+    /// Arm `DoubleLockStatus`: with FEAT_DoubleLock, `OSDLR_EL1.DLK` set
+    /// and `DBGPRCR_EL1.CORENPDRQ` clear, the processor never being in
+    /// Debug state.
+    fn double_lock_status(&self) -> bool {
+        self.implements(Feature::DoubleLock)
+            && self.sys.osdlr_el1 & OSDLR_DLK != 0
+            && self.sys.dbgprcr_el1 & DBGPRCR_CORENPDRQ == 0
     }
 
     /// Arm `IllegalExceptionReturn` for a return from the current level
@@ -884,11 +990,24 @@ impl<L: Levels> Cpu<L> {
 
     /// `AArch64_ExceptionReturn(target, SPSR_ELx)` at the current level:
     /// what `ERET` does with `ELR_ELx` and `ERETAA`/`ERETAB` with `ELR_ELx`
-    /// authenticated. Returns the new PC.
+    /// authenticated. Returns the new PC. Every return, legal or not, clears
+    /// the local exclusive monitor and sets the Event Register
+    /// (`ClearExclusiveLocal`, `SendEventLocal`).
     pub(crate) fn exception_return(&mut self, target: u64) -> u64 {
         let spsr = self.return_regs().spsr;
         self.monitor.armed = false;
         let legal_target = self.exception_return_target(spsr);
+
+        // Arm `DebugExceptionReturnSS`: PSTATE.SS takes SPSR.SS only for a
+        // return, with `MDSCR_EL1.SS` set, from where debug exceptions are
+        // disabled to where they are enabled, with SPSR.D as the
+        // destination's mask; it is 0 otherwise. An illegal return's
+        // destination is the current EL.
+        let dest_el = legal_target.unwrap_or(self.pstate.el);
+        let ss = spsr & (1 << 21) != 0
+            && self.sys.mdscr_el1 & MDSCR_SS != 0
+            && !self.debug_exceptions_enabled_from(self.pstate.el, self.pstate.d)
+            && self.debug_exceptions_enabled_from(dest_el, spsr & (1 << 9) != 0);
 
         // SPSR_ELx holds no bit of a feature this processor lacks: an MSR
         // writes only `spsr_mask`'s bits, and a snapshot that holds others
@@ -898,7 +1017,7 @@ impl<L: Levels> Cpu<L> {
         p.z = spsr & (1 << 30) != 0;
         p.c = spsr & (1 << 29) != 0;
         p.v = spsr & (1 << 28) != 0;
-        p.ss = spsr & (1 << 21) != 0;
+        p.ss = ss;
         p.d = spsr & (1 << 9) != 0;
         p.a = spsr & (1 << 8) != 0;
         p.i = spsr & (1 << 7) != 0;

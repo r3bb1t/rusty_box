@@ -35,7 +35,7 @@ appended, never reordered, as in gen_unicorn.py.
 Needs an AArch64 Linux C compiler that links statically (CC, default
 aarch64-linux-gnu-gcc) and QEMU's user-mode emulator (QEMU, default
 qemu-aarch64). The vectors in the tree were made with QEMU 11.1.2 with
-docs/qemu-afp-vector-fabs-fneg.patch applied: QEMU's vector FABS and FNEG
+docs/patches/qemu/qemu-afp-vector-fabs-fneg.patch applied: QEMU's vector FABS and FNEG
 ignore FPCR.AH, and the `_afp` families set it (docs/qemu-upstream-bugs.md);
 the patch changes nothing with FPCR.AH = 0, so every other family is as
 QEMU 11.1.2 makes it.

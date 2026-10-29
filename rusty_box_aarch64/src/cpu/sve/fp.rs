@@ -18,8 +18,9 @@
 use super::{segment_base, Esize, Pv, Zv};
 use crate::cpu::exec::{bit, bits, sext, ExecResult, Flow};
 use crate::cpu::fp::{
-    bf16_mul_add_long, bf16_neg, fp_binary, fp_compare, fp_compare_holds, fp_convert, fp_convert_round_odd, fp_log_b, fp_mul_add,
-    fp_scale, fp_to_int, fp_unary, int_to_fp, FpBinary, FpCompare, FpConversion, FpEnv, FpType, FpUnary, IntWidth,
+    bf16_mul_add_long, bf16_neg, fp_binary, fp_compare, fp_compare_holds, fp_convert,
+    fp_convert_round_odd, fp_log_b, fp_mul_add, fp_scale, fp_to_int, fp_unary, int_to_fp, FpBinary,
+    FpCompare, FpConversion, FpEnv, FpType, FpUnary, IntWidth,
 };
 use crate::cpu::za::PairFormat;
 use crate::cpu::{Cpu, Levels};
@@ -196,7 +197,11 @@ impl IntConversion {
             (0b01, 0b11) => (Esize::D, FpType::Half, IntWidth::Bits64),
             _ => return None,
         };
-        Some(Self { container, ty, width })
+        Some(Self {
+            container,
+            ty,
+            width,
+        })
     }
 }
 
@@ -246,7 +251,11 @@ impl<L: Levels> Cpu<L> {
             return self.undefined(pc, insn);
         };
         let immediate = bit(insn, 20);
-        let opc = if immediate { bits(insn, 18, 16) } else { bits(insn, 19, 16) };
+        let opc = if immediate {
+            bits(insn, 18, 16)
+        } else {
+            bits(insn, 19, 16)
+        };
         let op = match opc {
             0b0000 => PredicatedOp::Forward(FpBinary::Add),
             0b0001 => PredicatedOp::Forward(FpBinary::Sub),
@@ -326,7 +335,11 @@ impl<L: Levels> Cpu<L> {
         let mut env = self.fp_env();
         let mut result = Zv::ZERO;
         for e in 0..es.elements(vl) {
-            result.set(e, es, fp_binary(op, ty, operand1.get(e, es), operand2.get(e, es), &mut env));
+            result.set(
+                e,
+                es,
+                fp_binary(op, ty, operand1.get(e, es), operand2.get(e, es), &mut env),
+            );
         }
         self.fp_commit(&env);
         self.set_z(d, vl, &result);
@@ -368,7 +381,11 @@ impl<L: Levels> Cpu<L> {
         let mut partial = [(0u64, 0usize); DEPTH];
         let mut depth = 0;
         for e in 0..es.elements(vl) {
-            let mut value = if mask.active(e, es) { operand.get(e, es) } else { identity };
+            let mut value = if mask.active(e, es) {
+                operand.get(e, es)
+            } else {
+                identity
+            };
             let mut run = 1;
             while depth > 0 && partial[depth - 1].1 == run {
                 depth -= 1;
@@ -415,7 +432,12 @@ impl<L: Levels> Cpu<L> {
                 _ => return self.undefined(pc, insn),
             }
         };
-        let (m, g, n, d) = (bits(insn, 20, 16), bits(insn, 12, 10), bits(insn, 9, 5), bits(insn, 3, 0));
+        let (m, g, n, d) = (
+            bits(insn, 20, 16),
+            bits(insn, 12, 10),
+            bits(insn, 9, 5),
+            bits(insn, 3, 0),
+        );
         let vl = self.sve_check()?;
         let es = esize(ty);
         let mask = self.p(g, vl);
@@ -526,7 +548,11 @@ impl<L: Levels> Cpu<L> {
         let Some(ty) = fp_type(bits(insn, 23, 22)) else {
             return self.undefined(pc, insn);
         };
-        let op = if bit(insn, 16) { FpUnary::RSqrtEstimate } else { FpUnary::RecipEstimate };
+        let op = if bit(insn, 16) {
+            FpUnary::RSqrtEstimate
+        } else {
+            FpUnary::RecipEstimate
+        };
         let (n, d) = (bits(insn, 9, 5), bits(insn, 4, 0));
         let vl = self.sve_check()?;
         let es = esize(ty);
@@ -554,10 +580,19 @@ impl<L: Levels> Cpu<L> {
         };
         let form = mul_add_form(bit(insn, 13) != bit(insn, 14), bit(insn, 14));
         let writes_addend = !bit(insn, 15);
-        let (r16, g, r5, r0) = (bits(insn, 20, 16), bits(insn, 12, 10), bits(insn, 9, 5), bits(insn, 4, 0));
+        let (r16, g, r5, r0) = (
+            bits(insn, 20, 16),
+            bits(insn, 12, 10),
+            bits(insn, 9, 5),
+            bits(insn, 4, 0),
+        );
         // FMLA: addend Zda (r0), multiplicand Zn (r5), multiplier Zm (r16).
         // FMAD: addend Za (r16), multiplicand Zdn (r0), multiplier Zm (r5).
-        let (addend, multiplicand, multiplier) = if writes_addend { (r0, r5, r16) } else { (r16, r0, r5) };
+        let (addend, multiplicand, multiplier) = if writes_addend {
+            (r0, r5, r16)
+        } else {
+            (r16, r0, r5)
+        };
         let vl = self.sve_check()?;
         let es = esize(ty);
         let mask = self.p(g, vl);
@@ -567,7 +602,11 @@ impl<L: Levels> Cpu<L> {
         let mut env = self.fp_env();
         let mut result = self.z(r0, vl);
         for e in (0..es.elements(vl)).filter(|&e| mask.active(e, es)) {
-            result.set(e, es, fp_mul_add(form, ty, a.get(e, es), n.get(e, es), m.get(e, es), &mut env));
+            result.set(
+                e,
+                es,
+                fp_mul_add(form, ty, a.get(e, es), n.get(e, es), m.get(e, es), &mut env),
+            );
         }
         self.fp_commit(&env);
         self.set_z(r0, vl, &result);
@@ -581,7 +620,11 @@ impl<L: Levels> Cpu<L> {
     /// single `i2` (20:19) and Z0-Z7, double `i1` (20) and Z0-Z15.
     pub(crate) fn exec_sve_fp_indexed(&mut self, insn: u32) -> ExecResult {
         let (ty, index, m) = match bits(insn, 23, 22) {
-            0b00 | 0b01 => (FpType::Half, (bits(insn, 22, 22) << 2) | bits(insn, 20, 19), bits(insn, 18, 16)),
+            0b00 | 0b01 => (
+                FpType::Half,
+                (bits(insn, 22, 22) << 2) | bits(insn, 20, 19),
+                bits(insn, 18, 16),
+            ),
             0b10 => (FpType::Single, bits(insn, 20, 19), bits(insn, 18, 16)),
             _ => (FpType::Double, bits(insn, 20, 20), bits(insn, 19, 16)),
         };
@@ -600,7 +643,14 @@ impl<L: Levels> Cpu<L> {
             let r = if multiply_only {
                 fp_binary(FpBinary::Mul, ty, op1.get(e, es), element2, &mut env)
             } else {
-                fp_mul_add(form, ty, accumulator.get(e, es), op1.get(e, es), element2, &mut env)
+                fp_mul_add(
+                    form,
+                    ty,
+                    accumulator.get(e, es),
+                    op1.get(e, es),
+                    element2,
+                    &mut env,
+                )
             };
             result.set(e, es, r);
         }
@@ -643,14 +693,34 @@ impl<L: Levels> Cpu<L> {
                     if sub_i {
                         element2 = env.neg(ty, element2);
                     }
-                    result.set(real, es, fp_binary(FpBinary::Add, ty, operand1.get(real, es), element2, &mut env));
+                    result.set(
+                        real,
+                        es,
+                        fp_binary(
+                            FpBinary::Add,
+                            ty,
+                            operand1.get(real, es),
+                            element2,
+                            &mut env,
+                        ),
+                    );
                 }
                 if mask.active(imag, es) {
                     let mut element2 = operand2.get(real, es);
                     if !sub_i {
                         element2 = env.neg(ty, element2);
                     }
-                    result.set(imag, es, fp_binary(FpBinary::Add, ty, operand1.get(imag, es), element2, &mut env));
+                    result.set(
+                        imag,
+                        es,
+                        fp_binary(
+                            FpBinary::Add,
+                            ty,
+                            operand1.get(imag, es),
+                            element2,
+                            &mut env,
+                        ),
+                    );
                 }
             }
             self.fp_commit(&env);
@@ -658,7 +728,12 @@ impl<L: Levels> Cpu<L> {
             return Ok(Flow::Next);
         }
         let rot = bits(insn, 14, 13);
-        let (m, g, n, da) = (bits(insn, 20, 16), bits(insn, 12, 10), bits(insn, 9, 5), bits(insn, 4, 0));
+        let (m, g, n, da) = (
+            bits(insn, 20, 16),
+            bits(insn, 12, 10),
+            bits(insn, 9, 5),
+            bits(insn, 4, 0),
+        );
         let vl = self.sve_check()?;
         let mask = self.p(g, vl);
         let op1 = self.z(n, vl);
@@ -674,7 +749,14 @@ impl<L: Levels> Cpu<L> {
                 if rotation.neg_r {
                     elt2_a = env.neg(ty, elt2_a);
                 }
-                let r = fp_mul_add(FusedMulAdd::Fmadd, ty, result.get(real, es), elt1_a, elt2_a, &mut env);
+                let r = fp_mul_add(
+                    FusedMulAdd::Fmadd,
+                    ty,
+                    result.get(real, es),
+                    elt1_a,
+                    elt2_a,
+                    &mut env,
+                );
                 result.set(real, es, r);
             }
             if mask.active(imag, es) {
@@ -682,7 +764,14 @@ impl<L: Levels> Cpu<L> {
                 if rotation.neg_i {
                     elt2_b = env.neg(ty, elt2_b);
                 }
-                let r = fp_mul_add(FusedMulAdd::Fmadd, ty, result.get(imag, es), elt1_a, elt2_b, &mut env);
+                let r = fp_mul_add(
+                    FusedMulAdd::Fmadd,
+                    ty,
+                    result.get(imag, es),
+                    elt1_a,
+                    elt2_b,
+                    &mut env,
+                );
                 result.set(imag, es, r);
             }
         }
@@ -719,8 +808,22 @@ impl<L: Levels> Cpu<L> {
             if rotation.neg_i {
                 elt2_b = env.neg(ty, elt2_b);
             }
-            let real = fp_mul_add(FusedMulAdd::Fmadd, ty, op3.get(2 * p, es), elt1_a, elt2_a, &mut env);
-            let imag = fp_mul_add(FusedMulAdd::Fmadd, ty, op3.get(2 * p + 1, es), elt1_a, elt2_b, &mut env);
+            let real = fp_mul_add(
+                FusedMulAdd::Fmadd,
+                ty,
+                op3.get(2 * p, es),
+                elt1_a,
+                elt2_a,
+                &mut env,
+            );
+            let imag = fp_mul_add(
+                FusedMulAdd::Fmadd,
+                ty,
+                op3.get(2 * p + 1, es),
+                elt1_a,
+                elt2_b,
+                &mut env,
+            );
             result.set(2 * p, es, real);
             result.set(2 * p + 1, es, imag);
         }
@@ -772,8 +875,12 @@ impl<L: Levels> Cpu<L> {
     /// rounds to odd, BFCVTNT is `FPConvertBF`.
     pub(crate) fn exec_sve_fp_convert_odd(&mut self, pc: u64, insn: u32) -> ExecResult {
         use crate::cpu::fp::Precision::{Double, Half, Single};
-        let narrow = |container, from, to| FpConversion::between(from, to).map(|c| (container, OddConvert::Narrow(c)));
-        let widen = |container, from, to| FpConversion::between(from, to).map(|c| (container, OddConvert::Widen(c)));
+        let narrow = |container, from, to| {
+            FpConversion::between(from, to).map(|c| (container, OddConvert::Narrow(c)))
+        };
+        let widen = |container, from, to| {
+            FpConversion::between(from, to).map(|c| (container, OddConvert::Widen(c)))
+        };
         let decoded = match (bits(insn, 23, 22), bits(insn, 17, 16)) {
             (0b00, 0b10) => Some((Esize::D, OddConvert::NarrowRoundOdd)),
             (0b10, 0b00) => narrow(Esize::S, Single, Half),
@@ -798,16 +905,24 @@ impl<L: Levels> Cpu<L> {
         let mut result = self.z(d, vl);
         for e in (0..es.elements(vl)).filter(|&e| mask.active(e, es)) {
             match convert {
-                OddConvert::Narrow(c) => result.set(2 * e + 1, half, fp_convert(c, operand.get(e, es), &mut env)),
+                OddConvert::Narrow(c) => {
+                    result.set(2 * e + 1, half, fp_convert(c, operand.get(e, es), &mut env))
+                }
                 OddConvert::NarrowRoundOdd => {
-                    result.set(2 * e + 1, half, fp_convert_round_odd(operand.get(e, es), &mut env));
+                    result.set(
+                        2 * e + 1,
+                        half,
+                        fp_convert_round_odd(operand.get(e, es), &mut env),
+                    );
                 }
                 OddConvert::NarrowBf16 => {
                     let rounding = env.rounding();
                     let r = sf::f32_to_bf16(operand.get(e, es) as u32, rounding, &mut env.status);
                     result.set(2 * e + 1, half, u64::from(r));
                 }
-                OddConvert::Widen(c) => result.set(e, es, fp_convert(c, operand.get(2 * e + 1, half), &mut env)),
+                OddConvert::Widen(c) => {
+                    result.set(e, es, fp_convert(c, operand.get(2 * e + 1, half), &mut env))
+                }
             }
         }
         self.fp_commit(&env);
@@ -834,7 +949,11 @@ impl<L: Levels> Cpu<L> {
         let subtract = bit(insn, 13);
         let top = usize::from(bit(insn, 10));
         let (m, index) = if indexed {
-            let index = if dot { bits(insn, 20, 19) } else { (bits(insn, 20, 19) << 1) | bits(insn, 11, 11) };
+            let index = if dot {
+                bits(insn, 20, 19)
+            } else {
+                (bits(insn, 20, 19) << 1) | bits(insn, 11, 11)
+            };
             (bits(insn, 18, 16), index as usize)
         } else {
             (bits(insn, 20, 16), 0)
@@ -860,10 +979,18 @@ impl<L: Levels> Cpu<L> {
                 }
             } else {
                 let element1 = op1.get(2 * e + top, Esize::H) as u16;
-                let s = if indexed { 2 * base + index } else { 2 * e + top };
+                let s = if indexed {
+                    2 * base + index
+                } else {
+                    2 * e + top
+                };
                 let element2 = op2.get(s, Esize::H) as u16;
                 if bf16 {
-                    let element1 = if subtract { bf16_neg(element1, &env) } else { element1 };
+                    let element1 = if subtract {
+                        bf16_neg(element1, &env)
+                    } else {
+                        element1
+                    };
                     bf16_mul_add_long(acc, element1, element2, &mut env)
                 } else {
                     let form = mul_add_form(subtract, false);

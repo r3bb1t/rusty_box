@@ -12,13 +12,13 @@
 // last two abort QEMU (scalar FABS's word, 0x5ef8f820, aborts; FNEG's,
 // 0x7ef8f820, executes); on 11.1.2 every one agrees with Arm. Open:
 // fneg_vector_ah (entry 12), which prints DIFFERS on 11.1.2 and agrees with
-// docs/qemu-afp-vector-fabs-fneg.patch; sve_fcmla_idx_ah (entry 13), which
+// docs/patches/qemu/qemu-afp-vector-fabs-fneg.patch; sve_fcmla_idx_ah (entry 13), which
 // prints DIFFERS on 11.1.2 and agrees with
-// docs/qemu-sve-fcmla-indexed-ah.patch; sve_fmad_size00 and
+// docs/patches/qemu/qemu-sve-fcmla-indexed-ah.patch; sve_fmad_size00 and
 // sve_fsubr_size00 (entry 14), which execute on 11.1.2 where Arm raises
-// SIGILL, the first until docs/qemu-sve-fmad-size00.patch, the second
+// SIGILL, the first until docs/patches/qemu/qemu-sve-fmad-size00.patch, the second
 // until master's f2bfb1cf; sme_ld1_vertical_tail (entry 15), which prints
-// DIFFERS on 11.1.2 and agrees with docs/qemu-sme-ld1-vertical-tail.patch;
+// DIFFERS on 11.1.2 and agrees with docs/patches/qemu/qemu-sme-ld1-vertical-tail.patch;
 // sme2_movt (entry 16), which executes on 11.1.2 and master where Arm
 // raises SIGILL.
 #include <signal.h>

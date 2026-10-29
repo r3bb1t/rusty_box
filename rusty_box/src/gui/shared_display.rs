@@ -74,6 +74,9 @@ pub struct SharedDisplay {
     pub stop_flag: Arc<AtomicBool>,
     /// Serial console output text (accumulated from serial port TX)
     pub serial_log: String,
+    /// Bytes ever appended to `serial_log`, counting those its cap has since
+    /// dropped: a reader that remembers this count takes exactly what is new.
+    pub serial_written: u64,
     /// ASCII bytes from GUI to inject into serial port RX (for console input)
     pub pending_serial_input: Vec<u8>,
     /// Guest key press/release events queued for the emulator thread. Rendered
@@ -143,6 +146,7 @@ impl SharedDisplay {
             startup_status: None,
             stop_flag: Arc::new(AtomicBool::new(false)),
             serial_log: String::new(),
+            serial_written: 0,
             pending_serial_input: Vec::new(),
             pending_keys: Vec::new(),
             vga_charmap: [Vec::new(), Vec::new()],
@@ -156,6 +160,7 @@ impl SharedDisplay {
         const CAP: usize = 64 * 1024;
         const KEPT: usize = 48 * 1024;
         self.serial_log.push_str(text);
+        self.serial_written = self.serial_written.saturating_add(text.len() as u64);
         if self.serial_log.len() > CAP {
             let mut cut = self.serial_log.len() - KEPT;
             while !self.serial_log.is_char_boundary(cut) {
@@ -165,11 +170,19 @@ impl SharedDisplay {
         }
     }
 
-    /// Queue a line of ASCII text for serial RX injection.
+    /// Queue bytes for serial RX injection as typed, a key at a time.
+    pub fn queue_serial_input(&mut self, bytes: &[u8]) {
+        self.pending_serial_input.extend_from_slice(bytes);
+    }
+
+    /// Queue a line of text for serial RX injection, ended as a terminal's
+    /// Enter key ends it: with a carriage return, the Enter of a UEFI
+    /// console (`CHAR_CARRIAGE_RETURN`) and of GRUB, which a Unix tty turns
+    /// into a newline (`ICRNL`).
     pub fn queue_serial_input_line(&mut self, input: &str) {
         self.pending_serial_input
             .extend_from_slice(input.as_bytes());
-        self.pending_serial_input.push(b'\n');
+        self.pending_serial_input.push(b'\r');
     }
 
     /// Drain pending serial RX bytes.
@@ -454,12 +467,12 @@ mod tests {
     }
 
     #[test]
-    fn serial_input_queue_appends_newline_and_drains() {
+    fn serial_input_queue_appends_enter_and_drains() {
         let mut shared = SharedDisplay::new();
 
         shared.queue_serial_input_line("boot");
 
-        assert_eq!(shared.drain_serial_input(), b"boot\n");
+        assert_eq!(shared.drain_serial_input(), b"boot\r");
         assert!(shared.drain_serial_input().is_empty());
     }
 

@@ -64,7 +64,11 @@ fn parse_args() -> Result<Args, String> {
             "--code" => a.code = value("--code")?,
             "--vars" => a.vars = Some(value("--vars")?),
             "--dtb" => a.dtb = Some(value("--dtb")?),
-            "--ram-mib" => a.ram_mib = value("--ram-mib")?.parse().map_err(|e| format!("--ram-mib: {e}"))?,
+            "--ram-mib" => {
+                a.ram_mib = value("--ram-mib")?
+                    .parse()
+                    .map_err(|e| format!("--ram-mib: {e}"))?
+            }
             "--persist-vars" => a.persist_vars = Some(value("--persist-vars")?),
             "-h" | "--help" => return Err(usage()),
             other => return Err(format!("unknown argument {other}\n{}", usage())),
@@ -108,6 +112,7 @@ fn boot() -> ExitCode {
     };
     let config = VirtConfig {
         ips,
+        cpu: args.run.cpu,
         debug_stops: args.run.debug_stops(),
         ..VirtConfig::DEFAULT
     };
@@ -131,7 +136,11 @@ struct Images<'a> {
 
 /// Build the machine `builder` describes, with `images`, and run it as
 /// `args` asks.
-fn run_firmware<L: Levels>(builder: MachineBuilder<'_, Firmware<'_>, L>, images: Images<'_>, args: &Args) -> ExitCode {
+fn run_firmware<L: Levels>(
+    builder: MachineBuilder<'_, Firmware<'_>, L>,
+    images: Images<'_>,
+    args: &Args,
+) -> ExitCode {
     let mut builder = match common::plug_devices(builder, &args.run) {
         Ok(builder) => builder,
         Err(e) => {

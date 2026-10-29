@@ -12,7 +12,7 @@
 #[cfg(feature = "gui-egui")]
 use std::collections::VecDeque;
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 #[cfg(feature = "gui-egui")]
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -21,13 +21,13 @@ use rusty_box_aarch64::boot::LinuxImage;
 #[cfg(feature = "gui-egui")]
 use rusty_box_aarch64::{Key, KeyAction, PointerInput, Refreshed};
 use rusty_box_aarch64::{
-    BatchOutcome, ClockHz, KeyboardInput, MachineBuilder, NoEl2, OwnedStorage, RamSize, Resolution, RunBudget,
+    BatchOutcome, ClockHz, Disk, KeyboardInput, MachineBuilder, NoEl2, OwnedStorage, RamSize, Resolution, RunBudget,
     StopReason, VirtConfig, VirtMachine,
 };
 #[cfg(feature = "gui-egui")]
 use rusty_box::gui::{host_input::AbsolutePointerEvent, shared_display::SharedDisplay};
 
-use crate::config::{ArmBoot, ArmVirtConfig};
+use crate::config::{ArmBoot, ArmVirtConfig, DiskAccess, VirtDisk};
 #[cfg(feature = "gui-egui")]
 use crate::debugger::{
     control::{AfterRun, BetweenRuns, RunControl, Task},
@@ -46,24 +46,20 @@ type Virt = VirtMachine<OwnedStorage, NoEl2>;
 ///
 /// The slice is the latency ceiling for every host action — "Power Off",
 /// "Pause" and a keystroke are all seen between slices — and the grain the
-/// pacing sleeps in. Ten milliseconds is under what a person notices on a key
-/// and a quarter of the frame interval.
+/// pacing sleeps in. Ten milliseconds is under what a person notices on a
+/// key; a run in a window steps by less when its pictures come faster
+/// ([`window_slice`]).
 const SLICE: Duration = Duration::from_millis(10);
-
-/// How often the window is redrawn: 25 frames a second, the rate the PC's
-/// display keeps (Bochs vga.cc `vga_update_interval`).
-#[cfg(feature = "gui-egui")]
-const FRAME_INTERVAL: Duration = Duration::from_millis(40);
-
-/// How often the status bar's instruction rate is brought up to date.
-#[cfg(feature = "gui-egui")]
-const IPS_INTERVAL: Duration = Duration::from_secs(1);
 
 /// How far guest time may fall behind the host's before the pacing stops
 /// owing it: past this the guest is measured from now, so a guest that was
 /// slower than real time for a while does not then race its timers to catch
 /// up.
 const MAX_LAG: Duration = Duration::from_millis(100);
+
+/// How often the status bar's instruction rate is brought up to date.
+#[cfg(feature = "gui-egui")]
+const IPS_INTERVAL: Duration = Duration::from_secs(1);
 
 /// How long host input waits for a guest that takes none of it before it is
 /// dropped: a guest that reads no input for that long (its driver not loaded
@@ -83,6 +79,11 @@ const INPUT_BACKLOG: usize = 1 << 16;
 struct BootFiles {
     boot: BootImage,
 }
+
+/// EDK2 for QEMU's `virt` board (retrage/edk2-nightly RELEASEAARCH64_QEMU_EFI.fd),
+/// shipped in the binary for [`ArmBoot::BuiltinFirmware`]; its licence is in
+/// `THIRD-PARTY-LICENSES`.
+const BUNDLED_EDK2: &[u8] = include_bytes!("../firmware/QEMU_EFI.fd");
 
 enum BootImage {
     Firmware {
@@ -106,19 +107,30 @@ struct VariableStore {
     image: Vec<u8>,
 }
 
+impl VariableStore {
+    /// The store at `path`, when a firmware boot names one.
+    fn read(path: Option<&Path>) -> Result<Option<Self>, RunError> {
+        match path {
+            Some(path) => Ok(Some(Self {
+                path: path.to_path_buf(),
+                image: read_required_file("UEFI variable store", path)?,
+            })),
+            None => Ok(None),
+        }
+    }
+}
+
 impl BootFiles {
     fn read(config: &ArmVirtConfig) -> Result<Self, RunError> {
         let boot = match &config.boot {
             ArmBoot::Unset => return Err(RunError::MissingVirtBoot),
             ArmBoot::Firmware { code, vars } => BootImage::Firmware {
                 code: read_required_file("firmware", code)?,
-                vars: match vars {
-                    Some(path) => Some(VariableStore {
-                        path: path.clone(),
-                        image: read_required_file("UEFI variable store", path)?,
-                    }),
-                    None => None,
-                },
+                vars: VariableStore::read(vars.as_deref())?,
+            },
+            ArmBoot::BuiltinFirmware { vars } => BootImage::Firmware {
+                code: BUNDLED_EDK2.to_vec(),
+                vars: VariableStore::read(vars.as_deref())?,
             },
             ArmBoot::Linux {
                 kernel,
@@ -175,6 +187,7 @@ const ERASED_FLASH: u8 = 0xFF;
 fn build(config: &ArmVirtConfig, files: &BootFiles) -> Result<Virt, RunError> {
     let virt_config = VirtConfig {
         ips: ClockHz::new(u64::from(config.ips)).ok_or(RunError::ZeroValue { field: "virt.ips" })?,
+        cpu: config.cpu,
         rtc_epoch_seconds: host_epoch_seconds(),
         ..VirtConfig::DEFAULT
     };
@@ -190,6 +203,9 @@ fn build(config: &ArmVirtConfig, files: &BootFiles) -> Result<Virt, RunError> {
     }
     if config.tablet {
         builder = builder.virtio_tablet();
+    }
+    if let Some(disk) = &config.disk {
+        builder = builder.virtio_disk(open_disk(disk)?);
     }
     let built = match &files.boot {
         BootImage::Firmware { code, vars } => {
@@ -223,6 +239,54 @@ fn build(config: &ArmVirtConfig, files: &BootFiles) -> Result<Virt, RunError> {
     built.map_err(|source| RunError::VirtBuild { source })
 }
 
+/// The disk `disk` names, opened as QEMU opens a raw image (block/file-posix.c
+/// `raw_open_common`): for reading and writing, or, when the guest may not
+/// write it (`readonly=on`), for reading alone, so a file the host lets this
+/// process only read can still be one.
+fn open_disk(disk: &VirtDisk) -> Result<Disk, RunError> {
+    let opened = std::fs::OpenOptions::new()
+        .read(true)
+        .write(!disk.access.is_read_only())
+        .open(&disk.path)
+        .and_then(Disk::file)
+        .map_err(|source| RunError::MediaAttach {
+            kind: "disk",
+            path: disk.path.clone(),
+            source,
+        })?;
+    Ok(match disk.access {
+        DiskAccess::ReadWrite => opened,
+        DiskAccess::ReadOnly => opened.read_only(),
+    })
+}
+
+/// Logs the host error the guest's disk last met, which the guest was told
+/// of as an I/O error (QEMU's `BLOCK_IO_ERROR` event, `rerror=report`).
+fn report_disk_error(machine: &mut Virt, config: &ArmVirtConfig) {
+    let (Some(disk), Some(named)) = (machine.disk_mut(), &config.disk) else {
+        return;
+    };
+    if let Some(error) = disk.take_io_error() {
+        tracing::warn!(
+            "the guest was told of an I/O error on its disk {}: {error}",
+            named.path.display()
+        );
+    }
+}
+
+/// Makes what the guest wrote to its disk durable, as QEMU does when it
+/// closes a drive (block.c `bdrv_close` flushing it).
+fn close_disk(machine: &mut Virt, config: &ArmVirtConfig) -> Result<(), RunError> {
+    report_disk_error(machine, config);
+    let (Some(disk), Some(named)) = (machine.disk_mut(), &config.disk) else {
+        return Ok(());
+    };
+    disk.flush().map_err(|source| RunError::DiskFlush {
+        path: named.path.clone(),
+        source,
+    })
+}
+
 /// What the RTC reads at power-on: the host's time, as QEMU's PL031 does
 /// with its default `-rtc base=utc`. A host clock set before 1970 gives the
 /// board's own epoch instead.
@@ -236,36 +300,24 @@ fn host_epoch_seconds() -> u64 {
     }
 }
 
-/// [`SLICE`] in ticks at `ips`, never none.
-fn slice_ticks(ips: u32) -> u64 {
-    (u64::from(ips) * SLICE.as_millis() as u64 / 1_000).max(1)
+/// `slice` of guest time in ticks at `ips`, never none.
+fn slice_ticks(ips: u32, slice: Duration) -> u64 {
+    let ticks = u128::from(ips) * slice.as_nanos() / 1_000_000_000;
+    u64::try_from(ticks).unwrap_or(u64::MAX).max(1)
 }
 
-/// Whether a slice's end lets the machine run on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Settled {
-    RunOn,
-    /// The guest switched itself off, or its only processor.
-    Over,
+/// The slice a run in a window steps by: [`SLICE`], or half the time
+/// between pictures when that is shorter, so a picture due is shown within
+/// half a frame of its time rather than at the next whole slice.
+#[cfg(feature = "gui-egui")]
+fn window_slice(refresh: crate::config::RefreshHz) -> Duration {
+    SLICE.min(refresh.interval() / 2)
 }
 
-/// How `outcome` leaves the machine. Every stop the runs here never ask for
-/// is refused rather than run past: there is no exit address, no debugging
-/// stop and no stop flag on the machine, and a guest's reset request resets
-/// it in place, as QEMU's does.
-fn settle(outcome: BatchOutcome) -> Result<Settled, RunError> {
-    match outcome.stop {
-        StopReason::BudgetExhausted | StopReason::Halted => Ok(Settled::RunOn),
-        StopReason::PoweredOff | StopReason::ProcessorOff => Ok(Settled::Over),
-        stop @ (StopReason::StopRequested
-        | StopReason::ExitReached
-        | StopReason::ResetRequested
-        | StopReason::Undefined(_)
-        | StopReason::BusFault { .. }) => Err(RunError::VirtStopped { stop }),
-    }
-}
-
-/// Keeps guest time from running ahead of the host's.
+/// Keeps guest time from running ahead of the host's. A waiting processor
+/// skips to its next timer deadline (`Virt::ticks_to_next_timer_deadline`),
+/// so without this an idle guest's clock races: a held key auto-repeats at
+/// the guest's rate for as long as the host takes to deliver its release.
 struct Pacer {
     since: Instant,
     since_ticks: u64,
@@ -303,6 +355,30 @@ impl Pacer {
     }
 }
 
+/// Whether a slice's end lets the machine run on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Settled {
+    RunOn,
+    /// The guest switched itself off, or its only processor.
+    Over,
+}
+
+/// How `outcome` leaves the machine. Every stop the runs here never ask for
+/// is refused rather than run past: there is no exit address, no debugging
+/// stop and no stop flag on the machine, and a guest's reset request resets
+/// it in place, as QEMU's does.
+fn settle(outcome: BatchOutcome) -> Result<Settled, RunError> {
+    match outcome.stop {
+        StopReason::BudgetExhausted | StopReason::Halted => Ok(Settled::RunOn),
+        StopReason::PoweredOff | StopReason::ProcessorOff => Ok(Settled::Over),
+        stop @ (StopReason::StopRequested
+        | StopReason::ExitReached
+        | StopReason::ResetRequested
+        | StopReason::Undefined(_)
+        | StopReason::BusFault { .. }) => Err(RunError::VirtStopped { stop }),
+    }
+}
+
 /// The guest's serial output since the last call.
 fn take_serial_output(machine: &mut Virt) -> Vec<u8> {
     match machine.serial(0) {
@@ -333,18 +409,23 @@ pub(crate) fn run_on_console(config: ArmVirtConfig, console: Console) -> Result<
         Console::Headless => None,
         Console::Terminal => Some(RawTerminal::enter()),
     };
-    let ran = drive_on_console(&mut machine, config.ips, terminal.as_mut());
+    let ran = drive_on_console(&mut machine, &config, terminal.as_mut());
     drop(terminal);
-    finish(&files, &machine, ran)
+    finish(&config, &files, &mut machine, ran)
 }
 
 /// [`run_on_console`]'s loop, until the guest switches the board off, the
 /// terminal leaves, or the board stops where no run asked it to.
-fn drive_on_console(machine: &mut Virt, ips: u32, mut terminal: Option<&mut RawTerminal>) -> Result<(), RunError> {
-    let slice = slice_ticks(ips);
-    let mut pacer = Pacer::new(machine, ips);
+fn drive_on_console(
+    machine: &mut Virt,
+    config: &ArmVirtConfig,
+    mut terminal: Option<&mut RawTerminal>,
+) -> Result<(), RunError> {
+    let slice = slice_ticks(config.ips, SLICE);
+    let mut pacer = Pacer::new(machine, config.ips);
     loop {
         let outcome = machine.step(RunBudget::Ticks(slice));
+        report_disk_error(machine, config);
         let output = take_serial_output(machine);
         if !output.is_empty() {
             mirror_to_stdout(&output);
@@ -362,20 +443,30 @@ fn drive_on_console(machine: &mut Virt, ips: u32, mut terminal: Option<&mut RawT
     }
 }
 
-/// A run's end, however it came: the variable store is written back
-/// whether or not the run failed — QEMU's flash keeps what the firmware
-/// programmed whatever ends the VM — and the run's own failure is the one
-/// reported when both fail.
-fn finish(files: &BootFiles, machine: &Virt, ran: Result<(), RunError>) -> Result<RunSummary, RunError> {
+/// A run's end, however it came: the variable store is written back and
+/// the disk made durable whether or not the run failed — QEMU's flash keeps
+/// what the firmware programmed, and its drives are flushed as they close,
+/// whatever ends the VM. Of the failures, the run's own is the one
+/// reported, then the variable store's, then the disk's; the others are
+/// logged.
+fn finish(
+    config: &ArmVirtConfig,
+    files: &BootFiles,
+    machine: &mut Virt,
+    ran: Result<(), RunError>,
+) -> Result<RunSummary, RunError> {
     let persisted = files.persist(machine);
-    match (ran, persisted) {
-        (Ok(()), Ok(())) => Ok(RunSummary {
+    let closed = close_disk(machine, config);
+    let mut failures = [ran.err(), persisted.err(), closed.err()].into_iter().flatten();
+    match failures.next() {
+        None => Ok(RunSummary {
             instructions_executed: Some(machine.instructions()),
         }),
-        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
-        (Err(error), Err(unwritten)) => {
-            tracing::warn!("{unwritten}");
-            Err(error)
+        Some(reported) => {
+            for logged in failures {
+                tracing::warn!("{logged}");
+            }
+            Err(reported)
         }
     }
 }
@@ -573,9 +664,9 @@ pub(crate) fn run_in_shell(
 ) -> Result<RunSummary, RunError> {
     let files = BootFiles::read(config)?;
     let mut machine = build(config, &files)?;
-    let mut window = ShellWindow::open(display, &machine);
-    let ran = drive_in_shell(&mut machine, config.ips, &mut window, control);
-    finish(&files, &machine, ran)
+    let mut window = ShellWindow::open(display, &machine, config.refresh);
+    let ran = drive_in_shell(&mut machine, config, &mut window, control);
+    finish(config, &files, &mut machine, ran)
 }
 
 /// [`run_in_shell`]'s loop, until the guest switches the board off, the
@@ -583,12 +674,12 @@ pub(crate) fn run_in_shell(
 #[cfg(feature = "gui-egui")]
 fn drive_in_shell(
     machine: &mut Virt,
-    ips: u32,
+    config: &ArmVirtConfig,
     window: &mut ShellWindow<'_>,
     control: &RunControl,
 ) -> Result<(), RunError> {
-    let slice = slice_ticks(ips);
-    let mut pacer = Pacer::new(machine, ips);
+    let slice = slice_ticks(config.ips, window_slice(config.refresh));
+    let mut pacer = Pacer::new(machine, config.ips);
     let stop_flag = Arc::clone(control.stop_flag());
     loop {
         if stop_flag.load(std::sync::atomic::Ordering::Relaxed) {
@@ -605,6 +696,7 @@ fn drive_in_shell(
             }
         }
         let outcome = machine.step(RunBudget::Ticks(slice));
+        report_disk_error(machine, config);
         window.pump_input(machine);
         window.present(machine, Presenting::WhenDue);
         match settle(outcome)? {
@@ -687,6 +779,8 @@ struct ShellWindow<'d> {
     serial_text: Utf8Carry,
     /// When the guest last took input, or had none waiting for it.
     input_taken: Instant,
+    /// The time between two pictures, as the VM's refresh rate sets it.
+    frame_interval: Duration,
     last_frame: Instant,
     last_rate: Instant,
     rate_from: u64,
@@ -694,9 +788,10 @@ struct ShellWindow<'d> {
 
 #[cfg(feature = "gui-egui")]
 impl<'d> ShellWindow<'d> {
-    /// Takes over `display` for a run of `machine`: the picture starts
-    /// empty until the guest draws one.
-    fn open(display: &'d Arc<Mutex<SharedDisplay>>, machine: &Virt) -> Self {
+    /// Takes over `display` for a run of `machine`, showing its picture
+    /// `refresh` times a second: the picture starts empty until the guest
+    /// draws one.
+    fn open(display: &'d Arc<Mutex<SharedDisplay>>, machine: &Virt, refresh: crate::config::RefreshHz) -> Self {
         if let Ok(mut shown) = display.lock() {
             shown.ips = 0;
             shown.framebuffer.fill(0);
@@ -709,6 +804,7 @@ impl<'d> ShellWindow<'d> {
             serial: VecDeque::new(),
             serial_text: Utf8Carry::default(),
             input_taken: Instant::now(),
+            frame_interval: refresh.interval(),
             last_frame: Instant::now(),
             last_rate: Instant::now(),
             rate_from: machine.instructions(),
@@ -789,7 +885,7 @@ impl<'d> ShellWindow<'d> {
                 }
             }
         }
-        if when == Presenting::Now || self.last_frame.elapsed() >= FRAME_INTERVAL {
+        if when == Presenting::Now || self.last_frame.elapsed() >= self.frame_interval {
             self.last_frame = Instant::now();
             if let Some(mut screen) = machine.display() {
                 if let Ok(mut shown) = self.display.lock() {
@@ -1022,9 +1118,112 @@ mod tests {
     }
 
     #[test]
-    fn a_slice_is_ten_milliseconds_of_guest_time_and_never_none() {
-        assert_eq!(slice_ticks(50_000_000), 500_000);
-        assert_eq!(slice_ticks(1), 1);
+    fn a_slice_is_its_guest_time_in_ticks_and_never_none() {
+        assert_eq!(slice_ticks(50_000_000, SLICE), 500_000);
+        assert_eq!(slice_ticks(1, SLICE), 1);
+    }
+
+    /// At 60 pictures a second a window steps by half a frame, so each
+    /// picture shows within half a frame of its time; at a slow rate it
+    /// steps by the usual slice.
+    #[cfg(feature = "gui-egui")]
+    #[test]
+    fn a_window_steps_by_half_a_frame_when_that_is_shorter() {
+        let at = |hz| window_slice(crate::config::RefreshHz::new(hz).expect("a rate"));
+        assert_eq!(at(60), Duration::from_secs(1) / 120);
+        assert_eq!(at(25), SLICE);
+    }
+
+    /// The board is built with the processor the VM names: its `MIDR_EL1`,
+    /// and the counter frequency it reads at reset.
+    #[test]
+    fn the_board_runs_the_processor_the_vm_names() {
+        let kernel = ScratchFile::new("Image", &test_images::power_off_kernel());
+        for model in rusty_box_aarch64::CpuModel::ALL {
+            let config = ArmVirtConfig {
+                cpu: model,
+                ..kernel_board(&kernel)
+            };
+            let files = BootFiles::read(&config).expect("the kernel");
+            let machine = build(&config, &files).expect("the machine");
+            let midr = machine.sysreg_read(rusty_box_aarch64::SysReg::MIDR_EL1);
+            let cntfrq = machine.sysreg_read(rusty_box_aarch64::SysReg::CNTFRQ_EL0);
+            let want = match model {
+                rusty_box_aarch64::CpuModel::CortexA57 => (0x411F_D070, 62_500_000),
+                rusty_box_aarch64::CpuModel::Armv9p2 => (0x000F_0520, 1_000_000_000),
+            };
+            assert_eq!((midr, cntfrq), (Ok(want.0), Ok(want.1)), "{model:?}");
+        }
+    }
+
+    /// The board's virtio-blk is over the file the VM names: the guest sees
+    /// its length in whole sectors, the last one padded, and may write it
+    /// unless the VM makes it read-only.
+    #[test]
+    fn the_board_runs_on_the_disk_the_vm_names() {
+        let kernel = ScratchFile::new("Image", &test_images::power_off_kernel());
+        let image = ScratchFile::new("disk.img", &[0xA5; 3 * 512 + 1]);
+        for (access, device) in [
+            (DiskAccess::ReadWrite, rusty_box_aarch64::Access::ReadWrite),
+            (DiskAccess::ReadOnly, rusty_box_aarch64::Access::ReadOnly),
+        ] {
+            let config = ArmVirtConfig {
+                disk: Some(VirtDisk {
+                    path: image.0.clone(),
+                    access,
+                }),
+                ..kernel_board(&kernel)
+            };
+            let files = BootFiles::read(&config).expect("the kernel");
+            let machine = build(&config, &files).expect("the machine");
+            let disk = machine.disk().expect("a disk");
+            assert_eq!((disk.sectors(), disk.access()), (4, device), "{access:?}");
+        }
+    }
+
+    /// A file the host lets this process only read can be a read-only disk:
+    /// the image is opened for reading alone. (A process that permissions do
+    /// not bind, root's, could open it for writing too.)
+    #[test]
+    fn a_file_this_process_may_only_read_is_a_read_only_disk() {
+        let kernel = ScratchFile::new("Image", &test_images::power_off_kernel());
+        let image = ScratchFile::new("readable.img", &[0; 512]);
+        let writable = std::fs::metadata(&image.0).expect("the image").permissions();
+        let mut readable = writable.clone();
+        readable.set_readonly(true);
+        std::fs::set_permissions(&image.0, readable).expect("make the image read-only");
+        let config = ArmVirtConfig {
+            disk: Some(VirtDisk {
+                path: image.0.clone(),
+                access: DiskAccess::ReadOnly,
+            }),
+            ..kernel_board(&kernel)
+        };
+
+        let files = BootFiles::read(&config).expect("the kernel");
+        let built = build(&config, &files).map(|machine| machine.disk().map(|disk| disk.access()));
+        std::fs::set_permissions(&image.0, writable).expect("give the image back its permissions");
+        assert_eq!(built.expect("the machine"), Some(rusty_box_aarch64::Access::ReadOnly));
+    }
+
+    #[test]
+    fn a_disk_that_cannot_be_opened_is_refused_with_its_path() {
+        let kernel = ScratchFile::new("Image", &test_images::power_off_kernel());
+        let missing = std::env::temp_dir().join(format!("rusty-box-gui-virt-{}-absent.img", std::process::id()));
+        let config = ArmVirtConfig {
+            disk: Some(VirtDisk {
+                path: missing.clone(),
+                access: DiskAccess::ReadOnly,
+            }),
+            ..kernel_board(&kernel)
+        };
+
+        match run_on_console(config, Console::Headless) {
+            Err(RunError::MediaAttach { kind: "disk", path, source }) => {
+                assert_eq!((path, source.kind()), (missing, io::ErrorKind::NotFound));
+            }
+            other => panic!("not refused as a disk: {other:?}"),
+        }
     }
 
     /// A built machine whose serial console takes the terminal's keys.
@@ -1130,7 +1329,7 @@ mod tests {
     fn window_over<'d>(config: &ArmVirtConfig, display: &'d Arc<Mutex<SharedDisplay>>) -> (Virt, ShellWindow<'d>) {
         let files = BootFiles::read(config).expect("the kernel");
         let machine = build(config, &files).expect("the machine");
-        let window = ShellWindow::open(display, &machine);
+        let window = ShellWindow::open(display, &machine, config.refresh);
         (machine, window)
     }
 

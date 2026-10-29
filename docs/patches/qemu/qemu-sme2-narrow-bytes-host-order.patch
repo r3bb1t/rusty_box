@@ -1,0 +1,24 @@
+--- a/target/arm/tcg/sme_helper.c
++++ b/target/arm/tcg/sme_helper.c
+@@ -1783,7 +1783,7 @@
+ }
+
+-SQCVT4(sme2_sqcvt_sb, int32_t, int8_t, H4, H2, do_ssat_b)
+-SQCVT4(sme2_uqcvt_sb, uint32_t, uint8_t, H4, H2, do_usat_b)
+-SQCVT4(sme2_sqcvtu_sb, int32_t, uint8_t, H4, H2, do_usat_b)
++SQCVT4(sme2_sqcvt_sb, int32_t, int8_t, H4, H1, do_ssat_b)
++SQCVT4(sme2_uqcvt_sb, uint32_t, uint8_t, H4, H1, do_usat_b)
++SQCVT4(sme2_sqcvtu_sb, int32_t, uint8_t, H4, H1, do_usat_b)
+
+ SQCVT4(sme2_sqcvt_dh, int64_t, int16_t, H8, H2, do_ssat_h)
+@@ -1843,7 +1843,7 @@
+ }
+
+-SQRSHR4(sme2_sqrshr_sb, int32_t, int8_t, H4, H2, do_srshr, do_ssat_b)
+-SQRSHR4(sme2_uqrshr_sb, uint32_t, uint8_t, H4, H2, do_urshr, do_usat_b)
+-SQRSHR4(sme2_sqrshru_sb, int32_t, uint8_t, H4, H2, do_srshr, do_usat_b)
++SQRSHR4(sme2_sqrshr_sb, int32_t, int8_t, H4, H1, do_srshr, do_ssat_b)
++SQRSHR4(sme2_uqrshr_sb, uint32_t, uint8_t, H4, H1, do_urshr, do_usat_b)
++SQRSHR4(sme2_sqrshru_sb, int32_t, uint8_t, H4, H1, do_srshr, do_usat_b)
+
+ SQRSHR4(sme2_sqrshr_dh, int64_t, int16_t, H8, H2, do_srshr, do_ssat_h)

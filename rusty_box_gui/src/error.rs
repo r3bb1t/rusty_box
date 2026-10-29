@@ -86,6 +86,12 @@ pub enum RunError {
     #[error("virt.firmware and virt.kernel cannot both be set: the board boots one or the other")]
     ConflictingVirtBoot,
 
+    #[error("virt.builtin_firmware and {setting} cannot both be set: the board boots one firmware or kernel")]
+    ConflictingBuiltinFirmware { setting: &'static str },
+
+    #[error("virt.display.refresh_hz = {hz} is outside 1-{max}", max = crate::config::RefreshHz::MAX)]
+    InvalidRefreshRate { hz: u32 },
+
     #[error("{setting} needs virt.kernel: firmware loads its own kernel")]
     VirtSettingNeedsKernel { setting: &'static str },
 
@@ -94,6 +100,9 @@ pub enum RunError {
 
     #[error("{setting} has nothing to go with: set virt.firmware or virt.kernel")]
     VirtSettingWithoutBoot { setting: &'static str },
+
+    #[error("{setting} has no disk to go with: set virt.disk")]
+    VirtSettingWithoutDisk { setting: &'static str },
 
     #[error(
         "virt.display needs both a width and a height, neither zero; got {} x {}",
@@ -132,6 +141,9 @@ pub enum RunError {
 
     #[error("failed to write the UEFI variable store back to {}: {source}", path.display())]
     VariableStoreWrite { path: PathBuf, source: io::Error },
+
+    #[error("failed to make what the guest wrote to the disk {} durable: {source}", path.display())]
+    DiskFlush { path: PathBuf, source: io::Error },
 
     #[error("{field} must be greater than zero")]
     ZeroValue { field: &'static str },

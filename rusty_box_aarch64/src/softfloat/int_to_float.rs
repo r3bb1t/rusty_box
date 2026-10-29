@@ -66,11 +66,7 @@ pub(crate) fn i64_to_f32(a: i64, status: &mut SoftFloatStatus) -> Float32 {
 pub(crate) fn i64_to_f64(a: i64, status: &mut SoftFloatStatus) -> Float64 {
     let sign = a < 0;
     if (a & 0x7FFF_FFFF_FFFF_FFFF) == 0 {
-        return if sign {
-            pack_to_f64(true, 0x43E, 0)
-        } else {
-            0
-        };
+        return if sign { pack_to_f64(true, 0x43E, 0) } else { 0 };
     }
     let abs_a = if sign {
         (a as u64).wrapping_neg()

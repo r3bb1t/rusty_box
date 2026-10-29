@@ -68,7 +68,14 @@ const F_DISCARD: u64 = 1 << 13;
 const F_WRITE_ZEROES: u64 = 1 << 14;
 
 /// The device's own feature bits over a disk the guest may write.
-pub const FEATURES: u64 =F_SEG_MAX | F_GEOMETRY | F_BLK_SIZE | F_WCE | F_TOPOLOGY | F_CONFIG_WCE | F_DISCARD | F_WRITE_ZEROES;
+pub const FEATURES: u64 = F_SEG_MAX
+    | F_GEOMETRY
+    | F_BLK_SIZE
+    | F_WCE
+    | F_TOPOLOGY
+    | F_CONFIG_WCE
+    | F_DISCARD
+    | F_WRITE_ZEROES;
 
 /// `struct virtio_blk_config` up to the end of `write_zeroes_may_unmap`.
 pub const CONFIG_LEN: usize = 57;
@@ -341,7 +348,8 @@ impl Block {
         let status_at = Self::status_byte(vdev, chain).ok_or(QueueFault::BlockMissingHeaders)?;
         let kind = u32::from_le_bytes([header[0], header[1], header[2], header[3]]);
         let sector = u64::from_le_bytes([
-            header[8], header[9], header[10], header[11], header[12], header[13], header[14], header[15],
+            header[8], header[9], header[10], header[11], header[12], header[13], header[14],
+            header[15],
         ]);
         let status = match kind & !(T_OUT | T_BARRIER) {
             T_IN if kind & T_OUT != 0 => self.write(vdev, chain, sector),
@@ -355,7 +363,9 @@ impl Block {
                     Status::Unsupported
                 }
             }
-            T_ZONE_OPEN | T_ZONE_CLOSE | T_ZONE_FINISH | T_ZONE_RESET | T_ZONE_RESET_ALL => Status::Unsupported,
+            T_ZONE_OPEN | T_ZONE_CLOSE | T_ZONE_FINISH | T_ZONE_RESET | T_ZONE_RESET_ALL => {
+                Status::Unsupported
+            }
             T_SCSI_CMD => Self::scsi(vdev, chain),
             T_GET_ID => {
                 let room = (chain.writable_len - 1).min(ID_BYTES);
@@ -417,7 +427,10 @@ impl Block {
     fn range_ok(&self, sector: u64, size: u64) -> bool {
         let count = size / SECTOR_SIZE;
         let total = self.disk.sectors();
-        count <= REQUEST_MAX_SECTORS && size.is_multiple_of(BLOCK_SIZE) && sector <= total && count <= total - sector
+        count <= REQUEST_MAX_SECTORS
+            && size.is_multiple_of(BLOCK_SIZE)
+            && sector <= total
+            && count <= total - sector
     }
 
     /// A read: the disk into the device-writable buffers, all but the
@@ -516,7 +529,9 @@ impl Block {
     /// QEMU `virtio_blk_handle_discard_write_zeroes`. Discarding is ignored,
     /// as QEMU's drives ignore it unless given `discard=unmap`.
     fn discard_write_zeroes(&mut self, range: &[u8; RANGE_LEN], write_zeroes: bool) -> Status {
-        let sector = u64::from_le_bytes([range[0], range[1], range[2], range[3], range[4], range[5], range[6], range[7]]);
+        let sector = u64::from_le_bytes([
+            range[0], range[1], range[2], range[3], range[4], range[5], range[6], range[7],
+        ]);
         let sectors = u32::from_le_bytes([range[8], range[9], range[10], range[11]]);
         let flags = u32::from_le_bytes([range[12], range[13], range[14], range[15]]);
         if u64::from(sectors) > REQUEST_MAX_SECTORS {
@@ -530,7 +545,12 @@ impl Block {
             return Status::Unsupported;
         }
         if write_zeroes {
-            if self.disk.access() == Access::ReadOnly || self.disk.write_zeroes(DiskOffset::of_sector(sector), bytes).is_err() {
+            if self.disk.access() == Access::ReadOnly
+                || self
+                    .disk
+                    .write_zeroes(DiskOffset::of_sector(sector), bytes)
+                    .is_err()
+            {
                 return Status::IoError;
             }
             return self.written();

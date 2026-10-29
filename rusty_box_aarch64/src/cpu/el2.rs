@@ -21,7 +21,7 @@
 use rusty_box_core::snap::{SnapRead, SnapResult, SnapWrite};
 use rusty_box_core::SnapError;
 
-use super::features::{Feature, Features};
+use super::features::{Feature, Features, Implementation};
 use super::sysreg::{smcr_mask, DISR_MASK};
 use super::{id, Cpu, El};
 
@@ -180,10 +180,11 @@ impl El2Regs {
     /// processor's own identity until EL2 programs another, and
     /// `CNTHCTL_EL2`, whose `EL1PCTEN` and `EL1PCEN` reset to 1, so EL1's
     /// accesses to the physical counter and timer do not trap until EL2
-    /// asks. Which bits are RES1 depends on `features`: the RES1 bits of a
-    /// feature the processor implements are that feature's field, zero out
-    /// of reset.
-    pub(crate) const fn reset(features: Features) -> Self {
+    /// asks. Which bits are RES1 depends on the features `imp` implements:
+    /// the RES1 bits of a feature the processor implements are that
+    /// feature's field, zero out of reset.
+    pub(crate) const fn reset(imp: Implementation) -> Self {
+        let features = imp.features;
         Self {
             hcr: HCR_RES1,
             sctlr: SCTLR_EL2_RES1,
@@ -207,7 +208,7 @@ impl El2Regs {
             afsr0: 0,
             afsr1: 0,
             tpidr: 0,
-            vpidr: id::MIDR_EL1,
+            vpidr: imp.midr,
             vmpidr: id::MPIDR_EL1,
             smcr: 0,
             cnthctl: CNTHCTL_EL1PCTEN | CNTHCTL_EL1PCEN,
@@ -385,7 +386,12 @@ pub(crate) const fn cptr_el2_mask(features: Features) -> u64 {
 /// `CPTR_EL2`'s RES1 bits on a processor implementing `features`: the bits
 /// every processor has, and `TSM` without FEAT_SME.
 pub(crate) const fn cptr_el2_res1(features: Features) -> u64 {
-    CPTR_EL2_RES1_BASE | if features.has(Feature::Sme) { 0 } else { CPTR_TSM }
+    CPTR_EL2_RES1_BASE
+        | if features.has(Feature::Sme) {
+            0
+        } else {
+            CPTR_TSM
+        }
 }
 
 // ----- MDCR_EL2 -----
@@ -510,8 +516,10 @@ pub(crate) const fn has_contextidr_el2(features: Features) -> bool {
 /// `slot`, and [`El2Reg`] with [`El2Reg::ALL`], from one list of each
 /// register's variant and field, so that no register can be left out of
 /// the registers or a snapshot. The encodings that reach them are
-/// `Cpu::el2_storage`'s (`CNTHP_CTL_EL2`, whose `ISTATUS` is computed, the
-/// timer's), which `tests/unit/sysreg_spec.rs` holds to Arm's accessors.
+/// `sysreg.rs`'s `el2_encoding`, an exhaustive match on [`El2Reg`] that a
+/// register added here does not compile without (`CNTHP_CTL_EL2`, whose
+/// `ISTATUS` is computed, is the timer's), and which
+/// `tests/unit/sysreg_spec.rs` holds to Arm's accessors.
 macro_rules! el2_registers {
     ($($(#[$doc:meta])* $variant:ident => $field:ident,)*) => {
         /// The EL2 registers, as `MSR` leaves them (each through its mask).
@@ -699,12 +707,12 @@ pub struct El2State {
 }
 
 impl El2State {
-    /// The state out of reset on a processor implementing `features`: `SP_EL2`
+    /// The state out of reset on a processor implementing `imp`: `SP_EL2`
     /// zero and the registers as [`El2Regs::reset`] leaves them.
-    pub(crate) const fn reset(features: Features) -> Self {
+    pub(crate) const fn reset(imp: Implementation) -> Self {
         Self {
             sp_el2: 0,
-            regs: El2Regs::reset(features),
+            regs: El2Regs::reset(imp),
         }
     }
 }
@@ -728,7 +736,7 @@ impl<L: Levels> Cpu<L> {
     /// or for a processor without FEAT_EL2 the nothing it holds. A register
     /// holding a value no `MSR` on this processor leaves is refused.
     pub(crate) fn read_el2<R: SnapRead>(&self, r: &mut R) -> Result<L::State, SnapError> {
-        let mut state = L::State::keep(El2State::reset(self.imp.features));
+        let mut state = L::State::keep(El2State::reset(self.imp));
         let Some(read) = state.get_mut() else {
             return Ok(state);
         };
@@ -737,7 +745,9 @@ impl<L: Levels> Cpu<L> {
         for reg in El2Reg::ALL {
             let value = r.read_u64()?;
             if reg.kept(self.imp.features, spsr_mask, value) != value {
-                return Err(SnapError::Invalid("snapshot's EL2 register holds bits this processor cannot set"));
+                return Err(SnapError::Invalid(
+                    "snapshot's EL2 register holds bits this processor cannot set",
+                ));
             }
             *read.regs.slot(reg) = value;
         }
@@ -753,10 +763,12 @@ impl<L: Levels> Cpu<L> {
     }
 
     /// Arm `EL2Enabled()`: with no EL3 and no Secure state, whether the
-    /// processor implements EL2.
+    /// processor implements EL2, [`Cpu::have_el2`]. The two stay apart so
+    /// that each rule names the function its pseudocode calls; they part
+    /// only with EL3 or Secure EL2, which this processor lacks.
     #[inline(always)]
     pub(crate) const fn el2_enabled(&self) -> bool {
-        L::EL2
+        self.have_el2()
     }
 
     /// The EL2 registers as the rules read them: the processor's own with
@@ -859,7 +871,11 @@ mod tests {
     fn the_masks_keep_exactly_their_features_fields() {
         let a57 = Implementation::CORTEX_A57.with_levels::<WithEl2>().features;
         assert_eq!(hcr_mask(a57), 0x0000_0003_7FFF_7FFF);
-        assert_eq!(hcr_mask(a57) & (HCR_RES1 | (1 << 15)), 0, "RW and TID0 are not writable");
+        assert_eq!(
+            hcr_mask(a57) & (HCR_RES1 | (1 << 15)),
+            0,
+            "RW and TID0 are not writable"
+        );
         assert_eq!(sctlr_el2_mask(a57) & SCTLR_EL2_RES1, 0);
         assert_eq!(cptr_el2_mask(a57) & cptr_el2_res1(a57), 0);
         assert_eq!(cptr_el2_res1(a57), 0x33FF, "TSM is RES1 without FEAT_SME");

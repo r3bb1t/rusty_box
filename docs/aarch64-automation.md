@@ -1,7 +1,8 @@
 # Driving an AArch64 guest from Rust
 
 `rusty_box_aarch64` runs QEMU's `virt` board — a Cortex-A57-shaped ARMv8.0
-processor, a GICv2, a PL011 UART, flash, an RTC and a power button, and,
+processor or an Armv9.2 one with SME2, a GICv2, a PL011 UART, flash, an RTC
+and a power button, and,
 when asked, QEMU's virtio display, keyboard and tablet — without a human at
 the console. A program builds a machine, boots UEFI firmware or a Linux
 kernel on it, reads the serial console or the screen, types at it, points
@@ -54,7 +55,12 @@ assert_eq!(machine.ticks(), 0);
 A Linux kernel, loaded the way QEMU's `-kernel` loads one without firmware:
 the `Image` at its load offset, the initramfs above it, the device tree with
 `/chosen` filled in at the 2 MiB boundary after the initramfs, and the
-processor at the kernel's entry with `x0` pointing at the tree.
+processor at the kernel's entry with `x0` pointing at the tree. The UART is
+left as firmware leaves a console it has set up — 115200 baud, eight data
+bits, no parity, one stop bit, FIFOs on, transmitter and receiver enabled
+(`boot::DIRECT_BOOT_CONSOLE_BAUD`) — where QEMU leaves it at reset: a PL011
+sends nothing until it is enabled, and `earlycon=pl011` writes to it as it
+finds it.
 
 ```rust,no_run
 use rusty_box_aarch64::boot::{LinuxImage, SERIAL_CONSOLE_COMMAND_LINE};
@@ -73,11 +79,48 @@ let mut machine = MachineBuilder::new(VirtConfig::default())
 Or nothing at all: a bare machine starts at the base of RAM, for a host that
 writes its own code there (section 5).
 
-The device tree is QEMU's own for this board unless `device_tree(..)` gives
-another; either way its memory node is set to the RAM the machine has, its
-`/psci` node's `method` (where it has one) to the conduit the firmware
-answers on, and `machine.device_tree()` returns what the guest was given.
-`boot::fdt::property` reads a property back out of it.
+The device tree is QEMU's own for this board, its processor node made the
+processor's, unless `device_tree(..)` gives another, which keeps its own
+processor node, as QEMU's `-dtb` does. Either way, as QEMU's
+`arm_load_dtb` edits a tree, its memory nodes are replaced by one for the
+RAM the machine has, `/chosen` is added where it has none, and its `/psci`
+node is replaced by QEMU's, whose `method` names the conduit the firmware
+answers on; `machine.device_tree()` returns what the guest was given. `boot::fdt::property` reads a property back out
+of it.
+
+**The processor.** `VirtConfig::cpu` picks it: `CpuModel::CortexA57`, the
+default, QEMU's `cortex-a57` cut down to EL0 and EL1 (and EL2 with
+`with_el2()`); or
+`CpuModel::Armv9p2`, an Armv9.2 processor with SME and SME2 (and no SVE)
+that reports itself as a software model. The model decides what the ID
+registers advertise, `MIDR_EL1`, the system counter's frequency (62.5 MHz,
+as QEMU runs the Cortex-A57's, or 1 GHz, as Armv8.6 and later require) and
+the device tree's `compatible` for the processor. `CpuModel::name` spells
+a model for a command line or a file (`"cortex-a57"`, `"armv9.2"`), and
+`str::parse` reads one back, or an `UnknownCpuModel` that names the models
+there are.
+
+```rust
+# std::thread::Builder::new().stack_size(16 << 20).spawn(|| {
+use rusty_box_aarch64::boot::fdt;
+use rusty_box_aarch64::{CpuModel, MachineBuilder, RamSize, SysReg, VirtConfig};
+
+let config = VirtConfig {
+    cpu: CpuModel::Armv9p2,
+    ..VirtConfig::default()
+};
+let machine = MachineBuilder::new(config)
+    .ram(RamSize::mib(16).expect("a size the board maps"))
+    .firmware(&[0; 4])
+    .build()?;
+assert_eq!(machine.sysreg_read(SysReg::MIDR_EL1), Ok(0x000F_0520));
+assert_eq!(machine.sysreg_read(SysReg::CNTFRQ_EL0), Ok(1_000_000_000));
+let compatible = fdt::property(machine.device_tree(), "cpus/cpu@0", "compatible")?;
+assert_eq!(compatible, Some(&b"arm,armv8\0"[..]));
+# Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+# }).expect("a thread for the example").join().expect("the example runs")?;
+# Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+```
 
 **Virtualization.** `with_el2()` gives the processor EL2, the level a
 hypervisor runs at (QEMU's `virtualization=on`): it resets there, and PSCI is
@@ -103,12 +146,14 @@ assert_eq!(machine.pstate().el, El::El2);
 **Owned or lent.** `build()` gives a machine that owns its memory
 (`VirtMachine<OwnedStorage, L>`, movable to another thread). `build_in` runs in
 memory the caller lends, and borrows the firmware and kernel images where
-they are (either way the machine itself, without its RAM, is about half a
-megabyte — mostly the processor's decode cache — and is built and returned
-by value, so build and run it on a thread with a few megabytes of stack
+they are (either way the machine itself, without its RAM, is built and
+returned by value: about 170 KiB with `alloc`, whose trace cache is on the
+heap, and about half a megabyte without, whose smaller trace cache is in
+place — so build and run it on a thread with a few megabytes of stack
 rather than on a 1 MiB Windows main thread; the examples use 16 MiB):
 
 ```rust
+# std::thread::Builder::new().stack_size(16 << 20).spawn(|| {
 use rusty_box_aarch64::{MachineBuilder, MemoryLoan, RamSize, VirtConfig};
 
 let mut ram = vec![0u8; 16 << 20];
@@ -117,7 +162,9 @@ let machine = MachineBuilder::new(VirtConfig::default())
     .bare()
     .build_in(MemoryLoan { ram: &mut ram, vars: &mut [] })?;
 # drop(machine);
-# Ok::<(), rusty_box_aarch64::BuildError>(())
+# Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+# }).expect("a thread for the example").join().expect("the example runs")?;
+# Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
 ```
 
 **Limits.** RAM is a whole number of pages from 64 KiB up to the 255 GiB the
@@ -129,7 +176,11 @@ reads as erased flash. `BuildError` says what did not fit.
 ## 2. The serial console
 
 `virt`'s console is its PL011 UART, and `serial(0)` borrows it — the only
-port the board has, so `serial(1)` is `None`.
+port the board has, so `serial(1)` is `None`. The UART sends what the guest
+writes once the guest has enabled its transmitter (`UARTCR.UARTEN` and
+`TXE`), and takes input once it has enabled its receiver (`UARTEN` and
+`RXE`): firmware and Linux do, a directly booted kernel finds both on, and
+code on a bare machine has to switch them on itself.
 
 ```rust,no_run
 # use rusty_box_aarch64::{MachineBuilder, VirtConfig};
@@ -193,6 +244,7 @@ implements `KeyboardInput`, the trait the x86 machine's PS/2 keyboard
 implements too:
 
 ```rust
+# std::thread::Builder::new().stack_size(16 << 20).spawn(|| {
 use rusty_box_aarch64::{Key, KeyAction, KeyboardInput, Typed};
 
 /// Log in on any machine's keyboard, x86 or AArch64.
@@ -217,7 +269,9 @@ assert!(keyboard.key(Key::CtrlL, KeyAction::Release));
 // Bytes no key produces, as a paste would send them.
 let pasted = keyboard.bytes("é".as_bytes());
 assert_eq!(pasted, 2, "both bytes of the character fit");
-# Ok::<(), Box<dyn std::error::Error>>(())
+# Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+# }).expect("a thread for the example").join().expect("the example runs")?;
+# Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
 ```
 
 **Limits.** `type_text` maps a US layout and reports a character with no key
@@ -235,6 +289,7 @@ byte.
 A run is bounded by a budget and ends with a reason.
 
 ```rust
+# std::thread::Builder::new().stack_size(16 << 20).spawn(|| {
 # use rusty_box_aarch64::{MachineBuilder, MemoryLoan, RamSize, VirtConfig};
 use rusty_box_aarch64::{RunBudget, StopReason};
 # let mut ram = vec![0u8; 16 << 20];
@@ -259,7 +314,9 @@ match outcome.stop {
 if outcome.is_terminal() {
     println!("done");
 }
-# Ok::<(), Box<dyn std::error::Error>>(())
+# Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+# }).expect("a thread for the example").join().expect("the example runs")?;
+# Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
 ```
 
 A waiting machine says how far it may skip, and a stop handle ends a run
@@ -288,6 +345,7 @@ if outcome.stop == StopReason::StopRequested {
 The power controls:
 
 ```rust
+# std::thread::Builder::new().stack_size(16 << 20).spawn(|| {
 # use rusty_box_aarch64::{MachineBuilder, MemoryLoan, RamSize, VirtConfig};
 use rusty_box_aarch64::PowerState;
 # let mut ram = vec![0u8; 16 << 20];
@@ -301,7 +359,9 @@ machine.power().press_power_button();
 // A system reset: firmware from its reset vector, or a direct kernel loaded
 // afresh with its initrd and device tree.
 machine.power().reset();
-# Ok::<(), Box<dyn std::error::Error>>(())
+# Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+# }).expect("a thread for the example").join().expect("the example runs")?;
+# Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
 ```
 
 **Limits.** An instruction budget retires exactly that many instructions,
@@ -317,6 +377,7 @@ inputs give the same run however it is sliced.
 A bare machine is the shortest path to running your own code:
 
 ```rust
+# std::thread::Builder::new().stack_size(16 << 20).spawn(|| {
 use rusty_box_aarch64::board::RAM_BASE;
 use rusty_box_aarch64::{MachineBuilder, MemoryLoan, RamSize, Reg, StopReason, VirtConfig};
 
@@ -337,7 +398,9 @@ assert_eq!(machine.reg_read(Reg::X0), 43);
 
 // Exit addresses end every run before the instruction there executes.
 machine.set_exits(&[RAM_BASE + 4])?;
-# Ok::<(), Box<dyn std::error::Error>>(())
+# Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+# }).expect("a thread for the example").join().expect("the example runs")?;
+# Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
 ```
 
 Physical and virtual addresses are different verbs. A virtual access walks
@@ -347,6 +410,7 @@ TLB, so a mapping the guest rewrote without a `TLBI` already shows its new
 translation here:
 
 ```rust
+# std::thread::Builder::new().stack_size(16 << 20).spawn(|| {
 # use rusty_box_aarch64::board::RAM_BASE;
 # use rusty_box_aarch64::{MachineBuilder, MemoryLoan, RamSize, VirtConfig};
 # let mut ram = vec![0u8; 16 << 20];
@@ -358,7 +422,9 @@ machine.mem_read(RAM_BASE, &mut buf)?;           // guest-physical RAM
 machine.virt_read(RAM_BASE, &mut buf)?;          // through the page tables
 let phys = machine.virt_to_phys(RAM_BASE)?;      // walk without reading
 assert_eq!(phys, RAM_BASE, "the MMU is off out of reset");
-# Ok::<(), Box<dyn std::error::Error>>(())
+# Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+# }).expect("a thread for the example").join().expect("the example runs")?;
+# Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
 ```
 
 Registers are named by `Reg`, SIMD&FP registers by `VReg`, and system
@@ -371,6 +437,7 @@ reads the processor's own value (`MIDR_EL1`, `MPIDR_EL1`), not the one
 `VPIDR_EL2` or `VMPIDR_EL2` gives EL1:
 
 ```rust
+# std::thread::Builder::new().stack_size(16 << 20).spawn(|| {
 # use rusty_box_aarch64::{MachineBuilder, MemoryLoan, RamSize, VirtConfig};
 use rusty_box_aarch64::{Reg, SysReg, SysRegRefusal, VReg};
 # let mut ram = vec![0u8; 16 << 20];
@@ -391,7 +458,9 @@ match machine.sysreg_write(SysReg::MIDR_EL1, 0) {
 // The whole architectural state at one moment.
 let state = machine.cpu_snapshot();
 println!("pc={:#x} at EL{}", state.pc, state.pstate.el.index());
-# Ok::<(), Box<dyn std::error::Error>>(())
+# Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+# }).expect("a thread for the example").join().expect("the example runs")?;
+# Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
 ```
 
 **Limits.** `mem_read` and `mem_write` reach RAM only; a device window is
@@ -406,6 +475,7 @@ An observer is a type, not a callback list: it rides in the machine's own
 type, so a machine that observes nothing pays nothing.
 
 ```rust
+# std::thread::Builder::new().stack_size(16 << 20).spawn(|| {
 use rusty_box_aarch64::instrumentation::{ExceptionTaken, MemoryAccess};
 use rusty_box_aarch64::{Instrumentation, MachineBuilder, MemoryLoan, RamSize, VirtConfig};
 
@@ -437,7 +507,9 @@ let mut machine = MachineBuilder::new(VirtConfig::default())
 let outcome = machine.step(rusty_box_aarch64::RunBudget::Instructions(8));
 assert_eq!(outcome.progress.instructions(), Some(8));
 println!("{} instructions", machine.instrumentation().executed);
-# Ok::<(), Box<dyn std::error::Error>>(())
+# Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+# }).expect("a thread for the example").join().expect("the example runs")?;
+# Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
 ```
 
 The hooks: `before_execution`, `after_execution`, `branch` and
@@ -445,6 +517,16 @@ The hooks: `before_execution`, `after_execution`, `branch` and
 exception, IRQ and FIQ taken (with the vector, the syndrome and the fault
 address); `memory_access` for every data access that completes on the
 physical bus. Each defaults to nothing.
+
+An observer also says, by `Instrumentation::EXECUTION`, whether it must hear
+of every instruction. `Execution::Skippable` lets the machine fast-forward
+instructions whose only effect is the passage of time: the whole iterations of
+a loop that waits for the system counter to pass a value, as firmware delays
+do, which it jumps over exactly, leaving the state running them would leave.
+The observer is then not called for those instructions, and it is called as
+usual for every instruction the machine does run. The default is
+`Execution::Heard`, which keeps every hook call; `NoInstrumentation` is
+`Execution::Skippable`.
 
 ---
 
@@ -455,6 +537,7 @@ the variable store — written to any `SnapWrite` and read back from any
 `SnapRead`. A `Vec<u8>` is one, and so is a byte slice.
 
 ```rust
+# std::thread::Builder::new().stack_size(16 << 20).spawn(|| {
 # use rusty_box_aarch64::{MachineBuilder, MemoryLoan, RamSize, VirtConfig};
 # let mut ram = vec![0u8; 16 << 20];
 # let mut machine = MachineBuilder::new(VirtConfig::default())
@@ -464,7 +547,9 @@ let mut image = Vec::new();
 machine.save_snapshot(&mut image)?;
 // ... run on, then go back:
 machine.restore_snapshot(&mut image.as_slice())?;
-# Ok::<(), Box<dyn std::error::Error>>(())
+# Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+# }).expect("a thread for the example").join().expect("the example runs")?;
+# Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
 ```
 
 **Limits.** Firmware and kernel images are recorded by hash, not copied, so
@@ -489,6 +574,7 @@ A board with them has non-legacy transports (QEMU's
 which Linux's drivers refuse on a legacy transport.
 
 ```rust
+# std::thread::Builder::new().stack_size(16 << 20).spawn(|| {
 use rusty_box_aarch64::{
     MachineBuilder, NullDisplay, PointerInput, PointerPos, Refreshed, Resolution, VirtConfig,
 };
@@ -517,7 +603,9 @@ let mut pointer = machine.pointer().expect("built with a tablet");
 let middle = PointerPos::from_pixel(512, 384, 1024, 768);
 // Nothing has driven the tablet on this bare machine, so it takes nothing.
 assert!(!pointer.move_to(middle));
-# Ok::<(), Box<dyn std::error::Error>>(())
+# Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+# }).expect("a thread for the example").join().expect("the example runs")?;
+# Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
 ```
 
 `refresh` pushes what changed since the last refresh into any
@@ -550,6 +638,7 @@ host memory (`Disk::memory`) or a host file read and written in place
 (`Disk::file`, with `std`), and the machine keeps it.
 
 ```rust
+# std::thread::Builder::new().stack_size(16 << 20).spawn(|| {
 use rusty_box_aarch64::{Disk, MachineBuilder, VirtConfig};
 
 let mut machine = MachineBuilder::new(VirtConfig::default())
@@ -566,7 +655,9 @@ assert_eq!(disk.memory_bytes().map(<[u8]>::len), Some(1 << 20));
 let disk = machine.disk_mut().expect("built with a disk");
 assert!(disk.take_io_error().is_none());
 disk.flush()?;
-# Ok::<(), Box<dyn std::error::Error>>(())
+# Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+# }).expect("a thread for the example").join().expect("the example runs")?;
+# Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
 ```
 
 The device is the one QEMU makes for a drive given every default: one queue
@@ -630,6 +721,40 @@ An AArch64 machine's runs always end with an outcome, so its `Error` is
 | Registers | `X86Reg`, MSRs by index | `Reg`, `VReg`, `SysReg` by encoding |
 | Observer | `Instrumentation` | `Instrumentation` (its own hooks) |
 | Snapshots | `std::io` streams | `SnapWrite` / `SnapRead` (no `std` needed) |
+
+## Keeping the interpreter's speed
+
+`cargo xtask ci` holds the trace loop's speed with its step "aarch64
+hot-loop host instructions", which runs after the AArch64 machine's tests.
+It builds `aarch64_perfbench` and runs its five loops (`alu`, `memcpy`,
+`fnv`, `fp`, and `mmio`, whose every instruction takes the
+per-instruction path), plain and hooked, under valgrind's callgrind,
+counting the host instructions executed inside `VirtMachine::run_until`.
+Each count is compared with the one committed in
+`xtask/aarch64_hot_loop_baseline.txt`, and a rise of more than 0.5% fails
+the step; a fall of more than 0.5% is reported, so that the baseline can
+be refreshed to keep the gain. The ten runs take about four minutes on
+four cores.
+
+The count is deterministic, which a timing on a shared host is not, but it
+belongs to one compiler and one host: the baseline names the `rustc`
+commit, the host target and whether the host has fused multiply-add (the
+`fp` loop calls glibc's `fma`, which picks its code by it). The step is
+skipped, with the reason printed, where valgrind does not run — it does
+not exist on Windows — and where the compiler or host differs from the
+baseline's. It counts instructions, not time: a change that keeps the
+count but runs slower (a cache miss, a mispredicted branch) passes it.
+
+To refresh the baseline — after a change that is meant to move the counts,
+or with a new compiler — run, on a Linux host with valgrind:
+
+```text
+cargo xtask hot-loop-baseline
+```
+
+It counts the ten runs, prints them against the old baseline when the
+toolchain matches, and rewrites the file; commit it with the change that
+moved the counts.
 
 ## Where to look next
 

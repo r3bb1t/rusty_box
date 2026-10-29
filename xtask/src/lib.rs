@@ -13,6 +13,7 @@ use adb_client::{server::ADBServer, server_device::ADBServerDevice, ADBDeviceExt
 use std::net::{Ipv4Addr, SocketAddrV4};
 
 pub mod ci;
+pub mod hot_loop;
 
 const CMDLINE_TOOLS_VERSION: &str = "14742923";
 const ANDROID_PLATFORM: &str = "android-34";
@@ -95,6 +96,9 @@ pub enum XtaskCommand {
     Android(AndroidCommand),
     Ci(ci::CiCommand),
     PerfBaseline(ci::PerfBaselineCommand),
+    /// Count the AArch64 trace loop's host instructions and write them as
+    /// the baseline the ci step holds them to.
+    HotLoopBaseline,
 }
 
 struct AndroidContext {
@@ -245,6 +249,7 @@ where
         "android" => parse_android_args(&args[1..]).map(XtaskCommand::Android),
         "ci" => ci::parse_ci_args(&args[1..]).map(XtaskCommand::Ci),
         "perf-baseline" => Ok(XtaskCommand::PerfBaseline(ci::PerfBaselineCommand::default())),
+        "hot-loop-baseline" => Ok(XtaskCommand::HotLoopBaseline),
         _ => Err(format!("unknown xtask command {:?}\n{}", args[0], usage())),
     }
 }
@@ -340,6 +345,7 @@ fn execute(command: XtaskCommand) -> Result<(), String> {
         XtaskCommand::Android(command) => execute_android(command),
         XtaskCommand::Ci(command) => ci::execute_ci(command),
         XtaskCommand::PerfBaseline(command) => ci::execute_perf_baseline(command),
+        XtaskCommand::HotLoopBaseline => ci::execute_hot_loop_baseline(),
     }
 }
 
@@ -1236,7 +1242,7 @@ fn jdk_program(host: HostOs, tool: &str) -> PathBuf {
 
 fn usage() -> String {
     format!(
-        "Usage:\n  cargo xtask android build [--sdk PATH] [--skip-sdk]\n  cargo xtask android run [--sdk PATH] [--skip-sdk] [--screenshot PATH]\n  cargo xtask android screenshot [PATH] [--sdk PATH] [--skip-sdk]\n  cargo xtask ci [--full] [--skip-boot]\n  cargo xtask perf-baseline"
+        "Usage:\n  cargo xtask android build [--sdk PATH] [--skip-sdk]\n  cargo xtask android run [--sdk PATH] [--skip-sdk] [--screenshot PATH]\n  cargo xtask android screenshot [PATH] [--sdk PATH] [--skip-sdk]\n  cargo xtask ci [--full] [--skip-boot]\n  cargo xtask perf-baseline\n  cargo xtask hot-loop-baseline"
     )
 }
 

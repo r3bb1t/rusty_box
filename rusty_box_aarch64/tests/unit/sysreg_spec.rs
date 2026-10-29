@@ -37,11 +37,12 @@ use rusty_box_core::{ClockHz, VmClock};
 use serde_json::Value;
 
 use super::features::{Feature, Implementation};
-use super::{
-    id, sme, Activity, Cpu, CpuConfig, El, ExclusiveMonitor, Levels, NoEl2, Pstate, Step, SysRegs, WithEl2,
-};
 use super::pauth::PacKeys;
 use super::wait::EventRegister;
+use super::{
+    id, sme, Activity, Cpu, CpuConfig, El, ExclusiveMonitor, Levels, NoEl2, Pstate, Step, SysRegs,
+    WithEl2,
+};
 use crate::bus::{AccessWidth, BusFault, PhysAddr, PhysBus};
 use crate::instrumentation::NoInstrumentation;
 
@@ -64,31 +65,99 @@ const RT_PAIR: u32 = 0;
 /// The choices Arm leaves to an implementation (`ImpDefBool`) that the
 /// accessors this processor reaches ask about, with this processor's
 /// answer and why.
-const IMPLEMENTATION_DEFINED: [(&str, bool, &str); 22] = [
-    ("Implementation can reset into AArch32 state", false, "there is no AArch32"),
+const IMPLEMENTATION_DEFINED: [(&str, bool, &str); 23] = [
+    (
+        "Implementation can reset into AArch32 state",
+        false,
+        "there is no AArch32",
+    ),
     ("IMPLEMENTED_TRCIMSPEC<n>", false, "there is no trace unit"),
-    ("AArch64-AMEVCNTR1_EL0[n] is fixed", false, "there are no activity monitors"),
+    (
+        "AArch64-AMEVCNTR1_EL0[n] is fixed",
+        false,
+        "there are no activity monitors",
+    ),
     (
         "IMPLEMENTED_ACTLR_ELx accessor behavior",
         false,
         "the ACTLR_ELx encodings reach the register they name; the choice \
          matters only with FEAT_VHE or FEAT_NV",
     ),
-    ("ID_AA64DFR2_EL1 trapped by HCR_EL2.TID3", true, "TID3 traps every ID register of the ID space"),
-    ("ID_AA64FPFR0_EL1 trapped by HCR_EL2.TID3", true, "TID3 traps every ID register of the ID space"),
-    ("ID_AA64ISAR2_EL1 trapped by HCR_EL2.TID3", true, "TID3 traps every ID register of the ID space"),
-    ("ID_AA64ISAR3_EL1 trapped by HCR_EL2.TID3", true, "TID3 traps every ID register of the ID space"),
-    ("ID_AA64MMFR2_EL1 trapped by HCR_EL2.TID3", true, "TID3 traps every ID register of the ID space"),
-    ("ID_AA64MMFR3_EL1 trapped by HCR_EL2.TID3", true, "TID3 traps every ID register of the ID space"),
-    ("ID_AA64MMFR4_EL1 trapped by HCR_EL2.TID3", true, "TID3 traps every ID register of the ID space"),
-    ("ID_AA64PFR2_EL1 trapped by HCR_EL2.TID3", true, "TID3 traps every ID register of the ID space"),
-    ("ID_AA64SMFR0_EL1 trapped by HCR_EL2.TID3", true, "TID3 traps every ID register of the ID space"),
-    ("ID_AA64ZFR0_EL1 trapped by HCR_EL2.TID3", true, "TID3 traps every ID register of the ID space"),
-    ("ID_DFR1_EL1 trapped by HCR_EL2.TID3", true, "TID3 traps every ID register of the ID space"),
-    ("ID_ISAR6_EL1 trapped by HCR_EL2.TID3", true, "TID3 traps every ID register of the ID space"),
-    ("ID_MMFR4_EL1 trapped by HCR_EL2.TID3", true, "TID3 traps every ID register of the ID space"),
-    ("ID_MMFR5_EL1 trapped by HCR_EL2.TID3", true, "TID3 traps every ID register of the ID space"),
-    ("ID_PFR2_EL1 trapped by HCR_EL2.TID3", true, "TID3 traps every ID register of the ID space"),
+    (
+        "ID_AA64DFR2_EL1 trapped by HCR_EL2.TID3",
+        true,
+        "TID3 traps every ID register of the ID space",
+    ),
+    (
+        "ID_AA64FPFR0_EL1 trapped by HCR_EL2.TID3",
+        true,
+        "TID3 traps every ID register of the ID space",
+    ),
+    (
+        "ID_AA64ISAR2_EL1 trapped by HCR_EL2.TID3",
+        true,
+        "TID3 traps every ID register of the ID space",
+    ),
+    (
+        "ID_AA64ISAR3_EL1 trapped by HCR_EL2.TID3",
+        true,
+        "TID3 traps every ID register of the ID space",
+    ),
+    (
+        "ID_AA64MMFR2_EL1 trapped by HCR_EL2.TID3",
+        true,
+        "TID3 traps every ID register of the ID space",
+    ),
+    (
+        "ID_AA64MMFR3_EL1 trapped by HCR_EL2.TID3",
+        true,
+        "TID3 traps every ID register of the ID space",
+    ),
+    (
+        "ID_AA64MMFR4_EL1 trapped by HCR_EL2.TID3",
+        true,
+        "TID3 traps every ID register of the ID space",
+    ),
+    (
+        "ID_AA64PFR2_EL1 trapped by HCR_EL2.TID3",
+        true,
+        "TID3 traps every ID register of the ID space",
+    ),
+    (
+        "ID_AA64SMFR0_EL1 trapped by HCR_EL2.TID3",
+        true,
+        "TID3 traps every ID register of the ID space",
+    ),
+    (
+        "ID_AA64ZFR0_EL1 trapped by HCR_EL2.TID3",
+        true,
+        "TID3 traps every ID register of the ID space",
+    ),
+    (
+        "ID_DFR1_EL1 trapped by HCR_EL2.TID3",
+        true,
+        "TID3 traps every ID register of the ID space",
+    ),
+    (
+        "ID_ISAR6_EL1 trapped by HCR_EL2.TID3",
+        true,
+        "TID3 traps every ID register of the ID space",
+    ),
+    (
+        "ID_MMFR4_EL1 trapped by HCR_EL2.TID3",
+        true,
+        "TID3 traps every ID register of the ID space",
+    ),
+    (
+        "ID_MMFR5_EL1 trapped by HCR_EL2.TID3",
+        true,
+        "TID3 traps every ID register of the ID space",
+    ),
+    (
+        "ID_PFR2_EL1 trapped by HCR_EL2.TID3",
+        true,
+        "TID3 traps every ID register of the ID space",
+    ),
     (
         "When DC is treated as NOP, data cache maintenance operations are trapped",
         true,
@@ -103,6 +172,13 @@ const IMPLEMENTATION_DEFINED: [(&str, bool, &str); 22] = [
         "HCR_EL2.TERR,SCR_EL3.TERR/TWERR=0 when ERRIDR_EL1.NUM==0",
         false,
         "HCR_EL2.TERR traps the error record registers though there are none",
+    ),
+    (
+        "Trapped by MDCR_EL2.TDOSA",
+        true,
+        "without FEAT_DoubleLock, TDOSA traps OSDLR_EL1 as it traps the other \
+         OS-related registers and as it does with the feature, as QEMU's \
+         OSDLR_EL1 (`access_tdosa`) is trapped",
     ),
 ];
 
@@ -126,15 +202,18 @@ fn text<'a>(v: &'a Value, key: &str) -> &'a str {
 }
 
 fn list<'a>(v: &'a Value, key: &str) -> &'a [Value] {
-    v.get(key).and_then(Value::as_array).map_or(&[], Vec::as_slice)
+    v.get(key)
+        .and_then(Value::as_array)
+        .map_or(&[], Vec::as_slice)
 }
 
 /// Arm's `Registers.json`, read once.
 fn registers_json() -> &'static Value {
     static ROOT: OnceLock<Value> = OnceLock::new();
     ROOT.get_or_init(|| {
-        let dir = std::env::var_os(SPEC_DIR_VAR)
-            .unwrap_or_else(|| panic!("set {SPEC_DIR_VAR} to the unpacked AARCHMRS directory (holding Registers.json)"));
+        let dir = std::env::var_os(SPEC_DIR_VAR).unwrap_or_else(|| {
+            panic!("set {SPEC_DIR_VAR} to the unpacked AARCHMRS directory (holding Registers.json)")
+        });
         let path = PathBuf::from(dir).join("Registers.json");
         let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
         serde_json::from_slice(&bytes).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
@@ -229,7 +308,13 @@ fn parts(value: Option<&'static Value>, width: u32) -> Vec<Part> {
             let start = slice["start"].as_u64().unwrap_or(0) as u32;
             let w = slice["width"].as_u64().unwrap_or(0) as u32;
             assert_eq!(w, width, "{value}");
-            (0..w).rev().map(|i| Part::Var { name, bit: start + i }).collect()
+            (0..w)
+                .rev()
+                .map(|i| Part::Var {
+                    name,
+                    bit: start + i,
+                })
+                .collect()
         }
         "Values.Group" => {
             // `'011':p[3]`, `m[4]:'00'`, `'10':m[4:3]`.
@@ -256,7 +341,9 @@ fn parts(value: Option<&'static Value>, width: u32) -> Vec<Part> {
                     let (name, bits) = piece.split_once('[').unwrap_or_else(|| panic!("{value}"));
                     let bits = bits.trim_end_matches(']');
                     let (hi, lo) = match bits.split_once(':') {
-                        Some((h, l)) => (h.parse::<u32>().unwrap_or(0), l.parse::<u32>().unwrap_or(0)),
+                        Some((h, l)) => {
+                            (h.parse::<u32>().unwrap_or(0), l.parse::<u32>().unwrap_or(0))
+                        }
                         None => {
                             let b = bits.parse::<u32>().unwrap_or(0);
                             (b, b)
@@ -273,7 +360,11 @@ fn parts(value: Option<&'static Value>, width: u32) -> Vec<Part> {
 }
 
 fn literal_parts(quoted: &str) -> Vec<Part> {
-    quoted.trim_matches('\'').chars().map(Part::Literal).collect()
+    quoted
+        .trim_matches('\'')
+        .chars()
+        .map(Part::Literal)
+        .collect()
 }
 
 /// The instruction words of one accessor encoding, each with the values of
@@ -282,7 +373,10 @@ fn expand(instr: &'static str, encoding: &'static Value) -> Vec<(u32, Vec<(&'sta
     let fields = &encoding["encodings"];
     let get = |name: &str| fields.get(name);
     let order: [(&str, u32); 5] = [("op0", 2), ("op1", 3), ("CRn", 4), ("CRm", 4), ("op2", 3)];
-    let all: Vec<Vec<Part>> = order.iter().map(|&(name, width)| parts(get(name), width)).collect();
+    let all: Vec<Vec<Part>> = order
+        .iter()
+        .map(|&(name, width)| parts(get(name), width))
+        .collect();
     // Free bits: every `x` literal and every distinct variable bit.
     let mut free: Vec<Part> = Vec::new();
     for part in all.iter().flatten() {
@@ -297,7 +391,10 @@ fn expand(instr: &'static str, encoding: &'static Value) -> Vec<(u32, Vec<(&'sta
             free.push(part.clone());
         }
     }
-    let x_count = free.iter().filter(|p| matches!(p, Part::Literal('x'))).count();
+    let x_count = free
+        .iter()
+        .filter(|p| matches!(p, Part::Literal('x')))
+        .count();
     let mut out = Vec::new();
     for combo in 0u64..(1u64 << free.len()) {
         // Assign each free bit; `x` literals are taken in order.
@@ -463,7 +560,10 @@ enum Outcome {
 enum V {
     Bool(bool),
     Int(i128),
-    Bits { value: u64, width: u32 },
+    Bits {
+        value: u64,
+        width: u32,
+    },
     /// A bitstring constant with don't-care bits, as Arm writes it.
     Pattern(String),
     El(u8),
@@ -499,7 +599,10 @@ fn constant(quoted: &str) -> V {
         let value = u64::from_str_radix(body, 2).unwrap_or_else(|e| panic!("{quoted}: {e}"));
         return V::bits(value, body.len() as u32);
     }
-    V::Int(body.parse::<i128>().unwrap_or_else(|e| panic!("{quoted}: {e}")))
+    V::Int(
+        body.parse::<i128>()
+            .unwrap_or_else(|e| panic!("{quoted}: {e}")),
+    )
 }
 
 fn equal(a: &V, b: &V) -> bool {
@@ -512,7 +615,9 @@ fn equal(a: &V, b: &V) -> bool {
             })
         }
         (V::Bits { value: x, .. }, V::Bits { value: y, .. }) => x == y,
-        (V::Int(x), V::Bits { value, .. }) | (V::Bits { value, .. }, V::Int(x)) => *x == i128::from(*value),
+        (V::Int(x), V::Bits { value, .. }) | (V::Bits { value, .. }, V::Int(x)) => {
+            *x == i128::from(*value)
+        }
         (V::Open, _) | (_, V::Open) => panic!("comparing a value the pseudocode leaves open"),
         _ => a == b,
     }
@@ -538,7 +643,9 @@ impl Eval<'_> {
 
     fn feature(&self, name: &str) -> bool {
         match name {
-            "FEAT_AA64" | "FEAT_AA64EL0" | "FEAT_AA64EL1" | "FEAT_EL0" | "FEAT_EL1" | "v8Ap0" => true,
+            "FEAT_AA64" | "FEAT_AA64EL0" | "FEAT_AA64EL1" | "FEAT_EL0" | "FEAT_EL1" | "v8Ap0" => {
+                true
+            }
             "FEAT_AA64EL3" | "FEAT_EL3" => false,
             // As the processor advertises it: `ID_AA64DFR0_EL1.DoubleLock`
             // 0b0000 is the OS Double Lock implemented.
@@ -559,10 +666,9 @@ impl Eval<'_> {
     }
 
     fn register(&self, name: &str) -> u64 {
-        *self
-            .values
-            .get(name)
-            .unwrap_or_else(|| panic!("the accessors read {name}, which the test does not read the value of"))
+        *self.values.get(name).unwrap_or_else(|| {
+            panic!("the accessors read {name}, which the test does not read the value of")
+        })
     }
 
     fn hcr_bit(&self, field: &str) -> bool {
@@ -591,7 +697,9 @@ impl Eval<'_> {
             .iter()
             .find(|(n, _, _)| *n == name)
             .map(|(_, choice, _)| *choice)
-            .unwrap_or_else(|| panic!("ImpDefBool(\"{name}\") has no answer in IMPLEMENTATION_DEFINED"))
+            .unwrap_or_else(|| {
+                panic!("ImpDefBool(\"{name}\") has no answer in IMPLEMENTATION_DEFINED")
+            })
     }
 
     /// Field `field` of register `reg`, by the fieldset Arm gives this
@@ -623,7 +731,9 @@ impl Eval<'_> {
         for v in list(fieldset, "values") {
             let ranges: &[Value] = list(v, "rangeset");
             let named = match ty(v) {
-                "Fields.Field" | "Fields.ConstantField" | "Fields.Array" | "Fields.Dynamic" => text(v, "name") == field,
+                "Fields.Field" | "Fields.ConstantField" | "Fields.Array" | "Fields.Dynamic" => {
+                    text(v, "name") == field
+                }
                 "Fields.ConditionalField" => list(v, "fields")
                     .iter()
                     .find(|f| self.truth(&f["condition"]))
@@ -645,8 +755,17 @@ impl Eval<'_> {
         let reserved_width = list(fieldset, "values")
             .iter()
             .filter(|v| ty(v) == "Fields.ConditionalField")
-            .find(|v| list(v, "fields").iter().any(|f| text(&f["field"], "name") == field))
-            .map(|v| list(v, "rangeset").iter().map(|r| r["width"].as_u64().unwrap_or(0) as u32).sum::<u32>());
+            .find(|v| {
+                list(v, "fields")
+                    .iter()
+                    .any(|f| text(&f["field"], "name") == field)
+            })
+            .map(|v| {
+                list(v, "rangeset")
+                    .iter()
+                    .map(|r| r["width"].as_u64().unwrap_or(0) as u32)
+                    .sum::<u32>()
+            });
         match reserved_width {
             Some(width) => V::bits(0, width),
             None => panic!("{reg}.{field}: no such field"),
@@ -807,11 +926,17 @@ impl Eval<'_> {
             "EffectivelyAtEL0InHost" => V::Bool(self.el == 0 && self.in_host(0)),
             "EffectivelyAtEL0NotInHost" => V::Bool(self.el == 0 && !self.in_host(0)),
             "EffectiveHCR_EL2_NVx" => {
-                assert!(!self.feature("FEAT_NV"), "FEAT_NV is not modelled by the test");
+                assert!(
+                    !self.feature("FEAT_NV"),
+                    "FEAT_NV is not modelled by the test"
+                );
                 V::bits(0, 3)
             }
             "EffectiveHCRX_EL2_NVTGE" | "IsHCRXEL2Enabled" => {
-                assert!(!self.feature("FEAT_HCX"), "FEAT_HCX is not modelled by the test");
+                assert!(
+                    !self.feature("FEAT_HCX"),
+                    "FEAT_HCX is not modelled by the test"
+                );
                 if name == "IsHCRXEL2Enabled" {
                     V::Bool(false)
                 } else {
@@ -826,22 +951,33 @@ impl Eval<'_> {
             }
             "EffectiveTGEforEL0Traps" => V::bits(u64::from(self.hcr_bit("TGE")), 1),
             "SecurityStateAtEL" => V::Name("SS_NonSecure".to_string()),
-            "IsCurrentSecurityState" => V::Bool(self.eval(&args[0]) == V::Name("SS_NonSecure".to_string())),
+            "IsCurrentSecurityState" => {
+                V::Bool(self.eval(&args[0]) == V::Name("SS_NonSecure".to_string()))
+            }
             "ValidSecurityStateAtEL" => V::Bool(self.have_el(self.el_arg(args))),
             // Only Non-secure state, with no FEAT_Secure, FEAT_SEL2 or
             // FEAT_RME.
             "HaveELUsingSecurityState" => {
                 let el = self.el_arg(args);
-                V::Bool(self.have_el(el) && el != 3 && self.eval(&args[1]) == V::Name("SS_NonSecure".to_string()))
+                V::Bool(
+                    self.have_el(el)
+                        && el != 3
+                        && self.eval(&args[1]) == V::Name("SS_NonSecure".to_string()),
+                )
             }
             "EffectiveSCR_EL3_NS" => V::bits(1, 1),
             // No EL3 and no FEAT_RME.
-            "EffectiveSCR_EL3_TERR" | "EffectiveSCR_EL3_TWERR" | "EffectiveSCR_EL3_NSE" => V::bits(0, 1),
+            "EffectiveSCR_EL3_TERR" | "EffectiveSCR_EL3_TWERR" | "EffectiveSCR_EL3_NSE" => {
+                V::bits(0, 1)
+            }
             "EffectiveHCR_EL2_E2H" => V::bits(u64::from(self.e2h()), 1),
             "GetSPSR_EL1_M4" => V::bits((self.register("SPSR_EL1") >> 4) & 1, 1),
             "GetSPSR_EL2_M4" => V::bits((self.register("SPSR_EL2") >> 4) & 1, 1),
             "IsSCTLR2EL1Enabled" | "IsSCTLR2EL2Enabled" => {
-                assert!(!self.feature("FEAT_SCTLR2"), "FEAT_SCTLR2 is not modelled by the test");
+                assert!(
+                    !self.feature("FEAT_SCTLR2"),
+                    "FEAT_SCTLR2 is not modelled by the test"
+                );
                 V::Bool(false)
             }
             "UInt" => V::Int(self.eval(&args[0]).int()),
@@ -849,21 +985,34 @@ impl Eval<'_> {
             "X" => V::bits(0, 64),
             "ImpDefBool" => V::Bool(self.imp_def(text(&args[0], "value"))),
             "EffectiveHCR_EL2_TERR" => {
-                let records = CONSTANTS.iter().find(|(n, _)| *n == "NUM_ERROR_RECORDS").map_or(0, |(_, v)| *v);
-                let zero = records == 0 && self.imp_def("HCR_EL2.TERR,SCR_EL3.TERR/TWERR=0 when ERRIDR_EL1.NUM==0");
-                V::bits(u64::from(self.have_el2() && !zero && self.hcr_bit("TERR")), 1)
+                let records = CONSTANTS
+                    .iter()
+                    .find(|(n, _)| *n == "NUM_ERROR_RECORDS")
+                    .map_or(0, |(_, v)| *v);
+                let zero = records == 0
+                    && self.imp_def("HCR_EL2.TERR,SCR_EL3.TERR/TWERR=0 when ERRIDR_EL1.NUM==0");
+                V::bits(
+                    u64::from(self.have_el2() && !zero && self.hcr_bit("TERR")),
+                    1,
+                )
             }
             "AArch64_CanTrapDC" => V::Bool(
                 !self.treat_dc_as_nop(args)
-                    || self.imp_def("When DC is treated as NOP, data cache maintenance operations are trapped"),
+                    || self.imp_def(
+                        "When DC is treated as NOP, data cache maintenance operations are trapped",
+                    ),
             ),
             "AArch64_TreatDCAsNOP" => V::Bool(self.treat_dc_as_nop(args)),
             "AArch64_CanTrapIC" => V::Bool(
                 !self.treat_ic_as_nop()
-                    || self.imp_def("When IC is treated as NOP, data cache maintenance operations are trapped"),
+                    || self.imp_def(
+                        "When IC is treated as NOP, data cache maintenance operations are trapped",
+                    ),
             ),
             "AArch64_TreatICAsNOP" => V::Bool(self.treat_ic_as_nop()),
-            _ if args.is_empty() && self.spec.registers.contains_key(name) => V::bits(self.register(name), 64),
+            _ if args.is_empty() && self.spec.registers.contains_key(name) => {
+                V::bits(self.register(name), 64)
+            }
             _ => panic!("the test does not evaluate {name}()"),
         }
     }
@@ -883,7 +1032,10 @@ impl Eval<'_> {
         match scope {
             "CacheOpScope_PoU" => louu == 0 && louis == 0,
             "CacheOpScope_PoC" | "CacheOpScope_PoP" | "CacheOpScope_PoDP" => {
-                assert!(loc != 0, "a processor without caches is not modelled by the test");
+                assert!(
+                    loc != 0,
+                    "a processor without caches is not modelled by the test"
+                );
                 false
             }
             _ => false,
@@ -927,14 +1079,19 @@ impl Eval<'_> {
                 el: self.el_arg(args),
                 ec: self.eval(&args[1]).int() as u64,
             },
-            "AArch64_SystemAccessTraptoEL1orEL2" => self.trap_to_el1_or_el2(self.eval(&args[0]).int() as u64),
+            "AArch64_SystemAccessTraptoEL1orEL2" => {
+                self.trap_to_el1_or_el2(self.eval(&args[0]).int() as u64)
+            }
             "UnimplementedIDRegister" => {
                 if !self.feature("FEAT_IDST") {
                     Outcome::Undefined
                 } else if self.el == 0 {
                     self.trap_to_el1_or_el2(0x18)
                 } else {
-                    Outcome::Trap { el: self.el, ec: 0x18 }
+                    Outcome::Trap {
+                        el: self.el,
+                        ec: 0x18,
+                    }
                 }
             }
             "AArch64_ImpDefSysRegRead"
@@ -944,7 +1101,10 @@ impl Eval<'_> {
             | "AArch64_ImpDefSysInstr"
             | "AArch64_ImpDefSysInstrWithResult"
             | "AArch64_ImpDefSysInstr128" => Outcome::ImplementationDefined,
-            "AArch64_FGDTSystemAccessTrap" | "Halt" | "EXLOCKException" | "ConstrainUnpredictableProcedure" => {
+            "AArch64_FGDTSystemAccessTrap"
+            | "Halt"
+            | "EXLOCKException"
+            | "ConstrainUnpredictableProcedure" => {
                 panic!("{name}: a path no processor here reaches")
             }
             _ => Outcome::Access,
@@ -962,14 +1122,25 @@ impl Eval<'_> {
 struct Ram(Vec<u8>);
 
 impl PhysBus for Ram {
-    fn read(&mut self, addr: PhysAddr, width: AccessWidth, _clock: VmClock) -> Result<u64, BusFault> {
+    fn read(
+        &mut self,
+        addr: PhysAddr,
+        width: AccessWidth,
+        _clock: VmClock,
+    ) -> Result<u64, BusFault> {
         let a = addr.get() as usize;
         let n = width.bytes() as usize;
         let bytes = self.0.get(a..a + n).ok_or(BusFault::Unmapped)?;
         Ok(bytes.iter().rev().fold(0, |v, &b| (v << 8) | u64::from(b)))
     }
 
-    fn write(&mut self, addr: PhysAddr, width: AccessWidth, value: u64, _clock: VmClock) -> Result<(), BusFault> {
+    fn write(
+        &mut self,
+        addr: PhysAddr,
+        width: AccessWidth,
+        value: u64,
+        _clock: VmClock,
+    ) -> Result<(), BusFault> {
         let a = addr.get() as usize;
         let n = width.bytes() as usize;
         let bytes = self.0.get_mut(a..a + n).ok_or(BusFault::Unmapped)?;
@@ -1051,7 +1222,11 @@ fn step<L: Levels>(cpu: &mut Cpu<L>, ram: &mut Ram, word: u32) -> Observed {
     ram.0[CODE as usize..CODE as usize + 4].copy_from_slice(&word.to_le_bytes());
     cpu.pc = CODE;
     let before = cpu.pstate.el;
-    assert_eq!(cpu.step(ram, &mut NoInstrumentation), Step::Retired, "{word:#010x}");
+    assert_eq!(
+        cpu.step(ram, &mut NoInstrumentation),
+        Step::Retired,
+        "{word:#010x}"
+    );
     if cpu.pc == CODE + 4 && cpu.pstate.el == before {
         return Observed::Completed;
     }
@@ -1112,7 +1287,11 @@ fn writes_memory(site: &Site) -> bool {
 fn expected(outcome: Outcome, el: u8, tge: bool, word: u32, writes: bool) -> Observed {
     // Where an exception from `el` that does not name its level goes.
     let routed = if el == 2 || (el == 0 && tge) { 2 } else { 1 };
-    let undefined = Observed::Exception { el: routed, ec: 0, iss: 0 };
+    let undefined = Observed::Exception {
+        el: routed,
+        ec: 0,
+        iss: 0,
+    };
     match outcome {
         Outcome::Access if writes => Observed::Exception {
             el: routed,
@@ -1136,7 +1315,6 @@ fn processor<L: Levels>(imp: Implementation) -> (Cpu<L>, Ram) {
     let mut cpu = Cpu::<L>::implementing(
         CpuConfig {
             ips,
-            counter_hz: ips,
             reset_pc: CODE,
         },
         imp,
@@ -1313,7 +1491,10 @@ fn configs<L: Levels>(imp: Implementation) -> Vec<Config> {
     let features = imp.features.bits();
     let mut seed = 0x5EED_0000_0000_0000 ^ features as u64 ^ (features >> 64) as u64;
     for i in 0..12 {
-        let writes = variable.iter().map(|&(name, mask)| (name, splitmix(&mut seed) & mask)).collect();
+        let writes = variable
+            .iter()
+            .map(|&(name, mask)| (name, splitmix(&mut seed) & mask))
+            .collect();
         let r = splitmix(&mut seed);
         out.push(Config {
             label: format!("random {i}"),
@@ -1340,12 +1521,34 @@ struct Mismatch {
 }
 
 /// The processors, each implementation with the features of its level set,
-/// which [`Eval`] reads.
-const IMPLEMENTATIONS: [(&str, Implementation); 4] = [
-    ("Cortex-A57", Implementation::CORTEX_A57.with_levels::<NoEl2>()),
-    ("Cortex-A57 with EL2", Implementation::CORTEX_A57.with_levels::<WithEl2>()),
-    ("every feature", Implementation::EVERY_FEATURE.with_levels::<NoEl2>()),
-    ("every feature with EL2", Implementation::EVERY_FEATURE.with_levels::<WithEl2>()),
+/// which [`Eval`] reads. The Armv9.2 model lacks FEAT_DoubleLock, which
+/// every other has; with EL2 it is a processor no machine builds
+/// (`CpuModel::el2_available`), held to Arm's accessors all the same.
+const IMPLEMENTATIONS: [(&str, Implementation); 6] = [
+    (
+        "Cortex-A57",
+        Implementation::CORTEX_A57.with_levels::<NoEl2>(),
+    ),
+    (
+        "Cortex-A57 with EL2",
+        Implementation::CORTEX_A57.with_levels::<WithEl2>(),
+    ),
+    (
+        "Armv9.2",
+        Implementation::ARMV9P2.with_levels::<NoEl2>(),
+    ),
+    (
+        "Armv9.2 with EL2",
+        Implementation::ARMV9P2.with_levels::<WithEl2>(),
+    ),
+    (
+        "every feature",
+        Implementation::EVERY_FEATURE.with_levels::<NoEl2>(),
+    ),
+    (
+        "every feature with EL2",
+        Implementation::EVERY_FEATURE.with_levels::<WithEl2>(),
+    ),
 ];
 
 /// What an encoding no accessor names does, by the Arm ARM's prose, which
@@ -1526,7 +1729,10 @@ fn tally<L: Levels>(name: &'static str, imp: Implementation, unnamed: &[u32]) ->
 /// System register and System instruction spaces no accessor names is
 /// UNDEFINED.
 #[test]
-#[cfg_attr(not(aarchmrs), ignore = "reads Arm's AARCHMRS from the directory RUSTY_BOX_AARCHMRS names")]
+#[cfg_attr(
+    not(aarchmrs),
+    ignore = "reads Arm's AARCHMRS from the directory RUSTY_BOX_AARCHMRS names"
+)]
 fn every_system_access_takes_the_exception_arms_accessor_takes() {
     let spec = spec();
     let named: BTreeSet<u32> = spec.sites.iter().map(|s| s.word & !0x1F).collect();
@@ -1557,7 +1763,10 @@ fn every_system_access_takes_the_exception_arms_accessor_takes() {
                 })
             })
             .collect();
-        handles.into_iter().map(|h| h.join().unwrap_or_else(|e| std::panic::resume_unwind(e))).collect()
+        handles
+            .into_iter()
+            .map(|h| h.join().unwrap_or_else(|e| std::panic::resume_unwind(e)))
+            .collect()
     });
     let stepped: usize = results.iter().map(|r| r.stepped).sum();
     let states: Vec<usize> = results.iter().map(|r| r.states).collect();
@@ -1576,17 +1785,21 @@ fn every_system_access_takes_the_exception_arms_accessor_takes() {
     for m in &mismatches {
         let key = format!(
             "{} {} {} | {}: want {:?} got {:?}",
-            m.register,
-            m.instr,
-            m.asm,
-            m.imp,
-            m.want,
-            m.got
+            m.register, m.instr, m.asm, m.imp, m.want, m.got
         );
-        seen.entry(key).or_insert_with(|| format!("EL{} {} {:#010x}", m.el, m.config, m.word));
+        seen.entry(key)
+            .or_insert_with(|| format!("EL{} {} {:#010x}", m.el, m.config, m.word));
     }
-    let report: Vec<String> = seen.iter().map(|(k, v)| format!("{k} (first: {v})")).collect();
-    assert!(mismatches.is_empty(), "{} disagreements:\n{}", mismatches.len(), report.join("\n"));
+    let report: Vec<String> = seen
+        .iter()
+        .map(|(k, v)| format!("{k} (first: {v})"))
+        .collect();
+    assert!(
+        mismatches.is_empty(),
+        "{} disagreements:\n{}",
+        mismatches.len(),
+        report.join("\n")
+    );
 }
 
 // ----- the fields -----
@@ -1648,7 +1861,13 @@ fn bit_rules(eval: &Eval<'_>, reg: &str) -> [BitRule; 64] {
 
 /// Set the rules of the bits `values` (a fieldset's, or a dynamic field's
 /// instance's) describe, their ranges counted from bit `base`.
-fn apply_fields(eval: &Eval<'_>, reg: &str, values: &'static [Value], base: usize, rules: &mut [BitRule; 64]) {
+fn apply_fields(
+    eval: &Eval<'_>,
+    reg: &str,
+    values: &'static [Value],
+    base: usize,
+    rules: &mut [BitRule; 64],
+) {
     let mut set = |ranges: &[Value], rule: BitRule| {
         for r in ranges {
             let start = base + r["start"].as_u64().unwrap_or(0) as usize;
@@ -1658,7 +1877,10 @@ fn apply_fields(eval: &Eval<'_>, reg: &str, values: &'static [Value], base: usiz
     };
     let field_rule = |field: &Value| -> BitRule {
         let name = text(field, "name");
-        if let Some((_, _, rule, _)) = FIELD_RULES.iter().find(|(r, f, _, _)| *r == reg && (*f == name || *f == "*")) {
+        if let Some((_, _, rule, _)) = FIELD_RULES
+            .iter()
+            .find(|(r, f, _, _)| *r == reg && (*f == name || *f == "*"))
+        {
             return *rule;
         }
         match ty(field) {
@@ -1673,7 +1895,10 @@ fn apply_fields(eval: &Eval<'_>, reg: &str, values: &'static [Value], base: usiz
         let ranges = list(v, "rangeset");
         match ty(v) {
             "Fields.ConditionalField" => {
-                let rule = match list(v, "fields").iter().find(|f| eval.truth(&f["condition"])) {
+                let rule = match list(v, "fields")
+                    .iter()
+                    .find(|f| eval.truth(&f["condition"]))
+                {
                     Some(f) => field_rule(&f["field"]),
                     None => reserved_rule(text(v, "reservedtype")),
                 };
@@ -1689,7 +1914,10 @@ fn apply_fields(eval: &Eval<'_>, reg: &str, values: &'static [Value], base: usiz
                 let holding: Vec<&Value> = if reads_registers(v) {
                     Vec::new()
                 } else {
-                    list(v, "instances").iter().filter(|i| eval.truth(&i["condition"])).collect()
+                    list(v, "instances")
+                        .iter()
+                        .filter(|i| eval.truth(&i["condition"]))
+                        .collect()
                 };
                 match holding[..] {
                     [instance] => {
@@ -1730,14 +1958,20 @@ fn reserved_rule(kind: &str) -> BitRule {
 /// each RES0 bit as 0 and each RES1 bit as 1, and its constant fields
 /// unchanged, by the fieldset Arm's data gives the processor's features.
 #[test]
-#[cfg_attr(not(aarchmrs), ignore = "reads Arm's AARCHMRS from the directory RUSTY_BOX_AARCHMRS names")]
+#[cfg_attr(
+    not(aarchmrs),
+    ignore = "reads Arm's AARCHMRS from the directory RUSTY_BOX_AARCHMRS names"
+)]
 fn each_el2_register_keeps_the_bits_its_fieldset_gives_it() {
     use super::sysreg::SysRegKey;
 
     let spec = spec();
     let mut failures = Vec::new();
     let mut checked = 0;
-    for (name, imp) in IMPLEMENTATIONS.into_iter().filter(|(_, imp)| imp.has(Feature::El2)) {
+    for (name, imp) in IMPLEMENTATIONS
+        .into_iter()
+        .filter(|(_, imp)| imp.has(Feature::El2))
+    {
         let (mut reader, mut ram) = processor::<WithEl2>(imp);
         let values = input_values(&mut reader, &mut ram);
         let eval = Eval {
@@ -1765,7 +1999,8 @@ fn each_el2_register_keeps_the_bits_its_fieldset_gives_it() {
                     Ok(effect) => cpu.apply_write_effect(effect),
                     Err(e) => panic!("{name}: writing {reg}: {e:?}"),
                 }
-                cpu.sysreg_read(key).unwrap_or_else(|e| panic!("{name}: reading {reg}: {e:?}"))
+                cpu.sysreg_read(key)
+                    .unwrap_or_else(|e| panic!("{name}: reading {reg}: {e:?}"))
             };
             let ones = read_after(u64::MAX);
             let zeros = read_after(0);
@@ -1787,7 +2022,11 @@ fn each_el2_register_keeps_the_bits_its_fieldset_gives_it() {
             }
         }
     }
-    std::eprintln!("AARCHMRS {}: {checked} EL2 registers, {} disagreements", spec.release, failures.len());
+    std::eprintln!(
+        "AARCHMRS {}: {checked} EL2 registers, {} disagreements",
+        spec.release,
+        failures.len()
+    );
     assert!(checked > 0);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

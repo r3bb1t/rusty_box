@@ -71,7 +71,12 @@ impl ArrayVectors {
     /// three bits with the scale, one more for one register.
     fn of(insn: u32, width: usize) -> Self {
         let nreg = if bit(insn, 21) {
-            match (bit(insn, 23), bit(insn, 16), bits(insn, 12, 10), bit(insn, 20)) {
+            match (
+                bit(insn, 23),
+                bit(insn, 16),
+                bits(insn, 12, 10),
+                bit(insn, 20),
+            ) {
                 (true, true, _, _) => 4,
                 (true, false, _, _) => 2,
                 (false, _, 0b001 | 0b011, _) => 1,
@@ -195,8 +200,16 @@ impl ArrayRegs {
     fn of(insn: u32, width: usize) -> Self {
         let at = ArrayVectors::of(insn, width);
         let (n, m, pairing) = match (bit(insn, 21), bit(insn, 23)) {
-            (true, true) => (group(insn, 9, at.nreg), Second::Group(group(insn, 20, at.nreg)), Pairing::Same),
-            (true, false) => (bits(insn, 9, 5), Second::Vector(bits(insn, 19, 16)), Pairing::Same),
+            (true, true) => (
+                group(insn, 9, at.nreg),
+                Second::Group(group(insn, 20, at.nreg)),
+                Pairing::Same,
+            ),
+            (true, false) => (
+                bits(insn, 9, 5),
+                Second::Vector(bits(insn, 19, 16)),
+                Pairing::Same,
+            ),
             (false, _) => {
                 let index = match (width, at.nreg == 1) {
                     (4, true) => (bits(insn, 15, 15) << 3) | bits(insn, 12, 10),
@@ -207,7 +220,11 @@ impl ArrayRegs {
                     _ => bits(insn, 11, 10),
                 };
                 let pairing = Pairing::Indexed(index as usize);
-                (group(insn, 9, at.nreg), Second::Vector(bits(insn, 19, 16)), pairing)
+                (
+                    group(insn, 9, at.nreg),
+                    Second::Vector(bits(insn, 19, 16)),
+                    pairing,
+                )
             }
         };
         Self { at, n, m, pairing }
@@ -275,7 +292,13 @@ impl<L: Levels> Cpu<L> {
     /// Registers `first` to `first + nreg - 1`, an aligned group; the
     /// places past it zero.
     fn z_group(&self, first: u32, nreg: usize, svl: VecLen) -> [Zv; 4] {
-        core::array::from_fn(|k| if k < nreg { self.z(first + k as u32, svl) } else { Zv::ZERO })
+        core::array::from_fn(|k| {
+            if k < nreg {
+                self.z(first + k as u32, svl)
+            } else {
+                Zv::ZERO
+            }
+        })
     }
 
     /// The operation `op` of a multi-vector instruction on ZA array vectors
@@ -303,7 +326,12 @@ impl<L: Levels> Cpu<L> {
 
     /// Each word `e` of the vector `at` selects in register `r`'s stride
     /// becomes `op(word, e, r)`.
-    fn za_each_word<F: FnMut(u64, usize, usize) -> u64>(&mut self, at: ArrayVectors, svl: VecLen, mut op: F) {
+    fn za_each_word<F: FnMut(u64, usize, usize) -> u64>(
+        &mut self,
+        at: ArrayVectors,
+        svl: VecLen,
+        mut op: F,
+    ) {
         let span = self.array_span(at, 1, svl);
         for r in 0..at.nreg {
             let index = span.first + r * span.vstride;
@@ -339,14 +367,25 @@ impl<L: Levels> Cpu<L> {
     /// `2 * e + i` of the register and its pair in the second operand,
     /// modulo 2^32.
     pub(crate) fn exec_sme_array_int_long(&mut self, insn: u32) -> ExecResult {
-        self.int_mul_add_long(insn, ArrayRegs::of(insn, 2), Signs::of(insn, false), Esize::H)
+        self.int_mul_add_long(
+            insn,
+            ArrayRegs::of(insn, 2),
+            Signs::of(insn, false),
+            Esize::H,
+        )
     }
 
     /// The long integer products of `es` into words, `S` bit 3: word `e`
     /// of ZA vector `i` of the `width = 4 / es` each register's results
     /// span gains, or loses, the product of element `width * e + i` and its
     /// pair ([`Pairing::long`]).
-    fn int_mul_add_long(&mut self, insn: u32, regs: ArrayRegs, signs: Signs, es: Esize) -> ExecResult {
+    fn int_mul_add_long(
+        &mut self,
+        insn: u32,
+        regs: ArrayRegs,
+        signs: Signs,
+        es: Esize,
+    ) -> ExecResult {
         let width = Esize::S.bytes() / es.bytes();
         let subtract = bit(insn, 3);
         let pairing = regs.pairing;
@@ -354,10 +393,21 @@ impl<L: Levels> Cpu<L> {
         self.za_array(regs, width, svl, |acc, zn, zm, i| {
             let mut result = *acc;
             for e in 0..Esize::S.elements(svl) {
-                let (n, m) = (zn.get(width * e + i, es), zm.get(pairing.long(e, width, i), es));
+                let (n, m) = (
+                    zn.get(width * e + i, es),
+                    zm.get(pairing.long(e, width, i), es),
+                );
                 let product = signs.product(n, m, es) as u64;
                 let sum = acc.get(e, Esize::S);
-                result.set(e, Esize::S, if subtract { sum.wrapping_sub(product) } else { sum.wrapping_add(product) });
+                result.set(
+                    e,
+                    Esize::S,
+                    if subtract {
+                        sum.wrapping_sub(product)
+                    } else {
+                        sum.wrapping_add(product)
+                    },
+                );
             }
             result
         });
@@ -373,7 +423,11 @@ impl<L: Levels> Cpu<L> {
     /// `FPMulAddH_ZA` and `FPNeg`, or `BFMulAddH_ZA` and `BFNeg`
     /// ([`PairFormat`]).
     pub(crate) fn exec_sme_array_fp_long(&mut self, insn: u32) -> ExecResult {
-        let format = if bit(insn, 4) { PairFormat::BFloat16 } else { PairFormat::Half };
+        let format = if bit(insn, 4) {
+            PairFormat::BFloat16
+        } else {
+            PairFormat::Half
+        };
         let subtract = bit(insn, 3);
         let regs = ArrayRegs::of(insn, 2);
         let pairing = regs.pairing;
@@ -430,7 +484,13 @@ impl<L: Levels> Cpu<L> {
             let mut result = *acc;
             for e in 0..Esize::S.elements(svl) {
                 let dot: i128 = (0..parts)
-                    .map(|k| signs.product(zn.get(parts * e + k, es), zm.get(pairing.dot(e, parts, k), es), es))
+                    .map(|k| {
+                        signs.product(
+                            zn.get(parts * e + k, es),
+                            zm.get(pairing.dot(e, parts, k), es),
+                            es,
+                        )
+                    })
                     .sum();
                 result.set(e, Esize::S, acc.get(e, Esize::S).wrapping_add(dot as u64));
             }
@@ -445,7 +505,11 @@ impl<L: Levels> Cpu<L> {
     /// the ZA vector plus the products of 16-bit elements `2 * e` and `2 *
     /// e + 1` of the register and their pairs (`FPDotAdd_ZA`, `BFDotAdd`).
     pub(crate) fn exec_sme_array_fp_dot(&mut self, insn: u32) -> ExecResult {
-        let format = if bit(insn, 4) { PairFormat::BFloat16 } else { PairFormat::Half };
+        let format = if bit(insn, 4) {
+            PairFormat::BFloat16
+        } else {
+            PairFormat::Half
+        };
         let regs = ArrayRegs::of(insn, 1);
         let pairing = regs.pairing;
         let svl = self.check_streaming_sve_and_za_enabled()?;
@@ -453,7 +517,10 @@ impl<L: Levels> Cpu<L> {
         self.za_array(regs, 1, svl, |acc, zn, zm, _| {
             let mut result = *acc;
             for e in 0..Esize::S.elements(svl) {
-                let row = [zn.get(2 * e, Esize::H) as u16, zn.get(2 * e + 1, Esize::H) as u16];
+                let row = [
+                    zn.get(2 * e, Esize::H) as u16,
+                    zn.get(2 * e + 1, Esize::H) as u16,
+                ];
                 let col = [0, 1].map(|k| zm.get(pairing.dot(e, 2, k), Esize::H) as u16);
                 let sum = acc.get(e, Esize::S) as u32;
                 result.set(e, Esize::S, u64::from(format.dot(sum, row, col, &mut env)));
@@ -471,7 +538,11 @@ impl<L: Levels> Cpu<L> {
         if bit(insn, 22) {
             return self.undefined(pc, insn);
         }
-        let form = if bit(insn, 3) { FusedMulAdd::Fmsub } else { FusedMulAdd::Fmadd };
+        let form = if bit(insn, 3) {
+            FusedMulAdd::Fmsub
+        } else {
+            FusedMulAdd::Fmadd
+        };
         self.fp_mul_add_za(insn, form)
     }
 
@@ -479,7 +550,11 @@ impl<L: Levels> Cpu<L> {
     /// (`fmla_za_zzi_s2xi` to `fmls_za_zzi_s4xi`: [`ArrayRegs`], FMLS by
     /// bit 4), as [`Cpu::fp_mul_add_za`].
     pub(crate) fn exec_sme_indexed_fp_mul_add(&mut self, insn: u32) -> ExecResult {
-        let form = if bit(insn, 4) { FusedMulAdd::Fmsub } else { FusedMulAdd::Fmadd };
+        let form = if bit(insn, 4) {
+            FusedMulAdd::Fmsub
+        } else {
+            FusedMulAdd::Fmadd
+        };
         self.fp_mul_add_za(insn, form)
     }
 
@@ -494,8 +569,16 @@ impl<L: Levels> Cpu<L> {
         self.za_array(regs, 1, svl, |acc, zn, zm, _| {
             let mut result = *acc;
             for e in 0..Esize::S.elements(svl) {
-                let (sum, n, m) = (acc.get(e, Esize::S), zn.get(e, Esize::S), zm.get(pairing.dot(e, 1, 0), Esize::S));
-                result.set(e, Esize::S, fp_mul_add(form, FpType::Single, sum, n, m, &mut env));
+                let (sum, n, m) = (
+                    acc.get(e, Esize::S),
+                    zn.get(e, Esize::S),
+                    zm.get(pairing.dot(e, 1, 0), Esize::S),
+                );
+                result.set(
+                    e,
+                    Esize::S,
+                    fp_mul_add(form, FpType::Single, sum, n, m, &mut env),
+                );
             }
             result
         });
@@ -522,12 +605,22 @@ impl<L: Levels> Cpu<L> {
             let signs = Signs::of(insn, bit(insn, 3));
             self.za_each_word(regs.at, svl, |acc, e, r| {
                 let dot: i128 = (0..nreg)
-                    .map(|k| signs.product(zn[k].get(nreg * e + r, es), zm.get(pairing.dot(e, nreg, k), es), es))
+                    .map(|k| {
+                        signs.product(
+                            zn[k].get(nreg * e + r, es),
+                            zm.get(pairing.dot(e, nreg, k), es),
+                            es,
+                        )
+                    })
                     .sum();
                 acc.wrapping_add(dot as u64)
             });
         } else {
-            let format = if bit(insn, 4) { PairFormat::BFloat16 } else { PairFormat::Half };
+            let format = if bit(insn, 4) {
+                PairFormat::BFloat16
+            } else {
+                PairFormat::Half
+            };
             let mut env = self.fp_env().with_default_nan();
             self.za_each_word(regs.at, svl, |acc, e, r| {
                 let row = [0, 1].map(|k| zn[k].get(2 * e + r, Esize::H) as u16);
@@ -554,7 +647,15 @@ impl<L: Levels> Cpu<L> {
             let mut result = Zv::ZERO;
             for e in 0..Esize::S.elements(svl) {
                 let (n, m) = (zn.get(e, Esize::S), zm.get(e, Esize::S));
-                result.set(e, Esize::S, if subtract { n.wrapping_sub(m) } else { n.wrapping_add(m) });
+                result.set(
+                    e,
+                    Esize::S,
+                    if subtract {
+                        n.wrapping_sub(m)
+                    } else {
+                        n.wrapping_add(m)
+                    },
+                );
             }
             result
         });
@@ -577,12 +678,22 @@ impl<L: Levels> Cpu<L> {
         let svl = self.check_streaming_sve_and_za_enabled()?;
         let zm = self.z_group(group(insn, 9, at.nreg), at.nreg, svl);
         match (bit(insn, 4), subtract) {
-            (true, false) => self.za_each_word(at, svl, |a, e, r| a.wrapping_add(zm[r].get(e, Esize::S))),
-            (true, true) => self.za_each_word(at, svl, |a, e, r| a.wrapping_sub(zm[r].get(e, Esize::S))),
+            (true, false) => {
+                self.za_each_word(at, svl, |a, e, r| a.wrapping_add(zm[r].get(e, Esize::S)))
+            }
+            (true, true) => {
+                self.za_each_word(at, svl, |a, e, r| a.wrapping_sub(zm[r].get(e, Esize::S)))
+            }
             (false, _) => {
-                let op = if subtract { FpBinary::Sub } else { FpBinary::Add };
+                let op = if subtract {
+                    FpBinary::Sub
+                } else {
+                    FpBinary::Add
+                };
                 let mut env = self.fp_env().with_default_nan();
-                self.za_each_word(at, svl, |a, e, r| fp_binary(op, FpType::Single, a, zm[r].get(e, Esize::S), &mut env));
+                self.za_each_word(at, svl, |a, e, r| {
+                    fp_binary(op, FpType::Single, a, zm[r].get(e, Esize::S), &mut env)
+                });
             }
         }
         Ok(Flow::Next)

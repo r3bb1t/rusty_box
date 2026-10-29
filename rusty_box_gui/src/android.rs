@@ -705,10 +705,10 @@ impl FileBrowser {
     fn open(request: BrowseRequest, app: &AndroidApp) -> Self {
         let filter = match request.target {
             BrowseTarget::Cdrom => FileFilter::Extension("iso"),
-            BrowseTarget::HardDisk | BrowseTarget::NewDisk | BrowseTarget::NewFloppy => {
-                FileFilter::Extension("img")
-            }
-            BrowseTarget::Bios
+            BrowseTarget::NewDisk | BrowseTarget::NewFloppy => FileFilter::Extension("img"),
+            // An Arm board's disk may be an ISO as well as a raw image.
+            BrowseTarget::HardDisk
+            | BrowseTarget::Bios
             | BrowseTarget::VgaBios
             | BrowseTarget::Firmware
             | BrowseTarget::FirmwareVars

@@ -122,7 +122,9 @@ pub(crate) struct Zv {
 
 impl Zv {
     /// `Zeros(VL)`.
-    pub(crate) const ZERO: Self = Self { bytes: [0; MAX_VL_BYTES] };
+    pub(crate) const ZERO: Self = Self {
+        bytes: [0; MAX_VL_BYTES],
+    };
 
     /// `operand[e*:esize]`, zero-extended.
     #[inline]
@@ -209,7 +211,9 @@ pub(crate) struct Pv {
 
 impl Pv {
     /// `Zeros(PL)`.
-    pub(crate) const ZERO: Self = Self { bytes: [0; MAX_PL_BYTES] };
+    pub(crate) const ZERO: Self = Self {
+        bytes: [0; MAX_PL_BYTES],
+    };
 
     /// `Ones(PL)` for vectors of length `vl`.
     pub(crate) fn ones(vl: VecLen) -> Self {
@@ -300,9 +304,14 @@ impl Pv {
 /// element, V zero; as `PSTATE.NZCV` holds them (bits 31:28).
 pub(crate) fn pred_test(mask: &Pv, result: &Pv, es: Esize, vl: VecLen) -> u64 {
     let elements = es.elements(vl);
-    let first = (0..elements).find(|&e| mask.active(e, es)).is_some_and(|e| result.active(e, es));
+    let first = (0..elements)
+        .find(|&e| mask.active(e, es))
+        .is_some_and(|e| result.active(e, es));
     let none = !(0..elements).any(|e| mask.active(e, es) && result.active(e, es));
-    let last = (0..elements).rev().find(|&e| mask.active(e, es)).is_some_and(|e| result.active(e, es));
+    let last = (0..elements)
+        .rev()
+        .find(|&e| mask.active(e, es))
+        .is_some_and(|e| result.active(e, es));
     (u64::from(first) << 31) | (u64::from(none) << 30) | (u64::from(!last) << 29)
 }
 
@@ -379,13 +388,19 @@ pub(crate) fn group(insn: u32, hi: u32, nreg: usize) -> u32 {
 /// SQDMULH and SQRDMULH on one element: `SignedSat((2 * SInt(a) *
 /// SInt(b) (+ 2^(esize-1))) >> esize)`, rounding with `rounding`.
 pub(crate) fn sat_doubling_mul_high(a: u64, b: u64, es: Esize, rounding: bool) -> u64 {
-    sat_q(doubling_mul_high(int(a, es, false), int(b, es, false), es.bits(), rounding), es, false)
+    sat_q(
+        doubling_mul_high(int(a, es, false), int(b, es, false), es.bits(), rounding),
+        es,
+        false,
+    )
 }
 
 /// SCLAMP and UCLAMP on one element: `Min(Max(low, value), high)`, each
 /// element `Int`'d by `unsigned`.
 pub(crate) fn clamp(value: u64, low: u64, high: u64, es: Esize, unsigned: bool) -> u64 {
-    int(low, es, unsigned).max(int(value, es, unsigned)).min(int(high, es, unsigned)) as u64
+    int(low, es, unsigned)
+        .max(int(value, es, unsigned))
+        .min(int(high, es, unsigned)) as u64
 }
 
 /// The shift by element of SRSHL to UQRSHL, exact: `Int(a, unsigned)`
@@ -404,10 +419,18 @@ pub(crate) fn shift_by_element(a: u64, b: u64, es: Esize, unsigned: bool, roundi
 /// 32-bit result sign- or zero-extended to 64 bits by `unsigned`.
 pub(crate) fn sat_add_scalar(value: u64, delta: i128, wide: bool, unsigned: bool) -> u64 {
     if wide {
-        let operand = if unsigned { i128::from(value) } else { i128::from(value as i64) };
+        let operand = if unsigned {
+            i128::from(value)
+        } else {
+            i128::from(value as i64)
+        };
         sat_q_bits(operand + delta, 64, unsigned)
     } else {
-        let operand = if unsigned { i128::from(value as u32) } else { i128::from(value as i32) };
+        let operand = if unsigned {
+            i128::from(value as u32)
+        } else {
+            i128::from(value as i32)
+        };
         let result = sat_q_bits(operand + delta, 32, unsigned);
         if unsigned {
             result

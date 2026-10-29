@@ -107,7 +107,11 @@ fn p_bits(cpu: &Cpu<NoEl2>, n: u32) -> u64 {
 /// Predicate `n` holding `bits`, bit `i` that of vector byte `i`.
 fn set_p_bits(cpu: &mut Cpu<NoEl2>, n: u32, bits: u64) {
     let svl = cpu.current_svl();
-    cpu.set_p(n, svl, &Pv::from_bytes(&bits.to_le_bytes()[..svl.predicate_bytes()]));
+    cpu.set_p(
+        n,
+        svl,
+        &Pv::from_bytes(&bits.to_le_bytes()[..svl.predicate_bytes()]),
+    );
 }
 
 /// The bytes of Z register `n`.
@@ -283,19 +287,27 @@ fn the_strided_forms_skip_the_registers_between() {
     set_p_bits(&mut cpu, 8, 0x8001);
     (cpu.x[0], cpu.x[1]) = (DATA, 0);
     assert_eq!(exec_in(&mut cpu, &mut ram, LD1B_2X8), None);
-    assert_eq!((z_bytes(&cpu, 0), z_bytes(&cpu, 8)), (counting(0, 16), counting(16, 16)));
+    assert_eq!(
+        (z_bytes(&cpu, 0), z_bytes(&cpu, 8)),
+        (counting(0, 16), counting(16, 16))
+    );
     assert!((1..8).all(|z| z_bytes(&cpu, z) == [0xEE; 16]));
     // The last three of eight doublewords active (five inactive,
     // inverted): element 1 of Z27 and both of Z31, from byte 8 on.
     set_p_bits(&mut cpu, 11, 0x8000 | (5 << 4) | 0b1000);
     cpu.x[1] = 1;
     assert_eq!(exec_in(&mut cpu, &mut ram, LD1D_4X4), None);
-    assert_eq!((z_bytes(&cpu, 19), z_bytes(&cpu, 23)), (vec![0; 16], vec![0; 16]));
+    assert_eq!(
+        (z_bytes(&cpu, 19), z_bytes(&cpu, 23)),
+        (vec![0; 16], vec![0; 16])
+    );
     let mut z27 = vec![0; 8];
     z27.extend(counting(48, 8));
     assert_eq!(z_bytes(&cpu, 27), z27);
     assert_eq!(z_bytes(&cpu, 31), counting(56, 16));
-    assert!([20, 21, 22, 24, 28, 30].iter().all(|&z| z_bytes(&cpu, z) == [0xEE; 16]));
+    assert!([20, 21, 22, 24, 28, 30]
+        .iter()
+        .all(|&z| z_bytes(&cpu, z) == [0xEE; 16]));
 }
 
 /// A multi-vector store writes each register's active elements in turn and
@@ -343,7 +355,10 @@ fn a_fault_part_way_writes_no_register_and_keeps_the_stores_before_it() {
     set_p_bits(&mut cpu, 8, 0x8001);
     // 32 bytes from 16 before the end of the RAM.
     (cpu.x[0], cpu.x[1]) = (DATA + 48, 0);
-    assert_eq!(exec_in(&mut cpu, &mut ram, LD1B_2), Some(external_abort(false)));
+    assert_eq!(
+        exec_in(&mut cpu, &mut ram, LD1B_2),
+        Some(external_abort(false))
+    );
     assert_eq!(cpu.sys.far_el1, DATA + 64);
     assert_eq!(z_bytes(&cpu, 0), [0xEE; 16]);
     // Four registers 64 bytes back from 112: bytes 48 to 63, then a fault.
@@ -352,7 +367,10 @@ fn a_fault_part_way_writes_no_register_and_keeps_the_stores_before_it() {
     }
     set_p_bits(&mut cpu, 15, 0x8001);
     cpu.x[0] = DATA + 112;
-    assert_eq!(exec_in(&mut cpu, &mut ram, ST1B_4_IMM), Some(external_abort(true)));
+    assert_eq!(
+        exec_in(&mut cpu, &mut ram, ST1B_4_IMM),
+        Some(external_abort(true))
+    );
     assert_eq!(cpu.sys.far_el1, DATA + 64);
     assert_eq!(ram[48..], [28; 16]);
     assert_eq!(ram[..48], counting(0, 48)[..]);
@@ -364,16 +382,36 @@ fn a_fault_part_way_writes_no_register_and_keeps_the_stores_before_it() {
 #[test]
 fn they_need_streaming_mode_and_sme2() {
     let mut cpu = processor(Implementation::EVERY_FEATURE);
-    for insn in [PTRUE_PN8_B, WHILELT_PN8_B, WHILELT_PAIR_B, PEXT_P0_B, CNTP_B, LD1B_2, ST1H_2X8] {
+    for insn in [
+        PTRUE_PN8_B,
+        WHILELT_PN8_B,
+        WHILELT_PAIR_B,
+        PEXT_P0_B,
+        CNTP_B,
+        LD1B_2,
+        ST1H_2X8,
+    ] {
         assert_eq!(exec(&mut cpu, insn), Some(NOT_STREAMING), "{insn:#010x}");
     }
-    let features: Vec<Feature> = Feature::ALL.into_iter().filter(|&f| f != Feature::Sme2).collect();
+    let features: Vec<Feature> = Feature::ALL
+        .into_iter()
+        .filter(|&f| f != Feature::Sme2)
+        .collect();
     let mut cpu = processor(Implementation {
         features: Features::of(&features),
         max_svl: VecLen::MAX,
+        ..Implementation::EVERY_FEATURE
     });
     cpu.set_pstate_sm(true);
-    for insn in [PTRUE_PN8_B, WHILELT_PN8_B, WHILELT_PAIR_B, PEXT_P0_B, CNTP_B, LD1B_2, ST1H_2X8] {
+    for insn in [
+        PTRUE_PN8_B,
+        WHILELT_PN8_B,
+        WHILELT_PAIR_B,
+        PEXT_P0_B,
+        CNTP_B,
+        LD1B_2,
+        ST1H_2X8,
+    ] {
         assert_eq!(exec(&mut cpu, insn), Some(UNDEFINED), "{insn:#010x}");
     }
 }

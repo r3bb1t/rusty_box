@@ -598,10 +598,7 @@ impl Memop {
             | Self::Ldumaxal64
             | Self::Lduminal64
             | Self::Swpal64 => Feature::Lse,
-            Self::Ldaprb32l
-            | Self::Ldaprh32l
-            | Self::Ldapr32l
-            | Self::Ldapr64l => Feature::Lrcpc,
+            Self::Ldaprb32l | Self::Ldaprh32l | Self::Ldapr32l | Self::Ldapr64l => Feature::Lrcpc,
         }
     }
 }

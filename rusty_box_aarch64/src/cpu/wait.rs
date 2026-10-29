@@ -67,7 +67,10 @@ impl EventRegister {
     /// The register as it holds at the count `count`: `set`, with the event
     /// stream's later events still to come.
     pub(crate) const fn at(set: bool, count: Count) -> Self {
-        Self { set, folded_to: count }
+        Self {
+            set,
+            folded_to: count,
+        }
     }
 }
 
@@ -103,7 +106,11 @@ fn stream_edge_after(ctl: u64, offset: u64, after: Count) -> Option<Count> {
     // period, stays below 2^64.
     let after = after.get();
     let candidate = after - after % period + phase;
-    let event = if candidate > after { Some(candidate) } else { candidate.checked_add(period) };
+    let event = if candidate > after {
+        Some(candidate)
+    } else {
+        candidate.checked_add(period)
+    };
     event.map(Count::new)
 }
 
@@ -128,14 +135,20 @@ impl<L: Levels> Cpu<L> {
     /// Arm `IsEventRegisterSet`, the event stream's events up to now
     /// included.
     pub(crate) fn event_register(&self) -> bool {
-        self.event.set || self.stream_event_after(self.event.folded_to).is_some_and(|count| count <= self.counter())
+        self.event.set
+            || self
+                .stream_event_after(self.event.folded_to)
+                .is_some_and(|count| count <= self.counter())
     }
 
     /// Bring the Event Register up to the count now: set it if the event
     /// stream has generated an event since it was last brought up to date.
     pub(crate) fn fold_event_stream(&mut self) {
         let now = self.counter();
-        if self.stream_event_after(self.event.folded_to).is_some_and(|count| count <= now) {
+        if self
+            .stream_event_after(self.event.folded_to)
+            .is_some_and(|count| count <= now)
+        {
             self.event.set = true;
         }
         self.event.folded_to = now;
@@ -186,7 +199,9 @@ impl<L: Levels> Cpu<L> {
             Wait::Interrupt => interrupt,
             Wait::InterruptUntil(timeout) => interrupt || self.virtual_count() >= timeout,
             Wait::Event => self.take_event() || interrupt,
-            Wait::EventUntil(timeout) => self.take_event() || interrupt || self.virtual_count() >= timeout,
+            Wait::EventUntil(timeout) => {
+                self.take_event() || interrupt || self.virtual_count() >= timeout
+            }
         };
         if wake {
             self.activity = Activity::Running;
@@ -203,7 +218,10 @@ impl<L: Levels> Cpu<L> {
         let Activity::Waiting(wait) = self.activity else {
             return None;
         };
-        let stream = || self.stream_event_after(self.event.folded_to).and_then(|count| self.tick_reaching(count));
+        let stream = || {
+            self.stream_event_after(self.event.folded_to)
+                .and_then(|count| self.tick_reaching(count))
+        };
         match wait {
             Wait::Interrupt => None,
             Wait::InterruptUntil(timeout) => self.tick_reaching_virtual(timeout),
@@ -239,7 +257,12 @@ impl<L: Levels> Cpu<L> {
             WfxType::Wfit { rd } => (1 << 2) | ((rd & 31) << 5) | 0b10,
             WfxType::Wfet { rd } => (1 << 2) | ((rd & 31) << 5) | 0b11,
         };
-        Err(Exception::routed(ExceptionClass::WfxTrap, (1 << 24) | (0xE << 20) | form_iss, route).into())
+        Err(Exception::routed(
+            ExceptionClass::WfxTrap,
+            (1 << 24) | (0xE << 20) | form_iss,
+            route,
+        )
+        .into())
     }
 
     /// Start waiting for what `wait` names: the one place a processor's

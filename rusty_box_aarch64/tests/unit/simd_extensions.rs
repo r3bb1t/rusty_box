@@ -11,7 +11,7 @@
 
 use std::vec::Vec;
 
-use super::super::features::Implementation;
+use super::super::features::{Feature, Features, Implementation};
 use super::super::step::{exec, processor, CPACR_ALL, FP_TRAP, ILLEGAL_WHEN_STREAMING, UNDEFINED};
 
 /// `sqrdmlah v0.<T>, v1.<T>, v2.<T>` (`sqrdmlsh` with `sub`) at `size`.
@@ -82,12 +82,32 @@ const ALLOCATED: [u32; 21] = [
 #[test]
 fn the_encoders_match_the_assembler() {
     // aarch64-linux-gnu-as -march=armv8.6-a+i8mm, objdump -d.
-    assert_eq!(rdm_vector(1, false), 0x6E42_8420, "sqrdmlah v0.8h, v1.8h, v2.8h");
+    assert_eq!(
+        rdm_vector(1, false),
+        0x6E42_8420,
+        "sqrdmlah v0.8h, v1.8h, v2.8h"
+    );
     assert_eq!(rdm_scalar(1, false), 0x7E42_8420, "sqrdmlah h0, h1, h2");
-    assert_eq!(rdm_elem(1, false), 0x6F42_D020, "sqrdmlah v0.8h, v1.8h, v2.h[0]");
-    assert_eq!(rdm_scalar_elem(2, false), 0x7F82_D020, "sqrdmlah s0, s1, v2.s[0]");
-    assert_eq!(dot_vector(2, false), 0x4E82_9420, "sdot v0.4s, v1.16b, v2.16b");
-    assert_eq!(dot_elem(2, false), 0x4F82_E020, "sdot v0.4s, v1.16b, v2.4b[0]");
+    assert_eq!(
+        rdm_elem(1, false),
+        0x6F42_D020,
+        "sqrdmlah v0.8h, v1.8h, v2.h[0]"
+    );
+    assert_eq!(
+        rdm_scalar_elem(2, false),
+        0x7F82_D020,
+        "sqrdmlah s0, s1, v2.s[0]"
+    );
+    assert_eq!(
+        dot_vector(2, false),
+        0x4E82_9420,
+        "sdot v0.4s, v1.16b, v2.16b"
+    );
+    assert_eq!(
+        dot_elem(2, false),
+        0x4F82_E020,
+        "sdot v0.4s, v1.16b, v2.4b[0]"
+    );
     assert_eq!(USDOT, 0x4E82_9C20, "usdot v0.4s, v1.16b, v2.16b");
     assert_eq!(SUDOT_ELEM, 0x4F02_F020, "sudot v0.4s, v1.16b, v2.4b[0]");
     assert_eq!(USDOT_ELEM, 0x4F82_F020, "usdot v0.4s, v1.16b, v2.4b[0]");
@@ -157,6 +177,40 @@ fn the_simd_checks_follow_decode() {
     // smstart sm
     assert_eq!(exec(&mut cpu, 0xD503_437F), None);
     for insn in ALLOCATED {
-        assert_eq!(exec(&mut cpu, insn), Some(ILLEGAL_WHEN_STREAMING), "{insn:#010x}");
+        assert_eq!(
+            exec(&mut cpu, insn),
+            Some(ILLEGAL_WHEN_STREAMING),
+            "{insn:#010x}"
+        );
+    }
+}
+
+/// The 64-bit PMULL (`size = 11`) is FEAT_PMULL's (`pmull_advsimd.xml`):
+/// a processor with FEAT_AES and not FEAT_PMULL, which
+/// `ID_AA64ISAR0_EL1.AES` = 1 reports, refuses it and executes the 8-bit
+/// form; the Cortex-A57 (AES = 2) executes both.
+#[test]
+fn the_64_bit_pmull_needs_feat_pmull() {
+    const PMULL_1Q: u32 = 0x0EE2_E020; // pmull v0.1q, v1.1d, v2.1d
+    const PMULL_8H: u32 = 0x0E22_E020; // pmull v0.8h, v1.8b, v2.8b
+    const MRS_ID_AA64ISAR0: u32 = 0xD538_0600; // mrs x0, id_aa64isar0_el1
+    let aes_alone = Implementation {
+        features: Features::of(&[
+            Feature::Base,
+            Feature::Fp,
+            Feature::AdvSimd,
+            Feature::Aes,
+        ]),
+        ..Implementation::CORTEX_A57
+    };
+    for (imp, aes_field, pmull_1q) in [
+        (Implementation::CORTEX_A57, 2, None),
+        (aes_alone, 1, Some(UNDEFINED)),
+    ] {
+        let mut cpu = processor(imp);
+        assert_eq!(exec(&mut cpu, MRS_ID_AA64ISAR0), None);
+        assert_eq!((cpu.x[0] >> 4) & 0xF, aes_field, "{imp:?}");
+        assert_eq!(exec(&mut cpu, PMULL_1Q), pmull_1q, "{imp:?}");
+        assert_eq!(exec(&mut cpu, PMULL_8H), None, "{imp:?}");
     }
 }

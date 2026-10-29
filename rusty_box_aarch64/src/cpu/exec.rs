@@ -1,23 +1,28 @@
 //! Fetch, decode and dispatch: one call of [`Cpu::step`] executes one
-//! instruction or takes one exception.
+//! instruction or takes one exception; `trace.rs` runs many from a trace
+//! through the same pieces.
 //!
 //! Decoding is split in two. The decoder (`isa/`, cached by `decode.rs`)
 //! finds the word's A64 encoding, if it is one of a feature this core
 //! implements, and the handler class that executes it; anything else is
-//! UNDEFINED. The handler for that *class* then reads every operand field
-//! from the word itself, following the field layout and decode pseudocode of
-//! the Arm ARM. A class handler therefore covers its whole encoding group,
-//! and a field the decoder does not expose cannot be misread through it.
+//! UNDEFINED. `op.rs` then extracts the operand fields of the commonest
+//! integer, branch and load/store forms once; every other word goes to the
+//! handler for its *class*, which reads every operand field from the word
+//! itself, following the field layout and decode pseudocode of the Arm ARM.
+//! A class handler therefore covers its whole encoding group, and a field
+//! the decoder does not expose cannot be misread through it.
 
 use rusty_box_core::VmClock;
 
-use super::exception::{Exception, ExceptionClass};
+use super::decode::classify;
+use super::exception::{AddressedClass, Exception, ExceptionClass};
 use super::fp::FpType;
 use super::isa::Class;
 use super::ldst::SingleForm;
+use super::op::predecode;
 use super::za::ZaMove;
 use super::{Activity, Btype, Cpu, Levels};
-use crate::bus::{AccessWidth, BusFault, PhysAddr, PhysBus};
+use crate::bus::{AccessWidth, BusFault, FetchSource, PhysAddr, PhysBus};
 use crate::instrumentation::{Direction, Instrumentation, MemoryAccess};
 
 /// The bus one step executes against: the machine's own, with the observer
@@ -25,13 +30,18 @@ use crate::instrumentation::{Direction, Instrumentation, MemoryAccess};
 /// through unreported — the observer hears of the instruction itself, and a
 /// walk is not an access the program made.
 pub(crate) struct Observed<'a, B, I> {
-    bus: &'a mut B,
+    pub(crate) bus: &'a mut B,
     pub(crate) observer: &'a mut I,
 }
 
 impl<B: PhysBus, I: Instrumentation> PhysBus for Observed<'_, B, I> {
     #[inline(always)]
-    fn read(&mut self, addr: PhysAddr, width: AccessWidth, clock: VmClock) -> Result<u64, BusFault> {
+    fn read(
+        &mut self,
+        addr: PhysAddr,
+        width: AccessWidth,
+        clock: VmClock,
+    ) -> Result<u64, BusFault> {
         let value = self.bus.read(addr, width, clock)?;
         self.observer.memory_access(MemoryAccess {
             address: addr,
@@ -43,7 +53,13 @@ impl<B: PhysBus, I: Instrumentation> PhysBus for Observed<'_, B, I> {
     }
 
     #[inline(always)]
-    fn write(&mut self, addr: PhysAddr, width: AccessWidth, value: u64, clock: VmClock) -> Result<(), BusFault> {
+    fn write(
+        &mut self,
+        addr: PhysAddr,
+        width: AccessWidth,
+        value: u64,
+        clock: VmClock,
+    ) -> Result<(), BusFault> {
         self.bus.write(addr, width, value, clock)?;
         self.observer.memory_access(MemoryAccess {
             address: addr,
@@ -62,6 +78,16 @@ impl<B: PhysBus, I: Instrumentation> PhysBus for Observed<'_, B, I> {
     #[inline(always)]
     fn read_descriptor(&mut self, addr: PhysAddr, clock: VmClock) -> Result<u64, BusFault> {
         self.bus.read_descriptor(addr, clock)
+    }
+
+    #[inline(always)]
+    fn fetch_source(&self, addr: PhysAddr) -> FetchSource {
+        self.bus.fetch_source(addr)
+    }
+
+    #[inline(always)]
+    fn devices_touched(&self) -> bool {
+        self.bus.devices_touched()
     }
 }
 
@@ -107,6 +133,32 @@ pub enum StopCause {
     CpuOff,
 }
 
+/// What one instruction did, for the loop that runs the next.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Done {
+    /// It retired, and the next instruction is the next in sequence.
+    Next,
+    /// It retired or took an exception, and execution goes on elsewhere:
+    /// a taken branch, an exception return, an exception's vector.
+    Elsewhere,
+    /// It retired, and the processor waits for an interrupt.
+    Waiting,
+    /// The machine stops before it.
+    Stop(StopCause),
+}
+
+impl Done {
+    /// The public account of the step.
+    #[inline(always)]
+    pub(crate) const fn step(self) -> Step {
+        match self {
+            Self::Next | Self::Elsewhere => Step::Retired,
+            Self::Waiting => Step::Waiting,
+            Self::Stop(cause) => Step::Stop(cause),
+        }
+    }
+}
+
 /// How control leaves an instruction that completed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Flow {
@@ -138,6 +190,22 @@ impl From<Exception> for Fault {
 }
 
 pub(crate) type ExecResult = Result<Flow, Fault>;
+
+/// What [`Cpu::exec_op`](super::Cpu::exec_op) returns: an [`ExecResult`]
+/// whose fault is kept in a slot its caller provides. A `Fault` is larger
+/// than two registers, so a result that holds one is returned, and merged
+/// from every arm, through memory; this one fits in two, so the trace loop
+/// carries each instruction's result in registers.
+pub(crate) type OpResult<'f> = Result<Flow, &'f Fault>;
+
+/// Keep `fault` in `slot`, for an [`OpResult`] to refer to. Out of line,
+/// and cold, so that the trace loop's register allocation does not depend
+/// on it.
+#[cold]
+#[inline(never)]
+pub(crate) fn keep_fault(slot: &mut Option<Fault>, fault: Fault) -> &Fault {
+    slot.insert(fault)
+}
 
 /// Which faults stop the machine instead of being delivered to the guest.
 /// Both default to delivering, which is what hardware does; stopping is a
@@ -177,82 +245,155 @@ impl<L: Levels> Cpu<L> {
     /// Execute one instruction (or take the exception it raises) against
     /// `bus`, advancing time by one tick unless the step stops the machine,
     /// and tell `observer` what happened.
+    ///
+    /// This is the per-instruction path, with no trace cache: a machine runs
+    /// traces instead (`Cpu::run_trace`), which execute each instruction
+    /// through the same `execute_at` and `finish` steps. It runs exactly
+    /// one instruction, so it fast-forwards nothing.
     pub fn step<B: PhysBus, I: Instrumentation>(&mut self, bus: &mut B, observer: &mut I) -> Step {
         let pc = self.pc;
         let btype = self.pstate.btype;
         let mut observed = Observed { bus, observer };
         let mut fetched = None;
-        let result = self.execute(&mut observed, pc, &mut fetched);
-        let observer = observed.observer;
+        let result = match self.fetch_address(&mut observed, pc) {
+            Ok(pa) => self.execute_at(&mut observed, pc, pa, &mut fetched),
+            Err(fault) => Err(fault),
+        };
         if result.is_err() {
             // An instruction that faults or stops completes nothing:
             // PSTATE.BTYPE stays what the branch to it left.
             self.pstate.btype = btype;
         }
-        match result {
-            Ok(flow) => {
-                self.icount += 1;
-                self.retired += 1;
-                self.pc_history.push_back(pc);
-                if let Some(insn) = fetched {
-                    observer.after_execution(pc, insn);
-                }
-                match flow {
-                    Flow::Next => {
-                        self.pc = pc.wrapping_add(4);
-                        Step::Retired
-                    }
-                    Flow::Jump(target) => {
-                        // Every branch, ERET included, writes the PC through
-                        // `AArch64.BranchAddr` (Arm ARM `BranchTo`).
-                        let target = self.branch_addr(target);
-                        self.pc = target;
-                        observer.branch(pc, target);
-                        Step::Retired
-                    }
-                    Flow::Wait => {
-                        self.pc = pc.wrapping_add(4);
-                        if let Activity::Waiting(wait) = self.activity {
-                            observer.wait(pc, wait);
-                        }
-                        Step::Waiting
-                    }
-                }
-            }
-            Err(Fault::Exception(e)) => {
-                self.icount += 1;
-                self.retired += 1;
-                self.pc_history.push_back(pc);
-                let taken = self.take_sync_exception(e, pc);
-                observer.exception(taken);
-                Step::Retired
-            }
-            Err(Fault::Stop(cause)) => Step::Stop(cause),
-        }
+        self.finish(pc, fetched, result, observed.observer).step()
     }
 
-    fn execute<B: PhysBus, I: Instrumentation>(
+    /// The check that comes before an instruction's fetch, a misaligned PC,
+    /// and the fetch's translation: the physical address of the instruction
+    /// at `pc`. The PC alignment fault and the Instruction Abort come before
+    /// the Illegal Execution state exception in the Arm ARM's priority of
+    /// synchronous exceptions, which [`Cpu::execute_at`] raises once the
+    /// word is fetched.
+    #[inline(always)]
+    pub(crate) fn fetch_address<B: PhysBus>(&mut self, bus: &mut B, pc: u64) -> Result<u64, Fault> {
+        if pc & 3 != 0 {
+            return Err(Exception::at_address(AddressedClass::PcAlignment, 0, pc).into());
+        }
+        self.fetch_translate(bus, pc)
+    }
+
+    /// Fetch the instruction at `pc` from physical address `pa`, decode it
+    /// and execute it: with PSTATE.IL set (an illegal exception return),
+    /// the Illegal Execution state exception instead (Arm
+    /// `AArch64_CheckIllegalState`); with PSTATE.BTYPE set, after the branch
+    /// target check (FEAT_BTI, Arm `BranchTargetCheck`) of the page the
+    /// fetch's translation found ([`Cpu::in_guarded_page`]).
+    #[inline(always)]
+    pub(crate) fn execute_at<B: PhysBus, I: Instrumentation>(
         &mut self,
         bus: &mut Observed<'_, B, I>,
         pc: u64,
+        pa: u64,
         fetched_word: &mut Option<u32>,
     ) -> ExecResult {
-        // An illegal exception return left PSTATE.IL set: the next
-        // instruction raises Illegal Execution State instead of executing.
+        let insn = self.fetch_word(bus, pc, pa)?;
+        *fetched_word = Some(insn);
+        bus.observer.before_execution(pc, insn);
         if self.pstate.il {
             return Err(Exception::new(ExceptionClass::IllegalState, 0).into());
         }
-        if pc & 3 != 0 {
-            return Err(Exception::new(ExceptionClass::PcAlignment, 0).with_far(pc).into());
-        }
-        let fetched = self.fetch(bus, pc)?;
-        let insn = fetched.word;
-        *fetched_word = Some(insn);
-        bus.observer.before_execution(pc, insn);
         if self.pstate.btype != Btype::None {
-            self.branch_target_check(fetched.guarded, insn)?;
+            self.branch_target_check(self.in_guarded_page, insn)?;
         }
-        match self.decode_cache.decode(fetched.pa, insn) {
+        let mut raised = None;
+        self.exec_op(
+            bus,
+            pc,
+            predecode(classify(insn, self.imp.features), insn),
+            &mut raised,
+        )
+        .map_err(|fault| *fault)
+    }
+
+    /// Account for the instruction at `pc`, having ended in `result`: retire
+    /// it or take its exception, move the PC, and tell `observer`.
+    ///
+    /// `fetched` is the instruction's word whenever `result` is `Ok`. For a
+    /// fault it is `None` when the fetch raised it, its word never read, and
+    /// when a trace's instruction raised it (`Cpu::take_fault`), and the
+    /// word when the per-instruction path's execution raised it; a fault
+    /// does not read it.
+    #[inline(always)]
+    pub(crate) fn finish<I: Instrumentation>(
+        &mut self,
+        pc: u64,
+        fetched: Option<u32>,
+        result: ExecResult,
+        observer: &mut I,
+    ) -> Done {
+        match result {
+            Ok(flow) => self.retire(pc, fetched, flow, observer),
+            Err(Fault::Exception(e)) => {
+                self.icount += 1;
+                self.retired += 1;
+                let taken = self.take_sync_exception(e, pc);
+                observer.exception(taken);
+                Done::Elsewhere
+            }
+            Err(Fault::Stop(cause)) => Done::Stop(cause),
+        }
+    }
+
+    /// [`Cpu::finish`] for an instruction that completed, leaving by `flow`.
+    #[inline(always)]
+    pub(crate) fn retire<I: Instrumentation>(
+        &mut self,
+        pc: u64,
+        fetched: Option<u32>,
+        flow: Flow,
+        observer: &mut I,
+    ) -> Done {
+        self.icount += 1;
+        self.retired += 1;
+        if let Some(insn) = fetched {
+            observer.after_execution(pc, insn);
+        }
+        match flow {
+            Flow::Next => {
+                self.pc = pc.wrapping_add(4);
+                Done::Next
+            }
+            Flow::Jump(target) => {
+                // Every branch, ERET included, writes the PC through
+                // `AArch64.BranchAddr` (Arm ARM `BranchTo`).
+                let target = self.branch_addr(target);
+                self.pc = target;
+                self.history.jump(target, self.retired);
+                observer.branch(pc, target);
+                Done::Elsewhere
+            }
+            Flow::Wait => {
+                self.pc = pc.wrapping_add(4);
+                if let Activity::Waiting(wait) = self.activity {
+                    observer.wait(pc, wait);
+                }
+                Done::Waiting
+            }
+        }
+    }
+
+    /// Execute an instruction its class handler executes from the word.
+    /// A branch through a register reads whether its own page is guarded
+    /// (FEAT_BTI) from [`Cpu::in_guarded_page`], which the translation of
+    /// the fetch that brought it set: every instruction a trace runs is on
+    /// the page its first fetch translated.
+    pub(crate) fn exec_class<B: PhysBus>(
+        &mut self,
+        bus: &mut B,
+        pc: u64,
+        class: Class,
+        insn: u32,
+    ) -> ExecResult {
+        match class {
             Class::Undefined => self.undefined(pc, insn),
             Class::Hint => self.exec_hint(insn, pc),
             Class::WaitWithTimeout => self.exec_wfxt(insn),
@@ -274,9 +415,11 @@ impl<L: Levels> Cpu<L> {
             Class::CompareAndBranch => self.exec_compbranch(pc, insn),
             Class::TestAndBranch => self.exec_testbranch(pc, insn),
             Class::BranchImmediate => self.exec_branch_imm(pc, insn),
-            Class::BranchRegister => self.exec_branch_reg(pc, insn, fetched.guarded),
-            Class::AuthenticatedBranch => self.exec_branch_auth(pc, insn, fetched.guarded),
-            Class::ConditionalCompareImmediate | Class::ConditionalCompareRegister => self.exec_condcmp(pc, insn),
+            Class::BranchRegister => self.exec_branch_reg(pc, insn, self.in_guarded_page),
+            Class::AuthenticatedBranch => self.exec_branch_auth(pc, insn, self.in_guarded_page),
+            Class::ConditionalCompareImmediate | Class::ConditionalCompareRegister => {
+                self.exec_condcmp(pc, insn)
+            }
             Class::ConditionalSelect => self.exec_condsel(pc, insn),
             Class::DataProcessing1Source => self.exec_dp1(pc, insn),
             Class::DataProcessing2Source => self.exec_dp2(pc, insn),
@@ -291,12 +434,14 @@ impl<L: Levels> Cpu<L> {
             Class::LoadStoreUnscaled | Class::LoadStoreIndexed | Class::LoadStoreUnprivileged => {
                 self.exec_ldst_single(bus, pc, insn, SingleForm::Immediate9)
             }
-            Class::LoadStoreRegisterOffset => self.exec_ldst_single(bus, pc, insn, SingleForm::RegisterOffset),
+            Class::LoadStoreRegisterOffset => {
+                self.exec_ldst_single(bus, pc, insn, SingleForm::RegisterOffset)
+            }
             Class::LoadAuthenticated => self.exec_load_auth(bus, insn),
             Class::LoadLiteral => self.exec_load_literal(bus, pc, insn),
-            Class::LoadStorePairOffset | Class::LoadStorePairIndexed | Class::LoadStoreNoAllocatePair => {
-                self.exec_ldst_pair(bus, pc, insn)
-            }
+            Class::LoadStorePairOffset
+            | Class::LoadStorePairIndexed
+            | Class::LoadStoreNoAllocatePair => self.exec_ldst_pair(bus, pc, insn),
             Class::LoadStoreExclusive => self.exec_ldst_exclusive(bus, pc, insn),
             Class::AtomicMemoryOperation => self.exec_memop(bus, pc, insn),
             Class::CompareAndSwap => self.exec_cas(bus, insn),
@@ -320,7 +465,9 @@ impl<L: Levels> Cpu<L> {
             Class::SimdScalarThreeDifferent => self.exec_simd_diff(pc, insn, true),
             Class::SimdIndexedElement => self.exec_simd_elem(pc, insn, false),
             Class::SimdRoundingDoublingMultiplyAccumulate => self.exec_simd_rdm(pc, insn, false),
-            Class::SimdScalarRoundingDoublingMultiplyAccumulate => self.exec_simd_rdm(pc, insn, true),
+            Class::SimdScalarRoundingDoublingMultiplyAccumulate => {
+                self.exec_simd_rdm(pc, insn, true)
+            }
             Class::SimdDotProduct => self.exec_simd_dot(pc, insn, false),
             Class::SimdDotProductIndexedElement => self.exec_simd_dot(pc, insn, true),
             Class::SimdMatrixMultiply => self.exec_simd_mmla(pc, insn),
@@ -333,7 +480,9 @@ impl<L: Levels> Cpu<L> {
             Class::SimdFpMulAddLong => self.exec_simd_fmlal(insn, false),
             Class::SimdFpMulAddLongIndexedElement => self.exec_simd_fmlal(insn, true),
             Class::SimdComplexMultiplyAccumulate => self.exec_simd_fcmla(pc, insn, false),
-            Class::SimdComplexMultiplyAccumulateIndexedElement => self.exec_simd_fcmla(pc, insn, true),
+            Class::SimdComplexMultiplyAccumulateIndexedElement => {
+                self.exec_simd_fcmla(pc, insn, true)
+            }
             Class::SimdComplexAdd => self.exec_simd_fcadd(pc, insn),
             Class::SimdBfDotProduct => self.exec_simd_bfdot(insn, false),
             Class::SimdBfDotProductIndexedElement => self.exec_simd_bfdot(insn, true),
@@ -463,8 +612,12 @@ impl<L: Levels> Cpu<L> {
             Class::SmeBinaryOuterProduct => self.exec_sme_binary_outer_product(insn),
             Class::SmeMoveToSlice => self.exec_sme_move_to_slice(insn),
             Class::SmeMoveFromSlice => self.exec_sme_move_from_slice(insn),
-            Class::SmeMoveGroupToSlices => self.exec_sme_move_group_slices(pc, insn, ZaMove::Insert),
-            Class::SmeMoveGroupFromSlices => self.exec_sme_move_group_slices(pc, insn, ZaMove::Extract),
+            Class::SmeMoveGroupToSlices => {
+                self.exec_sme_move_group_slices(pc, insn, ZaMove::Insert)
+            }
+            Class::SmeMoveGroupFromSlices => {
+                self.exec_sme_move_group_slices(pc, insn, ZaMove::Extract)
+            }
             Class::SmeMoveGroupToArray => self.exec_sme_move_group_array(insn, ZaMove::Insert),
             Class::SmeMoveGroupFromArray => self.exec_sme_move_group_array(insn, ZaMove::Extract),
             Class::SmeZero => self.exec_sme_zero(insn),
@@ -482,7 +635,10 @@ impl<L: Levels> Cpu<L> {
     #[inline]
     pub(crate) fn undefined(&self, pc: u64, insn: u32) -> ExecResult {
         if self.debug_stops.on_undefined {
-            Err(Fault::Stop(StopCause::Undefined(UndefinedInsn { pc, insn })))
+            Err(Fault::Stop(StopCause::Undefined(UndefinedInsn {
+                pc,
+                insn,
+            })))
         } else {
             Err(Exception::new(ExceptionClass::Unknown, 0).into())
         }
@@ -507,5 +663,42 @@ impl<L: Levels> Cpu<L> {
         } else {
             result
         }
+    }
+}
+
+/// The condition flags N, Z, C and V as a value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Nzcv {
+    pub(crate) n: bool,
+    pub(crate) z: bool,
+    pub(crate) c: bool,
+    pub(crate) v: bool,
+}
+
+/// The condition `cond` (Arm ARM `ConditionHolds`) against `flags`.
+///
+/// This is [`Cpu::condition_holds`]'s table over a flag value, and
+/// `tests/unit/op.rs` checks the two agree on every condition and flag
+/// state. `condition_holds` keeps its own copy because it runs on every
+/// `b.cond` of the trace loop: reading `PSTATE`'s fields in each arm loads
+/// only the flags that condition names, where a [`Nzcv`] argument is loaded
+/// whole ahead of the condition switch.
+#[inline(always)]
+pub(crate) const fn cond_holds(flags: Nzcv, cond: u32) -> bool {
+    let Nzcv { n, z, c, v } = flags;
+    let result = match cond >> 1 {
+        0 => z,
+        1 => c,
+        2 => n,
+        3 => v,
+        4 => c && !z,
+        5 => n == v,
+        6 => n == v && !z,
+        _ => true,
+    };
+    if cond & 1 == 1 && cond != 0b1111 {
+        !result
+    } else {
+        result
     }
 }

@@ -34,12 +34,12 @@ digits, if it changed):
 Needs an AArch64 Linux C compiler that links statically (CC, default
 aarch64-linux-gnu-gcc) and QEMU's user-mode emulator (QEMU, default
 qemu-aarch64). The vectors in the tree were made with QEMU 11.1.2 with
-docs/qemu-afp-vector-fabs-fneg.patch applied, which changes nothing in
-Streaming SVE mode, docs/qemu-sve-fcmla-indexed-ah.patch,
-docs/qemu-sve-fmad-size00.patch and docs/qemu-sme-ld1-vertical-tail.patch,
+docs/patches/qemu/qemu-afp-vector-fabs-fneg.patch applied, which changes nothing in
+Streaming SVE mode, docs/patches/qemu/qemu-sve-fcmla-indexed-ah.patch,
+docs/patches/qemu/qemu-sve-fmad-size00.patch and docs/patches/qemu/qemu-sme-ld1-vertical-tail.patch,
 which bring FCMLA (indexed), FMAD and the SME LD1 to a vertical tile slice
 to the Arm ARM (docs/qemu-upstream-bugs.md, entries 13 to 15), and
-docs/qemu-sme2-movt-debug-state.patch, which changes no family's word
+docs/patches/qemu/qemu-sme2-movt-debug-state.patch, which changes no family's word
 (entry 16). QEMU is a
 second implementation, not the reference: where it and this core differ,
 the Arm ARM's pseudocode decides.

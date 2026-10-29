@@ -112,7 +112,10 @@ fn op(insn: u32, fpcr: u64, a: u128, b: u128) -> (u128, u64) {
 /// FPCR.FIZ, AH and NEP are FEAT_AFP's, RES0 without it.
 #[test]
 fn a_guest_sets_fiz_ah_and_nep_with_feat_afp_only() {
-    for (imp, kept) in [(Implementation::EVERY_FEATURE, FIZ | AH | NEP | FZ), (Implementation::CORTEX_A57, FZ)] {
+    for (imp, kept) in [
+        (Implementation::EVERY_FEATURE, FIZ | AH | NEP | FZ),
+        (Implementation::CORTEX_A57, FZ),
+    ] {
         let mut cpu = processor(imp);
         cpu.x[1] = FIZ | AH | NEP | FZ;
         assert_eq!(exec(&mut cpu, MSR_FPCR), None);
@@ -226,7 +229,10 @@ fn alternate_fmax_and_fmin_give_the_second_operand() {
     assert_eq!(op(FMIN_S, 0, NEG_ZERO, 0), (NEG_ZERO, 0));
     assert_eq!(op(FMIN_S, AH, NEG_ZERO, 0), (0, 0));
     assert_eq!(op(FMAX_S, AH | FZ, DENORMAL, 0xBF80_0000), (DENORMAL, IDC));
-    assert_eq!(op(FMAXNM_S, AH | FZ, DENORMAL, 0xBF80_0000), (0, IDC | UFC | IXC));
+    assert_eq!(
+        op(FMAXNM_S, AH | FZ, DENORMAL, 0xBF80_0000),
+        (0, IDC | UFC | IXC)
+    );
     // Two NaNs: FPMaxNum replaces the quiet one under FPCR.AH = 0; under
     // FPCR.AH = 1 FPProcessNaNs takes the first.
     assert_eq!(op(FMAXNM_S, 0, QNAN, 0x7F80_0002), (0x7FC0_0002, IOC));
@@ -245,10 +251,20 @@ fn alternate_abs_and_neg_keep_a_nan_s_sign() {
     assert_eq!(op(FNEG_S, AH, ONE, 0), (0xBF80_0000, 0));
     assert_eq!(op(FABS_S, 0, 0xFFC0_0001, 0), (QNAN, 0));
     assert_eq!(op(FABS_S, AH, 0xFFC0_0001, 0), (0xFFC0_0001, 0));
-    let lanes = |l: [u32; 4]| l.iter().rev().fold(0u128, |acc, &x| (acc << 32) | u128::from(x));
+    let lanes = |l: [u32; 4]| {
+        l.iter()
+            .rev()
+            .fold(0u128, |acc, &x| (acc << 32) | u128::from(x))
+    };
     let v = lanes([0x7FC0_0001, 0x3F80_0000, 0xFF80_0001, 0]);
-    assert_eq!(op(FNEG_4S, 0, v, 0).0, lanes([0xFFC0_0001, 0xBF80_0000, 0x7F80_0001, 0x8000_0000]));
-    assert_eq!(op(FNEG_4S, AH, v, 0).0, lanes([0x7FC0_0001, 0xBF80_0000, 0xFF80_0001, 0x8000_0000]));
+    assert_eq!(
+        op(FNEG_4S, 0, v, 0).0,
+        lanes([0xFFC0_0001, 0xBF80_0000, 0x7F80_0001, 0x8000_0000])
+    );
+    assert_eq!(
+        op(FNEG_4S, AH, v, 0).0,
+        lanes([0x7FC0_0001, 0xBF80_0000, 0xFF80_0001, 0x8000_0000])
+    );
     assert_eq!(op(FNMUL_S, 0, SNAN, ONE), (0xFFC0_0001, IOC));
     assert_eq!(op(FNMUL_S, AH, SNAN, ONE), (0x7FC0_0001, IOC));
     assert_eq!(op(FABD_S, 0, 0xFFC0_0001, ONE), (QNAN, 0));
@@ -317,7 +333,12 @@ fn with_upper(n: u32, low: u128) -> u128 {
 /// mode, where FPCR.NEP reads as 0 without FEAT_SME_FA64.
 #[test]
 fn nep_merges_scalar_results_into_the_named_register() {
-    let v = [with_upper(0, 0), with_upper(1, ONE), with_upper(2, ONE), with_upper(3, ONE)];
+    let v = [
+        with_upper(0, 0),
+        with_upper(1, ONE),
+        with_upper(2, ONE),
+        with_upper(3, ONE),
+    ];
     let merged = |insn: u32, fpcr: u64| {
         let mut cpu = processor(Implementation::EVERY_FEATURE);
         cpu.fpcr = fpcr;
@@ -341,7 +362,11 @@ fn nep_merges_scalar_results_into_the_named_register() {
     ];
     for (insn, esize, source) in cases {
         let expected = source.map_or(0, |n| with_upper(n, 0) >> esize << esize);
-        assert_eq!(merged(insn, NEP) >> esize << esize, expected, "{insn:#010x} under NEP");
+        assert_eq!(
+            merged(insn, NEP) >> esize << esize,
+            expected,
+            "{insn:#010x} under NEP"
+        );
         assert_eq!(merged(insn, 0) >> esize, 0, "{insn:#010x} without NEP");
     }
     assert_eq!(merged(FADD_S, NEP) as u32, 0x4000_0000, "1.0 + 1.0");

@@ -3,11 +3,13 @@
 //! the instructions with an immediate. Each handler names the Arm pages it
 //! is.
 
-use super::{decode_pred_count, int, mul_high, sat_add_scalar, sat_doubling_mul_high, sat_q, Esize, Zv};
-use crate::cpu::features::VecLen;
+use super::{
+    decode_pred_count, int, mul_high, sat_add_scalar, sat_doubling_mul_high, sat_q, Esize, Zv,
+};
 use crate::cpu::crypto::polynomial_mult;
 use crate::cpu::dp::{decode_bit_masks, ror};
 use crate::cpu::exec::{bit, bits, sext, ExecResult, Flow};
+use crate::cpu::features::VecLen;
 use crate::cpu::fp::FpType;
 use crate::cpu::simd::vfp_expand_imm;
 use crate::cpu::{Cpu, Levels};
@@ -94,7 +96,9 @@ impl BinOp {
             Self::SubReversed => b.wrapping_sub(a) & m,
             Self::Max { unsigned } => int(a, es, unsigned).max(int(b, es, unsigned)) as u64 & m,
             Self::Min { unsigned } => int(a, es, unsigned).min(int(b, es, unsigned)) as u64 & m,
-            Self::AbsDiff { unsigned } => (int(a, es, unsigned) - int(b, es, unsigned)).unsigned_abs() as u64 & m,
+            Self::AbsDiff { unsigned } => {
+                (int(a, es, unsigned) - int(b, es, unsigned)).unsigned_abs() as u64 & m
+            }
             Self::Mul => a.wrapping_mul(b) & m,
             Self::MulHigh { unsigned } => mul_high(a, b, es, unsigned),
             Self::Div { unsigned } => divide(a, b, es, unsigned),
@@ -171,9 +175,13 @@ enum Unary {
 enum MulUnpredicated {
     Mul,
     Pmul,
-    MulHigh { unsigned: bool },
+    MulHigh {
+        unsigned: bool,
+    },
     /// SQDMULH, SQRDMULH (`rounding`).
-    DoublingHigh { rounding: bool },
+    DoublingHigh {
+        rounding: bool,
+    },
 }
 
 /// The forms of `sve_countelt`.
@@ -206,7 +214,10 @@ pub(super) struct ShiftAmounts {
 pub(super) fn shift_amounts(tsize_imm3: u32, es: Esize) -> ShiftAmounts {
     let encoded = u64::from(tsize_imm3);
     let width = u64::from(es.bits());
-    ShiftAmounts { right: 2 * width - encoded, left: encoded - width }
+    ShiftAmounts {
+        right: 2 * width - encoded,
+        left: encoded - width,
+    }
 }
 
 impl<L: Levels> Cpu<L> {
@@ -215,7 +226,9 @@ impl<L: Levels> Cpu<L> {
     /// predicated): `00000100 size 0 op0:opc 000 Pg Zm Zdn`. The divides
     /// take 32- and 64-bit elements only.
     pub(crate) fn exec_sve_int_bin_pred(&mut self, pc: u64, insn: u32) -> ExecResult {
-        let Some(op) = BinOp::from_field(bits(insn, 20, 16)) else { return self.undefined(pc, insn) };
+        let Some(op) = BinOp::from_field(bits(insn, 20, 16)) else {
+            return self.undefined(pc, insn);
+        };
         let size = bits(insn, 23, 22);
         if matches!(op, BinOp::Div { .. } | BinOp::DivReversed { .. }) && size < 0b10 {
             return self.undefined(pc, insn);
@@ -229,7 +242,11 @@ impl<L: Levels> Cpu<L> {
         let mut result = operand1;
         for e in 0..es.elements(vl) {
             if mask.active(e, es) {
-                result.set(e, es, op.apply(operand1.get(e, es), operand2.get(e, es), es));
+                result.set(
+                    e,
+                    es,
+                    op.apply(operand1.get(e, es), operand2.get(e, es), es),
+                );
             }
         }
         self.set_z(dn, vl, &result);
@@ -259,16 +276,26 @@ impl<L: Levels> Cpu<L> {
         let vl = self.sve_check()?;
         let mask = self.p(g, vl);
         let operand = self.z(n, vl);
-        let active = (0..es.elements(vl)).filter(|&e| mask.active(e, es)).map(|e| operand.get(e, es));
+        let active = (0..es.elements(vl))
+            .filter(|&e| mask.active(e, es))
+            .map(|e| operand.get(e, es));
         let result = match op {
-            Reduction::SignedAdd => active.fold(0i64, |sum, x| sum.wrapping_add(es.signed(x))) as u64,
+            Reduction::SignedAdd => {
+                active.fold(0i64, |sum, x| sum.wrapping_add(es.signed(x))) as u64
+            }
             Reduction::UnsignedAdd => active.fold(0u64, u64::wrapping_add),
             Reduction::Max { unsigned: false } => {
-                active.map(|x| es.signed(x)).fold(es.signed(1 << (es.bits() - 1)), i64::max) as u64 & es.mask()
+                active
+                    .map(|x| es.signed(x))
+                    .fold(es.signed(1 << (es.bits() - 1)), i64::max) as u64
+                    & es.mask()
             }
             Reduction::Max { unsigned: true } => active.fold(0, u64::max),
             Reduction::Min { unsigned: false } => {
-                active.map(|x| es.signed(x)).fold(es.signed(es.mask() >> 1), i64::min) as u64 & es.mask()
+                active
+                    .map(|x| es.signed(x))
+                    .fold(es.signed(es.mask() >> 1), i64::min) as u64
+                    & es.mask()
             }
             Reduction::Min { unsigned: true } => active.fold(es.mask(), u64::min),
             Reduction::Orr => active.fold(0, |r, x| r | x),
@@ -291,7 +318,11 @@ impl<L: Levels> Cpu<L> {
         let result = if predicated {
             let es = Esize::from_size(bits(insn, 23, 22));
             let mask = self.p(bits(insn, 12, 10), vl);
-            let mut result = if bit(insn, 16) { self.z(d, vl) } else { Zv::ZERO };
+            let mut result = if bit(insn, 16) {
+                self.z(d, vl)
+            } else {
+                Zv::ZERO
+            };
             for e in 0..es.elements(vl) {
                 if mask.active(e, es) {
                     result.set(e, es, operand1.get(e, es));
@@ -320,7 +351,8 @@ impl<L: Levels> Cpu<L> {
                     return self.undefined(pc, insn);
                 }
                 let es = Esize::from_tsize(tsize);
-                let ShiftAmounts { right, left } = shift_amounts((tsize << 3) | bits(insn, 7, 5), es);
+                let ShiftAmounts { right, left } =
+                    shift_amounts((tsize << 3) | bits(insn, 7, 5), es);
                 let op = match bits(insn, 19, 16) {
                     0b0000 => ShiftImmediate::Asr,
                     0b0001 => ShiftImmediate::Lsr,
@@ -353,8 +385,12 @@ impl<L: Levels> Cpu<L> {
                         }
                         ShiftImmediate::Sqshl => sat_q(int(x, es, false) << left, es, false),
                         ShiftImmediate::Uqshl => sat_q(int(x, es, true) << left, es, true),
-                        ShiftImmediate::Srshr => ((int(x, es, false) + (1 << (right - 1))) >> right) as u64 & es.mask(),
-                        ShiftImmediate::Urshr => ((int(x, es, true) + (1 << (right - 1))) >> right) as u64 & es.mask(),
+                        ShiftImmediate::Srshr => {
+                            ((int(x, es, false) + (1 << (right - 1))) >> right) as u64 & es.mask()
+                        }
+                        ShiftImmediate::Urshr => {
+                            ((int(x, es, true) + (1 << (right - 1))) >> right) as u64 & es.mask()
+                        }
                         ShiftImmediate::Sqshlu => sat_q(int(x, es, false) << left, es, true),
                     };
                     result.set(e, es, r);
@@ -388,7 +424,10 @@ impl<L: Levels> Cpu<L> {
                         continue;
                     }
                     let (value, amount) = if wide {
-                        (operand1.get(e, es), operand2.get(e * es.bytes() / 8, Esize::D))
+                        (
+                            operand1.get(e, es),
+                            operand2.get(e * es.bytes() / 8, Esize::D),
+                        )
                     } else if reversed {
                         (operand2.get(e, es), operand1.get(e, es))
                     } else {
@@ -452,7 +491,9 @@ impl<L: Levels> Cpu<L> {
                 Unary::Abs => es.signed(x).unsigned_abs(),
                 Unary::Neg => x.wrapping_neg(),
                 // CLS: CountLeadingZeroBits(x<N-1:1> EOR x<N-2:0>).
-                Unary::Cls => u64::from((((x >> 1) ^ x) & (es.mask() >> 1)).leading_zeros() - (64 - (width - 1))),
+                Unary::Cls => u64::from(
+                    (((x >> 1) ^ x) & (es.mask() >> 1)).leading_zeros() - (64 - (width - 1)),
+                ),
                 Unary::Clz => u64::from((x & es.mask()).leading_zeros() - (64 - width)),
                 Unary::Cnt => u64::from((x & es.mask()).count_ones()),
                 Unary::Cnot => u64::from(x & es.mask() == 0),
@@ -471,7 +512,12 @@ impl<L: Levels> Cpu<L> {
     /// inactive elements keep the destination's.
     pub(crate) fn exec_sve_mul_add(&mut self, insn: u32) -> ExecResult {
         let es = Esize::from_size(bits(insn, 23, 22));
-        let (m, g, n9, d) = (bits(insn, 20, 16), bits(insn, 12, 10), bits(insn, 9, 5), bits(insn, 4, 0));
+        let (m, g, n9, d) = (
+            bits(insn, 20, 16),
+            bits(insn, 12, 10),
+            bits(insn, 9, 5),
+            bits(insn, 4, 0),
+        );
         let subtract = bit(insn, 13);
         let multiplicand_is_dest = bit(insn, 15);
         let vl = self.sve_check()?;
@@ -481,13 +527,21 @@ impl<L: Levels> Cpu<L> {
         let operand2 = self.z(m, vl);
         // MLA: the addend is Zda, the multiplicand Zn; MAD: the addend Za,
         // the multiplicand Zdn.
-        let (multiplicand, addend) = if multiplicand_is_dest { (&dest, &other) } else { (&other, &dest) };
+        let (multiplicand, addend) = if multiplicand_is_dest {
+            (&dest, &other)
+        } else {
+            (&other, &dest)
+        };
         let mut result = dest;
         for e in 0..es.elements(vl) {
             if mask.active(e, es) {
                 let product = multiplicand.get(e, es).wrapping_mul(operand2.get(e, es));
                 let a = addend.get(e, es);
-                let r = if subtract { a.wrapping_sub(product) } else { a.wrapping_add(product) };
+                let r = if subtract {
+                    a.wrapping_sub(product)
+                } else {
+                    a.wrapping_add(product)
+                };
                 result.set(e, es, r);
             }
         }
@@ -579,7 +633,11 @@ impl<L: Levels> Cpu<L> {
                 let operand3 = self.z(k, vl);
                 let mut result = Zv::ZERO;
                 for e in 0..Esize::D.elements(vl) {
-                    let (a, b, c) = (operand1.get(e, Esize::D), operand2.get(e, Esize::D), operand3.get(e, Esize::D));
+                    let (a, b, c) = (
+                        operand1.get(e, Esize::D),
+                        operand2.get(e, Esize::D),
+                        operand3.get(e, Esize::D),
+                    );
                     let r = match (opc, o2) {
                         (0b00, false) => a ^ b ^ c,
                         (0b01, false) => a ^ (b & !c),
@@ -649,12 +707,24 @@ impl<L: Levels> Cpu<L> {
         let es = Esize::from_size(bits(insn, 23, 22));
         let d = bits(insn, 4, 0);
         let (start_field, step_field) = (bits(insn, 9, 5), bits(insn, 20, 16));
-        let start = if bit(insn, 10) { es.signed(self.x_or_zr(start_field)) } else { sext(u64::from(start_field), 5) as i64 };
-        let step = if bit(insn, 11) { es.signed(self.x_or_zr(step_field)) } else { sext(u64::from(step_field), 5) as i64 };
+        let start = if bit(insn, 10) {
+            es.signed(self.x_or_zr(start_field))
+        } else {
+            sext(u64::from(start_field), 5) as i64
+        };
+        let step = if bit(insn, 11) {
+            es.signed(self.x_or_zr(step_field))
+        } else {
+            sext(u64::from(step_field), 5) as i64
+        };
         let vl = self.sve_check()?;
         let mut result = Zv::ZERO;
         for e in 0..es.elements(vl) {
-            result.set(e, es, start.wrapping_add((e as i64).wrapping_mul(step)) as u64);
+            result.set(
+                e,
+                es,
+                start.wrapping_add((e as i64).wrapping_mul(step)) as u64,
+            );
         }
         self.set_z(d, vl, &result);
         Ok(Flow::Next)
@@ -685,7 +755,9 @@ impl<L: Levels> Cpu<L> {
                 MulUnpredicated::Mul => a.wrapping_mul(b),
                 MulUnpredicated::Pmul => polynomial_mult(a, b, 8) as u64,
                 MulUnpredicated::MulHigh { unsigned } => mul_high(a, b, es, unsigned),
-                MulUnpredicated::DoublingHigh { rounding } => sat_doubling_mul_high(a, b, es, rounding),
+                MulUnpredicated::DoublingHigh { rounding } => {
+                    sat_doubling_mul_high(a, b, es, rounding)
+                }
             };
             result.set(e, es, r);
         }
@@ -713,8 +785,15 @@ impl<L: Levels> Cpu<L> {
         };
         // The saturating forms have D at bit 11 and U at 10; the others D
         // at 10.
-        let saturating = matches!(form, ElementCount::SaturatingVector | ElementCount::SaturatingScalar { .. });
-        let (decrement, unsigned) = if saturating { (bit(insn, 11), bit(insn, 10)) } else { (bit(insn, 10), false) };
+        let saturating = matches!(
+            form,
+            ElementCount::SaturatingVector | ElementCount::SaturatingScalar { .. }
+        );
+        let (decrement, unsigned) = if saturating {
+            (bit(insn, 11), bit(insn, 10))
+        } else {
+            (bit(insn, 10), false)
+        };
         let vl = self.sve_check()?;
         let count = decode_pred_count(pattern, es, vl) as i128 * imm;
         let delta = if decrement { -count } else { count };
@@ -723,7 +802,11 @@ impl<L: Levels> Cpu<L> {
                 let operand = self.z(dn, vl);
                 let mut result = Zv::ZERO;
                 for e in 0..es.elements(vl) {
-                    result.set(e, es, sat_q(int(operand.get(e, es), es, unsigned) + delta, es, unsigned));
+                    result.set(
+                        e,
+                        es,
+                        sat_q(int(operand.get(e, es), es, unsigned) + delta, es, unsigned),
+                    );
                 }
                 self.set_z(dn, vl, &result);
             }
@@ -753,7 +836,13 @@ impl<L: Levels> Cpu<L> {
     /// `DecodeBitMasks` makes of `imm13`, UNDEFINED where it is reserved.
     pub(crate) fn exec_sve_bitmask_imm(&mut self, pc: u64, insn: u32) -> ExecResult {
         let imm13 = bits(insn, 17, 5);
-        let Some(masks) = decode_bit_masks(imm13 & 0x1000 != 0, imm13 & 0x3F, (imm13 >> 6) & 0x3F, true, 64) else {
+        let Some(masks) = decode_bit_masks(
+            imm13 & 0x1000 != 0,
+            imm13 & 0x3F,
+            (imm13 >> 6) & 0x3F,
+            true,
+            64,
+        ) else {
             return self.undefined(pc, insn);
         };
         let imm = masks.wmask;
@@ -859,7 +948,11 @@ impl<L: Levels> Cpu<L> {
                     return self.undefined(pc, insn);
                 }
                 let unsigned = !multiply && opc & 1 != 0;
-                let imm = if unsigned { i128::from(imm8) } else { i128::from(sext(imm8, 8) as i64) };
+                let imm = if unsigned {
+                    i128::from(imm8)
+                } else {
+                    i128::from(sext(imm8, 8) as i64)
+                };
                 let vl = self.sve_check()?;
                 let operand = self.z(dn, vl);
                 let mut result = Zv::ZERO;
@@ -924,8 +1017,14 @@ impl<L: Levels> Cpu<L> {
     /// length in bytes (`op` = 1).
     pub(crate) fn add_vector_length(&mut self, insn: u32, vl: VecLen) {
         let imm = sext(u64::from(bits(insn, 10, 5)), 6);
-        let unit = if bit(insn, 22) { vl.predicate_bytes() } else { vl.bytes() };
-        let result = self.x_or_sp(bits(insn, 20, 16)).wrapping_add(imm.wrapping_mul(unit as u64));
+        let unit = if bit(insn, 22) {
+            vl.predicate_bytes()
+        } else {
+            vl.bytes()
+        };
+        let result = self
+            .x_or_sp(bits(insn, 20, 16))
+            .wrapping_add(imm.wrapping_mul(unit as u64));
         self.set_x_or_sp(bits(insn, 4, 0), result);
     }
 

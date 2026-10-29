@@ -10,8 +10,8 @@
 
 use super::dp::extend_reg;
 use super::exec::{bit, bits, sext, ExecResult, Flow};
-use super::mmu::{DataAccess, DataDirection};
-use super::{Cpu, Levels};
+use super::mmu::{DataAccess, DataDirection, ElementPair, QuadwordPair};
+use super::{Cpu, ExclusiveMonitor, Levels};
 use crate::bus::PhysBus;
 
 /// How a single-register load/store forms its address: the three offset
@@ -46,7 +46,13 @@ impl<L: Levels> Cpu<L> {
 
     /// LDR/STR and friends, every single-register form except the literal:
     /// `size 111 V 0x opc ...` with the offset form `form`.
-    pub(crate) fn exec_ldst_single<B: PhysBus>(&mut self, bus: &mut B, pc: u64, insn: u32, form: SingleForm) -> ExecResult {
+    pub(crate) fn exec_ldst_single<B: PhysBus>(
+        &mut self,
+        bus: &mut B,
+        pc: u64,
+        insn: u32,
+        form: SingleForm,
+    ) -> ExecResult {
         let size = bits(insn, 31, 30);
         let vector = bit(insn, 26);
         let opc = bits(insn, 23, 22);
@@ -54,9 +60,34 @@ impl<L: Levels> Cpu<L> {
         let rt = bits(insn, 4, 0);
 
         // Element size: for SIMD&FP registers opc<1> selects the 128-bit form.
-        let scale = if vector { ((opc >> 1) << 2) | size } else { size };
-        if vector && scale > 4 {
+        let scale = if vector {
+            ((opc >> 1) << 2) | size
+        } else {
+            size
+        };
+        // The Decode sections' UNDEFINED cases, which come before Execute's
+        // SIMD&FP enable check: a SIMD&FP register is at most 128 bits and
+        // has no unprivileged form, LDRSB/LDRSH to a W register have no word
+        // or doubleword size, and every register-offset form needs
+        // `option<1>` (`ldr_reg_fpsimd.xml`, `ldr_reg_gen.xml`: "sub-word
+        // index").
+        let unprivileged = form == SingleForm::Immediate9 && bits(insn, 11, 10) == 0b10;
+        if (vector && (scale > 4 || unprivileged))
+            || (!vector && opc == 3 && size >= 2)
+            || (form == SingleForm::RegisterOffset && bits(insn, 15, 13) & 2 == 0)
+        {
             return self.undefined(pc, insn);
+        }
+        // PRFM (immediate), PRFUM, PRFM (register) and the RPRFM words the
+        // decoder gives PRFM (register): a hint with no architectural
+        // effect. Arm forms its address from SP or Xn with no
+        // `CheckSPAlignment` and accesses nothing, so it cannot fault. There
+        // is no pre-indexed, post-indexed or unprivileged prefetch.
+        if !vector && size == 3 && opc == 2 {
+            if form == SingleForm::Immediate9 && bits(insn, 11, 10) != 0b00 {
+                return self.undefined(pc, insn);
+            }
+            return Ok(Flow::Next);
         }
         if vector {
             self.fp_check()?;
@@ -91,9 +122,6 @@ impl<L: Levels> Cpu<L> {
                         }
                     }
                     _ => {
-                        if vector {
-                            return self.undefined(pc, insn);
-                        }
                         // LDTR/STTR: EL0 permissions when executed at EL1.
                         acc = DataAccess::UNPRIVILEGED;
                         Addressing {
@@ -105,9 +133,6 @@ impl<L: Levels> Cpu<L> {
             }
             SingleForm::RegisterOffset => {
                 let option = bits(insn, 15, 13);
-                if option & 2 == 0 {
-                    return self.undefined(pc, insn);
-                }
                 let shift = if bit(insn, 12) { scale } else { 0 };
                 let offset = extend_reg(self.x_or_zr(bits(insn, 20, 16)), option, shift, 64);
                 let base = self.base_register(rn)?;
@@ -136,7 +161,6 @@ impl<L: Levels> Cpu<L> {
                 self.write_mem(bus, addressing.address, scale, v, acc)?;
             }
         } else {
-            let is_prefetch = size == 3 && opc == 2;
             match opc {
                 0 => {
                     let v = self.x_or_zr(rt);
@@ -146,25 +170,13 @@ impl<L: Levels> Cpu<L> {
                     let v = self.read_mem(bus, addressing.address, size, acc)?;
                     self.set_x_or_zr(rt, v);
                 }
-                2 if is_prefetch => {
-                    // PRFM/PRFUM: a hint with no architectural effect. There is
-                    // no pre/post-indexed or unprivileged prefetch.
-                    if addressing.writeback.is_some() || acc.unprivileged {
-                        return self.undefined(pc, insn);
-                    }
-                    return Ok(Flow::Next);
-                }
                 2 => {
                     // LDRSB/LDRSH/LDRSW to a 64-bit register.
                     let v = self.read_mem(bus, addressing.address, size, acc)?;
                     self.set_x_or_zr(rt, sext(v, 8 << size));
                 }
                 _ => {
-                    // LDRSB/LDRSH to a 32-bit register; size 2 and 3 are not
-                    // defined here.
-                    if size >= 2 {
-                        return self.undefined(pc, insn);
-                    }
+                    // LDRSB/LDRSH to a 32-bit register.
                     let v = self.read_mem(bus, addressing.address, size, acc)?;
                     self.set_x_or_zr(rt, sext(v, 8 << size) & 0xFFFF_FFFF);
                 }
@@ -179,7 +191,12 @@ impl<L: Levels> Cpu<L> {
 
     /// LDR (literal), LDRSW (literal), PRFM (literal) and the SIMD&FP
     /// literal loads: `opc 011 V 00 imm19 Rt`.
-    pub(crate) fn exec_load_literal<B: PhysBus>(&mut self, bus: &mut B, pc: u64, insn: u32) -> ExecResult {
+    pub(crate) fn exec_load_literal<B: PhysBus>(
+        &mut self,
+        bus: &mut B,
+        pc: u64,
+        insn: u32,
+    ) -> ExecResult {
         let opc = bits(insn, 31, 30);
         let vector = bit(insn, 26);
         let rt = bits(insn, 4, 0);
@@ -217,7 +234,12 @@ impl<L: Levels> Cpu<L> {
 
     /// LDP/STP/LDPSW/LDNP/STNP, general and SIMD&FP:
     /// `opc 101 V 0 index L imm7 Rt2 Rn Rt`.
-    pub(crate) fn exec_ldst_pair<B: PhysBus>(&mut self, bus: &mut B, pc: u64, insn: u32) -> ExecResult {
+    pub(crate) fn exec_ldst_pair<B: PhysBus>(
+        &mut self,
+        bus: &mut B,
+        pc: u64,
+        insn: u32,
+    ) -> ExecResult {
         let opc = bits(insn, 31, 30);
         let vector = bit(insn, 26);
         let index = bits(insn, 24, 23);
@@ -249,38 +271,47 @@ impl<L: Levels> Cpu<L> {
             }
             _ => (base.wrapping_add(offset), None),
         };
-        let step = 1u64 << scale;
         let acc = DataAccess::NORMAL;
 
         if vector {
             if load {
-                let (a, b) = if scale == 4 {
-                    (
-                        self.read_mem_u128(bus, address, acc)?,
-                        self.read_mem_u128(bus, address.wrapping_add(step), acc)?,
-                    )
+                let pair = if scale == 4 {
+                    self.read_mem_q_pair(bus, address, acc)?
                 } else {
-                    (
-                        u128::from(self.read_mem(bus, address, scale, acc)?),
-                        u128::from(self.read_mem(bus, address.wrapping_add(step), scale, acc)?),
-                    )
+                    let pair = self.read_pair(bus, address, scale, acc)?;
+                    QuadwordPair {
+                        first: u128::from(pair.first),
+                        second: u128::from(pair.second),
+                    }
                 };
-                self.write_v(rt as usize, a);
-                self.write_v(rt2 as usize, b);
+                self.write_v(rt as usize, pair.first);
+                self.write_v(rt2 as usize, pair.second);
             } else {
                 let (a, b) = (self.v[rt as usize], self.v[rt2 as usize]);
                 if scale == 4 {
-                    self.write_mem_u128(bus, address, a, acc)?;
-                    self.write_mem_u128(bus, address.wrapping_add(step), b, acc)?;
+                    let value = QuadwordPair {
+                        first: a,
+                        second: b,
+                    };
+                    self.write_mem_q_pair(bus, address, value, acc)?;
                 } else {
-                    self.write_mem(bus, address, scale, a as u64, acc)?;
-                    self.write_mem(bus, address.wrapping_add(step), scale, b as u64, acc)?;
+                    let value = ElementPair {
+                        first: a as u64,
+                        second: b as u64,
+                    };
+                    self.write_pair(bus, address, scale, value, acc)?;
                 }
             }
         } else if load {
-            let a = self.read_mem(bus, address, scale, acc)?;
-            let b = self.read_mem(bus, address.wrapping_add(step), scale, acc)?;
-            let (a, b) = if signed { (sext(a, 32), sext(b, 32)) } else { (a, b) };
+            let ElementPair {
+                first: a,
+                second: b,
+            } = self.read_pair(bus, address, scale, acc)?;
+            let (a, b) = if signed {
+                (sext(a, 32), sext(b, 32))
+            } else {
+                (a, b)
+            };
             // With Rt == Rt2 the result is CONSTRAINED UNPREDICTABLE. QEMU
             // (translate-a64.c `trans_LDP`) loads a 32-bit pair as one
             // 64-bit value and writes Rt2 then Rt, but splits a 64-bit pair
@@ -293,9 +324,11 @@ impl<L: Levels> Cpu<L> {
                 self.set_x_or_zr(rt2, b);
             }
         } else {
-            let (a, b) = (self.x_or_zr(rt), self.x_or_zr(rt2));
-            self.write_mem(bus, address, scale, a, acc)?;
-            self.write_mem(bus, address.wrapping_add(step), scale, b, acc)?;
+            let value = ElementPair {
+                first: self.x_or_zr(rt),
+                second: self.x_or_zr(rt2),
+            };
+            self.write_pair(bus, address, scale, value, acc)?;
         }
 
         if let Some(wb) = writeback {
@@ -308,7 +341,12 @@ impl<L: Levels> Cpu<L> {
     /// `size 001000 o2 L o1 Rs o0 Rt2 Rn Rt` (Arm groups `ldstexclr`,
     /// `ldstexclp` and `ldstord`). CAS and CASP share the space and are
     /// `exec_cas` and `exec_casp`.
-    pub(crate) fn exec_ldst_exclusive<B: PhysBus>(&mut self, bus: &mut B, pc: u64, insn: u32) -> ExecResult {
+    pub(crate) fn exec_ldst_exclusive<B: PhysBus>(
+        &mut self,
+        bus: &mut B,
+        pc: u64,
+        insn: u32,
+    ) -> ExecResult {
         let size = bits(insn, 31, 30);
         let o2 = bit(insn, 23);
         let load = bit(insn, 22);
@@ -348,35 +386,68 @@ impl<L: Levels> Cpu<L> {
         let total = 1u64 << total_log2;
 
         if load {
-            let pa = self.translate_for(bus, address, total, DataDirection::Read, DataAccess::ATOMIC)?;
-            if pair {
-                let elem = 1u64 << size;
-                let a = self.read_mem(bus, address, size, DataAccess::ATOMIC)?;
-                let b = self.read_mem(bus, address.wrapping_add(elem), size, DataAccess::ATOMIC)?;
+            let pa =
+                self.translate_for(bus, address, total, DataDirection::Read, DataAccess::ATOMIC)?;
+            if pair && size == 2 {
+                // A pair of words is one single-copy atomic doubleword
+                // (`ldxp.xml`: `Mem{64}`), Rt's word the low one.
+                let v = self.read_mem(bus, address, 3, DataAccess::ATOMIC)?;
+                self.set_x_or_zr(rt, v & 0xFFFF_FFFF);
+                self.set_x_or_zr(rt2, v >> 32);
+            } else if pair {
+                let a = self.read_mem(bus, address, 3, DataAccess::ATOMIC)?;
+                let b = self.read_mem(bus, address.wrapping_add(8), 3, DataAccess::ATOMIC)?;
                 self.set_x_or_zr(rt, a);
                 self.set_x_or_zr(rt2, b);
             } else {
                 let v = self.read_mem(bus, address, size, DataAccess::ATOMIC)?;
                 self.set_x_or_zr(rt, v);
             }
-            self.monitor.armed = true;
-            self.monitor.addr = pa.get();
-            self.monitor.bytes = total;
+            self.monitor = ExclusiveMonitor {
+                armed: true,
+                addr: pa.get(),
+                va: address,
+                bytes: total,
+            };
             return Ok(Flow::Next);
         }
 
-        // Store-exclusive: translation and permission faults are reported
-        // whether or not the monitor would have let the store happen.
-        let pa = self.translate_for(bus, address, total, DataDirection::Write, DataAccess::ATOMIC)?;
+        // Store-exclusive (Arm ARM `AArch64.ExclusiveMonitorsPass`): a
+        // misaligned address an exclusive access may not use faults first
+        // (`AArch64_UnalignedAccessFaults`, with FEAT_LSE2's rule). A store
+        // to a virtual address other than the one the monitor holds then
+        // fails without being translated: `AArch64.IsExclusiveVA`, which is
+        // IMPLEMENTATION DEFINED, is permitted to return FALSE for it, and
+        // here does, before `AArch64.TranslateAddress`, as QEMU compares the
+        // address before any access (target/arm/tcg/translate-a64.c
+        // `gen_store_exclusive`). Otherwise its translation and permission
+        // faults are reported, and the physical address it reaches must be
+        // the monitored one (`IsExclusiveLocal`).
+        self.check_alignment(address, total, DataAccess::ATOMIC, true)?;
         let m = self.monitor;
-        let pass = m.armed && m.addr == pa.get() && m.bytes == total;
+        let pass = if m.armed && m.va == address && m.bytes == total {
+            let pa = self.translate_for(
+                bus,
+                address,
+                total,
+                DataDirection::Write,
+                DataAccess::ATOMIC,
+            )?;
+            m.addr == pa.get()
+        } else {
+            false
+        };
         self.monitor.armed = false;
         if pass {
-            if pair {
-                let elem = 1u64 << size;
+            if pair && size == 2 {
+                // One single-copy atomic doubleword (`stxp.xml`:
+                // `Mem{64}`), Rt's word the low one.
+                let v = (self.x_or_zr(rt2) << 32) | (self.x_or_zr(rt) & 0xFFFF_FFFF);
+                self.write_mem(bus, address, 3, v, DataAccess::ATOMIC)?;
+            } else if pair {
                 let (a, b) = (self.x_or_zr(rt), self.x_or_zr(rt2));
-                self.write_mem(bus, address, size, a, DataAccess::ATOMIC)?;
-                self.write_mem(bus, address.wrapping_add(elem), size, b, DataAccess::ATOMIC)?;
+                self.write_mem(bus, address, 3, a, DataAccess::ATOMIC)?;
+                self.write_mem(bus, address.wrapping_add(8), 3, b, DataAccess::ATOMIC)?;
             } else {
                 let v = self.x_or_zr(rt);
                 self.write_mem(bus, address, size, v, DataAccess::ATOMIC)?;
@@ -388,7 +459,12 @@ impl<L: Levels> Cpu<L> {
 
     /// LD1-LD4/ST1-ST4 (multiple structures), with and without post-index:
     /// `0 Q 001100 post L 0 Rm opcode size Rn Rt`.
-    pub(crate) fn exec_ldst_multiple<B: PhysBus>(&mut self, bus: &mut B, pc: u64, insn: u32) -> ExecResult {
+    pub(crate) fn exec_ldst_multiple<B: PhysBus>(
+        &mut self,
+        bus: &mut B,
+        pc: u64,
+        insn: u32,
+    ) -> ExecResult {
         let q = bit(insn, 30);
         let post = bit(insn, 23);
         let load = bit(insn, 22);
@@ -447,7 +523,14 @@ impl<L: Levels> Cpu<L> {
             // a 64-bit form clears the upper half.
             for r in 0..(rpt * selem) {
                 let t = ((rt + r) % 32) as usize;
-                self.write_v(t, if q { regs[t] } else { regs[t] & u128::from(u64::MAX) });
+                self.write_v(
+                    t,
+                    if q {
+                        regs[t]
+                    } else {
+                        regs[t] & u128::from(u64::MAX)
+                    },
+                );
             }
         }
         if post {
@@ -459,7 +542,12 @@ impl<L: Levels> Cpu<L> {
 
     /// LD1-LD4/ST1-ST4 (single structure) and LD1R-LD4R:
     /// `0 Q 001101 post L R Rm opcode S size Rn Rt`.
-    pub(crate) fn exec_ldst_single_structure<B: PhysBus>(&mut self, bus: &mut B, pc: u64, insn: u32) -> ExecResult {
+    pub(crate) fn exec_ldst_single_structure<B: PhysBus>(
+        &mut self,
+        bus: &mut B,
+        pc: u64,
+        insn: u32,
+    ) -> ExecResult {
         let q = bit(insn, 30);
         let post = bit(insn, 23);
         let load = bit(insn, 22);

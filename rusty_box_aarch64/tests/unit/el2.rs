@@ -25,8 +25,8 @@ use std::vec::Vec;
 use rusty_box_core::{ClockHz, SnapError, VmClock};
 
 use super::el2::{
-    CPTR_TFP, CPTR_TSM, HCR_AMO, HCR_DC, HCR_FMO, HCR_HCD, HCR_IMO, HCR_TEA, HCR_TGE, HCR_TSC, HCR_VF, HCR_VI, HCR_VSE,
-    MDCR_TDE,
+    CPTR_TFP, CPTR_TSM, HCR_AMO, HCR_DC, HCR_FMO, HCR_HCD, HCR_IMO, HCR_TEA, HCR_TGE, HCR_TSC,
+    HCR_VF, HCR_VI, HCR_VSE, MDCR_TDE,
 };
 use super::features::{Feature, Features, Implementation};
 use super::sysreg::{CPACR_FPEN, CPACR_SMEN, SMCR_EZT0};
@@ -89,14 +89,25 @@ const EL2H: u64 = 0b1001;
 struct Ram(Vec<u8>);
 
 impl PhysBus for Ram {
-    fn read(&mut self, addr: PhysAddr, width: AccessWidth, _clock: VmClock) -> Result<u64, BusFault> {
+    fn read(
+        &mut self,
+        addr: PhysAddr,
+        width: AccessWidth,
+        _clock: VmClock,
+    ) -> Result<u64, BusFault> {
         let a = addr.get() as usize;
         let n = width.bytes() as usize;
         let bytes = self.0.get(a..a + n).ok_or(BusFault::Unmapped)?;
         Ok(bytes.iter().rev().fold(0, |v, &b| (v << 8) | u64::from(b)))
     }
 
-    fn write(&mut self, addr: PhysAddr, width: AccessWidth, value: u64, _clock: VmClock) -> Result<(), BusFault> {
+    fn write(
+        &mut self,
+        addr: PhysAddr,
+        width: AccessWidth,
+        value: u64,
+        _clock: VmClock,
+    ) -> Result<(), BusFault> {
         let a = addr.get() as usize;
         let n = width.bytes() as usize;
         let bytes = self.0.get_mut(a..a + n).ok_or(BusFault::Unmapped)?;
@@ -136,10 +147,12 @@ impl<L: Levels> Machine<L> {
         let mut cpu = Cpu::<L>::implementing(
             CpuConfig {
                 ips,
-                counter_hz: ips,
                 reset_pc: CODE,
             },
-            imp,
+            Implementation {
+                counter_hz: ips,
+                ..imp
+            },
         );
         cpu.sys.vbar_el1 = VBAR_EL1;
         if let Some(el2) = cpu.el2_mut() {
@@ -171,7 +184,11 @@ impl<L: Levels> Machine<L> {
         let a = at as usize;
         self.ram.0[a..a + 4].copy_from_slice(&insn.to_le_bytes());
         self.cpu.pc = at;
-        assert_eq!(self.cpu.step(&mut self.ram, &mut NoInstrumentation), Step::Retired, "{insn:#010x}");
+        assert_eq!(
+            self.cpu.step(&mut self.ram, &mut NoInstrumentation),
+            Step::Retired,
+            "{insn:#010x}"
+        );
         self.taken()
     }
 
@@ -220,10 +237,12 @@ fn reset_is_at_the_highest_exception_level() {
         let cpu = Cpu::<L>::implementing(
             CpuConfig {
                 ips,
-                counter_hz: ips,
                 reset_pc: CODE,
             },
-            imp,
+            Implementation {
+                counter_hz: ips,
+                ..imp
+            },
         );
         (cpu.pstate, cpu.pc)
     }
@@ -266,7 +285,10 @@ fn el2h_runs_on_sp_el2() {
     assert_eq!(m.run(HVC), sync(El::El2, LOWER_A64, EC_HVC, 0x1234));
     let vector = (VBAR_EL2 + LOWER_A64) as usize;
     m.ram.0[vector..vector + 4].copy_from_slice(&MOV_X0_SP.to_le_bytes());
-    assert_eq!(m.cpu.step(&mut m.ram, &mut NoInstrumentation), Step::Retired);
+    assert_eq!(
+        m.cpu.step(&mut m.ram, &mut NoInstrumentation),
+        Step::Retired
+    );
     assert_eq!(m.cpu.x[0], 0x3_3000, "the vector runs on SP_EL2");
 }
 
@@ -281,7 +303,11 @@ fn hvc_calls_the_hypervisor_unless_hcd_disables_it() {
     m.cpu.pstate.n = true;
     let spsr = m.cpu.pstate.to_spsr();
     assert_eq!(m.run(HVC), sync(El::El2, LOWER_A64, EC_HVC, 0x1234));
-    assert_eq!(m.cpu.el2_state.regs.elr, CODE + 4, "returns to the next instruction");
+    assert_eq!(
+        m.cpu.el2_state.regs.elr,
+        CODE + 4,
+        "returns to the next instruction"
+    );
     assert_eq!(m.cpu.el2_state.regs.spsr, spsr);
     assert_eq!(spsr & 0x1F, EL1H);
     assert!(m.cpu.pstate.d && m.cpu.pstate.a && m.cpu.pstate.i && m.cpu.pstate.f);
@@ -347,21 +373,30 @@ fn smc_is_the_firmware_call_with_el2_unless_tsc_traps_it() {
 fn eret_from_el2_returns_to_each_level_and_refuses_illegal_targets() {
     const TARGET: u64 = 0x5_0000;
     let mut m = Machine::with_el2();
-    for (m_field, el, sp_sel) in [(EL1H, El::El1, true), (EL0T, El::El0, false), (EL2T, El::El2, false), (EL2H, El::El2, true)] {
+    for (m_field, el, sp_sel) in [
+        (EL1H, El::El1, true),
+        (EL0T, El::El0, false),
+        (EL2T, El::El2, false),
+        (EL2H, El::El2, true),
+    ] {
         m.at(El::El2);
         m.cpu.el2_state.regs.spsr = m_field | (1 << 7) | (1 << 31);
         m.cpu.el2_state.regs.elr = TARGET;
         assert_eq!(m.run(ERET), None, "M {m_field:#06b}");
         let p = m.cpu.pstate;
-        assert_eq!((p.el, p.sp_sel, m.cpu.pc), (el, sp_sel, TARGET), "M {m_field:#06b}");
+        assert_eq!(
+            (p.el, p.sp_sel, m.cpu.pc),
+            (el, sp_sel, TARGET),
+            "M {m_field:#06b}"
+        );
         assert!(p.i && !p.f && p.n && !p.il, "M {m_field:#06b}");
     }
 
     let illegal = [
-        (0b1101, 0),       // EL3h: not implemented
-        (EL1H | 0x10, 0),  // AArch32
-        (0b0111, 0),       // M[1] set
-        (EL1H, HCR_TGE),   // EL1 under TGE (E2H = 0)
+        (0b1101, 0),      // EL3h: not implemented
+        (EL1H | 0x10, 0), // AArch32
+        (0b0111, 0),      // M[1] set
+        (EL1H, HCR_TGE),  // EL1 under TGE (E2H = 0)
     ];
     for (spsr, hcr) in illegal {
         let mut m = Machine::with_el2();
@@ -371,8 +406,16 @@ fn eret_from_el2_returns_to_each_level_and_refuses_illegal_targets() {
         m.cpu.el2_state.regs.elr = TARGET;
         assert_eq!(m.run(ERET), None, "SPSR {spsr:#x}");
         let p = m.cpu.pstate;
-        assert_eq!((p.el, p.sp_sel, p.il, m.cpu.pc), (El::El2, true, true, TARGET), "SPSR {spsr:#x}");
-        assert_eq!(m.run_at(TARGET, NOP), sync(El::El2, CURRENT_SPX, EC_ILLEGAL_STATE, 0), "SPSR {spsr:#x}");
+        assert_eq!(
+            (p.el, p.sp_sel, p.il, m.cpu.pc),
+            (El::El2, true, true, TARGET),
+            "SPSR {spsr:#x}"
+        );
+        assert_eq!(
+            m.run_at(TARGET, NOP),
+            sync(El::El2, CURRENT_SPX, EC_ILLEGAL_STATE, 0),
+            "SPSR {spsr:#x}"
+        );
     }
 
     let mut m = Machine::with_el2();
@@ -380,8 +423,108 @@ fn eret_from_el2_returns_to_each_level_and_refuses_illegal_targets() {
     m.cpu.sys.spsr_el1 = EL2H;
     m.cpu.sys.elr_el1 = TARGET;
     assert_eq!(m.run(ERET), None);
-    assert_eq!((m.cpu.pstate.el, m.cpu.pstate.il), (El::El1, true), "EL1 cannot return to EL2");
-    assert_eq!(m.run_at(TARGET, NOP), sync(El::El1, CURRENT_SPX, EC_ILLEGAL_STATE, 0));
+    assert_eq!(
+        (m.cpu.pstate.el, m.cpu.pstate.il),
+        (El::El1, true),
+        "EL1 cannot return to EL2"
+    );
+    assert_eq!(
+        m.run_at(TARGET, NOP),
+        sync(El::El1, CURRENT_SPX, EC_ILLEGAL_STATE, 0)
+    );
+}
+
+/// ERET from EL2 sets PSTATE.SS from SPSR_EL2.SS only for a return, with
+/// `MDSCR_EL1.SS` set, from where debug exceptions are disabled to where
+/// they are enabled (`DebugExceptionReturnSS`), and EL2 decides where they
+/// are taken (`DebugTargetFrom`, `AArch64_GenerateDebugExceptionsFrom`):
+/// at EL1 by default, so never from EL2 and from EL1 with `MDSCR_EL1.KDE`
+/// set and the mask (SPSR_EL2.D) clear; at EL2 under `MDCR_EL2.TDE` or
+/// `HCR_EL2.TGE`, so from EL1 and EL0 always, and from EL2 with KDE set and
+/// PSTATE.D clear, at the source as at the destination.
+#[test]
+fn eret_from_el2_restores_software_step_by_the_debug_target() {
+    const SPSR_SS: u64 = 1 << 21;
+    const SPSR_D: u64 = 1 << 9;
+    const MDSCR_SS: u64 = 1;
+    const MDSCR_KDE: u64 = 1 << 13;
+    const TARGET: u64 = 0x5_0000;
+    // MDSCR_EL1, PSTATE.D at EL2, MDCR_EL2 and HCR_EL2 bits, SPSR_EL2,
+    // then PSTATE.SS.
+    let cases = [
+        // Debug exceptions target EL1.
+        (MDSCR_SS, true, 0, 0, EL1H | SPSR_SS, false),
+        (MDSCR_SS | MDSCR_KDE, true, 0, 0, EL1H | SPSR_SS, true),
+        (MDSCR_SS | MDSCR_KDE, true, 0, 0, EL1H | SPSR_SS | SPSR_D, false),
+        (MDSCR_SS, true, 0, 0, EL0T | SPSR_SS, true),
+        (0, true, 0, 0, EL0T | SPSR_SS, false),
+        (MDSCR_SS | MDSCR_KDE, true, 0, 0, EL2H | SPSR_SS, false),
+        // `MDCR_EL2.TDE` takes them to EL2.
+        (MDSCR_SS, true, MDCR_TDE, 0, EL1H | SPSR_SS, true),
+        (MDSCR_SS | MDSCR_KDE, false, MDCR_TDE, 0, EL1H | SPSR_SS, false),
+        (MDSCR_SS | MDSCR_KDE, true, MDCR_TDE, 0, EL2H | SPSR_SS, true),
+        (MDSCR_SS, true, MDCR_TDE, 0, EL2H | SPSR_SS, false),
+        // So does `HCR_EL2.TGE`, under which EL1 is no return's target.
+        (MDSCR_SS, true, 0, HCR_TGE, EL0T | SPSR_SS, true),
+        (MDSCR_SS | MDSCR_KDE, false, 0, HCR_TGE, EL0T | SPSR_SS, false),
+    ];
+    for (mdscr, d, mdcr, hcr, spsr, ss) in cases {
+        let mut m = Machine::with_el2();
+        m.hcr(hcr);
+        m.cpu.el2_state.regs.mdcr |= mdcr;
+        m.at(El::El2);
+        // The OS Lock, locked out of reset, disables debug exceptions.
+        m.cpu.sys.oslsr_el1 &= !0b10;
+        m.cpu.sys.mdscr_el1 = mdscr;
+        m.cpu.pstate.d = d;
+        m.cpu.el2_state.regs.spsr = spsr;
+        m.cpu.el2_state.regs.elr = TARGET;
+        assert_eq!(m.run(ERET), None);
+        assert!(!m.cpu.pstate.il, "SPSR {spsr:#x}: a legal return");
+        assert_eq!(
+            m.cpu.pstate.ss, ss,
+            "MDSCR {mdscr:#x}, D {d}, MDCR {mdcr:#x}, HCR {hcr:#x}, SPSR {spsr:#x}"
+        );
+    }
+}
+
+/// With EL2 the highest level, the reset management registers are EL2's
+/// (Arm's data: `IsHighestEL`): `RVBAR_EL2` reads the address the last
+/// reset started execution from and `RMR_EL2` reads AA64 as one and keeps
+/// the Warm reset request RR, while `RVBAR_EL1` and `RMR_EL1`, which only a
+/// processor whose highest level is EL1 has, are UNDEFINED at EL1 and EL2.
+#[test]
+fn el2_holds_the_reset_management_registers() {
+    const MRS_RVBAR_EL2: u32 = 0xD53C_C020; // mrs x0, rvbar_el2
+    const MRS_RMR_EL2: u32 = 0xD53C_C040; // mrs x0, rmr_el2
+    const MSR_RMR_EL2: u32 = 0xD51C_C040; // msr rmr_el2, x0
+    const MRS_RVBAR_EL1: u32 = 0xD538_C020; // mrs x0, rvbar_el1
+    const MRS_RMR_EL1: u32 = 0xD538_C040; // mrs x0, rmr_el1
+    const MSR_RMR_EL1: u32 = 0xD518_C040; // msr rmr_el1, x0
+    const RESET_PC: u64 = 0x6_0000;
+    let mut m = Machine::with_el2();
+    m.cpu.reset_keeping_time(RESET_PC);
+    m.cpu.el2_state.regs.vbar = VBAR_EL2;
+    m.cpu.sys.vbar_el1 = VBAR_EL1;
+    m.at(El::El2);
+    assert_eq!(m.run(MRS_RVBAR_EL2), None);
+    assert_eq!(m.cpu.x[0], RESET_PC, "the last reset's address");
+    assert_eq!(m.run(MRS_RMR_EL2), None);
+    assert_eq!(m.cpu.x[0], 0b01, "AA64");
+    m.cpu.x[0] = !0;
+    assert_eq!(m.run(MSR_RMR_EL2), None);
+    assert_eq!(m.run(MRS_RMR_EL2), None);
+    assert_eq!(m.cpu.x[0], 0b11, "AA64 and RR, nothing else");
+    for el in [El::El2, El::El1] {
+        for insn in [MRS_RVBAR_EL1, MRS_RMR_EL1, MSR_RMR_EL1] {
+            m.at(el);
+            assert_eq!(
+                m.run(insn),
+                sync(el, CURRENT_SPX, EC_UNKNOWN, 0),
+                "{el:?}: {insn:#010x}"
+            );
+        }
+    }
 }
 
 /// Under `HCR_EL2.TGE`, the exceptions EL0 raises that EL1 would take go to
@@ -410,8 +553,16 @@ fn tge_takes_el0s_exceptions_to_el2() {
         assert_eq!(m.run(UDF), sync(to, LOWER_A64, EC_UNKNOWN, 0), "TGE {tge}");
         m.at(El::El0);
         m.cpu.x[1] = NOWHERE;
-        assert_eq!(m.run(LDR), sync(to, LOWER_A64, EC_DATA_ABORT_LOWER_EL, SEA), "TGE {tge}");
-        let far = if to == El::El2 { m.cpu.el2_state.regs.far } else { m.cpu.sys.far_el1 };
+        assert_eq!(
+            m.run(LDR),
+            sync(to, LOWER_A64, EC_DATA_ABORT_LOWER_EL, SEA),
+            "TGE {tge}"
+        );
+        let far = if to == El::El2 {
+            m.cpu.el2_state.regs.far
+        } else {
+            m.cpu.sys.far_el1
+        };
         assert_eq!(far, NOWHERE);
     }
 }
@@ -448,10 +599,16 @@ fn tea_takes_el1s_external_aborts_to_el2() {
     let mut m = Machine::with_el2();
     m.at(El::El1);
     m.cpu.x[1] = NOWHERE;
-    assert_eq!(m.run(LDR), sync(El::El1, CURRENT_SPX, EC_DATA_ABORT_SAME_EL, SEA));
+    assert_eq!(
+        m.run(LDR),
+        sync(El::El1, CURRENT_SPX, EC_DATA_ABORT_SAME_EL, SEA)
+    );
     m.hcr(HCR_TEA);
     m.at(El::El1);
-    assert_eq!(m.run(LDR), sync(El::El2, LOWER_A64, EC_DATA_ABORT_LOWER_EL, SEA));
+    assert_eq!(
+        m.run(LDR),
+        sync(El::El2, LOWER_A64, EC_DATA_ABORT_LOWER_EL, SEA)
+    );
     assert_eq!(m.cpu.el2_state.regs.far, NOWHERE);
     m.at(El::El1);
     assert_eq!(m.run(SVC), sync(El::El1, CURRENT_SPX, EC_SVC, 5));
@@ -460,7 +617,11 @@ fn tea_takes_el1s_external_aborts_to_el2() {
     m.hcr(HCR_TGE);
     m.at(El::El1);
     m.cpu.x[1] = NOWHERE;
-    assert_eq!(m.run(LDR), sync(El::El1, CURRENT_SPX, EC_DATA_ABORT_SAME_EL, SEA), "TGE, from EL1");
+    assert_eq!(
+        m.run(LDR),
+        sync(El::El1, CURRENT_SPX, EC_DATA_ABORT_SAME_EL, SEA),
+        "TGE, from EL1"
+    );
 }
 
 /// A physical IRQ or FIQ goes where `HCR_EL2.IMO` or `FMO` (or `TGE`) routes
@@ -471,8 +632,15 @@ fn tea_takes_el1s_external_aborts_to_el2() {
 #[test]
 fn physical_interrupts_go_where_imo_and_fmo_route_them() {
     for (line, routing, vector) in [(0, HCR_IMO, IRQ), (1, HCR_FMO, FIQ)] {
-        let assert_line = |m: &mut Machine<WithEl2>| m.cpu.set_interrupt_lines(line == 0, line == 1);
-        let take = |m: &mut Machine<WithEl2>| if line == 0 { m.cpu.take_irq() } else { m.cpu.take_fiq() };
+        let assert_line =
+            |m: &mut Machine<WithEl2>| m.cpu.set_interrupt_lines(line == 0, line == 1);
+        let take = |m: &mut Machine<WithEl2>| {
+            if line == 0 {
+                m.cpu.take_irq()
+            } else {
+                m.cpu.take_fiq()
+            }
+        };
         let mut m = Machine::with_el2();
         assert_line(&mut m);
 
@@ -481,38 +649,59 @@ fn physical_interrupts_go_where_imo_and_fmo_route_them() {
         m.cpu.pstate.i = false;
         m.cpu.pstate.f = false;
         let taken = m.cpu.deliver_interrupt().expect("unmasked at EL1");
-        assert_eq!((taken.to, taken.vector), (El::El1, VBAR_EL1 + CURRENT_SPX + vector));
+        assert_eq!(
+            (taken.to, taken.vector),
+            (El::El1, VBAR_EL1 + CURRENT_SPX + vector)
+        );
 
         m.at(El::El2);
         m.cpu.pstate.i = false;
         m.cpu.pstate.f = false;
-        assert!(!m.cpu.interrupt_deliverable(), "an interrupt for EL1 is not taken at EL2");
+        assert!(
+            !m.cpu.interrupt_deliverable(),
+            "an interrupt for EL1 is not taken at EL2"
+        );
         assert!(take(&mut m).is_none(), "not even by a host");
         assert_eq!((m.cpu.pstate.el, m.cpu.pc), (El::El2, CODE));
 
         m.hcr(routing);
         m.at(El::El1);
-        let taken = m.cpu.deliver_interrupt().expect("routed to EL2, PSTATE masks it not");
-        assert_eq!((taken.to, taken.vector), (El::El2, VBAR_EL2 + LOWER_A64 + vector));
+        let taken = m
+            .cpu
+            .deliver_interrupt()
+            .expect("routed to EL2, PSTATE masks it not");
+        assert_eq!(
+            (taken.to, taken.vector),
+            (El::El2, VBAR_EL2 + LOWER_A64 + vector)
+        );
         assert_eq!(m.cpu.el2_state.regs.elr, CODE);
 
         m.at(El::El2);
         assert!(!m.cpu.interrupt_deliverable(), "EL2's own mask");
         let taken = take(&mut m).expect("a host takes it whatever PSTATE masks");
-        assert_eq!((taken.to, taken.vector), (El::El2, VBAR_EL2 + CURRENT_SPX + vector));
+        assert_eq!(
+            (taken.to, taken.vector),
+            (El::El2, VBAR_EL2 + CURRENT_SPX + vector)
+        );
 
         m.at(El::El2);
         m.cpu.pstate.i = false;
         m.cpu.pstate.f = false;
         let taken = m.cpu.deliver_interrupt().expect("unmasked at EL2");
-        assert_eq!((taken.to, taken.vector), (El::El2, VBAR_EL2 + CURRENT_SPX + vector));
+        assert_eq!(
+            (taken.to, taken.vector),
+            (El::El2, VBAR_EL2 + CURRENT_SPX + vector)
+        );
 
         let mut m = Machine::with_el2();
         assert_line(&mut m);
         m.hcr(HCR_TGE);
         m.at(El::El0);
         let taken = m.cpu.deliver_interrupt().expect("TGE routes it to EL2");
-        assert_eq!((taken.to, taken.vector), (El::El2, VBAR_EL2 + LOWER_A64 + vector));
+        assert_eq!(
+            (taken.to, taken.vector),
+            (El::El2, VBAR_EL2 + LOWER_A64 + vector)
+        );
     }
 }
 
@@ -537,17 +726,41 @@ fn isr_shows_the_virtual_interrupts_where_el2_takes_the_physical_ones() {
         m.cpu.x[0]
     };
     m.cpu.set_interrupt_lines(true, true);
-    assert_eq!(isr(&mut m, El::El1, 0), I | F, "nothing routed: the physical lines");
-    assert_eq!(isr(&mut m, El::El1, HCR_IMO), F, "IRQ routed: no virtual IRQ pending");
+    assert_eq!(
+        isr(&mut m, El::El1, 0),
+        I | F,
+        "nothing routed: the physical lines"
+    );
+    assert_eq!(
+        isr(&mut m, El::El1, HCR_IMO),
+        F,
+        "IRQ routed: no virtual IRQ pending"
+    );
     assert_eq!(isr(&mut m, El::El1, ROUTED), 0);
     assert_eq!(isr(&mut m, El::El1, ROUTED | VIRTUAL), A | I | F);
-    assert_eq!(isr(&mut m, El::El1, HCR_FMO | VIRTUAL), I | F, "VI and VSE show only where routed");
+    assert_eq!(
+        isr(&mut m, El::El1, HCR_FMO | VIRTUAL),
+        I | F,
+        "VI and VSE show only where routed"
+    );
     assert_eq!(isr(&mut m, El::El1, HCR_AMO | HCR_VSE), A | I | F);
-    assert_eq!(isr(&mut m, El::El1, HCR_TGE | VIRTUAL), 0, "TGE: virtual, none pending");
-    assert_eq!(isr(&mut m, El::El2, ROUTED | VIRTUAL), I | F, "EL2: physical");
+    assert_eq!(
+        isr(&mut m, El::El1, HCR_TGE | VIRTUAL),
+        0,
+        "TGE: virtual, none pending"
+    );
+    assert_eq!(
+        isr(&mut m, El::El2, ROUTED | VIRTUAL),
+        I | F,
+        "EL2: physical"
+    );
     m.cpu.set_interrupt_lines(false, false);
     assert_eq!(isr(&mut m, El::El2, ROUTED | VIRTUAL), 0);
-    assert_eq!(isr(&mut m, El::El1, VIRTUAL), 0, "nothing routed: the physical lines");
+    assert_eq!(
+        isr(&mut m, El::El1, VIRTUAL),
+        0,
+        "nothing routed: the physical lines"
+    );
 }
 
 /// `HCR_EL2.VI`, `VF` and `VSE` raise a virtual IRQ, FIQ and SError for EL0
@@ -581,7 +794,11 @@ fn virtual_interrupts_are_taken_at_el1() {
     unmasked_at(&mut m, El::El1, HCR_VI | HCR_IMO);
     m.cpu.pstate.i = true;
     assert!(m.cpu.deliver_interrupt().is_none(), "PSTATE.I set");
-    assert_eq!((m.run(WFI), m.cpu.pstate.el), (None, El::El1), "WFI does not wait");
+    assert_eq!(
+        (m.run(WFI), m.cpu.pstate.el),
+        (None, El::El1),
+        "WFI does not wait"
+    );
 
     for (el, offset) in [(El::El1, CURRENT_SPX), (El::El0, LOWER_A64)] {
         unmasked_at(&mut m, el, HCR_VI | HCR_IMO | HCR_VF | HCR_FMO);
@@ -591,7 +808,10 @@ fn virtual_interrupts_are_taken_at_el1() {
         assert_eq!(m.cpu.el2_state.regs.hcr & HCR_VI, HCR_VI, "VI stays set");
         unmasked_at(&mut m, el, HCR_VF | HCR_FMO);
         let taken = m.cpu.deliver_interrupt().expect("a virtual FIQ");
-        assert_eq!((taken.kind, taken.vector), (ExceptionKind::VirtualFiq, VBAR_EL1 + offset + FIQ));
+        assert_eq!(
+            (taken.kind, taken.vector),
+            (ExceptionKind::VirtualFiq, VBAR_EL1 + offset + FIQ)
+        );
     }
 
     unmasked_at(&mut m, El::El1, HCR_VI | HCR_IMO);
@@ -603,9 +823,19 @@ fn virtual_interrupts_are_taken_at_el1() {
     m.cpu.el2_state.regs.vsesr = 0x0100_0ABC;
     unmasked_at(&mut m, El::El1, HCR_VSE | HCR_AMO);
     let taken = m.cpu.deliver_interrupt().expect("a virtual SError");
-    assert_eq!((taken.kind, taken.vector), (ExceptionKind::VirtualSError, VBAR_EL1 + CURRENT_SPX + SERROR));
+    assert_eq!(
+        (taken.kind, taken.vector),
+        (
+            ExceptionKind::VirtualSError,
+            VBAR_EL1 + CURRENT_SPX + SERROR
+        )
+    );
     assert_eq!(m.cpu.sys.esr_el1, (EC_SERROR << 26) | IL | 0x0100_0ABC);
-    assert_eq!(m.cpu.el2_state.regs.hcr & HCR_VSE, 0, "taking it clears VSE");
+    assert_eq!(
+        m.cpu.el2_state.regs.hcr & HCR_VSE,
+        0,
+        "taking it clears VSE"
+    );
     assert!(m.cpu.deliver_interrupt().is_none());
 
     // All three raised and unmasked: taken in the order chosen for the
@@ -627,7 +857,11 @@ fn virtual_interrupts_are_taken_at_el1() {
     v80.at(El::El1);
     v80.cpu.pstate.a = false;
     v80.cpu.deliver_interrupt().expect("a virtual SError");
-    assert_eq!(v80.cpu.sys.esr_el1, (EC_SERROR << 26) | IL, "no syndrome without FEAT_RAS");
+    assert_eq!(
+        v80.cpu.sys.esr_el1,
+        (EC_SERROR << 26) | IL,
+        "no syndrome without FEAT_RAS"
+    );
 }
 
 /// ESB at EL0 or EL1 defers a virtual SError that `PSTATE.A` masks into
@@ -650,12 +884,21 @@ fn esb_defers_a_masked_virtual_serror() {
 
     m.cpu.el2_state.regs.vdisr = 0;
     assert_eq!(m.run(ESB), None);
-    assert_eq!(m.cpu.el2_state.regs.vdisr, 0, "nothing pending, nothing deferred");
+    assert_eq!(
+        m.cpu.el2_state.regs.vdisr, 0,
+        "nothing pending, nothing deferred"
+    );
 
     m.hcr(HCR_VSE);
     m.at(El::El2);
     assert_eq!(m.run(ESB), None);
-    assert_eq!((m.cpu.el2_state.regs.vdisr, m.cpu.el2_state.regs.hcr & HCR_VSE), (0, HCR_VSE));
+    assert_eq!(
+        (
+            m.cpu.el2_state.regs.vdisr,
+            m.cpu.el2_state.regs.hcr & HCR_VSE
+        ),
+        (0, HCR_VSE)
+    );
 }
 
 /// EL1 reads `VPIDR_EL2` and `VMPIDR_EL2` as `MIDR_EL1` and `MPIDR_EL1`;
@@ -664,14 +907,14 @@ fn esb_defers_a_masked_virtual_serror() {
 fn el1_reads_the_identity_el2_gives_it() {
     let mut m = Machine::with_el2();
     m.at(El::El1);
-    assert_eq!((m.run(MRS_MIDR), m.cpu.x[0]), (None, id::MIDR_EL1));
+    assert_eq!((m.run(MRS_MIDR), m.cpu.x[0]), (None, id::MIDR_CORTEX_A57));
     assert_eq!((m.run(MRS_MPIDR), m.cpu.x[0]), (None, id::MPIDR_EL1));
     m.cpu.el2_state.regs.vpidr = 0x4100_1234;
     m.cpu.el2_state.regs.vmpidr = 0x8000_0003;
     assert_eq!((m.run(MRS_MIDR), m.cpu.x[0]), (None, 0x4100_1234));
     assert_eq!((m.run(MRS_MPIDR), m.cpu.x[0]), (None, 0x8000_0003));
     m.at(El::El2);
-    assert_eq!((m.run(MRS_MIDR), m.cpu.x[0]), (None, id::MIDR_EL1));
+    assert_eq!((m.run(MRS_MIDR), m.cpu.x[0]), (None, id::MIDR_CORTEX_A57));
     assert_eq!((m.run(MRS_MPIDR), m.cpu.x[0]), (None, id::MPIDR_EL1));
 }
 
@@ -722,20 +965,44 @@ fn zt0_is_trapped_by_each_levels_ezt0() {
         m.run(ZERO_ZT0)
     };
     assert_eq!(zt0(&mut m, El::El1, true, true), None);
-    assert_eq!(zt0(&mut m, El::El1, true, false), sync(El::El2, LOWER_A64, EC_SME, SMTC_INACCESSIBLE_ZT0));
-    assert_eq!(zt0(&mut m, El::El1, false, true), sync(El::El1, CURRENT_SPX, EC_SME, SMTC_INACCESSIBLE_ZT0));
-    assert_eq!(zt0(&mut m, El::El1, false, false), sync(El::El1, CURRENT_SPX, EC_SME, SMTC_INACCESSIBLE_ZT0));
+    assert_eq!(
+        zt0(&mut m, El::El1, true, false),
+        sync(El::El2, LOWER_A64, EC_SME, SMTC_INACCESSIBLE_ZT0)
+    );
+    assert_eq!(
+        zt0(&mut m, El::El1, false, true),
+        sync(El::El1, CURRENT_SPX, EC_SME, SMTC_INACCESSIBLE_ZT0)
+    );
+    assert_eq!(
+        zt0(&mut m, El::El1, false, false),
+        sync(El::El1, CURRENT_SPX, EC_SME, SMTC_INACCESSIBLE_ZT0)
+    );
     // At EL2 `SMCR_EL1` does not apply.
     assert_eq!(zt0(&mut m, El::El2, false, true), None);
-    assert_eq!(zt0(&mut m, El::El2, true, false), sync(El::El2, CURRENT_SPX, EC_SME, SMTC_INACCESSIBLE_ZT0));
+    assert_eq!(
+        zt0(&mut m, El::El2, true, false),
+        sync(El::El2, CURRENT_SPX, EC_SME, SMTC_INACCESSIBLE_ZT0)
+    );
     // `HCR_EL2.TGE` takes EL0's trap to EL1 to EL2.
     m.hcr(HCR_TGE);
-    assert_eq!(zt0(&mut m, El::El0, false, true), sync(El::El2, LOWER_A64, EC_SME, SMTC_INACCESSIBLE_ZT0));
+    assert_eq!(
+        zt0(&mut m, El::El0, false, true),
+        sync(El::El2, LOWER_A64, EC_SME, SMTC_INACCESSIBLE_ZT0)
+    );
     m.cpu.set_pstate_za(false);
-    assert_eq!(zt0(&mut m, El::El0, false, false), sync(El::El2, LOWER_A64, EC_SME, SMTC_INACTIVE_ZA));
+    assert_eq!(
+        zt0(&mut m, El::El0, false, false),
+        sync(El::El2, LOWER_A64, EC_SME, SMTC_INACTIVE_ZA)
+    );
     m.cpu.el2_state.regs.hcr &= !HCR_TGE;
-    assert_eq!(zt0(&mut m, El::El1, false, false), sync(El::El1, CURRENT_SPX, EC_SME, SMTC_INACTIVE_ZA));
-    assert_eq!(zt0(&mut m, El::El2, false, false), sync(El::El2, CURRENT_SPX, EC_SME, SMTC_INACTIVE_ZA));
+    assert_eq!(
+        zt0(&mut m, El::El1, false, false),
+        sync(El::El1, CURRENT_SPX, EC_SME, SMTC_INACTIVE_ZA)
+    );
+    assert_eq!(
+        zt0(&mut m, El::El2, false, false),
+        sync(El::El2, CURRENT_SPX, EC_SME, SMTC_INACTIVE_ZA)
+    );
 }
 
 /// Arm `CheckSMEEnabled` on an SME instruction: `CPACR_EL1.SMEN`, then
@@ -753,21 +1020,51 @@ fn an_sme_instruction_takes_cptr_el2s_traps_after_cpacr_el1s() {
         m.run(ZERO_ZT0)
     };
     let enabled = CPACR_SMEN | CPACR_FPEN;
-    assert_eq!(run(&mut m, El::El1, enabled, CPTR_TSM), sync(El::El2, LOWER_A64, EC_SME, SMTC_DISABLED));
-    assert_eq!(run(&mut m, El::El1, enabled, CPTR_TFP), sync(El::El2, LOWER_A64, EC_FP_ACCESS, FP_ACCESS_ISS));
-    assert_eq!(run(&mut m, El::El1, enabled, CPTR_TSM | CPTR_TFP), sync(El::El2, LOWER_A64, EC_SME, SMTC_DISABLED));
-    assert_eq!(run(&mut m, El::El1, CPACR_FPEN, CPTR_TSM), sync(El::El1, CURRENT_SPX, EC_SME, SMTC_DISABLED));
-    assert_eq!(run(&mut m, El::El1, CPACR_SMEN, CPTR_TSM), sync(El::El1, CURRENT_SPX, EC_FP_ACCESS, FP_ACCESS_ISS));
-    assert_eq!(run(&mut m, El::El2, 0, CPTR_TSM), sync(El::El2, CURRENT_SPX, EC_SME, SMTC_DISABLED));
-    assert_eq!(run(&mut m, El::El2, 0, CPTR_TFP), sync(El::El2, CURRENT_SPX, EC_FP_ACCESS, FP_ACCESS_ISS));
+    assert_eq!(
+        run(&mut m, El::El1, enabled, CPTR_TSM),
+        sync(El::El2, LOWER_A64, EC_SME, SMTC_DISABLED)
+    );
+    assert_eq!(
+        run(&mut m, El::El1, enabled, CPTR_TFP),
+        sync(El::El2, LOWER_A64, EC_FP_ACCESS, FP_ACCESS_ISS)
+    );
+    assert_eq!(
+        run(&mut m, El::El1, enabled, CPTR_TSM | CPTR_TFP),
+        sync(El::El2, LOWER_A64, EC_SME, SMTC_DISABLED)
+    );
+    assert_eq!(
+        run(&mut m, El::El1, CPACR_FPEN, CPTR_TSM),
+        sync(El::El1, CURRENT_SPX, EC_SME, SMTC_DISABLED)
+    );
+    assert_eq!(
+        run(&mut m, El::El1, CPACR_SMEN, CPTR_TSM),
+        sync(El::El1, CURRENT_SPX, EC_FP_ACCESS, FP_ACCESS_ISS)
+    );
+    assert_eq!(
+        run(&mut m, El::El2, 0, CPTR_TSM),
+        sync(El::El2, CURRENT_SPX, EC_SME, SMTC_DISABLED)
+    );
+    assert_eq!(
+        run(&mut m, El::El2, 0, CPTR_TFP),
+        sync(El::El2, CURRENT_SPX, EC_FP_ACCESS, FP_ACCESS_ISS)
+    );
     assert_eq!(run(&mut m, El::El2, 0, 0), None);
     // Under `HCR_EL2.TGE`, `CPACR_EL1`'s traps of EL0 go to EL2: SME's as
     // itself (`SMEAccessTrap`), SIMD&FP's as an uncategorized exception
     // (`AArch64_AdvSIMDFPAccessTrap`).
     m.hcr(HCR_TGE);
-    assert_eq!(run(&mut m, El::El0, CPACR_FPEN, 0), sync(El::El2, LOWER_A64, EC_SME, SMTC_DISABLED));
-    assert_eq!(run(&mut m, El::El0, CPACR_SMEN, 0), sync(El::El2, LOWER_A64, EC_UNKNOWN, 0));
-    assert_eq!(run(&mut m, El::El0, enabled, CPTR_TSM), sync(El::El2, LOWER_A64, EC_SME, SMTC_DISABLED));
+    assert_eq!(
+        run(&mut m, El::El0, CPACR_FPEN, 0),
+        sync(El::El2, LOWER_A64, EC_SME, SMTC_DISABLED)
+    );
+    assert_eq!(
+        run(&mut m, El::El0, CPACR_SMEN, 0),
+        sync(El::El2, LOWER_A64, EC_UNKNOWN, 0)
+    );
+    assert_eq!(
+        run(&mut m, El::El0, enabled, CPTR_TSM),
+        sync(El::El2, LOWER_A64, EC_SME, SMTC_DISABLED)
+    );
     assert_eq!(run(&mut m, El::El0, enabled, 0), None);
 }
 
@@ -815,17 +1112,29 @@ fn a_snapshot_whose_smcr_el2_holds_a_bit_no_msr_keeps_is_refused() {
         saved.cpu.el2_state.regs.smcr = smcr;
         let mut image = Vec::new();
         saved.cpu.save(&mut image).expect("save");
-        Machine::<WithEl2>::new(imp).cpu.restore(&mut image.as_slice()).is_err()
+        Machine::<WithEl2>::new(imp)
+            .cpu
+            .restore(&mut image.as_slice())
+            .is_err()
     };
-    let without_sme2: Vec<Feature> = Feature::ALL.into_iter().filter(|&f| f != Feature::Sme2).collect();
+    let without_sme2: Vec<Feature> = Feature::ALL
+        .into_iter()
+        .filter(|&f| f != Feature::Sme2)
+        .collect();
     let sme_alone = Implementation {
         features: Features::of(&without_sme2),
-        max_svl: Implementation::EVERY_FEATURE.max_svl,
+        ..Implementation::EVERY_FEATURE
     };
     assert!(!refused(Implementation::EVERY_FEATURE, SMCR_EZT0 | 3));
-    assert!(refused(Implementation::EVERY_FEATURE, 0x10), "SMCR_EL2 bit 4");
+    assert!(
+        refused(Implementation::EVERY_FEATURE, 0x10),
+        "SMCR_EL2 bit 4"
+    );
     assert!(!refused(sme_alone, 3));
-    assert!(refused(sme_alone, SMCR_EZT0), "SMCR_EL2.EZT0 without FEAT_SME2");
+    assert!(
+        refused(sme_alone, SMCR_EZT0),
+        "SMCR_EL2.EZT0 without FEAT_SME2"
+    );
 }
 
 // ----- the EL2 translation regime -----
@@ -868,9 +1177,14 @@ fn translating() -> Machine<WithEl2> {
     }
     m.ram.put64(EL2_L2 + 8, EL2_DATA | attrs);
     m.ram.put64(EL1_L2 + 8, EL1_DATA | attrs);
-    m.ram.put64(EL2_L2 + 8 * (READ_ONLY >> 21), READ_ONLY | attrs | AP2 | AP1);
-    m.ram.put64(EL2_L2 + 8 * (NO_EXECUTE >> 21), NO_EXECUTE | attrs | XN);
-    m.ram.put64(EL2_L2 + 8 * (PXN_ONLY >> 21), PXN_ONLY | attrs | PXN);
+    m.ram.put64(
+        EL2_L2 + 8 * (READ_ONLY >> 21),
+        READ_ONLY | attrs | AP2 | AP1,
+    );
+    m.ram
+        .put64(EL2_L2 + 8 * (NO_EXECUTE >> 21), NO_EXECUTE | attrs | XN);
+    m.ram
+        .put64(EL2_L2 + 8 * (PXN_ONLY >> 21), PXN_ONLY | attrs | PXN);
     m.ram.put64(EL2_DATA, 0x2222);
     m.ram.put64(EL1_DATA, 0x1111);
     let features = m.cpu.imp.features;
@@ -903,7 +1217,8 @@ fn el2_translates_through_its_own_tables() {
         let want = if el == El::El2 { 0x2222 } else { 0x1111 };
         assert_eq!(m.cpu.x[2], want, "{el:?}");
     }
-    m.ram.put64(EL2_L2 + 8, EL1_DATA | AF | INNER_SHAREABLE | BLOCK);
+    m.ram
+        .put64(EL2_L2 + 8, EL1_DATA | AF | INNER_SHAREABLE | BLOCK);
     m.at(El::El2);
     assert_eq!(m.run(TLBI_ALLE2), None);
     m.cpu.x[1] = SHARED;
@@ -940,7 +1255,10 @@ fn dc_and_tge_turn_off_el1_and_0_stage_1() {
 
     m.cpu.sys.sctlr_el1 &= !1;
     for (hcr, want) in [
-        (0, sync(El::El1, CURRENT_SPX, EC_DATA_ABORT_SAME_EL, ALIGNMENT)),
+        (
+            0,
+            sync(El::El1, CURRENT_SPX, EC_DATA_ABORT_SAME_EL, ALIGNMENT),
+        ),
         (HCR_DC, None),
     ] {
         m.cpu.el2_state.regs.hcr = reset | hcr;
@@ -960,7 +1278,7 @@ fn dc_and_tge_turn_off_el1_and_0_stage_1() {
 #[test]
 fn the_id_registers_offer_no_stage_2_granule() {
     const MRS_MMFR0: u32 = 0xD538_0700; // mrs x0, id_aa64mmfr0_el1
-    // TGran4_2, TGran16_2, TGran64_2, then TGran4, TGran16, TGran64.
+                                        // TGran4_2, TGran16_2, TGran64_2, then TGran4, TGran16, TGran64.
     let granules = |mmfr0: u64| [40, 32, 36, 28, 20, 24].map(|lsb| (mmfr0 >> lsb) & 0xF);
     let mut with = Machine::with_el2();
     with.at(El::El1);
@@ -983,9 +1301,17 @@ fn dc_ivac_at_el1_translates_as_an_invalidate_under_vm_and_dc() {
     const HCR_VM: u64 = 1 << 0;
     const CM: u64 = 1 << 8;
     let mut m = translating();
-    m.ram.put64(EL1_L2 + 8 * (READ_ONLY >> 21), READ_ONLY | AF | INNER_SHAREABLE | BLOCK | AP2);
+    m.ram.put64(
+        EL1_L2 + 8 * (READ_ONLY >> 21),
+        READ_ONLY | AF | INNER_SHAREABLE | BLOCK | AP2,
+    );
     let reset = m.cpu.el2_state.regs.hcr;
-    let refused = sync(El::El1, CURRENT_SPX, EC_DATA_ABORT_SAME_EL, PERMISSION_L2 | CM | WNR);
+    let refused = sync(
+        El::El1,
+        CURRENT_SPX,
+        EC_DATA_ABORT_SAME_EL,
+        PERMISSION_L2 | CM | WNR,
+    );
     for (hcr, want) in [(0, refused), (HCR_VM, refused), (HCR_DC, None)] {
         m.cpu.el2_state.regs.hcr = reset | hcr;
         m.cpu.sys.far_el1 = 0;
@@ -1005,23 +1331,42 @@ fn el2_permissions_are_those_of_one_privilege_level() {
     let mut m = translating();
     m.cpu.x[1] = READ_ONLY;
     assert_eq!(m.run(LDR), None);
-    assert_eq!(m.run(STR), sync(El::El2, CURRENT_SPX, EC_DATA_ABORT_SAME_EL, PERMISSION_L2 | WNR));
+    assert_eq!(
+        m.run(STR),
+        sync(
+            El::El2,
+            CURRENT_SPX,
+            EC_DATA_ABORT_SAME_EL,
+            PERMISSION_L2 | WNR
+        )
+    );
     assert_eq!(m.cpu.el2_state.regs.far, READ_ONLY);
 
     m.at(El::El2);
     m.ram.0[PXN_ONLY as usize..PXN_ONLY as usize + 4].copy_from_slice(&NOP.to_le_bytes());
     m.cpu.x[1] = PXN_ONLY;
     assert_eq!(m.run(BR_X1), None);
-    assert_eq!(m.cpu.step(&mut m.ram, &mut NoInstrumentation), Step::Retired);
+    assert_eq!(
+        m.cpu.step(&mut m.ram, &mut NoInstrumentation),
+        Step::Retired
+    );
     assert_eq!(m.cpu.pc, PXN_ONLY + 4, "bit 53 does not stop EL2 executing");
 
     m.at(El::El2);
     m.cpu.x[1] = NO_EXECUTE;
     assert_eq!(m.run(BR_X1), None);
-    assert_eq!(m.cpu.step(&mut m.ram, &mut NoInstrumentation), Step::Retired);
+    assert_eq!(
+        m.cpu.step(&mut m.ram, &mut NoInstrumentation),
+        Step::Retired
+    );
     assert_eq!(
         m.taken(),
-        sync(El::El2, CURRENT_SPX, EC_INSTRUCTION_ABORT_SAME_EL, PERMISSION_L2)
+        sync(
+            El::El2,
+            CURRENT_SPX,
+            EC_INSTRUCTION_ABORT_SAME_EL,
+            PERMISSION_L2
+        )
     );
     assert_eq!(m.cpu.el2_state.regs.far, NO_EXECUTE);
 }
@@ -1035,7 +1380,11 @@ fn a_snapshot_el2_tlb_entry_is_refused_where_no_walk_makes_it() {
     const PERM_EL0_R: u8 = 1 << 3;
     let mut m = translating();
     m.cpu.x[1] = SHARED;
-    assert_eq!(m.run(LDR), None, "the EL2 pages of the fetch and the load are cached");
+    assert_eq!(
+        m.run(LDR),
+        None,
+        "the EL2 pages of the fetch and the load are cached"
+    );
     let mut image = Vec::new();
     assert_eq!(m.cpu.tlb.save(&mut image), Ok(()));
     // The entry count, then each entry: its page, its PA, then its
@@ -1043,17 +1392,25 @@ fn a_snapshot_el2_tlb_entry_is_refused_where_no_walk_makes_it() {
     let count = u32::from_le_bytes([image[0], image[1], image[2], image[3]]) as usize;
     assert_eq!((count, image.len()), (2, 4 + count * (8 + 8 + 4)));
     let tcr = m.cpu.sys.tcr_el1;
-    let restore = |features: Features, image: &[u8]| Tlb::new().restore(&mut &image[..], features, tcr);
+    let restore =
+        |features: Features, image: &[u8]| Tlb::new().restore(&mut &image[..], features, tcr);
     let with = m.cpu.imp.features;
     let without = Implementation::CORTEX_A57.with_levels::<NoEl2>().features;
     assert_eq!(restore(with, &image), Ok(()));
     assert_eq!(
         restore(without, &image),
-        Err(SnapError::Invalid("TLB entry is of a regime this processor lacks"))
+        Err(SnapError::Invalid(
+            "TLB entry is of a regime this processor lacks"
+        ))
     );
     let mut el0 = image.clone();
     el0[4 + 8 + 8] |= PERM_EL0_R;
-    assert_eq!(restore(with, &el0), Err(SnapError::Invalid("TLB entry is not one a walk can produce")));
+    assert_eq!(
+        restore(with, &el0),
+        Err(SnapError::Invalid(
+            "TLB entry is not one a walk can produce"
+        ))
+    );
 }
 
 /// `LDTR` and `STTR` at EL2 are ordinary EL2 accesses: with no FEAT_NV and
@@ -1078,7 +1435,10 @@ fn ldtr_and_sttr_at_el2_are_ordinary_accesses() {
     assert_eq!(m.run(LDR), None);
     assert_eq!(m.cpu.x[2], 0x1111);
     m.at(El::El1);
-    assert_eq!(m.run(LDTR), sync(El::El1, CURRENT_SPX, EC_DATA_ABORT_SAME_EL, PERMISSION_L2));
+    assert_eq!(
+        m.run(LDTR),
+        sync(El::El1, CURRENT_SPX, EC_DATA_ABORT_SAME_EL, PERMISSION_L2)
+    );
 }
 
 /// In each regime the walk refuses an address beyond the output size its
@@ -1097,7 +1457,11 @@ fn the_walk_refuses_addresses_beyond_the_output_size() {
     let regimes = [(El::El1, EL1_L1, EL1_L2, 32), (El::El2, EL2_L1, EL2_L2, 16)];
     for (el, l1, l2, shift) in regimes {
         let size = |m: &mut Machine<WithEl2>, encoded: u64| {
-            let tcr = if el == El::El2 { &mut m.cpu.el2_state.regs.tcr } else { &mut m.cpu.sys.tcr_el1 };
+            let tcr = if el == El::El2 {
+                &mut m.cpu.el2_state.regs.tcr
+            } else {
+                &mut m.cpu.sys.tcr_el1
+            };
             *tcr = (*tcr & !(7 << shift)) | (encoded << shift);
         };
         let load = |m: &mut Machine<WithEl2>, va: u64| {
@@ -1109,19 +1473,37 @@ fn the_walk_refuses_addresses_beyond_the_output_size() {
 
         // A 2 MiB block at 4 GiB: beyond 32 bits, within 36.
         let mut m = translating();
-        m.ram.put64(l2 + 8 * (BLOCK_VA >> 21), HIGH | AF | INNER_SHAREABLE | BLOCK);
+        m.ram.put64(
+            l2 + 8 * (BLOCK_VA >> 21),
+            HIGH | AF | INNER_SHAREABLE | BLOCK,
+        );
         size(&mut m, 0b000);
-        assert_eq!(load(&mut m, BLOCK_VA), fault(ADDRESS_SIZE | 2), "{el:?}: block");
+        assert_eq!(
+            load(&mut m, BLOCK_VA),
+            fault(ADDRESS_SIZE | 2),
+            "{el:?}: block"
+        );
         let mut m = translating();
-        m.ram.put64(l2 + 8 * (BLOCK_VA >> 21), HIGH | AF | INNER_SHAREABLE | BLOCK);
+        m.ram.put64(
+            l2 + 8 * (BLOCK_VA >> 21),
+            HIGH | AF | INNER_SHAREABLE | BLOCK,
+        );
         size(&mut m, 0b001);
-        assert_eq!(load(&mut m, BLOCK_VA), fault(SEA), "{el:?}: block within 36 bits");
+        assert_eq!(
+            load(&mut m, BLOCK_VA),
+            fault(SEA),
+            "{el:?}: block within 36 bits"
+        );
 
         // A level 2 table at 4 GiB.
         let mut m = translating();
         m.ram.put64(l1 + 8 * (TABLE_VA >> 30), HIGH | TABLE);
         size(&mut m, 0b000);
-        assert_eq!(load(&mut m, TABLE_VA), fault(ADDRESS_SIZE | 1), "{el:?}: table");
+        assert_eq!(
+            load(&mut m, TABLE_VA),
+            fault(ADDRESS_SIZE | 1),
+            "{el:?}: table"
+        );
 
         // The table base at 4 GiB: the fetch of the load itself faults.
         let mut m = translating();
@@ -1147,17 +1529,56 @@ fn el2_has_one_address_range_and_its_own_top_byte_ignore() {
     let tagged = SHARED | (0x5A << 56);
     let mut m = translating();
     m.cpu.x[1] = tagged;
-    assert_eq!(m.run(LDR), sync(El::El2, CURRENT_SPX, EC_DATA_ABORT_SAME_EL, TRANSLATION_L0));
+    assert_eq!(
+        m.run(LDR),
+        sync(El::El2, CURRENT_SPX, EC_DATA_ABORT_SAME_EL, TRANSLATION_L0)
+    );
     assert_eq!(m.cpu.el2_state.regs.far, tagged);
     let mut m = translating();
     m.cpu.x[1] = SHARED | (1 << 39);
-    assert_eq!(m.run(LDR), sync(El::El2, CURRENT_SPX, EC_DATA_ABORT_SAME_EL, TRANSLATION_L0));
+    assert_eq!(
+        m.run(LDR),
+        sync(El::El2, CURRENT_SPX, EC_DATA_ABORT_SAME_EL, TRANSLATION_L0)
+    );
 
     let mut m = translating();
     m.cpu.el2_state.regs.tcr |= super::el2::TCR_EL2_TBI;
     m.cpu.x[1] = tagged;
     assert_eq!(m.run(LDR), None);
     assert_eq!(m.cpu.x[2], 0x2222);
+}
+
+/// A branch's target is the address `AArch64_BranchAddr` makes of it:
+/// under top-byte-ignore of instruction addresses, its top byte becomes
+/// copies of bit 55 in the EL1&0 regime, ones in the upper range and zeros
+/// in the lower, and zeros in the EL2 regime, of one range; without it the
+/// target stays as it is, for the fetch to fault on.
+#[test]
+fn a_branch_drops_the_tag_where_top_byte_ignore_covers_it() {
+    const UPPER: u64 = 0x5A80_0000_0000_1000;
+    const LOWER: u64 = 0x5A00_0000_0000_1000;
+    // `TCR_EL1.TBI0` and `TBI1`.
+    const TBI0: u64 = 1 << 37;
+    const TBI1: u64 = 1 << 38;
+    for (tcr, target, pc) in [
+        (TBI0 | TBI1, UPPER, 0xFF80_0000_0000_1000),
+        (TBI0 | TBI1, LOWER, 0x0000_0000_0000_1000),
+        (TBI0, UPPER, UPPER),
+        (TBI1, LOWER, LOWER),
+    ] {
+        let mut m = Machine::<NoEl2>::new(Implementation::CORTEX_A57);
+        m.at(El::El1);
+        m.cpu.sys.tcr_el1 = tcr;
+        m.cpu.x[1] = target;
+        assert_eq!(m.run(BR_X1), None);
+        assert_eq!(m.cpu.pc, pc, "TCR {tcr:#x}, target {target:#x}");
+    }
+    let mut m = Machine::with_el2();
+    m.at(El::El2);
+    m.cpu.el2_state.regs.tcr |= super::el2::TCR_EL2_TBI;
+    m.cpu.x[1] = UPPER;
+    assert_eq!(m.run(BR_X1), None);
+    assert_eq!(m.cpu.pc, 0x0080_0000_0000_1000, "EL2: zeros");
 }
 
 /// `AT S1E2R` and `AT S1E2W` translate through the EL2 regime into
@@ -1180,12 +1601,20 @@ fn at_s1e2_translates_through_the_el2_regime() {
     assert_eq!(m.run(AT_S1E2W), None);
     let par = m.cpu.sys.par_el1;
     assert_eq!(par & PAR_F, PAR_F, "{par:#x}");
-    assert_eq!((par >> 1) & 0x3F, PERMISSION_L2, "FST: a level 2 permission fault");
+    assert_eq!(
+        (par >> 1) & 0x3F,
+        PERMISSION_L2,
+        "FST: a level 2 permission fault"
+    );
 
     m.cpu.x[0] = 1 << 39;
     assert_eq!(m.run(AT_S1E2R), None);
     let par = m.cpu.sys.par_el1;
-    assert_eq!((par & PAR_F, (par >> 1) & 0x3F), (PAR_F, TRANSLATION_L0), "{par:#x}");
+    assert_eq!(
+        (par & PAR_F, (par >> 1) & 0x3F),
+        (PAR_F, TRANSLATION_L0),
+        "{par:#x}"
+    );
 }
 
 /// From EL2, `AT S12E1R` and `S12E1W` translate through the EL1&0 regime
@@ -1205,14 +1634,22 @@ fn at_s12_translates_the_el1_and_0_regime_from_el2() {
         m.cpu.x[0] = SHARED + 0x123;
         assert_eq!(m.run(at), None);
         let par = m.cpu.sys.par_el1;
-        assert_eq!((par & PAR_F, par & PA), (0, EL1_DATA), "{at:#010x}: {par:#x}");
+        assert_eq!(
+            (par & PAR_F, par & PA),
+            (0, EL1_DATA),
+            "{at:#010x}: {par:#x}"
+        );
     }
     for at in [AT_S12E0R, AT_S12E0W] {
         m.cpu.x[0] = SHARED;
         assert_eq!(m.run(at), None);
         let par = m.cpu.sys.par_el1;
         let fault = (par & PAR_F, (par >> 1) & 0x3F);
-        assert_eq!(fault, (PAR_F, PERMISSION_L2), "{at:#010x}: EL0 has no access: {par:#x}");
+        assert_eq!(
+            fault,
+            (PAR_F, PERMISSION_L2),
+            "{at:#010x}: EL0 has no access: {par:#x}"
+        );
     }
     m.at(El::El1);
     assert_eq!(m.run(AT_S12E1R), sync(El::El1, CURRENT_SPX, EC_UNKNOWN, 0));

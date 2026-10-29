@@ -41,7 +41,11 @@ impl<L: Levels> Cpu<L> {
     /// LDR ZT0 and STR ZT0 (`ldr_zt_br_`, `str_zt_br_`: `11100001 00 x11111
     /// 100000 Rn 00000`, a store by bit 21): ZT0's 64 bytes at `X[n]` or
     /// SP.
-    pub(crate) fn exec_sme_fill_spill_zt0<B: PhysBus>(&mut self, bus: &mut B, insn: u32) -> ExecResult {
+    pub(crate) fn exec_sme_fill_spill_zt0<B: PhysBus>(
+        &mut self,
+        bus: &mut B,
+        insn: u32,
+    ) -> ExecResult {
         let store = bit(insn, 21);
         self.check_sme_enabled()?;
         self.check_sme_zt0_enabled()?;
@@ -84,11 +88,19 @@ impl<L: Levels> Cpu<L> {
         self.check_sme_zt0_enabled()?;
         let elements = es.elements(svl);
         let segments = es.bits() as usize / (index_bits * nreg);
-        let imm = bits(insn, if index_bits == 2 { 17 } else { 16 }, 14 + nreg.trailing_zeros()) as usize;
+        let imm = bits(
+            insn,
+            if index_bits == 2 { 17 } else { 16 },
+            14 + nreg.trailing_zeros(),
+        ) as usize;
         let segment = imm % segments;
         let indexes = self.z(bits(insn, 9, 5), svl);
         let table = self.zt0();
-        let d = if nreg == 1 { bits(insn, 4, 0) } else { group(insn, 4, nreg) };
+        let d = if nreg == 1 {
+            bits(insn, 4, 0)
+        } else {
+            group(insn, 4, nreg)
+        };
         for r in 0..nreg {
             let base = (segment * nreg + r) * elements;
             let mut result = Zv::ZERO;

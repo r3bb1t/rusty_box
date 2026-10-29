@@ -475,29 +475,39 @@ fn with_absolute_paths(config: &ResolvedConfig) -> Result<ResolvedConfig, Librar
                 cdrom.path = absolute_path(&cdrom.path)?;
             }
         }
-        MachineConfig::ArmVirt(virt) => match &mut virt.boot {
-            ArmBoot::Unset => {}
-            ArmBoot::Firmware { code, vars } => {
-                *code = absolute_path(code)?;
-                if let Some(vars) = vars {
-                    *vars = absolute_path(vars)?;
+        MachineConfig::ArmVirt(virt) => {
+            match &mut virt.boot {
+                ArmBoot::Unset => {}
+                ArmBoot::Firmware { code, vars } => {
+                    *code = absolute_path(code)?;
+                    if let Some(vars) = vars {
+                        *vars = absolute_path(vars)?;
+                    }
+                }
+                ArmBoot::BuiltinFirmware { vars } => {
+                    if let Some(vars) = vars {
+                        *vars = absolute_path(vars)?;
+                    }
+                }
+                ArmBoot::Linux {
+                    kernel,
+                    initrd,
+                    command_line: _,
+                    device_tree,
+                } => {
+                    *kernel = absolute_path(kernel)?;
+                    if let Some(initrd) = initrd {
+                        *initrd = absolute_path(initrd)?;
+                    }
+                    if let Some(device_tree) = device_tree {
+                        *device_tree = absolute_path(device_tree)?;
+                    }
                 }
             }
-            ArmBoot::Linux {
-                kernel,
-                initrd,
-                command_line: _,
-                device_tree,
-            } => {
-                *kernel = absolute_path(kernel)?;
-                if let Some(initrd) = initrd {
-                    *initrd = absolute_path(initrd)?;
-                }
-                if let Some(device_tree) = device_tree {
-                    *device_tree = absolute_path(device_tree)?;
-                }
+            if let Some(disk) = &mut virt.disk {
+                disk.path = absolute_path(&disk.path)?;
             }
-        },
+        }
     }
     Ok(anchored)
 }
@@ -1281,6 +1291,49 @@ mod tests {
         assert_eq!(
             saved.pc().expect("a PC").cdrom.as_ref().map(|cdrom| cdrom.path.as_path()),
             Some(cwd.join("boot.iso").as_path())
+        );
+        remove_dir(&dir);
+    }
+
+    /// An Arm board's kernel, initrd and disk are saved absolute too.
+    #[test]
+    fn an_arm_boards_relative_paths_are_saved_absolute() {
+        let dir = scratch_dir("relative-arm");
+        let library = VmLibrary::open(dir.clone()).expect("open");
+        let config = ResolvedConfig {
+            machine: MachineConfig::ArmVirt(crate::config::ArmVirtConfig {
+                boot: ArmBoot::Linux {
+                    kernel: PathBuf::from("Image"),
+                    initrd: Some(PathBuf::from("initramfs.cpio.gz")),
+                    command_line: String::new(),
+                    device_tree: None,
+                },
+                disk: Some(crate::config::VirtDisk {
+                    path: PathBuf::from("disks/alpine.img"),
+                    access: crate::config::DiskAccess::ReadOnly,
+                }),
+                ..crate::config::ArmVirtConfig::blank()
+            }),
+            ..sample_config(&dir)
+        };
+
+        library.create("Alpine Arm", &config).expect("create");
+        let contents = library.load().expect("load");
+
+        let cwd = std::env::current_dir().expect("working directory");
+        let saved = contents.vms[0].config.arm_virt().expect("an Arm board");
+        assert!(
+            matches!(&saved.boot, ArmBoot::Linux { kernel, initrd: Some(initrd), .. }
+                if *kernel == cwd.join("Image") && *initrd == cwd.join("initramfs.cpio.gz")),
+            "{:?}",
+            saved.boot
+        );
+        assert_eq!(
+            saved.disk,
+            Some(crate::config::VirtDisk {
+                path: cwd.join("disks/alpine.img"),
+                access: crate::config::DiskAccess::ReadOnly,
+            })
         );
         remove_dir(&dir);
     }

@@ -1,23 +1,34 @@
 //! Identification values a guest can read, and the feature set they promise.
 //!
-//! The processor is shaped like a Cortex-A57 r1p0 (the value QEMU's
-//! `cortex-a57` model reports in `MIDR_EL1`), cut down to what this
-//! interpreter implements: AArch64 at EL0 and EL1, and at EL2 where the
-//! machine asks for it (FEAT_EL2), FP and Advanced SIMD,
-//! the Cryptographic Extension's AES, PMULL, SHA-1 and SHA-256 and CRC32 (the
+//! Each processor model ([`CpuModel`](super::CpuModel)) is cut down to what
+//! this interpreter implements: AArch64 at EL0 and EL1, and at EL2 where the
+//! machine asks for it (FEAT_EL2), the 4 KiB translation granule, no PMU.
+//! The Cortex-A57 r1p0 (the value QEMU's `cortex-a57` model reports in
+//! `MIDR_EL1`) has FP and Advanced SIMD, the
+//! Cryptographic Extension's AES, PMULL, SHA-1 and SHA-256 and CRC32 (the
 //! Cortex-A57's optional extensions, all of them, as QEMU's `cortex-a57`
-//! has them), the 4 KiB translation granule, no PMU. Every value here
-//! is consistent with that cut — an ID register that advertised a feature the
-//! executor rejects would make the feature unreachable (or worse, reachable
-//! and wrong), so the two change together. The registers that report
-//! instruction-set features are functions of the processor's feature set,
-//! which the decoder reads too.
+//! has them); the Armv9.2 model has those and the rest of its feature set
+//! (`Features::ARMV9P2`), and reports itself as a software model. Both
+//! describe the Cortex-A57's caches. Every value here is consistent with
+//! that cut — an ID register that advertised a feature the executor rejects
+//! would make the feature unreachable (or worse, reachable and wrong), so
+//! the two change together. The registers that report instruction-set
+//! features are functions of the processor's feature set, which the
+//! decoder reads too.
 
 use super::features::{Feature, Features};
 
-/// `MIDR_EL1`: Arm Ltd, variant 1, architecture 0xF, part 0xD07 (Cortex-A57),
-/// revision 0. QEMU `aarch64_a57_initfn` sets the same.
-pub const MIDR_EL1: u64 = 0x411F_D070;
+/// The Cortex-A57's `MIDR_EL1`: Arm Ltd, variant 1, architecture 0xF, part
+/// 0xD07 (Cortex-A57), revision 0. QEMU `aarch64_a57_initfn` sets the same.
+pub const MIDR_CORTEX_A57: u64 = 0x411F_D070;
+
+/// A software model's `MIDR_EL1`: implementer 0 (reserved for software
+/// use), variant 0, architecture 0xF (the ID registers identify each
+/// feature), part 0x052 (`'R'`, telling this model apart from QEMU's `max`,
+/// which is part `'Q'`), revision 0. QEMU `aarch64_max_tcg_initfn` builds
+/// its own the same way, so that no guest takes the processor for an Arm
+/// part and applies that part's errata workarounds.
+pub const MIDR_SOFTWARE_MODEL: u64 = 0x000F_0520;
 
 /// `MPIDR_EL1`: bit 31 RES1, uniprocessor bit clear, affinity 0.0.0.0.
 pub const MPIDR_EL1: u64 = 0x8000_0000;
@@ -85,10 +96,20 @@ pub(crate) const SMIDR_EL1: u64 = 0;
 /// (3:0) = 6 (Armv8.0 debug), 7 with FEAT_Debugv8p1, 8 with FEAT_Debugv8p2
 /// and 9 with FEAT_Debugv8p4 (each of which `Features.json` makes imply the
 /// one before), BRPs = 1 and WRPs = 1 (two of each, the architectural
-/// minimum), CTX_CMPs = 0, PMUVer = 0 (no PMU).
+/// minimum), CTX_CMPs = 0, PMUVer = 0 (no PMU), and DoubleLock (39:36) 0
+/// with FEAT_DoubleLock and 0b1111 without (`FEAT_DoubleLock <=>
+/// SInt(ID_AA64DFR0_EL1.DoubleLock) >= 0`).
 pub(crate) const fn id_aa64dfr0(features: Features) -> u64 {
-    let debug = chain_level(features, &[Feature::Debugv8p1, Feature::Debugv8p2, Feature::Debugv8p4]);
-    0x0000_0000_0010_1000 | (6 + debug)
+    let debug = chain_level(
+        features,
+        &[Feature::Debugv8p1, Feature::Debugv8p2, Feature::Debugv8p4],
+    );
+    let double_lock = if features.has(Feature::DoubleLock) {
+        0
+    } else {
+        0xF << 36
+    };
+    0x0000_0000_0010_1000 | double_lock | (6 + debug)
 }
 
 /// `DBGAUTHSTATUS_EL1` of a processor implementing `features`, as Arm's
@@ -107,8 +128,10 @@ pub(crate) const fn dbgauthstatus_el1(features: Features) -> u64 {
 /// `minimal_ras_reginfo` has it.
 pub(crate) const ERRIDR_EL1: u64 = 0;
 
-/// `ID_AA64ISAR0_EL1` of a processor implementing `features`: AES (7:4) = 2
-/// with FEAT_AES (AESE, AESD, AESMC, AESIMC and the 64-bit PMULL), SHA1
+/// `ID_AA64ISAR0_EL1` of a processor implementing `features`: AES (7:4) = 1
+/// with FEAT_AES (AESE, AESD, AESMC, AESIMC) and 2 with FEAT_PMULL (the
+/// 64-bit PMULL) as well (`Features.json`: `FEAT_PMULL <=>
+/// UInt(ID_AA64ISAR0_EL1.AES) >= 2`, and FEAT_PMULL implies FEAT_AES), SHA1
 /// (11:8) = 1, SHA2 (15:12) = 1 (SHA-256 only), CRC32 (19:16) = 1, Atomic
 /// (23:20) = 2 with FEAT_LSE, RDM (31:28) = 1, DP (47:44) = 1 with
 /// FEAT_DotProd, FHM (51:48) = 1, TS (55:52) = 1 with FEAT_FlagM and 2
@@ -119,9 +142,10 @@ pub(crate) const ERRIDR_EL1: u64 = 0;
 /// `aarch64_aa32_a57_init` (target/arm/cpu-max.c), which
 /// `aarch64_a57_initfn` calls.
 pub(crate) const fn id_aa64isar0(features: Features) -> u64 {
+    let aes = chain_level(features, &[Feature::Aes, Feature::Pmull]);
     let ts = chain_level(features, &[Feature::FlagM, Feature::FlagM2]);
     let tlb = chain_level(features, &[Feature::TlbiOs, Feature::TlbiRange]);
-    field(features, Feature::Aes, 4, 2)
+    (aes << 4)
         | field(features, Feature::Sha1, 8, 1)
         | field(features, Feature::Sha256, 12, 1)
         | field(features, Feature::Crc32, 16, 1)
@@ -264,7 +288,11 @@ const fn field(features: Features, feature: Feature, lsb: u32, value: u64) -> u6
 /// FEAT_ECV (2 would be FEAT_ECV_POFF, which needs EL2).
 pub(crate) const fn id_aa64mmfr0(features: Features) -> u64 {
     const NO_STAGE_2_GRANULE: u64 = (1 << 40) | (1 << 36) | (1 << 32);
-    let stage_2 = if features.has(Feature::El2) { NO_STAGE_2_GRANULE } else { 0 };
+    let stage_2 = if features.has(Feature::El2) {
+        NO_STAGE_2_GRANULE
+    } else {
+        0
+    };
     0x0F00_0024 | stage_2 | field(features, Feature::Ecv, 60, 1)
 }
 
@@ -289,7 +317,8 @@ pub const CLIDR_EL1: u64 = 0x0A20_0023;
 /// data (32 KiB, 2-way, 64-byte lines), L1 instruction (48 KiB, 3-way), L2
 /// unified (2 MiB, 16-way). The L1 geometry is the TRM's (DDI 0488C, 6.1);
 /// QEMU 9.2 and later report a 4-way L1 data cache (README, "Where the
-/// references differ"). Any other selection reads as zero.
+/// references differ"), and the board's device tree carries the TRM's 256
+/// sets to match these values. Any other selection reads as zero.
 pub const CCSIDR_L1D: u64 = 0x701F_E00A;
 pub const CCSIDR_L1I: u64 = 0x201F_E012;
 pub const CCSIDR_L2: u64 = 0x70FF_E07A;

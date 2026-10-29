@@ -5,8 +5,9 @@
 //! rusty_box_devices (their no_std + no_alloc builds included) and bare-metal
 //! (`x86_64-unknown-none`) checks of both, devices with alloc; tests for
 //! rusty_box_aarch64 without features and with std, and its bare-metal check
-//! with alloc; tests for the
-//! three WHP crates, the engine's with every target, and a check of
+//! with alloc; the AArch64 trace loop's host instructions against a
+//! committed baseline (`hot_loop`, skipped where valgrind does not run);
+//! tests for the three WHP crates, the engine's with every target, and a check of
 //! rusty_box_whp's examples; tests for the decoder and the rusty_box library;
 //! checks of rusty_box as no_std with and without alloc, for
 //! `x86_64-unknown-none`, and for `wasm32-unknown-unknown` with alloc; the UEFI
@@ -20,8 +21,9 @@
 //! The aarch64 test steps also check its decoder and system registers
 //! against Arm's machine-readable specification (AARCHMRS), which is not in
 //! this repository: `RUSTY_BOX_AARCHMRS` must name the unpacked package,
-//! which every step inherits, unless `--skip-aarchmrs` is given, which
-//! withholds the variable from every step so those tests are ignored.
+//! which every cargo the gate runs inherits, unless `--skip-aarchmrs` is
+//! given, which withholds the variable from every one so those tests are
+//! ignored.
 //!
 //! It is not a copy of `.github/workflows/ci.yml`. That workflow runs debug
 //! builds, and among its steps are several no step here runs: the tests of
@@ -30,13 +32,16 @@
 //! rusty_box for `x86_64-unknown-uefi`, and of the GUI without its default
 //! features.
 //!
-//! `cargo xtask perf-baseline` builds the release perfbench binary and archives it
-//! (with the git revision) under `target/perf-baselines/<rev>/` for interleaved
-//! A/B comparison against later phases.
+//! `cargo xtask perf-baseline` builds the release perfbench binaries — the x86
+//! machine's `perfbench` and the AArch64 interpreter's `aarch64_perfbench` — and
+//! archives them (with the git revision) under `target/perf-baselines/<rev>/` for
+//! interleaved A/B comparison against later phases. `cargo xtask
+//! hot-loop-baseline` counts the AArch64 trace loop's host instructions and
+//! rewrites the baseline the ci step holds them to.
 
 use std::{
     env,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
     time::Instant,
 };
@@ -420,10 +425,12 @@ fn production_panics(text: &str) -> usize {
     for line in text.lines() {
         let trimmed = line.trim_start();
         let is_doc_or_comment = trimmed.starts_with("//");
+        // Literals blanked first, so a `//` inside a string ("a//b",
+        // "http://…") does not cut the line's code short.
         let code = if is_doc_or_comment {
             String::new()
         } else {
-            without_literals(line.split("//").next().unwrap_or(""))
+            without_literals(line).split("//").next().unwrap_or("").to_owned()
         };
         let opens = code.matches('{').count() as i32;
         let closes = code.matches('}').count() as i32;
@@ -668,7 +675,9 @@ struct Step {
     stdout_marker: Option<&'static str>,
 }
 
-const MATRIX: &[Step] = &[
+/// The crates the x86 machine does not depend on: rusty_box_core,
+/// rusty_box_devices and rusty_box_aarch64.
+const FOUNDATION_MATRIX: &[Step] = &[
     // The core crate is proven on its own, in every configuration it ships,
     // BEFORE anything that depends on it: a foundation that only compiles as
     // part of its consumer is not a foundation. Its default build is the
@@ -766,6 +775,12 @@ const MATRIX: &[Step] = &[
         envs: &[],
         stdout_marker: None,
     },
+];
+
+/// The steps after the AArch64 hot-loop count, which runs once the AArch64
+/// machine's tests have passed and before the steps that build only on
+/// Windows, so that a Linux host reaches it.
+const MATRIX: &[Step] = &[
     // The Windows Hypervisor Platform seam. Its tests need no hypervisor —
     // they cover the bitfield layouts transcribed from the SDK, which is
     // exactly the part a reader cannot check by eye — so this step runs
@@ -1067,18 +1082,29 @@ enum Aarchmrs {
     Withheld,
 }
 
-/// Run `step`, its child inheriting this process's environment but for
-/// `RUSTY_BOX_AARCHMRS`, which `aarchmrs` decides.
-fn run_step(root: &PathBuf, step: &Step, aarchmrs: &Aarchmrs) -> Result<(), String> {
+impl Aarchmrs {
+    /// A `cargo` command in `root`, inheriting this process's environment
+    /// but for `RUSTY_BOX_AARCHMRS`, which this decides: every cargo the
+    /// gate runs is made here, so that each builds `rusty_box_aarch64` with
+    /// the value the others do and its build script reruns for none.
+    fn cargo(&self, root: &Path) -> Command {
+        let mut command = Command::new("cargo");
+        command.current_dir(root);
+        match self {
+            Self::At(dir) => command.env(AARCHMRS_VAR, dir),
+            Self::Withheld => command.env_remove(AARCHMRS_VAR),
+        };
+        command
+    }
+}
+
+/// Run `step` by a cargo [`Aarchmrs::cargo`] makes.
+fn run_step(root: &Path, step: &Step, aarchmrs: &Aarchmrs) -> Result<(), String> {
     let started = Instant::now();
     println!("==> {}", step.name);
 
-    let mut command = Command::new("cargo");
-    command.args(step.args).current_dir(root);
-    match aarchmrs {
-        Aarchmrs::At(dir) => command.env(AARCHMRS_VAR, dir),
-        Aarchmrs::Withheld => command.env_remove(AARCHMRS_VAR),
-    };
+    let mut command = aarchmrs.cargo(root);
+    command.args(step.args);
     for (key, value) in step.envs {
         command.env(key, value);
     }
@@ -1167,6 +1193,12 @@ pub fn execute_ci(command: CiCommand) -> Result<(), String> {
     doctrine_ratchets(&root)?;
     ran += 1;
 
+    for step in FOUNDATION_MATRIX {
+        run_step(&root, step, &aarchmrs)?;
+        ran += 1;
+    }
+    run_hot_loop_step(&root, &aarchmrs)?;
+    ran += 1;
     for step in MATRIX {
         run_step(&root, step, &aarchmrs)?;
         ran += 1;
@@ -1193,6 +1225,31 @@ pub fn execute_ci(command: CiCommand) -> Result<(), String> {
     Ok(())
 }
 
+/// The name the AArch64 hot-loop count runs under, between the AArch64
+/// machine's steps and the WHP crates'.
+const HOT_LOOP_STEP: &str = "aarch64 hot-loop host instructions";
+
+/// The AArch64 trace loop's host instructions against the committed
+/// baseline (`hot_loop`): fails on a rise over the limit, passes with the
+/// reason printed where it cannot count. Its build is a cargo
+/// [`Aarchmrs::cargo`] makes, as every step's is.
+fn run_hot_loop_step(root: &Path, aarchmrs: &Aarchmrs) -> Result<(), String> {
+    let started = Instant::now();
+    println!("==> {HOT_LOOP_STEP}");
+    crate::hot_loop::check(root, aarchmrs.cargo(root))
+        .map_err(|err| format!("{HOT_LOOP_STEP}: {err}"))?;
+    println!(
+        "<== {HOT_LOOP_STEP} ok ({:.1}s)",
+        started.elapsed().as_secs_f32()
+    );
+    Ok(())
+}
+
+/// `cargo xtask hot-loop-baseline`.
+pub fn execute_hot_loop_baseline() -> Result<(), String> {
+    crate::hot_loop::refresh(&repo_root()?)
+}
+
 pub fn execute_perf_baseline(_command: PerfBaselineCommand) -> Result<(), String> {
     let root = repo_root()?;
 
@@ -1208,42 +1265,70 @@ pub fn execute_perf_baseline(_command: PerfBaselineCommand) -> Result<(), String
         String::from_utf8_lossy(&output.stdout).trim().to_string()
     };
 
-    let status = Command::new("cargo")
-        .args([
-            "build", "--release", "-p", "rusty_box", "--example", "perfbench", "--features", "std",
-        ])
-        .current_dir(&root)
-        .status()
-        .map_err(|err| format!("failed to spawn cargo: {err}"))?;
-    if !status.success() {
-        return Err(format!("perfbench build exited with {status}"));
-    }
-
-    let exe = if cfg!(windows) {
-        "perfbench.exe"
-    } else {
-        "perfbench"
-    };
-    let built = root
-        .join("target")
-        .join("release")
-        .join("examples")
-        .join(exe);
-    if !built.exists() {
-        return Err(format!("built perfbench not found at {}", built.display()));
-    }
-
     let dest_dir = root.join("target").join("perf-baselines").join(&rev);
     std::fs::create_dir_all(&dest_dir)
         .map_err(|err| format!("failed to create {}: {err}", dest_dir.display()))?;
-    let dest = dest_dir.join(exe);
-    std::fs::copy(&built, &dest)
-        .map_err(|err| format!("failed to copy perfbench to {}: {err}", dest.display()))?;
+    for bench in PERF_BENCHES {
+        let status = Command::new("cargo")
+            .args([
+                "build",
+                "--release",
+                "-p",
+                bench.package,
+                "--example",
+                bench.example,
+                "--features",
+                "std",
+            ])
+            .current_dir(&root)
+            .status()
+            .map_err(|err| format!("failed to spawn cargo: {err}"))?;
+        if !status.success() {
+            return Err(format!("{} build exited with {status}", bench.example));
+        }
 
-    println!("perf baseline archived: {}", dest.display());
+        let exe = if cfg!(windows) {
+            format!("{}.exe", bench.example)
+        } else {
+            bench.example.to_string()
+        };
+        let built = root
+            .join("target")
+            .join("release")
+            .join("examples")
+            .join(&exe);
+        if !built.exists() {
+            return Err(format!("built {} not found at {}", bench.example, built.display()));
+        }
+        let dest = dest_dir.join(&exe);
+        std::fs::copy(&built, &dest).map_err(|err| {
+            format!("failed to copy {} to {}: {err}", bench.example, dest.display())
+        })?;
+        println!("perf baseline archived: {}", dest.display());
+    }
+
     println!("A/B usage: alternate baseline and candidate binaries >= 10 pairs, compare medians.");
     Ok(())
 }
+
+/// A benchmark example `perf-baseline` builds and archives.
+struct PerfBench {
+    package: &'static str,
+    example: &'static str,
+}
+
+/// The x86 machine's CPU-core benchmark, and the AArch64 interpreter's
+/// loops and boots (`rusty_box_aarch64/examples/perfbench.rs`).
+const PERF_BENCHES: &[PerfBench] = &[
+    PerfBench {
+        package: "rusty_box",
+        example: "perfbench",
+    },
+    PerfBench {
+        package: "rusty_box_aarch64",
+        example: "aarch64_perfbench",
+    },
+];
 
 pub fn parse_ci_args(args: &[String]) -> Result<CiCommand, String> {
     let mut command = CiCommand::default();
@@ -1359,5 +1444,34 @@ mod tests {
 }
 "##;
         assert_eq!(production_panics(source), 2);
+    }
+
+    /// A `//` inside a string is not a comment: the code after it on the
+    /// line is counted, and the braces on it are too, so a test module
+    /// holding one stays test code to its end.
+    #[test]
+    fn a_double_slash_in_a_string_is_not_a_comment() {
+        let production = r##"
+fn production(url: Option<&str>) -> usize {
+    "http://example".len() + url.unwrap().len()
+}
+"##;
+        assert_eq!(production_panics(production), 1);
+
+        let tests = r##"
+#[cfg(test)]
+mod tests {
+    fn paths() {
+        for refused in ["/", "a//b"] {
+            assert!(!refused.is_empty());
+        }
+    }
+
+    fn after() {
+        Some(1).expect("not counted");
+    }
+}
+"##;
+        assert_eq!(production_panics(tests), 0);
     }
 }

@@ -35,7 +35,8 @@ pub(crate) fn f64_to_f16(a: Float64, status: &mut SoftFloatStatus) -> Float16 {
 
     let unrounded = unrounded_f16(a);
     if exp == 0 && unrounded.sig == 0x4000 {
-        // A zero, or a double denormal whose bits all fell below the jam.
+        // A zero: the jam keeps a sticky bit of every denormal's fraction,
+        // so only a zero fraction gives this significand.
         return pack_to_f16(sign, 0, 0);
     }
 

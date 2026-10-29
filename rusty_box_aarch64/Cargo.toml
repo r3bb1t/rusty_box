@@ -46,3 +46,10 @@ required-features = ["std"]
 [[example]]
 name = "linux_virt"
 required-features = ["std"]
+
+# Named apart from rusty_box's own `perfbench`, which builds to the same
+# path under target/.
+[[example]]
+name = "aarch64_perfbench"
+path = "examples/perfbench.rs"
+required-features = ["std"]

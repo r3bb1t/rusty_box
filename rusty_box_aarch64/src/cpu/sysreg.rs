@@ -20,9 +20,9 @@
 //! [`Route::El2`] (`AArch64_SystemAccessTrap(EL2, ..)`).
 
 use super::el2::{
-    has_contextidr_el2, El2Reg, CNTHCTL_EL1PCEN, CNTHCTL_EL1PCTEN, CNTHCTL_EL1TVCT, CNTHCTL_EL1TVT, CPTR_TCPAC,
-    HCR_AMO, HCR_APK, HCR_FIEN, HCR_TACR, HCR_TERR, HCR_TID1, HCR_TID2, HCR_TID3, HCR_TIDCP, HCR_TLOR,
-    HCR_TRVM, HCR_TVM, MDCR_TDA, MDCR_TDE, MDCR_TDOSA, MDCR_TDRA,
+    has_contextidr_el2, El2Reg, CNTHCTL_EL1PCEN, CNTHCTL_EL1PCTEN, CNTHCTL_EL1TVCT, CNTHCTL_EL1TVT,
+    CPTR_TCPAC, HCR_AMO, HCR_APK, HCR_FIEN, HCR_TACR, HCR_TERR, HCR_TID1, HCR_TID2, HCR_TID3,
+    HCR_TIDCP, HCR_TLOR, HCR_TRVM, HCR_TVM, MDCR_TDA, MDCR_TDE, MDCR_TDOSA, MDCR_TDRA,
 };
 use super::exception::Route;
 use super::features::{Feature, Features};
@@ -30,7 +30,7 @@ use super::id;
 use super::pauth::KeyHalf;
 use super::regs::{SysReg, SysRegRefusal};
 use super::timer::GenericTimer;
-use super::{sctlr, Cpu, El, Levels, Pstate, SysRegs, RMR_AA64, RMR_RR};
+use super::{sctlr, Cpu, El, Levels, Pstate, SysRegs};
 
 /// Who is accessing a system register.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,7 +51,13 @@ pub(crate) struct SysRegKey(u32);
 
 impl SysRegKey {
     pub(crate) const fn new(op0: u32, op1: u32, crn: u32, crm: u32, op2: u32) -> Self {
-        Self(((op0 & 3) << 14) | ((op1 & 7) << 11) | ((crn & 15) << 7) | ((crm & 15) << 3) | (op2 & 7))
+        Self(
+            ((op0 & 3) << 14)
+                | ((op1 & 7) << 11)
+                | ((crn & 15) << 7)
+                | ((crm & 15) << 3)
+                | (op2 & 7),
+        )
     }
 
     /// From an `MRS`/`MSR`/`SYS` instruction word.
@@ -263,6 +269,9 @@ const LORN_EL1: u32 = key!(3, 0, 10, 4, 2);
 const LORC_EL1: u32 = key!(3, 0, 10, 4, 3);
 const LORID_EL1: u32 = key!(3, 0, 10, 4, 7);
 const VBAR_EL1: u32 = key!(3, 0, 12, 0, 0);
+// The reset management registers of EL1 where it is the highest EL (Arm's
+// data: `IsHighestEL(EL1) && FEAT_AA64`); with FEAT_EL2, EL2's
+// (`RVBAR_EL2`, `RMR_EL2`) are.
 const RVBAR_EL1: u32 = key!(3, 0, 12, 0, 1);
 const RMR_EL1: u32 = key!(3, 0, 12, 0, 2);
 const ISR_EL1: u32 = key!(3, 0, 12, 1, 0);
@@ -284,15 +293,16 @@ const CNTP_CVAL_EL0: u32 = key!(3, 3, 14, 2, 2);
 const CNTV_TVAL_EL0: u32 = key!(3, 3, 14, 3, 0);
 const CNTV_CTL_EL0: u32 = key!(3, 3, 14, 3, 1);
 const CNTV_CVAL_EL0: u32 = key!(3, 3, 14, 3, 2);
-const OSDTRRX_EL1: u32 = key!(2, 0, 0, 0, 2);
 const MDCCINT_EL1: u32 = key!(2, 0, 0, 2, 0);
 const MDSCR_EL1: u32 = key!(2, 0, 0, 2, 2);
-const OSDTRTX_EL1: u32 = key!(2, 0, 0, 3, 2);
 const OSECCR_EL1: u32 = key!(2, 0, 0, 6, 2);
 const MDCCSR_EL0: u32 = key!(2, 3, 0, 1, 0);
+// The Debug Communications Channel data registers. `DBGDTRTX_EL0` is named
+// `DBGDTRRX_EL0` when read.
+const OSDTRRX_EL1: u32 = key!(2, 0, 0, 0, 2);
+const OSDTRTX_EL1: u32 = key!(2, 0, 0, 3, 2);
 const DBGDTR_EL0: u32 = key!(2, 3, 0, 4, 0);
-/// `DBGDTRRX_EL0` to a read, `DBGDTRTX_EL0` to a write.
-const DBGDTRRX_TX_EL0: u32 = key!(2, 3, 0, 5, 0);
+const DBGDTRTX_EL0: u32 = key!(2, 3, 0, 5, 0);
 const MDRAR_EL1: u32 = key!(2, 0, 1, 0, 0);
 const OSLAR_EL1: u32 = key!(2, 0, 1, 0, 4);
 const OSLSR_EL1: u32 = key!(2, 0, 1, 1, 4);
@@ -344,6 +354,50 @@ const CNTHCTL_EL2: u32 = key!(3, 4, 14, 1, 0);
 const CNTHP_TVAL_EL2: u32 = key!(3, 4, 14, 2, 0);
 const CNTHP_CTL_EL2: u32 = key!(3, 4, 14, 2, 1);
 const CNTHP_CVAL_EL2: u32 = key!(3, 4, 14, 2, 2);
+
+/// The encoding an `MRS` and an `MSR` reach EL2 register `reg` by, held as
+/// written, on a processor implementing `features`: `None` where the
+/// processor lacks the register, and for `CNTHP_CTL_EL2`, whose `ISTATUS`
+/// the timer computes (its own arms read and write it). The one map from
+/// [`El2Reg`] to encodings, exhaustive (R5): a register added to the list
+/// is given its encoding here, or does not compile.
+fn el2_encoding(reg: El2Reg, features: Features) -> Option<u32> {
+    let present = |encoding: u32, has: bool| has.then_some(encoding);
+    match reg {
+        El2Reg::Hcr => Some(HCR_EL2),
+        El2Reg::Sctlr => Some(SCTLR_EL2),
+        El2Reg::Actlr => Some(ACTLR_EL2),
+        El2Reg::Cptr => Some(CPTR_EL2),
+        El2Reg::Hstr => Some(HSTR_EL2),
+        El2Reg::Hacr => Some(HACR_EL2),
+        El2Reg::Mdcr => Some(MDCR_EL2),
+        El2Reg::Tcr => Some(TCR_EL2),
+        El2Reg::Ttbr0 => Some(TTBR0_EL2),
+        El2Reg::Vtcr => Some(VTCR_EL2),
+        El2Reg::Vttbr => Some(VTTBR_EL2),
+        El2Reg::Mair => Some(MAIR_EL2),
+        El2Reg::Amair => Some(AMAIR_EL2),
+        El2Reg::Vbar => Some(VBAR_EL2),
+        El2Reg::Esr => Some(ESR_EL2),
+        El2Reg::Far => Some(FAR_EL2),
+        El2Reg::Hpfar => Some(HPFAR_EL2),
+        El2Reg::Elr => Some(ELR_EL2),
+        El2Reg::Spsr => Some(SPSR_EL2),
+        El2Reg::Afsr0 => Some(AFSR0_EL2),
+        El2Reg::Afsr1 => Some(AFSR1_EL2),
+        El2Reg::Tpidr => Some(TPIDR_EL2),
+        El2Reg::Vpidr => Some(VPIDR_EL2),
+        El2Reg::Vmpidr => Some(VMPIDR_EL2),
+        El2Reg::Smcr => present(SMCR_EL2, features.has(Feature::Sme)),
+        El2Reg::Cnthctl => Some(CNTHCTL_EL2),
+        El2Reg::Cntvoff => Some(CNTVOFF_EL2),
+        El2Reg::CnthpCtl => None,
+        El2Reg::CnthpCval => Some(CNTHP_CVAL_EL2),
+        El2Reg::Contextidr => present(CONTEXTIDR_EL2, has_contextidr_el2(features)),
+        El2Reg::Vdisr => present(VDISR_EL2, features.has(Feature::Ras)),
+        El2Reg::Vsesr => present(VSESR_EL2, features.has(Feature::Ras)),
+    }
+}
 
 /// Why an `MRS`/`MSR` did not complete.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -414,12 +468,66 @@ const CNTKCTL_BASE: u64 = 0x3FF;
 /// the same layout.
 pub(crate) const DISR_MASK: u64 = (1 << 31) | (1 << 24) | 0x00FF_FFFF;
 
+/// `MDSCR_EL1.SS`: software step is enabled.
+pub(super) const MDSCR_SS: u64 = 1;
+
 /// `MDSCR_EL1.TDCC`: EL0's accesses to the Debug Communications Channel
 /// registers trap to EL1.
 const MDSCR_TDCC: u64 = 1 << 12;
 
-/// `OSLSR_EL1.OSLK`: the OS lock is locked.
-const OSLSR_OSLK: u64 = 1 << 1;
+/// `MDSCR_EL1.KDE`: debug exceptions are enabled at the EL they target.
+pub(super) const MDSCR_KDE: u64 = 1 << 13;
+
+/// `OSDLR_EL1.DLK`: the OS Double Lock is locked (FEAT_DoubleLock; RES0
+/// without it).
+pub(super) const OSDLR_DLK: u64 = 1;
+
+/// `DBGPRCR_EL1.CORENPDRQ`: the core is asked not to power down, which
+/// overrides the OS Double Lock.
+pub(super) const DBGPRCR_CORENPDRQ: u64 = 1;
+
+/// `RMR_ELx.AA64`: the processor resets into AArch64. RAO/WI, as there is
+/// no AArch32 to reset into.
+const RMR_AA64: u64 = 1;
+
+/// `RMR_ELx.RR`: a Warm reset is requested.
+pub(super) const RMR_RR: u64 = 1 << 1;
+
+/// The Debug Communications Channel's flags, `EDSCR.TXfull` (DTRTX full)
+/// and `EDSCR.RXfull` (DTRRX full). They are kept at their places in
+/// `MDSCR_EL1`, bits 29 and 30, which views them as `MDCCSR_EL0` does at the
+/// same bits (Arm ARM, DDI 0487, the `MDSCR_EL1`, `MDCCSR_EL0` and `EDSCR`
+/// register descriptions).
+const DCC_TXFULL: u64 = 1 << 29;
+const DCC_RXFULL: u64 = 1 << 30;
+const DCC_FLAGS: u64 = DCC_TXFULL | DCC_RXFULL;
+
+/// The `MDSCR_EL1` fields that are the OS Lock save/restore view of `EDSCR`:
+/// RXfull (30), TXfull (29), RXO (27), TXU (26), INTdis (23:22), TDA (21),
+/// HDE (14) and ERR (6). An `MSR` writes them only while `OSLSR_EL1.OSLK` is
+/// 1, and leaves them as they are while it is 0 (Arm ARM, DDI 0487, the
+/// `MDSCR_EL1` description; Arm's ASL as the Sail arm-v9.3-a model carries
+/// it, `__set_MDSCR_EL1`). That ASL gates TFO (31) and SC2 (19) the same way;
+/// they belong to FEAT_TRF and FEAT_PCSRv8p2, which no processor model
+/// here implements, and are RES0.
+const MDSCR_SAVE_RESTORE: u64 =
+    DCC_FLAGS | (1 << 27) | (1 << 26) | (0b11 << 22) | (1 << 21) | (1 << 14) | (1 << 6);
+
+/// The `MDSCR_EL1` fields every processor model here has: the save/restore
+/// fields, SS (0), TDCC (12), KDE (13) and MDE (15). Every other bit is
+/// RES0 here (the bits later features define among them: TFO, SC2, EMBWE,
+/// TTA, EnSPM, EHBWE, of features no model implements), and reads as zero
+/// (Arm ARM, DDI 0487, the `MDSCR_EL1` description).
+pub(super) const MDSCR_FIELDS: u64 =
+    MDSCR_SAVE_RESTORE | MDSCR_SS | MDSCR_TDCC | MDSCR_KDE | (1 << 15);
+
+/// `OSLSR_EL1.OSLK`: the OS Lock is locked.
+pub(super) const OSLSR_OSLK: u64 = 1 << 1;
+
+/// `SCTLR_EL1` FEAT_MTE fields: ITFSB, TCF0, TCF, ATA0, ATA, TCSO0, TCSO,
+/// RES0 as no processor model here implements FEAT_MTE.
+const SCTLR_MTE: u64 =
+    (1 << 37) | (3 << 38) | (3 << 40) | (1 << 42) | (1 << 43) | (1 << 58) | (1 << 59);
 
 /// `CPACR_EL1.FPEN`.
 pub(crate) const CPACR_FPEN: u64 = 3 << 20;
@@ -558,7 +666,9 @@ impl<L: Levels> Cpu<L> {
     }
 
     /// The accessor checks of `MDCCSR_EL0`, `DBGDTR_EL0`, `DBGDTRRX_EL0` and
-    /// `DBGDTRTX_EL0`: `MDSCR_EL1.TDCC` traps EL0's to EL1; then
+    /// `DBGDTRTX_EL0`, made before the access has any effect (Arm ARM, DDI
+    /// 0487, their accessibility pseudocode; QEMU target/arm/debug_helper.c
+    /// `access_tdcc`): `MDSCR_EL1.TDCC` traps EL0's to EL1; then
     /// `MDCR_EL2.TDE` or `TDA` traps EL0's and EL1's to EL2, as `HCR_EL2.TGE`
     /// does EL0's.
     fn dcc_check(&self, el: El) -> Result<(), SysRegError> {
@@ -592,9 +702,8 @@ impl<L: Levels> Cpu<L> {
     /// them to a guest with no error records.
     fn error_record_register(&self, key: SysRegKey) -> bool {
         match key.0 {
-            ERRSELR_EL1 | ERXFR_EL1 | ERXCTLR_EL1 | ERXSTATUS_EL1 | ERXADDR_EL1 | ERXMISC0_EL1 | ERXMISC1_EL1 => {
-                self.implements(Feature::Ras)
-            }
+            ERRSELR_EL1 | ERXFR_EL1 | ERXCTLR_EL1 | ERXSTATUS_EL1 | ERXADDR_EL1 | ERXMISC0_EL1
+            | ERXMISC1_EL1 => self.implements(Feature::Ras),
             ERXMISC2_EL1 | ERXMISC3_EL1 | ERXPFGF_EL1 | ERXPFGCTL_EL1 | ERXPFGCDN_EL1 => {
                 self.implements(Feature::RasV1p1)
             }
@@ -632,7 +741,8 @@ impl<L: Levels> Cpu<L> {
         }
     }
 
-    /// `MRS`: the value of the register `key` names, read at the current EL.
+    /// The value an `MRS` at the current EL reads from the register `key`
+    /// names, without the read's side effect (see [`Cpu::sysreg_mrs`]).
     /// With FEAT_IDST, a read of the feature ID space that would be
     /// UNDEFINED traps instead (each ID register's accessor at EL0, and Arm
     /// `UnimplementedIDRegister` at any EL).
@@ -646,6 +756,20 @@ impl<L: Levels> Cpu<L> {
         }
     }
 
+    /// `MRS`: read the register `key` names at the current EL, with the
+    /// read's side effect. A read of `DBGDTRRX_EL0` or `DBGDTR_EL0` empties
+    /// DTRRX: RXfull is cleared to 0 after the read (Arm ARM, DDI 0487, the
+    /// `DBGDTRRX_EL0` and `DBGDTR_EL0` register descriptions). A read that
+    /// traps has no effect.
+    #[inline]
+    pub(crate) fn sysreg_mrs(&mut self, key: SysRegKey) -> Result<u64, SysRegError> {
+        let value = self.sysreg_read(key)?;
+        if let DBGDTR_EL0 | DBGDTRTX_EL0 = key.0 {
+            self.sys.mdscr_el1 &= !DCC_RXFULL;
+        }
+        Ok(value)
+    }
+
     /// The exception level an accessor reads and writes at.
     fn access_level(&self, accessor: Accessor) -> El {
         match accessor {
@@ -654,8 +778,9 @@ impl<L: Levels> Cpu<L> {
         }
     }
 
-    /// The value of the register `key` names, as `accessor` reads it.
-    /// Reading has no side effects on this core.
+    /// The value of the register `key` names, as `accessor` reads it. This
+    /// read has no side effect; an `MRS`'s side effect is
+    /// [`Cpu::sysreg_mrs`]'s.
     fn sysreg_read_as(&self, key: SysRegKey, accessor: Accessor) -> Result<u64, SysRegError> {
         let el = self.access_level(accessor);
         let el0 = el == El::El0;
@@ -687,8 +812,12 @@ impl<L: Levels> Cpu<L> {
             }
             TPIDR_EL0 => return Ok(self.sys.tpidr_el0),
             TPIDRRO_EL0 => return Ok(self.sys.tpidrro_el0),
-            DIT if self.implements(Feature::Dit) => return Ok(if self.pstate.dit { Pstate::DIT } else { 0 }),
-            SSBS if self.implements(Feature::Ssbs2) => return Ok(if self.pstate.ssbs { Pstate::SSBS } else { 0 }),
+            DIT if self.implements(Feature::Dit) => {
+                return Ok(if self.pstate.dit { Pstate::DIT } else { 0 })
+            }
+            SSBS if self.implements(Feature::Ssbs2) => {
+                return Ok(if self.pstate.ssbs { Pstate::SSBS } else { 0 })
+            }
             SVCR if self.implements(Feature::Sme) => {
                 self.sme_register_check(accessor)?;
                 return Ok(self.svcr.bits());
@@ -735,13 +864,33 @@ impl<L: Levels> Cpu<L> {
                     _ => self.timer_tval_read(GenericTimer::Virtual),
                 });
             }
-            // The Debug Communications Channel with no debugger attached:
-            // nothing received, nothing waiting to be sent
-            // (`MDCCSR_EL0.RXfull` and `TXfull` clear), and its data
-            // registers RAZ/WI.
-            MDCCSR_EL0 | DBGDTR_EL0 | DBGDTRRX_TX_EL0 => {
+            // The Debug Communications Channel with no external debugger on
+            // its far end (Arm ARM, DDI 0487, chapter H4, "The Debug
+            // Communication Channel and Instruction Transfer Register").
+            // `MDCCSR_EL0` reports the two flags; nothing ever empties DTRTX
+            // or fills DTRRX, so TXfull stays set from the first write on
+            // and RXfull is set only by a restore through `MDSCR_EL1`.
+            MDCCSR_EL0 => {
                 self.dcc_check(el)?;
-                return Ok(0);
+                return Ok(self.sys.mdscr_el1 & DCC_FLAGS);
+            }
+            // `DBGDTRRX_EL0` (`DBGDTRTX_EL0`'s encoding, read) returns DTRRX
+            // in bits [31:0], and `DBGDTR_EL0` returns DTRTX in bits [63:32]
+            // and DTRRX in [31:0] (the `DBGDTRRX_EL0` and `DBGDTR_EL0`
+            // descriptions; Arm's ASL `DBGDTR_EL0_read`). While RXfull is
+            // clear the whole value is UNKNOWN; this model reads zero.
+            // Emptying DTRRX is `sysreg_mrs`'s side effect.
+            DBGDTR_EL0 | DBGDTRTX_EL0 => {
+                self.dcc_check(el)?;
+                if self.sys.mdscr_el1 & DCC_RXFULL == 0 {
+                    return Ok(0);
+                }
+                let rx = u64::from(self.sys.dtrrx);
+                return Ok(if k == DBGDTR_EL0 {
+                    (u64::from(self.sys.dtrtx) << 32) | rx
+                } else {
+                    rx
+                });
             }
             _ => {}
         }
@@ -777,7 +926,7 @@ impl<L: Levels> Cpu<L> {
                 if el1 && self.el2_enabled() {
                     self.el2().vpidr
                 } else {
-                    id::MIDR_EL1
+                    self.imp.midr
                 }
             }
             MPIDR_EL1 => {
@@ -915,9 +1064,11 @@ impl<L: Levels> Cpu<L> {
                 id::LORID_EL1
             }
             VBAR_EL1 => self.sys.vbar_el1,
-            // Only where EL1 is the highest level.
-            RVBAR_EL1 if !self.have_el2() => self.rvbar,
-            RMR_EL1 if !self.have_el2() => self.sys.rmr,
+            // Only where EL1 is the highest level. The IMPLEMENTATION
+            // DEFINED address execution starts from after reset: the one the
+            // machine's last reset started it from.
+            RVBAR_EL1 if !self.have_el2() => self.sys.rvbar,
+            RMR_EL1 if !self.have_el2() => RMR_AA64 | self.sys.rmr,
             ISR_EL1 => self.interrupt_status(el),
             CONTEXTIDR_EL1 => {
                 self.trvm_check(el)?;
@@ -933,11 +1084,19 @@ impl<L: Levels> Cpu<L> {
                 self.debug_check(el, MDCR_TDA)?;
                 self.sys.mdscr_el1
             }
-            // The OS lock save and restore registers of the Debug
-            // Communications Channel, RAZ/WI as its data registers are.
+            // The save/restore views of DTRRX and DTRTX: a read returns the
+            // data register and leaves RXfull and TXfull as they are, at
+            // either state of the OS Lock (Arm ARM, DDI 0487, the
+            // `OSDTRRX_EL1` and `OSDTRTX_EL1` descriptions, which deprecate
+            // their use while the OS Lock is unlocked). Bits [63:32] are
+            // RES0.
             OSDTRRX_EL1 | OSDTRTX_EL1 => {
                 self.debug_check(el, MDCR_TDA)?;
-                0
+                u64::from(if k == OSDTRRX_EL1 {
+                    self.sys.dtrrx
+                } else {
+                    self.sys.dtrtx
+                })
             }
             // With the OS lock unlocked the value read is UNKNOWN; this is
             // the one it reads.
@@ -950,8 +1109,9 @@ impl<L: Levels> Cpu<L> {
                 self.sys.oslsr_el1
             }
             // `MDCR_EL2.TDOSA` traps `OSDLR_EL1` on a processor with
-            // FEAT_DoubleLock (`ID_AA64DFR0_EL1.DoubleLock` = 0), as every
-            // one here is.
+            // FEAT_DoubleLock (`ID_AA64DFR0_EL1.DoubleLock` = 0) and, Arm
+            // leaving it IMPLEMENTATION DEFINED ("Trapped by
+            // MDCR_EL2.TDOSA"), on one without, where DLK is RES0.
             OSDLR_EL1 => {
                 self.debug_check(el, MDCR_TDOSA)?;
                 self.sys.osdlr_el1
@@ -960,12 +1120,22 @@ impl<L: Levels> Cpu<L> {
                 self.debug_check(el, MDCR_TDOSA)?;
                 self.sys.dbgprcr_el1
             }
-            // No ROM table: `ROMADDR` invalid (`Valid` = 0b00).
+            // No ROM table for an external debugger to find: `Valid` 0b00,
+            // `ROMADDR` not valid, as QEMU reads it (`debug_cp_reginfo`).
             MDRAR_EL1 => {
                 self.debug_check(el, MDCR_TDRA)?;
                 0
             }
-            DBGCLAIMSET_EL1 | DBGCLAIMCLR_EL1 => {
+            // Every one of the eight claim tags is implemented: their
+            // `DBGCLAIMSET_EL1` bits read as one ("Access to this field is
+            // RAO/W1S", DDI 0601's `DBGCLAIMSET_EL1`), and
+            // `DBGCLAIMCLR_EL1` reads the tags themselves, as QEMU's
+            // `dbgclaimset_read` and `DBGCLAIMCLR_EL1` have them.
+            DBGCLAIMSET_EL1 => {
+                self.debug_check(el, MDCR_TDA)?;
+                0xFF
+            }
+            DBGCLAIMCLR_EL1 => {
                 self.debug_check(el, MDCR_TDA)?;
                 self.sys.dbgclaim
             }
@@ -1015,8 +1185,8 @@ impl<L: Levels> Cpu<L> {
             SP_EL1 => self.sp_el1,
             // RES0 with no AArch32 at EL1.
             SPSR_IRQ | SPSR_ABT | SPSR_UND | SPSR_FIQ => 0,
-            RVBAR_EL2 => self.rvbar,
-            RMR_EL2 => self.sys.rmr,
+            RVBAR_EL2 => self.sys.rvbar,
+            RMR_EL2 => RMR_AA64 | self.sys.rmr,
             CNTHP_CTL_EL2 => self.timer_ctl_read(GenericTimer::Hypervisor),
             CNTHP_TVAL_EL2 => self.timer_tval_read(GenericTimer::Hypervisor),
             // RES0, as `SMPRI_EL1` is: no streaming execution priorities.
@@ -1026,43 +1196,13 @@ impl<L: Levels> Cpu<L> {
     }
 
     /// The EL2 register held as written (through its [`El2Reg::kept`]
-    /// mask) that `key` names, if this processor implements it.
+    /// mask) that `key` names, if this processor implements it
+    /// ([`el2_encoding`]).
     fn el2_storage(&self, key: SysRegKey) -> Option<El2Reg> {
-        let f = self.imp.features;
-        Some(match key.0 {
-            HCR_EL2 => El2Reg::Hcr,
-            SCTLR_EL2 => El2Reg::Sctlr,
-            ACTLR_EL2 => El2Reg::Actlr,
-            CPTR_EL2 => El2Reg::Cptr,
-            HSTR_EL2 => El2Reg::Hstr,
-            HACR_EL2 => El2Reg::Hacr,
-            MDCR_EL2 => El2Reg::Mdcr,
-            TCR_EL2 => El2Reg::Tcr,
-            TTBR0_EL2 => El2Reg::Ttbr0,
-            VTCR_EL2 => El2Reg::Vtcr,
-            VTTBR_EL2 => El2Reg::Vttbr,
-            MAIR_EL2 => El2Reg::Mair,
-            AMAIR_EL2 => El2Reg::Amair,
-            VBAR_EL2 => El2Reg::Vbar,
-            ESR_EL2 => El2Reg::Esr,
-            FAR_EL2 => El2Reg::Far,
-            HPFAR_EL2 => El2Reg::Hpfar,
-            ELR_EL2 => El2Reg::Elr,
-            SPSR_EL2 => El2Reg::Spsr,
-            AFSR0_EL2 => El2Reg::Afsr0,
-            AFSR1_EL2 => El2Reg::Afsr1,
-            TPIDR_EL2 => El2Reg::Tpidr,
-            VPIDR_EL2 => El2Reg::Vpidr,
-            VMPIDR_EL2 => El2Reg::Vmpidr,
-            CNTHCTL_EL2 => El2Reg::Cnthctl,
-            CNTVOFF_EL2 => El2Reg::Cntvoff,
-            CNTHP_CVAL_EL2 => El2Reg::CnthpCval,
-            SMCR_EL2 if f.has(Feature::Sme) => El2Reg::Smcr,
-            CONTEXTIDR_EL2 if has_contextidr_el2(f) => El2Reg::Contextidr,
-            VDISR_EL2 if f.has(Feature::Ras) => El2Reg::Vdisr,
-            VSESR_EL2 if f.has(Feature::Ras) => El2Reg::Vsesr,
-            _ => return None,
-        })
+        let features = self.imp.features;
+        El2Reg::ALL
+            .into_iter()
+            .find(|&reg| el2_encoding(reg, features) == Some(key.0))
     }
 
     /// The value of breakpoint or watchpoint register `point`.
@@ -1089,12 +1229,21 @@ impl<L: Levels> Cpu<L> {
 
     /// `MSR`: write `value` to the register `key` names at the current EL.
     #[inline]
-    pub(crate) fn sysreg_write(&mut self, key: SysRegKey, value: u64) -> Result<WriteEffect, SysRegError> {
+    pub(crate) fn sysreg_write(
+        &mut self,
+        key: SysRegKey,
+        value: u64,
+    ) -> Result<WriteEffect, SysRegError> {
         self.sysreg_write_as(key, value, Accessor::Guest)
     }
 
     /// Write `value` to the register `key` names, as `accessor` writes it.
-    fn sysreg_write_as(&mut self, key: SysRegKey, value: u64, accessor: Accessor) -> Result<WriteEffect, SysRegError> {
+    fn sysreg_write_as(
+        &mut self,
+        key: SysRegKey,
+        value: u64,
+        accessor: Accessor,
+    ) -> Result<WriteEffect, SysRegError> {
         let el = self.access_level(accessor);
         let el0 = el == El::El0;
         let k = key.0;
@@ -1150,7 +1299,10 @@ impl<L: Levels> Cpu<L> {
                 match k {
                     CNTP_CTL_EL0 => self.sys.cntp_ctl_el0 = value & 3,
                     CNTP_CVAL_EL0 => self.sys.cntp_cval_el0 = value,
-                    _ => self.sys.cntp_cval_el0 = self.timer_cval_from_tval(GenericTimer::Physical, value),
+                    _ => {
+                        self.sys.cntp_cval_el0 =
+                            self.timer_cval_from_tval(GenericTimer::Physical, value)
+                    }
                 }
                 return Ok(WriteEffect::Timer);
             }
@@ -1159,12 +1311,30 @@ impl<L: Levels> Cpu<L> {
                 match k {
                     CNTV_CTL_EL0 => self.sys.cntv_ctl_el0 = value & 3,
                     CNTV_CVAL_EL0 => self.sys.cntv_cval_el0 = value,
-                    _ => self.sys.cntv_cval_el0 = self.timer_cval_from_tval(GenericTimer::Virtual, value),
+                    _ => {
+                        self.sys.cntv_cval_el0 =
+                            self.timer_cval_from_tval(GenericTimer::Virtual, value)
+                    }
                 }
                 return Ok(WriteEffect::Timer);
             }
-            DBGDTR_EL0 | DBGDTRRX_TX_EL0 => {
+            // A write fills DTRTX with bits [31:0]: TXfull is set to 1 after
+            // the write (Arm ARM, DDI 0487, the `DBGDTRTX_EL0` and
+            // `DBGDTR_EL0` register descriptions; Arm's ASL
+            // `DBGDTR_EL0_set`), and only an external debugger's read of
+            // DTRTX clears it again. `DBGDTR_EL0`'s bits [63:32] go to DTRRX
+            // and leave RXfull as it is. A write while TXfull is already set
+            // writes UNKNOWN values; this model leaves both data registers
+            // as they were.
+            DBGDTR_EL0 | DBGDTRTX_EL0 => {
                 self.dcc_check(el)?;
+                if self.sys.mdscr_el1 & DCC_TXFULL == 0 {
+                    self.sys.dtrtx = value as u32;
+                    if k == DBGDTR_EL0 {
+                        self.sys.dtrrx = (value >> 32) as u32;
+                    }
+                }
+                self.sys.mdscr_el1 |= DCC_TXFULL;
                 return Ok(WriteEffect::None);
             }
             _ => {}
@@ -1199,10 +1369,18 @@ impl<L: Levels> Cpu<L> {
                 self.sys.csselr_el1 = value & 0xF;
                 WriteEffect::None
             }
+            // The memory-tagging controls read as zero on a core without
+            // FEAT_MTE, and a write that changes nothing keeps the TLB
+            // (QEMU target/arm/helper.c `sctlr_write`).
             SCTLR_EL1 => {
                 self.tvm_check(el)?;
-                self.sys.sctlr_el1 = value;
-                WriteEffect::FlushTlb
+                let value = value & !SCTLR_MTE;
+                if value == self.sys.sctlr_el1 {
+                    WriteEffect::None
+                } else {
+                    self.sys.sctlr_el1 = value;
+                    WriteEffect::FlushTlb
+                }
             }
             ACTLR_EL1 => {
                 trap_to_el2(el1 && self.hcr_any(HCR_TACR))?;
@@ -1321,10 +1499,12 @@ impl<L: Levels> Cpu<L> {
                 self.sys.vbar_el1 = value & !0x7FF;
                 WriteEffect::None
             }
-            // Only where EL1 is the highest level: `AA64` RAO/WI, `RR` a
-            // request held as written.
+            // Only where EL1 is the highest level. RR asks the system for a
+            // Warm reset of the processor. The board has no reset controller
+            // that acts on the request (as QEMU's `virt` has none), so it is
+            // held and nothing resets; AA64 is RAO/WI.
             RMR_EL1 if !self.have_el2() => {
-                self.sys.rmr = RMR_AA64 | (value & RMR_RR);
+                self.sys.rmr = value & RMR_RR;
                 WriteEffect::None
             }
             CONTEXTIDR_EL1 => {
@@ -1361,13 +1541,32 @@ impl<L: Levels> Cpu<L> {
                 self.sys.mdccint_el1 = value;
                 WriteEffect::None
             }
+            // The save/restore fields, the channel's TXfull and RXfull among
+            // them, are read-only while the OS Lock is unlocked and written
+            // through to `EDSCR` while it is locked (Arm ARM, DDI 0487,
+            // `MDSCR_EL1` and `EDSCR`). Unlocked, a read of them is UNKNOWN;
+            // this model's reads return what they hold at every OS Lock
+            // state. A RES0 bit is not stored.
             MDSCR_EL1 => {
                 self.debug_check(el, MDCR_TDA)?;
-                self.sys.mdscr_el1 = value;
+                let kept = if self.sys.oslsr_el1 & OSLSR_OSLK != 0 {
+                    0
+                } else {
+                    MDSCR_SAVE_RESTORE
+                };
+                self.sys.mdscr_el1 = (value & MDSCR_FIELDS & !kept) | (self.sys.mdscr_el1 & kept);
                 WriteEffect::None
             }
+            // A write to a save/restore view sets the data register from bits
+            // [31:0] and leaves its flag as it is, at either state of the OS
+            // Lock (the `OSDTRRX_EL1` and `OSDTRTX_EL1` descriptions).
             OSDTRRX_EL1 | OSDTRTX_EL1 => {
                 self.debug_check(el, MDCR_TDA)?;
+                if k == OSDTRRX_EL1 {
+                    self.sys.dtrrx = value as u32;
+                } else {
+                    self.sys.dtrtx = value as u32;
+                }
                 WriteEffect::None
             }
             // Ignored while the OS lock is unlocked (Arm `OSECCR_EL1`'s
@@ -1385,14 +1584,19 @@ impl<L: Levels> Cpu<L> {
                 self.sys.oslsr_el1 = (self.sys.oslsr_el1 & !OSLSR_OSLK) | ((value & 1) << 1);
                 WriteEffect::None
             }
+            // DLK is RES0 without FEAT_DoubleLock.
             OSDLR_EL1 => {
                 self.debug_check(el, MDCR_TDOSA)?;
-                self.sys.osdlr_el1 = value & 1;
+                self.sys.osdlr_el1 = if self.implements(Feature::DoubleLock) {
+                    value & OSDLR_DLK
+                } else {
+                    0
+                };
                 WriteEffect::None
             }
             DBGPRCR_EL1 => {
                 self.debug_check(el, MDCR_TDOSA)?;
-                self.sys.dbgprcr_el1 = value & 1;
+                self.sys.dbgprcr_el1 = value & DBGPRCR_CORENPDRQ;
                 WriteEffect::None
             }
             DBGCLAIMSET_EL1 => {
@@ -1419,7 +1623,12 @@ impl<L: Levels> Cpu<L> {
 
     /// Write `value` to the EL2 register `key` names, as `accessor` writes
     /// it at EL2.
-    fn el2_register_write(&mut self, key: SysRegKey, value: u64, accessor: Accessor) -> Result<WriteEffect, SysRegError> {
+    fn el2_register_write(
+        &mut self,
+        key: SysRegKey,
+        value: u64,
+        accessor: Accessor,
+    ) -> Result<WriteEffect, SysRegError> {
         if let Some(reg) = self.el2_storage(key) {
             match reg {
                 El2Reg::Smcr => self.sme_register_check(accessor)?,
@@ -1446,8 +1655,9 @@ impl<L: Levels> Cpu<L> {
                 WriteEffect::None
             }
             SPSR_IRQ | SPSR_ABT | SPSR_UND | SPSR_FIQ => WriteEffect::None,
+            // As `RMR_EL1`'s where EL1 is the highest level.
             RMR_EL2 => {
-                self.sys.rmr = RMR_AA64 | (value & RMR_RR);
+                self.sys.rmr = value & RMR_RR;
                 WriteEffect::None
             }
             CNTHP_CTL_EL2 => {
@@ -1494,9 +1704,12 @@ impl<L: Levels> Cpu<L> {
             // A host reads at the highest level past the FP and SME enables
             // and the EL0 and EL2 controls, so only UNDEFINED is left to
             // come back.
-            Err(SysRegError::Undefined | SysRegError::Trap(_) | SysRegError::FpTrap(_) | SysRegError::SmeTrap(_)) => {
-                Err(SysRegRefusal::Absent)
-            }
+            Err(
+                SysRegError::Undefined
+                | SysRegError::Trap(_)
+                | SysRegError::FpTrap(_)
+                | SysRegError::SmeTrap(_),
+            ) => Err(SysRegRefusal::Absent),
         }
     }
 
@@ -1504,7 +1717,11 @@ impl<L: Levels> Cpu<L> {
     /// implemented level has: a write to a register the table walk reads
     /// flushes the TLB, and a timer write is reported for the machine to
     /// re-evaluate its lines.
-    pub(crate) fn host_sysreg_write(&mut self, reg: SysReg, value: u64) -> Result<WriteEffect, SysRegRefusal> {
+    pub(crate) fn host_sysreg_write(
+        &mut self,
+        reg: SysReg,
+        value: u64,
+    ) -> Result<WriteEffect, SysRegRefusal> {
         let key = SysRegKey::from_sysreg(reg);
         match self.sysreg_write_as(key, value, Accessor::Host) {
             Ok(effect) => {
@@ -1513,7 +1730,12 @@ impl<L: Levels> Cpu<L> {
             }
             // As for reads, a host write can only be UNDEFINED: either the
             // register is read-only, or there is no such register.
-            Err(SysRegError::Undefined | SysRegError::Trap(_) | SysRegError::FpTrap(_) | SysRegError::SmeTrap(_)) => {
+            Err(
+                SysRegError::Undefined
+                | SysRegError::Trap(_)
+                | SysRegError::FpTrap(_)
+                | SysRegError::SmeTrap(_),
+            ) => {
                 if self.sysreg_read_as(key, Accessor::Host).is_ok() {
                     Err(SysRegRefusal::ReadOnly)
                 } else {
@@ -1529,7 +1751,7 @@ impl<L: Levels> Cpu<L> {
     pub(crate) fn apply_write_effect(&mut self, effect: WriteEffect) {
         match effect {
             WriteEffect::None => {}
-            WriteEffect::FlushTlb => self.tlb.flush(),
+            WriteEffect::FlushTlb => self.flush_tlb(),
             WriteEffect::Timer => self.timer_dirty = true,
         }
     }

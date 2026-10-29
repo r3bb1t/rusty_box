@@ -30,6 +30,7 @@ use super::{clamp, int, sat_doubling_mul_high, sat_q, segment_base, shift_by_ele
 use crate::cpu::crypto::polynomial_mult;
 use crate::cpu::dp::add_with_carry;
 use crate::cpu::exec::{bit, bits, ExecResult, Flow};
+use crate::cpu::features::Feature;
 use crate::cpu::fp_estimate::{urecpe, ursqrte};
 use crate::cpu::simd_arith::{rounding_doubling_mul_add, shift_signed};
 use crate::cpu::{Cpu, Levels};
@@ -81,9 +82,18 @@ impl Indexed {
     /// doublewords `i1` (20) and Z0-Z15.
     const fn by_size(insn: u32) -> Self {
         match bits(insn, 23, 22) {
-            0b10 => Self { index: bits(insn, 20, 19) as usize, m: bits(insn, 18, 16) },
-            0b11 => Self { index: bits(insn, 20, 20) as usize, m: bits(insn, 19, 16) },
-            _ => Self { index: ((bits(insn, 22, 22) << 2) | bits(insn, 20, 19)) as usize, m: bits(insn, 18, 16) },
+            0b10 => Self {
+                index: bits(insn, 20, 19) as usize,
+                m: bits(insn, 18, 16),
+            },
+            0b11 => Self {
+                index: bits(insn, 20, 20) as usize,
+                m: bits(insn, 19, 16),
+            },
+            _ => Self {
+                index: ((bits(insn, 22, 22) << 2) | bits(insn, 20, 19)) as usize,
+                m: bits(insn, 18, 16),
+            },
         }
     }
 
@@ -92,9 +102,15 @@ impl Indexed {
     /// and Z0-Z15.
     const fn pair(insn: u32) -> Self {
         if bit(insn, 22) {
-            Self { index: bits(insn, 20, 20) as usize, m: bits(insn, 19, 16) }
+            Self {
+                index: bits(insn, 20, 20) as usize,
+                m: bits(insn, 19, 16),
+            }
         } else {
-            Self { index: bits(insn, 20, 19) as usize, m: bits(insn, 18, 16) }
+            Self {
+                index: bits(insn, 20, 19) as usize,
+                m: bits(insn, 18, 16),
+            }
         }
     }
 
@@ -104,9 +120,15 @@ impl Indexed {
     /// Z0-Z15.
     const fn long(insn: u32) -> Self {
         if bit(insn, 22) {
-            Self { index: ((bits(insn, 20, 20) << 1) | bits(insn, 11, 11)) as usize, m: bits(insn, 19, 16) }
+            Self {
+                index: ((bits(insn, 20, 20) << 1) | bits(insn, 11, 11)) as usize,
+                m: bits(insn, 19, 16),
+            }
         } else {
-            Self { index: ((bits(insn, 20, 19) << 1) | bits(insn, 11, 11)) as usize, m: bits(insn, 18, 16) }
+            Self {
+                index: ((bits(insn, 20, 19) << 1) | bits(insn, 11, 11)) as usize,
+                m: bits(insn, 18, 16),
+            }
         }
     }
 }
@@ -124,9 +146,18 @@ impl Widths {
     /// which such an instruction's decode makes UNDEFINED.
     const fn of_size(size: u32) -> Option<Self> {
         match size & 3 {
-            0b01 => Some(Self { wide: Esize::H, half: Esize::B }),
-            0b10 => Some(Self { wide: Esize::S, half: Esize::H }),
-            0b11 => Some(Self { wide: Esize::D, half: Esize::S }),
+            0b01 => Some(Self {
+                wide: Esize::H,
+                half: Esize::B,
+            }),
+            0b10 => Some(Self {
+                wide: Esize::S,
+                half: Esize::H,
+            }),
+            0b11 => Some(Self {
+                wide: Esize::D,
+                half: Esize::S,
+            }),
             _ => None,
         }
     }
@@ -136,9 +167,18 @@ impl Widths {
     /// UNDEFINED.
     const fn of_tsize(tsize: u32) -> Option<Self> {
         match tsize & 7 {
-            0b001 => Some(Self { wide: Esize::H, half: Esize::B }),
-            0b010 | 0b011 => Some(Self { wide: Esize::S, half: Esize::H }),
-            0b100..=0b111 => Some(Self { wide: Esize::D, half: Esize::S }),
+            0b001 => Some(Self {
+                wide: Esize::H,
+                half: Esize::B,
+            }),
+            0b010 | 0b011 => Some(Self {
+                wide: Esize::S,
+                half: Esize::H,
+            }),
+            0b100..=0b111 => Some(Self {
+                wide: Esize::D,
+                half: Esize::S,
+            }),
             _ => None,
         }
     }
@@ -180,12 +220,24 @@ impl LongOp {
         match self {
             Self::MulAdd { subtract, .. } => {
                 let acc = i128::from(acc);
-                (if subtract { acc - product } else { acc + product }) as u64
+                (if subtract {
+                    acc - product
+                } else {
+                    acc + product
+                }) as u64
             }
             Self::DoublingMulAdd { subtract } => {
                 let doubled = int(sat_q(2 * product, es, false), es, false);
                 let acc = int(acc, es, false);
-                sat_q(if subtract { acc - doubled } else { acc + doubled }, es, false)
+                sat_q(
+                    if subtract {
+                        acc - doubled
+                    } else {
+                        acc + doubled
+                    },
+                    es,
+                    false,
+                )
             }
             Self::Mul { .. } => product as u64,
             Self::DoublingMul => sat_q(2 * product, es, false),
@@ -213,7 +265,10 @@ enum MulOp {
 impl MulOp {
     /// Whether it reads the accumulator, Zda.
     const fn accumulates(self) -> bool {
-        matches!(self, Self::MulAdd { .. } | Self::RoundingDoublingMulAdd { .. })
+        matches!(
+            self,
+            Self::MulAdd { .. } | Self::RoundingDoublingMulAdd { .. }
+        )
     }
 }
 
@@ -227,7 +282,11 @@ enum BinaryOp {
     /// `ShiftSat(SInt(b), esize)`, left or (negative) right, a right shift
     /// rounding with `rounding`, the result saturated with `saturating`
     /// and else truncated.
-    Shift { saturating: bool, rounding: bool, unsigned: bool },
+    Shift {
+        saturating: bool,
+        rounding: bool,
+        unsigned: bool,
+    },
     /// SHADD, UHADD, SRHADD, URHADD: `(a + b (+ 1)) >> 1`.
     HalvingAdd { rounding: bool, unsigned: bool },
     /// SHSUB, UHSUB: `(a - b) >> 1`.
@@ -247,7 +306,11 @@ enum BinaryOp {
 impl BinaryOp {
     fn apply(self, a: u64, b: u64, es: Esize) -> u64 {
         match self {
-            Self::Shift { saturating, rounding, unsigned } => {
+            Self::Shift {
+                saturating,
+                rounding,
+                unsigned,
+            } => {
                 let res = shift_by_element(a, b, es, unsigned, rounding);
                 if saturating {
                     sat_q(res, es, unsigned)
@@ -258,9 +321,15 @@ impl BinaryOp {
             Self::HalvingAdd { rounding, unsigned } => {
                 ((int(a, es, unsigned) + int(b, es, unsigned) + i128::from(rounding)) >> 1) as u64
             }
-            Self::HalvingSub { unsigned } => ((int(a, es, unsigned) - int(b, es, unsigned)) >> 1) as u64,
-            Self::SaturatingAdd { unsigned } => sat_q(int(a, es, unsigned) + int(b, es, unsigned), es, unsigned),
-            Self::SaturatingSub { unsigned } => sat_q(int(a, es, unsigned) - int(b, es, unsigned), es, unsigned),
+            Self::HalvingSub { unsigned } => {
+                ((int(a, es, unsigned) - int(b, es, unsigned)) >> 1) as u64
+            }
+            Self::SaturatingAdd { unsigned } => {
+                sat_q(int(a, es, unsigned) + int(b, es, unsigned), es, unsigned)
+            }
+            Self::SaturatingSub { unsigned } => {
+                sat_q(int(a, es, unsigned) - int(b, es, unsigned), es, unsigned)
+            }
             Self::SaturatingAddMixed { unsigned } => {
                 sat_q(int(a, es, unsigned) + int(b, es, !unsigned), es, unsigned)
             }
@@ -342,7 +411,11 @@ impl Saturation {
 enum NarrowOp {
     /// SHRNB to UQRSHRNT: Zn's element, `Int`'d by `unsigned`, shifted
     /// right by `shift`, rounding with `rounding`.
-    Shift { shift: u32, rounding: bool, unsigned: bool },
+    Shift {
+        shift: u32,
+        rounding: bool,
+        unsigned: bool,
+    },
     /// SQXTNB to UQXTNT: Zn's element, `Int`'d by `unsigned`.
     Extract { unsigned: bool },
     /// ADDHNB to RSUBHNT: the high half of the sum or (`subtract`) the
@@ -366,17 +439,36 @@ impl<L: Levels> Cpu<L> {
     /// index with those of the word `i2` of its segment of Zm.
     pub(crate) fn exec_sve_intx_dot(&mut self, pc: u64, insn: u32) -> ExecResult {
         let two_way = bits(insn, 15, 11) == 0b11001;
-        let indexed = if two_way { bit(insn, 23) } else { bit(insn, 21) };
+        let indexed = if two_way {
+            bit(insn, 23)
+        } else {
+            bit(insn, 21)
+        };
         let u = bit(insn, 10);
         let signs = match (indexed, bits(insn, 15, 10)) {
             // SDOT, UDOT, four-way and two-way.
-            (_, 0b000000 | 0b000001 | 0b110010 | 0b110011) => DotSigns { n_unsigned: u, m_unsigned: u },
+            (_, 0b000000 | 0b000001 | 0b110010 | 0b110011) => DotSigns {
+                n_unsigned: u,
+                m_unsigned: u,
+            },
             // USDOT.
-            (false, 0b011110) | (true, 0b000110) => DotSigns { n_unsigned: true, m_unsigned: false },
+            (false, 0b011110) | (true, 0b000110) => DotSigns {
+                n_unsigned: true,
+                m_unsigned: false,
+            },
             // SUDOT (by element).
-            (true, 0b000111) => DotSigns { n_unsigned: false, m_unsigned: true },
+            (true, 0b000111) => DotSigns {
+                n_unsigned: false,
+                m_unsigned: true,
+            },
             _ => return self.undefined(pc, insn),
         };
+        // USDOT and SUDOT are FEAT_I8MM's: UNDEFINED without it, whatever
+        // else the processor implements (`usdot_z_zzz.xml`,
+        // `usdot_z_zzzi.xml`, `sudot_z_zzzi.xml`).
+        if signs.n_unsigned != signs.m_unsigned && !self.implements(Feature::I8mm) {
+            return self.undefined(pc, insn);
+        }
         let (es, q) = match (two_way, bit(insn, 22)) {
             (true, _) => (Esize::S, Esize::H),
             (false, true) => (Esize::D, Esize::H),
@@ -384,7 +476,11 @@ impl<L: Levels> Cpu<L> {
         };
         // The products each element sums: four, or two.
         let ways = es.bytes() / q.bytes();
-        let form = if indexed { Some(Indexed::pair(insn)) } else { None };
+        let form = if indexed {
+            Some(Indexed::pair(insn))
+        } else {
+            None
+        };
         let m = form.map_or(bits(insn, 20, 16), |f| f.m);
         let (n, da) = (bits(insn, 9, 5), bits(insn, 4, 0));
         let vl = self.sve_check()?;
@@ -433,9 +529,16 @@ impl<L: Levels> Cpu<L> {
             (op, t, t)
         } else if indexed {
             let op = match bits(insn, 15, 13) {
-                0b100 | 0b101 => LongOp::MulAdd { subtract: bit(insn, 13), unsigned: bit(insn, 12) },
-                0b001 => LongOp::DoublingMulAdd { subtract: bit(insn, 12) },
-                0b110 => LongOp::Mul { unsigned: bit(insn, 12) },
+                0b100 | 0b101 => LongOp::MulAdd {
+                    subtract: bit(insn, 13),
+                    unsigned: bit(insn, 12),
+                },
+                0b001 => LongOp::DoublingMulAdd {
+                    subtract: bit(insn, 12),
+                },
+                0b110 => LongOp::Mul {
+                    unsigned: bit(insn, 12),
+                },
                 0b111 if !bit(insn, 12) => LongOp::DoublingMul,
                 _ => return self.undefined(pc, insn),
             };
@@ -443,16 +546,43 @@ impl<L: Levels> Cpu<L> {
         } else {
             match bits(insn, 15, 11) {
                 // SQDMLALBT, SQDMLSLBT: Zn's even element by Zm's odd.
-                0b00001 => (LongOp::DoublingMulAdd { subtract: bit(insn, 10) }, 0, 1),
-                0b01000..=0b01011 => (LongOp::MulAdd { subtract: bit(insn, 12), unsigned: bit(insn, 11) }, t, t),
-                0b01100 | 0b01101 => (LongOp::DoublingMulAdd { subtract: bit(insn, 11) }, t, t),
+                0b00001 => (
+                    LongOp::DoublingMulAdd {
+                        subtract: bit(insn, 10),
+                    },
+                    0,
+                    1,
+                ),
+                0b01000..=0b01011 => (
+                    LongOp::MulAdd {
+                        subtract: bit(insn, 12),
+                        unsigned: bit(insn, 11),
+                    },
+                    t,
+                    t,
+                ),
+                0b01100 | 0b01101 => (
+                    LongOp::DoublingMulAdd {
+                        subtract: bit(insn, 11),
+                    },
+                    t,
+                    t,
+                ),
                 _ => return self.undefined(pc, insn),
             }
         };
-        let Some(Widths { wide: es, half: src }) = Widths::of_size(bits(insn, 23, 22)) else {
+        let Some(Widths {
+            wide: es,
+            half: src,
+        }) = Widths::of_size(bits(insn, 23, 22))
+        else {
             return self.undefined(pc, insn);
         };
-        let form = if indexed { Some(Indexed::long(insn)) } else { None };
+        let form = if indexed {
+            Some(Indexed::long(insn))
+        } else {
+            None
+        };
         let m = form.map_or(bits(insn, 20, 16), |f| f.m);
         let (n, d) = (bits(insn, 9, 5), bits(insn, 4, 0));
         let vl = self.sve_check()?;
@@ -461,7 +591,9 @@ impl<L: Levels> Cpu<L> {
         let acc = self.z(d, vl);
         let mut result = Zv::ZERO;
         for e in 0..es.elements(vl) {
-            let s2 = form.map_or(2 * e + sel2, |f| 2 * segment_base(e, 16 / es.bytes()) + f.index);
+            let s2 = form.map_or(2 * e + sel2, |f| {
+                2 * segment_base(e, 16 / es.bytes()) + f.index
+            });
             let a = int(op1.get(2 * e + sel1, src), src, op.unsigned());
             let b = int(op2.get(s2, src), src, op.unsigned());
             result.set(e, es, op.apply(acc.get(e, es), a, b, es));
@@ -479,9 +611,15 @@ impl<L: Levels> Cpu<L> {
     pub(crate) fn exec_sve_intx_mul(&mut self, pc: u64, insn: u32) -> ExecResult {
         let indexed = bit(insn, 21);
         let op = match (indexed, bits(insn, 15, 11)) {
-            (false, 0b01110) | (true, 0b00010) => MulOp::RoundingDoublingMulAdd { subtract: bit(insn, 10) },
-            (true, 0b00001) => MulOp::MulAdd { subtract: bit(insn, 10) },
-            (true, 0b11110) => MulOp::DoublingHigh { rounding: bit(insn, 10) },
+            (false, 0b01110) | (true, 0b00010) => MulOp::RoundingDoublingMulAdd {
+                subtract: bit(insn, 10),
+            },
+            (true, 0b00001) => MulOp::MulAdd {
+                subtract: bit(insn, 10),
+            },
+            (true, 0b11110) => MulOp::DoublingHigh {
+                rounding: bit(insn, 10),
+            },
             (true, 0b11111) if !bit(insn, 10) => MulOp::Mul,
             _ => return self.undefined(pc, insn),
         };
@@ -501,7 +639,11 @@ impl<L: Levels> Cpu<L> {
         let vl = self.sve_check()?;
         let op1 = self.z(n, vl);
         let op2 = self.z(m, vl);
-        let acc = if op.accumulates() { self.z(d, vl) } else { Zv::ZERO };
+        let acc = if op.accumulates() {
+            self.z(d, vl)
+        } else {
+            Zv::ZERO
+        };
         let mut result = Zv::ZERO;
         for e in 0..es.elements(vl) {
             let s = form.map_or(e, |f| segment_base(e, 16 / es.bytes()) + f.index);
@@ -550,11 +692,30 @@ impl<L: Levels> Cpu<L> {
         let (op, reversed) = match (bits(insn, 20, 19), bit(insn, 13)) {
             // `Q = 0, N = 0` is no shift of this class.
             (0b00, false) if !s => return self.undefined(pc, insn),
-            (0b00 | 0b01, false) => (BinaryOp::Shift { saturating: bit(insn, 19), rounding: s, unsigned: u }, r),
+            (0b00 | 0b01, false) => (
+                BinaryOp::Shift {
+                    saturating: bit(insn, 19),
+                    rounding: s,
+                    unsigned: u,
+                },
+                r,
+            ),
             (0b10, false) => match (r, s) {
-                (false, false) => (BinaryOp::HalvingAdd { rounding: false, unsigned: u }, false),
+                (false, false) => (
+                    BinaryOp::HalvingAdd {
+                        rounding: false,
+                        unsigned: u,
+                    },
+                    false,
+                ),
                 (false, true) => (BinaryOp::HalvingSub { unsigned: u }, false),
-                (true, false) => (BinaryOp::HalvingAdd { rounding: true, unsigned: u }, false),
+                (true, false) => (
+                    BinaryOp::HalvingAdd {
+                        rounding: true,
+                        unsigned: u,
+                    },
+                    false,
+                ),
                 (true, true) => (BinaryOp::HalvingSub { unsigned: u }, true),
             },
             (0b10, true) => match bits(insn, 18, 17) {
@@ -608,7 +769,10 @@ impl<L: Levels> Cpu<L> {
         let op = match (bits(insn, 20, 17), Widths::of_size(size)) {
             (0b0000, _) if size == 0b10 => UnaryOp::Estimate { square_root: op16 },
             (0b0100, _) => UnaryOp::Saturating { negate: op16 },
-            (0b0010, Some(w)) => UnaryOp::AccumulatePairs { unsigned: op16, half: w.half },
+            (0b0010, Some(w)) => UnaryOp::AccumulatePairs {
+                unsigned: op16,
+                half: w.half,
+            },
             _ => return self.undefined(pc, insn),
         };
         let es = Esize::from_size(size);
@@ -621,7 +785,11 @@ impl<L: Levels> Cpu<L> {
             let r = match op {
                 UnaryOp::Estimate { square_root } => {
                     let element = operand.get(e, es) as u32;
-                    u64::from(if square_root { ursqrte(element) } else { urecpe(element) })
+                    u64::from(if square_root {
+                        ursqrte(element)
+                    } else {
+                        urecpe(element)
+                    })
                 }
                 UnaryOp::Saturating { negate } => {
                     let element = int(operand.get(e, es), es, false);
@@ -651,7 +819,17 @@ impl<L: Levels> Cpu<L> {
         let high = self.z(m, vl);
         let mut result = self.z(d, vl);
         for e in 0..es.elements(vl) {
-            result.set(e, es, clamp(result.get(e, es), low.get(e, es), high.get(e, es), es, unsigned));
+            result.set(
+                e,
+                es,
+                clamp(
+                    result.get(e, es),
+                    low.get(e, es),
+                    high.get(e, es),
+                    es,
+                    unsigned,
+                ),
+            );
         }
         self.set_z(d, vl, &result);
         Ok(Flow::Next)
@@ -700,7 +878,11 @@ impl<L: Levels> Cpu<L> {
             }
             (false, false) => Esize::from_size(bits(insn, 23, 22)),
         };
-        let form = if indexed { Some(Indexed::pair(insn)) } else { None };
+        let form = if indexed {
+            Some(Indexed::pair(insn))
+        } else {
+            None
+        };
         let m = form.map_or(bits(insn, 20, 16), |f| f.m);
         let rotation = Rotation(bits(insn, 11, 10));
         let (n, da) = (bits(insn, 9, 5), bits(insn, 4, 0));
@@ -720,7 +902,11 @@ impl<L: Levels> Cpu<L> {
                     let elt2_a = int(op2.get(4 * s + 2 * i + rotation.sel_a(), q), q, false);
                     let elt2_b = int(op2.get(4 * s + 2 * i + rotation.sel_b(), q), q, false);
                     sum += elt1_r * elt2_a;
-                    sum += if rotation.dot_sub_i() { -(elt1_i * elt2_b) } else { elt1_i * elt2_b };
+                    sum += if rotation.dot_sub_i() {
+                        -(elt1_i * elt2_b)
+                    } else {
+                        elt1_i * elt2_b
+                    };
                 }
                 result.set(e, es, sum as u64);
             }
@@ -734,14 +920,34 @@ impl<L: Levels> Cpu<L> {
                 let elt3_r = int(op3.get(2 * p, es), es, false);
                 let elt3_i = int(op3.get(2 * p + 1, es), es, false);
                 let (real, imag) = if saturating {
-                    let real = rounding_doubling_mul_add(elt3_r, elt1_a, elt2_a, es.bits(), rotation.sub_r());
-                    let imag = rounding_doubling_mul_add(elt3_i, elt1_a, elt2_b, es.bits(), rotation.sub_i());
+                    let real = rounding_doubling_mul_add(
+                        elt3_r,
+                        elt1_a,
+                        elt2_a,
+                        es.bits(),
+                        rotation.sub_r(),
+                    );
+                    let imag = rounding_doubling_mul_add(
+                        elt3_i,
+                        elt1_a,
+                        elt2_b,
+                        es.bits(),
+                        rotation.sub_i(),
+                    );
                     (sat_q(real, es, false), sat_q(imag, es, false))
                 } else {
                     let product_r = elt1_a * elt2_a;
                     let product_i = elt1_a * elt2_b;
-                    let real = if rotation.sub_r() { elt3_r - product_r } else { elt3_r + product_r };
-                    let imag = if rotation.sub_i() { elt3_i - product_i } else { elt3_i + product_i };
+                    let real = if rotation.sub_r() {
+                        elt3_r - product_r
+                    } else {
+                        elt3_r + product_r
+                    };
+                    let imag = if rotation.sub_i() {
+                        elt3_i - product_i
+                    } else {
+                        elt3_i + product_i
+                    };
                     (real as u64, imag as u64)
                 };
                 result.set(2 * p, es, real);
@@ -815,7 +1021,11 @@ impl<L: Levels> Cpu<L> {
         let op2 = self.z(m, vl);
         let mut result = self.z(d, vl);
         for p in 0..es.elements(vl) / 2 {
-            result.set(2 * p + sel1, es, op1.get(2 * p + sel1, es) ^ op2.get(2 * p + sel2, es));
+            result.set(
+                2 * p + sel1,
+                es,
+                op1.get(2 * p + sel1, es) ^ op2.get(2 * p + sel2, es),
+            );
         }
         self.set_z(d, vl, &result);
         Ok(Flow::Next)
@@ -838,7 +1048,11 @@ impl<L: Levels> Cpu<L> {
         let operand = self.z(n, vl);
         let mut result = Zv::ZERO;
         for e in 0..es.elements(vl) {
-            result.set(e, es, (int(operand.get(2 * e + t, half), half, unsigned) << shift) as u64);
+            result.set(
+                e,
+                es,
+                (int(operand.get(2 * e + t, half), half, unsigned) << shift) as u64,
+            );
         }
         self.set_z(d, vl, &result);
         Ok(Flow::Next)
@@ -853,10 +1067,20 @@ impl<L: Levels> Cpu<L> {
         let size = bits(insn, 23, 22);
         let (es, src, unsigned, sel) = match bits(insn, 15, 12) {
             0b1100 => match Widths::of_size(size) {
-                Some(w) => (w.wide, w.half, bit(insn, 11), Some(usize::from(bit(insn, 10)))),
+                Some(w) => (
+                    w.wide,
+                    w.half,
+                    bit(insn, 11),
+                    Some(usize::from(bit(insn, 10))),
+                ),
                 None => return self.undefined(pc, insn),
             },
-            0b1111 if bit(insn, 11) => (Esize::from_size(size), Esize::from_size(size), bit(insn, 10), None),
+            0b1111 if bit(insn, 11) => (
+                Esize::from_size(size),
+                Esize::from_size(size),
+                bit(insn, 10),
+                None,
+            ),
             _ => return self.undefined(pc, insn),
         };
         let (m, n, da) = (bits(insn, 20, 16), bits(insn, 9, 5), bits(insn, 4, 0));
@@ -866,7 +1090,8 @@ impl<L: Levels> Cpu<L> {
         let mut result = self.z(da, vl);
         for e in 0..es.elements(vl) {
             let s = sel.map_or(e, |t| 2 * e + t);
-            let difference = (int(op1.get(s, src), src, unsigned) - int(op2.get(s, src), src, unsigned)).abs();
+            let difference =
+                (int(op1.get(s, src), src, unsigned) - int(op2.get(s, src), src, unsigned)).abs();
             result.set(e, es, result.get(e, es).wrapping_add(difference as u64));
         }
         self.set_z(da, vl, &result);
@@ -889,7 +1114,11 @@ impl<L: Levels> Cpu<L> {
         let mut result = self.z(da, vl);
         for p in 0..es.elements(vl) / 2 {
             let element2 = operand.get(2 * p + t, es);
-            let element2 = if subtract { !element2 & es.mask() } else { element2 };
+            let element2 = if subtract {
+                !element2 & es.mask()
+            } else {
+                element2
+            };
             let carry_in = carries.get(2 * p + 1, es) & 1 != 0;
             let sum = add_with_carry(result.get(2 * p, es), element2, carry_in, es == Esize::D);
             result.set(2 * p, es, sum.value);
@@ -913,10 +1142,19 @@ impl<L: Levels> Cpu<L> {
         let op2 = self.z(m, vl);
         let mut result = Zv::ZERO;
         for p in 0..es.elements(vl) / 2 {
-            let (acc_r, acc_i) = (int(op1.get(2 * p, es), es, false), int(op1.get(2 * p + 1, es), es, false));
-            let (elt2_r, elt2_i) = (int(op2.get(2 * p, es), es, false), int(op2.get(2 * p + 1, es), es, false));
-            let (real, imag) =
-                if sub_i { (acc_r - elt2_i, acc_i + elt2_r) } else { (acc_r + elt2_i, acc_i - elt2_r) };
+            let (acc_r, acc_i) = (
+                int(op1.get(2 * p, es), es, false),
+                int(op1.get(2 * p + 1, es), es, false),
+            );
+            let (elt2_r, elt2_i) = (
+                int(op2.get(2 * p, es), es, false),
+                int(op2.get(2 * p + 1, es), es, false),
+            );
+            let (real, imag) = if sub_i {
+                (acc_r - elt2_i, acc_i + elt2_r)
+            } else {
+                (acc_r + elt2_i, acc_i - elt2_r)
+            };
             let (real, imag) = if saturating {
                 (sat_q(real, es, false), sat_q(imag, es, false))
             } else {
@@ -953,7 +1191,12 @@ impl<L: Levels> Cpu<L> {
                 let operand = self.z(n, vl);
                 let mut result = self.z(d, vl);
                 for e in 0..es.elements(vl) {
-                    let element = shift_signed(int(operand.get(e, es), es, unsigned), right, es.bits(), rounding);
+                    let element = shift_signed(
+                        int(operand.get(e, es), es, unsigned),
+                        right,
+                        es.bits(),
+                        rounding,
+                    );
                     result.set(e, es, result.get(e, es).wrapping_add(element as u64));
                 }
                 self.set_z(d, vl, &result);
@@ -974,7 +1217,11 @@ impl<L: Levels> Cpu<L> {
                 let operand = self.z(n, vl);
                 let mut result = self.z(d, vl);
                 for e in 0..es.elements(vl) {
-                    result.set(e, es, (result.get(e, es) & !mask) | (shift(operand.get(e, es)) & mask));
+                    result.set(
+                        e,
+                        es,
+                        (result.get(e, es) & !mask) | (shift(operand.get(e, es)) & mask),
+                    );
                 }
                 self.set_z(d, vl, &result);
             }
@@ -1001,7 +1248,9 @@ impl<L: Levels> Cpu<L> {
         let (rounding, t) = (bit(insn, 11), usize::from(bit(insn, 10)));
         let (op, saturation, widths) = match bits(insn, 15, 13) {
             0b000 | 0b001 => {
-                let Some(w) = Widths::of_tsize(tsize) else { return self.undefined(pc, insn) };
+                let Some(w) = Widths::of_tsize(tsize) else {
+                    return self.undefined(pc, insn);
+                };
                 let shift = shift_amounts((tsize << 3) | bits(insn, 18, 16), w.half).right as u32;
                 // `U` the source's signedness; with `op`, the saturation.
                 let unsigned = bit(insn, 12);
@@ -1010,13 +1259,30 @@ impl<L: Levels> Cpu<L> {
                     (false, true) => Saturation::Truncate,
                     (true, false) => Saturation::Signed,
                 };
-                (NarrowOp::Shift { shift, rounding, unsigned }, saturation, w)
+                (
+                    NarrowOp::Shift {
+                        shift,
+                        rounding,
+                        unsigned,
+                    },
+                    saturation,
+                    w,
+                )
             }
             0b010 => {
                 let widths = match tsize {
-                    0b001 => Widths { wide: Esize::H, half: Esize::B },
-                    0b010 => Widths { wide: Esize::S, half: Esize::H },
-                    0b100 => Widths { wide: Esize::D, half: Esize::S },
+                    0b001 => Widths {
+                        wide: Esize::H,
+                        half: Esize::B,
+                    },
+                    0b010 => Widths {
+                        wide: Esize::S,
+                        half: Esize::H,
+                    },
+                    0b100 => Widths {
+                        wide: Esize::D,
+                        half: Esize::S,
+                    },
                     _ => return self.undefined(pc, insn),
                 };
                 let (op, saturation) = match bits(insn, 12, 11) {
@@ -1028,8 +1294,17 @@ impl<L: Levels> Cpu<L> {
                 (op, saturation, widths)
             }
             0b011 => {
-                let Some(w) = Widths::of_size(bits(insn, 23, 22)) else { return self.undefined(pc, insn) };
-                (NarrowOp::HighHalf { subtract: bit(insn, 12), rounding }, Saturation::Truncate, w)
+                let Some(w) = Widths::of_size(bits(insn, 23, 22)) else {
+                    return self.undefined(pc, insn);
+                };
+                (
+                    NarrowOp::HighHalf {
+                        subtract: bit(insn, 12),
+                        rounding,
+                    },
+                    Saturation::Truncate,
+                    w,
+                )
             }
             _ => return self.undefined(pc, insn),
         };
@@ -1037,18 +1312,33 @@ impl<L: Levels> Cpu<L> {
         let (m, n, d) = (bits(insn, 20, 16), bits(insn, 9, 5), bits(insn, 4, 0));
         let vl = self.sve_check()?;
         let op1 = self.z(n, vl);
-        let op2 = if matches!(op, NarrowOp::HighHalf { .. }) { self.z(m, vl) } else { Zv::ZERO };
+        let op2 = if matches!(op, NarrowOp::HighHalf { .. }) {
+            self.z(m, vl)
+        } else {
+            Zv::ZERO
+        };
         let mut result = if t == 1 { self.z(d, vl) } else { Zv::ZERO };
         for e in 0..es.elements(vl) {
             let value = match op {
-                NarrowOp::Shift { shift, rounding, unsigned } => {
-                    shift_signed(int(op1.get(e, es), es, unsigned), -(shift as i32), es.bits(), rounding)
-                }
+                NarrowOp::Shift {
+                    shift,
+                    rounding,
+                    unsigned,
+                } => shift_signed(
+                    int(op1.get(e, es), es, unsigned),
+                    -(shift as i32),
+                    es.bits(),
+                    rounding,
+                ),
                 NarrowOp::Extract { unsigned } => int(op1.get(e, es), es, unsigned),
                 NarrowOp::HighHalf { subtract, rounding } => {
                     let (a, b) = (int(op1.get(e, es), es, true), int(op2.get(e, es), es, true));
                     let sum = if subtract { a - b } else { a + b };
-                    let round = if rounding { 1i128 << (half.bits() - 1) } else { 0 };
+                    let round = if rounding {
+                        1i128 << (half.bits() - 1)
+                    } else {
+                        0
+                    };
                     (sum + round) >> half.bits()
                 }
             };

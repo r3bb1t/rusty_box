@@ -73,7 +73,10 @@ pub struct CfiFlash {
 /// flash (all ones) past the end of a short image.
 fn array_read(store: &[u8], offset: u64, bytes: u64) -> u64 {
     let start = offset as usize;
-    if let Some(slice) = start.checked_add(bytes as usize).and_then(|end| store.get(start..end)) {
+    if let Some(slice) = start
+        .checked_add(bytes as usize)
+        .and_then(|end| store.get(start..end))
+    {
         return crate::bus::le_value(slice);
     }
     let mut v = 0u64;
@@ -130,8 +133,15 @@ impl CfiFlash {
         }
     }
 
-    /// QEMU `pflash_reset`: back to read-array mode, any buffered write
-    /// abandoned.
+    /// Whether a read returns the array, without changing anything (QEMU
+    /// `pflash_read` in read-array mode, the mode `pflash_mem_read_with_attrs`
+    /// serves straight from the ROM device).
+    pub fn reads_array(&self) -> bool {
+        self.cmd == 0
+    }
+
+    /// QEMU `pflash_cfi01_system_reset`: back to read-array mode, any
+    /// buffered write abandoned.
     pub fn reset(&mut self) {
         self.cmd = 0;
         self.wcycle = 0;
@@ -196,14 +206,21 @@ impl CfiFlash {
         }
         match width {
             AccessWidth::Dword => {
-                u64::from(self.read32(store, off, 4)) | (u64::from(self.read32(store, off + 4, 4)) << 32)
+                u64::from(self.read32(store, off, 4))
+                    | (u64::from(self.read32(store, off + 4, 4)) << 32)
             }
             _ => u64::from(self.read32(store, off, width.bytes())) & width.value_mask(),
         }
     }
 
     /// A write to the bank whose array is `array`.
-    pub fn write(&mut self, mut array: FlashArray<'_>, offset: RegOffset, width: AccessWidth, value: u64) {
+    pub fn write(
+        &mut self,
+        mut array: FlashArray<'_>,
+        offset: RegOffset,
+        width: AccessWidth,
+        value: u64,
+    ) {
         let off = offset.get();
         match width {
             AccessWidth::Dword => {
@@ -338,9 +355,13 @@ impl CfiFlash {
                 // error was recorded while collecting it.
                 0xE8 if cmd == 0xD0 && self.status & STATUS_PROGRAM_ERROR == 0 => {
                     if let (Some(blk), FlashArray::Writable(store)) = (self.blk_offset, array) {
-                        let end = (blk as usize).saturating_add(WRITEBLOCK_SIZE).min(store.len());
+                        let end = (blk as usize)
+                            .saturating_add(WRITEBLOCK_SIZE)
+                            .min(store.len());
                         let n = end.saturating_sub(blk as usize);
-                        if let (Some(dst), Some(src)) = (store.get_mut(blk as usize..end), self.blk_bytes.get(..n)) {
+                        if let (Some(dst), Some(src)) =
+                            (store.get_mut(blk as usize..end), self.blk_bytes.get(..n))
+                        {
                             dst.copy_from_slice(src);
                         }
                     }
@@ -377,17 +398,25 @@ impl CfiFlash {
         r.read_bytes(&mut head)?;
         [self.cmd, self.wcycle, self.status] = head;
         if self.wcycle > 3 {
-            return Err(SnapError::Invalid("CFI flash write cycle is past the last one a command has"));
+            return Err(SnapError::Invalid(
+                "CFI flash write cycle is past the last one a command has",
+            ));
         }
         self.counter = r.read_u32()?;
-        self.blk_offset = if r.read_bool()? { Some(r.read_u64()?) } else { None };
+        self.blk_offset = if r.read_bool()? {
+            Some(r.read_u64()?)
+        } else {
+            None
+        };
         // A buffered write only ever opens on a write-block boundary inside
         // the bank (`write32`'s second cycle).
         if self
             .blk_offset
             .is_some_and(|blk| blk % WRITEBLOCK_SIZE as u64 != 0 || blk >= self.len)
         {
-            return Err(SnapError::Invalid("CFI flash buffered write is not at a write block in the bank"));
+            return Err(SnapError::Invalid(
+                "CFI flash buffered write is not at a write block in the bank",
+            ));
         }
         r.read_bytes(&mut self.blk_bytes)
     }
@@ -406,7 +435,10 @@ mod tests {
     impl SnapWrite for Image {
         fn write_bytes(&mut self, bytes: &[u8]) -> SnapResult {
             let end = self.len + bytes.len();
-            self.bytes.get_mut(self.len..end).ok_or(SnapError::Truncated)?.copy_from_slice(bytes);
+            self.bytes
+                .get_mut(self.len..end)
+                .ok_or(SnapError::Truncated)?
+                .copy_from_slice(bytes);
             self.len = end;
             Ok(())
         }
@@ -435,7 +467,10 @@ mod tests {
         };
         assert_eq!(restore(WRITEBLOCK_SIZE as u64), Ok(()));
         for wrong in [bank, u64::MAX - 1, WRITEBLOCK_SIZE as u64 + 4] {
-            assert!(matches!(restore(wrong), Err(SnapError::Invalid(_))), "{wrong:#x}");
+            assert!(
+                matches!(restore(wrong), Err(SnapError::Invalid(_))),
+                "{wrong:#x}"
+            );
         }
     }
 
@@ -459,37 +494,82 @@ mod tests {
         write(&mut f, &mut backing, 0x40000, dual(0x20));
         write(&mut f, &mut backing, 0x40000, dual(0xD0));
         write(&mut f, &mut backing, 0x40000, dual(0x70));
-        assert_eq!(f.read(&backing, at(0x40000), AccessWidth::Word) & 0x0080_0080, 0x0080_0080);
+        assert_eq!(
+            f.read(&backing, at(0x40000), AccessWidth::Word) & 0x0080_0080,
+            0x0080_0080
+        );
 
         write(&mut f, &mut backing, 0x40000, dual(0xE8));
         write(&mut f, &mut backing, 0x40000, dual(3));
-        for (i, w) in [0x1111_2222u64, 0x3333_4444, 0x5555_6666, 0x7777_8888].iter().enumerate() {
+        for (i, w) in [0x1111_2222u64, 0x3333_4444, 0x5555_6666, 0x7777_8888]
+            .iter()
+            .enumerate()
+        {
             write(&mut f, &mut backing, 0x40000 + 4 * i as u64, *w);
         }
         write(&mut f, &mut backing, 0x40000, dual(0xD0));
         write(&mut f, &mut backing, 0x40000, dual(0xFF));
-        assert_eq!(f.read(&backing, at(0x40004), AccessWidth::Word), 0x3333_4444);
-        assert_eq!(f.read(&backing, at(0x40010), AccessWidth::Word), 0xFFFF_FFFF, "erased by the sector erase");
+        assert_eq!(
+            f.read(&backing, at(0x40004), AccessWidth::Word),
+            0x3333_4444
+        );
+        assert_eq!(
+            f.read(&backing, at(0x40010), AccessWidth::Word),
+            0xFFFF_FFFF,
+            "erased by the sector erase"
+        );
     }
 
     #[test]
     fn device_id_and_cfi_query_replicate_across_the_bank() {
         let mut backing = [0u8; SECTOR_LEN as usize];
         let mut f = CfiFlash::new(backing.len() as u64);
-        f.write(FlashArray::Writable(&mut backing), RegOffset::new(0), AccessWidth::Word, dual(0x90));
-        assert_eq!(f.read(&backing, RegOffset::new(0), AccessWidth::Word), 0x0089_0089);
-        assert_eq!(f.read(&backing, RegOffset::new(4), AccessWidth::Word), 0x0018_0018);
-        f.write(FlashArray::Writable(&mut backing), RegOffset::new(0), AccessWidth::Word, dual(0x98));
-        assert_eq!(f.read(&backing, RegOffset::new(0x10 * 4), AccessWidth::Word), 0x0051_0051);
+        f.write(
+            FlashArray::Writable(&mut backing),
+            RegOffset::new(0),
+            AccessWidth::Word,
+            dual(0x90),
+        );
+        assert_eq!(
+            f.read(&backing, RegOffset::new(0), AccessWidth::Word),
+            0x0089_0089
+        );
+        assert_eq!(
+            f.read(&backing, RegOffset::new(4), AccessWidth::Word),
+            0x0018_0018
+        );
+        f.write(
+            FlashArray::Writable(&mut backing),
+            RegOffset::new(0),
+            AccessWidth::Word,
+            dual(0x98),
+        );
+        assert_eq!(
+            f.read(&backing, RegOffset::new(0x10 * 4), AccessWidth::Word),
+            0x0051_0051
+        );
     }
 
     #[test]
     fn a_read_only_bank_reports_erase_errors_and_keeps_its_data() {
         let backing = [0xABu8; SECTOR_LEN as usize];
         let mut f = CfiFlash::new(backing.len() as u64);
-        f.write(FlashArray::ReadOnly(&backing), RegOffset::new(0), AccessWidth::Word, dual(0x20));
-        assert_ne!(f.read(&backing, RegOffset::new(0), AccessWidth::Word) & 0x0020_0020, 0);
-        f.write(FlashArray::ReadOnly(&backing), RegOffset::new(0), AccessWidth::Word, dual(0xFF));
+        f.write(
+            FlashArray::ReadOnly(&backing),
+            RegOffset::new(0),
+            AccessWidth::Word,
+            dual(0x20),
+        );
+        assert_ne!(
+            f.read(&backing, RegOffset::new(0), AccessWidth::Word) & 0x0020_0020,
+            0
+        );
+        f.write(
+            FlashArray::ReadOnly(&backing),
+            RegOffset::new(0),
+            AccessWidth::Word,
+            dual(0xFF),
+        );
         assert_eq!(f.read(&backing, RegOffset::new(0), AccessWidth::Byte), 0xAB);
     }
 
@@ -497,9 +577,24 @@ mod tests {
     fn a_command_state_snapshot_round_trips_mid_buffered_write() {
         let mut backing = [0xFFu8; SECTOR_LEN as usize];
         let mut f = CfiFlash::new(backing.len() as u64);
-        f.write(FlashArray::Writable(&mut backing), RegOffset::new(0), AccessWidth::Word, dual(0xE8));
-        f.write(FlashArray::Writable(&mut backing), RegOffset::new(0), AccessWidth::Word, dual(1));
-        f.write(FlashArray::Writable(&mut backing), RegOffset::new(0), AccessWidth::Word, 0x1234_5678);
+        f.write(
+            FlashArray::Writable(&mut backing),
+            RegOffset::new(0),
+            AccessWidth::Word,
+            dual(0xE8),
+        );
+        f.write(
+            FlashArray::Writable(&mut backing),
+            RegOffset::new(0),
+            AccessWidth::Word,
+            dual(1),
+        );
+        f.write(
+            FlashArray::Writable(&mut backing),
+            RegOffset::new(0),
+            AccessWidth::Word,
+            0x1234_5678,
+        );
         let mut image = std::vec::Vec::new();
         f.save(&mut image).expect("save");
         let mut restored = CfiFlash::new(backing.len() as u64);
@@ -508,10 +603,31 @@ mod tests {
         assert!(source.is_empty());
         // Finishing the write on the restored bank commits what was collected
         // before the snapshot.
-        restored.write(FlashArray::Writable(&mut backing), RegOffset::new(4), AccessWidth::Word, 0x9ABC_DEF0);
-        restored.write(FlashArray::Writable(&mut backing), RegOffset::new(0), AccessWidth::Word, dual(0xD0));
-        restored.write(FlashArray::Writable(&mut backing), RegOffset::new(0), AccessWidth::Word, dual(0xFF));
-        assert_eq!(restored.read(&backing, RegOffset::new(0), AccessWidth::Word), 0x1234_5678);
-        assert_eq!(restored.read(&backing, RegOffset::new(4), AccessWidth::Word), 0x9ABC_DEF0);
+        restored.write(
+            FlashArray::Writable(&mut backing),
+            RegOffset::new(4),
+            AccessWidth::Word,
+            0x9ABC_DEF0,
+        );
+        restored.write(
+            FlashArray::Writable(&mut backing),
+            RegOffset::new(0),
+            AccessWidth::Word,
+            dual(0xD0),
+        );
+        restored.write(
+            FlashArray::Writable(&mut backing),
+            RegOffset::new(0),
+            AccessWidth::Word,
+            dual(0xFF),
+        );
+        assert_eq!(
+            restored.read(&backing, RegOffset::new(0), AccessWidth::Word),
+            0x1234_5678
+        );
+        assert_eq!(
+            restored.read(&backing, RegOffset::new(4), AccessWidth::Word),
+            0x9ABC_DEF0
+        );
     }
 }

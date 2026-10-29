@@ -16,6 +16,11 @@
 //!   exception, IRQ and FIQ the processor takes;
 //! - **memory** — [`Instrumentation::memory_access`], for every data access
 //!   that reaches the physical bus.
+//!
+//! [`Instrumentation::EXECUTION`] says whether the observer must hear of
+//! every instruction: [`NoInstrumentation`] does not
+//! ([`Execution::Skippable`]), which lets the machine fast-forward a loop
+//! that only waits for the system counter.
 
 use crate::bus::{AccessWidth, PhysAddr};
 use crate::cpu::{El, ExceptionClass, Wait};
@@ -92,10 +97,28 @@ pub struct ExceptionTaken {
     pub fault_address: Option<u64>,
 }
 
+/// Whether an observer must hear of every instruction executed
+/// ([`Instrumentation::EXECUTION`]).
+///
+/// Closed (R5): the machine decides for each variant whether it may skip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Execution {
+    /// Every instruction is executed, and the observer hears of each.
+    Heard,
+    /// The machine may fast-forward instructions whose only effect is the
+    /// passage of time. The observer is not called for them, and it is
+    /// called as usual for every instruction the machine does run.
+    Skippable,
+}
+
 /// Hooks a machine calls as its processor runs. Every one defaults to
 /// nothing.
 #[allow(unused_variables)]
 pub trait Instrumentation {
+    /// Whether the observer must hear of every instruction executed.
+    /// [`Execution::Heard`] by default, which keeps every hook call.
+    const EXECUTION: Execution = Execution::Heard;
+
     /// The instruction at `pc` was fetched and is about to execute.
     #[inline(always)]
     fn before_execution(&mut self, pc: u64, insn: u32) {}
@@ -129,4 +152,6 @@ pub trait Instrumentation {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct NoInstrumentation;
 
-impl Instrumentation for NoInstrumentation {}
+impl Instrumentation for NoInstrumentation {
+    const EXECUTION: Execution = Execution::Skippable;
+}

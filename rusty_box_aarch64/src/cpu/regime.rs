@@ -11,7 +11,8 @@
 //! itself, the TLB and the access paths are `mmu.rs`'s.
 
 use super::el2::{HCR_DC, HCR_TGE, TCR_EL2_HPD, TCR_EL2_TBI, TCR_EL2_TBID};
-use super::features::Feature;
+use super::exec::sext;
+use super::features::{Feature, Features};
 use super::{id, sctlr, Cpu, El, Levels};
 
 /// A stage 1 translation regime.
@@ -44,12 +45,13 @@ impl Regime {
     }
 
     /// `va` with its top byte replaced by its range's extension: bit 55's
-    /// copies in the upper range, zeros in the lower and in a regime with
-    /// one range (`AArch64_BranchAddr` under top-byte-ignore).
+    /// copies in a regime with two ranges, ones in the upper and zeros in
+    /// the lower, and zeros in a regime with one range (`AArch64_BranchAddr`
+    /// under top-byte-ignore).
     #[inline(always)]
     pub(crate) const fn canonical(self, va: u64) -> u64 {
-        if self.upper(va) {
-            va | 0xFF00_0000_0000_0000
+        if self.has_unprivileged() {
+            sext(va, 56)
         } else {
             va & 0x00FF_FFFF_FFFF_FFFF
         }
@@ -89,6 +91,12 @@ pub(crate) const fn output_address_bits(encoded: u64) -> u32 {
     }
 }
 
+// `PAMax`, which `output_address_bits` bounds by, is the size
+// `ID_AA64MMFR0_EL1.PARange` reports, which no feature changes (Arm
+// `AArch64_PAMax`; PARange encodes sizes as `PS` does).
+const _: () =
+    assert!(PS_BITS[(id::id_aa64mmfr0(Features::of(&[])) & 0xF) as usize] == id::PA_BITS);
+
 /// What a stage 1 walk of one regime reads from its registers (Arm
 /// `S1TTWParams`), for the virtual address range of the address walked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,7 +106,8 @@ pub(crate) struct S1Params {
     pub(crate) upper: bool,
     /// The range's table base register.
     pub(crate) ttbr: u64,
-    /// `TxSZ`, held within 16..=39 ([`Cpu::regime_txsz`]).
+    /// `TxSZ` as its register holds it, which the walk faults outside
+    /// 16..=39 (`AArch64_S1InvalidTxSZ`).
     pub(crate) txsz: u32,
     /// The range's walks are disabled (`TCR_EL1.EPD0`/`EPD1`).
     pub(crate) epd: bool,
@@ -163,8 +172,16 @@ impl<L: Levels> Cpu<L> {
         match regime {
             Regime::El10 => {
                 let tcr = self.sys.tcr_el1;
-                let tbi = (tcr >> (TCR_EL1_TBI0 + u32::from(upper))) & 1 == 1;
-                let tbid = (tcr >> (TCR_EL1_TBID0 + u32::from(upper))) & 1 == 1;
+                // Each upper-range bit chosen whole: a branch's tag check
+                // is then a carry into one bit test, where an added `upper`
+                // builds a mask first.
+                let (tbi_at, tbid_at) = if upper {
+                    (TCR_EL1_TBI0 + 1, TCR_EL1_TBID0 + 1)
+                } else {
+                    (TCR_EL1_TBI0, TCR_EL1_TBID0)
+                };
+                let tbi = (tcr >> tbi_at) & 1 == 1;
+                let tbid = (tcr >> tbid_at) & 1 == 1;
                 tbi && !(instruction && tbid && pauth)
             }
             Regime::El2 => {
@@ -174,13 +191,10 @@ impl<L: Levels> Cpu<L> {
         }
     }
 
-    /// `TxSZ` of the range of `regime` that `upper` names, held within
-    /// 16..=39: a value outside them behaves as the nearest (Arm
-    /// `AArch64_S1TxSZFaults`, the IMPLEMENTATION DEFINED choice not to
-    /// fault made here), for the walk and for the bottom bit of a pointer
-    /// authentication code alike (`AArch64_PACEffectiveTxSZ`).
+    /// `TxSZ` of the range of `regime` that `upper` names, as its register
+    /// holds it.
     #[inline]
-    pub(crate) fn regime_txsz(&self, regime: Regime, upper: bool) -> u32 {
+    fn regime_txsz(&self, regime: Regime, upper: bool) -> u32 {
         let txsz = match regime {
             Regime::El10 => {
                 let shift = TCR_EL1_T0SZ + if upper { TCR_EL1_UPPER_SZ_EPD } else { 0 };
@@ -188,7 +202,17 @@ impl<L: Levels> Cpu<L> {
             }
             Regime::El2 => self.el2().tcr & 0x3F,
         };
-        txsz.clamp(16, 39) as u32
+        txsz as u32
+    }
+
+    /// Arm `AArch64_PACEffectiveTxSZ`: [`Cpu::regime_txsz`] held within
+    /// 16..=39 (`AArch64_S1MinTxSZ` and `AArch64_MaxTxSZ` for the 4 KiB
+    /// granule without FEAT_LPA2's `DS` or FEAT_TTST), a value outside them
+    /// counting as the nearest, as it sets the bottom bit of a pointer
+    /// authentication code. The walk does not hold it so ([`S1Params::txsz`]).
+    #[inline]
+    pub(crate) fn pac_effective_txsz(&self, regime: Regime, upper: bool) -> u32 {
+        self.regime_txsz(regime, upper).clamp(16, 39)
     }
 
     /// Arm `AArch64_GetS1TTWParams(regime, ..., va)`: the walk parameters
@@ -200,7 +224,11 @@ impl<L: Levels> Cpu<L> {
             Regime::El10 => {
                 let tcr = self.sys.tcr_el1;
                 let upper = regime.upper(va);
-                let ttbr = if upper { self.sys.ttbr1_el1 } else { self.sys.ttbr0_el1 };
+                let ttbr = if upper {
+                    self.sys.ttbr1_el1
+                } else {
+                    self.sys.ttbr0_el1
+                };
                 let epd_bit = TCR_EL1_EPD0 + if upper { TCR_EL1_UPPER_SZ_EPD } else { 0 };
                 let up = u32::from(upper);
                 S1Params {

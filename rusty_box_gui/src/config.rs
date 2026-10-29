@@ -98,11 +98,14 @@ impl std::fmt::Display for MachineKind {
 
 /// The `[virt]` table: the Arm `virt` board's hardware.
 ///
-/// It boots UEFI firmware from flash (`firmware`, with `firmware_vars` for its
-/// variable store) or a Linux kernel directly (`kernel`, with `initrd`,
-/// `command_line` and `device_tree`), never both. `display` plugs in a
+/// `cpu` names its processor (`"cortex-a57"`, the default, or `"armv9.2"`).
+/// It boots UEFI firmware from flash (`firmware`, or the EDK2 built into
+/// the front end with `builtin_firmware = true`, either with
+/// `firmware_vars` for its variable store) or a Linux kernel directly
+/// (`kernel`, with `initrd`, `command_line` and `device_tree`), only one. `display` plugs in a
 /// virtio-gpu asking the guest for that size; `keyboard` and `tablet` plug
-/// in the virtio keyboard and tablet.
+/// in the virtio keyboard and tablet. `disk` plugs in a virtio-blk over that
+/// raw image, which the guest may only read with `disk_read_only`.
 // NOTE: field order matters for TOML serialization — `display`, a sub-table,
 // must follow the scalar fields.
 #[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
@@ -110,7 +113,9 @@ impl std::fmt::Display for MachineKind {
 pub struct VirtToml {
     pub memory_mib: Option<u32>,
     pub ips: Option<u32>,
+    pub cpu: Option<VirtCpuToml>,
     pub firmware: Option<PathBuf>,
+    pub builtin_firmware: Option<bool>,
     pub firmware_vars: Option<PathBuf>,
     pub kernel: Option<PathBuf>,
     pub initrd: Option<PathBuf>,
@@ -118,15 +123,65 @@ pub struct VirtToml {
     pub device_tree: Option<PathBuf>,
     pub keyboard: Option<bool>,
     pub tablet: Option<bool>,
+    pub disk: Option<PathBuf>,
+    pub disk_read_only: Option<bool>,
     pub display: Option<VirtDisplayToml>,
 }
 
-/// `[virt.display]`: the size a virtio-gpu asks the guest for.
+/// `virt.cpu`: a processor model, by the name
+/// [`rusty_box_aarch64::CpuModel::name`] gives it. A name no model has is
+/// refused when the file is read, with the names there are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct VirtCpuToml(pub rusty_box_aarch64::CpuModel);
+
+impl TryFrom<String> for VirtCpuToml {
+    type Error = String;
+
+    fn try_from(name: String) -> Result<Self, String> {
+        name.parse().map(Self).map_err(|e| format!("\"{name}\": {e}"))
+    }
+}
+
+impl From<VirtCpuToml> for String {
+    fn from(cpu: VirtCpuToml) -> Self {
+        cpu.0.name().to_owned()
+    }
+}
+
+/// `[virt.display]`: the size a virtio-gpu asks the guest for, and how
+/// often the window shows its picture.
 #[derive(Debug, Clone, Copy, Default, serde::Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct VirtDisplayToml {
     pub width: Option<u32>,
     pub height: Option<u32>,
+    pub refresh_hz: Option<u32>,
+}
+
+/// How many times a second the window shows the guest's picture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RefreshHz(u32);
+
+impl RefreshHz {
+    /// A display's usual rate.
+    pub const DEFAULT: Self = Self(60);
+    /// The fastest a host display shows.
+    pub const MAX: u32 = 240;
+
+    /// `hz`, when it is 1 to [`Self::MAX`].
+    pub fn new(hz: u32) -> Option<Self> {
+        (1..=Self::MAX).contains(&hz).then_some(Self(hz))
+    }
+
+    pub fn get(self) -> u32 {
+        self.0
+    }
+
+    /// The time between two pictures.
+    pub fn interval(self) -> std::time::Duration {
+        std::time::Duration::from_secs(1) / self.0
+    }
 }
 
 #[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
@@ -402,6 +457,28 @@ impl ResolvedConfig {
             MachineConfig::ArmVirt(virt) => virt.memory_mib,
         }
     }
+
+    /// The hard-disk image a run opens, whatever the machine: a PC's IDE
+    /// disk, which its guest writes, or an Arm board's virtio-blk disk.
+    pub fn hard_disk(&self) -> Option<HardDiskUse<'_>> {
+        match &self.machine {
+            MachineConfig::Pc(pc) => pc.disk.as_ref().map(|disk| HardDiskUse {
+                path: &disk.path,
+                access: DiskAccess::ReadWrite,
+            }),
+            MachineConfig::ArmVirt(virt) => virt.disk.as_ref().map(|disk| HardDiskUse {
+                path: &disk.path,
+                access: disk.access,
+            }),
+        }
+    }
+}
+
+/// A hard-disk image a run opens, and whether its guest may write it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HardDiskUse<'a> {
+    pub path: &'a Path,
+    pub access: DiskAccess,
 }
 
 /// The Bochs PC's hardware.
@@ -441,6 +518,8 @@ pub struct ArmVirtConfig {
     pub memory_mib: u32,
     /// The guest's instruction rate, which its timers count against.
     pub ips: u32,
+    /// The processor.
+    pub cpu: rusty_box_aarch64::CpuModel,
     pub boot: ArmBoot,
     /// The virtio-gpu, by the size it asks the guest for; `None` for none.
     pub display: Option<VirtioDisplaySize>,
@@ -448,6 +527,52 @@ pub struct ArmVirtConfig {
     pub keyboard: bool,
     /// A virtio tablet is plugged in.
     pub tablet: bool,
+    /// The virtio-blk's disk; `None` for none.
+    pub disk: Option<VirtDisk>,
+    /// How often the window shows the display's picture.
+    pub refresh: RefreshHz,
+}
+
+/// The disk behind the Arm `virt` board's virtio-blk, as QEMU's `-drive
+/// file=…,format=raw,if=none` with a `virtio-blk-device` has it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VirtDisk {
+    /// A raw image: its bytes are the disk's, sector for sector.
+    pub path: PathBuf,
+    /// Whether the guest may write it (QEMU's `readonly=on`).
+    pub access: DiskAccess,
+}
+
+/// Whether a VM's guest may write its hard disk.
+///
+/// Closed (R5): a PC's IDE disk is always written; an Arm board's virtio-blk
+/// disk may be either.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DiskAccess {
+    ReadWrite,
+    /// QEMU's `readonly=on`: the device refuses the guest's writes, and the
+    /// image is opened for reading alone.
+    ReadOnly,
+}
+
+impl DiskAccess {
+    /// The access `virt.disk_read_only`, and the Hard disk page's
+    /// `Read-only`, name.
+    pub fn of_read_only(read_only: bool) -> Self {
+        if read_only {
+            Self::ReadOnly
+        } else {
+            Self::ReadWrite
+        }
+    }
+
+    /// Whether the guest only reads the disk: `virt.disk_read_only`.
+    pub fn is_read_only(self) -> bool {
+        match self {
+            Self::ReadWrite => false,
+            Self::ReadOnly => true,
+        }
+    }
 }
 
 /// What the Arm `virt` board boots.
@@ -461,6 +586,9 @@ pub enum ArmBoot {
     Unset,
     /// UEFI firmware from flash, with its variable store when one is given.
     Firmware { code: PathBuf, vars: Option<PathBuf> },
+    /// The EDK2 for QEMU's `virt` built into the front end, from flash, with
+    /// its variable store when one is given.
+    BuiltinFirmware { vars: Option<PathBuf> },
     /// A Linux `Image` entered directly, as QEMU's `-kernel` does.
     Linux {
         kernel: PathBuf,
@@ -586,10 +714,13 @@ impl ArmVirtConfig {
         Self {
             memory_mib: DEFAULT_VIRT_MEMORY_MIB,
             ips: DEFAULT_VIRT_IPS,
+            cpu: rusty_box_aarch64::CpuModel::default(),
             boot: ArmBoot::Unset,
             display: None,
             keyboard: false,
             tablet: false,
+            disk: None,
+            refresh: RefreshHz::DEFAULT,
         }
     }
 }
@@ -677,6 +808,16 @@ fn resolve_arm_virt(file: &FileConfig, args: &Args, config_dir: Option<&Path>) -
     ensure_nonzero("ips", ips)?;
 
     let path = |p: &Option<PathBuf>| p.clone().map(|p| resolve_toml_path(config_dir, p));
+    if virt.builtin_firmware == Some(true) {
+        for (name, set) in [
+            ("virt.firmware", virt.firmware.is_some()),
+            ("virt.kernel", virt.kernel.is_some()),
+        ] {
+            if set {
+                return Err(RunError::ConflictingBuiltinFirmware { setting: name });
+            }
+        }
+    }
     let boot = match (path(&virt.firmware), path(&virt.kernel)) {
         (Some(_), Some(_)) => {
             return Err(RunError::ConflictingVirtBoot);
@@ -712,6 +853,20 @@ fn resolve_arm_virt(file: &FileConfig, args: &Args, config_dir: Option<&Path>) -
                 device_tree: path(&virt.device_tree),
             }
         }
+        (None, None) if virt.builtin_firmware == Some(true) => {
+            for (name, set) in [
+                ("virt.initrd", virt.initrd.is_some()),
+                ("virt.command_line", virt.command_line.is_some()),
+                ("virt.device_tree", virt.device_tree.is_some()),
+            ] {
+                if set {
+                    return Err(RunError::VirtSettingNeedsKernel { setting: name });
+                }
+            }
+            ArmBoot::BuiltinFirmware {
+                vars: path(&virt.firmware_vars),
+            }
+        }
         (None, None) => {
             for (name, set) in [
                 ("virt.firmware_vars", virt.firmware_vars.is_some()),
@@ -731,18 +886,38 @@ fn resolve_arm_virt(file: &FileConfig, args: &Args, config_dir: Option<&Path>) -
         Some(VirtDisplayToml {
             width: Some(width),
             height: Some(height),
+            ..
         }) if width != 0 && height != 0 => Some(VirtioDisplaySize { width, height }),
-        Some(VirtDisplayToml { width, height }) => {
+        Some(VirtDisplayToml { width, height, .. }) => {
             return Err(RunError::InvalidVirtDisplay { width, height });
         }
+    };
+    let refresh = match virt.display.and_then(|display| display.refresh_hz) {
+        None => RefreshHz::DEFAULT,
+        Some(hz) => RefreshHz::new(hz).ok_or(RunError::InvalidRefreshRate { hz })?,
+    };
+    let disk = match args.disk.clone().or_else(|| path(&virt.disk)) {
+        Some(path) => Some(VirtDisk {
+            path,
+            access: DiskAccess::of_read_only(virt.disk_read_only.unwrap_or(false)),
+        }),
+        None if virt.disk_read_only.is_some() => {
+            return Err(RunError::VirtSettingWithoutDisk {
+                setting: "virt.disk_read_only",
+            });
+        }
+        None => None,
     };
     Ok(ArmVirtConfig {
         memory_mib,
         ips,
+        cpu: virt.cpu.map_or_else(rusty_box_aarch64::CpuModel::default, |cpu| cpu.0),
         boot,
         display,
         keyboard: virt.keyboard.unwrap_or(false),
         tablet: virt.tablet.unwrap_or(false),
+        disk,
+        refresh,
     })
 }
 
@@ -1028,11 +1203,15 @@ impl ArmVirtConfig {
         let mut virt = VirtToml {
             memory_mib: Some(self.memory_mib),
             ips: Some(self.ips),
+            cpu: Some(VirtCpuToml(self.cpu)),
             keyboard: Some(self.keyboard),
             tablet: Some(self.tablet),
+            disk: self.disk.as_ref().map(|disk| disk.path.clone()),
+            disk_read_only: self.disk.as_ref().map(|disk| disk.access.is_read_only()),
             display: self.display.map(|size| VirtDisplayToml {
                 width: Some(size.width),
                 height: Some(size.height),
+                refresh_hz: Some(self.refresh.get()),
             }),
             ..VirtToml::default()
         };
@@ -1040,6 +1219,10 @@ impl ArmVirtConfig {
             ArmBoot::Unset => {}
             ArmBoot::Firmware { code, vars } => {
                 virt.firmware = Some(code.clone());
+                virt.firmware_vars = vars.clone();
+            }
+            ArmBoot::BuiltinFirmware { vars } => {
+                virt.builtin_firmware = Some(true);
                 virt.firmware_vars = vars.clone();
             }
             ArmBoot::Linux {
@@ -2597,7 +2780,7 @@ overwrite = false
     }
 
     /// An Arm board read back from what the library writes for it is the
-    /// board it wrote, for each way it boots.
+    /// board it wrote, for each way it boots, each processor and each disk.
     #[test]
     fn an_arm_virt_vm_round_trips_through_its_file() {
         let boots = [
@@ -2606,6 +2789,10 @@ overwrite = false
                 code: PathBuf::from("QEMU_EFI.fd"),
                 vars: Some(PathBuf::from("vars.fd")),
             },
+            ArmBoot::BuiltinFirmware {
+                vars: Some(PathBuf::from("vars.fd")),
+            },
+            ArmBoot::BuiltinFirmware { vars: None },
             ArmBoot::Linux {
                 kernel: PathBuf::from("Image"),
                 initrd: Some(PathBuf::from("initramfs.cpio.gz")),
@@ -2613,11 +2800,24 @@ overwrite = false
                 device_tree: Some(PathBuf::from("virt.dtb")),
             },
         ];
-        for boot in boots {
+        let processors = rusty_box_aarch64::CpuModel::ALL.into_iter().cycle();
+        let disks = [
+            None,
+            Some(VirtDisk {
+                path: PathBuf::from("alpine.img"),
+                access: DiskAccess::ReadWrite,
+            }),
+            Some(VirtDisk {
+                path: PathBuf::from("base.img"),
+                access: DiskAccess::ReadOnly,
+            }),
+        ];
+        for ((boot, cpu), disk) in boots.into_iter().zip(processors).zip(disks) {
             let resolved = ResolvedConfig {
                 machine: MachineConfig::ArmVirt(ArmVirtConfig {
                     memory_mib: 1024,
                     ips: 75_000_000,
+                    cpu,
                     boot,
                     display: Some(VirtioDisplaySize {
                         width: 1024,
@@ -2625,6 +2825,8 @@ overwrite = false
                     }),
                     keyboard: true,
                     tablet: true,
+                    disk,
+                    refresh: RefreshHz::new(144).expect("a rate"),
                 }),
                 display: DisplayBackend::Headless,
                 log_level: LogLevel::Info,
@@ -2648,6 +2850,26 @@ overwrite = false
 
         assert_eq!(resolved.arm_virt(), Some(&ArmVirtConfig::blank()));
         assert_eq!(ArmVirtConfig::blank().memory_mib, 256, "QEMU virt's default RAM");
+        assert_eq!(ArmVirtConfig::blank().cpu, rusty_box_aarch64::CpuModel::CortexA57);
+    }
+
+    /// `virt.cpu` names the processor by its model's name; a name no model
+    /// has is refused when the file is read, naming the ones there are.
+    #[test]
+    fn the_virt_processor_is_named_by_its_model() {
+        let board = |cpu: &str| format!("[vm]\nmachine = \"arm-virt\"\n[virt]\ncpu = \"{cpu}\"\n");
+        for model in rusty_box_aarch64::CpuModel::ALL {
+            let file: FileConfig = toml::from_str(&board(model.name())).unwrap();
+            let resolved = resolve_config(file, &args(["rusty_box_gui"])).unwrap();
+            assert_eq!(resolved.arm_virt().map(|virt| virt.cpu), Some(model));
+        }
+        let refused = toml::from_str::<FileConfig>(&board("cortex-a53")).unwrap_err().to_string();
+        assert!(
+            refused.contains("\"cortex-a53\": no processor model has that name")
+                && refused.contains("\"cortex-a57\"")
+                && refused.contains("\"armv9.2\""),
+            "{refused}"
+        );
     }
 
     #[test]
@@ -2710,19 +2932,56 @@ overwrite = false
         ));
     }
 
-    /// The flags every machine reads apply to an Arm board too.
+    /// The flags every machine reads apply to an Arm board too; `--disk`
+    /// replaces the file's disk and keeps how the guest may use it.
     #[test]
-    fn memory_and_rate_flags_apply_to_an_arm_board() {
-        let file: FileConfig = toml::from_str("[vm]\nmachine = \"arm-virt\"\n").unwrap();
+    fn memory_rate_and_disk_flags_apply_to_an_arm_board() {
+        let file: FileConfig = toml::from_str(
+            "[vm]\nmachine = \"arm-virt\"\n[virt]\ndisk = \"file.img\"\ndisk_read_only = true\n",
+        )
+        .unwrap();
         let resolved = resolve_config(
             file,
-            &args(["rusty_box_gui", "--memory-mib", "512", "--ips", "20000000"]),
+            &args([
+                "rusty_box_gui",
+                "--memory-mib",
+                "512",
+                "--ips",
+                "20000000",
+                "--disk",
+                "flag.img",
+            ]),
         )
         .unwrap();
         let virt = resolved.arm_virt().expect("an Arm board");
 
         assert_eq!(virt.memory_mib, 512);
         assert_eq!(virt.ips, 20_000_000);
+        assert_eq!(
+            virt.disk,
+            Some(VirtDisk {
+                path: PathBuf::from("flag.img"),
+                access: DiskAccess::ReadOnly,
+            })
+        );
+    }
+
+    /// `virt.disk` is found beside the VM file, as its other paths are, and
+    /// the guest writes it unless `disk_read_only` says otherwise.
+    #[test]
+    fn the_virt_disk_is_found_beside_its_file_and_written_by_default() {
+        let file: FileConfig =
+            toml::from_str("[vm]\nmachine = \"arm-virt\"\n[virt]\ndisk = \"alpine.img\"\n").unwrap();
+        let dir = Path::new("vms");
+        let resolved = resolve_config_with_base(file, &args(["rusty_box_gui"]), Some(dir)).unwrap();
+
+        assert_eq!(
+            resolved.arm_virt().and_then(|virt| virt.disk.clone()),
+            Some(VirtDisk {
+                path: dir.join("alpine.img"),
+                access: DiskAccess::ReadWrite,
+            })
+        );
     }
 
     #[test]
@@ -2750,6 +3009,10 @@ overwrite = false
             RunError::VirtSettingWithoutBoot { setting: "virt.command_line" }
         ));
         assert!(matches!(
+            refusal("disk_read_only = false\n"),
+            RunError::VirtSettingWithoutDisk { setting: "virt.disk_read_only" }
+        ));
+        assert!(matches!(
             refusal("memory_mib = 0\n"),
             RunError::InvalidVirtMemory { memory_mib: 0 }
         ));
@@ -2759,6 +3022,14 @@ overwrite = false
                 width: Some(1024),
                 height: None
             }
+        ));
+        assert!(matches!(
+            refusal("[virt.display]\nwidth = 1024\nheight = 768\nrefresh_hz = 0\n"),
+            RunError::InvalidRefreshRate { hz: 0 }
+        ));
+        assert!(matches!(
+            refusal("builtin_firmware = true\nkernel = \"Image\"\n"),
+            RunError::ConflictingBuiltinFirmware { setting: "virt.kernel" }
         ));
     }
 }
