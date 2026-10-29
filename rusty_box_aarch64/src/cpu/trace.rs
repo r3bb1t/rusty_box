@@ -606,8 +606,8 @@ impl Cpu {
             !exits.is_empty() || limit == self.run_left(),
             "with no exits, a trace's limit is the rest of its run"
         );
-        if self.pstate.btype != Btype::None {
-            return self.step_branch_target(bus, observer);
+        if self.pstate.btype != Btype::None || self.pstate.il {
+            return self.step_fetch_check(bus, observer);
         }
         let pc = self.pc;
         let mut observed = Observed { bus, observer };
@@ -738,13 +738,15 @@ impl Cpu {
         self.finish(pc, None, Err(fault), observer).step()
     }
 
-    /// Run the instruction at the PC by [`Cpu::step`], with PSTATE.BTYPE
-    /// set: a branch through a register led to it, and its branch target
-    /// check is due. Out of line, and cold, so that the trace loop's
-    /// register allocation does not depend on it.
+    /// Run the instruction at the PC by [`Cpu::step`], with a check of its
+    /// fetched word due: PSTATE.BTYPE set (a branch through a register led
+    /// to it, and its branch target check is due) or PSTATE.IL set (an
+    /// illegal exception return led to it, and it raises the Illegal
+    /// Execution state exception once fetched). Out of line, and cold, so
+    /// that the trace loop's register allocation does not depend on it.
     #[cold]
     #[inline(never)]
-    fn step_branch_target<B: PhysBus, I: Instrumentation>(
+    fn step_fetch_check<B: PhysBus, I: Instrumentation>(
         &mut self,
         bus: &mut B,
         observer: &mut I,

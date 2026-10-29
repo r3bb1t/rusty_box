@@ -202,6 +202,24 @@ impl<'a> GuestRam<'a> {
         }
     }
 
+    /// Store `data` at `addr`, or `None` if the bytes are not all RAM, in
+    /// which case nothing is written: QEMU's `dma_memory_write` failing.
+    pub fn try_store(&mut self, addr: u64, data: &[u8]) -> Option<()> {
+        let range = self.range(addr, data.len() as u64)?;
+        self.ram[range].copy_from_slice(data);
+        self.written.add(PhysAddr::new(addr), data.len() as u64);
+        Some(())
+    }
+
+    /// Set `len` bytes at `addr` to `byte`, or `None` if they are not all
+    /// RAM, in which case nothing is written: QEMU's `dma_memory_set`.
+    pub fn fill(&mut self, addr: u64, len: u64, byte: u8) -> Option<()> {
+        let range = self.range(addr, len)?;
+        self.ram[range].fill(byte);
+        self.written.add(PhysAddr::new(addr), len);
+        Some(())
+    }
+
     fn read_u16(&self, addr: u64) -> Option<u16> {
         let mut b = [0u8; 2];
         self.read(addr, &mut b)?;

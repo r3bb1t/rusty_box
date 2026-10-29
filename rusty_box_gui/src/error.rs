@@ -86,6 +86,12 @@ pub enum RunError {
     #[error("virt.firmware and virt.kernel cannot both be set: the board boots one or the other")]
     ConflictingVirtBoot,
 
+    #[error("virt.builtin_firmware and {setting} cannot both be set: the board boots one firmware or kernel")]
+    ConflictingBuiltinFirmware { setting: &'static str },
+
+    #[error("virt.display.refresh_hz = {hz} is outside 1-{max}", max = crate::config::RefreshHz::MAX)]
+    InvalidRefreshRate { hz: u32 },
+
     #[error("{setting} needs virt.kernel: firmware loads its own kernel")]
     VirtSettingNeedsKernel { setting: &'static str },
 

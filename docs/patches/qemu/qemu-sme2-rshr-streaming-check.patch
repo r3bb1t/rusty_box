@@ -1,0 +1,61 @@
+--- a/target/arm/tcg/translate-sme.c
++++ b/target/arm/tcg/translate-sme.c
+@@ -1786,17 +1786,36 @@
+ };
+ TRANS_FEAT(UZP_4, aa64_sme2, do_zipuzp_4, a, uzp4_fns)
+
+-static bool do_zz_rshr(DisasContext *s, arg_rshr *a, gen_helper_gvec_2 *fn)
++static void gen_zz_rshr(DisasContext *s, arg_rshr *a, gen_helper_gvec_2 *fn)
+ {
+-    if (sve_access_check(s)) {
+-        int vl = vec_full_reg_size(s);
+-        tcg_gen_gvec_2_ool(vec_full_reg_offset(s, a->zd),
+-                           vec_full_reg_offset(s, a->zn),
+-                           vl, vl, a->shift, fn);
++    int vl = vec_full_reg_size(s);
++    tcg_gen_gvec_2_ool(vec_full_reg_offset(s, a->zd),
++                       vec_full_reg_offset(s, a->zn),
++                       vl, vl, a->shift, fn);
++}
++
++/*
++ * The forms SME2 alone has: CheckStreamingSVEEnabled(), which outside
++ * Streaming SVE mode takes the SME trap even with FEAT_SVE implemented.
++ */
++static bool do_zz_rshr(DisasContext *s, arg_rshr *a, gen_helper_gvec_2 *fn)
++{
++    if (sme_sm_enabled_check(s)) {
++        gen_zz_rshr(s, a, fn);
++    }
++    return true;
++}
++
++/* The forms SVE2.1 shares with SME2: CheckSVEEnabled(). */
++static bool do_zz_rshr_sve(DisasContext *s, arg_rshr *a,
++                           gen_helper_gvec_2 *fn)
++{
++    if (sve_access_check(s)) {
++        gen_zz_rshr(s, a, fn);
+     }
+     return true;
+ }
+
+ TRANS_FEAT(SQRSHR_sh, aa64_sme2, do_zz_rshr, a, gen_helper_sme2_sqrshr_sh)
+ TRANS_FEAT(UQRSHR_sh, aa64_sme2, do_zz_rshr, a, gen_helper_sme2_uqrshr_sh)
+ TRANS_FEAT(SQRSHRU_sh, aa64_sme2, do_zz_rshr, a, gen_helper_sme2_sqrshru_sh)
+@@ -1808,9 +1827,12 @@
+ TRANS_FEAT(SQRSHRU_sb, aa64_sme2, do_zz_rshr, a, gen_helper_sme2_sqrshru_sb)
+ TRANS_FEAT(SQRSHRU_dh, aa64_sme2, do_zz_rshr, a, gen_helper_sme2_sqrshru_dh)
+
+-TRANS_FEAT(SQRSHRN_sh, aa64_sme2_or_sve2p1, do_zz_rshr, a, gen_helper_sme2_sqrshrn_sh)
+-TRANS_FEAT(UQRSHRN_sh, aa64_sme2_or_sve2p1, do_zz_rshr, a, gen_helper_sme2_uqrshrn_sh)
+-TRANS_FEAT(SQRSHRUN_sh, aa64_sme2_or_sve2p1, do_zz_rshr, a, gen_helper_sme2_sqrshrun_sh)
++TRANS_FEAT(SQRSHRN_sh, aa64_sme2_or_sve2p1, do_zz_rshr_sve, a,
++           gen_helper_sme2_sqrshrn_sh)
++TRANS_FEAT(UQRSHRN_sh, aa64_sme2_or_sve2p1, do_zz_rshr_sve, a,
++           gen_helper_sme2_uqrshrn_sh)
++TRANS_FEAT(SQRSHRUN_sh, aa64_sme2_or_sve2p1, do_zz_rshr_sve, a,
++           gen_helper_sme2_sqrshrun_sh)
+
+ TRANS_FEAT(SQRSHRN_sb, aa64_sme2, do_zz_rshr, a, gen_helper_sme2_sqrshrn_sb)
+ TRANS_FEAT(SQRSHRN_dh, aa64_sme2, do_zz_rshr, a, gen_helper_sme2_sqrshrn_dh)

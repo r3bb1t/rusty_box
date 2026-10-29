@@ -267,16 +267,14 @@ impl Cpu {
         self.finish(pc, fetched, result, observed.observer).step()
     }
 
-    /// The checks that come before an instruction's fetch — an illegal
-    /// exception return pending, a misaligned PC — and the fetch's
-    /// translation: the physical address of the instruction at `pc`.
+    /// The check that comes before an instruction's fetch, a misaligned PC,
+    /// and the fetch's translation: the physical address of the instruction
+    /// at `pc`. The PC alignment fault and the Instruction Abort come before
+    /// the Illegal Execution state exception in the Arm ARM's priority of
+    /// synchronous exceptions, which [`Cpu::execute_at`] raises once the
+    /// word is fetched.
     #[inline(always)]
     pub(crate) fn fetch_address<B: PhysBus>(&mut self, bus: &mut B, pc: u64) -> Result<u64, Fault> {
-        // An illegal exception return left PSTATE.IL set: the next
-        // instruction raises Illegal Execution State instead of executing.
-        if self.pstate.il {
-            return Err(Exception::new(ExceptionClass::IllegalState, 0).into());
-        }
         if pc & 3 != 0 {
             return Err(Exception::new(ExceptionClass::PcAlignment, 0)
                 .with_far(pc)
@@ -286,9 +284,11 @@ impl Cpu {
     }
 
     /// Fetch the instruction at `pc` from physical address `pa`, decode it
-    /// and execute it: with PSTATE.BTYPE set, after the branch target check
-    /// (FEAT_BTI, Arm `BranchTargetCheck`) of the page the fetch's
-    /// translation found ([`Cpu::in_guarded_page`]).
+    /// and execute it: with PSTATE.IL set (an illegal exception return),
+    /// the Illegal Execution state exception instead (Arm
+    /// `AArch64_CheckIllegalState`); with PSTATE.BTYPE set, after the branch
+    /// target check (FEAT_BTI, Arm `BranchTargetCheck`) of the page the
+    /// fetch's translation found ([`Cpu::in_guarded_page`]).
     #[inline(always)]
     pub(crate) fn execute_at<B: PhysBus, I: Instrumentation>(
         &mut self,
@@ -300,6 +300,9 @@ impl Cpu {
         let insn = self.fetch_word(bus, pc, pa)?;
         *fetched_word = Some(insn);
         bus.observer.before_execution(pc, insn);
+        if self.pstate.il {
+            return Err(Exception::new(ExceptionClass::IllegalState, 0).into());
+        }
         if self.pstate.btype != Btype::None {
             self.branch_target_check(self.in_guarded_page, insn)?;
         }

@@ -600,6 +600,76 @@ fn eret_restores_the_fields_and_an_illegal_return_restores_pan() {
     );
 }
 
+/// After an illegal exception return, the instruction at ELR_EL1 raises
+/// the Illegal Execution state exception (EC 0x0E) once it is fetched: a
+/// misaligned PC takes the PC alignment fault (EC 0x22) first, and one the
+/// tables do not map the Instruction Abort (EC 0x21), as the Arm ARM
+/// prioritizes synchronous exceptions.
+#[test]
+fn an_illegal_return_raises_illegal_state_after_the_fetch_checks() {
+    // A misaligned ELR, one past the four mapped blocks, and a mapped one.
+    for (elr, ec) in [(CODE + 0x102, 0x22), (0x80_0000, 0x21), (CODE + 0x100, 0x0E)] {
+        let mut m = Machine::new(Implementation::CORTEX_A57);
+        // SPSR M = EL2h, which this core lacks.
+        m.cpu.sys.spsr_el1 = 0b1001;
+        m.cpu.sys.elr_el1 = elr;
+        assert_eq!(m.step_raw(CODE, ERET), None);
+        assert!(m.cpu.pstate.il);
+        assert_eq!(m.cpu.pc, elr);
+        m.cpu.sys.esr_el1 = 0x3F << 26;
+        assert_eq!(
+            m.cpu.step(&mut m.ram, &mut NoInstrumentation),
+            Step::Retired
+        );
+        assert_eq!(m.cpu.sys.esr_el1 >> 26, ec, "ELR {elr:#x}");
+    }
+}
+
+/// ERET sets PSTATE.SS from SPSR_EL1.SS only for a return, with
+/// `MDSCR_EL1.SS` set, from where debug exceptions are disabled to where
+/// they are enabled, the destination masking them by SPSR_EL1.D
+/// (`DebugExceptionReturnSS`, `AArch64_GenerateDebugExceptionsFrom`); to 0
+/// otherwise, and with the OS Lock locked debug exceptions are disabled
+/// everywhere.
+#[test]
+fn eret_restores_software_step_only_into_an_enabled_debug_target() {
+    const SPSR_SS: u64 = 1 << 21;
+    const SPSR_D: u64 = 1 << 9;
+    const EL0T: u64 = 0b0000;
+    const EL1H: u64 = 0b0101;
+    const MDSCR_SS: u64 = 1;
+    const MDSCR_KDE: u64 = 1 << 13;
+    // MDSCR_EL1, PSTATE.D, OS Lock locked, SPSR_EL1, then PSTATE.SS.
+    for (mdscr, d, locked, spsr, ss) in [
+        (0, true, false, EL0T | SPSR_SS, false),
+        (MDSCR_SS, true, false, EL0T | SPSR_SS, true),
+        (MDSCR_SS, true, false, EL0T, false),
+        (MDSCR_SS, true, true, EL0T | SPSR_SS, false),
+        (MDSCR_SS | MDSCR_KDE, false, false, EL0T | SPSR_SS, false),
+        (MDSCR_SS | MDSCR_KDE, true, false, EL1H | SPSR_SS, true),
+        (MDSCR_SS | MDSCR_KDE, true, false, EL1H | SPSR_SS | SPSR_D, false),
+        (MDSCR_SS, true, false, EL1H | SPSR_SS, false),
+    ] {
+        let mut m = Machine::new(Implementation::CORTEX_A57);
+        m.cpu.sys.mdscr_el1 = mdscr;
+        m.cpu.pstate.d = d;
+        if !locked {
+            m.cpu.sys.oslsr_el1 &= !0b10;
+        }
+        m.cpu.sys.spsr_el1 = spsr;
+        m.cpu.sys.elr_el1 = if spsr & 0b1100 == 0 {
+            EL0_CODE
+        } else {
+            CODE + 0x100
+        };
+        assert_eq!(m.step_raw(CODE, ERET), None);
+        assert_eq!(
+            m.cpu.pstate.ss, ss,
+            "MDSCR {mdscr:#x}, D {d}, locked {locked}, SPSR {spsr:#x}"
+        );
+    }
+}
+
 /// SPSR_EL1 keeps PAN, UAO, DIT and SSBS only on a processor with their
 /// features; without them the bits are RES0, and a snapshot whose SPSR_EL1
 /// holds them is refused, so no ERET can set them.

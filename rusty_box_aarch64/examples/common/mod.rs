@@ -21,11 +21,10 @@ use rusty_box_core::ClockHz;
 const SLICE_TICKS: u64 = 4_000_000;
 
 /// The stack the thread that builds and runs a machine is given. A
-/// `VirtMachine` is about 245 KiB (its trace cache is on the heap; the
-/// processor's SME register file, 72 KiB, is the largest part of it), and
-/// a build moves it by value a few times, which comes close to the 1 MiB a
-/// Windows main thread has; tests take the same floor from
-/// `RUST_MIN_STACK` in `.cargo/config.toml`.
+/// `VirtMachine` is about 750 KiB (its trace cache is on the heap), and a
+/// build moves it by value a few times, past the 1 MiB a Windows main
+/// thread has; tests take the same floor from `RUST_MIN_STACK` in
+/// `.cargo/config.toml`.
 const MACHINE_STACK_BYTES: usize = 16 * 1024 * 1024;
 
 /// Run `program` on a thread with [`MACHINE_STACK_BYTES`] of stack and

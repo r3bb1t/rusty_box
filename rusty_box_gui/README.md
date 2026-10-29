@@ -97,9 +97,9 @@ A VM is a PC or an Arm `virt` board, QEMU's `virt` machine with one processor, a
   | --- | --- |
   | Memory | Guest memory, from 1 MB up to what the board maps below its high PCIe window |
   | Processors | The model (`Cortex-A57 (Armv8.0)` or `Armv9.2 with SME2`) and the IPS target guest time counts instructions at |
-  | Boot | `UEFI firmware` (firmware and variable-store paths; an empty firmware path boots the bundled EDK2 from the Hard Disk / ISO) or `Linux kernel` (an arm64 `Image`, an initrd, a device tree and the command line) |
+  | Boot | `UEFI firmware` (firmware and variable-store paths; an empty firmware path is the built-in EDK2, which boots the Hard Disk / ISO) or `Linux kernel` (an arm64 `Image`, an initrd, a device tree and the command line) |
   | Hard Disk | As a PC's, with the new-disk sheet: the raw image behind a virtio-blk, which Linux sees as `/dev/vda` and EDK2 boots from. `Advanced` holds `Read-only` (the guest reads the disk and cannot write it, as QEMU's `readonly=on`), which the disk's card then shows as `· read-only`. A disk the sheet makes is one the guest writes; a file chosen with `Change` keeps the setting |
-  | Display | `virtio-gpu`, and the size it asks the guest for: a preset from 800 × 600 to 1920 × 1080, or any width and height; the log level |
+  | Display | `virtio-gpu`, and the size it asks the guest for: a preset from 800 × 600 to 1920 × 1080, or any width and height; the `Refresh rate`, how many times a second the window shows the picture (1–240 Hz, 60 by default); the log level |
   | Input | A virtio `Keyboard` and a virtio `Tablet (absolute pointer)` |
 
 - **Console.** With a virtio-gpu the page shows what the guest's driver draws (Linux's `virtio_gpu` with `console=tty0` puts its console there at the size asked for). With a tablet the host pointer is the guest's absolute pointer over the picture, and the cursor is hidden there; nothing needs capturing. Keys go to the virtio keyboard, or, without one, to the serial console as an xterm would send them. Input the guest takes none of for two seconds (its driver not loaded yet) is dropped rather than sent late. EDK2's `ArmVirtQemu` puts no console on a virtio-gpu (QEMU's does not either), so a firmware boot's menus are on the serial console.
@@ -398,6 +398,7 @@ height = 768
 | `virt.ips` | The rate guest time counts instructions at | `50000000` | `--ips` |
 | `virt.cpu` | The processor: `"cortex-a57"`, QEMU's Cortex-A57 cut down to EL0 and EL1, or `"armv9.2"`, an Armv9.2 processor with SME and SME2 (no SVE) and a 1 GHz system counter; any other name is refused | `"cortex-a57"` | none |
 | `virt.firmware` | UEFI firmware for flash bank 0, as QEMU's `-bios` (EDK2 `ArmVirtQemu`); not with `virt.kernel` | none | none |
+| `virt.builtin_firmware` | `true` boots the EDK2 `ArmVirtQemu` built into the front end (licence in `THIRD-PARTY-LICENSES`); not with `virt.firmware` or `virt.kernel` | none | none |
 | `virt.firmware_vars` | Its variable store, flash bank 1; written back when the firmware changes it | none | none |
 | `virt.kernel` | An arm64 Linux `Image`, entered directly as QEMU's `-kernel` does; not with `virt.firmware` | none | none |
 | `virt.initrd` | Its initial RAM filesystem | none | none |
@@ -407,8 +408,9 @@ height = 768
 | `virt.disk` | Plug in a virtio-blk over this raw disk image, read and written in place: Linux's `/dev/vda`, as QEMU's `-drive file=…,format=raw,if=none` with a `virtio-blk-device` | no disk | `--disk` |
 | `virt.disk_read_only` | The guest only reads the disk, as QEMU's `readonly=on`, and the file is opened for reading alone | `false` | none |
 | `virt.display.width`, `virt.display.height` | Plug in a virtio-gpu that asks the guest for this size; both are needed and neither may be zero | no display | none |
+| `virt.display.refresh_hz` | How many times a second the window shows the picture, 1–240 | `60` | none |
 
-`virt.initrd`, `virt.command_line` and `virt.device_tree` need `virt.kernel`, and `virt.firmware_vars` needs `virt.firmware`, as QEMU's `-initrd`, `-append` and `-dtb` need `-kernel`; `virt.disk_read_only` needs `virt.disk`. A file with neither a firmware nor a kernel boots nothing yet: the shell keeps it and refuses to power it on. On the command line, an Arm VM takes `--config`, `--no-config`, `--display`, `--log-level`, `--memory-mib`, `--ips` and `--disk`; any other flag is refused with `<flag> is not a setting of an Arm virt board`. With `--display headless` the guest's serial console goes to standard output; with `--display terminal` this terminal also sends it keys, and Ctrl-A then X ends the run, as in QEMU's `-nographic` console (Ctrl-A twice sends one Ctrl-A).
+`virt.initrd`, `virt.command_line` and `virt.device_tree` need `virt.kernel`, and `virt.firmware_vars` needs `virt.firmware` or `virt.builtin_firmware`, as QEMU's `-initrd`, `-append` and `-dtb` need `-kernel`; `virt.disk_read_only` needs `virt.disk`. A file with neither a firmware nor a kernel boots nothing yet: the shell keeps it and refuses to power it on. A PC switched to an Arm board in the shell boots the built-in firmware, so a disk or ISO is all it needs. On the command line, an Arm VM takes `--config`, `--no-config`, `--display`, `--log-level`, `--memory-mib`, `--ips` and `--disk`; any other flag is refused with `<flag> is not a setting of an Arm virt board`. With `--display headless` the guest's serial console goes to standard output; with `--display terminal` this terminal also sends it keys, and Ctrl-A then X ends the run, as in QEMU's `-nographic` console (Ctrl-A twice sends one Ctrl-A).
 
 A kernel can mount its root filesystem from the disk rather than an initrd, given a kernel with the virtio-mmio, virtio-blk and filesystem drivers built in:
 

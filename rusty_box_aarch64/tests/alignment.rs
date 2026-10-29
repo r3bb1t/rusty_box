@@ -1,23 +1,26 @@
 //! Alignment faults as the guest sees them (R9: each test asserts the
 //! syndrome, the fault address and what memory holds afterwards).
 //!
-//! Arm ARM `Mem[]` checks alignment against the size of the whole access
-//! (`AArch64.CheckAlignment(address, size, ...)`), so a 16-byte SIMD&FP
-//! access to Device memory must be 16-byte aligned, and with stage 1
-//! disabled every data access is to Device memory. In the stage 1 walk the
+//! Arm's `Mem` judges a single register's access aligned by the size of the
+//! whole access (`aligned = IsAlignedSize(address, bytes)`), so a 16-byte
+//! SIMD&FP access to Device memory must be 16-byte aligned, and with stage
+//! 1 disabled every data access is to Device memory. In the stage 1 walk the
 //! alignment fault a Device page raises comes before its permission fault
 //! (`AArch64.S1Translate`: `AArch64.S1HasAlignmentFault` is tested before
 //! `AArch64.S1HasPermissionsFault`). QEMU 11.1.2 does the same
 //! (`target/arm/ptw.c`, the Device check ahead of the permission check,
 //! citing R_XCHFJ).
 //!
-//! A pair is two such accesses, one per element: Arm ARM `LDP`, `LDPSW`
-//! and `STP`, general-purpose and SIMD&FP alike, make `Mem[address,
-//! dbytes]` and then `Mem[address + dbytes, dbytes]`, so each element is
-//! checked against its own size, never the pair's. (The single 2 × `dbytes`
-//! access of FEAT_LSE2 is not this processor's: `ID_AA64MMFR2_EL1.AT` is
-//! 0.) A pair of words at 4 mod 8 is aligned, on Device memory and with
-//! SCTLR_EL1.A set; a pair of doublewords there is not.
+//! A pair is judged by its elements: `LDP`, `LDPSW` and `STP`,
+//! general-purpose and SIMD&FP alike, make one `Mem{2 * datasize}` access
+//! with `ispair`, which makes `aligned` the element size's, and make it as
+//! the two elements' accesses. (The single access FEAT_LSE2 makes of a pair
+//! in one 16-byte granule is not this processor's: `ID_AA64MMFR2_EL1.AT`
+//! is 0.) A pair of words at 4 mod 8 is aligned, on Device memory and with
+//! SCTLR_EL1.A set; a pair of doublewords there is not. A pair of Q
+//! registers at an address 8-byte aligned is four doubleword accesses,
+//! each passed `aligned = TRUE`, so Device memory takes it at 8 mod 16,
+//! where one Q register faults; at 4 mod 16 it faults.
 //!
 //! Guest code is hand-assembled (GNU as for aarch64); each snippet's source
 //! is beside its words.
@@ -243,11 +246,29 @@ fn a_q_register_store_to_device_memory_needs_16_byte_alignment() {
 }
 
 #[test]
-fn a_q_register_pair_load_from_device_memory_needs_16_byte_alignment() {
+fn a_q_register_pair_load_from_device_memory_at_a_doubleword_boundary_loads() {
+    const SECOND_Q: u128 = 0xFFEE_DDCC_BBAA_9988_7766_5544_3322_1100;
     let mut ram = vec![0u8; RAM_LEN];
     let mut m = bare(&mut ram);
     load(&mut m, &LOAD_PAIR_Q);
     let at = RAM_BASE + 0x1008;
+    m.mem_write(at, &Q_VALUE.to_le_bytes()).expect("in RAM");
+    m.mem_write(at + 16, &SECOND_Q.to_le_bytes())
+        .expect("in RAM");
+    m.reg_write(Reg::X1, at);
+    let out = m.step(RunBudget::Instructions(1));
+    assert_eq!(out.stop, StopReason::BudgetExhausted);
+    assert_eq!(m.vreg_read(v(0)), Q_VALUE);
+    assert_eq!(m.vreg_read(v(1)), SECOND_Q);
+    assert_eq!(m.reg_read(Reg::Pc), RAM_BASE + 4);
+}
+
+#[test]
+fn a_q_register_pair_load_from_device_memory_at_a_word_boundary_faults() {
+    let mut ram = vec![0u8; RAM_LEN];
+    let mut m = bare(&mut ram);
+    load(&mut m, &LOAD_PAIR_Q);
+    let at = RAM_BASE + 0x1004;
     m.reg_write(Reg::X1, at);
     let (esr, far) = fault(&mut m);
     assert_eq!(esr & 0x3F, DFSC_ALIGNMENT, "ESR {esr:#x}");

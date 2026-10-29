@@ -17,8 +17,10 @@ Arm, `qemu-arm@nongnu.org`), with the maintainers
 `Signed-off-by:` line (see QEMU's `docs/devel/submitting-a-patch.rst`). It
 does not take GitHub or GitLab pull requests. The patches here apply to
 `v11.1.2`, each on its own and all of them together, and were built and
-tested there; they are diffs, to be committed with a message and sign-off
-of the submitter's own.
+tested there, but for those whose entry says otherwise (entries 22 and
+23: written against master as of 2026-10-28 and checked to apply there,
+not yet built or tested); they are diffs, to be committed with a message
+and sign-off of the submitter's own.
 
 Reproducers:
 - `docs/qemu-aarch64-probe.S`: a bare-metal EL1 program for
@@ -776,6 +778,222 @@ case O prints 1, a WFIT with a timeout 2^24 counts ahead waits
 prints 8. An Alpine 3.23 kernel boots to `login:` on `-M virt-9.0
 -cpu max` and on `-cpu cortex-a57`.
 
+### 20. The PL031's match interrupt is up to a second late
+
+**Impact**: low. A guest that sets an alarm and reads RTCDR and RTCRIS
+can find the RTC at the match value with no interrupt raised, for up to a
+second.
+
+**Location**: `hw/rtc/pl031.c`, `pl031_set_alarm()`, arms `s->timer` for
+`now + ticks * NANOSECONDS_PER_SECOND`, a whole number of seconds after
+the write. `pl031_get_count()` reads `tick_offset + now /
+NANOSECONDS_PER_SECOND`, which changes on the second boundaries of
+`rtc_clock`, so the count reaches the match value at the first boundary
+after the write, up to a second before the timer fires.
+
+**What the PL031 does**: DDI 0224C §2.1 and Figure 2-3: RTCINTR is
+asserted when the RTC value and the match value are equal, on the 1 Hz
+edge at which the count reaches it.
+
+**Reproduce**: found by reading the source against the TRM; not yet run
+on QEMU. A guest at 5.4 s that writes RTCMR = RTCDR + 5 sees RTCDR reach
+it at 10.0 s and RTCRIS rise at 10.4 s.
+
+**Fix**: not yet written. `pl031_set_alarm()` would arm the timer for the
+boundary, `(now / NANOSECONDS_PER_SECOND + ticks) * NANOSECONDS_PER_SECOND`.
+`rusty_box_aarch64` arms its alarm there (`src/devices/pl031.rs`).
+
+### 21. The PL061 latches level interrupts and does not see its outputs
+
+**Impact**: low on `virt`, whose only wired line is the power button, an
+input Linux sets to both edges. A guest using a level-sensitive line or
+an output's edge sees a different interrupt from the PL061's.
+
+**Location**: `hw/gpio/pl061.c`, `pl061_update()` and `pl061_write()`.
+- `s->istate |= ~(s->data ^ s->iev) & s->isense` ORs a level-sensitive
+  line's level into the raw status, where only GPIOIC clears it. The
+  raw status stays set after the level goes.
+- Edges are found in `(s->old_in_data ^ s->data) & ~s->dir`, inputs
+  only.
+- A GPIODATA write is masked with `s->dir`, so a write to an input line
+  is lost.
+- `pl061_set_irq()` drops the outside level of an output line. When the
+  line becomes an input it reads its last driven value until the outside
+  changes.
+
+**What the PL061 does**, according to DDI 0190B:
+- §2.3.4 and §3.3.9: a level interrupt is recognised while "the external
+  source holds the level constant", and GPIOIC clears only "the interrupt
+  edge detection logic register". A level-sensitive line's raw status is
+  its level.
+- §2.2.2, Figure 2-1 and Table 2-2: detection watches the pads (`GPIN`,
+  synchronised), which loop an output's level back.
+- §3.3.1: a write reaches the GPIODATA register, gated by `PADDR[9:2]`
+  alone, and an input reads `GPIN`.
+
+**Reproduce**: found by reading the source against the TRM; not yet run
+on QEMU.
+
+**Fix**: not yet written. `rusty_box_aarch64`'s `src/devices/pl061.rs`
+models the TRM's behaviour: latched edges and live levels kept apart,
+detection on the line levels, and the outside levels kept per line.
+
+### 22. SME2's multi-vector narrowing shifts execute outside Streaming SVE mode
+
+**Impact**: small. On a processor with FEAT_SVE as well as FEAT_SME2
+(`-cpu max`), SQRSHR, UQRSHR and SQRSHRU of two and four vectors and
+SQRSHRN, UQRSHRN and SQRSHRUN of four execute with PSTATE.SM = 0, at the
+non-streaming vector length, where the architecture takes the SME trap.
+Software that runs them in Streaming SVE mode, as it must, sees no
+difference; a test of the trap sees the instruction execute.
+
+**Location**: `target/arm/tcg/translate-sme.c`, `do_zz_rshr()`, which
+every one of them reaches through `TRANS_FEAT(..., aa64_sme2,
+do_zz_rshr, ...)`. It calls `sve_access_check()`, which with PSTATE.SM =
+0 on a CPU with SVE makes the plain SVE check (`goto continue_sve`). The
+file's other SME2 multi-vector helpers call `sme_sm_enabled_check()`.
+
+**What the Arm ARM says**: the Execute section of `sqrshr_z_mz2`,
+`sqrshr_z_mz4`, `sqrshrn_z_mz4` and the unsigned forms on those pages
+begins `CheckStreamingSVEEnabled()`, which with PSTATE.SM = 0 takes
+`SMEAccessTrap(SMEExceptionType_NotStreaming, ...)`: EC 0x1D, SMTC
+0b010. Their Decode requires FEAT_SME2 alone. The two-vector SQRSHRN,
+UQRSHRN and SQRSHRUN (`sqrshrn_z_mz2`), which FEAT_SVE2p1 shares, begin
+`CheckSVEEnabled()` and are legal outside Streaming SVE mode, as QEMU
+has them.
+
+**Reproduce**: found by reading the source against the pages; not yet run
+on QEMU.
+
+    Arm:     sqrshr z0.h, {z0.s-z1.s}, #16 (0xC1E0D400) at EL0, SME enabled,
+             PSTATE.SM = 0: SME trap, SMTC 0b010 (SIGILL under Linux)
+    QEMU:    executes, at the SVE vector length
+
+Found on QEMU 11.1.2, and in master as of 2026-10-28 (73294d0).
+
+**Fix**: `docs/patches/qemu/qemu-sme2-rshr-streaming-check.patch`: the
+SME2-only forms take `sme_sm_enabled_check()`, the three forms SVE2.1
+shares keep `sve_access_check()`. It applies to master as of 2026-10-28;
+not yet built or tested.
+
+### 23. SQCVT and SQRSHR of four vectors to bytes misplace them on a big-endian host
+
+**Impact**: small, big-endian hosts only. The SME2 SQCVT, UQCVT and
+SQCVTU and SQRSHR, UQRSHR and SQRSHRU of four words to bytes write the
+bytes of each destination doubleword in the wrong order on a big-endian
+host; a little-endian host is right.
+
+**Location**: `target/arm/tcg/sme_helper.c`, the instances
+`SQCVT4(sme2_sqcvt_sb, ...)`, `SQCVT4(sme2_uqcvt_sb, ...)`,
+`SQCVT4(sme2_sqcvtu_sb, ...)` and the same three of `SQRSHR4()`. Each
+indexes its `int8_t` or `uint8_t` destination with `H2`, the halfword
+index macro (`H2(x)` is `x ^ 3` on a big-endian host), where a byte
+element needs `H1` (`x ^ 7`), as the interleaving forms
+(`SQCVTN4(sme2_sqcvtn_sb, ...)`, `SQRSHRN4(sme2_sqrshrn_sb, ...)`) and
+every other byte helper have it.
+
+**What the Arm ARM says**: `sqcvt_z_mz4` and `sqrshr_z_mz4` write
+`Elem[result, r*elements + e, esize]` of each source `r` and element
+`e`: the bytes of a vector in element order.
+
+**Reproduce**: found by reading the source; not yet run (it needs a
+big-endian host).
+
+    Arm:     sqcvt z0.b, {z4.s-z7.s} with z4.s = {1, 2, 3, 4, ...}:
+             z0.b[0] = 1, z0.b[1] = 2
+    QEMU on a big-endian host: z0.b[0] = 2, z0.b[1] = 1
+
+Found on QEMU 11.1.2, and in master as of 2026-10-28.
+
+**Fix**: `docs/patches/qemu/qemu-sme2-narrow-bytes-host-order.patch`:
+`H1` for the six byte forms. It applies to master as of 2026-10-28; not
+yet built or tested.
+
+### 24. SVE contiguous loads and stores ignore SCTLR_ELx.A
+
+**Impact**: small. With strict alignment checking on (`SCTLR_EL1.A` = 1),
+an SVE contiguous load or store of halfwords or larger to a misaligned
+address on Normal memory completes, where the architecture takes an
+alignment fault. Only system-mode software that sets `SCTLR_EL1.A` and
+relies on the fault sees it; Linux leaves it clear.
+
+**Location**: `target/arm/tcg/translate-sve.c`, `do_mem_zpa()`, passes no
+alignment requirement to the helpers, and `target/arm/tcg/sve_helper.c`
+(`sve_ldN_r`, `sve_stN_r` and the first-fault and non-fault forms) access
+memory through host pointers or, from `target/arm/tcg/sve_ldst_internal.h`
+`DO_LD_TLB` and `DO_ST_TLB`, `cpu_ld*_data_ra` and `cpu_st*_data_ra`,
+which are `MO_UNALN`. QEMU enforces `SCTLR_ELx.A` at translation time
+(`align_mem`, `target/arm/tcg/hflags.c` `aprofile_require_alignment`),
+which these paths never consult; only Device memory's alignment
+(`TLB_CHECK_ALIGNED`, `target/arm/ptw.c`) reaches them. SVE `LDR` and
+`STR`, which do use `align_mem`, are right.
+
+**What the Arm ARM says**: each element's access is `Mem{msize}`, whose
+`aligned = IsAlignedSize(address, bytes)`, and a misaligned access faults
+when `AArch64_UnalignedAccessFaults` holds, which `AlignmentEnforced()`
+(`SCTLR_ELx.A` = 1) makes it.
+
+**Reproduce**: found by reading the source; not yet run on QEMU.
+
+    Arm:     EL1, SCTLR_EL1.A = 1, Streaming SVE or SVE enabled, X0 = 0x1001
+             on Normal memory, P0 all true for halfwords:
+             ld1h {z0.h}, p0/z, [x0] (0xA4A0A000) takes an alignment fault
+    QEMU:    loads the halfwords
+
+Found on QEMU 11.1.2, and in master as of 2026-10-28. The SME loads and
+stores of tile slices and of vector groups use the same helpers and are
+likely affected too; not checked.
+
+**Fix**: not yet written. The translator would pass `align_mem` in the
+helpers' descriptor, and the helpers would raise the alignment fault for
+the first active misaligned element before any access, as
+`arm_cpu_do_unaligned_access()` raises it for a scalar access.
+`rusty_box_aarch64` checks each element (`src/cpu/sve/mem.rs`, through
+`Cpu::read_mem`).
+
+### 25. LDP and STP of Q registers at 8 mod 16 alignment-fault on Device memory
+
+**Impact**: small. An LDP, STP, LDNP or STNP of two Q registers at an
+address 8-byte but not 16-byte aligned takes an alignment fault on Device
+memory, and with the MMU off on all memory, where the architecture makes
+the access. Firmware copying with Q-register pairs before the MMU is on
+sees the fault.
+
+**Location**: `target/arm/tcg/translate-a64.c`, `trans_LDP_v()` and
+`trans_STP_v()`, make two 16-byte accesses with
+`finalize_memop_asimd(s, MO_128)` (`target/arm/tcg/translate.h`), which
+adds `MO_ALIGN`: enforced at translation time when `align_mem` is set,
+which with the MMU off it always is (`aprofile_require_alignment`), and
+on a Device page through `memop_tlb_alignment_bits()` in
+`get_phys_addr_lpae()` (`target/arm/ptw.c`). Either way each Q register
+must be 16-byte aligned.
+
+**What the Arm ARM says**: `ldp_fpsimd.xml` and `stp_fpsimd.xml` make one
+`Mem{2*datasize}` access with `ispair`. For 32 bytes, `Mem` (release
+2026-09) first applies `AArch64_UnalignedAccessFaults` with `aligned`
+judged by the 16-byte element (so `SCTLR_ELx.A` = 1 still faults), then:
+"If a 32 byte LDP (SIMD&FP) access is not aligned to 32 bytes but aligned
+to 8 bytes, it is treated as four 8 byte single-copy atomic accesses",
+each passed `aligned = TRUE`, which
+`AArch64_S1HasAlignmentFaultDueToMemType` does not fault on Device
+memory.
+
+**Reproduce**: found by reading the source against the pseudocode; not
+yet run on QEMU.
+
+    Arm:     MMU off, SCTLR_EL1.A = 0, X0 = RAM base + 8:
+             ldp q0, q1, [x0] (0xAD400400) loads both registers
+    QEMU:    alignment fault, DFSC 0x21
+
+Found on QEMU 11.1.2, and in master as of 2026-10-28.
+
+**Fix**: not yet written. The pair needs `MO_ALIGN_8` with
+`MO_ALIGN_TLB_ONLY` when `SCTLR_ELx.A` is clear and `MO_ALIGN` (16)
+when it is set, which the translator cannot tell apart today: `align_mem`
+is set for either. A translation flag for `SCTLR_ELx.A` alone would.
+`rusty_box_aarch64` makes the four accesses (`src/cpu/mmu.rs`,
+`Cpu::read_mem_q_pair` and `Cpu::write_mem_q_pair`).
+
 ---
 
 ## Deliberate QEMU omissions
@@ -807,6 +1025,18 @@ feature patch.
   should-be values, and FCMP/FCMPE with zero whatever `Rm` holds. Such a
   word is CONSTRAINED UNPREDICTABLE, and executing it as if the field held
   its should-be value is among the permitted behaviours.
+- **The PL031 always counts.** In `hw/rtc/pl031.c`, `pl031_read()` returns
+  1 for RTCCR ("RTC is permanently enabled") and `pl031_write()` ignores a
+  write to it ("Written value is ignored"). The device has no reset.
+  DDI 0224C says the RTC counts only once a 1 is written to RTCCR, and
+  that a later write resets its value to zero (§2.2.4, Table 3-5, for
+  every revision per Table B-2). A system reset clears RTCCR (§2.3.1).
+
+  A patch has a Linux side. `pl031_probe()` in
+  `drivers/rtc/rtc-pl031.c` sets `RTC_CR_EN` with a write on every boot.
+  On a PL031 that behaves as DDI 0224C says, Linux therefore zeroes an RTC
+  that firmware has already started. EDK2's `InitializePL031()` writes
+  RTCCR only while it reads 0. Linux would do the same.
 
 ---
 

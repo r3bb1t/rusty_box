@@ -20,6 +20,7 @@
 use super::crypto::polynomial_mult;
 use super::dp::ones;
 use super::exec::{bit, bits, sext, ExecResult, Flow};
+use super::features::Feature;
 use super::fp::FpType;
 use super::simd::{at_datasize, elem, set_elem};
 use super::Cpu;
@@ -800,11 +801,12 @@ impl Cpu {
         let d = self.v[rd];
         let saturating = matches!(opcode, 0b1001 | 0b1011 | 0b1101);
         // PMULL and PMULL2 (Arm ARM PMULL, PMULL2): size 0 multiplies bytes
-        // into halfwords, size 3 one doubleword into a quadword (FEAT_PMULL,
-        // advertised by ID_AA64ISAR0_EL1.AES = 2), and sizes 1 and 2 are
+        // into halfwords, size 3 one doubleword into a quadword, UNDEFINED
+        // without FEAT_PMULL (`pmull_advsimd.xml`), and sizes 1 and 2 are
         // reserved. Size 3 is reserved for every other opcode.
         let pmull_64 = opcode == 0b1110 && !u && !scalar && size == 3;
         let reserved = (size == 3 && !pmull_64)
+            || (pmull_64 && !self.implements(Feature::Pmull))
             || (scalar && !(saturating && !u))
             || (saturating && (u || size == 0))
             || (opcode == 0b1110 && (u || matches!(size, 1 | 2)));

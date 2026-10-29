@@ -6,7 +6,7 @@ use rusty_box_core::{SnapError, VmInstant};
 
 use super::features::{Feature, Implementation};
 use super::regs::{CpuState, Reg, RegClass, VReg};
-use super::sysreg::MDSCR_FIELDS;
+use super::sysreg::{MDSCR_FIELDS, RMR_RR};
 use super::wait::{EventRegister, Wait};
 use super::{pauth, sme, Activity, Btype, Cpu, El, ExclusiveMonitor, Pstate, SysRegs, PC_HISTORY};
 
@@ -42,7 +42,7 @@ pub(crate) const FPSR_MASK: u64 =
 
 /// How many system register values a snapshot carries, in
 /// [`SysRegs::to_array`] order.
-const SYSREG_COUNT: usize = 47;
+const SYSREG_COUNT: usize = 49;
 
 impl SysRegs {
     fn to_array(&self) -> [u64; SYSREG_COUNT] {
@@ -94,15 +94,20 @@ impl SysRegs {
             self.disr_el1,
             u64::from(self.dtrrx),
             u64::from(self.dtrtx),
+            self.rvbar_el1,
+            self.rmr_el1,
         ]
     }
 
     /// The inverse of [`SysRegs::to_array`]. Refuses a Debug Communications
-    /// Channel data register wider than its 32 bits, and an `MDSCR_EL1`
-    /// with a RES0 bit set, which no write stores.
+    /// Channel data register wider than its 32 bits, and an `MDSCR_EL1` or
+    /// `RMR_EL1` with a bit set that no write stores.
     fn from_array(a: [u64; SYSREG_COUNT]) -> SnapResult<Self> {
-        let [sctlr_el1, actlr_el1, cpacr_el1, ttbr0_el1, ttbr1_el1, tcr_el1, spsr_el1, elr_el1, esr_el1, far_el1, afsr0_el1, afsr1_el1, par_el1, mair_el1, amair_el1, vbar_el1, contextidr_el1, tpidr_el0, tpidrro_el0, tpidr_el1, tpidr2_el0, smcr_el1, csselr_el1, cntkctl_el1, cntfrq_el0, cntp_ctl_el0, cntp_cval_el0, cntv_ctl_el0, cntv_cval_el0, mdscr_el1, mdccint_el1, oslsr_el1, osdlr_el1, oseccr_el1, dbgprcr_el1, dbgclaim, bvr0, bvr1, bcr0, bcr1, wvr0, wvr1, wcr0, wcr1, disr_el1, dtrrx, dtrtx] =
+        let [sctlr_el1, actlr_el1, cpacr_el1, ttbr0_el1, ttbr1_el1, tcr_el1, spsr_el1, elr_el1, esr_el1, far_el1, afsr0_el1, afsr1_el1, par_el1, mair_el1, amair_el1, vbar_el1, contextidr_el1, tpidr_el0, tpidrro_el0, tpidr_el1, tpidr2_el0, smcr_el1, csselr_el1, cntkctl_el1, cntfrq_el0, cntp_ctl_el0, cntp_cval_el0, cntv_ctl_el0, cntv_cval_el0, mdscr_el1, mdccint_el1, oslsr_el1, osdlr_el1, oseccr_el1, dbgprcr_el1, dbgclaim, bvr0, bvr1, bcr0, bcr1, wvr0, wvr1, wcr0, wcr1, disr_el1, dtrrx, dtrtx, rvbar_el1, rmr_el1] =
             a;
+        if rmr_el1 & !RMR_RR != 0 {
+            return Err(SnapError::Invalid("RMR_EL1 with a bit other than RR set"));
+        }
         let data_register = |value: u64| {
             u32::try_from(value)
                 .map_err(|_| SnapError::Invalid("debug channel data register wider than 32 bits"))
@@ -156,6 +161,8 @@ impl SysRegs {
             dtrrx,
             dtrtx,
             disr_el1,
+            rvbar_el1,
+            rmr_el1,
         })
     }
 }
@@ -222,7 +229,7 @@ impl Cpu {
         *svcr = sme::Svcr::RESET;
         *scalable = sme::ScalableRegs::ZERO;
         *pac_keys = pauth::PacKeys::ZERO;
-        *sys = SysRegs::reset(imp.counter_hz);
+        *sys = SysRegs::reset(imp.counter_hz, reset_pc);
         *monitor = ExclusiveMonitor::CLEAR;
         *event = EventRegister::at(false, count);
         tlb.flush();
@@ -677,8 +684,9 @@ mod tests {
         c.sys.dtrtx = 0x9ABC_DEF0;
         let mut image = std::vec::Vec::new();
         c.save(&mut image).expect("save");
-        // DTRRX and DTRTX are the last two system registers.
-        let dtrrx = SYSREGS_AT + (SYSREG_COUNT - 2) * 8;
+        // DTRRX and DTRTX are the two system registers before the last two,
+        // RVBAR_EL1 and RMR_EL1.
+        let dtrrx = SYSREGS_AT + (SYSREG_COUNT - 4) * 8;
         assert_eq!(
             &image[dtrrx..dtrrx + 16],
             &[0x78, 0x56, 0x34, 0x12, 0, 0, 0, 0, 0xF0, 0xDE, 0xBC, 0x9A, 0, 0, 0, 0]
@@ -731,6 +739,36 @@ mod tests {
         let mut restored = cpu();
         restored.restore(&mut image.as_slice()).expect("restore");
         assert_eq!(restored.sys.mdscr_el1, MDSCR_FIELDS);
+    }
+
+    /// `RMR_EL1` stores RR alone, so an image holding any other of its
+    /// bits is refused; one holding RR restores it.
+    #[test]
+    fn a_processor_snapshot_with_an_rmr_el1_bit_other_than_rr_is_refused() {
+        let mut c = cpu();
+        c.sys.rmr_el1 = RMR_RR;
+        let mut image = std::vec::Vec::new();
+        c.save(&mut image).expect("save");
+        // RMR_EL1 is the last system register.
+        let rmr = SYSREGS_AT + (SYSREG_COUNT - 1) * 8;
+        assert_eq!(&image[rmr..rmr + 8], &RMR_RR.to_le_bytes());
+        for bit in (0..64).filter(|bit| RMR_RR & (1 << bit) == 0) {
+            let mut other = image.clone();
+            other[rmr..rmr + 8].copy_from_slice(&(RMR_RR | 1 << bit).to_le_bytes());
+            let mut restored = cpu();
+            assert!(
+                restored.restore(&mut other.as_slice()).is_err(),
+                "bit {bit} set"
+            );
+            assert_eq!(
+                restored.sys.to_array(),
+                cpu().sys.to_array(),
+                "a refused image changes nothing"
+            );
+        }
+        let mut restored = cpu();
+        restored.restore(&mut image.as_slice()).expect("restore");
+        assert_eq!(restored.sys.rmr_el1, RMR_RR);
     }
 
     /// An image is refused by a processor of another identity or another

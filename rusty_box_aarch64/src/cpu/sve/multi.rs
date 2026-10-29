@@ -632,8 +632,8 @@ impl Cpu {
             (true, 0b001) => WordOp::Round(FpRounding::PosInf),
             (true, 0b010) => WordOp::Round(FpRounding::NegInf),
             (true, 0b100) => WordOp::Round(FpRounding::TieAway),
-            (false, 0b001 | 0b101) => WordOp::ToInt { signed },
-            (false, 0b010 | 0b110) => WordOp::FromInt { signed },
+            (false, 0b001) => WordOp::ToInt { signed },
+            (false, 0b010) => WordOp::FromInt { signed },
             _ => return self.undefined(pc, insn),
         };
         let nreg = if bit(insn, 20) { 4 } else { 2 };

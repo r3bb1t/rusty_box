@@ -552,13 +552,14 @@ fn the_power_button_holds_gpio_line_three_for_100_ms() {
     assert_eq!(m.ticks_to_next_timer_deadline(), None);
 }
 
-/// `str w1, [x0, #4]` (RTCMR), then poll RTCRIS until it is set:
+/// `str w3, [x0, #0xc]` (RTCCR) to start the RTC, `str w1, [x0, #4]`
+/// (RTCMR), then poll RTCRIS until it is set:
 /// `ldr w2, [x0, #0x14]; cbz w2, .-4; b .`
-const RTC_MATCH_POLL: [u32; 4] = [0xB900_0401, 0xB940_1402, 0x34FF_FFE2, SPIN];
+const RTC_MATCH_POLL: [u32; 5] = [0xB900_0C03, 0xB900_0401, 0xB940_1402, 0x34FF_FFE2, SPIN];
 
-/// A guest that sets the RTC's match register sees the raw status rise one
-/// second later, masked or not: the write arms the alarm (QEMU
-/// `pl031_set_alarm`), and the run loop takes the new deadline at once.
+/// A guest that starts the RTC and sets its match register one second
+/// ahead sees the raw status rise as the RTC reaches it, masked or not: the
+/// write arms the alarm, and the run loop takes the new deadline at once.
 #[test]
 fn the_rtc_alarm_a_guest_arms_fires_on_time() {
     let ips = 1_000_000;
@@ -578,7 +579,8 @@ fn the_rtc_alarm_a_guest_arms_fires_on_time() {
     load(&mut m, RAM_BASE, &RTC_MATCH_POLL);
     m.reg_write(Reg::X0, RTC_BASE);
     m.reg_write(Reg::X1, (VirtConfig::DEFAULT_RTC_EPOCH + 1) & 0xFFFF_FFFF);
-    let out = m.emu_start(RAM_BASE, Some(RAM_BASE + 12), Some(4 * ips));
+    m.reg_write(Reg::X3, 1);
+    let out = m.emu_start(RAM_BASE, Some(RAM_BASE + 16), Some(4 * ips));
     assert_eq!(out.stop, StopReason::ExitReached);
     assert!(
         m.ticks() > ips,

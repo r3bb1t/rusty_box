@@ -34,6 +34,9 @@ mod history;
 mod isa;
 mod ldst;
 #[cfg(test)]
+#[path = "../../tests/unit/load_store.rs"]
+mod load_store;
+#[cfg(test)]
 #[path = "../../tests/unit/memory_system.rs"]
 mod memory_system;
 mod mmu;
@@ -425,10 +428,14 @@ pub(crate) struct SysRegs {
     /// `DISR_EL1` (FEAT_RAS): with no source of SError interrupts, only an
     /// `MSR` writes it.
     pub(crate) disr_el1: u64,
+    /// `RVBAR_EL1`: the address execution started from at the last reset.
+    pub(crate) rvbar_el1: u64,
+    /// `RMR_EL1`'s stored field, `RR` (bit 1), the Warm reset request.
+    pub(crate) rmr_el1: u64,
 }
 
 impl SysRegs {
-    fn reset(counter_hz: ClockHz) -> Self {
+    fn reset(counter_hz: ClockHz, reset_pc: u64) -> Self {
         Self {
             sctlr_el1: id::SCTLR_EL1_RESET,
             actlr_el1: 0,
@@ -473,6 +480,8 @@ impl SysRegs {
             dtrrx: 0,
             dtrtx: 0,
             disr_el1: 0,
+            rvbar_el1: reset_pc,
+            rmr_el1: 0,
         }
     }
 }
@@ -562,7 +571,7 @@ impl Cpu {
             scalable: sme::ScalableRegs::ZERO,
             pac_keys: pauth::PacKeys::ZERO,
             imp,
-            sys: SysRegs::reset(imp.counter_hz),
+            sys: SysRegs::reset(imp.counter_hz, config.reset_pc),
             monitor: ExclusiveMonitor::CLEAR,
             event: wait::EventRegister::at(false, timer::Count::new(0)),
             tlb: Tlb::new(),

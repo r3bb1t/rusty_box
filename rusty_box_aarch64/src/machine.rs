@@ -78,8 +78,8 @@ pub struct VirtConfig {
     /// The processor, which sets the system counter's frequency too
     /// ([`CpuModel::counter_hz`]).
     pub cpu: CpuModel,
-    /// What the RTC reads at emulated time zero, in seconds since the Unix
-    /// epoch.
+    /// What the RTC reads at power-on, in seconds since the Unix epoch
+    /// modulo 2^32. It stays there until the guest starts the RTC.
     pub rtc_epoch_seconds: u64,
     /// Faults that stop the machine instead of reaching the guest.
     pub debug_stops: DebugStops,
@@ -241,16 +241,27 @@ pub struct Bare;
 /// `build` (with `alloc`: the machine owns its memory) and `build_in` (the
 /// caller lends it).
 ///
+/// A machine is about 750 KiB and a build moves it by value, so it is built
+/// on a thread with room for it: a Windows main thread has 1 MiB.
+///
 /// ```
 /// use rusty_box_aarch64::machine::{MachineBuilder, MemoryLoan, RamSize, VirtConfig};
 ///
-/// let mut ram = vec![0u8; 16 << 20];
-/// let machine = MachineBuilder::new(VirtConfig::default())
-///     .ram(RamSize::mib(16).expect("a valid size"))
-///     .bare()
-///     .build_in(MemoryLoan { ram: &mut ram, vars: &mut [] })?;
-/// assert_eq!(machine.ticks(), 0);
-/// # Ok::<(), rusty_box_aarch64::machine::BuildError>(())
+/// let ticks = std::thread::Builder::new()
+///     .stack_size(16 << 20)
+///     .spawn(|| {
+///         let mut ram = vec![0u8; 16 << 20];
+///         let machine = MachineBuilder::new(VirtConfig::default())
+///             .ram(RamSize::mib(16).expect("a valid size"))
+///             .bare()
+///             .build_in(MemoryLoan { ram: &mut ram, vars: &mut [] })
+///             .expect("a bare machine builds");
+///         machine.ticks()
+///     })
+///     .expect("a thread for the machine")
+///     .join()
+///     .expect("the machine thread");
+/// assert_eq!(ticks, 0);
 /// ```
 #[must_use = "a builder does nothing until it builds"]
 pub struct MachineBuilder<'i, B = NoBoot, I = NoInstrumentation> {
@@ -1930,7 +1941,7 @@ impl<S: GuestStorage, I: Instrumentation> VirtMachine<S, I> {
 }
 
 const SNAPSHOT_MAGIC: [u8; 8] = *b"RBA64SNP";
-const SNAPSHOT_VERSION: u32 = 9;
+const SNAPSHOT_VERSION: u32 = 12;
 
 /// Everything about how a machine was built that a snapshot depends on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

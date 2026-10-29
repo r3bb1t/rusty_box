@@ -17,7 +17,6 @@ use std::sync::{
 
 const SERIAL_PANEL_MIN_HEIGHT: f32 = 48.0;
 const SERIAL_PANEL_DEFAULT_HEIGHT: f32 = 88.0;
-const SERIAL_PANEL_MAX_HEIGHT: f32 = 200.0;
 
 /// The startup notice: a spinner over one row of text.
 const STARTUP_SPINNER_SIZE: f32 = 28.0;
@@ -42,12 +41,15 @@ pub struct RustyBoxApp {
     cached_ips: u32,
     cached_emu_running: bool,
     // Cached serial log for display (updated each frame from shared)
-    cached_serial_log: String,
-    serial_log_len: usize,
+    /// The serial console's screen, fed from the shared log.
+    serial_terminal: super::serial_terminal::SerialTerminal,
     // Cached transient startup status (e.g. "Creating disk image…"), shown
     // before the guest produces video.
     cached_startup_status: Option<String>,
     serial_input: String,
+    /// The serial terminal held the keyboard last frame: keys go to the
+    /// guest's serial console, not to its keyboard.
+    serial_focused: bool,
     /// How the framebuffer fills the region it is drawn in.
     display_scale: DisplayScale,
     /// The shape of one guest pixel: square by default, or 4:3 for the VGA
@@ -113,10 +115,10 @@ impl RustyBoxApp {
             last_height: 0,
             cached_ips: 0,
             cached_emu_running: false,
-            cached_serial_log: String::new(),
-            serial_log_len: 0,
+            serial_terminal: super::serial_terminal::SerialTerminal::new(),
             cached_startup_status: None,
             serial_input: String::new(),
+            serial_focused: false,
             display_scale: DisplayScale::Crisp,
             pixel_aspect: PixelAspect::Square,
             prev_mouse_buttons: 0,
@@ -328,6 +330,62 @@ impl RustyBoxApp {
             .unwrap_or(false)
     }
 
+    /// The serial terminal `screen`, shown in `area`, as a keyboard target:
+    /// a click on it takes the keyboard, as clicking a terminal window does,
+    /// and while it holds it every key is sent to the guest's serial console
+    /// as xterm sends it, Tab, the arrows and Esc included; a click
+    /// elsewhere gives the keyboard back.
+    fn type_into_serial_terminal(&mut self, ui: &egui::Ui, screen: &egui::Response, area: egui::Rect) {
+        // The text is only as large as what the guest has written; a click
+        // anywhere in the terminal's area, below or beside it, counts too.
+        let backdrop = ui.interact(area, screen.id.with("area"), egui::Sense::click());
+        if screen.clicked() || backdrop.clicked() {
+            screen.request_focus();
+        }
+        self.serial_focused = screen.has_focus();
+        if !self.serial_focused {
+            return;
+        }
+        ui.memory_mut(|memory| {
+            memory.set_focus_lock_filter(
+                screen.id,
+                egui::EventFilter {
+                    tab: true,
+                    horizontal_arrows: true,
+                    vertical_arrows: true,
+                    escape: true,
+                },
+            );
+        });
+        let application_cursor = self.serial_terminal.application_cursor();
+        // With text selected, Ctrl+C (and Ctrl+X) copy it, as in a terminal
+        // window; egui's label selection does the copying.
+        let selected = ui
+            .ctx()
+            .with_plugin(|selection: &mut egui::text_selection::LabelSelectionState| selection.has_selection())
+            .unwrap_or(false);
+        let typed: Vec<u8> = ui.input(|input| {
+            input
+                .events
+                .iter()
+                .filter(|event| !(selected && matches!(event, egui::Event::Copy | egui::Event::Cut)))
+                .filter_map(|event| super::serial_terminal::terminal_input(event, application_cursor))
+                .flatten()
+                .collect()
+        });
+        if !typed.is_empty() && self.cached_emu_running {
+            if let Ok(mut display) = self.shared.lock() {
+                display.queue_serial_input(&typed);
+            }
+        }
+        ui.painter().rect_stroke(
+            area,
+            0.0,
+            egui::Stroke::new(1.0, egui::Color32::from_rgb(0x56, 0x9C, 0xD6)),
+            egui::StrokeKind::Inside,
+        );
+    }
+
     fn send_serial_input(&mut self) {
         if self.serial_input.is_empty() {
             return;
@@ -504,11 +562,9 @@ impl RustyBoxApp {
             }
             self.cached_startup_status.clone_from(&display.startup_status);
 
-            // Sync serial log if it changed.
-            if display.serial_log.len() != self.serial_log_len {
-                self.cached_serial_log.clone_from(&display.serial_log);
-                self.serial_log_len = display.serial_log.len();
-            }
+            // Feed the serial terminal what the log gained.
+            self.serial_terminal
+                .catch_up(&display.serial_log, display.serial_written);
 
             if !display.fb_dirty && self.texture.is_some() {
                 return;
@@ -632,6 +688,7 @@ impl RustyBoxApp {
         // bypass egui's focus gate so chords (Ctrl+C, Alt+Tab in the guest) reach
         // the VM even if a host widget holds focus.
         if self.shared_emu_running()
+            && !self.serial_focused
             && (self.mouse_captured() || !ctx.egui_wants_keyboard_input())
         {
             self.process_input(&ctx);
@@ -735,52 +792,127 @@ impl RustyBoxApp {
                 .resizable(true)
                 .min_size(SERIAL_PANEL_MIN_HEIGHT)
                 .default_size(SERIAL_PANEL_DEFAULT_HEIGHT)
-                .max_size(SERIAL_PANEL_MAX_HEIGHT)
+                // No cap: a drag takes it as tall as the console area allows.
                 .frame(
                     egui::Frame::NONE
                         .fill(console_bg)
                         .inner_margin(egui::Margin::same(6)),
                 )
                 .show(ui, |ui| {
-                    ui.label(
-                        egui::RichText::new("Serial Console")
-                            .monospace()
-                            .size(10.0)
-                            .color(egui::Color32::from_rgb(0x66, 0x66, 0x88)),
-                    );
-                    ui.separator();
-                    egui::ScrollArea::vertical()
-                        .stick_to_bottom(true)
-                        .auto_shrink([false, false])
-                        .show(ui, |ui| {
-                            ui.label(
-                                egui::RichText::new(&self.cached_serial_log)
-                                    .monospace()
-                                    .size(11.0)
-                                    .color(console_text),
+                    // The input row is laid out first, from the panel's bottom
+                    // edge, and the log fills only the height left above it: a
+                    // log that claimed the whole panel would push the row past
+                    // the panel, which the panel then grows to hold, up to its
+                    // cap, where the overflow is clipped and the drawn edge is
+                    // no longer the one that resizes it.
+                    ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+                        // A phone's soft keyboard opens for a text field, so
+                        // there a line is typed here and sent with Enter;
+                        // elsewhere the terminal takes the keyboard itself.
+                        if cfg!(target_os = "android") {
+                            ui.horizontal(|ui| {
+                                let response = ui.add(
+                                    egui::TextEdit::singleline(&mut self.serial_input)
+                                        .desired_width(260.0)
+                                        .hint_text("serial input"),
+                                );
+                                let enter_pressed = response.lost_focus()
+                                    && ui.input(|input| input.key_pressed(egui::Key::Enter));
+                                let send_enabled = self.cached_emu_running && !self.serial_input.is_empty();
+                                if ui
+                                    .add_enabled(send_enabled, egui::Button::new("Send"))
+                                    .clicked()
+                                    || (send_enabled && enter_pressed)
+                                {
+                                    self.send_serial_input();
+                                }
+                            });
+                            ui.separator();
+                        }
+                        ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                            ui.horizontal(|ui| {
+                                let muted = egui::Color32::from_rgb(0x66, 0x66, 0x88);
+                                ui.label(egui::RichText::new("Serial Console").monospace().size(10.0).color(muted));
+                                let hint = if self.serial_focused {
+                                    "typing to the guest; click outside to stop"
+                                } else {
+                                    "click to type, drag to select"
+                                };
+                                ui.label(egui::RichText::new(hint).monospace().size(10.0).color(muted));
+                                if ui.small_button("Copy Log").clicked() {
+                                    ui.ctx().copy_text(self.serial_terminal.text());
+                                }
+                            });
+                            ui.separator();
+                            // Both ways: a guest may size its screen wider
+                            // than the panel (GRUB on EDK2 asks for 240
+                            // columns).
+                            let font = egui::FontId::monospace(11.0);
+                            let screen = self.serial_terminal.layout(
+                                &font,
+                                super::serial_terminal::TerminalColours {
+                                    foreground: console_text,
+                                    background: console_bg,
+                                },
                             );
+                            // New output brings the screen into view as a
+                            // terminal window shows it: from its top row when
+                            // the rows down to the cursor fit, else as far as
+                            // the cursor. Between outputs the view stays where
+                            // it was scrolled, the scrollback above it.
+                            let follow = self
+                                .serial_terminal
+                                .take_new_output()
+                                .then(|| self.serial_terminal.cursor_cell())
+                                .flatten();
+                            let screen_lines = self.serial_terminal.screen_lines();
+                            // Not animated: a terminal shows its cursor at
+                            // once, and output arriving every frame would
+                            // otherwise retarget an easing scroll each frame.
+                            let scrolled = egui::ScrollArea::both()
+                                .auto_shrink([false, false])
+                                .animated(false)
+                                .show(ui, |ui| {
+                                    // Selectable as any text is: a drag
+                                    // selects, Ctrl+C copies the selection.
+                                    let shown = ui.add(
+                                        egui::Label::new(screen)
+                                            .extend()
+                                            .selectable(true)
+                                            .sense(egui::Sense::click_and_drag()),
+                                    );
+                                    if let Some(cell) = follow {
+                                        // The rows as laid out, not the font's
+                                        // nominal height, whose difference
+                                        // would grow down the scrollback.
+                                        let lines = screen_lines.first + screen_lines.count;
+                                        let line_height = shown.rect.height() / lines.max(1) as f32;
+                                        let cell_width = ui.fonts_mut(|fonts| fonts.glyph_width(&font, 'M'));
+                                        let line_top = |line: usize| shown.rect.top() + line as f32 * line_height;
+                                        let cursor = egui::Rect::from_min_size(
+                                            egui::pos2(
+                                                shown.rect.left() + cell.col as f32 * cell_width,
+                                                line_top(cell.line),
+                                            ),
+                                            egui::vec2(cell_width, line_height),
+                                        );
+                                        let screen_top = line_top(screen_lines.first);
+                                        if cursor.bottom() - screen_top <= ui.clip_rect().height() {
+                                            ui.scroll_to_rect(
+                                                egui::Rect::from_min_max(
+                                                    egui::pos2(shown.rect.left(), screen_top),
+                                                    cursor.max,
+                                                ),
+                                                Some(egui::Align::TOP),
+                                            );
+                                        } else {
+                                            ui.scroll_to_rect(cursor, None);
+                                        }
+                                    }
+                                    shown
+                                });
+                            self.type_into_serial_terminal(ui, &scrolled.inner, scrolled.inner_rect);
                         });
-                    ui.separator();
-                    ui.horizontal(|ui| {
-                        let response = ui.add(
-                            egui::TextEdit::singleline(&mut self.serial_input)
-                                .desired_width(260.0)
-                                .hint_text("serial input"),
-                        );
-                        let enter_pressed = response.lost_focus()
-                            && ui.input(|input| input.key_pressed(egui::Key::Enter));
-                        let send_enabled = self.cached_emu_running && !self.serial_input.is_empty();
-                        if ui
-                            .add_enabled(send_enabled, egui::Button::new("Send"))
-                            .clicked()
-                            || (send_enabled && enter_pressed)
-                        {
-                            self.send_serial_input();
-                        }
-                        if ui.button("Copy Log").clicked() {
-                            ui.ctx().copy_text(self.cached_serial_log.clone());
-                        }
-                        ui.add_enabled(false, egui::Button::new("Paste"));
                     });
                 });
         }
@@ -1037,7 +1169,7 @@ mod tests {
 
         assert_eq!(
             shared.lock().unwrap().drain_serial_input(),
-            b"help\n".to_vec()
+            b"help\r".to_vec()
         );
         assert!(app.serial_input.is_empty());
     }
@@ -1045,7 +1177,6 @@ mod tests {
     #[test]
     fn serial_panel_uses_compact_default_size() {
         assert!(SERIAL_PANEL_DEFAULT_HEIGHT <= 96.0);
-        assert!(SERIAL_PANEL_MAX_HEIGHT <= 220.0);
     }
 
     #[test]

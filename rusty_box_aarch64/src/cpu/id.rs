@@ -93,13 +93,20 @@ pub(crate) const SMIDR_EL1: u64 = 0;
 /// (3:0) = 6 (Armv8.0 debug), 7 with FEAT_Debugv8p1, 8 with FEAT_Debugv8p2
 /// and 9 with FEAT_Debugv8p4 (each of which `Features.json` makes imply the
 /// one before), BRPs = 1 and WRPs = 1 (two of each, the architectural
-/// minimum), CTX_CMPs = 0, PMUVer = 0 (no PMU).
+/// minimum), CTX_CMPs = 0, PMUVer = 0 (no PMU), and DoubleLock (39:36) 0
+/// with FEAT_DoubleLock and 0b1111 without (`FEAT_DoubleLock <=>
+/// SInt(ID_AA64DFR0_EL1.DoubleLock) >= 0`).
 pub(crate) const fn id_aa64dfr0(features: Features) -> u64 {
     let debug = chain_level(
         features,
         &[Feature::Debugv8p1, Feature::Debugv8p2, Feature::Debugv8p4],
     );
-    0x0000_0000_0010_1000 | (6 + debug)
+    let double_lock = if features.has(Feature::DoubleLock) {
+        0
+    } else {
+        0xF << 36
+    };
+    0x0000_0000_0010_1000 | double_lock | (6 + debug)
 }
 
 /// `DBGAUTHSTATUS_EL1` of a processor implementing `features`, as Arm's
@@ -118,8 +125,10 @@ pub(crate) const fn dbgauthstatus_el1(features: Features) -> u64 {
 /// `minimal_ras_reginfo` has it.
 pub(crate) const ERRIDR_EL1: u64 = 0;
 
-/// `ID_AA64ISAR0_EL1` of a processor implementing `features`: AES (7:4) = 2
-/// with FEAT_AES (AESE, AESD, AESMC, AESIMC and the 64-bit PMULL), SHA1
+/// `ID_AA64ISAR0_EL1` of a processor implementing `features`: AES (7:4) = 1
+/// with FEAT_AES (AESE, AESD, AESMC, AESIMC) and 2 with FEAT_PMULL (the
+/// 64-bit PMULL) as well (`Features.json`: `FEAT_PMULL <=>
+/// UInt(ID_AA64ISAR0_EL1.AES) >= 2`, and FEAT_PMULL implies FEAT_AES), SHA1
 /// (11:8) = 1, SHA2 (15:12) = 1 (SHA-256 only), CRC32 (19:16) = 1, Atomic
 /// (23:20) = 2 with FEAT_LSE, RDM (31:28) = 1, DP (47:44) = 1 with
 /// FEAT_DotProd, FHM (51:48) = 1, TS (55:52) = 1 with FEAT_FlagM and 2
@@ -130,9 +139,10 @@ pub(crate) const ERRIDR_EL1: u64 = 0;
 /// `aarch64_aa32_a57_init` (target/arm/cpu-max.c), which
 /// `aarch64_a57_initfn` calls.
 pub(crate) const fn id_aa64isar0(features: Features) -> u64 {
+    let aes = chain_level(features, &[Feature::Aes, Feature::Pmull]);
     let ts = chain_level(features, &[Feature::FlagM, Feature::FlagM2]);
     let tlb = chain_level(features, &[Feature::TlbiOs, Feature::TlbiRange]);
-    field(features, Feature::Aes, 4, 2)
+    (aes << 4)
         | field(features, Feature::Sha1, 8, 1)
         | field(features, Feature::Sha256, 12, 1)
         | field(features, Feature::Crc32, 16, 1)

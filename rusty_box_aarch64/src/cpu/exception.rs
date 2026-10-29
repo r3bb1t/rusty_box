@@ -5,6 +5,7 @@
 //! there is no routing to decide.
 
 use super::features::Feature;
+use super::sysreg::{DBGPRCR_CORENPDRQ, MDSCR_KDE, MDSCR_SS, OSDLR_DLK, OSLSR_OSLK};
 use super::{sctlr, Activity, Btype, Cpu, El, Pstate};
 use crate::instrumentation::{ExceptionKind, ExceptionTaken};
 
@@ -260,6 +261,30 @@ impl Cpu {
         self.pc
     }
 
+    /// Arm `AArch64_GenerateDebugExceptionsFrom(from_el, ss, mask)` on a
+    /// processor with no EL2 or EL3, which is never in Debug state (so not
+    /// `Halted()`): debug exceptions target EL1, and are enabled from EL0
+    /// and, with `MDSCR_EL1.KDE` set and `mask` (PSTATE.D) clear, from EL1,
+    /// unless the OS Lock or the OS Double Lock is locked.
+    fn debug_exceptions_enabled_from(&self, from_el: El, mask: bool) -> bool {
+        if self.sys.oslsr_el1 & OSLSR_OSLK != 0 || self.double_lock_status() {
+            return false;
+        }
+        match from_el {
+            El::El0 => true,
+            El::El1 => self.sys.mdscr_el1 & MDSCR_KDE != 0 && !mask,
+        }
+    }
+
+    /// Arm `DoubleLockStatus`: with FEAT_DoubleLock, `OSDLR_EL1.DLK` set
+    /// and `DBGPRCR_EL1.CORENPDRQ` clear, the processor never being in
+    /// Debug state.
+    fn double_lock_status(&self) -> bool {
+        self.implements(Feature::DoubleLock)
+            && self.sys.osdlr_el1 & OSDLR_DLK != 0
+            && self.sys.dbgprcr_el1 & DBGPRCR_CORENPDRQ == 0
+    }
+
     /// `AArch64.ExceptionReturn(target, SPSR_EL1)`: what `ERET` does with
     /// `ELR_EL1` and `ERETAA`/`ERETAB` with `ELR_EL1` authenticated. Returns
     /// the new PC. Every return, legal or not, clears the local exclusive
@@ -285,6 +310,20 @@ impl Cpu {
                 None => false,
             };
 
+        // Arm `DebugExceptionReturnSS`: PSTATE.SS takes SPSR.SS only for a
+        // return, with `MDSCR_EL1.SS` set, from where debug exceptions are
+        // disabled to where they are enabled, with SPSR.D as the
+        // destination's mask; it is 0 otherwise. An illegal return's
+        // destination is the current EL.
+        let dest_el = match (legal, target_el) {
+            (true, Some(el)) => el,
+            _ => self.pstate.el,
+        };
+        let ss = spsr & (1 << 21) != 0
+            && self.sys.mdscr_el1 & MDSCR_SS != 0
+            && !self.debug_exceptions_enabled_from(self.pstate.el, self.pstate.d)
+            && self.debug_exceptions_enabled_from(dest_el, spsr & (1 << 9) != 0);
+
         // SPSR_EL1 holds no bit of a feature this processor lacks: an MSR
         // writes only `spsr_mask`'s bits, and a snapshot that holds others
         // is refused.
@@ -293,7 +332,7 @@ impl Cpu {
         p.z = spsr & (1 << 30) != 0;
         p.c = spsr & (1 << 29) != 0;
         p.v = spsr & (1 << 28) != 0;
-        p.ss = spsr & (1 << 21) != 0;
+        p.ss = ss;
         p.d = spsr & (1 << 9) != 0;
         p.a = spsr & (1 << 8) != 0;
         p.i = spsr & (1 << 7) != 0;

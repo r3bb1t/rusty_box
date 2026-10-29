@@ -10,10 +10,11 @@
 //! A feature is implemented by a processor when its [`Features`] set holds
 //! it; the decoder executes an encoding only when the processor implements
 //! the feature the encoding belongs to. Every processor built implements
-//! the Cortex-A57's features, which the constants of `id` report, and the
-//! ID register field of each feature beyond them is read from the set
-//! (`sysreg.rs`); `isa::tests` checks, for every implementation built, that
-//! the ID registers and the set agree.
+//! the Cortex-A57's features but FEAT_DoubleLock, which Armv9.0 forbids;
+//! the constants of `id` report the rest, and the ID register field of
+//! every other feature is read from the set (`sysreg.rs`); `isa::tests`
+//! checks, for every implementation built, that the ID registers and the
+//! set agree.
 //!
 //! A machine's processor is one of the [`CpuModel`]s, each an
 //! [`Implementation`]: a feature set, the processor's identity, and the
@@ -37,9 +38,7 @@ pub(crate) enum Feature {
     Fp,
     /// FEAT_AdvSIMD: Advanced SIMD.
     AdvSimd,
-    /// FEAT_AES: AESE, AESD, AESMC, AESIMC. FEAT_PMULL, the 64-bit PMULL
-    /// the same ID field advertises, is no encoding of its own: PMULL's
-    /// decode pseudocode checks it.
+    /// FEAT_AES: AESE, AESD, AESMC, AESIMC.
     Aes,
     /// FEAT_SHA1: SHA1C, SHA1P, SHA1M, SHA1H, SHA1SU0, SHA1SU1.
     Sha1,
@@ -196,6 +195,12 @@ pub(crate) enum Feature {
     /// FEAT_SME2: the ZT0 register, predicate-as-counter, and the
     /// multi-vector instructions.
     Sme2,
+    /// FEAT_PMULL: the 64-bit PMULL and PMULL2 (`size = 11`), which PMULL's
+    /// decode pseudocode checks. No encoding of its own.
+    Pmull,
+    /// FEAT_DoubleLock: the OS Double Lock, `OSDLR_EL1.DLK`, which Armv9.0
+    /// forbids (`v9Ap0 ==> !FEAT_DoubleLock`). No encoding of its own.
+    DoubleLock,
 }
 
 /// What the conformance tests read of a feature: `tests/unit/spec.rs`
@@ -203,7 +208,7 @@ pub(crate) enum Feature {
 #[cfg(test)]
 impl Feature {
     /// Every feature, in declaration order.
-    pub(crate) const ALL: [Feature; 62] = [
+    pub(crate) const ALL: [Feature; 64] = [
         Feature::Base,
         Feature::Fp,
         Feature::AdvSimd,
@@ -266,6 +271,8 @@ impl Feature {
         Feature::Afp,
         Feature::Rpres,
         Feature::Sme2,
+        Feature::Pmull,
+        Feature::DoubleLock,
     ];
 
     /// The name Arm's data gives the feature, `None` for the base set.
@@ -333,6 +340,8 @@ impl Feature {
             Self::Afp => Some("FEAT_AFP"),
             Self::Rpres => Some("FEAT_RPRES"),
             Self::Sme2 => Some("FEAT_SME2"),
+            Self::Pmull => Some("FEAT_PMULL"),
+            Self::DoubleLock => Some("FEAT_DoubleLock"),
         }
     }
 
@@ -373,6 +382,8 @@ impl Feature {
                 | Self::Debugv8p4
                 | Self::Afp
                 | Self::Rpres
+                | Self::Pmull
+                | Self::DoubleLock
         )
     }
 
@@ -397,16 +408,20 @@ pub(crate) struct Features(u64);
 
 impl Features {
     /// What the Cortex-A57 this crate's processor is shaped like implements,
-    /// as QEMU's `cortex-a57` has it: ARMv8.0 with FP, Advanced SIMD and
-    /// the whole Cryptographic Extension and CRC32.
+    /// as QEMU's `cortex-a57` has it: ARMv8.0 with FP, Advanced SIMD, the
+    /// whole Cryptographic Extension (AES with the 64-bit PMULL, SHA-1 and
+    /// SHA-256), CRC32 and the OS Double Lock (`ID_AA64DFR0_EL1.DoubleLock`
+    /// 0, as the Cortex-A57 and QEMU report it).
     pub(crate) const CORTEX_A57: Self = Self::of(&[
         Feature::Base,
         Feature::Fp,
         Feature::AdvSimd,
         Feature::Aes,
+        Feature::Pmull,
         Feature::Sha1,
         Feature::Sha256,
         Feature::Crc32,
+        Feature::DoubleLock,
     ]);
 
     /// What the Armv9.2 processor model implements: every feature Arm's
@@ -418,7 +433,8 @@ impl Features {
     /// and these options: the Cryptographic Extension's AES, PMULL, SHA-1
     /// and SHA-256, QARMA5 as the pointer authentication algorithm,
     /// FEAT_FPAC and FEAT_FPACCOMBINE, FEAT_SSBS and FEAT_SSBS2, and
-    /// FEAT_RPRES. Not FEAT_SVE: Streaming SVE mode is its only SVE.
+    /// FEAT_RPRES. Not FEAT_SVE: Streaming SVE mode is its only SVE. Not
+    /// FEAT_DoubleLock, the one Cortex-A57 feature Armv9.0 forbids.
     pub(crate) const ARMV9P2: Self = Self::of(&[
         Feature::Base,
         Feature::Fp,
@@ -482,6 +498,7 @@ impl Features {
         Feature::Sme,
         Feature::Sme2,
         Feature::Aes,
+        Feature::Pmull,
         Feature::Sha1,
         Feature::Sha256,
         Feature::PacQarma5,
@@ -612,7 +629,9 @@ impl Implementation {
 #[cfg(test)]
 impl Implementation {
     /// The Armv9.2 model with every feature the decoder knows, which is
-    /// today the model's own set: a feature's tests run on it before any
+    /// today the model's own set and FEAT_DoubleLock (a set no processor
+    /// may have, Armv9.0 forbidding FEAT_DoubleLock, and none is built
+    /// with): a feature's tests run on it before any
     /// model implements the feature, and each exercises that feature's own
     /// rules.
     pub(crate) const EVERY_FEATURE: Self = Self {
@@ -752,7 +771,9 @@ mod tests {
 
     /// A feature still being built is in no processor model: only the
     /// tests' own implementation has it. Every implementation has the
-    /// Cortex-A57's features, which `id`'s constants report.
+    /// Cortex-A57's features, which `id`'s constants report, but
+    /// FEAT_DoubleLock, which a processor with FEAT_SME (an Armv9.2 one)
+    /// may not have.
     #[test]
     fn the_processors_built_implement_only_complete_features() {
         for feature in Feature::ALL {
@@ -762,7 +783,13 @@ mod tests {
                     feature.complete() || !imp.has(feature),
                     "{model:?}: {feature:?} is incomplete"
                 );
-                if Implementation::CORTEX_A57.has(feature) {
+                if feature == Feature::DoubleLock {
+                    assert_ne!(
+                        imp.has(feature),
+                        imp.has(Feature::Sme),
+                        "{model:?}: v9Ap0 ==> !FEAT_DoubleLock"
+                    );
+                } else if Implementation::CORTEX_A57.has(feature) {
                     assert!(imp.has(feature), "{model:?}: {feature:?}");
                 }
             }

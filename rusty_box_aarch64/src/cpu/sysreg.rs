@@ -160,6 +160,10 @@ const LORN_EL1: u32 = key!(3, 0, 10, 4, 2);
 const LORC_EL1: u32 = key!(3, 0, 10, 4, 3);
 const LORID_EL1: u32 = key!(3, 0, 10, 4, 7);
 const VBAR_EL1: u32 = key!(3, 0, 12, 0, 0);
+// EL1 is the highest EL, so it has the reset management registers (Arm's
+// data: `IsHighestEL(EL1) && FEAT_AA64`).
+const RVBAR_EL1: u32 = key!(3, 0, 12, 0, 1);
+const RMR_EL1: u32 = key!(3, 0, 12, 0, 2);
 const ISR_EL1: u32 = key!(3, 0, 12, 1, 0);
 const DISR_EL1: u32 = key!(3, 0, 12, 1, 1);
 const CONTEXTIDR_EL1: u32 = key!(3, 0, 13, 0, 1);
@@ -189,6 +193,7 @@ const OSDTRRX_EL1: u32 = key!(2, 0, 0, 0, 2);
 const OSDTRTX_EL1: u32 = key!(2, 0, 0, 3, 2);
 const DBGDTR_EL0: u32 = key!(2, 3, 0, 4, 0);
 const DBGDTRTX_EL0: u32 = key!(2, 3, 0, 5, 0);
+const MDRAR_EL1: u32 = key!(2, 0, 1, 0, 0);
 const OSLAR_EL1: u32 = key!(2, 0, 1, 0, 4);
 const OSLSR_EL1: u32 = key!(2, 0, 1, 1, 4);
 const OSDLR_EL1: u32 = key!(2, 0, 1, 3, 4);
@@ -246,9 +251,30 @@ const CNTKCTL_BASE: u64 = 0x3FF;
 /// whatever IDS holds read as zero.
 const DISR_MASK: u64 = (1 << 31) | (1 << 24) | 0x00FF_FFFF;
 
+/// `MDSCR_EL1.SS`: software step is enabled.
+pub(super) const MDSCR_SS: u64 = 1;
+
 /// `MDSCR_EL1.TDCC`: EL0's accesses to the Debug Communications Channel
 /// registers trap to EL1.
 const MDSCR_TDCC: u64 = 1 << 12;
+
+/// `MDSCR_EL1.KDE`: debug exceptions are enabled at the EL they target.
+pub(super) const MDSCR_KDE: u64 = 1 << 13;
+
+/// `OSDLR_EL1.DLK`: the OS Double Lock is locked (FEAT_DoubleLock; RES0
+/// without it).
+pub(super) const OSDLR_DLK: u64 = 1;
+
+/// `DBGPRCR_EL1.CORENPDRQ`: the core is asked not to power down, which
+/// overrides the OS Double Lock.
+pub(super) const DBGPRCR_CORENPDRQ: u64 = 1;
+
+/// `RMR_EL1.AA64`: the processor resets into AArch64. RAO/WI, as there is
+/// no AArch32 to reset into.
+const RMR_AA64: u64 = 1;
+
+/// `RMR_EL1.RR`: a Warm reset is requested.
+pub(super) const RMR_RR: u64 = 1 << 1;
 
 /// The Debug Communications Channel's flags, `EDSCR.TXfull` (DTRTX full)
 /// and `EDSCR.RXfull` (DTRRX full). They are kept at their places in
@@ -275,10 +301,11 @@ const MDSCR_SAVE_RESTORE: u64 =
 /// RES0 here (the bits later features define among them: TFO, SC2, EMBWE,
 /// TTA, EnSPM, EHBWE, of features no model implements), and reads as zero
 /// (Arm ARM, DDI 0487, the `MDSCR_EL1` description).
-pub(super) const MDSCR_FIELDS: u64 = MDSCR_SAVE_RESTORE | 1 | MDSCR_TDCC | (1 << 13) | (1 << 15);
+pub(super) const MDSCR_FIELDS: u64 =
+    MDSCR_SAVE_RESTORE | MDSCR_SS | MDSCR_TDCC | MDSCR_KDE | (1 << 15);
 
 /// `OSLSR_EL1.OSLK`: the OS Lock is locked.
-const OSLSR_OSLK: u64 = 1 << 1;
+pub(super) const OSLSR_OSLK: u64 = 1 << 1;
 
 /// `SCTLR_EL1` FEAT_MTE fields: ITFSB, TCF0, TCF, ATA0, ATA, TCSO0, TCSO,
 /// RES0 as no processor model here implements FEAT_MTE.
@@ -648,6 +675,10 @@ impl Cpu {
             LORSA_EL1 | LOREA_EL1 | LORN_EL1 | LORC_EL1 if self.implements(Feature::Lor) => 0,
             LORID_EL1 if self.implements(Feature::Lor) => id::LORID_EL1,
             VBAR_EL1 => self.sys.vbar_el1,
+            // The IMPLEMENTATION DEFINED address execution starts from after
+            // reset: the one the machine's last reset started it from.
+            RVBAR_EL1 => self.sys.rvbar_el1,
+            RMR_EL1 => RMR_AA64 | self.sys.rmr_el1,
             ISR_EL1 => (u64::from(self.irq_line) << 7) | (u64::from(self.fiq_line) << 6),
             CONTEXTIDR_EL1 => self.sys.contextidr_el1,
             TPIDR_EL1 => self.sys.tpidr_el1,
@@ -655,13 +686,23 @@ impl Cpu {
             MDCCINT_EL1 => self.sys.mdccint_el1,
             MDSCR_EL1 => self.sys.mdscr_el1,
             OSECCR_EL1 => self.sys.oseccr_el1,
+            // No ROM table for an external debugger to find: `Valid` 0b00,
+            // `ROMADDR` not valid, as QEMU reads it (`debug_cp_reginfo`).
+            MDRAR_EL1 => 0,
             OSLSR_EL1 => self.sys.oslsr_el1,
             OSDLR_EL1 => self.sys.osdlr_el1,
             DBGPRCR_EL1 => self.sys.dbgprcr_el1,
-            DBGCLAIMSET_EL1 | DBGCLAIMCLR_EL1 => self.sys.dbgclaim,
+            // Every one of the eight claim tags is implemented: their
+            // `DBGCLAIMSET_EL1` bits read as one ("Access to this field is
+            // RAO/W1S", DDI 0601's `DBGCLAIMSET_EL1`), and
+            // `DBGCLAIMCLR_EL1` reads the tags themselves, as QEMU's
+            // `dbgclaimset_read` and `DBGCLAIMCLR_EL1` have them.
+            DBGCLAIMSET_EL1 => 0xFF,
+            DBGCLAIMCLR_EL1 => self.sys.dbgclaim,
             DBGAUTHSTATUS_EL1 => id::dbgauthstatus_el1(self.imp.features),
             // With no error records (`ERRIDR_EL1.NUM` = 0), `ERRSELR_EL1`
-            // and the `ERX*` registers are UNDEFINED, as QEMU's
+            // and the `ERX*` registers are UNDEFINED, one of the outcomes
+            // DDI 0601's pages of those registers permit then, as QEMU's
             // `minimal_ras_reginfo` has them.
             ERRIDR_EL1 if self.implements(Feature::Ras) => id::ERRIDR_EL1,
             DISR_EL1 if self.implements(Feature::Ras) => self.sys.disr_el1,
@@ -1020,12 +1061,25 @@ impl Cpu {
                 self.sys.oslsr_el1 = (self.sys.oslsr_el1 & !2) | ((value & 1) << 1);
                 WriteEffect::None
             }
+            // DLK is RES0 without FEAT_DoubleLock.
             OSDLR_EL1 => {
-                self.sys.osdlr_el1 = value & 1;
+                self.sys.osdlr_el1 = if self.implements(Feature::DoubleLock) {
+                    value & OSDLR_DLK
+                } else {
+                    0
+                };
                 WriteEffect::None
             }
             DBGPRCR_EL1 => {
-                self.sys.dbgprcr_el1 = value & 1;
+                self.sys.dbgprcr_el1 = value & DBGPRCR_CORENPDRQ;
+                WriteEffect::None
+            }
+            // RR asks the system for a Warm reset of the processor. The
+            // board has no reset controller that acts on the request (as
+            // QEMU's `virt` has none), so it is held and nothing resets;
+            // AA64 is RAO/WI.
+            RMR_EL1 => {
+                self.sys.rmr_el1 = value & RMR_RR;
                 WriteEffect::None
             }
             DBGCLAIMSET_EL1 => {

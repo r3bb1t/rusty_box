@@ -355,6 +355,9 @@ pub struct NativeShellApp {
     /// The full-screen menu asked the Android host for its key pad.
     #[cfg(target_os = "android")]
     keypad_requested: bool,
+    /// F11 put the desktop window in full screen, showing the guest alone.
+    #[cfg(not(target_os = "android"))]
+    desktop_full_screen: bool,
 }
 
 /// The full-screen console's menu button: a glyph the VM bar already draws,
@@ -561,6 +564,7 @@ fn virt_boot_label(boot: &crate::config::ArmBoot) -> &'static str {
     match boot {
         crate::config::ArmBoot::Unset => "",
         crate::config::ArmBoot::Firmware { .. } => "UEFI firmware",
+        crate::config::ArmBoot::BuiltinFirmware { .. } => "Built-in UEFI firmware",
         crate::config::ArmBoot::Linux { .. } => "Linux kernel",
     }
 }
@@ -650,12 +654,18 @@ struct VirtSettings {
     disk_enabled: bool,
     disk_path: String,
     disk_read_only: bool,
+    /// How many times a second the window shows the picture.
+    refresh_hz: u32,
 }
 
 /// What the Arm `virt` board's Boot page boots.
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum VirtBootChoice {
+    /// Nothing chosen: a board read with nothing to boot, kept as it is
+    /// until one of the page's choices is picked. The page offers no button
+    /// for it.
+    Nothing,
     Firmware,
     Kernel,
 }
@@ -680,7 +690,7 @@ impl VirtSettings {
             memory_mib: config.memory_mib,
             ips: config.ips,
             cpu: config.cpu,
-            boot: VirtBootChoice::Firmware,
+            boot: VirtBootChoice::Nothing,
             firmware_path: String::new(),
             vars_path: String::new(),
             kernel_path: String::new(),
@@ -698,12 +708,18 @@ impl VirtSettings {
                 .as_ref()
                 .map_or_else(String::new, |disk| disk.path.display().to_string()),
             disk_read_only: config.disk.as_ref().is_some_and(|disk| disk.access.is_read_only()),
+            refresh_hz: config.refresh.get(),
         };
         match &config.boot {
             ArmBoot::Unset => {}
             ArmBoot::Firmware { code, vars } => {
                 settings.boot = VirtBootChoice::Firmware;
                 settings.firmware_path = code.display().to_string();
+                settings.vars_path = path(vars);
+            }
+            // The Firmware field left empty is the built-in EDK2.
+            ArmBoot::BuiltinFirmware { vars } => {
+                settings.boot = VirtBootChoice::Firmware;
                 settings.vars_path = path(vars);
             }
             ArmBoot::Linux {
@@ -732,14 +748,15 @@ impl VirtSettings {
             .to_string());
         }
         let boot = match self.boot {
-            // An empty firmware path boots the bundled EDK2 from the disk.
-            VirtBootChoice::Firmware => match trimmed_optional_path(&self.firmware_path) {
-                None => ArmBoot::Unset,
-                Some(code) => ArmBoot::Firmware {
-                    code,
-                    vars: trimmed_optional_path(&self.vars_path),
-                },
-            },
+            VirtBootChoice::Nothing => ArmBoot::Unset,
+            // An empty firmware path is the built-in EDK2.
+            VirtBootChoice::Firmware => {
+                let vars = trimmed_optional_path(&self.vars_path);
+                match trimmed_optional_path(&self.firmware_path) {
+                    None => ArmBoot::BuiltinFirmware { vars },
+                    Some(code) => ArmBoot::Firmware { code, vars },
+                }
+            }
             VirtBootChoice::Kernel => ArmBoot::Linux {
                 kernel: trimmed_optional_path(&self.kernel_path)
                     .ok_or_else(|| "Kernel path is required to boot a kernel".to_owned())?,
@@ -759,6 +776,8 @@ impl VirtSettings {
         } else {
             None
         };
+        let refresh = crate::config::RefreshHz::new(self.refresh_hz)
+            .ok_or_else(|| crate::error::RunError::InvalidRefreshRate { hz: self.refresh_hz }.to_string())?;
         Ok(crate::config::ArmVirtConfig {
             memory_mib: self.memory_mib,
             ips: self.ips.max(1),
@@ -771,6 +790,7 @@ impl VirtSettings {
                 path,
                 access: crate::config::DiskAccess::of_read_only(self.disk_read_only),
             }),
+            refresh,
         })
     }
 }
@@ -805,9 +825,19 @@ impl NativeVmSettings {
         let disk = pc.disk.as_ref();
         let cdrom = pc.cdrom.as_ref();
         let topology = pc.cpu_params.cpu_topology();
+        let mut virt = VirtSettings::from_config(virt);
+        if let crate::config::MachineConfig::Pc(_) = &config.machine {
+            // The board a switch to Arm makes is set up as a computer is: it
+            // boots the built-in EDK2, so a disk or ISO is all it needs, with
+            // a screen, a keyboard and a pointer.
+            virt.boot = VirtBootChoice::Firmware;
+            virt.display = true;
+            virt.keyboard = true;
+            virt.tablet = true;
+        }
         Self {
             machine: config.machine.kind(),
-            virt: VirtSettings::from_config(virt),
+            virt,
             pc_base: pc.clone(),
             memory_mib: pc.memory_mib,
             host_memory_mib: pc.host_memory_mib,
@@ -1192,9 +1222,10 @@ impl PowerOnGap {
             crate::config::MachineConfig::Pc(pc) => pc,
             crate::config::MachineConfig::ArmVirt(virt) => {
                 return match virt.boot {
-                    crate::config::ArmBoot::Unset if virt.disk.is_some() => None,
                     crate::config::ArmBoot::Unset => Some(Self::VirtBoot),
-                    crate::config::ArmBoot::Firmware { .. } | crate::config::ArmBoot::Linux { .. } => None,
+                    crate::config::ArmBoot::Firmware { .. }
+                    | crate::config::ArmBoot::BuiltinFirmware { .. }
+                    | crate::config::ArmBoot::Linux { .. } => None,
                 };
             }
         };
@@ -2084,6 +2115,8 @@ impl NativeShellApp {
             full_screen_menu_open: false,
             #[cfg(target_os = "android")]
             keypad_requested: false,
+            #[cfg(not(target_os = "android"))]
+            desktop_full_screen: false,
         }
     }
 
@@ -3080,6 +3113,7 @@ impl NativeShellApp {
                         });
                     };
                     match virt.boot {
+                        VirtBootChoice::Nothing => {}
                         VirtBootChoice::Firmware => {
                             path_row(ui, "Firmware", &mut virt.firmware_path, BrowseTarget::Firmware);
                             path_row(ui, "Variable store", &mut virt.vars_path, BrowseTarget::FirmwareVars);
@@ -3139,6 +3173,18 @@ impl NativeShellApp {
                         });
                         changed |= field_row(ui, "Height", |ui| {
                             draw_u32_field(ui, &mut virt.display_height, 1, 16_384, " px", editable, 1, None)
+                        });
+                        changed |= field_row(ui, "Refresh rate", |ui| {
+                            draw_u32_field(
+                                ui,
+                                &mut virt.refresh_hz,
+                                1,
+                                crate::config::RefreshHz::MAX,
+                                " Hz",
+                                editable,
+                                1,
+                                None,
+                            )
                         });
                     }
                     field_row(ui, "Log level", |ui| {
@@ -4853,8 +4899,9 @@ impl NativeShellApp {
         )
     }
 
-    /// The guest alone on the phone's screen, fitted or stretched as the VM
-    /// is set, under a corner button that opens the console's menu.
+    /// The guest on the phone's screen, fitted or stretched as the VM is set,
+    /// with the serial console below it when the menu's switch shows it,
+    /// under a corner button that opens the console's menu.
     #[cfg(target_os = "android")]
     fn draw_full_screen_console(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let scale = if self.settings.console_stretch {
@@ -4862,11 +4909,12 @@ impl NativeShellApp {
         } else {
             rusty_box::gui::DisplayScale::Fit
         };
+        let show_serial = self.chrome.show_serial;
         let vm = self.shown_vm();
         let console = self.sessions.open(&vm).console();
         console.set_display_scale(scale);
         let area = ui.max_rect();
-        console.ui_embedded_with_serial(ui, frame, false, None);
+        console.ui_embedded_with_serial(ui, frame, show_serial, None);
 
         let ctx = ui.ctx().clone();
         // A tap that opens the menu shows it from its top.
@@ -4922,6 +4970,7 @@ impl NativeShellApp {
             {
                 self.sessions.open(&vm).console().send_ctrl_alt_del();
             }
+            ui.checkbox(&mut self.chrome.show_serial, "Serial console");
             let mut stretch = self.settings.console_stretch;
             if ui.checkbox(&mut stretch, "Stretch to fill").changed() {
                 self.settings.console_stretch = stretch;
@@ -5304,12 +5353,51 @@ impl NativeShellApp {
                 .set_display_scale(rusty_box::gui::DisplayScale::Fit);
         }
 
+        #[cfg(not(target_os = "android"))]
+        {
+            // F11 is the shell's, taken before the console forwards keys to
+            // the guest; Esc stays the guest's.
+            if ui
+                .ctx()
+                .input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::F11))
+            {
+                self.desktop_full_screen = !self.desktop_full_screen;
+                ui.ctx()
+                    .send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.desktop_full_screen));
+            }
+            if self.desktop_full_screen {
+                self.draw_desktop_full_screen_console(ui, frame);
+                return;
+            }
+        }
+
         self.draw_vm_bar(ui);
         self.draw_sidebar(ui);
         self.draw_status_strip(ui);
         self.draw_central(ui, frame);
         self.draw_floppy_maker(ui.ctx());
         self.draw_about_window(ui.ctx());
+    }
+
+    /// The guest alone in the full-screen desktop window, fitted to it; F11
+    /// brings the shell back.
+    #[cfg(not(target_os = "android"))]
+    fn draw_desktop_full_screen_console(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        let status = self.runtime_status();
+        let placeholder = if status.running || status.start_pending {
+            None
+        } else {
+            Some(powered_off_placeholder())
+        };
+        let vm = self.shown_vm();
+        egui::CentralPanel::default()
+            .frame(egui::Frame::NONE.fill(egui::Color32::BLACK))
+            .show(ui, |ui| {
+                self.sessions
+                    .open(&vm)
+                    .console()
+                    .ui_embedded_with_serial(ui, frame, false, placeholder);
+            });
     }
 }
 
@@ -7272,6 +7360,7 @@ mod tests {
                 keyboard: true,
                 tablet: true,
                 disk: None,
+                refresh: crate::config::RefreshHz::DEFAULT,
             }),
             display: crate::args::DisplayBackend::Egui,
             log_level: crate::args::LogLevel::Warn,
@@ -8623,6 +8712,47 @@ mod tests {
 
         settings.machine = crate::config::MachineKind::ArmVirt;
         settings.apply_to_config(&mut applied).expect("applies as the board again");
+        assert_eq!(applied, original);
+    }
+
+    /// A PC switched to an Arm board is set up as a computer is: it boots
+    /// the built-in EDK2, so attaching a disk or ISO is all it needs, with a
+    /// screen, a keyboard and a pointer.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_pc_switched_to_an_arm_board_boots_the_builtin_firmware_with_a_screen() {
+        let mut settings = NativeVmSettings::from_config(&test_resolved_config());
+        settings.machine = crate::config::MachineKind::ArmVirt;
+        let mut applied = test_resolved_config();
+        settings.apply_to_config(&mut applied).expect("applies as an Arm board");
+        let board = applied.arm_virt().expect("an Arm board");
+        assert_eq!(board.boot, crate::config::ArmBoot::BuiltinFirmware { vars: None });
+        assert!(board.display.is_some(), "a screen");
+        assert!(board.keyboard && board.tablet, "a keyboard and a pointer");
+    }
+
+    /// The Boot page's empty Firmware field is the built-in EDK2, and a
+    /// variable store chosen beside it stays with it: applied back, the board
+    /// boots the built-in firmware over that store, and reads back the same.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn the_builtin_firmware_keeps_the_variable_store_chosen_for_it() {
+        let original = {
+            let mut config = test_virt_config();
+            config.arm_virt_mut().expect("an Arm board").boot =
+                crate::config::ArmBoot::BuiltinFirmware {
+                    vars: Some(PathBuf::from("vars.fd")),
+                };
+            config
+        };
+        let vars = PathBuf::from("vars.fd");
+        let settings = NativeVmSettings::from_config(&original);
+        assert_eq!(settings.virt.boot, VirtBootChoice::Firmware);
+        assert_eq!(settings.virt.firmware_path, "");
+        assert_eq!(settings.virt.vars_path, vars.display().to_string());
+
+        let mut applied = test_virt_config();
+        settings.apply_to_config(&mut applied).expect("applies");
         assert_eq!(applied, original);
     }
 
@@ -10857,6 +10987,212 @@ mod tests {
 
         fn shows(window: &Harness<'_, Window>, label: &str) -> bool {
             window.query_all_by_label(label).next().is_some()
+        }
+
+        /// Whether a label whose text is `value` is shown.
+        fn shows_value(window: &Harness<'_, Window>, value: &str) -> bool {
+            window.query_all_by_value(value).next().is_some()
+        }
+
+        /// A click on the serial terminal gives it the keyboard: typed text,
+        /// Enter as a carriage return, an arrow as xterm's `ESC [ A` and
+        /// Ctrl+C as ETX all reach the guest's serial console.
+        #[test]
+        fn keys_typed_into_the_serial_terminal_reach_the_guest() {
+            let (mut app, _command_rx, _scratch) = arm_app();
+            app.chrome.show_serial = true;
+            app.chrome.go_to(ShellPage::Console);
+            let _control = live_vm(&mut app);
+            let display = app.shown_display();
+            display.lock().unwrap().append_serial_log("localhost login: ");
+            // A running machine repaints every frame, so frames are stepped.
+            let mut window = window_of_size(app, egui::vec2(1200.0, 800.0));
+            window.run_steps(3);
+
+            // The screen is taller than the panel shows; its first line, where
+            // the prompt is, is in view.
+            let screen = window
+                .query_all_by_role(egui::accesskit::Role::Label)
+                .find(|node| node.value().is_some_and(|value| value.contains("localhost login:")))
+                .expect("the terminal's screen")
+                .rect();
+            let on_the_prompt = screen.left_top() + egui::vec2(20.0, 5.0);
+            window.hover_at(on_the_prompt);
+            for pressed in [true, false] {
+                window.event(egui::Event::PointerButton {
+                    pos: on_the_prompt,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                });
+            }
+            window.run_steps(2);
+            assert!(
+                shows_value(&window, "typing to the guest; click outside to stop"),
+                "the click gave the terminal the keyboard"
+            );
+            window.event(egui::Event::Text("root".to_owned()));
+            window.key_press(egui::Key::Enter);
+            window.key_press(egui::Key::ArrowUp);
+            window.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::C);
+            window.run_steps(2);
+
+            assert_eq!(
+                display.lock().unwrap().drain_serial_input(),
+                b"root\r\x1b[A\x03".to_vec()
+            );
+        }
+
+        /// The serial terminal follows its cursor at once, as a terminal
+        /// window does: the frame after a burst of output (a scroll egui
+        /// asks for lands on the next frame) shows its last line, rather than
+        /// easing towards it while more arrives.
+        #[test]
+        fn the_serial_terminal_shows_new_output_the_frame_after_it_arrives() {
+            let (mut app, _command_rx, _scratch) = arm_app();
+            app.chrome.show_serial = true;
+            app.chrome.go_to(ShellPage::Console);
+            let _control = live_vm(&mut app);
+            let display = app.shown_display();
+            display.lock().unwrap().append_serial_log("login: ");
+            let mut window = window_of_size(app, egui::vec2(1200.0, 800.0));
+            window.run_steps(3);
+
+            let burst: String = (0..200).map(|n| format!("line {n}\r\n")).collect();
+            display.lock().unwrap().append_serial_log(&burst);
+            window.step();
+            window.step();
+
+            let screen = window
+                .query_all_by_role(egui::accesskit::Role::Label)
+                .find(|node| node.value().is_some_and(|value| value.contains("line 199")))
+                .expect("the terminal's screen")
+                .rect();
+            let strip_top = window
+                .query_all_by_value("Interpreter")
+                .map(|node| node.rect().top())
+                .fold(f32::INFINITY, f32::min);
+            // The cursor sits on the screen's last row; the text ends a
+            // row below it at most.
+            let row = 14.0;
+            assert!(
+                screen.bottom() <= strip_top + 2.0 * row,
+                "the newest line is in view the frame after it arrives ({screen:?}, strip at {strip_top})"
+            );
+        }
+
+        /// A click anywhere in the terminal's area gives it the keyboard, not
+        /// only a click on text: early in a boot the guest has written a line
+        /// or two, and the rest of the terminal is as much the terminal.
+        #[test]
+        fn a_click_below_the_text_gives_the_terminal_the_keyboard() {
+            let (mut app, _command_rx, _scratch) = arm_app();
+            app.chrome.show_serial = true;
+            app.chrome.go_to(ShellPage::Console);
+            let _control = live_vm(&mut app);
+            app.shown_display().lock().unwrap().append_serial_log("UEFI firmware");
+            let mut window = window_of_size(app, egui::vec2(1200.0, 800.0));
+            window.run_steps(3);
+
+            let text = window
+                .query_all_by_role(egui::accesskit::Role::Label)
+                .find(|node| node.value().is_some_and(|value| value.contains("UEFI firmware")))
+                .expect("the terminal's text")
+                .rect();
+            let below = egui::pos2(text.left() + 200.0, text.bottom() + 20.0);
+            window.hover_at(below);
+            window.step();
+            // Pressed in one frame and released in the next, as a hand
+            // clicks.
+            for pressed in [true, false] {
+                window.event(egui::Event::PointerButton {
+                    pos: below,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                });
+                window.step();
+            }
+            window.run_steps(2);
+            assert!(
+                shows_value(&window, "typing to the guest; click outside to stop"),
+                "a click below the text gave the terminal the keyboard"
+            );
+        }
+
+        /// F11 shows the guest alone, without the shell's bar, tree and
+        /// strip, and F11 again brings them back.
+        #[test]
+        fn f11_toggles_the_guest_alone_in_full_screen() {
+            let (app, _command_rx, _scratch) = arm_app();
+            let mut window = window(app);
+            window.run();
+            assert!(shows(&window, "Hardware"), "the shell's tree is shown");
+
+            window.key_press(egui::Key::F11);
+            window.run();
+            assert!(!shows(&window, "Hardware"), "the guest alone, no tree");
+            assert!(window.state().app.desktop_full_screen);
+
+            window.key_press(egui::Key::F11);
+            window.run();
+            assert!(shows(&window, "Hardware"), "the shell is back");
+            assert!(!window.state().app.desktop_full_screen);
+        }
+
+        /// The Console page's serial panel lays out whole inside the window:
+        /// its title row lies below the guest's screen and above the status
+        /// strip, nothing of the panel pushed under either, so the edge drawn
+        /// is the edge that resizes it.
+        #[test]
+        fn the_serial_panel_lies_between_the_screen_and_the_status_strip() {
+            let (mut app, _command_rx, _scratch) = arm_app();
+            app.chrome.show_serial = true;
+            app.chrome.go_to(ShellPage::Console);
+            let _control = live_vm(&mut app);
+            {
+                let display = app.shown_display();
+                let mut display = display.lock().unwrap();
+                // A boot's worth of output, more lines than the panel shows.
+                let log: String = (0..2000).map(|n| format!("line {n}\r\n")).collect();
+                display.append_serial_log(&log);
+                // The guest's 1920x1080 screen.
+                display.fb_width = 1920;
+                display.fb_height = 1080;
+                display.framebuffer = vec![0x40; 1920 * 1080 * 4];
+                display.fb_dirty = true;
+            }
+            let mut window = window_of_size(app, egui::vec2(1536.0, 841.0));
+            // Frames enough for a panel that grows to its contents each frame
+            // to reach its cap.
+            for _ in 0..30 {
+                window.step();
+            }
+
+            let title = window
+                .query_all_by_value("Serial Console")
+                .next()
+                .expect("the panel's title")
+                .rect();
+            let copy_log = window.get_by_label("Copy Log").rect();
+            let screen = window
+                .query_all_by_role(egui::accesskit::Role::Image)
+                .next()
+                .expect("the guest's screen")
+                .rect();
+            // The shell's status strip, the page's bottom edge, names the engine.
+            let strip_top = window
+                .query_all_by_value("Interpreter")
+                .map(|node| node.rect().top())
+                .fold(f32::INFINITY, f32::min);
+            assert!(
+                screen.bottom() <= title.top(),
+                "the title is below the guest's screen, not under it ({title:?}, {screen:?})"
+            );
+            assert!(
+                copy_log.bottom() <= strip_top,
+                "the title row ends above the status strip at {strip_top} ({copy_log:?})"
+            );
         }
 
         /// The Debugger reads a PC, so an Arm VM's node lists no Debugger.

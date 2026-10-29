@@ -322,6 +322,14 @@ pub(crate) struct ElementPair {
     pub(crate) second: u64,
 }
 
+/// The two Q registers of a SIMD&FP pair access: `first` at the lower
+/// address, `second` 16 bytes above it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct QuadwordPair {
+    pub(crate) first: u128,
+    pub(crate) second: u128,
+}
+
 /// A completed walk, before permissions are checked against an access.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Walked {
@@ -1124,10 +1132,11 @@ impl Cpu {
         }
     }
 
-    /// The physical address a fetch at `pc` reads now, when the fetch raises
-    /// no exception and needs no walk: `None` on `PSTATE.IL`, a misaligned
-    /// `pc`, or anything but a TLB hit that permits a fetch at the current
-    /// EL. With stage 1 disabled it is [`Cpu::translate`]'s
+    /// The physical address a fetch at `pc` reads now, when neither the
+    /// fetch nor the checks on the word fetched raise an exception and the
+    /// fetch needs no walk: `None` on `PSTATE.IL` (the word raises the
+    /// Illegal Execution state exception), a misaligned `pc`, or anything
+    /// but a TLB hit that permits a fetch at the current EL. With stage 1 disabled it is [`Cpu::translate`]'s
     /// `AArch64_S1DisabledOutput` address. It never fills, flushes or
     /// marks anything.
     pub(crate) fn fetch_probe(&self, pc: u64) -> Option<u64> {
@@ -1460,6 +1469,18 @@ impl Cpu {
         Ok(())
     }
 
+    /// Whether a pair of `1 << log2`-byte elements at `va` is one
+    /// single-copy atomic access, of 8 bytes: with FEAT_LSE2, a pair of
+    /// words that lies in one 16-byte granule (Arm `Mem`, `AllInSCAGranule`,
+    /// whose IMPLEMENTATION DEFINED quantity is 16 here).
+    #[inline(always)]
+    fn pair_is_one_access(&self, va: u64, log2: u32, acc: DataAccess) -> bool {
+        log2 == 2
+            && (va & 15) + 8 <= 16
+            && acc.alignment == AlignmentRule::Any
+            && self.implements(Feature::Lse2)
+    }
+
     /// Read two adjacent elements of `1 << log2` bytes (`log2` in 0..=3),
     /// at `va` and `va + (1 << log2)`, each zero-extended and each an access
     /// of its own with `acc`'s constraints, as Arm ARM `LDP` makes them
@@ -1475,6 +1496,12 @@ impl Cpu {
     /// translation's result may be used for it as a TLB holds it (a walk's
     /// result stays usable until TLB maintenance, Arm ARM D8.13). Each
     /// element still takes its own external abort.
+    ///
+    /// With FEAT_LSE2, a pair of words that lies in one 16-byte granule is
+    /// one single-copy atomic access of 8 bytes instead (Arm `Mem`:
+    /// `AllInSCAGranule`), whose alignment, as every pair's, is judged by
+    /// its elements. A pair of doublewords there would be one 16-byte
+    /// access, which the bus has no width for: it stays two.
     #[inline(always)]
     pub(crate) fn read_pair<B: PhysBus>(
         &mut self,
@@ -1484,6 +1511,14 @@ impl Cpu {
         acc: DataAccess,
     ) -> Result<ElementPair, Fault> {
         let bytes = 1u64 << log2;
+        if self.pair_is_one_access(va, log2, acc) {
+            let t = self.translate_data(bus, va, bytes, DataDirection::Read, acc)?;
+            let value = self.bus_read(bus, va, PhysAddr::new(t.pa), 3)?;
+            return Ok(ElementPair {
+                first: value & 0xFFFF_FFFF,
+                second: value >> 32,
+            });
+        }
         if (va & 0xFFF) + 2 * bytes <= 0x1000 && acc.alignment == AlignmentRule::Any {
             let t = self.translate_data(bus, va, bytes, DataDirection::Read, acc)?;
             let first = self.bus_read(bus, va, PhysAddr::new(t.pa), log2)?;
@@ -1518,7 +1553,8 @@ impl Cpu {
     /// same fault with the same address, and the same stores noted
     /// ([`Cpu::note_store`]) in the same order, each just before its
     /// element is written. A pair within one page translates once, for the
-    /// reasons [`Cpu::read_pair`] gives.
+    /// reasons [`Cpu::read_pair`] gives, and with FEAT_LSE2 a pair of words
+    /// within one 16-byte granule is one access, as it reads.
     #[inline(always)]
     pub(crate) fn write_pair<B: PhysBus>(
         &mut self,
@@ -1529,6 +1565,11 @@ impl Cpu {
         acc: DataAccess,
     ) -> Result<(), Fault> {
         let bytes = 1u64 << log2;
+        if self.pair_is_one_access(va, log2, acc) {
+            let t = self.translate_data(bus, va, bytes, DataDirection::Write, acc)?;
+            let both = (value.second << 32) | (value.first & 0xFFFF_FFFF);
+            return self.bus_write(bus, va, PhysAddr::new(t.pa), 3, both);
+        }
         if (va & 0xFFF) + 2 * bytes <= 0x1000 && acc.alignment == AlignmentRule::Any {
             let t = self.translate_data(bus, va, bytes, DataDirection::Write, acc)?;
             self.bus_write(bus, va, PhysAddr::new(t.pa), log2, value.first)?;
@@ -1654,6 +1695,62 @@ impl Cpu {
             second: (value >> 64) as u64,
         };
         self.write_pair(bus, va, 3, halves, Self::halves_of(va, acc))
+    }
+
+    /// Read the 32 bytes of an LDP or LDNP of two Q registers at `va` (Arm
+    /// `Mem{256}`, `AccessType_ASIMD` with `ispair`). `SCTLR_EL1.A` judges
+    /// the access by its 16-byte elements. At an address 8-byte aligned the
+    /// access is four 8-byte single-copy atomic accesses, each passed
+    /// `aligned = TRUE`, so Device memory refuses none of them; at any other
+    /// each Q register is a misaligned access, as [`Cpu::read_mem_u128`]
+    /// makes it.
+    pub(crate) fn read_mem_q_pair<B: PhysBus>(
+        &mut self,
+        bus: &mut B,
+        va: u64,
+        acc: DataAccess,
+    ) -> Result<QuadwordPair, Fault> {
+        if va & 7 != 0 {
+            return Ok(QuadwordPair {
+                first: self.read_mem_u128(bus, va, acc)?,
+                second: self.read_mem_u128(bus, va.wrapping_add(16), acc)?,
+            });
+        }
+        if va & 15 != 0 && self.misaligned_faults(va, 32, acc) {
+            return Err(Self::data_abort(va, Fsc::Alignment, false));
+        }
+        let low = self.read_pair(bus, va, 3, acc)?;
+        let high = self.read_pair(bus, va.wrapping_add(16), 3, acc)?;
+        Ok(QuadwordPair {
+            first: u128::from(low.first) | (u128::from(low.second) << 64),
+            second: u128::from(high.first) | (u128::from(high.second) << 64),
+        })
+    }
+
+    /// Write the 32 bytes of an STP or STNP of two Q registers at `va`, as
+    /// [`Cpu::read_mem_q_pair`] reads them: at an address 8-byte aligned,
+    /// four 8-byte accesses in ascending order, each written before the
+    /// next is translated, as Arm's `Mem` setter makes them.
+    pub(crate) fn write_mem_q_pair<B: PhysBus>(
+        &mut self,
+        bus: &mut B,
+        va: u64,
+        value: QuadwordPair,
+        acc: DataAccess,
+    ) -> Result<(), Fault> {
+        if va & 7 != 0 {
+            self.write_mem_u128(bus, va, value.first, acc)?;
+            return self.write_mem_u128(bus, va.wrapping_add(16), value.second, acc);
+        }
+        if va & 15 != 0 && self.misaligned_faults(va, 32, acc) {
+            return Err(Self::data_abort(va, Fsc::Alignment, true));
+        }
+        let halves = |q: u128| ElementPair {
+            first: q as u64,
+            second: (q >> 64) as u64,
+        };
+        self.write_pair(bus, va, 3, halves(value.first), acc)?;
+        self.write_pair(bus, va.wrapping_add(16), 3, halves(value.second), acc)
     }
 
     /// `DC IVAC`, `DC CVAC`, `DC CVAU`, `DC CVAP`, `DC CVADP`, `DC CIVAC`

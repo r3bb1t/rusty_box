@@ -97,6 +97,7 @@ a model for a command line or a file (`"cortex-a57"`, `"armv9.2"`), and
 there are.
 
 ```rust
+# std::thread::Builder::new().stack_size(16 << 20).spawn(|| {
 use rusty_box_aarch64::boot::fdt;
 use rusty_box_aarch64::{CpuModel, MachineBuilder, RamSize, SysReg, VirtConfig};
 
@@ -112,7 +113,9 @@ assert_eq!(machine.sysreg_read(SysReg::MIDR_EL1), Ok(0x000F_0520));
 assert_eq!(machine.sysreg_read(SysReg::CNTFRQ_EL0), Ok(1_000_000_000));
 let compatible = fdt::property(machine.device_tree(), "cpus/cpu@0", "compatible")?;
 assert_eq!(compatible, Some(&b"arm,armv8\0"[..]));
-# Ok::<(), Box<dyn std::error::Error>>(())
+# Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+# }).expect("a thread for the example").join().expect("the example runs")?;
+# Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
 ```
 
 **Owned or lent.** `build()` gives a machine that owns its memory
@@ -125,6 +128,7 @@ place — so build and run it on a thread with a few megabytes of stack
 rather than on a 1 MiB Windows main thread; the examples use 16 MiB):
 
 ```rust
+# std::thread::Builder::new().stack_size(16 << 20).spawn(|| {
 use rusty_box_aarch64::{MachineBuilder, MemoryLoan, RamSize, VirtConfig};
 
 let mut ram = vec![0u8; 16 << 20];
@@ -133,7 +137,9 @@ let machine = MachineBuilder::new(VirtConfig::default())
     .bare()
     .build_in(MemoryLoan { ram: &mut ram, vars: &mut [] })?;
 # drop(machine);
-# Ok::<(), rusty_box_aarch64::BuildError>(())
+# Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+# }).expect("a thread for the example").join().expect("the example runs")?;
+# Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
 ```
 
 **Limits.** RAM is a whole number of pages from 64 KiB up to the 255 GiB the
@@ -213,6 +219,7 @@ implements `KeyboardInput`, the trait the x86 machine's PS/2 keyboard
 implements too:
 
 ```rust
+# std::thread::Builder::new().stack_size(16 << 20).spawn(|| {
 use rusty_box_aarch64::{Key, KeyAction, KeyboardInput, Typed};
 
 /// Log in on any machine's keyboard, x86 or AArch64.
@@ -237,7 +244,9 @@ assert!(keyboard.key(Key::CtrlL, KeyAction::Release));
 // Bytes no key produces, as a paste would send them.
 let pasted = keyboard.bytes("é".as_bytes());
 assert_eq!(pasted, 2, "both bytes of the character fit");
-# Ok::<(), Box<dyn std::error::Error>>(())
+# Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+# }).expect("a thread for the example").join().expect("the example runs")?;
+# Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
 ```
 
 **Limits.** `type_text` maps a US layout and reports a character with no key
@@ -255,6 +264,7 @@ byte.
 A run is bounded by a budget and ends with a reason.
 
 ```rust
+# std::thread::Builder::new().stack_size(16 << 20).spawn(|| {
 # use rusty_box_aarch64::{MachineBuilder, MemoryLoan, RamSize, VirtConfig};
 use rusty_box_aarch64::{RunBudget, StopReason};
 # let mut ram = vec![0u8; 16 << 20];
@@ -279,7 +289,9 @@ match outcome.stop {
 if outcome.is_terminal() {
     println!("done");
 }
-# Ok::<(), Box<dyn std::error::Error>>(())
+# Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+# }).expect("a thread for the example").join().expect("the example runs")?;
+# Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
 ```
 
 A waiting machine says how far it may skip, and a stop handle ends a run
@@ -308,6 +320,7 @@ if outcome.stop == StopReason::StopRequested {
 The power controls:
 
 ```rust
+# std::thread::Builder::new().stack_size(16 << 20).spawn(|| {
 # use rusty_box_aarch64::{MachineBuilder, MemoryLoan, RamSize, VirtConfig};
 use rusty_box_aarch64::PowerState;
 # let mut ram = vec![0u8; 16 << 20];
@@ -321,7 +334,9 @@ machine.power().press_power_button();
 // A system reset: firmware from its reset vector, or a direct kernel loaded
 // afresh with its initrd and device tree.
 machine.power().reset();
-# Ok::<(), Box<dyn std::error::Error>>(())
+# Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+# }).expect("a thread for the example").join().expect("the example runs")?;
+# Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
 ```
 
 **Limits.** An instruction budget retires exactly that many instructions,
@@ -337,6 +352,7 @@ inputs give the same run however it is sliced.
 A bare machine is the shortest path to running your own code:
 
 ```rust
+# std::thread::Builder::new().stack_size(16 << 20).spawn(|| {
 use rusty_box_aarch64::board::RAM_BASE;
 use rusty_box_aarch64::{MachineBuilder, MemoryLoan, RamSize, Reg, StopReason, VirtConfig};
 
@@ -357,7 +373,9 @@ assert_eq!(machine.reg_read(Reg::X0), 43);
 
 // Exit addresses end every run before the instruction there executes.
 machine.set_exits(&[RAM_BASE + 4])?;
-# Ok::<(), Box<dyn std::error::Error>>(())
+# Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+# }).expect("a thread for the example").join().expect("the example runs")?;
+# Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
 ```
 
 Physical and virtual addresses are different verbs. A virtual access walks
@@ -367,6 +385,7 @@ TLB, so a mapping the guest rewrote without a `TLBI` already shows its new
 translation here:
 
 ```rust
+# std::thread::Builder::new().stack_size(16 << 20).spawn(|| {
 # use rusty_box_aarch64::board::RAM_BASE;
 # use rusty_box_aarch64::{MachineBuilder, MemoryLoan, RamSize, VirtConfig};
 # let mut ram = vec![0u8; 16 << 20];
@@ -378,7 +397,9 @@ machine.mem_read(RAM_BASE, &mut buf)?;           // guest-physical RAM
 machine.virt_read(RAM_BASE, &mut buf)?;          // through the page tables
 let phys = machine.virt_to_phys(RAM_BASE)?;      // walk without reading
 assert_eq!(phys, RAM_BASE, "the MMU is off out of reset");
-# Ok::<(), Box<dyn std::error::Error>>(())
+# Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+# }).expect("a thread for the example").join().expect("the example runs")?;
+# Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
 ```
 
 Registers are named by `Reg`, SIMD&FP registers by `VReg`, and system
@@ -388,6 +409,7 @@ guest; a write has the effect an `MSR` would (a translation register flushes
 the TLB):
 
 ```rust
+# std::thread::Builder::new().stack_size(16 << 20).spawn(|| {
 # use rusty_box_aarch64::{MachineBuilder, MemoryLoan, RamSize, VirtConfig};
 use rusty_box_aarch64::{Reg, SysReg, SysRegRefusal, VReg};
 # let mut ram = vec![0u8; 16 << 20];
@@ -408,7 +430,9 @@ match machine.sysreg_write(SysReg::MIDR_EL1, 0) {
 // The whole architectural state at one moment.
 let state = machine.cpu_snapshot();
 println!("pc={:#x} at EL{}", state.pc, state.pstate.el.index());
-# Ok::<(), Box<dyn std::error::Error>>(())
+# Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+# }).expect("a thread for the example").join().expect("the example runs")?;
+# Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
 ```
 
 **Limits.** `mem_read` and `mem_write` reach RAM only; a device window is
@@ -423,6 +447,7 @@ An observer is a type, not a callback list: it rides in the machine's own
 type, so a machine that observes nothing pays nothing.
 
 ```rust
+# std::thread::Builder::new().stack_size(16 << 20).spawn(|| {
 use rusty_box_aarch64::instrumentation::{ExceptionTaken, MemoryAccess};
 use rusty_box_aarch64::{Instrumentation, MachineBuilder, MemoryLoan, RamSize, VirtConfig};
 
@@ -454,7 +479,9 @@ let mut machine = MachineBuilder::new(VirtConfig::default())
 let outcome = machine.step(rusty_box_aarch64::RunBudget::Instructions(8));
 assert_eq!(outcome.progress.instructions(), Some(8));
 println!("{} instructions", machine.instrumentation().executed);
-# Ok::<(), Box<dyn std::error::Error>>(())
+# Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+# }).expect("a thread for the example").join().expect("the example runs")?;
+# Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
 ```
 
 The hooks: `before_execution`, `after_execution`, `branch` and
@@ -482,6 +509,7 @@ the variable store — written to any `SnapWrite` and read back from any
 `SnapRead`. A `Vec<u8>` is one, and so is a byte slice.
 
 ```rust
+# std::thread::Builder::new().stack_size(16 << 20).spawn(|| {
 # use rusty_box_aarch64::{MachineBuilder, MemoryLoan, RamSize, VirtConfig};
 # let mut ram = vec![0u8; 16 << 20];
 # let mut machine = MachineBuilder::new(VirtConfig::default())
@@ -491,7 +519,9 @@ let mut image = Vec::new();
 machine.save_snapshot(&mut image)?;
 // ... run on, then go back:
 machine.restore_snapshot(&mut image.as_slice())?;
-# Ok::<(), Box<dyn std::error::Error>>(())
+# Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+# }).expect("a thread for the example").join().expect("the example runs")?;
+# Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
 ```
 
 **Limits.** Firmware and kernel images are recorded by hash, not copied, so
@@ -516,6 +546,7 @@ A board with them has non-legacy transports (QEMU's
 which Linux's drivers refuse on a legacy transport.
 
 ```rust
+# std::thread::Builder::new().stack_size(16 << 20).spawn(|| {
 use rusty_box_aarch64::{
     MachineBuilder, NullDisplay, PointerInput, PointerPos, Refreshed, Resolution, VirtConfig,
 };
@@ -544,7 +575,9 @@ let mut pointer = machine.pointer().expect("built with a tablet");
 let middle = PointerPos::from_pixel(512, 384, 1024, 768);
 // Nothing has driven the tablet on this bare machine, so it takes nothing.
 assert!(!pointer.move_to(middle));
-# Ok::<(), Box<dyn std::error::Error>>(())
+# Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+# }).expect("a thread for the example").join().expect("the example runs")?;
+# Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
 ```
 
 `refresh` pushes what changed since the last refresh into any
@@ -577,6 +610,7 @@ host memory (`Disk::memory`) or a host file read and written in place
 (`Disk::file`, with `std`), and the machine keeps it.
 
 ```rust
+# std::thread::Builder::new().stack_size(16 << 20).spawn(|| {
 use rusty_box_aarch64::{Disk, MachineBuilder, VirtConfig};
 
 let mut machine = MachineBuilder::new(VirtConfig::default())
@@ -593,7 +627,9 @@ assert_eq!(disk.memory_bytes().map(<[u8]>::len), Some(1 << 20));
 let disk = machine.disk_mut().expect("built with a disk");
 assert!(disk.take_io_error().is_none());
 disk.flush()?;
-# Ok::<(), Box<dyn std::error::Error>>(())
+# Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+# }).expect("a thread for the example").join().expect("the example runs")?;
+# Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
 ```
 
 The device is the one QEMU makes for a drive given every default: one queue

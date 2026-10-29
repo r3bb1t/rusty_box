@@ -30,6 +30,7 @@ use super::{clamp, int, sat_doubling_mul_high, sat_q, segment_base, shift_by_ele
 use crate::cpu::crypto::polynomial_mult;
 use crate::cpu::dp::add_with_carry;
 use crate::cpu::exec::{bit, bits, ExecResult, Flow};
+use crate::cpu::features::Feature;
 use crate::cpu::fp_estimate::{urecpe, ursqrte};
 use crate::cpu::simd_arith::{rounding_doubling_mul_add, shift_signed};
 use crate::cpu::Cpu;
@@ -462,6 +463,12 @@ impl Cpu {
             },
             _ => return self.undefined(pc, insn),
         };
+        // USDOT and SUDOT are FEAT_I8MM's: UNDEFINED without it, whatever
+        // else the processor implements (`usdot_z_zzz.xml`,
+        // `usdot_z_zzzi.xml`, `sudot_z_zzzi.xml`).
+        if signs.n_unsigned != signs.m_unsigned && !self.implements(Feature::I8mm) {
+            return self.undefined(pc, insn);
+        }
         let (es, q) = match (two_way, bit(insn, 22)) {
             (true, _) => (Esize::S, Esize::H),
             (false, true) => (Esize::D, Esize::H),

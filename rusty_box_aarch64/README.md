@@ -59,8 +59,9 @@ vocabulary are `rusty_box_core`'s, shared with the x86 machine.
 - **Time is a tick count.** One tick per retired instruction, at a stated rate
   (`ips`, default 50 M/s), as Bochs keeps `ticks_total`. The generic timer's
   counter is `floor(ticks × counter_hz ÷ ips)` in `u128`; timer deadlines are
-  the exact first tick whose count reaches `CVAL`; the PL031 RTC counts
-  emulated seconds from a fixed epoch. Nothing reads the host clock.
+  the exact first tick whose count reaches `CVAL`; the PL031 RTC reads a
+  fixed value at power-on and, once the guest starts it, counts emulated
+  seconds. Nothing reads the host clock.
 - **Waiting is free and slicing is invisible.** `WFI`, `WFE` and the timed
   `WFIT` and `WFET` jump time to the next event that can end them (an
   interrupt, the timer's event stream, their timeout), and the processor
@@ -288,23 +289,22 @@ is) must reproduce, are:
 | Processor | One of two models (`VirtConfig::cpu`, `CpuModel`). `cortex-a57`, the default: Cortex-A57-shaped ARMv8.0, the whole ARMv8.0 FP and Advanced SIMD instruction set (integer and floating point, vector and scalar, saturation setting FPSR.QC), the Cortex-A57's optional Cryptographic Extension (AES, 64-bit PMULL, SHA-1, SHA-256) and CRC32, as QEMU's `cortex-a57` has them, with QEMU's 62.5 MHz system counter. `armv9.2`: an Armv9.2 processor with SME and SME2 and no SVE (the features below), Streaming SVE vectors of 128 to 512 bits, `MIDR_EL1` 0x000F_0520 (implementer 0, a software model) and the 1 GHz counter Armv8.6 and later require. Both: EL0/EL1 AArch64 only, the Cortex-A57's caches as `CTR_EL0`, `CLIDR_EL1` and `CCSIDR_EL1` report them, 4 KiB-granule stage-1 MMU with TLB, exclusives, PSCI 1.1 (DEN 0022D) over `HVC`, the conduit QEMU's `virt` provides (see "Where the references differ") |
 | Interrupts | GICv2 without the Security Extensions, for one processor, as IHI 0048B specifies it, in QEMU's structure: both interrupt groups, with Group 0 on FIQ under `FIQEn`, the Group 1 aliases (`GICC_AIAR`, `GICC_AEOIR`, `GICC_AHPPIR`, `GICC_ABPR`), preemption by group priority, the running priority and active priority registers, and 4 KiB distributor and 8 KiB CPU interface regions; + GICv2m frame |
 | Timers | EL1 physical and virtual generic timers |
-| Devices | PL011 UART (`UARTPeriphID2` revision 1, QEMU's ID, as DDI 0183F describes the revisions up to r1p4: a 16-entry receive FIFO with overrun and break status, receive interrupts at the `UARTIFLS` level, modem-status interrupts on line changes, loopback, a receiver gated by `UARTEN` and `RXE`, a transmitter gated by `UARTEN` and `TXE` whose 16-entry transmit FIFO holds what is written meanwhile, transmit interrupts as the transmit FIFO drains through the `UARTIFLS` level, and the receive timeout counted in bit periods of the programmed baud rate on the machine's clock, while characters themselves cross the line in no time; see "Where the references differ"), PL031 RTC, PL061 GPIO with QEMU's `gpio-key` power button on line 3, CFI flash ×2 (QEMU `pflash_cfi01` semantics, whole 64 MiB banks decoded), `fw_cfg` (traditional interface, no files), 32 virtio-mmio transports (QEMU's legacy layout while empty; non-legacy, as QEMU's `force-legacy=false`, once the host plugs in QEMU's 2D `virtio-gpu-device` with its EDID, `virtio-keyboard-device`, `virtio-tablet-device` or `virtio-blk-device` over a raw image in memory or a host file, which take the highest free ones), an empty PCIe ECAM/windows |
+| Devices | PL011 UART (`UARTPeriphID2` revision 1, QEMU's ID, as DDI 0183F describes the revisions up to r1p4: a 16-entry receive FIFO with overrun and break status, receive interrupts at the `UARTIFLS` level, modem-status interrupts on line changes, loopback, a receiver gated by `UARTEN` and `RXE`, a transmitter gated by `UARTEN` and `TXE` whose 16-entry transmit FIFO holds what is written meanwhile, transmit interrupts as the transmit FIFO drains through the `UARTIFLS` level, and the receive timeout counted in bit periods of the programmed baud rate on the machine's clock, while characters themselves cross the line in no time; see "Where the references differ"), PL031 RTC (r1p3, as DDI 0224C describes it: stopped until `RTCCR` starts it, zeroed by any later `RTCCR` write, stopped again by a system reset), PL061 GPIO as DDI 0190B describes it (address-masked `GPIODATA`, edge and level detection on the lines' levels, outputs included) with QEMU's `gpio-key` power button on line 3, CFI flash ×2 (QEMU `pflash_cfi01` semantics, whole 64 MiB banks decoded), `fw_cfg` (traditional and DMA interfaces, no files), 32 virtio-mmio transports (QEMU's legacy layout while empty; non-legacy, as QEMU's `force-legacy=false`, once the host plugs in QEMU's 2D `virtio-gpu-device` with its EDID, `virtio-keyboard-device`, `virtio-tablet-device` or `virtio-blk-device` over a raw image in memory or a host file, which take the highest free ones), an empty PCIe ECAM/windows |
 | Board | QEMU `virt` memory map and IRQ wiring; QEMU 11.1.2's device tree in `assets/` (two QEMU bugs fixed, see "Where the references differ"; its `rng-seed` and `kaslr-seed` fixed, see below), its memory node and `/chosen` set per machine, and its processor's `compatible` to the model's, where libfdt's `fdt_setprop` puts them, so a kernel boot's tree is QEMU's property for property; a host's own tree gets the memory node and `/chosen`, as QEMU's `-dtb` does |
 | Boot | UEFI firmware from flash; or a Linux `Image`, initramfs and device tree placed as QEMU's `hw/arm/boot.c` places them, entered with the register state its boot stub leaves, and the UART's console set up at 115200 baud, 8N1, as firmware leaves it (see "Where the references differ") |
 
 Provenance: Arm's documents decide wherever they speak — the Arm ARM (DDI
 0487) and its machine-readable data (AARCHMRS) for the processor, IHI 0048B
-for the GIC, DDI 0183F for the PL011, DEN 0022D for PSCI and DEN 0028B for
-the SMC Calling Convention. QEMU's `virt` board decides what those documents
+for the GIC, DDI 0183F for the PL011, DDI 0224C for the PL031, DDI 0190B for
+the PL061, DEN 0022D for PSCI and DEN 0028B for the SMC Calling Convention.
+QEMU's `virt` board decides what those documents
 do not: the memory map, the interrupt wiring, the device tree, the choices
 Arm leaves to an implementation, and the devices Arm does not document
 (virtio, `fw_cfg`, the CFI flash, `gpio-key`). Each device cites its Arm
 document where there is one, then the QEMU source file and symbols it was
 ported from, and every departure from QEMU is listed under "Where the
-references differ". The PL031 RTC and the PL061 GPIO cite QEMU alone: they
-have Arm TRMs of their own (DDI 0224, DDI 0190), which these models have
-not been checked against. The QEMU reference is release 11.1.2 and its
-newest `virt` machine, `virt-11.1`.
+references differ". The QEMU reference is release 11.1.2 and its newest
+`virt` machine, `virt-11.1`.
 
 Beyond the Cortex-A57, the Armv9.2 model implements the features of an
 Armv9.2 processor: FEAT_LSE (the atomic memory operations, SWP,
@@ -462,8 +462,10 @@ integration tests of the public API.
   FMLAL2's choice of the upper half, FCMLA's negation at 90° or BFDOT's
   rounding to odd on purpose fails 14 to 590 of them.
   `tests/unit/simd_extensions.rs` checks the sizes the RDM and dot product
-  pages' decode pseudocode makes UNDEFINED, which QEMU refuses too, and that
-  the SIMD&FP and Streaming SVE traps come after decode;
+  pages' decode pseudocode makes UNDEFINED, which QEMU refuses too, that
+  the SIMD&FP and Streaming SVE traps come after decode, and that the
+  64-bit PMULL is UNDEFINED on a processor with FEAT_AES and not
+  FEAT_PMULL;
   `tests/unit/fp16.rs` checks FZ16 against FPUnpack, FPRound and FPMulAddH
   (no input denormal exception for half precision, underflow alone when a
   tiny result is flushed, FMLAL's addend under FZ), that a guest can set
@@ -535,7 +537,10 @@ integration tests of the public API.
   permissions, or EL1's under UAO, which PAN then applies to; MSR
   (immediate) and the PAN, UAO, DIT and SSBS registers at EL1 and EL0; AT
   S1E1RP and S1E1WP against AT S1E1R and S1E1W; what taking an exception
-  and ERET, legal and illegal, do to each field; SPSR_EL1 holding them only
+  and ERET, legal and illegal, do to each field, an illegal return's
+  Illegal Execution state exception coming after the next fetch's PC
+  alignment fault and Instruction Abort, and ERET restoring PSTATE.SS only
+  into an enabled debug target (`DebugExceptionReturnSS`); SPSR_EL1 holding them only
   with their features, a snapshot whose SPSR_EL1 or PSTATE holds one
   refused by a processor without it; and every encoding UNDEFINED without
   its feature. Ignoring PAN, EPAN or UAO, leaving PAN alone on exception
@@ -557,6 +562,14 @@ integration tests of the public API.
   stale translation with them; DSB nXS; LDLAR and STLLR as ordered
   accesses PAN applies to; the LORegion registers; and each feature's
   bits RES0 or its encodings UNDEFINED without it.
+- `tests/unit/load_store.rs` checks, over a bus that logs every access,
+  what Arm's `Mem` and the load and store pages decide and the vectors
+  cannot show: PRFM, PRFUM and PRFM (register) checking no SP alignment
+  and accessing nothing; a register offset without `option<1>` UNDEFINED
+  ahead of the SIMD&FP trap; a pair of Q registers at 8 mod 16 on Device
+  memory as four aligned doubleword accesses, which `SCTLR_EL1.A` faults;
+  LDXP and STXP of words as one doubleword access; and with FEAT_LSE2 a
+  pair of words in one 16-byte granule as one access.
 - `tests/unit/wait.rs` checks the waits every processor has and FEAT_WFxT's
   against Arm's pseudocode (`Hint_WFI`, `Hint_WFE`, `Hint_WFIT`,
   `Hint_WFET`, `TestEventCNTV`): SEV, SEVL and every exception return,
@@ -577,7 +590,11 @@ integration tests of the public API.
   record registers UNDEFINED, DISR_EL1's bits and its snapshot, EL0 kept
   out, a synchronous external abort's syndrome the same with the feature
   as without) and DBGAUTHSTATUS_EL1 with and without FEAT_Debugv8p4;
-  `isa::tests` the RAS and DebugVer fields of the ID registers.
+  RVBAR_EL1, RMR_EL1 and MDRAR_EL1 at EL1 and EL0; DBGCLAIMSET_EL1
+  reading as ones; and FEAT_DoubleLock's ID field and `OSDLR_EL1.DLK` on
+  the Cortex-A57, which has it, and the Armv9.2 model, which may not;
+  `isa::tests` the RAS, DebugVer and DoubleLock fields of the ID
+  registers.
 - `tests/crypto.rs` runs the cryptographic and CRC32 instructions as a guest
   uses them, to the standards' own answers: AES-128 encryption and
   decryption of the FIPS-197 example, SHA-1 and SHA-256 of "abc" (FIPS
@@ -905,7 +922,9 @@ integration tests of the public API.
   size, not the pair's (ARMv8.0 has no FEAT_LSE2): word, signed-word,
   single- and double-precision pairs to Device memory, and to Normal
   memory with `SCTLR_EL1.A` set, complete where each element is aligned
-  and the pair is not, and fault where an element is misaligned.
+  and the pair is not, and fault where an element is misaligned; a pair of
+  Q registers to Device memory loads at a doubleword boundary and faults
+  at a word one.
 - `tests/pair_access.rs`: a load or store pair acts as its two elements'
   accesses made one after the other — a store pair whose second element
   alone rewrites the next instruction runs it rewritten, a Q register
@@ -967,8 +986,9 @@ one open.
   STLR and the rest of `ldstexclr`, `ldstexclp` and `ldstord`), `Ra` of SMULH
   and UMULH, and `Rm` of FCMP and FCMPE with zero. FEAT_LRCPC's LDAPR,
   LDAPRB and LDAPRH have one too, `Rs`, which QEMU also refuses unless it
-  is 11111 (`Rt2` of CAS and CASP is not one: Arm fixes it, so
-  its other values are unallocated). A word that sets one of
+  is 11111, and so do FEAT_FlagM's CFINV and FEAT_FlagM2's XAFLAG and
+  AXFLAG, `CRm`, which QEMU fixes at 0000 (`Rt2` of CAS and CASP is not
+  one: Arm fixes it, so its other values are unallocated). A word that sets one of
   them otherwise is CONSTRAINED UNPREDICTABLE, and UNDEFINED is among the
   behaviours the Arm ARM permits; it is this model's, so the decoder is
   exactly Arm's encoding table, which fixes those bits. QEMU 11.1.2
@@ -1119,12 +1139,13 @@ one open.
   and a device's DMA is such a store.
 - **No RAS error records.** With FEAT_RAS, `ERRIDR_EL1.NUM` is 0, and
   `ERRSELR_EL1` and the `ERX*` registers (those of FEAT_RASv1p1 too) are
-  UNDEFINED, as QEMU's `minimal_ras_reginfo` has them; its comment states
-  that with no error records they may be. Arm's register data gives these
-  registers to every processor with FEAT_RAS, reading the record
-  `ERRSELR_EL1.SEL` selects; the Arm ARM's rule for a processor with no
-  record to select is in its prose, which this model was not checked
-  against. Nothing on this machine raises an SError, so ESB has nothing to
+  UNDEFINED, as QEMU's `minimal_ras_reginfo` has them. Arm permits it
+  (DDI 0601, release 2026-09): with zero error records "it is
+  IMPLEMENTATION DEFINED whether ERRSELR_EL1 is UNDEFINED or RES0", and
+  each `ERX*` register's page lists, when `ERRIDR_EL1.NUM` is 0, an
+  UNKNOWN record, RAZ/WI, NOPs or UNDEFINED as the outcomes an access may
+  have; the accessor pseudocode Arm's machine-readable data carries does
+  not show that choice. Nothing on this machine raises an SError, so ESB has nothing to
   defer into `DISR_EL1` and only an `MSR` writes that register; it keeps
   A, IDS and bits 23:0 (which IDS makes a syndrome or RES0) and reads the
   bits RES0 whatever IDS holds as zero, where QEMU's `disr_write` keeps all
@@ -1185,6 +1206,64 @@ one open.
   the word is a PRFM with a reserved `prfop`, which the Arm ARM executes as a
   hint, as QEMU does; the decoder conformance test lists it as its one
   departure from Arm's allocation.
+- **A pair of Q registers at 8 mod 16 is four aligned accesses.** Arm's
+  `Mem` makes the 32-byte access of an LDP, STP, LDNP or STNP of Q
+  registers at an address 8-byte aligned four 8-byte single-copy atomic
+  accesses, each passed `aligned = TRUE`, so Device memory, and with the
+  MMU off every data access, takes a pair at 8 mod 16 where one Q register
+  there faults; `SCTLR_EL1.A` still judges the pair by its 16-byte
+  elements. QEMU (master as of 2026-10-28) makes two 16-byte accesses
+  that Device memory requires to be 16-byte aligned
+  (`finalize_memop_asimd`, with the MMU off through `align_mem`, on a
+  Device page in `get_phys_addr_lpae`), and so faults
+  ([docs/qemu-upstream-bugs.md](../docs/qemu-upstream-bugs.md)). This model
+  follows Arm.
+- **A misaligned SVE element faults under `SCTLR_EL1.A`.** Each element of
+  an SVE contiguous load or store, here in Streaming SVE mode, is an
+  access of its own size (`Mem{msize}`), which `SCTLR_EL1.A` faults when
+  misaligned (`AlignmentEnforced`). QEMU (11.1.2 and master as of
+  2026-10-28) makes those element accesses unaligned (`MO_UNALN`) and
+  checks only Device memory's alignment
+  ([docs/qemu-upstream-bugs.md](../docs/qemu-upstream-bugs.md)). This
+  model follows Arm.
+- **A 16-byte single-copy atomic access reaches the bus as two 8-byte
+  halves.** Arm makes some 16-byte accesses one single-copy atomic access:
+  STXP and STLXP of X registers (`Mem{128}`), and with FEAT_LSE2 LDXP and
+  LDAXP of X registers and an LDP or STP of X registers in one 16-byte
+  granule; CASP of X registers is one atomic access too. The bus has no
+  16-byte width (`AccessWidth`), so each is two 8-byte accesses, the low
+  half first, with nothing between them: values, faults and the exclusive
+  monitor are Arm's, and only a device would see two transactions where
+  Arm makes one. The 8-byte cases are one access, as Arm makes them: LDXP
+  and STXP of W registers, and with FEAT_LSE2 an LDP or STP of W or S
+  registers in one 16-byte granule.
+- **The bits of a scalable register above the length written are zeroed.**
+  Where an instruction writes a Z or P register at a shorter length than
+  the register's own (a SIMD&FP write of a V register, `V{128}(n)`; an
+  SVE or SME write at the current vector length), and at the entry from
+  EL0 that `MaybeZeroSVEUppers` covers, Arm leaves the bits above the
+  length to the implementation (`Unpredictable_SVEZEROUPPER`), and the
+  bits of ZA outside the current SVL square likewise
+  (`Unpredictable_SMEZEROUPPER`). This model zeroes them, both taken as
+  TRUE, as it zeroes ZA when PSTATE.ZA is cleared, which
+  `ResetSMEState('0')` leaves ARBITRARY.
+- **A predicated access with no element active still checks SP's
+  alignment.** An SVE or SME load or store whose base is SP takes the SP
+  alignment check even when its predicate has no element active
+  (`Unpredictable_CHECKSPNONEACTIVE` taken as TRUE): the check depends on
+  the base register alone, as for LDR and STR.
+- **The reset management registers report this board's reset.** EL1 being
+  the highest EL, the processor has `RVBAR_EL1` and `RMR_EL1` (Arm's data:
+  `IsHighestEL(EL1)`). `RVBAR_EL1`, the IMPLEMENTATION DEFINED address
+  execution starts from after reset, reads the address the machine's last
+  reset started it from: the flash for firmware, the kernel's entry for a
+  direct boot, where QEMU reports its `rvbar` property (0) whatever it
+  boots. `RMR_EL1.AA64` is RAO/WI, there being no AArch32, and `RR`, a
+  request to the system for a Warm reset, keeps what is written: nothing
+  on this board answers the request, as nothing on QEMU's `virt` does
+  (QEMU makes the register RAZ/WI but AA64, its comment noting that the
+  bit is strictly a request). `MDRAR_EL1` reports no ROM table (`Valid`
+  0b00), as QEMU's does.
 - **`DC ZVA` on Device memory is an alignment fault.** Arm ARM
   `AArch64.S1HasAlignmentFault` faults every `DC ZVA` to Device memory, and
   with the MMU off every data access is to Device memory. QEMU 11.1.2 zeroes
@@ -1270,18 +1349,23 @@ one open.
   cache 4-way, where the Cortex-A57 MPCore TRM, and QEMU 8.2, make it 2-way;
   this model's `CCSIDR_EL1` is the TRM's, and the tree's `d-cache-sets` is
   `0x100` to agree with it.
-- **virtio DMA reaches RAM only.** QEMU's `dma_memory_map` maps a ring or
-  buffer wherever the address space has a region (`address_space_map`):
-  RAM and, for reading, a flash bank in read-array mode directly, anything
-  else through its bounce buffer. This board's virtio devices reach guest
-  RAM only, so a ring or buffer anywhere else breaks the device, as one in
-  an unassigned hole does in QEMU. Linux and EDK2 place their rings and
-  buffers in RAM.
-- **`fw_cfg` without DMA or files.** QEMU's `virt` offers the DMA interface
-  and a file directory (ACPI tables, SMBIOS, boot order); this board reports
-  the traditional interface only (`FW_CFG_ID` = 1) and an empty directory, a
+- **virtio and `fw_cfg` DMA reach RAM only.** QEMU's `dma_memory_map` maps a
+  ring or buffer wherever the address space has a region
+  (`address_space_map`): RAM and, for reading, a flash bank in read-array
+  mode directly, anything else through its bounce buffer; `fw_cfg`'s
+  `dma_memory_read` and `dma_memory_write` reach the same regions. This
+  board's virtio devices and `fw_cfg` reach guest RAM only, so a ring,
+  buffer or `fw_cfg` descriptor anywhere else breaks the transfer, as one in
+  an unassigned hole does in QEMU: an `fw_cfg` descriptor outside RAM is
+  never read and gets no ERROR status, so firmware polling it waits for
+  ever. Linux and EDK2 place their rings, buffers and descriptors in RAM.
+- **`fw_cfg` without files.** QEMU's `virt` offers a file directory (ACPI
+  tables, SMBIOS, boot order); this board offers the traditional and DMA
+  interfaces as QEMU does (`FW_CFG_ID` = 3) with an empty directory, a
   configuration the interface defines, so firmware describes the machine
-  from the device tree (`src/devices/fw_cfg.rs`).
+  from the device tree (`src/devices/fw_cfg.rs`). EDK2's `QemuFwCfgMmioPei`
+  enables DMA from the device tree's 0x18-byte region alone, without
+  reading `FW_CFG_ID`, so the DMA interface is required, not optional.
 - **The PCIe bus is empty.** QEMU's `virt` puts its host bridge's own
   function at 00:00.0; this board has no function there, so configuration
   reads find nothing and the I/O and memory windows answer like an empty
@@ -1291,10 +1375,42 @@ one open.
   as QEMU maps it (`virt_flash_map`), and reads the part an image does not
   cover as erased flash, so a firmware image needs no padding and a
   directly booted kernel no flash images at all (`src/board.rs`).
-- **The PL031 counts from a fixed epoch.** QEMU starts the RTC's counter
-  from the host's wall clock; this one starts from a configured epoch
-  (`VirtConfig::rtc_epoch_seconds`) and counts emulated seconds,
-  so the guest sees the same date on every run (`src/devices/pl031.rs`).
+- **The PL031 reads a fixed value at power-on.** QEMU starts the RTC from
+  the host's wall clock; this one reads a configured value
+  (`VirtConfig::rtc_epoch_seconds`) and counts emulated seconds, so the
+  guest sees the same date on every run (`src/devices/pl031.rs`).
+- **The PL031 counts only once started, and `RTCCR` zeroes it after.**
+  DDI 0224C (r1p3; Table B-2: every revision) has the RTC count only once
+  a 1 is written to `RTCCR` bit 0, which then reads 1, and any later
+  `RTCCR` write resets the RTC value to zero (§2.2.4, Table 3-5); a system
+  reset clears `RTCCR`, `RTCLR`, `RTCIMSC` and `RTCRIS` and keeps the value
+  and `RTCMR` (§2.3.1). QEMU's RTC always counts, reads `RTCCR` as 1,
+  ignores writes to it and has no reset. EDK2's `InitializePL031` writes
+  `RTCCR` only while it reads 0, as DDI 0224C asks; Linux's `pl031_probe`
+  writes it on every boot, so on this board, as on a PL031 that DDI 0224C
+  describes, Linux finds the RTC zeroed — 1970-01-01 — once firmware has
+  started it, until the time is set again
+  ([docs/qemu-upstream-bugs.md](../docs/qemu-upstream-bugs.md), "Deliberate
+  QEMU omissions"). The alarm is armed for the start of the second at
+  which the RTC reaches `RTCMR`; QEMU's fires a whole number of seconds
+  after the write, up to a second late (entry 20). `RTCPeriphID2` reads
+  0x04, revision 0, which DDI 0224C
+  gives r1p3; QEMU's reads 0x14. Every access reaches the register
+  `PADDR[11:2]` decodes (Table A-1), where QEMU reads a byte inside a
+  register as an unmapped offset.
+- **The PL061 follows its lines.** DDI 0190B has interrupt detection
+  watch the lines' levels, an output's included, since the pads loop it
+  back (§2.2.2, Table 2-2); a level-sensitive line's raw status is its
+  level, which `GPIOIC` does not clear (§2.3.4, §3.3.9); a `GPIODATA`
+  write changes the register whatever the direction (§3.3.1); a line
+  under hardware control ignores `GPIODIR` (§2.3.5); and an input reads
+  the level outside, whatever it last drove as an output. QEMU's
+  `pl061_update` watches inputs only, latches a level-sensitive line until
+  `GPIOIC`, drops `GPIODATA` writes to inputs, ignores `GPIOAFSEL` and
+  keeps an input's last driven value until the outside changes
+  ([docs/qemu-upstream-bugs.md](../docs/qemu-upstream-bugs.md) entry 21).
+  Every access reaches the register `PADDR[11:2]` decodes
+  (`src/devices/pl061.rs`).
 - **virtio-blk completes a request before its notification returns.**
   QEMU hands reads, writes and flushes to its block layer, which completes
   them later, in an order and at a time the host decides; here each

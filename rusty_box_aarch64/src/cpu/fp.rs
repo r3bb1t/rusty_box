@@ -795,7 +795,8 @@ const fn m_or_s(insn: u32) -> bool {
 }
 
 /// The precision of a scalar FP data-processing word: `None` when M or S
-/// is set or `ftype` is half precision or reserved.
+/// is set or `ftype` is the reserved `10`. Half precision (`ftype` 11) is
+/// [`FpType::Half`]; the decoder executes it only with FEAT_FP16.
 pub(crate) const fn scalar_type(insn: u32) -> Option<FpType> {
     if m_or_s(insn) {
         return None;

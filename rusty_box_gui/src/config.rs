@@ -99,9 +99,10 @@ impl std::fmt::Display for MachineKind {
 /// The `[virt]` table: the Arm `virt` board's hardware.
 ///
 /// `cpu` names its processor (`"cortex-a57"`, the default, or `"armv9.2"`).
-/// It boots UEFI firmware from flash (`firmware`, with `firmware_vars` for its
-/// variable store) or a Linux kernel directly (`kernel`, with `initrd`,
-/// `command_line` and `device_tree`), never both. `display` plugs in a
+/// It boots UEFI firmware from flash (`firmware`, or the EDK2 built into
+/// the front end with `builtin_firmware = true`, either with
+/// `firmware_vars` for its variable store) or a Linux kernel directly
+/// (`kernel`, with `initrd`, `command_line` and `device_tree`), only one. `display` plugs in a
 /// virtio-gpu asking the guest for that size; `keyboard` and `tablet` plug
 /// in the virtio keyboard and tablet. `disk` plugs in a virtio-blk over that
 /// raw image, which the guest may only read with `disk_read_only`.
@@ -114,6 +115,7 @@ pub struct VirtToml {
     pub ips: Option<u32>,
     pub cpu: Option<VirtCpuToml>,
     pub firmware: Option<PathBuf>,
+    pub builtin_firmware: Option<bool>,
     pub firmware_vars: Option<PathBuf>,
     pub kernel: Option<PathBuf>,
     pub initrd: Option<PathBuf>,
@@ -147,12 +149,39 @@ impl From<VirtCpuToml> for String {
     }
 }
 
-/// `[virt.display]`: the size a virtio-gpu asks the guest for.
+/// `[virt.display]`: the size a virtio-gpu asks the guest for, and how
+/// often the window shows its picture.
 #[derive(Debug, Clone, Copy, Default, serde::Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct VirtDisplayToml {
     pub width: Option<u32>,
     pub height: Option<u32>,
+    pub refresh_hz: Option<u32>,
+}
+
+/// How many times a second the window shows the guest's picture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RefreshHz(u32);
+
+impl RefreshHz {
+    /// A display's usual rate.
+    pub const DEFAULT: Self = Self(60);
+    /// The fastest a host display shows.
+    pub const MAX: u32 = 240;
+
+    /// `hz`, when it is 1 to [`Self::MAX`].
+    pub fn new(hz: u32) -> Option<Self> {
+        (1..=Self::MAX).contains(&hz).then_some(Self(hz))
+    }
+
+    pub fn get(self) -> u32 {
+        self.0
+    }
+
+    /// The time between two pictures.
+    pub fn interval(self) -> std::time::Duration {
+        std::time::Duration::from_secs(1) / self.0
+    }
 }
 
 #[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
@@ -500,6 +529,8 @@ pub struct ArmVirtConfig {
     pub tablet: bool,
     /// The virtio-blk's disk; `None` for none.
     pub disk: Option<VirtDisk>,
+    /// How often the window shows the display's picture.
+    pub refresh: RefreshHz,
 }
 
 /// The disk behind the Arm `virt` board's virtio-blk, as QEMU's `-drive
@@ -555,6 +586,9 @@ pub enum ArmBoot {
     Unset,
     /// UEFI firmware from flash, with its variable store when one is given.
     Firmware { code: PathBuf, vars: Option<PathBuf> },
+    /// The EDK2 for QEMU's `virt` built into the front end, from flash, with
+    /// its variable store when one is given.
+    BuiltinFirmware { vars: Option<PathBuf> },
     /// A Linux `Image` entered directly, as QEMU's `-kernel` does.
     Linux {
         kernel: PathBuf,
@@ -686,6 +720,7 @@ impl ArmVirtConfig {
             keyboard: false,
             tablet: false,
             disk: None,
+            refresh: RefreshHz::DEFAULT,
         }
     }
 }
@@ -773,6 +808,16 @@ fn resolve_arm_virt(file: &FileConfig, args: &Args, config_dir: Option<&Path>) -
     ensure_nonzero("ips", ips)?;
 
     let path = |p: &Option<PathBuf>| p.clone().map(|p| resolve_toml_path(config_dir, p));
+    if virt.builtin_firmware == Some(true) {
+        for (name, set) in [
+            ("virt.firmware", virt.firmware.is_some()),
+            ("virt.kernel", virt.kernel.is_some()),
+        ] {
+            if set {
+                return Err(RunError::ConflictingBuiltinFirmware { setting: name });
+            }
+        }
+    }
     let boot = match (path(&virt.firmware), path(&virt.kernel)) {
         (Some(_), Some(_)) => {
             return Err(RunError::ConflictingVirtBoot);
@@ -808,6 +853,20 @@ fn resolve_arm_virt(file: &FileConfig, args: &Args, config_dir: Option<&Path>) -
                 device_tree: path(&virt.device_tree),
             }
         }
+        (None, None) if virt.builtin_firmware == Some(true) => {
+            for (name, set) in [
+                ("virt.initrd", virt.initrd.is_some()),
+                ("virt.command_line", virt.command_line.is_some()),
+                ("virt.device_tree", virt.device_tree.is_some()),
+            ] {
+                if set {
+                    return Err(RunError::VirtSettingNeedsKernel { setting: name });
+                }
+            }
+            ArmBoot::BuiltinFirmware {
+                vars: path(&virt.firmware_vars),
+            }
+        }
         (None, None) => {
             for (name, set) in [
                 ("virt.firmware_vars", virt.firmware_vars.is_some()),
@@ -827,10 +886,15 @@ fn resolve_arm_virt(file: &FileConfig, args: &Args, config_dir: Option<&Path>) -
         Some(VirtDisplayToml {
             width: Some(width),
             height: Some(height),
+            ..
         }) if width != 0 && height != 0 => Some(VirtioDisplaySize { width, height }),
-        Some(VirtDisplayToml { width, height }) => {
+        Some(VirtDisplayToml { width, height, .. }) => {
             return Err(RunError::InvalidVirtDisplay { width, height });
         }
+    };
+    let refresh = match virt.display.and_then(|display| display.refresh_hz) {
+        None => RefreshHz::DEFAULT,
+        Some(hz) => RefreshHz::new(hz).ok_or(RunError::InvalidRefreshRate { hz })?,
     };
     let disk = match args.disk.clone().or_else(|| path(&virt.disk)) {
         Some(path) => Some(VirtDisk {
@@ -853,6 +917,7 @@ fn resolve_arm_virt(file: &FileConfig, args: &Args, config_dir: Option<&Path>) -
         keyboard: virt.keyboard.unwrap_or(false),
         tablet: virt.tablet.unwrap_or(false),
         disk,
+        refresh,
     })
 }
 
@@ -1146,6 +1211,7 @@ impl ArmVirtConfig {
             display: self.display.map(|size| VirtDisplayToml {
                 width: Some(size.width),
                 height: Some(size.height),
+                refresh_hz: Some(self.refresh.get()),
             }),
             ..VirtToml::default()
         };
@@ -1153,6 +1219,10 @@ impl ArmVirtConfig {
             ArmBoot::Unset => {}
             ArmBoot::Firmware { code, vars } => {
                 virt.firmware = Some(code.clone());
+                virt.firmware_vars = vars.clone();
+            }
+            ArmBoot::BuiltinFirmware { vars } => {
+                virt.builtin_firmware = Some(true);
                 virt.firmware_vars = vars.clone();
             }
             ArmBoot::Linux {
@@ -2719,6 +2789,10 @@ overwrite = false
                 code: PathBuf::from("QEMU_EFI.fd"),
                 vars: Some(PathBuf::from("vars.fd")),
             },
+            ArmBoot::BuiltinFirmware {
+                vars: Some(PathBuf::from("vars.fd")),
+            },
+            ArmBoot::BuiltinFirmware { vars: None },
             ArmBoot::Linux {
                 kernel: PathBuf::from("Image"),
                 initrd: Some(PathBuf::from("initramfs.cpio.gz")),
@@ -2752,6 +2826,7 @@ overwrite = false
                     keyboard: true,
                     tablet: true,
                     disk,
+                    refresh: RefreshHz::new(144).expect("a rate"),
                 }),
                 display: DisplayBackend::Headless,
                 log_level: LogLevel::Info,
@@ -2947,6 +3022,14 @@ overwrite = false
                 width: Some(1024),
                 height: None
             }
+        ));
+        assert!(matches!(
+            refusal("[virt.display]\nwidth = 1024\nheight = 768\nrefresh_hz = 0\n"),
+            RunError::InvalidRefreshRate { hz: 0 }
+        ));
+        assert!(matches!(
+            refusal("builtin_firmware = true\nkernel = \"Image\"\n"),
+            RunError::ConflictingBuiltinFirmware { setting: "virt.kernel" }
         ));
     }
 }

@@ -5,7 +5,7 @@
 use rusty_box_core::SnapError;
 
 use super::super::features::{Feature, Implementation};
-use super::super::step::{exec, processor, Taken, UNDEFINED};
+use super::super::step::{exec, processor, Taken, CODE, UNDEFINED};
 use super::super::{Cpu, El, Pstate};
 
 /// The words are GNU as's (`-march=armv9.2-a+predres`, objdump -d).
@@ -37,6 +37,19 @@ const MRS_DISR: u32 = 0xD538_C120; // mrs x0, disr_el1
 const MSR_DISR: u32 = 0xD518_C120;
 const MRS_DBGAUTHSTATUS: u32 = 0xD530_7EC0; // mrs x0, dbgauthstatus_el1
 const MSR_DBGAUTHSTATUS: u32 = 0xD510_7EC0;
+const MRS_MDRAR: u32 = 0xD530_1000; // mrs x0, mdrar_el1
+const MSR_MDRAR: u32 = 0xD510_1000;
+const MRS_RVBAR: u32 = 0xD538_C020; // mrs x0, rvbar_el1
+const MSR_RVBAR: u32 = 0xD518_C020;
+const MRS_RMR: u32 = 0xD538_C040; // mrs x0, rmr_el1
+const MSR_RMR: u32 = 0xD518_C040;
+const MRS_DBGCLAIMSET: u32 = 0xD530_78C0; // mrs x0, dbgclaimset_el1
+const MSR_DBGCLAIMSET: u32 = 0xD510_78C0;
+const MRS_DBGCLAIMCLR: u32 = 0xD530_79C0; // mrs x0, dbgclaimclr_el1
+const MSR_DBGCLAIMCLR: u32 = 0xD510_79C0;
+const MRS_OSDLR: u32 = 0xD530_1380; // mrs x0, osdlr_el1
+const MSR_OSDLR: u32 = 0xD510_1380;
+const MRS_ID_AA64DFR0: u32 = 0xD538_0500; // mrs x0, id_aa64dfr0_el1
 const LDR: u32 = 0xF940_0020; // ldr x0, [x1]
 
 /// `SCTLR_EL1.UCT` and `EnRCTX`; `CNTKCTL_EL1.EL0PCTEN` and `EL0VCTEN`.
@@ -409,5 +422,76 @@ fn dbgauthstatus_reports_non_secure_debug_implemented() {
         assert_eq!(exec(&mut cpu, MSR_DBGAUTHSTATUS), Some(UNDEFINED));
         at_el0(&mut cpu);
         assert_eq!(exec(&mut cpu, MRS_DBGAUTHSTATUS), Some(UNDEFINED));
+    }
+}
+
+/// EL1 is the highest EL, so it has the reset management registers (Arm's
+/// data: `IsHighestEL(EL1)`): `RVBAR_EL1` reads the address the last reset
+/// started execution from, and `RMR_EL1` reads AA64 as one and keeps the
+/// Warm reset request RR, which resets nothing here. `MDRAR_EL1` reads no
+/// ROM table (Valid 0b00). The two read-only registers cannot be written,
+/// and EL0 reaches none of the three.
+#[test]
+fn the_reset_management_and_rom_table_registers_read_at_el1() {
+    for imp in [Implementation::CORTEX_A57, Implementation::ARMV9P2] {
+        let mut cpu = processor(imp);
+        assert_eq!(exec(&mut cpu, MRS_RVBAR), None);
+        assert_eq!(cpu.x[0], CODE, "{imp:?}: the reset address");
+        assert_eq!(exec(&mut cpu, MRS_RMR), None);
+        assert_eq!(cpu.x[0], 0b01, "{imp:?}: AA64");
+        cpu.x[0] = !0;
+        assert_eq!(exec(&mut cpu, MSR_RMR), None, "{imp:?}");
+        assert_eq!(exec(&mut cpu, MRS_RMR), None);
+        assert_eq!(cpu.x[0], 0b11, "{imp:?}: AA64 and RR, nothing else");
+        assert_eq!(exec(&mut cpu, MRS_MDRAR), None);
+        assert_eq!(cpu.x[0], 0, "{imp:?}: no ROM table");
+        assert_eq!(exec(&mut cpu, MSR_RVBAR), Some(UNDEFINED));
+        assert_eq!(exec(&mut cpu, MSR_MDRAR), Some(UNDEFINED));
+        at_el0(&mut cpu);
+        for insn in [MRS_RVBAR, MRS_RMR, MSR_RMR, MRS_MDRAR] {
+            assert_eq!(exec(&mut cpu, insn), Some(UNDEFINED), "{insn:#010x}");
+        }
+    }
+}
+
+/// `DBGCLAIMSET_EL1` reads as one for each of the eight claim tags, all of
+/// them implemented, whatever the tags hold; `DBGCLAIMCLR_EL1` reads the
+/// tags, which ones written to the first set and to the second clear.
+#[test]
+fn the_claim_tag_set_register_reads_as_ones() {
+    let mut cpu = processor(Implementation::CORTEX_A57);
+    // The write, the value written, and the tags after it: bits above the
+    // eight tags are RAZ/WI.
+    for (insn, value, tags) in [
+        (MSR_DBGCLAIMSET, 0xFF_FFA5, 0xA5),
+        (MSR_DBGCLAIMCLR, 0xFF, 0x00),
+    ] {
+        cpu.x[0] = value;
+        assert_eq!(exec(&mut cpu, insn), None, "{insn:#010x}");
+        assert_eq!(exec(&mut cpu, MRS_DBGCLAIMCLR), None);
+        assert_eq!(cpu.x[0], tags, "the tags after {insn:#010x}");
+        assert_eq!(exec(&mut cpu, MRS_DBGCLAIMSET), None);
+        assert_eq!(cpu.x[0], 0xFF, "RAO after {insn:#010x}");
+    }
+}
+
+/// FEAT_DoubleLock is the Cortex-A57's and not the Armv9.2 model's, as
+/// Armv9.0 forbids it (`v9Ap0 ==> !FEAT_DoubleLock`):
+/// `ID_AA64DFR0_EL1.DoubleLock` reads 0 and 0b1111, and `OSDLR_EL1.DLK`
+/// keeps a one written to it only with the feature, being RES0 without.
+#[test]
+fn only_the_cortex_a57_has_the_os_double_lock() {
+    for (imp, double_lock) in [
+        (Implementation::CORTEX_A57, true),
+        (Implementation::ARMV9P2, false),
+    ] {
+        let mut cpu = processor(imp);
+        assert_eq!(exec(&mut cpu, MRS_ID_AA64DFR0), None);
+        let field = (cpu.x[0] >> 36) & 0xF;
+        assert_eq!(field, if double_lock { 0 } else { 0xF }, "{imp:?}");
+        cpu.x[0] = !0;
+        assert_eq!(exec(&mut cpu, MSR_OSDLR), None);
+        assert_eq!(exec(&mut cpu, MRS_OSDLR), None);
+        assert_eq!(cpu.x[0], u64::from(double_lock), "{imp:?}: DLK");
     }
 }

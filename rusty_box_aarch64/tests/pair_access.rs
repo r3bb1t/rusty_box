@@ -258,8 +258,10 @@ impl Instrumentation for BusLog {
 
 #[test]
 fn a_store_pair_within_a_page_whose_second_word_alone_reaches_a_hole_writes_its_first_word_only() {
-    // fw_cfg ignores the write, so the bus is where the first element is
-    // seen to land.
+    // The first word lands on fw_cfg's DMA low word (+0x14) and starts a
+    // transfer from descriptor address `FIRST` byte-swapped (0x7856_3412),
+    // past the end of this test's 4 MiB of RAM: the transfer reads and
+    // writes nothing, so the bus is where the first element is seen to land.
     const FIRST: u32 = 0x1234_5678;
     const SECOND: u32 = 0x9ABC_DEF0;
     let mut ram = vec![0u8; RAM_LEN];

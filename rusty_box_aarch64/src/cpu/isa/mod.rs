@@ -2093,6 +2093,9 @@ mod tests {
                     Feature::Fp => field(pfr0, 16) != 0xF,
                     Feature::AdvSimd => field(pfr0, 20) != 0xF,
                     Feature::Aes => field(isar0, 4) != 0,
+                    Feature::Pmull => field(isar0, 4) >= 2,
+                    // `SInt(DoubleLock) >= 0`: 0b0xxx.
+                    Feature::DoubleLock => field(dfr0, 36) < 8,
                     Feature::Sha1 => field(isar0, 8) != 0,
                     Feature::Sha256 => field(isar0, 12) != 0,
                     Feature::Crc32 => field(isar0, 16) != 0,
@@ -2172,8 +2175,10 @@ mod tests {
                 pfr0 & !((0xFF << 16) | (0xF << 28) | (0xF << 48) | (0xF << 56) | (0xF << 60)),
                 0x11
             );
-            // DFR0: DebugVer, two breakpoints and two watchpoints, no PMU.
-            assert_eq!(dfr0 & !0xF, 0x0010_1000);
+            // DFR0: DebugVer, two breakpoints and two watchpoints, no PMU,
+            // and DoubleLock 0 or 0b1111.
+            assert_eq!(dfr0 & !0xF & !(0xF << 36), 0x0010_1000);
+            assert!(matches!(field(dfr0, 36), 0 | 0xF), "DoubleLock");
             assert!(
                 (6..=9).contains(&field(dfr0, 0)),
                 "DebugVer: Armv8.0 to FEAT_Debugv8p4"

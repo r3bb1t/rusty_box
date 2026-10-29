@@ -10,7 +10,7 @@
 
 use super::dp::extend_reg;
 use super::exec::{bit, bits, sext, ExecResult, Flow};
-use super::mmu::{DataAccess, DataDirection, ElementPair};
+use super::mmu::{DataAccess, DataDirection, ElementPair, QuadwordPair};
 use super::{Cpu, ExclusiveMonitor};
 use crate::bus::PhysBus;
 
@@ -64,8 +64,29 @@ impl Cpu {
         } else {
             size
         };
-        if vector && scale > 4 {
+        // The Decode sections' UNDEFINED cases, which come before Execute's
+        // SIMD&FP enable check: a SIMD&FP register is at most 128 bits and
+        // has no unprivileged form, LDRSB/LDRSH to a W register have no word
+        // or doubleword size, and every register-offset form needs
+        // `option<1>` (`ldr_reg_fpsimd.xml`, `ldr_reg_gen.xml`: "sub-word
+        // index").
+        let unprivileged = form == SingleForm::Immediate9 && bits(insn, 11, 10) == 0b10;
+        if (vector && (scale > 4 || unprivileged))
+            || (!vector && opc == 3 && size >= 2)
+            || (form == SingleForm::RegisterOffset && bits(insn, 15, 13) & 2 == 0)
+        {
             return self.undefined(pc, insn);
+        }
+        // PRFM (immediate), PRFUM, PRFM (register) and the RPRFM words the
+        // decoder gives PRFM (register): a hint with no architectural
+        // effect. Arm forms its address from SP or Xn with no
+        // `CheckSPAlignment` and accesses nothing, so it cannot fault. There
+        // is no pre-indexed, post-indexed or unprivileged prefetch.
+        if !vector && size == 3 && opc == 2 {
+            if form == SingleForm::Immediate9 && bits(insn, 11, 10) != 0b00 {
+                return self.undefined(pc, insn);
+            }
+            return Ok(Flow::Next);
         }
         if vector {
             self.fp_check()?;
@@ -100,9 +121,6 @@ impl Cpu {
                         }
                     }
                     _ => {
-                        if vector {
-                            return self.undefined(pc, insn);
-                        }
                         // LDTR/STTR: EL0 permissions when executed at EL1.
                         acc = DataAccess::UNPRIVILEGED;
                         Addressing {
@@ -114,9 +132,6 @@ impl Cpu {
             }
             SingleForm::RegisterOffset => {
                 let option = bits(insn, 15, 13);
-                if option & 2 == 0 {
-                    return self.undefined(pc, insn);
-                }
                 let shift = if bit(insn, 12) { scale } else { 0 };
                 let offset = extend_reg(self.x_or_zr(bits(insn, 20, 16)), option, shift, 64);
                 let base = self.base_register(rn)?;
@@ -145,7 +160,6 @@ impl Cpu {
                 self.write_mem(bus, addressing.address, scale, v, acc)?;
             }
         } else {
-            let is_prefetch = size == 3 && opc == 2;
             match opc {
                 0 => {
                     let v = self.x_or_zr(rt);
@@ -155,25 +169,13 @@ impl Cpu {
                     let v = self.read_mem(bus, addressing.address, size, acc)?;
                     self.set_x_or_zr(rt, v);
                 }
-                2 if is_prefetch => {
-                    // PRFM/PRFUM: a hint with no architectural effect. There is
-                    // no pre/post-indexed or unprivileged prefetch.
-                    if addressing.writeback.is_some() || acc.unprivileged {
-                        return self.undefined(pc, insn);
-                    }
-                    return Ok(Flow::Next);
-                }
                 2 => {
                     // LDRSB/LDRSH/LDRSW to a 64-bit register.
                     let v = self.read_mem(bus, addressing.address, size, acc)?;
                     self.set_x_or_zr(rt, sext(v, 8 << size));
                 }
                 _ => {
-                    // LDRSB/LDRSH to a 32-bit register; size 2 and 3 are not
-                    // defined here.
-                    if size >= 2 {
-                        return self.undefined(pc, insn);
-                    }
+                    // LDRSB/LDRSH to a 32-bit register.
                     let v = self.read_mem(bus, addressing.address, size, acc)?;
                     self.set_x_or_zr(rt, sext(v, 8 << size) & 0xFFFF_FFFF);
                 }
@@ -268,27 +270,29 @@ impl Cpu {
             }
             _ => (base.wrapping_add(offset), None),
         };
-        let step = 1u64 << scale;
         let acc = DataAccess::NORMAL;
 
         if vector {
             if load {
-                let (a, b) = if scale == 4 {
-                    (
-                        self.read_mem_u128(bus, address, acc)?,
-                        self.read_mem_u128(bus, address.wrapping_add(step), acc)?,
-                    )
+                let pair = if scale == 4 {
+                    self.read_mem_q_pair(bus, address, acc)?
                 } else {
                     let pair = self.read_pair(bus, address, scale, acc)?;
-                    (u128::from(pair.first), u128::from(pair.second))
+                    QuadwordPair {
+                        first: u128::from(pair.first),
+                        second: u128::from(pair.second),
+                    }
                 };
-                self.write_v(rt as usize, a);
-                self.write_v(rt2 as usize, b);
+                self.write_v(rt as usize, pair.first);
+                self.write_v(rt2 as usize, pair.second);
             } else {
                 let (a, b) = (self.v[rt as usize], self.v[rt2 as usize]);
                 if scale == 4 {
-                    self.write_mem_u128(bus, address, a, acc)?;
-                    self.write_mem_u128(bus, address.wrapping_add(step), b, acc)?;
+                    let value = QuadwordPair {
+                        first: a,
+                        second: b,
+                    };
+                    self.write_mem_q_pair(bus, address, value, acc)?;
                 } else {
                     let value = ElementPair {
                         first: a as u64,
@@ -383,10 +387,15 @@ impl Cpu {
         if load {
             let pa =
                 self.translate_for(bus, address, total, DataDirection::Read, DataAccess::ATOMIC)?;
-            if pair {
-                let elem = 1u64 << size;
-                let a = self.read_mem(bus, address, size, DataAccess::ATOMIC)?;
-                let b = self.read_mem(bus, address.wrapping_add(elem), size, DataAccess::ATOMIC)?;
+            if pair && size == 2 {
+                // A pair of words is one single-copy atomic doubleword
+                // (`ldxp.xml`: `Mem{64}`), Rt's word the low one.
+                let v = self.read_mem(bus, address, 3, DataAccess::ATOMIC)?;
+                self.set_x_or_zr(rt, v & 0xFFFF_FFFF);
+                self.set_x_or_zr(rt2, v >> 32);
+            } else if pair {
+                let a = self.read_mem(bus, address, 3, DataAccess::ATOMIC)?;
+                let b = self.read_mem(bus, address.wrapping_add(8), 3, DataAccess::ATOMIC)?;
                 self.set_x_or_zr(rt, a);
                 self.set_x_or_zr(rt2, b);
             } else {
@@ -429,11 +438,15 @@ impl Cpu {
         };
         self.monitor.armed = false;
         if pass {
-            if pair {
-                let elem = 1u64 << size;
+            if pair && size == 2 {
+                // One single-copy atomic doubleword (`stxp.xml`:
+                // `Mem{64}`), Rt's word the low one.
+                let v = (self.x_or_zr(rt2) << 32) | (self.x_or_zr(rt) & 0xFFFF_FFFF);
+                self.write_mem(bus, address, 3, v, DataAccess::ATOMIC)?;
+            } else if pair {
                 let (a, b) = (self.x_or_zr(rt), self.x_or_zr(rt2));
-                self.write_mem(bus, address, size, a, DataAccess::ATOMIC)?;
-                self.write_mem(bus, address.wrapping_add(elem), size, b, DataAccess::ATOMIC)?;
+                self.write_mem(bus, address, 3, a, DataAccess::ATOMIC)?;
+                self.write_mem(bus, address.wrapping_add(8), 3, b, DataAccess::ATOMIC)?;
             } else {
                 let v = self.x_or_zr(rt);
                 self.write_mem(bus, address, size, v, DataAccess::ATOMIC)?;

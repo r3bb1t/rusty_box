@@ -12,7 +12,7 @@
 #[cfg(feature = "gui-egui")]
 use std::collections::VecDeque;
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 #[cfg(feature = "gui-egui")]
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -45,19 +45,20 @@ type Virt = VirtMachine<OwnedStorage>;
 ///
 /// The slice is the latency ceiling for every host action — "Power Off",
 /// "Pause" and a keystroke are all seen between slices — and the grain the
-/// pacing sleeps in. Ten milliseconds is under what a person notices on a key
-/// and a quarter of the frame interval.
+/// pacing sleeps in. Ten milliseconds is under what a person notices on a
+/// key; a run in a window steps by less when its pictures come faster
+/// ([`window_slice`]).
 const SLICE: Duration = Duration::from_millis(10);
 
-/// How often the window is redrawn: 25 frames a second, the rate the PC's
-/// display keeps (Bochs vga.cc `vga_update_interval`).
-#[cfg(feature = "gui-egui")]
-const FRAME_INTERVAL: Duration = Duration::from_millis(40);
+/// How far guest time may fall behind the host's before the pacing stops
+/// owing it: past this the guest is measured from now, so a guest that was
+/// slower than real time for a while does not then race its timers to catch
+/// up.
+const MAX_LAG: Duration = Duration::from_millis(100);
 
 /// How often the status bar's instruction rate is brought up to date.
 #[cfg(feature = "gui-egui")]
 const IPS_INTERVAL: Duration = Duration::from_secs(1);
-
 
 /// How long host input waits for a guest that takes none of it before it is
 /// dropped: a guest that reads no input for that long (its driver not loaded
@@ -79,7 +80,8 @@ struct BootFiles {
 }
 
 /// EDK2 for QEMU's `virt` board (retrage/edk2-nightly RELEASEAARCH64_QEMU_EFI.fd),
-/// shipped in the binary so a VM needs only a disk to boot.
+/// shipped in the binary for [`ArmBoot::BuiltinFirmware`]; its licence is in
+/// `THIRD-PARTY-LICENSES`.
 const BUNDLED_EDK2: &[u8] = include_bytes!("../firmware/QEMU_EFI.fd");
 
 enum BootImage {
@@ -104,24 +106,30 @@ struct VariableStore {
     image: Vec<u8>,
 }
 
+impl VariableStore {
+    /// The store at `path`, when a firmware boot names one.
+    fn read(path: Option<&Path>) -> Result<Option<Self>, RunError> {
+        match path {
+            Some(path) => Ok(Some(Self {
+                path: path.to_path_buf(),
+                image: read_required_file("UEFI variable store", path)?,
+            })),
+            None => Ok(None),
+        }
+    }
+}
+
 impl BootFiles {
     fn read(config: &ArmVirtConfig) -> Result<Self, RunError> {
         let boot = match &config.boot {
-            // A disk alone (an ISO or a raw image) boots the bundled EDK2.
-            ArmBoot::Unset if config.disk.is_some() => BootImage::Firmware {
-                code: BUNDLED_EDK2.to_vec(),
-                vars: None,
-            },
             ArmBoot::Unset => return Err(RunError::MissingVirtBoot),
             ArmBoot::Firmware { code, vars } => BootImage::Firmware {
                 code: read_required_file("firmware", code)?,
-                vars: match vars {
-                    Some(path) => Some(VariableStore {
-                        path: path.clone(),
-                        image: read_required_file("UEFI variable store", path)?,
-                    }),
-                    None => None,
-                },
+                vars: VariableStore::read(vars.as_deref())?,
+            },
+            ArmBoot::BuiltinFirmware { vars } => BootImage::Firmware {
+                code: BUNDLED_EDK2.to_vec(),
+                vars: VariableStore::read(vars.as_deref())?,
             },
             ArmBoot::Linux {
                 kernel,
@@ -291,9 +299,59 @@ fn host_epoch_seconds() -> u64 {
     }
 }
 
-/// [`SLICE`] in ticks at `ips`, never none.
-fn slice_ticks(ips: u32) -> u64 {
-    (u64::from(ips) * SLICE.as_millis() as u64 / 1_000).max(1)
+/// `slice` of guest time in ticks at `ips`, never none.
+fn slice_ticks(ips: u32, slice: Duration) -> u64 {
+    let ticks = u128::from(ips) * slice.as_nanos() / 1_000_000_000;
+    u64::try_from(ticks).unwrap_or(u64::MAX).max(1)
+}
+
+/// The slice a run in a window steps by: [`SLICE`], or half the time
+/// between pictures when that is shorter, so a picture due is shown within
+/// half a frame of its time rather than at the next whole slice.
+#[cfg(feature = "gui-egui")]
+fn window_slice(refresh: crate::config::RefreshHz) -> Duration {
+    SLICE.min(refresh.interval() / 2)
+}
+
+/// Keeps guest time from running ahead of the host's. A waiting processor
+/// skips to its next timer deadline (`Virt::ticks_to_next_timer_deadline`),
+/// so without this an idle guest's clock races: a held key auto-repeats at
+/// the guest's rate for as long as the host takes to deliver its release.
+struct Pacer {
+    since: Instant,
+    since_ticks: u64,
+    ips: u64,
+}
+
+impl Pacer {
+    fn new(machine: &Virt, ips: u32) -> Self {
+        Self {
+            since: Instant::now(),
+            since_ticks: machine.ticks(),
+            ips: u64::from(ips),
+        }
+    }
+
+    /// Measures from here: after a pause, the host time the machine stood
+    /// still is not owed to it.
+    fn restart(&mut self, machine: &Virt) {
+        self.since = Instant::now();
+        self.since_ticks = machine.ticks();
+    }
+
+    /// Sleeps off guest time that ran ahead of the host's; forgives a lag
+    /// past [`MAX_LAG`].
+    fn keep_pace(&mut self, machine: &Virt) {
+        let ticks = machine.ticks().saturating_sub(self.since_ticks);
+        let nanos = u128::from(ticks) * 1_000_000_000 / u128::from(self.ips);
+        let guest = Duration::from_nanos(u64::try_from(nanos).unwrap_or(u64::MAX));
+        let host = self.since.elapsed();
+        match guest.checked_sub(host) {
+            Some(ahead) => std::thread::sleep(ahead.min(SLICE)),
+            None if host - guest > MAX_LAG => self.restart(machine),
+            None => {}
+        }
+    }
 }
 
 /// Whether a slice's end lets the machine run on.
@@ -319,7 +377,6 @@ fn settle(outcome: BatchOutcome) -> Result<Settled, RunError> {
         | StopReason::BusFault { .. }) => Err(RunError::VirtStopped { stop }),
     }
 }
-
 
 /// The guest's serial output since the last call.
 fn take_serial_output(machine: &mut Virt) -> Vec<u8> {
@@ -363,9 +420,8 @@ fn drive_on_console(
     config: &ArmVirtConfig,
     mut terminal: Option<&mut RawTerminal>,
 ) -> Result<(), RunError> {
-    // Bochs `clock: sync=none`: the guest runs as fast as the host allows,
-    // its time counted in ticks at `ips`.
-    let slice = slice_ticks(config.ips);
+    let slice = slice_ticks(config.ips, SLICE);
+    let mut pacer = Pacer::new(machine, config.ips);
     loop {
         let outcome = machine.step(RunBudget::Ticks(slice));
         report_disk_error(machine, config);
@@ -380,7 +436,7 @@ fn drive_on_console(
             }
         }
         match settle(outcome)? {
-            Settled::RunOn => {}
+            Settled::RunOn => pacer.keep_pace(machine),
             Settled::Over => return Ok(()),
         }
     }
@@ -607,7 +663,7 @@ pub(crate) fn run_in_shell(
 ) -> Result<RunSummary, RunError> {
     let files = BootFiles::read(config)?;
     let mut machine = build(config, &files)?;
-    let mut window = ShellWindow::open(display, &machine);
+    let mut window = ShellWindow::open(display, &machine, config.refresh);
     let ran = drive_in_shell(&mut machine, config, &mut window, control);
     finish(config, &files, &mut machine, ran)
 }
@@ -621,8 +677,8 @@ fn drive_in_shell(
     window: &mut ShellWindow<'_>,
     control: &RunControl,
 ) -> Result<(), RunError> {
-    // Bochs `clock: sync=none`, as in the headless loop.
-    let slice = slice_ticks(config.ips);
+    let slice = slice_ticks(config.ips, window_slice(config.refresh));
+    let mut pacer = Pacer::new(machine, config.ips);
     let stop_flag = Arc::clone(control.stop_flag());
     loop {
         if stop_flag.load(std::sync::atomic::Ordering::Relaxed) {
@@ -630,6 +686,7 @@ fn drive_in_shell(
                 AfterRun::End => return Ok(()),
                 AfterRun::Serve => match serve(machine, control, window)? {
                     Next::Resume => {
+                        pacer.restart(machine);
                         window.restart_rate(machine);
                         continue;
                     }
@@ -642,7 +699,7 @@ fn drive_in_shell(
         window.pump_input(machine);
         window.present(machine, Presenting::WhenDue);
         match settle(outcome)? {
-            Settled::RunOn => {}
+            Settled::RunOn => pacer.keep_pace(machine),
             Settled::Over => return Ok(()),
         }
     }
@@ -721,6 +778,8 @@ struct ShellWindow<'d> {
     serial_text: Utf8Carry,
     /// When the guest last took input, or had none waiting for it.
     input_taken: Instant,
+    /// The time between two pictures, as the VM's refresh rate sets it.
+    frame_interval: Duration,
     last_frame: Instant,
     last_rate: Instant,
     rate_from: u64,
@@ -728,9 +787,10 @@ struct ShellWindow<'d> {
 
 #[cfg(feature = "gui-egui")]
 impl<'d> ShellWindow<'d> {
-    /// Takes over `display` for a run of `machine`: the picture starts
-    /// empty until the guest draws one.
-    fn open(display: &'d Arc<Mutex<SharedDisplay>>, machine: &Virt) -> Self {
+    /// Takes over `display` for a run of `machine`, showing its picture
+    /// `refresh` times a second: the picture starts empty until the guest
+    /// draws one.
+    fn open(display: &'d Arc<Mutex<SharedDisplay>>, machine: &Virt, refresh: crate::config::RefreshHz) -> Self {
         if let Ok(mut shown) = display.lock() {
             shown.ips = 0;
             shown.framebuffer.fill(0);
@@ -743,6 +803,7 @@ impl<'d> ShellWindow<'d> {
             serial: VecDeque::new(),
             serial_text: Utf8Carry::default(),
             input_taken: Instant::now(),
+            frame_interval: refresh.interval(),
             last_frame: Instant::now(),
             last_rate: Instant::now(),
             rate_from: machine.instructions(),
@@ -823,7 +884,7 @@ impl<'d> ShellWindow<'d> {
                 }
             }
         }
-        if when == Presenting::Now || self.last_frame.elapsed() >= FRAME_INTERVAL {
+        if when == Presenting::Now || self.last_frame.elapsed() >= self.frame_interval {
             self.last_frame = Instant::now();
             if let Some(mut screen) = machine.display() {
                 if let Ok(mut shown) = self.display.lock() {
@@ -1056,9 +1117,20 @@ mod tests {
     }
 
     #[test]
-    fn a_slice_is_ten_milliseconds_of_guest_time_and_never_none() {
-        assert_eq!(slice_ticks(50_000_000), 500_000);
-        assert_eq!(slice_ticks(1), 1);
+    fn a_slice_is_its_guest_time_in_ticks_and_never_none() {
+        assert_eq!(slice_ticks(50_000_000, SLICE), 500_000);
+        assert_eq!(slice_ticks(1, SLICE), 1);
+    }
+
+    /// At 60 pictures a second a window steps by half a frame, so each
+    /// picture shows within half a frame of its time; at a slow rate it
+    /// steps by the usual slice.
+    #[cfg(feature = "gui-egui")]
+    #[test]
+    fn a_window_steps_by_half_a_frame_when_that_is_shorter() {
+        let at = |hz| window_slice(crate::config::RefreshHz::new(hz).expect("a rate"));
+        assert_eq!(at(60), Duration::from_secs(1) / 120);
+        assert_eq!(at(25), SLICE);
     }
 
     /// The board is built with the processor the VM names: its `MIDR_EL1`,
@@ -1256,7 +1328,7 @@ mod tests {
     fn window_over<'d>(config: &ArmVirtConfig, display: &'d Arc<Mutex<SharedDisplay>>) -> (Virt, ShellWindow<'d>) {
         let files = BootFiles::read(config).expect("the kernel");
         let machine = build(config, &files).expect("the machine");
-        let window = ShellWindow::open(display, &machine);
+        let window = ShellWindow::open(display, &machine, config.refresh);
         (machine, window)
     }
 

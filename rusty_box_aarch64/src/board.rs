@@ -362,9 +362,11 @@ impl<S: GuestStorage> VirtBoard<S> {
         self.sync_device_lines();
     }
 
-    /// QEMU's system reset of the board's devices. The RTC keeps counting
-    /// and keeps its alarm (QEMU's `pl031_class_init` installs no reset
-    /// handler). The UART empties its receive FIFO, as `pl011_reset` does;
+    /// A system reset of the board's devices. The RTC stops at the value it
+    /// reads and clears its bus-clock registers, as `PRESETn` does
+    /// ([`Pl031::reset`]; QEMU's PL031 has no reset). A held power button is
+    /// released, then the GPIO's registers clear ([`Pl061::reset`]). The UART
+    /// empties its receive FIFO, as `pl011_reset` does;
     /// what the guest transmitted stays for the host to drain, and host bytes
     /// still waiting for the FIFO stay queued for it, which takes them once
     /// the guest switches the receiver back on, at `clock`. Memory is
@@ -375,9 +377,12 @@ impl<S: GuestStorage> VirtBoard<S> {
         self.flash_epoch += 1;
         self.gic = GicV2::new();
         self.uart.reset();
-        self.gpio = Pl061::new();
-        self.fw_cfg = FwCfg::new();
-        self.power_button_release = None;
+        self.rtc.reset(clock);
+        if self.power_button_release.take().is_some() {
+            self.gpio.set_input(POWER_BUTTON_LINE, false);
+        }
+        self.gpio.reset();
+        self.fw_cfg.reset();
         for transport in self.virtio.iter_mut().flatten() {
             transport.reset();
         }
@@ -679,7 +684,7 @@ impl<S: GuestStorage> VirtBoard<S> {
             return Ok(self.rtc.read(off, width, clock));
         }
         if let Some(off) = addr.offset_in(FW_CFG_BASE, FW_CFG_SIZE) {
-            return Ok(self.fw_cfg.read(off, width));
+            return self.fw_cfg.read(off, width);
         }
         if let Some(off) = addr.offset_in(GPIO_BASE, PRIMECELL_SIZE) {
             return Ok(self.gpio.read(off, width));
@@ -756,8 +761,10 @@ impl<S: GuestStorage> VirtBoard<S> {
             return Ok(());
         }
         if let Some(off) = addr.offset_in(FW_CFG_BASE, FW_CFG_SIZE) {
-            self.fw_cfg.write(off, width, value);
-            return Ok(());
+            let mut ram = GuestRam::new(self.storage.ram_mut());
+            let written = self.fw_cfg.write(&mut ram, off, width, value);
+            self.dma.merge(&ram.written());
+            return written;
         }
         if let Some(off) = addr.offset_in(GPIO_BASE, PRIMECELL_SIZE) {
             self.gpio.write(off, width, value);

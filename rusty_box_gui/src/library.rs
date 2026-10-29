@@ -484,6 +484,11 @@ fn with_absolute_paths(config: &ResolvedConfig) -> Result<ResolvedConfig, Librar
                         *vars = absolute_path(vars)?;
                     }
                 }
+                ArmBoot::BuiltinFirmware { vars } => {
+                    if let Some(vars) = vars {
+                        *vars = absolute_path(vars)?;
+                    }
+                }
                 ArmBoot::Linux {
                     kernel,
                     initrd,
