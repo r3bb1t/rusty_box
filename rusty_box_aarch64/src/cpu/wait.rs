@@ -35,7 +35,7 @@ use rusty_box_core::VmInstant;
 use super::el2::{HCR_TWE, HCR_TWI};
 use super::exception::{Exception, Route, SyndromeClass};
 use super::exec::{ExecResult, Fault, Flow};
-use super::timer::{Count, VirtualCount};
+use super::timer::{Count, CountOffset, VirtualCount};
 use super::{sctlr, Activity, Cpu, El, Levels};
 
 /// What a waiting processor waits for (R2: each wait is a state of its own).
@@ -89,7 +89,7 @@ pub(crate) const EVNTIS: u64 = 1 << 17;
 /// end of the count. A control word holds `EVNTIS` only with FEAT_ECV: a
 /// write keeps it only then, and a snapshot that holds it otherwise is
 /// refused.
-fn stream_edge_after(ctl: u64, offset: u64, after: Count) -> Option<Count> {
+fn stream_edge_after(ctl: u64, offset: CountOffset, after: Count) -> Option<Count> {
     if ctl & EVNTEN == 0 {
         return None;
     }
@@ -101,7 +101,7 @@ fn stream_edge_after(ctl: u64, offset: u64, after: Count) -> Option<Count> {
     let half = 1u64 << n;
     let period = half << 1;
     let edge = if ctl & EVNTDIR == 0 { half } else { 0 };
-    let phase = edge.wrapping_add(offset) & (period - 1);
+    let phase = edge.wrapping_add(offset.get()) & (period - 1);
     // The largest multiple of `period` at most `after`, plus less than a
     // period, stays below 2^64.
     let after = after.get();
@@ -169,7 +169,7 @@ impl<L: Levels> Cpu<L> {
     fn stream_event_after(&self, after: Count) -> Option<Count> {
         let virtual_stream = stream_edge_after(self.sys.cntkctl_el1, self.virtual_offset(), after);
         let physical_stream = if self.have_el2() {
-            stream_edge_after(self.el2().cnthctl, 0, after)
+            stream_edge_after(self.el2().cnthctl, CountOffset::NONE, after)
         } else {
             None
         };

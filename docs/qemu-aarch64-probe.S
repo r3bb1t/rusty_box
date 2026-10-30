@@ -115,6 +115,13 @@
 //      Waiting:                    O 0000000000000001
 //      QEMU 11.1.2:                O 0000000000000001
 //      QEMU 11.1.2, -M virt-9.0:   O 0000000000000000
+//
+// P  MRS of ID_AA64MMFR0_EL1 on this processor without EL2 (-M virt).
+//    Prints it. Arm's Features.json gives FEAT_ECV_POFF, ECV (bits 63:60)
+//    2 or more, only to a processor with EL2 ((FEAT_AA64 && FEAT_ECV_POFF)
+//    ==> FEAT_AA64EL2), so ECV is at most 1.
+//      Arm:          P 1...............                       (ECV 1)
+//      QEMU 11.1.2:  P 2100032310201126                       (ECV 2)
 
 #define UART 0x09000000
 
@@ -436,6 +443,17 @@ case_o:
     mov w0, #' '
     bl putc
     lsr x0, x5, #24                   // whole timeouts the count moved by
+    bl puthex
+    mov w0, #'\n'
+    bl putc
+
+case_p:
+    mrs x5, id_aa64mmfr0_el1
+    mov w0, #'P'
+    bl putc
+    mov w0, #' '
+    bl putc
+    mov x0, x5
     bl puthex
     mov w0, #'\n'
     bl putc

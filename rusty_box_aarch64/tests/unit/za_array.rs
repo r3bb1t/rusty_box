@@ -24,7 +24,7 @@
 use std::vec;
 use std::vec::Vec;
 
-use super::super::features::{Feature, Features, Implementation, VecLen};
+use super::super::features::{Feature, Implementation, VecLen};
 use super::super::step::{exec, processor, Taken, UNDEFINED};
 use super::super::sve::{Esize, Zv};
 use super::super::{Cpu, NoEl2};
@@ -1080,14 +1080,9 @@ fn they_need_streaming_mode_za_and_sme2() {
     for insn in all {
         assert_eq!(exec(&mut cpu, insn), Some(INACTIVE_ZA), "{insn:#010x}");
     }
-    let features: Vec<Feature> = Feature::ALL
-        .into_iter()
-        .filter(|&f| f != Feature::Sme2)
-        .collect();
     let mut cpu = processor(Implementation {
-        features: Features::of(&features),
         max_svl: VecLen::MAX,
-        ..Implementation::EVERY_FEATURE
+        ..Implementation::every_feature_but(&[Feature::Sme2])
     });
     cpu.set_pstate_sm(true);
     cpu.set_pstate_za(true);

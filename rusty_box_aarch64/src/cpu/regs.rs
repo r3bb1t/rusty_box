@@ -258,6 +258,7 @@ sysregs! {
     VBAR_EL2 = (3, 4, 12, 0, 0);
     TPIDR_EL2 = (3, 4, 13, 0, 2);
     CNTVOFF_EL2 = (3, 4, 14, 0, 3);
+    CNTPOFF_EL2 = (3, 4, 14, 0, 6);
     CNTHCTL_EL2 = (3, 4, 14, 1, 0);
     CNTHP_CTL_EL2 = (3, 4, 14, 2, 1);
     CNTHP_CVAL_EL2 = (3, 4, 14, 2, 2);

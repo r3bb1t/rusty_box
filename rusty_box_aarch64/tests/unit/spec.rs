@@ -1299,7 +1299,7 @@ fn rust_names(leaf: &Leaf) -> Option<(String, String)> {
 )]
 fn the_decoder_is_arms_encoding_tree_for_the_implemented_features() {
     let arm = Arm::load();
-    let (_, implications) = feature_implications();
+    let (_, implications) = feature_implications(&features_json());
     let src = source();
     assert!(src.errors.is_empty(), "{:#?}", src.errors);
     let mut problems: Vec<String> = Vec::new();
@@ -1693,51 +1693,20 @@ fn the_decoder_allocates_as_arm_does_on_every_word() {
 
 // ----- the feature sets -----
 
-/// Every pair of [`Feature`]s `(A, B)` that Arm's `Features.json` makes
-/// `FEAT_A` imply `FEAT_B`, directly or through other identifiers, with the
-/// release it was read from. An architecture version carries an
-/// implication on: `FEAT_SME ==> v9Ap2`, `v9Ap2 ==> (v9Ap1 && v8Ap7)`,
-/// `v9Ap1 ==> (v9Ap0 && v8Ap6)` and `v8Ap6 ==> FEAT_I8MM` make FEAT_SME
-/// imply FEAT_I8MM.
-fn feature_implications() -> (String, Vec<(Feature, Feature)>) {
+/// Arm's `Features.json`, from the AARCHMRS directory [`SPEC_DIR_VAR`]
+/// names.
+fn features_json() -> Value {
     let dir = std::env::var_os(SPEC_DIR_VAR).unwrap_or_else(|| {
         panic!("set {SPEC_DIR_VAR} to the unpacked AARCHMRS directory (holding Features.json)")
     });
     let path = PathBuf::from(dir).join("Features.json");
     let text = std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-    let root: Value =
-        serde_json::from_slice(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-    let release = root
-        .pointer("/_meta/version/ref")
-        .and_then(Value::as_str)
-        .unwrap_or("?")
-        .to_string();
-    let identifier = |side: Option<&Value>| {
-        let side = side?;
-        if side.get("_type").and_then(Value::as_str) != Some("AST.Identifier") {
-            return None;
-        }
-        side.get("value")
-            .and_then(Value::as_str)
-            .map(str::to_string)
-    };
-    // The identifiers a conjunction names (`FEAT_SME ==> (FEAT_FCMA &&
-    // FEAT_FP16 && FEAT_BF16 && FEAT_FHM)`), each implied on its own;
-    // `None` for any other shape, which implies no one identifier.
-    fn conjuncts(side: Option<&Value>, out: &mut Vec<String>) -> Option<()> {
-        let side = side?;
-        match side.get("_type").and_then(Value::as_str) {
-            Some("AST.Identifier") => {
-                out.push(side.get("value").and_then(Value::as_str)?.to_string())
-            }
-            Some("AST.BinaryOp") if side.get("op").and_then(Value::as_str) == Some("&&") => {
-                conjuncts(side.get("left"), out)?;
-                conjuncts(side.get("right"), out)?;
-            }
-            _ => return None,
-        }
-        Some(())
-    }
+    serde_json::from_slice(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+}
+
+/// Every constraint of `Features.json`: each parameter's, then the global
+/// ones.
+fn feature_constraints(root: &Value) -> Vec<&Value> {
     let parameter_constraints = root
         .get("parameters")
         .and_then(Value::as_array)
@@ -1750,22 +1719,69 @@ fn feature_implications() -> (String, Vec<(Feature, Feature)>) {
         .and_then(Value::as_array)
         .into_iter()
         .flatten();
-    let mut edges: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    for c in parameter_constraints.chain(global_constraints) {
+    parameter_constraints.chain(global_constraints).collect()
+}
+
+/// The identifiers a conjunction names (`FEAT_SME ==> (FEAT_FCMA &&
+/// FEAT_FP16 && FEAT_BF16 && FEAT_FHM)`), each implied on its own; `None`
+/// for any other shape, which implies no one identifier.
+fn conjuncts(side: Option<&Value>, out: &mut Vec<String>) -> Option<()> {
+    let side = side?;
+    match side.get("_type").and_then(Value::as_str) {
+        Some("AST.Identifier") => out.push(side.get("value").and_then(Value::as_str)?.to_string()),
+        Some("AST.BinaryOp") if side.get("op").and_then(Value::as_str) == Some("&&") => {
+            conjuncts(side.get("left"), out)?;
+            conjuncts(side.get("right"), out)?;
+        }
+        _ => return None,
+    }
+    Some(())
+}
+
+/// An implication of `Features.json` whose left side is a conjunction of
+/// identifiers, `(FEAT_AA64 && FEAT_ECV_POFF) ==> FEAT_AA64EL2`: where
+/// every identifier of `when` holds, every identifier of `then` does.
+struct ConjunctiveImplication {
+    when: Vec<String>,
+    then: Vec<String>,
+}
+
+/// Every implication of `Features.json` (`root`) between conjunctions of
+/// identifiers whose left side names two or more, which
+/// [`feature_implications`], following one identifier at a time, leaves
+/// out.
+fn conjunctive_implications(root: &Value) -> Vec<ConjunctiveImplication> {
+    let mut found = Vec::new();
+    for c in feature_constraints(root) {
         let is_implication = c.get("_type").and_then(Value::as_str) == Some("AST.BinaryOp")
             && c.get("op").and_then(Value::as_str) == Some("==>");
         if !is_implication {
             continue;
         }
-        let Some(a) = identifier(c.get("left")) else {
-            continue;
-        };
-        let mut right = Vec::new();
-        if conjuncts(c.get("right"), &mut right).is_none() {
-            continue;
+        let (mut when, mut then) = (Vec::new(), Vec::new());
+        if conjuncts(c.get("left"), &mut when).is_some()
+            && when.len() > 1
+            && conjuncts(c.get("right"), &mut then).is_some()
+        {
+            found.push(ConjunctiveImplication { when, then });
         }
-        edges.entry(a).or_default().extend(right);
     }
+    found
+}
+
+/// Every pair of [`Feature`]s `(A, B)` that Arm's `Features.json` makes
+/// `FEAT_A` imply `FEAT_B` (in `root`), directly or through other
+/// identifiers, with the release it was read from. An architecture version
+/// carries an implication on: `FEAT_SME ==> v9Ap2`, `v9Ap2 ==> (v9Ap1 &&
+/// v8Ap7)`, `v9Ap1 ==> (v9Ap0 && v8Ap6)` and `v8Ap6 ==> FEAT_I8MM` make
+/// FEAT_SME imply FEAT_I8MM.
+fn feature_implications(root: &Value) -> (String, Vec<(Feature, Feature)>) {
+    let release = root
+        .pointer("/_meta/version/ref")
+        .and_then(Value::as_str)
+        .unwrap_or("?")
+        .to_string();
+    let edges = identifier_edges(root);
     let mut implications = Vec::new();
     for a in Feature::ALL {
         let Some(name) = a.arm_name() else {
@@ -1791,6 +1807,37 @@ fn feature_implications() -> (String, Vec<(Feature, Feature)>) {
     (release, implications)
 }
 
+/// What each identifier implies on its own in `Features.json` (`root`),
+/// directly: the identifiers of each conjunction its implications name.
+fn identifier_edges(root: &Value) -> BTreeMap<String, BTreeSet<String>> {
+    let identifier = |side: Option<&Value>| {
+        let side = side?;
+        if side.get("_type").and_then(Value::as_str) != Some("AST.Identifier") {
+            return None;
+        }
+        side.get("value")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    };
+    let mut edges: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for c in feature_constraints(root) {
+        let is_implication = c.get("_type").and_then(Value::as_str) == Some("AST.BinaryOp")
+            && c.get("op").and_then(Value::as_str) == Some("==>");
+        if !is_implication {
+            continue;
+        }
+        let Some(a) = identifier(c.get("left")) else {
+            continue;
+        };
+        let mut right = Vec::new();
+        if conjuncts(c.get("right"), &mut right).is_none() {
+            continue;
+        }
+        edges.entry(a).or_default().extend(right);
+    }
+    edges
+}
+
 /// `feature` and every known feature Arm's implications lead to from it.
 fn implied_by(feature: Feature, implications: &[(Feature, Feature)]) -> Vec<Feature> {
     let mut found = vec![feature];
@@ -1809,7 +1856,11 @@ fn implied_by(feature: Feature, implications: &[(Feature, Feature)]) -> Vec<Feat
 /// Each processor this crate builds, and the test-only one with every
 /// feature, implements what Arm's feature model makes each of its features
 /// imply, among the features the decoder knows: a set Arm does not permit
-/// would advertise an ID register field no processor reports.
+/// would advertise an ID register field no processor reports. And the
+/// features a processor without EL2 drops are exactly those Arm gives only
+/// to a processor with EL2, alone or with AArch64 at EL0 and EL1, which
+/// every processor here has: FEAT_ECV_POFF by `(FEAT_AA64 &&
+/// FEAT_ECV_POFF) ==> FEAT_AA64EL2`.
 #[test]
 #[cfg_attr(
     not(aarchmrs),
@@ -1819,7 +1870,8 @@ fn every_implementation_has_what_its_features_imply() {
     use crate::cpu::features::Implementation;
     use crate::cpu::{NoEl2, WithEl2};
 
-    let (release, implications) = feature_implications();
+    let root = features_json();
+    let (release, implications) = feature_implications(&root);
     std::eprintln!(
         "AARCHMRS {release}: {} implications between known features",
         implications.len()
@@ -1834,9 +1886,12 @@ fn every_implementation_has_what_its_features_imply() {
     );
     let models = crate::cpu::CpuModel::ALL.map(crate::cpu::CpuModel::implementation);
     let implementations = models.into_iter().chain([Implementation::EVERY_FEATURE]);
-    for imp in
-        implementations.flat_map(|imp| [imp.with_levels::<NoEl2>(), imp.with_levels::<WithEl2>()])
-    {
+    for imp in implementations.flat_map(|imp| {
+        [
+            imp.with_levels::<NoEl2>().get(),
+            imp.with_levels::<WithEl2>().get(),
+        ]
+    }) {
         for &(a, b) in &implications {
             assert!(
                 !imp.has(a) || imp.has(b),
@@ -1844,6 +1899,62 @@ fn every_implementation_has_what_its_features_imply() {
             );
         }
     }
+
+    // The identifiers Arm gives only to a processor with EL2: FEAT_EL2 and
+    // FEAT_AA64EL2, and each that implies one of those, alone or with what
+    // every processor here has (`(FEAT_AA64 && FEAT_ECV_POFF) ==>
+    // FEAT_AA64EL2`), directly or through other identifiers, until no more
+    // are found.
+    const EVERY_PROCESSOR: [&str; 5] = [
+        "FEAT_AA64",
+        "FEAT_EL0",
+        "FEAT_EL1",
+        "FEAT_AA64EL0",
+        "FEAT_AA64EL1",
+    ];
+    let edges = identifier_edges(&root);
+    let conjunctive = conjunctive_implications(&root);
+    let mut need_el2: BTreeSet<&str> = BTreeSet::from(["FEAT_EL2", "FEAT_AA64EL2"]);
+    loop {
+        let found = need_el2.len();
+        for (a, implied) in &edges {
+            if implied.iter().any(|b| need_el2.contains(b.as_str())) {
+                need_el2.insert(a);
+            }
+        }
+        for c in &conjunctive {
+            if c.then.iter().any(|t| need_el2.contains(t.as_str())) {
+                let mut own = c
+                    .when
+                    .iter()
+                    .filter(|n| !EVERY_PROCESSOR.contains(&n.as_str()));
+                if let (Some(name), None) = (own.next(), own.next()) {
+                    need_el2.insert(name);
+                }
+            }
+        }
+        if need_el2.len() == found {
+            break;
+        }
+    }
+    assert!(
+        need_el2.contains("FEAT_ECV_POFF"),
+        "AARCHMRS {release}: no (FEAT_AA64 && FEAT_ECV_POFF) ==> FEAT_AA64EL2"
+    );
+    let only_with_el2: Vec<Feature> = Feature::ALL
+        .into_iter()
+        .filter(|&f| !matches!(f, Feature::El2 | Feature::Aa64El2))
+        .filter(|f| f.arm_name().is_some_and(|n| need_el2.contains(n)))
+        .collect();
+    // Exactly those are what a processor without EL2 drops.
+    let with = Implementation::EVERY_FEATURE.with_levels::<WithEl2>();
+    let without = Implementation::EVERY_FEATURE.with_levels::<NoEl2>();
+    let dropped: Vec<Feature> = Feature::ALL
+        .into_iter()
+        .filter(|&f| !matches!(f, Feature::El2 | Feature::Aa64El2))
+        .filter(|&f| with.has(f) && !without.has(f))
+        .collect();
+    assert_eq!(dropped, only_with_el2, "AARCHMRS {release}");
 }
 
 /// The value of the `Features.json` constraint `ast` when the identifiers
@@ -1903,26 +2014,8 @@ fn constraint_value(ast: &Value, holding: &BTreeSet<&str>) -> Option<bool> {
 fn each_model_is_a_processor_arms_feature_model_permits() {
     use crate::cpu::{CpuModel, NoEl2, WithEl2};
 
-    let dir = std::env::var_os(SPEC_DIR_VAR).unwrap_or_else(|| {
-        panic!("set {SPEC_DIR_VAR} to the unpacked AARCHMRS directory (holding Features.json)")
-    });
-    let path = PathBuf::from(dir).join("Features.json");
-    let text = std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-    let root: Value =
-        serde_json::from_slice(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-    let parameter_constraints = root
-        .get("parameters")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|p| p.get("constraints").and_then(Value::as_array))
-        .flatten();
-    let global_constraints = root
-        .get("constraints")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten();
-    let constraints: Vec<&Value> = parameter_constraints.chain(global_constraints).collect();
+    let root = features_json();
+    let constraints = feature_constraints(&root);
 
     const VERSIONS: [&str; 11] = [
         "v8Ap0", "v8Ap1", "v8Ap2", "v8Ap3", "v8Ap4", "v8Ap5", "v8Ap6", "v8Ap7", "v9Ap0", "v9Ap1",
@@ -1931,8 +2024,8 @@ fn each_model_is_a_processor_arms_feature_model_permits() {
     let levels = CpuModel::ALL.into_iter().flat_map(|model| {
         let imp = model.implementation();
         [
-            (model, imp.with_levels::<NoEl2>()),
-            (model, imp.with_levels::<WithEl2>()),
+            (model, imp.with_levels::<NoEl2>().get()),
+            (model, imp.with_levels::<WithEl2>().get()),
         ]
     });
     for (model, imp) in levels {

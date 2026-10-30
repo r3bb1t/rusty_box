@@ -36,7 +36,7 @@ use std::vec::Vec;
 use rusty_box_core::{ClockHz, VmClock};
 use serde_json::Value;
 
-use super::features::{Feature, Implementation};
+use super::features::{Feature, Implementation, LeveledImplementation};
 use super::pauth::PacKeys;
 use super::wait::EventRegister;
 use super::{
@@ -626,6 +626,7 @@ fn equal(a: &V, b: &V) -> bool {
 /// The processor state an accessor's pseudocode reads.
 struct Eval<'a> {
     spec: &'static Spec,
+    /// The processor's implementation, leveled for its level set.
     imp: Implementation,
     el: u8,
     /// `PSTATE.SP`.
@@ -1310,16 +1311,15 @@ fn expected(outcome: Outcome, el: u8, tge: bool, word: u32, writes: bool) -> Obs
 
 /// A processor implementing `imp` and the levels `L` at its reset exception
 /// level, with the vector bases set and the RAM it runs from.
-fn processor<L: Levels>(imp: Implementation) -> (Cpu<L>, Ram) {
+fn processor<L: Levels>(imp: LeveledImplementation<L>) -> (Cpu<L>, Ram) {
     let ips = ClockHz::new(1_000_000).unwrap_or(ClockHz::BOCHS_DEFAULT);
-    let mut cpu = Cpu::<L>::implementing(
+    let mut cpu = Cpu::<L>::leveled(
         CpuConfig {
             ips,
             reset_pc: CODE,
         },
         imp,
     );
-    assert_eq!(cpu.imp, imp, "the implementation names the level set");
     cpu.sys.vbar_el1 = VBAR_EL1;
     if let Some(el2) = cpu.el2_mut() {
         el2.vbar = VBAR_EL2;
@@ -1431,7 +1431,7 @@ fn splitmix(state: &mut u64) -> u64 {
 /// The states to test `imp` in: everything clear; SIMD&FP, SVE and SME
 /// enabled ("open"); open with each bit a control keeps set alone; open with
 /// the OS lock set; and random states.
-fn configs<L: Levels>(imp: Implementation) -> Vec<Config> {
+fn configs<L: Levels>(imp: LeveledImplementation<L>) -> Vec<Config> {
     let (mut cpu, mut ram) = processor::<L>(imp);
     let mut variable = Vec::new();
     for (name, never) in CONTROLS {
@@ -1520,30 +1520,32 @@ struct Mismatch {
     got: Observed,
 }
 
-/// The processors, each implementation with the features of its level set,
-/// which [`Eval`] reads. The Armv9.2 model lacks FEAT_DoubleLock, which
-/// every other has; with EL2 it is a processor no machine builds
-/// (`CpuModel::el2_available`), held to Arm's accessors all the same.
-const IMPLEMENTATIONS: [(&str, Implementation); 6] = [
+/// The processors without EL2, each implementation with the features of
+/// that level set, which [`Eval`] reads. The Armv9.2 model lacks
+/// FEAT_DoubleLock, which every other has.
+const WITHOUT_EL2: [(&str, LeveledImplementation<NoEl2>); 3] = [
     (
         "Cortex-A57",
         Implementation::CORTEX_A57.with_levels::<NoEl2>(),
     ),
+    ("Armv9.2", Implementation::ARMV9P2.with_levels::<NoEl2>()),
+    (
+        "every feature",
+        Implementation::EVERY_FEATURE.with_levels::<NoEl2>(),
+    ),
+];
+
+/// The processors with EL2, as [`WITHOUT_EL2`]. The Armv9.2 model with EL2
+/// is a processor no machine builds (`CpuModel::el2_available`), held to
+/// Arm's accessors all the same.
+const WITH_EL2: [(&str, LeveledImplementation<WithEl2>); 3] = [
     (
         "Cortex-A57 with EL2",
         Implementation::CORTEX_A57.with_levels::<WithEl2>(),
     ),
     (
-        "Armv9.2",
-        Implementation::ARMV9P2.with_levels::<NoEl2>(),
-    ),
-    (
         "Armv9.2 with EL2",
         Implementation::ARMV9P2.with_levels::<WithEl2>(),
-    ),
-    (
-        "every feature",
-        Implementation::EVERY_FEATURE.with_levels::<NoEl2>(),
     ),
     (
         "every feature with EL2",
@@ -1589,7 +1591,7 @@ fn generic(site: &Site) -> bool {
 /// `mismatches`; the number of words stepped.
 fn check<L: Levels>(
     name: &'static str,
-    imp: Implementation,
+    imp: LeveledImplementation<L>,
     el: u8,
     config: &Config,
     unnamed: &[u32],
@@ -1624,7 +1626,7 @@ fn check<L: Levels>(
         }
         let eval = Eval {
             spec,
-            imp,
+            imp: imp.get(),
             el,
             sp: cpu.pstate.sp_sel,
             values: &values,
@@ -1668,7 +1670,7 @@ fn check<L: Levels>(
     if config.sweep {
         let eval = Eval {
             spec,
-            imp,
+            imp: imp.get(),
             el,
             sp: cpu.pstate.sp_sel,
             values: &values,
@@ -1706,7 +1708,7 @@ struct Tally {
 
 /// [`check`] `imp`, of the level set `L`, in each of its [`configs`] at each
 /// exception level it has.
-fn tally<L: Levels>(name: &'static str, imp: Implementation, unnamed: &[u32]) -> Tally {
+fn tally<L: Levels>(name: &'static str, imp: LeveledImplementation<L>, unnamed: &[u32]) -> Tally {
     let mut tally = Tally {
         stepped: 0,
         states: 0,
@@ -1750,19 +1752,12 @@ fn every_system_access_takes_the_exception_arms_accessor_takes() {
     }
     let started = std::time::Instant::now();
     let results: Vec<Tally> = std::thread::scope(|scope| {
-        let handles: Vec<_> = IMPLEMENTATIONS
-            .iter()
-            .map(|&(name, imp)| {
-                let unnamed = &unnamed;
-                scope.spawn(move || {
-                    if imp.has(Feature::El2) {
-                        tally::<WithEl2>(name, imp, unnamed)
-                    } else {
-                        tally::<NoEl2>(name, imp, unnamed)
-                    }
-                })
-            })
-            .collect();
+        let unnamed = &unnamed;
+        let without =
+            WITHOUT_EL2.map(|(name, imp)| scope.spawn(move || tally::<NoEl2>(name, imp, unnamed)));
+        let with =
+            WITH_EL2.map(|(name, imp)| scope.spawn(move || tally::<WithEl2>(name, imp, unnamed)));
+        let handles: Vec<_> = without.into_iter().chain(with).collect();
         handles
             .into_iter()
             .map(|h| h.join().unwrap_or_else(|e| std::panic::resume_unwind(e)))
@@ -1968,15 +1963,12 @@ fn each_el2_register_keeps_the_bits_its_fieldset_gives_it() {
     let spec = spec();
     let mut failures = Vec::new();
     let mut checked = 0;
-    for (name, imp) in IMPLEMENTATIONS
-        .into_iter()
-        .filter(|(_, imp)| imp.has(Feature::El2))
-    {
+    for (name, imp) in WITH_EL2 {
         let (mut reader, mut ram) = processor::<WithEl2>(imp);
         let values = input_values(&mut reader, &mut ram);
         let eval = Eval {
             spec,
-            imp,
+            imp: imp.get(),
             el: 2,
             sp: true,
             values: &values,

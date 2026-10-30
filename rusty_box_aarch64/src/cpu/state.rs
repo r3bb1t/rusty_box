@@ -5,7 +5,7 @@ use rusty_box_core::snap::{SnapRead, SnapResult, SnapWrite};
 use rusty_box_core::SnapError;
 
 use super::el2::{El2State, El2Storage};
-use super::features::{Feature, Implementation};
+use super::features::{Feature, LeveledImplementation};
 use super::mmu::{El10Context, TlbContext};
 use super::regs::{CpuState, CpuStateEl2, PstateRefusal, Reg, RegClass, VReg};
 use super::sysreg::{MDSCR_FIELDS, OSDLR_DLK, RMR_RR};
@@ -28,9 +28,10 @@ mod activity_tag {
 /// FZ16 with FEAT_FP16, and FIZ, AH and NEP with FEAT_AFP (RES0 without
 /// them). The trap enables read as zero on a core without trapped
 /// floating-point exceptions.
-pub(crate) const fn fpcr_mask(imp: Implementation) -> u64 {
+pub(crate) const fn fpcr_mask<L: Levels>(imp: LeveledImplementation<L>) -> u64 {
     use crate::softfloat::{FPCR_AH, FPCR_FIZ, FPCR_FZ16, FPCR_NEP};
     const BASE: u64 = 0x07C0_0000;
+    let imp = imp.get();
     let fp16 = if imp.has(Feature::Fp16) { FPCR_FZ16 } else { 0 };
     let afp = if imp.has(Feature::Afp) {
         FPCR_FIZ | FPCR_AH | FPCR_NEP
@@ -630,8 +631,15 @@ impl<L: Levels> Cpu<L> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cpu::features::Implementation;
     use crate::cpu::{CpuConfig, NoEl2};
     use rusty_box_core::ClockHz;
+
+    /// The implementation the tests' processor has.
+    const IMP: Implementation = Implementation {
+        counter_hz: ClockHz::BOCHS_DEFAULT,
+        ..Implementation::CORTEX_A57
+    };
 
     fn cpu() -> Cpu<NoEl2> {
         Cpu::implementing(
@@ -639,10 +647,7 @@ mod tests {
                 ips: ClockHz::BOCHS_DEFAULT,
                 reset_pc: 0x1000,
             },
-            Implementation {
-                counter_hz: ClockHz::BOCHS_DEFAULT,
-                ..Implementation::CORTEX_A57
-            },
+            IMP,
         )
     }
 
@@ -709,7 +714,7 @@ mod tests {
                 ips: ClockHz::BOCHS_DEFAULT,
                 reset_pc: 0x2000,
             },
-            c.imp,
+            IMP,
         );
         fresh.icount = 500;
         fresh.retired = 400;
@@ -899,11 +904,11 @@ mod tests {
         let others = [
             Implementation {
                 midr: super::super::id::MIDR_SOFTWARE_MODEL,
-                ..c.imp
+                ..IMP
             },
             Implementation {
                 counter_hz: super::super::ARMV8P6_COUNTER_HZ,
-                ..c.imp
+                ..IMP
             },
         ];
         for imp in others {

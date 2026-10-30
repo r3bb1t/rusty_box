@@ -2062,7 +2062,7 @@ mod tests {
                 }
             }
         }
-        (cpu.imp, ids)
+        (cpu.imp.get(), ids)
     }
 
     /// The ID registers, read the way an EL1 guest reads them, advertise
@@ -2161,6 +2161,7 @@ mod tests {
                     Feature::SpecRes => field(isar1, 40) != 0,
                     Feature::Csv2 => field(pfr0, 56) != 0,
                     Feature::Ecv => field(mmfr0, 60) != 0,
+                    Feature::EcvPoff => field(mmfr0, 60) >= 2,
                     Feature::WfxT => field(isar2, 0) >= 2,
                     Feature::Ras => field(pfr0, 28) >= 1,
                     // `Features.json`: `FEAT_RASv1p1 <=> RAS >= 2 || (RAS == 1
@@ -2218,8 +2219,9 @@ mod tests {
             // SPECRES = 1 (no FEAT_SPECRES2), BF16 = 1 (no FEAT_EBF16), I8MM
             // and XS alone (no API or GPI: no IMPLEMENTATION DEFINED
             // algorithm, and APA is never 2, FEAT_EPAC), ISAR2 WFxT = 2
-            // alone, MMFR0 the 4 KiB granule's fields (with EL2, TGranX_2 =
-            // 1: none at stage 2) and ECV = 1 (no FEAT_ECV_POFF), MMFR1
+            // alone, MMFR0 the 4 KiB granule's fields (with EL2, TGran4_2 =
+            // 2 and TGran16_2 and TGran64_2 = 1: the 4 KiB granule alone at
+            // stage 2 too) and ECV = 1, or 2 with FEAT_ECV_POFF, MMFR1
             // HPDS = 1 (no FEAT_HPDS2), LO and PAN
             // alone, MMFR2 CnP, UAO, AT, IDS, TTL and E0PD alone. MMFR1
             // AFP and ISAR2 RPRES are each 1 or 0.
@@ -2266,9 +2268,10 @@ mod tests {
                 stage_2_fields.iter().all(|&f| f >= 1) || stage_2_fields.iter().all(|&f| f == 0),
                 "{stage_2_fields:?}"
             );
-            assert!(
-                field(mmfr0, 60) <= 1,
-                "ECV = 1: FEAT_ECV, not FEAT_ECV_POFF"
+            assert_eq!(
+                field(mmfr0, 60),
+                at(Feature::Ecv, 0, 1) + at(Feature::EcvPoff, 0, 1),
+                "ECV = 1: FEAT_ECV; 2: FEAT_ECV_POFF too"
             );
             assert!(field(mmfr1, 12) <= 1, "HPDS = 1: FEAT_HPDS, not FEAT_HPDS2");
             assert_eq!(

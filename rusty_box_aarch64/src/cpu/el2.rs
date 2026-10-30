@@ -21,7 +21,7 @@
 use rusty_box_core::snap::{SnapRead, SnapResult, SnapWrite};
 use rusty_box_core::SnapError;
 
-use super::features::{Feature, Features, Implementation};
+use super::features::{Feature, Features, LeveledImplementation};
 use super::mmu::{ContextStorage, NoContexts, TlbContexts, TTB_BADDR};
 use super::sysreg::{smcr_mask, DISR_MASK};
 use super::{id, Cpu, El};
@@ -188,7 +188,8 @@ impl El2Regs {
     /// asks. Which bits are RES1 depends on the features `imp` implements:
     /// the RES1 bits of a feature the processor implements are that
     /// feature's field, zero out of reset.
-    pub(crate) const fn reset(imp: Implementation) -> Self {
+    pub(crate) const fn reset<L: Levels>(imp: LeveledImplementation<L>) -> Self {
+        let imp = imp.get();
         let features = imp.features;
         Self {
             hcr: HCR_RES1,
@@ -218,6 +219,7 @@ impl El2Regs {
             smcr: 0,
             cnthctl: CNTHCTL_EL1PCTEN | CNTHCTL_EL1PCEN,
             cntvoff: 0,
+            cntpoff: 0,
             cnthp_ctl: 0,
             cnthp_cval: 0,
             contextidr: 0,
@@ -503,8 +505,13 @@ pub(crate) const CNTHCTL_EL1TVCT: u64 = 1 << 14;
 const CNTHCTL_BASE: u64 = 0xFF;
 /// `CNTHCTL_EL2`'s FEAT_ECV fields: `EL1TVT`, `EL1TVCT`, `EL1NVPCT`,
 /// `EL1NVVCT` (whose traps act only with FEAT_NV, which this processor
-/// lacks), `EVNTIS`. `ECV` (bit 12) is FEAT_ECV_POFF's.
-const CNTHCTL_ECV: u64 = 0x3_E000;
+/// lacks), `EVNTIS`.
+const CNTHCTL_ECV_FIELDS: u64 = 0x3_E000;
+/// `CNTHCTL_EL2.ECV` (FEAT_ECV_POFF), bit 12: `CNTPOFF_EL2` offsets the
+/// physical count EL0 and EL1 read and the EL1 physical timer compares
+/// (Arm `PhysicalOffsetIsValid`, `AArch64_CheckTimerConditions`). Only a
+/// processor with FEAT_ECV_POFF keeps it.
+pub(crate) const CNTHCTL_ECV_POFF: u64 = 1 << 12;
 /// `CNTHP_CTL_EL2.ENABLE` and `IMASK`, the fields a write keeps.
 const CNTHP_CTL_MASK: u64 = 0b11;
 /// `CONTEXTIDR_EL2.PROCID`.
@@ -515,11 +522,17 @@ pub(crate) const VSESR_MASK: u64 = (1 << 24) | 0x00FF_FFFF;
 
 /// The `CNTHCTL_EL2` bits a processor implementing `features` keeps.
 pub(crate) const fn cnthctl_mask(features: Features) -> u64 {
-    if features.has(Feature::Ecv) {
-        CNTHCTL_BASE | CNTHCTL_ECV
+    let ecv = if features.has(Feature::Ecv) {
+        CNTHCTL_ECV_FIELDS
     } else {
-        CNTHCTL_BASE
-    }
+        0
+    };
+    let poff = if features.has(Feature::EcvPoff) {
+        CNTHCTL_ECV_POFF
+    } else {
+        0
+    };
+    CNTHCTL_BASE | ecv | poff
 }
 
 /// Whether a processor implementing `features` has `CONTEXTIDR_EL2`:
@@ -622,6 +635,9 @@ el2_registers! {
     Cnthctl => cnthctl,
     /// `CNTVOFF_EL2`: the virtual count's offset from the physical count.
     Cntvoff => cntvoff,
+    /// `CNTPOFF_EL2` (FEAT_ECV_POFF): the physical count's offset at EL0
+    /// and EL1 while `CNTHCTL_EL2.ECV` is set.
+    Cntpoff => cntpoff,
     /// `CNTHP_CTL_EL2` (`ENABLE` and `IMASK`; `ISTATUS` is computed) and
     /// `CNTHP_CVAL_EL2`: the EL2 physical timer.
     CnthpCtl => cnthp_ctl,
@@ -666,6 +682,14 @@ impl El2Reg {
                 }
             }
             Self::Cnthctl => value & cnthctl_mask(features),
+            // `CNTPOFF_EL2.PO`, all 64 bits, with FEAT_ECV_POFF.
+            Self::Cntpoff => {
+                if features.has(Feature::EcvPoff) {
+                    value
+                } else {
+                    0
+                }
+            }
             Self::CnthpCtl => value & CNTHP_CTL_MASK,
             Self::Contextidr => {
                 if has_contextidr_el2(features) {
@@ -703,6 +727,47 @@ impl El2Reg {
             | Self::CnthpCval => value,
         }
     }
+
+    /// Whether the timers read the register: what
+    /// [`Cpu::el2_timer_inputs`] gathers, and `CNTHP_CTL_EL2`, which its own
+    /// arms write. Only a write of one of these can move a timer.
+    /// Exhaustive (R5): a register added to the list says whether it is
+    /// one.
+    pub(crate) const fn feeds_timers(self) -> bool {
+        match self {
+            Self::Cnthctl | Self::Cntvoff | Self::Cntpoff | Self::CnthpCtl | Self::CnthpCval => {
+                true
+            }
+            Self::Hcr
+            | Self::Sctlr
+            | Self::Actlr
+            | Self::Cptr
+            | Self::Hstr
+            | Self::Hacr
+            | Self::Mdcr
+            | Self::Tcr
+            | Self::Ttbr0
+            | Self::Vtcr
+            | Self::Vttbr
+            | Self::Mair
+            | Self::Amair
+            | Self::Vbar
+            | Self::Esr
+            | Self::Far
+            | Self::Hpfar
+            | Self::Elr
+            | Self::Spsr
+            | Self::Afsr0
+            | Self::Afsr1
+            | Self::Tpidr
+            | Self::Vpidr
+            | Self::Vmpidr
+            | Self::Smcr
+            | Self::Contextidr
+            | Self::Vdisr
+            | Self::Vsesr => false,
+        }
+    }
 }
 
 impl El2Regs {
@@ -725,7 +790,7 @@ pub struct El2State {
 impl El2State {
     /// The state out of reset on a processor implementing `imp`: `SP_EL2`
     /// zero and the registers as [`El2Regs::reset`] leaves them.
-    pub(crate) const fn reset(imp: Implementation) -> Self {
+    pub(crate) const fn reset<L: Levels>(imp: LeveledImplementation<L>) -> Self {
         Self {
             sp_el2: 0,
             regs: El2Regs::reset(imp),

@@ -146,13 +146,14 @@ vocabulary are `rusty_box_core`'s, shared with the x86 machine.
   everything an observer hears after every step.
 - **Counter polls fast-forward exactly.** When nobody watches every
   instruction, a loop that reads the physical or the virtual count
-  (`CNTPCT_EL0`, or `CNTVCT_EL0` with `CNTVOFF_EL2` subtracted), compares
+  (`CNTPCT_EL0`, with `CNTPOFF_EL2` subtracted at EL0 and EL1 under
+  `CNTHCTL_EL2.ECV`, or `CNTVCT_EL0` with `CNTVOFF_EL2` subtracted), compares
   it once with a value it does not change and branches on an ordering of
   the two jumps over every whole iteration that goes as the current one
   does: along a growing count each such branch changes its outcome at most
   once, so a binary search finds the last of them. The read must pass every
   check the instruction makes, EL2's traps included, and a stretch across
-  the virtual count's wrap is not skipped. The skip stops short of the budget and of
+  an offset count's wrap is not skipped. The skip stops short of the budget and of
   the next timer or device event, passes no exit address, and leaves
   iterations to run that refill the PC history. A trace that may begin such
   a loop is marked when it is built, so no other trace pays for the check
@@ -291,7 +292,7 @@ is) must reproduce, are:
 |---|---|
 | Processor | One of two models (`VirtConfig::cpu`, `CpuModel`). `cortex-a57`, the default: Cortex-A57-shaped ARMv8.0, the whole ARMv8.0 FP and Advanced SIMD instruction set (integer and floating point, vector and scalar, saturation setting FPSR.QC), the Cortex-A57's optional Cryptographic Extension (AES, 64-bit PMULL, SHA-1, SHA-256) and CRC32, as QEMU's `cortex-a57` has them, with QEMU's 62.5 MHz system counter. `armv9.2`: an Armv9.2 processor with SME and SME2 and no SVE (the features below), Streaming SVE vectors of 128 to 512 bits, `MIDR_EL1` 0x000F_0520 (implementer 0, a software model) and the 1 GHz counter Armv8.6 and later require. Both: EL0 and EL1, and on the Cortex-A57 EL2 with `MachineBuilder::with_el2` (see below), AArch64 only, the Cortex-A57's caches as `CTR_EL0`, `CLIDR_EL1` and `CCSIDR_EL1` report them, 4 KiB-granule MMU, stage 1 and with EL2 stage 2, with a TLB holding both stages' translations, exclusives, PSCI 1.1 (DEN 0022D) over `HVC`, or over `SMC` with EL2, the conduits QEMU's `virt` provides (see "Where the references differ") |
 | Interrupts | GICv2 without the Security Extensions, for one processor, as IHI 0048B specifies it, in QEMU's structure: both interrupt groups, with Group 0 on FIQ under `FIQEn`, the Group 1 aliases (`GICC_AIAR`, `GICC_AEOIR`, `GICC_AHPPIR`, `GICC_ABPR`), preemption by group priority, the running priority and active priority registers, and 4 KiB distributor and 8 KiB CPU interface regions; + GICv2m frame |
-| Timers | EL1 physical and virtual generic timers; with EL2, the EL2 physical timer (`CNTHP_*`, PPI 10), `CNTVOFF_EL2` and `CNTHCTL_EL2`'s traps and event stream |
+| Timers | EL1 physical and virtual generic timers; with EL2, the EL2 physical timer (`CNTHP_*`, PPI 10), `CNTVOFF_EL2` and `CNTHCTL_EL2`'s traps and event stream; with FEAT_ECV_POFF too, `CNTPOFF_EL2` (built, but no model has FEAT_ECV_POFF and EL2 yet) |
 | Devices | PL011 UART (`UARTPeriphID2` revision 1, QEMU's ID, as DDI 0183F describes the revisions up to r1p4: a 16-entry receive FIFO with overrun and break status, receive interrupts at the `UARTIFLS` level, modem-status interrupts on line changes, loopback, a receiver gated by `UARTEN` and `RXE`, a transmitter gated by `UARTEN` and `TXE` whose 16-entry transmit FIFO holds what is written meanwhile, transmit interrupts as the transmit FIFO drains through the `UARTIFLS` level, and the receive timeout counted in bit periods of the programmed baud rate on the machine's clock, while characters themselves cross the line in no time; see "Where the references differ"), PL031 RTC (r1p3, as DDI 0224C describes it: stopped until `RTCCR` starts it, zeroed by any later `RTCCR` write, stopped again by a system reset), PL061 GPIO as DDI 0190B describes it (address-masked `GPIODATA`, edge and level detection on the lines' levels, outputs included) with QEMU's `gpio-key` power button on line 3, CFI flash ×2 (QEMU `pflash_cfi01` semantics, whole 64 MiB banks decoded), `fw_cfg` (traditional and DMA interfaces, no files), 32 virtio-mmio transports (QEMU's legacy layout while empty; non-legacy, as QEMU's `force-legacy=false`, once the host plugs in QEMU's 2D `virtio-gpu-device` with its EDID, `virtio-keyboard-device`, `virtio-tablet-device` or `virtio-blk-device` over a raw image in memory or a host file, which take the highest free ones), an empty PCIe ECAM/windows |
 | Board | QEMU `virt` memory map and IRQ wiring; QEMU 11.1.2's device tree in `assets/` (two QEMU bugs fixed, see "Where the references differ"; its `rng-seed` and `kaslr-seed` fixed, see below), its memory node replaced by one for the machine's RAM, `/chosen` set per machine, its `/psci` node replaced by QEMU's for the conduit the firmware answers on (`fdt_add_psci_node`), and its processor's `compatible` set to the model's, where libfdt puts them, so a kernel boot's tree is QEMU's property for property; a host's own tree gets the same, every memory node and its `/psci` node replaced and `/chosen` added where it has none, as QEMU's `-dtb` does |
 | Boot | UEFI firmware from flash; or a Linux `Image`, initramfs and device tree placed as QEMU's `hw/arm/boot.c` places them, entered with the register state its boot stub leaves, and the UART's console set up at 115200 baud, 8N1, as firmware leaves it (see "Where the references differ") |
@@ -420,7 +421,12 @@ translation regime has its own TLB entries, which the `TLBI …E2` forms and
 `AT S1E2R` and `AT S1E2W` reach; and the EL2 physical timer interrupts on
 PPI 10, the virtual counter reads `CNTVOFF_EL2` back from the physical one,
 and `CNTHCTL_EL2` traps EL1's and EL0's timer accesses and drives the event
-stream EL2 sees. `HCR_EL2.VI`, `VF` and `VSE` raise a virtual IRQ, FIQ
+stream EL2 sees. A processor that has FEAT_ECV_POFF as well (none of the
+models yet: the Armv9.2 model, which has FEAT_ECV, has no EL2) has
+`CNTPOFF_EL2`: under `CNTHCTL_EL2.ECV`, EL0 and EL1 read the physical count
+less it, and the EL1 physical timer compares that count at every level
+(Arm `PhysicalOffsetIsValid`, `AArch64_CheckTimerConditions`).
+`HCR_EL2.VI`, `VF` and `VSE` raise a virtual IRQ, FIQ
 and SError for EL1 and EL0 where `IMO`, `FMO` and `AMO` route the physical
 kind to EL2: `ISR_EL1` shows them, each is taken to EL1 when its `PSTATE`
 mask is clear (after a deliverable physical interrupt, IRQ before FIQ
@@ -832,7 +838,11 @@ integration tests of the public API.
   departure is PRFM (register) with `Rt = 11xxx`, which Arm's data gives to
   RPRFM (FEAT_RPRFM) and which on a core without the feature is a PRFM with
   a reserved prfop. Against `Features.json`, each processor model's
-  feature set holds what Arm makes each of its features imply, and every
+  feature set holds what Arm makes each of its features imply, and what a
+  conjunction of identifiers implies where all of them hold of a
+  processor that can be built (`(FEAT_AA64 && FEAT_ECV_POFF) ==>
+  FEAT_AA64EL2`, with and without EL2, on the implementation with every
+  feature too), and every
   constraint whose identifiers decide it holds when the model's features,
   its architecture version and those it includes, and the structural
   features every processor here has (AArch64 at EL0 and EL1, a PIPT
@@ -893,7 +903,19 @@ integration tests of the public API.
   TLB entries apart from EL1&0's, `TLBI ALLE2`, one privilege level's
   permissions (AP[1] and bit 53 ignored, XN), one address range with its
   own TBI, `AT S1E2R` and `S1E2W`, and `AT S12E*` from EL2 through the
-  EL1&0 regime. `tests/unit/el2_vectors.rs` replays `tests/vectors/qemu_el2.txt`:
+  EL1&0 regime; and FEAT_ECV_POFF on the processor with every feature:
+  `CNTPOFF_EL2` and `CNTHCTL_EL2.ECV`, the offset count EL0 and EL1 read
+  and EL2 does not (EL0's under `HCR_EL2.TGE` included), the EL1 physical
+  timer's `TVAL` read and written at each level, `ISTATUS`, line and
+  deadline on the offset count (its wrap included), the timers a machine
+  holds after each EL2 write that moves them (`CNTPOFF_EL2`,
+  `CNTHCTL_EL2`, `CNTVOFF_EL2`, `CNTHP_CVAL_EL2`) or does not, and that a
+  write of any other EL2 register moves nothing they read, no offset
+  without the feature even where `ECV` is held set, a counter poll
+  fast-forwarded on the offset count (and none skipped across its wrap),
+  the register by a host's name for it, and a snapshot that keeps the
+  offset where the processor has it and is refused where it does not.
+  `tests/unit/el2_vectors.rs` replays `tests/vectors/qemu_el2.txt`:
   2,400 cases, generated by `tests/vectors/gen_qemu_el2.py` with a
   bare-metal EL2 program (`qemu_el2_runner.S`, `qemu_el2.ld`) on QEMU
   11.1.2's `-M virt,virtualization=on -cpu cortex-a57`, each writing
@@ -910,7 +932,10 @@ integration tests of the public API.
   where it has none (and `tests/unit/machine.rs` one whose `/psci` node is
   another PSCI 0.1 node, and another memory node, coming out as QEMU's own
   tree does), a hypervisor taking the EL2 timer's PPI 10 and powering off with
-  `SMC`, and a snapshot holding the EL2 state that a machine built without
+  `SMC`, the virtual timer's PPI 11 taken within two turns of the guest's
+  two-instruction loop after the `CNTVOFF_EL2` write that moves the
+  virtual count past `CVAL`, and a
+  snapshot holding the EL2 state that a machine built without
   virtualization refuses before changing anything.
 - A second, independent check needs no Arm data: on all 2^32 words, every
   word the decoder hands to a handler that
@@ -1525,6 +1550,14 @@ one open.
   written, 0b01, which `PAREncodeShareability` never gives
   (`target/arm/tcg/cpregs-at.c` `par_el1_shareability`;
   [docs/qemu-upstream-bugs.md](../docs/qemu-upstream-bugs.md) entry 28).
+- **No FEAT_ECV_POFF without EL2.** Arm's `Features.json` gives FEAT_ECV_POFF
+  only to a processor with EL2 (`(FEAT_AA64 && FEAT_ECV_POFF) ==>
+  FEAT_AA64EL2`), so a processor built without EL2 drops it, and with
+  FEAT_ECV its `ID_AA64MMFR0_EL1.ECV` reads 1. QEMU 11.1.2's `max` sets
+  `ECV` to 2 (`target/arm/tcg/cpu64.c` `aarch64_max_tcg_initfn`) and keeps
+  it when `virtualization=off` takes EL2 away: `arm_cpu_realizefn` clears
+  the hypervisor fields of the ID registers then, but not `ECV`
+  ([docs/qemu-upstream-bugs.md](../docs/qemu-upstream-bugs.md) entry 29).
 - **`DC ZVA` on Device memory is an alignment fault.** Arm ARM
   `AArch64.S1HasAlignmentFault` faults every `DC ZVA` to Device memory, and
   with the MMU off every data access is to Device memory; under stage 2,

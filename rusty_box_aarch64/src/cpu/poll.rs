@@ -44,16 +44,17 @@
 //!   agree. Each such condition, as the counter value grows, changes its
 //!   outcome at most once.
 //! - The count read is non-decreasing in the tick count: the physical count
-//!   (`Cpu::counter_at`, `CNTPCT = floor(icount * counter_hz / ips)`)
-//!   everywhere, and the virtual count, the physical count less
-//!   `CNTVOFF_EL2` (`Cpu::virtual_count_at`), but where it wraps to 0, which
-//!   a skip whose last count is below its first would cross and is
-//!   refused. Iteration `i` reads it at tick `icount + i * len`. So when
-//!   iterations 0 and `i` take the
-//!   same path, every `B.cond` on it has one outcome at both ends of an
-//!   interval of counter values, and so throughout it: every iteration in
-//!   between takes that path too. The search for the first iteration that
-//!   goes another way is a binary search, and exact.
+//!   (`Cpu::counter_at`, `CNTPCT = floor(icount * counter_hz / ips)`), less
+//!   `CNTPOFF_EL2` at EL0 and EL1 under `CNTHCTL_EL2.ECV`
+//!   (`Cpu::physical_count_at`), and the virtual count, the physical count
+//!   less `CNTVOFF_EL2` (`Cpu::virtual_count_at`), but where an offset count
+//!   wraps to 0, which a skip whose last count is below its first would
+//!   cross and is refused. Iteration `i` reads it at tick
+//!   `icount + i * len`. So when iterations 0 and `i` take the same path,
+//!   every `B.cond` on it has one outcome at both ends of an interval of
+//!   counter values, and so throughout it: every iteration in between takes
+//!   that path too. The search for the first iteration that goes another
+//!   way is a binary search, and exact.
 //! - Time is the only other thing the iterations change, and the skip
 //!   moves `icount` and `retired` by exactly the instructions skipped.
 //!   State derived from the counter — the event stream that sets the Event
@@ -289,7 +290,8 @@ impl PollStep {
 /// Closed (R5): the two counter registers a poll may read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PollCount {
-    /// `CNTPCT_EL0`, the physical count.
+    /// `CNTPCT_EL0`, the physical count, less `CNTPOFF_EL2` at EL0 and EL1
+    /// under `CNTHCTL_EL2.ECV`.
     Physical,
     /// `CNTVCT_EL0`, the virtual count: the physical count less
     /// `CNTVOFF_EL2`.
@@ -323,10 +325,11 @@ struct Poll<'x> {
 }
 
 impl<L: Levels> Cpu<L> {
-    /// What a read of `count` reads at the tick `icount`.
+    /// What a read of `count` at the current level reads at the tick
+    /// `icount`.
     fn poll_count_at(&self, count: PollCount, icount: u64) -> u64 {
         match count {
-            PollCount::Physical => self.counter_at(icount).get(),
+            PollCount::Physical => self.physical_count_at(self.pstate.el, icount).get(),
             PollCount::Virtual => self.virtual_count_at(icount).get(),
         }
     }
@@ -540,7 +543,7 @@ impl<L: Levels> Cpu<L> {
             return;
         }
         // Below 2^62 the signed orderings of the count are monotone too, and
-        // a virtual count that ends no lower than it starts has not wrapped
+        // an offset count that ends no lower than it starts has not wrapped
         // to 0 between: the skip spans far fewer than 2^64 counts.
         match self.icount.checked_add(fit * len) {
             Some(end) => {

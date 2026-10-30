@@ -24,7 +24,7 @@ and sign-off of the submitter's own.
 
 Reproducers:
 - `docs/qemu-aarch64-probe.S`: a bare-metal EL1 program for
-  `qemu-system-aarch64 -M virt`, one line of output per case (A to O). Its
+  `qemu-system-aarch64 -M virt`, one line of output per case (A to P). Its
   header gives the commands and the expected and observed output.
 - `docs/qemu-aarch64-probe-user.c`: a static Linux program for
   `qemu-aarch64 -cpu max`, one case per argument, for the entries fixed
@@ -1125,6 +1125,42 @@ Found on QEMU 11.1.2; master not checked.
 **Fix**: not yet written. `get_phys_addr_lpae()` would map 0b01 to one of
 the permitted values. `rusty_box_aarch64` takes Outer Shareable
 (`src/cpu/memattr.rs`, `Shareability::decode`).
+
+### 29. `max` without EL2 advertises FEAT_ECV_POFF
+
+**Impact**: very low. `-cpu max` with EL2 taken away (`-M virt`, whose
+`virtualization` is off by default) reports `ID_AA64MMFR0_EL1.ECV` = 2,
+FEAT_ECV_POFF, a feature only a processor with EL2 has. Its one register,
+`CNTPOFF_EL2`, is an EL2 register, so software that believes the field
+finds nothing to program; only software that checks the ID registers
+against Arm's feature rules sees the contradiction.
+
+**Location**: `target/arm/tcg/cpu64.c`, `aarch64_max_tcg_initfn()`, sets
+`ID_AA64MMFR0.ECV` to 2; `target/arm/cpu.c`, `arm_cpu_realizefn()`, on
+`!cpu->has_el2` unsets `ARM_FEATURE_EL2`, and its later
+`!arm_feature(env, ARM_FEATURE_EL2)` block clears the hypervisor fields
+of the ID registers (`ID_AA64PFR0.EL2`, `ID_PFR1.VIRTUALIZATION`) but not
+`ID_AA64MMFR0.ECV`.
+
+**What the Arm ARM says**: AARCHMRS `Features.json` constrains
+`(FEAT_AA64 && FEAT_ECV_POFF) ==> FEAT_AA64EL2`, and `FEAT_ECV_POFF <=>
+(UInt(ID_AA64MMFR0_EL1.ECV) >= 2)`: a processor without EL2 has
+`ECV` at most 1.
+
+**Reproduce**: probe case P (`-M virt -cpu max`, no EL2) prints
+`ID_AA64MMFR0_EL1`:
+
+    EL1:     mrs x5, id_aa64mmfr0_el1 (0xD538_0705)
+    Arm:     P 1...............   (ECV, bits 63:60, at most 1)
+    QEMU:    P 2100032310201126   (ECV 2)
+
+Found on QEMU 11.1.2; master not checked.
+
+**Fix**: not yet written. The `!arm_feature(env, ARM_FEATURE_EL2)` block
+of `arm_cpu_realizefn()` would lower `ID_AA64MMFR0.ECV` to 1 where it is
+above 1, beside the hypervisor fields it clears. `rusty_box_aarch64`
+drops the feature from a processor without EL2 (`src/cpu/features.rs`,
+`Implementation::with_levels`).
 
 ---
 

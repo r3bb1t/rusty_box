@@ -10,7 +10,7 @@
 
 use std::vec::Vec;
 
-use super::super::features::{Feature, Features, Implementation, VecLen};
+use super::super::features::{Feature, Implementation, VecLen};
 use super::super::step::{
     exec, processor, Taken, CPACR_ALL, DATA, FP_TRAP, ILLEGAL_WHEN_STREAMING, SME_DISABLED,
     UNDEFINED,
@@ -501,14 +501,7 @@ fn a_snapshot_with_sme_bits_no_msr_can_set_is_refused() {
         refused(&cpu, Implementation::EVERY_FEATURE),
         "SMCR_EL1 bit 4"
     );
-    let without_sme2: Vec<Feature> = Feature::ALL
-        .into_iter()
-        .filter(|&f| f != Feature::Sme2)
-        .collect();
-    let sme_alone = Implementation {
-        features: Features::of(&without_sme2),
-        ..Implementation::EVERY_FEATURE
-    };
+    let sme_alone = Implementation::every_feature_but(&[Feature::Sme2]);
     let mut cpu = processor(sme_alone);
     assert!(!refused(&cpu, sme_alone));
     cpu.sys.smcr_el1 = SMCR_EZT0;

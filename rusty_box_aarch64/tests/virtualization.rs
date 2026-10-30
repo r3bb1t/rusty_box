@@ -2,7 +2,9 @@
 //! (`MachineBuilder::with_el2`, QEMU `-M virt,virtualization=on`), as a
 //! guest and a host see it (R9): the processor starts at EL2, the device
 //! tree names `SMC` as the PSCI conduit, the EL2 physical timer interrupts
-//! on PPI 10, a snapshot keeps the EL2 state and is refused by a machine
+//! on PPI 10, a `CNTVOFF_EL2` write that moves the virtual count past
+//! `CVAL` has the virtual timer interrupt at once, a snapshot keeps the EL2
+//! state and is refused by a machine
 //! built without the extensions, and a processor model that cannot have EL2
 //! yet is refused it.
 //!
@@ -340,6 +342,87 @@ fn the_el2_timer_interrupts_on_ppi_10() {
     assert_eq!(m.reg_read(Reg::X20), 3, "three timer interrupts");
     assert_eq!(m.reg_read(Reg::X5), 26, "each one INTID 26, PPI 10");
     assert_eq!(m.pstate().el, El::El2);
+}
+
+/// A hypervisor at EL2 sets the virtual timer 2^40 counts ahead of the
+/// virtual count, then writes `CNTVOFF_EL2` so the virtual count stands
+/// 2^41 counts further on, past `CVAL`: the timer's interrupt, PPI 11
+/// (INTID 27), arrives within the next few instructions, not where the
+/// virtual count would have reached `CVAL` before the write.
+///
+/// ```text
+/// _start: ldr x0, =0x40001000   ; msr vbar_el2, x0
+///         mov x0, #(1 << 4)     ; msr hcr_el2, x0          // IMO
+///         ldr x1, =0x08000000   ; mov w2, #1 ; str w2, [x1] // GICD_CTLR
+///         mov w2, #(1 << 27)    ; str w2, [x1, #0x100]      // ISENABLER0
+///         ldr x3, =0x08010000   ; mov w2, #1 ; str w2, [x3] // GICC_CTLR
+///         mov w2, #0xff         ; str w2, [x3, #4]          // GICC_PMR
+///         msr cntvoff_el2, xzr
+///         mrs x4, cntvct_el0    ; mov x5, #(1 << 40) ; add x4, x4, x5
+///         msr cntv_cval_el0, x4
+///         mov x4, #1            ; msr cntv_ctl_el0, x4
+///         msr daifclr, #2       ; mov x21, #0
+///         ldr x5, =0xFFFFFE0000000000 ; msr cntvoff_el2, x5  // -2^41
+/// 1:      add x21, x21, #1      ; b 1b
+///         .org 0x1280                                       // IRQ, EL2 with SP_EL2
+///         ldr w5, [x3, #0xc]    ; mov x23, x21              // GICC_IAR
+///         ldr x0, =0x84000008   ; smc #0                    // SYSTEM_OFF
+/// 2:      b 2b
+/// ```
+#[test]
+fn moving_cntvoff_el2_past_cval_interrupts_at_once() {
+    const PROGRAM: [(u64, u32); 42] = [
+        (0x00, 0x5800_0380),
+        (0x04, 0xD51C_C000),
+        (0x08, 0xD280_0200),
+        (0x0C, 0xD51C_1100),
+        (0x10, 0x5800_0341),
+        (0x14, 0x5280_0022),
+        (0x18, 0xB900_0022),
+        (0x1C, 0x52A1_0002),
+        (0x20, 0xB901_0022),
+        (0x24, 0x5800_02E3),
+        (0x28, 0x5280_0022),
+        (0x2C, 0xB900_0062),
+        (0x30, 0x5280_1FE2),
+        (0x34, 0xB900_0462),
+        (0x38, 0xD51C_E07F),
+        (0x3C, 0xD53B_E044),
+        (0x40, 0xD2C0_2005),
+        (0x44, 0x8B05_0084),
+        (0x48, 0xD51B_E344),
+        (0x4C, 0xD280_0024),
+        (0x50, 0xD51B_E324),
+        (0x54, 0xD503_42FF),
+        (0x58, 0xD280_0015),
+        (0x5C, 0x5800_0165),
+        (0x60, 0xD51C_E065),
+        (0x64, 0x9100_06B5),
+        (0x68, 0x17FF_FFFF),
+        (0x6C, 0x0000_0000),
+        (0x70, 0x4000_1000),
+        (0x74, 0x0000_0000),
+        (0x78, 0x0800_0000),
+        (0x7C, 0x0000_0000),
+        (0x80, 0x0801_0000),
+        (0x84, 0x0000_0000),
+        (0x88, 0x0000_0000),
+        (0x8C, 0xFFFF_FE00),
+        (0x1280, 0xB940_0C65),
+        (0x1284, 0xAA15_03F7),
+        (0x1288, 0x5800_0080),
+        (0x128C, 0xD400_0003),
+        (0x1290, 0x1400_0000),
+        (0x1298, 0x8400_0008),
+    ];
+    let mut ram = vec![0u8; RAM_LEN];
+    let mut m = bare(&mut ram);
+    load(&mut m, &PROGRAM);
+    let out = m.step(RunBudget::Instructions(1_000_000));
+    assert_eq!(out.stop, StopReason::PoweredOff, "the interrupt arrived");
+    assert_eq!(m.reg_read(Reg::X5), 27, "INTID 27, PPI 11");
+    let spins = m.reg_read(Reg::X23);
+    assert!(spins <= 2, "{spins} iterations after the write");
 }
 
 /// A snapshot of a machine with virtualization holds its EL2 state: a

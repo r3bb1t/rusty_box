@@ -31,7 +31,7 @@
 
 use std::vec::Vec;
 
-use super::super::features::{Feature, Features, Implementation, VecLen};
+use super::super::features::{Feature, Implementation, VecLen};
 use super::super::fp_estimate::fpsr::{DZC, IDC, IOC, IXC, OFC, UFC};
 use super::super::sctlr;
 use super::super::step::{
@@ -1563,14 +1563,9 @@ fn the_sve2p1_instructions_need_streaming_mode_and_sme2() {
     for insn in all {
         assert_eq!(exec(&mut cpu, insn), Some(NOT_STREAMING), "{insn:#010x}");
     }
-    let features: Vec<Feature> = Feature::ALL
-        .into_iter()
-        .filter(|&f| f != Feature::Sme2)
-        .collect();
     let mut cpu = processor(Implementation {
-        features: Features::of(&features),
         max_svl: VecLen::MAX,
-        ..Implementation::EVERY_FEATURE
+        ..Implementation::every_feature_but(&[Feature::Sme2])
     });
     cpu.set_pstate_sm(true);
     for insn in all {

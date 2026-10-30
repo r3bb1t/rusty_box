@@ -23,15 +23,15 @@
 use std::boxed::Box;
 use std::vec::Vec;
 
-use rusty_box_core::{ClockHz, SnapError, VmClock};
+use rusty_box_core::{ClockHz, SnapError, VmClock, VmInstant};
 
 use super::el2::{
-    El2Reg, CPTR_TFP, CPTR_TSM, HCR_AMO, HCR_CD, HCR_DC, HCR_FMO, HCR_HCD, HCR_IMO, HCR_PTW,
-    HCR_TEA, HCR_TGE, HCR_TSC, HCR_VF, HCR_VI, HCR_VM, HCR_VSE, MDCR_TDE,
+    El2Reg, CNTHCTL_ECV_POFF, CPTR_TFP, CPTR_TSM, HCR_AMO, HCR_CD, HCR_DC, HCR_FMO, HCR_HCD,
+    HCR_IMO, HCR_PTW, HCR_TEA, HCR_TGE, HCR_TSC, HCR_VF, HCR_VI, HCR_VM, HCR_VSE, MDCR_TDE,
 };
 use super::exception::AccessSyndrome;
 use super::exec::Fault;
-use super::features::{Feature, Features, Implementation};
+use super::features::{Feature, Implementation};
 use super::mmu::saved_layout::{
     CONTEXTS, CONTEXT_BYTES, CONTEXT_HCR, CONTEXT_SCTLR, CONTEXT_VTCR, CONTEXT_VTTBR, ENTRY_BYTES,
     ENTRY_S2_DEVICE, ENTRY_S2_LEVEL, ENTRY_S2_PERMS, ENTRY_STAGE1, KEPT_BYTES,
@@ -41,10 +41,10 @@ use super::mmu::{DataAccess, El10Context, TlbContext};
 use super::op::Extend;
 use super::sysreg::{CPACR_FPEN, CPACR_SMEN, SMCR_EZT0};
 use super::{
-    id, Cpu, CpuConfig, El, Ipa, Levels, NoEl2, NoTranslation, Pstate, Step, SysReg, Tlb,
-    TranslationFault, TranslationStage, WithEl2,
+    id, Cpu, CpuConfig, El, Ipa, Levels, NoEl2, NoTranslation, Pstate, Step, SysReg, SysRegRefusal,
+    TimerLines, Tlb, TranslationFault, TranslationStage, WithEl2, WriteEffect,
 };
-use crate::bus::{AccessWidth, BusFault, PhysAddr, PhysBus};
+use crate::bus::{AccessWidth, BusFault, CodeEpoch, FetchSource, PhysAddr, PhysBus};
 use crate::instrumentation::{ExceptionKind, NoInstrumentation};
 
 const HVC: u32 = 0xD402_4682; // hvc #0x1234
@@ -1340,14 +1340,7 @@ fn a_snapshot_whose_smcr_el2_holds_a_bit_no_msr_keeps_is_refused() {
             .restore(&mut image.as_slice())
             .is_err()
     };
-    let without_sme2: Vec<Feature> = Feature::ALL
-        .into_iter()
-        .filter(|&f| f != Feature::Sme2)
-        .collect();
-    let sme_alone = Implementation {
-        features: Features::of(&without_sme2),
-        ..Implementation::EVERY_FEATURE
-    };
+    let sme_alone = Implementation::every_feature_but(&[Feature::Sme2]);
     assert!(!refused(Implementation::EVERY_FEATURE, SMCR_EZT0 | 3));
     assert!(
         refused(Implementation::EVERY_FEATURE, 0x10),
@@ -3327,4 +3320,615 @@ fn a_value_no_translation_reads_makes_no_new_context() {
         m.cpu.x[2], 0x7777,
         "MAIR_EL1 changed: the walk is made again"
     );
+}
+
+// ----- FEAT_ECV_POFF: the physical count's offset -----
+//
+// The words are GNU as 2.42's with `.arch armv8.6-a`, `CNTPOFF_EL2` written
+// as `s3_4_c14_c0_6`, which its objdump names `cntpoff_el2`.
+
+const MRS_CNTPCT: u32 = 0xD53B_E020; // mrs x0, cntpct_el0
+const MRS_CNTPCTSS: u32 = 0xD53B_E0A0; // mrs x0, cntpctss_el0
+const MRS_CNTPOFF: u32 = 0xD53C_E0C0; // mrs x0, cntpoff_el2
+const MSR_CNTPOFF: u32 = 0xD51C_E0C0; // msr cntpoff_el2, x0
+const MRS_CNTHCTL: u32 = 0xD53C_E100; // mrs x0, cnthctl_el2
+const MSR_CNTHCTL: u32 = 0xD51C_E100; // msr cnthctl_el2, x0
+const MRS_CNTP_CTL: u32 = 0xD53B_E220; // mrs x0, cntp_ctl_el0
+const MSR_CNTP_CTL: u32 = 0xD51B_E220; // msr cntp_ctl_el0, x0
+const MRS_CNTP_CVAL: u32 = 0xD53B_E240; // mrs x0, cntp_cval_el0
+const MRS_CNTP_TVAL: u32 = 0xD53B_E200; // mrs x0, cntp_tval_el0
+const MSR_CNTP_TVAL: u32 = 0xD51B_E200; // msr cntp_tval_el0, x0
+const MSR_CNTV_CTL: u32 = 0xD51B_E320; // msr cntv_ctl_el0, x0
+const MSR_CNTVOFF: u32 = 0xD51C_E060; // msr cntvoff_el2, x0
+const MSR_CNTHP_CTL: u32 = 0xD51C_E220; // msr cnthp_ctl_el2, x0
+const MSR_CNTHP_CVAL: u32 = 0xD51C_E240; // msr cnthp_cval_el2, x0
+/// `CNTKCTL_EL1.EL0PCTEN`: EL0's reads of the physical count enabled.
+const EL0PCTEN: u64 = 1 << 0;
+/// `CNTKCTL_EL1.EL0PTEN`: EL0's accesses to the EL1 physical timer enabled.
+const EL0PTEN: u64 = 1 << 9;
+/// `CNTx_CTL.ENABLE` and `ISTATUS`.
+const TIMER_ENABLE: u64 = 1 << 0;
+const TIMER_ISTATUS: u64 = 1 << 2;
+
+/// Every feature but FEAT_ECV_POFF: FEAT_ECV alone.
+fn ecv_without_poff() -> Implementation {
+    Implementation::every_feature_but(&[Feature::EcvPoff])
+}
+
+/// A processor with FEAT_ECV_POFF at the tick 12,345 (its counter runs at
+/// one count a tick), `CNTPOFF_EL2` holding `offset` and `CNTHCTL_EL2.ECV`
+/// as `ecv` says, each written by an `MSR` at EL2, and EL0's reads of the
+/// physical count enabled.
+fn with_physical_offset(offset: u64, ecv: bool) -> Machine<WithEl2> {
+    let mut m = Machine::<WithEl2>::new(Implementation::EVERY_FEATURE);
+    m.cpu.wait_until(VmInstant::from_ticks(12_345));
+    m.cpu.sys.cntkctl_el1 |= EL0PCTEN;
+    m.at(El::El2);
+    m.cpu.x[0] = offset;
+    assert_eq!(m.run(MSR_CNTPOFF), None);
+    m.at(El::El2);
+    m.cpu.x[0] = m.cpu.el2().cnthctl | if ecv { CNTHCTL_ECV_POFF } else { 0 };
+    assert_eq!(m.run(MSR_CNTHCTL), None);
+    m
+}
+
+/// Run `insn` at `el`: what it reads into X0, and the physical count it ran
+/// at.
+fn read_at(m: &mut Machine<WithEl2>, el: El, insn: u32) -> (u64, u64) {
+    m.at(el);
+    let count = m.cpu.counter().get();
+    assert_eq!(m.run(insn), None, "{insn:#010x} at {el:?}");
+    (m.cpu.x[0], count)
+}
+
+/// The timers as a machine holds them between its samples of them
+/// (`VirtMachine::sync_events`): the levels it drives the timer PPIs of
+/// the GIC with, and the tick it next samples them at. It samples them
+/// afresh where the processor says a register write moved them
+/// ([`Cpu::take_timer_dirty`]).
+#[derive(Debug, PartialEq, Eq)]
+struct HeldTimers {
+    lines: TimerLines,
+    deadline: Option<VmInstant>,
+}
+
+impl HeldTimers {
+    /// The timers as they are.
+    fn of(cpu: &Cpu<WithEl2>) -> Self {
+        Self {
+            lines: cpu.timer_lines(),
+            deadline: cpu.next_timer_deadline(),
+        }
+    }
+
+    /// Sample the timers afresh if the processor says a write since the
+    /// last sample moved them: whether it did.
+    fn sync(&mut self, cpu: &mut Cpu<WithEl2>) -> bool {
+        let moved = cpu.take_timer_dirty();
+        if moved {
+            *self = Self::of(cpu);
+        }
+        moved
+    }
+}
+
+/// FEAT_ECV_POFF: with `CNTHCTL_EL2.ECV` set, EL0 and EL1 read the physical
+/// count less `CNTPOFF_EL2`, modulo 2^64, through `CNTPCT_EL0` and
+/// `CNTPCTSS_EL0`, and EL2 the count itself (Arm's accessors of both); with
+/// `ECV` clear the offset takes no part. An offset above the count wraps
+/// the count EL1 reads. `CNTPOFF_EL2` holds all 64 bits, read back at EL2.
+#[test]
+fn cntpoff_offsets_the_physical_count_below_el2() {
+    for (ecv, offset) in [(false, 1_000), (true, 1_000), (true, 1 << 40)] {
+        let mut m = with_physical_offset(offset, ecv);
+        for insn in [MRS_CNTPCT, MRS_CNTPCTSS] {
+            for el in [El::El0, El::El1] {
+                let (read, count) = read_at(&mut m, el, insn);
+                let want = if ecv {
+                    count.wrapping_sub(offset)
+                } else {
+                    count
+                };
+                assert_eq!(
+                    read, want,
+                    "{insn:#010x} at {el:?}, ECV {ecv}, offset {offset:#x}"
+                );
+            }
+            let (read, count) = read_at(&mut m, El::El2, insn);
+            assert_eq!(read, count, "{insn:#010x} at EL2, ECV {ecv}");
+        }
+    }
+    let mut m = with_physical_offset(u64::MAX - 7, false);
+    assert_eq!(read_at(&mut m, El::El2, MRS_CNTPOFF).0, u64::MAX - 7);
+}
+
+/// The EL1 physical timer compares the count EL1 reads, the physical count
+/// less `CNTPOFF_EL2` under `CNTHCTL_EL2.ECV`, whatever the level
+/// (`AArch64_CheckTimerConditions`): a `TVAL` of 100 written at EL1 sets a
+/// `CVAL` 900 below the physical count and fires 100 ticks later. EL1's
+/// `TVAL` reads against the offset count, EL2's against the physical count
+/// itself (the accessor offsets EL0's and EL1's alone). Clearing `ECV`
+/// raises the line at once, the physical count being past `CVAL`, and has
+/// the timer lines sampled again.
+#[test]
+fn the_physical_timer_compares_the_offset_count() {
+    const OFFSET: u64 = 1_000;
+    let mut m = with_physical_offset(OFFSET, true);
+    m.at(El::El1);
+    let written_at = m.cpu.counter().get();
+    m.cpu.x[0] = 100;
+    assert_eq!(m.run(MSR_CNTP_TVAL), None);
+    m.at(El::El1);
+    m.cpu.x[0] = TIMER_ENABLE;
+    assert_eq!(m.run(MSR_CNTP_CTL), None);
+    let cval = written_at - OFFSET + 100;
+    assert_eq!(read_at(&mut m, El::El1, MRS_CNTP_CVAL).0, cval);
+    let (tval, count) = read_at(&mut m, El::El1, MRS_CNTP_TVAL);
+    assert_eq!(
+        tval,
+        cval - (count - OFFSET),
+        "EL1: against the offset count"
+    );
+    m.cpu.sys.cntkctl_el1 |= EL0PTEN;
+    let (tval, count) = read_at(&mut m, El::El0, MRS_CNTP_TVAL);
+    assert_eq!(
+        tval,
+        cval - (count - OFFSET),
+        "EL0: against the offset count"
+    );
+    let (tval, count) = read_at(&mut m, El::El2, MRS_CNTP_TVAL);
+    assert_eq!(
+        tval,
+        cval.wrapping_sub(count) & 0xFFFF_FFFF,
+        "EL2: against the physical count"
+    );
+    assert!(!m.cpu.timer_lines().physical);
+    assert_eq!(
+        m.cpu.next_timer_deadline().map(VmInstant::ticks),
+        Some(written_at + 100)
+    );
+    m.cpu.wait_until(VmInstant::from_ticks(written_at + 99));
+    assert!(!m.cpu.timer_lines().physical, "one tick short");
+    // `ISTATUS` reports the offset count's condition at EL2 too, though
+    // the physical count is long past `CVAL`.
+    assert_eq!(
+        read_at(&mut m, El::El2, MRS_CNTP_CTL).0,
+        TIMER_ENABLE,
+        "EL2, one tick short: ENABLE, no ISTATUS"
+    );
+    assert!(
+        m.cpu.timer_lines().physical,
+        "the offset count reaches CVAL"
+    );
+    assert_eq!(
+        read_at(&mut m, El::El2, MRS_CNTP_CTL).0,
+        TIMER_ENABLE | TIMER_ISTATUS,
+        "EL2: ENABLE and ISTATUS"
+    );
+
+    let mut m = with_physical_offset(OFFSET, true);
+    m.cpu.sys.cntp_cval_el0 = m.cpu.counter().get() - OFFSET + 100;
+    m.cpu.sys.cntp_ctl_el0 = TIMER_ENABLE;
+    let mut held = HeldTimers::of(&m.cpu);
+    assert!(held.sync(&mut m.cpu), "written since reset");
+    assert!(!held.lines.physical);
+    m.at(El::El2);
+    m.cpu.x[0] = m.cpu.el2().cnthctl & !CNTHCTL_ECV_POFF;
+    assert_eq!(m.run(MSR_CNTHCTL), None);
+    assert!(held.sync(&mut m.cpu), "CNTHCTL_EL2 written");
+    assert!(
+        held.lines.physical,
+        "ECV clear: the physical count is past CVAL, and the PPI high"
+    );
+}
+
+/// A write of `CNTP_TVAL_EL0` sets `CVAL` to the count the writing level
+/// reads plus the value: under `CNTHCTL_EL2.ECV`, the physical count less
+/// `CNTPOFF_EL2` at EL0 and EL1, and the physical count itself at EL2
+/// (Arm's `CNTP_TVAL_EL0` accessors).
+#[test]
+fn cntp_tval_is_written_against_the_count_its_level_reads() {
+    const OFFSET: u64 = 1_000;
+    let mut m = with_physical_offset(OFFSET, true);
+    m.cpu.sys.cntkctl_el1 |= EL0PTEN;
+    for (el, offset) in [(El::El0, OFFSET), (El::El1, OFFSET), (El::El2, 0)] {
+        m.at(el);
+        let count = m.cpu.counter().get();
+        m.cpu.x[0] = 100;
+        assert_eq!(m.run(MSR_CNTP_TVAL), None, "{el:?}");
+        assert_eq!(
+            read_at(&mut m, El::El1, MRS_CNTP_CVAL).0,
+            count - offset + 100,
+            "written at {el:?}"
+        );
+    }
+}
+
+/// `HCR_EL2.TGE` leaves EL0 outside a host while `HCR_EL2.E2H` is 0, as it
+/// is without FEAT_VHE (Arm `EffectivelyAtEL0NotInHost`), so EL0's reads of
+/// `CNTPCT_EL0` and `CNTP_TVAL_EL0` under `CNTHCTL_EL2.ECV` are of the
+/// physical count less `CNTPOFF_EL2` with TGE set too.
+#[test]
+fn el0_reads_the_offset_count_under_tge() {
+    const OFFSET: u64 = 1_000;
+    let mut m = with_physical_offset(OFFSET, true);
+    m.hcr(HCR_TGE);
+    m.cpu.sys.cntkctl_el1 |= EL0PTEN;
+    let cval = m.cpu.counter().get() - OFFSET + 100;
+    m.cpu.sys.cntp_cval_el0 = cval;
+    m.cpu.sys.cntp_ctl_el0 = TIMER_ENABLE;
+    let (read, count) = read_at(&mut m, El::El0, MRS_CNTPCT);
+    assert_eq!(read, count - OFFSET, "CNTPCT_EL0");
+    let (tval, count) = read_at(&mut m, El::El0, MRS_CNTP_TVAL);
+    assert_eq!(tval, cval - (count - OFFSET), "CNTP_TVAL_EL0");
+}
+
+/// A write of `CNTHCTL_EL2` or `CNTPOFF_EL2` that changes the physical
+/// offset moves the EL1 physical timer's count, and one of `CNTVOFF_EL2`
+/// that changes it the virtual timer's, and with it the tick the timer's
+/// line next rises at: the machine holds that tick after the write, so the
+/// timer's PPI rises when its count reaches `CVAL`; so too a write of
+/// `CNTHP_CVAL_EL2` that moves the EL2 timer's. One that leaves them as
+/// they were moves nothing, and the machine samples nothing afresh, so the
+/// writes of these registers a hypervisor commonly makes at each world
+/// switch cost no sample.
+#[test]
+fn the_machine_holds_the_timers_where_an_el2_write_moves_them() {
+    /// Make each write at EL2, the timers held as the machine holds them:
+    /// whether it moves them, and with that whether it has them sampled
+    /// afresh.
+    fn writes(m: &mut Machine<WithEl2>, held: &mut HeldTimers, rows: &[(&str, u32, u64, bool)]) {
+        for &(what, insn, value, moves) in rows {
+            let before = HeldTimers::of(&m.cpu);
+            m.at(El::El2);
+            m.cpu.x[0] = value;
+            assert_eq!(m.run(insn), None, "{what}");
+            let after = HeldTimers::of(&m.cpu);
+            assert_eq!(after != before, moves, "{what}: the timer's deadline");
+            assert_eq!(held.sync(&mut m.cpu), moves, "{what}: sampled afresh");
+            assert_eq!(*held, after, "{what}: as the machine holds it");
+        }
+    }
+    let mut m = with_physical_offset(1_000, false);
+    // The physical timer alone, enabled 500 counts ahead, which every
+    // offset here leaves ahead.
+    m.cpu.sys.cntp_cval_el0 = m.cpu.counter().get() + 500;
+    m.cpu.sys.cntp_ctl_el0 = TIMER_ENABLE;
+    let mut held = HeldTimers::of(&m.cpu);
+    assert!(held.sync(&mut m.cpu), "written since reset");
+    let cnthctl = m.cpu.el2().cnthctl;
+    writes(
+        &mut m,
+        &mut held,
+        &[
+            ("CNTPOFF_EL2 under ECV clear", MSR_CNTPOFF, 2_000, false),
+            ("CNTHCTL_EL2 as it was", MSR_CNTHCTL, cnthctl, false),
+            ("ECV set", MSR_CNTHCTL, cnthctl | CNTHCTL_ECV_POFF, true),
+            ("CNTPOFF_EL2 under ECV", MSR_CNTPOFF, 3_000, true),
+            ("CNTPOFF_EL2 as it was", MSR_CNTPOFF, 3_000, false),
+            ("ECV clear", MSR_CNTHCTL, cnthctl, true),
+        ],
+    );
+    // The virtual timer alone, likewise.
+    m.at(El::El1);
+    m.cpu.x[0] = 0;
+    assert_eq!(m.run(MSR_CNTP_CTL), None);
+    m.cpu.sys.cntv_cval_el0 = m.cpu.virtual_count().get() + 500;
+    m.at(El::El1);
+    m.cpu.x[0] = TIMER_ENABLE;
+    assert_eq!(m.run(MSR_CNTV_CTL), None);
+    assert!(held.sync(&mut m.cpu), "the timers' controls written");
+    writes(
+        &mut m,
+        &mut held,
+        &[
+            ("CNTVOFF_EL2", MSR_CNTVOFF, 100, true),
+            ("CNTVOFF_EL2 as it was", MSR_CNTVOFF, 100, false),
+        ],
+    );
+    // The EL2 timer alone, its compare value written the same way.
+    m.at(El::El1);
+    m.cpu.x[0] = 0;
+    assert_eq!(m.run(MSR_CNTV_CTL), None);
+    m.at(El::El2);
+    m.cpu.x[0] = TIMER_ENABLE;
+    assert_eq!(m.run(MSR_CNTHP_CTL), None);
+    assert!(held.sync(&mut m.cpu), "the timers' controls written");
+    let ahead = m.cpu.counter().get() + 500;
+    writes(
+        &mut m,
+        &mut held,
+        &[
+            ("CNTHP_CVAL_EL2", MSR_CNTHP_CVAL, ahead, true),
+            ("CNTHP_CVAL_EL2 as it was", MSR_CNTHP_CVAL, ahead, false),
+        ],
+    );
+}
+
+/// Only a register the timers read ([`El2Reg::feeds_timers`]) changes what
+/// they read of the EL2 registers: a write of any other, whatever its
+/// value, leaves every timer where it stood, so its `MSR` has nothing
+/// sampled again.
+#[test]
+fn only_the_registers_the_timers_read_move_them() {
+    let mut m = with_physical_offset(1_000, true);
+    let features = m.cpu.imp.features;
+    for reg in El2Reg::ALL.into_iter().filter(|reg| !reg.feeds_timers()) {
+        for value in [u64::MAX, 0, 0x5A5A_5A5A_5A5A_5A5A] {
+            let before = m.cpu.el2_timer_inputs();
+            m.cpu.el2_state.regs.write(reg, features, u64::MAX, value);
+            assert_eq!(
+                m.cpu.el2_timer_inputs(),
+                before,
+                "{reg:?} written with {value:#x}"
+            );
+        }
+    }
+}
+
+/// Where `CNTPOFF_EL2` lies above the physical count, the offset count has
+/// wrapped below zero, so it stands above a small `CVAL` and the timer's
+/// line is high; the line falls where the physical count reaches the offset
+/// and the offset count wraps to zero (`IsTimerConditionMet` compares
+/// unsigned), and rises again `CVAL` ticks later.
+#[test]
+fn the_physical_timer_line_falls_where_the_offset_count_wraps() {
+    let mut m = with_physical_offset(0, true);
+    let offset = m.cpu.counter().get() + 50;
+    m.at(El::El2);
+    m.cpu.x[0] = offset;
+    assert_eq!(m.run(MSR_CNTPOFF), None);
+    m.cpu.sys.cntp_cval_el0 = 10;
+    m.cpu.sys.cntp_ctl_el0 = TIMER_ENABLE;
+    assert!(
+        m.cpu.timer_lines().physical,
+        "the wrapped count is past CVAL"
+    );
+    assert_eq!(
+        m.cpu.next_timer_deadline().map(VmInstant::ticks),
+        Some(offset)
+    );
+    m.cpu.wait_until(VmInstant::from_ticks(offset));
+    assert!(!m.cpu.timer_lines().physical, "the offset count wraps to 0");
+    assert_eq!(
+        m.cpu.next_timer_deadline().map(VmInstant::ticks),
+        Some(offset + 10)
+    );
+    m.cpu.wait_until(VmInstant::from_ticks(offset + 10));
+    assert!(m.cpu.timer_lines().physical);
+}
+
+/// Only a processor with FEAT_ECV_POFF keeps `CNTHCTL_EL2.ECV`: one with
+/// FEAT_ECV alone, or the Cortex-A57 with neither, reads it back clear, and
+/// EL1 reads the physical count itself, even where the bit is held set.
+#[test]
+fn cnthctl_el2_ecv_is_kept_only_with_feat_ecv_poff() {
+    for (name, imp, kept) in [
+        (
+            "every feature",
+            Implementation::EVERY_FEATURE,
+            CNTHCTL_ECV_POFF,
+        ),
+        ("FEAT_ECV alone", ecv_without_poff(), 0),
+        ("Cortex-A57", Implementation::CORTEX_A57, 0),
+    ] {
+        let mut m = Machine::<WithEl2>::new(imp);
+        m.at(El::El2);
+        m.cpu.x[0] = m.cpu.el2().cnthctl | CNTHCTL_ECV_POFF;
+        m.cpu.el2_state.regs.cntpoff = 1_000;
+        assert_eq!(m.run(MSR_CNTHCTL), None, "{name}");
+        assert_eq!(
+            read_at(&mut m, El::El2, MRS_CNTHCTL).0 & CNTHCTL_ECV_POFF,
+            kept,
+            "{name}"
+        );
+        let (read, count) = read_at(&mut m, El::El1, MRS_CNTPCT);
+        let want = if kept != 0 {
+            count.wrapping_sub(1_000)
+        } else {
+            count
+        };
+        assert_eq!(read, want, "{name}");
+        // Without the feature the offset is not valid, `ECV` or no `ECV`
+        // (`PhysicalOffsetIsValid`), whatever state holds it.
+        m.cpu.el2_state.regs.cnthctl |= CNTHCTL_ECV_POFF;
+        let (read, count) = read_at(&mut m, El::El1, MRS_CNTPCT);
+        let want = if kept != 0 {
+            count.wrapping_sub(1_000)
+        } else {
+            count
+        };
+        assert_eq!(read, want, "{name}, ECV held as set");
+    }
+}
+
+/// The test RAM with fetches that are stable, as the board's RAM is: the
+/// trace cache, and with it the counter poll's fast-forward, runs over it.
+/// Only the test writes it, between runs.
+struct StableRam<'r>(&'r mut Ram);
+
+impl PhysBus for StableRam<'_> {
+    fn read(
+        &mut self,
+        addr: PhysAddr,
+        width: AccessWidth,
+        clock: VmClock,
+    ) -> Result<u64, BusFault> {
+        self.0.read(addr, width, clock)
+    }
+
+    fn write(
+        &mut self,
+        addr: PhysAddr,
+        width: AccessWidth,
+        value: u64,
+        clock: VmClock,
+    ) -> Result<(), BusFault> {
+        self.0.write(addr, width, value, clock)
+    }
+
+    fn fetch_source(&self, _addr: PhysAddr) -> FetchSource {
+        FetchSource::Stable(CodeEpoch::new(0))
+    }
+
+    fn devices_touched(&self) -> bool {
+        false
+    }
+}
+
+/// A poll of the physical count at EL1 under `CNTPOFF_EL2` ends at the
+/// instruction running every instruction ends it at, whether it is
+/// fast-forwarded or not: the fast-forward reads the count as EL1 does,
+/// less the offset. An offset just below 2^64 puts EL1's count 1000 ahead
+/// of the physical count, and a loop that waits while it is below a target
+/// is fast-forwarded to the same end; an offset just above the physical
+/// count has EL1's count wrap to 0, and a loop that waits while it is at or
+/// above 0x1000 ends just after the wrap, no skip crossing it. The words
+/// are GNU as 2.42's (`.arch armv8.6-a`).
+#[test]
+fn a_poll_of_the_offset_physical_count_ends_where_running_every_instruction_ends_it() {
+    const WHILE_BELOW: [u32; 5] = [
+        0xD53B_E020, // loop: mrs x0, cntpct_el0
+        0xEB13_001F, // cmp x0, x19
+        0x54FF_FFC3, // b.lo loop
+        0xD280_0022, // mov x2, #1
+        0x1400_0000, // b .
+    ];
+    const WHILE_AT_OR_ABOVE: [u32; 5] = [
+        0xD53B_E020, // loop: mrs x0, cntpct_el0
+        0xEB13_001F, // cmp x0, x19
+        0x54FF_FFC2, // b.hs loop
+        0xD280_0022, // mov x2, #1
+        0x1400_0000, // b .
+    ];
+    const DONE: u64 = CODE + 12;
+    // The tick the loop ends at, and how many runs it took: with the trace
+    // cache, which fast-forwards a poll, or one instruction at a time.
+    let ends_at = |program: [u32; 5], offset: u64, target: fn(u64) -> u64, skip: bool| {
+        let mut m = with_physical_offset(offset, true);
+        for (i, word) in program.into_iter().enumerate() {
+            let at = (CODE + 4 * i as u64) as usize;
+            m.ram.0[at..at + 4].copy_from_slice(&word.to_le_bytes());
+        }
+        m.at(El::El1);
+        m.cpu.x[19] = target(m.cpu.physical_count_read(El::El1).get());
+        let start = m.cpu.icount;
+        let mut runs = 0u64;
+        while m.cpu.pc != DONE {
+            assert!(m.cpu.icount - start < 1 << 22, "the poll ends");
+            let mut bus = StableRam(&mut m.ram);
+            if skip {
+                m.cpu.bound_run(1 << 20);
+                assert_eq!(
+                    m.cpu
+                        .run_trace(&mut bus, &mut NoInstrumentation, 1 << 20, &[DONE]),
+                    Step::Retired
+                );
+            } else {
+                assert_eq!(m.cpu.step(&mut bus, &mut NoInstrumentation), Step::Retired);
+            }
+            runs += 1;
+        }
+        (m.cpu.icount, runs)
+    };
+    let ahead = 0u64.wrapping_sub(1000);
+    let below = |count: u64| count + 50_000;
+    let (stepped, steps) = ends_at(WHILE_BELOW, ahead, below, false);
+    let (skipped, runs) = ends_at(WHILE_BELOW, ahead, below, true);
+    assert_eq!(skipped, stepped, "the same end, fast-forwarded");
+    assert!(runs * 100 < steps, "{runs} runs for {steps} instructions");
+
+    // An offset 0x8000 above the physical count the loop starts at, where
+    // `with_physical_offset` leaves it. The loop reads the count once in
+    // three instructions, so the first read past the wrap is 0 to 2 ticks
+    // past it, and the loop ends 3 instructions after that read.
+    let above = with_physical_offset(0, true).cpu.counter().get() + 0x8000;
+    let wrapping = |_: u64| 0x1000;
+    let (stepped, steps) = ends_at(WHILE_AT_OR_ABOVE, above, wrapping, false);
+    let (skipped, runs) = ends_at(WHILE_AT_OR_ABOVE, above, wrapping, true);
+    assert!(
+        (above + 3..above + 6).contains(&stepped),
+        "the first iteration to read past the wrap ends at {stepped}"
+    );
+    assert_eq!(skipped, stepped, "the same end, just past the wrap");
+    // Nothing is skipped: until it wraps, the offset count stands at 2^62
+    // and above, where `poll.rs` refuses a skip, so no run goes further than
+    // once around the three-instruction loop.
+    assert!(runs * 3 >= steps, "{runs} runs for {steps} instructions");
+}
+
+/// A snapshot keeps `CNTPOFF_EL2` and `CNTHCTL_EL2.ECV`: restored, EL1
+/// reads the offset count, and the EL1 physical timer's line and deadline
+/// are where they stood. An image whose `CNTPOFF_EL2` holds a value, or
+/// whose `CNTHCTL_EL2.ECV` is set, is refused by a processor without
+/// FEAT_ECV_POFF, which keeps neither.
+#[test]
+fn a_snapshot_keeps_the_physical_offset_where_the_processor_has_it() {
+    const OFFSET: u64 = 0x1234;
+    let mut saved = with_physical_offset(OFFSET, true);
+    saved.cpu.sys.cntp_cval_el0 = saved.cpu.counter().get() - OFFSET + 100;
+    saved.cpu.sys.cntp_ctl_el0 = TIMER_ENABLE;
+    let mut image = Vec::new();
+    saved.cpu.save(&mut image).expect("save");
+    let mut restored = Machine::<WithEl2>::new(Implementation::EVERY_FEATURE);
+    assert_eq!(restored.cpu.restore(&mut image.as_slice()), Ok(()));
+    assert_eq!(
+        HeldTimers::of(&restored.cpu),
+        HeldTimers::of(&saved.cpu),
+        "the timers where they stood"
+    );
+    assert_eq!(read_at(&mut restored, El::El2, MRS_CNTPOFF).0, OFFSET);
+    let (read, count) = read_at(&mut restored, El::El1, MRS_CNTPCT);
+    assert_eq!(read, count - OFFSET, "EL1 reads the offset count");
+
+    /// Whether a processor without FEAT_ECV_POFF refuses the image of one
+    /// with what `set` sets.
+    fn refused_without_poff(set: fn(&mut Machine<WithEl2>)) -> bool {
+        let mut saved = Machine::<WithEl2>::new(ecv_without_poff());
+        set(&mut saved);
+        let mut image = Vec::new();
+        saved.cpu.save(&mut image).expect("save");
+        Machine::<WithEl2>::new(ecv_without_poff())
+            .cpu
+            .restore(&mut image.as_slice())
+            .is_err()
+    }
+    assert!(
+        refused_without_poff(|m| m.cpu.el2_state.regs.cntpoff = 1),
+        "CNTPOFF_EL2"
+    );
+    assert!(
+        refused_without_poff(|m| m.cpu.el2_state.regs.cnthctl |= CNTHCTL_ECV_POFF),
+        "CNTHCTL_EL2.ECV"
+    );
+}
+
+/// A host reaches `CNTPOFF_EL2` by its name ([`SysReg::CNTPOFF_EL2`]) where
+/// the processor has FEAT_ECV_POFF, as an `MSR` at EL2 does: what it writes
+/// is what EL1's physical count is offset by under `CNTHCTL_EL2.ECV`, and a
+/// write that moves the offset has the timers sampled afresh. A processor
+/// without FEAT_ECV_POFF has no such register.
+#[test]
+fn a_host_reaches_cntpoff_el2_by_its_name() {
+    let mut m = with_physical_offset(0, true);
+    assert_eq!(
+        m.cpu.host_sysreg_write(SysReg::CNTPOFF_EL2, 1_000),
+        Ok(WriteEffect::Timer)
+    );
+    assert_eq!(m.cpu.sysreg(SysReg::CNTPOFF_EL2), Ok(1_000));
+    let (read, count) = read_at(&mut m, El::El1, MRS_CNTPCT);
+    assert_eq!(read, count - 1_000, "EL1 reads the offset count");
+    assert_eq!(
+        m.cpu.host_sysreg_write(SysReg::CNTPOFF_EL2, 1_000),
+        Ok(WriteEffect::None),
+        "the offset as it was"
+    );
+    for imp in [ecv_without_poff(), Implementation::CORTEX_A57] {
+        let mut cpu = Machine::<WithEl2>::new(imp).cpu;
+        assert_eq!(
+            cpu.host_sysreg_write(SysReg::CNTPOFF_EL2, 1_000),
+            Err(SysRegRefusal::Absent)
+        );
+        assert_eq!(cpu.sysreg(SysReg::CNTPOFF_EL2), Err(SysRegRefusal::Absent));
+    }
 }

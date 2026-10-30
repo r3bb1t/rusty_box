@@ -30,7 +30,7 @@ use super::id;
 use super::mmu::{El10Context, El2RegimeContext};
 use super::pauth::KeyHalf;
 use super::regs::{SysReg, SysRegRefusal};
-use super::timer::GenericTimer;
+use super::timer::{GenericTimer, Tval};
 use super::{sctlr, Cpu, El, Levels, Pstate, SysRegs};
 
 /// Who is accessing a system register.
@@ -113,6 +113,16 @@ impl SysRegKey {
     /// Whether the encoding names an EL2 register (`op1` = 4).
     const fn is_el2(self) -> bool {
         self.op1() == 4
+    }
+
+    /// The encoding's slot in [`EL2_STORAGE`], its `CRn`, `CRm` and `op2`,
+    /// where it is a register's of `op1` 4 (`op0` 3).
+    const fn el2_slot(self) -> Option<usize> {
+        if self.op0() == 3 && self.is_el2() {
+            Some((self.0 & ((1 << 11) - 1)) as usize)
+        } else {
+            None
+        }
     }
 
     /// `ESR_ELx.ISS` for a trapped `MSR`/`MRS` (EC 0x18).
@@ -351,6 +361,7 @@ const VDISR_EL2: u32 = key!(3, 4, 12, 1, 1);
 const CONTEXTIDR_EL2: u32 = key!(3, 4, 13, 0, 1);
 const TPIDR_EL2: u32 = key!(3, 4, 13, 0, 2);
 const CNTVOFF_EL2: u32 = key!(3, 4, 14, 0, 3);
+const CNTPOFF_EL2: u32 = key!(3, 4, 14, 0, 6);
 const CNTHCTL_EL2: u32 = key!(3, 4, 14, 1, 0);
 const CNTHP_TVAL_EL2: u32 = key!(3, 4, 14, 2, 0);
 const CNTHP_CTL_EL2: u32 = key!(3, 4, 14, 2, 1);
@@ -361,9 +372,17 @@ const CNTHP_CVAL_EL2: u32 = key!(3, 4, 14, 2, 2);
 /// processor lacks the register, and for `CNTHP_CTL_EL2`, whose `ISTATUS`
 /// the timer computes (its own arms read and write it). The one map from
 /// [`El2Reg`] to encodings, exhaustive (R5): a register added to the list
-/// is given its encoding here, or does not compile.
-fn el2_encoding(reg: El2Reg, features: Features) -> Option<u32> {
-    let present = |encoding: u32, has: bool| has.then_some(encoding);
+/// is given its encoding here, or does not compile. A register has one
+/// encoding whatever the features; they decide only whether it is there,
+/// which [`EL2_STORAGE`], built for every feature, relies on.
+const fn el2_encoding(reg: El2Reg, features: Features) -> Option<u32> {
+    const fn present(encoding: u32, has: bool) -> Option<u32> {
+        if has {
+            Some(encoding)
+        } else {
+            None
+        }
+    }
     match reg {
         El2Reg::Hcr => Some(HCR_EL2),
         El2Reg::Sctlr => Some(SCTLR_EL2),
@@ -392,6 +411,7 @@ fn el2_encoding(reg: El2Reg, features: Features) -> Option<u32> {
         El2Reg::Smcr => present(SMCR_EL2, features.has(Feature::Sme)),
         El2Reg::Cnthctl => Some(CNTHCTL_EL2),
         El2Reg::Cntvoff => Some(CNTVOFF_EL2),
+        El2Reg::Cntpoff => present(CNTPOFF_EL2, features.has(Feature::EcvPoff)),
         El2Reg::CnthpCtl => None,
         El2Reg::CnthpCval => Some(CNTHP_CVAL_EL2),
         El2Reg::Contextidr => present(CONTEXTIDR_EL2, has_contextidr_el2(features)),
@@ -399,6 +419,53 @@ fn el2_encoding(reg: El2Reg, features: Features) -> Option<u32> {
         El2Reg::Vsesr => present(VSESR_EL2, features.has(Feature::Ras)),
     }
 }
+
+/// The EL2 register held as written that each encoding of `op1` 4 names,
+/// by its slot ([`SysRegKey::el2_slot`]), on a processor implementing every
+/// feature: [`el2_encoding`] turned around, once, so finding a register is
+/// one load. Each register's encoding is one of `op0` 3 and `op1` 4, no two
+/// share one, and none has another with no feature or any one feature, or
+/// this does not compile.
+static EL2_STORAGE: [Option<El2Reg>; 1 << 11] = {
+    let mut table = [None; 1 << 11];
+    let mut i = 0;
+    while i < El2Reg::ALL.len() {
+        let reg = El2Reg::ALL[i];
+        if let Some(encoding) = el2_encoding(reg, Features::EVERY) {
+            let Some(slot) = SysRegKey(encoding).el2_slot() else {
+                panic!("an EL2 register's encoding is of op0 3 and op1 4");
+            };
+            assert!(table[slot].is_none(), "one EL2 register per encoding");
+            table[slot] = Some(reg);
+            /// Whether `reg` has no encoding but `encoding` with `features`.
+            const fn only(reg: El2Reg, features: Features, encoding: u32) -> bool {
+                match el2_encoding(reg, features) {
+                    Some(other) => other == encoding,
+                    None => true,
+                }
+            }
+            assert!(
+                only(reg, Features::of(&[]), encoding),
+                "one encoding per EL2 register"
+            );
+            let mut f = 0;
+            while f < Feature::ALL.len() {
+                assert!(
+                    only(reg, Features::of(&[Feature::ALL[f]]), encoding),
+                    "one encoding per EL2 register"
+                );
+                f += 1;
+            }
+        } else {
+            assert!(
+                el2_encoding(reg, Features::of(&[])).is_none(),
+                "an EL2 register no feature set gives an encoding to has none"
+            );
+        }
+        i += 1;
+    }
+    table
+};
 
 /// Why an `MRS`/`MSR` did not complete.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -430,7 +497,11 @@ pub(crate) enum WriteEffect {
     /// One of the EL1&0 regime's translation registers changed: the TLB's
     /// entries of its context stay apart ([`Cpu::el10_context_changed`]).
     El10Context,
-    /// A timer register changed: re-evaluate the timer outputs.
+    /// A write that may move a timer: of a timer's control or `TVAL`
+    /// register, or of an EL1 timer's compare register, whatever the
+    /// value; or of an EL2 register the timers read
+    /// ([`El2Reg::feeds_timers`]) that changed what they read of the EL2
+    /// registers ([`Cpu::el2_timer_inputs`]). Re-evaluate the timer outputs.
     Timer,
 }
 
@@ -486,6 +557,7 @@ impl TranslationRegister {
             | El2Reg::Smcr
             | El2Reg::Cnthctl
             | El2Reg::Cntvoff
+            | El2Reg::Cntpoff
             | El2Reg::CnthpCtl
             | El2Reg::CnthpCval
             | El2Reg::Contextidr
@@ -908,7 +980,7 @@ impl<L: Levels> Cpu<L> {
             }
             CNTPCT_EL0 => {
                 self.physical_count_check(el)?;
-                return Ok(self.counter().get());
+                return Ok(self.physical_count_read(el).get());
             }
             CNTVCT_EL0 => {
                 self.virtual_count_check(el)?;
@@ -918,7 +990,7 @@ impl<L: Levels> Cpu<L> {
             // read here is in program order already.
             CNTPCTSS_EL0 if self.implements(Feature::Ecv) => {
                 self.physical_count_check(el)?;
-                return Ok(self.counter().get());
+                return Ok(self.physical_count_read(el).get());
             }
             CNTVCTSS_EL0 if self.implements(Feature::Ecv) => {
                 self.virtual_count_check(el)?;
@@ -929,7 +1001,7 @@ impl<L: Levels> Cpu<L> {
                 return Ok(match k {
                     CNTP_CTL_EL0 => self.timer_ctl_read(GenericTimer::Physical),
                     CNTP_CVAL_EL0 => self.sys.cntp_cval_el0,
-                    _ => self.timer_tval_read(GenericTimer::Physical),
+                    _ => self.timer_tval_read(Tval::Physical(el)),
                 });
             }
             CNTV_CTL_EL0 | CNTV_CVAL_EL0 | CNTV_TVAL_EL0 => {
@@ -937,7 +1009,7 @@ impl<L: Levels> Cpu<L> {
                 return Ok(match k {
                     CNTV_CTL_EL0 => self.timer_ctl_read(GenericTimer::Virtual),
                     CNTV_CVAL_EL0 => self.sys.cntv_cval_el0,
-                    _ => self.timer_tval_read(GenericTimer::Virtual),
+                    _ => self.timer_tval_read(Tval::Virtual),
                 });
             }
             // The Debug Communications Channel with no external debugger on
@@ -1264,7 +1336,7 @@ impl<L: Levels> Cpu<L> {
             RVBAR_EL2 => self.sys.rvbar,
             RMR_EL2 => RMR_AA64 | self.sys.rmr,
             CNTHP_CTL_EL2 => self.timer_ctl_read(GenericTimer::Hypervisor),
-            CNTHP_TVAL_EL2 => self.timer_tval_read(GenericTimer::Hypervisor),
+            CNTHP_TVAL_EL2 => self.timer_tval_read(Tval::Hypervisor),
             // RES0, as `SMPRI_EL1` is: no streaming execution priorities.
             SMPRIMAP_EL2 if self.implements(Feature::Sme) => 0,
             _ => return Err(SysRegError::Undefined),
@@ -1275,10 +1347,8 @@ impl<L: Levels> Cpu<L> {
     /// mask) that `key` names, if this processor implements it
     /// ([`el2_encoding`]).
     fn el2_storage(&self, key: SysRegKey) -> Option<El2Reg> {
-        let features = self.imp.features;
-        El2Reg::ALL
-            .into_iter()
-            .find(|&reg| el2_encoding(reg, features) == Some(key.0))
+        let reg = EL2_STORAGE[key.el2_slot()?]?;
+        (el2_encoding(reg, self.imp.features) == Some(key.0)).then_some(reg)
     }
 
     /// The value of breakpoint or watchpoint register `point`.
@@ -1377,7 +1447,7 @@ impl<L: Levels> Cpu<L> {
                     CNTP_CVAL_EL0 => self.sys.cntp_cval_el0 = value,
                     _ => {
                         self.sys.cntp_cval_el0 =
-                            self.timer_cval_from_tval(GenericTimer::Physical, value)
+                            self.timer_cval_from_tval(Tval::Physical(el), value)
                     }
                 }
                 return Ok(WriteEffect::Timer);
@@ -1387,10 +1457,7 @@ impl<L: Levels> Cpu<L> {
                 match k {
                     CNTV_CTL_EL0 => self.sys.cntv_ctl_el0 = value & 3,
                     CNTV_CVAL_EL0 => self.sys.cntv_cval_el0 = value,
-                    _ => {
-                        self.sys.cntv_cval_el0 =
-                            self.timer_cval_from_tval(GenericTimer::Virtual, value)
-                    }
+                    _ => self.sys.cntv_cval_el0 = self.timer_cval_from_tval(Tval::Virtual, value),
                 }
                 return Ok(WriteEffect::Timer);
             }
@@ -1748,12 +1815,25 @@ impl<L: Levels> Cpu<L> {
             // and traps are read afresh before every instruction.
             let before =
                 TranslationRegister::of_el2(reg).map(|register| self.translation_context(register));
+            // What the timers read of the EL2 registers
+            // ([`Cpu::el2_timer_inputs`]) is compared across a write of a
+            // register they read ([`El2Reg::feeds_timers`]): one that
+            // changes it may move a timer, and has the timer lines sampled
+            // again.
+            let inputs = reg.feeds_timers().then(|| self.el2_timer_inputs());
             self.el2_write(reg, value);
-            let effect = match reg {
-                El2Reg::Cntvoff | El2Reg::CnthpCval => WriteEffect::Timer,
-                _ => WriteEffect::None,
-            };
-            return Ok(self.translation_effect(before, effect));
+            let timers = inputs.is_some_and(|inputs| inputs != self.el2_timer_inputs());
+            let effect = self.translation_effect(before, WriteEffect::None);
+            return Ok(match (timers, effect) {
+                (true, WriteEffect::None) => WriteEffect::Timer,
+                // A write has one effect to return: the timers' sampling is
+                // asked for here, the translation's returned.
+                (true, WriteEffect::FlushTlb | WriteEffect::El10Context | WriteEffect::Timer) => {
+                    self.apply_write_effect(WriteEffect::Timer);
+                    effect
+                }
+                (false, _) => effect,
+            });
         }
         Ok(match key.0 {
             SP_EL1 => {
@@ -1771,7 +1851,7 @@ impl<L: Levels> Cpu<L> {
                 WriteEffect::Timer
             }
             CNTHP_TVAL_EL2 => {
-                let cval = self.timer_cval_from_tval(GenericTimer::Hypervisor, value);
+                let cval = self.timer_cval_from_tval(Tval::Hypervisor, value);
                 self.el2_write(El2Reg::CnthpCval, cval);
                 WriteEffect::Timer
             }

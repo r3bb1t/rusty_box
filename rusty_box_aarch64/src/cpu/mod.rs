@@ -570,9 +570,10 @@ pub struct Cpu<L: Levels> {
     /// The pointer authentication keys (FEAT_PAuth), zero at reset as QEMU
     /// sets them, where the architecture leaves them UNKNOWN.
     pub(crate) pac_keys: pauth::PacKeys,
-    /// What this processor implements: the decoder, the ID registers and
-    /// every feature's own checks read it.
-    pub(crate) imp: features::Implementation,
+    /// What this processor implements, as a processor of its level set:
+    /// the decoder, the ID registers and every feature's own checks read
+    /// it.
+    pub(crate) imp: features::LeveledImplementation<L>,
     pub(crate) sys: SysRegs,
     pub(crate) monitor: ExclusiveMonitor,
     pub(crate) event: wait::EventRegister,
@@ -622,9 +623,16 @@ impl<L: Levels> Cpu<L> {
 
     /// A processor implementing `imp` and the levels `L`, in its reset
     /// state. `L` alone decides FEAT_EL2: whatever `imp` says of it is
-    /// replaced ([`features::Implementation::with_levels`]).
+    /// replaced, and without EL2 the features only EL2 brings, such as
+    /// FEAT_ECV_POFF, are dropped
+    /// ([`features::Implementation::with_levels`]).
     pub(crate) fn implementing(config: CpuConfig, imp: features::Implementation) -> Self {
-        let imp = imp.with_levels::<L>();
+        Self::leveled(config, imp.with_levels::<L>())
+    }
+
+    /// A processor implementing `imp`, leveled for `L` already, in its
+    /// reset state.
+    pub(crate) fn leveled(config: CpuConfig, imp: features::LeveledImplementation<L>) -> Self {
         Self {
             x: [0; 31],
             sp_el0: 0,

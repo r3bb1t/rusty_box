@@ -285,7 +285,8 @@ const fn field(features: Features, feature: Feature, lsb: u32, value: u64) -> u6
 /// supported. That is FEAT_GTG, which `Features.json` makes hold exactly
 /// when all three fields are non-zero, and permits a processor before
 /// ARMv8.5; `AArch64_HaveS2TG` then reads the stage 2 fields. ECV (63:60) =
-/// 1 with FEAT_ECV (2 would be FEAT_ECV_POFF, which needs EL2).
+/// 1 with FEAT_ECV, 2 with FEAT_ECV_POFF too (`FEAT_ECV_POFF <=>
+/// UInt(ID_AA64MMFR0_EL1.ECV) >= 2`).
 pub(crate) const fn id_aa64mmfr0(features: Features) -> u64 {
     const STAGE_2_GRANULES: u64 = (2 << 40) | (1 << 36) | (1 << 32);
     let stage_2 = if features.has(Feature::El2) {
@@ -293,7 +294,9 @@ pub(crate) const fn id_aa64mmfr0(features: Features) -> u64 {
     } else {
         0
     };
-    0x0F00_0024 | stage_2 | field(features, Feature::Ecv, 60, 1)
+    // FEAT_ECV_POFF requires FEAT_ECV (`FEAT_ECV_POFF ==> FEAT_ECV`).
+    let ecv = field(features, Feature::Ecv, 60, 1) + field(features, Feature::EcvPoff, 60, 1);
+    0x0F00_0024 | stage_2 | ecv
 }
 
 /// Physical address width implied by `ID_AA64MMFR0_EL1.PARange`.

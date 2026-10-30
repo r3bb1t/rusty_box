@@ -24,6 +24,7 @@ use super::id;
 use rusty_box_core::ClockHz;
 
 use super::el2::Levels;
+use core::marker::PhantomData;
 
 /// An architectural feature, by the Arm ARM's `FEAT_` name; the instruction
 /// set features are what an encoding belongs to.
@@ -163,6 +164,11 @@ pub(crate) enum Feature {
     /// FEAT_ECV: CNTPCTSS_EL0, CNTVCTSS_EL0 and CNTKCTL_EL1.EVNTIS. No
     /// encoding of its own.
     Ecv,
+    /// FEAT_ECV_POFF: `CNTPOFF_EL2` and `CNTHCTL_EL2.ECV`, the physical
+    /// count's offset at EL0 and EL1. Only a processor with EL2 has it
+    /// (`(FEAT_AA64 && FEAT_ECV_POFF) ==> FEAT_AA64EL2`). No encoding of its
+    /// own.
+    EcvPoff,
     /// FEAT_WFxT: WFET and WFIT.
     WfxT,
     /// FEAT_RAS: ESB, `ERRIDR_EL1` and `DISR_EL1`, and the error state a
@@ -214,9 +220,11 @@ pub(crate) enum Feature {
     DoubleLock,
 }
 
-// `Feature::ALL` lists every feature in declaration order, and each has a
-// bit of a `Features` set.
-#[cfg(test)]
+// `Feature::ALL` is in declaration order, and each feature has a bit of a
+// `Features` set. That it lists every feature, which `Features::EVERY` and
+// the EL2 register table built from it rely on, the source-reading test
+// `the_decoder_source_has_the_shape_the_spec_test_reads` checks, against
+// the enum as written, in every test run.
 const _: () = {
     let mut i = 0;
     while i < Feature::ALL.len() {
@@ -232,12 +240,9 @@ const _: () = {
     );
 };
 
-/// What the conformance tests read of a feature: `tests/unit/spec.rs`
-/// checks the decoder against Arm's data feature by feature.
-#[cfg(test)]
 impl Feature {
     /// Every feature, in declaration order.
-    pub(crate) const ALL: [Feature; 66] = [
+    pub(crate) const ALL: [Feature; 67] = [
         Feature::Base,
         Feature::Fp,
         Feature::AdvSimd,
@@ -290,6 +295,7 @@ impl Feature {
         Feature::SpecRes,
         Feature::Csv2,
         Feature::Ecv,
+        Feature::EcvPoff,
         Feature::WfxT,
         Feature::Ras,
         Feature::RasV1p1,
@@ -305,7 +311,12 @@ impl Feature {
         Feature::Pmull,
         Feature::DoubleLock,
     ];
+}
 
+/// What the conformance tests read of a feature: `tests/unit/spec.rs`
+/// checks the decoder against Arm's data feature by feature.
+#[cfg(test)]
+impl Feature {
     /// The name Arm's data gives the feature, `None` for the base set.
     pub(crate) const fn arm_name(self) -> Option<&'static str> {
         match self {
@@ -361,6 +372,7 @@ impl Feature {
             Self::SpecRes => Some("FEAT_SPECRES"),
             Self::Csv2 => Some("FEAT_CSV2"),
             Self::Ecv => Some("FEAT_ECV"),
+            Self::EcvPoff => Some("FEAT_ECV_POFF"),
             Self::WfxT => Some("FEAT_WFxT"),
             Self::Ras => Some("FEAT_RAS"),
             Self::RasV1p1 => Some("FEAT_RASv1p1"),
@@ -408,6 +420,7 @@ impl Feature {
                 | Self::SpecRes
                 | Self::Csv2
                 | Self::Ecv
+                | Self::EcvPoff
                 | Self::RasV1p1
                 | Self::RasSaV1p1
                 | Self::Debugv8p1
@@ -461,9 +474,20 @@ impl Features {
         Feature::DoubleLock,
     ]);
 
+    /// Every feature: a set no processor implements (FEAT_DoubleLock with
+    /// FEAT_SME, for one), for what is decided once for whichever features
+    /// a processor has, such as where each register a feature brings is
+    /// encoded.
+    pub(crate) const EVERY: Self = Self::of(&Feature::ALL);
+
     /// FEAT_EL2 in AArch64 state only (FEAT_AA64EL2 without FEAT_AA32EL2):
     /// what a processor of the level set [`WithEl2`](super::WithEl2) adds.
     const EL2: Self = Self(Feature::El2.bit() | Feature::Aa64El2.bit());
+
+    /// The features only a processor with EL2 has, which one of the level
+    /// set [`NoEl2`](super::NoEl2) withholds with EL2: FEAT_ECV_POFF
+    /// (`(FEAT_AA64 && FEAT_ECV_POFF) ==> FEAT_AA64EL2`).
+    const NEED_EL2: Self = Self(Feature::EcvPoff.bit());
 
     /// What the Armv9.2 processor model implements: every feature Arm's
     /// `Features.json` requires of an Armv9.2 processor that has FP and
@@ -669,18 +693,23 @@ impl Implementation {
         counter_hz: ARMV8P6_COUNTER_HZ,
     };
 
-    /// This implementation with FEAT_EL2 and FEAT_AA64EL2 exactly when the
-    /// level set `L` has EL2: the processor's type is what decides them
-    /// ([`Cpu::implementing`](super::Cpu::implementing)).
-    pub(crate) const fn with_levels<L: Levels>(self) -> Self {
-        let without = self.features.0 & !Features::EL2.0;
-        Self {
-            features: Features(if L::EL2 {
-                without | Features::EL2.0
-            } else {
-                without
-            }),
-            ..self
+    /// This implementation as a processor of the level set `L` has it, with
+    /// FEAT_EL2 and FEAT_AA64EL2 exactly when `L` has EL2: the processor's
+    /// type is what decides them
+    /// ([`Cpu::implementing`](super::Cpu::implementing)). Without EL2 it
+    /// also drops the features only EL2 brings ([`Features::NEED_EL2`]);
+    /// with it, it keeps those the implementation lists.
+    pub(crate) const fn with_levels<L: Levels>(self) -> LeveledImplementation<L> {
+        LeveledImplementation {
+            imp: Self {
+                features: Features(if L::EL2 {
+                    self.features.0 | Features::EL2.0
+                } else {
+                    self.features.0 & !(Features::EL2.0 | Features::NEED_EL2.0)
+                }),
+                ..self
+            },
+            levels: PhantomData,
         }
     }
 
@@ -690,14 +719,73 @@ impl Implementation {
     }
 }
 
+/// An implementation as a processor of the level set `L` has it
+/// ([`Implementation::with_levels`]): what a processor of `L` holds, and
+/// all a processor of `L` is built from
+/// ([`Cpu::leveled`](super::Cpu::leveled)), so its level set is the one it
+/// was leveled for (R2). One leveled without EL2 has dropped the features
+/// only EL2 brings, which leveling it again with EL2 could not bring back;
+/// a plain [`Implementation`] comes out of it only by name ([`get`] or a
+/// deref), never in its place.
+///
+/// [`get`]: LeveledImplementation::get
+pub(crate) struct LeveledImplementation<L: Levels> {
+    imp: Implementation,
+    levels: PhantomData<L>,
+}
+
+// By hand: derived, each would ask of `L` what it asks of the struct, and
+// a level set is a marker type that holds nothing.
+impl<L: Levels> Clone for LeveledImplementation<L> {
+    #[inline(always)]
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<L: Levels> Copy for LeveledImplementation<L> {}
+
+impl<L: Levels> PartialEq for LeveledImplementation<L> {
+    fn eq(&self, other: &Self) -> bool {
+        self.imp == other.imp
+    }
+}
+
+impl<L: Levels> Eq for LeveledImplementation<L> {}
+
+impl<L: Levels> core::fmt::Debug for LeveledImplementation<L> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        self.imp.fmt(f)
+    }
+}
+
+impl<L: Levels> LeveledImplementation<L> {
+    /// The implementation, leveled: what a `const fn` reads, where
+    /// [`Deref`](core::ops::Deref) cannot be called.
+    #[inline(always)]
+    pub(crate) const fn get(self) -> Implementation {
+        self.imp
+    }
+}
+
+impl<L: Levels> core::ops::Deref for LeveledImplementation<L> {
+    type Target = Implementation;
+
+    #[inline(always)]
+    fn deref(&self) -> &Implementation {
+        &self.imp
+    }
+}
+
 /// What the tests of a feature run on, whichever processor models
 /// implement it.
 #[cfg(test)]
 impl Implementation {
     /// The Armv9.2 model with every feature the decoder knows, which is
-    /// today the model's own set and FEAT_DoubleLock (a set no processor
-    /// may have, Armv9.0 forbidding FEAT_DoubleLock, and none is built
-    /// with): a feature's tests run on it before any
+    /// today the model's own set, FEAT_DoubleLock (a set no processor may
+    /// have, Armv9.0 forbidding FEAT_DoubleLock, and none is built with) and
+    /// FEAT_ECV_POFF, which it keeps only with EL2 and no model lists yet:
+    /// a feature's tests run on it before any
     /// model implements the feature, and each exercises that feature's own
     /// rules. EL2 comes with the processor's level set, as it does for
     /// every implementation: on [`NoEl2`](super::NoEl2) it starts at EL1,
@@ -707,9 +795,18 @@ impl Implementation {
     /// traps of SIMD&FP and SME, `SMCR_EL2`, `HCR_EL2.API` and `APK`, the
     /// EL2 regime's TBI, PAN and BTI).
     pub(crate) const EVERY_FEATURE: Self = Self {
-        features: Features::of(&Feature::ALL),
+        features: Features::EVERY,
         ..Self::ARMV9P2
     };
+
+    /// [`Implementation::EVERY_FEATURE`] without the features `left_out`:
+    /// what the tests of a feature's absence run on.
+    pub(crate) const fn every_feature_but(left_out: &[Feature]) -> Self {
+        Self {
+            features: Features(Features::EVERY.0 & !Features::of(left_out).0),
+            ..Self::EVERY_FEATURE
+        }
+    }
 }
 
 /// The system counter frequency QEMU gives the processor types it had
@@ -901,7 +998,7 @@ mod tests {
             let without = model.implementation().with_levels::<NoEl2>();
             let with = model.implementation().with_levels::<WithEl2>();
             for feature in Feature::ALL {
-                for imp in [without, with] {
+                for imp in [without.get(), with.get()] {
                     assert!(
                         feature.complete() || !imp.has(feature),
                         "{model:?}: {feature:?} is incomplete"
@@ -920,17 +1017,48 @@ mod tests {
                         assert!(imp.has(feature), "{model:?}: {feature:?}");
                     }
                 }
-                // EL2 is all the level set adds, and it decides EL2 alone.
+                // The level set adds EL2 and keeps the features only EL2
+                // brings that the model lists; it decides those alone.
                 let el2 = matches!(feature, Feature::El2 | Feature::Aa64El2);
+                let needs_el2 =
+                    Features::NEED_EL2.has(feature) && model.implementation().has(feature);
                 assert_eq!(
                     with.has(feature),
-                    without.has(feature) || el2,
+                    without.has(feature) || el2 || needs_el2,
                     "{model:?}: {feature:?}"
                 );
-                assert!(!el2 || !without.has(feature), "{model:?}: {feature:?}");
+                assert!(
+                    !(el2 || Features::NEED_EL2.has(feature)) || !without.has(feature),
+                    "{model:?}: {feature:?}"
+                );
             }
-            assert_eq!(with.with_levels::<NoEl2>(), without);
+            // Beside those features, the level set changes nothing.
+            assert_eq!(
+                Implementation {
+                    features: without.features,
+                    ..*with
+                },
+                *without
+            );
         }
+    }
+
+    /// A processor without EL2 has no feature only EL2 brings
+    /// (`(FEAT_AA64 && FEAT_ECV_POFF) ==> FEAT_AA64EL2`), and its ID
+    /// registers say so: the implementation with every feature has
+    /// FEAT_ECV_POFF with EL2 alone, and `ID_AA64MMFR0_EL1.ECV` reads 2 with
+    /// it and 1, FEAT_ECV's, without.
+    #[test]
+    fn a_processor_without_el2_has_no_feature_only_el2_brings() {
+        let with = Implementation::EVERY_FEATURE.with_levels::<WithEl2>();
+        let without = Implementation::EVERY_FEATURE.with_levels::<NoEl2>();
+        for feature in Feature::ALL {
+            if Features::NEED_EL2.has(feature) {
+                assert!(with.has(feature) && !without.has(feature), "{feature:?}");
+            }
+        }
+        let ecv = |features: Features| (id::id_aa64mmfr0(features) >> 60) & 0xF;
+        assert_eq!((ecv(with.features), ecv(without.features)), (2, 1));
     }
 
     /// QARMA5 is the one algorithm the pointer authentication instructions
