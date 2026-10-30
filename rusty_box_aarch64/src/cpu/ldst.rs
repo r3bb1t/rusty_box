@@ -92,7 +92,11 @@ impl Cpu {
             self.fp_check()?;
         }
 
-        let mut acc = DataAccess::NORMAL;
+        let mut acc = if vector {
+            DataAccess::SIMD_FP
+        } else {
+            DataAccess::NORMAL
+        };
         let addressing = match form {
             SingleForm::UnsignedImmediate => {
                 let base = self.base_register(rn)?;
@@ -207,10 +211,11 @@ impl Cpu {
                 return self.undefined(pc, insn);
             }
             self.fp_check()?;
+            let acc = DataAccess::SIMD_FP;
             let value = match opc {
-                0 => u128::from(self.read_mem(bus, address, AccessWidth::Word, DataAccess::NORMAL)?),
-                1 => u128::from(self.read_mem(bus, address, AccessWidth::Dword, DataAccess::NORMAL)?),
-                _ => self.read_mem_u128(bus, address, DataAccess::NORMAL)?,
+                0 => u128::from(self.read_mem(bus, address, AccessWidth::Word, acc)?),
+                1 => u128::from(self.read_mem(bus, address, AccessWidth::Dword, acc)?),
+                _ => self.read_mem_u128(bus, address, acc)?,
             };
             self.write_v(rt as usize, value);
             return Ok(Flow::Next);
@@ -272,7 +277,11 @@ impl Cpu {
             }
             _ => (base.wrapping_add(offset), None),
         };
-        let acc = DataAccess::NORMAL;
+        let acc = if vector {
+            DataAccess::SIMD_FP
+        } else {
+            DataAccess::NORMAL
+        };
         // Of a pair of Q registers, `scale` is 4 and this is not read.
         let width = AccessWidth::from_size_field(scale);
 
@@ -505,12 +514,12 @@ impl Cpu {
                     let mask = (u128::from(u64::MAX) >> (64 - ebytes * 8)) << shift;
                     let ea = address.wrapping_add(offs);
                     if load {
-                        let v = self.read_mem(bus, ea, width, DataAccess::NORMAL)?;
+                        let v = self.read_mem(bus, ea, width, DataAccess::SIMD_FP)?;
                         let reg = &mut regs[tt as usize];
                         *reg = (*reg & !mask) | (u128::from(v) << shift);
                     } else {
                         let v = ((regs[tt as usize] & mask) >> shift) as u64;
-                        self.write_mem(bus, ea, width, v, DataAccess::NORMAL)?;
+                        self.write_mem(bus, ea, width, v, DataAccess::SIMD_FP)?;
                     }
                     offs += ebytes;
                     tt = (tt + 1) % 32;
@@ -600,7 +609,7 @@ impl Cpu {
         for _ in 0..selem {
             let ea = address.wrapping_add(offs);
             if replicate {
-                let v = self.read_mem(bus, ea, width, DataAccess::NORMAL)?;
+                let v = self.read_mem(bus, ea, width, DataAccess::SIMD_FP)?;
                 let mut full = 0u128;
                 let mut pos = 0;
                 while pos < 128 {
@@ -612,11 +621,11 @@ impl Cpu {
                 let shift = (u64::from(index) * ebytes * 8) as u32;
                 let mask = (u128::from(u64::MAX) >> (64 - ebytes * 8)) << shift;
                 if load {
-                    let v = self.read_mem(bus, ea, width, DataAccess::NORMAL)?;
+                    let v = self.read_mem(bus, ea, width, DataAccess::SIMD_FP)?;
                     regs[t as usize] = (regs[t as usize] & !mask) | (u128::from(v) << shift);
                 } else {
                     let v = ((regs[t as usize] & mask) >> shift) as u64;
-                    self.write_mem(bus, ea, width, v, DataAccess::NORMAL)?;
+                    self.write_mem(bus, ea, width, v, DataAccess::SIMD_FP)?;
                 }
             }
             offs += ebytes;

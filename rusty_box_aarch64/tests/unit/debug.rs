@@ -46,6 +46,22 @@ const ADD_X0: u32 = 0x9100_0400; // add x0, x0, #1
 const B_BACK_4: u32 = 0x17FF_FFFF; // b .-4
 /// `msr daifclr, #8`: clear PSTATE.D.
 const CLEAR_D: u32 = 0xD503_48FF;
+/// `msr daifset, #8`: set PSTATE.D.
+const SET_D: u32 = 0xD503_48DF;
+const STXR: u32 = 0xC803_7C22; // stxr w3, x2, [x1]
+const ST1_16B: u32 = 0x4C00_7020; // st1 {v0.16b}, [x1]
+const LDR_D0: u32 = 0xFD40_0020; // ldr d0, [x1]
+const LDR_Z0: u32 = 0x8580_4020; // ldr z0, [x1]
+const STR_Z0: u32 = 0xE580_4020; // str z0, [x1]
+const PTRUE_P0: u32 = 0x2518_E3E0; // ptrue p0.b
+const LD1B_Z0: u32 = 0xA400_A020; // ld1b {z0.b}, p0/z, [x1]
+const LDR_ZA: u32 = 0xE100_0020; // ldr za[w12, 0], [x1]
+const SMSTART: u32 = 0xD503_477F;
+/// `CPACR_EL1.FPEN` and `SMEN`: EL0 and EL1 may use them.
+const FP_ENABLED: u64 = 3 << 20;
+const SME_ENABLED: u64 = 3 << 24;
+/// `msr mdscr_el1, x0`.
+const MSR_MDSCR: u32 = 0xD510_0240;
 
 /// `MSR` encodings: op0, op1, CRn, CRm, op2.
 type Key = (u32, u32, u32, u32, u32);
@@ -96,7 +112,8 @@ const EX: u64 = 1 << 6;
 /// `ISS.WnR` and `CM` of a Watchpoint exception.
 const WNR: u64 = 1 << 6;
 const CM: u64 = 1 << 8;
-/// `ISS.WPTV` of a Watchpoint exception, and WPT's first bit.
+/// `ISS.WPF`, `WPTV` of a Watchpoint exception, and WPT's first bit.
+const WPF: u64 = 1 << 16;
 const WPTV: u64 = 1 << 17;
 const WPT: u32 = 18;
 
@@ -489,6 +506,112 @@ fn a_snapshot_carries_what_was_stepped() {
     );
 }
 
+/// A stepped instruction that masks debug exceptions leaves Software Step
+/// inactive: the unmasking that follows enters active-pending from there,
+/// with no syndrome to record (Arm ARM D2.11.6, D2.11.9.1).
+#[test]
+fn a_step_that_masks_debug_exceptions_records_no_syndrome() {
+    let mut m = v8();
+    m.msr(MDSCR_EL1, SS | KDE);
+    m.eret(EL1H | SPSR_SS, CODE);
+    m.run(CODE, SET_D);
+    m.run(CODE + 4, NOP);
+    assert_eq!(m.taken(), None, "masked, the step is inactive");
+    m.run(CODE + 8, CLEAR_D);
+    m.put(CODE + 12, ADD_X0);
+    m.step();
+    assert_eq!(m.cpu.x[0], 0);
+    assert_eq!(
+        m.taken(),
+        Some(Taken {
+            ec: STEP_SAME,
+            iss: DEBUG,
+        })
+    );
+}
+
+/// So does a stepped write that clears `MDSCR_EL1.KDE`.
+#[test]
+fn a_step_that_clears_kde_records_no_syndrome() {
+    let mut m = v8();
+    m.msr(MDSCR_EL1, SS | KDE);
+    m.eret(EL1H | SPSR_SS, CODE);
+    m.cpu.x[0] = SS;
+    m.run(CODE, MSR_MDSCR);
+    m.msr(MDSCR_EL1, SS | KDE);
+    m.put(CODE + 4, ADD_X0);
+    m.step();
+    assert_eq!(
+        m.taken(),
+        Some(Taken {
+            ec: STEP_SAME,
+            iss: DEBUG,
+        })
+    );
+}
+
+/// An ERET that is itself stepped writes PSTATE.SS, so Software Step does
+/// not advance past it, and the exception that follows it records no
+/// syndrome, which D2.11.9.1 leaves optional.
+#[test]
+fn a_stepped_eret_records_no_syndrome() {
+    const TARGET: u64 = CODE + 0x40;
+    let mut m = v8();
+    m.msr(MDSCR_EL1, SS | KDE);
+    m.eret(EL1H | SPSR_SS, CODE);
+    m.msr(SPSR_EL1, EL1H);
+    m.msr(ELR_EL1, TARGET);
+    m.run(CODE, ERET);
+    assert_eq!(m.cpu.pc, TARGET);
+    assert!(!m.cpu.pstate.ss);
+    m.put(TARGET, ADD_X0);
+    m.step();
+    assert_eq!(m.cpu.x[0], 0);
+    assert_eq!(
+        m.taken(),
+        Some(Taken {
+            ec: STEP_SAME,
+            iss: DEBUG,
+        })
+    );
+    assert_eq!(m.cpu.sys.elr_el1, TARGET);
+}
+
+/// An illegal exception return's destination is the current level
+/// (`DebugExceptionReturnSS`, D2.11.10.1). With SPSR_EL1.SS set the
+/// Illegal Execution state exception comes first and saves SS 1; with it
+/// clear Software Step comes first and saves IL 1.
+#[test]
+fn an_illegal_return_under_software_step() {
+    const ILLEGAL_EL2H: u64 = 0b01001;
+    const SPSR_IL: u64 = 1 << 20;
+    const ILLEGAL_STATE: u64 = 0x0E;
+
+    let mut m = v8();
+    m.msr(MDSCR_EL1, SS | KDE);
+    m.eret(ILLEGAL_EL2H | SPSR_SS, CODE);
+    assert!(m.cpu.pstate.il && m.cpu.pstate.ss);
+    m.put(CODE, ADD_X0);
+    m.step();
+    assert_eq!(m.taken().map(|t| t.ec), Some(ILLEGAL_STATE));
+    assert_ne!(m.cpu.sys.spsr_el1 & SPSR_SS, 0);
+
+    let mut m = v8();
+    m.msr(MDSCR_EL1, SS | KDE);
+    m.eret(ILLEGAL_EL2H, CODE);
+    assert!(m.cpu.pstate.il && !m.cpu.pstate.ss);
+    m.put(CODE, ADD_X0);
+    m.step();
+    assert_eq!(
+        m.taken(),
+        Some(Taken {
+            ec: STEP_SAME,
+            iss: DEBUG,
+        })
+    );
+    assert_ne!(m.cpu.sys.spsr_el1 & SPSR_IL, 0);
+}
+
 // ----- Breakpoints -----
 
 /// A breakpoint on an instruction's address fires before it runs, at EL0
@@ -617,6 +740,23 @@ fn a_linked_breakpoint_needs_its_context() {
     assert_eq!(m.exec(NOP), None, "the linked breakpoint is disabled");
 }
 
+/// A link to anything but a context-aware breakpoint with linking enabled
+/// matches nothing, Arm's `Unpredictable_BPNOTLINKING` and
+/// `Unpredictable_BPLINKEDADDRMATCH` defaults: itself, an address
+/// breakpoint, or a breakpoint this processor does not have.
+#[test]
+fn a_link_to_anything_else_matches_nothing() {
+    let mut m = v8();
+    m.msr(dbgbvr(0), CODE);
+    m.msr(dbgbvr(1), CODE);
+    m.at_el1_debuggable(MDE);
+    m.msr(dbgbcr(1), breakpoint(ADDRESS, 0, EL0_ONLY));
+    for lbn in [0, 1, 2] {
+        m.msr(dbgbcr(0), breakpoint(LINKED_ADDRESS, lbn, BOTH_ELS));
+        assert_eq!(m.exec(NOP), None, "LBN {lbn}");
+    }
+}
+
 /// A breakpoint fires in the middle of code that runs from a trace.
 #[test]
 fn a_breakpoint_fires_inside_a_trace() {
@@ -637,6 +777,51 @@ fn a_breakpoint_fires_inside_a_trace() {
     assert_eq!(m.cpu.x[0], 1);
     assert_eq!(m.cpu.sys.elr_el1, CODE + 4);
     assert_eq!(m.taken().map(|t| t.ec), Some(BREAKPOINT_SAME));
+}
+
+/// A breakpoint and a watchpoint compare the address up to bit 48: the value
+/// registers' bits above it are left out of the comparison, Arm's
+/// `Unpredictable_DBGxVR_RESS` default, and bits 1:0 of `DBGBVR<n>` too.
+#[test]
+fn the_value_registers_compare_up_to_bit_48() {
+    const ABOVE: u64 = (1 << 49) | (1 << 60);
+    let mut m = v8();
+    m.msr(dbgbvr(0), CODE | ABOVE | 3);
+    m.msr(dbgbcr(0), breakpoint(ADDRESS, 0, BOTH_ELS));
+    m.at_el1_debuggable(MDE);
+    assert_eq!(m.exec(NOP).map(|t| t.ec), Some(BREAKPOINT_SAME));
+
+    let mut m = watching(v8(), ALL);
+    m.msr(dbgwvr(0), DATA | ABOVE);
+    assert_eq!(m.exec(LDR).map(|t| t.ec), Some(WATCHPOINT_SAME));
+}
+
+/// With FEAT_Debugv8p2, BT 0b0110 and 0b0111 match `CONTEXTIDR_EL1` as
+/// 0b0010 and 0b0011 do; without it they are reserved, which is disabled
+/// here.
+#[test]
+fn feat_debugv8p2_adds_two_context_types() {
+    const CONTEXT_EL1: u64 = 0b0110;
+    const LINKING_CONTEXT_EL1: u64 = 0b0111;
+
+    let mut m = v9();
+    m.msr(CONTEXTIDR_EL1, 0x1234);
+    m.msr(dbgbvr(1), 0x1234);
+    m.at_el1_debuggable(MDE);
+    m.msr(dbgbcr(1), breakpoint(CONTEXT_EL1, 0, BOTH_ELS));
+    assert_eq!(m.exec(NOP).map(|t| t.ec), Some(BREAKPOINT_SAME));
+    m.msr(dbgbcr(1), breakpoint(LINKING_CONTEXT_EL1, 0, BOTH_ELS));
+    assert_eq!(m.exec(NOP), None, "linking enabled fires on no event");
+    m.msr(dbgbvr(0), CODE);
+    m.msr(dbgbcr(0), breakpoint(LINKED_ADDRESS, 1, BOTH_ELS));
+    assert_eq!(m.exec(NOP).map(|t| t.ec), Some(BREAKPOINT_SAME));
+
+    let mut m = v8();
+    m.msr(CONTEXTIDR_EL1, 0x1234);
+    m.msr(dbgbvr(1), 0x1234);
+    m.at_el1_debuggable(MDE);
+    m.msr(dbgbcr(1), breakpoint(CONTEXT_EL1, 0, BOTH_ELS));
+    assert_eq!(m.exec(NOP), None, "reserved without FEAT_Debugv8p2");
 }
 
 // ----- Watchpoints -----
@@ -791,6 +976,32 @@ fn a_pair_is_watched_in_both_elements() {
     assert_eq!(m.cpu.sys.far_el1, 0x4000);
 }
 
+/// Any HMC or SSC on a processor with no EL2 or EL3 is reserved for a
+/// watchpoint as for a breakpoint, which is disabled here.
+#[test]
+fn a_reserved_watchpoint_state_is_silent() {
+    let mut m = watching(v8(), ALL);
+    for reserved in [1 << 13, 1 << 14, 2 << 14] {
+        m.msr(dbgwcr(0), watchpoint(ALL, ALL_BYTES, BOTH_ELS) | reserved);
+        assert_eq!(m.exec(LDR), None, "{reserved:#x}");
+    }
+}
+
+/// `ST1` makes each element an access of its own, so a watchpoint on one
+/// leaves those before it written, which Arm's `Mem` allows.
+#[test]
+fn st1_is_watched_an_element_at_a_time() {
+    let mut m = watching(v8(), STORES);
+    m.cpu.sys.cpacr_el1 = FP_ENABLED;
+    m.cpu.v[0] = u128::MAX;
+    m.msr(dbgwvr(0), 0x4000);
+    m.cpu.x[1] = 0x3FF8;
+    assert_eq!(m.exec(ST1_16B).map(|t| t.ec), Some(WATCHPOINT_SAME));
+    assert_eq!(m.cpu.sys.far_el1, 0x4000);
+    assert_eq!(m.ram.0[0x3FFF], 0xFF, "the page before it is written");
+    assert_eq!(m.ram.0[0x4000], 0, "the watched byte is not");
+}
+
 /// An access across a page boundary is watched byte by byte, and a store
 /// fires before anything is written.
 #[test]
@@ -912,6 +1123,114 @@ fn a_linked_watchpoint_needs_its_context() {
     assert!(m.exec(LDR).is_some());
     m.msr(CONTEXTIDR_EL1, 8);
     assert_eq!(m.exec(LDR), None);
+}
+
+/// A Store-Exclusive the monitor would pass is watched as a store. One that
+/// fails on the monitor's address before it translates raises nothing, the
+/// IMPLEMENTATION DEFINED choice Arm ARM D2.9.6.1 leaves, and reports its
+/// failure.
+#[test]
+fn a_store_exclusive_is_watched_only_once_it_translates() {
+    let mut m = watching(v8(), STORES);
+    assert_eq!(m.exec(STXR), None, "no monitor armed");
+    assert_eq!(m.cpu.x[3], 1, "the store failed");
+    assert_eq!(m.exec(LDXR), None, "a load, to a watch on stores");
+    assert_eq!(m.exec(STXR).map(|t| t.ec), Some(WATCHPOINT_SAME));
+}
+
+/// A Store-Exclusive to the monitor's virtual address that fails on the
+/// physical one, after it translates, is watched all the same: the
+/// translation is where the check is. With no watchpoint it reports its
+/// failure, so this is the failing path.
+#[test]
+fn a_store_exclusive_failing_after_it_translates_is_watched() {
+    const SECOND_GIB: u64 = 1 << 30;
+    const VA: u64 = SECOND_GIB + DATA;
+    let map_second_gib = |m: &mut Machine, output: u64| {
+        let block: u64 = output | (1 << 10) | (3 << 8) | 0b01;
+        let at = (L1 + 8) as usize;
+        m.ram.0[at..at + 8].copy_from_slice(&block.to_le_bytes());
+        m.cpu.tlb.flush();
+    };
+
+    let mut m = v8();
+    m.mmu_on();
+    map_second_gib(&mut m, 0);
+    m.cpu.x[1] = VA;
+    assert_eq!(m.exec(LDXR), None);
+    map_second_gib(&mut m, SECOND_GIB);
+    assert_eq!(m.exec(STXR), None);
+    assert_eq!(m.cpu.x[3], 1, "the physical address differs");
+
+    let mut m = v8();
+    m.mmu_on();
+    map_second_gib(&mut m, 0);
+    m.msr(dbgwvr(0), VA);
+    m.msr(dbgwcr(0), watchpoint(STORES, ALL_BYTES, BOTH_ELS));
+    m.at_el1_debuggable(MDE);
+    m.cpu.x[1] = VA;
+    assert_eq!(m.exec(LDXR), None);
+    map_second_gib(&mut m, SECOND_GIB);
+    assert_eq!(m.exec(STXR).map(|t| t.ec), Some(WATCHPOINT_SAME));
+}
+
+/// A processor in Streaming SVE mode on Normal memory, with a watchpoint
+/// on `lsc` of the doubleword at `DATA`.
+fn streaming(lsc: u64) -> Machine {
+    let mut m = watching(v9(), lsc);
+    m.mmu_on();
+    m.cpu.sys.cpacr_el1 = FP_ENABLED | SME_ENABLED;
+    assert_eq!(m.exec(SMSTART), None);
+    m
+}
+
+/// A contiguous SVE access and an SME access are relaxed (Arm
+/// `IsRelaxedWatchpointAccess`): each is watched out to the 16-byte
+/// boundaries around it, and WPF says a match may be of a byte it did not
+/// access, Arm's listed outcome of `Unpredictable_16BYTEROUNDEDDOWNACCESS`
+/// and `...UPACCESS`. An ordinary access there is not.
+#[test]
+fn a_relaxed_access_is_watched_out_to_16_bytes() {
+    let mut m = streaming(ALL);
+    assert_eq!(m.exec(PTRUE_P0), None);
+    m.cpu.x[1] = DATA + 8;
+    for word in [LDR_Z0, LD1B_Z0, LDR_ZA] {
+        assert_eq!(
+            m.exec(word),
+            Some(Taken {
+                ec: WATCHPOINT_SAME,
+                iss: WPTV | WPF | DEBUG,
+            }),
+            "{word:#010x}"
+        );
+        assert_eq!(m.cpu.sys.far_el1, DATA, "{word:#010x}");
+    }
+    assert_eq!(
+        m.exec(STR_Z0),
+        Some(Taken {
+            ec: WATCHPOINT_SAME,
+            iss: WPTV | WPF | WNR | DEBUG,
+        })
+    );
+    assert_eq!(m.exec(LDR), None, "a general-purpose load is exact");
+}
+
+/// A SIMD&FP access is relaxed in Streaming SVE mode alone.
+#[test]
+fn a_simd_fp_access_is_relaxed_only_when_streaming() {
+    let mut m = watching(v9(), ALL);
+    m.mmu_on();
+    m.cpu.sys.cpacr_el1 = FP_ENABLED | SME_ENABLED;
+    m.cpu.x[1] = DATA + 8;
+    assert_eq!(m.exec(LDR_D0), None, "not streaming");
+    assert_eq!(m.exec(SMSTART), None);
+    assert_eq!(
+        m.exec(LDR_D0),
+        Some(Taken {
+            ec: WATCHPOINT_SAME,
+            iss: WPTV | WPF | DEBUG,
+        })
+    );
 }
 
 /// Instruction fetches are never watched, nor are translation table walks.

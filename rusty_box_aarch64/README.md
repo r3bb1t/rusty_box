@@ -582,7 +582,9 @@ integration tests of the public API.
   linking, their enables and reserved values, inside a trace; and watchpoints
   by byte, word and masked range, at the level of the access (LDTR), on
   pairs, across pages and through the TLB, after a permission fault, on
-  atomics and `DC ZVA` and `DC IVAC`, and with FEAT_Debugv8p2's syndrome.
+  atomics, Store-Exclusives and `DC ZVA` and `DC IVAC`, on SVE, SME and
+  streaming SIMD&FP accesses rounded to 16 bytes, and with FEAT_Debugv8p2's
+  syndrome.
 - `tests/unit/wait.rs` checks the waits every processor has and FEAT_WFxT's
   against Arm's pseudocode (`Hint_WFI`, `Hint_WFE`, `Hint_WFIT`,
   `Hint_WFET`, `TestEventCNTV`): SEV, SEVL and every exception return,
@@ -1136,7 +1138,12 @@ one open.
   instructions are not NOPs here and share the walk of every other access,
   so `DC` and `IC` by address on a page with AF 0 fault, with CM and WnR
   set; `tests/unit/memory_system.rs` checks it.
-- **Self-hosted debug takes Arm's default in every open case.** A reserved
+- **Self-hosted debug takes Arm's listed default in every open case.** An
+  SME access, a contiguous SVE access and a SIMD&FP access in Streaming SVE
+  mode (`IsRelaxedWatchpointAccess`) are watched out to the 16-byte
+  boundaries around them, with WPF set (`Unpredictable_16BYTEROUNDEDDOWNACCESS`,
+  `...UPACCESS`); Arm ARM D2.9.6.3 (RLVLYV) would allow the exact bytes too. A
+  reserved
   `DBGBCR<n>.BT`, HMC, SSC or PMC, or `DBGWCR<n>` equivalent, behaves as
   disabled (`Unpredictable_RESBPTYPE`, `CheckValidStateMatch`), as does a
   link to anything but a context-aware breakpoint with linking enabled
@@ -1148,11 +1155,14 @@ one open.
   choices: a Software Step exception after a stepped instruction records
   ISV, EX for a Load-Exclusive, and one after an exception return records
   none; a Watchpoint exception reports the first watched byte in FAR_EL1,
-  the last matching watchpoint with FEAT_Debugv8p2 (`WPTV` 1), and `WPF` 0;
+  the last matching watchpoint with FEAT_Debugv8p2 (`WPTV` 1), and `WPF` 0
+  for an access that is not rounded;
   a Store-Exclusive is checked at its translation, so one that fails on
   the monitor's address before translating raises no watchpoint, and one
-  that fails after it can; a store across pages is checked whole before
-  anything is written. `tests/unit/debug.rs` checks them.
+  that fails after it can; a store of one register or a pair across pages
+  is checked whole before anything is written, while `ST1` and the SVE and
+  SME stores are checked an element at a time. `tests/unit/debug.rs` checks
+  them, with `ST1` standing for the stores made an element at a time.
 - **Cache maintenance by address translates, and faults as cache
   maintenance.** Arm's `AArch64_DC` and `AArch64_IC` translate the address
   of DC IVAC, CVAC, CVAU, CVAP, CVADP, CIVAC and IC IVAU and abort on a
@@ -1351,12 +1361,20 @@ one open.
   at once rather than waiting, as the Arm ARM permits, so only the
   instruction count of a WFE loop differs from QEMU, whose WFE sleeps.
 - **A store across a page boundary.** Arm's `Mem` setter writes element by
-  element and leaves what a faulting store has written unspecified. Every
-  store across pages here, a pair, a pair of Q registers and a single
-  register alike, translates both pages before writing anything, so a
-  fault leaves memory as it was, as QEMU does (accel/tcg/cputlb.c
-  `mmu_lookup`). A load across pages reads a byte at a time, and reports
-  the first byte that faulted.
+  element and leaves what a faulting store has written unspecified. One
+  register, a pair or a pair of Q registers across pages here translates
+  both pages before writing anything, so a fault leaves memory as it was, as
+  QEMU does (accel/tcg/cputlb.c `mmu_lookup`). `ST1` and the SVE and SME
+  stores make each element an access of its own, as Arm's do, so a fault on
+  a later element leaves the earlier ones written. A load across pages reads
+  a byte at a time, and reports the first byte that faulted.
+- **An 8-byte access to the PL031 or PL061 is two word accesses.** Their
+  TRMs describe 32-bit APB slaves and say nothing of a 64-bit master, which
+  leaves it to the bus bridge. QEMU's memory core splits the access for a
+  device that declares no access size (`access_with_adjusted_size`), so
+  `ldr x0, [rtc]` reads RTCDR and then RTCMR, the low word first. This model
+  does the same; the tests in `src/devices/pl031.rs` and
+  `src/devices/pl061.rs` check it.
 - **`HVC` is the firmware's conduit although EL2 is absent.** The Arm ARM
   makes `HVC` UNDEFINED when EL2 is not implemented (the `HVC` pseudocode:
   `if !HaveEL(EL2) || PSTATE.EL == EL0 ... UNDEFINED`), and

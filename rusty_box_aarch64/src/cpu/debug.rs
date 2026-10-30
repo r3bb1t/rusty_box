@@ -33,11 +33,12 @@ const DEBUG_EXCEPTION: u32 = 0b10_0010;
 const STEP_ISV: u32 = 1 << 24;
 const STEP_EX: u32 = 1 << 6;
 
-/// `ISS.WnR`, `CM`, `WPTV` and the bottom bit of `WPT` of a Watchpoint
-/// exception. WPF, FnP and FnV stay 0: every match here is of an address
-/// accessed, and FAR_EL1 holds it.
+/// `ISS.WnR`, `CM`, `WPF`, `WPTV` and the bottom bit of `WPT` of a
+/// Watchpoint exception. FnP and FnV stay 0: `FAR_EL1` holds the byte that
+/// matched.
 const WATCH_WNR: u32 = 1 << 6;
 const WATCH_CM: u32 = 1 << 8;
+const WATCH_WPF: u32 = 1 << 16;
 const WATCH_WPTV: u32 = 1 << 17;
 const WATCH_WPT_SHIFT: u32 = 18;
 
@@ -91,6 +92,45 @@ impl WatchedAccess {
                 }
             }
             Self::CacheInvalidate => WATCH_WNR | WATCH_CM,
+        }
+    }
+}
+
+/// How far around the bytes of an access a watchpoint looks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WatchedRange {
+    /// The bytes accessed.
+    Exact,
+    /// Those bytes, out to the 16-byte boundaries around them: a relaxed
+    /// access (Arm `IsRelaxedWatchpointAccess`), under Arm's listed outcome
+    /// of `Unpredictable_16BYTEROUNDEDDOWNACCESS` and `...UPACCESS`. `WPF`
+    /// then says a match may be of a byte it did not access.
+    RoundedTo16Bytes,
+}
+
+impl WatchedRange {
+    /// The first byte looked at of an access from `va`.
+    const fn first(self, va: u64) -> u64 {
+        match self {
+            Self::Exact => va,
+            Self::RoundedTo16Bytes => va & !15,
+        }
+    }
+
+    /// The byte past the last one looked at of an access that ends before
+    /// `end`.
+    const fn end(self, end: u64) -> u64 {
+        match self {
+            Self::Exact => end,
+            Self::RoundedTo16Bytes => end.wrapping_add(15) & !15,
+        }
+    }
+
+    /// `ISS.WPF`.
+    const fn syndrome(self) -> u32 {
+        match self {
+            Self::Exact => 0,
+            Self::RoundedTo16Bytes => WATCH_WPF,
         }
     }
 }
@@ -260,12 +300,16 @@ impl Cpu {
 
     /// Arm `SSAdvance`, after the instruction `word` completed, or as an SVC
     /// takes its exception, with no word to tell: from active-not-pending to
-    /// active-pending, unless the instruction wrote PSTATE.SS.
+    /// active-pending, unless the instruction wrote PSTATE.SS. An
+    /// instruction that leaves debug exceptions disabled leaves Software
+    /// Step inactive instead, and what enters active-pending from there has
+    /// no syndrome (Arm ARM D2.11.9.1).
     #[inline]
     pub(crate) fn ss_advance(&mut self, word: Option<u32>) {
         if self.should_advance_ss && self.sys.mdscr_el1 & MDSCR_SS != 0 && self.pstate.ss {
             self.pstate.ss = false;
             self.stepped = match word {
+                _ if !self.debug_exceptions_enabled() => Stepped::Nothing,
                 Some(word) if is_load_exclusive(word) => Stepped::LoadExclusive,
                 _ => Stepped::Instruction,
             };
@@ -355,20 +399,23 @@ impl Cpu {
         bytes: u64,
         kind: WatchedAccess,
         el: El,
+        range: WatchedRange,
     ) -> Result<(), Fault> {
         if !self.watch_armed || !self.debug_exceptions_enabled() {
             return Ok(());
         }
+        let first = range.first(va);
+        let length = range.end(va.wrapping_add(bytes)).wrapping_sub(first);
         let mut raised = None;
         for n in 0..WATCHPOINTS {
-            if let Some(address) = self.watchpoint_match(n, va, bytes, kind, el) {
+            if let Some(address) = self.watchpoint_match(n, first, length, kind, el) {
                 let lsc = (self.sys.dbgwcr[n] >> 3) & 3;
                 let number = if self.implements(Feature::Debugv8p2) {
                     WATCH_WPTV | ((n as u32) << WATCH_WPT_SHIFT)
                 } else {
                     0
                 };
-                let iss = kind.syndrome(lsc) | number | DEBUG_EXCEPTION;
+                let iss = kind.syndrome(lsc) | range.syndrome() | number | DEBUG_EXCEPTION;
                 raised = Some(Exception::new(ExceptionClass::Watchpoint, iss).with_far(address));
             }
         }

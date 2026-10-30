@@ -285,6 +285,9 @@ pub(super) const OSDLR_DLK: u64 = 1;
 /// overrides the OS Double Lock.
 pub(super) const DBGPRCR_CORENPDRQ: u64 = 1;
 
+/// The claim tags `DBGCLAIMSET_EL1` sets and `DBGCLAIMCLR_EL1` clears.
+pub(super) const DBGCLAIM_TAGS: u64 = 0xFF;
+
 /// `RMR_EL1.AA64`: the processor resets into AArch64. RAO/WI, as there is
 /// no AArch32 to reset into.
 const RMR_AA64: u64 = 1;
@@ -713,7 +716,7 @@ impl Cpu {
             // RAO/W1S", DDI 0601's `DBGCLAIMSET_EL1`), and
             // `DBGCLAIMCLR_EL1` reads the tags themselves, as QEMU's
             // `dbgclaimset_read` and `DBGCLAIMCLR_EL1` have them.
-            DBGCLAIMSET_EL1 => 0xFF,
+            DBGCLAIMSET_EL1 => DBGCLAIM_TAGS,
             DBGCLAIMCLR_EL1 => self.sys.dbgclaim,
             DBGAUTHSTATUS_EL1 => id::dbgauthstatus_el1(self.imp.features),
             // With no error records (`ERRIDR_EL1.NUM` = 0), `ERRSELR_EL1`
@@ -1114,11 +1117,11 @@ impl Cpu {
                 WriteEffect::None
             }
             DBGCLAIMSET_EL1 => {
-                self.sys.dbgclaim |= value & 0xFF;
+                self.sys.dbgclaim |= value & DBGCLAIM_TAGS;
                 WriteEffect::None
             }
             DBGCLAIMCLR_EL1 => {
-                self.sys.dbgclaim &= !(value & 0xFF);
+                self.sys.dbgclaim &= !(value & DBGCLAIM_TAGS);
                 WriteEffect::None
             }
             _ => match self.debug_breakpoint_write(key, value) {

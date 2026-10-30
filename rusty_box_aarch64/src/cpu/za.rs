@@ -706,12 +706,12 @@ impl Cpu {
         size: TileSize,
     ) -> Result<u128, Fault> {
         match size {
-            TileSize::Q => self.read_mem_u128(bus, addr, DataAccess::NORMAL),
+            TileSize::Q => self.read_mem_u128(bus, addr, DataAccess::SCALABLE),
             _ => Ok(u128::from(self.read_mem(
                 bus,
                 addr,
                 AccessWidth::from_size_field(size.log2_bytes()),
-                DataAccess::NORMAL,
+                DataAccess::SCALABLE,
             )?)),
         }
     }
@@ -725,13 +725,13 @@ impl Cpu {
         value: u128,
     ) -> Result<(), Fault> {
         match size {
-            TileSize::Q => self.write_mem_u128(bus, addr, value, DataAccess::NORMAL),
+            TileSize::Q => self.write_mem_u128(bus, addr, value, DataAccess::SCALABLE),
             _ => self.write_mem(
                 bus,
                 addr,
                 AccessWidth::from_size_field(size.log2_bytes()),
                 value as u64,
-                DataAccess::NORMAL,
+                DataAccess::SCALABLE,
             ),
         }
     }

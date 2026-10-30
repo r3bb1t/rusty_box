@@ -17,7 +17,7 @@ use rusty_box_core::SnapError;
 use super::dp::ones;
 use super::exception::{Exception, ExceptionClass};
 use super::exec::{sext, Fault, StopCause};
-use super::debug::WatchedAccess;
+use super::debug::{WatchedAccess, WatchedRange};
 use super::features::{Feature, Features};
 use super::{id, sctlr, Cpu, El};
 use crate::bus::{AccessWidth, BusFault, PhysAddr, PhysBus, PhysSpan};
@@ -90,6 +90,21 @@ impl AccessSpan {
     }
 }
 
+/// Which registers a data access is for, the part of Arm's access type that
+/// decides whether it is relaxed (`IsRelaxedWatchpointAccess`).
+///
+/// Closed (R5): the classes of a data access.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AccessClass {
+    General,
+    /// `AccessType_ASIMD`: relaxed in Streaming SVE mode.
+    SimdFp,
+    /// A contiguous `AccessType_SVE` access or an `AccessType_SME` one:
+    /// always relaxed. Every SVE load and store this processor has is
+    /// contiguous.
+    Scalable,
+}
+
 /// The constraints a data access carries beyond its size.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct DataAccess {
@@ -97,26 +112,41 @@ pub(crate) struct DataAccess {
     /// with PSTATE.UAO clear (Arm `AArch64_IsUnprivAccessPriv`).
     pub(crate) unprivileged: bool,
     pub(crate) alignment: AlignmentRule,
+    pub(crate) class: AccessClass,
 }
 
 impl DataAccess {
     pub(crate) const NORMAL: Self = Self {
         unprivileged: false,
         alignment: AlignmentRule::Any,
+        class: AccessClass::General,
     };
     /// A load-acquire or store-release.
     pub(crate) const ORDERED: Self = Self {
         unprivileged: false,
         alignment: AlignmentRule::Ordered,
+        class: AccessClass::General,
     };
     /// An exclusive or atomic access.
     pub(crate) const ATOMIC: Self = Self {
         unprivileged: false,
         alignment: AlignmentRule::Atomic,
+        class: AccessClass::General,
     };
     pub(crate) const UNPRIVILEGED: Self = Self {
         unprivileged: true,
         alignment: AlignmentRule::Any,
+        class: AccessClass::General,
+    };
+    /// A load or store of a SIMD&FP register.
+    pub(crate) const SIMD_FP: Self = Self {
+        class: AccessClass::SimdFp,
+        ..Self::NORMAL
+    };
+    /// A load or store of an SVE or SME register.
+    pub(crate) const SCALABLE: Self = Self {
+        class: AccessClass::Scalable,
+        ..Self::NORMAL
     };
 }
 
@@ -1499,8 +1529,18 @@ impl Cpu {
                 .map_err(|f| Self::data_abort(va, f, true)),
             DataDirection::ReadWrite => self.translate_rmw(bus, va, el, on_device),
         }?;
-        self.check_watchpoints(va, span.watched, direction.into(), el)?;
+        let range = self.watched_range(acc);
+        self.check_watchpoints(va, span.watched, direction.into(), el, range)?;
         Ok(mapping)
+    }
+
+    /// How a watchpoint looks at `acc` (Arm `IsRelaxedWatchpointAccess`).
+    fn watched_range(&self, acc: DataAccess) -> WatchedRange {
+        match acc.class {
+            AccessClass::Scalable => WatchedRange::RoundedTo16Bytes,
+            AccessClass::SimdFp if self.svcr.sm => WatchedRange::RoundedTo16Bytes,
+            AccessClass::SimdFp | AccessClass::General => WatchedRange::Exact,
+        }
     }
 
     /// The translation of a read-modify-write at `va`: read permission,
@@ -1696,7 +1736,8 @@ impl Cpu {
             let m = self
                 .translate(bus, byte_va, AccessKind::Read, el, OnDevice::Refused)
                 .map_err(|f| Self::data_abort(byte_va, f, false))?;
-            self.check_watchpoints(byte_va, 1, WatchedAccess::Load, el)?;
+            let range = self.watched_range(acc);
+            self.check_watchpoints(byte_va, 1, WatchedAccess::Load, el, range)?;
             value |= self.bus_read(bus, byte_va, m.pa, AccessWidth::Byte)? << (8 * i);
         }
         Ok(value)
@@ -1763,28 +1804,30 @@ impl Cpu {
     ) -> Result<(), Fault> {
         let bytes = width.bytes();
         self.check_alignment(va, bytes, acc, true)?;
-        let el = self.access_el(acc);
-        let pages = self.translate_write_pages(bus, va, bytes, el, OnDevice::Refused)?;
+        let pages = self.translate_write_pages(bus, va, bytes, acc, OnDevice::Refused)?;
         self.write_element_on_pages(bus, va, 0, width, value, pages)
     }
 
-    /// Translate, for a write checked against `el`'s permissions, the first
+    /// Translate, for a write with `acc`'s constraints, the first
     /// byte of an access of `bytes` at `va` that crosses a page boundary
     /// and its first byte on the second page, Device memory refusing them
     /// as `on_device` says, so that a fault on either, or a watchpoint on
     /// any of its bytes, is taken before anything is written, reported at
     /// the byte that faulted. Arm's `Mem` setter writes byte by byte, and
-    /// leaves what a faulting store has written unspecified; every store
-    /// that crosses a page here leaves memory as it was on a translation
-    /// fault, as QEMU's do (accel/tcg/cputlb.c `mmu_lookup`).
+    /// leaves what a faulting store has written unspecified; one register,
+    /// a pair or a pair of Q registers crossing a page here leaves memory
+    /// as it was on a translation fault, as QEMU's do (accel/tcg/cputlb.c
+    /// `mmu_lookup`). `ST1` and the SVE and SME stores make their elements'
+    /// accesses one at a time, and do not come through here.
     fn translate_write_pages<B: PhysBus>(
         &mut self,
         bus: &mut B,
         va: u64,
         bytes: u64,
-        el: El,
+        acc: DataAccess,
         on_device: OnDevice,
     ) -> Result<WritePages, Fault> {
+        let el = self.access_el(acc);
         let second_page = va.wrapping_add(bytes - 1) & !0xFFF;
         let first = self
             .translate(bus, va, AccessKind::Write, el, on_device)
@@ -1792,7 +1835,8 @@ impl Cpu {
         let second = self
             .translate(bus, second_page, AccessKind::Write, el, on_device)
             .map_err(|f| Self::data_abort(second_page, f, true))?;
-        self.check_watchpoints(va, bytes, WatchedAccess::Store, el)?;
+        let range = self.watched_range(acc);
+        self.check_watchpoints(va, bytes, WatchedAccess::Store, el, range)?;
         Ok(WritePages {
             first: first.pa,
             second: second.pa,
@@ -1984,8 +2028,7 @@ impl Cpu {
         let bytes = width.bytes();
         if (va & 0xFFF) + 2 * bytes > 0x1000 {
             self.check_alignment(va, bytes, acc, true)?;
-            let el = self.access_el(acc);
-            let pages = self.translate_write_pages(bus, va, 2 * bytes, el, on_device)?;
+            let pages = self.translate_write_pages(bus, va, 2 * bytes, acc, on_device)?;
             self.write_element_on_pages(bus, va, 0, width, value.first, pages)?;
             return self.write_element_on_pages(bus, va, bytes, width, value.second, pages);
         }
@@ -2049,8 +2092,7 @@ impl Cpu {
 
     /// Write 16 bytes (a Q register) at `va`, as [`Cpu::read_mem_u128`]
     /// reads them: the low half, then the high half. An access across a
-    /// page boundary translates both pages before either half is written,
-    /// as every store across pages does
+    /// page boundary translates both pages before either half is written
     /// ([`Cpu::translate_write_pages`]).
     pub(crate) fn write_mem_u128<B: PhysBus>(
         &mut self,
@@ -2094,8 +2136,8 @@ impl Cpu {
 
     /// Write the 32 bytes of an STP or STNP of two Q registers at `va`, as
     /// [`Cpu::read_mem_q_pair`] reads them, in ascending order. An access
-    /// across a page boundary translates both pages first, as every store
-    /// across pages does ([`Cpu::translate_write_pages`]).
+    /// across a page boundary translates both pages first
+    /// ([`Cpu::translate_write_pages`]).
     pub(crate) fn write_mem_q_pair<B: PhysBus>(
         &mut self,
         bus: &mut B,
@@ -2107,8 +2149,7 @@ impl Cpu {
         let eight_byte_aligned = va & 7 == 0;
         if (va & 0xFFF) + 32 > 0x1000 {
             let on_device = OnDevice::of_alignment(va, 8);
-            let el = self.access_el(acc);
-            let pages = self.translate_write_pages(bus, va, 32, el, on_device)?;
+            let pages = self.translate_write_pages(bus, va, 32, acc, on_device)?;
             let [first, second] = [ElementPair::from(value.first), value.second.into()];
             let doublewords = [first.first, first.second, second.first, second.second];
             for (offset, doubleword) in (0..).step_by(8).zip(doublewords) {
@@ -2144,7 +2185,8 @@ impl Cpu {
         if op == CacheMaintenance::Invalidate {
             let line = va & !(id::DC_LINE_BYTES - 1);
             let kind = WatchedAccess::CacheInvalidate;
-            self.check_watchpoints(line, id::DC_LINE_BYTES, kind, self.pstate.el)?;
+            let range = WatchedRange::Exact;
+            self.check_watchpoints(line, id::DC_LINE_BYTES, kind, self.pstate.el, range)?;
         }
         Ok(())
     }
@@ -2203,7 +2245,8 @@ impl Cpu {
         let m = self
             .translate(bus, base, AccessKind::Write, el, OnDevice::Refused)
             .map_err(|f| Self::data_abort(va, f, true))?;
-        self.check_watchpoints(base, id::DC_ZVA_BYTES, WatchedAccess::Store, el)?;
+        let kind = WatchedAccess::Store;
+        self.check_watchpoints(base, id::DC_ZVA_BYTES, kind, el, WatchedRange::Exact)?;
         self.note_store(m.pa, id::DC_ZVA_BYTES);
         for i in 0..id::DC_ZVA_BYTES / 8 {
             let at = PhysAddr::new(m.pa.get() + i * 8);

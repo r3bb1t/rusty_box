@@ -233,7 +233,7 @@ impl Cpu {
             for value in &mut values[..nreg] {
                 if active {
                     let data =
-                        self.read_mem(bus, addr, el.msize.access_width(), DataAccess::NORMAL)?;
+                        self.read_mem(bus, addr, el.msize.access_width(), DataAccess::SCALABLE)?;
                     value.set(e, el.esize, el.extend(data));
                 }
                 addr = addr.wrapping_add(mbytes as u64);
@@ -273,7 +273,7 @@ impl Cpu {
                         addr,
                         el.msize.access_width(),
                         value.get(e, el.esize),
-                        DataAccess::NORMAL,
+                        DataAccess::SCALABLE,
                     )?;
                 }
                 addr = addr.wrapping_add(mbytes as u64);
@@ -372,7 +372,7 @@ impl Cpu {
                     value.set(
                         e,
                         es,
-                        self.read_mem(bus, addr, es.access_width(), DataAccess::NORMAL)?,
+                        self.read_mem(bus, addr, es.access_width(), DataAccess::SCALABLE)?,
                     );
                 }
                 addr = addr.wrapping_add(es.bytes() as u64);
@@ -410,7 +410,7 @@ impl Cpu {
                         addr,
                         es.access_width(),
                         source.get(e, es),
-                        DataAccess::NORMAL,
+                        DataAccess::SCALABLE,
                     )?;
                 }
                 addr = addr.wrapping_add(es.bytes() as u64);
@@ -435,8 +435,8 @@ impl Cpu {
         let mut result = Zv::ZERO;
         if (0..count).any(|e| mask.active(e, el.esize)) {
             let addr = base.wrapping_add(offset * el.msize.bytes() as u64);
-            let data =
-                el.extend(self.read_mem(bus, addr, el.msize.access_width(), DataAccess::NORMAL)?);
+            let width = el.msize.access_width();
+            let data = el.extend(self.read_mem(bus, addr, width, DataAccess::SCALABLE)?);
             for e in (0..count).filter(|&e| mask.active(e, el.esize)) {
                 result.set(e, el.esize, data);
             }
@@ -465,7 +465,7 @@ impl Cpu {
                 quadword.set(
                     e,
                     es,
-                    self.read_mem(bus, addr, es.access_width(), DataAccess::NORMAL)?,
+                    self.read_mem(bus, addr, es.access_width(), DataAccess::SCALABLE)?,
                 );
             }
             addr = addr.wrapping_add(es.bytes() as u64);
@@ -536,7 +536,7 @@ impl Cpu {
         len: usize,
     ) -> Result<Zv, Fault> {
         self.check_transfer_alignment(aligned, addr, false)?;
-        let acc = DataAccess::NORMAL;
+        let acc = DataAccess::SCALABLE;
         let width = AccessWidth::Byte;
         let mut loaded = Zv::ZERO;
         for i in 0..len {
@@ -561,7 +561,7 @@ impl Cpu {
         bytes: &[u8],
     ) -> Result<(), Fault> {
         self.check_transfer_alignment(aligned, addr, true)?;
-        let acc = DataAccess::NORMAL;
+        let acc = DataAccess::SCALABLE;
         let width = AccessWidth::Byte;
         for (i, &byte) in (0u64..).zip(bytes) {
             let at = addr.wrapping_add(i);

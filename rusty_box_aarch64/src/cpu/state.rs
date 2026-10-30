@@ -8,7 +8,10 @@ use super::features::{Feature, Implementation};
 use super::mmu::TlbContext;
 use super::regs::{CpuState, Reg, RegClass, VReg};
 use super::debug::{watch_armed, Stepped};
-use super::sysreg::{DBGBCR_FIELDS, DBGWCR_FIELDS, MDSCR_FIELDS, RMR_RR};
+use super::sysreg::{
+    DBGBCR_FIELDS, DBGCLAIM_TAGS, DBGPRCR_CORENPDRQ, DBGWCR_FIELDS, MDSCR_FIELDS, OSDLR_DLK,
+    OSLSR_OSLK, RMR_RR,
+};
 use super::wait::{EventRegister, Wait};
 use super::{
     id, pauth, sme, Activity, Btype, Cpu, El, ExclusiveMonitor, Pstate, SysRegs, PC_HISTORY,
@@ -104,8 +107,8 @@ impl SysRegs {
     }
 
     /// The inverse of [`SysRegs::to_array`]. Refuses a Debug Communications
-    /// Channel data register wider than its 32 bits, and an `MDSCR_EL1` or
-    /// `RMR_EL1` with a bit set that no write stores.
+    /// Channel data register wider than its 32 bits, and any of the debug
+    /// registers or `RMR_EL1` with a bit set that no write stores.
     fn from_array(a: [u64; SYSREG_COUNT]) -> SnapResult<Self> {
         let [sctlr_el1, actlr_el1, cpacr_el1, ttbr0_el1, ttbr1_el1, tcr_el1, spsr_el1, elr_el1, esr_el1, far_el1, afsr0_el1, afsr1_el1, par_el1, mair_el1, amair_el1, vbar_el1, contextidr_el1, tpidr_el0, tpidrro_el0, tpidr_el1, tpidr2_el0, smcr_el1, csselr_el1, cntkctl_el1, cntfrq_el0, cntp_ctl_el0, cntp_cval_el0, cntv_ctl_el0, cntv_cval_el0, mdscr_el1, mdccint_el1, oslsr_el1, osdlr_el1, oseccr_el1, dbgprcr_el1, dbgclaim, bvr0, bvr1, bcr0, bcr1, wvr0, wvr1, wcr0, wcr1, disr_el1, dtrrx, dtrtx, rvbar_el1, rmr_el1] =
             a;
@@ -126,6 +129,20 @@ impl SysRegs {
         }
         if (wcr0 | wcr1) & !DBGWCR_FIELDS != 0 || (wvr0 | wvr1) & 3 != 0 {
             return Err(SnapError::Invalid("a watchpoint register with a RES0 bit set"));
+        }
+        if oslsr_el1 & !OSLSR_OSLK != id::OSLSR_EL1_RESET & !OSLSR_OSLK {
+            return Err(SnapError::Invalid(
+                "OSLSR_EL1 with a bit other than OSLK changed",
+            ));
+        }
+        if osdlr_el1 & !OSDLR_DLK != 0
+            || oseccr_el1 >> 32 != 0
+            || dbgprcr_el1 & !DBGPRCR_CORENPDRQ != 0
+            || dbgclaim & !DBGCLAIM_TAGS != 0
+        {
+            return Err(SnapError::Invalid(
+                "a debug register with a bit set that no write stores",
+            ));
         }
         Ok(Self {
             sctlr_el1,
@@ -498,6 +515,11 @@ impl Cpu {
                 "snapshot's DISR_EL1 holds bits this processor cannot set",
             ));
         }
+        if sys.osdlr_el1 != 0 && !self.implements(Feature::DoubleLock) {
+            return Err(SnapError::Invalid(
+                "snapshot's OSDLR_EL1 holds a lock this processor does not have",
+            ));
+        }
         let monitor = ExclusiveMonitor {
             armed: r.read_bool()?,
             addr: r.read_u64()?,
@@ -837,6 +859,58 @@ mod tests {
         let mut restored = cpu();
         restored.restore(&mut image.as_slice()).expect("restore");
         assert_eq!(restored.sys.rmr_el1, RMR_RR);
+    }
+
+    /// `OSLSR_EL1`, `OSDLR_EL1`, `OSECCR_EL1`, `DBGPRCR_EL1` and the claim
+    /// tags, at their places in [`SysRegs::to_array`], store only some of
+    /// their bits, and an image holding any other is refused.
+    #[test]
+    fn a_processor_snapshot_with_a_debug_bit_no_write_stores_is_refused() {
+        let mut image = std::vec::Vec::new();
+        cpu().save(&mut image).expect("save");
+        for (index, stored) in [
+            (31, OSLSR_OSLK),
+            (32, OSDLR_DLK),
+            (33, 0xFFFF_FFFF),
+            (34, DBGPRCR_CORENPDRQ),
+            (35, DBGCLAIM_TAGS),
+        ] {
+            let at = SYSREGS_AT + index * 8;
+            let mut value = [0; 8];
+            value.copy_from_slice(&image[at..at + 8]);
+            let value = u64::from_le_bytes(value);
+            for bit in 0..64 {
+                let mut other = image.clone();
+                other[at..at + 8].copy_from_slice(&(value ^ (1 << bit)).to_le_bytes());
+                assert_eq!(
+                    cpu().restore(&mut other.as_slice()).is_err(),
+                    stored & (1 << bit) == 0,
+                    "register {index}, bit {bit}"
+                );
+            }
+        }
+    }
+
+    /// `OSDLR_EL1.DLK` is RES0 on a processor without FEAT_DoubleLock.
+    #[test]
+    fn a_processor_snapshot_holding_the_double_lock_needs_the_feature() {
+        let armv9 = || {
+            Cpu::implementing(
+                CpuConfig {
+                    ips: ClockHz::BOCHS_DEFAULT,
+                    reset_pc: 0x1000,
+                },
+                Implementation {
+                    counter_hz: ClockHz::BOCHS_DEFAULT,
+                    ..Implementation::ARMV9P2
+                },
+            )
+        };
+        let mut image = std::vec::Vec::new();
+        armv9().save(&mut image).expect("save");
+        let at = SYSREGS_AT + 32 * 8;
+        image[at..at + 8].copy_from_slice(&OSDLR_DLK.to_le_bytes());
+        assert!(armv9().restore(&mut image.as_slice()).is_err());
     }
 
     /// An image is refused by a processor of another identity or another
