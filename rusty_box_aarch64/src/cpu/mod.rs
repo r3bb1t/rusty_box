@@ -37,6 +37,9 @@ mod fp_estimate;
 #[cfg(test)]
 #[path = "../../tests/unit/fp_extensions.rs"]
 mod fp_extensions;
+#[cfg(test)]
+#[path = "../../tests/unit/granules.rs"]
+mod granules;
 mod history;
 mod isa;
 mod ldst;

@@ -21,11 +21,11 @@
 //! The processor model is a Cortex-A57-shaped ARMv8.0 core with EL0 and EL1,
 //! and EL2 on a machine built with `MachineBuilder::with_el2` (no EL3, no
 //! AArch32), FP and Advanced SIMD, the
-//! Cryptographic Extension (AES, 64-bit PMULL, SHA-1, SHA-256) and CRC32, a
-//! 4 KiB-granule stage-1 MMU and a GICv2. `cpu::id` records every
-//! identification value the guest can read, and every instruction outside
-//! the features those values advertise is UNDEFINED, as the architecture
-//! requires.
+//! Cryptographic Extension (AES, 64-bit PMULL, SHA-1, SHA-256) and CRC32,
+//! a 4 KiB-granule MMU, stage 1 and with EL2 stage 2, and a GICv2.
+//! `cpu::id` records every identification value the guest can read, and
+//! every instruction outside the features those values advertise is
+//! UNDEFINED, as the architecture requires.
 //!
 //! Provenance (rusty_box R7): no Bochs upstream exists for any of this.
 //! Arm's documents decide wherever they speak: the instruction semantics

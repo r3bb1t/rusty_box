@@ -1999,9 +1999,10 @@ fn constraint_value(ast: &Value, holding: &BTreeSet<&str>) -> Option<bool> {
 /// Cryptographic Extension (`FEAT_Crypto`), from Armv8.2 its assembler
 /// aliases (`FEAT_ASMv8p2`, BFC and the 64-bit REV64), and with EL2 that
 /// granule at stage 2 (`FEAT_S2TGran4K`) and FEAT_GTG
-/// (`ID_AA64MMFR0_EL1`'s `TGran4_2` reads 2, `TGran16_2` and `TGran64_2`
-/// 1, all non-zero, which `Features.json` makes FEAT_GTG) — and every
-/// other identifier is false: no FEAT_SVE, no AArch32, no PMU.
+/// (`ID_AA64MMFR0_EL1`'s `TGran4_2` reads 2, and `TGran16_2` and
+/// `TGran64_2` 2 where the model has that granule at stage 2 and 1 where
+/// it does not, all non-zero, which `Features.json` makes FEAT_GTG) — and
+/// every other identifier is false: no FEAT_SVE, no AArch32, no PMU.
 ///
 /// A model that cannot have EL2 ([`CpuModel::el2_available`], whose build
 /// with EL2 is refused) breaks, with EL2, exactly the constraints that say

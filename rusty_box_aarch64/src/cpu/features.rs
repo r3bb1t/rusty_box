@@ -218,6 +218,24 @@ pub(crate) enum Feature {
     /// FEAT_DoubleLock: the OS Double Lock, `OSDLR_EL1.DLK`, which Armv9.0
     /// forbids (`v9Ap0 ==> !FEAT_DoubleLock`). No encoding of its own.
     DoubleLock,
+    /// FEAT_TGran16K: the 16 KiB translation granule at stage 1. No
+    /// encoding of its own.
+    TGran16K,
+    /// FEAT_TGran64K: the 64 KiB translation granule at stage 1. No
+    /// encoding of its own.
+    TGran64K,
+    /// FEAT_S2TGran16K: the 16 KiB granule at stage 2, which needs EL2 and
+    /// the granule at stage 1 (`FEAT_S2TGran16K ==> (FEAT_AA64EL2 &&
+    /// FEAT_TGran16K)`). No encoding of its own.
+    S2TGran16K,
+    /// FEAT_S2TGran64K: the 64 KiB granule at stage 2, as FEAT_S2TGran16K.
+    /// No encoding of its own.
+    S2TGran64K,
+    /// FEAT_TTST: small translation tables, an input address down to 16
+    /// bits at either stage (`AArch64_MaxTxSZ`: `TxSZ` up to 48, 47 with the
+    /// 64 KiB granule), and stage 2 starting at level 3 with the 4 KiB
+    /// granule. No encoding of its own.
+    Ttst,
 }
 
 // `Feature::ALL` is in declaration order, and each feature has a bit of a
@@ -242,7 +260,7 @@ const _: () = {
 
 impl Feature {
     /// Every feature, in declaration order.
-    pub(crate) const ALL: [Feature; 67] = [
+    pub(crate) const ALL: [Feature; 72] = [
         Feature::Base,
         Feature::Fp,
         Feature::AdvSimd,
@@ -310,6 +328,11 @@ impl Feature {
         Feature::Sme2,
         Feature::Pmull,
         Feature::DoubleLock,
+        Feature::TGran16K,
+        Feature::TGran64K,
+        Feature::S2TGran16K,
+        Feature::S2TGran64K,
+        Feature::Ttst,
     ];
 }
 
@@ -387,6 +410,11 @@ impl Feature {
             Self::Sme2 => Some("FEAT_SME2"),
             Self::Pmull => Some("FEAT_PMULL"),
             Self::DoubleLock => Some("FEAT_DoubleLock"),
+            Self::TGran16K => Some("FEAT_TGran16K"),
+            Self::TGran64K => Some("FEAT_TGran64K"),
+            Self::S2TGran16K => Some("FEAT_S2TGran16K"),
+            Self::S2TGran64K => Some("FEAT_S2TGran64K"),
+            Self::Ttst => Some("FEAT_TTST"),
         }
     }
 
@@ -432,6 +460,11 @@ impl Feature {
                 | Self::Aa64El2
                 | Self::Pmull
                 | Self::DoubleLock
+                | Self::TGran16K
+                | Self::TGran64K
+                | Self::S2TGran16K
+                | Self::S2TGran64K
+                | Self::Ttst
         )
     }
 
@@ -461,7 +494,12 @@ impl Features {
     /// as QEMU's `cortex-a57` has it: ARMv8.0 with FP, Advanced SIMD, the
     /// whole Cryptographic Extension (AES with the 64-bit PMULL, SHA-1 and
     /// SHA-256), CRC32 and the OS Double Lock (`ID_AA64DFR0_EL1.DoubleLock`
-    /// 0, as the Cortex-A57 and QEMU report it).
+    /// 0, as the Cortex-A57 and QEMU report it); and of the translation
+    /// granules, the 4 KiB one every processor has alone. Which others the
+    /// core has is the Cortex-A57 TRM's (DDI 0488) to say, which is not on
+    /// disk, and Arm's documents decide over QEMU, whose `cortex-a57`
+    /// reports the 64 KiB one too (`ID_AA64MMFR0_EL1` 0x1124). The identity
+    /// and extensions above are QEMU's report of the core.
     pub(crate) const CORTEX_A57: Self = Self::of(&[
         Feature::Base,
         Feature::Fp,
@@ -485,9 +523,11 @@ impl Features {
     const EL2: Self = Self(Feature::El2.bit() | Feature::Aa64El2.bit());
 
     /// The features only a processor with EL2 has, which one of the level
-    /// set [`NoEl2`](super::NoEl2) withholds with EL2: FEAT_ECV_POFF
-    /// (`(FEAT_AA64 && FEAT_ECV_POFF) ==> FEAT_AA64EL2`).
-    const NEED_EL2: Self = Self(Feature::EcvPoff.bit());
+    /// set [`NoEl2`](super::NoEl2) drops with EL2: FEAT_ECV_POFF
+    /// (`(FEAT_AA64 && FEAT_ECV_POFF) ==> FEAT_AA64EL2`), and the stage 2
+    /// granules (`FEAT_S2TGran16K ==> (FEAT_AA64EL2 && FEAT_TGran16K)`).
+    const NEED_EL2: Self =
+        Self(Feature::EcvPoff.bit() | Feature::S2TGran16K.bit() | Feature::S2TGran64K.bit());
 
     /// What the Armv9.2 processor model implements: every feature Arm's
     /// `Features.json` requires of an Armv9.2 processor that has FP and
@@ -497,8 +537,9 @@ impl Features {
     /// FEAT_BF16`, and what those features imply); FEAT_SME and FEAT_SME2;
     /// and these options: the Cryptographic Extension's AES, PMULL, SHA-1
     /// and SHA-256, QARMA5 as the pointer authentication algorithm,
-    /// FEAT_FPAC and FEAT_FPACCOMBINE, FEAT_SSBS and FEAT_SSBS2, and
-    /// FEAT_RPRES. Not FEAT_SVE: Streaming SVE mode is its only SVE. Not
+    /// FEAT_FPAC and FEAT_FPACCOMBINE, FEAT_SSBS and FEAT_SSBS2,
+    /// FEAT_RPRES, every translation granule at both stages, and FEAT_TTST.
+    /// Not FEAT_SVE: Streaming SVE mode is its only SVE. Not
     /// FEAT_DoubleLock, the one Cortex-A57 feature Armv9.0 forbids.
     pub(crate) const ARMV9P2: Self = Self::of(&[
         Feature::Base,
@@ -572,6 +613,11 @@ impl Features {
         Feature::Ssbs,
         Feature::Ssbs2,
         Feature::Rpres,
+        Feature::TGran16K,
+        Feature::TGran64K,
+        Feature::S2TGran16K,
+        Feature::S2TGran64K,
+        Feature::Ttst,
     ]);
 
     /// The set of `features`.
@@ -988,17 +1034,21 @@ mod tests {
 
     /// A feature still being built is in no processor model: only the
     /// tests' own implementation has it. Every implementation has the
-    /// Cortex-A57's features, which `id`'s constants report, but
-    /// FEAT_DoubleLock, which a processor with FEAT_SME (an Armv9.2 one)
-    /// may not have.
+    /// features the Cortex-A57 has at the same exception levels, which
+    /// `id`'s constants report, but FEAT_DoubleLock, which a processor with
+    /// FEAT_SME (an Armv9.2 one) may not have.
     #[test]
     fn the_processors_built_implement_only_complete_features() {
         let every = Implementation::EVERY_FEATURE.with_levels::<WithEl2>();
+        let a57 = [
+            Implementation::CORTEX_A57.with_levels::<NoEl2>().get(),
+            Implementation::CORTEX_A57.with_levels::<WithEl2>().get(),
+        ];
         for model in CpuModel::ALL {
             let without = model.implementation().with_levels::<NoEl2>();
             let with = model.implementation().with_levels::<WithEl2>();
             for feature in Feature::ALL {
-                for imp in [without.get(), with.get()] {
+                for (imp, a57) in [without.get(), with.get()].into_iter().zip(a57) {
                     assert!(
                         feature.complete() || !imp.has(feature),
                         "{model:?}: {feature:?} is incomplete"
@@ -1013,7 +1063,7 @@ mod tests {
                             imp.has(Feature::Sme),
                             "{model:?}: v9Ap0 ==> !FEAT_DoubleLock"
                         );
-                    } else if Implementation::CORTEX_A57.has(feature) {
+                    } else if a57.has(feature) {
                         assert!(imp.has(feature), "{model:?}: {feature:?}");
                     }
                 }

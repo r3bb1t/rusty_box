@@ -2162,6 +2162,22 @@ mod tests {
                     Feature::Csv2 => field(pfr0, 56) != 0,
                     Feature::Ecv => field(mmfr0, 60) != 0,
                     Feature::EcvPoff => field(mmfr0, 60) >= 2,
+                    Feature::TGran16K => field(mmfr0, 20) >= 1,
+                    // `SInt(TGran64) >= 0`: 0b0xxx.
+                    Feature::TGran64K => field(mmfr0, 24) < 8,
+                    // `Features.json`: with EL2, `TGranX_2 >= 2`, or 0 (no
+                    // FEAT_GTG) and the granule at stage 1.
+                    Feature::S2TGran16K => {
+                        field(pfr0, 8) >= 1
+                            && (field(mmfr0, 32) >= 2
+                                || (field(mmfr0, 32) == 0 && field(mmfr0, 20) >= 1))
+                    }
+                    Feature::S2TGran64K => {
+                        field(pfr0, 8) >= 1
+                            && (field(mmfr0, 36) >= 2
+                                || (field(mmfr0, 36) == 0 && field(mmfr0, 24) < 8))
+                    }
+                    Feature::Ttst => field(mmfr2, 28) >= 1,
                     Feature::WfxT => field(isar2, 0) >= 2,
                     Feature::Ras => field(pfr0, 28) >= 1,
                     // `Features.json`: `FEAT_RASv1p1 <=> RAS >= 2 || (RAS == 1
@@ -2219,11 +2235,11 @@ mod tests {
             // SPECRES = 1 (no FEAT_SPECRES2), BF16 = 1 (no FEAT_EBF16), I8MM
             // and XS alone (no API or GPI: no IMPLEMENTATION DEFINED
             // algorithm, and APA is never 2, FEAT_EPAC), ISAR2 WFxT = 2
-            // alone, MMFR0 the 4 KiB granule's fields (with EL2, TGran4_2 =
-            // 2 and TGran16_2 and TGran64_2 = 1: the 4 KiB granule alone at
-            // stage 2 too) and ECV = 1, or 2 with FEAT_ECV_POFF, MMFR1
+            // alone, MMFR0 the granules' fields (TGran16 = 1, not FEAT_LPA2's
+            // 2; with EL2, TGran4_2 = 2 and TGran16_2 and TGran64_2 = 2 or
+            // 1, FEAT_GTG) and ECV = 1, or 2 with FEAT_ECV_POFF, MMFR1
             // HPDS = 1 (no FEAT_HPDS2), LO and PAN
-            // alone, MMFR2 CnP, UAO, AT, IDS, TTL and E0PD alone. MMFR1
+            // alone, MMFR2 CnP, UAO, ST, AT, IDS, TTL and E0PD alone. MMFR1
             // AFP and ISAR2 RPRES are each 1 or 0.
             let at = |feature: Feature, lsb: u32, value: u64| {
                 if imp.has(feature) {
@@ -2254,13 +2270,32 @@ mod tests {
                 "SPECRES = 1: FEAT_SPECRES, not FEAT_SPECRES2"
             );
             assert!(field(isar1, 44) <= 1, "BF16 = 1: FEAT_BF16, not FEAT_EBF16");
-            let stage_2_granules =
-                at(Feature::El2, 40, 2) | at(Feature::El2, 36, 1) | at(Feature::El2, 32, 1);
+            // The granule fields, whose meaning the per-feature checks above
+            // test against `Features.json`, each within the values this core
+            // gives: TGran4 0; TGran16 0 or 1; TGran64 0 or 0xF; with EL2
+            // TGran4_2 2 and TGran16_2 and TGran64_2 1 or 2, without all 0.
+            let granule_fields = [20, 24, 28, 32, 36, 40]
+                .into_iter()
+                .fold(0, |acc, lsb| acc | (0xF << lsb));
             assert_eq!(
-                mmfr0 & !(0xF << 60),
-                0x0F00_0024 | stage_2_granules,
-                "PARange 44 bits, 16-bit ASIDs, the 4 KiB granule alone, at each stage"
+                mmfr0 & !(granule_fields | (0xF << 60)),
+                0x24,
+                "PARange 44 bits, 16-bit ASIDs, nothing else"
             );
+            assert_eq!(field(mmfr0, 28), 0, "TGran4: the 4 KiB granule");
+            assert!(field(mmfr0, 20) <= 1, "TGran16 = 1, not FEAT_LPA2's 2");
+            assert!(matches!(field(mmfr0, 24), 0 | 0xF), "TGran64");
+            let el2 = imp.has(Feature::El2);
+            assert_eq!(field(mmfr0, 40), if el2 { 2 } else { 0 }, "TGran4_2");
+            for lsb in [32, 36] {
+                let stage_2 = field(mmfr0, lsb);
+                let domain = if el2 {
+                    matches!(stage_2, 1 | 2)
+                } else {
+                    stage_2 == 0
+                };
+                assert!(domain, "the stage 2 granule field at {lsb}: {stage_2}");
+            }
             // `Features.json`: FEAT_GTG holds exactly when each of TGran4_2,
             // TGran16_2 and TGran64_2 is non-zero, so they are all or none.
             let stage_2_fields = [field(mmfr0, 40), field(mmfr0, 32), field(mmfr0, 36)];
@@ -2279,9 +2314,17 @@ mod tests {
                 at(Feature::Afp, 44, 1)
             );
             assert_eq!(
-                mmfr2 & !(0xF | (0xF << 4) | (0xF << 32) | (0xF << 36) | (0xF << 48) | (0xF << 60)),
+                mmfr2
+                    & !(0xF
+                        | (0xF << 4)
+                        | (0xF << 28)
+                        | (0xF << 32)
+                        | (0xF << 36)
+                        | (0xF << 48)
+                        | (0xF << 60)),
                 0
             );
+            assert!(field(mmfr2, 28) <= 1, "ST = 1: FEAT_TTST");
             assert_eq!(
                 (isar2, isar3),
                 (at(Feature::WfxT, 0, 2) | at(Feature::Rpres, 4, 1), 0)

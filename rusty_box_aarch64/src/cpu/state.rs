@@ -6,7 +6,7 @@ use rusty_box_core::SnapError;
 
 use super::el2::{El2State, El2Storage};
 use super::features::{Feature, LeveledImplementation};
-use super::mmu::{El10Context, TlbContext};
+use super::mmu::{El10Context, El2RegimeContext, TlbContext};
 use super::regs::{CpuState, CpuStateEl2, PstateRefusal, Reg, RegClass, VReg};
 use super::sysreg::{MDSCR_FIELDS, OSDLR_DLK, RMR_RR};
 use super::timer::VirtualCount;
@@ -585,7 +585,7 @@ impl<L: Levels> Cpu<L> {
         let tlb_context = TlbContext {
             features: self.imp.features,
             el10: El10Context::of(&sys, el2_regs),
-            sctlr_el2: el2_regs.map_or(0, |regs| regs.sctlr),
+            el2: el2_regs.map_or(El2RegimeContext::NONE, El2RegimeContext::of),
         };
         self.tlb.restore(r, &tlb_context)?;
         let history_len = usize::from(r.read_u8()?);

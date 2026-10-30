@@ -1,7 +1,7 @@
 //! Address translation (VMSAv8-64, Arm ARM D8, `AArch64_FullTranslate`)
-//! with the 4 KiB granule, the one `ID_AA64MMFR0_EL1` advertises: stage 1
-//! in the EL1&0 regime and with FEAT_EL2 the EL2 regime ([`Regime`]; their
-//! walk parameters are `regime.rs`'s), and with FEAT_EL2 stage 2 for the
+//! with each granule the processor has ([`Granule`]): stage 1 in the EL1&0
+//! regime and with FEAT_EL2 the EL2 regime ([`Regime`]; their walk
+//! parameters are `regime.rs`'s), and with FEAT_EL2 stage 2 for the
 //! EL1&0 regime (`stage2.rs`), which also translates the addresses of the
 //! descriptors stage 1's walk reads; the TLB that caches it; and the data
 //! and instruction access paths every load, store, fetch and cache
@@ -10,8 +10,12 @@
 //! an address.
 //!
 //! The TLB is direct-mapped and holds one 4 KiB page per entry, whatever the
-//! size of the block that mapped it, tagged with the regime that translated
-//! it (Arm `TLBContext`), so an access hits only an entry of its own regime.
+//! size of the page or block that mapped it, tagged with the regime that
+//! translated it (Arm `TLBContext`), so an access hits only an entry of its
+//! own regime. A walk fills the one entry of the 4 KiB page it translated,
+//! whatever its granule: each 4 KiB piece of a 16 KiB or 64 KiB page is
+//! walked for, as each piece of a block is, so an entry never takes a slot
+//! from more than the translation that was needed.
 //! An entry of the EL1&0 regime under stage 2 holds both stages' results:
 //! each stage's permissions and level apart, and whether stage 1 maps
 //! Device memory beside whether either does, so a hit raises each stage's
@@ -48,9 +52,10 @@ use super::exec::{Fault, StopCause};
 use super::features::{Feature, Features};
 use super::memattr::{self, MemAttrs};
 use super::regime::{
-    el10_s1_disabled_data_normal, el10_stage1_enabled, el10_stage2_enabled, Regime, S1Params,
+    el10_s1_disabled_data_normal, el10_stage1_enabled, el10_stage2_enabled, Granule, Regime,
+    S1Params, S1Range,
 };
-use super::stage2::S2Walked;
+use super::stage2::{s2_start, S2Start, S2Walked};
 use super::{id, sctlr, Cpu, El, Levels, SysRegs};
 use crate::bus::{AccessWidth, BusFault, PhysAddr, PhysBus, PhysSpan};
 
@@ -606,8 +611,9 @@ struct Stage2Made {
 }
 
 /// The most IPA pages one translation under stage 2 reads: a descriptor at
-/// each of the four levels stage 1's walk can read with the 4 KiB granule
-/// and no FEAT_LPA2 (levels 0 to 3), and the output.
+/// each of the levels stage 1's walk can read, at most four without
+/// FEAT_LPA2 (levels 0 to 3, which the 4 KiB and 16 KiB granules start at
+/// with a 48-bit input address, the 64 KiB one at level 1), and the output.
 const MADE: usize = 4 + 1;
 
 impl Stage2Made {
@@ -678,6 +684,20 @@ impl Stage1Output {
             Self::Disabled(ipa) => *ipa,
         }
     }
+}
+
+/// What stage 2 does in the context a snapshot's TLB entry was made in.
+///
+/// Closed (R5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stage2At {
+    /// Stage 2 does not translate the regime.
+    Off,
+    /// It translates the regime, but its configuration refuses every walk
+    /// ([`s2_start`]).
+    Refuses,
+    /// Its walks start here.
+    Starts(S2Start),
 }
 
 /// What stage 2 gives an IPA, as far as its checks (Arm
@@ -760,6 +780,21 @@ struct Mapping {
     pa: u64,
     guarded: bool,
     device: bool,
+}
+
+/// The output address of `va` with its regime's stage 1 disabled (Arm
+/// `AArch64_S1DisabledOutput`), top-byte-ignore (`tbi`) clearing its tag:
+/// `None` where it is wider than the physical address size, an address
+/// size fault at level 0. The one rule an access and a snapshot's TLB
+/// entry both meet (R5).
+#[inline(always)]
+const fn s1_disabled_address(va: u64, tbi: bool) -> Option<Ipa> {
+    let address = if tbi { va & 0x00FF_FFFF_FFFF_FFFF } else { va };
+    if address >> id::PA_BITS == 0 {
+        Some(Ipa::new(address))
+    } else {
+        None
+    }
 }
 
 /// The physical address of `va` in the page at `pa_page`.
@@ -846,46 +881,57 @@ impl WalkOutput for PhysAddr {
     }
 }
 
-/// Where a table walk starts ([`Cpu::walk_tables`]): the start level, the
-/// bits of the input address its table indexes (more than 9 for stage 2's
+/// Where a table walk starts ([`Cpu::walk_tables`]): the granule, the
+/// start level, the bits of the input address its table indexes (fewer than
+/// a level's stride where the input address is narrow, more for stage 2's
 /// concatenated tables), the table's address in the walk's output address
 /// space `A`, and the output size every table and output address must fit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct WalkStart<A> {
+    pub(super) granule: Granule,
     pub(super) level: u32,
     pub(super) index_bits: u32,
     pub(super) table: A,
     pub(super) oa_bits: u32,
 }
 
-/// A translation table base register's `BADDR` with the 4 KiB granule and
-/// a 48-bit output address, bits 47:1: its bit 0 is `CnP` (FEAT_TTCNP),
-/// which has no effect on one processor.
+/// A translation table base register's `BADDR` with a 48-bit output
+/// address, bits 47:1: its bit 0 is `CnP` (FEAT_TTCNP), which has no effect
+/// on one processor.
 pub(crate) const TTB_BADDR: u64 = 0x0000_FFFF_FFFF_FFFE;
 
+/// The output address bits a table or leaf descriptor holds without
+/// FEAT_LPA, FEAT_LPA2 or FEAT_D128, bits 47:0, of which those below the
+/// granule or the leaf's size are not the address (`AArch64_NextTableBase`,
+/// `AArch64_S1LeafBase`, `AArch64_S2LeafBase`).
+const DESC_OA: u64 = 0x0000_FFFF_FFFF_FFFF;
+
 impl<A: WalkOutput> WalkStart<A> {
-    /// Where a walk of an `ia_bits`-bit input address starting at `level`
-    /// from the base register `ttbr` starts, its tables' addresses fitting
-    /// `oa_bits` (Arm `AArch64_S1TTBaseAddress` and
-    /// `AArch64_S2TTBaseAddress` with the 4 KiB granule, without FEAT_LPA2
-    /// or FEAT_D128): `BADDR` aligned to the start table, whose index is
-    /// the input address's bits above the start level's, more than nine
-    /// for stage 2's concatenated tables. A base outside the output size
-    /// is a level 0 Address size fault: the start level's descriptor
-    /// address is the base with an index below its alignment, so it fits
-    /// exactly when the base does.
+    /// Where a walk with `granule` of an `ia_bits`-bit input address
+    /// starting at `level` from the base register `ttbr` starts, its
+    /// tables' addresses fitting `oa_bits` (Arm `AArch64_S1TTBaseAddress`
+    /// and `AArch64_S2TTBaseAddress` without FEAT_LPA, FEAT_LPA2 or
+    /// FEAT_D128, and with the IMPLEMENTATION DEFINED "BADDR expresses 52
+    /// bits for 64KB granule" FALSE): `BADDR` aligned to the start table,
+    /// whose index is the input address's bits above the start level's
+    /// translation size (`AArch64_TTEntryAddressBounds`). A base outside the
+    /// output size is a level 0 Address size fault: the start level's
+    /// descriptor address is the base with an index below its alignment, so
+    /// it fits exactly when the base does.
     pub(super) fn of_base(
         ttbr: u64,
+        granule: Granule,
         level: u32,
         ia_bits: u32,
         oa_bits: u32,
     ) -> Result<Self, TranslationFault> {
-        let index_bits = ia_bits - (12 + 9 * (3 - level));
+        let index_bits = ia_bits - granule.translation_size(level);
         let table = (ttbr & TTB_BADDR) & !ones(index_bits + 3);
         if table >> oa_bits != 0 {
             return Err(TranslationFault::AddressSize { level: 0 });
         }
         Ok(Self {
+            granule,
             level,
             index_bits,
             table: A::new(table),
@@ -958,12 +1004,13 @@ impl Stage2Leaf {
         }
     }
 
-    /// Whether `perms` and `level` are a stage 2 descriptor's
-    /// (`AArch64_S2DirectBasePermissions` without FEAT_XNX): read, write and
-    /// execute alike at EL1 and EL0, at level 1 to 3.
-    fn walked(perms: u8, level: u8) -> bool {
+    /// Whether `perms` and `level` are those of a stage 2 descriptor a walk
+    /// from `start` ends at (`AArch64_S2DirectBasePermissions` without
+    /// FEAT_XNX): read, write and execute alike at EL1 and EL0, at a level
+    /// the walk can end at ([`S2Start::ends_at`]).
+    fn walked(perms: u8, level: u8, start: S2Start) -> bool {
         let same_at_both = |el1: u8, el0: u8| (perms & el1 == 0) == (perms & el0 == 0);
-        (1..=3).contains(&level)
+        start.ends_at(u32::from(level))
             && perms & !PERMS == 0
             && same_at_both(PERM_EL1_R, PERM_EL0_R)
             && same_at_both(PERM_EL1_W, PERM_EL0_W)
@@ -1128,6 +1175,14 @@ pub(crate) struct El2RegimeContext {
 }
 
 impl El2RegimeContext {
+    /// The context of a processor without EL2, which has no EL2 regime.
+    pub(crate) const NONE: Self = Self {
+        sctlr_el2: 0,
+        tcr_el2: 0,
+        ttbr0_el2: 0,
+        mair_el2: 0,
+    };
+
     /// The context the EL2 registers `regs` make.
     pub(crate) const fn of(regs: &El2Regs) -> Self {
         let stage1 = regs.sctlr & sctlr::M != 0;
@@ -1190,6 +1245,12 @@ impl Stage2Context {
         El2Reg::Vttbr.kept(features, 0, self.vttbr_el2) == self.vttbr_el2
             && El2Reg::Vtcr.kept(features, 0, self.vtcr_el2) == self.vtcr_el2
     }
+
+    /// Where this context's walks start on a processor implementing
+    /// `features` ([`s2_start`]).
+    const fn start(&self, features: Features) -> Option<S2Start> {
+        s2_start(self.vtcr_el2, features)
+    }
 }
 
 impl TaggedContext for Stage2Context {
@@ -1214,25 +1275,30 @@ pub(crate) trait TaggedContext: Copy + PartialEq {
 }
 
 /// What decides which walks made a TLB's entries, as a snapshot restores
-/// the processor: its features, the EL1&0 regime's registers now, and
-/// `SCTLR_EL2`, which enables the EL2 regime's stage 1 (0 without EL2).
+/// the processor: its features, the EL1&0 regime's registers now, and the
+/// EL2 regime's ([`El2RegimeContext::NONE`] without EL2), whose entries
+/// were all made under them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct TlbContext {
     pub(crate) features: Features,
     pub(crate) el10: El10Context,
-    pub(crate) sctlr_el2: u64,
+    pub(crate) el2: El2RegimeContext,
 }
 
 impl TlbContext {
     /// `AArch64_S1Enabled` of the EL2 regime.
     const fn el2_stage1(&self) -> bool {
-        self.features.has(Feature::El2) && self.sctlr_el2 & sctlr::M != 0
+        self.features.has(Feature::El2) && self.el2.sctlr_el2 & sctlr::M != 0
     }
 }
 
 const TLB_ENTRIES: usize = 1024;
 /// The key of an empty entry, which no translation's key equals.
 const INVALID_KEY: u64 = u64::MAX;
+/// A snapshot's refusal of an entry or kept stage 2 translation no walk of
+/// its context makes, and of one whose context the TLB holds none of.
+const NOT_WALKED: SnapError = SnapError::Invalid("TLB entry is not one a walk can produce");
+const NO_CONTEXT: SnapError = SnapError::Invalid("TLB entry's context is not one the TLB holds");
 /// A virtual page number's bits: `va >> 12` of a 64-bit address.
 const PAGE_BITS: u32 = 52;
 /// The bit of a TLB key that names the EL2 regime, above every page number.
@@ -1917,9 +1983,6 @@ impl<L: Levels> Tlb<L> {
     /// [`Tlb::restore`], leaving what it read so far where it refuses the
     /// snapshot.
     fn restore_parts<R: SnapRead>(&mut self, r: &mut R, context: &TlbContext) -> SnapResult {
-        const NOT_WALKED: SnapError = SnapError::Invalid("TLB entry is not one a walk can produce");
-        const NO_CONTEXT: SnapError =
-            SnapError::Invalid("TLB entry's context is not one the TLB holds");
         let features = context.features;
         let el2 = L::EL2;
         debug_assert_eq!(el2, features.has(Feature::El2), "the level set's features");
@@ -2000,43 +2063,63 @@ impl<L: Levels> Tlb<L> {
                 Regime::El10 => Some(context_of(page)?),
                 Regime::El2 => None,
             };
-            // Stage 1's walk gives a leaf at level 1 to 3 the permissions of
-            // its regime (the EL2 regime's none of EL0's); stage 1 disabled
-            // gives every permission, and a data access Device memory unless
-            // `HCR_EL2.DC` makes it Normal.
-            let (stage1_valid, stage2) = match (made_in, stage1) {
-                (Some(made_in), Stage1::Walked) => (
-                    made_in.stage1() && (1..=3).contains(&level) && perms & !(PERMS | guarded) == 0,
-                    made_in.stage2(),
-                ),
-                (Some(made_in), Stage1::Disabled) => (
+            let va = (page & !TAG_MASK) << 12;
+            let stage2 = match made_in.and_then(|made_in| made_in.stage2_context()) {
+                None => Stage2At::Off,
+                Some(stage2) => match stage2.start(features) {
+                    Some(start) => Stage2At::Starts(start),
+                    None => Stage2At::Refuses,
+                },
+            };
+            // Stage 1's walk gives a leaf for an address the walk the
+            // context's `TCR_ELx` describes translates, at a level it can end
+            // at, with the permissions of its regime (the EL2 regime's none
+            // of EL0's); stage 1 disabled gives every permission, a data
+            // access Device memory unless `HCR_EL2.DC` makes it Normal, and
+            // an output address stage 2 translates.
+            let level_walked = u32::from(level);
+            // The range of the entry's address in its regime, as the
+            // context it was made in describes it.
+            let range = match made_in {
+                Some(made_in) => S1Range::el10(made_in.tcr_el1, regime.upper(va), features),
+                None => S1Range::el2(context.el2.tcr_el2, features),
+            };
+            let stage1_valid = match (made_in, stage1) {
+                (Some(made_in), Stage1::Walked) => {
+                    made_in.stage1()
+                        && range.reaches(va, features, level_walked)
+                        && perms & !(PERMS | guarded) == 0
+                }
+                (Some(made_in), Stage1::Disabled) => {
+                    let translated = match (s1_disabled_address(va, range.tbi(true)), stage2) {
+                        (Some(ipa), Stage2At::Starts(start)) => start.translates(ipa),
+                        (Some(_) | None, Stage2At::Off | Stage2At::Refuses)
+                        | (None, Stage2At::Starts(_)) => false,
+                    };
                     !made_in.stage1()
-                        && made_in.stage2()
+                        && translated
                         && level == 0
                         && perms == PERMS
-                        && s1_device == !el10_s1_disabled_data_normal(made_in.hcr_el2),
-                    true,
-                ),
-                (None, Stage1::Walked) => (
+                        && s1_device == !el10_s1_disabled_data_normal(made_in.hcr_el2)
+                }
+                (None, Stage1::Walked) => {
                     context.el2_stage1()
-                        && (1..=3).contains(&level)
+                        && range.reaches(va, features, level_walked)
                         && perms & !(PERMS | guarded) == 0
-                        && perms & PERMS_EL0 == 0,
-                    false,
-                ),
-                (None, Stage1::Disabled) => (false, false),
+                        && perms & PERMS_EL0 == 0
+                }
+                (None, Stage1::Disabled) => false,
             };
             // An entry stage 2 takes no part in holds `Stage2Leaf::NONE`; one
-            // it does, a stage 2 leaf.
-            let stage2_valid = if stage2 {
-                Stage2Leaf::walked(s2.perms, s2.level)
-            } else {
-                s2 == Stage2Leaf::NONE
+            // it does, a stage 2 leaf its walk can end at.
+            let stage2_valid = match stage2 {
+                Stage2At::Starts(start) => Stage2Leaf::walked(s2.perms, s2.level, start),
+                Stage2At::Refuses => false,
+                Stage2At::Off => s2 == Stage2Leaf::NONE,
             };
             if !stage1_valid || !stage2_valid {
                 return Err(NOT_WALKED);
             }
-            let va = (page & !TAG_MASK) << 12;
             let e0pd_refused =
                 made_in.is_some_and(|made_in| e0pd_set(features, made_in.tcr_el1, va));
             if stage1 == Stage1::Walked && perms & PERMS_EL0 != 0 && e0pd_refused {
@@ -2062,9 +2145,8 @@ impl<L: Levels> Tlb<L> {
                 s2,
             };
         }
-        // Stage 2 translations of IPAs, which only stage 2 keeps: an IPA as
-        // wide as a physical address at most (`AArch64_S2MinTxSZ`), in a
-        // stage 2 context the table holds.
+        // Stage 2 translations of IPAs, which only stage 2 keeps: an IPA its
+        // context's walks translate, in a stage 2 context the table holds.
         let kept = r.read_count(IPA_ENTRIES)?;
         for _ in 0..kept {
             let key = r.read_u64()?;
@@ -2072,14 +2154,25 @@ impl<L: Levels> Tlb<L> {
             let mut rest = [0u8; 3];
             r.read_bytes(&mut rest)?;
             let [perms, device, level] = rest;
-            if !contexts.stage2.current_entry(key) {
-                return Err(NO_CONTEXT);
-            }
-            if (key & !TAG_MASK) >> (id::PA_BITS - 12) != 0
+            let made_in = match tag_place(key) {
+                Some(place) if contexts.stage2.current_entry(key) => {
+                    contexts.stage2.table[place.index].ok_or(NO_CONTEXT)?
+                }
+                Some(_) | None => return Err(NO_CONTEXT),
+            };
+            // A context whose configuration refuses every walk keeps none.
+            let Some(start) = made_in.start(features) else {
+                return Err(NOT_WALKED);
+            };
+            // The key below its tag is an IPA page number alone, which the
+            // context's walks translate.
+            let ipa_page = key & !TAG_MASK;
+            if ipa_page >> PAGE_BITS != 0
+                || !start.translates(Ipa::new(ipa_page << 12))
                 || pa_page & 0xFFF != 0
                 || pa_page >> id::PA_BITS != 0
                 || device > 1
-                || !Stage2Leaf::walked(perms, level)
+                || !Stage2Leaf::walked(perms, level, start)
             {
                 return Err(NOT_WALKED);
             }
@@ -2773,14 +2866,14 @@ impl<L: Levels> Cpu<L> {
     #[inline(always)]
     fn s1_disabled_output(&self, regime: Regime, va: u64, kind: AccessKind) -> Option<Ipa> {
         let tbi = self.regime_tbi(regime, regime.upper(va), kind == AccessKind::Fetch);
-        let address = if tbi { va & 0x00FF_FFFF_FFFF_FFFF } else { va };
-        (address >> id::PA_BITS == 0).then_some(Ipa::new(address))
+        s1_disabled_address(va, tbi)
     }
 
     /// The translation table walk of one regime (Arm `AArch64_S1Walk`, with
-    /// `AArch64_VAIsOutOfRange` ahead of it) for the 4 KiB granule, with no
-    /// hardware access-flag management, under the parameters `params` the
-    /// regime's registers give the range `va` is in.
+    /// the level 0 faults `AArch64_S1Translate` takes ahead of it,
+    /// [`S1Range::start_for`]), with no hardware access-flag management,
+    /// under the parameters `params` the regime's registers give the range
+    /// `va` is in, its granule among them.
     ///
     /// The start level's descriptor address, every next-level table address
     /// and the output address must fit the output size the regime's
@@ -2811,40 +2904,16 @@ impl<L: Levels> Cpu<L> {
         source: &mut Stage2Source<'_>,
     ) -> Result<Walked, NoTranslation> {
         let s1 = NoTranslation::stage1;
-        // A TxSZ outside 16..=39 (`AArch64_S1MinTxSZ` and `AArch64_MaxTxSZ`
-        // for the 4 KiB granule without FEAT_LPA2's `DS` or FEAT_TTST):
-        // whether such a value is treated as the nearest one in range or
-        // takes a level 0 Translation fault is IMPLEMENTATION DEFINED (Arm
-        // `AArch64_GetS1TTWParams`, the ImpDef booleans "Fault on TxSZ value
-        // above maximum" and "... below minimum"; `AArch64_S1InvalidTxSZ`).
-        // This takes the fault in either regime, as QEMU does
-        // (target/arm/ptw.c `get_phys_addr_lpae`, `param.tsz_oob`).
-        if !(16..=39).contains(&params.txsz) {
+        let range = params.range;
+        let tbi = range.tbi(kind == AccessKind::Fetch);
+        let Some(start_level) = range.start_for(va, tbi, self.imp.features) else {
             return Err(s1(TranslationFault::Translation { level: 0 }));
-        }
-        let ia_bits = 64 - params.txsz;
-        let top = if self.regime_tbi(params.regime, params.upper, kind == AccessKind::Fetch) {
-            56
-        } else {
-            64
         };
-        let check = ones(top - ia_bits) << ia_bits;
-        if va & check != if params.upper { check } else { 0 } {
-            return Err(s1(TranslationFault::Translation { level: 0 }));
-        }
-        if params.epd {
-            return Err(s1(TranslationFault::Translation { level: 0 }));
-        }
-
-        let start_level: u32 = if ia_bits > 39 {
-            0
-        } else if ia_bits > 30 {
-            1
-        } else {
-            2
-        };
-        let start = WalkStart::<Ipa>::of_base(params.ttbr, start_level, ia_bits, params.oa_bits)
-            .map_err(s1)?;
+        let granule = range.granule;
+        let ia_bits = 64 - range.txsz;
+        let start =
+            WalkStart::<Ipa>::of_base(params.ttbr, granule, start_level, ia_bits, params.oa_bits)
+                .map_err(s1)?;
         let stage2 = self.stage2_enabled(params.regime);
         // The descriptor's address is an IPA, which stage 2 translates where
         // it translates the regime and is the physical address otherwise.
@@ -2937,19 +3006,23 @@ impl<L: Levels> Cpu<L> {
 
     /// The walk of translation tables from `start` for input address
     /// `input`, the part Arm's `AArch64_S1Walk` and `AArch64_S2Walk` share
-    /// for the 4 KiB granule with no FEAT_LPA2, FEAT_D128 or hardware
-    /// update: each level's descriptor, read at the physical address
-    /// `descriptor_address` gives the address of its table entry, in the
-    /// walk's output address space `A` (an IPA for stage 1's walk), must be
-    /// valid, a read that reaches nothing being a synchronous External
-    /// abort on the walk; a table descriptor gives the next level's table,
-    /// whose address must fit the output size (else an Address size fault at
-    /// the level of the descriptor that holds it); a level 3 descriptor with
-    /// bit 1 clear is reserved and level 0 has no block
-    /// (`AArch64_BlockDescSupported`); and the leaf's output address must fit
-    /// the output size and its access flag be set. The leaf's `tables` is
-    /// the OR of every table descriptor's bits 63:59, stage 1's hierarchical
-    /// attributes.
+    /// with no FEAT_LPA, FEAT_LPA2, FEAT_D128 or hardware update, with the
+    /// start's granule: each level's descriptor, read at the physical
+    /// address `descriptor_address` gives the address of its table entry, in
+    /// the walk's output address space `A` (an IPA for stage 1's walk), must
+    /// be valid, a read that reaches nothing being a synchronous External
+    /// abort on the walk (`AArch64_TTEntryAddressBounds`: each level after
+    /// the start indexes a stride of the input address); a table descriptor
+    /// gives the next level's table (`AArch64_NextTableBase`, with the
+    /// IMPLEMENTATION DEFINED "descriptor[15:12] for 64KB granule are
+    /// OA[51:48]" FALSE), whose address must fit the output size (else an
+    /// Address size fault at the level of the descriptor that holds it); a
+    /// level 3 descriptor with bit 1 clear is reserved, as is a block at a
+    /// level the granule has none (`AArch64_DecodeDescriptorType`,
+    /// [`Granule::block_at`]); and the leaf's output address
+    /// (`AArch64_S1LeafBase`, `AArch64_S2LeafBase`) must fit the output size
+    /// and its access flag be set. The leaf's `tables` is the OR of every
+    /// table descriptor's bits 63:59, stage 1's hierarchical attributes.
     pub(super) fn walk_tables<B: PhysBus, A: WalkOutput, E, F>(
         &self,
         bus: &mut B,
@@ -2960,16 +3033,17 @@ impl<L: Levels> Cpu<L> {
     where
         F: FnMut(&mut B, A) -> Result<PhysAddr, E>,
     {
+        let granule = start.granule;
         let mut table = start.table.get();
         let mut level = start.level;
         let mut tables = 0;
         let clock = self.clock();
         loop {
-            let shift = 12 + 9 * (3 - level);
+            let shift = granule.translation_size(level);
             let index_bits = if level == start.level {
                 start.index_bits
             } else {
-                9
+                granule.stride()
             };
             let index = (input >> shift) & ones(index_bits);
             let at_level = level as u8;
@@ -2986,7 +3060,7 @@ impl<L: Levels> Cpu<L> {
                 return fault(TranslationFault::Translation { level: at_level });
             }
             if level < 3 && desc & 2 != 0 {
-                let next = desc & 0x0000_FFFF_FFFF_F000;
+                let next = desc & DESC_OA & !ones(granule.bits());
                 if next >> start.oa_bits != 0 {
                     return fault(TranslationFault::AddressSize { level: at_level });
                 }
@@ -2995,10 +3069,15 @@ impl<L: Levels> Cpu<L> {
                 level += 1;
                 continue;
             }
-            if (level == 3 && desc & 2 == 0) || level == 0 {
+            let leaf = if level == 3 {
+                desc & 2 != 0
+            } else {
+                granule.block_at(level)
+            };
+            if !leaf {
                 return fault(TranslationFault::Translation { level: at_level });
             }
-            let out = desc & 0x0000_FFFF_FFFF_F000 & !ones(shift);
+            let out = desc & DESC_OA & !ones(shift);
             if out >> start.oa_bits != 0 {
                 return fault(TranslationFault::AddressSize { level: at_level });
             }
@@ -4169,6 +4248,8 @@ pub(crate) mod saved_layout {
     /// whether stage 1's walk made it, stage 2's permissions, Device memory
     /// and level.
     pub(crate) const ENTRY_BYTES: usize = 8 + 8 + 8;
+    /// The byte of an entry that holds stage 1's level.
+    pub(crate) const ENTRY_LEVEL: usize = 8 + 8 + 2;
     /// The byte of an entry that says whether stage 1's walk made it.
     pub(crate) const ENTRY_STAGE1: usize = 8 + 8 + 4;
     /// The bytes of an entry that hold stage 2's permissions, Device memory
@@ -4177,6 +4258,10 @@ pub(crate) mod saved_layout {
     pub(crate) const ENTRY_S2_DEVICE: usize = 8 + 8 + 6;
     pub(crate) const ENTRY_S2_LEVEL: usize = 8 + 8 + 7;
     /// A kept stage 2 translation: its IPA page with its tag, its output
-    /// page, then its three bytes.
+    /// page, then its three bytes: permissions, Device memory and level.
     pub(crate) const KEPT_BYTES: usize = 8 + 8 + 3;
+    pub(crate) const KEPT_LEVEL: usize = 8 + 8 + 2;
+    /// A restore's refusals of an entry ([`Tlb::restore`]).
+    pub(crate) const NOT_WALKED: rusty_box_core::SnapError = super::NOT_WALKED;
+    pub(crate) const NO_CONTEXT: rusty_box_core::SnapError = super::NO_CONTEXT;
 }

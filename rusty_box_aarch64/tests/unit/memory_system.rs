@@ -17,7 +17,7 @@ use std::vec::Vec;
 use rusty_box_core::{ClockHz, SnapError, VmClock};
 
 use super::features::{Feature, Features, Implementation};
-use super::mmu::{El10Context, TlbContext};
+use super::mmu::{El10Context, El2RegimeContext, TlbContext};
 use super::{id, Cpu, CpuConfig, El, NoEl2, Step, Tlb};
 use crate::bus::{AccessWidth, BusFault, PhysAddr, PhysBus};
 use crate::instrumentation::NoInstrumentation;
@@ -518,7 +518,7 @@ fn a_snapshot_entry_e0pd_refuses_is_refused() {
         let context = TlbContext {
             features,
             el10: El10Context { tcr_el1, ..el10 },
-            sctlr_el2: 0,
+            el2: El2RegimeContext::NONE,
         };
         Tlb::<NoEl2>::new()
             .restore(&mut image.as_slice(), &context)
@@ -540,6 +540,43 @@ fn a_snapshot_entry_e0pd_refuses_is_refused() {
         restored(a57_with(&[]).features, tcr | E0PD1),
         "E0PD1 is RES0 without FEAT_E0PD"
     );
+}
+
+/// A TLB entry stage 1's walk made in a half whose walks `TCR_EL1.EPD0` or
+/// `EPD1` disables, or of an address outside the range `T1SZ` gives, is one
+/// no walk makes (`AArch64_S1Translate` faults at level 0 ahead of the
+/// walk), so a snapshot holding one is refused by a processor whose
+/// `TCR_EL1` says so, and kept by one whose range holds it.
+#[test]
+fn a_snapshot_entry_of_a_range_tcr_does_not_walk_is_refused() {
+    const EPD0: u64 = 1 << 7;
+    const EPD1: u64 = 1 << 23;
+    let mut m = Machine::new(Implementation::EVERY_FEATURE);
+    m.cpu.x[1] = UPPER + EL0_RW;
+    assert_eq!(m.run(LDR), None, "both halves' pages are cached");
+    let mut image = Vec::new();
+    assert!(m.cpu.tlb.save(&mut image).is_ok());
+    let el10 = m.cpu.el10_context();
+    let tcr = el10.tcr_el1;
+    let features = Implementation::EVERY_FEATURE
+        .with_levels::<NoEl2>()
+        .features;
+    let restored = |tcr_el1: u64| {
+        let context = TlbContext {
+            features,
+            el10: El10Context { tcr_el1, ..el10 },
+            el2: El2RegimeContext::NONE,
+        };
+        Tlb::<NoEl2>::new()
+            .restore(&mut image.as_slice(), &context)
+            .is_ok()
+    };
+    let t1sz = |size: u64| (tcr & !(0x3F << 16)) | (size << 16);
+    assert!(restored(tcr));
+    assert!(!restored(tcr | EPD0), "the code's half disabled");
+    assert!(!restored(tcr | EPD1), "UPPER's half disabled");
+    assert!(!restored(t1sz(33)), "UPPER beyond a 31-bit upper range");
+    assert!(restored(t1sz(24)), "UPPER within a 40-bit upper range");
 }
 
 /// FEAT_TTCNP: `TTBRn_EL1.CnP`, bit 0, is kept as written and leaves the

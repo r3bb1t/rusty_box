@@ -34,10 +34,10 @@ use super::exec::Fault;
 use super::features::{Feature, Implementation};
 use super::mmu::saved_layout::{
     CONTEXTS, CONTEXT_BYTES, CONTEXT_HCR, CONTEXT_SCTLR, CONTEXT_VTCR, CONTEXT_VTTBR, ENTRY_BYTES,
-    ENTRY_S2_DEVICE, ENTRY_S2_LEVEL, ENTRY_S2_PERMS, ENTRY_STAGE1, KEPT_BYTES,
-    STAGE2_CONTEXT_BYTES,
+    ENTRY_S2_DEVICE, ENTRY_S2_LEVEL, ENTRY_S2_PERMS, ENTRY_STAGE1, KEPT_BYTES, NOT_WALKED,
+    NO_CONTEXT, STAGE2_CONTEXT_BYTES,
 };
-use super::mmu::{DataAccess, El10Context, TlbContext};
+use super::mmu::{DataAccess, El10Context, El2RegimeContext, TlbContext};
 use super::op::Extend;
 use super::sysreg::{CPACR_FPEN, CPACR_SMEN, SMCR_EZT0};
 use super::{
@@ -99,7 +99,7 @@ const EL1H: u64 = 0b0101;
 const EL2T: u64 = 0b1000;
 const EL2H: u64 = 0b1001;
 
-struct Ram(Vec<u8>);
+pub(super) struct Ram(pub(super) Vec<u8>);
 
 impl PhysBus for Ram {
     fn read(
@@ -132,12 +132,12 @@ impl PhysBus for Ram {
 }
 
 impl Ram {
-    fn put64(&mut self, at: u64, value: u64) {
+    pub(super) fn put64(&mut self, at: u64, value: u64) {
         let a = at as usize;
         self.0[a..a + 8].copy_from_slice(&value.to_le_bytes());
     }
 
-    fn get64(&self, at: u64) -> u64 {
+    pub(super) fn get64(&self, at: u64) -> u64 {
         let a = at as usize;
         let mut bytes = [0; 8];
         bytes.copy_from_slice(&self.0[a..a + 8]);
@@ -148,21 +148,21 @@ impl Ram {
 /// An exception the step took: the level, the vector offset from that
 /// level's `VBAR`, and its `ESR`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Taken {
-    to: El,
+pub(super) struct Taken {
+    pub(super) to: El,
     offset: u64,
-    esr: u64,
+    pub(super) esr: u64,
 }
 
-struct Machine<L: Levels> {
-    cpu: Cpu<L>,
-    ram: Ram,
+pub(super) struct Machine<L: Levels> {
+    pub(super) cpu: Cpu<L>,
+    pub(super) ram: Ram,
 }
 
 impl<L: Levels> Machine<L> {
     /// A processor of the levels `L` implementing `imp`, out of reset, its
     /// vector bases set.
-    fn new(imp: Implementation) -> Self {
+    pub(super) fn new(imp: Implementation) -> Self {
         let ips = ClockHz::new(1_000_000).unwrap_or(ClockHz::BOCHS_DEFAULT);
         let mut cpu = Cpu::<L>::implementing(
             CpuConfig {
@@ -186,7 +186,7 @@ impl<L: Levels> Machine<L> {
 
     /// Execute at `el` from [`CODE`] with `SP_ELx` selected (`SP_EL0` at
     /// EL0), every interrupt masked.
-    fn at(&mut self, el: El) {
+    pub(super) fn at(&mut self, el: El) {
         self.cpu.pstate = Pstate {
             el,
             sp_sel: el != El::El0,
@@ -200,7 +200,7 @@ impl<L: Levels> Machine<L> {
         self.run_at(CODE, insn)
     }
 
-    fn run_at(&mut self, at: u64, insn: u32) -> Option<Taken> {
+    pub(super) fn run_at(&mut self, at: u64, insn: u32) -> Option<Taken> {
         let a = at as usize;
         self.ram.0[a..a + 4].copy_from_slice(&insn.to_le_bytes());
         self.cpu.pc = at;
@@ -242,16 +242,16 @@ impl Machine<WithEl2> {
 
     /// The registers a snapshot's TLB is judged by, as the processor holds
     /// them.
-    fn tlb_context(&self) -> TlbContext {
+    pub(super) fn tlb_context(&self) -> TlbContext {
         TlbContext {
             features: self.cpu.imp.features,
             el10: self.cpu.el10_context(),
-            sctlr_el2: self.cpu.el2_state.regs.sctlr,
+            el2: El2RegimeContext::of(&self.cpu.el2_state.regs),
         }
     }
 
     /// The processor's TLB, saved.
-    fn saved_tlb(&self) -> SavedTlb {
+    pub(super) fn saved_tlb(&self) -> SavedTlb {
         let mut image = Vec::new();
         assert_eq!(self.cpu.tlb.save(&mut image), Ok(()));
         SavedTlb(image)
@@ -261,7 +261,10 @@ impl Machine<WithEl2> {
 /// `image` restored into the TLB of a processor of the level set `L` whose
 /// registers make `context`: the TLB's own image of what it restored, which
 /// a faithful restore makes `image` again.
-fn restored<L: Levels>(context: &TlbContext, image: &[u8]) -> Result<Vec<u8>, SnapError> {
+pub(super) fn restored<L: Levels>(
+    context: &TlbContext,
+    image: &[u8],
+) -> Result<Vec<u8>, SnapError> {
     let mut tlb = Box::new(Tlb::<L>::new());
     tlb.restore(&mut &image[..], context)?;
     let mut saved = Vec::new();
@@ -276,7 +279,7 @@ fn restored<L: Levels>(context: &TlbContext, image: &[u8]) -> Result<Vec<u8>, Sn
 /// place's generation, the places from the one found most recently to the
 /// least, and the current context's place plus one; the entries; and the
 /// kept stage 2 translations.
-struct SavedTlb(Vec<u8>);
+pub(super) struct SavedTlb(pub(super) Vec<u8>);
 
 /// Where one of a saved TLB's tables of contexts lies.
 struct SavedTable {
@@ -366,12 +369,12 @@ impl SavedTlb {
     }
 
     /// Where the kept stage 2 translations' count lies.
-    fn kept_at(&self) -> usize {
+    pub(super) fn kept_at(&self) -> usize {
         self.entries_at() + 4 + self.entries() * ENTRY_BYTES
     }
 
     /// How many stage 2 translations the TLB kept.
-    fn kept(&self) -> usize {
+    pub(super) fn kept(&self) -> usize {
         snapshot_count(&self.0[self.kept_at()..])
     }
 
@@ -407,7 +410,7 @@ impl SavedTlb {
     }
 
     /// Where the entry of the page of `va` is.
-    fn entry_at(&self, va: u64) -> usize {
+    pub(super) fn entry_at(&self, va: u64) -> usize {
         self.find_entry(va)
             .unwrap_or_else(|| panic!("no entry for {va:#x}"))
     }
@@ -1554,24 +1557,41 @@ fn dc_and_tge_turn_off_el1_and_0_stage_1() {
     assert_eq!(m.cpu.x[2], PHYSICAL >> 8, "the Normal read");
 }
 
-/// `ID_AA64MMFR0_EL1` offers the 4 KiB granule alone at both stages on a
-/// processor with EL2: `TGran4_2` reads 2 (supported), `TGran16_2` and
-/// `TGran64_2` 1 (not), which is FEAT_GTG (`Features.json` makes it hold
-/// exactly when all three are non-zero). Without EL2 all three read 0, and
-/// either way stage 1 offers the 4 KiB granule alone.
+/// `ID_AA64MMFR0_EL1` offers each model's granules at both stages on a
+/// processor with EL2: `TGran4_2` reads 2 (supported), and `TGran16_2` and
+/// `TGran64_2` 2 where the model has the granule at stage 2, else 1 (not),
+/// which is FEAT_GTG (`Features.json` makes it hold exactly when all three
+/// are non-zero). Without EL2 all three read 0. Either way stage 1 offers
+/// the 4 KiB granule (`TGran4` 0) on both models, and the 16 KiB and 64
+/// KiB ones on the Armv9.2 model alone (`TGran16` 1, `TGran64` 0, where the
+/// Cortex-A57 reads 0 and 0xF); `ID_AA64MMFR2_EL1.ST` reads 1 where
+/// FEAT_TTST is.
 #[test]
-fn the_id_registers_offer_the_4k_granule_at_both_stages() {
+fn the_id_registers_offer_each_models_granules_at_both_stages() {
     const MRS_MMFR0: u32 = 0xD538_0700; // mrs x0, id_aa64mmfr0_el1
-                                        // TGran4_2, TGran16_2, TGran64_2, then TGran4, TGran16, TGran64.
+    const MRS_MMFR2: u32 = 0xD538_0740; // mrs x0, id_aa64mmfr2_el1
+
+    // TGran4_2, TGran16_2, TGran64_2, then TGran4, TGran16, TGran64.
     let granules = |mmfr0: u64| [40, 32, 36, 28, 20, 24].map(|lsb| (mmfr0 >> lsb) & 0xF);
-    let mut with = Machine::with_el2();
-    with.at(El::El1);
-    assert_eq!(with.run(MRS_MMFR0), None);
-    assert_eq!(granules(with.cpu.x[0]), [2, 1, 1, 0, 0, 0xF]);
-    let mut without = Machine::<NoEl2>::new(Implementation::CORTEX_A57);
-    without.at(El::El1);
-    assert_eq!(without.run(MRS_MMFR0), None);
-    assert_eq!(granules(without.cpu.x[0]), [0, 0, 0, 0, 0, 0xF]);
+    fn read<L: Levels>(imp: Implementation) -> [u64; 2] {
+        let mut m = Machine::<L>::new(imp);
+        m.at(El::El1);
+        [MRS_MMFR0, MRS_MMFR2].map(|mrs| {
+            assert_eq!(m.run(mrs), None);
+            m.cpu.x[0]
+        })
+    }
+    let a57 = Implementation::CORTEX_A57;
+    let v9 = Implementation::ARMV9P2;
+    for (model, [mmfr0, mmfr2], want, st) in [
+        ("A57 with", read::<WithEl2>(a57), [2, 1, 1, 0, 0, 0xF], 0),
+        ("A57 without", read::<NoEl2>(a57), [0, 0, 0, 0, 0, 0xF], 0),
+        ("v9.2 with", read::<WithEl2>(v9), [2, 2, 2, 0, 1, 0], 1),
+        ("v9.2 without", read::<NoEl2>(v9), [0, 0, 0, 0, 1, 0], 1),
+    ] {
+        assert_eq!(granules(mmfr0), want, "{model} EL2");
+        assert_eq!((mmfr2 >> 28) & 0xF, st, "{model} EL2: ST");
+    }
 }
 
 /// `DC IVAC` at EL1 translates as an invalidate even where it is carried
@@ -1994,8 +2014,6 @@ const MSR_HCR_EL2: u32 = 0xD51C_1100; // msr hcr_el2, x0
 const MSR_VTTBR_EL2: u32 = 0xD51C_2100; // msr vttbr_el2, x0
 const DC_ZVA: u32 = 0xD50B_7421; // dc zva, x1
 const TLBI_VMALLS12E1: u32 = 0xD50C_87DF;
-const NOT_WALKED: SnapError = SnapError::Invalid("TLB entry is not one a walk can produce");
-const NO_CONTEXT: SnapError = SnapError::Invalid("TLB entry's context is not one the TLB holds");
 
 /// `HPFAR_EL2.FIPA` reporting `ipa`: its bits 47:12 in bits 39:4.
 const fn fipa(ipa: u64) -> u64 {

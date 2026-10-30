@@ -1,8 +1,8 @@
 //! Stage 2 translation (VMSAv8-64, FEAT_EL2): the walk of the tables
 //! `VTTBR_EL2` and `VTCR_EL2` describe, which translates the EL1&0 regime's
 //! intermediate physical addresses (IPAs) while `HCR_EL2.VM` or `DC` is set,
-//! with the 4 KiB granule, the one the ID registers offer at stage 2; and
-//! the permissions it gives.
+//! with each granule the processor has at stage 2; and the permissions it
+//! gives.
 //!
 //! Provenance (R7): the shared pseudocode of the A64 ISA XML (release
 //! 2026-09): `AArch64_S2Translate` (its checks before the walk),
@@ -28,13 +28,13 @@
 use core::convert::Infallible;
 
 use super::el2::{HCR_PTW, HCR_TGE};
-use super::features::Feature;
+use super::features::{Feature, Features};
 use super::memattr::{self, MemAttrs};
 use super::mmu::{
     Ipa, TranslationFault, WalkStart, WalkStop, PERM_EL0_R, PERM_EL0_W, PERM_EL0_X, PERM_EL1_R,
     PERM_EL1_W, PERM_EL1_X,
 };
-use super::regime::{el10_stage2_enabled, output_address_bits, Regime};
+use super::regime::{el10_stage2_enabled, output_address_bits, Granule, Regime, TCR_TG0};
 use super::{id, Cpu, Levels};
 use crate::bus::{PhysAddr, PhysBus};
 
@@ -45,26 +45,105 @@ const VTCR_SL0: u32 = 6;
 /// `VTCR_EL2.PS`, bits 18:16.
 const VTCR_PS: u32 = 16;
 
-/// `AArch64_S2MinTxSZ` with the 4 KiB granule and no FEAT_LPA2 or FEAT_D128:
-/// `64 - PAMax`, the input address being at most as wide as a physical one.
+/// `AArch64_S2MinTxSZ` without FEAT_LPA, FEAT_LPA2 or FEAT_D128, whatever
+/// the granule: `64 - PAMax`, the input address being at most as wide as a
+/// physical one.
 const S2_MIN_TXSZ: u32 = 64 - id::PA_BITS;
-/// `AArch64_MaxTxSZ` without FEAT_TTST: 39, a 25-bit input address.
-const MAX_TXSZ: u32 = 39;
 
-// `AArch64_S2InvalidSL` makes `SL0` = 0b10, a start at level 0, invalid
-// where `PAMax` is under 44 bits; on this processor it is valid.
+// `AArch64_S2InvalidSL` makes a start at level 0 with the 4 KiB granule
+// (`SL0` = 0b10) invalid where `PAMax` is under 44 bits, at level 1 with
+// the 64 KiB granule (0b10) under 44, and at level 1 with the 16 KiB
+// granule (0b10) under 42; on this processor all three are valid, and the
+// encodings it refuses ([`s2_start_level`]) are those no `PAMax` makes
+// valid without FEAT_LPA2 or FEAT_TTST.
 const _: () = assert!(id::PA_BITS >= 44);
 
 /// What a stage 2 walk reads from its registers (Arm `S2TTWParams`, from
-/// `AArch64_NSS2TTWParams`): `VTCR_EL2`'s `T0SZ`, `SL0` and `PS`, and
-/// `VTTBR_EL2`'s base.
+/// `AArch64_NSS2TTWParams`): where `VTCR_EL2`'s `T0SZ`, `SL0` and `TG0` start
+/// it, its `PS`, and `VTTBR_EL2`'s base.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct S2Params {
-    txsz: u32,
-    sl0: u32,
+    /// Where the walk starts ([`s2_start`]).
+    start: Option<S2Start>,
     /// The output address size `PS` gives, at most `PAMax`.
     oa_bits: u32,
     vttbr: u64,
+}
+
+/// Where a stage 2 walk starts: its granule (`VTCR_EL2.TG0`,
+/// [`Granule::stage2`]), the size of its input address (`64 - T0SZ`) and
+/// its start level (`SL0`'s).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct S2Start {
+    pub(crate) granule: Granule,
+    pub(crate) ia_bits: u32,
+    pub(crate) level: u32,
+}
+
+impl S2Start {
+    /// Whether a walk from here can end at `level` ([`Granule::ends_at`]).
+    pub(crate) const fn ends_at(self, level: u32) -> bool {
+        self.granule.ends_at(self.level, level)
+    }
+
+    /// Whether the walk translates `ipa` (Arm `AArch64_IPAIsOutOfRange`,
+    /// negated): whether it fits the input address.
+    pub(crate) const fn translates(self, ipa: Ipa) -> bool {
+        ipa.get() >> self.ia_bits == 0
+    }
+}
+
+/// Arm `AArch64_S2StartLevel` without FEAT_LPA2's `SL2` or FEAT_D128: the
+/// level a stage 2 walk with `granule` starts at for `VTCR_EL2.SL0` `sl0`,
+/// on a processor implementing `features`; `None` where
+/// `AArch64_S2InvalidSL` makes the encoding invalid — with the 4 KiB
+/// granule 0b11, a start at level 3, without FEAT_TTST; with the 16 KiB
+/// granule 0b11, a start at level 0, which needs FEAT_LPA2's `DS`; with the
+/// 64 KiB granule 0b11, which names no level.
+const fn s2_start_level(granule: Granule, sl0: u64, features: Features) -> Option<u32> {
+    match (granule, sl0 & 3) {
+        (Granule::K4, 0b00) => Some(2),
+        (Granule::K4, 0b01) => Some(1),
+        (Granule::K4, 0b10) => Some(0),
+        (Granule::K4, _) if features.has(Feature::Ttst) => Some(3),
+        (Granule::K16 | Granule::K64, 0b00) => Some(3),
+        (Granule::K16 | Granule::K64, 0b01) => Some(2),
+        (Granule::K16 | Granule::K64, 0b10) => Some(1),
+        (Granule::K4 | Granule::K16 | Granule::K64, _) => None,
+    }
+}
+
+/// Where a stage 2 walk under `VTCR_EL2` `vtcr` starts on a processor
+/// implementing `features`, or `None` where `AArch64_S2Translate` refuses
+/// the configuration before any walk, every translation a level 0
+/// Translation fault: a `T0SZ` outside `AArch64_S2MinTxSZ` and
+/// `AArch64_MaxTxSZ` of the granule (`AArch64_S2TxSZFaults`, with the
+/// IMPLEMENTATION DEFINED "Fault on TxSZ value above maximum" and "...
+/// below minimum" TRUE, as stage 1's), an `SL0` `AArch64_S2InvalidSL`
+/// refuses ([`s2_start_level`]), or one whose start level does not resolve
+/// at least one bit of the input address and at most a full level's
+/// stride and four more, the index into 16 concatenated tables
+/// (`AArch64_S2InconsistentSL`). The one test the walk and a snapshot's TLB
+/// both make (R5).
+pub(crate) const fn s2_start(vtcr: u64, features: Features) -> Option<S2Start> {
+    let granule = Granule::stage2(vtcr >> TCR_TG0, features);
+    let txsz = (vtcr & VTCR_T0SZ) as u32;
+    if txsz < S2_MIN_TXSZ || txsz > granule.max_txsz(features) {
+        return None;
+    }
+    let Some(level) = s2_start_level(granule, vtcr >> VTCR_SL0, features) else {
+        return None;
+    };
+    let ia_bits = 64 - txsz;
+    let lsb = granule.translation_size(level);
+    if ia_bits <= lsb || ia_bits > lsb + granule.stride() + 4 {
+        return None;
+    }
+    Some(S2Start {
+        granule,
+        ia_bits,
+        level,
+    })
 }
 
 /// A completed stage 2 walk.
@@ -129,8 +208,7 @@ impl<L: Levels> Cpu<L> {
     fn s2_params(&self) -> S2Params {
         let el2 = self.el2();
         S2Params {
-            txsz: (el2.vtcr & VTCR_T0SZ) as u32,
-            sl0: ((el2.vtcr >> VTCR_SL0) & 3) as u32,
+            start: s2_start(el2.vtcr, self.imp.features),
             oa_bits: output_address_bits(el2.vtcr >> VTCR_PS),
             vttbr: el2.vttbr,
         }
@@ -143,47 +221,36 @@ impl<L: Levels> Cpu<L> {
     }
 
     /// The stage 2 translation of `ipa`, as far as the walk: the checks
-    /// `AArch64_S2Translate` makes of the configuration and the address
-    /// before it walks, all level 0 Translation faults, then
-    /// `AArch64_S2Walk`. The start level is `VTCR_EL2.SL0`'s, and it may
-    /// index up to 16 concatenated tables; every descriptor address and the
-    /// output address must fit the output size `PS` gives, else an address
-    /// size fault, at level 0 for the first descriptor and at the level of
-    /// the descriptor holding the address for the others
-    /// ([`Cpu::walk_tables`], whose descriptors' addresses are physical).
+    /// `AArch64_S2Translate` makes of the configuration ([`s2_start`]) and
+    /// the address (`AArch64_IPAIsOutOfRange`) before it walks, all level 0
+    /// Translation faults, then `AArch64_S2Walk` from the start level
+    /// `SL0` gives, which may index up to 16 concatenated tables; every
+    /// descriptor address and the output address must fit the output size
+    /// `PS` gives, else an address size fault, at level 0 for the first
+    /// descriptor and at the level of the descriptor holding the address
+    /// for the others ([`Cpu::walk_tables`], whose descriptors' addresses
+    /// are physical).
     pub(crate) fn s2_walk<B: PhysBus>(
         &self,
         bus: &mut B,
         ipa: Ipa,
     ) -> Result<S2Walked, TranslationFault> {
         let params = self.s2_params();
-        let ipa = ipa.get();
         let level0 = TranslationFault::Translation { level: 0 };
-        if !(S2_MIN_TXSZ..=MAX_TXSZ).contains(&params.txsz) {
+        let Some(s2_start) = params.start else {
             return Err(level0);
-        }
-        // `AArch64_S2StartLevel` and `AArch64_S2InvalidSL` with the 4 KiB
-        // granule and no FEAT_LPA2 (`SL2` = 0): 0b11, a start at level 3,
-        // needs FEAT_TTST.
-        let start_level: u32 = match params.sl0 {
-            0b00 => 2,
-            0b01 => 1,
-            0b10 => 0,
-            _ => return Err(level0),
         };
-        let ia_bits = 64 - params.txsz;
-        // `AArch64_S2InconsistentSL`: the start level must resolve at least
-        // one bit, and at most a full level's nine and four more, the
-        // index into 16 concatenated tables.
-        let lsb = 12 + 9 * (3 - start_level);
-        if ia_bits <= lsb || ia_bits > lsb + 9 + 4 {
+        if !s2_start.translates(ipa) {
             return Err(level0);
         }
-        if ipa >> ia_bits != 0 {
-            return Err(level0);
-        }
+        let ipa = ipa.get();
+        let S2Start {
+            granule,
+            ia_bits,
+            level,
+        } = s2_start;
         let start =
-            WalkStart::<PhysAddr>::of_base(params.vttbr, start_level, ia_bits, params.oa_bits)?;
+            WalkStart::<PhysAddr>::of_base(params.vttbr, granule, level, ia_bits, params.oa_bits)?;
         let physical = &mut |_: &mut B, address: PhysAddr| Ok::<PhysAddr, Infallible>(address);
         let leaf = match self.walk_tables(bus, ipa, start, physical) {
             Ok(leaf) => leaf,

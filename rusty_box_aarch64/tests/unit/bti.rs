@@ -17,7 +17,7 @@ use std::vec::Vec;
 use rusty_box_core::{ClockHz, VmClock};
 
 use super::features::Implementation;
-use super::mmu::TlbContext;
+use super::mmu::{El2RegimeContext, TlbContext};
 use super::{id, Btype, Cpu, CpuConfig, El, NoEl2, Pstate, Reg, Step, Tlb};
 use crate::bus::{AccessWidth, BusFault, PhysAddr, PhysBus};
 use crate::instrumentation::NoInstrumentation;
@@ -474,7 +474,7 @@ fn a_guarded_tlb_entry_needs_bti() {
         let context = TlbContext {
             features,
             el10,
-            sctlr_el2: 0,
+            el2: El2RegimeContext::NONE,
         };
         Tlb::<NoEl2>::new()
             .restore(&mut image.as_slice(), &context)

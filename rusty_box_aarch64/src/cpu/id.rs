@@ -2,7 +2,10 @@
 //!
 //! Each processor model ([`CpuModel`](super::CpuModel)) is cut down to what
 //! this interpreter implements: AArch64 at EL0 and EL1, and at EL2 where the
-//! machine asks for it (FEAT_EL2), the 4 KiB translation granule, no PMU.
+//! machine asks for it (FEAT_EL2), no PMU. Of the translation granules, the
+//! interpreter walks all three; the Armv9.2 model offers them all, and the
+//! Cortex-A57 the 4 KiB one alone, the others its TRM's to say
+//! (`Features::CORTEX_A57`).
 //! The Cortex-A57 r1p0 (the value QEMU's `cortex-a57` model reports in
 //! `MIDR_EL1`) has FP and Advanced SIMD, the
 //! Cryptographic Extension's AES, PMULL, SHA-1 and SHA-256 and CRC32 (the
@@ -239,10 +242,12 @@ pub(crate) const fn id_aa64mmfr1(features: Features) -> u64 {
 /// `ID_AA64MMFR2_EL1` of a processor implementing `features`: CnP (3:0) = 1
 /// with FEAT_TTCNP, UAO (7:4) = 1 with FEAT_UAO, AT (35:32) = 1 with
 /// FEAT_LSE2, IDS (39:36) = 1 with FEAT_IDST, TTL (51:48) = 1 with
-/// FEAT_TTL, E0PD (63:60) = 1 with FEAT_E0PD; nothing else from v8.1+.
+/// FEAT_TTL, E0PD (63:60) = 1 with FEAT_E0PD, ST (31:28) = 1 with
+/// FEAT_TTST; nothing else from v8.1+.
 pub(crate) const fn id_aa64mmfr2(features: Features) -> u64 {
     field(features, Feature::Ttcnp, 0, 1)
         | field(features, Feature::Uao, 4, 1)
+        | field(features, Feature::Ttst, 28, 1)
         | field(features, Feature::Lse2, 32, 1)
         | field(features, Feature::Idst, 36, 1)
         | field(features, Feature::Ttl, 48, 1)
@@ -277,26 +282,34 @@ const fn field(features: Features, feature: Feature, lsb: u32, value: u64) -> u6
 
 /// `ID_AA64MMFR0_EL1` of a processor implementing `features`: PARange = 4
 /// (44-bit physical addresses, as the Cortex-A57), ASIDBits = 2 (16-bit
-/// ASIDs), mixed endianness not supported, TGran16 = 0 (not supported),
-/// TGran64 = 0xF (not supported), TGran4 = 0 (supported): only the 4 KiB
-/// granule is implemented, so only it is offered. With FEAT_EL2, the same
-/// at stage 2, said explicitly: TGran4_2 (43:40) = 2, the 4 KiB granule
-/// (FEAT_S2TGran4K), and TGran16_2 (35:32) and TGran64_2 (39:36) = 1, not
-/// supported. That is FEAT_GTG, which `Features.json` makes hold exactly
-/// when all three fields are non-zero, and permits a processor before
-/// ARMv8.5; `AArch64_HaveS2TG` then reads the stage 2 fields. ECV (63:60) =
-/// 1 with FEAT_ECV, 2 with FEAT_ECV_POFF too (`FEAT_ECV_POFF <=>
+/// ASIDs), mixed endianness not supported. The stage 1 granules: TGran4
+/// (31:28) = 0, the 4 KiB one every processor here has; TGran16 (23:20) = 1
+/// with FEAT_TGran16K, else 0; TGran64 (27:24) = 0 with FEAT_TGran64K, else
+/// 0xF (each field's own encoding of "supported"). With FEAT_EL2, the stage
+/// 2 granules said explicitly: TGran4_2 (43:40) = 2, the 4 KiB granule
+/// (FEAT_S2TGran4K), and TGran16_2 (35:32) and TGran64_2 (39:36) = 2 with
+/// FEAT_S2TGran16K and FEAT_S2TGran64K, else 1, not supported. That is
+/// FEAT_GTG, which `Features.json` makes hold exactly when all three fields
+/// are non-zero, and permits a processor before ARMv8.5;
+/// `AArch64_HaveS2TG` then reads the stage 2 fields. ECV (63:60) = 1 with
+/// FEAT_ECV, 2 with FEAT_ECV_POFF too (`FEAT_ECV_POFF <=>
 /// UInt(ID_AA64MMFR0_EL1.ECV) >= 2`).
 pub(crate) const fn id_aa64mmfr0(features: Features) -> u64 {
-    const STAGE_2_GRANULES: u64 = (2 << 40) | (1 << 36) | (1 << 32);
     let stage_2 = if features.has(Feature::El2) {
-        STAGE_2_GRANULES
+        (2 << 40)
+            | ((1 + field(features, Feature::S2TGran64K, 0, 1)) << 36)
+            | ((1 + field(features, Feature::S2TGran16K, 0, 1)) << 32)
     } else {
         0
     };
+    let tgran64 = if features.has(Feature::TGran64K) {
+        0
+    } else {
+        0xF << 24
+    };
     // FEAT_ECV_POFF requires FEAT_ECV (`FEAT_ECV_POFF ==> FEAT_ECV`).
     let ecv = field(features, Feature::Ecv, 60, 1) + field(features, Feature::EcvPoff, 60, 1);
-    0x0F00_0024 | stage_2 | ecv
+    0x0000_0024 | tgran64 | field(features, Feature::TGran16K, 20, 1) | stage_2 | ecv
 }
 
 /// Physical address width implied by `ID_AA64MMFR0_EL1.PARange`.
