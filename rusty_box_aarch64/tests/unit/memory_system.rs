@@ -17,6 +17,7 @@ use std::vec::Vec;
 use rusty_box_core::{ClockHz, VmClock};
 
 use super::features::{Feature, Features, Implementation};
+use super::mmu::TlbContext;
 use super::{id, Cpu, CpuConfig, El, Step, Tlb};
 use crate::bus::{AccessWidth, BusFault, PhysAddr, PhysBus};
 use crate::instrumentation::NoInstrumentation;
@@ -502,6 +503,59 @@ fn e0pd_faults_el0_accesses_to_its_half() {
     assert_eq!(a57.run(LDR), None, "E0PD0 is RES0 without FEAT_E0PD");
 }
 
+/// `PAR_EL1.ATTR` and `SH` after `AT S1E1R` of a page of the first block.
+fn at_attributes(m: &mut Machine) -> (u64, u64) {
+    m.cpu.x[0] = EL1_DATA;
+    assert_eq!(m.run(AT_S1E1R), None);
+    let par = m.cpu.sys.par_el1;
+    assert_eq!(par & 1, 0, "the translation succeeds");
+    (par >> 56, (par >> 7) & 3)
+}
+
+/// The effect of `SCTLR_EL1.C` shows in `PAR_EL1` (Arm ARM D7.5.5, rule
+/// RYLPDG, `AArch64_S1TreatAsNormalNC`): with it clear, Normal memory
+/// reports Non-cacheable and Outer Shareable, whatever `MAIR_EL1` and the
+/// descriptor say. `EncodePARAttrs` gives Write-Back memory, whose XS is 0,
+/// the encoding FEAT_XS adds and any other Normal memory 0x44; without
+/// FEAT_XS that encoding is reserved, so every Normal page reports 0x44.
+/// Device memory reports itself either way.
+#[test]
+fn at_reports_the_effect_of_sctlr_c() {
+    const C: u64 = 1 << 2;
+    for (imp, attr, c_set, c_clear) in [
+        (Implementation::ARMV9P2, 0xFF, (0xFF, 0b11), (0x40, 0b10)),
+        (Implementation::ARMV9P2, 0xAA, (0xAA, 0b11), (0x44, 0b10)),
+        (Implementation::ARMV9P2, 0x04, (0x04, 0b10), (0x04, 0b10)),
+        (
+            Implementation::CORTEX_A57,
+            0xFF,
+            (0xFF, 0b11),
+            (0x44, 0b10),
+        ),
+    ] {
+        let mut m = Machine::new(imp);
+        m.cpu.sys.mair_el1 = attr;
+        m.cpu.sys.sctlr_el1 |= C;
+        assert_eq!(at_attributes(&mut m), c_set, "{attr:#x}, C set");
+        m.cpu.sys.sctlr_el1 &= !C;
+        assert_eq!(at_attributes(&mut m), c_clear, "{attr:#x}, C clear");
+    }
+}
+
+/// `PAR_EL1.SH` never reports the reserved value 0b01: a descriptor holding
+/// it is Outer Shareable, Arm's listed outcome of
+/// `Unpredictable_Shareability`.
+#[test]
+fn at_maps_the_reserved_shareability_value() {
+    const C: u64 = 1 << 2;
+    const AF: u64 = 1 << 10;
+    const BLOCK: u64 = 0b01;
+    let mut m = Machine::new(Implementation::ARMV9P2);
+    m.cpu.sys.sctlr_el1 |= C;
+    m.set_descriptor(L2, AF | (0b01 << 8) | BLOCK);
+    assert_eq!(at_attributes(&mut m), (0xFF, 0b10));
+}
+
 /// A TLB entry giving EL0 a permission in a half FEAT_E0PD refuses EL0 is
 /// one the TLB never holds, so a snapshot holding one is refused.
 #[test]
@@ -511,11 +565,15 @@ fn a_snapshot_entry_e0pd_refuses_is_refused() {
     assert_eq!(m.run(LDR), None, "E0PD clear: the page is cached");
     let mut image = Vec::new();
     assert!(m.cpu.tlb.save(&mut image).is_ok());
-    let tcr = m.cpu.sys.tcr_el1;
+    let (tcr, sctlr) = (m.cpu.sys.tcr_el1, m.cpu.sys.sctlr_el1);
     let restored = |features: Features, tcr: u64| {
-        Tlb::new()
-            .restore(&mut image.as_slice(), features, tcr)
-            .is_ok()
+        let context = TlbContext {
+            features,
+            tcr,
+            sctlr,
+            watch_armed: false,
+        };
+        Tlb::new().restore(&mut image.as_slice(), context).is_ok()
     };
     let every = Implementation::EVERY_FEATURE.features;
     assert!(restored(every, tcr));
@@ -531,6 +589,137 @@ fn a_snapshot_entry_e0pd_refuses_is_refused() {
         restored(a57_with(&[]).features, tcr | E0PD1),
         "E0PD1 is RES0 without FEAT_E0PD"
     );
+}
+
+/// One TLB entry's record in a saved TLB: its tag, its page's address, its
+/// flags, what memory it is and its level.
+const TLB_RECORD: usize = 8 + 8 + 3;
+const TLB_RECORDS_AT: usize = 4;
+
+/// Where the record of `va`'s page starts in a saved TLB.
+fn tlb_record(image: &[u8], va: u64) -> usize {
+    let tag = (va >> 12).to_le_bytes();
+    (TLB_RECORDS_AT..image.len())
+        .step_by(TLB_RECORD)
+        .find(|&at| image[at..at + 8] == tag)
+        .unwrap_or_else(|| panic!("no record of {va:#x}"))
+}
+
+/// A snapshot's TLB entry must be one a walk under the snapshot's registers
+/// can have filled, whatever bit of it was changed; the entry as saved is.
+#[test]
+fn a_snapshot_tlb_entry_no_walk_can_produce_is_refused() {
+    const EL1_R: u8 = 1 << 0;
+    const EL1_W: u8 = 1 << 1;
+    const EL1_X: u8 = 1 << 2;
+    const EL0_R: u8 = 1 << 3;
+    const EL0_W: u8 = 1 << 4;
+    const EPD0: u64 = 1 << 7;
+    let mut m = Machine::new(Implementation::EVERY_FEATURE);
+    m.cpu.x[1] = EL1_DATA;
+    assert_eq!(m.run(LDR), None);
+    let mut image = Vec::new();
+    assert!(m.cpu.tlb.save(&mut image).is_ok());
+    let at = tlb_record(&image, EL1_DATA);
+    let context = TlbContext {
+        features: Implementation::EVERY_FEATURE.features,
+        tcr: m.cpu.sys.tcr_el1,
+        sctlr: m.cpu.sys.sctlr_el1,
+        watch_armed: false,
+    };
+    let restored = |image: &[u8], context: TlbContext| {
+        let mut bytes = image;
+        Tlb::new().restore(&mut bytes, context).is_ok()
+    };
+    assert!(restored(&image, context), "the entry as saved");
+    assert!(
+        !restored(
+            &image,
+            TlbContext {
+                tcr: context.tcr | EPD0,
+                ..context
+            }
+        ),
+        "EPD0 stops the walk"
+    );
+    let patched = |offset: usize, bytes: &[u8]| {
+        let mut changed = image.clone();
+        changed[at + offset..at + offset + bytes.len()].copy_from_slice(bytes);
+        changed
+    };
+    let flags_at = 16;
+    for (bytes, offset, case) in [
+        ((1u64 << 52).to_le_bytes().to_vec(), 0, "a tag past bit 51"),
+        (
+            (1u64 << id::PA_BITS).to_le_bytes().to_vec(),
+            8,
+            "an address past the output size",
+        ),
+        (std::vec![0], flags_at, "no EL1 read permission"),
+        (
+            std::vec![EL1_R | EL1_W | EL1_X | EL0_R | EL0_W],
+            flags_at,
+            "EL1 execute on memory EL0 can write",
+        ),
+        (std::vec![EL1_R | EL0_W], flags_at, "EL0 write without read"),
+        (std::vec![3], flags_at + 1, "no such memory"),
+        (std::vec![0], flags_at + 2, "level 0 holds no block"),
+        (std::vec![4], flags_at + 2, "no such level"),
+    ] {
+        assert!(!restored(&patched(offset, &bytes), context), "{case}");
+    }
+}
+
+/// An entry for a tag instruction fetches keep (`TCR_EL1.TBID0`) says so,
+/// and a snapshot that does not is refused: a fetch would use it, where its
+/// own walk faults.
+#[test]
+fn a_snapshot_tlb_entry_must_say_whether_fetches_keep_its_tag() {
+    const TBID0: u64 = 1 << 51;
+    const TAGGED: u64 = 0x5A00_0000_0000_0000 | EL1_DATA;
+    const KEPT: u8 = 1 << 7;
+    let mut m = Machine::new(Implementation::EVERY_FEATURE);
+    m.cpu.sys.tcr_el1 |= TBI0 | TBID0;
+    m.cpu.x[1] = TAGGED;
+    assert_eq!(m.run(LDR), None);
+    let mut image = Vec::new();
+    assert!(m.cpu.tlb.save(&mut image).is_ok());
+    let flags = tlb_record(&image, TAGGED) + 16;
+    assert_ne!(image[flags] & KEPT, 0);
+    let context = TlbContext {
+        features: Implementation::EVERY_FEATURE.features,
+        tcr: m.cpu.sys.tcr_el1,
+        sctlr: m.cpu.sys.sctlr_el1,
+        watch_armed: false,
+    };
+    let mut bytes = image.as_slice();
+    assert!(Tlb::new().restore(&mut bytes, context).is_ok());
+    image[flags] &= !KEPT;
+    let mut bytes = image.as_slice();
+    assert!(Tlb::new().restore(&mut bytes, context).is_err());
+}
+
+/// A fetch from a tagged address TBID0 keeps from being ignored faults,
+/// even after a load through the same address filled the TLB; a load after
+/// the fault still hits.
+#[test]
+fn a_fetch_does_not_use_an_entry_for_a_tag_it_keeps() {
+    const TBID0: u64 = 1 << 51;
+    const TAGGED: u64 = 0x5A00_0000_0000_0000 | CODE;
+    let mut m = Machine::new(Implementation::EVERY_FEATURE);
+    m.cpu.sys.tcr_el1 |= TBI0 | TBID0;
+    m.cpu.x[1] = TAGGED;
+    assert_eq!(m.run(LDR), None, "data accesses ignore the tag");
+    let taken = m.run_at(TAGGED, CODE, 0xD503_201F);
+    assert_eq!(
+        taken,
+        Some(Taken {
+            ec: INSTRUCTION_ABORT_SAME_EL,
+            iss: TRANSLATION_L0,
+            far: TAGGED,
+        })
+    );
+    assert_eq!(m.run(LDR), None);
 }
 
 /// FEAT_TTCNP: `TTBRn_EL1.CnP`, bit 0, is kept as written and leaves the
@@ -645,6 +834,24 @@ fn cache_maintenance_by_address_translates_and_checks_its_own_permissions() {
             "{insn:#010x} at {tagged:#x}, MMU off under TBI0"
         );
         m.cpu.sys.tcr_el1 &= !TBI0;
+    }
+}
+
+/// A cache maintenance instruction by address takes the Access flag fault of
+/// a page with AF 0, the IMPLEMENTATION DEFINED choice Arm ARM D8.15.3
+/// (RTRTWX) leaves: a data abort at the register's address with CM and WnR
+/// set.
+#[test]
+fn cache_maintenance_takes_the_access_flag_fault() {
+    /// `EL0_RW`'s block, read/write at both ELs, with AF 0.
+    const BLOCK_WITHOUT_AF: u64 = 0x20_0000 | (3 << 8) | (0b01 << 6) | 0b01;
+    const ACCESS_FLAG_L2: u64 = 0b00_1010;
+    for insn in [DC_CVAC, DC_CIVAC, DC_IVAC, IC_IVAU] {
+        let mut m = Machine::new(Implementation::CORTEX_A57);
+        m.set_descriptor(L2 + 8, BLOCK_WITHOUT_AF);
+        m.cpu.x[1] = EL0_RW;
+        let want = data_abort(El::El1, ACCESS_FLAG_L2 | CM | WNR, EL0_RW);
+        assert_eq!(m.run(insn), want, "{insn:#010x}");
     }
 }
 

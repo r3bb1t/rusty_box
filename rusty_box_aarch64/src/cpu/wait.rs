@@ -5,7 +5,7 @@
 //!
 //! The Event Register is set by `SEV` and `SEVL` (`SendEvent`, which with one
 //! processor is `SendEventLocal`), by every exception return
-//! (`AArch64.ExceptionReturn`), and by the event stream (`TestEventCNTV`: a
+//! (`AArch64_ExceptionReturn`), and by the event stream (`TestEventCNTV`: a
 //! transition of the bit of the virtual count `CNTKCTL_EL1` selects). The
 //! stream's events reach the register when it is read, from the count it was
 //! last brought up to; a write of `CNTKCTL_EL1` brings it up to date first,

@@ -12,7 +12,7 @@ use super::dp::extend_reg;
 use super::exec::{bit, bits, sext, ExecResult, Flow};
 use super::mmu::{DataAccess, DataDirection, ElementPair, QuadwordPair};
 use super::{Cpu, ExclusiveMonitor};
-use crate::bus::PhysBus;
+use crate::bus::{AccessWidth, PhysBus};
 
 /// How a single-register load/store forms its address: the three offset
 /// forms of the Arm ARM's "Load/store register" classes.
@@ -142,6 +142,8 @@ impl Cpu {
             }
         };
 
+        // For a SIMD&FP register below 128 bits, `scale` is `size`.
+        let width = AccessWidth::from_size_field(size);
         if vector {
             let load = opc & 1 == 1;
             if scale == 4 {
@@ -153,30 +155,30 @@ impl Cpu {
                     self.write_mem_u128(bus, addressing.address, v, acc)?;
                 }
             } else if load {
-                let v = self.read_mem(bus, addressing.address, scale, acc)?;
+                let v = self.read_mem(bus, addressing.address, width, acc)?;
                 self.write_v(rt as usize, u128::from(v));
             } else {
                 let v = self.v[rt as usize] as u64;
-                self.write_mem(bus, addressing.address, scale, v, acc)?;
+                self.write_mem(bus, addressing.address, width, v, acc)?;
             }
         } else {
             match opc {
                 0 => {
                     let v = self.x_or_zr(rt);
-                    self.write_mem(bus, addressing.address, size, v, acc)?;
+                    self.write_mem(bus, addressing.address, width, v, acc)?;
                 }
                 1 => {
-                    let v = self.read_mem(bus, addressing.address, size, acc)?;
+                    let v = self.read_mem(bus, addressing.address, width, acc)?;
                     self.set_x_or_zr(rt, v);
                 }
                 2 => {
                     // LDRSB/LDRSH/LDRSW to a 64-bit register.
-                    let v = self.read_mem(bus, addressing.address, size, acc)?;
+                    let v = self.read_mem(bus, addressing.address, width, acc)?;
                     self.set_x_or_zr(rt, sext(v, 8 << size));
                 }
                 _ => {
                     // LDRSB/LDRSH to a 32-bit register.
-                    let v = self.read_mem(bus, addressing.address, size, acc)?;
+                    let v = self.read_mem(bus, addressing.address, width, acc)?;
                     self.set_x_or_zr(rt, sext(v, 8 << size) & 0xFFFF_FFFF);
                 }
             }
@@ -206,8 +208,8 @@ impl Cpu {
             }
             self.fp_check()?;
             let value = match opc {
-                0 => u128::from(self.read_mem(bus, address, 2, DataAccess::NORMAL)?),
-                1 => u128::from(self.read_mem(bus, address, 3, DataAccess::NORMAL)?),
+                0 => u128::from(self.read_mem(bus, address, AccessWidth::Word, DataAccess::NORMAL)?),
+                1 => u128::from(self.read_mem(bus, address, AccessWidth::Dword, DataAccess::NORMAL)?),
                 _ => self.read_mem_u128(bus, address, DataAccess::NORMAL)?,
             };
             self.write_v(rt as usize, value);
@@ -215,15 +217,15 @@ impl Cpu {
         }
         match opc {
             0 => {
-                let v = self.read_mem(bus, address, 2, DataAccess::NORMAL)?;
+                let v = self.read_mem(bus, address, AccessWidth::Word, DataAccess::NORMAL)?;
                 self.set_x_or_zr(rt, v);
             }
             1 => {
-                let v = self.read_mem(bus, address, 3, DataAccess::NORMAL)?;
+                let v = self.read_mem(bus, address, AccessWidth::Dword, DataAccess::NORMAL)?;
                 self.set_x_or_zr(rt, v);
             }
             2 => {
-                let v = self.read_mem(bus, address, 2, DataAccess::NORMAL)?;
+                let v = self.read_mem(bus, address, AccessWidth::Word, DataAccess::NORMAL)?;
                 self.set_x_or_zr(rt, sext(v, 32));
             }
             _ => {}
@@ -271,13 +273,15 @@ impl Cpu {
             _ => (base.wrapping_add(offset), None),
         };
         let acc = DataAccess::NORMAL;
+        // Of a pair of Q registers, `scale` is 4 and this is not read.
+        let width = AccessWidth::from_size_field(scale);
 
         if vector {
             if load {
                 let pair = if scale == 4 {
                     self.read_mem_q_pair(bus, address, acc)?
                 } else {
-                    let pair = self.read_pair(bus, address, scale, acc)?;
+                    let pair = self.read_pair(bus, address, width, acc)?;
                     QuadwordPair {
                         first: u128::from(pair.first),
                         second: u128::from(pair.second),
@@ -298,14 +302,14 @@ impl Cpu {
                         first: a as u64,
                         second: b as u64,
                     };
-                    self.write_pair(bus, address, scale, value, acc)?;
+                    self.write_pair(bus, address, width, value, acc)?;
                 }
             }
         } else if load {
             let ElementPair {
                 first: a,
                 second: b,
-            } = self.read_pair(bus, address, scale, acc)?;
+            } = self.read_pair(bus, address, width, acc)?;
             let (a, b) = if signed {
                 (sext(a, 32), sext(b, 32))
             } else {
@@ -327,7 +331,7 @@ impl Cpu {
                 first: self.x_or_zr(rt),
                 second: self.x_or_zr(rt2),
             };
-            self.write_pair(bus, address, scale, value, acc)?;
+            self.write_pair(bus, address, width, value, acc)?;
         }
 
         if let Some(wb) = writeback {
@@ -354,6 +358,7 @@ impl Cpu {
         let rt2 = bits(insn, 14, 10);
         let rn = bits(insn, 9, 5);
         let rt = bits(insn, 4, 0);
+        let width = AccessWidth::from_size_field(size);
 
         if o2 {
             // LDAR/STLR (o0 = 1), and LDLAR/STLLR (o0 = 0, FEAT_LOR, which
@@ -367,11 +372,11 @@ impl Cpu {
             }
             let address = self.base_register(rn)?;
             if load {
-                let v = self.read_mem(bus, address, size, DataAccess::ORDERED)?;
+                let v = self.read_mem(bus, address, width, DataAccess::ORDERED)?;
                 self.set_x_or_zr(rt, v);
             } else {
                 let v = self.x_or_zr(rt);
-                self.write_mem(bus, address, size, v, DataAccess::ORDERED)?;
+                self.write_mem(bus, address, width, v, DataAccess::ORDERED)?;
             }
             return Ok(Flow::Next);
         }
@@ -387,20 +392,17 @@ impl Cpu {
         if load {
             let pa =
                 self.translate_for(bus, address, total, DataDirection::Read, DataAccess::ATOMIC)?;
+            let value = self.read_translated(bus, address, pa, total_log2)?;
             if pair && size == 2 {
                 // A pair of words is one single-copy atomic doubleword
                 // (`ldxp.xml`: `Mem{64}`), Rt's word the low one.
-                let v = self.read_mem(bus, address, 3, DataAccess::ATOMIC)?;
-                self.set_x_or_zr(rt, v & 0xFFFF_FFFF);
-                self.set_x_or_zr(rt2, v >> 32);
+                self.set_x_or_zr(rt, value as u64 & 0xFFFF_FFFF);
+                self.set_x_or_zr(rt2, (value >> 32) as u64);
             } else if pair {
-                let a = self.read_mem(bus, address, 3, DataAccess::ATOMIC)?;
-                let b = self.read_mem(bus, address.wrapping_add(8), 3, DataAccess::ATOMIC)?;
-                self.set_x_or_zr(rt, a);
-                self.set_x_or_zr(rt2, b);
+                self.set_x_or_zr(rt, value as u64);
+                self.set_x_or_zr(rt2, (value >> 64) as u64);
             } else {
-                let v = self.read_mem(bus, address, size, DataAccess::ATOMIC)?;
-                self.set_x_or_zr(rt, v);
+                self.set_x_or_zr(rt, value as u64);
             }
             self.monitor = ExclusiveMonitor {
                 armed: true,
@@ -411,20 +413,20 @@ impl Cpu {
             return Ok(Flow::Next);
         }
 
-        // Store-exclusive (Arm ARM `AArch64.ExclusiveMonitorsPass`): a
+        // Store-exclusive (Arm ARM `AArch64_ExclusiveMonitorsPass`): a
         // misaligned address an exclusive access may not use faults first
         // (`AArch64_UnalignedAccessFaults`, with FEAT_LSE2's rule). A store
         // to a virtual address other than the one the monitor holds then
-        // fails without being translated: `AArch64.IsExclusiveVA`, which is
+        // fails without being translated: `AArch64_IsExclusiveVA`, which is
         // IMPLEMENTATION DEFINED, is permitted to return FALSE for it, and
-        // here does, before `AArch64.TranslateAddress`, as QEMU compares the
+        // here does, before `AArch64_TranslateAddress`, as QEMU compares the
         // address before any access (target/arm/tcg/translate-a64.c
         // `gen_store_exclusive`). Otherwise its translation and permission
         // faults are reported, and the physical address it reaches must be
         // the monitored one (`IsExclusiveLocal`).
         self.check_alignment(address, total, DataAccess::ATOMIC, true)?;
         let m = self.monitor;
-        let pass = if m.armed && m.va == address && m.bytes == total {
+        let passed_at = if m.armed && m.va == address && m.bytes == total {
             let pa = self.translate_for(
                 bus,
                 address,
@@ -432,27 +434,24 @@ impl Cpu {
                 DataDirection::Write,
                 DataAccess::ATOMIC,
             )?;
-            m.addr == pa.get()
+            (m.addr == pa.get()).then_some(pa)
         } else {
-            false
+            None
         };
         self.monitor.armed = false;
-        if pass {
-            if pair && size == 2 {
+        if let Some(pa) = passed_at {
+            let value = if pair && size == 2 {
                 // One single-copy atomic doubleword (`stxp.xml`:
                 // `Mem{64}`), Rt's word the low one.
-                let v = (self.x_or_zr(rt2) << 32) | (self.x_or_zr(rt) & 0xFFFF_FFFF);
-                self.write_mem(bus, address, 3, v, DataAccess::ATOMIC)?;
+                u128::from((self.x_or_zr(rt2) << 32) | (self.x_or_zr(rt) & 0xFFFF_FFFF))
             } else if pair {
-                let (a, b) = (self.x_or_zr(rt), self.x_or_zr(rt2));
-                self.write_mem(bus, address, 3, a, DataAccess::ATOMIC)?;
-                self.write_mem(bus, address.wrapping_add(8), 3, b, DataAccess::ATOMIC)?;
+                u128::from(self.x_or_zr(rt)) | (u128::from(self.x_or_zr(rt2)) << 64)
             } else {
-                let v = self.x_or_zr(rt);
-                self.write_mem(bus, address, size, v, DataAccess::ATOMIC)?;
-            }
+                u128::from(self.x_or_zr(rt))
+            };
+            self.write_translated(bus, address, pa, total_log2, value)?;
         }
-        self.set_x_or_zr(rs, u64::from(!pass));
+        self.set_x_or_zr(rs, u64::from(passed_at.is_none()));
         Ok(Flow::Next)
     }
 
@@ -490,6 +489,7 @@ impl Cpu {
         }
         self.simd_check()?;
         let ebytes = 1u64 << size;
+        let width = AccessWidth::from_size_field(size);
         let datasize_bytes = if q { 16 } else { 8 };
         let elements = datasize_bytes / ebytes;
         let address = self.base_register(rn)?;
@@ -505,12 +505,12 @@ impl Cpu {
                     let mask = (u128::from(u64::MAX) >> (64 - ebytes * 8)) << shift;
                     let ea = address.wrapping_add(offs);
                     if load {
-                        let v = self.read_mem(bus, ea, size, DataAccess::NORMAL)?;
+                        let v = self.read_mem(bus, ea, width, DataAccess::NORMAL)?;
                         let reg = &mut regs[tt as usize];
                         *reg = (*reg & !mask) | (u128::from(v) << shift);
                     } else {
                         let v = ((regs[tt as usize] & mask) >> shift) as u64;
-                        self.write_mem(bus, ea, size, v, DataAccess::NORMAL)?;
+                        self.write_mem(bus, ea, width, v, DataAccess::NORMAL)?;
                     }
                     offs += ebytes;
                     tt = (tt + 1) % 32;
@@ -593,13 +593,14 @@ impl Cpu {
         };
         self.simd_check()?;
         let ebytes = 1u64 << scale;
+        let width = AccessWidth::from_size_field(scale);
         let address = self.base_register(rn)?;
         let mut regs = self.v;
         let mut offs = 0u64;
         for _ in 0..selem {
             let ea = address.wrapping_add(offs);
             if replicate {
-                let v = self.read_mem(bus, ea, scale, DataAccess::NORMAL)?;
+                let v = self.read_mem(bus, ea, width, DataAccess::NORMAL)?;
                 let mut full = 0u128;
                 let mut pos = 0;
                 while pos < 128 {
@@ -611,11 +612,11 @@ impl Cpu {
                 let shift = (u64::from(index) * ebytes * 8) as u32;
                 let mask = (u128::from(u64::MAX) >> (64 - ebytes * 8)) << shift;
                 if load {
-                    let v = self.read_mem(bus, ea, scale, DataAccess::NORMAL)?;
+                    let v = self.read_mem(bus, ea, width, DataAccess::NORMAL)?;
                     regs[t as usize] = (regs[t as usize] & !mask) | (u128::from(v) << shift);
                 } else {
                     let v = ((regs[t as usize] & mask) >> shift) as u64;
-                    self.write_mem(bus, ea, scale, v, DataAccess::NORMAL)?;
+                    self.write_mem(bus, ea, width, v, DataAccess::NORMAL)?;
                 }
             }
             offs += ebytes;

@@ -38,7 +38,7 @@ use super::fp::{fp_mul_add, FpEnv, FpType};
 use super::mmu::DataAccess;
 use super::sve::{group, int, Esize, Pv, Zv};
 use super::Cpu;
-use crate::bus::PhysBus;
+use crate::bus::{AccessWidth, PhysBus};
 use crate::softfloat::{self as sf, FusedMulAdd};
 
 /// The element size of a tile, `esize`: also how many tiles the array
@@ -710,7 +710,7 @@ impl Cpu {
             _ => Ok(u128::from(self.read_mem(
                 bus,
                 addr,
-                size.log2_bytes(),
+                AccessWidth::from_size_field(size.log2_bytes()),
                 DataAccess::NORMAL,
             )?)),
         }
@@ -729,7 +729,7 @@ impl Cpu {
             _ => self.write_mem(
                 bus,
                 addr,
-                size.log2_bytes(),
+                AccessWidth::from_size_field(size.log2_bytes()),
                 value as u64,
                 DataAccess::NORMAL,
             ),

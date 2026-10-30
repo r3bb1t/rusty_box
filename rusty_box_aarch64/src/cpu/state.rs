@@ -5,10 +5,14 @@ use rusty_box_core::snap::{SnapRead, SnapResult, SnapWrite};
 use rusty_box_core::{SnapError, VmInstant};
 
 use super::features::{Feature, Implementation};
+use super::mmu::TlbContext;
 use super::regs::{CpuState, Reg, RegClass, VReg};
-use super::sysreg::{MDSCR_FIELDS, RMR_RR};
+use super::debug::{watch_armed, Stepped};
+use super::sysreg::{DBGBCR_FIELDS, DBGWCR_FIELDS, MDSCR_FIELDS, RMR_RR};
 use super::wait::{EventRegister, Wait};
-use super::{pauth, sme, Activity, Btype, Cpu, El, ExclusiveMonitor, Pstate, SysRegs, PC_HISTORY};
+use super::{
+    id, pauth, sme, Activity, Btype, Cpu, El, ExclusiveMonitor, Pstate, SysRegs, PC_HISTORY,
+};
 
 /// How a snapshot names the processor's activity.
 mod activity_tag {
@@ -117,6 +121,12 @@ impl SysRegs {
         if mdscr_el1 & !MDSCR_FIELDS != 0 {
             return Err(SnapError::Invalid("MDSCR_EL1 with a RES0 bit set"));
         }
+        if (bcr0 | bcr1) & !DBGBCR_FIELDS != 0 {
+            return Err(SnapError::Invalid("DBGBCR_EL1 with a RES0 bit set"));
+        }
+        if (wcr0 | wcr1) & !DBGWCR_FIELDS != 0 || (wvr0 | wvr1) & 3 != 0 {
+            return Err(SnapError::Invalid("a watchpoint register with a RES0 bit set"));
+        }
         Ok(Self {
             sctlr_el1,
             actlr_el1,
@@ -208,6 +218,10 @@ impl Cpu {
             traces,
             trace_break,
             in_guarded_page,
+            step_each,
+            watch_armed,
+            stepped,
+            should_advance_ss,
             activity,
             icount: _,
             retired,
@@ -236,6 +250,10 @@ impl Cpu {
         traces.flush();
         *trace_break = true;
         *in_guarded_page = false;
+        *step_each = false;
+        *watch_armed = false;
+        *stepped = Stepped::Nothing;
+        *should_advance_ss = false;
         *activity = Activity::Running;
         *timer_dirty = true;
         *irq_line = false;
@@ -363,7 +381,9 @@ impl Cpu {
     /// with memory, so it cannot change an outcome, and a restore empties
     /// it.
     pub(crate) fn save<W: SnapWrite>(&self, w: &mut W) -> SnapResult {
-        w.write_u64(self.imp.features.bits())?;
+        let features = self.imp.features.bits();
+        w.write_u64(features as u64)?;
+        w.write_u64((features >> 64) as u64)?;
         w.write_u32(self.imp.max_svl.bits())?;
         w.write_u64(self.imp.midr)?;
         w.write_u64(self.imp.counter_hz.get())?;
@@ -399,6 +419,7 @@ impl Cpu {
             w.write_u64(t.ticks())?;
         }
         w.write_bool(self.event_register())?;
+        w.write_u8(self.stepped.code())?;
         w.write_u64(self.icount)?;
         w.write_u64(self.retired)?;
         self.tlb.save(w)?;
@@ -417,7 +438,7 @@ impl Cpu {
     /// streaming vector length, another `MIDR_EL1` or another system
     /// counter — is refused before anything changes.
     pub(crate) fn restore<R: SnapRead>(&mut self, r: &mut R) -> SnapResult {
-        let features = r.read_u64()?;
+        let features = u128::from(r.read_u64()?) | (u128::from(r.read_u64()?) << 64);
         let max_svl = r.read_u32()?;
         let midr = r.read_u64()?;
         let counter_hz = r.read_u64()?;
@@ -483,6 +504,15 @@ impl Cpu {
             va: r.read_u64()?,
             bytes: r.read_u64()?,
         };
+        if monitor.armed
+            && !(monitor.bytes.is_power_of_two()
+                && monitor.bytes <= 16
+                && monitor.addr >> id::PA_BITS == 0)
+        {
+            return Err(SnapError::Invalid(
+                "exclusive monitor armed on what no load-exclusive marks",
+            ));
+        }
         let activity = match r.read_u8()? {
             activity_tag::RUNNING => Activity::Running,
             activity_tag::INTERRUPT => Activity::Waiting(Wait::Interrupt),
@@ -514,6 +544,9 @@ impl Cpu {
             }
         }
         let event = r.read_bool()?;
+        let stepped = Stepped::from_code(r.read_u8()?).ok_or(SnapError::Invalid(
+            "Software Step names no kind of instruction stepped",
+        ))?;
         let icount = r.read_u64()?;
         let retired = r.read_u64()?;
         if retired > icount {
@@ -521,7 +554,13 @@ impl Cpu {
                 "processor retired more instructions than ticks passed",
             ));
         }
-        self.tlb.restore(r, self.imp.features, sys.tcr_el1)?;
+        let tlb_context = TlbContext {
+            features: self.imp.features,
+            tcr: sys.tcr_el1,
+            sctlr: sys.sctlr_el1,
+            watch_armed: watch_armed(&sys),
+        };
+        self.tlb.restore(r, tlb_context)?;
         let history_len = usize::from(r.read_u8()?);
         if history_len > PC_HISTORY {
             return Err(SnapError::Invalid(
@@ -548,6 +587,8 @@ impl Cpu {
         self.fpcr = fpcr;
         self.fpsr = fpsr;
         self.sys = sys;
+        self.derive_debug_controls();
+        self.stepped = stepped;
         self.monitor = monitor;
         self.activity = activity;
         self.icount = icount;
@@ -675,7 +716,34 @@ mod tests {
     /// identity (its features, streaming vector length, `MIDR_EL1` and
     /// counter frequency), X0-X30, SP_EL0, SP_EL1, PC, PSTATE, V0-V31,
     /// FPCR and FPSR.
-    const SYSREGS_AT: usize = 8 + 4 + 8 + 8 + (31 + 4) * 8 + 32 * 16 + 2 * 8;
+    const SYSREGS_AT: usize = 16 + 4 + 8 + 8 + (31 + 4) * 8 + 32 * 16 + 2 * 8;
+
+    /// Where an image's exclusive monitor starts: its armed flag, then its
+    /// physical address, virtual address and size.
+    const MONITOR_AT: usize = SYSREGS_AT + SYSREG_COUNT * 8;
+
+    /// A monitor armed on anything a load-exclusive cannot mark is refused:
+    /// every store compares its address against it.
+    #[test]
+    fn a_processor_snapshot_with_a_monitor_no_load_exclusive_arms_is_refused() {
+        let mut image = std::vec::Vec::new();
+        cpu().save(&mut image).expect("save");
+        let restored = |addr: u64, bytes: u64| {
+            let mut changed = image.clone();
+            changed[MONITOR_AT] = 1;
+            changed[MONITOR_AT + 1..MONITOR_AT + 9].copy_from_slice(&addr.to_le_bytes());
+            changed[MONITOR_AT + 17..MONITOR_AT + 25].copy_from_slice(&bytes.to_le_bytes());
+            let mut source: &[u8] = &changed;
+            cpu().restore(&mut source).is_ok()
+        };
+        assert!(restored(0x4000_0000, 8));
+        assert!(restored(0x4000_0000, 16));
+        assert!(!restored(u64::MAX, 16), "the end overflows");
+        assert!(!restored(1 << 44, 8), "past the physical address size");
+        assert!(!restored(0x4000_0000, 3), "not an access size");
+        assert!(!restored(0x4000_0000, 0), "not an access size");
+        assert!(!restored(0x4000_0000, 32), "wider than any exclusive");
+    }
 
     #[test]
     fn a_processor_snapshot_with_a_debug_data_register_wider_than_32_bits_is_refused() {

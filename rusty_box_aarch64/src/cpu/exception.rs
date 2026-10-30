@@ -1,9 +1,10 @@
 //! Taking exceptions to EL1 and returning from them (Arm ARM D1.10–D1.11,
-//! `AArch64.TakeException` and `AArch64.ExceptionReturn`).
+//! `AArch64_TakeException` and `AArch64_ExceptionReturn`).
 //!
 //! Every exception targets EL1: this core implements neither EL2 nor EL3, so
 //! there is no routing to decide.
 
+use super::debug::Stepped;
 use super::features::Feature;
 use super::sysreg::{DBGPRCR_CORENPDRQ, MDSCR_KDE, MDSCR_SS, OSDLR_DLK, OSLSR_OSLK};
 use super::{sctlr, Activity, Btype, Cpu, El, Pstate};
@@ -47,6 +48,12 @@ pub enum ExceptionClass {
     DataAbort,
     /// EC 0x26.
     SpAlignment,
+    /// EC 0x30 / 0x31: a hardware breakpoint.
+    Breakpoint,
+    /// EC 0x32 / 0x33.
+    SoftwareStep,
+    /// EC 0x34 / 0x35: a hardware watchpoint.
+    Watchpoint,
     /// EC 0x3C.
     Brk,
 }
@@ -81,6 +88,27 @@ impl ExceptionClass {
                 }
             }
             Self::SpAlignment => 0x26,
+            Self::Breakpoint => {
+                if lower {
+                    0x30
+                } else {
+                    0x31
+                }
+            }
+            Self::SoftwareStep => {
+                if lower {
+                    0x32
+                } else {
+                    0x33
+                }
+            }
+            Self::Watchpoint => {
+                if lower {
+                    0x34
+                } else {
+                    0x35
+                }
+            }
             Self::Brk => 0x3C,
         }
     }
@@ -95,6 +123,8 @@ impl ExceptionClass {
             | Self::IllegalState
             | Self::InstructionAbort
             | Self::PcAlignment
+            | Self::Breakpoint
+            | Self::SoftwareStep
             | Self::Brk => true,
             Self::Unknown
             | Self::WfxTrap
@@ -104,7 +134,8 @@ impl ExceptionClass {
             | Self::PacFail
             | Self::SmeAccess
             | Self::DataAbort
-            | Self::SpAlignment => false,
+            | Self::SpAlignment
+            | Self::Watchpoint => false,
         }
     }
 
@@ -165,7 +196,10 @@ impl Cpu {
         let from = self.pstate.el;
         // ESR_EL1.IL is 1: every A64 instruction is 32 bits.
         let esr = (e.class.code(from) << 26) | (1 << 25) | u64::from(e.iss & 0x01FF_FFFF);
+        // Arm `AArch64_CallSupervisor`: an SVC completes the instruction it
+        // is, so Software Step advances before SPSR_EL1.SS is saved.
         let return_addr = if e.class.returns_to_next() {
+            self.ss_advance(None);
             pc.wrapping_add(4)
         } else {
             pc
@@ -217,7 +251,7 @@ impl Cpu {
         }
     }
 
-    /// `AArch64.TakeException` to EL1, saving `spsr`, the image of `PSTATE`
+    /// `AArch64_TakeException` to EL1, saving `spsr`, the image of `PSTATE`
     /// the exception keeps. Returns the vector now executing. `PSTATE.SM`
     /// and `PSTATE.ZA` are not part of that image and carry over unchanged.
     fn enter_el1(&mut self, kind: VectorKind, return_addr: u64, spsr: u64) -> u64 {
@@ -257,6 +291,7 @@ impl Cpu {
             self.branch_addr((self.sys.vbar_el1 & !0x7FF).wrapping_add(quadrant + kind.offset()));
         self.history.jump(self.pc, self.retired);
         self.monitor.armed = false;
+        self.stepped = Stepped::Nothing;
         self.activity = Activity::Running;
         self.pc
     }
@@ -266,7 +301,7 @@ impl Cpu {
     /// `Halted()`): debug exceptions target EL1, and are enabled from EL0
     /// and, with `MDSCR_EL1.KDE` set and `mask` (PSTATE.D) clear, from EL1,
     /// unless the OS Lock or the OS Double Lock is locked.
-    fn debug_exceptions_enabled_from(&self, from_el: El, mask: bool) -> bool {
+    pub(super) fn debug_exceptions_enabled_from(&self, from_el: El, mask: bool) -> bool {
         if self.sys.oslsr_el1 & OSLSR_OSLK != 0 || self.double_lock_status() {
             return false;
         }
@@ -285,7 +320,7 @@ impl Cpu {
             && self.sys.dbgprcr_el1 & DBGPRCR_CORENPDRQ == 0
     }
 
-    /// `AArch64.ExceptionReturn(target, SPSR_EL1)`: what `ERET` does with
+    /// `AArch64_ExceptionReturn(target, SPSR_EL1)`: what `ERET` does with
     /// `ELR_EL1` and `ERETAA`/`ERETAB` with `ELR_EL1` authenticated. Returns
     /// the new PC. Every return, legal or not, clears the local exclusive
     /// monitor and sets the Event Register (`ClearExclusiveLocal`,
@@ -314,7 +349,9 @@ impl Cpu {
         // return, with `MDSCR_EL1.SS` set, from where debug exceptions are
         // disabled to where they are enabled, with SPSR.D as the
         // destination's mask; it is 0 otherwise. An illegal return's
-        // destination is the current EL.
+        // destination is the current EL. Arm `SetPSTATEFromPSR`: writing
+        // PSTATE.SS leaves Software Step not to advance past this
+        // instruction.
         let dest_el = match (legal, target_el) {
             (true, Some(el)) => el,
             _ => self.pstate.el,
@@ -323,6 +360,8 @@ impl Cpu {
             && self.sys.mdscr_el1 & MDSCR_SS != 0
             && !self.debug_exceptions_enabled_from(self.pstate.el, self.pstate.d)
             && self.debug_exceptions_enabled_from(dest_el, spsr & (1 << 9) != 0);
+        self.should_advance_ss = false;
+        self.stepped = Stepped::Nothing;
 
         // SPSR_EL1 holds no bit of a feature this processor lacks: an MSR
         // writes only `spsr_mask`'s bits, and a snapshot that holds others
@@ -360,7 +399,7 @@ impl Cpu {
                 p.btype = Btype::None;
             }
         }
-        // Arm `AArch64.ExceptionReturn`: `SendEventLocal` after
+        // Arm `AArch64_ExceptionReturn`: `SendEventLocal` after
         // `SetPSTATEFromPSR`, legal return or not.
         self.send_event();
         target

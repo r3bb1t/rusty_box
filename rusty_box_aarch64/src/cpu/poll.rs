@@ -93,7 +93,7 @@ use super::op::{predecode, Op};
 use super::sysreg::SysRegKey;
 use super::trace::PollBound;
 use super::{Cpu, PC_HISTORY};
-use crate::bus::{FetchSource, PhysAddr, PhysBus};
+use crate::bus::{FetchSource, PhysBus};
 
 /// The longest iteration a poll may have, in instructions, its counter read
 /// included.
@@ -299,7 +299,7 @@ impl Cpu {
         if exits.contains(&pc) {
             return None;
         }
-        let pa = PhysAddr::new(self.fetch_probe(pc)?);
+        let pa = self.fetch_probe(pc)?;
         match bus.fetch_source(pa) {
             FetchSource::Stable(_) => {}
             FetchSource::Volatile => return None,

@@ -289,6 +289,9 @@ pub const PA_BITS: u32 = 44;
 /// instruction cache, ERG and CWG of 64 bytes, bit 31 RES1.
 pub const CTR_EL0: u64 = 0x8444_C004;
 
+/// The data cache line `CTR_EL0.DminLine` names, in bytes.
+pub const DC_LINE_BYTES: u64 = 4 << ((CTR_EL0 >> 16) & 0xF);
+
 /// `DCZID_EL0.BS`: `DC ZVA` zeroes 2^4 words, 64 bytes.
 pub const DCZID_BLOCK_LOG2_WORDS: u64 = 4;
 

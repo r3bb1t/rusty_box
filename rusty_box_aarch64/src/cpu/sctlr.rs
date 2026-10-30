@@ -1,5 +1,5 @@
 //! The `SCTLR_EL1` fields the processor reads, as masks of the register
-//! (Arm ARM D19.2, `SCTLR_EL1`). The pointer authentication enables and
+//! (Arm ARM D24.2, `SCTLR_EL1`). The pointer authentication enables and
 //! BT0/BT1 are read where their key or EL selects the bit
 //! (`pauth.rs`, `bti.rs`).
 
@@ -7,6 +7,8 @@
 pub(crate) const M: u64 = 1 << 0;
 /// A: every misaligned data access faults.
 pub(crate) const A: u64 = 1 << 1;
+/// C: data accesses to Normal memory may be cached.
+pub(crate) const C: u64 = 1 << 2;
 /// SA: the SP alignment check at EL1.
 pub(crate) const SA: u64 = 1 << 3;
 /// SA0: the SP alignment check at EL0.

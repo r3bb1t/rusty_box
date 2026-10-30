@@ -18,7 +18,7 @@ use super::exec::{bit, bits, sext, ExecResult, Flow};
 use super::features::Feature;
 use super::mmu::DataAccess;
 use super::{Cpu, El};
-use crate::bus::PhysBus;
+use crate::bus::{AccessWidth, PhysBus};
 
 /// One 128-bit pointer authentication key, `APxxKeyHi_EL1:APxxKeyLo_EL1`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -314,7 +314,8 @@ const fn with_extension(ptr: u64, ext: bool, bottom: u32, tbi: bool) -> u64 {
 
 impl Cpu {
     /// Arm CalculateBottomPACBit: `64 - TxSZ` of the half of the address
-    /// space `top_bit` selects, as the walk holds TxSZ.
+    /// space `top_bit` selects, TxSZ held within its range
+    /// ([`Cpu::effective_txsz`]).
     fn bottom_pac_bit(&self, top_bit: bool) -> u32 {
         64 - self.effective_txsz(top_bit)
     }
@@ -612,7 +613,7 @@ impl Cpu {
             10,
         ) << 3;
         let address = authenticated.wrapping_add(offset);
-        let value = self.read_mem(bus, address, 3, DataAccess::NORMAL)?;
+        let value = self.read_mem(bus, address, AccessWidth::Dword, DataAccess::NORMAL)?;
         self.set_x_or_zr(rt, value);
         if bit(insn, 11) {
             self.set_x_or_sp(rn, address);

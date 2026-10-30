@@ -17,6 +17,7 @@ use std::vec::Vec;
 use rusty_box_core::{ClockHz, VmClock};
 
 use super::features::Implementation;
+use super::mmu::TlbContext;
 use super::{id, Btype, Cpu, CpuConfig, El, Pstate, Reg, Step, Tlb};
 use crate::bus::{AccessWidth, BusFault, PhysAddr, PhysBus};
 use crate::instrumentation::NoInstrumentation;
@@ -468,11 +469,15 @@ fn a_guarded_tlb_entry_needs_bti() {
     assert_eq!(m.step_at(GUARDED), None);
     let mut image = Vec::new();
     assert!(m.cpu.tlb.save(&mut image).is_ok());
-    let tcr = m.cpu.sys.tcr_el1;
+    let (tcr, sctlr) = (m.cpu.sys.tcr_el1, m.cpu.sys.sctlr_el1);
     let restored = |features| {
-        Tlb::new()
-            .restore(&mut image.as_slice(), features, tcr)
-            .is_ok()
+        let context = TlbContext {
+            features,
+            tcr,
+            sctlr,
+            watch_armed: false,
+        };
+        Tlb::new().restore(&mut image.as_slice(), context).is_ok()
     };
     assert!(restored(Implementation::EVERY_FEATURE.features));
     assert!(!restored(Implementation::CORTEX_A57.features));

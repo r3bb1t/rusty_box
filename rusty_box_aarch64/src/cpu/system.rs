@@ -188,6 +188,7 @@ impl Cpu {
                     Ok(WriteEffect::None) => {}
                     Ok(WriteEffect::FlushTlb) => self.flush_tlb(),
                     Ok(WriteEffect::Timer) => self.timer_dirty = true,
+                    Ok(WriteEffect::Debug) => self.debug_controls_changed(),
                     Err(e) => return self.sysreg_fault(pc, insn, e, key, rt, false),
                 }
                 Ok(Flow::Next)

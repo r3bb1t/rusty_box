@@ -653,6 +653,9 @@ fn eret_restores_software_step_only_into_an_enabled_debug_target() {
         let mut m = Machine::new(Implementation::CORTEX_A57);
         m.cpu.sys.mdscr_el1 = mdscr;
         m.cpu.pstate.d = d;
+        // With debug exceptions enabled at EL1 and Software Step on, the
+        // ERET runs only as the stepped instruction.
+        m.cpu.pstate.ss = !d;
         if !locked {
             m.cpu.sys.oslsr_el1 &= !0b10;
         }
@@ -696,7 +699,7 @@ fn spsr_holds_the_fields_only_with_their_features() {
     a57.cpu.sys.spsr_el1 = 0x3C5;
     let mut image = Vec::new();
     assert!(a57.cpu.save(&mut image).is_ok());
-    let at = 8 + 4 + 2 * 8 + 35 * 8 + 32 * 16 + 2 * 8 + 6 * 8;
+    let at = 16 + 4 + 2 * 8 + 35 * 8 + 32 * 16 + 2 * 8 + 6 * 8;
     let mut spsr = [0u8; 8];
     spsr.copy_from_slice(&image[at..at + 8]);
     assert_eq!(
@@ -750,7 +753,7 @@ fn a_snapshot_carries_the_fields() {
     let a57 = Machine::new(Implementation::CORTEX_A57);
     let mut image = Vec::new();
     assert!(a57.cpu.save(&mut image).is_ok());
-    let at = 8 + 4 + 2 * 8 + 34 * 8;
+    let at = 16 + 4 + 2 * 8 + 34 * 8;
     let mut spsr = [0u8; 8];
     spsr.copy_from_slice(&image[at..at + 8]);
     assert_eq!(

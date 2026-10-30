@@ -1632,6 +1632,7 @@ impl<S: GuestStorage, I: Instrumentation> VirtMachine<S, I> {
     pub fn virt_to_phys(&self, va: u64) -> Result<u64, TranslationFault> {
         self.cpu
             .debug_translate(&mut RamView(self.board.storage.ram()), va)
+            .map(PhysAddr::get)
     }
 
     /// Read memory through the guest's page tables, one page at a time.
@@ -1941,7 +1942,7 @@ impl<S: GuestStorage, I: Instrumentation> VirtMachine<S, I> {
 }
 
 const SNAPSHOT_MAGIC: [u8; 8] = *b"RBA64SNP";
-const SNAPSHOT_VERSION: u32 = 12;
+const SNAPSHOT_VERSION: u32 = 13;
 
 /// Everything about how a machine was built that a snapshot depends on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

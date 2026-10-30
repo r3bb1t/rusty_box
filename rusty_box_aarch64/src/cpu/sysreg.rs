@@ -233,6 +233,9 @@ pub(crate) enum WriteEffect {
     FlushTlb,
     /// A timer register changed: re-evaluate the timer outputs.
     Timer,
+    /// A control of Software Step, a breakpoint or a watchpoint changed:
+    /// [`Cpu::debug_controls_changed`].
+    Debug,
 }
 
 /// `CNTKCTL_EL1` EL0 access controls.
@@ -260,6 +263,19 @@ const MDSCR_TDCC: u64 = 1 << 12;
 
 /// `MDSCR_EL1.KDE`: debug exceptions are enabled at the EL they target.
 pub(super) const MDSCR_KDE: u64 = 1 << 13;
+
+/// `MDSCR_EL1.MDE`: breakpoints and watchpoints generate debug exceptions.
+pub(super) const MDSCR_MDE: u64 = 1 << 15;
+
+/// The `DBGBCR<n>_EL1` fields a processor with neither EL2 nor FEAT_BWE has:
+/// E (0), PMC (2:1), BAS (8:5), HMC (13), SSC (15:14), LBN (19:16) and
+/// BT (23:20). Every other bit is RES0, and is not stored.
+pub(super) const DBGBCR_FIELDS: u64 = 0x00FF_E1E7;
+
+/// The `DBGWCR<n>_EL1` fields: E (0), PAC (2:1), LSC (4:3), BAS (12:5),
+/// HMC (13), SSC (15:14), LBN (19:16), WT (20) and MASK (28:24). Every other
+/// bit is RES0, and is not stored.
+pub(super) const DBGWCR_FIELDS: u64 = 0x1F1F_FFFF;
 
 /// `OSDLR_EL1.DLK`: the OS Double Lock is locked (FEAT_DoubleLock; RES0
 /// without it).
@@ -302,7 +318,7 @@ const MDSCR_SAVE_RESTORE: u64 =
 /// TTA, EnSPM, EHBWE, of features no model implements), and reads as zero
 /// (Arm ARM, DDI 0487, the `MDSCR_EL1` description).
 pub(super) const MDSCR_FIELDS: u64 =
-    MDSCR_SAVE_RESTORE | MDSCR_SS | MDSCR_TDCC | MDSCR_KDE | (1 << 15);
+    MDSCR_SAVE_RESTORE | MDSCR_SS | MDSCR_TDCC | MDSCR_KDE | MDSCR_MDE;
 
 /// `OSLSR_EL1.OSLK`: the OS Lock is locked.
 pub(super) const OSLSR_OSLK: u64 = 1 << 1;
@@ -740,19 +756,34 @@ impl Cpu {
         }
     }
 
-    fn debug_breakpoint_write(&mut self, key: SysRegKey, value: u64) -> bool {
+    /// Write a breakpoint or watchpoint register, or `None` when `key`
+    /// names none. `DBGBVR<n>` keeps all 64 bits, since `DBGBCR<n>.BT`
+    /// decides which of them its comparison reads; bits 1:0 of `DBGWVR<n>`
+    /// are RES0.
+    fn debug_breakpoint_write(&mut self, key: SysRegKey, value: u64) -> Option<WriteEffect> {
         if key.op0() != 2 || key.op1() != 0 || key.crn() != 0 || key.crm() > 1 {
-            return false;
+            return None;
         }
         let n = key.crm() as usize;
         match key.op2() {
-            4 => self.sys.dbgbvr[n] = value,
-            5 => self.sys.dbgbcr[n] = value,
-            6 => self.sys.dbgwvr[n] = value,
-            7 => self.sys.dbgwcr[n] = value,
-            _ => return false,
+            4 => {
+                self.sys.dbgbvr[n] = value;
+                Some(WriteEffect::None)
+            }
+            5 => {
+                self.sys.dbgbcr[n] = value & DBGBCR_FIELDS;
+                Some(WriteEffect::Debug)
+            }
+            6 => {
+                self.sys.dbgwvr[n] = value & !3;
+                Some(WriteEffect::None)
+            }
+            7 => {
+                self.sys.dbgwcr[n] = value & DBGWCR_FIELDS;
+                Some(WriteEffect::Debug)
+            }
+            _ => None,
         }
-        true
     }
 
     /// `MSR`: write `value` to the register `key` names at the current EL.
@@ -1050,7 +1081,7 @@ impl Cpu {
                     MDSCR_SAVE_RESTORE
                 };
                 self.sys.mdscr_el1 = (value & MDSCR_FIELDS & !kept) | (self.sys.mdscr_el1 & kept);
-                WriteEffect::None
+                WriteEffect::Debug
             }
             OSECCR_EL1 => {
                 self.sys.oseccr_el1 = value & 0xFFFF_FFFF;
@@ -1090,13 +1121,10 @@ impl Cpu {
                 self.sys.dbgclaim &= !(value & 0xFF);
                 WriteEffect::None
             }
-            _ => {
-                if self.debug_breakpoint_write(key, value) {
-                    WriteEffect::None
-                } else {
-                    return Err(SysRegError::Undefined);
-                }
-            }
+            _ => match self.debug_breakpoint_write(key, value) {
+                Some(effect) => effect,
+                None => return Err(SysRegError::Undefined),
+            },
         };
         Ok(effect)
     }
@@ -1143,6 +1171,10 @@ impl Cpu {
             Ok(WriteEffect::Timer) => {
                 self.timer_dirty = true;
                 Ok(WriteEffect::Timer)
+            }
+            Ok(WriteEffect::Debug) => {
+                self.debug_controls_changed();
+                Ok(WriteEffect::Debug)
             }
             Ok(WriteEffect::None) => Ok(WriteEffect::None),
             // As for reads, a host write can only be UNDEFINED: either the

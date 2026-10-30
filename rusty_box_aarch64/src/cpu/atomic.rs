@@ -11,7 +11,7 @@
 use super::exec::{bit, bits, sext, ExecResult, Flow};
 use super::mmu::{DataAccess, DataDirection};
 use super::Cpu;
-use crate::bus::PhysBus;
+use crate::bus::{AccessWidth, PhysBus};
 
 /// Arm `MemAtomicOp`: what an atomic read-modify-write computes.
 ///
@@ -119,7 +119,8 @@ impl Cpu {
             // LDAPR, LDAPRB, LDAPRH: a load-acquire RCpc.
             (true, 0b100) => {
                 let address = self.base_register(rn)?;
-                let value = self.read_mem(bus, address, size, DataAccess::ORDERED)?;
+                let width = AccessWidth::from_size_field(size);
+                let value = self.read_mem(bus, address, width, DataAccess::ORDERED)?;
                 self.set_x_or_zr(rt, value);
                 return Ok(Flow::Next);
             }
@@ -203,17 +204,18 @@ impl Cpu {
         let rt = bits(insn, 4, 0);
         let offset = sext(u64::from(bits(insn, 20, 12)), 9);
         let address = self.base_register(rn)?.wrapping_add(offset);
+        let width = AccessWidth::from_size_field(size);
         if opc == 0b00 {
             let value = self.x_or_zr(rt);
-            self.write_mem(bus, address, size, value, DataAccess::ORDERED)?;
+            self.write_mem(bus, address, width, value, DataAccess::ORDERED)?;
             return Ok(Flow::Next);
         }
-        let value = self.read_mem(bus, address, size, DataAccess::ORDERED)?;
-        let width = 8 << size;
+        let value = self.read_mem(bus, address, width, DataAccess::ORDERED)?;
+        let bits = 8 << size;
         let result = match opc {
             0b01 => value,
-            0b10 => sext(value, width),
-            _ => sext(value, width) & 0xFFFF_FFFF,
+            0b10 => sext(value, bits),
+            _ => sext(value, bits) & 0xFFFF_FFFF,
         };
         self.set_x_or_zr(rt, result);
         Ok(Flow::Next)

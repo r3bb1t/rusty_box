@@ -397,14 +397,21 @@ impl Feature {
 }
 
 impl Feature {
-    const fn bit(self) -> u64 {
+    #[inline(always)]
+    const fn bit(self) -> u128 {
         1 << self as u32
     }
 }
 
-/// A set of [`Feature`]s: what one processor implements.
+/// A set of [`Feature`]s: what one processor implements, one bit per
+/// feature, in declaration order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) struct Features(u64);
+pub(crate) struct Features(u128);
+
+/// `Feature::ALL` lists every feature (`tests/unit/spec.rs`), so a test
+/// build refuses one more than the set has bits for.
+#[cfg(test)]
+const _: () = assert!(Feature::ALL.len() <= u128::BITS as usize);
 
 impl Features {
     /// What the Cortex-A57 this crate's processor is shaped like implements,
@@ -527,7 +534,7 @@ impl Features {
 
     /// The set as a bit per [`Feature`], in declaration order: what a
     /// snapshot records of the processor it was taken from.
-    pub(crate) const fn bits(self) -> u64 {
+    pub(crate) const fn bits(self) -> u128 {
         self.0
     }
 }

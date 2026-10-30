@@ -19,10 +19,10 @@
 
 use super::counter::PredCounter;
 use super::{Esize, Pv, Zv};
-use crate::bus::PhysBus;
+use crate::bus::{AccessWidth, PhysBus};
 use crate::cpu::exec::{bit, bits, sext, ExecResult, Fault, Flow};
 use crate::cpu::features::VecLen;
-use crate::cpu::mmu::{DataAccess, Part};
+use crate::cpu::mmu::DataAccess;
 use crate::cpu::Cpu;
 
 /// What a predicated access starts with, in its pseudocode's order: the
@@ -233,7 +233,7 @@ impl Cpu {
             for value in &mut values[..nreg] {
                 if active {
                     let data =
-                        self.read_mem(bus, addr, el.msize.log2_bytes(), DataAccess::NORMAL)?;
+                        self.read_mem(bus, addr, el.msize.access_width(), DataAccess::NORMAL)?;
                     value.set(e, el.esize, el.extend(data));
                 }
                 addr = addr.wrapping_add(mbytes as u64);
@@ -271,7 +271,7 @@ impl Cpu {
                     self.write_mem(
                         bus,
                         addr,
-                        el.msize.log2_bytes(),
+                        el.msize.access_width(),
                         value.get(e, el.esize),
                         DataAccess::NORMAL,
                     )?;
@@ -372,7 +372,7 @@ impl Cpu {
                     value.set(
                         e,
                         es,
-                        self.read_mem(bus, addr, es.log2_bytes(), DataAccess::NORMAL)?,
+                        self.read_mem(bus, addr, es.access_width(), DataAccess::NORMAL)?,
                     );
                 }
                 addr = addr.wrapping_add(es.bytes() as u64);
@@ -408,7 +408,7 @@ impl Cpu {
                     self.write_mem(
                         bus,
                         addr,
-                        es.log2_bytes(),
+                        es.access_width(),
                         source.get(e, es),
                         DataAccess::NORMAL,
                     )?;
@@ -436,7 +436,7 @@ impl Cpu {
         if (0..count).any(|e| mask.active(e, el.esize)) {
             let addr = base.wrapping_add(offset * el.msize.bytes() as u64);
             let data =
-                el.extend(self.read_mem(bus, addr, el.msize.log2_bytes(), DataAccess::NORMAL)?);
+                el.extend(self.read_mem(bus, addr, el.msize.access_width(), DataAccess::NORMAL)?);
             for e in (0..count).filter(|&e| mask.active(e, el.esize)) {
                 result.set(e, el.esize, data);
             }
@@ -465,7 +465,7 @@ impl Cpu {
                 quadword.set(
                     e,
                     es,
-                    self.read_mem(bus, addr, es.log2_bytes(), DataAccess::NORMAL)?,
+                    self.read_mem(bus, addr, es.access_width(), DataAccess::NORMAL)?,
                 );
             }
             addr = addr.wrapping_add(es.bytes() as u64);
@@ -523,26 +523,11 @@ impl Cpu {
         Ok(Flow::Next)
     }
 
-    /// The alignment check of an LDR or STR of a register, then the access
-    /// each of its bytes makes: `aligned` when the transfer's base is
-    /// aligned to the register's alignment; misaligned, the transfer
-    /// faults here at `addr` when alignment is enforced, and otherwise
-    /// Device memory refuses each of its bytes.
-    fn transfer_access(&self, addr: u64, aligned: bool, store: bool) -> Result<DataAccess, Fault> {
-        self.check_transfer_alignment(aligned, addr, store)?;
-        Ok(DataAccess {
-            part: if aligned {
-                Part::Whole
-            } else {
-                Part::OfMisaligned
-            },
-            ..DataAccess::NORMAL
-        })
-    }
-
-    /// The load of an LDR of a vector, a predicate or a ZA array vector,
-    /// its alignment check included: `len` bytes from `addr` up, each an
-    /// access of its own ([`Cpu::transfer_access`]).
+    /// The load of an LDR of a vector, a predicate or a ZA array vector:
+    /// `len` bytes from `addr` up, each an access of its own. `aligned`
+    /// when the transfer's base is aligned to the register's alignment;
+    /// misaligned, the transfer faults here at `addr` when alignment is
+    /// enforced, and otherwise Device memory refuses each of its bytes.
     pub(crate) fn fill_bytes<B: PhysBus>(
         &mut self,
         bus: &mut B,
@@ -550,13 +535,18 @@ impl Cpu {
         aligned: bool,
         len: usize,
     ) -> Result<Zv, Fault> {
-        let acc = self.transfer_access(addr, aligned, false)?;
+        self.check_transfer_alignment(aligned, addr, false)?;
+        let acc = DataAccess::NORMAL;
+        let width = AccessWidth::Byte;
         let mut loaded = Zv::ZERO;
         for i in 0..len {
-            loaded.set_byte(
-                i,
-                self.read_mem(bus, addr.wrapping_add(i as u64), 0, acc)? as u8,
-            );
+            let at = addr.wrapping_add(i as u64);
+            let byte = if aligned {
+                self.read_mem(bus, at, width, acc)?
+            } else {
+                self.read_part_of_misaligned(bus, at, width, acc)?
+            };
+            loaded.set_byte(i, byte as u8);
         }
         Ok(loaded)
     }
@@ -570,9 +560,17 @@ impl Cpu {
         aligned: bool,
         bytes: &[u8],
     ) -> Result<(), Fault> {
-        let acc = self.transfer_access(addr, aligned, true)?;
+        self.check_transfer_alignment(aligned, addr, true)?;
+        let acc = DataAccess::NORMAL;
+        let width = AccessWidth::Byte;
         for (i, &byte) in (0u64..).zip(bytes) {
-            self.write_mem(bus, addr.wrapping_add(i), 0, u64::from(byte), acc)?;
+            let at = addr.wrapping_add(i);
+            let value = u64::from(byte);
+            if aligned {
+                self.write_mem(bus, at, width, value, acc)?;
+            } else {
+                self.write_part_of_misaligned(bus, at, width, value, acc)?;
+            }
         }
         Ok(())
     }
