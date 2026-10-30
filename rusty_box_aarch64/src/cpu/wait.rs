@@ -33,7 +33,7 @@
 use rusty_box_core::VmInstant;
 
 use super::el2::{HCR_TWE, HCR_TWI};
-use super::exception::{Exception, ExceptionClass, Route};
+use super::exception::{Exception, Route, SyndromeClass};
 use super::exec::{ExecResult, Fault, Flow};
 use super::timer::{Count, VirtualCount};
 use super::{sctlr, Activity, Cpu, El, Levels};
@@ -258,7 +258,7 @@ impl<L: Levels> Cpu<L> {
             WfxType::Wfet { rd } => (1 << 2) | ((rd & 31) << 5) | 0b11,
         };
         Err(Exception::routed(
-            ExceptionClass::WfxTrap,
+            SyndromeClass::WfxTrap,
             (1 << 24) | (0xE << 20) | form_iss,
             route,
         )

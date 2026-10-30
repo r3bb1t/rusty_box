@@ -14,9 +14,10 @@
 
 use std::vec::Vec;
 
-use rusty_box_core::{ClockHz, VmClock};
+use rusty_box_core::{ClockHz, SnapError, VmClock};
 
 use super::features::{Feature, Features, Implementation};
+use super::mmu::{El10Context, TlbContext};
 use super::{id, Cpu, CpuConfig, El, NoEl2, Step, Tlb};
 use crate::bus::{AccessWidth, BusFault, PhysAddr, PhysBus};
 use crate::instrumentation::NoInstrumentation;
@@ -511,13 +512,21 @@ fn a_snapshot_entry_e0pd_refuses_is_refused() {
     assert_eq!(m.run(LDR), None, "E0PD clear: the page is cached");
     let mut image = Vec::new();
     assert!(m.cpu.tlb.save(&mut image).is_ok());
-    let tcr = m.cpu.sys.tcr_el1;
-    let restored = |features: Features, tcr: u64| {
-        Tlb::new()
-            .restore(&mut image.as_slice(), features, tcr)
+    let el10 = m.cpu.el10_context();
+    let tcr = el10.tcr_el1;
+    let restored = |features: Features, tcr_el1: u64| {
+        let context = TlbContext {
+            features,
+            el10: El10Context { tcr_el1, ..el10 },
+            sctlr_el2: 0,
+        };
+        Tlb::<NoEl2>::new()
+            .restore(&mut image.as_slice(), &context)
             .is_ok()
     };
-    let every = Implementation::EVERY_FEATURE.features;
+    let every = Implementation::EVERY_FEATURE
+        .with_levels::<NoEl2>()
+        .features;
     assert!(restored(every, tcr));
     assert!(
         !restored(every, tcr | E0PD1),
@@ -545,6 +554,112 @@ fn cnp_is_kept_and_does_not_move_the_table() {
     assert_eq!(m.cpu.x[2], 0x5A);
     assert_eq!(m.run(MRS_TTBR0), None);
     assert_eq!(m.cpu.x[0], L1 | 1);
+}
+
+/// Without EL2, a write of a register bit no translation reads leaves the
+/// TLB's translations in use, and one a translation reads leaves none
+/// (Arm keeps a translation until a TLBI removes it, whatever such a
+/// write): with `EL0_RW`'s block descriptor rewritten and no TLB
+/// maintenance, an `MSR` of `SCTLR_EL1` flipping `UCI`, which only cache
+/// maintenance reads, leaves the old translation in use, and one of
+/// `MAIR_EL1` changing an attribute no descriptor names makes the change
+/// seen.
+#[test]
+fn only_a_write_a_translation_reads_drops_the_tlbs_translations() {
+    const MSR_SCTLR_EL1: u32 = 0xD518_1000; // msr sctlr_el1, x0
+    const MSR_MAIR_EL1: u32 = 0xD518_A200; // msr mair_el1, x0
+    const AF: u64 = 1 << 10;
+    const INNER_SHAREABLE: u64 = 3 << 8;
+    const BLOCK: u64 = 0b01;
+    const EL0_READ_WRITE: u64 = 0b01 << 6;
+    const XN_BOTH: u64 = (1 << 54) | (1 << 53);
+    let mut m = Machine::new(Implementation::CORTEX_A57);
+    let put = |m: &mut Machine, at: u64, value: u64| {
+        let at = at as usize;
+        m.ram.0[at..at + 8].copy_from_slice(&value.to_le_bytes());
+    };
+    put(&mut m, EL0_RW, 0x1111);
+    put(&mut m, READ_ONLY, 0x7777);
+    m.cpu.x[1] = EL0_RW;
+    assert_eq!(m.run(LDR), None);
+    assert_eq!(m.cpu.x[2], 0x1111);
+    // `EL0_RW`'s block now maps `READ_ONLY`'s, at the same offset.
+    let block = 0x60_0000 | AF | INNER_SHAREABLE | BLOCK | EL0_READ_WRITE | XN_BOTH;
+    put(&mut m, L2 + 8, block);
+    m.cpu.x[0] = m.cpu.sys.sctlr_el1 ^ UCI;
+    assert_eq!(m.run(MSR_SCTLR_EL1), None);
+    assert_eq!(m.run(LDR), None);
+    assert_eq!(m.cpu.x[2], 0x1111, "UCI flipped: the translation stays");
+    m.cpu.x[0] = m.cpu.sys.mair_el1 | (0x44 << 56);
+    assert_eq!(m.run(MSR_MAIR_EL1), None);
+    assert_eq!(m.run(LDR), None);
+    assert_eq!(
+        m.cpu.x[2], 0x7777,
+        "MAIR_EL1 changed: the walk is made again"
+    );
+}
+
+/// A snapshot of another processor is refused before anything changes, the
+/// TLB's translations included, and one refused past the processor's
+/// implementation leaves the TLB as out of reset (Arm keeps a translation
+/// until a TLBI removes it, and an empty TLB walks again): with `EL0_RW`'s
+/// block descriptor rewritten and no TLB maintenance, the old translation
+/// stays in use after the first refusal, and the new one is seen after the
+/// second.
+#[test]
+fn a_snapshot_of_another_processor_is_refused_with_nothing_changed() {
+    const AF: u64 = 1 << 10;
+    const INNER_SHAREABLE: u64 = 3 << 8;
+    const BLOCK: u64 = 0b01;
+    const EL0_READ_WRITE: u64 = 0b01 << 6;
+    const XN_BOTH: u64 = (1 << 54) | (1 << 53);
+    /// The implementation a snapshot opens with: its features, streaming
+    /// vector length, `MIDR_EL1` and system counter.
+    const IMPLEMENTATION_BYTES: usize = 16 + 4 + 8 + 8;
+    let mut m = Machine::new(Implementation::CORTEX_A57);
+    let put = |m: &mut Machine, at: u64, value: u64| {
+        let at = at as usize;
+        m.ram.0[at..at + 8].copy_from_slice(&value.to_le_bytes());
+    };
+    put(&mut m, EL0_RW, 0x1111);
+    put(&mut m, READ_ONLY, 0x7777);
+    m.cpu.x[1] = EL0_RW;
+    assert_eq!(m.run(LDR), None);
+    assert_eq!(m.cpu.x[2], 0x1111);
+    // `EL0_RW`'s block now maps `READ_ONLY`'s, at the same offset.
+    let block = 0x60_0000 | AF | INNER_SHAREABLE | BLOCK | EL0_READ_WRITE | XN_BOTH;
+    put(&mut m, L2 + 8, block);
+
+    let mut other = Vec::new();
+    assert_eq!(
+        Machine::new(Implementation::EVERY_FEATURE)
+            .cpu
+            .save(&mut other),
+        Ok(())
+    );
+    assert_eq!(
+        m.cpu.restore(&mut other.as_slice()),
+        Err(SnapError::Invalid(
+            "snapshot of a processor implementing other features"
+        ))
+    );
+    assert_eq!(m.run(LDR), None);
+    assert_eq!(
+        m.cpu.x[2], 0x1111,
+        "another processor's image: the translation stays"
+    );
+
+    let mut own = Vec::new();
+    assert_eq!(m.cpu.save(&mut own), Ok(()));
+    assert_eq!(
+        m.cpu.restore(&mut &own[..IMPLEMENTATION_BYTES]),
+        Err(SnapError::Truncated)
+    );
+    assert_eq!(m.run(LDR), None);
+    assert_eq!(
+        m.cpu.x[2], 0x7777,
+        "an image refused past the implementation: the walk is made again"
+    );
 }
 
 /// The data and instruction cache maintenance instructions by address

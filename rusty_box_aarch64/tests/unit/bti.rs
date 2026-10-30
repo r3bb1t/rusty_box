@@ -17,6 +17,7 @@ use std::vec::Vec;
 use rusty_box_core::{ClockHz, VmClock};
 
 use super::features::Implementation;
+use super::mmu::TlbContext;
 use super::{id, Btype, Cpu, CpuConfig, El, NoEl2, Pstate, Reg, Step, Tlb};
 use crate::bus::{AccessWidth, BusFault, PhysAddr, PhysBus};
 use crate::instrumentation::NoInstrumentation;
@@ -468,14 +469,20 @@ fn a_guarded_tlb_entry_needs_bti() {
     assert_eq!(m.step_at(GUARDED), None);
     let mut image = Vec::new();
     assert!(m.cpu.tlb.save(&mut image).is_ok());
-    let tcr = m.cpu.sys.tcr_el1;
+    let el10 = m.cpu.el10_context();
     let restored = |features| {
-        Tlb::new()
-            .restore(&mut image.as_slice(), features, tcr)
+        let context = TlbContext {
+            features,
+            el10,
+            sctlr_el2: 0,
+        };
+        Tlb::<NoEl2>::new()
+            .restore(&mut image.as_slice(), &context)
             .is_ok()
     };
-    assert!(restored(Implementation::EVERY_FEATURE.features));
-    assert!(!restored(Implementation::CORTEX_A57.features));
+    let levels = |imp: Implementation| imp.with_levels::<NoEl2>().features;
+    assert!(restored(levels(Implementation::EVERY_FEATURE)));
+    assert!(!restored(levels(Implementation::CORTEX_A57)));
 }
 
 /// A snapshot carries PSTATE.BTYPE and the TLB's guarded pages.

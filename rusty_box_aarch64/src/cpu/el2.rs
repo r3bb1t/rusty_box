@@ -22,6 +22,7 @@ use rusty_box_core::snap::{SnapRead, SnapResult, SnapWrite};
 use rusty_box_core::SnapError;
 
 use super::features::{Feature, Features, Implementation};
+use super::mmu::{ContextStorage, NoContexts, TlbContexts, TTB_BADDR};
 use super::sysreg::{smcr_mask, DISR_MASK};
 use super::{id, Cpu, El};
 
@@ -62,18 +63,22 @@ impl Levels for WithEl2 {
 }
 
 mod sealed {
-    /// What a level set stores of EL2.
+    /// What a level set stores of EL2, and the tables of contexts its TLB
+    /// tags what it holds with.
     pub trait Sealed {
         type State: super::El2Storage;
+        type Contexts: super::ContextStorage;
     }
 }
 
 impl sealed::Sealed for NoEl2 {
     type State = NoEl2State;
+    type Contexts = NoContexts;
 }
 
 impl sealed::Sealed for WithEl2 {
     type State = El2State;
+    type Contexts = TlbContexts;
 }
 
 /// Where a processor keeps its EL2 state: [`El2State`] with EL2, nothing
@@ -224,6 +229,13 @@ impl El2Regs {
 
 // ----- HCR_EL2 -----
 
+/// `HCR_EL2.VM`: stage 2 translation of the EL1&0 regime
+/// (`AArch64_NSS2TTWParams`, `walkparams.vm`).
+pub(crate) const HCR_VM: u64 = 1 << 0;
+/// `HCR_EL2.PTW`: a stage 1 walk's descriptor read that stage 2 maps to
+/// Device memory takes a stage 2 Permission fault (`walkparams.ptw`, which
+/// `HCR_EL2.TGE` clears).
+pub(crate) const HCR_PTW: u64 = 1 << 2;
 /// `HCR_EL2.FMO`, `IMO`, `AMO`: physical FIQ, IRQ and SError routing to EL2.
 pub(crate) const HCR_FMO: u64 = 1 << 3;
 pub(crate) const HCR_IMO: u64 = 1 << 4;
@@ -233,9 +245,10 @@ pub(crate) const HCR_AMO: u64 = 1 << 5;
 pub(crate) const HCR_VF: u64 = 1 << 6;
 pub(crate) const HCR_VI: u64 = 1 << 7;
 pub(crate) const HCR_VSE: u64 = 1 << 8;
-/// `HCR_EL2.DC`: the EL1&0 regime's stage 1 is disabled, and its data
-/// accesses are to Normal Write-Back memory (`AArch64_S1Enabled`,
-/// `AArch64_S1DisabledOutput`).
+/// `HCR_EL2.DC`: the EL1&0 regime's stage 1 is disabled, its data accesses
+/// are to Normal Write-Back memory (`AArch64_S1Enabled`,
+/// `AArch64_S1DisabledOutput`), and stage 2 translates them as under `VM`
+/// (`AArch64_NSS2TTWParams`).
 pub(crate) const HCR_DC: u64 = 1 << 12;
 /// `HCR_EL2.TWI`, `TWE`: WFI and WFE (and WFIT, WFET) at EL0 and EL1 trap
 /// to EL2.
@@ -277,6 +290,9 @@ pub(crate) const HCR_HCD: u64 = 1 << 29;
 pub(crate) const HCR_TRVM: u64 = 1 << 30;
 /// `HCR_EL2.RW`: EL1 is AArch64, the only state it has (RAO/WI).
 pub(crate) const HCR_RW: u64 = 1 << 31;
+/// `HCR_EL2.CD`: stage 2 makes the EL1&0 regime's Normal data memory
+/// Non-cacheable (`S2DCacheEnabled`, `AArch64_S2TreatAsNormalNC`).
+pub(crate) const HCR_CD: u64 = 1 << 32;
 /// `HCR_EL2.TLOR` (FEAT_LOR): EL1's accesses to the LORegion registers trap.
 pub(crate) const HCR_TLOR: u64 = 1 << 35;
 /// `HCR_EL2.TERR` (FEAT_RAS): EL1's accesses to the error record registers
@@ -439,7 +455,7 @@ pub(crate) const fn tcr_el2_mask(features: Features) -> u64 {
 /// A translation table base register's `BADDR` (bits 47:1) and, with
 /// FEAT_TTCNP, `CnP` (bit 0).
 pub(crate) const fn ttbr_baddr_mask(features: Features) -> u64 {
-    0x0000_FFFF_FFFF_FFFE | if features.has(Feature::Ttcnp) { 1 } else { 0 }
+    TTB_BADDR | if features.has(Feature::Ttcnp) { 1 } else { 0 }
 }
 
 /// `VTCR_EL2`'s bits every processor with EL2 keeps: `T0SZ`, `SL0`,
@@ -808,6 +824,17 @@ impl<L: Levels> Cpu<L> {
     #[inline(always)]
     pub(crate) fn hcr_any(&self, bits: u64) -> bool {
         L::EL2 && self.el2().hcr & bits != 0
+    }
+
+    /// `HCR_EL2` as the controls of the levels below EL2 read it: 0 where
+    /// `EL2Enabled()` is FALSE, on a processor without EL2.
+    #[inline(always)]
+    pub(crate) fn hcr_el2(&self) -> u64 {
+        if L::EL2 {
+            self.el2().hcr
+        } else {
+            0
+        }
     }
 
     /// Whether `EL2Enabled()` and a bit of `bits` is clear in `HCR_EL2`:

@@ -1883,11 +1883,13 @@ fn constraint_value(ast: &Value, holding: &BTreeSet<&str>) -> Option<bool> {
 /// hold, its architecture version and those it includes hold, and the
 /// structural features of every processor here hold — AArch64
 /// (`FEAT_AA64`) at EL0 and EL1 (`FEAT_EL0`, `FEAT_EL1`, `FEAT_AA64EL0`,
-/// `FEAT_AA64EL1`), a PIPT instruction cache (`FEAT_IVIPT`: `CTR_EL0.L1Ip`
-/// is 0b11), the Cryptographic Extension (`FEAT_Crypto`), from Armv8.2 its
-/// assembler aliases (`FEAT_ASMv8p2`, BFC and the 64-bit REV64), and with
-/// EL2 FEAT_GTG (`ID_AA64MMFR0_EL1`'s `TGran4_2`, `TGran16_2` and
-/// `TGran64_2` read 1, which `Features.json` makes FEAT_GTG) — and every
+/// `FEAT_AA64EL1`), the 4 KiB translation granule (`FEAT_TGran4K`), a PIPT
+/// instruction cache (`FEAT_IVIPT`: `CTR_EL0.L1Ip` is 0b11), the
+/// Cryptographic Extension (`FEAT_Crypto`), from Armv8.2 its assembler
+/// aliases (`FEAT_ASMv8p2`, BFC and the 64-bit REV64), and with EL2 that
+/// granule at stage 2 (`FEAT_S2TGran4K`) and FEAT_GTG
+/// (`ID_AA64MMFR0_EL1`'s `TGran4_2` reads 2, `TGran16_2` and `TGran64_2`
+/// 1, all non-zero, which `Features.json` makes FEAT_GTG) — and every
 /// other identifier is false: no FEAT_SVE, no AArch32, no PMU.
 ///
 /// A model that cannot have EL2 ([`CpuModel::el2_available`], whose build
@@ -1949,6 +1951,7 @@ fn each_model_is_a_processor_arms_feature_model_permits() {
                 "FEAT_EL1",
                 "FEAT_AA64EL0",
                 "FEAT_AA64EL1",
+                "FEAT_TGran4K",
                 "FEAT_IVIPT",
                 "FEAT_Crypto",
             ])
@@ -1959,6 +1962,7 @@ fn each_model_is_a_processor_arms_feature_model_permits() {
         let el2 = imp.has(Feature::El2);
         if el2 {
             holding.insert("FEAT_GTG");
+            holding.insert("FEAT_S2TGran4K");
         }
         let (mut decided, mut broken) = (0, Vec::new());
         for c in &constraints {

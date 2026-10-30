@@ -25,6 +25,7 @@
 //! register states for every one.
 
 use super::dp::{add_with_carry, datasize, decode_bit_masks, ones, ror, shift_reg};
+use super::exception::AccessSyndrome;
 use super::exec::{bit, bits, keep_fault, sext, Fault, Flow, OpResult};
 use super::fp::{dp2_operation, dp3_form, scalar_type, FpBinary, FpDp3Regs, FpType};
 use super::isa::Class;
@@ -273,6 +274,27 @@ pub(crate) enum Op {
 }
 
 const _: () = assert!(core::mem::size_of::<Op>() == 16);
+
+/// The syndrome a stage 2 Data Abort on the access of a load or store of
+/// one general-purpose register reports ([`AccessSyndrome`]), from the
+/// op's fields: `Rt` = `rt` of `1 << size` bytes, extended as `extend` says
+/// (a store's [`Extend::Zero`]); none for a form with writeback, whose
+/// base's new value `writeback` holds (`None` for an offset form). The four
+/// ops that make such an access ([`Cpu::exec_op`]) give it only when the
+/// access faults, from values they hold past the access anyway, as a class
+/// handler's access gives its own ([`Cpu::read_gpr`]).
+#[inline(always)]
+const fn one_register_syndrome(
+    size: u8,
+    extend: Extend,
+    rt: u8,
+    writeback: Option<u64>,
+) -> Option<AccessSyndrome> {
+    match writeback {
+        None => Some(AccessSyndrome::load(size as u32, extend, rt as u32)),
+        Some(_) => None,
+    }
+}
 
 /// A register field, as a byte.
 #[inline(always)]
@@ -1221,6 +1243,15 @@ impl<L: Levels> Cpu<L> {
                     Err(fault) => return Err(keep_fault(raised, fault)),
                 }
             };
+            // A load or store's access, whose fault reports `$syndrome`, the
+            // op's syndrome, where its abort leaves room for one
+            // ([`one_register_syndrome`]): made only when the access faults.
+            ($step:expr, reporting($syndrome:expr)) => {
+                match $step {
+                    Ok(value) => value,
+                    Err(fault) => return Err(keep_fault(raised, fault.reporting($syndrome))),
+                }
+            };
         }
         match *source.op(self) {
             Op::Class { class, word } => Ok(completed!(self.exec_class(bus, pc, class, word))),
@@ -1494,8 +1525,11 @@ impl<L: Levels> Cpu<L> {
             } => {
                 let base = completed!(self.base_register(u32::from(rn)));
                 let (address, writeback) = indexed(base, imm, index);
-                let v =
-                    completed!(self.read_mem(bus, address, u32::from(size), DataAccess::NORMAL));
+                let acc = DataAccess::NORMAL.of_one_register();
+                let v = completed!(
+                    self.read_mem(bus, address, u32::from(size), acc),
+                    reporting(one_register_syndrome(size, extend, rt, writeback))
+                );
                 self.set_x_or_zr(u32::from(rt), extended(v, size, extend));
                 if let Some(wb) = writeback {
                     self.set_x_or_sp(u32::from(rn), wb);
@@ -1512,7 +1546,11 @@ impl<L: Levels> Cpu<L> {
                 let base = completed!(self.base_register(u32::from(rn)));
                 let (address, writeback) = indexed(base, imm, index);
                 let v = self.x_or_zr(u32::from(rt));
-                completed!(self.write_mem(bus, address, u32::from(size), v, DataAccess::NORMAL));
+                let acc = DataAccess::NORMAL.of_one_register();
+                completed!(
+                    self.write_mem(bus, address, u32::from(size), v, acc),
+                    reporting(one_register_syndrome(size, Extend::Zero, rt, writeback))
+                );
                 if let Some(wb) = writeback {
                     self.set_x_or_sp(u32::from(rn), wb);
                 }
@@ -1534,8 +1572,11 @@ impl<L: Levels> Cpu<L> {
                     64,
                 );
                 let address = completed!(self.base_register(u32::from(rn))).wrapping_add(offset);
-                let v =
-                    completed!(self.read_mem(bus, address, u32::from(size), DataAccess::NORMAL));
+                let acc = DataAccess::NORMAL.of_one_register();
+                let v = completed!(
+                    self.read_mem(bus, address, u32::from(size), acc),
+                    reporting(one_register_syndrome(size, extend, rt, None))
+                );
                 self.set_x_or_zr(u32::from(rt), extended(v, size, extend));
                 Ok(Flow::Next)
             }
@@ -1555,7 +1596,11 @@ impl<L: Levels> Cpu<L> {
                 );
                 let address = completed!(self.base_register(u32::from(rn))).wrapping_add(offset);
                 let v = self.x_or_zr(u32::from(rt));
-                completed!(self.write_mem(bus, address, u32::from(size), v, DataAccess::NORMAL));
+                let acc = DataAccess::NORMAL.of_one_register();
+                completed!(
+                    self.write_mem(bus, address, u32::from(size), v, acc),
+                    reporting(one_register_syndrome(size, Extend::Zero, rt, None))
+                );
                 Ok(Flow::Next)
             }
             Op::LoadPair {

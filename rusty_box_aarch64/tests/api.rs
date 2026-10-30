@@ -6,7 +6,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use rusty_box_aarch64::board::{GPIO_BASE, RAM_BASE, RTC_BASE, UART0_BASE};
 use rusty_box_aarch64::boot::{fdt, LinuxImage, PlacementError};
-use rusty_box_aarch64::cpu::{ExceptionClass, TranslationFault};
+use rusty_box_aarch64::cpu::{ExceptionClass, NoTranslation, TranslationFault, TranslationStage};
 use rusty_box_aarch64::instrumentation::{Direction, ExceptionKind, ExceptionTaken, MemoryAccess};
 use rusty_box_aarch64::machine::{BuildError, MemoryError, OnResetRequest};
 use rusty_box_aarch64::{
@@ -188,10 +188,11 @@ fn a_store_across_a_page_reports_the_page_that_faulted() {
     m.set_exits(&[vector]).expect("one exit");
 
     assert_eq!(m.virt_to_phys(0x8000_0FF9), Ok(RAM_BASE + 0x2_0FF9));
-    assert_eq!(
-        m.virt_to_phys(0x8000_1000),
-        Err(TranslationFault::Translation { level: 3 })
-    );
+    let level3 = NoTranslation {
+        stage: TranslationStage::One,
+        fault: TranslationFault::Translation { level: 3 },
+    };
+    assert_eq!(m.virt_to_phys(0x8000_1000), Err(level3));
 
     m.reg_write(Reg::X0, 0x8000_0FF9);
     m.reg_write(Reg::X1, 0x1122_3344_5566_7788);
@@ -229,7 +230,7 @@ fn a_store_across_a_page_reports_the_page_that_faulted() {
         m.virt_read(0x8000_2000, &mut stored),
         Err(MemoryError::Translation {
             va: 0x8000_2000,
-            fault: TranslationFault::Translation { level: 3 }
+            fault: level3
         })
     );
     assert_eq!(

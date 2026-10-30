@@ -15,7 +15,7 @@
 use rusty_box_core::VmClock;
 
 use super::decode::classify;
-use super::exception::{AddressedClass, Exception, ExceptionClass};
+use super::exception::{AccessSyndrome, AddressedClass, Exception, SyndromeClass};
 use super::fp::FpType;
 use super::isa::Class;
 use super::ldst::SingleForm;
@@ -189,6 +189,22 @@ impl From<Exception> for Fault {
     }
 }
 
+impl Fault {
+    /// The fault of an access by a load or store whose syndrome is
+    /// `syndrome` (`None`: one whose form has none), the abort's
+    /// [`SyndromeSlot`](super::exception::SyndromeSlot) closed with it where
+    /// it is open ([`Exception::reporting`]). Out of line and cold: only a
+    /// fault reaches it.
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn reporting(self, syndrome: Option<AccessSyndrome>) -> Self {
+        match self {
+            Self::Exception(e) => Self::Exception(e.reporting(syndrome)),
+            fault @ Self::Stop(_) => fault,
+        }
+    }
+}
+
 pub(crate) type ExecResult = Result<Flow, Fault>;
 
 /// What [`Cpu::exec_op`](super::Cpu::exec_op) returns: an [`ExecResult`]
@@ -299,7 +315,7 @@ impl<L: Levels> Cpu<L> {
         *fetched_word = Some(insn);
         bus.observer.before_execution(pc, insn);
         if self.pstate.il {
-            return Err(Exception::new(ExceptionClass::IllegalState, 0).into());
+            return Err(Exception::new(SyndromeClass::IllegalState, 0).into());
         }
         if self.pstate.btype != Btype::None {
             self.branch_target_check(self.in_guarded_page, insn)?;
@@ -640,7 +656,7 @@ impl<L: Levels> Cpu<L> {
                 insn,
             })))
         } else {
-            Err(Exception::new(ExceptionClass::Unknown, 0).into())
+            Err(Exception::new(SyndromeClass::Unknown, 0).into())
         }
     }
 

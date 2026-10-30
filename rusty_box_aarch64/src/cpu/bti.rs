@@ -8,7 +8,7 @@
 //! (`InGuardedPage`), `AArch64_TakeException` and `SetPSTATEFromPSR`
 //! (BTYPE across an exception and its return).
 
-use super::exception::{Exception, ExceptionClass};
+use super::exception::{Exception, SyndromeClass};
 use super::exec::bits;
 use super::features::Feature;
 use super::isa::{self, BranchTarget};
@@ -29,7 +29,7 @@ impl<L: Levels> Cpu<L> {
         let btype = self.pstate.btype;
         if in_guarded_page && !self.accepts(insn, btype) {
             return Err(Exception::new(
-                ExceptionClass::BranchTarget,
+                SyndromeClass::BranchTarget,
                 btype.bits() as u32,
             ));
         }

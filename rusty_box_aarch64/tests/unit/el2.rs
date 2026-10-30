@@ -20,17 +20,30 @@
 //! The words are GNU as's (2.42, `-march=armv8.2-a`, objdump -d), the SME
 //! ones with `-march=armv9.4-a+sme2`.
 
+use std::boxed::Box;
 use std::vec::Vec;
 
 use rusty_box_core::{ClockHz, SnapError, VmClock};
 
 use super::el2::{
-    CPTR_TFP, CPTR_TSM, HCR_AMO, HCR_DC, HCR_FMO, HCR_HCD, HCR_IMO, HCR_TEA, HCR_TGE, HCR_TSC,
-    HCR_VF, HCR_VI, HCR_VSE, MDCR_TDE,
+    El2Reg, CPTR_TFP, CPTR_TSM, HCR_AMO, HCR_CD, HCR_DC, HCR_FMO, HCR_HCD, HCR_IMO, HCR_PTW,
+    HCR_TEA, HCR_TGE, HCR_TSC, HCR_VF, HCR_VI, HCR_VM, HCR_VSE, MDCR_TDE,
 };
+use super::exception::AccessSyndrome;
+use super::exec::Fault;
 use super::features::{Feature, Features, Implementation};
+use super::mmu::saved_layout::{
+    CONTEXTS, CONTEXT_BYTES, CONTEXT_HCR, CONTEXT_SCTLR, CONTEXT_VTCR, CONTEXT_VTTBR, ENTRY_BYTES,
+    ENTRY_S2_DEVICE, ENTRY_S2_LEVEL, ENTRY_S2_PERMS, ENTRY_STAGE1, KEPT_BYTES,
+    STAGE2_CONTEXT_BYTES,
+};
+use super::mmu::{DataAccess, El10Context, TlbContext};
+use super::op::Extend;
 use super::sysreg::{CPACR_FPEN, CPACR_SMEN, SMCR_EZT0};
-use super::{id, Cpu, CpuConfig, El, Levels, NoEl2, Pstate, Step, Tlb, WithEl2};
+use super::{
+    id, Cpu, CpuConfig, El, Ipa, Levels, NoEl2, NoTranslation, Pstate, Step, SysReg, Tlb,
+    TranslationFault, TranslationStage, WithEl2,
+};
 use crate::bus::{AccessWidth, BusFault, PhysAddr, PhysBus};
 use crate::instrumentation::{ExceptionKind, NoInstrumentation};
 
@@ -123,6 +136,13 @@ impl Ram {
         let a = at as usize;
         self.0[a..a + 8].copy_from_slice(&value.to_le_bytes());
     }
+
+    fn get64(&self, at: u64) -> u64 {
+        let a = at as usize;
+        let mut bytes = [0; 8];
+        bytes.copy_from_slice(&self.0[a..a + 8]);
+        u64::from_le_bytes(bytes)
+    }
 }
 
 /// An exception the step took: the level, the vector offset from that
@@ -200,7 +220,7 @@ impl<L: Levels> Machine<L> {
             El::El1 => (El::El1, VBAR_EL1, self.cpu.sys.esr_el1),
             El::El0 => return None,
         };
-        (pc & !0x7FF == vbar).then_some(Taken {
+        (pc & !0x7FF == vbar).then(|| Taken {
             to,
             offset: pc - vbar,
             esr,
@@ -213,8 +233,183 @@ impl Machine<WithEl2> {
         Self::new(Implementation::CORTEX_A57)
     }
 
+    /// Set `bits` of `HCR_EL2`, the EL1&0 regime's context left to be
+    /// found again as an `MSR`'s change of it leaves it.
     fn hcr(&mut self, bits: u64) {
         self.cpu.el2_state.regs.hcr |= bits;
+        self.cpu.el10_context_changed();
+    }
+
+    /// The registers a snapshot's TLB is judged by, as the processor holds
+    /// them.
+    fn tlb_context(&self) -> TlbContext {
+        TlbContext {
+            features: self.cpu.imp.features,
+            el10: self.cpu.el10_context(),
+            sctlr_el2: self.cpu.el2_state.regs.sctlr,
+        }
+    }
+
+    /// The processor's TLB, saved.
+    fn saved_tlb(&self) -> SavedTlb {
+        let mut image = Vec::new();
+        assert_eq!(self.cpu.tlb.save(&mut image), Ok(()));
+        SavedTlb(image)
+    }
+}
+
+/// `image` restored into the TLB of a processor of the level set `L` whose
+/// registers make `context`: the TLB's own image of what it restored, which
+/// a faithful restore makes `image` again.
+fn restored<L: Levels>(context: &TlbContext, image: &[u8]) -> Result<Vec<u8>, SnapError> {
+    let mut tlb = Box::new(Tlb::<L>::new());
+    tlb.restore(&mut &image[..], context)?;
+    let mut saved = Vec::new();
+    assert_eq!(tlb.save(&mut saved), Ok(()));
+    Ok(saved)
+}
+
+/// A saved TLB ([`Tlb::save`], laid out as
+/// [`saved_layout`](super::mmu::saved_layout) says): its table of EL1&0
+/// contexts and its table of stage 2 contexts, each with each place a byte
+/// saying whether it holds one and then the context's registers, each
+/// place's generation, the places from the one found most recently to the
+/// least, and the current context's place plus one; the entries; and the
+/// kept stage 2 translations.
+struct SavedTlb(Vec<u8>);
+
+/// Where one of a saved TLB's tables of contexts lies.
+struct SavedTable {
+    /// Where each place holding a context begins, by place.
+    held: Vec<(usize, usize)>,
+    /// Where the places' generations lie, past the places.
+    generations_at: usize,
+}
+
+impl SavedTable {
+    /// Where the current context's place lies, past the generations and
+    /// the order the places were found in.
+    fn current_at(&self) -> usize {
+        self.generations_at + 2 * CONTEXTS
+    }
+
+    /// Where the table ends.
+    fn end(&self) -> usize {
+        self.current_at() + 1
+    }
+}
+
+impl SavedTlb {
+    /// The table of contexts `bytes` long each that begins at `at`.
+    fn table(&self, mut at: usize, bytes: usize) -> SavedTable {
+        let mut held = Vec::new();
+        for place in 0..CONTEXTS {
+            if self.0[at] == 1 {
+                held.push((place, at + 1));
+                at += 1 + bytes;
+            } else {
+                at += 1;
+            }
+        }
+        SavedTable {
+            held,
+            generations_at: at,
+        }
+    }
+
+    /// The table of EL1&0 contexts, first.
+    fn el10(&self) -> SavedTable {
+        self.table(0, CONTEXT_BYTES)
+    }
+
+    /// The table of stage 2 contexts, past it.
+    fn stage2(&self) -> SavedTable {
+        self.table(self.el10().end(), STAGE2_CONTEXT_BYTES)
+    }
+
+    /// Where each place of the table of EL1&0 contexts holding one begins,
+    /// by place.
+    fn contexts(&self) -> Vec<(usize, usize)> {
+        self.el10().held
+    }
+
+    /// Where the current EL1&0 context's place lies.
+    fn current_at(&self) -> usize {
+        self.el10().current_at()
+    }
+
+    /// The current EL1&0 context's place plus one, 0 for none.
+    fn current(&self) -> u8 {
+        self.0[self.current_at()]
+    }
+
+    /// The generation of the place `index` of the table of EL1&0 contexts.
+    fn generation(&self, index: usize) -> u8 {
+        self.0[self.el10().generations_at + index]
+    }
+
+    /// The little-endian doubleword at `at`.
+    fn u64_at(&self, at: usize) -> u64 {
+        let mut bytes = [0; 8];
+        bytes.copy_from_slice(&self.0[at..at + 8]);
+        u64::from_le_bytes(bytes)
+    }
+
+    /// Where the entries' count lies, past both tables.
+    fn entries_at(&self) -> usize {
+        self.stage2().end()
+    }
+
+    /// How many entries the TLB held.
+    fn entries(&self) -> usize {
+        snapshot_count(&self.0[self.entries_at()..])
+    }
+
+    /// Where the kept stage 2 translations' count lies.
+    fn kept_at(&self) -> usize {
+        self.entries_at() + 4 + self.entries() * ENTRY_BYTES
+    }
+
+    /// How many stage 2 translations the TLB kept.
+    fn kept(&self) -> usize {
+        snapshot_count(&self.0[self.kept_at()..])
+    }
+
+    /// The IPA page number of each kept stage 2 translation.
+    fn kept_pages(&self) -> Vec<u64> {
+        (0..self.kept())
+            .map(|i| self.u64_at(self.kept_at() + 4 + i * KEPT_BYTES) & ((1 << 52) - 1))
+            .collect()
+    }
+
+    /// The context tag of each entry.
+    fn entry_tags(&self) -> Vec<u8> {
+        (0..self.entries())
+            .map(|i| self.0[self.entries_at() + 4 + i * ENTRY_BYTES + 6] >> 4)
+            .collect()
+    }
+
+    /// Where the entry of the page of `va` is, if the TLB held one.
+    fn find_entry(&self, va: u64) -> Option<usize> {
+        let at = self.entries_at();
+        (0..self.entries())
+            .map(|i| at + 4 + i * ENTRY_BYTES)
+            .find(|&at| {
+                let mut page = [0; 8];
+                page.copy_from_slice(&self.0[at..at + 8]);
+                u64::from_le_bytes(page) & ((1 << 52) - 1) == va >> 12
+            })
+    }
+
+    /// Whether the TLB held an entry of the page of `va`.
+    fn has_entry(&self, va: u64) -> bool {
+        self.find_entry(va).is_some()
+    }
+
+    /// Where the entry of the page of `va` is.
+    fn entry_at(&self, va: u64) -> usize {
+        self.find_entry(va)
+            .unwrap_or_else(|| panic!("no entry for {va:#x}"))
     }
 }
 
@@ -455,18 +650,46 @@ fn eret_from_el2_restores_software_step_by_the_debug_target() {
         // Debug exceptions target EL1.
         (MDSCR_SS, true, 0, 0, EL1H | SPSR_SS, false),
         (MDSCR_SS | MDSCR_KDE, true, 0, 0, EL1H | SPSR_SS, true),
-        (MDSCR_SS | MDSCR_KDE, true, 0, 0, EL1H | SPSR_SS | SPSR_D, false),
+        (
+            MDSCR_SS | MDSCR_KDE,
+            true,
+            0,
+            0,
+            EL1H | SPSR_SS | SPSR_D,
+            false,
+        ),
         (MDSCR_SS, true, 0, 0, EL0T | SPSR_SS, true),
         (0, true, 0, 0, EL0T | SPSR_SS, false),
         (MDSCR_SS | MDSCR_KDE, true, 0, 0, EL2H | SPSR_SS, false),
         // `MDCR_EL2.TDE` takes them to EL2.
         (MDSCR_SS, true, MDCR_TDE, 0, EL1H | SPSR_SS, true),
-        (MDSCR_SS | MDSCR_KDE, false, MDCR_TDE, 0, EL1H | SPSR_SS, false),
-        (MDSCR_SS | MDSCR_KDE, true, MDCR_TDE, 0, EL2H | SPSR_SS, true),
+        (
+            MDSCR_SS | MDSCR_KDE,
+            false,
+            MDCR_TDE,
+            0,
+            EL1H | SPSR_SS,
+            false,
+        ),
+        (
+            MDSCR_SS | MDSCR_KDE,
+            true,
+            MDCR_TDE,
+            0,
+            EL2H | SPSR_SS,
+            true,
+        ),
         (MDSCR_SS, true, MDCR_TDE, 0, EL2H | SPSR_SS, false),
         // So does `HCR_EL2.TGE`, under which EL1 is no return's target.
         (MDSCR_SS, true, 0, HCR_TGE, EL0T | SPSR_SS, true),
-        (MDSCR_SS | MDSCR_KDE, false, 0, HCR_TGE, EL0T | SPSR_SS, false),
+        (
+            MDSCR_SS | MDSCR_KDE,
+            false,
+            0,
+            HCR_TGE,
+            EL0T | SPSR_SS,
+            false,
+        ),
     ];
     for (mdscr, d, mdcr, hcr, spsr, ss) in cases {
         let mut m = Machine::with_el2();
@@ -1165,11 +1388,29 @@ const AP2: u64 = 1 << 7;
 const AP1: u64 = 1 << 6;
 const XN: u64 = 1 << 54;
 const PXN: u64 = 1 << 53;
+/// Stage 2's level 1 table, whose first entry maps the first GiB of IPAs
+/// to itself, Normal Write-Back memory every stage 2 permission allows.
+const S2_L1: u64 = 0x1_4000;
+/// A stage 2 descriptor's `S2AP` read and write bits, and its `MemAttr` of
+/// Normal Inner and Outer Write-Back memory.
+const S2AP_R: u64 = 1 << 6;
+const S2AP_W: u64 = 1 << 7;
+const S2_NORMAL: u64 = 0b1111 << 2;
+/// `VTCR_EL2` of the identity stage 2: T0SZ 25 (a 39-bit IPA), SL0 1 (a
+/// start at level 1), PS 40 bits.
+const VTCR_IDENTITY: u64 = 25 | (1 << 6) | (0b010 << 16);
 
-/// A processor at EL2 with both regimes' MMUs on over the tables above,
-/// 39-bit virtual addresses (T0SZ 25) and 4 KiB pages, all memory Normal.
+/// A Cortex-A57 at EL2 with both regimes' MMUs on over the tables above,
+/// 39-bit virtual addresses (T0SZ 25) and 4 KiB pages, all memory Normal,
+/// and `VTTBR_EL2` and `VTCR_EL2` describing the identity stage 2, which
+/// translates nothing until `HCR_EL2.VM` or `DC` is set.
 fn translating() -> Machine<WithEl2> {
-    let mut m = Machine::with_el2();
+    translating_on(Implementation::CORTEX_A57)
+}
+
+/// [`translating`] on a processor implementing `imp`.
+fn translating_on(imp: Implementation) -> Machine<WithEl2> {
+    let mut m = Machine::<WithEl2>::new(imp);
     let attrs = AF | INNER_SHAREABLE | BLOCK;
     for (l1, l2, ap) in [(EL2_L1, EL2_L2, AP1), (EL1_L1, EL1_L2, 0)] {
         m.ram.put64(l1, l2 | TABLE);
@@ -1187,13 +1428,19 @@ fn translating() -> Machine<WithEl2> {
         .put64(EL2_L2 + 8 * (PXN_ONLY >> 21), PXN_ONLY | attrs | PXN);
     m.ram.put64(EL2_DATA, 0x2222);
     m.ram.put64(EL1_DATA, 0x1111);
+    m.ram.put64(
+        S2_L1,
+        AF | INNER_SHAREABLE | S2AP_R | S2AP_W | S2_NORMAL | BLOCK,
+    );
     let features = m.cpu.imp.features;
     let el2 = &mut m.cpu.el2_state.regs;
     // TCR_EL2: T0SZ 25, PS 40 bits; its RES1 bits come with the write.
-    el2.write(super::el2::El2Reg::Tcr, features, 0, 25 | (0b010 << 16));
+    el2.write(El2Reg::Tcr, features, 0, 25 | (0b010 << 16));
     el2.ttbr0 = EL2_L1;
     el2.mair = 0xFF;
     el2.sctlr |= 1;
+    el2.write(El2Reg::Vtcr, features, 0, VTCR_IDENTITY);
+    el2.vttbr = S2_L1;
     let sys = &mut m.cpu.sys;
     sys.tcr_el1 = 25 | (1 << 23);
     sys.ttbr0_el1 = EL1_L1;
@@ -1201,6 +1448,49 @@ fn translating() -> Machine<WithEl2> {
     sys.sctlr_el1 = id::SCTLR_EL1_RESET | 1;
     m.at(El::El2);
     m
+}
+
+/// A write of an EL2 regime register bit its walk does not read keeps the
+/// regime's translations, and one a walk reads empties the TLB: with
+/// `SHARED`'s EL2 descriptor rewritten and no TLB maintenance, an `MSR` of
+/// `SCTLR_EL2` flipping `C`, which the TLB holds nothing of, leaves the old
+/// translation in use, and one of `MAIR_EL2` changing an attribute no
+/// descriptor names makes the change seen.
+#[test]
+fn only_an_el2_write_its_walk_reads_empties_the_tlb() {
+    const MSR_SCTLR_EL2: u32 = 0xD51C_1000; // msr sctlr_el2, x0
+    const MSR_MAIR_EL2: u32 = 0xD51C_A200; // msr mair_el2, x0
+    const SCTLR_C: u64 = 1 << 2;
+    let mut m = translating();
+    m.ram.put64(READ_ONLY, 0x7777);
+    let load = |m: &mut Machine<WithEl2>| {
+        m.at(El::El2);
+        m.cpu.x[1] = SHARED;
+        assert_eq!(m.run(LDR), None);
+        m.cpu.x[2]
+    };
+    assert_eq!(load(&mut m), 0x2222, "SHARED's EL2 data");
+    m.ram.put64(
+        EL2_L2 + 8 * (SHARED >> 21),
+        READ_ONLY | AF | INNER_SHAREABLE | BLOCK,
+    );
+    m.at(El::El2);
+    m.cpu.x[0] = m.cpu.el2().sctlr ^ SCTLR_C;
+    assert_eq!(m.run(MSR_SCTLR_EL2), None);
+    assert_eq!(
+        m.cpu.el2().sctlr & SCTLR_C,
+        m.cpu.x[0] & SCTLR_C,
+        "C is written"
+    );
+    assert_eq!(load(&mut m), 0x2222, "C flipped: the translation stays");
+    m.at(El::El2);
+    m.cpu.x[0] = m.cpu.el2().mair | (0x44 << 56);
+    assert_eq!(m.run(MSR_MAIR_EL2), None);
+    assert_eq!(
+        load(&mut m),
+        0x7777,
+        "MAIR_EL2 changed: the walk is made again"
+    );
 }
 
 /// EL2's accesses translate through `TTBR0_EL2` and EL1's through
@@ -1228,8 +1518,9 @@ fn el2_translates_through_its_own_tables() {
 
 /// `HCR_EL2.DC` and `TGE` turn stage 1 of the EL1&0 regime off whatever
 /// `SCTLR_EL1.M` says (Arm `AArch64_S1Enabled`): an EL1 or EL0 access
-/// reaches the physical address it names. With stage 1 off a data access
-/// is to Device-nGnRnE memory, where a misaligned one takes an alignment
+/// reaches the intermediate physical address it names, which under `DC`
+/// stage 2 translates (here to itself). With stage 1 off a data access is
+/// to Device-nGnRnE memory, where a misaligned one takes an alignment
 /// fault, but under `DC` to Normal memory (`AArch64_S1DisabledOutput`).
 #[test]
 fn dc_and_tge_turn_off_el1_and_0_stage_1() {
@@ -1246,7 +1537,7 @@ fn dc_and_tge_turn_off_el1_and_0_stage_1() {
         (El::El0, HCR_TGE, PHYSICAL),
         (El::El1, 0, 0x1111),
     ] {
-        m.cpu.el2_state.regs.hcr = reset | hcr;
+        set_hcr(&mut m, reset | hcr);
         m.at(el);
         m.cpu.x[1] = SHARED;
         assert_eq!(m.run(LDR), None, "{el:?} HCR {hcr:#x}");
@@ -1254,6 +1545,7 @@ fn dc_and_tge_turn_off_el1_and_0_stage_1() {
     }
 
     m.cpu.sys.sctlr_el1 &= !1;
+    m.cpu.flush_tlb();
     for (hcr, want) in [
         (
             0,
@@ -1261,7 +1553,7 @@ fn dc_and_tge_turn_off_el1_and_0_stage_1() {
         ),
         (HCR_DC, None),
     ] {
-        m.cpu.el2_state.regs.hcr = reset | hcr;
+        set_hcr(&mut m, reset | hcr);
         m.at(El::El1);
         m.cpu.x[1] = SHARED + 1;
         assert_eq!(m.run(LDR), want, "misaligned, HCR {hcr:#x}");
@@ -1269,21 +1561,20 @@ fn dc_and_tge_turn_off_el1_and_0_stage_1() {
     assert_eq!(m.cpu.x[2], PHYSICAL >> 8, "the Normal read");
 }
 
-/// `ID_AA64MMFR0_EL1` offers no stage 2 granule on a processor with EL2,
-/// which has no stage 2 translation: `TGran4_2`, `TGran16_2` and
-/// `TGran64_2` read 1, not supported at stage 2 (FEAT_GTG, which
-/// `Features.json` makes hold exactly when all three are non-zero). Without
-/// EL2 all three read 0, and either way stage 1 offers the 4 KiB granule
-/// alone.
+/// `ID_AA64MMFR0_EL1` offers the 4 KiB granule alone at both stages on a
+/// processor with EL2: `TGran4_2` reads 2 (supported), `TGran16_2` and
+/// `TGran64_2` 1 (not), which is FEAT_GTG (`Features.json` makes it hold
+/// exactly when all three are non-zero). Without EL2 all three read 0, and
+/// either way stage 1 offers the 4 KiB granule alone.
 #[test]
-fn the_id_registers_offer_no_stage_2_granule() {
+fn the_id_registers_offer_the_4k_granule_at_both_stages() {
     const MRS_MMFR0: u32 = 0xD538_0700; // mrs x0, id_aa64mmfr0_el1
                                         // TGran4_2, TGran16_2, TGran64_2, then TGran4, TGran16, TGran64.
     let granules = |mmfr0: u64| [40, 32, 36, 28, 20, 24].map(|lsb| (mmfr0 >> lsb) & 0xF);
     let mut with = Machine::with_el2();
     with.at(El::El1);
     assert_eq!(with.run(MRS_MMFR0), None);
-    assert_eq!(granules(with.cpu.x[0]), [1, 1, 1, 0, 0, 0xF]);
+    assert_eq!(granules(with.cpu.x[0]), [2, 1, 1, 0, 0, 0xF]);
     let mut without = Machine::<NoEl2>::new(Implementation::CORTEX_A57);
     without.at(El::El1);
     assert_eq!(without.run(MRS_MMFR0), None);
@@ -1294,12 +1585,11 @@ fn the_id_registers_offer_no_stage_2_granule() {
 /// out as a clean and invalidate: under `HCR_EL2.VM` a page stage 1 makes
 /// read-only refuses it a permission (`AArch64_DC` translates before it
 /// changes the operation), while under `HCR_EL2.DC`, which turns off stage
-/// 1 for EL1 and EL0, there is no permission to check.
+/// 1 for EL1 and EL0, stage 1 has no permission to check and the identity
+/// stage 2 refuses nothing.
 #[test]
 fn dc_ivac_at_el1_translates_as_an_invalidate_under_vm_and_dc() {
     const DC_IVAC: u32 = 0xD508_7621; // dc ivac, x1
-    const HCR_VM: u64 = 1 << 0;
-    const CM: u64 = 1 << 8;
     let mut m = translating();
     m.ram.put64(
         EL1_L2 + 8 * (READ_ONLY >> 21),
@@ -1313,7 +1603,7 @@ fn dc_ivac_at_el1_translates_as_an_invalidate_under_vm_and_dc() {
         PERMISSION_L2 | CM | WNR,
     );
     for (hcr, want) in [(0, refused), (HCR_VM, refused), (HCR_DC, None)] {
-        m.cpu.el2_state.regs.hcr = reset | hcr;
+        set_hcr(&mut m, reset | hcr);
         m.cpu.sys.far_el1 = 0;
         m.at(El::El1);
         m.cpu.x[1] = READ_ONLY;
@@ -1385,31 +1675,37 @@ fn a_snapshot_el2_tlb_entry_is_refused_where_no_walk_makes_it() {
         None,
         "the EL2 pages of the fetch and the load are cached"
     );
-    let mut image = Vec::new();
-    assert_eq!(m.cpu.tlb.save(&mut image), Ok(()));
-    // The entry count, then each entry: its page, its PA, then its
-    // permissions, Device, level and regime bytes.
-    let count = u32::from_le_bytes([image[0], image[1], image[2], image[3]]) as usize;
-    assert_eq!((count, image.len()), (2, 4 + count * (8 + 8 + 4)));
-    let tcr = m.cpu.sys.tcr_el1;
-    let restore =
-        |features: Features, image: &[u8]| Tlb::new().restore(&mut &image[..], features, tcr);
-    let with = m.cpu.imp.features;
-    let without = Implementation::CORTEX_A57.with_levels::<NoEl2>().features;
-    assert_eq!(restore(with, &image), Ok(()));
+    let saved = m.saved_tlb();
+    // No EL1&0 context, the EL2 regime's entries carrying none; then the
+    // entries; then no stage 2 translations kept, none without stage 2.
+    assert!(saved.contexts().is_empty());
+    assert_eq!(saved.entry_tags(), [0, 0]);
+    assert_eq!(saved.0.len(), saved.kept_at() + 4);
+    let image = saved.0.clone();
+    let context = m.tlb_context();
+    let restore = |image: &[u8]| restored::<WithEl2>(&context, image);
+    let without = TlbContext {
+        features: Implementation::CORTEX_A57.with_levels::<NoEl2>().features,
+        ..context
+    };
+    assert_eq!(restore(&image), Ok(image.clone()));
     assert_eq!(
-        restore(without, &image),
+        restored::<NoEl2>(&without, &image),
         Err(SnapError::Invalid(
             "TLB entry is of a regime this processor lacks"
         ))
     );
     let mut el0 = image.clone();
-    el0[4 + 8 + 8] |= PERM_EL0_R;
+    el0[saved.entries_at() + 4 + 8 + 8] |= PERM_EL0_R;
+    assert_eq!(restore(&el0), Err(NOT_WALKED));
+    let mut tagged = image;
+    tagged[saved.entries_at() + 4 + 6] |= 1 << 4;
     assert_eq!(
-        restore(with, &el0),
+        restore(&tagged),
         Err(SnapError::Invalid(
-            "TLB entry is not one a walk can produce"
-        ))
+            "TLB entry's context is not one the TLB holds"
+        )),
+        "an EL2 entry tagged with a context"
     );
 }
 
@@ -1619,8 +1915,8 @@ fn at_s1e2_translates_through_the_el2_regime() {
 
 /// From EL2, `AT S12E1R` and `S12E1W` translate through the EL1&0 regime
 /// with EL1's permissions and `AT S12E0R` and `S12E0W` with EL0's: with
-/// no stage 2 translation, `PAR_EL1` holds the stage 1 result. EL1's are
-/// UNDEFINED.
+/// stage 2 off (`HCR_EL2.{DC,VM}` {0,0}), `PAR_EL1` holds the stage 1
+/// result. EL1's are UNDEFINED.
 #[test]
 fn at_s12_translates_the_el1_and_0_regime_from_el2() {
     const AT_S12E1R: u32 = 0xD50C_7880; // at s12e1r, x0
@@ -1653,4 +1949,1382 @@ fn at_s12_translates_the_el1_and_0_regime_from_el2() {
     }
     m.at(El::El1);
     assert_eq!(m.run(AT_S12E1R), sync(El::El1, CURRENT_SPX, EC_UNKNOWN, 0));
+}
+
+// ----- stage 2 -----
+//
+// Arm `AArch64_FullTranslate`, `AArch64_S2Translate`, `AArch64_S2Walk`,
+// `AArch64_S2CheckPermissions`, `S2CombineS1MemAttrs`, `IPAValid`,
+// `AArch64_FaultSyndrome` and `AArch64_InstructionSyndromeValid` with the
+// Arm ARM's `ESR_ELx.ISV`, `AArch64_ReportException` (`HPFAR_EL2`), and
+// `AArch64_AT` with `AArch64_EncodePAR`.
+
+/// `ESR_ELx.ISS` of an abort: the instruction syndrome (`ISV`, `SAS`,
+/// `SSE`, `SRT`, `SF`, `AR`), `CM` and `S1PTW`.
+const ISV: u64 = 1 << 24;
+const SSE: u64 = 1 << 21;
+const SF: u64 = 1 << 15;
+const AR: u64 = 1 << 14;
+const CM: u64 = 1 << 8;
+const S1PTW: u64 = 1 << 7;
+const fn sas(log2: u64) -> u64 {
+    log2 << 22
+}
+const fn srt(rt: u64) -> u64 {
+    rt << 16
+}
+/// More fault status codes.
+const ADDRESS_SIZE_L2: u64 = 0b00_0010;
+const TRANSLATION_L2: u64 = 0b00_0110;
+const ACCESS_FLAG_L2: u64 = 0b00_1010;
+const ALIGNMENT_FAULT: u64 = 0b10_0001;
+const EC_INSTRUCTION_ABORT_LOWER_EL: u64 = 0x20;
+
+/// Stage 2's level 2 table under `S2_L1`'s first entry, of 2 MiB blocks.
+const S2_L2: u64 = 0x1_5000;
+/// Where stage 2 puts `EL1_DATA`'s IPA.
+const GUEST_DATA: u64 = 0xE0_0000;
+/// Each a 2 MiB block stage 1 of the EL1&0 regime maps to the same IPA:
+/// stage 2 maps `S2_READ_ONLY` to itself read-only, `S2_DEVICE` to itself
+/// as Device-nGnRE memory, `S2_NO_EXECUTE` to itself execute-never, and
+/// `S2_UNMAPPED` not at all.
+const S2_READ_ONLY: u64 = 0x80_0000;
+const S2_DEVICE: u64 = 0xA0_0000;
+const S2_NO_EXECUTE: u64 = 0xC0_0000;
+const S2_UNMAPPED: u64 = 0x40_0000;
+/// A stage 2 descriptor's `MemAttr` of Device-nGnRE memory.
+const S2_DEVICE_NGNRE: u64 = 0b0001 << 2;
+/// What `HPFAR_EL2` holds before an abort, so that one that does not
+/// report an IPA is seen to leave it.
+const HPFAR_UNTOUCHED: u64 = 0xABC0;
+const MSR_HCR_EL2: u32 = 0xD51C_1100; // msr hcr_el2, x0
+const MSR_VTTBR_EL2: u32 = 0xD51C_2100; // msr vttbr_el2, x0
+const DC_ZVA: u32 = 0xD50B_7421; // dc zva, x1
+const TLBI_VMALLS12E1: u32 = 0xD50C_87DF;
+const NOT_WALKED: SnapError = SnapError::Invalid("TLB entry is not one a walk can produce");
+const NO_CONTEXT: SnapError = SnapError::Invalid("TLB entry's context is not one the TLB holds");
+
+/// `HPFAR_EL2.FIPA` reporting `ipa`: its bits 47:12 in bits 39:4.
+const fn fipa(ipa: u64) -> u64 {
+    (ipa >> 12) << 4
+}
+
+/// The count a saved TLB's section starts with.
+fn snapshot_count(image: &[u8]) -> usize {
+    u32::from_le_bytes([image[0], image[1], image[2], image[3]]) as usize
+}
+
+/// [`translating_on`] with stage 2 on (`HCR_EL2.VM`) over [`S2_L2`]: the
+/// first 4 MiB of IPAs (the code, the tables and `SHARED`) map to
+/// themselves, `EL1_DATA`'s IPA to [`GUEST_DATA`], and the IPAs above as
+/// their names say, each of which stage 1 of the EL1&0 regime maps to
+/// itself.
+fn stage2_on(imp: Implementation) -> Machine<WithEl2> {
+    let mut m = translating_on(imp);
+    let block = AF | INNER_SHAREABLE | BLOCK;
+    let rw = S2AP_R | S2AP_W;
+    m.ram.put64(S2_L1, S2_L2 | TABLE);
+    for (ipa, out, attrs) in [
+        (0, 0, rw | S2_NORMAL),
+        (SHARED, SHARED, rw | S2_NORMAL),
+        (EL1_DATA, GUEST_DATA, rw | S2_NORMAL),
+        (S2_READ_ONLY, S2_READ_ONLY, S2AP_R | S2_NORMAL),
+        (S2_DEVICE, S2_DEVICE, rw | S2_DEVICE_NGNRE),
+        (S2_NO_EXECUTE, S2_NO_EXECUTE, rw | S2_NORMAL | XN),
+    ] {
+        m.ram.put64(S2_L2 + 8 * (ipa >> 21), out | block | attrs);
+    }
+    for va in [S2_READ_ONLY, S2_DEVICE, S2_NO_EXECUTE, S2_UNMAPPED] {
+        m.ram.put64(EL1_L2 + 8 * (va >> 21), va | block);
+    }
+    m.ram.put64(GUEST_DATA, 0x3333);
+    m.cpu.el2_state.regs.hpfar = HPFAR_UNTOUCHED;
+    m.hcr(HCR_VM);
+    m
+}
+
+/// [`stage2_on`] a Cortex-A57.
+fn stage2() -> Machine<WithEl2> {
+    stage2_on(Implementation::CORTEX_A57)
+}
+
+/// Write `value` to `HCR_EL2` with an `MSR` at EL2, as a hypervisor does.
+fn set_hcr(m: &mut Machine<WithEl2>, value: u64) {
+    m.at(El::El2);
+    m.cpu.x[0] = value;
+    assert_eq!(m.run(MSR_HCR_EL2), None, "HCR_EL2 {value:#x}");
+}
+
+/// A Data Abort from EL1 taken to EL2 with `iss`.
+fn stage2_abort(iss: u64) -> Option<Taken> {
+    sync(El::El2, LOWER_A64, EC_DATA_ABORT_LOWER_EL, iss)
+}
+
+/// Under `HCR_EL2.VM` stage 2 translates every address the EL1&0 regime's
+/// stage 1 outputs, and with stage 1 off the virtual address itself; EL2's
+/// own regime has no stage 2. `HCR_EL2.TGE`, which turns EL0's stage 1 off,
+/// leaves stage 2 on (`AArch64_NSS2TTWParams`). A write of `HCR_EL2` or
+/// `VTTBR_EL2` changes what the next access finds.
+#[test]
+fn stage_2_translates_what_stage_1_outputs() {
+    let mut m = stage2();
+    m.at(El::El1);
+    m.cpu.x[1] = SHARED;
+    assert_eq!(m.run(LDR), None);
+    assert_eq!(
+        m.cpu.x[2], 0x3333,
+        "SHARED, by EL1_DATA's IPA, to GUEST_DATA"
+    );
+    m.cpu.x[2] = 0x4444;
+    assert_eq!(m.run(STR), None);
+    assert_eq!(m.ram.get64(GUEST_DATA), 0x4444);
+
+    m.at(El::El2);
+    assert_eq!(m.run(LDR), None);
+    assert_eq!(m.cpu.x[2], 0x2222, "EL2's own regime");
+
+    m.cpu.sys.sctlr_el1 &= !1;
+    m.cpu.flush_tlb();
+    m.at(El::El1);
+    m.cpu.x[1] = EL1_DATA;
+    assert_eq!(m.run(LDR), None);
+    assert_eq!(
+        m.cpu.x[2], 0x4444,
+        "stage 1 off: the virtual address is the IPA"
+    );
+
+    m.hcr(HCR_TGE);
+    m.cpu.flush_tlb();
+    m.at(El::El0);
+    m.cpu.x[1] = EL1_DATA;
+    assert_eq!(m.run(LDR), None);
+    assert_eq!(m.cpu.x[2], 0x4444, "EL0 under TGE");
+    m.cpu.el2_state.regs.hcr &= !HCR_TGE;
+    m.cpu.sys.sctlr_el1 |= 1;
+    m.cpu.flush_tlb();
+
+    // Stage 2 off by `MSR HCR_EL2`: EL1 reaches `EL1_DATA` itself.
+    m.at(El::El1);
+    m.cpu.x[1] = SHARED;
+    assert_eq!(m.run(LDR), None);
+    assert_eq!(m.cpu.x[2], 0x4444);
+    m.at(El::El2);
+    m.cpu.x[0] = m.cpu.el2().hcr & !HCR_VM;
+    assert_eq!(m.run(MSR_HCR_EL2), None);
+    m.at(El::El1);
+    assert_eq!(m.run(LDR), None);
+    assert_eq!(m.cpu.x[2], 0x1111, "stage 2 off");
+
+    // Back on, over tables that map every IPA to itself, then over
+    // `S2_L1`'s again, each by `MSR VTTBR_EL2`.
+    const IDENTITY_L1: u64 = 0x1_6000;
+    m.ram.put64(
+        IDENTITY_L1,
+        AF | INNER_SHAREABLE | S2AP_R | S2AP_W | S2_NORMAL | BLOCK,
+    );
+    m.at(El::El2);
+    m.cpu.x[0] = m.cpu.el2().hcr | HCR_VM;
+    assert_eq!(m.run(MSR_HCR_EL2), None);
+    for (vttbr, want) in [(IDENTITY_L1, 0x1111), (S2_L1, 0x4444)] {
+        m.at(El::El2);
+        m.cpu.x[0] = vttbr;
+        assert_eq!(m.run(MSR_VTTBR_EL2), None);
+        m.at(El::El1);
+        m.cpu.x[1] = SHARED;
+        assert_eq!(m.run(LDR), None);
+        assert_eq!(m.cpu.x[2], want, "VTTBR_EL2 {vttbr:#x}");
+    }
+}
+
+/// A stage 2 Translation, Access flag or Address size fault on an EL1
+/// access is taken to EL2 (`IsSecondStage`), `FAR_EL2` holding the virtual
+/// address and `HPFAR_EL2` the IPA (`IPAValid`), with the load's
+/// instruction syndrome; EL1's registers are untouched.
+#[test]
+fn a_stage_2_fault_is_taken_to_el2_with_the_ipa() {
+    let mut m = stage2();
+    m.at(El::El1);
+    m.cpu.x[1] = S2_UNMAPPED;
+    let syndrome = ISV | sas(3) | srt(2) | SF;
+    assert_eq!(m.run(LDR), stage2_abort(syndrome | TRANSLATION_L2));
+    let el2 = m.cpu.el2();
+    assert_eq!((el2.far, el2.hpfar), (S2_UNMAPPED, fipa(S2_UNMAPPED)));
+    assert_eq!((m.cpu.sys.esr_el1, m.cpu.sys.far_el1), (0, 0));
+
+    let entry = S2_L2 + 8 * (S2_UNMAPPED >> 21);
+    let rw = INNER_SHAREABLE | S2AP_R | S2AP_W | S2_NORMAL | BLOCK;
+    for (descriptor, fault) in [
+        (S2_UNMAPPED | rw, ACCESS_FLAG_L2),
+        // An output address beyond `VTCR_EL2.PS`'s 40 bits.
+        ((1 << 40) | AF | rw, ADDRESS_SIZE_L2),
+    ] {
+        m.ram.put64(entry, descriptor);
+        m.cpu.el2_state.regs.hpfar = HPFAR_UNTOUCHED;
+        m.at(El::El1);
+        assert_eq!(m.run(LDR), stage2_abort(syndrome | fault), "{fault:#x}");
+        assert_eq!(m.cpu.el2().hpfar, fipa(S2_UNMAPPED), "{fault:#x}");
+    }
+}
+
+/// A permission stage 2 refuses is a Permission fault taken to EL2, which
+/// reports no IPA (`HPFAR_EL2` is ARBITRARY: it keeps its value), whether
+/// the TLB holds the page or a walk finds it; a fetch stage 2 refuses
+/// execution is an Instruction Abort to EL2.
+#[test]
+fn stage_2_permission_faults_are_taken_to_el2() {
+    let mut m = stage2();
+    m.at(El::El1);
+    m.cpu.x[1] = S2_READ_ONLY;
+    assert_eq!(
+        m.run(LDR),
+        None,
+        "the read is permitted, and caches the page"
+    );
+    let refused = stage2_abort(ISV | sas(3) | srt(2) | SF | WNR | PERMISSION_L2);
+    assert_eq!(m.run(STR), refused, "the write, from the TLB");
+    m.cpu.flush_tlb();
+    m.at(El::El1);
+    assert_eq!(m.run(STR), refused, "the write, from a walk");
+    assert_eq!(
+        (m.cpu.el2().far, m.cpu.el2().hpfar),
+        (S2_READ_ONLY, HPFAR_UNTOUCHED)
+    );
+
+    m.at(El::El1);
+    m.cpu.x[1] = S2_NO_EXECUTE;
+    assert_eq!(m.run(BR_X1), None);
+    assert_eq!(
+        m.cpu.step(&mut m.ram, &mut NoInstrumentation),
+        Step::Retired
+    );
+    assert_eq!(
+        m.taken(),
+        sync(
+            El::El2,
+            LOWER_A64,
+            EC_INSTRUCTION_ABORT_LOWER_EL,
+            PERMISSION_L2
+        )
+    );
+    assert_eq!(m.cpu.el2().far, S2_NO_EXECUTE);
+}
+
+/// A stage 2 Data Abort on the access of a load or store of one
+/// general-purpose register without writeback reports its syndrome
+/// (`ISV`): the access size, sign extension, register, its width and
+/// acquire or release semantics. One with writeback, a pair, an exclusive
+/// and a SIMD&FP load report none.
+#[test]
+fn a_stage_2_data_abort_reports_a_single_register_access_syndrome() {
+    let cases: [(u32, u64); 19] = [
+        (0xF940_0022, ISV | sas(3) | srt(2) | SF),  // ldr x2, [x1]
+        (0x3940_0023, ISV | sas(0) | srt(3)),       // ldrb w3, [x1]
+        (0x39C0_0023, ISV | sas(0) | SSE | srt(3)), // ldrsb w3, [x1]
+        (0x7980_0024, ISV | sas(1) | SSE | srt(4) | SF), // ldrsh x4, [x1]
+        (0x79C0_0024, ISV | sas(1) | SSE | srt(4)), // ldrsh w4, [x1]
+        (0xB980_0025, ISV | sas(2) | SSE | srt(5) | SF), // ldrsw x5, [x1]
+        (0xB900_0026, ISV | sas(2) | srt(6) | WNR), // str w6, [x1]
+        (0x7900_0426, ISV | sas(1) | srt(6) | WNR), // strh w6, [x1, #2]
+        (0xF840_8027, ISV | sas(3) | srt(7) | SF),  // ldur x7, [x1, #8]
+        (0xF869_6828, ISV | sas(3) | srt(8) | SF),  // ldr x8, [x1, x9]
+        (0xF840_082A, ISV | sas(3) | srt(10) | SF), // ldtr x10, [x1]
+        (0xF800_0822, ISV | sas(3) | srt(2) | SF | WNR), // sttr x2, [x1]
+        (0xC8DF_FC2B, ISV | sas(3) | srt(11) | SF | AR), // ldar x11, [x1]
+        (0x889F_FC2C, ISV | sas(2) | srt(12) | AR | WNR), // stlr w12, [x1]
+        (0xF840_842E, 0),                           // ldr x14, [x1], #8
+        (0xF840_8C2F, 0),                           // ldr x15, [x1, #8]!
+        (0xA940_0C22, 0),                           // ldp x2, x3, [x1]
+        (0xC85F_7C22, 0),                           // ldxr x2, [x1]
+        (0xFD40_0020, 0),                           // ldr d0, [x1]
+    ];
+    let mut m = stage2();
+    m.cpu.sys.cpacr_el1 = CPACR_FPEN;
+    // EL0 may read and write the page at stage 1 too (AP[1]), which LDTR
+    // and STTR at EL1 are checked against.
+    m.ram.put64(
+        EL1_L2 + 8 * (S2_UNMAPPED >> 21),
+        S2_UNMAPPED | AF | INNER_SHAREABLE | BLOCK | AP1,
+    );
+    for (insn, iss) in cases {
+        m.at(El::El1);
+        m.cpu.x[1] = S2_UNMAPPED;
+        m.cpu.x[9] = 0;
+        assert_eq!(
+            m.run(insn),
+            stage2_abort(iss | TRANSLATION_L2),
+            "{insn:#010x}"
+        );
+        assert_eq!(m.cpu.x[1], S2_UNMAPPED, "{insn:#010x}: no writeback");
+    }
+
+    // LDR (literal) with stage 1 off, from the end of the IPAs stage 2 maps
+    // to the next, which it does not.
+    m.cpu.sys.sctlr_el1 &= !1;
+    m.cpu.flush_tlb();
+    m.at(El::El1);
+    let ldr_literal = 0x5800_0082; // ldr x2, .+16
+    assert_eq!(
+        m.run_at(S2_UNMAPPED - 16, ldr_literal),
+        stage2_abort(ISV | sas(3) | srt(2) | SF | TRANSLATION_L2)
+    );
+}
+
+/// The later single-register loads and stores report their syndrome too —
+/// LDAPR, LDAPUR* and STLUR (acquire or release), and LDRAA without
+/// writeback — and an atomic access none.
+#[test]
+fn later_single_register_loads_and_stores_report_their_syndrome() {
+    let cases: [(u32, u64); 7] = [
+        (0xF8BF_C02D, ISV | sas(3) | srt(13) | SF | AR), // ldapr x13, [x1]
+        (0x19C0_002E, ISV | sas(0) | SSE | srt(14) | AR), // ldapursb w14, [x1]
+        (0xD900_002F, ISV | sas(3) | srt(15) | SF | AR | WNR), // stlur x15, [x1]
+        (0xF820_0430, ISV | sas(3) | srt(16) | SF),      // ldraa x16, [x1]
+        (0xF820_1C31, 0),                                // ldraa x17, [x1, #8]!
+        (0xF822_0023, 0),                                // ldadd x2, x3, [x1]
+        (0xF822_8023, 0),                                // swp x2, x3, [x1]
+    ];
+    let mut m = stage2_on(Implementation::EVERY_FEATURE);
+    for (insn, iss) in cases {
+        m.at(El::El1);
+        m.cpu.x[1] = S2_UNMAPPED;
+        assert_eq!(
+            m.run(insn),
+            stage2_abort(iss | TRANSLATION_L2),
+            "{insn:#010x}"
+        );
+    }
+}
+
+/// A misaligned access split into bytes reports the syndrome only for a
+/// fault on its first byte (`accdesc.lowestaddress`).
+#[test]
+fn a_misaligned_access_reports_no_syndrome_past_its_first_byte() {
+    let mut m = stage2();
+    m.at(El::El1);
+    m.cpu.x[1] = S2_UNMAPPED - 4;
+    assert_eq!(m.run(LDR), stage2_abort(TRANSLATION_L2));
+    assert_eq!(m.cpu.el2().far, S2_UNMAPPED, "the first byte that faulted");
+    m.at(El::El1);
+    m.cpu.x[1] = S2_UNMAPPED + 0xFFC;
+    assert_eq!(
+        m.run(LDR),
+        stage2_abort(ISV | sas(3) | srt(2) | SF | TRANSLATION_L2)
+    );
+}
+
+/// A stage 2 fault on a descriptor stage 1's walk reads is taken to EL2
+/// with `S1PTW` and no instruction syndrome, reporting the descriptor's IPA
+/// (`IPAValid` on a walk, for a Permission fault too). Stage 2 maps a
+/// table in Device memory as Normal Non-cacheable for the walk unless
+/// `HCR_EL2.PTW` refuses it, and a table needs stage 2's read permission.
+#[test]
+fn a_stage_2_fault_on_stage_1s_walk_reports_s1ptw() {
+    // The virtual address `EL1_L1`'s second entry translates.
+    const WALKED: u64 = 1 << 30;
+    let mut m = stage2();
+    m.ram.put64(EL1_L1 + 8, S2_UNMAPPED | TABLE);
+    m.at(El::El1);
+    m.cpu.x[1] = WALKED;
+    assert_eq!(m.run(LDR), stage2_abort(S1PTW | TRANSLATION_L2));
+    assert_eq!(
+        (m.cpu.el2().far, m.cpu.el2().hpfar),
+        (WALKED, fipa(S2_UNMAPPED))
+    );
+    m.at(El::El1);
+    assert_eq!(
+        m.run(STR),
+        stage2_abort(S1PTW | WNR | TRANSLATION_L2),
+        "a store's"
+    );
+
+    m.ram.put64(EL1_L1 + 8, S2_DEVICE | TABLE);
+    m.ram
+        .put64(S2_DEVICE, EL1_DATA | AF | INNER_SHAREABLE | BLOCK);
+    m.at(El::El1);
+    assert_eq!(m.run(LDR), None);
+    assert_eq!(m.cpu.x[2], 0x3333, "through a table in Device memory");
+    m.hcr(HCR_PTW);
+    m.cpu.flush_tlb();
+    m.cpu.el2_state.regs.hpfar = HPFAR_UNTOUCHED;
+    m.at(El::El1);
+    assert_eq!(m.run(LDR), stage2_abort(S1PTW | PERMISSION_L2), "PTW");
+    assert_eq!(m.cpu.el2().hpfar, fipa(S2_DEVICE));
+
+    m.cpu.el2_state.regs.hcr &= !HCR_PTW;
+    m.ram.put64(
+        S2_L2 + 8 * (S2_DEVICE >> 21),
+        S2_DEVICE | AF | INNER_SHAREABLE | S2AP_W | S2_NORMAL | BLOCK,
+    );
+    m.cpu.flush_tlb();
+    m.at(El::El1);
+    assert_eq!(
+        m.run(LDR),
+        stage2_abort(S1PTW | PERMISSION_L2),
+        "a table stage 2 gives no read permission"
+    );
+}
+
+/// Device memory at stage 2 refuses a misaligned access, and `DC ZVA`
+/// whatever its alignment, with an Alignment fault taken to EL2
+/// (`AArch64_S2HasAlignmentFaultDueToMemType`), which reports no IPA;
+/// Device memory at stage 1 refuses the misaligned access first, to EL1.
+#[test]
+fn device_memory_at_stage_2_refuses_misaligned_accesses() {
+    let mut m = stage2();
+    m.at(El::El1);
+    m.cpu.x[1] = S2_DEVICE;
+    assert_eq!(m.run(LDR), None, "aligned");
+    m.cpu.x[1] = S2_DEVICE + 1;
+    assert_eq!(
+        m.run(LDR),
+        stage2_abort(ISV | sas(3) | srt(2) | SF | ALIGNMENT_FAULT)
+    );
+    assert_eq!(
+        (m.cpu.el2().far, m.cpu.el2().hpfar),
+        (S2_DEVICE + 1, HPFAR_UNTOUCHED)
+    );
+    m.at(El::El1);
+    m.cpu.x[1] = S2_DEVICE;
+    assert_eq!(m.run(DC_ZVA), stage2_abort(WNR | ALIGNMENT_FAULT));
+
+    // `MAIR_EL1.Attr1` Device-nGnRnE for the page at stage 1 as well.
+    m.cpu.sys.mair_el1 = 0x00FF;
+    m.ram.put64(
+        EL1_L2 + 8 * (S2_DEVICE >> 21),
+        S2_DEVICE | AF | INNER_SHAREABLE | BLOCK | (1 << 2),
+    );
+    m.cpu.flush_tlb();
+    m.at(El::El1);
+    m.cpu.x[1] = S2_DEVICE + 1;
+    assert_eq!(
+        m.run(LDR),
+        sync(El::El1, CURRENT_SPX, EC_DATA_ABORT_SAME_EL, ALIGNMENT_FAULT)
+    );
+}
+
+/// Stage 1's faults come before stage 2 translates: a write stage 1 refuses
+/// is EL1's Permission fault though stage 2 maps nothing there, and the
+/// read it permits meets stage 2's fault.
+#[test]
+fn stage_1_faults_come_before_stage_2s() {
+    let mut m = stage2();
+    m.ram.put64(
+        EL1_L2 + 8 * (S2_UNMAPPED >> 21),
+        S2_UNMAPPED | AF | INNER_SHAREABLE | BLOCK | AP2,
+    );
+    m.at(El::El1);
+    m.cpu.x[1] = S2_UNMAPPED;
+    assert_eq!(
+        m.run(STR),
+        sync(
+            El::El1,
+            CURRENT_SPX,
+            EC_DATA_ABORT_SAME_EL,
+            PERMISSION_L2 | WNR
+        )
+    );
+    assert_eq!(m.cpu.sys.far_el1, S2_UNMAPPED);
+    m.at(El::El1);
+    assert_eq!(
+        m.run(LDR),
+        stage2_abort(ISV | sas(3) | srt(2) | SF | TRANSLATION_L2)
+    );
+}
+
+/// An atomic access needs read and write permission at each stage, checked
+/// in Arm's order — stage 1's read and write, then stage 2's read and
+/// write — `WnR` saying whether a write was refused.
+#[test]
+fn an_atomic_access_meets_each_stages_permissions_in_order() {
+    const LDADD: u32 = 0xF822_0023; // ldadd x2, x3, [x1]
+    let mut m = stage2_on(Implementation::EVERY_FEATURE);
+    let stage1 = EL1_L2 + 8 * (S2_DEVICE >> 21);
+    let stage2 = S2_L2 + 8 * (S2_DEVICE >> 21);
+    m.ram
+        .put64(stage1, S2_DEVICE | AF | INNER_SHAREABLE | BLOCK | AP2);
+    m.ram.put64(
+        stage2,
+        S2_DEVICE | AF | INNER_SHAREABLE | S2AP_W | S2_NORMAL | BLOCK,
+    );
+    m.at(El::El1);
+    m.cpu.x[1] = S2_DEVICE;
+    assert_eq!(
+        m.run(LDADD),
+        sync(
+            El::El1,
+            CURRENT_SPX,
+            EC_DATA_ABORT_SAME_EL,
+            PERMISSION_L2 | WNR
+        ),
+        "stage 1's write before stage 2's read"
+    );
+    m.ram
+        .put64(stage1, S2_DEVICE | AF | INNER_SHAREABLE | BLOCK);
+    m.cpu.flush_tlb();
+    m.at(El::El1);
+    assert_eq!(m.run(LDADD), stage2_abort(PERMISSION_L2), "stage 2's read");
+    m.at(El::El1);
+    m.cpu.x[1] = S2_READ_ONLY;
+    assert_eq!(
+        m.run(LDADD),
+        stage2_abort(PERMISSION_L2 | WNR),
+        "stage 2's write"
+    );
+    m.at(El::El1);
+    m.cpu.x[1] = SHARED;
+    m.cpu.x[2] = 5;
+    assert_eq!(m.run(LDADD), None);
+    assert_eq!((m.cpu.x[3], m.ram.get64(GUEST_DATA)), (0x3333, 0x3338));
+}
+
+/// `AT S12E*` from EL2 translates by both stages and reports the output
+/// address with the attributes `S2CombineS1MemAttrs` gives it, and a fault
+/// of either stage, stage 2's with `PAR_EL1.S`; `AT S1E*` reports the IPA.
+/// Stage 1's Normal memory is Non-cacheable with `SCTLR_EL1.C` clear and
+/// stage 2's with `HCR_EL2.CD` set. A stage 2 fault on stage 1's walk is
+/// reported with `PAR_EL1.PTW` from EL2, and taken to EL2 from EL1.
+#[test]
+fn at_translates_through_both_stages() {
+    const AT_S12E1R: u32 = 0xD50C_7880; // at s12e1r, x0
+    const AT_S12E1W: u32 = 0xD50C_78A0; // at s12e1w, x0
+    const AT_S1E1R: u32 = 0xD508_7800; // at s1e1r, x0
+    const SCTLR_C: u64 = 1 << 2;
+    const PAR_F: u64 = 1;
+    const PAR_PTW: u64 = 1 << 8;
+    const PAR_S: u64 = 1 << 9;
+    const NS: u64 = 1 << 9;
+    const RES1: u64 = 1 << 11;
+    let par = |attr: u64, pa: u64, sh: u64| (attr << 56) | pa | NS | (sh << 7) | RES1;
+    let fault = |fst: u64, stage: u64| RES1 | stage | (fst << 1) | PAR_F;
+    let mut m = stage2();
+    m.cpu.sys.sctlr_el1 |= SCTLR_C;
+    let at = |m: &mut Machine<WithEl2>, insn: u32, va: u64| {
+        m.at(El::El2);
+        m.cpu.x[0] = va;
+        assert_eq!(m.run(insn), None, "{insn:#010x} {va:#x}");
+        m.cpu.sys.par_el1
+    };
+    assert_eq!(
+        at(&mut m, AT_S12E1R, SHARED + 0x123),
+        par(0xFF, GUEST_DATA, 0b11)
+    );
+    assert_eq!(
+        at(&mut m, AT_S1E1R, SHARED + 0x123),
+        par(0xFF, EL1_DATA, 0b11),
+        "the IPA"
+    );
+    assert_eq!(
+        at(&mut m, AT_S12E1R, S2_DEVICE),
+        par(0x04, S2_DEVICE, 0b10),
+        "Device-nGnRE"
+    );
+    assert_eq!(
+        at(&mut m, AT_S12E1W, S2_READ_ONLY),
+        fault(PERMISSION_L2, PAR_S)
+    );
+    assert_eq!(
+        at(&mut m, AT_S12E1R, S2_UNMAPPED),
+        fault(TRANSLATION_L2, PAR_S)
+    );
+    m.hcr(HCR_CD);
+    assert_eq!(
+        at(&mut m, AT_S12E1R, SHARED),
+        par(0x44, GUEST_DATA, 0b10),
+        "HCR_EL2.CD"
+    );
+    m.cpu.el2_state.regs.hcr &= !HCR_CD;
+    m.cpu.sys.sctlr_el1 &= !SCTLR_C;
+    assert_eq!(
+        at(&mut m, AT_S12E1R, SHARED),
+        par(0x44, GUEST_DATA, 0b10),
+        "SCTLR_EL1.C clear"
+    );
+
+    m.ram.put64(EL1_L1 + 8, S2_UNMAPPED | TABLE);
+    assert_eq!(
+        at(&mut m, AT_S1E1R, 1 << 30),
+        fault(TRANSLATION_L2, PAR_S | PAR_PTW)
+    );
+    let before = m.cpu.sys.par_el1;
+    m.at(El::El1);
+    m.cpu.x[0] = 1 << 30;
+    assert_eq!(
+        m.run(AT_S1E1R),
+        stage2_abort(CM | WNR | S1PTW | TRANSLATION_L2)
+    );
+    assert_eq!(m.cpu.sys.par_el1, before, "PAR_EL1 left as it was");
+    assert_eq!(m.cpu.el2().hpfar, fipa(S2_UNMAPPED));
+}
+
+/// The stage 2 configurations `AArch64_S2Translate` refuses each take a
+/// level 0 Translation fault, reporting the IPA: `T0SZ` below 64 - PAMax
+/// (20) or above 39 (the IMPLEMENTATION DEFINED faults, as stage 1's),
+/// `SL0` = 3 without FEAT_TTST, a start level that cannot resolve the
+/// input size (`AArch64_S2InconsistentSL`), and an IPA wider than `T0SZ`
+/// gives.
+#[test]
+fn stage_2_configurations_arm_refuses_take_a_level_0_translation_fault() {
+    const PS_40: u64 = 0b010 << 16;
+    let mut m = stage2();
+    m.cpu.sys.sctlr_el1 &= !1;
+    let features = m.cpu.imp.features;
+    for vtcr in [
+        19 | (2 << 6) | PS_40,
+        40 | (2 << 6) | PS_40,
+        25 | (3 << 6) | PS_40,
+        25 | (2 << 6) | PS_40,
+        34 | (1 << 6) | PS_40,
+    ] {
+        m.cpu.el2_state.regs.write(El2Reg::Vtcr, features, 0, vtcr);
+        m.cpu.flush_tlb();
+        m.cpu.el2_state.regs.hpfar = HPFAR_UNTOUCHED;
+        m.at(El::El1);
+        assert_eq!(
+            m.run(NOP),
+            sync(
+                El::El2,
+                LOWER_A64,
+                EC_INSTRUCTION_ABORT_LOWER_EL,
+                TRANSLATION_L0
+            ),
+            "VTCR_EL2 {vtcr:#x}: the fetch's"
+        );
+        assert_eq!(m.cpu.el2().hpfar, fipa(CODE), "VTCR_EL2 {vtcr:#x}");
+    }
+
+    // A 30-bit IPA space from level 2, at `S2_L2`; the data at 1 GiB.
+    m.cpu
+        .el2_state
+        .regs
+        .write(El2Reg::Vtcr, features, 0, 34 | PS_40);
+    m.cpu.el2_state.regs.vttbr = S2_L2;
+    m.cpu.flush_tlb();
+    m.at(El::El1);
+    m.cpu.x[1] = 1 << 30;
+    assert_eq!(
+        m.run(LDR),
+        stage2_abort(ISV | sas(3) | srt(2) | SF | TRANSLATION_L0)
+    );
+    assert_eq!(m.cpu.el2().hpfar, fipa(1 << 30));
+}
+
+/// With a 40-bit IPA from level 1, the start level is two concatenated
+/// tables, the second translating IPAs from 512 GiB; `VTTBR_EL2.BADDR`'s
+/// bits below the tables' alignment are ignored (`AArch64_S2TTBaseAddress`).
+#[test]
+fn stage_2_starts_in_concatenated_tables() {
+    const CONCATENATED: u64 = 0x1_6000;
+    const HIGH: u64 = 1 << 39;
+    let mut m = stage2();
+    let block = AF | INNER_SHAREABLE | S2AP_R | S2AP_W | S2_NORMAL | BLOCK;
+    m.ram.put64(CONCATENATED, block);
+    m.ram.put64(CONCATENATED + 0x1000, block);
+    let features = m.cpu.imp.features;
+    m.cpu
+        .el2_state
+        .regs
+        .write(El2Reg::Vtcr, features, 0, 24 | (1 << 6) | (0b010 << 16));
+    m.cpu.sys.sctlr_el1 &= !1;
+    for vttbr in [CONCATENATED, CONCATENATED + 0x1000] {
+        m.cpu.el2_state.regs.vttbr = vttbr;
+        m.cpu.flush_tlb();
+        m.at(El::El1);
+        m.cpu.x[1] = HIGH + EL1_DATA;
+        assert_eq!(m.run(LDR), None, "VTTBR_EL2 {vttbr:#x}");
+        assert_eq!(m.cpu.x[2], 0x1111, "VTTBR_EL2 {vttbr:#x}");
+    }
+}
+
+/// A debugger's walk goes through both stages, reporting the stage of a
+/// fault, and checks none of the access's permissions.
+#[test]
+fn a_debugger_walks_both_stages() {
+    let mut m = stage2();
+    m.at(El::El1);
+    let walk = |m: &mut Machine<WithEl2>, va: u64| m.cpu.debug_translate(&mut m.ram, va);
+    assert_eq!(walk(&mut m, SHARED + 8), Ok(GUEST_DATA + 8));
+    assert_eq!(walk(&mut m, S2_READ_ONLY), Ok(S2_READ_ONLY));
+    let level2 = TranslationFault::Translation { level: 2 };
+    assert_eq!(
+        walk(&mut m, S2_UNMAPPED),
+        Err(NoTranslation {
+            stage: TranslationStage::Two {
+                ipa: Ipa::new(S2_UNMAPPED)
+            },
+            fault: level2,
+        })
+    );
+    m.ram.put64(EL1_L1 + 8, S2_UNMAPPED | TABLE);
+    assert_eq!(
+        walk(&mut m, 1 << 30),
+        Err(NoTranslation {
+            stage: TranslationStage::TwoOnWalk {
+                ipa: Ipa::new(S2_UNMAPPED)
+            },
+            fault: level2,
+        })
+    );
+}
+
+/// Cache maintenance by address needs at stage 2 what it needs at stage 1:
+/// `DC IVAC` write permission, a clean at EL1 none; its faults are taken
+/// to EL2 with `CM` and `WnR`.
+#[test]
+fn cache_maintenance_meets_stage_2s_permissions() {
+    const DC_IVAC: u32 = 0xD508_7621; // dc ivac, x1
+    const DC_CVAC: u32 = 0xD50B_7A21; // dc cvac, x1
+    let mut m = stage2();
+    m.at(El::El1);
+    m.cpu.x[1] = S2_READ_ONLY;
+    assert_eq!(m.run(DC_CVAC), None);
+    assert_eq!(m.run(DC_IVAC), stage2_abort(CM | WNR | PERMISSION_L2));
+    m.at(El::El1);
+    m.cpu.x[1] = S2_UNMAPPED;
+    assert_eq!(m.run(DC_CVAC), stage2_abort(CM | WNR | TRANSLATION_L2));
+    assert_eq!(m.cpu.el2().hpfar, fipa(S2_UNMAPPED));
+}
+
+/// The TLB holds both stages' translation: after stage 2's table changes,
+/// `TLBI VMALLS12E1` from EL2 makes the change seen. A snapshot keeps such
+/// an entry, and refuses one no stage 2 walk makes.
+#[test]
+fn the_tlb_holds_both_stages() {
+    let mut m = stage2();
+    m.at(El::El1);
+    m.cpu.x[1] = S2_READ_ONLY;
+    assert_eq!(m.run(LDR), None);
+
+    let saved = m.saved_tlb();
+    let image = saved.0.clone();
+    let context = m.tlb_context();
+    let restore = |context: TlbContext, image: &[u8]| restored::<WithEl2>(&context, image);
+    assert_eq!(restore(context, &image), Ok(image.clone()));
+    let (place, context_at) = saved.contexts()[0];
+    assert_eq!(
+        (place, saved.current()),
+        (0, 1),
+        "the guest's context, current"
+    );
+    let data = saved.entry_at(S2_READ_ONLY);
+    // Stage 2's permissions byte: read at EL1 but not at EL0 is no stage 2
+    // descriptor's.
+    let mut odd = image.clone();
+    odd[data + ENTRY_S2_PERMS] = 1;
+    assert_eq!(restore(context, &odd), Err(NOT_WALKED));
+    let without = TlbContext {
+        features: Implementation::CORTEX_A57.with_levels::<NoEl2>().features,
+        ..context
+    };
+    assert_eq!(
+        restored::<NoEl2>(&without, &image),
+        Err(SnapError::Invalid(
+            "TLB holds a context no processor of its features makes"
+        )),
+        "a stage 2 context on a processor without EL2"
+    );
+    let elsewhere = TlbContext {
+        el10: El10Context {
+            vttbr_el2: context.el10.vttbr_el2 ^ (1 << 48),
+            ..context.el10
+        },
+        ..context
+    };
+    assert_eq!(
+        restore(elsewhere, &image),
+        Err(SnapError::Invalid(
+            "TLB's current context is not the registers'"
+        ))
+    );
+    // The context, its stage 2 turned off: its entries and kept
+    // translations are none its walks make. (Its current tag is cleared,
+    // the registers no longer its, and stage 2's registers, which a
+    // context without stage 2 does not hold.)
+    let mut stage_2_off = image.clone();
+    stage_2_off[context_at + CONTEXT_HCR] &= !(HCR_VM as u8);
+    stage_2_off[context_at + CONTEXT_VTTBR..context_at + CONTEXT_VTCR + 8].fill(0);
+    stage_2_off[saved.current_at()] = 0;
+    let mut unheld = stage_2_off.clone();
+    unheld[context_at + CONTEXT_VTCR] = 1;
+    assert_eq!(
+        restore(context, &unheld),
+        Err(SnapError::Invalid(
+            "TLB holds a context no processor of its features makes"
+        )),
+        "a context without stage 2 holding a VTCR_EL2"
+    );
+    assert_eq!(
+        restore(context, &stage_2_off),
+        Err(NOT_WALKED),
+        "a stage 2 entry where stage 2 translates nothing"
+    );
+
+    // With stage 2 off in the registers, no stage 2 context is current.
+    let mut el10_unfound = image.clone();
+    el10_unfound[saved.current_at()] = 0;
+    let stage_2_off_now = TlbContext {
+        el10: El10Context {
+            hcr_el2: context.el10.hcr_el2 & !HCR_VM,
+            ..context.el10
+        }
+        .normalized(),
+        ..context
+    };
+    assert_eq!(
+        restore(stage_2_off_now, &el10_unfound),
+        Err(SnapError::Invalid(
+            "TLB's current context is not the registers'"
+        )),
+        "a stage 2 context current where stage 2 translates nothing"
+    );
+
+    // The stage 2 translations kept apart from the entries, which the walks
+    // of the fetch and the load made, each in stage 2's context alone
+    // (`VTTBR_EL2` and `VTCR_EL2`): restored whatever the EL1&0 contexts,
+    // and refused where the table of stage 2 contexts does not hold theirs
+    // or where no walk makes one.
+    let without_entries = |image: &[u8]| {
+        let mut kept_only = image[..saved.entries_at()].to_vec();
+        kept_only.extend_from_slice(&0u32.to_le_bytes());
+        kept_only.extend_from_slice(&image[saved.kept_at()..]);
+        kept_only
+    };
+    let kept_only = without_entries(&image);
+    assert_ne!(saved.kept(), 0, "the walks kept IPAs");
+    assert_eq!(
+        image.len(),
+        saved.kept_at() + 4 + saved.kept() * KEPT_BYTES,
+        "the kept translations end the image"
+    );
+    assert_eq!(restore(context, &kept_only), Ok(kept_only.clone()));
+    let stage2 = saved.stage2();
+    let (s2_place, s2_at) = stage2.held[0];
+    assert_eq!(stage2.held.len(), 1);
+    assert_eq!(
+        (s2_place, image[stage2.current_at()]),
+        (0, 1),
+        "the guest's stage 2 context, current"
+    );
+    assert_eq!(
+        (saved.u64_at(s2_at), saved.u64_at(s2_at + 8)),
+        (context.el10.vttbr_el2, context.el10.vtcr_el2)
+    );
+    // The table without it, its place empty and none current.
+    let mut unheld_stage2 = kept_only[..s2_at - 1].to_vec();
+    unheld_stage2.push(0);
+    unheld_stage2.extend_from_slice(&kept_only[s2_at + STAGE2_CONTEXT_BYTES..]);
+    unheld_stage2[stage2.current_at() - STAGE2_CONTEXT_BYTES] = 0;
+    assert_eq!(restore(context, &unheld_stage2), Err(NO_CONTEXT));
+    let mut asymmetric = kept_only.clone();
+    // The first kept translation's permissions byte, after its IPA and PA.
+    asymmetric[saved.entries_at() + 4 + 4 + 16] = 1;
+    assert_eq!(restore(context, &asymmetric), Err(NOT_WALKED));
+
+    m.ram.put64(
+        S2_L2 + 8 * (S2_READ_ONLY >> 21),
+        S2_READ_ONLY | AF | INNER_SHAREABLE | S2AP_R | S2AP_W | S2_NORMAL | BLOCK,
+    );
+    m.at(El::El2);
+    assert_eq!(m.run(TLBI_VMALLS12E1), None);
+    m.at(El::El1);
+    m.cpu.x[2] = 0x5555;
+    assert_eq!(m.run(STR), None);
+    assert_eq!(m.ram.get64(S2_READ_ONLY), 0x5555);
+}
+
+/// After stage 2's table changes, `TLBI VMALLS12E1` makes the change seen
+/// by every virtual address stage 1 maps to the IPA, not only by the one
+/// that reached it before: a second address reaching `EL1_DATA`'s IPA
+/// finds the new output.
+#[test]
+fn tlbi_vmalls12e1_reaches_every_address_of_a_changed_ipa() {
+    let mut m = stage2();
+    m.ram.put64(
+        EL1_L2 + 8 * (EL1_DATA >> 21),
+        EL1_DATA | AF | INNER_SHAREABLE | BLOCK,
+    );
+    m.at(El::El1);
+    m.cpu.x[1] = SHARED;
+    assert_eq!(m.run(LDR), None);
+    assert_eq!(m.cpu.x[2], 0x3333, "EL1_DATA's IPA is GUEST_DATA");
+
+    m.ram.put64(
+        S2_L2 + 8 * (EL1_DATA >> 21),
+        EL1_DATA | AF | INNER_SHAREABLE | S2AP_R | S2AP_W | S2_NORMAL | BLOCK,
+    );
+    m.at(El::El2);
+    assert_eq!(m.run(TLBI_VMALLS12E1), None);
+    m.at(El::El1);
+    m.cpu.x[1] = EL1_DATA;
+    assert_eq!(m.run(LDR), None);
+    assert_eq!(m.cpu.x[2], 0x1111, "EL1_DATA's IPA is now itself");
+}
+
+/// With stage 1 of the EL1&0 regime off, the TLB holds stage 2's
+/// translation of each address alone, and its permissions refuse a hit as
+/// a walk's do. A snapshot keeps such an entry where stage 1 is off, and
+/// refuses it where stage 1 would have walked.
+#[test]
+fn an_entry_without_stage_1_holds_stage_2s_permissions() {
+    let mut m = stage2();
+    m.cpu.sys.sctlr_el1 &= !1;
+    m.at(El::El1);
+    m.cpu.x[1] = S2_READ_ONLY;
+    assert_eq!(
+        m.run(LDR),
+        None,
+        "the read is permitted, and caches the page"
+    );
+    let refused = stage2_abort(ISV | sas(3) | srt(2) | SF | WNR | PERMISSION_L2);
+    m.at(El::El1);
+    assert_eq!(m.run(STR), refused, "the write, from the TLB");
+
+    let saved = m.saved_tlb();
+    let image = saved.0.clone();
+    let context = m.tlb_context();
+    let restore = |context: TlbContext, image: &[u8]| restored::<WithEl2>(&context, image);
+    let data = saved.entry_at(S2_READ_ONLY);
+    assert_eq!(image[data + ENTRY_STAGE1], 1, "stage 1 disabled");
+    assert_eq!(restore(context, &image), Ok(image.clone()));
+    // The context, its stage 1 turned on (its current tag cleared, the
+    // registers no longer its).
+    let (_, context_at) = saved.contexts()[0];
+    let mut stage_1_on = image.clone();
+    stage_1_on[context_at + CONTEXT_SCTLR] |= 1;
+    stage_1_on[saved.current_at()] = 0;
+    assert_eq!(restore(context, &stage_1_on), Err(NOT_WALKED));
+}
+
+/// A hypervisor's switch from a guest to its own EL1&0 regime and back —
+/// `HCR_EL2.VM` cleared and set again, `VTTBR_EL2` its own (VMID 0, no
+/// tables) and the guest's again, `VTCR_EL2` another guest's or the
+/// guest's again — keeps both sides' translations: with `SHARED`'s stage 1
+/// descriptor rewritten and no TLB maintenance, which leaves a TLB free to
+/// go on using what it holds, each side still reads its own memory there
+/// after every switch, until `TLBI VMALLS12E1` makes the guest see the
+/// change. Stage 2's registers, which the hypervisor's own translations do
+/// not read, never cost it its translation.
+#[test]
+fn a_world_switch_keeps_both_sides_translations() {
+    const MSR_VTCR_EL2: u32 = 0xD51C_2140; // msr vtcr_el2, x0
+    let mut m = stage2();
+    let (guest_vttbr, guest_hcr) = (m.cpu.el2().vttbr, m.cpu.el2().hcr);
+    let guest_vtcr = m.cpu.el2().vtcr;
+    m.ram.put64(S2_READ_ONLY, 0x7777);
+    let switch = |m: &mut Machine<WithEl2>, to_guest: bool, round: u64| {
+        m.at(El::El2);
+        m.cpu.x[0] = if to_guest { guest_vttbr } else { 0 };
+        assert_eq!(m.run(MSR_VTTBR_EL2), None);
+        // Another guest's T0SZ on the hypervisor's side, each round.
+        m.cpu.x[0] = if to_guest {
+            guest_vtcr
+        } else {
+            (guest_vtcr & !0x3F) | (26 + round)
+        };
+        assert_eq!(m.run(MSR_VTCR_EL2), None);
+        m.cpu.x[0] = if to_guest {
+            guest_hcr
+        } else {
+            guest_hcr & !HCR_VM
+        };
+        assert_eq!(m.run(MSR_HCR_EL2), None);
+        m.at(El::El1);
+        m.cpu.x[1] = SHARED;
+        assert_eq!(m.run(LDR), None);
+        m.cpu.x[2]
+    };
+    assert_eq!(switch(&mut m, true, 0), 0x3333, "the guest");
+    assert_eq!(switch(&mut m, false, 0), 0x1111, "the hypervisor");
+    // `SHARED` now maps `S2_READ_ONLY`'s address on both sides, which a walk
+    // of either would read.
+    m.ram.put64(
+        EL1_L2 + 8 * (SHARED >> 21),
+        S2_READ_ONLY | AF | INNER_SHAREABLE | BLOCK,
+    );
+    for round in 1..4 {
+        assert_eq!(
+            switch(&mut m, true, round),
+            0x3333,
+            "the guest, round {round}"
+        );
+        assert_eq!(
+            switch(&mut m, false, round),
+            0x1111,
+            "the hypervisor, round {round}"
+        );
+    }
+    assert_eq!(
+        switch(&mut m, true, 4),
+        0x3333,
+        "the guest, before the TLBI"
+    );
+    m.at(El::El2);
+    assert_eq!(m.run(TLBI_VMALLS12E1), None);
+    m.at(El::El1);
+    assert_eq!(m.run(LDR), None);
+    assert_eq!(m.cpu.x[2], 0x7777, "the guest, after it");
+}
+
+/// The EL1&0 regime's translations carry the VMID even with stage 2
+/// disabled (Arm `AArch64_TLBContextEL10`: `tlbcontext.vmid = VMID()`
+/// whenever EL2 is enabled): with `SHARED`'s stage 1 descriptor rewritten
+/// and no TLB maintenance, another VMID in `VTTBR_EL2` walks the tables
+/// afresh and sees the change, and the first VMID, back, still finds the
+/// translation it had.
+#[test]
+fn el1_translations_carry_the_vmid_without_stage_2() {
+    let mut m = translating();
+    let base = m.cpu.el2().vttbr;
+    let in_vm = |m: &mut Machine<WithEl2>, vmid: u64| {
+        m.at(El::El2);
+        m.cpu.x[0] = base | (vmid << 48);
+        assert_eq!(m.run(MSR_VTTBR_EL2), None);
+        m.at(El::El1);
+        m.cpu.x[1] = SHARED;
+        assert_eq!(m.run(LDR), None, "VMID {vmid}");
+        m.cpu.x[2]
+    };
+    m.ram.put64(READ_ONLY, 0x7777);
+    assert_eq!(in_vm(&mut m, 0), 0x1111, "SHARED's EL1 data");
+    m.ram.put64(
+        EL1_L2 + 8 * (SHARED >> 21),
+        READ_ONLY | AF | INNER_SHAREABLE | BLOCK,
+    );
+    assert_eq!(in_vm(&mut m, 1), 0x7777, "another VMID walks again");
+    assert_eq!(
+        in_vm(&mut m, 0),
+        0x1111,
+        "the first VMID's translation, kept"
+    );
+}
+
+/// An entry stage 2 takes no part in holds none of stage 2's leaf, so a
+/// snapshot giving one stage 2's permissions, Device memory or a level is
+/// refused: `SHARED`'s EL1 entry, made with stage 2 disabled, restores as
+/// saved and with any of those bytes changed is no entry a walk makes.
+#[test]
+fn a_snapshot_entry_without_stage_2_holds_no_stage_2_leaf() {
+    let mut m = translating();
+    m.at(El::El1);
+    m.cpu.x[1] = SHARED;
+    assert_eq!(m.run(LDR), None);
+    let saved = m.saved_tlb();
+    let image = saved.0.clone();
+    let context = m.tlb_context();
+    assert_eq!(restored::<WithEl2>(&context, &image), Ok(image.clone()));
+    let data = saved.entry_at(SHARED);
+    for (at, value) in [
+        (ENTRY_S2_PERMS, 0),
+        (ENTRY_S2_DEVICE, 1),
+        (ENTRY_S2_LEVEL, 3),
+    ] {
+        let mut odd = image.clone();
+        odd[data + at] = value;
+        assert_eq!(
+            restored::<WithEl2>(&context, &odd),
+            Err(NOT_WALKED),
+            "byte {at} of the entry"
+        );
+    }
+}
+
+/// A guest's switch between its processes — `TTBR0_EL1` written with
+/// another ASID, its tables the same — keeps stage 2's translations, which
+/// depend on `VTTBR_EL2` and `VTCR_EL2` alone (Arm tags them with the VMID,
+/// not the ASID): with stage 2's descriptor of `EL1_DATA`'s IPA rewritten
+/// and no TLB maintenance, the new process's walk of `SHARED` still reaches
+/// `GUEST_DATA`, until `TLBI VMALLS12E1` makes the change seen.
+#[test]
+fn a_guest_process_switch_keeps_stage_2s_translations() {
+    const MSR_TTBR0_EL1: u32 = 0xD518_2000; // msr ttbr0_el1, x0
+    let mut m = stage2();
+    m.ram.put64(S2_READ_ONLY, 0x7777);
+    m.at(El::El1);
+    m.cpu.x[1] = SHARED;
+    assert_eq!(m.run(LDR), None);
+    assert_eq!(m.cpu.x[2], 0x3333, "EL1_DATA's IPA is GUEST_DATA");
+    m.ram.put64(
+        S2_L2 + 8 * (EL1_DATA >> 21),
+        S2_READ_ONLY | AF | INNER_SHAREABLE | S2AP_R | S2AP_W | S2_NORMAL | BLOCK,
+    );
+    for asid in 1..4u64 {
+        m.at(El::El1);
+        m.cpu.x[0] = (m.cpu.sys.ttbr0_el1 & !(0xFFFF << 48)) | (asid << 48);
+        assert_eq!(m.run(MSR_TTBR0_EL1), None);
+        m.at(El::El1);
+        assert_eq!(m.run(LDR), None);
+        assert_eq!(
+            m.cpu.x[2], 0x3333,
+            "ASID {asid}: the kept stage 2 translation"
+        );
+    }
+    m.at(El::El2);
+    assert_eq!(m.run(TLBI_VMALLS12E1), None);
+    m.at(El::El1);
+    assert_eq!(m.run(LDR), None);
+    assert_eq!(m.cpu.x[2], 0x7777, "EL1_DATA's IPA is now S2_READ_ONLY");
+}
+
+/// Translation tables in the first pages of 2 MiB blocks, as a guest's
+/// tables often lie, each keep their stage 2 translation: four of the
+/// guest's level 2 tables at the starts of four IPA blocks, read once, are
+/// read again after a process switch through what stage 2 gave the first
+/// time, with stage 2's descriptors of all four blocks made invalid and no
+/// TLB maintenance, until `TLBI VMALLS12E1` makes the change seen.
+#[test]
+fn tables_at_the_starts_of_blocks_each_keep_their_stage_2_translation() {
+    const MSR_TTBR0_EL1: u32 = 0xD518_2000; // msr ttbr0_el1, x0
+    const TABLES: [u64; 4] = [SHARED, S2_UNMAPPED, S2_READ_ONLY, S2_NO_EXECUTE];
+    let mut m = stage2();
+    m.ram.put64(
+        S2_L2 + 8 * (S2_UNMAPPED >> 21),
+        S2_UNMAPPED | AF | INNER_SHAREABLE | S2AP_R | S2AP_W | S2_NORMAL | BLOCK,
+    );
+    // The `k`th table maps the sixth 2 MiB block of the `k`th GiB.
+    let va = |k: u64| (k << 30) | (5 << 21);
+    for (k, table) in (1..).zip(TABLES) {
+        m.ram.put64(EL1_L1 + 8 * k, table | TABLE);
+        m.ram
+            .put64(table + 8 * 5, EL1_DATA | AF | INNER_SHAREABLE | BLOCK);
+    }
+    let load_all = |m: &mut Machine<WithEl2>, when: &str| {
+        for k in 1..=4 {
+            m.at(El::El1);
+            m.cpu.x[1] = va(k);
+            assert_eq!(m.run(LDR), None, "table {k}, {when}");
+            assert_eq!(m.cpu.x[2], 0x3333, "table {k}, {when}");
+        }
+    };
+    load_all(&mut m, "first read");
+    for table in TABLES {
+        m.ram.put64(S2_L2 + 8 * (table >> 21), 0);
+    }
+    m.at(El::El1);
+    m.cpu.x[0] = (m.cpu.sys.ttbr0_el1 & !(0xFFFF << 48)) | (1 << 48);
+    assert_eq!(m.run(MSR_TTBR0_EL1), None);
+    load_all(&mut m, "another process, the kept stage 2 translations");
+    m.at(El::El2);
+    assert_eq!(m.run(TLBI_VMALLS12E1), None);
+    m.at(El::El1);
+    m.cpu.x[1] = va(1);
+    assert_eq!(
+        m.run(LDR),
+        stage2_abort(S1PTW | TRANSLATION_L2),
+        "after the TLBI, stage 2 maps the table's block no more"
+    );
+}
+
+/// The TLB keeps the entries of at most fifteen contexts: a sixteenth takes
+/// the place of the one found least recently, whose entries are emptied,
+/// while one found again since it was made keeps its place; translations
+/// in every context, the one replaced included, stay right.
+#[test]
+fn a_sixteenth_context_takes_the_least_recently_found_ones_place() {
+    let mut m = stage2();
+    let base = m.cpu.el2().vttbr;
+    let in_vm = |m: &mut Machine<WithEl2>, vmid: u64, va: u64| {
+        m.at(El::El2);
+        m.cpu.x[0] = base | (vmid << 48);
+        assert_eq!(m.run(MSR_VTTBR_EL2), None);
+        m.at(El::El1);
+        m.cpu.x[1] = va;
+        assert_eq!(m.run(LDR), None, "VMID {vmid}");
+    };
+    // A page each of the first two VMIDs alone reads, whose page numbers'
+    // low bits no other entry's share, so that no other context's entry
+    // takes its slot: the code and SHARED pages are at multiples of 64.
+    let (vmid0_page, vmid1_page) = (S2_READ_ONLY + 0x5000, S2_NO_EXECUTE + 0x7000);
+    in_vm(&mut m, 0, vmid0_page);
+    in_vm(&mut m, 1, vmid1_page);
+    for vmid in 2..15 {
+        in_vm(&mut m, vmid, SHARED);
+        assert_eq!(m.cpu.x[2], 0x3333, "VMID {vmid}");
+    }
+    let saved = m.saved_tlb();
+    assert!(saved.has_entry(vmid0_page) && saved.has_entry(vmid1_page));
+    in_vm(&mut m, 0, SHARED);
+    assert_eq!(
+        m.saved_tlb().current(),
+        1,
+        "VMID 0 found again, in its place"
+    );
+    in_vm(&mut m, 15, SHARED);
+    let saved = m.saved_tlb();
+    assert_eq!(saved.contexts().len(), 15);
+    assert_eq!(saved.current(), 2, "the sixteenth, in VMID 1's place");
+    assert_eq!(
+        (saved.generation(0), saved.generation(1)),
+        (0, 1),
+        "VMID 1's place in its next generation"
+    );
+    assert!(saved.has_entry(vmid0_page), "VMID 0's entries stay");
+    assert!(
+        !saved.has_entry(vmid1_page),
+        "VMID 1's, of the place's last generation, match no more"
+    );
+    assert_eq!(
+        restored::<WithEl2>(&m.tlb_context(), &saved.0),
+        Ok(saved.0.clone())
+    );
+    in_vm(&mut m, 1, SHARED);
+    assert_eq!(m.cpu.x[2], 0x3333, "VMID 1 again, in a place of its own");
+    assert_eq!(m.saved_tlb().current(), 3, "VMID 2's, the least recent now");
+}
+
+/// A place's generation counts to 127 and then starts again from 0, when
+/// the entries made in the place, of every generation, are emptied: none
+/// made 128 generations before matches the context that then has it — of
+/// the table of EL1&0 contexts and, each VMID a stage 2 context too, of
+/// the table of stage 2 contexts.
+#[test]
+fn a_places_generation_starts_again_with_its_entries_emptied() {
+    let mut m = stage2();
+    let base = m.cpu.el2().vttbr;
+    let in_vm = |m: &mut Machine<WithEl2>, vmid: u64, va: u64| {
+        m.at(El::El2);
+        m.cpu.x[0] = base | (vmid << 48);
+        assert_eq!(m.run(MSR_VTTBR_EL2), None);
+        m.at(El::El1);
+        m.cpu.x[1] = va;
+        assert_eq!(m.run(LDR), None, "VMID {vmid}");
+    };
+    // A page no other context reads, whose slot no other entry takes, nor
+    // its kept stage 2 translation's slot another kept translation: every
+    // other context's are those of the code, `SHARED`'s IPA and the two
+    // tables' pages, each turned by its place.
+    let first_page = S2_READ_ONLY + 0x25000;
+    in_vm(&mut m, 0, first_page);
+    let saved = m.saved_tlb();
+    assert_eq!(saved.generation(0), 0);
+    assert!(
+        saved.kept_pages().contains(&(first_page >> 12)),
+        "its IPA's stage 2 translation, kept"
+    );
+    let mut seen_last = false;
+    for new in 1u64.. {
+        // Every VMID new to the table, each taking the least recent place.
+        in_vm(&mut m, new % 255 + 1, SHARED);
+        let saved = m.saved_tlb();
+        match saved.generation(0) {
+            0 if seen_last => {
+                assert!(
+                    !saved.has_entry(first_page),
+                    "the first context's entry, of generation 0 too, is gone"
+                );
+                assert!(
+                    !saved.kept_pages().contains(&(first_page >> 12)),
+                    "and so is its stage 2 translation"
+                );
+                return;
+            }
+            127 => seen_last = true,
+            _ => {}
+        }
+        assert!(new < 15 * 129, "place 0 is taken every 15 new contexts");
+    }
+}
+
+/// FEAT_E0PD is stage 1's walk's: with stage 1 disabled under stage 2, an
+/// EL0 access in a half `TCR_EL1.E0PD0` refuses EL0 meets none of it. An
+/// aligned load is permitted and cached; a misaligned one to the
+/// Device-nGnRnE memory stage 1 then leaves takes stage 1's alignment
+/// fault, from the TLB as from a walk, not E0PD's level 0 Translation
+/// fault.
+#[test]
+fn e0pd_does_not_reach_an_access_stage_1_leaves_alone() {
+    const TCR_E0PD0: u64 = 1 << 55;
+    let mut m = stage2_on(Implementation::EVERY_FEATURE);
+    m.cpu.sys.sctlr_el1 &= !1;
+    m.cpu.sys.tcr_el1 |= TCR_E0PD0;
+    m.cpu.flush_tlb();
+    m.at(El::El0);
+    m.cpu.x[1] = SHARED;
+    assert_eq!(m.run(LDR), None, "an aligned load, permitted");
+    assert!(m.saved_tlb().has_entry(SHARED), "and cached");
+    let misaligned = sync(El::El1, LOWER_A64, EC_DATA_ABORT_LOWER_EL, ALIGNMENT_FAULT);
+    for from in ["the TLB", "a walk"] {
+        m.at(El::El0);
+        m.cpu.x[1] = SHARED + 1;
+        assert_eq!(m.run(LDR), misaligned, "from {from}");
+        m.cpu.flush_tlb();
+    }
+}
+
+/// Only the access of a load or store of one general-purpose register
+/// leaves its stage 2 abort room for an instruction syndrome: offered one
+/// later, the abort of any other access reports none (`ISV` 0).
+#[test]
+fn only_a_single_register_access_takes_an_instruction_syndrome() {
+    let mut m = stage2();
+    m.at(El::El1);
+    let syndrome = AccessSyndrome::load(3, Extend::Zero, 2);
+    for (acc, reported) in [
+        (DataAccess::NORMAL, false),
+        (DataAccess::NORMAL.of_one_register(), true),
+    ] {
+        let Err(fault) = m.cpu.read_mem(&mut m.ram, S2_UNMAPPED, 3, acc) else {
+            panic!("stage 2 maps nothing at S2_UNMAPPED");
+        };
+        let Fault::Exception(e) = fault.reporting(Some(syndrome)) else {
+            panic!("a stage 2 abort, not a stop");
+        };
+        assert_eq!(u64::from(e.iss) & ISV != 0, reported, "{acc:?}");
+    }
+}
+
+/// A host's write of a translation register empties the TLB whatever the
+/// value, as `VirtMachine::sysreg_write` promises: rewriting `TTBR0_EL1`
+/// with its own value after changing a table makes the change seen, where
+/// a guest's `MSR` of the same value would leave the TLB's entries in use.
+#[test]
+fn a_host_translation_register_write_empties_the_tlb() {
+    let mut m = stage2();
+    m.at(El::El1);
+    m.cpu.x[1] = SHARED;
+    assert_eq!(m.run(LDR), None);
+    assert_eq!(m.cpu.x[2], 0x3333);
+    m.ram
+        .put64(EL1_L2 + 8, S2_READ_ONLY | AF | INNER_SHAREABLE | BLOCK);
+    m.ram.put64(S2_READ_ONLY, 0x7777);
+    let ttbr0 = m.cpu.sys.ttbr0_el1;
+    assert!(m.cpu.host_sysreg_write(SysReg::TTBR0_EL1, ttbr0).is_ok());
+    m.at(El::El1);
+    assert_eq!(m.run(LDR), None);
+    assert_eq!(m.cpu.x[2], 0x7777, "SHARED by the changed table");
+}
+
+/// A register value no translation reads makes no context of its own: with
+/// `SHARED`'s stage 1 descriptor rewritten and no TLB maintenance, an
+/// `SCTLR_EL1` bit the access reads, not the walk (`UCI`), leaves the
+/// regime in the context it was in, its translation still in use; a
+/// `MAIR_EL1` attribute no descriptor names, which a walk reads, makes a
+/// context whose walk sees the change.
+#[test]
+fn a_value_no_translation_reads_makes_no_new_context() {
+    const MSR_SCTLR_EL1: u32 = 0xD518_1000; // msr sctlr_el1, x0
+    const MSR_MAIR_EL1: u32 = 0xD518_A200; // msr mair_el1, x0
+    let mut m = stage2();
+    m.ram.put64(S2_READ_ONLY, 0x7777);
+    m.at(El::El1);
+    m.cpu.x[1] = SHARED;
+    assert_eq!(m.run(LDR), None);
+    assert_eq!(m.cpu.x[2], 0x3333);
+    m.ram.put64(
+        EL1_L2 + 8 * (SHARED >> 21),
+        S2_READ_ONLY | AF | INNER_SHAREABLE | BLOCK,
+    );
+    m.at(El::El1);
+    m.cpu.x[0] = m.cpu.sys.sctlr_el1 ^ (1 << 26);
+    assert_eq!(m.run(MSR_SCTLR_EL1), None);
+    m.at(El::El1);
+    assert_eq!(m.run(LDR), None);
+    assert_eq!(m.cpu.x[2], 0x3333, "UCI flipped: the translation stays");
+    m.at(El::El1);
+    m.cpu.x[0] = m.cpu.sys.mair_el1 | (0x44 << 56);
+    assert_eq!(m.run(MSR_MAIR_EL1), None);
+    m.at(El::El1);
+    assert_eq!(m.run(LDR), None);
+    assert_eq!(
+        m.cpu.x[2], 0x7777,
+        "MAIR_EL1 changed: the walk is made again"
+    );
 }

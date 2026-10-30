@@ -23,7 +23,7 @@ use rusty_box_core::SnapError;
 mod tests;
 
 use super::el2::CPTR_TSM;
-use super::exception::{Exception, ExceptionClass, Route};
+use super::exception::{Exception, Route, SyndromeClass};
 use super::exec::{bits, ExecResult, Fault, Flow};
 use super::features::{Feature, VecLen};
 use super::state::FPSR_MASK;
@@ -234,7 +234,7 @@ impl<L: Levels> Cpu<L> {
     /// is EL1 or the current level, which `HCR_EL2.TGE` takes from EL0 to
     /// EL2, and [`Route::El2`] for `CPTR_EL2`'s.
     pub(crate) fn sme_trap(&self, kind: SmeTrap, route: Route) -> Fault {
-        Exception::routed(ExceptionClass::SmeAccess, kind.smtc(), route).into()
+        Exception::routed(SyndromeClass::SmeAccess, kind.smtc(), route).into()
     }
 
     /// Where Arm `CheckSMEAccess` traps an access at the current level, if

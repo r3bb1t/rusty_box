@@ -1023,6 +1023,109 @@ is set for either. A translation flag for `SCTLR_ELx.A` alone would.
 `rusty_box_aarch64` makes the four accesses (`src/cpu/mmu.rs`,
 `Cpu::read_mem_q_pair` and `Cpu::write_mem_q_pair`).
 
+### 26. LDLAR and STLLR report AR = 0 in a stage 2 Data Abort
+
+**Impact**: low. A hypervisor that emulates a device access made with a
+LORegion load-acquire or store-release (FEAT_LOR) reads in `ESR_EL2` that
+the instruction had no acquire or release semantics. KVM does not read
+`AR`; a hypervisor that orders its emulation by it would order these
+accesses wrongly.
+
+**Location**: `target/arm/tcg/a64.decode` decodes LDLAR and STLLR as
+`LDAR` and `STLR` ("inc LDLAR", "inc STLLR") with `lasr` taken from the
+encoding's `o0` bit, which is 0 for them, and
+`target/arm/tcg/translate-a64.c` `trans_LDAR()` and `trans_STLR()` pass
+`a->lasr` as the syndrome's acquire/release bit.
+
+**What the Arm ARM says**: `ldlar.xml` and `stllr.xml` build their access
+with `CreateAccDescLOR()`, LDLAR with `acqsc` TRUE and STLLR with `relsc`
+TRUE (shared pseudocode, `CreateAccDescLOR`); the `ESR_ELx` ISS `AR`
+field, bit 14, is 1 for an "instruction [that] did have acquire/release
+semantics" (`LSInstructionSyndrome()`, bit 0, in `AArch64_FaultSyndrome()`).
+
+**Reproduce**: found by reading the source against the pseudocode; not
+yet run on QEMU.
+
+    Arm:     EL2 with HCR_EL2.VM = 1, EL1 X1 = an IPA stage 2 does not map:
+             ldlar x2, [x1] (0xC8DF7C22) takes a Data Abort to EL2 with
+             ESR_EL2.ISV = 1, SRT = 2, SF = 1, AR = 1
+    QEMU:    the same Data Abort with AR = 0
+
+Found on QEMU 11.1.2; master not checked.
+
+**Fix**: not yet written. `trans_LDAR()` and `trans_STLR()` would pass
+true as the syndrome's acquire/release bit for every form they decode,
+LDAR, STLR, LDLAR and STLLR all having the semantics.
+`rusty_box_aarch64` reports `AR` 1 for them (`src/cpu/ldst.rs`).
+
+### 27. A stage 2 fault past a misaligned access's first byte reports an instruction syndrome
+
+**Impact**: low. A load or store that crosses from a page stage 2 maps
+into one it does not is taken to EL2 with `ISV` = 1, where Arm reports
+`ISV` = 0 and the hypervisor decodes the instruction itself. A hypervisor
+that emulates the access from the syndrome emulates the whole access at
+the faulting address, which `FAR_EL2` and `HPFAR_EL2` give as the second
+page's, though part of it lies in the first.
+
+**Location**: `target/arm/tcg/tlb_helper.c`, `merge_syn_data_abort()`,
+keeps the template syndrome's `ISV` for every stage 2 Data Abort routed
+to EL2 but a stage 1 walk's, whichever byte of the access the fault is
+at; the slow path of a page-crossing access (`accel/tcg/cputlb.c`) faults
+on the second page with the instruction's template.
+
+**What the Arm ARM says**: `Mem[]` makes a misaligned access byte by byte
+and clears `accdesc.lowestaddress` after the first byte (shared
+pseudocode, `Mem`), and `AArch64_InstructionSyndromeValid()` returns
+FALSE first of all for a fault whose `accessdesc.lowestaddress` is FALSE.
+
+**Reproduce**: found by reading the source against the pseudocode; not
+yet run on QEMU.
+
+    Arm:     EL2 with HCR_EL2.VM = 1, stage 2 maps the IPA page P but not
+             P + 0x1000, EL1 X1 = P + 0xFFC:
+             ldr x2, [x1] (0xF9400022) takes a Data Abort to EL2 with
+             ESR_EL2.ISV = 0
+    QEMU:    the same Data Abort with ISV = 1, SAS = 3, SRT = 2, SF = 1
+
+Found on QEMU 11.1.2; master not checked.
+
+**Fix**: not yet written. The fault would carry whether its address is
+the access's lowest, as `ARMMMUFaultInfo` carries `s1ptw`, and
+`merge_syn_data_abort()` would drop the instruction syndrome where it is
+not. `rusty_box_aarch64` reports the syndrome only at the lowest address
+(`src/cpu/mmu.rs`, `SyndromeSlot`).
+
+### 28. PAR_EL1.SH reports the reserved 0b01
+
+**Impact**: very low. An address translation instruction of a page whose
+descriptor holds the reserved `SH` value 0b01 returns `PAR_EL1.SH` 0b01,
+a value Arm's `PAR_EL1` never holds. Only software that writes the
+reserved value and reads it back through `AT` sees it.
+
+**Location**: `target/arm/ptw.c`, `get_phys_addr_lpae()`, takes the
+descriptor's `SH` as `cacheattrs.shareability` as written, and
+`target/arm/tcg/cpregs-at.c` `par_el1_shareability()` returns it for
+Normal cacheable memory.
+
+**What the Arm ARM says**: `DecodeShareability()` takes 0b01 to
+`ConstrainUnpredictable(Unpredictable_Shareability)`, which permits
+Outer Shareable, Inner Shareable or Non-shareable, and
+`PAREncodeShareability()` encodes each of them as 0b10, 0b11 or 0b00.
+
+**Reproduce**: found by reading the source against the pseudocode; not
+yet run on QEMU.
+
+    Arm:     EL1, stage 1 maps X0's page Normal Write-Back (MAIR_EL1
+             attribute 0xFF) with SH = 0b01:
+             at s1e1r, x0 (0xD5087800), then PAR_EL1.SH is 0b00, 0b10 or 0b11
+    QEMU:    PAR_EL1.SH is 0b01
+
+Found on QEMU 11.1.2; master not checked.
+
+**Fix**: not yet written. `get_phys_addr_lpae()` would map 0b01 to one of
+the permitted values. `rusty_box_aarch64` takes Outer Shareable
+(`src/cpu/memattr.rs`, `Shareability::decode`).
+
 ---
 
 ## Deliberate QEMU omissions

@@ -2252,12 +2252,12 @@ mod tests {
                 "SPECRES = 1: FEAT_SPECRES, not FEAT_SPECRES2"
             );
             assert!(field(isar1, 44) <= 1, "BF16 = 1: FEAT_BF16, not FEAT_EBF16");
-            let no_stage_2_granule =
-                at(Feature::El2, 40, 1) | at(Feature::El2, 36, 1) | at(Feature::El2, 32, 1);
+            let stage_2_granules =
+                at(Feature::El2, 40, 2) | at(Feature::El2, 36, 1) | at(Feature::El2, 32, 1);
             assert_eq!(
                 mmfr0 & !(0xF << 60),
-                0x0F00_0024 | no_stage_2_granule,
-                "PARange 44 bits, 16-bit ASIDs, the 4 KiB granule alone, at stage 1 alone"
+                0x0F00_0024 | stage_2_granules,
+                "PARange 44 bits, 16-bit ASIDs, the 4 KiB granule alone, at each stage"
             );
             // `Features.json`: FEAT_GTG holds exactly when each of TGran4_2,
             // TGran16_2 and TGran64_2 is non-zero, so they are all or none.

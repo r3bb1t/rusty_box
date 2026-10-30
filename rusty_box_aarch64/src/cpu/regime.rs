@@ -10,7 +10,7 @@
 //! The walk parameters are gathered here, one place per regime; the walk
 //! itself, the TLB and the access paths are `mmu.rs`'s.
 
-use super::el2::{HCR_DC, HCR_TGE, TCR_EL2_HPD, TCR_EL2_TBI, TCR_EL2_TBID};
+use super::el2::{HCR_DC, HCR_TGE, HCR_VM, TCR_EL2_HPD, TCR_EL2_TBI, TCR_EL2_TBID};
 use super::exec::sext;
 use super::features::{Feature, Features};
 use super::{id, sctlr, Cpu, El, Levels};
@@ -27,6 +27,31 @@ pub(crate) enum Regime {
     /// EL2 (FEAT_EL2, `HCR_EL2.E2H` = 0): `TTBR0_EL2`, one privilege level
     /// and one virtual address range.
     El2 = 1,
+}
+
+/// Arm `AArch64_S1Enabled(Regime_EL10)` with `SCTLR_EL1` `sctlr` and
+/// `HCR_EL2` `hcr` (0 where `EL2Enabled()` is FALSE): `SCTLR_EL1.M`, unless
+/// `HCR_EL2.DC` or `TGE` disables stage 1 whatever it says. The one test
+/// of it, which the processor ([`Cpu::s1_enabled`]) and a TLB context
+/// (`mmu.rs`'s `El10Context`) both make.
+#[inline(always)]
+pub(crate) const fn el10_stage1_enabled(sctlr: u64, hcr: u64) -> bool {
+    sctlr & sctlr::M != 0 && hcr & (HCR_DC | HCR_TGE) == 0
+}
+
+/// Whether stage 2 translates the EL1&0 regime under `HCR_EL2` `hcr`
+/// (`AArch64_S2Translate`'s `walkparams.vm`): `VM` or `DC` set.
+#[inline(always)]
+pub(crate) const fn el10_stage2_enabled(hcr: u64) -> bool {
+    hcr & (HCR_VM | HCR_DC) != 0
+}
+
+/// Whether the EL1&0 regime's data accesses with stage 1 disabled are to
+/// Normal memory under `HCR_EL2` `hcr` (`AArch64_S1DisabledOutput`): `DC`
+/// set.
+#[inline(always)]
+pub(crate) const fn el10_s1_disabled_data_normal(hcr: u64) -> bool {
+    hcr & HCR_DC != 0
 }
 
 impl Regime {
@@ -94,8 +119,7 @@ pub(crate) const fn output_address_bits(encoded: u64) -> u32 {
 // `PAMax`, which `output_address_bits` bounds by, is the size
 // `ID_AA64MMFR0_EL1.PARange` reports, which no feature changes (Arm
 // `AArch64_PAMax`; PARange encodes sizes as `PS` does).
-const _: () =
-    assert!(PS_BITS[(id::id_aa64mmfr0(Features::of(&[])) & 0xF) as usize] == id::PA_BITS);
+const _: () = assert!(PS_BITS[(id::id_aa64mmfr0(Features::of(&[])) & 0xF) as usize] == id::PA_BITS);
 
 /// What a stage 1 walk of one regime reads from its registers (Arm
 /// `S1TTWParams`), for the virtual address range of the address walked.
@@ -143,22 +167,22 @@ impl<L: Levels> Cpu<L> {
     }
 
     /// Arm `AArch64_S1Enabled(regime)`: `SCTLR_ELx.M`, which for EL1&0
-    /// `HCR_EL2.DC` and `HCR_EL2.TGE` override (stage 1 of EL1&0 is then
-    /// disabled whatever `SCTLR_EL1.M` says).
+    /// `HCR_EL2.DC` and `HCR_EL2.TGE` override ([`el10_stage1_enabled`]).
     #[inline(always)]
     pub(crate) fn s1_enabled(&self, regime: Regime) -> bool {
         match regime {
-            Regime::El10 => self.sys.sctlr_el1 & sctlr::M != 0 && !self.hcr_any(HCR_DC | HCR_TGE),
+            Regime::El10 => el10_stage1_enabled(self.sys.sctlr_el1, self.hcr_el2()),
             Regime::El2 => self.el2().sctlr & sctlr::M != 0,
         }
     }
 
     /// Whether data accesses of `regime` with stage 1 disabled are to
     /// Normal memory rather than Device-nGnRnE (Arm
-    /// `AArch64_S1DisabledOutput`): in EL1&0 under `HCR_EL2.DC`.
+    /// `AArch64_S1DisabledOutput`): in EL1&0 under `HCR_EL2.DC`
+    /// ([`el10_s1_disabled_data_normal`]).
     #[inline(always)]
     pub(crate) fn s1_disabled_data_normal(&self, regime: Regime) -> bool {
-        regime == Regime::El10 && self.hcr_any(HCR_DC)
+        regime == Regime::El10 && el10_s1_disabled_data_normal(self.hcr_el2())
     }
 
     /// Whether top-byte-ignore applies to the instruction or data addresses
@@ -263,7 +287,7 @@ impl<L: Levels> Cpu<L> {
     /// Arm `AArch64_BranchAddr(target, PSTATE.EL)`: the address a branch,
     /// an exception entry or an exception return writes to the PC. Under
     /// top-byte-ignore of instruction addresses the tag is dropped: bits
-    /// [63:56] become copies of bit 55 at EL0 and EL1, whose regime has two
+    /// 63:56 become copies of bit 55 at EL0 and EL1, whose regime has two
     /// ranges, and zeros at EL2, whose regime has one; a tag TBID keeps from
     /// being ignored stays, for the fetch to fault on.
     #[inline]

@@ -11,9 +11,11 @@
 
 use super::el2::{
     El2Regs, El2Storage, HCR_AMO, HCR_FMO, HCR_IMO, HCR_TEA, HCR_TGE, HCR_VF, HCR_VI, HCR_VSE,
-    MDCR_TDE, VSESR_MASK,
+    HPFAR_FIPA, MDCR_TDE, VSESR_MASK,
 };
 use super::features::Feature;
+use super::mmu::Ipa;
+use super::op::Extend;
 use super::sysreg::{DBGPRCR_CORENPDRQ, MDSCR_KDE, MDSCR_SS, OSDLR_DLK, OSLSR_OSLK};
 use super::{sctlr, Activity, Btype, Cpu, El, Levels, Pstate, SysRegs};
 use crate::instrumentation::{ExceptionKind, ExceptionTaken};
@@ -135,7 +137,6 @@ impl ExceptionClass {
             | Self::SpAlignment => false,
         }
     }
-
 }
 
 /// The exception classes that report a virtual address in `FAR_ELx` (Arm
@@ -161,6 +162,51 @@ impl AddressedClass {
     }
 }
 
+/// The exception classes that report no address, only a syndrome: every
+/// class but an [`AddressedClass`].
+///
+/// Closed (R5): an exception of one of these is made without an address
+/// ([`Exception::new`], [`Exception::routed`], [`Exception::to_el2`]), so
+/// none of the classes that report one can be.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SyndromeClass {
+    Unknown,
+    WfxTrap,
+    FpAccess,
+    PacTrap,
+    BranchTarget,
+    IllegalState,
+    Svc,
+    Hvc,
+    Smc,
+    SysRegTrap,
+    PacFail,
+    SmeAccess,
+    SpAlignment,
+    Brk,
+}
+
+impl SyndromeClass {
+    const fn class(self) -> ExceptionClass {
+        match self {
+            Self::Unknown => ExceptionClass::Unknown,
+            Self::WfxTrap => ExceptionClass::WfxTrap,
+            Self::FpAccess => ExceptionClass::FpAccess,
+            Self::PacTrap => ExceptionClass::PacTrap,
+            Self::BranchTarget => ExceptionClass::BranchTarget,
+            Self::IllegalState => ExceptionClass::IllegalState,
+            Self::Svc => ExceptionClass::Svc,
+            Self::Hvc => ExceptionClass::Hvc,
+            Self::Smc => ExceptionClass::Smc,
+            Self::SysRegTrap => ExceptionClass::SysRegTrap,
+            Self::PacFail => ExceptionClass::PacFail,
+            Self::SmeAccess => ExceptionClass::SmeAccess,
+            Self::SpAlignment => ExceptionClass::SpAlignment,
+            Self::Brk => ExceptionClass::Brk,
+        }
+    }
+}
+
 /// Where a synchronous exception is taken from EL0 or EL1: from EL2 it is
 /// always EL2.
 ///
@@ -179,44 +225,165 @@ pub(crate) enum Route {
     El2,
 }
 
+/// Whether a Data Abort reports the syndrome of the load or store that made
+/// it, once the instruction gives one (Arm `AArch64_InstructionSyndromeValid`
+/// as far as the access decides it): `Open` for a stage 2 abort on the
+/// access itself at its lowest address (`accdesc.lowestaddress`), unless it
+/// is a synchronous External abort on stage 2's walk ("ISV on second stage
+/// translation table walk" is FALSE here, the value FEAT_RAS gives it);
+/// `Closed` for every other exception. The translation decides it where it
+/// builds the abort; the instruction closes it, filled with its syndrome
+/// or, where its form has none, empty
+/// ([`Fault::reporting`](super::exec::Fault::reporting)).
+///
+/// Closed (R5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SyndromeSlot {
+    Open,
+    Closed,
+}
+
+/// The syndrome of a load or store of one general-purpose register without
+/// writeback, which a stage 2 Data Abort on its access reports in
+/// `ESR_EL2.ISS[24:14]` (Arm `LSInstructionSyndrome`, whose content the
+/// Arm ARM's `ESR_ELx` gives, `ISV` = 1): `SAS`, the access size; `SSE`, a
+/// load's sign extension; `SRT`, the transfer register; `SF`, a 64-bit
+/// register; `AR`, acquire or release semantics. Such an instruction fills
+/// the abort's [`SyndromeSlot`]: its class handler makes its access with
+/// [`Cpu::read_gpr`] or [`Cpu::write_gpr`], and its pre-decoded op makes
+/// it from the fields it holds when the access faults
+/// (`op::one_register_syndrome`). Every other instruction — a load or store
+/// exclusive, one with writeback, a pair, an atomic access, a SIMD&FP, SVE
+/// or SME transfer, a cache maintenance or address translation instruction
+/// — reports none (`ISV` = 0).
+///
+/// It holds the instruction's own fields, as its decode gives them, and
+/// derives `SSE` and `SF` only when a fault reports them ([`Self::iss`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AccessSyndrome {
+    /// The access's size, log2 of its bytes.
+    size_log2: u8,
+    /// How a load extends what it reads into `Rt`; a store's is
+    /// [`Extend::Zero`], its register an X register for a doubleword as a
+    /// zero-extending load's is.
+    extend: Extend,
+    rt: u8,
+    acquire_release: bool,
+}
+
+impl AccessSyndrome {
+    /// A load of `1 << size_log2` bytes into `Rt` = `rt`, extended as
+    /// `extend` says.
+    #[inline(always)]
+    pub(crate) const fn load(size_log2: u32, extend: Extend, rt: u32) -> Self {
+        Self {
+            size_log2: size_log2 as u8,
+            extend,
+            rt: rt as u8,
+            acquire_release: false,
+        }
+    }
+
+    /// A store of the low `1 << size_log2` bytes of `Rt` = `rt`.
+    #[inline(always)]
+    pub(crate) const fn store(size_log2: u32, rt: u32) -> Self {
+        Self::load(size_log2, Extend::Zero, rt)
+    }
+
+    /// The same access with acquire or release semantics (`AR`).
+    #[inline(always)]
+    pub(crate) const fn acquire_release(self) -> Self {
+        Self {
+            acquire_release: true,
+            ..self
+        }
+    }
+
+    /// `ISV`, `SAS`, `SSE`, `SRT`, `SF` and `AR`, at their `ISS` bits: a
+    /// sign-extending load sets `SSE`, and `SF` is set for an X register,
+    /// which every doubleword access and every sign extension to 64 bits
+    /// transfers.
+    pub(crate) const fn iss(self) -> u32 {
+        let (sign_extend, sixty_four) = match self.extend {
+            Extend::Zero => (false, self.size_log2 == 3),
+            Extend::Signed64 => (true, true),
+            Extend::Signed32 => (true, false),
+        };
+        (1 << 24)
+            | ((self.size_log2 as u32 & 3) << 22)
+            | ((sign_extend as u32) << 21)
+            | ((self.rt as u32 & 31) << 16)
+            | ((sixty_four as u32) << 15)
+            | ((self.acquire_release as u32) << 14)
+    }
+}
+
+/// Which addresses an [`Exception`] reports beside its syndrome, as it holds
+/// them (Arm `AArch64_ReportException`): `Far`, the faulting virtual address
+/// in `FAR_ELx`, for an exception of a class that reports one
+/// ([`AddressedClass`]); `FarAndIpa`, the IPA in `HPFAR_EL2.FIPA` as well,
+/// for a stage 2 abort where Arm's `IPAValid` holds; `Syndrome` for every
+/// other. A register an exception does not report is ARBITRARY, and keeps
+/// its value here.
+///
+/// Closed (R5): only an exception built with an address reports one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Reports {
+    Syndrome,
+    Far,
+    FarAndIpa,
+}
+
 /// A synchronous exception raised by an instruction.
+///
+/// It is 24 bytes, as every instruction's result carries one: the address
+/// it reports is held where its class reports one, and read through
+/// [`Exception::far`], and the IPA a stage 2 abort reports beside it
+/// through [`Exception::hpfar`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Exception {
     pub(crate) class: ExceptionClass,
     pub(crate) iss: u32,
-    /// The faulting virtual address, which only an exception of a class
-    /// that reports one holds ([`Exception::at_address`]).
-    pub(crate) far: Option<u64>,
+    /// The faulting virtual address, where `reports` reports one; 0
+    /// otherwise.
+    far: u64,
+    /// A stage 2 abort's IPA, where `reports` reports one; 0 otherwise.
+    ipa: Ipa,
     pub(crate) route: Route,
+    reports: Reports,
+    syndrome: SyndromeSlot,
 }
 
+// The size every instruction's result carries a fault in: a larger one
+// costs the run loop that returns each instruction's result.
+const _: () = assert!(core::mem::size_of::<Exception>() == 24);
+
 impl Exception {
-    /// An exception of `class`, taken where its class's function takes it.
+    /// An exception of `class`, which reports no address, taken where its
+    /// class's function takes it.
     #[inline]
-    pub(crate) const fn new(class: ExceptionClass, iss: u32) -> Self {
-        Self {
-            class,
-            iss,
-            far: None,
-            route: Route::Class,
-        }
+    pub(crate) const fn new(class: SyndromeClass, iss: u32) -> Self {
+        Self::routed(class, iss, Route::Class)
     }
 
     /// An exception of `class` taken to EL2: a trap an EL2 control raises.
     #[inline]
-    pub(crate) const fn to_el2(class: ExceptionClass, iss: u32) -> Self {
+    pub(crate) const fn to_el2(class: SyndromeClass, iss: u32) -> Self {
         Self::routed(class, iss, Route::El2)
     }
 
-    /// An exception of `class` taken as `route` says: for a trap whose
-    /// target depends on the control that raised it.
+    /// An exception of `class`, which reports no address, taken as `route`
+    /// says: for a trap whose target depends on the control that raised it.
     #[inline]
-    pub(crate) const fn routed(class: ExceptionClass, iss: u32, route: Route) -> Self {
+    pub(crate) const fn routed(class: SyndromeClass, iss: u32, route: Route) -> Self {
         Self {
-            class,
+            class: class.class(),
             iss,
-            far: None,
+            far: 0,
+            ipa: Ipa::new(0),
             route,
+            reports: Reports::Syndrome,
+            syndrome: SyndromeSlot::Closed,
         }
     }
 
@@ -227,8 +394,81 @@ impl Exception {
         Self {
             class: class.class(),
             iss,
-            far: Some(far),
+            far,
+            ipa: Ipa::new(0),
             route: Route::Class,
+            reports: Reports::Far,
+            syndrome: SyndromeSlot::Closed,
+        }
+    }
+
+    /// An abort of stage 2 of `class` at `far`, taken to EL2
+    /// (`AArch64_DataAbort`, `AArch64_InstructionAbort` and
+    /// `SyncExternalAbortTarget`: `IsSecondStage` routes it there), which
+    /// reports `hpfar` in `HPFAR_EL2` (where `IPAValid` holds; `None` leaves
+    /// the register as it is), and the syndrome of the instruction that
+    /// made it where `syndrome` is open.
+    #[inline]
+    pub(crate) const fn second_stage_abort(
+        class: AddressedClass,
+        iss: u32,
+        far: u64,
+        hpfar: Option<Ipa>,
+        syndrome: SyndromeSlot,
+    ) -> Self {
+        let (ipa, reports) = match hpfar {
+            Some(ipa) => (ipa, Reports::FarAndIpa),
+            None => (Ipa::new(0), Reports::Far),
+        };
+        Self {
+            class: class.class(),
+            iss,
+            far,
+            ipa,
+            route: Route::El2,
+            reports,
+            syndrome,
+        }
+    }
+
+    /// The exception, its syndrome slot closed where it is open: filled
+    /// with `syndrome`, `ISV` and the instruction's fields joining the
+    /// abort's syndrome, or left empty (`ISV` 0) where the instruction's
+    /// form has none (`None`).
+    #[inline]
+    pub(crate) const fn reporting(self, syndrome: Option<AccessSyndrome>) -> Self {
+        match (self.syndrome, syndrome) {
+            (SyndromeSlot::Open, Some(syndrome)) => Self {
+                iss: self.iss | syndrome.iss(),
+                syndrome: SyndromeSlot::Closed,
+                ..self
+            },
+            (SyndromeSlot::Open, None) => Self {
+                syndrome: SyndromeSlot::Closed,
+                ..self
+            },
+            (SyndromeSlot::Closed, _) => self,
+        }
+    }
+
+    /// The faulting virtual address `FAR_ELx` reports, for an exception
+    /// built with one ([`Exception::at_address`],
+    /// [`Exception::second_stage_abort`]); `None` for every other.
+    #[inline]
+    pub(crate) const fn far(&self) -> Option<u64> {
+        match self.reports {
+            Reports::Far | Reports::FarAndIpa => Some(self.far),
+            Reports::Syndrome => None,
+        }
+    }
+
+    /// The IPA `HPFAR_EL2` reports, for a stage 2 abort whose IPA Arm's
+    /// `IPAValid` reports; `None` for every other exception.
+    #[inline]
+    pub(crate) const fn hpfar(&self) -> Option<Ipa> {
+        match self.reports {
+            Reports::FarAndIpa => Some(self.ipa),
+            Reports::Syndrome | Reports::Far => None,
         }
     }
 
@@ -527,11 +767,18 @@ impl<L: Levels> Cpu<L> {
         self.target_level(routed_to_el2)
     }
 
-    /// Take synchronous exception `e` raised by the instruction at `pc`.
+    /// Take synchronous exception `e` raised by the instruction at `pc`. A
+    /// stage 2 abort taken to EL2 reports its IPA in `HPFAR_EL2.FIPA`
+    /// (`AArch64_ReportException`: IPA bits 47:12 in bits 39:4, `NS` 0 with
+    /// no Secure EL2) where `IPAValid`, and leaves it as it was where it is
+    /// ARBITRARY.
     pub(crate) fn take_sync_exception(&mut self, e: Exception, pc: u64) -> ExceptionTaken {
         let from = self.pstate.el;
         let target = self.exception_target(&e);
         let to = target.el();
+        if let (Target::El2(proof), Some(ipa)) = (target, e.hpfar()) {
+            self.el2_state.proven(proof).regs.hpfar = ((ipa.get() >> 12) << 4) & HPFAR_FIPA;
+        }
         let class = e.class;
         // ESR_ELx.IL is 1: every A64 instruction is 32 bits.
         let esr = (class.code(from, to) << 26) | (1 << 25) | u64::from(e.iss & 0x01FF_FFFF);
@@ -540,7 +787,7 @@ impl<L: Levels> Cpu<L> {
         } else {
             pc
         };
-        let far = e.far;
+        let far = e.far();
         let saved = if class.preserves_btype() {
             self.pstate
         } else {

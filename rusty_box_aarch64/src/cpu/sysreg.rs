@@ -27,6 +27,7 @@ use super::el2::{
 use super::exception::Route;
 use super::features::{Feature, Features};
 use super::id;
+use super::mmu::{El10Context, El2RegimeContext};
 use super::pauth::KeyHalf;
 use super::regs::{SysReg, SysRegRefusal};
 use super::timer::GenericTimer;
@@ -423,10 +424,85 @@ pub(crate) enum SysRegError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WriteEffect {
     None,
-    /// A register the table walk reads changed: flush the TLB.
+    /// What the EL2 regime's table walk reads of its registers changed, or
+    /// a host wrote a translation register: flush the TLB.
     FlushTlb,
+    /// One of the EL1&0 regime's translation registers changed: the TLB's
+    /// entries of its context stay apart ([`Cpu::el10_context_changed`]).
+    El10Context,
     /// A timer register changed: re-evaluate the timer outputs.
     Timer,
+}
+
+/// The regime whose translations a register is part of: the one list of
+/// the translation registers, read by every write of one.
+///
+/// Closed (R5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TranslationRegister {
+    /// The EL1&0 regime's ([`El10Context`]): its stage 1 registers
+    /// (`SCTLR_EL1`, `TCR_EL1`, `TTBR0_EL1`, `TTBR1_EL1`, `MAIR_EL1`),
+    /// stage 2's (`VTTBR_EL2`, `VTCR_EL2`), and `HCR_EL2`, whose `VM`, `DC`,
+    /// `PTW` and `TGE` decide which walks are made.
+    El10,
+    /// The EL2 regime's ([`El2RegimeContext`]): `SCTLR_EL2`, `TCR_EL2`,
+    /// `TTBR0_EL2` and `MAIR_EL2`.
+    El2,
+}
+
+impl TranslationRegister {
+    /// The regime the register below EL2 encoded `key` belongs to, if it is
+    /// a translation register.
+    const fn of_el1(key: u32) -> Option<Self> {
+        match key {
+            SCTLR_EL1 | TCR_EL1 | TTBR0_EL1 | TTBR1_EL1 | MAIR_EL1 => Some(Self::El10),
+            _ => None,
+        }
+    }
+
+    /// The regime the EL2 register `reg` belongs to, if it is a
+    /// translation register.
+    const fn of_el2(reg: El2Reg) -> Option<Self> {
+        match reg {
+            El2Reg::Sctlr | El2Reg::Tcr | El2Reg::Ttbr0 | El2Reg::Mair => Some(Self::El2),
+            El2Reg::Hcr | El2Reg::Vtcr | El2Reg::Vttbr => Some(Self::El10),
+            El2Reg::Actlr
+            | El2Reg::Cptr
+            | El2Reg::Hstr
+            | El2Reg::Hacr
+            | El2Reg::Mdcr
+            | El2Reg::Amair
+            | El2Reg::Vbar
+            | El2Reg::Esr
+            | El2Reg::Far
+            | El2Reg::Hpfar
+            | El2Reg::Elr
+            | El2Reg::Spsr
+            | El2Reg::Afsr0
+            | El2Reg::Afsr1
+            | El2Reg::Tpidr
+            | El2Reg::Vpidr
+            | El2Reg::Vmpidr
+            | El2Reg::Smcr
+            | El2Reg::Cnthctl
+            | El2Reg::Cntvoff
+            | El2Reg::CnthpCtl
+            | El2Reg::CnthpCval
+            | El2Reg::Contextidr
+            | El2Reg::Vdisr
+            | El2Reg::Vsesr => None,
+        }
+    }
+}
+
+/// What a translation reads of one regime's registers, taken before a
+/// write of one of them to compare with after it.
+///
+/// Closed (R5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TranslationContext {
+    El10(El10Context),
+    El2(El2RegimeContext),
 }
 
 /// The trap to EL1 an EL0 control raises (`AArch64_SystemAccessTraptoEL1orEL2`)
@@ -1363,6 +1439,8 @@ impl<L: Levels> Cpu<L> {
         }
 
         let el1 = el == El::El1;
+        let before =
+            TranslationRegister::of_el1(k).map(|register| self.translation_context(register));
         let effect = match k {
             CSSELR_EL1 => {
                 trap_to_el2(el1 && self.hcr_any(HCR_TID2))?;
@@ -1370,17 +1448,11 @@ impl<L: Levels> Cpu<L> {
                 WriteEffect::None
             }
             // The memory-tagging controls read as zero on a core without
-            // FEAT_MTE, and a write that changes nothing keeps the TLB
-            // (QEMU target/arm/helper.c `sctlr_write`).
+            // FEAT_MTE.
             SCTLR_EL1 => {
                 self.tvm_check(el)?;
-                let value = value & !SCTLR_MTE;
-                if value == self.sys.sctlr_el1 {
-                    WriteEffect::None
-                } else {
-                    self.sys.sctlr_el1 = value;
-                    WriteEffect::FlushTlb
-                }
+                self.sys.sctlr_el1 = value & !SCTLR_MTE;
+                WriteEffect::None
             }
             ACTLR_EL1 => {
                 trap_to_el2(el1 && self.hcr_any(HCR_TACR))?;
@@ -1401,17 +1473,17 @@ impl<L: Levels> Cpu<L> {
             TTBR0_EL1 => {
                 self.tvm_check(el)?;
                 self.sys.ttbr0_el1 = value;
-                WriteEffect::FlushTlb
+                WriteEffect::None
             }
             TTBR1_EL1 => {
                 self.tvm_check(el)?;
                 self.sys.ttbr1_el1 = value;
-                WriteEffect::FlushTlb
+                WriteEffect::None
             }
             TCR_EL1 => {
                 self.tvm_check(el)?;
                 self.sys.tcr_el1 = value;
-                WriteEffect::FlushTlb
+                WriteEffect::None
             }
             SPSR_EL1 => {
                 self.sys.spsr_el1 = value & self.spsr_mask();
@@ -1471,7 +1543,7 @@ impl<L: Levels> Cpu<L> {
             MAIR_EL1 => {
                 self.tvm_check(el)?;
                 self.sys.mair_el1 = value;
-                WriteEffect::FlushTlb
+                WriteEffect::None
             }
             AMAIR_EL1 => {
                 self.tvm_check(el)?;
@@ -1618,7 +1690,41 @@ impl<L: Levels> Cpu<L> {
                 WriteEffect::None
             }
         };
-        Ok(effect)
+        Ok(self.translation_effect(before, effect))
+    }
+
+    /// What a translation reads now of the registers of `register`'s
+    /// regime.
+    fn translation_context(&self, register: TranslationRegister) -> TranslationContext {
+        match register {
+            TranslationRegister::El10 => TranslationContext::El10(self.el10_context()),
+            TranslationRegister::El2 => TranslationContext::El2(El2RegimeContext::of(self.el2())),
+        }
+    }
+
+    /// The effect of a write whose own is `effect`, of a translation
+    /// register whose regime's context was `before`, if it is one: a write
+    /// that changes the EL1&0 regime's context changes the context
+    /// ([`WriteEffect::El10Context`]), one that changes what the EL2
+    /// regime's walk reads empties the TLB ([`WriteEffect::FlushTlb`]), and
+    /// one that leaves the context as it was changes nothing of the TLB,
+    /// whose entries depend on the context alone.
+    fn translation_effect(
+        &self,
+        before: Option<TranslationContext>,
+        effect: WriteEffect,
+    ) -> WriteEffect {
+        match before {
+            Some(TranslationContext::El10(context)) if context != self.el10_context() => {
+                WriteEffect::El10Context
+            }
+            Some(TranslationContext::El2(context))
+                if context != El2RegimeContext::of(self.el2()) =>
+            {
+                WriteEffect::FlushTlb
+            }
+            Some(TranslationContext::El10(_) | TranslationContext::El2(_)) | None => effect,
+        }
     }
 
     /// Write `value` to the EL2 register `key` names, as `accessor` writes
@@ -1637,17 +1743,17 @@ impl<L: Levels> Cpu<L> {
                 El2Reg::Cnthctl | El2Reg::Cntvoff => self.fold_event_stream(),
                 _ => {}
             }
+            // A translation register's write is judged by the context of
+            // its regime ([`Cpu::translation_effect`]); `HCR_EL2`'s routing
+            // and traps are read afresh before every instruction.
+            let before =
+                TranslationRegister::of_el2(reg).map(|register| self.translation_context(register));
             self.el2_write(reg, value);
-            // The EL2 regime's own translation registers change what its
-            // walk caches, as the EL1&0 regime's do theirs. `HCR_EL2`
-            // changes no walk: `DC` and `TGE` turn the EL1&0 regime's stage
-            // 1 off, which every access checks before the TLB, and its
-            // routing is read afresh before every instruction.
-            return Ok(match reg {
-                El2Reg::Sctlr | El2Reg::Tcr | El2Reg::Ttbr0 | El2Reg::Mair => WriteEffect::FlushTlb,
+            let effect = match reg {
                 El2Reg::Cntvoff | El2Reg::CnthpCval => WriteEffect::Timer,
                 _ => WriteEffect::None,
-            });
+            };
+            return Ok(self.translation_effect(before, effect));
         }
         Ok(match key.0 {
             SP_EL1 => {
@@ -1714,9 +1820,11 @@ impl<L: Levels> Cpu<L> {
     }
 
     /// A host's write of `reg`, with the effect an `MSR` at the highest
-    /// implemented level has: a write to a register the table walk reads
-    /// flushes the TLB, and a timer write is reported for the machine to
-    /// re-evaluate its lines.
+    /// implemented level has, applied and returned: a timer write's has the
+    /// machine re-evaluate its lines. A write of a translation register
+    /// ([`Cpu::translation_register`]) empties the TLB whatever the value
+    /// ([`WriteEffect::FlushTlb`]), so that a host that has changed a
+    /// translation table makes the change seen by writing one.
     pub(crate) fn host_sysreg_write(
         &mut self,
         reg: SysReg,
@@ -1725,8 +1833,20 @@ impl<L: Levels> Cpu<L> {
         let key = SysRegKey::from_sysreg(reg);
         match self.sysreg_write_as(key, value, Accessor::Host) {
             Ok(effect) => {
-                self.apply_write_effect(effect);
-                Ok(effect)
+                let applied = match (effect, self.translation_register(key)) {
+                    // The flush is all an `MSR`'s effect on the TLB would
+                    // be, and more.
+                    (
+                        WriteEffect::None | WriteEffect::FlushTlb | WriteEffect::El10Context,
+                        Some(TranslationRegister::El10 | TranslationRegister::El2),
+                    ) => WriteEffect::FlushTlb,
+                    (WriteEffect::None, None) => WriteEffect::None,
+                    (WriteEffect::FlushTlb, None) => WriteEffect::FlushTlb,
+                    (WriteEffect::El10Context, None) => WriteEffect::El10Context,
+                    (WriteEffect::Timer, None | Some(_)) => WriteEffect::Timer,
+                };
+                self.apply_write_effect(applied);
+                Ok(applied)
             }
             // As for reads, a host write can only be UNDEFINED: either the
             // register is read-only, or there is no such register.
@@ -1745,13 +1865,22 @@ impl<L: Levels> Cpu<L> {
         }
     }
 
+    /// The regime `key`'s register is a translation register of, if it is
+    /// one ([`TranslationRegister`]); the EL2 registers only with EL2.
+    fn translation_register(&self, key: SysRegKey) -> Option<TranslationRegister> {
+        TranslationRegister::of_el1(key.0)
+            .or_else(|| self.el2_storage(key).and_then(TranslationRegister::of_el2))
+    }
+
     /// What the processor itself does after a write with `effect`: a TLB
-    /// flush for a translation control, and for a timer register the flag
-    /// that has the machine re-evaluate the timer lines.
+    /// flush for an EL2 regime translation control, a change of context for
+    /// an EL1&0 one, and for a timer register the flag that has the machine
+    /// re-evaluate the timer lines.
     pub(crate) fn apply_write_effect(&mut self, effect: WriteEffect) {
         match effect {
             WriteEffect::None => {}
             WriteEffect::FlushTlb => self.flush_tlb(),
+            WriteEffect::El10Context => self.el10_context_changed(),
             WriteEffect::Timer => self.timer_dirty = true,
         }
     }

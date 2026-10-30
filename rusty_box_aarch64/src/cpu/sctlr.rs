@@ -7,6 +7,9 @@
 pub(crate) const M: u64 = 1 << 0;
 /// A: every misaligned data access faults.
 pub(crate) const A: u64 = 1 << 1;
+/// C: data accesses to Normal memory are cacheable at stage 1; clear, they
+/// are Non-cacheable (`AArch64_S1DCacheEnabled`).
+pub(crate) const C: u64 = 1 << 2;
 /// SA: the SP alignment check at EL1.
 pub(crate) const SA: u64 = 1 << 3;
 /// SA0: the SP alignment check at EL0.

@@ -9,8 +9,10 @@
 //! interpreter agree: loaded registers are written first, the base last.
 
 use super::dp::extend_reg;
+use super::exception::AccessSyndrome;
 use super::exec::{bit, bits, sext, ExecResult, Flow};
 use super::mmu::{DataAccess, DataDirection, ElementPair, QuadwordPair};
+use super::op::Extend;
 use super::{Cpu, ExclusiveMonitor, Levels};
 use crate::bus::PhysBus;
 
@@ -161,23 +163,31 @@ impl<L: Levels> Cpu<L> {
                 self.write_mem(bus, addressing.address, scale, v, acc)?;
             }
         } else {
+            // A form without writeback reports its syndrome with a stage 2
+            // Data Abort on its access.
+            let address = addressing.address;
+            let no_writeback = addressing.writeback.is_none();
+            let load = move |extend| {
+                move || no_writeback.then_some(AccessSyndrome::load(size, extend, rt))
+            };
             match opc {
                 0 => {
                     let v = self.x_or_zr(rt);
-                    self.write_mem(bus, addressing.address, size, v, acc)?;
+                    let syndrome = move || no_writeback.then_some(AccessSyndrome::store(size, rt));
+                    self.write_gpr(bus, address, size, v, acc, syndrome)?;
                 }
                 1 => {
-                    let v = self.read_mem(bus, addressing.address, size, acc)?;
+                    let v = self.read_gpr(bus, address, size, acc, load(Extend::Zero))?;
                     self.set_x_or_zr(rt, v);
                 }
                 2 => {
                     // LDRSB/LDRSH/LDRSW to a 64-bit register.
-                    let v = self.read_mem(bus, addressing.address, size, acc)?;
+                    let v = self.read_gpr(bus, address, size, acc, load(Extend::Signed64))?;
                     self.set_x_or_zr(rt, sext(v, 8 << size));
                 }
                 _ => {
                     // LDRSB/LDRSH to a 32-bit register.
-                    let v = self.read_mem(bus, addressing.address, size, acc)?;
+                    let v = self.read_gpr(bus, address, size, acc, load(Extend::Signed32))?;
                     self.set_x_or_zr(rt, sext(v, 8 << size) & 0xFFFF_FFFF);
                 }
             }
@@ -214,17 +224,21 @@ impl<L: Levels> Cpu<L> {
             self.write_v(rt as usize, value);
             return Ok(Flow::Next);
         }
+        // Each load reports its syndrome with a stage 2 Data Abort on its
+        // access.
+        let load = move |size, extend| move || Some(AccessSyndrome::load(size, extend, rt));
+        let acc = DataAccess::NORMAL;
         match opc {
             0 => {
-                let v = self.read_mem(bus, address, 2, DataAccess::NORMAL)?;
+                let v = self.read_gpr(bus, address, 2, acc, load(2, Extend::Zero))?;
                 self.set_x_or_zr(rt, v);
             }
             1 => {
-                let v = self.read_mem(bus, address, 3, DataAccess::NORMAL)?;
+                let v = self.read_gpr(bus, address, 3, acc, load(3, Extend::Zero))?;
                 self.set_x_or_zr(rt, v);
             }
             2 => {
-                let v = self.read_mem(bus, address, 2, DataAccess::NORMAL)?;
+                let v = self.read_gpr(bus, address, 2, acc, load(2, Extend::Signed64))?;
                 self.set_x_or_zr(rt, sext(v, 32));
             }
             _ => {}
@@ -366,13 +380,19 @@ impl<L: Levels> Cpu<L> {
             if pair {
                 return self.undefined(pc, insn);
             }
+            // Each reports its syndrome, with acquire or release semantics,
+            // with a stage 2 Data Abort on its access.
             let address = self.base_register(rn)?;
+            let acc = DataAccess::ORDERED;
             if load {
-                let v = self.read_mem(bus, address, size, DataAccess::ORDERED)?;
+                let syndrome =
+                    move || Some(AccessSyndrome::load(size, Extend::Zero, rt).acquire_release());
+                let v = self.read_gpr(bus, address, size, acc, syndrome)?;
                 self.set_x_or_zr(rt, v);
             } else {
                 let v = self.x_or_zr(rt);
-                self.write_mem(bus, address, size, v, DataAccess::ORDERED)?;
+                let syndrome = move || Some(AccessSyndrome::store(size, rt).acquire_release());
+                self.write_gpr(bus, address, size, v, acc, syndrome)?;
             }
             return Ok(Flow::Next);
         }

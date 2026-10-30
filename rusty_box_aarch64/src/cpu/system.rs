@@ -6,10 +6,10 @@
 //! `virt` does (its device tree's `method`).
 
 use super::el2::{CPTR_TFP, HCR_HCD, HCR_TDZ, HCR_TPCP, HCR_TPU, HCR_TSC, HCR_TSW, HCR_TTLB};
-use super::exception::{Exception, ExceptionClass, Route};
+use super::exception::{Exception, Route, SyndromeClass};
 use super::exec::{bit, bits, ExecResult, Fault, Flow, StopCause};
 use super::features::Feature;
-use super::mmu::{AtCheck, CacheMaintenance};
+use super::mmu::{AtCheck, AtStages, CacheMaintenance};
 use super::sme::SmeTrap;
 use super::sysreg::{SysRegError, SysRegKey, CPACR_FPEN};
 use super::wait::Wait;
@@ -128,9 +128,9 @@ impl<L: Levels> Cpu<L> {
     #[inline]
     pub(crate) fn fp_trap(&self, route: Route) -> Fault {
         match route {
-            Route::Class if self.tge() => Exception::to_el2(ExceptionClass::Unknown, 0).into(),
+            Route::Class if self.tge() => Exception::to_el2(SyndromeClass::Unknown, 0).into(),
             Route::Class | Route::El2 => {
-                Exception::routed(ExceptionClass::FpAccess, (1 << 24) | (0xE << 20), route).into()
+                Exception::routed(SyndromeClass::FpAccess, (1 << 24) | (0xE << 20), route).into()
             }
         }
     }
@@ -197,7 +197,12 @@ impl<L: Levels> Cpu<L> {
     /// own.
     fn sys_el2_trap(trapped: bool, insn: u32, rt: u32) -> Result<(), Fault> {
         if trapped {
-            Err(Self::sysreg_trap(SysRegKey::from_insn(insn), rt, false, Route::El2))
+            Err(Self::sysreg_trap(
+                SysRegKey::from_insn(insn),
+                rt,
+                false,
+                Route::El2,
+            ))
         } else {
             Ok(())
         }
@@ -206,7 +211,7 @@ impl<L: Levels> Cpu<L> {
     /// The exception an access trapped to `route` takes (EC 0x18), its
     /// syndrome from `key`, `rt` and the direction.
     fn sysreg_trap(key: SysRegKey, rt: u32, read: bool, route: Route) -> Fault {
-        Exception::routed(ExceptionClass::SysRegTrap, key.trap_iss(rt, read), route).into()
+        Exception::routed(SyndromeClass::SysRegTrap, key.trap_iss(rt, read), route).into()
     }
 
     /// The exception an `MRS`, `MSR`, `SYS` or `SYSL` that `err` refuses
@@ -568,7 +573,7 @@ impl<L: Levels> Cpu<L> {
                     (_, 0) => AtCheck::El1,
                     _ => AtCheck::El0,
                 };
-                self.address_translate(bus, va, op2 & 1 == 1, checked)?;
+                self.address_translate(bus, va, op2 & 1 == 1, checked, AtStages::One)?;
                 Ok(Flow::Next)
             }
             // AT S1E2R, S1E2W: the EL2 regime, at EL2 only.
@@ -577,21 +582,20 @@ impl<L: Levels> Cpu<L> {
                     return self.undefined(pc, insn);
                 }
                 let va = self.x_or_zr(rt);
-                self.address_translate(bus, va, op2 & 1 == 1, AtCheck::El2)?;
+                self.address_translate(bus, va, op2 & 1 == 1, AtCheck::El2, AtStages::One)?;
                 Ok(Flow::Next)
             }
             // AT S12E1R, S12E1W, S12E0R, S12E0W: the EL1&0 regime, at EL2
-            // only (EL1's are UNDEFINED without FEAT_NV). Arm's accessor
-            // translates stage 1 alone while `HCR_EL2.{DC,VM}` is {0,0} and
-            // stages 1 and 2 otherwise; this processor applies no stage 2
-            // translation to any access, so each is its stage 1 translation.
+            // only (EL1's are UNDEFINED without FEAT_NV), by stage 1 and then
+            // stage 2, which `AArch64_S2Translate` leaves out while
+            // `HCR_EL2.{DC,VM}` is {0,0}.
             (4, 7, 8, 4..=7) => {
                 if el != El::El2 {
                     return self.undefined(pc, insn);
                 }
                 let va = self.x_or_zr(rt);
                 let checked = if op2 < 6 { AtCheck::El1 } else { AtCheck::El0 };
-                self.address_translate(bus, va, op2 & 1 == 1, checked)?;
+                self.address_translate(bus, va, op2 & 1 == 1, checked, AtStages::OneAndTwo)?;
                 Ok(Flow::Next)
             }
             // The EL1 TLB maintenance instructions (CRn 8), and their nXS
@@ -684,10 +688,10 @@ impl<L: Levels> Cpu<L> {
             return self.undefined(pc, insn);
         }
         match (opc, bits(insn, 1, 0)) {
-            (0, 1) => Err(Exception::new(ExceptionClass::Svc, imm16).into()),
+            (0, 1) => Err(Exception::new(SyndromeClass::Svc, imm16).into()),
             (0, 2) => self.exec_hvc(pc, insn, imm16),
             (0, 3) => self.exec_smc(pc, insn, imm16),
-            (1, 0) => Err(Exception::new(ExceptionClass::Brk, imm16).into()),
+            (1, 0) => Err(Exception::new(SyndromeClass::Brk, imm16).into()),
             // HLT with halting debug disabled, and DCPS outside Debug state,
             // are UNDEFINED.
             _ => self.undefined(pc, insn),
@@ -721,7 +725,7 @@ impl<L: Levels> Cpu<L> {
                 if self.hcr_any(HCR_HCD) {
                     return self.undefined(pc, insn);
                 }
-                Err(Exception::to_el2(ExceptionClass::Hvc, imm16).into())
+                Err(Exception::to_el2(SyndromeClass::Hvc, imm16).into())
             }
         }
     }
@@ -736,7 +740,7 @@ impl<L: Levels> Cpu<L> {
             return self.undefined(pc, insn);
         }
         if self.pstate.el == El::El1 && self.hcr_any(HCR_TSC) {
-            return Err(Exception::to_el2(ExceptionClass::Smc, imm16).into());
+            return Err(Exception::to_el2(SyndromeClass::Smc, imm16).into());
         }
         match self.psci_conduit() {
             PsciConduit::Smc => self.psci_call(),

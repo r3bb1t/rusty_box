@@ -404,10 +404,12 @@ machine.set_exits(&[RAM_BASE + 4])?;
 ```
 
 Physical and virtual addresses are different verbs. A virtual access walks
-the guest's current page tables as a data access would — with no permission
-check, and descriptors read from RAM only. It reads the tables, never the
-TLB, so a mapping the guest rewrote without a `TLBI` already shows its new
-translation here:
+the guest's current page tables as a data access would — stage 2's too
+when a hypervisor at EL2 has it on for the EL1&0 regime, with no check of
+the access's permissions, and descriptors read from RAM only. It reads the
+tables, never the TLB, so a mapping the guest rewrote without a `TLBI`
+already shows its new translation here. One that does not translate is
+`NoTranslation`: the walk's fault and the stage it arose in.
 
 ```rust
 # std::thread::Builder::new().stack_size(16 << 20).spawn(|| {
@@ -431,8 +433,10 @@ Registers are named by `Reg`, SIMD&FP registers by `VReg`, and system
 registers by encoding (`SysReg`, with constants for the common ones). A host
 reads and writes with the privilege of the highest implemented exception
 level (EL2 with `with_el2()`, EL1 without) and none of the controls
-that trap a guest; a write has the effect an `MSR` at that level would (a
-translation register flushes the TLB). At EL2 an EL1 identification register
+that trap a guest; a write has the effect an `MSR` at that level would, and
+a write of a translation register empties the TLB, whatever the value, so
+writing one makes a changed translation table seen. At EL2 an EL1
+identification register
 reads the processor's own value (`MIDR_EL1`, `MPIDR_EL1`), not the one
 `VPIDR_EL2` or `VMPIDR_EL2` gives EL1:
 

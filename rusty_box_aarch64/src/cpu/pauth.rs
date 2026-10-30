@@ -16,10 +16,11 @@
 use rusty_box_core::snap::{SnapRead, SnapResult, SnapWrite};
 
 use super::el2::HCR_API;
-use super::exception::{Exception, ExceptionClass};
+use super::exception::{AccessSyndrome, Exception, SyndromeClass};
 use super::exec::{bit, bits, sext, ExecResult, Flow};
 use super::features::Feature;
 use super::mmu::DataAccess;
+use super::op::Extend;
 use super::{Cpu, El, Levels};
 use crate::bus::PhysBus;
 
@@ -388,7 +389,7 @@ impl<L: Levels> Cpu<L> {
     /// instruction's own address the preferred return.
     fn pac_trap_to_el2(&self) -> Result<(), Exception> {
         if self.pstate.el != El::El2 && self.hcr_lacks(HCR_API) {
-            Err(Exception::to_el2(ExceptionClass::PacTrap, 0))
+            Err(Exception::to_el2(SyndromeClass::PacTrap, 0))
         } else {
             Ok(())
         }
@@ -512,7 +513,7 @@ impl<L: Levels> Cpu<L> {
         };
         if faults && result & checked != replicate((result >> 55) & 1 == 1) & checked {
             let syndrome = (u32::from(data) << 1) | key.number() as u32;
-            return Err(Exception::new(ExceptionClass::PacFail, syndrome));
+            return Err(Exception::new(SyndromeClass::PacFail, syndrome));
         }
         Ok(result)
     }
@@ -673,7 +674,9 @@ impl<L: Levels> Cpu<L> {
     /// 31 being SP) is authenticated with data key A or B as `M` says and
     /// a zero modifier, then offset by `S:imm9` doublewords; `W` writes the
     /// address back after the load, the loaded register first where the
-    /// two are one (as [`super::ldst`] orders every writeback).
+    /// two are one (as [`super::ldst`] orders every writeback). Without
+    /// writeback the load reports its syndrome with a stage 2 Data Abort on
+    /// its access.
     pub(crate) fn exec_load_auth<B: PhysBus>(&mut self, bus: &mut B, insn: u32) -> ExecResult {
         let key = PacKey::data_key(bit(insn, 23));
         let rn = bits(insn, 9, 5);
@@ -686,7 +689,9 @@ impl<L: Levels> Cpu<L> {
             10,
         ) << 3;
         let address = authenticated.wrapping_add(offset);
-        let value = self.read_mem(bus, address, 3, DataAccess::NORMAL)?;
+        let syndrome =
+            move || (!bit(insn, 11)).then_some(AccessSyndrome::load(3, Extend::Zero, rt));
+        let value = self.read_gpr(bus, address, 3, DataAccess::NORMAL, syndrome)?;
         self.set_x_or_zr(rt, value);
         if bit(insn, 11) {
             self.set_x_or_sp(rn, address);

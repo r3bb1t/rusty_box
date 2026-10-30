@@ -279,17 +279,17 @@ const fn field(features: Features, feature: Feature, lsb: u32, value: u64) -> u6
 /// (44-bit physical addresses, as the Cortex-A57), ASIDBits = 2 (16-bit
 /// ASIDs), mixed endianness not supported, TGran16 = 0 (not supported),
 /// TGran64 = 0xF (not supported), TGran4 = 0 (supported): only the 4 KiB
-/// granule is implemented, so only it is offered. With FEAT_EL2, TGran4_2
-/// (43:40), TGran16_2 (35:32) and TGran64_2 (39:36) = 1: no stage 2
-/// translation is built, so no granule is offered at stage 2. That is
-/// FEAT_GTG, which `Features.json` makes hold exactly when all three
-/// fields are non-zero, and which, like a 4 KiB stage 1 granule without a
-/// stage 2 one, it permits a processor before ARMv8.5. ECV (63:60) = 1 with
-/// FEAT_ECV (2 would be FEAT_ECV_POFF, which needs EL2).
+/// granule is implemented, so only it is offered. With FEAT_EL2, the same
+/// at stage 2, said explicitly: TGran4_2 (43:40) = 2, the 4 KiB granule
+/// (FEAT_S2TGran4K), and TGran16_2 (35:32) and TGran64_2 (39:36) = 1, not
+/// supported. That is FEAT_GTG, which `Features.json` makes hold exactly
+/// when all three fields are non-zero, and permits a processor before
+/// ARMv8.5; `AArch64_HaveS2TG` then reads the stage 2 fields. ECV (63:60) =
+/// 1 with FEAT_ECV (2 would be FEAT_ECV_POFF, which needs EL2).
 pub(crate) const fn id_aa64mmfr0(features: Features) -> u64 {
-    const NO_STAGE_2_GRANULE: u64 = (1 << 40) | (1 << 36) | (1 << 32);
+    const STAGE_2_GRANULES: u64 = (2 << 40) | (1 << 36) | (1 << 32);
     let stage_2 = if features.has(Feature::El2) {
-        NO_STAGE_2_GRANULE
+        STAGE_2_GRANULES
     } else {
         0
     };

@@ -8,8 +8,10 @@
 //! single-copy atomic and in order, so the acquire and release semantics
 //! (`A`, `R`) order nothing further here.
 
+use super::exception::AccessSyndrome;
 use super::exec::{bit, bits, sext, ExecResult, Flow};
 use super::mmu::{DataAccess, DataDirection};
+use super::op::Extend;
 use super::{Cpu, Levels};
 use crate::bus::PhysBus;
 
@@ -116,10 +118,13 @@ impl<L: Levels> Cpu<L> {
         let rn = bits(insn, 9, 5);
         let rt = bits(insn, 4, 0);
         let op = match (bit(insn, 15), bits(insn, 14, 12)) {
-            // LDAPR, LDAPRB, LDAPRH: a load-acquire RCpc.
+            // LDAPR, LDAPRB, LDAPRH: a load-acquire RCpc, which reports its
+            // syndrome with a stage 2 Data Abort on its access.
             (true, 0b100) => {
                 let address = self.base_register(rn)?;
-                let value = self.read_mem(bus, address, size, DataAccess::ORDERED)?;
+                let syndrome =
+                    move || Some(AccessSyndrome::load(size, Extend::Zero, rt).acquire_release());
+                let value = self.read_gpr(bus, address, size, DataAccess::ORDERED, syndrome)?;
                 self.set_x_or_zr(rt, value);
                 return Ok(Flow::Next);
             }
@@ -191,7 +196,9 @@ impl<L: Levels> Cpu<L> {
     /// LDAPUR*, STLUR* (Arm group `ldapstl_unscaled`, FEAT_LRCPC2):
     /// `size 011001 opc 0 imm9 00 Rn Rt`, at `Rn|SP` plus the signed
     /// unscaled `imm9`. `opc` = 00 stores, 01 loads zero-extended, 10 loads
-    /// sign-extended to 64 bits and 11 to 32.
+    /// sign-extended to 64 bits and 11 to 32. Each reports its syndrome,
+    /// with acquire or release semantics, with a stage 2 Data Abort on its
+    /// access.
     pub(crate) fn exec_ldapstl_unscaled<B: PhysBus>(
         &mut self,
         bus: &mut B,
@@ -203,17 +210,25 @@ impl<L: Levels> Cpu<L> {
         let rt = bits(insn, 4, 0);
         let offset = sext(u64::from(bits(insn, 20, 12)), 9);
         let address = self.base_register(rn)?.wrapping_add(offset);
+        let acc = DataAccess::ORDERED;
         if opc == 0b00 {
             let value = self.x_or_zr(rt);
-            self.write_mem(bus, address, size, value, DataAccess::ORDERED)?;
+            let syndrome = move || Some(AccessSyndrome::store(size, rt).acquire_release());
+            self.write_gpr(bus, address, size, value, acc, syndrome)?;
             return Ok(Flow::Next);
         }
-        let value = self.read_mem(bus, address, size, DataAccess::ORDERED)?;
+        let extend = match opc {
+            0b01 => Extend::Zero,
+            0b10 => Extend::Signed64,
+            _ => Extend::Signed32,
+        };
+        let syndrome = move || Some(AccessSyndrome::load(size, extend, rt).acquire_release());
+        let value = self.read_gpr(bus, address, size, acc, syndrome)?;
         let width = 8 << size;
-        let result = match opc {
-            0b01 => value,
-            0b10 => sext(value, width),
-            _ => sext(value, width) & 0xFFFF_FFFF,
+        let result = match extend {
+            Extend::Zero => value,
+            Extend::Signed64 => sext(value, width),
+            Extend::Signed32 => sext(value, width) & 0xFFFF_FFFF,
         };
         self.set_x_or_zr(rt, result);
         Ok(Flow::Next)

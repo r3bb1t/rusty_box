@@ -39,8 +39,8 @@ use crate::boot::{
 use crate::bus::{le_value, AccessWidth, BusFault, PhysAddr, PhysBus, PhysSpan};
 use crate::cpu::{
     Activity, Cpu, CpuConfig, CpuModel, CpuState, DebugStops, El2Unavailable, Levels, NoEl2,
-    PsciConduit, PsciNode, Pstate, PstateRefusal, Reg, Step, StopCause, SysReg, SysRegRefusal,
-    TranslationFault, UndefinedInsn, VReg, WithEl2,
+    NoTranslation, PsciConduit, PsciNode, Pstate, PstateRefusal, Reg, Step, StopCause, SysReg,
+    SysRegRefusal, UndefinedInsn, VReg, WithEl2, WriteEffect,
 };
 use crate::devices::pl011::TX_CAPACITY;
 use crate::devices::virtio::input::InputKind;
@@ -174,10 +174,17 @@ pub enum BuildError {
 impl core::fmt::Display for BuildError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::FirmwareTooLarge => f.write_str("the firmware is larger than a 64 MiB flash bank"),
-            Self::VariablesTooLarge => f.write_str("the variable store is larger than its flash bank"),
+            Self::FirmwareTooLarge => {
+                f.write_str("the firmware is larger than a 64 MiB flash bank")
+            }
+            Self::VariablesTooLarge => {
+                f.write_str("the variable store is larger than its flash bank")
+            }
             Self::LentRamSize { lent, configured } => {
-                write!(f, "{lent} bytes of RAM were lent for a machine configured with {configured}")
+                write!(
+                    f,
+                    "{lent} bytes of RAM were lent for a machine configured with {configured}"
+                )
             }
             Self::DeviceTree(e) => write!(f, "device tree: {e}"),
             Self::Placement(e) => write!(f, "{e}"),
@@ -741,7 +748,11 @@ fn describe(
         push(Edit::set(CHOSEN, "linux,initrd-end", Value::Bytes(end)));
     }
     // `fdt_add_psci_node`.
-    push(Edit::set(PSCI, "compatible", Value::Bytes(PsciNode::COMPATIBLE)));
+    push(Edit::set(
+        PSCI,
+        "compatible",
+        Value::Bytes(PsciNode::COMPATIBLE),
+    ));
     push(Edit::set(PSCI, "method", Value::String(psci.method())));
     push(Edit::set(PSCI, "cpu_suspend", Value::Bytes(&cpu_suspend)));
     push(Edit::set(PSCI, "cpu_off", Value::Bytes(&cpu_off)));
@@ -768,7 +779,8 @@ fn plan<L: Levels>(
     ram: RamSize,
     cpu: CpuModel,
 ) -> Result<Plan, BuildError> {
-    cpu.check_levels::<L>().map_err(BuildError::El2Unavailable)?;
+    cpu.check_levels::<L>()
+        .map_err(BuildError::El2Unavailable)?;
     let ram_len = ram.get();
     let boot = match choice {
         BootChoice::Firmware(_) => BootRecord::Firmware,
@@ -1139,18 +1151,20 @@ pub enum MemoryError {
     /// running the guest, not by a host access that would change them.
     NotRam { addr: u64 },
     /// The virtual address has no translation.
-    Translation { va: u64, fault: TranslationFault },
+    Translation { va: u64, fault: NoTranslation },
 }
 
 impl core::fmt::Display for MemoryError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::NotRam { addr } => write!(f, "{addr:#x} is not in RAM"),
-            Self::Translation { va, fault } => write!(f, "{va:#x} does not translate: {fault}"),
+            Self::Translation { va, .. } => write!(f, "{va:#x} does not translate"),
         }
     }
 }
 
+/// A failed translation's fault is the error's source, which the message
+/// leaves to it.
 impl core::error::Error for MemoryError {
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
@@ -1679,16 +1693,19 @@ impl<S: GuestStorage, L: Levels, I: Instrumentation> VirtMachine<S, L, I> {
         Ok(())
     }
 
-    /// Where data address `va` translates to under the current tables: a
-    /// walk that checks no permission, reads descriptors from RAM only, and
-    /// neither reads nor fills the TLB. A mapping the guest rewrote without
-    /// a `TLBI` shows its new translation here while the guest's own
-    /// accesses may still use the cached one.
+    /// Where data address `va` translates to under the current tables: the
+    /// walks of every stage that translates it (stage 2's as well under
+    /// `HCR_EL2.VM` or `DC`), checking none of the access's permissions,
+    /// reading descriptors from RAM only, and neither reading nor filling
+    /// the TLB. A mapping the guest rewrote without a `TLBI` shows its new
+    /// translation here while the guest's own accesses may still use the
+    /// cached one.
     ///
     /// # Errors
     ///
-    /// [`TranslationFault`] when it has no translation.
-    pub fn virt_to_phys(&self, va: u64) -> Result<u64, TranslationFault> {
+    /// [`NoTranslation`] when it has no translation: the fault, and the
+    /// stage it arose in.
+    pub fn virt_to_phys(&self, va: u64) -> Result<u64, NoTranslation> {
         self.cpu
             .debug_translate(&mut RamView(self.board.storage.ram()), va)
     }
@@ -1790,15 +1807,23 @@ impl<S: GuestStorage, L: Levels, I: Instrumentation> VirtMachine<S, L, I> {
     /// Write a system register as an `MSR` at the highest implemented level
     /// (EL2 with FEAT_EL2, EL1 without) would, with none of the controls
     /// that trap a guest and the effects included: a translation register
-    /// flushes the TLB, a timer register re-evaluates the timer lines before
-    /// the next instruction.
+    /// empties the TLB, whatever the value written, so writing one makes a
+    /// changed translation table seen; a timer register re-evaluates the
+    /// timer lines before the next instruction.
     ///
     /// # Errors
     ///
     /// [`SysRegRefusal`] for a register that does not exist or cannot be
     /// written; nothing changes.
     pub fn sysreg_write(&mut self, reg: SysReg, value: u64) -> Result<(), SysRegRefusal> {
-        self.cpu.host_sysreg_write(reg, value).map(|_effect| ())
+        match self.cpu.host_sysreg_write(reg, value)? {
+            // The processor applied each itself: the TLB's, and the timer
+            // lines' re-evaluation before the next instruction.
+            WriteEffect::None
+            | WriteEffect::FlushTlb
+            | WriteEffect::El10Context
+            | WriteEffect::Timer => Ok(()),
+        }
     }
 
     /// The architectural state now.
@@ -2026,10 +2051,12 @@ impl<S: GuestStorage, I: Instrumentation> VirtMachine<S, WithEl2, I> {
 }
 
 const SNAPSHOT_MAGIC: [u8; 8] = *b"RBA64SNP";
-/// The image layout's version: 13 holds the processor's level set (the
+/// The image layout's version: 14 holds the processor's level set (the
 /// shape's `virtualization`, the EL2 registers), a feature set of 128 bits,
-/// and `RVBAR_ELx` and `RMR_ELx` of the highest level.
-const SNAPSHOT_VERSION: u32 = 13;
+/// `RVBAR_ELx` and `RMR_ELx` of the highest level, each TLB entry's stage 2
+/// permissions, level and Device-ness beside stage 1's, the TLB's kept
+/// stage 2 translations, and its tables of EL1&0 and stage 2 contexts.
+const SNAPSHOT_VERSION: u32 = 14;
 
 /// Everything about how a machine was built that a snapshot depends on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

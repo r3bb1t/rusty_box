@@ -43,6 +43,7 @@ mod ldst;
 #[cfg(test)]
 #[path = "../../tests/unit/load_store.rs"]
 mod load_store;
+mod memattr;
 #[cfg(test)]
 #[path = "../../tests/unit/memory_system.rs"]
 mod memory_system;
@@ -64,6 +65,7 @@ mod simd_arith;
 mod simd_bf16;
 mod simd_fp;
 mod sme;
+mod stage2;
 mod state;
 #[cfg(test)]
 #[path = "../../tests/unit/step.rs"]
@@ -92,8 +94,9 @@ pub use features::{
     CpuModel, El2Unavailable, UnknownCpuModel, ARMV8P6_COUNTER_HZ, QEMU_BACKCOMPAT_COUNTER_HZ,
 };
 pub use history::RecentPcs;
-pub use mmu::{Tlb, TranslationFault};
+pub use mmu::{Ipa, NoTranslation, Tlb, TranslationFault, TranslationStage};
 pub use regs::{CpuState, CpuStateEl2, PstateRefusal, Reg, SysReg, SysRegRefusal, VReg};
+pub(crate) use sysreg::WriteEffect;
 pub(crate) use system::{PsciConduit, PsciNode};
 pub use timer::{TimerLines, VirtualCount};
 pub use wait::Wait;
@@ -573,7 +576,7 @@ pub struct Cpu<L: Levels> {
     pub(crate) sys: SysRegs,
     pub(crate) monitor: ExclusiveMonitor,
     pub(crate) event: wait::EventRegister,
-    pub(crate) tlb: Tlb,
+    pub(crate) tlb: Tlb<L>,
     pub(crate) traces: trace::TraceCache,
     /// Set by anything that may change how the next instruction is fetched
     /// or found — a TLB fill or flush, a write over cached code, a cache
@@ -619,7 +622,7 @@ impl<L: Levels> Cpu<L> {
 
     /// A processor implementing `imp` and the levels `L`, in its reset
     /// state. `L` alone decides FEAT_EL2: whatever `imp` says of it is
-    /// replaced ([`Implementation::with_levels`]).
+    /// replaced ([`features::Implementation::with_levels`]).
     pub(crate) fn implementing(config: CpuConfig, imp: features::Implementation) -> Self {
         let imp = imp.with_levels::<L>();
         Self {

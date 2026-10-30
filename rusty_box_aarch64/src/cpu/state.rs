@@ -6,6 +6,7 @@ use rusty_box_core::SnapError;
 
 use super::el2::{El2State, El2Storage};
 use super::features::{Feature, Implementation};
+use super::mmu::{El10Context, TlbContext};
 use super::regs::{CpuState, CpuStateEl2, PstateRefusal, Reg, RegClass, VReg};
 use super::sysreg::{MDSCR_FIELDS, OSDLR_DLK, RMR_RR};
 use super::timer::VirtualCount;
@@ -240,7 +241,7 @@ impl<L: Levels> Cpu<L> {
         *sys = SysRegs::reset(imp.counter_hz, reset_pc);
         *monitor = ExclusiveMonitor::CLEAR;
         *event = EventRegister::at(false, count);
-        tlb.flush();
+        tlb.reset();
         traces.flush();
         *trace_break = true;
         *in_guarded_page = false;
@@ -443,8 +444,21 @@ impl<L: Levels> Cpu<L> {
     /// the image: the machine drives them from its interrupt controller.
     /// An image of another implementation — other features, another
     /// streaming vector length, another `MIDR_EL1` or another system
-    /// counter — is refused before anything changes.
+    /// counter — is refused before anything changes. An image refused
+    /// later leaves the TLB as out of reset, so that it holds nothing made
+    /// under registers the processor may not hold.
     pub(crate) fn restore<R: SnapRead>(&mut self, r: &mut R) -> SnapResult {
+        self.restore_implementation(r)?;
+        let restored = self.restore_parts(r);
+        if restored.is_err() {
+            self.tlb.reset();
+        }
+        restored
+    }
+
+    /// Read the image's implementation, refusing one that is not this
+    /// processor's; nothing changes.
+    fn restore_implementation<R: SnapRead>(&self, r: &mut R) -> SnapResult {
         let features = u128::from(r.read_u64()?) | (u128::from(r.read_u64()?) << 64);
         let max_svl = r.read_u32()?;
         let midr = r.read_u64()?;
@@ -457,6 +471,12 @@ impl<L: Levels> Cpu<L> {
         if midr != self.imp.midr || counter_hz != self.imp.counter_hz.get() {
             return Err(SnapError::Invalid("snapshot of another processor"));
         }
+        Ok(())
+    }
+
+    /// [`Cpu::restore`] past the implementation, leaving what it restored
+    /// so far where it refuses the image.
+    fn restore_parts<R: SnapRead>(&mut self, r: &mut R) -> SnapResult {
         let mut x = [0u64; 31];
         for reg in x.iter_mut() {
             *reg = r.read_u64()?;
@@ -560,7 +580,13 @@ impl<L: Levels> Cpu<L> {
                 "processor retired more instructions than ticks passed",
             ));
         }
-        self.tlb.restore(r, self.imp.features, sys.tcr_el1)?;
+        let el2_regs = el2.get().map(|state| &state.regs);
+        let tlb_context = TlbContext {
+            features: self.imp.features,
+            el10: El10Context::of(&sys, el2_regs),
+            sctlr_el2: el2_regs.map_or(0, |regs| regs.sctlr),
+        };
+        self.tlb.restore(r, &tlb_context)?;
         let history_len = usize::from(r.read_u8()?);
         if history_len > PC_HISTORY {
             return Err(SnapError::Invalid(

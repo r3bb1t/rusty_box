@@ -289,7 +289,7 @@ is) must reproduce, are:
 
 | Part | Model |
 |---|---|
-| Processor | One of two models (`VirtConfig::cpu`, `CpuModel`). `cortex-a57`, the default: Cortex-A57-shaped ARMv8.0, the whole ARMv8.0 FP and Advanced SIMD instruction set (integer and floating point, vector and scalar, saturation setting FPSR.QC), the Cortex-A57's optional Cryptographic Extension (AES, 64-bit PMULL, SHA-1, SHA-256) and CRC32, as QEMU's `cortex-a57` has them, with QEMU's 62.5 MHz system counter. `armv9.2`: an Armv9.2 processor with SME and SME2 and no SVE (the features below), Streaming SVE vectors of 128 to 512 bits, `MIDR_EL1` 0x000F_0520 (implementer 0, a software model) and the 1 GHz counter Armv8.6 and later require. Both: EL0 and EL1, and on the Cortex-A57 EL2 with `MachineBuilder::with_el2` (see below), AArch64 only, the Cortex-A57's caches as `CTR_EL0`, `CLIDR_EL1` and `CCSIDR_EL1` report them, 4 KiB-granule stage-1 MMU with TLB, exclusives, PSCI 1.1 (DEN 0022D) over `HVC`, or over `SMC` with EL2, the conduits QEMU's `virt` provides (see "Where the references differ") |
+| Processor | One of two models (`VirtConfig::cpu`, `CpuModel`). `cortex-a57`, the default: Cortex-A57-shaped ARMv8.0, the whole ARMv8.0 FP and Advanced SIMD instruction set (integer and floating point, vector and scalar, saturation setting FPSR.QC), the Cortex-A57's optional Cryptographic Extension (AES, 64-bit PMULL, SHA-1, SHA-256) and CRC32, as QEMU's `cortex-a57` has them, with QEMU's 62.5 MHz system counter. `armv9.2`: an Armv9.2 processor with SME and SME2 and no SVE (the features below), Streaming SVE vectors of 128 to 512 bits, `MIDR_EL1` 0x000F_0520 (implementer 0, a software model) and the 1 GHz counter Armv8.6 and later require. Both: EL0 and EL1, and on the Cortex-A57 EL2 with `MachineBuilder::with_el2` (see below), AArch64 only, the Cortex-A57's caches as `CTR_EL0`, `CLIDR_EL1` and `CCSIDR_EL1` report them, 4 KiB-granule MMU, stage 1 and with EL2 stage 2, with a TLB holding both stages' translations, exclusives, PSCI 1.1 (DEN 0022D) over `HVC`, or over `SMC` with EL2, the conduits QEMU's `virt` provides (see "Where the references differ") |
 | Interrupts | GICv2 without the Security Extensions, for one processor, as IHI 0048B specifies it, in QEMU's structure: both interrupt groups, with Group 0 on FIQ under `FIQEn`, the Group 1 aliases (`GICC_AIAR`, `GICC_AEOIR`, `GICC_AHPPIR`, `GICC_ABPR`), preemption by group priority, the running priority and active priority registers, and 4 KiB distributor and 8 KiB CPU interface regions; + GICv2m frame |
 | Timers | EL1 physical and virtual generic timers; with EL2, the EL2 physical timer (`CNTHP_*`, PPI 10), `CNTVOFF_EL2` and `CNTHCTL_EL2`'s traps and event stream |
 | Devices | PL011 UART (`UARTPeriphID2` revision 1, QEMU's ID, as DDI 0183F describes the revisions up to r1p4: a 16-entry receive FIFO with overrun and break status, receive interrupts at the `UARTIFLS` level, modem-status interrupts on line changes, loopback, a receiver gated by `UARTEN` and `RXE`, a transmitter gated by `UARTEN` and `TXE` whose 16-entry transmit FIFO holds what is written meanwhile, transmit interrupts as the transmit FIFO drains through the `UARTIFLS` level, and the receive timeout counted in bit periods of the programmed baud rate on the machine's clock, while characters themselves cross the line in no time; see "Where the references differ"), PL031 RTC (r1p3, as DDI 0224C describes it: stopped until `RTCCR` starts it, zeroed by any later `RTCCR` write, stopped again by a system reset), PL061 GPIO as DDI 0190B describes it (address-masked `GPIODATA`, edge and level detection on the lines' levels, outputs included) with QEMU's `gpio-key` power button on line 3, CFI flash ×2 (QEMU `pflash_cfi01` semantics, whole 64 MiB banks decoded), `fw_cfg` (traditional and DMA interfaces, no files), 32 virtio-mmio transports (QEMU's legacy layout while empty; non-legacy, as QEMU's `force-legacy=false`, once the host plugs in QEMU's 2D `virtio-gpu-device` with its EDID, `virtio-keyboard-device`, `virtio-tablet-device` or `virtio-blk-device` over a raw image in memory or a host file, which take the highest free ones), an empty PCIe ECAM/windows |
@@ -433,8 +433,39 @@ resets at EL1, `HVC` is the PSCI call, and the EL2 registers and
 instructions are UNDEFINED. The level set is a type parameter of the
 machine and its processor (`NoEl2` or `WithEl2`), so a processor without
 EL2 holds no EL2 state and every EL2 rule, testing a constant, compiles
-away from it. Stage 2 translation and the GIC's
-virtualization extensions are not built yet (see "Not implemented").
+away from it.
+
+Under `HCR_EL2.VM` or `DC`, stage 2 translates the EL1&0 regime's
+intermediate physical addresses as Arm's `AArch64_S2Translate` and
+`AArch64_S2Walk` define it: `VTCR_EL2`'s `T0SZ`, `SL0` and `PS` with the
+4 KiB granule, which `ID_AA64MMFR0_EL1.TGran4_2` offers (2), up to 16
+concatenated start tables, the configurations Arm refuses taking a level 0
+Translation fault; `S2AP`, `XN` and the access flag; and `MemAttr`
+combined with stage 1's attributes by `S2CombineS1MemAttrs`, so that
+Device memory at either stage refuses a misaligned access. Stage 1's walk
+reads its descriptors through stage 2 too, `HCR_EL2.PTW` refusing it
+Device memory there. A stage 2 abort is taken to EL2 with `HPFAR_EL2`
+holding the IPA where `IPAValid` says so, `S1PTW` set on stage 1's walk,
+and for a load or store of one general-purpose register without writeback
+the instruction syndrome (`ISV`, `SAS`, `SSE`, `SRT`, `SF`, `AR`) a
+hypervisor's emulation of MMIO reads. `AT S12E*` translates by both
+stages and reports the combined attributes, `AT S1E*` the IPA, and a
+debugger's `virt_to_phys` walks both stages. The TLB holds both stages'
+results, each stage's permissions and memory type apart, and is emptied by
+every TLB maintenance instruction. Its EL1&0 entries are tagged with the
+context they were made in — the values of the EL1 translation registers,
+`VTTBR_EL2`, `VTCR_EL2` and the `HCR_EL2` bits that decide which walks
+are made (`VM`, `DC`, `PTW`, `TGE`) — up to fifteen contexts at once, so
+a hypervisor's switch to its own registers and back to a guest's finds
+the translations each had, where a write that changes one of the
+registers makes the next access find its context anew, never using an
+entry made under other values. The stage 2 translations of the IPAs a
+walk reads its descriptors at, and of its output, are kept beside the
+entries, tagged with stage 2's context alone (`VTTBR_EL2`, with its VMID,
+and `VTCR_EL2`; fifteen at once), as Arm tags them with the VMID: a
+guest's switch between its processes keeps them, and one translation
+walks stage 2 once for each IPA page it reads. The GIC's virtualization
+extensions are not built yet (see "Not implemented").
 The Armv9.2 model is refused EL2 (`BuildError::El2Unavailable`):
 `Features.json` requires of an Armv9.2 processor with EL2 FEAT_VHE,
 FEAT_FGT, FEAT_HCX, FEAT_EVT, FEAT_EVT2, FEAT_S2FWB and FEAT_XNX, none of
@@ -1407,12 +1438,101 @@ one open.
   ([docs/qemu-upstream-bugs.md](../docs/qemu-upstream-bugs.md), "Deliberate
   QEMU omissions"); the EL2 vectors leave them out. `MDRAR_EL1` reports no
   ROM table (`Valid` 0b00), as QEMU's does.
+- **The stage 2 granule is offered at stage 2.** With EL2,
+  `ID_AA64MMFR0_EL1.TGran4_2` reads 2 and `TGran16_2` and `TGran64_2` 1:
+  FEAT_GTG, saying at stage 2 what stage 1's fields say, which Arm's data
+  permits before ARMv8.5. QEMU's Cortex-A57 reads 0 in all three, each
+  meaning "as stage 1"; a hypervisor reads the same granules either way.
+- **Stage 2's IMPLEMENTATION DEFINED choices are stage 1's.** The
+  pseudocode asks both stages the same questions: a `VTCR_EL2.T0SZ` below
+  64 − PAMax (20) or above 39 takes a level 0 Translation fault ("Fault on
+  TxSZ value below minimum", "... above maximum"), `TG0` naming a granule
+  this processor lacks is the 4 KiB one ("TG0 encoded granule size"), the
+  Contiguous bit is treated as 0, and a clear access flag faults for cache
+  maintenance too. A synchronous External abort on stage 2's walk reports
+  no instruction syndrome ("ISV on second stage translation table walk"
+  FALSE, the value FEAT_RAS forces on the Armv9.2 model), where QEMU's
+  `merge_syn_data_abort` reports the instruction's. Stage 1 reports its
+  effective shareability under stage 2 as without ("Apply effective
+  shareability at stage 1" TRUE), which nothing a guest reads tells apart:
+  the two values differ only for Device and Non-cacheable memory, which
+  `S2CombineS1MemAttrs` and `PAREncodeShareability` make Outer Shareable
+  whatever stage 1 said.
+- **`HPFAR_EL2` keeps its value for a stage 2 fault whose IPA Arm does not
+  report.** `IPAValid` reports the IPA for a Translation, Access flag or
+  Address size fault, and on stage 1's walk for a Permission fault too;
+  for every other stage 2 fault `AArch64_ReportException` leaves
+  `HPFAR_EL2` ARBITRARY, and here it keeps its value. QEMU writes the IPA
+  for every stage 2 fault, which Arm permits too; Linux's KVM finds the
+  IPA of a Permission fault with `AT S1E1R`, as Arm intends.
+- **The TLB keeps the entries of an EL1&0 context it leaves.** Arm's TLB
+  tags an entry with its VMID and ASID and keeps it until a TLB
+  maintenance instruction removes it, so a switch to other values and back
+  may find it again; software that changes a translation table issues the
+  `TLBI` Arm requires. This TLB keeps the entries of up to fifteen sets of
+  the EL1&0 translation registers' values with EL2, and the stage 2
+  translations of up to fifteen pairs of `VTTBR_EL2` and `VTCR_EL2`, and
+  never uses one under other values. QEMU 11.1.2 flushes its TLB on a `VTTBR_EL2` write that
+  changes the VMID and on a `TTBRn_EL1` write that changes the ASID
+  (`target/arm/helper.c` `vttbr_write`, `vmsa_ttbr_write`), so a guest that
+  rewrites a table without the `TLBI` and then returns to it sees the new
+  mapping there, and the old one here, as Arm permits.
+- **`LDLAR` and `STLLR` report `AR` 1 with a stage 2 Data Abort.** The
+  Arm ARM's `ESR_ELx.AR` is 1 for an instruction with acquire or release
+  semantics, and the LORegion forms have them (Arm `CreateAccDescLOR`:
+  `acqsc`, `relsc`), within their LORegion. QEMU 11.1.2 passes the
+  encoding's `o0` bit as `AR` (`target/arm/tcg/translate-a64.c`
+  `trans_LDAR`, `trans_STLR`: `a->lasr`), which is 0 for them
+  ([docs/qemu-upstream-bugs.md](../docs/qemu-upstream-bugs.md) entry 26).
+- **A stage 2 fault past a split access's first byte reports no
+  instruction syndrome.** `Mem[]` splits a misaligned access into bytes
+  and clears `accdesc.lowestaddress` after the first, and
+  `AArch64_InstructionSyndromeValid` reports `ISV` only for a fault at the
+  lowest address; so a load or store crossing into a page stage 2 refuses
+  is taken to EL2 with `ISV` 0, and the hypervisor decodes the instruction
+  itself. QEMU's `merge_syn_data_abort` reports the instruction's syndrome
+  for every stage 2 abort on the access, wherever in it the fault lies
+  ([docs/qemu-upstream-bugs.md](../docs/qemu-upstream-bugs.md) entry 27).
+- **A reserved `MAIR_ELx` attribute is Device-nGnRnE.**
+  `S1DecodeMemAttrs` maps a reserved encoding (`Unpredictable_RESMAIR`) to
+  an UNKNOWN allocated one, which the pseudocode's own
+  `ConstrainUnpredictableBits` makes zeros: Device-nGnRnE, so a misaligned
+  access to it faults and `PAR_EL1.ATTR` reports 0x00. A reserved stage 2
+  `MemAttr` is Normal Non-cacheable, 0b0101 (`Unpredictable_S2RESMEMATTR`'s
+  `Constraint_NC`). QEMU takes a `MAIR_ELx` attribute as written, Normal
+  unless its high four bits are zero, and reports it so.
+- **`PAR_EL1.ATTR` reports the attributes the translation gives.**
+  `AArch64_AT` encodes the attributes of the translation, so with
+  `SCTLR_ELx.C` clear stage 1's Normal memory is reported Non-cacheable
+  (`AArch64_S1TreatAsNormalNC`), 0x44, as is stage 2's under `HCR_EL2.CD`
+  (`AArch64_S2TreatAsNormalNC`). QEMU reports stage 1's `MAIR_ELx`
+  attribute as written whatever `SCTLR_ELx.C` says, which Arm permits: the
+  IMPLEMENTATION DEFINED `ReportedPARAttrs` may report the descriptor's
+  attribute rather than the resulting one, and this model reports the
+  resulting one, as the function as Arm writes it does. Without FEAT_XS the
+  encodings of memory with XS = 0 — 0x40, 0xA0, and Device with bit 0 set
+  — are reserved, and `PAR_EL1.ATTR` takes `MAIR_ELx`'s encodings; the
+  pseudocode's `EncodePARAttrs` reaches them without testing the feature,
+  Normal Write-Back memory at stage 1 having XS = 0 whatever the processor,
+  so here a processor without FEAT_XS reports such memory as if XS were
+  1 (0x44 rather than 0x40), and one with it as the pseudocode does.
+- **A reserved `SH` of 0b01 is Outer Shareable.** `DecodeShareability`
+  takes the reserved value through
+  `ConstrainUnpredictable(Unpredictable_Shareability)`, which permits Outer,
+  Inner or Non-shareable; this model takes `Constraint_OSH`, at either
+  stage, so `PAR_EL1.SH` reports 0b10 for memory a descriptor maps with
+  `SH` 0b01. QEMU passes the descriptor's `SH` through to `PAR_EL1.SH` as
+  written, 0b01, which `PAREncodeShareability` never gives
+  (`target/arm/tcg/cpregs-at.c` `par_el1_shareability`;
+  [docs/qemu-upstream-bugs.md](../docs/qemu-upstream-bugs.md) entry 28).
 - **`DC ZVA` on Device memory is an alignment fault.** Arm ARM
   `AArch64.S1HasAlignmentFault` faults every `DC ZVA` to Device memory, and
-  with the MMU off every data access is to Device memory. QEMU 11.1.2 zeroes
-  the block instead (`target/arm/tcg/helper-a64.c` `HELPER(dc_zva)`, whose
-  comment notes that it does not implement the architecturally mandated
-  fault); this model takes the fault.
+  with the MMU off every data access is to Device memory; under stage 2,
+  `AArch64_S2HasAlignmentFaultDueToMemType` faults it too where stage 2
+  maps Device memory, a stage 2 Alignment fault taken to EL2. QEMU 11.1.2
+  zeroes the block instead at either stage (`target/arm/tcg/helper-a64.c`
+  `HELPER(dc_zva)`, whose comment notes that it does not implement the
+  architecturally mandated fault); this model takes the fault.
 - **The Event Register is set by exception returns and the event stream
   too.** Arm ARM `AArch64.ExceptionReturn` sets it (`SendEventLocal`), and
   so does each event of the virtual event stream (`TestEventCNTV`, under
@@ -1843,19 +1963,12 @@ one open.
   FEAT_SME_FA64, …), on the Armv9.2 model: none is an Armv9.2
   requirement, and the SVE instructions it has are the ones FEAT_SME makes
   legal in Streaming SVE mode.
-- Of EL2: stage-2 translation (`HCR_EL2.VM`, `DC`'s stage-2 half,
-  `VTCR_EL2` and `VTTBR_EL2` hold their bits and translate nothing, so
-  `AT S12E*` give the stage 1 result whatever they say; and
-  `ID_AA64MMFR0_EL1`'s `TGran4_2`, `TGran16_2` and `TGran64_2` read 1,
-  offering no stage-2 granule (FEAT_GTG), where QEMU's Cortex-A57 reads 0,
-  each as its stage 1 field: Arm's data permits both before ARMv8.5, and a
-  hypervisor that reads them, Linux's KVM among them, declines stage 2)
-  and the GIC's
-  virtualization extensions (no virtual CPU interface raises a virtual
-  interrupt; only `HCR_EL2` does, and the device tree's GIC node has no
-  GICH and GICV frames or maintenance interrupt, which QEMU's
-  `virtualization=on` board gives it, so Linux's KVM finds no vGIC), so a
-  hypervisor's guest cannot run yet; FEAT_VHE and the later EL2 features.
+- Of EL2: the GIC's virtualization extensions (no virtual CPU interface
+  raises a virtual interrupt; only `HCR_EL2` does, and the device tree's
+  GIC node has no GICH and GICV frames or maintenance interrupt, which
+  QEMU's `virtualization=on` board gives it, so Linux's KVM finds no vGIC
+  and cannot give a guest its interrupts yet); FEAT_VHE and the later EL2
+  features.
 - SHA-512, SHA-3, SM3 and SM4 (Armv8.2 options) on any processor: every
   QEMU CPU model that has them also has features the core does not
   implement yet (SVE), so no model to take their ID values from matches
