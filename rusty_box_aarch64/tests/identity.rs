@@ -14,8 +14,9 @@ use rusty_box_aarch64::boot::fdt;
 use rusty_box_aarch64::{
     BoardIdentity, EdidDate, EdidWeek, EdidWeekNumber, EdidYear, IdentityError, IdentityField,
     IdentityNames, IdentityProblem, InputDeviceId, InputProductId, InputVendorId, InputVersion,
-    LentStorage, MachineBuilder, MemoryLoan, MsiFrameIidr, NoEl2, NotAnEdidWeek, NotAnEdidYear,
-    NotPnpId, PnpId, RamSize, Reg, RunBudget, StopReason, VirtConfig, VirtMachine, VirtioVendorId,
+    LentStorage, MachineBuilder, MemoryLoan, MsiFrameField, MsiFrameFields, MsiFrameIidr, NoEl2,
+    NotAnEdidWeek, NotAnEdidYear, NotMsiFrameFields, NotPnpId, PnpId, RamSize, Reg, RunBudget,
+    StopReason, VirtConfig, VirtMachine, VirtioVendorId,
 };
 
 const RAM_LEN: usize = 4 << 20;
@@ -205,17 +206,26 @@ fn a_virtio_transport_reads_the_identitys_vendor() {
     }
 }
 
-/// The GICv2m frame's `MSI_IIDR` is the identity's: by default 0, naming
-/// no maker, where QEMU's reads its product ID, 'Q' (`PRODUCT_ID_QEMU`),
-/// and a host's own value where it gives one.
+/// The GICv2m frame's `MSI_IIDR` is the identity's (BSA 1.0C, I.9.3): by
+/// default 0, naming no product and no implementer, where QEMU's reads its
+/// product ID, 'Q' (`PRODUCT_ID_QEMU`); a host's product, revision and
+/// JEP106 code where it gives them, the architecture version 0 between.
 #[test]
 fn the_msi_frame_reads_the_identitys_iidr() {
+    let fields = MsiFrameFields {
+        product: 0x123,
+        revision: 0x5,
+        jep106_continuation: 0x6,
+        jep106_identity: 0x78,
+    };
+    let iidr = MsiFrameIidr::new(fields).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(iidr.fields(), fields);
     let hosts = BoardIdentity::new(IdentityNames {
-        msi_frame_iidr: MsiFrameIidr::new(0x1234_5678),
+        msi_frame_iidr: iidr,
         ..IdentityNames::RUSTY_BOX
     })
     .unwrap_or_else(|e| panic!("{e}"));
-    for (identity, iidr) in [(BoardIdentity::RUSTY_BOX, 0), (hosts, 0x1234_5678)] {
+    for (identity, iidr) in [(BoardIdentity::RUSTY_BOX, 0), (hosts, 0x1230_5678)] {
         let mut ram = vec![0u8; RAM_LEN];
         let mut m = bare(&mut ram, identity, Devices::None);
         assert_eq!(guest_load(&mut m, GIC_V2M_BASE + MSI_IIDR), iidr);
@@ -367,6 +377,60 @@ fn an_identity_the_board_cannot_give_is_refused() {
         refused(|n| n.compatible = &["acme,board+2.0_x/y-z", "acme,board"]),
         None
     );
+}
+
+/// An `MSI_IIDR` is made only of fields within their bits (BSA 1.0C,
+/// I.9.3), and a field wider than its bits is refused, named.
+#[test]
+fn an_msi_iidr_field_wider_than_its_bits_is_refused() {
+    let widest = MsiFrameFields {
+        product: 0xFFF,
+        revision: 0xF,
+        jep106_continuation: 0xF,
+        jep106_identity: 0x7F,
+    };
+    // Every field at its widest: the architecture version, bits [19:16],
+    // and bit 7 stay 0.
+    assert_eq!(
+        MsiFrameIidr::new(widest).map(MsiFrameIidr::get),
+        Ok(0xFFF0_FF7F)
+    );
+    for (wide, field) in [
+        (
+            MsiFrameFields {
+                product: 0x1000,
+                ..widest
+            },
+            MsiFrameField::Product,
+        ),
+        (
+            MsiFrameFields {
+                revision: 0x10,
+                ..widest
+            },
+            MsiFrameField::Revision,
+        ),
+        (
+            MsiFrameFields {
+                jep106_continuation: 0x10,
+                ..widest
+            },
+            MsiFrameField::Jep106Continuation,
+        ),
+        (
+            MsiFrameFields {
+                jep106_identity: 0x80,
+                ..widest
+            },
+            MsiFrameField::Jep106Identity,
+        ),
+    ] {
+        assert_eq!(
+            MsiFrameIidr::new(wide),
+            Err(NotMsiFrameFields { field }),
+            "{field:?}"
+        );
+    }
 }
 
 /// The EDID's maker, week and year are values EDID can give, or are not

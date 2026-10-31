@@ -328,19 +328,103 @@ impl InputVersion {
     }
 }
 
-/// What the GICv2m frame's `MSI_IIDR` reads: the frame's implementer and
-/// product, in the fields Arm's Server Base System Architecture gives the
-/// register (ARM-DEN-0029, version 2.2, pages 35 to 39).
+/// What the GICv2m frame's `MSI_IIDR` reads (Arm Base System Architecture
+/// 1.0C, DEN0094C, I.9.3): the frame's product in bits [31:20], its
+/// revision in bits [15:12] and its implementer's JEP106 code in bits
+/// [11:0], the continuation code in [11:8] and the identity code in [6:0].
+/// Bits [19:16], the architecture version, are 0 for GICv2m v0, and bit 7
+/// is always 0.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MsiFrameIidr(u32);
 
+/// The fields of an [`MsiFrameIidr`] as a host gives them, each within the
+/// bits the register holds it in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MsiFrameFields {
+    /// The product, 12 bits.
+    pub product: u16,
+    /// The revision, 4 bits.
+    pub revision: u8,
+    /// The implementer's JEP106 continuation code, 4 bits.
+    pub jep106_continuation: u8,
+    /// The implementer's JEP106 identity code, 7 bits.
+    pub jep106_identity: u8,
+}
+
+/// One of an [`MsiFrameFields`]' fields.
+///
+/// Closed (R5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MsiFrameField {
+    Product,
+    Revision,
+    Jep106Continuation,
+    Jep106Identity,
+}
+
+/// A field wider than the bits `MSI_IIDR` holds it in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NotMsiFrameFields {
+    pub field: MsiFrameField,
+}
+
+impl core::fmt::Display for NotMsiFrameFields {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let (field, bits) = match self.field {
+            MsiFrameField::Product => ("product", 12),
+            MsiFrameField::Revision => ("revision", 4),
+            MsiFrameField::Jep106Continuation => ("JEP106 continuation code", 4),
+            MsiFrameField::Jep106Identity => ("JEP106 identity code", 7),
+        };
+        write!(f, "the MSI_IIDR {field} is wider than its {bits} bits")
+    }
+}
+
+impl core::error::Error for NotMsiFrameFields {}
+
 impl MsiFrameIidr {
-    /// No implementer and no product: every field 0.
+    /// No product, revision 0 and no implementer: every field 0.
     pub const NONE: Self = Self(0);
 
-    /// The register's value `value`.
-    pub const fn new(value: u32) -> Self {
-        Self(value)
+    /// The register `fields` make, with the architecture version 0.
+    ///
+    /// # Errors
+    ///
+    /// [`NotMsiFrameFields`] names the first field wider than its bits.
+    pub const fn new(fields: MsiFrameFields) -> Result<Self, NotMsiFrameFields> {
+        let MsiFrameFields {
+            product,
+            revision,
+            jep106_continuation,
+            jep106_identity,
+        } = fields;
+        let field = if product > 0xFFF {
+            MsiFrameField::Product
+        } else if revision > 0xF {
+            MsiFrameField::Revision
+        } else if jep106_continuation > 0xF {
+            MsiFrameField::Jep106Continuation
+        } else if jep106_identity > 0x7F {
+            MsiFrameField::Jep106Identity
+        } else {
+            return Ok(Self(
+                (product as u32) << 20
+                    | (revision as u32) << 12
+                    | (jep106_continuation as u32) << 8
+                    | jep106_identity as u32,
+            ));
+        };
+        Err(NotMsiFrameFields { field })
+    }
+
+    /// The register's fields.
+    pub const fn fields(self) -> MsiFrameFields {
+        MsiFrameFields {
+            product: (self.0 >> 20) as u16,
+            revision: ((self.0 >> 12) & 0xF) as u8,
+            jep106_continuation: ((self.0 >> 8) & 0xF) as u8,
+            jep106_identity: (self.0 & 0x7F) as u8,
+        }
     }
 
     /// The register's value.
@@ -562,8 +646,8 @@ impl IdentityNames<'static> {
     /// "RBOX" in the register's little-endian bytes, and the input vendor
     /// is "RB" read big-endian, 0x5242, whose products are numbered here:
     /// the keyboard 1 and the tablet 2, each at version 1. The GICv2m
-    /// frame names no implementer and no product, as the project has no
-    /// implementer code.
+    /// frame names no product and no implementer: BSA I.9.3 asks for the
+    /// implementer's JEP106 code, and the project holds none.
     pub const RUSTY_BOX: Self = Self {
         model: "Rusty Box virt",
         compatible: &["rusty-box,virt"],

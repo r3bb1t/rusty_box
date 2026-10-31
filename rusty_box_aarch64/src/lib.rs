@@ -72,8 +72,8 @@ pub use disk::{Access, Disk};
 pub use identity::{
     BoardIdentity, CompatibleList, CompatibleStrings, EdidDate, EdidProductCode, EdidWeek,
     EdidWeekNumber, EdidYear, IdentityError, IdentityField, IdentityNames, IdentityProblem,
-    InputDeviceId, InputProductId, InputVendorId, InputVersion, MsiFrameIidr, NotAnEdidWeek,
-    NotAnEdidYear, NotPnpId, PnpId, VirtioVendorId,
+    InputDeviceId, InputProductId, InputVendorId, InputVersion, MsiFrameField, MsiFrameFields,
+    MsiFrameIidr, NotAnEdidWeek, NotAnEdidYear, NotMsiFrameFields, NotPnpId, PnpId, VirtioVendorId,
 };
 pub use instrumentation::{Execution, Instrumentation, NoInstrumentation};
 #[cfg(feature = "alloc")]

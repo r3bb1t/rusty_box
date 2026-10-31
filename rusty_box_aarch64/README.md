@@ -1927,14 +1927,14 @@ one open.
   1, and a display of PNP ID
   "RBX", which the UEFI Forum's registry assigns to no one (its export of
   2026-10-31), product 1, named "Rusty Box", made in 2026 with no week
-  given; a GICv2m `MSI_IIDR` of 0, which names no implementer and no
-  product: QEMU's own `gicv2m_read`, which cites the Server Base System
-  Architecture 2.2 (ARM-DEN-0029, pages 35 to 39), leaves the implementer
-  field 0 for want of one and the architecture revision 0 as that
-  specification says, and adds only its product ID (the specification
-  itself is not on disk); and no device tree has QEMU's platform bus, on
-  which the board puts no device. A tree the host gives is named the same
-  way: QEMU's
+  given; a GICv2m `MSI_IIDR` of 0, which names no product and no
+  implementer, with the architecture version 0, GICv2m v0 (Arm Base
+  System Architecture 1.0C, DEN0094C, I.9.3). That section asks for the
+  implementer's JEP106 code, which this project does not hold, so the
+  field reads 0, as QEMU's does; a host with a code gives it, and its
+  product and revision, through `MsiFrameFields`. And no device tree
+  has QEMU's platform bus, on which the board puts no device. A tree the
+  host gives is named the same way: QEMU's
   `-dtb` keeps a tree's own names, but a tree dumped from QEMU would then
   tell the guest it is QEMU's `virt` (Linux's binding for
   `linux,dummy-virt` is titled "QEMU virt machine"), so a host names the
