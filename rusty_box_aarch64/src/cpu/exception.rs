@@ -10,8 +10,8 @@
 //! `HCR_EL2.TEA` as the class's function reads them).
 
 use super::el2::{
-    El2Regs, El2Storage, HCR_AMO, HCR_FMO, HCR_IMO, HCR_TEA, HCR_TGE, HCR_VF, HCR_VI, HCR_VSE,
-    HPFAR_FIPA, MDCR_TDE, VSESR_MASK,
+    hpfar_fipa, El2Regs, El2Storage, HCR_AMO, HCR_FMO, HCR_IMO, HCR_TEA, HCR_TGE, HCR_VF, HCR_VI,
+    HCR_VSE, MDCR_TDE, VSESR_MASK,
 };
 use super::features::Feature;
 use super::mmu::Ipa;
@@ -769,15 +769,16 @@ impl<L: Levels> Cpu<L> {
 
     /// Take synchronous exception `e` raised by the instruction at `pc`. A
     /// stage 2 abort taken to EL2 reports its IPA in `HPFAR_EL2.FIPA`
-    /// (`AArch64_ReportException`: IPA bits 47:12 in bits 39:4, `NS` 0 with
-    /// no Secure EL2) where `IPAValid`, and leaves it as it was where it is
-    /// ARBITRARY.
+    /// (`AArch64_ReportException`: IPA bits 47:12 in bits 39:4, with
+    /// FEAT_LPA bits 51:12 in bits 43:4, `NS` 0 with no Secure EL2) where
+    /// `IPAValid`, and leaves it as it was where it is ARBITRARY.
     pub(crate) fn take_sync_exception(&mut self, e: Exception, pc: u64) -> ExceptionTaken {
         let from = self.pstate.el;
         let target = self.exception_target(&e);
         let to = target.el();
         if let (Target::El2(proof), Some(ipa)) = (target, e.hpfar()) {
-            self.el2_state.proven(proof).regs.hpfar = ((ipa.get() >> 12) << 4) & HPFAR_FIPA;
+            let fipa = hpfar_fipa(self.imp.features);
+            self.el2_state.proven(proof).regs.hpfar = ((ipa.get() >> 12) << 4) & fipa;
         }
         let class = e.class;
         // ESR_ELx.IL is 1: every A64 instruction is 32 bits.

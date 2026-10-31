@@ -779,8 +779,9 @@ fn cache_maintenance_by_address_translates_and_checks_its_own_permissions() {
     // size is an address size fault at level 0, after TBI0 drops the tag.
     m.cpu.sys.sctlr_el1 &= !1;
     let tagged = 0x5A00_0000_0000_0000 | EL1_DATA;
+    let beyond = 1 << id::pa_bits(m.cpu.imp.features);
     for insn in cleans.into_iter().chain([IC_IVAU, DC_IVAC]) {
-        for (address, faults) in [(EL1_DATA, false), (1 << id::PA_BITS, true), (tagged, true)] {
+        for (address, faults) in [(EL1_DATA, false), (beyond, true), (tagged, true)] {
             m.cpu.x[1] = address;
             let want = if faults {
                 cm(El::El1, ADDRESS_SIZE_L0, address)

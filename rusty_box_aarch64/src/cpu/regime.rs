@@ -10,7 +10,10 @@
 //! `AArch64_S1StartLevel`, `AArch64_MaxTxSZ`, `AArch64_S1MinTxSZ`,
 //! `AArch64_BlockDescSupported`, `AArch64_S1DecodeTG0`,
 //! `AArch64_S1DecodeTG1`, `AArch64_S2DecodeTG0`, `AArch64_HaveS1TG` and
-//! `AArch64_HaveS2TG`.
+//! `AArch64_HaveS2TG`; for where a walk's addresses are held and how wide
+//! they are, `AArch64_PAMax`, `AArch64_OAOutOfRange`,
+//! `AArch64_S1TTBaseAddress`, `AArch64_S2TTBaseAddress`,
+//! `AArch64_NextTableBase`, `AArch64_S1LeafBase` and `AArch64_S2LeafBase`.
 //!
 //! The walk parameters are gathered here, one place per regime; the walk
 //! itself, the TLB and the access paths are `mmu.rs`'s.
@@ -146,14 +149,15 @@ impl Granule {
     /// The level a stage 1 walk with the granule for `TxSZ` `txsz` starts
     /// at ([`Granule::start_level`]) on a processor implementing
     /// `features`, or `None` where every translation takes a level 0
-    /// Translation fault: a `TxSZ` outside [`S1_MIN_TXSZ`] and
+    /// Translation fault: a `TxSZ` outside [`Granule::s1_min_txsz`] and
     /// [`Granule::max_txsz`] (`AArch64_S1TxSZFaults`, with the
     /// IMPLEMENTATION DEFINED "Fault on TxSZ value above maximum" and "...
-    /// below minimum" TRUE, as QEMU's `param.tsz_oob`). The one test the
-    /// walk and a snapshot's TLB both make (R5).
+    /// below minimum" TRUE, as QEMU's `param.tsz_oob`; with FEAT_LVA the
+    /// second is no choice). The one test the walk and a snapshot's TLB both
+    /// make (R5).
     #[inline(always)]
     pub(crate) const fn s1_start(self, txsz: u32, features: Features) -> Option<u32> {
-        if txsz >= S1_MIN_TXSZ && txsz <= self.max_txsz(features) {
+        if txsz >= self.s1_min_txsz(features) && txsz <= self.max_txsz(features) {
             Some(self.start_level(64 - txsz))
         } else {
             None
@@ -161,11 +165,24 @@ impl Granule {
     }
 
     /// Whether a walk with the granule starting at `start` can end at
-    /// `level`, at either stage: at or below the start, at a level the
-    /// granule has leaves at ([`Granule::leaf_at`]).
+    /// `level` on a processor implementing `features`, at either stage: at
+    /// or below the start, at a level the granule has leaves at
+    /// ([`Granule::leaf_at`]).
     #[inline(always)]
-    pub(crate) const fn ends_at(self, start: u32, level: u32) -> bool {
-        start <= level && self.leaf_at(level)
+    pub(crate) const fn ends_at(self, start: u32, level: u32, features: Features) -> bool {
+        start <= level && self.leaf_at(level, features)
+    }
+
+    /// Arm `AArch64_S1MinTxSZ` without FEAT_LPA2's `DS`, FEAT_LVA3 or
+    /// FEAT_D128: the smallest `TxSZ` at stage 1 on a processor implementing
+    /// `features`, 12 (a 52-bit input address) with FEAT_LVA and the 64 KiB
+    /// granule, else 16 (48 bits).
+    #[inline(always)]
+    pub(crate) const fn s1_min_txsz(self, features: Features) -> u32 {
+        match self {
+            Self::K64 if features.has(Feature::Lva) => 12,
+            Self::K4 | Self::K16 | Self::K64 => 16,
+        }
     }
 
     /// Arm `AArch64_MaxTxSZ`, at either stage: the largest `TxSZ`, the
@@ -183,24 +200,27 @@ impl Granule {
         }
     }
 
-    /// Whether a block descriptor is valid at `level` (Arm
-    /// `AArch64_BlockDescSupported` without FEAT_LPA2's `DS`, FEAT_D128
-    /// or a 52-bit `PAMax`): at levels 1 and 2 with the 4 KiB granule, at
-    /// level 2 with the others.
+    /// Whether a block descriptor is valid at `level` on a processor
+    /// implementing `features` (Arm `AArch64_BlockDescSupported` without
+    /// FEAT_LPA2's `DS` or FEAT_D128): at levels 1 and 2 with the 4 KiB
+    /// granule, at level 2 with the 16 KiB one, and with the 64 KiB one at
+    /// level 2, and at level 1 too where `PAMax` is 52 bits (FEAT_LPA).
     #[inline(always)]
-    pub(crate) const fn block_at(self, level: u32) -> bool {
+    pub(crate) const fn block_at(self, level: u32, features: Features) -> bool {
         match self {
             Self::K4 => level == 1 || level == 2,
-            Self::K16 | Self::K64 => level == 2,
+            Self::K16 => level == 2,
+            Self::K64 => level == 2 || (level == 1 && id::pa_bits(features) >= 52),
         }
     }
 
-    /// Whether a walk with the granule can end at `level` (Arm
-    /// `AArch64_DecodeDescriptorType`): at a page at level 3, or a block
-    /// where the granule has blocks ([`Granule::block_at`]).
+    /// Whether a walk with the granule can end at `level` on a processor
+    /// implementing `features` (Arm `AArch64_DecodeDescriptorType`): at a
+    /// page at level 3, or a block where the granule has blocks
+    /// ([`Granule::block_at`]).
     #[inline(always)]
-    pub(crate) const fn leaf_at(self, level: u32) -> bool {
-        level == 3 || self.block_at(level)
+    pub(crate) const fn leaf_at(self, level: u32, features: Features) -> bool {
+        level == 3 || self.block_at(level, features)
     }
 
     /// The granule of the EL1&0 regime's range `upper` names under
@@ -297,10 +317,6 @@ enum GranuleStage {
     One,
     Two,
 }
-
-/// Arm `AArch64_S1MinTxSZ` without FEAT_LVA or FEAT_LVA3: the smallest
-/// `TxSZ`, a 48-bit input address.
-const S1_MIN_TXSZ: u32 = 16;
 
 /// Arm `AArch64_MaxTxSZ` without FEAT_TTST, whatever the granule: 39, a
 /// 25-bit input address. With FEAT_TTST every granule's is larger.
@@ -399,7 +415,8 @@ pub(crate) struct S1Range {
     /// [`Granule::el2`]).
     pub(crate) granule: Granule,
     /// `TxSZ` as its register holds it, which the walk faults outside
-    /// [`S1_MIN_TXSZ`]`..=`[`Granule::max_txsz`] ([`Granule::s1_start`]).
+    /// [`Granule::s1_min_txsz`]`..=`[`Granule::max_txsz`]
+    /// ([`Granule::s1_start`]).
     pub(crate) txsz: u32,
     /// The range's walks are disabled (`TCR_EL1.EPD0`/`EPD1`; never in EL2).
     epd: bool,
@@ -474,34 +491,138 @@ impl S1Range {
     /// meet.
     pub(crate) const fn reaches(self, va: u64, features: Features, level: u32) -> bool {
         match self.start_for(va, self.tbi_instruction, features) {
-            Some(start) => self.granule.ends_at(start, level),
+            Some(start) => self.granule.ends_at(start, level, features),
             None => false,
         }
     }
 }
 
-/// `TCR_ELx.PS`/`IPS` and `AArch64_PhysicalAddressSize`: the size in bits
-/// each encoding names, which the walk's output addresses must fit.
-const PS_BITS: [u32; 8] = [32, 36, 40, 42, 44, 48, 52, 56];
+/// `PS`'s encoding of 52 bits, with which FEAT_LPA's table base registers
+/// hold a 52-bit base for the 64 KiB granule.
+const PS_52: u64 = 0b110;
 
-/// The output address size of an encoded `PS` or `IPS` field on this
-/// processor (Arm `AArch64_PhysicalAddressSize` with no FEAT_LPA and no
-/// FEAT_D128): the field's size, at most 48 bits and at most `PAMax`.
-#[inline]
-pub(crate) const fn output_address_bits(encoded: u64) -> u32 {
-    let ps = PS_BITS[(encoded & 7) as usize];
-    let max = if id::PA_BITS < 48 { id::PA_BITS } else { 48 };
-    if ps < max {
-        ps
-    } else {
-        max
+/// Where a table base register holds bits 51:48 of the start table's
+/// address (Arm `AArch64_S1TTBaseAddress`, `AArch64_S2TTBaseAddress`).
+///
+/// Closed (R5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BaseHigh {
+    /// Nowhere: `BADDR` is bits 47:1.
+    None,
+    /// Bits 5:2, `BADDR` bits 47:6 and the table at least 64-byte aligned:
+    /// with FEAT_LPA, the 64 KiB granule and `PS` 0b110 (the IMPLEMENTATION
+    /// DEFINED "BADDR expresses 52 bits for 64KB granule" FALSE without).
+    Bits5To2,
+}
+
+/// Where a table or leaf descriptor holds bits 51:48 of the address it
+/// gives (Arm `AArch64_NextTableBase`, `AArch64_S1LeafBase`,
+/// `AArch64_S2LeafBase`).
+///
+/// Closed (R5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DescriptorHigh {
+    /// Nowhere: the address is bits 47:0, those below the granule or the
+    /// leaf's size cleared.
+    None,
+    /// Bits 15:12, below every address the 64 KiB granule gives: with that
+    /// granule where `PAMax` is 52 bits (the IMPLEMENTATION DEFINED
+    /// "descriptor[15:12] for 64KB granule are OA[51:48]" FALSE where it is
+    /// less).
+    Bits15To12,
+}
+
+/// How a walk's table base register and descriptors hold its addresses,
+/// and the size they must fit: what `S1TTWParams` and `S2TTWParams`' `ps`
+/// mean with the walk's granule on its processor. The one description
+/// both stages' walks read (R5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct OaLayout {
+    /// The output address size (Arm `AArch64_PhysicalAddressSize` without
+    /// FEAT_LPA2's `DS` or FEAT_D128): `PS`'s, at most 52 bits with FEAT_LPA
+    /// and the 64 KiB granule and at most 48 otherwise, and at most
+    /// `PAMax`. Every table address and output address must fit it
+    /// ([`OaLayout::fits`]).
+    bits: u32,
+    base: BaseHigh,
+    descriptor: DescriptorHigh,
+}
+
+impl OaLayout {
+    /// The layout of a walk with `granule` under the encoded `PS` or `IPS`
+    /// `ps` on a processor implementing `features`.
+    #[inline(always)]
+    pub(crate) const fn of(ps: u64, granule: Granule, features: Features) -> Self {
+        let pa_max = id::pa_bits(features);
+        let k64 = matches!(granule, Granule::K64);
+        let lpa = features.has(Feature::Lpa);
+        let format_max = if lpa && k64 { 52 } else { 48 };
+        let max = if pa_max < format_max {
+            pa_max
+        } else {
+            format_max
+        };
+        let size = id::ADDRESS_SIZES[(ps & 7) as usize];
+        Self {
+            bits: if size < max { size } else { max },
+            base: if lpa && k64 && ps & 7 == PS_52 {
+                BaseHigh::Bits5To2
+            } else {
+                BaseHigh::None
+            },
+            descriptor: if k64 && pa_max >= 52 {
+                DescriptorHigh::Bits15To12
+            } else {
+                DescriptorHigh::None
+            },
+        }
+    }
+
+    /// Whether `address` fits the output address size (Arm
+    /// `AArch64_OAOutOfRange`, negated).
+    #[inline(always)]
+    pub(crate) const fn fits(self, address: u64) -> bool {
+        address >> self.bits == 0
+    }
+
+    /// The start table's address the table base register `ttbr` holds,
+    /// aligned down to `2^align_bits` bytes, the start table's size: `BADDR`
+    /// with bits 51:48 from where [`BaseHigh`] says. Bit 0 is `CnP`
+    /// (FEAT_TTCNP), which has no effect on one processor.
+    #[inline(always)]
+    pub(crate) const fn table_base(self, ttbr: u64, align_bits: u32) -> u64 {
+        match self.base {
+            BaseHigh::None => (ttbr & TTB_BADDR) & !ones(align_bits),
+            BaseHigh::Bits5To2 => {
+                let align_bits = if align_bits < 6 { 6 } else { align_bits };
+                let base = (ttbr & TTB_BADDR) | (((ttbr >> 2) & 0xF) << 48);
+                base & !ones(align_bits)
+            }
+        }
+    }
+
+    /// The address a table or leaf descriptor `desc` gives, its bits below
+    /// `low_bits` (the granule's for a table, the leaf's size for a leaf)
+    /// not part of it: bits 47:`low_bits`, and bits 51:48 from where
+    /// [`DescriptorHigh`] says.
+    #[inline(always)]
+    pub(crate) const fn descriptor_address(self, desc: u64, low_bits: u32) -> u64 {
+        let low = desc & DESC_OA & !ones(low_bits);
+        match self.descriptor {
+            DescriptorHigh::None => low,
+            DescriptorHigh::Bits15To12 => low | (((desc >> 12) & 0xF) << 48),
+        }
     }
 }
 
-// `PAMax`, which `output_address_bits` bounds by, is the size
-// `ID_AA64MMFR0_EL1.PARange` reports, which no feature changes (Arm
-// `AArch64_PAMax`; PARange encodes sizes as `PS` does).
-const _: () = assert!(PS_BITS[(id::id_aa64mmfr0(Features::of(&[])) & 0xF) as usize] == id::PA_BITS);
+/// The output address bits 47:0 a table or leaf descriptor holds, of which
+/// those below the granule or the leaf's size are not the address.
+const DESC_OA: u64 = 0x0000_FFFF_FFFF_FFFF;
+
+/// A translation table base register's `BADDR`, bits 47:1, whose bits 5:2
+/// FEAT_LPA's 52-bit base makes bits 51:48 ([`OaLayout::table_base`]); its
+/// bit 0 is `CnP` (FEAT_TTCNP), which has no effect on one processor.
+pub(crate) const TTB_BADDR: u64 = 0x0000_FFFF_FFFF_FFFE;
 
 /// What a stage 1 walk of one regime reads from its registers (Arm
 /// `S1TTWParams`), for the virtual address range of the address walked.
@@ -514,8 +635,9 @@ pub(crate) struct S1Params {
     pub(crate) ttbr: u64,
     /// Hierarchical permissions disabled (FEAT_HPDS).
     pub(crate) hpd: bool,
-    /// The output address size, from `IPS` or `PS`.
-    pub(crate) oa_bits: u32,
+    /// How the walk's addresses are held, and the output address size, from
+    /// `IPS` or `PS` with the range's granule.
+    pub(crate) oa: OaLayout,
     pub(crate) mair: u64,
     pub(crate) wxn: bool,
 }
@@ -589,19 +711,21 @@ impl<L: Levels> Cpu<L> {
     }
 
     /// Arm `AArch64_PACEffectiveTxSZ`: the `TxSZ` of the range of `regime`
-    /// that `upper` names held within [`S1_MIN_TXSZ`]`..=`
-    /// [`Granule::max_txsz`] of the range's granule (`AArch64_S1MinTxSZ`
-    /// without FEAT_LVA, `AArch64_MaxTxSZ`), a value outside them counting
-    /// as the nearest, as it sets the bottom bit of a pointer
-    /// authentication code: for the walk's faulting values the CONSTRAINED
-    /// UNPREDICTABLE `Unpredictable_RESTnSZ` taken as `Constraint_FORCE`,
-    /// the pseudocode's own `ConstrainUnpredictable` choice ("Map to the
-    /// limit value"). The walk does not hold it so ([`S1Range::txsz`]).
+    /// that `upper` names held within [`Granule::s1_min_txsz`]`..=`
+    /// [`Granule::max_txsz`] of the range's granule (`AArch64_S1MinTxSZ`,
+    /// `AArch64_MaxTxSZ`), a value outside them counting as the nearest, as
+    /// it sets the bottom bit of a pointer authentication code: for the
+    /// walk's faulting values the CONSTRAINED UNPREDICTABLE
+    /// `Unpredictable_RESTnSZ` taken as `Constraint_FORCE`, the pseudocode's
+    /// own `ConstrainUnpredictable` choice ("Map to the limit value"). The
+    /// walk does not hold it so ([`S1Range::txsz`]).
     #[inline]
     pub(crate) fn pac_effective_txsz(&self, regime: Regime, upper: bool) -> u32 {
+        let features = self.imp.features;
         let range = self.s1_range(regime, upper);
-        let max = range.granule.max_txsz(self.imp.features);
-        range.txsz.clamp(S1_MIN_TXSZ, max)
+        let min = range.granule.s1_min_txsz(features);
+        let max = range.granule.max_txsz(features);
+        range.txsz.clamp(min, max)
     }
 
     /// Arm `AArch64_GetS1TTWParams(regime, ..., va)`: the walk parameters
@@ -619,24 +743,26 @@ impl<L: Levels> Cpu<L> {
                     self.sys.ttbr0_el1
                 };
                 let up = u32::from(upper);
+                let range = self.s1_range(regime, upper);
                 S1Params {
                     regime,
-                    range: self.s1_range(regime, upper),
+                    range,
                     ttbr,
                     hpd: hpds && (tcr >> (TCR_EL1_HPD0 + up)) & 1 == 1,
-                    oa_bits: output_address_bits(tcr >> TCR_EL1_IPS),
+                    oa: OaLayout::of(tcr >> TCR_EL1_IPS, range.granule, self.imp.features),
                     mair: self.sys.mair_el1,
                     wxn: self.sys.sctlr_el1 & sctlr::WXN != 0,
                 }
             }
             Regime::El2 => {
                 let el2 = self.el2();
+                let range = self.s1_range(regime, false);
                 S1Params {
                     regime,
-                    range: self.s1_range(regime, false),
+                    range,
                     ttbr: el2.ttbr0,
                     hpd: hpds && el2.tcr & TCR_EL2_HPD != 0,
-                    oa_bits: output_address_bits(el2.tcr >> TCR_EL2_PS),
+                    oa: OaLayout::of(el2.tcr >> TCR_EL2_PS, range.granule, self.imp.features),
                     mair: el2.mair,
                     wxn: el2.sctlr & sctlr::WXN != 0,
                 }
@@ -665,14 +791,25 @@ impl<L: Levels> Cpu<L> {
 mod tests {
     use super::*;
 
-    /// `AArch64_PhysicalAddressSize` with no FEAT_LPA: the encoded size, at
-    /// most 48 bits and at most this processor's 44.
+    /// `AArch64_PhysicalAddressSize`: the encoded size, at most `PAMax`, 44
+    /// bits without FEAT_LPA and 52 with it, and at most 48 bits but with
+    /// FEAT_LPA and the 64 KiB granule.
     #[test]
     fn output_sizes_stop_at_the_physical_address_size() {
-        assert_eq!(output_address_bits(0b000), 32);
-        assert_eq!(output_address_bits(0b011), 42);
-        assert_eq!(output_address_bits(0b100), 44);
-        assert_eq!(output_address_bits(0b101), 44, "48 bits, beyond PAMax");
-        assert_eq!(output_address_bits(0b111), 44, "56 bits");
+        let a57 = Features::of(&[]);
+        let lpa = Features::of(&[Feature::Lpa]);
+        let bits = |ps, granule, features| OaLayout::of(ps, granule, features).bits;
+        for granule in [Granule::K4, Granule::K16, Granule::K64] {
+            assert_eq!(bits(0b000, granule, a57), 32);
+            assert_eq!(bits(0b011, granule, a57), 42);
+            assert_eq!(bits(0b100, granule, a57), 44);
+            assert_eq!(bits(0b101, granule, a57), 44, "48 bits, beyond PAMax");
+            assert_eq!(bits(0b111, granule, a57), 44, "56 bits");
+            assert_eq!(bits(0b101, granule, lpa), 48);
+        }
+        assert_eq!(bits(0b110, Granule::K4, lpa), 48, "52 bits, beyond 4 KiB's");
+        assert_eq!(bits(0b110, Granule::K16, lpa), 48, "beyond 16 KiB's");
+        assert_eq!(bits(0b110, Granule::K64, lpa), 52);
+        assert_eq!(bits(0b111, Granule::K64, lpa), 52, "56 bits, beyond PAMax");
     }
 }

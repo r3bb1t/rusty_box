@@ -1,9 +1,12 @@
 //! The translation granules (FEAT_TGran16K, FEAT_TGran64K, FEAT_S2TGran16K,
-//! FEAT_S2TGran64K) and small translation tables (FEAT_TTST) as a guest
-//! sees them (R9): loads, `AT` and pointer authentication at EL1 through
-//! stage 1 tables of each granule and input address size, and loads at EL1
-//! through stage 2 tables of each granule and start level, on processors
-//! with each feature and without.
+//! FEAT_S2TGran64K), small translation tables (FEAT_TTST), and the 64 KiB
+//! granule's 52-bit addresses (FEAT_LPA, FEAT_LVA) as a guest sees them
+//! (R9): loads, `AT` and pointer authentication at EL1 through stage 1
+//! tables of each granule and input address size, loads at EL1 through
+//! stage 2 tables of each granule and start level, and the IPA size
+//! `HPFAR_EL2` holds, on processors with each feature and without. (The ID
+//! registers' granule and address size fields are `el2.rs`'s
+//! `the_id_registers_offer_each_models_granules_at_both_stages`.)
 //!
 //! The rules are the Arm ARM's pseudocode: `AArch64_S1TTWParamsEL10`
 //! (`AArch64_S1DecodeTG0`, `AArch64_S1DecodeTG1`, `AArch64_HaveS1TG`),
@@ -13,7 +16,9 @@
 //! `AArch64_S1LeafBase`, `AArch64_NSS2TTWParams` (`AArch64_S2DecodeTG0`,
 //! `AArch64_HaveS2TG`), `AArch64_S2Translate` (`AArch64_S2TxSZFaults`,
 //! `AArch64_S2InvalidSL`, `AArch64_S2InconsistentSL`),
-//! `AArch64_S2StartLevel`, `AArch64_PACEffectiveTxSZ` and
+//! `AArch64_S2StartLevel`, `AArch64_PACEffectiveTxSZ`,
+//! `AArch64_PhysicalAddressSize`, `AArch64_S1TTBaseAddress`,
+//! `AArch64_NextTableBase`, `AArch64_S1DisabledOutput` and
 //! `AArch64_EncodePAR`; the stage 2 fault's report is `AArch64_DataAbort`
 //! with `HPFAR_EL2`.
 //!
@@ -30,7 +35,10 @@ use super::{id, El, WithEl2};
 
 const LDR: u32 = 0xF940_0022; // ldr x2, [x1]
 const AT_S1E1R: u32 = 0xD508_7801; // at s1e1r, x1
+const AT_S12E1R: u32 = 0xD50C_7881; // at s12e1r, x1
 const XPACI: u32 = 0xDAC1_43E0; // xpaci x0
+const MSR_HPFAR: u32 = 0xD51C_6080; // msr hpfar_el2, x0
+const MRS_HPFAR: u32 = 0xD53C_6080; // mrs x0, hpfar_el2
 
 /// The processor models: the Cortex-A57, with the 4 KiB granule alone and
 /// no FEAT_TTST, and the Armv9.2 one, with every granule and FEAT_TTST.
@@ -47,8 +55,8 @@ const TABLES: u64 = 0x10_0000;
 const DATA: u64 = 0xC0_0000;
 
 /// The input address each walk translates: its bits below the input
-/// address size, which index every level and the page.
-const PATTERN: u64 = 0x0000_9A5C_3E71_D468;
+/// address size, which index every level and the page, up to 52 bits.
+const PATTERN: u64 = 0x000B_9A5C_3E71_D468;
 
 /// Descriptor bits: a block (bit 1 clear) or a table or page (bit 1 set),
 /// the access flag and Inner Shareable.
@@ -68,6 +76,14 @@ const T1SZ: u32 = 16;
 const IPS_44: u64 = 0b100 << 32;
 const PS_44: u64 = 0b100 << 16;
 const SL0: u32 = 6;
+/// `IPS` and `PS` of 48 and 52 bits, and `IPS` of 56, which
+/// [`Machine::stage1`] and [`Machine::stage2`]'s 44 bits leave as they are
+/// when ORed in.
+const IPS_48: u64 = 0b101 << 32;
+const IPS_52: u64 = 0b110 << 32;
+const IPS_56: u64 = 0b111 << 32;
+const PS_48: u64 = 0b101 << 16;
+const PS_52: u64 = 0b110 << 16;
 
 /// The `TG0` encodings, and `TG1`'s.
 const TG0_4K: u64 = 0b00;
@@ -86,6 +102,12 @@ const EC_DATA_ABORT_LOWER_EL: u64 = 0x24;
 const EC_DATA_ABORT_SAME_EL: u64 = 0x25;
 const fn translation(level: u64) -> u64 {
     0b00_0100 | level
+}
+const fn address_size(level: u64) -> u64 {
+    level
+}
+const fn external_on_walk(level: u64) -> u64 {
+    0b01_0100 | level
 }
 
 /// Translation tables of one granule as a test lays them out: the page
@@ -300,22 +322,33 @@ impl Machine {
     }
 }
 
-/// `PAR_EL1`'s `F`, and its `PA` (47:12).
+/// `PAR_EL1`'s `F`, its `PA` (47:12), with FEAT_LPA's bits 51:48 too, a
+/// fault's `FST` (6:1), `S`, a fault of stage 2, and `PTW`, one on stage
+/// 1's walk.
 const PAR_F: u64 = 1;
 const PAR_PA: u64 = 0x0000_FFFF_FFFF_F000;
+const PAR_PA_52: u64 = 0x000F_FFFF_FFFF_F000;
+const PAR_FST: u64 = 0x3F << 1;
+const PAR_S: u64 = 1 << 9;
+const PAR_PTW: u64 = 1 << 8;
 
 /// The doubleword each test puts where a translation of `ia` leads.
 const fn marker(ia: u64) -> u64 {
     ia ^ 0x5A5A_0000_0000_5A5A
 }
 
-/// A stage 1 Data Abort at EL1 with Translation fault status at `level`.
-fn s1_translation_fault(level: u64) -> Result<u64, Taken> {
+/// A stage 1 Data Abort at EL1 with fault status `fsc`.
+fn s1_fault(fsc: u64) -> Result<u64, Taken> {
     Err(Taken {
         to: El::El1,
         ec: EC_DATA_ABORT_SAME_EL,
-        fsc: translation(level),
+        fsc,
     })
+}
+
+/// A stage 1 Data Abort at EL1 with Translation fault status at `level`.
+fn s1_translation_fault(level: u64) -> Result<u64, Taken> {
+    s1_fault(translation(level))
 }
 
 /// A processor implementing `imp` at EL1 with stage 1 on over tables of
@@ -457,31 +490,38 @@ fn each_granule_walks_from_the_level_its_input_address_size_gives() {
 }
 
 /// A descriptor with bit 1 clear is a block only at a level its granule
-/// has blocks at: levels 1 and 2 with the 4 KiB granule, level 2 with the
-/// 16 KiB and 64 KiB ones (without FEAT_LPA2's `DS` or a 52-bit physical
-/// address). At level 0, at the 16 KiB and 64 KiB granules' level 1, and
-/// at level 3 it is invalid, a Translation fault at its level.
+/// has blocks at on its processor (without FEAT_LPA2's `DS`): levels 1 and
+/// 2 with the 4 KiB granule, level 2 with the 16 KiB one, and level 2 with
+/// the 64 KiB one, and level 1 too with a 52-bit physical address
+/// (FEAT_LPA). At level 0, at the 16 KiB granule's level 1, at the 64 KiB
+/// granule's without a 52-bit physical address, and at level 3 it is
+/// invalid, a Translation fault at its level; at stage 1, and for the 64
+/// KiB granule's level 1 at stage 2.
 #[test]
 fn a_block_is_a_leaf_only_at_the_levels_its_granule_has_blocks_at() {
     const BLOCK_VA: u64 = 0x8000_0000_0000;
     const OFFSET: u64 = 0x3_0468;
+    let no_lpa = Implementation::every_feature_but(&[Feature::Lpa]);
     let cases = [
-        // (TG0, page bits, start level, block level, a block there)
-        (TG0_4K, 12, 0, 0, false),
-        (TG0_4K, 12, 0, 1, true),
-        (TG0_4K, 12, 0, 2, true),
-        (TG0_4K, 12, 0, 3, false),
-        (TG0_16K, 14, 0, 0, false),
-        (TG0_16K, 14, 0, 1, false),
-        (TG0_16K, 14, 0, 2, true),
-        (TG0_16K, 14, 0, 3, false),
-        (TG0_64K, 16, 1, 1, false),
-        (TG0_64K, 16, 1, 2, true),
-        (TG0_64K, 16, 1, 3, false),
+        // (processor, TG0, page bits, start level, block level, a block there)
+        ("v9.2", V9, TG0_4K, 12, 0, 0, false),
+        ("v9.2", V9, TG0_4K, 12, 0, 1, true),
+        ("v9.2", V9, TG0_4K, 12, 0, 2, true),
+        ("v9.2", V9, TG0_4K, 12, 0, 3, false),
+        ("v9.2", V9, TG0_16K, 14, 0, 0, false),
+        ("v9.2", V9, TG0_16K, 14, 0, 1, false),
+        ("v9.2", V9, TG0_16K, 14, 0, 2, true),
+        ("v9.2", V9, TG0_16K, 14, 0, 3, false),
+        ("v9.2", V9, TG0_64K, 16, 1, 1, true),
+        ("v9.2", V9, TG0_64K, 16, 1, 2, true),
+        ("v9.2", V9, TG0_64K, 16, 1, 3, false),
+        ("no LPA", no_lpa, TG0_64K, 16, 1, 1, false),
+        ("no LPA", no_lpa, TG0_64K, 16, 1, 2, true),
+        ("no LPA", no_lpa, TG0_4K, 12, 0, 1, true),
     ];
-    for (tg0, page_bits, start, level, block) in cases {
-        let case = std::format!("TG0 {tg0:#b}, level {level}");
-        let (mut m, tables) = lower_range(V9, tg0, page_bits, 16, start);
+    for (name, imp, tg0, page_bits, start, level, block) in cases {
+        let case = std::format!("{name}: TG0 {tg0:#b}, level {level}");
+        let (mut m, tables) = lower_range(imp, tg0, page_bits, 16, start);
         m.map(tables, BLOCK_VA, level, s1_leaf(0, BLOCK));
         m.ram.put64(OFFSET, marker(OFFSET));
         let want = if block {
@@ -490,6 +530,30 @@ fn a_block_is_a_leaf_only_at_the_levels_its_granule_has_blocks_at() {
             s1_translation_fault(u64::from(level))
         };
         assert_eq!(m.load(BLOCK_VA + OFFSET), want, "{case}");
+    }
+
+    // Stage 2's: a level 1 block of the 64 KiB granule, the low 4 TiB of
+    // IPAs mapped to themselves, under a walk starting at level 1 (`SL0`
+    // 0b10, `T0SZ` the smallest the processor takes). A load at EL1 reads
+    // through it where `PAMax` is 52 bits; where it is 44 the instruction
+    // fetch takes a Translation fault at level 1 to EL2.
+    for (name, imp, t0sz, block) in [("v9.2", V9, 12, true), ("no LPA", no_lpa, 20, false)] {
+        let mut m = Machine::new(imp);
+        let tables = m.tables(16, 64 - t0sz, 1);
+        m.map(tables, 0, 1, s2_leaf(0, BLOCK));
+        let vtcr = u64::from(t0sz) | (0b10 << SL0) | (TG0_64K << TG0);
+        m.stage2(vtcr, tables.root);
+        m.ram.put64(DATA, marker(DATA));
+        let want = if block {
+            Ok(marker(DATA))
+        } else {
+            Err(Taken {
+                to: El::El2,
+                ec: EC_INSTRUCTION_ABORT_LOWER_EL,
+                fsc: translation(1),
+            })
+        };
+        assert_eq!(m.load(DATA), want, "{name}: stage 2");
     }
 }
 
@@ -553,23 +617,31 @@ fn a_granule_the_processor_lacks_is_the_4k_one() {
 
 /// A descriptor's bits between bit 12 and its granule's page are not its
 /// address (Arm `AArch64_NextTableBase`, `AArch64_S1LeafBase`,
-/// `AArch64_S2LeafBase`; the 64 KiB granule's bits 15:12 are address bits
-/// 51:48 only with a 52-bit `PAMax`): with every one of them set in each
-/// table and page descriptor of the 16 KiB and 64 KiB granules, a load
-/// reads what it reads without them, at stage 1 and at stage 2.
+/// `AArch64_S2LeafBase`): with every one of them set in each table and page
+/// descriptor of the 16 KiB granule, on the Armv9.2 model and on a
+/// processor without FEAT_LPA, and of the 64 KiB granule on the latter
+/// (where `PAMax` is 52 bits they are address bits 51:48,
+/// `a_64k_descriptor_holds_bits_51_to_48_of_its_address_in_bits_15_to_12`),
+/// a load reads what it reads without them, at stage 1 and at stage 2.
 #[test]
 fn the_bits_below_a_page_in_a_descriptor_are_not_its_address() {
-    for (tg0, page_bits, start) in [(TG0_16K, 14, 1), (TG0_64K, 16, 2)] {
+    let no_lpa = Implementation::every_feature_but(&[Feature::Lpa]);
+    let cases = [
+        ("v9.2", V9, TG0_16K, 14, 1),
+        ("no LPA", no_lpa, TG0_16K, 14, 1),
+        ("no LPA", no_lpa, TG0_64K, 16, 2),
+    ];
+    for (name, imp, tg0, page_bits, start) in cases {
         let below_page = ((1 << page_bits) - 1) & !0xFFF;
         let va = PATTERN & ((1 << 39) - 1);
         let offset = va & ((1 << page_bits) - 1);
-        let (mut m, mut tables) = lower_range(V9, tg0, page_bits, 25, start);
+        let (mut m, mut tables) = lower_range(imp, tg0, page_bits, 25, start);
         tables.below_page = below_page;
         m.map(tables, va, 3, s1_leaf(DATA | below_page, TABLE));
         m.ram.put64(DATA + offset, marker(va));
-        assert_eq!(m.load(va), Ok(marker(va)), "stage 1, TG0 {tg0:#b}");
+        assert_eq!(m.load(va), Ok(marker(va)), "{name}: stage 1, TG0 {tg0:#b}");
 
-        let mut m = Machine::new(V9);
+        let mut m = Machine::new(imp);
         // T0SZ 24, a 40-bit IPA, from level 2 (`SL0` 0b01).
         let mut tables = m.tables(page_bits, 40, 2);
         tables.below_page = below_page;
@@ -579,7 +651,8 @@ fn the_bits_below_a_page_in_a_descriptor_are_not_its_address() {
         m.map(tables, ipa, 3, s2_leaf(DATA | below_page, TABLE));
         m.stage2(24 | (0b01 << SL0) | (tg0 << TG0), tables.root);
         m.ram.put64(DATA + offset, marker(ipa));
-        assert_eq!(m.load(ipa), Ok(marker(ipa)), "stage 2, TG0 {tg0:#b}");
+        let read = m.load(ipa);
+        assert_eq!(read, Ok(marker(ipa)), "{name}: stage 2, TG0 {tg0:#b}");
     }
 }
 
@@ -613,14 +686,16 @@ fn a_granule_at_stage_1_alone_is_the_4k_one_at_stage_2() {
 }
 
 /// `TxSZ` above `AArch64_MaxTxSZ` — 39 without FEAT_TTST, with it 48, or 47
-/// with the 64 KiB granule — or below 16 takes a level 0 Translation fault
-/// for every address (the IMPLEMENTATION DEFINED "Fault on TxSZ value above
-/// maximum" and "... below minimum"), which `AT S1E1R` at EL2 reports in
-/// `PAR_EL1`; within them the walk translates.
+/// with the 64 KiB granule — or below `AArch64_S1MinTxSZ` — 16, but 12 with
+/// FEAT_LVA and the 64 KiB granule — takes a level 0 Translation fault for
+/// every address (the IMPLEMENTATION DEFINED "Fault on TxSZ value above
+/// maximum" and "... below minimum", which FEAT_LVA makes no choice),
+/// which `AT S1E1R` at EL2 reports in `PAR_EL1`; within them the walk
+/// translates.
 #[test]
 fn txsz_beyond_its_granules_range_faults_at_level_0() {
-    const PAR_FST: u64 = 0x3F << 1;
     let no_ttst = Implementation::every_feature_but(&[Feature::Ttst]);
+    let no_lva = Implementation::every_feature_but(&[Feature::Lva]);
     let cases = [
         // (processor, TG0, T0SZ, translates)
         ("TTST", V9, TG0_4K, 48, true),
@@ -631,6 +706,12 @@ fn txsz_beyond_its_granules_range_faults_at_level_0() {
         ("TTST", V9, TG0_64K, 48, false),
         ("TTST", V9, TG0_4K, 16, true),
         ("TTST", V9, TG0_4K, 15, false),
+        ("LVA", V9, TG0_64K, 12, true),
+        ("LVA", V9, TG0_64K, 11, false),
+        ("LVA", V9, TG0_4K, 12, false),
+        ("LVA", V9, TG0_16K, 15, false),
+        ("no LVA", no_lva, TG0_64K, 16, true),
+        ("no LVA", no_lva, TG0_64K, 15, false),
         ("no TTST", no_ttst, TG0_4K, 39, true),
         ("no TTST", no_ttst, TG0_4K, 40, false),
         ("no TTST", no_ttst, TG0_16K, 40, false),
@@ -651,8 +732,10 @@ fn txsz_beyond_its_granules_range_faults_at_level_0() {
             TG0_64K => 16,
             _ => 12,
         };
-        // Wider than a page, as every `TxSZ` the walk takes gives.
-        let ia_bits = (64 - t0sz).clamp(page_bits + 1, 48);
+        // Wider than a page, as every `TxSZ` the walk takes gives, and no
+        // wider than the granule's level 0 or 1 table resolves.
+        let widest = if page_bits == 16 { 52 } else { 48 };
+        let ia_bits = (64 - t0sz).clamp(page_bits + 1, widest);
         let stride = page_bits - 3;
         let start = 3 - (ia_bits - 1 - page_bits) / stride;
         let tables = m.tables(page_bits, ia_bits, start);
@@ -670,13 +753,15 @@ fn txsz_beyond_its_granules_range_faults_at_level_0() {
 }
 
 /// The bottom bit of a pointer authentication code is `64 - TxSZ`, `TxSZ`
-/// held within 16 and `AArch64_MaxTxSZ` of the range's granule
+/// held within `AArch64_S1MinTxSZ` (16, or 12 with FEAT_LVA and the 64 KiB
+/// granule) and `AArch64_MaxTxSZ` of the range's granule
 /// (`AArch64_PACEffectiveTxSZ`): `XPACI` clears the bits from there up.
 #[test]
 fn a_pointer_authentication_code_ends_where_its_granules_txsz_range_does() {
-    const POINTER: u64 = 0x0000_7FFF_FFFF_0123;
+    const POINTER: u64 = 0x000F_7FFF_FFFF_0123;
     let no_ttst = Implementation::every_feature_but(&[Feature::Ttst]);
     let no_64k = Implementation::every_feature_but(&[Feature::TGran64K, Feature::S2TGran64K]);
+    let no_lva = Implementation::every_feature_but(&[Feature::Lva]);
     let cases = [
         // (processor, TG0, T0SZ, the code's bottom bit)
         ("TTST", V9, TG0_4K, 48, 16),
@@ -686,6 +771,10 @@ fn a_pointer_authentication_code_ends_where_its_granules_txsz_range_does() {
         ("TTST", V9, TG0_64K, 63, 17),
         ("TTST", V9, TG0_4K, 8, 48),
         ("TTST", V9, TG0_4K, 25, 39),
+        ("LVA", V9, TG0_64K, 12, 52),
+        ("LVA", V9, TG0_64K, 8, 52),
+        ("LVA", V9, TG0_16K, 12, 48),
+        ("no LVA", no_lva, TG0_64K, 12, 48),
         ("no TTST", no_ttst, TG0_4K, 48, 25),
         ("no TTST", no_ttst, TG0_64K, 48, 25),
         ("no 64K", no_64k, TG0_64K, 48, 16),
@@ -709,12 +798,17 @@ fn a_pointer_authentication_code_ends_where_its_granules_txsz_range_does() {
 /// FEAT_TTST, with the 16 KiB granule 0b11 without FEAT_LPA2's `DS`, with
 /// the 64 KiB granule 0b11), a start level that resolves no bit of the
 /// input address or more than a stride and four, and a `T0SZ` outside
-/// 64 − 44 and `AArch64_MaxTxSZ` of the granule take a level 0 Translation
-/// fault at stage 2 for every access — here the instruction fetch, taken
-/// to EL2 with `HPFAR_EL2` holding its IPA. Where the walk translates, a
-/// load reads the page it leads to and the next page faults at level 3.
+/// `AArch64_S2MinTxSZ` and `AArch64_MaxTxSZ` of the granule take a level 0
+/// Translation fault at stage 2 for every access — here the instruction
+/// fetch, taken to EL2 with `HPFAR_EL2` holding its IPA. The smallest
+/// `T0SZ` is `64 - PAMax`, 20 for the Cortex-A57's 44 bits; where `PAMax`
+/// is 52 bits (FEAT_LPA) it is 12 with the 64 KiB granule and 16 with the
+/// others. Where the walk translates, a load reads the page it leads to,
+/// up to a 52-bit IPA, and the next page faults at level 3 with
+/// `HPFAR_EL2` holding its IPA.
 #[test]
 fn stage_2_starts_where_sl0_and_its_granule_say() {
+    let no_lpa = Implementation::every_feature_but(&[Feature::Lpa]);
     let cases = [
         // (processor, TG0, page bits, T0SZ, SL0, start level or refused)
         ("v9.2", V9, TG0_4K, 12, 24, 0b01, Some(1)),
@@ -729,13 +823,18 @@ fn stage_2_starts_where_sl0_and_its_granule_say() {
         ("v9.2", V9, TG0_4K, 12, 29, 0b00, None),
         ("v9.2", V9, TG0_4K, 12, 21, 0b01, Some(1)),
         ("v9.2", V9, TG0_4K, 12, 20, 0b01, None),
-        ("v9.2", V9, TG0_4K, 12, 19, 0b10, None),
-        ("v9.2", V9, TG0_4K, 12, 20, 0b10, Some(0)),
+        ("v9.2", V9, TG0_4K, 12, 19, 0b10, Some(0)),
+        ("v9.2", V9, TG0_4K, 12, 16, 0b10, Some(0)),
+        ("v9.2", V9, TG0_4K, 12, 15, 0b10, None),
+        ("v9.2", V9, TG0_4K, 12, 12, 0b10, None),
         ("v9.2", V9, TG0_16K, 14, 24, 0b10, Some(1)),
         ("v9.2", V9, TG0_16K, 14, 24, 0b01, Some(2)),
         ("v9.2", V9, TG0_16K, 14, 23, 0b01, None),
         ("v9.2", V9, TG0_16K, 14, 24, 0b00, None),
         ("v9.2", V9, TG0_16K, 14, 24, 0b11, None),
+        ("v9.2", V9, TG0_16K, 14, 16, 0b11, None),
+        ("v9.2", V9, TG0_16K, 14, 16, 0b10, Some(1)),
+        ("v9.2", V9, TG0_16K, 14, 15, 0b10, None),
         ("v9.2", V9, TG0_16K, 14, 48, 0b00, Some(3)),
         ("v9.2", V9, TG0_16K, 14, 35, 0b00, Some(3)),
         ("v9.2", V9, TG0_16K, 14, 34, 0b00, None),
@@ -748,6 +847,12 @@ fn stage_2_starts_where_sl0_and_its_granule_say() {
         ("v9.2", V9, TG0_64K, 16, 48, 0b00, None),
         ("v9.2", V9, TG0_64K, 16, 31, 0b00, Some(3)),
         ("v9.2", V9, TG0_64K, 16, 30, 0b00, None),
+        ("v9.2", V9, TG0_64K, 16, 12, 0b10, Some(1)),
+        ("v9.2", V9, TG0_64K, 16, 11, 0b10, None),
+        ("no LPA", no_lpa, TG0_64K, 16, 20, 0b10, Some(1)),
+        ("no LPA", no_lpa, TG0_64K, 16, 19, 0b10, None),
+        ("A57", A57, TG0_4K, 12, 20, 0b10, Some(0)),
+        ("A57", A57, TG0_4K, 12, 19, 0b10, None),
         ("A57", A57, TG0_4K, 12, 39, 0b11, None),
         ("A57", A57, TG0_4K, 12, 39, 0b00, Some(2)),
         ("A57", A57, TG0_4K, 12, 39, 0b01, None),
@@ -761,8 +866,21 @@ fn stage_2_starts_where_sl0_and_its_granule_say() {
         let mut m = Machine::new(imp);
         let vtcr = u64::from(t0sz) | (sl0 << SL0) | (tg0 << TG0);
         let Some(start) = start else {
-            // No walk is made: the tables are empty memory.
-            m.stage2(vtcr, TABLES);
+            // No walk is made. Where `SL0` names a level the input address
+            // fits, tables from it translate the fetch, so the refusal is
+            // what faults; elsewhere they are empty memory, which a walk
+            // from a level other than 0 faults at that level.
+            let ia_bits = 64 - t0sz;
+            let root = match sl0_level(page_bits, sl0) {
+                Some(level) if fits_level(page_bits, ia_bits, level) => {
+                    let tables = m.tables(page_bits, ia_bits, level);
+                    let code_page = CODE & !(tables.page() - 1);
+                    m.map(tables, code_page, 3, s2_leaf(code_page, TABLE));
+                    tables.root
+                }
+                Some(_) | None => TABLES,
+            };
+            m.stage2(vtcr, root);
             m.cpu.el2_state.regs.hpfar = 0;
             assert_eq!(
                 m.run(LDR),
@@ -806,14 +924,43 @@ fn stage_2_starts_where_sl0_and_its_granule_say() {
     }
 }
 
+/// The level `SL0` `sl0` names for the granule of `2^page_bits`-byte pages,
+/// whether or not a processor accepts it (`AArch64_S2StartLevel` without
+/// FEAT_LPA2's `SL2`): the level a walk would start at. With the 64 KiB
+/// granule 0b11 names none.
+const fn sl0_level(page_bits: u32, sl0: u64) -> Option<u32> {
+    match (page_bits, sl0) {
+        (12, 0b00) => Some(2),
+        (12, 0b01) => Some(1),
+        (12, 0b10) => Some(0),
+        (12, _) => Some(3),
+        (_, 0b00) => Some(3),
+        (_, 0b01) => Some(2),
+        (_, 0b10) => Some(1),
+        (14, _) => Some(0),
+        _ => None,
+    }
+}
+
+/// Whether a stage 2 walk of an `ia_bits`-bit input address with the
+/// granule of `2^page_bits`-byte pages can start at `level`
+/// (`AArch64_S2InconsistentSL`, negated): its table resolves at least one
+/// bit and at most a stride and four more, 16 concatenated tables.
+const fn fits_level(page_bits: u32, ia_bits: u32, level: u32) -> bool {
+    let stride = page_bits - 3;
+    let lsb = page_bits + stride * (3 - level);
+    ia_bits > lsb && ia_bits <= lsb + stride + 4
+}
+
 /// The levels, from 3 down, a walk with the granule of `2^page_bits`-byte
-/// pages starting at `start` can end at: at or below the start, at a page
-/// at level 3 or a block at level 2 with every granule, at a block at
-/// level 1 with the 4 KiB granule alone, and never at level 0
-/// (`AArch64_DecodeDescriptorType` without FEAT_LPA2's `DS` or a 52-bit
-/// `PAMax`).
+/// pages starting at `start` can end at on the Armv9.2 model: at or below
+/// the start, at a page at level 3 or a block at level 2 with every
+/// granule, at a block at level 1 with the 4 KiB granule, and with the 64
+/// KiB one where `PAMax` is 52 bits, as it is there (FEAT_LPA), and never
+/// at level 0 (`AArch64_DecodeDescriptorType` without FEAT_LPA2's `DS`).
 const fn leaf_levels(page_bits: u32, start: u32) -> [bool; 4] {
-    [true, start <= 2, start <= 1 && page_bits == 12, false]
+    let level_1 = page_bits == 12 || (page_bits == 16 && id::pa_bits(V9.features) >= 52);
+    [true, start <= 2, start <= 1 && level_1, false]
 }
 
 /// A snapshot's TLB entry is refused at a level no stage 1 walk the
@@ -828,6 +975,7 @@ fn a_snapshot_entry_holds_a_level_its_stage_1_walk_ends_at() {
         (TG0_4K, 12, 34, 2),
         (TG0_4K, 12, 48, 3),
         (TG0_16K, 14, 25, 1),
+        (TG0_64K, 16, 16, 1),
         (TG0_64K, 16, 25, 2),
         (TG0_64K, 16, 47, 3),
     ];
@@ -1002,5 +1150,259 @@ fn every_4k_piece_of_a_64k_page_reads_its_own_piece() {
             let read = m.load(page + piece * 0x1000);
             assert_eq!(read, Ok(marker(DATA + piece)), "{case}: piece {piece}");
         }
+    }
+}
+
+/// With the 64 KiB granule where `PAMax` is 52 bits (FEAT_LPA), a table or
+/// leaf descriptor's bits 15:12 are bits 51:48 of the address it gives
+/// (`AArch64_NextTableBase`, `AArch64_S1LeafBase`, `AArch64_S2LeafBase`),
+/// which must fit the output size `IPS` or `PS` gives: at 52 bits `AT`
+/// reports a leaf's address in `PAR_EL1.PA` (51:12), and the next table is
+/// read at a table descriptor's, a read nothing answers a synchronous
+/// External abort on the walk at the next level; at 48 bits either is an
+/// Address size fault at the level of the descriptor that holds it. Where
+/// `PAMax` is less the bits are not the address.
+#[test]
+fn a_64k_descriptor_holds_bits_51_to_48_of_its_address_in_bits_15_to_12() {
+    const HIGH: u64 = 0xA;
+    let no_lpa = Implementation::every_feature_but(&[Feature::Lpa]);
+    let va = PATTERN & ((1 << 39) - 1);
+    let offset = va & 0xFFFF;
+    let high_page = (HIGH << 48) | DATA | (offset & !0xFFF);
+    let low_page = DATA | (offset & !0xFFF);
+    let address_size_at = |level| PAR_F | (address_size(level) << 1);
+    let table_read = s1_fault(external_on_walk(3));
+    let table_too_wide = s1_fault(address_size(2));
+    // (processor, IPS, PAR_EL1 for the leaf, the load through the table)
+    let cases = [
+        ("v9.2", V9, IPS_52, high_page, table_read),
+        ("v9.2", V9, IPS_56, high_page, table_read),
+        ("v9.2", V9, IPS_48, address_size_at(3), table_too_wide),
+        ("no LPA", no_lpa, IPS_52, low_page, Ok(marker(va))),
+    ];
+    for (name, imp, ips, leaf_par, through_table) in cases {
+        let (mut m, tables) = lower_range(imp, TG0_64K, 16, 25, 2);
+        m.map(tables, va, 3, s1_leaf(DATA | (HIGH << 12), TABLE));
+        m.cpu.sys.tcr_el1 |= ips;
+        m.cpu.el10_context_changed();
+        assert_eq!(par_result(m.at_s1e1r(va)), leaf_par, "{name}: leaf");
+
+        let (mut m, mut tables) = lower_range(imp, TG0_64K, 16, 25, 2);
+        tables.below_page = HIGH << 12;
+        m.map(tables, va, 3, s1_leaf(DATA, TABLE));
+        m.ram.put64(DATA + offset, marker(va));
+        m.cpu.sys.tcr_el1 |= ips;
+        m.cpu.el10_context_changed();
+        assert_eq!(m.load(va), through_table, "{name}: table");
+    }
+
+    // Stage 2's leaf, `AT S12E1R` at EL2 reporting it or its fault.
+    let cases = [
+        ("v9.2", V9, PS_52, high_page),
+        ("v9.2", V9, PS_48, PAR_S | address_size_at(3)),
+        ("no LPA", no_lpa, PS_52, low_page),
+    ];
+    for (name, imp, ps, want) in cases {
+        let mut m = Machine::new(imp);
+        // T0SZ 24, a 40-bit IPA, from level 2 (`SL0` 0b01).
+        let tables = m.tables(16, 40, 2);
+        let code_page = CODE & !0xFFFF;
+        m.map(tables, code_page, 3, s2_leaf(code_page, TABLE));
+        m.map(tables, va, 3, s2_leaf(DATA | (HIGH << 12), TABLE));
+        m.stage2(24 | (0b01 << SL0) | (TG0_64K << TG0) | ps, tables.root);
+        m.at(El::El2);
+        m.cpu.x[1] = va;
+        assert_eq!(m.run(AT_S12E1R), None, "{name}: AT S12E1R");
+        assert_eq!(par_result(m.cpu.sys.par_el1), want, "{name}: stage 2 leaf");
+    }
+
+    // Stage 2's table descriptor: a load at EL1 through it, its fault taken
+    // to EL2.
+    let stage_2_fault = |fsc| {
+        Err(Taken {
+            to: El::El2,
+            ec: EC_DATA_ABORT_LOWER_EL,
+            fsc,
+        })
+    };
+    let cases = [
+        ("v9.2", V9, PS_52, stage_2_fault(external_on_walk(3))),
+        ("v9.2", V9, PS_48, stage_2_fault(address_size(2))),
+        ("no LPA", no_lpa, PS_52, Ok(marker(va))),
+    ];
+    for (name, imp, ps, want) in cases {
+        let mut m = Machine::new(imp);
+        let mut tables = m.tables(16, 40, 2);
+        let code_page = CODE & !0xFFFF;
+        m.map(tables, code_page, 3, s2_leaf(code_page, TABLE));
+        tables.below_page = HIGH << 12;
+        m.map(tables, va, 3, s2_leaf(DATA, TABLE));
+        m.ram.put64(DATA + offset, marker(va));
+        m.stage2(24 | (0b01 << SL0) | (TG0_64K << TG0) | ps, tables.root);
+        assert_eq!(m.load(va), want, "{name}: stage 2 table");
+    }
+}
+
+/// What a test compares of `PAR_EL1` `par`: a translation's `PA` (51:12),
+/// or a fault's `F`, `FST`, `S` and `PTW`.
+const fn par_result(par: u64) -> u64 {
+    if par & PAR_F == 0 {
+        par & PAR_PA_52
+    } else {
+        par & (PAR_F | PAR_FST | PAR_S | PAR_PTW)
+    }
+}
+
+/// Under a 52-bit `IPS` or `PS` (0b110) with the 64 KiB granule and
+/// FEAT_LPA, a table base register holds bits 51:48 of the start table's
+/// address in bits 5:2, the table at least 64-byte aligned
+/// (`AArch64_S1TTBaseAddress`, `AArch64_S2TTBaseAddress`, the
+/// IMPLEMENTATION DEFINED "BADDR expresses 52 bits for 64KB granule" FALSE
+/// otherwise): the walk reads its start table there, a read nothing
+/// answers a synchronous External abort on the walk at the start level,
+/// `TTBR1_EL1`'s at stage 1 and `VTTBR_EL2`'s at stage 2. Under any other
+/// size — 48 bits, or 56 (0b111), which `PAMax` makes 52 bits too — with
+/// the 4 KiB or 16 KiB granule, or without FEAT_LPA, they are the base's
+/// own bits 5:2, which every start table here, 64 bytes or more, is
+/// aligned below: the walk reads where the rest of `BADDR` says.
+#[test]
+fn a_64k_table_base_holds_bits_51_to_48_in_bits_5_to_2_under_a_52_bit_ips() {
+    let no_lpa = Implementation::every_feature_but(&[Feature::Lpa]);
+    let offset = UPPER_VA & 0xFFFF;
+    let translated = Ok(marker(UPPER_VA));
+    let cases = [
+        // (processor, IPS, TTBR1_EL1 bits 5:2, the load)
+        ("v9.2", V9, IPS_52, 0b1010, s1_fault(external_on_walk(2))),
+        ("v9.2", V9, IPS_52, 0b1000, s1_fault(external_on_walk(2))),
+        ("v9.2", V9, IPS_52, 0b0000, translated),
+        ("v9.2", V9, IPS_48, 0b1010, translated),
+        ("v9.2", V9, IPS_56, 0b1010, translated),
+        ("no LPA", no_lpa, IPS_52, 0b1010, translated),
+    ];
+    for (name, imp, ips, high, want) in cases {
+        let (mut m, tables) = upper_range(imp, TG1_64K, 16, 2);
+        m.map(tables, UPPER_VA, 3, s1_leaf(DATA, TABLE));
+        m.ram.put64(DATA + offset, marker(UPPER_VA));
+        m.cpu.sys.ttbr1_el1 = tables.root | (high << 2);
+        m.cpu.sys.tcr_el1 |= ips;
+        m.cpu.el10_context_changed();
+        assert_eq!(m.load(UPPER_VA), want, "{name}: IPS {ips:#x}, {high:#06b}");
+    }
+    // The 4 KiB and 16 KiB granules' base is `BADDR` alone under a 52-bit
+    // `IPS` too, its bits 5:2 below the alignment of these start tables.
+    for (tg1, page_bits, start) in [(TG1_4K, 12, 1), (TG1_16K, 14, 1)] {
+        let (mut m, tables) = upper_range(V9, tg1, page_bits, start);
+        m.map(tables, UPPER_VA, 3, s1_leaf(DATA, TABLE));
+        let offset = UPPER_VA & ((1 << page_bits) - 1);
+        m.ram.put64(DATA + offset, marker(UPPER_VA));
+        m.cpu.sys.ttbr1_el1 = tables.root | (0b1010 << 2);
+        m.cpu.sys.tcr_el1 |= IPS_52;
+        m.cpu.el10_context_changed();
+        assert_eq!(m.load(UPPER_VA), translated, "TG1 {tg1:#b}");
+    }
+
+    // Stage 2's: `VTTBR_EL2` under `VTCR_EL2.PS`, read first for the
+    // instruction fetch at EL1, whose fault is taken to EL2.
+    let va = PATTERN & ((1 << 39) - 1);
+    let cases = [
+        // (processor, PS, VTTBR_EL2 bits 5:2, the fetch's fault)
+        ("v9.2", V9, PS_52, 0b1010, Some(external_on_walk(2))),
+        ("v9.2", V9, PS_52, 0b1000, Some(external_on_walk(2))),
+        ("v9.2", V9, PS_52, 0b0000, None),
+        ("v9.2", V9, PS_48, 0b1010, None),
+        ("no LPA", no_lpa, PS_52, 0b1010, None),
+    ];
+    for (name, imp, ps, high, fault) in cases {
+        let mut m = Machine::new(imp);
+        let tables = m.tables(16, 40, 2);
+        let code_page = CODE & !0xFFFF;
+        m.map(tables, code_page, 3, s2_leaf(code_page, TABLE));
+        m.map(tables, va, 3, s2_leaf(DATA, TABLE));
+        m.ram.put64(DATA + (va & 0xFFFF), marker(va));
+        let vtcr = 24 | (0b01 << SL0) | (TG0_64K << TG0) | ps;
+        m.stage2(vtcr, tables.root | (high << 2));
+        let want = match fault {
+            Some(fsc) => Err(Taken {
+                to: El::El2,
+                ec: EC_INSTRUCTION_ABORT_LOWER_EL,
+                fsc,
+            }),
+            None => Ok(marker(va)),
+        };
+        assert_eq!(m.load(va), want, "{name}: PS {ps:#x}, {high:#06b}");
+    }
+}
+
+/// With FEAT_LVA and the 64 KiB granule an input address is up to 52 bits
+/// (`T0SZ` or `T1SZ` 12, `AArch64_S1MinTxSZ`), its walk starting at level 1
+/// with a table of 1024 entries: a page there is where a load reads and
+/// `AT` puts it, in each range of the EL1&0 regime and in the EL2 regime's,
+/// and an address one bit wider is out of range.
+#[test]
+fn a_64k_virtual_address_reaches_52_bits_with_feat_lva() {
+    let va = PATTERN & ((1 << 52) - 1);
+    assert_ne!(va >> 48, 0, "the address has bits above 48");
+    let (mut m, tables) = lower_range(V9, TG0_64K, 16, 12, 1);
+    walks_to_its_page(&mut m, tables, va, "TTBR0_EL1");
+
+    let mut m = Machine::new(V9);
+    let lower = m.tables(12, 39, 1);
+    let code_page = CODE & !0xFFF;
+    m.map(lower, code_page, 3, s1_leaf(code_page, TABLE));
+    let upper = m.tables(16, 52, 1);
+    let tcr = 25 | (TG0_4K << TG0) | (12 << T1SZ) | (TG1_64K << TG1);
+    m.stage1(tcr, lower.root, upper.root);
+    walks_to_its_page(&mut m, upper, (!0 << 52) | va, "TTBR1_EL1");
+
+    let (mut m, tables) = el2_range(V9, TG0_64K, 16, 12, 1);
+    m.map(tables, va, 3, s1_leaf(DATA, TABLE));
+    m.ram.put64(DATA + (va & 0xFFFF), marker(va));
+    assert_eq!(m.load(va), Ok(marker(va)), "EL2");
+    assert_eq!(
+        m.load(va | (1 << 52)),
+        Err(Taken {
+            to: El::El2,
+            ec: EC_DATA_ABORT_SAME_EL,
+            fsc: translation(0),
+        }),
+        "EL2: out of range"
+    );
+}
+
+/// With stage 1 disabled an address is its own output address, which must
+/// fit `PAMax` (`AArch64_S1DisabledOutput`): `AT S1E1R` reports the widest
+/// address below it, 52 bits with FEAT_LPA and the Cortex-A57's 44, and an
+/// Address size fault at level 0 for one bit more.
+#[test]
+fn an_untranslated_address_fits_pamax() {
+    for (name, imp, pa_bits) in [("v9.2", V9, 52), ("A57", A57, 44)] {
+        let mut m = Machine::new(imp);
+        let widest = (1 << (pa_bits - 1)) | DATA;
+        let par = m.at_s1e1r(widest) & (PAR_PA_52 | PAR_F);
+        assert_eq!(par, widest, "{name}: {widest:#x}");
+        let beyond = (1 << pa_bits) | DATA;
+        let par = m.at_s1e1r(beyond) & (PAR_FST | PAR_F);
+        assert_eq!(par, PAR_F | (address_size(0) << 1), "{name}: {beyond:#x}");
+    }
+}
+
+/// `HPFAR_EL2.FIPA` holds IPA bits 51:12 in bits 43:4 with FEAT_LPA, and
+/// bits 47:12 in bits 39:4 without, the bits above it RES0: an `MSR` keeps
+/// those alone. (A stage 2 abort's report of a 52-bit IPA there is
+/// `stage_2_starts_where_sl0_and_its_granule_say`'s.)
+#[test]
+fn hpfar_el2_holds_a_52_bit_ipa_with_feat_lpa() {
+    let cases = [
+        ("v9.2", V9, 0x0000_0FFF_FFFF_FFF0),
+        ("A57", A57, 0x0000_00FF_FFFF_FFF0),
+    ];
+    for (name, imp, fipa) in cases {
+        let mut m = Machine::new(imp);
+        m.at(El::El2);
+        m.cpu.x[0] = !0;
+        assert_eq!(m.run(MSR_HPFAR), None, "{name}: MSR");
+        m.cpu.x[0] = 0;
+        assert_eq!(m.run(MRS_HPFAR), None, "{name}: MRS");
+        assert_eq!(m.cpu.x[0], fipa, "{name}");
     }
 }

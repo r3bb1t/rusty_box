@@ -22,7 +22,8 @@ use rusty_box_core::snap::{SnapRead, SnapResult, SnapWrite};
 use rusty_box_core::SnapError;
 
 use super::features::{Feature, Features, LeveledImplementation};
-use super::mmu::{ContextStorage, NoContexts, TlbContexts, TTB_BADDR};
+use super::mmu::{ContextStorage, NoContexts, TlbContexts};
+use super::regime::TTB_BADDR;
 use super::sysreg::{smcr_mask, DISR_MASK};
 use super::{id, Cpu, El};
 
@@ -470,9 +471,16 @@ pub(crate) const VTTBR_VMID8: u64 = 0x00FF_0000_0000_0000;
 
 // ----- the other EL2 registers -----
 
-/// `HPFAR_EL2.FIPA` without FEAT_LPA: bits 39:4, IPA bits 47:12 (bits
-/// 47:40 RES0).
-pub(crate) const HPFAR_FIPA: u64 = 0x0000_00FF_FFFF_FFF0;
+/// `HPFAR_EL2.FIPA` on a processor implementing `features`: bits 39:4, IPA
+/// bits 47:12, and with FEAT_LPA bits 43:4, IPA bits 51:12 (the bits above
+/// RES0).
+pub(crate) const fn hpfar_fipa(features: Features) -> u64 {
+    if features.has(Feature::Lpa) {
+        0x0000_0FFF_FFFF_FFF0
+    } else {
+        0x0000_00FF_FFFF_FFF0
+    }
+}
 /// `VMPIDR_EL2`'s fields: `Aff3`, `U`, `MT`, `Aff2`, `Aff1`, `Aff0`.
 pub(crate) const VMPIDR_MASK: u64 = 0x0000_00FF_41FF_FFFF;
 /// `VMPIDR_EL2`'s RES1 bit: 31.
@@ -670,7 +678,7 @@ impl El2Reg {
             Self::Vttbr => value & (ttbr_baddr_mask(features) | VTTBR_VMID8),
             Self::Vbar => value & VBAR_MASK,
             Self::Esr => value & ESR_MASK,
-            Self::Hpfar => value & HPFAR_FIPA,
+            Self::Hpfar => value & hpfar_fipa(features),
             Self::Spsr => value & spsr_mask,
             Self::Vpidr => value & VPIDR_MASK,
             Self::Vmpidr => (value & VMPIDR_MASK) | VMPIDR_RES1,

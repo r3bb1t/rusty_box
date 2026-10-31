@@ -24,7 +24,7 @@ and sign-off of the submitter's own.
 
 Reproducers:
 - `docs/qemu-aarch64-probe.S`: a bare-metal EL1 program for
-  `qemu-system-aarch64 -M virt`, one line of output per case (A to P). Its
+  `qemu-system-aarch64 -M virt`, one line of output per case (A to R). Its
   header gives the commands and the expected and observed output.
 - `docs/qemu-aarch64-probe-user.c`: a static Linux program for
   `qemu-aarch64 -cpu max`, one case per argument, for the entries fixed
@@ -1161,6 +1161,86 @@ of `arm_cpu_realizefn()` would lower `ID_AA64MMFR0.ECV` to 1 where it is
 above 1, beside the hypervisor fields it clears. `rusty_box_aarch64`
 drops the feature from a processor without EL2 (`src/cpu/features.rs`,
 `Implementation::with_levels`).
+
+---
+
+### 30. A 64 KiB descriptor's bits 15:12 are ignored under an output size below 52 bits
+
+**Impact**: very low. With FEAT_LPA and the 64 KiB granule, a block,
+page or table descriptor whose bits 15:12 are not zero translates where
+they say nothing, when `TCR_ELx.{I}PS` or `VTCR_EL2.PS` gives fewer than
+52 bits, instead of taking an Address size fault. Only software that
+writes 52-bit addresses into its tables and then narrows the output size
+sees it.
+
+**Location**: `target/arm/ptw.c`, `get_phys_addr_lpae()`: `descaddr =
+descriptor & descaddrmask` keeps bits 47 down to the granule; descriptor
+bits 15:12 join it as `descaddr` bits 51:48 only `if (outputsize > 48)`,
+and otherwise the out-of-range test (`descaddr >> outputsize`) sees an
+address without them.
+
+**What the Arm ARM says**: `AArch64_NextTableBase`,
+`AArch64_S1LeafBase` and `AArch64_S2LeafBase` take descriptor bits 15:12
+as address bits 51:48 for the 64 KiB granule whenever `AArch64_PAMax()
+>= 52`, whatever the configured output size; `AArch64_S1Walk` and
+`AArch64_S2Walk` then fault a table address (`AArch64_S1OAOutOfRange` on
+the next `descaddress`) or an output address the output size cannot hold:
+`Fault_AddressSize` at the level of the descriptor that holds it.
+
+**Reproduce**: probe case Q (`-M virt -cpu max`): a level 2 block
+descriptor of the 64 KiB granule with bits 15:12 = 0xa under `IPS` 48
+bits, `AT S1E1R` of its address:
+
+    EL1:     at s1e1r, x2; mrs x5, par_el1
+    Arm:     Q 0000000000000805   (F, FST = level 2 Address size)
+    QEMU:    Q ff00000040000b80   (translated, the bits dropped)
+
+Found on QEMU 11.1.2; master not checked.
+
+**Fix**: not yet written. `get_phys_addr_lpae()` would add descriptor bits
+15:12 as address bits 51:48 for the 64 KiB granule whenever `arm_pamax()`
+is 52, before the out-of-range test, so that test faults them under a
+smaller `outputsize`. `rusty_box_aarch64` does (`src/cpu/regime.rs`,
+`OaLayout::descriptor_address`).
+
+---
+
+### 31. A table base register's bits 5:2 are taken as BADDR[51:48] under IPS 0b111
+
+**Impact**: very low. With FEAT_LPA, the 64 KiB granule and `TCR_ELx.IPS`
+(or `PS`, `VTCR_EL2.PS`) of 0b111, 56 bits, which `PAMax` makes 52, the
+walk starts at a table address whose bits 51:48 are the table base
+register's bits 5:2, where Arm takes those bits as the base's own bits
+5:2, below the alignment of any start table of 64 bytes or more. Software
+that leaves bits 5:2 zero, as it must under 0b110 for a table in the
+first 256 TiB, sees no difference.
+
+**Location**: `target/arm/ptw.c`, `get_phys_addr_lpae()`: `descaddr |=
+extract64(ttbr, 2, 4) << 48` `if (outputsize > 48)`, where `outputsize`
+is the `PARange` bound of `PS`, 52 for both 0b110 and 0b111.
+
+**What the Arm ARM says**: `AArch64_S1TTBaseAddress` and
+`AArch64_S2TTBaseAddress` take bits 5:2 as base bits 51:48 when
+`walkparams.ds == '1'` or when the granule is 64 KiB, `walkparams.ps ==
+'110'` and FEAT_LPA is implemented (or the IMPLEMENTATION DEFINED "BADDR
+expresses 52 bits for 64KB granule"); otherwise the base is
+`ttbr[47:1]`, aligned down to the start table's size.
+
+**Reproduce**: probe case R (`-M virt -cpu max`): `IPS` 0b111,
+`TTBR1_EL1` bits 5:2 = 0xa, the table at its address, `AT S1E1R`:
+
+    EL1:     at s1e1r, x2; mrs x5, par_el1
+    Arm:     R ff00000040000b80   (translated)
+    QEMU:    R 0000000096000156 ...   (Data Abort: a synchronous
+             External abort on the level 2 walk, read at 0xa << 48 up)
+
+Found on QEMU 11.1.2; master not checked.
+
+**Fix**: not yet written. `get_phys_addr_lpae()` would take the bits as
+`descaddr` bits 51:48 under `param.ds`, or for the 64 KiB granule when
+`param.ps` is 6 and `PARange` is at least 6, rather than whenever
+`outputsize > 48`. `rusty_box_aarch64` does (`src/cpu/regime.rs`,
+`OaLayout::table_base`).
 
 ---
 

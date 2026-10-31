@@ -52,8 +52,8 @@ use super::exec::{Fault, StopCause};
 use super::features::{Feature, Features};
 use super::memattr::{self, MemAttrs};
 use super::regime::{
-    el10_s1_disabled_data_normal, el10_stage1_enabled, el10_stage2_enabled, Granule, Regime,
-    S1Params, S1Range,
+    el10_s1_disabled_data_normal, el10_stage1_enabled, el10_stage2_enabled, Granule, OaLayout,
+    Regime, S1Params, S1Range,
 };
 use super::stage2::{s2_start, S2Start, S2Walked};
 use super::{id, sctlr, Cpu, El, Levels, SysRegs};
@@ -784,13 +784,13 @@ struct Mapping {
 
 /// The output address of `va` with its regime's stage 1 disabled (Arm
 /// `AArch64_S1DisabledOutput`), top-byte-ignore (`tbi`) clearing its tag:
-/// `None` where it is wider than the physical address size, an address
-/// size fault at level 0. The one rule an access and a snapshot's TLB
-/// entry both meet (R5).
+/// `None` where it is wider than `PAMax` on a processor implementing
+/// `features`, an address size fault at level 0. The one rule an access
+/// and a snapshot's TLB entry both meet (R5).
 #[inline(always)]
-const fn s1_disabled_address(va: u64, tbi: bool) -> Option<Ipa> {
+const fn s1_disabled_address(va: u64, tbi: bool, features: Features) -> Option<Ipa> {
     let address = if tbi { va & 0x00FF_FFFF_FFFF_FFFF } else { va };
-    if address >> id::PA_BITS == 0 {
+    if address >> id::pa_bits(features) == 0 {
         Some(Ipa::new(address))
     } else {
         None
@@ -885,49 +885,38 @@ impl WalkOutput for PhysAddr {
 /// start level, the bits of the input address its table indexes (fewer than
 /// a level's stride where the input address is narrow, more for stage 2's
 /// concatenated tables), the table's address in the walk's output address
-/// space `A`, and the output size every table and output address must fit.
+/// space `A`, and how its descriptors hold addresses and the output size
+/// every table and output address must fit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct WalkStart<A> {
     pub(super) granule: Granule,
     pub(super) level: u32,
     pub(super) index_bits: u32,
     pub(super) table: A,
-    pub(super) oa_bits: u32,
+    pub(super) oa: OaLayout,
 }
-
-/// A translation table base register's `BADDR` with a 48-bit output
-/// address, bits 47:1: its bit 0 is `CnP` (FEAT_TTCNP), which has no effect
-/// on one processor.
-pub(crate) const TTB_BADDR: u64 = 0x0000_FFFF_FFFF_FFFE;
-
-/// The output address bits a table or leaf descriptor holds without
-/// FEAT_LPA, FEAT_LPA2 or FEAT_D128, bits 47:0, of which those below the
-/// granule or the leaf's size are not the address (`AArch64_NextTableBase`,
-/// `AArch64_S1LeafBase`, `AArch64_S2LeafBase`).
-const DESC_OA: u64 = 0x0000_FFFF_FFFF_FFFF;
 
 impl<A: WalkOutput> WalkStart<A> {
     /// Where a walk with `granule` of an `ia_bits`-bit input address
     /// starting at `level` from the base register `ttbr` starts, its
-    /// tables' addresses fitting `oa_bits` (Arm `AArch64_S1TTBaseAddress`
-    /// and `AArch64_S2TTBaseAddress` without FEAT_LPA, FEAT_LPA2 or
-    /// FEAT_D128, and with the IMPLEMENTATION DEFINED "BADDR expresses 52
-    /// bits for 64KB granule" FALSE): `BADDR` aligned to the start table,
-    /// whose index is the input address's bits above the start level's
-    /// translation size (`AArch64_TTEntryAddressBounds`). A base outside the
-    /// output size is a level 0 Address size fault: the start level's
-    /// descriptor address is the base with an index below its alignment, so
-    /// it fits exactly when the base does.
+    /// addresses held as `oa` says (Arm `AArch64_S1TTBaseAddress` and
+    /// `AArch64_S2TTBaseAddress` without FEAT_LPA2 or FEAT_D128): the base
+    /// aligned to the start table, whose index is the input address's bits
+    /// above the start level's translation size
+    /// (`AArch64_TTEntryAddressBounds`). A base outside the output size is a
+    /// level 0 Address size fault: the start level's descriptor address is
+    /// the base with an index below its alignment, so it fits exactly when
+    /// the base does.
     pub(super) fn of_base(
         ttbr: u64,
         granule: Granule,
         level: u32,
         ia_bits: u32,
-        oa_bits: u32,
+        oa: OaLayout,
     ) -> Result<Self, TranslationFault> {
         let index_bits = ia_bits - granule.translation_size(level);
-        let table = (ttbr & TTB_BADDR) & !ones(index_bits + 3);
-        if table >> oa_bits != 0 {
+        let table = oa.table_base(ttbr, index_bits + 3);
+        if !oa.fits(table) {
             return Err(TranslationFault::AddressSize { level: 0 });
         }
         Ok(Self {
@@ -935,7 +924,7 @@ impl<A: WalkOutput> WalkStart<A> {
             level,
             index_bits,
             table: A::new(table),
-            oa_bits,
+            oa,
         })
     }
 }
@@ -1005,12 +994,13 @@ impl Stage2Leaf {
     }
 
     /// Whether `perms` and `level` are those of a stage 2 descriptor a walk
-    /// from `start` ends at (`AArch64_S2DirectBasePermissions` without
-    /// FEAT_XNX): read, write and execute alike at EL1 and EL0, at a level
-    /// the walk can end at ([`S2Start::ends_at`]).
-    fn walked(perms: u8, level: u8, start: S2Start) -> bool {
+    /// from `start` ends at on a processor implementing `features`
+    /// (`AArch64_S2DirectBasePermissions` without FEAT_XNX): read, write and
+    /// execute alike at EL1 and EL0, at a level the walk can end at
+    /// ([`S2Start::ends_at`]).
+    fn walked(perms: u8, level: u8, start: S2Start, features: Features) -> bool {
         let same_at_both = |el1: u8, el0: u8| (perms & el1 == 0) == (perms & el0 == 0);
-        start.ends_at(u32::from(level))
+        start.ends_at(u32::from(level), features)
             && perms & !PERMS == 0
             && same_at_both(PERM_EL1_R, PERM_EL0_R)
             && same_at_both(PERM_EL1_W, PERM_EL0_W)
@@ -1039,9 +1029,10 @@ const EMPTY_IPA_ENTRY: IpaEntry = IpaEntry {
 /// walks lead to.
 const IPA_ENTRIES: usize = 256;
 
-// `Tlb::ipa_slot` folds an IPA page number, at most `PA_BITS - 12` bits
-// (`AArch64_S2MinTxSZ`), eight bits at a time into a slot's eight.
-const _: () = assert!(IPA_ENTRIES == 1 << 8 && id::PA_BITS - 12 <= 40);
+// `Tlb::ipa_slot` folds an IPA page number, at most `PAMax - 12` bits on
+// any processor here (`AArch64_S2MinTxSZ`), eight bits at a time into a
+// slot's eight.
+const _: () = assert!(IPA_ENTRIES == 1 << 8 && id::MAX_PA_BITS - 12 <= 40);
 
 /// The registers the EL1&0 regime's translations depend on: stage 1's
 /// (`SCTLR_EL1`, `TCR_EL1`, `TTBR0_EL1`, `TTBR1_EL1`, `MAIR_EL1`), and with
@@ -2031,7 +2022,7 @@ impl<L: Levels> Tlb<L> {
             let [perms, s1_device, level, regime, stage1, s2_perms, s2_device, s2_level] = rest;
             if page & !(TAG_MASK | ((1 << PAGE_BITS) - 1)) != 0
                 || pa_page & 0xFFF != 0
-                || pa_page >> id::PA_BITS != 0
+                || pa_page >> id::pa_bits(features) != 0
                 || s1_device > 1
                 || s2_device > 1
             {
@@ -2091,7 +2082,8 @@ impl<L: Levels> Tlb<L> {
                         && perms & !(PERMS | guarded) == 0
                 }
                 (Some(made_in), Stage1::Disabled) => {
-                    let translated = match (s1_disabled_address(va, range.tbi(true)), stage2) {
+                    let disabled = s1_disabled_address(va, range.tbi(true), features);
+                    let translated = match (disabled, stage2) {
                         (Some(ipa), Stage2At::Starts(start)) => start.translates(ipa),
                         (Some(_) | None, Stage2At::Off | Stage2At::Refuses)
                         | (None, Stage2At::Starts(_)) => false,
@@ -2113,7 +2105,7 @@ impl<L: Levels> Tlb<L> {
             // An entry stage 2 takes no part in holds `Stage2Leaf::NONE`; one
             // it does, a stage 2 leaf its walk can end at.
             let stage2_valid = match stage2 {
-                Stage2At::Starts(start) => Stage2Leaf::walked(s2.perms, s2.level, start),
+                Stage2At::Starts(start) => Stage2Leaf::walked(s2.perms, s2.level, start, features),
                 Stage2At::Refuses => false,
                 Stage2At::Off => s2 == Stage2Leaf::NONE,
             };
@@ -2170,9 +2162,9 @@ impl<L: Levels> Tlb<L> {
             if ipa_page >> PAGE_BITS != 0
                 || !start.translates(Ipa::new(ipa_page << 12))
                 || pa_page & 0xFFF != 0
-                || pa_page >> id::PA_BITS != 0
+                || pa_page >> id::pa_bits(features) != 0
                 || device > 1
-                || !Stage2Leaf::walked(perms, level, start)
+                || !Stage2Leaf::walked(perms, level, start, features)
             {
                 return Err(NOT_WALKED);
             }
@@ -2866,7 +2858,7 @@ impl<L: Levels> Cpu<L> {
     #[inline(always)]
     fn s1_disabled_output(&self, regime: Regime, va: u64, kind: AccessKind) -> Option<Ipa> {
         let tbi = self.regime_tbi(regime, regime.upper(va), kind == AccessKind::Fetch);
-        s1_disabled_address(va, tbi)
+        s1_disabled_address(va, tbi, self.imp.features)
     }
 
     /// The translation table walk of one regime (Arm `AArch64_S1Walk`, with
@@ -2912,7 +2904,7 @@ impl<L: Levels> Cpu<L> {
         let granule = range.granule;
         let ia_bits = 64 - range.txsz;
         let start =
-            WalkStart::<Ipa>::of_base(params.ttbr, granule, start_level, ia_bits, params.oa_bits)
+            WalkStart::<Ipa>::of_base(params.ttbr, granule, start_level, ia_bits, params.oa)
                 .map_err(s1)?;
         let stage2 = self.stage2_enabled(params.regime);
         // The descriptor's address is an IPA, which stage 2 translates where
@@ -3006,23 +2998,23 @@ impl<L: Levels> Cpu<L> {
 
     /// The walk of translation tables from `start` for input address
     /// `input`, the part Arm's `AArch64_S1Walk` and `AArch64_S2Walk` share
-    /// with no FEAT_LPA, FEAT_LPA2, FEAT_D128 or hardware update, with the
-    /// start's granule: each level's descriptor, read at the physical
-    /// address `descriptor_address` gives the address of its table entry, in
-    /// the walk's output address space `A` (an IPA for stage 1's walk), must
-    /// be valid, a read that reaches nothing being a synchronous External
-    /// abort on the walk (`AArch64_TTEntryAddressBounds`: each level after
-    /// the start indexes a stride of the input address); a table descriptor
-    /// gives the next level's table (`AArch64_NextTableBase`, with the
-    /// IMPLEMENTATION DEFINED "descriptor[15:12] for 64KB granule are
-    /// OA[51:48]" FALSE), whose address must fit the output size (else an
-    /// Address size fault at the level of the descriptor that holds it); a
-    /// level 3 descriptor with bit 1 clear is reserved, as is a block at a
-    /// level the granule has none (`AArch64_DecodeDescriptorType`,
-    /// [`Granule::block_at`]); and the leaf's output address
-    /// (`AArch64_S1LeafBase`, `AArch64_S2LeafBase`) must fit the output size
-    /// and its access flag be set. The leaf's `tables` is the OR of every
-    /// table descriptor's bits 63:59, stage 1's hierarchical attributes.
+    /// with no FEAT_LPA2, FEAT_D128 or hardware update, with the start's
+    /// granule: each level's descriptor, read at the physical address
+    /// `descriptor_address` gives the address of its table entry, in the
+    /// walk's output address space `A` (an IPA for stage 1's walk), must be
+    /// valid, a read that reaches nothing being a synchronous External abort
+    /// on the walk (`AArch64_TTEntryAddressBounds`: each level after the
+    /// start indexes a stride of the input address); a table descriptor
+    /// gives the next level's table (`AArch64_NextTableBase`, as the start's
+    /// [`OaLayout`] holds it), whose address must fit the output size (else
+    /// an Address size fault at the level of the descriptor that holds it);
+    /// a level 3 descriptor with bit 1 clear is reserved, as is a block at a
+    /// level the granule has none on this processor
+    /// (`AArch64_DecodeDescriptorType`, [`Granule::block_at`]); and the
+    /// leaf's output address (`AArch64_S1LeafBase`, `AArch64_S2LeafBase`)
+    /// must fit the output size and its access flag be set. The leaf's
+    /// `tables` is the OR of every table descriptor's bits 63:59, stage 1's
+    /// hierarchical attributes.
     pub(super) fn walk_tables<B: PhysBus, A: WalkOutput, E, F>(
         &self,
         bus: &mut B,
@@ -3060,8 +3052,8 @@ impl<L: Levels> Cpu<L> {
                 return fault(TranslationFault::Translation { level: at_level });
             }
             if level < 3 && desc & 2 != 0 {
-                let next = desc & DESC_OA & !ones(granule.bits());
-                if next >> start.oa_bits != 0 {
+                let next = start.oa.descriptor_address(desc, granule.bits());
+                if !start.oa.fits(next) {
                     return fault(TranslationFault::AddressSize { level: at_level });
                 }
                 tables |= desc >> 59;
@@ -3072,13 +3064,13 @@ impl<L: Levels> Cpu<L> {
             let leaf = if level == 3 {
                 desc & 2 != 0
             } else {
-                granule.block_at(level)
+                granule.block_at(level, self.imp.features)
             };
             if !leaf {
                 return fault(TranslationFault::Translation { level: at_level });
             }
-            let out = desc & DESC_OA & !ones(shift);
-            if out >> start.oa_bits != 0 {
+            let out = start.oa.descriptor_address(desc, shift);
+            if !start.oa.fits(out) {
                 return fault(TranslationFault::AddressSize { level: at_level });
             }
             if (desc >> 10) & 1 == 0 {
@@ -3299,8 +3291,11 @@ impl<L: Levels> Cpu<L> {
         }
         self.sys.par_el1 = match result {
             Ok((pa, attrs)) => {
+                // PA, bits 47:12, and with FEAT_LPA bits 51:48 too, as the
+                // address's own bits: no output address is wider than
+                // `PAMax`.
                 (u64::from(attrs.par_attr(self.imp.features)) << 56)
-                    | (pa & 0x0000_FFFF_FFFF_F000)
+                    | (pa & 0x000F_FFFF_FFFF_F000)
                     | NS
                     | (u64::from(attrs.par_shareability()) << 7)
                     | RES1

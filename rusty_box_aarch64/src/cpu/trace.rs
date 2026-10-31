@@ -63,7 +63,7 @@
 
 use super::decode::classify;
 use super::exec::{Done, Fault, Observed, Step};
-use super::id::PA_BITS;
+use super::id::MAX_PA_BITS;
 use super::op::{predecode, Op, OpSource};
 use super::poll::PollStep;
 use super::{Btype, Cpu, Levels};
@@ -133,7 +133,7 @@ const INVALID: u64 = u64::MAX;
 /// so a marked one is never [`INVALID`].
 const POLL: u64 = 1 << 63;
 
-const _: () = assert!(PA_BITS < 63);
+const _: () = assert!(MAX_PA_BITS < 63);
 
 // Pages that share a stamp must share their window of entries, or a write
 // to one would clear the stamp of the other's traces without forgetting

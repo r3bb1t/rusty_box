@@ -5,7 +5,11 @@
 //! machine asks for it (FEAT_EL2), no PMU. Of the translation granules, the
 //! interpreter walks all three; the Armv9.2 model offers them all, and the
 //! Cortex-A57 the 4 KiB one alone, the others its TRM's to say
-//! (`Features::CORTEX_A57`).
+//! (`Features::CORTEX_A57`). The Armv9.2 model's physical addresses are 52
+//! bits (FEAT_LPA), the Cortex-A57's 44
+//! ([`CpuModel::physical_address_bits`](super::CpuModel::physical_address_bits));
+//! its virtual addresses are 52 bits with the 64 KiB granule (FEAT_LVA), 48
+//! otherwise and on the Cortex-A57.
 //! The Cortex-A57 r1p0 (the value QEMU's `cortex-a57` model reports in
 //! `MIDR_EL1`) has FP and Advanced SIMD, the
 //! Cryptographic Extension's AES, PMULL, SHA-1 and SHA-256 and CRC32 (the
@@ -243,10 +247,12 @@ pub(crate) const fn id_aa64mmfr1(features: Features) -> u64 {
 /// with FEAT_TTCNP, UAO (7:4) = 1 with FEAT_UAO, AT (35:32) = 1 with
 /// FEAT_LSE2, IDS (39:36) = 1 with FEAT_IDST, TTL (51:48) = 1 with
 /// FEAT_TTL, E0PD (63:60) = 1 with FEAT_E0PD, ST (31:28) = 1 with
-/// FEAT_TTST; nothing else from v8.1+.
+/// FEAT_TTST, VARange (19:16) = 1 with FEAT_LVA (`FEAT_LVA <=>
+/// UInt(VARange) >= 1`); nothing else from v8.1+.
 pub(crate) const fn id_aa64mmfr2(features: Features) -> u64 {
     field(features, Feature::Ttcnp, 0, 1)
         | field(features, Feature::Uao, 4, 1)
+        | field(features, Feature::Lva, 16, 1)
         | field(features, Feature::Ttst, 28, 1)
         | field(features, Feature::Lse2, 32, 1)
         | field(features, Feature::Idst, 36, 1)
@@ -280,8 +286,9 @@ const fn field(features: Features, feature: Feature, lsb: u32, value: u64) -> u6
     }
 }
 
-/// `ID_AA64MMFR0_EL1` of a processor implementing `features`: PARange = 4
-/// (44-bit physical addresses, as the Cortex-A57), ASIDBits = 2 (16-bit
+/// `ID_AA64MMFR0_EL1` of a processor implementing `features`: PARange
+/// (3:0) the encoding of its physical address size ([`pa_range`]), 6 for 52
+/// bits with FEAT_LPA and 4 for 44 bits without, ASIDBits = 2 (16-bit
 /// ASIDs), mixed endianness not supported. The stage 1 granules: TGran4
 /// (31:28) = 0, the 4 KiB one every processor here has; TGran16 (23:20) = 1
 /// with FEAT_TGran16K, else 0; TGran64 (27:24) = 0 with FEAT_TGran64K, else
@@ -309,11 +316,43 @@ pub(crate) const fn id_aa64mmfr0(features: Features) -> u64 {
     };
     // FEAT_ECV_POFF requires FEAT_ECV (`FEAT_ECV_POFF ==> FEAT_ECV`).
     let ecv = field(features, Feature::Ecv, 60, 1) + field(features, Feature::EcvPoff, 60, 1);
-    0x0000_0024 | tgran64 | field(features, Feature::TGran16K, 20, 1) | stage_2 | ecv
+    0x0000_0020
+        | pa_range(features)
+        | tgran64
+        | field(features, Feature::TGran16K, 20, 1)
+        | stage_2
+        | ecv
 }
 
-/// Physical address width implied by `ID_AA64MMFR0_EL1.PARange`.
-pub const PA_BITS: u32 = 44;
+/// `ID_AA64MMFR0_EL1.PARange` of a processor implementing `features`, the
+/// encoding ([`ADDRESS_SIZES`]) of its physical address size, Arm's
+/// IMPLEMENTATION DEFINED `AArch64_PAMax`: 0b0110, 52 bits, with FEAT_LPA,
+/// which a `PARange` of 52 bits or more is (`FEAT_LPA <=> UInt(PARange) >=
+/// 6`), 56 bits needing FEAT_D128, which no processor here has; 0b0100, 44
+/// bits, without, the Cortex-A57's.
+#[inline(always)]
+const fn pa_range(features: Features) -> u64 {
+    if features.has(Feature::Lpa) {
+        0b0110
+    } else {
+        0b0100
+    }
+}
+
+/// Arm `AArch64_PAMax`: the physical address size of a processor
+/// implementing `features`, which its `ID_AA64MMFR0_EL1.PARange` reports
+/// ([`pa_range`]).
+#[inline(always)]
+pub(crate) const fn pa_bits(features: Features) -> u32 {
+    ADDRESS_SIZES[pa_range(features) as usize]
+}
+
+/// The widest physical address of any processor here ([`pa_bits`]).
+pub(crate) const MAX_PA_BITS: u32 = pa_bits(Features::EVERY);
+
+/// The address sizes, in bits, that `ID_AA64MMFR0_EL1.PARange` and
+/// `TCR_ELx.PS`/`IPS` encode, each at its encoding.
+pub(crate) const ADDRESS_SIZES: [u32; 8] = [32, 36, 40, 42, 44, 48, 52, 56];
 
 /// `CTR_EL0`: as the Cortex-A57 — 64-byte minimum I and D lines, PIPT
 /// instruction cache, ERG and CWG of 64 bytes, bit 31 RES1.

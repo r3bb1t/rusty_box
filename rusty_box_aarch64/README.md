@@ -290,7 +290,7 @@ is) must reproduce, are:
 
 | Part | Model |
 |---|---|
-| Processor | One of two models (`VirtConfig::cpu`, `CpuModel`). `cortex-a57`, the default: Cortex-A57-shaped ARMv8.0, the whole ARMv8.0 FP and Advanced SIMD instruction set (integer and floating point, vector and scalar, saturation setting FPSR.QC), the Cortex-A57's optional Cryptographic Extension (AES, 64-bit PMULL, SHA-1, SHA-256) and CRC32, as QEMU's `cortex-a57` has them, with QEMU's 62.5 MHz system counter. `armv9.2`: an Armv9.2 processor with SME and SME2 and no SVE (the features below), Streaming SVE vectors of 128 to 512 bits, `MIDR_EL1` 0x000F_0520 (implementer 0, a software model) and the 1 GHz counter Armv8.6 and later require. Both: EL0 and EL1, and on the Cortex-A57 EL2 with `MachineBuilder::with_el2` (see below), AArch64 only, the Cortex-A57's caches as `CTR_EL0`, `CLIDR_EL1` and `CCSIDR_EL1` report them, an MMU with the 4 KiB granule (the Armv9.2 model the 16 KiB and 64 KiB ones too, and FEAT_TTST's small tables, at stage 1: it has no EL2 yet), stage 1 and with EL2 stage 2, with a TLB holding both stages' translations, exclusives, PSCI 1.1 (DEN 0022D) over `HVC`, or over `SMC` with EL2, the conduits QEMU's `virt` provides (see "Where the references differ") |
+| Processor | One of two models (`VirtConfig::cpu`, `CpuModel`). `cortex-a57`, the default: Cortex-A57-shaped ARMv8.0, the whole ARMv8.0 FP and Advanced SIMD instruction set (integer and floating point, vector and scalar, saturation setting FPSR.QC), the Cortex-A57's optional Cryptographic Extension (AES, 64-bit PMULL, SHA-1, SHA-256) and CRC32, as QEMU's `cortex-a57` has them, with QEMU's 62.5 MHz system counter. `armv9.2`: an Armv9.2 processor with SME and SME2 and no SVE (the features below), Streaming SVE vectors of 128 to 512 bits, `MIDR_EL1` 0x000F_0520 (implementer 0, a software model) and the 1 GHz counter Armv8.6 and later require. Both: EL0 and EL1, and on the Cortex-A57 EL2 with `MachineBuilder::with_el2` (see below), AArch64 only, the Cortex-A57's caches as `CTR_EL0`, `CLIDR_EL1` and `CCSIDR_EL1` report them, an MMU with the 4 KiB granule and 44-bit physical and 48-bit virtual addresses (the Armv9.2 model the 16 KiB and 64 KiB granules too, FEAT_TTST's small tables, and 52-bit physical addresses, FEAT_LPA: an untranslated address of up to 52 bits, and walks that output up to 52 bits with the 64 KiB granule, taking 52-bit virtual addresses with it, FEAT_LVA, and up to 48 with the others; at stage 1, as it has no EL2 yet), stage 1 and with EL2 stage 2, with a TLB holding both stages' translations, exclusives, PSCI 1.1 (DEN 0022D) over `HVC`, or over `SMC` with EL2, the conduits QEMU's `virt` provides (see "Where the references differ") |
 | Interrupts | GICv2 without the Security Extensions, for one processor, as IHI 0048B specifies it, in QEMU's structure: both interrupt groups, with Group 0 on FIQ under `FIQEn`, the Group 1 aliases (`GICC_AIAR`, `GICC_AEOIR`, `GICC_AHPPIR`, `GICC_ABPR`), preemption by group priority, the running priority and active priority registers, and 4 KiB distributor and 8 KiB CPU interface regions; + GICv2m frame |
 | Timers | EL1 physical and virtual generic timers; with EL2, the EL2 physical timer (`CNTHP_*`, PPI 10), `CNTVOFF_EL2` and `CNTHCTL_EL2`'s traps and event stream; with FEAT_ECV_POFF too, `CNTPOFF_EL2` (built, but no model has FEAT_ECV_POFF and EL2 yet) |
 | Devices | PL011 UART (`UARTPeriphID2` revision 1, QEMU's ID, as DDI 0183F describes the revisions up to r1p4: a 16-entry receive FIFO with overrun and break status, receive interrupts at the `UARTIFLS` level, modem-status interrupts on line changes, loopback, a receiver gated by `UARTEN` and `RXE`, a transmitter gated by `UARTEN` and `TXE` whose 16-entry transmit FIFO holds what is written meanwhile, transmit interrupts as the transmit FIFO drains through the `UARTIFLS` level, and the receive timeout counted in bit periods of the programmed baud rate on the machine's clock, while characters themselves cross the line in no time; see "Where the references differ"), PL031 RTC (r1p3, as DDI 0224C describes it: stopped until `RTCCR` starts it, zeroed by any later `RTCCR` write, stopped again by a system reset), PL061 GPIO as DDI 0190B describes it (address-masked `GPIODATA`, edge and level detection on the lines' levels, outputs included) with QEMU's `gpio-key` power button on line 3, CFI flash ×2 (QEMU `pflash_cfi01` semantics, whole 64 MiB banks decoded), `fw_cfg` (traditional and DMA interfaces, no files), 32 virtio-mmio transports (QEMU's legacy layout while empty; non-legacy, as QEMU's `force-legacy=false`, once the host plugs in QEMU's 2D `virtio-gpu-device` with its EDID, `virtio-keyboard-device`, `virtio-tablet-device` or `virtio-blk-device` over a raw image in memory or a host file, which take the highest free ones), an empty PCIe ECAM/windows |
@@ -336,7 +336,13 @@ down to 16 bits, 17 with the 64 KiB granule), each at stage 1, and built
 for stage 2 too — FEAT_S2TGran16K and FEAT_S2TGran64K, and FEAT_TTST's
 small stage 2 tables and stage 2 walk starting at level 3 with the 4 KiB
 granule — which no guest reaches yet: this model cannot have EL2
-(`CpuModel::el2_available`); FEAT_HPDS
+(`CpuModel::el2_available`); FEAT_LPA and FEAT_LVA (a 52-bit physical
+address size, `ID_AA64MMFR0_EL1.PARange` 0b0110, and with the 64 KiB
+granule 52-bit input addresses, `TxSZ` down to 12, output addresses
+whose bits 51:48 a descriptor holds in bits 15:12 and, under a 52-bit
+`PS`, a table base register in bits 5:2, and a block at level 1), at
+stage 1 and built for stage 2 (a 52-bit IPA, and `HPFAR_EL2.FIPA` to
+bit 43); FEAT_HPDS
 (TCR_EL1.HPD0 and HPD1), FEAT_TTCNP (TTBRn_EL1.CnP),
 FEAT_E0PD (TCR_EL1.E0PD0 and E0PD1) with the FEAT_CSV3 it requires,
 FEAT_TLBIOS, FEAT_TLBIRANGE and FEAT_TTL (the Outer Shareable and range
@@ -673,7 +679,19 @@ integration tests of the public API.
   snapshot's TLB entry, or kept stage 2 translation, refused at a level no
   walk of the context it was made in ends at, or for an address that walk
   does not translate, at either stage and in either regime
-  (`tests/unit/memory_system.rs` checks `EPD` and `T1SZ` there).
+  (`tests/unit/memory_system.rs` checks `EPD` and `T1SZ` there). It checks
+  FEAT_LPA and FEAT_LVA the same way (`AArch64_PAMax`,
+  `AArch64_PhysicalAddressSize`, `AArch64_S1TTBaseAddress`,
+  `AArch64_NextTableBase`, `AArch64_S1LeafBase`, `AArch64_S2MinTxSZ`): a
+  64 KiB descriptor's bits 15:12 as address bits 51:48, reported by `AT`
+  at both stages under a 52-bit size and an Address size fault under a
+  48-bit one, and not address bits without a 52-bit `PAMax`; a table base
+  register's bits 5:2 under a 52-bit `IPS` or `PS` alone, at both stages;
+  52-bit input addresses in both EL1&0 ranges and in EL2's, and the
+  smallest `T0SZ` at stage 2 per granule; the code bits of `XPACI` up to
+  bit 52; an untranslated address up to `PAMax`; and `HPFAR_EL2` holding
+  a 52-bit IPA. `tests/unit/el2.rs` checks each model's `PARange`,
+  `VARange` and `CpuModel::physical_address_bits`.
 - `tests/unit/load_store.rs` checks, over a bus that logs every access,
   what Arm's `Mem` and the load and store pages decide and the vectors
   cannot show: PRFM, PRFUM and PRFM (register) checking no SP alignment
@@ -1510,17 +1528,21 @@ one open.
   hypervisor reads the same granules either way.
 - **Both stages make the same IMPLEMENTATION DEFINED choices.** The
   pseudocode asks both stages the same questions: a `TxSZ` below its
-  minimum (16 at stage 1, 64 − PAMax (20) at stage 2) or above
-  `AArch64_MaxTxSZ` (39; with FEAT_TTST 48, or 47 with the 64 KiB
+  minimum (at stage 1 16, or 12 with FEAT_LVA and the 64 KiB granule; at
+  stage 2 64 − PAMax, 20 on the Cortex-A57, and with the Armv9.2 model's
+  52-bit `PAMax` 12 with the 64 KiB granule and 16 with the others) or
+  above `AArch64_MaxTxSZ` (39; with FEAT_TTST 48, or 47 with the 64 KiB
   granule) takes a level 0 Translation fault ("Fault on TxSZ value below
-  minimum", "... above maximum"), as QEMU's `tsz_oob` does; a `TG0` or
+  minimum", "... above maximum", the first no choice with FEAT_LVA at
+  stage 1 and FEAT_LPA at stage 2), as QEMU's `tsz_oob` does; a `TG0` or
   `TG1` naming a granule the processor lacks, or its reserved encoding, is
   the 4 KiB one ("TG0 encoded granule size", "TG1 encoded granule size"),
   the smallest granule, QEMU's choice (`sanitize_gran_size`); with the 64
-  KiB granule and a 44-bit `PAMax`, neither a descriptor's bits 15:12 nor a
-  table base register's bits 5:2 are address bits 51:48 ("descriptor[15:12]
-  for 64KB granule are OA[51:48]" and "BADDR expresses 52 bits for 64KB
-  granule" FALSE, as QEMU uses them only for a 52-bit output size); the
+  KiB granule where `PAMax` is under 52 bits, neither a descriptor's bits
+  15:12 nor a table base register's bits 5:2 are address bits 51:48
+  ("descriptor[15:12] for 64KB granule are OA[51:48]" and "BADDR
+  expresses 52 bits for 64KB granule" FALSE, as QEMU uses them only for a
+  52-bit output size, which needs FEAT_LPA); the
   Contiguous bit is treated as 0, and a clear access flag faults for cache
   maintenance too. A synchronous External abort on stage 2's walk reports
   no instruction syndrome ("ISV on second stage translation table walk"
@@ -1606,6 +1628,24 @@ one open.
   it when `virtualization=off` takes EL2 away: `arm_cpu_realizefn` clears
   the hypervisor fields of the ID registers then, but not `ECV`
   ([docs/qemu-upstream-bugs.md](../docs/qemu-upstream-bugs.md) entry 29).
+- **A 64 KiB descriptor's bits 15:12 are address bits whatever the output
+  size.** With a 52-bit `PAMax` (FEAT_LPA), Arm's `AArch64_NextTableBase`,
+  `AArch64_S1LeafBase` and `AArch64_S2LeafBase` take them as bits 51:48 of
+  the address the descriptor gives, so under an `IPS` or `PS` below 52
+  bits a nonzero value is an Address size fault. QEMU 11.1.2's
+  `get_phys_addr_lpae` takes them only for a 52-bit output size and
+  otherwise drops them, translating where Arm faults
+  ([docs/qemu-upstream-bugs.md](../docs/qemu-upstream-bugs.md) entry 30,
+  probe case Q).
+- **A table base register's bits 5:2 are `BADDR[51:48]` under `PS` 0b110
+  alone.** Arm's `AArch64_S1TTBaseAddress` and `AArch64_S2TTBaseAddress`
+  take them so with FEAT_LPA and the 64 KiB granule when the field is
+  0b110; under 0b111 (56 bits, 52 with this `PAMax`) they are the base's
+  own bits 5:2, below the alignment of any start table of 64 bytes or
+  more. QEMU 11.1.2 takes them as bits 51:48 whenever the output size is
+  52 bits, 0b111 too
+  ([docs/qemu-upstream-bugs.md](../docs/qemu-upstream-bugs.md) entry 31,
+  probe case R).
 - **`DC ZVA` on Device memory is an alignment fault.** Arm ARM
   `AArch64.S1HasAlignmentFault` faults every `DC ZVA` to Device memory, and
   with the MMU off every data access is to Device memory; under stage 2,
@@ -2044,6 +2084,12 @@ one open.
   FEAT_SME_FA64, …), on the Armv9.2 model: none is an Armv9.2
   requirement, and the SVE instructions it has are the ones FEAT_SME makes
   legal in Streaming SVE mode.
+- Of the translation regime: FEAT_LPA2 (52-bit addresses with the 4 KiB
+  and 16 KiB granules, `TCR_ELx.DS`, `VTCR_EL2.SL2`, walks from level −1),
+  and FEAT_HAF and FEAT_HAFDBS (the access flag and dirty state set by the
+  walk). TLB maintenance empties the whole TLB, an over-invalidation Arm
+  permits, and a 16 KiB or 64 KiB page, or a block, is walked once for
+  each 4 KiB piece the processor touches.
 - Of EL2: the GIC's virtualization extensions (no virtual CPU interface
   raises a virtual interrupt; only `HCR_EL2` does, and the device tree's
   GIC node has no GICH and GICV frames or maintenance interrupt, which

@@ -122,6 +122,28 @@
 //    ==> FEAT_AA64EL2), so ECV is at most 1.
 //      Arm:          P 1...............                       (ECV 1)
 //      QEMU 11.1.2:  P 2100032310201126                       (ECV 2)
+//
+// Q and R add the upper range with the 64 KiB granule (TG1 0b11, T1SZ 25:
+// 39 bits, walked from level 2, whose blocks are 512 MiB) beside cases E
+// to I's lower range, and print PAR_EL1 after AT S1E1R of
+// 0xffffff8000000000, which entry 0 of its level 2 table maps to the RAM at
+// 0x40000000 (attr 1, inner shareable); or ESR_EL1 and ELR_EL1 where the AT
+// faults. -cpu max has FEAT_LPA (PARange 52 bits).
+// Q  The block descriptor's bits 15:12 are 0xa, under IPS 48 bits. With a
+//    52-bit PAMax and the 64 KiB granule they are OA[51:48] whatever IPS
+//    says (AArch64_S1LeafBase), and an output address IPS cannot hold is an
+//    Address size fault (AArch64_S1OAOutOfRange): PAR_EL1.F = 1, FST =
+//    level 2 Address size.
+//      Arm:          Q 0000000000000805
+//      QEMU 11.1.2:  Q ff00000040000b80                       (translated)
+// R  IPS 56 bits (0b111) and TTBR1_EL1 bits 5:2 0xa. Only IPS 0b110 makes
+//    them BADDR[51:48] (AArch64_S1TTBaseAddress); under any other they are
+//    the base's own bits 5:2, below this 8 KiB table's alignment, and the
+//    walk reads the table where the rest of BADDR puts it.
+//      Arm:          R ff00000040000b80                       (translated)
+//      QEMU 11.1.2:  R 0000000096000156 ...                   (an External
+//                    abort on the level 2 walk, the table read at
+//                    0xa << 48 up)
 
 #define UART 0x09000000
 
@@ -457,7 +479,67 @@ case_p:
     bl puthex
     mov w0, #'\n'
     bl putc
+
+case_q:
+    // Cases E to I's lower range, and the 64 KiB upper range: T1SZ 25,
+    // EPD1 clear, inner and outer write-back, inner shareable, TG1 0b11;
+    // IPS 48 bits.
+    ldr x0, =(25 | (0x5 << 8) | (3 << 12) | (25 << 16) | (0x5 << 24) | (3 << 28) | (3 << 30) | (5 << 32))
+    msr tcr_el1, x0
+    ldr x0, =l2_64k
+    msr ttbr1_el1, x0
+    ldr x0, =(0x40000000 | (0xa << 12) | (3 << 8) | (1 << 10) | (1 << 2) | 1)
+    ldr x1, =l2_64k
+    str x0, [x1]
+    dsb sy
+    tlbi vmalle1
+    dsb sy
+    isb
+    adr x0, case_r
+    mov w2, #'Q'
+    bl at_upper
+
+case_r:
+    // IPS 56 bits, TTBR1_EL1 bits 5:2 0xa, the block without bits 15:12.
+    ldr x0, =(25 | (0x5 << 8) | (3 << 12) | (25 << 16) | (0x5 << 24) | (3 << 28) | (3 << 30) | (7 << 32))
+    msr tcr_el1, x0
+    ldr x0, =(l2_64k + (0xa << 2))
+    msr ttbr1_el1, x0
+    ldr x0, =(0x40000000 | (3 << 8) | (1 << 10) | (1 << 2) | 1)
+    ldr x1, =l2_64k
+    str x0, [x1]
+    dsb sy
+    tlbi vmalle1
+    dsb sy
+    isb
+    adr x0, done
+    mov w2, #'R'
+    bl at_upper
     b done
+
+// AT S1E1R of 0xffffff8000000000 for case w2, resuming at x0 if it faults:
+// print the case and PAR_EL1.
+at_upper:
+    mov x14, x30
+    ldr x1, =resume
+    str x0, [x1]
+    ldr x1, =which
+    strb w2, [x1]
+    ldr x2, =0xffffff8000000000
+    at s1e1r, x2
+    isb
+    mrs x5, par_el1
+    ldr x1, =which
+    ldrb w0, [x1]
+    bl putc
+    mov w0, #' '
+    bl putc
+    mov x0, x5
+    bl puthex
+    mov w0, #'\n'
+    bl putc
+    mov x30, x14
+    ret
 
 // Resume at x0 after the case, then ERET to EL0 at x1 with every interrupt
 // masked; w2 names the case.
@@ -573,3 +655,9 @@ l1:
     .quad 0x40000000 | (1 << 54) | (1 << 53) | (3 << 8) | (1 << 10) | (1 << 6) | (1 << 2) | 1  // EL0 read/write
     .quad 0x40000000 | (1 << 54) | (1 << 53) | (3 << 8) | (1 << 10) | (2 << 6) | (1 << 2) | 1  // read-only
     .skip 4096 - 5 * 8
+
+// The level-2 table of cases Q and R's 64 KiB upper range: 1024 entries,
+// 8 KiB, aligned to its size; the cases write entry 0.
+    .balign 8192
+l2_64k:
+    .skip 8192

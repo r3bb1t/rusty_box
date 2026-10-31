@@ -34,7 +34,7 @@ use super::mmu::{
     Ipa, TranslationFault, WalkStart, WalkStop, PERM_EL0_R, PERM_EL0_W, PERM_EL0_X, PERM_EL1_R,
     PERM_EL1_W, PERM_EL1_X,
 };
-use super::regime::{el10_stage2_enabled, output_address_bits, Granule, Regime, TCR_TG0};
+use super::regime::{el10_stage2_enabled, Granule, OaLayout, Regime, TCR_TG0};
 use super::{id, Cpu, Levels};
 use crate::bus::{PhysAddr, PhysBus};
 
@@ -45,45 +45,59 @@ const VTCR_SL0: u32 = 6;
 /// `VTCR_EL2.PS`, bits 18:16.
 const VTCR_PS: u32 = 16;
 
-/// `AArch64_S2MinTxSZ` without FEAT_LPA, FEAT_LPA2 or FEAT_D128, whatever
-/// the granule: `64 - PAMax`, the input address being at most as wide as a
-/// physical one.
-const S2_MIN_TXSZ: u32 = 64 - id::PA_BITS;
+/// Arm `AArch64_S2MinTxSZ` without FEAT_LPA2's `DS` or FEAT_D128, for an
+/// EL1 in AArch64 state, the only one here: the smallest `T0SZ` with
+/// `granule` on a processor implementing `features`, `64 -` the widest
+/// input address. That is `PAMax` bits, or where `PAMax` is 52 bits or
+/// more, 52 with the 64 KiB granule and 48 with the others.
+const fn s2_min_txsz(granule: Granule, features: Features) -> u32 {
+    let pa_max = id::pa_bits(features);
+    let ia_max = match granule {
+        _ if pa_max < 52 => pa_max,
+        Granule::K64 => 52,
+        Granule::K4 | Granule::K16 => 48,
+    };
+    64 - ia_max
+}
 
 // `AArch64_S2InvalidSL` makes a start at level 0 with the 4 KiB granule
 // (`SL0` = 0b10) invalid where `PAMax` is under 44 bits, at level 1 with
 // the 64 KiB granule (0b10) under 44, and at level 1 with the 16 KiB
-// granule (0b10) under 42; on this processor all three are valid, and the
-// encodings it refuses ([`s2_start_level`]) are those no `PAMax` makes
-// valid without FEAT_LPA2 or FEAT_TTST.
-const _: () = assert!(id::PA_BITS >= 44);
+// granule (0b10) under 42; on every processor here, 44 bits without
+// FEAT_LPA and 52 with it, all three are valid, and the encodings
+// [`s2_start_level`] refuses are those no `PAMax` makes valid without
+// FEAT_LPA2 or FEAT_TTST.
+const _: () = assert!(
+    id::pa_bits(Features::of(&[])) >= 44 && id::pa_bits(Features::of(&[Feature::Lpa])) >= 44
+);
 
 /// What a stage 2 walk reads from its registers (Arm `S2TTWParams`, from
-/// `AArch64_NSS2TTWParams`): where `VTCR_EL2`'s `T0SZ`, `SL0` and `TG0` start
-/// it, its `PS`, and `VTTBR_EL2`'s base.
+/// `AArch64_NSS2TTWParams`): what `VTCR_EL2` says of it, and `VTTBR_EL2`'s
+/// base.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct S2Params {
-    /// Where the walk starts ([`s2_start`]).
+    /// Where the walk starts and how its addresses are held ([`s2_start`]).
     start: Option<S2Start>,
-    /// The output address size `PS` gives, at most `PAMax`.
-    oa_bits: u32,
     vttbr: u64,
 }
 
 /// Where a stage 2 walk starts: its granule (`VTCR_EL2.TG0`,
 /// [`Granule::stage2`]), the size of its input address (`64 - T0SZ`) and
-/// its start level (`SL0`'s).
+/// its start level (`SL0`'s); and how its addresses are held and bounded,
+/// `PS` with the granule ([`OaLayout::of`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct S2Start {
     pub(crate) granule: Granule,
     pub(crate) ia_bits: u32,
     pub(crate) level: u32,
+    pub(crate) oa: OaLayout,
 }
 
 impl S2Start {
-    /// Whether a walk from here can end at `level` ([`Granule::ends_at`]).
-    pub(crate) const fn ends_at(self, level: u32) -> bool {
-        self.granule.ends_at(self.level, level)
+    /// Whether a walk from here can end at `level` on a processor
+    /// implementing `features` ([`Granule::ends_at`]).
+    pub(crate) const fn ends_at(self, level: u32, features: Features) -> bool {
+        self.granule.ends_at(self.level, level, features)
     }
 
     /// Whether the walk translates `ipa` (Arm `AArch64_IPAIsOutOfRange`,
@@ -116,10 +130,11 @@ const fn s2_start_level(granule: Granule, sl0: u64, features: Features) -> Optio
 /// Where a stage 2 walk under `VTCR_EL2` `vtcr` starts on a processor
 /// implementing `features`, or `None` where `AArch64_S2Translate` refuses
 /// the configuration before any walk, every translation a level 0
-/// Translation fault: a `T0SZ` outside `AArch64_S2MinTxSZ` and
+/// Translation fault: a `T0SZ` outside [`s2_min_txsz`] and
 /// `AArch64_MaxTxSZ` of the granule (`AArch64_S2TxSZFaults`, with the
 /// IMPLEMENTATION DEFINED "Fault on TxSZ value above maximum" and "...
-/// below minimum" TRUE, as stage 1's), an `SL0` `AArch64_S2InvalidSL`
+/// below minimum" TRUE, as stage 1's; with FEAT_LPA the second is no
+/// choice), an `SL0` `AArch64_S2InvalidSL`
 /// refuses ([`s2_start_level`]), or one whose start level does not resolve
 /// at least one bit of the input address and at most a full level's
 /// stride and four more, the index into 16 concatenated tables
@@ -128,7 +143,7 @@ const fn s2_start_level(granule: Granule, sl0: u64, features: Features) -> Optio
 pub(crate) const fn s2_start(vtcr: u64, features: Features) -> Option<S2Start> {
     let granule = Granule::stage2(vtcr >> TCR_TG0, features);
     let txsz = (vtcr & VTCR_T0SZ) as u32;
-    if txsz < S2_MIN_TXSZ || txsz > granule.max_txsz(features) {
+    if txsz < s2_min_txsz(granule, features) || txsz > granule.max_txsz(features) {
         return None;
     }
     let Some(level) = s2_start_level(granule, vtcr >> VTCR_SL0, features) else {
@@ -143,6 +158,7 @@ pub(crate) const fn s2_start(vtcr: u64, features: Features) -> Option<S2Start> {
         granule,
         ia_bits,
         level,
+        oa: OaLayout::of(vtcr >> VTCR_PS, granule, features),
     })
 }
 
@@ -209,7 +225,6 @@ impl<L: Levels> Cpu<L> {
         let el2 = self.el2();
         S2Params {
             start: s2_start(el2.vtcr, self.imp.features),
-            oa_bits: output_address_bits(el2.vtcr >> VTCR_PS),
             vttbr: el2.vttbr,
         }
     }
@@ -248,9 +263,9 @@ impl<L: Levels> Cpu<L> {
             granule,
             ia_bits,
             level,
+            oa,
         } = s2_start;
-        let start =
-            WalkStart::<PhysAddr>::of_base(params.vttbr, granule, level, ia_bits, params.oa_bits)?;
+        let start = WalkStart::<PhysAddr>::of_base(params.vttbr, granule, level, ia_bits, oa)?;
         let physical = &mut |_: &mut B, address: PhysAddr| Ok::<PhysAddr, Infallible>(address);
         let leaf = match self.walk_tables(bus, ipa, start, physical) {
             Ok(leaf) => leaf,

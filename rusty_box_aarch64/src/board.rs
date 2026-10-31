@@ -566,7 +566,7 @@ impl<S: GuestStorage> VirtBoard<S> {
     /// The RAM bytes an access covers, if it lies entirely in RAM.
     #[inline(always)]
     fn ram_bytes(&self, addr: u64, width: AccessWidth) -> Option<&[u8]> {
-        let off = addr.checked_sub(RAM_BASE)? as usize;
+        let off = usize::try_from(addr.checked_sub(RAM_BASE)?).ok()?;
         self.storage
             .ram()
             .get(off..off.checked_add(width.bytes() as usize)?)
@@ -576,7 +576,7 @@ impl<S: GuestStorage> VirtBoard<S> {
     /// entirely in RAM.
     #[inline(always)]
     fn store_ram(&mut self, addr: u64, width: AccessWidth, value: u64) -> Option<()> {
-        let off = addr.checked_sub(RAM_BASE)? as usize;
+        let off = usize::try_from(addr.checked_sub(RAM_BASE)?).ok()?;
         store_le(self.storage.ram_mut(), off, width, value)
     }
 }

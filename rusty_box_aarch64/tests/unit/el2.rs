@@ -31,7 +31,7 @@ use super::el2::{
 };
 use super::exception::AccessSyndrome;
 use super::exec::Fault;
-use super::features::{Feature, Implementation};
+use super::features::{CpuModel, Feature, Implementation};
 use super::mmu::saved_layout::{
     CONTEXTS, CONTEXT_BYTES, CONTEXT_HCR, CONTEXT_SCTLR, CONTEXT_VTCR, CONTEXT_VTTBR, ENTRY_BYTES,
     ENTRY_S2_DEVICE, ENTRY_S2_LEVEL, ENTRY_S2_PERMS, ENTRY_STAGE1, KEPT_BYTES, NOT_WALKED,
@@ -1565,7 +1565,10 @@ fn dc_and_tge_turn_off_el1_and_0_stage_1() {
 /// the 4 KiB granule (`TGran4` 0) on both models, and the 16 KiB and 64
 /// KiB ones on the Armv9.2 model alone (`TGran16` 1, `TGran64` 0, where the
 /// Cortex-A57 reads 0 and 0xF); `ID_AA64MMFR2_EL1.ST` reads 1 where
-/// FEAT_TTST is.
+/// FEAT_TTST is. Each reports its address sizes: `PARange` 52 bits (6) on
+/// the Armv9.2 model, which has FEAT_LPA, and 44 (4) on the Cortex-A57;
+/// `ID_AA64MMFR2_EL1.VARange` 1 (FEAT_LVA) on the Armv9.2 model, 0 on the
+/// Cortex-A57.
 #[test]
 fn the_id_registers_offer_each_models_granules_at_both_stages() {
     const MRS_MMFR0: u32 = 0xD538_0700; // mrs x0, id_aa64mmfr0_el1
@@ -1591,6 +1594,19 @@ fn the_id_registers_offer_each_models_granules_at_both_stages() {
     ] {
         assert_eq!(granules(mmfr0), want, "{model} EL2");
         assert_eq!((mmfr2 >> 28) & 0xF, st, "{model} EL2: ST");
+    }
+    // `PARange` encodes the size `CpuModel::physical_address_bits` gives:
+    // the field's encodings as the Arm ARM lists them, written out here
+    // apart from the implementation's table so that the test checks it.
+    const SIZES: [u32; 8] = [32, 36, 40, 42, 44, 48, 52, 56];
+    for (cpu, pa_range, va_range) in [(CpuModel::CortexA57, 4, 0), (CpuModel::Armv9p2, 6, 1)] {
+        let model = cpu.name();
+        assert_eq!(cpu.physical_address_bits(), SIZES[pa_range], "{model}");
+        let imp = cpu.implementation();
+        for [mmfr0, mmfr2] in [read::<WithEl2>(imp), read::<NoEl2>(imp)] {
+            assert_eq!(mmfr0 & 0xF, pa_range as u64, "{model}: PARange");
+            assert_eq!((mmfr2 >> 16) & 0xF, va_range, "{model}: VARange");
+        }
     }
 }
 
@@ -2569,7 +2585,8 @@ fn at_translates_through_both_stages() {
 
 /// The stage 2 configurations `AArch64_S2Translate` refuses each take a
 /// level 0 Translation fault, reporting the IPA: `T0SZ` below 64 - PAMax
-/// (20) or above 39 (the IMPLEMENTATION DEFINED faults, as stage 1's),
+/// (20, the Cortex-A57's 44 bits) or above 39 (the IMPLEMENTATION DEFINED
+/// faults, as stage 1's),
 /// `SL0` = 3 without FEAT_TTST, a start level that cannot resolve the
 /// input size (`AArch64_S2InconsistentSL`), and an IPA wider than `T0SZ`
 /// gives.

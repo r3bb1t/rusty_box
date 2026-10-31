@@ -2178,6 +2178,10 @@ mod tests {
                                 || (field(mmfr0, 36) == 0 && field(mmfr0, 24) < 8))
                     }
                     Feature::Ttst => field(mmfr2, 28) >= 1,
+                    // `Features.json`: `FEAT_LPA <=> UInt(PARange) >= 6`,
+                    // `FEAT_LVA <=> UInt(VARange) >= 1`.
+                    Feature::Lpa => field(mmfr0, 0) >= 6,
+                    Feature::Lva => field(mmfr2, 16) >= 1,
                     Feature::WfxT => field(isar2, 0) >= 2,
                     Feature::Ras => field(pfr0, 28) >= 1,
                     // `Features.json`: `FEAT_RASv1p1 <=> RAS >= 2 || (RAS == 1
@@ -2235,12 +2239,12 @@ mod tests {
             // SPECRES = 1 (no FEAT_SPECRES2), BF16 = 1 (no FEAT_EBF16), I8MM
             // and XS alone (no API or GPI: no IMPLEMENTATION DEFINED
             // algorithm, and APA is never 2, FEAT_EPAC), ISAR2 WFxT = 2
-            // alone, MMFR0 the granules' fields (TGran16 = 1, not FEAT_LPA2's
-            // 2; with EL2, TGran4_2 = 2 and TGran16_2 and TGran64_2 = 2 or
-            // 1, FEAT_GTG) and ECV = 1, or 2 with FEAT_ECV_POFF, MMFR1
-            // HPDS = 1 (no FEAT_HPDS2), LO and PAN
-            // alone, MMFR2 CnP, UAO, ST, AT, IDS, TTL and E0PD alone. MMFR1
-            // AFP and ISAR2 RPRES are each 1 or 0.
+            // alone, MMFR0 PARange (44 or 52 bits), the granules' fields
+            // (TGran16 = 1, not FEAT_LPA2's 2; with EL2, TGran4_2 = 2 and
+            // TGran16_2 and TGran64_2 = 2 or 1, FEAT_GTG) and ECV = 1, or 2
+            // with FEAT_ECV_POFF, MMFR1 HPDS = 1 (no FEAT_HPDS2), LO and PAN
+            // alone, MMFR2 CnP, UAO, VARange, ST, AT, IDS, TTL and E0PD
+            // alone. MMFR1 AFP and ISAR2 RPRES are each 1 or 0.
             let at = |feature: Feature, lsb: u32, value: u64| {
                 if imp.has(feature) {
                     value << lsb
@@ -2278,9 +2282,13 @@ mod tests {
                 .into_iter()
                 .fold(0, |acc, lsb| acc | (0xF << lsb));
             assert_eq!(
-                mmfr0 & !(granule_fields | (0xF << 60)),
-                0x24,
-                "PARange 44 bits, 16-bit ASIDs, nothing else"
+                mmfr0 & !(granule_fields | (0xF << 60) | 0xF),
+                0x20,
+                "16-bit ASIDs, nothing else"
+            );
+            assert!(
+                matches!(field(mmfr0, 0), 4 | 6),
+                "PARange: 44 bits, or 52 bits with FEAT_LPA (56 needs FEAT_D128)"
             );
             assert_eq!(field(mmfr0, 28), 0, "TGran4: the 4 KiB granule");
             assert!(field(mmfr0, 20) <= 1, "TGran16 = 1, not FEAT_LPA2's 2");
@@ -2317,6 +2325,7 @@ mod tests {
                 mmfr2
                     & !(0xF
                         | (0xF << 4)
+                        | (0xF << 16)
                         | (0xF << 28)
                         | (0xF << 32)
                         | (0xF << 36)
@@ -2325,6 +2334,10 @@ mod tests {
                 0
             );
             assert!(field(mmfr2, 28) <= 1, "ST = 1: FEAT_TTST");
+            assert!(
+                field(mmfr2, 16) <= 1,
+                "VARange = 1: FEAT_LVA, not FEAT_LVA3's 2"
+            );
             assert_eq!(
                 (isar2, isar3),
                 (at(Feature::WfxT, 0, 2) | at(Feature::Rpres, 4, 1), 0)

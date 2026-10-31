@@ -1124,7 +1124,8 @@ impl PhysBus for RamView<'_> {
         width: AccessWidth,
         _clock: rusty_box_core::VmClock,
     ) -> Result<u64, BusFault> {
-        let off = addr.get().checked_sub(RAM_BASE).ok_or(BusFault::Unmapped)? as usize;
+        let off = addr.get().checked_sub(RAM_BASE).ok_or(BusFault::Unmapped)?;
+        let off = usize::try_from(off).map_err(|_| BusFault::Unmapped)?;
         let end = off
             .checked_add(width.bytes() as usize)
             .ok_or(BusFault::Unmapped)?;
