@@ -3,7 +3,6 @@
 //! board places it.
 
 pub mod cfi_flash;
-pub mod fw_cfg;
 pub mod gicv2;
 pub mod pl011;
 pub mod pl031;

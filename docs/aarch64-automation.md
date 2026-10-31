@@ -85,8 +85,55 @@ processor node, as QEMU's `-dtb` does. Either way, as QEMU's
 `arm_load_dtb` edits a tree, its memory nodes are replaced by one for the
 RAM the machine has, `/chosen` is added where it has none, and its `/psci`
 node is replaced by QEMU's, whose `method` names the conduit the firmware
-answers on; `machine.device_tree()` returns what the guest was given. `boot::fdt::property` reads a property back out
-of it.
+answers on. Either way its `/model` and root `compatible` are the machine's
+identity's (below), and it has no `fw-cfg` or `platform-bus` node, as the
+board has neither device; `machine.device_tree()` returns what the guest
+was given. `boot::fdt::property` reads a property back out of it.
+
+**The machine's name.** Everything a guest reads that says who made the
+machine — the device tree's `/model` and root `compatible`, every
+virtio-mmio transport's `VendorID`, the GICv2m frame's `MSI_IIDR`, the
+virtio keyboard's and tablet's names, vendor, products and versions, and
+the virtio display's EDID maker, product, name and date — comes from a
+`BoardIdentity`, by default
+`BoardIdentity::RUSTY_BOX`. `BoardIdentity::new` takes a host's names as
+`IdentityNames`, checks each against what its field can carry (printable
+ASCII within the field's size, a `compatible` list of one string or more,
+most specific first, each by dt-schema's pattern, the numbers as types that
+hold only what EDID or virtio can give) and copies
+them into the identity, with no allocator; `MachineBuilder::identity`
+names the machine with it. The identity is part of the machine's shape: a
+snapshot restores only into a machine of the same identity (section 7).
+
+```rust
+# std::thread::Builder::new().stack_size(16 << 20).spawn(|| {
+use rusty_box_aarch64::boot::fdt;
+use rusty_box_aarch64::{
+    BoardIdentity, EdidDate, EdidWeek, EdidWeekNumber, EdidYear, IdentityNames,
+    MachineBuilder, RamSize, VirtConfig,
+};
+
+let made = EdidDate::Manufactured {
+    week: EdidWeek::Of(EdidWeekNumber::new(12)?),
+    year: EdidYear::new(2026)?,
+};
+let identity = BoardIdentity::new(IdentityNames {
+    model: "Acme Board",
+    compatible: &["acme,board-1", "acme,board"],
+    display_date: made,
+    ..IdentityNames::RUSTY_BOX
+})?;
+let machine = MachineBuilder::new(VirtConfig::default())
+    .ram(RamSize::mib(16).expect("a size the board maps"))
+    .identity(identity)
+    .firmware(&[0x00, 0x00, 0x00, 0x14]) // b .
+    .build()?;
+let model = fdt::property(machine.device_tree(), "", "model")?;
+assert_eq!(model, Some(&b"Acme Board\0"[..]));
+# Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+# }).expect("a thread for the example").join().expect("the example runs")?;
+# Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+```
 
 **The processor.** `VirtConfig::cpu` picks it: `CpuModel::CortexA57`, the
 default, QEMU's `cortex-a57` cut down to EL0 and EL1 (and EL2 with
@@ -558,7 +605,8 @@ machine.restore_snapshot(&mut image.as_slice())?;
 
 **Limits.** Firmware and kernel images are recorded by hash, not copied, so
 an image restores only into a machine built the same way — the same RAM,
-images, boot method and clock — and is refused, with nothing changed, by any
+images, boot method, clock and identity (`MachineBuilder::identity`, every
+name and number of it) — and is refused, with nothing changed, by any
 other. Host-side state stays with the host: serial input not yet taken is
 dropped and the terminal's held modifiers released, so type again after a
 restore; the display's next refresh sends the whole picture. A restore that
@@ -571,7 +619,8 @@ fails part-way through an image leaves the machine switched off until
 
 QEMU's `virt` takes a display and input devices as `-device` options. The
 builder takes the three QEMU's display front ends drive — `virtio-gpu-device`
-(2D, with QEMU's EDID), `virtio-keyboard-device` and `virtio-tablet-device`
+(2D, with an EDID made as QEMU's generator makes it, naming the display by
+the board's identity), `virtio-keyboard-device` and `virtio-tablet-device`
 — and plugs each into the highest free virtio-mmio transport, as QEMU does.
 A board with them has non-legacy transports (QEMU's
 `-global virtio-mmio.force-legacy=false`): these are virtio 1.0 devices,

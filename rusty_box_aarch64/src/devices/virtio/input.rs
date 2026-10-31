@@ -47,6 +47,7 @@ use rusty_box_core::snap::{SnapRead, SnapResult, SnapWrite};
 
 use super::queue::Chain;
 use super::{Core, Vdev, STATUS_DRIVER_OK};
+use crate::identity::{BoardIdentity, InputDeviceId, InputVendorId, Text, INPUT_NAME_CAPACITY};
 
 /// Which input device.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -79,8 +80,6 @@ const BTN_TOUCH: u16 = 0x14A;
 const BTN_GEAR_DOWN: u16 = 0x150;
 const BTN_GEAR_UP: u16 = 0x151;
 const BUS_VIRTUAL: u16 = 0x06;
-/// The USB vendor QEMU gives its virtual input devices.
-const VENDOR_QEMU: u16 = 0x0627;
 
 /// `keymap_button`'s codes: the buttons a QEMU pointer reports.
 const BUTTON_CODES: [u16; 8] = [
@@ -105,11 +104,12 @@ pub const EVENT_QUEUE: usize = 0;
 pub const STATUS_QUEUE: usize = 1;
 pub const QUEUE_SIZE: u16 = 64;
 
-/// Bytes of configuration space: the 8-byte header and the largest entry
-/// (QEMU `virtio_input_device_realize`'s `cfg_size`) — the keyboard's key
+/// The configuration's header: `select`, `subsel`, `size` and padding.
+const CONFIG_HEADER_LEN: usize = 8;
+/// The largest entry each device has besides its name: the keyboard's key
 /// bitmap of 29 bytes, the tablet's button bitmap of 43.
-const KEYBOARD_CONFIG_LEN: usize = 8 + (KEY_REPLY as usize).div_ceil(8);
-const TABLET_CONFIG_LEN: usize = 8 + BTN_GEAR_UP as usize / 8 + 1;
+const KEYBOARD_LARGEST_ENTRY: usize = (KEY_REPLY as usize).div_ceil(8);
+const TABLET_LARGEST_ENTRY: usize = BTN_GEAR_UP as usize / 8 + 1;
 
 /// The most events one batch has: both axes of a position and the sync.
 const MAX_BATCH: usize = 3;
@@ -326,6 +326,12 @@ impl ConfigEntry {
         entry
     }
 
+    /// `name`, its size the string's length: a string here has no NUL
+    /// terminator (virtio 1.2, 5.8.4).
+    fn name(name: &Text<INPUT_NAME_CAPACITY>) -> Self {
+        Self::from_bytes(name.as_bytes())
+    }
+
     /// A bitmap with bit `code` set for every code, sized to its highest
     /// set byte (QEMU `virtio_input_extend_config`).
     fn bitmap<I: Iterator<Item = u16>>(codes: I) -> Self {
@@ -345,6 +351,12 @@ impl ConfigEntry {
 /// A virtio-input device.
 pub struct Input {
     kind: InputKind,
+    /// What `VIRTIO_INPUT_CFG_ID_NAME` reads.
+    name: Text<INPUT_NAME_CAPACITY>,
+    /// The vendor `VIRTIO_INPUT_CFG_ID_DEVIDS` reads.
+    vendor: InputVendorId,
+    /// The product and version `VIRTIO_INPUT_CFG_ID_DEVIDS` reads.
+    id: InputDeviceId,
     /// The driver set `DRIVER_OK` since the last reset.
     active: bool,
     select: u8,
@@ -352,9 +364,14 @@ pub struct Input {
 }
 
 impl Input {
-    pub fn new(kind: InputKind) -> Self {
+    /// The device of `kind` a board named `identity` plugs in: of the name,
+    /// vendor, product and version the identity gives it.
+    pub(crate) const fn for_board(kind: InputKind, identity: &BoardIdentity) -> Self {
         Self {
             kind,
+            name: identity.input_name(kind),
+            vendor: identity.input_vendor(),
+            id: identity.input_id(kind),
             active: false,
             select: 0,
             subsel: 0,
@@ -377,11 +394,15 @@ impl Input {
         }
     }
 
+    /// Bytes of configuration space: the header and the largest entry
+    /// (QEMU `virtio_input_device_realize`'s `cfg_size`), the name where
+    /// that is the largest.
     pub fn config_len(&self) -> usize {
-        match self.kind {
-            InputKind::Keyboard => KEYBOARD_CONFIG_LEN,
-            InputKind::Tablet => TABLET_CONFIG_LEN,
-        }
+        let largest = match self.kind {
+            InputKind::Keyboard => KEYBOARD_LARGEST_ENTRY,
+            InputKind::Tablet => TABLET_LARGEST_ENTRY,
+        };
+        CONFIG_HEADER_LEN + largest.max(self.name.as_bytes().len())
     }
 
     /// The configuration entry `select`/`subsel` names, if the device has
@@ -389,22 +410,13 @@ impl Input {
     fn entry(&self, select: u8, subsel: u8) -> Option<ConfigEntry> {
         let subsel = u16::from(subsel);
         Some(match (self.kind, select) {
-            (InputKind::Keyboard, CFG_ID_NAME) if subsel == 0 => {
-                ConfigEntry::from_bytes(b"QEMU Virtio Keyboard\0")
-            }
-            (InputKind::Tablet, CFG_ID_NAME) if subsel == 0 => {
-                ConfigEntry::from_bytes(b"QEMU Virtio Tablet\0")
-            }
+            (_, CFG_ID_NAME) if subsel == 0 => ConfigEntry::name(&self.name),
             (_, CFG_ID_DEVIDS) if subsel == 0 => {
-                let (product, version): (u16, u16) = match self.kind {
-                    InputKind::Keyboard => (0x0001, 0x0001),
-                    InputKind::Tablet => (0x0003, 0x0002),
-                };
                 let mut ids = [0u8; 8];
                 ids[..2].copy_from_slice(&BUS_VIRTUAL.to_le_bytes());
-                ids[2..4].copy_from_slice(&VENDOR_QEMU.to_le_bytes());
-                ids[4..6].copy_from_slice(&product.to_le_bytes());
-                ids[6..].copy_from_slice(&version.to_le_bytes());
+                ids[2..4].copy_from_slice(&self.vendor.get().to_le_bytes());
+                ids[4..6].copy_from_slice(&self.id.product.get().to_le_bytes());
+                ids[6..].copy_from_slice(&self.id.version.get().to_le_bytes());
                 ConfigEntry::from_bytes(&ids)
             }
             (InputKind::Keyboard, CFG_EV_BITS) if subsel == EV_KEY => {

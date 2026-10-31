@@ -6,8 +6,15 @@
 //! `edid_desc_ranges`, `edid_desc_text`, `edid_colorspace`,
 //! `init_displayid`, `qemu_displayid_generate`, `edid_checksum`), with the
 //! inputs `virtio_gpu_base_generate_edid` gives it for a display with no
-//! physical size, refresh rate, name or serial number: vendor "RHT", name
-//! "QEMU Monitor", 75 Hz, 100 dpi, no largest mode.
+//! physical size, refresh rate or serial number: 75 Hz, 100 dpi, no largest
+//! mode. VESA E-EDID 1.4 decides where QEMU departs from it: a name of 13
+//! characters fills its descriptor with no line feed (3.10.3.4). What
+//! names the display — its maker, product, name and date of manufacture,
+//! which QEMU fixes as vendor "RHT", model 0x1234, "QEMU Monitor" and week
+//! 42 of 2014 — is an input, the board's own
+//! ([`crate::identity::BoardIdentity`]).
+
+use crate::identity::DisplayIdentity;
 
 /// Bytes of EDID a virtio-gpu response carries (`struct
 /// virtio_gpu_resp_edid`'s `edid`).
@@ -187,13 +194,17 @@ fn desc_type(edid: &mut [u8], desc: usize, kind: u8) {
     edid[desc..desc + 5].copy_from_slice(&[0, 0, 0, kind, 0]);
 }
 
-/// QEMU `edid_desc_text`.
+/// A string descriptor (VESA E-EDID 1.4, 3.10.3.1 to 3.10.3.4): up to 13
+/// characters, a shorter string ended by a line feed and padded with
+/// spaces. QEMU's `edid_desc_text` keeps 12 and always ends them so.
 fn desc_text(edid: &mut [u8], desc: usize, kind: u8, text: &[u8]) {
     desc_type(edid, desc, kind);
     edid[desc + 5..desc + 18].fill(b' ');
-    let len = text.len().min(12);
+    let len = text.len().min(13);
     edid[desc + 5..desc + 5 + len].copy_from_slice(&text[..len]);
-    edid[desc + 5 + len] = b'\n';
+    if len < 13 {
+        edid[desc + 5 + len] = b'\n';
+    }
 }
 
 /// QEMU `edid_desc_ranges`: 50–125 Hz, 30–160 kHz, 2550 MHz.
@@ -291,8 +302,8 @@ fn dpi_to_mm(dpi: u32, res: u32) -> u32 {
 }
 
 /// QEMU `qemu_edid_generate` into `EDID_LEN` bytes, for a display whose
-/// preferred mode is `prefx` by `prefy`.
-pub fn generate(prefx: u32, prefy: u32) -> [u8; EDID_LEN] {
+/// preferred mode is `prefx` by `prefy` and which `display` describes.
+pub(crate) fn generate(prefx: u32, prefy: u32, display: &DisplayIdentity) -> [u8; EDID_LEN] {
     let mut edid = [0u8; EDID_LEN];
     let refresh_rate = 75_000;
     let dpi = 100;
@@ -316,16 +327,16 @@ pub fn generate(prefx: u32, prefy: u32) -> [u8; EDID_LEN] {
         init_displayid(&mut edid, did);
     }
 
-    // Header, vendor "RHT", model 0x1234, no serial, week 42 of 2014,
-    // EDID 1.4.
+    // Header, the display's maker and product, no serial, its date of
+    // manufacture, EDID 1.4.
     edid[..8].copy_from_slice(&[0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00]);
-    let vendor = b"RHT".map(|c| u16::from(c - b'@') & 0x1F);
+    let vendor = display.vendor.letters().map(|c| u16::from(c - b'@') & 0x1F);
     let vendor_id = (vendor[0] << 10) | (vendor[1] << 5) | vendor[2];
     edid[8..10].copy_from_slice(&vendor_id.to_be_bytes());
-    edid[10..12].copy_from_slice(&0x1234u16.to_le_bytes());
+    edid[10..12].copy_from_slice(&display.product.get().to_le_bytes());
     edid[12..16].copy_from_slice(&0u32.to_le_bytes());
-    edid[16] = 42;
-    edid[17] = (2014 - 1990) as u8;
+    edid[16] = display.date.week_byte();
+    edid[17] = display.date.year_byte();
     edid[18] = 1;
     edid[19] = 4;
 
@@ -356,7 +367,7 @@ pub fn generate(prefx: u32, prefy: u32) -> [u8; EDID_LEN] {
     }
     desc = desc_next(&edid, Some(dta), desc);
     if let Some(at) = desc {
-        desc_text(&mut edid, at, 0xFC, b"QEMU Monitor");
+        desc_text(&mut edid, at, 0xFC, display.name.as_bytes());
         desc = desc_next(&edid, Some(dta), desc);
     }
     while let Some(at) = desc {

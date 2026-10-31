@@ -14,6 +14,38 @@ use crate::bus::AccessWidth;
 use crate::devices::virtio::edid;
 use crate::devices::virtio::test_driver::*;
 use crate::devices::virtio::Device;
+use crate::identity::{
+    BoardIdentity, DisplayIdentity, EdidDate, EdidProductCode, EdidWeek, EdidWeekNumber, EdidYear,
+    IdentityNames, PnpId,
+};
+
+/// The display a board with the default identity plugs in.
+fn display(preferred: Resolution) -> Gpu {
+    Gpu::new(preferred, boards_display())
+}
+
+/// What the default identity's EDID says of its display.
+fn boards_display() -> DisplayIdentity {
+    BoardIdentity::RUSTY_BOX.display()
+}
+
+/// What QEMU's EDID says of its display (`qemu_edid_generate`'s defaults):
+/// vendor "RHT", model 0x1234, "QEMU Monitor", week 42 of 2014.
+fn qemus_display() -> DisplayIdentity {
+    let week = EdidWeekNumber::new(42).unwrap_or_else(|e| panic!("{e}"));
+    BoardIdentity::new(IdentityNames {
+        display_vendor: PnpId::new("RHT").unwrap_or_else(|e| panic!("{e}")),
+        display_product: EdidProductCode::new(0x1234),
+        display_name: "QEMU Monitor",
+        display_date: EdidDate::Manufactured {
+            week: EdidWeek::Of(week),
+            year: EdidYear::new(2014).unwrap_or_else(|e| panic!("{e}")),
+        },
+        ..IdentityNames::RUSTY_BOX
+    })
+    .unwrap_or_else(|e| panic!("{e}"))
+    .display()
+}
 
 /// What Linux accepts of what the device offers: the ring features and
 /// `VIRTIO_GPU_F_EDID`.
@@ -47,7 +79,7 @@ const B8G8R8X8: u32 = 2;
 const B8G8R8A8: u32 = 1;
 
 fn gpu(width: u32, height: u32) -> Driver {
-    let mut d = Driver::new(Device::Gpu(Gpu::new(Resolution::new(width, height))));
+    let mut d = Driver::new(Device::Gpu(display(Resolution::new(width, height))));
     d.start(LINUX_FEATURES);
     d
 }
@@ -272,20 +304,104 @@ fn qemu_edid_vectors() -> Vec<(u32, u32, Vec<u8>)> {
         .collect()
 }
 
+/// Given QEMU's names for its display, the generator makes QEMU's EDID.
 #[test]
-fn the_edid_is_qemus_byte_for_byte() {
+fn the_edid_is_qemus_byte_for_byte_given_qemus_names() {
     let vectors = qemu_edid_vectors();
     assert_eq!(vectors.len(), 9);
     for (w, h, expected) in vectors {
-        assert_eq!(edid::generate(w, h).to_vec(), expected, "{w}x{h}");
+        assert_eq!(
+            edid::generate(w, h, &qemus_display()).to_vec(),
+            expected,
+            "{w}x{h}"
+        );
     }
+}
+
+/// The display product name descriptor's 13 bytes (tag 0xFC) in the base
+/// block, wherever the generator put it.
+fn edid_name(e: &[u8]) -> [u8; 13] {
+    let at = [54, 72, 90, 108]
+        .into_iter()
+        .find(|&d| e[d..d + 4] == [0, 0, 0, 0xFC])
+        .unwrap_or_else(|| panic!("no display product name descriptor"));
+    let mut name = [0u8; 13];
+    name.copy_from_slice(&e[at + 5..at + 18]);
+    name
+}
+
+/// The maker's PNP ID, as a guest's parser unpacks bytes 8 and 9: five bits
+/// a letter, 1 for A (VESA E-EDID 1.4, 3.4.1).
+fn edid_maker(e: &[u8]) -> [char; 3] {
+    let id = u16::from_be_bytes([e[8], e[9]]);
+    [10, 5, 0].map(|shift| (b'@' + ((id >> shift) & 0x1F) as u8) as char)
+}
+
+/// The base block's bytes sum to 0 (VESA E-EDID 1.4, 3.11).
+fn assert_base_checksum(e: &[u8]) {
+    let sum = e[..128].iter().fold(0u8, |s, &b| s.wrapping_add(b));
+    assert_eq!(sum, 0, "checksum");
+}
+
+/// What a guest's EDID parser reads of the default identity's display: the
+/// PNP ID "RBX" packed five bits a letter, product 1, no serial, no week
+/// and the year 2026, and the name "Rusty Box" ended by a line feed and
+/// padded with spaces.
+#[test]
+fn the_edid_names_the_boards_display() {
+    let e = edid::generate(1024, 768, &boards_display());
+    assert_eq!(edid_maker(&e), ['R', 'B', 'X']);
+    assert_eq!(e[10..12], [1, 0], "product 1");
+    assert_eq!(e[12..16], [0; 4], "no serial");
+    assert_eq!((e[16], e[17]), (0, 36), "no week, 1990 + 36 = 2026");
+    assert_eq!(&edid_name(&e), b"Rusty Box\n   ");
+
+    let host = BoardIdentity::new(IdentityNames {
+        display_vendor: PnpId::new("ACM").unwrap_or_else(|err| panic!("{err}")),
+        display_product: EdidProductCode::new(0x0042),
+        display_name: "Acme Screen",
+        display_date: EdidDate::Manufactured {
+            week: EdidWeek::Unstated,
+            year: EdidYear::new(2030).unwrap_or_else(|err| panic!("{err}")),
+        },
+        ..IdentityNames::RUSTY_BOX
+    })
+    .unwrap_or_else(|err| panic!("{err}"));
+    let e = edid::generate(1024, 768, &host.display());
+    assert_eq!(edid_maker(&e), ['A', 'C', 'M']);
+    assert_eq!(e[10..12], [0x42, 0], "product 0x42");
+    assert_eq!((e[16], e[17]), (0, 40), "no week, 1990 + 40 = 2030");
+    assert_eq!(&edid_name(&e), b"Acme Screen\n ");
+    assert_base_checksum(&e);
+
+    // A name of 13 characters fills the descriptor with no line feed (VESA
+    // E-EDID 1.4, 3.10.3.4).
+    let full = BoardIdentity::new(IdentityNames {
+        display_name: "Thirteen chrs",
+        ..IdentityNames::RUSTY_BOX
+    })
+    .unwrap_or_else(|err| panic!("{err}"));
+    let e = edid::generate(1024, 768, &full.display());
+    assert_eq!(&edid_name(&e), b"Thirteen chrs");
+    assert_base_checksum(&e);
+
+    // A model year: the Model Year Flag, FFh, then the year (Table 3.8).
+    let model_year = BoardIdentity::new(IdentityNames {
+        display_date: EdidDate::ModelYear(
+            EdidYear::new(2031).unwrap_or_else(|err| panic!("{err}")),
+        ),
+        ..IdentityNames::RUSTY_BOX
+    })
+    .unwrap_or_else(|err| panic!("{err}"));
+    let e = edid::generate(1024, 768, &model_year.display());
+    assert_eq!((e[16], e[17]), (0xFF, 41), "model year 1990 + 41 = 2031");
+    assert_base_checksum(&e);
 }
 
 #[test]
 fn the_edid_describes_the_requested_mode() {
-    let e = edid::generate(1024, 768);
+    let e = edid::generate(1024, 768, &boards_display());
     assert_eq!(e[..8], [0, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0]);
-    assert_eq!(e[8..10], [0x49, 0x14], "vendor RHT");
     assert_eq!(e[126], 1, "one extension, the CTA block");
     // The preferred mode's detailed timing: 1024 by 768.
     assert_eq!(u32::from(e[56]) | (u32::from(e[58] & 0xF0) << 4), 1024);
@@ -298,7 +414,7 @@ fn the_edid_describes_the_requested_mode() {
         );
     }
     // A screen too large for a detailed timing gets a DisplayID block.
-    assert_eq!(edid::generate(3840, 2160)[126], 2);
+    assert_eq!(edid::generate(3840, 2160, &boards_display())[126], 2);
 }
 
 #[test]
@@ -308,7 +424,10 @@ fn get_edid_answers_with_the_displays_edid() {
     assert_eq!(resp.len(), 1056);
     assert_eq!(le32(&resp, 0), OK_EDID);
     assert_eq!(le32(&resp, 24), 1024, "size");
-    assert_eq!(resp[32..].to_vec(), edid::generate(1280, 800).to_vec());
+    assert_eq!(
+        resp[32..].to_vec(),
+        edid::generate(1280, 800, &boards_display()).to_vec()
+    );
     assert_eq!(
         status(&mut d, &cmd(GET_EDID, &[1, 0])),
         ERR_INVALID_PARAMETER,
@@ -623,7 +742,10 @@ fn a_display_of_no_pixels_turns_the_output_off() {
     );
     // QEMU's EDID for no size is its default 1280 by 800.
     let resp = command(&mut d, &cmd(GET_EDID, &[0, 0]), 1056);
-    assert_eq!(resp[32..].to_vec(), edid::generate(1280, 800).to_vec());
+    assert_eq!(
+        resp[32..].to_vec(),
+        edid::generate(1280, 800, &boards_display()).to_vec()
+    );
     let on = d.host(|device, _| match device {
         Device::Gpu(g) => g.ui_info(Resolution::new(1024, 768)),
         Device::Input(_) | Device::Block(_) => false,
@@ -764,7 +886,7 @@ fn a_cursor_near_the_corner_keeps_its_hot_spot_on_the_pointer() {
 fn a_display_of_no_requested_size_survives_a_snapshot() {
     let d = gpu(0, 0);
     let saved = d.save();
-    let resumed = d.restored(Device::Gpu(Gpu::new(Resolution::new(1, 1))), &saved);
+    let resumed = d.restored(Device::Gpu(display(Resolution::new(1, 1))), &saved);
     assert_eq!(resumed.save(), saved);
 }
 
@@ -773,7 +895,7 @@ fn a_snapshot_shows_the_same_picture() {
     let mut d = gpu(640, 480);
     show_picture(&mut d, 32, 16);
     let saved = d.save();
-    let mut resumed = d.restored(Device::Gpu(Gpu::new(Resolution::new(1, 1))), &saved);
+    let mut resumed = d.restored(Device::Gpu(display(Resolution::new(1, 1))), &saved);
     assert_eq!(resumed.save(), saved);
     let (mut a, mut b) = (Screen::default(), Screen::default());
     refresh(&mut d, &mut a);

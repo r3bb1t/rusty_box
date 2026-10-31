@@ -76,6 +76,7 @@ use rusty_box_core::snap::{SnapRead, SnapResult, SnapWrite};
 use rusty_box_core::SnapError;
 
 use crate::bus::{read_by_words, write_by_words, AccessWidth, RegOffset};
+use crate::identity::MsiFrameIidr;
 
 /// SGIs, PPIs and QEMU `virt`'s 256 SPIs (`num-irq` = `NUM_IRQS + 32`).
 pub const NUM_IRQ: usize = 288;
@@ -130,8 +131,6 @@ pub const V2M_NUM_SPI: u32 = 64;
 const V2M_MSI_TYPER: u64 = 0x008;
 const V2M_MSI_SETSPI_NS: u64 = 0x040;
 const V2M_MSI_IIDR: u64 = 0xFCC;
-/// QEMU `PRODUCT_ID_QEMU`.
-const PRODUCT_ID_QEMU: u32 = 0x51;
 
 #[derive(Clone, Copy)]
 struct Bits([u32; WORDS]);
@@ -879,22 +878,27 @@ impl GicV2 {
 
     // ----- GICv2m MSI frame -----
 
-    pub fn v2m_read(&mut self, offset: RegOffset, width: AccessWidth) -> u64 {
+    /// A read of the frame on a board whose identity gives `MSI_IIDR` as
+    /// `iidr` ([`crate::identity::BoardIdentity::msi_frame_iidr`]).
+    pub fn v2m_read(&mut self, offset: RegOffset, width: AccessWidth, iidr: MsiFrameIidr) -> u64 {
         let off = offset.get();
         match width {
             AccessWidth::Byte | AccessWidth::Half => 0,
-            AccessWidth::Word => u64::from(Self::v2m_register(off)),
+            AccessWidth::Word => u64::from(Self::v2m_register(off, iidr)),
             AccessWidth::Dword => {
-                u64::from(Self::v2m_register(off)) | u64::from(Self::v2m_register(off + 4)) << 32
+                u64::from(Self::v2m_register(off, iidr))
+                    | u64::from(Self::v2m_register(off + 4, iidr)) << 32
             }
         }
     }
 
-    /// QEMU `gicv2m_read` for a 4-byte access (any other size reads as zero).
-    fn v2m_register(off: u64) -> u32 {
+    /// QEMU `gicv2m_read` for a 4-byte access (any other size reads as
+    /// zero), but for `MSI_IIDR`, which is the board's identity's where
+    /// QEMU's names QEMU (`PRODUCT_ID_QEMU`, 'Q').
+    fn v2m_register(off: u64, iidr: MsiFrameIidr) -> u32 {
         match off {
             V2M_MSI_TYPER => (V2M_BASE_SPI << 16) | V2M_NUM_SPI,
-            V2M_MSI_IIDR => PRODUCT_ID_QEMU << 20,
+            V2M_MSI_IIDR => iidr.get(),
             _ => 0,
         }
     }
@@ -1396,12 +1400,13 @@ mod tests {
         assert!(!g.irq_out(), "a byte write is ignored");
         g.v2m_write(RegOffset::new(V2M_MSI_SETSPI_NS), AccessWidth::Half, 80);
         assert_eq!(cpu_get(&mut g, IAR), 80);
+        let iidr = MsiFrameIidr::NONE;
         assert_eq!(
-            g.v2m_read(RegOffset::new(V2M_MSI_TYPER), AccessWidth::Byte),
+            g.v2m_read(RegOffset::new(V2M_MSI_TYPER), AccessWidth::Byte, iidr),
             0
         );
         assert_eq!(
-            g.v2m_read(RegOffset::new(V2M_MSI_TYPER), AccessWidth::Word),
+            g.v2m_read(RegOffset::new(V2M_MSI_TYPER), AccessWidth::Word, iidr),
             u64::from((80u32 << 16) | 64)
         );
     }

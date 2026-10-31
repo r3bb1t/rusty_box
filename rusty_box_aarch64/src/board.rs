@@ -28,7 +28,6 @@ use crate::bus::{
 };
 use crate::cpu::TimerLines;
 use crate::devices::cfi_flash::{CfiFlash, FlashArray};
-use crate::devices::fw_cfg::FwCfg;
 use crate::devices::gicv2::GicV2;
 use crate::devices::pl011::{BaudRate, Pl011, Received, UartClocks};
 use crate::devices::pl031::Pl031;
@@ -43,6 +42,7 @@ use crate::devices::virtio::{Device, Transport, Vdev, MAX_DEVICES};
 use crate::devices::virtio_mmio::{self, Layout};
 #[cfg(feature = "alloc")]
 use crate::disk::Disk;
+use crate::identity::{BoardIdentity, MsiFrameIidr, VirtioVendorId};
 use crate::storage::GuestStorage;
 
 pub const FLASH0_BASE: u64 = 0x0000_0000;
@@ -61,8 +61,6 @@ pub const GIC_V2M_BASE: u64 = 0x0802_0000;
 pub const GIC_V2M_SIZE: u64 = 0x1000;
 pub const UART0_BASE: u64 = 0x0900_0000;
 pub const RTC_BASE: u64 = 0x0901_0000;
-pub const FW_CFG_BASE: u64 = 0x0902_0000;
-pub const FW_CFG_SIZE: u64 = 0x18;
 pub const GPIO_BASE: u64 = 0x0903_0000;
 pub const PRIMECELL_SIZE: u64 = 0x1000;
 pub const VIRTIO_MMIO_BASE: u64 = 0x0A00_0000;
@@ -190,7 +188,12 @@ pub struct VirtBoard<S> {
     pub(crate) uart: Pl011,
     pub(crate) rtc: Pl031,
     pub(crate) gpio: Pl061,
-    pub(crate) fw_cfg: FwCfg,
+    /// What every virtio-mmio transport's `VendorID` reads, the board's
+    /// identity's ([`BoardIdentity::virtio_vendor`]).
+    pub(crate) virtio_vendor: VirtioVendorId,
+    /// What the GICv2m frame's `MSI_IIDR` reads, the board's identity's
+    /// ([`BoardIdentity::msi_frame_iidr`]).
+    pub(crate) msi_frame_iidr: MsiFrameIidr,
     /// Host bytes waiting for room in the UART's receive FIFO.
     pub(crate) serial_input: RingBuffer<u8, SERIAL_INPUT_CAPACITY>,
     /// When the pressed power button is released, if it is held.
@@ -224,8 +227,16 @@ pub struct VirtBoard<S> {
 }
 
 impl<S: GuestStorage> VirtBoard<S> {
-    pub(crate) fn new(storage: S, rtc_epoch_seconds: u64, plugs: Plugs) -> Self {
+    /// A board over `storage` whose RTC starts at `rtc_epoch_seconds`, with
+    /// the devices `plugs` names, each naming itself as `identity` says.
+    pub(crate) fn new(
+        storage: S,
+        rtc_epoch_seconds: u64,
+        plugs: Plugs,
+        identity: &BoardIdentity,
+    ) -> Self {
         let devices = plugs.devices;
+        let virtio_vendor = identity.virtio_vendor();
         let mut virtio: [Option<Transport>; MAX_DEVICES] = [None, None, None, None];
         let mut next_slot = (virtio_mmio::TRANSPORT_COUNT - 1) as u8;
         let mut plug = |device: Device, virtio: &mut [Option<Transport>; MAX_DEVICES]| {
@@ -236,13 +247,15 @@ impl<S: GuestStorage> VirtBoard<S> {
         };
         #[cfg(feature = "alloc")]
         if let Some(size) = devices.display {
-            plug(Device::Gpu(Gpu::new(size)), &mut virtio);
+            plug(Device::Gpu(Gpu::new(size, identity.display())), &mut virtio);
         }
         if devices.keyboard == Plugged::Yes {
-            plug(Device::Input(Input::new(InputKind::Keyboard)), &mut virtio);
+            let keyboard = Input::for_board(InputKind::Keyboard, identity);
+            plug(Device::Input(keyboard), &mut virtio);
         }
         if devices.tablet == Plugged::Yes {
-            plug(Device::Input(Input::new(InputKind::Tablet)), &mut virtio);
+            let tablet = Input::for_board(InputKind::Tablet, identity);
+            plug(Device::Input(tablet), &mut virtio);
         }
         #[cfg(feature = "alloc")]
         if let Some(disk) = plugs.disk {
@@ -261,7 +274,8 @@ impl<S: GuestStorage> VirtBoard<S> {
             uart: Pl011::new(),
             rtc: Pl031::new(rtc_epoch_seconds),
             gpio: Pl061::new(),
-            fw_cfg: FwCfg::new(),
+            virtio_vendor,
+            msi_frame_iidr: identity.msi_frame_iidr(),
             serial_input: RingBuffer::new(),
             power_button_release: None,
             deadline_moved: false,
@@ -386,7 +400,6 @@ impl<S: GuestStorage> VirtBoard<S> {
             self.gpio.set_input(POWER_BUTTON_LINE, false);
         }
         self.gpio.reset();
-        self.fw_cfg.reset();
         for transport in self.virtio.iter_mut().flatten() {
             transport.reset();
         }
@@ -674,7 +687,7 @@ impl<S: GuestStorage> VirtBoard<S> {
             return Ok(self.gic.cpu_read(off, width));
         }
         if let Some(off) = addr.offset_in(GIC_V2M_BASE, GIC_V2M_SIZE) {
-            return Ok(self.gic.v2m_read(off, width));
+            return Ok(self.gic.v2m_read(off, width, self.msi_frame_iidr));
         }
         if let Some(off) = addr.offset_in(UART0_BASE, PRIMECELL_SIZE) {
             let deadline = self.uart.next_deadline();
@@ -686,9 +699,6 @@ impl<S: GuestStorage> VirtBoard<S> {
         if let Some(off) = addr.offset_in(RTC_BASE, PRIMECELL_SIZE) {
             return Ok(self.rtc.read(off, width, clock));
         }
-        if let Some(off) = addr.offset_in(FW_CFG_BASE, FW_CFG_SIZE) {
-            return self.fw_cfg.read(off, width);
-        }
         if let Some(off) = addr.offset_in(GPIO_BASE, PRIMECELL_SIZE) {
             return Ok(self.gpio.read(off, width));
         }
@@ -698,10 +708,11 @@ impl<S: GuestStorage> VirtBoard<S> {
         ) {
             let reg = RegOffset::new(off.get() % virtio_mmio::TRANSPORT_SIZE);
             let layout = self.mmio_layout;
+            let vendor = self.virtio_vendor;
             return Ok(
                 match self.transport_mut(off.get() / virtio_mmio::TRANSPORT_SIZE) {
-                    Some(transport) => transport.read(reg, width),
-                    None => virtio_mmio::read_empty_transport(reg, width, layout),
+                    Some(transport) => transport.read(reg, width, vendor),
+                    None => virtio_mmio::read_empty_transport(reg, width, layout, vendor),
                 },
             );
         }
@@ -762,12 +773,6 @@ impl<S: GuestStorage> VirtBoard<S> {
             }
             self.sync_device_lines();
             return Ok(());
-        }
-        if let Some(off) = addr.offset_in(FW_CFG_BASE, FW_CFG_SIZE) {
-            let mut ram = GuestRam::new(self.storage.ram_mut());
-            let written = self.fw_cfg.write(&mut ram, off, width, value);
-            self.dma.merge(&ram.written());
-            return written;
         }
         if let Some(off) = addr.offset_in(GPIO_BASE, PRIMECELL_SIZE) {
             self.gpio.write(off, width, value);

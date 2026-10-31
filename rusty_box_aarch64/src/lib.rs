@@ -31,12 +31,14 @@
 //! Arm's documents decide wherever they speak: the instruction semantics
 //! follow the Arm Architecture Reference Manual for A-profile (DDI 0487)
 //! pseudocode, the GIC IHI 0048B, the PL011 DDI 0183F, and the firmware
-//! calls PSCI (DEN 0022D) and the SMC Calling Convention (DEN 0028B). QEMU's
-//! `hw/arm/virt.c` and the device models it instantiates decide what those
-//! documents do not — the memory map, the interrupt wiring, the device
-//! tree, the choices Arm leaves to an implementation, and the devices Arm
-//! does not document — cited per file. README's "Where the references
-//! differ" lists every departure from QEMU.
+//! calls PSCI (DEN 0022D) and the SMC Calling Convention (DEN 0028B); the
+//! virtio devices follow OASIS virtio 1.2 and the display's EDID VESA
+//! E-EDID 1.4 where those speak. QEMU's `hw/arm/virt.c` and the device
+//! models it instantiates decide what those documents do not — the memory
+//! map, the interrupt wiring, the device tree, the choices the documents
+//! leave to an implementation, and the devices no specification describes
+//! — cited per file. README's "Where the references differ" lists every
+//! departure from QEMU.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -53,6 +55,7 @@ pub mod cpu;
 pub mod devices;
 #[cfg(feature = "alloc")]
 pub mod disk;
+pub mod identity;
 pub mod instrumentation;
 pub mod machine;
 mod softfloat;
@@ -66,6 +69,12 @@ pub use cpu::{
 };
 #[cfg(feature = "alloc")]
 pub use disk::{Access, Disk};
+pub use identity::{
+    BoardIdentity, CompatibleList, CompatibleStrings, EdidDate, EdidProductCode, EdidWeek,
+    EdidWeekNumber, EdidYear, IdentityError, IdentityField, IdentityNames, IdentityProblem,
+    InputDeviceId, InputProductId, InputVendorId, InputVersion, MsiFrameIidr, NotAnEdidWeek,
+    NotAnEdidYear, NotPnpId, PnpId, VirtioVendorId,
+};
 pub use instrumentation::{Execution, Instrumentation, NoInstrumentation};
 #[cfg(feature = "alloc")]
 pub use machine::Display;

@@ -269,21 +269,32 @@ fn a_waiting_processor_sleeps_past_a_stuck_deadline_to_the_timer() {
 /// whole by QEMU's (`fdt_add_psci_node`), whatever compatible, method or
 /// function identifiers its own named. QEMU's tree for this board with a
 /// PSCI 0.1 node of other identifiers in place of its own and a second
-/// memory node comes out as QEMU's tree itself does, byte for byte, for
-/// either conduit.
+/// memory node, named as the board names itself, comes out as the board's
+/// own tree does, byte for byte, for either conduit.
 #[test]
 fn a_host_tree_gets_qemu_s_memory_and_psci_nodes() {
     use super::{describe, BootChoice, Description, DeviceTree, PsciConduit, TreeSource};
     use crate::boot::fdt::{self, Edit, NodePath, Removal, Value};
     use crate::boot::QEMU_VIRT_DEVICE_TREE;
+    use crate::identity::BoardIdentity;
     use crate::CpuModel;
 
     let psci = NodePath::of("psci");
+    let root = NodePath::of("");
+    let identity = BoardIdentity::RUSTY_BOX;
+    // A host's tree that names the board as its identity does, the edit the
+    // board makes to its own tree alone.
     let mut foreign = vec![0u8; 64 * 1024];
     let len = fdt::rebuild(
         QEMU_VIRT_DEVICE_TREE,
         &[Removal::At(psci)],
         &[
+            Edit::set(root, "model", Value::String(identity.model())),
+            Edit::set(
+                root,
+                "compatible",
+                Value::Bytes(identity.compatible().property()),
+            ),
             Edit::set(
                 NodePath::of("memory@80000000"),
                 "device_type",
@@ -311,9 +322,15 @@ fn a_host_tree_gets_qemu_s_memory_and_psci_nodes() {
             psci: conduit,
         };
         let mut from_board = std::boxed::Box::new(DeviceTree::EMPTY);
-        describe(TreeSource::Board, machine, &mut from_board).expect("describes");
+        describe(TreeSource::Board, machine, &identity, &mut from_board).expect("describes");
         let mut from_host = std::boxed::Box::new(DeviceTree::EMPTY);
-        describe(TreeSource::Host(foreign), machine, &mut from_host).expect("describes");
+        describe(
+            TreeSource::Host(foreign),
+            machine,
+            &identity,
+            &mut from_host,
+        )
+        .expect("describes");
         assert_eq!(
             from_host.as_slice(),
             from_board.as_slice(),
@@ -331,10 +348,12 @@ fn a_host_tree_gets_qemu_s_memory_and_psci_nodes() {
         );
     }
     // Without EL2, and with the RAM QEMU's tree describes, the board's tree
-    // is QEMU's own: the same tokens in the same order, the strings block
-    // the same. Only the padding after a value may differ: libfdt leaves
-    // whatever bytes were there (`fdt_setprop` copies the value alone),
-    // and a property written anew here is padded with zeros.
+    // is QEMU's own but for the identity: the same tokens in the same
+    // order, the strings block the same, once QEMU's tree is given the
+    // identity's `/model` and root `compatible` and loses its `fw-cfg` and
+    // platform bus nodes. Only the padding after a value may differ: libfdt
+    // leaves whatever bytes were there (`fdt_setprop` copies the value
+    // alone), and a property written anew here is padded with zeros.
     let machine = Description {
         ram_len: 256 << 20,
         cpu: CpuModel::CortexA57,
@@ -343,11 +362,95 @@ fn a_host_tree_gets_qemu_s_memory_and_psci_nodes() {
         psci: PsciConduit::Hvc,
     };
     let mut from_board = std::boxed::Box::new(DeviceTree::EMPTY);
-    describe(TreeSource::Board, machine, &mut from_board).expect("describes");
+    describe(TreeSource::Board, machine, &identity, &mut from_board).expect("describes");
+    let mut qemus_renamed = vec![0u8; 64 * 1024];
+    let len = fdt::rebuild(
+        QEMU_VIRT_DEVICE_TREE,
+        &[
+            Removal::RootChild("fw-cfg"),
+            Removal::RootChild("platform-bus"),
+        ],
+        &[
+            Edit::set(root, "model", Value::String(identity.model())),
+            Edit::set(
+                root,
+                "compatible",
+                Value::Bytes(identity.compatible().property()),
+            ),
+        ],
+        &mut qemus_renamed,
+    )
+    .expect("rebuild");
+    assert_eq!(tokens(from_board.as_slice()), tokens(&qemus_renamed[..len]));
+}
+
+/// Every tree, the board's or a host's, names the board as its identity
+/// says, and none holds a node for QEMU's `fw_cfg` or its platform bus,
+/// which the board does not have.
+#[test]
+fn the_device_tree_names_the_board_by_its_identity() {
+    use super::{describe, BootChoice, Description, DeviceTree, PsciConduit, TreeSource};
+    use crate::boot::fdt;
+    use crate::boot::QEMU_VIRT_DEVICE_TREE;
+    use crate::identity::{BoardIdentity, IdentityNames};
+    use crate::CpuModel;
+
+    let machine = Description {
+        ram_len: 256 << 20,
+        cpu: CpuModel::CortexA57,
+        choice: BootChoice::Bare,
+        layout: None,
+        psci: PsciConduit::Hvc,
+    };
+    let host = BoardIdentity::new(IdentityNames {
+        model: "Acme Board",
+        compatible: &["acme,board-1", "acme,board"],
+        ..IdentityNames::RUSTY_BOX
+    })
+    .unwrap_or_else(|e| panic!("{e}"));
+    for (identity, model, compatible) in [
+        (
+            BoardIdentity::RUSTY_BOX,
+            &b"Rusty Box virt\0"[..],
+            &b"rusty-box,virt\0"[..],
+        ),
+        (
+            host,
+            &b"Acme Board\0"[..],
+            &b"acme,board-1\0acme,board\0"[..],
+        ),
+    ] {
+        let mut tree = std::boxed::Box::new(DeviceTree::EMPTY);
+        describe(TreeSource::Board, machine, &identity, &mut tree).expect("describes");
+        let tree = tree.as_slice();
+        assert_eq!(fdt::property(tree, "", "model"), Ok(Some(model)));
+        assert_eq!(fdt::property(tree, "", "compatible"), Ok(Some(compatible)));
+        for gone in ["fw-cfg@9020000", "platform-bus@c000000"] {
+            assert_eq!(fdt::property(tree, gone, "compatible"), Ok(None), "{gone}");
+        }
+    }
+    // A host's tree, here QEMU's own `linux,dummy-virt` one, is named by
+    // the identity too.
+    let mut tree = std::boxed::Box::new(DeviceTree::EMPTY);
+    describe(
+        TreeSource::Host(QEMU_VIRT_DEVICE_TREE),
+        machine,
+        &host,
+        &mut tree,
+    )
+    .expect("describes");
+    let tree = tree.as_slice();
     assert_eq!(
-        tokens(from_board.as_slice()),
-        tokens(QEMU_VIRT_DEVICE_TREE)
+        fdt::property(tree, "", "model"),
+        Ok(Some(&b"Acme Board\0"[..]))
     );
+    assert_eq!(
+        fdt::property(tree, "", "compatible"),
+        Ok(Some(&b"acme,board-1\0acme,board\0"[..]))
+    );
+    for gone in ["fw-cfg@9020000", "platform-bus@c000000"] {
+        assert_eq!(fdt::property(tree, gone, "compatible"), Ok(None), "{gone}");
+    }
 }
 
 /// A token of a flattened device tree's structure block, as a guest reads

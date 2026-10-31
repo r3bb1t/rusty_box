@@ -5,15 +5,17 @@
 //! legacy (QEMU's default, `Version` 1) on a board without virtio devices,
 //! non-legacy (`Version` 2) on one with them (the `virtio` module says why).
 //! With no backend plugged in, `virtio_mmio_read` answers the magic value,
-//! the version and the vendor ID whatever the access size, reports
+//! the version and the vendor ID — the board's own
+//! ([`crate::identity::BoardIdentity`]) — whatever the access size, reports
 //! `DeviceID` 0 — "no device" in the virtio specification — and reads every
 //! other register as zero; writes are ignored. Drivers rely on that to skip
 //! the slot. QEMU's memory core splits an eight-byte access into two
 //! four-byte ones, low half first.
 
 use crate::bus::{AccessWidth, RegOffset};
+use crate::identity::VirtioVendorId;
 
-use super::virtio::{MAGIC, MODERN_VERSION, VENDOR_QEMU};
+use super::virtio::{MAGIC, MODERN_VERSION};
 
 const LEGACY_VERSION: u32 = 1;
 
@@ -30,7 +32,14 @@ pub enum Layout {
     Modern,
 }
 
-pub fn read_empty_transport(offset: RegOffset, width: AccessWidth, layout: Layout) -> u64 {
+/// A read of `width` at `offset` of an empty transport on a board whose
+/// transports have `layout` and whose `VendorID` is `vendor`.
+pub fn read_empty_transport(
+    offset: RegOffset,
+    width: AccessWidth,
+    layout: Layout,
+    vendor: VirtioVendorId,
+) -> u64 {
     let register = |off: u64| -> u64 {
         u64::from(match off {
             0x000 => MAGIC,
@@ -38,7 +47,7 @@ pub fn read_empty_transport(offset: RegOffset, width: AccessWidth, layout: Layou
                 Layout::Legacy => LEGACY_VERSION,
                 Layout::Modern => MODERN_VERSION,
             },
-            0x00C => VENDOR_QEMU,
+            0x00C => vendor.get(),
             _ => 0,
         })
     };

@@ -46,6 +46,7 @@ use crate::devices::pl011::TX_CAPACITY;
 use crate::devices::virtio::input::InputKind;
 #[cfg(feature = "alloc")]
 use crate::disk::Disk;
+use crate::identity::BoardIdentity;
 use crate::instrumentation::{Instrumentation, NoInstrumentation};
 #[cfg(feature = "alloc")]
 use crate::storage::OwnedStorage;
@@ -282,6 +283,7 @@ pub struct MachineBuilder<'i, B = NoBoot, L: Levels = NoEl2, I = NoInstrumentati
     levels: PhantomData<L>,
     observer: I,
     plugs: Plugs,
+    identity: BoardIdentity,
 }
 
 /// Where a machine's device tree comes from.
@@ -291,7 +293,8 @@ pub struct MachineBuilder<'i, B = NoBoot, L: Levels = NoEl2, I = NoInstrumentati
 enum TreeSource<'i> {
     /// QEMU's for this board ([`boot::QEMU_VIRT_DEVICE_TREE`]), its
     /// processor node made the processor's, as QEMU's `virt` writes the node
-    /// from the processor it is given (`fdt_add_cpu_nodes`).
+    /// from the processor it is given (`fdt_add_cpu_nodes`), and edited as
+    /// [`describe`] edits every tree.
     Board,
     /// The host's, which describes the processor as the host wrote it, as
     /// QEMU takes a `-dtb` tree.
@@ -299,8 +302,10 @@ enum TreeSource<'i> {
 }
 
 impl<'i> MachineBuilder<'i, NoBoot, NoEl2, NoInstrumentation> {
-    /// A builder with [`RamSize::DEFAULT`] of RAM, the device tree QEMU
-    /// generates for this board, and a processor without EL2.
+    /// A builder with [`RamSize::DEFAULT`] of RAM, the board's device tree
+    /// (QEMU's for this board, edited to describe it:
+    /// [`boot::QEMU_VIRT_DEVICE_TREE`]), a processor without EL2, and the
+    /// identity [`BoardIdentity::RUSTY_BOX`].
     pub fn new(config: VirtConfig) -> Self {
         Self {
             config,
@@ -310,6 +315,7 @@ impl<'i> MachineBuilder<'i, NoBoot, NoEl2, NoInstrumentation> {
             levels: PhantomData,
             observer: NoInstrumentation,
             plugs: Plugs::NONE,
+            identity: BoardIdentity::RUSTY_BOX,
         }
     }
 }
@@ -332,6 +338,7 @@ impl<'i, B, I> MachineBuilder<'i, B, NoEl2, I> {
             levels: PhantomData,
             observer: self.observer,
             plugs: self.plugs,
+            identity: self.identity,
         }
     }
 }
@@ -349,7 +356,10 @@ impl<'i, B, L: Levels, I> MachineBuilder<'i, B, L, I> {
     /// one for the RAM, `/chosen` is added where it has none and for a
     /// kernel given its command line and initrd, and its `/psci` node is
     /// replaced by QEMU's, whose method names the conduit the levels `L`
-    /// give PSCI; its processor node stays as given.
+    /// give PSCI; its processor node stays as given. Its `/model` and root
+    /// `compatible` are the machine's identity's
+    /// ([`MachineBuilder::identity`]), and its `fw-cfg` and `platform-bus`
+    /// nodes go, as the board has neither.
     pub fn device_tree(mut self, tree: &'i [u8]) -> Self {
         self.device_tree = TreeSource::Host(tree);
         self
@@ -365,7 +375,22 @@ impl<'i, B, L: Levels, I> MachineBuilder<'i, B, L, I> {
             levels: PhantomData,
             observer,
             plugs: self.plugs,
+            identity: self.identity,
         }
+    }
+
+    /// Name the machine `identity` rather than
+    /// [`BoardIdentity::RUSTY_BOX`]: what the device tree gives as `/model`
+    /// and root `compatible`, the board's tree or one the host gives
+    /// ([`MachineBuilder::device_tree`]), every virtio-mmio transport's
+    /// `VendorID`, the GICv2m frame's `MSI_IIDR`, the virtio keyboard's and
+    /// tablet's names, vendor, products and versions, and the virtio
+    /// display's EDID maker, product, name and date. The identity
+    /// is part of the machine's shape: a snapshot restores only into a
+    /// machine of the same identity.
+    pub fn identity(mut self, identity: BoardIdentity) -> Self {
+        self.identity = identity;
+        self
     }
 
     /// Plug in a virtio-gpu (QEMU `-device virtio-gpu-device`) whose display
@@ -439,6 +464,7 @@ impl<'i, L: Levels, I> MachineBuilder<'i, NoBoot, L, I> {
             levels: PhantomData,
             observer: self.observer,
             plugs: self.plugs,
+            identity: self.identity,
         }
     }
 }
@@ -523,7 +549,13 @@ macro_rules! build_methods {
             /// [`BuildError`] when an image does not fit where it has to go.
             pub fn build(self) -> Result<VirtMachine<OwnedStorage, L, I>, BuildError> {
                 let choice = ($choice)(self.boot);
-                let plan = plan::<L>(self.device_tree, choice, self.ram, self.config.cpu)?;
+                let plan = plan::<L>(
+                    self.device_tree,
+                    choice,
+                    self.ram,
+                    self.config.cpu,
+                    &self.identity,
+                )?;
                 let storage = owned_storage(self.ram, choice)?;
                 Ok(assemble(
                     self.config,
@@ -531,6 +563,7 @@ macro_rules! build_methods {
                     storage,
                     self.observer,
                     self.plugs,
+                    self.identity,
                 ))
             }
         }
@@ -551,7 +584,13 @@ macro_rules! build_methods {
                 'i: 'm,
             {
                 let choice = ($choice)(self.boot);
-                let plan = plan::<L>(self.device_tree, choice, self.ram, self.config.cpu)?;
+                let plan = plan::<L>(
+                    self.device_tree,
+                    choice,
+                    self.ram,
+                    self.config.cpu,
+                    &self.identity,
+                )?;
                 let storage = lent_storage(self.ram, choice, loan)?;
                 Ok(assemble(
                     self.config,
@@ -559,6 +598,7 @@ macro_rules! build_methods {
                     storage,
                     self.observer,
                     self.plugs,
+                    self.identity,
                 ))
             }
         }
@@ -682,21 +722,35 @@ struct Description<'i> {
 /// by QEMU's (`fdt_add_psci_node`, which deletes the node a tree has, as
 /// its function identifiers may not be QEMU's), whose `method` names the
 /// conduit the processor's firmware answers on ([`PsciConduit::of`]). The
-/// board's own tree gets the processor's `compatible` first, as QEMU's
-/// `virt` writes the processor node from the processor it is given
-/// (`fdt_add_cpu_nodes`), which in QEMU's tree for the Cortex-A57 is the
-/// value it has. QEMU's tree for this board, the default source, is the
-/// one QEMU made this way, so without EL2 only the memory size changes it.
+/// board has neither QEMU's `fw_cfg` nor its platform bus
+/// (`qemu,platform`), so a `fw-cfg` or `platform-bus` node that is a child
+/// of the root, where QEMU's `virt` puts them, goes too; a node of either
+/// name deeper in a host's tree is the host's own and stays.
+///
+/// The board's own tree, QEMU's for this board, gets the processor's
+/// `compatible` first, as QEMU's `virt` writes the processor node from the
+/// processor it is given (`fdt_add_cpu_nodes`), which in QEMU's tree for
+/// the Cortex-A57 is the value it has. Every tree, the board's or a host's,
+/// names the board `identity`'s way, its `/model` and root `compatible`
+/// replacing the tree's own (QEMU's `linux,dummy-virt`, whose binding is
+/// "QEMU virt machine").
 fn describe(
     source: TreeSource<'_>,
     machine: Description<'_>,
+    identity: &BoardIdentity,
     out: &mut DeviceTree,
 ) -> Result<(), DeviceTreeError> {
+    const ROOT: NodePath<'static> = NodePath::of("");
     const PROCESSOR: NodePath<'static> = NodePath::of("cpus/cpu@0");
     const MEMORY: NodePath<'static> = NodePath::of("memory@40000000");
     const CHOSEN: NodePath<'static> = NodePath::of("chosen");
     const PSCI: NodePath<'static> = NodePath::of("psci");
-    const REMOVALS: [Removal<'static>; 2] = [Removal::Named("memory"), Removal::At(PSCI)];
+    const REMOVALS: [Removal<'static>; 4] = [
+        Removal::Named("memory"),
+        Removal::At(PSCI),
+        Removal::RootChild("fw-cfg"),
+        Removal::RootChild("platform-bus"),
+    ];
     let Description {
         ram_len,
         cpu,
@@ -721,7 +775,14 @@ fn describe(
     let cpu_off = PsciNode::CPU_OFF.to_be_bytes();
     let cpu_on = PsciNode::CPU_ON.to_be_bytes();
     let migrate = PsciNode::MIGRATE.to_be_bytes();
-    let mut edits = [Edit::node(CHOSEN); 13];
+    /// The most edits a description makes: the processor's `compatible`
+    /// (the board's tree), the board's two names, the memory node's two
+    /// properties, `/chosen` and its command line, the initrd's two
+    /// properties, and the `/psci` node's six. A kernel boot of the board's
+    /// tree with a command line and an initrd makes them all (`tests/api.rs`,
+    /// `a_directly_booted_kernel_is_entered_as_qemu_enters_it`).
+    const MOST_EDITS: usize = 1 + 2 + 2 + 2 + 2 + 6;
+    let mut edits = [Edit::node(CHOSEN); MOST_EDITS];
     let (tree, mut count) = match source {
         TreeSource::Board => {
             edits[0] = Edit::set(PROCESSOR, "compatible", Value::String(cpu.compatible()));
@@ -733,6 +794,12 @@ fn describe(
         edits[count] = edit;
         count += 1;
     };
+    push(Edit::set(ROOT, "model", Value::String(identity.model())));
+    push(Edit::set(
+        ROOT,
+        "compatible",
+        Value::Bytes(identity.compatible().property()),
+    ));
     // `fdt_add_memory_node`.
     push(Edit::set(MEMORY, "device_type", Value::String("memory")));
     push(Edit::set(MEMORY, "reg", Value::Bytes(&reg)));
@@ -771,13 +838,14 @@ struct Plan {
 
 /// Place the boot's images in `ram` and describe the machine, a `cpu`
 /// processor of the levels `L`, whose firmware answers PSCI on the conduit
-/// they give it, refusing what does not fit. Nothing is allocated or
-/// written yet, so a refusal leaves a caller's loan untouched.
+/// they give it, named `identity`, refusing what does not fit. Nothing is
+/// allocated or written yet, so a refusal leaves a caller's loan untouched.
 fn plan<L: Levels>(
     source_tree: TreeSource<'_>,
     choice: BootChoice<'_>,
     ram: RamSize,
     cpu: CpuModel,
+    identity: &BoardIdentity,
 ) -> Result<Plan, BuildError> {
     cpu.check_levels::<L>()
         .map_err(BuildError::El2Unavailable)?;
@@ -802,7 +870,7 @@ fn plan<L: Levels>(
             layout,
             psci: PsciConduit::of::<L>(),
         };
-        describe(source_tree, machine, &mut device_tree)?;
+        describe(source_tree, machine, identity, &mut device_tree)?;
         let tree_len = device_tree.len as u64;
         match layout {
             Some(layout) => layout.fit_device_tree(ram_len, tree_len)?,
@@ -815,13 +883,15 @@ fn plan<L: Levels>(
     Ok(Plan { boot, device_tree })
 }
 
-/// The machine `plan` describes, in `storage`, started.
+/// The machine `plan` describes, in `storage`, its devices named `identity`,
+/// started.
 fn assemble<S: GuestStorage, L: Levels, I: Instrumentation>(
     config: VirtConfig,
     plan: Plan,
     storage: S,
     observer: I,
     plugs: Plugs,
+    identity: BoardIdentity,
 ) -> VirtMachine<S, L, I> {
     let Plan { boot, device_tree } = plan;
     // The plan checked the model's levels (`CpuModel::check_levels`).
@@ -838,7 +908,8 @@ fn assemble<S: GuestStorage, L: Levels, I: Instrumentation>(
     let devices = plugs.devices;
     let mut machine = VirtMachine {
         cpu,
-        board: VirtBoard::new(storage, config.rtc_epoch_seconds, plugs),
+        board: VirtBoard::new(storage, config.rtc_epoch_seconds, plugs, &identity),
+        identity_hash: identity_hash(&identity),
         observer,
         config,
         boot,
@@ -1088,6 +1159,9 @@ pub struct VirtMachine<S, L: Levels, I = NoInstrumentation> {
     cpu: Cpu<L>,
     /// The virtio devices it was built with.
     devices: VirtioDevices,
+    /// What it tells the guest it is, as a snapshot fingerprints it
+    /// ([`identity_hash`]).
+    identity_hash: u64,
     config: VirtConfig,
     exits: Exits,
     terminal: TerminalKeyboard,
@@ -1896,6 +1970,7 @@ impl<S: GuestStorage, L: Levels, I: Instrumentation> VirtMachine<S, L, I> {
             code_hash: fnv1a(storage.code()),
             kernel_hash: fnv1a(images.kernel),
             initrd_hash: fnv1a(images.initrd),
+            identity_hash: self.identity_hash,
             ips: self.config.ips.get(),
             cpu: self.config.cpu.tag(),
             boot: self.boot.tag(),
@@ -1937,7 +2012,6 @@ impl<S: GuestStorage, L: Levels, I: Instrumentation> VirtMachine<S, L, I> {
         self.board.uart.save(w)?;
         self.board.rtc.save(w)?;
         self.board.gpio.save(w)?;
-        self.board.fw_cfg.save(w)?;
         self.board.flash0.save(w)?;
         self.board.flash1.save(w)?;
         for transport in self.board.virtio.iter().flatten() {
@@ -2015,7 +2089,6 @@ impl<S: GuestStorage, L: Levels, I: Instrumentation> VirtMachine<S, L, I> {
         self.board.uart.restore(r)?;
         self.board.rtc.restore(r)?;
         self.board.gpio.restore(r)?;
-        self.board.fw_cfg.restore(r)?;
         self.board.flash0.restore(r)?;
         self.board.flash1.restore(r)?;
         for transport in self.board.virtio.iter_mut().flatten() {
@@ -2052,14 +2125,16 @@ impl<S: GuestStorage, I: Instrumentation> VirtMachine<S, WithEl2, I> {
 }
 
 const SNAPSHOT_MAGIC: [u8; 8] = *b"RBA64SNP";
-/// The image layout's version: 16 holds the processor's level set (the
+/// The image layout's version: 17 holds the processor's level set (the
 /// shape's `virtualization`, the EL2 registers, `CNTPOFF_EL2` among them), a
 /// feature set of 128 bits, `RVBAR_ELx` and `RMR_ELx` of the highest level,
 /// what Software Step stepped, each TLB entry's stage 2 permissions and
 /// level beside stage 1's and the memory each stage and both together map
-/// it to, the TLB's kept stage 2 translations, and its tables of EL1&0 and
-/// stage 2 contexts.
-const SNAPSHOT_VERSION: u32 = 16;
+/// it to, the TLB's kept stage 2 translations, its tables of EL1&0 and
+/// stage 2 contexts, the shape's identity fingerprint, and the board's
+/// devices: the GIC, the PL011, the PL031, the PL061, both flash banks and
+/// every virtio-mmio transport.
+const SNAPSHOT_VERSION: u32 = 17;
 
 /// Everything about how a machine was built that a snapshot depends on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2069,6 +2144,8 @@ struct Shape {
     code_hash: u64,
     kernel_hash: u64,
     initrd_hash: u64,
+    /// What the guest is told the machine is ([`identity_hash`]).
+    identity_hash: u64,
     ips: u64,
     /// The processor model ([`CpuModel::tag`]), which sets the system
     /// counter's frequency too.
@@ -2093,6 +2170,7 @@ impl Shape {
             self.code_hash,
             self.kernel_hash,
             self.initrd_hash,
+            self.identity_hash,
             self.ips,
             self.kernel_offset,
             self.initrd_offset,
@@ -2108,11 +2186,11 @@ impl Shape {
     }
 
     fn restore<R: SnapRead>(r: &mut R) -> SnapResult<Self> {
-        let mut v = [0u64; 8];
+        let mut v = [0u64; 9];
         for value in v.iter_mut() {
             *value = r.read_u64()?;
         }
-        let [ram_len, vars_len, code_hash, kernel_hash, initrd_hash, ips, kernel_offset, initrd_offset] =
+        let [ram_len, vars_len, code_hash, kernel_hash, initrd_hash, identity_hash, ips, kernel_offset, initrd_offset] =
             v;
         Ok(Self {
             ram_len,
@@ -2120,6 +2198,7 @@ impl Shape {
             code_hash,
             kernel_hash,
             initrd_hash,
+            identity_hash,
             ips,
             cpu: r.read_u8()?,
             boot: r.read_u8()?,
@@ -2136,15 +2215,30 @@ impl Shape {
     }
 }
 
+/// FNV-1a's offset basis, 64-bit.
+const FNV_OFFSET_BASIS: u64 = 0xCBF2_9CE4_8422_2325;
+
 /// FNV-1a, 64-bit: a fingerprint of an image a snapshot names but does not
 /// carry.
 fn fnv1a(bytes: &[u8]) -> u64 {
-    let mut h: u64 = 0xCBF2_9CE4_8422_2325;
+    fnv1a_from(FNV_OFFSET_BASIS, bytes)
+}
+
+/// FNV-1a, 64-bit, of `bytes` following what made `hash`.
+fn fnv1a_from(mut hash: u64, bytes: &[u8]) -> u64 {
     for &b in bytes {
-        h ^= u64::from(b);
-        h = h.wrapping_mul(0x0000_0100_0000_01B3);
+        hash ^= u64::from(b);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01B3);
     }
-    h
+    hash
+}
+
+/// FNV-1a over every name and number of `identity`
+/// ([`BoardIdentity::each_part`]).
+fn identity_hash(identity: &BoardIdentity) -> u64 {
+    let mut hash = FNV_OFFSET_BASIS;
+    identity.each_part(|bytes| hash = fnv1a_from(hash, bytes));
+    hash
 }
 
 /// The length of the next piece of a virtual access: to the end of the page

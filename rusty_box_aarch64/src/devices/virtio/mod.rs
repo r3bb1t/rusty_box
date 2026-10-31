@@ -56,6 +56,7 @@ mod tests;
 use rusty_box_core::snap::{SnapError, SnapRead, SnapResult, SnapWrite};
 
 use crate::bus::{AccessWidth, RegOffset};
+use crate::identity::VirtioVendorId;
 use input::Input;
 use queue::{Chain, GuestRam, Queue, QueueFault, RingFeatures};
 
@@ -63,8 +64,6 @@ use queue::{Chain, GuestRam, Queue, QueueFault, RingFeatures};
 pub const MAGIC: u32 = 0x7472_6976;
 /// `Version` of a non-legacy transport.
 pub const MODERN_VERSION: u32 = 2;
-/// QEMU's vendor ID, "QEMU" little-endian.
-pub const VENDOR_QEMU: u32 = 0x554D_4551;
 /// `VIRTIO_QUEUE_MAX`: the queue indices `QueueSel` and `QueueNotify`
 /// accept.
 const VIRTIO_QUEUE_MAX: u32 = 1024;
@@ -556,16 +555,26 @@ impl Transport {
         }
     }
 
-    pub(crate) fn read(&mut self, offset: RegOffset, width: AccessWidth) -> u64 {
+    /// A read of `width` at `offset` of a transport on a board whose
+    /// `VendorID` is `vendor` ([`crate::identity::BoardIdentity`]). The
+    /// vendor is the board's, one value for every transport and for the
+    /// slots no device fills ([`super::virtio_mmio::read_empty_transport`]),
+    /// so the board holds it once and passes it to each read.
+    pub(crate) fn read(
+        &mut self,
+        offset: RegOffset,
+        width: AccessWidth,
+        vendor: VirtioVendorId,
+    ) -> u64 {
         if width == AccessWidth::Dword {
-            let low = self.read_word(offset.get(), AccessWidth::Word);
-            let high = self.read_word(offset.get() + 4, AccessWidth::Word);
+            let low = self.read_word(offset.get(), AccessWidth::Word, vendor);
+            let high = self.read_word(offset.get() + 4, AccessWidth::Word, vendor);
             return low | (high << 32);
         }
-        self.read_word(offset.get(), width)
+        self.read_word(offset.get(), width, vendor)
     }
 
-    fn read_word(&mut self, off: u64, width: AccessWidth) -> u64 {
+    fn read_word(&mut self, off: u64, width: AccessWidth, vendor: VirtioVendorId) -> u64 {
         if off >= CONFIG_OFFSET {
             return self.config_read((off - CONFIG_OFFSET) as usize, width);
         }
@@ -576,7 +585,7 @@ impl Transport {
             0x000 => MAGIC,
             0x004 => MODERN_VERSION,
             0x008 => self.device.id(),
-            0x00C => VENDOR_QEMU,
+            0x00C => vendor.get(),
             0x010 => {
                 ((self.core.host_features & !LEGACY_FEATURES) >> (32 * self.host_features_sel))
                     as u32

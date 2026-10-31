@@ -47,6 +47,11 @@ assert!(typed.is_complete());
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
+The machine names itself [`BoardIdentity::RUSTY_BOX`](src/identity.rs)
+unless the builder is given another: `MachineBuilder::identity` takes a
+`BoardIdentity::new(IdentityNames { model: "Acme Board", ..IdentityNames::RUSTY_BOX })`,
+whose names are checked and copied into the machine, with no allocator.
+
 [docs/aarch64-automation.md](../docs/aarch64-automation.md) is the guide:
 building (firmware, direct kernel or bare; owned or lent memory), the serial
 console and the terminal keyboard, budgets and stop reasons, the power button
@@ -293,8 +298,8 @@ is) must reproduce, are:
 | Processor | One of two models (`VirtConfig::cpu`, `CpuModel`). `cortex-a57`, the default: Cortex-A57-shaped ARMv8.0, the whole ARMv8.0 FP and Advanced SIMD instruction set (integer and floating point, vector and scalar, saturation setting FPSR.QC), the Cortex-A57's optional Cryptographic Extension (AES, 64-bit PMULL, SHA-1, SHA-256) and CRC32, as QEMU's `cortex-a57` has them, with QEMU's 62.5 MHz system counter. `armv9.2`: an Armv9.2 processor with SME and SME2 and no SVE (the features below), Streaming SVE vectors of 128 to 512 bits, `MIDR_EL1` 0x000F_0520 (implementer 0, a software model) and the 1 GHz counter Armv8.6 and later require. Both: EL0 and EL1, and on the Cortex-A57 EL2 with `MachineBuilder::with_el2` (see below), AArch64 only, the Cortex-A57's caches as `CTR_EL0`, `CLIDR_EL1` and `CCSIDR_EL1` report them, an MMU with the 4 KiB granule and 44-bit physical and 48-bit virtual addresses (the Armv9.2 model the 16 KiB and 64 KiB granules too, FEAT_TTST's small tables, and 52-bit physical addresses, FEAT_LPA: an untranslated address of up to 52 bits, and walks that output up to 52 bits with the 64 KiB granule, taking 52-bit virtual addresses with it, FEAT_LVA, and with the 4 KiB and 16 KiB granules under `TCR_ELx.DS`, FEAT_LPA2, walking from level −1 with the 4 KiB one, and up to 48 bits otherwise; at stage 1, as it has no EL2 yet), stage 1 and with EL2 stage 2, with a TLB holding both stages' translations, exclusives, PSCI 1.1 (DEN 0022D) over `HVC`, or over `SMC` with EL2, the conduits QEMU's `virt` provides (see "Where the references differ") |
 | Interrupts | GICv2 without the Security Extensions, for one processor, as IHI 0048B specifies it, in QEMU's structure: both interrupt groups, with Group 0 on FIQ under `FIQEn`, the Group 1 aliases (`GICC_AIAR`, `GICC_AEOIR`, `GICC_AHPPIR`, `GICC_ABPR`), preemption by group priority, the running priority and active priority registers, and 4 KiB distributor and 8 KiB CPU interface regions; + GICv2m frame |
 | Timers | EL1 physical and virtual generic timers; with EL2, the EL2 physical timer (`CNTHP_*`, PPI 10), `CNTVOFF_EL2` and `CNTHCTL_EL2`'s traps and event stream; with FEAT_ECV_POFF too, `CNTPOFF_EL2` (built, but no model has FEAT_ECV_POFF and EL2 yet) |
-| Devices | PL011 UART (`UARTPeriphID2` revision 1, QEMU's ID, as DDI 0183F describes the revisions up to r1p4: a 16-entry receive FIFO with overrun and break status, receive interrupts at the `UARTIFLS` level, modem-status interrupts on line changes, loopback, a receiver gated by `UARTEN` and `RXE`, a transmitter gated by `UARTEN` and `TXE` whose 16-entry transmit FIFO holds what is written meanwhile, transmit interrupts as the transmit FIFO drains through the `UARTIFLS` level, and the receive timeout counted in bit periods of the programmed baud rate on the machine's clock, while characters themselves cross the line in no time; see "Where the references differ"), PL031 RTC (r1p3, as DDI 0224C describes it: stopped until `RTCCR` starts it, zeroed by any later `RTCCR` write, stopped again by a system reset), PL061 GPIO as DDI 0190B describes it (address-masked `GPIODATA`, edge and level detection on the lines' levels, outputs included) with QEMU's `gpio-key` power button on line 3, CFI flash ×2 (QEMU `pflash_cfi01` semantics, whole 64 MiB banks decoded), `fw_cfg` (traditional and DMA interfaces, no files), 32 virtio-mmio transports (QEMU's legacy layout while empty; non-legacy, as QEMU's `force-legacy=false`, once the host plugs in QEMU's 2D `virtio-gpu-device` with its EDID, `virtio-keyboard-device`, `virtio-tablet-device` or `virtio-blk-device` over a raw image in memory or a host file, which take the highest free ones), an empty PCIe ECAM/windows |
-| Board | QEMU `virt` memory map and IRQ wiring; QEMU 11.1.2's device tree in `assets/` (two QEMU bugs fixed, see "Where the references differ"; its `rng-seed` and `kaslr-seed` fixed, see below), its memory node replaced by one for the machine's RAM, `/chosen` set per machine, its `/psci` node replaced by QEMU's for the conduit the firmware answers on (`fdt_add_psci_node`), and its processor's `compatible` set to the model's, where libfdt puts them, so a kernel boot's tree is QEMU's property for property; a host's own tree gets the same, every memory node and its `/psci` node replaced and `/chosen` added where it has none, as QEMU's `-dtb` does |
+| Devices | PL011 UART (`UARTPeriphID2` revision 1, QEMU's ID, as DDI 0183F describes the revisions up to r1p4: a 16-entry receive FIFO with overrun and break status, receive interrupts at the `UARTIFLS` level, modem-status interrupts on line changes, loopback, a receiver gated by `UARTEN` and `RXE`, a transmitter gated by `UARTEN` and `TXE` whose 16-entry transmit FIFO holds what is written meanwhile, transmit interrupts as the transmit FIFO drains through the `UARTIFLS` level, and the receive timeout counted in bit periods of the programmed baud rate on the machine's clock, while characters themselves cross the line in no time; see "Where the references differ"), PL031 RTC (r1p3, as DDI 0224C describes it: stopped until `RTCCR` starts it, zeroed by any later `RTCCR` write, stopped again by a system reset), PL061 GPIO as DDI 0190B describes it (address-masked `GPIODATA`, edge and level detection on the lines' levels, outputs included) with QEMU's `gpio-key` power button on line 3, CFI flash ×2 (QEMU `pflash_cfi01` semantics, whole 64 MiB banks decoded), no `fw_cfg` (see "Where the references differ"), 32 virtio-mmio transports (QEMU's legacy layout while empty; non-legacy, as QEMU's `force-legacy=false`, once the host plugs in QEMU's 2D `virtio-gpu-device` with its EDID, `virtio-keyboard-device`, `virtio-tablet-device` or `virtio-blk-device` over a raw image in memory or a host file, which take the highest free ones), an empty PCIe ECAM/windows |
+| Board | QEMU `virt` memory map and IRQ wiring; QEMU 11.1.2's device tree in `assets/` (two QEMU bugs fixed, see "Where the references differ"; its `rng-seed` and `kaslr-seed` fixed, see below), its memory node replaced by one for the machine's RAM, `/chosen` set per machine, its `/psci` node replaced by QEMU's for the conduit the firmware answers on (`fdt_add_psci_node`), its processor's `compatible` set to the model's, and its `/model` and root `compatible` set to the board's identity's, where libfdt puts them, so a kernel boot's tree is QEMU's property for property but for the names; neither the `fw-cfg` node nor QEMU's platform bus, which the board does not have (see "Where the references differ"); a host's own tree gets the same, its names the identity's too, every memory node and its `/psci` node replaced and `/chosen` added where it has none, as QEMU's `-dtb` does |
 | Boot | UEFI firmware from flash; or a Linux `Image`, initramfs and device tree placed as QEMU's `hw/arm/boot.c` places them, entered with the register state its boot stub leaves, and the UART's console set up at 115200 baud, 8N1, as firmware leaves it (see "Where the references differ") |
 
 Provenance: Arm's documents decide wherever they speak — the Arm ARM (DDI
@@ -304,10 +309,15 @@ the PL061, DEN 0022D for PSCI and DEN 0028B for the SMC Calling Convention.
 QEMU's `virt` board decides what those documents
 do not: the memory map, the interrupt wiring, the device tree, the choices
 Arm leaves to an implementation, and the devices Arm does not document
-(virtio, `fw_cfg`, the CFI flash, `gpio-key`). Each device cites its Arm
-document where there is one, then the QEMU source file and symbols it was
-ported from, and every departure from QEMU is listed under "Where the
-references differ". The QEMU reference is release 11.1.2 and its newest
+(virtio, the CFI flash, `gpio-key`). A device with its own published
+specification is held to it as to Arm's: the virtio devices to OASIS virtio
+1.2, the display's EDID to VESA E-EDID 1.4. No limit comes from one guest's
+driver. What the board tells a guest it is —
+the device tree's model, the virtio vendor and device names, the display's
+EDID — is its own, not QEMU's. Each device cites its Arm
+document or specification where there is one, then the QEMU source file and
+symbols it was ported from, and every departure from QEMU is listed under
+"Where the references differ". The QEMU reference is release 11.1.2 and its newest
 `virt` machine, `virt-11.1`.
 
 Beyond the Cortex-A57, the Armv9.2 model implements the features of an
@@ -1058,12 +1068,14 @@ integration tests of the public API.
   run, so an encoding gone missing from the decoder fails it without Arm's
   data.
 - The EDK2 boot to the UEFI shell was compared with QEMU 11.1.2 running the
-  same firmware (Debian's AAVMF), device tree and memory size, without a
-  network card (`-nic none`): identical console bytes. The shell's `memmap`
-  differs where this board leaves QEMU's parts out: QEMU's ACPI tables,
-  which EDK2 installs from `fw_cfg` files, and allocations still present
-  with `acpi=off` and fw_cfg DMA off, which this comparison does not
-  attribute further.
+  same firmware (Debian's AAVMF) with 256 MiB and no network card
+  (`-nic none`), QEMU with its own device tree and `fw_cfg`, this board with
+  neither: identical console bytes, 1,333 of them to the shell's prompt.
+  The shell's `memmap` differs: QEMU's holds 16 pages of ACPI tables, which
+  EDK2 installs from QEMU's `fw_cfg` files, and more boot-services and
+  runtime memory (BS_Data 4,565 pages against 4,305, BS_Code 950 against
+  933, RT_Data 816 against 784), which this comparison does not attribute
+  further.
 - Alpine Linux 3.23.7 (kernel 6.18.58, Alpine's `virt` configuration) boots to
   a login prompt with no warnings in its log, logs in, and runs commands whose
   output matches the host (`seq 1 20000 | sha256sum`); `reboot` comes back to
@@ -1109,15 +1121,19 @@ integration tests of the public API.
   negotiation, resets, interrupt and configuration-change behaviour and
   every rule whose breach QEMU reports with `virtio_error`
   (`tests/unit/virtio_transport.rs`); QEMU's keyboard and tablet
-  configuration byte for byte and the events each host action becomes
+  configuration byte for byte but for the names, vendor, products and
+  versions, the board's identity's, and the events each host action becomes
   (`tests/unit/virtio_input.rs`); every 2D GPU command and its errors in
   QEMU's order, frames and the cursor as the host receives them
   (`tests/unit/virtio_gpu.rs`); the block device's configuration and
   geometry, every request type and its errors, the cache mode, read-only
   and file-backed disks and snapshots (`tests/unit/virtio_block.rs`). The
-  EDID matches QEMU's own generator byte for byte at nine sizes
-  (`tests/vectors/qemu_edid.txt`, from `tests/vectors/gen_qemu_edid.sh`,
-  which builds `edid-generate.c` from a QEMU checkout). Alpine with the
+  EDID generator, given QEMU's names for its display, matches QEMU's own
+  byte for byte at nine sizes (`tests/vectors/qemu_edid.txt`, from
+  `tests/vectors/gen_qemu_edid.sh`, which builds `edid-generate.c` from a
+  QEMU checkout); the board gives it its identity's. `tests/identity.rs`
+  reads, as a guest, the board's names: the device tree's, every
+  transport's `VendorID`, the input devices' names and vendor. Alpine with the
   three devices binds `virtio_gpu` (`+edid`), shows its console in the
   framebuffer at the requested size, and receives a key typed on the virtio
   keyboard in its evdev; a snapshot taken after the drivers bound, restored
@@ -1232,10 +1248,11 @@ integration tests of the public API.
 
 Arm's documents decide wherever they speak: the Arm ARM and AARCHMRS what
 an instruction does, IHI 0048B the GIC, DDI 0183F the PL011, DEN 0022D and
-DEN 0028B the firmware calls. QEMU 11.1.2's `virt` board and `cortex-a57`
+DEN 0028B the firmware calls; OASIS virtio 1.2 the virtio devices and VESA
+E-EDID 1.4 the display's EDID. QEMU 11.1.2's `virt` board and `cortex-a57`
 decide what they do not: the board's layout, wiring and device tree, the
-devices Arm does not document, and the choices Arm leaves to an
-implementation. Every place this model departs from QEMU is listed here
+devices no specification describes, and the choices the specifications
+leave to an implementation. Every place this model departs from QEMU is listed here
 with its evidence, as are the choices it makes where the references leave
 one open.
 
@@ -1884,23 +1901,74 @@ one open.
   cache 4-way, where the Cortex-A57 MPCore TRM, and QEMU 8.2, make it 2-way;
   this model's `CCSIDR_EL1` is the TRM's, and the tree's `d-cache-sets` is
   `0x100` to agree with it.
-- **virtio and `fw_cfg` DMA reach RAM only.** QEMU's `dma_memory_map` maps a
-  ring or buffer wherever the address space has a region
-  (`address_space_map`): RAM and, for reading, a flash bank in read-array
-  mode directly, anything else through its bounce buffer; `fw_cfg`'s
-  `dma_memory_read` and `dma_memory_write` reach the same regions. This
-  board's virtio devices and `fw_cfg` reach guest RAM only, so a ring,
-  buffer or `fw_cfg` descriptor anywhere else breaks the transfer, as one in
-  an unassigned hole does in QEMU: an `fw_cfg` descriptor outside RAM is
-  never read and gets no ERROR status, so firmware polling it waits for
-  ever. Linux and EDK2 place their rings, buffers and descriptors in RAM.
-- **`fw_cfg` without files.** QEMU's `virt` offers a file directory (ACPI
-  tables, SMBIOS, boot order); this board offers the traditional and DMA
-  interfaces as QEMU does (`FW_CFG_ID` = 3) with an empty directory, a
-  configuration the interface defines, so firmware describes the machine
-  from the device tree (`src/devices/fw_cfg.rs`). EDK2's `QemuFwCfgMmioPei`
-  enables DMA from the device tree's 0x18-byte region alone, without
-  reading `FW_CFG_ID`, so the DMA interface is required, not optional.
+- **virtio DMA reaches RAM only.** QEMU's `dma_memory_map` maps a ring or
+  buffer wherever the address space has a region (`address_space_map`):
+  RAM and, for reading, a flash bank in read-array mode directly, anything
+  else through its bounce buffer. This board's virtio devices reach guest
+  RAM only, so a ring or buffer anywhere else breaks the transfer, as one in
+  an unassigned hole does in QEMU. Linux and EDK2 place their rings and
+  buffers in RAM.
+- **The board names itself.** QEMU's `virt` tells a guest it is QEMU: its
+  device tree's `/model` and root `compatible` are `linux,dummy-virt`, it
+  has a platform bus `qemu,platform`, every virtio-mmio transport's
+  `VendorID` reads "QEMU", the virtio keyboard and tablet are "QEMU Virtio
+  Keyboard" and "QEMU Virtio Tablet" of USB vendor 0x0627, products 1 and
+  3 of QEMU's numbering, and the
+  display's EDID is vendor "RHT", model 0x1234, "QEMU Monitor", made in
+  week 42 of 2014, and the GICv2m frame's `MSI_IIDR` reads QEMU's product
+  ID, 'Q' (`PRODUCT_ID_QEMU`). Software keys on them: systemd's `detect_vm_device_tree`
+  reports QEMU for a node named `fw-cfg` and a generic virtual machine for
+  `linux,dummy-virt`. This board gives its own instead, a host's
+  `BoardIdentity` or by default `BoardIdentity::RUSTY_BOX` (`src/identity.rs`):
+  model "Rusty Box virt", compatible `rusty-box,virt` (dt-schema's pattern
+  for a `compatible` string), `VendorID` "RBOX", "Rusty Box Virtio
+  Keyboard" and "Rusty Box Virtio Tablet" of vendor 0x5242 on
+  `BUS_VIRTUAL`, which has no vendor registry, products 1 and 2 at version
+  1, and a display of PNP ID
+  "RBX", which the UEFI Forum's registry assigns to no one (its export of
+  2026-10-31), product 1, named "Rusty Box", made in 2026 with no week
+  given; a GICv2m `MSI_IIDR` of 0, which names no implementer and no
+  product: QEMU's own `gicv2m_read`, which cites the Server Base System
+  Architecture 2.2 (ARM-DEN-0029, pages 35 to 39), leaves the implementer
+  field 0 for want of one and the architecture revision 0 as that
+  specification says, and adds only its product ID (the specification
+  itself is not on disk); and no device tree has QEMU's platform bus, on
+  which the board puts no device. A tree the host gives is named the same
+  way: QEMU's
+  `-dtb` keeps a tree's own names, but a tree dumped from QEMU would then
+  tell the guest it is QEMU's `virt` (Linux's binding for
+  `linux,dummy-virt` is titled "QEMU virt machine"), so a host names the
+  board through its `BoardIdentity`. So a guest that tells a virtual
+  machine from the device tree, as systemd's `detect_vm_device_tree` does
+  (`fw-cfg`, `linux,dummy-virt` or a `/hypervisor` node), finds none here,
+  where on QEMU it finds QEMU by `fw-cfg`; what systemd's SMBIOS check
+  finds is the firmware's to say, and a kernel booted directly has no
+  SMBIOS tables. Linux and
+  EDK2 key on none of these: Alpine boots to its shell and EDK2 to its
+  UEFI shell with them. `tests/identity.rs` checks what a guest reads.
+- **Names as their specifications hold them.** QEMU's keyboard and tablet
+  count a NUL in their name's size (`sizeof` of the string in
+  `virtio-input-hid.c`), where virtio 1.2 (5.8.4) says a string has no NUL
+  terminator (its bug entry 36); this board sizes a name to its length, up
+  to the string's 128 bytes. QEMU's EDID generator (`edid_desc_text`) keeps 12 characters
+  of a display's name and always ends them with a line feed; VESA E-EDID
+  1.4 (3.10.3.4) allows 13, a line feed ending only a shorter name, and
+  this board writes up to 13 so. EDID 1.4 reserves the year bytes 00h to
+  0Fh (3.4.4, Table 3.8), so a display's year is 2006 to 2245, and a
+  display gives either the year it was made, with its week where stated,
+  or a model year (the week byte FFh), as `EdidDate` says. A guest's
+  driver may keep less of a name than its field holds (Linux's virtio
+  input driver keeps 64 bytes); that is the guest's to decide, and the
+  board does not narrow its names to suit one guest.
+- **No `fw_cfg`.** QEMU's `virt` has `fw_cfg` at 0x09020000, whose
+  signature reads "QEMU" and whose device tree node is `qemu,fw-cfg-mmio`;
+  it gives a guest ACPI tables, SMBIOS and the boot order as files. This
+  board has no such files to give, so the device's one effect on a guest
+  would be QEMU's signature, and the board has no `fw_cfg`: its window is
+  unassigned, and no device tree, the board's own or a host's, has an
+  `fw-cfg` node. EDK2 (`ArmVirtQemu`) boots to its UEFI shell without
+  one, describing the machine from the device tree, and Linux does not need
+  one.
 - **The PCIe bus is empty.** QEMU's `virt` puts its host bridge's own
   function at 00:00.0; this board has no function there, so configuration
   reads find nothing and the I/O and memory windows answer like an empty

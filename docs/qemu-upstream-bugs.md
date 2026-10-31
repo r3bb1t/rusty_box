@@ -1385,6 +1385,36 @@ Found on QEMU 11.1.2.
 **Fix**: not yet written. `rusty_box_aarch64` reports the effect
 (`src/cpu/mmu.rs`, `Cpu::address_translate`).
 
+### 36. The virtio input devices count a NUL in their name's size
+
+**Impact**: small. A driver that takes `size` bytes as the name reads a
+NUL as its last character. Linux's `virtinput_probe` copies the bytes into
+a zeroed buffer, so the NUL is harmless there; a driver that stores the
+name with its length, as the specification allows, keeps a NUL inside it.
+
+**Location**: `hw/input/virtio-input-hid.c`, the `virtio_keyboard_config`,
+`virtio_mouse_config`, `virtio_tablet_config` and
+`virtio_multitouch_config` tables, whose `VIRTIO_INPUT_CFG_ID_NAME`
+entries set `.size = sizeof(VIRTIO_ID_NAME_...)`, the string literal's
+length with its NUL.
+
+**What the specification says**: virtio 1.2 (OASIS, csd01), 5.8.4:
+"Strings do not include a NUL terminator", and `size` is how much
+information is available. QEMU's own `virtio_input_idstr_config`, which
+sets the serial, gives the length without the NUL (`snprintf`'s return).
+
+**Reproduce**: found by reading the source against the specification; not
+yet run on QEMU.
+
+    virtio 1.2:  ID_NAME of "QEMU Virtio Keyboard": size 20
+    QEMU:        size 21, the last byte 0
+
+Found on QEMU 11.1.2; master (2026-10-31) has the same tables.
+
+**Fix**: not yet written: each table's `.size` would be
+`sizeof(VIRTIO_ID_NAME_...) - 1`. `rusty_box_aarch64` sizes a name to its
+length (`src/devices/virtio/input.rs`, `ConfigEntry::name`).
+
 ---
 
 ## Deliberate QEMU omissions

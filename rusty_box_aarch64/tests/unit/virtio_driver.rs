@@ -11,6 +11,7 @@ use rusty_box_core::snap::{SnapResult, SnapWrite};
 
 use crate::board::RAM_BASE;
 use crate::bus::{AccessWidth, RegOffset};
+use crate::identity::BoardIdentity;
 
 use super::queue::GuestRam;
 use super::{Device, Transport, Vdev};
@@ -126,7 +127,11 @@ impl Driver {
     }
 
     pub fn read_width(&mut self, off: u64, width: AccessWidth) -> u64 {
-        self.transport.read(RegOffset::new(off), width)
+        self.transport.read(
+            RegOffset::new(off),
+            width,
+            BoardIdentity::RUSTY_BOX.virtio_vendor(),
+        )
     }
 
     pub fn read(&mut self, off: u64) -> u32 {

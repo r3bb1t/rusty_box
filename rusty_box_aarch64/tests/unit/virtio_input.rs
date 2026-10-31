@@ -11,12 +11,20 @@ use super::{Input, InputKind};
 use crate::bus::AccessWidth;
 use crate::devices::virtio::test_driver::*;
 use crate::devices::virtio::{Device, Vdev};
+use crate::identity::{
+    BoardIdentity, IdentityNames, InputDeviceId, InputProductId, InputVendorId, InputVersion,
+};
 
 /// What Linux accepts of what the device offers.
 const LINUX_FEATURES: u64 = F_VERSION_1 | F_INDIRECT_DESC | F_EVENT_IDX;
 
+/// The device of `kind` on a board with the default identity.
+fn input(kind: InputKind) -> Input {
+    Input::for_board(kind, &BoardIdentity::RUSTY_BOX)
+}
+
 fn device(kind: InputKind) -> Driver {
-    Driver::new(Device::Input(Input::new(kind)))
+    Driver::new(Device::Input(input(kind)))
 }
 
 /// Have the host send through the input device.
@@ -70,16 +78,18 @@ fn events(d: &mut Driver, buffers: &[u64]) -> Vec<(u16, u16, u32)> {
 
 const SYN: (u16, u16, u32) = (0, 0, 0);
 
+/// The configuration is QEMU's, but for the name, vendor, product and
+/// version, which are the board's own.
 #[test]
-fn the_keyboard_configuration_is_qemus() {
+fn the_keyboard_configuration_is_qemus_with_the_boards_name() {
     let mut d = device(InputKind::Keyboard);
     let (size, name) = entry(&mut d, 0x01, 0);
-    assert_eq!(size, 21, "the name counts its NUL, as QEMU's sizeof does");
-    assert_eq!(name, b"QEMU Virtio Keyboard\0");
-    // BUS_VIRTUAL, vendor 0x0627, product 1, version 1.
+    assert_eq!(size, 25, "the name's length: a string has no NUL");
+    assert_eq!(name, b"Rusty Box Virtio Keyboard");
+    // BUS_VIRTUAL, vendor "RB" (0x5242), product 1, version 1.
     assert_eq!(
         entry(&mut d, 0x03, 0),
-        (8, [6, 0, 0x27, 0x06, 1, 0, 1, 0].to_vec())
+        (8, [6, 0, 0x42, 0x52, 1, 0, 1, 0].to_vec())
     );
     // EV_KEY: every code from KEY_ESC below KEY_REPLY (232).
     let (size, keys) = entry(&mut d, 0x11, 0x01);
@@ -101,17 +111,73 @@ fn the_keyboard_configuration_is_qemus() {
     assert_eq!(d.read_width(CONFIG + 37, AccessWidth::Byte), 0xFF);
 }
 
+/// A host's identity names its input devices: the driver reads the
+/// keyboard's and tablet's names, each sized to its length with no NUL
+/// (virtio 1.2, 5.8.4), and their vendor.
 #[test]
-fn the_tablet_configuration_is_qemus() {
+fn a_hosts_identity_names_the_input_devices() {
+    let id = |product, version| InputDeviceId {
+        product: InputProductId::new(product),
+        version: InputVersion::new(version),
+    };
+    let identity = BoardIdentity::new(IdentityNames {
+        keyboard: "Acme Keys",
+        keyboard_id: id(0x0101, 0x0203),
+        tablet: "Acme Pad",
+        tablet_id: id(0x0405, 0x0607),
+        input_vendor: InputVendorId::new(0xACE5),
+        ..IdentityNames::RUSTY_BOX
+    })
+    .unwrap_or_else(|e| panic!("{e}"));
+    for (kind, name, product_and_version) in [
+        (
+            InputKind::Keyboard,
+            &b"Acme Keys"[..],
+            [0x01, 0x01, 0x03, 0x02],
+        ),
+        (
+            InputKind::Tablet,
+            &b"Acme Pad"[..],
+            [0x05, 0x04, 0x07, 0x06],
+        ),
+    ] {
+        let mut d = Driver::new(Device::Input(Input::for_board(kind, &identity)));
+        assert_eq!(entry(&mut d, 0x01, 0), (name.len() as u8, name.to_vec()));
+        let (_, ids) = entry(&mut d, 0x03, 0);
+        assert_eq!(ids[2..4], [0xE5, 0xAC], "the vendor, little-endian");
+        assert_eq!(
+            ids[4..],
+            product_and_version,
+            "the product and version, little-endian"
+        );
+    }
+    // The longest name an identity holds fills the whole 128-byte string.
+    let longest = "k".repeat(crate::identity::INPUT_NAME_CAPACITY);
+    let identity = BoardIdentity::new(IdentityNames {
+        keyboard: &longest,
+        ..IdentityNames::RUSTY_BOX
+    })
+    .unwrap_or_else(|e| panic!("{e}"));
+    let mut d = Driver::new(Device::Input(Input::for_board(
+        InputKind::Keyboard,
+        &identity,
+    )));
+    let (size, name) = entry(&mut d, 0x01, 0);
+    assert_eq!(size, 128, "the whole string field");
+    assert_eq!(name, longest.as_bytes());
+}
+
+#[test]
+fn the_tablet_configuration_is_qemus_with_the_boards_name() {
     let mut d = device(InputKind::Tablet);
     assert_eq!(
         entry(&mut d, 0x01, 0),
-        (19, b"QEMU Virtio Tablet\0".to_vec())
+        (23, b"Rusty Box Virtio Tablet".to_vec())
     );
     assert_eq!(
         entry(&mut d, 0x03, 0),
-        (8, [6, 0, 0x27, 0x06, 3, 0, 2, 0].to_vec()),
-        "product 3, version 2"
+        (8, [6, 0, 0x42, 0x52, 2, 0, 1, 0].to_vec()),
+        "BUS_VIRTUAL, vendor \"RB\", product 2, version 1"
     );
     // EV_KEY: keymap_button's codes, up to BTN_GEAR_UP (0x151).
     let (size, buttons) = entry(&mut d, 0x11, 0x01);
@@ -168,8 +234,8 @@ fn the_selection_survives_a_device_reset() {
     d.write(STATUS, 0);
     assert_eq!(
         d.read_width(CONFIG + 2, AccessWidth::Byte),
-        21,
-        "QEMU's reset leaves cfg_select alone"
+        25,
+        "QEMU's reset leaves cfg_select alone: the name's size"
     );
 }
 
@@ -342,7 +408,7 @@ fn a_snapshot_keeps_the_device_active_and_its_selection() {
     d.start(LINUX_FEATURES);
     let buffers = event_buffers(&mut d, 3);
     let saved = d.save();
-    let mut resumed = d.restored(Device::Input(Input::new(InputKind::Tablet)), &saved);
+    let mut resumed = d.restored(Device::Input(input(InputKind::Tablet)), &saved);
     assert_eq!(resumed.read_width(CONFIG + 2, AccessWidth::Byte), 20);
     assert!(send(&mut resumed, |input, vdev| input
         .move_to(vdev, PointerPos::new(7, 9))));

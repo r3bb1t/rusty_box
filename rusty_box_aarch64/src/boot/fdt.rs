@@ -140,22 +140,31 @@ pub(crate) enum Removal<'a> {
     /// Every node below the root, at any depth, named `name` or `name@`
     /// and a unit address, as QEMU's `qemu_fdt_node_unit_path` finds them.
     Named(&'a str),
+    /// Every child of the root named `name` or `name@` and a unit address:
+    /// where QEMU's `virt` puts the nodes of its own devices, leaving a node
+    /// of that name deeper in a tree alone.
+    RootChild(&'a str),
 }
 
 impl Removal<'_> {
     /// Whether this removes `node`.
     fn removes(&self, node: &Chain<'_, '_>) -> bool {
-        if node.parent.is_none() {
+        let Some(parent) = node.parent else {
             return false;
-        }
+        };
         match *self {
             Self::At(path) => node.is(path),
-            Self::Named(name) => node
-                .name
-                .strip_prefix(name.as_bytes())
-                .is_some_and(|rest| rest.is_empty() || rest.first() == Some(&b'@')),
+            Self::Named(name) => is_named(node.name, name),
+            Self::RootChild(name) => parent.parent.is_none() && is_named(node.name, name),
         }
     }
+}
+
+/// Whether a node's `name` (its unit name) is `base` or `base@` and a unit
+/// address.
+fn is_named(name: &[u8], base: &str) -> bool {
+    name.strip_prefix(base.as_bytes())
+        .is_some_and(|rest| rest.is_empty() || rest.first() == Some(&b'@'))
 }
 
 /// Why a device tree could not be edited.
@@ -1443,5 +1452,33 @@ mod tests {
         assert_eq!(layout(tree, "chosen"), layout(&source, "chosen"));
         assert_eq!(layout(tree, "rusty-box-test"), (std::vec![], std::vec![]));
         assert_eq!(layout(tree, "").1[0], "rusty-box-test");
+    }
+
+    /// A root-child removal takes the root's children of that name, as
+    /// QEMU's `virt` places its `platform-bus@c000000`, and leaves a node of
+    /// the name deeper in the tree, a host's own.
+    #[test]
+    fn a_root_child_removal_leaves_a_deeper_node_of_the_name() {
+        let mut dst = [0u8; 64 * 1024];
+        let extra = [Edit::set(
+            NodePath::of("cpus/platform-bus@1"),
+            "n",
+            Value::Bytes(&[1]),
+        )];
+        let len = rebuild(QEMU_DTB, &[], &extra, &mut dst).expect("rebuild");
+        let source = dst[..len].to_vec();
+        let found = |tree: &[u8], node| layout(tree, node) != (std::vec![], std::vec![]);
+        assert!(found(&source, "platform-bus@c000000"));
+
+        let len = rebuild(
+            &source,
+            &[Removal::RootChild("platform-bus")],
+            &[],
+            &mut dst,
+        )
+        .expect("rebuild");
+        let tree = &dst[..len];
+        assert!(!found(tree, "platform-bus@c000000"), "the root's child");
+        assert!(found(tree, "cpus/platform-bus@1"), "the deeper node");
     }
 }

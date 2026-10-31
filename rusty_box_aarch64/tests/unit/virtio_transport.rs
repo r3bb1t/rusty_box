@@ -8,9 +8,18 @@ use super::input::{Input, InputKind};
 use super::test_driver::*;
 use super::Device;
 use crate::bus::AccessWidth;
+use crate::identity::BoardIdentity;
+
+/// The keyboard a board with the default identity plugs in.
+fn keyboard_device() -> Device {
+    Device::Input(Input::for_board(
+        InputKind::Keyboard,
+        &BoardIdentity::RUSTY_BOX,
+    ))
+}
 
 fn keyboard() -> Driver {
-    Driver::new(Device::Input(Input::new(InputKind::Keyboard)))
+    Driver::new(keyboard_device())
 }
 
 /// What Linux accepts of what the device offers.
@@ -23,13 +32,15 @@ fn report(d: &mut Driver) {
     d.notify(1);
 }
 
+/// The registers are a non-legacy QEMU transport's, but for `VendorID`,
+/// the board's own: "RBOX" in the register's little-endian bytes.
 #[test]
-fn the_registers_identify_a_non_legacy_qemu_transport() {
+fn the_registers_identify_a_non_legacy_transport_of_the_boards_vendor() {
     let mut d = keyboard();
     assert_eq!(d.read(MAGIC_VALUE), 0x7472_6976);
     assert_eq!(d.read(VERSION), 2);
     assert_eq!(d.read(DEVICE_ID), 18);
-    assert_eq!(d.read(VENDOR_ID), 0x554D_4551);
+    assert_eq!(d.read(VENDOR_ID).to_le_bytes(), *b"RBOX");
     // No shared memory regions: their length is all ones, their base 0.
     assert_eq!(d.read(SHM_LEN_LOW), u32::MAX);
     assert_eq!(d.read(SHM_LEN_HIGH), u32::MAX);
@@ -443,7 +454,7 @@ fn a_snapshot_resumes_where_the_queues_were() {
     report(&mut d);
     d.set_used_event(1, 7);
     let saved = d.save();
-    let mut resumed = d.restored(Device::Input(Input::new(InputKind::Keyboard)), &saved);
+    let mut resumed = d.restored(keyboard_device(), &saved);
     assert_eq!(resumed.save(), saved);
 
     // The same next steps on both give the same guest memory and interrupt.

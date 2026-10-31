@@ -27,8 +27,13 @@ use crate::devices::pl011::BaudRate;
 pub use fdt::DeviceTreeError;
 
 /// The device tree QEMU 11.1.2 generates for `-M virt -cpu cortex-a57 -m 256`
-/// (`-machine dumpdtb=`), which describes exactly this board, as generated
-/// with two upstream bugs fixed (docs/qemu-upstream-bugs.md): the CPU node's
+/// (`-machine dumpdtb=`), the source a machine edits into the tree it gives
+/// its guest: that tree drops the dump's `fw-cfg` and `platform-bus` nodes,
+/// devices the board does not have, and replaces its `/model` and root
+/// `compatible`, QEMU's `linux,dummy-virt`, with the machine's identity's,
+/// so this constant is not a tree to hand a guest as it is
+/// ([`crate::machine::VirtMachine::device_tree`] is). It is kept as dumped
+/// but for two upstream bugs fixed (docs/qemu-upstream-bugs.md): the CPU node's
 /// L1 data cache is the Cortex-A57's 2-way one, as the TRM gives it and
 /// this board's CCSIDR reports it ([`crate::cpu::id::CCSIDR_L1D`]), and it
 /// names no `next-level-cache` (QEMU names phandle 0 when it makes no L2

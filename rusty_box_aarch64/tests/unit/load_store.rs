@@ -38,6 +38,8 @@ const LDXP_W: u32 = 0x887F_0C22; // ldxp w2, w3, [x1]
 const STXP_W: u32 = 0x8824_0C22; // stxp w4, w2, w3, [x1]
 const LDP_W: u32 = 0x2940_0C22; // ldp w2, w3, [x1]
 const STP_W: u32 = 0x2900_0C22; // stp w2, w3, [x1]
+const LDP_W_PRE: u32 = 0x29C2_9023; // ldp w3, w4, [x1, #20]!
+const STP_W_PRE: u32 = 0x2982_8C22; // stp w2, w3, [x1, #20]!
 
 /// `SCTLR_EL1.A`: every misaligned data access faults.
 const SCTLR_A: u64 = 1 << 1;
@@ -61,6 +63,9 @@ struct Access {
 struct LoggedRam {
     bytes: Vec<u8>,
     log: Vec<Access>,
+    /// A word the bus refuses, as it refuses an unassigned address: a hole
+    /// inside a page, which the board's own map does not have.
+    hole: Option<u64>,
 }
 
 impl LoggedRam {
@@ -73,7 +78,14 @@ impl LoggedRam {
         Self {
             bytes,
             log: Vec::new(),
+            hole: None,
         }
+    }
+
+    /// Whether an access of `width` at `addr` reaches the hole.
+    fn in_hole(&self, addr: PhysAddr, width: AccessWidth) -> bool {
+        self.hole
+            .is_some_and(|h| addr.get() < h + 4 && h < addr.get() + width.bytes())
     }
 
     fn quadword(&self, at: u64) -> u128 {
@@ -102,6 +114,9 @@ impl PhysBus for LoggedRam {
         _clock: VmClock,
     ) -> Result<u64, BusFault> {
         self.note(addr.get(), width, false);
+        if self.in_hole(addr, width) {
+            return Err(BusFault::Unmapped);
+        }
         let a = addr.get() as usize;
         let n = width.bytes() as usize;
         let bytes = self.bytes.get(a..a + n).ok_or(BusFault::Unmapped)?;
@@ -116,6 +131,9 @@ impl PhysBus for LoggedRam {
         _clock: VmClock,
     ) -> Result<(), BusFault> {
         self.note(addr.get(), width, true);
+        if self.in_hole(addr, width) {
+            return Err(BusFault::Unmapped);
+        }
         let a = addr.get() as usize;
         let n = width.bytes() as usize;
         let bytes = self.bytes.get_mut(a..a + n).ok_or(BusFault::Unmapped)?;
@@ -440,4 +458,66 @@ fn with_the_mmu_off_a_word_pair_is_two_accesses() {
     let mut cpu = processor(Implementation::ARMV9P2);
     let mut ram = LoggedRam::new();
     word_pair_accesses(&mut cpu, &mut ram, DATA + 4, false, "MMU off");
+}
+
+/// A pair of words within one page whose second word alone the bus
+/// refuses takes the second element's synchronous external abort (EC 0x25,
+/// DFSC 0b010000, `FAR_EL1` the second word, `ELR_EL1` the pair) and writes
+/// its base back not at all. A load writes neither register; a store has
+/// written its first word, which Arm permits (D1.4.1.4: what an
+/// instruction wrote before a precise exception is UNKNOWN).
+#[test]
+fn a_pair_within_a_page_whose_second_word_alone_is_refused_aborts_on_it() {
+    const FIRST: u64 = DATA + 0x40;
+    const HOLE: u64 = FIRST + 4;
+    const BASE: u64 = FIRST - 20;
+    const SYNC_EXTERNAL: u64 = 0b01_0000;
+    const WNR: u64 = 1 << 6;
+    let mut cpu = processor(Implementation::CORTEX_A57);
+    let mut ram = LoggedRam::new();
+    ram.hole = Some(HOLE);
+    let untouched = ram.bytes.clone();
+
+    cpu.x[1] = BASE;
+    cpu.x[3] = 0x5555;
+    cpu.x[4] = 0x5555;
+    assert_eq!(
+        step(&mut cpu, &mut ram, LDP_W_PRE),
+        Some(Taken {
+            ec: 0x25,
+            iss: SYNC_EXTERNAL
+        })
+    );
+    assert_eq!(
+        ram.log,
+        [
+            read(FIRST, AccessWidth::Word),
+            read(HOLE, AccessWidth::Word)
+        ]
+    );
+    assert_eq!((cpu.sys.far_el1, cpu.sys.elr_el1), (HOLE, CODE));
+    assert_eq!((cpu.x[3], cpu.x[4]), (0x5555, 0x5555), "neither is loaded");
+    assert_eq!(cpu.x[1], BASE, "the base is not written back");
+
+    cpu.x[2] = 0x1234_5678;
+    cpu.x[3] = 0x9ABC_DEF0;
+    assert_eq!(
+        step(&mut cpu, &mut ram, STP_W_PRE),
+        Some(Taken {
+            ec: 0x25,
+            iss: SYNC_EXTERNAL | WNR
+        })
+    );
+    assert_eq!(
+        ram.log,
+        [
+            write(FIRST, AccessWidth::Word),
+            write(HOLE, AccessWidth::Word)
+        ]
+    );
+    assert_eq!((cpu.sys.far_el1, cpu.sys.elr_el1), (HOLE, CODE));
+    assert_eq!(cpu.x[1], BASE, "the base is not written back");
+    let (first, hole) = (FIRST as usize, HOLE as usize);
+    assert_eq!(ram.bytes[first..first + 4], 0x1234_5678u32.to_le_bytes());
+    assert_eq!(ram.bytes[hole..hole + 4], untouched[hole..hole + 4]);
 }

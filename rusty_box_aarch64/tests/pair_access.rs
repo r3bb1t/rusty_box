@@ -7,16 +7,16 @@
 //! second element's store is seen on its own: rewriting the next
 //! instruction where the first element touches no decoded code, and, for a
 //! Q register's high half, clearing the exclusive monitor that only it
-//! overlaps. A pair within one page whose second element alone reaches an
-//! address nothing answers takes that element's external abort after the
-//! first element's access, as Arm ARM `LDP`/`STP` order them: a load writes
-//! neither register, a store has made its first element's write, and
-//! neither writes the base back.
+//! overlaps. A pair whose first element reaches a device register and
+//! whose second alone reaches an address nothing answers takes that
+//! element's external abort after the first element's access, as Arm ARM
+//! `LDP`/`STP` order them: a load writes neither register, a store has
+//! made its first element's write, and neither writes the base back.
 //!
 //! Guest code is hand-assembled (GNU as for aarch64); each snippet's source
 //! is beside its words.
 
-use rusty_box_aarch64::board::{FW_CFG_BASE, RAM_BASE};
+use rusty_box_aarch64::board::{GIC_DIST_BASE, RAM_BASE};
 use rusty_box_aarch64::instrumentation::{Direction, MemoryAccess};
 use rusty_box_aarch64::{
     AccessWidth, Instrumentation, LentStorage, MachineBuilder, MemoryLoan, NoEl2, PhysAddr,
@@ -182,12 +182,17 @@ fn a_load_pair_within_a_page_reads_both_words() {
     assert_eq!(m.reg_read(Reg::X4), SECOND);
 }
 
-// A hole inside a page of the board's address map: fw_cfg decodes 0x18
-// bytes (QEMU 11.1.2 hw/arm/virt.c `base_memmap`, `VIRT_FW_CFG`), the
-// last of them the low word of its DMA address register, and the rest of
-// its page is unassigned. A word pair at FW_CFG_BASE + 0x14, which is on
-// Device memory with stage 1 disabled and aligned there, reaches the
-// register with its first element and the hole with its second.
+// A hole after a device register: the GIC distributor decodes one page
+// (QEMU 11.1.2 hw/intc/arm_gic.c, a 0x1000 region in `virt`'s 64 KiB
+// slot), its last word `GICD_CIDR3`, read-only, and the page after it is
+// unassigned. A word pair at `GIC_DIST_BASE + 0xFFC`, which is on Device
+// memory with stage 1 disabled and aligned there, reaches the register
+// with its first element and the hole with its second.
+
+/// Where `x1` points: 20 bytes below the pair.
+const PAIR_BASE: u64 = GIC_DIST_BASE + 0xFE8;
+/// The second element's address, the hole's first byte.
+const HOLE: u64 = GIC_DIST_BASE + 0x1000;
 
 /// `ldp w3, w4, [x1, #20]!; b .`
 const LOAD_PAIR_INTO_HOLE: [u32; 2] = [0x29C2_9023, 0x1400_0000];
@@ -198,7 +203,7 @@ const EC_DATA_ABORT_SAME_EL: u64 = 0x25;
 const DFSC_SYNC_EXTERNAL: u64 = 0x10;
 const WNR: u64 = 1 << 6;
 
-/// Run the pair at `RAM_BASE` with `x1 = FW_CFG_BASE` and check the Data
+/// Run the pair at `RAM_BASE` with `x1 = PAIR_BASE` and check the Data
 /// Abort it must take: the second element's synchronous external abort,
 /// with the pair's own address to return to and its base not written back.
 fn second_element_aborts<S: rusty_box_aarch64::GuestStorage, I: Instrumentation>(
@@ -213,7 +218,7 @@ fn second_element_aborts<S: rusty_box_aarch64::GuestStorage, I: Instrumentation>
     assert_eq!(esr & WNR != 0, write, "ESR {esr:#x}");
     assert_eq!(
         m.sysreg_read(SysReg::FAR_EL1),
-        Ok(FW_CFG_BASE + 0x18),
+        Ok(HOLE),
         "the second element's address"
     );
     assert_eq!(
@@ -223,17 +228,17 @@ fn second_element_aborts<S: rusty_box_aarch64::GuestStorage, I: Instrumentation>
     );
     assert_eq!(
         m.reg_read(Reg::X1),
-        FW_CFG_BASE,
+        PAIR_BASE,
         "the base is not written back"
     );
 }
 
 #[test]
-fn a_load_pair_within_a_page_whose_second_word_alone_reaches_a_hole_loads_neither_register() {
+fn a_load_pair_whose_second_word_alone_reaches_a_hole_loads_neither_register() {
     let mut ram = vec![0u8; RAM_LEN];
     let mut m = bare(&mut ram);
     load(&mut m, RAM_BASE, &LOAD_PAIR_INTO_HOLE);
-    m.reg_write(Reg::X1, FW_CFG_BASE);
+    m.reg_write(Reg::X1, PAIR_BASE);
     m.reg_write(Reg::X3, 0x5555);
     m.reg_write(Reg::X4, 0x5555);
     second_element_aborts(&mut m, false);
@@ -260,22 +265,20 @@ impl Instrumentation for BusLog {
 }
 
 #[test]
-fn a_store_pair_within_a_page_whose_second_word_alone_reaches_a_hole_writes_its_first_word_only() {
-    // The first word lands on fw_cfg's DMA low word (+0x14) and starts a
-    // transfer from descriptor address `FIRST` byte-swapped (0x7856_3412),
-    // past the end of this test's 4 MiB of RAM: the transfer reads and
-    // writes nothing, so the bus is where the first element is seen to land.
+fn a_store_pair_whose_second_word_alone_reaches_a_hole_writes_its_first_word_only() {
+    // The first word lands on `GICD_CIDR3`, which ignores a write, so the
+    // bus is where the first element is seen to land.
     const FIRST: u32 = 0x1234_5678;
     const SECOND: u32 = 0x9ABC_DEF0;
     let mut ram = vec![0u8; RAM_LEN];
     let mut m = observed(&mut ram, BusLog::default());
     load(&mut m, RAM_BASE, &STORE_PAIR_INTO_HOLE);
-    m.reg_write(Reg::X1, FW_CFG_BASE);
+    m.reg_write(Reg::X1, PAIR_BASE);
     m.reg_write(Reg::X2, u64::from(FIRST));
     m.reg_write(Reg::X3, u64::from(SECOND));
     second_element_aborts(&mut m, true);
     let first_store = MemoryAccess {
-        address: PhysAddr::new(FW_CFG_BASE + 0x14),
+        address: PhysAddr::new(GIC_DIST_BASE + 0xFFC),
         width: AccessWidth::Word,
         direction: Direction::Write,
         value: u64::from(FIRST),

@@ -46,6 +46,7 @@ use rusty_box_devices::display::Resolution;
 use super::edid;
 use super::queue::{Chain, GuestRam};
 use super::Vdev;
+use crate::identity::DisplayIdentity;
 
 pub const CONTROL_QUEUE: usize = 0;
 pub const CURSOR_QUEUE: usize = 1;
@@ -362,6 +363,8 @@ enum Output {
 pub struct Gpu {
     /// `req_state[0]`: the size the display asks the guest for.
     preferred: Resolution,
+    /// The maker, product and name the display's EDID gives.
+    display: DisplayIdentity,
     output: Output,
     /// `virtio_config.events_read`.
     events_read: u32,
@@ -382,10 +385,11 @@ pub struct Gpu {
 
 impl Gpu {
     /// A device asking for `preferred`, its output enabled whatever the size
-    /// (`virtio_gpu_base_device_realize`).
-    pub fn new(preferred: Resolution) -> Self {
+    /// (`virtio_gpu_base_device_realize`), whose EDID gives `display`.
+    pub(crate) fn new(preferred: Resolution, display: DisplayIdentity) -> Self {
         Self {
             preferred,
+            display,
             output: Output::Enabled,
             events_read: 0,
             resources: Vec::new(),
@@ -707,8 +711,11 @@ impl Gpu {
         let mut resp = [0u8; EDID_RESPONSE_LEN];
         resp[..4].copy_from_slice(&RESP_OK_EDID.to_le_bytes());
         resp[HDR_LEN..HDR_LEN + 4].copy_from_slice(&(edid::EDID_LEN as u32).to_le_bytes());
-        resp[HDR_LEN + 8..]
-            .copy_from_slice(&edid::generate(self.preferred.width, self.preferred.height));
+        resp[HDR_LEN + 8..].copy_from_slice(&edid::generate(
+            self.preferred.width,
+            self.preferred.height,
+            &self.display,
+        ));
         Self::respond(vdev, chain, cmd, &mut resp);
     }
 
