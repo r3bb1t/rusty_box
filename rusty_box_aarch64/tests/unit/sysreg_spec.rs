@@ -1815,30 +1815,45 @@ enum BitRule {
     Open,
 }
 
+/// A field of an EL2 register whose whole rule the data does not give.
+struct FieldRule {
+    register: &'static str,
+    /// The field's name, or `*` for every field of the register.
+    field: &'static str,
+    rule: BitRule,
+    /// The feature whose processors the rule leaves to the data, which
+    /// gives their field whole; `None` where it covers every processor.
+    unless: Option<Feature>,
+}
+
 /// The fields of the EL2 registers whose whole rule the data does not
-/// give, each with the rule and where it comes from. Both processors with
-/// EL2 have `SMIDR_EL1.SMPS` = 0 and no FEAT_LPA2, so each rule holds for
-/// both.
-const FIELD_RULES: [(&str, &str, BitRule, &str); 3] = [
-    (
-        "CNTHP_CTL_EL2",
-        "ISTATUS",
-        BitRule::Open,
-        "read-only: whether the timer condition is met (AArch64_CheckTimerConditions)",
-    ),
-    (
-        "TCR_EL2",
-        "DS",
-        BitRule::Zero,
-        "the register description makes DS RES0 without FEAT_LPA2; the data's \
-         fallback field for that case carries no values",
-    ),
-    (
-        "SMPRIMAP_EL2",
-        "*",
-        BitRule::Zero,
-        "the register description: when SMIDR_EL1.SMPS is 0, this register is RES0",
-    ),
+/// give, each with where its rule comes from. Every processor with EL2 has
+/// `SMIDR_EL1.SMPS` = 0.
+const FIELD_RULES: [FieldRule; 3] = [
+    // Read-only: whether the timer condition is met
+    // (AArch64_CheckTimerConditions).
+    FieldRule {
+        register: "CNTHP_CTL_EL2",
+        field: "ISTATUS",
+        rule: BitRule::Open,
+        unless: None,
+    },
+    // The register description makes DS RES0 without FEAT_LPA2; the data's
+    // fallback field for that case carries no values.
+    FieldRule {
+        register: "TCR_EL2",
+        field: "DS",
+        rule: BitRule::Zero,
+        unless: Some(Feature::Lpa2),
+    },
+    // The register description: when SMIDR_EL1.SMPS is 0, this register is
+    // RES0.
+    FieldRule {
+        register: "SMPRIMAP_EL2",
+        field: "*",
+        rule: BitRule::Zero,
+        unless: None,
+    },
 ];
 
 /// The rule of each bit of `reg`'s fieldset, for the processor `eval`
@@ -1872,10 +1887,12 @@ fn apply_fields(
     };
     let field_rule = |field: &Value| -> BitRule {
         let name = text(field, "name");
-        if let Some((_, _, rule, _)) = FIELD_RULES
-            .iter()
-            .find(|(r, f, _, _)| *r == reg && (*f == name || *f == "*"))
-        {
+        let covers = |rule: &&FieldRule| {
+            rule.register == reg
+                && (rule.field == name || rule.field == "*")
+                && !rule.unless.is_some_and(|feature| eval.imp.has(feature))
+        };
+        if let Some(FieldRule { rule, .. }) = FIELD_RULES.iter().find(covers) {
             return *rule;
         }
         match ty(field) {

@@ -41,8 +41,8 @@ use super::mmu::{DataAccess, El10Context, El2RegimeContext, TlbContext};
 use super::op::Extend;
 use super::sysreg::{CPACR_FPEN, CPACR_SMEN, SMCR_EZT0};
 use super::{
-    id, Cpu, CpuConfig, El, Ipa, Levels, NoEl2, NoTranslation, Pstate, Step, SysReg, SysRegRefusal,
-    TimerLines, Tlb, TranslationFault, TranslationStage, WithEl2, WriteEffect,
+    id, Cpu, CpuConfig, El, Ipa, Level, Levels, NoEl2, NoTranslation, Pstate, Step, SysReg,
+    SysRegRefusal, TimerLines, Tlb, TranslationFault, TranslationStage, WithEl2, WriteEffect,
 };
 use crate::bus::{AccessWidth, BusFault, CodeEpoch, FetchSource, PhysAddr, PhysBus};
 use crate::instrumentation::{ExceptionKind, NoInstrumentation};
@@ -1561,14 +1561,16 @@ fn dc_and_tge_turn_off_el1_and_0_stage_1() {
 /// processor with EL2: `TGran4_2` reads 2 (supported), and `TGran16_2` and
 /// `TGran64_2` 2 where the model has the granule at stage 2, else 1 (not),
 /// which is FEAT_GTG (`Features.json` makes it hold exactly when all three
-/// are non-zero). Without EL2 all three read 0. Either way stage 1 offers
-/// the 4 KiB granule (`TGran4` 0) on both models, and the 16 KiB and 64
-/// KiB ones on the Armv9.2 model alone (`TGran16` 1, `TGran64` 0, where the
-/// Cortex-A57 reads 0 and 0xF); `ID_AA64MMFR2_EL1.ST` reads 1 where
-/// FEAT_TTST is. Each reports its address sizes: `PARange` 52 bits (6) on
-/// the Armv9.2 model, which has FEAT_LPA, and 44 (4) on the Cortex-A57;
-/// `ID_AA64MMFR2_EL1.VARange` 1 (FEAT_LVA) on the Armv9.2 model, 0 on the
-/// Cortex-A57.
+/// are non-zero); on the Armv9.2 model, which has FEAT_LPA2, `TGran4_2`
+/// and `TGran16_2` read 3, the granules' 52-bit addresses. Without EL2 all
+/// three read 0. Either way stage 1 offers the 4 KiB granule (`TGran4` 0)
+/// on the Cortex-A57 and the 16 KiB and 64 KiB ones on the Armv9.2 model
+/// alone (`TGran64` 0, where the Cortex-A57 reads 0xF), where `TGran4`
+/// reads 1 and `TGran16` 2 for FEAT_LPA2 (the Cortex-A57's `TGran16` reads
+/// 0); `ID_AA64MMFR2_EL1.ST` reads 1 where FEAT_TTST is. Each reports its
+/// address sizes: `PARange` 52 bits (6) on the Armv9.2 model, which has
+/// FEAT_LPA, and 44 (4) on the Cortex-A57; `ID_AA64MMFR2_EL1.VARange` 1
+/// (FEAT_LVA) on the Armv9.2 model, 0 on the Cortex-A57.
 #[test]
 fn the_id_registers_offer_each_models_granules_at_both_stages() {
     const MRS_MMFR0: u32 = 0xD538_0700; // mrs x0, id_aa64mmfr0_el1
@@ -1589,8 +1591,8 @@ fn the_id_registers_offer_each_models_granules_at_both_stages() {
     for (model, [mmfr0, mmfr2], want, st) in [
         ("A57 with", read::<WithEl2>(a57), [2, 1, 1, 0, 0, 0xF], 0),
         ("A57 without", read::<NoEl2>(a57), [0, 0, 0, 0, 0, 0xF], 0),
-        ("v9.2 with", read::<WithEl2>(v9), [2, 2, 2, 0, 1, 0], 1),
-        ("v9.2 without", read::<NoEl2>(v9), [0, 0, 0, 0, 1, 0], 1),
+        ("v9.2 with", read::<WithEl2>(v9), [3, 3, 2, 1, 2, 0], 1),
+        ("v9.2 without", read::<NoEl2>(v9), [0, 0, 0, 1, 2, 0], 1),
     ] {
         assert_eq!(granules(mmfr0), want, "{model} EL2");
         assert_eq!((mmfr2 >> 28) & 0xF, st, "{model} EL2: ST");
@@ -2672,7 +2674,7 @@ fn a_debugger_walks_both_stages() {
     let walk = |m: &mut Machine<WithEl2>, va: u64| m.cpu.debug_translate(&mut m.ram, va);
     assert_eq!(walk(&mut m, SHARED + 8), Ok(GUEST_DATA + 8));
     assert_eq!(walk(&mut m, S2_READ_ONLY), Ok(S2_READ_ONLY));
-    let level2 = TranslationFault::Translation { level: 2 };
+    let level2 = TranslationFault::Translation { level: Level::Two };
     assert_eq!(
         walk(&mut m, S2_UNMAPPED),
         Err(NoTranslation {

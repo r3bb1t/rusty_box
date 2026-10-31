@@ -286,54 +286,198 @@ pub(crate) enum OnDevice {
     Permitted,
 }
 
-/// A fault status code (`ESR_ELx.ISS.DFSC`/`IFSC`) with its lookup level.
+/// A lookup level of a translation table walk (Arm's `level`), from -1,
+/// where a walk with FEAT_LPA2's `DS` and the 4 KiB granule starts, to 3,
+/// the last (`FINAL_LEVEL`).
+///
+/// Closed (R5): the levels of VMSAv8-64 without FEAT_D128, whose 128-bit
+/// descriptors start walks at level -2 too.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[repr(i8)]
+pub enum Level {
+    Minus1 = -1,
+    Zero = 0,
+    One = 1,
+    Two = 2,
+    Three = 3,
+}
+
+impl Level {
+    /// The level as Arm numbers it.
+    pub const fn number(self) -> i8 {
+        self as i8
+    }
+
+    /// The level as one a block or page descriptor can be at, which every
+    /// level but -1 is.
+    pub const fn leaf(self) -> Option<LeafLevel> {
+        match self {
+            Self::Minus1 => None,
+            Self::Zero => Some(LeafLevel::Zero),
+            Self::One => Some(LeafLevel::One),
+            Self::Two => Some(LeafLevel::Two),
+            Self::Three => Some(LeafLevel::Three),
+        }
+    }
+
+    /// The level a table descriptor at this one leads to: none after level
+    /// 3, whose descriptors are pages.
+    pub(crate) const fn next(self) -> Option<Self> {
+        match self {
+            Self::Minus1 => Some(Self::Zero),
+            Self::Zero => Some(Self::One),
+            Self::One => Some(Self::Two),
+            Self::Two => Some(Self::Three),
+            Self::Three => None,
+        }
+    }
+
+    /// How many levels lie below this one: `FINAL_LEVEL - level`, 0 to 4.
+    pub(crate) const fn levels_below(self) -> u32 {
+        (Self::Three.number() - self.number()) as u32
+    }
+}
+
+impl core::fmt::Display for Level {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{}", self.number())
+    }
+}
+
+/// A lookup level a block or page descriptor can be at: 0 to 3, the walk's
+/// levels but -1, which has no blocks (`AArch64_BlockDescSupported`).
+///
+/// Closed (R5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[repr(u8)]
+pub enum LeafLevel {
+    Zero = 0,
+    One = 1,
+    Two = 2,
+    Three = 3,
+}
+
+impl LeafLevel {
+    /// The level as Arm numbers it.
+    pub const fn number(self) -> u8 {
+        self as u8
+    }
+
+    /// The walk's level this is.
+    pub const fn level(self) -> Level {
+        match self {
+            Self::Zero => Level::Zero,
+            Self::One => Level::One,
+            Self::Two => Level::Two,
+            Self::Three => Level::Three,
+        }
+    }
+
+    /// The level `number` names, if a leaf can be at it.
+    pub(crate) const fn of(number: u8) -> Option<Self> {
+        match number {
+            0 => Some(Self::Zero),
+            1 => Some(Self::One),
+            2 => Some(Self::Two),
+            3 => Some(Self::Three),
+            _ => None,
+        }
+    }
+}
+
+impl core::fmt::Display for LeafLevel {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{}", self.number())
+    }
+}
+
+/// A fault status code (`ESR_ELx.ISS.DFSC`/`IFSC`) with its lookup level:
+/// any of a walk's for a fault a table descriptor can give, a leaf's for
+/// one only a leaf gives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Fsc {
-    AddressSize(u8),
-    Translation(u8),
-    AccessFlag(u8),
-    Permission(u8),
+    AddressSize(Level),
+    Translation(Level),
+    AccessFlag(LeafLevel),
+    Permission(LeafLevel),
     SyncExternal,
-    SyncExternalOnWalk(u8),
+    SyncExternalOnWalk(Level),
     Alignment,
 }
 
 impl Fsc {
+    /// Whether the fault status code `code` ([`Fsc::code`]) is a
+    /// synchronous External abort's (Arm `IsExternalAbort`):
+    /// `SyncExternal`'s, or `SyncExternalOnWalk`'s at any level, found by
+    /// making each, so that the reading cannot leave out a code the making
+    /// gives (R5).
+    pub(crate) const fn is_external(code: u32) -> bool {
+        if code == Self::SyncExternal.code() {
+            return true;
+        }
+        let mut next = Some(Level::Minus1);
+        while let Some(level) = next {
+            if code == Self::SyncExternalOnWalk(level).code() {
+                return true;
+            }
+            next = level.next();
+        }
+        false
+    }
+
+    /// Arm `EncodeLDFSC` ([`ld_fsc`]).
     const fn code(self) -> u32 {
         match self {
-            Self::AddressSize(l) => l as u32,
-            Self::Translation(l) => 0b00_0100 | l as u32,
-            Self::AccessFlag(l) => 0b00_1000 | l as u32,
-            Self::Permission(l) => 0b00_1100 | l as u32,
+            Self::AddressSize(level) => ld_fsc(level, 0b00_0000, 0b10_1001),
+            Self::Translation(level) => ld_fsc(level, 0b00_0100, 0b10_1011),
+            Self::AccessFlag(level) => with_level(0b00_1000, level),
+            Self::Permission(level) => with_level(0b00_1100, level),
             Self::SyncExternal => 0b01_0000,
-            Self::SyncExternalOnWalk(l) => 0b01_0100 | l as u32,
+            Self::SyncExternalOnWalk(level) => ld_fsc(level, 0b01_0100, 0b01_0011),
             Self::Alignment => 0b10_0001,
         }
     }
+}
+
+/// Arm `EncodeLDFSC` of a fault at `level` whose code is `base` with the
+/// level in bits 1:0 at levels 0 to 3, and at level -1, which only
+/// FEAT_LPA2's walks reach, `minus_1`, a code of its own.
+const fn ld_fsc(level: Level, base: u32, minus_1: u32) -> u32 {
+    match level.leaf() {
+        Some(leaf) => with_level(base, leaf),
+        None => minus_1,
+    }
+}
+
+/// Arm `EncodeLDFSC` at levels 0 to 3: the fault's code `base` with the
+/// level in bits 1:0.
+const fn with_level(base: u32, level: LeafLevel) -> u32 {
+    base | level.number() as u32
 }
 
 /// Why a translation table walk found no translation.
 ///
 /// Closed (R5): the faults a walk can end in before the permissions of the
 /// access it translates are considered. `level` is the lookup level the
-/// walk had reached.
+/// walk had reached: any of a walk's for a fault a table descriptor can
+/// give, a leaf's for one only a leaf gives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TranslationFault {
     /// The address, or a table or output address, is wider than the
     /// configured address size.
-    AddressSize { level: u8 },
+    AddressSize { level: Level },
     /// No valid descriptor maps it.
-    Translation { level: u8 },
+    Translation { level: Level },
     /// The descriptor that maps it has its access flag clear, which this
     /// ARMv8.0 core faults on rather than sets.
-    AccessFlag { level: u8 },
+    AccessFlag { level: LeafLevel },
     /// A descriptor read reached nothing on the bus.
-    ExternalAbortOnWalk { level: u8 },
+    ExternalAbortOnWalk { level: Level },
     /// Stage 2 refuses a stage 1 walk the descriptor it reads: its stage 2
     /// descriptor gives no read permission, or `HCR_EL2.PTW` refuses it
     /// Device memory (`AArch64_S2CheckPermissions` for `AccessType_TTW`).
     /// `level` is the stage 2 walk's.
-    Permission { level: u8 },
+    Permission { level: LeafLevel },
 }
 
 impl core::fmt::Display for TranslationFault {
@@ -611,10 +755,10 @@ struct Stage2Made {
 }
 
 /// The most IPA pages one translation under stage 2 reads: a descriptor at
-/// each of the levels stage 1's walk can read, at most four without
-/// FEAT_LPA2 (levels 0 to 3, which the 4 KiB and 16 KiB granules start at
-/// with a 48-bit input address, the 64 KiB one at level 1), and the output.
-const MADE: usize = 4 + 1;
+/// each of the levels stage 1's walk can read, at most five (levels -1 to
+/// 3, which the 4 KiB granule starts at with FEAT_LPA2's 52-bit input
+/// address; without it at most four, levels 0 to 3), and the output.
+const MADE: usize = 5 + 1;
 
 impl Stage2Made {
     const fn new(tag: u64) -> Self {
@@ -826,11 +970,13 @@ pub(crate) struct QuadwordPair {
 struct Walked {
     ipa: Ipa,
     perms: u8,
-    level: u8,
+    level: LeafLevel,
     /// The regime's `MAIR_ELx` attribute the descriptor's `AttrIndx`
-    /// selects, and the descriptor's `SH`, as they are: an access reads
-    /// only whether they make Device memory, and only address translation
-    /// decodes them ([`Walked::attrs`]).
+    /// selects, and the leaf's shareability — the descriptor's `SH`, or
+    /// under FEAT_LPA2's `DS` the range's `SH0` or `SH1`
+    /// ([`OaLayout::shareability`]) — as they are: an access reads only
+    /// whether they make Device memory, and only address translation decodes
+    /// them ([`Walked::attrs`]).
     attr: u8,
     sh: u8,
 }
@@ -885,12 +1031,13 @@ impl WalkOutput for PhysAddr {
 /// start level, the bits of the input address its table indexes (fewer than
 /// a level's stride where the input address is narrow, more for stage 2's
 /// concatenated tables), the table's address in the walk's output address
-/// space `A`, and how its descriptors hold addresses and the output size
-/// every table and output address must fit.
+/// space `A`, and how its descriptors hold addresses — FEAT_LPA2's forms or
+/// not, which decides where it has blocks — and the output size every
+/// table and output address must fit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct WalkStart<A> {
     pub(super) granule: Granule,
-    pub(super) level: u32,
+    pub(super) level: Level,
     pub(super) index_bits: u32,
     pub(super) table: A,
     pub(super) oa: OaLayout,
@@ -900,24 +1047,24 @@ impl<A: WalkOutput> WalkStart<A> {
     /// Where a walk with `granule` of an `ia_bits`-bit input address
     /// starting at `level` from the base register `ttbr` starts, its
     /// addresses held as `oa` says (Arm `AArch64_S1TTBaseAddress` and
-    /// `AArch64_S2TTBaseAddress` without FEAT_LPA2 or FEAT_D128): the base
-    /// aligned to the start table, whose index is the input address's bits
-    /// above the start level's translation size
-    /// (`AArch64_TTEntryAddressBounds`). A base outside the output size is a
-    /// level 0 Address size fault: the start level's descriptor address is
-    /// the base with an index below its alignment, so it fits exactly when
-    /// the base does.
+    /// `AArch64_S2TTBaseAddress` without FEAT_D128): the base aligned to the
+    /// start table, whose index is the input address's bits above the start
+    /// level's translation size (`AArch64_TTEntryAddressBounds`). A base
+    /// outside the output size is a level 0 Address size fault, whatever the
+    /// start level (`AArch64_S1Walk`, `AArch64_S2Walk`): the start level's
+    /// descriptor address is the base with an index below its alignment, so
+    /// it fits exactly when the base does.
     pub(super) fn of_base(
         ttbr: u64,
         granule: Granule,
-        level: u32,
+        level: Level,
         ia_bits: u32,
         oa: OaLayout,
     ) -> Result<Self, TranslationFault> {
         let index_bits = ia_bits - granule.translation_size(level);
         let table = oa.table_base(ttbr, index_bits + 3);
         if !oa.fits(table) {
-            return Err(TranslationFault::AddressSize { level: 0 });
+            return Err(TranslationFault::AddressSize { level: Level::Zero });
         }
         Ok(Self {
             granule,
@@ -935,7 +1082,7 @@ impl<A: WalkOutput> WalkStart<A> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct WalkLeaf<A> {
     pub(super) desc: u64,
-    pub(super) level: u32,
+    pub(super) level: LeafLevel,
     pub(super) out: A,
     pub(super) tables: u64,
 }
@@ -962,7 +1109,7 @@ pub(super) enum WalkStop<E> {
 struct Stage1Leaf {
     perms: u8,
     device: bool,
-    level: u8,
+    level: LeafLevel,
     stage1: Stage1,
 }
 
@@ -974,7 +1121,7 @@ struct Stage1Leaf {
 struct Stage2Leaf {
     perms: u8,
     device: bool,
-    level: u8,
+    level: LeafLevel,
 }
 
 impl Stage2Leaf {
@@ -982,7 +1129,7 @@ impl Stage2Leaf {
     const NONE: Self = Self {
         perms: PERMS,
         device: false,
-        level: 0,
+        level: LeafLevel::Zero,
     };
 
     const fn of(walked: &S2Walked) -> Self {
@@ -998,9 +1145,9 @@ impl Stage2Leaf {
     /// (`AArch64_S2DirectBasePermissions` without FEAT_XNX): read, write and
     /// execute alike at EL1 and EL0, at a level the walk can end at
     /// ([`S2Start::ends_at`]).
-    fn walked(perms: u8, level: u8, start: S2Start, features: Features) -> bool {
+    fn walked(perms: u8, level: LeafLevel, start: S2Start, features: Features) -> bool {
         let same_at_both = |el1: u8, el0: u8| (perms & el1 == 0) == (perms & el0 == 0);
-        start.ends_at(u32::from(level), features)
+        start.ends_at(level, features)
             && perms & !PERMS == 0
             && same_at_both(PERM_EL1_R, PERM_EL0_R)
             && same_at_both(PERM_EL1_W, PERM_EL0_W)
@@ -1437,13 +1584,13 @@ const EMPTY_ENTRY: TlbEntry = TlbEntry {
     s1: Stage1Leaf {
         perms: 0,
         device: false,
-        level: 0,
+        level: LeafLevel::Zero,
         stage1: Stage1::Walked,
     },
     s2: Stage2Leaf {
         perms: 0,
         device: false,
-        level: 0,
+        level: LeafLevel::Zero,
     },
 };
 
@@ -1933,12 +2080,12 @@ impl<L: Levels> Tlb<L> {
             w.write_bytes(&[
                 e.s1.perms,
                 u8::from(e.s1.device),
-                e.s1.level,
+                e.s1.level.number(),
                 key_regime(e.key) as u8,
                 e.s1.stage1 as u8,
                 e.s2.perms,
                 u8::from(e.s2.device),
-                e.s2.level,
+                e.s2.level.number(),
             ])?;
         }
         let can_match = |key: u64| key != INVALID_KEY && contexts.stage2.current_entry(key);
@@ -1947,7 +2094,7 @@ impl<L: Levels> Tlb<L> {
         for e in self.ipa.iter().filter(|e| can_match(e.key)) {
             w.write_u64(e.key)?;
             w.write_u64(e.pa_page.get())?;
-            w.write_bytes(&[e.leaf.perms, u8::from(e.leaf.device), e.leaf.level])?;
+            w.write_bytes(&[e.leaf.perms, u8::from(e.leaf.device), e.leaf.level.number()])?;
         }
         Ok(())
     }
@@ -2020,6 +2167,10 @@ impl<L: Levels> Tlb<L> {
             let mut rest = [0u8; 8];
             r.read_bytes(&mut rest)?;
             let [perms, s1_device, level, regime, stage1, s2_perms, s2_device, s2_level] = rest;
+            let (Some(level), Some(s2_level)) = (LeafLevel::of(level), LeafLevel::of(s2_level))
+            else {
+                return Err(NOT_WALKED);
+            };
             if page & !(TAG_MASK | ((1 << PAGE_BITS) - 1)) != 0
                 || pa_page & 0xFFF != 0
                 || pa_page >> id::pa_bits(features) != 0
@@ -2068,7 +2219,6 @@ impl<L: Levels> Tlb<L> {
             // of EL0's); stage 1 disabled gives every permission, a data
             // access Device memory unless `HCR_EL2.DC` makes it Normal, and
             // an output address stage 2 translates.
-            let level_walked = u32::from(level);
             // The range of the entry's address in its regime, as the
             // context it was made in describes it.
             let range = match made_in {
@@ -2078,7 +2228,7 @@ impl<L: Levels> Tlb<L> {
             let stage1_valid = match (made_in, stage1) {
                 (Some(made_in), Stage1::Walked) => {
                     made_in.stage1()
-                        && range.reaches(va, features, level_walked)
+                        && range.reaches(va, features, level)
                         && perms & !(PERMS | guarded) == 0
                 }
                 (Some(made_in), Stage1::Disabled) => {
@@ -2090,13 +2240,13 @@ impl<L: Levels> Tlb<L> {
                     };
                     !made_in.stage1()
                         && translated
-                        && level == 0
+                        && level == LeafLevel::Zero
                         && perms == PERMS
                         && s1_device == !el10_s1_disabled_data_normal(made_in.hcr_el2)
                 }
                 (None, Stage1::Walked) => {
                     context.el2_stage1()
-                        && range.reaches(va, features, level_walked)
+                        && range.reaches(va, features, level)
                         && perms & !(PERMS | guarded) == 0
                         && perms & PERMS_EL0 == 0
                 }
@@ -2153,7 +2303,7 @@ impl<L: Levels> Tlb<L> {
                 Some(_) | None => return Err(NO_CONTEXT),
             };
             // A context whose configuration refuses every walk keeps none.
-            let Some(start) = made_in.start(features) else {
+            let (Some(start), Some(level)) = (made_in.start(features), LeafLevel::of(level)) else {
                 return Err(NOT_WALKED);
             };
             // The key below its tag is an IPA page number alone, which the
@@ -2748,7 +2898,7 @@ impl<L: Levels> Cpu<L> {
     fn s1_disabled(&self, regime: Regime, va: u64, kind: AccessKind) -> Result<Ipa, NoTranslation> {
         self.s1_disabled_output(regime, va, kind)
             .ok_or(NoTranslation::stage1(TranslationFault::AddressSize {
-                level: 0,
+                level: Level::Zero,
             }))
     }
 
@@ -2768,7 +2918,7 @@ impl<L: Levels> Cpu<L> {
             Stage1Output::Disabled(_) => Stage1Leaf {
                 perms: PERMS,
                 device: !self.s1_disabled_data_normal(regime),
-                level: 0,
+                level: LeafLevel::Zero,
                 stage1: Stage1::Disabled,
             },
         }
@@ -2789,7 +2939,7 @@ impl<L: Levels> Cpu<L> {
     ) -> Result<Walked, NoTranslation> {
         if self.e0pd_refuses(va, el) {
             return Err(NoTranslation::stage1(TranslationFault::Translation {
-                level: 0,
+                level: Level::Zero,
             }));
         }
         self.walk(bus, self.s1_params(regime, va), va, kind, source)
@@ -2805,7 +2955,7 @@ impl<L: Levels> Cpu<L> {
     #[inline(always)]
     fn refusal(&self, va: u64, el: El, fault: Fsc) -> Fsc {
         if self.e0pd_refuses(va, el) {
-            Fsc::Translation(0)
+            Fsc::Translation(Level::Zero)
         } else {
             fault
         }
@@ -2899,13 +3049,12 @@ impl<L: Levels> Cpu<L> {
         let range = params.range;
         let tbi = range.tbi(kind == AccessKind::Fetch);
         let Some(start_level) = range.start_for(va, tbi, self.imp.features) else {
-            return Err(s1(TranslationFault::Translation { level: 0 }));
+            return Err(s1(TranslationFault::Translation { level: Level::Zero }));
         };
         let granule = range.granule;
         let ia_bits = 64 - range.txsz;
-        let start =
-            WalkStart::<Ipa>::of_base(params.ttbr, granule, start_level, ia_bits, params.oa)
-                .map_err(s1)?;
+        let start = WalkStart::<Ipa>::of_base(params.ttbr, granule, start_level, ia_bits, range.oa)
+            .map_err(s1)?;
         let stage2 = self.stage2_enabled(params.regime);
         // The descriptor's address is an IPA, which stage 2 translates where
         // it translates the regime and is the physical address otherwise.
@@ -2990,26 +3139,27 @@ impl<L: Levels> Cpu<L> {
         Ok(Walked {
             ipa: leaf.out,
             perms,
-            level: leaf.level as u8,
+            level: leaf.level,
             attr: ((params.mair >> (((desc >> 2) & 7) * 8)) & 0xFF) as u8,
-            sh: ((desc >> 8) & 3) as u8,
+            sh: params.range.oa.shareability(desc),
         })
     }
 
     /// The walk of translation tables from `start` for input address
     /// `input`, the part Arm's `AArch64_S1Walk` and `AArch64_S2Walk` share
-    /// with no FEAT_LPA2, FEAT_D128 or hardware update, with the start's
-    /// granule: each level's descriptor, read at the physical address
-    /// `descriptor_address` gives the address of its table entry, in the
-    /// walk's output address space `A` (an IPA for stage 1's walk), must be
-    /// valid, a read that reaches nothing being a synchronous External abort
-    /// on the walk (`AArch64_TTEntryAddressBounds`: each level after the
-    /// start indexes a stride of the input address); a table descriptor
-    /// gives the next level's table (`AArch64_NextTableBase`, as the start's
-    /// [`OaLayout`] holds it), whose address must fit the output size (else
-    /// an Address size fault at the level of the descriptor that holds it);
-    /// a level 3 descriptor with bit 1 clear is reserved, as is a block at a
-    /// level the granule has none on this processor
+    /// with no FEAT_D128 or hardware update, with the start's granule and
+    /// `DS`: each level's descriptor, from the start's (-1 to 3), read at
+    /// the physical address `descriptor_address` gives the address of its
+    /// table entry, in the walk's output address space `A` (an IPA for stage
+    /// 1's walk), must be valid, a read that reaches nothing being a
+    /// synchronous External abort on the walk
+    /// (`AArch64_TTEntryAddressBounds`: each level after the start indexes a
+    /// stride of the input address); a table descriptor gives the next
+    /// level's table (`AArch64_NextTableBase`, as the start's [`OaLayout`]
+    /// holds it), whose address must fit the output size (else an Address
+    /// size fault at the level of the descriptor that holds it); a level 3
+    /// descriptor with bit 1 clear is reserved, as is a block at a level the
+    /// granule has none at on this processor, level -1 among them
     /// (`AArch64_DecodeDescriptorType`, [`Granule::block_at`]); and the
     /// leaf's output address (`AArch64_S1LeafBase`, `AArch64_S2LeafBase`)
     /// must fit the output size and its access flag be set. The leaf's
@@ -3038,47 +3188,50 @@ impl<L: Levels> Cpu<L> {
                 granule.stride()
             };
             let index = (input >> shift) & ones(index_bits);
-            let at_level = level as u8;
             let fault = |fault| Err(WalkStop::Fault(fault));
             let address =
                 descriptor_address(bus, A::new(table + index * 8)).map_err(WalkStop::Descriptor)?;
             let desc = match bus.read_descriptor(address, clock) {
                 Ok(d) => d,
                 Err(BusFault::Unmapped) => {
-                    return fault(TranslationFault::ExternalAbortOnWalk { level: at_level })
+                    return fault(TranslationFault::ExternalAbortOnWalk { level })
                 }
             };
             if desc & 1 == 0 {
-                return fault(TranslationFault::Translation { level: at_level });
+                return fault(TranslationFault::Translation { level });
             }
-            if level < 3 && desc & 2 != 0 {
+            // A table descriptor, bit 1 set, at every level but 3.
+            let next_level = if desc & 2 != 0 { level.next() } else { None };
+            if let Some(next_level) = next_level {
                 let next = start.oa.descriptor_address(desc, granule.bits());
                 if !start.oa.fits(next) {
-                    return fault(TranslationFault::AddressSize { level: at_level });
+                    return fault(TranslationFault::AddressSize { level });
                 }
                 tables |= desc >> 59;
                 table = next;
-                level += 1;
+                level = next_level;
                 continue;
             }
-            let leaf = if level == 3 {
-                desc & 2 != 0
-            } else {
-                granule.block_at(level, self.imp.features)
+            // A page at level 3, or a block where the granule has them;
+            // level -1 has none.
+            let leaf = match level.leaf() {
+                Some(LeafLevel::Three) if desc & 2 != 0 => Some(LeafLevel::Three),
+                Some(at) if granule.block_at(at, start.oa.ds(), self.imp.features) => Some(at),
+                Some(_) | None => None,
             };
-            if !leaf {
-                return fault(TranslationFault::Translation { level: at_level });
-            }
+            let Some(leaf_level) = leaf else {
+                return fault(TranslationFault::Translation { level });
+            };
             let out = start.oa.descriptor_address(desc, shift);
             if !start.oa.fits(out) {
-                return fault(TranslationFault::AddressSize { level: at_level });
+                return fault(TranslationFault::AddressSize { level });
             }
             if (desc >> 10) & 1 == 0 {
-                return fault(TranslationFault::AccessFlag { level: at_level });
+                return fault(TranslationFault::AccessFlag { level: leaf_level });
             }
             return Ok(WalkLeaf {
                 desc,
-                level,
+                level: leaf_level,
                 out: A::new(out | (input & ones(shift))),
                 tables,
             });
@@ -4116,7 +4269,7 @@ impl<L: Levels> Cpu<L> {
         // Ahead of the TLB as well as the walk: an operation that needs no
         // permission would pass a hit E0PD refuses.
         if self.s1_enabled(regime) && self.e0pd_refuses(va, el) {
-            let refused = Abort::first(Fsc::Translation(0), true);
+            let refused = Abort::first(Fsc::Translation(Level::Zero), true);
             return Err(Self::maintenance_abort(va, refused));
         }
         self.translate_needs(bus, va, needs, el, OnDevice::Permitted)
@@ -4259,4 +4412,43 @@ pub(crate) mod saved_layout {
     /// A restore's refusals of an entry ([`Tlb::restore`]).
     pub(crate) const NOT_WALKED: rusty_box_core::SnapError = super::NOT_WALKED;
     pub(crate) const NO_CONTEXT: rusty_box_core::SnapError = super::NO_CONTEXT;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Arm `EncodeLDFSC` gives each fault and level a code of its own, and
+    /// [`Fsc::is_external`] reads back exactly the synchronous External
+    /// aborts' among them, at every level -1 to 3: what routing an abort by
+    /// `HCR_EL2.TEA` reads.
+    #[test]
+    fn each_fault_status_code_reads_back_as_external_or_not() {
+        // Every fault at every level it can be at, the levels walked from -1.
+        let mut faults = [Fsc::Alignment; 2 + 3 * 5 + 2 * 4];
+        faults[1] = Fsc::SyncExternal;
+        let mut at = 2;
+        let mut next = Some(Level::Minus1);
+        while let Some(level) = next {
+            faults[at] = Fsc::AddressSize(level);
+            faults[at + 1] = Fsc::Translation(level);
+            faults[at + 2] = Fsc::SyncExternalOnWalk(level);
+            at += 3;
+            if let Some(leaf) = level.leaf() {
+                faults[at] = Fsc::AccessFlag(leaf);
+                faults[at + 1] = Fsc::Permission(leaf);
+                at += 2;
+            }
+            next = level.next();
+        }
+        assert_eq!(at, faults.len(), "five levels, four with leaves");
+        for (i, fault) in faults.into_iter().enumerate() {
+            let external = matches!(fault, Fsc::SyncExternal | Fsc::SyncExternalOnWalk(_));
+            assert_eq!(Fsc::is_external(fault.code()), external, "{fault:?}");
+            assert!(fault.code() < 0x40, "{fault:?}: six bits");
+            for other in &faults[..i] {
+                assert_ne!(fault.code(), other.code(), "{fault:?} and {other:?}");
+            }
+        }
+    }
 }

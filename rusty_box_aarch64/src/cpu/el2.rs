@@ -432,7 +432,7 @@ pub(crate) const MDCR_EL2_MASK: u64 = MDCR_TDE | MDCR_TDA | MDCR_TDOSA | MDCR_TD
 // ----- the EL2 translation regime and stage 2 -----
 
 /// `TCR_EL2`'s bits for `E2H` = 0 every processor with EL2 keeps: `T0SZ`,
-/// `IRGN0`, `ORGN0`, `SH0`, `TG0`, `PS`, `TBI`. `DS` (bit 32) is FEAT_LPA2's.
+/// `IRGN0`, `ORGN0`, `SH0`, `TG0`, `PS`, `TBI`.
 const TCR_EL2_BASE: u64 = 0x0017_FF3F;
 /// `TCR_EL2.HPD` (FEAT_HPDS): hierarchical permissions off.
 pub(crate) const TCR_EL2_HPD: u64 = 1 << 24;
@@ -440,6 +440,9 @@ pub(crate) const TCR_EL2_HPD: u64 = 1 << 24;
 pub(crate) const TCR_EL2_TBI: u64 = 1 << 20;
 /// `TCR_EL2.TBID` (FEAT_PAuth): `TBI` for data addresses only.
 pub(crate) const TCR_EL2_TBID: u64 = 1 << 29;
+/// `TCR_EL2.DS` (FEAT_LPA2): 52-bit addresses with the 4 KiB and 16 KiB
+/// granules.
+pub(crate) const TCR_EL2_DS: u64 = 1 << 32;
 /// `TCR_EL2`'s RES1 bits: 23 and 31.
 pub(crate) const TCR_EL2_RES1: u64 = 0x8080_0000;
 
@@ -452,6 +455,9 @@ pub(crate) const fn tcr_el2_mask(features: Features) -> u64 {
     if features.has(Feature::PAuth) {
         mask |= TCR_EL2_TBID;
     }
+    if features.has(Feature::Lpa2) {
+        mask |= TCR_EL2_DS;
+    }
     mask
 }
 
@@ -463,7 +469,23 @@ pub(crate) const fn ttbr_baddr_mask(features: Features) -> u64 {
 
 /// `VTCR_EL2`'s bits every processor with EL2 keeps: `T0SZ`, `SL0`,
 /// `IRGN0`, `ORGN0`, `SH0`, `TG0`, `PS`.
-pub(crate) const VTCR_EL2_MASK: u64 = 0x0007_FFFF;
+const VTCR_EL2_BASE: u64 = 0x0007_FFFF;
+/// `VTCR_EL2.DS` (FEAT_LPA2): 52-bit addresses with the 4 KiB and 16 KiB
+/// granules.
+pub(crate) const VTCR_EL2_DS: u64 = 1 << 32;
+/// `VTCR_EL2.SL2` (FEAT_LPA2): with `DS` and the 4 KiB granule, the top bit
+/// of the start level's encoding (`SL2:SL0`).
+pub(crate) const VTCR_EL2_SL2: u64 = 1 << 33;
+
+/// The `VTCR_EL2` bits a processor implementing `features` keeps.
+const fn vtcr_el2_mask(features: Features) -> u64 {
+    if features.has(Feature::Lpa2) {
+        VTCR_EL2_BASE | VTCR_EL2_DS | VTCR_EL2_SL2
+    } else {
+        VTCR_EL2_BASE
+    }
+}
+
 /// `VTCR_EL2`'s RES1 bit: 31.
 pub(crate) const VTCR_EL2_RES1: u64 = 1 << 31;
 /// `VTTBR_EL2.VMID` with 8-bit VMIDs (no FEAT_VMID16): bits 55:48.
@@ -674,7 +696,7 @@ impl El2Reg {
             Self::Mdcr => value & MDCR_EL2_MASK,
             Self::Tcr => (value & tcr_el2_mask(features)) | TCR_EL2_RES1,
             Self::Ttbr0 => value & ttbr_baddr_mask(features),
-            Self::Vtcr => (value & VTCR_EL2_MASK) | VTCR_EL2_RES1,
+            Self::Vtcr => (value & vtcr_el2_mask(features)) | VTCR_EL2_RES1,
             Self::Vttbr => value & (ttbr_baddr_mask(features) | VTTBR_VMID8),
             Self::Vbar => value & VBAR_MASK,
             Self::Esr => value & ESR_MASK,
@@ -980,7 +1002,11 @@ mod tests {
         assert_eq!(cptr_el2_mask(a57) & cptr_el2_res1(a57), 0);
         assert_eq!(cptr_el2_res1(a57), 0x33FF, "TSM is RES1 without FEAT_SME");
         assert_eq!(tcr_el2_mask(a57) & TCR_EL2_RES1, 0);
-        assert_eq!(VTCR_EL2_MASK & VTCR_EL2_RES1, 0);
+        let every = Implementation::EVERY_FEATURE
+            .with_levels::<WithEl2>()
+            .features;
+        assert_eq!(tcr_el2_mask(every) & TCR_EL2_RES1, 0);
+        assert_eq!(vtcr_el2_mask(every) & VTCR_EL2_RES1, 0);
         assert_eq!(VMPIDR_MASK & VMPIDR_RES1, 0);
     }
 }

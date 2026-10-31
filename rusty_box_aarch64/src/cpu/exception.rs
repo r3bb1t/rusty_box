@@ -14,7 +14,7 @@ use super::el2::{
     HCR_VSE, MDCR_TDE, VSESR_MASK,
 };
 use super::features::Feature;
-use super::mmu::Ipa;
+use super::mmu::{Fsc, Ipa};
 use super::op::Extend;
 use super::sysreg::{DBGPRCR_CORENPDRQ, MDSCR_KDE, MDSCR_SS, OSDLR_DLK, OSLSR_OSLK};
 use super::{sctlr, Activity, Btype, Cpu, El, Levels, Pstate, SysRegs};
@@ -484,11 +484,11 @@ impl Exception {
     }
 }
 
-/// A synchronous External abort's fault status codes (`ESR_ELx.ISS.DFSC`
-/// and `IFSC`): `0b010000`, and `0b0101xx` on a translation table walk.
+/// Whether an Instruction or Data Abort's syndrome `iss` holds a
+/// synchronous External abort's fault status code (`ESR_ELx.ISS.DFSC` and
+/// `IFSC`, [`Fsc::is_external`]).
 const fn is_external_abort(iss: u32) -> bool {
-    let fsc = iss & 0x3F;
-    fsc == 0b01_0000 || fsc & 0b11_1100 == 0b01_0100
+    Fsc::is_external(iss & 0x3F)
 }
 
 /// Which vector of the four in a vector-table quadrant.

@@ -97,7 +97,7 @@ pub use features::{
     CpuModel, El2Unavailable, UnknownCpuModel, ARMV8P6_COUNTER_HZ, QEMU_BACKCOMPAT_COUNTER_HZ,
 };
 pub use history::RecentPcs;
-pub use mmu::{Ipa, NoTranslation, Tlb, TranslationFault, TranslationStage};
+pub use mmu::{Ipa, LeafLevel, Level, NoTranslation, Tlb, TranslationFault, TranslationStage};
 pub use regs::{CpuState, CpuStateEl2, PstateRefusal, Reg, SysReg, SysRegRefusal, VReg};
 pub(crate) use sysreg::WriteEffect;
 pub(crate) use system::{PsciConduit, PsciNode};

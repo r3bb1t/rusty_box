@@ -2001,7 +2001,8 @@ fn constraint_value(ast: &Value, holding: &BTreeSet<&str>) -> Option<bool> {
 /// granule at stage 2 (`FEAT_S2TGran4K`) and FEAT_GTG
 /// (`ID_AA64MMFR0_EL1`'s `TGran4_2` reads 2, and `TGran16_2` and
 /// `TGran64_2` 2 where the model has that granule at stage 2 and 1 where
-/// it does not, all non-zero, which `Features.json` makes FEAT_GTG) — and
+/// it does not, FEAT_LPA2 making `TGran4_2` and `TGran16_2`'s 2 a 3, all
+/// non-zero, which `Features.json` makes FEAT_GTG) — and
 /// every other identifier is false: no FEAT_SVE, no AArch32, no PMU.
 ///
 /// A model that cannot have EL2 ([`CpuModel::el2_available`], whose build

@@ -290,22 +290,31 @@ const fn field(features: Features, feature: Feature, lsb: u32, value: u64) -> u6
 /// (3:0) the encoding of its physical address size ([`pa_range`]), 6 for 52
 /// bits with FEAT_LPA and 4 for 44 bits without, ASIDBits = 2 (16-bit
 /// ASIDs), mixed endianness not supported. The stage 1 granules: TGran4
-/// (31:28) = 0, the 4 KiB one every processor here has; TGran16 (23:20) = 1
-/// with FEAT_TGran16K, else 0; TGran64 (27:24) = 0 with FEAT_TGran64K, else
-/// 0xF (each field's own encoding of "supported"). With FEAT_EL2, the stage
-/// 2 granules said explicitly: TGran4_2 (43:40) = 2, the 4 KiB granule
-/// (FEAT_S2TGran4K), and TGran16_2 (35:32) and TGran64_2 (39:36) = 2 with
-/// FEAT_S2TGran16K and FEAT_S2TGran64K, else 1, not supported. That is
+/// (31:28) = 0, the 4 KiB one every processor here has, 1 with FEAT_LPA2
+/// (the granule's 52-bit addresses); TGran16 (23:20) = 1 with
+/// FEAT_TGran16K, 2 with FEAT_LPA2 too, else 0; TGran64 (27:24) = 0 with
+/// FEAT_TGran64K, else 0xF (each field's own encoding of "supported").
+/// With FEAT_EL2, the stage 2 granules said explicitly: TGran4_2 (43:40) =
+/// 2, the 4 KiB granule (FEAT_S2TGran4K), and TGran16_2 (35:32) and
+/// TGran64_2 (39:36) = 2 with FEAT_S2TGran16K and FEAT_S2TGran64K, else 1,
+/// not supported. That is
 /// FEAT_GTG, which `Features.json` makes hold exactly when all three fields
 /// are non-zero, and permits a processor before ARMv8.5;
-/// `AArch64_HaveS2TG` then reads the stage 2 fields. ECV (63:60) = 1 with
+/// `AArch64_HaveS2TG` then reads the stage 2 fields. With FEAT_LPA2,
+/// TGran4_2 and, where the granule is there, TGran16_2 are 3, the
+/// granule's 52-bit addresses at stage 2. Each field's FEAT_LPA2 value
+/// implies the feature (`(SInt(TGran4) >= 1) ==> FEAT_LPA2`,
+/// `(UInt(TGran16) >= 2) ==> FEAT_LPA2`, and `>= 3` for the stage 2
+/// fields), the fields being how software finds it. ECV (63:60) = 1 with
 /// FEAT_ECV, 2 with FEAT_ECV_POFF too (`FEAT_ECV_POFF <=>
 /// UInt(ID_AA64MMFR0_EL1.ECV) >= 2`).
 pub(crate) const fn id_aa64mmfr0(features: Features) -> u64 {
+    // FEAT_LPA2's step up from each granule field's "supported".
+    let lpa2 = field(features, Feature::Lpa2, 0, 1);
     let stage_2 = if features.has(Feature::El2) {
-        (2 << 40)
+        ((2 + lpa2) << 40)
             | ((1 + field(features, Feature::S2TGran64K, 0, 1)) << 36)
-            | ((1 + field(features, Feature::S2TGran16K, 0, 1)) << 32)
+            | ((1 + field(features, Feature::S2TGran16K, 0, 1 + lpa2)) << 32)
     } else {
         0
     };
@@ -318,8 +327,9 @@ pub(crate) const fn id_aa64mmfr0(features: Features) -> u64 {
     let ecv = field(features, Feature::Ecv, 60, 1) + field(features, Feature::EcvPoff, 60, 1);
     0x0000_0020
         | pa_range(features)
+        | (lpa2 << 28)
         | tgran64
-        | field(features, Feature::TGran16K, 20, 1)
+        | field(features, Feature::TGran16K, 20, 1 + lpa2)
         | stage_2
         | ecv
 }

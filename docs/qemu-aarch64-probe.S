@@ -144,6 +144,23 @@
 //      QEMU 11.1.2:  R 0000000096000156 ...                   (an External
 //                    abort on the level 2 walk, the table read at
 //                    0xa << 48 up)
+//
+// S and T set FEAT_LPA2's TCR_EL1.DS with the 4 KiB granule in both ranges
+// and IPS 48 bits: the lower range's blocks, without SH, translate as
+// before, and the upper range (TG1 0b10, T1SZ 25: 39 bits, walked from
+// level 1, whose blocks are 1 GiB) is AT S1E1R'd as in Q and R, entry 0
+// of its level 1 table the block. -cpu max has FEAT_LPA2 (TGran4 1).
+// S  The block descriptor's bits 9:8 are 0b01. Under DS they are OA[51:50]
+//    whatever IPS says (AArch64_S1LeafBase), and an output address IPS
+//    cannot hold is an Address size fault: PAR_EL1.F = 1, FST = level 1
+//    Address size.
+//      Arm:          S 0000000000000803
+//      QEMU 11.1.2:  S ff00000040000b80                       (translated)
+// T  TTBR1_EL1 bits 5:2 0x1. Under DS they are BADDR[51:48] whatever IPS
+//    says (AArch64_S1TTBaseAddress), and a base IPS cannot hold is a level
+//    0 Address size fault: FST = level 0 Address size.
+//      Arm:          T 0000000000000801
+//      QEMU 11.1.2:  T ff00000040000b80                       (translated)
 
 #define UART 0x09000000
 
@@ -512,8 +529,44 @@ case_r:
     tlbi vmalle1
     dsb sy
     isb
-    adr x0, done
+    adr x0, case_s
     mov w2, #'R'
+    bl at_upper
+
+case_s:
+    // FEAT_LPA2's DS with the 4 KiB granule in both ranges: the lower range
+    // from l1_ds, the upper range (T1SZ 25: 39 bits, from level 1, 1 GiB
+    // blocks) from l1_upper; IPS 48 bits. The block's bits 9:8 0b01.
+    ldr x0, =l1_ds
+    msr ttbr0_el1, x0
+    ldr x0, =l1_upper
+    msr ttbr1_el1, x0
+    ldr x0, =(0x40000000 | (1 << 8) | (1 << 10) | (1 << 2) | 1)
+    ldr x1, =l1_upper
+    str x0, [x1]
+    ldr x0, =(25 | (0x5 << 8) | (3 << 12) | (25 << 16) | (0x5 << 24) | (3 << 28) | (2 << 30) | (5 << 32) | (1 << 59))
+    msr tcr_el1, x0
+    dsb sy
+    tlbi vmalle1
+    dsb sy
+    isb
+    adr x0, case_t
+    mov w2, #'S'
+    bl at_upper
+
+case_t:
+    // TTBR1_EL1 bits 5:2 0x1, the block without bits 9:8.
+    ldr x0, =(l1_upper + (0x1 << 2))
+    msr ttbr1_el1, x0
+    ldr x0, =(0x40000000 | (1 << 10) | (1 << 2) | 1)
+    ldr x1, =l1_upper
+    str x0, [x1]
+    dsb sy
+    tlbi vmalle1
+    dsb sy
+    isb
+    adr x0, done
+    mov w2, #'T'
     bl at_upper
     b done
 
@@ -661,3 +714,14 @@ l1:
     .balign 8192
 l2_64k:
     .skip 8192
+
+// Cases S and T's level-1 tables under DS: l1's first two blocks without
+// SH, whose bits 9:8 DS makes OA[51:50] (the shareability is TCR_EL1's);
+// and the upper range's, whose entry 0 the cases write.
+    .balign 4096
+l1_ds:
+    .quad 0x00000000 | (1 << 54) | (1 << 53) | (1 << 10) | 1                   // Device, EL1's
+    .quad 0x40000000 | (1 << 10) | (1 << 2) | 1                                // EL1's
+    .skip 4096 - 2 * 8
+l1_upper:
+    .skip 4096

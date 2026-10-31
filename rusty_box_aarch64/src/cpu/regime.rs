@@ -13,15 +13,20 @@
 //! `AArch64_HaveS2TG`; for where a walk's addresses are held and how wide
 //! they are, `AArch64_PAMax`, `AArch64_OAOutOfRange`,
 //! `AArch64_S1TTBaseAddress`, `AArch64_S2TTBaseAddress`,
-//! `AArch64_NextTableBase`, `AArch64_S1LeafBase` and `AArch64_S2LeafBase`.
+//! `AArch64_NextTableBase`, `AArch64_S1LeafBase` and `AArch64_S2LeafBase`;
+//! for FEAT_LPA2's `DS`, `AArch64_S1TTWParamsEL10`, `AArch64_S1TTWParamsEL2`
+//! and `AArch64_NSS2TTWParams` (where it applies), and
+//! `AArch64_S1NextWalkStateLeaf` and `AArch64_S2NextWalkStateLeaf` (the
+//! shareability it moves to the `TCR`).
 //!
 //! The walk parameters are gathered here, one place per regime; the walk
 //! itself, the TLB and the access paths are `mmu.rs`'s.
 
 use super::dp::ones;
-use super::el2::{HCR_DC, HCR_TGE, HCR_VM, TCR_EL2_HPD, TCR_EL2_TBI, TCR_EL2_TBID};
+use super::el2::{HCR_DC, HCR_TGE, HCR_VM, TCR_EL2_DS, TCR_EL2_HPD, TCR_EL2_TBI, TCR_EL2_TBID};
 use super::exec::sext;
 use super::features::{Feature, Features};
+use super::mmu::{LeafLevel, Level};
 use super::{id, sctlr, Cpu, El, Levels};
 
 /// A stage 1 translation regime.
@@ -121,68 +126,102 @@ impl Granule {
         self.bits() - 3
     }
 
-    /// Arm `TranslationSize`: the input address bits a leaf at `level`
-    /// maps directly to the output address.
+    /// Arm `TranslationSize`: the input address bits below those a table at
+    /// `level` indexes, which a leaf there maps directly to the output
+    /// address.
     #[inline(always)]
-    pub(crate) const fn translation_size(self, level: u32) -> u32 {
-        self.bits() + self.stride() * (3 - level)
+    pub(crate) const fn translation_size(self, level: Level) -> u32 {
+        self.bits() + self.stride() * level.levels_below()
     }
 
     /// Arm `AArch64_S1StartLevel` (without FEAT_D128): the level whose
     /// table resolves the top bit of an `ia_bits`-bit input address, `3 -
     /// (ia_bits - 1 - bits) / stride`, found as the highest level whose
     /// translation size the address exceeds (level 3 for an address no
-    /// wider than a level 2 leaf's).
+    /// wider than a level 2 leaf's). Level -1 is the 4 KiB granule's for an
+    /// address wider than 48 bits, which FEAT_LPA2's `DS` permits.
     #[inline(always)]
-    pub(crate) const fn start_level(self, ia_bits: u32) -> u32 {
-        if ia_bits > self.translation_size(0) {
-            0
-        } else if ia_bits > self.translation_size(1) {
-            1
-        } else if ia_bits > self.translation_size(2) {
-            2
+    pub(crate) const fn start_level(self, ia_bits: u32) -> Level {
+        if ia_bits > self.translation_size(Level::Minus1) {
+            Level::Minus1
+        } else if ia_bits > self.translation_size(Level::Zero) {
+            Level::Zero
+        } else if ia_bits > self.translation_size(Level::One) {
+            Level::One
+        } else if ia_bits > self.translation_size(Level::Two) {
+            Level::Two
         } else {
-            3
+            Level::Three
         }
     }
 
-    /// The level a stage 1 walk with the granule for `TxSZ` `txsz` starts
-    /// at ([`Granule::start_level`]) on a processor implementing
-    /// `features`, or `None` where every translation takes a level 0
-    /// Translation fault: a `TxSZ` outside [`Granule::s1_min_txsz`] and
-    /// [`Granule::max_txsz`] (`AArch64_S1TxSZFaults`, with the
-    /// IMPLEMENTATION DEFINED "Fault on TxSZ value above maximum" and "...
-    /// below minimum" TRUE, as QEMU's `param.tsz_oob`; with FEAT_LVA the
-    /// second is no choice). The one test the walk and a snapshot's TLB both
-    /// make (R5).
+    /// The level a stage 1 walk with the granule for `TxSZ` `txsz`, under
+    /// FEAT_LPA2's `ds` or not, starts at ([`Granule::start_level`]) on a
+    /// processor implementing `features`, or `None` where every translation
+    /// takes a level 0 Translation fault: a `TxSZ` outside
+    /// [`Granule::s1_min_txsz`] and [`Granule::max_txsz`]
+    /// (`AArch64_S1TxSZFaults`, with the IMPLEMENTATION DEFINED "Fault on
+    /// TxSZ value above maximum" and "... below minimum" TRUE, as QEMU's
+    /// `param.tsz_oob`; with FEAT_LVA the second is no choice). The one test
+    /// the walk and a snapshot's TLB both make (R5).
     #[inline(always)]
-    pub(crate) const fn s1_start(self, txsz: u32, features: Features) -> Option<u32> {
-        if txsz >= self.s1_min_txsz(features) && txsz <= self.max_txsz(features) {
+    pub(crate) const fn s1_start(self, txsz: u32, ds: Ds, features: Features) -> Option<Level> {
+        if txsz >= self.s1_min_txsz(ds, features) && txsz <= self.max_txsz(features) {
             Some(self.start_level(64 - txsz))
         } else {
             None
         }
     }
 
-    /// Whether a walk with the granule starting at `start` can end at
-    /// `level` on a processor implementing `features`, at either stage: at
-    /// or below the start, at a level the granule has leaves at
-    /// ([`Granule::leaf_at`]).
+    /// Whether a walk with the granule starting at `start`, under FEAT_LPA2's
+    /// `ds` or not, can end at `level` on a processor implementing
+    /// `features`, at either stage: at or below the start, at a level the
+    /// granule has leaves at ([`Granule::leaf_at`]).
     #[inline(always)]
-    pub(crate) const fn ends_at(self, start: u32, level: u32, features: Features) -> bool {
-        start <= level && self.leaf_at(level, features)
+    pub(crate) const fn ends_at(
+        self,
+        start: Level,
+        level: LeafLevel,
+        ds: Ds,
+        features: Features,
+    ) -> bool {
+        // By number: `Level`'s `Ord` is not callable in a `const fn`.
+        start.number() <= level.level().number() && self.leaf_at(level, ds, features)
     }
 
-    /// Arm `AArch64_S1MinTxSZ` without FEAT_LPA2's `DS`, FEAT_LVA3 or
-    /// FEAT_D128: the smallest `TxSZ` at stage 1 on a processor implementing
-    /// `features`, 12 (a 52-bit input address) with FEAT_LVA and the 64 KiB
-    /// granule, else 16 (48 bits).
+    /// Arm `AArch64_S1MinTxSZ` without FEAT_LVA3 or FEAT_D128: the smallest
+    /// `TxSZ` at stage 1 on a processor implementing `features`, 12 (a
+    /// 52-bit input address) with FEAT_LVA and the 64 KiB granule or
+    /// FEAT_LPA2's `ds`, else 16 (48 bits). The function asks about `ds`
+    /// inside its FEAT_LVA test, which every processor with FEAT_LPA2 passes
+    /// (`FEAT_LPA2 ==> FEAT_LVA`).
     #[inline(always)]
-    pub(crate) const fn s1_min_txsz(self, features: Features) -> u32 {
-        match self {
-            Self::K64 if features.has(Feature::Lva) => 12,
-            Self::K4 | Self::K16 | Self::K64 => 16,
+    pub(crate) const fn s1_min_txsz(self, ds: Ds, features: Features) -> u32 {
+        if features.has(Feature::Lva) && self.holds_52_bits(ds) {
+            12
+        } else {
+            16
         }
+    }
+
+    /// Whether a walk with the granule, under FEAT_LPA2's `ds` or not, has
+    /// a 52-bit form, which Arm's `AArch64_S1MinTxSZ`, `AArch64_S2MinTxSZ`
+    /// and `AArch64_PhysicalAddressSize` each ask (with a feature or `PAMax`
+    /// of their own besides): the 64 KiB granule's, or `ds`.
+    #[inline(always)]
+    pub(crate) const fn holds_52_bits(self, ds: Ds) -> bool {
+        matches!(self, Self::K64) || ds.on()
+    }
+
+    /// Arm `S1TTWParams.ds` and `S2TTWParams.ds`: whether a walk with the
+    /// granule takes FEAT_LPA2's 52-bit forms on a processor implementing
+    /// `features`, its register's `DS` bit being `bit` — never with the 64
+    /// KiB granule, whose 52-bit forms are FEAT_LPA's
+    /// (`AArch64_S1TTWParamsEL10`, `AArch64_S1TTWParamsEL2`,
+    /// `AArch64_NSS2TTWParams`). The one maker of a [`Ds`] (R5).
+    #[inline(always)]
+    pub(crate) const fn effective_ds(self, bit: bool, features: Features) -> Ds {
+        Ds(bit && features.has(Feature::Lpa2) && !matches!(self, Self::K64))
     }
 
     /// Arm `AArch64_MaxTxSZ`, at either stage: the largest `TxSZ`, the
@@ -200,27 +239,32 @@ impl Granule {
         }
     }
 
-    /// Whether a block descriptor is valid at `level` on a processor
-    /// implementing `features` (Arm `AArch64_BlockDescSupported` without
-    /// FEAT_LPA2's `DS` or FEAT_D128): at levels 1 and 2 with the 4 KiB
-    /// granule, at level 2 with the 16 KiB one, and with the 64 KiB one at
-    /// level 2, and at level 1 too where `PAMax` is 52 bits (FEAT_LPA).
+    /// Whether a block descriptor is valid at `level` under FEAT_LPA2's
+    /// `ds` or not, on a processor implementing `features` (Arm
+    /// `AArch64_BlockDescSupported` without FEAT_D128): at levels 1 and 2
+    /// with the 4 KiB granule, and at level 0 too with `ds`; at level 2 with
+    /// the 16 KiB one, and at level 1 too with `ds`; and with the 64 KiB one
+    /// at level 2, and at level 1 too where `PAMax` is 52 bits (FEAT_LPA);
+    /// never at level 3, whose descriptors are pages, nor at level -1, which
+    /// a [`LeafLevel`] does not name.
     #[inline(always)]
-    pub(crate) const fn block_at(self, level: u32, features: Features) -> bool {
-        match self {
-            Self::K4 => level == 1 || level == 2,
-            Self::K16 => level == 2,
-            Self::K64 => level == 2 || (level == 1 && id::pa_bits(features) >= 52),
+    pub(crate) const fn block_at(self, level: LeafLevel, ds: Ds, features: Features) -> bool {
+        match (self, level) {
+            (Self::K4 | Self::K16 | Self::K64, LeafLevel::Two) | (Self::K4, LeafLevel::One) => true,
+            (Self::K4, LeafLevel::Zero) | (Self::K16, LeafLevel::One) => ds.on(),
+            (Self::K64, LeafLevel::One) => id::pa_bits(features) >= 52,
+            (Self::K4 | Self::K16 | Self::K64, LeafLevel::Three)
+            | (Self::K16 | Self::K64, LeafLevel::Zero) => false,
         }
     }
 
-    /// Whether a walk with the granule can end at `level` on a processor
-    /// implementing `features` (Arm `AArch64_DecodeDescriptorType`): at a
-    /// page at level 3, or a block where the granule has blocks
-    /// ([`Granule::block_at`]).
+    /// Whether a walk with the granule, under FEAT_LPA2's `ds` or not, can
+    /// end at `level` on a processor implementing `features` (Arm
+    /// `AArch64_DecodeDescriptorType`): at a page at level 3, or a block
+    /// where the granule has blocks ([`Granule::block_at`]).
     #[inline(always)]
-    pub(crate) const fn leaf_at(self, level: u32, features: Features) -> bool {
-        level == 3 || self.block_at(level, features)
+    pub(crate) const fn leaf_at(self, level: LeafLevel, ds: Ds, features: Features) -> bool {
+        matches!(level, LeafLevel::Three) || self.block_at(level, ds, features)
     }
 
     /// The granule of the EL1&0 regime's range `upper` names under
@@ -309,6 +353,22 @@ impl Granule {
     }
 }
 
+/// Whether a walk takes FEAT_LPA2's 52-bit forms (Arm `S1TTWParams.ds`,
+/// `S2TTWParams.ds`): its register's `DS` bit where the processor has
+/// FEAT_LPA2 and the granule is the 4 KiB or the 16 KiB one, which
+/// [`Granule::effective_ds`] alone decides, its field private so that a
+/// register's bit cannot stand for it (R5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Ds(bool);
+
+impl Ds {
+    /// Whether the walk takes the 52-bit forms.
+    #[inline(always)]
+    pub(crate) const fn on(self) -> bool {
+        self.0
+    }
+}
+
 /// A stage of translation, as it decides which granules a processor has.
 ///
 /// Closed (R5).
@@ -333,12 +393,16 @@ const TCR_EL1_IPS: u32 = 32;
 const TCR_EL1_TBI0: u32 = 37;
 const TCR_EL1_HPD0: u32 = 41;
 const TCR_EL1_TBID0: u32 = 51;
-/// How far above `T0SZ` and `EPD0` their upper-range fields `T1SZ` and
-/// `EPD1` are; `TBI1`, `HPD1` and `TBID1` are each the bit above their
-/// lower-range field.
-const TCR_EL1_UPPER_SZ_EPD: u32 = 16;
+/// `TCR_EL1.DS` (FEAT_LPA2), for both ranges.
+const TCR_EL1_DS: u32 = 59;
+/// How far above `T0SZ`, `EPD0` and `SH0` their upper-range fields `T1SZ`,
+/// `EPD1` and `SH1` are; `TBI1`, `HPD1` and `TBID1` are each the bit above
+/// their lower-range field.
+const TCR_EL1_UPPER_FIELD: u32 = 16;
 /// `TCR_EL2.PS`.
 const TCR_EL2_PS: u32 = 16;
+/// `SH0` (13:12) of `TCR_EL1`, `TCR_EL2` and `VTCR_EL2` alike ([`sh0`]).
+const TCR_SH0: u32 = 12;
 /// `TG0` (15:14) of `TCR_EL1`, `TCR_EL2` and `VTCR_EL2` alike.
 pub(crate) const TCR_TG0: u32 = 14;
 
@@ -373,7 +437,7 @@ const fn el2_tbi(tcr: u64, instruction: bool, pauth: bool) -> bool {
 /// under `TCR_EL1` `tcr` (`EPD1` or `EPD0`).
 #[inline(always)]
 const fn el10_epd(tcr: u64, upper: bool) -> bool {
-    let epd_bit = TCR_EL1_EPD0 + if upper { TCR_EL1_UPPER_SZ_EPD } else { 0 };
+    let epd_bit = TCR_EL1_EPD0 + if upper { TCR_EL1_UPPER_FIELD } else { 0 };
     (tcr >> epd_bit) & 1 == 1
 }
 
@@ -393,8 +457,20 @@ const fn va_in_range(va: u64, upper: bool, ia_bits: u32, tbi: bool) -> bool {
 /// (`T1SZ` or `T0SZ`), as the register holds it.
 #[inline(always)]
 const fn el10_txsz(tcr: u64, upper: bool) -> u32 {
-    let shift = TCR_EL1_T0SZ + if upper { TCR_EL1_UPPER_SZ_EPD } else { 0 };
+    let shift = TCR_EL1_T0SZ + if upper { TCR_EL1_UPPER_FIELD } else { 0 };
     ((tcr >> shift) & 0x3F) as u32
+}
+
+/// `SH0` (13:12) of `TCR_EL1`, `TCR_EL2` or `VTCR_EL2` `reg`.
+#[inline(always)]
+pub(crate) const fn sh0(reg: u64) -> u8 {
+    ((reg >> TCR_SH0) & 3) as u8
+}
+
+/// `SH0` or, for the upper range, `SH1` of `TCR_EL1` `tcr`.
+#[inline(always)]
+const fn el10_sh(tcr: u64, upper: bool) -> u8 {
+    sh0(tcr >> if upper { TCR_EL1_UPPER_FIELD } else { 0 })
 }
 
 /// `TxSZ` of the EL2 regime under `TCR_EL2` `tcr` (`T0SZ`).
@@ -404,9 +480,10 @@ const fn el2_txsz(tcr: u64) -> u32 {
 }
 
 /// What decides which addresses the stage 1 walks of one range of a
-/// regime translate and where they can end (Arm `S1TTWParams`' `tgx`,
-/// `txsz`, `epd`, `tbi` and `tbid`): the one description the walk
-/// ([`S1Params::range`]) and a snapshot's TLB entries both read (R5).
+/// regime translate, where they can end and how their tables hold
+/// addresses (Arm `S1TTWParams`' `tgx`, `txsz`, `ps`, `ds`, `sh`, `epd`,
+/// `tbi` and `tbid`): the one description the walk ([`S1Params::range`])
+/// and a snapshot's TLB entries both read (R5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct S1Range {
     /// The upper virtual address range (`TTBR1_EL1`), only in EL1&0.
@@ -418,6 +495,10 @@ pub(crate) struct S1Range {
     /// [`Granule::s1_min_txsz`]`..=`[`Granule::max_txsz`]
     /// ([`Granule::s1_start`]).
     pub(crate) txsz: u32,
+    /// How the range's walks hold their addresses, and the output address
+    /// size: `IPS` or `PS` with the granule, FEAT_LPA2's `DS`
+    /// ([`OaLayout::ds`]) and under it the range's `SH0` or `SH1`.
+    pub(crate) oa: OaLayout,
     /// The range's walks are disabled (`TCR_EL1.EPD0`/`EPD1`; never in EL2).
     epd: bool,
     /// Top-byte-ignore of data addresses, and of instruction addresses.
@@ -431,10 +512,14 @@ impl S1Range {
     #[inline(always)]
     pub(crate) const fn el10(tcr: u64, upper: bool, features: Features) -> Self {
         let pauth = features.has(Feature::PAuth);
+        let granule = Granule::el10(tcr, upper, features);
+        let ds = granule.effective_ds((tcr >> TCR_EL1_DS) & 1 == 1, features);
+        let sh = el10_sh(tcr, upper);
         Self {
             upper,
-            granule: Granule::el10(tcr, upper, features),
+            granule,
             txsz: el10_txsz(tcr, upper),
+            oa: OaLayout::of(tcr >> TCR_EL1_IPS, granule, ds, sh, features),
             epd: el10_epd(tcr, upper),
             tbi_data: el10_tbi(tcr, upper, false, pauth),
             tbi_instruction: el10_tbi(tcr, upper, true, pauth),
@@ -446,10 +531,13 @@ impl S1Range {
     #[inline(always)]
     pub(crate) const fn el2(tcr: u64, features: Features) -> Self {
         let pauth = features.has(Feature::PAuth);
+        let granule = Granule::el2(tcr, features);
+        let ds = granule.effective_ds(tcr & TCR_EL2_DS != 0, features);
         Self {
             upper: false,
-            granule: Granule::el2(tcr, features),
+            granule,
             txsz: el2_txsz(tcr),
+            oa: OaLayout::of(tcr >> TCR_EL2_PS, granule, ds, sh0(tcr), features),
             epd: false,
             tbi_data: el2_tbi(tcr, false, pauth),
             tbi_instruction: el2_tbi(tcr, true, pauth),
@@ -474,8 +562,8 @@ impl S1Range {
     /// ([`va_in_range`]), or for the range's walks disabled (`EPD`) — the one
     /// fault whichever of them it is.
     #[inline(always)]
-    pub(crate) const fn start_for(self, va: u64, tbi: bool, features: Features) -> Option<u32> {
-        match self.granule.s1_start(self.txsz, features) {
+    pub(crate) const fn start_for(self, va: u64, tbi: bool, features: Features) -> Option<Level> {
+        match self.granule.s1_start(self.txsz, self.oa.ds(), features) {
             Some(start) if !self.epd && va_in_range(va, self.upper, 64 - self.txsz, tbi) => {
                 Some(start)
             }
@@ -489,9 +577,9 @@ impl S1Range {
     /// addresses, which every tagged address the TLB keeps a translation of
     /// has ([`Cpu::cache`]): what a snapshot's TLB entry the walk made must
     /// meet.
-    pub(crate) const fn reaches(self, va: u64, features: Features, level: u32) -> bool {
+    pub(crate) const fn reaches(self, va: u64, features: Features, level: LeafLevel) -> bool {
         match self.start_for(va, self.tbi_instruction, features) {
-            Some(start) => self.granule.ends_at(start, level, features),
+            Some(start) => self.granule.ends_at(start, level, self.oa.ds(), features),
             None => false,
         }
     }
@@ -510,8 +598,9 @@ enum BaseHigh {
     /// Nowhere: `BADDR` is bits 47:1.
     None,
     /// Bits 5:2, `BADDR` bits 47:6 and the table at least 64-byte aligned:
-    /// with FEAT_LPA, the 64 KiB granule and `PS` 0b110 (the IMPLEMENTATION
-    /// DEFINED "BADDR expresses 52 bits for 64KB granule" FALSE without).
+    /// with FEAT_LPA2's `DS`, or with FEAT_LPA, the 64 KiB granule and `PS`
+    /// 0b110 (the IMPLEMENTATION DEFINED "BADDR expresses 52 bits for 64KB
+    /// granule" FALSE without FEAT_LPA).
     Bits5To2,
 }
 
@@ -527,36 +616,53 @@ enum DescriptorHigh {
     None,
     /// Bits 15:12, below every address the 64 KiB granule gives: with that
     /// granule where `PAMax` is 52 bits (the IMPLEMENTATION DEFINED
-    /// "descriptor[15:12] for 64KB granule are OA[51:48]" FALSE where it is
+    /// "descriptor\[15:12\] for 64KB granule are OA\[51:48\]" FALSE where it is
     /// less).
     Bits15To12,
+    /// Bits 51:50 in bits 9:8 (the descriptor's `SH` without `DS`) and bits
+    /// 49:48 in bits 49:48, a leaf's shareability `sh` the walk's own
+    /// (`TCR_ELx.SHn` or `VTCR_EL2.SH0`): with FEAT_LPA2's `DS`, which only
+    /// the 4 KiB and 16 KiB granules take.
+    Bits9To8And49To48 { sh: u8 },
 }
 
 /// How a walk's table base register and descriptors hold its addresses,
 /// and the size they must fit: what `S1TTWParams` and `S2TTWParams`' `ps`
-/// mean with the walk's granule on its processor. The one description
-/// both stages' walks read (R5).
+/// and `ds`, and under `ds` their `sh`, mean with the walk's granule on its
+/// processor. The one description both stages' walks read (R5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct OaLayout {
     /// The output address size (Arm `AArch64_PhysicalAddressSize` without
-    /// FEAT_LPA2's `DS` or FEAT_D128): `PS`'s, at most 52 bits with FEAT_LPA
-    /// and the 64 KiB granule and at most 48 otherwise, and at most
+    /// FEAT_D128): `PS`'s, at most 52 bits with FEAT_LPA and the 64 KiB
+    /// granule or FEAT_LPA2's `DS`, at most 48 otherwise, and at most
     /// `PAMax`. Every table address and output address must fit it
     /// ([`OaLayout::fits`]).
     bits: u32,
     base: BaseHigh,
     descriptor: DescriptorHigh,
+    /// The walk's FEAT_LPA2 `DS`, as [`Granule::effective_ds`] decided it,
+    /// kept as the layout was made with it: `descriptor` is
+    /// [`DescriptorHigh::Bits9To8And49To48`] exactly when it is on, as
+    /// [`OaLayout::of`], the one maker of a layout, makes it, `DS` never
+    /// applying to the 64 KiB granule, whose form is `Bits15To12`.
+    ds: Ds,
 }
 
 impl OaLayout {
-    /// The layout of a walk with `granule` under the encoded `PS` or `IPS`
-    /// `ps` on a processor implementing `features`.
+    /// The layout of a walk with `granule`, under FEAT_LPA2's `ds` or not
+    /// ([`Granule::effective_ds`]), and the encoded `PS` or `IPS` `ps`, on
+    /// a processor implementing `features`; `sh`, its register's `SH0` or
+    /// `SH1`, is its leaves' shareability under `ds`.
     #[inline(always)]
-    pub(crate) const fn of(ps: u64, granule: Granule, features: Features) -> Self {
+    pub(crate) const fn of(ps: u64, granule: Granule, ds: Ds, sh: u8, features: Features) -> Self {
         let pa_max = id::pa_bits(features);
         let k64 = matches!(granule, Granule::K64);
         let lpa = features.has(Feature::Lpa);
-        let format_max = if lpa && k64 { 52 } else { 48 };
+        let format_max = if lpa && granule.holds_52_bits(ds) {
+            52
+        } else {
+            48
+        };
         let max = if pa_max < format_max {
             pa_max
         } else {
@@ -565,16 +671,19 @@ impl OaLayout {
         let size = id::ADDRESS_SIZES[(ps & 7) as usize];
         Self {
             bits: if size < max { size } else { max },
-            base: if lpa && k64 && ps & 7 == PS_52 {
+            base: if ds.on() || (lpa && k64 && ps & 7 == PS_52) {
                 BaseHigh::Bits5To2
             } else {
                 BaseHigh::None
             },
             descriptor: if k64 && pa_max >= 52 {
                 DescriptorHigh::Bits15To12
+            } else if ds.on() {
+                DescriptorHigh::Bits9To8And49To48 { sh }
             } else {
                 DescriptorHigh::None
             },
+            ds,
         }
     }
 
@@ -611,6 +720,30 @@ impl OaLayout {
         match self.descriptor {
             DescriptorHigh::None => low,
             DescriptorHigh::Bits15To12 => low | (((desc >> 12) & 0xF) << 48),
+            DescriptorHigh::Bits9To8And49To48 { .. } => {
+                low | (((desc >> 8) & 3) << 50) | (desc & DESC_OA_49_48)
+            }
+        }
+    }
+
+    /// Whether the walk takes FEAT_LPA2's 52-bit forms, `DS`, as the layout
+    /// was made with it ([`OaLayout::of`]): which also decides where the
+    /// walk has blocks ([`Granule::block_at`]) and how small its `TxSZ` can
+    /// be.
+    #[inline(always)]
+    pub(crate) const fn ds(self) -> Ds {
+        self.ds
+    }
+
+    /// The shareability a block or page descriptor `desc` gives: its `SH`,
+    /// bits 9:8, or where those are address bits the walk's own
+    /// ([`DescriptorHigh::Bits9To8And49To48`]; Arm
+    /// `AArch64_S1NextWalkStateLeaf`, `AArch64_S2NextWalkStateLeaf`).
+    #[inline(always)]
+    pub(crate) const fn shareability(self, desc: u64) -> u8 {
+        match self.descriptor {
+            DescriptorHigh::None | DescriptorHigh::Bits15To12 => ((desc >> 8) & 3) as u8,
+            DescriptorHigh::Bits9To8And49To48 { sh } => sh,
         }
     }
 }
@@ -619,9 +752,14 @@ impl OaLayout {
 /// those below the granule or the leaf's size are not the address.
 const DESC_OA: u64 = 0x0000_FFFF_FFFF_FFFF;
 
+/// Bits 49:48 of a descriptor, the same bits of its address with
+/// FEAT_LPA2's `DS` ([`DescriptorHigh::Bits9To8And49To48`]).
+const DESC_OA_49_48: u64 = 0x0003_0000_0000_0000;
+
 /// A translation table base register's `BADDR`, bits 47:1, whose bits 5:2
-/// FEAT_LPA's 52-bit base makes bits 51:48 ([`OaLayout::table_base`]); its
-/// bit 0 is `CnP` (FEAT_TTCNP), which has no effect on one processor.
+/// a 52-bit base (FEAT_LPA's, FEAT_LPA2's) makes bits 51:48
+/// ([`OaLayout::table_base`]); its bit 0 is `CnP` (FEAT_TTCNP), which has
+/// no effect on one processor.
 pub(crate) const TTB_BADDR: u64 = 0x0000_FFFF_FFFF_FFFE;
 
 /// What a stage 1 walk of one regime reads from its registers (Arm
@@ -629,15 +767,13 @@ pub(crate) const TTB_BADDR: u64 = 0x0000_FFFF_FFFF_FFFE;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct S1Params {
     pub(crate) regime: Regime,
-    /// Which addresses the range's walks translate and where they can end.
+    /// Which addresses the range's walks translate, where they can end and
+    /// how their tables hold addresses.
     pub(crate) range: S1Range,
     /// The range's table base register.
     pub(crate) ttbr: u64,
     /// Hierarchical permissions disabled (FEAT_HPDS).
     pub(crate) hpd: bool,
-    /// How the walk's addresses are held, and the output address size, from
-    /// `IPS` or `PS` with the range's granule.
-    pub(crate) oa: OaLayout,
     pub(crate) mair: u64,
     pub(crate) wxn: bool,
 }
@@ -723,7 +859,7 @@ impl<L: Levels> Cpu<L> {
     pub(crate) fn pac_effective_txsz(&self, regime: Regime, upper: bool) -> u32 {
         let features = self.imp.features;
         let range = self.s1_range(regime, upper);
-        let min = range.granule.s1_min_txsz(features);
+        let min = range.granule.s1_min_txsz(range.oa.ds(), features);
         let max = range.granule.max_txsz(features);
         range.txsz.clamp(min, max)
     }
@@ -743,26 +879,22 @@ impl<L: Levels> Cpu<L> {
                     self.sys.ttbr0_el1
                 };
                 let up = u32::from(upper);
-                let range = self.s1_range(regime, upper);
                 S1Params {
                     regime,
-                    range,
+                    range: self.s1_range(regime, upper),
                     ttbr,
                     hpd: hpds && (tcr >> (TCR_EL1_HPD0 + up)) & 1 == 1,
-                    oa: OaLayout::of(tcr >> TCR_EL1_IPS, range.granule, self.imp.features),
                     mair: self.sys.mair_el1,
                     wxn: self.sys.sctlr_el1 & sctlr::WXN != 0,
                 }
             }
             Regime::El2 => {
                 let el2 = self.el2();
-                let range = self.s1_range(regime, false);
                 S1Params {
                     regime,
-                    range,
+                    range: self.s1_range(regime, false),
                     ttbr: el2.ttbr0,
                     hpd: hpds && el2.tcr & TCR_EL2_HPD != 0,
-                    oa: OaLayout::of(el2.tcr >> TCR_EL2_PS, range.granule, self.imp.features),
                     mair: el2.mair,
                     wxn: el2.sctlr & sctlr::WXN != 0,
                 }
@@ -793,12 +925,17 @@ mod tests {
 
     /// `AArch64_PhysicalAddressSize`: the encoded size, at most `PAMax`, 44
     /// bits without FEAT_LPA and 52 with it, and at most 48 bits but with
-    /// FEAT_LPA and the 64 KiB granule.
+    /// FEAT_LPA and the 64 KiB granule or FEAT_LPA2's `DS`.
     #[test]
     fn output_sizes_stop_at_the_physical_address_size() {
         let a57 = Features::of(&[]);
         let lpa = Features::of(&[Feature::Lpa]);
-        let bits = |ps, granule, features| OaLayout::of(ps, granule, features).bits;
+        let lpa2 = Features::of(&[Feature::Lpa2, Feature::Lva]);
+        let both = Features::of(&[Feature::Lpa, Feature::Lpa2, Feature::Lva]);
+        let bits = |ps, granule: Granule, features| {
+            let ds = granule.effective_ds(false, features);
+            OaLayout::of(ps, granule, ds, 0, features).bits
+        };
         for granule in [Granule::K4, Granule::K16, Granule::K64] {
             assert_eq!(bits(0b000, granule, a57), 32);
             assert_eq!(bits(0b011, granule, a57), 42);
@@ -811,5 +948,15 @@ mod tests {
         assert_eq!(bits(0b110, Granule::K16, lpa), 48, "beyond 16 KiB's");
         assert_eq!(bits(0b110, Granule::K64, lpa), 52);
         assert_eq!(bits(0b111, Granule::K64, lpa), 52, "56 bits, beyond PAMax");
+        let ds_bits = |ps, granule: Granule, features| {
+            let ds = granule.effective_ds(true, features);
+            OaLayout::of(ps, granule, ds, 0, features).bits
+        };
+        for granule in [Granule::K4, Granule::K16] {
+            assert_eq!(ds_bits(0b110, granule, both), 52, "DS");
+            assert_eq!(ds_bits(0b111, granule, both), 52, "DS, 56 bits");
+            assert_eq!(bits(0b110, granule, both), 48, "DS clear");
+            assert_eq!(ds_bits(0b110, granule, lpa2), 44, "DS, PAMax 44");
+        }
     }
 }

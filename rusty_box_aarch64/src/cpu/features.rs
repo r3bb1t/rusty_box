@@ -244,6 +244,14 @@ pub(crate) enum Feature {
     /// FEAT_LVA: 52-bit virtual addresses with the 64 KiB granule
     /// (`AArch64_S1MinTxSZ` 12). No encoding of its own.
     Lva,
+    /// FEAT_LPA2: 52-bit addresses with the 4 KiB and 16 KiB granules where
+    /// `TCR_EL1.DS`, `TCR_EL2.DS` or `VTCR_EL2.DS` is set: input addresses
+    /// down to a `TxSZ` of 12, walks from level -1 with the 4 KiB granule,
+    /// blocks at level 0 (4 KiB) and level 1 (16 KiB), a descriptor's bits
+    /// 9:8 holding address bits 51:50 and its shareability taken from the
+    /// `TCR`, and a table base register's bits 5:2 address bits 51:48. It
+    /// needs FEAT_LVA (`FEAT_LPA2 ==> FEAT_LVA`). No encoding of its own.
+    Lpa2,
 }
 
 // `Feature::ALL` is in declaration order, and each feature has a bit of a
@@ -268,7 +276,7 @@ const _: () = {
 
 impl Feature {
     /// Every feature, in declaration order.
-    pub(crate) const ALL: [Feature; 74] = [
+    pub(crate) const ALL: [Feature; 75] = [
         Feature::Base,
         Feature::Fp,
         Feature::AdvSimd,
@@ -343,6 +351,7 @@ impl Feature {
         Feature::Ttst,
         Feature::Lpa,
         Feature::Lva,
+        Feature::Lpa2,
     ];
 }
 
@@ -427,6 +436,7 @@ impl Feature {
             Self::Ttst => Some("FEAT_TTST"),
             Self::Lpa => Some("FEAT_LPA"),
             Self::Lva => Some("FEAT_LVA"),
+            Self::Lpa2 => Some("FEAT_LPA2"),
         }
     }
 
@@ -479,6 +489,7 @@ impl Feature {
                 | Self::Ttst
                 | Self::Lpa
                 | Self::Lva
+                | Self::Lpa2
         )
     }
 
@@ -553,9 +564,10 @@ impl Features {
     /// and SHA-256, QARMA5 as the pointer authentication algorithm,
     /// FEAT_FPAC and FEAT_FPACCOMBINE, FEAT_SSBS and FEAT_SSBS2,
     /// FEAT_RPRES, every translation granule at both stages, FEAT_TTST, and
-    /// 52-bit physical and virtual addresses (FEAT_LPA, FEAT_LVA).
-    /// Not FEAT_SVE: Streaming SVE mode is its only SVE. Not
-    /// FEAT_DoubleLock, the one Cortex-A57 feature Armv9.0 forbids.
+    /// 52-bit physical and virtual addresses with every granule (FEAT_LPA,
+    /// FEAT_LVA, FEAT_LPA2). Not FEAT_SVE: Streaming SVE mode is its only
+    /// SVE. Not FEAT_DoubleLock, the one Cortex-A57 feature Armv9.0
+    /// forbids.
     pub(crate) const ARMV9P2: Self = Self::of(&[
         Feature::Base,
         Feature::Fp,
@@ -635,6 +647,7 @@ impl Features {
         Feature::Ttst,
         Feature::Lpa,
         Feature::Lva,
+        Feature::Lpa2,
     ]);
 
     /// The set of `features`.
