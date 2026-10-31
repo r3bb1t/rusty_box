@@ -505,12 +505,14 @@ impl Feature {
 impl Feature {
     /// The feature's bit of a [`Features`] set, whose 128 bits hold every
     /// feature (checked where [`Feature::ALL`] is built).
+    #[inline(always)]
     const fn bit(self) -> u128 {
         1 << self as u32
     }
 }
 
-/// A set of [`Feature`]s: what one processor implements, a bit each.
+/// A set of [`Feature`]s: what one processor implements, one bit per
+/// feature, in declaration order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct Features(u128);
 

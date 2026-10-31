@@ -503,6 +503,9 @@ pub(crate) enum WriteEffect {
     /// ([`El2Reg::feeds_timers`]) that changed what they read of the EL2
     /// registers ([`Cpu::el2_timer_inputs`]). Re-evaluate the timer outputs.
     Timer,
+    /// A control of Software Step, a breakpoint or a watchpoint changed:
+    /// [`Cpu::debug_controls_changed`].
+    Debug,
 }
 
 /// The regime whose translations a register is part of: the one list of
@@ -514,7 +517,8 @@ enum TranslationRegister {
     /// The EL1&0 regime's ([`El10Context`]): its stage 1 registers
     /// (`SCTLR_EL1`, `TCR_EL1`, `TTBR0_EL1`, `TTBR1_EL1`, `MAIR_EL1`),
     /// stage 2's (`VTTBR_EL2`, `VTCR_EL2`), and `HCR_EL2`, whose `VM`, `DC`,
-    /// `PTW` and `TGE` decide which walks are made.
+    /// `PTW` and `TGE` decide which walks are made and whose `CD` what
+    /// memory they make.
     El10,
     /// The EL2 regime's ([`El2RegimeContext`]): `SCTLR_EL2`, `TCR_EL2`,
     /// `TTBR0_EL2` and `MAIR_EL2`.
@@ -626,6 +630,23 @@ const MDSCR_TDCC: u64 = 1 << 12;
 /// `MDSCR_EL1.KDE`: debug exceptions are enabled at the EL they target.
 pub(super) const MDSCR_KDE: u64 = 1 << 13;
 
+/// `MDSCR_EL1.MDE`: breakpoints and watchpoints generate debug exceptions.
+pub(super) const MDSCR_MDE: u64 = 1 << 15;
+
+/// The `DBGBCR<n>_EL1` fields of a processor with no FEAT_BWE, FEAT_ABLE,
+/// FEAT_RME or FEAT_Debugv8p9, with EL2 or without (Arm's
+/// `DBGBCR<n>_EL1`): E (0), PMC (2:1), BAS (8:5), HMC (13), SSC (15:14),
+/// LBN (19:16) and BT (23:20). Every other bit is RES0, and is not stored.
+/// HMC and SSC are fields with EL2 or without; without it every nonzero
+/// value of theirs is reserved, which the matching treats as disabled
+/// (`CheckValidStateMatch`), as it treats `BAS`, RES1 without AArch32.
+pub(super) const DBGBCR_FIELDS: u64 = 0x00FF_E1E7;
+
+/// The `DBGWCR<n>_EL1` fields: E (0), PAC (2:1), LSC (4:3), BAS (12:5),
+/// HMC (13), SSC (15:14), LBN (19:16), WT (20) and MASK (28:24). Every other
+/// bit is RES0, and is not stored.
+pub(super) const DBGWCR_FIELDS: u64 = 0x1F1F_FFFF;
+
 /// `OSDLR_EL1.DLK`: the OS Double Lock is locked (FEAT_DoubleLock; RES0
 /// without it).
 pub(super) const OSDLR_DLK: u64 = 1;
@@ -633,6 +654,9 @@ pub(super) const OSDLR_DLK: u64 = 1;
 /// `DBGPRCR_EL1.CORENPDRQ`: the core is asked not to power down, which
 /// overrides the OS Double Lock.
 pub(super) const DBGPRCR_CORENPDRQ: u64 = 1;
+
+/// The claim tags `DBGCLAIMSET_EL1` sets and `DBGCLAIMCLR_EL1` clears.
+pub(super) const DBGCLAIM_TAGS: u64 = 0xFF;
 
 /// `RMR_ELx.AA64`: the processor resets into AArch64. RAO/WI, as there is
 /// no AArch32 to reset into.
@@ -667,7 +691,7 @@ const MDSCR_SAVE_RESTORE: u64 =
 /// TTA, EnSPM, EHBWE, of features no model implements), and reads as zero
 /// (Arm ARM, DDI 0487, the `MDSCR_EL1` description).
 pub(super) const MDSCR_FIELDS: u64 =
-    MDSCR_SAVE_RESTORE | MDSCR_SS | MDSCR_TDCC | MDSCR_KDE | (1 << 15);
+    MDSCR_SAVE_RESTORE | MDSCR_SS | MDSCR_TDCC | MDSCR_KDE | MDSCR_MDE;
 
 /// `OSLSR_EL1.OSLK`: the OS Lock is locked.
 pub(super) const OSLSR_OSLK: u64 = 1 << 1;
@@ -1281,7 +1305,7 @@ impl<L: Levels> Cpu<L> {
             // `dbgclaimset_read` and `DBGCLAIMCLR_EL1` have them.
             DBGCLAIMSET_EL1 => {
                 self.debug_check(el, MDCR_TDA)?;
-                0xFF
+                DBGCLAIM_TAGS
             }
             DBGCLAIMCLR_EL1 => {
                 self.debug_check(el, MDCR_TDA)?;
@@ -1362,15 +1386,30 @@ impl<L: Levels> Cpu<L> {
         regs[point.n]
     }
 
-    /// The storage of breakpoint or watchpoint register `point`.
-    fn debug_point_mut(&mut self, point: DebugPoint) -> &mut u64 {
-        let regs = match point.reg {
-            DebugPointReg::Bvr => &mut self.sys.dbgbvr,
-            DebugPointReg::Bcr => &mut self.sys.dbgbcr,
-            DebugPointReg::Wvr => &mut self.sys.dbgwvr,
-            DebugPointReg::Wcr => &mut self.sys.dbgwcr,
-        };
-        &mut regs[point.n]
+    /// Write breakpoint or watchpoint register `point`. `DBGBVR<n>` keeps
+    /// all 64 bits, since `DBGBCR<n>.BT` decides which of them its
+    /// comparison reads; bits 1:0 of `DBGWVR<n>` are RES0; a control
+    /// register keeps its fields alone, and its write changes what is armed.
+    fn debug_point_write(&mut self, point: DebugPoint, value: u64) -> WriteEffect {
+        let n = point.n;
+        match point.reg {
+            DebugPointReg::Bvr => {
+                self.sys.dbgbvr[n] = value;
+                WriteEffect::None
+            }
+            DebugPointReg::Bcr => {
+                self.sys.dbgbcr[n] = value & DBGBCR_FIELDS;
+                WriteEffect::Debug
+            }
+            DebugPointReg::Wvr => {
+                self.sys.dbgwvr[n] = value & !3;
+                WriteEffect::None
+            }
+            DebugPointReg::Wcr => {
+                self.sys.dbgwcr[n] = value & DBGWCR_FIELDS;
+                WriteEffect::Debug
+            }
+        }
     }
 
     /// `MSR`: write `value` to the register `key` names at the current EL.
@@ -1694,7 +1733,7 @@ impl<L: Levels> Cpu<L> {
                     MDSCR_SAVE_RESTORE
                 };
                 self.sys.mdscr_el1 = (value & MDSCR_FIELDS & !kept) | (self.sys.mdscr_el1 & kept);
-                WriteEffect::None
+                WriteEffect::Debug
             }
             // A write to a save/restore view sets the data register from bits
             // [31:0] and leaves its flag as it is, at either state of the OS
@@ -1740,12 +1779,12 @@ impl<L: Levels> Cpu<L> {
             }
             DBGCLAIMSET_EL1 => {
                 self.debug_check(el, MDCR_TDA)?;
-                self.sys.dbgclaim |= value & 0xFF;
+                self.sys.dbgclaim |= value & DBGCLAIM_TAGS;
                 WriteEffect::None
             }
             DBGCLAIMCLR_EL1 => {
                 self.debug_check(el, MDCR_TDA)?;
-                self.sys.dbgclaim &= !(value & 0xFF);
+                self.sys.dbgclaim &= !(value & DBGCLAIM_TAGS);
                 WriteEffect::None
             }
             _ => {
@@ -1753,8 +1792,7 @@ impl<L: Levels> Cpu<L> {
                     return Err(SysRegError::Undefined);
                 };
                 self.debug_check(el, MDCR_TDA)?;
-                *self.debug_point_mut(point) = value;
-                WriteEffect::None
+                self.debug_point_write(point, value)
             }
         };
         Ok(self.translation_effect(before, effect))
@@ -1828,7 +1866,13 @@ impl<L: Levels> Cpu<L> {
                 (true, WriteEffect::None) => WriteEffect::Timer,
                 // A write has one effect to return: the timers' sampling is
                 // asked for here, the translation's returned.
-                (true, WriteEffect::FlushTlb | WriteEffect::El10Context | WriteEffect::Timer) => {
+                (
+                    true,
+                    WriteEffect::FlushTlb
+                    | WriteEffect::El10Context
+                    | WriteEffect::Timer
+                    | WriteEffect::Debug,
+                ) => {
                     self.apply_write_effect(WriteEffect::Timer);
                     effect
                 }
@@ -1924,6 +1968,7 @@ impl<L: Levels> Cpu<L> {
                     (WriteEffect::FlushTlb, None) => WriteEffect::FlushTlb,
                     (WriteEffect::El10Context, None) => WriteEffect::El10Context,
                     (WriteEffect::Timer, None | Some(_)) => WriteEffect::Timer,
+                    (WriteEffect::Debug, None | Some(_)) => WriteEffect::Debug,
                 };
                 self.apply_write_effect(applied);
                 Ok(applied)
@@ -1962,6 +2007,7 @@ impl<L: Levels> Cpu<L> {
             WriteEffect::FlushTlb => self.flush_tlb(),
             WriteEffect::El10Context => self.el10_context_changed(),
             WriteEffect::Timer => self.timer_dirty = true,
+            WriteEffect::Debug => self.debug_controls_changed(),
         }
     }
 }

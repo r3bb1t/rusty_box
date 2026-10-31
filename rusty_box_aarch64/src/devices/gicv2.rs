@@ -75,7 +75,7 @@
 use rusty_box_core::snap::{SnapRead, SnapResult, SnapWrite};
 use rusty_box_core::SnapError;
 
-use crate::bus::{AccessWidth, RegOffset};
+use crate::bus::{read_by_words, write_by_words, AccessWidth, RegOffset};
 
 /// SGIs, PPIs and QEMU `virt`'s 256 SPIs (`num-irq` = `NUM_IRQS + 32`).
 pub const NUM_IRQ: usize = 288;
@@ -819,17 +819,9 @@ impl GicV2 {
     }
 
     pub fn cpu_read(&mut self, offset: RegOffset, width: AccessWidth) -> u64 {
-        let off = offset.get();
-        match width {
-            AccessWidth::Dword => {
-                let low = self.cpu_read_register(off);
-                let high = self.cpu_read_register(off + 4);
-                u64::from(low) | u64::from(high) << 32
-            }
-            AccessWidth::Byte | AccessWidth::Half | AccessWidth::Word => {
-                u64::from(self.cpu_read_register(off))
-            }
-        }
+        read_by_words(offset, width, |offset| {
+            u64::from(self.cpu_read_register(offset.get()))
+        })
     }
 
     /// QEMU `gic_cpu_read`, with the Group 1 aliases `GICC_AIAR` (0x20) and
@@ -854,16 +846,9 @@ impl GicV2 {
     }
 
     pub fn cpu_write(&mut self, offset: RegOffset, width: AccessWidth, value: u64) {
-        let off = offset.get();
-        match width {
-            AccessWidth::Dword => {
-                self.cpu_write_register(off, value as u32);
-                self.cpu_write_register(off + 4, (value >> 32) as u32);
-            }
-            AccessWidth::Byte | AccessWidth::Half | AccessWidth::Word => {
-                self.cpu_write_register(off, value as u32)
-            }
-        }
+        write_by_words(offset, width, value, |offset, word| {
+            self.cpu_write_register(offset.get(), word as u32);
+        });
         self.update();
     }
 

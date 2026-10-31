@@ -22,7 +22,7 @@ use super::features::Feature;
 use super::mmu::DataAccess;
 use super::op::Extend;
 use super::{Cpu, El, Levels};
-use crate::bus::PhysBus;
+use crate::bus::{AccessWidth, PhysBus};
 
 /// One 128-bit pointer authentication key, `APxxKeyHi_EL1:APxxKeyLo_EL1`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -691,7 +691,13 @@ impl<L: Levels> Cpu<L> {
         let address = authenticated.wrapping_add(offset);
         let syndrome =
             move || (!bit(insn, 11)).then_some(AccessSyndrome::load(3, Extend::Zero, rt));
-        let value = self.read_gpr(bus, address, 3, DataAccess::NORMAL, syndrome)?;
+        let value = self.read_gpr(
+            bus,
+            address,
+            AccessWidth::Dword,
+            DataAccess::NORMAL,
+            syndrome,
+        )?;
         self.set_x_or_zr(rt, value);
         if bit(insn, 11) {
             self.set_x_or_sp(rn, address);

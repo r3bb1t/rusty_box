@@ -38,7 +38,7 @@ use super::fp::{fp_mul_add, FpEnv, FpType};
 use super::mmu::DataAccess;
 use super::sve::{group, int, Esize, Pv, Zv};
 use super::{Cpu, Levels};
-use crate::bus::PhysBus;
+use crate::bus::{AccessWidth, PhysBus};
 use crate::softfloat::{self as sf, FusedMulAdd};
 
 /// The element size of a tile, `esize`: also how many tiles the array
@@ -706,12 +706,12 @@ impl<L: Levels> Cpu<L> {
         size: TileSize,
     ) -> Result<u128, Fault> {
         match size {
-            TileSize::Q => self.read_mem_u128(bus, addr, DataAccess::NORMAL),
+            TileSize::Q => self.read_mem_u128(bus, addr, DataAccess::SCALABLE),
             _ => Ok(u128::from(self.read_mem(
                 bus,
                 addr,
-                size.log2_bytes(),
-                DataAccess::NORMAL,
+                AccessWidth::from_size_field(size.log2_bytes()),
+                DataAccess::SCALABLE,
             )?)),
         }
     }
@@ -725,13 +725,13 @@ impl<L: Levels> Cpu<L> {
         value: u128,
     ) -> Result<(), Fault> {
         match size {
-            TileSize::Q => self.write_mem_u128(bus, addr, value, DataAccess::NORMAL),
+            TileSize::Q => self.write_mem_u128(bus, addr, value, DataAccess::SCALABLE),
             _ => self.write_mem(
                 bus,
                 addr,
-                size.log2_bytes(),
+                AccessWidth::from_size_field(size.log2_bytes()),
                 value as u64,
-                DataAccess::NORMAL,
+                DataAccess::SCALABLE,
             ),
         }
     }

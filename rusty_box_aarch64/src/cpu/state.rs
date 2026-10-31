@@ -4,15 +4,19 @@
 use rusty_box_core::snap::{SnapRead, SnapResult, SnapWrite};
 use rusty_box_core::SnapError;
 
+use super::debug::Stepped;
 use super::el2::{El2State, El2Storage};
 use super::features::{Feature, LeveledImplementation};
 use super::mmu::{El10Context, El2RegimeContext, TlbContext};
 use super::regs::{CpuState, CpuStateEl2, PstateRefusal, Reg, RegClass, VReg};
-use super::sysreg::{MDSCR_FIELDS, OSDLR_DLK, RMR_RR};
+use super::sysreg::{
+    DBGBCR_FIELDS, DBGCLAIM_TAGS, DBGPRCR_CORENPDRQ, DBGWCR_FIELDS, MDSCR_FIELDS, OSDLR_DLK,
+    OSLSR_OSLK, RMR_RR,
+};
 use super::timer::VirtualCount;
 use super::wait::{EventRegister, Wait};
 use super::{
-    pauth, sme, Activity, Btype, Cpu, El, ExclusiveMonitor, Levels, Pstate, SysRegs, PC_HISTORY,
+    id, pauth, sme, Activity, Btype, Cpu, El, ExclusiveMonitor, Levels, Pstate, SysRegs, PC_HISTORY,
 };
 
 /// How a snapshot names the processor's activity.
@@ -106,8 +110,8 @@ impl SysRegs {
     }
 
     /// The inverse of [`SysRegs::to_array`]. Refuses a Debug Communications
-    /// Channel data register wider than its 32 bits, and an `MDSCR_EL1` or
-    /// `RMR_ELx` with a bit set that no write stores.
+    /// Channel data register wider than its 32 bits, and any of the debug
+    /// registers or `RMR_ELx` with a bit set that no write stores.
     fn from_array(a: [u64; SYSREG_COUNT]) -> SnapResult<Self> {
         let [sctlr_el1, actlr_el1, cpacr_el1, ttbr0_el1, ttbr1_el1, tcr_el1, spsr_el1, elr_el1, esr_el1, far_el1, afsr0_el1, afsr1_el1, par_el1, mair_el1, amair_el1, vbar_el1, contextidr_el1, tpidr_el0, tpidrro_el0, tpidr_el1, tpidr2_el0, smcr_el1, csselr_el1, cntkctl_el1, cntfrq_el0, cntp_ctl_el0, cntp_cval_el0, cntv_ctl_el0, cntv_cval_el0, mdscr_el1, mdccint_el1, oslsr_el1, osdlr_el1, oseccr_el1, dbgprcr_el1, dbgclaim, bvr0, bvr1, bcr0, bcr1, wvr0, wvr1, wcr0, wcr1, disr_el1, dtrrx, dtrtx, rvbar, rmr] =
             a;
@@ -122,6 +126,28 @@ impl SysRegs {
         let dtrtx = data_register(dtrtx)?;
         if mdscr_el1 & !MDSCR_FIELDS != 0 {
             return Err(SnapError::Invalid("MDSCR_EL1 with a RES0 bit set"));
+        }
+        if (bcr0 | bcr1) & !DBGBCR_FIELDS != 0 {
+            return Err(SnapError::Invalid("DBGBCR_EL1 with a RES0 bit set"));
+        }
+        if (wcr0 | wcr1) & !DBGWCR_FIELDS != 0 || (wvr0 | wvr1) & 3 != 0 {
+            return Err(SnapError::Invalid(
+                "a watchpoint register with a RES0 bit set",
+            ));
+        }
+        if oslsr_el1 & !OSLSR_OSLK != id::OSLSR_EL1_RESET & !OSLSR_OSLK {
+            return Err(SnapError::Invalid(
+                "OSLSR_EL1 with a bit other than OSLK changed",
+            ));
+        }
+        if osdlr_el1 & !OSDLR_DLK != 0
+            || oseccr_el1 >> 32 != 0
+            || dbgprcr_el1 & !DBGPRCR_CORENPDRQ != 0
+            || dbgclaim & !DBGCLAIM_TAGS != 0
+        {
+            return Err(SnapError::Invalid(
+                "a debug register with a bit set that no write stores",
+            ));
         }
         Ok(Self {
             sctlr_el1,
@@ -217,6 +243,10 @@ impl<L: Levels> Cpu<L> {
             traces,
             trace_break,
             in_guarded_page,
+            step_each,
+            watch_armed,
+            stepped,
+            should_advance_ss,
             activity,
             icount: _,
             retired,
@@ -246,6 +276,10 @@ impl<L: Levels> Cpu<L> {
         traces.flush();
         *trace_break = true;
         *in_guarded_page = false;
+        *step_each = false;
+        *watch_armed = false;
+        *stepped = Stepped::Nothing;
+        *should_advance_ss = false;
         *activity = Activity::Running;
         *timer_dirty = true;
         *irq_line = false;
@@ -429,6 +463,7 @@ impl<L: Levels> Cpu<L> {
             w.write_u64(t.get())?;
         }
         w.write_bool(self.event_register())?;
+        w.write_u8(self.stepped.code())?;
         w.write_u64(self.icount)?;
         w.write_u64(self.retired)?;
         self.tlb.save(w)?;
@@ -548,6 +583,15 @@ impl<L: Levels> Cpu<L> {
             va: r.read_u64()?,
             bytes: r.read_u64()?,
         };
+        if monitor.armed
+            && !(monitor.bytes.is_power_of_two()
+                && monitor.bytes <= 16
+                && monitor.addr >> id::pa_bits(self.imp.features) == 0)
+        {
+            return Err(SnapError::Invalid(
+                "exclusive monitor armed on what no load-exclusive marks",
+            ));
+        }
         let activity = match r.read_u8()? {
             activity_tag::RUNNING => Activity::Running,
             activity_tag::INTERRUPT => Activity::Waiting(Wait::Interrupt),
@@ -574,6 +618,9 @@ impl<L: Levels> Cpu<L> {
             ));
         }
         let event = r.read_bool()?;
+        let stepped = Stepped::from_code(r.read_u8()?).ok_or(SnapError::Invalid(
+            "Software Step names no kind of instruction stepped",
+        ))?;
         let icount = r.read_u64()?;
         let retired = r.read_u64()?;
         if retired > icount {
@@ -615,6 +662,8 @@ impl<L: Levels> Cpu<L> {
         self.fpcr = fpcr;
         self.fpsr = fpsr;
         self.sys = sys;
+        self.derive_debug_controls();
+        self.stepped = stepped;
         self.monitor = monitor;
         self.activity = activity;
         self.icount = icount;
@@ -756,6 +805,34 @@ mod tests {
     /// PSTATE, V0-V31, FPCR and FPSR.
     const SYSREGS_AT: usize = 16 + 4 + 8 + 8 + (31 + 4) * 8 + 32 * 16 + 2 * 8;
 
+    /// Where an image's exclusive monitor starts on a processor without
+    /// EL2, whose image holds no EL2 registers: its armed flag, then its
+    /// physical address, virtual address and size.
+    const MONITOR_AT: usize = SYSREGS_AT + SYSREG_COUNT * 8;
+
+    /// A monitor armed on anything a load-exclusive cannot mark is refused:
+    /// every store compares its address against it.
+    #[test]
+    fn a_processor_snapshot_with_a_monitor_no_load_exclusive_arms_is_refused() {
+        let mut image = std::vec::Vec::new();
+        cpu().save(&mut image).expect("save");
+        let restored = |addr: u64, bytes: u64| {
+            let mut changed = image.clone();
+            changed[MONITOR_AT] = 1;
+            changed[MONITOR_AT + 1..MONITOR_AT + 9].copy_from_slice(&addr.to_le_bytes());
+            changed[MONITOR_AT + 17..MONITOR_AT + 25].copy_from_slice(&bytes.to_le_bytes());
+            let mut source: &[u8] = &changed;
+            cpu().restore(&mut source).is_ok()
+        };
+        assert!(restored(0x4000_0000, 8));
+        assert!(restored(0x4000_0000, 16));
+        assert!(!restored(u64::MAX, 16), "the end overflows");
+        assert!(!restored(1 << 44, 8), "past the physical address size");
+        assert!(!restored(0x4000_0000, 3), "not an access size");
+        assert!(!restored(0x4000_0000, 0), "not an access size");
+        assert!(!restored(0x4000_0000, 32), "wider than any exclusive");
+    }
+
     #[test]
     fn a_processor_snapshot_with_a_debug_data_register_wider_than_32_bits_is_refused() {
         let mut c = cpu();
@@ -891,6 +968,58 @@ mod tests {
             armv9().sys.to_array(),
             "a refused image changes nothing"
         );
+    }
+
+    /// `OSLSR_EL1`, `OSDLR_EL1`, `OSECCR_EL1`, `DBGPRCR_EL1` and the claim
+    /// tags, at their places in [`SysRegs::to_array`], store only some of
+    /// their bits, and an image holding any other is refused.
+    #[test]
+    fn a_processor_snapshot_with_a_debug_bit_no_write_stores_is_refused() {
+        let mut image = std::vec::Vec::new();
+        cpu().save(&mut image).expect("save");
+        for (index, stored) in [
+            (31, OSLSR_OSLK),
+            (32, OSDLR_DLK),
+            (33, 0xFFFF_FFFF),
+            (34, DBGPRCR_CORENPDRQ),
+            (35, DBGCLAIM_TAGS),
+        ] {
+            let at = SYSREGS_AT + index * 8;
+            let mut value = [0; 8];
+            value.copy_from_slice(&image[at..at + 8]);
+            let value = u64::from_le_bytes(value);
+            for bit in 0..64 {
+                let mut other = image.clone();
+                other[at..at + 8].copy_from_slice(&(value ^ (1 << bit)).to_le_bytes());
+                assert_eq!(
+                    cpu().restore(&mut other.as_slice()).is_err(),
+                    stored & (1 << bit) == 0,
+                    "register {index}, bit {bit}"
+                );
+            }
+        }
+    }
+
+    /// `OSDLR_EL1.DLK` is RES0 on a processor without FEAT_DoubleLock.
+    #[test]
+    fn a_processor_snapshot_holding_the_double_lock_needs_the_feature() {
+        let armv9 = || {
+            Cpu::<NoEl2>::implementing(
+                CpuConfig {
+                    ips: ClockHz::BOCHS_DEFAULT,
+                    reset_pc: 0x1000,
+                },
+                Implementation {
+                    counter_hz: ClockHz::BOCHS_DEFAULT,
+                    ..Implementation::ARMV9P2
+                },
+            )
+        };
+        let mut image = std::vec::Vec::new();
+        armv9().save(&mut image).expect("save");
+        let at = SYSREGS_AT + 32 * 8;
+        image[at..at + 8].copy_from_slice(&OSDLR_DLK.to_le_bytes());
+        assert!(armv9().restore(&mut image.as_slice()).is_err());
     }
 
     /// An image is refused by a processor of another identity or another

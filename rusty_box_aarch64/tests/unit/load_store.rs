@@ -7,7 +7,8 @@
 //! Arm's `Mem` makes four aligned doubleword accesses at an address 8-byte
 //! aligned; and the single-copy atomic accesses of LDXP and STXP of words
 //! (`Mem{64}`) and, with FEAT_LSE2, of a pair of words in one 16-byte
-//! granule (`Mem`, `AllInSCAGranule`).
+//! granule of Normal Write-Back Shareable memory (`Mem`, `AllInSCAGranule`,
+//! `AArch64_MemSingleRead`).
 //!
 //! The processor runs at EL1 with the MMU off, so every data access is to
 //! Device-nGnRnE memory. The words are hand-assembled from the Arm ARM's
@@ -248,45 +249,195 @@ fn ldxp_and_stxp_of_words_are_one_doubleword_access() {
     );
 }
 
+/// `SCTLR_EL1.M` and `C`.
+const SCTLR_M: u64 = 1 << 0;
+const SCTLR_C: u64 = 1 << 2;
+/// `MAIR_EL1` attribute bytes: Normal Write-Back, Normal Non-cacheable,
+/// Normal Write-Back outer and Non-cacheable inner, and Device-nGnRnE.
+const NORMAL_WRITE_BACK: u64 = 0xFF;
+const NORMAL_NON_CACHEABLE: u64 = 0x44;
+const OUTER_WRITE_BACK_ONLY: u64 = 0xF4;
+const DEVICE: u64 = 0x00;
+/// A block descriptor's SH field: Inner, Outer and Non-shareable.
+const INNER_SHAREABLE: u64 = 0b11;
+const OUTER_SHAREABLE: u64 = 0b10;
+const NON_SHAREABLE: u64 = 0b00;
+
+/// Map the first 2 MiB of RAM, identity, as one block with MAIR attribute
+/// `attr` and shareability `sh`, and turn the MMU on with `SCTLR_EL1.C` as
+/// `cached` says, through tables in the RAM below `CODE`.
+fn map_block(cpu: &mut Cpu<NoEl2>, ram: &mut LoggedRam, attr: u64, sh: u64, cached: bool) {
+    const L1: usize = 0x1000;
+    const L2: usize = 0x2000;
+    const AF: u64 = 1 << 10;
+    let table = L2 as u64 | 0b11;
+    let block = AF | (sh << 8) | 0b01;
+    ram.bytes[L1..L1 + 8].copy_from_slice(&table.to_le_bytes());
+    ram.bytes[L2..L2 + 8].copy_from_slice(&block.to_le_bytes());
+    cpu.sys.mair_el1 = attr;
+    cpu.sys.tcr_el1 = 25;
+    cpu.sys.ttbr0_el1 = L1 as u64;
+    let c = if cached { SCTLR_C } else { 0 };
+    cpu.sys.sctlr_el1 = (cpu.sys.sctlr_el1 & !SCTLR_C) | SCTLR_M | c;
+    cpu.tlb.flush();
+}
+
+/// The data accesses LDP and STP of two words at `at` make, and the words
+/// they load and store, each pair checked against `loads` and `stores`. The
+/// first run of each fills the TLB, whose table walk the log shows; the
+/// second is the one checked.
+fn word_pair_accesses(
+    cpu: &mut Cpu<NoEl2>,
+    ram: &mut LoggedRam,
+    at: u64,
+    one_access: bool,
+    case: &str,
+) {
+    let (loads, stores) = if one_access {
+        (
+            std::vec![read(at, AccessWidth::Dword)],
+            std::vec![write(at, AccessWidth::Dword)],
+        )
+    } else {
+        (
+            std::vec![read(at, AccessWidth::Word), read(at + 4, AccessWidth::Word)],
+            std::vec![write(at, AccessWidth::Word), write(at + 4, AccessWidth::Word)],
+        )
+    };
+    let offset = at - DATA;
+    cpu.x[1] = at;
+    assert_eq!(step(cpu, ram, LDP_W), None);
+    assert_eq!(step(cpu, ram, LDP_W), None);
+    assert_eq!(ram.log, loads, "{case}");
+    let word = |first: u64| (0..4).fold(0, |w, i| w | ((first + i) << (8 * i)));
+    assert_eq!((cpu.x[2], cpu.x[3]), (word(offset), word(offset + 4)));
+
+    cpu.x[2] = 0x5555_5555;
+    cpu.x[3] = 0x6666_6666;
+    assert_eq!(step(cpu, ram, STP_W), None);
+    assert_eq!(ram.log, stores, "{case}");
+    let a = at as usize;
+    assert_eq!(
+        ram.bytes[a..a + 8],
+        0x6666_6666_5555_5555u64.to_le_bytes()
+    );
+}
+
 /// With FEAT_LSE2, LDP and STP of two words that lie in one 16-byte
-/// granule are one single-copy atomic doubleword access; across a granule
-/// boundary, and on a processor without FEAT_LSE2, they are two word
-/// accesses. The registers get the same words either way.
+/// granule of Normal Write-Back Shareable memory are one single-copy atomic
+/// doubleword access (Arm `AArch64_MemSingleRead`: `IsWBShareable`). Across
+/// a granule boundary, on a processor without FEAT_LSE2, and on any other
+/// memory they are two word accesses: the same words reach the registers,
+/// but a device gets the two accesses it answers.
 #[test]
-fn with_lse2_a_word_pair_in_one_granule_is_one_access() {
-    for (imp, offset, one_access) in [
-        (Implementation::ARMV9P2, 4, true),
-        (Implementation::ARMV9P2, 12, false),
-        (Implementation::CORTEX_A57, 4, false),
+fn with_lse2_a_word_pair_is_one_access_only_on_write_back_shareable_memory() {
+    const IN_GRANULE: u64 = DATA + 4;
+    const ACROSS_GRANULES: u64 = DATA + 12;
+    for (imp, attr, sh, cached, at, one_access, case) in [
+        (
+            Implementation::ARMV9P2,
+            NORMAL_WRITE_BACK,
+            INNER_SHAREABLE,
+            true,
+            IN_GRANULE,
+            true,
+            "Write-Back Inner Shareable",
+        ),
+        (
+            Implementation::ARMV9P2,
+            NORMAL_WRITE_BACK,
+            OUTER_SHAREABLE,
+            true,
+            IN_GRANULE,
+            true,
+            "Write-Back Outer Shareable",
+        ),
+        (
+            Implementation::ARMV9P2,
+            NORMAL_WRITE_BACK,
+            0b01,
+            true,
+            IN_GRANULE,
+            true,
+            "the reserved SH value, Outer Shareable by Arm's default",
+        ),
+        (
+            Implementation::ARMV9P2,
+            NORMAL_WRITE_BACK,
+            INNER_SHAREABLE,
+            true,
+            ACROSS_GRANULES,
+            false,
+            "across a 16-byte granule",
+        ),
+        (
+            Implementation::ARMV9P2,
+            NORMAL_WRITE_BACK,
+            NON_SHAREABLE,
+            true,
+            IN_GRANULE,
+            false,
+            "Non-shareable",
+        ),
+        (
+            Implementation::ARMV9P2,
+            NORMAL_WRITE_BACK,
+            INNER_SHAREABLE,
+            false,
+            IN_GRANULE,
+            false,
+            "SCTLR_EL1.C clear makes it Non-cacheable",
+        ),
+        (
+            Implementation::ARMV9P2,
+            NORMAL_NON_CACHEABLE,
+            INNER_SHAREABLE,
+            true,
+            IN_GRANULE,
+            false,
+            "Normal Non-cacheable",
+        ),
+        (
+            Implementation::ARMV9P2,
+            OUTER_WRITE_BACK_ONLY,
+            INNER_SHAREABLE,
+            true,
+            IN_GRANULE,
+            false,
+            "Write-Back outer alone",
+        ),
+        (
+            Implementation::ARMV9P2,
+            DEVICE,
+            NON_SHAREABLE,
+            true,
+            IN_GRANULE,
+            false,
+            "Device memory",
+        ),
+        (
+            Implementation::CORTEX_A57,
+            NORMAL_WRITE_BACK,
+            INNER_SHAREABLE,
+            true,
+            IN_GRANULE,
+            false,
+            "without FEAT_LSE2",
+        ),
     ] {
         let mut cpu = processor(imp);
         let mut ram = LoggedRam::new();
-        let at = DATA + offset;
-        cpu.x[1] = at;
-        let (loads, stores) = if one_access {
-            (
-                std::vec![read(at, AccessWidth::Dword)],
-                std::vec![write(at, AccessWidth::Dword)],
-            )
-        } else {
-            (
-                std::vec![read(at, AccessWidth::Word), read(at + 4, AccessWidth::Word)],
-                std::vec![write(at, AccessWidth::Word), write(at + 4, AccessWidth::Word)],
-            )
-        };
-        assert_eq!(step(&mut cpu, &mut ram, LDP_W), None);
-        assert_eq!(ram.log, loads, "{imp:?} at +{offset}");
-        let word = |first: u64| (0..4).fold(0, |w, i| w | ((first + i) << (8 * i)));
-        assert_eq!((cpu.x[2], cpu.x[3]), (word(offset), word(offset + 4)));
-
-        cpu.x[2] = 0x5555_5555;
-        cpu.x[3] = 0x6666_6666;
-        assert_eq!(step(&mut cpu, &mut ram, STP_W), None);
-        assert_eq!(ram.log, stores, "{imp:?} at +{offset}");
-        let a = at as usize;
-        assert_eq!(
-            ram.bytes[a..a + 8],
-            0x6666_6666_5555_5555u64.to_le_bytes()
-        );
+        map_block(&mut cpu, &mut ram, attr, sh, cached);
+        word_pair_accesses(&mut cpu, &mut ram, at, one_access, case);
     }
+}
+
+/// With the MMU off every data access is to Device-nGnRnE memory, so with
+/// FEAT_LSE2 too a pair of words is two word accesses, which a device with
+/// no 8-byte access answers.
+#[test]
+fn with_the_mmu_off_a_word_pair_is_two_accesses() {
+    let mut cpu = processor(Implementation::ARMV9P2);
+    let mut ram = LoggedRam::new();
+    word_pair_accesses(&mut cpu, &mut ram, DATA + 4, false, "MMU off");
 }

@@ -29,7 +29,7 @@ use core::convert::Infallible;
 
 use super::el2::{HCR_PTW, HCR_TGE, VTCR_EL2_DS, VTCR_EL2_SL2};
 use super::features::{Feature, Features};
-use super::memattr::{self, MemAttrs};
+use super::memattr::MemAttrs;
 use super::mmu::{
     Ipa, LeafLevel, Level, TranslationFault, WalkStart, WalkStop, PERM_EL0_R, PERM_EL0_W,
     PERM_EL0_X, PERM_EL1_R, PERM_EL1_W, PERM_EL1_X,
@@ -184,21 +184,14 @@ pub(crate) struct S2Walked {
     pub(crate) level: LeafLevel,
     /// The descriptor's `MemAttr` and `FnXS` (false without FEAT_XS), and
     /// the leaf's shareability — the descriptor's `SH`, or under FEAT_LPA2's
-    /// `DS` `VTCR_EL2.SH0` ([`OaLayout::shareability`]) — as they are: an
-    /// access reads only whether they make Device memory, and only address
-    /// translation decodes them ([`S2Walked::attrs`]).
+    /// `DS` `VTCR_EL2.SH0` ([`OaLayout::shareability`]) — as they are,
+    /// decoded by [`S2Walked::attrs`].
     memattr: u8,
     sh: u8,
     fnxs: bool,
 }
 
 impl S2Walked {
-    /// Whether stage 2 maps Device memory ([`memattr::stage2_device`]).
-    #[inline]
-    pub(crate) const fn device(&self) -> bool {
-        memattr::stage2_device(self.memattr)
-    }
-
     /// The attributes stage 2 gives (`S2DecodeMemAttrs`).
     pub(crate) const fn attrs(&self) -> MemAttrs {
         MemAttrs::stage2(self.memattr, self.sh, self.fnxs)

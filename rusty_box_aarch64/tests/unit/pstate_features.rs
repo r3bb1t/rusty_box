@@ -653,6 +653,9 @@ fn eret_restores_software_step_only_into_an_enabled_debug_target() {
         let mut m = Machine::new(Implementation::CORTEX_A57);
         m.cpu.sys.mdscr_el1 = mdscr;
         m.cpu.pstate.d = d;
+        // With debug exceptions enabled at EL1 and Software Step on, the
+        // ERET runs only as the stepped instruction.
+        m.cpu.pstate.ss = !d;
         if !locked {
             m.cpu.sys.oslsr_el1 &= !0b10;
         }

@@ -23,8 +23,8 @@ use rusty_box_core::{ClockHz, RingBuffer, VmClock, VmInstant};
 use rusty_box_devices::display::Resolution;
 
 use crate::bus::{
-    le_value, store_le, AccessWidth, BusFault, CodeEpoch, FetchSource, PhysAddr, PhysBus,
-    RegOffset, Writes,
+    load_le, store_le, AccessWidth, BusFault, CodeEpoch, FetchSource, PhysAddr, PhysBus, RegOffset,
+    Writes,
 };
 use crate::cpu::TimerLines;
 use crate::devices::cfi_flash::{CfiFlash, FlashArray};
@@ -563,13 +563,11 @@ impl<S: GuestStorage> VirtBoard<S> {
         self.storage.vars()
     }
 
-    /// The RAM bytes an access covers, if it lies entirely in RAM.
+    /// Load an access from RAM; `None` unless it lies entirely in RAM.
     #[inline(always)]
-    fn ram_bytes(&self, addr: u64, width: AccessWidth) -> Option<&[u8]> {
+    fn load_ram(&self, addr: u64, width: AccessWidth) -> Option<u64> {
         let off = usize::try_from(addr.checked_sub(RAM_BASE)?).ok()?;
-        self.storage
-            .ram()
-            .get(off..off.checked_add(width.bytes() as usize)?)
+        load_le(self.storage.ram(), off, width)
     }
 
     /// Store an access to RAM; `None`, with nothing written, unless it lies
@@ -598,11 +596,11 @@ impl<S: GuestStorage> PhysBus for VirtBoard<S> {
         width: AccessWidth,
         clock: VmClock,
     ) -> Result<u64, BusFault> {
-        let a = addr.get();
-        if let Some(bytes) = self.ram_bytes(a, width) {
-            return Ok(le_value(bytes));
+        if let Some(value) = self.load_ram(addr.get(), width) {
+            return Ok(value);
         }
         self.read_outside_ram(addr, width, clock)
+            .map(|value| value & width.value_mask())
     }
 
     #[inline]
@@ -616,7 +614,7 @@ impl<S: GuestStorage> PhysBus for VirtBoard<S> {
         if self.store_ram(addr.get(), width, value).is_some() {
             return Ok(());
         }
-        self.write_outside_ram(addr, width, value, clock)
+        self.write_outside_ram(addr, width, value & width.value_mask(), clock)
     }
 
     /// RAM, whose every writer the processor hears of (its own stores, and

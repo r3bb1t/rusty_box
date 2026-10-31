@@ -6,8 +6,8 @@
 //! SIMD&FP access to Device memory must be 16-byte aligned, and with stage
 //! 1 disabled every data access is to Device memory. In the stage 1 walk the
 //! alignment fault a Device page raises comes before its permission fault
-//! (`AArch64.S1Translate`: `AArch64.S1HasAlignmentFault` is tested before
-//! `AArch64.S1HasPermissionsFault`). QEMU 11.1.2 does the same
+//! (`AArch64_S1Translate`: `AArch64_S1HasAlignmentFault` is tested before
+//! `AArch64_S1HasPermissionsFault`). QEMU 11.1.2 does the same
 //! (`target/arm/ptw.c`, the Device check ahead of the permission check,
 //! citing R_XCHFJ).
 //!
@@ -15,8 +15,9 @@
 //! general-purpose and SIMD&FP alike, make one `Mem{2 * datasize}` access
 //! with `ispair`, which makes `aligned` the element size's, and make it as
 //! the two elements' accesses. (The single access FEAT_LSE2 makes of a pair
-//! in one 16-byte granule is not this processor's: `ID_AA64MMFR2_EL1.AT`
-//! is 0.) A pair of words at 4 mod 8 is aligned, on Device memory and with
+//! in one 16-byte granule, on Normal Write-Back Shareable memory, is not
+//! this processor's: `ID_AA64MMFR2_EL1.AT` is 0.) A pair of words at 4 mod 8
+//! is aligned, on Device memory and with
 //! SCTLR_EL1.A set; a pair of doublewords there is not. A pair of Q
 //! registers at an address 8-byte aligned is four doubleword accesses,
 //! each passed `aligned = TRUE`, so Device memory takes it at 8 mod 16,

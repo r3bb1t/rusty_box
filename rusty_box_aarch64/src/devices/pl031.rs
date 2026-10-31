@@ -44,7 +44,7 @@
 use rusty_box_core::snap::{SnapError, SnapRead, SnapResult, SnapWrite};
 use rusty_box_core::{VmClock, VmInstant};
 
-use crate::bus::{AccessWidth, RegOffset};
+use crate::bus::{read_by_words, write_by_words, AccessWidth, RegOffset};
 
 /// The registers' offsets in the region (DDI 0224C Table 3-1).
 const RTCDR: u64 = 0x000;
@@ -223,7 +223,11 @@ impl Pl031 {
         self.alarm
     }
 
-    pub fn read(&mut self, offset: RegOffset, _width: AccessWidth, clock: VmClock) -> u64 {
+    pub fn read(&mut self, offset: RegOffset, width: AccessWidth, clock: VmClock) -> u64 {
+        read_by_words(offset, width, |offset| self.register(offset, clock))
+    }
+
+    fn register(&mut self, offset: RegOffset, clock: VmClock) -> u64 {
         let reg = register_at(offset);
         u64::from(match reg {
             RTCDR => self.value(clock),
@@ -246,11 +250,20 @@ impl Pl031 {
     pub fn write(
         &mut self,
         offset: RegOffset,
-        _width: AccessWidth,
+        width: AccessWidth,
         value: u64,
         clock: VmClock,
     ) -> bool {
-        let v = value as u32;
+        let mut rearmed = false;
+        write_by_words(offset, width, value, |offset, word| {
+            rearmed |= self.set_register(offset, word as u32, clock);
+        });
+        rearmed
+    }
+
+    /// Write the register at `offset`. Returns whether that re-armed the
+    /// alarm.
+    fn set_register(&mut self, offset: RegOffset, v: u32, clock: VmClock) -> bool {
         match register_at(offset) {
             RTCMR => {
                 self.mr = v;
@@ -325,6 +338,28 @@ mod tests {
         let mut rtc = Pl031::new(epoch);
         assert!(write(&mut rtc, RTCCR, 1, start), "starting re-arms the alarm");
         rtc
+    }
+
+    /// An 8-byte access is two word accesses, the low one first, which DDI
+    /// 0224C's 32-bit APB interface leaves to the bridge and QEMU's memory
+    /// core does (`access_with_adjusted_size`).
+    #[test]
+    fn an_eight_byte_access_is_two_word_accesses() {
+        let mut rtc = Pl031::new(100);
+        assert!(write(&mut rtc, RTCMR, 0x1234, at_second(0)));
+        let value = rtc.read(RegOffset::new(RTCDR), AccessWidth::Dword, at_second(0));
+        assert_eq!(value, 100 | (0x1234 << 32));
+
+        let lr_then_cr = 7 | (1 << 32);
+        assert!(rtc.write(
+            RegOffset::new(RTCLR),
+            AccessWidth::Dword,
+            lr_then_cr,
+            at_second(0)
+        ));
+        assert_eq!(read(&mut rtc, RTCLR, at_second(0)), 7);
+        assert_eq!(read(&mut rtc, RTCCR, at_second(0)), 1, "RTCCR started it");
+        assert_eq!(read(&mut rtc, RTCDR, at_second(2)), 9);
     }
 
     /// Power-on leaves the RTC stopped: it reads its value whatever the

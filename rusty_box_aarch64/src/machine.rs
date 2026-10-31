@@ -36,7 +36,7 @@ use crate::boot::fdt::{self, Edit, NodePath, Removal, Value};
 use crate::boot::{
     self, DeviceTreeError, KernelLayout, LinuxImage, PlacementError, DEVICE_TREE_CAPACITY,
 };
-use crate::bus::{le_value, AccessWidth, BusFault, PhysAddr, PhysBus, PhysSpan};
+use crate::bus::{load_le, AccessWidth, BusFault, PhysAddr, PhysBus, PhysSpan};
 use crate::cpu::{
     Activity, Cpu, CpuConfig, CpuModel, CpuState, DebugStops, El2Unavailable, Levels, NoEl2,
     NoTranslation, PsciConduit, PsciNode, Pstate, PstateRefusal, Reg, Step, StopCause, SysReg,
@@ -1126,10 +1126,7 @@ impl PhysBus for RamView<'_> {
     ) -> Result<u64, BusFault> {
         let off = addr.get().checked_sub(RAM_BASE).ok_or(BusFault::Unmapped)?;
         let off = usize::try_from(off).map_err(|_| BusFault::Unmapped)?;
-        let end = off
-            .checked_add(width.bytes() as usize)
-            .ok_or(BusFault::Unmapped)?;
-        self.0.get(off..end).map(le_value).ok_or(BusFault::Unmapped)
+        load_le(self.0, off, width).ok_or(BusFault::Unmapped)
     }
 
     fn write(
@@ -1709,6 +1706,7 @@ impl<S: GuestStorage, L: Levels, I: Instrumentation> VirtMachine<S, L, I> {
     pub fn virt_to_phys(&self, va: u64) -> Result<u64, NoTranslation> {
         self.cpu
             .debug_translate(&mut RamView(self.board.storage.ram()), va)
+            .map(PhysAddr::get)
     }
 
     /// Read memory through the guest's page tables, one page at a time.
@@ -1818,12 +1816,14 @@ impl<S: GuestStorage, L: Levels, I: Instrumentation> VirtMachine<S, L, I> {
     /// written; nothing changes.
     pub fn sysreg_write(&mut self, reg: SysReg, value: u64) -> Result<(), SysRegRefusal> {
         match self.cpu.host_sysreg_write(reg, value)? {
-            // The processor applied each itself: the TLB's, and the timer
-            // lines' re-evaluation before the next instruction.
+            // The processor applied each itself: the TLB's, the timer
+            // lines' re-evaluation before the next instruction, and the
+            // debug controls'.
             WriteEffect::None
             | WriteEffect::FlushTlb
             | WriteEffect::El10Context
-            | WriteEffect::Timer => Ok(()),
+            | WriteEffect::Timer
+            | WriteEffect::Debug => Ok(()),
         }
     }
 
@@ -2052,13 +2052,14 @@ impl<S: GuestStorage, I: Instrumentation> VirtMachine<S, WithEl2, I> {
 }
 
 const SNAPSHOT_MAGIC: [u8; 8] = *b"RBA64SNP";
-/// The image layout's version: 15 holds the processor's level set (the
+/// The image layout's version: 16 holds the processor's level set (the
 /// shape's `virtualization`, the EL2 registers, `CNTPOFF_EL2` among them), a
 /// feature set of 128 bits, `RVBAR_ELx` and `RMR_ELx` of the highest level,
-/// each TLB entry's stage 2 permissions, level and Device-ness beside stage
-/// 1's, the TLB's kept stage 2 translations, and its tables of EL1&0 and
+/// what Software Step stepped, each TLB entry's stage 2 permissions and
+/// level beside stage 1's and the memory each stage and both together map
+/// it to, the TLB's kept stage 2 translations, and its tables of EL1&0 and
 /// stage 2 contexts.
-const SNAPSHOT_VERSION: u32 = 15;
+const SNAPSHOT_VERSION: u32 = 16;
 
 /// Everything about how a machine was built that a snapshot depends on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -38,6 +38,7 @@ use super::exec::{bits, sext, Fault};
 use super::features::VecLen;
 use super::simd_arith::{doubling_mul_high, int as simd_int, sat, shift_signed};
 use super::{Cpu, Levels};
+use crate::bus::AccessWidth;
 
 /// `MAX_VL` in bytes.
 const MAX_VL_BYTES: usize = VecLen::MAX.bytes();
@@ -85,11 +86,17 @@ impl Esize {
         1 << self as u32
     }
 
-    /// `log2(esize DIV 8)`: the size of an access of one element, as
-    /// [`Cpu::read_mem`] and [`Cpu::write_mem`] take it.
+    /// `log2(esize DIV 8)`.
     #[inline]
     pub(crate) const fn log2_bytes(self) -> u32 {
         self as u32
+    }
+
+    /// The size of an access of one element, as [`Cpu::read_mem`] and
+    /// [`Cpu::write_mem`] take it.
+    #[inline]
+    pub(crate) const fn access_width(self) -> AccessWidth {
+        AccessWidth::from_size_field(self as u32)
     }
 
     /// The element's bits, as a mask of the low `esize` bits.

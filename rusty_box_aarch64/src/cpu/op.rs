@@ -31,7 +31,7 @@ use super::fp::{dp2_operation, dp3_form, scalar_type, FpBinary, FpDp3Regs, FpTyp
 use super::isa::Class;
 use super::mmu::{DataAccess, ElementPair};
 use super::{Cpu, Levels};
-use crate::bus::PhysBus;
+use crate::bus::{AccessWidth, PhysBus};
 use crate::softfloat::FusedMulAdd;
 
 /// How a load extends what it read.
@@ -1526,8 +1526,9 @@ impl<L: Levels> Cpu<L> {
                 let base = completed!(self.base_register(u32::from(rn)));
                 let (address, writeback) = indexed(base, imm, index);
                 let acc = DataAccess::NORMAL.of_one_register();
+                let width = AccessWidth::from_size_field(u32::from(size));
                 let v = completed!(
-                    self.read_mem(bus, address, u32::from(size), acc),
+                    self.read_mem(bus, address, width, acc),
                     reporting(one_register_syndrome(size, extend, rt, writeback))
                 );
                 self.set_x_or_zr(u32::from(rt), extended(v, size, extend));
@@ -1547,8 +1548,9 @@ impl<L: Levels> Cpu<L> {
                 let (address, writeback) = indexed(base, imm, index);
                 let v = self.x_or_zr(u32::from(rt));
                 let acc = DataAccess::NORMAL.of_one_register();
+                let width = AccessWidth::from_size_field(u32::from(size));
                 completed!(
-                    self.write_mem(bus, address, u32::from(size), v, acc),
+                    self.write_mem(bus, address, width, v, acc),
                     reporting(one_register_syndrome(size, Extend::Zero, rt, writeback))
                 );
                 if let Some(wb) = writeback {
@@ -1573,8 +1575,9 @@ impl<L: Levels> Cpu<L> {
                 );
                 let address = completed!(self.base_register(u32::from(rn))).wrapping_add(offset);
                 let acc = DataAccess::NORMAL.of_one_register();
+                let width = AccessWidth::from_size_field(u32::from(size));
                 let v = completed!(
-                    self.read_mem(bus, address, u32::from(size), acc),
+                    self.read_mem(bus, address, width, acc),
                     reporting(one_register_syndrome(size, extend, rt, None))
                 );
                 self.set_x_or_zr(u32::from(rt), extended(v, size, extend));
@@ -1597,8 +1600,9 @@ impl<L: Levels> Cpu<L> {
                 let address = completed!(self.base_register(u32::from(rn))).wrapping_add(offset);
                 let v = self.x_or_zr(u32::from(rt));
                 let acc = DataAccess::NORMAL.of_one_register();
+                let width = AccessWidth::from_size_field(u32::from(size));
                 completed!(
-                    self.write_mem(bus, address, u32::from(size), v, acc),
+                    self.write_mem(bus, address, width, v, acc),
                     reporting(one_register_syndrome(size, Extend::Zero, rt, None))
                 );
                 Ok(Flow::Next)
@@ -1613,14 +1617,14 @@ impl<L: Levels> Cpu<L> {
             } => {
                 let base = completed!(self.base_register(u32::from(rn)));
                 let (address, writeback) = indexed(base, imm, index);
-                let scale = u32::from(size);
+                let width = AccessWidth::from_size_field(u32::from(size));
                 let ElementPair {
                     first: a,
                     second: b,
-                } = completed!(self.read_pair(bus, address, scale, DataAccess::NORMAL));
+                } = completed!(self.read_pair(bus, address, width, DataAccess::NORMAL));
                 // The order `exec_ldst_pair` writes them in, which decides
                 // the CONSTRAINED UNPREDICTABLE Rt == Rt2 case.
-                if scale == 2 {
+                if width == AccessWidth::Word {
                     self.set_x_or_zr(u32::from(rt2), b);
                     self.set_x_or_zr(u32::from(rt), a);
                 } else {
@@ -1642,12 +1646,12 @@ impl<L: Levels> Cpu<L> {
             } => {
                 let base = completed!(self.base_register(u32::from(rn)));
                 let (address, writeback) = indexed(base, imm, index);
-                let scale = u32::from(size);
+                let width = AccessWidth::from_size_field(u32::from(size));
                 let value = ElementPair {
                     first: self.x_or_zr(u32::from(rt)),
                     second: self.x_or_zr(u32::from(rt2)),
                 };
-                completed!(self.write_pair(bus, address, scale, value, DataAccess::NORMAL));
+                completed!(self.write_pair(bus, address, width, value, DataAccess::NORMAL));
                 if let Some(wb) = writeback {
                     self.set_x_or_sp(u32::from(rn), wb);
                 }

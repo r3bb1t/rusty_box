@@ -42,7 +42,7 @@
 
 use rusty_box_core::snap::{SnapRead, SnapResult, SnapWrite};
 
-use crate::bus::{AccessWidth, RegOffset};
+use crate::bus::{read_by_words, write_by_words, AccessWidth, RegOffset};
 
 /// The registers' offsets in the region (DDI 0190B Table 3-1).
 const GPIODATA_LAST: u64 = 0x3FC;
@@ -146,7 +146,11 @@ impl Pl061 {
         self.edges |= changed & wanted;
     }
 
-    pub fn read(&mut self, offset: RegOffset, _width: AccessWidth) -> u64 {
+    pub fn read(&mut self, offset: RegOffset, width: AccessWidth) -> u64 {
+        read_by_words(offset, width, |offset| self.register(offset))
+    }
+
+    fn register(&mut self, offset: RegOffset) -> u64 {
         let reg = register_at(offset);
         u64::from(match reg {
             0..=GPIODATA_LAST => self.levels() & (reg >> 2) as u8,
@@ -163,9 +167,14 @@ impl Pl061 {
         })
     }
 
-    pub fn write(&mut self, offset: RegOffset, _width: AccessWidth, value: u64) {
+    pub fn write(&mut self, offset: RegOffset, width: AccessWidth, value: u64) {
+        write_by_words(offset, width, value, |offset, word| {
+            self.set_register(offset, word as u8);
+        });
+    }
+
+    fn set_register(&mut self, offset: RegOffset, v: u8) {
         let reg = register_at(offset);
-        let v = value as u8;
         match reg {
             0..=GPIODATA_LAST => {
                 let mask = (reg >> 2) as u8;
@@ -230,6 +239,20 @@ mod tests {
 
     fn read(gpio: &mut Pl061, off: u64) -> u8 {
         gpio.read(RegOffset::new(off), AccessWidth::Word) as u8
+    }
+
+    /// An 8-byte access is two word accesses, the low one first, which DDI
+    /// 0190B's APB interface leaves to the bridge and QEMU's memory core
+    /// does (`access_with_adjusted_size`).
+    #[test]
+    fn an_eight_byte_access_is_two_word_accesses() {
+        let mut gpio = Pl061::new();
+        let ibe_then_iev = 0x12 | (0x34 << 32);
+        gpio.write(RegOffset::new(GPIOIBE), AccessWidth::Dword, ibe_then_iev);
+        assert_eq!(read(&mut gpio, GPIOIBE), 0x12);
+        assert_eq!(read(&mut gpio, GPIOIEV), 0x34);
+        let value = gpio.read(RegOffset::new(GPIOIBE), AccessWidth::Dword);
+        assert_eq!(value, ibe_then_iev);
     }
 
     #[test]

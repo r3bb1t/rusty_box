@@ -43,6 +43,7 @@
 use rusty_box_core::snap::{SnapRead, SnapResult, SnapWrite};
 use rusty_box_core::SnapError;
 
+use super::debug::{WatchedAccess, WatchedRange};
 use super::dp::ones;
 use super::el2::{
     El2Reg, El2Regs, El2Storage, HCR_CD, HCR_DC, HCR_PTW, HCR_TGE, HCR_VM, VTTBR_VMID8,
@@ -50,7 +51,7 @@ use super::el2::{
 use super::exception::{AccessSyndrome, AddressedClass, Exception, SyndromeClass, SyndromeSlot};
 use super::exec::{Fault, StopCause};
 use super::features::{Feature, Features};
-use super::memattr::{self, MemAttrs};
+use super::memattr::{MemAttrs, Shareability};
 use super::regime::{
     el10_s1_disabled_data_normal, el10_stage1_enabled, el10_stage2_enabled, Granule, OaLayout,
     Regime, S1Params, S1Range,
@@ -113,6 +114,51 @@ pub(crate) enum AtStages {
     OneAndTwo,
 }
 
+/// The size of a data access at its address, as the checks made on it read
+/// it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AccessSpan {
+    /// What the alignment checks judge: one element of a pair.
+    bytes: u64,
+    /// What the watchpoints watch: both elements of a pair.
+    watched: u64,
+}
+
+impl AccessSpan {
+    /// One access of `bytes`.
+    #[inline(always)]
+    const fn single(bytes: u64) -> Self {
+        Self {
+            bytes,
+            watched: bytes,
+        }
+    }
+
+    /// A pair of elements of `bytes` on one page.
+    #[inline(always)]
+    const fn pair(bytes: u64) -> Self {
+        Self {
+            bytes,
+            watched: 2 * bytes,
+        }
+    }
+}
+
+/// Which registers a data access is for, the part of Arm's access type that
+/// decides whether it is relaxed (`IsRelaxedWatchpointAccess`).
+///
+/// Closed (R5): the classes of a data access.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AccessClass {
+    General,
+    /// `AccessType_ASIMD`: relaxed in Streaming SVE mode.
+    SimdFp,
+    /// A contiguous `AccessType_SVE` access or an `AccessType_SME` one:
+    /// always relaxed. Every SVE load and store this processor has is
+    /// contiguous.
+    Scalable,
+}
+
 /// The constraints a data access carries beyond its size, as Arm's
 /// `AccessDescriptor` carries them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,36 +167,46 @@ pub(crate) struct DataAccess {
     /// with PSTATE.UAO clear (Arm `AArch64_IsUnprivAccessPriv`).
     pub(crate) unprivileged: bool,
     pub(crate) alignment: AlignmentRule,
-    pub(crate) part: Part,
     pub(crate) syndrome: InstructionSyndrome,
+    pub(crate) class: AccessClass,
 }
 
 impl DataAccess {
     pub(crate) const NORMAL: Self = Self {
         unprivileged: false,
         alignment: AlignmentRule::Any,
-        part: Part::Whole,
         syndrome: InstructionSyndrome::Absent,
+        class: AccessClass::General,
     };
     /// A load-acquire or store-release.
     pub(crate) const ORDERED: Self = Self {
         unprivileged: false,
         alignment: AlignmentRule::Ordered,
-        part: Part::Whole,
         syndrome: InstructionSyndrome::Absent,
+        class: AccessClass::General,
     };
     /// An exclusive or atomic access.
     pub(crate) const ATOMIC: Self = Self {
         unprivileged: false,
         alignment: AlignmentRule::Atomic,
-        part: Part::Whole,
         syndrome: InstructionSyndrome::Absent,
+        class: AccessClass::General,
     };
     pub(crate) const UNPRIVILEGED: Self = Self {
         unprivileged: true,
         alignment: AlignmentRule::Any,
-        part: Part::Whole,
         syndrome: InstructionSyndrome::Absent,
+        class: AccessClass::General,
+    };
+    /// A load or store of a SIMD&FP register.
+    pub(crate) const SIMD_FP: Self = Self {
+        class: AccessClass::SimdFp,
+        ..Self::NORMAL
+    };
+    /// A load or store of an SVE or SME register.
+    pub(crate) const SCALABLE: Self = Self {
+        class: AccessClass::Scalable,
+        ..Self::NORMAL
     };
 
     /// The same access, made by a load or store of one general-purpose
@@ -216,28 +272,14 @@ impl AddressInAccess {
     }
 }
 
-/// What a data access is of the access an instruction makes, for Device
-/// memory's alignment check.
-///
-/// Closed (R5).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Part {
-    /// All of it: judged by its own size and address.
-    Whole,
-    /// One single-copy access of a transfer that is misaligned as a whole:
-    /// an 8-byte half of a 16-byte SIMD&FP access, or a byte of an SVE
-    /// `LDR`/`STR` whose base is misaligned. Arm passes the whole
-    /// transfer's `aligned` to `AArch64_MemSingle` for each part, so Device
-    /// memory refuses the part however it is itself aligned.
-    OfMisaligned,
-}
-
 /// Which misaligned data accesses fault before translation, the part of Arm
 /// `AArch64_UnalignedAccessFaults` an access's kind decides.
 /// The current regime's `SCTLR_ELx.A` faults every misaligned access
 /// whatever the rule, and
 /// Device memory every one, after the walk and before the permissions
-/// ([`OnDevice`]).
+/// ([`OnDevice`]). On Normal memory that is not Write-Back Shareable a
+/// misaligned access these rules let through is performed, the outcome
+/// Arm lists for `Unpredictable_LSE2_ALIGNMENT_FAULT`.
 ///
 /// Closed (R5): the kinds of access the instruction set has.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -250,9 +292,8 @@ pub(crate) enum AlignmentRule {
     Atomic,
     /// A load-acquire or store-release (`acqsc`, `acqpc`, `relsc`): with
     /// FEAT_LSE2, those that cross a 16-byte boundary while `SCTLR_EL1.nAA`
-    /// is 0. Without it, every one, the rule before FEAT_LSE2 that QEMU
-    /// keeps (`check_ordered_align`): the pseudocode's rule reads `nAA`,
-    /// which FEAT_LSE2 adds.
+    /// is 0. Without it, every one (Arm ARM B2.8.2.1.3 and C3.2.11; the
+    /// pseudocode's rule reads only `nAA`, which FEAT_LSE2 adds).
     Ordered,
 }
 
@@ -260,7 +301,10 @@ pub(crate) enum AlignmentRule {
 /// decides the permission its translation needs (Arm
 /// `AArch64_S1CheckPermissions`, `AccessType_DC` and `AccessType_IC`).
 /// PSTATE.PAN takes no part (`CreateAccDescDC` and `CreateAccDescIC` leave
-/// `pan` clear).
+/// `pan` clear). Whatever it does, the fault of a walk is taken, an Access
+/// flag fault included, the IMPLEMENTATION DEFINED choice of rule RTRTWX
+/// ("Generate access flag fault on IC/DC operations" being TRUE here), and
+/// by `IC IVAU` a Translation fault, that of Arm ARM D7.5.9.1.
 ///
 /// Closed (R5): the maintenance by address this core implements.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -278,12 +322,29 @@ pub(crate) enum CacheMaintenance {
 
 /// Whether Device memory refuses an access for its alignment, as Arm
 /// `AArch64_S1HasAlignmentFaultDueToMemType` decides after the walk and
-/// before the permission check: a misaligned access (a [`Part`] of one
-/// included), and `DC ZVA`, are refused.
+/// before the permission check: an access whose `aligned` is FALSE, and
+/// `DC ZVA`, are refused, no Device location supporting unaligned accesses
+/// here. `aligned` is the whole instruction's, so a part of a misaligned
+/// transfer is refused however it is itself aligned: an 8-byte half of a
+/// 16-byte SIMD&FP access, or a byte of an SVE `LDR` or `STR` whose base is
+/// misaligned.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum OnDevice {
     Refused,
     Permitted,
+}
+
+impl OnDevice {
+    /// As Arm's `aligned` of an access of `bytes` (a power of two) at `va`
+    /// says.
+    #[inline(always)]
+    const fn of_alignment(va: u64, bytes: u64) -> Self {
+        if va & (bytes - 1) == 0 {
+            Self::Permitted
+        } else {
+            Self::Refused
+        }
+    }
 }
 
 /// A lookup level of a translation table walk (Arm's `level`), from -1,
@@ -469,7 +530,7 @@ pub enum TranslationFault {
     /// No valid descriptor maps it.
     Translation { level: Level },
     /// The descriptor that maps it has its access flag clear, which this
-    /// ARMv8.0 core faults on rather than sets.
+    /// core, with no FEAT_HAFDBS, faults on rather than sets.
     AccessFlag { level: LeafLevel },
     /// A descriptor read reached nothing on the bus.
     ExternalAbortOnWalk { level: Level },
@@ -685,6 +746,19 @@ pub(crate) enum Needs {
     ReadWrite,
     /// A cache maintenance instruction by address.
     Maintenance(CacheMaintenance),
+}
+
+impl From<DataDirection> for Needs {
+    /// What a data access of `direction` needs: a read, a write, or for a
+    /// read-modify-write both, which stage 2 can give apart.
+    #[inline(always)]
+    fn from(direction: DataDirection) -> Self {
+        match direction {
+            DataDirection::Read => Self::Access(AccessKind::Read),
+            DataDirection::Write => Self::Access(AccessKind::Write),
+            DataDirection::ReadWrite => Self::ReadWrite,
+        }
+    }
 }
 
 impl Needs {
@@ -911,19 +985,127 @@ const fn e0pd_set(features: Features, tcr: u64, va: u64) -> bool {
 /// The outcome of a translation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Translated {
-    pub(crate) pa: u64,
+    pub(crate) pa: PhysAddr,
+}
+
+/// What the memory a stage maps is, as far as an access to it cares: Arm's
+/// `MemoryAttributes` reduced to whether it is Device memory, and for
+/// Normal memory whether both its levels are Write-Back and whether it is
+/// Shareable — what `IsWBShareable` reads once the stages combine.
+///
+/// Closed (R5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Memory {
+    Device,
+    /// Normal memory with a level that is not Write-Back.
+    Normal,
+    /// Normal Inner and Outer Write-Back memory, Non-shareable.
+    WriteBack,
+    /// Normal Inner and Outer Write-Back Shareable memory (`IsWBShareable`),
+    /// on which an access can be single-copy atomic above the byte.
+    WriteBackShareable,
+}
+
+impl Memory {
+    /// The memory attributes `attrs` describe.
+    const fn of(attrs: MemAttrs) -> Self {
+        if attrs.is_device() {
+            Self::Device
+        } else if !attrs.is_write_back() {
+            Self::Normal
+        } else if matches!(attrs.shareability, Shareability::Non) {
+            Self::WriteBack
+        } else {
+            Self::WriteBackShareable
+        }
+    }
+
+    /// The memory of an access stage 1 maps to `s1` and stage 2 to `s2`
+    /// (Arm `S2CombineS1MemAttrs` with `HCR_EL2.FWB` clear, as far as
+    /// `Memory` sees it): Device at either stage makes it Device; Normal at
+    /// both takes each level's weaker cacheability, so it is Write-Back only
+    /// where both stages are, and the wider shareability, so it is
+    /// Shareable where either stage is.
+    const fn combined(s1: Self, s2: Self) -> Self {
+        match (s1, s2) {
+            (Self::Device, _) | (_, Self::Device) => Self::Device,
+            (Self::Normal, _) | (_, Self::Normal) => Self::Normal,
+            (Self::WriteBack, Self::WriteBack) => Self::WriteBack,
+            (Self::WriteBackShareable, Self::WriteBack | Self::WriteBackShareable)
+            | (Self::WriteBack, Self::WriteBackShareable) => Self::WriteBackShareable,
+        }
+    }
+
+    /// `self`, Normal memory taken as Non-cacheable where `treat` holds
+    /// ([`MemAttrs::normal_as_non_cacheable`]).
+    const fn normal_as_non_cacheable(self, treat: bool) -> Self {
+        match self {
+            Self::WriteBack | Self::WriteBackShareable if treat => Self::Normal,
+            Self::Device | Self::Normal | Self::WriteBack | Self::WriteBackShareable => self,
+        }
+    }
+
+    /// The memory a data access is to with stage 1 disabled
+    /// (`AArch64_S1DisabledOutput`): Device-nGnRnE, or with `HCR_EL2.DC`
+    /// (`normal`) Normal Write-Back Non-shareable.
+    const fn s1_disabled(normal: bool) -> Self {
+        if normal {
+            Self::of(MemAttrs::NORMAL_WRITE_BACK)
+        } else {
+            Self::Device
+        }
+    }
+
+    /// Whether it is Device memory, which refuses a misaligned data access.
+    #[inline(always)]
+    const fn is_device(self) -> bool {
+        matches!(self, Self::Device)
+    }
+
+    /// The value a snapshot holds for it.
+    const fn code(self) -> u8 {
+        match self {
+            Self::Normal => 0,
+            Self::Device => 1,
+            Self::WriteBack => 2,
+            Self::WriteBackShareable => 3,
+        }
+    }
+
+    /// The memory a snapshot's `code` names.
+    const fn from_code(code: u8) -> Option<Self> {
+        match code {
+            0 => Some(Self::Normal),
+            1 => Some(Self::Device),
+            2 => Some(Self::WriteBack),
+            3 => Some(Self::WriteBackShareable),
+            _ => None,
+        }
+    }
+}
+
+/// The memory a translation's data accesses are to: stage 1's `s1`, and
+/// where stage 2 takes part, combined with its `s2`, which `HCR_EL2.CD`
+/// (`cd`) makes Non-cacheable (`AArch64_S2TreatAsNormalNC`). The one rule
+/// a fill and a snapshot's entry both meet (R5).
+const fn entry_memory(s1: Memory, s2: Option<Memory>, cd: bool) -> Memory {
+    match s2 {
+        Some(s2) => Memory::combined(s1, s2.normal_as_non_cacheable(cd)),
+        None => s1,
+    }
 }
 
 /// A translation that permits its access, with what an access reads of its
 /// page past the permission checks: whether stage 1 made the page guarded
 /// (FEAT_BTI's `InGuardedPage`, which an instruction fetch records; never
-/// with stage 1 disabled, `AArch64_S1DisabledOutput`), and whether either
-/// stage maps Device memory, which a misaligned data access checks.
+/// with stage 1 disabled, `AArch64_S1DisabledOutput`), and the memory both
+/// stages map it to, which a misaligned data access and a pair of words
+/// check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Mapping {
-    pa: u64,
+    pa: PhysAddr,
     guarded: bool,
-    device: bool,
+    memory: Memory,
 }
 
 /// The output address of `va` with its regime's stage 1 disabled (Arm
@@ -955,6 +1137,25 @@ pub(crate) struct ElementPair {
     pub(crate) second: u64,
 }
 
+impl From<u128> for ElementPair {
+    /// The two doublewords of a quadword, the low one first.
+    #[inline]
+    fn from(value: u128) -> Self {
+        Self {
+            first: value as u64,
+            second: (value >> 64) as u64,
+        }
+    }
+}
+
+impl From<ElementPair> for u128 {
+    /// The quadword two doublewords make, `first` the low one.
+    #[inline]
+    fn from(pair: ElementPair) -> Self {
+        u128::from(pair.first) | (u128::from(pair.second) << 64)
+    }
+}
+
 /// The two Q registers of a SIMD&FP pair access: `first` at the lower
 /// address, `second` 16 bytes above it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -974,21 +1175,13 @@ struct Walked {
     /// The regime's `MAIR_ELx` attribute the descriptor's `AttrIndx`
     /// selects, and the leaf's shareability — the descriptor's `SH`, or
     /// under FEAT_LPA2's `DS` the range's `SH0` or `SH1`
-    /// ([`OaLayout::shareability`]) — as they are: an access reads only
-    /// whether they make Device memory, and only address translation decodes
-    /// them ([`Walked::attrs`]).
+    /// ([`OaLayout::shareability`]) — as they are, decoded by
+    /// [`Walked::attrs`].
     attr: u8,
     sh: u8,
 }
 
 impl Walked {
-    /// Whether stage 1 maps Device memory on a processor implementing
-    /// `features` ([`memattr::stage1_device`]).
-    #[inline]
-    const fn device(&self, features: Features) -> bool {
-        memattr::stage1_device(self.attr, features)
-    }
-
     /// The attributes stage 1 gives (`S1DecodeMemAttrs`).
     const fn attrs(&self, features: Features) -> MemAttrs {
         MemAttrs::stage1(self.attr, self.sh, features)
@@ -1101,26 +1294,28 @@ pub(super) enum WalkStop<E> {
 
 /// What stage 1 gave a translation, as its checks read it
 /// ([`Cpu::s1_refusal`]): its permissions, and whether its page is guarded;
-/// whether it maps Device memory for a data access; its walk's level; and
-/// whether its walk made it. With stage 1 disabled, every permission, no
-/// guarded page, Device memory unless `HCR_EL2.DC` makes a data access
-/// Normal, and level 0.
+/// the memory it maps a data access to, with the regime's `SCTLR_ELx.C`
+/// applied (`AArch64_S1TreatAsNormalNC`); its walk's level; and whether its
+/// walk made it. With stage 1 disabled, every permission, no guarded page,
+/// Device memory unless `HCR_EL2.DC` makes a data access Normal
+/// ([`Memory::s1_disabled`]), and level 0.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Stage1Leaf {
     perms: u8,
-    device: bool,
+    memory: Memory,
     level: LeafLevel,
     stage1: Stage1,
 }
 
 /// What a TLB entry holds of stage 2: its permissions, as the stage 1
-/// permission bits they leave ([`S2Walked::perms`]), whether it maps Device
-/// memory, and its walk's level. Without stage 2, every permission, Normal
-/// memory and level 0, which refuse nothing.
+/// permission bits they leave ([`S2Walked::perms`]), the memory its
+/// descriptor maps the access to (`HCR_EL2.CD` applied where the stages
+/// combine, [`entry_memory`]), and its walk's level. Without stage 2, every
+/// permission, Normal memory and level 0, which refuse nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Stage2Leaf {
     perms: u8,
-    device: bool,
+    memory: Memory,
     level: LeafLevel,
 }
 
@@ -1128,14 +1323,14 @@ impl Stage2Leaf {
     /// The entry of a translation stage 2 takes no part in.
     const NONE: Self = Self {
         perms: PERMS,
-        device: false,
+        memory: Memory::Normal,
         level: LeafLevel::Zero,
     };
 
     const fn of(walked: &S2Walked) -> Self {
         Self {
             perms: walked.perms,
-            device: walked.device(),
+            memory: Memory::of(walked.attrs()),
             level: walked.level,
         }
     }
@@ -1184,8 +1379,9 @@ const _: () = assert!(IPA_ENTRIES == 1 << 8 && id::MAX_PA_BITS - 12 <= 40);
 /// The registers the EL1&0 regime's translations depend on: stage 1's
 /// (`SCTLR_EL1`, `TCR_EL1`, `TTBR0_EL1`, `TTBR1_EL1`, `MAIR_EL1`), and with
 /// EL2 stage 2's (`VTTBR_EL2`, `VTCR_EL2`) and the `HCR_EL2` bits that
-/// decide which walks are made (`VM`, `PTW`, `DC`, `TGE`); 0 for each EL2
-/// register without EL2. Every entry of the regime the TLB holds was made
+/// decide which walks are made (`VM`, `PTW`, `DC`, `TGE`) and what memory
+/// they make (`CD`); 0 for each EL2 register without EL2. Every entry of
+/// the regime the TLB holds was made
 /// under one such set, its context.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct El10Context {
@@ -1200,7 +1396,7 @@ pub(crate) struct El10Context {
 }
 
 /// The `HCR_EL2` bits an [`El10Context`] holds.
-const HCR_TRANSLATION: u64 = HCR_VM | HCR_PTW | HCR_DC | HCR_TGE;
+const HCR_TRANSLATION: u64 = HCR_VM | HCR_PTW | HCR_DC | HCR_TGE | HCR_CD;
 
 impl El10Context {
     /// The context the EL1&0 regime's registers in `sys` and, with EL2,
@@ -1221,13 +1417,13 @@ impl El10Context {
     }
 
     /// The context `self`'s registers make, as far as a translation reads
-    /// them: of `SCTLR_EL1` its `M` and, with stage 1 enabled, `WXN` (every
-    /// other bit is read by the access, not cached); with stage 1 disabled
-    /// no table base and no `MAIR_EL1` (`TCR_EL1` stays, whose `TBI` bits
-    /// judge the addresses stage 1 then leaves); and with stage 2 disabled
-    /// of `VTTBR_EL2` only its VMID, which tags the regime's translations
-    /// whenever EL2 is enabled (Arm `AArch64_TLBContextEL10`, `VMID()`), and
-    /// no `VTCR_EL2` or `HCR_EL2.PTW`. Register values that translate alike
+    /// them: of `SCTLR_EL1` what [`walk_sctlr`] keeps; with stage 1
+    /// disabled no table base and no `MAIR_EL1` (`TCR_EL1` stays, whose
+    /// `TBI` bits judge the addresses stage 1 then leaves); and with stage 2
+    /// disabled of `VTTBR_EL2` only its VMID, which tags the regime's
+    /// translations whenever EL2 is enabled (Arm `AArch64_TLBContextEL10`,
+    /// `VMID()`), and no `VTCR_EL2`, `HCR_EL2.PTW` or `HCR_EL2.CD`
+    /// (`AArch64_S2TreatAsNormalNC`). Register values that translate alike
     /// and carry one VMID make one context.
     pub(crate) const fn normalized(self) -> Self {
         let hcr_el2 = self.hcr_el2 & HCR_TRANSLATION;
@@ -1241,7 +1437,7 @@ impl El10Context {
             ..self
         };
         if !context.stage2() {
-            context.hcr_el2 &= !HCR_PTW;
+            context.hcr_el2 &= !(HCR_PTW | HCR_CD);
             context.vttbr_el2 &= VTTBR_VMID8;
             context.vtcr_el2 = 0;
         }
@@ -1300,7 +1496,7 @@ impl TaggedContext for El10Context {
 }
 
 /// What the EL2 regime's translations read of its registers: of
-/// `SCTLR_EL2` its `M` and, with stage 1 enabled, `WXN`; `TCR_EL2`; and with
+/// `SCTLR_EL2` what [`walk_sctlr`] keeps; `TCR_EL2`; and with
 /// stage 1 enabled `TTBR0_EL2` and `MAIR_EL2`. Its entries carry no context:
 /// a write that changes this empties the TLB, and one that leaves it as it
 /// was changes nothing, as for [`El10Context`] without EL2.
@@ -1336,9 +1532,11 @@ impl El2RegimeContext {
 /// What a regime's translations read of its `SCTLR_ELx`, `sctlr`: `M`, and
 /// with stage 1 enabled (`stage1`; `HCR_EL2.DC` and `TGE` can disable the
 /// EL1&0 regime's under `M`) `WXN`, which its walk folds into the
-/// permissions it gives. Every other bit is read by the access, not cached.
+/// permissions it gives, and `C`, which makes the Normal memory it maps
+/// Non-cacheable (`AArch64_S1TreatAsNormalNC`). Every other bit is read by
+/// the access, not cached.
 const fn walk_sctlr(sctlr: u64, stage1: bool) -> u64 {
-    sctlr & (sctlr::M | if stage1 { sctlr::WXN } else { 0 })
+    sctlr & (sctlr::M | if stage1 { sctlr::WXN | sctlr::C } else { 0 })
 }
 
 /// A register only stage 1's walk reads — a table base, `MAIR_ELx` — as a
@@ -1413,7 +1611,7 @@ pub(crate) trait TaggedContext: Copy + PartialEq {
 }
 
 /// What decides which walks made a TLB's entries, as a snapshot restores
-/// the processor: its features, the EL1&0 regime's registers now, and the
+/// the processor: its features, the EL1&0 regime's registers now, the
 /// EL2 regime's ([`El2RegimeContext::NONE`] without EL2), whose entries
 /// were all made under them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1430,9 +1628,41 @@ impl TlbContext {
     }
 }
 
+/// The two pages of a store that crosses a page boundary, both translated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WritePages {
+    /// Where the store's first byte goes.
+    first: PhysAddr,
+    /// Where its first byte on the second page goes.
+    second: PhysAddr,
+    /// How many of its bytes lie on the first page.
+    first_bytes: u64,
+}
+
+impl WritePages {
+    /// Where byte `offset` of the store goes.
+    #[inline]
+    const fn byte(self, offset: u64) -> PhysAddr {
+        if offset < self.first_bytes {
+            PhysAddr::new(self.first.get() + offset)
+        } else {
+            PhysAddr::new(self.second.get() + offset - self.first_bytes)
+        }
+    }
+
+    /// Whether the `bytes` bytes from `offset` lie on one page.
+    #[inline]
+    const fn holds(self, offset: u64, bytes: u64) -> bool {
+        offset + bytes <= self.first_bytes || offset >= self.first_bytes
+    }
+}
+
 const TLB_ENTRIES: usize = 1024;
 /// The key of an empty entry, which no translation's key equals.
 const INVALID_KEY: u64 = u64::MAX;
+/// How many fills [`Tlb`] remembers since a flush, which then empties only
+/// those entries.
+const FILL_LOG: usize = 256;
 /// A snapshot's refusal of an entry or kept stage 2 translation no walk of
 /// its context makes, and of one whose context the TLB holds none of.
 const NOT_WALKED: SnapError = SnapError::Invalid("TLB entry is not one a walk can produce");
@@ -1533,9 +1763,10 @@ struct TlbEntry {
     key: u64,
     /// The output page of both stages.
     pa_page: u64,
-    /// Whether either stage maps Device memory for a data access: the
-    /// memory an access through the entry is to.
-    device: bool,
+    /// The memory both stages map a data access to ([`Memory::combined`]),
+    /// with `SCTLR_ELx.C` and `HCR_EL2.CD` applied: the memory an access
+    /// through the entry is to.
+    memory: Memory,
     /// What stage 1 gave.
     s1: Stage1Leaf,
     /// What stage 2 gave: [`Stage2Leaf::NONE`] where it takes no part.
@@ -1555,9 +1786,9 @@ impl TlbEntry {
     #[inline(always)]
     const fn mapping(&self, va: u64) -> Mapping {
         Mapping {
-            pa: in_page(self.pa_page, va),
+            pa: PhysAddr::new(in_page(self.pa_page, va)),
             guarded: self.s1.perms & GUARDED != 0,
-            device: self.device,
+            memory: self.memory,
         }
     }
 
@@ -1580,16 +1811,16 @@ impl TlbEntry {
 const EMPTY_ENTRY: TlbEntry = TlbEntry {
     key: INVALID_KEY,
     pa_page: 0,
-    device: false,
+    memory: Memory::Normal,
     s1: Stage1Leaf {
         perms: 0,
-        device: false,
+        memory: Memory::Normal,
         level: LeafLevel::Zero,
         stage1: Stage1::Walked,
     },
     s2: Stage2Leaf {
         perms: 0,
-        device: false,
+        memory: Memory::Normal,
         level: LeafLevel::Zero,
     },
 };
@@ -1616,6 +1847,11 @@ pub struct Tlb<L: Levels> {
     entries: [TlbEntry; TLB_ENTRIES],
     ipa: [IpaEntry; IPA_ENTRIES],
     contexts: L::Contexts,
+    /// The slots of `entries` filled since the last flush, as far as
+    /// [`FILL_LOG`] of them.
+    filled: [u16; FILL_LOG],
+    /// How many fills since the last flush, stopping past [`FILL_LOG`].
+    fills: usize,
 }
 
 /// Where a TLB keeps its tables of contexts: [`TlbContexts`] on a processor
@@ -1909,15 +2145,35 @@ impl<L: Levels> Tlb<L> {
             entries: [EMPTY_ENTRY; TLB_ENTRIES],
             ipa: [EMPTY_IPA_ENTRY; IPA_ENTRIES],
             contexts: <L::Contexts as ContextStorage>::NONE,
+            filled: [0; FILL_LOG],
+            fills: 0,
         }
+    }
+
+    /// Put `entry` in `slot` of `entries`, as a fill of the TLB that the
+    /// next flush empties.
+    fn fill(&mut self, slot: usize, entry: TlbEntry) {
+        self.entries[slot] = entry;
+        if self.fills < FILL_LOG {
+            self.filled[self.fills] = slot as u16;
+        }
+        self.fills = (self.fills + 1).min(FILL_LOG + 1);
     }
 
     /// Empty every context's entries and kept stage 2 translations, the
     /// current contexts left to be found again by the next translation,
-    /// from the registers as they are then. Only stage 2 keeps translations
-    /// of IPAs, so without EL2 there are none to empty.
+    /// from the registers as they are then: the slots filled since the last
+    /// flush, or every slot past [`FILL_LOG`] fills. Only stage 2 keeps
+    /// translations of IPAs, so without EL2 there are none to empty.
     pub(crate) fn flush(&mut self) {
-        self.entries = [EMPTY_ENTRY; TLB_ENTRIES];
+        if self.fills <= FILL_LOG {
+            for &slot in &self.filled[..self.fills] {
+                self.entries[usize::from(slot)] = EMPTY_ENTRY;
+            }
+        } else {
+            self.entries = [EMPTY_ENTRY; TLB_ENTRIES];
+        }
+        self.fills = 0;
         debug_assert!(
             L::EL2 || self.ipa.iter().all(|kept| kept.key == INVALID_KEY),
             "a kept stage 2 translation without EL2"
@@ -2054,12 +2310,12 @@ impl<L: Levels> Tlb<L> {
     /// snapshot: the table of EL1&0 contexts and then the table of stage 2
     /// contexts ([`Contexts::save`]); then the entries that can match, each
     /// one's virtual page number with its context's tag and its output
-    /// page, then its stage 1 flags, whether either stage maps Device
-    /// memory, stage 1's level, its regime's byte, whether stage 1 maps
-    /// Device memory, stage 2's permissions and level, and whether stage 1
-    /// was disabled; then the kept stage 2 translations that can match,
-    /// each one's IPA page number with its stage 2 context's tag and output
-    /// page, then its permissions, Device-ness and level. An entry of an
+    /// page, then stage 1's permissions, memory ([`Memory::code`]) and
+    /// level, its regime's byte, whether stage 1 was disabled, stage 2's
+    /// permissions, memory and level, and the memory of both stages
+    /// combined; then the kept stage 2 translations that can match, each
+    /// one's IPA page number with its stage 2 context's tag and output
+    /// page, then its permissions, memory and level. An entry of an
     /// older generation than its place's, which nothing matches, is left
     /// out, as an empty entry would be.
     pub(crate) fn save<W: SnapWrite>(&self, w: &mut W) -> SnapResult {
@@ -2079,13 +2335,14 @@ impl<L: Levels> Tlb<L> {
             w.write_u64(e.pa_page)?;
             w.write_bytes(&[
                 e.s1.perms,
-                u8::from(e.s1.device),
+                e.s1.memory.code(),
                 e.s1.level.number(),
                 key_regime(e.key) as u8,
                 e.s1.stage1 as u8,
                 e.s2.perms,
-                u8::from(e.s2.device),
+                e.s2.memory.code(),
                 e.s2.level.number(),
+                e.memory.code(),
             ])?;
         }
         let can_match = |key: u64| key != INVALID_KEY && contexts.stage2.current_entry(key);
@@ -2094,7 +2351,7 @@ impl<L: Levels> Tlb<L> {
         for e in self.ipa.iter().filter(|e| can_match(e.key)) {
             w.write_u64(e.key)?;
             w.write_u64(e.pa_page.get())?;
-            w.write_bytes(&[e.leaf.perms, u8::from(e.leaf.device), e.leaf.level.number()])?;
+            w.write_bytes(&[e.leaf.perms, e.leaf.memory.code(), e.leaf.level.number()])?;
         }
         Ok(())
     }
@@ -2130,6 +2387,10 @@ impl<L: Levels> Tlb<L> {
             0
         };
         self.reset();
+        // No fill log covers the entries the restore writes, from the first
+        // on: the next flush, a refused image's included, empties every
+        // slot.
+        self.fills = FILL_LOG + 1;
         // A held context is one registers this processor holds make: an
         // EL1&0 one normalized, its stage 2 registers' values ones they can
         // hold where it has stage 2 (without, it keeps only the VMID, which
@@ -2164,25 +2425,30 @@ impl<L: Levels> Tlb<L> {
         for _ in 0..valid {
             let page = r.read_u64()?;
             let pa_page = r.read_u64()?;
-            let mut rest = [0u8; 8];
+            let mut rest = [0u8; 9];
             r.read_bytes(&mut rest)?;
-            let [perms, s1_device, level, regime, stage1, s2_perms, s2_device, s2_level] = rest;
+            let [perms, s1_memory, level, regime, stage1, s2_perms, s2_memory, s2_level, memory] =
+                rest;
             let (Some(level), Some(s2_level)) = (LeafLevel::of(level), LeafLevel::of(s2_level))
             else {
+                return Err(NOT_WALKED);
+            };
+            let (Some(s1_memory), Some(s2_memory), Some(memory)) = (
+                Memory::from_code(s1_memory),
+                Memory::from_code(s2_memory),
+                Memory::from_code(memory),
+            ) else {
                 return Err(NOT_WALKED);
             };
             if page & !(TAG_MASK | ((1 << PAGE_BITS) - 1)) != 0
                 || pa_page & 0xFFF != 0
                 || pa_page >> id::pa_bits(features) != 0
-                || s1_device > 1
-                || s2_device > 1
             {
                 return Err(NOT_WALKED);
             }
-            let s1_device = s1_device == 1;
             let s2 = Stage2Leaf {
                 perms: s2_perms,
-                device: s2_device == 1,
+                memory: s2_memory,
                 level: s2_level,
             };
             let regime = match byte_regime(regime) {
@@ -2225,11 +2491,16 @@ impl<L: Levels> Tlb<L> {
                 Some(made_in) => S1Range::el10(made_in.tcr_el1, regime.upper(va), features),
                 None => S1Range::el2(context.el2.tcr_el2, features),
             };
+            // Stage 1's walk gives Normal memory Non-cacheable under its
+            // regime's `SCTLR_ELx.C` clear (`AArch64_S1TreatAsNormalNC`).
+            let s1_walked_memory =
+                |sctlr: u64| s1_memory == s1_memory.normal_as_non_cacheable(sctlr & sctlr::C == 0);
             let stage1_valid = match (made_in, stage1) {
                 (Some(made_in), Stage1::Walked) => {
                     made_in.stage1()
                         && range.reaches(va, features, level)
                         && perms & !(PERMS | guarded) == 0
+                        && s1_walked_memory(made_in.sctlr_el1)
                 }
                 (Some(made_in), Stage1::Disabled) => {
                     let disabled = s1_disabled_address(va, range.tbi(true), features);
@@ -2242,13 +2513,15 @@ impl<L: Levels> Tlb<L> {
                         && translated
                         && level == LeafLevel::Zero
                         && perms == PERMS
-                        && s1_device == !el10_s1_disabled_data_normal(made_in.hcr_el2)
+                        && s1_memory
+                            == Memory::s1_disabled(el10_s1_disabled_data_normal(made_in.hcr_el2))
                 }
                 (None, Stage1::Walked) => {
                     context.el2_stage1()
                         && range.reaches(va, features, level)
                         && perms & !(PERMS | guarded) == 0
                         && perms & PERMS_EL0 == 0
+                        && s1_walked_memory(context.el2.sctlr_el2)
                 }
                 (None, Stage1::Disabled) => false,
             };
@@ -2259,7 +2532,14 @@ impl<L: Levels> Tlb<L> {
                 Stage2At::Refuses => false,
                 Stage2At::Off => s2 == Stage2Leaf::NONE,
             };
-            if !stage1_valid || !stage2_valid {
+            // The memory of both stages as a fill combines it, under the
+            // `HCR_EL2.CD` of the context the entry was made in.
+            let s2_memory = match stage2 {
+                Stage2At::Starts(_) => Some(s2.memory),
+                Stage2At::Refuses | Stage2At::Off => None,
+            };
+            let cd = made_in.is_some_and(|made_in| made_in.hcr_el2 & HCR_CD != 0);
+            if !stage1_valid || !stage2_valid || memory != entry_memory(s1_memory, s2_memory, cd) {
                 return Err(NOT_WALKED);
             }
             let e0pd_refused =
@@ -2277,10 +2557,10 @@ impl<L: Levels> Tlb<L> {
             *slot = TlbEntry {
                 key,
                 pa_page,
-                device: s1_device || s2.device,
+                memory,
                 s1: Stage1Leaf {
                     perms,
-                    device: s1_device,
+                    memory: s1_memory,
                     level,
                     stage1,
                 },
@@ -2295,7 +2575,7 @@ impl<L: Levels> Tlb<L> {
             let pa_page = r.read_u64()?;
             let mut rest = [0u8; 3];
             r.read_bytes(&mut rest)?;
-            let [perms, device, level] = rest;
+            let [perms, memory, level] = rest;
             let made_in = match tag_place(key) {
                 Some(place) if contexts.stage2.current_entry(key) => {
                     contexts.stage2.table[place.index].ok_or(NO_CONTEXT)?
@@ -2303,7 +2583,11 @@ impl<L: Levels> Tlb<L> {
                 Some(_) | None => return Err(NO_CONTEXT),
             };
             // A context whose configuration refuses every walk keeps none.
-            let (Some(start), Some(level)) = (made_in.start(features), LeafLevel::of(level)) else {
+            let (Some(start), Some(level), Some(memory)) = (
+                made_in.start(features),
+                LeafLevel::of(level),
+                Memory::from_code(memory),
+            ) else {
                 return Err(NOT_WALKED);
             };
             // The key below its tag is an IPA page number alone, which the
@@ -2313,7 +2597,6 @@ impl<L: Levels> Tlb<L> {
                 || !start.translates(Ipa::new(ipa_page << 12))
                 || pa_page & 0xFFF != 0
                 || pa_page >> id::pa_bits(features) != 0
-                || device > 1
                 || !Stage2Leaf::walked(perms, level, start, features)
             {
                 return Err(NOT_WALKED);
@@ -2327,7 +2610,7 @@ impl<L: Levels> Tlb<L> {
                 pa_page: PhysAddr::new(pa_page),
                 leaf: Stage2Leaf {
                     perms,
-                    device: device == 1,
+                    memory,
                     level,
                 },
             };
@@ -2503,15 +2786,16 @@ impl<L: Levels> Cpu<L> {
     }
 
     /// The translation of `va` by the TLB entry that translates it, if the
-    /// TLB holds one that permits an access of `kind` checked against
-    /// `el`'s permissions at each stage ([`Cpu::entry_refusal`]): the one
-    /// case that raises no fault of a walk or of the page's permissions.
-    /// [`Cpu::translate_data`] and [`Cpu::fetch_translate`] try it inline,
-    /// and make their checks in their order out of line only when it is
-    /// `None`; [`Cpu::fetch_probe`] answers from it alone where the TLB is
-    /// used.
+    /// TLB holds one that permits an access needing `needs` checked against
+    /// `el`'s permissions at each stage ([`Cpu::entry_refusal`]) — a
+    /// read-modify-write both read and write, which stage 2 can give
+    /// apart: the one case that raises no fault of a walk or of the page's
+    /// permissions. [`Cpu::translate_data`] and [`Cpu::fetch_translate`]
+    /// try it inline, and make their checks in their order out of line only
+    /// when it is `None`; [`Cpu::fetch_probe`] answers from it alone where
+    /// the TLB is used.
     #[inline(always)]
-    fn permitted_hit(&self, va: u64, kind: AccessKind, el: El) -> Option<Mapping> {
+    fn permitted_hit(&self, va: u64, needs: Needs, el: El) -> Option<Mapping> {
         let regime = self.regime();
         if !self.tlb_used(regime) {
             return None;
@@ -2520,7 +2804,7 @@ impl<L: Levels> Cpu<L> {
         let entry = self.tlb.entry_for(key);
         if !entry.translates(key)
             || self
-                .entry_refusal(&entry, va, Needs::Access(kind), el, OnDevice::Permitted)
+                .entry_refusal(&entry, needs, el, OnDevice::Permitted)
                 .is_some()
         {
             return None;
@@ -2539,18 +2823,17 @@ impl<L: Levels> Cpu<L> {
     fn entry_refusal(
         &self,
         entry: &TlbEntry,
-        va: u64,
         needs: Needs,
         el: El,
         on_device: OnDevice,
     ) -> Option<Abort> {
-        if let Some(abort) = self.s1_refusal(&entry.stage1_leaf::<L>(), va, needs, el, on_device) {
+        if let Some(abort) = self.s1_refusal(&entry.stage1_leaf::<L>(), needs, el, on_device) {
             return Some(abort);
         }
         // An entry whose stage 2 gives every permission and Normal memory —
         // every entry stage 2 takes no part in, `Stage2Leaf::NONE`'s —
         // passes stage 2's checks.
-        if L::EL2 && (entry.s2.perms != PERMS || entry.s2.device) {
+        if L::EL2 && (entry.s2.perms != PERMS || entry.s2.memory.is_device()) {
             return self.s2_refusal(entry.s2, needs, el, on_device, needs.writes());
         }
         None
@@ -2564,34 +2847,27 @@ impl<L: Levels> Cpu<L> {
     /// (`AArch64_S1HasAlignmentFaultDueToMemType`, as `on_device` asks;
     /// an instruction fetch never does), then the permissions
     /// (`AArch64_S1CheckPermissions`), none where stage 1 is disabled.
-    /// FEAT_E0PD is stage 1's walk's, ahead of it: a miss meets it in
-    /// [`Cpu::s1_walk`]; the TLB holds no page stage 1's walk made that
-    /// E0PD refuses EL0 and EL0 has a permission for ([`Cpu::cache`]), so
-    /// every EL0 access E0PD refuses that hits such an entry is refused here,
-    /// and [`Cpu::refusal`] names the fault. A leaf made with stage 1
-    /// disabled meets no E0PD. Each of `s1`'s fields is read where a check
-    /// reads it, so a hit reads only what its checks need.
+    /// FEAT_E0PD is stage 1's walk's, ahead of it ([`Cpu::s1_walk`]): the
+    /// TLB holds no page stage 1's walk made that E0PD refuses EL0 and EL0
+    /// has a permission for ([`Cpu::cache`]), so every EL0 access E0PD
+    /// refuses that hits such an entry is refused here and walks, and the
+    /// walk names the fault. A leaf made with stage 1 disabled meets no
+    /// E0PD. Each of `s1`'s fields is read where a check reads it, so a hit
+    /// reads only what its checks need.
     #[inline(always)]
     fn s1_refusal(
         &self,
         s1: &Stage1Leaf,
-        va: u64,
         needs: Needs,
         el: El,
         on_device: OnDevice,
     ) -> Option<Abort> {
-        let walked = s1.stage1 == Stage1::Walked;
-        if on_device == OnDevice::Refused && s1.device {
-            let fault = if walked {
-                self.refusal(va, el, Fsc::Alignment)
-            } else {
-                Fsc::Alignment
-            };
-            return Some(Abort::first(fault, needs.writes()));
+        if on_device == OnDevice::Refused && s1.memory.is_device() {
+            return Some(Abort::first(Fsc::Alignment, needs.writes()));
         }
-        if walked {
+        if s1.stage1 == Stage1::Walked {
             if let Some(refused) = self.first_refused(s1.perms, needs, el, Pan::Checked) {
-                let fault = self.refusal(va, el, Fsc::Permission(s1.level));
+                let fault = Fsc::Permission(s1.level);
                 return Some(Abort::first(fault, refused == AccessKind::Write));
             }
         }
@@ -2613,7 +2889,7 @@ impl<L: Levels> Cpu<L> {
         on_device: OnDevice,
         write: bool,
     ) -> Option<Abort> {
-        if on_device == OnDevice::Refused && leaf.device {
+        if on_device == OnDevice::Refused && leaf.memory.is_device() {
             return Some(Abort::second_unreported(Fsc::Alignment, write));
         }
         let refused = self.first_refused(leaf.perms, needs, el, Pan::Absent)?;
@@ -2649,9 +2925,10 @@ impl<L: Levels> Cpu<L> {
     /// The translation of `va` for an access needing `needs` checked
     /// against `el`'s permissions, the one way every translation but the
     /// inline hit ([`Cpu::permitted_hit`]) goes: where the TLB is used
-    /// ([`Cpu::tlb_used`]), the checks of the entry it holds
-    /// ([`Cpu::entry_refusal`]); else, or on a miss, the walks
-    /// ([`Cpu::translate_miss`]).
+    /// ([`Cpu::tlb_used`]), the entry it holds where that entry's checks
+    /// pass ([`Cpu::entry_refusal`]); else the walks
+    /// ([`Cpu::translate_miss`]), which a TLB may always make, so that
+    /// every fault is the walk's and raised in its order in one place.
     fn translate_needs<B: PhysBus>(
         &mut self,
         bus: &mut B,
@@ -2666,10 +2943,9 @@ impl<L: Levels> Cpu<L> {
         }
         let key = self.found_tlb_key(va, regime);
         if let Some(entry) = self.tlb.hit(key) {
-            return match self.entry_refusal(&entry, va, needs, el, on_device) {
-                Some(abort) => Err(abort),
-                None => Ok(entry.mapping(va)),
-            };
+            if self.entry_refusal(&entry, needs, el, on_device).is_none() {
+                return Ok(entry.mapping(va));
+            }
         }
         self.translate_miss(bus, va, key, needs, el, on_device)
     }
@@ -2691,13 +2967,13 @@ impl<L: Levels> Cpu<L> {
             .s1_disabled(regime, va, needs.kind())
             .map_err(|f| f.abort(needs.writes()))?;
         let s1 = self.stage1_leaf(regime, &Stage1Output::Disabled(ipa));
-        if let Some(abort) = self.s1_refusal(&s1, va, needs, el, on_device) {
+        if let Some(abort) = self.s1_refusal(&s1, needs, el, on_device) {
             return Err(abort);
         }
         Ok(Mapping {
-            pa: ipa.untranslated().get(),
+            pa: ipa.untranslated(),
             guarded: false,
-            device: s1.device,
+            memory: s1.memory,
         })
     }
 
@@ -2762,24 +3038,17 @@ impl<L: Levels> Cpu<L> {
         let s1 = self.stage1_leaf(regime, &out);
         let ipa = out.ipa();
         if let (Stage1Output::Walked(_), None) = (&out, &stage2) {
-            self.cache(
-                key,
-                va,
-                kind,
-                s1,
-                Stage2Leaf::NONE,
-                ipa.untranslated().get(),
-            );
+            self.cache(key, va, kind, s1, None, ipa.untranslated());
         }
-        if let Some(abort) = self.s1_refusal(&s1, va, needs, el, on_device) {
+        if let Some(abort) = self.s1_refusal(&s1, needs, el, on_device) {
             return Err(abort);
         }
         let guarded = s1.perms & GUARDED != 0;
         let Some(made) = stage2 else {
             return Ok(Mapping {
-                pa: ipa.untranslated().get(),
+                pa: ipa.untranslated(),
                 guarded,
-                device: s1.device,
+                memory: s1.memory,
             });
         };
         let s2 = self
@@ -2788,21 +3057,23 @@ impl<L: Levels> Cpu<L> {
                 let stage = TranslationStage::Two { ipa };
                 NoTranslation { stage, fault }.abort(write)
             })?;
-        self.cache(key, va, kind, s1, s2.leaf, s2.pa.get());
+        self.cache(key, va, kind, s1, Some(s2.leaf), s2.pa);
         if let Some(abort) = self.s2_refusal(s2.leaf, needs, el, on_device, write) {
             return Err(abort);
         }
+        let cd = self.hcr_any(HCR_CD);
         Ok(Mapping {
-            pa: s2.pa.get(),
+            pa: s2.pa,
             guarded,
-            device: s1.device || s2.leaf.device,
+            memory: entry_memory(s1.memory, Some(s2.leaf.memory), cd),
         })
     }
 
     /// Cache in the TLB, under `key` ([`Cpu::found_tlb_key`]), the
     /// translation of `va` in the current regime to `pa` that stage 1
-    /// (`s1`) and stage 2 (`leaf`, [`Stage2Leaf::NONE`] without stage 2)
-    /// gave an access of `kind`.
+    /// (`s1`) and stage 2 (`s2`, `None` where it takes no part) gave an
+    /// access of `kind`, with the memory both map it to
+    /// ([`entry_memory`]).
     ///
     /// A tagged address keeps its tag in the entry's tag, so it hits only
     /// itself; no entry made before a TCR write, which can change what the
@@ -2824,8 +3095,8 @@ impl<L: Levels> Cpu<L> {
         va: u64,
         kind: AccessKind,
         s1: Stage1Leaf,
-        leaf: Stage2Leaf,
-        pa: u64,
+        s2: Option<Stage2Leaf>,
+        pa: PhysAddr,
     ) {
         let regime = key_regime(key);
         debug_assert!(
@@ -2844,24 +3115,29 @@ impl<L: Levels> Cpu<L> {
         // The fill may evict the entry the running trace's fetches hit; the
         // next instruction's fetch translates again, as it would have.
         self.trace_break = true;
-        self.tlb.entries[Tlb::<L>::slot(key)] = TlbEntry {
-            key,
-            pa_page: pa & !0xFFF,
-            device: s1.device || leaf.device,
-            s1,
-            s2: leaf,
-        };
+        let cd = s2.is_some() && self.hcr_any(HCR_CD);
+        let memory = entry_memory(s1.memory, s2.map(|leaf| leaf.memory), cd);
+        self.tlb.fill(
+            Tlb::<L>::slot(key),
+            TlbEntry {
+                key,
+                pa_page: pa.get() & !0xFFF,
+                memory,
+                s1,
+                s2: s2.unwrap_or(Stage2Leaf::NONE),
+            },
+        );
     }
 
     /// The E0PD rule of Arm `AArch64_S1Translate` (FEAT_E0PD): with
     /// `TCR_EL1.E0PD0` or `E0PD1` set, an access at `va` checked against
     /// EL0's permissions (`accdesc.el`, EL0's for LDTR and STTR at EL1
     /// without PSTATE.UAO), which only the EL1&0 regime has, takes a level 0
-    /// translation fault, ahead of the walk. Every such access meets it: on
-    /// a TLB miss in [`Cpu::s1_walk`]; on a hit in [`Cpu::refusal`], where
-    /// its permission check fails, as the TLB holds no page E0PD refuses EL0
-    /// that EL0 has a permission for ([`Cpu::cache`]); and in
-    /// [`Cpu::cache_maintenance`], whose accesses can need no permission.
+    /// translation fault, ahead of the walk. Every such access walks
+    /// ([`Cpu::s1_walk`]), as the TLB holds no page E0PD refuses EL0 that
+    /// EL0 has a permission for ([`Cpu::cache`]), so a hit refuses it and a
+    /// refused hit walks; or is [`Cpu::cache_maintenance`]'s, whose
+    /// accesses can need no permission.
     fn e0pd_refuses(&self, va: u64, el: El) -> bool {
         el == El::El0 && e0pd_set(self.imp.features, self.sys.tcr_el1, va)
     }
@@ -2909,15 +3185,19 @@ impl<L: Levels> Cpu<L> {
     #[inline(always)]
     fn stage1_leaf(&self, regime: Regime, out: &Stage1Output) -> Stage1Leaf {
         match out {
-            Stage1Output::Walked(walked) => Stage1Leaf {
-                perms: walked.perms,
-                device: walked.device(self.imp.features),
-                level: walked.level,
-                stage1: Stage1::Walked,
-            },
+            Stage1Output::Walked(walked) => {
+                let non_cacheable = self.regime_sctlr(regime) & sctlr::C == 0;
+                let memory = Memory::of(walked.attrs(self.imp.features));
+                Stage1Leaf {
+                    perms: walked.perms,
+                    memory: memory.normal_as_non_cacheable(non_cacheable),
+                    level: walked.level,
+                    stage1: Stage1::Walked,
+                }
+            }
             Stage1Output::Disabled(_) => Stage1Leaf {
                 perms: PERMS,
-                device: !self.s1_disabled_data_normal(regime),
+                memory: Memory::s1_disabled(self.s1_disabled_data_normal(regime)),
                 level: LeafLevel::Zero,
                 stage1: Stage1::Disabled,
             },
@@ -2945,27 +3225,11 @@ impl<L: Levels> Cpu<L> {
         self.walk(bus, self.s1_params(regime, va), va, kind, source)
     }
 
-    /// The fault an access at `va` checked against `el`'s permissions takes
-    /// when its TLB entry refuses it `fault`: a level 0 translation fault
-    /// where FEAT_E0PD refuses EL0 the page, which Arm's
-    /// `AArch64_S1Translate` checks ahead of the walk and so of every other
-    /// fault, and `fault` otherwise. Inline, so that where only whether an
-    /// entry refuses is asked ([`Cpu::permitted_hit`]) nothing of it is
-    /// made.
-    #[inline(always)]
-    fn refusal(&self, va: u64, el: El, fault: Fsc) -> Fsc {
-        if self.e0pd_refuses(va, el) {
-            Fsc::Translation(Level::Zero)
-        } else {
-            fault
-        }
-    }
-
     /// Whether an access of `kind` checked against `el`'s permissions may
-    /// use a page the walk gave `perms`: it has the permission it needs,
-    /// and a data access is not one PSTATE.PAN refuses (every data access
-    /// is subject to PAN, Arm `AccessDescriptor.pan`; an instruction fetch
-    /// is not).
+    /// use a page with flags `perms`: it has the permission it needs, and a
+    /// data access is not one PSTATE.PAN refuses (every data access is
+    /// subject to PAN, Arm `AccessDescriptor.pan`; an instruction fetch is
+    /// not). No entry holds a tag a fetch does not ignore ([`Cpu::cache`]).
     #[inline(always)]
     fn permits(&self, perms: u8, kind: AccessKind, el: El) -> bool {
         permitted(perms, kind, el) && (kind == AccessKind::Fetch || !self.pan_refuses(perms, el))
@@ -3289,7 +3553,7 @@ impl<L: Levels> Cpu<L> {
             fault,
         };
         let Stage2Output { pa, leaf } = self.s2_leaf(bus, ipa, source).map_err(on_walk)?;
-        if (self.s2_ptw() && leaf.device) || leaf.perms & PERM_EL1_R == 0 {
+        if (self.s2_ptw() && leaf.memory.is_device()) || leaf.perms & PERM_EL1_R == 0 {
             return Err(on_walk(TranslationFault::Permission { level: leaf.level }));
         }
         Ok(pa)
@@ -3304,7 +3568,7 @@ impl<L: Levels> Cpu<L> {
         &self,
         bus: &mut B,
         va: u64,
-    ) -> Result<u64, NoTranslation> {
+    ) -> Result<PhysAddr, NoTranslation> {
         let regime = self.regime();
         // Checked against EL1's permissions, a privileged level's, which
         // FEAT_E0PD leaves alone.
@@ -3319,10 +3583,10 @@ impl<L: Levels> Cpu<L> {
             )?
             .ipa();
         if !self.stage2_enabled(regime) {
-            return Ok(ipa.untranslated().get());
+            return Ok(ipa.untranslated());
         }
         self.s2_leaf(bus, ipa, &mut Stage2Source::Walked)
-            .map(|s2| s2.pa.get())
+            .map(|s2| s2.pa)
             .map_err(|fault| NoTranslation {
                 stage: TranslationStage::Two { ipa },
                 fault,
@@ -3553,11 +3817,11 @@ impl<L: Levels> Cpu<L> {
     /// syndrome is then the same with the feature as without.
     #[cold]
     #[inline(never)]
-    fn external_abort(&self, va: u64, pa: u64, kind: AccessKind) -> Fault {
+    fn external_abort(&self, va: u64, pa: PhysAddr, kind: AccessKind) -> Fault {
         if self.debug_stops.on_bus_fault {
             return Fault::Stop(StopCause::BusFault {
                 pc: self.pc,
-                addr: pa,
+                addr: pa.get(),
             });
         }
         let abort = Abort::first(Fsc::SyncExternal, kind == AccessKind::Write);
@@ -3572,14 +3836,17 @@ impl<L: Levels> Cpu<L> {
     /// The physical address of the instruction at `pc` (already known to be
     /// aligned), or the Instruction Abort its translation raises. Records
     /// whether the page is guarded (Arm `InGuardedPage`, FEAT_BTI) in
-    /// [`Cpu::in_guarded_page`], for the instructions fetched from it.
+    /// [`Cpu::in_guarded_page`], for the instructions fetched from it. A
+    /// fetch from Device memory that is not execute-never runs as Normal
+    /// Non-cacheable, the outcome Arm lists for `Unpredictable_INSTRDEVICE`
+    /// (Arm ARM B2.10.2 allows a Permission fault instead).
     #[inline(always)]
     pub(crate) fn fetch_translate<B: PhysBus>(
         &mut self,
         bus: &mut B,
         pc: u64,
-    ) -> Result<u64, Fault> {
-        match self.permitted_hit(pc, AccessKind::Fetch, self.pstate.el) {
+    ) -> Result<PhysAddr, Fault> {
+        match self.permitted_hit(pc, Needs::Access(AccessKind::Fetch), self.pstate.el) {
             Some(hit) => {
                 self.in_guarded_page = hit.guarded;
                 Ok(hit.pa)
@@ -3596,7 +3863,7 @@ impl<L: Levels> Cpu<L> {
     /// disabled and no stage 2, which leave the TLB unused, it is
     /// [`Cpu::translate`]'s `AArch64_S1DisabledOutput` address. It never
     /// fills, flushes or marks anything.
-    pub(crate) fn fetch_probe(&self, pc: u64) -> Option<u64> {
+    pub(crate) fn fetch_probe(&self, pc: u64) -> Option<PhysAddr> {
         if self.pstate.il || pc & 3 != 0 {
             return None;
         }
@@ -3604,9 +3871,9 @@ impl<L: Levels> Cpu<L> {
         if !self.tlb_used(regime) {
             return self
                 .s1_disabled_output(regime, pc, AccessKind::Fetch)
-                .map(|ipa| ipa.untranslated().get());
+                .map(|ipa| ipa.untranslated());
         }
-        self.permitted_hit(pc, AccessKind::Fetch, self.pstate.el)
+        self.permitted_hit(pc, Needs::Access(AccessKind::Fetch), self.pstate.el)
             .map(|hit| hit.pa)
     }
 
@@ -3614,7 +3881,11 @@ impl<L: Levels> Cpu<L> {
     /// TLB miss, or a page that does not permit the fetch.
     #[cold]
     #[inline(never)]
-    fn fetch_translate_checked<B: PhysBus>(&mut self, bus: &mut B, pc: u64) -> Result<u64, Fault> {
+    fn fetch_translate_checked<B: PhysBus>(
+        &mut self,
+        bus: &mut B,
+        pc: u64,
+    ) -> Result<PhysAddr, Fault> {
         let el = self.pstate.el;
         let needs = Needs::Access(AccessKind::Fetch);
         let m = self
@@ -3630,9 +3901,9 @@ impl<L: Levels> Cpu<L> {
         &mut self,
         bus: &mut B,
         pc: u64,
-        pa: u64,
+        pa: PhysAddr,
     ) -> Result<u32, Fault> {
-        match bus.fetch(PhysAddr::new(pa), self.clock()) {
+        match bus.fetch(pa, self.clock()) {
             Ok(word) => Ok(word),
             Err(BusFault::Unmapped) => Err(self.external_abort(pc, pa, AccessKind::Fetch)),
         }
@@ -3655,94 +3926,81 @@ impl<L: Levels> Cpu<L> {
     }
 
     /// Alignment checks that precede translation, then translation, with
-    /// Device memory's alignment check ahead of the permissions, for an
-    /// access of `bytes` (a power of two) at `va` that stays in one page.
-    /// A read-modify-write checks read permission, then write permission.
-    /// WnR is `!read && write` for every fault but a refused write.
+    /// Device memory's alignment check as `on_device` says ahead of the
+    /// permissions, for an access of `bytes` (a power of two) at `va` that
+    /// stays in one page. A read-modify-write checks read permission, then
+    /// write permission; write permission implies read permission, so a
+    /// TLB entry that permits the write permits both. WnR is `!read &&
+    /// write` for every fault but a refused write.
     ///
-    /// A read or a write whose TLB entry permits it, and that no alignment
-    /// check can refuse — aligned and whole, or misaligned on Normal memory
-    /// with no check that faults it before translation — raises none of
-    /// these faults, and is answered inline; everything else makes the
-    /// checks in order out of line.
+    /// An access whose TLB entry permits it, and that no alignment check
+    /// can refuse — aligned and whole, or misaligned on Normal memory with
+    /// no check that faults it before translation — raises none of these
+    /// faults, and is answered inline while no watchpoint is armed
+    /// ([`Cpu::watch_armed`]); everything else makes the checks in order out
+    /// of line, where the entry's hit spares the walk.
     #[inline(always)]
     fn translate_data<B: PhysBus>(
         &mut self,
         bus: &mut B,
         va: u64,
-        bytes: u64,
+        span: AccessSpan,
         direction: DataDirection,
         acc: DataAccess,
-    ) -> Result<Translated, Fault> {
-        let hit = match direction {
-            DataDirection::Read => self.permitted_hit(va, AccessKind::Read, self.access_el(acc)),
-            DataDirection::Write => self.permitted_hit(va, AccessKind::Write, self.access_el(acc)),
-            DataDirection::ReadWrite => None,
-        };
-        if let Some(hit) = hit {
+        on_device: OnDevice,
+    ) -> Result<Mapping, Fault> {
+        let needs = Needs::from(direction);
+        if let Some(hit) = self.permitted_hit(va, needs, self.access_el(acc)) {
             // An ordinary access misaligned on Normal memory faults only
             // under SCTLR_ELx.A ([`Cpu::misaligned_faults`]).
-            let aligned = va & (bytes - 1) == 0 && acc.part == Part::Whole;
-            if aligned
-                || (!hit.device && acc.alignment == AlignmentRule::Any && !self.strict_alignment())
+            if !self.watch_armed
+                && (on_device == OnDevice::Permitted
+                    || (!hit.memory.is_device()
+                        && acc.alignment == AlignmentRule::Any
+                        && !self.strict_alignment()))
             {
-                return Ok(Translated { pa: hit.pa });
+                return Ok(hit);
             }
         }
-        self.translate_data_checked(bus, va, bytes, direction, acc)
+        self.translate_data_checked(bus, va, span, direction, acc, on_device)
     }
 
     /// [`Cpu::translate_data`] with every check made, in order: stage 1
     /// disabled, a TLB miss (which walks and fills), a page that does not
-    /// permit the access, a read-modify-write, or an access an alignment
-    /// check may refuse.
+    /// permit the access, a watchpoint armed, or an access an alignment
+    /// check may refuse. The
+    /// watchpoints come last, after the access's translation and permission
+    /// checks (Arm `AArch64_TranslateAddress`).
     #[cold]
     #[inline(never)]
     fn translate_data_checked<B: PhysBus>(
         &mut self,
         bus: &mut B,
         va: u64,
-        bytes: u64,
+        span: AccessSpan,
         direction: DataDirection,
         acc: DataAccess,
-    ) -> Result<Translated, Fault> {
-        let misaligned = va & (bytes - 1) != 0;
-        if misaligned && self.misaligned_faults(va, bytes, acc) {
-            return Err(Self::alignment_abort(va, direction == DataDirection::Write));
-        }
-        let on_device = if misaligned || acc.part == Part::OfMisaligned {
-            OnDevice::Refused
-        } else {
-            OnDevice::Permitted
-        };
+        on_device: OnDevice,
+    ) -> Result<Mapping, Fault> {
+        self.check_alignment(va, span.bytes, acc, direction == DataDirection::Write)?;
         let el = self.access_el(acc);
         let slot = acc.syndrome_slot(AddressInAccess::Lowest);
-        match direction {
-            DataDirection::Read => self
-                .translate(bus, va, AccessKind::Read, el, on_device)
-                .map_err(|abort| Self::data_abort(va, abort, slot)),
-            DataDirection::Write => self
-                .translate(bus, va, AccessKind::Write, el, on_device)
-                .map_err(|abort| Self::data_abort(va, abort, slot)),
-            DataDirection::ReadWrite => self
-                .translate_rmw(bus, va, el, on_device)
-                .map_err(|abort| Self::data_abort(va, abort, slot)),
-        }
+        let needs = Needs::from(direction);
+        let mapping = self
+            .translate_needs(bus, va, needs, el, on_device)
+            .map_err(|abort| Self::data_abort(va, abort, slot))?;
+        let range = self.watched_range(acc);
+        self.check_watchpoints(va, span.watched, direction.into(), el, range)?;
+        Ok(mapping)
     }
 
-    /// The translation of a read-modify-write at `va`: read permission,
-    /// then write permission, at stage 1 and then at stage 2
-    /// ([`Cpu::translate_needs`]).
-    #[inline(never)]
-    fn translate_rmw<B: PhysBus>(
-        &mut self,
-        bus: &mut B,
-        va: u64,
-        el: El,
-        on_device: OnDevice,
-    ) -> Result<Translated, Abort> {
-        self.translate_needs(bus, va, Needs::ReadWrite, el, on_device)
-            .map(|m| Translated { pa: m.pa })
+    /// How a watchpoint looks at `acc` (Arm `IsRelaxedWatchpointAccess`).
+    fn watched_range(&self, acc: DataAccess) -> WatchedRange {
+        match acc.class {
+            AccessClass::Scalable => WatchedRange::RoundedTo16Bytes,
+            AccessClass::SimdFp if self.svcr.sm => WatchedRange::RoundedTo16Bytes,
+            AccessClass::SimdFp | AccessClass::General => WatchedRange::Exact,
+        }
     }
 
     /// The physical address an access of `bytes` at `va` reaches, with every
@@ -3757,64 +4015,144 @@ impl<L: Levels> Cpu<L> {
         direction: DataDirection,
         acc: DataAccess,
     ) -> Result<PhysAddr, Fault> {
-        self.translate_data(bus, va, bytes, direction, acc)
-            .map(|t| PhysAddr::new(t.pa))
+        let on_device = OnDevice::of_alignment(va, bytes);
+        self.translate_data(
+            bus,
+            va,
+            AccessSpan::single(bytes),
+            direction,
+            acc,
+            on_device,
+        )
+        .map(|m| m.pa)
     }
 
-    /// The bus half of every data read: `1 << log2` bytes (`log2` in 0..=3)
-    /// at `pa`, which `va` translated to, in one bus access, zero-extended.
-    /// A bus fault is a synchronous external abort reported at `va`.
+    /// The bus half of every data read: `width` at `pa`, which `va`
+    /// translated to, in one bus access, zero-extended. A bus fault is a
+    /// synchronous external abort reported at `va`.
     #[inline(always)]
     fn bus_read<B: PhysBus>(
         &mut self,
         bus: &mut B,
         va: u64,
         pa: PhysAddr,
-        log2: u32,
+        width: AccessWidth,
     ) -> Result<u64, Fault> {
-        let width = AccessWidth::from_log2(log2).unwrap_or(AccessWidth::Dword);
         match bus.read(pa, width, self.clock()) {
-            Ok(v) => Ok(v & width.value_mask()),
-            Err(BusFault::Unmapped) => Err(self.external_abort(va, pa.get(), AccessKind::Read)),
+            Ok(v) => Ok(v),
+            Err(BusFault::Unmapped) => Err(self.external_abort(va, pa, AccessKind::Read)),
         }
     }
 
-    /// The bus half of every data write: the low `1 << log2` bytes of
-    /// `value` at `pa`, which `va` translated to, in one bus access, after
-    /// [`Cpu::note_store`]. A bus fault is a synchronous external abort
-    /// reported at `va`.
+    /// Two adjacent elements of `width` at `pa`, which `va` translated to,
+    /// each a bus access of its own.
+    #[inline(always)]
+    fn bus_read_pair<B: PhysBus>(
+        &mut self,
+        bus: &mut B,
+        va: u64,
+        pa: PhysAddr,
+        width: AccessWidth,
+    ) -> Result<ElementPair, Fault> {
+        let bytes = width.bytes();
+        let first = self.bus_read(bus, va, pa, width)?;
+        let second_pa = PhysAddr::new(pa.get() + bytes);
+        let second = self.bus_read(bus, va.wrapping_add(bytes), second_pa, width)?;
+        Ok(ElementPair { first, second })
+    }
+
+    /// The low `width` bytes of `value` at `pa`, which `va` translated to,
+    /// in one bus access, with nothing else a store does. A bus fault is a
+    /// synchronous external abort reported at `va`.
+    #[inline(always)]
+    fn bus_store<B: PhysBus>(
+        &mut self,
+        bus: &mut B,
+        va: u64,
+        pa: PhysAddr,
+        width: AccessWidth,
+        value: u64,
+    ) -> Result<(), Fault> {
+        match bus.write(pa, width, value, self.clock()) {
+            Ok(()) => Ok(()),
+            Err(BusFault::Unmapped) => Err(self.external_abort(va, pa, AccessKind::Write)),
+        }
+    }
+
+    /// The bus half of every data write: [`Cpu::bus_store`], after
+    /// [`Cpu::note_store`].
     #[inline(always)]
     fn bus_write<B: PhysBus>(
         &mut self,
         bus: &mut B,
         va: u64,
         pa: PhysAddr,
-        log2: u32,
+        width: AccessWidth,
         value: u64,
     ) -> Result<(), Fault> {
-        let width = AccessWidth::from_log2(log2).unwrap_or(AccessWidth::Dword);
-        self.note_store(pa.get(), 1 << log2);
-        match bus.write(pa, width, value & width.value_mask(), self.clock()) {
-            Ok(()) => Ok(()),
-            Err(BusFault::Unmapped) => Err(self.external_abort(va, pa.get(), AccessKind::Write)),
-        }
+        self.note_store(pa, width.bytes());
+        self.bus_store(bus, va, pa, width, value)
     }
 
-    /// Read `1 << log2` bytes (`log2` in 0..=3) at `va`, zero-extended. An
-    /// access within one page is inlined into the instruction that makes
-    /// it; one that crosses a page boundary is out of line.
+    /// Two adjacent elements of `width` at `pa`, as
+    /// [`Cpu::bus_read_pair`] reads them.
+    #[inline(always)]
+    fn bus_write_pair<B: PhysBus>(
+        &mut self,
+        bus: &mut B,
+        va: u64,
+        pa: PhysAddr,
+        width: AccessWidth,
+        value: ElementPair,
+    ) -> Result<(), Fault> {
+        let bytes = width.bytes();
+        self.bus_write(bus, va, pa, width, value.first)?;
+        let second_pa = PhysAddr::new(pa.get() + bytes);
+        self.bus_write(bus, va.wrapping_add(bytes), second_pa, width, value.second)
+    }
+
+    /// Read `width` at `va`, zero-extended. An access within one page is
+    /// inlined into the instruction that makes it; one that crosses a page
+    /// boundary is out of line.
     #[inline(always)]
     pub(crate) fn read_mem<B: PhysBus>(
         &mut self,
         bus: &mut B,
         va: u64,
-        log2: u32,
+        width: AccessWidth,
         acc: DataAccess,
     ) -> Result<u64, Fault> {
-        let bytes = 1u64 << log2;
+        let on_device = OnDevice::of_alignment(va, width.bytes());
+        self.read_single(bus, va, width, acc, on_device)
+    }
+
+    /// [`Cpu::read_mem`] of one part of a transfer misaligned as a whole,
+    /// which Device memory refuses however the part is aligned: Arm passes
+    /// the transfer's `aligned` to `AArch64_MemSingle` for each part.
+    pub(crate) fn read_part_of_misaligned<B: PhysBus>(
+        &mut self,
+        bus: &mut B,
+        va: u64,
+        width: AccessWidth,
+        acc: DataAccess,
+    ) -> Result<u64, Fault> {
+        self.read_single(bus, va, width, acc, OnDevice::Refused)
+    }
+
+    #[inline(always)]
+    fn read_single<B: PhysBus>(
+        &mut self,
+        bus: &mut B,
+        va: u64,
+        width: AccessWidth,
+        acc: DataAccess,
+        on_device: OnDevice,
+    ) -> Result<u64, Fault> {
+        let bytes = width.bytes();
         if (va & 0xFFF) + bytes <= 0x1000 {
-            let t = self.translate_data(bus, va, bytes, DataDirection::Read, acc)?;
-            return self.bus_read(bus, va, PhysAddr::new(t.pa), log2);
+            let span = AccessSpan::single(bytes);
+            let m = self.translate_data(bus, va, span, DataDirection::Read, acc, on_device)?;
+            return self.bus_read(bus, va, m.pa, width);
         }
         self.read_mem_across_pages(bus, va, bytes, acc)
     }
@@ -3829,16 +4167,16 @@ impl<L: Levels> Cpu<L> {
         &mut self,
         bus: &mut B,
         va: u64,
-        log2: u32,
+        width: AccessWidth,
         acc: DataAccess,
         syndrome: S,
     ) -> Result<u64, Fault> {
-        self.read_mem(bus, va, log2, acc.of_one_register())
+        self.read_mem(bus, va, width, acc.of_one_register())
             .map_err(|fault| fault.reporting(syndrome()))
     }
 
     /// A read of `bytes` at `va` that crosses a page boundary, and so is
-    /// misaligned. Each byte is an access of its own (Arm ARM `Mem[]` on an
+    /// misaligned. Each byte is an access of its own (Arm `Mem` on an
     /// unaligned address, `AArch64_MemSingle` of each byte, each with the
     /// whole access's alignment), so a translation or external fault
     /// reports the first byte that faulted — an address in the page that
@@ -3858,9 +4196,7 @@ impl<L: Levels> Cpu<L> {
         bytes: u64,
         acc: DataAccess,
     ) -> Result<u64, Fault> {
-        if self.misaligned_faults(va, bytes, acc) {
-            return Err(Self::alignment_abort(va, false));
-        }
+        self.check_alignment(va, bytes, acc, false)?;
         let el = self.access_el(acc);
         let mut value = 0u64;
         for i in 0..bytes {
@@ -3869,28 +4205,26 @@ impl<L: Levels> Cpu<L> {
             let t = self
                 .translate(bus, byte_va, AccessKind::Read, el, OnDevice::Refused)
                 .map_err(|abort| Self::data_abort(byte_va, abort, slot))?;
-            value |= self.bus_read(bus, byte_va, PhysAddr::new(t.pa), 0)? << (8 * i);
+            let range = self.watched_range(acc);
+            self.check_watchpoints(byte_va, 1, WatchedAccess::Load, el, range)?;
+            value |= self.bus_read(bus, byte_va, t.pa, AccessWidth::Byte)? << (8 * i);
         }
         Ok(value)
     }
 
-    /// Write the low `1 << log2` bytes of `value` at `va`. As for a read, an
+    /// Write the low `width` bytes of `value` at `va`. As for a read, an
     /// access within one page is inlined and one across pages is not.
     #[inline(always)]
     pub(crate) fn write_mem<B: PhysBus>(
         &mut self,
         bus: &mut B,
         va: u64,
-        log2: u32,
+        width: AccessWidth,
         value: u64,
         acc: DataAccess,
     ) -> Result<(), Fault> {
-        let bytes = 1u64 << log2;
-        if (va & 0xFFF) + bytes <= 0x1000 {
-            let t = self.translate_data(bus, va, bytes, DataDirection::Write, acc)?;
-            return self.bus_write(bus, va, PhysAddr::new(t.pa), log2, value);
-        }
-        self.write_mem_across_pages(bus, va, bytes, value, acc)
+        let on_device = OnDevice::of_alignment(va, width.bytes());
+        self.write_single(bus, va, width, value, acc, on_device)
     }
 
     /// [`Cpu::write_mem`] by a store of one general-purpose register, its
@@ -3900,16 +4234,48 @@ impl<L: Levels> Cpu<L> {
         &mut self,
         bus: &mut B,
         va: u64,
-        log2: u32,
+        width: AccessWidth,
         value: u64,
         acc: DataAccess,
         syndrome: S,
     ) -> Result<(), Fault> {
-        self.write_mem(bus, va, log2, value, acc.of_one_register())
+        self.write_mem(bus, va, width, value, acc.of_one_register())
             .map_err(|fault| fault.reporting(syndrome()))
     }
 
-    /// A write of the low `bytes` bytes of `value` at `va` that crosses a
+    /// [`Cpu::write_mem`] of one part of a transfer misaligned as a whole,
+    /// as [`Cpu::read_part_of_misaligned`] reads one.
+    pub(crate) fn write_part_of_misaligned<B: PhysBus>(
+        &mut self,
+        bus: &mut B,
+        va: u64,
+        width: AccessWidth,
+        value: u64,
+        acc: DataAccess,
+    ) -> Result<(), Fault> {
+        self.write_single(bus, va, width, value, acc, OnDevice::Refused)
+    }
+
+    #[inline(always)]
+    fn write_single<B: PhysBus>(
+        &mut self,
+        bus: &mut B,
+        va: u64,
+        width: AccessWidth,
+        value: u64,
+        acc: DataAccess,
+        on_device: OnDevice,
+    ) -> Result<(), Fault> {
+        let bytes = width.bytes();
+        if (va & 0xFFF) + bytes <= 0x1000 {
+            let span = AccessSpan::single(bytes);
+            let m = self.translate_data(bus, va, span, DataDirection::Write, acc, on_device)?;
+            return self.bus_write(bus, va, m.pa, width, value);
+        }
+        self.write_mem_across_pages(bus, va, width, value, acc)
+    }
+
+    /// A write of the low `width` bytes of `value` at `va` that crosses a
     /// page boundary, its faults reported as [`Cpu::read_mem_across_pages`]
     /// reports a read's. Both pages are translated before anything is
     /// written, so a fault on the second page leaves memory untouched: the
@@ -3920,70 +4286,123 @@ impl<L: Levels> Cpu<L> {
         &mut self,
         bus: &mut B,
         va: u64,
-        bytes: u64,
+        width: AccessWidth,
         value: u64,
         acc: DataAccess,
     ) -> Result<(), Fault> {
-        if self.misaligned_faults(va, bytes, acc) {
-            return Err(Self::alignment_abort(va, true));
-        }
-        let el = self.access_el(acc);
-        self.translate_write_pages(bus, va, bytes, acc)?;
-        for i in 0..bytes {
-            let byte_va = va.wrapping_add(i);
-            let slot = acc.syndrome_slot(AddressInAccess::of_byte(i));
-            let t = self
-                .translate(bus, byte_va, AccessKind::Write, el, OnDevice::Refused)
-                .map_err(|abort| Self::data_abort(byte_va, abort, slot))?;
-            self.bus_write(bus, byte_va, PhysAddr::new(t.pa), 0, value >> (8 * i))?;
-        }
-        Ok(())
+        let bytes = width.bytes();
+        self.check_alignment(va, bytes, acc, true)?;
+        let pages = self.translate_write_pages(bus, va, bytes, acc, OnDevice::Refused)?;
+        self.write_element_on_pages(bus, va, 0, width, value, pages)
     }
 
-    /// Translate, for a write by `acc`, the first byte of a misaligned
-    /// access of `bytes` at `va` that crosses a page boundary and the first
-    /// byte on its second page, so that a fault on either is taken before
-    /// anything is written, reported at the byte that faulted. Only the
-    /// first is at the access's lowest address, and so can report the
-    /// instruction's syndrome.
+    /// Translate, for a write with `acc`'s constraints, the first
+    /// byte of an access of `bytes` at `va` that crosses a page boundary
+    /// and its first byte on the second page, Device memory refusing them
+    /// as `on_device` says, so that a fault on either, or a watchpoint on
+    /// any of its bytes, is taken before anything is written, reported at
+    /// the byte that faulted, in the order of Arm's bytes: the first page's
+    /// translation, then its watchpoints, then the second page's
+    /// translation and its watchpoints (`AArch64_MemSingle` translates a
+    /// byte, then `AArch64_CheckDebug` checks it). Arm's `Mem` setter writes byte by byte, and
+    /// leaves what a faulting store has written unspecified; one register,
+    /// a pair or a pair of Q registers crossing a page here leaves memory
+    /// as it was on a translation fault, as QEMU's do (accel/tcg/cputlb.c
+    /// `mmu_lookup`). `ST1` and the SVE and SME stores make their elements'
+    /// accesses one at a time, and do not come through here. Only the first
+    /// byte is at the access's lowest address, and so can report the
+    /// instruction's syndrome ([`AddressInAccess`]).
     fn translate_write_pages<B: PhysBus>(
         &mut self,
         bus: &mut B,
         va: u64,
         bytes: u64,
         acc: DataAccess,
-    ) -> Result<(), Fault> {
+        on_device: OnDevice,
+    ) -> Result<WritePages, Fault> {
         let el = self.access_el(acc);
         let second_page = va.wrapping_add(bytes - 1) & !0xFFF;
-        let probes = [
-            (va, AddressInAccess::Lowest),
-            (second_page, AddressInAccess::Later),
-        ];
-        for (probe, at) in probes {
-            let slot = acc.syndrome_slot(at);
-            self.translate(bus, probe, AccessKind::Write, el, OnDevice::Refused)
-                .map_err(|abort| Self::data_abort(probe, abort, slot))?;
+        let first_bytes = second_page.wrapping_sub(va);
+        let range = self.watched_range(acc);
+        let first = self
+            .translate(bus, va, AccessKind::Write, el, on_device)
+            .map_err(|abort| {
+                Self::data_abort(va, abort, acc.syndrome_slot(AddressInAccess::Lowest))
+            })?;
+        self.check_watchpoints(va, first_bytes, WatchedAccess::Store, el, range)?;
+        let second = self
+            .translate(bus, second_page, AccessKind::Write, el, on_device)
+            .map_err(|abort| {
+                Self::data_abort(
+                    second_page,
+                    abort,
+                    acc.syndrome_slot(AddressInAccess::Later),
+                )
+            })?;
+        let second_bytes = bytes - first_bytes;
+        self.check_watchpoints(second_page, second_bytes, WatchedAccess::Store, el, range)?;
+        Ok(WritePages {
+            first: first.pa,
+            second: second.pa,
+            first_bytes,
+        })
+    }
+
+    /// Write the low `width` bytes of `value`, an element at byte `offset`
+    /// of the store at `va` to `pages`: one access if it lies on one page,
+    /// a byte at a time if it crosses.
+    fn write_element_on_pages<B: PhysBus>(
+        &mut self,
+        bus: &mut B,
+        va: u64,
+        offset: u64,
+        width: AccessWidth,
+        value: u64,
+        pages: WritePages,
+    ) -> Result<(), Fault> {
+        let bytes = width.bytes();
+        if pages.holds(offset, bytes) {
+            return self.bus_write(
+                bus,
+                va.wrapping_add(offset),
+                pages.byte(offset),
+                width,
+                value,
+            );
+        }
+        for i in 0..bytes {
+            let at = offset + i;
+            let byte = value >> (8 * i);
+            self.bus_write(
+                bus,
+                va.wrapping_add(at),
+                pages.byte(at),
+                AccessWidth::Byte,
+                byte,
+            )?;
         }
         Ok(())
     }
 
-    /// Whether a pair of `1 << log2`-byte elements at `va` is one
-    /// single-copy atomic access, of 8 bytes: with FEAT_LSE2, a pair of
-    /// words that lies in one 16-byte granule (Arm `Mem`, `AllInSCAGranule`,
-    /// whose IMPLEMENTATION DEFINED quantity is 16 here).
+    /// Whether a pair of `width` elements at `va` on the memory `m` is one
+    /// single-copy atomic access of 8 bytes: with FEAT_LSE2, a pair of
+    /// words that lies in one 16-byte granule of Normal Write-Back
+    /// Shareable memory (Arm `Mem`, `AllInSCAGranule`, whose IMPLEMENTATION
+    /// DEFINED quantity is 16 here, and `AArch64_MemSingleRead`,
+    /// `IsWBShareable`). On any other memory `AArch64_MemSingleRead` makes
+    /// the two accesses of the pair.
     #[inline(always)]
-    fn pair_is_one_access(&self, va: u64, log2: u32, acc: DataAccess) -> bool {
-        log2 == 2
+    fn pair_is_one_access(&self, va: u64, width: AccessWidth, m: Mapping) -> bool {
+        width == AccessWidth::Word
             && (va & 15) + 8 <= 16
-            && acc.alignment == AlignmentRule::Any
+            && m.memory == Memory::WriteBackShareable
             && self.implements(Feature::Lse2)
     }
 
-    /// Read two adjacent elements of `1 << log2` bytes (`log2` in 0..=3),
-    /// at `va` and `va + (1 << log2)`, each zero-extended and each an access
-    /// of its own with `acc`'s constraints, as Arm ARM `LDP` makes them
-    /// (`Mem[address, dbytes]` then `Mem[address + dbytes, dbytes]`), and as
-    /// [`Cpu::read_mem_u128`] makes its halves.
+    /// Read two adjacent elements of `width`, at `va` and `va` plus `width`,
+    /// each zero-extended, with `acc`'s constraints: Arm `LDP`'s one
+    /// `Mem{2*datasize}` with `ispair` set, whose alignment is judged by the
+    /// elements, as [`Cpu::read_mem_u128`] makes its halves.
     ///
     /// The result is that of two reads of the elements made in order: the
     /// same values, and the same fault with the same address. A pair of
@@ -3992,38 +4411,49 @@ impl<L: Levels> Cpu<L> {
     /// the first's page, aligned exactly when the first is, with the same
     /// constraints, so it meets the same alignment checks, and the first
     /// translation's result may be used for it as a TLB holds it (a walk's
-    /// result stays usable until TLB maintenance, Arm ARM D8.13). Each
+    /// result stays usable until TLB maintenance, Arm ARM D8.16). Each
     /// element still takes its own external abort.
     ///
-    /// With FEAT_LSE2, a pair of words that lies in one 16-byte granule is
-    /// one single-copy atomic access of 8 bytes instead (Arm `Mem`:
-    /// `AllInSCAGranule`), whose alignment, as every pair's, is judged by
-    /// its elements. A pair of doublewords there would be one 16-byte
-    /// access, which the bus has no width for: it stays two.
+    /// With FEAT_LSE2, a pair of words that lies in one 16-byte granule of
+    /// Normal Write-Back Shareable memory is one single-copy atomic access
+    /// of 8 bytes instead ([`Cpu::pair_is_one_access`]). A pair of
+    /// doublewords there would be one 16-byte access, which the bus has no
+    /// width for: it stays two.
     #[inline(always)]
     pub(crate) fn read_pair<B: PhysBus>(
         &mut self,
         bus: &mut B,
         va: u64,
-        log2: u32,
+        width: AccessWidth,
         acc: DataAccess,
     ) -> Result<ElementPair, Fault> {
-        let bytes = 1u64 << log2;
-        if self.pair_is_one_access(va, log2, acc) {
-            let t = self.translate_data(bus, va, bytes, DataDirection::Read, acc)?;
-            let value = self.bus_read(bus, va, PhysAddr::new(t.pa), 3)?;
-            return Ok(ElementPair {
-                first: value & 0xFFFF_FFFF,
-                second: value >> 32,
-            });
-        }
+        let on_device = OnDevice::of_alignment(va, width.bytes());
+        self.read_elements(bus, va, width, acc, on_device)
+    }
+
+    #[inline(always)]
+    fn read_elements<B: PhysBus>(
+        &mut self,
+        bus: &mut B,
+        va: u64,
+        width: AccessWidth,
+        acc: DataAccess,
+        on_device: OnDevice,
+    ) -> Result<ElementPair, Fault> {
+        let bytes = width.bytes();
         if (va & 0xFFF) + 2 * bytes <= 0x1000 && acc.alignment == AlignmentRule::Any {
-            let t = self.translate_data(bus, va, bytes, DataDirection::Read, acc)?;
-            let first = self.bus_read(bus, va, PhysAddr::new(t.pa), log2)?;
-            let second = self.bus_read(bus, va + bytes, PhysAddr::new(t.pa + bytes), log2)?;
-            return Ok(ElementPair { first, second });
+            let span = AccessSpan::pair(bytes);
+            let m = self.translate_data(bus, va, span, DataDirection::Read, acc, on_device)?;
+            if self.pair_is_one_access(va, width, m) {
+                let value = self.bus_read(bus, va, m.pa, AccessWidth::Dword)?;
+                return Ok(ElementPair {
+                    first: value & 0xFFFF_FFFF,
+                    second: value >> 32,
+                });
+            }
+            return self.bus_read_pair(bus, va, m.pa, width);
         }
-        self.read_pair_apart(bus, va, log2, acc)
+        self.read_pair_apart(bus, va, width, acc, on_device)
     }
 
     /// A [`Cpu::read_pair`] whose elements are read on their own: across a
@@ -4034,17 +4464,19 @@ impl<L: Levels> Cpu<L> {
         &mut self,
         bus: &mut B,
         va: u64,
-        log2: u32,
+        width: AccessWidth,
         acc: DataAccess,
+        on_device: OnDevice,
     ) -> Result<ElementPair, Fault> {
-        let first = self.read_mem(bus, va, log2, acc)?;
-        let second = self.read_mem(bus, va.wrapping_add(1 << log2), log2, acc)?;
+        let first = self.read_single(bus, va, width, acc, on_device)?;
+        let second_va = va.wrapping_add(width.bytes());
+        let second = self.read_single(bus, second_va, width, acc, on_device)?;
         Ok(ElementPair { first, second })
     }
 
-    /// Write the low `1 << log2` bytes (`log2` in 0..=3) of each element of
-    /// `value`, `first` at `va` and `second` at `va + (1 << log2)`, in Arm
-    /// ARM `STP`'s order, each an access of its own as for
+    /// Write the low `width` bytes of each element of `value`, `first` at
+    /// `va` and `second` at `va` plus `width`, in the order of Arm `STP`'s
+    /// `Mem{2*datasize}`, each an access of its own as for
     /// [`Cpu::read_pair`].
     ///
     /// The result is that of two writes of the elements made in order: the
@@ -4052,49 +4484,67 @@ impl<L: Levels> Cpu<L> {
     /// ([`Cpu::note_store`]) in the same order, each just before its
     /// element is written. A pair within one page translates once, for the
     /// reasons [`Cpu::read_pair`] gives, and with FEAT_LSE2 a pair of words
-    /// within one 16-byte granule is one access, as it reads.
+    /// within one 16-byte granule of Normal Write-Back Shareable memory is
+    /// one access, as it reads.
     #[inline(always)]
     pub(crate) fn write_pair<B: PhysBus>(
         &mut self,
         bus: &mut B,
         va: u64,
-        log2: u32,
+        width: AccessWidth,
         value: ElementPair,
         acc: DataAccess,
     ) -> Result<(), Fault> {
-        let bytes = 1u64 << log2;
-        if self.pair_is_one_access(va, log2, acc) {
-            let t = self.translate_data(bus, va, bytes, DataDirection::Write, acc)?;
-            let both = (value.second << 32) | (value.first & 0xFFFF_FFFF);
-            return self.bus_write(bus, va, PhysAddr::new(t.pa), 3, both);
-        }
+        let on_device = OnDevice::of_alignment(va, width.bytes());
+        self.write_elements(bus, va, width, value, acc, on_device)
+    }
+
+    #[inline(always)]
+    fn write_elements<B: PhysBus>(
+        &mut self,
+        bus: &mut B,
+        va: u64,
+        width: AccessWidth,
+        value: ElementPair,
+        acc: DataAccess,
+        on_device: OnDevice,
+    ) -> Result<(), Fault> {
+        let bytes = width.bytes();
         if (va & 0xFFF) + 2 * bytes <= 0x1000 && acc.alignment == AlignmentRule::Any {
-            let t = self.translate_data(bus, va, bytes, DataDirection::Write, acc)?;
-            self.bus_write(bus, va, PhysAddr::new(t.pa), log2, value.first)?;
-            return self.bus_write(
-                bus,
-                va + bytes,
-                PhysAddr::new(t.pa + bytes),
-                log2,
-                value.second,
-            );
+            let span = AccessSpan::pair(bytes);
+            let m = self.translate_data(bus, va, span, DataDirection::Write, acc, on_device)?;
+            if self.pair_is_one_access(va, width, m) {
+                let both = (value.second << 32) | (value.first & 0xFFFF_FFFF);
+                return self.bus_write(bus, va, m.pa, AccessWidth::Dword, both);
+            }
+            return self.bus_write_pair(bus, va, m.pa, width, value);
         }
-        self.write_pair_apart(bus, va, log2, value, acc)
+        self.write_pair_apart(bus, va, width, value, acc, on_device)
     }
 
     /// A [`Cpu::write_pair`] whose elements are written on their own, as
-    /// for [`Cpu::read_pair_apart`].
+    /// for [`Cpu::read_pair_apart`]: across a page boundary, both pages
+    /// translated first ([`Cpu::translate_write_pages`]).
     #[inline(never)]
     fn write_pair_apart<B: PhysBus>(
         &mut self,
         bus: &mut B,
         va: u64,
-        log2: u32,
+        width: AccessWidth,
         value: ElementPair,
         acc: DataAccess,
+        on_device: OnDevice,
     ) -> Result<(), Fault> {
-        self.write_mem(bus, va, log2, value.first, acc)?;
-        self.write_mem(bus, va.wrapping_add(1 << log2), log2, value.second, acc)
+        let bytes = width.bytes();
+        if (va & 0xFFF) + 2 * bytes > 0x1000 {
+            self.check_alignment(va, bytes, acc, true)?;
+            let pages = self.translate_write_pages(bus, va, 2 * bytes, acc, on_device)?;
+            self.write_element_on_pages(bus, va, 0, width, value.first, pages)?;
+            return self.write_element_on_pages(bus, va, bytes, width, value.second, pages);
+        }
+        self.write_single(bus, va, width, value.first, acc, on_device)?;
+        let second_va = va.wrapping_add(bytes);
+        self.write_single(bus, second_va, width, value.second, acc, on_device)
     }
 
     /// The read half of an atomic access: `1 << log2` bytes (`log2` in
@@ -4109,11 +4559,12 @@ impl<L: Levels> Cpu<L> {
         log2: u32,
     ) -> Result<u128, Fault> {
         if log2 == 4 {
-            let lo = self.bus_read(bus, va, pa, 3)?;
-            let hi = self.bus_read(bus, va.wrapping_add(8), PhysAddr::new(pa.get() + 8), 3)?;
-            return Ok(u128::from(lo) | (u128::from(hi) << 64));
+            return self
+                .bus_read_pair(bus, va, pa, AccessWidth::Dword)
+                .map(u128::from);
         }
-        self.bus_read(bus, va, pa, log2).map(u128::from)
+        self.bus_read(bus, va, pa, AccessWidth::from_size_field(log2))
+            .map(u128::from)
     }
 
     /// The write half of an atomic access: the low `1 << log2` bytes of
@@ -4127,20 +4578,14 @@ impl<L: Levels> Cpu<L> {
         value: u128,
     ) -> Result<(), Fault> {
         if log2 == 4 {
-            self.bus_write(bus, va, pa, 3, value as u64)?;
-            return self.bus_write(
-                bus,
-                va.wrapping_add(8),
-                PhysAddr::new(pa.get() + 8),
-                3,
-                (value >> 64) as u64,
-            );
+            return self.bus_write_pair(bus, va, pa, AccessWidth::Dword, value.into());
         }
-        self.bus_write(bus, va, pa, log2, value as u64)
+        let width = AccessWidth::from_size_field(log2);
+        self.bus_write(bus, va, pa, width, value as u64)
     }
 
     /// Read 16 bytes (a Q register) at `va`, as two 8-byte halves, each
-    /// translated with the whole access's alignment (Arm `Mem[]`: a 16-byte
+    /// translated with the whole access's alignment (Arm `Mem`: a 16-byte
     /// SIMD&FP access is two single-copy atomic 8-byte accesses, each passed
     /// the access's own `aligned`).
     pub(crate) fn read_mem_u128<B: PhysBus>(
@@ -4149,31 +4594,16 @@ impl<L: Levels> Cpu<L> {
         va: u64,
         acc: DataAccess,
     ) -> Result<u128, Fault> {
-        if va & 15 != 0 && self.misaligned_faults(va, 16, acc) {
-            return Err(Self::alignment_abort(va, false));
-        }
-        let halves = self.read_pair(bus, va, 3, Self::halves_of(va, acc))?;
-        Ok(u128::from(halves.first) | (u128::from(halves.second) << 64))
-    }
-
-    /// The access each 8-byte half of a 16-byte access at `va` makes.
-    fn halves_of(va: u64, acc: DataAccess) -> DataAccess {
-        if va & 15 != 0 {
-            DataAccess {
-                part: Part::OfMisaligned,
-                ..acc
-            }
-        } else {
-            acc
-        }
+        self.check_alignment(va, 16, acc, false)?;
+        let on_device = OnDevice::of_alignment(va, 16);
+        self.read_elements(bus, va, AccessWidth::Dword, acc, on_device)
+            .map(u128::from)
     }
 
     /// Write 16 bytes (a Q register) at `va`, as [`Cpu::read_mem_u128`]
     /// reads them: the low half, then the high half. An access across a
-    /// page boundary, misaligned and so refused by Device memory, translates
-    /// both pages before either half is written, as a scalar store across
-    /// pages does ([`Cpu::translate_write_pages`]): a store that takes a
-    /// synchronous Data Abort leaves memory as it was.
+    /// page boundary translates both pages before either half is written
+    /// ([`Cpu::translate_write_pages`]).
     pub(crate) fn write_mem_u128<B: PhysBus>(
         &mut self,
         bus: &mut B,
@@ -4181,17 +4611,9 @@ impl<L: Levels> Cpu<L> {
         value: u128,
         acc: DataAccess,
     ) -> Result<(), Fault> {
-        if va & 15 != 0 && self.misaligned_faults(va, 16, acc) {
-            return Err(Self::alignment_abort(va, true));
-        }
-        if (va & 0xFFF) + 16 > 0x1000 {
-            self.translate_write_pages(bus, va, 16, acc)?;
-        }
-        let halves = ElementPair {
-            first: value as u64,
-            second: (value >> 64) as u64,
-        };
-        self.write_pair(bus, va, 3, halves, Self::halves_of(va, acc))
+        self.check_alignment(va, 16, acc, true)?;
+        let on_device = OnDevice::of_alignment(va, 16);
+        self.write_elements(bus, va, AccessWidth::Dword, value.into(), acc, on_device)
     }
 
     /// Read the 32 bytes of an LDP or LDNP of two Q registers at `va` (Arm
@@ -4213,21 +4635,19 @@ impl<L: Levels> Cpu<L> {
                 second: self.read_mem_u128(bus, va.wrapping_add(16), acc)?,
             });
         }
-        if va & 15 != 0 && self.misaligned_faults(va, 32, acc) {
-            return Err(Self::alignment_abort(va, false));
-        }
-        let low = self.read_pair(bus, va, 3, acc)?;
-        let high = self.read_pair(bus, va.wrapping_add(16), 3, acc)?;
+        self.check_alignment(va, 16, acc, false)?;
+        let first = self.read_pair(bus, va, AccessWidth::Dword, acc)?;
+        let second = self.read_pair(bus, va.wrapping_add(16), AccessWidth::Dword, acc)?;
         Ok(QuadwordPair {
-            first: u128::from(low.first) | (u128::from(low.second) << 64),
-            second: u128::from(high.first) | (u128::from(high.second) << 64),
+            first: first.into(),
+            second: second.into(),
         })
     }
 
     /// Write the 32 bytes of an STP or STNP of two Q registers at `va`, as
-    /// [`Cpu::read_mem_q_pair`] reads them: at an address 8-byte aligned,
-    /// four 8-byte accesses in ascending order, each written before the
-    /// next is translated, as Arm's `Mem` setter makes them.
+    /// [`Cpu::read_mem_q_pair`] reads them, in ascending order. An access
+    /// across a page boundary translates both pages first
+    /// ([`Cpu::translate_write_pages`]).
     pub(crate) fn write_mem_q_pair<B: PhysBus>(
         &mut self,
         bus: &mut B,
@@ -4235,19 +4655,26 @@ impl<L: Levels> Cpu<L> {
         value: QuadwordPair,
         acc: DataAccess,
     ) -> Result<(), Fault> {
-        if va & 7 != 0 {
+        self.check_alignment(va, 16, acc, true)?;
+        let eight_byte_aligned = va & 7 == 0;
+        if (va & 0xFFF) + 32 > 0x1000 {
+            let on_device = OnDevice::of_alignment(va, 8);
+            let pages = self.translate_write_pages(bus, va, 32, acc, on_device)?;
+            let [first, second] = [ElementPair::from(value.first), value.second.into()];
+            let doublewords = [first.first, first.second, second.first, second.second];
+            for (offset, doubleword) in (0..).step_by(8).zip(doublewords) {
+                let width = AccessWidth::Dword;
+                self.write_element_on_pages(bus, va, offset, width, doubleword, pages)?;
+            }
+            return Ok(());
+        }
+        if !eight_byte_aligned {
             self.write_mem_u128(bus, va, value.first, acc)?;
             return self.write_mem_u128(bus, va.wrapping_add(16), value.second, acc);
         }
-        if va & 15 != 0 && self.misaligned_faults(va, 32, acc) {
-            return Err(Self::alignment_abort(va, true));
-        }
-        let halves = |q: u128| ElementPair {
-            first: q as u64,
-            second: (q >> 64) as u64,
-        };
-        self.write_pair(bus, va, 3, halves(value.first), acc)?;
-        self.write_pair(bus, va.wrapping_add(16), 3, halves(value.second), acc)
+        self.write_pair(bus, va, AccessWidth::Dword, value.first.into(), acc)?;
+        let second_va = va.wrapping_add(16);
+        self.write_pair(bus, second_va, AccessWidth::Dword, value.second.into(), acc)
     }
 
     /// `DC IVAC`, `DC CVAC`, `DC CVAU`, `DC CVAP`, `DC CVADP`, `DC CIVAC`
@@ -4256,8 +4683,27 @@ impl<L: Levels> Cpu<L> {
     /// says ([`maintenance_needs`]) at stage 1 and, under stage 2, at stage 2
     /// too. With no cache to clean or invalidate, the translation is all
     /// they do. A fault is a Data Abort at `va` with `CM` and `WnR` set
-    /// (`AArch64_FaultSyndrome`); Device memory refuses none of them.
+    /// (`AArch64_FaultSyndrome`); Device memory refuses none of them. `DC
+    /// IVAC`, which operates on a data cache line of [`id::DC_LINE_BYTES`],
+    /// is watched as one aligned access of that size.
     pub(crate) fn cache_maintenance<B: PhysBus>(
+        &mut self,
+        bus: &mut B,
+        va: u64,
+        op: CacheMaintenance,
+    ) -> Result<(), Fault> {
+        self.maintenance_translation(bus, va, op)?;
+        if op == CacheMaintenance::Invalidate {
+            let line = va & !(id::DC_LINE_BYTES - 1);
+            let kind = WatchedAccess::CacheInvalidate;
+            let range = WatchedRange::Exact;
+            self.check_watchpoints(line, id::DC_LINE_BYTES, kind, self.pstate.el, range)?;
+        }
+        Ok(())
+    }
+
+    /// The translation and the permission check of [`Cpu::cache_maintenance`].
+    fn maintenance_translation<B: PhysBus>(
         &mut self,
         bus: &mut B,
         va: u64,
@@ -4284,38 +4730,37 @@ impl<L: Levels> Cpu<L> {
     pub(crate) fn dc_zva<B: PhysBus>(&mut self, bus: &mut B, va: u64) -> Result<(), Fault> {
         let base = va & !(id::DC_ZVA_BYTES - 1);
         let el = self.pstate.el;
-        let t = self
+        let m = self
             .translate(bus, base, AccessKind::Write, el, OnDevice::Refused)
             .map_err(|abort| Self::data_abort(va, abort, SyndromeSlot::Closed))?;
-        self.note_store(t.pa, id::DC_ZVA_BYTES);
-        let clock = self.clock();
+        let kind = WatchedAccess::Store;
+        self.check_watchpoints(base, id::DC_ZVA_BYTES, kind, el, WatchedRange::Exact)?;
+        self.note_store(m.pa, id::DC_ZVA_BYTES);
         for i in 0..id::DC_ZVA_BYTES / 8 {
-            if bus
-                .write(PhysAddr::new(t.pa + i * 8), AccessWidth::Dword, 0, clock)
-                .is_err()
-            {
-                return Err(self.external_abort(va, t.pa + i * 8, AccessKind::Write));
-            }
+            let at = PhysAddr::new(m.pa.get() + i * 8);
+            self.bus_store(bus, va, at, AccessWidth::Dword, 0)?;
         }
         Ok(())
     }
 
     /// What a store of `bytes` at `pa`, within one page, does besides
     /// writing: it clears the local exclusive monitor if it overlaps the
-    /// monitored granule (the IMPLEMENTATION DEFINED choice of Arm ARM
-    /// B2.9.5 that every store by this processor clears it, which is what
-    /// makes an interrupted `LDXR`/`STXR` sequence retry), and it forgets
-    /// every trace holding an instruction it may overwrite. Every store the
-    /// processor makes comes through here (R5: the one choke point for
-    /// self-modifying code), before the bus sees it.
+    /// monitored granule (of the IMPLEMENTATION DEFINED cases of Arm ARM
+    /// B2.12.1, a store by this processor to the marked address clears it,
+    /// which is what makes an interrupted `LDXR`/`STXR` sequence retry; one
+    /// elsewhere leaves it), and it forgets every trace holding an
+    /// instruction it may overwrite. Every store the processor makes comes
+    /// through here (R5: the one choke point for self-modifying code),
+    /// before the bus sees it.
     #[inline]
-    fn note_store(&mut self, pa: u64, bytes: u64) {
+    fn note_store(&mut self, pa: PhysAddr, bytes: u64) {
         let m = self.monitor;
-        if m.armed && pa < m.addr + m.bytes && m.addr < pa + bytes {
+        let at = pa.get();
+        if m.armed && at < m.addr + m.bytes && m.addr < at + bytes {
             self.monitor.armed = false;
         }
-        if self.traces.holds_code(pa) {
-            if let Some(span) = PhysSpan::new(PhysAddr::new(pa), bytes) {
+        if self.traces.holds_code(at) {
+            if let Some(span) = PhysSpan::new(pa, bytes) {
                 self.forget_code(span);
             }
         }
@@ -4324,7 +4769,7 @@ impl<L: Levels> Cpu<L> {
     /// The alignment check that comes before the translation of an access of
     /// `bytes` at `va` (Arm `AArch64_UnalignedAccessFaults`), on its own: a
     /// store-exclusive makes it before it compares its address with the
-    /// monitor's (`AArch64.ExclusiveMonitorsPass`).
+    /// monitor's (`AArch64_ExclusiveMonitorsPass`).
     pub(crate) fn check_alignment(
         &self,
         va: u64,
@@ -4391,22 +4836,26 @@ pub(crate) mod saved_layout {
     pub(crate) const CONTEXT_HCR: usize = 5 * 8;
     pub(crate) const CONTEXT_VTTBR: usize = 6 * 8;
     pub(crate) const CONTEXT_VTCR: usize = 7 * 8;
-    /// An entry: its page with its tag, its output page, then its eight
-    /// bytes — stage 1's permissions, Device memory and level, the regime,
-    /// whether stage 1's walk made it, stage 2's permissions, Device memory
-    /// and level.
-    pub(crate) const ENTRY_BYTES: usize = 8 + 8 + 8;
+    /// An entry: its page with its tag, its output page, then its nine
+    /// bytes — stage 1's permissions, memory and level, the regime, whether
+    /// stage 1's walk made it, stage 2's permissions, memory and level, and
+    /// the memory of both stages combined.
+    pub(crate) const ENTRY_BYTES: usize = 8 + 8 + 9;
+    /// The byte of an entry that holds stage 1's memory.
+    pub(crate) const ENTRY_MEMORY: usize = 8 + 8 + 1;
     /// The byte of an entry that holds stage 1's level.
     pub(crate) const ENTRY_LEVEL: usize = 8 + 8 + 2;
     /// The byte of an entry that says whether stage 1's walk made it.
     pub(crate) const ENTRY_STAGE1: usize = 8 + 8 + 4;
-    /// The bytes of an entry that hold stage 2's permissions, Device memory
-    /// and level.
+    /// The bytes of an entry that hold stage 2's permissions, memory and
+    /// level.
     pub(crate) const ENTRY_S2_PERMS: usize = 8 + 8 + 5;
-    pub(crate) const ENTRY_S2_DEVICE: usize = 8 + 8 + 6;
+    pub(crate) const ENTRY_S2_MEMORY: usize = 8 + 8 + 6;
     pub(crate) const ENTRY_S2_LEVEL: usize = 8 + 8 + 7;
+    /// The byte of an entry that holds the memory of both stages combined.
+    pub(crate) const ENTRY_COMBINED: usize = 8 + 8 + 8;
     /// A kept stage 2 translation: its IPA page with its tag, its output
-    /// page, then its three bytes: permissions, Device memory and level.
+    /// page, then its three bytes: permissions, memory and level.
     pub(crate) const KEPT_BYTES: usize = 8 + 8 + 3;
     pub(crate) const KEPT_LEVEL: usize = 8 + 8 + 2;
     /// A restore's refusals of an entry ([`Tlb::restore`]).

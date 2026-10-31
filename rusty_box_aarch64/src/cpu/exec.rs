@@ -65,7 +65,7 @@ impl<B: PhysBus, I: Instrumentation> PhysBus for Observed<'_, B, I> {
             address: addr,
             width,
             direction: Direction::Write,
-            value,
+            value: value & width.value_mask(),
         });
         Ok(())
     }
@@ -271,16 +271,32 @@ impl<L: Levels> Cpu<L> {
         let btype = self.pstate.btype;
         let mut observed = Observed { bus, observer };
         let mut fetched = None;
-        let result = match self.fetch_address(&mut observed, pc) {
-            Ok(pa) => self.execute_at(&mut observed, pc, pa, &mut fetched),
-            Err(fault) => Err(fault),
-        };
+        let result = self.checked_execute(&mut observed, pc, &mut fetched);
         if result.is_err() {
             // An instruction that faults or stops completes nothing:
             // PSTATE.BTYPE stays what the branch to it left.
             self.pstate.btype = btype;
+        } else {
+            self.ss_advance(fetched);
         }
         self.finish(pc, fetched, result, observed.observer).step()
+    }
+
+    /// The instruction at `pc`, with every check that comes before it in
+    /// the Arm ARM's priority of synchronous exceptions, from Software Step
+    /// (Arm `CheckSoftwareStep`) to a breakpoint on its address, which
+    /// comes after its fetch's translation and before the read of its word.
+    #[inline(always)]
+    fn checked_execute<B: PhysBus, I: Instrumentation>(
+        &mut self,
+        bus: &mut Observed<'_, B, I>,
+        pc: u64,
+        fetched: &mut Option<u32>,
+    ) -> ExecResult {
+        self.check_software_step()?;
+        let pa = self.fetch_address(bus, pc)?;
+        self.check_breakpoints(pc)?;
+        self.execute_at(bus, pc, pa, fetched)
     }
 
     /// The check that comes before an instruction's fetch, a misaligned PC,
@@ -290,7 +306,11 @@ impl<L: Levels> Cpu<L> {
     /// synchronous exceptions, which [`Cpu::execute_at`] raises once the
     /// word is fetched.
     #[inline(always)]
-    pub(crate) fn fetch_address<B: PhysBus>(&mut self, bus: &mut B, pc: u64) -> Result<u64, Fault> {
+    pub(crate) fn fetch_address<B: PhysBus>(
+        &mut self,
+        bus: &mut B,
+        pc: u64,
+    ) -> Result<PhysAddr, Fault> {
         if pc & 3 != 0 {
             return Err(Exception::at_address(AddressedClass::PcAlignment, 0, pc).into());
         }
@@ -308,7 +328,7 @@ impl<L: Levels> Cpu<L> {
         &mut self,
         bus: &mut Observed<'_, B, I>,
         pc: u64,
-        pa: u64,
+        pa: PhysAddr,
         fetched_word: &mut Option<u32>,
     ) -> ExecResult {
         let insn = self.fetch_word(bus, pc, pa)?;
@@ -380,7 +400,7 @@ impl<L: Levels> Cpu<L> {
             }
             Flow::Jump(target) => {
                 // Every branch, ERET included, writes the PC through
-                // `AArch64.BranchAddr` (Arm ARM `BranchTo`).
+                // `AArch64_BranchAddr` (Arm ARM `BranchTo`).
                 let target = self.branch_addr(target);
                 self.pc = target;
                 self.history.jump(target, self.retired);

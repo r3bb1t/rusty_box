@@ -17,6 +17,10 @@ mod bti;
 #[path = "../../tests/unit/bti.rs"]
 mod bti_tests;
 mod crypto;
+mod debug;
+#[cfg(test)]
+#[path = "../../tests/unit/debug.rs"]
+mod debug_tests;
 mod decode;
 #[cfg(test)]
 #[path = "../../tests/unit/difftest.rs"]
@@ -414,7 +418,7 @@ pub(crate) struct ExclusiveMonitor {
     /// The physical address of the monitored granule.
     pub(crate) addr: u64,
     /// The virtual address the load-exclusive used, which a store-exclusive
-    /// compares first (Arm ARM `AArch64.IsExclusiveVA`).
+    /// compares first (Arm ARM `AArch64_IsExclusiveVA`).
     pub(crate) va: u64,
     pub(crate) bytes: u64,
 }
@@ -594,6 +598,22 @@ pub struct Cpu<L: Levels> {
     /// are on its first one's page; so it is not saved, and the first fetch
     /// after a restore sets it.
     pub(crate) in_guarded_page: bool,
+    /// Whether every instruction runs by [`Cpu::step`], where Software Step
+    /// and the breakpoints are checked: `MDSCR_EL1.SS` is set, or `MDE` with
+    /// a breakpoint enabled. Derived (`Cpu::debug_controls_changed`), so it
+    /// is not saved.
+    pub(crate) step_each: bool,
+    /// Whether a data access goes through the check of the watchpoints:
+    /// `MDSCR_EL1.MDE` is set with a watchpoint enabled. Derived, as
+    /// [`Cpu::step_each`] is. While it is set, no data access is answered
+    /// by the inline TLB hit, so that every one reaches the check.
+    pub(crate) watch_armed: bool,
+    /// What took Software Step to active-pending.
+    pub(crate) stepped: debug::Stepped,
+    /// Arm `ShouldAdvanceSS`: set before each instruction, cleared by one
+    /// that writes PSTATE.SS. An instruction does not outlive it, so it is
+    /// not saved.
+    pub(crate) should_advance_ss: bool,
     pub(crate) activity: Activity,
     /// Ticks since the machine was built: one per retired (or faulting)
     /// instruction, plus the span skipped while waiting.
@@ -657,6 +677,10 @@ impl<L: Levels> Cpu<L> {
             traces: trace::TraceCache::new(),
             trace_break: false,
             in_guarded_page: false,
+            step_each: false,
+            watch_armed: false,
+            stepped: debug::Stepped::Nothing,
+            should_advance_ss: false,
             activity: Activity::Running,
             icount: 0,
             retired: 0,

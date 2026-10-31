@@ -78,6 +78,18 @@ impl AccessWidth {
         }
     }
 
+    /// The width an instruction's 2-bit `size` field names; the rest of
+    /// `size` is not read.
+    #[inline(always)]
+    pub(crate) const fn from_size_field(size: u32) -> Self {
+        match size & 3 {
+            0 => Self::Byte,
+            1 => Self::Half,
+            2 => Self::Word,
+            _ => Self::Dword,
+        }
+    }
+
     #[inline]
     pub const fn bytes(self) -> u64 {
         match self {
@@ -123,6 +135,61 @@ pub(crate) fn le_value(bytes: &[u8]) -> u64 {
             .map_or(0, |b| u64::from(u32::from_le_bytes(b))),
         _ => bytes.try_into().map_or(0, u64::from_le_bytes),
     }
+}
+
+/// The `width` bytes at `offset` in `bytes`, little-endian and zero-extended,
+/// each width a fixed-size load. `None` when they do not all lie in `bytes`.
+#[inline(always)]
+pub(crate) fn load_le(bytes: &[u8], offset: usize, width: AccessWidth) -> Option<u64> {
+    match width {
+        AccessWidth::Byte => load_array(bytes, offset).map(|b| u64::from(u8::from_le_bytes(b))),
+        AccessWidth::Half => load_array(bytes, offset).map(|b| u64::from(u16::from_le_bytes(b))),
+        AccessWidth::Word => load_array(bytes, offset).map(|b| u64::from(u32::from_le_bytes(b))),
+        AccessWidth::Dword => load_array(bytes, offset).map(u64::from_le_bytes),
+    }
+}
+
+/// The `N` bytes at `offset` in `bytes`, or `None` when they do not all lie
+/// there.
+#[inline(always)]
+fn load_array<const N: usize>(bytes: &[u8], offset: usize) -> Option<[u8; N]> {
+    let end = offset.checked_add(N)?;
+    bytes.get(offset..end)?.try_into().ok()
+}
+
+/// A read of `width` at `offset` of a device with no register wider than a
+/// word, `read` reading the register at an offset. An 8-byte access is two
+/// word reads, the low one first: the PrimeCell TRMs leave it to the bus
+/// bridge, and QEMU's `access_with_adjusted_size` makes it of an access to
+/// a device that declares no access size.
+#[inline]
+pub(crate) fn read_by_words<F: FnMut(RegOffset) -> u64>(
+    offset: RegOffset,
+    width: AccessWidth,
+    mut read: F,
+) -> u64 {
+    if width != AccessWidth::Dword {
+        return read(offset);
+    }
+    let low = read(offset);
+    let high = read(RegOffset::new(offset.get() + 4));
+    low | (high << 32)
+}
+
+/// A write of `value`, as [`read_by_words`] reads: `write` writes the
+/// register at an offset.
+#[inline]
+pub(crate) fn write_by_words<F: FnMut(RegOffset, u64)>(
+    offset: RegOffset,
+    width: AccessWidth,
+    value: u64,
+    mut write: F,
+) {
+    if width != AccessWidth::Dword {
+        return write(offset, value);
+    }
+    write(offset, value & 0xFFFF_FFFF);
+    write(RegOffset::new(offset.get() + 4), value >> 32);
 }
 
 /// Store the low `width` bytes of `value` little-endian at `offset` in

@@ -364,11 +364,11 @@ CNTVCTSS_EL0 and CNTKCTL_EL1.EVNTIS) and FEAT_WFxT (WFET and WFIT, which
 wait until their timeout); FEAT_RAS with FEAT_RASv1p1 and FEAT_RASSAv1p1
 (ESB, ERRIDR_EL1 with no error records, DISR_EL1, and the error state a
 synchronous external abort reports), and FEAT_Debugv8p1, FEAT_Debugv8p2
-and FEAT_Debugv8p4 (`DebugVer`, and DBGAUTHSTATUS_EL1's always-enabled
-non-invasive debug; what else they change is how breakpoints and
-watchpoints match, which never fire on any processor here (see "Not
-implemented"), and halting and external debug and the PMU, which this
-model does not have); FEAT_AFP (FPCR.FIZ, FPCR.AH's alternate
+and FEAT_Debugv8p4 (`DebugVer`, DBGAUTHSTATUS_EL1's always-enabled
+non-invasive debug, a breakpoint type that matches `CONTEXTIDR_EL1` and the
+watchpoint number in a Watchpoint exception's syndrome; what else they
+change is halting and external debug and the PMU, which this model does
+not have); FEAT_AFP (FPCR.FIZ, FPCR.AH's alternate
 floating-point behaviours in every scalar, Advanced SIMD and BFloat16
 instruction, and FPCR.NEP's merging of scalar results into the source
 register each instruction names) and FEAT_RPRES (12-bit single-precision
@@ -660,8 +660,11 @@ integration tests of the public API.
   permission or Device alignment fault and through a TLB entry an EL1
   access filled, with PAN still judging EL0's permissions there and a
   snapshot's TLB entry E0PD would refuse EL0 refused; DC and IC by address faulting with CM and WnR
-  at the register's address, DC IVAC needing write permission, a clean at
-  EL0 read permission, PAN taking no part, and UCI's trap first; each later
+  at the register's address, on an Access flag of 0 as well, DC IVAC needing
+  write permission, a clean at
+  EL0 read permission, PAN taking no part, and UCI's trap first; `AT` and
+  `PAR_EL1` under `SCTLR_EL1.C` and for the reserved shareability value;
+  snapshot TLB entries no walk could have produced refused; each later
   TLBI form UNDEFINED without its features and at EL0 and invalidating a
   stale translation with them; DSB nXS; LDLAR and STLLR as ordered
   accesses PAN applies to; the LORegion registers; and each feature's
@@ -725,7 +728,19 @@ integration tests of the public API.
   ahead of the SIMD&FP trap; a pair of Q registers at 8 mod 16 on Device
   memory as four aligned doubleword accesses, which `SCTLR_EL1.A` faults;
   LDXP and STXP of words as one doubleword access; and with FEAT_LSE2 a
-  pair of words in one 16-byte granule as one access.
+  pair of words in one 16-byte granule as one access on Normal Write-Back
+  Shareable memory and two on any other, or with the MMU off.
+- `tests/unit/debug.rs` checks self-hosted debug against Arm's pseudocode,
+  set up by the guest's own `MSR` and `ERET`: Software Step's states, its
+  syndrome, what an SVC, another exception or an interrupt saves in
+  `SPSR_EL1.SS`, and stepping code a machine runs from traces, across a
+  snapshot; breakpoints by address and by `CONTEXTIDR_EL1`, linked and
+  linking, their enables and reserved values, inside a trace; and watchpoints
+  by byte, word and masked range, at the level of the access (LDTR), on
+  pairs, across pages and through the TLB, after a permission fault, on
+  atomics, Store-Exclusives and `DC ZVA` and `DC IVAC`, on SVE, SME and
+  streaming SIMD&FP accesses rounded to 16 bytes, and with FEAT_Debugv8p2's
+  syndrome.
 - `tests/unit/wait.rs` checks the waits every processor has and FEAT_WFxT's
   against Arm's pseudocode (`Hint_WFI`, `Hint_WFE`, `Hint_WFIT`,
   `Hint_WFET`, `TestEventCNTV`): SEV, SEVL and every exception return,
@@ -1329,10 +1344,86 @@ one open.
 - **Without FEAT_LSE2, a misaligned load-acquire or store-release faults.**
   The current `AArch64_UnalignedAccessFaults` faults an ordered access only
   when it leaves its 16-byte granule with `SCTLR_ELx.nAA` = 0, testing no
-  feature. `nAA` is a FEAT_LSE2 field, so this model applies that rule with
+  feature. `nAA` is a FEAT_LSE2 field, and Arm ARM B2.8.2.1.3 applies the
+  rule to a processor with FEAT_LSE2 alone, so this model applies it with
   FEAT_LSE2 and the Armv8.0 one without it, as the Cortex-A57 and QEMU
   (`check_ordered_align`, alignment enforced unless the processor has
   LSE2) do: any misaligned LDAR, STLR, LDAXR or STLXR faults.
+- **With FEAT_LSE2, a misaligned atomic or ordered access off Write-Back
+  Shareable memory is performed.** `Unpredictable_LSE2_ALIGNMENT_FAULT` lets
+  such an access fault or not on Normal memory that is not Write-Back
+  Shareable; this model takes Arm's listed default, no fault, and no atomic
+  access takes the fault `Unpredictable_Atomic_MMU_IMPDEF_FAULT` allows.
+  Device memory refuses it, as every misaligned access.
+- **Reserved memory attributes, Contiguous and fetches from Device memory.**
+  A `MAIR_EL1` attribute Arm reserves, which `Unpredictable_RESMAIR` maps to
+  an UNKNOWN allocated value, is read by its fields, as QEMU reads it: a top
+  nibble of zero is Device memory, and anything else Normal. Shareability
+  0b01 is Outer Shareable (`DecodeShareability`, Constraint_OSH). The
+  Contiguous bit changes nothing, as `AArch64_ContiguousBit` allows ("Treat
+  Contiguous bit as 0"), so an entry here always maps one page. A fetch
+  from Device memory that is not execute-never runs
+  (`Unpredictable_INSTRDEVICE`, Constraint_NONE); Arm ARM B2.10.2 allows a
+  Permission fault instead. Every misaligned access to Device memory
+  faults on alignment: `AArch64_S1HasAlignmentFaultDueToMemType` lets a
+  location accept one, and no location here does. A byte of a misaligned
+  access that reaches Device memory on the next page faults the same way
+  (`Unpredictable_DEVPAGE2`, Constraint_FAULT).
+- **`AT` reports the memory the access would use, not the descriptor's
+  attributes.** Arm ARM D7.5.5 and rule RLRYRY (D8.2.13.1, the resulting
+  attributes returned in `PAR_EL1`) make `PAR_EL1` report what
+  applies with `SCTLR_EL1.C` 0, so Normal memory reports Non-cacheable
+  (0x44, or 0x40 for Write-Back memory under FEAT_XS), Outer Shareable,
+  and a reserved shareability value reports as what it decodes to. QEMU
+  11.1.2 reads `MAIR_EL1` with no regard to `SCTLR_EL1.C`, and reports
+  shareability 0b01 as it stands (`do_ats_write`, `par_el1_shareability`);
+  the page of `PAR_EL1` allows the descriptor's own value, so only the
+  first is a departure from Arm's rule. `tests/unit/memory_system.rs` checks
+  Arm's.
+- **Cache maintenance by address takes the Access flag fault.** Whether it
+  can is IMPLEMENTATION DEFINED (Arm ARM D8.15.3, RTRTWX). These
+  instructions are not NOPs here and share the walk of every other access,
+  so `DC` and `IC` by address on a page with AF 0 fault, with CM and WnR
+  set; `tests/unit/memory_system.rs` checks it.
+- **Self-hosted debug takes Arm's listed default in every open case.** An
+  SME access, a contiguous SVE access and a SIMD&FP access in Streaming SVE
+  mode (`IsRelaxedWatchpointAccess`) are watched out to the 16-byte
+  boundaries around them, with WPF set (`Unpredictable_16BYTEROUNDEDDOWNACCESS`,
+  `...UPACCESS`); Arm ARM D2.9.6.3 (RLVLYV) would allow the exact bytes too. A
+  reserved
+  `DBGBCR<n>.BT`, HMC, SSC or PMC, or `DBGWCR<n>` equivalent, behaves as
+  disabled (`Unpredictable_RESBPTYPE`, `CheckValidStateMatch`), as does a
+  link to anything but a context-aware breakpoint with linking enabled
+  (`BPNOTLINKING`, `BPLINKEDADDRMATCH`); `DBGWCR<n>.MASK` 1 or 2 is disabled
+  (`RESWPMASK`), and a mask with BAS other than all ones, a non-contiguous
+  BAS, or set bits inside a mask match nothing (`WPMASKANDBAS`,
+  `WPBASCONTIGUOUS`, `WPMASKEDBITS`). Bits of `DBGBVR<n>` and `DBGWVR<n>`
+  above `DebugAddrTop` — bit 52 with FEAT_LVA, the Armv9.2 processor's,
+  bit 48 without — are not compared (`DBGxVR_RESS`). With EL2, `HMC` and
+  `SSC` 0b11 reach EL2 as `AArch64_StateMatch` has them on a processor
+  with no EL3 and no Secure state, the VMID breakpoint types compare
+  `VTTBR_EL2.VMID`, and the `CONTEXTIDR_EL2` types (`match_cid2`), which
+  need FEAT_VHE or FEAT_Debugv8p2 with EL2 as `AArch64_ReservedBreakpointType`
+  has it, compare `CONTEXTIDR_EL2`; the Cortex-A57 with EL2 reserves them.
+  The IMPLEMENTATION DEFINED
+  choices: a Software Step exception after a stepped instruction records
+  ISV, EX for a Load-Exclusive, and one after an exception return records
+  none; a Watchpoint exception reports the first watched byte in FAR_EL1,
+  the last matching watchpoint with FEAT_Debugv8p2 (`WPTV` 1), and `WPF` 0
+  for an access that is not rounded;
+  a Store-Exclusive is checked at its translation, so one that fails on
+  the monitor's address before translating raises no watchpoint, and one
+  that fails after it can; a store of one register or a pair across pages
+  is checked whole before anything is written, in the order of its bytes
+  (the first page's translation, then its watchpoints, then the second
+  page's), and so is a pair in one page, where Arm's `Mem` setter writes
+  an aligned pair as two single-copy atomic accesses and so may write the
+  first before the second's watchpoint fires: Arm ARM D1.4.1.4 makes the
+  memory an instruction of more than one such access affects UNKNOWN after
+  a precise exception, so the first element's old value is one the
+  architecture allows. `ST1` and the SVE and
+  SME stores are checked an element at a time. `tests/unit/debug.rs` checks
+  them, with `ST1` standing for the stores made an element at a time.
 - **Cache maintenance by address translates, and faults as cache
   maintenance.** Arm's `AArch64_DC` and `AArch64_IC` translate the address
   of DC IVAC, CVAC, CVAU, CVAP, CVADP, CIVAC and IC IVAU and abort on a
@@ -1507,7 +1598,13 @@ one open.
   monitor are Arm's, and only a device would see two transactions where
   Arm makes one. The 8-byte cases are one access, as Arm makes them: LDXP
   and STXP of W registers, and with FEAT_LSE2 an LDP or STP of W or S
-  registers in one 16-byte granule.
+  registers in one 16-byte granule of Normal Write-Back Shareable memory
+  (`AArch64_MemSingleRead`, `IsWBShareable`). On any other memory, Device
+  memory and the MMU off among them, that pair is two accesses. QEMU 11.1.2
+  issues every LDP and STP of words as one 8-byte operation, on any memory
+  and with or without FEAT_LSE2 (`trans_LDP`, `trans_STP`,
+  [docs/qemu-upstream-bugs.md](../docs/qemu-upstream-bugs.md) entry 34);
+  `tests/unit/load_store.rs` checks Arm's rule.
 - **The bits of a scalable register above the length written are zeroed.**
   Where an instruction writes a Z or P register at a shorter length than
   the register's own (a SIMD&FP write of a V register, `V{128}(n)`; an
@@ -1627,11 +1724,14 @@ one open.
   `AArch64_AT` encodes the attributes of the translation, so with
   `SCTLR_ELx.C` clear stage 1's Normal memory is reported Non-cacheable
   (`AArch64_S1TreatAsNormalNC`), 0x44, as is stage 2's under `HCR_EL2.CD`
-  (`AArch64_S2TreatAsNormalNC`). QEMU reports stage 1's `MAIR_ELx`
-  attribute as written whatever `SCTLR_ELx.C` says, which Arm permits: the
-  IMPLEMENTATION DEFINED `ReportedPARAttrs` may report the descriptor's
-  attribute rather than the resulting one, and this model reports the
-  resulting one, as the function as Arm writes it does. Without FEAT_XS the
+  (`AArch64_S2TreatAsNormalNC`), as D7.5.5 requires: "The effect of
+  SCTLR_ELx.C, HCR_EL2.DC and HCR_EL2.CD is reflected in the result of the
+  address translation instructions in the PAR". The comment on the
+  IMPLEMENTATION DEFINED `ReportedPARAttrs` lets the field be the resulting
+  attribute or the descriptor's; for these three controls D7.5.5 decides.
+  QEMU reports stage 1's `MAIR_ELx` attribute as written whatever
+  `SCTLR_ELx.C` says ([docs/qemu-upstream-bugs.md](../docs/qemu-upstream-bugs.md)
+  entry 35). Without FEAT_XS the
   encodings of memory with XS = 0 — 0x40, 0xA0, and Device with bit 0 set
   — are reserved, and `PAR_EL1.ATTR` takes `MAIR_ELx`'s encodings; the
   pseudocode's `EncodePARAttrs` reaches them without testing the feature,
@@ -1705,13 +1805,21 @@ one open.
   model follows the Arm ARM. A WFE that does not consume an event completes
   at once rather than waiting, as the Arm ARM permits, so only the
   instruction count of a WFE loop differs from QEMU, whose WFE sleeps.
-- **A pair or a 16-byte store across a page boundary.** Arm ARM `STP`
-  makes two accesses, so a fault on the second element's page comes after
-  the first element is written; QEMU 11.1.2 stores a pair of X registers as
-  one 16-byte access whose pages are both translated first. This model makes
-  the pseudocode's two accesses. A single 16-byte `STR Q` across a page, like
-  a scalar store across one, translates both pages before writing anything,
-  as QEMU does.
+- **A store across a page boundary.** Arm's `Mem` setter writes element by
+  element and leaves what a faulting store has written unspecified. One
+  register, a pair or a pair of Q registers across pages here translates
+  both pages before writing anything, so a fault leaves memory as it was, as
+  QEMU does (accel/tcg/cputlb.c `mmu_lookup`). `ST1` and the SVE and SME
+  stores make each element an access of its own, as Arm's do, so a fault on
+  a later element leaves the earlier ones written. A load across pages reads
+  a byte at a time, and reports the first byte that faulted.
+- **An 8-byte access to the PL031 or PL061 is two word accesses.** Their
+  TRMs describe 32-bit APB slaves and say nothing of a 64-bit master, which
+  leaves it to the bus bridge. QEMU's memory core splits the access for a
+  device that declares no access size (`access_with_adjusted_size`), so
+  `ldr x0, [rtc]` reads RTCDR and then RTCMR, the low word first. This model
+  does the same; the tests in `src/devices/pl031.rs` and
+  `src/devices/pl061.rs` check it.
 - **`HVC` is the firmware's conduit although EL2 is absent.** The Arm ARM
   makes `HVC` UNDEFINED when EL2 is not implemented (the `HVC` pseudocode:
   `if !HaveEL(EL2) || PSTATE.EL == EL0 ... UNDEFINED`), and
@@ -2147,9 +2255,10 @@ one open.
   one this core can be.
 - Floating-point exception traps: FPCR's trap-enable bits read as zero, as on
   a Cortex-A57, so exceptions only accumulate in FPSR.
-- Debug: breakpoint and watchpoint registers exist (two of each, as
-  advertised) but never fire; no Debug state, no PMU. The Debug
-  Communications Channel's interrupt requests (COMMRX and COMMTX, which
+- Debug: Software Step, and two breakpoints and two watchpoints, as
+  `ID_AA64DFR0_EL1` advertises, raise their exceptions (`src/cpu/debug.rs`);
+  there is no Debug state, no halting debug, no Vector Catch and no PMU. The
+  Debug Communications Channel's interrupt requests (COMMRX and COMMTX, which
   `MDCCINT_EL1` enables) reach no interrupt controller: where they connect
   is the system's choice, and QEMU's `virt` connects them nowhere, so
   `MDCCINT_EL1` keeps what is written and raises nothing.

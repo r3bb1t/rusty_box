@@ -606,7 +606,7 @@ impl<L: Levels> Cpu<L> {
             !exits.is_empty() || limit == self.run_left(),
             "with no exits, a trace's limit is the rest of its run"
         );
-        if self.pstate.btype != Btype::None || self.pstate.il {
+        if self.pstate.btype != Btype::None || self.pstate.il || self.step_each {
             return self.step_fetch_check(bus, observer);
         }
         let pc = self.pc;
@@ -615,10 +615,20 @@ impl<L: Levels> Cpu<L> {
             Ok(pa) => pa,
             Err(fault) => return self.take_fault(pc, fault, observed.observer),
         };
-        let (trace, epoch) = match observed.fetch_source(PhysAddr::new(pa)) {
-            FetchSource::Stable(epoch) => match self.traces.lookup(pa, epoch) {
+        // The fetch's own walk may have reached a device, by tables on one:
+        // the caller looks at the machine after this one instruction, which
+        // a trace would run, and link, past. An instruction in a trace
+        // reaches no device, so no later fetch of the run does.
+        if observed.devices_touched() {
+            return self.step_uncached(&mut observed, pc, pa);
+        }
+        let (trace, epoch) = match observed.fetch_source(pa) {
+            FetchSource::Stable(epoch) => match self.traces.lookup(pa.get(), epoch) {
                 Some(trace) => (Some(trace), epoch),
-                None => (self.trace_miss(&mut observed, pa, epoch, exits), epoch),
+                None => (
+                    self.trace_miss(&mut observed, pa.get(), epoch, exits),
+                    epoch,
+                ),
             },
             FetchSource::Volatile => (None, CodeEpoch::new(0)),
         };
@@ -644,7 +654,7 @@ impl<L: Levels> Cpu<L> {
                         debug_assert!(
                             !self.trace_break && !self.timer_dirty && !observed.devices_touched()
                         );
-                        match self.linked_trace(i, pc, pa, epoch) {
+                        match self.linked_trace(i, pc, pa.get(), epoch) {
                             Some(next) => {
                                 slots = next.start..next.start + next.len;
                                 pc = self.pc;
@@ -738,11 +748,12 @@ impl<L: Levels> Cpu<L> {
         self.finish(pc, None, Err(fault), observer).step()
     }
 
-    /// Run the instruction at the PC by [`Cpu::step`], with a check of its
-    /// fetched word due: PSTATE.BTYPE set (a branch through a register led
-    /// to it, and its branch target check is due) or PSTATE.IL set (an
-    /// illegal exception return led to it, and it raises the Illegal
-    /// Execution state exception once fetched). Out of line, and cold, so
+    /// Run the instruction at the PC by [`Cpu::step`], with a check of it
+    /// due: PSTATE.BTYPE set (a branch through a register led to it, and its
+    /// branch target check is due), PSTATE.IL set (an illegal exception
+    /// return led to it, and it raises the Illegal Execution state exception
+    /// once fetched) or [`Cpu::step_each`] set (Software Step or a
+    /// breakpoint watches every instruction). Out of line, and cold, so
     /// that the trace loop's register allocation does not depend on it.
     #[cold]
     #[inline(never)]
@@ -765,7 +776,7 @@ impl<L: Levels> Cpu<L> {
         &mut self,
         observed: &mut Observed<'_, B, I>,
         pc: u64,
-        pa: u64,
+        pa: PhysAddr,
     ) -> Step {
         let mut fetched = None;
         let result = self.execute_at(observed, pc, pa, &mut fetched);

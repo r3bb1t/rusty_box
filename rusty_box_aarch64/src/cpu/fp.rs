@@ -894,10 +894,13 @@ impl<L: Levels> Cpu<L> {
 
     /// Write a scalar result to `Vd`: `result = if IsMerging(FPCR()) then
     /// V(merge) else Zeros` with the low `mask` bits replaced, `merge` being
-    /// the source register the instruction's page names.
+    /// the source register the instruction's page names. Merging is the
+    /// cold path: FPCR.NEP is 0 at reset and stays 0 unless software opts
+    /// into it.
     #[inline]
     pub(crate) fn fp_set_merging(&mut self, d: u32, merge: u32, mask: u64, value: u64) {
         let upper = if self.fp_merging() {
+            core::hint::cold_path();
             self.v[merge as usize] & !u128::from(mask)
         } else {
             0

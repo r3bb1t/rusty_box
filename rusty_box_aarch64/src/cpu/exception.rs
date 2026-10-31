@@ -9,6 +9,7 @@
 //! exception at EL2, and below that `HCR_EL2.TGE`, `MDCR_EL2.TDE` and
 //! `HCR_EL2.TEA` as the class's function reads them).
 
+use super::debug::Stepped;
 use super::el2::{
     hpfar_fipa, El2Regs, El2Storage, HCR_AMO, HCR_FMO, HCR_IMO, HCR_TEA, HCR_TGE, HCR_VF, HCR_VI,
     HCR_VSE, MDCR_TDE, VSESR_MASK,
@@ -69,6 +70,12 @@ pub enum ExceptionClass {
     DataAbort,
     /// EC 0x26.
     SpAlignment,
+    /// EC 0x30 / 0x31: a hardware breakpoint.
+    Breakpoint,
+    /// EC 0x32 / 0x33.
+    SoftwareStep,
+    /// EC 0x34 / 0x35: a hardware watchpoint.
+    Watchpoint,
     /// EC 0x3C.
     Brk,
 }
@@ -108,6 +115,27 @@ impl ExceptionClass {
                 }
             }
             Self::SpAlignment => 0x26,
+            Self::Breakpoint => {
+                if same {
+                    0x31
+                } else {
+                    0x30
+                }
+            }
+            Self::SoftwareStep => {
+                if same {
+                    0x33
+                } else {
+                    0x32
+                }
+            }
+            Self::Watchpoint => {
+                if same {
+                    0x35
+                } else {
+                    0x34
+                }
+            }
             Self::Brk => 0x3C,
         }
     }
@@ -122,6 +150,8 @@ impl ExceptionClass {
             | Self::IllegalState
             | Self::InstructionAbort
             | Self::PcAlignment
+            | Self::Breakpoint
+            | Self::SoftwareStep
             | Self::Brk => true,
             Self::Unknown
             | Self::WfxTrap
@@ -134,7 +164,8 @@ impl ExceptionClass {
             | Self::PacFail
             | Self::SmeAccess
             | Self::DataAbort
-            | Self::SpAlignment => false,
+            | Self::SpAlignment
+            | Self::Watchpoint => false,
         }
     }
 }
@@ -150,6 +181,7 @@ pub(crate) enum AddressedClass {
     InstructionAbort,
     PcAlignment,
     DataAbort,
+    Watchpoint,
 }
 
 impl AddressedClass {
@@ -158,6 +190,7 @@ impl AddressedClass {
             Self::InstructionAbort => ExceptionClass::InstructionAbort,
             Self::PcAlignment => ExceptionClass::PcAlignment,
             Self::DataAbort => ExceptionClass::DataAbort,
+            Self::Watchpoint => ExceptionClass::Watchpoint,
         }
     }
 }
@@ -183,6 +216,8 @@ pub(crate) enum SyndromeClass {
     PacFail,
     SmeAccess,
     SpAlignment,
+    Breakpoint,
+    SoftwareStep,
     Brk,
 }
 
@@ -202,6 +237,8 @@ impl SyndromeClass {
             Self::PacFail => ExceptionClass::PacFail,
             Self::SmeAccess => ExceptionClass::SmeAccess,
             Self::SpAlignment => ExceptionClass::SpAlignment,
+            Self::Breakpoint => ExceptionClass::Breakpoint,
+            Self::SoftwareStep => ExceptionClass::SoftwareStep,
             Self::Brk => ExceptionClass::Brk,
         }
     }
@@ -705,7 +742,9 @@ impl<L: Levels> Cpu<L> {
     ///   whole: under `TGE` its trap to EL1 is raised as the uncategorized
     ///   exception to EL2 the function takes instead, so one of this class
     ///   stays at EL1;
-    /// - `AArch64_SoftwareBreakpoint`: under `TGE` or `MDCR_EL2.TDE`;
+    /// - `AArch64_SoftwareBreakpoint`, `AArch64_BreakpointException`,
+    ///   `AArch64_SoftwareStepException` and `AArch64_WatchpointException`:
+    ///   under `TGE` or `MDCR_EL2.TDE`;
     /// - `AArch64_InstructionAbort`, `AArch64_DataAbort`: a synchronous
     ///   External abort where `SyncExternalAbortTarget` says (`HCR_EL2.TEA`,
     ///   or `TGE` from EL0), any other abort under `TGE`;
@@ -726,7 +765,10 @@ impl<L: Levels> Cpu<L> {
                 tge
             }
             ExceptionClass::FpAccess => false,
-            ExceptionClass::Brk => tge || self.mdcr_any(MDCR_TDE),
+            ExceptionClass::Brk
+            | ExceptionClass::Breakpoint
+            | ExceptionClass::SoftwareStep
+            | ExceptionClass::Watchpoint => tge || self.mdcr_any(MDCR_TDE),
             ExceptionClass::InstructionAbort | ExceptionClass::DataAbort => {
                 if is_external_abort(e.iss) {
                     self.hcr_any(HCR_TEA) || (from_el0 && tge)
@@ -783,7 +825,11 @@ impl<L: Levels> Cpu<L> {
         let class = e.class;
         // ESR_ELx.IL is 1: every A64 instruction is 32 bits.
         let esr = (class.code(from, to) << 26) | (1 << 25) | u64::from(e.iss & 0x01FF_FFFF);
+        // Arm `AArch64_CallSupervisor` and `AArch64_CallHypervisor`: the
+        // call completes the instruction it is, so Software Step advances
+        // before SPSR_ELx.SS is saved.
         let return_addr = if e.returns_to_next() {
+            self.ss_advance(None);
             pc.wrapping_add(4)
         } else {
             pc
@@ -1151,6 +1197,7 @@ impl<L: Levels> Cpu<L> {
         self.pc = self.branch_addr((vbar & !0x7FF).wrapping_add(quadrant + kind.offset()));
         self.history.jump(self.pc, self.retired);
         self.monitor.armed = false;
+        self.stepped = Stepped::Nothing;
         self.activity = Activity::Running;
         self.pc
     }
@@ -1172,7 +1219,7 @@ impl<L: Levels> Cpu<L> {
     /// is locked, debug exceptions are enabled from below their target
     /// ([`Cpu::debug_target`]) and, with `MDSCR_EL1.KDE` set and `mask`
     /// (PSTATE.D) clear, from the target itself.
-    fn debug_exceptions_enabled_from(&self, from_el: El, mask: bool) -> bool {
+    pub(super) fn debug_exceptions_enabled_from(&self, from_el: El, mask: bool) -> bool {
         if self.sys.oslsr_el1 & OSLSR_OSLK != 0 || self.double_lock_status() {
             return false;
         }
@@ -1250,12 +1297,16 @@ impl<L: Levels> Cpu<L> {
         // return, with `MDSCR_EL1.SS` set, from where debug exceptions are
         // disabled to where they are enabled, with SPSR.D as the
         // destination's mask; it is 0 otherwise. An illegal return's
-        // destination is the current EL.
+        // destination is the current EL. Arm `SetPSTATEFromPSR`: writing
+        // PSTATE.SS leaves Software Step not to advance past this
+        // instruction.
         let dest_el = legal_target.unwrap_or(self.pstate.el);
         let ss = spsr & (1 << 21) != 0
             && self.sys.mdscr_el1 & MDSCR_SS != 0
             && !self.debug_exceptions_enabled_from(self.pstate.el, self.pstate.d)
             && self.debug_exceptions_enabled_from(dest_el, spsr & (1 << 9) != 0);
+        self.should_advance_ss = false;
+        self.stepped = Stepped::Nothing;
 
         // SPSR_ELx holds no bit of a feature this processor lacks: an MSR
         // writes only `spsr_mask`'s bits, and a snapshot that holds others
@@ -1293,7 +1344,7 @@ impl<L: Levels> Cpu<L> {
                 p.btype = Btype::None;
             }
         }
-        // Arm `AArch64.ExceptionReturn`: `SendEventLocal` after
+        // Arm `AArch64_ExceptionReturn`: `SendEventLocal` after
         // `SetPSTATEFromPSR`, legal return or not.
         self.send_event();
         target

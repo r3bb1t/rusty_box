@@ -111,7 +111,7 @@ use core::num::NonZeroU32;
 use rusty_box_core::snap::{SnapRead, SnapResult, SnapWrite};
 use rusty_box_core::{ClockHz, Cycles, RingBuffer, SnapError, VmClock, VmInstant};
 
-use crate::bus::{AccessWidth, RegOffset};
+use crate::bus::{read_by_words, write_by_words, AccessWidth, RegOffset};
 
 /// The registers' offsets in the region (DDI 0183F Table 3-1).
 const UARTDR: RegOffset = RegOffset::new(0x000);
@@ -800,16 +800,7 @@ impl Pl011 {
     }
 
     pub fn read(&mut self, offset: RegOffset, width: AccessWidth) -> u64 {
-        match width {
-            AccessWidth::Dword => {
-                let low = self.read_register(offset);
-                let high = self.read_register(RegOffset::new(offset.get() + 4));
-                u64::from(low) | (u64::from(high) << 32)
-            }
-            AccessWidth::Byte | AccessWidth::Half | AccessWidth::Word => {
-                u64::from(self.read_register(offset))
-            }
-        }
+        read_by_words(offset, width, |offset| u64::from(self.read_register(offset)))
     }
 
     /// QEMU `pl011_read`.
@@ -837,19 +828,9 @@ impl Pl011 {
     }
 
     pub fn write(&mut self, offset: RegOffset, width: AccessWidth, value: u64, clocks: UartClocks) {
-        match width {
-            AccessWidth::Dword => {
-                self.write_register(offset, value as u32, clocks);
-                self.write_register(
-                    RegOffset::new(offset.get() + 4),
-                    (value >> 32) as u32,
-                    clocks,
-                );
-            }
-            AccessWidth::Byte | AccessWidth::Half | AccessWidth::Word => {
-                self.write_register(offset, value as u32, clocks);
-            }
-        }
+        write_by_words(offset, width, value, |offset, word| {
+            self.write_register(offset, word as u32, clocks);
+        });
     }
 
     /// QEMU `pl011_write`.

@@ -34,12 +34,12 @@ use super::exec::Fault;
 use super::features::{CpuModel, Feature, Implementation};
 use super::mmu::saved_layout::{
     CONTEXTS, CONTEXT_BYTES, CONTEXT_HCR, CONTEXT_SCTLR, CONTEXT_VTCR, CONTEXT_VTTBR, ENTRY_BYTES,
-    ENTRY_S2_DEVICE, ENTRY_S2_LEVEL, ENTRY_S2_PERMS, ENTRY_STAGE1, KEPT_BYTES, NOT_WALKED,
-    NO_CONTEXT, STAGE2_CONTEXT_BYTES,
+    ENTRY_COMBINED, ENTRY_MEMORY, ENTRY_S2_LEVEL, ENTRY_S2_MEMORY, ENTRY_S2_PERMS, ENTRY_STAGE1,
+    KEPT_BYTES, NOT_WALKED, NO_CONTEXT, STAGE2_CONTEXT_BYTES,
 };
 use super::mmu::{DataAccess, El10Context, El2RegimeContext, TlbContext};
 use super::op::Extend;
-use super::sysreg::{CPACR_FPEN, CPACR_SMEN, SMCR_EZT0};
+use super::sysreg::{CPACR_FPEN, CPACR_SMEN, OSLSR_OSLK, SMCR_EZT0};
 use super::{
     id, Cpu, CpuConfig, El, Ipa, Level, Levels, NoEl2, NoTranslation, Pstate, Step, SysReg,
     SysRegRefusal, TimerLines, Tlb, TranslationFault, TranslationStage, WithEl2, WriteEffect,
@@ -703,6 +703,11 @@ fn eret_from_el2_restores_software_step_by_the_debug_target() {
         m.cpu.sys.oslsr_el1 &= !0b10;
         m.cpu.sys.mdscr_el1 = mdscr;
         m.cpu.pstate.d = d;
+        // Active-not-pending where Software Step is enabled at EL2: the
+        // ERET runs, with no step exception before it (Arm
+        // `CheckSoftwareStep`), and what it restores depends on the SPSR
+        // alone (`DebugExceptionReturnSS`).
+        m.cpu.pstate.ss = true;
         m.cpu.el2_state.regs.spsr = spsr;
         m.cpu.el2_state.regs.elr = TARGET;
         assert_eq!(m.run(ERET), None);
@@ -813,6 +818,194 @@ fn tde_takes_breakpoint_instructions_to_el2() {
         m.at(el);
         assert_eq!(m.run(BRK), want, "{el:?} TGE {tge:#x} TDE {tde:#x}");
     }
+}
+
+/// `MDSCR_EL1.KDE` and `MDE`, and the `DBGBCR<n>_EL1` fields the breakpoint
+/// tests set: `E`, `PxC` (2:1), `HMC` (13), `SSC` (15:14), `LBN` (19:16)
+/// and `BT` (23:20).
+const MDSCR_KDE: u64 = 1 << 13;
+const MDSCR_MDE: u64 = 1 << 15;
+const BCR_E: u64 = 1;
+const BCR_HMC: u64 = 1 << 13;
+const fn bcr_pxc(pxc: u64) -> u64 {
+    pxc << 1
+}
+const fn bcr_ssc(ssc: u64) -> u64 {
+    ssc << 14
+}
+const fn bcr_lbn(n: u64) -> u64 {
+    n << 16
+}
+const fn bcr_bt(bt: u64) -> u64 {
+    bt << 20
+}
+/// A Breakpoint exception's syndrome: EC 0x30 from a lower level, 0x31 from
+/// the same; IFSC 0b100010.
+const EC_BREAKPOINT_LOWER_EL: u64 = 0x30;
+const EC_BREAKPOINT_SAME_EL: u64 = 0x31;
+const IFSC_DEBUG: u64 = 0b10_0010;
+
+impl Machine<WithEl2> {
+    /// Set breakpoint `n` to `control` (enabled) and `value`, with
+    /// `MDSCR_EL1.MDE` and `KDE`, `MDCR_EL2` `mdcr` and `VTTBR_EL2.VMID`
+    /// `vmid`, and the OS lock, locked at reset, unlocked as `OSLAR_EL1`
+    /// unlocks it; then put the processor at `el` with PSTATE.D clear.
+    fn breakpoint(&mut self, n: usize, control: u64, value: u64, mdcr: u64, vmid: u64, el: El) {
+        self.cpu.sys.oslsr_el1 &= !OSLSR_OSLK;
+        self.cpu.sys.mdscr_el1 = MDSCR_MDE | MDSCR_KDE;
+        self.cpu.sys.dbgbcr[n] = control | BCR_E;
+        self.cpu.sys.dbgbvr[n] = value;
+        self.cpu.el2_state.regs.mdcr |= mdcr;
+        self.cpu.el2_state.regs.vttbr = vmid << 48;
+        self.cpu.debug_controls_changed();
+        self.at(el);
+        self.cpu.pstate.d = false;
+    }
+}
+
+/// On a processor with EL2 an address breakpoint reaches the levels Arm's
+/// `AArch64_StateMatch` and `CheckValidStateMatch` give it with no EL3: EL0
+/// and EL1 by `PxC`, EL2 with `HMC`, and EL2 alone with `SSC` 0b11, `HMC`
+/// and `PxC` 0b00; `SSC` 0b01 or 0b10, and `HMC` with `SSC` 0b00 and `PxC`
+/// 0b10, are reserved and fire nowhere. At EL2 it fires only where
+/// `MDCR_EL2.TDE` makes EL2 the debug target, `KDE` set and PSTATE.D clear
+/// (`AArch64_GenerateDebugExceptionsFrom`), and `TDE` takes EL1's to EL2
+/// (`AArch64_BreakpointException`).
+#[test]
+fn a_breakpoint_reaches_el2_by_hmc() {
+    let el2 = sync(El::El2, CURRENT_SPX, EC_BREAKPOINT_SAME_EL, IFSC_DEBUG);
+    let el1_to_el2 = sync(El::El2, LOWER_A64, EC_BREAKPOINT_LOWER_EL, IFSC_DEBUG);
+    let el1 = sync(El::El1, CURRENT_SPX, EC_BREAKPOINT_SAME_EL, IFSC_DEBUG);
+    let cases = [
+        // (EL, HMC, SSC and PxC, MDCR_EL2, the exception)
+        (El::El2, BCR_HMC | bcr_pxc(0b11), MDCR_TDE, el2),
+        (El::El2, bcr_pxc(0b11), MDCR_TDE, None),
+        (El::El2, BCR_HMC | bcr_ssc(0b11), MDCR_TDE, el2),
+        (El::El1, BCR_HMC | bcr_ssc(0b11), MDCR_TDE, None),
+        (El::El1, bcr_pxc(0b01), MDCR_TDE, el1_to_el2),
+        (El::El1, bcr_pxc(0b01), 0, el1),
+        (El::El1, bcr_ssc(0b01) | bcr_pxc(0b01), MDCR_TDE, None),
+        (El::El1, bcr_ssc(0b10) | bcr_pxc(0b01), MDCR_TDE, None),
+        (El::El1, BCR_HMC | bcr_pxc(0b10), MDCR_TDE, None),
+        (El::El2, BCR_HMC | bcr_pxc(0b10), MDCR_TDE, None),
+        (El::El2, BCR_HMC | bcr_pxc(0b11), 0, None),
+    ];
+    for (el, control, mdcr, want) in cases {
+        let mut m = Machine::with_el2();
+        m.breakpoint(0, control, CODE, mdcr, 0, el);
+        assert_eq!(m.run(NOP), want, "{el:?}, {control:#x}, MDCR {mdcr:#x}");
+    }
+}
+
+/// The VMID breakpoint types, `BT` 0b1000 to 0b1011 on the context-aware
+/// breakpoint (Arm `AArch64_BreakpointValueMatch`'s `match_vmid`), which only
+/// a processor with EL2 has: 0b1000 fires at EL0 and EL1 while
+/// `VTTBR_EL2.VMID` is `DBGBVR1_EL1` bits 39:32, 0b1010 while
+/// `CONTEXTIDR_EL1` is its bits 31:0 too; neither, nor a `CONTEXTIDR_EL1`
+/// breakpoint, fires at EL2, where no context matches. An address breakpoint
+/// linked to 0b1001 fires only in that VMID. Without EL2 the types are
+/// reserved.
+#[test]
+fn a_vmid_breakpoint_fires_in_its_virtual_machine() {
+    const CONTEXT_AWARE: usize = 1;
+    const ID: u64 = 0x77;
+    let at_el1 = sync(El::El1, CURRENT_SPX, EC_BREAKPOINT_SAME_EL, IFSC_DEBUG);
+    let vmid = bcr_bt(0b1000) | bcr_pxc(0b11);
+    let vmid_and_id = bcr_bt(0b1010) | bcr_pxc(0b11);
+    let at_el2 = BCR_HMC | bcr_pxc(0b11);
+    let cases = [
+        // (EL, DBGBCR1_EL1, DBGBVR1_EL1, MDCR_EL2, VMID, CONTEXTIDR_EL1, the exception)
+        (El::El1, vmid, 5 << 32, 0, 5, 0, at_el1),
+        (El::El1, vmid, 5 << 32, 0, 6, 0, None),
+        (El::El2, vmid | BCR_HMC, 5 << 32, MDCR_TDE, 5, 0, None),
+        (El::El1, vmid_and_id, (5 << 32) | ID, 0, 5, ID, at_el1),
+        (El::El1, vmid_and_id, (5 << 32) | ID, 0, 5, ID + 1, None),
+        (El::El1, vmid_and_id, (5 << 32) | ID, 0, 6, ID, None),
+        (El::El2, bcr_bt(0b0010) | at_el2, ID, MDCR_TDE, 0, ID, None),
+    ];
+    for (el, control, value, mdcr, vmid, id, want) in cases {
+        let mut m = Machine::with_el2();
+        m.cpu.sys.contextidr_el1 = id;
+        m.breakpoint(CONTEXT_AWARE, control, value, mdcr, vmid, el);
+        let case = std::format!("{el:?}, {control:#x}, VMID {vmid}, CONTEXTIDR {id:#x}");
+        assert_eq!(m.run(NOP), want, "{case}");
+    }
+
+    for (vmid, want) in [(5, at_el1), (6, None)] {
+        let mut m = Machine::with_el2();
+        let linking = bcr_bt(0b1001) | bcr_pxc(0b11);
+        let linked = bcr_bt(0b0001) | bcr_lbn(CONTEXT_AWARE as u64) | bcr_pxc(0b11);
+        m.breakpoint(CONTEXT_AWARE, linking, 5 << 32, 0, vmid, El::El1);
+        m.breakpoint(0, linked, CODE, 0, vmid, El::El1);
+        assert_eq!(m.run(NOP), want, "linked, VMID {vmid}");
+    }
+
+    let mut m = Machine::<NoEl2>::new(Implementation::CORTEX_A57);
+    m.cpu.sys.oslsr_el1 &= !OSLSR_OSLK;
+    m.cpu.sys.mdscr_el1 = MDSCR_MDE | MDSCR_KDE;
+    m.cpu.sys.dbgbcr[CONTEXT_AWARE] = vmid | BCR_E;
+    m.cpu.debug_controls_changed();
+    m.at(El::El1);
+    m.cpu.pstate.d = false;
+    assert_eq!(m.run(NOP), None, "reserved without EL2");
+}
+
+/// The `CONTEXTIDR_EL2` breakpoint types, `BT` 0b1100 to 0b1111 on the
+/// context-aware breakpoint (Arm `AArch64_BreakpointValueMatch`'s
+/// `match_cid2`), valid on a processor with EL2 and FEAT_VHE or
+/// FEAT_Debugv8p2 (`AArch64_ReservedBreakpointType`): 0b1100 fires at EL1
+/// and at EL2 while `CONTEXTIDR_EL2` is `DBGBVR1_EL1` bits 63:32; 0b1110
+/// fires at EL1 while `CONTEXTIDR_EL1` is its bits 31:0 too, and not at
+/// EL2, where `CONTEXTIDR_EL1` matches nothing. An address breakpoint
+/// linked to 0b1101 fires only under that `CONTEXTIDR_EL2`. The Cortex-A57,
+/// with neither feature, reserves them.
+#[test]
+fn a_contextidr_el2_breakpoint_matches_with_debugv8p2() {
+    const CONTEXT_AWARE: usize = 1;
+    const ID: u64 = 0x77;
+    const HOST_ID: u64 = 0x1234_5678;
+    let at_el1 = sync(El::El1, CURRENT_SPX, EC_BREAKPOINT_SAME_EL, IFSC_DEBUG);
+    let at_el2 = sync(El::El2, CURRENT_SPX, EC_BREAKPOINT_SAME_EL, IFSC_DEBUG);
+    let host_id = bcr_bt(0b1100) | bcr_pxc(0b11);
+    let host_hmc = host_id | BCR_HMC;
+    let both = bcr_bt(0b1110) | bcr_pxc(0b11);
+    let both_hmc = both | BCR_HMC;
+    let host_value = HOST_ID << 32;
+    let both_value = host_value | ID;
+    let cases = [
+        // (EL, DBGBCR1_EL1, DBGBVR1_EL1, MDCR_EL2, CONTEXTIDR_EL2,
+        // CONTEXTIDR_EL1, the exception)
+        (El::El1, host_id, host_value, 0, HOST_ID, 0, at_el1),
+        (El::El1, host_id, host_value, 0, HOST_ID + 1, 0, None),
+        (El::El2, host_hmc, host_value, MDCR_TDE, HOST_ID, 0, at_el2),
+        (El::El1, both, both_value, 0, HOST_ID, ID, at_el1),
+        (El::El1, both, both_value, 0, HOST_ID, ID + 1, None),
+        (El::El1, both, both_value, 0, HOST_ID + 1, ID, None),
+        (El::El2, both_hmc, both_value, MDCR_TDE, HOST_ID, ID, None),
+    ];
+    for (el, control, value, mdcr, host, id, want) in cases {
+        let mut m = Machine::<WithEl2>::new(Implementation::EVERY_FEATURE);
+        m.cpu.sys.contextidr_el1 = id;
+        m.cpu.el2_state.regs.contextidr = host;
+        m.breakpoint(CONTEXT_AWARE, control, value, mdcr, 0, el);
+        let case =
+            std::format!("{el:?}, {control:#x}, CONTEXTIDR_EL2 {host:#x}, CONTEXTIDR_EL1 {id:#x}");
+        assert_eq!(m.run(NOP), want, "{case}");
+    }
+
+    for (host, want) in [(HOST_ID, at_el1), (HOST_ID + 1, None)] {
+        let mut m = Machine::<WithEl2>::new(Implementation::EVERY_FEATURE);
+        m.cpu.el2_state.regs.contextidr = host;
+        let linking = bcr_bt(0b1101) | bcr_pxc(0b11);
+        let linked = bcr_bt(0b0001) | bcr_lbn(CONTEXT_AWARE as u64) | bcr_pxc(0b11);
+        m.breakpoint(CONTEXT_AWARE, linking, host_value, 0, 0, El::El1);
+        m.breakpoint(0, linked, CODE, 0, 0, El::El1);
+        assert_eq!(m.run(NOP), want, "linked, CONTEXTIDR_EL2 {host:#x}");
+    }
+
+    let mut m = Machine::with_el2();
+    m.breakpoint(CONTEXT_AWARE, host_id, 0, 0, 0, El::El1);
+    assert_eq!(m.run(NOP), None, "reserved on the Cortex-A57");
 }
 
 /// `HCR_EL2.TEA` takes EL1's synchronous External aborts to EL2, with the
@@ -1449,14 +1642,16 @@ fn translating_on(imp: Implementation) -> Machine<WithEl2> {
 /// A write of an EL2 regime register bit its walk does not read keeps the
 /// regime's translations, and one a walk reads empties the TLB: with
 /// `SHARED`'s EL2 descriptor rewritten and no TLB maintenance, an `MSR` of
-/// `SCTLR_EL2` flipping `C`, which the TLB holds nothing of, leaves the old
-/// translation in use, and one of `MAIR_EL2` changing an attribute no
-/// descriptor names makes the change seen.
+/// `SCTLR_EL2` flipping `SA`, which the TLB holds nothing of, leaves the old
+/// translation in use; one flipping `C`, which decides the memory the walk
+/// makes (`AArch64_S1TreatAsNormalNC`), makes the change seen; and so does
+/// one of `MAIR_EL2` changing an attribute no descriptor names.
 #[test]
 fn only_an_el2_write_its_walk_reads_empties_the_tlb() {
     const MSR_SCTLR_EL2: u32 = 0xD51C_1000; // msr sctlr_el2, x0
     const MSR_MAIR_EL2: u32 = 0xD51C_A200; // msr mair_el2, x0
     const SCTLR_C: u64 = 1 << 2;
+    const SCTLR_SA: u64 = 1 << 3;
     let mut m = translating();
     m.ram.put64(READ_ONLY, 0x7777);
     let load = |m: &mut Machine<WithEl2>| {
@@ -1465,26 +1660,35 @@ fn only_an_el2_write_its_walk_reads_empties_the_tlb() {
         assert_eq!(m.run(LDR), None);
         m.cpu.x[2]
     };
+    let flip = |m: &mut Machine<WithEl2>, bit: u64| {
+        m.at(El::El2);
+        m.cpu.x[0] = m.cpu.el2().sctlr ^ bit;
+        assert_eq!(m.run(MSR_SCTLR_EL2), None);
+        assert_eq!(
+            m.cpu.el2().sctlr & bit,
+            m.cpu.x[0] & bit,
+            "{bit:#x} is written"
+        );
+    };
+    let rewrite = |m: &mut Machine<WithEl2>, output: u64| {
+        m.ram.put64(
+            EL2_L2 + 8 * (SHARED >> 21),
+            output | AF | INNER_SHAREABLE | BLOCK,
+        );
+    };
     assert_eq!(load(&mut m), 0x2222, "SHARED's EL2 data");
-    m.ram.put64(
-        EL2_L2 + 8 * (SHARED >> 21),
-        READ_ONLY | AF | INNER_SHAREABLE | BLOCK,
-    );
-    m.at(El::El2);
-    m.cpu.x[0] = m.cpu.el2().sctlr ^ SCTLR_C;
-    assert_eq!(m.run(MSR_SCTLR_EL2), None);
-    assert_eq!(
-        m.cpu.el2().sctlr & SCTLR_C,
-        m.cpu.x[0] & SCTLR_C,
-        "C is written"
-    );
-    assert_eq!(load(&mut m), 0x2222, "C flipped: the translation stays");
+    rewrite(&mut m, READ_ONLY);
+    flip(&mut m, SCTLR_SA);
+    assert_eq!(load(&mut m), 0x2222, "SA flipped: the translation stays");
+    flip(&mut m, SCTLR_C);
+    assert_eq!(load(&mut m), 0x7777, "C flipped: the walk is made again");
+    rewrite(&mut m, EL2_DATA);
     m.at(El::El2);
     m.cpu.x[0] = m.cpu.el2().mair | (0x44 << 56);
     assert_eq!(m.run(MSR_MAIR_EL2), None);
     assert_eq!(
         load(&mut m),
-        0x7777,
+        0x2222,
         "MAIR_EL2 changed: the walk is made again"
     );
 }
@@ -2089,6 +2293,55 @@ fn stage2_abort(iss: u64) -> Option<Taken> {
     sync(El::El2, LOWER_A64, EC_DATA_ABORT_LOWER_EL, iss)
 }
 
+/// Stage 2 can give write without read (`S2AP` 0b10), which stage 1 cannot:
+/// a store to such a page completes and leaves its translation in the TLB,
+/// and an atomic read-modify-write of the page (FEAT_LSE, which the
+/// Cortex-A57 lacks) then takes a stage 2 Permission fault for its read
+/// (`AArch64_S2CheckPermissions`), from that TLB entry as from a walk.
+#[test]
+fn an_atomic_needs_read_permission_at_stage_2() {
+    const LDADD: u32 = 0xF822_0023; // ldadd x2, x3, [x1]
+    let mut m = stage2_on(Implementation::EVERY_FEATURE);
+    let write_only = S2_UNMAPPED | AF | INNER_SHAREABLE | BLOCK | S2AP_W | S2_NORMAL;
+    m.ram.put64(S2_L2 + 8 * (S2_UNMAPPED >> 21), write_only);
+    m.at(El::El1);
+    m.cpu.x[1] = S2_UNMAPPED;
+    assert_eq!(m.run(STR), None, "a store needs write alone");
+    assert_eq!(m.run(LDADD), stage2_abort(PERMISSION_L2));
+}
+
+/// While a watchpoint is armed, an access with stage 1 disabled under
+/// stage 2 meets it every time: the TLB entry its translation leaves, which
+/// has stage 2's permissions alone checked, lets no data access past the
+/// watchpoints' check.
+#[test]
+fn a_watchpoint_fires_with_stage_1_off_under_stage_2() {
+    const EC_WATCHPOINT_SAME_EL: u64 = 0x35;
+    // `DBGWCR0_EL1`: enabled, `PAC` both levels, `LSC` loads and stores,
+    // every byte.
+    const WATCH: u64 = 1 | (0b11 << 1) | (0b11 << 3) | (0xFF << 5);
+    let watchpoint = sync(El::El1, CURRENT_SPX, EC_WATCHPOINT_SAME_EL, IFSC_DEBUG);
+    let mut m = stage2();
+    m.cpu.sys.sctlr_el1 &= !1;
+    m.cpu.el10_context_changed();
+    m.cpu.sys.oslsr_el1 &= !OSLSR_OSLK;
+    m.cpu.sys.mdscr_el1 = MDSCR_MDE | MDSCR_KDE;
+    m.cpu.sys.dbgwvr[0] = SHARED;
+    m.cpu.sys.dbgwcr[0] = WATCH;
+    m.cpu.debug_controls_changed();
+    let accesses = [
+        (SHARED, watchpoint),
+        (SHARED + 8, None),
+        (SHARED, watchpoint),
+    ];
+    for (address, want) in accesses {
+        m.at(El::El1);
+        m.cpu.pstate.d = false;
+        m.cpu.x[1] = address;
+        assert_eq!(m.run(LDR), want, "{address:#x}");
+    }
+}
+
 /// Under `HCR_EL2.VM` stage 2 translates every address the EL1&0 regime's
 /// stage 1 outputs, and with stage 1 off the virtual address itself; EL2's
 /// own regime has no stage 2. `HCR_EL2.TGE`, which turns EL0's stage 1 off,
@@ -2672,8 +2925,8 @@ fn a_debugger_walks_both_stages() {
     let mut m = stage2();
     m.at(El::El1);
     let walk = |m: &mut Machine<WithEl2>, va: u64| m.cpu.debug_translate(&mut m.ram, va);
-    assert_eq!(walk(&mut m, SHARED + 8), Ok(GUEST_DATA + 8));
-    assert_eq!(walk(&mut m, S2_READ_ONLY), Ok(S2_READ_ONLY));
+    assert_eq!(walk(&mut m, SHARED + 8), Ok(PhysAddr::new(GUEST_DATA + 8)));
+    assert_eq!(walk(&mut m, S2_READ_ONLY), Ok(PhysAddr::new(S2_READ_ONLY)));
     let level2 = TranslationFault::Translation { level: Level::Two };
     assert_eq!(
         walk(&mut m, S2_UNMAPPED),
@@ -3044,7 +3297,7 @@ fn a_snapshot_entry_without_stage_2_holds_no_stage_2_leaf() {
     let data = saved.entry_at(SHARED);
     for (at, value) in [
         (ENTRY_S2_PERMS, 0),
-        (ENTRY_S2_DEVICE, 1),
+        (ENTRY_S2_MEMORY, 1),
         (ENTRY_S2_LEVEL, 3),
     ] {
         let mut odd = image.clone();
@@ -3055,6 +3308,37 @@ fn a_snapshot_entry_without_stage_2_holds_no_stage_2_leaf() {
             "byte {at} of the entry"
         );
     }
+}
+
+/// An entry holds the memory its walk makes: `SHARED`'s EL1 entry, made with
+/// `SCTLR_EL1.C` clear, holds Normal Non-cacheable memory, since that bit
+/// makes stage 1's Normal memory Non-cacheable
+/// (`AArch64_S1TreatAsNormalNC`). A snapshot giving it Write-Back memory, or
+/// combining its stages' memory otherwise than a fill does, is refused.
+#[test]
+fn a_snapshot_entry_holds_the_memory_its_walk_makes() {
+    const NORMAL: u8 = 0;
+    const DEVICE: u8 = 1;
+    const WRITE_BACK_SHAREABLE: u8 = 3;
+    const SCTLR_C: u64 = 1 << 2;
+    let mut m = translating();
+    assert_eq!(m.cpu.sys.sctlr_el1 & SCTLR_C, 0, "SCTLR_EL1.C clear");
+    m.at(El::El1);
+    m.cpu.x[1] = SHARED;
+    assert_eq!(m.run(LDR), None);
+    let saved = m.saved_tlb();
+    let image = saved.0.clone();
+    let context = m.tlb_context();
+    let data = saved.entry_at(SHARED);
+    assert_eq!(image[data + ENTRY_MEMORY], NORMAL);
+    assert_eq!(image[data + ENTRY_COMBINED], NORMAL);
+    let mut cached = image.clone();
+    cached[data + ENTRY_MEMORY] = WRITE_BACK_SHAREABLE;
+    cached[data + ENTRY_COMBINED] = WRITE_BACK_SHAREABLE;
+    assert_eq!(restored::<WithEl2>(&context, &cached), Err(NOT_WALKED));
+    let mut combined = image.clone();
+    combined[data + ENTRY_COMBINED] = DEVICE;
+    assert_eq!(restored::<WithEl2>(&context, &combined), Err(NOT_WALKED));
 }
 
 /// A guest's switch between its processes — `TTBR0_EL1` written with
@@ -3291,7 +3575,10 @@ fn only_a_single_register_access_takes_an_instruction_syndrome() {
         (DataAccess::NORMAL, false),
         (DataAccess::NORMAL.of_one_register(), true),
     ] {
-        let Err(fault) = m.cpu.read_mem(&mut m.ram, S2_UNMAPPED, 3, acc) else {
+        let Err(fault) = m
+            .cpu
+            .read_mem(&mut m.ram, S2_UNMAPPED, AccessWidth::Dword, acc)
+        else {
             panic!("stage 2 maps nothing at S2_UNMAPPED");
         };
         let Fault::Exception(e) = fault.reporting(Some(syndrome)) else {

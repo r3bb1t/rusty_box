@@ -217,14 +217,6 @@ const fn stage1_allocated(attr: u8, features: Features) -> u8 {
     }
 }
 
-/// Whether the `MAIR_ELx` attribute `attr` is Device memory on a processor
-/// implementing `features`, as [`MemAttrs::stage1`] decodes it: what an
-/// access reads of a walk's attributes, without the rest of the decode.
-#[inline]
-pub(crate) const fn stage1_device(attr: u8, features: Features) -> bool {
-    stage1_allocated(attr, features) & 0xF0 == 0
-}
-
 /// The stage 2 `MemAttr` `memattr` stands for: itself, or for the reserved
 /// encodings 0b0100 (no FEAT_MTE_PERM) and 0b1x00 Normal Non-cacheable,
 /// 0b0101 (`Unpredictable_S2RESMEMATTR`'s `Constraint_NC`).
@@ -235,13 +227,6 @@ const fn stage2_allocated(memattr: u8) -> u8 {
     } else {
         memattr
     }
-}
-
-/// Whether the stage 2 `MemAttr` `memattr` is Device memory, as
-/// [`MemAttrs::stage2`] decodes it.
-#[inline]
-pub(crate) const fn stage2_device(memattr: u8) -> bool {
-    stage2_allocated(memattr) & 0b1100 == 0
 }
 
 /// Arm `S2DecodeCacheability` of a non-zero two-bit field. Stage 2 assigns
@@ -406,6 +391,13 @@ impl MemAttrs {
     #[inline]
     pub(crate) const fn is_device(&self) -> bool {
         matches!(self.memtype, MemType::Device(_))
+    }
+
+    /// Whether the memory is Normal Inner and Outer Write-Back, the
+    /// cacheability `IsWBShareable` asks of it.
+    #[inline]
+    pub(crate) const fn is_write_back(&self) -> bool {
+        self.memtype.is_write_back()
     }
 
     /// `self`, Normal memory taken as Non-cacheable where `treat` holds:
@@ -581,29 +573,6 @@ mod tests {
             MemAttrs::combined(s1_wb, s2_dev_ngre).par_shareability(),
             0b10
         );
-    }
-
-    /// What an access reads of a walk's attributes, whether they make
-    /// Device memory, is what the whole decode says, for every encoding at
-    /// either stage, with FEAT_XS and without.
-    #[test]
-    fn the_device_test_agrees_with_the_decode() {
-        for features in [A57, XS] {
-            for attr in 0..=255u8 {
-                assert_eq!(
-                    stage1_device(attr, features),
-                    MemAttrs::stage1(attr, 0b11, features).is_device(),
-                    "{attr:#04x}"
-                );
-            }
-        }
-        for memattr in 0..16u8 {
-            assert_eq!(
-                stage2_device(memattr),
-                MemAttrs::stage2(memattr, 0b11, false).is_device(),
-                "{memattr:#06b}"
-            );
-        }
     }
 
     /// The reserved stage 2 encodings are Normal Non-cacheable.

@@ -503,6 +503,54 @@ fn e0pd_faults_el0_accesses_to_its_half() {
     assert_eq!(a57.run(LDR), None, "E0PD0 is RES0 without FEAT_E0PD");
 }
 
+/// `PAR_EL1.ATTR` and `SH` after `AT S1E1R` of a page of the first block.
+fn at_attributes(m: &mut Machine) -> (u64, u64) {
+    m.cpu.x[0] = EL1_DATA;
+    assert_eq!(m.run(AT_S1E1R), None);
+    let par = m.cpu.sys.par_el1;
+    assert_eq!(par & 1, 0, "the translation succeeds");
+    (par >> 56, (par >> 7) & 3)
+}
+
+/// The effect of `SCTLR_EL1.C` shows in `PAR_EL1` (Arm ARM D7.5.5, rule
+/// RLRYRY, `AArch64_S1TreatAsNormalNC`): with it clear, Normal memory
+/// reports Non-cacheable and Outer Shareable, whatever `MAIR_EL1` and the
+/// descriptor say. `EncodePARAttrs` gives Write-Back memory, whose XS is 0,
+/// the encoding FEAT_XS adds and any other Normal memory 0x44; without
+/// FEAT_XS that encoding is reserved, so every Normal page reports 0x44.
+/// Device memory reports itself either way.
+#[test]
+fn at_reports_the_effect_of_sctlr_c() {
+    const C: u64 = 1 << 2;
+    for (imp, attr, c_set, c_clear) in [
+        (Implementation::ARMV9P2, 0xFF, (0xFF, 0b11), (0x40, 0b10)),
+        (Implementation::ARMV9P2, 0xAA, (0xAA, 0b11), (0x44, 0b10)),
+        (Implementation::ARMV9P2, 0x04, (0x04, 0b10), (0x04, 0b10)),
+        (Implementation::CORTEX_A57, 0xFF, (0xFF, 0b11), (0x44, 0b10)),
+    ] {
+        let mut m = Machine::new(imp);
+        m.cpu.sys.mair_el1 = attr;
+        m.cpu.sys.sctlr_el1 |= C;
+        assert_eq!(at_attributes(&mut m), c_set, "{attr:#x}, C set");
+        m.cpu.sys.sctlr_el1 &= !C;
+        assert_eq!(at_attributes(&mut m), c_clear, "{attr:#x}, C clear");
+    }
+}
+
+/// `PAR_EL1.SH` never reports the reserved value 0b01: a descriptor holding
+/// it is Outer Shareable, Arm's listed outcome of
+/// `Unpredictable_Shareability`.
+#[test]
+fn at_maps_the_reserved_shareability_value() {
+    const C: u64 = 1 << 2;
+    const AF: u64 = 1 << 10;
+    const BLOCK: u64 = 0b01;
+    let mut m = Machine::new(Implementation::ARMV9P2);
+    m.cpu.sys.sctlr_el1 |= C;
+    m.set_descriptor(L2, AF | (0b01 << 8) | BLOCK);
+    assert_eq!(at_attributes(&mut m), (0xFF, 0b10));
+}
+
 /// A TLB entry giving EL0 a permission in a half FEAT_E0PD refuses EL0 is
 /// one the TLB never holds, so a snapshot holding one is refused.
 #[test]
@@ -577,6 +625,29 @@ fn a_snapshot_entry_of_a_range_tcr_does_not_walk_is_refused() {
     assert!(!restored(tcr | EPD1), "UPPER's half disabled");
     assert!(!restored(t1sz(33)), "UPPER beyond a 31-bit upper range");
     assert!(restored(t1sz(24)), "UPPER within a 40-bit upper range");
+}
+
+/// A fetch from a tagged address TBID0 keeps from being ignored faults,
+/// even after a load through the same address filled the TLB; a load after
+/// the fault still hits.
+#[test]
+fn a_fetch_does_not_use_an_entry_for_a_tag_it_keeps() {
+    const TBID0: u64 = 1 << 51;
+    const TAGGED: u64 = 0x5A00_0000_0000_0000 | CODE;
+    let mut m = Machine::new(Implementation::EVERY_FEATURE);
+    m.cpu.sys.tcr_el1 |= TBI0 | TBID0;
+    m.cpu.x[1] = TAGGED;
+    assert_eq!(m.run(LDR), None, "data accesses ignore the tag");
+    let taken = m.run_at(TAGGED, CODE, 0xD503_201F);
+    assert_eq!(
+        taken,
+        Some(Taken {
+            ec: INSTRUCTION_ABORT_SAME_EL,
+            iss: TRANSLATION_L0,
+            far: TAGGED,
+        })
+    );
+    assert_eq!(m.run(LDR), None);
 }
 
 /// FEAT_TTCNP: `TTBRn_EL1.CnP`, bit 0, is kept as written and leaves the
@@ -798,6 +869,24 @@ fn cache_maintenance_by_address_translates_and_checks_its_own_permissions() {
             "{insn:#010x} at {tagged:#x}, MMU off under TBI0"
         );
         m.cpu.sys.tcr_el1 &= !TBI0;
+    }
+}
+
+/// A cache maintenance instruction by address takes the Access flag fault of
+/// a page with AF 0, the IMPLEMENTATION DEFINED choice Arm ARM D8.15.3
+/// (RTRTWX) leaves: a data abort at the register's address with CM and WnR
+/// set.
+#[test]
+fn cache_maintenance_takes_the_access_flag_fault() {
+    /// `EL0_RW`'s block, read/write at both ELs, with AF 0.
+    const BLOCK_WITHOUT_AF: u64 = 0x20_0000 | (3 << 8) | (0b01 << 6) | 0b01;
+    const ACCESS_FLAG_L2: u64 = 0b00_1010;
+    for insn in [DC_CVAC, DC_CIVAC, DC_IVAC, IC_IVAU] {
+        let mut m = Machine::new(Implementation::CORTEX_A57);
+        m.set_descriptor(L2 + 8, BLOCK_WITHOUT_AF);
+        m.cpu.x[1] = EL0_RW;
+        let want = data_abort(El::El1, ACCESS_FLAG_L2 | CM | WNR, EL0_RW);
+        assert_eq!(m.run(insn), want, "{insn:#010x}");
     }
 }
 

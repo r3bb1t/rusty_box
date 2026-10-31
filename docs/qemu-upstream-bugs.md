@@ -1321,6 +1321,70 @@ Found on QEMU 11.1.2; master not checked.
 is at least 6, rather than whenever `outputsize > 48`.
 `rusty_box_aarch64` does (`src/cpu/regime.rs`, `OaLayout::table_base`).
 
+### 34. LDP and STP of words are one 8-byte access on every memory
+
+**Impact**: small. A device that takes 8-byte accesses sees one where the
+architecture makes two word accesses, in order. A device with only 4-byte
+accesses is spared, as the memory core splits the access for it.
+
+**Location**: `target/arm/tcg/translate-a64.c`, `trans_LDP()` and
+`trans_STP()`, issue a pair of words as one `tcg_gen_qemu_ld_i64` or
+`tcg_gen_qemu_st_i64`, whatever the memory type and with or without
+FEAT_LSE2; their comment says one operation is issued in all cases.
+
+**What the Arm ARM says**: `ldp_gen.xml` and `stp_gen.xml` make one
+`Mem{2*datasize}` with `ispair`, and `AArch64_MemSingleRead` and
+`AArch64_MemSingleWrite` make it one access only with FEAT_LSE2, in one
+16-byte granule, on Normal Write-Back Shareable memory (`IsWBShareable`).
+On anything else it is two accesses of the elements (Arm ARM B2.8.2.1.1).
+
+**Reproduce**: found by reading the source against the pseudocode; not
+yet run on QEMU.
+
+    Arm:     MMU off, ldp w0, w1, [x2], x2 at a device: two word reads
+    QEMU:    one 8-byte read, split only if the device's ops require it
+
+Found on QEMU 11.1.2.
+
+**Fix**: not yet written. The memory type is known only at the TLB
+lookup, so the split belongs in the access helpers rather than the
+translator. `rusty_box_aarch64` decides it there (`src/cpu/mmu.rs`,
+`Cpu::pair_is_one_access`).
+
+### 35. AT does not report the effect of SCTLR_EL1.C
+
+**Impact**: small. With stage 1 enabled and the data cache disabled, `AT`
+reports the page's Write-Back attributes, where the access would be
+Non-cacheable. Software that reads `PAR_EL1` with caches off, such as a
+page table check in early boot, is told of attributes that do not apply.
+
+**Location**: `target/arm/ptw.c`, `get_phys_addr_lpae()`, reads the
+attribute from `MAIR_ELx` with no reference to `SCTLR_ELx.C`, and
+`target/arm/tcg/cpregs-at.c`, `do_ats_write()`, copies it to `PAR_EL1`.
+
+**What the Arm ARM says**: D7.5.5, "The effect of SCTLR_ELx.C,
+HCR_EL2.DC and HCR_EL2.CD is reflected in the result of the address
+translation instructions in the PAR when these bits have an effect on the
+stages of translation being reported in the PAR", and rule RLRYRY, which
+returns "the resulting attributes" in `PAR_EL1`;
+`AArch64_S1TreatAsNormalNC` makes the memory Normal Non-cacheable and
+`EncodePARAttrs` encodes it. The comment on the IMPLEMENTATION DEFINED
+`ReportedPARAttrs` words this less firmly, letting the field be the
+resulting attribute "instead of the value that appears in the translation
+table descriptor"; D7.5.5 is the rule for these three controls.
+
+**Reproduce**: found by reading the source against the pseudocode; not
+yet run on QEMU.
+
+    Arm:     M = 1, C = 0, MAIR 0xFF, SH = 0b11: AT S1E1R gives ATTR Normal
+             Non-cacheable, SH 0b10
+    QEMU:    ATTR 0xFF, SH 0b11
+
+Found on QEMU 11.1.2.
+
+**Fix**: not yet written. `rusty_box_aarch64` reports the effect
+(`src/cpu/mmu.rs`, `Cpu::address_translate`).
+
 ---
 
 ## Deliberate QEMU omissions

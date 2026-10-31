@@ -13,7 +13,7 @@ use super::exec::{bit, bits, sext, ExecResult, Flow};
 use super::mmu::{DataAccess, DataDirection};
 use super::op::Extend;
 use super::{Cpu, Levels};
-use crate::bus::PhysBus;
+use crate::bus::{AccessWidth, PhysBus};
 
 /// Arm `MemAtomicOp`: what an atomic read-modify-write computes.
 ///
@@ -124,7 +124,8 @@ impl<L: Levels> Cpu<L> {
                 let address = self.base_register(rn)?;
                 let syndrome =
                     move || Some(AccessSyndrome::load(size, Extend::Zero, rt).acquire_release());
-                let value = self.read_gpr(bus, address, size, DataAccess::ORDERED, syndrome)?;
+                let width = AccessWidth::from_size_field(size);
+                let value = self.read_gpr(bus, address, width, DataAccess::ORDERED, syndrome)?;
                 self.set_x_or_zr(rt, value);
                 return Ok(Flow::Next);
             }
@@ -211,10 +212,11 @@ impl<L: Levels> Cpu<L> {
         let offset = sext(u64::from(bits(insn, 20, 12)), 9);
         let address = self.base_register(rn)?.wrapping_add(offset);
         let acc = DataAccess::ORDERED;
+        let width = AccessWidth::from_size_field(size);
         if opc == 0b00 {
             let value = self.x_or_zr(rt);
             let syndrome = move || Some(AccessSyndrome::store(size, rt).acquire_release());
-            self.write_gpr(bus, address, size, value, acc, syndrome)?;
+            self.write_gpr(bus, address, width, value, acc, syndrome)?;
             return Ok(Flow::Next);
         }
         let extend = match opc {
@@ -223,12 +225,12 @@ impl<L: Levels> Cpu<L> {
             _ => Extend::Signed32,
         };
         let syndrome = move || Some(AccessSyndrome::load(size, extend, rt).acquire_release());
-        let value = self.read_gpr(bus, address, size, acc, syndrome)?;
-        let width = 8 << size;
+        let value = self.read_gpr(bus, address, width, acc, syndrome)?;
+        let bits = 8 << size;
         let result = match extend {
             Extend::Zero => value,
-            Extend::Signed64 => sext(value, width),
-            Extend::Signed32 => sext(value, width) & 0xFFFF_FFFF,
+            Extend::Signed64 => sext(value, bits),
+            Extend::Signed32 => sext(value, bits) & 0xFFFF_FFFF,
         };
         self.set_x_or_zr(rt, result);
         Ok(Flow::Next)

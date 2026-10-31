@@ -1,5 +1,5 @@
 //! The `SCTLR_EL1` fields the processor reads, as masks of the register
-//! (Arm ARM D19.2, `SCTLR_EL1`). The pointer authentication enables and
+//! (Arm ARM D24.2, `SCTLR_EL1`). The pointer authentication enables and
 //! BT0/BT1 are read where their key or EL selects the bit
 //! (`pauth.rs`, `bti.rs`).
 
