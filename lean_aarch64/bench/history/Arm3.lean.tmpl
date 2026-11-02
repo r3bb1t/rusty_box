@@ -1,0 +1,519 @@
+/-
+A pure-Lean A64 core for rusty_box's `aarch64_perfbench` loops (alu, memcpy, fnv):
+real A64 decoding, AddWithCarry flags, DecodeBitMasks, an MMU walk behind a
+64-entry TLB, and two engines:
+  * `naive`: translate, fetch, decode and execute every instruction;
+  * `trace`: decode once into `Op`s, straight-line traces (<= 32 ops, ending
+    at a branch or HVC, never across a page) keyed by physical address in a
+    HashMap, PC translated once per trace, stores into code pages invalidate.
+Register file variant: {{VARIANT}}
+-/
+import Std.Data.HashMap
+open Std
+
+def RAM_BASE : UInt64 := 0x40000000
+def RAM_SIZE : Nat := 64 * 1024 * 1024
+def MISS : UInt64 := 0xFFFFFFFFFFFFFFFF
+
+/-- A decoded A64 instruction, operand fields extracted once. -/
+inductive Op where
+  | addsubReg (sf sub setf : Bool) (d n m sh amt : UInt8)
+  | logicReg  (sf : Bool) (opc : UInt8) (inv : Bool) (d n m sh amt : UInt8)
+  | addsubImm (sf sub setf : Bool) (d n : UInt8) (imm : UInt64)
+  | logicImm  (sf : Bool) (opc : UInt8) (d n : UInt8) (mask : UInt64)
+  | movw      (sf : Bool) (opc : UInt8) (d : UInt8) (imm : UInt64) (pos : UInt64)
+  | bitfield  (sf : Bool) (opc : UInt8) (d n : UInt8) (r s : UInt64) (wmask tmask : UInt64)
+  | madd      (sf sub : Bool) (d n m a : UInt8)
+  | ldstPair  (sf load wb post : Bool) (t t2 n : UInt8) (off : UInt64)
+  | ldstImm   (size opc : UInt8) (wb post : Bool) (t n : UInt8) (off : UInt64)
+  | bcond     (cond : UInt8) (off : UInt64)
+  | b         (link : Bool) (off : UInt64)
+  | hvc
+  | undef     (w : UInt32)
+  deriving Inhabited
+
+structure Sys where
+  tlbV   : Array UInt64     -- VA page tags (reads only on the hot path)
+  tlbP   : Array UInt64     -- PA page bases
+  codePg : ByteArray        -- 1 per 4 KiB RAM page that holds cached code
+  cache  : HashMap UInt64 (Array Op) := {}
+
+structure Cpu where
+{{REGFIELDS}}
+  sp     : UInt64 := 0
+  pc     : UInt64 := 0
+  nzcv   : UInt64 := 0      -- N Z C V in bits 3..0
+  icount : UInt64 := 0
+  halt   : UInt8  := 0      -- 0 running, 1 powered off, 2 undefined, 3 fault
+  ttbr0  : UInt64 := 0
+  mem    : ByteArray
+  sys    : Sys
+
+{{GETSET}}
+
+@[inline] def Cpu.rx (c : Cpu) (i : UInt8) : UInt64 := if i == 31 then 0 else c.getX i
+@[inline] def Cpu.rxsp (c : Cpu) (i : UInt8) : UInt64 := if i == 31 then c.sp else c.getX i
+@[inline] def Cpu.wx (c : Cpu) (i : UInt8) (v : UInt64) : Cpu := if i == 31 then c else c.setX i v
+@[inline] def Cpu.wxsp (c : Cpu) (i : UInt8) (v : UInt64) : Cpu := if i == 31 then { c with sp := v } else c.setX i v
+@[inline] def Cpu.wr (c : Cpu) (sf : Bool) (i : UInt8) (v : UInt64) : Cpu := c.wx i (if sf then v else v &&& 0xFFFFFFFF)
+
+-- ── guest RAM, little-endian ─────────────────────────────────────────────
+@[inline] def rb (m : ByteArray) (i : Nat) : UInt64 := (m[i]!).toUInt64
+@[inline] def rd8 (m : ByteArray) (i : Nat) : UInt64 := rb m i
+@[inline] def rd32 (m : ByteArray) (i : Nat) : UInt64 :=
+  rb m i ||| rb m (i+1) <<< 8 ||| rb m (i+2) <<< 16 ||| rb m (i+3) <<< 24
+@[inline] def rd64 (m : ByteArray) (i : Nat) : UInt64 :=
+  rd32 m i ||| rd32 m (i+4) <<< 32
+@[inline] def wb (m : ByteArray) (i : Nat) (v : UInt64) (k : Nat) : ByteArray :=
+  m.set! (i+k) (v >>> (8*k).toUInt64).toUInt8
+@[inline] def wr32 (m : ByteArray) (i : Nat) (v : UInt64) : ByteArray :=
+  wb (wb (wb (wb m i v 0) i v 1) i v 2) i v 3
+@[inline] def wrN (m : ByteArray) (i : Nat) (v : UInt64) (bytes : Nat) : ByteArray :=
+  if bytes == 8 then wr32 (wr32 m i v) (i+4) (v >>> 32)
+  else if bytes == 4 then wr32 m i v
+  else if bytes == 1 then wb m i v 0
+  else wb (wb m i v 0) i v 1
+@[inline] def rdN (m : ByteArray) (i : Nat) (bytes : Nat) : UInt64 :=
+  if bytes == 8 then rd64 m i else if bytes == 4 then rd32 m i
+  else if bytes == 1 then rd8 m i else rb m i ||| rb m (i+1) <<< 8
+
+@[inline] def Sys.setTlb (s : Sys) (i : Nat) (vp pa : UInt64) : Sys :=
+  { s with tlbV := s.tlbV.set! i vp, tlbP := s.tlbP.set! i pa }
+@[inline] def Sys.addTrace (s : Sys) (pa : UInt64) (pg : Nat) (tr : Array Op) : Sys :=
+  { s with cache := s.cache.insert pa tr, codePg := s.codePg.set! pg 1 }
+def Sys.dropCache (s : Sys) : Sys :=
+  { s with cache := {}, codePg := ByteArray.mk (Array.replicate (RAM_SIZE / 4096) 0) }
+
+-- ── translation: a 64-entry TLB in front of a stage 1 walk ───────────────
+/-- TTBR0, T0SZ = 25 (39-bit VA from level 1), 4 KiB granule; level 1 block
+descriptors with AF set. A table descriptor or anything else faults here. -/
+def walk (c : Cpu) (va : UInt64) : UInt64 :=
+  if va >>> 39 != 0 then MISS else
+  let dpa := c.ttbr0 + ((va >>> 30) &&& 0x1FF) * 8
+  if dpa < RAM_BASE || dpa - RAM_BASE + 8 > RAM_SIZE.toUInt64 then MISS else
+  let desc := rd64 c.mem (dpa - RAM_BASE).toNat
+  if desc &&& 3 == 1 && desc &&& 0x400 != 0 then
+    (desc &&& 0x0000FFFFC0000000) ||| (va &&& 0x3FFFF000)
+  else MISS
+
+@[inline] def tlbIdx (va : UInt64) : Nat := ((va >>> 12) &&& 63).toNat
+
+/-- The physical address of `va` on a TLB hit, else `MISS`. -/
+@[inline] def Cpu.lookup (c : Cpu) (va : UInt64) : UInt64 :=
+  let i := tlbIdx va
+  if c.sys.tlbV[i]! == va >>> 12 then c.sys.tlbP[i]! ||| (va &&& 0xFFF) else MISS
+
+/-- Fill the TLB for `va` if it misses; sets `halt := 3` on a fault. -/
+@[inline] def Cpu.fill (c : Cpu) (va : UInt64) : Cpu :=
+  if c.sys.tlbV[tlbIdx va]! == va >>> 12 then c else
+  let pa := walk c va
+  if pa == MISS then { c with halt := 3 } else
+  let i := tlbIdx va
+  { c with sys := c.sys.setTlb i (va >>> 12) pa }
+
+@[inline] def inRam (pa : UInt64) (bytes : Nat) : Bool :=
+  pa >= RAM_BASE && (pa - RAM_BASE).toNat + bytes <= RAM_SIZE
+
+/-- Make `va` loadable: fill the TLB, or halt with a fault (an access
+crossing a page faults rather than being split; the loops' are aligned). -/
+@[inline] def Cpu.prep (c : Cpu) (va : UInt64) (bytes : Nat) : Cpu :=
+  if (va &&& 0xFFF).toNat + bytes > 4096 then { c with halt := 3 } else
+  let c := c.fill va
+  let pa := c.lookup va
+  if pa == MISS || !inRam pa bytes then { c with halt := 3 } else c
+
+/-- The value at `va` after `prep` (0 if it faulted). -/
+@[inline] def Cpu.peek (c : Cpu) (va : UInt64) (bytes : Nat) : UInt64 :=
+  let pa := c.lookup va
+  if pa == MISS || !inRam pa bytes then 0 else rdN c.mem (pa - RAM_BASE).toNat bytes
+
+/-- Store; a store into a page holding cached code drops the trace cache. -/
+@[inline] def Cpu.store (c : Cpu) (va : UInt64) (bytes : Nat) (v : UInt64) : Cpu :=
+  if (va &&& 0xFFF).toNat + bytes > 4096 then { c with halt := 3 } else
+  let c := c.fill va
+  let pa := c.lookup va
+  if pa == MISS || !inRam pa bytes then { c with halt := 3 } else
+  let off := (pa - RAM_BASE).toNat
+  let c := { c with mem := wrN c.mem off v bytes }
+  if c.sys.codePg[off >>> 12]! != 0 then
+    { c with sys := c.sys.dropCache }
+  else c
+
+-- Memory-op finishers. Every value is an argument: evaluated before the call
+-- consumes `c`, so no read of the old state can be floated past its update
+-- (which would keep the old state alive and force a copy of the registers).
+@[noinline] def Cpu.retireAt (c : Cpu) (wb : Bool) (n : UInt8) (nb next : UInt64) : Cpu :=
+  let c := if wb then c.wxsp n nb else c
+  if c.halt == 0 then { c with pc := next, icount := c.icount + 1 } else c
+@[noinline] def Cpu.finLoad (c : Cpu) (t : UInt8) (v : UInt64) (wb : Bool) (n : UInt8) (nb next : UInt64) : Cpu :=
+  if c.halt != 0 then c else (c.wx t v).retireAt wb n nb next
+@[noinline] def Cpu.finLoadPair (c : Cpu) (t : UInt8) (v1 : UInt64) (t2 : UInt8) (v2 : UInt64) (wb : Bool) (n : UInt8) (nb next : UInt64) : Cpu :=
+  if c.halt != 0 then c else ((c.wx t v1).wx t2 v2).retireAt wb n nb next
+@[noinline] def Cpu.finStore (c : Cpu) (addr : UInt64) (bytes : Nat) (v : UInt64) (wb : Bool) (n : UInt8) (nb next : UInt64) : Cpu :=
+  (c.store addr bytes v).retireAt wb n nb next
+@[noinline] def Cpu.finStorePair (c : Cpu) (addr : UInt64) (bytes : Nat) (v1 v2 : UInt64) (wb : Bool) (n : UInt8) (nb next : UInt64) : Cpu :=
+  ((c.store addr bytes v1).store (addr + bytes.toUInt64) bytes v2).retireAt wb n nb next
+
+-- ── Arm ARM shared pseudocode ────────────────────────────────────────────
+@[inline] def ones (n : UInt64) : UInt64 := if n >= 64 then MISS else (1 <<< n) - 1
+@[inline] def ror (sf : Bool) (x : UInt64) (r : UInt64) : UInt64 :=
+  if sf then (if r == 0 then x else (x >>> r) ||| (x <<< (64 - r)))
+  else let x := x &&& 0xFFFFFFFF
+       if r == 0 then x else ((x >>> r) ||| (x <<< (32 - r))) &&& 0xFFFFFFFF
+
+@[inline] def shiftReg (sf : Bool) (x : UInt64) (sh : UInt8) (amt : UInt64) : UInt64 :=
+  if sf then
+    match sh with
+    | 0 => x <<< amt
+    | 1 => x >>> amt
+    | 2 => (x.toInt64 >>> amt.toInt64).toUInt64
+    | _ => ror true x amt
+  else
+    let x := x &&& 0xFFFFFFFF
+    match sh with
+    | 0 => (x <<< amt) &&& 0xFFFFFFFF
+    | 1 => x >>> amt
+    | 2 => ((x.toUInt32.toInt32 >>> amt.toUInt32.toInt32).toUInt32).toUInt64
+    | _ => ror false x amt
+
+/-- AddWithCarry's flags as NZCV in bits 3..0. -/
+@[inline] def awcFlags (sf : Bool) (x y carry : UInt64) : UInt64 :=
+  if sf then
+    let r := x + y + carry
+    let n := r >>> 63
+    let z : UInt64 := if r == 0 then 1 else 0
+    let cf : UInt64 := if carry == 1 then (if r <= x then 1 else 0) else (if r < x then 1 else 0)
+    let v := ((x ^^^ r) &&& (y ^^^ r)) >>> 63
+    (n <<< 3) ||| (z <<< 2) ||| (cf <<< 1) ||| v
+  else
+    let x := x &&& 0xFFFFFFFF
+    let y := y &&& 0xFFFFFFFF
+    let full := x + y + carry
+    let r := full &&& 0xFFFFFFFF
+    let n := (r >>> 31) &&& 1
+    let z : UInt64 := if r == 0 then 1 else 0
+    let cf := full >>> 32
+    let v := (((x ^^^ r) &&& (y ^^^ r)) >>> 31) &&& 1
+    (n <<< 3) ||| (z <<< 2) ||| (cf <<< 1) ||| v
+
+@[inline] def logicFlags (sf : Bool) (r : UInt64) : UInt64 :=
+  let n := if sf then r >>> 63 else (r >>> 31) &&& 1
+  let z : UInt64 := if r == 0 then 1 else 0
+  (n <<< 3) ||| (z <<< 2)
+
+def conditionHolds (cond : UInt8) (nzcv : UInt64) : Bool :=
+  let n := nzcv &&& 8 != 0
+  let z := nzcv &&& 4 != 0
+  let c := nzcv &&& 2 != 0
+  let v := nzcv &&& 1 != 0
+  let base := match cond >>> 1 with
+    | 0 => z
+    | 1 => c
+    | 2 => n
+    | 3 => v
+    | 4 => c && !z
+    | 5 => n == v
+    | 6 => n == v && !z
+    | _ => true
+  if cond &&& 1 == 1 && cond != 15 then !base else base
+
+def highestSetBit (x : UInt64) (width : Nat) : Int := Id.run do
+  let mut r : Int := -1
+  for i in [0:width] do
+    if (x >>> i.toUInt64) &&& 1 == 1 then r := i
+  return r
+
+def replicate (x : UInt64) (esize : UInt64) : UInt64 := Id.run do
+  let mut r : UInt64 := 0
+  let mut s : UInt64 := 0
+  while s < 64 do
+    r := r ||| (x <<< s)
+    s := s + esize
+  return r
+
+/-- DecodeBitMasks(immN, imms, immr, immediate, M): (wmask, tmask), or
+none when the encoding is reserved. Worked out at decode, as rusty_box's
+op.rs does for a logical immediate. -/
+def decodeBitMasks (immN imms immr : UInt64) (immediate : Bool) (m : UInt64) : Option (UInt64 × UInt64) :=
+  let len := highestSetBit ((immN <<< 6) ||| ((~~~imms) &&& 0x3F)) 7
+  if len < 1 then none else
+  let len := len.toNat.toUInt64
+  let esize := (1 : UInt64) <<< len
+  if esize > m then none else
+  let levels := ones len
+  if immediate && (imms &&& levels) == levels then none else
+  let s := imms &&& levels
+  let r := immr &&& levels
+  let d := (s - r) &&& levels
+  let welem := ones (s + 1)
+  let telem := ones (d + 1)
+  let rotated := if r == 0 then welem else ((welem >>> r) ||| (welem <<< (esize - r))) &&& ones esize
+  let wm := replicate rotated esize
+  let tm := replicate telem esize
+  let full := if m == 64 then MISS else 0xFFFFFFFF
+  some (wm &&& full, tm &&& full)
+
+@[inline] def sext (x : UInt64) (bits : UInt64) : UInt64 :=
+  ((x <<< (64 - bits)).toInt64 >>> (64 - bits).toInt64).toUInt64
+
+-- ── decode: the A64 encoding index, the groups these loops reach ─────────
+def decode (w : UInt32) : Op :=
+  let w64 := w.toUInt64
+  let f (lo bits : UInt64) : UInt64 := (w64 >>> lo) &&& ones bits
+  let d := (f 0 5).toUInt8
+  let n := (f 5 5).toUInt8
+  let m := (f 16 5).toUInt8
+  let sf := f 31 1 == 1
+  if w &&& 0x1F200000 == 0x0B000000 then            -- add/sub (shifted register)
+    let sh := (f 22 2).toUInt8
+    let imm6 := f 10 6
+    if sh == 3 || (!sf && imm6 >= 32) then .undef w else
+    .addsubReg sf (f 30 1 == 1) (f 29 1 == 1) d n m sh imm6.toUInt8
+  else if w &&& 0x1F000000 == 0x0A000000 then       -- logical (shifted register)
+    let imm6 := f 10 6
+    if !sf && imm6 >= 32 then .undef w else
+    .logicReg sf (f 29 2).toUInt8 (f 21 1 == 1) d n m (f 22 2).toUInt8 imm6.toUInt8
+  else if w &&& 0x1F800000 == 0x11000000 then       -- add/sub (immediate)
+    let imm := f 10 12 <<< (if f 22 1 == 1 then 12 else 0)
+    .addsubImm sf (f 30 1 == 1) (f 29 1 == 1) d n imm
+  else if w &&& 0x1F800000 == 0x12000000 then       -- logical (immediate)
+    if !sf && f 22 1 == 1 then .undef w else
+    match decodeBitMasks (f 22 1) (f 10 6) (f 16 6) true (if sf then 64 else 32) with
+    | some (wm, _) => .logicImm sf (f 29 2).toUInt8 d n wm
+    | none => .undef w
+  else if w &&& 0x1F800000 == 0x12800000 then       -- move wide
+    let opc := (f 29 2).toUInt8
+    let hw := f 21 2
+    if opc == 1 || (!sf && hw >= 2) then .undef w else
+    .movw sf opc d (f 5 16) (hw * 16)
+  else if w &&& 0x1F800000 == 0x13000000 then       -- bitfield
+    let opc := (f 29 2).toUInt8
+    let nbit := f 22 1
+    if opc == 3 || (sf && nbit == 0) || (!sf && nbit == 1) then .undef w else
+    match decodeBitMasks nbit (f 10 6) (f 16 6) false (if sf then 64 else 32) with
+    | some (wm, tm) => .bitfield sf opc d n (f 16 6) (f 10 6) wm tm
+    | none => .undef w
+  else if w &&& 0x1F000000 == 0x1B000000 then       -- data-processing (3 source)
+    if f 21 3 != 0 || f 29 2 != 0 then .undef w else
+    .madd sf (f 15 1 == 1) d n m (f 10 5).toUInt8
+  else if w &&& 0x3A000000 == 0x28000000 then       -- load/store pair
+    let opc := f 30 2
+    let idx := f 23 2
+    if f 26 1 == 1 || idx == 0 || opc == 1 || opc == 3 then .undef w else
+    let sf := opc == 2
+    let scale : UInt64 := if sf then 3 else 2
+    .ldstPair sf (f 22 1 == 1) (idx != 2) (idx == 1) (f 0 5).toUInt8 (f 10 5).toUInt8 n
+      (sext (f 15 7) 7 <<< scale)
+  else if w &&& 0x3B200000 == 0x38000000 && f 10 2 != 2 && f 26 1 == 0 then  -- ld/st (imm9)
+    let idx := f 10 2
+    .ldstImm (f 30 2).toUInt8 (f 22 2).toUInt8 (idx != 0) (idx == 1) d n (sext (f 12 9) 9)
+  else if w &&& 0x3B000000 == 0x39000000 && f 26 1 == 0 then                 -- ld/st (uimm12)
+    let size := f 30 2
+    .ldstImm size.toUInt8 (f 22 2).toUInt8 false false d n (f 10 12 <<< size)
+  else if w &&& 0xFF000010 == 0x54000000 then       -- B.cond
+    .bcond (f 0 4).toUInt8 (sext (f 5 19) 19 <<< 2)
+  else if w &&& 0x7C000000 == 0x14000000 then       -- B, BL
+    .b (f 31 1 == 1) (sext (f 0 26) 26 <<< 2)
+  else if w &&& 0xFFE0001F == 0xD4000002 then .hvc   -- HVC
+  else .undef w
+
+@[inline] def Op.endsTrace : Op → Bool
+  | .bcond .. | .b .. | .hvc | .undef _ => true
+  | _ => false
+
+-- ── execute ──────────────────────────────────────────────────────────────
+@[inline] def mask32 (sf : Bool) (x : UInt64) : UInt64 := if sf then x else x &&& 0xFFFFFFFF
+
+def exec (c : Cpu) (op : Op) : Cpu :=
+  let next := c.pc + 4
+  match op with
+  | .addsubReg sf sub setf d n m sh amt =>
+    let x := mask32 sf (c.rx n)
+    let y := mask32 sf (shiftReg sf (c.rx m) sh amt.toUInt64)
+    let y := if sub then mask32 sf (~~~y) else y
+    let carry : UInt64 := if sub then 1 else 0
+    let r := mask32 sf (x + y + carry)
+    if setf then c.setXF d r (awcFlags sf x y carry) next else c.setXN d r next
+  | .logicReg sf opc inv d n m sh amt =>
+    let x := c.rx n
+    let y := shiftReg sf (c.rx m) sh amt.toUInt64
+    let y := mask32 sf (if inv then ~~~y else y)
+    let r := match opc with
+      | 0 => x &&& y | 1 => x ||| y | 2 => x ^^^ y | _ => x &&& y
+    let r := mask32 sf r
+    if opc == 3 then c.setXF d r (logicFlags sf r) next else c.setXN d r next
+  | .addsubImm sf sub setf d n imm =>
+    let x := mask32 sf (c.rxsp n)
+    let y := if sub then mask32 sf (~~~imm) else imm
+    let carry : UInt64 := if sub then 1 else 0
+    let r := mask32 sf (x + y + carry)
+    if setf then c.setXF d r (awcFlags sf x y carry) next
+    else if d == 31 then { c with sp := r, pc := next, icount := c.icount + 1 } else c.setXN d r next
+  | .logicImm sf opc d n mask =>
+    let x := mask32 sf (c.rx n)
+    let r := match opc with
+      | 0 => x &&& mask | 1 => x ||| mask | 2 => x ^^^ mask | _ => x &&& mask
+    if opc == 3 then c.setXF d r (logicFlags sf r) next
+    else if d == 31 then { c with sp := r, pc := next, icount := c.icount + 1 } else c.setXN d r next
+  | .movw sf opc d imm pos =>
+    let r := match opc with
+      | 0 => ~~~(imm <<< pos)
+      | 2 => imm <<< pos
+      | _ => (c.rx d &&& ~~~(0xFFFF <<< pos)) ||| (imm <<< pos)
+    c.setXN d (mask32 sf r) next
+  | .bitfield sf opc d n r s wmask tmask =>
+    let src := c.rx n
+    let bot := ror sf src r &&& wmask
+    let res := match opc with
+      | 0 =>   -- SBFM
+        let top := if (src >>> s) &&& 1 == 1 then MISS else 0
+        (top &&& ~~~tmask) ||| (bot &&& tmask)
+      | 1 =>   -- BFM
+        let dst := c.rx d
+        let bot := (dst &&& ~~~wmask) ||| bot
+        (dst &&& ~~~tmask) ||| (bot &&& tmask)
+      | _ => bot &&& tmask   -- UBFM
+    c.setXN d (mask32 sf res) next
+  | .madd sf sub d n m a =>
+    let p := c.rx n * c.rx m
+    let r := if sub then c.rx a - p else c.rx a + p
+    c.setXN d (mask32 sf r) next
+  | .ldstPair sf load wb post t t2 n off =>
+    let base := c.rxsp n
+    let addr := if post then base else base + off
+    let bytes := if sf then 8 else 4
+    if load then
+      let c := (c.prep addr bytes).prep (addr + bytes.toUInt64) bytes
+      Cpu.finLoadPair c t (c.peek addr bytes) t2 (c.peek (addr + bytes.toUInt64) bytes) wb n (base + off) next
+    else
+      Cpu.finStorePair c addr bytes (c.rx t) (c.rx t2) wb n (base + off) next
+  | .ldstImm size opc wb post t n off =>
+    let base := c.rxsp n
+    let addr := if post then base else base + off
+    let bytes := 1 <<< size.toNat
+    match opc with
+    | 0 => Cpu.finStore c addr bytes (c.rx t) wb n (base + off) next
+    | 1 =>
+      let c := c.prep addr bytes
+      Cpu.finLoad c t (c.peek addr bytes) wb n (base + off) next
+    | _ =>
+      let c := c.prep addr bytes
+      let v := sext (c.peek addr bytes) (8 * bytes).toUInt64
+      Cpu.finLoad c t (if opc == 3 then v &&& 0xFFFFFFFF else v) wb n (base + off) next
+  | .bcond cond off => { c with pc := if conditionHolds cond c.nzcv then c.pc + off else next, icount := c.icount + 1 }
+  | .b link off =>
+    let c := if link then c.wx 30 next else c
+    { c with pc := c.pc + off, icount := c.icount + 1 }
+  | .hvc =>   -- PSCI over HVC: SYSTEM_OFF powers off, as the board's firmware interface
+    if c.rx 0 == 0x84000008 then { c with halt := 1 } else { c with halt := 2 }
+  | .undef _ => { c with halt := 2 }
+
+
+-- ── engine 1: every instruction translated, fetched, decoded ────────────
+partial def runNaive (c : Cpu) : Cpu :=
+  if c.halt != 0 then c else
+  let c := c.fill c.pc
+  let pa := c.lookup c.pc
+  if pa == MISS || !inRam pa 4 then { c with halt := 3 } else
+  let op := decode (rd32 c.mem (pa - RAM_BASE).toNat).toUInt32
+  runNaive (exec c op)
+
+-- ── engine 2: the trace cache ────────────────────────────────────────────
+def buildTrace (c : Cpu) (pa : UInt64) : Array Op := Id.run do
+  let mut ops : Array Op := Array.emptyWithCapacity 32
+  let mut a := pa
+  for _ in [0:32] do
+    let op := decode (rd32 c.mem (a - RAM_BASE).toNat).toUInt32
+    ops := ops.push op
+    a := a + 4
+    if op.endsTrace || a &&& 0xFFF == 0 then break
+  return ops
+
+partial def execTrace (c : Cpu) (tr : Array Op) (i : Nat) : Cpu :=
+  if h : i < tr.size then
+    let op := tr[i]
+    let gen := c.sys.cache.size
+    let c := exec c op
+    -- a store that dropped the cache, or a halt, ends the trace here
+    if c.halt != 0 || c.sys.cache.size != gen then c else execTrace c tr (i + 1)
+  else c
+
+partial def runTrace (c : Cpu) : Cpu :=
+  if c.halt != 0 then c else
+  let c := c.fill c.pc
+  let pa := c.lookup c.pc
+  if pa == MISS || !inRam pa 4 then { c with halt := 3 } else
+  match c.sys.cache[pa]? with
+  | some tr => runTrace (execTrace c tr 0)
+  | none =>
+    let tr := buildTrace c pa
+    let pg := ((pa - RAM_BASE) >>> 12).toNat
+    let c := { c with sys := c.sys.addTrace pa pg tr }
+    runTrace (execTrace c tr 0)
+
+-- ── the perfbench setup ──────────────────────────────────────────────────
+def CODE : UInt64 := RAM_BASE + 0x1000
+def TABLES : UInt64 := RAM_BASE + 0x100000
+def SOURCE : UInt64 := RAM_BASE + 0x200000
+def DESTINATION : UInt64 := RAM_BASE + 0x300000
+def RESULT : UInt64 := RAM_BASE + 0x400000
+def BLOCK : Nat := 64 * 1024
+def POWER_OFF : List UInt32 := [0xD2800100, 0xF2B08000, 0xD4000002]
+def ALU : List UInt32 := [0x8B010000, 0xCA000C21, 0xCB000042, 0xAA421C63, 0x92089C64,
+  0x9B011405, 0xD37BE8A6, 0x0B0000E7, 0xF1000529, 0x54FFFEE1]
+def MEMCPY : List UInt32 := [0xAA0B03E0, 0xAA0C03E1, 0xD2810002, 0xA8C11003, 0xA8C11805,
+  0xA8811023, 0xA8811825, 0xF1000442, 0x54FFFF61, 0xF100054A, 0x54FFFEC1]
+def FNV : List UInt32 := [0xD28464A1, 0xF2B08441, 0xF2D39C81, 0xF2F97E41, 0xD2803664,
+  0xF2C02004, 0xAA0B03E0, 0xD2A00022, 0x38401403, 0xCA030021, 0x9B047C21, 0xF1000442,
+  0x54FFFF81, 0xF9000181, 0xF100054A, 0x54FFFEE1]
+
+def zeros (n : Nat) : ByteArray := Id.run do
+  let mut b := ByteArray.emptyWithCapacity n
+  for _ in [0:n] do b := b.push 0
+  return b
+
+def machine (code : List UInt32) (regs : List (UInt8 × UInt64)) : Cpu := Id.run do
+  let mut mem := zeros RAM_SIZE
+  let mut a := (CODE - RAM_BASE).toNat
+  for w in code ++ POWER_OFF do
+    mem := wrN mem a w.toUInt64 4
+    a := a + 4
+  let mut seed : UInt64 := 0x9E3779B97F4A7C15
+  for i in [0:BLOCK / 8] do
+    seed := seed ^^^ (seed <<< 13)
+    seed := seed ^^^ (seed >>> 7)
+    seed := seed ^^^ (seed <<< 17)
+    mem := wrN mem ((SOURCE - RAM_BASE).toNat + 8 * i) seed 8
+  let block : UInt64 := RAM_BASE ||| ((1 : UInt64) <<< 10) ||| ((3 : UInt64) <<< 8) ||| 1
+  mem := wrN mem ((TABLES - RAM_BASE).toNat + 8 * (RAM_BASE >>> 30).toNat) block 8
+  let tlbV := Array.replicate 64 MISS
+  let tlbP := Array.replicate 64 0
+  let codePg := ByteArray.mk (Array.replicate (RAM_SIZE / 4096) 0)
+  let mut c : Cpu := { mem := mem, sys := { tlbV := tlbV, tlbP := tlbP, codePg := codePg }, ttbr0 := TABLES, pc := CODE {{INITREGS}} }
+  for (r, v) in regs do c := c.wx r v
+  return c
+
+def fnv64 (m : ByteArray) (off len : Nat) : UInt64 := Id.run do
+  let mut h : UInt64 := 0xcbf29ce484222325
+  for i in [off:off+len] do
+    h := (h ^^^ (m[i]!).toUInt64) * 0x100000001b3
+  return h
+
+def hex (x : UInt64) : String := String.ofList (Nat.toDigits 16 x.toNat)
+
+def main (args : List String) : IO UInt32 := do
+  let wl := args.getD 0 "alu"
+  let engine := args.getD 1 "trace"
+  let scale := ((args.getD 2 "1").toNat?.getD 1).toUInt64
+  let c := match wl with
+    | "memcpy" => machine MEMCPY [(10, if scale == 0 then 80 else 8000 * scale), (11, SOURCE), (12, DESTINATION)]
+    | "fnv"    => machine FNV [(10, if scale == 0 then 3 else 250 * scale), (11, SOURCE), (12, RESULT)]
+    | _        => machine ALU [(0, 0x0123456789ABCDEF), (1, 0x0F1E2D3C4B5A6978), (9, if scale == 0 then 100000 else 10000000 * scale)]
+  let t0 ← IO.monoNanosNow
+  let c := if engine == "naive" then runNaive c else runTrace c
+  let t1 ← IO.monoNanosNow
+  let s := (t1 - t0).toFloat / 1e9
+  IO.println s!"lean {{VARIANT}} {engine} {wl}: {c.icount} instrs {s}s {c.icount.toFloat / s / 1e6} MIPS halt={c.halt}"
+  IO.println s!"  regs {String.intercalate " " ((List.range 13).map fun i => hex (c.rx i.toUInt8))}"
+  IO.println s!"  dst {hex (fnv64 c.mem (DESTINATION - RAM_BASE).toNat BLOCK)} result {hex (rd64 c.mem (RESULT - RAM_BASE).toNat)}"
+  return 0

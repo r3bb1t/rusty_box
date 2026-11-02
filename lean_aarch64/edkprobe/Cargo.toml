@@ -1,0 +1,13 @@
+[package]
+name = "edkprobe"
+version = "0.1.0"
+edition = "2024"
+[dependencies]
+rusty_box_aarch64 = { path = "../../rusty_box_aarch64", features = ["std"] }
+disarm64 = { version = "0.2", default-features = false, features = ["full"] }
+disarm64_defn = { version = "0.2", default-features = false }
+[profile.release]
+opt-level = 3
+
+# Standalone: not a member of the rusty_box workspace.
+[workspace]

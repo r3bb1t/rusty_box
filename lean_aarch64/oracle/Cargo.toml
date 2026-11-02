@@ -1,0 +1,11 @@
+[package]
+name = "oracle"
+version = "0.1.0"
+edition = "2024"
+[dependencies]
+rusty_box_aarch64 = { path = "../../rusty_box_aarch64", features = ["std"] }
+[profile.release]
+opt-level = 3
+
+# Standalone: not a member of the rusty_box workspace.
+[workspace]
