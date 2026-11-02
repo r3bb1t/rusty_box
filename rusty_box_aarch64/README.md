@@ -1080,6 +1080,20 @@ integration tests of the public API.
   a login prompt with no warnings in its log, logs in, and runs commands whose
   output matches the host (`seq 1 20000 | sha256sum`); `reboot` comes back to
   the login prompt and `poweroff` stops the machine.
+- With virtualization (`--virtualization`) on the Cortex-A57, the same
+  Alpine starts at EL2, and KVM initializes in nVHE mode with a 44-bit IPA
+  limit. From a disk carrying QEMU 10.1.5 and the packages it needs, it
+  runs `qemu-system-aarch64 -M virt,gic-version=2,kernel-irqchip=off
+  -accel kvm -cpu host -m 192` with Alpine's own kernel and initramfs. The
+  nested guest boots under KVM, through stage 2, to its initramfs shell,
+  and there `uname -m` answers `aarch64` (2026-11-02). The board has no
+  vGIC (see "Not implemented"), so QEMU emulates the guest's GIC in user
+  space. That makes the nested boot slow: to `/init` it takes 38 times as
+  long as the host's own boot of the same kernel. Counted through the
+  instrumentation hooks (`docs/aarch64-automation.md`), nine of the
+  guest's exits in ten are stage 2 aborts on two device pages, the GIC CPU
+  interface and the UART, each a round trip through KVM to QEMU. No stage
+  2 fault repeats on memory.
 - `tests/timer_interrupts.rs`: hand-written guests drive the interrupt path
   end to end. One runs GIC + timer + `WFI` + IRQ entry/`ERET` + PSCI; its
   outcome is identical for every budget slicing, and a snapshot taken
@@ -2311,8 +2325,9 @@ one open.
 - Of EL2: the GIC's virtualization extensions (no virtual CPU interface
   raises a virtual interrupt; only `HCR_EL2` does, and the device tree's
   GIC node has no GICH and GICV frames or maintenance interrupt, which
-  QEMU's `virtualization=on` board gives it, so Linux's KVM finds no vGIC
-  and cannot give a guest its interrupts yet); FEAT_VHE and the later EL2
+  QEMU's `virtualization=on` board gives it, so Linux's KVM finds no vGIC,
+  and a VMM must emulate its guest's GIC itself, as QEMU does with
+  `kernel-irqchip=off`); FEAT_VHE and the later EL2
   features; and EL2 on the Armv9.2 model, which Arm requires FEAT_VHE and
   others of there, so the EL2 features built for it — FEAT_S2TGran16K,
   FEAT_S2TGran64K, FEAT_TTST's stage 2 rules, FEAT_ECV_POFF — reach no
