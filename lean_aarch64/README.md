@@ -9,6 +9,14 @@ divergence bisected to one instruction.
 
 ## Status (2026-11-03)
 
+**Alpine Linux 3.23's kernel (6.18.58-0-virt) boots directly to its first
+console line in pure Lean, lockstep-clean**: `leanbox linux check 1000000
+400000000 "Booting Linux"` prints the same 11 checkpoints as
+`oracle/ref/linux_first_1M.txt` and the same 507 console bytes ("Booting Linux
+on physical CPU 0x0000000000 [0x411fd070]", the version line, ...), with the
+kernel, initramfs and device tree where QEMU's `-kernel` puts them (boot.rs
+`layout`) and the UART set up as firmware leaves it.
+
 **AAVMF (EDK2) boots to `Shell>` in pure Lean, lockstep-clean against
 rusty_box**: `leanbox check 1000000 700000000` prints the same 636 checkpoints
 as `oracle/ref/ref_1M.txt` (retired count, tick count, PC and the state hash
@@ -121,8 +129,8 @@ register and RAM access.
 | `bench/Burst.lean` | `Chain.lean` with the per-trace burst limit `lim` |
 | `bench/history/` | the structure-threading design it replaced (`Arm3.lean.tmpl`, generated per register-file variant by `gen.py`) |
 | `loops_oracle/` | runs the perfbench loops on rusty_box and prints the final registers and hashes the Lean runs are compared with |
-| `oracle/` | the EDK2 lockstep oracle: `dump` (device tree, start state), `check K MAX` (a state hash every K retired instructions), `detail FROM COUNT` (full registers after each instruction) |
-| `oracle/ref/` | rusty_box's reference run of AAVMF to `Shell>`: `ref_1M.txt` (a checkpoint every 1M instructions; `Shell>` at 636M), `console.txt`, `dtb.bin` (the board's device tree as the firmware finds it at RAM base) |
+| `oracle/` | the lockstep oracle: `edk2`/`linux` `dump` (device tree, start state), `check K MAX [UNTIL]` (a state hash every K retired instructions), `detail FROM COUNT` (full registers after each instruction) |
+| `oracle/ref/` | `linux_dtb.bin` and `linux_first_1M.txt`: the device tree rusty_box gives the kernel, and its reference run to the first console line; rusty_box's reference run of AAVMF to `Shell>`: `ref_1M.txt` (a checkpoint every 1M instructions; `Shell>` at 636M), `console.txt`, `dtb.bin` (the board's device tree as the firmware finds it at RAM base) |
 | `edkprobe/` | the instruction mix of the EDK2 boot through the instrumentation API |
 
 ## Building and running
@@ -130,9 +138,15 @@ register and RAM access.
 ```bash
 # Lean 4.35 (lean, leanc and lake on PATH)
 cd lean_aarch64 && lake build          # leanc -O3 -DNDEBUG, from lakefile.lean
-./.lake/build/bin/leanbox check 1000000 700000000 > lean.txt   # to Shell>, writes console.txt
+./.lake/build/bin/leanbox edk2 check 1000000 700000000 > lean.txt   # to Shell>, writes console.txt
 diff oracle/ref/ref_1M.txt lean.txt
-./.lake/build/bin/leanbox detail 5000000 20   # registers after each of 20 instructions
+./.lake/build/bin/leanbox edk2 detail 5000000 20   # registers after each of 20 instructions
+
+# Alpine 3.23: the netboot vmlinuz-virt is an EFI zboot image; its gzip
+# payload (offset and size at bytes 8 and 12) is the arm64 Image.
+LINUX_IMAGE=Image LINUX_INITRD=initramfs-virt LINUX_DTB=oracle/ref/linux_dtb.bin \
+  ./.lake/build/bin/leanbox linux check 1000000 400000000 "Booting Linux"
+(cd oracle && LINUX_IMAGE=... LINUX_INITRD=... cargo run --release -- linux check 1000000 400000000 "Booting Linux")
 
 cd bench
 lean -c Chain.c Chain.lean && leanc -O3 -DNDEBUG -o chain Chain.c

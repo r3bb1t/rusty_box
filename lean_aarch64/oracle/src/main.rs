@@ -2,6 +2,10 @@
 //!   oracle edk2 dump                  -> dtb.bin, init.txt (start state)
 //!   oracle edk2 check K MAX           -> one line per K retired instructions
 //!   oracle edk2 detail FROM COUNT     -> full state after each instruction in [FROM, FROM+COUNT)
+//!   oracle linux dump|check|detail ... -> the same for a direct kernel boot of
+//!     $LINUX_IMAGE (an arm64 Image) with $LINUX_INITRD, the serial console
+//!     command line; `dump` writes ram.bin (all of RAM at the first instruction)
+use rusty_box_aarch64::boot::{LinuxImage, SERIAL_CONSOLE_COMMAND_LINE};
 use rusty_box_aarch64::{MachineBuilder, Reg, RunBudget, VirtConfig};
 use std::io::Write;
 
@@ -17,6 +21,7 @@ macro_rules! state_hash { ($m:expr) => {{
 
 fn main() {
     let a: Vec<String> = std::env::args().collect();
+    if a[1] == "linux" { return linux(&a); }
     let code = std::fs::read("/usr/share/AAVMF/AAVMF_CODE.no-secboot.fd").unwrap();
     let vars = std::fs::read("/usr/share/AAVMF/AAVMF_VARS.fd").unwrap();
     let mut m = MachineBuilder::new(VirtConfig::default()).firmware(&code).variables(&vars).build().unwrap();
@@ -65,6 +70,65 @@ fn main() {
             for _ in 0..count {
                 let pc = m.reg_read(Reg::Pc);
                 let mut w = [0u8; 4]; let insn = if m.mem_read(pc, &mut w).is_ok() { u32::from_le_bytes(w) } else { 0 };
+                let o = m.step(RunBudget::Instructions(1));
+                retired += o.progress.instructions().unwrap_or(0);
+                write!(out, "D {retired} t{} pc {pc:x} insn {insn:08x} ->", m.ticks()).unwrap();
+                for i in 0..31 { write!(out, " {:x}", m.reg_read(Reg::x(i).unwrap())).unwrap(); }
+                writeln!(out, " sp0 {:x} sp1 {:x} nzcv {:x} daif {:x}", m.reg_read(Reg::SpEl0), m.reg_read(Reg::SpEl1), m.reg_read(Reg::Nzcv), m.reg_read(Reg::Daif)).unwrap();
+            }
+        }
+        _ => panic!("mode"),
+    }
+}
+
+fn linux(a: &[String]) {
+    let image = std::env::var("LINUX_IMAGE").unwrap_or_else(|_| "/tmp/alp/Image".into());
+    let initrd = std::env::var("LINUX_INITRD").unwrap_or_else(|_| "/tmp/alp/initramfs-virt".into());
+    let kernel = std::fs::read(image).unwrap();
+    let initrd = std::fs::read(initrd).unwrap();
+    let mut m = MachineBuilder::new(VirtConfig::default())
+        .linux(LinuxImage::parse(&kernel).unwrap())
+        .initrd(&initrd)
+        .command_line(SERIAL_CONSOLE_COMMAND_LINE)
+        .build()
+        .unwrap();
+    let mut out = std::io::BufWriter::new(std::io::stdout().lock());
+    let mut console: Vec<u8> = Vec::new();
+    let mut retired: u64 = 0;
+    match a[2].as_str() {
+        "dump" => {
+            std::fs::write("ram.bin", m.ram()).unwrap();
+            std::fs::write("dtb.bin", m.device_tree()).unwrap();
+            writeln!(out, "pc {:#x}", m.reg_read(Reg::Pc)).unwrap();
+            for i in 0..31 { let v = m.reg_read(Reg::x(i).unwrap()); if v != 0 { writeln!(out, "x{i} {v:#x}").unwrap(); } }
+            writeln!(out, "pstate {:?}", m.pstate()).unwrap();
+            writeln!(out, "ram {} bytes, device tree {} bytes", m.ram().len(), m.device_tree().len()).unwrap();
+        }
+        "check" => {
+            let k: u64 = a[3].parse().unwrap();
+            let max: u64 = a[4].parse().unwrap();
+            let until = a.get(5).cloned();
+            while retired < max {
+                let o = m.step(RunBudget::Instructions(k));
+                retired += o.progress.instructions().unwrap_or(0);
+                if let Some(mut s) = m.serial(0) { console.extend(s.take_output()); }
+                writeln!(out, "C {retired} {} {:x} {:016x} {}", m.ticks(), m.reg_read(Reg::Pc), state_hash!(m), console.len()).unwrap();
+                if o.is_terminal() { writeln!(out, "STOP {:?}", o.stop).unwrap(); break; }
+                if let Some(u) = &until { if console.windows(u.len()).any(|w| w == u.as_bytes()) { writeln!(out, "UNTIL").unwrap(); break; } }
+            }
+            std::fs::write("console.txt", &console).unwrap();
+        }
+        "detail" => {
+            let from: u64 = a[3].parse().unwrap();
+            let count: u64 = a[4].parse().unwrap();
+            while retired < from {
+                let o = m.step(RunBudget::Instructions((from - retired).min(1 << 24)));
+                retired += o.progress.instructions().unwrap_or(0);
+                if o.is_terminal() { break; }
+            }
+            for _ in 0..count {
+                let pc = m.reg_read(Reg::Pc);
+                let mut w = [0u8; 4]; let insn = if m.virt_read(pc, &mut w).is_ok() { u32::from_le_bytes(w) } else { 0 };
                 let o = m.step(RunBudget::Instructions(1));
                 retired += o.progress.instructions().unwrap_or(0);
                 write!(out, "D {retired} t{} pc {pc:x} insn {insn:08x} ->", m.ticks()).unwrap();
