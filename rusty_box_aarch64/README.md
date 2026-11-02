@@ -1088,12 +1088,20 @@ integration tests of the public API.
   nested guest boots under KVM, through stage 2, to its initramfs shell,
   and there `uname -m` answers `aarch64` (2026-11-02). The board has no
   vGIC (see "Not implemented"), so QEMU emulates the guest's GIC in user
-  space. That makes the nested boot slow: to `/init` it takes 38 times as
-  long as the host's own boot of the same kernel. Counted through the
-  instrumentation hooks (`docs/aarch64-automation.md`), nine of the
-  guest's exits in ten are stage 2 aborts on two device pages, the GIC CPU
-  interface and the UART, each a round trip through KVM to QEMU. No stage
-  2 fault repeats on memory.
+  space. Counted through the instrumentation hooks
+  (`docs/aarch64-automation.md`), nine of the guest's exits in ten are
+  stage 2 aborts on two device pages, the GIC CPU interface and the UART,
+  each a round trip through KVM to QEMU; an exit costs about 24,000
+  instructions, a timer tick about 2.2 exits, and no stage 2 fault repeats
+  on memory. Time is counted in instructions, so that cost is fixed
+  against the clock rate: a nested hypervisor needs a realistic one. At
+  the default `ips` of 50M a second, the guest's 1 kHz tick takes some 97%
+  of each emulated millisecond, and the guest reaches `Run /init` at 599 s
+  of its own time, about 16 minutes of host time. With `--ips 1000000000`
+  the tick takes under 5%: the guest reaches `Run /init` at 1.1 s and its
+  shell at 6.55 s, 52 s of host time after its kernel starts, and the
+  whole run, the host's boot and QEMU's install included, takes under 4
+  minutes.
 - `tests/timer_interrupts.rs`: hand-written guests drive the interrupt path
   end to end. One runs GIC + timer + `WFI` + IRQ entry/`ERET` + PSCI; its
   outcome is identical for every budget slicing, and a snapshot taken
