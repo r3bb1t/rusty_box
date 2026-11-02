@@ -9,6 +9,37 @@ divergence bisected to one instruction.
 
 ## Status (2026-11-03)
 
+**AAVMF (EDK2) boots to `Shell>` in pure Lean, lockstep-clean against
+rusty_box**: `leanbox check 1000000 700000000` prints the same 636 checkpoints
+as `oracle/ref/ref_1M.txt` (retired count, tick count, PC and the state hash
+over x0..x30, SP_EL0, SP_EL1, NZCV and DAIF, every million instructions) and
+the same console, byte for byte. Speed, same host (4-core VM):
+
+| | to `Shell>` | |
+|---|---|---|
+| rusty_box (`oracle edk2 check`) | 3.1 s | fast-forwards counter polls |
+| Lean (`leanbox check`) | 40.6 s | 15.6 M instructions/s, no poll fast-forward |
+
+The machine (`Leanbox/`): the A64 base integer ISA as rusty_box decodes it for a
+Cortex-A57 (strict should-be bits, everything else UNDEFINED), CRC32, the system
+registers and system instructions of an EL1-only processor, the stage 1 MMU
+(4 KiB granule, levels 0–3, TTBR0/1, permissions, TBI, MMU off), the TLB,
+exceptions (synchronous, IRQ, FIQ, ERET, illegal return), the exclusive monitor,
+PSCI over HVC, the generic timer and event stream, WFI/WFE, and the board:
+GICv2, PL011, PL031, PL061, both CFI flash banks, the empty virtio-mmio
+transports and the PCI windows. The run loop is machine.rs `run_slice`'s:
+bursts to the next event, `sync_events`, `after_device_access`, interrupts
+between traces, WFI sleeping to the next event.
+
+Not modelled yet, each stopping the machine with a message rather than being
+taken for something else: `AT` (address translation), armed breakpoints,
+watchpoints and software step, and the SIMD&FP data processing outside the
+small set EDK2 executes (`Leanbox/Cpu/Simd.lean`: modified immediate, the
+copies, integer three-same and compare-with-zero, `ADDP`, `SCVTF`/`UCVTF`,
+`FMOV` general).
+
+### The perfbench loops
+
 The chained interpreter (`bench/Chain.lean`, `bench/Burst.lean`) runs rusty_box's
 `aarch64_perfbench` loops bit-exactly: on `alu`, `memcpy` and `fnv` it ends in the
 same registers, the same retired-instruction count and the same destination-block
@@ -76,10 +107,19 @@ register and RAM access.
 
 | path | what |
 |---|---|
-| `bench/Chain.lean` | the chained interpreter and the perfbench loop setup |
+| `Main.lean` | `leanbox check K MAX` / `detail FROM COUNT`: the oracle's checkpoint and per-instruction lines |
+| `Leanbox/Run.lean` | the chained interpreter `run`, the trace lookup, and the run loop (`drive`, `syncEvents`, `afterDeviceAccess`) |
+| `Leanbox/Cpu/Decode.lean` | the A64 decoder to `Op`, register-31 meanings resolved to slots |
+| `Leanbox/Cpu/Step.lean` | `execOp`: every op, completely (the reference the fast paths agree with) |
+| `Leanbox/Cpu/Exec.lean` | exceptions, ERET, the data access paths, PSCI, the system instructions |
+| `Leanbox/Cpu/Simd.lean` | structure loads/stores and the SIMD&FP data processing modelled so far |
+| `Leanbox/Cpu/Mmu.lean` | stage 1 walk, TLB, permissions |
+| `Leanbox/Cpu/Sysreg.lean` | the generic timer, the event register, `MRS`/`MSR` |
+| `Leanbox/Cpu/State.lean`, `Bus.lean` | the machine state and the board's bus |
+| `Leanbox/Dev/` | GICv2, PL011, PL031, PL061, CFI flash, the empty virtio-mmio transport, each with `#guard`s from its Rust tests |
+| `bench/Chain.lean` | the chained interpreter's prototype on the perfbench loops |
 | `bench/Burst.lean` | `Chain.lean` with the per-trace burst limit `lim` |
 | `bench/history/` | the structure-threading design it replaced (`Arm3.lean.tmpl`, generated per register-file variant by `gen.py`) |
-| `Leanbox/Dev/Pl011.lean` | the PL011 UART, ported exactly from `rusty_box_aarch64/src/devices/pl011.rs`, with 14 checks reproducing 11 of its unit tests |
 | `loops_oracle/` | runs the perfbench loops on rusty_box and prints the final registers and hashes the Lean runs are compared with |
 | `oracle/` | the EDK2 lockstep oracle: `dump` (device tree, start state), `check K MAX` (a state hash every K retired instructions), `detail FROM COUNT` (full registers after each instruction) |
 | `oracle/ref/` | rusty_box's reference run of AAVMF to `Shell>`: `ref_1M.txt` (a checkpoint every 1M instructions; `Shell>` at 636M), `console.txt`, `dtb.bin` (the board's device tree as the firmware finds it at RAM base) |
@@ -88,8 +128,13 @@ register and RAM access.
 ## Building and running
 
 ```bash
-# Lean 4.35 (lean and leanc on PATH)
-cd lean_aarch64/bench
+# Lean 4.35 (lean, leanc and lake on PATH)
+cd lean_aarch64 && lake build          # leanc -O3 -DNDEBUG, from lakefile.lean
+./.lake/build/bin/leanbox check 1000000 700000000 > lean.txt   # to Shell>, writes console.txt
+diff oracle/ref/ref_1M.txt lean.txt
+./.lake/build/bin/leanbox detail 5000000 20   # registers after each of 20 instructions
+
+cd bench
 lean -c Chain.c Chain.lean && leanc -O3 -DNDEBUG -o chain Chain.c
 ./chain alu 1        # also: memcpy, fnv; a scale of 0 runs a short version
 
