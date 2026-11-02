@@ -242,6 +242,71 @@ def intToFloat (neg : Bool) (x : Nat) (ebits fbits : Nat) (rmode : UInt64) : UIn
     let mant := q - (1 <<< fbits)
     (signBit ||| ((e + bias).toUInt64 <<< fbits.toUInt64) ||| mant.toUInt64, rem != 0)
 
+-- ── the Cryptographic Extension's SHA-256 (Arm ARM `SHA256hash`) ───────
+@[inline] def ror32 (x : UInt64) (r : UInt64) : UInt64 :=
+  ((x >>> r) ||| (x <<< (32 - r))) &&& 0xFFFF_FFFF
+@[inline] def lane32 (v : V128) (e : UInt64) : UInt64 := v.elem 2 e
+
+/-- Arm `SHA256hash(X, Y, W, part1)`. -/
+def sha256hash (x y w : V128) (part1 : Bool) : V128 := Id.run do
+  let mut x := x
+  let mut y := y
+  for e in [0:4] do
+    let chs := (((lane32 y 1) ^^^ (lane32 y 2)) &&& (lane32 y 0)) ^^^ (lane32 y 2)
+    let maj := ((lane32 x 0) &&& (lane32 x 1)) ||| (((lane32 x 0) ||| (lane32 x 1)) &&& (lane32 x 2))
+    let y0 := lane32 y 0
+    let sig1 := ror32 y0 6 ^^^ ror32 y0 11 ^^^ ror32 y0 25
+    let t := (lane32 y 3 + sig1 + chs + lane32 w e.toUInt64) &&& 0xFFFF_FFFF
+    x := x.setElem 2 3 (t + lane32 x 3)
+    let x0 := lane32 x 0
+    let sig0 := ror32 x0 2 ^^^ ror32 x0 13 ^^^ ror32 x0 22
+    y := y.setElem 2 3 (t + sig0 + maj)
+    -- <Y, X> = ROL(Y : X, 32)
+    let xTop := lane32 x 3
+    let yTop := lane32 y 3
+    x := ⟨(x.lo <<< 32) ||| yTop, (x.hi <<< 32) ||| (x.lo >>> 32)⟩
+    y := ⟨(y.lo <<< 32) ||| xTop, (y.hi <<< 32) ||| (y.lo >>> 32)⟩
+  return if part1 then x else y
+
+/-- Arm `SHA256SU0`. -/
+def sha256su0 (d n : V128) : V128 := Id.run do
+  -- T = operand2<31:0> : operand1<127:32>
+  let t : V128 := ⟨(d.lo >>> 32) ||| (d.hi <<< 32), (d.hi >>> 32) ||| (n.lo <<< 32)⟩
+  let mut r : V128 := ⟨0, 0⟩
+  for e in [0:4] do
+    let el := lane32 t e.toUInt64
+    let el := ror32 el 7 ^^^ ror32 el 18 ^^^ (el >>> 3)
+    r := r.setElem 2 e.toUInt64 (el + lane32 d e.toUInt64)
+  return r
+
+/-- Arm `SHA256SU1`. -/
+def sha256su1 (d n m : V128) : V128 := Id.run do
+  -- T0 = operand3<31:0> : operand2<127:32>; T1 = operand3<127:64>
+  let t0 : V128 := ⟨(n.lo >>> 32) ||| (n.hi <<< 32), (n.hi >>> 32) ||| (m.lo <<< 32)⟩
+  let mut r : V128 := ⟨0, 0⟩
+  let mut t1 : UInt64 := m.hi
+  for e in [0:2] do
+    let el := (t1 >>> (32 * e.toUInt64)) &&& 0xFFFF_FFFF
+    let el := ror32 el 17 ^^^ ror32 el 19 ^^^ (el >>> 10)
+    r := r.setElem 2 e.toUInt64 (el + lane32 d e.toUInt64 + lane32 t0 e.toUInt64)
+  t1 := r.lo
+  for e in [2:4] do
+    let el := (t1 >>> (32 * (e - 2).toUInt64)) &&& 0xFFFF_FFFF
+    let el := ror32 el 17 ^^^ ror32 el 19 ^^^ (el >>> 10)
+    r := r.setElem 2 e.toUInt64 (el + lane32 d e.toUInt64 + lane32 t0 e.toUInt64)
+  return r
+
+/-- Carry-less multiplication of `bits`-bit `a` and `b` (Arm
+`PolynomialMult`): the low and high 64 bits of the product. -/
+def clmul (a b : UInt64) (bits : Nat) : UInt64 × UInt64 := Id.run do
+  let mut lo : UInt64 := 0
+  let mut hi : UInt64 := 0
+  for i in [0:bits] do
+    if (b >>> i.toUInt64) &&& 1 == 1 then
+      lo := lo ^^^ (a <<< i.toUInt64)
+      if i != 0 then hi := hi ^^^ (a >>> (64 - i.toUInt64))
+  return (lo, hi)
+
 def stopSimd (st : St) (pc : UInt64) (w : UInt32) : St :=
   raise st pc (unmodelled s!"SIMD&FP word {hex w.toUInt64} at {hex pc}")
 
@@ -364,12 +429,72 @@ def execSimd (st : St) (pc : UInt64) (w : UInt32) : St :=
       if opcode == 10 && u then raise st pc undefinedF
       else setD (mapV q size (fun x => if f x then all else 0) a)
     else if opcode == 5 && u && size == 0 then setD ⟨~~~a.lo, ~~~a.hi⟩   -- NOT
+    else if opcode == 0 || (opcode == 1 && !u) then           -- REV64, REV32, REV16
+      let container : UInt64 := if opcode == 0 && !u then 64 else if opcode == 0 then 32 else 16
+      if bits >= container then raise st pc undefinedF else
+      let per := container / bits
+      let r := Id.run do
+        let mut r : V128 := ⟨0, 0⟩
+        for e in [0:(elems q size).toNat] do
+          let e := e.toUInt64
+          r := r.setElem size e (a.elem size (e - e % per + (per - 1 - e % per)))
+        return r
+      setD r
     else stopSimd st pc w
   else if w &&& 0xFF3E_0C00 == 0x5E30_0800 then              -- scalar pairwise
     let opcode := fld w 12 5
     if opcode == 27 && !u && size == 3 then
       nx { st with rf := putV st.rf rd ⟨a.lo + a.hi, 0⟩ } pc
     else stopSimd st pc w
+  else if w &&& 0xFF20_8C00 == 0x5E00_0000 then              -- crypto three-register SHA
+    if size != 0 then raise st pc undefinedF else
+    let opcode := fld w 12 3
+    let d := getV st.rf rd
+    let r? : Option V128 := match opcode with
+      | 4 => some (sha256hash d a b true)          -- SHA256H Qd, Qn, Vm
+      | 5 => some (sha256hash a d b false)         -- SHA256H2 Qd, Qn, Vm
+      | 6 => some (sha256su1 d a b)
+      | _ => none
+    match r? with
+    | some r => nx { st with rf := putV st.rf rd r } pc
+    | none => if opcode == 7 then raise st pc undefinedF else stopSimd st pc w
+  else if w &&& 0xFF3E_0C00 == 0x5E28_0800 then              -- crypto two-register SHA
+    if size != 0 then raise st pc undefinedF else
+    let opcode := fld w 12 5
+    if opcode == 2 then nx { st with rf := putV st.rf rd (sha256su0 (getV st.rf rd) a) } pc
+    else if opcode > 2 then raise st pc undefinedF else stopSimd st pc w
+  else if w &&& 0x9F20_FC00 == 0x0E20_E000 && !u then        -- PMULL, PMULL2
+    let hiHalf := q
+    if size == 3 then
+      let x := if hiHalf then a.hi else a.lo
+      let y := if hiHalf then b.hi else b.lo
+      let (lo, hi) := clmul x y 64
+      nx { st with rf := putV st.rf rd ⟨lo, hi⟩ } pc
+    else if size == 0 then
+      let r := Id.run do
+        let mut r : V128 := ⟨0, 0⟩
+        for e in [0:8] do
+          let x := (if hiHalf then a.hi else a.lo) >>> (8 * e.toUInt64) &&& 0xFF
+          let y := (if hiHalf then b.hi else b.lo) >>> (8 * e.toUInt64) &&& 0xFF
+          r := r.setElem 1 e.toUInt64 (clmul x y 8).1
+        return r
+      nx { st with rf := putV st.rf rd r } pc
+    else raise st pc undefinedF
+  else if w &&& 0x9F80_FC00 == 0x0F00_A400 && fld w 19 4 != 0 then   -- SSHLL, USHLL
+    let immh := fld64 w 19 4
+    if immh &&& 8 != 0 then raise st pc undefinedF else
+    let log2 : UInt64 := if immh &&& 4 != 0 then 2 else if immh &&& 2 != 0 then 1 else 0
+    let esize : UInt64 := 8 <<< log2
+    let shift := fld64 w 16 7 - esize
+    let src := if q then a.hi else a.lo
+    let r := Id.run do
+      let mut r : V128 := ⟨0, 0⟩
+      for e in [0:(64 / esize).toNat] do
+        let x := (src >>> (esize * e.toUInt64)) &&& ones esize
+        let x := if u then x else sext x esize &&& ones (2 * esize)
+        r := r.setElem (log2 + 1) e.toUInt64 (x <<< shift)
+      return r
+    nx { st with rf := putV st.rf rd r } pc
   else if w &&& 0x7F20_FC00 == 0x1E20_0000 then              -- FP <-> integer
     let sf := fld w 31 1 == 1
     let ftype := fld w 22 2

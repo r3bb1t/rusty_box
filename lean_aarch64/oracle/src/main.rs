@@ -81,7 +81,54 @@ fn main() {
     }
 }
 
+/// Every word executed whose class the Lean machine may lack: SIMD&FP data
+/// processing and loads/stores, system words, and the exceptions taken.
+#[derive(Default)]
+struct Probe {
+    words: std::collections::HashMap<u32, u64>,
+    exc: std::collections::HashMap<String, u64>,
+}
+impl rusty_box_aarch64::Instrumentation for Probe {
+    fn before_execution(&mut self, _pc: u64, insn: u32) {
+        let op0 = (insn >> 25) & 0xF;
+        let simd_dp = op0 & 0b0111 == 0b0111;
+        let simd_ldst = op0 & 0b0101 == 0b0100 && (insn >> 26) & 1 == 1;
+        let system = insn & 0xFFC0_0000 == 0xD500_0000 || insn & 0xFF00_0000 == 0xD400_0000;
+        if simd_dp || simd_ldst || system { *self.words.entry(insn).or_default() += 1; }
+    }
+    fn exception(&mut self, t: rusty_box_aarch64::instrumentation::ExceptionTaken) {
+        *self.exc.entry(format!("{:?} {:?}->{:?}", t.kind, t.from, t.to)).or_default() += 1;
+    }
+}
+
 fn linux(a: &[String]) {
+    if a[2] == "probe" {
+        let image = std::env::var("LINUX_IMAGE").unwrap_or_else(|_| "/tmp/alp/Image".into());
+        let initrd = std::env::var("LINUX_INITRD").unwrap_or_else(|_| "/tmp/alp/initramfs-virt".into());
+        let kernel = std::fs::read(image).unwrap();
+        let initrd = std::fs::read(initrd).unwrap();
+        let mut m = MachineBuilder::new(VirtConfig::default())
+            .instrumentation(Probe::default())
+            .linux(LinuxImage::parse(&kernel).unwrap())
+            .initrd(&initrd)
+            .command_line(SERIAL_CONSOLE_COMMAND_LINE)
+            .build()
+            .unwrap();
+        let until = a[3].as_bytes().to_vec();
+        let mut console: Vec<u8> = Vec::new();
+        loop {
+            let o = m.step(RunBudget::Instructions(1_000_000));
+            if let Some(mut s) = m.serial(0) { console.extend(s.take_output()); }
+            if m.instructions() % 100_000_000 < 1_000_000 { eprintln!("{} {} {:?}", m.instructions(), m.ticks(), o.stop); }
+            if o.is_terminal() || console.windows(until.len()).any(|w| w == until.as_slice()) { break; }
+        }
+        let p = m.instrumentation();
+        let mut v: Vec<_> = p.words.iter().collect();
+        v.sort();
+        for (w, c) in v { println!("W {w:08x} {c}"); }
+        for (k, c) in &p.exc { println!("E {k} {c}"); }
+        return;
+    }
     let image = std::env::var("LINUX_IMAGE").unwrap_or_else(|_| "/tmp/alp/Image".into());
     let initrd = std::env::var("LINUX_INITRD").unwrap_or_else(|_| "/tmp/alp/initramfs-virt".into());
     let kernel = std::fs::read(image).unwrap();

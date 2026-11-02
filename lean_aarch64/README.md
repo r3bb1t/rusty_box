@@ -9,13 +9,15 @@ divergence bisected to one instruction.
 
 ## Status (2026-11-03)
 
-**Alpine Linux 3.23's kernel (6.18.58-0-virt) boots directly to its first
-console line in pure Lean, lockstep-clean**: `leanbox linux check 1000000
-400000000 "Booting Linux"` prints the same 11 checkpoints as
-`oracle/ref/linux_first_1M.txt` and the same 507 console bytes ("Booting Linux
-on physical CPU 0x0000000000 [0x411fd070]", the version line, ...), with the
-kernel, initramfs and device tree where QEMU's `-kernel` puts them (boot.rs
-`layout`) and the UART set up as firmware leaves it.
+**Alpine Linux 3.23 boots to its login prompt in pure Lean, lockstep-clean**:
+the kernel (6.18.58-0-virt, booted directly) and an initramfs of Alpine's
+minirootfs (`tools/mkinitramfs.py`: busybox init, a getty on ttyAMA0) run to
+`(none) login: ` at 545M retired instructions with the same 545 checkpoints
+as `oracle/ref/linux_login_1M.txt` and the same 11,874 console bytes. On the
+way the guest takes 10,072 IRQs, 255 system calls and 207 aborts (EL0 page
+faults among them), and runs the kernel's SHA-256 self-tests on the
+Cryptographic Extension. Speed, same host: rusty_box 5.4 s, Lean 33.4 s
+(16.3 M instructions/s).
 
 **AAVMF (EDK2) boots to `Shell>` in pure Lean, lockstep-clean against
 rusty_box**: `leanbox check 1000000 700000000` prints the same 636 checkpoints
@@ -42,9 +44,11 @@ between traces, WFI sleeping to the next event.
 Not modelled yet, each stopping the machine with a message rather than being
 taken for something else: `AT` (address translation), armed breakpoints,
 watchpoints and software step, and the SIMD&FP data processing outside the
-small set EDK2 executes (`Leanbox/Cpu/Simd.lean`: modified immediate, the
-copies, integer three-same and compare-with-zero, `ADDP`, `SCVTF`/`UCVTF`,
-`FMOV` general).
+set these boots execute (`Leanbox/Cpu/Simd.lean`: modified immediate, the
+copies, integer three-same and compare-with-zero, `REV16/32/64`, `ADDP`,
+`SSHLL`/`USHLL`, `PMULL`/`PMULL2`, `SHA256H`/`H2`/`SU0`/`SU1`,
+`SCVTF`/`UCVTF`, `FMOV` general): no FP arithmetic yet (rusty_box's
+softfloat is not ported), no AES or SHA-1.
 
 ### The perfbench loops
 
@@ -130,7 +134,8 @@ register and RAM access.
 | `bench/history/` | the structure-threading design it replaced (`Arm3.lean.tmpl`, generated per register-file variant by `gen.py`) |
 | `loops_oracle/` | runs the perfbench loops on rusty_box and prints the final registers and hashes the Lean runs are compared with |
 | `oracle/` | the lockstep oracle: `edk2`/`linux` `dump` (device tree, start state), `check K MAX [UNTIL]` (a state hash every K retired instructions), `detail FROM COUNT` (full registers after each instruction) |
-| `oracle/ref/` | `linux_dtb.bin` and `linux_first_1M.txt`: the device tree rusty_box gives the kernel, and its reference run to the first console line; rusty_box's reference run of AAVMF to `Shell>`: `ref_1M.txt` (a checkpoint every 1M instructions; `Shell>` at 636M), `console.txt`, `dtb.bin` (the board's device tree as the firmware finds it at RAM base) |
+| `oracle/ref/` | `linux_dtb.bin` and `linux_first_1M.txt`: the device tree rusty_box gives the kernel with the netboot initramfs, and its reference run to the first console line; `linux_login_dtb.bin` and `linux_login_1M.txt`: the same with `tools/mkinitramfs.py`'s initramfs, to `login: `; rusty_box's reference run of AAVMF to `Shell>`: `ref_1M.txt` (a checkpoint every 1M instructions; `Shell>` at 636M), `console.txt`, `dtb.bin` (the board's device tree as the firmware finds it at RAM base) |
+| `tools/mkinitramfs.py` | Alpine's minirootfs as an initramfs that ends at `login:` |
 | `edkprobe/` | the instruction mix of the EDK2 boot through the instrumentation API |
 
 ## Building and running
@@ -147,6 +152,14 @@ diff oracle/ref/ref_1M.txt lean.txt
 LINUX_IMAGE=Image LINUX_INITRD=initramfs-virt LINUX_DTB=oracle/ref/linux_dtb.bin \
   ./.lake/build/bin/leanbox linux check 1000000 400000000 "Booting Linux"
 (cd oracle && LINUX_IMAGE=... LINUX_INITRD=... cargo run --release -- linux check 1000000 400000000 "Booting Linux")
+
+# to the login prompt: the minirootfs as an initramfs
+python3 -I tools/mkinitramfs.py alpine-minirootfs-3.23.7-aarch64.tar.gz initramfs.cpio.gz
+LINUX_IMAGE=Image LINUX_INITRD=initramfs.cpio.gz LINUX_DTB=oracle/ref/linux_login_dtb.bin \
+  ./.lake/build/bin/leanbox linux check 1000000 700000000 "login: "
+diff oracle/ref/linux_login_1M.txt <the output>
+# every SIMD&FP, system and exception-generating word a boot executes, with counts
+(cd oracle && LINUX_INITRD=... cargo run --release -- linux probe "login: ")
 
 cd bench
 lean -c Chain.c Chain.lean && leanc -O3 -DNDEBUG -o chain Chain.c
