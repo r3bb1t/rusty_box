@@ -469,10 +469,10 @@ def writeC (s : State) (off : UInt64) (log2 : UInt8) (v : UInt64) (c : Clocks) :
   else
     s.writeRegister off v.toUInt32 c
 
--- board.rs VirtBoard::pump_serial_input_since. It only moves bytes from the
--- host input buffer (`serial_input`) into the receive FIFO; with no host
--- input it does nothing (besides the board-level `deadline_moved` hint,
--- which is not device state). Hence a no-op here.
+-- board.rs VirtBoard::pump_serial_input_since moves bytes from the host
+-- input buffer (`serial_input`), which is the board's, into the receive FIFO:
+-- the board does it (Cpu/Bus.lean `pumpSerialSince`) after these, so the
+-- device's own step is the identity.
 def pumpSerialInput (s : State) (_now : UInt64) : State := s
 
 -- board.rs read_outside_ram, UART arm: uart.read, pump_serial_input_since,

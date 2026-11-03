@@ -53,8 +53,7 @@ def IPS : Nat := 50_000_000
 def COUNTER_HZ : Nat := 62_500_000
 
 /-- board.rs `VirtBoard`, with the flash banks' arrays, without the virtio
-devices (none plugged: every transport is empty, `Layout::Legacy`) and the
-host's serial input (none). -/
+devices (none plugged: every transport is empty, `Layout::Legacy`). -/
 structure Board where
   flash0 : Dev.Flash.State
   flash1 : Dev.Flash.State
@@ -70,6 +69,9 @@ structure Board where
   deadlineMoved : Bool
   /-- board.rs `touched`. -/
   touched : Bool
+  /-- board.rs `serial_input`: host bytes waiting for room in the UART's
+  receive FIFO, oldest first. -/
+  serialIn : ByteArray
   deriving Inhabited
 
 /-- The trace cache's entries (a power of two). -/
@@ -229,7 +231,8 @@ def Board.new (code vars : ByteArray) : Board :=
     rtc := Dev.Pl031.State.new Dev.Pl031.DEFAULT_RTC_EPOCH
     gpio := Dev.Pl061.State.new
     deadlineMoved := false
-    touched := false }
+    touched := false
+    serialIn := ByteArray.empty }
 
 /-- state.rs `reset_keeping_time` with mod.rs `SysRegs::reset` and
 `Pstate::reset::<NoEl2>`, at tick `icount`. -/

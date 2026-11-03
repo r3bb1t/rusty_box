@@ -64,6 +64,47 @@ def advanceDevices (b : Board) (now : UInt64) : Board × Option UInt64 :=
   let b := b.syncDeviceLines
   (b, b.nextDeadline)
 
+/-- board.rs `SERIAL_INPUT_CAPACITY`. -/
+def SERIAL_INPUT_CAPACITY : Nat := 4096
+
+/-- board.rs `pump_serial_input_since`'s loop: hand the UART as many waiting
+host bytes as its receive FIFO takes, at tick `now`. -/
+def pumpSerial (b : Board) (now : UInt64) : Board := Id.run do
+  let mut b := b
+  let mut n := 0
+  while n < b.serialIn.size && b.uart.canReceive do
+    let (u, taken) := b.uart.receive b.serialIn[n]! (Dev.Pl011.Clocks.atTick now)
+    b := { b with uart := u }
+    if !taken then break
+    n := n + 1
+  if n == 0 then return b
+  return { b with serialIn := b.serialIn.extract n b.serialIn.size }
+
+/-- board.rs `pump_serial_input_since` after a UART access, `before` the
+UART's deadline before it (`note_uart_deadline`). -/
+def pumpSerialSince (b : Board) (before : Option UInt64) (now : UInt64) : Board :=
+  let b := b.pumpSerial now
+  if b.uart.nextDeadline != before then { b with deadlineMoved := true } else b
+
+/-- board.rs `send_serial` at tick `now`: each byte straight into the
+receive FIFO while nothing waits ahead of it and the FIFO has room, into the
+host buffer otherwise; the bytes taken. -/
+def sendSerial (b : Board) (bytes : ByteArray) (now : UInt64) : Board × Nat := Id.run do
+  let before := b.uart.nextDeadline
+  let mut b := b
+  let mut taken := 0
+  for byte in bytes do
+    if b.serialIn.size == 0 && b.uart.canReceive then
+      let (u, ok) := b.uart.receive byte (Dev.Pl011.Clocks.atTick now)
+      b := { b with uart := u }
+      if !ok then break
+    else if b.serialIn.size < SERIAL_INPUT_CAPACITY then
+      b := { b with serialIn := b.serialIn.push byte }
+    else break
+    taken := taken + 1
+  let moved := b.uart.nextDeadline != before
+  ((if moved then { b with deadlineMoved := true } else b).syncDeviceLines, taken)
+
 /-- board.rs `reset_devices` on a freshly built board at tick `now`. -/
 def resetDevices (b : Board) (now : UInt64) : Board :=
   let b := { b with flash0 := b.flash0.reset, flash1 := b.flash1.reset }
@@ -71,7 +112,7 @@ def resetDevices (b : Board) (now : UInt64) : Board :=
   let b := { b with uart := b.uart.reset }
   let b := { b with rtc := b.rtc.reset now }
   let b := { b with gpio := b.gpio.reset }
-  b.syncDeviceLines
+  (b.pumpSerial now).syncDeviceLines
 
 /-- board.rs `read_outside_ram`, then the bus's width mask: `none` is
 `BusFault::Unmapped`. -/
@@ -98,7 +139,7 @@ def read (b : Board) (a : UInt64) (log2 : UInt8) (now : UInt64) : Board × Optio
     let before := b.uart.nextDeadline
     let (u, v) := b.uart.read (a - UART0_BASE) log2 now
     let b := { b with uart := u }
-    let b := if b.uart.nextDeadline != before then { b with deadlineMoved := true } else b
+    let b := b.pumpSerialSince before now
     (b.syncDeviceLines, some (v &&& m))
   else if within a RTC_BASE PRIMECELL_SIZE then
     let (r, v) := b.rtc.read (a - RTC_BASE) log2 now
@@ -135,7 +176,7 @@ def write (b : Board) (a : UInt64) (log2 : UInt8) (v : UInt64) (now : UInt64) : 
   else if within a UART0_BASE PRIMECELL_SIZE then
     let before := b.uart.nextDeadline
     let b := { b with uart := b.uart.write (a - UART0_BASE) log2 v now }
-    let b := if b.uart.nextDeadline != before then { b with deadlineMoved := true } else b
+    let b := b.pumpSerialSince before now
     (b.syncDeviceLines, true)
   else if within a RTC_BASE PRIMECELL_SIZE then
     let (r, moved) := b.rtc.write (a - RTC_BASE) log2 v now

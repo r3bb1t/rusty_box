@@ -155,14 +155,34 @@ fn linux(a: &[String]) {
         "check" => {
             let k: u64 = a[3].parse().unwrap();
             let max: u64 = a[4].parse().unwrap();
-            let until = a.get(5).cloned();
+            // The console script: `until:TEXT` waits for TEXT on the console
+            // after the previous item, `type:TEXT` sends TEXT; plain TEXT is
+            // `until:`; `\r` and `\n` are CR and LF. Acted on after each line.
+            let script: Vec<(bool, Vec<u8>)> = a[5..].iter().map(|s| {
+                let un = |t: &str| t.replace("\\r", "\r").replace("\\n", "\n").into_bytes();
+                if let Some(t) = s.strip_prefix("type:") { (true, un(t)) }
+                else if let Some(t) = s.strip_prefix("until:") { (false, un(t)) }
+                else { (false, un(s)) }
+            }).collect();
+            let (mut pos, mut mark) = (0usize, 0usize);
             while retired < max {
                 let o = m.step(RunBudget::Instructions(k));
                 retired += o.progress.instructions().unwrap_or(0);
                 if let Some(mut s) = m.serial(0) { console.extend(s.take_output()); }
                 writeln!(out, "C {retired} {} {:x} {:016x} {}", m.ticks(), m.reg_read(Reg::Pc), state_hash!(m), console.len()).unwrap();
                 if o.is_terminal() { writeln!(out, "STOP {:?}", o.stop).unwrap(); break; }
-                if let Some(u) = &until { if console.windows(u.len()).any(|w| w == u.as_bytes()) { writeln!(out, "UNTIL").unwrap(); break; } }
+                while pos < script.len() {
+                    let (is_type, text) = &script[pos];
+                    if *is_type {
+                        let sent = m.serial(0).map_or(0, |mut s| s.send(text));
+                        if sent != text.len() { writeln!(out, "SHORT {sent} of {}", text.len()).unwrap(); }
+                    } else if !console[mark..].windows(text.len()).any(|w| w == text.as_slice()) {
+                        break;
+                    }
+                    mark = console.len();
+                    pos += 1;
+                }
+                if !script.is_empty() && pos >= script.len() { writeln!(out, "UNTIL").unwrap(); break; }
             }
             std::fs::write("console.txt", &console).unwrap();
         }

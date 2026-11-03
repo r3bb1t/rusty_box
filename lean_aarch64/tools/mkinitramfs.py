@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """Build the initramfs the login runs boot: Alpine's minirootfs as a
 gzip-compressed newc cpio, with busybox init as /init and a getty on the
-PL011 (ttyAMA0), so the boot ends at Alpine's `login:` prompt.
+PL011 (ttyAMA0), so the boot ends at Alpine's `login:` prompt, where `root`
+logs in with no password.
 
     python3 -I mkinitramfs.py alpine-minirootfs-3.23.7-aarch64.tar.gz initramfs.cpio.gz
 
 The archive's members keep their modes, owners and times; /dev/console is
 added (the kernel opens it for /init's standard streams), and /etc/inittab
-is replaced. Nothing is read from or written to the host's filesystem but
+is replaced, and root's password is emptied in /etc/shadow (the minirootfs
+locks it). Nothing is read from or written to the host's filesystem but
 the two named files.
 """
 import gzip
@@ -61,6 +63,10 @@ def main(src, dst):
             perm = m.mode & 0o7777
             if name == "etc/inittab":
                 c.entry(name, 0o100644, INITTAB, m.uid, m.gid, int(m.mtime))
+            elif name == "etc/shadow":
+                lines = t.extractfile(m).read().split(b"\n")
+                lines = [b"root::" + l.split(b":", 2)[2] if l.startswith(b"root:") else l for l in lines]
+                c.entry(name, 0o100000 | perm, b"\n".join(lines), m.uid, m.gid, int(m.mtime))
             elif m.isdir():
                 c.entry(name, 0o040000 | perm, b"", m.uid, m.gid, int(m.mtime))
             elif m.issym():

@@ -81,22 +81,57 @@ def hasText (b : ByteArray) (pat : ByteArray) : Bool := Id.run do
     if ok then return true
   return false
 
+/-- A console script item (as the oracle's): `until:TEXT` waits for TEXT
+on the console after the previous item, `type:TEXT` sends TEXT to the UART
+(board.rs `send_serial`); plain TEXT is `until:`. `\r` and `\n` stand for
+carriage return and line feed. -/
+def scriptItem (arg : String) : Bool × ByteArray :=
+  let unescape (t : String) : ByteArray := ((t.replace "\\r" "\r").replace "\\n" "\n").toUTF8
+  if arg.startsWith "type:" then (true, unescape (arg.drop 5).toString)
+  else if arg.startsWith "until:" then (false, unescape (arg.drop 6).toString)
+  else (false, unescape arg)
+
+/-- Send `bytes` to the UART at the machine's tick, then what the next run's
+start does (machine.rs `run_until`: `after_device_access`). -/
+def sendSerial (m : Mach) (bytes : ByteArray) : Mach × Nat :=
+  let (b, n) := m.sys.board.sendSerial bytes m.icnt
+  ({ m with sys := afterDeviceAccess { m.sys with board := b } m.icnt }, n)
+
 /-- One line per `k` retired instructions, as the oracle's `check` prints
-them, until `max`, a stop, or `until` on the console (printed as `tag`). -/
-partial def checkLoop (m : Mach) (k max : UInt64) (stopAt : ByteArray) (tag : String)
-    (out : IO.FS.Stream) : IO Mach := do
-  if m.retired >= max then return m
+them, until `max`, a stop, or the end of the script (printed as `tag`). The
+script is acted on after each line: every `until` satisfied by the console
+since the previous item, and every `type` after it. The console is drained
+from the UART after each step and kept here, as the oracle keeps it. -/
+partial def checkLoop (m : Mach) (k max : UInt64) (script : Array (Bool × ByteArray))
+    (pos mark : Nat) (con : ByteArray) (tag : String) (out : IO.FS.Stream) : IO (Mach × ByteArray) := do
+  if m.retired >= max then return (m, con)
   let m := drive m (m.retired + k)
-  let c := console m
-  out.putStrLn s!"C {m.retired} {m.icnt} {hex m.pc} {String.ofList ((Nat.toDigits 16 (stateHash m).toNat).leftpad 16 (Char.ofNat 48))} {c.size}"
+  let (u, o) := m.sys.board.uart.takeOutput
+  let m := { m with sys := { m.sys with board := { m.sys.board with uart := u } } }
+  let con := con ++ o
+  out.putStrLn s!"C {m.retired} {m.icnt} {hex m.pc} {String.ofList ((Nat.toDigits 16 (stateHash m).toNat).leftpad 16 (Char.ofNat 48))} {con.size}"
   if m.sys.power != 0 then
     out.putStrLn s!"STOP {m.sys.power} {m.sys.stopWhy}"
-    return m
-  -- the oracle searches the whole console; a match ends in the newest bytes
-  if hasText (c.extract (c.size - min c.size (k.toNat + stopAt.size)) c.size) stopAt then
+    return (m, con)
+  let mut m := m
+  let mut pos := pos
+  let mut mark := mark
+  while pos < script.size do
+    let (isType, text) := script[pos]!
+    if isType then
+      let (m', n) := sendSerial m text
+      m := m'
+      if n != text.size then out.putStrLn s!"SHORT {n} of {text.size}"
+      mark := con.size
+      pos := pos + 1
+    else if hasText (con.extract mark con.size) text then
+      mark := con.size
+      pos := pos + 1
+    else break
+  if pos >= script.size then
     out.putStrLn tag
-    return m
-  checkLoop m k max stopAt tag out
+    return (m, con)
+  checkLoop m k max script pos mark con tag out
 
 def regsLine (m : Mach) : String := Id.run do
   let mut s := ""
@@ -107,12 +142,12 @@ def run1 (m : Mach) (args : List String) (stopAt : String) (tag : String) : IO U
   let out ← IO.getStdout
   match args with
   | "check" :: k :: max :: rest =>
-    let stopAt := (rest.headD stopAt).toUTF8
+    let script := (if rest.isEmpty then [stopAt] else rest).toArray.map scriptItem
     let t0 ← IO.monoNanosNow
-    let m ← checkLoop m k.toNat!.toUInt64 max.toNat!.toUInt64 stopAt tag out
+    let (m, con) ← checkLoop m k.toNat!.toUInt64 max.toNat!.toUInt64 script 0 0 ByteArray.empty tag out
     let t1 ← IO.monoNanosNow
     IO.eprintln s!"{m.retired} instructions in {(t1 - t0).toFloat / 1e9}s"
-    IO.FS.writeBinFile "console.txt" (console m)
+    IO.FS.writeBinFile "console.txt" con
   | "detail" :: from_ :: count :: _ =>
     let m := drive m from_.toNat!.toUInt64
     let mut m := m
@@ -120,7 +155,7 @@ def run1 (m : Mach) (args : List String) (stopAt : String) (tag : String) : IO U
       let pc := m.pc
       m := drive m (m.retired + 1)
       out.putStrLn s!"D {m.retired} t{m.icnt} pc {hex pc} ->{regsLine m}"
-  | _ => IO.eprintln "usage: leanbox edk2|linux check K MAX [UNTIL] | detail FROM COUNT"
+  | _ => IO.eprintln "usage: leanbox edk2|linux check K MAX [until:TEXT|type:TEXT]... | detail FROM COUNT; leanbox bare TESTS"
 
 def parseHex (x : String) : UInt64 :=
   (x.foldl (fun acc c => acc * 16 + (if c.isDigit then c.toNat - 48 else c.toNat - 87)) 0).toUInt64
@@ -179,5 +214,5 @@ def main (args : List String) : IO UInt32 := do
     let initrd ← readFile ((← IO.getEnv "LINUX_INITRD").getD "/tmp/alp/initramfs-virt")
     let dtb ← readFile ((← IO.getEnv "LINUX_DTB").getD "oracle/ref/linux_dtb.bin")
     run1 (bootLinux kernel initrd dtb) rest "\x01\x02" "UNTIL"
-  | _ => IO.eprintln "usage: leanbox edk2|linux check K MAX [UNTIL] | detail FROM COUNT"
+  | _ => IO.eprintln "usage: leanbox edk2|linux check K MAX [until:TEXT|type:TEXT]... | detail FROM COUNT; leanbox bare TESTS"
   return 0
