@@ -22,6 +22,7 @@ macro_rules! state_hash { ($m:expr) => {{
 fn main() {
     let a: Vec<String> = std::env::args().collect();
     if a[1] == "linux" { return linux(&a); }
+    if a[1] == "bare" { return bare(&a[2]); }
     let code = std::fs::read("/usr/share/AAVMF/AAVMF_CODE.no-secboot.fd").unwrap();
     let vars = std::fs::read("/usr/share/AAVMF/AAVMF_VARS.fd").unwrap();
     let mut m = MachineBuilder::new(VirtConfig::default()).firmware(&code).variables(&vars).build().unwrap();
@@ -184,5 +185,54 @@ fn linux(a: &[String]) {
             }
         }
         _ => panic!("mode"),
+    }
+}
+
+/// The differential test: each line of `path` is an instruction word and a
+/// start state (`insn sp nzcv x0..x30 v0lo v0hi .. v31lo v31hi`, hex); each
+/// runs alone on a bare machine at EL1h with interrupts masked, the MMU off,
+/// VBAR_EL1 at RAM base + 2 MiB and SIMD&FP enabled, its word at RAM base +
+/// 1 MiB + 4 * line, and 8 KiB of RAM at RAM base + 4 KiB filled with a
+/// pattern of the line's number, FPSR and FPCR zero. One line out per test:
+/// the state after.
+fn bare(path: &str) {
+    use rusty_box_aarch64::{Pstate, SysReg, VReg};
+    const RAM: u64 = 0x4000_0000;
+    let mut m = MachineBuilder::new(VirtConfig::default()).bare().build().unwrap();
+    let text = std::fs::read_to_string(path).unwrap();
+    let mut out = std::io::BufWriter::new(std::io::stdout().lock());
+    for (idx, line) in text.lines().enumerate() {
+        let f: Vec<u64> = line.split_whitespace().map(|x| u64::from_str_radix(x, 16).unwrap()).collect();
+        let pc = RAM + 0x10_0000 + 4 * idx as u64;
+        m.mem_write(pc, &(f[0] as u32).to_le_bytes()).unwrap();
+        let mut pat = vec![0u8; 0x2000];
+        let mut h = 0x9E37_79B9_7F4A_7C15u64 ^ idx as u64;
+        for b in pat.iter_mut() { h ^= h << 13; h ^= h >> 7; h ^= h << 17; *b = h as u8; }
+        m.mem_write(RAM + 0x1000, &pat).unwrap();
+        let mut ps = Pstate::RESET;
+        ps.n = f[2] & 8 != 0; ps.z = f[2] & 4 != 0; ps.c = f[2] & 2 != 0; ps.v = f[2] & 1 != 0;
+        m.set_pstate(ps).unwrap();
+        for i in 0..31 { m.reg_write(Reg::x(i).unwrap(), f[3 + i as usize]); }
+        m.reg_write(Reg::SpEl1, f[1]);
+        for i in 0..32u8 {
+            let lo = f[34 + 2 * i as usize] as u128; let hi = f[35 + 2 * i as usize] as u128;
+            m.vreg_write(VReg::new(i).unwrap(), (hi << 64) | lo);
+        }
+        for (r, v) in [(SysReg::VBAR_EL1, RAM + 0x20_0000), (SysReg::CPACR_EL1, 0x30_0000),
+                       (SysReg::ESR_EL1, 0), (SysReg::FAR_EL1, 0), (SysReg::ELR_EL1, 0), (SysReg::SPSR_EL1, 0),
+                       (SysReg::FPSR, 0), (SysReg::FPCR, 0)] {
+            m.sysreg_write(r, v).unwrap();
+        }
+        m.reg_write(Reg::Pc, pc);
+        let o = m.step(RunBudget::Instructions(1));
+        let mut mem = vec![0u8; 0x2000];
+        m.mem_read(RAM + 0x1000, &mut mem).unwrap();
+        let mut mh = FNV_OFF; for b in &mem { mh ^= *b as u64; mh = mh.wrapping_mul(0x100000001b3); }
+        write!(out, "T {idx} {:?} pc {:x} nzcv {:x}", o.stop, m.reg_read(Reg::Pc), m.reg_read(Reg::Nzcv) >> 28).unwrap();
+        for i in 0..31 { write!(out, " {:x}", m.reg_read(Reg::x(i).unwrap())).unwrap(); }
+        write!(out, " sp {:x}", m.reg_read(Reg::SpEl1)).unwrap();
+        for i in 0..32u8 { let v = m.vreg_read(VReg::new(i).unwrap()); write!(out, " {:x}:{:x}", v as u64, (v >> 64) as u64).unwrap(); }
+        let r = |r| m.sysreg_read(r).unwrap();
+        writeln!(out, " esr {:x} far {:x} elr {:x} spsr {:x} fpsr {:x} mem {mh:x}", r(SysReg::ESR_EL1), r(SysReg::FAR_EL1), r(SysReg::ELR_EL1), r(SysReg::SPSR_EL1), r(SysReg::FPSR)).unwrap();
     }
 }

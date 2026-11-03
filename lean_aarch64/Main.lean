@@ -122,6 +122,50 @@ def run1 (m : Mach) (args : List String) (stopAt : String) (tag : String) : IO U
       out.putStrLn s!"D {m.retired} t{m.icnt} pc {hex pc} ->{regsLine m}"
   | _ => IO.eprintln "usage: leanbox edk2|linux check K MAX [UNTIL] | detail FROM COUNT"
 
+def parseHex (x : String) : UInt64 :=
+  (x.foldl (fun acc c => acc * 16 + (if c.isDigit then c.toNat - 48 else c.toNat - 87)) 0).toUInt64
+
+/-- The Lean side of `oracle bare` (tools/difftest_gen.py's tests): the same
+start state per line, one instruction, the same line out. -/
+def bare (path : String) : IO Unit := do
+  let text ← IO.FS.readFile path
+  let out ← IO.getStdout
+  let board := (Board.new ByteArray.empty ByteArray.empty).resetDevices 0
+  let sys0 := syncEvents (Sys.reset RAM_BASE 0 board) 0
+  let mut m : Mach := { rf := zeros RF_BYTES, mem := zeros RAM_SIZE.toNat, sys := sys0, pc := RAM_BASE, nzcv := 0, icnt := 0 }
+  let mut idx := 0
+  for line in text.splitOn "\n" do
+    if line.isEmpty then continue
+    let f := (line.splitOn " ").toArray.map parseHex
+    let pc := RAM_BASE + 0x10_0000 + 4 * idx.toUInt64
+    let mut mem := st32 m.mem (pc - RAM_BASE).toUSize f[0]!
+    let mut h : UInt64 := 0x9E37_79B9_7F4A_7C15 ^^^ idx.toUInt64
+    for k in [0:0x2000] do
+      h := h ^^^ (h <<< 13); h := h ^^^ (h >>> 7); h := h ^^^ (h <<< 17)
+      mem := sb mem (0x1000 + k).toUSize h
+    let mut rf := m.rf
+    for i in [0:31] do rf := wr rf i.toUInt8 f[3 + i]!
+    rf := wr rf SP f[1]!
+    for i in [0:32] do rf := wv rf i.toUInt8 f[34 + 2 * i]! f[35 + 2 * i]!
+    let vb : UInt64 := RAM_BASE + 0x200000
+    let s0 := m.sys
+    let sys : Sys := { s0 with el := 1, spsel := true, daif := 0x3C0, il := false, vbar := vb }
+    let sys : Sys := { sys with cpacr := 0x300000, esr := 0, far := 0, elr := 0, spsr := 0 }
+    let sys : Sys := { sys with monArmed := false, power := 0, fpsr := 0, fpcr := 0 }
+    m := { m with rf, mem, sys, pc, nzcv := f[2]! &&& 0xF }
+    m := drive m (m.retired + 1)
+    let mut mh : UInt64 := 0xcbf29ce484222325
+    for k in [0:0x2000] do mh := (mh ^^^ gb m.mem (0x1000 + k).toUSize) * 0x100000001b3
+    let stop := if m.sys.power == 0 then "BudgetExhausted" else s!"STOP{m.sys.power}"
+    let mut s := s!"T {idx} {stop} pc {hex m.pc} nzcv {hex m.nzcv}"
+    for i in [0:31] do s := s ++ s!" {hex (rr m.rf i.toUInt8)}"
+    s := s ++ s!" sp {hex (spEl1 m.rf m.sys)}"
+    for i in [0:32] do s := s ++ s!" {hex (vlo m.rf i.toUInt8)}:{hex (vhi m.rf i.toUInt8)}"
+    s := s ++ s!" esr {hex m.sys.esr} far {hex m.sys.far} elr {hex m.sys.elr} spsr {hex m.sys.spsr} fpsr {hex m.sys.fpsr} mem {hex mh}"
+    out.putStrLn s
+    if m.sys.power != 0 then m := { m with sys := { m.sys with power := 0 } }
+    idx := idx + 1
+
 def main (args : List String) : IO UInt32 := do
   match args with
   | "edk2" :: rest =>
@@ -129,6 +173,7 @@ def main (args : List String) : IO UInt32 := do
     let vars ← readFile "/usr/share/AAVMF/AAVMF_VARS.fd"
     let dtb ← readFile ((← IO.getEnv "EDK2_DTB").getD "oracle/ref/dtb.bin")
     run1 (boot code vars dtb) rest "Shell> " "SHELL"
+  | ["bare", path] => bare path
   | "linux" :: rest =>
     let kernel ← readFile ((← IO.getEnv "LINUX_IMAGE").getD "/tmp/alp/Image")
     let initrd ← readFile ((← IO.getEnv "LINUX_INITRD").getD "/tmp/alp/initramfs-virt")

@@ -47,6 +47,25 @@ hits on stable memory, x30 periodic) and the iterations that take its path
 and fit in the burst are skipped, leaving the counter register, NZCV and the
 tick count as running them would.
 
+**Single instructions, against rusty_box**: `tools/difftest_gen.py` writes random
+words of one encoding group with random start states (registers half the time
+pointing into a scratch window), `oracle bare` and `leanbox bare` run each alone
+(EL1h, MMU off, so loads and stores reach Device memory) and print the state
+after it: registers, NZCV, PC, all SIMD&FP registers, ESR/FAR/ELR/SPSR, FPSR
+and a hash of the window. 80,000 words of the data-processing, load/store and
+branch groups (about 60% of them raising an exception) give identical lines.
+Of 5,000 SIMD&FP data-processing words, the 64 this machine executes match and
+the other 4,936 stop it as unmodelled. The tester found one bug the boots had
+not: a 128-bit access's Device-memory alignment is judged by its 16 bytes, and
+a pair of Q registers at an 8-byte-aligned address is four doubleword accesses
+(mmu.rs `read_mem_u128`, `read_mem_q_pair`, `write_mem_q_pair`).
+
+```bash
+python3 -I tools/difftest_gen.py ldst 20000 7 > t.txt    # dpimm dpreg ldst branch simd all
+oracle/target/release/oracle bare t.txt > rusty.txt
+./.lake/build/bin/leanbox bare t.txt > lean.txt && diff rusty.txt lean.txt
+```
+
 Not modelled yet, each stopping the machine with a message rather than being
 taken for something else: `AT` (address translation), armed breakpoints,
 watchpoints and software step, and the SIMD&FP data processing outside the
@@ -164,6 +183,7 @@ register and RAM access.
 | `oracle/` | the lockstep oracle: `edk2`/`linux` `dump` (device tree, start state), `check K MAX [UNTIL]` (a state hash every K retired instructions), `detail FROM COUNT` (full registers after each instruction) |
 | `oracle/ref/` | `linux_dtb.bin` and `linux_first_1M.txt`: the device tree rusty_box gives the kernel with the netboot initramfs, and its reference run to the first console line; `linux_login_dtb.bin` and `linux_login_1M.txt`: the same with `tools/mkinitramfs.py`'s initramfs, to `login: `; rusty_box's reference run of AAVMF to `Shell>`: `ref_1M.txt` (a checkpoint every 1M instructions; `Shell>` at 636M), `console.txt`, `dtb.bin` (the board's device tree as the firmware finds it at RAM base) |
 | `tools/mkinitramfs.py` | Alpine's minirootfs as an initramfs that ends at `login:` |
+| `tools/difftest_gen.py` | random single-instruction tests for `oracle bare` / `leanbox bare` |
 | `edkprobe/` | the instruction mix of the EDK2 boot through the instrumentation API |
 
 ## Building and running

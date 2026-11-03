@@ -157,14 +157,14 @@ def fpAccess (st : St) (addr : UInt64) (size : UInt8) (load : Bool) (t : UInt8) 
       match checkAlignment st.sys addr 16 {} false with
       | some f => (st, some f)
       | none =>
-        let (st, r) := readPair st addr 3 {}
+        let (st, r) := readPair st addr 3 {} true
         match r with
         | .error f => (st, some f)
         | .ok (a, b) => (setV st t a b, none)
     else
       match checkAlignment st.sys addr 16 {} true with
       | some f => (st, some f)
-      | none => writePair st addr 3 (vlo st.rf t) (vhi st.rf t) {}
+      | none => writePair st addr 3 (vlo st.rf t) (vhi st.rf t) {} true
   else if load then
     let (st, r) := readMem st addr size {}
     match r with
@@ -309,19 +309,57 @@ def execOp (st : St) (pc : UInt64) (op : Op) : St :=
     let fin (st : St) : St := nx (if wb then setR st n (base + off) else st) pc
     if size == 4 then
       if load then
-        let (st, f) := fpAccess st addr 4 true t
-        match f with
-        | some f => raise st pc f
-        | none =>
-          let (st, f) := fpAccess st (addr + 16) 4 true t2
-          match f with | some f => raise st pc f | none => fin st
+        -- mmu.rs `read_mem_q_pair`
+        if addr &&& 7 != 0 then
+          let (st, f) := fpAccess st addr 4 true t
+          match f with
+          | some f => raise st pc f
+          | none =>
+            let (st, f) := fpAccess st (addr + 16) 4 true t2
+            match f with | some f => raise st pc f | none => fin st
+        else
+          match checkAlignment st.sys addr 16 {} false with
+          | some f => raise st pc f
+          | none =>
+          let (st, r1) := readPair st addr 3 {}
+          match r1 with
+          | .error f => raise st pc f
+          | .ok (a, b) =>
+          let (st, r2) := readPair st (addr + 16) 3 {}
+          match r2 with
+          | .error f => raise st pc f
+          | .ok (c, d) => fin (setV (setV st t a b) t2 c d)
       else
-        let (st, f) := fpAccess st addr 4 false t
-        match f with
+        -- mmu.rs `write_mem_q_pair`
+        match checkAlignment st.sys addr 16 {} true with
         | some f => raise st pc f
         | none =>
-          let (st, f) := fpAccess st (addr + 16) 4 false t2
-          match f with | some f => raise st pc f | none => fin st
+        let vals := #[vlo st.rf t, vhi st.rf t, vlo st.rf t2, vhi st.rf t2]
+        if (addr &&& 0xFFF) + 32 > 0x1000 then
+          let (st, r) := xlatePages st addr 32 {} (addr &&& 7 != 0)
+          match r with
+          | .error f => raise st pc f
+          | .ok pages =>
+            let rec go (st : St) (k : Nat) : St :=
+              if k ≥ 4 then fin st else
+              let (st, f) := writeOnPages st addr pages (8 * k.toUInt64) 8 vals[k]!
+              match f with | some f => raise st pc f | none => go st (k + 1)
+            termination_by 4 - k
+            go st 0
+        else if addr &&& 7 != 0 then
+          let (st, f) := fpAccess st addr 4 false t
+          match f with
+          | some f => raise st pc f
+          | none =>
+            let (st, f) := fpAccess st (addr + 16) 4 false t2
+            match f with | some f => raise st pc f | none => fin st
+        else
+          let (st, f) := writePair st addr 3 vals[0]! vals[1]! {}
+          match f with
+          | some f => raise st pc f
+          | none =>
+            let (st, f) := writePair st (addr + 16) 3 vals[2]! vals[3]! {}
+            match f with | some f => raise st pc f | none => fin st
     else if load then
       let (st, rv) := readPair st addr size {}
       match rv with

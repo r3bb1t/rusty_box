@@ -223,6 +223,44 @@ def readSingle (st : St) (va : UInt64) (log2 : UInt8) (acc : Acc) (refuse : Bool
 @[inline] def readMem (st : St) (va : UInt64) (log2 : UInt8) (acc : Acc) : St × Except Fault UInt64 :=
   readSingle st va log2 acc (va &&& ((1 <<< log2.toUInt64) - 1) != 0)
 
+/-- mmu.rs `translate_write_pages`: both pages of a write of `bytes` at `va`
+that crosses a page boundary, the first page's then the second's: the PA of
+`va`, the PA of the second page, and the bytes on the first. -/
+def xlatePages (st : St) (va bytes : UInt64) (acc : Acc) (refuse : Bool) :
+    St × Except Fault (UInt64 × UInt64 × UInt64) :=
+  let el := accEl st.sys acc
+  let second := (va + bytes - 1) &&& ~~~0xFFF
+  let (sys, r1) := translate st.sys st.mem va st.icnt AK_WRITE el refuse
+  let st := { st with sys := sys }
+  match r1 with
+  | .error a => (st, .error (dataAbort st.sys va a))
+  | .ok (pa1, _) =>
+  let (sys, r2) := translate st.sys st.mem second st.icnt AK_WRITE el refuse
+  let st := { st with sys := sys }
+  match r2 with
+  | .error a => (st, .error (dataAbort st.sys second a))
+  | .ok (pa2, _) => (st, .ok (pa1, pa2, second - va))
+
+/-- mmu.rs `write_element_on_pages`: `bytes` of `v` at offset `off` of a
+write translated by `xlatePages`, whole where they lie on one page, else
+byte by byte. -/
+def writeOnPages (st : St) (va : UInt64) (pages : UInt64 × UInt64 × UInt64) (off bytes v : UInt64) :
+    St × Option Fault :=
+  let (pa1, pa2, firstBytes) := pages
+  let pa (o : UInt64) : UInt64 := if o < firstBytes then pa1 + o else pa2 + (o - firstBytes)
+  if off + bytes <= firstBytes || off >= firstBytes then
+    let log2 : UInt8 := if bytes == 8 then 3 else if bytes == 4 then 2 else if bytes == 2 then 1 else 0
+    let (st, ok) := busWrite st (pa off) log2 v
+    if ok then (st, none) else (st, some (externalAbort st.sys (va + off) true))
+  else
+    let rec go (st : St) (i : Nat) : St × Option Fault :=
+      if i ≥ bytes.toNat then (st, none) else
+      let at_ := off + i.toUInt64
+      let (st, ok) := busWrite st (pa at_) 0 ((v >>> (8 * i.toUInt64)) &&& 0xFF)
+      if !ok then (st, some (externalAbort st.sys (va + at_) true)) else go st (i + 1)
+    termination_by bytes.toNat - i
+    go st 0
+
 /-- mmu.rs `write_single`. -/
 def writeSingle (st : St) (va : UInt64) (log2 : UInt8) (v : UInt64) (acc : Acc) (refuse : Bool) :
     St × Option Fault :=
@@ -239,27 +277,10 @@ def writeSingle (st : St) (va : UInt64) (log2 : UInt8) (v : UInt64) (acc : Acc) 
     match checkAlignment st.sys va bytes acc true with
     | some f => (st, some f)
     | none =>
-    let el := accEl st.sys acc
-    let second := (va + bytes - 1) &&& ~~~0xFFF
-    let firstBytes := second - va
-    let (sys, r1) := translate st.sys st.mem va st.icnt AK_WRITE el true
-    let st := { st with sys := sys }
-    match r1 with
-    | .error a => (st, some (dataAbort st.sys va a))
-    | .ok (pa1, _) =>
-    let (sys, r2) := translate st.sys st.mem second st.icnt AK_WRITE el true
-    let st := { st with sys := sys }
-    match r2 with
-    | .error a => (st, some (dataAbort st.sys second a))
-    | .ok (pa2, _) =>
-    let rec go (st : St) (i : Nat) : St × Option Fault :=
-      if i ≥ bytes.toNat then (st, none) else
-      let at_ := i.toUInt64
-      let pa := if at_ < firstBytes then pa1 + at_ else pa2 + (at_ - firstBytes)
-      let (st, ok) := busWrite st pa 0 ((v >>> (8 * at_)) &&& 0xFF)
-      if !ok then (st, some (externalAbort st.sys (va + at_) true)) else go st (i + 1)
-    termination_by bytes.toNat - i
-    go st 0
+    let (st, r) := xlatePages st va bytes acc true
+    match r with
+    | .error f => (st, some f)
+    | .ok pages => writeOnPages st va pages 0 bytes v
 
 @[inline] def writeMem (st : St) (va : UInt64) (log2 : UInt8) (v : UInt64) (acc : Acc) : St × Option Fault :=
   writeSingle st va log2 v acc (va &&& ((1 <<< log2.toUInt64) - 1) != 0)
@@ -267,9 +288,11 @@ def writeSingle (st : St) (va : UInt64) (log2 : UInt8) (v : UInt64) (acc : Acc) 
 /-- mmu.rs `read_pair` (and `read_mem_u128` with `log2` 3 after its
 alignment check): two elements, one translation within a page, each on its
 own across one. -/
-def readPair (st : St) (va : UInt64) (log2 : UInt8) (acc : Acc) : St × Except Fault (UInt64 × UInt64) :=
+def readPair (st : St) (va : UInt64) (log2 : UInt8) (acc : Acc) (quad : Bool := false) :
+    St × Except Fault (UInt64 × UInt64) :=
   let bytes : UInt64 := 1 <<< log2.toUInt64
-  let refuse := va &&& (bytes - 1) != 0
+  -- `OnDevice::of_alignment`: by the element, or by all 16 bytes of a Q access
+  let refuse := va &&& ((if quad then 2 * bytes else bytes) - 1) != 0
   if (va &&& 0xFFF) + 2 * bytes <= 0x1000 && !acc.aligned then
     let (st, r) := dataXlate st va (2 * bytes) false acc refuse
     match r with
@@ -294,9 +317,10 @@ def readPair (st : St) (va : UInt64) (log2 : UInt8) (acc : Acc) : St × Except F
     | .ok b => (st, .ok (a, b))
 
 /-- mmu.rs `write_pair` (and `write_mem_u128`). -/
-def writePair (st : St) (va : UInt64) (log2 : UInt8) (a b : UInt64) (acc : Acc) : St × Option Fault :=
+def writePair (st : St) (va : UInt64) (log2 : UInt8) (a b : UInt64) (acc : Acc) (quad : Bool := false) :
+    St × Option Fault :=
   let bytes : UInt64 := 1 <<< log2.toUInt64
-  let refuse := va &&& (bytes - 1) != 0
+  let refuse := va &&& ((if quad then 2 * bytes else bytes) - 1) != 0
   if (va &&& 0xFFF) + 2 * bytes <= 0x1000 && !acc.aligned then
     let (st, r) := dataXlate st va (2 * bytes) true acc refuse
     match r with
