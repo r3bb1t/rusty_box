@@ -558,7 +558,7 @@ def execSys (st : St) (pc : UInt64) (w : UInt32) : St :=
         else
           let bits := crm.toUInt64 <<< 6
           let d := if op2 == 6 then sys.daif ||| bits else sys.daif &&& ~~~bits
-          { nx { st with sys := { sys with daif := d } } pc with flow := 3 }
+          { nx { st with sys := { sys with daif := d } } pc with flow := 1 }
       else raise st pc undefinedF
   else if op0 == 1 then
     if l == 1 then raise st pc undefinedF                    -- SYSL
@@ -607,7 +607,9 @@ def execSys (st : St) (pc : UInt64) (w : UInt32) : St :=
           else if eff == 2 then flushTlb sys else sys
         let st := nx { st with sys := sys, nzcv := nzcv } pc
         if eff == 3 && debugArmed st.sys then raise st pc (unmodelled s!"debug controls armed at {hex pc}")
-        else { st with flow := if eff == 1 then 2 else 3 }
+        -- a timer write goes back to the run loop; a change of the translation
+        -- context empties the micro-TLBs; anything else ends the trace
+        else { st with flow := if eff == 1 then 2 else if eff == 2 then 3 else 1 }
       | .error e => raise st pc (sysFault w false e)
 
 end Leanbox

@@ -341,6 +341,7 @@ def execOp (st : St) (pc : UInt64) (op : Op) : St :=
       raise st pc { ec := EC_SYSREG, iss := trapIss (((if virt then K_CNTVCT else K_CNTPCT) <<< 5) ||| (if t == SINK then 31 else t.toUInt32)) true }
     else nx (setR st t (counterAt st.icnt)) pc
   | .sys w => execSys st pc w
+  | .mrs w _ _ => execSys st pc w
   | .simd w => execSimd st pc w
   | .undef _ => raise st pc undefinedF
   | .endTrace => st

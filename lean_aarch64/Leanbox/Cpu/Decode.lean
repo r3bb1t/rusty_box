@@ -88,6 +88,9 @@ inductive Op where
   -- system
   | nop
   | readCounter (virt : Bool) (t : UInt8)      -- MRS Xt, CNTPCT_EL0 / CNTVCT_EL0
+  /-- Every other MRS: `k` the register's encoding (bits 20:5), `t` the
+  destination slot, `w` the word (for the reference executor). -/
+  | mrs     (w k : UInt32) (t : UInt8)
   | sys     (w : UInt32)                        -- every other system, exception and ERET word
   | simd    (w : UInt32)                        -- SIMD&FP data processing
   | undef   (w : UInt32)
@@ -303,7 +306,8 @@ def decodeControl (w : UInt32) : Op :=
       else if op0s == 1 then .sys w                  -- SYS, SYSL
       else if l == 1 && op0s == 3 && op1 == 3 && crn == 14 && crm == 0 && (op2 == 1 || op2 == 2) then
         .readCounter (op2 == 2) (zw rt)
-      else .sys w                                    -- MSR, MRS
+      else if l == 1 then .mrs w ((w >>> 5) &&& 0xFFFF) (zw rt)
+      else .sys w                                    -- MSR
     else if top >= 2 then                            -- branch_reg
       if fld w 25 1 == 0 then .undef w else
       let opc := fld w 21 4

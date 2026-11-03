@@ -327,6 +327,17 @@ partial def run (rf mem : ByteArray) (sys : Sys) (tr : Array Op) (i : USize)
     run (wr rf d (mask32 sf (if sub then rr rf a - p else rr rf a + p))) mem sys tr (i+1) tpc nzcv (icnt+1) lim cv cp dvr dpr dvw dpw dvr2 dpr2
   | .mull u sub d n m a => run (wr rf d (mullVal u sub (rr rf n) (rr rf m) (rr rf a))) mem sys tr (i+1) tpc nzcv (icnt+1) lim cv cp dvr dpr dvw dpw dvr2 dpr2
   | .mulh u d n m => run (wr rf d (mulHigh (rr rf n) (rr rf m) (!u))) mem sys tr (i+1) tpc nzcv (icnt+1) lim cv cp dvr dpr dvw dpw dvr2 dpr2
+  | .mrs _ k t =>
+    -- the reads at EL1 with no side effect and nothing to check
+    if sys.el != 1 then slowpath! else
+    if k == K_SP_EL0 && sys.spsel then run (wr rf t sys.sp0) mem sys tr (i+1) tpc nzcv (icnt+1) lim cv cp dvr dpr dvw dpw dvr2 dpr2
+    else if k == K_TPIDR_EL1 then run (wr rf t sys.tpidr1) mem sys tr (i+1) tpc nzcv (icnt+1) lim cv cp dvr dpr dvw dpw dvr2 dpr2
+    else if k == K_DAIF then run (wr rf t sys.daif) mem sys tr (i+1) tpc nzcv (icnt+1) lim cv cp dvr dpr dvw dpw dvr2 dpr2
+    else if k == K_NZCV then run (wr rf t (nzcv <<< 28)) mem sys tr (i+1) tpc nzcv (icnt+1) lim cv cp dvr dpr dvw dpw dvr2 dpr2
+    else if k == K_TPIDR_EL0 then run (wr rf t sys.tpidr0) mem sys tr (i+1) tpc nzcv (icnt+1) lim cv cp dvr dpr dvw dpw dvr2 dpr2
+    else if k == K_DCZID then run (wr rf t DCZID_BLOCK_LOG2_WORDS) mem sys tr (i+1) tpc nzcv (icnt+1) lim cv cp dvr dpr dvw dpw dvr2 dpr2
+    else if k == K_CURRENT_EL then run (wr rf t 4) mem sys tr (i+1) tpc nzcv (icnt+1) lim cv cp dvr dpr dvw dpw dvr2 dpr2
+    else slowpath!
   | .nop => run rf mem sys tr (i+1) tpc nzcv (icnt+1) lim cv cp dvr dpr dvw dpw dvr2 dpr2
   | .readCounter virt t =>
     if sys.el == 0 then slowpath! else
