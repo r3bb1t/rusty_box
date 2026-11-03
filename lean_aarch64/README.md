@@ -27,8 +27,8 @@ the same console, byte for byte. Speed, same host (4-core VM):
 
 | | to `Shell>` | |
 |---|---|---|
-| rusty_box (`oracle edk2 check`) | 3.1 s | fast-forwards counter polls |
-| Lean (`leanbox edk2 check`) | 15.2 s | 42 M instructions/s, no poll fast-forward |
+| rusty_box (`oracle edk2 check`) | 3.1 s | |
+| Lean (`leanbox edk2 check`) | 11.5 s | 55 M instructions/s, counting the polls it skips |
 
 The machine (`Leanbox/`): the A64 base integer ISA as rusty_box decodes it for a
 Cortex-A57 (strict should-be bits, everything else UNDEFINED), CRC32, the system
@@ -39,7 +39,13 @@ PSCI over HVC, the generic timer and event stream, WFI/WFE, and the board:
 GICv2, PL011, PL031, PL061, both CFI flash banks, the empty virtio-mmio
 transports and the PCI windows. The run loop is machine.rs `run_slice`'s:
 bursts to the next event, `sync_events`, `after_device_access`, interrupts
-between traces, WFI sleeping to the next event.
+between traces, WFI sleeping to the next event; and poll.rs's exact
+fast-forward of counter polls (`Cpu/Poll.lean`): at a counter read that
+starts a trace, one iteration is walked (only NOPs, one 64-bit compare of the
+counter register, ordering B.conds, B/BL/BR/BLR/RET, all fetched from TLB
+hits on stable memory, x30 periodic) and the iterations that take its path
+and fit in the burst are skipped, leaving the counter register, NZCV and the
+tick count as running them would.
 
 Not modelled yet, each stopping the machine with a message rather than being
 taken for something else: `AT` (address translation), armed breakpoints,
@@ -106,6 +112,7 @@ callgrind (Alpine to its first 40M instructions):
 | loads and stores on data micro-TLBs, refilled from the TLB without allocating | | 34.6 s | 30.9 s |
 | every pure ALU op in `run` (`Cpu/Alu.lean`, shared with `execOp`) | | 24.6 s | 23.6 s |
 | the common trace lookup inline in `run` (no `Next` allocated) | 394 | 15.2 s | 20.9 s |
+| counter polls fast-forwarded exactly (`Cpu/Poll.lean`, poll.rs's rule) | | 11.5 s | 20.9 s |
 
 A register file of `FloatArray` words (one unboxed element per register,
 `Float.ofBits`/`toBits` as the casts) was tried and dropped: Lean canonicalizes
@@ -145,6 +152,8 @@ register and RAM access.
 | `Leanbox/Cpu/Exec.lean` | exceptions, ERET, the data access paths, PSCI, the system instructions |
 | `Leanbox/Cpu/Simd.lean` | structure loads/stores and the SIMD&FP data processing modelled so far |
 | `Leanbox/Cpu/Mmu.lean` | stage 1 walk, TLB, permissions |
+| `Leanbox/Cpu/Poll.lean` | the exact fast-forward of counter polls |
+| `Leanbox/Cpu/Alu.lean` | the values of the pure data-processing ops, shared by `execOp` and `run` |
 | `Leanbox/Cpu/Sysreg.lean` | the generic timer, the event register, `MRS`/`MSR` |
 | `Leanbox/Cpu/State.lean`, `Bus.lean` | the machine state and the board's bus |
 | `Leanbox/Dev/` | GICv2, PL011, PL031, PL061, CFI flash, the empty virtio-mmio transport, each with `#guard`s from its Rust tests |

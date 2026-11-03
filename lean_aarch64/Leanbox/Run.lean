@@ -1,4 +1,5 @@
 import Leanbox.Cpu.Step
+import Leanbox.Cpu.Poll
 /-
 The chained interpreter (bench/Chain.lean's design: one self-tail-recursive
 `run`, each handler tail-calling it on the next op, every trace ending in an
@@ -327,9 +328,19 @@ partial def run (rf mem : ByteArray) (sys : Sys) (tr : Array Op) (i : USize)
   | .mull u sub d n m a => run (wr rf d (mullVal u sub (rr rf n) (rr rf m) (rr rf a))) mem sys tr (i+1) tpc nzcv (icnt+1) lim cv cp dvr dpr dvw dpw dvr2 dpr2
   | .mulh u d n m => run (wr rf d (mulHigh (rr rf n) (rr rf m) (!u))) mem sys tr (i+1) tpc nzcv (icnt+1) lim cv cp dvr dpr dvw dpw dvr2 dpr2
   | .nop => run rf mem sys tr (i+1) tpc nzcv (icnt+1) lim cv cp dvr dpr dvw dpw dvr2 dpr2
-  | .readCounter _ t =>
-    if sys.el != 0 then run (wr rf t (counterAt icnt)) mem sys tr (i+1) tpc nzcv (icnt+1) lim cv cp dvr dpr dvw dpw dvr2 dpr2
-    else slowpath!
+  | .readCounter virt t =>
+    if sys.el == 0 then slowpath! else
+    -- a counter poll's whole iterations, fast-forwarded (Cpu/Poll.lean)
+    let key := noPollKey pc (rr rf 30)
+    match (if i == 0 && pollShape (agu tr 1 .endTrace) && !knownNoPoll sys key then pollSkip sys rf mem pc t virt icnt (lim - icnt) else .notNow) with
+    | .skip ticks count flags =>
+      let sys := { sys with noPoll := clearNoPoll sys.noPoll key }
+      run (wr rf t count) mem sys DISPATCH 0 pc flags (icnt + ticks) lim cv cp dvr dpr dvw dpw dvr2 dpr2
+    | .notPoll =>
+      let sys := { sys with noPoll := noteNoPoll sys.noPoll key }
+      run (wr rf t (counterAt icnt)) mem sys tr (i+1) tpc nzcv (icnt+1) lim cv cp dvr dpr dvw dpw dvr2 dpr2
+    | .notNow =>
+      run (wr rf t (counterAt icnt)) mem sys tr (i+1) tpc nzcv (icnt+1) lim cv cp dvr dpr dvw dpw dvr2 dpr2
   -- loads and stores of general-purpose registers through the micro-TLBs
   | .ldst size opc wb post kind t n off =>
     let base := rr rf n

@@ -169,6 +169,8 @@ structure Sys where
   ctr : Array (Array Op)
   /-- Per 128-byte line of RAM, whether a cached trace holds code from it. -/
   cmark : ByteArray
+  /-- Counter reads whose poll walk failed (Cpu/Poll.lean), by PC. -/
+  noPoll : Array UInt64
   board : Board
   deriving Inhabited
 
@@ -253,6 +255,7 @@ def Sys.reset (resetPc icount : UInt64) (board : Board) : Sys :=
     ctag := Array.replicate CACHE MISS
     ctr := Array.replicate CACHE #[]
     cmark := zeros (RAM_SIZE.toNat / 128)
+    noPoll := Array.replicate 512 MISS
     board := board }
 
 /-- The state a slow-path step works on and returns. -/
