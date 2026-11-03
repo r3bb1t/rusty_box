@@ -16,8 +16,8 @@ minirootfs (`tools/mkinitramfs.py`: busybox init, a getty on ttyAMA0) run to
 as `oracle/ref/linux_login_1M.txt` and the same 11,874 console bytes. On the
 way the guest takes 10,072 IRQs, 255 system calls and 207 aborts (EL0 page
 faults among them), and runs the kernel's SHA-256 self-tests on the
-Cryptographic Extension. Speed, same host: rusty_box 5.4 s, Lean 33.4 s
-(16.3 M instructions/s).
+Cryptographic Extension. Speed, same host: rusty_box 5.4 s, Lean 20.9 s
+(26 M instructions/s).
 
 **AAVMF (EDK2) boots to `Shell>` in pure Lean, lockstep-clean against
 rusty_box**: `leanbox check 1000000 700000000` prints the same 636 checkpoints
@@ -28,7 +28,7 @@ the same console, byte for byte. Speed, same host (4-core VM):
 | | to `Shell>` | |
 |---|---|---|
 | rusty_box (`oracle edk2 check`) | 3.1 s | fast-forwards counter polls |
-| Lean (`leanbox check`) | 40.6 s | 15.6 M instructions/s, no poll fast-forward |
+| Lean (`leanbox edk2 check`) | 15.2 s | 42 M instructions/s, no poll fast-forward |
 
 The machine (`Leanbox/`): the A64 base integer ISA as rusty_box decodes it for a
 Cortex-A57 (strict should-be bits, everything else UNDEFINED), CRC32, the system
@@ -95,7 +95,26 @@ The plan and the reference data for booting EDK2 to `Shell>` are below.
   (`ByteArray.lt_size_of_lt_usize`): with `Nat` indices every access carries a
   bignum fallback.
 
-### What decided the speed
+### What decided the speed of the machine
+
+On the boots, measured as host instructions per guest instruction with
+callgrind (Alpine to its first 40M instructions):
+
+| step | host/guest | EDK2 to `Shell>` | Alpine to `login:` |
+|---|---|---|---|
+| every op but a few ALU ones through `execOp` (an `St` allocated per op) | 535 | 40.6 s | 33.4 s |
+| loads and stores on data micro-TLBs, refilled from the TLB without allocating | | 34.6 s | 30.9 s |
+| every pure ALU op in `run` (`Cpu/Alu.lean`, shared with `execOp`) | | 24.6 s | 23.6 s |
+| the common trace lookup inline in `run` (no `Next` allocated) | 394 | 15.2 s | 20.9 s |
+
+A register file of `FloatArray` words (one unboxed element per register,
+`Float.ofBits`/`toBits` as the casts) was tried and dropped: Lean canonicalizes
+a NaN's payload through `Float.ofBits`, so a register holding a NaN-shaped bit
+pattern changes, and the boot diverged at once. The register file stays a
+`ByteArray`, whose 8-byte accesses are eight bounds-checked byte accesses (each
+store also checks exclusivity): what remains of `run`'s cost is mostly that.
+
+### What decided the speed of the perfbench loops
 
 | step | `alu` | `fnv` | `memcpy` |
 |---|---|---|---|
