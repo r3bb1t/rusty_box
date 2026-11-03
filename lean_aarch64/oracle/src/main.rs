@@ -23,6 +23,7 @@ fn main() {
     let a: Vec<String> = std::env::args().collect();
     if a[1] == "linux" { return linux(&a); }
     if a[1] == "bare" { return bare(&a[2]); }
+    if a[1] == "iso" { return iso(&a[2], &a[3..]); }
     let code = std::fs::read("/usr/share/AAVMF/AAVMF_CODE.no-secboot.fd").unwrap();
     let vars = std::fs::read("/usr/share/AAVMF/AAVMF_VARS.fd").unwrap();
     let mut m = MachineBuilder::new(VirtConfig::default()).firmware(&code).variables(&vars).build().unwrap();
@@ -255,4 +256,40 @@ fn bare(path: &str) {
         let r = |r| m.sysreg_read(r).unwrap();
         writeln!(out, " esr {:x} far {:x} elr {:x} spsr {:x} fpsr {:x} mem {mh:x}", r(SysReg::ESR_EL1), r(SysReg::FAR_EL1), r(SysReg::ELR_EL1), r(SysReg::SPSR_EL1), r(SysReg::FPSR)).unwrap();
     }
+}
+
+/// Boot the firmware with `path` (an ISO image) on a read-only virtio-blk
+/// disk, as rusty_box does with a `[virt] disk`, and report the retired
+/// instruction and tick counts at which each of `marks` first appears on the
+/// console, and the SIMD&FP words executed (all, then those not in the set the
+/// Lean machine runs: `oracle linux probe` lists that set).
+fn iso(path: &str, marks: &[String]) {
+    let code = std::fs::read("/usr/share/AAVMF/AAVMF_CODE.no-secboot.fd").unwrap();
+    let vars = std::fs::read("/usr/share/AAVMF/AAVMF_VARS.fd").unwrap();
+    let image = std::fs::read(path).unwrap();
+    let mut m = MachineBuilder::new(VirtConfig::default())
+        .instrumentation(Probe::default())
+        .firmware(&code)
+        .variables(&vars)
+        .virtio_disk(rusty_box_aarch64::Disk::memory(image).read_only())
+        .build()
+        .unwrap();
+    let mut console: Vec<u8> = Vec::new();
+    let mut next = 0usize;
+    let t0 = std::time::Instant::now();
+    while next < marks.len() {
+        let o = m.step(RunBudget::Instructions(10_000_000));
+        if let Some(mut s) = m.serial(0) { console.extend(s.take_output()); }
+        while next < marks.len() && console.windows(marks[next].len()).any(|w| w == marks[next].as_bytes()) {
+            println!("MARK {:?} retired {} ticks {} host {:.1}s", marks[next], m.instructions(), m.ticks(), t0.elapsed().as_secs_f64());
+            next += 1;
+        }
+        if o.is_terminal() { println!("STOP {:?}", o.stop); break; }
+        if m.instructions() > 20_000_000_000 { println!("GAVE UP at {}", m.instructions()); break; }
+    }
+    std::fs::write("console.txt", &console).unwrap();
+    let p = m.instrumentation();
+    let mut v: Vec<_> = p.words.iter().collect();
+    v.sort();
+    for (w, c) in v { println!("W {w:08x} {c}"); }
 }
